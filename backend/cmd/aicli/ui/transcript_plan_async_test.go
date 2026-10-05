@@ -90,12 +90,21 @@ func TestAsyncPlanWindowConvergesLikeSyncPlan(t *testing.T) {
 	state := UIControllerState{}
 	state.planSink = sink
 	state = reduceUIControllerState(state, Resize{Width: 90, Height: 40, Generation: 1}, 1)
-	if !state.HistoryEffects.planRequestInFlight {
-		t.Fatal("空装载没有派发窗口请求")
+	// 空 transcript 是平凡规划：不派发 worker，锁内直接完整落账（空往返优化）。
+	if state.HistoryEffects.planRequestInFlight || len(sink.requests) != 0 {
+		t.Fatalf("空装载不得派发窗口请求：inFlight=%t requests=%d",
+			state.HistoryEffects.planRequestInFlight, len(sink.requests))
 	}
-	// 替换 transcript 时上一请求仍在飞：该 reduce 不得重复派发。
-	before := state.HistoryEffects.planRequestSeq
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: resumeParitySnapshot()}, 2)
+	// 首个真实窗口：立即派发；在飞期间的后续 reduce 不得重复派发。
+	if !state.HistoryEffects.planRequestInFlight || len(sink.requests) != 1 {
+		t.Fatalf("替换 transcript 后应派发窗口请求：inFlight=%t requests=%d",
+			state.HistoryEffects.planRequestInFlight, len(sink.requests))
+	}
+	modified := resumeParitySnapshot()
+	modified.Revision++
+	before := state.HistoryEffects.planRequestSeq
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: modified}, 3)
 	if state.HistoryEffects.planRequestSeq != before {
 		t.Fatal("在飞期间不得重复派发请求")
 	}
@@ -143,12 +152,8 @@ func TestAsyncPlanWindowStaleResultReDispatches(t *testing.T) {
 	state.planSink = sink
 	state = reduceUIControllerState(state, Resize{Width: 90, Height: 40, Generation: 1}, 1)
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: resumeParitySnapshot()}, 2)
-	// 两次结算：第一次是空 transcript 的旧请求（被指纹丢弃并重派发），第二次留下截断游标。
+	// 首个窗口（from-0，0 预算）截断并留下游标。
 	state, _ = completeFakePlanWindow(t, state, sink, 3)
-	if !state.HistoryEffects.planRequestInFlight {
-		t.Fatal("陈旧结果必须立即重派发")
-	}
-	state, _ = completeFakePlanWindow(t, state, sink, 4)
 	if state.HistoryEffects.planRequestInFlight || !state.HistoryEffects.PlanIncomplete || !state.HistoryEffects.planResumeValid {
 		t.Fatalf("截断窗口没有留下游标/未完成状态：inFlight=%t incomplete=%t resume=%t",
 			state.HistoryEffects.planRequestInFlight, state.HistoryEffects.PlanIncomplete, state.HistoryEffects.planResumeValid)
@@ -202,7 +207,6 @@ func TestAsyncPlanWindowEpochInvalidationReDispatches(t *testing.T) {
 	state = reduceUIControllerState(state, Resize{Width: 90, Height: 40, Generation: 1}, 1)
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: resumeParitySnapshot()}, 2)
 	state, _ = completeFakePlanWindow(t, state, sink, 3)
-	state, _ = completeFakePlanWindow(t, state, sink, 4)
 	if !state.HistoryEffects.planResumeValid {
 		t.Fatal("前置条件：应有截断游标")
 	}

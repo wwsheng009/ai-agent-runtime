@@ -821,6 +821,14 @@ func fixedSurfaceRowsContain(rows [][]vt.Cell, text string) bool {
 	return strings.Contains(builder.String(), text)
 }
 
+// lastActionIsTranscriptSurface 允许 P1.2 异步规划的结果 action 出现在 transcript
+// 动作之后：plan worker 在锁外完成 screening 后投递 HistoryPlanWindowReady，
+// waitUIActorIdle 会等它落地，因此"最后一条"可能是结果 action。transcript 确实
+// 已被 reduce 的证据由随后的 AppState 断言给出。
+func lastActionIsTranscriptSurface(last string) bool {
+	return last == "ReplaceTranscript" || last == "HistoryPlanWindowReady"
+}
+
 func TestChatRuntimeEventBridge_OrdinaryEventUsesUIActorReducer(t *testing.T) {
 	session := &ChatSession{}
 	coordinator := newTestChatInteractionCoordinator(t, session)
@@ -847,7 +855,7 @@ func TestChatRuntimeEventBridge_OrdinaryEventUsesUIActorReducer(t *testing.T) {
 		t.Fatal("ordinary runtime event did not initialize UI actor")
 	}
 	stats := coordinator.uiActor.Stats()
-	if stats.Processed < 2 || stats.LastAction != "ReplaceTranscript" {
+	if stats.Processed < 2 || !lastActionIsTranscriptSurface(stats.LastAction) {
 		t.Fatalf("runtime event and its transcript follow-up were not reduced by UI actor: %+v", stats)
 	}
 	bridgeSnapshot := bridge.sceneSnapshot()
@@ -891,7 +899,7 @@ func TestChatInteractionCoordinator_NonRuntimeSceneProducersProjectTranscript(t 
 	if len(state.Transcript.Cells) != 3 {
 		t.Fatalf("transcript cells = %d, want user + command + error", len(state.Transcript.Cells))
 	}
-	if stats := coordinator.uiActor.Stats(); stats.Processed < 3 || stats.LastAction != "ReplaceTranscript" {
+	if stats := coordinator.uiActor.Stats(); stats.Processed < 3 || !lastActionIsTranscriptSurface(stats.LastAction) {
 		t.Fatalf("non-runtime snapshots were not reduced as transcript actions: %+v", stats)
 	}
 }
@@ -927,7 +935,7 @@ func TestChatRuntimeEventBridge_ReplayProjectsTranscriptToUIActor(t *testing.T) 
 	if snapshot == nil || state.Transcript.Revision != snapshot.Revision || len(state.Transcript.Cells) != len(snapshot.Cells) {
 		t.Fatalf("AppState transcript is not the replayed Scene snapshot: state=%+v scene=%+v", state.Transcript, snapshot)
 	}
-	if stats := coordinator.uiActor.Stats(); stats.LastAction != "ReplaceTranscript" {
+	if stats := coordinator.uiActor.Stats(); !lastActionIsTranscriptSurface(stats.LastAction) {
 		t.Fatalf("replay transcript was not reduced as ReplaceTranscript: %+v", stats)
 	}
 }

@@ -1195,6 +1195,10 @@ func actionClassString(action UIAction) string {
 		return "HistoryProjectionInvalidated"
 	case HistoryScrollbackReconciled:
 		return "HistoryScrollbackReconciled"
+	case HistoryPlanWindowReady:
+		return "HistoryPlanWindowReady"
+	case ContinueHistoryPlanAction:
+		return "ContinueHistoryPlan"
 	case RuntimeEvent:
 		return "RuntimeEvent(" + a.Kind + ")"
 	case ReplaceTranscriptAction:

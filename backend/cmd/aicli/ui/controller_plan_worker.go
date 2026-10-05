@@ -144,3 +144,12 @@ func (c *UIController) WaitPlanWorker(timeout time.Duration) bool {
 		return false
 	}
 }
+
+// AsyncTranscriptPlanEnabled 报告本控制器是否配置了 plan worker（P1.2 Stage B2）。
+// 生产 wiring 自检用：commands 侧断言真实会话 actors 不再锁内同步 screening。
+func (c *UIController) AsyncTranscriptPlanEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.planWorkerConfigured
+}

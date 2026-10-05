@@ -483,8 +483,24 @@ P0.2 必须补观测的原因。
   - 测试：真 worker E2E（0 预算多轮截断 → executor 驱动 → 收敛 + 全覆盖 + seq>0）、
     WaitIdle 谓词、Close/幂等/worker 退出、默认关闭零变化；`-race` 9/9 PASS、
     宽回归 66.2s PASS、游标 `-count=4` PASS。
-- **Stage B3（待实施）**：生产 wiring 切换（commands 侧 `UIControllerConfig` 打开
-  `AsyncTranscriptPlan`）+ 现场 soak 与 P16 拆分读数验收。
+- **Stage B3（已实施）**：生产 wiring 与可观测性。
+  - 生产 actor 打开 `AsyncTranscriptPlan: true`（chat_ui_actor.go）；`/debug`
+    history-effect 摘要新增 `plan-inflight` / `plan-windows` 委派读数
+    （`PlanRequestInFlight` / `PlanWindowsDelegated`），soak 时可直接确认规划确实
+    走 worker 且无长期未结算窗口。
+  - 生产 soak 暴露并修复两个真实缺陷：
+    1. 结果栅栏曾包含几何/冻结/投影恢复门，**比同步路径更严格**：这些状态持续时
+       结果被反复丢弃、计划永不安装（native history 永远收不到内容，两个内容交付
+       E2E 定位）。栅栏收敛为与同步路径等价（只判 `planInputsEpoch`/输入指纹），
+       陈旧即按当前输入重派发（有界，不会形成 result→dispatch 热循环）。
+    2. 空 transcript（无任何 cell）的派发是纯空往返 → 锁内平凡完成落账。
+  - 配套：`actionClassString` 收录 `HistoryPlanWindowReady` / `ContinueHistoryPlan`；
+    surface 用例的 `LastAction` 断言容忍结果 action（`lastActionIsTranscriptSurface`）；
+    granted-replay 用例按文档化收敛路径驱动（屏障先于恢复帧时记录 proven epoch，
+    由 `HistoryProjectionRecovered` 消费）。
+  - 验证：commands 全包只剩 HEAD 亦失败的 MCP/storage 环境性用例（worktree A/B
+    已证）与两个隔离 3/3 通过的负载敏感时序用例（ui reconciliation-backoff /
+    actor-ready，均位于 flag-off 路径）；ui 宽回归 54-80s；异步 `-race` 13.2s 全绿。
 
 ### P2（结构性）
 

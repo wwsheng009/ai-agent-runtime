@@ -118,12 +118,18 @@ type transcriptPlanWindowRequest struct {
 // screening 需要的快照（byID/mutable/layoutRows 全部在 worker 内派生）。
 func transcriptPlanSnapshotForRequest(req transcriptPlanWindowRequest) transcriptPlanSnapshot {
 	transcript := TranscriptState{Cells: req.Cells}
+	width := req.Width
+	if width < 1 {
+		// 与锁内快照（transcriptPlanMintSnapshotFor）保持同一兜底：几何未到达时
+		// 布局仍有确定性宽度，结果是否采用由结果栅栏决定。
+		width = 80
+	}
 	return transcriptPlanSnapshot{
 		cells:      req.Cells,
 		byID:       transcriptCellsByID(transcript),
 		mutable:    mutableTranscriptCellIDs(transcript),
 		layoutRows: transcript.LayoutRows(req.Generation),
-		width:      req.Width,
+		width:      width,
 		generation: req.Generation,
 		theme:      req.Theme,
 	}
@@ -974,6 +980,12 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	// 期间不重复派发：executor kick 门（planContinuationPending）同时把在飞视作
 	// 已有进展，避免无 sleep 的热旋转。派发失败（sink 拒绝/无 worker）回退同步。
 	if state.planSink != nil {
+		// 空 transcript（无任何 cell）的完整规划是平凡的：不派发 worker，直接按
+		// 完整结果落账。启动期与纯几何变化期的派发是纯粹的空往返（P1.2 B3）。
+		if len(state.Transcript.Cells) == 0 {
+			effects.clearTranscriptPlanResume()
+			return applyTranscriptPlanWindow(state, false, 0, nil, true, 0, 0, inputs)
+		}
 		if effects.planRequestInFlight {
 			return false, false
 		}
@@ -1058,12 +1070,18 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 	}
 	effects.planRequestInFlight = false
 	inputs := currentTranscriptPlanInputs(state)
-	stale := a.planInputsEpoch != effects.planInputsEpoch ||
-		a.inputs != inputs ||
-		state.Geometry.Width < 1 || state.Geometry.Height < 1 ||
-		effects.Frozen || effects.ProjectionUnknown || effects.hasUnresolvedTerminalDelivery()
+	inputsMoved := a.planInputsEpoch != effects.planInputsEpoch || a.inputs != inputs
+	// 栅栏集合必须与同步路径**等价**：锁内同步规划不检查几何/冻结/投影态（那是
+	// executor 交付侧的职责），结果栅栏若比它严格，就会在那些状态持续时丢弃结果
+	// 且不再安装计划 —— 实测症状是 native history 永远收不到内容
+	// （TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory 等）。
+	// 唯一的判据是"这次 screening 是否仍对应一组最新输入"。
+	stale := inputsMoved
 	if stale {
 		effects.PlanStalled = false
+		// 输入在飞行期间移动 ⇒ 存在一组更新且可规划的输入，新请求携带当前输入，
+		// 因此下一轮结果必然匹配——重派发有界（不会出现 result→dispatch→result
+		// 的无界热循环，该病态只可能来自对"持续不变"的状态反复判 stale）。
 		if state.planSink != nil {
 			dispatchTranscriptPlanWindow(state, inputs)
 		}

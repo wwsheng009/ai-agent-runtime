@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 // TestAsyncPlanWorkerConvergesResumedSessionThroughActor 是最接近生产的端到端：
@@ -41,8 +43,10 @@ func TestAsyncPlanWorkerConvergesResumedSessionThroughActor(t *testing.T) {
 		state := controller.State()
 		if !state.HistoryEffects.PlanIncomplete && !state.HistoryEffects.planRequestInFlight {
 			assertHistoryCoversFinalizedCells(t, state)
-			if state.HistoryEffects.planRequestSeq == 0 {
-				t.Fatal("没有观察到任何 worker 窗口请求（sink 未注入？）")
+			diag := controller.HistoryEffectDiagnostics()
+			if diag.PlanWindowsDelegated == 0 || diag.PlanRequestInFlight {
+				t.Fatalf("委派读数异常：windows=%d inFlight=%t（sink 未注入或未收敛）",
+					diag.PlanWindowsDelegated, diag.PlanRequestInFlight)
 			}
 			return
 		}
@@ -120,5 +124,42 @@ func TestAsyncPlanWorkerDisabledByDefault(t *testing.T) {
 	state := controller.State()
 	if state.HistoryEffects.planRequestSeq != 0 || state.HistoryEffects.planRequestInFlight {
 		t.Fatal("默认配置不得启用异步规划")
+	}
+}
+
+// TestAsyncPlanWorkerDoesNotSpinOnUnchangedInputs 回归：从不 Resize 的会话
+// （几何 0×0）里任何规划需求都会派发，结果必须按与同步路径相同的语义直接结算；
+// 若结果栅栏对"持久不变的状态"（几何未知/冻结/投影未知）反复判 stale 并重派发，
+// actor 会陷入 result→dispatch→result 的无界热循环（生产表现为 WaitIdle 永不返回、
+// actor 永久 busy；本用例在修复前挂死 10 分钟）。
+func TestAsyncPlanWorkerDoesNotSpinOnUnchangedInputs(t *testing.T) {
+	controller := NewUIController(UIControllerConfig{MailboxSize: 64, AsyncTranscriptPlan: true}, nil, nil)
+	go controller.Run()
+	t.Cleanup(func() {
+		controller.Close()
+		controller.WaitIdle()
+	})
+
+	if !controller.Post(SetActiveCellAction{Active: ActiveCellState{
+		CellID:   41,
+		Revision: 7,
+		Kind:     scene.KindAssistant,
+		Phase:    ActiveCellMutable,
+		Source:   "partial streamed body text",
+		Stable:   SourceRange{Start: 0, End: 22},
+		Enqueued: SourceRange{Start: 0, End: 22},
+		Acked:    SourceRange{Start: 0, End: 8},
+	}}) {
+		t.Fatal("post active cell mount")
+	}
+	if !controller.WaitIdleTimeout(10 * time.Second) {
+		t.Fatal("持续性恢复门不得把 actor 打成 result→dispatch 热循环")
+	}
+	state := controller.State()
+	if state.HistoryEffects.planRequestInFlight {
+		t.Fatal("恢复门下的陈旧结果必须结算，不能保持在飞")
+	}
+	if state.HistoryEffects.PlanIncomplete {
+		t.Fatal("几何未知时不得留下 incomplete 计划（应由后续 Resize 重新触发）")
 	}
 }

@@ -74,7 +74,7 @@ func TestChatInteractionCoordinator_LocalSupplementProjectsTranscript(t *testing
 	if state.Transcript.Revision != snapshot.Revision || len(state.Transcript.Cells) != 1 {
 		t.Fatalf("AppState transcript = %+v, scene = %+v", state.Transcript, snapshot)
 	}
-	if stats := coordinator.uiActor.Stats(); stats.LastAction != "ReplaceTranscript" {
+	if stats := coordinator.uiActor.Stats(); !lastActionIsTranscriptSurface(stats.LastAction) {
 		t.Fatalf("local supplement was not projected as ReplaceTranscript: %+v", stats)
 	}
 }

@@ -444,9 +444,14 @@ type HistoryEffectDiagnostics struct {
 	ScrollbackReplayArmed  bool
 	PlanIncomplete         bool
 	PlanStalled            bool
-	NextToken              uint64
-	TerminalEpoch          uint64
-	Summary                HistoryEffectQueueSummary
+	// P1.2 Stage B2 委派读数：worker 是否持有未结算窗口、累计受理的窗口请求数。
+	// 生产 wiring 打开 AsyncTranscriptPlan 后，这两项是"规划确实走 worker"的
+	// 直接证据（plan-windows>0 且不随 plan-inflight 长期为真）。
+	PlanRequestInFlight  bool
+	PlanWindowsDelegated uint64
+	NextToken            uint64
+	TerminalEpoch        uint64
+	Summary              HistoryEffectQueueSummary
 }
 
 // Diagnostics projects the queue without detaching anything. The caller must
@@ -460,6 +465,8 @@ func (s HistoryEffectQueueState) Diagnostics() HistoryEffectDiagnostics {
 		ScrollbackReplayArmed:  s.ScrollbackReplayArmed,
 		PlanIncomplete:         s.PlanIncomplete,
 		PlanStalled:            s.PlanStalled,
+		PlanRequestInFlight:    s.planRequestInFlight,
+		PlanWindowsDelegated:   s.planRequestSeq,
 		NextToken:              s.NextToken,
 		TerminalEpoch:          s.TerminalEpoch,
 		Summary:                s.Summary(),

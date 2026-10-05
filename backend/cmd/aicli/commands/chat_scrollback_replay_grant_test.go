@@ -105,8 +105,26 @@ func TestCanonicalHistorySeedArmsReplayOnlyForImportedUnits(t *testing.T) {
 		t.Fatal("post scrollback reconciliation")
 	}
 	coordinator.waitUIActorIdle()
-	if state = uiActorStateForGrantTest(t, coordinator); state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("proven scrollback replacement did not consume the grant")
+	state = uiActorStateForGrantTest(t, coordinator)
+	if state.HistoryEffects.ScrollbackReplayArmed {
+		// P1.2 B3：异步规划下屏障可能先于 presenter 的 source-backed 恢复帧
+		// 落地。设计上的收敛路径是"本次无法锚定的替换记录 proven epoch，等恢复
+		// 帧到达再消费"（见 HistoryScrollbackReconciled 的 else 分支）。
+		if state.HistoryEffects.ProvenScrollbackEpoch == 0 {
+			t.Fatalf("未锚定的替换必须记录 proven epoch：%+v", state.HistoryEffects)
+		}
+		if !coordinator.postUIAction(ui.HistoryProjectionRecovered{LayoutGeneration: state.LayoutGeneration}) {
+			t.Fatal("post projection recovered")
+		}
+		coordinator.waitUIActorIdle()
+		state = uiActorStateForGrantTest(t, coordinator)
+	}
+	if state.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatalf("proven scrollback replacement did not consume the grant: armed=%t epoch=%d provenEpoch=%d frozen=%t projectionUnknown=%t reconciliationRequired=%t lease=%t",
+			state.HistoryEffects.ScrollbackReplayArmed, state.HistoryEffects.TerminalEpoch,
+			state.HistoryEffects.ProvenScrollbackEpoch, state.HistoryEffects.Frozen,
+			state.HistoryEffects.ProjectionUnknown, state.HistoryEffects.ReconciliationRequired,
+			state.Lease.Active)
 	}
 
 	// Same canonical history again: every unit is already seeded and matched, so
