@@ -124,6 +124,12 @@ func assertSummaryMatchesEntryWalk(t *testing.T, state UIControllerState) {
 	want.ClaimRejectsGate = state.HistoryEffects.claimRejectsGate
 	want.ClaimRejectsStale = state.HistoryEffects.claimRejectsStale
 	want.ClaimRejectsInvalid = state.HistoryEffects.claimRejectsInvalid
+	// 压缩计数（P2-1）不是遍历结果：被剪除的条目已不在 Entries() 里，tombstone
+	// 集合也不对应任何条目。按原值搬运，其余字段仍必须与遍历完全一致。
+	if ledger := state.HistoryEffects.ledger; ledger != nil {
+		want.LedgerCompacted = ledger.compactedEntries
+		want.LedgerTerminalSources = len(ledger.compactedTerminalSources)
+	}
 	for _, entry := range entries {
 		switch entry.State {
 		case HistoryCommitPending:

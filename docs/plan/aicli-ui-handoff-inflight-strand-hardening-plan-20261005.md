@@ -504,9 +504,28 @@ P0.2 必须补观测的原因。
 
 ### P2（结构性）
 
-1. ledger 终态压缩（按 epoch 剪枝/聚合 acked 条目，保留 source 身份去重的最小集）。
+1. **P2-1 已实施（窗口化终态压缩）**：新增压缩身份索引 `compactedTerminalSources`
+   （source identity 最小集）与 `compactedEntries` 计数；`pruneEntry` 成对回收
+   byToken/byRange/bySource/tokens/activeTokensByCell，并把阻断态（Acked transcript /
+   Abandoned）身份转存 tombstone；`hasTerminalRecordForSource`、`holdsPlan`、`Enqueue`
+   对压缩身份保持同一语义，`reconcileScrollback` 整体替换 ledger 时 tombstone 清零
+   （新 terminal epoch 允许重新铸造）。触发为窗口化：live 库存超过
+   `historyLedgerCompactHighWater`(4096) 时在 ack 路径回收到
+   `historyLedgerCompactTarget`(2048)，近期 ack 的帧/状态仍可读；永不回收的保留集 =
+   未决交付（Failed、部分写入 Invalidated）+ Acked+Active 前缀证明（
+   activeAckedRenderedPrefixRows 需要其渲染行）。`/debug` 新增 `compacted=` /
+   `terminal-sources=` 读数。测试：ledger 级压缩/保留集/Clone/去重身份、queue 级窗口
+   回收核算（历史 20 条、门限 8/4）、Summary 与条目遍历等价（含新计数）、`-race` 绿。
+   后续（P2-1b，未实施）：Acked+Active 前缀证明的载荷聚合（当前仍随会话单调增长），
+   以及 tombstone 在超长会话下的进一步聚合（当前为每个已交付 range 一个 key）。
 2. Scene/Transcript 分段/保留上限；`PostDeferred`/`followups` 容量与优先级契约对齐文档 B1/B2。
 3. 状态行"阶段时钟 / 回合时钟"分离；长轮预算与软着陆在 UI 侧可见。
+
+另（既有 bug，A/B 证实在 HEAD 上未打任何补丁即可复现，非本轮引入）：
+`TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite` 约
+1/4 概率出现 finalized resident tail 双写（终态 scrollback + 可见屏各一份；现场物理
+转储 `E:\tmp\async-final-dupe.txt`，ledger 转储显示 transcript 移交全部 acked 而 resident
+帧仍保留同一批行）。已作为独立有界任务在隔离工作区定位修复中。
 
 ## 6. 验证
 

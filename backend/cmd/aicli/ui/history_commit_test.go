@@ -161,6 +161,172 @@ func TestHistoryCommitLedger_SourceLookupKeepsLifecycleWithoutDetachedCopies(t *
 	}
 }
 
+// TestHistoryCommitLedger_TerminalCompactionRetainsSourceIdentity 锁定 P2-1：已
+// 确认的 transcript 交付不再被任何读取方消费（行载荷已在 Ack 时置 nil），条目可
+// 立即回收；但 "该来源已交付" 必须永远阻断重复铸造，身份以最小 tombstone 留下。
+func TestHistoryCommitLedger_TerminalCompactionRetainsSourceIdentity(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	commit := testHistoryCommit(1, 1, 2)
+	if err := ledger.Enqueue(commit); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := ledger.MarkInFlight(commit.Token); err != nil {
+		t.Fatalf("MarkInFlight: %v", err)
+	}
+	if err := ledger.Ack(commit.Token, 3, 2); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if !ledger.pruneResolvedToken(commit.Token) {
+		t.Fatal("acked transcript entry must be prunable")
+	}
+	if _, ok := ledger.Entry(commit.Token); ok {
+		t.Fatal("pruned entry stayed addressable")
+	}
+	if len(ledger.byToken) != 0 || len(ledger.byRange) != 0 || len(ledger.bySource) != 0 || len(ledger.tokens) != 0 {
+		t.Fatalf("compaction left index residue: byToken=%d byRange=%d bySource=%d tokens=%d",
+			len(ledger.byToken), len(ledger.byRange), len(ledger.bySource), len(ledger.tokens))
+	}
+	if ledger.compactedEntries != 1 {
+		t.Fatalf("compacted counter = %d, want 1", ledger.compactedEntries)
+	}
+	key := historyCommitSourceIdentity(commit)
+	if !ledger.hasTerminalRecordForSource(key) {
+		t.Fatal("compaction dropped the terminal source identity")
+	}
+	if !ledger.holdsPlan() {
+		t.Fatal("compaction must keep the plan-memoizable lifecycle fact")
+	}
+	remint := commit
+	remint.Token = 2
+	if err := ledger.Enqueue(remint); !errors.Is(err, ErrDuplicateCommitRange) {
+		t.Fatalf("re-mint after compaction = %v, want ErrDuplicateCommitRange", err)
+	}
+	// Clone 必须携带 tombstone 与计数：AppState 快照也要保持同一阻断语义。
+	clone := ledger.Clone()
+	if !clone.hasTerminalRecordForSource(key) || clone.compactedEntries != 1 {
+		t.Fatalf("clone lost compacted terminal state: entries=%d tombstones=%d",
+			clone.compactedEntries, len(clone.compactedTerminalSources))
+	}
+	if err := clone.Enqueue(remint); !errors.Is(err, ErrDuplicateCommitRange) {
+		t.Fatalf("clone re-mint = %v, want ErrDuplicateCommitRange", err)
+	}
+}
+
+// TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads 锁定压缩的
+// 保留集合：Acked+Active 的渲染行仍被 finalized 计划的前导证明读取；未决的
+// Failed/部分写入交付在 settle 前必须保持可寻址；非部分写入的 Invalidated 不
+// 阻断再铸造，因此剪除时不留 tombstone。
+func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	active := testHistoryCommit(1, 7, 2)
+	active.Origin = HistoryCommitActive
+	if err := ledger.Enqueue(active); err != nil {
+		t.Fatalf("Enqueue(active): %v", err)
+	}
+	if err := ledger.MarkInFlight(active.Token); err != nil {
+		t.Fatalf("MarkInFlight(active): %v", err)
+	}
+	if err := ledger.Ack(active.Token, 5, 2); err != nil {
+		t.Fatalf("Ack(active): %v", err)
+	}
+	if ledger.pruneResolvedToken(active.Token) {
+		t.Fatal("acked Active-origin entry still backs the rendered-prefix proof")
+	}
+	if entry, ok := ledger.Entry(active.Token); !ok || len(entry.Commit.Lines) == 0 {
+		t.Fatal("active payload must be retained until finalization consumes it")
+	}
+
+	failed := testHistoryCommit(2, 8, 2)
+	failed.Origin = HistoryCommitActive
+	if err := ledger.Enqueue(failed); err != nil {
+		t.Fatalf("Enqueue(failed): %v", err)
+	}
+	if err := ledger.MarkInFlight(failed.Token); err != nil {
+		t.Fatalf("MarkInFlight(failed): %v", err)
+	}
+	if err := ledger.Fail(failed.Token, errors.New("short write"), true); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if ledger.pruneResolvedToken(failed.Token) {
+		t.Fatal("unresolved failed delivery must stay addressable until settle")
+	}
+	if !ledger.SettleUnresolvedWithoutReplay() {
+		t.Fatal("settle must retire unresolved entries")
+	}
+	if entry, ok := ledger.Entry(failed.Token); !ok || entry.State != HistoryCommitAbandoned {
+		t.Fatalf("settled entry must stay addressable as Abandoned until the window compaction retires it: %+v found=%t", entry, ok)
+	}
+	if !ledger.pruneResolvedToken(failed.Token) {
+		t.Fatal("abandoned entry must be prunable once retired")
+	}
+	if !ledger.hasTerminalRecordForSource(historyCommitSourceIdentity(failed)) {
+		t.Fatal("abandoned source identity was lost")
+	}
+	if len(ledger.activeTokensByCell[8]) != 0 {
+		t.Fatalf("active token index kept compacted tokens: %v", ledger.activeTokensByCell[8])
+	}
+
+	invalidated := testHistoryCommit(3, 9, 2)
+	if err := ledger.Enqueue(invalidated); err != nil {
+		t.Fatalf("Enqueue(invalidated): %v", err)
+	}
+	if _, err := ledger.Invalidate(invalidated.Token); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	if !ledger.pruneResolvedToken(invalidated.Token) {
+		t.Fatal("non-partial invalidation is not consumed by any reader and must be prunable")
+	}
+	if ledger.hasTerminalRecordForSource(historyCommitSourceIdentity(invalidated)) {
+		t.Fatal("non-partial invalidation must not block a future mint")
+	}
+	// 剪除后镜像与有序遍历保持精确：剩余 live 条目不受影响。
+	if tokens := ledger.orderedTokens(); len(tokens) != 1 || tokens[0] != active.Token {
+		t.Fatalf("ordered mirror after compaction = %v, want [%d]", tokens, active.Token)
+	}
+}
+
+// TestHistoryEffectQueueAckCompactsResolvedEntries 走 queue 层（生产 ack 入口）：
+// 库存超过高水位后，最老的已确认 transcript 条目被回收（近期条目保留），诊断读数
+// 同步反映压缩，来源身份仍阻断重复铸造。
+func TestHistoryEffectQueueAckCompactsResolvedEntries(t *testing.T) {
+	restoreHigh, restoreTarget := historyLedgerCompactHighWater, historyLedgerCompactTarget
+	t.Cleanup(func() {
+		historyLedgerCompactHighWater, historyLedgerCompactTarget = restoreHigh, restoreTarget
+	})
+	historyLedgerCompactHighWater, historyLedgerCompactTarget = 8, 4
+
+	state := HistoryEffectQueueState{ledger: NewHistoryCommitLedger()}
+	for token := uint64(1); token <= 20; token++ {
+		commit := testHistoryCommit(token, scene.CellID(token), 2)
+		if err := state.ledger.Enqueue(commit); err != nil {
+			t.Fatalf("Enqueue(%d): %v", token, err)
+		}
+		if err := state.ledger.MarkInFlight(token); err != nil {
+			t.Fatalf("MarkInFlight(%d): %v", token, err)
+		}
+		if err := state.ack(token, token, 2); err != nil {
+			t.Fatalf("ack(%d): %v", token, err)
+		}
+	}
+	summary := state.Summary()
+	if summary.LedgerEntries > historyLedgerCompactHighWater {
+		t.Fatalf("inventory stayed above the high water: %#v", summary)
+	}
+	if summary.LedgerCompacted == 0 || summary.LedgerTerminalSources == 0 {
+		t.Fatalf("window compaction did not retire resolved entries: %#v", summary)
+	}
+	if summary.LedgerEntries+int(summary.LedgerCompacted) != 20 {
+		t.Fatalf("compaction accounting = %d live + %d compacted, want 20",
+			summary.LedgerEntries, summary.LedgerCompacted)
+	}
+	if _, ok := state.ledger.Entry(20); !ok {
+		t.Fatal("windowed compaction must retain recent acknowledgements")
+	}
+	if !state.hasTerminalRecordForSource(testHistoryCommit(1, 1, 2)) {
+		t.Fatal("oldest compacted source identity was lost")
+	}
+}
+
 func TestTerminalEffectResultsKeepAckAndPartialFailureDistinct(t *testing.T) {
 	ack := TerminalEffectAck{Token: 17, Frame: 4}.AsAction()
 	if ack.Token != 17 || ack.Err != nil || ack.MayHavePartiallyWritten {

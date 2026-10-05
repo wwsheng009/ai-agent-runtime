@@ -349,11 +349,19 @@ func (s *HistoryEffectQueueState) recordClaimRefusal(err error) {
 // HistoryEffectQueueSummary is a payload-free projection of the queue's
 // delivery lifecycle for diagnostics.
 type HistoryEffectQueueSummary struct {
-	// LedgerEntries is the whole ledger inventory (len(byToken)), which only
-	// grows. It is the size driver of every ledger copy, so a diagnostic that
+	// LedgerEntries is the live ledger inventory (len(byToken)) *after* P2-1
+	// terminal compaction: resolved entries whose payload no reader consumes are
+	// pruned. It is the size driver of every ledger copy, so a diagnostic that
 	// reports queue counters without it cannot tell "a short queue" from "a
 	// long queue whose entries are all terminal".
-	LedgerEntries           int
+	LedgerEntries int
+	// LedgerCompacted counts entries retired by terminal compaction (monotonic),
+	// and LedgerTerminalSources is the retained tombstone set: source identities
+	// that must keep blocking a second mint within this terminal epoch. Together
+	// they let a soak distinguish "compaction is happening" from "the ledger is
+	// still growing without bound".
+	LedgerCompacted         uint64
+	LedgerTerminalSources   int
 	Pending                 int
 	InFlight                int
 	Acked                   int
@@ -402,6 +410,8 @@ func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
 		return summary
 	}
 	summary.LedgerEntries = len(s.ledger.byToken)
+	summary.LedgerCompacted = s.ledger.compactedEntries
+	summary.LedgerTerminalSources = len(s.ledger.compactedTerminalSources)
 	for token, entry := range s.ledger.byToken {
 		switch entry.State {
 		case HistoryCommitPending:
@@ -555,7 +565,14 @@ func (s *HistoryEffectQueueState) ack(token, frame, generation uint64) error {
 	if s == nil || s.ledger == nil {
 		return ErrCommitNotInFlight
 	}
-	return s.ledger.Ack(token, frame, generation)
+	if err := s.ledger.Ack(token, frame, generation); err != nil {
+		return err
+	}
+	// P2-1 终态压缩：ack 是终态转换的主入口，库存超过高水位时在这里把最老已
+	// 终结条目回收到目标水位。窗口化保证近期 ack（帧与状态）仍可读，同时库存
+	// 有界；Acked+Active 提供前缀证明的条目永不参与回收。
+	s.ledger.compactResolvedIfLarge()
+	return nil
 }
 
 // ackBatch confirms an ordered bootstrap transaction. The first commit was
