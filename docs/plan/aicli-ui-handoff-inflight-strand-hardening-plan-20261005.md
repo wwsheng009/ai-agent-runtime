@@ -327,6 +327,104 @@ P0.2 必须补观测的原因。
   - `TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite`：
     间歇 `marker count=2`（Stage 2 之前已出现一次；单跑通过），归入既有 flake 待排查。
 
+### P1.2 设计评审稿（规划移出 c.mu）
+
+**现状与目标**
+- 规划（`syncHistoryEffectsForTranscriptWithin`）在 actor（`c.mu` 内）运行；最贵的是
+  screening/layout（逐 cell 布局、markdown/chroma 重渲染、wrap），铸 commit 只在其次。
+- 目标：screening 移出锁（plan worker goroutine），锁内只保留三件事：
+  ① 快照构造（O(cells) 拷贝 header）；② 铸 commit（读 live ledger + 入队，窗口有界）；
+  ③ 收尾（membership 踢除 + 清游标 + 落 memo）。
+- 复用 P1.1b 游标实现"窗口化"：一次请求 = 一个 screening 窗口，收敛仍由
+  `PlanIncomplete` + executor kick 驱动，锁内单轮成本上界 = 一个窗口的铸 commit。
+
+**相位拆分（代码级）**
+1. `screenTranscriptPlanWindow(snapshot, deadline, startRow) → (rows, complete, nextRow)`：
+   纯布局，**不读 ledger、不读 HistoryEffects**。`layoutRows`（`LayoutTranscript`）与
+   fold target 的派生也在 worker 内进行——它们单独就可能吃掉整个预算
+   （history_effect_planner.go:80-96），留在锁内等于目标落空。输入只有快照。
+2. `mintTranscriptPlanWindow(state, snapshot, rows, screenRowsBefore) → (commits, ...)`：
+   锁内。现有 `planEligibleHistoryCommitsWithinFrom` 的组行逻辑原样保留；**分组数据用
+   快照的 cells/byID**（结构化等价，不依赖 fence 假设），frontier / activeCommits /
+   skipRows / settled 用 live 状态（见下）。
+3. `finishResumedTranscriptPlan`（Stage 3 已有）：末尾一次无预算全量 pass 完成
+   membership 踢除、清游标、落 memo。
+
+**快照与所有权**
+- `transcriptPlanSnapshot{cells []TranscriptCell, mutable map[CellID]struct{}, geometry,
+  theme, generation, projection}`；Source 字符串共享（不可变），cells 做**值拷贝**
+  （reducer 可能原地改 `Cells[i]`；6600 cell ≈ 1.3MB/请求，可接受）。byID / layoutRows
+  / fold target 全部在 worker 内派生（`LayoutRows` 每次返回 `scene.LayoutTranscript`
+  生成的独立行值，app_state.go:184-197，归 worker 独占）。
+- 承载不变量是"**生产代码无对既有 transcript cell / layoutRows 的原地写**"（审查确认
+  全仓只有测试在写，如 app_layout_test.go:57）——必须加**守护测试**固化它，而不是依赖
+  口头约定。
+- ledger **不进快照**：settled / skipRows / frontier(Active) 全在 mint 相位读 live
+  状态。因此不存在"账本快照过期"这类竞态；陈旧只能来自布局输入，用指纹判定（见下）。
+
+**请求/结果与栅栏**
+- 队列状态新增：`planRequestSeq uint64`（单调）、`planRequestInFlight bool`、
+  `planInputsEpoch uint64`（显式失效序号）、快照指纹（复用 `transcriptPlanInputs`）。
+- **planInputsEpoch**：`invalidateTranscriptPlanMemo`（armed replay / no-op install）
+  自增该序号；请求携带、结果接收时比对。没有它，一个"失效之前产生、失效之后到达"的
+  结果会通过指纹比对并 `storeTranscriptPlanResume` 复活刚被清掉的游标（重演 A.4 的
+  空屏路径）；TerminalEpoch 只覆盖 reconcileScrollback，不覆盖显式失效。
+- reducer 需要规划时（memo miss / 游标续跑）：若无在飞请求 → seq++、构造快照、
+  **非阻塞投递**（`select{case ch<-req: default: 覆盖槽位}`；actor 绝不能阻塞在 send
+  上——worker 可能正阻塞在 `c.Post` 等锁，会形成死锁环）。
+- worker：screen → Post(`HistoryPlanWindowReady{seq, planInputsEpoch, fingerprint,
+  rows, complete, nextRow, screenRows, screenMs}`)。结果 action 必须是 **ClassBarrier /
+  不可 coalesce**（同 ContinueHistoryPlanAction，action.go:564-568），否则批处理 merge
+  会把它丢掉。
+- reducer 收结果（顺序固定）：① `seq != planRequestSeq` → 丢弃、**不清 in-flight**
+  （新请求仍有效）；② 失效序号/指纹不匹配，或 Frozen / ProjectionUnknown /
+  ReconciliationRequired / geometry 门被翻起（controller.go:705-708、
+  history_effect_planner.go:948-953）→ 丢弃并**立即按当前输入重新请求**（seq++）；
+  ③ 通过 → mint + enqueue + Stage 3 游标/收尾，清 in-flight。
+  ②的"立即重请求"是必须的：首次（无游标）规划被丢弃时 PlanIncomplete 仍为 false，
+  executor kick 与空队列唤醒都不会触发，空闲会话（正是 resume 场景）会永久停摆。
+- `continueTruncatedHistoryPlan`：在飞时不重复请求、返回 true 且不置 PlanStalled。
+- **kick 门（阻断项修正）**：`planContinuationPending()`（= `PlanIncomplete &&
+  !PlanStalled`）必须改为"在飞时为 false"——否则 executor 的
+  `claimedToken==0 && schedule.planIncomplete` 分支会每轮 Post 一枚 barrier Continue
+  （terminal_session_executor.go:1039-1052，run 无 sleep），形成 actor↔executor 热旋转。
+  在飞即"进展已委托"，结果 action 自身的 wake 谓词负责重新唤醒。
+
+**生命周期**
+- worker 与 actor 同生命周期：`Run` 启动；用 `done` channel 通知退出，**不关闭请求
+  channel**（Run 排空途中 reducer 仍可能投递 → close 会 panic）；worker 的 Post 在
+  Close 后返回 false 即退出；测试 teardown 用 `WaitPlanWorker`（新增），避免 goroutine
+  泄漏。
+- `WaitIdle` **必须纳入 `planRequestInFlight`**（controller.go:863-876 明确不等待异步
+  worker、也不读 revision，设计稿原判断错误）：否则装载后 WaitIdle 立刻返回、覆盖度
+  断言读到半应用状态——现有 E2E 全部依赖它。
+
+**诊断（P16 拆分）**
+- 新增 `LastScreenMs/MaxScreenMs`（worker 侧）与 `LastMintMs/MaxMintMs`（锁内），
+  现有 `LastPlanMs/MaxPlanMs` 保持 = screen + mint（兼容 /debug 与既有断言）。
+  P1.2 验收标准：锁内 mint 的 MaxMintMs 显著低于现状 MaxPlanMs。
+
+**测试计划**
+- 窗口化收敛：现有 E2E（ArmedResume / ExecutorContinues / budget 测试）worker 化后
+  必须继续 PASS——它们是最好的回归网。
+- 陈旧丢弃：请求在飞时改 geometry/theme/transcript → 结果被丢弃 → 下一轮收敛（新增单测）。
+- 生命周期：Close 时不泄漏、不 panic；晚到结果被丢弃。
+- 竞态：`go test -race` 跑 History/Transcript/Executor 组（worker 与 actor 并发）。
+- 判据交互：在飞期间 P1.1b 游标/P1.1c 版本变化 → 结果丢弃而非半应用。
+
+**风险与开放问题（评审后更新）**
+1. **缓存缺失去重（审查新增）**：共享缓存只有 mutex、没有 singleflight——actor 与
+   worker 同时 miss 同一 cell 会各渲染一份（只浪费 CPU，LRU 计费正确）。接受为已知
+   成本；若 P16 显示重复渲染显著，再加 per-key 合并。
+2. **丢弃风暴**：in-flight 期间连续变更 → 结果反复丢弃 + 立即重请求；丢弃只烧 worker
+   CPU（不占锁），请求通道的覆盖语义天然合并。新增 `PlanDiscarded` 计数观察。
+3. **mint 相位锁内成本上界**：窗口 4096 语义行 ≈ 最多数千 commit 的入队；是否恒为
+   ms 级需 P16 实测；不达标则窗口按 fragment 预算再切。
+4. **快照 cells 值拷贝成本**：每请求 O(cells) ≈ 1.3MB（6600 cell），窗口数 ~70 时总量
+   ~90MB 拷贝，可接受；若成热点可改为按 frontier 前缀截断 cells。
+5. ~~快照 COW 假设~~：已自证（LayoutRows 独立派生），且承载不变量收敛为"无原地写者"
+   + 守护测试（见"快照与所有权"）。
+
 ### P2（结构性）
 
 1. ledger 终态压缩（按 epoch 剪枝/聚合 acked 条目，保留 source 身份去重的最小集）。
