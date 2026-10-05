@@ -359,11 +359,12 @@ func (h *Handler) deliverTeamTaskLifecycleMailbox(ctx context.Context, event tea
 	_ = chat.DeliverMailboxEventFirst(ctx, h.getSessionEventStore(), nil, nil, strings.TrimSpace(mate.SessionID), team.BuildTaskLifecycleMailboxMessage(event))
 }
 
-func (h *Handler) dispatchCancelledTaskLifecycleEvent(ctx context.Context, store team.Store, task *team.Task, assignee string, summary string) {
+func (h *Handler) dispatchCancelledTaskLifecycleEvent(ctx context.Context, store team.Store, task *team.Task, assignee, reason, summary string) {
 	if h == nil || store == nil || task == nil || strings.TrimSpace(task.ID) == "" || strings.TrimSpace(task.TeamID) == "" {
 		return
 	}
 	assignee = firstNonEmptyString(strings.TrimSpace(assignee), teamTaskAssigneeID(task))
+	reason = firstNonEmptyString(strings.TrimSpace(reason), "api_release")
 	summary = firstNonEmptyString(strings.TrimSpace(summary), "cancelled")
 	event := team.TeamEvent{
 		Type:   "task.cancelled",
@@ -373,7 +374,7 @@ func (h *Handler) dispatchCancelledTaskLifecycleEvent(ctx context.Context, store
 			"task_id":  strings.TrimSpace(task.ID),
 			"assignee": assignee,
 			"status":   string(team.TaskStatusCancelled),
-			"reason":   "api_release",
+			"reason":   reason,
 			"summary":  summary,
 		},
 		Timestamp: time.Now().UTC(),
@@ -1876,7 +1877,7 @@ func (h *Handler) UpdateAgentControlTask(w http.ResponseWriter, r *http.Request)
 		if req.Summary != nil {
 			summary = strings.TrimSpace(*req.Summary)
 		}
-		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), summary)
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), "api_release", summary)
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
@@ -1924,7 +1925,7 @@ func (h *Handler) UpdateAgentControlTaskStatus(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if status == team.TaskStatusCancelled {
-		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), strings.TrimSpace(req.Summary))
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), "api_release", strings.TrimSpace(req.Summary))
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
@@ -2072,7 +2073,7 @@ func (h *Handler) ReleaseAgentControlTask(w http.ResponseWriter, r *http.Request
 		assignee = firstNonEmptyString(assignee, teammateID)
 	}
 	if status == team.TaskStatusCancelled {
-		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, assignee, strings.TrimSpace(req.Summary))
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, assignee, "api_release", strings.TrimSpace(req.Summary))
 	}
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"task": record})
 }
@@ -2866,7 +2867,7 @@ func (h *Handler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		if req.Summary != nil {
 			summary = strings.TrimSpace(*req.Summary)
 		}
-		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), summary)
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, teamTaskAssigneeID(current), "api_release", summary)
 	}
 	updated, err := store.GetTask(r.Context(), taskID)
 	if err != nil {
@@ -3744,7 +3745,7 @@ func (h *Handler) ReleaseTaskLease(w http.ResponseWriter, r *http.Request) {
 		_ = store.UpdateTeammateState(r.Context(), strings.TrimSpace(req.TeammateID), team.TeammateStateIdle)
 	}
 	if status == team.TaskStatusCancelled {
-		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, firstNonEmptyString(teamTaskAssigneeID(current), strings.TrimSpace(req.TeammateID)), strings.TrimSpace(req.Summary))
+		h.dispatchCancelledTaskLifecycleEvent(r.Context(), store, current, firstNonEmptyString(teamTaskAssigneeID(current), strings.TrimSpace(req.TeammateID)), "api_release", strings.TrimSpace(req.Summary))
 	}
 	updated, _ := store.GetTask(r.Context(), taskID)
 	if updated == nil {
