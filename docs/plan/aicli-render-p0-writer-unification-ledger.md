@@ -70,7 +70,17 @@
    - [x] secret（surface 预览下无直写，仅 legacy fallback）；
    - [ ] transient line：无显示属主，需先设计显示（底部 prompt 行或 popup）再认领 text 直写。
 4. [x] 标题/铃装配到 control sink（`chatControlSequenceWriter`）。
-5. `status.go` 兜底路径与 stderr 收编（交互期统一走动态状态行/日志文件）。
+5. [~] `status.go` 兜底路径与 stderr 收编（侦察完成，待逐点核实）：
+   - `ui.Print*`（status.go 快捷函数）在 commands 的交互期调用点大多已有 popup/fail-closed
+     守卫：export 在 `usePopup` 时把 warning 进 popup（`chat_export_command.go:438`）；
+     `chat.go` / `chat_restored_pending.go` 仅在 `!unifiedInteractiveOutputMustFailClosed`
+     时走 raw。这些是 legacy-only 兜底：保持守卫、不迁移字节。
+   - 待核实（可能 unified 可达）：`chat_model_switch.go:766/781`、
+     `chat_resume_command.go:738/751`、`chat_model_command.go:595`、
+     `chat_selection_output.go:101`。核实后：迁 popup/动态行，或补守卫并登记基线。
+   - stderr：mesh 等后台告警已走 `NotifyChatDiagnostic` → 动态栏（`chat_diagnostic.go`
+     契约）；其余为启动期 warning（presenter attach 前）保持 stderr。交互期新告警必须走
+     `NotifyChatDiagnostic`，不得直写 stderr。
 6. 单写端断言测试（注入计数 writer，断言交互期物理 writer 计数=1）+ 门禁运行说明文档化。
 
 ## 3.1 已知基线问题（非本分支引入）
