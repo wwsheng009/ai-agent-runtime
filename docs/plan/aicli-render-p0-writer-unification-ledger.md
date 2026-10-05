@@ -54,10 +54,22 @@
 
 ## 3.1 已知基线问题（非本分支引入）
 
-- `TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory`（commands）在分支基线 HEAD
-  （`09190ee8`，不含本轮改动）上 A/B 对照同样失败：`BOUNDARY-FINAL-32` 未与 33 相邻（原生历史缺行）。
-  该测试落在 `a75d1c89` 的 active 归档/贴底区域，需单独定位；本分支的 P0 改动与其失败无因果关系
-  （commands 全量仅此 1 项失败，其余全绿）。
+- `TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory`（commands）：
+  `BOUNDARY-FINAL-32` 与 33 不相邻（active 归档与 resident 尾部之间留白，原生历史不连续）。
+  - A/B 定位：`b19284db` 上 `-count=3` **全过**；`a75d1c89`（active 归档保持贴底锚定）之后**稳定失败**。
+    即该回归由上一轮修复引入（当时只回归了 `cmd/aicli/ui`，漏跑 commands 包）。
+  - 冲突契约：
+    - `TestTerminalSessionActiveArchiveKeepsBottomAnchorForLaterMessages`（a75d1c89 新增，ui）要求
+      active 归档后 finalized 尾部**保持贴底**，后续实时消息贴底追加；
+    - 本测试要求 active 归档（流式 40 行前缀）与 resident 尾部**连续**（resident 必须从 row 1 接续
+      scrollback），即归档后 top-align。
+  - 两者对同一"active 归档"给出相反锚位期望：本质是审计 §6 P2 指出的
+    "active 归档/replay/settle 整族特例"无法用局部补丁同时满足。
+  - 处理建议（需决策，不在 P0 范围）：
+    1. 快速缓解：按"归档后是否仍有同一 active cell 的 finalized 续写"区分锚位（streaming 中贴底 /
+       finalized 溢出 top-align）——仍需确认两测试各自的实际状态机路径；
+    2. 正解（P2）：finalized-only 进 scrollback，删除 active 归档路径，冲突面直接消失。
+  - 本分支 P0 改动与该失败无因果关系（commands 全量仅此 1 项失败，其余全绿）。
 
 ## 4. 验收
 
