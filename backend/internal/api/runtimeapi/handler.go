@@ -262,6 +262,10 @@ type Handler struct {
 	// supervisionProgressCheckWG 让 StopSupervisionProgressCheck 能等到循环真正
 	// 退出（重配后不留残留巡检 goroutine）。
 	supervisionProgressCheckWG sync.WaitGroup
+	// Step 2/4：等待期兜底反馈的 in-memory 节奏器（与 CLI 宿主同构）。丢失
+	// 只重置节奏；durable 挂起记录仍是唯一事实来源。
+	waitFeedbackTrackerOnce sync.Once
+	waitFeedbackTracker     *supervision.WaitFeedbackTracker
 
 	// P0-1c/M7：per-host 长生命周期的 live-only 进度镜像（与 CLI 宿主的
 	// host.subagentProgressMirror 同形）。子会话事件订阅与 progress 投影的

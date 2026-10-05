@@ -249,6 +249,14 @@ func (h *Handler) runSupervisionProgressCheckForParent(
 	if !h.supervisionProgressParentRunnable(ctx, parentSessionID) {
 		return false, nil
 	}
+	// Step 2/4：等待期兜底反馈先于 batch 进度巡查（与 CLI 的每 tick 顺序一致）。
+	// 有挂起 turn 且节奏器判定 due 时注入一条 wait_feedback episode；终态/审批/
+	// critical 的投递优先由 pending/critical 门保证。
+	if scheduled, err := h.maybeScheduleWaitFeedbackWake(ctx, scheduler, parentSessionID, rootScopeID); err != nil {
+		return false, err
+	} else if scheduled {
+		return true, nil
+	}
 	pending, err := h.getSupervisionStore().ListWakePending(ctx, supervision.WakeFilter{
 		RootScopeID:           rootScopeID,
 		TargetParentSessionID: parentSessionID,
@@ -290,6 +298,81 @@ func (h *Handler) runSupervisionProgressCheckForParent(
 		return false, err
 	}
 	return true, nil
+}
+
+// maybeScheduleWaitFeedbackWake is the API-side twin of the CLI wait-feedback
+// sweep (cmd/aicli/commands/chat_actor_wait_feedback.go): when the parent is
+// parked on pending obligations and the cadence tracker is due, schedule one
+// bounded wait_feedback wake and drain it through the normal wake path so the
+// runnable/budget/single-flight gates stay in one place. Pending lifecycle /
+// approval wakes and unresolved critical notifications win: the fallback must
+// not race the edge that carries the ledger.
+func (h *Handler) maybeScheduleWaitFeedbackWake(
+	ctx context.Context,
+	scheduler *supervision.WakeScheduler,
+	parentSessionID, rootScopeID string,
+) (bool, error) {
+	if h == nil || scheduler == nil {
+		return false, nil
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return false, nil
+	}
+	if rootScopeID = strings.TrimSpace(rootScopeID); rootScopeID == "" {
+		rootScopeID = parentSessionID
+	}
+	batchStore := h.getSubagentBatchStore()
+	store := h.getSupervisionStore()
+	if batchStore == nil || store == nil {
+		return false, nil
+	}
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: parentSessionID,
+		UnclaimedOnly:         true,
+		Limit:                 1,
+	})
+	if err != nil || len(pending) > 0 {
+		return false, nil
+	}
+	if h.supervisionHasUnresolvedCritical(ctx, rootScopeID) {
+		return false, nil
+	}
+	scheduled, err := supervision.ScheduleWaitFeedbackWake(
+		ctx,
+		batchStore,
+		h.agentSessionObligationResolver(),
+		h.teamObligationResolver(),
+		scheduler,
+		h.apiWaitFeedbackTracker(),
+		parentSessionID,
+		rootScopeID,
+	)
+	if err != nil || !scheduled {
+		return false, err
+	}
+	if err := h.drainSupervisedParentWake(ctx, rootScopeID, parentSessionID); err != nil {
+		if errors.Is(err, supervision.ErrWakeParentBusy) || errors.Is(err, supervision.ErrWakeRateLimited) {
+			// 竞态或预算边界：保持 durable 语义，等下一次 transition 重试。
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// apiWaitFeedbackTracker returns this host's in-memory wait-feedback cadence
+// tracker (delta floor + single silence escalation). Losing it on restart only
+// resets the cadence; the durable parked record stays the source of truth.
+func (h *Handler) apiWaitFeedbackTracker() *supervision.WaitFeedbackTracker {
+	if h == nil {
+		return nil
+	}
+	h.waitFeedbackTrackerOnce.Do(func() {
+		h.waitFeedbackTracker = supervision.NewWaitFeedbackTracker()
+	})
+	return h.waitFeedbackTracker
 }
 
 // supervisionHasUnresolvedCritical reports whether the root scope still holds
