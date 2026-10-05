@@ -11,6 +11,16 @@
   - 扫描语义：`ui/*.go` 生产文件的 `os.Stdout/os.Stderr` 触碰点（纯 `Fd()` 探测除外）、`fmt.Print*`、`TerminalOutput()`。
   - 基线分组：P0 实活目标（inputbox_editor ×3 组、status 兜底、osc_live）；lease/全屏已改道的 raw 兜底；
     legacy 死链打印机；被栅栏的 FixedBottomSurface；`TERM_SESSION_TRACE` 调试追踪。
+- [x] **控制序列旁路 API + inputbox_editor 模式序列迁移**（commit `c159a118`）。
+  - `TerminalSession.WritePromptEditorControl(sequence)`：以 `TransactionPromptEditor` kind 提交，
+    与帧/历史共用 `transactionMu`（控制字节不可能插入帧字节中间）。
+  - `LineEditorHooks.OnTerminalControl func(sequence string) bool`：宿主认领接口；未认领保留 raw 回退。
+  - `inputbox_editor` 四处序列（`readPromptWithHooksContext` 启用/禁用、`readPrompt` 启用/禁用）改经钩子；
+    写端基线 `readPromptWithHooksContext` 3→1、`readPrompt` 3→1、新增 `writeEditorControlSequence` 1（net -3 refs）。
+  - 生产接线：主 / busy / merged / selection composer 全部经 `chatInteractionCoordinator.WritePromptEditorControl`
+    → session（无 unified 会话时返回 false，回退 raw）。
+  - 测试：`TestWriteEditorControlSequence{ClaimsViaHook,FallsBackToRawWriter}`、
+    `TestTerminalSessionWritePromptEditorControl`；ui 全量绿。
 
 ## 2. 关键侦察结论（决定迁移顺序）
 
@@ -35,14 +45,19 @@
 
 ## 3. 下一步（按序执行）
 
-1. 设计并实现控制序列旁路 API（`TerminalSession`/presenter + output port control 提交），
-   含并发/顺序测试：控制序列不得插入一帧的字节中间，且帧写失败时不得静默吞掉模式切换。
-2. 迁移 `inputbox_editor` `:264/267`（+ `:208/214`），hooks 增加 `ControlWriter`；
-   迁移后从基线删除 `readPromptWithHooksContext`、`readPrompt` 两条目（-2 条目 / -6 refs）。
-3. 迁移 transient/modal/agent-panel composer 的编辑器出口（补 hooks/sink）。
+1. [x] 控制序列旁路 API（`c159a118`）。
+2. [x] `inputbox_editor` 模式序列迁移（`c159a118`）；余下 1 ref/函数是编辑器读循环的 stdin/stdout 绑定。
+3. 迁移 transient/modal/agent-panel composer 的编辑器出口（补 hooks/sink；主/busy/merged/selection 已接线）。
 4. 迁移标题/铃装配到 control sink（commands 侧，审计 §2.2）。
 5. `status.go` 兜底路径与 stderr 收编（交互期统一走动态状态行/日志文件）。
 6. 单写端断言测试（注入计数 writer，断言交互期物理 writer 计数=1）+ 门禁运行说明文档化。
+
+## 3.1 已知基线问题（非本分支引入）
+
+- `TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory`（commands）在分支基线 HEAD
+  （`09190ee8`，不含本轮改动）上 A/B 对照同样失败：`BOUNDARY-FINAL-32` 未与 33 相邻（原生历史缺行）。
+  该测试落在 `a75d1c89` 的 active 归档/贴底区域，需单独定位；本分支的 P0 改动与其失败无因果关系
+  （commands 全量仅此 1 项失败，其余全绿）。
 
 ## 4. 验收
 
