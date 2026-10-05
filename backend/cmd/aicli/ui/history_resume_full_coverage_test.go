@@ -34,6 +34,13 @@ func coverageSnapshot(revision uint64, cellCount, linesEach int) *scene.Snapshot
 
 // assertHistoryCoverage 断言每个 finalized cell 都在 ledger 里有终态记录。
 // 「pending=0」不是完整性的证明：live 事故里它同时成立而历史缺了大半。
+//
+// P2-1 之后 live 账本不再是完整的覆盖判据：终态压缩会把已确认交付的 Acked
+// 条目从 byToken 剪除，只留下 compactedTerminalSources tombstone（身份阻断，
+// 不再载荷）。因此覆盖必须由「live 条目 ∪ 压缩 tombstone」共同证明，否则任何
+// 超过 historyLedgerCompactHighWater 的用例都会把已交付误报成「从未规划」。
+// 本用例只做干净 ack（无失败/无部分写入），此处的 tombstone 恰好对应已确认
+// 交付；若未来用例引入 Abandoned，需要按状态收紧该判据。
 func assertHistoryCoverage(t *testing.T, controller *UIController, session *TerminalSession, want int) {
 	t.Helper()
 	state := controller.State()
@@ -45,6 +52,11 @@ func assertHistoryCoverage(t *testing.T, controller *UIController, session *Term
 			continue
 		}
 		covered[entry.Commit.CellID] = struct{}{}
+	}
+	if ledger := state.HistoryEffects.ledger; ledger != nil {
+		for key := range ledger.compactedTerminalSources {
+			covered[key.cellID] = struct{}{}
+		}
 	}
 	missing := 0
 	firstMissing := scene.CellID(0)

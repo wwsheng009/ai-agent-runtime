@@ -190,6 +190,16 @@ func TestTruncatedTranscriptPlanContinuesUntilComplete(t *testing.T) {
 		}
 		planned[entry.Commit.CellID] = struct{}{}
 	}
+	// P2-1 终态压缩按高水位剪除 Acked 条目并留下 tombstone：本用例 900 cell ×
+	// ~7 commits 超过 historyLedgerCompactHighWater，只数 live 条目会把已交付的
+	// 前缀误报成「尾部从未规划」（压缩关闭 900/900、压缩开启 387/900 的 A/B）。
+	// tombstone 与 live 条目共同构成交付身份；本用例无失败/部分写入，故 tombstone
+	// 均来自已确认交付。
+	if ledger := state.HistoryEffects.ledger; ledger != nil {
+		for key := range ledger.compactedTerminalSources {
+			planned[key.cellID] = struct{}{}
+		}
+	}
 	if len(planned) != cells {
 		t.Fatalf("truncated plan converged over %d/%d cells: the tail of the transcript was never planned",
 			len(planned), cells)

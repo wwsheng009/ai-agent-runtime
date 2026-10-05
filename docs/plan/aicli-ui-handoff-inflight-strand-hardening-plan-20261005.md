@@ -557,6 +557,17 @@ P0.2 必须补观测的原因。
   文档 §八.1 的 `compactResolvedIfLarge←ackBatch` 疑点）；`TestTruncatedTranscriptPlanContinuesUntilComplete`
   间歇失败（converged 387/900）。其余宽组与 commands 生产装配子集 PASS。
 
+- **遗留失败定点结论（2026-10-05 复核）**：上述两处失败经 A/B 证实为 **P2-1 之后
+  覆盖判据失真，而非内容丢失**。同一驱动、仅切换 `historyLedgerCompactHighWater`：
+  压缩开启时 live 条目只覆盖 387/900 cell（`acked=4096` 恰为高水位，与 §八.1 疑点
+  吻合），把 `compactedTerminalSources` tombstone 一并计入后为 **900/900**；压缩关闭
+  时 live 条目即为 900/900。即：P2-1 按设计把已确认交付的 Acked 条目压缩为身份
+  tombstone（阻断再铸造、不再载荷），而两个用例仍把 live 条目当作完整交付判据。
+  已更新 `history_planning_budget_test.go` 与 `history_resume_full_coverage_test.go`：
+  覆盖 = live 条目 ∪ compacted tombstone（并注明引入 Abandoned 用例时需按状态收紧）。
+  复核：上述两个用例 + `TestExecutorContinuesIncompletePlanWithoutAckTrigger` 均 PASS
+  （2.1s / 91.9s / 10.8s）。生产侧规划与交付链路无缺口，无需回滚 P2-1。
+
 ## 6. 验证
 
 - 单测：`go test ./cmd/aicli/ui/ -run 'TerminalSessionExecutor|HistoryCommit' -count=1`。
@@ -566,6 +577,10 @@ P0.2 必须补观测的原因。
   - `oldest_pending_token` 不再长期冻结；
   - `executor` 区块出现 `claimMissReleases` 且 `in-flight` 不再恒为 1；
   - `render_output.delivery_records_sealed` 随投递前进。
+- 上线前提：resident-tail 双写（以及本条 P1/P2 全部修复）只存在于**重新构建**的
+  二进制中；2026-10-05 现场的 `aicli-2x.exe` 构建于 21:40:36，早于 23:03:38 的
+  1cace024，因此运行中的 TUI 仍会复现"终态 scrollback + 可见屏各一份"的重复/交错。
+  验证前必须重建并用新进程复现（ledger/可见区状态均为内存态，不能热更新）。
 
 ## 7. 风险与回滚
 
