@@ -598,6 +598,12 @@ func (s *ChatSession) runInterruptCleanup(done chan struct{}) {
 	ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
 	defer cancel()
 	outcome = host.interruptActiveRuns(ctx, baseSessionID, userID, activeTeamID)
+	// Step 3：中断清理完成 ⇒ 挂起窗口的 ESC watcher 同步释放。不释放的话，
+	// 空闲 prompt 下的 ESC 会被误当成"中断运行"（没有 run 可中断），污染下一次
+	// 输入的语义。
+	if s.RuntimeEventBridge != nil {
+		s.RuntimeEventBridge.releaseParkedEscapeWatcher()
+	}
 }
 
 func (s *ChatSession) waitForInterruptCleanup() {

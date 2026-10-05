@@ -226,6 +226,11 @@ type SessionActorConfig struct {
 	// snapshots). nil uses the process-wide default ($HOME/.aicli/plans or
 	// AICLI_PLANS_DIR).
 	PlanStore *planstore.Store
+	// SuspendedTurnAbandon cascades a parked turn's non-batch obligations
+	// (`agent_session:` / `team:`) when the user abandons it (ESC / interrupt).
+	// Hosts that park such obligations must wire the hooks; a nil hook with
+	// matching obligations keeps the record (retryable, visible) on purpose.
+	SuspendedTurnAbandon SuspendedTurnAbandonHooks
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -313,6 +318,8 @@ type SessionActor struct {
 	questionWaiters map[string]chan string
 	// lastApprovalOutcome is guarded by waiterMu.
 	lastApprovalOutcome approvalOutcome
+	// abandonHooks cascade a parked turn's non-batch obligations on abandon.
+	abandonHooks SuspendedTurnAbandonHooks
 	activeRunWG         sync.WaitGroup
 }
 
@@ -367,6 +374,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		triggerTurnDrain:   cfg.TriggerTurnDrain,
 		triggerTurnRunMeta: cfg.TriggerTurnRunMeta,
 		planStore:          cfg.PlanStore,
+		abandonHooks:       cfg.SuspendedTurnAbandon,
 		onStop:             cfg.OnStop,
 		runStallTimeout:    cfg.RunStallTimeout,
 		onRunStalled:       cfg.OnRunStalled,
@@ -1383,7 +1391,11 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	// EC-E7 / EC-C5：用户 ESC / interrupt 到达时，挂起 turn（§6.12）必须被放弃：
 	// 级联取消账本 + 清挂起记录。只取消 run 不够 —— 挂起态本身没有 run，记录会
 	// 跨中断存活，下一次提交继续复用旧 turn_id（EC-E1"turn 永不结束"）。
-	abandonedTurnID, abandonErr := a.abandonSuspendedTurnOnInterrupt(context.Background(), run)
+	// 清理有界（不阻塞中断返回）：预算内没跑完的级联留在 durable 记录上，
+	// 下一次 ESC / 收尾重试（幂等），事件里以 abandon_error 可见。
+	abandonCtx, cancelAbandon := context.WithTimeout(context.Background(), interruptedTurnAbandonBudget)
+	abandonedTurnID, abandonResult, abandonErr := a.abandonSuspendedTurnOnInterrupt(abandonCtx, run)
+	cancelAbandon()
 	_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
 		state.Status = SessionStopped
 		state.CurrentTurnID = ""
@@ -1403,6 +1415,17 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	}
 	if abandonedTurnID != "" {
 		payload["abandoned_turn_id"] = abandonedTurnID
+	}
+	if abandonResult != nil {
+		if len(abandonResult.CanceledBatchIDs) > 0 {
+			payload["abandoned_batch_ids"] = abandonResult.CanceledBatchIDs
+		}
+		if len(abandonResult.CanceledAgentSessionIDs) > 0 {
+			payload["abandoned_agent_session_ids"] = abandonResult.CanceledAgentSessionIDs
+		}
+		if len(abandonResult.CanceledTeamIDs) > 0 {
+			payload["abandoned_team_ids"] = abandonResult.CanceledTeamIDs
+		}
 	}
 	if abandonErr != nil {
 		// 放弃失败必须可见（I9 降级），但不得把 interrupt 本身变成失败。

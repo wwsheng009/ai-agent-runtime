@@ -4713,6 +4713,12 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		TriggerTurnRunMeta: func(ctx context.Context, _ *chat.Session) *team.RunMeta {
 			return h.apiSessionRunMeta(ctx, sessionID)
 		},
+		// Step 3：挂起 turn 的显式放弃级联（interrupt 兜底路径）——子会话走
+		// actor 中断，团队走 StopLoop + paused 停放语义。
+		SuspendedTurnAbandon: chat.SuspendedTurnAbandonHooks{
+			CancelAgentSession: h.cancelSuspendedTurnAgentSession,
+			CancelTeam:         h.cancelSuspendedTurnTeam,
+		},
 		PersistHook:  h.runtimeServerGoalPersistHook,
 		RecoverStale: true,
 		PrepareRun: func(ctx context.Context, session *chat.Session, resume bool) error {

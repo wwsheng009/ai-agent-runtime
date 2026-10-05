@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -125,4 +126,92 @@ func TestInterruptAbandonsSuspendedTurn(t *testing.T) {
 	require.NotNil(t, state)
 	require.Empty(t, state.SuspendedTurnID)
 	require.Equal(t, SessionStopped, state.Status)
+}
+
+// TestAbandonSuspendedTurnCascadesNonBatchObligations pins the Step-3 cascade:
+// a parked turn's agent_session:/team: obligations are cancelled through the
+// host hooks before the record is cleared, and the canceled ids are reported.
+func TestAbandonSuspendedTurnCascadesNonBatchObligations(t *testing.T) {
+	ctx := context.Background()
+	h := newResumeEpisodeHarness(t)
+	h.seedSuspendedTurn(t, "turn_parked")
+	require.NoError(t, h.batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:     "turn_parked",
+		SessionID:  h.session.ID,
+		ObligationIDs: []string{
+			subagentbatch.AgentSessionObligationID("child-1"),
+			subagentbatch.TeamObligationID("team-1"),
+		},
+	}))
+
+	var agentCalls, teamCalls []string
+	h.actor.abandonHooks = SuspendedTurnAbandonHooks{
+		CancelAgentSession: func(_ context.Context, sessionID, reason string) error {
+			agentCalls = append(agentCalls, sessionID+"|"+reason)
+			return nil
+		},
+		CancelTeam: func(_ context.Context, teamID, reason string) error {
+			teamCalls = append(teamCalls, teamID+"|"+reason)
+			return nil
+		},
+	}
+
+	result, err := h.actor.AbandonSuspendedTurn(ctx, "turn_parked", "user interrupt")
+	require.NoError(t, err)
+	require.True(t, result.Cleared)
+	require.Equal(t, []string{"child-1"}, result.CanceledAgentSessionIDs)
+	require.Equal(t, []string{"team-1"}, result.CanceledTeamIDs)
+	require.Equal(t, []string{"child-1|user interrupt"}, agentCalls)
+	require.Equal(t, []string{"team-1|user interrupt"}, teamCalls)
+
+	_, ok, err := h.batches.GetTurnSuspension(ctx, h.session.ID, "turn_parked")
+	require.NoError(t, err)
+	require.False(t, ok, "a fully cascaded abandon must clear the parked-turn record")
+}
+
+// TestAbandonSuspendedTurnKeepsRecordWhenCascadeFails pins the retry contract:
+// a failing non-batch cascade keeps the durable record instead of silently
+// dropping the obligation; the next (idempotent) ESC retries.
+func TestAbandonSuspendedTurnKeepsRecordWhenCascadeFails(t *testing.T) {
+	ctx := context.Background()
+	h := newResumeEpisodeHarness(t)
+	h.seedSuspendedTurn(t, "turn_parked")
+	require.NoError(t, h.batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn_parked",
+		SessionID:     h.session.ID,
+		ObligationIDs: []string{subagentbatch.AgentSessionObligationID("child-stuck")},
+	}))
+	h.actor.abandonHooks = SuspendedTurnAbandonHooks{
+		CancelAgentSession: func(context.Context, string, string) error {
+			return errors.New("child still busy")
+		},
+	}
+
+	_, err := h.actor.AbandonSuspendedTurn(ctx, "turn_parked", "user interrupt")
+	require.Error(t, err)
+
+	_, ok, readErr := h.batches.GetTurnSuspension(ctx, h.session.ID, "turn_parked")
+	require.NoError(t, readErr)
+	require.True(t, ok, "partial cascade failure must keep the parked record for retry")
+}
+
+// TestAbandonSuspendedTurnRequiresHooksForNonBatchObligations pins the strict
+// reading: an unwired host cascade never silently drops an obligation it cannot
+// cancel.
+func TestAbandonSuspendedTurnRequiresHooksForNonBatchObligations(t *testing.T) {
+	ctx := context.Background()
+	h := newResumeEpisodeHarness(t)
+	h.seedSuspendedTurn(t, "turn_parked")
+	require.NoError(t, h.batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn_parked",
+		SessionID:     h.session.ID,
+		ObligationIDs: []string{subagentbatch.TeamObligationID("team-unwired")},
+	}))
+
+	_, err := h.actor.AbandonSuspendedTurn(ctx, "turn_parked", "user interrupt")
+	require.Error(t, err)
+
+	_, ok, readErr := h.batches.GetTurnSuspension(ctx, h.session.ID, "turn_parked")
+	require.NoError(t, readErr)
+	require.True(t, ok, "an unwired cascade must keep the record, never clear on a guess")
 }

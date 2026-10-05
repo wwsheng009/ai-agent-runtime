@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // EC-E7 / EC-C5：挂起 turn 的"放弃"执行器（设计 §6.12 / §6.5）。
@@ -28,10 +29,30 @@ import (
 type SuspendedTurnAbandonResult struct {
 	TurnID                  string   `json:"turn_id,omitempty"`
 	CanceledBatchIDs        []string `json:"canceled_batch_ids,omitempty"`
+	CanceledAgentSessionIDs []string `json:"canceled_agent_session_ids,omitempty"`
+	CanceledTeamIDs         []string `json:"canceled_team_ids,omitempty"`
 	AlreadyTerminalBatchIDs []string `json:"already_terminal_batch_ids,omitempty"`
 	MissingBatchIDs         []string `json:"missing_batch_ids,omitempty"`
 	Cleared                 bool     `json:"cleared,omitempty"`
 }
+
+// SuspendedTurnAbandonHooks lets the host cascade the non-batch obligations of
+// a parked turn (`agent_session:` / `team:`) when the user abandons it (ESC /
+// interrupt). Batch cancels live in the coordinator; child sessions need the
+// host's actor-interrupt channel and teams the host's suspend semantics, so
+// both are injected instead of guessed. A nil hook with obligations of that
+// kind keeps the parked record (visible, retryable) — never silently drops an
+// obligation.
+type SuspendedTurnAbandonHooks struct {
+	CancelAgentSession func(ctx context.Context, sessionID, reason string) error
+	CancelTeam         func(ctx context.Context, teamID, reason string) error
+}
+
+// interruptedTurnAbandonBudget bounds the synchronous abandon executed from the
+// interrupt path. ESC keeps the highest priority: a slow cascade must not wedge
+// the interrupt reply; anything that cannot finish in budget stays on the
+// durable record and is retried by the next ESC (idempotent).
+const interruptedTurnAbandonBudget = 1200 * time.Millisecond
 
 // AbandonSuspendedTurn 放弃本会话的挂起 turn：级联取消账本内全部 obligation，
 // 然后清掉 §6.12 挂起记录与派生缓存。没有挂起记录时是幂等 no-op（记录已被清 /
@@ -86,6 +107,25 @@ func (a *SessionActor) AbandonSuspendedTurn(ctx context.Context, turnID, reason 
 		}
 		result.CanceledBatchIDs = append(result.CanceledBatchIDs, batchID)
 	}
+	for _, sessionID := range record.ObligationAgentSessionIDs() {
+		if a.abandonHooks.CancelAgentSession == nil {
+			return nil, fmt.Errorf("abandon parked turn %s: cancel agent session %s: control hook is not configured", turnID, sessionID)
+		}
+		if err := a.abandonHooks.CancelAgentSession(ctx, sessionID, reason); err != nil {
+			// 保留挂起记录：下一次中断/放弃会重试（幂等），绝不在部分取消后清记录。
+			return nil, fmt.Errorf("abandon parked turn %s: cancel agent session %s: %w", turnID, sessionID, err)
+		}
+		result.CanceledAgentSessionIDs = append(result.CanceledAgentSessionIDs, sessionID)
+	}
+	for _, teamID := range record.ObligationTeamIDs() {
+		if a.abandonHooks.CancelTeam == nil {
+			return nil, fmt.Errorf("abandon parked turn %s: cancel team %s: control hook is not configured", turnID, teamID)
+		}
+		if err := a.abandonHooks.CancelTeam(ctx, teamID, reason); err != nil {
+			return nil, fmt.Errorf("abandon parked turn %s: cancel team %s: %w", turnID, teamID, err)
+		}
+		result.CanceledTeamIDs = append(result.CanceledTeamIDs, teamID)
+	}
 	if err := store.ClearTurnSuspension(ctx, a.id, turnID); err != nil {
 		return nil, fmt.Errorf("abandon parked turn %s: clear suspension: %w", turnID, err)
 	}
@@ -102,9 +142,9 @@ func (a *SessionActor) AbandonSuspendedTurn(ctx context.Context, turnID, reason 
 // EC-E7 shape — a parked turn has no run at all, so `run` is nil there.
 // Returns the abandoned turn id (empty when there was nothing to abandon) plus a
 // degradation error that must stay visible without failing the interrupt itself.
-func (a *SessionActor) abandonSuspendedTurnOnInterrupt(ctx context.Context, run *sessionRunControl) (string, error) {
+func (a *SessionActor) abandonSuspendedTurnOnInterrupt(ctx context.Context, run *sessionRunControl) (string, *SuspendedTurnAbandonResult, error) {
 	if a == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	turnID := strings.TrimSpace(a.cachedSuspendedTurnID())
 	if turnID == "" {
@@ -114,14 +154,14 @@ func (a *SessionActor) abandonSuspendedTurnOnInterrupt(ctx context.Context, run 
 		turnID = strings.TrimSpace(run.turnID)
 	}
 	if turnID == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	result, err := a.AbandonSuspendedTurn(ctx, turnID, "user interrupt")
 	if err != nil {
-		return turnID, err
+		return turnID, nil, err
 	}
 	if result == nil || !result.Cleared {
-		return "", nil
+		return "", nil, nil
 	}
-	return result.TurnID, nil
+	return result.TurnID, result, nil
 }

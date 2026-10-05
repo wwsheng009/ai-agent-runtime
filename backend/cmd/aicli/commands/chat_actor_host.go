@@ -1825,6 +1825,13 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		TriggerTurnRunMeta: func(_ context.Context, session *runtimechat.Session) *team.RunMeta {
 			return toolbroker.SpawnAgentRunMetaFromContext(session)
 		},
+		// Step 3：挂起 turn 的显式放弃（ESC / interrupt）级联 —— agent_session
+		// 走本机 actor 中断通道，team 走 suspend 语义；预算内未完成的级联保留
+		// durable 挂起记录，可重试（见内部 chat.SuspendedTurnAbandonHooks）。
+		SuspendedTurnAbandon: runtimechat.SuspendedTurnAbandonHooks{
+			CancelAgentSession: h.cancelSuspendedTurnAgentSession,
+			CancelTeam:         h.cancelSuspendedTurnTeam,
+		},
 		PrepareRun:  localChatPrepareRunHook(apiAgent, session, workspaceRoot, isBaseSession, h.ToolSurface),
 		PersistHook: localGoalPersistHook(sessionStore),
 		// Phase 2 自愈钩子：仅基础会话启用，子会话不得以子 ID 复活基础会话行。

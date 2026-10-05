@@ -41,6 +41,11 @@ import (
 
 type chatRuntimeEventBridge struct {
 	session             *ChatSession
+	// parkedEscapeMu / parkedEscapeStop hold the §6.12 parked-window ESC
+	// consumer: armed on turn.suspended, released on turn.resumed or interrupt
+	// cleanup, so ESC can abandon a parked turn that has no run to interrupt.
+	parkedEscapeMu   sync.Mutex
+	parkedEscapeStop func()
 	primarySessionMu    sync.RWMutex
 	primarySessionID    string
 	startOnce           sync.Once
@@ -1348,9 +1353,48 @@ func (b *chatRuntimeEventBridge) RunError() error {
 	return b.runErr
 }
 
+// acquireParkedEscapeWatcher arms the parked-window ESC consumer exactly once
+// per parked spell (the consumer itself is reference-counted across run-scoped
+// and parked-window drivers).
+func (b *chatRuntimeEventBridge) acquireParkedEscapeWatcher() {
+	if b == nil || b.session == nil {
+		return
+	}
+	b.parkedEscapeMu.Lock()
+	defer b.parkedEscapeMu.Unlock()
+	if b.parkedEscapeStop != nil {
+		return
+	}
+	b.parkedEscapeStop = startChatEscapeInterruptWatcher(b.session)
+}
+
+// releaseParkedEscapeWatcher disarms the parked-window ESC consumer. It is
+// idempotent: settle/resume, interrupt cleanup and session teardown may all
+// report the same end edge.
+func (b *chatRuntimeEventBridge) releaseParkedEscapeWatcher() {
+	if b == nil {
+		return
+	}
+	b.parkedEscapeMu.Lock()
+	stop := b.parkedEscapeStop
+	b.parkedEscapeStop = nil
+	b.parkedEscapeMu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
 func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if b == nil {
 		return
+	}
+	switch event.Type {
+	case runtimeevents.EventTurnSuspended:
+		// 挂起态没有 run：run 级 watcher 已随 run 结束释放，这里补上 parked
+		// 窗口的 ESC 消费者，保证"最高优先级中断"在整个等待期成立。
+		b.acquireParkedEscapeWatcher()
+	case runtimeevents.EventTurnResumed:
+		b.releaseParkedEscapeWatcher()
 	}
 	if event.Type == runtimechat.EventToolFinished {
 		b.rememberTodoSnapshotFromEvent(event)
