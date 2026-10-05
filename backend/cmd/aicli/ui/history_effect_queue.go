@@ -836,3 +836,34 @@ func (s HistoryEffectQueueState) hasTerminalRecordForSource(commit HistoryCommit
 func (s HistoryEffectQueueState) hasUnresolvedTerminalDelivery() bool {
 	return s.ledger.hasUnresolvedTerminalDelivery()
 }
+
+// hasInFlightActiveOriginDelivery reports whether a still-mutable-cell batch
+// (Origin == HistoryCommitActive) is currently being written: its head token is
+// InFlight and the remaining members stay Pending until that same physical
+// transaction proves them. Pending-only active tokens are deliberately NOT
+// reported: they have not been handed to the writer, so a full-plan reconcile
+// may still replace them safely. InFlight is the precise window in which
+// eviction is destructive — a full-transcript reconcile mints Transcript-origin
+// replacements under a different identity, the batch members are invalidated
+// mid-write, and the successful write can no longer be acknowledged
+// (ErrCommitNotInFlight), forcing an unresolved-delivery recovery that re-covers
+// rows which already crossed the writer. Ownership transfer must therefore wait
+// for this batch to settle; a write success then proves the prefix for skipRows,
+// and a write failure settles into the source-backed recovery path.
+func (s HistoryEffectQueueState) hasInFlightActiveOriginDelivery() bool {
+	if s.ledger == nil {
+		return false
+	}
+	for _, tokens := range s.ledger.activeTokensByCell {
+		for _, token := range tokens {
+			entry, ok := s.ledger.byToken[token]
+			if !ok || entry.Commit.Origin != HistoryCommitActive {
+				continue
+			}
+			if entry.State == HistoryCommitInFlight {
+				return true
+			}
+		}
+	}
+	return false
+}

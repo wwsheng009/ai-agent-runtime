@@ -973,6 +973,19 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	// after a pass that could not advance (see HistoryEffectQueueState.
 	// PlanStalled).
 	effects := &state.HistoryEffects
+	// Active 批次物理写在途（head InFlight，其余成员 Pending 等待同一次写
+	// 证明）时不得跑全会话 reconcile：reconcile 会以 Transcript 身份逐出
+	// 这些 token，写成功后 ackBatch 因 ErrCommitNotInFlight 被拒，进而把已
+	// 落盘的行标成未决并触发重放（resident-tail 双写）。所有权移交必须等这批
+	// 投递给出确定结果：成功则 acked 前缀参与 skipRows、失败则走 executor 的
+	// source-backed recovery。PlanIncomplete 让 ack/fail 与 executor kick 在
+	// 结算后继续这次规划；advanced=true 表示进展已委托给在途交付，调用方不得
+	// 据此置 PlanStalled。
+	if effects.hasInFlightActiveOriginDelivery() {
+		effects.PlanIncomplete = true
+		effects.PlanStalled = false
+		return false, true
+	}
 	effects.PlanStalled = false
 	inputs := currentTranscriptPlanInputs(state)
 	// P1.2 Stage B：装了 plan worker 时，锁内只派发窗口请求；screening 在 worker
@@ -1069,6 +1082,15 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 		return
 	}
 	effects.planRequestInFlight = false
+	// 同步路径的同一门槛：Active 批次物理写在途时，窗口结果的 mint+membership
+	// 会以 Transcript 身份逐出正在物理写的批次成员（或与并发 scoped 计划竞逐
+	// 同一批行）。丢弃本次结果且不立即重派发——所有权移交必须等这批投递结算；
+	// PlanIncomplete 让 ack/fail 与 executor kick 在结算后继续规划。
+	if effects.hasInFlightActiveOriginDelivery() {
+		effects.PlanIncomplete = true
+		effects.PlanStalled = false
+		return
+	}
 	inputs := currentTranscriptPlanInputs(state)
 	inputsMoved := a.planInputsEpoch != effects.planInputsEpoch || a.inputs != inputs
 	// 栅栏集合必须与同步路径**等价**：锁内同步规划不检查几何/冻结/投影态（那是
@@ -1101,6 +1123,12 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 // Pending/InFlight token 误杀），因此必须再做一次无预算全量 pass —— 此时布局
 // 缓存已被前几轮全部热起来，代价远低于首轮冷启动。完成后清游标、落 memo。
 func finishResumedTranscriptPlan(state *UIControllerState) bool {
+	if state.HistoryEffects.hasInFlightActiveOriginDelivery() {
+		// 物理写在途：membership 踢除会把正在写的批次成员逐出。保留游标与
+		// PlanIncomplete，结算后由 ack/executor kick 再次收尾。
+		state.HistoryEffects.PlanIncomplete = true
+		return false
+	}
 	full, complete := planEligibleHistoryCommitsWithin(state.AppState, time.Time{})
 	if !complete {
 		// 零 deadline 不会截断；保底不改变投递语义，保留游标等下一次机会。
@@ -1150,6 +1178,13 @@ func continueTruncatedHistoryPlan(state *UIControllerState) bool {
 		// 或重派发。这里返回 false 且不置 PlanStalled——在飞不是停滞。
 		return false
 	}
+	if effects.hasInFlightActiveOriginDelivery() {
+		// 物理写在途：批次成员（含仍 Pending 的同批交付）正由执行器的事务证明
+		// （写成功即 ack、失败即 unresolved+recovery），结果 action 会再次驱动
+		// 这里。在途不是停滞，返回 false 且不置 PlanStalled；同时绝不能抢跑
+		// 全会话 reconcile。
+		return false
+	}
 	// While the prefix still has pending work the executor is already carrying
 	// the plan forward; re-planning here would burn another layout budget per ack
 	// without adding anything the queue does not already hold. In-flight tokens
@@ -1194,7 +1229,10 @@ func (s HistoryEffectQueueState) planContinuationPending() bool {
 	// 在飞请求期间不算 pending：screening 已委托给 worker。若仍为 true，executor
 	// 的 kick 分支会每个轮次 Post 一枚 barrier Continue（run 无 sleep），形成
 	// actor↔executor 热旋转；结果 action 自身的 wake 谓词负责重新唤醒。
-	return s.PlanIncomplete && !s.PlanStalled && !s.planRequestInFlight
+	// 同理，Active 批次物理写在途时也不算 pending：执行器本身在证明该批次
+	// （写结果会驱动 ack/fail 路径继续规划），kick 只会空转。
+	return s.PlanIncomplete && !s.PlanStalled && !s.planRequestInFlight &&
+		!s.hasInFlightActiveOriginDelivery()
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell

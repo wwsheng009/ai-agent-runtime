@@ -406,6 +406,104 @@ func TestFinalizeActiveCellPlansOnlyUnacknowledgedResidentTail(t *testing.T) {
 	}
 }
 
+// TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight 固化 resident-tail
+// 双写的 reducer 侧护栏：当 Active 批次已交给执行器（head InFlight、成员仍
+// Pending，等待同一次物理写证明）时，finalize 不得立刻做全会话 reconcile ——
+// 那会以 Transcript 身份逐出批次成员，使随后成功的写 ackBatch 因
+// ErrCommitNotInFlight 被拒并触发重放。批次结算（ack）后才以 Transcript 身份
+// 补铸未确认后缀，已交付前缀不重发。
+func TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight(t *testing.T) {
+	const width, height = 100, 24
+	markers := make([]string, 40)
+	for index := range markers {
+		markers[index] = fmt.Sprintf("DEFER-FINALIZE-%02d terminal history validation", index+1)
+	}
+	source := strings.Join(markers, "\n")
+
+	state := UIControllerState{}
+	state = reduceUIControllerState(state, Resize{Width: width, Height: height, Generation: 1}, 1)
+	state = reduceUIControllerState(state, SetSemanticActiveCellProjectionAction{Enabled: true}, 2)
+	state = reduceUIControllerState(state, SetActiveCellAction{Active: ActiveCellState{
+		CellID: 81, Revision: 40, Kind: scene.KindAssistant,
+		Phase: ActiveCellMutable, Source: source,
+	}}, 3)
+
+	activeEntries := state.HistoryEffects.Entries()
+	if len(activeEntries) < 2 {
+		t.Fatalf("active overflow entries = %d, want at least 2", len(activeEntries))
+	}
+	batch := make([]HistoryCommit, 0, len(activeEntries))
+	for _, entry := range activeEntries {
+		if entry.Commit.Origin != HistoryCommitActive {
+			t.Fatalf("entry not active-origin: %#v", entry)
+		}
+		batch = append(batch, entry.Commit)
+	}
+	// 与 executor 的 claim 批一致：head InFlight，后续成员保持 Pending。
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: batch[0].Token, LayoutGeneration: state.LayoutGeneration,
+	}, 4)
+
+	state = reduceUIControllerState(state, FinalizeActiveCellAction{
+		Snapshot: &scene.Snapshot{Revision: 41, Cells: []*scene.TranscriptCell{{
+			ID: 81, Revision: 41, Kind: scene.KindAssistant,
+			Source: source, Phase: scene.CellCommitted,
+		}}},
+		ExpectedActiveCellID: 81, ExpectedActiveRevision: 40,
+		ExpectedSceneRevision: 41,
+		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
+	}, 5)
+
+	for _, entry := range state.HistoryEffects.Entries() {
+		switch {
+		case entry.Commit.Origin == HistoryCommitTranscript:
+			t.Fatalf("finalize minted a transcript identity while the active batch was in flight: %#v", entry)
+		case entry.Commit.Token == batch[0].Token:
+			if entry.State != HistoryCommitInFlight {
+				t.Fatalf("batch head state = %v, want in-flight", entry.State)
+			}
+		default:
+			if entry.State != HistoryCommitPending {
+				t.Fatalf("batch member %d state = %v, want pending", entry.Commit.Token, entry.State)
+			}
+		}
+	}
+	if !state.HistoryEffects.PlanIncomplete {
+		t.Fatalf("deferred ownership transfer did not arm continuation: %#v", state.HistoryEffects)
+	}
+
+	// 批次写成功：整批 ack 之后，只有未确认后缀可以以 Transcript 身份补铸。
+	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
+		Commits: batch, Frame: 4, LayoutGeneration: state.LayoutGeneration,
+	}, 6)
+
+	ackedRows := 0
+	transcriptRows := 0
+	for _, entry := range state.HistoryEffects.Entries() {
+		switch entry.Commit.Origin {
+		case HistoryCommitActive:
+			if entry.State != HistoryCommitAcked {
+				t.Fatalf("batch entry not acked after physical proof: %#v", entry)
+			}
+			ackedRows += len(entry.Commit.Lines)
+		case HistoryCommitTranscript:
+			if entry.State != HistoryCommitPending {
+				t.Fatalf("transcript suffix state = %v, want pending", entry.State)
+			}
+			transcriptRows += len(entry.Commit.Lines)
+		}
+	}
+	if got, want := ackedRows+transcriptRows, len(markers); got != want {
+		t.Fatalf("planned rows = %d, want %d (acked %d + suffix %d)", got, want, ackedRows, transcriptRows)
+	}
+	if transcriptRows == 0 || ackedRows >= len(markers) {
+		t.Fatalf("suffix not planned after settlement: ackedRows=%d transcriptRows=%d", ackedRows, transcriptRows)
+	}
+	if state.HistoryEffects.PlanIncomplete {
+		t.Fatalf("continuation did not complete after settlement: %#v", state.HistoryEffects)
+	}
+}
+
 func TestPlanPlainCellHistoryCommitsMapsInternalAndTrailingBlankRows(t *testing.T) {
 	const source = "first\n\nlast\n"
 	state := AppState{
