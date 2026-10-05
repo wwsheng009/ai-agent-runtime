@@ -137,6 +137,13 @@ type LoopReActConfig struct {
 	// agent-session obligations never settles while this is nil (conservative:
 	// never clear on a guess).
 	AgentSessionObligations subagentbatch.AgentSessionObligationResolver `yaml:"-"`
+	// TeamObligations resolves team runs parked as `team:` obligations
+	// (spawn_team with auto_start). nil keeps the batch+child-only settle
+	// predicate; hosts that park team runs must wire their durable team-store
+	// reader so the parked turn can clear once every listed team reached a
+	// terminal control-plane state. A record carrying team obligations never
+	// settles while this is nil (conservative: never clear on a guess).
+	TeamObligations subagentbatch.TeamObligationResolver `yaml:"-"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -1374,6 +1381,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 
 		// 3. Observe: 记录执行结果
 		currentCtx = promoteTeamRunContext(currentCtx, toolResults)
+		loop.parkTeamObligationsFromResults(currentCtx, sessionID, toolResults)
 		observationStart := len(observations)
 		observations = loop.observe(currentCtx, toolResults, observations, step)
 		if manager := loop.agent.GetContextManager(); manager != nil && observationStart < len(observations) {
@@ -7310,6 +7318,117 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 	})
 }
 
+// parkTeamObligation records a team run dispatched by spawn_team as a
+// `team:` obligation on the current turn (§6.12), mirroring parkBackgroundTurn
+// for subagent batches. The team dispatcher (broker) starts the run as part of
+// the spawn tool call, so the loop — which owns the turn identity and the
+// durable batch store — is the component that can park deterministically before
+// the run ends. Appending to an existing record keeps batch/child/team
+// obligations in one suspension row; a write failure is projected as a
+// degradation instead of failing the spawn.
+func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID string) {
+	if loop == nil || loop.agent == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	teamID = strings.TrimSpace(teamID)
+	if sessionID == "" || teamID == "" {
+		return
+	}
+	coordinator := loop.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return
+	}
+	store := coordinator.Store()
+	if store == nil || !store.IsDurable() {
+		return
+	}
+	turnID := strings.TrimSpace(loop.turnID)
+	if turnID == "" {
+		// A turn without an id cannot be resumed by anyone; do not write a
+		// record that the resume path could never match.
+		return
+	}
+	record, alreadyParked, err := store.GetTurnSuspension(ctx, sessionID, turnID)
+	if err != nil {
+		return
+	}
+	if record == nil {
+		record = &subagentbatch.TurnSuspension{TurnID: turnID, SessionID: sessionID}
+	}
+	if strings.TrimSpace(record.RootScopeID) == "" {
+		record.RootScopeID = sessionID
+	}
+	obligationID := subagentbatch.TeamObligationID(teamID)
+	for _, existing := range record.ObligationIDs {
+		if existing == obligationID {
+			return
+		}
+	}
+	record.ObligationIDs = append(record.ObligationIDs, obligationID)
+	if record.ParkedAt.IsZero() {
+		record.ParkedAt = time.Now().UTC()
+	}
+	if err := store.ParkTurnSuspension(ctx, record); err != nil {
+		loop.agent.reportSuspensionDegraded(ctx, sessionID, "team parked-state write failed: "+err.Error())
+		return
+	}
+	// §6.8 / G3 edge semantics: announce the suspension only on the transition
+	// from "no record" to "record". A read failure stays silent: better to miss
+	// one edge signal than to risk a duplicate.
+	if alreadyParked {
+		return
+	}
+	loop.emitRuntimeEvent(events.EventTurnSuspended, sessionID, "", map[string]interface{}{
+		"team_id":            teamID,
+		"obligation_count":   len(record.ObligationIDs),
+		"resume_queue_count": len(record.ResumeQueue),
+		"parked_at":          record.ParkedAt.Format(time.RFC3339Nano),
+	})
+}
+
+// parkTeamObligationsFromResults parks one team: obligation for every
+// successful spawn_team call in this step whose run was actually started
+// (auto_start defaults to true, matching the broker). Failures and
+// auto_start=false spawns never park: there is no dispatched work to join.
+func (loop *ReActLoop) parkTeamObligationsFromResults(ctx context.Context, sessionID string, results []toolExecutionResult) {
+	for _, result := range results {
+		if strings.TrimSpace(result.Error) != "" ||
+			!strings.EqualFold(strings.TrimSpace(result.Call.Name), toolbroker.ToolSpawnTeam) {
+			continue
+		}
+		if !toolCallAutoStartDefaultTrue(result.Call) {
+			continue
+		}
+		teamID, _ := spawnTeamContextIDs(result)
+		if teamID == "" {
+			continue
+		}
+		loop.parkTeamObligation(ctx, sessionID, teamID)
+	}
+}
+
+// toolCallAutoStartDefaultTrue resolves the spawn_team auto_start argument
+// with the broker's default (true). Value kinds are normalized like the
+// broker's lenient boolean coercion, so "false" cannot be mistaken for start.
+func toolCallAutoStartDefaultTrue(call types.ToolCall) bool {
+	if call.Args == nil {
+		return true
+	}
+	switch value := call.Args["auto_start"].(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "false", "0", "no", "off":
+			return false
+		case "true", "1", "yes", "on":
+			return true
+		}
+	}
+	return true
+}
+
 // settleParkedTurnOnRunEnd is the clear half of the §6.12 parked-turn lifecycle:
 // once every obligation batch of the parked turn reached a terminal state, the
 // turn is over and the durable record must go — otherwise nextTurnID keeps
@@ -7352,10 +7471,12 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 		return
 	}
 	var agentSessionResolver subagentbatch.AgentSessionObligationResolver
+	var teamResolver subagentbatch.TeamObligationResolver
 	if loop.config != nil {
 		agentSessionResolver = loop.config.AgentSessionObligations
+		teamResolver = loop.config.TeamObligations
 	}
-	settled, err := subagentbatch.TurnObligationsSettledWith(settleCtx, store, record, agentSessionResolver)
+	settled, err := subagentbatch.TurnObligationsSettledWithTeams(settleCtx, store, record, agentSessionResolver, teamResolver)
 	if err != nil || !settled {
 		return
 	}

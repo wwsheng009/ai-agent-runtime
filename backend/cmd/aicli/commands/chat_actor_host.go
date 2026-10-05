@@ -1784,6 +1784,9 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	// run 收尾的 settle 必须能判读子会话终态——接宿主自己的 durable 判读器
 	// （supervision 通知面；未接线时保持 batch-only 语义，已有挂起不受影响）。
 	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
+	// §6.12 扩展：spawn_team 的 team: 义务同样需要 run 收尾时的 durable 判读器
+	// （team store 终态 + 无 live loop）；未接线时 team 义务保持保守不清账。
+	loopConfig.TeamObligations = h.teamObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。子会话走 aicli.subagents.routing
 	// （scheduler 侧），主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。
 	applyLocalChatMainAgentRouting(loopConfig, session, isBaseSession)
@@ -3809,9 +3812,54 @@ func (h *localChatRuntimeHost) dispatchTeamLifecycleEvent(event team.TeamEvent, 
 			h.EventBus.Publish(runtimeEvent)
 		}
 	}
+	// §6.12 team join：不限于 base 会话——子代理会话（lead）派发的 run 同样
+	// 可能带着 team: 义务挂起，终态事件必须替它排 settle wake。
+	h.maybeResumeTeamParkedTurn(context.Background(), sessionID, event.Type)
 	if h.BaseSession != nil && isBaseLifecycleSession {
 		warnIfChatSessionSyncFails(h.BaseSession, "team lifecycle sync", syncAmbientTeamLifecycleState(h.BaseSession))
 	}
+}
+
+// maybeResumeTeamParkedTurn is the §6.12 team-join closure: a terminal team
+// event is the resume edge for a parent turn parked on team: obligations. The
+// settlement wake is scheduled only when the durable ledger is fully terminal
+// (never on a guess) and drained through the normal wake path; the parked
+// record itself is cleared by the settle predicate, not here.
+func (h *localChatRuntimeHost) maybeResumeTeamParkedTurn(ctx context.Context, sessionID, eventType string) {
+	if h == nil || h.Supervision == nil || h.Supervision.Wakes == nil || h.SubagentBatches == nil {
+		return
+	}
+	switch strings.TrimSpace(eventType) {
+	case "team.completed", "team.summary":
+	default:
+		return
+	}
+	parentSessionID := strings.TrimSpace(sessionID)
+	if parentSessionID == "" {
+		parentSessionID = h.baseRuntimeSessionID()
+	}
+	if parentSessionID == "" {
+		return
+	}
+	rootScopeID := h.baseRuntimeSessionID()
+	if rootScopeID == "" {
+		rootScopeID = parentSessionID
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settleCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+		settleCtx,
+		h.SubagentBatches,
+		h.agentSessionObligationResolver(),
+		h.teamObligationResolver(),
+		h.Supervision.Wakes,
+		parentSessionID,
+		rootScopeID,
+	)
+	_ = h.wakeSupervisedParent(settleCtx, parentSessionID, rootScopeID)
 }
 
 func (h *localChatRuntimeHost) deliverTeamLifecycleMailbox(ctx context.Context, sessionID string, event team.TeamEvent) {

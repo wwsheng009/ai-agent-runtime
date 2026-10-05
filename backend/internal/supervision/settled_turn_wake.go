@@ -47,6 +47,22 @@ func ScheduleSettledTurnWake(
 	scheduler *WakeScheduler,
 	parentSessionID, rootScopeID string,
 ) (bool, error) {
+	return ScheduleSettledTurnWakeWithTeams(ctx, batches, resolver, nil, scheduler, parentSessionID, rootScopeID)
+}
+
+// ScheduleSettledTurnWakeWithTeams is ScheduleSettledTurnWake extended to
+// team-run obligations (team:): a parked turn may also be waiting on
+// spawn_team runs, so the terminal verdict must consult the team control plane.
+// A nil team resolver keeps the previous conservative behavior (a record
+// carrying team obligations never settles).
+func ScheduleSettledTurnWakeWithTeams(
+	ctx context.Context,
+	batches subagentbatch.BatchStore,
+	resolver subagentbatch.AgentSessionObligationResolver,
+	teamResolver subagentbatch.TeamObligationResolver,
+	scheduler *WakeScheduler,
+	parentSessionID, rootScopeID string,
+) (bool, error) {
 	if batches == nil || scheduler == nil {
 		return false, nil
 	}
@@ -69,7 +85,7 @@ func ScheduleSettledTurnWake(
 		if record == nil {
 			continue
 		}
-		settled, err := subagentbatch.TurnObligationsAllTerminal(ctx, batches, record, resolver)
+		settled, err := subagentbatch.TurnObligationsAllTerminalWithTeams(ctx, batches, record, resolver, teamResolver)
 		if err != nil {
 			// One unreadable record must not hide a later settled one; the
 			// turn keeps its previous (parked) behavior.

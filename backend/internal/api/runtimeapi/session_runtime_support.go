@@ -1262,10 +1262,11 @@ func (c *sessionAgentController) projectAgentCompletion(ctx context.Context, par
 		// action_required 时排），而结算谓词只在 run 结束跑：没有这一笔，
 		// "全部义务成功"的挂起 turn 会永久停放，与 spawn_agent 的
 		// "auto-resumes it on the child's terminal event" 契约相悖。
-		_, _ = supervision.ScheduleSettledTurnWake(
+		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
 			ctx,
 			c.handler.getSubagentBatchStore(),
 			c.handler.agentSessionObligationResolver(),
+			c.handler.teamObligationResolver(),
 			c.handler.getSupervisionWakeScheduler(),
 			parentSessionID,
 			rootScopeID,
@@ -4641,6 +4642,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	// 未装配 supervision store 时为 nil——记录保持挂起（保守方向），批量义务
 	// 的结清规则不变。
 	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
+	// §6.12 扩展：spawn_team 的 team: 义务同样需要 run 末的 durable 判读器
+	// （team store 终态）；未接线时 team 义务保持保守不清账。
+	loopConfig.TeamObligations = h.teamObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。child 标记（agent_type / depth /
 	// read_only）与上面的子会话策略同口径——带任一标记的会话是子 Agent，走
 	// aicli.subagents.routing，主 Agent 的开关不得改变其行为（§6.3 配置隔离）。

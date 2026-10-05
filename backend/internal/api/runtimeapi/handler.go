@@ -2416,6 +2416,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				// buildSessionLoopConfig；携带 agent_session: 义务的挂起记录同样
 				// 需要 supervision 判读器才能在本 run 末结清。
 				AgentSessionObligations: h.agentSessionObligationResolver(),
+				// team: 义务同源：run 末 settle 需要 team store 终态判读器。
+				TeamObligations: h.teamObligationResolver(),
 			})
 			if reactErr != nil {
 				// 失败/中断（含客户端断开导致的 ctx 取消）也要落库：否则本轮已产生
@@ -2745,6 +2747,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				// §6.12：与流式直连路径同源，非流式 Web 回合的 loop 也需要子会话
 				// 义务判读器才能结清挂起 turn。
 				AgentSessionObligations: h.agentSessionObligationResolver(),
+				// team: 义务同源：run 末 settle 需要 team store 终态判读器。
+				TeamObligations: h.teamObligationResolver(),
 			},
 		})
 		if reactErr != nil {

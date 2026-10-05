@@ -173,6 +173,9 @@ func (h *Handler) getTeamOrchestrator() *team.Orchestrator {
 				Payload:   payload,
 				Timestamp: event.Timestamp,
 			})
+			// §6.12 team join：terminal 团队事件是 parked turn 的恢复边沿；
+			// 结清判定以 durable 账本为准，wake 走正常投递路径。
+			h.maybeResumeTeamParkedTurn(context.Background(), event)
 		})
 	}
 

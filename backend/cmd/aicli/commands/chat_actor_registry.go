@@ -1458,10 +1458,11 @@ func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, pa
 		// "auto-resumes it on the child's terminal event" 契约相悖。
 		// 结清判定以 durable 账本为准（ListTurnSuspensions + settle 谓词），
 		// 不依赖派生缓存；排出的 wake 由下面的 wakeSupervisedParent 立即排空。
-		_, _ = supervision.ScheduleSettledTurnWake(
+		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
 			ctx,
 			r.Host.SubagentBatches,
 			r.Host.agentSessionObligationResolver(),
+			r.Host.teamObligationResolver(),
 			r.Host.Supervision.Wakes,
 			parentSessionID,
 			rootScopeID,
