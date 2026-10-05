@@ -1158,3 +1158,29 @@ Select-String -Path "$env:TEMP\goro.txt" -Pattern '^goroutine ' | Measure-Object
 | SSE 映射表 | `commands/web_schema.go:76-111` | 已知事件类型全集的参考 |
 | 既有加固文档 | `docs/plan/aicli-chat-unified-render-stall-analysis-and-hardening.md` §8 | 残余风险基线 |
 | E2E 脚本 | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` 等 | 验收执行 |
+
+## 附录 C：单一有序车道实施记录（实时渲染顺序修复，2026-10-05）
+
+- **现场**：session_20261005225426_UlODbztS（E:\projects\itsm\itsm）实时 TUI 输出跨家族
+  错乱：reasoning 块被拆散、夹到 tool 结果之间；同一 turn 的 `chat.json`、
+  `runtime-events.jsonl`、回放全文均顺序正确 —— 病灶在实时投递层（回放正确、实时错乱）。
+- **机制**：实时入队曾有三条通道 —— 有界 `eventQueue`（直投）、`pendingStreams`（流式
+  合并侧车道）、`deferredQueue`（非流式溢出 FIFO）+ critical 保留位/异步重试。侧车道
+  只保证家族内顺序：critical 可越过 stream 积压（测试显式钉住 overtake），stream 也可
+  越过 deferred（代码注释自认）。慢消费者（大段工具输出渲染）时，后到的 tool/llm 事件
+  直投越过积压 reasoning，即实时顺序错乱的根因。
+- **修复（b19284db）**：收敛为单一 ordered backlog。
+  1. 所有家族共用一条 FIFO；`backlog` 非空或 worker 在途时**绝不直投**，全部入道；
+  2. critical 只保证"永不丢"（超软上限保留并计数），不再越队；subagent 生命周期豁免取消；
+  3. 投递在 `streamMu` 内一次性原子完成（非阻塞发送 + 弹队），删除在途/pending 两阶段
+     窗口、critical 异步重试通道与"家族内强刷尾巴"特例；
+  4. 合并只保留顺序安全形式：流式队尾相邻折叠（同流/连续序号）、可合并家族按 key 原位
+     最新值替换；
+  5. off/observe 仍是策略回滚开关（不合并/不驱逐/仅计数归因），但"单一车道"在所有模式
+     生效 —— 顺序不是策略。
+- **验证**：新增 `TestChatRuntimeEvents_LiveOrderAcrossFamiliesUnderSlowConsumer`（现场
+  序列；修复前首条投递为 llm.request.finished 越过 reasoning 积压，修复后严格按事件序，
+  先红后绿）；`cmd/aicli/commands` 整包 `-count=1` 全绿；关键用例 `-race` 全绿；契约更新：
+  `CriticalEventsWaitInOrderedBacklog`、`LatestWinsSlotReplacesInPlace`、终态道内保留。
+- **后续观察**：`DeferredBacklog`（现为统一积压）继续纳入 settle 谓词；`CriticalPending`
+  语义改为"仍在道内未投递的 critical 数"；`/debug` 字段名保持不变（向后兼容）。
