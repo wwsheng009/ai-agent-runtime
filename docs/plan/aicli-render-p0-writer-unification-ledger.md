@@ -70,18 +70,38 @@
    - [x] secret（surface 预览下无直写，仅 legacy fallback）；
    - [ ] transient line：无显示属主，需先设计显示（底部 prompt 行或 popup）再认领 text 直写。
 4. [x] 标题/铃装配到 control sink（`chatControlSequenceWriter`）。
-5. [~] `status.go` 兜底路径与 stderr 收编（侦察完成，待逐点核实）：
+5. [x] `status.go` 兜底路径与 stderr 收编（核实完成 + 收口防线）：
    - `ui.Print*`（status.go 快捷函数）在 commands 的交互期调用点大多已有 popup/fail-closed
      守卫：export 在 `usePopup` 时把 warning 进 popup（`chat_export_command.go:438`）；
      `chat.go` / `chat_restored_pending.go` 仅在 `!unifiedInteractiveOutputMustFailClosed`
      时走 raw。这些是 legacy-only 兜底：保持守卫、不迁移字节。
-   - 待核实（可能 unified 可达）：`chat_model_switch.go:766/781`、
-     `chat_resume_command.go:738/751`、`chat_model_command.go:595`、
-     `chat_selection_output.go:101`。核实后：迁 popup/动态行，或补守卫并登记基线。
+   - 逐点核实结论（unified 会话期可达性，全链证据）：
+     - `chat_model_switch.go:766/781`：不可达——分派器 `selectRuntimeReasoningEffort:645` 的
+       popup 守卫（646）在 unified 恒真 → `...Popup`；766/781 在 `...Legacy`（692-783）。
+     - `chat_model_command.go:595`：不可达——分派器 472-480（守卫 476）恒走 popup；
+       unified 下 `/model`、`/provider` 在 handler 入口即分流到 structured CommandResult。
+     - `chat_resume_command.go:738/751`：不可达——两处都在 `if usePopup` 的 else 分支。
+     - `chat.go` / `chat_reasoning.go`：仅启动期可达（presenter attach 之前，
+       `prepareChatRuntimeState` 早于 `bootstrapChatSessionShell`），raw stderr 无会话期冲突。
+     - `chat_session.go:2029-2096`：死代码（`maybeSelectStartupSession` 无生产调用者）。
+     - `chat_selection_output.go:101`：unified 会话期调用者全被拦截（skills/theme 入口分流；
+       其余为启动期/死代码）。
+   - 收口防线：`chat_selection_output.go` 的 `printChatSelectionLine` /
+     `printChatSelectionPrompt` / `printChatSelectionWarning` 增加
+     `chatSelectionDiagnosticClaim`——登记中的交互会话存在时投递动态栏、绝不写裸
+     stdout/stderr；无会话（启动期）保持原字节。测试
+     `TestChatSelectionOutputClaimsToDiagnosticSinkWhenSessionActive`。
+     范围刻意不含 `writeChatParts` 通用行写：`printChatSessionInfoRow` 等会话信息行
+     也走它，劫持会改变调试/恢复输出的归属与绘制时序（回归实测：`/debug on` 的
+     信息行被劫持 → 动态栏重绘 → paint trace 记录事件，破坏
+     `TestDebugDisplayNoRenderPaintTraceWithoutEvents`）。
    - stderr：mesh 等后台告警已走 `NotifyChatDiagnostic` → 动态栏（`chat_diagnostic.go`
      契约）；其余为启动期 warning（presenter attach 前）保持 stderr。交互期新告警必须走
      `NotifyChatDiagnostic`，不得直写 stderr。
-6. 单写端断言测试（注入计数 writer，断言交互期物理 writer 计数=1）+ 门禁运行说明文档化。
+6. [x] 单写端断言测试：`TestUnifiedSessionSinglePhysicalWriterFence` 注入计数 writer，
+   在统一会话存活期驱动标题/铃/编辑器模式序列/动态诊断/直写输出/命令输出，
+   断言全部落在同一物理 writer、进程 stdout/stderr 零字节。
+   （门禁运行说明见 §4 验收与 README 待补。）
 
 ## 3.1 已知基线问题（非本分支引入）
 
@@ -107,5 +127,8 @@
 
 - 每次迁移：`go test ./cmd/aicli/ui/ -run TestUIInteractiveDirectWriterInventory`（计数必须按预期下降）+
   目标包回归 + 真机 e2e（粘贴、焦点切换、标题、铃、长文本粘贴）。
+- 单写端运行时门禁（新增）：
+  `go test ./cmd/aicli/commands/ -run 'TestUnifiedSessionSinglePhysicalWriterFence|TestChatSelectionOutputClaimsToDiagnosticSinkWhenSessionActive|TestChatControlSequenceWriter'`
+  ——注入计数 writer + 进程 stdout/stderr 零字节断言，覆盖标题/铃/模式序列/动态诊断/直写/命令输出。
 - 完成态：ui 生产文件直写基线只剩白名单类（被栅栏 surface / TRACE / 启动期 probe），
   交互期物理 writer 计数 = 1；CI 中门禁测试常开。
