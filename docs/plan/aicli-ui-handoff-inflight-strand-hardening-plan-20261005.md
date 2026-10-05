@@ -1,6 +1,6 @@
 # aicli UI 历史投递 stranded InFlight 与 actor 锁内规划：架构缺陷评审与加固计划（2026-10-05）
 
-> 状态：评审完成；P0 已实施并通过回归（2026-10-05，见 §5 实施记录）。
+> 状态：评审完成；P0 已实施并通过回归；P1 部分实施（2026-10-05，见 §5 实施记录）。
 > 现场：`session_20260930210352_V5o7MDYL`（进程 PID 15908，二进制 rev `3b48c5ed`，已包含 `046adc09`
 > 的 fold 缓存扩容与 executor 有界等待修复）。
 > 关联文档：`docs/plan/aicli-chat-unified-render-stall-analysis-and-hardening.md`、
@@ -190,13 +190,46 @@ P0.2 必须补观测的原因。
   `time` import 导致主树 `go build` 失败）；本次验证刻意在隔离 worktree 完成，未触碰该 WIP。
   现场进程 15908 的既有 stranded token 仍需重启才能清除（ledger 为内存态）。
 
-### P1（下一步，消除无界临界区与丢唤醒）
+### P1（部分实施，2026-10-05）
 
-1. `continueTruncatedHistoryPlan` 传入真实预算（非零 deadline），并为截断补一条自唤醒
-   （ack 之外的 kick 或 deadline 排序）；这需要与 D3 的自唤醒兜底一起做，避免"预算化后
-   没人续跑"。
-2. 规划移出 `c.mu`：锁内只取输入快照，锁外 `planEligibleHistoryCommits`，锁内只 reconcile；
-   `State()/debug` 改无锁快照（或复用 transcript 不可变快照）。
+1. **截断规划的续跑触发与唤醒**（P1.1）
+   - P1.1a（已实施）：空队列 + `PlanIncomplete && !PlanStalled` 时，`historyCommitWakeNeeded`
+     对任意 action 发射唤醒（带 Frozen/ProjectionUnknown/unresolved 同源门），让 executor 的
+     `ContinueHistoryPlanAction` kick 在空闲 resume 会话里可达；同时把
+     `HistoryProjectionInvalidated` 加入 recovery 白名单——该 action 自身置
+     ProjectionUnknown，此前却没有唤醒出口。
+   - P1.1b（设计修订，待实现）：**不能**简单给 `continueTruncatedHistoryPlan` 加预算。
+     planner 注释（`history_effect_planner.go:877-887`）自证：冷缓存大前缀下每轮有预算的
+     pass 会停在同一样本点，前缀全是缓存命中/已有终态记录 → NextToken 不变 → PlanStalled
+     被永久置位、kick 解除（live 事故：next=1288 / acked=322 / pending=0）。要同时满足
+     "锁持有有界"与"跨轮前进"，需要把布局 walk 的采样位置做成跨续跑 checkpoint（增量规划），
+     或在 memo 中记录已覆盖的 cell 前沿；这是独立设计项。
+2. 规划移出 `c.mu`（P1.2，未实施）：锁内只取输入快照，锁外 `planEligibleHistoryCommits`，
+   锁内只 reconcile；`State()/debug` 改无锁快照（或复用 transcript 不可变快照）。
+3. D5 观测（已实施）：`HistoryEffectQueueSummary` 增加
+   `OldestInFlightToken/OldestInFlightGeneration`，`/debug` 摘要输出
+   `oldest-inflight-token/gen`，使 "in-flight generation 落后于 layout generation" 的
+   stranded 签名可被直接读出（此前只有计数，无法与健康写入区分）。
+
+### P1 实施记录（2026-10-05）
+
+- 代码：
+  - `backend/cmd/aicli/ui/controller.go`：空队列分支增加
+    `planContinuationPending() && !Frozen && !ProjectionUnknown && !hasUnresolvedTerminalDelivery()`
+    自唤醒；recovery 白名单加入 `HistoryProjectionInvalidated`。
+  - `backend/cmd/aicli/ui/controller_test.go`：新增
+    `TestHistoryCommitWakeNeededForTruncatedPlanContinuation`（incomplete→唤醒；
+    stalled/frozen→不唤醒；projection-unknown 下仅 recovery 白名单 action 唤醒；
+    invalidated→唤醒 recovery）。
+  - `backend/cmd/aicli/ui/history_effect_queue.go`、`history_diagnostic_state_test.go`：
+    Summary 增加 oldest in-flight token/generation，并同步逐条遍历等价性断言。
+  - `backend/cmd/aicli/commands/chat_debug_document.go`：debug 摘要追加
+    `oldest-inflight-token/oldest-inflight-gen`。
+- 验证：
+  - `go test ./cmd/aicli/ui/ -run 'TestHistoryCommitWakeNeeded|TestTerminalSessionExecutor' -count=1` → ok；
+  - `go test ./cmd/aicli/ui/ -run 'TestHistoryEffectQueueSummary|TestHistoryDiagnostic|TestHistoryCommitWakeNeeded' -count=1` → ok；
+  - `go test ./cmd/aicli/commands/ -run 'TestHistoryEffectDiagnosticsExposeScrollbackReplayGrant' -count=1` → ok；
+  - 涉及文件 `gofmt -l` 均无输出。
 
 ### P2（结构性）
 

@@ -508,12 +508,16 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 	// be reconciled against it.
 	// plan-count/plan-last-ms/plan-max-ms 是 P16 的归因读数：P12 说端点（=用户
 	// 界面）被冻结，这三个数说冻结花在规划器上的部分有多大。
-	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d abandoned=%d ledger-entries=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d",
+	// oldest-inflight-token/gen 给出被 claim 的 token 身份：其 generation 落后于
+	// 当前 layout generation 即 stranded claim 签名（releaseClaimMiss 修复的病态），
+	// 只有计数时这与「正在健康写入」无法区分。
+	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d abandoned=%d ledger-entries=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d oldest-inflight-token=%d oldest-inflight-gen=%d",
 		summary.Pending, summary.InFlight, summary.Acked, summary.Failed, summary.Invalidated,
 		summary.Abandoned, summary.LedgerEntries,
 		summary.PlanCount, summary.LastPlanMs, summary.MaxPlanMs,
 		effects.Frozen, effects.ScrollbackReplayArmed,
-		effects.NextToken, effects.TerminalEpoch)
+		effects.NextToken, effects.TerminalEpoch,
+		summary.OldestInFlightToken, summary.OldestInFlightGeneration)
 }
 
 // appendChatDebugUIActorLines 输出消费端成本快照（docs/plan/ui-event-bridge-drop-hardening.md

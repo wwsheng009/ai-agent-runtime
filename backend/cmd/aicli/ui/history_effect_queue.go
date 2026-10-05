@@ -268,6 +268,14 @@ type HistoryEffectQueueSummary struct {
 	Abandoned               int
 	OldestPendingToken      uint64
 	OldestPendingGeneration uint64
+	// OldestInFlightToken/Generation identify the claimed handoff, if any. An
+	// in-flight generation older than the live layout generation is the
+	// stranded-claim signature (an accepted claim whose detached batch could
+	// not be composed; see TerminalSessionExecutor.releaseClaimMiss). Without
+	// the identity, a stuck queue is indistinguishable from a healthy write in
+	// progress: the counters alone read the same.
+	OldestInFlightToken      uint64
+	OldestInFlightGeneration uint64
 	// PlanCount / LastPlanMs / MaxPlanMs 归因单次规划耗时（P16）：冻结窗口内
 	// 只要有一次规划接近窗口时长，P12 的卡顿就应归到规划器，而不是布局/写。
 	PlanCount  uint64
@@ -299,6 +307,13 @@ func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
 			}
 		case HistoryCommitInFlight:
 			summary.InFlight++
+			// At most one claim is active under the ordering guard, but take the
+			// minimum defensively exactly like Pending: tokens are minted
+			// ascending, so the smallest in-flight token is the oldest claim.
+			if summary.OldestInFlightToken == 0 || token < summary.OldestInFlightToken {
+				summary.OldestInFlightToken = token
+				summary.OldestInFlightGeneration = entry.Commit.LayoutGeneration
+			}
 		case HistoryCommitAcked:
 			summary.Acked++
 		case HistoryCommitStateFailed:

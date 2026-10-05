@@ -1795,3 +1795,37 @@ func TestHistoryCommitWakeNeededForStandaloneScrollbackReconciliation(t *testing
 		t.Fatal("known reconciled state should not wake on recovery publication")
 	}
 }
+
+func TestHistoryCommitWakeNeededForTruncatedPlanContinuation(t *testing.T) {
+	// An empty queue with a truncated (incomplete, not yet stalled) plan has no
+	// other entry point: the ack handlers cannot run (nothing pending) and an
+	// idle resumed session produces no later transcript transition. Any action
+	// must therefore wake the executor so it can post the continuation kick.
+	state := UIControllerState{}
+	state.HistoryEffects.PlanIncomplete = true
+	if !historyCommitWakeNeeded(SetActiveCellAction{}, state) {
+		t.Fatal("empty queue with an incomplete plan must wake the continuation kick")
+	}
+	state.HistoryEffects.PlanStalled = true
+	if historyCommitWakeNeeded(SetActiveCellAction{}, state) {
+		t.Fatal("a stalled plan must not keep waking an executor that cannot advance")
+	}
+	state.HistoryEffects.PlanStalled = false
+	state.HistoryEffects.Frozen = true
+	if historyCommitWakeNeeded(SetActiveCellAction{}, state) {
+		t.Fatal("a frozen queue must not wake a continuation the reducer refuses")
+	}
+	state.HistoryEffects.Frozen = false
+	state.HistoryEffects.ProjectionUnknown = true
+	if historyCommitWakeNeeded(Timer{}, state) {
+		t.Fatal("an action outside the recovery whitelist must not wake a plan that projection recovery owns")
+	}
+	if !historyCommitWakeNeeded(SetActiveCellAction{}, state) {
+		t.Fatal("the recovery branch must still wake for an action that can carry recovery")
+	}
+	// The invalidation action itself sets ProjectionUnknown in the reducer, so
+	// it must wake the recovery owner even though it carries no pending token.
+	if !historyCommitWakeNeeded(HistoryProjectionInvalidated{}, state) {
+		t.Fatal("HistoryProjectionInvalidated did not wake the recovery owner it just armed")
+	}
+}

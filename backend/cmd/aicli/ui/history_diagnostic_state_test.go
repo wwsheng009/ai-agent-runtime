@@ -128,6 +128,10 @@ func assertSummaryMatchesEntryWalk(t *testing.T, state UIControllerState) {
 			}
 		case HistoryCommitInFlight:
 			want.InFlight++
+			if want.OldestInFlightToken == 0 || entry.Commit.Token < want.OldestInFlightToken {
+				want.OldestInFlightToken = entry.Commit.Token
+				want.OldestInFlightGeneration = entry.Commit.LayoutGeneration
+			}
 		case HistoryCommitAcked:
 			want.Acked++
 		case HistoryCommitStateFailed:
