@@ -217,11 +217,11 @@ func layoutTranscriptScreenRowsWithin(rows []scene.LayoutRow, cells map[scene.Ce
 // alignTranscriptCellStart 的约束同源：布局缓存按 cell 内容寻址，从 cell 中部
 // 开始会把残缺行集合写进该 cell 的缓存条目。
 //
-// 截断点必须对齐到 cell 边界：结构化/折叠 cell 在其首行一次性 append 整块结果
-// （renderedStructured），而 walk 下标仍逐行前进，预算采样可能命中在该 cell 的
-// 中部；此时结果里已含整块 cell，nextRow 必须前移到该 cell 语义行的末尾，否则
-// 下一轮会重复 append 同一 cell。plain cell 由内层循环整段消费，外层采样天然
-// 只在其起点命中；gap 行自身即边界，不得跨过（它携带后继 cell 的分组）。
+// 截断点必须让每个窗口只含完整的 cell：plan 侧按 rows[start].CellID 分组，一个
+// 残缺切片（结构化/折叠 cell 的中途语义行，或只带上了前导 gap 的 cell）会被当成
+// 完整 cell 规划，产生与全量规划不同的身份（错位 fragment / whole-cell 回退），
+// 续跑就会重复投递这些行。因此预算命中后先把当前 cell 处理完（连同它的前导
+// gap），再在下一个 cell 的起始行返回；nextRow 天然落在 cell 边界。
 //
 // startRow 越界视为已经走到末尾（续跑方可能带着覆盖全部行的游标进来），返回
 // complete=true。nextRow == startRow 只可能来自非法输入（startRow 落在 cell
@@ -239,6 +239,10 @@ func layoutTranscriptScreenRowsFrom(rows []scene.LayoutRow, cells map[scene.Cell
 	cache := sharedCellRows
 	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
 	foldTarget := toolFoldTargetRows(rows, cells, mutable)
+	// 预算耗尽后先把当前 cell 走完再返回（见上方截断语义）：budgetExpiredCell 是
+	// 命中时正在处理的 cell，只有遇到不同 CellID 的行才是合法返回点。
+	budgetExpired := false
+	budgetExpiredCell := scene.CellID(0)
 	for index := startRow; index < len(rows); index++ {
 		// 预算绝不能把结果截断成**空前缀**：规划器把「行集为空」当作「没有可交付
 		// 历史」（planEligibleHistoryCommits 在 len(rows)==0 时直接返回），而 resume
@@ -247,9 +251,13 @@ func layoutTranscriptScreenRowsFrom(rows []scene.LayoutRow, cells map[scene.Cell
 		// 规划永远是 0 候选（live: next=0 / pending=0），armed 的销毁式重放清空
 		// scrollback 之后无内容可写，屏幕永久空白。至少产出一行才能让「截断前缀」
 		// 与「没有历史」可区分，也才能让重试严格前进。
-		if !deadline.IsZero() && len(result) > 0 &&
+		if !budgetExpired && !deadline.IsZero() && len(result) > 0 &&
 			index%layoutBudgetCheckRows == 0 && time.Now().After(deadline) {
-			return result, false, layoutResumeRow(rows, index, renderedStructured)
+			budgetExpired = true
+			budgetExpiredCell = rows[index].CellID
+		}
+		if budgetExpired && rows[index].CellID != budgetExpiredCell {
+			return result, false, index
 		}
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
@@ -322,21 +330,6 @@ func layoutTranscriptScreenRowsFrom(rows []scene.LayoutRow, cells map[scene.Cell
 		index-- // 补偿 for 步进：index 已指向下一个不同 cell 或末尾
 	}
 	return result, true, len(rows)
-}
-
-// layoutResumeRow 把截断采样点对齐到 cell 边界。当前行所属 cell 已经整块 append
-// 过（结构化/折叠路径）时跳过其剩余非 gap 语义行；否则该 cell 尚未开始，原样
-// 返回。gap 行永远原样返回：它属于后继 cell，跨过它会丢失后继 cell 的起始语义。
-func layoutResumeRow(rows []scene.LayoutRow, index int, renderedStructured map[scene.CellID]struct{}) int {
-	cellID := rows[index].CellID
-	if _, rendered := renderedStructured[cellID]; !rendered {
-		return index
-	}
-	next := index
-	for next < len(rows) && rows[next].CellID == cellID && rows[next].Gap == 0 {
-		next++
-	}
-	return next
 }
 
 // layoutTranscriptTailScreenRows 只布局 transcript 的尾部，返回结果与「全量布局

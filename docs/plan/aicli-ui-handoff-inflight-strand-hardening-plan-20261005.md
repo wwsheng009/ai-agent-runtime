@@ -270,22 +270,35 @@ P0.2 必须补观测的原因。
 
 ### P1.1b 实施进展（2026-10-05）
 
-- **Stage 1（已实施）**：`backend/cmd/aicli/ui/app_screen_layout.go` 新增
-  `layoutTranscriptScreenRowsFrom`（startRow 续跑，返回 `(rows, complete, nextRow)`）与
-  `layoutResumeRow`（截断点对齐 cell 边界：结构化/折叠 cell 已整块 append 时前移游标、
-  不跨 gap）；`layoutTranscriptScreenRowsWithin` 退化为 startRow=0 的代理，输出逐字节
-  不变。新增 `TestLayoutTranscriptScreenRowsFromResumesAtCellBoundaries`：过期 deadline 下
-  逐轮续跑的行序列与一次性全量布局逐行一致（多轮、游标严格前进、游标恒在 cell 边界）。
-  验证：`go test ./cmd/aicli/ui/ -run 'TestLayoutTranscriptScreenRowsFromResumesAtCellBoundaries|TestLayoutTranscriptTailScreenRowsMatchesFullLayout|TestHistory|TestTerminalSessionExecutor' -count=1` → ok。
-- **Stage 2（待实施）**：`planEligibleHistoryCommitsWithinFrom`（全局 displayStart/
-  firstVisible、wholeCell DisplayRange 全局化）+ 并集/去重属性测试。Stage 2 必须同时落地
-  §5 P1.1b 第 5 条的 whole-cell fallback 判据修正（cell 边界截断后"完整包含即可"，
-  替代 `complete` 条件），否则不可映射 plain cell 在续跑前缀永久缺失。
+- **Stage 1+2（已实施）**：
+  - `app_screen_layout.go`：新增 `layoutTranscriptScreenRowsFrom`（startRow 续跑，返回
+    `(rows, complete, nextRow)`）。**截断语义修正为"预算命中后补完当前 cell 再返回"**：
+    实测发现"按 cell 前移游标"仍会切出残缺窗口——预算恰好命中某 cell 的内容行、而它的
+    前导 gap 行已进入窗口时，plan 侧把"只含 gap 的切片"当成完整 cell，触发 whole-cell
+    回退并铸出与全量规划不同的身份（bug 再现：prefix cell 513 src={0,570} vs full 的
+    7 个 fragment）。补完当前 cell 后每个窗口只含完整 cell，nextRow 天然落在 cell 边界。
+  - `history_effect_planner.go`：新增 `planEligibleHistoryCommitsWithinFrom(state, deadline,
+    startRow, screenRowsBefore) → (commits, complete, nextRow, screenRows)`；DisplayRange
+    以 `screenRowsBefore` 为全局基址、`firstVisible` 全局化；whole-cell fallback 判据由
+    `complete` 改为"cell 完整包含在窗口内"（修掉不可映射 plain cell 在续跑前缀永久缺失
+    的缺口）；旧入口退化为 startRow=0 代理（行为不变，除判据修正本身）。
+  - 新增 `TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan`：预算 0 下逐轮续跑的
+    提交并集（historyCommitKey 身份 + 行数多重集）与无预算全量规划完全一致；夹具覆盖
+    plain / 结构化 markdown / 折叠工具链 / **不可映射 plain（tab → whole-cell fallback）**。
+  - 验证：`go test ./cmd/aicli/ui/ -run 'TestLayoutTranscript|TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan|TestHistory|TestSync|TestTranscript|TestTerminalSessionExecutor' -count=1`
+    → 除下述既有间歇测试外全部通过；`TestTruncatedTranscriptPlanContinuesUntilComplete`
+    单跑（含新身份语义断言）56.2s 通过。
 - **Stage 3（待实施）**：游标生命周期接入 `syncHistoryEffectsForTranscriptWithin` /
   `continueTruncatedHistoryPlan`（末尾热缓存全量 membership pass + 清游标 + record memo）、
   `invalidateTranscriptPlanMemo` 清游标、`activeAckPlanVersion` 作用域设计。
-- 既有观察（未定位，与本改动无因果关系证据）：`TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite`
-  在一次大测试组运行中偶发 `marker count=2`，单跑与整组复跑均通过；先记录，后续排查。
+- 既有测试观察（A/B 在 HEAD 复现，与 Stage 1/2 无因果）：
+  - `TestTruncatedTranscriptPlanContinuesUntilComplete`：内部 60s deadline 对负载敏感
+    （单跑 ~56s；组跑/高负载下超时失败）。`next=12600`（reconcile 前 6300 + 前缀 3585 +
+    续跑后缀）为既有 token 语义，非本次引入。
+  - `TestKeyHandlerStart_DoesNotPollSessionInputWhileSuspended`：在 HEAD 同样稳定失败
+    （该文件最近由 79eb8c9a / a95a98ea 触碰，非本线改动）。
+  - `TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite`：
+    间歇 `marker count=2`（Stage 2 之前已出现一次；单跑通过），归入既有 flake 待排查。
 
 ### P2（结构性）
 
