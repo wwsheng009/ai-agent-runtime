@@ -524,6 +524,82 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 	}
 }
 
+// TestTerminalSessionExecutorClaimMissReleasesStrandedInFlight locks the
+// liveness fix for an accepted claim whose detached batch cannot be composed at
+// the current layout generation. The deterministic construction injects a
+// Resize as a reducer follow-up of the BeginHistoryCommit action: the internal
+// reducer marks the token InFlight in the same batch, waitControllerIdle drains
+// the follow-up Resize, and the executor's snapshot then refuses the batch
+// because the reducer generation advanced underneath the claim.
+//
+// Before the fix that claim stayed InFlight forever: terminalSessionSchedule
+// scans Pending only, hasOlderPendingOrInFlight rejects every later claim, and
+// no watchdog reclaims it — a single race silently deadlocked the whole handoff
+// queue (live 2026-10-05: in-flight=1, oldest pending frozen, delivery journal
+// frozen, pending growing on an idle session). The fix must return the token to
+// Pending, rebase it onto the injected generation, and let the queue drain.
+func TestTerminalSessionExecutorClaimMissReleasesStrandedInFlight(t *testing.T) {
+	var executor *TerminalSessionExecutor
+	injected := false
+	controller := NewUIController(UIControllerConfig{}, ContextualReducerFunc(
+		func(_ uint64, action UIAction, context *ReducerContext) []Effect {
+			if _, ok := action.(BeginHistoryCommit); ok && !injected {
+				injected = true
+				if context != nil {
+					context.PostFollowup(Resize{Width: 100, Height: 30, Generation: 5})
+				}
+			}
+			return nil
+		}), func(effect Effect) {
+		if executor != nil {
+			executor.HandleEffect(effect)
+		}
+	})
+	go controller.Run()
+	t.Cleanup(func() {
+		controller.Close()
+		controller.WaitIdle()
+	})
+
+	postHistoryEffectFixture(t, controller, 20)
+	controller.WaitIdle()
+
+	writer := &terminalSessionShortWriter{}
+	executor = NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	t.Cleanup(executor.Close)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		executor.Request()
+		executor.WaitIdle()
+		controller.WaitIdle()
+		schedule := controller.terminalSessionSchedule()
+		if !schedule.recoveryActionable && schedule.pendingToken == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("executor did not drain after the claim miss: %#v", controller.State().HistoryEffects)
+		}
+	}
+
+	if !injected {
+		t.Fatal("resize race was not injected; the claim-miss path was not exercised")
+	}
+	if got := executor.RecoveryDiag().ClaimMissReleases; got == 0 {
+		t.Fatalf("claim-miss release never happened; diag=%+v", executor.RecoveryDiag())
+	}
+	state := controller.State()
+	if state.LayoutGeneration != 5 {
+		t.Fatalf("layout generation = %d, want the injected generation 5", state.LayoutGeneration)
+	}
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.State == HistoryCommitInFlight {
+			t.Fatalf("accepted claim stranded InFlight after the claim miss: %#v", entry)
+		}
+	}
+	assertTerminalSessionExecutorDrainedHistory(t, state)
+}
+
 func TestTerminalSessionExecutorSecondResizeRaceStillDrainsWithoutReplay(t *testing.T) {
 	var executor *TerminalSessionExecutor
 	controller := newHistoryExecutorController(t, func(effect Effect) {

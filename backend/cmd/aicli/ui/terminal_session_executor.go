@@ -55,7 +55,13 @@ type ExecutorRecoveryDiag struct {
 	// to cross into native scrollback, otherwise post-resume messages never
 	// render.
 	HandoffsWhileBackoff uint64 `json:"handoffsWhileBackoff"`
-	TotalRecoveries      uint64 `json:"totalRecoveries"`
+	// ClaimMissReleases counts claim-miss cycles that posted an explicit release
+	// for a claimed token: an accepted claim is returned to Pending and rebased
+	// onto the current layout generation, while a refused claim is a safe
+	// reducer no-op. Each posted release prevents (or retries) the
+	// stranded-InFlight deadlock; see TerminalSessionExecutor.releaseClaimMiss.
+	ClaimMissReleases uint64 `json:"claimMissReleases"`
+	TotalRecoveries   uint64 `json:"totalRecoveries"`
 	// GeneratedAtUnixMs is when this snapshot was assembled; it lets a caller
 	// compute whether the loop is still advancing between two polls.
 	GeneratedAtUnixMs int64 `json:"generatedAtUnixMs"`
@@ -203,6 +209,17 @@ type TerminalSessionExecutor struct {
 	// A growing count proves the active band keeps committing new messages to
 	// the unified renderer even while recovery is parked.
 	diagHandoffWhileBackoff uint64
+	// diagClaimMissReleases counts claim-miss cycles that posted an explicit
+	// HistoryCommitDeferred release (most often because a Resize/Theme drained
+	// by waitControllerIdle advanced the layout generation between markInFlight
+	// and the snapshot). Without the release, an accepted claim stays InFlight
+	// forever: terminalSessionSchedule scans Pending only, and
+	// hasOlderPendingOrInFlight rejects every later claim behind it, silently
+	// deadlocking the whole handoff queue (live 2026-10-05: in-flight=1, oldest
+	// pending frozen, delivery journal frozen, pending growing on an idle
+	// session). A refused claim posts the same no-op release; the counter
+	// therefore measures release attempts, not confirmed rebases.
+	diagClaimMissReleases uint64
 
 	// lastResetAt / lastResetEpoch are the scrollback recovery progress guard.
 	// A reconciliation that did not converge must not be re-armed on the next
@@ -302,6 +319,7 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 		ArmedBackoff:               e.diagArmedBackoff,
 		FlushesWhileBackoff:        e.diagFlushedWhileBackoff,
 		HandoffsWhileBackoff:       e.diagHandoffWhileBackoff,
+		ClaimMissReleases:          e.diagClaimMissReleases,
 		TotalRecoveries:            e.diagSeq,
 		GeneratedAtUnixMs:          nowUnixMs,
 		GenerationAdvancesInWindow: executorDiagGenerationAdvances(entries),
@@ -785,6 +803,37 @@ func (e *TerminalSessionExecutor) waitControllerIdle() bool {
 	return e.controller.WaitIdleTimeout(terminalSessionControllerIdleWait)
 }
 
+// releaseClaimMiss returns an accepted-but-uncomposable history claim to the
+// reducer as an explicit Deferred. This helper runs only on the claim-miss
+// branch, which is reached before any transaction is composed or written, so
+// "Deferred" (the terminal transaction did not start; zero bytes reached the
+// host) is the exact semantic: the reducer returns the token to Pending and,
+// when the layout generation advanced underneath the claim, rebases its
+// payload onto the current generation.
+//
+// This is a liveness requirement, not an optimization. A claim that stays
+// InFlight with no terminal result is invisible to terminalSessionSchedule
+// (which scans Pending only) and blocks every later claim through
+// hasOlderPendingOrInFlight, so a single stranded claim deadlocks the whole
+// handoff queue, and no aging watchdog exists to recover it afterwards. The
+// post is unconditional because this helper cannot distinguish "markInFlight
+// was refused" from "markInFlight succeeded but the snapshot refused"; a
+// Deferred for a non-InFlight token is a safe no-op in the reducer (the
+// deferInFlight error is ignored there).
+func (e *TerminalSessionExecutor) releaseClaimMiss(token, generation uint64) {
+	if e == nil || e.controller == nil || token == 0 {
+		return
+	}
+	e.diagMu.Lock()
+	e.diagClaimMissReleases++
+	e.diagMu.Unlock()
+	_ = e.controller.Post(HistoryCommitDeferred{Token: token, LayoutGeneration: generation})
+	// Drain so the rebase is visible to the caller's follow-up schedule read.
+	// Bounded by terminalSessionControllerIdleWait like every other controller
+	// wait on this worker.
+	e.waitControllerIdle()
+}
+
 // runOne returns true when reducer publication exposes immediate ordered work:
 // either one history token was acknowledged or a successful scrollback reset
 // replanned the canonical transcript under a fresh terminal epoch. Frame-only
@@ -864,9 +913,14 @@ func (e *TerminalSessionExecutor) runOne() bool {
 						})
 						return continued
 					}
-					// The claim raced a reducer action (token rebased or
-					// invalidated). Fall through to the recovery-actionable
-					// re-check below instead of spinning on the stale token.
+					// The claim could not be composed: either the reducer refused
+					// markInFlight, or the layout generation advanced after an
+					// accepted claim (the token was rebased/invalidated). Release
+					// an accepted claim explicitly so it cannot strand InFlight
+					// and block every later claim via the ordering guard; then
+					// fall through to the recovery-actionable re-check below
+					// instead of spinning on the stale token.
+					e.releaseClaimMiss(claimedToken, schedule.pendingGeneration)
 				}
 				snapshot := e.controller.terminalSessionSnapshot(0)
 				if terminalSessionSnapshotRecoveryActionable(snapshot) {
@@ -1004,7 +1058,11 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		// its wake may already have been coalesced into this running worker. A
 		// frozen/leased queue intentionally exposes no pending token, while the
 		// unchanged token can mean an older in-flight ordering fence; neither case
-		// should spin the executor.
+		// should spin the executor. An *accepted* claim (markInFlight succeeded)
+		// whose detached batch could not be composed at the now-current layout
+		// generation must be released explicitly; leaving it InFlight strands it
+		// forever behind the Pending-only schedule scan and the ordering guard.
+		e.releaseClaimMiss(claimedToken, schedule.pendingGeneration)
 		latest := e.controller.terminalSessionSchedule()
 		return terminalSessionClaimMissRequiresRetry(schedule, latest) ||
 			e.controller.terminalSessionHasActionableWork()

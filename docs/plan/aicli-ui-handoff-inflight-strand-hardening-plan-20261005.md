@@ -1,0 +1,222 @@
+# aicli UI 历史投递 stranded InFlight 与 actor 锁内规划：架构缺陷评审与加固计划（2026-10-05）
+
+> 状态：评审完成；P0 已实施并通过回归（2026-10-05，见 §5 实施记录）。
+> 现场：`session_20260930210352_V5o7MDYL`（进程 PID 15908，二进制 rev `3b48c5ed`，已包含 `046adc09`
+> 的 fold 缓存扩容与 executor 有界等待修复）。
+> 关联文档：`docs/plan/aicli-chat-unified-render-stall-analysis-and-hardening.md`、
+> `docs/analysis/renderer-stall-analysis-20260901.md`、
+> `docs/debug/ui-actor-stall-tool-completed-drop-and-snapshot-hotpath-20260930.md`、
+> `docs/debug/cpu-hotspots-ui-render-and-session-persist-optimization-20260929.md`、
+> `docs/e2e/resume-history-e2e.md`。
+
+## 1. 结论摘要
+
+本会话的"总是卡住"不是单一 bug，而是五个架构级缺陷叠加；其中 **D1 是可复现、可判定的
+活性死锁，且与回合是否在跑无关**：
+
+1. **D1（P0）handoff 死锁**：token 被 reducer 接受为 InFlight 后，若事务快照因 generation
+   前移而拒绝组合，executor 既不会写、也不会回投任何 `Deferred/Failed` 结果；该 token 永久停留
+   InFlight。排序护栏（`hasOlderPendingOrInFlight`）随即拒绝所有更晚 token 的认领，而调度器只扫描
+   Pending、看不到它，全仓也没有老化/租约/看门狗。一个 stranded claim 即永久堵死整条 native
+   history 管线。
+2. **D2（P1）单锁 actor 承载无界工作**：`c.mu` 持锁期间执行全量 transcript 深拷贝与全量历史规划；
+   `continueTruncatedHistoryPlan` 还用零值 deadline 做**无预算**规划。所有输入、重绘、executor
+   快照都排在这把锁后面，单次持锁无上界（现场 plan-max 108s）。
+3. **D3（P1）唤醒协议是事件白名单驱动**：`HistoryCommitWakeEffect` 只对 13 类 action 发射；
+   `Deferred`、`HistoryProjectionInvalidated`、部分 `PlanIncomplete` 场景没有自唤醒，活性依赖
+   "下一次恰好有白名单 action"，无周期性兜底。
+4. **D4（P2）无界数据模型**：ledger `byToken/tokens/byRange/bySource` 无删除路径（现场 136,498
+   条、其中 135,717 已 acked 仍常驻）；Scene/Transcript 同样无保留上限（8,830 cells / 270,976
+   行）。为绕开 O(N) 扫描积累的单调计数器（`minNonTerminalToken/unresolvedCount/
+   activeAckPlanVersion`）是持续打补丁的症状，不是解。
+5. **D5（P0 附带）观测与语义盲区**：`in-flight` 只暴露计数、不暴露 token 与年龄；executor 的
+   recovery 诊断环不覆盖 normal claim 路径，所以现场"82 分钟无诊断"既不能证明它空闲、也不能
+   定位卡住的 token；状态行时钟是整轮时钟，"Running X (54m)" 让人误判单步卡死。
+
+## 2. 现场证据（2026-10-05）
+
+采样窗口（`GET /web/api/status`）：
+
+| 指标 | 08:21 | 08:31 | 08:53 | 判读 |
+| --- | --- | --- | --- | --- |
+| `history_effects.pending` | 33 | 36 | **47** | 持续铸 token，只增不减 |
+| `oldest_pending_token` | 289960 | 289960 | **289960** | 队头 10+ 分钟不动 |
+| `in-flight` | 1 | 1 | **1** | 恒定 stranded claim |
+| `render_output.sealed / last_sequence` | 3988 | 3988 | **3988** | 物理投递记录全程冻结 |
+| executor recovery 诊断年龄 | ~50min | ~59min | **~82min** | 无迭代记录（且不覆盖 normal claim） |
+| UI revision | 24372 | 26982 | **35631** | actor 仍在推进，排除"进程死了" |
+
+补充事实：
+
+- `GET /web/api/turn`：该回合已于 **08:50:29** 结束（`duration_ms=4,620,276` ≈ 77 分钟、
+  73 步、输入 20.7M token）。**会话空闲后队列仍在增长且仍不投递**，排除"长回合导致"的解释。
+- pprof goroutine dump（08:2x）：UI 线程在 `reduceUIControllerState → syncHistoryEffectsForTranscript
+  → planEligibleHistoryCommitsWithin → layoutTranscriptScreenRowsWithin → toolFoldTargetRows`，
+  同时 FramePump 线程阻塞在 `PostDeferred → c.mu.Lock`（`controller.go:410`）。
+- 04-30 修复效果确认：`fold_omit` 缓存命中 99.37%、0 逐出；`cell_rows` 缓存顶满
+  67.1MB/64MiB（81,249 逐出）说明 O(history) 成本仍在，但已不是本轮死锁主因。
+
+现场签名（stranded InFlight + 排序护栏 + 无看门狗）可与进程内状态一一对应；具体卡住的 token
+身份在现有诊断面不可见，P0.2 补上该观测。
+
+## 3. 架构缺陷
+
+### D1 handoff：严格排序 + 单次握手 + 静默失败（P0，现场直接病因）
+
+代码路径（全部为已读行号）：
+
+1. executor 读 schedule（只挑 `State == Pending`，`terminal_session_snapshot.go:59-74`）→
+   `Post(BeginHistoryCommit)`（`terminal_session_executor.go:951-960`）。
+2. reducer 执行 `markInFlight`（`controller_state.go:278-289`）：要求无更老 Pending/InFlight
+   （`history_effect_queue.go:367-390`、`history_commit.go:575-580`），**错误被静默忽略**。
+3. `waitControllerIdle` 会顺带 drain 排在后面的 `Resize/SetTheme`（`terminal_session_executor.go:958`），
+   `state.LayoutGeneration` 前移；随后 `terminalSessionSnapshot` 里
+   `terminalSessionClaimedBatchLocked` 因 `entry.Commit.LayoutGeneration != state.LayoutGeneration`
+   返回 nil（`terminal_session_snapshot.go:127-135`）。
+4. 事务因此**从未执行**，但没有任何回投动作把该 token 释放（`terminal_session_executor.go:1000-1011`
+   只做 claim-miss 重试判断）。按语义这里应当发 `HistoryCommitDeferred`（"证明没有写任何字节"，
+   `controller_state.go:348-357`），这正是本次 P0 修复点。
+5. 排序护栏 `hasOlderPendingOrInFlight` 用 `minNonTerminalToken` 把后续所有 claim 判为
+   `ErrHistoryCommitOutOfOrder`；而 schedule 永远看不到 InFlight，形成永久队头阻塞。
+6. 解除路径只剩全量 replan 的 `syncHistoryEffectCandidates` invalidate 或显式 replay epoch；
+   空闲 resumed 会话两条都等不到。**当前进程 15908 只能重启恢复**（ledger 为内存态）。
+
+次生漏洞（同属 D3，但由 D1 暴露）：
+
+- `HistoryCommitDeferred` 不在 pending 白名单（`controller.go:696-702`），回 Pending 后无自唤醒；
+- `HistoryProjectionInvalidated` 不在白名单（帧写错误路径 post 后只能等下一次交互）；
+- 截断规划在 `UpdateActiveCellAction` 场景可 `PlanIncomplete=true` 而无后续 trigger
+  （`history_effect_queue.go:43-68` 注释自证同类现场）；
+- Frozen/Lease 期间 park 依赖外部释放，本层无看门狗。
+
+违反的设计不变量：C1"可恢复工作必须有显式调度入口，不得遗漏唤醒"（stall 文档 §5.1）、
+C5"generation 隔离"只做了写侧隔离、没有配对的 abort/reclaim 路径。
+
+### D2 actor 单锁承载无界工作（P1）
+
+- `Run` 在 `c.mu` 内执行 `reduceUIControllerState`（`controller.go:577-586`），内含：
+  - `FinalizeActiveCellAction` 全量 `NewTranscriptState` 深拷（`controller_state.go:585`、
+    `app_state.go:84-101`）；
+  - `syncHistoryEffectsForTranscript` 全量布局规划（`controller_state.go` 多处、预算
+    `history_effect_planner.go:24` = 250ms/轮）；
+  - `continueTruncatedHistoryPlan` → `syncHistoryEffectsForTranscriptWithin(state, time.Time{})`
+    —— **零值 deadline = 无预算**（`history_effect_planner.go:888`、779-783 注释自证）。
+- 读侧同一把锁：`State()/AppState()/DiagnosticState()` 深拷 transcript 与整份 ledger，
+  代码注释自证单次 ~96MB/~180ms（`controller.go:962-967`）。
+- 后果：锁持有时间无上界；frame pump（goroutine dump 实证）、executor 快照、durable Post
+  全部被牵连。与 B5"所有等待有界"的意图相悖——不是等待无界，是临界区无界。
+
+### D3 唤醒协议（P1）
+
+见 D1 次生漏洞。唤醒是"action 白名单 ∨ 可见帧 FlushEffect"的事件驱动通道，没有周期性
+deadline 排序或 tick 兜底；失败/超时路径不保证被本轮或下一轮重新调度。
+
+### D4 无界数据模型（P2）
+
+- ledger 注释明说 `tokens` 与 `byToken` 无删除路径、只增（`history_commit.go:219-222`）；
+  `Clone/Entries/Summary` 都是 O(全量)。现场 136,498 条目的常驻内存与诊断扫描成本。
+- Scene `cells` append-only（`scene.go:450/499/545`），无保留/分段上限；O(全量) 规划是结构性的。
+- 邮箱侧：`PostDeferred` 无容量上限且与外部共享 FIFO；`followups` 无上限且优先于外部队列
+  （并发代理报告 D8/D9），与 B1/B2"有界 + followup 不占外部容量"矛盾。
+
+### D5 观测与状态语义（P0 附带）
+
+- `in-flight` 只有计数；无 oldest-inflight-token/age，无法定位、无法告警。
+- executor recovery 诊断环只记录 recovery 分支；normal claim/claim-miss 无痕，导致"静默
+  忙转"和"空闲"不可区分。
+- `dynamicStatusStarted` 是整轮时钟（`chat_interaction.go:1277-1298`），跨 tool/retry 阶段
+  不重置；"Running X (Nm)" 应读作"本轮已运行 N 分钟"，当前文案易被读成"该步卡了 N 分钟"。
+- 长轮成本：本轮 77 分钟 / 73 步 / 20.7M 输入 token，且 `Turn Budget: <none this run>`；
+  长轮预算缺位（历史文档 §2.3 根因 D 已记录过一次）。
+
+## 4. 与设计不变量的对照
+
+| 不变量（出处） | 实现现状 |
+| --- | --- |
+| B1/B2 有界邮箱、非阻塞、followup 不占外部容量（event-bridge §5.2-6.1） | PostDeferred 无上限共享 FIFO；followups 无上限且优先 → 背压倒置风险 |
+| B5 所有等待有界、reducer/effect callback 不得反向等待（stall §8.3） | 等待已加界（2s），但**锁内无预算规划**让临界区无界，等价延迟不可控 |
+| C1 可恢复工作必须有显式调度入口、不丢唤醒（stall §5.1） | Deferred / ProjectionInvalidated / 部分 PlanIncomplete 无自唤醒；claim-miss 无回投 → D1 |
+| C5 generation 隔离：旧 generation 的 Ack/frame 不得确认新代（architecture §4.4） | 写侧隔离正确；但被拒绝的 claim 没有 abort/reclaim，隔离变成永久泄漏 |
+| D1/D2 handoff 单调前进、exactly-once（refactor-plan INV-HANDOFF-01/02） | 排序护栏保证单调，但一个 stranded claim 让整个 frontier 永停 |
+| E3 缓存只存派生结果、可重建（architecture §13.2） | 成立；但无界 ledger/scene 不是缓存，无法重建出"有界" |
+
+## 5. 修复计划
+
+### P0（已实施，2026-10-05：最小闭环，修复现场直接病因）
+
+- **P0.1 claim-miss 显式释放**（`terminal_session_executor.go` runOne 的
+  `claimedToken != 0 && snapshot.claimed == nil` 分支）：补投
+  `HistoryCommitDeferred{Token: claimedToken, LayoutGeneration: schedule.pendingGeneration}`。
+  语义依据：该分支未执行任何写（compose/Flush 从未运行），Deferred 即"证明零字节"；
+  reducer 会 `deferInFlight` → `Pending`，generation 不一致时 `rebasePendingHistoryEffects`
+  把载荷重基到当前代。若 markInFlight 本就被拒（token 非 InFlight），该动作是安全 no-op。
+- **P0.2 观测**：executor 增加 `claimMissReleases` 计数并附到 RecoveryDiag/导出；
+  `/debug` 可见 claim-miss 释放次数（不再"无痕"）。
+- **P0.3 回归测试**：锁定"claim 被接受 → generation 前移 → 快照拒绝 → token 回 Pending 并可
+  重新投递"的完整链路；同时覆盖"markInFlight 被拒时 Deferred 为 no-op"。
+
+验收标准：
+
+1. 构造 stale-generation InFlight token，执行一次 executor 周期后：ledger 中该 token 回到
+   Pending（rebase 到当前 generation），无永久 InFlight；
+2. 随后一次正常 claim 可以推进队头（不再被 `ErrHistoryCommitOutOfOrder` 永久拒绝）；
+3. `claimMissReleases` 计数按预期递增；
+4. `go test ./cmd/aicli/ui/...` 通过（含 race 视 CI 而定）。
+
+运维注：对已卡住的进程 15908，P0 只防复发；该进程内存中的 stranded token 不会自愈，
+需要用一次全量 replan（不可直接触发）或重启恢复。这是本缺陷"不可自愈"的直接后果，也是
+P0.2 必须补观测的原因。
+
+### P0 实施记录（2026-10-05）
+
+- 代码：
+  - `backend/cmd/aicli/ui/terminal_session_executor.go`：新增 `releaseClaimMiss`（对
+    claim-miss 显式 Post `HistoryCommitDeferred` 并做有界 drain，让 reducer 把已接受的
+    claim 回 Pending 并 rebase 到当前 generation），在常规认领点
+    （`claimedToken != 0 && snapshot.claimed == nil`）与 backoff success-mode 认领点接入；
+    新增 `diagClaimMissReleases` 计数并从 `RecoveryDiag()` 输出为 `claimMissReleases`。
+  - `backend/cmd/aicli/ui/executor_diag_export.go`：文本导出新增 `claimMissReleases` 行。
+  - `backend/cmd/aicli/ui/terminal_session_executor_test.go`：新增
+    `TestTerminalSessionExecutorClaimMissReleasesStrandedInFlight`。测试通过
+    `ReducerContext.PostFollowup` 在 BeginHistoryCommit 的同一批注入 Resize，
+    确定性复现"markInFlight 已接受 → waitControllerIdle 排空 resize → 快照拒绝"；
+    断言 token 不再停留 InFlight、队列排空、`ClaimMissReleases >= 1`。未打补丁时该测试会在
+    排空超时与 `ClaimMissReleases == 0` 两条断言上失败（计数断言保证先红后绿）。
+- 验证（在 HEAD `d9e0bc2e` 的隔离 worktree 中注入上述文件后运行，避免并发 WIP 干扰）：
+  - `go test ./cmd/aicli/ui/ -run 'TestTerminalSessionExecutor' -count=1` → ok（用例 32.1s）；
+  - `go test ./cmd/aicli/ui/ -run 'TestTerminalSession|TestHistory' -count=1` → ok（20.7s）；
+  - `gofmt -l` 三个文件均无输出。
+- 备注：主工作区当时存在并发中的无关 WIP（`internal/chat` 等，`actor_abandon.go` 缺
+  `time` import 导致主树 `go build` 失败）；本次验证刻意在隔离 worktree 完成，未触碰该 WIP。
+  现场进程 15908 的既有 stranded token 仍需重启才能清除（ledger 为内存态）。
+
+### P1（下一步，消除无界临界区与丢唤醒）
+
+1. `continueTruncatedHistoryPlan` 传入真实预算（非零 deadline），并为截断补一条自唤醒
+   （ack 之外的 kick 或 deadline 排序）；这需要与 D3 的自唤醒兜底一起做，避免"预算化后
+   没人续跑"。
+2. 规划移出 `c.mu`：锁内只取输入快照，锁外 `planEligibleHistoryCommits`，锁内只 reconcile；
+   `State()/debug` 改无锁快照（或复用 transcript 不可变快照）。
+
+### P2（结构性）
+
+1. ledger 终态压缩（按 epoch 剪枝/聚合 acked 条目，保留 source 身份去重的最小集）。
+2. Scene/Transcript 分段/保留上限；`PostDeferred`/`followups` 容量与优先级契约对齐文档 B1/B2。
+3. 状态行"阶段时钟 / 回合时钟"分离；长轮预算与软着陆在 UI 侧可见。
+
+## 6. 验证
+
+- 单测：`go test ./cmd/aicli/ui/ -run 'TerminalSessionExecutor|HistoryCommit' -count=1`。
+- 回归护栏：P0.3 新测试必须能在未打补丁的代码上失败（先红后绿）。
+- 现场观察表达式（修复上线后）：
+  - `history_gates.pending_count` 在空闲会话中回落到 0；
+  - `oldest_pending_token` 不再长期冻结；
+  - `executor` 区块出现 `claimMissReleases` 且 `in-flight` 不再恒为 1；
+  - `render_output.delivery_records_sealed` 随投递前进。
+
+## 7. 风险与回滚
+
+- P0.1 的 Deferred 只用于"事务未开始"的 claim-miss 分支，不会触发重写/重复写；最坏情况是
+  对一个非 InFlight token 的 no-op 动作，无副作用。
+- 单文件改动 + 单测；回滚即 revert `terminal_session_executor.go`（及可选诊断字段）。
+- 诊断字段只增不改既有契约（JSON 新增键），对旧消费者向后兼容。
