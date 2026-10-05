@@ -425,6 +425,32 @@ P0.2 必须补观测的原因。
 5. ~~快照 COW 假设~~：已自证（LayoutRows 独立派生），且承载不变量收敛为"无原地写者"
    + 守护测试（见"快照与所有权"）。
 
+### P1.2 实施进展（2026-10-05）
+
+- **Stage A（已实施）**：纯重构，零行为变更目标。
+  - `history_effect_planner.go` 拆出 `transcriptPlanSnapshotFor`（锁内构造：cells 值
+    切片别名 + byID/mutable/layoutRows/width/generation/theme）、
+    `screenTranscriptPlanWindow`（纯布局、不读 ledger/HistoryEffects）、
+    `mintTranscriptPlanWindow`（锁内：快照解读 rows + live frontier/Active/skipRows/
+    settled）；`planEligibleHistoryCommitsWithinFrom` 退化为"快照 → screen → mint"
+    三步，入口签名与语义不变。
+  - 新增 `TestTranscriptCellsNotMutatedInPlaceByReducers`：守护"无原地写者"不变量
+    （持有旧 cells 切片 + 逐 cell 拷贝，跑替换/几何/armed replay 三类 reducer 后比对）。
+- **顺带修复（A/B 定位的真实缺陷）**：screening 预算门限
+  `time.Now().After(deadline)` → `!time.Now().Before(deadline)`。Windows 上
+  `time.Now()` 刻度可能粗于两次调用间隔：`budget=0`（deadline == 创建时刻）时整轮
+  screening 可能判"未过期"，于是"0 预算必然在第一个采样点切断"的契约随机失效。
+  证据链：HEAD `-count=4` 8/8 过 → Stage A 版本复现失败（第 3/4 轮）→ 临时走线显示
+  失败轮 index=0/4096/8192 三处 `after=false`（整轮落在一个时钟刻度内）→ 改为
+  `!Before` 后 `-count=8` 16/16 过。副作用：`TestTruncatedTranscriptPlanContinuesUntilComplete`
+  从 52-56s 提速到 26.3s（确定性首点截断，少走空轮）。
+  - 同类观察（未改）：active 交接循环的 `After(deadline)`（history_effect_planner.go:430）
+    在 0 预算下可能不提前 break；该路径同受粗刻度影响但无正确性后果，列入观察。
+- 验证：宽测试组（History/Transcript/Plan/Sync/Executor/NativeScrollback/两个 E2E）
+  PASS 76.6s；预算 0 生命周期用例 PASS 26.3s；`gofmt -l` 无输出。
+- **Stage B（待实施）**：worker + 请求/结果 action + seq/planInputsEpoch/指纹三重栅栏
+  + kick 门 + WaitIdle/WaitPlanWorker 生命周期（按设计稿执行）。
+
 ### P2（结构性）
 
 1. ledger 终态压缩（按 epoch 剪枝/聚合 acked 条目，保留 source 身份去重的最小集）。

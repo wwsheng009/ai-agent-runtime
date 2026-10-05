@@ -251,8 +251,12 @@ func layoutTranscriptScreenRowsFrom(rows []scene.LayoutRow, cells map[scene.Cell
 		// 规划永远是 0 候选（live: next=0 / pending=0），armed 的销毁式重放清空
 		// scrollback 之后无内容可写，屏幕永久空白。至少产出一行才能让「截断前缀」
 		// 与「没有历史」可区分，也才能让重试严格前进。
+		// 用 !Before 而不是 After：Windows 上 time.Now() 的刻度可能比两次调用
+		// 间隔更粗，budget=0（deadline == 创建时刻）时 After 可能整轮为 false，
+		// 于是"0 预算必然截断"的契约（E2E/单元测试都依赖它）会随机失效。相等
+		// 即视为已过期，预算语义与文档一致。
 		if !budgetExpired && !deadline.IsZero() && len(result) > 0 &&
-			index%layoutBudgetCheckRows == 0 && time.Now().After(deadline) {
+			index%layoutBudgetCheckRows == 0 && !time.Now().Before(deadline) {
 			budgetExpired = true
 			budgetExpiredCell = rows[index].CellID
 		}

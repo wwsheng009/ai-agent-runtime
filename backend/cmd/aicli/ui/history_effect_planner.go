@@ -37,6 +37,108 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 	return commits
 }
 
+// transcriptPlanSnapshot 是 transcript 规划的**布局输入快照**（P1.2）：screening
+// 相位只依赖这组值，不读 ledger / HistoryEffects。Stage A 在锁内构造并同步调用
+// 两个相位；Stage B 会把构造留在锁内、screening 交给 plan worker。
+//
+// 不变量：cells 是 live `Transcript.Cells` 的**值切片别名**（不拷贝元素），因此
+// 生产代码不得原地写 `Cells[i]`——由 TestTranscriptCellsNotMutatedInPlaceByReducers
+// 守护；layoutRows 由 `LayoutTranscript` 独立派生，归快照独占。
+type transcriptPlanSnapshot struct {
+	cells      []scene.TranscriptCell
+	byID       map[scene.CellID]scene.TranscriptCell
+	mutable    map[scene.CellID]struct{}
+	layoutRows []scene.LayoutRow
+	width      int
+	generation uint64
+	theme      style.ThemeContext
+}
+
+// transcriptPlanSnapshotFor 在锁内构造快照。layoutRows 的派生必须发生在建立
+// screening deadline 之前（见 planEligibleHistoryCommitsWithinFrom 的顺序注释），
+// 这里连同 byID/mutable 一起完成。
+func transcriptPlanSnapshotFor(state AppState) transcriptPlanSnapshot {
+	width := state.Geometry.Width
+	if width < 1 {
+		width = 80
+	}
+	return transcriptPlanSnapshot{
+		cells:      state.Transcript.Cells,
+		byID:       transcriptCellsByID(state.Transcript),
+		mutable:    mutableTranscriptCellIDs(state.Transcript),
+		layoutRows: state.Transcript.LayoutRows(state.LayoutGeneration),
+		width:      width,
+		generation: state.LayoutGeneration,
+		theme:      state.Theme,
+	}
+}
+
+// screenTranscriptPlanWindow 是 P1.2 的 screening 相位：纯布局，**不读 ledger、
+// 不读 HistoryEffects**，输出与全量布局逐行一致（续跑对齐/截断语义见
+// layoutTranscriptScreenRowsFrom）。
+func screenTranscriptPlanWindow(snap transcriptPlanSnapshot, deadline time.Time, startRow int) ([]AppScreenRow, bool, int) {
+	return layoutTranscriptScreenRowsFrom(snap.layoutRows, snap.byID, snap.mutable, snap.width, deadline, snap.theme, startRow)
+}
+
+// mintTranscriptPlanWindow 是 P1.2 的铸 commit 相位（锁内）：按快照的 byID/width/
+// theme/generation 解读 rows，其余输入（frontier、Active、ackedActive、settled）
+// 一律在 live 状态上求值。返回顺序与旧实现一致：cell 提交在前，activeCommits 追加
+// 在尾部。
+func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows []AppScreenRow, screenRowsBefore int) []HistoryCommit {
+	frontierCells, frontierActive := canonicalHistoryCommitFrontier(state)
+	var activeCommits []HistoryCommit
+	if state.SemanticActiveCellProjection && frontierActive {
+		activeCommits = planMutableActiveCellHistoryCommitsWithTheme(state.Active, state.Geometry, state.LayoutGeneration, state.Theme)
+	}
+	// 已结算分片（Acked/Failed/Abandoned/Invalidated）不再参与 reconcile，
+	// 规划时直接跳过，避免每次 transcript 迁移都把整段历史重新物化 payload。
+	ackedActive := indexAckedActiveHistoryCommits(state.HistoryEffects)
+	settled := state.HistoryEffects.hasSettledRecordForSource
+	// The primary frame now owns only the mutable/bottom inline viewport.
+	// Finalized transcript rows all belong to native terminal history; retaining
+	// a screen-sized transcript tail here would make those rows disappear as
+	// soon as the viewport-only presenter stops repainting the old whole frame.
+	// DisplayRange 是提交身份的一部分（historyCommitKey 含 displayStart/End）：
+	// 续跑轮必须用全局行下标，displayStart 为游标基址、窗口内局部下标再叠加；
+	// firstVisible 同样按全局已布局行数给出（当前实现下恒等于窗口行数，但预算
+	// 窗口的可见性语义恢复后必须保持全局含义）。
+	displayStart := screenRowsBefore
+	firstVisible := screenRowsBefore + len(rows)
+	// Commit eligibility is a physical display decision. Using semantic source
+	// lines here would hand off a CJK/wrapped/tab-expanded cell while some of
+	// its physical rows are still visible in the primary viewport.
+	commits := make([]HistoryCommit, 0)
+	for start := 0; start < len(rows); {
+		cellID := rows[start].CellID
+		end := start + 1
+		for end < len(rows) && rows[end].CellID == cellID {
+			end++
+		}
+		cell, found := snap.byID[cellID]
+		_, beforeFrontier := frontierCells[cellID]
+		if found && beforeFrontier && cellIsFinalizedForHistory(cell) && cell.Source != "" {
+			skipRows := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], snap.byID)
+			if cellUsesStructuredPresentation(cell) {
+				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, snap.generation, snap.byID, settled)...)
+			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, snap.width, themeFingerprint(snap.theme), snap.generation, snap.byID, settled); mapped {
+				commits = append(commits, segments...)
+			} else if skipRows == 0 && end <= firstVisible {
+				// whole-cell fallback（控制符/tab 等无法逐行映射的 plain cell）的
+				// 判据是"cell 完整包含在窗口内"，不再是"整份 transcript 已走完"：
+				// 截断窗口只含完整 cell，而游标续跑后前缀不会再被完整 pass 访问 ——
+				// 继续要求 complete 会让这些行永久缺失。窗口内 wholeCell 的身份（整
+				// SourceRange / fragment 0 / 全局 DisplayRange）与完整 pass 完全一致，
+				// 入队去重后不会重复投递。
+				if commit, ok := wholeCellHistoryCommit(cell, rows[start:end], displayStart+start, displayStart+end, snap.generation, snap.byID, settled); ok {
+					commits = append(commits, commit)
+				}
+			}
+		}
+		start = end
+	}
+	return append(commits, activeCommits...)
+}
+
 // planEligibleHistoryCommitsWithin 是带预算的规划实现。complete 为 false 表示
 // 布局在预算耗尽时被截断：commits 仍然是合法的（它是完整规划的前缀，不会提交
 // 错误内容），但它**不是**全量规划，调用方不得据此记录 memo —— 否则被截断的
@@ -64,19 +166,6 @@ func planEligibleHistoryCommitsWithinFrom(state AppState, deadline time.Time, st
 	if state.Geometry.Width < 1 || state.Geometry.Height < 1 {
 		return nil, true, startRow, screenRowsBefore
 	}
-	frontierCells, frontierActive := canonicalHistoryCommitFrontier(state)
-	var activeCommits []HistoryCommit
-	if state.SemanticActiveCellProjection && frontierActive {
-		activeCommits = planMutableActiveCellHistoryCommitsWithTheme(state.Active, state.Geometry, state.LayoutGeneration, state.Theme)
-	}
-	width := state.Geometry.Width
-	if width < 1 {
-		width = 80
-	}
-	// Commit eligibility is a physical display decision. Using semantic source
-	// lines here would hand off a CJK/wrapped/tab-expanded cell while some of
-	// its physical rows are still visible in the primary viewport.
-	byID := transcriptCellsByID(state.Transcript)
 	// 场景语义布局（LayoutTranscript）没有部分结果，是这一轮的前置工作：在 resume
 	// 会话上它单独就可能超过 historyCommitPlanningBudget（4497 cell → 159k 行，
 	// live 实测 screening 拿到的 deadline 早已过期）。把它算进 screening 预算，
@@ -93,66 +182,19 @@ func planEligibleHistoryCommitsWithinFrom(state AppState, deadline time.Time, st
 	// 「无法推进」，永久置位 PlanStalled 并解除执行器的续跑 kick —— 缺失的尾部再也
 	// 不会被规划（live: next=1288 / acked=322 / pending=0 / plan_incomplete=true /
 	// plan_stalled=true，注入 /status 让 transcript 真的变了也不自愈）。
-	layoutRows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	snap := transcriptPlanSnapshotFor(state)
 	// 预算从这里才开始计时：若在 layoutRows 之前建立 deadline，它会被上面这次
 	// 语义布局整个吃掉，screening 的第一个采样点就已过期（见上）。
 	screenDeadline := deadline
 	if !deadline.IsZero() {
 		screenDeadline = time.Now().Add(historyCommitPlanningBudget)
 	}
-	rows, complete, nextRow := layoutTranscriptScreenRowsFrom(
-		layoutRows, byID, mutableTranscriptCellIDs(state.Transcript), width, screenDeadline, state.Theme, startRow)
+	rows, complete, nextRow := screenTranscriptPlanWindow(snap, screenDeadline, startRow)
 	// 本轮覆盖的物理行数累加到全局 DisplayRange 基址上；预算守卫保证截断不会
 	// 返回空前缀，所以空窗口只能是"走到末尾/游标越界"，由 complete/nextRow 表达。
 	screenRows := screenRowsBefore + len(rows)
-	if len(rows) == 0 {
-		return activeCommits, complete, nextRow, screenRows
-	}
-	ackedActive := indexAckedActiveHistoryCommits(state.HistoryEffects)
-	// 已结算分片（Acked/Failed/Abandoned/Invalidated）不再参与 reconcile，
-	// 规划时直接跳过，避免每次 transcript 迁移都把整段历史重新物化 payload。
-	settled := state.HistoryEffects.hasSettledRecordForSource
-	// The primary frame now owns only the mutable/bottom inline viewport.
-	// Finalized transcript rows all belong to native terminal history; retaining
-	// a screen-sized transcript tail here would make those rows disappear as
-	// soon as the viewport-only presenter stops repainting the old whole frame.
-	// DisplayRange 是提交身份的一部分（historyCommitKey 含 displayStart/End）：
-	// 续跑轮必须用全局行下标，displayStart 为游标基址、窗口内局部下标再叠加；
-	// firstVisible 同样按全局已布局行数给出（当前实现下恒等于窗口行数，但预算
-	// 窗口的可见性语义恢复后必须保持全局含义）。
-	displayStart := screenRowsBefore
-	firstVisible := screenRowsBefore + len(rows)
-	commits := make([]HistoryCommit, 0)
-	for start := 0; start < len(rows); {
-		cellID := rows[start].CellID
-		end := start + 1
-		for end < len(rows) && rows[end].CellID == cellID {
-			end++
-		}
-		cell, found := byID[cellID]
-		_, beforeFrontier := frontierCells[cellID]
-		if found && beforeFrontier && cellIsFinalizedForHistory(cell) && cell.Source != "" {
-			skipRows := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], byID)
-			if cellUsesStructuredPresentation(cell) {
-				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, state.LayoutGeneration, byID, settled)...)
-			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, width, themeFingerprint(state.Theme), state.LayoutGeneration, byID, settled); mapped {
-				commits = append(commits, segments...)
-			} else if skipRows == 0 && end <= firstVisible {
-				// whole-cell fallback（控制符/tab 等无法逐行映射的 plain cell）的
-				// 判据是"cell 完整包含在窗口内"，不再是"整份 transcript 已走完"：
-				// layoutResumeRow 保证截断窗口只含完整 cell（结构化 cell 的残余语义
-				// 行被前移跳过），而游标续跑后前缀不会再被完整 pass 访问 —— 继续
-				// 要求 complete 会让这些行永久缺失。窗口内 wholeCell 的身份（整
-				// SourceRange / fragment 0 / 全局 DisplayRange）与完整 pass 完全一致，
-				// 入队去重后不会重复投递。
-				if commit, ok := wholeCellHistoryCommit(cell, rows[start:end], displayStart+start, displayStart+end, state.LayoutGeneration, byID, settled); ok {
-					commits = append(commits, commit)
-				}
-			}
-		}
-		start = end
-	}
-	return append(commits, activeCommits...), complete, nextRow, screenRows
+	commits := mintTranscriptPlanWindow(state, snap, rows, screenRowsBefore)
+	return commits, complete, nextRow, screenRows
 }
 
 // ackedActiveHistoryCommitIndex is a planner-local, read-only view of the
