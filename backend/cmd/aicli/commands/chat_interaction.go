@@ -5381,6 +5381,19 @@ func (c *chatInteractionCoordinator) WriteTerminalBell(sequence string) bool {
 	return session.WriteTerminalBell(sequence) == nil
 }
 
+// UnifiedRendererActive reports whether the unified renderer owns the physical
+// writer. Control-sequence adapters use this to fail closed on submit failure
+// instead of falling back to a raw os.Std* write that would interleave with the
+// session writer (gap G2/A1-3).
+func (c *chatInteractionCoordinator) UnifiedRendererActive() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.unifiedRenderer
+}
+
 func (c *chatInteractionCoordinator) DebugSummary() string {
 	if c == nil {
 		return ""

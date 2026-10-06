@@ -8,6 +8,40 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
+// unified 会话下 submit 失败：必须 fail-closed——不得回退 raw writer，
+// 否则 OSC/BEL 字节会绕过 session writer 与帧交错（G2/A1-3）。
+func TestChatControlSequenceWriterUnifiedSubmitFailureFailsClosed(t *testing.T) {
+	session := &ChatSession{}
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(72, 18)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var terminal bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&terminal) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	var raw bytes.Buffer
+	writer := chatControlSequenceWriter{
+		session: session,
+		raw:     &raw,
+		submit:  func(*chatInteractionCoordinator, string) bool { return false },
+	}
+	const title = "\x1b]0;unified-title\x07"
+	if _, err := writer.Write([]byte(title)); err != nil {
+		t.Fatalf("write title: %v", err)
+	}
+	if raw.Len() != 0 {
+		t.Fatalf("unified submit failure must not fall back to the raw writer, got %q", raw.String())
+	}
+}
+
 // 非 unified 会话：控制序列写回 legacy raw writer（字节不变）。
 func TestChatControlSequenceWriterFallsBackToRawWriter(t *testing.T) {
 	session := &ChatSession{}
