@@ -196,8 +196,8 @@ func TestDeferredOlderPagePrependReplansAndCoversOlderCells(t *testing.T) {
 
 	// 顺序断言的对象必须是**这一轮新铸的计划**，而不是 ledger 里的存量条目：ledger
 	// 会保留上一轮已经铸好的 token（身份相同的 commit 不会重铸），把新铸的较早页
-	// 追加在后面。销毁式重放会整体替换 ledger（reconcileScrollback 的既有语义），
-	// 所以交付顺序由计划顺序决定，而不是此刻的 ledger 顺序。
+	// 追加在后面。交付顺序由计划顺序决定，而不是此刻的 ledger 顺序（append-only：
+	// 已交付身份不会重铸）。
 	plan, complete := planEligibleHistoryCommitsWithin(state.AppState, time.Time{})
 	if !complete {
 		t.Fatal("the post-prepend plan is truncated; the ordering invariant cannot be checked")

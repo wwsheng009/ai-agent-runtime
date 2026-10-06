@@ -242,8 +242,8 @@ type HistoryCommitLedger struct {
 	// compactedTerminalSources 是被终态压缩剪除、但来源身份仍必须阻断再次铸造的
 	// source key 最小集（Delivered/Settled 等阻断态）。P2-1：Delivered transcript 条目
 	// 与 settle 后的隔离终态条目不再被任何读取方消费（行载荷已置 nil 或无用），
-	// 但 "该来源已交付" 必须永远阻断重复铸造；reconcileScrollback 整体替换 ledger
-	// 时随之清零 —— 新 terminal epoch 允许从源重新铸造。
+	// 但 "该来源已交付" 必须永远阻断重复铸造（append-only 去重）；只有外部整体
+	// 替换 ledger 时随之清零。
 	compactedTerminalSources map[historyCommitSourceKey]struct{}
 	// compactedEntries 是累计剪除的条目数（单调，soak 观测用：证明压缩确实发生）。
 	compactedEntries uint64

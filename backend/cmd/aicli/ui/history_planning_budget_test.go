@@ -97,14 +97,13 @@ func TestTruncatedTranscriptPlanContinuesUntilComplete(t *testing.T) {
 		t.Fatalf("unbudgeted plan must be complete and non-empty: complete=%t commits=%d", complete, len(full))
 	}
 
-	// resume 的对账 epoch 会整体退休 ledger（reconcileScrollback），随后的重规划
-	// 必须重新覆盖整份 transcript。真实预算下截断与否取决于机器速度与布局缓存
-	// 状态（warm cache 上 250ms 往往就够走完整份历史），所以把预算压到 0：布局在
-	// 第一个采样点（layoutBudgetCheckRows 行）必然截断，截断路径因此可以被确定性
-	// 地测到。
-	if !state.HistoryEffects.reconcileScrollback(state.HistoryEffects.TerminalEpoch + 1) {
-		t.Fatal("fixture could not open a fresh terminal epoch")
-	}
+	// 外部整体替换 ledger 后的重规划必须重新覆盖整份 transcript（装载路径保留
+	// ledger；此处白盒模拟外部替换 + 显式 memo 失效）。真实预算下截断与否取决于
+	// 机器速度与布局缓存状态（warm cache 上 250ms 往往就够走完整份历史），所以把
+	// 预算压到 0：布局在第一个采样点（layoutBudgetCheckRows 行）必然截断，截断路径
+	// 因此可以被确定性地测到。
+	state.HistoryEffects.ledger = NewHistoryCommitLedger()
+	state.HistoryEffects.invalidateTranscriptPlanMemo()
 	restoreBudget := historyCommitPlanningBudget
 	defer func() { historyCommitPlanningBudget = restoreBudget }()
 	historyCommitPlanningBudget = 0

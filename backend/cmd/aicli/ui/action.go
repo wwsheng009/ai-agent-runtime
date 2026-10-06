@@ -515,11 +515,11 @@ func (HistoryProjectionInvalidated) isUIAction()         {}
 func (HistoryProjectionInvalidated) Class() ActionClass  { return ClassBarrier }
 func (HistoryProjectionInvalidated) CoalesceKey() string { return "" }
 
-// HistoryReconciliationSettled is the non-destructive counterpart of
-// HistoryScrollbackReconciled: the terminal owner proved a fresh source-backed
-// viewport projection without replacing native scrollback, so unproven
-// deliveries are quarantined in place and ordered handoff resumes. It must
-// never be used to reinterpret a possibly partial scrollback handoff as Acked.
+// HistoryReconciliationSettled is the only recovery barrier: the terminal owner
+// proved a fresh source-backed viewport projection without replacing native
+// scrollback, so unproven deliveries are quarantined in place and ordered
+// handoff resumes. It must never be used to reinterpret a possibly partial
+// scrollback handoff as Acked.
 type HistoryReconciliationSettled struct {
 	LayoutGeneration uint64
 }
@@ -527,24 +527,6 @@ type HistoryReconciliationSettled struct {
 func (HistoryReconciliationSettled) isUIAction()         {}
 func (HistoryReconciliationSettled) Class() ActionClass  { return ClassBarrier }
 func (HistoryReconciliationSettled) CoalesceKey() string { return "" }
-
-// HistoryScrollbackReconciled is the explicit terminal-epoch boundary for an
-// unresolved native-scrollback delivery. It may be posted only after the
-// terminal session has been replaced or its scrollback has been reset, and a
-// source-backed primary recovery frame for LayoutGeneration has completed.
-//
-// A repaint alone cannot establish this fact: it restores the visible viewport
-// but cannot tell which old handoff bytes reached native scrollback. Epoch must
-// therefore be monotonic for one physical terminal session and is supplied by
-// the terminal owner, never inferred from a layout revision.
-type HistoryScrollbackReconciled struct {
-	LayoutGeneration uint64
-	TerminalEpoch    uint64
-}
-
-func (HistoryScrollbackReconciled) isUIAction()         {}
-func (HistoryScrollbackReconciled) Class() ActionClass  { return ClassBarrier }
-func (HistoryScrollbackReconciled) CoalesceKey() string { return "" }
 
 // ContinueHistoryPlanAction asks the reducer to carry a budget-truncated
 // transcript plan forward.

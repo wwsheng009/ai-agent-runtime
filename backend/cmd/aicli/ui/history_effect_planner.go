@@ -902,8 +902,8 @@ func continueTruncatedHistoryPlan(state *UIControllerState) bool {
 	}
 	if effects.Frozen || effects.ProjectionUnknown || effects.hasUnresolvedTerminalDelivery() {
 		// Recovery owns the queue; the replan that follows recovery
-		// (HistoryProjectionRecovered / HistoryScrollbackReconciled) re-arms the
-		// obligation on its own.
+		// (HistoryProjectionRecovered / HistoryReconciliationSettled) re-arms
+		// the obligation on its own.
 		return false
 	}
 	if state.Geometry.Width < 1 || state.Geometry.Height < 1 {
@@ -1004,7 +1004,8 @@ func transcriptFenceFoldString(h uint64, s string, prime uint64) uint64 {
 // transcriptPlanInputs 是 transcriptPlanMemoHit 与截断续跑游标共享的输入指纹：
 // 任何一项变化都同时让 memo 与游标失效。字段与 memo 的比较项一一对应（fence 是
 // 逐 cell 的 finalized 指纹，不含 mutable 前沿；themeKey 用 themeFingerprint；
-// terminalEpoch 覆盖 reconcileScrollback 的整体 ledger 替换）。
+// terminalEpoch 保留为语义代输入——当前没有生产推进点，整体 ledger 替换由
+// invalidateTranscriptPlanMemo 显式失效覆盖）。
 type transcriptPlanInputs struct {
 	sceneID       uint64
 	fence         uint64
@@ -1065,11 +1066,11 @@ func transcriptPlanMemoHit(state *UIControllerState) bool {
 	}
 	// Every input above is unchanged, but the memo only fingerprints plan
 	// *inputs*: it cannot see that the ledger the plan was reconciled into no
-	// longer holds it. That state is reachable (reconcileScrollback replaces
-	// the ledger wholesale, and an armed replacement can be reduced before any
-	// plan was minted), and memoizing it is destructive: the executor is then
-	// authorized to clear native scrollback while the queue has nothing to
-	// replay. A plan that produced candidates must still be present in the
+	// longer holds it. That state is reachable (an external wholesale ledger
+	// replacement, or a load re-proof reduced before any plan was minted), and
+	// memoizing it strands the loaded generation: the queue reads "planned"
+	// while there is nothing to deliver. A plan that produced candidates must
+	// still be present in the
 	// ledger to be memoizable; a plan that produced none stays memoizable, so
 	// a legitimately empty queue (fresh session, everything already delivered)
 	// never pays for the O(entire history) re-layout this memo exists to avoid.

@@ -385,72 +385,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case HistoryProjectionRecovered:
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.markProjectionKnown()
-			// A scrollback replacement the terminal owner already proved must be
-			// reconciled as soon as this frame proof exists. Consuming the recorded
-			// epoch here is what converges a reset whose own barrier arrived while
-			// the projection was still unknown; leaving it recorded would strand
-			// the ledger on ranges the reset removed, and nothing could re-emit
-			// them because hasTerminalRecordForSource keeps them un-mintable.
-			if state.HistoryEffects.reconcileScrollback(state.HistoryEffects.ProvenScrollbackEpoch) {
-				state.HistoryEffects.clearScrollbackReplayAuthorization()
-				resetActiveHistoryProgressForTerminalEpoch(&state)
-				syncHistoryEffectsForTranscript(&state)
-			}
 			// Clearing ProjectionUnknown is the other non-ack transition that
-			// unblocks the continuation gate. When the reconcile above did not
-			// run (the epoch was already consumed) nothing else replans, and the
-			// plan would stay truncated forever. The call is cheap when the
-			// reconcile just queued tokens (the pending gate returns early).
+			// unblocks the continuation gate: nothing else replans a truncated
+			// plan, and it would stay stranded forever. The call is cheap when
+			// the plan is not truncated (the pending gate returns early).
 			continueTruncatedHistoryPlan(&state)
 		}
 	case HistoryProjectionInvalidated:
 		if a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.ProjectionUnknown = true
-		}
-	case HistoryScrollbackReconciled:
-		// A visible-frame recovery is insufficient to resolve a possibly
-		// partial native-scrollback handoff. Only the terminal owner can post
-		// this stronger epoch barrier after reset/replacement and a confirmed
-		// source-backed recovery frame. Replan every eligible semantic range
-		// under fresh tokens; never reinterpret old delivery as Acked.
-		//
-		// This barrier reports an irreversible physical act: the executor only
-		// posts it for a transaction that actually replaced native scrollback
-		// (result.ScrollbackReset with a fresh terminal epoch). Two consequences
-		// follow. First, the layout generation is not part of the fence: a resize
-		// or theme change that landed while the replacement crossed the writer
-		// does not undo the replacement, and the replan below always runs against
-		// the current state. Second, a replacement this reduction cannot anchor
-		// yet (no current source-backed frame, or an alternate-screen lease) is
-		// recorded rather than dropped, and HistoryProjectionRecovered consumes it
-		// as soon as that proof exists. Dropping it would be a state no later
-		// interaction can repair: the one-shot authorization stays armed (the
-		// executor selects the destructive plan again and clears scrollback
-		// repeatedly), the ledger keeps claiming those ranges are delivered
-		// (hasTerminalRecordForSource blocks re-minting, so nothing is ever
-		// re-emitted), and the projection still reads as Known over an empty
-		// resident region — a permanently blank transcript. The monotonic epoch
-		// fence inside reconcileScrollback keeps a duplicate or stale barrier
-		// idempotent, so ordering is still guaranteed.
-		if a.TerminalEpoch != 0 {
-			if !state.Lease.Active && !state.HistoryEffects.Frozen && !state.HistoryEffects.ProjectionUnknown &&
-				state.HistoryEffects.reconcileScrollback(a.TerminalEpoch) {
-				// The authorization is one-shot: the replay it allowed just
-				// happened, so no later interaction may repeat it.
-				state.HistoryEffects.clearScrollbackReplayAuthorization()
-				resetActiveHistoryProgressForTerminalEpoch(&state)
-				syncHistoryEffectsForTranscript(&state)
-			} else {
-				// The replacement is physically done and irreversible even when
-				// this reduction cannot anchor the new epoch yet. Remember the
-				// proven epoch instead of dropping the fact: the recovery that
-				// supplies the frame proof consumes it, so a reset can never be
-				// left unrecorded. The layout generation is deliberately not part
-				// of this fence — a resize or theme change that landed while the
-				// replacement crossed the writer does not undo the replacement,
-				// and the replan below always runs against the current state.
-				state.HistoryEffects.recordProvenScrollbackReplacement(a.TerminalEpoch)
-			}
 		}
 	case DrawRequested:
 		state.LastDraw = a
@@ -995,18 +938,6 @@ func activeReplacementInvalidatesAckedHistory(active ActiveCellState, next Trans
 			active.Source[:end] != cell.Source[:end]
 	}
 	return true
-}
-
-func resetActiveHistoryProgressForTerminalEpoch(state *UIControllerState) {
-	if state == nil || state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 {
-		return
-	}
-	if state.Active.Enqueued == (SourceRange{}) && state.Active.Acked == (SourceRange{}) {
-		return
-	}
-	state.Active.Revision++
-	state.Active.Enqueued = SourceRange{}
-	state.Active.Acked = SourceRange{}
 }
 
 // reconcileTranscriptActiveCell merges a semantic Scene snapshot with the

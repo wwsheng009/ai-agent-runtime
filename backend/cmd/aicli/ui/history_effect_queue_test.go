@@ -121,35 +121,6 @@ func TestHistoryEffectQueue_UnresolvedFailureBlocksLaterTokensAfterRecovery(t *t
 	}
 }
 
-func TestHistoryEffectQueue_ReconcileScrollbackRetiresOnlyAProvenTerminalEpoch(t *testing.T) {
-	queue := HistoryEffectQueueState{}
-	if err := queue.enqueue(testHistoryCommit(0, 91, 3)); err != nil {
-		t.Fatalf("enqueue first: %v", err)
-	}
-	if err := queue.enqueue(testHistoryCommit(0, 92, 3)); err != nil {
-		t.Fatalf("enqueue second: %v", err)
-	}
-	if err := queue.markInFlight(1, 3); err != nil {
-		t.Fatalf("begin first: %v", err)
-	}
-	if err := queue.fail(1, 3, errors.New("writer failed"), true); err != nil {
-		t.Fatalf("fail first: %v", err)
-	}
-	nextToken := queue.NextToken
-	if queue.reconcileScrollback(0) {
-		t.Fatal("zero terminal epoch was accepted")
-	}
-	if !queue.reconcileScrollback(1) {
-		t.Fatalf("new terminal epoch was rejected: epoch=%d entries=%#v", queue.TerminalEpoch, queue.Entries())
-	}
-	if queue.TerminalEpoch != 1 || queue.NextToken != nextToken || len(queue.Entries()) != 0 {
-		t.Fatalf("reconciliation did not retire old delivery ledger: %#v", queue)
-	}
-	if queue.reconcileScrollback(1) {
-		t.Fatal("duplicate terminal epoch retired ledger twice")
-	}
-}
-
 func TestHistoryEffectsReducer_BootstrapBatchAcknowledgesOrderedPendingRangesAtomically(t *testing.T) {
 	state := historyEffectTestState(t, 2)
 	entries := state.HistoryEffects.Entries()
@@ -617,47 +588,34 @@ func TestHistoryEffectsReducer_BatchAckAcceptedWhenLeaseArrivesAfterTerminalWrit
 	}
 }
 
-func TestHistoryEffectsReducer_ScrollbackReconciliationRequiresRecoveryAndReplansFreshTokens(t *testing.T) {
+// 非破坏性恢复（settle）是唯一恢复路径：部分写入的在途交付被原地隔离，
+// delivery ledger 保持权威（append-only 去重），迟到的旧回调不可复活隔离条目，
+// 语义 epoch 不因 settle 推进。
+func TestHistoryEffectsReducer_FailedHandoffSettlesWithoutRetiringLedger(t *testing.T) {
 	state := historyEffectTestState(t, 2)
-	oldEntries := state.HistoryEffects.Entries()
-	oldToken := oldEntries[0].Commit.Token
-	oldNextToken := state.HistoryEffects.NextToken
+	oldToken := state.HistoryEffects.Entries()[0].Commit.Token
 	state = reduceUIControllerState(state, BeginHistoryCommit{Token: oldToken, LayoutGeneration: 2}, 3)
 	state = reduceUIControllerState(state, HistoryCommitFailed{
 		Token: oldToken, LayoutGeneration: 2, Err: errors.New("terminal failed"), MayHavePartiallyWritten: true,
 	}, 4)
-	if !state.HistoryEffects.ProjectionUnknown {
-		t.Fatal("failed handoff did not require recovery")
-	}
-	if !state.HistoryEffects.ReconciliationRequired {
-		t.Fatal("possibly written handoff did not request scrollback reconciliation")
+	if !state.HistoryEffects.ProjectionUnknown || !state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("partial write did not request a settle: %#v", state.HistoryEffects)
 	}
 
-	// The reset claim is not a substitute for a current source-backed frame.
-	state = reduceUIControllerState(state, HistoryScrollbackReconciled{LayoutGeneration: 2, TerminalEpoch: 1}, 5)
-	if state.HistoryEffects.TerminalEpoch != 0 || len(state.HistoryEffects.Entries()) != len(oldEntries) {
-		t.Fatalf("unrecovered reset claim changed delivery ledger: %#v", state.HistoryEffects)
-	}
+	state = reduceUIControllerState(state, HistoryReconciliationSettled{LayoutGeneration: 2}, 5)
 	state = reduceUIControllerState(state, HistoryProjectionRecovered{LayoutGeneration: 2}, 6)
-	state = reduceUIControllerState(state, HistoryScrollbackReconciled{LayoutGeneration: 2, TerminalEpoch: 1}, 7)
-	entries := state.HistoryEffects.Entries()
-	if state.HistoryEffects.TerminalEpoch != 1 || len(entries) == 0 || state.HistoryEffects.NextToken <= oldNextToken {
-		t.Fatalf("reconciliation did not mint a fresh epoch: epoch=%d next=%d entries=%#v", state.HistoryEffects.TerminalEpoch, state.HistoryEffects.NextToken, entries)
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("settle left the recovery obligation set: %#v", state.HistoryEffects)
 	}
-	if state.HistoryEffects.ReconciliationRequired {
-		t.Fatal("fresh terminal epoch retained reconciliation intent")
-	}
-	for _, entry := range entries {
-		if entry.Commit.Token <= oldNextToken || entry.State != HistoryCommitQueued {
-			t.Fatalf("old delivery leaked into fresh epoch: %#v", entry)
-		}
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("settle advanced the terminal epoch without a physical act: %d", state.HistoryEffects.TerminalEpoch)
 	}
 
-	// The old terminal callback cannot acknowledge a newly replanned range.
-	state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: oldToken, Frame: 99, LayoutGeneration: 2}, 8)
+	// The stale callback of the quarantined token cannot resurrect it.
+	state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: oldToken, Frame: 99, LayoutGeneration: 2}, 7)
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Token == oldToken {
-			t.Fatalf("stale acknowledgement resurrected retired token: %#v", entry)
+		if entry.Commit.Token == oldToken && entry.State == HistoryCommitDelivered {
+			t.Fatalf("stale acknowledgement resurrected a quarantined token: %#v", entry)
 		}
 	}
 }

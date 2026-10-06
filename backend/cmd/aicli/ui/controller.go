@@ -625,7 +625,7 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 			ReplaceTranscriptAction, SetThemeContextAction,
 			SetActiveCellAction, UpdateActiveCellAction, SetSemanticActiveCellProjectionAction,
 			FinalizeActiveCellAction, Resize, LeaseReleased,
-			HistoryProjectionRecovered, HistoryScrollbackReconciled,
+			HistoryProjectionRecovered,
 			HistoryPlanWindowReady:
 			return true
 		}
@@ -658,7 +658,7 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 	case ReplaceTranscriptAction, SetThemeContextAction, SetActiveCellAction, UpdateActiveCellAction,
 		SetSemanticActiveCellProjectionAction,
 		FinalizeActiveCellAction, Resize,
-		LeaseReleased, HistoryProjectionRecovered, HistoryScrollbackReconciled,
+		LeaseReleased, HistoryProjectionRecovered,
 		HistoryCommitAcknowledged, HistoryCommitsAcknowledged,
 		HistoryPlanWindowReady:
 		return true
@@ -1140,8 +1140,6 @@ func actionClassString(action UIAction) string {
 		return "HistoryProjectionRecovered"
 	case HistoryProjectionInvalidated:
 		return "HistoryProjectionInvalidated"
-	case HistoryScrollbackReconciled:
-		return "HistoryScrollbackReconciled"
 	case HistoryPlanWindowReady:
 		return "HistoryPlanWindowReady"
 	case ContinueHistoryPlanAction:

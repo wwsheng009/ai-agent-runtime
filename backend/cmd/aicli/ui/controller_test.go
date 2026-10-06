@@ -1691,7 +1691,6 @@ func TestUIActionClassification(t *testing.T) {
 		{"HistoryCommitFailed", HistoryCommitFailed{}, ClassBarrier, ""},
 		{"HistoryProjectionRecovered", HistoryProjectionRecovered{}, ClassBarrier, ""},
 		{"HistoryProjectionInvalidated", HistoryProjectionInvalidated{}, ClassBarrier, ""},
-		{"HistoryScrollbackReconciled", HistoryScrollbackReconciled{}, ClassBarrier, ""},
 		{"RuntimeEvent", RuntimeEvent{}, ClassDurable, ""},
 		{"InputEvent", InputEvent{}, ClassDurable, ""},
 		{"SetActiveBandAction", SetActiveBandAction{}, ClassDurable, ""},

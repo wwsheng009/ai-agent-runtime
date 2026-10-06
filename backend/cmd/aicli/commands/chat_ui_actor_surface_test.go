@@ -31,7 +31,7 @@ func TestUnifiedRendererActionNeedsFlushDoesNotSelfRetryDeliveryBookkeeping(t *t
 			t.Errorf("%T unexpectedly requested a generic frame", action)
 		}
 	}
-	for _, action := range []ui.UIAction{ui.UpdateActiveCellAction{}, ui.HistoryCommitAcknowledged{}, ui.HistoryScrollbackReconciled{}} {
+	for _, action := range []ui.UIAction{ui.UpdateActiveCellAction{}, ui.HistoryCommitAcknowledged{}} {
 		if !unifiedRendererActionNeedsFlush(action) {
 			t.Errorf("%T omitted a visible/current-state frame", action)
 		}

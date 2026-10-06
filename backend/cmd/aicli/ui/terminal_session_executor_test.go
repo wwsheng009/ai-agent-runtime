@@ -1177,7 +1177,7 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testi
 // The fix bounds the success-mode backoff with a retry window. After the
 // window expires the executor must retry the scrollback reconciliation reset,
 // and since ProjectionUnknown is now false the reducer accepts the fresh
-// HistoryScrollbackReconciled barrier, clearing ReconciliationRequired.
+// settle barrier, clearing ReconciliationRequired.
 func TestTerminalSessionExecutorReconciliationRetryAfterDeadlock(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
 	writer := &terminalSessionShortWriter{}
@@ -1395,7 +1395,7 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 	}
 
 	// 5. Successful scrollback reset, obligation already cleared (the executor's
-	// own HistoryProjectionRecovered/HistoryScrollbackReconciled posts were
+	// own HistoryProjectionRecovered / reconcile posts were
 	// reduced by WaitIdle before armRecoveryBackoff runs), generation unchanged:
 	// this is the actual production reset+replay loop — the reconcile handler
 	// replanned the whole transcript, the next cycle is recoveryActionable

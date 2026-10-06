@@ -625,8 +625,8 @@ func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration u
 //
 //  3. SUCCESSFUL scrollback reset whose layout generation did NOT advance.
 //     This is the reset+replay-loop signature the obligation check cannot see:
-//     the executor's own HistoryProjectionRecovered / HistoryScrollbackReconciled
-//     posts are reduced (WaitIdle) before this function runs, so
+//     the executor's own HistoryProjectionRecovered posts are reduced
+//     (WaitIdle) before this function runs, so
 //     terminalHistoryRecoveryObligationPending() is already false even though
 //     the reconcile handler replanned the entire transcript (memo misses on
 //     every TerminalEpoch bump) and the next worker cycle re-enters recovery.
@@ -1234,12 +1234,6 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	// obligation and a settle must never race it.
 	if result.SettledHistoryProjection && result.Frame.Err == nil && !result.Frame.Deferred {
 		e.postControllerActionTracked(HistoryReconciliationSettled{LayoutGeneration: generation})
-	}
-	if result.ScrollbackReset && result.TerminalEpoch != 0 {
-		e.postControllerActionTracked(HistoryScrollbackReconciled{
-			LayoutGeneration: generation,
-			TerminalEpoch:    result.TerminalEpoch,
-		})
 	}
 	e.waitLastControllerAction()
 	if result.ScrollbackReset {
