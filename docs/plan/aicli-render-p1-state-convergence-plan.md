@@ -260,10 +260,8 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   `TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory`：
   基线 `d8ec19ca` 单测即可 1/12 复现（当前 2/12、全门控版 0/12，样本内不可区分），
   与本轮改动无因果证据；复跑全绿。
-- 本小步未竟（已记录为后续）：driver 单 probe 注入与 `Terminal`/`driver`/
-  `theme.go` raw GetSize 收敛（30+ 展示宽度调用点需单探针缓存转发）、unified
-  下 `ApplyGeometry` 纯采纳入口。改动面与夹具迁移清单见会话侦察报告
-  （HEAD `fa9ca777` 逐行核实）。
+- driver 单 probe 与展示宽度缓存转发已在 §2.10 落地；本小步剩余：unified
+  下 `ApplyGeometry` 纯采纳入口（见 §2.10 末条）。
 
 ### 2.9 验证中发现的既有竞态修复（executor WaitIdle/Request，已完成）
 
@@ -283,6 +281,30 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   WaitIdle×Request 并发）；原 flaky 用例 20 连跑 0 失败。A/B 对照：基线
   `d8ec19ca` 1/12、全门控版 `8d8ae0fe` 6/12、修复后 0/20。
 - 验证：ui 全量 128.4s + commands 全量 174.3s 通过。
+
+### 2.10 P1-2b 几何收敛第 2 部分（driver 单探针 + 展示宽度缓存转发，已完成）
+
+- `TerminalDriver.ProbeSize()` 成为 ui 包唯一 raw `term.GetSize` 探测点（经
+  测试接缝 `driverSizeProbe` 注入）：探测成功写能力缓存并发布进程级尺寸备忘
+  （`terminal_size_cache.go`），失败不污染缓存；`RefreshCapabilities` 复用
+  `ProbeSize`。
+- `TerminalDriver.Size()` 改为纯缓存读（不再 syscall）；`Terminal.updateSize`
+  与 `FixedBottomSurface.refreshTerminalDimensionsLocked` 改走 `ProbeSize`。
+  `RefreshSize` 的 `sizeProbeCount` 预算语义不变（surface 夹具断言 1 次/操作）。
+- `GetTerminalWidth/Height/Size`（theme.go/terminal.go）改为进程级缓存转发：
+  优先读最近一次真实探测结果，无缓存时做一次 raw 探测并发布；管道/无 TTY 的
+  80x24 兜底不发布。30+ 展示宽度调用点（info/output/inputbox/separator/
+  welcome/chat_* 等）经该入口收敛，不再逐次探测。
+- 钉子：`terminal_size_cache_test.go` 2 项（单探针 + 缓存转发 + `Size()` 零
+  syscall + 探测失败不污染缓存）。
+- 验证：ui 全量 110.8s（单独运行）+ commands 全量 185.5s 绿。并发双包时
+  `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`（单独 98.7s
+  通过，内部收敛期限对负载敏感）超时未收敛一次；单独复跑全绿，属既有负载
+  敏感用例，与本改动无因果证据。
+- 剩余（记录为后续）：unified 下 `ApplyGeometry` 纯采纳入口（当前 unified 帧
+  几何已经由 `terminalSessionSnapshot` 携带 `AppState.Geometry`，显式纯采纳
+  入口与其夹具待专项）；`chat_setup.chatTerminalWriterWidth` 的 writer 专属
+  GetSize 保留（语义是给定 writer 的宽度，不是进程终端）。
 
 ## 3. P1-3 WaitIdle 事件驱动 ack
 

@@ -40,6 +40,10 @@ type TerminalDriver struct {
 	caps   TerminalCapabilities
 }
 
+// driverSizeProbe 是唯一 raw GetSize 调用的测试接缝：生产恒为 term.GetSize，
+// 测试可替换以验证「单探针 + 缓存转发」而不依赖真实 TTY。
+var driverSizeProbe = term.GetSize
+
 // EnsureConsoleUTF8Output 在任何输出发生前调用一次，确保无 VT 的 Windows
 // 控制台（如 Win7 conhost）按 UTF-8 解码程序输出，避免中文显示为乱码。
 // 支持 VT 的控制台、管道/文件重定向、非 Windows 平台均为空操作。
@@ -71,10 +75,8 @@ func (d *TerminalDriver) RefreshCapabilities() TerminalCapabilities {
 	}
 
 	width, height := 80, 24
-	if stdoutFD >= 0 {
-		if w, h, err := term.GetSize(stdoutFD); err == nil && w > 0 && h > 0 {
-			width, height = w, h
-		}
+	if w, h, err := d.ProbeSize(); err == nil && w > 0 && h > 0 {
+		width, height = w, h
 	}
 
 	interactive := stdinFD >= 0 && stdoutFD >= 0 && term.IsTerminal(stdinFD) && term.IsTerminal(stdoutFD)
@@ -155,22 +157,38 @@ func (d *TerminalDriver) Capabilities() TerminalCapabilities {
 	return d.caps
 }
 
-func (d *TerminalDriver) Size() (width, height int, err error) {
+// ProbeSize 是 ui 包唯一允许直接调用 term.GetSize 的位置（P1-2b 单探针）。
+// 探测成功后把尺寸写入能力缓存并发布到进程级尺寸备忘；失败返回错误且不改写
+// 缓存。调用方：Terminal.updateSize/RefreshSize、surface 尺寸刷新。
+func (d *TerminalDriver) ProbeSize() (width, height int, err error) {
 	if d == nil || d.stdout == nil {
+		return 0, 0, nil
+	}
+	width, height, err = driverSizeProbe(int(d.stdout.Fd()))
+	if err != nil || width <= 0 || height <= 0 {
+		return 0, 0, err
+	}
+	d.caps.Width = width
+	d.caps.Height = height
+	publishProcessTerminalSize(width, height)
+	return width, height, nil
+}
+
+// Size 读取最近一次探测的能力缓存，不再发起 syscall（P1-2b 单探针收敛）。
+// 需要最新尺寸的调用方必须显式走 ProbeSize；展示宽度调用点走
+// GetTerminalWidth/Height 的进程级缓存转发。
+func (d *TerminalDriver) Size() (width, height int, err error) {
+	if d == nil {
 		return 80, 24, nil
 	}
-	width, height, err = term.GetSize(int(d.stdout.Fd()))
-	if err != nil || width <= 0 || height <= 0 {
-		caps := d.Capabilities()
-		if caps.Width <= 0 {
-			caps.Width = 80
-		}
-		if caps.Height <= 0 {
-			caps.Height = 24
-		}
-		return caps.Width, caps.Height, err
+	caps := d.Capabilities()
+	if caps.Width <= 0 {
+		caps.Width = 80
 	}
-	return width, height, nil
+	if caps.Height <= 0 {
+		caps.Height = 24
+	}
+	return caps.Width, caps.Height, nil
 }
 
 func (d *TerminalDriver) IsInteractive() bool {

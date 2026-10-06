@@ -56,7 +56,7 @@ func (t *Terminal) updateSize() {
 		return
 	}
 	if t.driver != nil {
-		if width, height, err := t.driver.Size(); err == nil && width > 0 && height > 0 {
+		if width, height, err := t.driver.ProbeSize(); err == nil && width > 0 && height > 0 {
 			t.width = width
 			t.height = height
 			return
@@ -349,16 +349,16 @@ func (t *Terminal) PrintAt(row, col int, text string) {
 	t.RestoreCursor()
 }
 
-// GetTerminalSize 获取终端实际大小（通过 escape code 查询）
+// GetTerminalSize 获取终端大小：优先读进程级单探针缓存（driver.ProbeSize
+// 发布），无缓存时做一次 raw 探测并发布；两者都不可用返回 80x24 兜底。
 func GetTerminalSize() (width, height int) {
-	width, height, err := term.GetSize(int(os.Stdout.Fd()))
-	if err == nil && width > 0 && height > 0 {
+	if width, height, ok := cachedProcessTerminalSize(); ok {
 		return width, height
 	}
-	if width = GetTerminalWidth(); width <= 0 {
-		width = 80
+	if width, height, ok := probeHostTerminalSize(); ok {
+		return width, height
 	}
-	return width, 24
+	return 80, 24
 }
 
 // SetupTerminal 设置终端，支持退出时还原

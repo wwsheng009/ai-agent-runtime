@@ -803,7 +803,7 @@ func (s *FixedBottomSurface) refreshTerminalDimensionsLocked() {
 	if s == nil || s.terminal == nil || s.terminal.driver == nil || s.terminal.driver.stdout == nil {
 		return
 	}
-	width, height, err := s.terminal.driver.Size()
+	width, height, err := s.terminal.driver.ProbeSize()
 	if err != nil || width <= 0 || height <= 0 {
 		return
 	}

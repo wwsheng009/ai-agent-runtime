@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
-	"golang.org/x/term"
 )
 
 // ThemeType 主题类型（明暗轴）
@@ -288,22 +287,31 @@ func (t *Theme) Dimmed(text string) string {
 	return RenderRoleTextWithTheme(text, style.RoleTextMuted, t)
 }
 
-// GetTerminalWidth 获取终端宽度（用于自适应布局）
+// GetTerminalWidth 获取终端宽度（用于自适应布局）。
+//
+// P1-2b：展示宽度调用点走进程级单探针缓存转发（driver.ProbeSize 发布），
+// 不再每次调用 term.GetSize；无缓存时做一次 raw 探测并发布。
 func GetTerminalWidth() int {
-	defaultWidth := 80
-	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
+	if width, _, ok := cachedProcessTerminalSize(); ok {
 		return width
 	}
-	return defaultWidth
+	if width, _, ok := probeHostTerminalSize(); ok {
+		return width
+	}
+	return 80
 }
 
-// GetTerminalHeight 获取终端高度（用于自适应布局）
+// GetTerminalHeight 获取终端高度（用于自适应布局）。
+//
+// P1-2b：与 GetTerminalWidth 共用同一进程级单探针缓存。
 func GetTerminalHeight() int {
-	defaultHeight := 24
-	if _, height, err := term.GetSize(int(os.Stdout.Fd())); err == nil && height > 0 {
+	if _, height, ok := cachedProcessTerminalSize(); ok {
 		return height
 	}
-	return defaultHeight
+	if _, height, ok := probeHostTerminalSize(); ok {
+		return height
+	}
+	return 24
 }
 
 // CenterText 居中文本
