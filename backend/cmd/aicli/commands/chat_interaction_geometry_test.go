@@ -64,7 +64,7 @@ func TestSurfaceFacadePostDoesNotDeadlockBehindCoordinatorLock(t *testing.T) {
 		}
 		return nil
 	}), nil)
-	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	coordinator.uiActorOnce.Do(func() { coordinator.publishUIActor(actor) })
 	go actor.Run()
 	defer func() {
 		releaseOnce.Do(func() { close(blockReducer) })

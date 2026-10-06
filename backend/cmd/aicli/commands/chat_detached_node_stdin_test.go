@@ -28,6 +28,19 @@ func replaceStdinWithNullDevice(t *testing.T) func() {
 	}
 }
 
+// joinStdinReadLoop waits for the queue's stdin read loop to exit before the
+// caller restores the process-global os.Stdin. The EOF/parked decision reads
+// that global from the pump goroutine, so an unjoined restore is a data race
+// (exposed by go test -race).
+func joinStdinReadLoop(t *testing.T, queue *chatInputQueue) {
+	t.Helper()
+	select {
+	case <-queue.stdinLoopDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stdin read loop did not exit")
+	}
+}
+
 // TestDetachedMeshNodeStdinEOFParkKeepsQueueServing 覆盖「spawn 上报 started 但
 // 节点马上自己退出」的回归：网格拉起的脱离节点 stdin 是空设备，pump 读到 EOF
 // 时必须停驻等待 Web 队列，而不是把 io.EOF 记成终态错误让主循环退出。
@@ -59,6 +72,7 @@ func TestDetachedMeshNodeStdinEOFParkKeepsQueueServing(t *testing.T) {
 	if err := queue.terminalError(); err != nil {
 		t.Fatalf("terminal error after web line: %v", err)
 	}
+	joinStdinReadLoop(t, queue)
 }
 
 // TestPlainProcessStdinEOFStillEndsChat 守住另一半语义：普通进程（没有
@@ -78,6 +92,7 @@ func TestPlainProcessStdinEOFStillEndsChat(t *testing.T) {
 			if !errors.Is(err, io.EOF) {
 				t.Fatalf("want io.EOF terminal error, got %v", err)
 			}
+			joinStdinReadLoop(t, queue)
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

@@ -67,12 +67,31 @@ func (c *chatInteractionCoordinator) ensureUIActor() *ui.UIController {
 		// AsyncTranscriptPlan 是 P1.2 Stage B3 的生产切换：transcript 规划的
 		// screening（大会话 resume 时 O(entire history) 的布局前置）移出 actor
 		// 锁，由控制器内部 plan worker 执行；锁内只做派发与铸 commit 收尾。
-		c.uiActor = ui.NewUIController(ui.UIControllerConfig{
+		actor := ui.NewUIController(ui.UIControllerConfig{
 			ReserveDynamicStatusRow: true,
 			AsyncTranscriptPlan:     true,
 		}, ui.ContextualReducerFunc(c.reduceUIActionWithContext), nil)
-		go c.uiActor.Run()
+		c.publishUIActor(actor)
+		go actor.Run()
 	})
+	return c.currentUIActor()
+}
+
+// publishUIActor 发布惰性创建的 actor（唯一写点；uiActorOnce 保证只发生一次）。
+func (c *chatInteractionCoordinator) publishUIActor(actor *ui.UIController) {
+	c.uiActorMu.Lock()
+	c.uiActor = actor
+	c.uiActorMu.Unlock()
+}
+
+// currentUIActor 读取已发布的 actor；未创建返回 nil（不触发创建）。读侧统一
+// 走本方法，避免与 ensureUIActor 的发布写竞争。
+func (c *chatInteractionCoordinator) currentUIActor() *ui.UIController {
+	if c == nil {
+		return nil
+	}
+	c.uiActorMu.RLock()
+	defer c.uiActorMu.RUnlock()
 	return c.uiActor
 }
 
@@ -1030,10 +1049,10 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 	if surface != nil {
 		surface.SetAlternateScreenLeaseTransport(nil)
 	}
-	if c.uiActor != nil {
-		c.uiActor.Close()
-		if !c.uiActor.WaitIdleTimeout(chatUIActorCloseTimeout) {
-			stats := c.uiActor.Stats()
+	if actor := c.currentUIActor(); actor != nil {
+		actor.Close()
+		if !actor.WaitIdleTimeout(chatUIActorCloseTimeout) {
+			stats := actor.Stats()
 			writeSessionDebugInfo(c.session, fmt.Sprintf("[shutdown] UI actor did not drain after close timeout pending=%d last=%q", stats.Pending, stats.LastAction), false)
 		}
 	}
@@ -1281,30 +1300,33 @@ func (c *chatInteractionCoordinator) uiActionRejectedAfterShutdown() bool {
 // waitUIActorIdle 等待 UI actor 排空当前队列（测试辅助与确定性路径）。
 // actor 尚未创建时立即返回。生产代码不应依赖（producer 只 Post）。
 func (c *chatInteractionCoordinator) waitUIActorIdle() {
-	if c == nil || c.uiActor == nil {
+	actor := c.currentUIActor()
+	if actor == nil {
 		return
 	}
-	c.uiActor.WaitIdle()
+	actor.WaitIdle()
 }
 
 func (c *chatInteractionCoordinator) waitUIActorIdleTimeout(timeout time.Duration) bool {
-	if c == nil || c.uiActor == nil {
+	actor := c.currentUIActor()
+	if actor == nil {
 		return true
 	}
-	return c.uiActor.WaitIdleTimeout(timeout)
+	return actor.WaitIdleTimeout(timeout)
 }
 
 // waitUIActorIdleBounded is the production idle barrier. On timeout it records
 // a diagnostic and returns false so callers can fail closed instead of
 // continuing into a legacy writer or modal transition with unsettled state.
 func (c *chatInteractionCoordinator) waitUIActorIdleBounded(what string) bool {
-	if c == nil || c.uiActor == nil {
+	actor := c.currentUIActor()
+	if actor == nil {
 		return true
 	}
-	if c.uiActor.WaitIdleTimeout(chatUIActorIdleWaitTimeout) {
+	if actor.WaitIdleTimeout(chatUIActorIdleWaitTimeout) {
 		return true
 	}
-	stats := c.uiActor.Stats()
+	stats := actor.Stats()
 	writeSessionDebugInfo(c.session, fmt.Sprintf("[ui-actor] idle barrier timeout what=%q pending=%d last=%q", what, stats.Pending, stats.LastAction), false)
 	return false
 }

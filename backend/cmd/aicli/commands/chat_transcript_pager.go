@@ -82,10 +82,14 @@ func openChatTranscriptPager(session *ChatSession) {
 }
 
 func chatTranscriptPagerView(session *ChatSession, leaseID uint64) ui.TranscriptPagerView {
-	if session == nil || session.Interaction == nil || session.Interaction.uiActor == nil {
+	if session == nil || session.Interaction == nil {
 		return ui.TranscriptPagerView{}
 	}
-	state := session.Interaction.uiActor.AppState()
+	actor := session.Interaction.currentUIActor()
+	if actor == nil {
+		return ui.TranscriptPagerView{}
+	}
+	state := actor.AppState()
 	active := state.Active
 	if active.Phase == ui.ActiveCellInactive {
 		active = ui.ActiveCellState{}

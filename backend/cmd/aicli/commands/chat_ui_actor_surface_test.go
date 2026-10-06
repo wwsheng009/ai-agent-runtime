@@ -1051,7 +1051,7 @@ func TestChatInteractionCoordinatorPromptInputNeverWaitsForActorDrain(t *testing
 		}
 		return nil
 	}), nil)
-	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	coordinator.uiActorOnce.Do(func() { coordinator.publishUIActor(actor) })
 	go actor.Run()
 	t.Cleanup(func() {
 		release()
@@ -1128,7 +1128,7 @@ func TestChatInteractionCoordinatorPromptInputNeverWaitsForFullMailbox(t *testin
 		}
 		return coordinator.reduceUIAction(revision, action)
 	}), nil)
-	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	coordinator.uiActorOnce.Do(func() { coordinator.publishUIActor(actor) })
 	go actor.Run()
 	t.Cleanup(func() {
 		release()
@@ -1183,7 +1183,7 @@ func TestChatInteractionCoordinatorPostScheduledUIActionNeverWaitsForFullMailbox
 		}
 		return coordinator.reduceUIAction(revision, action)
 	}), nil)
-	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	coordinator.uiActorOnce.Do(func() { coordinator.publishUIActor(actor) })
 	go actor.Run()
 	t.Cleanup(func() {
 		release()
@@ -1238,7 +1238,7 @@ func TestChatInteractionCoordinatorPromptEditorStatusNeverWaitsForFullMailbox(t 
 		}
 		return nil
 	}), nil)
-	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	coordinator.uiActorOnce.Do(func() { coordinator.publishUIActor(actor) })
 	go actor.Run()
 	t.Cleanup(func() {
 		release()
@@ -1295,7 +1295,7 @@ func TestChatInteractionCoordinatorPromptResetRejectsQueuedSnapshot(t *testing.T
 		}
 		return coordinator.reduceUIAction(revision, action)
 	}), nil)
-	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	coordinator.uiActorOnce.Do(func() { coordinator.publishUIActor(actor) })
 	go actor.Run()
 	t.Cleanup(func() {
 		release()

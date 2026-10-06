@@ -452,27 +452,40 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   2. `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`
      （153.0s 超时）：已知基线（§1.6：基线 `d8ec19ca` 同用例在 race 插桩下
      同样超时）。
-- commands 包：5 用例失败、58 个 DATA RACE 报告，聚为 3 组竞争；命中代码区域
-  均非本轮 P1 改动点（本轮改动文件清单不含 function_catalog/skills/chat_mesh，
-  uiActor 字段读写点亦未触碰），但无基线 race 日志，标记「既有嫌疑、待专项」：
-  1. **function catalog（约 55 报告）**：`TestInitSkillFunctionsWithManager_
-     HotReload*` 中后台 `scheduleSkillsRuntimeRefresh →
-     buildSkillsRuntimeBindingFromManager → registerFunction` 写 catalog 的
-     `entries`/registry 映射，测试线程 `Stats()/syncFromRegistry/
-     sharedCapabilityCatalog/clone*` 并发读；`function_catalog.go` 全文件无锁。
-     待专项：catalog 加 RWMutex 覆盖全部公共入口（register/sync/clone/Stats/
-     选择路径），或后台刷新改 actor 串行。
-  2. **stdin 全局（1 报告）**：`chat_detached_node_stdin_test.go` 的
-     `replaceStdinWithNullDevice` 在 pump goroutine 存活期间恢复 `os.Stdin`，
-     与 `chatStdinIsNullDevice`（chat_mesh.go:64）读全局竞争。待专项：测试侧
-     pump 停止屏障（当前 `chatInputQueue` 无 stop API）。
-  3. **uiActor 发布（2 报告）**：`ensureUIActor` 在 `uiActorOnce.Do` 内写
-     `c.uiActor`（chat_ui_actor.go:70）与 `waitUIActorIdle/Timeout/Bounded`
-     直接读字段（:1284/:1291/:1301）竞争；`TestDiagnosticNoticeTimerExpiry
-     ClearsTheRow` 触发。待专项：`uiActor` 改 `atomic.Pointer` 发布（16 处
-     访问点统一 load），或所有读侧先 `uiActorOnce.Do(func(){})` 屏障。
-- 结论：race 行 ui 侧修复后仅剩已知基线超时；commands 侧 3 组既有竞争未修，
-  验收矩阵 race 行标记「ui 通过（除基线）；commands 待专项」。
+- commands 包：5 用例失败、57 个 DATA RACE 报告，聚为 3 组竞争；命中代码区域
+  均非本轮 P1 改动点（function_catalog/skills/chat_mesh 不在本轮改动清单，
+  uiActor 字段读写点亦未触碰），但无基线 race 日志，按「既有嫌疑」修复：
+  1. **function catalog（约 55 报告，已修复）**：后台
+     `scheduleSkillsRuntimeRefresh → buildSkillsRuntimeBindingFromManager →
+     registerFunction` 写 `entries`/registry 映射，请求线程
+     `Stats()/syncFromRegistry/sharedCapabilityCatalog/clone*` 并发读；
+     `function_catalog.go` 原全文件无锁。修复：catalog 增加 `sync.RWMutex`，
+     写入口（register/Prune/Remove/Set*/ensureFunctionCatalog）全写锁；读路径
+     改「锁内快照 + 锁外查询」（syncFromRegistry/BuiltinSchemas/SkillSchema/
+     Names/Descriptor(s)/Stats/sharedCapabilitySnapshot）；Select/Execute 锁内
+     只取引用与快照，慢速/可重入外部调用全部移到锁外。验证：hot-reload race
+     ×2 零 DATA RACE、定向 race 集绿、commands 全量 181.3s 绿。
+     残余风险（后续）：`Registry()` 仍裸暴露 registry（command_invoke/
+     chat_tool_availability/chat_mcp_session_scope 直连 Get/List/Unregister）、
+     4 处直接读 `catalog.entries`（chat_mcp_session_scope.go:210、
+     chat_skill_tool_surface.go:148/189、command_invoke.go:991）、
+     `skillsRuntimeBinding` 字段原地写未同步；彻底方案为 FunctionRegistry
+     内部加锁或访问器收口。
+  2. **stdin 全局（1 报告，已修复）**：`replaceStdinWithNullDevice` 在 pump
+     读循环存活期间恢复 `os.Stdin`，与 `chatStdinIsNullDevice`
+     （chat_mesh.go:64）竞争。修复：`chatInputQueue` 增 `stdinLoopDone`
+     （读循环退出时关闭，生产无消费者），测试侧 `joinStdinReadLoop` 在恢复
+     全局前 join；两个 stdin 用例 `-race` 通过。
+  3. **uiActor 发布（2 报告，已修复）**：`ensureUIActor` 在 `uiActorOnce.Do`
+     内写 `c.uiActor` 与 `waitUIActorIdle/Timeout/Bounded` 直接读字段竞争。
+     修复：`uiActorMu RWMutex` + `publishUIActor`/`currentUIActor` 访问器；
+     ensureUIActor 走发布，全部生产读点（wait helpers/shutdown/bridge 热路径/
+     debug document+HTTP/transcript pager/resume progress）改访问器，测试注入
+     点改 `publishUIActor`。定向 `-race`（DiagnosticNotice 等 4 用例）通过。
+- 结论：三组竞争全部修复。**最终门禁复跑**（同命令）：ui 230.2s 零 DATA
+  RACE，仅剩已知基线 `TestArmedResume...`（161.3s 超时）；commands
+  **ok 361.9s 全绿、零 DATA RACE**（修复前 57 报告 / 5 用例失败）。
+  race 行验收通过（除已记录基线超时）。
 
 ## 6. 侦察报告归档
 

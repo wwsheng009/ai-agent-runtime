@@ -779,15 +779,16 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 	}
 
 	// ====== AppState (Presenter Migration) ======
-	if session.Interaction != nil && session.Interaction.uiActor != nil {
+	if session.Interaction != nil && session.Interaction.currentUIActor() != nil {
+		actor := session.Interaction.currentUIActor()
 		// DiagnosticState: this endpoint reports scalars, geometry, gates, and
 		// the history-effect lifecycle, but never a commit entry. State() would
 		// detach the whole commit ledger under the actor mutex on each poll —
 		// the dominant cost of this probe on a resumed session.
-		state := session.Interaction.uiActor.DiagnosticState()
+		state := actor.DiagnosticState()
 		// The snapshot carries no ledger, so the queue counters come from their
 		// own ledger-free projection under the same mutex (no allocation).
-		effectDiagnostics := session.Interaction.uiActor.HistoryEffectDiagnostics()
+		effectDiagnostics := actor.HistoryEffectDiagnostics()
 		lease := "inactive"
 		if state.Lease.Active {
 			lease = "active"
@@ -826,7 +827,7 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 		app.HistoryGates = gates
 		// 消费端成本快照（§6.2 第 2 条）：只在有活动时输出，避免空会话的
 		// 噪声字段。Stats() 是 actor 互斥量下的定长快照，不阻塞 Run 循环。
-		if actorStats := session.Interaction.uiActor.Stats(); actorStats.Processed > 0 ||
+		if actorStats := actor.Stats(); actorStats.Processed > 0 ||
 			actorStats.PostWaitCount > 0 || actorStats.Pending > 0 {
 			app.UIActor = &chatDebugDisplayUIActorInfo{
 				Processed:        actorStats.Processed,
@@ -1053,7 +1054,7 @@ func chatDebugAppStateUnavailableReason(session *ChatSession) string {
 		return "no active chat session"
 	case session.Interaction == nil:
 		return "no interactive renderer: session.Interaction is nil (headless/CI process model)"
-	case session.Interaction.uiActor == nil:
+	case session.Interaction.currentUIActor() == nil:
 		return "no interactive renderer: uiActor not attached (requires a real interactive terminal)"
 	case session.Surface == nil:
 		return "renderer attached but Surface is nil"

@@ -173,6 +173,7 @@ type chatInteractionCoordinator struct {
 	// UI actor（Phase 1，实施指南任务 2/3/5）：业务 producer 只投递 action，
 	// reducer 经 legacy adapter 生成相同输出。惰性创建，见 ensureUIActor。
 	uiActor     *ui.UIController
+	uiActorMu   sync.RWMutex
 	uiActorOnce sync.Once
 	// unifiedRenderer selects the AppState -> TerminalSession primary path.
 	// FixedBottomSurface may remain enabled as a compatibility state facade, but
@@ -662,7 +663,7 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	// in which a caller could replace a terminal writer while the actor still
 	// owns a queued physical legacy paint. This is a one-time mount barrier,
 	// not a producer-side synchronization path for streaming or editor input.
-	actor := c.uiActor
+	actor := c.currentUIActor()
 	c.mu.Unlock()
 	if actor != nil {
 		actor.WaitIdle()
@@ -4822,10 +4823,11 @@ func (c *chatInteractionCoordinator) finalAssistantOverflowHintLocked(content st
 // ReplaceTranscript path; the follow-up command document then renders as the
 // first cell of the new conversation.
 func (c *chatInteractionCoordinator) resetTranscriptForNewSession() {
-	if c == nil || c.uiActor == nil {
+	actor := c.currentUIActor()
+	if actor == nil {
 		return
 	}
-	c.uiActor.Post(ui.ReplaceTranscriptAction{Snapshot: &scene.Snapshot{}})
+	actor.Post(ui.ReplaceTranscriptAction{Snapshot: &scene.Snapshot{}})
 }
 
 func (c *chatInteractionCoordinator) RenderSubmittedUserInput(input string) {

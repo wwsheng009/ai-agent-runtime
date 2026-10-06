@@ -238,10 +238,14 @@ type chatInputQueue struct {
 	readySignal           chan struct{}
 	priorityCaptureSignal chan struct{}
 	start                 sync.Once
-	mu                    sync.RWMutex
-	priorityMode          bool
-	priorityPrompt        string
-	priorityRevision      uint64
+	// stdinLoopDone 在 stdinReadLoop 退出（parked/EOF/错误）时关闭。生产无消费者；
+	// 测试用它在恢复 os.Stdin 全局前与读循环建立 join——EOF 判定会读该全局，
+	// 未 join 的替换是数据竞争（go test -race 已暴露）。
+	stdinLoopDone    chan struct{}
+	mu               sync.RWMutex
+	priorityMode     bool
+	priorityPrompt   string
+	priorityRevision uint64
 	// externalCaptureActive：TUI busy queued-input capture 持有底部 prompt 行
 	// （chat_send.go -> startBusyQueuedInputCapture）。它只表示"主读取循环不是
 	// 读者"，提问/审批仍必须走控制台合并回答路径。
@@ -288,6 +292,7 @@ func newChatInputQueue(reader *bufio.Reader) *chatInputQueue {
 		readySignal:               make(chan struct{}, 1),
 		priorityCaptureSignal:     make(chan struct{}, 1),
 		priorityResolvedElsewhere: make(chan struct{}, 1),
+		stdinLoopDone:             make(chan struct{}),
 	}
 }
 
@@ -460,6 +465,11 @@ func (q *chatInputQueue) stdinPump() {
 }
 
 func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
+	defer func() {
+		if q.stdinLoopDone != nil {
+			close(q.stdinLoopDone)
+		}
+	}()
 	// 网格拉起的脱离节点（stdin 是空设备，见 chatDetachedNodeStdinExhausted）
 	// 读到 EOF 时不能上报终态错误：节点还要靠 Web 队列继续服务浏览器窗口。
 	// events 保持打开、pump 停在等待队列上，readLine 于是只阻塞不报错。

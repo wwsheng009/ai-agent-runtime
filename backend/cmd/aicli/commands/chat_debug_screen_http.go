@@ -156,8 +156,8 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 	//     点击会话后历史消息未注入 bridge 时仍可直接派生，Win7 降级形态下
 	//     bridge Scene 只覆盖 live events，历史不重放）
 	// 四者都空时才落到 "no active terminal surface" 死信号。
-	if session.Interaction != nil && session.Interaction.uiActor != nil {
-		state := session.Interaction.uiActor.AppState()
+	if session.Interaction != nil && session.Interaction.currentUIActor() != nil {
+		state := session.Interaction.currentUIActor().AppState()
 		layout := ui.ComposeAppTextLayout(state)
 		if layout.Height > 0 && len(layout.Rows) > 0 {
 			lines := make([]string, 0, len(layout.Rows))
@@ -413,8 +413,8 @@ func buildChatWebScreenSnapshotFull() *chatDebugScreenSnapshot {
 		snap.Reason = "no active chat session"
 		return snap
 	}
-	if session.Interaction != nil && session.Interaction.uiActor != nil {
-		state := session.Interaction.uiActor.AppState()
+	if session.Interaction != nil && session.Interaction.currentUIActor() != nil {
+		state := session.Interaction.currentUIActor().AppState()
 		if lines := transcriptFallbackCells(state.Transcript.Cells); len(lines) > 0 {
 			snap.Available = true
 			snap.Lines = lines
@@ -459,12 +459,12 @@ func buildChatWebScreenSnapshotWindowed(window chatWebMessageWindow) *chatDebugS
 		snap.Reason = "no active chat session"
 		return snap
 	}
-	if session.Interaction != nil && session.Interaction.uiActor != nil {
+	if session.Interaction != nil && session.Interaction.currentUIActor() != nil {
 		// 只取 transcript cells，绝不能让快照路径深拷贝投递账本：
 		// AppState() 会克隆整个 HistoryCommitLedger（pprof 实测累计 89GB、
 		// 占全部分配的 8.8%，且每次都要在 actor 互斥量内复制整张账本）。
 		// DiagnosticState 保留 transcript/active/bottom，只丢弃账本。
-		cells := session.Interaction.uiActor.DiagnosticState().AppState.Transcript.Cells
+		cells := session.Interaction.currentUIActor().DiagnosticState().AppState.Transcript.Cells
 		if total := countTranscriptCellMessages(cells); total > 0 {
 			return snap.fillWindowedMessages(total, window, func(start, end int) []chatWebScreenMessage {
 				return transcriptFallbackMessagesRange(cells, start, end)

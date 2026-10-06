@@ -402,7 +402,7 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	if builder == nil || session == nil {
 		return
 	}
-	if session.Interaction == nil || session.Interaction.uiActor == nil {
+	if session.Interaction == nil || session.Interaction.currentUIActor() == nil {
 		// B1：没有交互渲染器（headless/CI 进程模型的常态）时必须显式输出。
 		// 旧行为在这里直接 return，面板与 ?format=text 上整个 AppState 区块
 		// 静默消失，读屏断言无法区分「没有渲染器」与「渲染器正常」。
@@ -415,11 +415,12 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	// commit entry. State() would detach the whole commit ledger while holding
 	// the actor mutex on every /debug/chat/status poll — 100,000 entries and
 	// ~96 MB on a 4,000-cell resumed page.
-	state := session.Interaction.uiActor.DiagnosticState()
+	actor := session.Interaction.currentUIActor()
+	state := actor.DiagnosticState()
 	// The snapshot carries no ledger, so the queue counters come from their own
 	// ledger-free projection: one O(entries) count under the same mutex, and no
 	// allocation at all.
-	effectDiagnostics := session.Interaction.uiActor.HistoryEffectDiagnostics()
+	effectDiagnostics := actor.HistoryEffectDiagnostics()
 	builder.heading("AppState / Presenter Migration: (GET /debug/chat/status#app_state)")
 	builder.meta("UI Revision:", strconv.FormatUint(state.Revision, 10))
 	builder.meta("Layout Generation:", strconv.FormatUint(state.Geometry.Generation, 10))
@@ -534,10 +535,10 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 // 输出，避免空会话噪声：FlushCount 远小于 Processed 说明批处理生效，Post Wait 说明
 // 生产者曾被 mailbox 背压（此时才轮到按 §6.2 第 4 条评估调大 MailboxSize）。
 func appendChatDebugUIActorLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
-	if builder == nil || session == nil || session.Interaction == nil || session.Interaction.uiActor == nil {
+	if builder == nil || session == nil || session.Interaction == nil || session.Interaction.currentUIActor() == nil {
 		return
 	}
-	stats := session.Interaction.uiActor.Stats()
+	stats := session.Interaction.currentUIActor().Stats()
 	if stats.Processed == 0 && stats.PostWaitCount == 0 && stats.Pending == 0 {
 		return
 	}

@@ -278,10 +278,11 @@ const (
 // 诊断投影（不克隆 ledger）；调用方不得持有 coordinator.mu，本函数会取 controller
 // 的锁，与 actor 内回调互锁。
 func (c *chatInteractionCoordinator) historyReplayDeliverySettled() bool {
-	if c == nil || c.uiActor == nil {
+	actor := c.currentUIActor()
+	if actor == nil {
 		return true
 	}
-	diagnostics := c.uiActor.HistoryEffectDiagnostics()
+	diagnostics := actor.HistoryEffectDiagnostics()
 	if diagnostics.ScrollbackReplayArmed || diagnostics.ProjectionUnknown || diagnostics.Frozen {
 		return false
 	}
@@ -305,7 +306,7 @@ func (c *chatInteractionCoordinator) resumeProgressLoadSettleActive() bool {
 // 探测 goroutine 有界（≤兜底窗口），收尾行提前被前台活动或兜底窗口清掉时自行退出。
 func settleChatHistoryLoadWhenDelivered(session *ChatSession) {
 	coordinator := chatResumeProgressTarget(session)
-	if coordinator == nil || coordinator.uiActor == nil {
+	if coordinator == nil || coordinator.currentUIActor() == nil {
 		return
 	}
 	if !coordinator.resumeProgressLoadSettleActive() {

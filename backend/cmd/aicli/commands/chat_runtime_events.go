@@ -2966,10 +2966,12 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 	// 消耗的都是同一段生产者等待）。首投即成功不产生样本。
 	var waitStart time.Time
 	defer func() {
-		if waitStart.IsZero() || coordinator.uiActor == nil {
+		if waitStart.IsZero() {
 			return
 		}
-		coordinator.uiActor.ObservePostWaitNanos(time.Since(waitStart))
+		if actor := coordinator.currentUIActor(); actor != nil {
+			actor.ObservePostWaitNanos(time.Since(waitStart))
+		}
 	}()
 	mustNotDrop := b.uiActorPostMustNotDrop(event.Type)
 	for {
@@ -2982,7 +2984,8 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 		if coordinator.uiActionRejectedAfterShutdown() {
 			return false, false
 		}
-		if coordinator.uiActor == nil || coordinator.uiActor.Stats().Closed {
+		actor := coordinator.currentUIActor()
+		if actor == nil || actor.Stats().Closed {
 			return false, false
 		}
 		// A bounded mailbox is normal backpressure, but waiting for it must
@@ -3022,8 +3025,8 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 		// WaitActionApplied self-removes on timeout and is bounded by the
 		// remaining budget, so the loop can never outlive its deadline.
 		if remaining := time.Until(waitDeadline); remaining > 0 {
-			if ticket := coordinator.uiActor.LastAcceptedTicket(); ticket != 0 {
-				coordinator.uiActor.WaitActionApplied(ticket, remaining)
+			if ticket := actor.LastAcceptedTicket(); ticket != 0 {
+				actor.WaitActionApplied(ticket, remaining)
 			} else {
 				// Defensive: a full bounded mailbox always owns an accepted
 				// ticket, but never turn the fallback into a tight spin.

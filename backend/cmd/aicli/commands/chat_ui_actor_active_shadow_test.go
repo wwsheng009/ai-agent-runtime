@@ -34,7 +34,7 @@ func TestRenderAssistantDelta_ShadowUsesCausalFollowup(t *testing.T) {
 		close(completed)
 		return nil
 	}), nil)
-	coordinator.uiActor = actor
+	coordinator.publishUIActor(actor)
 	coordinator.uiActorOnce.Do(func() {})
 	go actor.Run()
 	t.Cleanup(func() {
@@ -99,7 +99,7 @@ func TestToolStageShadowUsesCausalFollowup(t *testing.T) {
 		close(completed)
 		return nil
 	}), nil)
-	coordinator.uiActor = actor
+	coordinator.publishUIActor(actor)
 	coordinator.uiActorOnce.Do(func() {})
 	go actor.Run()
 	t.Cleanup(func() {

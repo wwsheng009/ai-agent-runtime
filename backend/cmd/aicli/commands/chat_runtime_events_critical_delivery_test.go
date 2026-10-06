@@ -21,7 +21,7 @@ func newStalledUIActorFixture(t *testing.T, sessionID string) (*chatRuntimeEvent
 	actor := ui.NewUIController(ui.UIControllerConfig{MailboxSize: 1}, ui.ReducerFunc(func(uint64, ui.UIAction) []ui.Effect {
 		return nil
 	}), func(ui.Effect) {})
-	coordinator.uiActorOnce.Do(func() { coordinator.uiActor = actor })
+	coordinator.uiActorOnce.Do(func() { coordinator.publishUIActor(actor) })
 	t.Cleanup(func() { actor.Close() })
 	if !actor.TryPost(ui.Resize{}) {
 		t.Fatal("failed to fill the one-slot mailbox")
