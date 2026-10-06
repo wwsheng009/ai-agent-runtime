@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -137,6 +138,13 @@ func uiDirectWriterInventory() []uiDirectWriterInventoryEntry {
 		{File: "welcome.go", Func: "PrintGoodbye", Kind: "os.Std*", Count: 1},
 		{File: "welcome.go", Func: "PrintHelp", Kind: "os.Std*", Count: 2},
 		{File: "welcome.go", Func: "PrintWelcomeWithConfig", Kind: "os.Std*", Count: 1},
+		// --- 审计补登（G2 盲区：子包递归 + 包级 var，2026-10-06）---
+		// DEC2026 帧包裹的 legacy surface 路径（syncFramesEnabled 仅在
+		// legacy FixedBottomSurface 开启；unified 路径不触达）。
+		{File: "renderengine/terminal_lock.go", Func: "withTerminalWriteLock", Kind: "os.Std*", Count: 2},
+		// legacy 兼容 sink 的默认 writer（包级 var；写路径经 proxy 串行化，
+		// 生产 interactive 由 TerminalSession 注入 writer）。
+		{File: "terminal_output.go", Func: "var processTerminalOutput", Kind: "os.Std*", Count: 1},
 	}
 }
 
@@ -147,9 +155,28 @@ func collectUIDirectWriters(t *testing.T) []uiDirectWriter {
 		t.Fatal("runtime.Caller failed")
 	}
 	uiDir := filepath.Dir(currentFile)
-	paths, err := filepath.Glob(filepath.Join(uiDir, "*.go"))
+	// Recursive walk: subpackages (renderengine, scene, render, …) are part
+	// of the same terminal-byte surface, so a flat ui/*.go glob is a blind
+	// spot (see audit gap G2: renderengine/terminal_lock.go).
+	var paths []string
+	err := filepath.WalkDir(uiDir, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != uiDir && (entry.Name() == "testdata" || strings.HasPrefix(entry.Name(), ".")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		paths = append(paths, path)
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("glob ui sources: %v", err)
+		t.Fatalf("walk ui sources: %v", err)
 	}
 	sort.Strings(paths)
 
@@ -163,53 +190,46 @@ func collectUIDirectWriters(t *testing.T) []uiDirectWriter {
 		if err != nil {
 			t.Fatalf("parse %s: %v", filepath.Base(path), err)
 		}
+		rel, err := filepath.Rel(uiDir, path)
+		if err != nil {
+			t.Fatalf("rel %s: %v", path, err)
+		}
+		fileKey := filepath.ToSlash(rel)
 		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			name := fn.Name.Name
-			if fn.Recv != nil {
-				name = "method " + name
-			}
-			// Fd() probes (terminal size, console handles) are not byte
-			// writers. Record their selector positions so the main walk can
-			// skip them and the ledger stays about real output channels.
-			fdProbe := map[token.Pos]bool{}
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue
 				}
-				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || selector.Sel.Name != "Fd" {
-					return true
+				name := d.Name.Name
+				if d.Recv != nil {
+					name = "method " + name
 				}
-				if stream := uiStdStreamSelector(selector.X); stream != nil {
-					fdProbe[stream.Pos()] = true
+				collectUIWritersFromNode(fset, fileKey, name, d.Body, &writers)
+			case *ast.GenDecl:
+				// Package-level vars can hold writers too (struct literals,
+				// func literals, plain os.Std* values); without this pass they
+				// never enter the ledger (audit gap G2 blind spot).
+				if d.Tok != token.VAR {
+					continue
 				}
-				return true
-			})
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				kind := ""
-				switch n := node.(type) {
-				case *ast.SelectorExpr:
-					if uiStdStreamSelector(n) != nil && !fdProbe[n.Pos()] {
-						kind = "os.Std*"
+				for _, spec := range d.Specs {
+					valueSpec, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
 					}
-				case *ast.CallExpr:
-					kind = uiDirectWriterCallKind(n)
+					name := "var "
+					for i, ident := range valueSpec.Names {
+						if i > 0 {
+							name += ","
+						}
+						name += ident.Name
+					}
+					for _, value := range valueSpec.Values {
+						collectUIWritersFromNode(fset, fileKey, name, value, &writers)
+					}
 				}
-				if kind != "" {
-					writers = append(writers, uiDirectWriter{
-						File: filepath.Base(path),
-						Func: name,
-						Kind: kind,
-						Line: fset.Position(node.Pos()).Line,
-					})
-				}
-				return true
-			})
+			}
 		}
 	}
 	sort.Slice(writers, func(i, j int) bool {
@@ -225,6 +245,51 @@ func collectUIDirectWriters(t *testing.T) []uiDirectWriter {
 		return writers[i].Line < writers[j].Line
 	})
 	return writers
+}
+
+// collectUIWritersFromNode records direct-writer sites inside one AST node.
+// FuncDecl bodies are attributed to the function name; package-level var
+// initializers are attributed to "var <names>" so package-scope writers
+// cannot hide from the gate.
+func collectUIWritersFromNode(fset *token.FileSet, file string, name string, node ast.Node, writers *[]uiDirectWriter) {
+	// Fd() probes (terminal size, console handles) are not byte writers.
+	// Record their selector positions so the main walk can skip them and the
+	// ledger stays about real output channels.
+	fdProbe := map[token.Pos]bool{}
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Fd" {
+			return true
+		}
+		if stream := uiStdStreamSelector(selector.X); stream != nil {
+			fdProbe[stream.Pos()] = true
+		}
+		return true
+	})
+	ast.Inspect(node, func(n ast.Node) bool {
+		kind := ""
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if uiStdStreamSelector(x) != nil && !fdProbe[x.Pos()] {
+				kind = "os.Std*"
+			}
+		case *ast.CallExpr:
+			kind = uiDirectWriterCallKind(x)
+		}
+		if kind != "" {
+			*writers = append(*writers, uiDirectWriter{
+				File: file,
+				Func: name,
+				Kind: kind,
+				Line: fset.Position(n.Pos()).Line,
+			})
+		}
+		return true
+	})
 }
 
 // uiStdStreamSelector reports whether expr is os.Stdout or os.Stderr.

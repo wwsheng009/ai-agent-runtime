@@ -990,8 +990,10 @@ func TestStructuredCommandHandlersHaveNoDirectTerminalWriter(t *testing.T) {
 
 // TestChatInteractiveDirectWriterInventory is the P0 baseline gate for the
 // unified-render migration. It deliberately records current legacy writers
-// rather than treating them as safe: every direct terminal writer reachable
-// from chat*.go or command.go must be listed in this migration-debt baseline.
+// rather than treating them as safe: every direct terminal writer in the
+// commands package (all *.go, non-recursive) must be listed in this
+// migration-debt baseline, including package-level vars, struct literals,
+// conversions and non-arg0 os.Std* positions (audit gap G2 blind spots).
 //
 // The gate fails when a new writer is introduced or a legacy writer count
 // changes. Migrating a writer means removing its entry; do not add entries for
@@ -1202,6 +1204,46 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_tool_debug.go", Func: "writeSessionDebugInfo", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_transcript_renderer.go", Func: "method RenderSupplement", Kind: "fmt.Print", Count: 1},
 		{File: "command.go", Func: "executeShellCommandDetailedMode", Kind: "fmt.Print", Count: 17},
+		// --- 审计补登（G2 盲区：包级 var / 结构体字面量 / 非 arg0 / glob 外，2026-10-06）---
+		// 说明：本组为盲区扫描先红后的存量登记（证据 E:\tmp\a0-cmd-red.txt）；
+		// A1 收敛（旁路化 / 收编 / 栅栏）后逐条删除，不得新增。
+		{File: "chat.go", Func: "printChatSessionMetaRow", Kind: "os.Std*", Count: 1},
+		{File: "chat.go", Func: "selectProviderWithReaderNumeric", Kind: "os.Std*", Count: 1},
+		{File: "chat_cache_local.go", Func: "var usageAttachWarn", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		{File: "chat_command_text_writer.go", Func: "NewStdoutCommandTextWriter", Kind: "os.Std*", Count: 1},
+		{File: "chat_interaction.go", Func: "newChatInteractionCoordinator", Kind: "os.Std*", Count: 1},
+		{File: "chat_legacy_console_editor_windows.go", Func: "var legacyConsoleDebugf", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		{File: "chat_legacy_console_editor_windows.go", Func: "var legacyConsoleDebugln", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		{File: "chat_model_command.go", Func: "printModelCommandProviderPickerLegacyPage", Kind: "os.Std*", Count: 2},
+		{File: "chat_model_command.go", Func: "promptModelCommandProviderSelectionLegacy", Kind: "os.Std*", Count: 2},
+		{File: "chat_model_switch.go", Func: "printRuntimeModelPickerLegacyPage", Kind: "os.Std*", Count: 1},
+		{File: "chat_model_switch.go", Func: "promptRuntimeModelSelectionLegacy", Kind: "os.Std*", Count: 1},
+		{File: "chat_model_switch.go", Func: "selectRuntimeReasoningEffortLegacy", Kind: "os.Std*", Count: 4},
+		{File: "chat_notification.go", Func: "initializeChatTitleNotifier", Kind: "os.Std*", Count: 1},
+		{File: "chat_notification_sound.go", Func: "initializeChatSoundNotifier", Kind: "os.Std*", Count: 1},
+		{File: "chat_pipe_console_line.go", Func: "pipeConsoleLineEditorSupported", Kind: "os.Std*", Count: 1},
+		{File: "chat_pipe_console_line.go", Func: "readPipeInteractiveLine", Kind: "os.Std*", Count: 2},
+		{File: "chat_profile_lifecycle_ops.go", Func: "chatProfileEditLifecycleText", Kind: "os.Std*", Count: 2},
+		{File: "chat_profile_overlay.go", Func: "emitProfileConfigOverlayWarning", Kind: "os.Std*", Count: 1},
+		{File: "chat_profile_resume.go", Func: "chatReapplyResumedProfileState", Kind: "os.Std*", Count: 1},
+		{File: "chat_selection_output.go", Func: "printChatSelectionMutedSuffix", Kind: "os.Std*", Count: 1},
+		{File: "chat_selection_output.go", Func: "printChatSelectionParts", Kind: "os.Std*", Count: 1},
+		{File: "chat_selection_output.go", Func: "printChatSelectionPrompt", Kind: "os.Std*", Count: 1},
+		{File: "chat_selection_output.go", Func: "printChatSelectionWarning", Kind: "os.Std*", Count: 1},
+		{File: "chat_setup.go", Func: "buildChatSession", Kind: "os.Std*", Count: 4},
+		{File: "chat_setup.go", Func: "presentChatSession", Kind: "os.Std*", Count: 3},
+		{File: "chat_setup.go", Func: "printChatCurrentRuntimeSessionStderr", Kind: "os.Std*", Count: 12},
+		{File: "chat_setup.go", Func: "printChatSessionPreamble", Kind: "os.Std*", Count: 25},
+		{File: "chat_setup.go", Func: "restoreLocalRuntimeHostTeamState", Kind: "os.Std*", Count: 1},
+		{File: "chat_surface_output.go", Func: "writeDirectInteractiveOutput", Kind: "os.Std*", Count: 1},
+		{File: "chat_tool_executor.go", Func: "withLiveChatToolOutput", Kind: "os.Std*", Count: 2},
+		{File: "chat_ui_actor.go", Func: "method EnableUnifiedRendererGateway", Kind: "os.Std*", Count: 1},
+		{File: "chat_ui_actor.go", Func: "method enableUnifiedRendererWithWriter", Kind: "os.Std*", Count: 1},
+		// exec_event_processor.go：审计点名 glob 外（exec 子进程/流输出通道），本轮纳入门禁。
+		{File: "exec_event_processor.go", Func: "NewExecEventProcessor", Kind: "os.Std*", Count: 2},
+		{File: "exec_event_processor.go", Func: "method OnStreamDelta", Kind: "ui.WriteTerminal*", Count: 1},
+		{File: "exec_event_processor.go", Func: "method OnTurnCompleted", Kind: "ui.WriteTerminal*", Count: 1},
+		{File: "exec_event_processor.go", Func: "method PrintFinalOutput", Kind: "ui.WriteTerminal*", Count: 1},
 	}
 }
 
@@ -1212,11 +1254,20 @@ func collectChatDirectWriters(t *testing.T) []chatDirectWriter {
 		t.Fatal("runtime.Caller failed")
 	}
 	commandsDir := filepath.Dir(currentFile)
+	// Scope: the interactive chat surface (chat*.go + command.go) plus the
+	// audit-flagged exec_event_processor.go (gap G2: previously outside the
+	// glob; its exec stream is an interactive-adjacent terminal byte channel).
+	// The remaining non-chat CLI files (config/doctor/mcp/provider/…) are
+	// classified as non-interactive command surfaces and are intentionally not
+	// swept into this interactive gate (see gap-closure plan A0/A1-8d).
 	paths, err := filepath.Glob(filepath.Join(commandsDir, "chat*.go"))
 	if err != nil {
 		t.Fatalf("glob chat sources: %v", err)
 	}
-	paths = append(paths, filepath.Join(commandsDir, "command.go"))
+	paths = append(paths,
+		filepath.Join(commandsDir, "command.go"),
+		filepath.Join(commandsDir, "exec_event_processor.go"),
+	)
 	sort.Strings(paths)
 
 	fset := token.NewFileSet()
@@ -1229,36 +1280,124 @@ func collectChatDirectWriters(t *testing.T) []chatDirectWriter {
 		if err != nil {
 			t.Fatalf("parse %s: %v", filepath.Base(path), err)
 		}
+		rel, err := filepath.Rel(commandsDir, path)
+		if err != nil {
+			t.Fatalf("rel %s: %v", path, err)
+		}
+		fileKey := filepath.ToSlash(rel)
 		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			name := fn.Name.Name
-			if fn.Recv != nil {
-				name = "method " + name
-			}
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue
 				}
-				if kind := chatDirectWriterKind(call); kind != "" {
-					writers = append(writers, chatDirectWriter{
-						File: filepath.Base(path),
-						Func: name,
-						Kind: kind,
-						Line: fset.Position(call.Pos()).Line,
-					})
+				name := d.Name.Name
+				if d.Recv != nil {
+					name = "method " + name
 				}
-				return true
-			})
+				collectChatWritersFromNode(fset, fileKey, name, d.Body, &writers)
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					valueSpec, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					name := "var "
+					for i, ident := range valueSpec.Names {
+						if i > 0 {
+							name += ","
+						}
+						name += ident.Name
+					}
+					for _, value := range valueSpec.Values {
+						collectChatWritersFromNode(fset, fileKey, name, value, &writers)
+					}
+				}
+			}
 		}
 	}
 	sort.Slice(writers, func(i, j int) bool {
 		return writers[i].String() < writers[j].String()
 	})
 	return writers
+}
+
+// collectChatWritersFromNode records direct-writer sites inside one AST node.
+// It combines call classification with a selector pass so writers hidden in
+// package-level vars, struct literals, conversions and non-arg0 positions are
+// still gated. Selectors already accounted for by a call kind, probe-only
+// method receivers (Fd/Stat/Sync/Name) and writer-identity comparisons are
+// skipped to avoid double counting and false positives.
+func collectChatWritersFromNode(fset *token.FileSet, file string, name string, node ast.Node, writers *[]chatDirectWriter) {
+	covered := map[token.Pos]bool{}
+	probe := map[token.Pos]bool{}
+	comparison := map[token.Pos]bool{}
+	markStream := func(expr ast.Expr, set map[token.Pos]bool) {
+		if selector, ok := expr.(*ast.SelectorExpr); ok && isChatStdStream(selector) {
+			set[selector.Pos()] = true
+		}
+	}
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			selector, ok := x.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if isChatStdStream(selector.X) && chatProbeMethod(selector.Sel.Name) {
+				markStream(selector.X, probe)
+			}
+			switch chatDirectWriterKind(x) {
+			case "fmt.Fprint(os.Std*)", "io.WriteString(os.Std*)", "ui.WriteTerminal*":
+				if len(x.Args) > 0 {
+					markStream(x.Args[0], covered)
+				}
+			case "os.Std*.Write*":
+				markStream(selector.X, covered)
+			}
+		case *ast.BinaryExpr:
+			if x.Op == token.EQL || x.Op == token.NEQ {
+				markStream(x.X, comparison)
+				markStream(x.Y, comparison)
+			}
+		}
+		return true
+	})
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		kind := ""
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if isChatStdStream(x) && !covered[x.Pos()] && !probe[x.Pos()] && !comparison[x.Pos()] {
+				kind = "os.Std*"
+			}
+		case *ast.CallExpr:
+			kind = chatDirectWriterKind(x)
+		}
+		if kind != "" {
+			*writers = append(*writers, chatDirectWriter{
+				File: file,
+				Func: name,
+				Kind: kind,
+				Line: fset.Position(n.Pos()).Line,
+			})
+		}
+		return true
+	})
+}
+
+// chatProbeMethod lists os.Std* methods that inspect the stream rather than
+// writing bytes to it.
+func chatProbeMethod(name string) bool {
+	switch name {
+	case "Fd", "Stat", "Sync", "Name":
+		return true
+	}
+	return false
 }
 
 func chatDirectWriterKind(call *ast.CallExpr) string {
