@@ -397,6 +397,28 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 - 验证：`go build`；ui 全量 + commands 全量（此前两连败的同一负载）；定向 `-race`
   （controller waiter/executor 栅栏/bridge 三态），见提交记录。
 
+### 3.7 轮询消除核查（1ms 轮询点清单复核，已完成）
+
+- 已消除：`chat_ui_actor.go` 的 prompt input / editor status 两个 dispatch
+  flusher 由 1ms 重试改 `waitUIActorCapacity`（`LastAcceptedTicket` +
+  `WaitActionApplied` 250ms 分片唤醒；循环语义不变——admitted/closed/shutdown
+  才退出；无 accepted ticket 的防御回退保留 1ms）。既有两个「NeverWaitsFor
+  FullMailbox」契约测试复跑通过。
+- 保留（队列等待或有界超时兜底，非 actor idle 轮询）：
+  - `controller.go:852`（`WaitIdleTimeout` 内部）：仅经保留的有界栅栏触达——
+    退出 close drain（chat_ui_actor.go:1014）、legacy 有界辅助
+    （chat_runtime_events.go:4787、chat_surface_output.go:538 300ms）、
+    `waitUIActorIdleBounded` 5s（生产 7 处，§3.3 明确保留）。
+  - `chat_runtime_events.go:1981/2003/2597`：backlog/deferred/字节预算的队列
+    等待，§3.3 明确保留。
+  - `chat_runtime_events.go:3030`：bridge 邮箱满事件驱动等待的防御回退
+    （无 accepted ticket 时）。
+- 结论：actor idle 等待路径（controller waiter / executor 票据栅栏 / bridge
+  三态 ack / 两个 dispatch flusher）已无 1ms 轮询；剩余均为队列等待或有界
+  超时兜底（保留项）。
+- 验证：commands 全量 166.8s 绿；两个「NeverWaitsForFullMailbox」契约测试
+  定向通过。
+
 ## 4. 实施顺序与回滚
 
 1. **P1-2a**（已完成）：`LayoutGeneration` 字段删除；`historyTailCells` 撤回、`historyPrepareHits/Misses` 暂缓（见 §2.1/§2.5）。

@@ -442,6 +442,27 @@ func (c *chatInteractionCoordinator) clearPromptInputDispatchThrough(sequence ui
 	c.promptInputDispatchMu.Unlock()
 }
 
+// uiActionCapacityWaitSlice bounds one capacity-wait iteration in the prompt
+// dispatch flushers. The loops keep their unbounded retry semantics (they exit
+// on admission, actor close, or shutdown); each iteration wakes on the actor's
+// applied watermark instead of a 1ms spin, mirroring the bridge's mailbox-full
+// path.
+const uiActionCapacityWaitSlice = 250 * time.Millisecond
+
+// waitUIActorCapacity blocks one iteration until the actor applies an accepted
+// action, so a full mailbox drains without busy-polling. The defensive fallback
+// keeps a missing accepted ticket from becoming a tight spin.
+func waitUIActorCapacity(actor *ui.UIController) {
+	if actor == nil {
+		return
+	}
+	if ticket := actor.LastAcceptedTicket(); ticket != 0 {
+		actor.WaitActionApplied(ticket, uiActionCapacityWaitSlice)
+		return
+	}
+	time.Sleep(time.Millisecond)
+}
+
 func (c *chatInteractionCoordinator) flushPromptInputDispatch(actor *ui.UIController) {
 	if c == nil || actor == nil {
 		return
@@ -492,9 +513,9 @@ func (c *chatInteractionCoordinator) flushPromptInputDispatch(actor *ui.UIContro
 			c.promptInputDispatchMu.Unlock()
 			return
 		}
-		// TryPost is intentionally non-blocking. A short retry lets the actor
-		// drain without allocating one goroutine per editor callback.
-		time.Sleep(time.Millisecond)
+		// TryPost is intentionally non-blocking; wait for applied progress so
+		// the actor can drain without a busy 1ms retry per editor callback.
+		waitUIActorCapacity(actor)
 	}
 }
 
@@ -617,7 +638,7 @@ func (c *chatInteractionCoordinator) flushPromptEditorStatusDispatch(actor *ui.U
 			c.promptEditorStatusDispatchMu.Unlock()
 			return
 		}
-		time.Sleep(time.Millisecond)
+		waitUIActorCapacity(actor)
 	}
 }
 
