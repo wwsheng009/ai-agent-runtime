@@ -549,6 +549,32 @@ sequenceDiagram
 > 收敛执行：`docs/plan/aicli-render-gap-closure-plan-20261006.md`（批次 A–D：门禁增强 / 轮询登记 /
 > 交付账收紧 / 口径小修 + 验收与台账）。
 
+### 7.5.1 轮询保留项登记（B0/B2，2026-10-06）
+
+> 依据：P1-3 §3.7 保留决策 + 实施方案 B 批。B2 核对：生产 1ms 命中集合与本表一致
+>（`controller.go:852`、`chat_runtime_events.go:1981/2003/2597/3033`、`chat_ui_actor.go:485`），
+> 无未登记 1ms 站点。B1 决策：**保留**（不事件化；触发条件变化时再走事件化改造）。
+
+| 站点 | 形态 | 分类 | 说明 |
+|---|---|---|---|
+| `ui/controller.go:852`（`WaitIdleTimeout` 内部） | 1ms | 有界超时兜底（保留） | 经 close drain / legacy 有界辅助 / `waitUIActorIdleBounded` 5s 触达（P1-3 §3.7） |
+| `chat_runtime_events.go:1981/2003/2597` | 1ms | 队列等待（保留） | backlog / deferred / 字节预算等待 |
+| `chat_runtime_events.go:3033` | 1ms | 防御回退（保留） | 无 accepted ticket 的 mailbox 满等待回退 |
+| `chat_ui_actor.go:485` | 1ms | 防御回退（保留） | `waitUIActorCapacity` 无 ticket 防紧自旋 |
+| `chat_runtime_events.go:1840` | 5ms | 队列重试（保留） | deferred retry interval |
+| `chat_ui_actor.go:1035` | 5ms | 有界重试（保留） | alternate-screen release 3 次退避 |
+| `ui/terminal_session_executor.go:1037` | 10ms | backoff 让出（保留，P2 删） | scrollback reset backoff |
+| `ui/screen_lease.go:82-89` | 10ms | lease 等待（保留） | alternate screen 互斥 |
+| `chat_resume_progress.go:331/407` | 400ms | 进度轮询（保留；P2 候选事件化） | 历史加载 settle 等待 |
+| `chat_startup_timing.go:187` | 5s | watchdog（保留） | 启动看门狗 |
+| `chat_busy_input.go:38` / `chat_input_queue.go:951` | 50–100ms | 输入窗口/队列（保留） | 非 actor-idle 路径 |
+| `chat_http.go:205` / `context.go:383` | 退避间隔 | 网络/命令重试（保留） | 指数退避 |
+| `chat_interaction.go:7660` | rune delay | 用户可见节流（保留） | 流式渲染节奏 |
+| `ui/inputbox_editor*.go`、`chat_legacy_console_editor_windows.go:159` | 10–50ms 级 | 平台输入/转义序列等待（保留） | Windows/Unix 输入解码 |
+| `ui/terminal.go:450` | Sleep 方法 | 工具 API（非轮询点） | 公共封装 |
+
+> 复核触发：若上述任一站点成为热点/延迟主因，或 actor-idle 语义变化，重新评估事件化（方案 B1）。
+
 ---
 
 ## 8. 组件衔接契约（接口矩阵）
