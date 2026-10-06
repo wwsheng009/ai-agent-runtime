@@ -232,11 +232,16 @@ type UIController struct {
 	// post ticket merged into queue[i]. Tickets are the ack identity for
 	// WaitActionApplied/WaitActionVisible; the lanes are always resliced
 	// together so their lengths stay equal. Followups carry no ticket.
-	queueTickets  []uint64
-	nextTicket    uint64
-	appliedTicket uint64
-	visibleTicket uint64
-	waiters       map[uint64][]*actionWaiter
+	queueTickets []uint64
+	nextTicket   uint64
+	// lastAcceptedTicket is the newest ticket that owns a mailbox slot
+	// (admitted or merged). Dropped posts never advance it, so the applied
+	// watermark covering it proves the mailbox has no accepted action left —
+	// the event-driven capacity fence behind LastAcceptedTicket.
+	lastAcceptedTicket uint64
+	appliedTicket      uint64
+	visibleTicket      uint64
+	waiters            map[uint64][]*actionWaiter
 	// followups holds actions causally emitted while the reducer applies the
 	// current action. They are consumed before the next external mailbox item,
 	// but do not consume external mailbox capacity: accepting a facade mutation

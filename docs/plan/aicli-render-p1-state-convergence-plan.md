@@ -177,8 +177,7 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   waiter 表在 `c.mu` 下登记/释放；超时自摘除并复核水位（竞态不丢成功）；Run 在 close-drain 完成后 abort 未决 waiter。
 - 钉测试 7 项（`controller_action_wait_test.go`）：admitted/merged/dropped、deferred、无 Run 超时、
   visible 等待 effect 交付、merge 双 ticket、满 mailbox 三态。
-- 未决：executor 五处替换（847/891/1012/1155/1159/1183/834）与 bridge 三态 ack 属第 2/3 小步；
-  `WaitIdleTimeout` 的 1ms 轮询仅在这些调用点迁移后才会消失。
+- 第 2/3 小步（executor 票据栅栏 + bridge 三态 ack）已完成，见 §3.6。
 - 相邻修复（本次一并落地，commands 包）——「在途窗口」在单车道重构后残留的两处缺口：
   1. `trySendStreamEvent` 改为**先记账后入队**：原 send→account 窗口内消费者已出队并进入
      写帧，并发 delta 读到 `eventQueueBytes==0` 而直投；
@@ -189,6 +188,30 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   （期望 `["Hello"," world!"]` 实得 `["Hello"," world","!"]`，隔离通过）；修复后该测试
   5x、`TestChatRuntimeEvents` 子集 3x 通过，全量复跑见提交记录。与 §3.3「合并/丢弃路径必须立即 ack」
   同域，属 bridge 第 3 小步的前置清障。
+
+### 3.6 P1-3 第 2/3 小步实施记录（executor 票据栅栏 + bridge 三态 ack，已完成）
+
+- executor（terminal_session_executor.go）：
+  - `postControllerActionTracked`（全部 14 处 `e.controller.Post` 改走 tracked）+ `lastControllerTicket`；
+    7 处 `waitControllerIdle`（847/891/1012/1155/1159/1183/834）迁移为票据栅栏。
+  - 834/891/1012/1155/1159/1183 等"自己最近一次 post 已 apply"（`waitLastControllerAction`）；
+    **847 读 schedule 前需可见"调用时刻已接受的全部 action"**（种子/替换快照异步 apply），
+    用 `waitControllerAcceptedApplied`（`LastAcceptedTicket` + `WaitActionApplied`，finite 集合、
+    事件驱动、2s 有界）。直接改 own-ticket 会让
+    `TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory` 在全量负载下
+    稳定复现 17 个 entry 全 Pending（快照未 apply 即读 schedule 后退出且无后续唤醒）；
+    修复后该测试与 commands 全量复跑绿，并新增钉测试
+    `TestWaitControllerAcceptedAppliedWaitsForPriorAccepts`。
+  - `WaitIdleTimeout` 生产调用点清零（仅剩测试使用）；生产路径 1ms 轮询消除。
+- bridge（chat_runtime_events.go）：`postRuntimeEventToUIActorWithEpoch` 改
+  `tryPostUIActionTracked` 三态（admitted/merged=送达；dropped=满/关闭）；满邮箱等待改事件驱动：
+  `LastAcceptedTicket()` + `WaitActionApplied(remaining)`，删除 `time.Sleep(1ms)` 轮询；
+  critical 重试 / 非 critical 有界丢弃语义不变。
+- controller 增补：`lastAcceptedTicket` 仅由 accepted（admitted/merged）推进，dropped 票据
+  永不悬挂；`LastAcceptedTicket()` 作为容量栅栏水位；钉测试
+  `TestLastAcceptedTicketIsTheCapacityFence`。
+- 验证：`go build`；ui 全量 + commands 全量（此前两连败的同一负载）；定向 `-race`
+  （controller waiter/executor 栅栏/bridge 三态），见提交记录。
 
 ## 4. 实施顺序与回滚
 

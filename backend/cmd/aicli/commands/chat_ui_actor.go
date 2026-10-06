@@ -348,6 +348,18 @@ func (c *chatInteractionCoordinator) tryPostUIAction(action ui.UIAction) bool {
 	return actor.TryPost(action)
 }
 
+// tryPostUIActionTracked is the ack-aware form of tryPostUIAction used by the
+// runtime-event bridge: the three-state outcome replaces the boolean retry
+// loop's guesswork, and the bridge waits on LastAcceptedTicket instead of
+// polling the mailbox.
+func (c *chatInteractionCoordinator) tryPostUIActionTracked(action ui.UIAction) (ui.PostOutcome, uint64) {
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return ui.PostDropped, 0
+	}
+	return actor.TryPostTracked(action)
+}
+
 // postScheduledUIAction is the FramePump-safe posting entry. Timer and
 // DrawRequested are coalescable internal actions with a fixed key set; the
 // deferred FIFO lane admits them without waiting for bounded mailbox capacity,

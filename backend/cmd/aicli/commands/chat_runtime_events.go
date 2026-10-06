@@ -65,11 +65,11 @@ type chatRuntimeEventBridge struct {
 	// backlog into eventQueue. A slow UI consumer therefore degrades to
 	// bounded, in-order backlog growth instead of blocking the LLM stream
 	// callback or reordering the live display (回放正确不能替代实时正确).
-	streamMu                    sync.Mutex
-	backlog                     []*chatRuntimeQueuedEvent
-	backlogBytes                int64
-	backlogIndex                map[string]*chatRuntimeQueuedEvent // coalescible latest-wins 槽位
-	streamWorkerRunning         bool
+	streamMu            sync.Mutex
+	backlog             []*chatRuntimeQueuedEvent
+	backlogBytes        int64
+	backlogIndex        map[string]*chatRuntimeQueuedEvent // coalescible latest-wins 槽位
+	streamWorkerRunning bool
 	// streamWriteInFlight is true while run() is handling a mergeable stream
 	// event (its write has started and not returned). Publishers must keep
 	// coalescing into the ordered backlog during this window, and the backlog
@@ -77,7 +77,7 @@ type chatRuntimeEventBridge struct {
 	// merge surface, so promoting during an in-flight write would split one
 	// stall into several small redraws. Unlike queue-byte accounting this flag
 	// is exact for harnesses that consume the queue manually.
-	streamWriteInFlight bool
+	streamWriteInFlight         bool
 	backlogMerged               uint64
 	backlogEvicted              uint64
 	backlogDropped              uint64
@@ -2973,7 +2973,7 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 	}()
 	mustNotDrop := b.uiActorPostMustNotDrop(event.Type)
 	for {
-		if coordinator.tryPostUIAction(action) {
+		if outcome, _ := coordinator.tryPostUIActionTracked(action); outcome != ui.PostDropped {
 			return true, true
 		}
 		if waitStart.IsZero() {
@@ -3015,10 +3015,21 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 			b.logLateRuntimeEvent(event, reason)
 			return false, false
 		}
-		// The UI actor releases a slot as soon as it finishes the current
-		// action; polling keeps the wait genuinely bounded without blocking on
-		// the mailbox cond.
-		time.Sleep(time.Millisecond)
+		// The mailbox releases capacity as Run applies accepted actions. Wait
+		// event-driven for the newest accepted ticket instead of polling: when
+		// the applied watermark covers it, the mailbox holds no accepted
+		// action, so the retry above must be admitted (or merged).
+		// WaitActionApplied self-removes on timeout and is bounded by the
+		// remaining budget, so the loop can never outlive its deadline.
+		if remaining := time.Until(waitDeadline); remaining > 0 {
+			if ticket := coordinator.uiActor.LastAcceptedTicket(); ticket != 0 {
+				coordinator.uiActor.WaitActionApplied(ticket, remaining)
+			} else {
+				// Defensive: a full bounded mailbox always owns an accepted
+				// ticket, but never turn the fallback into a tight spin.
+				time.Sleep(time.Millisecond)
+			}
+		}
 	}
 }
 

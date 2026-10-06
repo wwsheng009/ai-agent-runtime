@@ -182,6 +182,12 @@ const (
 type TerminalSessionExecutor struct {
 	controller *UIController
 	session    *TerminalSession
+	// lastControllerTicket is the ack ticket of the newest action this executor
+	// posted and the controller accepted (admitted or merged). The runOne and
+	// publishResult fences wait for it instead of polling the controller queue:
+	// "my last post has been applied" is exactly the state fence those call
+	// sites need, and it cannot be pinned by unrelated producers.
+	lastControllerTicket uint64
 
 	mu        sync.Mutex
 	running   bool
@@ -211,7 +217,7 @@ type TerminalSessionExecutor struct {
 	diagHandoffWhileBackoff uint64
 	// diagClaimMissReleases counts claim-miss cycles that posted an explicit
 	// HistoryCommitDeferred release (most often because a Resize/Theme drained
-	// by waitControllerIdle advanced the layout generation between markInFlight
+	// by the ticket fence advanced the layout generation between markInFlight
 	// and the snapshot). Without the release, an accepted claim stays InFlight
 	// forever: terminalSessionSchedule scans Pending only, and
 	// hasOlderPendingOrInFlight rejects every later claim behind it, silently
@@ -782,25 +788,68 @@ func (e *TerminalSessionExecutor) finishWorker(done chan struct{}) {
 	}
 }
 
-// terminalSessionControllerIdleWait 是执行器等待控制器队列排空的单次上限。
+// terminalSessionControllerIdleWait 是执行器等控制器 ack 的单次上限。
 //
 // 执行器是生产侧循环，而控制器在持续负载下队列可能长期非空（历史规划 pass
 // 与高频事件流叠加）：无界的 UIController.WaitIdle 会把执行器线程永久钉死，
 // 现场表现为投递日志/scrollback 不再推进、TUI 假死（2026-10-04
 // session_20260930210352_V5o7MDYL：publishResult 在 WaitIdle 上阻塞 33 分钟，
 // executor.last_entry 冻结在 seq=831，render_output 冻结在 last_sequence=3233）。
-// 超时后继续前进是安全的：所有调用点在超时路径上都只依赖随后重新读取的快照，
-// 或队列里仍有待办（HasPending）；排队中的 ack/reducer action 会按序应用并
-// 由对应的 reducer 分支自行唤醒执行器。
+// 原实现用 WaitIdleTimeout 的 1ms 轮询兜底；现在所有调用点改为等待执行器
+// 自己最近一次 post 的 ack 票据（WaitActionApplied）——事件驱动、不受其它
+// 生产者队列长度影响。超时后继续前进仍是安全的：所有调用点在超时路径上都
+// 只依赖随后重新读取的快照，或队列里仍有待办（HasPending）；排队中的
+// ack/reducer action 会按序应用并由对应的 reducer 分支自行唤醒执行器。
 const terminalSessionControllerIdleWait = 2 * time.Second
 
-// waitControllerIdle 是有界的 WaitIdle：true 表示控制器已排空，false 表示
-// 等待超时（调用方按"可能仍需再跑一轮"处理，绝不阻塞）。
-func (e *TerminalSessionExecutor) waitControllerIdle() bool {
+// postControllerActionTracked 投递一个控制器 action 并记录被接受 post 的 ack
+// 票据。仅当控制器拒绝（已关闭）时返回 false；合并 post 返回的是被合并槽位
+// 提升后的票据，因此等待该票据观察到的正是携带本次 payload 的那次 apply。
+func (e *TerminalSessionExecutor) postControllerActionTracked(action UIAction) bool {
+	if e == nil || e.controller == nil || action == nil {
+		return false
+	}
+	outcome, ticket := e.controller.PostTracked(action)
+	if outcome == PostDropped {
+		return false
+	}
+	e.lastControllerTicket = ticket
+	return true
+}
+
+// waitLastControllerAction 有界等待执行器最近一次被接受的 post 完成 apply、
+// 其 AppState 已发布——这正是原 waitControllerIdle 各调用点需要的状态栅栏。
+// 没有待观察 post 时立即返回 true；false 表示超时，调用方按"可能仍需再跑
+// 一轮"处理，绝不阻塞。
+func (e *TerminalSessionExecutor) waitLastControllerAction() bool {
 	if e == nil || e.controller == nil {
 		return true
 	}
-	return e.controller.WaitIdleTimeout(terminalSessionControllerIdleWait)
+	ticket := e.lastControllerTicket
+	if ticket == 0 {
+		return true
+	}
+	return e.controller.WaitActionApplied(ticket, terminalSessionControllerIdleWait)
+}
+
+// waitControllerAcceptedApplied 有界等待"调用时刻已接受的全部 action"完成
+// apply——runOne 读 schedule 前的状态栅栏。种子快照/替换动作是异步 apply 的：
+// 立即读 schedule 会在 pending token 出现前空跑一轮并退出，而后续唤醒只由
+// 特定 action 的 reducer 转移触发（HistoryPlanWindowReady 等），一旦错过
+// 就再也没有 claim 机会（全量负载下
+// TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory 稳定复现
+// 17 个 entry 全 Pending）。与旧 WaitIdleTimeout 的区别：只等本次调用时刻
+// 已接受的票据（finite 集合），不会被后续生产者的持续入队钉死，事件驱动无
+// 1ms 轮询。
+func (e *TerminalSessionExecutor) waitControllerAcceptedApplied() bool {
+	if e == nil || e.controller == nil {
+		return true
+	}
+	ticket := e.controller.LastAcceptedTicket()
+	if ticket == 0 {
+		return true
+	}
+	return e.controller.WaitActionApplied(ticket, terminalSessionControllerIdleWait)
 }
 
 // releaseClaimMiss returns an accepted-but-uncomposable history claim to the
@@ -827,11 +876,11 @@ func (e *TerminalSessionExecutor) releaseClaimMiss(token, generation uint64) {
 	e.diagMu.Lock()
 	e.diagClaimMissReleases++
 	e.diagMu.Unlock()
-	_ = e.controller.Post(HistoryCommitDeferred{Token: token, LayoutGeneration: generation})
+	e.postControllerActionTracked(HistoryCommitDeferred{Token: token, LayoutGeneration: generation})
 	// Drain so the rebase is visible to the caller's follow-up schedule read.
 	// Bounded by terminalSessionControllerIdleWait like every other controller
 	// wait on this worker.
-	e.waitControllerIdle()
+	e.waitLastControllerAction()
 }
 
 // runOne returns true when reducer publication exposes immediate ordered work:
@@ -844,7 +893,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	if e == nil || e.controller == nil || e.session == nil {
 		return false
 	}
-	e.waitControllerIdle()
+	e.waitControllerAcceptedApplied()
 	schedule := e.controller.terminalSessionSchedule()
 	if schedule.recoveryActionable {
 		// Scrollback-reset backoff: a failing writer must not turn the
@@ -883,12 +932,12 @@ func (e *TerminalSessionExecutor) runOne() bool {
 					// scrollback. Without this, new messages after `resume`
 					// stall forever while the success-mode backoff persists at
 					// an unchanged layout generation.
-					if !e.controller.Post(BeginHistoryCommit{
+					if !e.postControllerActionTracked(BeginHistoryCommit{
 						Token: schedule.pendingToken, LayoutGeneration: schedule.pendingGeneration,
 					}) {
 						return false
 					}
-					e.waitControllerIdle()
+					e.waitLastControllerAction()
 					claimedToken := schedule.pendingToken
 					snapshot := e.controller.terminalSessionSnapshot(claimedToken)
 					if snapshot.claimed != nil {
@@ -1004,12 +1053,12 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	}
 	claimedToken := uint64(0)
 	if schedule.pendingToken != 0 {
-		if !e.controller.Post(BeginHistoryCommit{
+		if !e.postControllerActionTracked(BeginHistoryCommit{
 			Token: schedule.pendingToken, LayoutGeneration: schedule.pendingGeneration,
 		}) {
 			return false
 		}
-		e.waitControllerIdle()
+		e.waitLastControllerAction()
 		claimedToken = schedule.pendingToken
 	}
 
@@ -1047,7 +1096,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		// acked=322, pending=0, projection known). Ask the reducer to continue
 		// the plan; the stall guard (PlanStalled) keeps a plan that cannot
 		// advance in this epoch from spinning this loop.
-		if e.controller.Post(ContinueHistoryPlanAction{}) {
+		if e.postControllerActionTracked(ContinueHistoryPlanAction{}) {
 			return true
 		}
 	}
@@ -1120,29 +1169,29 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 		}
 		switch {
 		case history.Deferred && history.Err == nil && !history.MayHavePartiallyWritten:
-			_ = e.controller.Post(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
+			e.postControllerActionTracked(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
 		case history.Err != nil && result.Frame.Err != nil && !history.MayHavePartiallyWritten:
 			// The terminal transaction was attempted, but the writer proved that
 			// zero bytes reached the host. Keep the same token retryable. The frame
 			// error below invalidates the viewport cache; after a source-backed
 			// recovery, HistoryProjectionRecovered wakes this Pending handoff.
-			_ = e.controller.Post(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
+			e.postControllerActionTracked(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
 		case history.MayHavePartiallyWritten && history.Err == nil:
-			_ = e.controller.Post(HistoryCommitFailed{
+			e.postControllerActionTracked(HistoryCommitFailed{
 				Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration,
 				Err: ErrHistoryCommitPartialWriteWithoutError, MayHavePartiallyWritten: true,
 			})
 		case history.Err != nil:
-			_ = e.controller.Post(HistoryCommitFailed{
+			e.postControllerActionTracked(HistoryCommitFailed{
 				Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration,
 				Err: history.Err, MayHavePartiallyWritten: history.MayHavePartiallyWritten,
 			})
 		default:
 			if len(history.Delivered) > 0 {
-				historyAcknowledged = e.controller.Post(HistoryCommitsAcknowledged{
+				historyAcknowledged = e.postControllerActionTracked(HistoryCommitsAcknowledged{
 					Commits: history.Delivered, Frame: history.Frame, LayoutGeneration: claimed.LayoutGeneration,
 				})
-			} else if e.controller.Post(HistoryCommitAcknowledged{
+			} else if e.postControllerActionTracked(HistoryCommitAcknowledged{
 				Token: claimed.Token, Frame: history.Frame, LayoutGeneration: claimed.LayoutGeneration,
 			}) {
 				historyAcknowledged = true
@@ -1151,12 +1200,12 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	}
 
 	if result.Frame.Err != nil {
-		_ = e.controller.Post(HistoryProjectionInvalidated{LayoutGeneration: generation})
-		e.waitControllerIdle()
+		e.postControllerActionTracked(HistoryProjectionInvalidated{LayoutGeneration: generation})
+		e.waitLastControllerAction()
 		return false
 	}
 	if result.Frame.Deferred {
-		e.waitControllerIdle()
+		e.waitLastControllerAction()
 		return false
 	}
 	// A bottom-viewport repaint is not proof that the independently owned top
@@ -1164,7 +1213,7 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	// terminal owner confirms both facts; partial history writes remain
 	// fail-closed until an explicit scrollback reconciliation.
 	if result.Frame.FullRepaint && e.session.ProjectionState().HistoryKnown {
-		_ = e.controller.Post(HistoryProjectionRecovered{LayoutGeneration: generation})
+		e.postControllerActionTracked(HistoryProjectionRecovered{LayoutGeneration: generation})
 	}
 	// A non-destructive recovery proves the visible frame without replacing
 	// scrollback. Publish the settle barrier so the reducer quarantines the
@@ -1172,15 +1221,15 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	// an authorized replay is still pending, because that replay owns the
 	// obligation and a settle must never race it.
 	if result.SettledHistoryProjection && result.Frame.Err == nil && !result.Frame.Deferred {
-		_ = e.controller.Post(HistoryReconciliationSettled{LayoutGeneration: generation})
+		e.postControllerActionTracked(HistoryReconciliationSettled{LayoutGeneration: generation})
 	}
 	if result.ScrollbackReset && result.TerminalEpoch != 0 {
-		_ = e.controller.Post(HistoryScrollbackReconciled{
+		e.postControllerActionTracked(HistoryScrollbackReconciled{
 			LayoutGeneration: generation,
 			TerminalEpoch:    result.TerminalEpoch,
 		})
 	}
-	e.waitControllerIdle()
+	e.waitLastControllerAction()
 	if result.ScrollbackReset {
 		return e.controller.terminalSessionHasActionableWork()
 	}

@@ -1936,26 +1936,58 @@ func TestExecutorDiagTextSummarySmoke(t *testing.T) {
 }
 
 // TestTerminalSessionExecutorControllerIdleWaitIsBounded pins the 2026-10-04
-// deadlock fix: the executor must never block forever on a controller whose
-// queue stays non-empty under sustained load. The bounded wait reports false
-// and lets the worker loop continue instead of pinning the executor thread.
+// deadlock fix on the ticket-based fence: the executor must never block forever
+// on a controller whose queue stays non-empty under sustained load. The bounded
+// wait reports false and lets the worker loop continue instead of pinning the
+// executor thread.
 func TestTerminalSessionExecutorControllerIdleWaitIsBounded(t *testing.T) {
 	controller := NewUIController(UIControllerConfig{}, nil, nil)
-	if !controller.Post(ContinueHistoryPlanAction{}) {
-		t.Fatal("controller.Post rejected the queued fixture action")
-	}
 	executor := &TerminalSessionExecutor{controller: controller}
+	if !executor.postControllerActionTracked(ContinueHistoryPlanAction{}) {
+		t.Fatal("controller rejected the queued fixture action")
+	}
 
 	started := time.Now()
-	idle := executor.waitControllerIdle()
+	applied := executor.waitLastControllerAction()
 	elapsed := time.Since(started)
-	if idle {
-		t.Fatal("waitControllerIdle reported idle with a non-empty queue")
+	if applied {
+		t.Fatal("waitLastControllerAction reported applied with no running actor")
 	}
 	if elapsed < terminalSessionControllerIdleWait/2 {
-		t.Fatalf("waitControllerIdle returned after %s, want >= %s", elapsed, terminalSessionControllerIdleWait/2)
+		t.Fatalf("waitLastControllerAction returned after %s, want >= %s", elapsed, terminalSessionControllerIdleWait/2)
 	}
 	if elapsed > terminalSessionControllerIdleWait*5 {
-		t.Fatalf("waitControllerIdle took %s, want bounded near %s", elapsed, terminalSessionControllerIdleWait)
+		t.Fatalf("waitLastControllerAction took %s, want bounded near %s", elapsed, terminalSessionControllerIdleWait)
+	}
+}
+
+// TestWaitControllerAcceptedAppliedWaitsForPriorAccepts pins the runOne head
+// fence: it must observe actions accepted before the call (the seed/replacement
+// snapshot applies asynchronously), not just the executor's own posts. Reading
+// the schedule before that snapshot applies strands every pending token with no
+// later wake to claim them.
+func TestWaitControllerAcceptedAppliedWaitsForPriorAccepts(t *testing.T) {
+	controller := NewUIController(
+		UIControllerConfig{},
+		ReducerFunc(func(uint64, UIAction) []Effect { return nil }),
+		func(Effect) {},
+	)
+	defer controller.Close()
+	executor := &TerminalSessionExecutor{controller: controller}
+	if !controller.Post(DrawRequested{Key: "seed-snapshot"}) {
+		t.Fatal("controller rejected the seed fixture action")
+	}
+
+	started := time.Now()
+	if executor.waitControllerAcceptedApplied() {
+		t.Fatal("waitControllerAcceptedApplied reported applied without a running actor")
+	}
+	if elapsed := time.Since(started); elapsed < terminalSessionControllerIdleWait/2 {
+		t.Fatalf("waitControllerAcceptedApplied returned after %s, want a bounded wait", elapsed)
+	}
+
+	go controller.Run()
+	if !executor.waitControllerAcceptedApplied() {
+		t.Fatal("accepted seed action never reached the applied watermark")
 	}
 }

@@ -177,3 +177,38 @@ func TestWaitActionVisibleWaitsForEffectDelivery(t *testing.T) {
 		t.Fatal("visible fence never opened after delivery")
 	}
 }
+
+// TestLastAcceptedTicketIsTheCapacityFence pins the invariant the runtime-event
+// bridge relies on: the newest *accepted* ticket (never a dropped post's) is
+// the watermark whose apply proves the mailbox has capacity again.
+func TestLastAcceptedTicketIsTheCapacityFence(t *testing.T) {
+	c := NewUIController(
+		UIControllerConfig{MailboxSize: 1},
+		ReducerFunc(func(uint64, UIAction) []Effect { return nil }),
+		func(Effect) {},
+	)
+	defer c.Close()
+
+	outcome, first := c.PostTracked(DrawRequested{Key: "fence-1"})
+	if outcome != PostAdmitted {
+		t.Fatalf("first PostTracked = %v, want admitted", outcome)
+	}
+	if got := c.LastAcceptedTicket(); got != first {
+		t.Fatalf("LastAcceptedTicket = %d, want %d", got, first)
+	}
+	if outcome, ticket := c.TryPostTracked(Resize{Width: 8, Height: 3}); outcome != PostDropped || ticket != 0 {
+		t.Fatalf("full-mailbox TryPostTracked = %v/%d, want dropped/0", outcome, ticket)
+	}
+	if got := c.LastAcceptedTicket(); got != first {
+		t.Fatalf("LastAcceptedTicket advanced on a dropped post: %d, want %d", got, first)
+	}
+
+	go c.Run()
+	if !c.WaitActionApplied(first, 2*time.Second) {
+		t.Fatal("applied fence never opened for the accepted ticket")
+	}
+	outcome, second := c.TryPostTracked(Resize{Width: 8, Height: 3})
+	if outcome != PostAdmitted || second <= first {
+		t.Fatalf("TryPostTracked after drain = %v/%d, want admitted with ticket > %d", outcome, second, first)
+	}
+}

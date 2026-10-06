@@ -50,6 +50,7 @@ func (c *UIController) PostTracked(action UIAction) (PostOutcome, uint64) {
 	}
 	ticket := c.nextPostTicketLocked()
 	if c.mergeCoalescableLocked(action, ticket) {
+		c.observeAcceptedTicketLocked(ticket)
 		c.mu.Unlock()
 		return PostMerged, ticket
 	}
@@ -71,6 +72,7 @@ func (c *UIController) PostTracked(action UIAction) (PostOutcome, uint64) {
 		return PostDropped, 0
 	}
 	c.appendQueuedLocked(action, ticket)
+	c.observeAcceptedTicketLocked(ticket)
 	c.mu.Unlock()
 	c.cond.Broadcast()
 	return PostAdmitted, ticket
@@ -88,12 +90,14 @@ func (c *UIController) TryPostTracked(action UIAction) (PostOutcome, uint64) {
 	}
 	ticket := c.nextPostTicketLocked()
 	if c.mergeCoalescableLocked(action, ticket) {
+		c.observeAcceptedTicketLocked(ticket)
 		return PostMerged, ticket
 	}
 	if len(c.queue) >= c.cap {
 		return PostDropped, 0
 	}
 	c.appendQueuedLocked(action, ticket)
+	c.observeAcceptedTicketLocked(ticket)
 	c.cond.Broadcast()
 	return PostAdmitted, ticket
 }
@@ -111,12 +115,14 @@ func (c *UIController) PostDeferredTracked(action UIAction) (PostOutcome, uint64
 	}
 	ticket := c.nextPostTicketLocked()
 	if c.mergeCoalescableLocked(action, ticket) {
+		c.observeAcceptedTicketLocked(ticket)
 		c.deferredPosted++
 		c.deferredMerged++
 		c.mu.Unlock()
 		return PostMerged, ticket
 	}
 	c.appendQueuedLocked(action, ticket)
+	c.observeAcceptedTicketLocked(ticket)
 	c.deferredPosted++
 	if len(c.queue) > c.cap {
 		c.capacityOverflow++
@@ -138,6 +144,31 @@ func (c *UIController) PostDeferredTracked(action UIAction) (PostOutcome, uint64
 func (c *UIController) nextPostTicketLocked() uint64 {
 	c.nextTicket++
 	return c.nextTicket
+}
+
+// observeAcceptedTicketLocked records the newest ticket that owns (or will
+// own, after a merge) a mailbox slot. Dropped posts deliberately do not
+// advance it: their ticket numbers are never applied, so a capacity fence
+// waiting on the newest *accepted* ticket always terminates.
+//
+// 调用方必须持有 c.mu。
+func (c *UIController) observeAcceptedTicketLocked(ticket uint64) {
+	if ticket > c.lastAcceptedTicket {
+		c.lastAcceptedTicket = ticket
+	}
+}
+
+// LastAcceptedTicket returns the highest ticket of any action accepted into
+// the mailbox (admitted or merged). Waiting for its apply is the event-driven
+// capacity fence for TryPost: once the applied watermark covers it, the
+// mailbox holds no accepted action, so a retry must be admitted (or merged).
+func (c *UIController) LastAcceptedTicket() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastAcceptedTicket
 }
 
 // mergeCoalescableLocked merges action into an already queued coalescable slot
