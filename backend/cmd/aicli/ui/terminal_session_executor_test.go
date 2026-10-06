@@ -532,8 +532,8 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 // the follow-up Resize, and the executor's snapshot then refuses the batch
 // because the reducer generation advanced underneath the claim.
 //
-// Before the fix that claim stayed InFlight forever: terminalSessionSchedule
-// scans Pending only, hasOlderPendingOrInFlight rejects every later claim, and
+// Before the fix that claim stayed on the write cursor forever:
+// terminalSessionSchedule scans Queued only, hasOlderQueuedToken rejects every later claim, and
 // no watchdog reclaims it — a single race silently deadlocked the whole handoff
 // queue (live 2026-10-05: in-flight=1, oldest pending frozen, delivery journal
 // frozen, pending growing on an idle session). The fix must return the token to

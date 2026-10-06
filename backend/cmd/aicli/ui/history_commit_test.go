@@ -393,6 +393,88 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 	}
 }
 
+// TestHistoryCommitLedger_QueueHeadCursorMatchesScan 钉住 P1-1 第 3 步替换
+// pendingCount 后的两个不变量：HasPending 必须恒等于「存在 Queued 条目」，且
+// hasOlderQueuedToken 的 O(1) 头指针判据必须与全表扫描逐一一致（乱序入队、
+// 中间取消、头指针推进、settle 隔离、Clone 与外部构造的 ledger 全覆盖）。
+func TestHistoryCommitLedger_QueueHeadCursorMatchesScan(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	check := func(when string) {
+		t.Helper()
+		want := ledger.QueuedCount() > 0
+		if got := ledger.HasPending(); got != want {
+			t.Fatalf("%s: HasPending=%t, scan=%t", when, got, want)
+		}
+		for _, token := range []uint64{1, 2, 3, 4} {
+			wantOlder := false
+			for candidate, entry := range ledger.byToken {
+				if candidate < token && entry.State == HistoryCommitQueued {
+					wantOlder = true
+					break
+				}
+			}
+			if got := ledger.hasOlderQueuedToken(token); got != wantOlder {
+				t.Fatalf("%s: hasOlderQueuedToken(%d)=%t, scan=%t", when, token, got, wantOlder)
+			}
+		}
+	}
+
+	check("empty")
+	// 乱序入队：头指针必须取最小 token，而不是最后一个。
+	for _, token := range []uint64{3, 1, 2} {
+		if err := ledger.Enqueue(testHistoryCommit(token, scene.CellID(token), 8)); err != nil {
+			t.Fatalf("Enqueue(%d): %v", token, err)
+		}
+	}
+	check("three queued out of order")
+	if ledger.queueHeadToken != 1 {
+		t.Fatalf("queue head = %d, want 1", ledger.queueHeadToken)
+	}
+
+	// 取消中间的 token：头指针不动（头仍是最小未交付），队列判据保持精确。
+	if err := ledger.Invalidate(2, false); err != nil {
+		t.Fatalf("Invalidate(2): %v", err)
+	}
+	check("middle invalidated")
+
+	// 交付头 token：头指针必须跳过已被取消的 2，前进到 3。
+	if err := ledger.Ack(1, 7, 8); err != nil {
+		t.Fatalf("Ack(1): %v", err)
+	}
+	check("head delivered")
+	if ledger.queueHeadToken != 3 {
+		t.Fatalf("queue head after delivery = %d, want 3", ledger.queueHeadToken)
+	}
+
+	// 失败最后一个 queued token：队列清空，头指针归零。
+	if err := ledger.Fail(3, errors.New("short write"), false); err != nil {
+		t.Fatalf("Fail(3): %v", err)
+	}
+	check("queue drained")
+	if ledger.queueHeadToken != 0 {
+		t.Fatalf("queue head after drain = %d, want 0", ledger.queueHeadToken)
+	}
+	// settle 隔离未决交付：条目仍是隔离终态（非 Queued），队列判据不受影响。
+	if !ledger.SettleUnresolvedWithoutReplay() {
+		t.Fatal("settle must retire the failed delivery")
+	}
+	check("failed delivery settled")
+
+	// Clone 必须携带头指针；外部构造的 ledger（绕过 Enqueue）必须走扫描兜底。
+	clone := ledger.Clone()
+	if clone.HasPending() || clone.queueHeadToken != 0 {
+		t.Fatalf("clone inherited a stale head: head=%d pending=%t", clone.queueHeadToken, clone.HasPending())
+	}
+	external := NewHistoryCommitLedger()
+	external.byToken[11] = HistoryCommitEntry{Commit: testHistoryCommit(11, 42, 8), State: HistoryCommitQueued}
+	if !external.HasPending() {
+		t.Fatal("externally constructed ledger lost its queued entry")
+	}
+	if external.QueuedCount() != 1 {
+		t.Fatalf("external QueuedCount=%d, want 1", external.QueuedCount())
+	}
+}
+
 // TestHistoryCommitLedger_OrderedTokensStaysAscending verifies the cached
 // token slice mirrors byToken keys in ascending order even for out-of-order
 // Enqueue calls (the defensive fallback path must never be observable). The

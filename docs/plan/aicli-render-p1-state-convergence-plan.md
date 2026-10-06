@@ -2,7 +2,7 @@
 
 > 来源：`docs/plan/aicli-unified-render-architecture-audit-20261005.md` §6 P1。
 > 基线：`feat/render-p0-writer-unification` @ `44f31cbf`（P0 写端归一完成，18 提交）。
-> 状态：**侦察完成 + P1-1 第 1/2 步、P1-2a、P1-3 第 1/2 小步已实施**
+> 状态：**侦察完成 + P1-1 第 1/2/3 步、P1-2a、P1-3 第 1/2 小步已实施**
 >（2026-10-06；三路 explore 原始报告要点已归档于 §6，全部证据带 `文件:行`）。
 
 ## 0. 结论摘要
@@ -130,6 +130,25 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   定向 `-race` 通过。全包 `-race` 仅
   `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation` 因 60s 收敛期限在
   race 插桩下超时，基线 `d8ec19ca` 同一用例同样失败（非本轮回归）。
+
+### 1.7 P1-1 第 3 步实施记录（pendingCount/minNonTerminalToken 游标化，已完成）
+
+- `pendingCount` 删除：空队列判据改由队列头指针 `queueHeadToken`（最小 Queued
+  token，0=空）直接表达；`HasPending()` 不再维护与状态转移并行的计数镜像。
+  外部构造的 ledger（测试直写 `byToken`）仅在 `len(tokens) != len(byToken)`
+  时走扫描兜底（与 `orderedTokens()` 同一检测信号），生产路径保持 O(1)。
+- `minNonTerminalToken` 更名 `queueHeadToken`（队列头指针），与
+  `HistoryEffectQueueState.WriteCursor`（交付游标）配对；`advanceQueueHeadAfterTerminal`
+  在 Queued→终态时向前跳过终态 token（摊还 O(1)），`hasOlderPendingOrInFlight`
+  更名 `hasOlderQueuedToken`（claim 排序护栏读头指针）。
+- 顺带删除死代码 `nextNonTerminalTokenByScan`；`nextNonTerminalToken` 更名
+  `nextQueuedToken`；诊断 trace 的 pending 计数改走 `QueuedCount()` 扫描
+  （仅 AIR_TRACE_HISTORY 开启时执行）。
+- 回归钉：新增 `TestHistoryCommitLedger_QueueHeadCursorMatchesScan`，对乱序入队、
+  中间取消、头指针推进、settle 隔离、Clone 与外部构造 ledger 逐状态比对
+  `HasPending`/`hasOlderQueuedToken` 与全表扫描；barrier-flip 测试改用
+  `QueuedCount()` 断言。
+- 验证：ui 全量 + commands 全量通过；定向 `-race` 通过。
 
 ## 2. P1-2 可推导镜像收敛
 

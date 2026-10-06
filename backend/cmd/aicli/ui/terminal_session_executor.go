@@ -218,9 +218,9 @@ type TerminalSessionExecutor struct {
 	// diagClaimMissReleases counts claim-miss cycles that posted an explicit
 	// HistoryCommitDeferred release (most often because a Resize/Theme drained
 	// by the ticket fence advanced the layout generation between markInFlight
-	// and the snapshot). Without the release, an accepted claim stays InFlight
-	// forever: terminalSessionSchedule scans Pending only, and
-	// hasOlderPendingOrInFlight rejects every later claim behind it, silently
+	// and the snapshot). Without the release, an accepted claim stays on the
+	// write cursor forever: terminalSessionSchedule scans Queued only, and
+	// hasOlderQueuedToken rejects every later claim behind it, silently
 	// deadlocking the whole handoff queue (live 2026-10-05: in-flight=1, oldest
 	// pending frozen, delivery journal frozen, pending growing on an idle
 	// session). A refused claim posts the same no-op release; the counter

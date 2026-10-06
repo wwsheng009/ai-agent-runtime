@@ -248,7 +248,7 @@ func (s HistoryEffectQueueState) Pending() []HistoryCommit {
 	if s.ledger == nil || !s.ledger.HasPending() {
 		return nil
 	}
-	commits := make([]HistoryCommit, 0, s.ledger.pendingCount)
+	commits := make([]HistoryCommit, 0, len(s.ledger.byToken))
 	for _, token := range s.ledger.orderedTokens() {
 		entry, ok := s.ledger.byToken[token]
 		if ok && entry.State == HistoryCommitQueued {
@@ -540,7 +540,7 @@ func (s *HistoryEffectQueueState) markInFlight(token, generation uint64) error {
 	}
 	// Native scrollback is ordered. Do not let a stale presenter claim a later
 	// token while an earlier eligible effect has not reached a terminal result.
-	if s.ledger.hasOlderPendingOrInFlight(token) {
+	if s.ledger.hasOlderQueuedToken(token) {
 		return ErrHistoryCommitOutOfOrder
 	}
 	s.WriteCursor = token
@@ -693,7 +693,6 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 		wasUnresolved := entry.Unresolved()
 		switch entry.State {
 		case HistoryCommitQueued:
-			s.ledger.pendingCount--
 			entry.State = HistoryCommitQuarantined
 			entry.Quarantine = HistoryCommitQuarantineFailed
 		case HistoryCommitQuarantined:
@@ -711,7 +710,7 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 		s.ledger.byToken[delivered.Token] = entry
 		// Queued -> Quarantined is a terminal transition; keep the cached minimum
 		// non-terminal token from pinning on this token.
-		s.ledger.advanceMinAfterTerminal(delivered.Token)
+		s.ledger.advanceQueueHeadAfterTerminal(delivered.Token)
 	}
 	s.ReconciliationRequired = true
 }

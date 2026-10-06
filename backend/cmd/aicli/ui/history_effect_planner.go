@@ -1191,7 +1191,7 @@ func continueTruncatedHistoryPlan(state *UIControllerState) bool {
 	// are not observable at this point on purpose: the ack that drains the queue
 	// is reduced after its own token was acknowledged, and the executor claims the
 	// next token only after that reduction returned.
-	if effects.ledger != nil && effects.ledger.pendingCount > 0 {
+	if effects.ledger != nil && effects.ledger.HasPending() {
 		return false
 	}
 	if effects.Frozen || effects.ProjectionUnknown || effects.hasUnresolvedTerminalDelivery() {

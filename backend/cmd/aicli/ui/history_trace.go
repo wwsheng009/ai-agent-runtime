@@ -53,7 +53,7 @@ func historyTracePendingCount(effects HistoryEffectQueueState) int {
 	if effects.ledger == nil {
 		return 0
 	}
-	return effects.ledger.pendingCount
+	return effects.ledger.QueuedCount()
 }
 
 // active reports whether the hook currently has a usable path, emitting the

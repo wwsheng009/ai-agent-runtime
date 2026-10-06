@@ -254,15 +254,14 @@ type HistoryCommitLedger struct {
 	byRange            map[historyCommitRangeKey]uint64
 	bySource           map[historyCommitSourceKey]map[uint64]struct{}
 	activeTokensByCell map[scene.CellID][]uint64
-	pendingCount       int
-	// minNonTerminalToken caches the smallest token whose state is still
-	// Queued (claimed or not). It backs hasOlderPendingOrInFlight as an O(1)
-	// predicate; production pprof showed the previous full-map scan inside
-	// the per-claim ordering guard as a hot spot on resumed sessions with a
-	// very large ledger. Terminal states are absorbing (no path re-arms
-	// Delivered/Quarantined), so the minimum only ever moves forward and
-	// the recompute-after-terminal scan is amortized O(1) per transition.
-	minNonTerminalToken uint64
+	// queueHeadToken 是队列头指针：最小未交付（Queued）token，0 = 队列为空。
+	// 它与 HistoryEffectQueueState.WriteCursor（交付游标，可能正在物理写的
+	// token）配对：claim 只允许头指针位置，交付/取消后头指针向前跳过终态。
+	// P1-1 第 3 步：pendingCount 已删除 —— 空队列判据直接由头指针表达
+	// （HasPending），不再维护一个与状态转移并行的计数镜像。production pprof
+	// 显示旧的整表扫描在 per-claim 排序护栏上是热点，因此头指针只向前推进，
+	// 终态吸收（Delivered/Quarantined 不回退）保证跳过扫描摊还 O(1)。
+	queueHeadToken uint64
 	// activeAckPlanVersion bumps whenever the acked Active-origin prefix that
 	// planEligibleHistoryCommits reads via activeAckedRenderedPrefixRows can
 	// change. Ack is the only transition that grows that set (terminal states
@@ -351,9 +350,8 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 		tokens[at] = commit.Token
 		l.activeTokensByCell[commit.CellID] = tokens
 	}
-	l.pendingCount++
-	if l.minNonTerminalToken == 0 || commit.Token < l.minNonTerminalToken {
-		l.minNonTerminalToken = commit.Token
+	if l.queueHeadToken == 0 || commit.Token < l.queueHeadToken {
+		l.queueHeadToken = commit.Token
 	}
 	return nil
 }
@@ -408,9 +406,8 @@ func (l *HistoryCommitLedger) Invalidate(token uint64, mayHavePartiallyWritten b
 		l.unresolvedCount++
 		entry.MayHavePartiallyWritten = true
 	}
-	l.pendingCount--
 	l.byToken[token] = entry
-	l.advanceMinAfterTerminal(token)
+	l.advanceQueueHeadAfterTerminal(token)
 	return nil
 }
 
@@ -442,20 +439,19 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 		entry.Commit.Lines = nil
 	}
 	l.byToken[token] = entry
-	l.pendingCount--
 	if entry.Commit.Origin == HistoryCommitActive {
 		l.activeAckPlanVersion++
 	}
-	l.advanceMinAfterTerminal(token)
+	l.advanceQueueHeadAfterTerminal(token)
 	return nil
 }
 
-// nextNonTerminalToken returns the smallest live token greater than from that
-// is still Queued, or 0 when none remains. It walks the cached
+// nextQueuedToken returns the smallest live token greater than from that is
+// still Queued, or 0 when none remains. It walks the cached
 // ascending token slice; the walk is bounded by the number of consecutive
 // terminal tokens after from, so the total cost is amortized O(1) per
 // terminal transition across the ledger's lifetime.
-func (l *HistoryCommitLedger) nextNonTerminalToken(from uint64) uint64 {
+func (l *HistoryCommitLedger) nextQueuedToken(from uint64) uint64 {
 	tokens := l.orderedTokens()
 	// Binary-search the first token above `from`, then scan forward only over
 	// the terminal run. The previous implementation skipped the token prefix
@@ -473,29 +469,16 @@ func (l *HistoryCommitLedger) nextNonTerminalToken(from uint64) uint64 {
 	return 0
 }
 
-func (l *HistoryCommitLedger) nextNonTerminalTokenByScan(from uint64) uint64 {
-	for _, token := range l.orderedTokens() {
-		if token <= from {
-			continue
-		}
-		if entry, ok := l.byToken[token]; ok &&
-			entry.State == HistoryCommitQueued {
-			return token
-		}
-	}
-	return 0
-}
-
-// advanceMinAfterTerminal refreshes the cached minimum non-terminal token
-// after a transition into a terminal state (Delivered or Quarantined).
-// Terminal states are absorbing, so the minimum only ever moves forward and
-// the bounded recompute scan stays amortized O(1) per terminal transition.
-// Skipping this refresh pins the cache on a terminal token and makes
-// hasOlderPendingOrInFlight report a phantom older effect forever, which
-// deadlocks every later claim behind out-of-order rejection.
-func (l *HistoryCommitLedger) advanceMinAfterTerminal(token uint64) {
-	if l.minNonTerminalToken == token {
-		l.minNonTerminalToken = l.nextNonTerminalToken(token)
+// advanceQueueHeadAfterTerminal moves the queue-head cursor past token after a
+// Queued -> terminal transition (Delivered or Quarantined). Terminal states are
+// absorbing, so the head only ever moves forward and the bounded recompute scan
+// stays amortized O(1) per terminal transition. Skipping this refresh pins the
+// head on a terminal token and makes hasOlderQueuedToken report a phantom older
+// effect forever, which deadlocks every later claim behind out-of-order
+// rejection.
+func (l *HistoryCommitLedger) advanceQueueHeadAfterTerminal(token uint64) {
+	if l.queueHeadToken == token {
+		l.queueHeadToken = l.nextQueuedToken(token)
 	}
 }
 
@@ -511,9 +494,8 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 	// A failed quarantine is always unresolved regardless of
 	// MayHavePartiallyWritten.
 	l.unresolvedCount++
-	l.pendingCount--
 	l.byToken[token] = entry
-	l.advanceMinAfterTerminal(token)
+	l.advanceQueueHeadAfterTerminal(token)
 	return nil
 }
 
@@ -574,8 +556,39 @@ func (l *HistoryCommitLedger) Entries() []HistoryCommitEntry {
 // HasPending is allocation-free and is intended for scheduler decisions. The
 // detached Entries view is deliberately reserved for diagnostics and callers
 // that actually need payload ownership.
+//
+// The queue-head cursor answers this in O(1): head != 0 iff at least one Queued
+// entry exists. Only externally constructed ledgers (tests that write byToken
+// directly, bypassing Enqueue) leave the head unset; the ordered-token cache
+// mismatch is the same signal orderedTokens() uses to detect them, and only
+// then does this pay for a scan.
 func (l *HistoryCommitLedger) HasPending() bool {
-	return l != nil && l.pendingCount > 0
+	if l == nil {
+		return false
+	}
+	if l.queueHeadToken != 0 {
+		return true
+	}
+	if len(l.tokens) != len(l.byToken) {
+		return l.nextQueuedToken(0) != 0
+	}
+	return false
+}
+
+// QueuedCount counts Queued entries by scanning the ledger. Diagnostic-only
+// (env-gated trace): production emptiness/ordering decisions use the O(1)
+// queue-head cursor instead.
+func (l *HistoryCommitLedger) QueuedCount() int {
+	if l == nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range l.byToken {
+		if entry.State == HistoryCommitQueued {
+			count++
+		}
+	}
+	return count
 }
 
 // holdsPlan reports whether the ledger still records any delivery lifecycle.
@@ -723,11 +736,11 @@ func (l *HistoryCommitLedger) hasUnresolvedTerminalDelivery() bool {
 	return l != nil && l.unresolvedCount > 0
 }
 
-func (l *HistoryCommitLedger) hasOlderPendingOrInFlight(token uint64) bool {
+func (l *HistoryCommitLedger) hasOlderQueuedToken(token uint64) bool {
 	// O(1) equivalent of the previous full-map scan: an earlier Queued token
-	// exists exactly when the smallest non-terminal token is
-	// still older than token. See the minNonTerminalToken field comment.
-	return l != nil && l.minNonTerminalToken != 0 && l.minNonTerminalToken < token
+	// exists exactly when the queue head is still older than token. See the
+	// queueHeadToken field comment.
+	return l != nil && l.queueHeadToken != 0 && l.queueHeadToken < token
 }
 
 func (l *HistoryCommitLedger) orderedTokens() []uint64 {
@@ -785,8 +798,7 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 		}
 	}
 	clone.compactedEntries = l.compactedEntries
-	clone.pendingCount = l.pendingCount
-	clone.minNonTerminalToken = l.minNonTerminalToken
+	clone.queueHeadToken = l.queueHeadToken
 	clone.activeAckPlanVersion = l.activeAckPlanVersion
 	clone.unresolvedCount = l.unresolvedCount
 	clone.tokens = append([]uint64(nil), l.tokens...)

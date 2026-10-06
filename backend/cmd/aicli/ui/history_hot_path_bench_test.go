@@ -54,7 +54,7 @@ func benchMutableActive(source string) ActiveCellState {
 // BenchmarkResumeReplay300Cells measures one full snapshot install of a
 // resumed session: planEligibleHistoryCommits lays out and wraps every
 // finalized cell, then each candidate walks enqueue (which previously paid an
-// O(ledger) hasOlderPendingOrInFlight scan per token).
+// O(ledger) ordering scan per token; the queue head is now an O(1) cursor).
 func BenchmarkResumeReplay300Cells(b *testing.B) {
 	snapshot := benchResumedSnapshot(300)
 	for b.Loop() {
@@ -264,9 +264,9 @@ func BenchmarkUIControllerBurstBatching(b *testing.B) {
 // 「输出区行数」量级。
 func BenchmarkLayoutAppScreenResumedSession(b *testing.B) {
 	state := AppState{
-		Revision:         1,
-		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
-		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
+		Revision:   1,
+		Geometry:   GeometryState{Width: 100, Height: 40, Generation: 1},
+		Transcript: NewTranscriptState(benchResumedSnapshot(3000)),
 	}
 	rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 	b.ReportMetric(float64(len(rows)), "layout_rows")
@@ -285,9 +285,9 @@ func BenchmarkLayoutAppScreenResumedSession(b *testing.B) {
 // MatchesFullLayout 下逐行相等。
 func BenchmarkLayoutTranscriptTailVsFull(b *testing.B) {
 	state := AppState{
-		Revision:         1,
-		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
-		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
+		Revision:   1,
+		Geometry:   GeometryState{Width: 100, Height: 40, Generation: 1},
+		Transcript: NewTranscriptState(benchResumedSnapshot(3000)),
 	}
 	rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 	byID := transcriptCellsByID(state.Transcript)
@@ -320,9 +320,9 @@ func BenchmarkLayoutTranscriptTailVsFull(b *testing.B) {
 // 记忆化，每次调用都要为整个历史重建 []scene.LayoutRow。
 func BenchmarkTranscriptLayoutRowsResumedSession(b *testing.B) {
 	state := AppState{
-		Revision:         1,
-		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
-		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
+		Revision:   1,
+		Geometry:   GeometryState{Width: 100, Height: 40, Generation: 1},
+		Transcript: NewTranscriptState(benchResumedSnapshot(3000)),
 	}
 	b.ReportMetric(float64(len(state.Transcript.Cells)), "cells")
 	b.ReportAllocs()

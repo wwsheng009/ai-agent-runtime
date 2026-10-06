@@ -931,8 +931,8 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 		if state3.HistoryEffects.HasPending() {
 			t.Fatalf("barrier flip did not re-plan: pending effects survived")
 		}
-		if state3.HistoryEffects.ledger.pendingCount != 0 {
-			t.Fatalf("barrier flip left %d pending effects", state3.HistoryEffects.ledger.pendingCount)
+		if count := state3.HistoryEffects.ledger.QueuedCount(); count != 0 {
+			t.Fatalf("barrier flip left %d pending effects", count)
 		}
 	})
 
