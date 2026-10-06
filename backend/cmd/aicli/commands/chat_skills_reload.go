@@ -95,10 +95,13 @@ func runSkillReloadCommand(session *ChatSession) (*skillReloadReport, error) {
 
 	cfg := effectiveChatSkillConfig(session.Config, session)
 	binding := session.SkillsBinding
-	if binding == nil || binding.manager == nil {
+	if binding == nil {
 		return nil, fmt.Errorf("技能运行时尚未挂载；请确认 skills_runtime.enabled 后重试")
 	}
-	manager := binding.manager
+	manager := binding.Manager()
+	if manager == nil {
+		return nil, fmt.Errorf("技能运行时尚未挂载；请确认 skills_runtime.enabled 后重试")
+	}
 	registry := manager.Registry()
 	loader := manager.Loader()
 	if registry == nil || loader == nil {

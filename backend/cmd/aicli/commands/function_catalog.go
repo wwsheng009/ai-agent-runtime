@@ -597,7 +597,7 @@ func (c *aicliFunctionCatalog) SelectRequestFunctions(session *ChatSession, prom
 	exposureMode := skillExposureAuto
 	if binding != nil {
 		exposedSkills, exposureDetails = binding.AnalyzeSkillExposure(session, prompt)
-		if mode := normalizeSkillExposureMode(binding.exposureMode); mode != "" {
+		if mode := normalizeSkillExposureMode(binding.ExposureMode()); mode != "" {
 			exposureMode = mode
 		}
 	} else if mode := normalizeSkillExposureMode(session.SkillsMode); mode != "" {
@@ -651,7 +651,7 @@ func (c *aicliFunctionCatalog) SelectStableSessionFunctions(session *ChatSession
 
 	exposureMode := skillExposureAuto
 	if binding != nil {
-		if mode := normalizeSkillExposureMode(binding.exposureMode); mode != "" {
+		if mode := normalizeSkillExposureMode(binding.ExposureMode()); mode != "" {
 			exposureMode = mode
 		}
 	} else if mode := normalizeSkillExposureMode(session.SkillsMode); mode != "" {
@@ -736,7 +736,7 @@ func (c *aicliFunctionCatalog) skillFunctionForCatalogNameLocked(name string) *S
 	if c.skillsBinding == nil {
 		return nil
 	}
-	return c.skillsBinding.skillFunctions[name]
+	return c.skillsBinding.SkillFunctionForName(name)
 }
 
 // filterMentionHiddenTextSkillFunctions 从请求选择中剔除被 mention 收敛的

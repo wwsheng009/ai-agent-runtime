@@ -255,7 +255,7 @@ func skillMentionBinding(session *ChatSession) *skillsRuntimeBinding {
 func skillMentionKnownNames(session *ChatSession) map[string]string {
 	known := make(map[string]string)
 	if binding := skillMentionBinding(session); binding != nil {
-		for _, fn := range binding.skillFunctions {
+		for _, fn := range binding.SkillFunctions() {
 			name := skillFunctionDisplayName(fn)
 			if name == "" {
 				continue
@@ -376,8 +376,9 @@ func resolveMentionedTextSkills(ctx context.Context, session *ChatSession, menti
 		}
 	}
 
-	byName := make(map[string][]skillMentionCandidate, len(binding.skillFunctions))
-	for _, fn := range binding.skillFunctions {
+	skillFunctions := binding.SkillFunctions()
+	byName := make(map[string][]skillMentionCandidate, len(skillFunctions))
+	for _, fn := range skillFunctions {
 		name := skillFunctionDisplayName(fn)
 		if fn == nil || name == "" {
 			continue
@@ -962,10 +963,11 @@ const skillMentionUntrustedProjectDetail = "project is not trusted (folder trust
 // 变量化以便单测注入：binding.manager 是具体 bootstrap manager，单测不便启动
 // 全量 runtime；生产路径始终走 registry.UnavailableSkills()（Q11）。
 var skillMentionUnavailableSkills = func(binding *skillsRuntimeBinding) []runtimeskill.UnavailableSkill {
-	if binding == nil || binding.manager == nil {
+	manager := binding.Manager()
+	if manager == nil {
 		return nil
 	}
-	registry := binding.manager.Registry()
+	registry := manager.Registry()
 	if registry == nil {
 		return nil
 	}
@@ -1123,7 +1125,8 @@ func skillMentionSelectedMissingTools(session *ChatSession, selection *skillMent
 		return nil
 	}
 	binding := skillMentionBinding(session)
-	if binding == nil || binding.mcpRuntime == nil {
+	mcpRuntime := binding.MCPRuntime()
+	if mcpRuntime == nil {
 		return nil
 	}
 	var note *skillMentionDependencyNote
@@ -1134,7 +1137,7 @@ func skillMentionSelectedMissingTools(session *ChatSession, selection *skillMent
 		}
 		var missing []string
 		for _, toolName := range normalizeSkillMentionToolNames(skillItem.Tools) {
-			if _, err := binding.mcpRuntime.FindTool(toolName); err != nil {
+			if _, err := mcpRuntime.FindTool(toolName); err != nil {
 				missing = append(missing, toolName)
 			}
 		}

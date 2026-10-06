@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -46,6 +47,13 @@ type skillExecutor interface {
 }
 
 type skillsRuntimeBinding struct {
+	// mu 保护全部可变字段：热刷新（buildSkillsRuntimeBindingFromManager 的
+	// reuse 分支）会整体替换 count/skillFunctions/skillFunctionsByPath/roots/
+	// exposure* 等，请求线程读字段必须经访问器（锁内取快照）；字段替换后
+	// 不再原地变更，快照可锁外使用。锁序约定：catalog.mu → binding.mu
+	// （function_catalog 持 catalog 锁时只经访问器读 binding）；刷新路径
+	// 先取 binding 写锁完成字段替换、释放后再取 catalog 锁（不得嵌套）。
+	mu      sync.RWMutex
 	manager *runtimebootstrap.Manager
 	// ownsManager is true when this binding created the bootstrap manager and
 	// must stop it on Close. Shared host bootstrap managers set this false so
@@ -110,14 +118,91 @@ func (b *skillsRuntimeBinding) Count() int {
 	if b == nil {
 		return 0
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	return b.count
 }
 
 func (b *skillsRuntimeBinding) Close() error {
-	if b == nil || b.manager == nil || !b.ownsManager {
+	if b == nil {
 		return nil
 	}
-	return b.manager.Stop()
+	b.mu.RLock()
+	manager := b.manager
+	ownsManager := b.ownsManager
+	b.mu.RUnlock()
+	if manager == nil || !ownsManager {
+		return nil
+	}
+	return manager.Stop()
+}
+
+// Manager / MCPRuntime / Roots / ExposureMode / ExposureTopK / SkillFunctions
+// 是热刷新可变字段的锁内快照访问器：请求线程不得直读字段。
+func (b *skillsRuntimeBinding) Manager() *runtimebootstrap.Manager {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.manager
+}
+
+func (b *skillsRuntimeBinding) MCPRuntime() runtimeskill.MCPManager {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.mcpRuntime
+}
+
+func (b *skillsRuntimeBinding) Roots() []string {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.roots
+}
+
+func (b *skillsRuntimeBinding) ExposureMode() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.exposureMode
+}
+
+func (b *skillsRuntimeBinding) ExposureTopK() int {
+	if b == nil {
+		return 0
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.exposureTopK
+}
+
+// SkillFunctions 返回当前 skill 函数表（锁内取引用；刷新整体替换 map，
+// 返回的 map 不再被写入，可锁外遍历）。
+func (b *skillsRuntimeBinding) SkillFunctions() map[string]*SkillFunction {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.skillFunctions
+}
+
+// SkillFunctionForName 按函数名（map 键，如 skill__alpha）查函数。
+func (b *skillsRuntimeBinding) SkillFunctionForName(functionName string) *SkillFunction {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.skillFunctions[strings.TrimSpace(functionName)]
 }
 
 func (b *skillsRuntimeBinding) ResolveExposedSkillFunctions(session *ChatSession, prompt string) map[string]struct{} {
@@ -126,20 +211,30 @@ func (b *skillsRuntimeBinding) ResolveExposedSkillFunctions(session *ChatSession
 }
 
 func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt string) (map[string]struct{}, *skillExposureDetails) {
-	if b == nil || len(b.skillFunctions) == 0 {
+	if b == nil {
+		return nil, nil
+	}
+	// 热刷新会整体替换这些字段：锁内取快照，锁外使用。
+	b.mu.RLock()
+	skillFunctions := b.skillFunctions
+	exposureMode := b.exposureMode
+	exposureTopK := b.exposureTopK
+	exposureRouter := b.exposureRouter
+	b.mu.RUnlock()
+	if len(skillFunctions) == 0 {
 		return nil, nil
 	}
 
 	exposed := make(map[string]struct{})
 	details := &skillExposureDetails{
-		Mode: normalizeSkillExposureMode(b.exposureMode),
-		TopK: resolveSkillExposureTopK(b.exposureTopK),
+		Mode: normalizeSkillExposureMode(exposureMode),
+		TopK: resolveSkillExposureTopK(exposureTopK),
 	}
 	// disable-model-invocation（标准字段）：技能仍在 skillFunctions 中注册，
 	// 显式 /skill 回合可用，但不得进入模型隐式暴露面（路由候选 / 历史回补 /
 	// 文本提及触发）。
 	modelInvocable := func(name string) bool {
-		fn, ok := b.skillFunctions[name]
+		fn, ok := skillFunctions[name]
 		if !ok || fn == nil {
 			return false
 		}
@@ -152,7 +247,7 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 		return true
 	}
 	addFunction := func(name string) {
-		fn, ok := b.skillFunctions[name]
+		fn, ok := skillFunctions[name]
 		if !ok || fn == nil || !modelInvocable(name) {
 			return
 		}
@@ -179,8 +274,8 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 		routingPrompt = deriveRoutingPrompt(cloneRuntimeMessages(session.Messages))
 	}
 	details.RoutingPrompt = routingPrompt
-	if routingPrompt != "" && b.exposureRouter != nil {
-		for _, result := range b.exposureRouter.Route(context.Background(), routingPrompt) {
+	if routingPrompt != "" && exposureRouter != nil {
+		for _, result := range exposureRouter.Route(context.Background(), routingPrompt) {
 			if result == nil || result.Skill == nil {
 				continue
 			}
@@ -218,7 +313,8 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 }
 
 func (b *skillsRuntimeBinding) findExplicitSkillMentions(prompt string) []string {
-	if b == nil || len(b.skillFunctions) == 0 {
+	skillFunctions := b.SkillFunctions()
+	if len(skillFunctions) == 0 {
 		return nil
 	}
 
@@ -228,7 +324,7 @@ func (b *skillsRuntimeBinding) findExplicitSkillMentions(prompt string) []string
 	}
 
 	matches := make([]string, 0)
-	for functionName, fn := range b.skillFunctions {
+	for functionName, fn := range skillFunctions {
 		if fn != nil && !fn.ModelInvocable() {
 			continue
 		}
@@ -281,6 +377,8 @@ func (b *skillsRuntimeBinding) skillFunctionByPath(path string) *SkillFunction {
 	if path == "" || path == "." {
 		return nil
 	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	if fn, ok := b.skillFunctionsByPath[path]; ok {
 		return fn
 	}
@@ -296,8 +394,9 @@ func (b *skillsRuntimeBinding) skillFunctionByName(skillName string) *SkillFunct
 		return nil
 	}
 
+	skillFunctions := b.SkillFunctions()
 	var candidate *SkillFunction
-	for _, fn := range b.skillFunctions {
+	for _, fn := range skillFunctions {
 		if fn == nil {
 			continue
 		}
@@ -702,7 +801,7 @@ func buildSkillMainLoopInjection(session *ChatSession, functionName string, args
 	if session == nil || session.SkillsBinding == nil {
 		return "", false
 	}
-	fn := session.SkillsBinding.skillFunctions[strings.TrimSpace(functionName)]
+	fn := session.SkillsBinding.SkillFunctionForName(functionName)
 	if fn == nil || fn.executor == nil {
 		return "", false
 	}
@@ -1134,11 +1233,13 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 		// 全部停用/无可用 skill：reuse 模式（热刷新）仍要撤销旧函数面，
 		// 否则停用后 /skills 还能选中并执行——假开关。
 		if reuse != nil {
+			reuse.mu.Lock()
 			reuse.count = 0
 			reuse.skillFunctions = map[string]*SkillFunction{}
 			reuse.skillFunctionsByPath = map[string]*SkillFunction{}
 			reuse.skillNameCounts = map[string]int{}
 			reuse.roots = append([]string(nil), manager.SkillDirs()...)
+			reuse.mu.Unlock()
 			catalog.PruneSkillFunctionsExcept(nil)
 			return reuse, nil
 		}
@@ -1278,6 +1379,9 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 	if binding == nil {
 		binding = &skillsRuntimeBinding{}
 	}
+	// 热刷新路径（reuse != nil）下 binding 对请求线程可见：字段替换必须在
+	// 写锁内整体完成，释放后才调用 catalog（锁序：binding → catalog 不嵌套）。
+	binding.mu.Lock()
 	binding.manager = manager
 	binding.ownsManager = ownsManager
 	binding.mcpRuntime = mcpRuntime
@@ -1290,6 +1394,7 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 	binding.skillFunctionsByPath = skillFunctionsByPath
 	binding.skillNameCounts = skillNameCounts
 	binding.roots = append([]string(nil), manager.SkillDirs()...)
+	binding.mu.Unlock()
 	if reuse != nil {
 		// 热刷新：撤销新集合之外的 skill 函数（停用即不可再被 /skills 选中）。
 		catalog.PruneSkillFunctionsExcept(skillFunctionKeepSet(skillFunctions))
@@ -1305,25 +1410,33 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 // 顺序不可交换：先让 loader 过滤器 + registry 重建（撤销/恢复注册），再用新的
 // summaries 重建函数面并撤销 stale 函数。配置落盘与内存更新由调用方负责。
 func refreshSkillsRuntimeBinding(session *ChatSession, cfg *config.Config) error {
-	if session == nil || session.SkillsBinding == nil || session.SkillsBinding.manager == nil {
+	if session == nil || session.SkillsBinding == nil {
 		return fmt.Errorf("当前会话没有可刷新的 skills runtime")
 	}
 	// 串行化刷新：/skills 启停命令与文件监听回调都可能触发重建。
 	session.skillsBindingMu.Lock()
 	defer session.skillsBindingMu.Unlock()
 
+	binding := session.SkillsBinding
+	manager := binding.Manager()
+	if manager == nil {
+		return fmt.Errorf("当前会话没有可刷新的 skills runtime")
+	}
+	mcpRuntime := binding.MCPRuntime()
+	exposureTopK := binding.ExposureTopK()
+	exposureMode := binding.ExposureMode()
+
 	cfg = effectiveChatSkillConfig(cfg, session)
 	if cfg == nil {
 		return fmt.Errorf("skills 配置不可用")
 	}
-	binding := session.SkillsBinding
-	if err := binding.manager.ApplySkillNameFilter(runtimeprofileinput.WithDisabledSkills(
+	if err := manager.ApplySkillNameFilter(runtimeprofileinput.WithDisabledSkills(
 		runtimeprofileinput.BuildSkillFilter(session.ProfileSkillSelection),
 		disabledSkillNames(cfg),
 	)); err != nil {
 		return fmt.Errorf("应用 skills 启停名单失败: %w", err)
 	}
-	_, err := buildSkillsRuntimeBindingFromManager(cfg, session, binding.mcpRuntime, binding.manager, false, binding.exposureTopK, binding.exposureMode, binding)
+	_, err := buildSkillsRuntimeBindingFromManager(cfg, session, mcpRuntime, manager, false, exposureTopK, exposureMode, binding)
 	return err
 }
 
@@ -1333,10 +1446,11 @@ func refreshSkillsRuntimeBinding(session *ChatSession, cfg *config.Config) error
 // 只对"长期宿主"的 manager 生效（EnableHotReload 开启后才有 HotReload）；
 // 一次性扫描的私有 manager 不注册，避免无意义的重建。
 func (b *skillsRuntimeBinding) attachHotReloadRefresh(session *ChatSession) {
-	if b == nil || b.manager == nil || session == nil || b.hotReloadAttached {
+	manager := b.Manager()
+	if manager == nil || session == nil || b.hotReloadAttached {
 		return
 	}
-	hotReload := b.manager.HotReload()
+	hotReload := manager.HotReload()
 	if hotReload == nil {
 		return
 	}
@@ -2112,8 +2226,9 @@ func (b *skillsRuntimeBinding) orderedSkillFunctionNames() []string {
 			return names
 		}
 	}
-	names := make([]string, 0, len(b.skillFunctions))
-	for name := range b.skillFunctions {
+	skillFunctions := b.SkillFunctions()
+	names := make([]string, 0, len(skillFunctions))
+	for name := range skillFunctions {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -2129,7 +2244,7 @@ func (b *skillsRuntimeBinding) schemaForSkillFunction(name string) map[string]in
 			return schema
 		}
 	}
-	fn, ok := b.skillFunctions[name]
+	fn, ok := b.SkillFunctions()[name]
 	if !ok || fn == nil {
 		return nil
 	}

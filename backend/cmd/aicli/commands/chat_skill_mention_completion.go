@@ -503,8 +503,9 @@ func (c *chatSkillMentionCompletionController) collectCandidatesLocked(query str
 		}
 	}
 
-	byName := make(map[string][]skillMentionCandidate, len(binding.skillFunctions))
-	for _, fn := range binding.skillFunctions {
+	skillFunctions := binding.SkillFunctions()
+	byName := make(map[string][]skillMentionCandidate, len(skillFunctions))
+	for _, fn := range skillFunctions {
 		if fn == nil {
 			continue
 		}

@@ -1408,8 +1408,8 @@ func formatChatAgentSourceLine(session *ChatSession) string {
 }
 
 func resolvedChatSkillsMode(session *ChatSession, binding *skillsRuntimeBinding) string {
-	if binding != nil && binding.exposureMode != "" {
-		return binding.exposureMode
+	if mode := binding.ExposureMode(); mode != "" {
+		return mode
 	}
 	if session != nil && strings.TrimSpace(session.SkillsMode) != "" {
 		return strings.TrimSpace(session.SkillsMode)
@@ -1418,10 +1418,10 @@ func resolvedChatSkillsMode(session *ChatSession, binding *skillsRuntimeBinding)
 }
 
 func resolvedChatSkillsTopK(binding *skillsRuntimeBinding) int {
-	if binding == nil || binding.exposureTopK <= 0 {
-		return 0
+	if topK := binding.ExposureTopK(); topK > 0 {
+		return topK
 	}
-	return binding.exposureTopK
+	return 0
 }
 
 func resolveAICLIRetryConfig(cfg *config.Config) RetryConfig {

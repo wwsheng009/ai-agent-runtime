@@ -161,7 +161,7 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 
 	var skillItem *runtimeskill.Skill
 	if binding := catalog.SkillsBinding(); binding != nil {
-		if fn, ok := binding.skillFunctions[functionName]; ok && fn != nil {
+		if fn := binding.SkillFunctionForName(functionName); fn != nil {
 			skillItem = fn.resolvedTurnSkill()
 		}
 	}
@@ -308,10 +308,10 @@ func skillFunctionForName(catalog *aicliFunctionCatalog, functionName string) *S
 	if binding == nil {
 		return nil
 	}
-	if fn, ok := binding.skillFunctions[functionName]; ok {
+	if fn := binding.SkillFunctionForName(functionName); fn != nil {
 		return fn
 	}
-	for name, fn := range binding.skillFunctions {
+	for name, fn := range binding.SkillFunctions() {
 		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(functionName)) {
 			return fn
 		}
@@ -435,14 +435,14 @@ func buildSkillCatalogText(session *ChatSession, catalog *aicliFunctionCatalog) 
 	}
 	var summaries []*runtimeskill.SkillSummary
 	if binding := catalog.SkillsBinding(); binding != nil {
-		if binding.manager != nil {
-			if reg := binding.manager.Registry(); reg != nil {
+		if manager := binding.Manager(); manager != nil {
+			if reg := manager.Registry(); reg != nil {
 				summaries = reg.ListSummaries()
 			}
 		}
 		// 退化：manager/registry 缺失时，从已暴露的 skill 函数收集摘要。
 		if len(summaries) == 0 {
-			for _, fn := range binding.skillFunctions {
+			for _, fn := range binding.SkillFunctions() {
 				if fn != nil && fn.summary != nil {
 					summaries = append(summaries, fn.summary)
 				}

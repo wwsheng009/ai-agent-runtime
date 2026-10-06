@@ -319,7 +319,7 @@ func sessionSkillRoots(session *ChatSession) []string {
 	if session.SkillsBinding == nil {
 		return []string{"<none: skills runtime not attached — " + sessionSkillLoadDiagnosis(session) + ">"}
 	}
-	roots := append([]string(nil), session.SkillsBinding.roots...)
+	roots := append([]string(nil), session.SkillsBinding.Roots()...)
 	if len(roots) == 0 {
 		return []string{"<none: binding attached but manager reported 0 skill dir — " + sessionSkillLoadDiagnosis(session) + ">"}
 	}

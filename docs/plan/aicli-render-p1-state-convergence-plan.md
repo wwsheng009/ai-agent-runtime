@@ -473,8 +473,29 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
      （command_invoke ×3、chat_tool_availability、chat_mcp_session_scope ×3、
      chat_skill_tool_surface ×2、chat_actor_executor ×1）；新增
      `TestAICLIFunctionCatalog_AccessorsRaceHotRegister` 栅栏（热注册 × 全
-     访问器并发，`-race` 零报告）。仍余：`skillsRuntimeBinding` 字段原地写
-     未同步（skills 层后续项）。
+     访问器并发，`-race` 零报告）。
+  1b. **skillsRuntimeBinding 热刷新原地写（本轮修复）**：
+     `buildSkillsRuntimeBindingFromManager` 的 reuse 分支整体替换
+     count/skillFunctions/skillFunctionsByPath/roots/exposure*/manager/
+     mcpRuntime 等 12 个字段，请求线程原直读字段（约 25 处）无同步。
+     修复：binding 增加 `sync.RWMutex` + 锁内快照访问器（Manager/MCPRuntime/
+     Roots/ExposureMode/ExposureTopK/SkillFunctions/SkillFunctionForName；
+     Count/Close/skillFunctionByPath/skillFunctionByName 内部加读锁；
+     AnalyzeSkillExposure/orderedSkillFunctionNames/schemaForSkillFunction
+     改锁内取快照），写路径在写锁内整体替换、释放后才取 catalog 锁（锁序
+     catalog → binding，无嵌套）；全部读点（chat/mentions/completion/turn/
+     skills command/reload/function_catalog ×3）已收口。新增
+     `TestSkillsRuntimeBindingAccessorsRaceInPlaceRefresh` 栅栏（原地替换 ×
+     全访问器并发，`-race` 零报告）。定向 race 集（热刷新真实路径 + mention/
+     picker/catalog Select）绿；全包 race 终验 ok 361.7s 零报告（见提交记录）。
+  1c. **既有 flake 修复（本轮顺带）**：
+     `TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory`
+     等 4 处在 actor/presenter idle 后即时断言 `HistoryCommitDelivered`——
+     两者都不覆盖 TerminalSessionExecutor 的异步 schedule；HEAD 上隔离
+     `-race -count=20` 复现 2 次（非本轮引入）。修复：新增
+     `awaitHistoryCommitDelivered`（显式 `executor.Request/WaitIdle` +
+     ≤2s 有界轮询，与 terminal_projection 测试同一屏障）替换 4 处即时断言；
+     `-count=10 -race` 全绿。
   2. **stdin 全局（1 报告，已修复）**：`replaceStdinWithNullDevice` 在 pump
      读循环存活期间恢复 `os.Stdin`，与 `chatStdinIsNullDevice`
      （chat_mesh.go:64）竞争。修复：`chatInputQueue` 增 `stdinLoopDone`

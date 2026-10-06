@@ -17,6 +17,37 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// awaitHistoryCommitDelivered 有界等待至少一条 history effect 完成物理交付，
+// 返回 Delivered 计数。actor idle + presenter idle 不覆盖
+// TerminalSessionExecutor 的异步 schedule：全量负载（-race）下交付可能尚未
+// 发生，直接断言会偶发假阴性（既有 flake，非被测语义）。先显式请求 executor
+// 并等其 idle（与 terminal_projection 测试同一屏障），再做 ≤2s 有界轮询。
+func awaitHistoryCommitDelivered(t *testing.T, coordinator *chatInteractionCoordinator) int {
+	t.Helper()
+	if coordinator == nil {
+		return 0
+	}
+	if coordinator.session != nil && coordinator.session.TerminalSessionExecutor != nil {
+		coordinator.session.TerminalSessionExecutor.Request()
+		coordinator.session.TerminalSessionExecutor.WaitIdle()
+	}
+	coordinator.waitUIActorIdle()
+	deadline := time.Now().Add(2 * time.Second)
+	acked := 0
+	for {
+		acked = 0
+		for _, entry := range coordinator.uiActor.State().HistoryEffects.Entries() {
+			if entry.State == ui.HistoryCommitDelivered {
+				acked++
+			}
+		}
+		if acked > 0 || time.Now().After(deadline) {
+			return acked
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestSeedPersistedHistoryGroupsReasoningAndAssistantByExactRequest(t *testing.T) {
 	assistant := runtimetypes.NewAssistantMessage("persisted answer")
 	runtimetypes.SetReasoningBlock(assistant.Metadata, &runtimetypes.ReasoningBlock{
@@ -424,14 +455,8 @@ func TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory(t *te
 		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("historical question %d", index), 1)
 		assertTranscriptSourceCount(t, state.AppState.Transcript.Cells, fmt.Sprintf("historical answer %d", index), 1)
 	}
-	acked := 0
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitDelivered {
-			acked++
-		}
-	}
-	if acked == 0 {
-		t.Fatalf("overflowed history did not reach a TerminalSession history acknowledgement: %#v", state.HistoryEffects.Entries())
+	if acked := awaitHistoryCommitDelivered(t, coordinator); acked == 0 {
+		t.Fatalf("overflowed history did not reach a TerminalSession history acknowledgement: %#v", coordinator.uiActor.State().HistoryEffects.Entries())
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
 		t.Fatalf("overflowed unified history populated legacy historyWindow: %#v", got)
@@ -519,13 +544,7 @@ func TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsi
 	if state.Active.Phase != ui.ActiveCellMutable || !strings.Contains(state.Active.Source, activeReasoning) {
 		t.Fatalf("active reasoning was not projected from AppState: %+v", state.Active)
 	}
-	acked := 0
-	for _, entry := range coordinator.uiActor.State().HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitDelivered {
-			acked++
-		}
-	}
-	if acked == 0 {
+	if acked := awaitHistoryCommitDelivered(t, coordinator); acked == 0 {
 		t.Fatal("overflowed primary history did not reach TerminalSession scrollback handoff")
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
@@ -650,14 +669,8 @@ func TestUnifiedStartupOrderRetainsHistoryTailAndScrollback(t *testing.T) {
 	if projection.Validity != renderengine.ProjectionKnown || projection.Geometry.Width != width || projection.Geometry.Height != height || projection.LayoutGeneration != state.Geometry.Generation {
 		t.Fatalf("terminal projection does not match startup AppState: projection=%+v state=%+v", projection, state.AppState)
 	}
-	acked := 0
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitDelivered {
-			acked++
-		}
-	}
-	if acked == 0 {
-		t.Fatalf("startup history never reached native-scrollback handoff: %#v", state.HistoryEffects.Entries())
+	if acked := awaitHistoryCommitDelivered(t, coordinator); acked == 0 {
+		t.Fatalf("startup history never reached native-scrollback handoff: %#v", coordinator.uiActor.State().HistoryEffects.Entries())
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
 		t.Fatalf("startup history entered legacy historyWindow: %#v", got)
@@ -808,14 +821,8 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 	if projection.Validity != renderengine.ProjectionKnown || projection.Geometry.Width != width || projection.Geometry.Height != height || projection.LayoutGeneration != state.Geometry.Generation {
 		t.Fatalf("terminal projection does not match reconciled AppState: projection=%+v state=%+v", projection, state.AppState)
 	}
-	acked := 0
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitDelivered {
-			acked++
-		}
-	}
-	if acked == 0 {
-		t.Fatalf("reconciled history never reached native-scrollback handoff: %#v", state.HistoryEffects.Entries())
+	if acked := awaitHistoryCommitDelivered(t, coordinator); acked == 0 {
+		t.Fatalf("reconciled history never reached native-scrollback handoff: %#v", coordinator.uiActor.State().HistoryEffects.Entries())
 	}
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
 		t.Fatalf("unified replay/reconcile populated legacy historyWindow: %#v", got)

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1870,4 +1871,53 @@ func TestAnalyzeSkillExposure_KeepsTextSkillFunctionWhenHideDisabledOrHeadless(t
 			}
 		})
 	}
+}
+
+// TestSkillsRuntimeBindingAccessorsRaceInPlaceRefresh 是热刷新原地写收口的
+// 栅栏：写侧按刷新路径的锁约定整体替换可变字段，读侧并发调用全部访问器；
+// -race 下必须零报告（收口前的字段直读会在此触发竞争）。
+func TestSkillsRuntimeBindingAccessorsRaceInPlaceRefresh(t *testing.T) {
+	binding := &skillsRuntimeBinding{
+		count:                1,
+		exposureMode:         "auto",
+		exposureTopK:         3,
+		skillFunctions:       map[string]*SkillFunction{"skill__alpha": {functionName: "skill__alpha"}},
+		skillFunctionsByPath: map[string]*SkillFunction{},
+		skillNameCounts:      map[string]int{},
+		roots:                []string{"/skills"},
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			binding.mu.Lock()
+			binding.count = i
+			binding.skillFunctions = map[string]*SkillFunction{
+				"skill__alpha": {functionName: "skill__alpha"},
+			}
+			binding.roots = []string{"/skills"}
+			binding.mu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 400; i++ {
+		binding.Count()
+		binding.ExposureMode()
+		binding.ExposureTopK()
+		binding.Roots()
+		binding.SkillFunctions()
+		binding.SkillFunctionForName("skill__alpha")
+		binding.skillFunctionByName("alpha")
+		binding.skillFunctionByPath("/skills/alpha/SKILL.md")
+	}
+	close(stop)
+	wg.Wait()
 }
