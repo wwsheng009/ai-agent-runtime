@@ -141,7 +141,7 @@ func TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation(t *testing.T) 
 	// pending=0 时缺口仍然存在，所以收敛之后还要单独断言覆盖度。
 	converge := func() {
 		t.Helper()
-		deadline := time.Now().Add(60 * time.Second)
+		deadline := time.Now().Add(raceScaledDeadline(60 * time.Second))
 		stable := 0
 		for {
 			state := controller.State()
@@ -258,7 +258,7 @@ func TestExecutorContinuesIncompletePlanWithoutAckTrigger(t *testing.T) {
 
 	// 只唤醒执行器（没有任何 ack、没有 transcript 迁移）：续跑必须由执行器
 	// 侧的 kick 触发，直到整份 transcript 都有终态记录。
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(raceScaledDeadline(60 * time.Second))
 	for {
 		state := controller.State()
 		if !state.HistoryEffects.planContinuationPending() && !state.HistoryEffects.HasPending() {

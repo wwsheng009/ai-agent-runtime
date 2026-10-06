@@ -454,6 +454,10 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   2. `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`
      （153.0s 超时）：已知基线（§1.6：基线 `d8ec19ca` 同用例在 race 插桩下
      同样超时）。
+     **已修复（2026-10-06）**：race 构建标签 + `raceScaledDeadline`（×6）自适应
+     看门狗（`race_enabled_test.go` / `race_disabled_test.go` / `test_deadline_test.go`）——
+     语义断言不变，仅放大被 detector 拖慢的 wall-clock 预算；`-race` 复跑
+     `ok 297.6s`（`E:\tmp\cl-armed-race2.txt`），常规 `ok 81.1s` 不变。
 - commands 包：5 用例失败、57 个 DATA RACE 报告，聚为 3 组竞争；命中代码区域
   均非本轮 P1 改动点（function_catalog/skills/chat_mesh 不在本轮改动清单，
   uiActor 字段读写点亦未触碰），但无基线 race 日志，按「既有嫌疑」修复：
@@ -512,7 +516,7 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 - 结论：三组竞争全部修复。**最终门禁复跑**（同命令）：ui 230.2s 零 DATA
   RACE，仅剩已知基线 `TestArmedResume...`（161.3s 超时）；commands
   **ok 361.9s 全绿、零 DATA RACE**（修复前 57 报告 / 5 用例失败）。
-  race 行验收通过（除已记录基线超时）。
+  race 行验收通过（唯一基线超时已以 race 自适应看门狗修复，见 §5.1 条目 2）。
 
 ## 6. 侦察报告归档
 
