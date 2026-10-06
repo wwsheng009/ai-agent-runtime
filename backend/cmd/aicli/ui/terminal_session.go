@@ -1165,7 +1165,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		}
 	}
 	s.cursor = cloneTerminalCursor(frame.Cursor)
-	s.frame++
+	s.confirmWriteLocked()
 	frameResult := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint}
 	if historyResult != nil && historyBytes != "" {
 		*historyResult = HistoryCommitResult{Frame: s.frame, Delivered: delivered}
@@ -1185,6 +1185,20 @@ func terminalScrollbackResetReason(reconciliation bool) string {
 		return "reconciliation"
 	}
 	return ""
+}
+
+// confirmWriteLocked is the single allocation point for the writer frame
+// identity (P1-2b §2.3). Every physically confirmed transaction — a viewport
+// frame or a history-only handoff — advances the same counter exactly once,
+// after the write returned success and the in-memory proof was committed.
+// Frame numbers are therefore dense, gap-free and totally ordered with
+// physical writes; no other counter in the renderer may claim writer-frame
+// identity. Counters that do carry a "generation"/"frame" name elsewhere
+// (e.g. render/output bindingGeneration, FramePump ticks, paint traces) are
+// scheduler/cache/lease epochs and must never be compared with s.frame.
+func (s *TerminalSession) confirmWriteLocked() uint64 {
+	s.frame++
+	return s.frame
 }
 
 func terminalTransactionWithHistory(frame TerminalFrameResult, history *HistoryCommit, result HistoryCommitResult) TerminalTransactionResult {
@@ -1325,7 +1339,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 		}
 	}
 
-	s.frame++
+	s.confirmWriteLocked()
 	s.historyStreamTailRows = terminalAppendHistoryTailRows(s.historyStreamTailRows, rows, s.outputBottom)
 	s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, []HistoryCommit{commit})
 	if !activeArchive {

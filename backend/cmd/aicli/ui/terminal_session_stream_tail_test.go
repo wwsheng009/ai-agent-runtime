@@ -193,3 +193,47 @@ func TestTerminalSessionStreamTailAppendOnlyAcrossDeliveries(t *testing.T) {
 		t.Fatalf("stream tail last row = %q, want the new delivery", after[len(after)-1])
 	}
 }
+
+// P1-2b §2.3：writer frame 身份只有一个分配点（confirmWriteLocked）。
+// viewport 帧与 history-only 交付共享同一计数器，成功写各 +1；deferred /
+// 失败写不得推进，否则帧号与物理写序列脱钩。
+func TestTerminalSessionWriterFrameIsSingleAllocationPoint(t *testing.T) {
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	plan := terminalSessionPlan(1, 24, 6, 4, LeaseState{})
+	if result := session.Flush(plan); result.Err != nil || result.Frame != 1 {
+		t.Fatalf("initial frame = %#v", result)
+	}
+	if result := session.Flush(plan); result.Err != nil || result.Frame != 2 || session.frame != 2 {
+		t.Fatalf("second viewport frame = %#v (session.frame=%d)", result, session.frame)
+	}
+
+	// 陈旧 generation 的 history-only 交付必须 Deferred，帧号不动。
+	stale := terminalSessionCommit(999, render.Line{Spans: []render.Span{{Text: "STALE"}}})
+	if result := session.CommitHistory(stale); !result.Deferred || result.Err != nil {
+		t.Fatalf("stale history commit = %#v", result)
+	}
+	if session.frame != 2 {
+		t.Fatalf("deferred commit advanced the writer frame to %d", session.frame)
+	}
+
+	// 成功的 history-only 路径与 viewport 路径共享同一帧号序列。
+	confirmed := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "CONFIRMED"}}})
+	if result := session.CommitHistory(confirmed); result.Err != nil || result.Deferred || result.Frame != 3 {
+		t.Fatalf("history-only commit = %#v (session.frame=%d)", result, session.frame)
+	}
+	if session.frame != 3 {
+		t.Fatalf("history-only commit left session.frame=%d, want 3", session.frame)
+	}
+
+	// 半写失败不得推进帧号。
+	writer.short = true
+	failing := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "FAILING"}}})
+	failing.Token = 2
+	if result := session.CommitHistory(failing); result.Err == nil {
+		t.Fatalf("short history commit unexpectedly succeeded: %#v", result)
+	}
+	if session.frame != 3 {
+		t.Fatalf("failed commit advanced the writer frame to %d", session.frame)
+	}
+}

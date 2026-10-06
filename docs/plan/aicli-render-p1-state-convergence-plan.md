@@ -2,7 +2,7 @@
 
 > 来源：`docs/plan/aicli-unified-render-architecture-audit-20261005.md` §6 P1。
 > 基线：`feat/render-p0-writer-unification` @ `44f31cbf`（P0 写端归一完成，18 提交）。
-> 状态：**侦察完成 + P1-1 第 1/2/3 步、P1-2a、P1-3 第 1/2 小步已实施**
+> 状态：**侦察完成 + P1-1 第 1/2/3 步、P1-2a、P1-2b 第 1/3 小步、P1-3 第 1/2 小步已实施**
 >（2026-10-06；三路 explore 原始报告要点已归档于 §6，全部证据带 `文件:行`）。
 
 ## 0. 结论摘要
@@ -224,6 +224,19 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 - 事实源声明：stream tail 的事实源是「本 session 物理写成功的行」（ledger ack
   在 writer 之外不可见 archived 行，故不能由 ledger 重建）；resident tail 的事实源
   是 region 模型；两者交集之外正是 active 归档行。
+
+### 2.7 P1-2b 第 3 小步实施记录（frame 单点，已完成；先于几何收敛落地）
+
+- `TerminalSession.frame` 两处自增（viewport 事务、history-only 交付）收敛为
+  `confirmWriteLocked()` 单点：成功物理写后 +1 并返回，deferred/失败不推进。
+  新增 `TestTerminalSessionWriterFrameIsSingleAllocationPoint` 钉住
+  「viewport 与 history-only 共享同一帧号序列、stale Deferred 不推进、半写失败
+  不推进」。
+- 更名隔离复核：计划提到的 `pumpFrames`/`paintTraceFrames`/`bandPaintGeneration`/
+  `cacheGeneration`/`eventSeq` 在当前代码中已不存在；唯一同名语义是
+  `render/output.bindingGeneration`（lease 绑定代），已天然隔离，无需改名。
+  隔离语义以 `confirmWriteLocked` 注释声明：其他 generation/frame 计数是
+  scheduler/cache/lease epoch，禁止与 `s.frame` 比较。
 
 ## 3. P1-3 WaitIdle 事件驱动 ack
 
