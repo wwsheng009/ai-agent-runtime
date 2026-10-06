@@ -265,6 +265,25 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   下 `ApplyGeometry` 纯采纳入口。改动面与夹具迁移清单见会话侦察报告
   （HEAD `fa9ca777` 逐行核实）。
 
+### 2.9 验证中发现的既有竞态修复（executor WaitIdle/Request，已完成）
+
+- 症状：commands 全量负载下
+  `TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory` 以约 1/6
+  概率 panic `sync: WaitGroup is reused before previous Wait has returned`
+  （栈：`TerminalSessionExecutor.WaitIdle` ← presenter.WaitIdle ←
+  `awaitUnifiedPresenterIdle`）。
+- 根因：`TerminalSessionExecutor`/`HistoryCommitExecutor` 用 `sync.WaitGroup`
+  做 idle 等待；`Request` 可在 `WaitIdle` 的 `Wait` 观察到计数 0 的同时执行
+  `Add(1)`，而 WaitGroup 明确禁止「Wait 在途时复用」。
+- 修复：删除 wg，改为 done 通道代际等待（`waitWorkerIdle` 循环：在 `e.mu` 下读
+  running/done，running=false 才返回；`finishWorker` 在同一临界区置
+  running=false、清 done、close）。HistoryCommitExecutor 同步改为 done 通道
+  （其 run 原先无通道）。
+- 回归钉：新增 `TestTerminalSessionExecutorWaitIdleRequestRace`（25 轮
+  WaitIdle×Request 并发）；原 flaky 用例 20 连跑 0 失败。A/B 对照：基线
+  `d8ec19ca` 1/12、全门控版 `8d8ae0fe` 6/12、修复后 0/20。
+- 验证：ui 全量 128.4s + commands 全量 174.3s 通过。
+
 ## 3. P1-3 WaitIdle 事件驱动 ack
 
 ### 3.1 现状（关键行）

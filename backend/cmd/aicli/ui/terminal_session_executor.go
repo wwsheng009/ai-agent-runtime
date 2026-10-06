@@ -193,7 +193,6 @@ type TerminalSessionExecutor struct {
 	running   bool
 	requested bool
 	closed    bool
-	wg        sync.WaitGroup
 	done      chan struct{}
 
 	diagMu   sync.Mutex
@@ -705,7 +704,6 @@ func (e *TerminalSessionExecutor) Request() {
 	e.running = true
 	e.done = make(chan struct{})
 	done := e.done
-	e.wg.Add(1)
 	e.mu.Unlock()
 	go e.run(done)
 }
@@ -732,7 +730,7 @@ func (e *TerminalSessionExecutor) CloseTimeout(timeout time.Duration) bool {
 		return true
 	}
 	if timeout <= 0 {
-		e.wg.Wait()
+		e.waitWorkerIdle()
 		return true
 	}
 	timer := time.NewTimer(timeout)
@@ -746,14 +744,35 @@ func (e *TerminalSessionExecutor) CloseTimeout(timeout time.Duration) bool {
 }
 
 // WaitIdle is a deterministic test and controlled-shutdown helper.
+//
+// It must not use a sync.WaitGroup: Request can start a new worker (Add)
+// concurrently with a Wait that observed a zero counter, which panics with
+// "WaitGroup is reused before previous Wait has returned" (reproduced by
+// TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory under
+// full-suite load). The done channel is published and cleared under e.mu
+// (finishWorker), so this generation loop is race-free.
 func (e *TerminalSessionExecutor) WaitIdle() {
 	if e != nil {
-		e.wg.Wait()
+		e.waitWorkerIdle()
+	}
+}
+
+// waitWorkerIdle waits until no worker is running, including a worker that
+// starts while an earlier generation is finishing.
+func (e *TerminalSessionExecutor) waitWorkerIdle() {
+	for {
+		e.mu.Lock()
+		done := e.done
+		running := e.running
+		e.mu.Unlock()
+		if !running || done == nil {
+			return
+		}
+		<-done
 	}
 }
 
 func (e *TerminalSessionExecutor) run(done chan struct{}) {
-	defer e.wg.Done()
 	for {
 		e.mu.Lock()
 		if e.closed {

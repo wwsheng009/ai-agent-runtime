@@ -334,6 +334,34 @@ func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTran
 	}
 }
 
+// Request 与 WaitIdle 并发不得触发 "WaitGroup is reused before previous Wait
+// has returned" panic（历史缺陷：Wait 观察到计数 0 的同时 Request 执行 Add；
+// 旧实现以约 1/6 概率在 TestSuccessfulRequestBoundaryPreservesFortyLineFinal
+// InNativeHistory 复现）。done 通道在 e.mu 下发布/清除后，该竞态消失。
+func TestTerminalSessionExecutorWaitIdleRequestRace(t *testing.T) {
+	for iteration := 0; iteration < 25; iteration++ {
+		controller := NewUIController(UIControllerConfig{}, nil, nil)
+		executor := NewTerminalSessionExecutor(controller, NewTerminalSession(&bytes.Buffer{}))
+		go controller.Run()
+
+		var racers sync.WaitGroup
+		racers.Add(2)
+		go func() {
+			defer racers.Done()
+			executor.WaitIdle()
+		}()
+		go func() {
+			defer racers.Done()
+			executor.Request()
+		}()
+		racers.Wait()
+
+		executor.CloseTimeout(time.Second)
+		controller.Close()
+		controller.WaitIdle()
+	}
+}
+
 func TestTerminalSessionExecutorBoundsBootstrapAcrossTransactions(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
 	postHistoryEffectFixture(t, controller, scene.CellID(terminalHistoryBatchMaxCommits+5))

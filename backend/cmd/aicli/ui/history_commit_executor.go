@@ -52,7 +52,7 @@ type HistoryCommitExecutor struct {
 	running   bool
 	requested bool
 	closed    bool
-	wg        sync.WaitGroup
+	done      chan struct{}
 }
 
 func NewHistoryCommitExecutor(controller *UIController, sink HistoryCommitSink) *HistoryCommitExecutor {
@@ -77,9 +77,10 @@ func (e *HistoryCommitExecutor) Request() {
 		return
 	}
 	e.running = true
-	e.wg.Add(1)
+	e.done = make(chan struct{})
+	done := e.done
 	e.mu.Unlock()
-	go e.run()
+	go e.run(done)
 }
 
 // Close prevents new terminal work and waits for a worker that has already
@@ -90,24 +91,50 @@ func (e *HistoryCommitExecutor) Close() {
 	}
 	e.mu.Lock()
 	e.closed = true
+	done := e.done
 	e.mu.Unlock()
-	e.wg.Wait()
+	if done != nil {
+		<-done
+	}
 }
 
 // WaitIdle is a deterministic test/controlled-teardown helper. It is not
 // intended as a normal UI producer synchronization primitive.
 func (e *HistoryCommitExecutor) WaitIdle() {
 	if e != nil {
-		e.wg.Wait()
+		e.waitWorkerIdle()
 	}
 }
 
-func (e *HistoryCommitExecutor) run() {
-	defer e.wg.Done()
+// waitWorkerIdle mirrors TerminalSessionExecutor: the done channel is
+// published and cleared under e.mu, so waiting on the current generation can
+// never race a concurrent Add the way a sync.WaitGroup would.
+func (e *HistoryCommitExecutor) waitWorkerIdle() {
+	for {
+		e.mu.Lock()
+		done := e.done
+		running := e.running
+		e.mu.Unlock()
+		if !running || done == nil {
+			return
+		}
+		<-done
+	}
+}
+
+func (e *HistoryCommitExecutor) finishWorker(done chan struct{}) {
+	e.running = false
+	if done != nil {
+		e.done = nil
+		close(done)
+	}
+}
+
+func (e *HistoryCommitExecutor) run(done chan struct{}) {
 	for {
 		e.mu.Lock()
 		if e.closed {
-			e.running = false
+			e.finishWorker(done)
 			e.mu.Unlock()
 			return
 		}
@@ -117,7 +144,7 @@ func (e *HistoryCommitExecutor) run() {
 		if !e.runOne() {
 			e.mu.Lock()
 			if e.closed || !e.requested {
-				e.running = false
+				e.finishWorker(done)
 				e.mu.Unlock()
 				return
 			}
