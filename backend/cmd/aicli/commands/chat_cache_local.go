@@ -272,6 +272,9 @@ func localContextString(values map[string]interface{}, keys ...string) string {
 // usageAttachWarn 记录一次本地统一用量分析服务挂载失败。此前失败完全静默：
 // 一旦启动期 attach 失败（例如多进程竞争 sqlite 写锁），该进程整个生命周期
 // 都不会写入 usage_requests，缓存视图静默为空且没有任何线索。
+//
+// 注（A1-8 登记）：保留包级 var 形态作为 usage_attach_retry_test.go 的注入缝
+// （测试替换捕获输出）；已在 writer inventory 登记，不作为新增直写点。
 var usageAttachWarn = func(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Warning: usage analytics "+format+"\n", args...)
 }

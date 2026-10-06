@@ -271,6 +271,7 @@ func chatProfileEditLifecycleText(session *ChatSession, ref string, open bool) (
 			return "", fmt.Errorf("无法解析 $EDITOR/$VISUAL（%s）: %w；也可以手工编辑：%s", editor, err, yamlPath)
 		}
 		command := exec.Command(name, append(args, yamlPath)...)
+		// 登记（A1-8e）：外部编辑器的子进程 stdio 接线（非本进程终端帧出口）。
 		command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := command.Run(); err != nil {
 			return "", fmt.Errorf("编辑器退出异常（%s）: %w", editor, err)

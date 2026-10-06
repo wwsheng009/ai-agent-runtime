@@ -124,6 +124,7 @@ func (c *chatInteractionCoordinator) sessionRenderIDLocked() string {
 // PhysicalSink→RenderOutputGateway，session 的所有 terminal bytes 经
 // gateway 提交（receipt/journal/mirror 可观测），不再直写 os.Stdout。
 // 返回 gateway 供 /debug 与测试观察；失败返回 nil。
+// 登记（A1-8b）：本处 os.Stdout 是设计白名单中的唯一物理 sink。
 func (c *chatInteractionCoordinator) EnableUnifiedRendererGateway() *outputpkg.RenderOutputGateway {
 	if c == nil {
 		return nil
@@ -278,6 +279,8 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	c.unifiedRenderer = true
 	c.mu.Unlock()
 	if writer == nil {
+		// 登记（A1-8c）：测试/legacy 直写辅助入口；生产经
+		// EnableUnifiedRendererGateway（PhysicalSink）进入，不触达这里。
 		writer = os.Stdout
 	}
 	if surface != nil {

@@ -79,6 +79,8 @@ func readPipeInteractiveLine(ctx context.Context, prompt string) (string, bool, 
 		})
 		defer ui.SetInteractiveInputDebugHook(nil)
 	}
+	// 登记（A1-8e）：pipe/PTY 交互编辑器按设计直写 process stdout（pipe 模式
+	// 无 unified 会话；诊断走 aicli-pipe-debug.log，见上方注释）。
 	writer := io.Writer(os.Stdout)
 	if chatDebugFlagEnabled() {
 		writer = &pipeFrameDiagWriter{w: os.Stdout}

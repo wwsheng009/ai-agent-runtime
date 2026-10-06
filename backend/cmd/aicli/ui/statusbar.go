@@ -193,7 +193,12 @@ func (s *StatusBar) renderDocumentLocked(doc render.Document) string {
 	return renderDocumentWithProfile(doc, s.theme)
 }
 
-// Render 渲染状态栏
+// Render 渲染状态栏。
+//
+// Fenced-dead（G9/A1-7）：生产不调用 Render/RenderWithLayout/RenderSimple——
+// 唯一构造点是 layout.go NewLayout，Layout.Render/RenderStatusBar 均无生产
+// 调用者。三者经 WriteTerminalText(os.Stdout, …) 直写，已登记 writer
+// inventory；若需重新接线，必须先接入 physical fence。
 func (s *StatusBar) Render() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

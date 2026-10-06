@@ -92,6 +92,8 @@ func withLiveChatToolOutput(ctx context.Context, session *ChatSession, toolCallI
 		// chatLiveToolOutputWriter never consumes its writer or surface when a
 		// stable ActiveBand owner exists. Passing io.Discard/nil in unified mode
 		// still makes the no-direct-write invariant explicit and testable.
+		// 登记（A1-5）：non-unified 直写通道；unified 分支在下方切换为
+		// io.Discard（不产生无身份 raw transcript 镜像）。
 		writer := io.Writer(os.Stdout)
 		var surface chatOutputSurface = session.Surface
 		if interaction.UnifiedRendererEnabled() {
@@ -113,6 +115,7 @@ func withLiveChatToolOutput(ctx context.Context, session *ChatSession, toolCallI
 		// event. Do not manufacture an identity-less raw transcript mirror.
 		return ctx
 	}
+	// 登记（A1-5）：non-unified 直写兜底；unified 已在上面提前返回。
 	beginDirectInteractiveOutput(session)
 	return runtimeexecutor.WithOutputMirror(ctx, newLimitedChatSystemOutputWriterWithSurface(os.Stdout, session.Surface, maxToolResultPreviewLines, maxToolResultPreviewBytes))
 }
