@@ -110,7 +110,13 @@ type HistoryEffectQueueState struct {
 	claimRejectsGate       uint64 // frozen / projection unknown / unresolved terminal delivery
 	claimRejectsStale      uint64 // token entry missing, or its commit generation no longer matches
 	claimRejectsInvalid    uint64 // anything else (not pending, invalid commit)
-	ledger                 *HistoryCommitLedger
+	// WriteCursor 是"可能正在被物理写入"的 token（0 = 无）。claim 协议从逐条
+	// InFlight 状态收敛为这个单调标量：同一时刻至多一个 token 可能已在写，
+	// 由单 worker 严格 FIFO 保证顺序。条目保持 Pending，直到 Ack/Fail/Invalidate
+	// 给出终态；planner 对 WriteCursor 指向的 token 沿用旧 InFlight 的安全点
+	// （展示载荷变化时 invalidate，绝不 rebase）。
+	WriteCursor uint64
+	ledger      *HistoryCommitLedger
 	// lastPlanned* memoize the active-cell inputs from the most recent
 	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
 	// do not move any source boundary (Stable/Enqueued/Acked), resize, or
@@ -517,15 +523,22 @@ func (s *HistoryEffectQueueState) markInFlight(token, generation uint64) error {
 		return ErrHistoryCommitRecoveryPending
 	}
 	entry, ok := s.ledger.Entry(token)
-	if !ok || entry.Commit.LayoutGeneration != generation {
+	if !ok || entry.State != HistoryCommitPending || entry.Commit.LayoutGeneration != generation {
 		return ErrStaleLayoutGeneration
+	}
+	// Single physical writer: a second, different claim while a token may still
+	// be in flight is out of order. Re-claiming the same token is idempotent
+	// (the executor retries a claim whose snapshot read found nothing).
+	if s.WriteCursor != 0 && s.WriteCursor != token {
+		return ErrHistoryCommitOutOfOrder
 	}
 	// Native scrollback is ordered. Do not let a stale presenter claim a later
 	// token while an earlier eligible effect has not reached a terminal result.
 	if s.ledger.hasOlderPendingOrInFlight(token) {
 		return ErrHistoryCommitOutOfOrder
 	}
-	return s.ledger.MarkInFlight(token)
+	s.WriteCursor = token
+	return nil
 }
 
 func (s *HistoryEffectQueueState) rebasePending(commit HistoryCommit) error {
@@ -534,7 +547,12 @@ func (s *HistoryEffectQueueState) rebasePending(commit HistoryCommit) error {
 	}
 	for _, entry := range s.ledger.byToken {
 		current := entry.Commit
-		if entry.State != HistoryCommitPending || current.Origin != commit.Origin ||
+		// The write cursor token may already be physically written: rebasing it
+		// would let an old payload be acknowledged against new semantics. The
+		// planner invalidates it instead (same safety point as the removed
+		// InFlight state); every other Pending entry rebases in place.
+		if entry.State != HistoryCommitPending || current.Token == s.WriteCursor ||
+			current.Origin != commit.Origin ||
 			current.CellID != commit.CellID ||
 			(current.Origin != HistoryCommitActive && current.Revision != commit.Revision) ||
 			current.SourceRange != commit.SourceRange ||
@@ -550,11 +568,12 @@ func (s *HistoryEffectQueueState) invalidate(token uint64) error {
 	if s == nil || s.ledger == nil {
 		return ErrCommitNotPending
 	}
-	wasInFlight, err := s.ledger.Invalidate(token)
-	if err != nil {
+	wasWriting := s.WriteCursor == token
+	if err := s.ledger.Invalidate(token, wasWriting); err != nil {
 		return err
 	}
-	if wasInFlight {
+	if wasWriting {
+		s.WriteCursor = 0
 		s.ProjectionUnknown = true
 		s.ReconciliationRequired = true
 	}
@@ -565,9 +584,19 @@ func (s *HistoryEffectQueueState) ack(token, frame, generation uint64) error {
 	if s == nil || s.ledger == nil {
 		return ErrCommitNotInFlight
 	}
+	// Only the token the single writer currently holds may be acknowledged.
+	// A duplicate ack of an already-Acked token keeps its dedicated error so
+	// diagnostics can still distinguish "acked twice" from "never claimed".
+	if s.WriteCursor != token {
+		if entry, ok := s.ledger.Entry(token); ok && entry.State == HistoryCommitAcked {
+			return s.ledger.Ack(token, frame, generation)
+		}
+		return ErrCommitNotInFlight
+	}
 	if err := s.ledger.Ack(token, frame, generation); err != nil {
 		return err
 	}
+	s.WriteCursor = 0
 	// P2-1 终态压缩：ack 是终态转换的主入口，库存超过高水位时在这里把最老已
 	// 终结条目回收到目标水位。窗口化保证近期 ack（帧与状态）仍可读，同时库存
 	// 有界；Acked+Active 提供前缀证明的条目永不参与回收。
@@ -623,7 +652,7 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 			}
 			ackGenerations[index] = entry.Commit.LayoutGeneration
 		}
-		if (index == 0 && entry.State != HistoryCommitInFlight) ||
+		if (index == 0 && (entry.State != HistoryCommitPending || s.WriteCursor != commit.Token)) ||
 			(index > 0 && entry.State != HistoryCommitPending) {
 			return ErrCommitNotInFlight
 		}
@@ -632,9 +661,9 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 
 	for index, commit := range commits {
 		if index > 0 {
-			if err := s.ledger.MarkInFlight(commit.Token); err != nil {
-				return err
-			}
+			// Advance the single write cursor exactly as the sequential claim
+			// path would; ack clears it again below.
+			s.WriteCursor = commit.Token
 		}
 		if err := s.ack(commit.Token, frame, ackGenerations[index]); err != nil {
 			return err
@@ -693,7 +722,16 @@ func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error 
 	if !ok || entry.Commit.LayoutGeneration != generation {
 		return ErrStaleLayoutGeneration
 	}
-	return s.ledger.DeferInFlight(token)
+	// Deferred means the terminal transaction did not start, so the entry stays
+	// Pending and only the write cursor is released. A Deferred for a token that
+	// does not hold the cursor is a safe no-op refusal: the executor posts it
+	// unconditionally on the claim-miss path, where the claim may have been
+	// refused before ever setting the cursor.
+	if entry.State != HistoryCommitPending || s.WriteCursor != token {
+		return ErrCommitNotInFlight
+	}
+	s.WriteCursor = 0
+	return nil
 }
 
 func (s *HistoryEffectQueueState) fail(token, generation uint64, err error, mayHavePartiallyWritten bool) error {
@@ -706,6 +744,9 @@ func (s *HistoryEffectQueueState) fail(token, generation uint64, err error, mayH
 	}
 	if err := s.ledger.Fail(token, err, mayHavePartiallyWritten); err != nil {
 		return err
+	}
+	if s.WriteCursor == token {
+		s.WriteCursor = 0
 	}
 	// Any failed terminal transaction means the cached physical projection can
 	// no longer prove which bytes reached the terminal. Recovery must repaint
@@ -853,6 +894,14 @@ func (s HistoryEffectQueueState) hasUnresolvedTerminalDelivery() bool {
 func (s HistoryEffectQueueState) hasInFlightActiveOriginDelivery() bool {
 	if s.ledger == nil {
 		return false
+	}
+	// The single write cursor is the live claim: a claimed Active-origin token
+	// may already be crossing the writer, so a finalize must still defer the
+	// full-session reconcile until its write resolves.
+	if s.WriteCursor != 0 {
+		if entry, ok := s.ledger.byToken[s.WriteCursor]; ok && entry.Commit.Origin == HistoryCommitActive {
+			return true
+		}
 	}
 	for _, tokens := range s.ledger.activeTokensByCell {
 		for _, token := range tokens {

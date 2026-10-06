@@ -482,8 +482,8 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 	beforeResize := controller.State()
 	oldNextToken := beforeResize.HistoryEffects.NextToken
 	oldToken := beforeResize.HistoryEffects.Entries()[0].Commit.Token
-	if entry := historyCommitEntry(t, beforeResize, oldToken); entry.State != HistoryCommitInFlight {
-		t.Fatalf("blocked history token = %#v, want in flight", entry)
+	if entry := historyCommitEntry(t, beforeResize, oldToken); entry.State != HistoryCommitPending || beforeResize.HistoryEffects.WriteCursor != oldToken {
+		t.Fatalf("blocked history token = %#v cursor=%d, want claimed pending", entry, beforeResize.HistoryEffects.WriteCursor)
 	}
 	if bytes.Contains(firstWrite, []byte("\x1b[3J")) {
 		t.Fatalf("initial history transaction unexpectedly reset scrollback: %q", firstWrite)
@@ -498,8 +498,8 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 	// the writer, but it must neither invalidate the in-flight delivery nor
 	// demand a scrollback replay: the write is already committed to the host,
 	// and invalidating it would make the range permanently un-mintable.
-	if entry := historyCommitEntry(t, resized, oldToken); entry.State != HistoryCommitInFlight || entry.MayHavePartiallyWritten {
-		t.Fatalf("resize quarantined in-flight history: %#v", entry)
+	if entry := historyCommitEntry(t, resized, oldToken); entry.State != HistoryCommitPending || resized.HistoryEffects.WriteCursor != oldToken || entry.MayHavePartiallyWritten {
+		t.Fatalf("resize quarantined in-flight history: %#v cursor=%d", entry, resized.HistoryEffects.WriteCursor)
 	}
 	if resized.HistoryEffects.ProjectionUnknown || resized.HistoryEffects.ReconciliationRequired {
 		t.Fatalf("resize race raised a recovery obligation: %#v", resized.HistoryEffects)
@@ -593,8 +593,8 @@ func TestTerminalSessionExecutorClaimMissReleasesStrandedInFlight(t *testing.T) 
 		t.Fatalf("layout generation = %d, want the injected generation 5", state.Geometry.Generation)
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitInFlight {
-			t.Fatalf("accepted claim stranded InFlight after the claim miss: %#v", entry)
+		if state.HistoryEffects.WriteCursor == entry.Commit.Token {
+			t.Fatalf("write cursor stranded after the claim miss: %#v", entry)
 		}
 	}
 	assertTerminalSessionExecutorDrainedHistory(t, state)

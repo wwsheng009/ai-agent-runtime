@@ -62,8 +62,8 @@ func TestTerminalSessionExecutorArmedReplayWaitsForInFlightDelivery(t *testing.T
 		t.Fatalf("initial history transaction unexpectedly reset scrollback: %q", firstWrite)
 	}
 	inflightToken := before.HistoryEffects.Entries()[0].Commit.Token
-	if entry := historyCommitEntry(t, before, inflightToken); entry.State != HistoryCommitInFlight {
-		t.Fatalf("blocked history token = %#v, want in flight", entry)
+	if entry := historyCommitEntry(t, before, inflightToken); entry.State != HistoryCommitPending || before.HistoryEffects.WriteCursor != inflightToken {
+		t.Fatalf("blocked history token = %#v cursor=%d, want claimed pending", entry, before.HistoryEffects.WriteCursor)
 	}
 
 	// A session load arms the one-shot replay while that handoff is still

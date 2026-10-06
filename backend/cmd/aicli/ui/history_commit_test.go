@@ -26,9 +26,6 @@ func TestHistoryCommitLedger_AckExactlyOnceByTokenAndRange(t *testing.T) {
 	if err := ledger.Enqueue(commit); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	if err := ledger.MarkInFlight(commit.Token); err != nil {
-		t.Fatalf("MarkInFlight: %v", err)
-	}
 	if err := ledger.Ack(commit.Token, 99, 3); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
@@ -101,14 +98,11 @@ func TestHistoryCommitLedger_StaleGenerationDoesNotAdvanceAck(t *testing.T) {
 	if err := ledger.Enqueue(commit); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	if err := ledger.MarkInFlight(commit.Token); err != nil {
-		t.Fatalf("MarkInFlight: %v", err)
-	}
 	if err := ledger.Ack(commit.Token, 3, 5); !errors.Is(err, ErrStaleLayoutGeneration) {
 		t.Fatalf("stale Ack = %v, want ErrStaleLayoutGeneration", err)
 	}
 	entry, ok := ledger.Entry(commit.Token)
-	if !ok || entry.State != HistoryCommitInFlight || entry.AckFrame != 0 {
+	if !ok || entry.State != HistoryCommitPending || entry.AckFrame != 0 {
 		t.Fatalf("stale Ack advanced entry: %+v, found=%t", entry, ok)
 	}
 }
@@ -118,9 +112,6 @@ func TestHistoryCommitLedger_FailurePreservesPartialWriteSignal(t *testing.T) {
 	commit := testHistoryCommit(13, 88, 2)
 	if err := ledger.Enqueue(commit); err != nil {
 		t.Fatalf("Enqueue: %v", err)
-	}
-	if err := ledger.MarkInFlight(commit.Token); err != nil {
-		t.Fatalf("MarkInFlight: %v", err)
 	}
 	cause := errors.New("short write")
 	if err := ledger.Fail(commit.Token, cause, true); err != nil {
@@ -150,9 +141,6 @@ func TestHistoryCommitLedger_SourceLookupKeepsLifecycleWithoutDetachedCopies(t *
 	}); allocs != 0 {
 		t.Fatalf("source lookup allocated %v objects; detached payload copies must stay off the hot path", allocs)
 	}
-	if err := ledger.MarkInFlight(target.Token); err != nil {
-		t.Fatalf("MarkInFlight: %v", err)
-	}
 	if err := ledger.Ack(target.Token, 10, target.LayoutGeneration); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
@@ -169,9 +157,6 @@ func TestHistoryCommitLedger_TerminalCompactionRetainsSourceIdentity(t *testing.
 	commit := testHistoryCommit(1, 1, 2)
 	if err := ledger.Enqueue(commit); err != nil {
 		t.Fatalf("Enqueue: %v", err)
-	}
-	if err := ledger.MarkInFlight(commit.Token); err != nil {
-		t.Fatalf("MarkInFlight: %v", err)
 	}
 	if err := ledger.Ack(commit.Token, 3, 2); err != nil {
 		t.Fatalf("Ack: %v", err)
@@ -223,9 +208,6 @@ func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.
 	if err := ledger.Enqueue(active); err != nil {
 		t.Fatalf("Enqueue(active): %v", err)
 	}
-	if err := ledger.MarkInFlight(active.Token); err != nil {
-		t.Fatalf("MarkInFlight(active): %v", err)
-	}
 	if err := ledger.Ack(active.Token, 5, 2); err != nil {
 		t.Fatalf("Ack(active): %v", err)
 	}
@@ -240,9 +222,6 @@ func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.
 	failed.Origin = HistoryCommitActive
 	if err := ledger.Enqueue(failed); err != nil {
 		t.Fatalf("Enqueue(failed): %v", err)
-	}
-	if err := ledger.MarkInFlight(failed.Token); err != nil {
-		t.Fatalf("MarkInFlight(failed): %v", err)
 	}
 	if err := ledger.Fail(failed.Token, errors.New("short write"), true); err != nil {
 		t.Fatalf("Fail: %v", err)
@@ -270,7 +249,7 @@ func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.
 	if err := ledger.Enqueue(invalidated); err != nil {
 		t.Fatalf("Enqueue(invalidated): %v", err)
 	}
-	if _, err := ledger.Invalidate(invalidated.Token); err != nil {
+	if err := ledger.Invalidate(invalidated.Token, false); err != nil {
 		t.Fatalf("Invalidate: %v", err)
 	}
 	if !ledger.pruneResolvedToken(invalidated.Token) {
@@ -301,8 +280,8 @@ func TestHistoryEffectQueueAckCompactsResolvedEntries(t *testing.T) {
 		if err := state.ledger.Enqueue(commit); err != nil {
 			t.Fatalf("Enqueue(%d): %v", token, err)
 		}
-		if err := state.ledger.MarkInFlight(token); err != nil {
-			t.Fatalf("MarkInFlight(%d): %v", token, err)
+		if err := state.markInFlight(token, 2); err != nil {
+			t.Fatalf("markInFlight(%d): %v", token, err)
 		}
 		if err := state.ack(token, token, 2); err != nil {
 			t.Fatalf("ack(%d): %v", token, err)
@@ -372,10 +351,6 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	check("pending")
-	if err := ledger.MarkInFlight(first.Token); err != nil {
-		t.Fatalf("MarkInFlight: %v", err)
-	}
-	check("in-flight")
 
 	// Ack resolves cleanly and never counts.
 	if err := ledger.Ack(first.Token, 1, 8); err != nil {
@@ -388,9 +363,6 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 	if err := ledger.Enqueue(second); err != nil {
 		t.Fatalf("Enqueue second: %v", err)
 	}
-	if err := ledger.MarkInFlight(second.Token); err != nil {
-		t.Fatalf("MarkInFlight second: %v", err)
-	}
 	if err := ledger.Fail(second.Token, errors.New("boom"), false); err != nil {
 		t.Fatalf("Fail: %v", err)
 	}
@@ -401,23 +373,20 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 	if err := ledger.Enqueue(third); err != nil {
 		t.Fatalf("Enqueue third: %v", err)
 	}
-	if wasInFlight, err := ledger.Invalidate(third.Token); err != nil || wasInFlight {
-		t.Fatalf("Invalidate pending: wasInFlight=%t err=%v", wasInFlight, err)
+	if err := ledger.Invalidate(third.Token, false); err != nil {
+		t.Fatalf("Invalidate pending: %v", err)
 	}
 	check("pending invalidated")
 
-	// In-flight invalidation implies a partial write and IS unresolved.
+	// Partial-write invalidation (the token held the write cursor) IS unresolved.
 	fourth := testHistoryCommit(4, 44, 8)
 	if err := ledger.Enqueue(fourth); err != nil {
 		t.Fatalf("Enqueue fourth: %v", err)
 	}
-	if err := ledger.MarkInFlight(fourth.Token); err != nil {
-		t.Fatalf("MarkInFlight fourth: %v", err)
+	if err := ledger.Invalidate(fourth.Token, true); err != nil {
+		t.Fatalf("Invalidate partial: %v", err)
 	}
-	if wasInFlight, err := ledger.Invalidate(fourth.Token); err != nil || !wasInFlight {
-		t.Fatalf("Invalidate in-flight: wasInFlight=%t err=%v", wasInFlight, err)
-	}
-	check("in-flight invalidated")
+	check("partial invalidated")
 
 	// Clone must carry the counter forward.
 	clone := ledger.Clone()

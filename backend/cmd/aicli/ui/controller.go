@@ -961,9 +961,13 @@ type historyCommitGate struct {
 	Frozen            bool
 	ProjectionUnknown bool
 	LayoutGeneration  uint64
-	EntryFound        bool
-	EntryState        HistoryCommitState
-	EntryGeneration   uint64
+	// WriteCursor mirrors HistoryEffects.WriteCursor: the single token that may
+	// be physically written. A claim is current when the entry is still Pending
+	// and this cursor names it (the former InFlight state, now a scalar).
+	WriteCursor     uint64
+	EntryFound      bool
+	EntryState      HistoryCommitState
+	EntryGeneration uint64
 }
 
 // historyCommitGateOf reads one token's gate projection under the actor mutex
@@ -980,6 +984,7 @@ func (c *UIController) historyCommitGateOf(token uint64) historyCommitGate {
 		Frozen:            c.state.HistoryEffects.Frozen,
 		ProjectionUnknown: c.state.HistoryEffects.ProjectionUnknown,
 		LayoutGeneration:  c.state.Geometry.Generation,
+		WriteCursor:       c.state.HistoryEffects.WriteCursor,
 	}
 	if entry, ok := c.state.HistoryEffects.ledger.entry(token); ok {
 		gate.EntryFound = true

@@ -90,6 +90,11 @@ type HistoryCommitState uint8
 
 const (
 	HistoryCommitPending HistoryCommitState = iota
+	// HistoryCommitInFlight is retained only so externally built states and
+	// diagnostics can still name the legacy value. Since the P1-1 write-cursor
+	// convergence no production transition enters this state: a claimed entry
+	// stays Pending and HistoryEffectQueueState.WriteCursor records that it may
+	// be physically written. Step 2 (六态归一) removes the constant.
 	HistoryCommitInFlight
 	HistoryCommitAcked
 	HistoryCommitStateFailed
@@ -298,34 +303,6 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	return nil
 }
 
-func (l *HistoryCommitLedger) MarkInFlight(token uint64) error {
-	entry, ok := l.entry(token)
-	if !ok || entry.State != HistoryCommitPending {
-		return ErrCommitNotPending
-	}
-	entry.State = HistoryCommitInFlight
-	l.byToken[token] = entry
-	l.pendingCount--
-	return nil
-}
-
-// DeferInFlight returns an effect to Pending only when its presenter did not
-// begin a terminal write. The token and immutable payload remain unchanged, so
-// retrying after a lease/recovery boundary cannot mint a second handoff.
-func (l *HistoryCommitLedger) DeferInFlight(token uint64) error {
-	entry, ok := l.entry(token)
-	if !ok || entry.State != HistoryCommitInFlight {
-		return ErrCommitNotInFlight
-	}
-	entry.State = HistoryCommitPending
-	entry.AckFrame = 0
-	entry.Failure = nil
-	entry.MayHavePartiallyWritten = false
-	l.byToken[token] = entry
-	l.pendingCount++
-	return nil
-}
-
 // RebasePending updates only the display payload of an unstarted effect after
 // a layout generation change. Token and semantic source identity are retained;
 // resize therefore never creates a second history handoff token.
@@ -359,31 +336,26 @@ func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCom
 // Invalidate prevents a pending or in-flight effect from being consumed after
 // transcript replacement. An in-flight invalidation means terminal bytes may
 // already have reached the old projection and therefore requires recovery.
-func (l *HistoryCommitLedger) Invalidate(token uint64) (wasInFlight bool, err error) {
+//
+// mayHavePartiallyWritten is supplied by the caller: the queue knows whether
+// the token currently holds the write cursor, i.e. whether a physical write
+// may already have started (the previous InFlight state). A partially written
+// cancellation counts as an unresolved terminal delivery; the counter is
+// monotonic (unresolved entries never revert to resolved).
+func (l *HistoryCommitLedger) Invalidate(token uint64, mayHavePartiallyWritten bool) error {
 	entry, ok := l.entry(token)
-	if !ok || (entry.State != HistoryCommitPending && entry.State != HistoryCommitInFlight) {
-		return false, ErrCommitNotPending
+	if !ok || entry.State != HistoryCommitPending {
+		return ErrCommitNotPending
 	}
-	wasInFlight = entry.State == HistoryCommitInFlight
 	entry.State = HistoryCommitInvalidated
-	// An invalidated in-flight transaction had MayHavePartiallyWritten set to
-	// true below, which counts as an unresolved terminal delivery. The counter
-	// is monotonic (unresolved entries never revert to resolved).
-	if wasInFlight {
+	if mayHavePartiallyWritten {
 		l.unresolvedCount++
-	}
-	// An in-flight transaction can already have written a prefix before a
-	// semantic replacement or geometry barrier reaches the actor. Preserve that
-	// fact on the ledger entry so later planning never treats this identity as a
-	// harmless pending cancellation.
-	if wasInFlight {
 		entry.MayHavePartiallyWritten = true
-	} else {
-		l.pendingCount--
 	}
+	l.pendingCount--
 	l.byToken[token] = entry
 	l.advanceMinAfterTerminal(token)
-	return wasInFlight, nil
+	return nil
 }
 
 // Ack accepts a terminal effect only for the layout generation that produced
@@ -397,7 +369,7 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	if entry.State == HistoryCommitAcked {
 		return ErrDuplicateCommitAck
 	}
-	if entry.State != HistoryCommitInFlight {
+	if entry.State != HistoryCommitPending {
 		return ErrCommitNotInFlight
 	}
 	if entry.Commit.LayoutGeneration != currentGeneration {
@@ -414,6 +386,7 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 		entry.Commit.Lines = nil
 	}
 	l.byToken[token] = entry
+	l.pendingCount--
 	if entry.Commit.Origin == HistoryCommitActive {
 		l.activeAckPlanVersion++
 	}
@@ -472,7 +445,7 @@ func (l *HistoryCommitLedger) advanceMinAfterTerminal(token uint64) {
 
 func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWritten bool) error {
 	entry, ok := l.entry(token)
-	if !ok || entry.State != HistoryCommitInFlight {
+	if !ok || entry.State != HistoryCommitPending {
 		return ErrCommitNotInFlight
 	}
 	entry.State = HistoryCommitStateFailed
@@ -481,6 +454,7 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 	// HistoryCommitStateFailed is always unresolved regardless of
 	// MayHavePartiallyWritten.
 	l.unresolvedCount++
+	l.pendingCount--
 	l.byToken[token] = entry
 	l.advanceMinAfterTerminal(token)
 	return nil

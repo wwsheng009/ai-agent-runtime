@@ -541,8 +541,8 @@ func TestHistoryEffectsReducer_TranscriptBoundaryChangeInvalidatesInFlightHandof
 		state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: entry.Commit.Token, Frame: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation}, 3)
 	}
 	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: state.Geometry.Generation}, 3)
-	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitInFlight {
-		t.Fatalf("begin history = %#v", entry)
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != token {
+		t.Fatalf("begin history = %#v cursor=%d", entry, state.HistoryEffects.WriteCursor)
 	}
 	beforeToken := state.HistoryEffects.NextToken
 
@@ -561,8 +561,8 @@ func TestHistoryEffectsReducer_ResizeKeepsInFlightDeliveryAndAcceptsRacedAck(t *
 	entries := state.HistoryEffects.Entries()
 	token := entries[0].Commit.Token
 	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: 2}, 3)
-	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitInFlight {
-		t.Fatalf("begin entry = %#v, want in flight", entry)
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != token {
+		t.Fatalf("begin entry = %#v cursor=%d, want claimed pending", entry, state.HistoryEffects.WriteCursor)
 	}
 	count, nextToken := len(entries), state.HistoryEffects.NextToken
 	state = reduceUIControllerState(state, Resize{Width: 100, Height: 10, Generation: 3}, 4)
@@ -571,8 +571,8 @@ func TestHistoryEffectsReducer_ResizeKeepsInFlightDeliveryAndAcceptsRacedAck(t *
 	// invalidating a raced, in-fact-completed write would make the range
 	// permanently un-mintable. Only a refused proof may raise an obligation.
 	entry := historyCommitEntry(t, state, token)
-	if entry.State != HistoryCommitInFlight || entry.MayHavePartiallyWritten {
-		t.Fatalf("resize invalidated an in-flight projection: entry=%#v", entry)
+	if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != token || entry.MayHavePartiallyWritten {
+		t.Fatalf("resize invalidated an in-flight projection: entry=%#v cursor=%d", entry, state.HistoryEffects.WriteCursor)
 	}
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
 		t.Fatalf("resize raised a recovery obligation: %#v", state.HistoryEffects)

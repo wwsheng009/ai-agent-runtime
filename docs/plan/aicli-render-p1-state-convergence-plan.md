@@ -71,6 +71,32 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 6. 终态吸收性与缓存单调性：Acked/Abandoned 后回退会破坏 minNonTerminalToken/unresolvedCount 单调假设。
 7. 坐标系统混用：HandoffFrontier（渲染行）≠ ledger token/display range；trim/重定基不可混用。
 
+### 1.5 P1-1 第 1 步实施记录（InFlight/claim → 单飞写游标，已完成）
+
+- 设计修正（相对 §1.2 的"executor 私有游标"）：planner 的 InFlight 安全点
+  （展示载荷变化时 invalidate 而非 rebase）与批量 ack 校验需要 reducer 侧可见，
+  因此落地为 `HistoryEffectQueueState.WriteCursor`（单调标量，0=无）。旧协议由
+  `hasOlderPendingOrInFlight` 保证同一时刻至多一个 InFlight，结构上等价。
+- ledger（history_commit.go）：删除 `MarkInFlight`/`DeferInFlight`；`Ack`/`Fail`
+  改为 Pending → 终态并各自维护 `pendingCount`；`Invalidate(token, mayHavePartiallyWritten)`
+  由队列传入"是否持有游标"决定未决语义（部分写标记 + unresolvedCount）。
+  `HistoryCommitInFlight` 常量保留但生产不再进入（step 2 六态归一删除）。
+- queue（history_effect_queue.go）：`markInFlight` 语义 = 设置 WriteCursor
+  （frozen/projection/generation/ordering/单飞校验，幂等重领）；`deferInFlight` = 清游标；
+  `invalidate`/`ack`/`fail` 成功路径清游标；`ackBatch` 以"head==cursor、其余 Pending"
+  校验并逐条推进游标；`rebasePending` 跳过游标 token；`hasInFlightActiveOriginDelivery`
+  改判游标 token（finalize 延迟护栏）。
+- reducer/planner：`historyCommitGate` 增加 WriteCursor 投影，`historyCommitClaimCurrent`
+  改判 "Pending && cursor==token"；`syncHistoryEffectCandidates` 对游标 token 走旧
+  InFlight 分支（载荷变化即 invalidate）。
+- executor/snapshot：`terminalSessionClaimedBatchLocked` 的 claimed 判据改
+  "Pending && WriteCursor==token"；`releaseClaimMiss` 语义不变（Deferred 清游标）。
+- 测试重写面：history_commit_test（fixture 去 MarkInFlight、Invalidate 签名/语义）、
+  queue/planner/executor/scrollback/settled 断言改"Pending+游标"；
+  `TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight` 暴露并修复了
+  finalize 护栏漏判（hasInFlightActiveOriginDelivery 未含游标）。
+- 验证：ui 全量 + commands 全量 + 定向 -race（见提交记录）。
+
 ## 2. P1-2 可推导镜像收敛
 
 ### 2.1 镜像字段（14 项盘点，关键处置）

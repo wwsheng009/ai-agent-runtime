@@ -42,9 +42,6 @@ func TestReplanSkipsSettledFragments(t *testing.T) {
 		if !ok || entry.State != HistoryCommitPending {
 			continue
 		}
-		if err := ledger.MarkInFlight(token); err != nil {
-			t.Fatalf("mark in flight %d: %v", token, err)
-		}
 		if err := ledger.Ack(token, 1, entry.Commit.LayoutGeneration); err != nil {
 			t.Fatalf("ack %d: %v", token, err)
 		}

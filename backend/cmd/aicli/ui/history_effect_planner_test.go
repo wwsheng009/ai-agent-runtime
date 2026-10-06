@@ -228,8 +228,8 @@ func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
 		},
 	}, 6)
 	entry = historyCommitEntry(t, state, first.Token)
-	if entry.State != HistoryCommitInFlight || state.HistoryEffects.ProjectionUnknown {
-		t.Fatalf("append-only revision invalidated in-flight stable effect: entry=%+v", entry)
+	if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != first.Token || state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("append-only revision invalidated claimed stable effect: entry=%+v state=%+v", entry, state.HistoryEffects)
 	}
 	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
 		Token: first.Token, Frame: 1, LayoutGeneration: state.Geometry.Generation,
@@ -458,8 +458,8 @@ func TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight(t *testing.T) {
 		case entry.Commit.Origin == HistoryCommitTranscript:
 			t.Fatalf("finalize minted a transcript identity while the active batch was in flight: %#v", entry)
 		case entry.Commit.Token == batch[0].Token:
-			if entry.State != HistoryCommitInFlight {
-				t.Fatalf("batch head state = %v, want in-flight", entry.State)
+			if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != batch[0].Token {
+				t.Fatalf("batch head state = %v cursor=%d, want claimed pending", entry.State, state.HistoryEffects.WriteCursor)
 			}
 		default:
 			if entry.State != HistoryCommitPending {
@@ -787,9 +787,6 @@ func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
 		if err := ledger.Enqueue(commits[i]); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
-		if err := ledger.MarkInFlight(commits[i].Token); err != nil {
-			t.Fatalf("mark in-flight: %v", err)
-		}
 		if err := ledger.Ack(commits[i].Token, 1, 1); err != nil {
 			t.Fatalf("ack: %v", err)
 		}
@@ -1080,13 +1077,13 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 	if err := state.HistoryEffects.enqueue(inFlight); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	// Mark it InFlight (simulating executor claim).
+	// Claim it (simulating executor write claim).
 	if err := state.HistoryEffects.markInFlight(1, 1); err != nil {
 		t.Fatalf("markInFlight: %v", err)
 	}
 	entry, ok := state.HistoryEffects.ledger.Entry(1)
-	if !ok || entry.State != HistoryCommitInFlight {
-		t.Fatalf("expected in-flight entry, got state=%s", entry.State)
+	if !ok || entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != 1 {
+		t.Fatalf("expected claimed pending entry, got state=%s cursor=%d", entry.State, state.HistoryEffects.WriteCursor)
 	}
 
 	// Build a candidate with the same source identity (origin, cellID, source
@@ -1100,18 +1097,18 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 	// Call syncHistoryEffectCandidates — the exact trigger path.
 	syncHistoryEffectCandidates(state, []HistoryCommit{candidate}, 91)
 
-	// Assert: the in-flight entry was NOT invalidated.
+	// Assert: the claimed entry was NOT invalidated.
 	entry, ok = state.HistoryEffects.ledger.Entry(1)
 	if !ok {
-		t.Fatal("in-flight entry was removed from ledger")
+		t.Fatal("claimed entry was removed from ledger")
 	}
-	if entry.State != HistoryCommitInFlight {
-		t.Fatalf("in-flight entry was invalidated (state=%s); fix broke: "+
+	if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != 1 {
+		t.Fatalf("claimed entry was invalidated (state=%s cursor=%d); fix broke: "+
 			"DisplayRange-only difference for active commit must not trigger invalidate",
-			entry.State)
+			entry.State, state.HistoryEffects.WriteCursor)
 	}
 	if state.HistoryEffects.ProjectionUnknown {
-		t.Fatal("ProjectionUnknown was set — in-flight commit was invalidated")
+		t.Fatal("ProjectionUnknown was set — claimed commit was invalidated")
 	}
 	if state.HistoryEffects.ReconciliationRequired {
 		t.Fatal("ReconciliationRequired was set — in-flight commit was invalidated")

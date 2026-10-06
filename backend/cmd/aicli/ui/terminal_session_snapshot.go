@@ -129,7 +129,8 @@ func terminalSessionClaimedBatchLocked(state UIControllerState, token uint64) (*
 		return nil, nil
 	}
 	entry, ok := ledger.byToken[token]
-	if !ok || entry.State != HistoryCommitInFlight || entry.Commit.LayoutGeneration != state.Geometry.Generation {
+	if !ok || entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != token ||
+		entry.Commit.LayoutGeneration != state.Geometry.Generation {
 		return nil, nil
 	}
 	claimed := entry.Commit.Clone()

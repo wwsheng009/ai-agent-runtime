@@ -860,15 +860,15 @@ func (e *TerminalSessionExecutor) waitControllerAcceptedApplied() bool {
 // when the layout generation advanced underneath the claim, rebases its
 // payload onto the current generation.
 //
-// This is a liveness requirement, not an optimization. A claim that stays
-// InFlight with no terminal result is invisible to terminalSessionSchedule
-// (which scans Pending only) and blocks every later claim through
-// hasOlderPendingOrInFlight, so a single stranded claim deadlocks the whole
-// handoff queue, and no aging watchdog exists to recover it afterwards. The
-// post is unconditional because this helper cannot distinguish "markInFlight
-// was refused" from "markInFlight succeeded but the snapshot refused"; a
-// Deferred for a non-InFlight token is a safe no-op in the reducer (the
-// deferInFlight error is ignored there).
+// This is a liveness requirement, not an optimization. A claim whose write
+// cursor stays set with no terminal result is still Pending, so the schedule
+// keeps pointing at it and the ordering guard blocks every later claim: a
+// single stranded claim would deadlock the whole handoff queue, and no aging
+// watchdog exists to recover it afterwards. The post is unconditional because
+// this helper cannot distinguish "the claim was refused" from "the cursor was
+// set but the snapshot refused"; a Deferred for a token that does not hold the
+// cursor is a safe no-op in the reducer (the deferInFlight error is ignored
+// there).
 func (e *TerminalSessionExecutor) releaseClaimMiss(token, generation uint64) {
 	if e == nil || e.controller == nil || token == 0 {
 		return

@@ -1482,6 +1482,17 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
 					return
 				}
+				if entry.Commit.Token == state.HistoryEffects.WriteCursor {
+					// The executor holds this token as the active write claim: it may
+					// already have crossed the writer. A changed display payload must
+					// invalidate rather than rebase, exactly like the removed InFlight
+					// state did; rebasing would let old bytes be acknowledged as the
+					// new semantic layout.
+					if !historyCommitPresentationEqual(entry.Commit, candidate) {
+						_ = state.HistoryEffects.invalidate(entry.Commit.Token)
+					}
+					return
+				}
 				// A semantic snapshot can retain the same cell source while
 				// changing a preceding boundary/gap. The token remains the
 				// same unstarted effect, but its display payload must be rebased

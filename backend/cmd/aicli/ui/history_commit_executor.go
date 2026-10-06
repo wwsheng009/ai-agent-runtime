@@ -216,7 +216,8 @@ func historyCommitClaimCurrent(gate historyCommitGate, commit HistoryCommit) boo
 		gate.LayoutGeneration != commit.LayoutGeneration {
 		return false
 	}
-	return gate.EntryFound && gate.EntryState == HistoryCommitInFlight &&
+	return gate.EntryFound && gate.EntryState == HistoryCommitPending &&
+		gate.WriteCursor == commit.Token &&
 		gate.EntryGeneration == commit.LayoutGeneration
 }
 
