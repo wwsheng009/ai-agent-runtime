@@ -36,7 +36,7 @@ func TestHistoryEffectQueue_FreezeBlocksBeginButNotAck(t *testing.T) {
 		t.Fatalf("ack in-flight commit during freeze: %v", err)
 	}
 	entries := queue.Entries()
-	if len(entries) != 1 || entries[0].State != HistoryCommitAcked {
+	if len(entries) != 1 || entries[0].State != HistoryCommitDelivered {
 		t.Fatalf("entries = %#v", entries)
 	}
 }
@@ -169,7 +169,7 @@ func TestHistoryEffectsReducer_BootstrapBatchAcknowledgesOrderedPendingRangesAto
 	}, 4)
 	for _, commit := range commits {
 		entry := historyCommitEntry(t, state, commit.Token)
-		if entry.State != HistoryCommitAcked || entry.AckFrame != 9 || entry.Commit.Lines != nil {
+		if entry.State != HistoryCommitDelivered || entry.AckFrame != 9 || entry.Commit.Lines != nil {
 			t.Fatalf("bootstrap token %d was not atomically acknowledged: %#v", commit.Token, entry)
 		}
 	}
@@ -206,7 +206,7 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBa
 
 	for _, commit := range commits {
 		entry := historyCommitEntry(t, state, commit.Token)
-		if entry.State != HistoryCommitStateFailed || entry.AckFrame != 0 ||
+		if !entry.IsFailed() || entry.AckFrame != 0 ||
 			!entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrCommitSourceChanged) {
 			t.Fatalf("mismatched delivered token %d was not quarantined: %#v", commit.Token, entry)
 		}
@@ -223,7 +223,7 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBa
 
 func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 	state := AppState{
-		Geometry:         GeometryState{Width: 4, Height: 4, Generation: 1},
+		Geometry: GeometryState{Width: 4, Height: 4, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "123456", Phase: scene.CellCommitted},
 			{ID: 2, Revision: 1, Kind: scene.KindAssistant, Source: "abcdef", Phase: scene.CellCommitted},
@@ -258,7 +258,7 @@ func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 
 func TestPlanEligibleHistoryCommits_SplitsUnbrokenPlainLineAtPrimaryBoundary(t *testing.T) {
 	state := AppState{
-		Geometry:         GeometryState{Width: 4, Height: 3, Generation: 1},
+		Geometry: GeometryState{Width: 4, Height: 3, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "abcdefghijkl", Phase: scene.CellCommitted},
 		}}),
@@ -317,7 +317,7 @@ func TestHistoryEffectsReducer_UnbrokenLineHandoffsEachRowOnce(t *testing.T) {
 
 func TestPlanEligibleHistoryCommits_SplitsCJKWrappedRowsAtByteBoundaries(t *testing.T) {
 	state := AppState{
-		Geometry:         GeometryState{Width: 4, Height: 3, Generation: 1},
+		Geometry: GeometryState{Width: 4, Height: 3, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "甲乙丙丁己", Phase: scene.CellCommitted},
 		}}),
@@ -338,7 +338,7 @@ func TestPlanEligibleHistoryCommits_SplitsCJKWrappedRowsAtByteBoundaries(t *test
 func TestPlanEligibleHistoryCommits_SplitsMarkdownRowsAtPrimaryBoundary(t *testing.T) {
 	const source = "# markdown heading\n\n- **markdown-history-01**\n- **markdown-history-02**\n- **markdown-history-03**\n- **markdown-history-04**\n- **markdown-history-05**"
 	state := AppState{
-		Geometry:         GeometryState{Width: 48, Height: 4, Generation: 1},
+		Geometry: GeometryState{Width: 48, Height: 4, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: source, Phase: scene.CellCommitted},
 		}}),
@@ -372,7 +372,7 @@ func TestPlanEligibleHistoryCommits_SplitsMarkdownRowsAtPrimaryBoundary(t *testi
 func TestPlanEligibleHistoryCommits_SegmentsOversizedFinalizedPlainCell(t *testing.T) {
 	const source = "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh"
 	state := AppState{
-		Geometry:         GeometryState{Width: 80, Height: 6, Generation: 1},
+		Geometry: GeometryState{Width: 80, Height: 6, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: source, Phase: scene.CellCommitted},
 		}}),
@@ -410,8 +410,8 @@ func BenchmarkPlanEligibleHistoryCommitsPlainTranscript(b *testing.B) {
 		})
 	}
 	state := AppState{
-		Geometry:         GeometryState{Width: 100, Height: 24, Generation: 1},
-		Transcript:       NewTranscriptState(&scene.Snapshot{Cells: cells}),
+		Geometry:   GeometryState{Width: 100, Height: 24, Generation: 1},
+		Transcript: NewTranscriptState(&scene.Snapshot{Cells: cells}),
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -445,7 +445,7 @@ func TestHistoryEffectsReducer_TranscriptOnlyMintsAndResizeOnlyRebases(t *testin
 		if after[index].Commit.Token != before[index].Commit.Token {
 			t.Fatalf("resize replaced token at %d: before=%#v after=%#v", index, before[index], after[index])
 		}
-		if after[index].State == HistoryCommitPending && after[index].Commit.LayoutGeneration != 6 {
+		if after[index].State == HistoryCommitQueued && after[index].Commit.LayoutGeneration != 6 {
 			t.Fatalf("pending commit was not rebased: %#v", after[index])
 		}
 	}
@@ -463,7 +463,7 @@ func TestHistoryEffectsReducer_StaleBeginClaimDoesNotInvalidateProjection(t *tes
 		Token: token, LayoutGeneration: state.Geometry.Generation - 1,
 	}, 3)
 	entry := historyCommitEntry(t, state, token)
-	if entry.State != HistoryCommitPending {
+	if entry.State != HistoryCommitQueued {
 		t.Fatalf("stale begin changed pending token state: %#v", entry)
 	}
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
@@ -486,14 +486,14 @@ func TestHistoryEffectsReducer_LeaseFreezesAndReplacementInvalidatesPending(t *t
 	token := entries[0].Commit.Token
 	state = reduceUIControllerState(state, LeaseAcquired{LeaseID: 12}, 3)
 	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: 2}, 4)
-	if entry := state.HistoryEffects.Entries()[0]; entry.State != HistoryCommitPending {
+	if entry := state.HistoryEffects.Entries()[0]; entry.State != HistoryCommitQueued {
 		t.Fatalf("lease allowed pending token to enter flight: %#v", entry)
 	}
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: &scene.Snapshot{Revision: 2, Cells: cells[len(cells)-1:]}}, 5)
 	invalidated := false
 	for _, entry := range state.HistoryEffects.Entries() {
 		if entry.Commit.Token == token {
-			invalidated = entry.State == HistoryCommitInvalidated
+			invalidated = entry.IsInvalidated()
 		}
 	}
 	if !invalidated {
@@ -508,13 +508,13 @@ func TestHistoryEffectsReducer_LeaseFreezesAndReplacementInvalidatesPending(t *t
 func TestHistoryEffectsReducer_TranscriptBoundaryChangeRebasesPendingHandoff(t *testing.T) {
 	state, token := historyEffectBoundaryChangeState(t)
 	before := historyCommitEntry(t, state, token)
-	if before.State != HistoryCommitPending || len(before.Commit.Lines) != 2 || len(before.Commit.Lines[0].Spans) != 0 {
+	if before.State != HistoryCommitQueued || len(before.Commit.Lines) != 2 || len(before.Commit.Lines[0].Spans) != 0 {
 		t.Fatalf("fixture did not retain boundary gap in pending payload: %#v", before)
 	}
 
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: historyEffectBoundaryChangedSnapshot(state)}, 3)
 	after := historyCommitEntry(t, state, token)
-	if after.State != HistoryCommitPending || after.Commit.Token != token {
+	if after.State != HistoryCommitQueued || after.Commit.Token != token {
 		t.Fatalf("boundary-only replacement changed pending delivery identity: before=%#v after=%#v", before, after)
 	}
 	if after.Commit.DisplayRange == before.Commit.DisplayRange || len(after.Commit.Lines) != 1 ||
@@ -534,21 +534,21 @@ func TestHistoryEffectsReducer_TranscriptBoundaryChangeInvalidatesInFlightHandof
 	// Native scrollback is ordered; retire any older eligible cells so the
 	// candidate can be the token currently in flight for this test.
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Token >= token || entry.State != HistoryCommitPending {
+		if entry.Commit.Token >= token || entry.State != HistoryCommitQueued {
 			continue
 		}
 		state = reduceUIControllerState(state, BeginHistoryCommit{Token: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation}, 3)
 		state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: entry.Commit.Token, Frame: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation}, 3)
 	}
 	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: state.Geometry.Generation}, 3)
-	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != token {
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != token {
 		t.Fatalf("begin history = %#v cursor=%d", entry, state.HistoryEffects.WriteCursor)
 	}
 	beforeToken := state.HistoryEffects.NextToken
 
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: historyEffectBoundaryChangedSnapshot(state)}, 4)
 	entry := historyCommitEntry(t, state, token)
-	if entry.State != HistoryCommitInvalidated || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown {
+	if !entry.IsInvalidated() || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown {
 		t.Fatalf("changed in-flight payload was not fail-closed: entry=%#v state=%#v", entry, state.HistoryEffects)
 	}
 	if state.HistoryEffects.NextToken != beforeToken || state.HistoryEffects.HasPending() {
@@ -561,7 +561,7 @@ func TestHistoryEffectsReducer_ResizeKeepsInFlightDeliveryAndAcceptsRacedAck(t *
 	entries := state.HistoryEffects.Entries()
 	token := entries[0].Commit.Token
 	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: 2}, 3)
-	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != token {
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != token {
 		t.Fatalf("begin entry = %#v cursor=%d, want claimed pending", entry, state.HistoryEffects.WriteCursor)
 	}
 	count, nextToken := len(entries), state.HistoryEffects.NextToken
@@ -571,7 +571,7 @@ func TestHistoryEffectsReducer_ResizeKeepsInFlightDeliveryAndAcceptsRacedAck(t *
 	// invalidating a raced, in-fact-completed write would make the range
 	// permanently un-mintable. Only a refused proof may raise an obligation.
 	entry := historyCommitEntry(t, state, token)
-	if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != token || entry.MayHavePartiallyWritten {
+	if entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != token || entry.MayHavePartiallyWritten {
 		t.Fatalf("resize invalidated an in-flight projection: entry=%#v cursor=%d", entry, state.HistoryEffects.WriteCursor)
 	}
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
@@ -584,7 +584,7 @@ func TestHistoryEffectsReducer_ResizeKeepsInFlightDeliveryAndAcceptsRacedAck(t *
 	// for the exact generation the writer took. Refusing it would demand a
 	// replay, which normal interaction must never perform.
 	state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: token, Frame: 8, LayoutGeneration: 2}, 5)
-	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitAcked {
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitDelivered {
 		t.Fatalf("raced acknowledgement was refused: %#v", entry)
 	}
 	if state.HistoryEffects.ProjectionUnknown {
@@ -611,7 +611,7 @@ func TestHistoryEffectsReducer_BatchAckAcceptedWhenLeaseArrivesAfterTerminalWrit
 	}
 	for index, commit := range pending {
 		entry := historyCommitEntry(t, state, commit.Token)
-		if entry.State != HistoryCommitAcked || entry.AckFrame != 9 || entry.MayHavePartiallyWritten {
+		if entry.State != HistoryCommitDelivered || entry.AckFrame != 9 || entry.MayHavePartiallyWritten {
 			t.Fatalf("delivered entry[%d] rejected after lease barrier: %#v", index, entry)
 		}
 	}
@@ -648,7 +648,7 @@ func TestHistoryEffectsReducer_ScrollbackReconciliationRequiresRecoveryAndReplan
 		t.Fatal("fresh terminal epoch retained reconciliation intent")
 	}
 	for _, entry := range entries {
-		if entry.Commit.Token <= oldNextToken || entry.State != HistoryCommitPending {
+		if entry.Commit.Token <= oldNextToken || entry.State != HistoryCommitQueued {
 			t.Fatalf("old delivery leaked into fresh epoch: %#v", entry)
 		}
 	}
@@ -667,7 +667,7 @@ func TestHistoryEffectsReducer_AckedSourceIsNotMintedAgainAfterResize(t *testing
 	token := state.HistoryEffects.Entries()[0].Commit.Token
 	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: 2}, 3)
 	state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: token, Frame: 9, LayoutGeneration: 2}, 4)
-	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitAcked {
+	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitDelivered {
 		t.Fatalf("head token not acked: %#v", entry)
 	}
 
@@ -679,7 +679,7 @@ func TestHistoryEffectsReducer_AckedSourceIsNotMintedAgainAfterResize(t *testing
 		t.Fatalf("acked source minted a second token after resize: %d -> %d", beforeToken, state.HistoryEffects.NextToken)
 	}
 	entry := historyCommitEntry(t, state, token)
-	if entry.State != HistoryCommitAcked || entry.Commit.Lines != nil {
+	if entry.State != HistoryCommitDelivered || entry.Commit.Lines != nil {
 		t.Fatalf("acked source was changed or retained payload: %#v", entry)
 	}
 }

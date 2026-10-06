@@ -196,7 +196,7 @@ func (e *HistoryCommitExecutor) runOne() bool {
 // commitHistory converts a terminal-side panic into the same conservative
 // failure path as a short write. A sink can panic after it has emitted bytes,
 // so recovery must assume an unknown physical projection rather than leaving
-// the token permanently InFlight and the executor goroutine dead.
+// the token permanently claimed and the executor goroutine dead.
 func (e *HistoryCommitExecutor) commitHistory(commit HistoryCommit) (result HistoryCommitResult) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -216,11 +216,11 @@ func historyCommitClaimCurrent(gate historyCommitGate, commit HistoryCommit) boo
 		gate.LayoutGeneration != commit.LayoutGeneration {
 		return false
 	}
-	return gate.EntryFound && gate.EntryState == HistoryCommitPending &&
+	return gate.EntryFound && gate.EntryState == HistoryCommitQueued &&
 		gate.WriteCursor == commit.Token &&
 		gate.EntryGeneration == commit.LayoutGeneration
 }
 
 func historyCommitAcked(gate historyCommitGate) bool {
-	return gate.EntryFound && gate.EntryState == HistoryCommitAcked
+	return gate.EntryFound && gate.EntryState == HistoryCommitDelivered
 }

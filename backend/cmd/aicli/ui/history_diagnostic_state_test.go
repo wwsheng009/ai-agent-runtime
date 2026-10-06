@@ -132,26 +132,36 @@ func assertSummaryMatchesEntryWalk(t *testing.T, state UIControllerState) {
 	}
 	for _, entry := range entries {
 		switch entry.State {
-		case HistoryCommitPending:
-			want.Pending++
-			if want.OldestPendingToken == 0 {
-				want.OldestPendingToken = entry.Commit.Token
-				want.OldestPendingGeneration = entry.Commit.LayoutGeneration
+		case HistoryCommitQueued:
+			want.Queued++
+			if want.OldestQueuedToken == 0 || entry.Commit.Token < want.OldestQueuedToken {
+				want.OldestQueuedToken = entry.Commit.Token
+				want.OldestQueuedGeneration = entry.Commit.LayoutGeneration
 			}
-		case HistoryCommitInFlight:
-			want.InFlight++
-			if want.OldestInFlightToken == 0 || entry.Commit.Token < want.OldestInFlightToken {
-				want.OldestInFlightToken = entry.Commit.Token
-				want.OldestInFlightGeneration = entry.Commit.LayoutGeneration
+		case HistoryCommitDelivered:
+			want.Delivered++
+		case HistoryCommitQuarantined:
+			want.Quarantined++
+			switch entry.Quarantine {
+			case HistoryCommitQuarantineFailed:
+				want.QuarantinedFailed++
+			case HistoryCommitQuarantineSettled:
+				want.QuarantinedSettled++
 			}
-		case HistoryCommitAcked:
-			want.Acked++
-		case HistoryCommitStateFailed:
-			want.Failed++
-		case HistoryCommitInvalidated:
-			want.Invalidated++
-		case HistoryCommitAbandoned:
-			want.Abandoned++
+			if entry.Unresolved() {
+				want.QuarantinedUnresolved++
+			}
+		}
+	}
+	// Claimed 游标不是 ledger 条目属性（条目仍是 queued），按 queue 标量搬运，
+	// generation 由该 token 的条目补全 —— 与 Summary() 的读取路径一致。
+	want.ClaimedToken = state.HistoryEffects.WriteCursor
+	if want.ClaimedToken != 0 {
+		for _, entry := range entries {
+			if entry.Commit.Token == want.ClaimedToken {
+				want.ClaimedGeneration = entry.Commit.LayoutGeneration
+				break
+			}
 		}
 	}
 	if got := state.HistoryEffects.Summary(); got != want {
@@ -176,7 +186,7 @@ func TestHistoryEffectQueueSummaryMatchesEntryWalk(t *testing.T) {
 		t.Fatalf("diagnostic projection lost plan timing: %#v vs %#v", diag, summary)
 	}
 
-	// 混合态：失败一次后 drain 停止，ledger 里同时留下 failed 与 pending。
+	// 混合态：失败一次后 drain 停止，ledger 里同时留下 failed 与 queued。
 	failing := newHistoryExecutorController(t, nil)
 	postHistoryEffectFixture(t, failing, 4)
 	failing.WaitIdle()
@@ -187,7 +197,7 @@ func TestHistoryEffectQueueSummaryMatchesEntryWalk(t *testing.T) {
 	executor.Request()
 	executor.WaitIdle()
 	state := failing.State()
-	if summary := state.HistoryEffects.Summary(); summary.Failed == 0 {
+	if summary := state.HistoryEffects.Summary(); summary.QuarantinedFailed == 0 {
 		t.Fatalf("expected a failed entry after a refusing sink: %#v", summary)
 	}
 	assertSummaryMatchesEntryWalk(t, state)

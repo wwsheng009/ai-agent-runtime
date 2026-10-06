@@ -268,7 +268,7 @@ func TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameW
 		t.Fatalf("final drain left active/pending state: active=%+v effects=%+v", state.Active, state.HistoryEffects.Entries())
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
+		if entry.State == HistoryCommitQueued {
 			t.Fatalf("final drain left token %d in state %s", entry.Commit.Token, entry.State)
 		}
 	}
@@ -313,7 +313,7 @@ func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTran
 
 	state := controller.State()
 	first := historyCommitEntry(t, state, before[0].Commit.Token)
-	if first.State != HistoryCommitAcked || state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
+	if first.State != HistoryCommitDelivered || state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
 		t.Fatalf("initial bootstrap did not atomically hand off history: entry=%#v unknown=%t writes=%d", first, state.HistoryEffects.ProjectionUnknown, writer.writes)
 	}
 
@@ -325,7 +325,7 @@ func TestTerminalSessionExecutorBootstrapsAndAcknowledgesOrderedHistoryInOneTran
 		t.Fatalf("history inventory changed across presenter bootstrap: before=%d after=%d", len(before), len(entries))
 	}
 	for index, entry := range entries {
-		if entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
+		if entry.State != HistoryCommitDelivered || entry.AckFrame == 0 {
 			t.Fatalf("entry[%d] was not acknowledged after bootstrap: %#v", index, entry)
 		}
 		if index > 0 && entry.AckFrame < entries[index-1].AckFrame {
@@ -352,7 +352,7 @@ func TestTerminalSessionExecutorBoundsBootstrapAcrossTransactions(t *testing.T) 
 	entries := controller.State().HistoryEffects.Entries()
 	ackFrames := make(map[uint64]struct{})
 	for index, entry := range entries {
-		if entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
+		if entry.State != HistoryCommitDelivered || entry.AckFrame == 0 {
 			t.Fatalf("entry[%d] was not acknowledged after bounded drain: %#v", index, entry)
 		}
 		ackFrames[entry.AckFrame] = struct{}{}
@@ -383,7 +383,7 @@ func TestTerminalSessionExecutorConsumesActorWakeAndDrainsOrderedHistory(t *test
 		t.Fatal("wake fixture did not create history effects")
 	}
 	for index, entry := range entries {
-		if entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
+		if entry.State != HistoryCommitDelivered || entry.AckFrame == 0 {
 			t.Fatalf("entry[%d] was not acknowledged through actor wake: %#v", index, entry)
 		}
 		if index > 0 && entry.AckFrame < entries[index-1].AckFrame {
@@ -451,7 +451,7 @@ func TestTerminalSessionExecutorConsumesControllerWakeWithoutExtraFrame(t *testi
 		t.Fatal("fixture did not create effects")
 	}
 	for _, entry := range entries {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			t.Fatalf("wake-driven drain left entry unresolved: %#v", entry)
 		}
 	}
@@ -482,7 +482,7 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 	beforeResize := controller.State()
 	oldNextToken := beforeResize.HistoryEffects.NextToken
 	oldToken := beforeResize.HistoryEffects.Entries()[0].Commit.Token
-	if entry := historyCommitEntry(t, beforeResize, oldToken); entry.State != HistoryCommitPending || beforeResize.HistoryEffects.WriteCursor != oldToken {
+	if entry := historyCommitEntry(t, beforeResize, oldToken); entry.State != HistoryCommitQueued || beforeResize.HistoryEffects.WriteCursor != oldToken {
 		t.Fatalf("blocked history token = %#v cursor=%d, want claimed pending", entry, beforeResize.HistoryEffects.WriteCursor)
 	}
 	if bytes.Contains(firstWrite, []byte("\x1b[3J")) {
@@ -498,7 +498,7 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 	// the writer, but it must neither invalidate the in-flight delivery nor
 	// demand a scrollback replay: the write is already committed to the host,
 	// and invalidating it would make the range permanently un-mintable.
-	if entry := historyCommitEntry(t, resized, oldToken); entry.State != HistoryCommitPending || resized.HistoryEffects.WriteCursor != oldToken || entry.MayHavePartiallyWritten {
+	if entry := historyCommitEntry(t, resized, oldToken); entry.State != HistoryCommitQueued || resized.HistoryEffects.WriteCursor != oldToken || entry.MayHavePartiallyWritten {
 		t.Fatalf("resize quarantined in-flight history: %#v cursor=%d", entry, resized.HistoryEffects.WriteCursor)
 	}
 	if resized.HistoryEffects.ProjectionUnknown || resized.HistoryEffects.ReconciliationRequired {
@@ -512,7 +512,7 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 	if state.Geometry.Generation != 5 {
 		t.Fatalf("resize recovery state = generation %d", state.Geometry.Generation)
 	}
-	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
+	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitDelivered || entry.AckFrame == 0 {
 		t.Fatalf("raced delivery was not acknowledged: state=%s gen=%d ack=%d partial=%t failure=%v",
 			entry.State, entry.Commit.LayoutGeneration, entry.AckFrame, entry.MayHavePartiallyWritten, entry.Failure)
 	}
@@ -642,7 +642,7 @@ func TestTerminalSessionExecutorSecondResizeRaceStillDrainsWithoutReplay(t *test
 	if state.Geometry.Generation != 6 {
 		t.Fatalf("second resize recovery state = generation %d", state.Geometry.Generation)
 	}
-	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitAcked || entry.MayHavePartiallyWritten {
+	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitDelivered || entry.MayHavePartiallyWritten {
 		t.Fatalf("raced delivery did not settle as acked: state=%s gen=%d ack=%d partial=%t failure=%v",
 			entry.State, entry.Commit.LayoutGeneration, entry.AckFrame, entry.MayHavePartiallyWritten, entry.Failure)
 	}
@@ -670,7 +670,7 @@ func assertTerminalSessionExecutorDrainedHistory(t *testing.T, state UIControlle
 		if entry.MayHavePartiallyWritten {
 			t.Fatalf("history drain left a partially written delivery: %#v", entry)
 		}
-		if entry.State != HistoryCommitAcked && entry.State != HistoryCommitAbandoned {
+		if entry.State != HistoryCommitDelivered && !entry.IsSettled() {
 			t.Fatalf("history drain left a non-terminal delivery: %#v", entry)
 		}
 	}
@@ -725,7 +725,7 @@ func TestTerminalSessionExecutorFrameFailureReconcilesWithoutBlindHandoff(t *tes
 
 	state := controller.State()
 	entry := historyCommitEntry(t, state, firstToken)
-	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
+	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
 		t.Fatalf("failed bootstrap did not fail closed: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
 	}
 
@@ -751,13 +751,13 @@ func TestTerminalSessionExecutorFrameFailureReconcilesWithoutBlindHandoff(t *tes
 			t.Fatalf("settle left a partially written delivery: %#v", current)
 		}
 		if current.Commit.Token == firstToken {
-			if current.State != HistoryCommitAbandoned {
+			if !current.IsSettled() {
 				t.Fatalf("unproven delivery was not quarantined in place: %#v", current)
 			}
 			quarantined = true
 			continue
 		}
-		if current.State != HistoryCommitAcked {
+		if current.State != HistoryCommitDelivered {
 			t.Fatalf("settled history left an unresolved delivery: %#v", current)
 		}
 	}
@@ -883,7 +883,7 @@ func TestTerminalSessionExecutorPartialHistoryWriteReconcilesWithoutResize(t *te
 		if entry.MayHavePartiallyWritten {
 			t.Fatalf("replanned history remained unresolved: %#v", entry)
 		}
-		if entry.State != HistoryCommitAcked && entry.State != HistoryCommitAbandoned {
+		if entry.State != HistoryCommitDelivered && !entry.IsSettled() {
 			t.Fatalf("replanned history left a non-terminal delivery: %#v", entry)
 		}
 	}
@@ -907,7 +907,7 @@ func TestTerminalSessionExecutorZeroByteWriterErrorRecoversAndRetriesSameToken(t
 	executor.WaitIdle()
 	state := controller.State()
 	entry := historyCommitEntry(t, state, firstToken)
-	if entry.State != HistoryCommitPending || entry.Commit.Token != firstToken ||
+	if entry.State != HistoryCommitQueued || entry.Commit.Token != firstToken ||
 		entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
 		t.Fatalf("zero-byte failure was not retained as retryable: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
 	}
@@ -920,7 +920,7 @@ func TestTerminalSessionExecutorZeroByteWriterErrorRecoversAndRetriesSameToken(t
 	executor.WaitIdle()
 	state = controller.State()
 	entry = historyCommitEntry(t, state, firstToken)
-	if entry.State != HistoryCommitAcked || entry.Commit.Token != firstToken || entry.AckFrame == 0 || writer.writes != 3 {
+	if entry.State != HistoryCommitDelivered || entry.Commit.Token != firstToken || entry.AckFrame == 0 || writer.writes != 3 {
 		t.Fatalf("same token was not recovered and acknowledged: entry=%#v writes=%d", entry, writer.writes)
 	}
 }
@@ -941,7 +941,7 @@ func TestTerminalSessionExecutorLeaseDefersFrameAndDoesNotClaimHistory(t *testin
 	executor.WaitIdle()
 
 	entry := historyCommitEntry(t, controller.State(), firstToken)
-	if entry.State != HistoryCommitPending || writer.writes != 0 {
+	if entry.State != HistoryCommitQueued || writer.writes != 0 {
 		t.Fatalf("lease executor wrote or claimed history: entry=%#v writes=%d", entry, writer.writes)
 	}
 }
@@ -963,7 +963,7 @@ func TestTerminalSessionExecutorMissingHistoryResultFailsConservatively(t *testi
 	executor.publishResult(commit.LayoutGeneration, &commit, result)
 	controller.WaitIdle()
 	entry := historyCommitEntry(t, controller.State(), commit.Token)
-	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrTerminalTransactionMissingResult) {
+	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrTerminalTransactionMissingResult) {
 		t.Fatalf("missing terminal result was not conservatively failed: %#v", entry)
 	}
 	if !controller.State().HistoryEffects.ProjectionUnknown {

@@ -255,7 +255,7 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 // 语义不变量（P1.1b）：complete=false 时 commits 只是**前缀**，调用方只能走
 // syncHistoryEffectCandidatesPrefix 入队，绝不能对它做 membership 踢除
 // （syncHistoryEffectCandidates 的语义是"候选列表 == 完整有效集合"，后缀会误杀
-// 前缀全部 Pending/InFlight token）。游标走到末尾后，调用方仍须再做一次无预算
+// 前缀全部 Queued token）。游标走到末尾后，调用方仍须再做一次无预算
 // 全量 pass 才能完成 membership reconcile。
 //
 // DisplayRange 必须全局化：historyCommitKey 把 DisplayRange 计入提交身份，局部
@@ -343,7 +343,7 @@ func activeAckedRenderedPrefixRows(index ackedActiveHistoryCommitIndex, cellID s
 			continue
 		}
 		commit := entry.Commit
-		if entry.State != HistoryCommitAcked || commit.Origin != HistoryCommitActive ||
+		if entry.State != HistoryCommitDelivered || commit.Origin != HistoryCommitActive ||
 			commit.CellID != cellID || commit.SourceRange.Start > frontier ||
 			commit.SourceRange.End <= frontier || len(commit.Lines) == 0 {
 			continue
@@ -973,7 +973,7 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	// after a pass that could not advance (see HistoryEffectQueueState.
 	// PlanStalled).
 	effects := &state.HistoryEffects
-	// Active 批次物理写在途（head InFlight，其余成员 Pending 等待同一次写
+	// Active 批次物理写在途（head 被写游标 claim，其余成员 Queued 等待同一次写
 	// 证明）时不得跑全会话 reconcile：reconcile 会以 Transcript 身份逐出
 	// 这些 token，写成功后 ackBatch 因 ErrCommitNotInFlight 被拒，进而把已
 	// 落盘的行标成未决并触发重放（resident-tail 双写）。所有权移交必须等这批
@@ -981,7 +981,7 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	// source-backed recovery。PlanIncomplete 让 ack/fail 与 executor kick 在
 	// 结算后继续这次规划；advanced=true 表示进展已委托给在途交付，调用方不得
 	// 据此置 PlanStalled。
-	if effects.hasInFlightActiveOriginDelivery() {
+	if effects.hasClaimedActiveOriginDelivery() {
 		effects.PlanIncomplete = true
 		effects.PlanStalled = false
 		return false, true
@@ -1086,7 +1086,7 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 	// 会以 Transcript 身份逐出正在物理写的批次成员（或与并发 scoped 计划竞逐
 	// 同一批行）。丢弃本次结果且不立即重派发——所有权移交必须等这批投递结算；
 	// PlanIncomplete 让 ack/fail 与 executor kick 在结算后继续规划。
-	if effects.hasInFlightActiveOriginDelivery() {
+	if effects.hasClaimedActiveOriginDelivery() {
 		effects.PlanIncomplete = true
 		effects.PlanStalled = false
 		return
@@ -1120,10 +1120,10 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 
 // finishResumedTranscriptPlan 在游标走到 transcript 末尾后完成这次被截断的规划：
 // membership 踢除要求候选列表是"完整有效集合"，后缀不满足（会把前缀里所有
-// Pending/InFlight token 误杀），因此必须再做一次无预算全量 pass —— 此时布局
+// Queued token 误杀），因此必须再做一次无预算全量 pass —— 此时布局
 // 缓存已被前几轮全部热起来，代价远低于首轮冷启动。完成后清游标、落 memo。
 func finishResumedTranscriptPlan(state *UIControllerState) bool {
-	if state.HistoryEffects.hasInFlightActiveOriginDelivery() {
+	if state.HistoryEffects.hasClaimedActiveOriginDelivery() {
 		// 物理写在途：membership 踢除会把正在写的批次成员逐出。保留游标与
 		// PlanIncomplete，结算后由 ack/executor kick 再次收尾。
 		state.HistoryEffects.PlanIncomplete = true
@@ -1178,7 +1178,7 @@ func continueTruncatedHistoryPlan(state *UIControllerState) bool {
 		// 或重派发。这里返回 false 且不置 PlanStalled——在飞不是停滞。
 		return false
 	}
-	if effects.hasInFlightActiveOriginDelivery() {
+	if effects.hasClaimedActiveOriginDelivery() {
 		// 物理写在途：批次成员（含仍 Pending 的同批交付）正由执行器的事务证明
 		// （写成功即 ack、失败即 unresolved+recovery），结果 action 会再次驱动
 		// 这里。在途不是停滞，返回 false 且不置 PlanStalled；同时绝不能抢跑
@@ -1232,7 +1232,7 @@ func (s HistoryEffectQueueState) planContinuationPending() bool {
 	// 同理，Active 批次物理写在途时也不算 pending：执行器本身在证明该批次
 	// （写结果会驱动 ack/fail 路径继续规划），kick 只会空转。
 	return s.PlanIncomplete && !s.PlanStalled && !s.planRequestInFlight &&
-		!s.hasInFlightActiveOriginDelivery()
+		!s.hasClaimedActiveOriginDelivery()
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell
@@ -1477,7 +1477,7 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 		reconcile := func(entry HistoryCommitEntry) {
 			candidate, exists := valid[historyCommitSourceIdentity(entry.Commit)]
 			switch entry.State {
-			case HistoryCommitPending:
+			case HistoryCommitQueued:
 				if !exists {
 					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
 					return
@@ -1485,9 +1485,8 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 				if entry.Commit.Token == state.HistoryEffects.WriteCursor {
 					// The executor holds this token as the active write claim: it may
 					// already have crossed the writer. A changed display payload must
-					// invalidate rather than rebase, exactly like the removed InFlight
-					// state did; rebasing would let old bytes be acknowledged as the
-					// new semantic layout.
+					// invalidate rather than rebase: rebasing would let old bytes be
+					// acknowledged as the new semantic layout.
 					if !historyCommitPresentationEqual(entry.Commit, candidate) {
 						_ = state.HistoryEffects.invalidate(entry.Commit.Token)
 					}
@@ -1501,13 +1500,6 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 					if err := ledger.RebasePending(entry.Commit.Token, candidate); err != nil {
 						state.HistoryEffects.ProjectionUnknown = true
 					}
-				}
-			case HistoryCommitInFlight:
-				// Once a terminal transaction was claimed, a changed display
-				// payload may already be partially written. Never let its old
-				// acknowledgement prove delivery for the new semantic layout.
-				if !exists || !historyCommitPresentationEqual(entry.Commit, candidate) {
-					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
 				}
 			}
 		}
@@ -1603,8 +1595,15 @@ func advanceActiveCellEnqueuedFromEffects(state *UIControllerState) {
 			continue
 		}
 		switch entry.State {
-		case HistoryCommitPending, HistoryCommitInFlight, HistoryCommitAcked, HistoryCommitStateFailed:
+		case HistoryCommitQueued, HistoryCommitDelivered:
 			commits = append(commits, commit)
+		case HistoryCommitQuarantined:
+			// A failed write may still have produced a physical prefix; an
+			// invalidated/settled delivery never counts toward the enqueued
+			// frontier (mirrors the former Failed-only inclusion).
+			if entry.Quarantine == HistoryCommitQuarantineFailed {
+				commits = append(commits, commit)
+			}
 		}
 	}
 	sort.Slice(commits, func(i, j int) bool {
@@ -1644,7 +1643,7 @@ func rebasePendingHistoryEffects(state *UIControllerState) {
 	if ledger := state.HistoryEffects.ledger; ledger != nil {
 		for _, entry := range ledger.byToken {
 			switch entry.State {
-			case HistoryCommitPending:
+			case HistoryCommitQueued:
 				if _, exists := valid[historyCommitSourceIdentity(entry.Commit)]; !exists {
 					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
 				}

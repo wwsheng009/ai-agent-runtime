@@ -116,7 +116,7 @@ func TestProvenScrollbackReplacementReconcilesDespiteLayoutDrift(t *testing.T) {
 func historyPendingCount(state UIControllerState) int {
 	pending := 0
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitPending {
+		if entry.State == HistoryCommitQueued {
 			pending++
 		}
 	}

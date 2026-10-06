@@ -103,17 +103,17 @@ type HistoryEffectQueueState struct {
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
 	// silent: a rejected claim and a claim that never arrived produced identical
-	// diagnostics. That is how the 2026-10-05 stranded-InFlight incident stayed
+	// diagnostics. That is how the 2026-10-05 stranded-claim incident stayed
 	// invisible while the ordering guard rejected every later claim.
 	claimSkipsStaleAction  uint64 // action generation != state generation; the reducer never attempts markInFlight
-	claimRejectsOutOfOrder uint64 // an older Pending/InFlight token fences this claim
+	claimRejectsOutOfOrder uint64 // an older Queued token fences this claim
 	claimRejectsGate       uint64 // frozen / projection unknown / unresolved terminal delivery
 	claimRejectsStale      uint64 // token entry missing, or its commit generation no longer matches
-	claimRejectsInvalid    uint64 // anything else (not pending, invalid commit)
+	claimRejectsInvalid    uint64 // anything else (not queued, invalid commit)
 	// WriteCursor 是"可能正在被物理写入"的 token（0 = 无）。claim 协议从逐条
-	// InFlight 状态收敛为这个单调标量：同一时刻至多一个 token 可能已在写，
-	// 由单 worker 严格 FIFO 保证顺序。条目保持 Pending，直到 Ack/Fail/Invalidate
-	// 给出终态；planner 对 WriteCursor 指向的 token 沿用旧 InFlight 的安全点
+	// 状态收敛为这个单调标量：同一时刻至多一个 token 可能已在写，
+	// 由单 worker 严格 FIFO 保证顺序。条目保持 Queued，直到 Ack/Fail/Invalidate
+	// 给出终态；planner 对 WriteCursor 指向的 token 沿用旧 claim 窗口的安全点
 	// （展示载荷变化时 invalidate，绝不 rebase）。
 	WriteCursor uint64
 	ledger      *HistoryCommitLedger
@@ -251,7 +251,7 @@ func (s HistoryEffectQueueState) Pending() []HistoryCommit {
 	commits := make([]HistoryCommit, 0, s.ledger.pendingCount)
 	for _, token := range s.ledger.orderedTokens() {
 		entry, ok := s.ledger.byToken[token]
-		if ok && entry.State == HistoryCommitPending {
+		if ok && entry.State == HistoryCommitQueued {
 			commits = append(commits, entry.Commit.Clone())
 		}
 	}
@@ -270,9 +270,9 @@ func (s HistoryEffectQueueState) HasPending() bool {
 //
 // 规划器用它跳过「已经交付/已终结」的分片，避免在每次 transcript 迁移时把
 // 整段历史的 render payload 重新物化一遍（pprof：planMarkdownCellHistoryCommits
-// 累计 211GB，其中绝大多数分片早已 Acked）。只有 Pending/InFlight 条目参与
+// 累计 211GB，其中绝大多数分片早已 Delivered）。只有 Queued 条目参与
 // syncHistoryEffectCandidates 的 payload 比对与 rebase，因此只要存在这类条目
-// 就必须继续发射候选；全部为终态（Acked/Failed/Abandoned/Invalidated）时
+// 就必须继续发射候选；全部为终态（Delivered/Quarantined）时
 // 发射与否不影响投递语义，跳过纯属省分配。
 func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSourceKey) bool {
 	if s.ledger == nil {
@@ -287,7 +287,7 @@ func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSour
 		if !ok {
 			continue
 		}
-		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
+		if entry.State == HistoryCommitQueued {
 			return false
 		}
 	}
@@ -366,24 +366,28 @@ type HistoryEffectQueueSummary struct {
 	// that must keep blocking a second mint within this terminal epoch. Together
 	// they let a soak distinguish "compaction is happening" from "the ledger is
 	// still growing without bound".
-	LedgerCompacted         uint64
-	LedgerTerminalSources   int
-	Pending                 int
-	InFlight                int
-	Acked                   int
-	Failed                  int
-	Invalidated             int
-	Abandoned               int
-	OldestPendingToken      uint64
-	OldestPendingGeneration uint64
-	// OldestInFlightToken/Generation identify the claimed handoff, if any. An
-	// in-flight generation older than the live layout generation is the
-	// stranded-claim signature (an accepted claim whose detached batch could
-	// not be composed; see TerminalSessionExecutor.releaseClaimMiss). Without
-	// the identity, a stuck queue is indistinguishable from a healthy write in
-	// progress: the counters alone read the same.
-	OldestInFlightToken      uint64
-	OldestInFlightGeneration uint64
+	LedgerCompacted       uint64
+	LedgerTerminalSources int
+	Queued                int
+	Delivered             int
+	// Quarantined counts every terminal non-delivery; the sub-counters keep the
+	// two behaviours a soak must tell apart: unresolved entries still gate
+	// recovery, settled entries no longer do.
+	Quarantined            int
+	QuarantinedUnresolved  int
+	QuarantinedFailed      int
+	QuarantinedSettled     int
+	OldestQueuedToken      uint64
+	OldestQueuedGeneration uint64
+	// ClaimedToken/Generation identify the handoff the single writer currently
+	// holds (HistoryEffectQueueState.WriteCursor), if any. A claimed generation
+	// older than the live layout generation is the stranded-claim signature (an
+	// accepted claim whose detached batch could not be composed; see
+	// TerminalSessionExecutor.releaseClaimMiss). Without the identity, a stuck
+	// queue is indistinguishable from a healthy write in progress: the
+	// counters alone read the same.
+	ClaimedToken      uint64
+	ClaimedGeneration uint64
 	// PlanCount / LastPlanMs / MaxPlanMs 归因单次规划耗时（P16）：冻结窗口内
 	// 只要有一次规划接近窗口时长，P12 的卡顿就应归到规划器，而不是布局/写。
 	PlanCount  uint64
@@ -418,33 +422,35 @@ func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
 	summary.LedgerEntries = len(s.ledger.byToken)
 	summary.LedgerCompacted = s.ledger.compactedEntries
 	summary.LedgerTerminalSources = len(s.ledger.compactedTerminalSources)
+	if s.WriteCursor != 0 {
+		summary.ClaimedToken = s.WriteCursor
+		if entry, ok := s.ledger.byToken[s.WriteCursor]; ok {
+			summary.ClaimedGeneration = entry.Commit.LayoutGeneration
+		}
+	}
 	for token, entry := range s.ledger.byToken {
 		switch entry.State {
-		case HistoryCommitPending:
-			summary.Pending++
-			// Tokens are minted ascending, so the smallest pending token is the
+		case HistoryCommitQueued:
+			summary.Queued++
+			// Tokens are minted ascending, so the smallest queued token is the
 			// oldest eligible claim — the same head Pending() returns.
-			if summary.OldestPendingToken == 0 || token < summary.OldestPendingToken {
-				summary.OldestPendingToken = token
-				summary.OldestPendingGeneration = entry.Commit.LayoutGeneration
+			if summary.OldestQueuedToken == 0 || token < summary.OldestQueuedToken {
+				summary.OldestQueuedToken = token
+				summary.OldestQueuedGeneration = entry.Commit.LayoutGeneration
 			}
-		case HistoryCommitInFlight:
-			summary.InFlight++
-			// At most one claim is active under the ordering guard, but take the
-			// minimum defensively exactly like Pending: tokens are minted
-			// ascending, so the smallest in-flight token is the oldest claim.
-			if summary.OldestInFlightToken == 0 || token < summary.OldestInFlightToken {
-				summary.OldestInFlightToken = token
-				summary.OldestInFlightGeneration = entry.Commit.LayoutGeneration
+		case HistoryCommitDelivered:
+			summary.Delivered++
+		case HistoryCommitQuarantined:
+			summary.Quarantined++
+			switch entry.Quarantine {
+			case HistoryCommitQuarantineFailed:
+				summary.QuarantinedFailed++
+			case HistoryCommitQuarantineSettled:
+				summary.QuarantinedSettled++
 			}
-		case HistoryCommitAcked:
-			summary.Acked++
-		case HistoryCommitStateFailed:
-			summary.Failed++
-		case HistoryCommitInvalidated:
-			summary.Invalidated++
-		case HistoryCommitAbandoned:
-			summary.Abandoned++
+			if entry.Unresolved() {
+				summary.QuarantinedUnresolved++
+			}
 		}
 	}
 	return summary
@@ -523,7 +529,7 @@ func (s *HistoryEffectQueueState) markInFlight(token, generation uint64) error {
 		return ErrHistoryCommitRecoveryPending
 	}
 	entry, ok := s.ledger.Entry(token)
-	if !ok || entry.State != HistoryCommitPending || entry.Commit.LayoutGeneration != generation {
+	if !ok || entry.State != HistoryCommitQueued || entry.Commit.LayoutGeneration != generation {
 		return ErrStaleLayoutGeneration
 	}
 	// Single physical writer: a second, different claim while a token may still
@@ -551,7 +557,7 @@ func (s *HistoryEffectQueueState) rebasePending(commit HistoryCommit) error {
 		// would let an old payload be acknowledged against new semantics. The
 		// planner invalidates it instead (same safety point as the removed
 		// InFlight state); every other Pending entry rebases in place.
-		if entry.State != HistoryCommitPending || current.Token == s.WriteCursor ||
+		if entry.State != HistoryCommitQueued || current.Token == s.WriteCursor ||
 			current.Origin != commit.Origin ||
 			current.CellID != commit.CellID ||
 			(current.Origin != HistoryCommitActive && current.Revision != commit.Revision) ||
@@ -588,7 +594,7 @@ func (s *HistoryEffectQueueState) ack(token, frame, generation uint64) error {
 	// A duplicate ack of an already-Acked token keeps its dedicated error so
 	// diagnostics can still distinguish "acked twice" from "never claimed".
 	if s.WriteCursor != token {
-		if entry, ok := s.ledger.Entry(token); ok && entry.State == HistoryCommitAcked {
+		if entry, ok := s.ledger.Entry(token); ok && entry.State == HistoryCommitDelivered {
 			return s.ledger.Ack(token, frame, generation)
 		}
 		return ErrCommitNotInFlight
@@ -646,14 +652,14 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 			// its own (newer) generation instead; anything else - a source
 			// replacement, a same-generation content change, or a rebased
 			// first/in-flight token - still fails closed.
-			if index == 0 || entry.State != HistoryCommitPending ||
+			if index == 0 || entry.State != HistoryCommitQueued ||
 				entry.Commit.LayoutGeneration <= commit.LayoutGeneration {
 				return ErrCommitSourceChanged
 			}
 			ackGenerations[index] = entry.Commit.LayoutGeneration
 		}
-		if (index == 0 && (entry.State != HistoryCommitPending || s.WriteCursor != commit.Token)) ||
-			(index > 0 && entry.State != HistoryCommitPending) {
+		if (index == 0 && (entry.State != HistoryCommitQueued || s.WriteCursor != commit.Token)) ||
+			(index > 0 && entry.State != HistoryCommitQueued) {
 			return ErrCommitNotInFlight
 		}
 		previousToken = commit.Token
@@ -681,34 +687,30 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 	}
 	for _, delivered := range commits {
 		entry, ok := s.ledger.byToken[delivered.Token]
-		if !ok || entry.State == HistoryCommitAcked {
+		if !ok || entry.State == HistoryCommitDelivered {
 			continue
 		}
-		wasUnresolved := entry.State == HistoryCommitStateFailed ||
-			(entry.State == HistoryCommitInvalidated && entry.MayHavePartiallyWritten)
+		wasUnresolved := entry.Unresolved()
 		switch entry.State {
-		case HistoryCommitPending:
+		case HistoryCommitQueued:
 			s.ledger.pendingCount--
-			entry.State = HistoryCommitStateFailed
-		case HistoryCommitInFlight, HistoryCommitStateFailed:
-			entry.State = HistoryCommitStateFailed
-		case HistoryCommitInvalidated:
-			// Keep the invalidated identity, but strengthen its physical fact.
+			entry.State = HistoryCommitQuarantined
+			entry.Quarantine = HistoryCommitQuarantineFailed
+		case HistoryCommitQuarantined:
+			// Failed stays failed, an invalidated identity is kept but its
+			// physical fact is strengthened, and a settled quarantine keeps its
+			// settled kind (already resolved by the no-replay policy).
 		}
 		entry.Failure = cause
 		entry.MayHavePartiallyWritten = true
 		// Keep the unresolved counter monotonic: only a transition into an
-		// unresolved state increments it (Pending/InFlight/plain-Invalidated ->
-		// Failed or Invalidated-with-partial-write). Already-unresolved entries
-		// (Failed, or Invalidated with MayHavePartiallyWritten) do not bump it.
-		nowUnresolved := entry.State == HistoryCommitStateFailed ||
-			(entry.State == HistoryCommitInvalidated && entry.MayHavePartiallyWritten)
-		if !wasUnresolved && nowUnresolved {
+		// unresolved state increments it; already-unresolved entries do not.
+		if !wasUnresolved && entry.Unresolved() {
 			s.ledger.unresolvedCount++
 		}
 		s.ledger.byToken[delivered.Token] = entry
-		// Pending/InFlight -> Failed is a terminal transition; keep the cached
-		// minimum non-terminal token from pinning on this token.
+		// Queued -> Quarantined is a terminal transition; keep the cached minimum
+		// non-terminal token from pinning on this token.
 		s.ledger.advanceMinAfterTerminal(delivered.Token)
 	}
 	s.ReconciliationRequired = true
@@ -727,7 +729,7 @@ func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error 
 	// does not hold the cursor is a safe no-op refusal: the executor posts it
 	// unconditionally on the claim-miss path, where the claim may have been
 	// refused before ever setting the cursor.
-	if entry.State != HistoryCommitPending || s.WriteCursor != token {
+	if entry.State != HistoryCommitQueued || s.WriteCursor != token {
 		return ErrCommitNotInFlight
 	}
 	s.WriteCursor = 0
@@ -878,12 +880,12 @@ func (s HistoryEffectQueueState) hasUnresolvedTerminalDelivery() bool {
 	return s.ledger.hasUnresolvedTerminalDelivery()
 }
 
-// hasInFlightActiveOriginDelivery reports whether a still-mutable-cell batch
+// hasClaimedActiveOriginDelivery reports whether a still-mutable-cell batch
 // (Origin == HistoryCommitActive) is currently being written: its head token is
-// InFlight and the remaining members stay Pending until that same physical
-// transaction proves them. Pending-only active tokens are deliberately NOT
+// claimed by the write cursor and the remaining members stay Queued until that
+// same physical transaction proves them. Queued-but-unclaimed active tokens are deliberately NOT
 // reported: they have not been handed to the writer, so a full-plan reconcile
-// may still replace them safely. InFlight is the precise window in which
+// may still replace them safely. The claimed window is where
 // eviction is destructive — a full-transcript reconcile mints Transcript-origin
 // replacements under a different identity, the batch members are invalidated
 // mid-write, and the successful write can no longer be acknowledged
@@ -891,7 +893,7 @@ func (s HistoryEffectQueueState) hasUnresolvedTerminalDelivery() bool {
 // rows which already crossed the writer. Ownership transfer must therefore wait
 // for this batch to settle; a write success then proves the prefix for skipRows,
 // and a write failure settles into the source-backed recovery path.
-func (s HistoryEffectQueueState) hasInFlightActiveOriginDelivery() bool {
+func (s HistoryEffectQueueState) hasClaimedActiveOriginDelivery() bool {
 	if s.ledger == nil {
 		return false
 	}
@@ -901,17 +903,6 @@ func (s HistoryEffectQueueState) hasInFlightActiveOriginDelivery() bool {
 	if s.WriteCursor != 0 {
 		if entry, ok := s.ledger.byToken[s.WriteCursor]; ok && entry.Commit.Origin == HistoryCommitActive {
 			return true
-		}
-	}
-	for _, tokens := range s.ledger.activeTokensByCell {
-		for _, token := range tokens {
-			entry, ok := s.ledger.byToken[token]
-			if !ok || entry.Commit.Origin != HistoryCommitActive {
-				continue
-			}
-			if entry.State == HistoryCommitInFlight {
-				return true
-			}
 		}
 	}
 	return false

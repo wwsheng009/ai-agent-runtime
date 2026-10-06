@@ -33,7 +33,7 @@ func TestHistoryCommitLedger_AckExactlyOnceByTokenAndRange(t *testing.T) {
 		t.Fatalf("second Ack = %v, want ErrDuplicateCommitAck", err)
 	}
 	entry, ok := ledger.Entry(commit.Token)
-	if !ok || entry.State != HistoryCommitAcked || entry.AckFrame != 99 {
+	if !ok || entry.State != HistoryCommitDelivered || entry.AckFrame != 99 {
 		t.Fatalf("entry = %+v, found=%t", entry, ok)
 	}
 	if entry.Commit.Lines != nil {
@@ -102,7 +102,7 @@ func TestHistoryCommitLedger_StaleGenerationDoesNotAdvanceAck(t *testing.T) {
 		t.Fatalf("stale Ack = %v, want ErrStaleLayoutGeneration", err)
 	}
 	entry, ok := ledger.Entry(commit.Token)
-	if !ok || entry.State != HistoryCommitPending || entry.AckFrame != 0 {
+	if !ok || entry.State != HistoryCommitQueued || entry.AckFrame != 0 {
 		t.Fatalf("stale Ack advanced entry: %+v, found=%t", entry, ok)
 	}
 }
@@ -118,7 +118,7 @@ func TestHistoryCommitLedger_FailurePreservesPartialWriteSignal(t *testing.T) {
 		t.Fatalf("Fail: %v", err)
 	}
 	entry, ok := ledger.Entry(commit.Token)
-	if !ok || entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, cause) {
+	if !ok || !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, cause) {
 		t.Fatalf("entry = %+v, found=%t", entry, ok)
 	}
 }
@@ -232,8 +232,8 @@ func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.
 	if !ledger.SettleUnresolvedWithoutReplay() {
 		t.Fatal("settle must retire unresolved entries")
 	}
-	if entry, ok := ledger.Entry(failed.Token); !ok || entry.State != HistoryCommitAbandoned {
-		t.Fatalf("settled entry must stay addressable as Abandoned until the window compaction retires it: %+v found=%t", entry, ok)
+	if entry, ok := ledger.Entry(failed.Token); !ok || !entry.IsSettled() {
+		t.Fatalf("settled entry must stay addressable as a settled quarantine until the window compaction retires it: %+v found=%t", entry, ok)
 	}
 	if !ledger.pruneResolvedToken(failed.Token) {
 		t.Fatal("abandoned entry must be prunable once retired")
@@ -328,13 +328,8 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 		t.Helper()
 		want := 0
 		for _, entry := range ledger.byToken {
-			switch entry.State {
-			case HistoryCommitStateFailed:
+			if entry.Unresolved() {
 				want++
-			case HistoryCommitInvalidated:
-				if entry.MayHavePartiallyWritten {
-					want++
-				}
 			}
 		}
 		if got := ledger.hasUnresolvedTerminalDelivery(); got != (want > 0) {
@@ -345,18 +340,18 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 		}
 	}
 
-	// Pending and in-flight entries are never unresolved.
+	// Queued (claimed or not) entries are never unresolved.
 	first := testHistoryCommit(1, 41, 8)
 	if err := ledger.Enqueue(first); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	check("pending")
 
-	// Ack resolves cleanly and never counts.
+	// Delivery resolves cleanly and never counts.
 	if err := ledger.Ack(first.Token, 1, 8); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	check("acked")
+	check("delivered")
 
 	// Fail always counts, even without a partial-write signal.
 	second := testHistoryCommit(2, 42, 8)
@@ -368,7 +363,7 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 	}
 	check("failed without partial write")
 
-	// Pending invalidation without a partial write is NOT unresolved.
+	// Queued invalidation without a partial write is NOT unresolved.
 	third := testHistoryCommit(3, 43, 8)
 	if err := ledger.Enqueue(third); err != nil {
 		t.Fatalf("Enqueue third: %v", err)
@@ -376,7 +371,7 @@ func TestHistoryCommitLedger_UnresolvedCounterMatchesScan(t *testing.T) {
 	if err := ledger.Invalidate(third.Token, false); err != nil {
 		t.Fatalf("Invalidate pending: %v", err)
 	}
-	check("pending invalidated")
+	check("queued invalidated")
 
 	// Partial-write invalidation (the token held the write cursor) IS unresolved.
 	fourth := testHistoryCommit(4, 44, 8)
@@ -433,7 +428,7 @@ func TestHistoryCommitLedger_OrderedTokensStaysAscending(t *testing.T) {
 		t.Fatalf("orderedTokens returned a detached copy; want the cached read-only view: %v", after)
 	}
 	// External byToken write (test-only path) triggers the defensive rebuild.
-	ledger.byToken[11] = HistoryCommitEntry{Commit: testHistoryCommit(11, 42, 8), State: HistoryCommitPending}
+	ledger.byToken[11] = HistoryCommitEntry{Commit: testHistoryCommit(11, 42, 8), State: HistoryCommitQueued}
 	rebuild := ledger.orderedTokens()
 	if len(rebuild) != len(want)+1 || rebuild[len(rebuild)-1] != 11 {
 		t.Fatalf("defensive rebuild = %v, want %v + 11", rebuild, want)

@@ -55,7 +55,7 @@ func TestResumeStreamingDeltasDoNotLoopScrollbackReset(t *testing.T) {
 			Token: 1, CellID: cellID, SourceRange: SourceRange{Start: 0, End: 5},
 			LayoutGeneration: state.Geometry.Generation,
 		},
-		State: HistoryCommitAcked,
+		State: HistoryCommitDelivered,
 	}
 	if state.Active.Acked.End != 5 {
 		t.Fatalf("after SetActiveCellAction: active=%+v", state.Active)
@@ -122,7 +122,7 @@ func TestResumeStreamingFullPathPrefixPresentationChange(t *testing.T) {
 			Token: 1, CellID: cellID, SourceRange: SourceRange{Start: 0, End: 5},
 			LayoutGeneration: state.Geometry.Generation,
 		},
-		State: HistoryCommitAcked,
+		State: HistoryCommitDelivered,
 	}
 	if state.HistoryEffects.ReconciliationRequired {
 		t.Fatal("initial state already set ReconciliationRequired")

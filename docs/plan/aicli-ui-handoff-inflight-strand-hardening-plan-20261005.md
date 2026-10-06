@@ -232,9 +232,10 @@ P0.2 必须补观测的原因。
      游标作废、memo 强制失效清游标、小非零预算下复用 `assertHistoryCoverage` 的端到端覆盖。
 2. 规划移出 `c.mu`（P1.2，未实施）：锁内只取输入快照，锁外 `planEligibleHistoryCommits`，
    锁内只 reconcile；`State()/debug` 改无锁快照（或复用 transcript 不可变快照）。
-3. D5 观测（已实施）：`HistoryEffectQueueSummary` 增加
-   `OldestInFlightToken/OldestInFlightGeneration`，`/debug` 摘要输出
-   `oldest-inflight-token/gen`，使 "in-flight generation 落后于 layout generation" 的
+3. D5 观测（已实施；P1-1 第 2 步随三态归一更名为 claimed 命名）：
+   `HistoryEffectQueueSummary` 的 `ClaimedToken/ClaimedGeneration`
+   （原 `OldestInFlightToken/OldestInFlightGeneration`），`/debug` 摘要输出
+   `claimed-token/claimed-gen`，使 "claimed generation 落后于 layout generation" 的
    stranded 签名可被直接读出（此前只有计数，无法与健康写入区分）。reducer 侧
    `BeginHistoryCommit` 的拒绝/跳过也全部留痕：`ClaimSkipsStaleAction`（动作 generation
    过期，未尝试认领）与 `ClaimRejectsOutOfOrder/Gate/Stale/Invalid`，经 Summary 输出到
@@ -573,8 +574,8 @@ P0.2 必须补观测的原因。
 - 单测：`go test ./cmd/aicli/ui/ -run 'TerminalSessionExecutor|HistoryCommit' -count=1`。
 - 回归护栏：P0.3 新测试必须能在未打补丁的代码上失败（先红后绿）。
 - 现场观察表达式（修复上线后）：
-  - `history_gates.pending_count` 在空闲会话中回落到 0；
-  - `oldest_pending_token` 不再长期冻结；
+  - `history_gates.queued_count` 在空闲会话中回落到 0；
+  - `oldest_queued_token` / `claimed_token` 不再长期冻结（claimed generation 落后即 stranded 签名）；
   - `executor` 区块出现 `claimMissReleases` 且 `in-flight` 不再恒为 1；
   - `render_output.delivery_records_sealed` 随投递前进。
 - 上线前提：resident-tail 双写（以及本条 P1/P2 全部修复）只存在于**重新构建**的

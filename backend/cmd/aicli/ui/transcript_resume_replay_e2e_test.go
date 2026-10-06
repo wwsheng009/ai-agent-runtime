@@ -140,7 +140,7 @@ func TestResumeStreamingDeltasNoScrollbackResetReplayE2E(t *testing.T) {
 	// Let the executor write the restored transcript once and settle.
 	h.flush(t)
 	for _, entry := range h.controller.State().HistoryEffects.Entries() {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			t.Fatalf("resume restore left history unresolved: %#v", entry)
 		}
 	}
@@ -198,7 +198,7 @@ func TestResumeSceneRebuildNewSceneIDNoScrollbackResetReplayE2E(t *testing.T) {
 	)
 	h.flush(t)
 	for _, entry := range h.controller.State().HistoryEffects.Entries() {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			t.Fatalf("resume restore left history unresolved: %#v", entry)
 		}
 	}
@@ -266,7 +266,7 @@ func TestResumeFailingWriterReconciliationStopsWithinBoundE2E(t *testing.T) {
 	)
 	h.flush(t)
 	for _, entry := range h.controller.State().HistoryEffects.Entries() {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			t.Fatalf("resume restore left history unresolved: %#v", entry)
 		}
 	}

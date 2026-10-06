@@ -62,7 +62,7 @@ func assertHistoryCoversFinalizedCells(t *testing.T, state UIControllerState) {
 	t.Helper()
 	covered := make(map[scene.CellID]struct{})
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitInvalidated || entry.State == HistoryCommitAbandoned {
+		if entry.IsInvalidated() || entry.IsSettled() {
 			continue
 		}
 		covered[entry.Commit.CellID] = struct{}{}

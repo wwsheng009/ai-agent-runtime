@@ -808,7 +808,7 @@ func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState
 	maxPrefix := -1
 	seenAcked := false
 	for _, entry := range effects.ledger.byToken {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			continue
 		}
 		seenAcked = true

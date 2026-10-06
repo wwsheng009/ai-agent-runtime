@@ -59,7 +59,7 @@ func TestTranscriptReplacementInvalidatesAckedHistory_MutableCellGrowth(t *testi
 			CellID:      cellID,
 			SourceRange: SourceRange{Start: 0, End: 5}, // "hello"
 		},
-		State: HistoryCommitAcked,
+		State: HistoryCommitDelivered,
 	}
 
 	effects := HistoryEffectQueueState{ledger: ledger}
@@ -119,7 +119,7 @@ func TestTranscriptReplacementInvalidatesAckedHistory_CommittedCellPresentation(
 			CellID:      cellID,
 			SourceRange: SourceRange{Start: 0, End: 5},
 		},
-		State: HistoryCommitAcked,
+		State: HistoryCommitDelivered,
 	}
 
 	effects := HistoryEffectQueueState{ledger: ledger}
@@ -177,7 +177,7 @@ func TestTranscriptReplacementInvalidatesAckedHistory_PrefixCorrection(t *testin
 			CellID:      cellID,
 			SourceRange: SourceRange{Start: 0, End: 5}, // "hello" vs "HELLO"
 		},
-		State: HistoryCommitAcked,
+		State: HistoryCommitDelivered,
 	}
 
 	effects := HistoryEffectQueueState{ledger: ledger}
@@ -260,7 +260,7 @@ func TestTranscriptReplacementInvalidatesAckedHistory_PrefixPresentationChange(t
 			CellID:      prefixCellID,
 			SourceRange: SourceRange{Start: 0, End: 6}, // "prefix"
 		},
-		State: HistoryCommitAcked,
+		State: HistoryCommitDelivered,
 	}
 
 	effects := HistoryEffectQueueState{ledger: ledger}
@@ -334,7 +334,7 @@ func TestTranscriptReplacementInvalidatesAckedHistory_PrefixSourceChange(t *test
 			CellID:      prefixCellID,
 			SourceRange: SourceRange{Start: 0, End: 6}, // "prefix" vs "prefix-..."
 		},
-		State: HistoryCommitAcked,
+		State: HistoryCommitDelivered,
 	}
 
 	effects := HistoryEffectQueueState{ledger: ledger}

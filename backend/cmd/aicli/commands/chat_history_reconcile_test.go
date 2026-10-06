@@ -426,7 +426,7 @@ func TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory(t *te
 	}
 	acked := 0
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitAcked {
+		if entry.State == ui.HistoryCommitDelivered {
 			acked++
 		}
 	}
@@ -521,7 +521,7 @@ func TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsi
 	}
 	acked := 0
 	for _, entry := range coordinator.uiActor.State().HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitAcked {
+		if entry.State == ui.HistoryCommitDelivered {
 			acked++
 		}
 	}
@@ -652,7 +652,7 @@ func TestUnifiedStartupOrderRetainsHistoryTailAndScrollback(t *testing.T) {
 	}
 	acked := 0
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitAcked {
+		if entry.State == ui.HistoryCommitDelivered {
 			acked++
 		}
 	}
@@ -810,7 +810,7 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 	}
 	acked := 0
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitAcked {
+		if entry.State == ui.HistoryCommitDelivered {
 			acked++
 		}
 	}

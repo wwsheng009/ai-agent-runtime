@@ -39,7 +39,7 @@ func TestReplanSkipsSettledFragments(t *testing.T) {
 	acked := 0
 	for _, token := range ledger.orderedTokens() {
 		entry, ok := ledger.byToken[token]
-		if !ok || entry.State != HistoryCommitPending {
+		if !ok || entry.State != HistoryCommitQueued {
 			continue
 		}
 		if err := ledger.Ack(token, 1, entry.Commit.LayoutGeneration); err != nil {

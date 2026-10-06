@@ -1016,7 +1016,7 @@ func (c *UIController) PendingHistoryCommit() (HistoryCommit, bool) {
 	// eligible claim — the same head Pending() would return.
 	for _, token := range effects.ledger.orderedTokens() {
 		entry, ok := effects.ledger.byToken[token]
-		if ok && entry.State == HistoryCommitPending {
+		if ok && entry.State == HistoryCommitQueued {
 			return entry.Commit.Clone(), true
 		}
 	}

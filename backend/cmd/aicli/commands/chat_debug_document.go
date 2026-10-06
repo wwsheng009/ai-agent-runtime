@@ -512,18 +512,19 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 	// worker 窗口尚未结算（锁内已不再同步 screening），后者是累计受理请求数。
 	// compacted/terminal-sources 是 P2-1 终态压缩读数：前者是累计回收的条目数
 	// （单调），后者是仍以身份 tombstone 形式阻断重复铸造的最小来源集。
-	// oldest-inflight-token/gen 给出被 claim 的 token 身份：其 generation 落后于
-	// 当前 layout generation 即 stranded claim 签名（releaseClaimMiss 修复的病态），
+	// claimed-token/gen 给出被 claim 的 token 身份：其 generation 落后于当前
+	// layout generation 即 stranded claim 签名（releaseClaimMiss 修复的病态），
 	// 只有计数时这与「正在健康写入」无法区分。
-	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d abandoned=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d oldest-inflight-token=%d oldest-inflight-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d",
-		summary.Pending, summary.InFlight, summary.Acked, summary.Failed, summary.Invalidated,
-		summary.Abandoned, summary.LedgerEntries,
+	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-failed=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d",
+		summary.Queued, summary.Delivered, summary.Quarantined,
+		summary.QuarantinedUnresolved, summary.QuarantinedFailed, summary.QuarantinedSettled,
+		summary.LedgerEntries,
 		summary.LedgerCompacted, summary.LedgerTerminalSources,
 		summary.PlanCount, summary.LastPlanMs, summary.MaxPlanMs,
 		effects.PlanRequestInFlight, effects.PlanWindowsDelegated,
 		effects.Frozen, effects.ScrollbackReplayArmed,
 		effects.NextToken, effects.TerminalEpoch,
-		summary.OldestInFlightToken, summary.OldestInFlightGeneration,
+		summary.ClaimedToken, summary.ClaimedGeneration,
 		summary.ClaimSkipsStaleAction, summary.ClaimRejectsOutOfOrder,
 		summary.ClaimRejectsGate, summary.ClaimRejectsStale, summary.ClaimRejectsInvalid)
 }

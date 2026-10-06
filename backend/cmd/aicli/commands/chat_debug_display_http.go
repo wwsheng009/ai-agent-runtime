@@ -378,15 +378,20 @@ type chatDebugDisplayHistoryGateInfo struct {
 	// native scrollback. Armed=true while RecoveryActionable=false means the
 	// authorized replay has not been composed yet; armed=false with an
 	// outstanding obligation means the recovery will settle in place instead.
-	ScrollbackReplayArmed   bool   `json:"scrollback_replay_armed"`
-	RecoveryActionable      bool   `json:"recovery_actionable"`
-	PendingCount            int    `json:"pending_count"`
-	OldestPendingToken      uint64 `json:"oldest_pending_token,omitempty"`
-	OldestPendingGeneration uint64 `json:"oldest_pending_generation,omitempty"`
+	ScrollbackReplayArmed  bool   `json:"scrollback_replay_armed"`
+	RecoveryActionable     bool   `json:"recovery_actionable"`
+	QueuedCount            int    `json:"queued_count"`
+	OldestQueuedToken      uint64 `json:"oldest_queued_token,omitempty"`
+	OldestQueuedGeneration uint64 `json:"oldest_queued_generation,omitempty"`
+	// ClaimedToken/Generation identify the handoff the single writer currently
+	// holds; a claimed generation older than the live layout generation is the
+	// stranded-claim signature (see HistoryEffectQueueSummary).
+	ClaimedToken      uint64 `json:"claimed_token,omitempty"`
+	ClaimedGeneration uint64 `json:"claimed_generation,omitempty"`
 	// PlanIncomplete/PlanStalled expose the budget-truncated transcript plan.
-	// pending_count=0 is not proof that history is complete: a plan cut off by
+	// queued_count=0 is not proof that history is complete: a plan cut off by
 	// historyCommitPlanningBudget leaves the cells the layout walk never reached
-	// unplanned, so a resumed session can read pending=0/acked=N over a
+	// unplanned, so a resumed session can read queued=0/delivered=N over a
 	// transcript whose tail never entered native scrollback (live: 6622 cells /
 	// 291842 rows, next=1288, acked=322). PlanStalled additionally marks a plan
 	// that cannot advance at the current inputs (its remaining sources are
@@ -797,9 +802,9 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			HistoryEffects:   chatDebugHistoryEffectSummary(effectDiagnostics),
 		}
 		// Structured commit gates: the same predicate the presenter scheduler
-		// uses (terminalHistoryRecoveryActionable) plus the oldest pending
-		// token identity so a poller can correlate a stuck pending commit with
-		// the current layout generation.
+		// uses (terminalHistoryRecoveryActionable) plus the oldest queued token
+		// and the claimed (write-cursor) identity, so a poller can correlate a
+		// stuck delivery with the current layout generation.
 		effects := effectDiagnostics
 		gates := &chatDebugDisplayHistoryGateInfo{
 			Frozen:                 effects.Frozen,
@@ -812,9 +817,11 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			PlanStalled:    effects.PlanStalled,
 			// Ledger-free counts; the old loop walked Entries() and detached
 			// every commit's render lines to count states.
-			PendingCount:            effects.Summary.Pending,
-			OldestPendingToken:      effects.Summary.OldestPendingToken,
-			OldestPendingGeneration: effects.Summary.OldestPendingGeneration,
+			QueuedCount:            effects.Summary.Queued,
+			OldestQueuedToken:      effects.Summary.OldestQueuedToken,
+			OldestQueuedGeneration: effects.Summary.OldestQueuedGeneration,
+			ClaimedToken:           effects.Summary.ClaimedToken,
+			ClaimedGeneration:      effects.Summary.ClaimedGeneration,
 		}
 		app.HistoryGates = gates
 		// 消费端成本快照（§6.2 第 2 条）：只在有活动时输出，避免空会话的

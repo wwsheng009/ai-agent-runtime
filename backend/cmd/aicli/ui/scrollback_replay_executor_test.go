@@ -62,7 +62,7 @@ func TestTerminalSessionExecutorArmedReplayWaitsForInFlightDelivery(t *testing.T
 		t.Fatalf("initial history transaction unexpectedly reset scrollback: %q", firstWrite)
 	}
 	inflightToken := before.HistoryEffects.Entries()[0].Commit.Token
-	if entry := historyCommitEntry(t, before, inflightToken); entry.State != HistoryCommitPending || before.HistoryEffects.WriteCursor != inflightToken {
+	if entry := historyCommitEntry(t, before, inflightToken); entry.State != HistoryCommitQueued || before.HistoryEffects.WriteCursor != inflightToken {
 		t.Fatalf("blocked history token = %#v cursor=%d, want claimed pending", entry, before.HistoryEffects.WriteCursor)
 	}
 
@@ -83,7 +83,7 @@ func TestTerminalSessionExecutorArmedReplayWaitsForInFlightDelivery(t *testing.T
 	// cannot prove how many of those bytes reached the host, so it must escalate
 	// the token to the unresolved partial-write state — that escalation is
 	// precisely what the authorized replay is allowed to repair.
-	if entry := historyCommitEntry(t, armed, inflightToken); entry.State != HistoryCommitInvalidated || !entry.MayHavePartiallyWritten {
+	if entry := historyCommitEntry(t, armed, inflightToken); !entry.IsInvalidated() || !entry.MayHavePartiallyWritten {
 		t.Fatalf("replacement did not escalate the in-flight delivery: %#v", entry)
 	}
 	if writer.countWritesContaining([]byte("\x1b[3J")) != 0 {

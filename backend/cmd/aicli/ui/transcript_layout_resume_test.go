@@ -24,9 +24,9 @@ const resumeUnmappableSource = "制表符\t开头的行\n第二行\n"
 //   - 末尾 cell 保持 mutable，作为 frontier 屏障（布局豁免）。
 func resumeParityFixtureState() AppState {
 	return AppState{
-		Revision:         4,
-		Geometry:         GeometryState{Width: 90, Height: 40, Generation: 1},
-		Transcript:       NewTranscriptState(resumeParitySnapshot()),
+		Revision:   4,
+		Geometry:   GeometryState{Width: 90, Height: 40, Generation: 1},
+		Transcript: NewTranscriptState(resumeParitySnapshot()),
 	}
 }
 
@@ -272,7 +272,7 @@ func TestTranscriptPlanResumeCursorAdvancesUntilComplete(t *testing.T) {
 	}
 	covered := make(map[scene.CellID]struct{})
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitInvalidated || entry.State == HistoryCommitAbandoned {
+		if entry.IsInvalidated() || entry.IsSettled() {
 			continue
 		}
 		covered[entry.Commit.CellID] = struct{}{}

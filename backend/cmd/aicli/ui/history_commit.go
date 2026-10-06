@@ -10,9 +10,12 @@ import (
 )
 
 var (
-	ErrInvalidHistoryCommit    = errors.New("invalid history commit")
-	ErrDuplicateCommitToken    = errors.New("duplicate history commit token")
-	ErrDuplicateCommitRange    = errors.New("duplicate history commit range")
+	ErrInvalidHistoryCommit = errors.New("invalid history commit")
+	ErrDuplicateCommitToken = errors.New("duplicate history commit token")
+	ErrDuplicateCommitRange = errors.New("duplicate history commit range")
+	// ErrCommitNotPending / ErrCommitNotInFlight 是历史命名：三态归一后两者都
+	// 表示"条目不是 queued（不可 claim/ack/fail）"。保留名字以稳定既有错误
+	// 分类与诊断，不表示仍有独立的状态。
 	ErrCommitNotPending        = errors.New("history commit is not pending")
 	ErrCommitNotInFlight       = errors.New("history commit is not in flight")
 	ErrHistoryCommitOutOfOrder = errors.New("history commit is not the oldest eligible effect")
@@ -85,44 +88,60 @@ func (c HistoryCommit) Clone() HistoryCommit {
 }
 
 // HistoryCommitState records terminal-effect progress separately from source
-// and physical projection state.
+// and physical projection state. P1-1 六态归一：交付生命周期只有三态，物理写
+// 窗口不再是一个状态，而由 HistoryEffectQueueState.WriteCursor 单独表达。
 type HistoryCommitState uint8
 
 const (
-	HistoryCommitPending HistoryCommitState = iota
-	// HistoryCommitInFlight is retained only so externally built states and
-	// diagnostics can still name the legacy value. Since the P1-1 write-cursor
-	// convergence no production transition enters this state: a claimed entry
-	// stays Pending and HistoryEffectQueueState.WriteCursor records that it may
-	// be physically written. Step 2 (六态归一) removes the constant.
-	HistoryCommitInFlight
-	HistoryCommitAcked
-	HistoryCommitStateFailed
-	HistoryCommitInvalidated
-	// HistoryCommitAbandoned is the terminal state for a delivery whose
-	// physical outcome is unknown (failed or partially written) and which the
-	// no-replay policy refuses to repair by replacing native scrollback. The
-	// entry keeps its source identity so the range is never minted a second
-	// time, but it no longer blocks ordered delivery.
-	HistoryCommitAbandoned
+	// HistoryCommitQueued：已入队、未交付。可能已被 executor claim（游标指向）
+	// 也可能还没有；两种情况下都还没有终态交付证明，且都会阻断更晚 token 的写。
+	HistoryCommitQueued HistoryCommitState = iota
+	// HistoryCommitDelivered：物理写成功并已进滚动区（原 Acked）。
+	HistoryCommitDelivered
+	// HistoryCommitQuarantined：交付不可证明或被拒绝（原 Failed/Invalidated/
+	// Abandoned）。不再阻断有序交付，但按 Quarantine 子类保留未决计数、压缩
+	// 资格与"同源防重铸"三个行为差异。
+	HistoryCommitQuarantined
+)
+
+// HistoryCommitQuarantine 是 quarantined 的子类，只保留无法合并的行为差异：
+//   - Failed：写失败，恒未决（settle 前不可压缩、阻断同源再铸）；
+//   - Invalidated：语义替换取消；MayHavePartiallyWritten 时未决且阻断再铸，
+//     否则已解决、可压缩、不阻断同源再铸；
+//   - Settled：settle 后的隔离终态：不再未决、可压缩，但永久阻断同源再铸
+//     （无重放策略下不可由内存证明的交付既不重发也不重铸）。
+type HistoryCommitQuarantine uint8
+
+const (
+	HistoryCommitQuarantineNone HistoryCommitQuarantine = iota
+	HistoryCommitQuarantineFailed
+	HistoryCommitQuarantineInvalidated
+	HistoryCommitQuarantineSettled
 )
 
 func (s HistoryCommitState) String() string {
 	switch s {
-	case HistoryCommitPending:
-		return "pending"
-	case HistoryCommitInFlight:
-		return "in_flight"
-	case HistoryCommitAcked:
-		return "acked"
-	case HistoryCommitStateFailed:
-		return "failed"
-	case HistoryCommitInvalidated:
-		return "invalidated"
-	case HistoryCommitAbandoned:
-		return "abandoned"
+	case HistoryCommitQueued:
+		return "queued"
+	case HistoryCommitDelivered:
+		return "delivered"
+	case HistoryCommitQuarantined:
+		return "quarantined"
 	default:
 		return "unknown"
+	}
+}
+
+func (q HistoryCommitQuarantine) String() string {
+	switch q {
+	case HistoryCommitQuarantineFailed:
+		return "failed"
+	case HistoryCommitQuarantineInvalidated:
+		return "invalidated"
+	case HistoryCommitQuarantineSettled:
+		return "settled"
+	default:
+		return "none"
 	}
 }
 
@@ -130,6 +149,7 @@ func (s HistoryCommitState) String() string {
 type HistoryCommitEntry struct {
 	Commit                  HistoryCommit
 	State                   HistoryCommitState
+	Quarantine              HistoryCommitQuarantine
 	AckFrame                uint64
 	MayHavePartiallyWritten bool
 	Failure                 error
@@ -138,6 +158,41 @@ type HistoryCommitEntry struct {
 func (e HistoryCommitEntry) Clone() HistoryCommitEntry {
 	e.Commit = e.Commit.Clone()
 	return e
+}
+
+// Unresolved reports whether the delivery still needs terminal recovery: a
+// failed write is always unresolved, an invalidated write only when bytes may
+// have partially landed. Settled quarantines are resolved by definition.
+func (e HistoryCommitEntry) Unresolved() bool {
+	return e.Quarantine == HistoryCommitQuarantineFailed ||
+		(e.Quarantine == HistoryCommitQuarantineInvalidated && e.MayHavePartiallyWritten)
+}
+
+func (e HistoryCommitEntry) IsFailed() bool {
+	return e.State == HistoryCommitQuarantined && e.Quarantine == HistoryCommitQuarantineFailed
+}
+
+func (e HistoryCommitEntry) IsInvalidated() bool {
+	return e.State == HistoryCommitQuarantined && e.Quarantine == HistoryCommitQuarantineInvalidated
+}
+
+func (e HistoryCommitEntry) IsSettled() bool {
+	return e.State == HistoryCommitQuarantined && e.Quarantine == HistoryCommitQuarantineSettled
+}
+
+// BlocksRemint reports whether this entry's source identity must block a second
+// mint of the same range within the terminal epoch. Delivered and every
+// quarantine kind block except a pure (non-partial) invalidation, whose source
+// was never physically delivered and is therefore free to be planned again.
+func (e HistoryCommitEntry) BlocksRemint() bool {
+	switch e.State {
+	case HistoryCommitQueued, HistoryCommitDelivered:
+		return true
+	case HistoryCommitQuarantined:
+		return e.Quarantine != HistoryCommitQuarantineInvalidated || e.MayHavePartiallyWritten
+	default:
+		return false
+	}
 }
 
 type historyCommitRangeKey struct {
@@ -201,11 +256,11 @@ type HistoryCommitLedger struct {
 	activeTokensByCell map[scene.CellID][]uint64
 	pendingCount       int
 	// minNonTerminalToken caches the smallest token whose state is still
-	// Pending or InFlight. It backs hasOlderPendingOrInFlight as an O(1)
+	// Queued (claimed or not). It backs hasOlderPendingOrInFlight as an O(1)
 	// predicate; production pprof showed the previous full-map scan inside
 	// the per-claim ordering guard as a hot spot on resumed sessions with a
 	// very large ledger. Terminal states are absorbing (no path re-arms
-	// Acked/Failed/Invalidated), so the minimum only ever moves forward and
+	// Delivered/Quarantined), so the minimum only ever moves forward and
 	// the recompute-after-terminal scan is amortized O(1) per transition.
 	minNonTerminalToken uint64
 	// activeAckPlanVersion bumps whenever the acked Active-origin prefix that
@@ -217,13 +272,13 @@ type HistoryCommitLedger struct {
 	// activeTokensByCell on every stream chunk.
 	activeAckPlanVersion uint64
 	// unresolvedCount caches the number of entries that require terminal
-	// recovery (Failed, or Invalidated with MayHavePartiallyWritten). It keeps
+	// recovery (failed, or invalidated with MayHavePartiallyWritten). It keeps
 	// hasUnresolvedTerminalDelivery O(1); production pprof showed the previous
 	// full-map scan inside the per-action wake predicate as a hot spot.
 	unresolvedCount int
 	// compactedTerminalSources 是被终态压缩剪除、但来源身份仍必须阻断再次铸造的
-	// source key 最小集（Acked/Abandoned 等阻断态）。P2-1：Acked transcript 条目
-	// 与 settle 后的 Abandoned 条目不再被任何读取方消费（行载荷已置 nil 或无用），
+	// source key 最小集（Delivered/Settled 等阻断态）。P2-1：Delivered transcript 条目
+	// 与 settle 后的隔离终态条目不再被任何读取方消费（行载荷已置 nil 或无用），
 	// 但 "该来源已交付" 必须永远阻断重复铸造；reconcileScrollback 整体替换 ledger
 	// 时随之清零 —— 新 terminal epoch 允许从源重新铸造。
 	compactedTerminalSources map[historyCommitSourceKey]struct{}
@@ -271,7 +326,7 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	key := historyCommitKey(commit)
 	if token, exists := l.byRange[key]; exists {
 		previous := l.byToken[token]
-		if previous.State != HistoryCommitInvalidated || previous.MayHavePartiallyWritten {
+		if previous.BlocksRemint() {
 			return ErrDuplicateCommitRange
 		}
 	}
@@ -281,7 +336,7 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	if _, blocked := l.compactedTerminalSources[sourceKey]; blocked {
 		return ErrDuplicateCommitRange
 	}
-	l.byToken[commit.Token] = HistoryCommitEntry{Commit: commit.Clone(), State: HistoryCommitPending}
+	l.byToken[commit.Token] = HistoryCommitEntry{Commit: commit.Clone(), State: HistoryCommitQueued}
 	l.byRange[key] = commit.Token
 	l.tokens = insertSortedToken(l.tokens, commit.Token)
 	if l.bySource[sourceKey] == nil {
@@ -308,7 +363,7 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 // resize therefore never creates a second history handoff token.
 func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCommit) error {
 	entry, ok := l.entry(token)
-	if !ok || entry.State != HistoryCommitPending {
+	if !ok || entry.State != HistoryCommitQueued {
 		return ErrCommitNotPending
 	}
 	current := entry.Commit
@@ -333,21 +388,22 @@ func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCom
 	return nil
 }
 
-// Invalidate prevents a pending or in-flight effect from being consumed after
-// transcript replacement. An in-flight invalidation means terminal bytes may
-// already have reached the old projection and therefore requires recovery.
+// Invalidate prevents a queued effect (claimed or not) from being consumed
+// after transcript replacement. A claimed invalidation means terminal bytes
+// may already have reached the old projection and therefore requires recovery.
 //
 // mayHavePartiallyWritten is supplied by the caller: the queue knows whether
 // the token currently holds the write cursor, i.e. whether a physical write
-// may already have started (the previous InFlight state). A partially written
-// cancellation counts as an unresolved terminal delivery; the counter is
+// may already have started. A partially written cancellation counts as an
+// unresolved terminal delivery; the counter is
 // monotonic (unresolved entries never revert to resolved).
 func (l *HistoryCommitLedger) Invalidate(token uint64, mayHavePartiallyWritten bool) error {
 	entry, ok := l.entry(token)
-	if !ok || entry.State != HistoryCommitPending {
+	if !ok || entry.State != HistoryCommitQueued {
 		return ErrCommitNotPending
 	}
-	entry.State = HistoryCommitInvalidated
+	entry.State = HistoryCommitQuarantined
+	entry.Quarantine = HistoryCommitQuarantineInvalidated
 	if mayHavePartiallyWritten {
 		l.unresolvedCount++
 		entry.MayHavePartiallyWritten = true
@@ -366,16 +422,16 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	if !ok {
 		return ErrCommitNotInFlight
 	}
-	if entry.State == HistoryCommitAcked {
+	if entry.State == HistoryCommitDelivered {
 		return ErrDuplicateCommitAck
 	}
-	if entry.State != HistoryCommitPending {
+	if entry.State != HistoryCommitQueued {
 		return ErrCommitNotInFlight
 	}
 	if entry.Commit.LayoutGeneration != currentGeneration {
 		return ErrStaleLayoutGeneration
 	}
-	entry.State = HistoryCommitAcked
+	entry.State = HistoryCommitDelivered
 	entry.AckFrame = frame
 	entry.Failure = nil
 	entry.MayHavePartiallyWritten = false
@@ -395,7 +451,7 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 }
 
 // nextNonTerminalToken returns the smallest live token greater than from that
-// is still Pending or InFlight, or 0 when none remains. It walks the cached
+// is still Queued, or 0 when none remains. It walks the cached
 // ascending token slice; the walk is bounded by the number of consecutive
 // terminal tokens after from, so the total cost is amortized O(1) per
 // terminal transition across the ledger's lifetime.
@@ -410,7 +466,7 @@ func (l *HistoryCommitLedger) nextNonTerminalToken(from uint64) uint64 {
 	index := sort.Search(len(tokens), func(i int) bool { return tokens[i] > from })
 	for ; index < len(tokens); index++ {
 		if entry, ok := l.byToken[tokens[index]]; ok &&
-			(entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight) {
+			entry.State == HistoryCommitQueued {
 			return tokens[index]
 		}
 	}
@@ -423,7 +479,7 @@ func (l *HistoryCommitLedger) nextNonTerminalTokenByScan(from uint64) uint64 {
 			continue
 		}
 		if entry, ok := l.byToken[token]; ok &&
-			(entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight) {
+			entry.State == HistoryCommitQueued {
 			return token
 		}
 	}
@@ -431,7 +487,7 @@ func (l *HistoryCommitLedger) nextNonTerminalTokenByScan(from uint64) uint64 {
 }
 
 // advanceMinAfterTerminal refreshes the cached minimum non-terminal token
-// after a transition into a terminal state (Acked, Failed, or Invalidated).
+// after a transition into a terminal state (Delivered or Quarantined).
 // Terminal states are absorbing, so the minimum only ever moves forward and
 // the bounded recompute scan stays amortized O(1) per terminal transition.
 // Skipping this refresh pins the cache on a terminal token and makes
@@ -445,13 +501,14 @@ func (l *HistoryCommitLedger) advanceMinAfterTerminal(token uint64) {
 
 func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWritten bool) error {
 	entry, ok := l.entry(token)
-	if !ok || entry.State != HistoryCommitPending {
+	if !ok || entry.State != HistoryCommitQueued {
 		return ErrCommitNotInFlight
 	}
-	entry.State = HistoryCommitStateFailed
+	entry.State = HistoryCommitQuarantined
+	entry.Quarantine = HistoryCommitQuarantineFailed
 	entry.Failure = err
 	entry.MayHavePartiallyWritten = mayHavePartiallyWritten
-	// HistoryCommitStateFailed is always unresolved regardless of
+	// A failed quarantine is always unresolved regardless of
 	// MayHavePartiallyWritten.
 	l.unresolvedCount++
 	l.pendingCount--
@@ -463,7 +520,7 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 // SettleUnresolvedWithoutReplay retires unresolved terminal deliveries in
 // place instead of replacing native scrollback. Normal interaction must never
 // replay history, so a range whose bytes cannot be proven (failed write, or an
-// invalidated in-flight token that may have partially landed) is quarantined:
+// invalidated claimed token that may have partially landed) is quarantined:
 // it stops counting as an unresolved delivery so ordered handoff can resume,
 // while its source identity stays terminal so the same range is never minted
 // twice. The trade-off is deliberate and visible: an unproven range is not
@@ -476,12 +533,11 @@ func (l *HistoryCommitLedger) SettleUnresolvedWithoutReplay() bool {
 	}
 	settled := false
 	for token, entry := range l.byToken {
-		unresolved := entry.State == HistoryCommitStateFailed ||
-			(entry.State == HistoryCommitInvalidated && entry.MayHavePartiallyWritten)
-		if !unresolved {
+		if !entry.Unresolved() {
 			continue
 		}
-		entry.State = HistoryCommitAbandoned
+		entry.State = HistoryCommitQuarantined
+		entry.Quarantine = HistoryCommitQuarantineSettled
 		entry.MayHavePartiallyWritten = false
 		l.byToken[token] = entry
 		settled = true
@@ -533,20 +589,19 @@ func (l *HistoryCommitLedger) holdsPlan() bool {
 
 // prunableResolvedEntry 判定一个已终结的条目是否仍被任何读取方消费载荷。
 // 保留集合只有两类：
-//   - Acked + Active-origin：activeAckedRenderedPrefixRows 需要已交付的渲染行
+//   - Delivered + Active-origin：activeAckedRenderedPrefixRows 需要已交付的渲染行
 //     来证明"前导行已在原生滚动区"并据此计算 finalized 计划的 skipRows；
-//   - Failed / Invalidated-with-partial：未决交付，settle 之前必须保持可寻址。
+//   - failed / invalidated-with-partial 隔离：未决交付，settle 之前必须保持可寻址。
 //
-// 其余终态（Acked transcript、Abandoned、Invalidated 且未部分写入）的载荷无人
-// 再读，只剩"该来源已交付"这一身份事实，可压缩为 tombstone。
+// 其余终态（Delivered transcript、settled 隔离、invalidated 且未部分写入）的载荷
+// 无人再读，只剩"该来源已交付"这一身份事实，可压缩为 tombstone。
 func prunableResolvedEntry(entry HistoryCommitEntry) bool {
 	switch entry.State {
-	case HistoryCommitAcked:
+	case HistoryCommitDelivered:
 		return entry.Commit.Origin == HistoryCommitTranscript
-	case HistoryCommitAbandoned:
-		return true
-	case HistoryCommitInvalidated:
-		return !entry.MayHavePartiallyWritten
+	case HistoryCommitQuarantined:
+		return entry.Quarantine == HistoryCommitQuarantineSettled ||
+			(entry.Quarantine == HistoryCommitQuarantineInvalidated && !entry.MayHavePartiallyWritten)
 	default:
 		return false
 	}
@@ -620,9 +675,9 @@ func (l *HistoryCommitLedger) pruneEntry(token uint64, entry HistoryCommitEntry)
 			delete(l.bySource, sourceKey)
 		}
 	}
-	// Acked/Abandoned 是"阻断再铸造"的终态：身份必须留下。Invalidated 非部分写入
-	// 不阻断（既有语义），因此不留 tombstone。
-	if entry.State != HistoryCommitInvalidated {
+	// Delivered/Settled 等阻断态：身份必须留下。Invalidated 非部分写入不阻断
+	//（既有语义），因此不留 tombstone。
+	if entry.BlocksRemint() {
 		if l.compactedTerminalSources == nil {
 			l.compactedTerminalSources = make(map[historyCommitSourceKey]struct{})
 		}
@@ -654,14 +709,8 @@ func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSource
 		if !ok {
 			continue
 		}
-		switch entry.State {
-		case HistoryCommitPending, HistoryCommitInFlight, HistoryCommitAcked,
-			HistoryCommitStateFailed, HistoryCommitAbandoned:
+		if entry.BlocksRemint() {
 			return true
-		case HistoryCommitInvalidated:
-			if entry.MayHavePartiallyWritten {
-				return true
-			}
 		}
 	}
 	return false
@@ -669,14 +718,14 @@ func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSource
 
 func (l *HistoryCommitLedger) hasUnresolvedTerminalDelivery() bool {
 	// Counter-backed O(1) predicate. The counter is monotonic: entries reach
-	// Failed or Invalidated-with-partial-write and never revert to a resolved
-	// state (no path re-arms DeferInFlight/Ack/Invalidate from those states).
+	// failed or invalidated-with-partial-write and never revert to a resolved
+	// state except through the explicit SettleUnresolvedWithoutReplay pass.
 	return l != nil && l.unresolvedCount > 0
 }
 
 func (l *HistoryCommitLedger) hasOlderPendingOrInFlight(token uint64) bool {
-	// O(1) equivalent of the previous full-map scan: an earlier Pending or
-	// InFlight token exists exactly when the smallest non-terminal token is
+	// O(1) equivalent of the previous full-map scan: an earlier Queued token
+	// exists exactly when the smallest non-terminal token is
 	// still older than token. See the minNonTerminalToken field comment.
 	return l != nil && l.minNonTerminalToken != 0 && l.minNonTerminalToken < token
 }

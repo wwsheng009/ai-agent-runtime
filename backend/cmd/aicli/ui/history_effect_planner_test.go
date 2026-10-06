@@ -149,8 +149,8 @@ func TestCanonicalHistoryFrontierNoLongerBlockedAfterOrphanToolFinalization(t *t
 		ID: 2, Revision: 1, Kind: scene.KindAssistant, Source: "final answer", Phase: scene.CellCommitted,
 	}
 	state := AppState{
-		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
-		Transcript:       TranscriptState{Revision: 1, Cells: []scene.TranscriptCell{tool, answer}},
+		Geometry:   GeometryState{Width: 80, Height: 12, Generation: 1},
+		Transcript: TranscriptState{Revision: 1, Cells: []scene.TranscriptCell{tool, answer}},
 	}
 	if commits := planEligibleHistoryCommits(state); len(commits) != 0 {
 		t.Fatalf("mutable orphan tool did not hold the ordering frontier: %#v", commits)
@@ -211,7 +211,7 @@ func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
 		},
 	}, 4)
 	entry := historyCommitEntry(t, state, first.Token)
-	if entry.State != HistoryCommitPending || entry.Commit.Token != first.Token || state.HistoryEffects.ProjectionUnknown {
+	if entry.State != HistoryCommitQueued || entry.Commit.Token != first.Token || state.HistoryEffects.ProjectionUnknown {
 		t.Fatalf("append-only revision invalidated stable effect identity: entry=%+v state=%+v", entry, state.HistoryEffects)
 	}
 
@@ -228,7 +228,7 @@ func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
 		},
 	}, 6)
 	entry = historyCommitEntry(t, state, first.Token)
-	if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != first.Token || state.HistoryEffects.ProjectionUnknown {
+	if entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != first.Token || state.HistoryEffects.ProjectionUnknown {
 		t.Fatalf("append-only revision invalidated claimed stable effect: entry=%+v state=%+v", entry, state.HistoryEffects)
 	}
 	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
@@ -291,7 +291,7 @@ func TestReplaceTranscriptAppendDoesNotReplayStructuredActiveHistoryPrefix(t *te
 			}
 			frame := uint64(1)
 			for _, entry := range initialEntries {
-				if entry.Commit.Origin != HistoryCommitActive || entry.State != HistoryCommitPending {
+				if entry.Commit.Origin != HistoryCommitActive || entry.State != HistoryCommitQueued {
 					continue
 				}
 				state = reduceUIControllerState(state, BeginHistoryCommit{
@@ -324,7 +324,7 @@ func TestReplaceTranscriptAppendDoesNotReplayStructuredActiveHistoryPrefix(t *te
 			var pendingText strings.Builder
 			for _, entry := range state.HistoryEffects.Entries() {
 				commit := entry.Commit
-				if entry.State != HistoryCommitPending || commit.Origin != HistoryCommitActive {
+				if entry.State != HistoryCommitQueued || commit.Origin != HistoryCommitActive {
 					continue
 				}
 				pending++
@@ -392,7 +392,7 @@ func TestFinalizeActiveCellPlansOnlyUnacknowledgedResidentTail(t *testing.T) {
 
 	var transcriptRows []string
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Origin != HistoryCommitTranscript || entry.State != HistoryCommitPending {
+		if entry.Commit.Origin != HistoryCommitTranscript || entry.State != HistoryCommitQueued {
 			continue
 		}
 		for _, line := range entry.Commit.Lines {
@@ -458,11 +458,11 @@ func TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight(t *testing.T) {
 		case entry.Commit.Origin == HistoryCommitTranscript:
 			t.Fatalf("finalize minted a transcript identity while the active batch was in flight: %#v", entry)
 		case entry.Commit.Token == batch[0].Token:
-			if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != batch[0].Token {
+			if entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != batch[0].Token {
 				t.Fatalf("batch head state = %v cursor=%d, want claimed pending", entry.State, state.HistoryEffects.WriteCursor)
 			}
 		default:
-			if entry.State != HistoryCommitPending {
+			if entry.State != HistoryCommitQueued {
 				t.Fatalf("batch member %d state = %v, want pending", entry.Commit.Token, entry.State)
 			}
 		}
@@ -481,12 +481,12 @@ func TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight(t *testing.T) {
 	for _, entry := range state.HistoryEffects.Entries() {
 		switch entry.Commit.Origin {
 		case HistoryCommitActive:
-			if entry.State != HistoryCommitAcked {
+			if entry.State != HistoryCommitDelivered {
 				t.Fatalf("batch entry not acked after physical proof: %#v", entry)
 			}
 			ackedRows += len(entry.Commit.Lines)
 		case HistoryCommitTranscript:
-			if entry.State != HistoryCommitPending {
+			if entry.State != HistoryCommitQueued {
 				t.Fatalf("transcript suffix state = %v, want pending", entry.State)
 			}
 			transcriptRows += len(entry.Commit.Lines)
@@ -506,7 +506,7 @@ func TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight(t *testing.T) {
 func TestPlanPlainCellHistoryCommitsMapsInternalAndTrailingBlankRows(t *testing.T) {
 	const source = "first\n\nlast\n"
 	state := AppState{
-		Geometry:         GeometryState{Width: 80, Height: 24, Generation: 1},
+		Geometry: GeometryState{Width: 80, Height: 24, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{{
 			ID: 72, Revision: 1, Kind: scene.KindAssistant,
 			Source: source, Phase: scene.CellCommitted,
@@ -579,7 +579,7 @@ func TestPlanEligibleHistoryCommitsRespectsCanonicalMutableFrontier(t *testing.T
 
 func TestPlanEligibleHistoryCommitsStopsAtFirstMutableCell(t *testing.T) {
 	state := AppState{
-		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
+		Geometry: GeometryState{Width: 80, Height: 12, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
 			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindReasoning, Source: "mutable barrier", Phase: scene.CellMutable},
@@ -599,7 +599,7 @@ func TestPlanEligibleHistoryCommitsStopsAtFirstMutableCell(t *testing.T) {
 
 func TestPlanEligibleHistoryCommitsTreatsEmptyMutableCellAsBarrier(t *testing.T) {
 	state := AppState{
-		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
+		Geometry: GeometryState{Width: 80, Height: 12, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
 			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindReasoning, Source: "", Phase: scene.CellMutable},
@@ -637,7 +637,7 @@ func TestSyncHistoryEffectsForActiveCellLeavesTranscriptEntriesUntouched(t *test
 	syncHistoryEffectsForActiveCell(&state)
 
 	entry, ok := state.HistoryEffects.ledger.Entry(commit.Token)
-	if !ok || entry.State != HistoryCommitPending {
+	if !ok || entry.State != HistoryCommitQueued {
 		t.Fatalf("active-only sync changed unrelated transcript effect: entry=%+v found=%t", entry, ok)
 	}
 }
@@ -703,7 +703,7 @@ func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
 	state.HistoryEffects.ledger = NewHistoryCommitLedger()
 	for token := uint64(1); token <= 8192; token++ {
 		commit := testHistoryCommit(token, scene.CellID(token%finalizedCells+1), 1)
-		state.HistoryEffects.ledger.byToken[token] = HistoryCommitEntry{Commit: commit, State: HistoryCommitPending}
+		state.HistoryEffects.ledger.byToken[token] = HistoryCommitEntry{Commit: commit, State: HistoryCommitQueued}
 	}
 	state.HistoryEffects.NextToken = 8192
 
@@ -793,7 +793,7 @@ func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
 	}
 
 	state := AppState{
-		Geometry:         geometry,
+		Geometry: geometry,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindReasoning, Source: source, Phase: scene.CellCommitted},
 		}}),
@@ -837,7 +837,7 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 	// If the fast path skips planning, the corruption must survive untouched.
 	corruptPending := func(state *UIControllerState) (token uint64, broken string) {
 		for token, entry := range state.HistoryEffects.ledger.byToken {
-			if entry.State != HistoryCommitPending {
+			if entry.State != HistoryCommitQueued {
 				continue
 			}
 			broken = "BROKEN-SENTINEL"
@@ -870,7 +870,7 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 			t.Fatalf("unchanged input re-planned: ledger entries %d -> %d", first, got)
 		}
 		entry, ok := state.HistoryEffects.ledger.byToken[token]
-		if !ok || entry.State != HistoryCommitPending {
+		if !ok || entry.State != HistoryCommitQueued {
 			t.Fatalf("fast path did not run: pending entry %d was reconciled", token)
 		}
 		if entry.Commit.Lines[0].Spans[0].Text != broken {
@@ -909,7 +909,7 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 		if !ok {
 			return // invalidated and pruned by the re-plan: acceptable
 		}
-		if entry.State == HistoryCommitInvalidated {
+		if entry.IsInvalidated() {
 			return // invalidated by the re-plan: acceptable
 		}
 		if entry.Commit.Lines[0].Spans[0].Text == broken {
@@ -1082,7 +1082,7 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 		t.Fatalf("markInFlight: %v", err)
 	}
 	entry, ok := state.HistoryEffects.ledger.Entry(1)
-	if !ok || entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != 1 {
+	if !ok || entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != 1 {
 		t.Fatalf("expected claimed pending entry, got state=%s cursor=%d", entry.State, state.HistoryEffects.WriteCursor)
 	}
 
@@ -1102,7 +1102,7 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 	if !ok {
 		t.Fatal("claimed entry was removed from ledger")
 	}
-	if entry.State != HistoryCommitPending || state.HistoryEffects.WriteCursor != 1 {
+	if entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != 1 {
 		t.Fatalf("claimed entry was invalidated (state=%s cursor=%d); fix broke: "+
 			"DisplayRange-only difference for active commit must not trigger invalidate",
 			entry.State, state.HistoryEffects.WriteCursor)
@@ -1145,7 +1145,7 @@ func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
 		t.Fatalf("enqueue tail: %v", err)
 	}
 	tailEntry, ok := state.HistoryEffects.ledger.Entry(1)
-	if !ok || tailEntry.State != HistoryCommitPending {
+	if !ok || tailEntry.State != HistoryCommitQueued {
 		t.Fatalf("尾部提交没有以 pending 进入 ledger: ok=%t state=%s", ok, tailEntry.State)
 	}
 
@@ -1161,13 +1161,13 @@ func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
 	}
 	syncHistoryEffectCandidatesPrefix(state, []HistoryCommit{prefix})
 
-	// Invalidate 把条目置为 HistoryCommitInvalidated 而不是从 ledger 删除，所以
+	// Invalidate 把条目置为 quarantined/invalidated 而不是从 ledger 删除，所以
 	// 契约要断言 state，不能只断言存在性。
 	tailEntry, ok = state.HistoryEffects.ledger.Entry(1)
 	if !ok {
 		t.Fatal("尾部提交从 ledger 消失了")
 	}
-	if tailEntry.State != HistoryCommitPending {
+	if tailEntry.State != HistoryCommitQueued {
 		t.Fatalf("截断前缀把尾部已排队的提交置为 %s：这会让 Enqueued 前沿回退", tailEntry.State)
 	}
 	if entries := state.HistoryEffects.Entries(); len(entries) != 2 {
@@ -1178,7 +1178,7 @@ func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
 	// 正是两条路径必须分开的原因，也说明上面的断言不是恒真。
 	syncHistoryEffectCandidates(state, []HistoryCommit{prefix}, 0)
 	tailEntry, ok = state.HistoryEffects.ledger.Entry(1)
-	if !ok || tailEntry.State != HistoryCommitInvalidated {
+	if !ok || !tailEntry.IsInvalidated() {
 		t.Fatalf("完整规划语义下，不在有效集合里的 pending 条目应当被置为 invalidated: ok=%t state=%s", ok, tailEntry.State)
 	}
 }

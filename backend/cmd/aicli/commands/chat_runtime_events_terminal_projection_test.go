@@ -95,7 +95,7 @@ func TestDottedLifecycleProjectsMarkdownExactlyOnceIntoNativeHistory(t *testing.
 		t.Fatal("committed Scene produced no HistoryCommit effects")
 	}
 	for _, entry := range entries {
-		if entry.State != ui.HistoryCommitAcked {
+		if entry.State != ui.HistoryCommitDelivered {
 			t.Fatalf("history effect not acknowledged: %#v", entry)
 		}
 	}
@@ -469,8 +469,8 @@ func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.
 		t.Fatalf("late reasoning long-flow semantic order = %+v active=%+v", final.Transcript.Cells, final.Active)
 	}
 	for _, entry := range final.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitPending || entry.State == ui.HistoryCommitInFlight ||
-			entry.State == ui.HistoryCommitStateFailed || entry.MayHavePartiallyWritten {
+		if entry.State == ui.HistoryCommitQueued ||
+			entry.IsFailed() || entry.MayHavePartiallyWritten {
 			t.Fatalf("late reasoning history effect not settled: %#v", entry)
 		}
 	}
@@ -648,8 +648,8 @@ func TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory(t *test
 		t.Fatalf("committed transcript lost authoritative final: %+v", state.Transcript.Cells)
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitPending || entry.State == ui.HistoryCommitInFlight ||
-			entry.State == ui.HistoryCommitStateFailed || entry.MayHavePartiallyWritten {
+		if entry.State == ui.HistoryCommitQueued ||
+			entry.IsFailed() || entry.MayHavePartiallyWritten {
 			t.Fatalf("history effect not acknowledged: %#v", entry)
 		}
 	}
@@ -814,7 +814,7 @@ func TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory(t *testi
 	// 使用语义正文的字节坐标。
 	semanticAnswer := answer
 	for _, entry := range final.HistoryEffects.Entries() {
-		if entry.State == ui.HistoryCommitAcked && entry.Commit.CellID == streaming.Active.CellID &&
+		if entry.State == ui.HistoryCommitDelivered && entry.Commit.CellID == streaming.Active.CellID &&
 			entry.Commit.SourceRange.End == len(semanticAnswer) {
 			tailAcknowledged = true
 			break

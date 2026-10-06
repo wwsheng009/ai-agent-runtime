@@ -490,15 +490,17 @@ while ($true) {
   "width": 120,
   "height": 42,
   "primary_lease": "active",
-  "history_effects": "frozen=false pending=0 active",
+  "history_effects": "queued=0 delivered=12 quarantined=0 active",
   "history_gates": {
     "frozen": false,
     "projection_unknown": false,
     "reconciliation_required": false,
     "recovery_actionable": false,
-    "pending_count": 0,
-    "oldest_pending_token": 0,
-    "oldest_pending_generation": 0
+    "queued_count": 0,
+    "oldest_queued_token": 0,
+    "oldest_queued_generation": 0,
+    "claimed_token": 0,
+    "claimed_generation": 0
   },
   "active_cell": {
     "id": 41,
@@ -536,9 +538,11 @@ while ($true) {
 | `projection_unknown` | bool | **投影未知**：物理终端缓存状态不可信，需先重建投影 |
 | `reconciliation_required` | bool | **需协调**：滚动缓存需要显式协调后才能提交 |
 | `recovery_actionable` | bool | **可恢复**：综合以上条件判断为需要执行恢复操作 |
-| `pending_count` | int | 待处理（已提交但未确认）的 HistoryCommit 数量 |
-| `oldest_pending_token` | uint64 | 最旧待处理提交的 token（可关联到 layout_generation） |
-| `oldest_pending_generation` | uint64 | 最旧待处理提交对应的 layout_generation |
+| `queued_count` | int | 未交付（已入队，含已被写游标 claim）的 HistoryCommit 数量 |
+| `oldest_queued_token` | uint64 | 最旧未交付提交的 token（可关联到 layout_generation） |
+| `oldest_queued_generation` | uint64 | 最旧未交付提交对应的 layout_generation |
+| `claimed_token` | uint64 | 单写端当前持有（可能正在物理写）的 token；其 generation 落后于 layout_generation 即 stranded-claim 签名 |
+| `claimed_generation` | uint64 | 被 claim token 对应的 layout_generation |
 
 **诊断价值**：这四个门控直接回答"哪个条件在阻塞提交"。例如 `projection_unknown=true` 且 `recovery_actionable=true` → 需要先恢复投影，提交才能继续。
 

@@ -285,7 +285,8 @@ func (c *chatInteractionCoordinator) historyReplayDeliverySettled() bool {
 	if diagnostics.ScrollbackReplayArmed || diagnostics.ProjectionUnknown || diagnostics.Frozen {
 		return false
 	}
-	return diagnostics.Summary.Pending == 0 && diagnostics.Summary.InFlight == 0
+	// 三态归一后「未完成提交」= queued（含已被写游标 claim 的 token）。
+	return diagnostics.Summary.Queued == 0
 }
 
 // resumeProgressLoadSettleActive 报告「装载历史」收尾行是否仍需要落地探测。

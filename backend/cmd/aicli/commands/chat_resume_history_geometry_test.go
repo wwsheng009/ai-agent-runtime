@@ -57,7 +57,7 @@ func TestSessionLoadBeforeGeometryStillDeliversTranscript(t *testing.T) {
 	}
 	planned := make(map[uint64]struct{}, len(entries))
 	for _, entry := range entries {
-		if entry.State != ui.HistoryCommitPending {
+		if entry.State != ui.HistoryCommitQueued {
 			t.Fatalf("token %d planned in state %v, want pending", entry.Commit.Token, entry.State)
 		}
 		planned[uint64(entry.Commit.CellID)] = struct{}{}

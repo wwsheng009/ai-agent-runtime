@@ -76,7 +76,7 @@ func main() {
 
 func assertHistoryAcknowledged(controller *ui.UIController) {
 	for _, entry := range controller.State().HistoryEffects.Entries() {
-		if entry.State != ui.HistoryCommitAcked {
+		if entry.State != ui.HistoryCommitDelivered {
 			fmt.Fprintf(os.Stderr, "unresolved history effect: %#v\n", entry)
 			os.Exit(3)
 		}

@@ -63,7 +63,7 @@ func TestHistoryCommitExecutor_AcksOldestTokensThroughWakeEffect(t *testing.T) {
 		t.Fatalf("sink calls = %v, entries = %#v", got, entries)
 	}
 	for index, entry := range entries {
-		if entry.State != HistoryCommitAcked || entry.AckFrame != entry.Commit.Token+100 {
+		if entry.State != HistoryCommitDelivered || entry.AckFrame != entry.Commit.Token+100 {
 			t.Fatalf("entry[%d] not acknowledged: %#v", index, entry)
 		}
 		if got[index] != entry.Commit.Token {
@@ -91,10 +91,10 @@ func TestHistoryCommitExecutor_FailureStopsDrainAndMarksUnknown(t *testing.T) {
 		t.Fatalf("calls=%d unknown=%t, want one failed call and Unknown", calls, state.HistoryEffects.ProjectionUnknown)
 	}
 	entries := state.HistoryEffects.Entries()
-	if len(entries) < 2 || entries[0].State != HistoryCommitStateFailed || !entries[0].MayHavePartiallyWritten {
+	if len(entries) < 2 || !entries[0].IsFailed() || !entries[0].MayHavePartiallyWritten {
 		t.Fatalf("failed head entry = %#v", entries)
 	}
-	if entries[1].State != HistoryCommitPending {
+	if entries[1].State != HistoryCommitQueued {
 		t.Fatalf("later token advanced after failure: %#v", entries[1])
 	}
 }
@@ -112,7 +112,7 @@ func TestHistoryCommitExecutor_PossiblePartialWriteWithoutErrorFails(t *testing.
 	executor.WaitIdle()
 
 	entry := controller.State().HistoryEffects.Entries()[0]
-	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitPartialWriteWithoutError) {
+	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitPartialWriteWithoutError) {
 		t.Fatalf("partial-without-error entry = %#v", entry)
 	}
 	if !controller.State().HistoryEffects.ProjectionUnknown {
@@ -133,7 +133,7 @@ func TestHistoryCommitExecutor_SinkPanicFailsAndLeavesNoWorkerHang(t *testing.T)
 	executor.WaitIdle()
 
 	entry := controller.State().HistoryEffects.Entries()[0]
-	if entry.State != HistoryCommitStateFailed || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitSinkPanic) {
+	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitSinkPanic) {
 		t.Fatalf("panic entry = %#v", entry)
 	}
 	if !controller.State().HistoryEffects.ProjectionUnknown {
@@ -159,7 +159,7 @@ func TestHistoryCommitExecutor_DeferredWithoutBytesRequeuesSameToken(t *testing.
 	executor.Request()
 	executor.WaitIdle()
 	entry := historyCommitEntry(t, controller.State(), first)
-	if calls != 1 || entry.State != HistoryCommitPending || controller.State().HistoryEffects.ProjectionUnknown {
+	if calls != 1 || entry.State != HistoryCommitQueued || controller.State().HistoryEffects.ProjectionUnknown {
 		t.Fatalf("defer entry = %#v calls=%d state=%#v", entry, calls, controller.State().HistoryEffects)
 	}
 
@@ -168,7 +168,7 @@ func TestHistoryCommitExecutor_DeferredWithoutBytesRequeuesSameToken(t *testing.
 	entry = historyCommitEntry(t, controller.State(), first)
 	// A successful second request is allowed to drain later tokens too; the
 	// invariant here is that the original token was not replaced or failed.
-	if calls < 2 || entry.State != HistoryCommitAcked || entry.AckFrame != 77 {
+	if calls < 2 || entry.State != HistoryCommitDelivered || entry.AckFrame != 77 {
 		t.Fatalf("requeued entry = %#v calls=%d", entry, calls)
 	}
 }
@@ -192,7 +192,7 @@ func TestHistoryCommitExecutor_DoesNotClaimWhileLeaseFrozen(t *testing.T) {
 	if calls != 0 {
 		t.Fatalf("frozen lease called sink %d times", calls)
 	}
-	if entry := controller.State().HistoryEffects.Entries()[0]; entry.State != HistoryCommitPending {
+	if entry := controller.State().HistoryEffects.Entries()[0]; entry.State != HistoryCommitQueued {
 		t.Fatalf("frozen lease changed entry: %#v", entry)
 	}
 }

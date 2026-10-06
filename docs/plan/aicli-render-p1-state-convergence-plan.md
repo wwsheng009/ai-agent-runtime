@@ -2,8 +2,8 @@
 
 > 来源：`docs/plan/aicli-unified-render-architecture-audit-20261005.md` §6 P1。
 > 基线：`feat/render-p0-writer-unification` @ `44f31cbf`（P0 写端归一完成，18 提交）。
-> 状态：**侦察完成**（2026-10-06，三路 explore：ledger 状态机 / 可推导镜像 / WaitIdle 握手；
-> 原始报告要点已归档于 §6，全部证据带 `文件:行`）。
+> 状态：**侦察完成 + P1-1 第 1/2 步、P1-2a、P1-3 第 1/2 小步已实施**
+>（2026-10-06；三路 explore 原始报告要点已归档于 §6，全部证据带 `文件:行`）。
 
 ## 0. 结论摘要
 
@@ -96,6 +96,38 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   `TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight` 暴露并修复了
   finalize 护栏漏判（hasInFlightActiveOriginDelivery 未含游标）。
 - 验证：ui 全量 + commands 全量 + 定向 -race（见提交记录）。
+
+### 1.6 P1-1 第 2 步实施记录（六态归一，已完成）
+
+- enum（history_commit.go）：`HistoryCommitQueued` / `HistoryCommitDelivered` /
+  `HistoryCommitQuarantined` 三态；删除 `InFlight` / `Failed` / `Invalidated` /
+  `Abandoned` 常量。物理写窗口不占状态（由 `WriteCursor` 表达，第 1 步已落地）。
+- 不可合并的四个行为差异收敛为 quarantine 子类 `HistoryCommitQuarantine`
+  （None/Failed/Invalidated/Settled），由 `HistoryCommitEntry.Unresolved()` /
+  `BlocksRemint()` 两个谓词统一裁决：
+  - Failed：恒未决、settle 前不可压缩、阻断同源再铸；
+  - Invalidated：partial 时未决且阻断再铸；非 partial 已解决、可压缩、不阻断；
+  - Settled：settle 后不再未决、可压缩，但永久阻断同源再铸。
+  `unresolvedCount`、`minNonTerminalToken`、`prunableResolvedEntry`、
+  `hasTerminalRecordForSource`、压缩 tombstone 全部改为谓词驱动，语义与旧六态逐一对照。
+- queue：`markDeliveredBatchUnresolved` 按 Queued→Failed 隔离、Invalidated 保留子类
+  并强化 partial 事实；`Summary` 读数改为 queued/delivered/quarantined
+  （+quarantined-unresolved/failed/settled），`OldestInFlightToken/Generation`
+  改为 `ClaimedToken/Generation`（直接取 `WriteCursor`）；
+  `hasInFlightActiveOriginDelivery` 更名 `hasClaimedActiveOriginDelivery`
+  （删除恒空的 legacy activeTokensByCell 扫描）。
+- planner：`syncHistoryEffectCandidates` 删除 InFlight 分支（游标 token 在 queued
+  分支内 invalidate 的安全点不变）；`advanceActiveCellEnqueuedFromEffects` 只把
+  Queued/Delivered/failed-quarantine 计入 Enqueued 前沿（与旧
+  Pending/InFlight/Acked/Failed 集合一致）。
+- 观测面：`/debug` history_gates 改 `queued_count`/`oldest_queued_token`/
+  `oldest_queued_generation` + `claimed_token`/`claimed_generation`；
+  document 摘要行改 `queued/delivered/quarantined(-unresolved/-failed/-settled)`
+  与 `claimed-token/claimed-gen`；`chat_resume_progress` 的收尾判据改 queued==0。
+- 错误常量 `ErrCommitNotPending`/`ErrCommitNotInFlight` 保留原名（分类稳定），
+  注释标明二者在三态下均表示"非 queued"。
+- 验证：`go test ./cmd/aicli/ui/` 全量 + `./cmd/aicli/commands/` 全量通过；
+  `-race` 见提交记录。
 
 ## 2. P1-2 可推导镜像收敛
 

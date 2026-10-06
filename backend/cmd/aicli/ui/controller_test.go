@@ -1858,7 +1858,7 @@ func TestBeginHistoryCommitRefusalsAreObservable(t *testing.T) {
 	if outOfOrder.HistoryEffects.claimRejectsOutOfOrder != 1 {
 		t.Fatalf("out-of-order claim rejections = %d, want 1", outOfOrder.HistoryEffects.claimRejectsOutOfOrder)
 	}
-	if entry, ok := outOfOrder.HistoryEffects.ledger.Entry(second); !ok || entry.State != HistoryCommitPending {
+	if entry, ok := outOfOrder.HistoryEffects.ledger.Entry(second); !ok || entry.State != HistoryCommitQueued {
 		t.Fatalf("rejected claim changed token state: %#v", entry)
 	}
 	if summary := outOfOrder.HistoryEffects.Summary(); summary.ClaimRejectsOutOfOrder != 1 {

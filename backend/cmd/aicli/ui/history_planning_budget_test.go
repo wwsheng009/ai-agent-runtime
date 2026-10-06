@@ -128,7 +128,7 @@ func TestTruncatedTranscriptPlanContinuesUntilComplete(t *testing.T) {
 		fullIdentities[historyCommitSourceIdentity(commit)] = struct{}{}
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitInvalidated {
+		if entry.IsInvalidated() {
 			continue
 		}
 		if _, ok := fullIdentities[historyCommitSourceIdentity(entry.Commit)]; !ok {
@@ -185,7 +185,7 @@ func TestTruncatedTranscriptPlanContinuesUntilComplete(t *testing.T) {
 	}
 	planned := make(map[scene.CellID]struct{}, cells)
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitInvalidated {
+		if entry.IsInvalidated() {
 			continue
 		}
 		planned[entry.Commit.CellID] = struct{}{}

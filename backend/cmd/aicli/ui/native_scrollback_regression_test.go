@@ -96,7 +96,7 @@ func TestTerminalResizePreservesNativeScrollbackWithoutHistoryReplay(t *testing.
 		t.Fatal("initial handoff planned no history commit")
 	}
 	for _, entry := range entries {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			t.Fatalf("initial history entry not acked: %#v", entry)
 		}
 	}
@@ -130,7 +130,7 @@ func TestTerminalResizePreservesNativeScrollbackWithoutHistoryReplay(t *testing.
 	}
 	// 账本不得因 resize 回退已确认的交付身份。
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			t.Fatalf("resize disturbed the acked history ledger: %#v", entry)
 		}
 	}
@@ -252,8 +252,8 @@ func TestAuthoritativeFinalCorrectionSettlesWithoutScrollbackReplay(t *testing.T
 		t.Fatalf("authoritative correction left the projection unresolved: %#v", state.HistoryEffects)
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
-			t.Fatalf("authoritative correction left an in-flight delivery: %#v", entry)
+		if entry.State == HistoryCommitQueued {
+			t.Fatalf("authoritative correction left a queued delivery: %#v", entry)
 		}
 	}
 	raw := h.physical.String()
@@ -579,7 +579,7 @@ func TestRealTTYNativeScrollbackProbe(t *testing.T) {
 	controller.WaitIdle()
 
 	for _, entry := range controller.State().HistoryEffects.Entries() {
-		if entry.State != HistoryCommitAcked {
+		if entry.State != HistoryCommitDelivered {
 			t.Fatalf("real terminal left history unresolved: %#v", entry)
 		}
 	}
