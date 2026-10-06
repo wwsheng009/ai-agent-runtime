@@ -876,6 +876,20 @@ func (c *UIController) LayoutGeneration() uint64 {
 	return c.state.Geometry.Generation
 }
 
+// Geometry returns the reducer-authoritative terminal geometry. The unified
+// presenter uses it as the dedup source for Resize posts so it no longer keeps
+// a private width/height mirror (P1-2b §2.2). Like LayoutGeneration it is a
+// short c.mu read and must not be called while holding c.mu (sync.Mutex is not
+// reentrant); presenter callbacks run outside the actor lock.
+func (c *UIController) Geometry() GeometryState {
+	if c == nil {
+		return GeometryState{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.Geometry
+}
+
 // Stats 返回一致的诊断快照。
 func (c *UIController) Stats() ControllerStats {
 	if c == nil {

@@ -721,7 +721,10 @@ func (c *chatInteractionCoordinator) SetPrimaryPresenter(presenter *ui.TerminalS
 
 // primaryTerminalGeometry is a read-only geometry bridge for the presenter.
 // It deliberately reads only the surface's cached terminal dimensions; layout
-// and terminal writes remain exclusively in the actor/presenter path.
+// and terminal writes remain exclusively in the actor/presenter path. Without
+// an attached surface it fails closed instead of falling back to a raw
+// term.GetSize (P1-2b §2.2): a second probe authority behind the actor would
+// race the driver probe and break the single-authority geometry contract.
 func (c *chatInteractionCoordinator) primaryTerminalGeometry() (width, height int, ok bool) {
 	if c == nil {
 		return 0, 0, false
@@ -739,11 +742,7 @@ func (c *chatInteractionCoordinator) primaryTerminalGeometry() (width, height in
 			return width, height, true
 		}
 	}
-	width, height = ui.GetTerminalWidth(), ui.GetTerminalHeight()
-	if width < 1 || height < 1 {
-		return 0, 0, false
-	}
-	return width, height, true
+	return 0, 0, false
 }
 
 func (c *chatInteractionCoordinator) SupportsLiveStream() bool {
@@ -7348,7 +7347,10 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 
 	sizeChanged := false
 	geometryProbed := false
-	if c.surface != nil && c.surface.Enabled() {
+	// Unified mode owns geometry through the presenter probe -> Resize ->
+	// AppState.Geometry chain; a legacy surface probe here would be a second
+	// authority reporting the same terminal (P1-2b §2.2).
+	if !c.unifiedRendererEnabledLocked() && c.surface != nil && c.surface.Enabled() {
 		if softNeedsReflow {
 			// Soft ownership already disagrees with the cached layout width —
 			// reflow now; also force an unthrottled probe so layout stays coherent.
@@ -7430,7 +7432,7 @@ func (c *chatInteractionCoordinator) refreshActiveStreamViewportNow() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.surface != nil && c.surface.Enabled() {
+	if !c.unifiedRendererEnabledLocked() && c.surface != nil && c.surface.Enabled() {
 		_ = c.surface.SyncTerminalGeometry()
 		c.reportMeasuredSurfaceGeometryLocked()
 	}

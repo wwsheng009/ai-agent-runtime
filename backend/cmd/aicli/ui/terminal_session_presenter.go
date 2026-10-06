@@ -33,8 +33,6 @@ type TerminalSessionPresenter struct {
 
 	mu           sync.Mutex
 	closed       bool
-	lastWidth    int
-	lastHeight   int
 	probePending bool
 }
 
@@ -130,12 +128,23 @@ func (p *TerminalSessionPresenter) publishGeometry() {
 		p.mu.Unlock()
 		return
 	}
-	if p.lastWidth == width && p.lastHeight == height && !p.probePending {
+	pending := p.probePending
+	p.mu.Unlock()
+	// Dedup against the reducer-authoritative geometry instead of a private
+	// lastWidth/lastHeight mirror (P1-2b §2.2): once the actor has applied this
+	// size, no later flush re-posts it. A deferred (mailbox-full) post keeps its
+	// retry marker and bypasses the check until the post is admitted.
+	if !pending {
+		geometry := p.controller.Geometry()
+		if geometry.Width == width && geometry.Height == height {
+			return
+		}
+	}
+	p.mu.Lock()
+	if p.closed {
 		p.mu.Unlock()
 		return
 	}
-	p.lastWidth = width
-	p.lastHeight = height
 	if !p.probePending {
 		p.probePending = true
 	}

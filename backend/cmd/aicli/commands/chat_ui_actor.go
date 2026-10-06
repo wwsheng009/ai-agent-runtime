@@ -304,13 +304,19 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	return false
 }
 
+// unifiedRendererEnabledLocked is the lock-free variant for callers that
+// already hold c.mu (sync.Mutex is not reentrant).
+func (c *chatInteractionCoordinator) unifiedRendererEnabledLocked() bool {
+	return c != nil && c.unifiedRenderer
+}
+
 func (c *chatInteractionCoordinator) UnifiedRendererEnabled() bool {
 	if c == nil {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.unifiedRenderer
+	return c.unifiedRendererEnabledLocked()
 }
 
 func (c *chatInteractionCoordinator) RequestUnifiedFrame() {

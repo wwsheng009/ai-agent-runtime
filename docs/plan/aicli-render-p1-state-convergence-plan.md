@@ -2,7 +2,7 @@
 
 > 来源：`docs/plan/aicli-unified-render-architecture-audit-20261005.md` §6 P1。
 > 基线：`feat/render-p0-writer-unification` @ `44f31cbf`（P0 写端归一完成，18 提交）。
-> 状态：**侦察完成 + P1-1 第 1/2/3 步、P1-2a、P1-2b 第 1/3 小步、P1-3 第 1/2 小步已实施**
+> 状态：**侦察完成 + P1-1 第 1/2/3 步、P1-2a、P1-2b 第 1/3 小步与几何收敛第 1 部分、P1-3 第 1/2 小步已实施**
 >（2026-10-06；三路 explore 原始报告要点已归档于 §6，全部证据带 `文件:行`）。
 
 ## 0. 结论摘要
@@ -237,6 +237,26 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   `render/output.bindingGeneration`（lease 绑定代），已天然隔离，无需改名。
   隔离语义以 `confirmWriteLocked` 注释声明：其他 generation/frame 计数是
   scheduler/cache/lease epoch，禁止与 `s.frame` 比较。
+
+### 2.8 P1-2b 第 2 小步（几何收敛，第 1 部分已完成）
+
+- presenter 去重镜像删除：`TerminalSessionPresenter.lastWidth/lastHeight` 删除，
+  去重改读 reducer 权威 `UIController.Geometry()`（controller.go 新增窄访问器，
+  与 `LayoutGeneration()` 同款短 `c.mu` 读）；`probePending` 保留（投递重试
+  标记，非几何镜像）。满邮箱延迟重发语义不变（钉子测试通过）。
+- `primaryTerminalGeometry` 无 surface 时 fail-closed：删除 `theme.go` raw
+  `term.GetSize` 回退，探针只认 surface 缓存；unified 探针不再是第二个
+  GetSize 权威。
+- unified surface 上报门控：`maybeRefreshStreamGeometryLocked` 与
+  `refreshActiveStreamViewportNow` 的 legacy surface probe/report 分支加
+  `unifiedRendererEnabledLocked()` 门控（新增免锁变体，避免持 `c.mu` 时重入
+  死锁）；legacy 路径与 `reportMeasuredSurfaceGeometryLocked` 本体不变。
+- 验证：ui 全量（103.9s）+ commands 全量（176.5s）+ 定向 `-race`
+  （presenter/geometry）通过。
+- 本小步未竟（已记录为后续）：driver 单 probe 注入与 `Terminal`/`driver`/
+  `theme.go` raw GetSize 收敛（30+ 展示宽度调用点需单探针缓存转发）、unified
+  下 `ApplyGeometry` 纯采纳入口。改动面与夹具迁移清单见会话侦察报告
+  （HEAD `fa9ca777` 逐行核实）。
 
 ## 3. P1-3 WaitIdle 事件驱动 ack
 
