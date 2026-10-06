@@ -27,6 +27,11 @@ const (
 // terminalWriteMu (the same lock every batch already holds) and defaults off so
 // non-interactive callers and unit-test surfaces are byte-for-byte unchanged.
 // Only the production fixed-bottom surface flips it on at Enable().
+//
+// Freeze (gap G2/A1-1): the ui-package freeze test pins the toggle to that
+// legacy path. Unified sessions must never call SetTerminalSynchronizedFrames:
+// the DEC 2026 brackets below are raw os.Stdout writes (writer inventory entry
+// renderengine/terminal_lock.go) and would bypass the session writer.
 var syncFramesEnabled bool
 
 // SetTerminalSynchronizedFrames toggles DEC 2026 framing around

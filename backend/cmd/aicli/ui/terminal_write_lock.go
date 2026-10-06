@@ -20,6 +20,12 @@ const (
 
 // SetTerminalSynchronizedFrames toggles DEC 2026 framing around
 // WithTerminalWriteLock batches.
+//
+// Freeze (gap G2/A1-1): the only production toggler is the legacy
+// FixedBottomSurface Enable/Disable pair. Unified sessions must never enable
+// it — renderengine writes the brackets directly to os.Stdout (writer
+// inventory: renderengine/terminal_lock.go), which would bypass the session
+// writer. TestSynchronizedFramesToggledOnlyByLegacySurface enforces this.
 func SetTerminalSynchronizedFrames(enabled bool) {
 	renderengine.SetTerminalSynchronizedFrames(enabled)
 }
