@@ -1019,8 +1019,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		historyInsertedRows = len(historyInsertedPayload)
 	}
 	if historyInsertedRows > 0 {
-		// A2 第一刀（停铸 active）：交付分支与 Origin 无关，统一走 resident
-		// 插入（terminalActiveHistoryArchiveANSI 留作死代码，第二刀删除）。
+		// A2（停铸 active）：交付分支与 Origin 无关，统一走 resident 插入。
 		if s.historyInsertionContinuesScrollback(frame.Geometry.Height, frame.OutputBottomRow) {
 			// resident 模型为空，但已有行跨入 native scrollback：本次插入续写
 			// 归档流，必须从 row 1 起，否则会在 scrollback 与可见行之间留下
@@ -1674,101 +1673,6 @@ func terminalHistoryInsertionANSI(height, capacity int, resident, inserted []str
 		topAligned = true
 	}
 	return output.String(), topAligned
-}
-
-// historyBatchIsActiveOrigin reports whether one planned history delivery
-// contains only commits minted for a still-mutable active cell. An empty or
-// mixed batch keeps the resident insertion semantics: only a delivery that is
-// entirely active overflow may be archived past the retained finalized tail.
-func historyBatchIsActiveOrigin(delivered []HistoryCommit) bool {
-	if len(delivered) == 0 {
-		return false
-	}
-	for _, commit := range delivered {
-		if commit.Origin != HistoryCommitActive {
-			return false
-		}
-	}
-	return true
-}
-
-// terminalActiveHistoryArchiveANSI writes a mutable cell's overflow rows
-// through the primary history region and into native scrollback without ever
-// making them resident there. The retained finalized tail the layout projects
-// above the active band is restored exactly, so streaming overflow can no
-// longer evict finalized rows from the visible primary screen.
-//
-// One chunk at a time:
-//  1. paint the chunk over the region's top rows;
-//  2. scroll the region up by the chunk length, which records exactly those
-//     painted rows into native scrollback (the region top margin is row one).
-//
-// Once every chunk has crossed, the region is repainted from the retained tail
-// model at its current anchor: only a finalized-stream overflow flips the
-// region to sticky-top, because only then does the resident suffix continue the
-// rows that reached native scrollback. An active archive is fire-and-forget
-// (those rows are the mutable cell's streamed prefix, later superseded by the
-// finalized delivery), so flipping the finalized tail from its bottom anchor to
-// row one would make every later live message land mid-screen with blank space
-// below it instead of appending at the bottom above the band. The resident
-// model itself is unchanged: an archive never owns rows of the region, so later
-// capacity or alignment decisions keep seeing the finalized tail and nothing
-// else. The returned alignment is therefore unchanged by an archive.
-func terminalActiveHistoryArchiveANSI(height, capacity int, resident, inserted []string, topAligned bool) (string, bool) {
-	if height < 1 || capacity < 1 || len(inserted) == 0 {
-		return "", topAligned
-	}
-	if capacity > height {
-		capacity = height
-	}
-	resident = terminalRetainHistoryTailRows(resident, capacity)
-	var output strings.Builder
-	remaining := inserted
-	for len(remaining) > 0 {
-		chunk := remaining
-		if len(chunk) > capacity {
-			chunk = chunk[:capacity]
-		}
-		for index, row := range chunk {
-			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", index+1)
-			output.WriteString(row)
-		}
-		// The empty handoff plan still emits one CR/LF per row, so the region
-		// scrolls by exactly the archived length and native scrollback records
-		// exactly the rows painted above.
-		output.WriteString(renderengine.NewHandoffPlan(height, capacity, make([]string, len(chunk))).ANSI())
-		remaining = remaining[len(chunk):]
-	}
-	if topAligned {
-		// finalized 流已经溢出到 native scrollback：resident 后缀必须紧接
-		// 归档行，从第一行开始连续。
-		for index, row := range resident {
-			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", index+1)
-			output.WriteString(row)
-		}
-		for row := len(resident) + 1; row <= capacity; row++ {
-			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
-		}
-		return output.String(), true
-	}
-	// 尚无 finalized 溢出：保持贴底锚定（新行经既有 compress 语义追加在
-	// resident 下方、始终落在可见区底部），空白留在顶部。
-	start := capacity - len(resident) + 1
-	if start < 1 {
-		start = 1
-	}
-	for row := 1; row < start; row++ {
-		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
-	}
-	for index, row := range resident {
-		position := start + index
-		if position > capacity {
-			break
-		}
-		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", position)
-		output.WriteString(row)
-	}
-	return output.String(), false
 }
 
 func terminalHistoryDeleteLinesANSI(capacity, row, count int) string {

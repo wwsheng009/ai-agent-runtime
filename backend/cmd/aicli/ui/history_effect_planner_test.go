@@ -296,30 +296,6 @@ func TestPlanEligibleHistoryCommitsTreatsEmptyMutableCellAsBarrier(t *testing.T)
 	}
 }
 
-func TestSyncHistoryEffectsForActiveCellLeavesTranscriptEntriesUntouched(t *testing.T) {
-	state := UIControllerState{AppState: AppState{
-		Geometry:                     GeometryState{Width: 80, Height: 24, Generation: 1},
-		SemanticActiveCellProjection: true,
-		Active: ActiveCellState{
-			CellID: 91, Revision: 2, Kind: scene.KindAssistant,
-			Phase: ActiveCellMutable, Source: "short active source",
-		},
-	}}
-	commit := testHistoryCommit(1, 41, 1)
-	state.HistoryEffects.ledger = NewHistoryCommitLedger()
-	if err := state.HistoryEffects.ledger.Enqueue(commit); err != nil {
-		t.Fatalf("enqueue transcript effect: %v", err)
-	}
-	state.HistoryEffects.NextToken = commit.Token
-
-	syncHistoryEffectsForActiveCell(&state)
-
-	entry, ok := state.HistoryEffects.ledger.Entry(commit.Token)
-	if !ok || entry.State != HistoryCommitQueued {
-		t.Fatalf("active-only sync changed unrelated transcript effect: entry=%+v found=%t", entry, ok)
-	}
-}
-
 func TestTranscriptReplacementOnlyUpdatesActive(t *testing.T) {
 	previous := NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 		{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "prompt", Phase: scene.CellCommitted},

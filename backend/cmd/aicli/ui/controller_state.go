@@ -541,11 +541,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		if state.SemanticActiveCellProjection && state.Active.Phase == ActiveCellMutable {
 			state.Active = normalizeActiveStableRange(state.Active, state.Active.Enqueued.End)
 		}
-		if activeOnly && !invalidatesAcked && state.Active.Phase == ActiveCellMutable {
-			syncHistoryEffectsForActiveCell(&state)
-		} else {
-			syncHistoryEffectsForTranscript(&state)
-		}
+		// A2 第二刀：active 不再单独铸提交；active-only 替换与全会话路径统一
+		// 走 transcript 规划（memo 命中时为空转）。
+		syncHistoryEffectsForTranscript(&state)
 		refreshTranscriptOverlayPager(&state)
 	case SetActiveCellAction:
 		if a.Active.Phase == ActiveCellInactive {
@@ -571,14 +569,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// and the complete source-range invariant before publishing the snapshot.
 		if reduceActiveCellUpdate(&state, a) == nil {
 			// Updating the mounted mutable source cannot alter the finalized
-			// transcript prefix. Keep the unified high-frequency stream path
-			// independent of full Markdown/transcript layout; legacy projection
-			// still uses the complete planner because its source may differ.
-			if state.SemanticActiveCellProjection {
-				syncHistoryEffectsForActiveCell(&state)
-			} else {
-				syncHistoryEffectsForTranscript(&state)
-			}
+			// transcript prefix; A2 第二刀后 active 不再单独铸提交，统一走
+			// transcript 规划（memo 命中即空转）。
+			syncHistoryEffectsForTranscript(&state)
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ClearActiveCellAction:
@@ -1080,9 +1073,7 @@ func advanceActiveCellLedgerOnAck(state *UIControllerState, commits []HistoryCom
 // 这类变化不进 transcript fence，必须显式让 memo 与续跑游标失效，否则
 // transcript-origin 的重复候选会留在 ledger 里被二次投递。
 //
-// 仍活跃的可变 cell 的 ack 不推进：它的已交付前缀由 memo 命中路径上的
-// syncHistoryEffectsForActiveCell 做 O(viewport) 对账，不需要全量重规划；若把
-// 这类 ack 也计入，流式热路径会退化成每个 ack 一次全量布局（~190% CPU 的旧模式）。
+// 仍活跃的可变 cell 的 ack 不推进（A2 第二刀后其恒为 0，不再有交付）。
 func noteFinalizedActiveAck(state *UIControllerState, commits []HistoryCommit) {
 	for _, commit := range commits {
 		if commit.Origin != HistoryCommitActive {

@@ -964,12 +964,8 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	}
 	if transcriptPlanMemoHit(state) {
 		// The finalized transcript prefix and every layout input it depends on
-		// are unchanged. Only the mutable active cell's handoff inputs can have
-		// moved (the executor acks advance Acked/Enqueued on every handoff), so
-		// reconcile just that O(viewport) part. Re-laying-out the entire
-		// finalized history per ack is what pinned resumed sessions at ~190%
-		// CPU: the active handoff loop paid O(entire history) per commit.
-		syncHistoryEffectsForActiveCell(state)
+		// are unchanged. A2 第二刀后 active 不再铸提交，因此 memo 命中即无工作
+		// （旧实现需在此对账 active 候选，正是 ~190% CPU 热路径的来源）。
 		return false, false
 	}
 	// A memo miss means the plan inputs moved, so whatever the previous
@@ -1251,8 +1247,8 @@ func (s HistoryEffectQueueState) planContinuationPending() bool {
 // Revision is a reliable content/presentation proxy), sequence/chain grouping
 // (layout gap decisions read both), kind, phase, commit-block flag, boundary
 // class, and source length. Mutable cells are excluded because they are the
-// frontier barrier — their growth is planned by syncHistoryEffectsForActiveCell,
-// never part of the finalized plan. Chain keys are folded into the fence so an
+// frontier barrier — mutable growth is not part of the finalized plan (A2 第二刀
+// 后也不再产生 active 提交). Chain keys are folded into the fence so an
 // unversioned snapshot that rewires tool-chain grouping cannot be memoized as
 // identical (the SceneID == 0 guard this fence replaces).
 func transcriptFinalizedPrefixFence(transcript TranscriptState) uint64 {
@@ -1410,7 +1406,7 @@ func recordTranscriptPlanMemo(state *UIControllerState, candidates int) {
 // the entire history per appended cell — measured at 723ms/op on a 2000-cell
 // transcript, and visible live as plan-last-ms 4.7-6.9s with ~9 plans/min. Only
 // the finalized prefix enters planEligibleHistoryCommits; mutable cells are the
-// frontier barrier and are planned by syncHistoryEffectsForActiveCell.
+// frontier barrier (A2 第二刀后不再单独规划).
 func transcriptFinalizedCellCount(transcript TranscriptState) int {
 	count := 0
 	for _, cell := range transcript.Cells {
@@ -1419,61 +1415,6 @@ func transcriptFinalizedCellCount(transcript TranscriptState) int {
 		}
 	}
 	return count
-}
-
-// syncHistoryEffectsForActiveCell is the hot path for append-only stream
-// updates. The finalized transcript prefix and its physical rows cannot change
-// while the same cell remains mutable, so rebuilding it here only burns CPU
-// and allocations. Reconcile just this cell's active handoff candidates.
-// syncHistoryEffectsForActiveCell 是 streaming 入口的 active 提交同步。
-// A2 第一刀（停铸 active）后本函数空转：mutable 期间不再铸 active 提交，
-// finalize 一次铸全量。旧实现保留为 syncHistoryEffectsForActiveCellLegacy
-// （死代码，第二刀随 active 铸路径一起删除）。
-func syncHistoryEffectsForActiveCell(*UIControllerState) {}
-
-func syncHistoryEffectsForActiveCellLegacy(state *UIControllerState) {
-	if state == nil || !state.SemanticActiveCellProjection ||
-		state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 {
-		return
-	}
-	// Fast path: an append-only stream update that neither moves a source
-	// boundary (Stable/Enqueued/Acked), nor resizes (Geometry generation), nor
-	// reflows (Layout generation), nor changes the source content that the
-	// planner branches on (length / markdown shape / commit barrier) cannot
-	// change the planned candidate set.
-	// planMutableActiveCellHistoryCommitsWithTheme is pure over these inputs,
-	// so skip the rebuild entirely instead of churning CPU and allocations on
-	// every chunk.
-	looksMarkdown := state.Active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(state.Active.Source)
-	supplementMarkdown := state.Active.Kind == scene.KindReasoning && markdown.LooksLikeMarkdown(state.Active.Source)
-	if state.HistoryEffects.lastPlannedActiveEnqueuedValid &&
-		state.HistoryEffects.lastPlannedActiveStable == state.Active.Stable &&
-		state.HistoryEffects.lastPlannedActiveEnqueued == state.Active.Enqueued &&
-		state.HistoryEffects.lastPlannedActiveAcked == state.Active.Acked &&
-		state.HistoryEffects.lastPlannedLayoutGeneration == state.Geometry.Generation &&
-		state.HistoryEffects.lastPlannedGeometryGeneration == state.Geometry.Generation &&
-		state.HistoryEffects.lastPlannedSourceLen == len(state.Active.Source) &&
-		state.HistoryEffects.lastPlannedKind == state.Active.Kind &&
-		state.HistoryEffects.lastPlannedLooksMarkdown == looksMarkdown &&
-		state.HistoryEffects.lastPlannedSupplementMarkdown == supplementMarkdown &&
-		state.HistoryEffects.lastPlannedBlocked == state.Active.HistoryCommitBlocked {
-		return
-	}
-	candidates := planMutableActiveCellHistoryCommitsWithTheme(
-		state.Active, state.Geometry, state.Geometry.Generation, state.Theme,
-	)
-	syncHistoryEffectCandidates(state, candidates, state.Active.CellID)
-	state.HistoryEffects.lastPlannedActiveStable = state.Active.Stable
-	state.HistoryEffects.lastPlannedActiveEnqueued = state.Active.Enqueued
-	state.HistoryEffects.lastPlannedActiveAcked = state.Active.Acked
-	state.HistoryEffects.lastPlannedLayoutGeneration = state.Geometry.Generation
-	state.HistoryEffects.lastPlannedGeometryGeneration = state.Geometry.Generation
-	state.HistoryEffects.lastPlannedSourceLen = len(state.Active.Source)
-	state.HistoryEffects.lastPlannedKind = state.Active.Kind
-	state.HistoryEffects.lastPlannedLooksMarkdown = looksMarkdown
-	state.HistoryEffects.lastPlannedSupplementMarkdown = supplementMarkdown
-	state.HistoryEffects.lastPlannedBlocked = state.Active.HistoryCommitBlocked
-	state.HistoryEffects.lastPlannedActiveEnqueuedValid = true
 }
 
 // syncHistoryEffectCandidates reconciles a planned candidate set with the

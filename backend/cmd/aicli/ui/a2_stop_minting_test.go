@@ -258,33 +258,3 @@ func TestFinalizeActiveCellPlansWholeSourceWithoutDeferral(t *testing.T) {
 		}
 	}
 }
-
-// A2 第一刀：streaming 入口的 active 同步空转——无论源如何推进（append/stable
-// 前移），都不得铸提交或移动交付前沿。
-func TestSyncHistoryEffectsForActiveCellMintsNothing(t *testing.T) {
-	source := strings.Repeat("mutable-row\n", 30)
-	state := &UIControllerState{AppState: AppState{
-		Geometry:                     GeometryState{Width: 80, Height: 12, Generation: 1},
-		SemanticActiveCellProjection: true,
-		Active: ActiveCellState{
-			CellID: 91, Revision: 2, Kind: scene.KindAssistant, Phase: ActiveCellMutable,
-			Source: source, Stable: SourceRange{Start: 0, End: len(source)},
-		},
-	}}
-	state.HistoryEffects.ledger = NewHistoryCommitLedger()
-
-	syncHistoryEffectsForActiveCell(state)
-	if entries := state.HistoryEffects.ledger.Entries(); len(entries) != 0 {
-		t.Fatalf("first sync minted entries: %d", len(entries))
-	}
-
-	state.Active.Source += "mutable-row-030\n"
-	state.Active.Stable.End = len(state.Active.Source)
-	syncHistoryEffectsForActiveCell(state)
-	if entries := state.HistoryEffects.ledger.Entries(); len(entries) != 0 {
-		t.Fatalf("stable advance minted entries: %d", len(entries))
-	}
-	if state.Active.Enqueued.End != 0 || state.Active.Acked.End != 0 {
-		t.Fatalf("sync moved delivery frontiers: %+v", state.Active)
-	}
-}

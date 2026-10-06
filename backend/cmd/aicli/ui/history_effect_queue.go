@@ -91,13 +91,10 @@ type HistoryEffectQueueState struct {
 	planRequestInFlight bool
 	planInputsEpoch     uint64
 	// finalizedActiveAckPlanVersion 记录"已 finalize 的 cell 的 Active-origin 交付
-	// 又前进"的次数。这类 ack 不改变 transcript/layout/theme 指纹，却会收缩 plan
-	// 读到的 skipRows（activeAckedRenderedPrefixRows），必须让 memo 与续跑游标都
-	// 失效，否则 transcript-origin 的重复候选会留在 ledger 里被二次投递。按
-	// finalized cell 作用域计数：仍活跃的可变 cell 的 ack 不计——那由
-	// syncHistoryEffectsForActiveCell 的 O(viewport) 对账处理，若也计入，流式热
-	// 路径的每个 ack 都会全量重规划（正是 memo 要消除的 ~190% CPU 模式）。由
-	// reducer 的 ack 处理器推进。
+	// 又前进"的次数（A2 第二刀后不再产生 Active-origin 交付，字段与推进逻辑待后续
+	// 清理）：这类 ack 不改变 transcript/layout/theme 指纹，却会收缩 plan 读到的
+	// skipRows，必须让 memo 与续跑游标失效，否则 transcript-origin 的重复候选会
+	// 留在 ledger 里被二次投递。由 reducer 的 ack 处理器推进。
 	finalizedActiveAckPlanVersion uint64
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
@@ -126,11 +123,8 @@ type HistoryEffectQueueState struct {
 	// （G4/C1 诊断计数；只读快照可见）。
 	ClaimedPresentationDrift uint64
 	ledger                   *HistoryCommitLedger
-	// lastPlanned* memoize the active-cell inputs from the most recent
-	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
-	// do not move any source boundary (Stable/Enqueued/Acked), resize, or
-	// reflow cannot change the planned candidate set, so the hot path skips
-	// rebuilding it entirely (rebuilding only burns CPU and allocations).
+	// lastPlanned* 是 active 铸提交 memo 的遗留字段（A2 第二刀后生产不再写入，
+	// 待后续清理删除）。
 	lastPlannedActiveEnqueuedValid bool
 	lastPlannedActiveStable        SourceRange
 	lastPlannedActiveEnqueued      SourceRange
