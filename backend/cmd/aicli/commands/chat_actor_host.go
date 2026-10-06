@@ -222,8 +222,8 @@ type localChatRuntimeHost struct {
 	// chat_actor_wait_feedback.go）。内存态：重启后重新计时即可。
 	waitFeedbackTrackerOnce sync.Once
 	waitFeedbackTracker     *supervision.WaitFeedbackTracker
-	cleanupFns        []func()
-	closeOnce         sync.Once
+	cleanupFns              []func()
+	closeOnce               sync.Once
 	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
 	//（P1-4/H12）：同一 host 构建的每个 scheduler 共用同一 limiter 实例，
 	// 使 agents.maxThreads 成为「全部 batch 合计」的上限，而不是每个 batch

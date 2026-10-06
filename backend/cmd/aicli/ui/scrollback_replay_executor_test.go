@@ -33,14 +33,13 @@ func (w *terminalSessionBlockingWriter) firstWriteIndexOf(needle []byte) int {
 	return 0
 }
 
-// TestTerminalSessionExecutorArmedReplayWaitsForInFlightDelivery pins the
-// ordering contract between the authorized destructive replay and a delivery
-// that is already crossing the writer. Arming the replay must not invalidate or
-// preempt the in-flight handoff (those bytes are already committed to the host,
-// so invalidating them would make the range permanently un-mintable), the replay
-// must run exactly once after that handoff settles, and it must consume the
-// one-shot authorization so no later interaction resets native scrollback again.
-func TestTerminalSessionExecutorArmedReplayWaitsForInFlightDelivery(t *testing.T) {
+// TestTerminalSessionExecutorLoadKeepsScrollbackAppendOnly pins the S1 contract:
+// a session load arriving while a handoff is crossing the writer must not reset
+// native scrollback, must not retire the delivery ledger, and must let the
+// in-flight delivery complete as an ordinary record. Loaded content reaches the
+// host by the ordinary ordered handoff — appended, never replayed from a cleared
+// screen.
+func TestTerminalSessionExecutorLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	var executor *TerminalSessionExecutor
 	controller := newHistoryExecutorController(t, func(effect Effect) {
 		if executor != nil {
@@ -48,7 +47,8 @@ func TestTerminalSessionExecutorArmedReplayWaitsForInFlightDelivery(t *testing.T
 		}
 	})
 	writer := newTerminalSessionBlockingWriter()
-	executor = NewTerminalSessionExecutor(controller, NewTerminalSession(writer))
+	session := NewTerminalSession(writer)
+	executor = NewTerminalSessionExecutor(controller, session)
 	t.Cleanup(func() {
 		writer.unblock()
 		executor.Close()
@@ -66,72 +66,61 @@ func TestTerminalSessionExecutorArmedReplayWaitsForInFlightDelivery(t *testing.T
 		t.Fatalf("blocked history token = %#v cursor=%d, want claimed pending", entry, before.HistoryEffects.WriteCursor)
 	}
 
-	// A session load arms the one-shot replay while that handoff is still
-	// crossing the writer.
+	// A session load arrives while that handoff is still crossing the writer.
 	if !controller.Post(ReplaceTranscriptAction{
 		Snapshot:            scrollbackGrantSnapshot(2, "loaded session"),
 		ArmScrollbackReplay: true,
 	}) {
-		t.Fatal("post armed replacement")
+		t.Fatal("post load replacement")
 	}
 	controller.WaitIdle()
-	armed := controller.State()
-	if !armed.HistoryEffects.ScrollbackReplayArmed || !armed.HistoryEffects.ReconciliationRequired {
-		t.Fatalf("load did not arm the replay: %#v", armed.HistoryEffects)
+	loaded := controller.State()
+	if loaded.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatal("load armed a destructive replay")
 	}
-	// The replacement supersedes the delivery crossing the writer. The ledger
-	// cannot prove how many of those bytes reached the host, so it must escalate
-	// the token to the unresolved partial-write state — that escalation is
-	// precisely what the authorized replay is allowed to repair.
-	if entry := historyCommitEntry(t, armed, inflightToken); !entry.IsInvalidated() || !entry.MayHavePartiallyWritten {
-		t.Fatalf("replacement did not escalate the in-flight delivery: %#v", entry)
+	if loaded.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("load started a terminal epoch without a physical act: %d", loaded.HistoryEffects.TerminalEpoch)
+	}
+	// The in-flight record must survive the load: those bytes are already
+	// crossing the writer and append-only delivery must not re-emit them.
+	if _, ok := loaded.HistoryEffects.Entry(inflightToken); !ok {
+		t.Fatal("load retired the in-flight delivery record")
 	}
 	if writer.countWritesContaining([]byte("\x1b[3J")) != 0 {
-		t.Fatal("scrollback was replaced while the handoff was still in flight")
+		t.Fatal("scrollback was reset while the handoff was still in flight")
 	}
 
 	drainExecutorAllowingWrites(t, executor, controller, writer)
 
 	state := controller.State()
-	// The proven epoch replacement discards the superseded delivery records and
-	// replans from the loaded Scene; keeping the escalated token alive would
-	// re-emit a range whose physical outcome the reset already superseded.
-	if entry, survived := state.HistoryEffects.Entry(inflightToken); survived {
-		t.Fatalf("superseded delivery survived the proven replacement epoch: %#v", entry)
+	if _, ok := state.HistoryEffects.Entry(inflightToken); !ok {
+		t.Fatalf("in-flight delivery record disappeared after the load: %#v", state.HistoryEffects)
 	}
 	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("the authorized replay did not consume the one-shot grant")
+		t.Fatal("load left a destructive authorization armed")
 	}
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
-		t.Fatalf("authorized replay left an obligation: %#v", state.HistoryEffects)
+		t.Fatalf("load left an obligation: %#v", state.HistoryEffects)
 	}
-	if state.HistoryEffects.TerminalEpoch == 0 {
-		t.Fatal("authorized replay did not mint a terminal epoch")
+	if resets := writer.countWritesContaining([]byte("\x1b[3J")); resets != 0 {
+		t.Fatalf("session load wrote %d scrollback resets, want 0", resets)
 	}
-	resetIndex := writer.firstWriteIndexOf([]byte("\x1b[3J"))
-	if resetIndex == 0 {
-		t.Fatal("authorized replay never replaced native scrollback")
+	if loadIndex := writer.firstWriteIndexOf([]byte("loaded session")); loadIndex == 0 {
+		t.Fatal("loaded transcript never reached the host")
 	}
-	loadIndex := writer.firstWriteIndexOf([]byte("loaded session"))
-	if loadIndex == 0 {
-		t.Fatal("authorized replay never rendered the loaded transcript")
-	}
-	if loadIndex < resetIndex {
-		t.Fatalf("loaded transcript reached the host before the reset: load write %d, reset write %d", loadIndex, resetIndex)
-	}
-	if resets := writer.countWritesContaining([]byte("\x1b[3J")); resets != 1 {
-		t.Fatalf("authorized replay wrote %d reset transactions, want 1", resets)
+	if projection := session.ProjectionState(); projection.ScrollbackResetCount != 0 {
+		t.Fatalf("projection counted %d scrollback resets after a load: %+v", projection.ScrollbackResetCount, projection)
 	}
 
-	// The grant is one-shot: a later resize must repaint without replaying.
+	// A later resize must also repaint without replaying.
 	if !controller.Post(Resize{Width: 80, Height: 14, Generation: 9}) {
-		t.Fatal("post post-replay Resize")
+		t.Fatal("post post-load Resize")
 	}
 	controller.WaitIdle()
 	executor.Request()
 	executor.WaitIdle()
 	controller.WaitIdle()
-	if resets := writer.countWritesContaining([]byte("\x1b[3J")); resets != 1 {
-		t.Fatalf("a later interaction replayed scrollback: %d reset transactions", resets)
+	if resets := writer.countWritesContaining([]byte("\x1b[3J")); resets != 0 {
+		t.Fatalf("a later interaction reset scrollback: %d", resets)
 	}
 }

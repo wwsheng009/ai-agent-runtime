@@ -273,10 +273,9 @@ const (
 	chatHistoryLoadSettleQuiet = 2
 )
 
-// historyReplayDeliverySettled 报告收尾全量重投递是否已真正落地：scrollback
-// 授权已被消费、投影已知、队列未冻结且没有未完成提交。只读 controller 的廉价
-// 诊断投影（不克隆 ledger）；调用方不得持有 coordinator.mu，本函数会取 controller
-// 的锁，与 actor 内回调互锁。
+// historyReplayDeliverySettled 报告装载内容是否已真正全部落地：投影已知、
+// 队列未冻结且没有未完成提交。只读 controller 的廉价诊断投影（不克隆 ledger）；
+// 调用方不得持有 coordinator.mu，本函数会取 controller 的锁，与 actor 内回调互锁。
 func (c *chatInteractionCoordinator) historyReplayDeliverySettled() bool {
 	actor := c.currentUIActor()
 	if actor == nil {

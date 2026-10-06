@@ -10,14 +10,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
-// 需求：/resume（ReplaceTranscriptAction + ArmScrollbackReplay）的销毁式重放必须把
-// 常驻历史区重新填满。这是 live 事故 session_20260919224618_bXDmrK6x 的固化：
-// 进程在启动恢复时正常交付了整份 transcript（append_count=8793），随后一次 armed
-// replay 执行了 \x1b[3J，但重放没有再投递任何行，于是历史区永久空白
-// （projection.history_rows=0 / history_known=true / pending=0，且执行器空闲）。
-//
-// 该测试断言的是物理结果，而不是"计划里有内容"：reset 之后必须真的写出 transcript。
-func TestArmedResumeReplayRepopulatesResidentHistory(t *testing.T) {
+// P2 replay 切片 S1：/resume（ReplaceTranscriptAction + ArmScrollbackReplay）不再
+// 清屏重放。装载内容是 append-only 的：
+//  1. 同一修订（同身份）重复装载不得再追加任何字节（delivery ledger 去重）；
+//  2. 新修订只追加修正（新身份追加，旧行物理保留）；
+//  3. 全路径不写 \x1b[3J，ScrollbackResetCount 恒 0，语义 epoch 不因装载推进。
+func TestResumeLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	const width, height = 72, 12
 	markers := make([]string, 30)
 	for index := range markers {
@@ -87,36 +85,58 @@ func TestArmedResumeReplayRepopulatesResidentHistory(t *testing.T) {
 	if rows := session.ProjectionState().HistoryRows; rows == 0 {
 		t.Fatalf("normal transcript delivery left no resident history rows: %+v", session.ProjectionState())
 	}
+	afterPhase1 := physical.Len()
+	markerCount1 := strings.Count(physical.String(), markers[0])
+	if markerCount1 == 0 {
+		t.Fatal("fixture never delivered the loaded cell")
+	}
 
-	// 阶段 2：/resume —— 同一份 transcript 以 armed replay 重新装载。
+	// 阶段 2：/resume 同一修订（no-op 安装 + 重证明）—— 同身份内容不得重复追加。
 	post(ReplaceTranscriptAction{
-		Snapshot:            regressionCommittedSnapshot(2, cell(2)),
+		Snapshot:            regressionCommittedSnapshot(1, cell(1)),
 		ArmScrollbackReplay: true,
 	})
 	converge()
 
 	state := controller.State()
 	projection := session.ProjectionState()
-	if projection.ScrollbackResetCount != 1 {
-		t.Fatalf("armed resume performed %d scrollback replacements, want exactly one: %+v",
-			projection.ScrollbackResetCount, projection)
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("resume advanced the semantic epoch without a physical act: %#v", state.HistoryEffects)
 	}
-	if state.HistoryEffects.TerminalEpoch == 0 {
-		t.Fatalf("armed resume did not open a fresh terminal epoch: %#v", state.HistoryEffects)
+	if projection.ScrollbackResetCount != 0 {
+		t.Fatalf("resume reset scrollback %d times, want 0: %+v", projection.ScrollbackResetCount, projection)
 	}
-	raw := physical.String()
-	reset := strings.LastIndex(raw, "\x1b[3J")
-	if reset < 0 {
-		t.Fatal("armed resume never physically replaced scrollback")
+	if strings.Contains(physical.String(), "\x1b[3J") {
+		t.Fatal("resume wrote a scrollback reset sequence")
 	}
-	replayed := raw[reset:]
-	if !strings.Contains(replayed, markers[0]) || !strings.Contains(replayed, markers[len(markers)-1]) {
-		t.Fatalf("scrollback replacement was not followed by a transcript replay: %q", replayed)
+	if physical.Len() < afterPhase1 {
+		t.Fatal("physical output shrank across a resume")
 	}
-	if projection.HistoryRows == 0 {
-		t.Fatalf("resident history region is empty after the armed replay: %+v", projection)
+	if count := strings.Count(physical.String(), markers[0]); count != markerCount1 {
+		t.Fatalf("reloading the same revision re-emitted the cell: marker count %d -> %d (append-only dedup)",
+			markerCount1, count)
 	}
-	if !projection.HistoryKnown {
-		t.Fatalf("armed replay did not prove the history projection: %+v", projection)
+	if projection.HistoryRows == 0 || !projection.HistoryKnown {
+		t.Fatalf("resume left the history projection unpopulated: %+v", projection)
+	}
+
+	// 阶段 3：/resume 新修订（内容修正）—— 只追加，不清屏。
+	post(ReplaceTranscriptAction{
+		Snapshot:            regressionCommittedSnapshot(2, cell(2)),
+		ArmScrollbackReplay: true,
+	})
+	converge()
+
+	if resets := session.ProjectionState().ScrollbackResetCount; resets != 0 {
+		t.Fatalf("corrected resume reset scrollback %d times, want 0", resets)
+	}
+	if strings.Contains(physical.String(), "\x1b[3J") {
+		t.Fatal("corrected resume wrote a scrollback reset sequence")
+	}
+	if count := strings.Count(physical.String(), markers[0]); count <= markerCount1 {
+		t.Fatalf("new revision was not appended after the load: marker count %d -> %d", markerCount1, count)
+	}
+	if projection := session.ProjectionState(); projection.HistoryRows == 0 || !projection.HistoryKnown {
+		t.Fatalf("corrected resume left the history projection unpopulated: %+v", projection)
 	}
 }

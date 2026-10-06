@@ -39,8 +39,8 @@ func TestResizeReplansTranscriptInstalledBeforeGeometry(t *testing.T) {
 	if got := len(state.HistoryEffects.Entries()); got != 0 {
 		t.Fatalf("precondition: geometry-free load planned %d entries, want 0", got)
 	}
-	if !state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("precondition: session load did not arm the one-shot replay authorization")
+	if state.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatal("precondition: session load armed a destructive replay; native scrollback is append-only")
 	}
 
 	state = reduceUIControllerState(state, Resize{Width: 100, Height: 30, Generation: 1}, 2)

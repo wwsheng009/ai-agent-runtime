@@ -46,18 +46,23 @@ func uiActorStateForGrantTest(t *testing.T, coordinator *chatInteractionCoordina
 	return actor.State()
 }
 
-func TestSessionLoadGrantsScrollbackReplayInReplacementAction(t *testing.T) {
+// TestSessionLoadNeverArmsDestructiveReplay：装载（含空会话）仍然发布 replacement
+// snapshot 并触发从源重证明，但绝不授权销毁式重放 —— native scrollback append-only。
+func TestSessionLoadNeverArmsDestructiveReplay(t *testing.T) {
 	bridge, coordinator := scrollbackReplayGrantHarness(t)
 	// start() is the /resume, --session and startup-restore entry point. The
 	// event log intentionally does not exist here, which also pins that an empty
-	// session load still publishes a replacement snapshot carrying the grant.
+	// session load still publishes its replacement snapshot.
 	bridge.start()
 	coordinator.waitUIActorIdle()
 
 	state := uiActorStateForGrantTest(t, coordinator)
-	if !state.HistoryEffects.ScrollbackReplayArmed || !state.HistoryEffects.ReconciliationRequired {
-		t.Fatalf("session load armed=%t reconciliationRequired=%t, want both true",
-			state.HistoryEffects.ScrollbackReplayArmed, state.HistoryEffects.ReconciliationRequired)
+	if state.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatal("session load armed a destructive scrollback replay")
+	}
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("session load advanced the terminal epoch without a physical act: %d",
+			state.HistoryEffects.TerminalEpoch)
 	}
 }
 
@@ -75,15 +80,18 @@ func TestNonLoadReplayDoesNotGrantScrollbackReplay(t *testing.T) {
 	}
 }
 
-// TestCanonicalHistorySeedArmsReplayOnlyForImportedUnits pins the canonical-seed
-// arm policy — the second and last producer of the one-shot replay
-// authorization. Importing canonical units the Scene does not have replaces the
-// physical projection, so it authorizes exactly one replay; re-presenting the
-// same canonical history (/history, resume presentation requested twice) imports
-// nothing and must leave a spent grant spent, so no normal interaction can
-// re-arm a scrollback replay.
-func TestCanonicalHistorySeedArmsReplayOnlyForImportedUnits(t *testing.T) {
+// TestCanonicalHistorySeedReProvesOnlyForImportedUnits pins the canonical-seed
+// policy: importing canonical units the Scene does not have publishes a load
+// replacement (re-proof from source, appended by the ordinary handoff);
+// re-presenting the same canonical history (/history, resume presentation
+// requested twice) imports nothing and publishes no replacement; no seed ever
+// arms a destructive scrollback replay.
+func TestCanonicalHistorySeedReProvesOnlyForImportedUnits(t *testing.T) {
 	bridge, coordinator := scrollbackReplayGrantHarness(t)
+	if !coordinator.postUIAction(ui.Resize{Width: 80, Height: 24, Generation: 1}) {
+		t.Fatal("post resize")
+	}
+	coordinator.waitUIActorIdle()
 	history := []runtimetypes.Message{
 		*runtimetypes.NewUserMessage("查看 docs"),
 		*runtimetypes.NewAssistantMessage("目录里有 README。"),
@@ -92,58 +100,38 @@ func TestCanonicalHistorySeedArmsReplayOnlyForImportedUnits(t *testing.T) {
 	bridge.seedPersistedHistory(history, "已加载历史会话")
 	coordinator.waitUIActorIdle()
 	state := uiActorStateForGrantTest(t, coordinator)
-	if !state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("importing canonical history did not authorize the one-shot replay")
-	}
-
-	// Consume the grant the way the terminal owner does after a proven scrollback
-	// replacement: a newer terminal epoch that starts a fresh delivery ledger.
-	if !coordinator.postUIAction(ui.HistoryScrollbackReconciled{
-		LayoutGeneration: state.Geometry.Generation,
-		TerminalEpoch:    state.HistoryEffects.TerminalEpoch + 1,
-	}) {
-		t.Fatal("post scrollback reconciliation")
-	}
-	coordinator.waitUIActorIdle()
-	state = uiActorStateForGrantTest(t, coordinator)
 	if state.HistoryEffects.ScrollbackReplayArmed {
-		// P1.2 B3：异步规划下屏障可能先于 presenter 的 source-backed 恢复帧
-		// 落地。设计上的收敛路径是"本次无法锚定的替换记录 proven epoch，等恢复
-		// 帧到达再消费"（见 HistoryScrollbackReconciled 的 else 分支）。
-		if state.HistoryEffects.ProvenScrollbackEpoch == 0 {
-			t.Fatalf("未锚定的替换必须记录 proven epoch：%+v", state.HistoryEffects)
-		}
-		if !coordinator.postUIAction(ui.HistoryProjectionRecovered{LayoutGeneration: state.Geometry.Generation}) {
-			t.Fatal("post projection recovered")
-		}
-		coordinator.waitUIActorIdle()
-		state = uiActorStateForGrantTest(t, coordinator)
+		t.Fatal("canonical seed armed a destructive replay")
 	}
-	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatalf("proven scrollback replacement did not consume the grant: armed=%t epoch=%d provenEpoch=%d frozen=%t projectionUnknown=%t reconciliationRequired=%t lease=%t",
-			state.HistoryEffects.ScrollbackReplayArmed, state.HistoryEffects.TerminalEpoch,
-			state.HistoryEffects.ProvenScrollbackEpoch, state.HistoryEffects.Frozen,
-			state.HistoryEffects.ProjectionUnknown, state.HistoryEffects.ReconciliationRequired,
-			state.Lease.Active)
+	firstEntries := len(state.HistoryEffects.Entries())
+	if firstEntries == 0 {
+		t.Fatalf("canonical seed planned no delivery: %#v", state.HistoryEffects)
 	}
 
 	// Same canonical history again: every unit is already seeded and matched, so
-	// no replacement snapshot is published and the consumed grant stays consumed.
+	// no replacement snapshot is published and nothing is re-planned.
 	bridge.seedPersistedHistory(history, "已加载历史会话")
 	coordinator.waitUIActorIdle()
-	if state = uiActorStateForGrantTest(t, coordinator); state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("re-presenting the same canonical history re-armed a consumed replay grant")
+	state = uiActorStateForGrantTest(t, coordinator)
+	if state.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatal("re-presenting the same canonical history armed a replay")
+	}
+	if got := len(state.HistoryEffects.Entries()); got != firstEntries {
+		t.Fatalf("re-presenting the same canonical history re-planned %d entries (want %d)", got, firstEntries)
 	}
 
 	// A genuinely new canonical unit is a replacement again (log-loss gap fill or
-	// a canonical rewrite): the imported unit invalidates the shown projection, so
-	// the seed authorizes one more replay. Pinned deliberately — narrowing this
-	// would let stale rows survive a canonical rewrite.
+	// a canonical rewrite): the imported unit must be planned for append-only
+	// delivery.
 	grown := append(append([]runtimetypes.Message{}, history...), *runtimetypes.NewAssistantMessage("补充说明"))
 	bridge.seedPersistedHistory(grown, "已加载历史会话")
 	coordinator.waitUIActorIdle()
-	if state = uiActorStateForGrantTest(t, coordinator); !state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("importing a new canonical unit did not authorize a replacement replay")
+	state = uiActorStateForGrantTest(t, coordinator)
+	if state.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatal("growing canonical history armed a destructive replay")
+	}
+	if got := len(state.HistoryEffects.Entries()); got <= firstEntries {
+		t.Fatalf("new canonical unit was not planned: entries %d -> %d", firstEntries, got)
 	}
 }
 

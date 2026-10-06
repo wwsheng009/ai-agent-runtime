@@ -16,10 +16,10 @@ import (
 // sessionInteractionReplacementSnapshot). Planning is geometry-gated, so when
 // that replacement snapshot reaches the reducer before the first applied
 // resize, the load mints no history commit at all: the ledger stays empty
-// (pending=0 in-flight=0 acked=0) while the one-shot scrollback replay
-// authorization is already armed. Rebasing pending payloads on the next resize
-// cannot recreate a plan that was never made, so the body stayed blank no
-// matter how often the user resized the terminal.
+// (pending=0 in-flight=0 acked=0). The load marker only forces a re-proof on
+// the next plan input change; rebasing pending payloads cannot recreate a plan
+// that was never made, so the first geometry arrival must re-derive it or the
+// body stays blank no matter how often the user resized the terminal.
 func TestSessionLoadBeforeGeometryStillDeliversTranscript(t *testing.T) {
 	bridge, coordinator := scrollbackReplayGrantHarness(t)
 
@@ -34,8 +34,8 @@ func TestSessionLoadBeforeGeometryStillDeliversTranscript(t *testing.T) {
 	if len(loaded.Transcript.Cells) == 0 {
 		t.Fatal("load seeded no transcript cells")
 	}
-	if !loaded.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("load did not arm the one-shot scrollback replay authorization")
+	if loaded.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatal("load armed a destructive scrollback replay")
 	}
 	if len(loaded.HistoryEffects.Entries()) != 0 {
 		t.Fatalf("precondition: geometry-free load planned %d entries, want 0",

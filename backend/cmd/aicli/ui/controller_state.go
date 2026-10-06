@@ -466,28 +466,16 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ReplaceTranscriptAction:
-		// A session load authorizes exactly one replay and is itself the reason
-		// the obligation exists: the loaded Scene is a fresh semantic source
-		// that must replace whatever the terminal shows. The authorization is
-		// granted here, in the same reduction that installs the Scene it
-		// authorizes, and deliberately before the no-op check below: a
-		// replacement snapshot that is already installed still requests the
-		// replay. An executor can therefore never observe an armed grant against
-		// the pre-replacement Scene, which would spend the one shot on stale
-		// content and leave the loaded generation unreplayed. Raising the
-		// obligation here (instead of waiting for an invalidating replacement)
-		// makes the one-shot replay happen even when the loaded session had no
-		// previously acknowledged range to invalidate.
+		// A session load re-proves the plan from source rather than trusting a
+		// memo. The delivery ledger and the semantic epoch are deliberately
+		// untouched: native scrollback is append-only, so records for content
+		// that is still part of the transcript remain authoritative and
+		// re-emitting them would duplicate rows. A replacement that invalidates
+		// acknowledged history is detected below and resolved by the
+		// non-destructive settle transaction — never by clearing scrollback.
+		// The re-proof happens before the no-op check below: a replacement
+		// snapshot that is already installed must still be replanned.
 		if a.ArmScrollbackReplay {
-			state.HistoryEffects.armScrollbackReplay()
-			state.HistoryEffects.ReconciliationRequired = true
-			// The grant authorizes a destructive physical replacement, so the
-			// plan that follows must be re-proved from source rather than
-			// trusted to a memo: the install below is a no-op whenever the
-			// Scene was already published (RuntimeEvent republishes the
-			// authoritative snapshot even with an empty ChangeSet), and a
-			// no-op leaves every memoized plan input unchanged — the replay
-			// would then clear native scrollback with nothing to write back.
 			state.HistoryEffects.invalidateTranscriptPlanMemo()
 		}
 		// RuntimeEvent currently publishes the authoritative Scene snapshot even

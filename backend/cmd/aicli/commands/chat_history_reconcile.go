@@ -64,19 +64,17 @@ func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Me
 
 // seedPersistedHistoryForSessionLoad is the session-load variant of
 // seedPersistedHistory (/resume, /load, startup restore). It differs in exactly
-// one way: the armed replacement is published even when this call imported no
-// new unit, because the one-shot replay authorization belongs to the load, not
-// to the delta.
+// one way: the load replacement is published even when this call imported no
+// new unit, because the load must re-prove the plan from source (ArmScrollbackReplay
+// is a load marker, not a delta) and a no-op install would otherwise be skipped.
 //
 // Startup replays the runtime event log into the Scene before canonical history
 // is seeded, so a session whose log already covers the conversation reconciles
-// with seeded=false while native scrollback still belongs to the previous
-// process (usually nothing but the shell line that launched aicli). Skipping the
-// replacement there leaves the terminal owner without the loaded generation:
-// the Scene is correct, the resident native scrollback is not, and the user can
-// only see the viewport tail — the session looks unrecoverable even though every
-// message was loaded. Regular Scene updates must keep using seedPersistedHistory
-// so resize/stream/theme traffic can never mint a destructive replay.
+// with seeded=false. Skipping the replacement there would leave the loaded
+// generation unreplanned (memo over a stale plan), so the terminal owner would
+// never append the loaded content. Regular Scene updates must keep using
+// seedPersistedHistory so resize/stream/theme traffic can never trigger a load
+// re-proof or a scrollback act.
 func (b *chatRuntimeEventBridge) seedPersistedHistoryForSessionLoad(messages []runtimetypes.Message, header string) {
 	b.seedPersistedHistoryWithLoadGrant(messages, header, true)
 }
@@ -103,19 +101,20 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryWithLoadGrant(
 		return
 	}
 	// 会话加载（/resume、/load、启动恢复，以及首次装配 canonical 历史的
-	// /history）在这里请求一次 scrollback 替换：canonical 历史刚装配进 Scene，
-	// 这个 replacement snapshot 本身就是授权的携带者（ArmScrollbackReplay
-	// 字段），与它授权的 Scene 在同一 action 内原子进入 reducer。reducer 对
-	// “快照已安装”的替换同样会授予授权（见 controller_state.go 的
-	// ReplaceTranscriptAction 分支），因此即使本次没有新增 unit，装载好的
-	// 生成仍然会替换原生 scrollback。正常交互（resize/流式增量/主题切换/写入
-	// 恢复）走上面的提前返回，永远拿不到重放授权。
+	// /history）在这里发布装载替换：canonical 历史刚装配进 Scene，这个
+	// replacement snapshot 携带装载标记（ArmScrollbackReplay），与它应用的
+	// Scene 在同一 action 内原子进入 reducer。reducer 对"快照已安装"的替换
+	// 同样会从源重证明（见 controller_state.go 的 ReplaceTranscriptAction
+	// 分支），因此即使本次没有新增 unit，装载好的生成仍然会被重新规划。
+	// native scrollback 是 append-only：装载不清屏，内容按序追加。正常交互
+	// （resize/流式增量/主题切换/写入恢复）走上面的提前返回，永远不会触发装载
+	// 重证明。
 	b.sessionInteractionReplacementSnapshot()
 }
 
 // seedPersistedHistoryLocked is the render-transaction half of history seed.
-// It exists so destructive transcript replacement can rebuild the encoder and
-// Scene under the same renderMu ownership before publishing one new snapshot.
+// It exists so a transcript replacement can rebuild the encoder and Scene under
+// the same renderMu ownership before publishing one new snapshot.
 func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHistorySeedUnit, header string) bool {
 	if b == nil || b.renderEncoder == nil ||
 		(len(units) == 0 && strings.TrimSpace(header) == "") {
@@ -419,10 +418,12 @@ func persistedHistoryPageScope(messages []runtimetypes.Message) string {
 
 // replaceCanonicalHistoryProjection rebuilds the owned transcript from the
 // post-mutation canonical history. Backtrack removes durable conversation
-// content, so append-only reconciliation is incorrect: old Scene cells must
-// disappear before the surviving canonical cells and follow-up command result
-// are committed. The caller has already completed the domain mutation and no
-// active model run may be rendering into this bridge.
+// content from the Scene: the surviving canonical cells must replace the old
+// projection before the follow-up command result is committed. Native
+// scrollback is append-only, so the physical rows already delivered stay; the
+// corrected projection is appended (只追加修正). The caller has already
+// completed the domain mutation and no active model run may be rendering into
+// this bridge.
 //
 // The history-reset marker is persisted in the runtime event log. On a later
 // startup replay it discards pre-backtrack event rows before reseeding this
@@ -441,10 +442,9 @@ func (b *chatRuntimeEventBridge) replaceCanonicalHistoryProjection(messages []ru
 	b.seedPersistedHistoryLocked(units, header)
 	b.appendHistoryResetLog(messages, header)
 	b.renderMu.Unlock()
-	// 显式 canonical 历史重写（/backtrack、截断、会话加载回放）同样只授权一次
-	// 全量重放：旧 Scene 的物理行必须先被替换，再按新 canonical 顺序重建。
-	// 授权随 replacement snapshot 一起发布，执行器不可能再用替换前的 Scene
-	// 组合出破坏性事务。
+	// 显式 canonical 历史重写（/backtrack、截断、会话加载回放）同样随
+	// replacement snapshot 发布装载标记：新 canonical 顺序从源重证明，已交付
+	// 的物理行保留（append-only），新身份内容按序追加。
 	b.sessionInteractionReplacementSnapshot()
 	return true
 }

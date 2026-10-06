@@ -1157,20 +1157,13 @@ func terminalSessionSnapshotRecoveryActionable(snapshot terminalSessionControlle
 // terminalHistoryRecoveryPlan selects the physical transaction that resolves an
 // outstanding history obligation (projectionUnknown or reconciliationRequired).
 //
-// Only an explicit reducer-armed authorization may replace native scrollback and
-// replay history: a session load (/resume, /load, startup restore) requests it
-// inside the replacement snapshot it publishes, so the grant is installed by the
-// same reduction that installs the Scene it authorizes and is consumed by
-// exactly one reset+reconcile. Every other
-// obligation — a failed or partially written handoff, an invalidated in-flight
-// token, a resize or theme change that raced a claim — is settled
-// non-destructively: the visible frame is repainted from semantic source and the
-// unprovable resident range is quarantined in place. Already delivered rows are
-// never re-emitted, and no normal interaction clears native scrollback.
+// Recovery is always non-destructive: the visible frame is repainted from
+// semantic source and the unprovable resident range is quarantined in place.
+// Native scrollback is append-only, so no interaction — including a session
+// load (/resume, /load, startup restore) — clears it; loaded content is
+// appended after the last proven row by the ordinary ordered handoff. Already
+// delivered rows are never re-emitted.
 func terminalHistoryRecoveryPlan(snapshot terminalSessionControllerSnapshot) TerminalTransactionPlan {
-	if snapshot.scrollbackReplayArmed {
-		return composeTerminalViewportScrollbackReconciliationPlan(snapshot.appState)
-	}
 	plan := composeTerminalViewportTransactionPlan(snapshot.appState, nil)
 	plan.SettleHistoryProjection = true
 	return plan

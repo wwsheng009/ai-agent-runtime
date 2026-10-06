@@ -929,12 +929,12 @@ func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridge(bridge *ch
 }
 
 // postReplacementTranscriptSnapshotFromBridge publishes a canonical-history
-// replacement snapshot and requests the one-shot scrollback-replay
-// authorization inside the same action. Session load (/resume, /load, startup
-// restore), canonical history seed and /backtrack use it instead of
-// postTranscriptSnapshotFromBridge so the grant and the Scene it authorizes
-// reach the reducer together: the executor can never compose a destructive
-// replay plan from the pre-replacement Scene.
+// replacement snapshot and carries the load marker (ArmScrollbackReplay) inside
+// the same action. Session load (/resume, /load, startup restore), canonical
+// history seed and /backtrack use it instead of postTranscriptSnapshotFromBridge
+// so the marker and the Scene it applies to reach the reducer together: the
+// load re-proof always runs against the replacement Scene, never the retired
+// one. Native scrollback is append-only; no load clears it.
 func (c *chatInteractionCoordinator) postReplacementTranscriptSnapshotFromBridge(bridge *chatRuntimeEventBridge) {
 	c.postTranscriptSnapshotFromBridgeWithReplayAuthorization(bridge, true)
 }
