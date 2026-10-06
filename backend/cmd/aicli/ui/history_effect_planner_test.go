@@ -802,8 +802,72 @@ func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
 	byID := transcriptCellsByID(state.Transcript)
 	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(1), byID, nil, 80, style.ThemeContext{})
 	acked := indexAckedActiveHistoryCommits(state.HistoryEffects)
-	if matched := activeAckedRenderedPrefixRows(acked, 1, rows, byID); matched == 0 {
-		t.Fatalf("BUG: acked handoff rows do not match finalize rows — whole cell re-committed (duplicate reasoning)")
+	if matched, proved := activeAckedRenderedPrefixRows(acked, 1, rows, byID); !proved || matched == 0 {
+		t.Fatalf("BUG: acked handoff rows do not match finalize rows — whole cell re-committed (duplicate reasoning) (matched=%d proved=%v)", matched, proved)
+	}
+}
+
+// TestActiveAckedRenderedPrefixRowsNoPrefixIsProvedZero pins G5/C2: a cell with
+// no delivered active prefix reports (0, true) — "nothing to skip" is provable
+// and keeps the whole-cell fallback eligible.
+func TestActiveAckedRenderedPrefixRowsNoPrefixIsProvedZero(t *testing.T) {
+	state := AppState{
+		Geometry: GeometryState{Width: 80, Height: 12, Generation: 1},
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
+			{ID: 7, Sequence: 1, Revision: 2, Kind: scene.KindAssistant, Source: "hello world\n", Phase: scene.CellCommitted},
+		}}),
+		HistoryEffects: HistoryEffectQueueState{ledger: NewHistoryCommitLedger()},
+	}
+	byID := transcriptCellsByID(state.Transcript)
+	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(1), byID, nil, 80, style.ThemeContext{})
+	acked := indexAckedActiveHistoryCommits(state.HistoryEffects)
+	matched, proved := activeAckedRenderedPrefixRows(acked, 7, rows, byID)
+	if matched != 0 || !proved {
+		t.Fatalf("no-prefix case = (%d, %v), want (0, true)", matched, proved)
+	}
+}
+
+// TestActiveAckedRenderedPrefixRowsDivergentRowsAreUnproved pins G5/C2: when a
+// delivered active prefix exists but the current rows diverge from it, the
+// result is (0, false) — distinct from the no-prefix case so callers can close
+// the whole-cell fallback and let finalize/ProjectionUnknown converge.
+func TestActiveAckedRenderedPrefixRowsDivergentRowsAreUnproved(t *testing.T) {
+	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
+	source := "first line\nsecond line\nthird line\n"
+	commit := HistoryCommit{
+		Token:            1,
+		Origin:           HistoryCommitActive,
+		CellID:           9,
+		Revision:         1,
+		SourceRange:      SourceRange{Start: 0, End: len(source)},
+		DisplayRange:     DisplayRange{Start: 0, End: 3},
+		LayoutGeneration: 1,
+		Lines: []render.Line{
+			{Spans: []render.Span{{Text: "first line"}}},
+			{Spans: []render.Span{{Text: "second line"}}},
+			{Spans: []render.Span{{Text: "third line"}}},
+		},
+	}
+	ledger := NewHistoryCommitLedger()
+	if err := ledger.Enqueue(commit); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := ledger.Ack(commit.Token, 1, 1); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	state := AppState{
+		Geometry: geometry,
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
+			{ID: 9, Sequence: 1, Revision: 2, Kind: scene.KindAssistant, Source: "completely different\nrows here\n", Phase: scene.CellCommitted},
+		}}),
+		HistoryEffects: HistoryEffectQueueState{ledger: ledger},
+	}
+	byID := transcriptCellsByID(state.Transcript)
+	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(1), byID, nil, 80, style.ThemeContext{})
+	acked := indexAckedActiveHistoryCommits(state.HistoryEffects)
+	matched, proved := activeAckedRenderedPrefixRows(acked, 9, rows, byID)
+	if matched != 0 || proved {
+		t.Fatalf("divergent-prefix case = (%d, %v), want (0, false)", matched, proved)
 	}
 }
 

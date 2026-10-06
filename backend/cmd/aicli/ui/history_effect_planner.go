@@ -215,18 +215,20 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 		cell, found := snap.byID[cellID]
 		_, beforeFrontier := frontierCells[cellID]
 		if found && beforeFrontier && cellIsFinalizedForHistory(cell) && cell.Source != "" {
-			skipRows := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], snap.byID)
+			skipRows, prefixProved := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], snap.byID)
 			if cellUsesStructuredPresentation(cell) {
 				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, snap.generation, snap.byID, settled)...)
 			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, snap.width, themeFingerprint(snap.theme), snap.generation, snap.byID, settled); mapped {
 				commits = append(commits, segments...)
-			} else if skipRows == 0 && end <= firstVisible {
+			} else if skipRows == 0 && prefixProved && end <= firstVisible {
 				// whole-cell fallback（控制符/tab 等无法逐行映射的 plain cell）的
 				// 判据是"cell 完整包含在窗口内"，不再是"整份 transcript 已走完"：
 				// 截断窗口只含完整 cell，而游标续跑后前缀不会再被完整 pass 访问 ——
 				// 继续要求 complete 会让这些行永久缺失。窗口内 wholeCell 的身份（整
 				// SourceRange / fragment 0 / 全局 DisplayRange）与完整 pass 完全一致，
 				// 入队去重后不会重复投递。
+				// G5/C2：仅当"零前缀"可证（prefixProved）时才允许 whole-cell 兜底；
+				// 已交付前缀不等价（proved=false）必须交给 finalize 收敛，不得重铸。
 				if commit, ok := wholeCellHistoryCommit(cell, rows[start:end], displayStart+start, displayStart+end, snap.generation, snap.byID, settled); ok {
 					commits = append(commits, commit)
 				}
@@ -332,9 +334,13 @@ func canonicalHistoryCommitFrontier(state AppState) (map[scene.CellID]struct{}, 
 // crossed the terminal while the same cell was mutable. History planning uses
 // the retained structured payload, not text hashes, and only accepts a
 // contiguous source prefix whose lines still match the finalized projection.
-func activeAckedRenderedPrefixRows(index ackedActiveHistoryCommitIndex, cellID scene.CellID, rows []AppScreenRow, byID map[scene.CellID]scene.TranscriptCell) int {
+//
+// 返回值 (rows, proved)（G5/C2）：proved=false 表示**存在**已交付前缀但当前行
+// 不等价（前缀证明失败），不再与"无前缀"混用同一个 0。调用方据此关闭
+// whole-cell 兜底，交由 finalize/ProjectionUnknown 收敛，而不是把整 cell 重铸。
+func activeAckedRenderedPrefixRows(index ackedActiveHistoryCommitIndex, cellID scene.CellID, rows []AppScreenRow, byID map[scene.CellID]scene.TranscriptCell) (int, bool) {
 	if index.ledger == nil {
-		return 0
+		return 0, true
 	}
 	frontier, matched, rowIndex := 0, 0, 0
 	for _, token := range index.ledger.activeTokensByCell[cellID] {
@@ -354,16 +360,16 @@ func activeAckedRenderedPrefixRows(index ackedActiveHistoryCommitIndex, cellID s
 				rowIndex++
 			}
 			if rowIndex >= len(rows) || !historyRenderLineEquivalent(line, appTranscriptRenderLine(rows[rowIndex], byID)) {
-				return 0
+				return 0, false
 			}
 			matched++
 			rowIndex++
 		}
 	}
 	if frontier == 0 || matched == 0 {
-		return 0
+		return 0, true
 	}
-	return matched
+	return matched, true
 }
 
 func historyRenderLineEquivalent(left, right render.Line) bool {
