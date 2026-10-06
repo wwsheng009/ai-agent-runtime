@@ -12,9 +12,9 @@ import (
 
 func composeFixtureState() AppState {
 	return AppState{
-		Revision:         41,
-		Geometry:         GeometryState{Width: 80, Height: 24, Generation: 9},
-		Lease:            LeaseState{ID: 7, Active: true},
+		Revision: 41,
+		Geometry: GeometryState{Width: 80, Height: 24, Generation: 9},
+		Lease:    LeaseState{ID: 7, Active: true},
 		Transcript: NewTranscriptState(&scene.Snapshot{
 			Revision: 12,
 			Cells: []*scene.TranscriptCell{

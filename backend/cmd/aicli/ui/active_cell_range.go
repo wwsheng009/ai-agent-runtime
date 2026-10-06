@@ -186,10 +186,8 @@ func reduceActiveCellUpdate(state *UIControllerState, action UpdateActiveCellAct
 		next.Enqueued = next.Acked
 		next.Stable = SourceRange{}
 		// Content was replaced, not appended: old byte offsets no longer
-		// identify the same semantic content. Invalidate the planner fast-path
-		// memo so the next sync re-plans even if the boundary keys happen to
-		// coincide (e.g. equal-length replacement with an empty frontier).
-		state.HistoryEffects.lastPlannedActiveEnqueuedValid = false
+		// identify the same semantic content. A2 第二刀后 active 不再单独规划，
+		// transcript 计划不读 active 边界，无需额外失效。
 	} else if !next.StreamingRangesKnown() && current.StreamingRangesKnown() { // A producer may omit ranges only for a Scene-derived snapshot. An
 		// active update cannot erase a known queued-but-unacked range.
 		return ErrInvalidActiveCellRanges

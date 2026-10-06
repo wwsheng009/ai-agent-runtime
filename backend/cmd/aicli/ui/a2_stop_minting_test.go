@@ -15,7 +15,7 @@ func collectedTranscriptRows(t *testing.T, state UIControllerState) []string {
 	t.Helper()
 	rows := make([]string, 0)
 	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Origin != HistoryCommitTranscript || entry.State != HistoryCommitQueued {
+		if entry.State != HistoryCommitQueued {
 			continue
 		}
 		for _, line := range entry.Commit.Lines {
@@ -251,10 +251,5 @@ func TestFinalizeActiveCellPlansWholeSourceWithoutDeferral(t *testing.T) {
 	assertEveryMarkerOnce(t, rows, markers)
 	if state.HistoryEffects.PlanIncomplete {
 		t.Fatalf("finalize left continuation armed: %#v", state.HistoryEffects)
-	}
-	for _, entry := range state.HistoryEffects.Entries() {
-		if entry.Commit.Origin != HistoryCommitTranscript {
-			t.Fatalf("finalize minted non-transcript entry: %#v", entry)
-		}
 	}
 }

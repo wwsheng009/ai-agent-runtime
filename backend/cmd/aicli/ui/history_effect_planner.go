@@ -2,10 +2,8 @@ package ui
 
 import (
 	"errors"
-	"sort"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
@@ -329,207 +327,6 @@ func renderLineText(line render.Line) string {
 		text += span.Text
 	}
 	return text
-}
-
-// planMutableActiveCellHistoryCommits hands off the stable prefix of a still
-// mutable cell whose rendered body overflows the adaptive band budget.
-// The active projection keeps only the viewport tail (ProjectActiveCellBand);
-// every row above it must already have crossed the physical writer so an
-// interrupted stream never loses earlier output. Each commit maps one physical
-// row back to the exact half-open source range that produced it, mirroring
-// planPlainCellHistoryCommits. Markdown is committed as one structured stable
-// source fragment because its rendered rows are not byte-bijective.
-func planMutableActiveCellHistoryCommits(active ActiveCellState, geometry GeometryState, generation uint64) []HistoryCommit {
-	return planMutableActiveCellHistoryCommitsWithTheme(active, geometry, generation, style.ThemeContext{})
-}
-
-func planMutableActiveCellHistoryCommitsWithTheme(active ActiveCellState, geometry GeometryState, generation uint64, theme style.ThemeContext) []HistoryCommit {
-	if active.Phase != ActiveCellMutable || active.CellID == 0 || active.HistoryCommitBlocked ||
-		(active.Kind != scene.KindAssistant && active.Kind != scene.KindSupplement && active.Kind != scene.KindReasoning) || active.Source == "" ||
-		geometry.Width < 1 || geometry.Height < 1 {
-		return nil
-	}
-	if active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source) {
-		return planMutableMarkdownHistoryCommit(active, geometry, generation, theme)
-	}
-	if active.Kind == scene.KindReasoning {
-		// Every reasoning projection is structured even when its semantic body
-		// is plain text: the opening divider is derived chrome and must cross
-		// the history handoff exactly once with the first source-backed range.
-		return planMutableMarkdownHistoryCommit(active, geometry, generation, theme)
-	}
-	start := active.Acked.End
-	if start < 0 || start > len(active.Source) || !activeCellSourceBoundary(active.Source, start) {
-		return nil
-	}
-	if start == len(active.Source) {
-		return nil
-	}
-	width := geometry.Width
-	rows := activeCellBandRows(active.Source[start:], width)
-	maxRows := ActiveBandRows(geometry.Height)
-	if len(rows) <= maxRows {
-		return nil
-	}
-	firstVisible := len(rows) - maxRows
-
-	role := appTranscriptRenderRole(active.Kind)
-	lineRanges := sourceLineRanges(active.Source[start:])
-	commits := make([]HistoryCommit, 0, firstVisible)
-	displayRow := 0
-	for _, line := range lineRanges {
-		absolute := sourceLineRange{
-			Source: SourceRange{Start: line.Source.Start + start, End: line.Source.End + start},
-			Text:   line.Text,
-		}
-		if line.Text == "" {
-			// Blank lines (including the trailing newline of a streamed body)
-			// wrap to exactly one empty physical row. handle them explicitly:
-			// wrapPlainAppScreenText deliberately declines empty input.
-			if displayRow >= firstVisible {
-				break
-			}
-			if rows[displayRow] != "" {
-				return nil
-			}
-			commits = append(commits, HistoryCommit{
-				Origin:           HistoryCommitActive,
-				CellID:           active.CellID,
-				Revision:         active.Revision,
-				SourceRange:      absolute.Source,
-				DisplayRange:     DisplayRange{Start: displayRow, End: displayRow + 1},
-				LayoutGeneration: generation,
-				Lines: []render.Line{{
-					Spans: []render.Span{{Text: "", Style: render.Style{Role: string(role)}}},
-				}},
-			})
-			displayRow++
-			continue
-		}
-		wrapped, sourceRows, mapped := plainWrappedSourceRanges(absolute, width, false)
-		if !mapped || len(wrapped) == 0 || len(sourceRows) != len(wrapped) {
-			return nil
-		}
-		if displayRow >= firstVisible {
-			break
-		}
-		commitRows := len(wrapped)
-		if remaining := firstVisible - displayRow; commitRows > remaining {
-			commitRows = remaining
-		}
-		for offset, text := range wrapped[:commitRows] {
-			if rows[displayRow+offset] != text {
-				return nil
-			}
-			sourceRange := sourceRows[offset]
-			if sourceRange.End > active.Stable.End {
-				return nil
-			}
-			commits = append(commits, HistoryCommit{
-				Origin:           HistoryCommitActive,
-				CellID:           active.CellID,
-				Revision:         active.Revision,
-				SourceRange:      sourceRange,
-				DisplayRange:     DisplayRange{Start: displayRow + offset, End: displayRow + offset + 1},
-				LayoutGeneration: generation,
-				Lines: []render.Line{{
-					Spans: []render.Span{{Text: text, Style: render.Style{Role: string(role)}}},
-				}},
-			})
-		}
-		displayRow += commitRows
-		if commitRows < len(wrapped) {
-			break
-		}
-	}
-	if displayRow != firstVisible || len(commits) == 0 {
-		return nil
-	}
-	return commits
-}
-
-func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryState, generation uint64, theme style.ThemeContext) []HistoryCommit {
-	start, stableEnd := active.Acked.End, active.Stable.End
-	if start < 0 || stableEnd <= start || stableEnd > len(active.Source) ||
-		!activeCellSourceBoundary(active.Source, start) ||
-		!activeCellSourceBoundary(active.Source, stableEnd) {
-		return nil
-	}
-	highlighter := newActiveBandHighlighter()
-	// Reasoning renders derived divider rows around its semantic body, so the
-	// projector must preserve that exact shape or finalization can re-commit the
-	// whole cell and duplicate reasoning in scrollback.
-	reasoning := active.Kind == scene.KindReasoning
-	// One projector serves the whole handoff loop: prefix (source[:start]) is
-	// memoized across every candidate query and the full-source render is done
-	// once, so planning N rows costs ~N full renders instead of 2×(N+2).
-	proj := newSuffixProjector(active.Source, start, geometry.Width, theme, reasoning, highlighter)
-	live, ok := proj.live()
-	if !ok || len(live) <= ActiveBandRows(geometry.Height) {
-		return nil
-	}
-	maxCommitRows := len(live) - ActiveBandRows(geometry.Height)
-	commitEnd := active.Enqueued.End
-	// Only rows past the last enqueued boundary can be newly handed off.
-	deadline := time.Now().Add(historyCommitPlanningBudget)
-	for _, line := range sourceLineRanges(active.Source[start:stableEnd]) {
-		if time.Now().After(deadline) {
-			break
-		}
-		candidateEnd := start + line.Source.End
-		if candidateEnd <= commitEnd || candidateEnd > stableEnd {
-			continue
-		}
-		candidateLines, projected := proj.suffix(candidateEnd)
-		if !projected || len(candidateLines) == 0 {
-			continue
-		}
-		if len(candidateLines) > maxCommitRows {
-			// Rendered row count is monotonic in the source end, so later
-			// candidates can only exceed the band budget as well.
-			break
-		}
-		if !render.LinesEqual(candidateLines, live[:len(candidateLines)]) {
-			continue
-		}
-		commitEnd = candidateEnd
-	}
-	if commitEnd <= start {
-		return nil
-	}
-	boundaries := make([]int, 0, 2)
-	if active.Enqueued.End > start && active.Enqueued.End <= commitEnd {
-		boundaries = append(boundaries, active.Enqueued.End)
-	}
-	if commitEnd > active.Enqueued.End {
-		boundaries = append(boundaries, commitEnd)
-	}
-	commits := make([]HistoryCommit, 0, len(boundaries))
-	sourceStart, displayStart := start, 0
-	for _, sourceEnd := range boundaries {
-		projectedPrefix, projected := proj.suffix(sourceEnd)
-		if !projected || displayStart >= len(projectedPrefix) {
-			return nil
-		}
-		lines := cloneRenderLines(projectedPrefix[displayStart:])
-		if len(lines) == 0 || displayStart+len(lines) > len(live) ||
-			!render.LinesEqual(lines, live[displayStart:displayStart+len(lines)]) {
-			return nil
-		}
-		commits = append(commits, HistoryCommit{
-			Origin:           HistoryCommitActive,
-			CellID:           active.CellID,
-			Revision:         active.Revision,
-			SourceRange:      SourceRange{Start: sourceStart, End: sourceEnd},
-			FragmentID:       uint64(sourceStart) + 1,
-			DisplayRange:     DisplayRange{Start: displayStart, End: displayStart + len(lines)},
-			LayoutGeneration: generation,
-			Lines:            lines,
-		})
-		sourceStart = sourceEnd
-		displayStart += len(lines)
-	}
-	return commits
 }
 
 // planMarkdownCellHistoryCommits hands off hidden rich-rendered rows one at a
@@ -917,18 +714,6 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	// after a pass that could not advance (see HistoryEffectQueueState.
 	// PlanStalled).
 	effects := &state.HistoryEffects
-	// Active 批次物理写在途（head 被写游标 claim，其余成员 Queued 等待同一次写
-	// 证明）时不得跑全会话 reconcile：reconcile 会以 Transcript 身份逐出
-	// 这些 token，写成功后 ackBatch 因 ErrCommitNotInFlight 被拒，进而把已
-	// 落盘的行标成未决并触发重放（resident-tail 双写）。A2 第二刀后不再产生
-	// Active-origin 交付，该守卫为防御性保留（恒不命中）。PlanIncomplete 让
-	// ack/fail 与 executor kick 在结算后继续这次规划；advanced=true 表示进展
-	// 已委托给在途交付，调用方不得据此置 PlanStalled。
-	if effects.hasClaimedActiveOriginDelivery() {
-		effects.PlanIncomplete = true
-		effects.PlanStalled = false
-		return false, true
-	}
 	effects.PlanStalled = false
 	inputs := currentTranscriptPlanInputs(state)
 	// P1.2 Stage B：装了 plan worker 时，锁内只派发窗口请求；screening 在 worker
@@ -992,7 +777,7 @@ func applyTranscriptPlanWindow(state *UIControllerState, resume bool, startRow i
 	}
 	if complete {
 		effects.PlanIncomplete = false
-		syncHistoryEffectCandidates(state, commits, 0)
+		syncHistoryEffectCandidates(state, commits)
 		recordTranscriptPlanMemo(state, len(commits))
 		return true, true
 	}
@@ -1025,15 +810,6 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 		return
 	}
 	effects.planRequestInFlight = false
-	// 同步路径的同一门槛：Active 批次物理写在途时，窗口结果的 mint+membership
-	// 会以 Transcript 身份逐出正在物理写的批次成员（或与并发 scoped 计划竞逐
-	// 同一批行）。丢弃本次结果且不立即重派发——所有权移交必须等这批投递结算；
-	// PlanIncomplete 让 ack/fail 与 executor kick 在结算后继续规划。
-	if effects.hasClaimedActiveOriginDelivery() {
-		effects.PlanIncomplete = true
-		effects.PlanStalled = false
-		return
-	}
 	inputs := currentTranscriptPlanInputs(state)
 	inputsMoved := a.planInputsEpoch != effects.planInputsEpoch || a.inputs != inputs
 	// 栅栏集合必须与同步路径**等价**：锁内同步规划不检查几何/冻结/投影态（那是
@@ -1066,12 +842,6 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 // Queued token 误杀），因此必须再做一次无预算全量 pass —— 此时布局
 // 缓存已被前几轮全部热起来，代价远低于首轮冷启动。完成后清游标、落 memo。
 func finishResumedTranscriptPlan(state *UIControllerState) bool {
-	if state.HistoryEffects.hasClaimedActiveOriginDelivery() {
-		// 物理写在途：membership 踢除会把正在写的批次成员逐出。保留游标与
-		// PlanIncomplete，结算后由 ack/executor kick 再次收尾。
-		state.HistoryEffects.PlanIncomplete = true
-		return false
-	}
 	full, complete := planEligibleHistoryCommitsWithin(state.AppState, time.Time{})
 	if !complete {
 		// 零 deadline 不会截断；保底不改变投递语义，保留游标等下一次机会。
@@ -1079,7 +849,7 @@ func finishResumedTranscriptPlan(state *UIControllerState) bool {
 		state.HistoryEffects.PlanIncomplete = true
 		return false
 	}
-	syncHistoryEffectCandidates(state, full, 0)
+	syncHistoryEffectCandidates(state, full)
 	state.HistoryEffects.clearTranscriptPlanResume()
 	state.HistoryEffects.PlanIncomplete = false
 	state.HistoryEffects.PlanStalled = false
@@ -1119,13 +889,6 @@ func continueTruncatedHistoryPlan(state *UIControllerState) bool {
 	if effects.planRequestInFlight {
 		// 在飞请求拥有进展：screening 已委托给 worker，结果 action 回来后由它收尾
 		// 或重派发。这里返回 false 且不置 PlanStalled——在飞不是停滞。
-		return false
-	}
-	if effects.hasClaimedActiveOriginDelivery() {
-		// 物理写在途：批次成员（含仍 Pending 的同批交付）正由执行器的事务证明
-		// （写成功即 ack、失败即 unresolved+recovery），结果 action 会再次驱动
-		// 这里。在途不是停滞，返回 false 且不置 PlanStalled；同时绝不能抢跑
-		// 全会话 reconcile。
 		return false
 	}
 	// While the prefix still has pending work the executor is already carrying
@@ -1172,10 +935,7 @@ func (s HistoryEffectQueueState) planContinuationPending() bool {
 	// 在飞请求期间不算 pending：screening 已委托给 worker。若仍为 true，executor
 	// 的 kick 分支会每个轮次 Post 一枚 barrier Continue（run 无 sleep），形成
 	// actor↔executor 热旋转；结果 action 自身的 wake 谓词负责重新唤醒。
-	// 同理，Active 批次物理写在途时也不算 pending：执行器本身在证明该批次
-	// （写结果会驱动 ack/fail 路径继续规划），kick 只会空转。
-	return s.PlanIncomplete && !s.PlanStalled && !s.planRequestInFlight &&
-		!s.hasClaimedActiveOriginDelivery()
+	return s.PlanIncomplete && !s.PlanStalled && !s.planRequestInFlight
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell
@@ -1255,23 +1015,19 @@ type transcriptPlanInputs struct {
 	projection    bool
 	themeKey      string
 	terminalEpoch uint64
-	// finalizedAckVersion 是已 finalize cell 的 Active-origin 交付版本（A2 第二刀后
-	// 恒为 0；字段与推进逻辑待后续清理）。
-	finalizedAckVersion uint64
 }
 
 func currentTranscriptPlanInputs(state *UIControllerState) transcriptPlanInputs {
 	return transcriptPlanInputs{
-		sceneID:             state.Transcript.SceneID,
-		fence:               transcriptFinalizedPrefixFence(state.Transcript),
-		finalized:           transcriptFinalizedCellCount(state.Transcript),
-		layoutGen:           state.Geometry.Generation,
-		width:               state.Geometry.Width,
-		height:              state.Geometry.Height,
-		projection:          state.SemanticActiveCellProjection,
-		themeKey:            themeFingerprint(state.Theme),
-		terminalEpoch:       state.HistoryEffects.TerminalEpoch,
-		finalizedAckVersion: state.HistoryEffects.finalizedActiveAckPlanVersion,
+		sceneID:       state.Transcript.SceneID,
+		fence:         transcriptFinalizedPrefixFence(state.Transcript),
+		finalized:     transcriptFinalizedCellCount(state.Transcript),
+		layoutGen:     state.Geometry.Generation,
+		width:         state.Geometry.Width,
+		height:        state.Geometry.Height,
+		projection:    state.SemanticActiveCellProjection,
+		themeKey:      themeFingerprint(state.Theme),
+		terminalEpoch: state.HistoryEffects.TerminalEpoch,
 	}
 }
 
@@ -1304,8 +1060,7 @@ func transcriptPlanMemoHit(state *UIControllerState) bool {
 		effects.lastPlannedHeight != state.Geometry.Height ||
 		effects.lastPlannedProjection != state.SemanticActiveCellProjection ||
 		effects.lastPlannedThemeKey != themeFingerprint(state.Theme) ||
-		effects.lastPlannedTerminalEpoch != effects.TerminalEpoch ||
-		effects.lastPlannedFinalizedActiveAckVersion != effects.finalizedActiveAckPlanVersion {
+		effects.lastPlannedTerminalEpoch != effects.TerminalEpoch {
 		return false
 	}
 	// Every input above is unchanged, but the memo only fingerprints plan
@@ -1336,7 +1091,6 @@ func recordTranscriptPlanMemo(state *UIControllerState, candidates int) {
 	effects.lastPlannedProjection = state.SemanticActiveCellProjection
 	effects.lastPlannedThemeKey = themeFingerprint(state.Theme)
 	effects.lastPlannedTerminalEpoch = effects.TerminalEpoch
-	effects.lastPlannedFinalizedActiveAckVersion = effects.finalizedActiveAckPlanVersion
 	effects.lastPlannedCandidateCount = candidates
 }
 
@@ -1359,9 +1113,8 @@ func transcriptFinalizedCellCount(transcript TranscriptState) int {
 }
 
 // syncHistoryEffectCandidates reconciles a planned candidate set with the
-// reducer-owned ledger. scopeCellID is zero for a complete transcript plan;
-// otherwise only active entries for that cell are touched.
-func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryCommit, scopeCellID scene.CellID) {
+// reducer-owned ledger.
+func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryCommit) {
 	valid := make(map[historyCommitSourceKey]HistoryCommit, len(candidates))
 	for _, candidate := range candidates {
 		valid[historyCommitSourceIdentity(candidate)] = candidate
@@ -1396,16 +1149,8 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 				}
 			}
 		}
-		if scopeCellID == 0 {
-			for _, entry := range ledger.byToken {
-				reconcile(entry)
-			}
-		} else {
-			for _, token := range ledger.activeTokensByCell[scopeCellID] {
-				if entry, exists := ledger.byToken[token]; exists {
-					reconcile(entry)
-				}
-			}
+		for _, entry := range ledger.byToken {
+			reconcile(entry)
 		}
 	}
 	enqueueHistoryCandidates(state, candidates)
@@ -1435,7 +1180,6 @@ func enqueueHistoryCandidates(state *UIControllerState, candidates []HistoryComm
 			state.HistoryEffects.ProjectionUnknown = true
 		}
 	}
-	advanceActiveCellEnqueuedFromEffects(state)
 }
 
 // historyCommitPresentationEqual compares every non-token field that can
@@ -1454,10 +1198,8 @@ func enqueueHistoryCandidates(state *UIControllerState, candidates []HistoryComm
 // display coordinates either (historyCommitKey), so a display-only shift can
 // never collide with a new source that reuses the freed rows.
 func historyCommitPresentationEqual(current, candidate HistoryCommit) bool {
-	sameRevision := current.Revision == candidate.Revision ||
-		(current.Origin == HistoryCommitActive && candidate.Origin == HistoryCommitActive)
-	if current.Origin != candidate.Origin ||
-		current.CellID != candidate.CellID || !sameRevision ||
+	if current.CellID != candidate.CellID ||
+		current.Revision != candidate.Revision ||
 		current.SourceRange != candidate.SourceRange ||
 		current.FragmentID != candidate.FragmentID ||
 		current.LayoutGeneration != candidate.LayoutGeneration ||
@@ -1465,60 +1207,6 @@ func historyCommitPresentationEqual(current, candidate HistoryCommit) bool {
 		return false
 	}
 	return true
-}
-
-func advanceActiveCellEnqueuedFromEffects(state *UIControllerState) {
-	if state == nil || state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 ||
-		state.HistoryEffects.ledger == nil {
-		return
-	}
-	frontier := state.Active.Enqueued.End
-	commits := make([]HistoryCommit, 0)
-	for _, token := range state.HistoryEffects.ledger.activeTokensByCell[state.Active.CellID] {
-		entry, exists := state.HistoryEffects.ledger.byToken[token]
-		if !exists {
-			continue
-		}
-		commit := entry.Commit
-		if commit.Origin != HistoryCommitActive || commit.CellID != state.Active.CellID ||
-			commit.SourceRange.End <= frontier || commit.SourceRange.End > state.Active.Stable.End {
-			continue
-		}
-		switch entry.State {
-		case HistoryCommitQueued, HistoryCommitDelivered:
-			commits = append(commits, commit)
-		case HistoryCommitQuarantined:
-			// A failed write may still have produced a physical prefix; an
-			// invalidated/settled delivery never counts toward the enqueued
-			// frontier (mirrors the former Failed-only inclusion).
-			if entry.Quarantine == HistoryCommitQuarantineFailed {
-				commits = append(commits, commit)
-			}
-		}
-	}
-	sort.Slice(commits, func(i, j int) bool {
-		if commits[i].SourceRange.Start != commits[j].SourceRange.Start {
-			return commits[i].SourceRange.Start < commits[j].SourceRange.Start
-		}
-		if commits[i].SourceRange.End != commits[j].SourceRange.End {
-			return commits[i].SourceRange.End < commits[j].SourceRange.End
-		}
-		return commits[i].Token < commits[j].Token
-	})
-	for _, commit := range commits {
-		if commit.SourceRange.Start > frontier {
-			break
-		}
-		if commit.SourceRange.End > frontier {
-			frontier = commit.SourceRange.End
-		}
-	}
-	if frontier <= state.Active.Enqueued.End {
-		return
-	}
-	if next, err := MarkActiveEnqueued(state.Active, frontier); err == nil {
-		state.Active = next
-	}
 }
 
 func rebasePendingHistoryEffects(state *UIControllerState) {
@@ -1553,13 +1241,5 @@ func rebasePendingHistoryEffects(state *UIControllerState) {
 			!errors.Is(err, ErrCommitNotPending) {
 			state.HistoryEffects.ProjectionUnknown = true
 		}
-		if candidate.Origin == HistoryCommitActive &&
-			!state.HistoryEffects.hasTerminalRecordForSource(candidate) {
-			if err := state.HistoryEffects.enqueue(candidate); err != nil &&
-				!errors.Is(err, ErrDuplicateCommitRange) {
-				state.HistoryEffects.ProjectionUnknown = true
-			}
-		}
 	}
-	advanceActiveCellEnqueuedFromEffects(state)
 }

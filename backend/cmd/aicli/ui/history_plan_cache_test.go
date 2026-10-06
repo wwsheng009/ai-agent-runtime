@@ -57,7 +57,7 @@ func TestPlanPlainHistoryCommitsCacheRoundTrip(t *testing.T) {
 	const source = "alpha\nbeta\ngamma\n"
 	makeState := func() AppState {
 		return AppState{
-			Geometry:         GeometryState{Width: 40, Height: 24, Generation: 1},
+			Geometry: GeometryState{Width: 40, Height: 24, Generation: 1},
 			Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{{
 				ID: 88, Revision: 1, Kind: scene.KindUser,
 				Source: source, Phase: scene.CellCommitted,
@@ -86,7 +86,7 @@ func TestPlanPlainHistoryCommitsDynamicFields(t *testing.T) {
 	const source = "alpha\nbeta\ngamma\n"
 	makeState := func() AppState {
 		return AppState{
-			Geometry:         GeometryState{Width: 40, Height: 24, Generation: 1},
+			Geometry: GeometryState{Width: 40, Height: 24, Generation: 1},
 			Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{{
 				ID: 91, Revision: 1, Kind: scene.KindUser,
 				Source: source, Phase: scene.CellCommitted,

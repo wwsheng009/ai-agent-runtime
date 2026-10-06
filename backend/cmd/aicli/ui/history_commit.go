@@ -42,17 +42,6 @@ type DisplayRange struct {
 	End   int
 }
 
-// HistoryCommitOrigin distinguishes immutable transcript history from a
-// stable prefix handed off while its semantic cell is still mutable. Active
-// effects deliberately survive append-only source revisions; transcript
-// effects retain the exact finalized revision as part of their identity.
-type HistoryCommitOrigin uint8
-
-const (
-	HistoryCommitTranscript HistoryCommitOrigin = iota
-	HistoryCommitActive
-)
-
 func (r DisplayRange) Valid() bool {
 	return r.Start >= 0 && r.End >= r.Start
 }
@@ -62,7 +51,6 @@ func (r DisplayRange) Valid() bool {
 // layout generation are all required; text is payload, never identity.
 type HistoryCommit struct {
 	Token       uint64
-	Origin      HistoryCommitOrigin
 	CellID      scene.CellID
 	Revision    uint64
 	SourceRange SourceRange
@@ -76,8 +64,7 @@ type HistoryCommit struct {
 }
 
 func (c HistoryCommit) Valid() bool {
-	return c.Token != 0 && c.Origin <= HistoryCommitActive &&
-		c.CellID != 0 && c.LayoutGeneration != 0 &&
+	return c.Token != 0 && c.CellID != 0 && c.LayoutGeneration != 0 &&
 		c.SourceRange.Valid() && c.SourceRange.End > c.SourceRange.Start &&
 		c.DisplayRange.Valid() && c.DisplayRange.End > c.DisplayRange.Start
 }
@@ -196,7 +183,6 @@ func (e HistoryCommitEntry) BlocksRemint() bool {
 }
 
 type historyCommitRangeKey struct {
-	origin           HistoryCommitOrigin
 	cellID           scene.CellID
 	revision         uint64
 	sourceStart      int
@@ -206,7 +192,6 @@ type historyCommitRangeKey struct {
 }
 
 type historyCommitSourceKey struct {
-	origin      HistoryCommitOrigin
 	cellID      scene.CellID
 	revision    uint64
 	sourceStart int
@@ -215,16 +200,9 @@ type historyCommitSourceKey struct {
 }
 
 func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
-	revision := commit.Revision
-	if commit.Origin == HistoryCommitActive {
-		// Mutable source revisions are delivery fences, not new semantic cells.
-		// An append-only update must not mint the same stable range again.
-		revision = 0
-	}
 	return historyCommitSourceKey{
-		origin:      commit.Origin,
 		cellID:      commit.CellID,
-		revision:    revision,
+		revision:    commit.Revision,
 		sourceStart: commit.SourceRange.Start,
 		sourceEnd:   commit.SourceRange.End,
 		fragmentID:  commit.FragmentID,
@@ -233,7 +211,6 @@ func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
 
 func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 	return historyCommitRangeKey{
-		origin:           c.Origin,
 		cellID:           c.CellID,
 		revision:         c.Revision,
 		sourceStart:      c.SourceRange.Start,
@@ -246,10 +223,9 @@ func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 // HistoryCommitLedger is reducer-owned effect progress. It deliberately has
 // no terminal I/O and does not infer identity from line text or hashes.
 type HistoryCommitLedger struct {
-	byToken            map[uint64]HistoryCommitEntry
-	byRange            map[historyCommitRangeKey]uint64
-	bySource           map[historyCommitSourceKey]map[uint64]struct{}
-	activeTokensByCell map[scene.CellID][]uint64
+	byToken  map[uint64]HistoryCommitEntry
+	byRange  map[historyCommitRangeKey]uint64
+	bySource map[historyCommitSourceKey]map[uint64]struct{}
 	// queueHeadToken 是队列头指针：最小未交付（Queued）token，0 = 队列为空。
 	// 它与 HistoryEffectQueueState.WriteCursor（交付游标，可能正在物理写的
 	// token）配对：claim 只允许头指针位置，交付/取消后头指针向前跳过终态。
@@ -258,11 +234,6 @@ type HistoryCommitLedger struct {
 	// 显示旧的整表扫描在 per-claim 排序护栏上是热点，因此头指针只向前推进，
 	// 终态吸收（Delivered/Quarantined 不回退）保证跳过扫描摊还 O(1)。
 	queueHeadToken uint64
-	// activeAckPlanVersion 是 active ack 前缀版本的遗留计数器（A2 第二刀后不再
-	// 产生 Active-origin 交付，恒为 0；字段与推进逻辑待后续清理）。历史上它随
-	// acked Active-origin 前缀变化递增，transcript-plan memo 用它替代每次流式
-	// chunk 的 activeTokensByCell 扫描。
-	activeAckPlanVersion uint64
 	// unresolvedCount caches the number of entries that require terminal
 	// recovery (failed, or invalidated with MayHavePartiallyWritten). It keeps
 	// hasUnresolvedTerminalDelivery O(1); production pprof showed the previous
@@ -287,7 +258,6 @@ func NewHistoryCommitLedger() *HistoryCommitLedger {
 		byToken:                  make(map[uint64]HistoryCommitEntry),
 		byRange:                  make(map[historyCommitRangeKey]uint64),
 		bySource:                 make(map[historyCommitSourceKey]map[uint64]struct{}),
-		activeTokensByCell:       make(map[scene.CellID][]uint64),
 		compactedTerminalSources: make(map[historyCommitSourceKey]struct{}),
 		tokens:                   make([]uint64, 0, 64),
 	}
@@ -305,9 +275,6 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	}
 	if l.bySource == nil {
 		l.bySource = make(map[historyCommitSourceKey]map[uint64]struct{})
-	}
-	if l.activeTokensByCell == nil {
-		l.activeTokensByCell = make(map[scene.CellID][]uint64)
 	}
 	if !commit.Valid() {
 		return ErrInvalidHistoryCommit
@@ -335,14 +302,6 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 		l.bySource[sourceKey] = make(map[uint64]struct{})
 	}
 	l.bySource[sourceKey][commit.Token] = struct{}{}
-	if commit.Origin == HistoryCommitActive {
-		tokens := l.activeTokensByCell[commit.CellID]
-		at := sort.Search(len(tokens), func(index int) bool { return tokens[index] >= commit.Token })
-		tokens = append(tokens, 0)
-		copy(tokens[at+1:], tokens[at:])
-		tokens[at] = commit.Token
-		l.activeTokensByCell[commit.CellID] = tokens
-	}
 	if l.queueHeadToken == 0 || commit.Token < l.queueHeadToken {
 		l.queueHeadToken = commit.Token
 	}
@@ -358,8 +317,7 @@ func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCom
 		return ErrCommitNotPending
 	}
 	current := entry.Commit
-	if current.Origin != replacement.Origin || current.CellID != replacement.CellID ||
-		(current.Origin != HistoryCommitActive && current.Revision != replacement.Revision) ||
+	if current.CellID != replacement.CellID || current.Revision != replacement.Revision ||
 		current.SourceRange != replacement.SourceRange || current.FragmentID != replacement.FragmentID {
 		return ErrCommitSourceChanged
 	}
@@ -425,16 +383,10 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	entry.AckFrame = frame
 	entry.Failure = nil
 	entry.MayHavePartiallyWritten = false
-	// Finalized transcript source can always rebuild its payload. A mutable
-	// handoff retains its small delivered fragment until finalization so the
-	// finalized planner can prove and skip that already-physical rich prefix.
-	if entry.Commit.Origin == HistoryCommitTranscript {
-		entry.Commit.Lines = nil
-	}
+	// Transcript source can always rebuild its payload; nothing retains rendered
+	// lines past ack (A2 第二刀后不再有 Active-origin 交付).
+	entry.Commit.Lines = nil
 	l.byToken[token] = entry
-	if entry.Commit.Origin == HistoryCommitActive {
-		l.activeAckPlanVersion++
-	}
 	l.advanceQueueHeadAfterTerminal(token)
 	return nil
 }
@@ -594,17 +546,15 @@ func (l *HistoryCommitLedger) holdsPlan() bool {
 }
 
 // prunableResolvedEntry 判定一个已终结的条目是否仍被任何读取方消费载荷。
-// 保留集合只有两类：
-//   - Delivered + Active-origin：历史上 finalized 计划需要已交付渲染行计算
-//     skipRows（A2 第二刀后不再产生 Active-origin 交付，保留规则待后续清理）；
-//   - failed / invalidated-with-partial 隔离：未决交付，settle 之前必须保持可寻址。
+// 保留集合只有一类：failed / invalidated-with-partial 隔离——未决交付，
+// settle 之前必须保持可寻址。
 //
-// 其余终态（Delivered transcript、settled 隔离、invalidated 且未部分写入）的载荷
+// 其余终态（Delivered、settled 隔离、invalidated 且未部分写入）的载荷
 // 无人再读，只剩"该来源已交付"这一身份事实，可压缩为 tombstone。
 func prunableResolvedEntry(entry HistoryCommitEntry) bool {
 	switch entry.State {
 	case HistoryCommitDelivered:
-		return entry.Commit.Origin == HistoryCommitTranscript
+		return true
 	case HistoryCommitQuarantined:
 		return entry.Quarantine == HistoryCommitQuarantineSettled ||
 			(entry.Quarantine == HistoryCommitQuarantineInvalidated && !entry.MayHavePartiallyWritten)
@@ -689,17 +639,6 @@ func (l *HistoryCommitLedger) pruneEntry(token uint64, entry HistoryCommitEntry)
 		}
 		l.compactedTerminalSources[sourceKey] = struct{}{}
 	}
-	if entry.Commit.Origin == HistoryCommitActive {
-		tokens := l.activeTokensByCell[entry.Commit.CellID]
-		if at := sort.Search(len(tokens), func(i int) bool { return tokens[i] >= token }); at < len(tokens) && tokens[at] == token {
-			tokens = append(tokens[:at], tokens[at+1:]...)
-			if len(tokens) == 0 {
-				delete(l.activeTokensByCell, entry.Commit.CellID)
-			} else {
-				l.activeTokensByCell[entry.Commit.CellID] = tokens
-			}
-		}
-	}
 	l.compactedEntries++
 }
 
@@ -781,9 +720,6 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 		}
 		clone.bySource[key] = cloneTokens
 	}
-	for cellID, tokens := range l.activeTokensByCell {
-		clone.activeTokensByCell[cellID] = append([]uint64(nil), tokens...)
-	}
 	if len(l.compactedTerminalSources) > 0 {
 		clone.compactedTerminalSources = make(map[historyCommitSourceKey]struct{}, len(l.compactedTerminalSources))
 		for key := range l.compactedTerminalSources {
@@ -792,7 +728,6 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 	}
 	clone.compactedEntries = l.compactedEntries
 	clone.queueHeadToken = l.queueHeadToken
-	clone.activeAckPlanVersion = l.activeAckPlanVersion
 	clone.unresolvedCount = l.unresolvedCount
 	clone.tokens = append([]uint64(nil), l.tokens...)
 	return clone

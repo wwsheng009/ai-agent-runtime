@@ -9,137 +9,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
-// TestPlanMutableActiveCellHistoryCommits covers the overflow handoff planner
-// for a still-mutable plain cell: blank lines (including the trailing newline
-// of a streamed body) must not abort the whole prefix, Markdown stays out of
-// scope, and an already-acknowledged source offset resumes the projection.
-func TestPlanMutableActiveCellHistoryCommits(t *testing.T) {
-	geometry := GeometryState{Width: 80, Height: 12}
-
-	newActive := func(source string, ackedEnd int) ActiveCellState {
-		return ActiveCellState{
-			CellID:   41,
-			Revision: 7,
-			Kind:     scene.KindAssistant,
-			Phase:    ActiveCellMutable,
-			Source:   source,
-			Stable:   SourceRange{Start: 0, End: len(source)},
-			Acked:    SourceRange{Start: 0, End: ackedEnd},
-		}
-	}
-
-	t.Run("blank lines and trailing newline do not abort the prefix", func(t *testing.T) {
-		lines := make([]string, 0, 31)
-		for index := 0; index < 30; index++ {
-			if index == 10 {
-				lines = append(lines, "")
-			}
-			lines = append(lines, fmt.Sprintf("mutable-row-%03d", index))
-		}
-		source := strings.Join(lines, "\n") + "\n"
-		active := newActive(source, 0)
-
-		commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
-		if len(commits) == 0 {
-			t.Fatalf("expected a non-empty overflow prefix, got none")
-		}
-		if commits[0].Lines[0].Spans[0].Text != "mutable-row-000" {
-			t.Fatalf("first handoff row = %q, want mutable-row-000", commits[0].Lines[0].Spans[0].Text)
-		}
-		wantRows := len(strings.Split(source, "\n")) - ActiveBandRows(geometry.Height)
-		if len(commits) != wantRows {
-			t.Fatalf("handoff rows = %d, want %d", len(commits), wantRows)
-		}
-		// Rows are contiguous and ordered by display row.
-		for index, commit := range commits {
-			if commit.DisplayRange.Start != index || commit.DisplayRange.End != index+1 {
-				t.Fatalf("commit %d display range = %+v, want contiguous rows", index, commit.DisplayRange)
-			}
-			if commit.SourceRange.Start >= commit.SourceRange.End {
-				t.Fatalf("commit %d source range %+v is empty", index, commit.SourceRange)
-			}
-		}
-		// The last handoff row is the band's first visible row minus one.
-		wantLast := strings.Split(source, "\n")[wantRows-1]
-		last := commits[len(commits)-1]
-		if last.Lines[0].Spans[0].Text != wantLast {
-			t.Fatalf("last handoff row = %q, want %q", last.Lines[0].Spans[0].Text, wantLast)
-		}
-	})
-
-	t.Run("markdown stays out of scope", func(t *testing.T) {
-		source := "# heading\n\nplain body\n" + strings.Repeat("x\n", 30)
-		active := newActive(source, 0)
-		if commits := planMutableActiveCellHistoryCommits(active, geometry, 1); len(commits) != 0 {
-			t.Fatalf("markdown source produced %d handoff commits, want none", len(commits))
-		}
-	})
-
-	t.Run("body that fits the band budget produces no commits", func(t *testing.T) {
-		active := newActive(strings.Join([]string{"one", "two", "three"}, "\n"), 0)
-		if commits := planMutableActiveCellHistoryCommits(active, geometry, 1); len(commits) != 0 {
-			t.Fatalf("short source produced %d handoff commits, want none", len(commits))
-		}
-	})
-
-	t.Run("acknowledged offset resumes the projection", func(t *testing.T) {
-		source := strings.Join([]string{
-			"mutable-row-000", "mutable-row-001", "mutable-row-002",
-			"mutable-row-003", "mutable-row-004", "mutable-row-005",
-			"mutable-row-006", "mutable-row-007", "mutable-row-008",
-			"mutable-row-009", "mutable-row-010", "mutable-row-011",
-		}, "\n")
-		// ack through row-007 (its trailing newline), leaving rows 008..011 live.
-		ackedEnd := strings.Index(source, "mutable-row-008")
-		active := newActive(source, ackedEnd)
-
-		commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
-		if len(commits) != 0 {
-			t.Fatalf("resumed projection produced %d commits, want none (tail fits the band)", len(commits))
-		}
-	})
-
-	t.Run("partially acknowledged short body hands off the remaining prefix", func(t *testing.T) {
-		source := strings.Join([]string{
-			"mutable-row-000", "mutable-row-001", "mutable-row-002",
-			"mutable-row-003", "mutable-row-004", "mutable-row-005",
-			"mutable-row-006", "mutable-row-007", "mutable-row-008",
-			"mutable-row-009", "mutable-row-010", "mutable-row-011",
-			"mutable-row-012", "mutable-row-013", "mutable-row-014",
-			"mutable-row-015", "mutable-row-016", "mutable-row-017",
-			"mutable-row-018", "mutable-row-019", "mutable-row-020",
-		}, "\n")
-		ackedEnd := strings.Index(source, "mutable-row-010")
-		active := newActive(source, ackedEnd)
-
-		commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
-		want := 21 - ActiveBandRows(geometry.Height) - 10 // rows 010..020, minus the live tail
-		if len(commits) != want {
-			t.Fatalf("resumed handoff rows = %d, want %d", len(commits), want)
-		}
-		if commits[0].Lines[0].Spans[0].Text != "mutable-row-010" {
-			t.Fatalf("first resumed handoff row = %q, want mutable-row-010", commits[0].Lines[0].Spans[0].Text)
-		}
-	})
-
-	t.Run("one long logical line hands off complete wrapped rows", func(t *testing.T) {
-		source := strings.Repeat("x", 80*12)
-		active := newActive(source, 0)
-		commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
-		if len(commits) == 0 {
-			t.Fatal("wrapped single-line overflow created no stable handoff")
-		}
-		if commits[0].SourceRange != (SourceRange{Start: 0, End: 80}) ||
-			len(commits[0].Lines) != 1 || renderLineText(commits[0].Lines[0]) != strings.Repeat("x", 80) {
-			t.Fatalf("first wrapped handoff = %#v", commits[0])
-		}
-		last := commits[len(commits)-1]
-		if last.SourceRange.End >= len(source) || last.SourceRange.End <= last.SourceRange.Start {
-			t.Fatalf("wrapped handoff consumed the live tail or used an empty range: %#v", last)
-		}
-	})
-}
-
 func TestCanonicalHistoryFrontierNoLongerBlockedAfterOrphanToolFinalization(t *testing.T) {
 	tool := scene.TranscriptCell{
 		ID: 1, Revision: 1, Kind: scene.KindToolChain, Source: "shell command", Phase: scene.CellMutable,
@@ -370,64 +239,21 @@ func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
 	}
 }
 
-// A mutable reasoning cell whose markdown-looking body overflows the ActiveBand
-// must hand off the same source-faithful rows that finalization projects. Its
-// derived divider crosses the handoff with the first body-backed source range
-// and is never stored in Source.
-func TestPlanMutableReasoningHistoryCommitMatchesSourceFaithfulFinalize(t *testing.T) {
-	bodyLines := make([]string, 0, 30)
-	bodyLines = append(bodyLines, "Good. Key modules all exist:")
-	for i := 0; i < 14; i++ {
-		bodyLines = append(bodyLines, fmt.Sprintf("- `backend/internal/module%02d` ✅", i))
-	}
-	bodyLines = append(bodyLines, "", "And `.agents/agents/explore.md`, `general.md`, `plan.md` exist.", "")
-	source := strings.Join(bodyLines, "\n")
-
-	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
-	active := ActiveCellState{
-		CellID: 1, Revision: 3, Kind: scene.KindReasoning,
-		Phase:  ActiveCellMutable,
-		Source: source,
-		Stable: SourceRange{Start: 0, End: len(source)},
-		Acked:  SourceRange{Start: 0, End: 0},
-	}
-
-	commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
-	if len(commits) == 0 {
-		t.Fatalf("long reasoning should hand off overflow rows, got no commits")
-	}
-	rawReasoningSeen := false
-	for _, c := range commits {
-		for _, line := range c.Lines {
-			if strings.Contains(renderLineText(line), "- `backend/internal/module") {
-				rawReasoningSeen = true
-			}
-		}
-	}
-	if !rawReasoningSeen {
-		t.Fatalf("reasoning handoff normalized markdown-looking provider text: %#v", commits)
-	}
-}
-
-// TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange is a
-// regression test for the high-CPU loop (185% sustained).  The loop was driven
-// by every streaming delta invalidating an in-flight Active-origin commit
-// whose DisplayRange differed from the new candidate's DisplayRange because
-// the Acked frontier advanced between the full-transcript replan (after
-// reconciliation reset Acked=0) and the active-only replan (from the new
-// Acked.End).  Source range + lines were identical; only the derived
-// display-row range changed.  historyCommitPresentationEqual now skips
-// DisplayRange for active commits, so this scenario must NOT trigger
-// invalidate → ReconciliationRequired=true.
-func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *testing.T) {
-	// Setup: state with a ledger containing one Active-origin commit in-flight.
+// TestSyncHistoryEffectCandidates_ClaimedInFlightDifferentDisplayRange is a
+// regression test for the high-CPU loop (185% sustained). The loop was driven
+// by every streaming delta invalidating an in-flight claimed commit whose
+// DisplayRange differed from the new candidate's DisplayRange while source
+// range + lines were identical; only the derived display-row range changed.
+// historyCommitPresentationEqual deliberately skips DisplayRange, so this
+// scenario must NOT trigger invalidate → ReconciliationRequired=true.
+func TestSyncHistoryEffectCandidates_ClaimedInFlightDifferentDisplayRange(t *testing.T) {
+	// Setup: state with a ledger containing one commit in-flight.
 	state := &UIControllerState{AppState: AppState{Geometry: GeometryState{Generation: 1}}}
 	state.HistoryEffects.ledger = NewHistoryCommitLedger()
 
-	// Build a valid Active-origin commit (as produced by a full-transcript
-	// replan after reconciliation reset Acked=0 → DisplayRange {1,2}).
+	// Build a valid commit (as produced by a full-transcript replan with a
+	// previous layout generation → DisplayRange {1,2}).
 	inFlight := HistoryCommit{
-		Origin:           HistoryCommitActive,
 		CellID:           91,
 		Revision:         2,
 		SourceRange:      SourceRange{Start: 0, End: 10},
@@ -459,7 +285,7 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 	candidate.DisplayRange = DisplayRange{Start: 0, End: 1} // relative row
 
 	// Call syncHistoryEffectCandidates — the exact trigger path.
-	syncHistoryEffectCandidates(state, []HistoryCommit{candidate}, 91)
+	syncHistoryEffectCandidates(state, []HistoryCommit{candidate})
 
 	// Assert: the claimed entry was NOT invalidated.
 	entry, ok = state.HistoryEffects.ledger.Entry(1)
@@ -497,7 +323,6 @@ func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
 	state.HistoryEffects.ledger = NewHistoryCommitLedger()
 
 	tail := HistoryCommit{
-		Origin:           HistoryCommitTranscript,
 		CellID:           42,
 		Revision:         1,
 		SourceRange:      SourceRange{Start: 0, End: 10},
@@ -515,7 +340,6 @@ func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
 
 	// 截断前缀：只包含更早的一个 cell，尾部 cell 不在集合里。
 	prefix := HistoryCommit{
-		Origin:           HistoryCommitTranscript,
 		CellID:           7,
 		Revision:         1,
 		SourceRange:      SourceRange{Start: 0, End: 5},
@@ -540,7 +364,7 @@ func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
 
 	// 对照：完整集合语义下，不在有效集合里的 pending 条目确实会被逐出 —— 这
 	// 正是两条路径必须分开的原因，也说明上面的断言不是恒真。
-	syncHistoryEffectCandidates(state, []HistoryCommit{prefix}, 0)
+	syncHistoryEffectCandidates(state, []HistoryCommit{prefix})
 	tailEntry, ok = state.HistoryEffects.ledger.Entry(1)
 	if !ok || !tailEntry.IsInvalidated() {
 		t.Fatalf("完整规划语义下，不在有效集合里的 pending 条目应当被置为 invalidated: ok=%t state=%s", ok, tailEntry.State)

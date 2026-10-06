@@ -61,8 +61,8 @@ func TestWriteEditorControlSequenceClaimsViaHook(t *testing.T) {
 func TestWriteEditorControlSequenceFallsBackToRawWriter(t *testing.T) {
 	const sequence = "\x1b[?2004l"
 	for name, hooks := range map[string]*LineEditorHooks{
-		"no hooks":     nil,
-		"unclaimed":    {OnTerminalControl: func(string) bool { return false }},
+		"no hooks":  nil,
+		"unclaimed": {OnTerminalControl: func(string) bool { return false }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			raw := captureEditorStdout(t, func() {

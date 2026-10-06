@@ -71,7 +71,7 @@ func TestStreamingActiveFinalizeTransfersResidentTailExactlyOnce(t *testing.T) {
 
 	pendingTail := false
 	for _, entry := range h.controller.State().HistoryEffects.Entries() {
-		if entry.State == HistoryCommitQueued && entry.Commit.Origin == HistoryCommitTranscript &&
+		if entry.State == HistoryCommitQueued &&
 			strings.Contains(renderLineText(entry.Commit.Lines[0]), markers[len(markers)-1]) {
 			pendingTail = true
 		}

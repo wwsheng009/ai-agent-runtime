@@ -149,7 +149,7 @@ func BenchmarkAckLoopResync(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		// Simulate the executor ack of one overflow row: Acked.End advances
-		// (advanceActiveCellLedgerOnAck) and the next sync re-plans.
+		// and the next sync re-plans.
 		next := active
 		next.Acked = SourceRange{Start: 0, End: next.Acked.End + 22}
 		if next.Acked.End > len(source) {

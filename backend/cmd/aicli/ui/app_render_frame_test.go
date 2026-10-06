@@ -14,8 +14,8 @@ import (
 
 func TestComposeAppRenderFramePreservesTextFrameAndStructuredSources(t *testing.T) {
 	state := AppState{
-		Revision:         55,
-		Geometry:         GeometryState{Width: 24, Height: 14, Generation: 4},
+		Revision: 55,
+		Geometry: GeometryState{Width: 24, Height: 14, Generation: 4},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: "question", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
 			{ID: 2, Sequence: 2, Kind: scene.KindAssistant, Source: "answer", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
@@ -98,7 +98,7 @@ func TestComposeAppRenderFrameDetachesStructuredLines(t *testing.T) {
 
 func TestComposeAppRenderFrameNormalizesStructuredBandTrailingSpaces(t *testing.T) {
 	state := AppState{
-		Geometry:         GeometryState{Width: 40, Height: 12, Generation: 1},
+		Geometry: GeometryState{Width: 40, Height: 12, Generation: 1},
 		Bottom: BottomPaneState{
 			ActiveBandStyled: []render.Line{
 				{Spans: []render.Span{{Text: "first", Style: render.Style{Role: string(style.RoleAssistant)}}}},
@@ -188,7 +188,7 @@ func TestComposeAppRenderFrameUsesSourceBackedActiveBandFallback(t *testing.T) {
 
 func TestComposeAppRenderFrameRendersCommittedAssistantMarkdown(t *testing.T) {
 	state := AppState{
-		Geometry:         GeometryState{Width: 40, Height: 12, Generation: 1},
+		Geometry: GeometryState{Width: 40, Height: 12, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{{
 			ID: 1, Sequence: 1, Kind: scene.KindAssistant,
 			Source: "# Rendered heading\n\n- **finished**\n- `code`",

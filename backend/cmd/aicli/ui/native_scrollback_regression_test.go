@@ -331,9 +331,6 @@ func TestMutableMarkdownOverflowHandsOffRichPrefixBeforeFinalize(t *testing.T) {
 	fragments := map[uint64]struct{}{}
 	for _, entry := range entries {
 		commit := entry.Commit
-		if commit.Origin != HistoryCommitTranscript {
-			continue
-		}
 		if commit.FragmentID == 0 {
 			t.Fatalf("finalize plan has no stable render fragment identity: %#v", commit)
 		}

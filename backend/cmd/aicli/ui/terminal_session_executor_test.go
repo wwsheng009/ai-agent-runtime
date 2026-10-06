@@ -277,8 +277,8 @@ func TestTerminalSessionExecutorDrainsFinalTranscriptDeliveryAfterStreaming(t *t
 		_ = os.WriteFile(path, physical, 0o644)
 		var ledger strings.Builder
 		for _, entry := range state.HistoryEffects.Entries() {
-			fmt.Fprintf(&ledger, "token=%d origin=%d state=%s gen=%d src=[%d,%d) disp=[%d,%d) lines=%d ack=%d partial=%t failure=%v\n",
-				entry.Commit.Token, entry.Commit.Origin, entry.State, entry.Commit.LayoutGeneration,
+			fmt.Fprintf(&ledger, "token=%d state=%s gen=%d src=[%d,%d) disp=[%d,%d) lines=%d ack=%d partial=%t failure=%v\n",
+				entry.Commit.Token, entry.State, entry.Commit.LayoutGeneration,
 				entry.Commit.SourceRange.Start, entry.Commit.SourceRange.End,
 				entry.Commit.DisplayRange.Start, entry.Commit.DisplayRange.End,
 				len(entry.Commit.Lines), entry.AckFrame, entry.MayHavePartiallyWritten, entry.Failure)

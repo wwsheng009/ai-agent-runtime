@@ -3,8 +3,6 @@ package ui
 import (
 	"errors"
 	"time"
-
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 var (
@@ -90,12 +88,6 @@ type HistoryEffectQueueState struct {
 	planRequestSeq      uint64
 	planRequestInFlight bool
 	planInputsEpoch     uint64
-	// finalizedActiveAckPlanVersion 记录"已 finalize 的 cell 的 Active-origin 交付
-	// 又前进"的次数（A2 第二刀后不再产生 Active-origin 交付，字段与推进逻辑待后续
-	// 清理）：这类 ack 不改变 transcript/layout/theme 指纹，却会收缩 plan 读到的
-	// skipRows，必须让 memo 与续跑游标失效，否则 transcript-origin 的重复候选会
-	// 留在 ledger 里被二次投递。由 reducer 的 ack 处理器推进。
-	finalizedActiveAckPlanVersion uint64
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
@@ -123,33 +115,14 @@ type HistoryEffectQueueState struct {
 	// （G4/C1 诊断计数；只读快照可见）。
 	ClaimedPresentationDrift uint64
 	ledger                   *HistoryCommitLedger
-	// lastPlanned* 是 active 铸提交 memo 的遗留字段（A2 第二刀后生产不再写入，
-	// 待后续清理删除）。
-	lastPlannedActiveEnqueuedValid bool
-	lastPlannedActiveStable        SourceRange
-	lastPlannedActiveEnqueued      SourceRange
-	lastPlannedActiveAcked         SourceRange
-	lastPlannedLayoutGeneration    uint64
-	lastPlannedGeometryGeneration  uint64
-	lastPlannedSourceLen           int
-	lastPlannedKind                scene.CellKind
-	lastPlannedLooksMarkdown       bool
-	lastPlannedSupplementMarkdown  bool
-	lastPlannedBlocked             bool
 	// Transcript-plan memo for syncHistoryEffectsForTranscript. The full
 	// transcript plan re-lays-out and re-wraps every finalized cell, which on
 	// resumed sessions costs O(entire history) per stream chunk even though
 	// the chunk only grows the still-mutable active cell. The fingerprint
 	// covers every planEligibleHistoryCommits input: the transcript version
 	// fence (same trust level as transcriptSnapshotAlreadyInstalled),
-	// geometry/layout/theme identity, the semantic-projection flag, and — only
-	// when semantic projection is on, because that is the only mode where the
-	// planner reads Active — the active-cell planner inputs. The ledger-dependent
-	// plan input (the acked Active-origin prefix of a finalized cell) is tracked by
-	// finalizedActiveAckPlanVersion plus TerminalEpoch instead of a per-call scan;
-	// the ledger's own activeAckPlanVersion counts every active ack and is
-	// deliberately too broad to key the memo on (a live mutable cell's acks are
-	// handled by the O(viewport) active reconcile, not a full replan).
+	// geometry/layout/theme identity, the semantic-projection flag, and the
+	// terminal epoch (ledger replacement).
 	lastPlannedTranscriptValid   bool
 	lastPlannedTranscriptSceneID uint64
 	// lastPlannedTranscriptFence fingerprints every finalized transcript cell
@@ -175,9 +148,6 @@ type HistoryEffectQueueState struct {
 	lastPlannedProjection          bool
 	lastPlannedThemeKey            string
 	lastPlannedTerminalEpoch       uint64
-	// lastPlannedFinalizedActiveAckVersion 是 lastPlanned* 组里那个按 finalized
-	// cell 作用域的交付版本（见 finalizedActiveAckPlanVersion）。
-	lastPlannedFinalizedActiveAckVersion uint64
 	// lastPlannedCandidateCount is how many commits the last COMPLETE plan
 	// produced. It exists because the memo fingerprints only plan *inputs*: a
 	// ledger that lost the plan it was reconciled into (reconcileScrollback
@@ -563,9 +533,8 @@ func (s *HistoryEffectQueueState) rebasePending(commit HistoryCommit) error {
 		// releases it via Deferred before the next rebase; every other Pending
 		// entry rebases in place.
 		if entry.State != HistoryCommitQueued || current.Token == s.WriteCursor ||
-			current.Origin != commit.Origin ||
 			current.CellID != commit.CellID ||
-			(current.Origin != HistoryCommitActive && current.Revision != commit.Revision) ||
+			current.Revision != commit.Revision ||
 			current.SourceRange != commit.SourceRange ||
 			current.FragmentID != commit.FragmentID {
 			continue
@@ -911,33 +880,4 @@ func (s HistoryEffectQueueState) hasTerminalRecordForSource(commit HistoryCommit
 // explicit reconciliation policy before ordered history delivery resumes.
 func (s HistoryEffectQueueState) hasUnresolvedTerminalDelivery() bool {
 	return s.ledger.hasUnresolvedTerminalDelivery()
-}
-
-// hasClaimedActiveOriginDelivery reports whether a still-mutable-cell batch
-// (Origin == HistoryCommitActive) is currently being written: its head token is
-// claimed by the write cursor and the remaining members stay Queued until that
-// same physical transaction proves them. Queued-but-unclaimed active tokens are deliberately NOT
-// reported: they have not been handed to the writer, so a full-plan reconcile
-// may still replace them safely. The claimed window is where
-// eviction is destructive — a full-transcript reconcile mints Transcript-origin
-// replacements under a different identity, the batch members are invalidated
-// mid-write, and the successful write can no longer be acknowledged
-// (ErrCommitNotInFlight), forcing an unresolved-delivery recovery that re-covers
-// rows which already crossed the writer. Ownership transfer must therefore wait
-// for this batch to settle; a write failure settles into the source-backed
-// recovery path. A2 第二刀后不再产生 Active-origin 交付，本守卫恒不命中
-// （防御性保留）。
-func (s HistoryEffectQueueState) hasClaimedActiveOriginDelivery() bool {
-	if s.ledger == nil {
-		return false
-	}
-	// The single write cursor is the live claim: a claimed Active-origin token
-	// may already be crossing the writer, so a finalize must still defer the
-	// full-session reconcile until its write resolves.
-	if s.WriteCursor != 0 {
-		if entry, ok := s.ledger.byToken[s.WriteCursor]; ok && entry.Commit.Origin == HistoryCommitActive {
-			return true
-		}
-	}
-	return false
 }

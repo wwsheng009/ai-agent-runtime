@@ -50,7 +50,6 @@ func TestTerminalSessionActiveOriginOverflowUsesResidentInsertion(t *testing.T) 
 		render.Line{Spans: []render.Span{{Text: "active-head-one"}}},
 		render.Line{Spans: []render.Span{{Text: "active-head-two"}}},
 	)
-	active.Origin = HistoryCommitActive
 	active.Token = 2
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &active}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("active history transaction = %#v", result)
@@ -84,7 +83,6 @@ func TestTerminalSessionActiveOriginOverflowKeepsDocumentOrder(t *testing.T) {
 		render.Line{Spans: []render.Span{{Text: "archive-four"}}},
 		render.Line{Spans: []render.Span{{Text: "archive-five"}}},
 	)
-	active.Origin = HistoryCommitActive
 	active.Token = 2
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &active}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("active history transaction = %#v", result)
@@ -118,7 +116,6 @@ func TestTerminalSessionActiveOriginInsertionAdvancesResidentModel(t *testing.T)
 	active := terminalSessionCommit(1,
 		line("act-01"), line("act-02"), line("act-03"), line("act-04"), line("act-05"),
 	)
-	active.Origin = HistoryCommitActive
 	active.Token = 2
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &active}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("active delivery = %#v", result)
@@ -160,7 +157,6 @@ func TestTerminalSessionActiveOriginInsertionKeepsResidentContinuity(t *testing.
 	active := terminalSessionCommit(1,
 		line("act-01"), line("act-02"), line("act-03"), line("act-04"), line("act-05"),
 	)
-	active.Origin = HistoryCommitActive
 	active.Token = 2
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &active}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("active delivery = %#v", result)

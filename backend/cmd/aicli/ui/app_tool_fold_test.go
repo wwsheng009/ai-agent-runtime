@@ -24,8 +24,8 @@ func TestTranscriptFoldsOversizedToolResult(t *testing.T) {
 	middle := fmt.Sprintf("row-%02d", bodyLines/2)
 
 	state := AppState{
-		Revision:         7,
-		Geometry:         GeometryState{Width: 80, Height: 40, Generation: 1},
+		Revision: 7,
+		Geometry: GeometryState{Width: 80, Height: 40, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{
 				ID: 1, Sequence: 1, Kind: scene.KindToolChain, Source: source,

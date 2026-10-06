@@ -306,10 +306,6 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		if errors.Is(ackErr, ErrStaleLayoutGeneration) {
 			state.HistoryEffects.ProjectionUnknown = true
 		} else if ackErr == nil {
-			if entry, ok := state.HistoryEffects.ledger.Entry(a.Token); ok {
-				advanceActiveCellLedgerOnAck(&state, []HistoryCommit{entry.Commit})
-				noteFinalizedActiveAck(&state, []HistoryCommit{entry.Commit})
-			}
 			// A budget-truncated plan mints only its oldest prefix, and an idle
 			// resumed session produces no later transcript transition to carry
 			// it forward. The prefix has now been delivered, so continue the
@@ -331,8 +327,6 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.HistoryEffects.markDeliveredBatchUnresolved(a.Commits, ackErr)
 			state.HistoryEffects.ProjectionUnknown = true
 		} else if len(a.Commits) > 0 {
-			advanceActiveCellLedgerOnAck(&state, a.Commits)
-			noteFinalizedActiveAck(&state, a.Commits)
 			// Same continuation rule as the single ack above: the batch may have
 			// been the truncated plan's delivered prefix.
 			continueTruncatedHistoryPlan(&state)
@@ -1025,66 +1019,6 @@ func resetActiveHistoryProgressForTerminalEpoch(state *UIControllerState) {
 	state.Active.Revision++
 	state.Active.Enqueued = SourceRange{}
 	state.Active.Acked = SourceRange{}
-}
-
-// advanceActiveCellLedgerOnAck moves the active source boundary only after a
-// history handoff has physically crossed the writer (single HistoryCommitAcknowledged
-// or the batched HistoryCommitsAcknowledged delivery). The band projection then
-// resumes from the acknowledged source offset instead of repainting rows that
-// already reached native scrollback. Only commits enqueued for the live mutable
-// cell advance the ledger; finalized transcript deliveries are identity-distinct
-// and leave the active ranges untouched (their Stable ledger is zeroed on
-// finalize, so MarkActiveEnqueued rejects them by invariant).
-func advanceActiveCellLedgerOnAck(state *UIControllerState, commits []HistoryCommit) {
-	if state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 || len(commits) == 0 {
-		return
-	}
-	frontier := state.Active.Acked.End
-	for {
-		advanced := false
-		for _, commit := range commits {
-			if commit.Origin != HistoryCommitActive ||
-				commit.CellID != state.Active.CellID ||
-				commit.SourceRange.Start > frontier ||
-				commit.SourceRange.End <= frontier ||
-				commit.SourceRange.End > state.Active.Enqueued.End {
-				continue
-			}
-			frontier = commit.SourceRange.End
-			advanced = true
-		}
-		if !advanced {
-			break
-		}
-	}
-	if frontier <= state.Active.Acked.End {
-		return
-	}
-	next, err := MarkActiveAcked(state.Active, frontier)
-	if err != nil {
-		return
-	}
-	state.Active = next
-}
-
-// noteFinalizedActiveAck 推进 finalizedActiveAckPlanVersion：当被 ack 的
-// Active-origin 提交属于一个**已经 finalize**（不再等于当前活跃可变 cell）的 cell
-// 时，历史上该 cell 已交付的前缀又前进了一步，finalized 计划读到的 skipRows
-// 因此变大，必须显式让 memo 与续跑游标失效。A2 第二刀后不再产生 Active-origin
-// 交付，本函数恒为空转（字段与推进逻辑待后续清理）。
-//
-// 仍活跃的可变 cell 的 ack 不推进（A2 第二刀后其恒为 0，不再有交付）。
-func noteFinalizedActiveAck(state *UIControllerState, commits []HistoryCommit) {
-	for _, commit := range commits {
-		if commit.Origin != HistoryCommitActive {
-			continue
-		}
-		if state.Active.Phase == ActiveCellMutable && state.Active.CellID == commit.CellID {
-			continue
-		}
-		state.HistoryEffects.finalizedActiveAckPlanVersion++
-		return
-	}
 }
 
 // reconcileTranscriptActiveCell merges a semantic Scene snapshot with the

@@ -57,7 +57,7 @@ func TestTreeIndentTextSingleLineGetsClosingMarker(t *testing.T) {
 // legacy "  " 前缀时，必须产出完全一致的标记列。
 func TestTreeIndentProjectionsShareMarkerGeometry(t *testing.T) {
 	for name, content := range map[string][]string{
-		"multi-line": {"a.go:1: `foo`", "", "统计: 2 个文件, 0 个目录"},
+		"multi-line":  {"a.go:1: `foo`", "", "统计: 2 个文件, 0 个目录"},
 		"single-line": {"Note: offset 296 equals total lines 296; use offset 295 to read the last line."},
 	} {
 		t.Run(name, func(t *testing.T) {

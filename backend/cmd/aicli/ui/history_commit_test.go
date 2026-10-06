@@ -198,28 +198,12 @@ func TestHistoryCommitLedger_TerminalCompactionRetainsSourceIdentity(t *testing.
 }
 
 // TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads 锁定压缩的
-// 保留集合：Acked+Active 的渲染行仍被 finalized 计划的前导证明读取；未决的
-// Failed/部分写入交付在 settle 前必须保持可寻址；非部分写入的 Invalidated 不
-// 阻断再铸造，因此剪除时不留 tombstone。
+// 保留集合：未决的 Failed/部分写入交付在 settle 前必须保持可寻址；非部分写入
+// 的 Invalidated 不阻断再铸造，因此剪除时不留 tombstone。
 func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.T) {
 	ledger := NewHistoryCommitLedger()
-	active := testHistoryCommit(1, 7, 2)
-	active.Origin = HistoryCommitActive
-	if err := ledger.Enqueue(active); err != nil {
-		t.Fatalf("Enqueue(active): %v", err)
-	}
-	if err := ledger.Ack(active.Token, 5, 2); err != nil {
-		t.Fatalf("Ack(active): %v", err)
-	}
-	if ledger.pruneResolvedToken(active.Token) {
-		t.Fatal("acked Active-origin entry still backs the rendered-prefix proof")
-	}
-	if entry, ok := ledger.Entry(active.Token); !ok || len(entry.Commit.Lines) == 0 {
-		t.Fatal("active payload must be retained until finalization consumes it")
-	}
 
 	failed := testHistoryCommit(2, 8, 2)
-	failed.Origin = HistoryCommitActive
 	if err := ledger.Enqueue(failed); err != nil {
 		t.Fatalf("Enqueue(failed): %v", err)
 	}
@@ -241,9 +225,6 @@ func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.
 	if !ledger.hasTerminalRecordForSource(historyCommitSourceIdentity(failed)) {
 		t.Fatal("abandoned source identity was lost")
 	}
-	if len(ledger.activeTokensByCell[8]) != 0 {
-		t.Fatalf("active token index kept compacted tokens: %v", ledger.activeTokensByCell[8])
-	}
 
 	invalidated := testHistoryCommit(3, 9, 2)
 	if err := ledger.Enqueue(invalidated); err != nil {
@@ -258,9 +239,9 @@ func TestHistoryCommitLedger_TerminalCompactionKeepsRetainedPayloads(t *testing.
 	if ledger.hasTerminalRecordForSource(historyCommitSourceIdentity(invalidated)) {
 		t.Fatal("non-partial invalidation must not block a future mint")
 	}
-	// 剪除后镜像与有序遍历保持精确：剩余 live 条目不受影响。
-	if tokens := ledger.orderedTokens(); len(tokens) != 1 || tokens[0] != active.Token {
-		t.Fatalf("ordered mirror after compaction = %v, want [%d]", tokens, active.Token)
+	// 剪除后镜像与有序遍历保持精确：全部条目均已剪除。
+	if tokens := ledger.orderedTokens(); len(tokens) != 0 {
+		t.Fatalf("ordered mirror after compaction = %v, want empty", tokens)
 	}
 }
 

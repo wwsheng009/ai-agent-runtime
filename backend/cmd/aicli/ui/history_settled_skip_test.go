@@ -11,8 +11,8 @@ import (
 //
 // 背景（生产 pprof）：resume 长会话的每一次 transcript 迁移都会重扫整段历史，
 // planMarkdownCellHistoryCommits 因此累计分配 211GB，而其中绝大多数分片早已
-// Acked 且 payload 在 Ack 时就被丢弃（见 HistoryCommitLedger.Ack 对
-// HistoryCommitTranscript 的处理）。规划器提前跳过这些来源即可省掉整轮重建。
+// Acked 且 payload 在 Ack 时就被丢弃（见 HistoryCommitLedger.Ack 的载荷清空）。
+// 规划器提前跳过这些来源即可省掉整轮重建。
 func TestReplanSkipsSettledFragments(t *testing.T) {
 	state := reduceUIControllerState(UIControllerState{}, Resize{Width: 72, Height: 12, Generation: 1}, 1)
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{
@@ -58,11 +58,5 @@ func TestReplanSkipsSettledFragments(t *testing.T) {
 }
 
 func countFinalizedCandidates(commits []HistoryCommit) int {
-	count := 0
-	for _, commit := range commits {
-		if commit.Origin != HistoryCommitActive {
-			count++
-		}
-	}
-	return count
+	return len(commits)
 }
