@@ -16,7 +16,7 @@
 
 总验收（缺一不可）：
 
-- `BenchmarkDeferredOlderPageReplan/second_plan_prepend` ≤ 基线 1/3（基线 602ms，§1.3）。
+- `BenchmarkDeferredOlderPageReplan/second_plan_prepend` ≤ 基线 1/3（本机基线 522.4ms → ≤174ms；Stage 0 记录见 §1.5）。
 - 大会话（6,720 cells / ~161k 行）重复 pass 代价 ∝ 增量（4,001 vs 6,720 cells 两档对照不随规模增长）；冷启动首轮 ≤ 单窗口预算（≤2s，harness P12 口径）。
 - 语义组保持绿：`TestDeferredOlderPagePrependReplansAndCoversOlderCells`、`TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan`（改写后）、`TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`（改写后）。
 - `go test ./cmd/aicli/ui/` 与 `./cmd/aicli/commands/` 全量（含 -race 抽验）绿。
@@ -51,11 +51,43 @@
 - 跨包：commands debug HTTP/文档 8 处读 4 个诊断字段（schema 稳定性需决策，§2.3）。
 - 5 个不可直接删耦合：memo 早退（planner `:1353`）、在途批次挂起（`:984-988/:1089-1092/:1126-1130`）、`planContinuationPending` 4 类消费方、共享同步 helper（`screenTranscriptPlanWindow`/`planEligibleHistoryCommitsWithinFrom`）、benchmark 假阳性（`prependReplanSink` 与 planSink 无关）。
 
+### 1.5 Stage 0 实测记录（2026-10-06，本机，`-benchtime 3x`）
+
+基线（`BenchmarkDeferredOlderPageReplan`，ui 包）：
+
+| 子基准 | 耗时 | 分配 |
+|---|---|---|
+| `second_plan_prepend`（6,720 cells） | **522.4ms** | 346.6MB / 837k allocs |
+| `first_plan`（4,001 cells） | 229.5ms | 246.6MB / 678k allocs |
+| `plan_only`（4,001 cells） | 135.5ms | 124.9MB / 176k allocs |
+| `older_page_layout_only`（2,719 cells） | 1.9ms | 3.6MB |
+| `layout_only` / scene 热布局 | 2.8ms / 4.9ms | — |
+| `state_clone` / `clone_history_effects_only` / `clone_transcript_only` | 148.8ms / 136.6ms / 0.24ms | — |
+| `install_only` | 0.43ms | — |
+| `history_effects_diagnostics_projection` | 6.8ms / 0 allocs | — |
+
+分解读法（基准自带口径 `:241-247`）：`second(522) ≫ first(229) + older_layout(1.9)`
+⇒ 第二次规划**不是**增量形态；渲染/布局已非瓶颈（per-cell `sharedCellRows` 缓存已存在，热布局 2.8–4.9ms）。
+
+CPU profile（`plan_only` + `second_plan_prepend`，9,630ms 样本）热点：
+
+| 函数 | cum | 说明 |
+|---|---|---|
+| `syncHistoryEffectCandidates` | 3,340ms（34.7%） | `enqueueHistoryCandidates` 1,850ms；全量 `byToken` 对账 980ms；`valid` map 构建 430ms |
+| `assemblePlainHistoryCommits` | 900ms（9.4%） | 逐行 `settled`（`hasTerminalRecordForSource`）查询 610ms |
+| GC/分配内部 | ~25% | 单次规划 125–346MB 分配 |
+| map 操作 | matchH2 12.6% flat | 大量小 map 查找（源身份键） |
+
+**结论（Stage 1 范围修正）**：L2.6 的落点不是 screening 复用（已有 per-cell 行缓存），
+而是**计划层段级增量装配与集成**——per-cell 提交段（commits + source 身份）memo、
+未变段复用（跳过逐行 settled，改提交级过滤）、集成按段 diff（免全量 `byToken` 扫描与全量 enqueue）、
+prepend 时复用段按常量偏移重定基 DisplayRange（与 `RebasePending` 同语义）。
+
 ## 2. 设计决策
 
 ### 2.1 候选
 
-- **A（推荐首做）计划层增量 screening（L2.6）**：缓存已 screening 屏幕行（键含 cell 身份/revision/布局输入），单次 pass 只 screen 变更 cell 并重组计划；重复 pass 代价 ∝ 增量。只改 screening 复用，不触碰投递语义，风险最低，且验收口径已存在。
+- **A（推荐首做）计划层段级增量装配（L2.6 的实测修正版）**：per-cell 计划段 memo（commits + source 身份）＋提交级 settled 过滤＋段 diff 集成＋prepend DisplayRange 重定基；重复 pass 代价 ∝ 变更段。复用段仅跳过重算，不触碰投递语义，风险最低；Stage 0 实测确认渲染缓存已存在、热点在装配/集成（§1.5）。
 - **B（备选）L2.4 计算移出锁 + L2.7 ledger 克隆地板**：单线程顺序执行但计算在锁外；无预算、无 worker。当前整状态 `Clone()` 被 ledger 深拷贝钉在 157–180ms（resume §4.8），需 L2.7 中期项（已 ack entry 降级为不含 `Lines`）达标后才可行。
 - **C（暂不采用）需求驱动增量铸 commit**：以结构性批量边界替代时间预算；需改 membership/逐出语义，风险最大。
 
@@ -75,17 +107,24 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
 
 ## 3. 分阶段实施（每阶段独立提交，失败即回滚）
 
-### Stage 0 基线与门禁（0.5 天）
+### Stage 0 基线与门禁（已完成，2026-10-06；实测记录见 §1.5）
 
 - 固化基线：`go test ./cmd/aicli/ui/ -run '^$' -bench 'BenchmarkDeferredOlderPageReplan|BenchmarkLayoutTranscriptResumeScale|BenchmarkPlanEligibleHistoryCommitsPlainTranscript' -benchtime 3x`，记录 `second_plan_prepend` 当前值。
+- CPU profile 归因已完成（`plan_only` + `second_plan_prepend`）：热点 = 集成 34.7% / 装配 9.4% / GC ~25%，见 §1.5。
 - 锁内耗时打点已存在（P16 `recordTranscriptPlanTiming` queue `:300`；plan-last/max 诊断）。
 
-### Stage 1 计划层增量 screening（2–4 天）
+### Stage 1 计划层段级增量装配（2–4 天；范围按 Stage 0 实测修正，§1.5）
 
-- 1a 新缓存：per-cell screened rows（键含 cell 身份/revision/width/theme/generation 相关项；容量自适应；append-only 前缀复用与 L2.2 同型）。
-- 1b 重组：全量 rows = 缓存段拼接 + 变更 cell 增量 screen；commit 铸走现有 `mintTranscriptPlanWindow`；cell 边界对齐契约（`TestLayoutTranscriptScreenRowsFromResumesAtCellBoundaries` 语义）。
-- 1c 结构断言：screening 次数/缓存命中计数可观测（诊断）；等价测试：增量结果 == 无预算全量（身份多重集 + 顺序），prepend 场景覆盖与顺序。
-- 验收：`second_plan_prepend` ≤1/3 基线；宽回归组（History/Transcript/Plan/Sync/Executor/NativeScrollback/两个 E2E）绿。
+- 1a 段索引：per-cell 计划段（`[]HistoryCommit` + source 身份集合 + 段行数），键 = cell 身份/revision/呈现输入
+  （width/theme/generation/skipRows 相关项）；容量自适应，与 `sharedCellRows` 同型但缓存的是**提交段**而非屏幕行。
+- 1b 复用与重定基：未变段直接复用；prepend 场景按前插行数对 DisplayRange 做常量偏移
+  （复用段不重跑 assemble/逐行 settled）；变更段走现有 assemble+mint。
+- 1c 提交级 settled 过滤：复用段按提交（非逐行）做 `hasTerminalRecordForSource` 过滤后交付集成。
+- 1d diff 集成：`syncHistoryEffectCandidates` 只对「新增/变更/移除」段做入队与逐出；
+  未变段跳过 enqueue 与全量 `byToken` 对账（Stage 0 热点 3,340ms 的消除点）。
+- 1e 结构断言与等价：段命中/复用计数可观测（诊断）；增量结果 == 无预算全量（身份多重集 + 顺序）；
+  prepend 覆盖与顺序（`TestDeferredOlderPagePrependReplansAndCoversOlderCells` 保持绿）。
+- 验收：`second_plan_prepend` ≤174ms（1/3 × 522ms）；宽回归组（History/Transcript/Plan/Sync/Executor/NativeScrollback/两个 E2E）绿。
 
 ### Stage 2 无预算同步化（1–2 天）
 
