@@ -70,6 +70,14 @@ type chatRuntimeEventBridge struct {
 	backlogBytes                int64
 	backlogIndex                map[string]*chatRuntimeQueuedEvent // coalescible latest-wins 槽位
 	streamWorkerRunning         bool
+	// streamWriteInFlight is true while run() is handling a mergeable stream
+	// event (its write has started and not returned). Publishers must keep
+	// coalescing into the ordered backlog during this window, and the backlog
+	// worker must not promote a stream head out of it: the backlog is the only
+	// merge surface, so promoting during an in-flight write would split one
+	// stall into several small redraws. Unlike queue-byte accounting this flag
+	// is exact for harnesses that consume the queue manually.
+	streamWriteInFlight bool
 	backlogMerged               uint64
 	backlogEvicted              uint64
 	backlogDropped              uint64
@@ -1874,6 +1882,18 @@ func (b *chatRuntimeEventBridge) tryDeliverBacklogHeadLocked() bool {
 		}
 		ok = b.trySendQueuedToBoundedQueue(&q)
 	} else {
+		// Stream slots must stay in the backlog — the only merge surface —
+		// while a stream write is in flight. Promoting the head into the
+		// bounded queue during an in-flight write moves the merge window out
+		// of the backlog: a delta arriving after the promotion finds an empty
+		// backlog and cannot fold into the pending text, so one stall splits
+		// into several small redraws (TestChatRuntimeEvents_
+		// CoalescesStreamingDeltasWhileQueueBacksUp flaked on exactly this).
+		// The worker retries; run() pumps the backlog as soon as the current
+		// write returns and clears the flag.
+		if b.streamWriteInFlight {
+			return false
+		}
 		q := chatRuntimeQueuedEvent{
 			event:    head.event,
 			size:     head.size,
@@ -2377,7 +2397,7 @@ func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, s
 	epoch := b.runEpoch
 	b.renderMu.Unlock()
 	q := &chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch, queuedAt: time.Now()}
-	if len(b.backlog) > 0 || b.streamWorkerRunning || b.streamQueueBusy() {
+	if len(b.backlog) > 0 || b.streamWorkerRunning || b.streamWriteInFlight || b.streamQueueBusy() {
 		// 消费者仍然落后（队列里还有未处理事件，或正在处理上一条）：此时
 		// 逐条直投会让一次卡顿裂成多次小重绘，必须合并进单一有序车道。
 		b.appendBacklogSlotLocked(q, eventClassStream)
@@ -2611,17 +2631,24 @@ func (b *chatRuntimeEventBridge) trySendStreamEvent(q *chatRuntimeQueuedEvent) b
 	if len(b.eventQueue) >= b.normalEventQueueCapacity() {
 		return false
 	}
+	// Account the retained bytes BEFORE the send. The consumer may dequeue and
+	// start handling the event the instant it is sent (handleQueuedEvent
+	// releases the bytes only after the write returns), so a concurrent delta
+	// must already observe a lagging consumer and coalesce into the ordered
+	// backlog. Accounting after the send leaves a window where
+	// streamQueueBusy() reads zero while a write is in flight, and the next
+	// delta bypasses coalescing into a second direct send — one stall then
+	// degrades into several small redraws (TestChatRuntimeEvents_
+	// CoalescesStreamingDeltasWhileQueueBacksUp flaked on exactly this).
+	b.accountEventQueueBytes(q.size)
 	select {
 	case b.eventQueue <- *q:
-		// Streaming events are exempt from the blocking byte budget but are
-		// still accounted so coalescing can detect a lagging consumer and so
-		// run() releases a symmetric amount.
-		b.accountEventQueueBytes(q.size)
 		b.progressMu.Lock()
 		b.enqueuedEvents++
 		b.progressMu.Unlock()
 		return true
 	default:
+		b.releaseEventQueueBytes(q.size)
 		return false
 	}
 }
@@ -2747,7 +2774,18 @@ func mergeStreamText(existing, incoming string) string {
 
 func (b *chatRuntimeEventBridge) run() {
 	for queued := range b.eventQueue {
+		streamWrite := isMergeableStreamEvent(queued.event.Type)
+		if streamWrite {
+			b.streamMu.Lock()
+			b.streamWriteInFlight = true
+			b.streamMu.Unlock()
+		}
 		b.handleQueuedEvent(queued)
+		if streamWrite {
+			b.streamMu.Lock()
+			b.streamWriteInFlight = false
+			b.streamMu.Unlock()
+		}
 		b.progressMu.Lock()
 		b.processedEvents++
 		b.progressMu.Unlock()
