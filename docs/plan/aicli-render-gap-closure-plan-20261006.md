@@ -12,6 +12,8 @@
 > `aicli-render-remaining-defect-ledger-20261006.md`（A1–A5 主线）、写端清单门禁
 > （`ui/writer_inventory_test.go`、`commands/chat_command_result_test.go`）。
 > 规范源：`docs/architecture/aicli-tui-renderer-architecture-design.md` §7.5（本方案执行其 G1–G12）。
+> **实施口径**：G1–G12 的**实施基准**为本方案（批次/步骤/验收/台账）；各域细分以所注计划为准
+>（P1-3 §3.7 保留决策、P2 切片、P1-1 子计划、P0 台账）；任何冲突回设计文档（唯一规范源）。
 > 硬规则：**迁移一处 → 从 §9 台账划掉一处**；测试先行；一刀一提交；每刀 `gofmt` +
 > 目标包门禁 + 相关用例；跨批不得混合提交。
 
