@@ -228,6 +228,15 @@ type UIController struct {
 	mu    sync.Mutex
 	cond  *sync.Cond
 	queue []UIAction
+	// queueTickets is a parallel lane to queue: queueTickets[i] is the highest
+	// post ticket merged into queue[i]. Tickets are the ack identity for
+	// WaitActionApplied/WaitActionVisible; the lanes are always resliced
+	// together so their lengths stay equal. Followups carry no ticket.
+	queueTickets  []uint64
+	nextTicket    uint64
+	appliedTicket uint64
+	visibleTicket uint64
+	waiters       map[uint64][]*actionWaiter
 	// followups holds actions causally emitted while the reducer applies the
 	// current action. They are consumed before the next external mailbox item,
 	// but do not consume external mailbox capacity: accepting a facade mutation
@@ -324,87 +333,15 @@ func (c *UIController) SetEffectConsumer(consumer EffectConsumer) bool {
 // 满时阻塞等待消费者；coalescable 同 key 待处理时直接合并返回。
 // 可在任意 goroutine 调用。
 func (c *UIController) Post(action UIAction) bool {
-	if c == nil || action == nil {
-		return false
-	}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return false
-	}
-	if action.Class() == ClassCoalescable {
-		if key := action.CoalesceKey(); key != "" {
-			if idx, ok := c.coalesce[key]; ok && idx < len(c.queue) {
-				c.queue[idx] = mergeActions(c.queue[idx], action)
-				c.posted++
-				c.dropped++
-				c.mu.Unlock()
-				return true
-			}
-		}
-	}
-	var waitStart time.Time
-	for len(c.queue) >= c.cap {
-		if c.closed {
-			c.recordPostWaitLocked(waitStart)
-			c.mu.Unlock()
-			return false
-		}
-		if waitStart.IsZero() {
-			waitStart = time.Now()
-		}
-		c.cond.Wait()
-	}
-	c.recordPostWaitLocked(waitStart)
-	if c.closed {
-		c.mu.Unlock()
-		return false
-	}
-	c.queue = append(c.queue, action)
-	if action.Class() == ClassCoalescable {
-		if key := action.CoalesceKey(); key != "" {
-			c.coalesce[key] = len(c.queue) - 1
-		}
-	}
-	c.posted++
-	c.mu.Unlock()
-	c.cond.Broadcast()
-	return true
+	outcome, _ := c.PostTracked(action)
+	return outcome != PostDropped
 }
 
 // TryPost 是 Post 的非阻塞形态：mailbox 满且不可合并时立即返回 false
 // （不丢弃任何已接受 action；调用方可选择稍后重试）。closed 时返回 false。
 func (c *UIController) TryPost(action UIAction) bool {
-	if c == nil || action == nil {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return false
-	}
-	if action.Class() == ClassCoalescable {
-		if key := action.CoalesceKey(); key != "" {
-			if idx, ok := c.coalesce[key]; ok && idx < len(c.queue) {
-				c.queue[idx] = mergeActions(c.queue[idx], action)
-				c.posted++
-				c.dropped++
-				return true
-			}
-		}
-	}
-	if len(c.queue) >= c.cap {
-		return false
-	}
-	c.queue = append(c.queue, action)
-	if action.Class() == ClassCoalescable {
-		if key := action.CoalesceKey(); key != "" {
-			c.coalesce[key] = len(c.queue) - 1
-		}
-	}
-	c.posted++
-	c.cond.Broadcast()
-	return true
+	outcome, _ := c.TryPostTracked(action)
+	return outcome != PostDropped
 }
 
 // PostDeferred appends an internal, already-derived UI action without waiting
@@ -418,44 +355,8 @@ func (c *UIController) TryPost(action UIAction) bool {
 // remains their backpressure boundary. The queue may temporarily exceed cap;
 // only internal projection adapters should call this method.
 func (c *UIController) PostDeferred(action UIAction) bool {
-	if c == nil || action == nil {
-		return false
-	}
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return false
-	}
-	if action.Class() == ClassCoalescable {
-		if key := action.CoalesceKey(); key != "" {
-			if idx, ok := c.coalesce[key]; ok && idx < len(c.queue) {
-				c.queue[idx] = mergeActions(c.queue[idx], action)
-				c.posted++
-				c.dropped++
-				c.deferredPosted++
-				c.deferredMerged++
-				c.mu.Unlock()
-				return true
-			}
-		}
-	}
-	c.queue = append(c.queue, action)
-	if action.Class() == ClassCoalescable {
-		if key := action.CoalesceKey(); key != "" {
-			c.coalesce[key] = len(c.queue) - 1
-		}
-	}
-	c.posted++
-	c.deferredPosted++
-	if len(c.queue) > c.cap {
-		c.capacityOverflow++
-	}
-	if len(c.queue) > c.peakPending {
-		c.peakPending = len(c.queue)
-	}
-	c.mu.Unlock()
-	c.cond.Broadcast()
-	return true
+	outcome, _ := c.PostDeferredTracked(action)
+	return outcome != PostDropped
 }
 
 // PostFollowup accepts an action emitted synchronously by the current reducer.
@@ -539,11 +440,13 @@ func (c *UIController) Run() {
 		}
 		if len(c.queue) == 0 && len(c.followups) == 0 {
 			// closed 且队列已空：排空完成。
+			c.releaseAbortedWaitersLocked()
 			c.mu.Unlock()
 			return
 		}
 		c.mu.Unlock()
 		batchActions := 0
+		batchMaxTicket := uint64(0)
 		var batchDirty renderengine.DirtyFlags
 		batchFlush := false
 		batchMarkedDelivering := false
@@ -565,12 +468,15 @@ func (c *UIController) Run() {
 				break
 			}
 			var action UIAction
+			var ticket uint64
 			if len(c.followups) > 0 {
 				action = c.followups[0]
 				c.followups = c.followups[1:]
 			} else {
 				action = c.queue[0]
+				ticket = c.queueTickets[0]
 				c.queue = c.queue[1:]
+				c.queueTickets = c.queueTickets[1:]
 				c.reindexCoalesceLocked()
 			}
 			c.inFlight = true
@@ -612,6 +518,17 @@ func (c *UIController) Run() {
 				c.followups = c.followups[:followupStart]
 			}
 			c.lastAction = actionClassString(action)
+			if ticket > 0 {
+				if ticket > c.appliedTicket {
+					c.appliedTicket = ticket
+				}
+				if ticket > batchMaxTicket {
+					batchMaxTicket = ticket
+				}
+				// The action's state is published above; waiters registered for
+				// this ticket may now read the snapshot it produced.
+				c.releaseActionWaitersLocked()
+			}
 			batchActions++
 			var immediate []Effect
 			for _, effect := range effects {
@@ -639,12 +556,18 @@ func (c *UIController) Run() {
 		if batchFlush {
 			c.deliver([]Effect{FlushEffect{Dirty: batchDirty}})
 		}
+		c.mu.Lock()
 		if batchMarkedDelivering {
-			c.mu.Lock()
 			c.delivering = false
-			c.mu.Unlock()
-			c.cond.Broadcast()
 		}
+		// Effects for the whole batch (flush included) have been delivered:
+		// visible-ticket waiters are released only after this point.
+		if batchMaxTicket > c.visibleTicket {
+			c.visibleTicket = batchMaxTicket
+		}
+		c.releaseActionWaitersLocked()
+		c.mu.Unlock()
+		c.cond.Broadcast()
 	}
 }
 
