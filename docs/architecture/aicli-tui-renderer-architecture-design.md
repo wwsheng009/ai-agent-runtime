@@ -5,8 +5,9 @@
 > 基线：`feat/render-p0-writer-unification` @ `d47147b1`（2026-10-06）。
 > 依据：`docs/plan/aicli-unified-render-architecture-audit-20261005.md`（§5 根因、§6 目标与 P0–P3）、
 > P0 台账（`aicli-render-p0-writer-unification-ledger.md`）、P1 计划（`aicli-render-p1-state-convergence-plan.md`）、
-> P1-1 子计划（`aicli-render-p1-1-step4-planning-incremental-plan.md`）、P2 侦察（进行中）、P3 与工作区实读。
-> 阅读顺序建议：§1 → §2 → §5（时序）→ §3/§4（按需）→ §6/§7。
+> P1-1 子计划（`aicli-render-p1-1-step4-planning-incremental-plan.md`）、P2 侦察（2026-10-06 完成）、P3 与工作区实读。
+> 阅读顺序建议：§1 → §2 → §5（时序）→ §8（衔接契约）→ §9（handoff 专项）→ §10（区域模型）
+> → §3/§4/§6/§7（按需）→ §11。
 
 ---
 
@@ -521,7 +522,283 @@ sequenceDiagram
 
 ---
 
-## 8. 开放问题（实施前需定稿）
+## 8. 组件衔接契约（接口矩阵）
+
+> 本表是"组件之间怎么衔接"的规范：每一行是一个衔接点（seam），定义载荷、顺序/前置条件、失败语义。
+> 任何新增交互必须先在此登记；违反顺序约束的调用视为架构缺陷（对齐 §6 INV）。
+
+| # | 衔接（上游 → 下游） | 载荷/载体 | 顺序与前置条件 | 失败/拒绝语义 |
+|---|---|---|---|---|
+| S1 | 事件桥 → UI mailbox | `UIAction`（epoch 标记；流=coalescable，critical=保留席） | 单车道 FIFO；epoch stale 拒绝；有积压不得旁路 | 有界等待失败 → 仅流事件可丢弃 + 诊断计数；critical 不丢 |
+| S2 | 输入/命令 producer → mailbox | typed `UIAction`（durable/coalescable/barrier/followup） | 唯一入口；禁止直改状态或写终端 | 非 typed 调用 = 评审/门禁违规 |
+| S3 | mailbox → reducer | action 批（≤64） | 单 goroutine；durable 保序、coalescable latest-wins；followup 先于外部 mailbox | reducer panic 丢弃本 action 的 causal children（不半提交） |
+| S4 | reducer → Scene | `ReplaceTranscriptAction`（快照） | 全有或全无；与规划同一次归约（S4 先于 S5） | 无快照不替换；失败不产生半场景 |
+| S5 | reducer → planner | transcript+active+geometry+theme+lease（纯输入） | 目标：同线程同步（无 worker、无结果 action） | 无（纯函数） |
+| S6 | planner → 交付账 | 候选（身份 = source range + revision + fragment） | 同源去重（`hasTerminalRecordForSource`）；**Queued 可 rebase，claimed 只 invalidate、永不 rebase** | 重复铸造/身份冲突 → 拒绝入账 |
+| S7 | 交付账 → executor | Pending 批 + claim（单飞） | `markInFlight` 门：`!Frozen && !Unknown && !hasUnresolvedDelivery` | `ErrHistoryCommitFrozen` / `ErrHistoryProjectionUnknown` / `ErrHistoryCommitRecoveryPending` |
+| S8 | executor → TerminalSession | claimed 批快照（plan + payload） | prepare→write；单 writer；geometry 已发布（S11 先于 S8） | 短写/错误 = fail-closed（不静默降级） |
+| S9 | TerminalSession → gateway → TTY | 原子写批次（DEC 2026 包裹） | 一帧一次；primary 串行提交 | 写失败 → Failed（投影 unknown） |
+| S10 | TerminalSession → reducer（回执） | Ack/Failed/Deferred/Settled/Recovered（动作） | 经 mailbox 回 reducer；回执顺序 = 写顺序 | 世代失配 → settle / quarantine（不复活旧 token） |
+| S11 | presenter → executor | geometry 发布（先）+ Request（后） | 首帧不得零尺寸；probe 失败保留 pending 下次重试 | TryPost 失败 → 下次 Flush/Request 重试 |
+| S12 | FramePump → executor | 调度键：dynamicStatus / stableCommit / activeFrame / prompt | 每 key 单 pending，替换即合并；定时器只 `Post(DrawRequested)` | 无（替换语义） |
+| S13 | reducer → lease 屏障 | Begin/EndLease（barrier） | lease 活跃 → 历史交付冻结（S7 门）；往返只经同一 transport | 冻结期只入账不投递 |
+| S14 | 编辑器/控制序列 → session 旁路 | bracketed-paste/focus/secret/标题/铃 | session 内串行、可记录、lease 感知 | 组件持 stdout = P0 门禁违规 |
+| S15 | 诊断 tap | 只读（PaintTrace / diag ring） | 零字段补偿；不参与布局/diff/输出 | 无 |
+
+**跨 seam 关键顺序约束（违反即缺陷）**
+
+1. **S4 先于 S5**：Scene 安装与规划必须同一次归约，否则规划输入与所授权快照错位。
+2. **S11 先于 S8**：首帧前 geometry 必须已发布（否则 `TerminalFramePlan.Valid()` 拒绝该帧）。
+3. **S6 → S7 → S8 严格串行**：claim 之后该载荷不得被 rebase/替换；invalidate 只能转为失败/隔离。
+4. **S10 必须回 reducer**：任何"结果直接驱动下一跳"的旁路都视为违规。
+5. **S1 的 epoch 与 S10 的世代校验成对**：回执世代失配一律进 settle/quarantine，不得重放旧 token。
+
+---
+
+## 9. active band → history handoff 专项（影响最终渲染的核心链路）
+
+> 本章把"active band 如何变成历史、最终如何成为屏幕字节"的衔接逻辑完整成文；
+> 目标语义与 P2 切片（§7.4）一致；凡标"当前"的行为是迁移期状态。
+
+### 9.1 目标语义（四句话）
+
+1. mutable 只活在 band（可见窗口内的 tail）：不铸 history token、不写 scrollback、不写 resident。
+2. finalize 时整 cell 从 source 0 一次性铸造并按行序交付（不重铸、不跳段、skipRows=0）。
+3. 已交付事实只进不退：交付游标单调；settle 原地隔离、永不重发、从最后已证明行续写。
+4. 可见窗口 W 行只服务 finalized 内容；溢出按行序 append 进 native scrollback。
+
+### 9.2 四阶段生命周期（目标形态）
+
+| 阶段 | 入口 | 责任组件 | 写什么 | 不写什么 | 账目变化 |
+|---|---|---|---|---|---|
+| A 流式 | `UpdateActiveCellAction` | reducer → band 投影（`ProjectActiveCellBand`） | band 尾部（≤ `ActiveBandRows` 预算） | 不铸 token、不写 scrollback、不写 resident | 无 |
+| B finalize | `FinalizeActiveCellAction` | reducer → planner | 无（仅规划） | — | cell 转 transcript；整段铸造候选（skipRows=0） |
+| C 交付 | 交付唤醒（事件驱动） | executor → `TerminalSession` | 单事务：history insert（resident 窗口 + 溢出按行序 append）→ viewport diff → cursor restore | 不改写 scrollback、不重发已证明行 | claim → 写 → 交付游标前进 |
+| D 账目 | 回执 | reducer / 交付账 | — | 不复活旧 token | ack=游标单调；失败=settle/quarantine 或 epoch 恢复 |
+
+### 9.3 时序图
+
+#### 9.3.1 阶段 A：流式（band-only）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RT as Runtime
+    participant RD as Reducer
+    participant AS as AppState
+    participant LY as 帧合成
+    participant TS as TerminalSession
+
+    RT->>RD: assistant.delta
+    RD->>AS: Active.Source 增长（revision++）
+    RD->>LY: FlushEffect(activeFrame)
+    LY->>LY: ProjectActiveCellBand：只取尾部 ≤ ActiveBandRows
+    LY->>TS: 帧事务（band 区 diff）
+    TS-->>RD: front 确认
+    Note over AS,TS: 不铸 history token；不写 scrollback；<br/>超出 band 预算的前缀在 finalize 前不可见（§9.6）。
+```
+
+#### 9.3.2 阶段 B+C：finalize 一次性交付（全链）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RT as Runtime
+    participant RD as Reducer
+    participant PL as Planner
+    participant DC as 交付账 / 游标
+    participant EX as Executor
+    participant TS as TerminalSession
+    participant GW as Gateway
+
+    RT->>RD: assistant_message（权威终稿）
+    RD->>RD: FinalizeActiveCell（cell → transcript）
+    RD->>PL: 同归约规划（source 0 起，整段）
+    PL->>DC: 候选按行序入账（身份去重）
+    RD->>EX: 交付唤醒（事件驱动）
+    EX->>DC: claim 单飞（唯一在途）
+    EX->>TS: 事务：history insert → viewport diff → cursor
+    TS->>GW: 原子写（DEC 2026）
+    GW-->>TS: 写完成
+    TS-->>DC: ack → 交付游标单调前进
+    Note over PL,DC: 已交付前缀不重铸；<br/>resident 窗口保持连续；溢出按行序进 scrollback。
+```
+
+#### 9.3.3 交付在飞 × resize（rebase / invalidate）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TTY as TTY
+    participant RD as Reducer
+    participant PL as Planner
+    participant DC as 交付账
+    participant EX as Executor
+    participant TS as TerminalSession
+
+    TTY->>RD: Resize / Theme
+    RD->>RD: Geometry 更新 + LayoutGeneration++
+    RD->>PL: 重规划（同归约）
+    PL->>DC: Queued 候选：按身份 rebase 到新几何
+    PL->>DC: claimed 候选：只 invalidate（永不 rebase）
+    DC-->>EX: invalidate → Deferred / recovery
+    RD->>TS: 重画可见窗口（window-only）
+    Note over DC,TS: claimed 载荷不得被替换；<br/>invalidate 只能转失败/隔离，之后按行序重排。
+```
+
+#### 9.3.4 部分写失败 → settle → 续写
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant EX as Executor
+    participant TS as TerminalSession
+    participant GW as Gateway
+    participant RD as Reducer
+    participant DC as 交付账
+
+    EX->>TS: 事务写
+    TS->>GW: 写批次
+    GW--xTS: 短写 / 错误 / panic
+    TS->>TS: MayHavePartiallyWritten：proofs 整族复位（stream tail/cells/锚）
+    TS-->>RD: Failed / ProjectionUnknown
+    RD->>DC: settle：不可证明区间原地隔离（永不重发）
+    DC-->>EX: 从最后已证明行继续（按行序）
+    Note over RD,TS: 不重试旧 token；<br/>若 settle 无法收敛 → 语义 epoch 恢复（§5.6）。
+```
+
+### 9.4 边界条件矩阵（handoff × 事件）
+
+| 事件 | 流式中（A） | 交付在飞（C） | 已确认（D 之后） |
+|---|---|---|---|
+| resize / theme | band 按新几何重投影（不铸） | Queued rebase；claimed invalidate → Deferred/recovery；窗口重画 | 只重画窗口；scrollback 不回读 |
+| finalize | 立即转 B（同归约） | 迁移期：等批 ack 后补铸；目标：无 active 批 | 直接铸全量 |
+| lease begin/end | 交付冻结（queued 只入账） | 冻结期 claim 延后；lease 结束恢复 | 不受影响 |
+| 部分写失败 | — | proofs 复位 → settle（从最后已证明行续写） | 不受影响 |
+| resume / replay | 新 epoch 一次性导入（不依赖旧账） | 新 epoch 取消旧在途 | 旧 epoch 游标作废 |
+| 长 mutable 溢出 | 超出 band 预算部分 finalize 前不可见（§9.6） | — | — |
+| 队列满 / 背压 | 候选有界入账（不入渲染） | claim 延后，不丢已确认事实 | — |
+
+### 9.5 当前 → 目标差异与 P2 切片映射
+
+| 对象 | 当前（迁移期） | 目标 | 切片 |
+|---|---|---|---|
+| active 溢出归档（mutable→scrollback） | `planMutableActiveCellHistoryCommitsWithTheme` 铸 Active 提交；`terminalActiveHistoryArchiveANSI` 归档 | 停铸；band tail-only | P2 Slice 1（单点停铸）→ Slice 2（删终端归档路径） |
+| skipRows（finalize 只补尾） | 由已交付 Active 条目反推 | 恒 0（整段铸造） | Slice 1 后自动成立 |
+| 锚定（底锚/顶锚/续接启发式） | `historyTopAligned` + `historyInsertionContinuesScrollback` 等 12 场景 | 统一"resident 之后按序写、写满 LF 溢出" | P2 锚定切片 |
+| armed 销毁式重放 | `ArmScrollbackReplay` + `\x1b[3J` + `ProvenScrollbackEpoch` | 删除；settle 保留；`TerminalEpoch` 语义化 | P2 replay 切片（S1–S5） |
+| reset backoff（success-mode） | 预算 / 窗口 / yield | 先删 success-mode，保留 failed 限速与诊断 | P2 最后一步 |
+
+### 9.6 可见性取舍（显式设计决策）
+
+- band 预算：`ActiveBandRows = clamp(Height/3, ≤14, ≤Height-12, ≥6)`（常量：divisor=3、max=14、reserved=12、min=6）。
+- **流式期间超出 band 预算的内容在 finalize 前不可见**：既不进 scrollback（INV-4），也不进 resident（resident 只服务 finalized 内容）。
+- 理由：exactly-once + append-only 的代价；提前可见必然引入"可改写区域"（破坏 resident 语义）或"提前归档"（正是被删除的特例族）。
+- 若未来产品要求长流式提前可见：只允许两条路——**增大 band 预算** 或 **stable 前缀分段 finalize（需单独设计并登记 §11 开放问题）**；不得恢复 mutable→scrollback 路径。
+
+---
+
+## 10. 屏幕区域模型（Region Model）
+
+> 本章把"屏幕上有哪些区域、各自归谁、预算多少、如何互让、光标归谁、怎么扩展"成文；
+> 数据来自代码实证（`bottom_pane_layout_policy.go` / `bottom_pane_row_plan.go` /
+> `bottom_pane_popup_state.go` / `app_screen_layout.go` / `app_render_frame.go`）。
+
+### 10.1 区域清单与所有者
+
+| 区域 | 语义所有者（AppState） | 渲染槽位（RowOwner） | 预算 | 光标 | 备注 |
+|---|---|---|---|---|---|
+| 历史区（transcript / fullscreen overlay） | `AppState.Transcript`（Scene 快照） | transcript | resident 窗口 W 行（outputBottom 以上）；溢出 → scrollback | 无 | fullscreen 时整体替换 |
+| active band | `AppState.Active`（ActiveCellState） | band | `clamp(h/3, ≤14, ≤h-12, ≥6)`；顶距 1 行（h≥16） | 无 | tail-only（§9） |
+| 动态状态行 | `BottomPaneState.DynamicStatusModel` | status | 1 行（`ReserveDynamicStatusRow` 常驻预留） | 无 | 等待态时钟；events degraded 尾部 |
+| notice 行 | `BottomPaneState`（notice） | prompt | ≤ noticeRows | 无 | prompt 上方 |
+| prompt 输入区 | `BottomPaneState`（prompt/composer） | prompt | 可见行 ≤ 派生上限；上下 margin 各 1（h≥12） | prompt（默认） | popup ComposerLine 可接管 |
+| SessionID 行 | `BottomPaneState.SessionIDLine` | status | 1 行（statusRow-1，可选） | 无 | session 级 |
+| 底部状态栏 | `BottomPaneState.StatusModel` | status | 1 行（最底，statusRow=height） | 无 | nil → RunReady 默认 |
+| popup / 面板 | `BottomPaneState`（PopupLines/Owner/Instance/Viewport/ComposerLine） | popup | 两种锚定（见 10.2）；reserved rows 契约 | ComposerLine 存在时接管 | 见 10.6 面板族 |
+| 副屏（fullscreen/alternate） | `AppState.Lease` + `RoutingPanel` | （同一 transport） | 全屏 | lease 内自管 | 冻结历史交付（S13） |
+
+### 10.2 底部堆叠顺序与优先级（代码实证）
+
+自底向上（bottom-up）：
+
+1. `height`：底部状态栏（`StatusModel`，owner status；nil 渲染 RunReady）。
+2. `height-1`：SessionID 行（`SessionIDLine`，owner status；可选）。
+3. popup / prompt 区（互让，两种锚定）：
+   - `popupExpandsBelowPrompt`：popup 从 `promptBottom + bottomMargin + 1` 向下扩展；
+   - 否则：popup 锚定在 `statusRow - popupBottomGap - popupRows`（整个底部 gap 之上），
+     防止 prompt 区行（band/动态状态/notice）覆盖 popup 尾。
+4. prompt 区自底向上：prompt 输入行 → top margin → 动态状态行 → notice 行 → active band。
+
+reserve 公式（`bottomPaneReservedRowCount`）：
+
+```text
+bottomRows = 1 + sessionStatusVisible + visiblePopup
+           + (popupExpandsBelowPrompt ? promptAreaVisible
+                                      : composerVisible + popupBottomGap)
+```
+
+优先级（互让规则）：prompt 可见行数在空间不足时被压缩
+（`maxRows = promptBottom - outputBottom - dynamic - notice - bandLayout - topMargin`），
+但动态状态 / notice / band 不被 prompt 挤掉；popup 的输入行（ComposerLine）优先于底部 prompt 获得光标。
+
+### 10.3 光标归属（`bottomFocusForPopup`）
+
+| 条件 | 焦点 |
+|---|---|
+| popup 持有 `ComposerLine` | popup（最后一行即输入行） |
+| prompt 可见 | prompt |
+| prompt 不可见但存在信息型 popup | popup（驻留末尾，兼容语义） |
+| 以上皆无 | None |
+
+### 10.4 行预算公式汇总
+
+| 预算 | 公式/常量 | 位置 |
+|---|---|---|
+| band 行数 | `clamp(h/3, ≤14, ≤h-12, ≥6)`（min=6 / max=14 / reserved=12 / divisor=3） | `fixed_bottom_surface.go:57-72` |
+| band 顶距 | 1 行（h≥16），否则 0 | `fixed_bottom_surface.go:81-86` |
+| composer margins | 上 1 / 下 1（h≥12），否则 0/0 | `fixed_bottom_surface.go:74-79` |
+| prompt 最大可见行 | `promptInputMaxVisibleRowsForGeometry`（派生） | `bottom_pane_layout_policy.go:43` |
+| 底部 reserve | 见 10.2 公式 | `bottom_pane_row_plan.go:120-128` |
+
+### 10.5 区域 → dirty → 帧键
+
+| 区域 | dirty 来源 | 帧键 |
+|---|---|---|
+| active band | 流式 delta / ack 推进 | activeFrame |
+| 历史区 | finalize / 交付确认 / resize | stableCommit |
+| 动态状态行 | `SetDynamicStatusModel` / 等待态时钟 | dynamicStatus |
+| prompt / notice / popup | 输入 / popup 栈 / 焦点 | prompt |
+
+### 10.6 面板族统一模型（目标；当前为缺口）
+
+统一面板契约（目标形态，所有面板都必须满足）：
+
+```text
+Panel = { Owner, Instance, Layer(above-prompt | below-prompt | fullscreen),
+          ReservedRows, ComposerLine?, FocusPolicy, Lifecycle(open/update/close),
+          LeaseInterplay }
+```
+
+| 面板族 | 当前实现 | 目标 |
+|---|---|---|
+| popup（审批/提问/信息） | `PopupLayer` + owner/instance/viewport/composerLine/belowPrompt/reservedRows | 保留为 `Layer=above/below-prompt` |
+| modal box（审批/提问正文盒） | `modalBoxLines`（按内容扩展的边框盒） | 归入 popup 统一层 |
+| RoutingPanel | 副屏 lease + `RoutingPanelState` | `Layer=fullscreen`（lease 互斥） |
+| agent panel / debug panel | 各自 popup owner | 归入 popup 统一层 + 独立 owner 命名空间 |
+| 多层 popup | `PopupStack`（准入/优先级规则散落） | 统一"优先级 = 层深 + owner 优先级表"（待定稿） |
+
+### 10.7 区域扩展流程（新区域/新面板）
+
+1. 语义状态进 `AppState`（并在 §4 所有权矩阵登记所有者）；
+2. 在 bottom row plan 中定义行数、优先级、row owner、cursor（含窄屏/溢出行为）；
+3. `ComposeAppRenderFrame` 提供 structured line（plain 一致性校验）；
+4. 定义 dirty 分类与帧键；
+5. 添加窄屏、overflow、popup 覆盖、resize 测试（并更新本章表格）。
+
+---
+
+## 11. 开放问题（实施前需定稿）
 
 1. **D2 提交身份决策**（P1-1 §1.6）：`historyCommitRangeKey` 去 display + finalized 跳过 display 比较；
    已识别中部插入反例（仅跳过重定基会丢行），需测试先行钉住"无重复铸造 / 无丢行"不变式。
@@ -532,7 +809,11 @@ sequenceDiagram
 5. **测试改写策略**：5,296 个固化断言中，哪些随 P2/P3 语义改写、哪些删除、哪些新增为结构断言——
    需在 P2 切片计划中列明（避免"改一处、重写多处断言"的回归噪声）。
 6. **文档清理**：约 35 份 render 相关文档的归档/合并策略（避免再次出现"唯一规范源"声明漂移）。
+7. **长流式提前可见性**（§9.6）：若产品要求，选择"增大 band 预算"或"stable 前缀分段 finalize"
+   （需单独设计；禁止恢复 mutable→scrollback 路径）。
+8. **面板族统一契约**（§10.6）：多层 popup 的准入/优先级表、焦点与 lease 关系定稿。
 
 ---
 
-> 维护约定：本文件随每个 P0–P3 切片更新（状态列 + 矩阵 + 时序图）；任何新增状态字段必须先在本文件 §4 登记所有者。
+> 维护约定：本文件随每个 P0–P3 切片更新（状态列 + 矩阵 + 时序图 + 区域表）；
+> 任何新增状态字段必须先在本文件 §4 登记所有者，任何新增区域/面板必须先在本文件 §10 登记契约。
