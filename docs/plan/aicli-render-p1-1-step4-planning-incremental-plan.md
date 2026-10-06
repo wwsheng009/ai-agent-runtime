@@ -154,3 +154,40 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
 3. **在途批次**：新挂起契约错则丢计划（§1.4 耦合 2）；`TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight` 改写后必须等价。
 4. **memo 误命中**：部分计划落 memo 会漏交付；结构断言 + 等价测试双保险。
 5. **回滚粒度**：每阶段独立提交；Stage 2/3 失败回滚到 Stage 1 态（同步+预算仍可用）。
+
+### 1.6 Stage 1 设计细化（2026-10-06 编码前复核，工作区实读）
+
+**已存在的缓存（先复用，不重造）**：
+
+- `sharedHistoryPlan`（history_plan_cache.go:27-54）：per-cell `[]planPhysicalRow` LRU（8192 条 / 64MB）；
+  `planPlainCellHistoryCommits` 命中路径（planner:724-741）跳过 wrap/物化，仅做对齐校验 + `assemblePlainHistoryCommits`。
+- 结论：Stage 1 不需要新的物理行缓存；缺的是**提交级**复用与**集成 diff**。
+
+**提交身份模型（决定 diff 可行域）**：
+
+- `historyCommitSourceKey`（history_commit.go:210-217）：origin/cellID/revision/sourceStart/sourceEnd/fragmentID
+  ——**不含 DisplayRange**；`bySource` + `compactedTerminalSources` 是其索引，`BlocksRemint`（:187-196）
+  对 **Queued 与 Delivered 均为 true** ⇒ `hasTerminalRecordForSource` 覆盖未交付条目，
+  `enqueueHistoryCandidates` 对已存在来源的候选直接跳过。
+- `historyCommitRangeKey`（:236-248）：source key + displayStart/displayEnd/layoutGeneration，用于 `byRange`
+  （Enqueue 的精确重复检测 / RebasePending 冲突检测）。
+- `historyCommitPresentationEqual`（planner:1563-1578）：finalized 提交**比较 DisplayRange**（Active 已跳过）。
+- prepend 场景：全部 finalized Queued 条目 DisplayRange 常量平移 → presentationEqual=false →
+  `RebasePending` 全量重定基（reconcile 980ms 与 byRange 双 map 操作的主体）。
+
+**DisplayRange 生产消费方（实读，非测试，仅 3 处）**：`Valid()` 校验（:82）、`historyCommitKey`（byRange）、
+`historyCommitPresentationEqual`。**writer/presenter/scrollback 均不消费**（字节权威 = SourceRange + Lines）。
+
+**Stage 1d 两个候选方向（编码前二选一或组合）**：
+
+- **D1（保守）**：段 diff 只跳过「source 身份集合与 Lines 均未变**且** DisplayRange 未变」的段；
+  prepend 仍全量重定基 ⇒ 只消 enqueue 侧，消不掉 reconcile。
+- **D2（激进，收益大）**：把 DisplayRange 从「呈现等价」降级为纯簿记（finalized 亦跳过比较，
+  或进一步从 byRange 键移除）——prepend 不再触发全量 RebasePending，未变段可直接跳过。
+  待证不变式：①byRange 去 display 后无重复铸造路径（bySource 阻断已覆盖 Queued/Delivered）；
+  ②跨 generation（reflow）不碰撞由 layoutGeneration 键隔离；③同 generation 下不同来源的
+  display 区间不相交（新来源只能占用旧条目未使用的平移区）。
+  风险：display 陈旧化在 reflow 场景的碰撞需测试钉死；续跑轮键稳定性。
+
+**落点排序（修订）**：D2 身份论证（测试先行）→ 1c 提交级 settled 过滤 → 1d 段 diff 集成
+→ 1b 复用段常量偏移重定基 → 1a 段索引与命中计数（诊断）。
