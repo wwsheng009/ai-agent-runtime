@@ -243,7 +243,7 @@ flowchart TB
 | 9 | assistant 去重 | 编码器 `assistantSnapshotBy` | — | 删除 `renderedAssistantDeltaContent/digest/length` 与 **`renderedAssistantFinal/finalDigest/finalLength`**（扫描补登） | P1 部分 |
 | 10 | 行内容镜像 | `ScreenModel`（唯一屏幕镜像） | 历史行由 source 派生（不落镜像） | 删除 `historyStreamTailRows` / `historyTailCells` / `SoftOutputState.lines` / `PaintTrace` 内容 hash（或降级 /debug）；**扫描补登**：bridge 侧 `historySeedSeen/historySeedClaimedItems` 与 legacy `FixedBottomSurface.lastWidth/lastHeight` | P1-2a 部分；`historyTailCells` 保留待替换 |
 | 11 | plan 完整性 | —（不存在） | — | 规划单线程同步后删除 `PlanIncomplete/PlanStalled/续跑组`（P1-1 Stage 2–4） | Stage 1 设计完成 |
-| 12 | 空闲判定 | —（事件驱动 ack） | — | `waitControllerIdle` 已删、executor 已改 `WaitActionApplied`；**残余**：`WaitIdleTimeout` 的 1ms 轮询仍在（`controller.go:852`）且被生产 `waitUIActorIdleBounded`（`chat_ui_actor.go:1054/1315/1326`）与 run-end settle（`chat_runtime_events.go:4790`）调用 → 待 P1-3 收尾 | **部分**（此前误标"已落地"，本轮降级） |
+| 12 | 空闲判定 | —（事件驱动 ack） | — | `waitControllerIdle` 已删、executor 已改 `WaitActionApplied`；**残余**：`WaitIdleTimeout` 的 1ms 轮询仍在（`controller.go:852`），经 P1-3 §3.7 明确**保留的有界超时兜底**触达（close drain / legacy 辅助 / `waitUIActorIdleBounded` 5s）→ 可选事件化见差距收敛方案 B1 | **部分**（残余为显式保留项） |
 | 13 | backoff 进度 | —（fail-closed + 恢复） | — | 删除 reset backoff 状态机（P2） | 待 P2 |
 | 14 | 降级/预算遥测 | 事件桥单点计数器 | 只读快照 | 合并 `lateDropStats` 与 `publishedDrops` 两份无锁镜像（扫描点名） | 部分 |
 
@@ -529,13 +529,13 @@ sequenceDiagram
 
 | # | 差距 | 证据 | 严重度 | 处置 |
 |---|---|---|---|---|
-| G1 | **1ms 轮询残余**：`WaitIdleTimeout` 轮询仍在，生产 `waitUIActorIdleBounded` 与 run-end settle 调用 | `controller.go:852`；`chat_ui_actor.go:1054/1315/1326`；`chat_runtime_events.go:4790` | 中 | P1-3 收尾（§4 #12 已降级"部分"） |
+| G1 | **1ms 轮询残余（保留项）**：`WaitIdleTimeout` 内部 1ms 轮询仍在，经 `waitUIActorIdleBounded`（5s）/close drain/legacy 辅助触达；P1-3 §3.7 已决策**保留**（有界兜底） | `controller.go:852`；`chat_ui_actor.go:1054/1315/1326`；`chat_runtime_events.go:4787/4790` | 低-中 | 实施方案 B0/B1：登记清单化；事件化（可选） |
 | G2 | **写端门禁盲区**：ui 门禁 glob 非递归漏 `renderengine/terminal_lock.go:73,76`（os.Stdout DEC2026）；两个扫描器不覆盖包级 var / 结构体字面量 / 非 arg0 | `terminal_output.go:21`；`chat_notification.go:613`；`chat_notification_sound.go:170`；`chat_legacy_console_editor_windows.go:60-66`；`chat_tool_executor.go:95,117` | 中 | P0 门禁增强（递归 + 盲区扫描）+ 缺口登记 |
 | G3 | **stderr 边缘未收口**：交互期仍有 os.Stderr 直写（与 stdout 同 tty） | `chat_setup.go:108/139/233/268` 及 `printChatSessionInfoRow` 调用点；`chat_selection_output.go:129`；`chat.go:1073` | 中 | §3.8 持续收口（P0 尾项） |
 | G4 | **claimed 路径 rebase/invalidate 缺口**：`rebasePendingHistoryEffects` 对 claimed 且 presentation 改变的 token 静默跳过，靠 generation 失配→Deferred 释放后收敛 | `history_effect_planner.go:1643-1661`；`history_effect_queue.go:560-567` | 中 | P2 前收紧；§9.3.3/§8 已标注 |
 | G5 | **skipRows 证明 0 二义性**：`activeAckedRenderedPrefixRows` 返回 0 兼表"无前缀/前缀不等价"，后者由 finalize 兜底置 `ProjectionUnknown` | `history_effect_planner.go:335-367`；`controller_state.go:594-597` | 中 | P2 Slice 1 后消失；先加注释/测试钉住 |
 | G6 | **§4 未登记镜像 9 组**（M1–M9：`runActive`/轮终态账本/`historySeed*`/legacy 几何/viewport 双表示/terminalEpoch 双份/final 三字段/恢复诊断/drop 遥测） | 见 §4 本轮补登 | 中 | 已补登 §4；逐项随 P1/P2 收敛 |
-| G7 | **生产轮询多处**：1ms（4 处）、5ms（backlog worker/settle）、10ms（backoff/lease）、50–100ms（Windows/overlay 平台） | `chat_runtime_events.go:1840/1981/2003/2597/3033/4803`；`terminal_session_executor.go:1037`；`screen_lease.go:82-89` 等 | 低-中 | P1-3/P2 收尾；平台 I/O 轮询保留并登记 |
+| G7 | **生产轮询多处**：1ms（4 处）、5ms（backlog worker/settle）、10ms（backoff/lease）、50–100ms（Windows/overlay 平台）；多数为 P1-3 §3.7 明确保留的队列等待/有界兜底 | `chat_runtime_events.go:1840/1981/2003/2597/3033/4803`；`terminal_session_executor.go:1037`；`screen_lease.go:82-89` 等 | 低 | 实施方案 B0 登记表；随 P2 backoff/legacy 退役删减 |
 | G8 | **区域未登记项**：编辑器状态行/队列指示/band 顶距/fullscreen 族/主帧 defer/ComposerLine 替换语义 | 见 §10 本轮补登 | 低 | 已补登 §10 |
 | G9 | **legacy `StatusBar` 潜伏第二写端**：生产不可达，但 `StatusBar.Render` 直写 os.Stdout，无栅栏 | `statusbar.go:197-252`；唯一构造 `layout.go:58`（无生产 Render 调用） | 低-中 | P0 fenced-dead 清理（加物理栅栏或删除） |
 | G10 | **web/TUI statusbar 段集合不一致**：同源同构建函数，但 web 缺 state/goal/model/provider/fast（goal/fast 未说明） | `web_statusbar.go:125-210` vs `chat_interaction.go:2878-2912` | 低 | 文档注明或代码对齐 |
@@ -545,6 +545,9 @@ sequenceDiagram
 **本轮文档修正记录**：§4（#1/#5/#9/#10/#12/#14 补登与状态降级）、§8（S1/S5 迁移注记、约束 3 缺口）、
 §9（9.3.3 缺口注、9.3.4 settle 前置、9.5 核验注）、§10（堆叠 clamp/modal/ComposerLine/未登记区域/状态栏数据源）、
 §7.1（P1-3 部分）。
+
+> 收敛执行：`docs/plan/aicli-render-gap-closure-plan-20261006.md`（批次 A–D：门禁增强 / 轮询登记 /
+> 交付账收紧 / 口径小修 + 验收与台账）。
 
 ---
 
