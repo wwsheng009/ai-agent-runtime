@@ -54,7 +54,7 @@ native scrollback 只做 append-only 单向交付（写出的字节永不回读�
 
 | 组件 | 位置 | 职责 | 关键契约 |
 |---|---|---|---|
-| 事件桥 | `commands/chat_runtime_events.go` | runtime 事件分类、单车道 backlog（512/2MiB，尾槽合并）、有界 eventQueue（576）、EndRun 有界排水、run epoch | 跨家族严格 FIFO；epoch 拒绝 stale；外来会话内容不进父数据面 |
+| 事件桥 | `commands/chat_runtime_events.go` | runtime 事件分类、单车道 ordered backlog（512/2MiB；流=连续序号尾槽拼接、coalescible=原位 latest-wins、critical 保留）、有界 eventQueue（512+64 critical 保留位 / 4MiB）、EndRun 有界排水、run epoch | 跨家族严格 FIFO；epoch 拒绝 stale；外来会话内容不进父数据面 |
 | 输入路径 | `commands/chat_composer.go` / `chat_interaction.go` / `ui/inputbox_editor.go` | 键盘/paste/composer；编辑器控制序列经 **session 旁路** | producer 只发 typed `UIAction`；不持 `os.Stdout` |
 | UI actor | `ui/controller.go`（`Run` :436） | mailbox（durable/coalescable/barrier/followup）、批 ≤64、每批一个 `FlushEffect` | 单 goroutine；reducer 唯一入口 |
 | reducer | `ui/controller_state.go:78`（+ commands 适配 `chat_ui_actor.go:1076`） | `AppState` 唯一写者；纯 transition；派生状态 | 无 I/O、无终端读、无隐藏可变全局 |
@@ -68,7 +68,7 @@ native scrollback 只做 append-only 单向交付（写出的字节永不回读�
 | executor | `ui/terminal_session_executor.go` | 单飞 claim、事务执行、恢复调度（目标：无 backoff 睡眠） | claim-miss 显式释放；不并发写 |
 | **TerminalSession** | `ui/terminal_session.go` | **唯一物理 writer**：viewport diff、历史插入、scrollback 导入、epoch、原子写（DEC 2026 包裹） | prepare→write 顺序；短写=失败；不承诺回读 |
 | 输出网关 | `ui/render/output/gateway.go` | primary serial + journal ring + mirror（生产队列 64） | 一次只有一个 primary 提交 |
-| 帧调度 | `ui/renderengine/frame_pump.go` | 每 key 单 pending job，替换式重调度（60/30 FPS） | 唯一 scheduler；定时器不落笔 |
+| 帧调度 | `ui/renderengine/frame_pump.go` | 每 key 单 pending job，替换式重调度（默认 60 FPS，可配置） | 唯一 scheduler；定时器不落笔 |
 | ScreenModel | `ui/renderengine/screen_model.go` | front/back 网格（**唯一屏幕内容镜像**） | 未确认 front 绝不作差分依据 |
 | 控制序列旁路 | `ui/terminal_title.go` / `terminal_bell.go` + session 旁路方法 | 标题（OSC）/铃（BEL）/编辑器序列 | session 内串行、可记录、lease 感知；组件不持 stdout |
 | lease | `ui/screen_lease.go` + `AppState.Lease` | fullscreen/alternate 所有权 | lease 活跃冻结历史交付；lease 走同一 transport |
@@ -121,10 +121,11 @@ flowchart TB
 
 ### 3.1 事件接入层（`commands/chat_runtime_events.go`）
 
-- **分类与家族**：runtime 事件按家族（assistant/reasoning/tool/approval/run 生命周期）分类；跨家族严格 FIFO，
-  同流事件允许尾槽合并（latest-wins），ordered 家族不可绕过。
-- **单车道 backlog**（`b19284db` 已落地）：所有事件经唯一有序 backlog（512 条 / 2MiB）→ 有界 `eventQueue`（576）
-  → 单 worker 消费；不允许旁路直投 mailbox 的"快车道"。
+- **分类与家族**：runtime 事件按交付类（critical / coalescible / ordered / stream）分类；
+  跨家族严格 FIFO；流事件按连续序号尾槽拼接、coalescible 原位 latest-wins、ordered 家族不可绕过。
+- **单车道 backlog**（`b19284db` 已落地）：所有事件经唯一有序 backlog（512 条 / 2MiB）→
+  有界 `eventQueue`（512 + 64 critical 保留位 / 4MiB）→ 单 worker 消费；
+  backlog worker 是唯一重试路径；不允许旁路直投 mailbox 的"快车道"。
 - **epoch**：run/turn 身份由 bridge 单点持有（`runEpoch`）；所有下游只持**引用副本**用于 stale 拒绝，
   不落第二份可变状态（§4 第 1 项）。
 - **EndRun 排水**：有界排空 backlog → eventQueue，再以 barrier action 通知 reducer 收尾；排水期间不丢终态事件。
@@ -167,7 +168,8 @@ flowchart TB
 - **事实**：已交付的 finalized 行前缀（单调游标）+ 至多一个在途 claim（单飞写证明）。
 - **提交身份**：`(cell 身份, revision, source range, fragment)`；display 位置为**簿记**，不参与字节等价
   （P1-1 §1.6 的 D2 方向：`byRange` 去 display）。
-- **删除面**：6 态 ledger（defer/inflight/rebase 特例）、scrollback replay/settle/reconcile、reset backoff、
+- **删除面**：账本事务语义（六态已于 P1-1 第 2 步归一为三态 queued/delivered/quarantined，目标再降为
+  行序交付游标）、scrollback replay/reconcile（**settle 保留**，它就是目标语义）、reset backoff、
   `PlanIncomplete/PlanStalled/续跑组`——单线程序列化与单向交付后均无存在理由（P1/P1-1/P2）。
 - **失败语义**：写入结果不可证明 → 不重试旧 token；标记投影 unknown → source-backed 重建 + 新 terminal epoch
   （§3.6）；恢复不需要旧账本的事务回执。
@@ -226,24 +228,24 @@ flowchart TB
 ## 4. 状态所有权矩阵（14 处镜像的终态）
 
 > 口径：每行给出**目标唯一所有者**；"派生/引用"列的值必须是只读且可随时重算。
-> "收敛动作"列指向 P0–P3 或专项计划；状态为截至 `d47147b1` 的实施进度。
+> "收敛动作"列指向 P0–P3 或专项计划；状态为截至 `d47147b1` 的实施进度（2026-10-06 四路扫描复核，见 §7.5）。
 
 | # | 事实 | 目标唯一所有者 | 只读派生 / 引用 | 收敛动作 | 状态 |
 |---|---|---|---|---|---|
-| 1 | run/turn 身份 | 事件桥 `runEpoch` | 交付层仅持 epoch 引用做 stale 拒绝 | 删除 `runState/lastClosedTurnID/adoptedTurnID` 等冗余副本；terminal epoch 与 run epoch 明确区分命名 | 部分 |
+| 1 | run/turn 身份 | 事件桥 `runEpoch` | 交付层仅持 epoch 引用做 stale 拒绝 | 删除冗余副本（已登记：`runState/lastClosedTurnID/adoptedTurnID`；**扫描补登**：`runActive`、`adoptedRunEpoch`、`executorTurnID`、轮终态账本 `retiredTurnIDs/acceptedAssistantFinalTurns/finalAssistantTurns`）；terminal epoch 与 run epoch 明确区分命名 | 部分 |
 | 2 | layout generation | `AppState.LayoutGeneration` | frame/plan/session 持值副本（stale 拒绝） | 删除 `executor.lastResetGeneration`（backoff 删除后自然消失） | 部分 |
 | 3 | 几何 | `AppState.Geometry`（probe 单点输入 + Resize barrier 回投） | session 持"已应用几何" | 删除 presenter `lastWidth/lastHeight` 镜像（改派生比较） | P1-2b 主体已落地 |
 | 4 | 历史交付进度 | **交付游标**（§3.4） | executor 诊断只读 | 删除 claim 拒绝计数 / `historyTailRows` / `historyTailCells` / diag 镜像或降级 /debug | P1-1/P1-2 部分 |
-| 5 | scrollback/terminal epoch | `TerminalSession.terminalEpoch` | `AppState` 持引用 | 收敛 `ProvenScrollbackEpoch` 等副本（P2 后 replay/settle 删除） | 待 P2 |
+| 5 | scrollback/terminal epoch | `TerminalSession.terminalEpoch` | `AppState` 持引用 | 收敛 `ProvenScrollbackEpoch` 等副本（P2 后 replay/settle 删除）；**扫描补登**：session 与 `HistoryEffectQueueState.TerminalEpoch` 两份可变值需归一 | 待 P2 |
 | 6 | lease | `AppState.Lease` | session 持应用态 | 归并 `alternateLeaseID` / `ScreenLease.ID` 副本 | 部分 |
 | 7 | 帧号 | **writer 单点分配**（`TerminalSession.frame`） | `PaintTrace`/gateway 各自观测独立编号 | 删除跨层"同一帧号"假设；观测编号不参与正确性 | 部分 |
 | 8 | 流序号 | 编码器 `streamOrder` | payload `sequence/coalesced_from` 仅作输入元数据 | 禁止下游二次编号 | 已落地 |
-| 9 | assistant 去重 | 编码器 `assistantSnapshotBy` | — | 删除 `renderedAssistantDeltaContent/digest/length` 副本 | P1 部分 |
-| 10 | 行内容镜像 | `ScreenModel`（唯一屏幕镜像） | 历史行由 source 派生（不落镜像） | 删除 `historyStreamTailRows` / `historyTailCells` / `SoftOutputState.lines` / `PaintTrace` 内容 hash（或降级 /debug） | P1-2a 部分；`historyTailCells` 保留待替换 |
+| 9 | assistant 去重 | 编码器 `assistantSnapshotBy` | — | 删除 `renderedAssistantDeltaContent/digest/length` 与 **`renderedAssistantFinal/finalDigest/finalLength`**（扫描补登） | P1 部分 |
+| 10 | 行内容镜像 | `ScreenModel`（唯一屏幕镜像） | 历史行由 source 派生（不落镜像） | 删除 `historyStreamTailRows` / `historyTailCells` / `SoftOutputState.lines` / `PaintTrace` 内容 hash（或降级 /debug）；**扫描补登**：bridge 侧 `historySeedSeen/historySeedClaimedItems` 与 legacy `FixedBottomSurface.lastWidth/lastHeight` | P1-2a 部分；`historyTailCells` 保留待替换 |
 | 11 | plan 完整性 | —（不存在） | — | 规划单线程同步后删除 `PlanIncomplete/PlanStalled/续跑组`（P1-1 Stage 2–4） | Stage 1 设计完成 |
-| 12 | 空闲判定 | —（事件驱动 ack） | — | 删除 `waitControllerIdle` 1ms 轮询与三连 `WaitIdle`（P1-3 已落地） | 已落地 |
+| 12 | 空闲判定 | —（事件驱动 ack） | — | `waitControllerIdle` 已删、executor 已改 `WaitActionApplied`；**残余**：`WaitIdleTimeout` 的 1ms 轮询仍在（`controller.go:852`）且被生产 `waitUIActorIdleBounded`（`chat_ui_actor.go:1054/1315/1326`）与 run-end settle（`chat_runtime_events.go:4790`）调用 → 待 P1-3 收尾 | **部分**（此前误标"已落地"，本轮降级） |
 | 13 | backoff 进度 | —（fail-closed + 恢复） | — | 删除 reset backoff 状态机（P2） | 待 P2 |
-| 14 | 降级/预算遥测 | 事件桥单点计数器 | 只读快照 | 合并两份无锁镜像 | 部分 |
+| 14 | 降级/预算遥测 | 事件桥单点计数器 | 只读快照 | 合并 `lateDropStats` 与 `publishedDrops` 两份无锁镜像（扫描点名） | 部分 |
 
 **判定**：矩阵是"修一处、坏一处"的结构性解药——任何新状态字段必须先在本文登记所有者；
 无所有者的镜像不得新增，已有镜像按上表收敛。
@@ -476,7 +478,7 @@ sequenceDiagram
 | 阶段 | 目标 | 已完成 | 进行中 / 待办 |
 |---|---|---|---|
 | **P0 写端归一** | 所有字节经统一边界；旁路可记录 | 控制序列旁路（`c159a118`：标题/铃/编辑器序列）；守卫与回归栅栏（`09190ee8`，64 项债务台账）；legacy surface 单向栅栏 | stderr 边缘路径收口；CI 白名单门禁（`render/output` 之外 0 命中）；fenced-dead 清理 |
-| **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–3（单飞写游标、六态归一、计数器游标）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack） | P1-1 第 4 步（删续跑组 ≈305 refs，受 P1-1 子计划门控）；残余镜像（§4 标注"部分/待"） |
+| **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–3（单飞写游标、六态归一、计数器游标）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | P1-1 第 4 步（删续跑组 ≈305 refs，受 P1-1 子计划门控）；残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
 | **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 522ms/op + CPU profile 归因）；Stage 1 设计细化（§1.6：身份模型/D2 反例） | Stage 1 编码（D2 测试先行 → 1c/1d → 基准 ≤174ms）；Stage 2（无预算同步化，冷启动门控）；Stage 3（去异步）；Stage 4（删续跑组） |
 | **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4） | 切片计划（S1–S5 已成形）→ 实施（含 8 项验收矩阵） |
 | **P3 性能** | O(delta) 成本模型 | 基准与热点归因（P1-1 Stage 0）；部分缓存（`sharedCellRows`/`sharedHistoryPlan`） | 增量编码（viewport 物化 + 脏行 diff）；去全屏克隆（plan 单所有者、ScreenModel swap）；active markdown 增量解析 |
@@ -520,6 +522,30 @@ sequenceDiagram
 4. **必须保留的内核**：settle 全链与 tail 锚点、stream tail/cells 去重证明、`TerminalEpoch`、
    诊断窗口（`ArmedBackoff/BackoffEngaged` 等读数）；删除任何 reset/归档代码时不得触碰。
 
+### 7.5 目标架构 × 现状差距扫描（2026-10-06，四路只读扫描）
+
+> 方法：写端闭合 / 状态镜像 / handoff 链路 / 屏幕区域四路只读扫描 + 文档逐条核验（对照 §2/§4/§8/§9/§10）。
+> 本节只登记"与目标架构的差距"；已由既有计划覆盖的标注处置，未覆盖的进 §11 开放问题。
+
+| # | 差距 | 证据 | 严重度 | 处置 |
+|---|---|---|---|---|
+| G1 | **1ms 轮询残余**：`WaitIdleTimeout` 轮询仍在，生产 `waitUIActorIdleBounded` 与 run-end settle 调用 | `controller.go:852`；`chat_ui_actor.go:1054/1315/1326`；`chat_runtime_events.go:4790` | 中 | P1-3 收尾（§4 #12 已降级"部分"） |
+| G2 | **写端门禁盲区**：ui 门禁 glob 非递归漏 `renderengine/terminal_lock.go:73,76`（os.Stdout DEC2026）；两个扫描器不覆盖包级 var / 结构体字面量 / 非 arg0 | `terminal_output.go:21`；`chat_notification.go:613`；`chat_notification_sound.go:170`；`chat_legacy_console_editor_windows.go:60-66`；`chat_tool_executor.go:95,117` | 中 | P0 门禁增强（递归 + 盲区扫描）+ 缺口登记 |
+| G3 | **stderr 边缘未收口**：交互期仍有 os.Stderr 直写（与 stdout 同 tty） | `chat_setup.go:108/139/233/268` 及 `printChatSessionInfoRow` 调用点；`chat_selection_output.go:129`；`chat.go:1073` | 中 | §3.8 持续收口（P0 尾项） |
+| G4 | **claimed 路径 rebase/invalidate 缺口**：`rebasePendingHistoryEffects` 对 claimed 且 presentation 改变的 token 静默跳过，靠 generation 失配→Deferred 释放后收敛 | `history_effect_planner.go:1643-1661`；`history_effect_queue.go:560-567` | 中 | P2 前收紧；§9.3.3/§8 已标注 |
+| G5 | **skipRows 证明 0 二义性**：`activeAckedRenderedPrefixRows` 返回 0 兼表"无前缀/前缀不等价"，后者由 finalize 兜底置 `ProjectionUnknown` | `history_effect_planner.go:335-367`；`controller_state.go:594-597` | 中 | P2 Slice 1 后消失；先加注释/测试钉住 |
+| G6 | **§4 未登记镜像 9 组**（M1–M9：`runActive`/轮终态账本/`historySeed*`/legacy 几何/viewport 双表示/terminalEpoch 双份/final 三字段/恢复诊断/drop 遥测） | 见 §4 本轮补登 | 中 | 已补登 §4；逐项随 P1/P2 收敛 |
+| G7 | **生产轮询多处**：1ms（4 处）、5ms（backlog worker/settle）、10ms（backoff/lease）、50–100ms（Windows/overlay 平台） | `chat_runtime_events.go:1840/1981/2003/2597/3033/4803`；`terminal_session_executor.go:1037`；`screen_lease.go:82-89` 等 | 低-中 | P1-3/P2 收尾；平台 I/O 轮询保留并登记 |
+| G8 | **区域未登记项**：编辑器状态行/队列指示/band 顶距/fullscreen 族/主帧 defer/ComposerLine 替换语义 | 见 §10 本轮补登 | 低 | 已补登 §10 |
+| G9 | **legacy `StatusBar` 潜伏第二写端**：生产不可达，但 `StatusBar.Render` 直写 os.Stdout，无栅栏 | `statusbar.go:197-252`；唯一构造 `layout.go:58`（无生产 Render 调用） | 低-中 | P0 fenced-dead 清理（加物理栅栏或删除） |
+| G10 | **web/TUI statusbar 段集合不一致**：同源同构建函数，但 web 缺 state/goal/model/provider/fast（goal/fast 未说明） | `web_statusbar.go:125-210` vs `chat_interaction.go:2878-2912` | 低 | 文档注明或代码对齐 |
+| G11 | **doc/code drift**：`terminal_output.go` 注释宣称 `SetLegacyBinding` 重定向，全仓无实现 | `terminal_output.go:21` 注释 | 低 | 修正注释或补实现 |
+| G12 | **口径不一致**：`app_layout.StatusRows`（nil 时为 0）与 row plan 恒预留 1 行 | `app_layout.go:110` vs `bottom_pane_row_plan.go:121` | 低 | 统一口径（随 P1-2b 残余） |
+
+**本轮文档修正记录**：§4（#1/#5/#9/#10/#12/#14 补登与状态降级）、§8（S1/S5 迁移注记、约束 3 缺口）、
+§9（9.3.3 缺口注、9.3.4 settle 前置、9.5 核验注）、§10（堆叠 clamp/modal/ComposerLine/未登记区域/状态栏数据源）、
+§7.1（P1-3 部分）。
+
 ---
 
 ## 8. 组件衔接契约（接口矩阵）
@@ -529,11 +555,11 @@ sequenceDiagram
 
 | # | 衔接（上游 → 下游） | 载荷/载体 | 顺序与前置条件 | 失败/拒绝语义 |
 |---|---|---|---|---|
-| S1 | 事件桥 → UI mailbox | `UIAction`（epoch 标记；流=coalescable，critical=保留席） | 单车道 FIFO；epoch stale 拒绝；有积压不得旁路 | 有界等待失败 → 仅流事件可丢弃 + 诊断计数；critical 不丢 |
+| S1 | 事件桥 → UI mailbox | `UIAction`（epoch 标记；流=coalescable，critical=保留席） | 单车道 FIFO；epoch stale 拒绝；有积压不得旁路 | 有界等待失败 → 仅流事件可丢弃 + 诊断计数；critical 不丢（实现注：部分有界等待站点仍用 1ms 睡眠轮询，`chat_runtime_events.go:2597/3033`，待收敛） |
 | S2 | 输入/命令 producer → mailbox | typed `UIAction`（durable/coalescable/barrier/followup） | 唯一入口；禁止直改状态或写终端 | 非 typed 调用 = 评审/门禁违规 |
 | S3 | mailbox → reducer | action 批（≤64） | 单 goroutine；durable 保序、coalescable latest-wins；followup 先于外部 mailbox | reducer panic 丢弃本 action 的 causal children（不半提交） |
 | S4 | reducer → Scene | `ReplaceTranscriptAction`（快照） | 全有或全无；与规划同一次归约（S4 先于 S5） | 无快照不替换；失败不产生半场景 |
-| S5 | reducer → planner | transcript+active+geometry+theme+lease（纯输入） | 目标：同线程同步（无 worker、无结果 action） | 无（纯函数） |
+| S5 | reducer → planner | transcript+active+geometry+theme+lease（纯输入） | 目标：同线程同步（无 worker、无结果 action）；**迁移中**：当前仍有 plan worker/异步（P1-1 Stage 3） | 无（纯函数） |
 | S6 | planner → 交付账 | 候选（身份 = source range + revision + fragment） | 同源去重（`hasTerminalRecordForSource`）；**Queued 可 rebase，claimed 只 invalidate、永不 rebase** | 重复铸造/身份冲突 → 拒绝入账 |
 | S7 | 交付账 → executor | Pending 批 + claim（单飞） | `markInFlight` 门：`!Frozen && !Unknown && !hasUnresolvedDelivery` | `ErrHistoryCommitFrozen` / `ErrHistoryProjectionUnknown` / `ErrHistoryCommitRecoveryPending` |
 | S8 | executor → TerminalSession | claimed 批快照（plan + payload） | prepare→write；单 writer；geometry 已发布（S11 先于 S8） | 短写/错误 = fail-closed（不静默降级） |
@@ -550,6 +576,8 @@ sequenceDiagram
 1. **S4 先于 S5**：Scene 安装与规划必须同一次归约，否则规划输入与所授权快照错位。
 2. **S11 先于 S8**：首帧前 geometry 必须已发布（否则 `TerminalFramePlan.Valid()` 拒绝该帧）。
 3. **S6 → S7 → S8 严格串行**：claim 之后该载荷不得被 rebase/替换；invalidate 只能转为失败/隔离。
+   （**扫描缺口 G4**：`rebasePendingHistoryEffects` 对 claimed 且 presentation 改变的 token 静默跳过，
+   靠 generation 失配→Deferred 释放后收敛——见 §7.5。）
 4. **S10 必须回 reducer**：任何"结果直接驱动下一跳"的旁路都视为违规。
 5. **S1 的 epoch 与 S10 的世代校验成对**：回执世代失配一律进 settle/quarantine，不得重放旧 token。
 
@@ -643,7 +671,7 @@ sequenceDiagram
     PL->>DC: claimed 候选：只 invalidate（永不 rebase）
     DC-->>EX: invalidate → Deferred / recovery
     RD->>TS: 重画可见窗口（window-only）
-    Note over DC,TS: claimed 载荷不得被替换；<br/>invalidate 只能转失败/隔离，之后按行序重排。
+    Note over DC,TS: claimed 载荷不得被替换；<br/>invalidate 只能转失败/隔离，之后按行序重排。<br/>扫描注：sync 路径即时 invalidate；<br/>rebasePending 路径静默跳过（G4，待收紧）。
 ```
 
 #### 9.3.4 部分写失败 → settle → 续写
@@ -667,6 +695,9 @@ sequenceDiagram
     Note over RD,TS: 不重试旧 token；<br/>若 settle 无法收敛 → 语义 epoch 恢复（§5.6）。
 ```
 
+> 前置条件：settle 仅在 `LayoutGeneration == 当前代数 && !ScrollbackReplayArmed` 时执行
+> （`controller_state.go:373`）；armed replay 竞态下 settle 让位给 replay（实现正确，本轮补记）。
+
 ### 9.4 边界条件矩阵（handoff × 事件）
 
 | 事件 | 流式中（A） | 交付在飞（C） | 已确认（D 之后） |
@@ -689,6 +720,10 @@ sequenceDiagram
 | armed 销毁式重放 | `ArmScrollbackReplay` + `\x1b[3J` + `ProvenScrollbackEpoch` | 删除；settle 保留；`TerminalEpoch` 语义化 | P2 replay 切片（S1–S5） |
 | reset backoff（success-mode） | 预算 / 窗口 / yield | 先删 success-mode，保留 failed 限速与诊断 | P2 最后一步 |
 
+> 扫描复核（2026-10-06）：①③④⑥⑦ 与本章语义一致（②有一处路径级缺口 G4）；⑤"整段铸造 skipRows=0"
+> 目标**尚无落地痕迹**（预期，Slice 1 未实施）；另发现 skipRows 证明返回 0 存在"无前缀/前缀不等价"
+> 二义性（G5），现由 finalize 兜底置 `ProjectionUnknown`。
+
 ### 9.6 可见性取舍（显式设计决策）
 
 - band 预算：`ActiveBandRows = clamp(Height/3, ≤14, ≤Height-12, ≥6)`（常量：divisor=3、max=14、reserved=12、min=6）。
@@ -708,15 +743,15 @@ sequenceDiagram
 
 | 区域 | 语义所有者（AppState） | 渲染槽位（RowOwner） | 预算 | 光标 | 备注 |
 |---|---|---|---|---|---|
-| 历史区（transcript / fullscreen overlay） | `AppState.Transcript`（Scene 快照） | transcript | resident 窗口 W 行（outputBottom 以上）；溢出 → scrollback | 无 | fullscreen 时整体替换 |
-| active band | `AppState.Active`（ActiveCellState） | band | `clamp(h/3, ≤14, ≤h-12, ≥6)`；顶距 1 行（h≥16） | 无 | tail-only（§9） |
-| 动态状态行 | `BottomPaneState.DynamicStatusModel` | status | 1 行（`ReserveDynamicStatusRow` 常驻预留） | 无 | 等待态时钟；events degraded 尾部 |
-| notice 行 | `BottomPaneState`（notice） | prompt | ≤ noticeRows | 无 | prompt 上方 |
-| prompt 输入区 | `BottomPaneState`（prompt/composer） | prompt | 可见行 ≤ 派生上限；上下 margin 各 1（h≥12） | prompt（默认） | popup ComposerLine 可接管 |
-| SessionID 行 | `BottomPaneState.SessionIDLine` | status | 1 行（statusRow-1，可选） | 无 | session 级 |
-| 底部状态栏 | `BottomPaneState.StatusModel` | status | 1 行（最底，statusRow=height） | 无 | nil → RunReady 默认 |
-| popup / 面板 | `BottomPaneState`（PopupLines/Owner/Instance/Viewport/ComposerLine） | popup | 两种锚定（见 10.2）；reserved rows 契约 | ComposerLine 存在时接管 | 见 10.6 面板族 |
-| 副屏（fullscreen/alternate） | `AppState.Lease` + `RoutingPanel` | （同一 transport） | 全屏 | lease 内自管 | 冻结历史交付（S13） |
+| 历史区（transcript / fullscreen overlay） | `AppState.Transcript`（Scene 快照） | transcript | resident 窗口 W 行（outputBottom 以上）；溢出 → scrollback | 无 | fullscreen 时主帧在 TerminalSession 级整体 defer（`terminal_session.go:878-887`），非 layout 内替换 |
+| active band | `AppState.Active`（ActiveCellState） | band | `clamp(h/3, ≤14, ≤h-12, ≥6)`；顶距 1 行（h≥16） | 无 | tail-only（§9）；legacy 兼容源 `BottomPaneState.ActiveBandLines/Styled`（`!SemanticActiveCellProjection` 时） |
+| 动态状态行 | `BottomPaneState.DynamicStatusModel` | status | 1 行（统一生产模式 `ReserveDynamicStatusRow=true` 常驻预留；ComposerLine 激活时挂起=0 行） | 无 | 等待态时钟；events degraded 尾部；预留但模型 nil 时保持 RowOwnerGap 空白（结构预留、非绘制） |
+| notice 行 | `BottomPaneState`（notice + `PromptEditorStatusLine`） | prompt | ≤ noticeRows（队列/附件 ≤3 + 编辑器状态 1，可达 4） | 无 | prompt 上方；含队列指示行与编辑器状态/错误行（如 Plan mode 失败） |
+| prompt 输入区 | `BottomPaneState`（prompt/composer） | prompt | 可见行 ≤ 派生上限；上下 margin 各 1（h≥12） | prompt（默认） | popup ComposerLine 存在时 prompt 区整体不布局（被替换，而非仅光标接管） |
+| SessionID 行 | `BottomPaneState.SessionIDLine` | status | 1 行（statusRow-1，可选） | 无 | session 级；composer 可见或 popup 有内容时隐藏；内容含 `--pprof/--debug` 段 |
+| 底部状态栏 | `BottomPaneState.StatusModel` | status | 1 行（最底，statusRow=height） | 无 | nil → RunReady 默认；物理行恒预留（即使 nil）；`app_layout.StatusRows` 与之存在口径差（G12） |
+| popup / 面板 | `BottomPaneState`（PopupLines/Owner/Instance/Viewport/ComposerLine/PopupStack/BelowPrompt/ReservedRows） | popup | 两种锚定（见 10.2）；reserved rows 契约 | ComposerLine 存在时接管 | 见 10.6；modal box 按内容扩展并替换 popupLines（`bottom_pane_row_plan.go:49-51`） |
+| 副屏（fullscreen/alternate） | `AppState.Lease`（唯一入口 `chat_screen_framework.go:21`）；使用者：RoutingPanel / fullscreen list / debug overlay / transcript pager / pickers | （同一 transport） | 全屏 | lease 内自管 | 冻结历史交付（S13）；主帧整体 defer |
 
 ### 10.2 底部堆叠顺序与优先级（代码实证）
 
@@ -742,6 +777,15 @@ bottomRows = 1 + sessionStatusVisible + visiblePopup
 （`maxRows = promptBottom - outputBottom - dynamic - notice - bandLayout - topMargin`），
 但动态状态 / notice / band 不被 prompt 挤掉；popup 的输入行（ComposerLine）优先于底部 prompt 获得光标。
 
+补充（扫描补登）：
+
+- `bottomRows` 先夹到 `[1, height-1]`（`height≤1` 强制 1；`bottom_pane_row_plan.go:54-61`）。
+- `visiblePopup` 为 modal box 替换后的行数；`popupRows` 另加 `composerVisibleRowCount()`（:52）。
+- 非扩展分支的 `popupBottomGap` = bandLayout + dynamic + notice + margins + popupInputGap + extraPromptReserved
+  （`fixed_bottom_surface.go:4521-4523`）。
+- prompt 压缩用 `activeBandLayoutRowCount()`（含顶距），`maxRows<1` 时强制 1（:191-197）。
+- ComposerLine 模式整段跳过 prompt 区布局（:102-104）。
+
 ### 10.3 光标归属（`bottomFocusForPopup`）
 
 | 条件 | 焦点 |
@@ -751,14 +795,18 @@ bottomRows = 1 + sessionStatusVisible + visiblePopup
 | prompt 不可见但存在信息型 popup | popup（驻留末尾，兼容语义） |
 | 以上皆无 | None |
 
+> Focus 并非只由该函数派生：`controller_state.go:616/675/728/749-759/1231` 亦有写入点；
+> 实际光标落点见 `app_compose.go:66-102`（Prompt 需 `PromptCursorKnown && PromptVisible &&
+> RowPlan.PromptInputStartRow/Rows`；Popup 落在最后一条 popup 行，无行则 nil）。
+
 ### 10.4 行预算公式汇总
 
 | 预算 | 公式/常量 | 位置 |
 |---|---|---|
-| band 行数 | `clamp(h/3, ≤14, ≤h-12, ≥6)`（min=6 / max=14 / reserved=12 / divisor=3） | `fixed_bottom_surface.go:57-72` |
+| band 行数 | `clamp(h/3, ≤14, ≤h-12, ≥6)`（min=6 / max=14 / reserved=12 / divisor=3；顺序：先除、cap 14、cap h-12、floor 6，h<18 时 floor 6 胜出） | `fixed_bottom_surface.go:57-72` |
 | band 顶距 | 1 行（h≥16），否则 0 | `fixed_bottom_surface.go:81-86` |
 | composer margins | 上 1 / 下 1（h≥12），否则 0/0 | `fixed_bottom_surface.go:74-79` |
-| prompt 最大可见行 | `promptInputMaxVisibleRowsForGeometry`（派生） | `bottom_pane_layout_policy.go:43` |
+| prompt 最大可见行 | `promptInputMaxVisibleRowsForGeometry`（定义 :72-101；调用 :43；上限 `ChatComposerMaxVisibleRows=6`） | `bottom_pane_layout_policy.go` / `inputbox_editor.go:40` |
 | 底部 reserve | 见 10.2 公式 | `bottom_pane_row_plan.go:120-128` |
 
 ### 10.5 区域 → dirty → 帧键
@@ -769,6 +817,7 @@ bottomRows = 1 + sessionStatusVisible + visiblePopup
 | 历史区 | finalize / 交付确认 / resize | stableCommit |
 | 动态状态行 | `SetDynamicStatusModel` / 等待态时钟 | dynamicStatus |
 | prompt / notice / popup | 输入 / popup 栈 / 焦点 | prompt |
+| 诊断通知行 | 诊断事件（degraded/警告） | diagnosticNotice |
 
 ### 10.6 面板族统一模型（目标；当前为缺口）
 
@@ -785,7 +834,8 @@ Panel = { Owner, Instance, Layer(above-prompt | below-prompt | fullscreen),
 | popup（审批/提问/信息） | `PopupLayer` + owner/instance/viewport/composerLine/belowPrompt/reservedRows | 保留为 `Layer=above/below-prompt` |
 | modal box（审批/提问正文盒） | `modalBoxLines`（按内容扩展的边框盒） | 归入 popup 统一层 |
 | RoutingPanel | 副屏 lease + `RoutingPanelState` | `Layer=fullscreen`（lease 互斥） |
-| agent panel / debug panel | 各自 popup owner | 归入 popup 统一层 + 独立 owner 命名空间 |
+| agent panel | 各自 popup owner | 归入 popup 统一层 + 独立 owner 命名空间 |
+| debug overlay / fullscreen list / transcript pager | lease 全屏（**非** popup） | 归入 `Layer=fullscreen` |
 | 多层 popup | `PopupStack`（准入/优先级规则散落） | 统一"优先级 = 层深 + owner 优先级表"（待定稿） |
 
 ### 10.7 区域扩展流程（新区域/新面板）
@@ -812,6 +862,8 @@ Panel = { Owner, Instance, Layer(above-prompt | below-prompt | fullscreen),
 7. **长流式提前可见性**（§9.6）：若产品要求，选择"增大 band 预算"或"stable 前缀分段 finalize"
    （需单独设计；禁止恢复 mutable→scrollback 路径）。
 8. **面板族统一契约**（§10.6）：多层 popup 的准入/优先级表、焦点与 lease 关系定稿。
+9. **扫描缺口收敛**（§7.5）：G2 门禁增强（递归 + 盲区）、G4 claimed 路径收紧、G5 skipRows 二义性、
+   G9 legacy `StatusBar` 第二写端——需在 P0/P2 内排期。
 
 ---
 
