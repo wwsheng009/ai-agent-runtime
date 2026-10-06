@@ -480,7 +480,7 @@ sequenceDiagram
 | **P0 写端归一** | 所有字节经统一边界；旁路可记录 | 控制序列旁路（`c159a118`：标题/铃/编辑器序列）；守卫与回归栅栏（`09190ee8`，64 项债务台账）；legacy surface 单向栅栏 | stderr 边缘路径收口；CI 白名单门禁（`render/output` 之外 0 命中）；fenced-dead 清理 |
 | **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–3（单飞写游标、六态归一、计数器游标）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | P1-1 第 4 步（删续跑组 ≈305 refs，受 P1-1 子计划门控）；残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
 | **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 522ms/op + CPU profile 归因）；Stage 1 设计细化（§1.6：身份模型/D2 反例） | Stage 1 编码（D2 测试先行 → 1c/1d → 基准 ≤174ms）；Stage 2（无预算同步化，冷启动门控）；Stage 3（去异步）；Stage 4（删续跑组） |
-| **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 全部完成**（第一刀 `130cc7f5`；第二刀 `7471d34a`/`80738513`/`e3236de9`）；**replay 切片 S1（`59ac603d`：装载恒 settle、append-only 去重、授权族测试改写）** | replay 切片 S2–S5（barrier/reconcile/3J/背压清理）；锚定切片 |
+| **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 全部完成**（第一刀 `130cc7f5`；第二刀 `7471d34a`/`80738513`/`e3236de9`）；**replay 切片 S1（`59ac603d`）+ S2（`9a205572`：barrier/reconcile 族删除，settle 为唯一恢复路径）** | replay 切片 S3–S5（3J/背压/诊断清理 + 目标用例）；锚定切片 |
 | **P3 性能** | O(delta) 成本模型 | 基准与热点归因（P1-1 Stage 0）；部分缓存（`sharedCellRows`/`sharedHistoryPlan`） | 增量编码（viewport 物化 + 脏行 diff）；去全屏克隆（plan 单所有者、ScreenModel swap）；active markdown 增量解析 |
 
 ### 7.2 分阶段验收（总表）
@@ -518,6 +518,9 @@ sequenceDiagram
    **S1 已完成（`59ac603d`）**：生产恢复计划恒 settle；装载（`ArmScrollbackReplay`）只做
    从源重证明，delivery ledger 保持权威（append-only 去重：同身份内容零重发、新身份只追加）；
    装载不推进 epoch、不写 `3J`；授权族/物理屏障测试改写或删除。
+   **S2 已完成（`9a205572`）**：`HistoryScrollbackReconciled`/`ProvenScrollbackEpoch`/
+   `reconcileScrollback` 全族删除，settle 成为唯一恢复路径；旧回调栅栏由 delivery ledger
+   身份 + settle 原地隔离承担。
    `/resume`/`/backtrack` 语义需产品决策：append-only 下"改写历史"不可物理回滚。
 3. **锚定与 backoff**：`historyTopAligned` + `historyInsertionContinuesScrollback`（0d5ecda6 启发式）
    属删除核心；插入统一为"resident 之后按序写、写满 LF 溢出"；resize 已是 window-only，
@@ -750,7 +753,7 @@ sequenceDiagram
 | active 溢出归档（mutable→scrollback） | **已完成**：生产停铸（`130cc7f5`）；交付分支统一 resident 插入；死代码/skipRows 管线/active ack 机制与枚举面已删（第二刀 `7471d34a`/`80738513`/`e3236de9`） | 停铸；band tail-only | Slice 1 ✅ |
 | skipRows（finalize 只补尾） | **第一刀后恒 0**（停铸 → 无已交付 Active 条目） | 恒 0（整段铸造） | Slice 1 后自动成立 ✅ |
 | 锚定（底锚/顶锚/续接启发式） | `historyTopAligned` + `historyInsertionContinuesScrollback` 等 12 场景 | 统一"resident 之后按序写、写满 LF 溢出" | P2 锚定切片 |
-| armed 销毁式重放 | **S1 已完成（`59ac603d`）**：生产恒 settle、装载不再 arm；`\x1b[3J`/armed 族待 S2–S4 删 | 删除；settle 保留；`TerminalEpoch` 语义化 | P2 replay 切片 S2–S5 |
+| armed 销毁式重放 | **S1+S2 已完成（`59ac603d`/`9a205572`）**：生产恒 settle、装载不再 arm；barrier/reconcile 族已删；`\x1b[3J`/armed/背压待 S3–S4 删 | 删除；settle 保留；`TerminalEpoch` 语义化 | P2 replay 切片 S3–S5 |
 | reset backoff（success-mode） | 预算 / 窗口 / yield | 先删 success-mode，保留 failed 限速与诊断 | P2 最后一步 |
 
 > 扫描复核（2026-10-06）：①③④⑥⑦ 与本章语义一致（②的 G4 claimed 漂移由差距收敛方案 C1 `d1cd0efb`

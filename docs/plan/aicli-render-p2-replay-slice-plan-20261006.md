@@ -2,7 +2,7 @@
 
 > 依据：`docs/architecture/aicli-tui-renderer-architecture-design.md` §7.4 第 2 条（replay/settle 族）、
 > `docs/plan/aicli-render-p2-recon-20261006.md` §1（三路只读侦察 + 可删性表 + 切片建议）。
-> 状态：**S1 已完成（`59ac603d`）**；S2 待启动（本文件随切片推进回填证据与提交锚点）。
+> 状态：**S1/S2 已完成（`59ac603d`/`9a205572`）**；S3 待启动（本文件随切片推进回填证据与提交锚点）。
 
 ## 0. 目标语义与行为变更（产品口径）
 
@@ -74,13 +74,21 @@
   装载零重发、新修订只追加；
 - 净删 175 行（15 文件，+328/−503；含 2 个旧授权族测试文件删除）。
 
-## 2. S2：删 `ProvenScrollbackEpoch` / `HistoryScrollbackReconciled`
+## 2. S2：删 `ProvenScrollbackEpoch` / `HistoryScrollbackReconciled`（已完成，`9a205572`）
 
-- epoch 推进已内联进 `ReplaceTranscriptAction`（S1）；删除 action、reducer 分支、
-  `reconcileScrollback`/`recordProvenScrollbackReplacement`、`ProvenScrollbackEpoch` 字段、
-  `HistoryProjectionRecovered` 的延迟消费调用与 executor 的 `HistoryScrollbackReconciled` 回执。
-- `TerminalEpoch` 保留（语义化）：plan memo 输入 + stale-callback 栅栏 + 诊断。
-- 删除/改写 `history_effect_queue_test.go` reconcile 用例、`scrollback_reconcile_barrier_test.go` 等。
+- 删除 `HistoryScrollbackReconciled` action（含 class/wake 名单/actionClassString）、reducer
+  分支、executor 回执；删除 `reconcileScrollback`/`recordProvenScrollbackReplacement`/
+  `ProvenScrollbackEpoch` 字段、`HistoryProjectionRecovered` 的延迟消费调用；
+  删除已无调用方的 `resetActiveHistoryProgressForTerminalEpoch`、`armScrollbackReplay`、
+  `clearScrollbackReplayAuthorization`。
+- `TerminalEpoch` 保留（当前无生产推进点；plan memo 输入 + 诊断），S5 再评估去留。
+- 测试：删除 2 个 reconcile 单测；`TestHistoryEffectsReducer_ScrollbackReconciliation...`
+  改写为 `TestHistoryEffectsReducer_FailedHandoffSettlesWithoutRetiringLedger`（settle 原地
+  隔离 + 旧回调不可复活 + epoch 不推进）；`history_planning_budget_test.go` 白盒改
+  `NewHistoryCommitLedger + invalidateTranscriptPlanMemo`；action 表/唤醒测试同步。
+- 验收（已达成）：`go test ./cmd/aicli/ui` **ok 113.7s**；`./cmd/aicli/commands`
+  **ok 172.1s**；`go vet`/`go build ./...`/gofmt 干净；真机 e2e PASS（72 行 exactly-once）。
+  净删 212 行（13 文件，+64/−276）。
 
 ## 3. S3：删 success-mode 背压 + `ScrollbackReset` 结果/计数/3J 写路径
 
