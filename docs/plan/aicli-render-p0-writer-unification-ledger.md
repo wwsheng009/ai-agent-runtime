@@ -65,10 +65,17 @@
 
 1. [x] 控制序列旁路 API（`c159a118`）。
 2. [x] `inputbox_editor` 模式序列迁移（`c159a118`）；余下 1 ref/函数是编辑器读循环的 stdin/stdout 绑定。
-3. [~] transient/modal/agent-panel composer 编辑器出口：
+3. [x] transient/modal/agent-panel composer 编辑器出口：
    - [x] modal + agent-panel（认领 + popup 折入输入）；
    - [x] secret（surface 预览下无直写，仅 legacy fallback）；
-   - [ ] transient line：无显示属主，需先设计显示（底部 prompt 行或 popup）再认领 text 直写。
+   - [x] transient line：显示属主 = 底部 prompt 行（方案 A）。
+     `chatTransientLineComposer` 新增 `mergedPromptSupported`/`readLineMerged`/`mergedHooks`：
+     固定 surface 且直读 stdin 时停靠草稿 → `ShowAnswerPrompt` 占用 prompt 行 →
+     `OnChange`/`OnTerminalWrite` 折入（`SetPromptInputSnapshot`/`WritePromptEditorText`）→
+     读毕 `DiscardPrompt` 归还草稿；无 surface/排队读保持原直读通道。
+     测试：`TestChatTransientLineComposerReadsThroughBottomPromptRow`、
+     `TestChatTransientLineMergedHooksFoldIntoBottomPrompt`、
+     `TestChatTransientLineComposerFallsBackWithoutSurface`。
 4. [x] 标题/铃装配到 control sink（`chatControlSequenceWriter`）。
 5. [x] `status.go` 兜底路径与 stderr 收编（核实完成 + 收口防线）：
    - `ui.Print*`（status.go 快捷函数）在 commands 的交互期调用点大多已有 popup/fail-closed
@@ -130,5 +137,6 @@
 - 单写端运行时门禁（新增）：
   `go test ./cmd/aicli/commands/ -run 'TestUnifiedSessionSinglePhysicalWriterFence|TestChatSelectionOutputClaimsToDiagnosticSinkWhenSessionActive|TestChatControlSequenceWriter'`
   ——注入计数 writer + 进程 stdout/stderr 零字节断言，覆盖标题/铃/模式序列/动态诊断/直写/命令输出。
+- composer 出口门禁：`go test ./cmd/aicli/commands/ -run 'TestChatTransientLineComposer|TestChatMergedAnswerPrompt|TestChatModalComposer|TestChatAgentPanelComposer'`。
 - 完成态：ui 生产文件直写基线只剩白名单类（被栅栏 surface / TRACE / 启动期 probe），
   交互期物理 writer 计数 = 1；CI 中门禁测试常开。
