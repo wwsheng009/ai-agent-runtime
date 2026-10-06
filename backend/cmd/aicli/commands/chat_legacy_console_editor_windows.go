@@ -57,11 +57,14 @@ var procWriteConsoleOutputCharacterW = windows.NewLazySystemDLL("kernel32.dll").
 var procGetConsoleScreenBufferInfo = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleScreenBufferInfo")
 var procSetConsoleCursorPosition = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCursorPosition")
 
-var legacyConsoleDebugf = func(format string, args ...any) {
+// legacyConsoleDebugf/ln 是降级控制台编辑器的诊断出口（--debug 或按键
+// 归一化取证）。保留 stderr 直写语义（legacy 会话无统一渲染面，取证优先）；
+// 原先的包级 var 闭包形态是门禁盲区（G2/A1-4），改为函数内化并纳入基线。
+func legacyConsoleDebugf(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, format, args...)
 }
 
-var legacyConsoleDebugln = func(args ...any) {
+func legacyConsoleDebugln(args ...any) {
 	_, _ = fmt.Fprintln(os.Stderr, args...)
 }
 
