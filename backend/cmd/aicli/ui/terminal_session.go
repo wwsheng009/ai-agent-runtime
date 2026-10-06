@@ -1019,25 +1019,17 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		historyInsertedRows = len(historyInsertedPayload)
 	}
 	if historyInsertedRows > 0 {
-		if historyBatchIsActiveOrigin(delivered) {
-			// A still-mutable cell's overflow prefix crosses the physical
-			// writer as an archive, not as a new resident of the primary
-			// history region. The finalized tail the layout projects above the
-			// active band must survive its own cell's streaming overflow.
-			historyBytes, nextHistoryTopAligned = terminalActiveHistoryArchiveANSI(
-				frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
-			)
-		} else {
-			if s.historyInsertionContinuesScrollback(frame.Geometry.Height, frame.OutputBottomRow) {
-				// resident 模型为空，但已有行跨入 native scrollback（active
-				// 归档不拥有 resident 行）：本次插入续写归档流，必须从 row 1
-				// 起，否则会在 scrollback 与可见行之间留下空白空档。
-				nextHistoryTopAligned = true
-			}
-			historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
-				frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
-			)
+		// A2 第一刀（停铸 active）：交付分支与 Origin 无关，统一走 resident
+		// 插入（terminalActiveHistoryArchiveANSI 留作死代码，第二刀删除）。
+		if s.historyInsertionContinuesScrollback(frame.Geometry.Height, frame.OutputBottomRow) {
+			// resident 模型为空，但已有行跨入 native scrollback：本次插入续写
+			// 归档流，必须从 row 1 起，否则会在 scrollback 与可见行之间留下
+			// 空白空档。
+			nextHistoryTopAligned = true
 		}
+		historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
+			frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
+		)
 	}
 	// composer band 是本事务的最后一个写入段，而且只要本事务在其上方写过任何字节
 	// （重置 / 边界重排 / 历史插入），band 就必须整段重写：写在上方的字节可能经由
@@ -1159,9 +1151,8 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 				s.historyStreamTailRows, historyInsertedPayload, frame.OutputBottomRow,
 			)
 			s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, delivered)
-			if !historyBatchIsActiveOrigin(delivered) {
-				s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, historyInsertedPayload, frame.OutputBottomRow)
-			}
+			// A2 第一刀：统一交付后 resident 模型无条件跟随已交付行。
+			s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, historyInsertedPayload, frame.OutputBottomRow)
 		}
 	}
 	s.cursor = cloneTerminalCursor(frame.Cursor)
@@ -1299,23 +1290,18 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	// The top-anchored region ends immediately above the inline viewport. Since
 	// its top margin is physical row one, overflow becomes native scrollback;
 	// prompt/status rows below outputBottom never participate in the scroll.
-	activeArchive := commit.Origin == HistoryCommitActive
+	// A2 第一刀（停铸 active）：交付与 Origin 无关，统一走 resident 插入。
 	var bytes string
 	var nextHistoryTopAligned bool
-	if activeArchive {
-		bytes, nextHistoryTopAligned = terminalActiveHistoryArchiveANSI(
-			s.geometry.Height, s.outputBottom, s.historyTailRows, rows, s.historyTopAligned,
-		)
-	} else {
-		topAligned := s.historyTopAligned
-		if s.historyInsertionContinuesScrollback(s.geometry.Height, s.outputBottom) {
-			// 同上：active 归档留下的 scrollback 行必须由本次插入续接。
-			topAligned = true
-		}
-		bytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
-			s.geometry.Height, s.outputBottom, s.historyTailRows, rows, topAligned,
-		)
+	topAligned := s.historyTopAligned
+	if s.historyInsertionContinuesScrollback(s.geometry.Height, s.outputBottom) {
+		// resident 模型为空但已有行跨入 native scrollback：本次插入必须从
+		// row 1 起续写，避免空白空档。
+		topAligned = true
 	}
+	bytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
+		s.geometry.Height, s.outputBottom, s.historyTailRows, rows, topAligned,
+	)
 	if bytes == "" {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
@@ -1342,9 +1328,8 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	s.confirmWriteLocked()
 	s.historyStreamTailRows = terminalAppendHistoryTailRows(s.historyStreamTailRows, rows, s.outputBottom)
 	s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, []HistoryCommit{commit})
-	if !activeArchive {
-		s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
-	}
+	// A2 第一刀：统一交付后 resident 模型无条件跟随已交付行。
+	s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
 	s.historyTopAligned = nextHistoryTopAligned
 	s.preparedHistory = nil
 	return HistoryCommitResult{Frame: s.frame}
@@ -1352,11 +1337,11 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 
 // historyInsertionContinuesScrollback reports whether a finalized insertion
 // with an empty resident model must start at row one because earlier rows
-// already crossed into native scrollback. Active archives never make their
-// rows resident, so when the resident model is empty and the stream tail is
-// not, the visible suffix must continue the archived stream instead of being
-// bottom-anchored with blank headroom between scrollback and the visible rows
-// (which would break the one-continuous-native-history-stream contract).
+// already crossed into native scrollback (e.g. a settle/retention path left
+// the stream tail ahead of the resident model), so the visible suffix must
+// continue the stream instead of being bottom-anchored with blank headroom
+// between scrollback and the visible rows (which would break the
+// one-continuous-native-history-stream contract).
 func (s *TerminalSession) historyInsertionContinuesScrollback(height, capacity int) bool {
 	if s == nil || s.historyTopAligned {
 		return false

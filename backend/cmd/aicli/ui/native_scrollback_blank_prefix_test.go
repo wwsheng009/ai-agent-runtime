@@ -59,8 +59,9 @@ func TestStreamingFinalizePlansTailAfterBlankSourceRows(t *testing.T) {
 	}
 
 	streaming := h.controller.State()
-	if streaming.Active.Acked.End == 0 || streaming.Active.Acked.End >= len(source) {
-		t.Fatalf("fixture did not retain a resident suffix: %+v", streaming.Active)
+	// A2 第一刀：mutable 期间不铸 active 提交，也不推进 ack 前沿。
+	if streaming.Active.Acked.End != 0 || len(streaming.HistoryEffects.Entries()) != 0 {
+		t.Fatalf("mutable streaming minted history: active=%+v effects=%+v", streaming.Active, streaming.HistoryEffects.Entries())
 	}
 	finalCell := &scene.TranscriptCell{
 		ID: 92, Revision: uint64(len(lines) + 1), Kind: scene.KindAssistant,

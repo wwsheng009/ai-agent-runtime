@@ -183,11 +183,10 @@ func dispatchTranscriptPlanWindow(state *UIControllerState, inputs transcriptPla
 // 一律在 live 状态上求值。返回顺序与旧实现一致：cell 提交在前，activeCommits 追加
 // 在尾部。
 func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows []AppScreenRow, screenRowsBefore int) []HistoryCommit {
-	frontierCells, frontierActive := canonicalHistoryCommitFrontier(state)
-	var activeCommits []HistoryCommit
-	if state.SemanticActiveCellProjection && frontierActive {
-		activeCommits = planMutableActiveCellHistoryCommitsWithTheme(state.Active, state.Geometry, state.Geometry.Generation, state.Theme)
-	}
+	frontierCells, _ := canonicalHistoryCommitFrontier(state)
+	// A2 第一刀（停铸 active）：mutable 期间不再铸 active 提交；finalize 时从
+	// source 0 一次性铸全量 transcript 提交。旧 active 铸路径保留在
+	// planMutableActiveCellHistoryCommitsWithTheme（死代码，第二刀删除）。
 	// 已结算分片（Acked/Failed/Abandoned/Invalidated）不再参与 reconcile，
 	// 规划时直接跳过，避免每次 transcript 迁移都把整段历史重新物化 payload。
 	ackedActive := indexAckedActiveHistoryCommits(state.HistoryEffects)
@@ -236,7 +235,7 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 		}
 		start = end
 	}
-	return append(commits, activeCommits...)
+	return commits
 }
 
 // planEligibleHistoryCommitsWithin 是带预算的规划实现。complete 为 false 表示
@@ -1426,7 +1425,13 @@ func transcriptFinalizedCellCount(transcript TranscriptState) int {
 // updates. The finalized transcript prefix and its physical rows cannot change
 // while the same cell remains mutable, so rebuilding it here only burns CPU
 // and allocations. Reconcile just this cell's active handoff candidates.
-func syncHistoryEffectsForActiveCell(state *UIControllerState) {
+// syncHistoryEffectsForActiveCell 是 streaming 入口的 active 提交同步。
+// A2 第一刀（停铸 active）后本函数空转：mutable 期间不再铸 active 提交，
+// finalize 一次铸全量。旧实现保留为 syncHistoryEffectsForActiveCellLegacy
+// （死代码，第二刀随 active 铸路径一起删除）。
+func syncHistoryEffectsForActiveCell(*UIControllerState) {}
+
+func syncHistoryEffectsForActiveCellLegacy(state *UIControllerState) {
 	if state == nil || !state.SemanticActiveCellProjection ||
 		state.Active.Phase != ActiveCellMutable || state.Active.CellID == 0 {
 		return

@@ -48,27 +48,26 @@ func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 		t.Fatal("resident tail non-empty must not claim scrollback continuation")
 	}
 
-	// 2) active 归档：行只进 stream tail（writer 私有证明），resident 模型不动，
-	//    底部锚定不变 —— 两者是不同证明，这正是不能把 stream tail 当镜像删掉的原因。
-	active := terminalSessionCommit(1, line("act-01"), line("act-02"), line("act-03"), line("act-04"), line("act-05"))
-	active.Origin = HistoryCommitActive
-	active.Token = 2
-	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &active}); result.History == nil || result.History.Err != nil || result.History.Deferred {
-		t.Fatalf("active archive = %#v", result)
+	// 2) 统一交付（A2 第一刀）：交付与 Origin 无关，stream tail 与 resident
+	//    tail 同步推进；stream tail 是 outputBottom 有界后缀。
+	second := terminalSessionCommit(1, line("next-01"), line("next-02"), line("next-03"))
+	second.Token = 2
+	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &second}); result.History == nil || result.History.Err != nil || result.History.Deferred {
+		t.Fatalf("second delivery = %#v", result)
 	}
 	// stream tail 是有界证明：上界 = outputBottom，保留的是最近写入的后缀。
 	if got := len(session.historyStreamTailRows); got != outputBottom {
-		t.Fatalf("stream tail after active archive = %d rows, want %d (bounded suffix)", got, outputBottom)
+		t.Fatalf("stream tail after second delivery = %d rows, want %d (bounded suffix)", got, outputBottom)
 	}
 	streamTail := strings.Join(session.historyStreamTailRows, "\n")
-	if !strings.Contains(streamTail, "act-01") || !strings.Contains(streamTail, "act-05") || strings.Contains(streamTail, "fin-") {
+	if !strings.Contains(streamTail, "next-03") || strings.Contains(streamTail, "fin-01") {
 		t.Fatalf("bounded stream tail must keep the newest written suffix: %q", streamTail)
 	}
-	if got := len(session.historyTailRows); got != 3 {
-		t.Fatalf("resident tail after active archive = %d rows, want 3", got)
+	if got := len(session.historyTailRows); got != outputBottom {
+		t.Fatalf("resident tail after second delivery = %d rows, want %d", got, outputBottom)
 	}
-	if session.historyTopAligned {
-		t.Fatal("active archive with bottom anchor must not top-align")
+	if !session.historyTopAligned {
+		t.Fatal("second delivery overflow past capacity must top-align")
 	}
 
 	// 3) finalized 溢出：语义行越过 row 1 进入 scrollback 后 topAligned 置位。

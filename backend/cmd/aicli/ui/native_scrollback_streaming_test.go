@@ -54,8 +54,9 @@ func TestStreamingActiveFinalizeTransfersResidentTailExactlyOnce(t *testing.T) {
 	}
 
 	streaming := h.controller.State()
-	if streaming.Active.Acked.End == 0 || streaming.Active.Acked.End >= len(source) {
-		t.Fatalf("streaming active frontier=%+v, want an acknowledged prefix and resident suffix", streaming.Active)
+	// A2 第一刀：mutable 期间不铸 active 提交；finalize 从 0 铸全量。
+	if streaming.Active.Acked.End != 0 || len(streaming.HistoryEffects.Entries()) != 0 {
+		t.Fatalf("mutable streaming minted history: active=%+v effects=%+v", streaming.Active, streaming.HistoryEffects.Entries())
 	}
 	finalCell := &scene.TranscriptCell{
 		ID: 91, Revision: 41, Kind: scene.KindAssistant,

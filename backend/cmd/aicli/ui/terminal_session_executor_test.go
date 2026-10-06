@@ -166,7 +166,9 @@ func TestTerminalSessionClaimMissRequiresRetryOnlyForActionableScheduleChange(t 
 	}
 }
 
-func TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite(t *testing.T) {
+// A2 第一刀：streaming 期间没有流式历史事务；finalize 是会话的第一笔历史交付，
+// executor 必须在阻塞帧写之后把它完整排空（每行恰好一次）。
+func TestTerminalSessionExecutorDrainsFinalTranscriptDeliveryAfterStreaming(t *testing.T) {
 	const width, height = 100, 24
 	markers := make([]string, 40)
 	lines := make([]string, len(markers))
@@ -235,18 +237,11 @@ func TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameW
 				}},
 			)
 		}
-		if index == 30 {
-			select {
-			case <-writer.started:
-			case <-time.After(5 * time.Second):
-				t.Fatal("timed out waiting for blocked streaming transaction")
-			}
-		}
 	}
 
 	streaming := controller.State()
-	if streaming.Active.Acked.End != 0 || streaming.Active.Enqueued.End == 0 {
-		t.Fatalf("blocked streaming frontier=%+v, want pending history and resident tail", streaming.Active)
+	if streaming.Active.Acked.End != 0 || streaming.Active.Enqueued.End != 0 || len(streaming.HistoryEffects.Entries()) != 0 {
+		t.Fatalf("mutable streaming minted history before finalize: active=%+v effects=%+v", streaming.Active, streaming.HistoryEffects.Entries())
 	}
 	finalCell := &scene.TranscriptCell{
 		ID: 91, Revision: 41, Kind: scene.KindAssistant,

@@ -777,9 +777,13 @@ func TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory(t *testi
 	if streaming.Active.Stable.End != len(answer) || streaming.Active.Enqueued.End < streaming.Active.Acked.End {
 		t.Fatalf("streaming range ledger is inconsistent: %+v", streaming.Active)
 	}
-	if streaming.Active.Acked.End <= 0 || streaming.Active.Acked.End >= len(answer) {
-		t.Fatalf("fixture did not split acknowledged prefix from resident tail: active=%+v effects=%+v",
-			streaming.Active, streaming.HistoryEffects.Entries())
+	if streaming.Active.Acked.End != 0 {
+		t.Fatalf("mutable ack frontier advanced before finalize: active=%+v", streaming.Active)
+	}
+	for _, entry := range streaming.HistoryEffects.Entries() {
+		if entry.Commit.CellID == streaming.Active.CellID {
+			t.Fatalf("mutable cell minted history before finalize: %#v", entry)
+		}
 	}
 
 	bridge.Handle(runtimeevents.Event{

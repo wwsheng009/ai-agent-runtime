@@ -160,11 +160,14 @@ func TestMutableActiveFinalizePreservesExactlyOncePhysicalFlow(t *testing.T) {
 	h.flush()
 
 	streaming := h.controller.State()
-	if streaming.Active.Acked.End == 0 {
-		t.Fatalf("fixture never acknowledged a mutable overflow prefix: active=%+v effects=%+v", streaming.Active, streaming.HistoryEffects.Entries())
+	// A2 第一刀：mutable 期间不铸 active 提交；稳定前缀不得在 finalize 前跨 writer。
+	if streaming.Active.Acked.End != 0 || len(streaming.HistoryEffects.Entries()) != 0 {
+		t.Fatalf("mutable streaming minted history before finalize: active=%+v effects=%+v", streaming.Active, streaming.HistoryEffects.Entries())
 	}
-	if !strings.Contains(h.physical.String(), markers[0]) || !strings.Contains(h.physical.String(), markers[len(markers)-1]) {
-		t.Fatalf("streaming transaction did not contain both history prefix and live tail")
+	if raw := h.physical.String(); strings.Contains(raw, markers[0]) {
+		t.Fatalf("stable mutable prefix crossed the writer before finalize: %q", raw)
+	} else if !strings.Contains(raw, markers[len(markers)-1]) {
+		t.Fatalf("live viewport tail missing before finalize: %q", raw)
 	}
 
 	finalCell := &scene.TranscriptCell{
@@ -210,8 +213,9 @@ func TestAuthoritativeFinalCorrectionSettlesWithoutScrollbackReplay(t *testing.T
 		}},
 	)
 	h.flush()
-	if h.controller.State().Active.Acked.End == 0 {
-		t.Fatal("fixture did not hand off the stale mutable prefix")
+	// A2 第一刀：stale mutable 源不再 handoff；修正源在 finalize 时从 0 交付。
+	if h.controller.State().Active.Acked.End != 0 || len(h.controller.State().HistoryEffects.Entries()) != 0 {
+		t.Fatal("fixture minted stale mutable history before finalize")
 	}
 	handoffEpoch := h.controller.State().HistoryEffects.TerminalEpoch
 
@@ -266,10 +270,19 @@ func TestAuthoritativeFinalCorrectionSettlesWithoutScrollbackReplay(t *testing.T
 			t.Fatalf("corrected marker %q delivered %d times, want exactly one", marker, count)
 		}
 	}
-	for _, marker := range oldMarkers {
-		if count := strings.Count(raw, marker); count > 1 {
-			t.Fatalf("stale mutable marker %q re-emitted %d times without a replay", marker, count)
+	// stale 行只允许存在于流式 band 的瞬态绘制；不得进入历史账本，也不得进入
+	// native scrollback（band 绘制不滚动）。
+	for _, entry := range state.HistoryEffects.Entries() {
+		for _, line := range entry.Commit.Lines {
+			if strings.Contains(renderLineText(line), "STALE-ACTIVE-") {
+				t.Fatalf("stale mutable row reached the history ledger: %#v", entry)
+			}
 		}
+	}
+	screen := vt.NewScreen(width, height)
+	screen.Feed(raw)
+	if scrollback := strings.Join(screen.ScrollbackLines(), "\n"); strings.Contains(scrollback, "STALE-ACTIVE-") {
+		t.Fatalf("stale mutable rows entered native scrollback: %q", scrollback)
 	}
 }
 
@@ -295,23 +308,37 @@ func TestMutableMarkdownOverflowHandsOffRichPrefixBeforeFinalize(t *testing.T) {
 		}},
 	)
 
-	entries := h.controller.State().HistoryEffects.Entries()
-	if len(entries) == 0 {
-		t.Fatal("mutable Markdown overflow created no pre-finalize history effects")
+	// A2 第一刀：mutable 期间不 handoff；finalize 一次性铸全量 rich IR。
+	if entries := h.controller.State().HistoryEffects.Entries(); len(entries) != 0 {
+		t.Fatalf("mutable Markdown minted pre-finalize history effects: %+v", entries)
 	}
+
+	finalCell := &scene.TranscriptCell{
+		ID: 81, Revision: 3, Kind: scene.KindAssistant,
+		Source: source, Phase: scene.CellCommitted,
+	}
+	h.post(t, FinalizeActiveCellAction{
+		Snapshot:             regressionCommittedSnapshot(3, finalCell),
+		ExpectedActiveCellID: 81, ExpectedActiveRevision: 2,
+		ExpectedSceneRevision: 3,
+		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
+	})
+
+	// 账本条目在 executor 排空并压缩前读取：Acked 压缩会丢弃 payload。
+	entries := h.controller.State().HistoryEffects.Entries()
 	var payload strings.Builder
 	rich := false
 	fragments := map[uint64]struct{}{}
 	for _, entry := range entries {
 		commit := entry.Commit
-		if commit.Origin != HistoryCommitActive {
+		if commit.Origin != HistoryCommitTranscript {
 			continue
 		}
 		if commit.FragmentID == 0 {
-			t.Fatalf("mutable Markdown handoff has no stable render fragment identity: %#v", commit)
+			t.Fatalf("finalize plan has no stable render fragment identity: %#v", commit)
 		}
 		if _, duplicate := fragments[commit.FragmentID]; duplicate {
-			t.Fatalf("duplicate mutable Markdown fragment id %d", commit.FragmentID)
+			t.Fatalf("duplicate finalize fragment id %d", commit.FragmentID)
 		}
 		fragments[commit.FragmentID] = struct{}{}
 		payload.WriteString(render.PlainBackend{}.Render(render.LinesDoc(commit.Lines...)))
@@ -324,13 +351,13 @@ func TestMutableMarkdownOverflowHandsOffRichPrefixBeforeFinalize(t *testing.T) {
 		}
 	}
 	if len(fragments) == 0 || !strings.Contains(payload.String(), "MD-OVERFLOW-000") {
-		t.Fatalf("mutable Markdown early rendered prefix was not planned: fragments=%d payload=%q", len(fragments), payload.String())
+		t.Fatalf("finalize plan omitted the rendered Markdown prefix: fragments=%d payload=%q", len(fragments), payload.String())
 	}
 	if strings.Contains(payload.String(), "**") || strings.Contains(payload.String(), "# Mutable Markdown") {
-		t.Fatalf("mutable Markdown history leaked raw source syntax: %q", payload.String())
+		t.Fatalf("finalize Markdown history leaked raw source syntax: %q", payload.String())
 	}
 	if !rich {
-		t.Fatalf("mutable Markdown history lost structured emphasis/code styling: %#v", entries)
+		t.Fatalf("finalize Markdown history lost structured emphasis/code styling: %#v", entries)
 	}
 
 	h.flush()

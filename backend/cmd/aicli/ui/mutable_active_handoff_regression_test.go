@@ -9,11 +9,9 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
-// A mutable response may outgrow the active viewport before its final event
-// arrives. Its stable prefix must already have crossed the physical writer;
-// keeping only the viewport tail makes those earlier rows unreachable until
-// finalization and loses them entirely if the stream is interrupted.
-func TestMutableActiveOverflowWritesStablePrefixBeforeFinalize(t *testing.T) {
+// A2 第一刀（停铸 active）：mutable 溢出的稳定前缀在 finalize 之前不得跨物理
+// writer；finalize 时整源从 0 一次交付，每个标记恰好一次。
+func TestMutableActiveOverflowDefersStablePrefixUntilFinalize(t *testing.T) {
 	const (
 		earlyMarker  = "MUTABLE-EARLY-000"
 		latestMarker = "MUTABLE-LATEST-029"
@@ -60,6 +58,9 @@ func TestMutableActiveOverflowWritesStablePrefixBeforeFinalize(t *testing.T) {
 	if before.Active.Phase != ActiveCellMutable || len(before.Transcript.Cells) != 0 {
 		t.Fatalf("fixture finalized or retained the cell unexpectedly: active=%+v transcript=%+v", before.Active, before.Transcript.Cells)
 	}
+	if entries := before.HistoryEffects.Entries(); len(entries) != 0 || before.Active.Acked.End != 0 {
+		t.Fatalf("mutable streaming minted history before finalize: active=%+v effects=%+v", before.Active, entries)
+	}
 
 	executor.Request()
 	executor.WaitIdle()
@@ -69,16 +70,24 @@ func TestMutableActiveOverflowWritesStablePrefixBeforeFinalize(t *testing.T) {
 	if !strings.Contains(raw, latestMarker) {
 		t.Fatalf("fixture did not paint the live viewport tail; terminal bytes=%q", raw)
 	}
-	if !strings.Contains(raw, earlyMarker) {
-		after := controller.State()
-		projection := ProjectActiveCellBand(after.Active, after.Geometry)
-		t.Fatalf(
-			"stable mutable prefix never crossed the physical writer before finalize: marker=%q history_effects=%d projected_range=%+v projected_rows=%d terminal_bytes=%q",
-			earlyMarker,
-			len(after.HistoryEffects.Entries()),
-			projection.SourceRange,
-			len(projection.Lines),
-			raw,
-		)
+	if strings.Contains(raw, earlyMarker) {
+		t.Fatalf("stable mutable prefix crossed the physical writer before finalize; terminal bytes=%q", raw)
 	}
+
+	if !controller.Post(FinalizeActiveCellAction{
+		Snapshot: &scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{{
+			ID: 41, Revision: 2, Kind: scene.KindAssistant,
+			Source: source, Phase: scene.CellCommitted,
+		}}},
+		ExpectedActiveCellID: 41, ExpectedActiveRevision: 1,
+		ExpectedSceneRevision: 2,
+		ExpectedActiveKind:    scene.KindAssistant, ExpectedActiveKindKnown: true,
+	}) {
+		t.Fatal("post finalize")
+	}
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+
+	assertPhysicalMarkersExactlyOnce(t, physical.String(), 80, 12, []string{earlyMarker, latestMarker})
 }
