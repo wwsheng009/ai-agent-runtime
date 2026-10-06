@@ -10,7 +10,8 @@
 - 根因：**writer 物理事实（frame/history tail/物理投影）与 reducer 语义事实（Geometry/LayoutGeneration/ledger）
   之间缺少显式边界**——既有 ack 栅栏缺失（1ms 轮询 + 三连 Wait 代偿），又有镜像字段在两层间来回抄写。
 - 顺序（依赖驱动）：
-  1. **P1-2a 零风险删除**（纯镜像/统计：`LayoutGeneration` 字段、`historyTailCells`、`historyPrepareHits/Misses`）；
+  1. **P1-2a 零风险删除**（`LayoutGeneration` 字段已删；`historyTailCells` 复核后**撤回删除**、
+     `historyPrepareHits/Misses` 复核后**暂缓**——见 §2.1 修订）；
   2. **P1-3 事件驱动 ack**（先建栅栏，消除无界 WaitIdle 死锁风险——P1-1 删 InFlight 的前提）；
   3. **P1-1 ledger 四步收敛**（InFlight/claim → 六态归一 → 计数器游标化 → 规划续跑组）；
   4. **P1-2b 派生收敛**（`historyStreamTailRows`/`historyTopAligned` 改 ledger ack 推导、几何 probe 收敛、frame 单点）。
@@ -76,9 +77,9 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 
 | 字段 | 位置 | 事实源 | 处置 |
 |---|---|---|---|
-| `historyTailCells` | terminal_session.go:351-357 | ledger `activeTokensByCell`（history_commit.go:196） | **删除**（P1-2a，改查 ledger） |
+| `historyTailCells` | terminal_session.go:351-357 | **非镜像**（见修订） | **撤回删除**：ledger `activeTokensByCell` 是"未终态 token"索引（ack 压缩即删），而本字段是"本 writer 已物理交付 cell"证明（投影清除才重置），用于丢失 ledger 证明后的重投递裁剪；直接替换会双向漂移（漏裁/误裁）。改列 P1-2b：ledger 需新增"投影重置后已交付 cell"索引方可替换，否则永久保留 |
 | `LayoutGeneration` | app_state.go:43 | `Geometry.Generation`（105/108/109/473 全同值） | **删除**（访问器，P1-2a） |
-| `historyPrepareHits/Misses` | terminal_session.go:382-383 | 无生产消费者 | **删除/降级 /debug**（P1-2a） |
+| `historyPrepareHits/Misses` | terminal_session.go:382-383 | 无生产消费者（仅测试断言） | **暂缓**：6 个测试以其为缓存命中/失效的唯一观测点，直接删除会削弱 2 个测试的断言特异性；待 /debug 导出或测试改用 preparedHistory 身份断言后再删 |
 | `historyStreamTailRows` | terminal_session.go:345-350 | ledger Acked 范围 + AckFrame（history_commit.go:128） | 降级：writer 私有证明，改 ack 推导（P1-2b） |
 | `historyTopAligned` | terminal_session.go:358-364 | "已有行进滚动区"（stream tail 非空 + resident 空） | 降级：派生 + 不变量测试（P1-2b） |
 | `historyTailRows` | terminal_session.go:344 | 物理已写缓存 | 保留（writer 私有，禁止回喂 reducer） |
@@ -111,8 +112,19 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 
 - before：`historyStreamTailRows` 12 行/1 文件；`historyTailCells|historyTopAligned|preparedHistory` 33+10 行；
   几何关键词 43 文件（19 生产）；`frame++|frames++|generation++|Generation++` 10 行/7 文件（含 seq/nextGen 16 写入点/10 文件）。
-- after 目标：删除 4 项（historyTailCells、LayoutGeneration、prepareHits/Misses、unified surface 上报）；
+- after 目标（修订）：删除 1 项（`LayoutGeneration`，P1-2a 已落地）；撤回 1 项（`historyTailCells` 非镜像）；
+  暂缓 1 项（prepareHits/Misses，待 /debug 导出或测试改造）；unified surface 上报删除归入 P1-2b；
   降级 4 项（streamTailRows、topAligned、presenter 镜像、PaintTrace）；事实源 = AppState.Geometry + TerminalSession.frame + ledger。
+
+### 2.5 P1-2a 实施记录（已完成）
+
+- `LayoutGeneration` 字段删除：生产 8 文件（app_state/controller/controller_state/app_layout/history_effect_planner/
+  history_trace/terminal_session_snapshot/history_plan_diagnosis + commands 2 处 debug 读点）全部改读
+  `state.Geometry.Generation`；写入点（Resize/主题）删除，字段不再抄写。
+  测试 20+ 文件机械同步（70 处 `state.LayoutGeneration` → `state.Geometry.Generation`；AppState 字面量删除冗余字段，
+  全部与既有 `Geometry.Generation` 同值）。
+- `historyTailCells`：复核后撤回（见 §2.1）。
+- `historyPrepareHits/Misses`：复核后暂缓（见 §2.1）。
 
 ## 3. P1-3 WaitIdle 事件驱动 ack
 
@@ -156,7 +168,7 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 
 ## 4. 实施顺序与回滚
 
-1. **P1-2a**（1 提交/项，纯删除 + 访问器）：`LayoutGeneration`、`historyTailCells`、`historyPrepareHits/Misses`。
+1. **P1-2a**（已完成）：`LayoutGeneration` 字段删除；`historyTailCells` 撤回、`historyPrepareHits/Misses` 暂缓（见 §2.1/§2.5）。
 2. **P1-3**（2-3 提交）：`WaitActionApplied` + Post 通知（controller.go）→ executor 五处替换 → bridge 三态 ack。
 3. **P1-1**（4 提交，每步先加钉测试再删实现）：InFlight/claim → 六态归一 → 计数器游标 → 规划续跑组（后置，依赖规划单线程化）。
 4. **P1-2b**（2-3 提交）：streamTailRows/topAligned 派生 → 几何收敛 → frame 单点 + 更名隔离。
