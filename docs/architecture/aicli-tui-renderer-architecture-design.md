@@ -480,7 +480,7 @@ sequenceDiagram
 | **P0 写端归一** | 所有字节经统一边界；旁路可记录 | 控制序列旁路（`c159a118`：标题/铃/编辑器序列）；守卫与回归栅栏（`09190ee8`，64 项债务台账）；legacy surface 单向栅栏 | stderr 边缘路径收口；CI 白名单门禁（`render/output` 之外 0 命中）；fenced-dead 清理 |
 | **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–3（单飞写游标、六态归一、计数器游标）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | P1-1 第 4 步（删续跑组 ≈305 refs，受 P1-1 子计划门控）；残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
 | **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 522ms/op + CPU profile 归因）；Stage 1 设计细化（§1.6：身份模型/D2 反例） | Stage 1 编码（D2 测试先行 → 1c/1d → 基准 ≤174ms）；Stage 2（无预算同步化，冷启动门控）；Stage 3（去异步）；Stage 4（删续跑组） |
-| **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 第一刀（停铸 active，`130cc7f5`）**；第二刀 2a/2b（`7471d34a`/`80738513`：archive/sync 死代码、skipRows 管线） | 第二刀 2c（advanceActive*/noteFinalizedActiveAck/lastPlannedActive*/枚举面）；replay 切片（S1–S5）；锚定切片 |
+| **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 第一刀（停铸 active，`130cc7f5`）**；第二刀 2a/2b/2c（`7471d34a`/`80738513`/`e3236de9`：archive/sync 死代码、skipRows 管线、active ack 机制与枚举面）——**Slice 1 全部完成** | replay 切片（S1–S5）；锚定切片 |
 | **P3 性能** | O(delta) 成本模型 | 基准与热点归因（P1-1 Stage 0）；部分缓存（`sharedCellRows`/`sharedHistoryPlan`） | 增量编码（viewport 物化 + 脏行 diff）；去全屏克隆（plan 单所有者、ScreenModel swap）；active markdown 增量解析 |
 
 ### 7.2 分阶段验收（总表）
@@ -509,7 +509,8 @@ sequenceDiagram
    `activeAckedRenderedPrefixRows` 的 skipRows 由已交付 Active 条目推导，停铸后恒为 0，
    finalize 从 source 0 一次性铸全量。切片序：Slice 0 目标断言 → Slice 1 单点停铸
    （核心语义，可独立回滚）→ Slice 2 删终端归档路径 → Slice 3 reducer/planner 清理
-   → Slice 4 `HistoryCommitActive` 类型面收尾（最后做，编译错误为向导）。
+   → Slice 4 `HistoryCommitActive` 类型面收尾——**全部完成**（Slice 1 `130cc7f5`；
+   Slice 2–4 第二刀 `7471d34a`/`80738513`/`e3236de9`，净删 ~1336 行，行为中性）。
 2. **replay / settle 族**：**settle 族整体保留（它就是目标语义：原地隔离、永不重发、
    从最后已证明行续写）；armed 销毁式重放族整体可删**（授权字段、`ProvenScrollbackEpoch`、
    `HistoryScrollbackReconciled` 分支、`\x1b[3J` 写路径、success-mode 背压、相关诊断）。
@@ -743,7 +744,7 @@ sequenceDiagram
 
 | 对象 | 当前（迁移期） | 目标 | 切片 |
 |---|---|---|---|
-| active 溢出归档（mutable→scrollback） | **第一刀已完成（`130cc7f5`）**：生产停铸；交付分支统一 resident 插入；`terminalActiveHistoryArchiveANSI` 死代码待删 | 停铸；band tail-only | Slice 1 第一刀 ✅ → 第二刀（删死代码/skipRows 管线） |
+| active 溢出归档（mutable→scrollback） | **已完成**：生产停铸（`130cc7f5`）；交付分支统一 resident 插入；死代码/skipRows 管线/active ack 机制与枚举面已删（第二刀 `7471d34a`/`80738513`/`e3236de9`） | 停铸；band tail-only | Slice 1 ✅ |
 | skipRows（finalize 只补尾） | **第一刀后恒 0**（停铸 → 无已交付 Active 条目） | 恒 0（整段铸造） | Slice 1 后自动成立 ✅ |
 | 锚定（底锚/顶锚/续接启发式） | `historyTopAligned` + `historyInsertionContinuesScrollback` 等 12 场景 | 统一"resident 之后按序写、写满 LF 溢出" | P2 锚定切片 |
 | armed 销毁式重放 | `ArmScrollbackReplay` + `\x1b[3J` + `ProvenScrollbackEpoch` | 删除；settle 保留；`TerminalEpoch` 语义化 | P2 replay 切片（S1–S5） |
@@ -751,7 +752,8 @@ sequenceDiagram
 
 > 扫描复核（2026-10-06）：①③④⑥⑦ 与本章语义一致（②的 G4 claimed 漂移由差距收敛方案 C1 `d1cd0efb`
 > 显式化；G5 由 C2 `cc4ae9ac` 去二义）。⑤"整段铸造 skipRows=0"已由 **Slice 1 第一刀 `130cc7f5`**
-> 落地（停铸后 skipRows 恒 0，finalize 从 0 全量一次）；第二刀做纯清理（行为中性）。
+> 落地（停铸后 skipRows 恒 0，finalize 从 0 全量一次）；第二刀 `7471d34a`/`80738513`/`e3236de9`
+> 完成纯清理（行为中性）。
 
 ### 9.6 可见性取舍（显式设计决策）
 

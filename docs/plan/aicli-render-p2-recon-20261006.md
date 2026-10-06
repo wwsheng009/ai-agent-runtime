@@ -184,6 +184,9 @@ source 0 一次铸全量 —— 无需先重构 skipRows 管线。
     `indexAckedActiveHistoryCommits` / `activeAckedRenderedPrefixRows`）；`mintTranscriptPlanWindow`
     skipRows 恒 0、whole-cell 兜底去 prefixProved 门；相关 G5/C2 测试与注释清理。
   - 验证：`go test ./cmd/aicli/ui -count=1` ok；`./cmd/aicli/commands -count=1` ok；`go vet` 双包干净。
-  - 2c 待办（ledger 语义面，单独一刀）：`advanceActiveCell*` / `noteFinalizedActiveAck` /
+  - 2c（`e3236de9`）：删除 active ack 机制（`advanceActiveCell*` / `noteFinalizedActiveAck` /
     `finalizedActiveAckPlanVersion` / `lastPlannedActive*` / `activeTokensByCell` / `activeAckPlanVersion` /
-    `hasClaimedActiveOriginDelivery` 及 Active revision 豁免；`HistoryCommitActive` 枚举面收尾。
+    `hasClaimedActiveOriginDelivery`）与 Active revision 豁免；删除 `HistoryCommitActive` 枚举与
+    `HistoryCommit.Origin` 字段（身份键同步收敛为单值），相关守卫/测试/注释清理。
+  - **第二刀完成（2a+2b+2c，行为中性）**：净删 ~1336 行；`go test ./cmd/aicli/ui` /
+    `./cmd/aicli/commands` 全量绿；`go build ./...` 干净；P2 Slice 1 全部收口。
