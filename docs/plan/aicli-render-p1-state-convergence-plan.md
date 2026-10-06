@@ -126,8 +126,10 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   与 `claimed-token/claimed-gen`；`chat_resume_progress` 的收尾判据改 queued==0。
 - 错误常量 `ErrCommitNotPending`/`ErrCommitNotInFlight` 保留原名（分类稳定），
   注释标明二者在三态下均表示"非 queued"。
-- 验证：`go test ./cmd/aicli/ui/` 全量 + `./cmd/aicli/commands/` 全量通过；
-  `-race` 见提交记录。
+- 验证（`1e8154d6`）：`go test ./cmd/aicli/ui/` 全量 + `./cmd/aicli/commands/` 全量通过；
+  定向 `-race` 通过。全包 `-race` 仅
+  `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation` 因 60s 收敛期限在
+  race 插桩下超时，基线 `d8ec19ca` 同一用例同样失败（非本轮回归）。
 
 ## 2. P1-2 可推导镜像收敛
 
