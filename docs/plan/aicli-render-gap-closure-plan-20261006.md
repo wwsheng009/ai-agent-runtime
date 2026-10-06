@@ -6,6 +6,7 @@
 > 关联（上游/同族）：`aicli-unified-render-architecture-audit-20261005.md`（P0–P3 源头）、
 > `aicli-ui-handoff-inflight-strand-hardening-plan-20261005.md`（handoff 硬化域，G4/G5）、
 > `aicli-render-p0-writer-unification-ledger.md`（P0 台账，A 批对接）、
+> `aicli-tui-owned-render-simplification-plan.md`（owned render 母计划，兼容清理对接）、
 > `aicli-render-p1-state-convergence-plan.md`（P1-3 §3.7 保留决策）、
 > `aicli-render-p1-1-step4-planning-incremental-plan.md`、`aicli-render-p2-recon-20261006.md`（切片）、
 > `aicli-render-remaining-defect-ledger-20261006.md`（A1–A5 主线）、写端清单门禁
