@@ -1221,7 +1221,6 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_model_switch.go", Func: "selectRuntimeReasoningEffortLegacy", Kind: "os.Std*", Count: 4},
 		{File: "chat_notification.go", Func: "initializeChatTitleNotifier", Kind: "os.Std*", Count: 1},
 		{File: "chat_notification_sound.go", Func: "initializeChatSoundNotifier", Kind: "os.Std*", Count: 1},
-		{File: "chat_pipe_console_line.go", Func: "pipeConsoleLineEditorSupported", Kind: "os.Std*", Count: 1},
 		{File: "chat_pipe_console_line.go", Func: "readPipeInteractiveLine", Kind: "os.Std*", Count: 2},
 		{File: "chat_profile_lifecycle_ops.go", Func: "chatProfileEditLifecycleText", Kind: "os.Std*", Count: 2},
 		{File: "chat_profile_overlay.go", Func: "emitProfileConfigOverlayWarning", Kind: "os.Std*", Count: 1},
@@ -1344,6 +1343,12 @@ func collectChatWritersFromNode(fset *token.FileSet, file string, name string, n
 	ast.Inspect(node, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.CallExpr:
+			if ident, ok := x.Fun.(*ast.Ident); ok {
+				if chatProbeCall(ident.Name) && len(x.Args) > 0 {
+					markStream(x.Args[0], probe)
+				}
+				return true
+			}
 			selector, ok := x.Fun.(*ast.SelectorExpr)
 			if !ok {
 				return true
@@ -1395,6 +1400,16 @@ func collectChatWritersFromNode(fset *token.FileSet, file string, name string, n
 func chatProbeMethod(name string) bool {
 	switch name {
 	case "Fd", "Stat", "Sync", "Name":
+		return true
+	}
+	return false
+}
+
+// chatProbeCall lists helper calls that inspect a stream (fd type probes)
+// rather than writing bytes to it.
+func chatProbeCall(name string) bool {
+	switch name {
+	case "fdIsPipeOrChar":
 		return true
 	}
 	return false
