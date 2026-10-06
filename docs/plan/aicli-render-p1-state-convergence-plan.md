@@ -301,10 +301,14 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`（单独 98.7s
   通过，内部收敛期限对负载敏感）超时未收敛一次；单独复跑全绿，属既有负载
   敏感用例，与本改动无因果证据。
-- 剩余（记录为后续）：unified 下 `ApplyGeometry` 纯采纳入口（当前 unified 帧
-  几何已经由 `terminalSessionSnapshot` 携带 `AppState.Geometry`，显式纯采纳
-  入口与其夹具待专项）；`chat_setup.chatTerminalWriterWidth` 的 writer 专属
-  GetSize 保留（语义是给定 writer 的宽度，不是进程终端）。
+- unified 纯采纳入口复核（本项关闭）：unified 帧几何唯一来源是
+  `ComposeAppRenderFrame`/`ComposeTerminalFramePlan` 从 `AppState.Geometry`
+  纯派生（`app_render_frame_test.go:34` 已钉 `frame.Geometry ==
+  state.Geometry`），`TerminalSession.Flush` 逐值采纳 `frame.Geometry`
+  （terminal_session.go:1114），零几何由 `TerminalFramePlan.Valid()`
+  fail-closed，全路径无 probe 回退——无需新增独立 `ApplyGeometry` API。
+- 保留：`chat_setup.chatTerminalWriterWidth` 的 writer 专属 GetSize（语义是
+  给定 writer 的宽度，不是进程终端）。
 
 ## 3. P1-3 WaitIdle 事件驱动 ack
 
