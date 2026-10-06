@@ -166,10 +166,35 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 - lease/held 交互：screen open 等待必须在 lease transition 发布后 ack（chat_screen_framework.go:24/:173/:387-405）；
   resize/theme 与 claim 交错的 ack 栅栏对应"快照可读"而非"仅出队"。
 
+### 3.5 P1-3 第 1 小步实施记录（controller 侧 waiter，已完成）
+
+- `PostTracked`/`TryPostTracked`/`PostDeferredTracked`：三态 outcome（admitted/merged/dropped）+ ticket；
+  merge 时槽位 ticket 提升到 max（旧 poster 的 ticket 也被同一 apply 释放）；`Post`/`TryPost`/`PostDeferred`
+  改为薄包装，投递语义与计数器口径不变。
+- `queueTickets` 与 `queue` 在同一 reslice 点同生共死；`appliedTicket`/`visibleTicket` 单调水位：
+  applied = reducer 返回且 state 已发布（controller.go Run 内 reduce 之后）；visible = 批内全部 effect（含 flush）已交付。
+- `WaitActionApplied(ticket, timeout)` / `WaitActionVisible(ticket, timeout)`：channel 唤醒（无轮询、无辅助 goroutine）；
+  waiter 表在 `c.mu` 下登记/释放；超时自摘除并复核水位（竞态不丢成功）；Run 在 close-drain 完成后 abort 未决 waiter。
+- 钉测试 7 项（`controller_action_wait_test.go`）：admitted/merged/dropped、deferred、无 Run 超时、
+  visible 等待 effect 交付、merge 双 ticket、满 mailbox 三态。
+- 未决：executor 五处替换（847/891/1012/1155/1159/1183/834）与 bridge 三态 ack 属第 2/3 小步；
+  `WaitIdleTimeout` 的 1ms 轮询仅在这些调用点迁移后才会消失。
+- 相邻修复（本次一并落地，commands 包）——「在途窗口」在单车道重构后残留的两处缺口：
+  1. `trySendStreamEvent` 改为**先记账后入队**：原 send→account 窗口内消费者已出队并进入
+     写帧，并发 delta 读到 `eventQueueBytes==0` 而直投；
+  2. 新增 `streamWriteInFlight`（run() 处理流事件期间置位）：写入在途时（a）新 delta 一律
+     合并进 backlog、（b）backlog worker **不得把流式头槽提升进 bounded queue**——
+     否则合并面（backlog）被搬走，卡顿被裂成多次小重绘。
+  症状：全量负载下 `TestChatRuntimeEvents_CoalescesStreamingDeltasWhileQueueBacksUp` 三连败
+  （期望 `["Hello"," world!"]` 实得 `["Hello"," world","!"]`，隔离通过）；修复后该测试
+  5x、`TestChatRuntimeEvents` 子集 3x 通过，全量复跑见提交记录。与 §3.3「合并/丢弃路径必须立即 ack」
+  同域，属 bridge 第 3 小步的前置清障。
+
 ## 4. 实施顺序与回滚
 
 1. **P1-2a**（已完成）：`LayoutGeneration` 字段删除；`historyTailCells` 撤回、`historyPrepareHits/Misses` 暂缓（见 §2.1/§2.5）。
-2. **P1-3**（2-3 提交）：`WaitActionApplied` + Post 通知（controller.go）→ executor 五处替换 → bridge 三态 ack。
+2. **P1-3**（2-3 提交）：`WaitActionApplied` + Post 通知（controller.go，**第 1 小步已完成**，见 §3.5）
+   → executor 五处替换 → bridge 三态 ack。
 3. **P1-1**（4 提交，每步先加钉测试再删实现）：InFlight/claim → 六态归一 → 计数器游标 → 规划续跑组（后置，依赖规划单线程化）。
 4. **P1-2b**（2-3 提交）：streamTailRows/topAligned 派生 → 几何收敛 → frame 单点 + 更名隔离。
 - 每步独立可回滚；任一步 `-race` 或长会话验收不过即回滚该步，不带病前进。
