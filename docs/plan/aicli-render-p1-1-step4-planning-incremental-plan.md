@@ -182,12 +182,16 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
 
 - **D1（保守）**：段 diff 只跳过「source 身份集合与 Lines 均未变**且** DisplayRange 未变」的段；
   prepend 仍全量重定基 ⇒ 只消 enqueue 侧，消不掉 reconcile。
-- **D2（激进，收益大）**：把 DisplayRange 从「呈现等价」降级为纯簿记（finalized 亦跳过比较，
-  或进一步从 byRange 键移除）——prepend 不再触发全量 RebasePending，未变段可直接跳过。
-  待证不变式：①byRange 去 display 后无重复铸造路径（bySource 阻断已覆盖 Queued/Delivered）；
-  ②跨 generation（reflow）不碰撞由 layoutGeneration 键隔离；③同 generation 下不同来源的
-  display 区间不相交（新来源只能占用旧条目未使用的平移区）。
-  风险：display 陈旧化在 reflow 场景的碰撞需测试钉死；续跑轮键稳定性。
+- **D2（激进，收益大）**：把 DisplayRange 从「呈现等价」与 `byRange` 键中降级为纯簿记
+  （finalized 亦跳过比较；`historyCommitRangeKey` 收敛为 source key + layoutGeneration）——
+  prepend/中部插入不再触发全量 RebasePending，未变段可直接跳过。
+  待证不变式：①`byRange` 去 display 后无重复铸造路径（bySource 阻断已覆盖 Queued/Delivered）；
+  ②跨 generation（reflow）不碰撞由 layoutGeneration 键隔离；③**中部插入反例已识别（2026-10-06）**：
+  新来源会复用被平移条目的旧 display 区间；若只跳过重定基而保留 display 键（D2-lite），
+  `Enqueue` 命中 `byRange[旧键]` 且 `BlocksRemint`=true 会把新来源提交当重复拒绝（**丢行**）——
+  因此 D2 必须**同时**把 display 从 `byRange` 键移除，而不是"保留键、只跳重定基"。
+  ④续跑轮键稳定性：display 不进键 ⇒ 天然稳定（旧注释的"局部下标"问题一并消失）。
+  风险：`byRange` 语义收窄后，直接 `Enqueue`（测试/手写状态）的重复检测覆盖面变化需测试钉死。
 
 **落点排序（修订）**：D2 身份论证（测试先行）→ 1c 提交级 settled 过滤 → 1d 段 diff 集成
 → 1b 复用段常量偏移重定基 → 1a 段索引与命中计数（诊断）。
