@@ -212,25 +212,37 @@ C1 ──► C2 ──► P2 Slice 1 ──►（P2 其余切片）
 
 | ID | 项 | 状态 | 提交 | 备注 |
 |---|---|---|---|---|
-| A0 | 门禁增强（递归 + 盲区扫描器） | pending | — | 先红后绿；基线更新 |
-| A1-1 | renderengine/terminal_lock.go 直写 | pending | — | 登记+冻结（首选） |
-| A1-2 | terminal_output.go 包级 var + 注释漂移（G11） | pending | — | 注释修正 + 登记 |
-| A1-3 | notification OSC/BEL 旁路化 | pending | — | 失败路径测试 |
-| A1-4 | legacy console editor stderr 闭包 | pending | — | 收编或登记 |
-| A1-5 | tool_executor stdout 转换登记 | pending | — | allowlist |
-| A1-6 | stderr 边缘收口（G3） | pending | — | chat_setup 等 |
-| A1-7 | legacy StatusBar 栅栏（G9） | pending | — | 或 fenced-dead |
-| A1-8 | 余项分类登记/收敛（8a–8f） | pending | — | 见 §3 A1 余项明细 |
-| A2 | 单写端断言扩展 + e2e | pending | — | 批次收口 |
-| B0 | 保留项登记表回填 §7.5 | pending | — | 清单化 |
-| B1 | WaitIdleTimeout 事件化（可选） | pending | — | 默认保留 |
-| B2 | 1ms 站点清零核对 | pending | — | 仅剩表内条目 |
-| C1 | claimed×presentation 显式化 | pending | — | 先绿钉现状 |
-| C2 | skipRows 去二义 | pending | — | `(rows, proved)` |
-| D1 | StatusRows 口径统一 | pending | — | G12 |
-| D2 | web/TUI statusbar 注明 | pending | — | G10 |
-| D3 | G6 残余映射登记 | pending | — | 随 P1/P2 |
-| D4 | §10 补登项测试对照 | pending | — | G8 残余 |
+| A0 | 门禁增强（递归 + 盲区扫描器） | **done** | `896a94e8`、`b3144171` | 先红后绿：ui +2（renderengine/terminal_output）；commands 盲区 +36 存量登记；fd 探针排除 |
+| A1-1 | renderengine/terminal_lock.go 直写 | **done** | `89ffb8a2` | 登记+冻结：调用方围栏测试（仅 legacy surface） |
+| A1-2 | terminal_output.go 注释漂移（G11） | **done** | `3dec55ee` | 注释修正（SetLegacyBinding 从未落地） |
+| A1-3 | notification OSC/BEL 旁路化 | **done** | `98e9707b` | fail-closed：unified submit 失败不得回退 raw（钉测试先红后绿） |
+| A1-4 | legacy console editor stderr 闭包 | **done** | `4f44ea7d` | 函数内化 + 基线同步 |
+| A1-5 | tool_executor stdout 转换登记 | **done** | `3a88d33f` | allowlist 注释 |
+| A1-6 | stderr 边缘收口（G3） | **done** | `86889760` | profile overlay/resume claim-first；其余分类登记（基线注释 (a)–(d)） |
+| A1-7 | legacy StatusBar 栅栏（G9） | **done** | `3a88d33f` | fenced-dead 标注 + 基线登记 |
+| A1-8 | 余项分类登记/收敛（8a–8f） | **done** | `3a88d33f`、`b3144171` | 8a–8f 全部登记；exec_event_processor 纳入门禁 |
+| A2 | 单写端断言扩展 + e2e | **done（e2e 待真机）** | — | 既有栅栏覆盖四类驱动 + 进程零字节（PASS）；真机 e2e 脚本待终端环境执行 |
+| B0 | 保留项登记表回填 §7.5 | **done** | `12f5ed9d` | 设计文档 §7.5.1（14 行登记表） |
+| B1 | WaitIdleTimeout 事件化（可选） | **决策：保留** | `12f5ed9d` | 默认保留；触发条件变化再事件化（§7.5.1） |
+| B2 | 1ms 站点清零核对 | **done** | `12f5ed9d` | 1ms 集合=表内 5 处，无未登记站点 |
+| C1 | claimed×presentation 显式化 | **done** | `d1cd0efb` | 诊断计数 `ClaimedPresentationDrift` + Deferred 收敛钉测试 |
+| C2 | skipRows 去二义 | **done** | `cc4ae9ac` | `(rows, proved)` + whole-cell 兜底仅限可证零前缀 |
+| D1 | StatusRows 口径统一 | **done** | `a3145fd2` | 物理预留口径 + 空白状态钉测试 |
+| D2 | web/TUI statusbar 注明 | **done** | `32107dd6` | 设计文档 §7.5 G10 |
+| D3 | G6 残余映射登记 | **done** | `32107dd6` | M4/M5/M6 映射回填 |
+| D4 | §10 补登项测试对照 | **done** | `32107dd6` | 既有测试覆盖核对通过（无新增） |
+
+### 9.1 实施证据（2026-10-06）
+
+- A0 先红：ui diff（`renderengine/terminal_lock.go` ×2 + `terminal_output.go var` ×1）；commands
+  `E:\tmp\a0-cmd-red.txt`（147 行；in-scope 36 项登记，glob 收窄为 chat*+command.go+exec_event_processor.go）。
+- 门禁绿：`go test ./cmd/aicli/ui ./cmd/aicli/commands -run 'DirectWriterInventory|WriterInventory'` → ok。
+- A2：`TestUnifiedSessionSinglePhysicalWriterFence` PASS（title/bell/编辑器序列/直写输出/命令输出/诊断六类；
+  进程 stdout/stderr 零字节）。
+- C 回归：`go test ./cmd/aicli/ui -run 'History|Resume|PlanningBudget|Transcript|Handoff|Active'` →
+  C2 后 ok 74.6s；C1 后 ok 79.1s。
+- D：`go test ./cmd/aicli/ui -run 'Layout'` → ok。
+- 未执行：真机 e2e（`scripts/test-aicli-windows-terminal-e2e.ps1`，需交互终端；留待真机/CI 执行）。
 
 ## 10. 附录：扫描出处与关联证据
 
