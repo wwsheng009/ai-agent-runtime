@@ -4,6 +4,8 @@
 > 来源：只读侦察批 `batch_2aaf16fd48ac9da9`（a2-replay / a2-topalign 完成；a2-archive 被只读 shell 策略误杀，已重派）。
 > 目标语义（审计 §6 P2）：可见窗口 W 行 + 溢出按行序 append 进 native scrollback；任何 mutable 内容
 > 不得提前入 scrollback（等 finalized 一次性写）；resize 只重画窗口；不承诺 scrollback 可改写。
+> 关联：`docs/plan/aicli-render-gap-closure-plan-20261006.md` 批次 C（G4 claimed 漂移 / G5 skipRows 二义）
+> 为本归档 §1/§3 切片（Slice 1）的前置收敛。
 
 ## 1. scrollback replay / settle-unresolved / reconcile（a2-replay）
 

@@ -4,6 +4,8 @@
 > 依据：`docs/plan/aicli-unified-render-architecture-audit-20261005.md` §2/§6（P0）。
 > 硬规则：**迁移一处 → 从 `backend/cmd/aicli/ui/writer_inventory_test.go` 基线删除对应条目；
 > 不得为任何新交互功能新增条目。** 门禁测试：`go test ./cmd/aicli/ui/ -run TestUIInteractiveDirectWriterInventory`。
+> 关联：残余写端差距（G2/G3/G9/G11）收敛见 `docs/plan/aicli-render-gap-closure-plan-20261006.md` 批次 A；
+> 本台账条目与该方案 A1 逐项/登记表互相对应。
 
 ## 1. 已完成
 

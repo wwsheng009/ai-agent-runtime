@@ -8,6 +8,8 @@
 > `docs/debug/ui-actor-stall-tool-completed-drop-and-snapshot-hotpath-20260930.md`、
 > `docs/debug/cpu-hotspots-ui-render-and-session-persist-optimization-20260929.md`、
 > `docs/e2e/resume-history-e2e.md`。
+> `docs/plan/aicli-render-gap-closure-plan-20261006.md`（G4/G5 收敛执行：claimed×presentation 漂移、
+> skipRows 证明二义——对应本计划 §5 的 in-flight/交付语义域）。
 
 ## 1. 结论摘要
 

@@ -4,6 +4,8 @@
 > 基线：`feat/render-p0-writer-unification` @ `b93cc1e4`（Stage 0 后）。
 > 上游：`aicli-unified-render-architecture-audit-20261005.md` §5/§6、`aicli-ui-handoff-inflight-strand-hardening-plan-20261005.md` §5、
 > `aicli-render-p1-state-convergence-plan.md`、`aicli-render-p1-1-step4-planning-incremental-plan.md`。
+> 关联：G1–G12 差距收敛实施方案 `docs/plan/aicli-render-gap-closure-plan-20261006.md`
+>（P0/P1-3/P2 尾项的执行入口；A1–A5 主线仍以本台账为准）。
 
 ## 1. 依赖架构件（先落地前提，再谈根治）
 

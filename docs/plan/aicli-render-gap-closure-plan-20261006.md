@@ -3,10 +3,14 @@
 > 性质：**实施方案**（批次 A–D 的切片、测试先行、验收、台账）。本文是
 > `docs/architecture/aicli-tui-renderer-architecture-design.md` §7.5（G1–G12 差距扫描）的执行文档。
 > 基线：`feat/render-p0-writer-unification` @ `d6315e78`（文档）；代码基线 `d47147b1`（扫描时点）。
-> 关联：`aicli-render-p1-state-convergence-plan.md`（P1-3 §3.7 保留决策）、
+> 关联（上游/同族）：`aicli-unified-render-architecture-audit-20261005.md`（P0–P3 源头）、
+> `aicli-ui-handoff-inflight-strand-hardening-plan-20261005.md`（handoff 硬化域，G4/G5）、
+> `aicli-render-p0-writer-unification-ledger.md`（P0 台账，A 批对接）、
+> `aicli-render-p1-state-convergence-plan.md`（P1-3 §3.7 保留决策）、
 > `aicli-render-p1-1-step4-planning-incremental-plan.md`、`aicli-render-p2-recon-20261006.md`（切片）、
 > `aicli-render-remaining-defect-ledger-20261006.md`（A1–A5 主线）、写端清单门禁
 > （`ui/writer_inventory_test.go`、`commands/chat_command_result_test.go`）。
+> 规范源：`docs/architecture/aicli-tui-renderer-architecture-design.md` §7.5（本方案执行其 G1–G12）。
 > 硬规则：**迁移一处 → 从 §9 台账划掉一处**；测试先行；一刀一提交；每刀 `gofmt` +
 > 目标包门禁 + 相关用例；跨批不得混合提交。
 

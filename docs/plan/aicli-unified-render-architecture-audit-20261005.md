@@ -5,6 +5,8 @@
 > 关联文档：`docs/plan/aicli-chat-unified-render-stall-analysis-and-hardening.md`（统一渲染卡住分析与加固）、
 > `docs/plan/aicli-tui-owned-render-simplification-plan.md`（owned render 母计划）、
 > `docs/plan/aicli-tui-owned-render-simplification-implementation-guide.md`。
+> `docs/architecture/aicli-tui-renderer-architecture-design.md`（目标形态 v2；§7.5 差距扫描）与
+> `docs/plan/aicli-render-gap-closure-plan-20261006.md`（G1–G12 收敛执行：批次 A–D）。
 > 证据口径：全部结论附 `file:line`；行号为审计快照行号。审计由 3 个只读子代理台账（writers / statemap / perf）
 > 与主审抽查合并而成；抽查与独立审查结果见 §7。
 > 审查状态：已完成两轮独立只读审查（fact-check），修订记录见 §7.2；修订后核心结论不变。
