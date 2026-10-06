@@ -179,9 +179,8 @@ func dispatchTranscriptPlanWindow(state *UIControllerState, inputs transcriptPla
 }
 
 // mintTranscriptPlanWindow 是 P1.2 的铸 commit 相位（锁内）：按快照的 byID/width/
-// theme/generation 解读 rows，其余输入（frontier、Active、ackedActive、settled）
-// 一律在 live 状态上求值。返回顺序与旧实现一致：cell 提交在前，activeCommits 追加
-// 在尾部。
+// theme/generation 解读 rows，其余输入（frontier、settled）一律在 live 状态上求值。
+// A2 第二刀：active 不再铸提交（停铸），finalize 从 source 0 全量铸；skipRows 恒 0。
 func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows []AppScreenRow, screenRowsBefore int) []HistoryCommit {
 	frontierCells, _ := canonicalHistoryCommitFrontier(state)
 	// A2 第一刀（停铸 active）：mutable 期间不再铸 active 提交；finalize 时从
@@ -189,7 +188,6 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 	// planMutableActiveCellHistoryCommitsWithTheme（死代码，第二刀删除）。
 	// 已结算分片（Acked/Failed/Abandoned/Invalidated）不再参与 reconcile，
 	// 规划时直接跳过，避免每次 transcript 迁移都把整段历史重新物化 payload。
-	ackedActive := indexAckedActiveHistoryCommits(state.HistoryEffects)
 	settled := state.HistoryEffects.hasSettledRecordForSource
 	// The primary frame now owns only the mutable/bottom inline viewport.
 	// Finalized transcript rows all belong to native terminal history; retaining
@@ -214,20 +212,19 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 		cell, found := snap.byID[cellID]
 		_, beforeFrontier := frontierCells[cellID]
 		if found && beforeFrontier && cellIsFinalizedForHistory(cell) && cell.Source != "" {
-			skipRows, prefixProved := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], snap.byID)
+			// A2 第二刀：active 不再铸提交，finalize 从 0 全量铸；skipRows 恒 0，
+			// whole-cell 兜底仅需"cell 完整包含在窗口内"。
 			if cellUsesStructuredPresentation(cell) {
-				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, snap.generation, snap.byID, settled)...)
-			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, skipRows, snap.width, themeFingerprint(snap.theme), snap.generation, snap.byID, settled); mapped {
+				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, 0, snap.generation, snap.byID, settled)...)
+			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, 0, snap.width, themeFingerprint(snap.theme), snap.generation, snap.byID, settled); mapped {
 				commits = append(commits, segments...)
-			} else if skipRows == 0 && prefixProved && end <= firstVisible {
+			} else if end <= firstVisible {
 				// whole-cell fallback（控制符/tab 等无法逐行映射的 plain cell）的
 				// 判据是"cell 完整包含在窗口内"，不再是"整份 transcript 已走完"：
 				// 截断窗口只含完整 cell，而游标续跑后前缀不会再被完整 pass 访问 ——
 				// 继续要求 complete 会让这些行永久缺失。窗口内 wholeCell 的身份（整
 				// SourceRange / fragment 0 / 全局 DisplayRange）与完整 pass 完全一致，
 				// 入队去重后不会重复投递。
-				// G5/C2：仅当"零前缀"可证（prefixProved）时才允许 whole-cell 兜底；
-				// 已交付前缀不等价（proved=false）必须交给 finalize 收敛，不得重铸。
 				if commit, ok := wholeCellHistoryCommit(cell, rows[start:end], displayStart+start, displayStart+end, snap.generation, snap.byID, settled); ok {
 					commits = append(commits, commit)
 				}
@@ -296,18 +293,6 @@ func planEligibleHistoryCommitsWithinFrom(state AppState, deadline time.Time, st
 	return commits, complete, nextRow, screenRows
 }
 
-// ackedActiveHistoryCommitIndex is a planner-local, read-only view of the
-// retained mutable-cell payloads needed when that cell becomes finalized. The
-// ledger maintains token order per active cell, so planning never asks Entries
-// for a sorted, deeply cloned copy of the complete ledger.
-type ackedActiveHistoryCommitIndex struct {
-	ledger *HistoryCommitLedger
-}
-
-func indexAckedActiveHistoryCommits(effects HistoryEffectQueueState) ackedActiveHistoryCommitIndex {
-	return ackedActiveHistoryCommitIndex{ledger: effects.ledger}
-}
-
 // canonicalHistoryCommitFrontier enforces the transcript's single physical
 // ordering frontier. Only the contiguous finalized prefix may enter native
 // history. The first mutable cell is a barrier; no later finalized or active
@@ -327,48 +312,6 @@ func canonicalHistoryCommitFrontier(state AppState) (map[scene.CellID]struct{}, 
 	}
 	return eligible, state.Active.Phase == ActiveCellMutable &&
 		state.Active.CellID != 0 && !state.Active.HistoryCommitBlocked
-}
-
-// activeAckedRenderedPrefixRows proves how many leading finalized rows already
-// crossed the terminal while the same cell was mutable. History planning uses
-// the retained structured payload, not text hashes, and only accepts a
-// contiguous source prefix whose lines still match the finalized projection.
-//
-// 返回值 (rows, proved)（G5/C2）：proved=false 表示**存在**已交付前缀但当前行
-// 不等价（前缀证明失败），不再与"无前缀"混用同一个 0。调用方据此关闭
-// whole-cell 兜底，交由 finalize/ProjectionUnknown 收敛，而不是把整 cell 重铸。
-func activeAckedRenderedPrefixRows(index ackedActiveHistoryCommitIndex, cellID scene.CellID, rows []AppScreenRow, byID map[scene.CellID]scene.TranscriptCell) (int, bool) {
-	if index.ledger == nil {
-		return 0, true
-	}
-	frontier, matched, rowIndex := 0, 0, 0
-	for _, token := range index.ledger.activeTokensByCell[cellID] {
-		entry, exists := index.ledger.byToken[token]
-		if !exists {
-			continue
-		}
-		commit := entry.Commit
-		if entry.State != HistoryCommitDelivered || commit.Origin != HistoryCommitActive ||
-			commit.CellID != cellID || commit.SourceRange.Start > frontier ||
-			commit.SourceRange.End <= frontier || len(commit.Lines) == 0 {
-			continue
-		}
-		frontier = commit.SourceRange.End
-		for _, line := range commit.Lines {
-			for rowIndex < len(rows) && rows[rowIndex].TranscriptGap {
-				rowIndex++
-			}
-			if rowIndex >= len(rows) || !historyRenderLineEquivalent(line, appTranscriptRenderLine(rows[rowIndex], byID)) {
-				return 0, false
-			}
-			matched++
-			rowIndex++
-		}
-	}
-	if frontier == 0 || matched == 0 {
-		return 0, true
-	}
-	return matched, true
 }
 
 func historyRenderLineEquivalent(left, right render.Line) bool {
@@ -977,11 +920,10 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	// Active 批次物理写在途（head 被写游标 claim，其余成员 Queued 等待同一次写
 	// 证明）时不得跑全会话 reconcile：reconcile 会以 Transcript 身份逐出
 	// 这些 token，写成功后 ackBatch 因 ErrCommitNotInFlight 被拒，进而把已
-	// 落盘的行标成未决并触发重放（resident-tail 双写）。所有权移交必须等这批
-	// 投递给出确定结果：成功则 acked 前缀参与 skipRows、失败则走 executor 的
-	// source-backed recovery。PlanIncomplete 让 ack/fail 与 executor kick 在
-	// 结算后继续这次规划；advanced=true 表示进展已委托给在途交付，调用方不得
-	// 据此置 PlanStalled。
+	// 落盘的行标成未决并触发重放（resident-tail 双写）。A2 第二刀后不再产生
+	// Active-origin 交付，该守卫为防御性保留（恒不命中）。PlanIncomplete 让
+	// ack/fail 与 executor kick 在结算后继续这次规划；advanced=true 表示进展
+	// 已委托给在途交付，调用方不得据此置 PlanStalled。
 	if effects.hasClaimedActiveOriginDelivery() {
 		effects.PlanIncomplete = true
 		effects.PlanStalled = false
@@ -1313,8 +1255,8 @@ type transcriptPlanInputs struct {
 	projection    bool
 	themeKey      string
 	terminalEpoch uint64
-	// finalizedAckVersion 是已 finalize cell 的 Active-origin 交付版本：ack 收缩
-	// skipRows 后，游标必须从 0 重新规划（前缀候选集变了）。
+	// finalizedAckVersion 是已 finalize cell 的 Active-origin 交付版本（A2 第二刀后
+	// 恒为 0；字段与推进逻辑待后续清理）。
 	finalizedAckVersion uint64
 }
 
@@ -1336,10 +1278,9 @@ func currentTranscriptPlanInputs(state *UIControllerState) transcriptPlanInputs 
 // transcriptPlanMemoHit reports whether the finalized-prefix plan inputs are
 // identical to the ones that produced the last full transcript plan. The plan
 // (planEligibleHistoryCommits) is pure over the finalized transcript fence,
-// geometry, theme, layout generation, and the projection flag: the acked
-// Active-origin prefix it reads via activeAckedRenderedPrefixRows is frozen
-// once a cell finalizes, and the mutable cell itself is the frontier barrier —
-// never part of the finalized plan. The transcript fence is the per-cell
+// geometry, theme, layout generation, and the projection flag; the mutable cell
+// itself is the frontier barrier — never part of the finalized plan (A2 第二刀后
+// 也不再产生 active 提交). The transcript fence is the per-cell
 // finalized fingerprint (not the scene-wide Revision/ContentVersion counters,
 // which the active cell's stream growth advances on every chunk). The fence
 // folds chain keys and sequence, so even an unversioned snapshot (SceneID ==

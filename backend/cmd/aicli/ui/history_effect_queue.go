@@ -924,8 +924,9 @@ func (s HistoryEffectQueueState) hasUnresolvedTerminalDelivery() bool {
 // mid-write, and the successful write can no longer be acknowledged
 // (ErrCommitNotInFlight), forcing an unresolved-delivery recovery that re-covers
 // rows which already crossed the writer. Ownership transfer must therefore wait
-// for this batch to settle; a write success then proves the prefix for skipRows,
-// and a write failure settles into the source-backed recovery path.
+// for this batch to settle; a write failure settles into the source-backed
+// recovery path. A2 第二刀后不再产生 Active-origin 交付，本守卫恒不命中
+// （防御性保留）。
 func (s HistoryEffectQueueState) hasClaimedActiveOriginDelivery() bool {
 	if s.ledger == nil {
 		return false

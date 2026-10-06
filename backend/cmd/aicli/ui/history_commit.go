@@ -258,13 +258,10 @@ type HistoryCommitLedger struct {
 	// 显示旧的整表扫描在 per-claim 排序护栏上是热点，因此头指针只向前推进，
 	// 终态吸收（Delivered/Quarantined 不回退）保证跳过扫描摊还 O(1)。
 	queueHeadToken uint64
-	// activeAckPlanVersion bumps whenever the acked Active-origin prefix that
-	// planEligibleHistoryCommits reads via activeAckedRenderedPrefixRows can
-	// change. Ack is the only transition that grows that set (terminal states
-	// are absorbing and Invalidate/Fail/Defer never touch Acked entries), and
-	// reconcileScrollback replaces the whole ledger behind a new TerminalEpoch.
-	// The transcript-plan memo uses this counter instead of scanning
-	// activeTokensByCell on every stream chunk.
+	// activeAckPlanVersion 是 active ack 前缀版本的遗留计数器（A2 第二刀后不再
+	// 产生 Active-origin 交付，恒为 0；字段与推进逻辑待后续清理）。历史上它随
+	// acked Active-origin 前缀变化递增，transcript-plan memo 用它替代每次流式
+	// chunk 的 activeTokensByCell 扫描。
 	activeAckPlanVersion uint64
 	// unresolvedCount caches the number of entries that require terminal
 	// recovery (failed, or invalidated with MayHavePartiallyWritten). It keeps
@@ -598,8 +595,8 @@ func (l *HistoryCommitLedger) holdsPlan() bool {
 
 // prunableResolvedEntry 判定一个已终结的条目是否仍被任何读取方消费载荷。
 // 保留集合只有两类：
-//   - Delivered + Active-origin：activeAckedRenderedPrefixRows 需要已交付的渲染行
-//     来证明"前导行已在原生滚动区"并据此计算 finalized 计划的 skipRows；
+//   - Delivered + Active-origin：历史上 finalized 计划需要已交付渲染行计算
+//     skipRows（A2 第二刀后不再产生 Active-origin 交付，保留规则待后续清理）；
 //   - failed / invalidated-with-partial 隔离：未决交付，settle 之前必须保持可寻址。
 //
 // 其余终态（Delivered transcript、settled 隔离、invalidated 且未部分写入）的载荷

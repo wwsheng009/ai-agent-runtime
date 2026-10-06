@@ -1069,9 +1069,9 @@ func advanceActiveCellLedgerOnAck(state *UIControllerState, commits []HistoryCom
 
 // noteFinalizedActiveAck 推进 finalizedActiveAckPlanVersion：当被 ack 的
 // Active-origin 提交属于一个**已经 finalize**（不再等于当前活跃可变 cell）的 cell
-// 时，该 cell 已交付的前缀又前进了一步，finalized 计划读到的 skipRows 因此变大。
-// 这类变化不进 transcript fence，必须显式让 memo 与续跑游标失效，否则
-// transcript-origin 的重复候选会留在 ledger 里被二次投递。
+// 时，历史上该 cell 已交付的前缀又前进了一步，finalized 计划读到的 skipRows
+// 因此变大，必须显式让 memo 与续跑游标失效。A2 第二刀后不再产生 Active-origin
+// 交付，本函数恒为空转（字段与推进逻辑待后续清理）。
 //
 // 仍活跃的可变 cell 的 ack 不推进（A2 第二刀后其恒为 0，不再有交付）。
 func noteFinalizedActiveAck(state *UIControllerState, commits []HistoryCommit) {

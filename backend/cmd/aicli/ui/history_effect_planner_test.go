@@ -7,7 +7,6 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
 
 // TestPlanMutableActiveCellHistoryCommits covers the overflow handoff planner
@@ -407,121 +406,6 @@ func TestPlanMutableReasoningHistoryCommitMatchesSourceFaithfulFinalize(t *testi
 	}
 	if !rawReasoningSeen {
 		t.Fatalf("reasoning handoff normalized markdown-looking provider text: %#v", commits)
-	}
-}
-
-// TestPlanReasoningAckedPrefixMatchesFinalize proves the source-faithful handoff
-// rows are recognized by the acked-prefix matcher, so the finalized cell only
-// commits the remaining tail instead of the whole cell (duplicate render).
-func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
-	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
-	bodyLines := make([]string, 0, 30)
-	bodyLines = append(bodyLines, "Good. Key modules all exist:")
-	for i := 0; i < 20; i++ {
-		bodyLines = append(bodyLines, fmt.Sprintf("- `backend/internal/module%02d` ✅", i))
-	}
-	bodyLines = append(bodyLines, "", "And `.agents/agents/explore.md`, `general.md`, `plan.md` exist.", "")
-	source := strings.Join(bodyLines, "\n")
-
-	active := ActiveCellState{
-		CellID: 1, Revision: 3, Kind: scene.KindReasoning,
-		Phase:  ActiveCellMutable,
-		Source: source,
-		Stable: SourceRange{Start: 0, End: len(source)},
-		Acked:  SourceRange{Start: 0, End: 0},
-	}
-	commits := planMutableActiveCellHistoryCommits(active, geometry, 1)
-	if len(commits) == 0 {
-		t.Fatal("long reasoning should hand off overflow rows")
-	}
-
-	ledger := NewHistoryCommitLedger()
-	for i := range commits {
-		commits[i].Token = uint64(i + 1)
-		if err := ledger.Enqueue(commits[i]); err != nil {
-			t.Fatalf("enqueue: %v", err)
-		}
-		if err := ledger.Ack(commits[i].Token, 1, 1); err != nil {
-			t.Fatalf("ack: %v", err)
-		}
-	}
-
-	state := AppState{
-		Geometry: geometry,
-		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
-			{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindReasoning, Source: source, Phase: scene.CellCommitted},
-		}}),
-		HistoryEffects: HistoryEffectQueueState{ledger: ledger},
-	}
-	byID := transcriptCellsByID(state.Transcript)
-	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(1), byID, nil, 80, style.ThemeContext{})
-	acked := indexAckedActiveHistoryCommits(state.HistoryEffects)
-	if matched, proved := activeAckedRenderedPrefixRows(acked, 1, rows, byID); !proved || matched == 0 {
-		t.Fatalf("BUG: acked handoff rows do not match finalize rows — whole cell re-committed (duplicate reasoning) (matched=%d proved=%v)", matched, proved)
-	}
-}
-
-// TestActiveAckedRenderedPrefixRowsNoPrefixIsProvedZero pins G5/C2: a cell with
-// no delivered active prefix reports (0, true) — "nothing to skip" is provable
-// and keeps the whole-cell fallback eligible.
-func TestActiveAckedRenderedPrefixRowsNoPrefixIsProvedZero(t *testing.T) {
-	state := AppState{
-		Geometry: GeometryState{Width: 80, Height: 12, Generation: 1},
-		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
-			{ID: 7, Sequence: 1, Revision: 2, Kind: scene.KindAssistant, Source: "hello world\n", Phase: scene.CellCommitted},
-		}}),
-		HistoryEffects: HistoryEffectQueueState{ledger: NewHistoryCommitLedger()},
-	}
-	byID := transcriptCellsByID(state.Transcript)
-	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(1), byID, nil, 80, style.ThemeContext{})
-	acked := indexAckedActiveHistoryCommits(state.HistoryEffects)
-	matched, proved := activeAckedRenderedPrefixRows(acked, 7, rows, byID)
-	if matched != 0 || !proved {
-		t.Fatalf("no-prefix case = (%d, %v), want (0, true)", matched, proved)
-	}
-}
-
-// TestActiveAckedRenderedPrefixRowsDivergentRowsAreUnproved pins G5/C2: when a
-// delivered active prefix exists but the current rows diverge from it, the
-// result is (0, false) — distinct from the no-prefix case so callers can close
-// the whole-cell fallback and let finalize/ProjectionUnknown converge.
-func TestActiveAckedRenderedPrefixRowsDivergentRowsAreUnproved(t *testing.T) {
-	geometry := GeometryState{Width: 80, Height: 12, Generation: 1}
-	source := "first line\nsecond line\nthird line\n"
-	commit := HistoryCommit{
-		Token:            1,
-		Origin:           HistoryCommitActive,
-		CellID:           9,
-		Revision:         1,
-		SourceRange:      SourceRange{Start: 0, End: len(source)},
-		DisplayRange:     DisplayRange{Start: 0, End: 3},
-		LayoutGeneration: 1,
-		Lines: []render.Line{
-			{Spans: []render.Span{{Text: "first line"}}},
-			{Spans: []render.Span{{Text: "second line"}}},
-			{Spans: []render.Span{{Text: "third line"}}},
-		},
-	}
-	ledger := NewHistoryCommitLedger()
-	if err := ledger.Enqueue(commit); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
-	if err := ledger.Ack(commit.Token, 1, 1); err != nil {
-		t.Fatalf("ack: %v", err)
-	}
-	state := AppState{
-		Geometry: geometry,
-		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
-			{ID: 9, Sequence: 1, Revision: 2, Kind: scene.KindAssistant, Source: "completely different\nrows here\n", Phase: scene.CellCommitted},
-		}}),
-		HistoryEffects: HistoryEffectQueueState{ledger: ledger},
-	}
-	byID := transcriptCellsByID(state.Transcript)
-	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(1), byID, nil, 80, style.ThemeContext{})
-	acked := indexAckedActiveHistoryCommits(state.HistoryEffects)
-	matched, proved := activeAckedRenderedPrefixRows(acked, 9, rows, byID)
-	if matched != 0 || proved {
-		t.Fatalf("divergent-prefix case = (%d, %v), want (0, false)", matched, proved)
 	}
 }
 

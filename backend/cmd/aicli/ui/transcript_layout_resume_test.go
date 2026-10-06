@@ -312,10 +312,10 @@ func TestTranscriptPlanResumeClearedByForcedInvalidation(t *testing.T) {
 	}
 }
 
-// TestTranscriptPlanMemoTracksFinalizedActiveAcks 锁定 P1.1c：memo 与续跑游标
-// 必须把"已 finalize cell 的 Active-origin 交付"计入判据——它收缩 skipRows，却不
-// 改变 transcript/layout/theme 指纹；不判它，陈旧 transcript-origin 候选会一直
-// 留在 ledger 里被二次投递（重复行）。
+// TestTranscriptPlanMemoTracksFinalizedActiveAcks 锁定 P1.1c 的 memo 版本栅栏：
+// 历史上"已 finalize cell 的 Active-origin 交付"收缩 skipRows 却不改
+// transcript/layout/theme 指纹，必须计入判据。A2 第二刀后该交付不再产生，本用例
+// 继续钉住版本栅栏字段的传递（恒 0 时不得误判为指纹变化）。
 func TestTranscriptPlanMemoTracksFinalizedActiveAcks(t *testing.T) {
 	restoreBudget := historyCommitPlanningBudget
 	defer func() { historyCommitPlanningBudget = restoreBudget }()
