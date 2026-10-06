@@ -139,13 +139,24 @@ source 0 一次铸全量 —— 无需先重构 skipRows 管线。
    finalize 仍有等价护栏。
 4. resume：ledger 纯内存，删除后重放只剩 transcript-origin，"归档行不属于 resident 模型"特例消失。
 
-### 切片（Slice 0-4，可独立回滚）
-- **Slice 0**（准备，无行为）：固定"finalize 从 0 一次性写"目标断言 + 记录回滚验证命令。
-- **Slice 1**（单点停铸，核心语义）：`planMutableActiveCellHistoryCommitsWithTheme` 首行 return nil；
-  改写 4 个 archive 直测 + 2 个 planner 溢出测试 + skipRows 断言。**此切片即达成目标语义**。
-- **Slice 2**：删终端归档路径（:1021-1040/:1302-1308/`historyBatchIsActiveOrigin`/`terminalActiveHistoryArchiveANSI`）。
-- **Slice 3**：reducer/planner 清理（`syncHistoryEffectsForActiveCell`、`advanceActiveCell*`、
-  `activeAckedRenderedPrefixRows`+skipRows、frontier 第二返回值、`hasClaimedActiveOriginDelivery` 门、`lastPlannedActive*`）。
-- **Slice 4**（最后）：类型面删 `HistoryCommitActive` 及全部 Active 分支，以编译错误为向导。
-- 回归优先级：Slice 1 后全量 ui+commands 投影测试；Slice 2/3 后重点 queue/executor/projection 测试；
-  Slice 4 后全仓编译 + ui 全包。
+### 切片（两刀制，a2-archive2 精化版；均可独立回滚）
+- **第一刀（行为反转，3 源文件 + 测试）**：
+  1. 规划停铸：planner:188-190/:237 删 active append；`syncHistoryEffectsForActiveCell` 先空转
+     （立即 return，最小 diff），调用点不动。
+  2. 交付分支统一：terminal_session.go:1302-1308 与 :1021-1041 的 active 分支并入 insertion；
+     `terminalActiveHistoryArchiveANSI` 暂留为死代码。
+  3. 测试反转：archive 4 例 + `mutable_active_handoff_regression_test.go:16`（断言反转：
+     finalize 前**不得**出现 early marker）+ stream_tail active 断言。
+  4. **刻意保留**：`HistoryCommitActive`、`activeTokensByCell`、`advanceActiveCellLedgerOnAck`、
+     `activeAckedRenderedPrefixRows`、`lastPlannedActive*`、`hasClaimedActiveOriginDelivery`——
+     Acked 恒 0 时它们自然退化为无行为，回滚面最小。
+- **第二刀（清理，行为中性）**：删 skipRows 管线/index、`advanceActiveCell*`、`noteFinalizedActiveAck`、
+  `finalizedActiveAckPlanVersion`、`lastPlannedActive*`、`activeTokensByCell`/`activeAckPlanVersion`、
+  `hasClaimedActiveOriginDelivery` 及 Active revision 豁免、`terminalActiveHistoryArchiveANSI`/`historyBatchIsActiveOrigin`。
+- **第三刀（可选，高风险）**：再评估删 `ActiveCellState.Enqueued/Acked` 与 `MarkActiveAcked/Enqueued`、
+  `HistoryCommitActive` 枚举；`historyStreamTailRows/historyTailCells`（**replay 去重证明，不可删**）
+  与 `historyTopAligned` **全程保留**。
+- **风险排序**：第一刀交付分支 > 第一刀规划停铸 > 第二刀；每刀后跑 `go test ./cmd/aicli/ui/...`，
+  重点观察 `native_scrollback_*`、`terminal_session_executor_test.go`、`history_planning_budget_test.go`。
+- **最大回归面**：finalize 一次性写必须与旧「active 前缀 + 后缀」逐字节等价（reasoning 投影形状警告
+  planner:511-513），用 `:724/:762` 的替代断言固化。
