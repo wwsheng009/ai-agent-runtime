@@ -205,6 +205,26 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 - `historyTailCells`：复核后撤回（见 §2.1）。
 - `historyPrepareHits/Misses`：复核后暂缓（见 §2.1）。
 
+### 2.6 P1-2b 第 1 小步实施记录（streamTailRows/topAligned 降级，已完成）
+
+- 复核结论：`historyStreamTailRows`/`historyTopAligned`/`historyTailCells` 均为
+  `TerminalSession` 私有字段，快照只导出 `HistoryRows: len(historyTailRows)`，
+  不存在回喂 reducer 的镜像路径；审计的「可推导镜像」判定按 §2.1 修订为
+  writer 私有 ack 证明，本次不删除（删掉会丢 archived 行的 dedup 证明）。
+- 降级落地为不变量钉（新增 `terminal_session_stream_tail_test.go`，3 项）：
+  1. `TestTerminalSessionStreamTailProofTracksAckedWrites`：acked 写入 → 有界
+     （上界 outputBottom）后缀 append；active 归档只动 stream tail 不动 resident
+     模型；finalized 溢出后 `topAligned` 置位并 sticky；显式 `resetScrollback`
+     整族失效（tail/cells/topAligned 清零、投影已知位重建）。
+  2. `TestTerminalSessionStreamTailProofResetsOnPartialWrite`：半写后
+     stream tail / provenance / topAligned / 投影已知位一起复位，
+     `historyInsertionContinuesScrollback` 不得再声称续接。
+  3. `TestTerminalSessionStreamTailAppendOnlyAcrossDeliveries`：同 projection 内
+     成功交付只追加、不重写已证明行（dedup 只裁本批 payload）。
+- 事实源声明：stream tail 的事实源是「本 session 物理写成功的行」（ledger ack
+  在 writer 之外不可见 archived 行，故不能由 ledger 重建）；resident tail 的事实源
+  是 region 模型；两者交集之外正是 active 归档行。
+
 ## 3. P1-3 WaitIdle 事件驱动 ack
 
 ### 3.1 现状（关键行）
