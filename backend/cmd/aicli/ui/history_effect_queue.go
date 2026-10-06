@@ -113,10 +113,19 @@ type HistoryEffectQueueState struct {
 	// WriteCursor 是"可能正在被物理写入"的 token（0 = 无）。claim 协议从逐条
 	// 状态收敛为这个单调标量：同一时刻至多一个 token 可能已在写，
 	// 由单 worker 严格 FIFO 保证顺序。条目保持 Queued，直到 Ack/Fail/Invalidate
-	// 给出终态；planner 对 WriteCursor 指向的 token 沿用旧 claim 窗口的安全点
-	// （展示载荷变化时 invalidate，绝不 rebase）。
+	// 给出终态；planner 对 WriteCursor 指向的 token 绝不 rebase（写入在途，
+	// 改写载荷会让旧字节按新语义被 ack）。
+	//
+	// G4/C1：claimed 且 presentation 已漂移（generation/DisplayRange 变化、
+	// identity 仍有效）时，收敛路径是执行器 generation 闸门 → Deferred 释放
+	// 游标 → 下一次规划 rebase；规划期用 ClaimedPresentationDrift 计数让此前
+	// 的静默跳过可观测（不在此处 invalidate：那会把每次写中 resize 升级成
+	// ProjectionUnknown/Reconciliation）。
 	WriteCursor uint64
-	ledger      *HistoryCommitLedger
+	// ClaimedPresentationDrift 记录规划期发现的 claimed×presentation 漂移次数
+	// （G4/C1 诊断计数；只读快照可见）。
+	ClaimedPresentationDrift uint64
+	ledger                   *HistoryCommitLedger
 	// lastPlanned* memoize the active-cell inputs from the most recent
 	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
 	// do not move any source boundary (Stable/Enqueued/Acked), resize, or
@@ -555,8 +564,10 @@ func (s *HistoryEffectQueueState) rebasePending(commit HistoryCommit) error {
 		current := entry.Commit
 		// The write cursor token may already be physically written: rebasing it
 		// would let an old payload be acknowledged against new semantics. The
-		// planner invalidates it instead (same safety point as the removed
-		// InFlight state); every other Pending entry rebases in place.
+		// planner keeps it (identity-valid presentation drift is counted as
+		// ClaimedPresentationDrift; G4/C1) and the executor's generation gate
+		// releases it via Deferred before the next rebase; every other Pending
+		// entry rebases in place.
 		if entry.State != HistoryCommitQueued || current.Token == s.WriteCursor ||
 			current.Origin != commit.Origin ||
 			current.CellID != commit.CellID ||
@@ -733,6 +744,35 @@ func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error 
 	}
 	s.WriteCursor = 0
 	return nil
+}
+
+// claimedPresentationDrifted reports whether a still-claimed token's candidate
+// presentation diverged (layout generation or display range). Payload lines are
+// intentionally not compared: Active-origin commits snapshot a fixed source
+// prefix, so later source growth is normal streaming, not drift.
+func (s *HistoryEffectQueueState) claimedPresentationDrifted(candidate HistoryCommit) bool {
+	if s == nil || s.ledger == nil || s.WriteCursor == 0 {
+		return false
+	}
+	entry, ok := s.ledger.Entry(s.WriteCursor)
+	if !ok || entry.State != HistoryCommitQueued {
+		return false
+	}
+	if historyCommitSourceIdentity(entry.Commit) != historyCommitSourceIdentity(candidate) {
+		return false
+	}
+	return entry.Commit.LayoutGeneration != candidate.LayoutGeneration ||
+		entry.Commit.DisplayRange != candidate.DisplayRange
+}
+
+// noteClaimedPresentationDrift increments the diagnostic counter when the
+// claimed token's candidate presentation drifted. Returns true when counted.
+func (s *HistoryEffectQueueState) noteClaimedPresentationDrift(candidate HistoryCommit) bool {
+	if !s.claimedPresentationDrifted(candidate) {
+		return false
+	}
+	s.ClaimedPresentationDrift++
+	return true
 }
 
 func (s *HistoryEffectQueueState) fail(token, generation uint64, err error, mayHavePartiallyWritten bool) error {

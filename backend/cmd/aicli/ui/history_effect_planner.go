@@ -1639,17 +1639,25 @@ func rebasePendingHistoryEffects(state *UIControllerState) {
 		return
 	}
 	candidates := planEligibleHistoryCommits(state.AppState)
-	valid := make(map[historyCommitSourceKey]struct{}, len(candidates))
+	valid := make(map[historyCommitSourceKey]HistoryCommit, len(candidates))
 	for _, candidate := range candidates {
-		valid[historyCommitSourceIdentity(candidate)] = struct{}{}
+		valid[historyCommitSourceIdentity(candidate)] = candidate
 	}
 	if ledger := state.HistoryEffects.ledger; ledger != nil {
 		for _, entry := range ledger.byToken {
-			switch entry.State {
-			case HistoryCommitQueued:
-				if _, exists := valid[historyCommitSourceIdentity(entry.Commit)]; !exists {
-					_ = state.HistoryEffects.invalidate(entry.Commit.Token)
-				}
+			if entry.State != HistoryCommitQueued {
+				continue
+			}
+			candidate, exists := valid[historyCommitSourceIdentity(entry.Commit)]
+			if !exists {
+				_ = state.HistoryEffects.invalidate(entry.Commit.Token)
+				continue
+			}
+			// G4/C1：claimed 且 presentation 漂移 → 不 rebase（写入在途）、不
+			// invalidate（避免把写中 resize 升级为 ProjectionUnknown）；计数并
+			// 交由执行器 generation 闸门 Deferred 释放后收敛。
+			if entry.Commit.Token == state.HistoryEffects.WriteCursor {
+				state.HistoryEffects.noteClaimedPresentationDrift(candidate)
 			}
 		}
 	}
