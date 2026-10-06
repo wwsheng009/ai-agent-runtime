@@ -43,6 +43,8 @@
 3. `Enqueued 区间` → 规划只按 Acked 游标推进后成为派生值（planner :1577-1622）；`Stable` 不可删。
 4. 规划续跑组 `PlanIncomplete/PlanStalled/planResume*/planRequest*`（queue :57-92）→ 前提是规划单线程增量
    （无预算截断、无异步 screening）。
+   前置子计划已产出：`docs/plan/aicli-render-p1-1-step4-planning-incremental-plan.md`
+   （终态四要件、Stage 0–5 分阶段验收、5 个关键耦合处置、冷启动敞口门控）。
 5. `lastPlanned*` memo（:119-182）→ 与 6 态解耦，可用单调 generation 显式失效，后置。
 
 **必须保留**：Acked（交付事实 + 防重铸锚点，需"每 cell 已交付 source 前缀 + 来源身份 tombstone"表达）；
