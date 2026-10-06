@@ -42,11 +42,36 @@ func newWaitTestController(rec *waitTestRecorder) *UIController {
 	return NewUIController(UIControllerConfig{}, ReducerFunc(rec.apply), rec.effect)
 }
 
+// startControllerRunForTest starts the actor loop and returns a done channel
+// that closes when Run returns.
+func startControllerRunForTest(c *UIController) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.Run()
+	}()
+	return done
+}
+
+// joinControllerRunForTest closes the actor and waits (bounded) for its Run
+// goroutine to return. A leaked reducer goroutine would otherwise keep reading
+// package-level planner state (historyCommitPlanningBudget) into the next test
+// and race that test's writes under -race.
+func joinControllerRunForTest(t *testing.T, c *UIController, done chan struct{}) {
+	t.Helper()
+	c.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("controller Run goroutine did not exit after Close")
+	}
+}
+
 func TestPostTrackedAdmittedReleasesAppliedWaiter(t *testing.T) {
 	rec := &waitTestRecorder{}
 	c := newWaitTestController(rec)
-	go c.Run()
-	defer c.Close()
+	done := startControllerRunForTest(c)
+	defer joinControllerRunForTest(t, c, done)
 
 	outcome, ticket := c.PostTracked(DrawRequested{Key: "wait-admitted"})
 	if outcome != PostAdmitted || ticket == 0 {
@@ -79,8 +104,8 @@ func TestPostTrackedMergedReleasesBothTickets(t *testing.T) {
 			secondOutcome, secondTicket, firstTicket)
 	}
 
-	go c.Run()
-	defer c.Close()
+	done := startControllerRunForTest(c)
+	defer joinControllerRunForTest(t, c, done)
 
 	if !c.WaitActionApplied(firstTicket, 2*time.Second) {
 		t.Fatal("first (merged) ticket never released")
@@ -132,8 +157,8 @@ func TestPostDeferredTrackedAdmittedAndApplied(t *testing.T) {
 	if outcome != PostAdmitted || ticket == 0 {
 		t.Fatalf("PostDeferredTracked = %v/%d, want admitted with ticket", outcome, ticket)
 	}
-	go c.Run()
-	defer c.Close()
+	done := startControllerRunForTest(c)
+	defer joinControllerRunForTest(t, c, done)
 	if !c.WaitActionApplied(ticket, 2*time.Second) {
 		t.Fatal("deferred ticket never released")
 	}
@@ -159,8 +184,8 @@ func TestWaitActionAppliedTimesOutWithoutRun(t *testing.T) {
 func TestWaitActionVisibleWaitsForEffectDelivery(t *testing.T) {
 	rec := &waitTestRecorder{hold: make(chan struct{}), holdOne: true}
 	c := newWaitTestController(rec)
-	go c.Run()
-	defer c.Close()
+	done := startControllerRunForTest(c)
+	defer joinControllerRunForTest(t, c, done)
 
 	outcome, ticket := c.PostTracked(DrawRequested{Key: "visible"})
 	if outcome != PostAdmitted {
@@ -187,7 +212,6 @@ func TestLastAcceptedTicketIsTheCapacityFence(t *testing.T) {
 		ReducerFunc(func(uint64, UIAction) []Effect { return nil }),
 		func(Effect) {},
 	)
-	defer c.Close()
 
 	outcome, first := c.PostTracked(DrawRequested{Key: "fence-1"})
 	if outcome != PostAdmitted {
@@ -203,7 +227,8 @@ func TestLastAcceptedTicketIsTheCapacityFence(t *testing.T) {
 		t.Fatalf("LastAcceptedTicket advanced on a dropped post: %d, want %d", got, first)
 	}
 
-	go c.Run()
+	done := startControllerRunForTest(c)
+	defer joinControllerRunForTest(t, c, done)
 	if !c.WaitActionApplied(first, 2*time.Second) {
 		t.Fatal("applied fence never opened for the accepted ticket")
 	}

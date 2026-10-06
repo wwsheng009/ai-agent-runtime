@@ -438,6 +438,42 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 | 既有回归 | 两包全量 + P0 门禁命令（写端清单/单写端/composer 出口） | 全绿 |
 | 轮询消除 | §3.1 的 1ms 轮询点清单 | actor idle 等待无 1ms 轮询（保留项除外） |
 
+### 5.1 全包 -race 验收执行记录（2026-10-06）
+
+- 命令：`go test -race -count=1 -p 1 -timeout 3000s ./cmd/aicli/ui/ ./cmd/aicli/commands/`
+  （日志 `E:\tmp\p1-race.txt`；ui 216.0s / commands 363.2s）。
+- ui 包：2 失败 = 1 已修复 + 1 已知基线。
+  1. `TestAsyncPlanWorkerConvergesResumedSessionThroughActor`（DATA RACE，0.11s）：
+     P1-3 新增的 `TestLastAcceptedTicketIsTheCapacityFence` 未 join Run
+     goroutine，测试结束后 reducer 仍在 `history_effect_planner.go:288` 读包级
+     `historyCommitPlanningBudget`，与后续 plan-worker 测试写该变量竞争。
+     **已修复**：`startControllerRunForTest`/`joinControllerRunForTest`
+     （Close + 5s 有界 join），同文件 5 个用例全部接入。
+  2. `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`
+     （153.0s 超时）：已知基线（§1.6：基线 `d8ec19ca` 同用例在 race 插桩下
+     同样超时）。
+- commands 包：5 用例失败、58 个 DATA RACE 报告，聚为 3 组竞争；命中代码区域
+  均非本轮 P1 改动点（本轮改动文件清单不含 function_catalog/skills/chat_mesh，
+  uiActor 字段读写点亦未触碰），但无基线 race 日志，标记「既有嫌疑、待专项」：
+  1. **function catalog（约 55 报告）**：`TestInitSkillFunctionsWithManager_
+     HotReload*` 中后台 `scheduleSkillsRuntimeRefresh →
+     buildSkillsRuntimeBindingFromManager → registerFunction` 写 catalog 的
+     `entries`/registry 映射，测试线程 `Stats()/syncFromRegistry/
+     sharedCapabilityCatalog/clone*` 并发读；`function_catalog.go` 全文件无锁。
+     待专项：catalog 加 RWMutex 覆盖全部公共入口（register/sync/clone/Stats/
+     选择路径），或后台刷新改 actor 串行。
+  2. **stdin 全局（1 报告）**：`chat_detached_node_stdin_test.go` 的
+     `replaceStdinWithNullDevice` 在 pump goroutine 存活期间恢复 `os.Stdin`，
+     与 `chatStdinIsNullDevice`（chat_mesh.go:64）读全局竞争。待专项：测试侧
+     pump 停止屏障（当前 `chatInputQueue` 无 stop API）。
+  3. **uiActor 发布（2 报告）**：`ensureUIActor` 在 `uiActorOnce.Do` 内写
+     `c.uiActor`（chat_ui_actor.go:70）与 `waitUIActorIdle/Timeout/Bounded`
+     直接读字段（:1284/:1291/:1301）竞争；`TestDiagnosticNoticeTimerExpiry
+     ClearsTheRow` 触发。待专项：`uiActor` 改 `atomic.Pointer` 发布（16 处
+     访问点统一 load），或所有读侧先 `uiActorOnce.Do(func(){})` 屏障。
+- 结论：race 行 ui 侧修复后仅剩已知基线超时；commands 侧 3 组既有竞争未修，
+  验收矩阵 race 行标记「ui 通过（除基线）；commands 待专项」。
+
 ## 6. 侦察报告归档
 
 - ledger 报告：六态/队列标志/计数器全表 + 删除顺序 + 风险 1-7（§1 已蒸馏，原始 47KB 见会话 artifact）。
