@@ -14,9 +14,9 @@ import (
 
 func TestLayoutAppStateDerivesTranscriptAndBottomWithoutAliases(t *testing.T) {
 	state := AppState{
-		Revision:         31,
-		Geometry:         GeometryState{Width: 80, Height: 24, Generation: 7},
-		Lease:            LeaseState{ID: 5, Active: true},
+		Revision: 31,
+		Geometry: GeometryState{Width: 80, Height: 24, Generation: 7},
+		Lease:    LeaseState{ID: 5, Active: true},
 		Transcript: NewTranscriptState(&scene.Snapshot{
 			Revision: 12,
 			Cells: []*scene.TranscriptCell{
@@ -63,8 +63,8 @@ func TestLayoutAppStateDerivesTranscriptAndBottomWithoutAliases(t *testing.T) {
 
 func TestLayoutAppScreenCombinesTranscriptTailAndBottomWithoutTerminal(t *testing.T) {
 	state := AppState{
-		Revision:         17,
-		Geometry:         GeometryState{Width: 5, Height: 7, Generation: 4},
+		Revision: 17,
+		Geometry: GeometryState{Width: 5, Height: 7, Generation: 4},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: "abcdeF", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
 			{ID: 2, Sequence: 2, Kind: scene.KindAssistant, Source: "甲乙xy", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
@@ -229,10 +229,10 @@ func TestLayoutAppScreen_PlainOwnerTextParityWithLegacyOwnedViewport(t *testing.
 		{ID: 3, Sequence: 3, Kind: scene.KindUser, Source: "follow up", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
 	}}
 	state := AppState{
-		Revision:         13,
-		Geometry:         GeometryState{Width: width, Height: height, Generation: 3},
-		Transcript:       NewTranscriptState(snapshot),
-		Bottom:           bottom,
+		Revision:   13,
+		Geometry:   GeometryState{Width: width, Height: height, Generation: 3},
+		Transcript: NewTranscriptState(snapshot),
+		Bottom:     bottom,
 	}
 
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
@@ -563,8 +563,8 @@ func TestUserMessagePrefixReservesWidthAndPrefixesEveryLine(t *testing.T) {
 	width := 10
 	source := "abcdefghijklmnopqrstuvwxyz" // 26 个 ASCII 字符
 	state := AppState{
-		Revision:         1,
-		Geometry:         GeometryState{Width: width, Height: 8, Generation: 1},
+		Revision: 1,
+		Geometry: GeometryState{Width: width, Height: 8, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: source, Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
 		}}),
@@ -686,5 +686,23 @@ func TestLayoutTwoRowStatus(t *testing.T) {
 	layout4 := LayoutAppState(composer)
 	if layout4.Bottom.StatusRows != 1 {
 		t.Fatalf("composer StatusRows = %d, want 1", layout4.Bottom.StatusRows)
+	}
+}
+
+// TestBottomPaneStatusRowsReservesBlankStatusRow pins G12/D1: the row plan and
+// the surface always reserve one physical status row, even when the status
+// model is nil/blank; StatusRows uses the same physical-reservation口径.
+func TestBottomPaneStatusRowsReservesBlankStatusRow(t *testing.T) {
+	state := AppState{
+		Geometry:   GeometryState{Width: 80, Height: 24},
+		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1}),
+	}
+	layout := LayoutAppState(state)
+	if layout.Bottom.StatusRows != 1 {
+		t.Fatalf("blank-status StatusRows = %d, want 1 (physical reservation)", layout.Bottom.StatusRows)
+	}
+	plan := LayoutBottomPaneRows(state.Bottom, state.Geometry)
+	if plan.StatusRow != 24 {
+		t.Fatalf("blank-status StatusRow = %d, want 24", plan.StatusRow)
 	}
 }

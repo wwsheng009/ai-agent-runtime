@@ -20,7 +20,10 @@ type AppLayout struct {
 // the bottom overlay. State is copied so layout consumers cannot mutate the
 // AppState snapshot from which this result was derived.
 type BottomPaneLayout struct {
-	State                BottomPaneState
+	State BottomPaneState
+	// StatusRows 是物理预留口径（G12/D1）：状态行恒预留 1 行（row plan /
+	// surface 同式 1+sessionStatus），与 StatusModel 是否空白无关；可见性
+	// 由 statusVisibleRowCount（blank/nil 时为 0）单独表达。
 	StatusRows           int
 	DynamicStatusRows    int
 	PromptNoticeRows     int
@@ -106,8 +109,10 @@ func layoutBottomPane(state AppState, activeBand ActiveBandProjection, legacyBan
 	bottom := DeriveBottomPaneState(bottomSource, state.Geometry)
 	policy := BottomPanePolicyForGeometry(bottom, state.Geometry)
 	return appBottomPaneLayout{
-		State:               bottom,
-		StatusRows:          bottom.statusVisibleRowCount() + bottom.sessionStatusVisibleRowCount(),
+		State: bottom,
+		// 物理预留口径（G12/D1）：恒 1 行 + 会话状态行；与
+		// bottomPaneReservedRowCount / fixed_bottom_surface 的 1+sessionStatus 对齐。
+		StatusRows:          1 + bottom.sessionStatusVisibleRowCount(),
 		DynamicStatusRows:   bottom.dynamicStatusVisibleRowCount(),
 		PromptNoticeRows:    bottom.promptNoticeVisibleRowCount(),
 		ActiveBandRows:      bottom.activeBandLayoutRowCount(),
