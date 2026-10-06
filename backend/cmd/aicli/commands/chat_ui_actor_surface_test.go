@@ -982,6 +982,38 @@ func TestChatInteractionCoordinatorRefreshReportsMeasuredGeometryToAppState(t *t
 	})
 }
 
+// Unified 模式下 surface 探针仍负责刷新 presenter 读取的缓存尺寸，但不得把
+// 测量结果直接上报（Resize 统一走 presenter probe → AppState.Geometry 链路）。
+// 直接上报会额外推进一次 revision 并让两条几何权威并行（P1-2b §2.2）。
+func TestChatInteractionCoordinatorUnifiedRefreshDoesNotReportMeasuredSurfaceGeometry(t *testing.T) {
+	_ = captureSurfaceStdout(t, func() {
+		session := &ChatSession{}
+		coordinator := newTestChatInteractionCoordinator(t, session)
+		t.Cleanup(coordinator.Shutdown)
+		session.Interaction = coordinator
+
+		surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+		surface.EnableForTest(91, 31)
+		coordinator.SetSurface(surface)
+		coordinator.mu.Lock()
+		coordinator.unifiedRenderer = true
+		coordinator.mu.Unlock()
+		coordinator.waitUIActorIdle()
+
+		before := coordinator.uiActor.Revision()
+		coordinator.RefreshActiveStreamViewport()
+		state := coordinator.uiActor.AppState()
+		if state.Geometry.Width != 0 || state.Geometry.Height != 0 {
+			t.Fatalf("unified refresh must not report surface geometry directly: %+v", state.Geometry)
+		}
+		// unified refresh = theme barrier + Resize barrier; a direct measured
+		// report would add a third revision (the legacy test pins that shape).
+		if stats := coordinator.uiActor.Stats(); stats.Revision != before+2 || stats.LastAction != "Resize" {
+			t.Fatalf("unified refresh revisions = %+v, before=%d", stats, before)
+		}
+	})
+}
+
 func TestChatInteractionCoordinatorPromptInputUsesSequencedInputAction(t *testing.T) {
 	session := &ChatSession{}
 	coordinator := newTestChatInteractionCoordinator(t, session)

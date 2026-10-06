@@ -248,11 +248,18 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   `term.GetSize` 回退，探针只认 surface 缓存；unified 探针不再是第二个
   GetSize 权威。
 - unified surface 上报门控：`maybeRefreshStreamGeometryLocked` 与
-  `refreshActiveStreamViewportNow` 的 legacy surface probe/report 分支加
-  `unifiedRendererEnabledLocked()` 门控（新增免锁变体，避免持 `c.mu` 时重入
-  死锁）；legacy 路径与 `reportMeasuredSurfaceGeometryLocked` 本体不变。
-- 验证：ui 全量（103.9s）+ commands 全量（176.5s）+ 定向 `-race`
-  （presenter/geometry）通过。
+  `refreshActiveStreamViewportNow` **保留 surface 探针**（刷新 presenter 读取的
+  缓存尺寸与 legacy 布局簿记），仅把「直接上报」`reportMeasuredSurfaceGeometryLocked`
+  在 unified 下门控；unified 的 Resize 统一经 presenter probe → AppState.Geometry
+  链路，legacy 路径与上报本体不变。`unifiedRendererEnabledLocked()` 免锁变体
+  避免持 `c.mu` 时重入死锁。
+  （修正记录：初版曾把探针一并门控——而该探针是当前 unified 下唯一的尺寸变化
+  探测点（driver 单 probe 尚未落地），会导致 resize 失效；已改为仅门控上报。）
+- 验证：ui 全量（128.4s）+ commands 全量（174.3s）+ 定向 `-race`
+  （presenter/geometry）通过。另一次 commands 全量（181.7s）暴露既有 flaky 用例
+  `TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory`：
+  基线 `d8ec19ca` 单测即可 1/12 复现（当前 2/12、全门控版 0/12，样本内不可区分），
+  与本轮改动无因果证据；复跑全绿。
 - 本小步未竟（已记录为后续）：driver 单 probe 注入与 `Terminal`/`driver`/
   `theme.go` raw GetSize 收敛（30+ 展示宽度调用点需单探针缓存转发）、unified
   下 `ApplyGeometry` 纯采纳入口。改动面与夹具迁移清单见会话侦察报告

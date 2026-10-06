@@ -7347,10 +7347,7 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 
 	sizeChanged := false
 	geometryProbed := false
-	// Unified mode owns geometry through the presenter probe -> Resize ->
-	// AppState.Geometry chain; a legacy surface probe here would be a second
-	// authority reporting the same terminal (P1-2b §2.2).
-	if !c.unifiedRendererEnabledLocked() && c.surface != nil && c.surface.Enabled() {
+	if c.surface != nil && c.surface.Enabled() {
 		if softNeedsReflow {
 			// Soft ownership already disagrees with the cached layout width —
 			// reflow now; also force an unthrottled probe so layout stays coherent.
@@ -7359,7 +7356,11 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 		} else {
 			sizeChanged, geometryProbed = c.surface.SyncTerminalGeometryThrottled(ui.DefaultGeometryProbeMinInterval)
 		}
-		if geometryProbed {
+		// Unified mode: the probe above only refreshes the cached dimensions
+		// the presenter reads; the Resize post flows through the presenter
+		// probe -> AppState.Geometry chain instead of a direct surface report
+		// (P1-2b §2.2). Legacy keeps the direct report.
+		if geometryProbed && !c.unifiedRendererEnabledLocked() {
 			c.reportMeasuredSurfaceGeometryLocked()
 		}
 		// Recompute after a probe may have applied a new scroll-region width.
@@ -7432,9 +7433,13 @@ func (c *chatInteractionCoordinator) refreshActiveStreamViewportNow() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.unifiedRendererEnabledLocked() && c.surface != nil && c.surface.Enabled() {
+	if c.surface != nil && c.surface.Enabled() {
 		_ = c.surface.SyncTerminalGeometry()
-		c.reportMeasuredSurfaceGeometryLocked()
+		// Unified: the probe refreshes the cache for the presenter's next
+		// geometry publication; only legacy reports the measurement directly.
+		if !c.unifiedRendererEnabledLocked() {
+			c.reportMeasuredSurfaceGeometryLocked()
+		}
 	}
 	if c.activeStream == nil || !c.activeStream.Active() {
 		return
