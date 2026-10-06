@@ -188,5 +188,7 @@ source 0 一次铸全量 —— 无需先重构 skipRows 管线。
     `finalizedActiveAckPlanVersion` / `lastPlannedActive*` / `activeTokensByCell` / `activeAckPlanVersion` /
     `hasClaimedActiveOriginDelivery`）与 Active revision 豁免；删除 `HistoryCommitActive` 枚举与
     `HistoryCommit.Origin` 字段（身份键同步收敛为单值），相关守卫/测试/注释清理。
-  - **第二刀完成（2a+2b+2c，行为中性）**：净删 ~1336 行；`go test ./cmd/aicli/ui` /
-    `./cmd/aicli/commands` 全量绿；`go build ./...` 干净；P2 Slice 1 全部收口。
+  - **第二刀完成（2a+2b+2c，行为中性）**：删除 1336 行（净减 ~1194 行）；`go test ./cmd/aicli/ui` /
+    `./cmd/aicli/commands` 全量绿；`go build ./...` 干净；真机 e2e
+    （`scripts/test-aicli-windows-terminal-e2e.ps1`）PASS：72 行 history exactly-once、
+    增量归档尾部推进、prompt/status 各一次、Markdown 无源语法；P2 Slice 1 全部收口。

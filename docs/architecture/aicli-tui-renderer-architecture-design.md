@@ -510,7 +510,7 @@ sequenceDiagram
    finalize 从 source 0 一次性铸全量。切片序：Slice 0 目标断言 → Slice 1 单点停铸
    （核心语义，可独立回滚）→ Slice 2 删终端归档路径 → Slice 3 reducer/planner 清理
    → Slice 4 `HistoryCommitActive` 类型面收尾——**全部完成**（Slice 1 `130cc7f5`；
-   Slice 2–4 第二刀 `7471d34a`/`80738513`/`e3236de9`，净删 ~1336 行，行为中性）。
+   Slice 2–4 第二刀 `7471d34a`/`80738513`/`e3236de9`，删除 1336 行（净减 ~1194 行），行为中性）。
 2. **replay / settle 族**：**settle 族整体保留（它就是目标语义：原地隔离、永不重发、
    从最后已证明行续写）；armed 销毁式重放族整体可删**（授权字段、`ProvenScrollbackEpoch`、
    `HistoryScrollbackReconciled` 分支、`\x1b[3J` 写路径、success-mode 背压、相关诊断）。
