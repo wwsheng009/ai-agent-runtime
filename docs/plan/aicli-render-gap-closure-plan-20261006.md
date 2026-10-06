@@ -221,7 +221,7 @@ C1 ──► C2 ──► P2 Slice 1 ──►（P2 其余切片）
 | A1-6 | stderr 边缘收口（G3） | **done** | `86889760` | profile overlay/resume claim-first；其余分类登记（基线注释 (a)–(d)） |
 | A1-7 | legacy StatusBar 栅栏（G9） | **done** | `3a88d33f` | fenced-dead 标注 + 基线登记 |
 | A1-8 | 余项分类登记/收敛（8a–8f） | **done** | `3a88d33f`、`b3144171` | 8a–8f 全部登记；exec_event_processor 纳入门禁 |
-| A2 | 单写端断言扩展 + e2e | **done（e2e 待真机）** | — | 既有栅栏覆盖四类驱动 + 进程零字节（PASS）；真机 e2e 脚本待终端环境执行 |
+| A2 | 单写端断言扩展 + e2e | **done** | — | 栅栏覆盖四类驱动 + 进程零字节（PASS）；真机 e2e PASS（2026-10-06，Windows Terminal 自动断言 5 组） |
 | B0 | 保留项登记表回填 §7.5 | **done** | `12f5ed9d` | 设计文档 §7.5.1（14 行登记表） |
 | B1 | WaitIdleTimeout 事件化（可选） | **决策：保留** | `12f5ed9d` | 默认保留；触发条件变化再事件化（§7.5.1） |
 | B2 | 1ms 站点清零核对 | **done** | `12f5ed9d` | 1ms 集合=表内 5 处，无未登记站点 |
@@ -242,7 +242,9 @@ C1 ──► C2 ──► P2 Slice 1 ──►（P2 其余切片）
 - C 回归：`go test ./cmd/aicli/ui -run 'History|Resume|PlanningBudget|Transcript|Handoff|Active'` →
   C2 后 ok 74.6s；C1 后 ok 79.1s。
 - D：`go test ./cmd/aicli/ui -run 'Layout'` → ok。
-- 未执行：真机 e2e（`scripts/test-aicli-windows-terminal-e2e.ps1`，需交互终端；留待真机/CI 执行）。
+- 真机 e2e：`scripts/test-aicli-windows-terminal-e2e.ps1` **PASS**（31.4s）——72 条 history 各恰 1 次、
+  最老/最新可达、增量历史可见尾随滚动、prompt/status 各 1 次、Markdown 渲染无原始语法泄漏
+  （fixture 窗口 WindowsTerminal.exe PID 40272）。
 
 ## 10. 附录：扫描出处与关联证据
 
