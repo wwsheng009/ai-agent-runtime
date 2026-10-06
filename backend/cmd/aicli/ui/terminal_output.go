@@ -38,11 +38,14 @@ var terminalOutputProxy io.Writer = processTerminalOutputProxy{}
 // than retaining os.Stdout directly.
 //
 // Phase 3 降级语义（8.2 接入顺序 6）：TerminalOutput() 只保留启动前
-// process-compat 与测试入口。active session 期间不动态解析"当前 session"；
-// 生产 interactive 路径通过 Terminal.SetLegacyBinding /
-// FixedBottomSurface.SetLegacyBinding 把输出重定向到 gateway binding——
-// binding 存在时相应方法不触达本 writer（physical fence）。本函数自身
-// 不得被 late goroutine 用来补写旧 session 的输出。
+// process-compat 与 legacy 适配器/测试入口。active unified session 的字节由
+// TerminalSession/gateway 的注入 writer 承载，不触达本 sink。
+//
+// 修正（G11 文档漂移，2026-10-06）：旧注释声称生产路径经
+// Terminal.SetLegacyBinding / FixedBottomSurface.SetLegacyBinding 重定向到
+// gateway binding——该 API 从未落地（全仓无实现）。legacy 适配器的隔离由
+// FixedBottomSurface 的 physical fence 保证；本函数不得被 late goroutine
+// 用来补写旧 session 的输出。
 func TerminalOutput() io.Writer {
 	return terminalOutputProxy
 }
