@@ -534,13 +534,13 @@ sequenceDiagram
 | G3 | **stderr 边缘未收口**：交互期仍有 os.Stderr 直写（与 stdout 同 tty） | `chat_setup.go:108/139/233/268` 及 `printChatSessionInfoRow` 调用点；`chat_selection_output.go:129`；`chat.go:1073` | 中 | §3.8 持续收口（P0 尾项） |
 | G4 | **claimed 路径 rebase/invalidate 缺口**：`rebasePendingHistoryEffects` 对 claimed 且 presentation 改变的 token 静默跳过，靠 generation 失配→Deferred 释放后收敛 | `history_effect_planner.go:1643-1661`；`history_effect_queue.go:560-567` | 中 | P2 前收紧；§9.3.3/§8 已标注 |
 | G5 | **skipRows 证明 0 二义性**：`activeAckedRenderedPrefixRows` 返回 0 兼表"无前缀/前缀不等价"，后者由 finalize 兜底置 `ProjectionUnknown` | `history_effect_planner.go:335-367`；`controller_state.go:594-597` | 中 | P2 Slice 1 后消失；先加注释/测试钉住 |
-| G6 | **§4 未登记镜像 9 组**（M1–M9：`runActive`/轮终态账本/`historySeed*`/legacy 几何/viewport 双表示/terminalEpoch 双份/final 三字段/恢复诊断/drop 遥测） | 见 §4 本轮补登 | 中 | 已补登 §4；逐项随 P1/P2 收敛 |
+| G6 | **§4 未登记镜像 9 组**（M1–M9：`runActive`/轮终态账本/`historySeed*`/legacy 几何/viewport 双表示/terminalEpoch 双份/final 三字段/恢复诊断/drop 遥测） | 见 §4 本轮补登 | 中 | 已补登 §4；映射（D3）：M4→A 批 fenced-dead、M5→P1-2b 残余、M6→P2 TerminalEpoch 语义化、其余随 P1/P2 字段清理 |
 | G7 | **生产轮询多处**：1ms（4 处）、5ms（backlog worker/settle）、10ms（backoff/lease）、50–100ms（Windows/overlay 平台）；多数为 P1-3 §3.7 明确保留的队列等待/有界兜底 | `chat_runtime_events.go:1840/1981/2003/2597/3033/4803`；`terminal_session_executor.go:1037`；`screen_lease.go:82-89` 等 | 低 | 实施方案 B0 登记表；随 P2 backoff/legacy 退役删减 |
 | G8 | **区域未登记项**：编辑器状态行/队列指示/band 顶距/fullscreen 族/主帧 defer/ComposerLine 替换语义 | 见 §10 本轮补登 | 低 | 已补登 §10 |
-| G9 | **legacy `StatusBar` 潜伏第二写端**：生产不可达，但 `StatusBar.Render` 直写 os.Stdout，无栅栏 | `statusbar.go:197-252`；唯一构造 `layout.go:58`（无生产 Render 调用） | 低-中 | P0 fenced-dead 清理（加物理栅栏或删除） |
-| G10 | **web/TUI statusbar 段集合不一致**：同源同构建函数，但 web 缺 state/goal/model/provider/fast（goal/fast 未说明） | `web_statusbar.go:125-210` vs `chat_interaction.go:2878-2912` | 低 | 文档注明或代码对齐 |
-| G11 | **doc/code drift**：`terminal_output.go` 注释宣称 `SetLegacyBinding` 重定向，全仓无实现 | `terminal_output.go:21` 注释 | 低 | 修正注释或补实现 |
-| G12 | **口径不一致**：`app_layout.StatusRows`（nil 时为 0）与 row plan 恒预留 1 行 | `app_layout.go:110` vs `bottom_pane_row_plan.go:121` | 低 | 统一口径（随 P1-2b 残余） |
+| G9 | **legacy `StatusBar` 潜伏第二写端**：生产不可达，但 `StatusBar.Render` 直写 os.Stdout，无栅栏 | `statusbar.go:197-252`；唯一构造 `layout.go:58`（无生产 Render 调用） | 低-中 | 已 fenced-dead 标注（A1-7：`statusbar.go` Render 注释 + 基线登记）；重接线须先加物理栅栏 |
+| G10 | **web/TUI statusbar 段集合不一致**：同源同构建函数，但 web 缺 state/goal/model/provider/fast（goal/fast 未说明） | `web_statusbar.go:125-210` vs `chat_interaction.go:2878-2912` | 低 | 已文档注明（D2）：web 缺段为现状差异，web 侧对齐另评；goal/fast 为 TUI 专属段 |
+| G11 | **doc/code drift**：`terminal_output.go` 注释宣称 `SetLegacyBinding` 重定向，全仓无实现 | `terminal_output.go:21` 注释 | 低 | 已修正注释（A1-2，2026-10-06） |
+| G12 | **口径不一致**：`app_layout.StatusRows`（nil 时为 0）与 row plan 恒预留 1 行 | `app_layout.go:110` vs `bottom_pane_row_plan.go:121` | 低 | 已统一（D1：物理预留口径 + 钉测试） |
 
 **本轮文档修正记录**：§4（#1/#5/#9/#10/#12/#14 补登与状态降级）、§8（S1/S5 迁移注记、约束 3 缺口）、
 §9（9.3.3 缺口注、9.3.4 settle 前置、9.5 核验注）、§10（堆叠 clamp/modal/ComposerLine/未登记区域/状态栏数据源）、
@@ -778,7 +778,7 @@ sequenceDiagram
 | notice 行 | `BottomPaneState`（notice + `PromptEditorStatusLine`） | prompt | ≤ noticeRows（队列/附件 ≤3 + 编辑器状态 1，可达 4） | 无 | prompt 上方；含队列指示行与编辑器状态/错误行（如 Plan mode 失败） |
 | prompt 输入区 | `BottomPaneState`（prompt/composer） | prompt | 可见行 ≤ 派生上限；上下 margin 各 1（h≥12） | prompt（默认） | popup ComposerLine 存在时 prompt 区整体不布局（被替换，而非仅光标接管） |
 | SessionID 行 | `BottomPaneState.SessionIDLine` | status | 1 行（statusRow-1，可选） | 无 | session 级；composer 可见或 popup 有内容时隐藏；内容含 `--pprof/--debug` 段 |
-| 底部状态栏 | `BottomPaneState.StatusModel` | status | 1 行（最底，statusRow=height） | 无 | nil → RunReady 默认；物理行恒预留（即使 nil）；`app_layout.StatusRows` 与之存在口径差（G12） |
+| 底部状态栏 | `BottomPaneState.StatusModel` | status | 1 行（最底，statusRow=height） | 无 | nil → RunReady 默认；物理行恒预留（即使 nil）；`app_layout.StatusRows` 已对齐物理预留口径（D1，2026-10-06） |
 | popup / 面板 | `BottomPaneState`（PopupLines/Owner/Instance/Viewport/ComposerLine/PopupStack/BelowPrompt/ReservedRows） | popup | 两种锚定（见 10.2）；reserved rows 契约 | ComposerLine 存在时接管 | 见 10.6；modal box 按内容扩展并替换 popupLines（`bottom_pane_row_plan.go:49-51`） |
 | 副屏（fullscreen/alternate） | `AppState.Lease`（唯一入口 `chat_screen_framework.go:21`）；使用者：RoutingPanel / fullscreen list / debug overlay / transcript pager / pickers | （同一 transport） | 全屏 | lease 内自管 | 冻结历史交付（S13）；主帧整体 defer |
 
