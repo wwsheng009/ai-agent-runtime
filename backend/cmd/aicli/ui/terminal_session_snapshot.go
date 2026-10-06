@@ -54,7 +54,7 @@ func (c *UIController) terminalSessionSchedule() terminalSessionScheduleSnapshot
 		recoveryActionable:     terminalHistoryRecoveryActionable(c.state),
 		planIncomplete:         effects.planContinuationPending(),
 		stateRevision:          c.revision,
-		stateGeneration:        c.state.LayoutGeneration,
+		stateGeneration:        c.state.Geometry.Generation,
 	}
 	if !effects.HasPending() || effects.ledger == nil {
 		return snapshot
@@ -114,7 +114,6 @@ func terminalViewportAppState(state AppState) AppState {
 			ReconciliationRequired: effects.ReconciliationRequired,
 			ScrollbackReplayArmed:  effects.ScrollbackReplayArmed,
 		},
-		LayoutGeneration: state.LayoutGeneration,
 	}
 }
 
@@ -130,7 +129,7 @@ func terminalSessionClaimedBatchLocked(state UIControllerState, token uint64) (*
 		return nil, nil
 	}
 	entry, ok := ledger.byToken[token]
-	if !ok || entry.State != HistoryCommitInFlight || entry.Commit.LayoutGeneration != state.LayoutGeneration {
+	if !ok || entry.State != HistoryCommitInFlight || entry.Commit.LayoutGeneration != state.Geometry.Generation {
 		return nil, nil
 	}
 	claimed := entry.Commit.Clone()
@@ -144,7 +143,7 @@ func terminalSessionClaimedBatchLocked(state UIControllerState, token uint64) (*
 			continue
 		}
 		next := ledger.byToken[nextToken]
-		if next.State == HistoryCommitPending && next.Commit.LayoutGeneration == state.LayoutGeneration {
+		if next.State == HistoryCommitPending && next.Commit.LayoutGeneration == state.Geometry.Generation {
 			if !budget.admit(next.Commit) {
 				break
 			}

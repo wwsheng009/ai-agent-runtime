@@ -109,8 +109,8 @@ func TestUIController_MeasuredResizeAdvancesGenerationOnlyOnGeometryChange(t *te
 	c.WaitIdle()
 
 	state := c.AppState()
-	if state.Geometry != (GeometryState{Width: 120, Height: 42, Generation: 9}) || state.LayoutGeneration != 9 {
-		t.Fatalf("geometry/layout = %+v/%d", state.Geometry, state.LayoutGeneration)
+	if state.Geometry != (GeometryState{Width: 120, Height: 42, Generation: 9}) || state.Geometry.Generation != 9 {
+		t.Fatalf("geometry/layout = %+v/%d", state.Geometry, state.Geometry.Generation)
 	}
 }
 

@@ -66,7 +66,7 @@ func transcriptPlanMintSnapshotFor(state AppState) transcriptPlanSnapshot {
 		cells:      state.Transcript.Cells,
 		byID:       transcriptCellsByID(state.Transcript),
 		width:      width,
-		generation: state.LayoutGeneration,
+		generation: state.Geometry.Generation,
 		theme:      state.Theme,
 	}
 }
@@ -77,7 +77,7 @@ func transcriptPlanMintSnapshotFor(state AppState) transcriptPlanSnapshot {
 func transcriptPlanSnapshotFor(state AppState) transcriptPlanSnapshot {
 	snap := transcriptPlanMintSnapshotFor(state)
 	snap.mutable = mutableTranscriptCellIDs(state.Transcript)
-	snap.layoutRows = state.Transcript.LayoutRows(state.LayoutGeneration)
+	snap.layoutRows = state.Transcript.LayoutRows(state.Geometry.Generation)
 	return snap
 }
 
@@ -162,7 +162,7 @@ func dispatchTranscriptPlanWindow(state *UIControllerState, inputs transcriptPla
 		Cells:           state.Transcript.Cells,
 		Width:           state.Geometry.Width,
 		Height:          state.Geometry.Height,
-		Generation:      state.LayoutGeneration,
+		Generation:      state.Geometry.Generation,
 		Theme:           state.Theme,
 		Projection:      state.SemanticActiveCellProjection,
 	}
@@ -186,7 +186,7 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 	frontierCells, frontierActive := canonicalHistoryCommitFrontier(state)
 	var activeCommits []HistoryCommit
 	if state.SemanticActiveCellProjection && frontierActive {
-		activeCommits = planMutableActiveCellHistoryCommitsWithTheme(state.Active, state.Geometry, state.LayoutGeneration, state.Theme)
+		activeCommits = planMutableActiveCellHistoryCommitsWithTheme(state.Active, state.Geometry, state.Geometry.Generation, state.Theme)
 	}
 	// 已结算分片（Acked/Failed/Abandoned/Invalidated）不再参与 reconcile，
 	// 规划时直接跳过，避免每次 transcript 迁移都把整段历史重新物化 payload。
@@ -1322,7 +1322,7 @@ func currentTranscriptPlanInputs(state *UIControllerState) transcriptPlanInputs 
 		sceneID:             state.Transcript.SceneID,
 		fence:               transcriptFinalizedPrefixFence(state.Transcript),
 		finalized:           transcriptFinalizedCellCount(state.Transcript),
-		layoutGen:           state.LayoutGeneration,
+		layoutGen:           state.Geometry.Generation,
 		width:               state.Geometry.Width,
 		height:              state.Geometry.Height,
 		projection:          state.SemanticActiveCellProjection,
@@ -1357,7 +1357,7 @@ func transcriptPlanMemoHit(state *UIControllerState) bool {
 		effects.lastPlannedTranscriptSceneID != state.Transcript.SceneID ||
 		effects.lastPlannedTranscriptFence != transcriptFinalizedPrefixFence(state.Transcript) ||
 		effects.lastPlannedTranscriptCells != transcriptFinalizedCellCount(state.Transcript) ||
-		effects.lastPlannedTranscriptLayoutGen != state.LayoutGeneration ||
+		effects.lastPlannedTranscriptLayoutGen != state.Geometry.Generation ||
 		effects.lastPlannedWidth != state.Geometry.Width ||
 		effects.lastPlannedHeight != state.Geometry.Height ||
 		effects.lastPlannedProjection != state.SemanticActiveCellProjection ||
@@ -1388,7 +1388,7 @@ func recordTranscriptPlanMemo(state *UIControllerState, candidates int) {
 	effects.lastPlannedTranscriptSceneID = state.Transcript.SceneID
 	effects.lastPlannedTranscriptFence = transcriptFinalizedPrefixFence(state.Transcript)
 	effects.lastPlannedTranscriptCells = transcriptFinalizedCellCount(state.Transcript)
-	effects.lastPlannedTranscriptLayoutGen = state.LayoutGeneration
+	effects.lastPlannedTranscriptLayoutGen = state.Geometry.Generation
 	effects.lastPlannedWidth = state.Geometry.Width
 	effects.lastPlannedHeight = state.Geometry.Height
 	effects.lastPlannedProjection = state.SemanticActiveCellProjection
@@ -1439,7 +1439,7 @@ func syncHistoryEffectsForActiveCell(state *UIControllerState) {
 		state.HistoryEffects.lastPlannedActiveStable == state.Active.Stable &&
 		state.HistoryEffects.lastPlannedActiveEnqueued == state.Active.Enqueued &&
 		state.HistoryEffects.lastPlannedActiveAcked == state.Active.Acked &&
-		state.HistoryEffects.lastPlannedLayoutGeneration == state.LayoutGeneration &&
+		state.HistoryEffects.lastPlannedLayoutGeneration == state.Geometry.Generation &&
 		state.HistoryEffects.lastPlannedGeometryGeneration == state.Geometry.Generation &&
 		state.HistoryEffects.lastPlannedSourceLen == len(state.Active.Source) &&
 		state.HistoryEffects.lastPlannedKind == state.Active.Kind &&
@@ -1449,13 +1449,13 @@ func syncHistoryEffectsForActiveCell(state *UIControllerState) {
 		return
 	}
 	candidates := planMutableActiveCellHistoryCommitsWithTheme(
-		state.Active, state.Geometry, state.LayoutGeneration, state.Theme,
+		state.Active, state.Geometry, state.Geometry.Generation, state.Theme,
 	)
 	syncHistoryEffectCandidates(state, candidates, state.Active.CellID)
 	state.HistoryEffects.lastPlannedActiveStable = state.Active.Stable
 	state.HistoryEffects.lastPlannedActiveEnqueued = state.Active.Enqueued
 	state.HistoryEffects.lastPlannedActiveAcked = state.Active.Acked
-	state.HistoryEffects.lastPlannedLayoutGeneration = state.LayoutGeneration
+	state.HistoryEffects.lastPlannedLayoutGeneration = state.Geometry.Generation
 	state.HistoryEffects.lastPlannedGeometryGeneration = state.Geometry.Generation
 	state.HistoryEffects.lastPlannedSourceLen = len(state.Active.Source)
 	state.HistoryEffects.lastPlannedKind = state.Active.Kind

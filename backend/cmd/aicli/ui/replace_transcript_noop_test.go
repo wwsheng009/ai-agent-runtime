@@ -15,7 +15,6 @@ func TestReplaceTranscriptSameSceneVersionIsAllocationFreeNoOp(t *testing.T) {
 
 	state := UIControllerState{AppState: AppState{
 		Geometry:         GeometryState{Width: 80, Height: 8, Generation: 1},
-		LayoutGeneration: 1,
 	}}
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, 1)
 	if len(state.Transcript.Cells) != len(snapshot.Cells) {

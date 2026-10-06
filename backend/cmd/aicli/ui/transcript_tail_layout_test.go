@@ -41,7 +41,6 @@ func tailParityFixtureState() AppState {
 	}
 	return AppState{
 		Revision:         3,
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 90, Height: 40, Generation: 1},
 		Transcript:       NewTranscriptState(&scene.Snapshot{Cells: refs}),
 	}
@@ -86,7 +85,7 @@ func tailWindowSizes(full int) []int {
 func TestLayoutTranscriptTailScreenRowsMatchesFullLayout(t *testing.T) {
 	state := tailParityFixtureState()
 	width := state.Geometry.Width
-	rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 	byID := transcriptCellsByID(state.Transcript)
 	mutable := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
 
@@ -124,7 +123,7 @@ func expectedTail(full []AppScreenRow, maxRows int) []AppScreenRow {
 // 必须是某个 cell 非 gap 连续段的第一行（或 gap row），不能落在 cell 中间。
 func TestTranscriptTailStartIndexAlignsToCellBoundary(t *testing.T) {
 	state := tailParityFixtureState()
-	rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 	if len(rows) < 2 {
 		t.Fatal("fixture 布局行过少")
 	}

@@ -150,7 +150,6 @@ func TestCanonicalHistoryFrontierNoLongerBlockedAfterOrphanToolFinalization(t *t
 	}
 	state := AppState{
 		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript:       TranscriptState{Revision: 1, Cells: []scene.TranscriptCell{tool, answer}},
 	}
 	if commits := planEligibleHistoryCommits(state); len(commits) != 0 {
@@ -217,7 +216,7 @@ func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
 	}
 
 	state = reduceUIControllerState(state, BeginHistoryCommit{
-		Token: first.Token, LayoutGeneration: state.LayoutGeneration,
+		Token: first.Token, LayoutGeneration: state.Geometry.Generation,
 	}, 5)
 	thirdSource := nextSource + "\nepoch-row-020"
 	state = reduceUIControllerState(state, UpdateActiveCellAction{
@@ -233,7 +232,7 @@ func TestMutableHistoryIdentitySurvivesAppendOnlyActiveRevision(t *testing.T) {
 		t.Fatalf("append-only revision invalidated in-flight stable effect: entry=%+v", entry)
 	}
 	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
-		Token: first.Token, Frame: 1, LayoutGeneration: state.LayoutGeneration,
+		Token: first.Token, Frame: 1, LayoutGeneration: state.Geometry.Generation,
 	}, 7)
 	if state.Active.Acked.End != first.SourceRange.End {
 		t.Fatalf("ack frontier=%d, want first stable range end %d", state.Active.Acked.End, first.SourceRange.End)
@@ -296,10 +295,10 @@ func TestReplaceTranscriptAppendDoesNotReplayStructuredActiveHistoryPrefix(t *te
 					continue
 				}
 				state = reduceUIControllerState(state, BeginHistoryCommit{
-					Token: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration,
+					Token: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation,
 				}, frame+3)
 				state = reduceUIControllerState(state, HistoryCommitAcknowledged{
-					Token: entry.Commit.Token, Frame: frame, LayoutGeneration: state.LayoutGeneration,
+					Token: entry.Commit.Token, Frame: frame, LayoutGeneration: state.Geometry.Generation,
 				}, frame+4)
 				frame++
 			}
@@ -371,10 +370,10 @@ func TestFinalizeActiveCellPlansOnlyUnacknowledgedResidentTail(t *testing.T) {
 	}
 	for index, entry := range activeEntries {
 		state = reduceUIControllerState(state, BeginHistoryCommit{
-			Token: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration,
+			Token: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation,
 		}, uint64(4+index*2))
 		state = reduceUIControllerState(state, HistoryCommitAcknowledged{
-			Token: entry.Commit.Token, Frame: uint64(index + 1), LayoutGeneration: state.LayoutGeneration,
+			Token: entry.Commit.Token, Frame: uint64(index + 1), LayoutGeneration: state.Geometry.Generation,
 		}, uint64(5+index*2))
 	}
 	if state.Active.Acked.End == 0 || state.Active.Acked.End >= len(source) {
@@ -441,7 +440,7 @@ func TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight(t *testing.T) {
 	}
 	// 与 executor 的 claim 批一致：head InFlight，后续成员保持 Pending。
 	state = reduceUIControllerState(state, BeginHistoryCommit{
-		Token: batch[0].Token, LayoutGeneration: state.LayoutGeneration,
+		Token: batch[0].Token, LayoutGeneration: state.Geometry.Generation,
 	}, 4)
 
 	state = reduceUIControllerState(state, FinalizeActiveCellAction{
@@ -474,7 +473,7 @@ func TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight(t *testing.T) {
 
 	// 批次写成功：整批 ack 之后，只有未确认后缀可以以 Transcript 身份补铸。
 	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
-		Commits: batch, Frame: 4, LayoutGeneration: state.LayoutGeneration,
+		Commits: batch, Frame: 4, LayoutGeneration: state.Geometry.Generation,
 	}, 6)
 
 	ackedRows := 0
@@ -508,7 +507,6 @@ func TestPlanPlainCellHistoryCommitsMapsInternalAndTrailingBlankRows(t *testing.
 	const source = "first\n\nlast\n"
 	state := AppState{
 		Geometry:         GeometryState{Width: 80, Height: 24, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{{
 			ID: 72, Revision: 1, Kind: scene.KindAssistant,
 			Source: source, Phase: scene.CellCommitted,
@@ -544,7 +542,6 @@ func TestPlanEligibleHistoryCommitsRespectsCanonicalMutableFrontier(t *testing.T
 	assistantSource := strings.Join(assistantLines, "\n")
 	state := AppState{
 		Geometry:                     geometry,
-		LayoutGeneration:             1,
 		SemanticActiveCellProjection: true,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 3, Kind: scene.KindReasoning, Source: "reasoning still mutable", Phase: scene.CellMutable},
@@ -583,7 +580,6 @@ func TestPlanEligibleHistoryCommitsRespectsCanonicalMutableFrontier(t *testing.T
 func TestPlanEligibleHistoryCommitsStopsAtFirstMutableCell(t *testing.T) {
 	state := AppState{
 		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
 			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindReasoning, Source: "mutable barrier", Phase: scene.CellMutable},
@@ -604,7 +600,6 @@ func TestPlanEligibleHistoryCommitsStopsAtFirstMutableCell(t *testing.T) {
 func TestPlanEligibleHistoryCommitsTreatsEmptyMutableCellAsBarrier(t *testing.T) {
 	state := AppState{
 		Geometry:         GeometryState{Width: 80, Height: 12, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 1, Kind: scene.KindUser, Source: "committed prefix", Phase: scene.CellCommitted},
 			{ID: 2, Sequence: 2, Revision: 1, Kind: scene.KindReasoning, Source: "", Phase: scene.CellMutable},
@@ -626,7 +621,6 @@ func TestPlanEligibleHistoryCommitsTreatsEmptyMutableCellAsBarrier(t *testing.T)
 func TestSyncHistoryEffectsForActiveCellLeavesTranscriptEntriesUntouched(t *testing.T) {
 	state := UIControllerState{AppState: AppState{
 		Geometry:                     GeometryState{Width: 80, Height: 24, Generation: 1},
-		LayoutGeneration:             1,
 		SemanticActiveCellProjection: true,
 		Active: ActiveCellState{
 			CellID: 91, Revision: 2, Kind: scene.KindAssistant,
@@ -699,7 +693,6 @@ func BenchmarkReplaceTranscriptActiveOnlyLargeLedger(b *testing.B) {
 	snapshot := &scene.Snapshot{SceneID: 1, Revision: 2, ContentVersion: 1, Cells: cells}
 	state := UIControllerState{AppState: AppState{
 		Geometry:                     GeometryState{Width: 100, Height: 24, Generation: 1},
-		LayoutGeneration:             1,
 		SemanticActiveCellProjection: true,
 		Transcript:                   NewTranscriptState(snapshot),
 		Active: ActiveCellState{
@@ -804,7 +797,6 @@ func TestPlanReasoningAckedPrefixMatchesFinalize(t *testing.T) {
 
 	state := AppState{
 		Geometry:         geometry,
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Revision: 2, Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Revision: 4, Kind: scene.KindReasoning, Source: source, Phase: scene.CellCommitted},
 		}}),
@@ -828,7 +820,6 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 	newState := func(source string) *UIControllerState {
 		state := &UIControllerState{AppState: AppState{
 			Geometry:                     GeometryState{Width: 80, Height: 12, Generation: 1},
-			LayoutGeneration:             1,
 			SemanticActiveCellProjection: true,
 			Active: ActiveCellState{
 				CellID:   91,
@@ -1069,9 +1060,7 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 // invalidate → ReconciliationRequired=true.
 func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *testing.T) {
 	// Setup: state with a ledger containing one Active-origin commit in-flight.
-	state := &UIControllerState{AppState: AppState{
-		LayoutGeneration: 1,
-	}}
+	state := &UIControllerState{AppState: AppState{Geometry: GeometryState{Generation: 1}}}
 	state.HistoryEffects.ledger = NewHistoryCommitLedger()
 
 	// Build a valid Active-origin commit (as produced by a full-transcript
@@ -1143,7 +1132,7 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 // invalidate —— 内容不会错（下一次完整规划会重新入队），但 token 抖动会回退
 // Enqueued 前沿，代价是 scrollback 的重复写或漏写。
 func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
-	state := &UIControllerState{AppState: AppState{LayoutGeneration: 1}}
+	state := &UIControllerState{AppState: AppState{Geometry: GeometryState{Generation: 1}}}
 	state.HistoryEffects.ledger = NewHistoryCommitLedger()
 
 	tail := HistoryCommit{

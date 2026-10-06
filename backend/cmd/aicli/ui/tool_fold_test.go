@@ -35,7 +35,6 @@ func foldTestAppState(cells ...scene.TranscriptCell) AppState {
 	}
 	return AppState{
 		Revision:         7,
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 80, Height: 40, Generation: 1},
 		Transcript:       NewTranscriptState(&scene.Snapshot{Cells: refs}),
 	}

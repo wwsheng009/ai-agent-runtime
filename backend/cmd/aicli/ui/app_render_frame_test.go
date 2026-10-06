@@ -15,7 +15,6 @@ import (
 func TestComposeAppRenderFramePreservesTextFrameAndStructuredSources(t *testing.T) {
 	state := AppState{
 		Revision:         55,
-		LayoutGeneration: 4,
 		Geometry:         GeometryState{Width: 24, Height: 14, Generation: 4},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: "question", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
@@ -32,7 +31,7 @@ func TestComposeAppRenderFramePreservesTextFrameAndStructuredSources(t *testing.
 
 	frame := ComposeAppRenderFrame(state)
 	plain := ComposeAppTextLayout(state)
-	if frame.Revision != state.Revision || frame.LayoutGeneration != state.LayoutGeneration || frame.Geometry != state.Geometry {
+	if frame.Revision != state.Revision || frame.LayoutGeneration != state.Geometry.Generation || frame.Geometry != state.Geometry {
 		t.Fatalf("frame metadata = %+v", frame)
 	}
 	if len(frame.Rows) != len(plain.Rows) {
@@ -99,7 +98,6 @@ func TestComposeAppRenderFrameDetachesStructuredLines(t *testing.T) {
 
 func TestComposeAppRenderFrameNormalizesStructuredBandTrailingSpaces(t *testing.T) {
 	state := AppState{
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 40, Height: 12, Generation: 1},
 		Bottom: BottomPaneState{
 			ActiveBandStyled: []render.Line{
@@ -190,7 +188,6 @@ func TestComposeAppRenderFrameUsesSourceBackedActiveBandFallback(t *testing.T) {
 
 func TestComposeAppRenderFrameRendersCommittedAssistantMarkdown(t *testing.T) {
 	state := AppState{
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 40, Height: 12, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{{
 			ID: 1, Sequence: 1, Kind: scene.KindAssistant,

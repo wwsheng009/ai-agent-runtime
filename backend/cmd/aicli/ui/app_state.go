@@ -40,7 +40,6 @@ type AppState struct {
 	SkillPicker                  SkillPickerState
 	ExportPicker                 ExportPickerState
 	MCPPicker                    MCPPickerState
-	LayoutGeneration             uint64
 }
 
 // Clone returns an independent immutable snapshot suitable for layout,

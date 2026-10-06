@@ -130,7 +130,7 @@ func TestScrollbackReplayGrantSurvivesRegularUpdatesUntilConsumed(t *testing.T) 
 	// A settle that races the replay must not be allowed to reinterpret the
 	// unproven range as resolved and thereby cancel the authorized replacement.
 	state = reduceUIControllerState(state, HistoryReconciliationSettled{
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 	}, 3)
 	if !state.HistoryEffects.ScrollbackReplayArmed {
 		t.Fatal("HistoryReconciliationSettled short-circuited an authorized replay")
@@ -143,7 +143,7 @@ func TestScrollbackReplayGrantIsConsumedExactlyOnce(t *testing.T) {
 		ArmScrollbackReplay: true,
 	}, 1)
 	state = reduceUIControllerState(state, HistoryScrollbackReconciled{
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 		TerminalEpoch:    1,
 	}, 2)
 	if state.HistoryEffects.ScrollbackReplayArmed {
@@ -151,7 +151,7 @@ func TestScrollbackReplayGrantIsConsumedExactlyOnce(t *testing.T) {
 	}
 
 	state = reduceUIControllerState(state, HistoryProjectionInvalidated{
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 	}, 3)
 	if plan := scrollbackGrantRecoveryPlan(state); plan.resetScrollback {
 		t.Fatalf("spent grant replayed again: %+v", plan)

@@ -40,7 +40,7 @@ func traceHistoryReduction(state UIControllerState, format string, args ...any) 
 		return
 	}
 	historyTrace.append(fmt.Sprintf("[hist] gen=%d next=%d unknown=%t recon=%t pending=%d | %s",
-		state.LayoutGeneration, state.HistoryEffects.NextToken,
+		state.Geometry.Generation, state.HistoryEffects.NextToken,
 		state.HistoryEffects.ProjectionUnknown, state.HistoryEffects.ReconciliationRequired,
 		historyTracePendingCount(state.HistoryEffects),
 		fmt.Sprintf(format, args...)))

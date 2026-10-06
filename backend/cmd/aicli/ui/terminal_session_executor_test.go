@@ -509,8 +509,8 @@ func TestTerminalSessionExecutorResizeRacingInFlightHistoryDrainsWithoutReplay(t
 
 	state := controller.State()
 	assertTerminalSessionExecutorDrainedHistory(t, state)
-	if state.LayoutGeneration != 5 {
-		t.Fatalf("resize recovery state = generation %d", state.LayoutGeneration)
+	if state.Geometry.Generation != 5 {
+		t.Fatalf("resize recovery state = generation %d", state.Geometry.Generation)
 	}
 	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitAcked || entry.AckFrame == 0 {
 		t.Fatalf("raced delivery was not acknowledged: state=%s gen=%d ack=%d partial=%t failure=%v",
@@ -589,8 +589,8 @@ func TestTerminalSessionExecutorClaimMissReleasesStrandedInFlight(t *testing.T) 
 		t.Fatalf("claim-miss release never happened; diag=%+v", executor.RecoveryDiag())
 	}
 	state := controller.State()
-	if state.LayoutGeneration != 5 {
-		t.Fatalf("layout generation = %d, want the injected generation 5", state.LayoutGeneration)
+	if state.Geometry.Generation != 5 {
+		t.Fatalf("layout generation = %d, want the injected generation 5", state.Geometry.Generation)
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
 		if entry.State == HistoryCommitInFlight {
@@ -639,8 +639,8 @@ func TestTerminalSessionExecutorSecondResizeRaceStillDrainsWithoutReplay(t *test
 
 	state := controller.State()
 	assertTerminalSessionExecutorDrainedHistory(t, state)
-	if state.LayoutGeneration != 6 {
-		t.Fatalf("second resize recovery state = generation %d", state.LayoutGeneration)
+	if state.Geometry.Generation != 6 {
+		t.Fatalf("second resize recovery state = generation %d", state.Geometry.Generation)
 	}
 	if entry := historyCommitEntry(t, state, oldToken); entry.State != HistoryCommitAcked || entry.MayHavePartiallyWritten {
 		t.Fatalf("raced delivery did not settle as acked: state=%s gen=%d ack=%d partial=%t failure=%v",
@@ -795,7 +795,7 @@ func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredProjection(t *te
 	// obligation — a plain viewport-only flush would leave it stuck forever.
 	controller.mu.Lock()
 	controller.state.HistoryEffects.ReconciliationRequired = true
-	generation := controller.state.LayoutGeneration
+	generation := controller.state.Geometry.Generation
 	controller.mu.Unlock()
 	executor.recordScrollbackReset(0, generation, false) // success-mode arm
 
@@ -1362,7 +1362,7 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 	// 4. Successful flush, obligation pending, generation advanced (racing
 	// resize/theme change): genuine progress. Must NOT arm.
 	controller.mu.Lock()
-	controller.state.LayoutGeneration++
+	controller.state.Geometry.Generation++
 	controller.mu.Unlock()
 	if controller.LayoutGeneration() == startGen {
 		t.Fatal("test setup failed: generation did not advance")
@@ -1379,7 +1379,7 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 	// again, and the obligation check alone never sees it. A successful reset
 	// at an unchanged layout generation must arm the guard.
 	controller.mu.Lock()
-	controller.state.LayoutGeneration = startGen // restore: no racing progress
+	controller.state.Geometry.Generation = startGen // restore: no racing progress
 	controller.state.HistoryEffects.ProjectionUnknown = false
 	controller.state.HistoryEffects.ReconciliationRequired = false
 	controller.mu.Unlock()

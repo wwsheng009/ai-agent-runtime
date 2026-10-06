@@ -58,7 +58,6 @@ func TestPlanPlainHistoryCommitsCacheRoundTrip(t *testing.T) {
 	makeState := func() AppState {
 		return AppState{
 			Geometry:         GeometryState{Width: 40, Height: 24, Generation: 1},
-			LayoutGeneration: 1,
 			Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{{
 				ID: 88, Revision: 1, Kind: scene.KindUser,
 				Source: source, Phase: scene.CellCommitted,
@@ -88,7 +87,6 @@ func TestPlanPlainHistoryCommitsDynamicFields(t *testing.T) {
 	makeState := func() AppState {
 		return AppState{
 			Geometry:         GeometryState{Width: 40, Height: 24, Generation: 1},
-			LayoutGeneration: 2,
 			Transcript: NewTranscriptState(&scene.Snapshot{Revision: 1, Cells: []*scene.TranscriptCell{{
 				ID: 91, Revision: 1, Kind: scene.KindUser,
 				Source: source, Phase: scene.CellCommitted,
@@ -96,11 +94,11 @@ func TestPlanPlainHistoryCommitsDynamicFields(t *testing.T) {
 		}
 	}
 	state := makeState()
-	t.Logf("cells=%d width=%d layoutGen=%d theme=%q", len(state.Transcript.Cells), state.Geometry.Width, state.LayoutGeneration, themeFingerprint(state.Theme))
+	t.Logf("cells=%d width=%d layoutGen=%d theme=%q", len(state.Transcript.Cells), state.Geometry.Width, state.Geometry.Generation, themeFingerprint(state.Theme))
 	frontier, _ := canonicalHistoryCommitFrontier(state)
 	t.Logf("frontier=%v", frontier)
 	byID := transcriptCellsByID(state.Transcript)
-	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(state.LayoutGeneration), byID, mutableTranscriptCellIDs(state.Transcript), state.Geometry.Width, state.Theme)
+	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(state.Geometry.Generation), byID, mutableTranscriptCellIDs(state.Transcript), state.Geometry.Width, state.Theme)
 	t.Logf("rows=%d", len(rows))
 	commits := planEligibleHistoryCommits(state)
 	if len(commits) != 4 {

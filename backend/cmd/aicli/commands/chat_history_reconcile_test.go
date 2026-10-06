@@ -547,7 +547,7 @@ func TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsi
 		}
 	}
 	{
-		rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+		rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 		for i := 0; i < len(rows); i++ {
 			r := rows[i]
 			t.Logf("DEBUG row[%d] cell=%d gap=%v text=%q", i, uint64(r.CellID), r.Gap > 0, r.Text)
@@ -635,7 +635,7 @@ func TestUnifiedStartupOrderRetainsHistoryTailAndScrollback(t *testing.T) {
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	state := coordinator.uiActor.State()
-	if state.Geometry.Width != width || state.Geometry.Height != height || state.LayoutGeneration == 0 {
+	if state.Geometry.Width != width || state.Geometry.Height != height || state.Geometry.Generation == 0 {
 		t.Fatalf("startup geometry did not come from mounted surface: %+v", state.AppState.Geometry)
 	}
 	if state.Active.Phase != ui.ActiveCellMutable || !strings.Contains(state.Active.Source, "startup active reasoning remains visible") {
@@ -647,7 +647,7 @@ func TestUnifiedStartupOrderRetainsHistoryTailAndScrollback(t *testing.T) {
 		t.Fatal("startup did not publish TerminalSession")
 	}
 	projection := session.TerminalSession.ProjectionState()
-	if projection.Validity != renderengine.ProjectionKnown || projection.Geometry.Width != width || projection.Geometry.Height != height || projection.LayoutGeneration != state.LayoutGeneration {
+	if projection.Validity != renderengine.ProjectionKnown || projection.Geometry.Width != width || projection.Geometry.Height != height || projection.LayoutGeneration != state.Geometry.Generation {
 		t.Fatalf("terminal projection does not match startup AppState: projection=%+v state=%+v", projection, state.AppState)
 	}
 	acked := 0
@@ -788,7 +788,7 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 	awaitUnifiedPresenterIdle(t, coordinator)
 
 	state := coordinator.uiActor.State()
-	if state.Geometry.Width != width || state.Geometry.Height != height || state.LayoutGeneration == 0 {
+	if state.Geometry.Width != width || state.Geometry.Height != height || state.Geometry.Generation == 0 {
 		t.Fatalf("startup geometry did not come from mounted surface: %+v", state.AppState.Geometry)
 	}
 	if state.Active.Phase != ui.ActiveCellMutable || !strings.Contains(state.Active.Source, "live reasoning after replay remains visible") {
@@ -805,7 +805,7 @@ func TestUnifiedStartupReplaysEventLogThenReconcilesCanonicalHistoryWithoutDupli
 		t.Fatal("startup did not publish TerminalSession")
 	}
 	projection := session.TerminalSession.ProjectionState()
-	if projection.Validity != renderengine.ProjectionKnown || projection.Geometry.Width != width || projection.Geometry.Height != height || projection.LayoutGeneration != state.LayoutGeneration {
+	if projection.Validity != renderengine.ProjectionKnown || projection.Geometry.Width != width || projection.Geometry.Height != height || projection.LayoutGeneration != state.Geometry.Generation {
 		t.Fatalf("terminal projection does not match reconciled AppState: projection=%+v state=%+v", projection, state.AppState)
 	}
 	acked := 0

@@ -25,7 +25,6 @@ const resumeUnmappableSource = "制表符\t开头的行\n第二行\n"
 func resumeParityFixtureState() AppState {
 	return AppState{
 		Revision:         4,
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 90, Height: 40, Generation: 1},
 		Transcript:       NewTranscriptState(resumeParitySnapshot()),
 	}
@@ -68,7 +67,7 @@ func resumeParitySnapshot() *scene.Snapshot {
 func TestLayoutTranscriptScreenRowsFromResumesAtCellBoundaries(t *testing.T) {
 	state := resumeParityFixtureState()
 	width := state.Geometry.Width
-	rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 	byID := transcriptCellsByID(state.Transcript)
 	mutable := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
 	// 至少跨两个采样点（第一轮在 4096 附近截断、第二轮在 8192 附近再截断）才

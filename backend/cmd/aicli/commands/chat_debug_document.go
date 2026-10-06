@@ -422,7 +422,7 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	effectDiagnostics := session.Interaction.uiActor.HistoryEffectDiagnostics()
 	builder.heading("AppState / Presenter Migration: (GET /debug/chat/status#app_state)")
 	builder.meta("UI Revision:", strconv.FormatUint(state.Revision, 10))
-	builder.meta("Layout Generation:", strconv.FormatUint(state.LayoutGeneration, 10))
+	builder.meta("Layout Generation:", strconv.FormatUint(state.Geometry.Generation, 10))
 	builder.meta("Geometry:", fmt.Sprintf("%dx%d (generation %d)", state.Geometry.Width, state.Geometry.Height, state.Geometry.Generation))
 	if state.Lease.Active {
 		builder.meta("Primary Lease:", fmt.Sprintf("active #%d", state.Lease.ID))

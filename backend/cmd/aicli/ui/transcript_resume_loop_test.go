@@ -53,7 +53,7 @@ func TestResumeStreamingDeltasDoNotLoopScrollbackReset(t *testing.T) {
 	state.HistoryEffects.ledger.byToken[1] = HistoryCommitEntry{
 		Commit: HistoryCommit{
 			Token: 1, CellID: cellID, SourceRange: SourceRange{Start: 0, End: 5},
-			LayoutGeneration: state.LayoutGeneration,
+			LayoutGeneration: state.Geometry.Generation,
 		},
 		State: HistoryCommitAcked,
 	}
@@ -120,7 +120,7 @@ func TestResumeStreamingFullPathPrefixPresentationChange(t *testing.T) {
 	state.HistoryEffects.ledger.byToken[1] = HistoryCommitEntry{
 		Commit: HistoryCommit{
 			Token: 1, CellID: cellID, SourceRange: SourceRange{Start: 0, End: 5},
-			LayoutGeneration: state.LayoutGeneration,
+			LayoutGeneration: state.Geometry.Generation,
 		},
 		State: HistoryCommitAcked,
 	}

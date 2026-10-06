@@ -53,9 +53,9 @@ func TestResizeReplansTranscriptInstalledBeforeGeometry(t *testing.T) {
 		if entry.State != HistoryCommitPending {
 			t.Fatalf("token %d planned in state %v, want pending", entry.Commit.Token, entry.State)
 		}
-		if entry.Commit.LayoutGeneration != state.LayoutGeneration {
+		if entry.Commit.LayoutGeneration != state.Geometry.Generation {
 			t.Fatalf("token %d carries generation %d, want %d",
-				entry.Commit.Token, entry.Commit.LayoutGeneration, state.LayoutGeneration)
+				entry.Commit.Token, entry.Commit.LayoutGeneration, state.Geometry.Generation)
 		}
 	}
 

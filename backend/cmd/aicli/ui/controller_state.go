@@ -102,11 +102,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		generationChanged := false
 		if a.Generation > state.Geometry.Generation {
 			state.Geometry.Generation = a.Generation
-			state.LayoutGeneration = a.Generation
 			generationChanged = true
 		} else if geometryChanged {
 			state.Geometry.Generation++
-			state.LayoutGeneration = state.Geometry.Generation
 			generationChanged = true
 		}
 		if geometryChanged || generationChanged {
@@ -286,7 +284,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// stale while the action is queued. Ignore that harmless claim miss and let
 		// the current schedule wake the presenter; marking ProjectionUnknown here
 		// would create an endless recovery/reclaim loop for the same stale token.
-		if a.LayoutGeneration == state.LayoutGeneration {
+		if a.LayoutGeneration == state.Geometry.Generation {
 			if err := state.HistoryEffects.markInFlight(a.Token, a.LayoutGeneration); err != nil {
 				// A stale claim miss is intentionally ignored — see the comment
 				// above for why marking ProjectionUnknown here would loop — but it
@@ -347,7 +345,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		traceHistoryReduction(state, "ackBatch n=%d first=%d last=%d batchGen=%d frame=%d err=%v",
 			len(a.Commits), firstToken, lastToken, a.LayoutGeneration, a.Frame, ackErr)
 	case HistoryCommitFailed:
-		if a.LayoutGeneration != state.LayoutGeneration {
+		if a.LayoutGeneration != state.Geometry.Generation {
 			state.HistoryEffects.ProjectionUnknown = true
 			break
 		}
@@ -364,7 +362,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// was queued, then rebase its payload onto the current generation so it
 		// stays claimable instead of freezing the queue behind a stale token.
 		if err := state.HistoryEffects.deferInFlight(a.Token, a.LayoutGeneration); err == nil &&
-			a.LayoutGeneration != state.LayoutGeneration {
+			a.LayoutGeneration != state.Geometry.Generation {
 			rebasePendingHistoryEffects(&state)
 		}
 	case HistoryReconciliationSettled:
@@ -372,7 +370,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// scrollback. Quarantine unproven deliveries in place and resume
 		// ordered handoff; an authorized replay must never be short-circuited
 		// by a settle that raced it.
-		if a.LayoutGeneration == state.LayoutGeneration && !state.HistoryEffects.ScrollbackReplayArmed {
+		if a.LayoutGeneration == state.Geometry.Generation && !state.HistoryEffects.ScrollbackReplayArmed {
 			state.HistoryEffects.settleUnresolvedWithoutReplay()
 			// Settling is the transition that clears the unresolved-delivery
 			// gate, and it is not an ack. A continuation attempt that ran while
@@ -391,7 +389,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// 全部通过后，在锁内铸 commit 并走与同步路径共用的收尾。
 		handleHistoryPlanWindowReady(&state, a)
 	case HistoryProjectionRecovered:
-		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.LayoutGeneration {
+		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.markProjectionKnown()
 			// A scrollback replacement the terminal owner already proved must be
 			// reconciled as soon as this frame proof exists. Consuming the recorded
@@ -412,7 +410,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			continueTruncatedHistoryPlan(&state)
 		}
 	case HistoryProjectionInvalidated:
-		if a.LayoutGeneration == state.LayoutGeneration {
+		if a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.ProjectionUnknown = true
 		}
 	case HistoryScrollbackReconciled:
@@ -470,7 +468,6 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.Geometry.Generation == 0 {
 				state.Geometry.Generation = 1
 			}
-			state.LayoutGeneration = state.Geometry.Generation
 			rebasePendingHistoryEffects(&state)
 			refreshTranscriptOverlayPager(&state)
 		}

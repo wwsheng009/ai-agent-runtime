@@ -1202,8 +1202,8 @@ func TestUIController_AppStateSnapshotTracksActorDomainsAndDetaches(t *testing.T
 	c.WaitIdle()
 
 	state := c.State()
-	if state.Revision != uint64(len(actions)) || state.LayoutGeneration != 13 {
-		t.Fatalf("revision/layout = %d/%d, want %d/13", state.Revision, state.LayoutGeneration, len(actions))
+	if state.Revision != uint64(len(actions)) || state.Geometry.Generation != 13 {
+		t.Fatalf("revision/layout = %d/%d, want %d/13", state.Revision, state.Geometry.Generation, len(actions))
 	}
 	if state.Geometry != (GeometryState{Width: 120, Height: 42, Generation: 13}) || !state.Lease.Active || state.Lease.ID != 88 {
 		t.Fatalf("geometry/lease = %+v/%+v", state.Geometry, state.Lease)
@@ -1840,8 +1840,8 @@ func TestBeginHistoryCommitRefusalsAreObservable(t *testing.T) {
 	first := entries[0].Commit.Token
 	second := entries[1].Commit.Token
 	generation := entries[0].Commit.LayoutGeneration
-	if generation != base.LayoutGeneration {
-		t.Fatalf("fixture generation mismatch: commit=%d state=%d", generation, base.LayoutGeneration)
+	if generation != base.Geometry.Generation {
+		t.Fatalf("fixture generation mismatch: commit=%d state=%d", generation, base.Geometry.Generation)
 	}
 
 	// 1) 动作 generation 已过期：reducer 直接跳过认领（不改变状态），但必须留痕。

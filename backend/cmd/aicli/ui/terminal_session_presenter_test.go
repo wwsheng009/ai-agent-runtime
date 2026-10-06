@@ -36,7 +36,7 @@ func TestTerminalSessionPresenter_AttachesGeometryAndFlushesFrame(t *testing.T) 
 	presenter.WaitIdle()
 
 	state := controller.AppState()
-	if state.Geometry.Width != 80 || state.Geometry.Height != 24 || state.LayoutGeneration == 0 {
+	if state.Geometry.Width != 80 || state.Geometry.Height != 24 || state.Geometry.Generation == 0 {
 		t.Fatalf("geometry was not published before flush: %+v", state.Geometry)
 	}
 	projection := presenter.Session().ProjectionState()
@@ -80,7 +80,7 @@ func TestTerminalSessionPresenter_RetriesDeferredGeometryPublication(t *testing.
 	controller.WaitIdle()
 
 	state := controller.AppState()
-	if state.Geometry.Width != 91 || state.Geometry.Height != 33 || state.LayoutGeneration == 0 {
+	if state.Geometry.Width != 91 || state.Geometry.Height != 33 || state.Geometry.Generation == 0 {
 		t.Fatalf("deferred geometry was not retried: %+v", state.Geometry)
 	}
 	presenter.Close()

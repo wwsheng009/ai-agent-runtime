@@ -51,10 +51,10 @@ func LayoutAppState(state AppState) AppLayout {
 
 	layout := AppLayout{
 		Revision:         state.Revision,
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 		Geometry:         state.Geometry,
 		Lease:            state.Lease,
-		Transcript:       state.Transcript.LayoutRows(state.LayoutGeneration),
+		Transcript:       state.Transcript.LayoutRows(state.Geometry.Generation),
 		Active:           state.Active,
 		ActiveBand:       activeBand.Clone(),
 		Bottom: BottomPaneLayout{

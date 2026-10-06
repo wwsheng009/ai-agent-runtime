@@ -162,10 +162,10 @@ func TestHistoryEffectsReducer_BootstrapBatchAcknowledgesOrderedPendingRangesAto
 		entries[2].Commit.Clone(),
 	}
 	state = reduceUIControllerState(state, BeginHistoryCommit{
-		Token: commits[0].Token, LayoutGeneration: state.LayoutGeneration,
+		Token: commits[0].Token, LayoutGeneration: state.Geometry.Generation,
 	}, 3)
 	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
-		Commits: commits, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+		Commits: commits, Frame: 9, LayoutGeneration: state.Geometry.Generation,
 	}, 4)
 	for _, commit := range commits {
 		entry := historyCommitEntry(t, state, commit.Token)
@@ -190,7 +190,7 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBa
 		entries[2].Commit.Clone(),
 	}
 	state = reduceUIControllerState(state, BeginHistoryCommit{
-		Token: commits[0].Token, LayoutGeneration: state.LayoutGeneration,
+		Token: commits[0].Token, LayoutGeneration: state.Geometry.Generation,
 	}, 3)
 
 	// Simulate a semantic/layout action rebasing a later token while the old
@@ -201,7 +201,7 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBa
 		t.Fatalf("rebase pending bootstrap token: %v", err)
 	}
 	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
-		Commits: commits, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+		Commits: commits, Frame: 9, LayoutGeneration: state.Geometry.Generation,
 	}, 4)
 
 	for _, commit := range commits {
@@ -215,7 +215,7 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBa
 		t.Fatalf("mismatched batch remained retryable: %#v", state.HistoryEffects)
 	}
 
-	state = reduceUIControllerState(state, HistoryProjectionRecovered{LayoutGeneration: state.LayoutGeneration}, 5)
+	state = reduceUIControllerState(state, HistoryProjectionRecovered{LayoutGeneration: state.Geometry.Generation}, 5)
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.HasPending() {
 		t.Fatalf("viewport-only recovery exposed an unresolved batch: %#v", state.HistoryEffects)
 	}
@@ -224,7 +224,6 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBa
 func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 	state := AppState{
 		Geometry:         GeometryState{Width: 4, Height: 4, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "123456", Phase: scene.CellCommitted},
 			{ID: 2, Revision: 1, Kind: scene.KindAssistant, Source: "abcdef", Phase: scene.CellCommitted},
@@ -260,7 +259,6 @@ func TestPlanEligibleHistoryCommits_UsesPhysicalWrappedRows(t *testing.T) {
 func TestPlanEligibleHistoryCommits_SplitsUnbrokenPlainLineAtPrimaryBoundary(t *testing.T) {
 	state := AppState{
 		Geometry:         GeometryState{Width: 4, Height: 3, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "abcdefghijkl", Phase: scene.CellCommitted},
 		}}),
@@ -320,7 +318,6 @@ func TestHistoryEffectsReducer_UnbrokenLineHandoffsEachRowOnce(t *testing.T) {
 func TestPlanEligibleHistoryCommits_SplitsCJKWrappedRowsAtByteBoundaries(t *testing.T) {
 	state := AppState{
 		Geometry:         GeometryState{Width: 4, Height: 3, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: "甲乙丙丁己", Phase: scene.CellCommitted},
 		}}),
@@ -342,7 +339,6 @@ func TestPlanEligibleHistoryCommits_SplitsMarkdownRowsAtPrimaryBoundary(t *testi
 	const source = "# markdown heading\n\n- **markdown-history-01**\n- **markdown-history-02**\n- **markdown-history-03**\n- **markdown-history-04**\n- **markdown-history-05**"
 	state := AppState{
 		Geometry:         GeometryState{Width: 48, Height: 4, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: source, Phase: scene.CellCommitted},
 		}}),
@@ -377,7 +373,6 @@ func TestPlanEligibleHistoryCommits_SegmentsOversizedFinalizedPlainCell(t *testi
 	const source = "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh"
 	state := AppState{
 		Geometry:         GeometryState{Width: 80, Height: 6, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Revision: 1, Kind: scene.KindAssistant, Source: source, Phase: scene.CellCommitted},
 		}}),
@@ -416,7 +411,6 @@ func BenchmarkPlanEligibleHistoryCommitsPlainTranscript(b *testing.B) {
 	}
 	state := AppState{
 		Geometry:         GeometryState{Width: 100, Height: 24, Generation: 1},
-		LayoutGeneration: 1,
 		Transcript:       NewTranscriptState(&scene.Snapshot{Cells: cells}),
 	}
 	b.ReportAllocs()
@@ -466,7 +460,7 @@ func TestHistoryEffectsReducer_StaleBeginClaimDoesNotInvalidateProjection(t *tes
 	token := pending[0].Token
 
 	state = reduceUIControllerState(state, BeginHistoryCommit{
-		Token: token, LayoutGeneration: state.LayoutGeneration - 1,
+		Token: token, LayoutGeneration: state.Geometry.Generation - 1,
 	}, 3)
 	entry := historyCommitEntry(t, state, token)
 	if entry.State != HistoryCommitPending {
@@ -543,10 +537,10 @@ func TestHistoryEffectsReducer_TranscriptBoundaryChangeInvalidatesInFlightHandof
 		if entry.Commit.Token >= token || entry.State != HistoryCommitPending {
 			continue
 		}
-		state = reduceUIControllerState(state, BeginHistoryCommit{Token: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration}, 3)
-		state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: entry.Commit.Token, Frame: entry.Commit.Token, LayoutGeneration: state.LayoutGeneration}, 3)
+		state = reduceUIControllerState(state, BeginHistoryCommit{Token: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation}, 3)
+		state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: entry.Commit.Token, Frame: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation}, 3)
 	}
-	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: state.LayoutGeneration}, 3)
+	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: state.Geometry.Generation}, 3)
 	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitInFlight {
 		t.Fatalf("begin history = %#v", entry)
 	}
@@ -605,11 +599,11 @@ func TestHistoryEffectsReducer_BatchAckAcceptedWhenLeaseArrivesAfterTerminalWrit
 		t.Fatalf("fixture pending commits = %d, want at least 2", len(pending))
 	}
 	state = reduceUIControllerState(state, BeginHistoryCommit{
-		Token: pending[0].Token, LayoutGeneration: state.LayoutGeneration,
+		Token: pending[0].Token, LayoutGeneration: state.Geometry.Generation,
 	}, 3)
 	state = reduceUIControllerState(state, LeaseAcquired{LeaseID: 44}, 4)
 	state = reduceUIControllerState(state, HistoryCommitsAcknowledged{
-		Commits: pending, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+		Commits: pending, Frame: 9, LayoutGeneration: state.Geometry.Generation,
 	}, 5)
 
 	if !state.Lease.Active || !state.HistoryEffects.Frozen || state.HistoryEffects.ProjectionUnknown {
@@ -694,10 +688,10 @@ func TestHistoryEffectsReducer_InsertionBeforeAckedHistoryRequiresScrollbackReco
 	state := historyEffectTestState(t, 2)
 	first := state.HistoryEffects.Entries()[0].Commit
 	state = reduceUIControllerState(state, BeginHistoryCommit{
-		Token: first.Token, LayoutGeneration: state.LayoutGeneration,
+		Token: first.Token, LayoutGeneration: state.Geometry.Generation,
 	}, 3)
 	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
-		Token: first.Token, Frame: 9, LayoutGeneration: state.LayoutGeneration,
+		Token: first.Token, Frame: 9, LayoutGeneration: state.Geometry.Generation,
 	}, 4)
 
 	snapshot := state.Transcript.Snapshot()
@@ -739,8 +733,8 @@ func TestHistoryEffectsReducer_StaleResizeCannotRewindGeneration(t *testing.T) {
 	state := historyEffectTestState(t, 7)
 	before := state.Clone()
 	state = reduceUIControllerState(state, Resize{Width: 20, Height: 10, Generation: 6}, 3)
-	if state.Geometry != before.Geometry || state.LayoutGeneration != before.LayoutGeneration {
-		t.Fatalf("stale resize rewound geometry/layout: before=%+v/%d after=%+v/%d", before.Geometry, before.LayoutGeneration, state.Geometry, state.LayoutGeneration)
+	if state.Geometry != before.Geometry || state.Geometry.Generation != before.Geometry.Generation {
+		t.Fatalf("stale resize rewound geometry/layout: before=%+v/%d after=%+v/%d", before.Geometry, before.Geometry.Generation, state.Geometry, state.Geometry.Generation)
 	}
 }
 

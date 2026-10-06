@@ -32,10 +32,10 @@ func TestProvenScrollbackReplacementReconcilesDespiteConcurrentInvalidation(t *t
 	// The armed replay physically replaced scrollback, but a concurrent writer
 	// failure invalidated the projection before the reconcile barrier landed.
 	state = reduceUIControllerState(state, HistoryProjectionInvalidated{
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 	}, 3)
 	state = reduceUIControllerState(state, HistoryScrollbackReconciled{
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 		TerminalEpoch:    1,
 	}, 4)
 
@@ -57,7 +57,7 @@ func TestProvenScrollbackReplacementReconcilesDespiteConcurrentInvalidation(t *t
 	// The frame proof arrives: the recorded replacement must now reconcile, which
 	// is what makes the transcript re-mintable and repopulates the region.
 	state = reduceUIControllerState(state, HistoryProjectionRecovered{
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 	}, 5)
 
 	if state.HistoryEffects.TerminalEpoch != 1 {
@@ -93,7 +93,7 @@ func TestProvenScrollbackReplacementReconcilesDespiteLayoutDrift(t *testing.T) {
 
 	// A resize lands between the physical replacement and its barrier.
 	state = reduceUIControllerState(state, Resize{Width: 60, Height: 10, Generation: 2}, 3)
-	staleGeneration := state.LayoutGeneration - 1
+	staleGeneration := state.Geometry.Generation - 1
 
 	state = reduceUIControllerState(state, HistoryScrollbackReconciled{
 		LayoutGeneration: staleGeneration,

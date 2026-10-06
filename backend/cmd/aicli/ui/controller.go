@@ -945,7 +945,7 @@ func (c *UIController) LayoutGeneration() uint64 {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.state.LayoutGeneration
+	return c.state.Geometry.Generation
 }
 
 // Stats 返回一致的诊断快照。
@@ -1051,7 +1051,7 @@ func (c *UIController) historyCommitGateOf(token uint64) historyCommitGate {
 	gate := historyCommitGate{
 		Frozen:            c.state.HistoryEffects.Frozen,
 		ProjectionUnknown: c.state.HistoryEffects.ProjectionUnknown,
-		LayoutGeneration:  c.state.LayoutGeneration,
+		LayoutGeneration:  c.state.Geometry.Generation,
 	}
 	if entry, ok := c.state.HistoryEffects.ledger.entry(token); ok {
 		gate.EntryFound = true

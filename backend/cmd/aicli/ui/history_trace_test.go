@@ -16,7 +16,7 @@ func TestHistoryTraceAppendsToConfiguredFile(t *testing.T) {
 	t.Cleanup(historyTrace.close)
 
 	state := UIControllerState{}
-	state.LayoutGeneration = 7
+	state.Geometry.Generation = 7
 	traceHistoryReduction(state, "ack token=%d frame=%d", 3, 11)
 	traceHistoryReduction(state, "fail token=%d err=%v", 4, "boom")
 

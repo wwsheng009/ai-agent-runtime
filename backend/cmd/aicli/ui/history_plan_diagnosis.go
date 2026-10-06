@@ -108,7 +108,7 @@ func DiagnoseHistoryPlan(state UIControllerState) HistoryPlanDiagnosis {
 		appState := state.AppState
 		byID := transcriptCellsByID(appState.Transcript)
 		mutable := mutableTranscriptCellIDs(appState.Transcript)
-		layoutRows := appState.Transcript.LayoutRows(appState.LayoutGeneration)
+		layoutRows := appState.Transcript.LayoutRows(appState.Geometry.Generation)
 		diag.LayoutRowsTotal = len(layoutRows)
 		screened, _ := layoutTranscriptScreenRowsWithin(
 			layoutRows, byID, mutable, appState.Geometry.Width, time.Time{}, appState.Theme)

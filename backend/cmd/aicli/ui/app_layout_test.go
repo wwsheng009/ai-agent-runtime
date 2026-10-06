@@ -15,7 +15,6 @@ import (
 func TestLayoutAppStateDerivesTranscriptAndBottomWithoutAliases(t *testing.T) {
 	state := AppState{
 		Revision:         31,
-		LayoutGeneration: 7,
 		Geometry:         GeometryState{Width: 80, Height: 24, Generation: 7},
 		Lease:            LeaseState{ID: 5, Active: true},
 		Transcript: NewTranscriptState(&scene.Snapshot{
@@ -65,7 +64,6 @@ func TestLayoutAppStateDerivesTranscriptAndBottomWithoutAliases(t *testing.T) {
 func TestLayoutAppScreenCombinesTranscriptTailAndBottomWithoutTerminal(t *testing.T) {
 	state := AppState{
 		Revision:         17,
-		LayoutGeneration: 4,
 		Geometry:         GeometryState{Width: 5, Height: 7, Generation: 4},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: "abcdeF", Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},
@@ -232,7 +230,6 @@ func TestLayoutAppScreen_PlainOwnerTextParityWithLegacyOwnedViewport(t *testing.
 	}}
 	state := AppState{
 		Revision:         13,
-		LayoutGeneration: 3,
 		Geometry:         GeometryState{Width: width, Height: height, Generation: 3},
 		Transcript:       NewTranscriptState(snapshot),
 		Bottom:           bottom,
@@ -567,7 +564,6 @@ func TestUserMessagePrefixReservesWidthAndPrefixesEveryLine(t *testing.T) {
 	source := "abcdefghijklmnopqrstuvwxyz" // 26 个 ASCII 字符
 	state := AppState{
 		Revision:         1,
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: width, Height: 8, Generation: 1},
 		Transcript: NewTranscriptState(&scene.Snapshot{Cells: []*scene.TranscriptCell{
 			{ID: 1, Sequence: 1, Kind: scene.KindUser, Source: source, Phase: scene.CellCommitted, Boundary: boundary.BoundaryNormal},

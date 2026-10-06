@@ -99,7 +99,7 @@ func TestCanonicalHistorySeedArmsReplayOnlyForImportedUnits(t *testing.T) {
 	// Consume the grant the way the terminal owner does after a proven scrollback
 	// replacement: a newer terminal epoch that starts a fresh delivery ledger.
 	if !coordinator.postUIAction(ui.HistoryScrollbackReconciled{
-		LayoutGeneration: state.LayoutGeneration,
+		LayoutGeneration: state.Geometry.Generation,
 		TerminalEpoch:    state.HistoryEffects.TerminalEpoch + 1,
 	}) {
 		t.Fatal("post scrollback reconciliation")
@@ -113,7 +113,7 @@ func TestCanonicalHistorySeedArmsReplayOnlyForImportedUnits(t *testing.T) {
 		if state.HistoryEffects.ProvenScrollbackEpoch == 0 {
 			t.Fatalf("未锚定的替换必须记录 proven epoch：%+v", state.HistoryEffects)
 		}
-		if !coordinator.postUIAction(ui.HistoryProjectionRecovered{LayoutGeneration: state.LayoutGeneration}) {
+		if !coordinator.postUIAction(ui.HistoryProjectionRecovered{LayoutGeneration: state.Geometry.Generation}) {
 			t.Fatal("post projection recovered")
 		}
 		coordinator.waitUIActorIdle()

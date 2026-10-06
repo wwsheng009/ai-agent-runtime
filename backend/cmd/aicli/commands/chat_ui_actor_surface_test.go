@@ -973,7 +973,7 @@ func TestChatInteractionCoordinatorRefreshReportsMeasuredGeometryToAppState(t *t
 		before := coordinator.uiActor.Revision()
 		coordinator.RefreshActiveStreamViewport()
 		state := coordinator.uiActor.AppState()
-		if state.Geometry.Width != 91 || state.Geometry.Height != 31 || state.Geometry.Generation == 0 || state.LayoutGeneration != state.Geometry.Generation {
+		if state.Geometry.Width != 91 || state.Geometry.Height != 31 || state.Geometry.Generation == 0 || state.Geometry.Generation != state.Geometry.Generation {
 			t.Fatalf("measured geometry was not published to AppState: %+v", state)
 		}
 		if stats := coordinator.uiActor.Stats(); stats.Revision != before+2 || stats.LastAction != "Resize" {

@@ -790,7 +790,7 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 		app := &chatDebugDisplayAppStateInfo{
 			Available:        true,
 			Revision:         state.Revision,
-			LayoutGeneration: state.LayoutGeneration,
+			LayoutGeneration: state.Geometry.Generation,
 			Width:            state.Geometry.Width,
 			Height:           state.Geometry.Height,
 			PrimaryLease:     lease,

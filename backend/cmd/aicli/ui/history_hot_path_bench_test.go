@@ -265,11 +265,10 @@ func BenchmarkUIControllerBurstBatching(b *testing.B) {
 func BenchmarkLayoutAppScreenResumedSession(b *testing.B) {
 	state := AppState{
 		Revision:         1,
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
 		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
 	}
-	rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 	b.ReportMetric(float64(len(rows)), "layout_rows")
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -287,11 +286,10 @@ func BenchmarkLayoutAppScreenResumedSession(b *testing.B) {
 func BenchmarkLayoutTranscriptTailVsFull(b *testing.B) {
 	state := AppState{
 		Revision:         1,
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
 		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
 	}
-	rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	rows := state.Transcript.LayoutRows(state.Geometry.Generation)
 	byID := transcriptCellsByID(state.Transcript)
 	mutable := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
 	const maxRows = 40
@@ -323,7 +321,6 @@ func BenchmarkLayoutTranscriptTailVsFull(b *testing.B) {
 func BenchmarkTranscriptLayoutRowsResumedSession(b *testing.B) {
 	state := AppState{
 		Revision:         1,
-		LayoutGeneration: 1,
 		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
 		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
 	}
@@ -331,7 +328,7 @@ func BenchmarkTranscriptLayoutRowsResumedSession(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if rows := state.Transcript.LayoutRows(state.LayoutGeneration); len(rows) == 0 {
+		if rows := state.Transcript.LayoutRows(state.Geometry.Generation); len(rows) == 0 {
 			b.Fatal("LayoutRows produced no rows")
 		}
 	}

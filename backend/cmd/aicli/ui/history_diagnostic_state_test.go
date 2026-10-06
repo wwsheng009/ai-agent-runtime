@@ -61,9 +61,9 @@ func TestDiagnosticStateDropsHistoryPayload(t *testing.T) {
 	}
 
 	// 诊断消费方真正读的字段必须一个不少。
-	if diag.Revision != full.Revision || diag.LayoutGeneration != full.LayoutGeneration {
+	if diag.Revision != full.Revision || diag.Geometry.Generation != full.Geometry.Generation {
 		t.Fatalf("diagnostic scalars diverged: revision %d/%d generation %d/%d",
-			diag.Revision, full.Revision, diag.LayoutGeneration, full.LayoutGeneration)
+			diag.Revision, full.Revision, diag.Geometry.Generation, full.Geometry.Generation)
 	}
 	if diag.Geometry.Width != full.Geometry.Width || diag.Geometry.Height != full.Geometry.Height ||
 		diag.Geometry.Generation != full.Geometry.Generation {
@@ -244,7 +244,7 @@ func TestHistoryCommitGateMatchesEntryProjection(t *testing.T) {
 			gate.EntryGeneration != entry.Commit.LayoutGeneration {
 			t.Fatalf("gate for token %d = %#v, entry = %#v", entry.Commit.Token, gate, entry)
 		}
-		if gate.LayoutGeneration != state.LayoutGeneration ||
+		if gate.LayoutGeneration != state.Geometry.Generation ||
 			gate.Frozen != state.HistoryEffects.Frozen ||
 			gate.ProjectionUnknown != state.HistoryEffects.ProjectionUnknown {
 			t.Fatalf("gate barriers for token %d = %#v, state = %#v", entry.Commit.Token, gate, state)
