@@ -907,19 +907,115 @@ func newChatTransientLineComposer(session *ChatSession) *chatTransientLineCompos
 	return &chatTransientLineComposer{session: session}
 }
 
+// mergedPromptSupported reports whether the transient line can be typed into
+// the fixed bottom prompt row. It mirrors chatMergedAnswerPromptSupported: the
+// row must exist (fixed surface) and the direct editor must own stdin; the
+// queued/external capture path keeps the raw reader because it owns stdin for
+// the whole turn.
+func (c *chatTransientLineComposer) mergedPromptSupported() bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil || c.session.InputBox == nil {
+		return false
+	}
+	if !chatComposerUsesFixedSurface(c.session) {
+		return false
+	}
+	return !shouldRoutePriorityPromptThroughQueue(c.session)
+}
+
 func (c *chatTransientLineComposer) ReadLine() (string, error) {
 	if c == nil || c.session == nil || c.session.InputBox == nil {
 		return "", io.EOF
+	}
+	if c.mergedPromptSupported() {
+		if line, ok, err := c.readLineMerged(); ok {
+			return line, err
+		}
 	}
 	line, err := c.session.InputBox.ReadTransientLineWithHooks(c.hooks())
 	return line, normalizeChatComposerReadError(c.session, err)
 }
 
-// hooks wires only the control channel: the transient line has no visible
-// prompt owner on the surface, so its text frames keep the raw fallback until
-// a display owner exists (tracked in the P0 ledger).
+// readLineMerged mirrors chatMergedPromptComposer: park the pending draft, take
+// the bottom prompt row over (ShowAnswerPrompt only means "the regular prompt
+// row is active"), fold editor frames into it, and hand the draft back after
+// the read. ok=false means the row could not be painted; the caller falls back
+// to the raw transient reader so the typed text stays visible.
+func (c *chatTransientLineComposer) readLineMerged() (line string, ok bool, err error) {
+	interaction := c.session.Interaction
+	draft := interaction.PromptInputSnapshot()
+	// The transient answer shares the prompt row with the regular draft: clear
+	// it first so the parked draft cannot leak into the read.
+	interaction.SetPromptInput("")
+	if !interaction.ShowAnswerPrompt() {
+		c.restoreDraft(draft)
+		return "", false, nil
+	}
+	defer c.finish(draft)
+	ctx, done := c.session.newComposerReadContext()
+	defer done()
+	line, err = c.session.InputBox.ReadTransientLineWithHooksContext(ctx, c.mergedHooks())
+	return line, true, normalizeChatComposerReadError(c.session, err)
+}
+
+// finish releases the prompt row and hands the parked draft back.
+func (c *chatTransientLineComposer) finish(draft ui.LineEditorSnapshot) {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.DiscardPrompt()
+	c.restoreDraft(draft)
+}
+
+func (c *chatTransientLineComposer) restoreDraft(draft ui.LineEditorSnapshot) {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	if draft.Text == "" {
+		return
+	}
+	c.session.Interaction.SetPromptInputSnapshot(draft)
+}
+
+// hooks wires the raw fallback path: only the control channel is claimed, the
+// text frames keep their legacy writer (no surface owner).
 func (c *chatTransientLineComposer) hooks() ui.LineEditorHooks {
 	return ui.LineEditorHooks{OnTerminalControl: c.onTerminalControl}
+}
+
+// mergedHooks folds editor frames into the bottom prompt row, mirroring
+// chatMergedPromptComposer. No OnCancel here: transient reads keep their
+// existing cancel semantics.
+func (c *chatTransientLineComposer) mergedHooks() ui.LineEditorHooks {
+	return ui.LineEditorHooks{
+		OnChange:              c.onMergedChange,
+		OnBeforeTerminalWrite: c.onMergedBeforeTerminalWrite,
+		OnTerminalWrite:       c.onMergedTerminalWrite,
+		OnTerminalControl:     c.onTerminalControl,
+		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
+		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
+		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),
+	}
+}
+
+func (c *chatTransientLineComposer) onMergedChange(snapshot ui.LineEditorSnapshot) {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return
+	}
+	c.session.Interaction.SetPromptInputSnapshot(snapshot)
+}
+
+func (c *chatTransientLineComposer) onMergedBeforeTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot) string {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return ""
+	}
+	return c.session.Interaction.PromptCursorPrefix(render.LastCursorRow, render.LastCursorCol)
+}
+
+func (c *chatTransientLineComposer) onMergedTerminalWrite(_ ui.LineEditorSnapshot, render ui.LineEditorRenderSnapshot, writer io.Writer, text string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
 }
 
 func (c *chatTransientLineComposer) onTerminalControl(sequence string) bool {
