@@ -2,8 +2,10 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
@@ -693,4 +695,38 @@ func TestAICLIFunctionCatalog_SelectRequestFunctions_HidesTextSkillFunctionInAut
 	if details != nil && stringSliceContains(details.ExposedFunctions, "skill__alpha") {
 		t.Fatalf("expected exposure analysis pruned of text skill, got %v", details.ExposedFunctions)
 	}
+}
+
+// TestAICLIFunctionCatalog_AccessorsRaceHotRegister 是「残余直读收口」的栅栏：
+// 后台 goroutine 经公共注册入口热注册（写锁），前台并发调用全部读访问器；
+// -race 下必须零报告（收口前的 entries/registry 直读会在此触发竞争）。
+func TestAICLIFunctionCatalog_AccessorsRaceHotRegister(t *testing.T) {
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			catalog.RegisterFunction(&testFunction{name: fmt.Sprintf("builtin__race_%d", i)})
+		}
+	}()
+
+	for i := 0; i < 400; i++ {
+		catalog.entryForRead("builtin__race_0")
+		catalog.entriesSnapshot()
+		catalog.skillFunctionForRead("builtin__race_0")
+		catalog.executableSkillFunctionNamesForRead()
+		catalog.registeredFunction("builtin__race_0")
+		catalog.listRegisteredFunctions()
+	}
+	close(stop)
+	wg.Wait()
 }

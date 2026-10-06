@@ -197,17 +197,15 @@ func pruneSessionMCPFunctions(session *ChatSession, server string) int {
 	}
 	catalog := session.FunctionCatalog
 	names := map[string]struct{}{}
-	if catalog.registry != nil {
-		for _, fn := range catalog.registry.List() {
-			if fn == nil {
-				continue
-			}
-			if strings.EqualFold(mcpFunctionServer(fn), server) {
-				names[strings.TrimSpace(fn.Name())] = struct{}{}
-			}
+	for _, fn := range catalog.listRegisteredFunctions() {
+		if fn == nil {
+			continue
+		}
+		if strings.EqualFold(mcpFunctionServer(fn), server) {
+			names[strings.TrimSpace(fn.Name())] = struct{}{}
 		}
 	}
-	for name, entry := range catalog.entries {
+	for name, entry := range catalog.entriesSnapshot() {
 		if entry == nil || entry.fn == nil {
 			continue
 		}
@@ -224,7 +222,7 @@ func pruneSessionMCPFunctions(session *ChatSession, server string) int {
 			removed++
 			continue
 		}
-		if catalog.registry != nil && catalog.registry.Unregister(name) {
+		if catalog.unregisterRegisteredFunction(name) {
 			removed++
 		}
 	}

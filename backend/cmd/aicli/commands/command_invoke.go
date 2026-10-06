@@ -262,7 +262,7 @@ func resolveExactCallableFunctionName(catalog *aicliFunctionCatalog, requestedNa
 			continue
 		}
 		seen[candidate] = struct{}{}
-		if _, ok := catalog.Registry().Get(candidate); !ok {
+		if _, ok := catalog.registeredFunction(candidate); !ok {
 			continue
 		}
 		isSkill := strings.HasPrefix(candidate, skillFunctionPrefix)
@@ -476,7 +476,7 @@ func directFunctionSchema(session *ChatSession, functionName string) map[string]
 	if catalog == nil || catalog.Registry() == nil {
 		return nil
 	}
-	fn, ok := catalog.Registry().Get(functionName)
+	fn, ok := catalog.registeredFunction(functionName)
 	if !ok || fn == nil {
 		return nil
 	}
@@ -988,7 +988,7 @@ func directSkillBridgeCommandPreview(session *ChatSession, functionName string, 
 		return ""
 	}
 	catalog.syncFromRegistry()
-	entry := catalog.entries[strings.TrimSpace(functionName)]
+	entry := catalog.entryForRead(functionName)
 	if entry == nil || entry.fn == nil {
 		return ""
 	}

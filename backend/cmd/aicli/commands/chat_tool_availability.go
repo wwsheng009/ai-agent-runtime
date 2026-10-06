@@ -48,7 +48,7 @@ func chatSharedToolAvailable(session *ChatSession, toolName string) bool {
 	if catalog == nil || catalog.Registry() == nil {
 		return false
 	}
-	_, ok := catalog.Registry().Get(toolName)
+	_, ok := catalog.registeredFunction(toolName)
 	return ok
 }
 

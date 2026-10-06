@@ -465,12 +465,16 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
      Names/Descriptor(s)/Stats/sharedCapabilitySnapshot）；Select/Execute 锁内
      只取引用与快照，慢速/可重入外部调用全部移到锁外。验证：hot-reload race
      ×2 零 DATA RACE、定向 race 集绿、commands 全量 181.3s 绿。
-     残余风险（后续）：`Registry()` 仍裸暴露 registry（command_invoke/
-     chat_tool_availability/chat_mcp_session_scope 直连 Get/List/Unregister）、
-     4 处直接读 `catalog.entries`（chat_mcp_session_scope.go:210、
-     chat_skill_tool_surface.go:148/189、command_invoke.go:991）、
-     `skillsRuntimeBinding` 字段原地写未同步；彻底方案为 FunctionRegistry
-     内部加锁或访问器收口。
+     残余风险收口（本轮）：新增锁内读访问器（`entryForRead`/
+     `entriesSnapshot`/`skillFunctionForRead`/
+     `executableSkillFunctionNamesForRead`/`registeredFunction`/
+     `listRegisteredFunctions`/`unregisterRegisteredFunction`/
+     `executeRegisteredFunctionWithMeta`），全部生产直读点已收口
+     （command_invoke ×3、chat_tool_availability、chat_mcp_session_scope ×3、
+     chat_skill_tool_surface ×2、chat_actor_executor ×1）；新增
+     `TestAICLIFunctionCatalog_AccessorsRaceHotRegister` 栅栏（热注册 × 全
+     访问器并发，`-race` 零报告）。仍余：`skillsRuntimeBinding` 字段原地写
+     未同步（skills 层后续项）。
   2. **stdin 全局（1 报告，已修复）**：`replaceStdinWithNullDevice` 在 pump
      读循环存活期间恢复 `os.Stdin`，与 `chatStdinIsNullDevice`
      （chat_mesh.go:64）竞争。修复：`chatInputQueue` 增 `stdinLoopDone`

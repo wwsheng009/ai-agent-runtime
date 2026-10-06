@@ -303,6 +303,128 @@ func (c *aicliFunctionCatalog) RemoveFunction(name string) bool {
 	return true
 }
 
+// ---- 锁内读访问器：收口 entries/registry 的包内直读点 ----
+//
+// 背景：热加载回调在后台 goroutine 注册函数（写锁），请求线程读取函数面。
+// 任何绕过访问器的直读都会与注册竞争；以下访问器全部在 catalog 锁内取
+// 快照，调用方在锁外使用返回值。条目注册后字段不再原地变更，浅拷贝即可。
+
+// entryForRead 返回目录条目（读锁内读取；不存在时返回 nil）。
+func (c *aicliFunctionCatalog) entryForRead(name string) *aicliCatalogEntry {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.entries[strings.TrimSpace(name)]
+}
+
+// entriesSnapshot 返回目录条目的浅拷贝（读锁内），供需要遍历多个条目的
+// 调用方使用；回调不得在本方法内执行（快照完成后已释放锁）。
+func (c *aicliFunctionCatalog) entriesSnapshot() map[string]*aicliCatalogEntry {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	snapshot := make(map[string]*aicliCatalogEntry, len(c.entries))
+	for name, entry := range c.entries {
+		snapshot[name] = entry
+	}
+	return snapshot
+}
+
+// skillFunctionForRead 解析目录内可执行的 skill 函数（含 executor 校验），
+// 非技能条目或不可执行时返回 nil。
+func (c *aicliFunctionCatalog) skillFunctionForRead(name string) *SkillFunction {
+	entry := c.entryForRead(name)
+	if entry == nil || !entry.isSkill {
+		return nil
+	}
+	fn, _ := entry.fn.(*SkillFunction)
+	if fn == nil || fn.executor == nil {
+		return nil
+	}
+	return fn
+}
+
+// executableSkillFunctionNamesForRead 返回目录内可执行 skill 函数名（已排序）。
+func (c *aicliFunctionCatalog) executableSkillFunctionNamesForRead() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	names := make([]string, 0, len(c.entries))
+	for name, entry := range c.entries {
+		if entry == nil || !entry.isSkill {
+			continue
+		}
+		fn, ok := entry.fn.(*SkillFunction)
+		if !ok || fn == nil || fn.executor == nil {
+			continue
+		}
+		names = append(names, name)
+	}
+	c.mu.RUnlock()
+	sort.Strings(names)
+	return names
+}
+
+// registeredFunction 在读锁下查询 registry，与热注册的写锁互斥。
+func (c *aicliFunctionCatalog) registeredFunction(name string) (functions.Function, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.registry == nil {
+		return nil, false
+	}
+	return c.registry.Get(name)
+}
+
+// listRegisteredFunctions 在读锁下快照 registry 列表。
+func (c *aicliFunctionCatalog) listRegisteredFunctions() []functions.Function {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.registry == nil {
+		return nil
+	}
+	return c.registry.List()
+}
+
+// unregisterRegisteredFunction 在写锁下从 registry 撤销（RemoveFunction
+// 的回退路径：目录条目不存在但仍需清 registry 的残留项）。
+func (c *aicliFunctionCatalog) unregisterRegisteredFunction(name string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.registry == nil {
+		return false
+	}
+	return c.registry.Unregister(name)
+}
+
+// executeRegisteredFunctionWithMeta 与 registry.ExecuteFunctionWithMeta 语义
+// 一致，但 Get 在读锁内进行；函数执行（外部代码，可能重入 catalog）在锁外。
+func (c *aicliFunctionCatalog) executeRegisteredFunctionWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
+	fn, ok := c.registeredFunction(name)
+	if !ok || fn == nil {
+		return "", nil, fmt.Errorf("function '%s' not found", name)
+	}
+	args = toolargs.Normalize(args)
+	if rich, ok := fn.(functions.FunctionWithMetadata); ok {
+		return rich.ExecuteWithMeta(ctx, args)
+	}
+	output, err := fn.Execute(ctx, args)
+	return output, nil, err
+}
+
 // filterSessionHiddenMCPFunctions 按会话级 MCP 覆盖过滤选择结果：被本会话
 // 停用的 server 的 MCP 函数不得进入模型工具面（与注册期撤销构成双保险）。
 func (c *aicliFunctionCatalog) filterSessionHiddenMCPFunctions(session *ChatSession, selection *aicliFunctionSelection) *aicliFunctionSelection {

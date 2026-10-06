@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -145,15 +144,7 @@ func (s *skillToolSurface) skillFunction(name string) *SkillFunction {
 	if catalog == nil {
 		return nil
 	}
-	entry := catalog.entries[name]
-	if entry == nil || !entry.isSkill {
-		return nil
-	}
-	fn, _ := entry.fn.(*SkillFunction)
-	if fn == nil || fn.executor == nil {
-		return nil
-	}
-	return fn
+	return catalog.skillFunctionForRead(name)
 }
 
 func isSkillToolSurfaceName(mcpName string) bool {
@@ -186,17 +177,5 @@ func sessionSkillFunctionNames(session *ChatSession) []string {
 	if catalog == nil {
 		return nil
 	}
-	names := make([]string, 0, len(catalog.entries))
-	for name, entry := range catalog.entries {
-		if entry == nil || !entry.isSkill {
-			continue
-		}
-		fn, ok := entry.fn.(*SkillFunction)
-		if !ok || fn == nil || fn.executor == nil {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	return catalog.executableSkillFunctionNamesForRead()
 }

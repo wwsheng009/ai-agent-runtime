@@ -814,7 +814,7 @@ func executeDirectImageGenerationFallback(ctx context.Context, session *ChatSess
 	if catalog == nil || catalog.Registry() == nil {
 		return nil, fmt.Errorf("function registry 未初始化")
 	}
-	output, metadata, err := catalog.Registry().ExecuteFunctionWithMeta(ctx, resolvedName, args)
+	output, metadata, err := catalog.executeRegisteredFunctionWithMeta(ctx, resolvedName, args)
 	if session != nil && session.Logger != nil {
 		session.Logger.LogToolResult(aicliLogScope{TurnID: "image-fallback", RequestID: "image-fallback-req-01"}, "direct-image-fallback", resolvedName, toolExecutionLogPayload(output, metadata), err)
 	}
