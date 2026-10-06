@@ -76,6 +76,17 @@ A 与 B 文件面无交集，可并行；C 与 B 的建议顺序仅为避免 set
 > 说明：第 8 行为扫描报告"新增缺口"中不涉及交互期主链的余项；处置以"可审计"为目标，
 > 不为了零命中而改变非 TUI 语义（pipe/exec/子进程保留并登记）。
 
+**A1 余项明细（#8 展开，逐项勾选）**
+
+| 子项 | 位置 | 处置 |
+|---|---|---|
+| 8a | `commands/chat_command_text_writer.go:48`（`NewStdoutCommandTextWriter`） | 显式 allowlist 登记（plain/JSON/非交互） |
+| 8b | `commands/chat_ui_actor.go:149`（`NewPhysicalSink(..., os.Stdout)`） | 设计白名单登记（统一 gateway 唯一物理 sink） |
+| 8c | `commands/chat_ui_actor.go:281`（test-only 直写回退） | 登记（test-only，注释明示） |
+| 8d | `commands/exec_event_processor.go:190`（裸 ANSI `\033[K`） | 收敛或注明 exec 非 TUI 并登记（commands 门禁 glob 外） |
+| 8e | `commands/chat_pipe_console_line.go:82-100`、`chat_profile_lifecycle_ops.go:274` | 登记（pipe / 子进程 stdio，非终端帧出口） |
+| 8f | `commands/chat_model_command.go:558…` / `chat_model_switch.go:392…`（`writeChatMutedSuffix` 路由） | 登记（写通道已入 `ui.WriteTerminal*` 台账；stdout/stderr 路由选择无门禁） |
+
 ### A2 验收（批次收口）
 
 - 单写端断言扩展：`TestUnifiedSessionSinglePhysicalWriterFence` 驱动控制序列/直写输出/命令输出/诊断，
@@ -202,7 +213,7 @@ C1 ──► C2 ──► P2 Slice 1 ──►（P2 其余切片）
 | A1-5 | tool_executor stdout 转换登记 | pending | — | allowlist |
 | A1-6 | stderr 边缘收口（G3） | pending | — | chat_setup 等 |
 | A1-7 | legacy StatusBar 栅栏（G9） | pending | — | 或 fenced-dead |
-| A1-8 | 余项分类登记/收敛 | pending | — | 见 A1 表 #8 |
+| A1-8 | 余项分类登记/收敛（8a–8f） | pending | — | 见 §3 A1 余项明细 |
 | A2 | 单写端断言扩展 + e2e | pending | — | 批次收口 |
 | B0 | 保留项登记表回填 §7.5 | pending | — | 清单化 |
 | B1 | WaitIdleTimeout 事件化（可选） | pending | — | 默认保留 |
