@@ -162,3 +162,17 @@ source 0 一次铸全量 —— 无需先重构 skipRows 管线。
   重点观察 `native_scrollback_*`、`terminal_session_executor_test.go`、`history_planning_budget_test.go`。
 - **最大回归面**：finalize 一次性写必须与旧「active 前缀 + 后缀」逐字节等价（reasoning 投影形状警告
   planner:511-513），用 `:724/:762` 的替代断言固化。
+- **第一刀实施记录（2026-10-06，`130cc7f5`）**：
+  - 规划停铸：`mintTranscriptPlanWindow` 删除 active append；`syncHistoryEffectsForActiveCell` 空转
+    （旧实现保留为 `syncHistoryEffectsForActiveCellLegacy`，死代码待第二刀删除）。
+  - 交付统一：`terminal_session.go` 批/单条交付分支与 Origin 解耦，统一 resident 插入；
+    `historyTailRows` 无条件跟随；`terminalActiveHistoryArchiveANSI` / `historyBatchIsActiveOrigin`
+    成为死代码（第二刀删除）。
+  - 测试反转：archive 4 例重写为统一插入文档序；新增 `a2_stop_minting_test.go` 钉"mutable 零铸造 +
+    finalize 从 0 全量一次"；handoff 回归断言反转（finalize 前不得出现 early marker）；
+    stream_tail / blank-prefix / streaming / executor / commands projection 同步改写。
+  - 验证：`go test ./cmd/aicli/ui -count=1` ok（111s）；`./cmd/aicli/commands -count=1` ok（170s）；
+    `go vet` 双包干净；gofmt 干净。
+  - 遗留（第二刀范围）：`activeAckedRenderedPrefixRows`/skipRows index、`advanceActiveCell*`、
+    `noteFinalizedActiveAck`、`finalizedActiveAckPlanVersion`、`lastPlannedActive*`、`activeTokensByCell`、
+    `hasClaimedActiveOriginDelivery`、archive 死代码与 `HistoryCommitActive` 枚举面。
