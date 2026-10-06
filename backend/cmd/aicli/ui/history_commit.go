@@ -202,8 +202,6 @@ type historyCommitRangeKey struct {
 	sourceStart      int
 	sourceEnd        int
 	fragmentID       uint64
-	displayStart     int
-	displayEnd       int
 	layoutGeneration uint64
 }
 
@@ -241,8 +239,6 @@ func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 		sourceStart:      c.SourceRange.Start,
 		sourceEnd:        c.SourceRange.End,
 		fragmentID:       c.FragmentID,
-		displayStart:     c.DisplayRange.Start,
-		displayEnd:       c.DisplayRange.End,
 		layoutGeneration: c.LayoutGeneration,
 	}
 }

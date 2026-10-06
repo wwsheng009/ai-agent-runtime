@@ -516,3 +516,49 @@ func TestHistoryCommitLedger_OrderedTokensStaysAscending(t *testing.T) {
 		t.Fatalf("defensive rebuild = %v, want %v + 11", rebuild, want)
 	}
 }
+
+// TestHistoryCommitLedger_DisplayRangeReuseDoesNotBlockNewSource 锁定 P1-1 Stage 1
+// 的身份收敛（D2）：DisplayRange 已从交付身份（historyCommitKey）降级为簿记。
+// 中部插入时，新来源会复用被平移条目的旧 display 区间；若 display 仍在范围键里，
+// Enqueue 会命中旧键且 BlocksRemint=true，把新来源的提交当作重复拒绝 —— 新 cell
+// 的物理行永久丢失。本用例同时确认同来源+同 generation 的真重复仍被拒绝。
+func TestHistoryCommitLedger_DisplayRangeReuseDoesNotBlockNewSource(t *testing.T) {
+	ledger := NewHistoryCommitLedger()
+	shifted := testHistoryCommit(1, 41, 8)
+	shifted.DisplayRange = DisplayRange{Start: 10, End: 11}
+	if err := ledger.Enqueue(shifted); err != nil {
+		t.Fatalf("enqueue shifted source: %v", err)
+	}
+
+	inserted := testHistoryCommit(2, 99, 8)
+	inserted.DisplayRange = DisplayRange{Start: 10, End: 11}
+	if err := ledger.Enqueue(inserted); err != nil {
+		t.Fatalf("display-range reuse by a new source must enqueue: %v", err)
+	}
+	if got := len(ledger.Entries()); got != 2 {
+		t.Fatalf("entries=%d want 2", got)
+	}
+
+	remint := testHistoryCommit(3, 41, 8)
+	if err := ledger.Enqueue(remint); !errors.Is(err, ErrDuplicateCommitRange) {
+		t.Fatalf("same source+generation remint = %v, want ErrDuplicateCommitRange", err)
+	}
+}
+
+// TestHistoryCommitPresentationEqual_DisplayOnlyShiftIsEqual 锁定 D2 的另一半：
+// display-only 平移（prepend/中部插入）不得再触发全账本 RebasePending；真实载荷
+// （Lines）变化必须继续判不等，交给 rebase/invalidate 路径。
+func TestHistoryCommitPresentationEqual_DisplayOnlyShiftIsEqual(t *testing.T) {
+	current := testHistoryCommit(1, 41, 8)
+	shifted := current
+	shifted.DisplayRange = DisplayRange{Start: 77, End: 80}
+	if !historyCommitPresentationEqual(current, shifted) {
+		t.Fatal("display-only shift must compare equal")
+	}
+
+	changed := current
+	changed.Lines = []render.Line{{Spans: []render.Span{{Text: "different bytes"}}}}
+	if historyCommitPresentationEqual(current, changed) {
+		t.Fatal("line payload change must compare unequal")
+	}
+}

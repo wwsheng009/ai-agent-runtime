@@ -179,17 +179,17 @@ func TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan(t *testing.T) {
 	assertHistoryCommitMultisetEqual(t, full, union)
 }
 
-// assertHistoryCommitMultisetEqual 比较两份提交列表的身份多重集：身份包含
-// historyCommitKey 的全部字段（origin/cell/revision/source/display/fragment/
-// generation）与物理行数。缺失（前缀被跳过）、重复（游标回退重渲染）与身份
-// 错位（DisplayRange 用了局部下标）都会在这里被区分出来。
+// assertHistoryCommitMultisetEqual 比较两份提交列表的身份多重集：身份 =
+// historyCommitKey 的全部字段（origin/cell/revision/source/fragment/generation）
+// + DisplayRange + 物理行数。缺失（前缀被跳过）、重复（游标回退重渲染）与物理行
+// 错位（DisplayRange 用了局部下标）都会在这里被区分出来；DisplayRange 虽已从交付
+// 身份中降级为簿记（见 historyCommitPresentationEqual 注释），本断言仍需要它。
 func assertHistoryCommitMultisetEqual(t *testing.T, want, got []HistoryCommit) {
 	t.Helper()
 	describe := func(commit HistoryCommit) string {
-		key := historyCommitKey(commit)
 		return fmt.Sprintf("origin=%d cell=%d rev=%d src=[%d,%d) frag=%d disp=[%d,%d) gen=%d lines=%d",
-			key.origin, key.cellID, key.revision, key.sourceStart, key.sourceEnd, key.fragmentID,
-			key.displayStart, key.displayEnd, key.layoutGeneration, len(commit.Lines))
+			commit.Origin, commit.CellID, commit.Revision, commit.SourceRange.Start, commit.SourceRange.End,
+			commit.FragmentID, commit.DisplayRange.Start, commit.DisplayRange.End, commit.LayoutGeneration, len(commit.Lines))
 	}
 	count := func(commits []HistoryCommit) map[string]int {
 		counts := make(map[string]int, len(commits))

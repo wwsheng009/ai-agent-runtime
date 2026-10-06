@@ -195,3 +195,20 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
 
 **落点排序（修订）**：D2 身份论证（测试先行）→ 1c 提交级 settled 过滤 → 1d 段 diff 集成
 → 1b 复用段常量偏移重定基 → 1a 段索引与命中计数（诊断）。
+
+### 1.7 D2 实施记录（2026-10-06，已完成）
+
+- 变更：`historyCommitRangeKey` 移除 displayStart/displayEnd（`history_commit.go`）；
+  `historyCommitPresentationEqual` 对 finalized 亦不再比较 DisplayRange（planner 注释同步重写）。
+- 回归测试：`TestHistoryCommitLedger_DisplayRangeReuseDoesNotBlockNewSource`（中部插入复用旧 display
+  区间不丢行；同来源+同 generation 仍拒绝）、`TestHistoryCommitPresentationEqual_DisplayOnlyShiftIsEqual`
+  （display-only 平移判等；Lines 变化判不等）。
+- 门禁：ui 全量 ok 114.2s、commands 全量 ok 173.8s、prepend 覆盖结构断言绿。
+- 基准（本机 `-benchtime 3x`，含侦察并发噪声）：`second_plan_prepend` 503–530ms（基线 522.4ms，噪声内）；
+  分配 **837k → 641k allocs/op（-23%）**、346.6 → 325.0 MB/op。
+- 结论：D2 的时间收益在噪声内（其消除的重定基只是 522ms 的一小部分）；价值 = 身份收敛（中部插入
+  丢行隐患从"依赖全量重定基"变为"结构上不可能"）+ 分配下降 + 为 1d 段级 diff 解除 display 障碍。
+- **验收修订（重要）**：基线 522ms 的构成 = `state.Clone()` 136–148ms（L2.4 固定开销，属 L2.7 clone 地板）
+  + 2,719 新 cell 的真实增量（mint+enqueue）+ 存量 4,001 cell 的重算。**≤174ms 在 L2.7 落地前不可达**。
+  Stage 1 独立验收改为：`second_plan_prepend − clone − older_page 增量` 的**存量重算部分下降 ≥50%**
+  （用 plan_only / first_plan / state_clone 三个子基准差分读）。

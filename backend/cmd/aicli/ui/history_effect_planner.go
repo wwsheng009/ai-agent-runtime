@@ -1550,16 +1550,16 @@ func enqueueHistoryCandidates(state *UIControllerState, candidates []HistoryComm
 // intentionally omitted so a pending effect can retain its identity while its
 // current-layout display payload is safely rebased before any write begins.
 //
-// For active commits, DisplayRange is the band row relative to the Acked
-// frontier at planning time.  When the Acked frontier advances between the
-// full-transcript replan (after a scrollback reconciliation resets
-// Acked=0) and the next active-only replan (from the new Acked.End), two
-// plans for the same source range + lines produce different DisplayRange
-// values although the terminal bytes are identical.  Comparing DisplayRange
-// here would invalidate the in-flight commit on every streaming delta,
-// re-arming a full scrollback reset + O(N²) replan per chunk — the
-// high-CPU loop.  Skip DisplayRange for active commits; the source range
-// and rendered lines are the authority for byte equality.
+// DisplayRange is deliberately NOT compared, for active and finalized commits
+// alike. It is layout bookkeeping with no delivery consumer (P1-1 Stage 1
+// design note): terminal bytes are the source range plus the rendered lines.
+// Prepending older pages or inserting cells mid-transcript shifts every later
+// commit's display range by a constant while the bytes stay identical;
+// comparing DisplayRange would force a full-ledger RebasePending (and, for the
+// claimed token, an invalidate) on every such reorder — the O(entire history)
+// churn this predicate must not re-create. Range identity no longer carries
+// display coordinates either (historyCommitKey), so a display-only shift can
+// never collide with a new source that reuses the freed rows.
 func historyCommitPresentationEqual(current, candidate HistoryCommit) bool {
 	sameRevision := current.Revision == candidate.Revision ||
 		(current.Origin == HistoryCommitActive && candidate.Origin == HistoryCommitActive)
@@ -1571,10 +1571,7 @@ func historyCommitPresentationEqual(current, candidate HistoryCommit) bool {
 		!render.LinesEqual(current.Lines, candidate.Lines) {
 		return false
 	}
-	if current.Origin == HistoryCommitActive {
-		return true
-	}
-	return current.DisplayRange == candidate.DisplayRange
+	return true
 }
 
 func advanceActiveCellEnqueuedFromEffects(state *UIControllerState) {
