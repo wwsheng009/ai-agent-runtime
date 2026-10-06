@@ -176,3 +176,14 @@ source 0 一次铸全量 —— 无需先重构 skipRows 管线。
   - 遗留（第二刀范围）：`activeAckedRenderedPrefixRows`/skipRows index、`advanceActiveCell*`、
     `noteFinalizedActiveAck`、`finalizedActiveAckPlanVersion`、`lastPlannedActive*`、`activeTokensByCell`、
     `hasClaimedActiveOriginDelivery`、archive 死代码与 `HistoryCommitActive` 枚举面。
+- **第二刀进展（2026-10-06，行为中性清理；均可独立回滚）**：
+  - 2a（`7471d34a`）：删除 `terminalActiveHistoryArchiveANSI` / `historyBatchIsActiveOrigin` /
+    `syncHistoryEffectsForActiveCell`（含 legacy 与 memo 快路径）；active-only 替换/更新统一走
+    `syncHistoryEffectsForTranscript`（memo 命中即空转）。
+  - 2b（`80738513`）：删除 skipRows/active-ack index 管线（`ackedActiveHistoryCommitIndex` /
+    `indexAckedActiveHistoryCommits` / `activeAckedRenderedPrefixRows`）；`mintTranscriptPlanWindow`
+    skipRows 恒 0、whole-cell 兜底去 prefixProved 门；相关 G5/C2 测试与注释清理。
+  - 验证：`go test ./cmd/aicli/ui -count=1` ok；`./cmd/aicli/commands -count=1` ok；`go vet` 双包干净。
+  - 2c 待办（ledger 语义面，单独一刀）：`advanceActiveCell*` / `noteFinalizedActiveAck` /
+    `finalizedActiveAckPlanVersion` / `lastPlannedActive*` / `activeTokensByCell` / `activeAckPlanVersion` /
+    `hasClaimedActiveOriginDelivery` 及 Active revision 豁免；`HistoryCommitActive` 枚举面收尾。
