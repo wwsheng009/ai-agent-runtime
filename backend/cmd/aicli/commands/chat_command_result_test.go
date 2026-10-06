@@ -1205,8 +1205,16 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_transcript_renderer.go", Func: "method RenderSupplement", Kind: "fmt.Print", Count: 1},
 		{File: "command.go", Func: "executeShellCommandDetailedMode", Kind: "fmt.Print", Count: 17},
 		// --- 审计补登（G2 盲区：包级 var / 结构体字面量 / 非 arg0 / glob 外，2026-10-06）---
-		// 说明：本组为盲区扫描先红后的存量登记（证据 E:\tmp\a0-cmd-red.txt）；
-		// A1 收敛（旁路化 / 收编 / 栅栏）后逐条删除，不得新增。
+		// 说明：本组为盲区扫描先红后的存量登记（证据 E:\tmp\a0-cmd-red.txt）。
+		// A1-6 分类（2026-10-06）：
+		//   (a) 运行时已收口（行为）：notification/sound（A1-3 fail-closed）、
+		//       profile overlay/resume 警告（claim-first，无接收方回退 stderr）；
+		//   (b) 既有 claim-first：selection Line/Prompt/Warning；
+		//   (c) 启动前/legacy 回退（保留）：preamble/info 行、presentChatSession、
+		//       buildChatSession、selection Parts/MutedSuffix、model picker legacy、
+		//       chat.go meta 行、surface legacy 直写、coordinator 默认 writer；
+		//   (d) 非 TUI 通道（保留）：pipe/PTY、子进程 stdio、exec、测试注入缝、物理 sink 白名单。
+		// 条目删除随 P1/P2 迁移推进；不得新增。
 		{File: "chat.go", Func: "printChatSessionMetaRow", Kind: "os.Std*", Count: 1},
 		{File: "chat.go", Func: "selectProviderWithReaderNumeric", Kind: "os.Std*", Count: 1},
 		{File: "chat_cache_local.go", Func: "var usageAttachWarn", Kind: "fmt.Fprint(os.Std*)", Count: 1},

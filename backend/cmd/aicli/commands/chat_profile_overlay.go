@@ -168,8 +168,12 @@ func profileResolutionConfig(session *ChatSession) *config.Config {
 }
 
 // emitProfileConfigOverlayWarning 显式告警：覆盖未生效，会话继续按基线运行。
+// A1-6：交互期先投递诊断通道（统一渲染不写裸 stderr）；无接收方回退 stderr。
 func emitProfileConfigOverlayWarning(err error) {
 	if err == nil {
+		return
+	}
+	if NotifyChatDiagnostic(fmt.Sprintf("Warning: profile 配置覆盖未生效: %v", err)) {
 		return
 	}
 	fmt.Fprintf(newChatSystemOutputWriter(os.Stderr), "Warning: profile 配置覆盖未生效: %v\n", err)

@@ -63,8 +63,10 @@ func chatReapplyResumedProfileState(session *ChatSession, ref string) {
 		if err != nil {
 			reason = err.Error()
 		}
-		fmt.Fprintf(newChatSystemOutputWriter(os.Stderr),
-			"Warning: 恢复会话的 profile %q 解析失败: %s；本会话暂按基线运行，修复后用 /profile reload\n", ref, reason)
+		message := fmt.Sprintf("Warning: 恢复会话的 profile %q 解析失败: %s；本会话暂按基线运行，修复后用 /profile reload", ref, reason)
+		if !NotifyChatDiagnostic(message) {
+			fmt.Fprintf(newChatSystemOutputWriter(os.Stderr), "%s\n", message)
+		}
 		return
 	}
 	applyProfileStateToChatSession(session, state)
