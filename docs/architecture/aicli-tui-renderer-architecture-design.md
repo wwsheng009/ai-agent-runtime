@@ -233,10 +233,10 @@ flowchart TB
 | # | 事实 | 目标唯一所有者 | 只读派生 / 引用 | 收敛动作 | 状态 |
 |---|---|---|---|---|---|
 | 1 | run/turn 身份 | 事件桥 `runEpoch` | 交付层仅持 epoch 引用做 stale 拒绝 | 删除冗余副本（已登记：`runState/lastClosedTurnID/adoptedTurnID`；**扫描补登**：`runActive`、`adoptedRunEpoch`、`executorTurnID`、轮终态账本 `retiredTurnIDs/acceptedAssistantFinalTurns/finalAssistantTurns`）；terminal epoch 与 run epoch 明确区分命名 | 部分 |
-| 2 | layout generation | `AppState.LayoutGeneration` | frame/plan/session 持值副本（stale 拒绝） | 删除 `executor.lastResetGeneration`（backoff 删除后自然消失） | 部分 |
+| 2 | layout generation | `AppState.LayoutGeneration` | frame/plan/session 持值副本（stale 拒绝） | `executor.lastResetGeneration` 已随 S4（`7ade9732`）删除 | 已落地 |
 | 3 | 几何 | `AppState.Geometry`（probe 单点输入 + Resize barrier 回投） | session 持"已应用几何" | 删除 presenter `lastWidth/lastHeight` 镜像（改派生比较） | P1-2b 主体已落地 |
 | 4 | 历史交付进度 | **交付游标**（§3.4） | executor 诊断只读 | 删除 claim 拒绝计数 / `historyTailRows` / `historyTailCells` / diag 镜像或降级 /debug | P1-1/P1-2 部分 |
-| 5 | scrollback/terminal epoch | `TerminalSession.terminalEpoch` | `AppState` 持引用 | 收敛 `ProvenScrollbackEpoch` 等副本（P2 后 replay/settle 删除）；**扫描补登**：session 与 `HistoryEffectQueueState.TerminalEpoch` 两份可变值需归一 | 待 P2 |
+| 5 | scrollback/terminal epoch | `TerminalSession.terminalEpoch` | `AppState` 持引用 | `ProvenScrollbackEpoch` 已随 S2（`9a205572`）删除；**剩余**：session 与 `HistoryEffectQueueState.TerminalEpoch` 两份可变值归一 | 部分 |
 | 6 | lease | `AppState.Lease` | session 持应用态 | 归并 `alternateLeaseID` / `ScreenLease.ID` 副本 | 部分 |
 | 7 | 帧号 | **writer 单点分配**（`TerminalSession.frame`） | `PaintTrace`/gateway 各自观测独立编号 | 删除跨层"同一帧号"假设；观测编号不参与正确性 | 部分 |
 | 8 | 流序号 | 编码器 `streamOrder` | payload `sequence/coalesced_from` 仅作输入元数据 | 禁止下游二次编号 | 已落地 |
@@ -244,7 +244,7 @@ flowchart TB
 | 10 | 行内容镜像 | `ScreenModel`（唯一屏幕镜像） | 历史行由 source 派生（不落镜像） | 删除 `historyStreamTailRows` / `historyTailCells` / `SoftOutputState.lines` / `PaintTrace` 内容 hash（或降级 /debug）；**扫描补登**：bridge 侧 `historySeedSeen/historySeedClaimedItems` 与 legacy `FixedBottomSurface.lastWidth/lastHeight` | P1-2a 部分；`historyTailCells` 保留待替换 |
 | 11 | plan 完整性 | —（不存在） | — | 规划单线程同步后删除 `PlanIncomplete/PlanStalled/续跑组`（P1-1 Stage 2–4） | Stage 1 设计完成 |
 | 12 | 空闲判定 | —（事件驱动 ack） | — | `waitControllerIdle` 已删、executor 已改 `WaitActionApplied`；**残余**：`WaitIdleTimeout` 的 1ms 轮询仍在（`controller.go:852`），经 P1-3 §3.7 明确**保留的有界超时兜底**触达（close drain / legacy 辅助 / `waitUIActorIdleBounded` 5s）→ 可选事件化见差距收敛方案 B1 | **部分**（残余为显式保留项） |
-| 13 | backoff 进度 | —（fail-closed + 恢复） | — | 删除 reset backoff 状态机（P2） | 待 P2 |
+| 13 | backoff 进度 | —（fail-closed + 恢复） | — | reset backoff 状态机已随 S3/S4（`9e7383c1`/`7ade9732`）删除；guard 降级为 `recoveryBackoff*` 限速（§9.5） | 已收敛 |
 | 14 | 降级/预算遥测 | 事件桥单点计数器 | 只读快照 | 合并 `lateDropStats` 与 `publishedDrops` 两份无锁镜像（扫描点名） | 部分 |
 
 **判定**：矩阵是"修一处、坏一处"的结构性解药——任何新状态字段必须先在本文登记所有者；
