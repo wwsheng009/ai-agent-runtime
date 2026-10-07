@@ -250,6 +250,17 @@ type HistoryCommitLedger struct {
 	compactedTerminalSources map[historyCommitSourceKey]struct{}
 	// compactedEntries 是累计剪除的条目数（单调，soak 观测用：证明压缩确实发生）。
 	compactedEntries uint64
+	// acksSinceCompact 是距上次终态压缩的成功 ack 数。装载期 ledger 会一次性
+	// 铸造到全量 token（实测 86k 条，绝大多数是 Queued、不可剪除），此时
+	// 「len > 高水位」恒真——旧实现每个 ack 都触发一次全量扫描，退化为
+	// O(acks × ledger)（生产 pprof：交付期 compactResolvedIfLarge 占 58.8% cum，
+	// 其中 mapaccess2 35.7s）。压缩改按 ack 窗口摊还，见 compactResolvedIfLarge。
+	acksSinceCompact uint64
+	// compactedOnce 标记本 ledger 已至少压缩过一次：首次越界仍立即压缩，
+	// 之后才进入摊还窗口（保持既有语义与单测）。
+	compactedOnce bool
+	// compactScans 是累计全量扫描次数（测试/soak 观测：证明摊还生效）。
+	compactScans uint64
 	// tokens is the deduplicated, ascending set of live token identities. It
 	// mirrors byToken keys so orderedTokens avoids a per-call sort allocation;
 	// 终态压缩成对删除 byToken 与这里的元素，因此镜像始终精确。
@@ -449,6 +460,7 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	// lines past ack (A2 第二刀后不再有 Active-origin 交付).
 	entry.Commit.Lines = nil
 	l.byToken[token] = entry
+	l.acksSinceCompact++
 	l.advanceQueueHeadAfterTerminal(token)
 	return nil
 }
@@ -639,9 +651,30 @@ var (
 // 只有超过高水位才扫描，且每次最多扫一遍；被保留的非可剪除条目（未决交付、
 // Acked+Active 前缀证明）不参与回收，因此库存上界 = 高水位 + 保留集合。
 func (l *HistoryCommitLedger) compactResolvedIfLarge() int {
-	if l == nil || len(l.byToken) <= historyLedgerCompactHighWater {
+	if l == nil {
 		return 0
 	}
+	if len(l.byToken) <= historyLedgerCompactHighWater {
+		// 回落到水位以内：窗口复位，下一次越界立即压缩（保持既有语义）。
+		l.acksSinceCompact = 0
+		l.compactedOnce = false
+		return 0
+	}
+	// 摊还窗口（2026-10-08 性能修复）：ledger 在恢复装载期一次性持有全量 token
+	// （86k 条，多数为 Queued 保留集），「超过高水位」恒真；旧实现每个 ack 都
+	// 全量扫描 + 逐条剪除，O(acks × ledger)。改为首次越界立即压缩，此后每积累
+	// 一个窗口宽度（highWater-target）个 ack 再压缩一次。保留集合（Queued/
+	// 未决交付）本就不参与回收，库存上界语义不变。
+	step := historyLedgerCompactHighWater - historyLedgerCompactTarget
+	if step < 1 {
+		step = 1
+	}
+	if l.compactedOnce && l.acksSinceCompact < uint64(step) {
+		return 0
+	}
+	l.compactedOnce = true
+	l.acksSinceCompact = 0
+	l.compactScans++
 	// 快照一份有序 token：pruneEntry 会原地收缩 l.tokens，直接在内部切片上
 	// range 会跳过/重复元素。
 	tokens := append([]uint64(nil), l.orderedTokens()...)
@@ -819,6 +852,9 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 		}
 	}
 	clone.compactedEntries = l.compactedEntries
+	clone.acksSinceCompact = l.acksSinceCompact
+	clone.compactedOnce = l.compactedOnce
+	clone.compactScans = l.compactScans
 	clone.queueHeadToken = l.queueHeadToken
 	clone.unresolvedCount = l.unresolvedCount
 	clone.mintedFrontier = l.mintedFrontier
