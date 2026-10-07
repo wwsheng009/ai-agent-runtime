@@ -259,6 +259,16 @@ func (s HistoryEffectQueueState) retainedQueuedCommitForSource(key historyCommit
 	return commit, hasQueued, true, true
 }
 
+// pruneCompactedSourcesNotInTranscript 转发 ledger 的装载边界墓碑剪枝：
+// transcript 整体替换后，只有仍在当前 transcript 的 cell 需要保留阻断身份
+// （见 HistoryCommitLedger.pruneCompactedSourcesNotInTranscript / A1-3 R5）。
+func (s *HistoryEffectQueueState) pruneCompactedSourcesNotInTranscript(transcript TranscriptState) {
+	if s == nil || s.ledger == nil {
+		return
+	}
+	s.ledger.pruneCompactedSourcesNotInTranscript(transcript.Cells)
+}
+
 // recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。
 // 耗时与计数分列：PlanCount>0 且 MaxPlanMs 接近冻结窗口，才说明 P12 的卡顿
 // 花在规划器上。

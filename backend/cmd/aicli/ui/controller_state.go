@@ -436,7 +436,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.HistoryEffects.ProjectionUnknown = true
 			state.HistoryEffects.ReconciliationRequired = true
 		}
+		previousCellCount := len(state.Transcript.Cells)
 		state.Transcript = nextTranscript
+		if !activeOnly && (a.ArmScrollbackReplay || len(nextTranscript.Cells) < previousCellCount) {
+			// A1-3 R5：整体替换（会话装载）后按新 transcript 剪除已被移除 cell 的
+			// 压缩来源墓碑；仍保留的 cell 保持阻断（append-only 去重，防装载重放
+			// 重复追加）。frontier 只作加速器，不再是跨代际的「已铸造」真相。
+			// 门控：armed 装载/较早页插入，或 cell 集合收缩（回溯）；纯追加不扫。
+			state.HistoryEffects.pruneCompactedSourcesNotInTranscript(nextTranscript)
+		}
 		state.Active = reconcileTranscriptActiveCell(state.Active, state.Transcript)
 		if state.SemanticActiveCellProjection && state.Active.Phase == ActiveCellMutable {
 			state.Active = normalizeActiveStableRange(state.Active, state.Active.Enqueued.End)

@@ -761,6 +761,30 @@ func (l *HistoryCommitLedger) hasUnresolvedTerminalDelivery() bool {
 	return l != nil && l.unresolvedCount > 0
 }
 
+// pruneCompactedSourcesNotInTranscript 在 transcript 整体替换（会话装载）边界按
+// 当前 transcript 有界化压缩来源墓碑：只保留 cellID 仍在 transcript 中的阻断身份。
+//
+// 背景（A1-3 步 3c / R5）：frontier 的「sourceKey ≤ frontier ⇒ 已铸造」只在单一
+// transcript 代际内成立。会话装载会引入 key 低于旧 frontier 的新来源，此时 frontier
+// 不再是精确的「已铸造」判据，因此阻断真相只能是墓碑本身；装载边界剪除已被移除
+// 的 cell 的来源后，墓碑规模 ≤ 当前会话来源数（不再随历史交付行数无界增长）。
+// 仍在新 transcript 的 cell 保留阻断：native scrollback 是 append-only，装载重放
+// 同一来源绝不能重复追加。
+func (l *HistoryCommitLedger) pruneCompactedSourcesNotInTranscript(cells []scene.TranscriptCell) {
+	if l == nil || len(l.compactedTerminalSources) == 0 {
+		return
+	}
+	present := make(map[scene.CellID]struct{}, len(cells))
+	for index := range cells {
+		present[cells[index].ID] = struct{}{}
+	}
+	for key := range l.compactedTerminalSources {
+		if _, ok := present[key.cellID]; !ok {
+			delete(l.compactedTerminalSources, key)
+		}
+	}
+}
+
 func (l *HistoryCommitLedger) hasOlderQueuedToken(token uint64) bool {
 	// O(1) equivalent of the previous full-map scan: an earlier Queued token
 	// exists exactly when the queue head is still older than token. See the
