@@ -2,7 +2,7 @@
 
 > 依据：`docs/architecture/aicli-tui-renderer-architecture-design.md` §7.4 第 2 条（replay/settle 族）、
 > `docs/plan/aicli-render-p2-recon-20261006.md` §1（三路只读侦察 + 可删性表 + 切片建议）。
-> 状态：**S1/S2 已完成（`59ac603d`/`9a205572`）**；S3 待启动（本文件随切片推进回填证据与提交锚点）。
+> 状态：**S1/S2/S3 已完成（`59ac603d`/`9a205572`/`9e7383c1`）**；S4 待启动（本文件随切片推进回填证据与提交锚点）。
 
 ## 0. 目标语义与行为变更（产品口径）
 
@@ -90,20 +90,27 @@
   **ok 172.1s**；`go vet`/`go build ./...`/gofmt 干净；真机 e2e PASS（72 行 exactly-once）。
   净删 212 行（13 文件，+64/−276）。
 
-## 3. S3：删 success-mode 背压 + `ScrollbackReset` 结果/计数/3J 写路径
+## 3. S3：删 success-mode 背压 + `ScrollbackReset` 结果/计数/3J 写路径（已完成，`9e7383c1`）
 
 - executor `armRecoveryBackoff` 的 reset 分支（第 3 条）删除；保留 failed 限速与
-  "obligation pending + generation 不变" 分支。
-- `TerminalTransactionPlan.resetScrollback`、`forceScrollbackReset` 分支、
-  `ScrollbackResetCount`/`LastScrollbackResetReason`/`terminalScrollbackResetReason`、
-  `TerminalTransactionResult.ScrollbackReset` 与全部 `3J` 写点删除。
-- 保留：失败限速（439 arms/0 engages 事故防线）、settle 事务、半写整族复位。
+  "obligation pending + generation 不变" 分支（case 2 的 retry window/budget 语义保留，
+  作为非收敛 obligation 的速率上限；命名清理归 S4）。
+- 删除：`TerminalTransactionPlan.resetScrollback`、`ComposeScrollbackReconciliationPlanForDebug`、
+  `composeTerminalViewportScrollbackReconciliationPlan`、`forceScrollbackReset` 全部分支、
+  `ScrollbackResetCount`/`LastScrollbackResetReason`/`terminalScrollbackResetReason`/
+  `terminalResetScrollbackANSI`（`\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H` 唯一生产写点）、
+  `TerminalTransactionResult.ScrollbackReset`、executor diag 的 `ScrollbackReset`/
+  `ScrollbackResetsInWindow`、debug HTTP/document 对应字段。
+- 保留：失败限速、settle 事务、半写整族复位、`TerminalEpoch` 语义栅栏（无生产写者）。
+- 验收（已达成）：`go test ./cmd/aicli/ui` **ok 115.3s**；`./cmd/aicli/commands`
+  **ok 177.9s（3395 pass）**；`go vet`/`go build ./...`/gofmt 干净；真机 e2e PASS
+  （72 行 exactly-once）。净删 285 行（17 文件，+84/−369）。
 
 ## 4. S4：诊断字段 / debug composer / guard 清理
 
-- `ScrollbackReplayArmed`（state/diagnostics/debug JSON/status 行）、debug composer
-  `composeTerminalViewportScrollbackReconciliationPlan`（若 S3 后无引用）、
-  `clearScrollbackReplayAuthorization`、相关唤醒列表项删除。
+- `ScrollbackReplayArmed`（state/diagnostics/debug JSON/status 行）、相关唤醒列表项删除。
+- S3 保留的 `scrollbackReset*` 命名（backoff/record 等）重命名为 `recoveryBackoff*`
+  并清理 "reset+replay" 时代注释。
 
 ## 5. S5：目标语义用例（新增）
 
