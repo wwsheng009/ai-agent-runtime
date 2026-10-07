@@ -734,6 +734,11 @@ func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSource
 	if l == nil {
 		return false
 	}
+	// A1-3 步 3b：游标早出——未铸造（且无墓碑，墓碑必然已铸造）的来源不可能
+	// 有终态记录。语义与旧实现逐字等价：bySource 非空或墓碑存在 ⇒ minted。
+	if !l.mintedThrough(key) {
+		return false
+	}
 	if _, blocked := l.compactedTerminalSources[key]; blocked {
 		return true
 	}

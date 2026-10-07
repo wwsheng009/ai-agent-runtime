@@ -182,9 +182,19 @@ func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSour
 	if s.ledger == nil {
 		return false
 	}
+	// A1-3 步 3b：未铸造 ⇒ 无任何记录，必须物化并铸新 commit。
+	if !s.ledger.mintedThrough(key) {
+		return false
+	}
 	tokens := s.ledger.bySource[key]
 	if len(tokens) == 0 {
-		return false
+		// 已铸造且无 live 记录：唯一可能是「已压缩的终态」（墓碑存在时其全部
+		// 记录都已终态且不再参与 reconcile——条目已从 byToken 剪除，发射与否
+		// 不影响投递语义，跳过纯属省分配；旧实现会先白物化一次 payload，随后
+		// 在入队处以墓碑跳过）。无墓碑则只可能是 remintable 的
+		// invalidated-clean（pruneEntry 不留墓碑）：必须物化以允许再铸。
+		_, blocked := s.ledger.compactedTerminalSources[key]
+		return blocked
 	}
 	for token := range tokens {
 		entry, ok := s.ledger.byToken[token]
@@ -212,6 +222,10 @@ func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSour
 //     已结算行排除在候选之外）。
 func (s HistoryEffectQueueState) retainedQueuedCommitForSource(key historyCommitSourceKey, generation uint64) (commit HistoryCommit, hasQueued bool, terminal bool, safe bool) {
 	if s.ledger == nil {
+		return HistoryCommit{}, false, false, false
+	}
+	// A1-3 步 3b：未铸造 ⇒ 无任何记录（含压缩墓碑），必须铸新 commit。
+	if !s.ledger.mintedThrough(key) {
 		return HistoryCommit{}, false, false, false
 	}
 	if _, blocked := s.ledger.compactedTerminalSources[key]; blocked {
