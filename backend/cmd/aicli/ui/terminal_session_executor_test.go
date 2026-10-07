@@ -1032,9 +1032,10 @@ func TestTerminalSessionExecutorCloseTimeoutAbortsBlockedWrite(t *testing.T) {
 	}
 }
 
-// A1-1：被阻塞的历史移交写在中止（shutdown abort）下必须保持 fail-closed：
-// 结果只能零写重试（Deferred，保持 Queued）或未决隔离，绝不能 ack；中止后的
-// 重试不得再触达物理 writer，也不得发出破坏性 scrollback 复位。
+// A1-1/A1-2a：被阻塞的历史移交写在中止（shutdown abort）下必须保持 fail-closed：
+// in-flight abort 的 syscall 之后可能完整落盘，属「覆盖未知」——不得 ack，也不得
+// 当作零写重试，必须未决隔离（Failed+partial）；中止后的重试不得再触达物理
+// writer，也不得发出破坏性 scrollback 复位。
 func TestTerminalSessionExecutorAbortDuringBlockedHistoryHandoffStaysFailClosed(t *testing.T) {
 	controller := newHistoryExecutorController(t, nil)
 	if !controller.Post(Resize{Width: 80, Height: 10, Generation: 4}) {
@@ -1085,7 +1086,7 @@ func TestTerminalSessionExecutorAbortDuringBlockedHistoryHandoffStaysFailClosed(
 	}
 	controller.WaitIdle()
 
-	// Abort 结果经 executor worker 异步发布（Deferred → 重试被拒 → 投影失效），
+	// Abort 结果经 executor worker 异步发布（Failed → 恢复被拒 → 投影失效），
 	// 等待其收敛到静止的 fail-closed 状态再断言。
 	var state UIControllerState
 	deadline := time.Now().Add(5 * time.Second)
@@ -1104,8 +1105,14 @@ func TestTerminalSessionExecutorAbortDuringBlockedHistoryHandoffStaysFailClosed(
 	if entry.State == HistoryCommitDelivered {
 		t.Fatalf("aborted history handoff was acknowledged: %#v", entry)
 	}
-	if entry.State != HistoryCommitQueued {
-		t.Fatalf("aborted zero-write handoff should stay retryable (queued): %#v", entry)
+	if entry.State != HistoryCommitQuarantined {
+		t.Fatalf("abandoned in-flight handoff must quarantine, not stay retryable: %#v", entry)
+	}
+	if !entry.MayHavePartiallyWritten {
+		t.Fatalf("abandoned syscall coverage is unknown and must be marked possibly-partial: %#v", entry)
+	}
+	if entry.Failure == nil {
+		t.Fatalf("abandoned in-flight handoff must carry a failure fact: %#v", entry)
 	}
 	if !state.HistoryEffects.ProjectionUnknown {
 		t.Fatalf("aborted history handoff left projection known: %#v", state.HistoryEffects)

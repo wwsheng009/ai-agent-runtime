@@ -1133,16 +1133,27 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 		if history == nil {
 			history = &HistoryCommitResult{Err: ErrTerminalTransactionMissingResult, MayHavePartiallyWritten: true}
 		}
+		// A1-2 proof record: the zero-write proof comes from the recorded
+		// transaction fact when available. The legacy error-shape conjunction
+		// stays as the fallback for callers that predate the record.
+		zeroWrite := result.Frame.Err != nil && !history.MayHavePartiallyWritten
+		if result.Proof != nil {
+			zeroWrite = result.Proof.zeroWriteProven()
+		}
+		partiallyWritten := history.MayHavePartiallyWritten
+		if result.Proof != nil && result.Proof.possiblyWritten() {
+			partiallyWritten = true
+		}
 		switch {
 		case history.Deferred && history.Err == nil && !history.MayHavePartiallyWritten:
 			e.postControllerActionTracked(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
-		case history.Err != nil && result.Frame.Err != nil && !history.MayHavePartiallyWritten:
+		case history.Err != nil && zeroWrite && !partiallyWritten:
 			// The terminal transaction was attempted, but the writer proved that
 			// zero bytes reached the host. Keep the same token retryable. The frame
 			// error below invalidates the viewport cache; after a source-backed
 			// recovery, HistoryProjectionRecovered wakes this Pending handoff.
 			e.postControllerActionTracked(HistoryCommitDeferred{Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration})
-		case history.MayHavePartiallyWritten && history.Err == nil:
+		case partiallyWritten && history.Err == nil:
 			e.postControllerActionTracked(HistoryCommitFailed{
 				Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration,
 				Err: ErrHistoryCommitPartialWriteWithoutError, MayHavePartiallyWritten: true,
@@ -1150,7 +1161,7 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 		case history.Err != nil:
 			e.postControllerActionTracked(HistoryCommitFailed{
 				Token: claimed.Token, LayoutGeneration: claimed.LayoutGeneration,
-				Err: history.Err, MayHavePartiallyWritten: history.MayHavePartiallyWritten,
+				Err: history.Err, MayHavePartiallyWritten: partiallyWritten,
 			})
 		default:
 			if len(history.Delivered) > 0 {

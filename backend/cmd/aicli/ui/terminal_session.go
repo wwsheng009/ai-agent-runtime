@@ -252,6 +252,11 @@ type TerminalTransactionResult struct {
 	History                  *HistoryCommitResult
 	SettledHistoryProjection bool
 	TerminalEpoch            uint64
+	// Proof records the byte-level outcome of the physical attempt (A1-2
+	// proof record). Nil means the transaction never reached the write path
+	// (lease/generation deferrals, invalid plans) or the caller predates the
+	// record; consumers fall back to the legacy error-shape classification.
+	Proof *terminalWriteProof
 }
 
 // terminalPreparedTransaction contains pure presentation work derived from one
@@ -1005,7 +1010,8 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	if historyBytes != "" {
 		kind = outputpkg.TransactionFrameAndHistory
 	}
-	if write := s.writeTerminalBytesKindLocked(kind, bytes, frame.Geometry); write.Err != nil {
+	write := s.writeTerminalBytesKindLocked(kind, bytes, frame.Geometry)
+	if write.Err != nil {
 		if os.Getenv("TERM_SESSION_TRACE") != "" {
 			fmt.Printf("TERMTRACE_WRITE_ERR frame=%d err=%v\n", s.frame, write.Err)
 		}
@@ -1034,7 +1040,16 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		if historyResult != nil && historyBytes != "" {
 			*historyResult = HistoryCommitResult{Err: write.Err, MayHavePartiallyWritten: write.MayHavePartiallyWritten}
 		}
-		return TerminalTransactionResult{Frame: frameResult, History: historyResult}
+		return TerminalTransactionResult{
+			Frame:   frameResult,
+			History: historyResult,
+			Proof: &terminalWriteProof{
+				Outcome:      write.Outcome,
+				FlushedBytes: write.FlushedBytes,
+				TotalBytes:   len(bytes),
+				Err:          write.Err,
+			},
+		}
 	}
 	candidateScreen.ConfirmFlush()
 	if os.Getenv("TERM_SESSION_TRACE") != "" {
@@ -1096,11 +1111,20 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		*historyResult = HistoryCommitResult{Frame: s.frame, Delivered: delivered}
 		s.preparedHistory = nil
 	}
+	var proof *terminalWriteProof
+	if bytes != "" {
+		proof = &terminalWriteProof{
+			Outcome:      terminalWriteCommitted,
+			FlushedBytes: len(bytes),
+			TotalBytes:   len(bytes),
+		}
+	}
 	return TerminalTransactionResult{
 		Frame:                    frameResult,
 		History:                  historyResult,
 		SettledHistoryProjection: settleHistoryProjection,
 		TerminalEpoch:            s.terminalEpoch,
+		Proof:                    proof,
 	}
 }
 
@@ -1607,6 +1631,8 @@ func terminalViewportBandClearANSI(previous, next ViewportArea, capacity int, bo
 type terminalWriteResult struct {
 	Err                     error
 	MayHavePartiallyWritten bool
+	Outcome                 terminalWriteClass
+	FlushedBytes            int
 }
 
 // writeTerminalBytesLocked emits one fully assembled terminal transaction.
@@ -1641,13 +1667,18 @@ func (s *TerminalSession) writeTerminalBytesKindLocked(kind outputpkg.Transactio
 			result = terminalWriteResult{
 				Err:                     fmt.Errorf("%w: %v", ErrTerminalWriterPanic, recovered),
 				MayHavePartiallyWritten: true,
+				Outcome:                 terminalWritePartial,
 			}
 		}
 	}()
 	result.Err = s.presenter.Flush(probe, func(w io.Writer) {
 		_, _ = io.WriteString(w, bytes)
 	})
-	result.MayHavePartiallyWritten = probe.bytesWritten > 0
+	result.FlushedBytes = probe.bytesWritten
+	// An in-flight abort may still complete its syscall later, so its coverage
+	// is unknown: mark it possibly-partial even though the probe counted zero.
+	result.MayHavePartiallyWritten = probe.bytesWritten > 0 || errors.Is(result.Err, errTerminalWriteAbandoned)
+	result.Outcome = classifyTerminalWriteClass(result.Err, probe.bytesWritten, result.MayHavePartiallyWritten)
 	return result
 }
 
@@ -1717,23 +1748,30 @@ func (s *TerminalSession) submitWithPortLocked(port outputpkg.RenderOutputPort, 
 	if receipt.Primary == nil {
 		// pre-admission rejection/defer：未调用 sink、零写证明。
 		return terminalWriteResult{
-			Err: outputpkg.NewClassifiedError(receipt.Admission.ErrorClass, receipt.Admission.Message),
+			Err:     outputpkg.NewClassifiedError(receipt.Admission.ErrorClass, receipt.Admission.Message),
+			Outcome: terminalWriteFailedZero,
 		}
 	}
 	p := receipt.Primary
 	switch p.Status {
 	case outputpkg.DeliveryCommitted:
-		return terminalWriteResult{}
+		return terminalWriteResult{Outcome: terminalWriteCommitted, FlushedBytes: len(bytes)}
 	case outputpkg.DeliveryFailedZeroBytes:
 		// 可证明零写：调用方可安全重试/重建。
-		return terminalWriteResult{Err: receiptError(p.ErrorClass)}
+		return terminalWriteResult{Err: receiptError(p.ErrorClass), Outcome: terminalWriteFailedZero}
 	case outputpkg.DeliveryUnknownPartial:
+		outcome := terminalWritePartial
+		if p.ErrorClass == outputpkg.DeliveryErrorCanceledAfterStart {
+			// 已派发的 syscall 被放弃：宿主状态未知（可能完整落盘）。
+			outcome = terminalWriteAbandoned
+		}
 		return terminalWriteResult{
 			Err:                     receiptError(p.ErrorClass),
 			MayHavePartiallyWritten: true,
+			Outcome:                 outcome,
 		}
 	default: // deferred/rejected
-		return terminalWriteResult{Err: receiptError(p.ErrorClass)}
+		return terminalWriteResult{Err: receiptError(p.ErrorClass), Outcome: terminalWriteFailedZero}
 	}
 }
 
@@ -1748,8 +1786,12 @@ var terminalSessionIntentSeq uint64
 // 携带 class 信息。
 func receiptError(class outputpkg.DeliveryErrorClass) error {
 	switch class {
-	case outputpkg.DeliveryErrorCanceledBeforeIO, outputpkg.DeliveryErrorCanceledAfterStart:
+	case outputpkg.DeliveryErrorCanceledBeforeIO:
 		return ErrTerminalWriteAborted
+	case outputpkg.DeliveryErrorCanceledAfterStart:
+		// A canceled-after-start syscall may still complete; keep the abort
+		// identity but let callers classify it as possibly-partial.
+		return errTerminalWriteAbandoned
 	case outputpkg.DeliveryErrorClosed, outputpkg.DeliveryErrorAbandoned:
 		return ErrTerminalWriterMissing
 	default:

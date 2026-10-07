@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 )
@@ -11,6 +12,12 @@ import (
 // later, but the session refuses every subsequent frame so no second owner can
 // interleave bytes with it.
 var ErrTerminalWriteAborted = errors.New("terminal write aborted during shutdown")
+
+// errTerminalWriteAbandoned marks an abort that raced an already-dispatched
+// syscall: the underlying Write may still complete later, so the host state is
+// unknown rather than provably zero. Callers must classify it as a possible
+// partial write (fail-closed), not as a retryable zero-byte attempt.
+var errTerminalWriteAbandoned = fmt.Errorf("%w: canceled after start", ErrTerminalWriteAborted)
 
 // TerminalWriteAborter is the optional cancellation contract for physical
 // terminal writers. Generic io.Writer cannot be interrupted safely; this
@@ -72,22 +79,23 @@ func (w *abortableTerminalWriter) Write(data []byte) (int, error) {
 	select {
 	case w.request <- buf:
 	case <-w.abort:
+		// The dispatcher never picked this request up, so the host provably
+		// received zero bytes of it.
 		return 0, ErrTerminalWriteAborted
 	}
 	select {
 	case outcome := <-w.result:
-		w.mu.Lock()
-		aborted := w.aborted
-		w.mu.Unlock()
-		if aborted {
-			return 0, ErrTerminalWriteAborted
-		}
+		// The syscall returned before the abort was observed: its byte facts
+		// are known, so report them instead of collapsing to a zero-byte
+		// abort. The entry check still refuses every later write.
 		if outcome.panicked {
 			panic(outcome.panicValue)
 		}
 		return outcome.n, outcome.err
 	case <-w.abort:
-		return 0, ErrTerminalWriteAborted
+		// The dispatcher is inside the underlying Write and may complete it
+		// later: coverage is unknown.
+		return 0, errTerminalWriteAbandoned
 	}
 }
 
