@@ -143,6 +143,10 @@
   `TestFinalizeActiveCellPlansWholeSourceFromZero/WithoutDeferral`）`-count=40` 与 `-race` 均绿。
 - 提交：`1e223029`（批 1+2）；验证：三用例 `-count=20`/`-race` 绿、既有 partial 家族绿。
 
+- **A1-2a（`c29865fd`）**：写事务证明贯通——abort 派发二义纠偏（in-flight → Failed+partial
+  未决隔离）、executor 按 proof 分类（Q6 关闭）；设计与实施记录见
+  `docs/plan/aicli-render-a1-2-write-proof-record-plan.md`。
+
 ## 6. 风险与开放问题
 
 1. **settle vs epoch 冲突**：§3.4 行 172 说 settle 保留、行 175-176/§9.3.4 说失败→epoch 恢复；
