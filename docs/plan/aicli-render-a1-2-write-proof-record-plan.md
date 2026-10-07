@@ -58,7 +58,7 @@ type terminalWriteProof struct {
 | Q6（executor 零写判据） | `history.Err != nil && result.Frame.Err != nil && !partial` 合取 | `proof.Outcome == FailedZero`（proof 为 nil 时保留旧合取兜底） |
 | abort 二义 | 两类取消折叠 + wrapper 不区分派发 | Abandoned 事实 + probe partial 标记 |
 | Q2（queue invalidate） | `WriteCursor==token` 推定可能已写（`history_effect_queue.go:496-510`） | **已落地（A1-2b，§7.2）**：pending-invalidation + 结果动作 proof 解析 |
-| Q3/Q4（batch 失配） | `markDeliveredBatchUnresolved` 兜底（`:607-639`） | Q4 游标释放已落地（§7.2）；Q3 covered 集为 A1-2b 尾项 |
+| Q3/Q4（batch 失配） | `markDeliveredBatchUnresolved` 兜底（`:607-639`） | **已落地（Q4 §7.2 / Q3 §7.3）**：覆盖集逐 token 解析，整批回退删除 |
 | Q5（Deferred 条件） | 由 `Deferred && Err==nil && !partial` 驱动 | 保留 + 零写分支改 proof 驱动（A1-2a） |
 | S6（session tail 去重） | 物理投影证明 + 文本重合 | A1-2c 评估（ledger proof 落账后） |
 
@@ -68,7 +68,7 @@ type terminalWriteProof struct {
   executor 按 proof 分类（Q6 关闭）+ A1-1 abort 用例纠偏（in-flight abort = unresolved）。
 - **A1-2b**：queue/reducer 推定替换：invalidate 不再读 WriteCursor，改读最近 proof
   （executor 在结果动作中携带 outcome）；batch covered 集直接判。
-  **状态（2026-10-07）**：Q2 + Q4 游标释放已落地（§7.2）；Q3 covered 集尾项待做。
+  **状态（2026-10-07）**：Q2/Q4（§7.2）+ Q3 覆盖集逐 token 解析（§7.3）全部落地。
 - **A1-2c**：settle 定稿为 proof 终态（放弃区分谓词化）+ 门槛删除面评估
   （E1/E2/E3/S3/S4/S6），更新设计文档 §3.4/§3.6。
 
@@ -134,5 +134,26 @@ type terminalWriteProof struct {
   （Deferred 干净 / Ack 未决），新增 fail 矩阵、batch 游标释放、executor 零写门控用例。
 - **验证**：queue/reducer `-count=20` 绿；executor `-count=10` 绿；`-race` 绿；ui 全量
   113.5s 绿；commands 全量随提交记录。
-- **尾项**：Q3——`HistoryCommitsAcknowledged` 携带 covered 集，使
-  `markDeliveredBatchUnresolved` 失配路径结构性不可达（当前仍为兜底）。
+- **Q3**：覆盖集逐 token 解析已落地，见 §7.3。
+
+### 7.3 Q3 覆盖集逐 token 解析（2026-10-07，已落地）
+
+- **旧形态**：`ackBatch` 先整体校验交付快照，任一成员失配即返回错误，
+  `markDeliveredBatchUnresolved` 把**整批**成员按「可能已写」隔离并置
+  `ProjectionUnknown`。已证明交付的成员也被拖入恢复义务，批量回退是唯一出口。
+- **新形态（覆盖集 = 精确证明）**：`ackBatch(commits, frame, gen) (unresolved bool, err error)`
+  逐 token 解析，与单 token 路径同分类：
+  - 形状校验（有序、非零、头 token 世代 = claim 世代）只对**畸形覆盖集**整批
+    fail-closed（执行器不变式违反，非交付二义）；
+  - claimed 失效 pending → `ResolveInvalidation(true)`：invalidated + partial 未决隔离；
+  - 源身份被替换 / 同代载荷变化 / 头 claim 已释放 → 仅该 token 隔离（保留物理事实）；
+  - 后随 token 竞态 rebase 到更新世代 → 按其自身世代照常交付（原语义保留）；
+  - 已终结 / 已压缩 token → 幂等跳过（压缩仅回收已终结条目）。
+- **删除**：`markDeliveredBatchUnresolved`（整批回退）拆为
+  `quarantineCoveredToken`（单 token）+ `quarantineCoveredBatch`（畸形集 fail-closed）；
+  handler 仅在 `unresolved=true` 时置 unknown + reconciliation。
+- **验收**：`TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesOnlyChangedToken`
+  （头/尾 Delivered、仅失配 token 隔离、ProjectionRecovered + Settled 清义务）、
+  `TestHistoryEffectQueue_CoveredBatchResolvesPendingInvalidationPerToken`、
+  `TestHistoryEffectQueue_BatchUnresolvedReleasesClaimedCursor`；queue/reducer `-count=20`
+  绿、`-race` 绿、ui 全量 101.2s 绿、commands 全量随提交记录。

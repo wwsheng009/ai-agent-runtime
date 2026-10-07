@@ -149,7 +149,12 @@
 
 - **A1-2b（`b99c6bd1`）**：claimed 失效改 pending-invalidation + 结果动作 proof 解析
   （Q2 关闭）；executor 写前门控零写 Deferred；`markDeliveredBatchUnresolved` 释放
-  被 claim 游标（Q4 邻近修复）。Q3 covered 集为尾项（见设计记录 §7.2）。
+  被 claim 游标（Q4 邻近修复）。
+
+- **Q3（`31cf5f72`）**：覆盖集逐 token 解析——`ackBatch` 不再整批失配回退，
+  `markDeliveredBatchUnresolved` 删除；仅畸形覆盖集 fail-closed，其余按单 token
+  证明分类（pending 失效→未决隔离、身份/同代变化→仅该 token 隔离、竞态 rebase
+  照常交付）。见设计记录 §7.3。
 
 ## 6. 风险与开放问题
 
