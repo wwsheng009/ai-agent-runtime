@@ -546,13 +546,13 @@ sequenceDiagram
 
 | # | 差距 | 证据 | 严重度 | 处置 |
 |---|---|---|---|---|
-| G1 | **1ms 轮询残余（保留项）**：`WaitIdleTimeout` 内部 1ms 轮询仍在，经 `waitUIActorIdleBounded`（5s）/close drain/legacy 辅助触达；P1-3 §3.7 已决策**保留**（有界兜底） | `controller.go:852`；`chat_ui_actor.go:1054/1315/1326`；`chat_runtime_events.go:4787/4790` | 低-中 | 实施方案 B0/B1：登记清单化；事件化（可选） |
+| G1 | **1ms 轮询残余（保留项）**：`WaitIdleTimeout` 内部 1ms 轮询仍在，经 `waitUIActorIdleBounded`（5s）/close drain/legacy 辅助触达；P1-3 §3.7 已决策**保留**（有界兜底） | `controller.go:852`；`chat_ui_actor.go`（close drain / `waitUIActorIdleBounded`）；`chat_runtime_events.go`（legacy 辅助） | 低-中 | 实施方案 B0/B1：登记清单化；事件化（可选） |
 | G2 | **写端门禁盲区**：ui 门禁 glob 非递归漏 `renderengine/terminal_lock.go:73,76`（os.Stdout DEC2026）；两个扫描器不覆盖包级 var / 结构体字面量 / 非 arg0 | `terminal_output.go:21`；`chat_notification.go:613`；`chat_notification_sound.go:170`；`chat_legacy_console_editor_windows.go:60-66`；`chat_tool_executor.go:95,117` | 中 | P0 门禁增强（递归 + 盲区扫描）+ 缺口登记 |
 | G3 | **stderr 边缘未收口**：交互期仍有 os.Stderr 直写（与 stdout 同 tty） | `chat_setup.go:108/139/233/268` 及 `printChatSessionInfoRow` 调用点；`chat_selection_output.go:129`；`chat.go:1073` | 中 | §3.8 持续收口（P0 尾项） |
 | G4 | **claimed 路径 rebase/invalidate 缺口**：`rebasePendingHistoryEffects` 对 claimed 且 presentation 改变的 token 静默跳过，靠 generation 失配→Deferred 释放后收敛 | `history_effect_planner.go:1643-1661`；`history_effect_queue.go:560-567` | 中 | P2 前收紧；§9.3.3/§8 已标注 |
 | G5 | **skipRows 证明 0 二义性**：`activeAckedRenderedPrefixRows` 返回 0 兼表"无前缀/前缀不等价"，后者由 finalize 兜底置 `ProjectionUnknown` | `history_effect_planner.go:335-367`；`controller_state.go:594-597` | 中 | P2 Slice 1 后消失；先加注释/测试钉住 |
 | G6 | **§4 未登记镜像 9 组**（M1–M9：`runActive`/轮终态账本/`historySeed*`/legacy 几何/viewport 双表示/terminalEpoch 双份/final 三字段/恢复诊断/drop 遥测） | 见 §4 本轮补登 | 中 | 已补登 §4；映射（D3）：M4→A 批 fenced-dead、M5→P1-2b 残余、M6→P2 TerminalEpoch 语义化、其余随 P1/P2 字段清理 |
-| G7 | **生产轮询多处**：1ms（4 处）、5ms（backlog worker/settle）、10ms（backoff/lease）、50–100ms（Windows/overlay 平台）；多数为 P1-3 §3.7 明确保留的队列等待/有界兜底 | `chat_runtime_events.go:1840/1981/2003/2597/3033/4803`；`terminal_session_executor.go:1037`；`screen_lease.go:82-89` 等 | 低 | 实施方案 B0 登记表；随 P2 backoff/legacy 退役删减 |
+| G7 | **生产轮询多处**：1ms（5 处）、5ms（backlog worker/settle）、10ms（backoff/lease）、50–100ms（Windows/overlay 平台）；多数为 P1-3 §3.7 明确保留的队列等待/有界兜底 | `chat_runtime_events.go:1840/1981/2003/2597/3033/4803`；`screen_lease.go:82-89` 等（`terminal_session_executor.go:1037` 已随 P2 replay 切片删除） | 低 | 实施方案 B0 登记表；随 P2 backoff/legacy 退役删减 |
 | G8 | **区域未登记项**：编辑器状态行/队列指示/band 顶距/fullscreen 族/主帧 defer/ComposerLine 替换语义 | 见 §10 本轮补登 | 低 | 已补登 §10 |
 | G9 | **legacy `StatusBar` 潜伏第二写端**：生产不可达，但 `StatusBar.Render` 直写 os.Stdout，无栅栏 | `statusbar.go:197-252`；唯一构造 `layout.go:58`（无生产 Render 调用） | 低-中 | 已 fenced-dead 标注（A1-7：`statusbar.go` Render 注释 + 基线登记）；重接线须先加物理栅栏 |
 | G10 | **web/TUI statusbar 段集合不一致**：同源同构建函数，但 web 缺 state/goal/model/provider/fast（goal/fast 未说明） | `web_statusbar.go:125-210` vs `chat_interaction.go:2878-2912` | 低 | 已文档注明（D2）：web 缺段为现状差异，web 侧对齐另评；goal/fast 为 TUI 专属段 |
@@ -568,8 +568,8 @@ sequenceDiagram
 
 ### 7.5.1 轮询保留项登记（B0/B2，2026-10-06）
 
-> 依据：P1-3 §3.7 保留决策 + 实施方案 B 批。B2 核对：生产 1ms 命中集合与本表一致
->（`controller.go:852`、`chat_runtime_events.go:1981/2003/2597/3033`、`chat_ui_actor.go:485`），
+> 依据：P1-3 §3.7 保留决策 + 实施方案 B 批。B2 核对（2026-10-07 复验）：生产 1ms 命中集合与本表一致
+>（`controller.go:852`、`chat_runtime_events.go:1981/2003/2597/3033`、`chat_ui_actor.go:493`），
 > 无未登记 1ms 站点。B1 决策：**保留**（不事件化；触发条件变化时再走事件化改造）。
 
 | 站点 | 形态 | 分类 | 说明 |
@@ -577,10 +577,10 @@ sequenceDiagram
 | `ui/controller.go:852`（`WaitIdleTimeout` 内部） | 1ms | 有界超时兜底（保留） | 经 close drain / legacy 有界辅助 / `waitUIActorIdleBounded` 5s 触达（P1-3 §3.7） |
 | `chat_runtime_events.go:1981/2003/2597` | 1ms | 队列等待（保留） | backlog / deferred / 字节预算等待 |
 | `chat_runtime_events.go:3033` | 1ms | 防御回退（保留） | 无 accepted ticket 的 mailbox 满等待回退 |
-| `chat_ui_actor.go:485` | 1ms | 防御回退（保留） | `waitUIActorCapacity` 无 ticket 防紧自旋 |
+| `chat_ui_actor.go:493` | 1ms | 防御回退（保留） | `waitUIActorCapacity` 无 ticket 防紧自旋 |
 | `chat_runtime_events.go:1840` | 5ms | 队列重试（保留） | deferred retry interval |
-| `chat_ui_actor.go:1035` | 5ms | 有界重试（保留） | alternate-screen release 3 次退避 |
-| `ui/terminal_session_executor.go:1037` | 10ms | backoff 让出（保留，P2 删） | scrollback reset backoff |
+| `chat_ui_actor.go:1044` | 5ms | 有界重试（保留） | alternate-screen release 3 次退避 |
+| `ui/terminal_session_executor.go:1037` | 10ms | **已删除**（P2 replay 切片 S3/S4） | 原 scrollback reset backoff 让出 |
 | `ui/screen_lease.go:82-89` | 10ms | lease 等待（保留） | alternate screen 互斥 |
 | `chat_resume_progress.go:331/407` | 400ms | 进度轮询（保留；P2 候选事件化） | 历史加载 settle 等待 |
 | `chat_startup_timing.go:187` | 5s | watchdog（保留） | 启动看门狗 |

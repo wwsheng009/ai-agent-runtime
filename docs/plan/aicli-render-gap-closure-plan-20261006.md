@@ -212,7 +212,7 @@ C1 ──► C2 ──► P2 Slice 1 ──►（P2 其余切片）
 
 | ID | 项 | 状态 | 提交 | 备注 |
 |---|---|---|---|---|
-| A0 | 门禁增强（递归 + 盲区扫描器） | **done** | `896a94e8`、`b3144171` | 先红后绿：ui +2（renderengine/terminal_output）；commands 盲区 +36 存量登记；fd 探针排除 |
+| A0 | 门禁增强（递归 + 盲区扫描器） | **done** | `896a94e8`、`b3144171` | 先红后绿：ui +2（renderengine/terminal_output）；commands 盲区 +36 存量登记；fd 探针排除。实现口径：盲区扫描器**并入两个主门禁文件**（`writer_inventory_test.go` / `chat_command_result_test.go`），未单独建 blindspot 文件 |
 | A1-1 | renderengine/terminal_lock.go 直写 | **done** | `89ffb8a2` | 登记+冻结：调用方围栏测试（仅 legacy surface） |
 | A1-2 | terminal_output.go 注释漂移（G11） | **done** | `3dec55ee` | 注释修正（SetLegacyBinding 从未落地） |
 | A1-3 | notification OSC/BEL 旁路化 | **done** | `98e9707b` | fail-closed：unified submit 失败不得回退 raw（钉测试先红后绿） |
@@ -245,6 +245,23 @@ C1 ──► C2 ──► P2 Slice 1 ──►（P2 其余切片）
 - 真机 e2e：`scripts/test-aicli-windows-terminal-e2e.ps1` **PASS**（31.4s）——72 条 history 各恰 1 次、
   最老/最新可达、增量历史可见尾随滚动、prompt/status 各 1 次、Markdown 渲染无原始语法泄漏
   （fixture 窗口 WindowsTerminal.exe PID 40272）。
+
+### 9.2 独立查核记录（2026-10-07，后续切片后复验）
+
+> 触发：P2 Slice 1、P1-1 步骤 1–4、P2 replay 切片 S1–S5 等后续工作落定后，复核本方案
+> 的落地物是否仍然成立（查核只读复验 + 文档漂移修正）。
+
+| 项 | 复验证据 | 结论 |
+|---|---|---|
+| A0/A1 门禁 | `go test ./cmd/aicli/ui ./cmd/aicli/commands -run 'DirectWriterInventory|WriterInventory'` → 双 ok（2026-10-07）；递归 glob + 包级 var（`ValueSpec` + 全表达式 `ast.Inspect`，覆盖结构体/函数字面量与非 arg0 引用）均在主门禁内；`exec_event_processor.go` 已入 glob 且有基线条目 | ✅ 无漂移 |
+| A2 单写端 + e2e | `TestUnifiedSessionSinglePhysicalWriterFence` PASS；真机 e2e PASS（73 行 exactly-once + 装载/追加阶段 + `clear-3J=0`，见 S5） | ✅ 增强 |
+| B0/B2 轮询登记 | 生产 1ms 命中集合与 §7.5.1 一致（`controller.go:852`；`chat_runtime_events.go:1981/2003/2597/3033`；`chat_ui_actor.go:493`），无未登记 1ms 站点；两处行号陈旧已修正（485→493、1035→1044）；`terminal_session_executor.go:1037` 10ms 站点已被 P2 replay 切片删除（表内标注） | ✅ 集合一致，行号已修 |
+| C1 claimed 漂移 | `ClaimedPresentationDrift` 计数 + `TestClaimedPresentationDriftCountsAndConvergesAfterDeferred` 在册 | ✅ |
+| C2 skipRows | 原 `activeAckedRenderedPrefixRows` 已随 P2 Slice 1（停铸 active / active ack 机制删除）整体退役；finalize 侧 `finalizedActiveCorrectionTouchesAckedPrefix` 兜底保留；设计文档 §7.1 已记录该管线删除 | ✅ 被 P2 正确取代 |
+| D1/D2/D3/D4 | D1 钉测试 `TestBottomPaneStatusRowsReservesBlankStatusRow` 在册；D2 G10 行、D3 G6 映射行在册；M4 状态栏 fenced-dead 注释在册；D4 相关区域测试随全量绿 | ✅ |
+| 验收命令（§8） | B `-run 'WaitController|WaitIdle'` ok；C `-run 'History|Resume|PlanningBudget|Transcript'` **ok 95.2s**；D `-run 'Layout'` ok（2026-10-07） | ✅ 全绿 |
+
+> 查核结论：A0–D4 落地物在后续切片后全部成立；无实现缺口，仅修正三处文档行号/口径漂移。
 
 ## 10. 附录：扫描出处与关联证据
 
