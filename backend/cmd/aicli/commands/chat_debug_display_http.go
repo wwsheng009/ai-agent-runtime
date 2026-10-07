@@ -382,15 +382,9 @@ type chatDebugDisplayHistoryGateInfo struct {
 	// stranded-claim signature (see HistoryEffectQueueSummary).
 	ClaimedToken      uint64 `json:"claimed_token,omitempty"`
 	ClaimedGeneration uint64 `json:"claimed_generation,omitempty"`
-	// PlanIncomplete/PlanStalled expose the budget-truncated transcript plan.
-	// queued_count=0 is not proof that history is complete: a plan cut off by
-	// historyCommitPlanningBudget leaves the cells the layout walk never reached
-	// unplanned, so a resumed session can read queued=0/delivered=N over a
-	// transcript whose tail never entered native scrollback (live: 6622 cells /
-	// 291842 rows, next=1288, acked=322). PlanStalled additionally marks a plan
-	// that cannot advance at the current inputs (its remaining sources are
-	// already terminal in this epoch), which is the difference between "the
-	// continuation is still scheduled" and "this epoch is out of options".
+	// PlanIncomplete/PlanStalled 是 deprecated 零值（P1-1 Stage 4 起续跑组与
+	// 预算截断已删除，规划为无预算单遍）：字段仅为 JSON schema 稳定性保留，
+	// 恒为 false，不再具有诊断语义。
 	PlanIncomplete bool `json:"plan_incomplete"`
 	PlanStalled    bool `json:"plan_stalled"`
 }

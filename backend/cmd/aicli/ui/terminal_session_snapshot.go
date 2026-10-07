@@ -15,16 +15,10 @@ type terminalSessionScheduleSnapshot struct {
 	projectionUnknown      bool
 	reconciliationRequired bool
 	recoveryActionable     bool
-	// planIncomplete reports a budget-truncated transcript plan that still owes
-	// cells and has not been proven unable to advance at the current plan inputs
-	// (PlanStalled). The executor uses it to continue the plan when a wake finds
-	// no pending token and no recovery obligation; without it the plan's only
-	// continuation trigger is an ack that may never come again.
-	planIncomplete    bool
-	pendingToken      uint64
-	pendingGeneration uint64
-	stateRevision     uint64
-	stateGeneration   uint64
+	pendingToken           uint64
+	pendingGeneration      uint64
+	stateRevision          uint64
+	stateGeneration        uint64
 }
 
 type terminalSessionControllerSnapshot struct {
@@ -49,7 +43,6 @@ func (c *UIController) terminalSessionSchedule() terminalSessionScheduleSnapshot
 		projectionUnknown:      effects.ProjectionUnknown,
 		reconciliationRequired: effects.ReconciliationRequired,
 		recoveryActionable:     terminalHistoryRecoveryActionable(c.state),
-		planIncomplete:         effects.planContinuationPending(),
 		stateRevision:          c.revision,
 		stateGeneration:        c.state.Geometry.Generation,
 	}
@@ -211,8 +204,7 @@ func (c *UIController) terminalSessionHasActionableWork() bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.state.HistoryEffects.HasPending() || terminalHistoryRecoveryActionable(c.state) ||
-		c.state.HistoryEffects.planContinuationPending()
+	return c.state.HistoryEffects.HasPending() || terminalHistoryRecoveryActionable(c.state)
 }
 
 // terminalHistoryRecoveryActionable distinguishes a recovery obligation from

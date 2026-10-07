@@ -430,10 +430,8 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	} else {
 		builder.meta("Primary Lease:", "inactive")
 	}
-	// The queue counters alone cannot distinguish "everything delivered" from
-	// "the plan was cut off and its tail was never planned": both read
-	// pending=0. Report the truncated-plan flags on the same line so a live
-	// session is diagnosable without a rebuild.
+	// planIncomplete/planStalled 是 deprecated 零值（P1-1 Stage 4 起无预算
+	// 单遍规划，续跑组已删除）：同行输出仅为旧日志格式兼容。
 	builder.meta("History Effects:", fmt.Sprintf("%s planIncomplete=%t planStalled=%t",
 		chatDebugHistoryEffectSummary(effectDiagnostics),
 		effectDiagnostics.PlanIncomplete, effectDiagnostics.PlanStalled))

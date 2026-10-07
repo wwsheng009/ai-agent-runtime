@@ -21,19 +21,6 @@ type HistoryEffectQueueState struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
-	// PlanIncomplete 是预算截断时代的"欠账计划"标记。P1-1 Stage 2 起规划无预算
-	// 单遍（planEligibleHistoryCommitsWithin），不存在截断前缀，本字段不再被置位；
-	// Stage 4 删除字段与其全部消费方，当前保留用于诊断 JSON 兼容。
-	PlanIncomplete bool
-	// PlanStalled 曾是续跑停滞的自旋守卫。Stage 2 起无截断计划，本字段不再被
-	// 置位；Stage 4 删除，当前保留用于诊断 JSON 兼容。
-	PlanStalled bool
-	// planResume* 是 P1.1b 的截断续跑游标。Stage 2 起规划单遍完整，游标不再写入；
-	// Stage 4 删除字段与 clear/store 方法，当前保留用于诊断 JSON 兼容。
-	planResumeValid      bool
-	planResumeRow        int
-	planResumeScreenRows int
-	planResumeInputs     transcriptPlanInputs
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
@@ -272,29 +259,6 @@ func (s *HistoryEffectQueueState) recordTranscriptPlanTiming(duration time.Durat
 	}
 }
 
-// storeTranscriptPlanResume 记录一次被预算截断的 pass 留下的续跑游标。
-func (s *HistoryEffectQueueState) storeTranscriptPlanResume(row, screenRows int, inputs transcriptPlanInputs) {
-	if s == nil {
-		return
-	}
-	s.planResumeValid = true
-	s.planResumeRow = row
-	s.planResumeScreenRows = screenRows
-	s.planResumeInputs = inputs
-}
-
-// clearTranscriptPlanResume 丢弃截断续跑游标：计划完成、输入被显式作废，或
-// ledger 被整体替换（前缀永远不会再被规划）时调用。
-func (s *HistoryEffectQueueState) clearTranscriptPlanResume() {
-	if s == nil {
-		return
-	}
-	s.planResumeValid = false
-	s.planResumeRow = 0
-	s.planResumeScreenRows = 0
-	s.planResumeInputs = transcriptPlanInputs{}
-}
-
 // recordClaimRefusal classifies one refused BeginHistoryCommit claim. It is a
 // pure counter update: the refusal must never raise recovery here (see the
 // reducer's BeginHistoryCommit comment), but it must remain observable.
@@ -427,10 +391,11 @@ type HistoryEffectDiagnostics struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
-	PlanIncomplete         bool
-	PlanStalled            bool
-	// P1.2 worker 已删除（P1-1 Stage 3）；这两项保留为 deprecated 零值，维持
-	// debug JSON/文档的字段稳定性。
+	// PlanIncomplete/PlanStalled 与 P1.2 worker 的这两项均为 deprecated 零值：
+	// 续跑组已删除（P1-1 Stage 4）、worker 已删除（Stage 3），字段仅为
+	// debug JSON/文档的跨包稳定性保留。
+	PlanIncomplete       bool
+	PlanStalled          bool
 	PlanRequestInFlight  bool
 	PlanWindowsDelegated uint64
 	NextToken            uint64
@@ -446,8 +411,6 @@ func (s HistoryEffectQueueState) Diagnostics() HistoryEffectDiagnostics {
 		Frozen:                 s.Frozen,
 		ProjectionUnknown:      s.ProjectionUnknown,
 		ReconciliationRequired: s.ReconciliationRequired,
-		PlanIncomplete:         s.PlanIncomplete,
-		PlanStalled:            s.PlanStalled,
 		NextToken:              s.NextToken,
 		TerminalEpoch:          s.TerminalEpoch,
 		Summary:                s.Summary(),
@@ -764,10 +727,6 @@ func (s *HistoryEffectQueueState) markProjectionKnown() {
 func (s *HistoryEffectQueueState) invalidateTranscriptPlanMemo() {
 	if s != nil {
 		s.lastPlannedTranscriptValid = false
-		// memo 与游标共享同一组输入：显式失效意味着"从源重证明"，被截断的前缀
-		// 也可能已经不在新 ledger 里（外部整体替换、no-op 安装从未持有该计划），
-		// 游标必须一起作废。
-		s.clearTranscriptPlanResume()
 	}
 }
 

@@ -72,13 +72,9 @@ func assertHistoryCoverage(t *testing.T, controller *UIController, session *Term
 	}
 	if missing > 0 {
 		t.Fatalf("history is missing %d/%d finalized cells (first missing %d, ledger states %v, "+
-			"next=%d pending=%d planIncomplete=%t planStalled=%t projection=%+v)",
+			"next=%d pending=%d projection=%+v)",
 			missing, want, firstMissing, counts, state.HistoryEffects.NextToken,
-			historyPendingCount(state), state.HistoryEffects.PlanIncomplete,
-			state.HistoryEffects.PlanStalled, session.ProjectionState())
-	}
-	if state.HistoryEffects.PlanIncomplete {
-		t.Fatalf("a fully delivered transcript still reports an incomplete plan: %#v", state.HistoryEffects)
+			historyPendingCount(state), session.ProjectionState())
 	}
 }
 

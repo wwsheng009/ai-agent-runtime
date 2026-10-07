@@ -1914,7 +1914,7 @@ func TestExecutorDiagTextSummarySmoke(t *testing.T) {
 func TestTerminalSessionExecutorControllerIdleWaitIsBounded(t *testing.T) {
 	controller := NewUIController(UIControllerConfig{}, nil, nil)
 	executor := &TerminalSessionExecutor{controller: controller}
-	if !executor.postControllerActionTracked(ContinueHistoryPlanAction{}) {
+	if !executor.postControllerActionTracked(HistoryReconciliationSettled{LayoutGeneration: 1}) {
 		t.Fatal("controller rejected the queued fixture action")
 	}
 

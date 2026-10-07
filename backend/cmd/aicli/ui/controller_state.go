@@ -361,10 +361,6 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			// 重跑规划以保证任何输入变化都被重新对账（memo 命中即空操作）。
 			syncHistoryEffectsForTranscript(&state)
 		}
-	case ContinueHistoryPlanAction:
-		// 旧续跑 kick 的兼容入口（Stage 4 删除）：按当前输入重跑规划，memo
-		// 命中即空操作。
-		syncHistoryEffectsForTranscript(&state)
 	case HistoryProjectionRecovered:
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.markProjectionKnown()

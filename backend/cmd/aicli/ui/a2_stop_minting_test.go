@@ -249,7 +249,4 @@ func TestFinalizeActiveCellPlansWholeSourceWithoutDeferral(t *testing.T) {
 
 	rows := collectedTranscriptRows(t, state)
 	assertEveryMarkerOnce(t, rows, markers)
-	if state.HistoryEffects.PlanIncomplete {
-		t.Fatalf("finalize left continuation armed: %#v", state.HistoryEffects)
-	}
 }

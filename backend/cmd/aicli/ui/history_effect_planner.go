@@ -616,9 +616,8 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 		return
 	}
 	// A memo miss means the plan inputs moved. Stage 2 起不存在"欠账"计划：下面的
-	// 单遍规划要么完整覆盖，要么没有候选；PlanStalled 仅为旧诊断字段保留。
+	// 单遍规划要么完整覆盖，要么没有候选。
 	effects := &state.HistoryEffects
-	effects.PlanStalled = false
 	// P16：规划器本体（screening + 铸 commit，含入队）的耗时归因。这是锁内最贵
 	// 的一段，必须能回答「P12 的冻结是不是花在规划上」；memo 命中（上方早退）
 	// 不算一次规划，因此不记录，避免把空转计成规划。
@@ -633,17 +632,8 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 // reconcile（复用段整 cell 跳过）+ memo。Stage 3 起这是唯一实现（无异步结果
 // 路径）。
 func applyTranscriptPlan(state *UIControllerState, commits []HistoryCommit, retained transcriptPlanRetention) {
-	effects := &state.HistoryEffects
-	effects.PlanIncomplete = false
 	syncHistoryEffectCandidatesRetained(state, commits, retained)
 	recordTranscriptPlanMemo(state, len(commits))
-}
-
-// planContinuationPending 曾是"预算截断计划欠账"的谓词。Stage 2 起规划单遍完整，
-// PlanIncomplete 不再置位，因此恒为 false；Stage 4 删除该谓词与全部消费方
-// （executor kick / wake 门 / snapshot 读点），当前保留用于诊断兼容。
-func (s HistoryEffectQueueState) planContinuationPending() bool {
-	return s.PlanIncomplete && !s.PlanStalled
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell

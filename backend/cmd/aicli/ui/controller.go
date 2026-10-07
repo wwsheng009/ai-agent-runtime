@@ -619,20 +619,10 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 		return true
 	}
 	if !effects.HasPending() {
-		// No pending deliveries. A budget-truncated plan that still owes cells
-		// (PlanIncomplete && !PlanStalled) has exactly one remaining trigger:
-		// the executor's ContinueHistoryPlanAction kick. Its other triggers are
-		// ack handlers and recovery transitions, which an idle resumed session
-		// never produces, so without this wake the plan is stranded with an
-		// empty queue and the tail never reaches native scrollback (live:
-		// 6622 cells / 291842 rows, next=1288, acked=322, pending=0,
-		// plan_incomplete=true, projection known). The same gates the
-		// continuation itself checks keep this from spinning while a lease,
-		// projection recovery, or an unresolved delivery owns the queue.
-		return effects.planContinuationPending() &&
-			!effects.Frozen &&
-			!effects.ProjectionUnknown &&
-			!effects.hasUnresolvedTerminalDelivery()
+		// No pending deliveries and no recovery obligation: nothing owns the
+		// queue. The old empty-queue wake for a budget-truncated plan
+		// (continuation kick) is gone with single-pass planning (Stage 4).
+		return false
 	}
 	switch action.(type) {
 	case ReplaceTranscriptAction, SetThemeContextAction, SetActiveCellAction, UpdateActiveCellAction,
@@ -1114,8 +1104,6 @@ func actionClassString(action UIAction) string {
 		return "HistoryProjectionRecovered"
 	case HistoryProjectionInvalidated:
 		return "HistoryProjectionInvalidated"
-	case ContinueHistoryPlanAction:
-		return "ContinueHistoryPlan"
 	case RuntimeEvent:
 		return "RuntimeEvent(" + a.Kind + ")"
 	case ReplaceTranscriptAction:

@@ -527,15 +527,6 @@ func (HistoryReconciliationSettled) isUIAction()         {}
 func (HistoryReconciliationSettled) Class() ActionClass  { return ClassBarrier }
 func (HistoryReconciliationSettled) CoalesceKey() string { return "" }
 
-// ContinueHistoryPlanAction 曾是"预算截断计划"的续跑请求（executor kick）。
-// P1-1 Stage 2 起规划无预算单遍，不存在截断计划；动作与执行器 kick 在 Stage 4
-// 一并删除，当前保留为兼容壳。
-type ContinueHistoryPlanAction struct{}
-
-func (ContinueHistoryPlanAction) isUIAction()         {}
-func (ContinueHistoryPlanAction) Class() ActionClass  { return ClassBarrier }
-func (ContinueHistoryPlanAction) CoalesceKey() string { return "" }
-
 // TerminalEffectAck is the typed success result for a terminal transaction.
 // It is an alias-shaped action payload rather than an implicit nil error, so
 // Phase 4 reducers can validate token/generation before advancing handoff.

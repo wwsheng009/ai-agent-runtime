@@ -187,6 +187,36 @@ memo 语义回归"完整规划已落"（无预算单遍下每次落账都完整�
 **验收**：全量组合 ui 113.3s ok + commands 183.4s ok；`-race` 点检
 （Deferred/Prepend/Settled/WriterFence/Wake 组）ok。
 
+### 2.6 Stage 4 实施记录（2026-10-07，已完成）
+
+**删除面**（续跑组本体与全部消费方）：
+
+- 协议/结果面：`ContinueHistoryPlanAction` 类型（action.go）、reducer 兼容 case、
+  actionClassString 条目、executor kick（`terminal_session_executor.go`）。
+- wake 门：`historyCommitWakeNeeded` 的空队列分支删除（`!HasPending()` 直接
+  `return false`）；快照面：`terminalSessionScheduleSnapshot.planIncomplete`
+  字段与两处读点（schedule 赋值、`terminalSessionHasActionableWork`）删除。
+- 状态面：queue 的 `PlanIncomplete/PlanStalled/planResume*` 字段与
+  `storeTranscriptPlanResume`/`clearTranscriptPlanResume` 删除；
+  `invalidateTranscriptPlanMemo` 不再联动作废游标；planner 的两处置位与
+  `planContinuationPending` 谓词删除。
+- **诊断 schema 保留**：`HistoryEffectDiagnostics` 的 4 个字段
+  （PlanIncomplete/PlanStalled/PlanRequestInFlight/PlanWindowsDelegated）与
+  commands debug JSON/文档输出保持为 **deprecated 零值**（跨包 schema 稳定），
+  注释已改为"恒为 false，无诊断语义"。
+
+**测试面**：`TestHistoryCommitWakeNeededForTruncatedPlanContinuation` 改写为
+`TestHistoryCommitWakeNeededForRecoveryWithoutPending`（只保留恢复分支断言）；
+删除 a2/diagnostic/全覆盖组中的续跑字段断言；executor 空闲等待栅栏用例的
+fixture 换成 `HistoryReconciliationSettled`。
+
+**验收**：全量组合 ui 110.3s ok + commands 181.5s ok；`-race` 点检
+（Wake/Reducer/Schedule 组 3.4s、commands Debug 6.4s）ok；全仓 grep 零生产引用
+（仅剩 deprecated 零值字段与注释）。
+
+> 总验收注记：§0 的 `≤174ms` 已被 §1.8 修订（clone 地板 + 存量重算 ≥50% 口径，
+> 实测 −57.5%）；Stage 5 收尾时把 §0 行同步为修订口径。
+
 ## 3. 分阶段实施（每阶段独立提交，失败即回滚）
 
 ### Stage 0 基线与门禁（已完成，2026-10-06；实测记录见 §1.5）
@@ -220,7 +250,7 @@ memo 语义回归"完整规划已落"（无预算单遍下每次落账都完整�
 - 删 worker/sink/请求/`HistoryPlanWindowReady`/三重栅栏字段/wiring/`WaitIdle` 例外/`AsyncTranscriptPlan` 配置；`TestProductionUIActorEnablesAsyncTranscriptPlan` 删除。
 - 验收：装载/覆盖度断言在同步语义下绿；`-race` 抽验绿。
 
-### Stage 4 = P1-1 第 4 步本体（1–2 天）
+### Stage 4 = P1-1 第 4 步本体（已完成，2026-10-07；实施记录见 §2.6）
 
 - 删续跑组与全部消费方（§1.4 清单）；wake/kick/snapshot 收口。
 - 验收：主计划 §1.3 第 4 步验收 + 全包门禁。
