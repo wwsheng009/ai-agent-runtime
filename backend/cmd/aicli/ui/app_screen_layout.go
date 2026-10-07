@@ -1,8 +1,10 @@
 package ui
 
 import (
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
@@ -193,34 +195,60 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 // layoutTranscriptScreenRowsImpl 是布局投影的唯一实现（P1-1 Stage 2：无预算单遍）。
 // 规划与逐帧渲染共用它：帧必须完整，截断会画错屏，因此这里不存在部分结果；
 // 规划侧不再有预算/游标/窗口参数。
+//
+// 首渲染 miss 的渲染是纯函数（cell + width + theme），装载期全量布局实测
+// 1.37s 锁内成本（P16 冻结，86k 行恢复），因此拆成三段：
+//  1. 顺序扫描按行序生成段表（gap / 缓存命中 / 待渲染任务），缓存查询与
+//     foldHint 判定仍在调用方 goroutine；
+//  2. miss 任务并行渲染（worker 池，纯函数，共享缓存自带锁）；
+//  3. 顺序装配（cache.put + appendCachedCellRows），输出与顺序渲染逐行一致。
+//
+// 门限（layoutParallelRenderThreshold）保证稳态帧（miss 少）不付并行开销。
+
+// layoutParallelRenderThreshold 是启用 worker 池的 miss 任务数门限；负值禁用
+// 并行（测试用），0 表示只要有任务就并行。默认值只影响首渲染延迟，不影响输出。
+var layoutParallelRenderThreshold = 64
+
+// layoutParallelRenderMaxWorkers 是并行渲染的 worker 上限；默认 0 = 取
+// GOMAXPROCS（首渲染是一次性 CPU 突发，用满核把锁内时长压到最短；稳态帧
+// miss 少、不触发并行）。测试可显式设小以固定并发度。
+var layoutParallelRenderMaxWorkers = 0
+
+type layoutRenderJob struct {
+	cell     scene.TranscriptCell
+	key      cellLayoutKey
+	showHint bool
+	folded   bool
+	plain    bool
+	userKind bool
+	rows     []scene.LayoutRow
+}
+
+type layoutRenderSegment struct {
+	cellID scene.CellID
+	gap    int
+	job    int
+	rows   []AppScreenRow
+}
+
 func layoutTranscriptScreenRowsImpl(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, theme style.ThemeContext) []AppScreenRow {
 	if len(rows) == 0 {
 		return nil
 	}
-	result := make([]AppScreenRow, 0, len(rows))
-	renderedStructured := make(map[scene.CellID]struct{})
 	fp := themeFingerprint(theme)
 	cache := sharedCellRows
 	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
 	foldTarget := toolFoldTargetRows(rows, cells, mutable)
+	segments := make([]layoutRenderSegment, 0, len(rows))
+	jobs := make([]layoutRenderJob, 0, 16)
+	renderedStructured := make(map[scene.CellID]struct{})
 	for index := 0; index < len(rows); index++ {
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
 			continue
 		}
 		if row.Gap > 0 {
-			for count := 0; count < int(row.Gap); count++ {
-				result = append(result, AppScreenRow{
-					// A semantic boundary is an empty transcript row, not
-					// unowned bottom-pane headroom. Keeping its physical owner
-					// as Transcript matches the existing owned viewport while
-					// TranscriptGap retains the semantic distinction needed by
-					// later HistoryCommit handling.
-					Owner:         renderengine.RowOwnerTranscript,
-					CellID:        row.CellID,
-					TranscriptGap: true,
-				})
-			}
+			segments = append(segments, layoutRenderSegment{cellID: row.CellID, gap: int(row.Gap), job: -1})
 			continue
 		}
 		if _, rendered := renderedStructured[row.CellID]; rendered {
@@ -233,23 +261,23 @@ func layoutTranscriptScreenRowsImpl(rows []scene.LayoutRow, cells map[scene.Cell
 			showHint := row.CellID == foldTarget
 			key := cellLayoutKeyFor(toolCell, width, fp)
 			key.foldHint = showHint
-			cached := cache.get(key)
-			if cached == nil {
-				cached = foldedToolChainScreenRows(toolCell, width, theme, showHint)
-				cache.put(key, cached)
+			if cached := cache.get(key); cached != nil {
+				segments = append(segments, layoutRenderSegment{cellID: row.CellID, job: -1, rows: cached})
+			} else {
+				jobs = append(jobs, layoutRenderJob{cell: toolCell, key: key, showHint: showHint, folded: true})
+				segments = append(segments, layoutRenderSegment{cellID: row.CellID, job: len(jobs) - 1})
 			}
-			result = appendCachedCellRows(result, row.CellID, cached)
 			renderedStructured[row.CellID] = struct{}{}
 			continue
 		}
 		if cell, found := cells[row.CellID]; found && cellUsesStructuredPresentation(cell) {
 			key := cellLayoutKeyFor(cell, width, fp)
-			cached := cache.get(key)
-			if cached == nil {
-				cached = structuredTranscriptScreenRows(cell, width, theme)
-				cache.put(key, cached)
+			if cached := cache.get(key); cached != nil {
+				segments = append(segments, layoutRenderSegment{cellID: row.CellID, job: -1, rows: cached})
+			} else {
+				jobs = append(jobs, layoutRenderJob{cell: cell, key: key})
+				segments = append(segments, layoutRenderSegment{cellID: row.CellID, job: len(jobs) - 1})
 			}
-			result = appendCachedCellRows(result, row.CellID, cached)
 			renderedStructured[row.CellID] = struct{}{}
 			continue
 		}
@@ -259,22 +287,103 @@ func layoutTranscriptScreenRowsImpl(rows []scene.LayoutRow, cells map[scene.Cell
 		for index < len(rows) && rows[index].CellID == row.CellID && rows[index].Gap == 0 {
 			index++
 		}
-		var cellRows []AppScreenRow
 		if cell, found := cells[row.CellID]; found {
 			key := cellLayoutKeyFor(cell, width, fp)
-			cached := cache.get(key)
-			if cached == nil {
-				cached = wrapPlainCellRows(rows[start:index], row.CellID, width, cell.Kind == scene.KindUser)
-				cache.put(key, cached)
+			if cached := cache.get(key); cached != nil {
+				segments = append(segments, layoutRenderSegment{cellID: row.CellID, job: -1, rows: cached})
+			} else {
+				jobs = append(jobs, layoutRenderJob{
+					cell:     cell,
+					key:      key,
+					plain:    true,
+					userKind: cell.Kind == scene.KindUser,
+					rows:     rows[start:index],
+				})
+				segments = append(segments, layoutRenderSegment{cellID: row.CellID, job: len(jobs) - 1})
 			}
-			cellRows = cached
 		} else {
-			cellRows = wrapPlainCellRows(rows[start:index], row.CellID, width, false)
+			segments = append(segments, layoutRenderSegment{
+				cellID: row.CellID,
+				job:    -1,
+				rows:   wrapPlainCellRows(rows[start:index], row.CellID, width, false),
+			})
 		}
-		result = appendCachedCellRows(result, row.CellID, cellRows)
 		index-- // 补偿 for 步进：index 已指向下一个不同 cell 或末尾
 	}
+
+	// Phase 2：并行渲染 miss 任务。渲染是纯函数；共享缓存（cellRowsCache /
+	// RenderCache / foldOmissions）自带锁，cache.put 仍留在 Phase 3 单线程执行。
+	rendered := make([][]AppScreenRow, len(jobs))
+	if len(jobs) > 0 {
+		workers := layoutParallelRenderMaxWorkers
+		if workers <= 0 {
+			workers = runtime.GOMAXPROCS(0)
+		}
+		if workers > len(jobs) {
+			workers = len(jobs)
+		}
+		if workers > 1 && layoutParallelRenderThreshold >= 0 && len(jobs) >= layoutParallelRenderThreshold {
+			var next int32
+			var wg sync.WaitGroup
+			for worker := 0; worker < workers; worker++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						jobIndex := int(atomic.AddInt32(&next, 1)) - 1
+						if jobIndex >= len(jobs) {
+							return
+						}
+						rendered[jobIndex] = renderLayoutJob(jobs[jobIndex], width, theme)
+					}
+				}()
+			}
+			wg.Wait()
+		} else {
+			for jobIndex := range jobs {
+				rendered[jobIndex] = renderLayoutJob(jobs[jobIndex], width, theme)
+			}
+		}
+	}
+
+	// Phase 3：顺序装配（与顺序渲染逐行一致）。
+	result := make([]AppScreenRow, 0, len(rows))
+	for _, segment := range segments {
+		if segment.gap > 0 {
+			for count := 0; count < segment.gap; count++ {
+				result = append(result, AppScreenRow{
+					// A semantic boundary is an empty transcript row, not
+					// unowned bottom-pane headroom. Keeping its physical owner
+					// as Transcript matches the existing owned viewport while
+					// TranscriptGap retains the semantic distinction needed by
+					// later HistoryCommit handling.
+					Owner:         renderengine.RowOwnerTranscript,
+					CellID:        segment.cellID,
+					TranscriptGap: true,
+				})
+			}
+			continue
+		}
+		cellRows := segment.rows
+		if segment.job >= 0 {
+			cellRows = rendered[segment.job]
+			cache.put(jobs[segment.job].key, cellRows)
+		}
+		result = appendCachedCellRows(result, segment.cellID, cellRows)
+	}
 	return result
+}
+
+// renderLayoutJob 执行一个首渲染任务（纯函数；并行安全）。
+func renderLayoutJob(job layoutRenderJob, width int, theme style.ThemeContext) []AppScreenRow {
+	switch {
+	case job.folded:
+		return foldedToolChainScreenRows(job.cell, width, theme, job.showHint)
+	case job.plain:
+		return wrapPlainCellRows(job.rows, job.cell.ID, width, job.userKind)
+	default:
+		return structuredTranscriptScreenRows(job.cell, width, theme)
+	}
 }
 
 // layoutTranscriptTailScreenRows 只布局 transcript 的尾部，返回结果与「全量布局
