@@ -821,12 +821,11 @@ func fixedSurfaceRowsContain(rows [][]vt.Cell, text string) bool {
 	return strings.Contains(builder.String(), text)
 }
 
-// lastActionIsTranscriptSurface 允许 P1.2 异步规划的结果 action 出现在 transcript
-// 动作之后：plan worker 在锁外完成 screening 后投递 HistoryPlanWindowReady，
-// waitUIActorIdle 会等它落地，因此"最后一条"可能是结果 action。transcript 确实
-// 已被 reduce 的证据由随后的 AppState 断言给出。
+// lastActionIsTranscriptSurface 在同步规划语义下只认 ReplaceTranscript：plan
+// worker 已删除（P1-1 Stage 3），screening 在 reduce 内联完成，不再有结果 action
+// 排在 transcript 动作之后。
 func lastActionIsTranscriptSurface(last string) bool {
-	return last == "ReplaceTranscript" || last == "HistoryPlanWindowReady"
+	return last == "ReplaceTranscript"
 }
 
 func TestChatRuntimeEventBridge_OrdinaryEventUsesUIActorReducer(t *testing.T) {

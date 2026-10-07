@@ -18,10 +18,6 @@ type UIControllerConfig struct {
 	// 历史容量在同一会话内保持恒定，历史渲染无法接管动态状态栏所在行。
 	// 只应由统一渲染器 owner（TerminalSessionPresenter 路径）开启。
 	ReserveDynamicStatusRow bool
-	// AsyncTranscriptPlan 启用 P1.2 plan worker：transcript 规划把 screening
-	// 窗口派发给控制器内部 goroutine，reducer 锁内只做派发与铸 commit 收尾。
-	// 默认关闭（同步路径），生产 wiring 切换见 P1.2 Stage B3。
-	AsyncTranscriptPlan bool
 }
 
 // EffectConsumer receives effects after the reducer has published the
@@ -247,18 +243,12 @@ type UIController struct {
 	// but do not consume external mailbox capacity: accepting a facade mutation
 	// from an already accepted reducer action must never wait for that same
 	// reducer to resume consumption.
-	followups []UIAction
-	coalesce  map[string]int // coalescable key -> queue 内下标
-	closed    bool
-	cap       int
-	reducer   Reducer
-	onEffect  func(Effect)
-	// planWorker 与 planWorkerConfigured：异步 screening 的 worker 句柄。句柄
-	// 自身通过请求通道与原子旗标与 actor 通信，不依赖 c.mu（reduce 在锁内调用
-	// 它的 Request，取 c.mu 会重入死锁，见 controller_plan_worker.go）。
-	planWorker           asyncTranscriptPlanWorker
-	planWorkerConfigured bool
-
+	followups        []UIAction
+	coalesce         map[string]int // coalescable key -> queue 内下标
+	closed           bool
+	cap              int
+	reducer          Reducer
+	onEffect         func(Effect)
 	posted           uint64
 	processed        uint64
 	dropped          uint64
@@ -304,11 +294,6 @@ func NewUIController(cfg UIControllerConfig, reducer Reducer, onEffect func(Effe
 		onEffect: onEffect,
 	}
 	c.cond = sync.NewCond(&c.mu)
-	if cfg.AsyncTranscriptPlan {
-		c.planWorkerConfigured = true
-		c.planWorker.req = make(chan transcriptPlanWindowRequest, planWorkerRequestCapacity)
-		c.planWorker.done = make(chan struct{})
-	}
 	// 初始状态就带上常驻预留：任何一帧（包括第一帧、无动态模型的空闲帧）都不得
 	// 因为动态行占位变化而移动 band 边界。
 	c.state.Bottom.ReserveDynamicStatusRow = cfg.ReserveDynamicStatusRow
@@ -437,7 +422,6 @@ func (c *UIController) Run() {
 	if c == nil {
 		return
 	}
-	c.startPlanWorker()
 	for {
 		c.mu.Lock()
 		for len(c.queue) == 0 && len(c.followups) == 0 && !c.closed {
@@ -509,9 +493,6 @@ func (c *UIController) Run() {
 			c.reducerNanos += applyNanos
 			if !panicked {
 				effects = c.collectPostActionEffectsLocked(effects)
-				// P1.2 Stage B2：worker 启用时把 sink 注入语义状态；reducer 的
-				// 规划路径据此把 screening 派发出去（nil = Stage A 同步规划）。
-				c.state.planSink = c.planSinkForReduce()
 				c.state = reduceUIControllerState(c.state, action, c.revision)
 				if historyCommitWakeNeeded(action, c.state) {
 					effects = append(effects, HistoryCommitWakeEffect{})
@@ -625,8 +606,7 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 			ReplaceTranscriptAction, SetThemeContextAction,
 			SetActiveCellAction, UpdateActiveCellAction, SetSemanticActiveCellProjectionAction,
 			FinalizeActiveCellAction, Resize, LeaseReleased,
-			HistoryProjectionRecovered,
-			HistoryPlanWindowReady:
+			HistoryProjectionRecovered:
 			return true
 		}
 	}
@@ -659,8 +639,7 @@ func historyCommitWakeNeeded(action UIAction, state UIControllerState) bool {
 		SetSemanticActiveCellProjectionAction,
 		FinalizeActiveCellAction, Resize,
 		LeaseReleased, HistoryProjectionRecovered,
-		HistoryCommitAcknowledged, HistoryCommitsAcknowledged,
-		HistoryPlanWindowReady:
+		HistoryCommitAcknowledged, HistoryCommitsAcknowledged:
 		return true
 	default:
 		return false
@@ -805,7 +784,6 @@ func (c *UIController) Close() {
 	}
 	c.closed = true
 	c.mu.Unlock()
-	c.stopPlanWorker()
 	c.cond.Broadcast()
 }
 
@@ -813,16 +791,12 @@ func (c *UIController) Close() {
 // effect callbacks 已派发。它不等待 effect callback 启动的异步工作；那类
 // worker 必须提供自己的受控等待接口。用于测试与确定性路径；生产代码不应
 // 依赖（producer 只 Post）。
-//
-// 例外：P1.2 的 plan worker 属于*语义状态机内部*的委派——锁内 reduce 不再同步
-// 完成 screening，若 WaitIdle 不等它，装载/覆盖度断言会读到半应用状态。因此
-// 未 Close 时在飞请求计入繁忙；Close 后不再等待（结果不会再回来，等待会挂死）。
 func (c *UIController) WaitIdle() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
-	for len(c.queue) > 0 || len(c.followups) > 0 || c.inFlight || c.delivering || c.planInFlightLocked() {
+	for len(c.queue) > 0 || len(c.followups) > 0 || c.inFlight || c.delivering {
 		c.cond.Wait()
 	}
 	c.mu.Unlock()
@@ -841,7 +815,7 @@ func (c *UIController) WaitIdleTimeout(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
 		c.mu.Lock()
-		idle := len(c.queue) == 0 && len(c.followups) == 0 && !c.inFlight && !c.delivering && !c.planInFlightLocked()
+		idle := len(c.queue) == 0 && len(c.followups) == 0 && !c.inFlight && !c.delivering
 		c.mu.Unlock()
 		if idle {
 			return true
@@ -1140,8 +1114,6 @@ func actionClassString(action UIAction) string {
 		return "HistoryProjectionRecovered"
 	case HistoryProjectionInvalidated:
 		return "HistoryProjectionInvalidated"
-	case HistoryPlanWindowReady:
-		return "HistoryPlanWindowReady"
 	case ContinueHistoryPlanAction:
 		return "ContinueHistoryPlan"
 	case RuntimeEvent:

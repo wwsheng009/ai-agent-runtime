@@ -66,90 +66,10 @@ func transcriptPlanSnapshotFor(state AppState) transcriptPlanSnapshot {
 	return snap
 }
 
-// screenTranscriptPlanWindow 是 P1.2 的 screening 相位：纯布局，**不读 ledger、
+// screenTranscriptPlanWindow 是 screening 相位：纯布局，**不读 ledger、
 // 不读 HistoryEffects**，输出即全量布局（无预算单遍）。
 func screenTranscriptPlanWindow(snap transcriptPlanSnapshot) []AppScreenRow {
 	return layoutTranscriptScreenRows(snap.layoutRows, snap.byID, snap.mutable, snap.width, snap.theme)
-}
-
-// transcriptPlanSink 是 reducer 与 plan worker 之间的请求通道（P1.2 Stage B）。
-// RequestTranscriptPlanWindow 必须非阻塞且线程安全（worker 可能在忙）；返回 false
-// 表示无法受理，reducer 回退到同步内联规划。
-type transcriptPlanSink interface {
-	RequestTranscriptPlanWindow(req transcriptPlanWindowRequest) bool
-}
-
-// transcriptPlanWindowRequest 是一次 screening 的完整输入。cells 是 live
-// Transcript.Cells 的值切片别名——"无原地写者"不变量（见 transcriptPlanSnapshot
-// 注释与守护测试）保证 worker 与 actor 并发读安全；byID/mutable/layoutRows 由
-// worker 侧从 cells 派生，不随请求传递。
-type transcriptPlanWindowRequest struct {
-	Seq             uint64
-	PlanInputsEpoch uint64
-	Inputs          transcriptPlanInputs
-	Cells           []scene.TranscriptCell
-	Width           int
-	Height          int
-	Generation      uint64
-	Theme           style.ThemeContext
-	Projection      bool
-}
-
-// transcriptPlanSnapshotForRequest 是 worker 侧的请求消费：从请求里的 cells 重建
-// screening 需要的快照（byID/mutable/layoutRows 全部在 worker 内派生）。
-func transcriptPlanSnapshotForRequest(req transcriptPlanWindowRequest) transcriptPlanSnapshot {
-	transcript := TranscriptState{Cells: req.Cells}
-	width := req.Width
-	if width < 1 {
-		// 与锁内快照（transcriptPlanMintSnapshotFor）保持同一兜底：几何未到达时
-		// 布局仍有确定性宽度，结果是否采用由结果栅栏决定。
-		width = 80
-	}
-	return transcriptPlanSnapshot{
-		cells:      req.Cells,
-		byID:       transcriptCellsByID(transcript),
-		mutable:    mutableTranscriptCellIDs(transcript),
-		layoutRows: transcript.LayoutRows(req.Generation),
-		width:      width,
-		generation: req.Generation,
-		theme:      req.Theme,
-	}
-}
-
-// screenTranscriptPlanWindowRequest 在 worker 侧消费一个 screening 请求（无预算
-// 单遍），返回布局结果与实测耗时。
-func screenTranscriptPlanWindowRequest(req transcriptPlanWindowRequest) ([]AppScreenRow, time.Duration) {
-	snap := transcriptPlanSnapshotForRequest(req)
-	started := time.Now()
-	rows := screenTranscriptPlanWindow(snap)
-	return rows, time.Since(started)
-}
-
-// dispatchTranscriptPlanWindow 在 reducer 侧派发一个窗口请求。seq 只在请求被受理
-// 时前进：被拒绝的请求不占用 seq，也不置 in-flight（回退同步）。
-func dispatchTranscriptPlanWindow(state *UIControllerState, inputs transcriptPlanInputs) bool {
-	sink := state.planSink
-	if sink == nil {
-		return false
-	}
-	effects := &state.HistoryEffects
-	req := transcriptPlanWindowRequest{
-		Seq:             effects.planRequestSeq + 1,
-		PlanInputsEpoch: effects.planInputsEpoch,
-		Inputs:          inputs,
-		Cells:           state.Transcript.Cells,
-		Width:           state.Geometry.Width,
-		Height:          state.Geometry.Height,
-		Generation:      state.Geometry.Generation,
-		Theme:           state.Theme,
-		Projection:      state.SemanticActiveCellProjection,
-	}
-	if !sink.RequestTranscriptPlanWindow(req) {
-		return false
-	}
-	effects.planRequestSeq = req.Seq
-	effects.planRequestInFlight = true
-	return true
 }
 
 // transcriptPlanRetention 记录"整 cell 提交集可保留"的复用段：cell 内容
@@ -172,10 +92,10 @@ func (r *transcriptPlanRetention) mark(id scene.CellID, revision uint64) {
 	r.cells[transcriptPlanCellIdentity{id: id, revision: revision}] = struct{}{}
 }
 
-// mintTranscriptPlanWindow 是 P1.2 的铸 commit 相位（锁内）：按快照的 byID/width/
-// theme/generation 解读 rows，其余输入（frontier、settled）一律在 live 状态上求值。
+// mintTranscriptPlan 是铸 commit 相位（锁内）：按快照的 byID/width/theme/
+// generation 解读 rows，其余输入（frontier、settled）一律在 live 状态上求值。
 // A2 第二刀：active 不再铸提交（停铸），finalize 从 source 0 全量铸；skipRows 恒 0。
-func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows []AppScreenRow) ([]HistoryCommit, transcriptPlanRetention) {
+func mintTranscriptPlan(state AppState, snap transcriptPlanSnapshot, rows []AppScreenRow) ([]HistoryCommit, transcriptPlanRetention) {
 	frontierCells, _ := canonicalHistoryCommitFrontier(state)
 	// A2 第一刀（停铸 active）：mutable 期间不再铸 active 提交；finalize 时从
 	// source 0 一次性铸全量 transcript 提交。旧 active 铸路径保留在
@@ -244,7 +164,7 @@ func planEligibleHistoryCommitsWithin(state AppState) ([]HistoryCommit, transcri
 	}
 	snap := transcriptPlanSnapshotFor(state)
 	rows := screenTranscriptPlanWindow(snap)
-	commits, retention := mintTranscriptPlanWindow(state, snap, rows)
+	commits, retention := mintTranscriptPlan(state, snap, rows)
 	return commits, retention
 }
 
@@ -699,24 +619,6 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	// 单遍规划要么完整覆盖，要么没有候选；PlanStalled 仅为旧诊断字段保留。
 	effects := &state.HistoryEffects
 	effects.PlanStalled = false
-	inputs := currentTranscriptPlanInputs(state)
-	// P1.2 Stage B：装了 plan worker 时，锁内只派发 screening 请求；结果以
-	// HistoryPlanWindowReady 回到 reducer 铸 commit 并收尾。在飞期间不重复派发。
-	// 派发失败（sink 拒绝/无 worker）回退同步。
-	if state.planSink != nil {
-		// 空 transcript（无任何 cell）的完整规划是平凡的：不派发 worker，直接按
-		// 完整结果落账。启动期与纯几何变化期的派发是纯粹的空往返（P1.2 B3）。
-		if len(state.Transcript.Cells) == 0 {
-			applyTranscriptPlan(state, nil, transcriptPlanRetention{})
-			return
-		}
-		if effects.planRequestInFlight {
-			return
-		}
-		if dispatchTranscriptPlanWindow(state, inputs) {
-			return
-		}
-	}
 	// P16：规划器本体（screening + 铸 commit，含入队）的耗时归因。这是锁内最贵
 	// 的一段，必须能回答「P12 的冻结是不是花在规划上」；memo 命中（上方早退）
 	// 不算一次规划，因此不记录，避免把空转计成规划。
@@ -728,8 +630,8 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 }
 
 // applyTranscriptPlan 把一次完整规划（无预算单遍）落到队列状态上：membership
-// reconcile（复用段整 cell 跳过）+ memo。同步路径与异步结果 action 共用这一份
-// 实现，保证两条路径的投递语义逐字一致。
+// reconcile（复用段整 cell 跳过）+ memo。Stage 3 起这是唯一实现（无异步结果
+// 路径）。
 func applyTranscriptPlan(state *UIControllerState, commits []HistoryCommit, retained transcriptPlanRetention) {
 	effects := &state.HistoryEffects
 	effects.PlanIncomplete = false
@@ -737,53 +639,11 @@ func applyTranscriptPlan(state *UIControllerState, commits []HistoryCommit, reta
 	recordTranscriptPlanMemo(state, len(commits))
 }
 
-// handleHistoryPlanWindowReady 是异步 screening 结果的 reducer 端收尾。
-//
-// 栅栏顺序固定（P1.2 审查）：先看 seq——不等于当前请求即已被更新的请求取代，直接
-// 丢弃且不清 in-flight（新请求仍有效）；再看失效序号/输入指纹，任何一项不成立都
-// 丢弃结果并**立即按当前输入重新派发**。全部通过后，在锁内用 mint 快照铸 commit
-// 并走共用收尾。
-func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowReady) {
-	effects := &state.HistoryEffects
-	if a.seq != effects.planRequestSeq {
-		return
-	}
-	effects.planRequestInFlight = false
-	inputs := currentTranscriptPlanInputs(state)
-	inputsMoved := a.planInputsEpoch != effects.planInputsEpoch || a.inputs != inputs
-	// 栅栏集合必须与同步路径**等价**：锁内同步规划不检查几何/冻结/投影态（那是
-	// executor 交付侧的职责），结果栅栏若比它严格，就会在那些状态持续时丢弃结果
-	// 且不再安装计划 —— 实测症状是 native history 永远收不到内容
-	// （TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory 等）。
-	// 唯一的判据是"这次 screening 是否仍对应一组最新输入"。
-	stale := inputsMoved
-	if stale {
-		effects.PlanStalled = false
-		// 输入在飞行期间移动 ⇒ 存在一组更新且可规划的输入，新请求携带当前输入，
-		// 因此下一轮结果必然匹配——重派发有界。
-		if state.planSink != nil {
-			dispatchTranscriptPlanWindow(state, inputs)
-		}
-		return
-	}
-	mintStarted := time.Now()
-	snap := transcriptPlanMintSnapshotFor(state.AppState)
-	commits, retention := mintTranscriptPlanWindow(state.AppState, snap, a.rows)
-	// 归因：screening 由 worker 侧计时，这里补上锁内 mint + 收尾的部分。
-	effects.recordTranscriptPlanTiming(a.screenDuration + time.Since(mintStarted))
-	applyTranscriptPlan(state, commits, retention)
-}
-
-// planContinuationPending reports whether a budget-truncated plan still owes
-// cells and has not already been proven unable to advance at the current plan
-// inputs. The executor reads it to decide whether a wake with an empty queue
-// and no recovery obligation should ask the reducer to continue the plan
-// instead of going idle on a transcript it only partly delivered.
+// planContinuationPending 曾是"预算截断计划欠账"的谓词。Stage 2 起规划单遍完整，
+// PlanIncomplete 不再置位，因此恒为 false；Stage 4 删除该谓词与全部消费方
+// （executor kick / wake 门 / snapshot 读点），当前保留用于诊断兼容。
 func (s HistoryEffectQueueState) planContinuationPending() bool {
-	// 在飞请求期间不算 pending：screening 已委托给 worker。若仍为 true，executor
-	// 的 kick 分支会每个轮次 Post 一枚 barrier Continue（run 无 sleep），形成
-	// actor↔executor 热旋转；结果 action 自身的 wake 谓词负责重新唤醒。
-	return s.PlanIncomplete && !s.PlanStalled && !s.planRequestInFlight
+	return s.PlanIncomplete && !s.PlanStalled
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell

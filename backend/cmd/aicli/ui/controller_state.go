@@ -21,11 +21,6 @@ type UIControllerState struct {
 	AppState
 	Effects  EffectResultState
 	LastDraw DrawRequested
-	// planSink 非 nil 时，transcript 规划把 screening 窗口交给控制器侧 plan worker
-	// （P1.2 Stage B），reducer 只做请求派发与结果收尾；nil（直接 reduce 的测试与
-	// 兼容路径）保持 Stage A 的锁内同步规划。不经 Clone 语义传播问题：真值只在
-	// actor 应用动作前由 controller 注入（见 B2）。
-	planSink transcriptPlanSink
 }
 
 func (s UIControllerState) Clone() UIControllerState {
@@ -370,10 +365,6 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// 旧续跑 kick 的兼容入口（Stage 4 删除）：按当前输入重跑规划，memo
 		// 命中即空操作。
 		syncHistoryEffectsForTranscript(&state)
-	case HistoryPlanWindowReady:
-		// plan worker 的 screening 结果（P1.2 Stage B1）：seq/失效序号/指纹/恢复门
-		// 全部通过后，在锁内铸 commit 并走与同步路径共用的收尾。
-		handleHistoryPlanWindowReady(&state, a)
 	case HistoryProjectionRecovered:
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.markProjectionKnown()

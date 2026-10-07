@@ -151,6 +151,42 @@ memo 语义回归"完整规划已落"（无预算单遍下每次落账都完整�
 均绿）。**Stage 3 门控**：单次规划成本已知且有界（4001 cell ≈ 190ms；resume 级
 会话的 E2E 单遍收敛总时长 93s 主要花在交付写盘），去异步可启动。
 
+### 2.5 Stage 3 实施记录（2026-10-07，已完成）
+
+**删除面**（同步单遍成为唯一路径）：
+
+- worker 本体：`controller_plan_worker.go` 整文件（`asyncTranscriptPlanWorker`、
+  请求通道、`start/stop/WaitPlanWorker/AsyncTranscriptPlanEnabled`、
+  `planInFlightLocked`）。
+- 协议面：`transcriptPlanSink`/`transcriptPlanWindowRequest`/
+  `transcriptPlanSnapshotForRequest`/`screenTranscriptPlanWindowRequest`/
+  `dispatchTranscriptPlanWindow`；`planSink` 注入（controller reduce 前）。
+- 结果面：`HistoryPlanWindowReady` action、reducer case、两处 wake 白名单、
+  actionClassString；`planRequestSeq/planRequestInFlight/planInputsEpoch` 三重
+  栅栏字段与 `invalidateTranscriptPlanMemo` 的 epoch 自增。
+- 配置与装配：`UIControllerConfig.AsyncTranscriptPlan`、生产 wiring
+  （`chat_ui_actor.go`）、`WaitIdle`/`WaitIdleTimeout` 的 plan worker 例外。
+- 命名清理：`mintTranscriptPlanWindow` → `mintTranscriptPlan`。
+- 诊断兼容：`PlanRequestInFlight`/`PlanWindowsDelegated` 保留为 deprecated 零值
+  （commands debug 文档仍打印）。
+
+**测试面**：删除 `controller_plan_worker_test.go`（5 用例）、
+`transcript_plan_async_test.go`（6 用例，含陈旧结果重派发/epoch 失效/sink 回退）、
+`chat_ui_actor_async_plan_test.go`；`lastActionIsTranscriptSurface` 收敛为
+`ReplaceTranscript`。**断点重规划语义**：陈旧结果通道已不存在；显式失效
+（装载替换/no-op 安装/epoch 重置）仍走 `invalidateTranscriptPlanMemo` → 下一次
+迁移同步重规划，语义等价且无在飞窗口。
+
+**附带修复（覆盖门禁用例的 watchdog 记账）**：`TestArmedResume...` 的 converge
+循环此前在 idle 迭代上检查 deadline —— 某次 `flush()` 的长交付跨过 deadline 后，
+下一轮读到已收敛的 idle 状态仍被误报 "never converged"（现场 dump：pending=0、
+全终态、Projection/Reconciliation 干净；ledger 头指针探针 6000 条全排空绿，
+排除产品侧 phantom pending）。修正为只在**非 idle** 迭代检查 deadline，并把墙钟
+上限放宽到 120s（race ×6）；修复后 E2E 连跑 2/2 绿（77s/80s）。
+
+**验收**：全量组合 ui 113.3s ok + commands 183.4s ok；`-race` 点检
+（Deferred/Prepend/Settled/WriterFence/Wake 组）ok。
+
 ## 3. 分阶段实施（每阶段独立提交，失败即回滚）
 
 ### Stage 0 基线与门禁（已完成，2026-10-06；实测记录见 §1.5）
@@ -179,7 +215,7 @@ memo 语义回归"完整规划已落"（无预算单遍下每次落账都完整�
 - 2c：memo 契约改写（删 `PlanIncomplete` 早退）。
 - 验收：冷/热单次规划锁内耗时实测（harness 口径）；截断类测试删除或改写；全覆盖组绿。
 
-### Stage 3 去异步（1 天）
+### Stage 3 去异步（已完成，2026-10-07；实施记录见 §2.5）
 
 - 删 worker/sink/请求/`HistoryPlanWindowReady`/三重栅栏字段/wiring/`WaitIdle` 例外/`AsyncTranscriptPlan` 配置；`TestProductionUIActorEnablesAsyncTranscriptPlan` 删除。
 - 验收：装载/覆盖度断言在同步语义下绿；`-race` 抽验绿。

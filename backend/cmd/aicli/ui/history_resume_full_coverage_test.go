@@ -131,7 +131,12 @@ func TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation(t *testing.T) 
 	// pending=0 时缺口仍然存在，所以收敛之后还要单独断言覆盖度。
 	converge := func() {
 		t.Helper()
-		deadline := time.Now().Add(raceScaledDeadline(60 * time.Second))
+		// 120s（race 下 ×6）是"单次 49200 行交付在负载机器上的墙钟上限"，不是
+		// 性能断言：deadline 只在**非 idle** 的迭代上检查。此前在 idle 迭代上
+		// 也检查 deadline，一旦某次 flush() 的长交付刚好跨过 60s，下一轮读到
+		// 已经收敛的 idle 状态仍会被误报为"never converged"（现场 dump：
+		// pending=0、全终态、Projection/Reconciliation 干净）。
+		deadline := time.Now().Add(raceScaledDeadline(120 * time.Second))
 		stable := 0
 		for {
 			state := controller.State()
@@ -145,9 +150,16 @@ func TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation(t *testing.T) 
 				}
 			} else {
 				stable = 0
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("history projection never converged: %#v", state.HistoryEffects)
+				if time.Now().After(deadline) {
+					head, tokens, byToken, unresolved := uint64(0), 0, 0, 0
+					if ledger := state.HistoryEffects.ledger; ledger != nil {
+						head, tokens, byToken = ledger.queueHeadToken, len(ledger.tokens), len(ledger.byToken)
+						unresolved = ledger.unresolvedCount
+					}
+					t.Fatalf("history projection never converged: pending=%d head=%d tokens=%d byToken=%d unresolved=%d summary=%+v state=%#v",
+						historyPendingCount(state), head, tokens, byToken, unresolved,
+						state.HistoryEffects.Summary(), state.HistoryEffects)
+				}
 			}
 			flush()
 		}

@@ -34,20 +34,6 @@ type HistoryEffectQueueState struct {
 	planResumeRow        int
 	planResumeScreenRows int
 	planResumeInputs     transcriptPlanInputs
-	// P1.2 Stage B1：异步 screening 的请求协议。装了 planSink 时 transcript 规划
-	// 不再锁内 inline：reducer 派发一个窗口请求（seq 单调），worker 侧完成布局后以
-	// HistoryPlanWindowReady 回到 reducer，用 seq/planInputsEpoch/输入指纹三重栅栏
-	// 判定结果是否仍然可用。
-	//   - planRequestSeq 只在请求被受理（sink 返回 true）时前进；结果 seq 不等于它
-	//     即视为被更新的请求取代，直接丢弃且不清 in-flight（新请求仍有效）。
-	//   - planRequestInFlight 期间 planContinuationPending 为 false：screening 已
-	//     委托，executor 不得再 kick，否则是无 sleep 的热旋转。
-	//   - planInputsEpoch 由 invalidateTranscriptPlanMemo 自增：装载替换 /
-	//     no-op 安装这类"显式失效"不进任何指纹，没有它，失效前产生的结果会通过
-	//     指纹比对并复活刚被清掉的游标（P1.2 审查漏项 A）。
-	planRequestSeq      uint64
-	planRequestInFlight bool
-	planInputsEpoch     uint64
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
@@ -443,9 +429,8 @@ type HistoryEffectDiagnostics struct {
 	ReconciliationRequired bool
 	PlanIncomplete         bool
 	PlanStalled            bool
-	// P1.2 Stage B2 委派读数：worker 是否持有未结算窗口、累计受理的窗口请求数。
-	// 生产 wiring 打开 AsyncTranscriptPlan 后，这两项是"规划确实走 worker"的
-	// 直接证据（plan-windows>0 且不随 plan-inflight 长期为真）。
+	// P1.2 worker 已删除（P1-1 Stage 3）；这两项保留为 deprecated 零值，维持
+	// debug JSON/文档的字段稳定性。
 	PlanRequestInFlight  bool
 	PlanWindowsDelegated uint64
 	NextToken            uint64
@@ -463,8 +448,6 @@ func (s HistoryEffectQueueState) Diagnostics() HistoryEffectDiagnostics {
 		ReconciliationRequired: s.ReconciliationRequired,
 		PlanIncomplete:         s.PlanIncomplete,
 		PlanStalled:            s.PlanStalled,
-		PlanRequestInFlight:    s.planRequestInFlight,
-		PlanWindowsDelegated:   s.planRequestSeq,
 		NextToken:              s.NextToken,
 		TerminalEpoch:          s.TerminalEpoch,
 		Summary:                s.Summary(),
@@ -785,9 +768,6 @@ func (s *HistoryEffectQueueState) invalidateTranscriptPlanMemo() {
 		// 也可能已经不在新 ledger 里（外部整体替换、no-op 安装从未持有该计划），
 		// 游标必须一起作废。
 		s.clearTranscriptPlanResume()
-		// 显式失效同时作废所有在飞请求：它们的结果按旧 ledger 的前缀铸 commit，
-		// 放行会通过指纹比对并复活刚被清掉的游标（A.4 空屏路径）。
-		s.planInputsEpoch++
 	}
 }
 

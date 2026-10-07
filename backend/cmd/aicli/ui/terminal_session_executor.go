@@ -827,7 +827,7 @@ func (e *TerminalSessionExecutor) waitLastControllerAction() bool {
 // waitControllerAcceptedApplied 有界等待"调用时刻已接受的全部 action"完成
 // apply——runOne 读 schedule 前的状态栅栏。种子快照/替换动作是异步 apply 的：
 // 立即读 schedule 会在 pending token 出现前空跑一轮并退出，而后续唤醒只由
-// 特定 action 的 reducer 转移触发（HistoryPlanWindowReady 等），一旦错过
+// 特定 action 的 reducer 转移触发（历史/几何迁移等），一旦错过
 // 就再也没有 claim 机会（全量负载下
 // TestPrintVisibleChatHistory_UnifiedHandoffsOverflowedCanonicalHistory 稳定复现
 // 17 个 entry 全 Pending）。与旧 WaitIdleTimeout 的区别：只等本次调用时刻
