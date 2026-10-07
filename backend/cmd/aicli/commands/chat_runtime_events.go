@@ -104,11 +104,10 @@ type chatRuntimeEventBridge struct {
 	runErr                      error
 	// lateDropMu / lateDropStats 记录被围栏或归属守卫拒绝的 UI 动作（诊断用：
 	// 围栏此前只写 debug 日志，"等待态没有 run"的撕裂不可观测）。
-	lateDropMu    sync.Mutex
-	lateDropStats chatRuntimeLateDropStats
-	// publishedDrops 是已上报到 EventBus（→ usageanalytics "fence" 来源）的计数
-	// 水位；EndRun 只上报增量，避免同一批拒绝被每轮重复累加。
-	publishedDrops  chatRuntimeLateDropStats
+	lateDropMu sync.Mutex
+	// lateDropStats 是事件桥单点 drop 遥测（§4 行 14 合并）：累计计数 +
+	// 已上报水位（Reported*，EndRun 只上报增量，避免同一批拒绝被每轮重复累加）。
+	lateDropStats   chatRuntimeLateDropStats
 	rendered        map[string]struct{}
 	historySeedSeen map[string]struct{}
 	// historySeedClaimedItems / historySeedItemByIdentity / historySeedFrontItemID
@@ -4543,6 +4542,11 @@ type chatRuntimeLateDropStats struct {
 	LastType       string
 	LastReason     string
 	LastAt         time.Time
+	// Reported* 是已上报到 EventBus（→ usageanalytics "fence" 来源）的计数水位；
+	// 与累计计数同址（单点计数器），不再另持一份并行镜像。
+	ReportedIdleNoRun      uint64
+	ReportedClosedAfterRun uint64
+	ReportedActiveMismatch uint64
 }
 
 func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, reason string) {
@@ -4681,17 +4685,16 @@ func (b *chatRuntimeEventBridge) publishRenderFenceDrops(turnID string) {
 	}
 	b.lateDropMu.Lock()
 	stats := b.lateDropStats
-	published := b.publishedDrops
-	idle := stats.IdleNoRun - published.IdleNoRun
-	closed := stats.ClosedAfterRun - published.ClosedAfterRun
-	activeMismatch := stats.ActiveMismatch - published.ActiveMismatch
+	idle := stats.IdleNoRun - stats.ReportedIdleNoRun
+	closed := stats.ClosedAfterRun - stats.ReportedClosedAfterRun
+	activeMismatch := stats.ActiveMismatch - stats.ReportedActiveMismatch
 	if idle == 0 && closed == 0 && activeMismatch == 0 {
 		b.lateDropMu.Unlock()
 		return
 	}
-	b.publishedDrops.IdleNoRun = stats.IdleNoRun
-	b.publishedDrops.ClosedAfterRun = stats.ClosedAfterRun
-	b.publishedDrops.ActiveMismatch = stats.ActiveMismatch
+	b.lateDropStats.ReportedIdleNoRun = stats.IdleNoRun
+	b.lateDropStats.ReportedClosedAfterRun = stats.ClosedAfterRun
+	b.lateDropStats.ReportedActiveMismatch = stats.ActiveMismatch
 	reason := stats.LastReason
 	b.lateDropMu.Unlock()
 

@@ -245,7 +245,7 @@ flowchart TB
 | 11 | plan 完整性 | —（不存在） | — | 规划单线程同步后删除 `PlanIncomplete/PlanStalled/续跑组`（P1-1 Stage 2–4） | Stage 1 设计完成 |
 | 12 | 空闲判定 | —（事件驱动 ack） | — | `waitControllerIdle` 已删、executor 已改 `WaitActionApplied`；**残余**：`WaitIdleTimeout` 的 1ms 轮询仍在（`controller.go:852`），经 P1-3 §3.7 明确**保留的有界超时兜底**触达（close drain / legacy 辅助 / `waitUIActorIdleBounded` 5s）→ 可选事件化见差距收敛方案 B1 | **部分**（残余为显式保留项） |
 | 13 | backoff 进度 | —（fail-closed + 恢复） | — | reset backoff 状态机已随 S3/S4（`9e7383c1`/`7ade9732`）删除；guard 降级为 `recoveryBackoff*` 限速（§9.5） | 已收敛 |
-| 14 | 降级/预算遥测 | 事件桥单点计数器 | 只读快照 | 合并 `lateDropStats` 与 `publishedDrops` 两份无锁镜像（扫描点名） | 部分 |
+| 14 | 降级/预算遥测 | 事件桥单点计数器 | 只读快照 | `lateDropStats` 与上报水位合并为单点计数器（`Reported*` 同址，2026-10-07） | 已落地 |
 
 **判定**：矩阵是"修一处、坏一处"的结构性解药——任何新状态字段必须先在本文登记所有者；
 无所有者的镜像不得新增，已有镜像按上表收敛。
