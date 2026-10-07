@@ -100,3 +100,15 @@
 4. **R4 `sourceEnd` 在游标比较中的角色**：fragment 划分下同 `sourceStart` 不同 `sourceEnd`
    的键必须有序且无歧义；比较器定为
    `(cellID, revision, sourceStart, fragmentID, sourceEnd)`，由等价性测试钉住。
+
+## 6. 实施记录
+
+- **3a（`1f375719`，2026-10-07）**：`HistoryCommitLedger` 增 `mintedFrontier` +
+  `mintedFrontierValid` 纯镜像（`Enqueue` 单调推进、`Clone` 保真、`mintedThrough` 判定）；
+  `historyCommitSourceKeyLess` 定义 allocation 序（cellID → revision → sourceStart →
+  fragmentID → sourceEnd）。等价性用例
+  `TestMintedFrontierMirrorsMintedSourcesAcrossResumePrepend`（resume 先装 + deferred
+  prepend + 交付后重规划：候选 `mintedThrough ≡ bySource/压缩墓碑判定`，且较早页确实被铸造）
+  与 `TestMintedFrontierCloneAndMonotonicity` 绿。全量回归：ui 127.8s、commands 186.3s 绿。
+  **结论**：allocation 序定理在关键流程上经验成立；R4（`sourceEnd` 序）由用例钉住；
+  3b 可按计划将规划 skip 切换到 `mintedThrough` + live 检查（双跑对照后删旧路径）。
