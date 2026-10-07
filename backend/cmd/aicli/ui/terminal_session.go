@@ -712,7 +712,9 @@ func (s *TerminalSession) FlushTransaction(plan TerminalTransactionPlan) Termina
 		}
 		return TerminalTransactionResult{Frame: result}
 	}
-	plan = plan.Clone()
+	// 只读契约（P3-S2）：调用方在提交后不得再变更 plan（Frame.Rows /
+	// RenderRows / History 载荷）；本会话对 plan 只读，故不再做防御性深拷贝。
+	// 载荷的「一次构造」发生在 compose 阶段（HistoryCommit.Clone）。
 	if !plan.Valid() {
 		result := TerminalFrameResult{Err: ErrInvalidTerminalFrame}
 		if plan.History != nil {
@@ -871,10 +873,26 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild
 	hadKnownProjection := s.screen.ProjectionValidity() == renderengine.ProjectionKnown && !s.lease.Active
 	projectionKnown := hadKnownProjection
-	candidateScreen := s.screen.Clone()
-	if candidateScreen == nil {
-		result := TerminalFrameResult{Frame: s.frame, Err: ErrTerminalWriterMissing}
-		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Err: ErrTerminalWriterMissing})
+	modelHeight := area.Height
+	if modelHeight < 1 {
+		modelHeight = 1
+	}
+	modelWidth, currentHeight := s.screen.Size()
+	// P3-S2：稳态帧就地事务化，不再每帧 Clone 整张双缓冲网格。结构变更帧
+	// （租约、几何、视口位置或尺寸变化）要 Resize/Invalidate 清空双缓冲，
+	// 零字节失败必须让已确认模型保持原样（既有契约），因此这些帧仍走
+	// 事务性候选克隆；Clone 同时保留为回退开关。PrepareFlush 已改为延迟
+	// 提交（front/投影只在 ConfirmFlush 推进），就地路径的成功/失败语义
+	// 由此与克隆路径一致。
+	structuralChange := s.lease.Active || resizeRebuild ||
+		modelWidth != area.Width || currentHeight != modelHeight || s.viewport != area
+	candidateScreen := s.screen
+	if structuralChange {
+		candidateScreen = s.screen.Clone()
+		if candidateScreen == nil {
+			result := TerminalFrameResult{Frame: s.frame, Err: ErrTerminalWriterMissing}
+			return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Err: ErrTerminalWriterMissing})
+		}
 	}
 	if s.lease.Active {
 		candidateScreen.Invalidate()
@@ -884,11 +902,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
-	modelHeight := area.Height
-	if modelHeight < 1 {
-		modelHeight = 1
-	}
-	if width, height := candidateScreen.Size(); width != area.Width || height != modelHeight || s.viewport != area {
+	if modelWidth != area.Width || currentHeight != modelHeight || s.viewport != area {
 		candidateScreen.Resize(area.Width, modelHeight)
 		projectionKnown = false
 	}
@@ -1052,6 +1066,9 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		}
 	}
 	candidateScreen.ConfirmFlush()
+	if structuralChange {
+		s.screen = candidateScreen
+	}
 	if os.Getenv("TERM_SESSION_TRACE") != "" {
 		fmt.Printf("TERMTRACE frame=%d gen=%d outBottom=%d area.Top=%d area.H=%d prevTop=%d prevH=%d prevKnown=%v prevTermH=%d histKnown=%v histStarted=%v tailRows=%d transitionBytes=%d historyBytes=%d histInsertedRows=%d fullRepaint=%v initHist=%v resize=%v\n",
 			s.frame, frame.LayoutGeneration, frame.OutputBottomRow, area.Top, area.Height,
@@ -1063,7 +1080,6 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 			fmt.Printf("TERMTRACE_BYTES frame=%d:\n%q\n", s.frame, bytes)
 		}
 	}
-	s.screen = candidateScreen
 	s.geometry = frame.Geometry
 	s.generation = frame.LayoutGeneration
 	s.terminalEpoch = frame.TerminalEpoch
@@ -1187,7 +1203,8 @@ func (s *TerminalSession) CommitHistory(commit HistoryCommit) HistoryCommitResul
 	if s == nil {
 		return HistoryCommitResult{Err: ErrTerminalWriterMissing}
 	}
-	commit = commit.Clone()
+	// 只读契约（P3-S2）：commit 由执行器以已分离的 claim 快照提交
+	// （terminalSessionClaimedBatchLocked 已克隆），此处不再二次深拷贝。
 	if !commit.Valid() {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}

@@ -178,10 +178,16 @@ func TestScreenModelWriteFailureRequiresRecoveryBeforeDiff(t *testing.T) {
 	if output := model.PrepareFlush(); output == "" {
 		t.Fatal("initial frame did not paint")
 	}
-	if got := model.ProjectionValidity(); got != ProjectionUnknown {
-		t.Fatalf("prepared frame projection = %v, want unknown", got)
+	// P3-S2：PrepareFlush 不再推进 front/投影（延迟提交到 ConfirmFlush）。
+	// 未确认写之前投影保持上一已确认值；只有 MarkWriteFailed/ConfirmFlush
+	// 才改变它。失败写仍必须让下一帧走恢复全量重绘。
+	if got := model.ProjectionValidity(); got != ProjectionKnown {
+		t.Fatalf("prepared frame projection = %v, want known (deferred commit)", got)
 	}
 	model.MarkWriteFailed()
+	if got := model.ProjectionValidity(); got != ProjectionUnknown {
+		t.Fatalf("failed write projection = %v, want unknown", got)
+	}
 
 	model.StageRow(3, testRow(8, "changed"))
 	output := model.Flush()

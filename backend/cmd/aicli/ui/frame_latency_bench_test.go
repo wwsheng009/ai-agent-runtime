@@ -147,7 +147,11 @@ func newFrameLatencyHarness(b *testing.B, historyCells int) *frameLatencyHarness
 	// 窗口占比：S1 起每帧只物化 viewport 行；rows 1..Top-1（历史区）不再
 	// SGR 编码/VT 展开。此处只记录，循环结束后上报（计时循环前的
 	// ReportMetric 会被测试框架丢弃）。
-	probe := ComposeTerminalFramePlan(controller.State().AppState)
+	// DiagnosticState 与生产执行器的快照同构：无投递账本。State()/AppState()
+	// 会深拷贝整张 HistoryCommitLedger（S2 pprof：300 cells 时占挂具分配的
+	// 75%，纯属测量噪声），生产逐帧路径（terminalSessionSchedule/Snapshot）
+	// 从不克隆账本。
+	probe := ComposeTerminalFramePlan(controller.DiagnosticState().AppState)
 	harness.viewportRows = terminalFrameViewportArea(probe).Height
 	harness.skippedRows = probe.Geometry.Height - harness.viewportRows
 	return harness
@@ -157,7 +161,9 @@ func newFrameLatencyHarness(b *testing.B, historyCells int) *frameLatencyHarness
 func (h *frameLatencyHarness) stepOnce(b *testing.B) bool {
 	b.Helper()
 	h.source.WriteString(frameBenchChunk)
-	current := h.controller.State().Active
+	// 只读 active 栅栏：与生产适配器一致地使用无账本访问器；不得用
+	// State()/AppState()（它们会克隆整张投递账本）。
+	current := h.controller.ActiveCellState()
 	next := benchMutableActive(h.source.String())
 	next.Revision = current.Revision + 1
 

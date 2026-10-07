@@ -287,10 +287,13 @@ func (m *ScreenModel) Flush() string {
 	return output
 }
 
-// PrepareFlush builds the ANSI diff and advances the tentative front frame,
-// but leaves its physical projection Unknown until ConfirmFlush. A later
-// MarkWriteFailed therefore turns the following transaction into a recovery
-// full repaint rather than allowing an unsafe incremental diff.
+// PrepareFlush builds the ANSI diff without committing anything: front, the
+// physical projection, and forceRepaint all stay at their confirmed values
+// until ConfirmFlush. The session's steady-state transactions stage in place,
+// so a zero-byte write failure must leave the confirmed model byte-identical
+// (P3-S2); deferring the front commit is what makes that safe. A write
+// failure is still reported through MarkWriteFailed, which forces the next
+// transaction into a recovery full repaint.
 func (m *ScreenModel) PrepareFlush() string {
 	if m == nil {
 		return ""
@@ -325,26 +328,26 @@ func (m *ScreenModel) PrepareFlush() string {
 			}
 		}
 	}
-	for r := 0; r < m.height; r++ {
-		copy(m.front[r], m.back[r])
-	}
-	m.forceRepaint = false
-	// The bytes have not reached a terminal yet. Keep the physical projection
-	// unknown until the presenter confirms a complete target write.
-	m.projection = ProjectionUnknown
 	if m.trace != nil && len(events) > 0 {
 		m.trace.recordFrame(events, m.height)
 	}
 	return output.String()
 }
 
-// ConfirmFlush marks the tentative front commit as physically known. It is a
-// no-op for nil models and is intentionally separate from Flush so a failed
-// terminal write cannot be mistaken for a rendered frame.
+// ConfirmFlush commits the staged back frame after the target accepted every
+// byte: front adopts back, a pending full repaint is consumed, and the
+// physical projection becomes known. It is a no-op for nil models and is
+// intentionally separate from PrepareFlush so a failed terminal write cannot
+// be mistaken for a rendered frame.
 func (m *ScreenModel) ConfirmFlush() {
-	if m != nil {
-		m.projection = ProjectionKnown
+	if m == nil {
+		return
 	}
+	for r := 0; r < m.height; r++ {
+		copy(m.front[r], m.back[r])
+	}
+	m.forceRepaint = false
+	m.projection = ProjectionKnown
 }
 
 // MarkWriteFailed invalidates the physical projection after a zero-byte,
