@@ -3,62 +3,8 @@ package ui
 import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
-	"io"
-	"os"
-	"strings"
 	"testing"
 )
-
-func captureStatusBarStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	oldStdout := os.Stdout
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	os.Stdout = writer
-	restoreTerminalOutput := SetTerminalOutputForTesting(writer)
-	restored := false
-	restore := func() {
-		if restored {
-			return
-		}
-		restoreTerminalOutput()
-		os.Stdout = oldStdout
-		restored = true
-	}
-	defer restore()
-
-	fn()
-	restore()
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close writer: %v", err)
-	}
-	out, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	_ = reader.Close()
-	return string(out)
-}
-
-func TestStatusBarRenderDoesNotClearBelowStatusArea(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	bar := NewStatusBar(10)
-	bar.SetHeight(1)
-	bar.Update("State", "Ready")
-
-	out := captureStatusBarStdout(t, func() {
-		bar.Render()
-	})
-	if strings.Contains(out, "\x1b[0J") || strings.Contains(out, "\x1b[J") {
-		t.Fatalf("status bar render must not clear from status row to screen end, got %q", out)
-	}
-	if !strings.Contains(out, "State: Ready") {
-		t.Fatalf("expected rendered status item, got %q", out)
-	}
-}
 
 func TestStatusBarThinkingDoesNotWriteDirectlyToStderr(t *testing.T) {
 	bar := NewStatusBar(1).WithDefaultStatus()

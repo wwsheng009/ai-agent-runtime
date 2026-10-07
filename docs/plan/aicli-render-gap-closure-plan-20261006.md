@@ -219,7 +219,7 @@ C1 ──► C2 ──► P2 Slice 1 ──►（P2 其余切片）
 | A1-4 | legacy console editor stderr 闭包 | **done** | `4f44ea7d` | 函数内化 + 基线同步 |
 | A1-5 | tool_executor stdout 转换登记 | **done** | `3a88d33f` | allowlist 注释 |
 | A1-6 | stderr 边缘收口（G3） | **done** | `86889760` | profile overlay/resume claim-first；其余分类登记（基线注释 (a)–(d)） |
-| A1-7 | legacy StatusBar 栅栏（G9） | **done** | `3a88d33f` | fenced-dead 标注 + 基线登记 |
+| A1-7 | legacy StatusBar 栅栏（G9） | **done** | `3a88d33f` | fenced-dead 标注 + 基线登记；2026-10-07 升级为整体删除（fenced-dead 清理：Render 族 + `Layout.Render/Refresh`，基线同步） |
 | A1-8 | 余项分类登记/收敛（8a–8f） | **done** | `3a88d33f`、`b3144171` | 8a–8f 全部登记；exec_event_processor 纳入门禁 |
 | A2 | 单写端断言扩展 + e2e | **done** | — | 栅栏覆盖四类驱动 + 进程零字节（PASS）；真机 e2e PASS（2026-10-06，Windows Terminal 自动断言 5 组） |
 | B0 | 保留项登记表回填 §7.5 | **done** | `12f5ed9d` | 设计文档 §7.5.1（14 行登记表） |

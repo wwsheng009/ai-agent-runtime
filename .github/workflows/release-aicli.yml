@@ -268,6 +268,17 @@ jobs:
           set -euo pipefail
           go run ./tools/terminal-inventory -root .. -out ../terminal-output-inventory.json -verify
 
+      # P0 writer inventory gate (gap G2/A0): recursive walk + blind-spot
+      # scanner (package-level vars, struct/func literals, non-arg0 refs) over
+      # interactive direct writers in ui and commands. Baselines are
+      # migration-debt ledgers, not authorizations; any added/removed site
+      # fails the build.
+      - name: Verify interactive direct-writer inventory (ui + commands)
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go test ./cmd/aicli/ui ./cmd/aicli/commands -run 'DirectWriterInventory|WriterInventory' -count=1
+
   build-frontend:
     name: Build embedded frontend (webui dist)
     runs-on: ubuntu-latest

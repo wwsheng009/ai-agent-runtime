@@ -333,58 +333,6 @@ func (l *Layout) writeRightAligned(row int, plainWidth int, styled string) {
 	_, _ = WriteTerminalText(os.Stdout, strings.Repeat(" ", pad)+styled)
 }
 
-// Render 渲染整个布局
-func (l *Layout) Render() {
-	if !l.enabled {
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.calculateAreas()
-
-	// 保存当前光标位置
-	l.terminal.SaveCursor()
-
-	// 清屏
-	l.terminal.Clear()
-
-	// 绘制聊天区域边界（Document + role adapter）
-	if l.chatArea != nil {
-		l.writeRightAligned(l.chatArea.Row, DisplayWidth("聊天区域"), l.FormatChatChrome())
-	}
-
-	// 绘制分隔线
-	if l.chatArea != nil && l.statusArea != nil {
-		separatorRow := l.statusArea.Row - 1
-		l.terminal.MoveToRow(separatorRow)
-		l.terminal.ClearFromCursor()
-		_, _ = WriteTerminalText(os.Stdout, l.FormatSeparatorLine()+clearToEOL)
-	}
-
-	// 渲染状态栏
-	if l.statusBar != nil {
-		l.statusBar.Clear()
-		l.statusBar.SetRow(l.statusArea.Row)
-		l.statusBar.WithDefaultStatus()
-		l.statusBar.Render()
-	}
-
-	// 恢复光标位置
-	l.terminal.RestoreCursor()
-}
-
-// RenderStatusBar 仅渲染状态栏
-func (l *Layout) RenderStatusBar() {
-	if !l.enabled || l.statusBar == nil {
-		return
-	}
-
-	l.terminal.SaveCursor()
-	l.statusBar.Render()
-	l.terminal.RestoreCursor()
-}
-
 // RenderInputArea 渲染输入区域（Document + WriteTerminal*）
 func (l *Layout) RenderInputArea(prompt, input string) {
 	if !l.enabled || l.inputArea == nil {
@@ -528,15 +476,6 @@ func (l *Layout) UpdateStatusRole(key string, value interface{}, role style.Role
 		l.statusBar.UpdateRole(key, value, role)
 	}
 	return l
-}
-
-// Refresh 刷新显示
-func (l *Layout) Refresh() {
-	if !l.enabled {
-		return
-	}
-
-	l.Render()
 }
 
 // Enable 启用布局

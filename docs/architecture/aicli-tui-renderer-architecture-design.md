@@ -217,11 +217,11 @@ flowchart TB
 |---|---|---|
 | 标题 OSC / 铃 BEL | 经 `TerminalSession` 旁路方法（session 内串行、可记录、lease 感知） | P0 已落地（`c159a118`） |
 | 编辑器控制序列（bracketed-paste/focus 等） | 同上，经 session 旁路；组件不持 `os.Stdout` | P0 已落地 |
-| stderr | 交互期统一走 `NotifyChatDiagnostic` 或日志文件；禁止与 stdout 同 tty 直写 | P0 部分（边缘路径持续收口） |
+| stderr | 交互期统一走 `NotifyChatDiagnostic` 或日志文件；禁止与 stdout 同 tty 直写 | P0 部分（选择输出已 claim-first 收口；启动/配置边缘分类登记，持续收口） |
 | fullscreen lease | lease 活跃冻结历史交付；往返只经同一 presenter transport | 已落地，随 P1 简化 |
 | resize / theme | 几何 probe 单点输入 → `AppState` → `LayoutGeneration++`；未交付载荷重定基/失效；仅重画窗口 | P1-2b 已落地主体 |
 | 诊断（`/debug`、PaintTrace） | 只读观测；零字段补偿；不参与布局/diff/输出 | 已落地 |
-| legacy `FixedBottomSurface` | 只作 facade/几何桥；物理写单向栅栏（不可复活） | P0 已栅栏；fenced-dead 待清理 |
+| legacy `FixedBottomSurface` | 只作 facade/几何桥；物理写单向栅栏（不可复活） | P0 已栅栏；直写族待清理（StatusBar legacy 渲染面已删，2026-10-07） |
 
 ---
 
@@ -477,7 +477,7 @@ sequenceDiagram
 
 | 阶段 | 目标 | 已完成 | 进行中 / 待办 |
 |---|---|---|---|
-| **P0 写端归一** | 所有字节经统一边界；旁路可记录 | 控制序列旁路（`c159a118`：标题/铃/编辑器序列）；守卫与回归栅栏（`09190ee8`，64 项债务台账）；legacy surface 单向栅栏 | stderr 边缘路径收口；CI 白名单门禁（`render/output` 之外 0 命中）；fenced-dead 清理 |
+| **P0 写端归一** | 所有字节经统一边界；旁路可记录 | 控制序列旁路（`c159a118`：标题/铃/编辑器序列）；守卫与回归栅栏（`09190ee8`，64 项债务台账）；legacy surface 单向栅栏；**CI 门禁接线（2026-10-07：release workflow 显式运行 ui+commands writer inventory）；StatusBar legacy 直写渲染面删除（Render 族 + `Layout.Render/Refresh`，基线同步）** | stderr 边缘路径持续收口（选择输出已 claim-first，其余分类登记）；FixedBottomSurface 直写族清理 |
 | **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–3（单飞写游标、六态归一、计数器游标）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | P1-1 第 4 步（删续跑组 ≈305 refs，受 P1-1 子计划门控）；残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
 | **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 522ms/op + CPU profile 归因）；Stage 1 设计细化（§1.6：身份模型/D2 反例） | Stage 1 编码（D2 测试先行 → 1c/1d → 基准 ≤174ms）；Stage 2（无预算同步化，冷启动门控）；Stage 3（去异步）；Stage 4（删续跑组） |
 | **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 全部完成**（第一刀 `130cc7f5`；第二刀 `7471d34a`/`80738513`/`e3236de9`）；**replay 切片 S1–S5 全部完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`：恒 settle、3J 路径与 armed 诊断全删、目标语义用例 + 真机 e2e 装载/追加阶段）** | 锚定切片；剩余特例族 |
@@ -554,7 +554,7 @@ sequenceDiagram
 | G6 | **§4 未登记镜像 9 组**（M1–M9：`runActive`/轮终态账本/`historySeed*`/legacy 几何/viewport 双表示/terminalEpoch 双份/final 三字段/恢复诊断/drop 遥测） | 见 §4 本轮补登 | 中 | 已补登 §4；映射（D3）：M4→A 批 fenced-dead、M5→P1-2b 残余、M6→P2 TerminalEpoch 语义化、其余随 P1/P2 字段清理 |
 | G7 | **生产轮询多处**：1ms（5 处）、5ms（backlog worker/settle）、10ms（backoff/lease）、50–100ms（Windows/overlay 平台）；多数为 P1-3 §3.7 明确保留的队列等待/有界兜底 | `chat_runtime_events.go:1840/1981/2003/2597/3033/4803`；`screen_lease.go:82-89` 等（`terminal_session_executor.go:1037` 已随 P2 replay 切片删除） | 低 | 实施方案 B0 登记表；随 P2 backoff/legacy 退役删减 |
 | G8 | **区域未登记项**：编辑器状态行/队列指示/band 顶距/fullscreen 族/主帧 defer/ComposerLine 替换语义 | 见 §10 本轮补登 | 低 | 已补登 §10 |
-| G9 | **legacy `StatusBar` 潜伏第二写端**：生产不可达，但 `StatusBar.Render` 直写 os.Stdout，无栅栏 | `statusbar.go:197-252`；唯一构造 `layout.go:58`（无生产 Render 调用） | 低-中 | 已 fenced-dead 标注（A1-7：`statusbar.go` Render 注释 + 基线登记）；重接线须先加物理栅栏 |
+| G9 | **legacy `StatusBar` 潜伏第二写端**：生产不可达，但 `StatusBar.Render` 直写 os.Stdout，无栅栏 | `statusbar.go`（原 197-252）；唯一构造 `layout.go:58` | 低-中 | **已删除（2026-10-07 fenced-dead 清理）**：Render/RenderWithLayout/RenderSimple/RenderIfChanged/ForceRender + `Layout.Render/RenderStatusBar/Refresh` 全删，基线同步；重接线须先过 writer inventory 门禁 |
 | G10 | **web/TUI statusbar 段集合不一致**：同源同构建函数，但 web 缺 state/goal/model/provider/fast（goal/fast 未说明） | `web_statusbar.go:125-210` vs `chat_interaction.go:2878-2912` | 低 | 已文档注明（D2）：web 缺段为现状差异，web 侧对齐另评；goal/fast 为 TUI 专属段 |
 | G11 | **doc/code drift**：`terminal_output.go` 注释宣称 `SetLegacyBinding` 重定向，全仓无实现 | `terminal_output.go:21` 注释 | 低 | 已修正注释（A1-2，2026-10-06） |
 | G12 | **口径不一致**：`app_layout.StatusRows`（nil 时为 0）与 row plan 恒预留 1 行 | `app_layout.go:110` vs `bottom_pane_row_plan.go:121` | 低 | 已统一（D1：物理预留口径 + 钉测试） |

@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +18,11 @@ type StatusItem struct {
 	Width int         // 最小宽度（终端单元格）
 }
 
-// StatusBar 状态栏组件
+// StatusBar 状态栏组件。
+//
+// P0 fenced-dead 清理（G9/A1-7 后续）：legacy 直写渲染面（Render/RenderWithLayout/
+// RenderSimple/RenderIfChanged/ForceRender）已删除——生产唯一物理写路径是
+// unified TerminalSession；如需重新接线，必须先接入统一写端并过 writer inventory 门禁。
 type StatusBar struct {
 	terminal *Terminal
 	theme    *Theme
@@ -27,7 +30,6 @@ type StatusBar struct {
 	row      int // 状态栏所在的行号
 	height   int // 状态栏高度
 	mu       sync.RWMutex
-	force    bool // 是否强制刷新
 }
 
 // NewStatusBar 创建新的状态栏
@@ -193,92 +195,6 @@ func (s *StatusBar) renderDocumentLocked(doc render.Document) string {
 	return renderDocumentWithProfile(doc, s.theme)
 }
 
-// Render 渲染状态栏。
-//
-// Fenced-dead（G9/A1-7）：生产不调用 Render/RenderWithLayout/RenderSimple——
-// 唯一构造点是 layout.go NewLayout，Layout.Render/RenderStatusBar 均无生产
-// 调用者。三者经 WriteTerminalText(os.Stdout, …) 直写，已登记 writer
-// inventory；若需重新接线，必须先接入 physical fence。
-func (s *StatusBar) Render() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.terminal == nil {
-		return
-	}
-
-	// 保存当前光标位置
-	s.terminal.SaveCursor()
-
-	// 计算每个项目的显示
-	for i := 0; i < s.height; i++ {
-		s.terminal.MoveTo(s.row+i, 1)
-		s.terminal.ClearLine()
-
-		if i < len(s.items) {
-			doc := render.Document{Blocks: []render.Block{{
-				Kind:  render.BlockStatus,
-				Lines: []render.Line{statusItemLine(s.items[i], true)},
-			}}}
-			_, _ = WriteTerminalText(os.Stdout, s.renderDocumentLocked(doc))
-		}
-		s.terminal.ClearLine()
-	}
-
-	// 恢复光标位置
-	s.terminal.RestoreCursor()
-}
-
-// RenderWithLayout 使用布局方式渲染状态栏
-func (s *StatusBar) RenderWithLayout() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.terminal == nil || len(s.items) == 0 {
-		return false
-	}
-
-	row := s.row
-
-	// 清除状态栏区域
-	s.terminal.SaveCursor()
-	for i := 0; i < s.height; i++ {
-		s.terminal.MoveTo(row+i, 1)
-		s.terminal.ClearLine()
-	}
-
-	width := s.terminal.Width()
-	s.terminal.MoveTo(row, 1)
-	_, _ = WriteTerminalText(os.Stdout, s.renderDocumentLocked(s.documentLocked(width)))
-	s.terminal.ClearLine()
-
-	s.terminal.RestoreCursor()
-	return true
-}
-
-// RenderSimple 简化版渲染（单行）
-func (s *StatusBar) RenderSimple() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.terminal == nil {
-		return
-	}
-
-	// 保存光标
-	s.terminal.SaveCursor()
-
-	// 清除并移动到状态栏行
-	s.terminal.MoveTo(s.row, 1)
-	s.terminal.ClearLine()
-
-	_, _ = WriteTerminalText(os.Stdout, s.renderDocumentLocked(s.documentLocked(s.terminal.Width())))
-	s.terminal.ClearLine()
-
-	// 恢复光标
-	s.terminal.RestoreCursor()
-}
-
 // Row 返回状态栏所在的行号
 func (s *StatusBar) Row() int {
 	s.mu.RLock()
@@ -333,22 +249,6 @@ func (s *StatusBar) WithAIThinking(thinking bool) *StatusBar {
 		return s.UpdateRole("Status", "Thinking...", style.RoleWarning)
 	}
 	return s.UpdateRole("Status", "Ready", style.RoleSuccess)
-}
-
-// RenderIfChanged 如果内容有变化则渲染
-func (s *StatusBar) RenderIfChanged() {
-	s.Render()
-}
-
-// ForceRender 强制渲染
-func (s *StatusBar) ForceRender() {
-	s.mu.Lock()
-	s.force = true
-	s.mu.Unlock()
-	s.Render()
-	s.mu.Lock()
-	s.force = false
-	s.mu.Unlock()
 }
 
 // GetModel 获取当前模型
