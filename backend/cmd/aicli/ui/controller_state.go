@@ -311,14 +311,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// Batch proof follows the same rule as a single ack: the terminal wrote
 		// this exact ordered snapshot, so a superseded reducer generation must
 		// not turn delivered rows into an unresolved delivery.
-		ackErr := state.HistoryEffects.ackBatch(a.Commits, a.Frame, a.LayoutGeneration)
-		if ackErr != nil {
-			// A batch that no longer matches the reducer snapshot may have
-			// reached native scrollback in full. Quarantine every delivered
-			// token so viewport recovery cannot expose a retryable suffix.
-			state.HistoryEffects.markDeliveredBatchUnresolved(a.Commits, ackErr)
+		unresolved, ackErr := state.HistoryEffects.ackBatch(a.Commits, a.Frame, a.LayoutGeneration)
+		if unresolved {
+			// The covered set resolved per token: only tokens whose bytes can no
+			// longer be proven became unresolved. Raise the recovery obligation
+			// for exactly those instead of quarantining the whole batch.
 			state.HistoryEffects.ProjectionUnknown = true
-		} else if len(a.Commits) > 0 {
+			state.HistoryEffects.ReconciliationRequired = true
+		} else if ackErr == nil && len(a.Commits) > 0 {
 			// 同单条 ack：无条件重跑规划（memo 命中即空操作）。
 			syncHistoryEffectsForTranscript(&state)
 		}
@@ -327,8 +327,8 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			firstToken = a.Commits[0].Token
 			lastToken = a.Commits[len(a.Commits)-1].Token
 		}
-		traceHistoryReduction(state, "ackBatch n=%d first=%d last=%d batchGen=%d frame=%d err=%v",
-			len(a.Commits), firstToken, lastToken, a.LayoutGeneration, a.Frame, ackErr)
+		traceHistoryReduction(state, "ackBatch n=%d first=%d last=%d batchGen=%d frame=%d unresolved=%t err=%v",
+			len(a.Commits), firstToken, lastToken, a.LayoutGeneration, a.Frame, unresolved, ackErr)
 	case HistoryCommitFailed:
 		if a.LayoutGeneration != state.Geometry.Generation {
 			state.HistoryEffects.ProjectionUnknown = true

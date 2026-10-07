@@ -149,7 +149,7 @@ func TestHistoryEffectsReducer_BootstrapBatchAcknowledgesOrderedPendingRangesAto
 	}
 }
 
-func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBatch(t *testing.T) {
+func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesOnlyChangedToken(t *testing.T) {
 	state := historyEffectTestState(t, 2)
 	entries := state.HistoryEffects.Entries()
 	if len(entries) < 3 {
@@ -175,20 +175,36 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesWholeDeliveredBa
 		Commits: commits, Frame: 9, LayoutGeneration: state.Geometry.Generation,
 	}, 4)
 
-	for _, commit := range commits {
-		entry := historyCommitEntry(t, state, commit.Token)
-		if !entry.IsFailed() || entry.AckFrame != 0 ||
-			!entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrCommitSourceChanged) {
-			t.Fatalf("mismatched delivered token %d was not quarantined: %#v", commit.Token, entry)
-		}
+	// 覆盖集逐 token 解析：只有真正失配的 token 变成未决隔离，其余成员保留
+	// 已证明的交付事实（旧实现整批隔离，把已交付行也拖入恢复义务）。
+	head := historyCommitEntry(t, state, commits[0].Token)
+	if head.State != HistoryCommitDelivered || head.AckFrame != 9 {
+		t.Fatalf("unchanged covered head must stay delivered: %#v", head)
 	}
-	if !state.HistoryEffects.ProjectionUnknown || len(state.HistoryEffects.Pending()) != 0 {
-		t.Fatalf("mismatched batch remained retryable: %#v", state.HistoryEffects)
+	changed := historyCommitEntry(t, state, commits[1].Token)
+	if !changed.IsFailed() || changed.AckFrame != 0 ||
+		!changed.MayHavePartiallyWritten || !errors.Is(changed.Failure, ErrCommitSourceChanged) {
+		t.Fatalf("changed covered token was not quarantined: %#v", changed)
+	}
+	tail := historyCommitEntry(t, state, commits[2].Token)
+	if tail.State != HistoryCommitDelivered || tail.AckFrame != 9 {
+		t.Fatalf("unchanged covered tail must stay delivered: %#v", tail)
+	}
+	if !state.HistoryEffects.ProjectionUnknown || !state.HistoryEffects.ReconciliationRequired ||
+		len(state.HistoryEffects.Pending()) != 0 {
+		t.Fatalf("unresolved covered token must raise the recovery obligation: %#v", state.HistoryEffects)
 	}
 
 	state = reduceUIControllerState(state, HistoryProjectionRecovered{LayoutGeneration: state.Geometry.Generation}, 5)
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.HasPending() {
 		t.Fatalf("viewport-only recovery exposed an unresolved batch: %#v", state.HistoryEffects)
+	}
+	if !state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("unresolved covered token must still require reconciliation: %#v", state.HistoryEffects)
+	}
+	state = reduceUIControllerState(state, HistoryReconciliationSettled{LayoutGeneration: state.Geometry.Generation}, 6)
+	if state.HistoryEffects.ReconciliationRequired || state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("settle did not clear the recovery obligation: %#v", state.HistoryEffects)
 	}
 }
 

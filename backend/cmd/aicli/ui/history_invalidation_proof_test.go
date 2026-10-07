@@ -81,12 +81,13 @@ func TestHistoryEffectQueue_BatchUnresolvedReleasesClaimedCursor(t *testing.T) {
 		t.Fatalf("markInFlight: %v", err)
 	}
 	commits := []HistoryCommit{entries[0].Commit, entries[1].Commit}
-	queue.markDeliveredBatchUnresolved(commits, errors.New("batch mismatch"))
+	// 畸形覆盖集（执行器不变式违反）整批 fail-closed：每个成员保留物理事实。
+	// 投影恢复义务由 handler 依据返回的 unresolved 标志置位。
+	if !queue.quarantineCoveredBatch(commits, errors.New("batch mismatch")) {
+		t.Fatalf("malformed covered batch must report an unresolved delivery: %#v", queue)
+	}
 	if queue.WriteCursor != 0 {
 		t.Fatalf("quarantined batch left the write cursor pinned at %d", queue.WriteCursor)
-	}
-	if !queue.ReconciliationRequired {
-		t.Fatalf("batch quarantine must require reconciliation: %#v", queue)
 	}
 	for _, entry := range queue.Entries() {
 		if entry.State != HistoryCommitQuarantined || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
@@ -166,5 +167,60 @@ func TestHistoryCommitExecutor_InvalidatedClaimDefersWithoutWrite(t *testing.T) 
 	}
 	if state.HistoryEffects.WriteCursor != 0 || state.HistoryEffects.ProjectionUnknown {
 		t.Fatalf("clean gate refusal left claim/recovery inconsistent: %#v", state.HistoryEffects)
+	}
+}
+
+// A1-2b/Q3：覆盖集内被 claim 的 token 在写后带失效 pending 时，按单 token
+// 证明分类解析（invalidated+partial 未决隔离），覆盖集其余成员照常交付。
+func TestHistoryEffectQueue_CoveredBatchResolvesPendingInvalidationPerToken(t *testing.T) {
+	queue := HistoryEffectQueueState{}
+	if err := queue.enqueue(testHistoryCommit(0, 91, 3)); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	if err := queue.enqueue(testHistoryCommit(0, 92, 3)); err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+	entries := queue.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("fixture entries = %d, want 2", len(entries))
+	}
+	head, tail := entries[0].Commit, entries[1].Commit
+	if err := queue.markInFlight(head.Token, 3); err != nil {
+		t.Fatalf("markInFlight: %v", err)
+	}
+	if err := queue.invalidate(head.Token); err != nil {
+		t.Fatalf("invalidate: %v", err)
+	}
+
+	unresolved, err := queue.ackBatch([]HistoryCommit{head, tail}, 9, 3)
+	if err != nil {
+		t.Fatalf("ackBatch: %v", err)
+	}
+	if !unresolved {
+		t.Fatalf("invalidated covered head must stay unresolved: %#v", queue)
+	}
+	findEntry := func(token uint64) HistoryCommitEntry {
+		t.Helper()
+		for _, entry := range queue.Entries() {
+			if entry.Commit.Token == token {
+				return entry
+			}
+		}
+		t.Fatalf("token %d missing from %#v", token, queue.Entries())
+		return HistoryCommitEntry{}
+	}
+	entry := findEntry(head.Token)
+	if !entry.IsInvalidated() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
+		t.Fatalf("covered invalidation must resolve as unresolved isolation: %#v", entry)
+	}
+	tailEntry := findEntry(tail.Token)
+	if tailEntry.State != HistoryCommitDelivered || tailEntry.AckFrame != 9 {
+		t.Fatalf("unchanged covered tail must stay delivered: %#v", tailEntry)
+	}
+	if queue.WriteCursor != 0 || !queue.ProjectionUnknown || !queue.ReconciliationRequired {
+		t.Fatalf("covered invalidation left claim/obligation inconsistent: %#v", queue)
+	}
+	if len(queue.Pending()) != 0 {
+		t.Fatalf("unresolved covered batch stayed retryable: %#v", queue.Pending())
 	}
 }

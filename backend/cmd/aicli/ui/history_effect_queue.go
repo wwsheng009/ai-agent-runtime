@@ -546,121 +546,155 @@ func (s *HistoryEffectQueueState) ack(token, frame, generation uint64) error {
 	return nil
 }
 
-// ackBatch confirms an ordered bootstrap transaction. The first commit was
-// claimed before terminal I/O; later commits remain Pending until the same
-// successful write proves their delivery. Advancing them here preserves the
-// ledger's normal oldest-first ordering without giving TerminalSession effect
-// ownership or accepting a stale batch after a semantic replacement.
-func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, generation uint64) error {
-	if s == nil || s.ledger == nil || len(commits) == 0 {
-		return ErrCommitNotInFlight
+// ackBatch resolves one covered batch: the exact ordered commits a single
+// terminal transaction wrote. Every covered token is resolved from its own
+// ledger state with the same proof classification as the single-token path, so
+// a token that can no longer be proven semantically becomes unresolved on its
+// own instead of quarantining the whole batch. Returns whether the batch left
+// an unresolved delivery; a non-nil error means the covered set itself was
+// malformed (executor invariant violation) and failed closed as a whole.
+func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, generation uint64) (bool, error) {
+	if s == nil || s.ledger == nil {
+		return false, ErrCommitNotInFlight
 	}
-	if s.ProjectionUnknown {
-		return ErrHistoryProjectionUnknown
-	}
-	if s.hasUnresolvedTerminalDelivery() {
-		return ErrHistoryCommitRecoveryPending
+	if len(commits) == 0 {
+		return false, nil
 	}
 
-	// Validate the complete delivered snapshot before changing any entry. The
-	// terminal wrote this batch atomically, so a concurrent semantic rebase of
-	// a later Pending token must not leave an Acked prefix and a retryable tail.
+	// Shape first: the covered set must be an ordered token prefix whose head
+	// carries the claimed transaction generation. A violation cannot describe
+	// a physical write, so the whole set fails closed before any token moves.
 	previousToken := uint64(0)
-	ackGenerations := make([]uint64, len(commits))
 	for index, commit := range commits {
-		if commit.LayoutGeneration != generation || commit.Token == 0 || (previousToken != 0 && commit.Token <= previousToken) {
-			return ErrStaleLayoutGeneration
-		}
-		entry, ok := s.ledger.Entry(commit.Token)
-		if !ok || historyCommitSourceIdentity(entry.Commit) != historyCommitSourceIdentity(commit) {
-			return ErrCommitSourceChanged
-		}
-		if entry.InvalidationPending {
-			// The source was invalidated while this token was claimed. The batch
-			// bytes may be on screen, but semantic delivery can no longer be
-			// proven: fail closed so the handler quarantines the batch.
-			return ErrCommitSourceChanged
-		}
-		ackGenerations[index] = generation
-		if !historyCommitPresentationEqual(entry.Commit, commit) {
-			// The batch bytes are already proven written, but a resize that
-			// raced this same write rebases the still-Pending tail onto the
-			// new layout generation (new wrap width, new display ranges). That
-			// supersession is not a source change: identity is unchanged and
-			// the newer generation only re-presents the same delivered range.
-			// Failing the batch closed here would turn a proven handoff into an
-			// unprovable resident range and re-raise a recovery obligation that
-			// the no-replay policy can never repay. Acknowledge the entry for
-			// its own (newer) generation instead; anything else - a source
-			// replacement, a same-generation content change, or a rebased
-			// first/in-flight token - still fails closed.
-			if index == 0 || entry.State != HistoryCommitQueued ||
-				entry.Commit.LayoutGeneration <= commit.LayoutGeneration {
-				return ErrCommitSourceChanged
-			}
-			ackGenerations[index] = entry.Commit.LayoutGeneration
-		}
-		if (index == 0 && (entry.State != HistoryCommitQueued || s.WriteCursor != commit.Token)) ||
-			(index > 0 && entry.State != HistoryCommitQueued) {
-			return ErrCommitNotInFlight
+		if commit.Token == 0 || (previousToken != 0 && commit.Token <= previousToken) ||
+			(index == 0 && commit.LayoutGeneration != generation) {
+			return s.quarantineCoveredBatch(commits, ErrStaleLayoutGeneration), ErrStaleLayoutGeneration
 		}
 		previousToken = commit.Token
 	}
 
+	unresolved := false
 	for index, commit := range commits {
-		if index > 0 {
-			// Advance the single write cursor exactly as the sequential claim
-			// path would; ack clears it again below.
-			s.WriteCursor = commit.Token
-		}
-		if err := s.ack(commit.Token, frame, ackGenerations[index]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// markDeliveredBatchUnresolved records that the terminal may have accepted
-// every row from a batch whose actor snapshot could no longer be acknowledged.
-// None of those tokens may become retryable after a viewport-only recovery.
-func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []HistoryCommit, cause error) {
-	if s == nil || s.ledger == nil {
-		return
-	}
-	for _, delivered := range commits {
-		entry, ok := s.ledger.byToken[delivered.Token]
-		if !ok || entry.State == HistoryCommitDelivered {
+		entry, ok := s.ledger.Entry(commit.Token)
+		if !ok {
+			// A compacted token was already resolved; a source with no terminal
+			// record at all cannot have been minted by this ledger.
+			if !s.ledger.hasTerminalRecordForSource(historyCommitSourceIdentity(commit)) {
+				return s.quarantineCoveredBatch(commits, ErrCommitSourceChanged), ErrCommitSourceChanged
+			}
 			continue
 		}
-		wasUnresolved := entry.Unresolved()
-		switch entry.State {
-		case HistoryCommitQueued:
-			entry.State = HistoryCommitQuarantined
-			entry.Quarantine = HistoryCommitQuarantineFailed
-		case HistoryCommitQuarantined:
-			// Failed stays failed, an invalidated identity is kept but its
-			// physical fact is strengthened, and a settled quarantine keeps its
-			// settled kind (already resolved by the no-replay policy).
+		if entry.State != HistoryCommitQueued {
+			// Already resolved (delivered / quarantined / settled): the proof
+			// adds no new physical fact.
+			continue
 		}
-		entry.Failure = cause
-		entry.MayHavePartiallyWritten = true
-		entry.InvalidationPending = false
-		// Keep the unresolved counter monotonic: only a transition into an
-		// unresolved state increments it; already-unresolved entries do not.
-		if !wasUnresolved && entry.Unresolved() {
-			s.ledger.unresolvedCount++
-		}
-		s.ledger.byToken[delivered.Token] = entry
-		// Queued -> Quarantined is a terminal transition; keep the cached minimum
-		// non-terminal token from pinning on this token.
-		s.ledger.advanceQueueHeadAfterTerminal(delivered.Token)
-		// A claimed batch member can never be written again: release the cursor
-		// or it would pin ordered handoff behind a terminal token forever.
-		if s.WriteCursor == delivered.Token {
-			s.WriteCursor = 0
+		switch {
+		case entry.InvalidationPending:
+			// Committed bytes whose source was invalidated while claimed: the
+			// single-token classification applies per token (unresolved
+			// isolation), instead of a batch-wide failure.
+			s.ackCoveredToken(commit.Token, frame, generation)
+			unresolved = true
+		case index == 0 && s.WriteCursor != commit.Token:
+			// The claim that consumed this transaction is gone; the delivered
+			// bytes cannot be attributed to a retryable token.
+			s.quarantineCoveredToken(commit.Token, ErrCommitNotInFlight)
+			unresolved = true
+		case historyCommitSourceIdentity(entry.Commit) != historyCommitSourceIdentity(commit):
+			// The source was replaced while the write was in flight: the bytes
+			// on screen no longer match any live source.
+			s.quarantineCoveredToken(commit.Token, ErrCommitSourceChanged)
+			unresolved = true
+		case !historyCommitPresentationEqual(entry.Commit, commit):
+			if index > 0 && entry.Commit.LayoutGeneration > commit.LayoutGeneration {
+				// A resize raced the write and rebased this still-Pending
+				// follower onto the newer layout generation. Identity is
+				// unchanged and the newer generation only re-presents the same
+				// delivered range, so the proven handoff stays delivered at its
+				// own generation; failing it would raise an obligation that the
+				// no-replay policy can never repay.
+				s.ackCoveredToken(commit.Token, frame, entry.Commit.LayoutGeneration)
+			} else {
+				// Same-generation content change or a rebased first/in-flight
+				// token: the delivered bytes no longer match the planned source.
+				s.quarantineCoveredToken(commit.Token, ErrCommitSourceChanged)
+				unresolved = true
+			}
+		default:
+			s.ackCoveredToken(commit.Token, frame, entry.Commit.LayoutGeneration)
 		}
 	}
-	s.ReconciliationRequired = true
+	return unresolved, nil
+}
+
+// ackCoveredToken resolves one proven covered token exactly like the
+// sequential single-token path: the covered batch temporarily advances the
+// single write cursor through its ordered tokens, and each ack clears it.
+func (s *HistoryEffectQueueState) ackCoveredToken(token, frame, generation uint64) {
+	s.WriteCursor = token
+	if err := s.ack(token, frame, generation); err != nil {
+		// A covered token that cannot be acknowledged despite matching its
+		// ledger record is a ledger invariant violation; keep the physical
+		// fact by quarantining it instead of silently dropping the proof.
+		s.quarantineCoveredToken(token, err)
+	}
+}
+
+// quarantineCoveredToken records the physical fact for one covered token whose
+// bytes can no longer be proven against a live source. Returns whether the
+// token is unresolved (recovery obligation) after the transition. Only the
+// genuinely ambiguous token changes state; its neighbours keep their own
+// resolution.
+func (s *HistoryEffectQueueState) quarantineCoveredToken(token uint64, cause error) bool {
+	if s == nil || s.ledger == nil {
+		return false
+	}
+	entry, ok := s.ledger.byToken[token]
+	if !ok || entry.State == HistoryCommitDelivered {
+		return false
+	}
+	wasUnresolved := entry.Unresolved()
+	switch entry.State {
+	case HistoryCommitQueued:
+		entry.State = HistoryCommitQuarantined
+		entry.Quarantine = HistoryCommitQuarantineFailed
+	case HistoryCommitQuarantined:
+		// Failed stays failed, an invalidated identity is kept but its physical
+		// fact is strengthened, and a settled quarantine keeps its settled kind
+		// (already resolved by the no-replay policy).
+	}
+	entry.Failure = cause
+	entry.MayHavePartiallyWritten = true
+	entry.InvalidationPending = false
+	// Keep the unresolved counter monotonic: only a transition into an
+	// unresolved state increments it; already-unresolved entries do not.
+	if !wasUnresolved && entry.Unresolved() {
+		s.ledger.unresolvedCount++
+	}
+	s.ledger.byToken[token] = entry
+	// Queued -> Quarantined is a terminal transition; keep the cached minimum
+	// non-terminal token from pinning on this token.
+	s.ledger.advanceQueueHeadAfterTerminal(token)
+	// A claimed batch member can never be written again: release the cursor or
+	// it would pin ordered handoff behind a terminal token forever.
+	if s.WriteCursor == token {
+		s.WriteCursor = 0
+	}
+	return entry.Unresolved()
+}
+
+// quarantineCoveredBatch fails a malformed covered set closed: every token it
+// names keeps its recorded physical fact. Returns whether any token is
+// unresolved after the pass.
+func (s *HistoryEffectQueueState) quarantineCoveredBatch(commits []HistoryCommit, cause error) bool {
+	unresolved := false
+	for _, commit := range commits {
+		if s.quarantineCoveredToken(commit.Token, cause) {
+			unresolved = true
+		}
+	}
+	return unresolved
 }
 
 func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error {
