@@ -104,7 +104,7 @@
 |---|---|---|---|---|
 | A1-1 | **partial-write 验收矩阵** | 6 个故障注入用例（§5 表 1–6）+ 守护重建（表 8）；真缺陷即 fail-closed 修复 | 无 | 新用例 + 既有 fail-closed 组 + `-count=40` + `-race` |
 | A1-2 | **写事务记录（proof record）** | executor↔session 边界引入事务事实（Started/Committed/Aborted/UnknownPartial + 覆盖 token 集），invalidate/ack/fail 按事实分类；删 Q2-Q6 推定分支；settle 定稿为 proof 终态 | A1-1 | 门槛清单删除项逐条有替代迁移；fail-closed 语义不回退 |
-| A1-3 | **行序交付游标** | ledger 正向 delivered-row cursor + claim 身份挂 range/fragment；规划只从游标之后；据此评估 Quarantine 子类/tombstone/ackBatch 删除面 | A1-2 | 无重复铸造/无丢行不变式 + 宽回归 + 真机 e2e |
+| A1-3 | **行序交付游标** | ledger 正向 delivered-row cursor + claim 身份挂 range/fragment；规划只从游标之后；据此评估 Quarantine 子类/tombstone/ackBatch 删除面。**设计冻结见 `docs/plan/aicli-render-a1-3-row-cursor-plan.md`（2026-10-07）** | A1-2 | 无重复铸造/无丢行不变式 + 宽回归 + 真机 e2e |
 | A1-4 | **A3 重估** | tombstone 聚合或随游标删除；更新台账 A3 依据（原函数已删） | A1-3 | 长会话载荷/内存核算 + 文档同步 |
 
 ## 5. A1-1 先红后绿用例矩阵

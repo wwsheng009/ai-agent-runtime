@@ -216,6 +216,29 @@ func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
 	}
 }
 
+// historyCommitSourceKeyLess 定义 allocation 序（= mint 序，A1-3 步 3a）：
+// cellID → revision → sourceStart → fragmentID → sourceEnd。
+//
+// 定理与前提（mint 序 = allocation 序）见
+// docs/plan/aicli-render-a1-3-row-cursor-plan.md §1.2：常规流式按流序分配
+// cell ID，prepend/中部插入的 cell ID 更晚分配也更晚进入规划；唯一反例
+// （两页在首次规划前同装）由装载契约排除并钉测试。
+func historyCommitSourceKeyLess(a, b historyCommitSourceKey) bool {
+	if a.cellID != b.cellID {
+		return a.cellID < b.cellID
+	}
+	if a.revision != b.revision {
+		return a.revision < b.revision
+	}
+	if a.sourceStart != b.sourceStart {
+		return a.sourceStart < b.sourceStart
+	}
+	if a.fragmentID != b.fragmentID {
+		return a.fragmentID < b.fragmentID
+	}
+	return a.sourceEnd < b.sourceEnd
+}
+
 func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 	return historyCommitRangeKey{
 		cellID:           c.CellID,
@@ -258,6 +281,13 @@ type HistoryCommitLedger struct {
 	// mirrors byToken keys so orderedTokens avoids a per-call sort allocation;
 	// 终态压缩成对删除 byToken 与这里的元素，因此镜像始终精确。
 	tokens []uint64
+	// mintedFrontier 是「已铸造前缀上界」（allocation 序，单调，A1-3 步 3a）：
+	// sourceKey ≤ frontier ⇔ 该来源在当前 terminal epoch 已铸造过（3c 起附带
+	// remintable 例外）。它是纯镜像，3a 不改变任何判定；为 3b 的规划 skip 与
+	// 3c 的 tombstone 删除提供 O(1) 判定。mintedFrontierValid=false 表示尚未
+	// 铸造任何来源。
+	mintedFrontier      historyCommitSourceKey
+	mintedFrontierValid bool
 }
 
 func NewHistoryCommitLedger() *HistoryCommitLedger {
@@ -309,10 +339,29 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 		l.bySource[sourceKey] = make(map[uint64]struct{})
 	}
 	l.bySource[sourceKey][commit.Token] = struct{}{}
+	l.advanceMintedFrontier(sourceKey)
 	if l.queueHeadToken == 0 || commit.Token < l.queueHeadToken {
 		l.queueHeadToken = commit.Token
 	}
 	return nil
+}
+
+// advanceMintedFrontier 单调推进已铸造前缀上界（A1-3 步 3a）。
+func (l *HistoryCommitLedger) advanceMintedFrontier(key historyCommitSourceKey) {
+	if !l.mintedFrontierValid || historyCommitSourceKeyLess(l.mintedFrontier, key) {
+		l.mintedFrontier = key
+		l.mintedFrontierValid = true
+	}
+}
+
+// mintedThrough reports whether this source identity has been minted at least
+// once in the current terminal epoch according to the mint frontier
+// (allocation order). 3a 语义：纯镜像判定；3b 起用于规划 skip。
+func (l *HistoryCommitLedger) mintedThrough(key historyCommitSourceKey) bool {
+	if l == nil || !l.mintedFrontierValid {
+		return false
+	}
+	return !historyCommitSourceKeyLess(l.mintedFrontier, key)
 }
 
 // RebasePending updates only the display payload of an unstarted effect after
@@ -768,6 +817,8 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 	clone.compactedEntries = l.compactedEntries
 	clone.queueHeadToken = l.queueHeadToken
 	clone.unresolvedCount = l.unresolvedCount
+	clone.mintedFrontier = l.mintedFrontier
+	clone.mintedFrontierValid = l.mintedFrontierValid
 	clone.tokens = append([]uint64(nil), l.tokens...)
 	return clone
 }
