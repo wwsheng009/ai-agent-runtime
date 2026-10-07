@@ -493,7 +493,7 @@ sequenceDiagram
 | **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–4（单飞写游标、六态归一、计数器游标、**续跑组删除 `9651f07b`**）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | 残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
 | **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 + CPU profile）；Stage 1（段级增量装配，存量重算 −57.5%）；Stage 2（无预算同步化 `72f7f7f4`）；Stage 3（去异步 `c2745fb5`）；Stage 4（删续跑组 `9651f07b`）；Stage 5 收尾 | 已全部完成（2026-10-07） |
 | **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 全部完成**（第一刀 `130cc7f5`；第二刀 `7471d34a`/`80738513`/`e3236de9`）；**replay 切片 S1–S5 全部完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`：恒 settle、3J 路径与 armed 诊断全删、目标语义用例 + 真机 e2e 装载/追加阶段）**；**锚定切片完成（`90d3342d`）**：底锚/续接启发式/transition 补偿全删，统一按序写 + LF 溢出（真机 e2e 73 行 exactly-once） | 三路特例族（archive/replay/锚定）均已收口；必须保留内核（§7.4-4）不动 |
-| **P3 性能** | O(delta) 成本模型 | 基准与热点归因（P1-1 Stage 0）；部分缓存（`sharedCellRows`/`sharedHistoryPlan`） | 增量编码（viewport 物化 + 脏行 diff）；去全屏克隆（plan 单所有者、ScreenModel swap）；active markdown 增量解析 |
+| **P3 性能** | O(delta) 成本模型 | 基准与热点归因（P1-1 Stage 0）；部分缓存（`sharedCellRows`/`sharedHistoryPlan`） | 增量编码（viewport 物化 + 脏行 diff）；去全屏克隆（plan 单所有者、ScreenModel swap）；active markdown 增量解析；**专项计划：`docs/plan/aicli-render-p3-performance-plan-20261007.md`（2026-10-07 三路侦察完成，S0–S4 定义；S0 基线仪器待启动）** |
 
 ### 7.2 分阶段验收（总表）
 

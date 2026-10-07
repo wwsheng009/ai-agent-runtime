@@ -1,0 +1,170 @@
+# aicli 渲染 P3（性能收敛）专项计划：O(delta) 成本模型
+
+> 依据：`docs/plan/aicli-unified-render-architecture-audit-20261005.md` §4 TOP1/2/3/6/7/9、§6 P3（:275-282）、§6.1（:290）；
+> `docs/architecture/aicli-tui-renderer-architecture-design.md` §7.1 P3 行、§7.2 验收行；`docs/plan/aicli-render-remaining-defect-ledger-20261006.md` A4。
+> 基线：`feat/render-p0-writer-unification` @ `8f6b32b8`（工作树干净）。
+> 前置侦察：2026-10-07 三路只读（帧路径成本解剖 / 基准与验收设施 / active markdown 增量可行性），结论并入 §1，不另设侦察文档。
+> 状态：**侦察完成；S0 待启动**。
+
+## 0. 目标与验收
+
+**目标形态**：每 delta 工作量 **O(delta) + 常量帧**；成本与全屏面积、历史总量脱钩；p95 帧时延
+**< 16ms**（流式稳态）；每帧分配 / GC / 锁持有可量化。
+
+**验收（审计 §6.1 P3 行）**：新基准报告（p50/p95 帧时延、每帧分配、GC 次数、锁持有时间）+
+delta 成本 O(delta) 证明。
+
+**不回归面**：ui / commands 全量 + `-race` 全绿；真机 e2e（history exactly-once、无 CSI 3J）
+保持通过。
+
+## 1. 现状基线（2026-10-07 侦察结论）
+
+### 1.1 每帧成本下界（unified viewport 路径「恒做」清单）
+
+| 项 | 位置 | 量级 |
+|---|---|---|
+| 整屏行数组分配 | `app_screen_layout.go:90,130-136`（`makeAppScreenRows(height)`） | O(height) 分配/帧 |
+| 行组装 + 逐行 clone | `app_render_frame.go:54-77`；`terminal_session.go:68-87` | O(height) 克隆/帧 |
+| **`terminalFrameCells` 全 height 行物化** | `terminal_session.go:1160-1168` → `:1842-1875`（每行 `vt.NewScreen(width,2)` + `style.RenderDocument` + Feed） | O(height×(spans+W))，每行一次分配；viewport 只消费其子集 |
+| `plan.Clone()` 深拷贝 | `terminal_session.go:176-187`，调用点 `:715` | O(rows×spans) 防御性开销 |
+| `ScreenModel.Clone()` front+back 深拷贝 | `terminal_session.go:874`；`renderengine/screen_model.go:71-79,580-593` | 每帧整网格复制 |
+| `StageFrame` 逐行 `normalizeRow` 重分配 | `screen_model.go:141-152,564-570` | O(height×W) |
+| `PrepareFlush` 全行扫描 + `copy(front,back)` | `screen_model.go:294-339`（:328-330 无条件整网格拷贝） | O(height×W) |
+| **历史写入 → viewport 全量 `Invalidate` → forceRepaint** | `terminal_session.go:993-995`（`transitionBytes!="" || historyBytes!=""`）；`screen_model.go:303-314` | 任何历史插入整段重绘 viewport |
+
+触发条件归纳：以上为**每帧恒做**（与变化量无关）；`DirtyFlags`（8 类）只存在于 `FramePump`
+（`frame_pump.go:14-27`），TerminalSession flush 路径**不消费**、且无行坐标。
+
+### 1.2 已有增量设施（可复用，勿重造）
+
+| 设施 | 键/状态 | 证据 |
+|---|---|---|
+| Scene Revision / ContentVersion | 全局单调；事务提交 revision++ | `scene/scene.go:195-197,259-265,282-297,414-416`；`transaction.go:63-82` |
+| per-cell Revision | cell 级 COW 变更栅栏（严格递增） | `scene.go:552-576,579-605,608-637` |
+| **splitSourceLinesCache（append 前缀复用，唯一样板）** | `CellID` + `(revision, source)`；`hasPrefix` 复用 | `scene/layout_cache.go:31-99,104-125` |
+| sharedCellRows / sharedHistoryPlan | 内容寻址（`cellLayoutKey`），LRU | `transcript_layout_cache.go:171-217`；`history_plan_cache.go:27-54` |
+| transcriptPlanMemo | SceneID + finalized 前缀 fence + 布局/主题/epoch | `history_effect_planner.go:654-689,745-788` |
+| preparedHistory 缓存 | (width, theme, commits 呈现代相等)；写后清空 | `terminal_session.go:280-290,803-823` |
+| ScreenModel 双缓冲 + `diffRow` | 行级 cell 差分（未被上层利用） | `screen_model.go:294-339,455-483` |
+| `sampleRingP95`（有界样本环） | 可直接复用为帧时延 p95 估计器 | `controller.go:167-211` |
+| PaintTrace（emit/change/white 计数） | O(delta) 证明的工作量计数 | `renderengine/paint_trace.go` |
+| `historyPrepareHits/Misses` | prepare 命中率（TOP9） | `terminal_session.go:358,808` |
+
+### 1.3 缺口（S1–S4 的改造面）
+
+1. **行身份缺失**：`AppScreenRow`（`app_screen_layout.go:21-35`）、`AppRenderRow`（`app_render_frame.go:16-19`）
+   无 Revision/hash；`TerminalFramePlan` 只有全局 `LayoutGeneration/TerminalEpoch`（`terminal_session.go:45-63`）
+   ——presenter 无法从 plan 得出脏行集合。
+2. **无「变更行区间」生产者**：`LayoutAppScreen` 每帧返回全窗口行；`DirtyFlags` 无行坐标。
+3. **`terminalFrameCells` 契约强制 `len(rows)==height`**（`terminal_session.go:1843`）→ 全量物化。
+4. **历史写入触发全屏 forceRepaint**（见 1.1 末行）。
+5. **active markdown 语义路径每帧全量重算**：`active_cell_projection.go:189`（全源 `markdown.Render`）+
+   `:193`（前缀渲染）+ `:194`（全前缀 `LinesEqual`），失败再渲一次 `:141`；**无跨帧文档缓存**
+   （`RenderCache` 只服务已提交 cell 与 legacy band）。关键待接线件：`suffixProjector`
+   （`active_cell_projection.go:264-352`）已实现且有测试，**生产路径未使用**。
+6. **测量缺口**：无逐帧时延分布 benchmark；全仓无 `ReadMemStats/NumGC` 使用；无锁持有时长埋点；
+   无 O(delta) 增长断言；无确定性 N 行/s 注入器（仅有真机 e2e）。
+
+## 2. 切片计划（S0–S4，先仪器后优化）
+
+> 硬规则：每个切片先落**等价/回归判据**，再动实现；性能数字一律用差分口径（见 §3），
+> 不以单次绝对值为准。S1/S2 可并行；S3 依赖 S0 的帧级仪器；S4 独立于 S1–S3。
+
+### S0 基线仪器（先做；0.5–1 天）
+
+- **帧时延分布**：新增 `ui/frame_latency_bench_test.go`——确定性 N 行/s 注入
+  （`UIController.Post` 定速 `UpdateActiveCellAction`）→ reduce → Layout → compose → flush
+  （fake presenter）；逐帧时长入 `sampleRingP95`，`b.ReportMetric(p50/p95/max)`；
+  断言稳态 p95 < 16ms（本机口径）。
+- **每帧分配/GC**：`runtime.ReadMemStats` 前后差 / 帧数 + `testing.AllocsPerOp`；
+  跨历史规模（300 / 2000 / 6719 cells）断言**分配不随历史总量增长**。
+- **O(delta) 矩阵**：历史规模 × 恒定 delta 数，报 `ns/delta`、`allocs/delta`；
+  断言 2× 规模斜率比 ≈ 1；用 `PaintTrace` emit/layout rows 计数交叉验证工作量 ∝ delta。
+- **锁持有**：测试专用 wrapper 或对 `terminalSessionSnapshot` / `FlushTransaction` 临界区采样计时，
+  报告 max/累计（不引入生产埋点）。
+- **复用**：`BenchmarkDeferredOlderPageReplan` 11 个子基准（clone/plan/layout 拆项）、
+  `BenchmarkLayoutAppScreenResumedSession`（自报 layout_rows）、
+  `BenchmarkLayoutTranscriptTailVsFull`、`BenchmarkReplyStreamChunks`、
+  `BenchmarkResumeStreamChunkWithLargeHistory`、`BenchmarkReplaceTranscriptMutableTailSnapshot`。
+- **产出**：基线报告（p50/p95、分配/帧、GC、锁持有、O(delta) 斜率）+ 命令清单；
+  记录本机与 CI 差分口径。
+
+### S1 去全屏物化/编码（审计 TOP2；0.5–1 天）
+
+- `terminalFrameCells` **viewport-only 物化**：只物化 `area.Top-1..` 的 viewport 行；
+  历史行占位不编码、不 `vt.NewScreen`（把每行一次分配改为仅 viewport 行）。
+- 等价判据：现有 parity 用例（`TestLayoutTranscriptTailScreenRowsMatchesFullLayout` 等）
+  + 真机 e2e（exactly-once / 无 3J）。
+
+### S2 去全屏深拷贝（审计 TOP1；~1 天）
+
+- **plan 单所有者零拷贝**：删除 `plan.Clone()`（`terminal_session.go:715`），以契约测试钉住
+  「plan 传入后不再变更」；若契约不成立则改 move 语义（构造侧交出所有权）。
+- **`ScreenModel` swap 而非 copy**：`PrepareFlush` 的 `copy(front,back)`（`screen_model.go:328-330`）
+  改指针交换 / 差异复用；重审 `ScreenModel.Clone` 调用点（`terminal_session.go:874`）的必要性。
+- 等价判据：`-race` 全绿 + 渲染 parity + 真机 e2e；失败回退保留 Clone 路径开关。
+
+### S3 脏行 diff（审计 TOP3/9；2–3 天）
+
+- **行身份入帧**：`AppScreenRow` / `AppRenderRow` / `TerminalFramePlan` 携带
+  `CellID + Revision`（或内容 hash）；历史 staged 行附着 `HistoryCommit.FragmentID + DisplayRange`
+  （`history_commit.go:52-64` 已有身份，仅未附着到帧行）。
+- **历史写入不再全屏 Invalidate**：替换 `terminal_session.go:993-995` 的整段 forceRepaint，
+  只重绘变更行 + 历史插入区域（resident 尾部）。
+- **`StageFrame` / `PrepareFlush` 改脏行集合**：以版本比较替换全行扫描；
+  校验失败即 **fail-closed 回退全量**（保留现路径）。
+- 等价判据：帧内容 parity（同输入全量 vs 增量逐行等价）+ 真机 e2e；`historyPrepareHits/Misses`
+  与 PaintTrace 白重绘计数作为回归栅栏。
+
+### S4 active markdown 增量（审计 TOP6；1–2 天）
+
+- **A 接线 `suffixProjector`**（零接口变更，性价比最高）：`ProjectActiveCellBandWithTheme` 内
+  用 `prefix()/suffix()/live()` 替换直接调用 `activeMarkdownSuffixLines`，消除 planning pass 内
+  2×(N+2) 次全量重渲（`active_cell_projection.go:257-263` 注释自述）。
+- **B 跨帧前缀缓存**：键 `{CellID, Revision, width, themeFingerprint}`；命中条件
+  `strings.HasPrefix(source, cached.source)`（照抄 `scene/layout_cache.go:104-125` 语义）+
+  Revision 前进；校验沿用渲染行前缀相等（`active_cell_projection.go:194`）。
+- **C stable/holdback 拆分**：stable cut 来自 `markdown.StreamCollector`（`stream.go:151-183`）；
+  stable 段走 `SharedRenderCache`（mode 区分），holdback 纯文本渲染；未闭合 fence 不高亮
+  （`openMarkdownFenceStart`，`stream.go:185-222`）。
+- **D chroma**：复用 highlightMemo；闭合块一次性 lex（配合分帧/预算上限，防单块 80ms 打爆帧）。
+- **E 回退与护栏**：`projected=false → 全量渲染` 现成（`:134-143`）；每帧尾部 N KB 上限；
+  action 开关回落当前全量路径。
+- 开放问题（实施前确认）：encoder 层 assistant 流式 upsert 是否保证 Head 前缀扩展
+  （决定 B 的 miss 率）；`SemanticActiveCellProjection` 生产默认启用面。
+
+### 观察项（按 S0 报告决定是否纳入本轮）
+
+- TOP7 每帧 ANSI 后处理逐字节扫描 + 每 CUP `strings.Split` 分配（审计 `:1048→:1391-1440` 为
+  旧快照行号，需重定位）；
+- TOP8 全局 `terminalWriteMu` / `transactionMu` 覆盖整批写（锁持有时长在 S0 中量化后再决策）。
+
+## 3. 验收与门禁
+
+- **本机口径**：差分 + p95 分布（沿用 P1-1 §1.7/§1.9 教训：`second_plan_prepend` 绝对值
+  503–530ms 噪声带，不用单次绝对值卡线）。
+- **硬验收**：p95 帧时延 < 16ms（稳态流式，本机口径）；O(delta) 斜率断言；
+  每帧分配不随历史总量增长；ui / commands 全量 + `-race` 绿；真机 e2e 不回归。
+- **门禁集成**：
+  - 扩展 `scripts/test-aicli-resume-startup-perf-e2e.ps1`（P12 已打印 UI stall p95/max、
+    P16 规划预算；复用为帧延迟代理）；
+  - 新建 `aicli-perf-baseline.yml`（照 `frontend-perf-baseline.yml` 形态：手动触发 +
+    报告 artifact + 红线脚本）；Go benchmark 不默认进 `go test`，需显式步骤；
+  - `release-aicli.yml` 保持既有测试门禁（E4/parity/writer inventory），新增 perf 步骤为可选。
+
+## 4. 风险与回滚
+
+| 风险 | 缓解 |
+|---|---|
+| 深拷贝去除引入别名/竞态 | 契约测试钉住「plan 传入后不变更」；`-race` 全绿；保留 Clone 回退开关 |
+| 脏行 diff 漏写（丢帧） | fail-closed：版本校验失败即全量 StageFrame + forceRepaint；parity 逐行断言 |
+| markdown 增量前缀失效 | 现有 `LinesEqual` 逐帧校验 + `projected=false` 全量回退现成 |
+| 性能门禁噪声 | 差分/分布阈值 + 报告 artifact；红线仅对显著回归 |
+| 审计行号漂移 | 本计划已用 2026-10-07 实读行号；引用审计处标注快照 |
+
+## 5. 记录（实施回填）
+
+- **侦察（2026-10-07，三路只读，完成）**：帧路径成本解剖（恒做清单/克隆点/失效路径/增量设施/
+  脏行缺口）；基准与验收设施（现有 bench 清单、Stage 0 基线方法与归因、可复用计数设施、
+  5 项测量缺口、CI 集成点）；active markdown（每帧重复计算 10 项、缓存键表、增量可行性判定、
+  最小接口草图 A–E）。以上结论已并入 §1–§2。
