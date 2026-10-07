@@ -143,7 +143,7 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 		}
 	}
 	if len(lines) == 0 && !structuredSource {
-		rows := activeCellBandRows(active.Source[start:], width)
+		rows := activeCellBandTailRows(active.Source[start:], width, ActiveBandRows(geometry.Height))
 		role := appTranscriptRenderRole(active.Kind)
 		lines = make([]render.Line, 0, len(rows))
 		for _, row := range rows {
@@ -367,6 +367,47 @@ func activeCellBandRows(source string, width int) []string {
 			expanded = []string{""}
 		}
 		rows = append(rows, expanded...)
+	}
+	return rows
+}
+
+// activeCellBandTailRows 只展开源尾部足以覆盖视口的逻辑行（至多 maxRows 行——
+// 每个逻辑行至少产生 1 个可视行），返回尾部 maxRows 个可视行。wrapAppScreenText
+// 按逻辑行独立展开、不跨行携带状态，因此「只展开尾部行」与「全量展开后取尾部」
+// 逐行等价；这避免为随后被丢弃的头部行支付 O(源长度) 的 wrap 成本——流式源随
+// token 增长，全量展开会让每帧成本与总输出量挂钩。
+func activeCellBandTailRows(source string, width, maxRows int) []string {
+	if maxRows < 1 {
+		return nil
+	}
+	if source == "" {
+		// 与 activeCellBandRows("") 的产物一致（单个空可视行）。
+		return []string{""}
+	}
+	// 从尾部向前数至多 maxRows 个换行，定位需要展开的最早逻辑行。
+	cut := 0
+	seen := 0
+	for index := len(source) - 1; index >= 0; index-- {
+		if source[index] != '\n' {
+			continue
+		}
+		seen++
+		if seen >= maxRows {
+			cut = index + 1
+			break
+		}
+	}
+	rows := make([]string, 0, maxRows)
+	for _, logical := range strings.Split(source[cut:], "\n") {
+		logical = strings.TrimSuffix(logical, "\r")
+		expanded := wrapAppScreenText(logical, width)
+		if len(expanded) == 0 {
+			expanded = []string{""}
+		}
+		rows = append(rows, expanded...)
+	}
+	if len(rows) > maxRows {
+		rows = rows[len(rows)-maxRows:]
 	}
 	return rows
 }
