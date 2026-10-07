@@ -102,6 +102,26 @@
 - active/finalized 合并触及 ledger ack 证明（Active 条目不剪除、ack 需渲染行）与 planner `ActiveBandRows`
   → 跨模块一致性风险。
 
+### 实施记录（2026-10-07，已完成）
+
+切片 S1–S3 合并为一次锚定统一（`90d3342d`，+76/−192）：
+
+- `terminalHistoryInsertionANSI` 删底锚分支（CSI M headroom 删除 + `capacity-fill+1`
+  起始行），统一为 `start = len(resident)+1`；写满后仅由 HandoffPlan（LF）溢出。
+- 删 `historyTopAligned` 字段与 `historyInsertionContinuesScrollback` 续接启发式
+  （帧路径与 sink 路径两处调用点）；半写复位面随之收窄。
+- `terminalViewportTransitionANSI` 收敛为 window-only：扩张只清刚转交的 viewport 行
+  （删 IL 补偿），收缩只滚动语义溢出（删 DL 补偿）；`terminalHistoryDeleteLinesANSI` /
+  `terminalHistoryInsertLinesANSI` 成死代码删除。
+- 测试改写：stream_tail 字段断言、active_archive 续接断言、viewport 收缩/扩张锚定
+  断言、rich handoff 起始行、zero-write retry 断言。
+- S4 backoff：`recoveryBackoff*` 限速已由 replay 切片 S3/S4 收敛（§9.5），无需再动。
+
+验收：ui 全量 103.8s ok；commands 全量 169.8s ok；`-race` 点检
+（StreamTail/ActiveOrigin/Viewport/Transaction/CommitHistory）1.3s ok；真机 e2e 全绿
+（73 行 exactly-once、最旧行进入 scrollback、装载/追加无 3J、prompt/status 恰一次、
+Markdown 无原始语法）。
+
 ## 3. active 溢出归档（a2-archive，报告已在策略误杀前完成）
 
 ### 结论（关键）

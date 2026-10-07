@@ -481,7 +481,7 @@ sequenceDiagram
 | **P0 写端归一** | 所有字节经统一边界；旁路可记录 | 控制序列旁路（`c159a118`：标题/铃/编辑器序列）；守卫与回归栅栏（`09190ee8`，64 项债务台账）；legacy surface 单向栅栏；**CI 门禁接线（2026-10-07：release workflow 显式运行 ui+commands writer inventory）；StatusBar legacy 直写渲染面删除（Render 族 + `Layout.Render/Refresh`，基线同步）** | stderr 边缘路径持续收口（选择输出已 claim-first，其余分类登记）；FixedBottomSurface 直写族清理 |
 | **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–4（单飞写游标、六态归一、计数器游标、**续跑组删除 `9651f07b`**）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | 残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
 | **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 + CPU profile）；Stage 1（段级增量装配，存量重算 −57.5%）；Stage 2（无预算同步化 `72f7f7f4`）；Stage 3（去异步 `c2745fb5`）；Stage 4（删续跑组 `9651f07b`）；Stage 5 收尾 | 已全部完成（2026-10-07） |
-| **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 全部完成**（第一刀 `130cc7f5`；第二刀 `7471d34a`/`80738513`/`e3236de9`）；**replay 切片 S1–S5 全部完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`：恒 settle、3J 路径与 armed 诊断全删、目标语义用例 + 真机 e2e 装载/追加阶段）** | 锚定切片；剩余特例族 |
+| **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 全部完成**（第一刀 `130cc7f5`；第二刀 `7471d34a`/`80738513`/`e3236de9`）；**replay 切片 S1–S5 全部完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`：恒 settle、3J 路径与 armed 诊断全删、目标语义用例 + 真机 e2e 装载/追加阶段）**；**锚定切片完成（`90d3342d`）**：底锚/续接启发式/transition 补偿全删，统一按序写 + LF 溢出（真机 e2e 73 行 exactly-once） | 三路特例族（archive/replay/锚定）均已收口；必须保留内核（§7.4-4）不动 |
 | **P3 性能** | O(delta) 成本模型 | 基准与热点归因（P1-1 Stage 0）；部分缓存（`sharedCellRows`/`sharedHistoryPlan`） | 增量编码（viewport 物化 + 脏行 diff）；去全屏克隆（plan 单所有者、ScreenModel swap）；active markdown 增量解析 |
 
 ### 7.2 分阶段验收（总表）
@@ -537,6 +537,8 @@ sequenceDiagram
    属删除核心；插入统一为"resident 之后按序写、写满 LF 溢出"；resize 已是 window-only，
    不得重新引入 DECSTBM/DECSC。reset backoff 不能裸删（防 busy loop）：先删 success-mode 预算，
    保留 failed-mode 限速与诊断窗口，确认无循环后再删 guard。
+   **锚定切片已完成（`90d3342d`）**：底锚/续接启发式/过渡期 DL·IL 补偿全部删除，
+   统一为「resident 之后按序写、写满 LF 溢出」；真机 e2e 复核 73 行 exactly-once。
 4. **必须保留的内核**：settle 全链与 tail 锚点、stream tail/cells 去重证明、`TerminalEpoch`、
    诊断窗口（`ArmedBackoff/BackoffEngaged` 等读数）；删除任何 reset/归档代码时不得触碰。
 
@@ -763,7 +765,7 @@ sequenceDiagram
 |---|---|---|---|
 | active 溢出归档（mutable→scrollback） | **已完成**：生产停铸（`130cc7f5`）；交付分支统一 resident 插入；死代码/skipRows 管线/active ack 机制与枚举面已删（第二刀 `7471d34a`/`80738513`/`e3236de9`） | 停铸；band tail-only | Slice 1 ✅ |
 | skipRows（finalize 只补尾） | **第一刀后恒 0**（停铸 → 无已交付 Active 条目） | 恒 0（整段铸造） | Slice 1 后自动成立 ✅ |
-| 锚定（底锚/顶锚/续接启发式） | `historyTopAligned` + `historyInsertionContinuesScrollback` 等 12 场景 | 统一"resident 之后按序写、写满 LF 溢出" | P2 锚定切片 |
+| 锚定（底锚/顶锚/续接启发式） | **已完成（`90d3342d`）**：底锚分支/续接启发式/transition DL·IL 补偿全删；插入统一 `start = len(resident)+1`，仅 HandoffPlan LF 溢出 | 统一"resident 之后按序写、写满 LF 溢出" | ✅ |
 | armed 销毁式重放 | **S1–S5 全部完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`）**：生产恒 settle、装载不再 arm；barrier/reconcile/3J/物理 reset 路径与 armed 诊断全删；guard 收敛为 recoveryBackoff；目标语义用例 + 真机 e2e 装载阶段通过 | 删除；settle 保留；`TerminalEpoch` 语义化 | ✅ |
 | recovery backoff | 预算 / 窗口 / yield | **已收敛（S3/S4）**：`recoveryBackoff*` 限速非收敛的 source-backed recovery 重证；failed 限速保留；success-mode 分支保留为 handoff-under-backoff（新内容照常投递） | ✅ |
 
