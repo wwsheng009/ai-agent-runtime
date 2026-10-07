@@ -1266,6 +1266,10 @@ type terminalSessionShortWriter struct {
 	panic     bool
 	zeroError error
 	failZero  int
+	// cutMarker/cutOffset 支持"在指定标记文本的第 N 个字符处截断"的确定性
+	// 故障注入（行中间截断），仅对首次命中标记的写生效。
+	cutMarker string
+	cutOffset int
 	writes    int
 	bytes     bytes.Buffer
 }
@@ -1278,6 +1282,20 @@ func (w *terminalSessionShortWriter) Write(data []byte) (int, error) {
 	if w.failZero > 0 {
 		w.failZero--
 		return 0, w.zeroError
+	}
+	if w.cutMarker != "" {
+		if index := bytes.Index(data, []byte(w.cutMarker)); index >= 0 {
+			n := index + w.cutOffset
+			if n < 1 {
+				n = 1
+			}
+			if n > len(data) {
+				n = len(data)
+			}
+			_, _ = w.bytes.Write(data[:n])
+			w.cutMarker = ""
+			return n, nil
+		}
 	}
 	if w.short && len(data) > 0 {
 		n := len(data) / 2
@@ -1422,6 +1440,106 @@ func TestTerminalSessionPartialHistoryTransitionFailsClosed(t *testing.T) {
 	}
 	if writer.bytes.Len() != before {
 		t.Fatalf("unknown history projection accepted new bytes: before=%d after=%d", before, writer.bytes.Len())
+	}
+}
+
+func TestTerminalSessionPartialHistoryWriteMidRowStaysFailClosed(t *testing.T) {
+	const width, height = 40, 6
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	initial := terminalSessionPlan(1, width, height, 4, LeaseState{})
+	if result := session.Flush(initial); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+	marker := "MIDROW-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: marker}}})
+	writer.cutMarker = marker
+	writer.cutOffset = 9
+	result := session.CommitHistory(commit)
+	if !errors.Is(result.Err, io.ErrShortWrite) || !result.MayHavePartiallyWritten {
+		t.Fatalf("mid-row history write = %#v", result)
+	}
+	if state := session.ProjectionState(); state.HistoryKnown || state.HistoryRows != 0 {
+		t.Fatalf("mid-row partial retained history proof: %#v", state)
+	}
+	// VT 屏级断言：截断前缀必须可见（证明字节确实在行中间中断），但标记文本
+	// 不得作为完整行出现，也不得进入 scrollback。
+	screen := vt.NewScreen(width, height)
+	screen.Feed(writer.bytes.String())
+	visible := strings.Join(screen.Lines(1, height), "\n")
+	if !strings.Contains(visible, "MIDROW-AB") {
+		t.Fatalf("mid-row partial prefix missing from screen: %q\n%s", visible, screen.Dump())
+	}
+	if strings.Contains(visible, marker) {
+		t.Fatalf("mid-row partial produced a complete row: %q\n%s", visible, screen.Dump())
+	}
+	if scrollback := strings.Join(screen.ScrollbackLines(), "\n"); strings.Contains(scrollback, marker) {
+		t.Fatalf("mid-row partial reached scrollback: %q", scrollback)
+	}
+	next := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "NEXT-AFTER-MIDROW"}}})
+	next.Token = 2
+	before := writer.bytes.Len()
+	if result := session.CommitHistory(next); !result.Deferred || result.Err != nil {
+		t.Fatalf("history write after mid-row partial = %#v", result)
+	}
+	if writer.bytes.Len() != before {
+		t.Fatalf("mid-row partial accepted new bytes: before=%d after=%d", before, writer.bytes.Len())
+	}
+}
+
+func TestTerminalSessionMergedTransactionCutInsideHistoryFailsClosed(t *testing.T) {
+	const width, height = 40, 6
+	writer := &terminalSessionShortWriter{}
+	session := NewTerminalSession(writer)
+	initial := terminalSessionPlan(1, width, height, 4, LeaseState{})
+	if result := session.Flush(initial); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+	seed := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "SEED-ROW"}}})
+	if result := session.CommitHistory(seed); result.Err != nil || result.Deferred {
+		t.Fatalf("seed history = %#v", result)
+	}
+	before := writer.bytes.Len()
+
+	// 合并事务的字节顺序是 transition → history → viewport；在 history 段中间
+	// 截断时，位于其后的 viewport 字节必须整批丢弃（不得出现"历史半写、可见区
+	// 已更新"的混合终态）。
+	marker := "MERGED-HISTORY-MARKER-0123456789"
+	frame := terminalSessionPlan(1, width, height, 4, LeaseState{})
+	frame.Rows[4].Text = "NEW-VIEWPORT-MARKER"
+	commit := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: marker}}})
+	commit.Token = 2
+	writer.cutMarker = marker
+	writer.cutOffset = 11
+	result := session.FlushTransaction(TerminalTransactionPlan{Frame: frame, History: &commit})
+	if !errors.Is(result.Frame.Err, io.ErrShortWrite) || result.History == nil ||
+		!errors.Is(result.History.Err, io.ErrShortWrite) || !result.History.MayHavePartiallyWritten {
+		t.Fatalf("cut merged transaction = %#v", result)
+	}
+	if state := session.ProjectionState(); state.Validity != renderengine.ProjectionUnknown || state.HistoryKnown {
+		t.Fatalf("cut merged transaction retained proof: %#v", state)
+	}
+	transactionBytes := writer.bytes.String()[before:]
+	if strings.Contains(transactionBytes, "NEW-VIEWPORT-MARKER") {
+		t.Fatalf("cut inside history leaked trailing viewport bytes: %q", transactionBytes)
+	}
+	screen := vt.NewScreen(width, height)
+	screen.Feed(writer.bytes.String())
+	visible := strings.Join(screen.Lines(1, height), "\n")
+	if !strings.Contains(visible, "MERGED-HIST") {
+		t.Fatalf("cut merged history prefix missing from screen: %q\n%s", visible, screen.Dump())
+	}
+	if strings.Contains(visible, marker) || strings.Contains(visible, "NEW-VIEWPORT-MARKER") {
+		t.Fatalf("cut merged transaction left a mixed terminal state: %q\n%s", visible, screen.Dump())
+	}
+	next := terminalSessionCommit(1, render.Line{Spans: []render.Span{{Text: "NEXT-AFTER-MERGED"}}})
+	next.Token = 3
+	beforeNext := writer.bytes.Len()
+	if result := session.CommitHistory(next); !result.Deferred || result.Err != nil {
+		t.Fatalf("history write after merged cut = %#v", result)
+	}
+	if writer.bytes.Len() != beforeNext {
+		t.Fatalf("merged cut accepted new bytes: before=%d after=%d", beforeNext, writer.bytes.Len())
 	}
 }
 

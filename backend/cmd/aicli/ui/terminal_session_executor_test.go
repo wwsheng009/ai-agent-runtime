@@ -1032,6 +1032,92 @@ func TestTerminalSessionExecutorCloseTimeoutAbortsBlockedWrite(t *testing.T) {
 	}
 }
 
+// A1-1：被阻塞的历史移交写在中止（shutdown abort）下必须保持 fail-closed：
+// 结果只能零写重试（Deferred，保持 Queued）或未决隔离，绝不能 ack；中止后的
+// 重试不得再触达物理 writer，也不得发出破坏性 scrollback 复位。
+func TestTerminalSessionExecutorAbortDuringBlockedHistoryHandoffStaysFailClosed(t *testing.T) {
+	controller := newHistoryExecutorController(t, nil)
+	if !controller.Post(Resize{Width: 80, Height: 10, Generation: 4}) {
+		t.Fatal("post Resize")
+	}
+	marker := "ABORT-HANDOFF-ROW-0123456789"
+	if !controller.Post(ReplaceTranscriptAction{Snapshot: &scene.Snapshot{
+		Revision: 1,
+		Cells: []*scene.TranscriptCell{{
+			ID: 1, Revision: 1, Kind: scene.KindAssistant,
+			Source: marker, Phase: scene.CellCommitted,
+		}},
+	}}) {
+		t.Fatal("post ReplaceTranscriptAction")
+	}
+	controller.WaitIdle()
+	pending := controller.State().HistoryEffects.Pending()
+	if len(pending) == 0 {
+		t.Fatal("fixture produced no pending history")
+	}
+	token := pending[0].Token
+
+	writer := newTerminalSessionBlockingWriter()
+	session := NewTerminalSession(writer)
+	executor := NewTerminalSessionExecutor(controller, session)
+	t.Cleanup(func() {
+		writer.unblock()
+		executor.Close()
+		controller.WaitIdle()
+	})
+
+	executor.Request()
+	historyIndex := 0
+	var batch []byte
+	for index := 1; index <= 4; index++ {
+		batch = writer.waitStarted(t, index)
+		if bytes.Contains(batch, []byte(marker)) {
+			historyIndex = index
+			break
+		}
+		writer.allow()
+	}
+	if historyIndex == 0 {
+		t.Fatal("history handoff write never reached the blocking writer")
+	}
+	if err := session.AbortTerminalWrite(); err != nil {
+		t.Fatalf("AbortTerminalWrite: %v", err)
+	}
+	controller.WaitIdle()
+
+	// Abort 结果经 executor worker 异步发布（Deferred → 重试被拒 → 投影失效），
+	// 等待其收敛到静止的 fail-closed 状态再断言。
+	var state UIControllerState
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		state = controller.State()
+		if state.HistoryEffects.ProjectionUnknown && state.HistoryEffects.WriteCursor == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("aborted history handoff did not settle fail-closed: unknown=%v cursor=%d",
+				state.HistoryEffects.ProjectionUnknown, state.HistoryEffects.WriteCursor)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entry := historyCommitEntry(t, state, token)
+	if entry.State == HistoryCommitDelivered {
+		t.Fatalf("aborted history handoff was acknowledged: %#v", entry)
+	}
+	if entry.State != HistoryCommitQueued {
+		t.Fatalf("aborted zero-write handoff should stay retryable (queued): %#v", entry)
+	}
+	if !state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("aborted history handoff left projection known: %#v", state.HistoryEffects)
+	}
+	if got := writer.writeCount(); got != historyIndex {
+		t.Fatalf("aborted history handoff physical batches = %d, want %d (no replay after abort)", got, historyIndex)
+	}
+	if writer.contains([]byte("\x1b[3J")) {
+		t.Fatal("aborted history handoff emitted a destructive scrollback reset")
+	}
+}
+
 func TestTerminalSessionExecutorWorkerTeardownReusesFreshDoneChannel(t *testing.T) {
 	controller := NewUIController(UIControllerConfig{}, nil, nil)
 	session := NewTerminalSession(&bytes.Buffer{})
