@@ -213,3 +213,45 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
   + 2,719 新 cell 的真实增量（mint+enqueue）+ 存量 4,001 cell 的重算。**≤174ms 在 L2.7 落地前不可达**。
   Stage 1 独立验收改为：`second_plan_prepend − clone − older_page 增量` 的**存量重算部分下降 ≥50%**
   （用 plan_only / first_plan / state_clone 三个子基准差分读）。
+
+### 1.8 Stage 1c/1d 编码设计（2026-10-07，工作区实读补充；编码前冻结）
+
+**落点**：planner 装配产出「候选 + 保留分类」，integration 消费保留分类跳过全量对账。
+
+**保留分类模型**（`mintTranscriptPlanWindow` 扩展输出）：
+
+- 段 memo 命中（`sharedHistoryPlan` 行缓存 + 提交段 memo，键 = `cellLayoutKey` + generation + skipRows + 完整覆盖）且 cell 复用：
+  - 段内提交逐条 `hasTerminalRecordForSource` 分拣：
+    - 全部已有终态记录 → `retainedCells`（cell 级；integration 跳过该 cell 的全部 ledger 条目）；
+    - 部分终态/部分新增（混合 cell）→ 新增提交入 `candidates`；已有终态 source 入 `retainedSources`（仅混合 cell 需要，规模 ≤ 在飞窗口）；
+    - 全部无终态 → 复用 memo 提交直接入 `candidates`（免重建 Lines）。
+- memo miss（新增/变更 cell）→ 现有 assemble 路径；产出同一分类结构。
+- 截断窗口（部分覆盖）不落段 memo，也不进入保留分类（维持现有前缀语义）。
+
+**integration（`syncHistoryEffectCandidates`）**：
+
+- `valid` map 仅由 `candidates` 构建（规模 = 新增/变更；prepend 场景从 161k 降至 ~65k）。
+- `byToken` 对账：entry 的 cell ∈ `retainedCells` 或 source ∈ `retainedSources` → 跳过；
+  其余照旧（absent → invalidate；presentation 漂移 → rebase/invalidate）。
+- `enqueueHistoryCandidates(candidates)` 只入队新增。
+- 截断前缀路径（`syncHistoryEffectCandidatesPrefix`）不变（只入队）。
+
+**安全条件（反例，必须同时满足）**：
+
+1. 不可仅按「已有终态记录」跳过：presentation 漂移（reflow/width/generation 变化）时新提交必须入
+   `candidates` 触发 rebase/invalidate —— 跳过仅允许在段复用（Lines 身份由 memo 键保证相同）前提下。
+2. 混合 cell 的被跳过条目不得落入「absent → invalidate」：必须显式 `retainedSources`。
+3. ledger/会话替换：memo 键含 cell 身份；若 cell 身份可复用（序列重置），须在 ledger 重置点清段 memo
+   （实现时加 epoch 或显式清点）。
+4. 复用提交的 DisplayRange 按 displayStart 常量偏移重写（D2 后不参与等价/键，仅簿记准确）。
+
+**管线改动面**：`mintTranscriptPlanWindow`（返回扩展）→ `applyTranscriptPlanWindow` →
+`HistoryPlanWindowReady` 载荷（action.go）→ `handleHistoryPlanWindowReady` →
+`syncHistoryEffectCandidates`（新增 retained 参数，nil = 旧语义）；`rebasePendingHistoryEffects` 同构消费。
+
+**诊断（1e）**：段命中/复用/保留计数入 `recordTranscriptPlanTiming` 旁路，/debug 可读。
+
+**验收**：§1.7 差分口径（存量重算 ≥50% 下降）+ 宽回归组绿 + 既有等价/覆盖断言
+（`TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan`、`TestDeferredOlderPagePrependReplansAndCoversOlderCells`）保持绿。
+
+**回滚**：单提交；retained 参数缺省 nil 时行为与当前逐字一致（可分步落地）。
