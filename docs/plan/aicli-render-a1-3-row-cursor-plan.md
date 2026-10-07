@@ -112,3 +112,17 @@
   与 `TestMintedFrontierCloneAndMonotonicity` 绿。全量回归：ui 127.8s、commands 186.3s 绿。
   **结论**：allocation 序定理在关键流程上经验成立；R4（`sourceEnd` 序）由用例钉住；
   3b 可按计划将规划 skip 切换到 `mintedThrough` + live 检查（双跑对照后删旧路径）。
+
+- **3b（`b66d3367`，2026-10-07）**：三个来源判定切换 mint 游标：
+  - `hasTerminalRecordForSource`：加 `mintedThrough` 早出（等价）；
+  - `hasSettledRecordForSource`：加游标早出 + **已压缩终态来源 → settled=true**
+    （旧实现先白物化 payload、随后在入队处以墓碑跳过；分歧仅发生在 bySource 为空、
+    无 live 条目可被 reconcile 时，投递语义不变）；
+  - `retainedQueuedCommitForSource`：加游标早出（等价）。
+  等价性双跑：`TestSourceJudgmentsMatchLegacyAcrossResumePrepend`（生产顺序 + 交付 +
+  压缩，全 key 三判定对照，且断言压缩分歧分支确实被触发）、
+  `TestCompactedTerminalSourceSkipsMaterializationAndMinting`、
+  `TestPrunedRemintableSourceStillRequiresMaterialization`（零写作废来源保持
+  unsettled，重规划仍可再铸，不丢行）绿。全量回归：专项族 119.8s、ui 135.9s、
+  commands 189.9s 绿。**结论**：3c 可删 `compactedTerminalSources` 的消费面
+  （`hasSettled`/`hasTerminal` 已由游标承担主判定），并将 bySource 降级为 live-only。
