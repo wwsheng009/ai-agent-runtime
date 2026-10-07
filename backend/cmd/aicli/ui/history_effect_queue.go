@@ -497,21 +497,34 @@ func (s *HistoryEffectQueueState) invalidate(token uint64) error {
 	if s == nil || s.ledger == nil {
 		return ErrCommitNotPending
 	}
-	wasWriting := s.WriteCursor == token
-	if err := s.ledger.Invalidate(token, wasWriting); err != nil {
-		return err
+	if s.WriteCursor == token {
+		// Claimed: a physical write may be in flight, but the cursor only says
+		// the claim exists — not that bytes crossed the writer. Record the
+		// invalidation intent and let the write result (Committed / zero-write
+		// / partial) resolve it with its proof instead of guessing here.
+		return s.ledger.MarkInvalidationPending(token)
 	}
-	if wasWriting {
-		s.WriteCursor = 0
-		s.ProjectionUnknown = true
-		s.ReconciliationRequired = true
-	}
-	return nil
+	return s.ledger.Invalidate(token, false)
 }
 
 func (s *HistoryEffectQueueState) ack(token, frame, generation uint64) error {
 	if s == nil || s.ledger == nil {
 		return ErrCommitNotInFlight
+	}
+	if s.WriteCursor == token {
+		if entry, ok := s.ledger.Entry(token); ok && entry.InvalidationPending {
+			// The write committed, but the payload was invalidated while it was
+			// claimed: old bytes are on screen without a matching source. Record
+			// the physical fact and raise the recovery obligation instead of
+			// acknowledging the invalidated payload as delivered.
+			if err := s.ledger.ResolveInvalidation(token, true); err != nil {
+				return err
+			}
+			s.WriteCursor = 0
+			s.ProjectionUnknown = true
+			s.ReconciliationRequired = true
+			return nil
+		}
 	}
 	// Only the token the single writer currently holds may be acknowledged.
 	// A duplicate ack of an already-Acked token keeps its dedicated error so
@@ -560,6 +573,12 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 		}
 		entry, ok := s.ledger.Entry(commit.Token)
 		if !ok || historyCommitSourceIdentity(entry.Commit) != historyCommitSourceIdentity(commit) {
+			return ErrCommitSourceChanged
+		}
+		if entry.InvalidationPending {
+			// The source was invalidated while this token was claimed. The batch
+			// bytes may be on screen, but semantic delivery can no longer be
+			// proven: fail closed so the handler quarantines the batch.
 			return ErrCommitSourceChanged
 		}
 		ackGenerations[index] = generation
@@ -625,6 +644,7 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 		}
 		entry.Failure = cause
 		entry.MayHavePartiallyWritten = true
+		entry.InvalidationPending = false
 		// Keep the unresolved counter monotonic: only a transition into an
 		// unresolved state increments it; already-unresolved entries do not.
 		if !wasUnresolved && entry.Unresolved() {
@@ -634,6 +654,11 @@ func (s *HistoryEffectQueueState) markDeliveredBatchUnresolved(commits []History
 		// Queued -> Quarantined is a terminal transition; keep the cached minimum
 		// non-terminal token from pinning on this token.
 		s.ledger.advanceQueueHeadAfterTerminal(delivered.Token)
+		// A claimed batch member can never be written again: release the cursor
+		// or it would pin ordered handoff behind a terminal token forever.
+		if s.WriteCursor == delivered.Token {
+			s.WriteCursor = 0
+		}
 	}
 	s.ReconciliationRequired = true
 }
@@ -645,6 +670,15 @@ func (s *HistoryEffectQueueState) deferInFlight(token, generation uint64) error 
 	entry, ok := s.ledger.Entry(token)
 	if !ok || entry.Commit.LayoutGeneration != generation {
 		return ErrStaleLayoutGeneration
+	}
+	if entry.InvalidationPending && s.WriteCursor == token {
+		// Deferred carries the zero-write proof: nothing reached the host, so
+		// the invalidation is clean and the projection stays known.
+		if err := s.ledger.ResolveInvalidation(token, false); err != nil {
+			return err
+		}
+		s.WriteCursor = 0
+		return nil
 	}
 	// Deferred means the terminal transaction did not start, so the entry stays
 	// Pending and only the write cursor is released. A Deferred for a token that
@@ -694,6 +728,21 @@ func (s *HistoryEffectQueueState) fail(token, generation uint64, err error, mayH
 	entry, ok := s.ledger.Entry(token)
 	if !ok || entry.Commit.LayoutGeneration != generation {
 		return ErrStaleLayoutGeneration
+	}
+	if entry.InvalidationPending {
+		// The invalidation dominates the failure classification: the source is
+		// gone, and the proof fact only decides whether recovery is owed.
+		if err := s.ledger.ResolveInvalidation(token, mayHavePartiallyWritten); err != nil {
+			return err
+		}
+		if s.WriteCursor == token {
+			s.WriteCursor = 0
+		}
+		if mayHavePartiallyWritten {
+			s.ProjectionUnknown = true
+			s.ReconciliationRequired = true
+		}
+		return nil
 	}
 	if err := s.ledger.Fail(token, err, mayHavePartiallyWritten); err != nil {
 		return err

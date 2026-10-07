@@ -140,6 +140,13 @@ type HistoryCommitEntry struct {
 	AckFrame                uint64
 	MayHavePartiallyWritten bool
 	Failure                 error
+	// InvalidationPending marks a Queued entry whose source/presentation was
+	// invalidated while a write claim was outstanding. The claim is retained
+	// (the cursor still names it) and the write result action resolves the
+	// invalidation with the proof fact: Deferred/zero-write -> clean
+	// invalidation, Committed -> invalidated with bytes on screen, partial
+	// failure -> unresolved. The cursor alone never decides this.
+	InvalidationPending bool
 }
 
 func (e HistoryCommitEntry) Clone() HistoryCommitEntry {
@@ -337,22 +344,54 @@ func (l *HistoryCommitLedger) RebasePending(token uint64, replacement HistoryCom
 	return nil
 }
 
-// Invalidate prevents a queued effect (claimed or not) from being consumed
-// after transcript replacement. A claimed invalidation means terminal bytes
-// may already have reached the old projection and therefore requires recovery.
+// Invalidate prevents a queued effect from being consumed after transcript
+// replacement. mayHavePartiallyWritten is the physical fact supplied by the
+// caller: true only when a write provably started (or its coverage is
+// unknown). A partially written cancellation counts as an unresolved terminal
+// delivery; the counter is monotonic (unresolved entries never revert).
 //
-// mayHavePartiallyWritten is supplied by the caller: the queue knows whether
-// the token currently holds the write cursor, i.e. whether a physical write
-// may already have started. A partially written cancellation counts as an
-// unresolved terminal delivery; the counter is
-// monotonic (unresolved entries never revert to resolved).
+// Callers that hold a claim must not guess this fact from the write cursor:
+// record the intent with MarkInvalidationPending and resolve it from the write
+// result action (which carries the proof).
 func (l *HistoryCommitLedger) Invalidate(token uint64, mayHavePartiallyWritten bool) error {
+	return l.invalidateQueued(token, mayHavePartiallyWritten)
+}
+
+// MarkInvalidationPending records that a queued entry must be invalidated, but
+// keeps it (and its write claim) alive until the in-flight write result
+// arrives. The result resolves the pending invalidation with its proof fact.
+func (l *HistoryCommitLedger) MarkInvalidationPending(token uint64) error {
+	entry, ok := l.entry(token)
+	if !ok || entry.State != HistoryCommitQueued {
+		return ErrCommitNotPending
+	}
+	if !entry.InvalidationPending {
+		entry.InvalidationPending = true
+		l.byToken[token] = entry
+	}
+	return nil
+}
+
+// ResolveInvalidation completes a pending invalidation with the physical fact
+// carried by the write result action.
+func (l *HistoryCommitLedger) ResolveInvalidation(token uint64, mayHavePartiallyWritten bool) error {
+	entry, ok := l.entry(token)
+	if !ok || entry.State != HistoryCommitQueued || !entry.InvalidationPending {
+		return ErrCommitNotPending
+	}
+	entry.InvalidationPending = false
+	l.byToken[token] = entry
+	return l.invalidateQueued(token, mayHavePartiallyWritten)
+}
+
+func (l *HistoryCommitLedger) invalidateQueued(token uint64, mayHavePartiallyWritten bool) error {
 	entry, ok := l.entry(token)
 	if !ok || entry.State != HistoryCommitQueued {
 		return ErrCommitNotPending
 	}
 	entry.State = HistoryCommitQuarantined
 	entry.Quarantine = HistoryCommitQuarantineInvalidated
+	entry.InvalidationPending = false
 	if mayHavePartiallyWritten {
 		l.unresolvedCount++
 		entry.MayHavePartiallyWritten = true

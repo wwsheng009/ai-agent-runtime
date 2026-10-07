@@ -497,7 +497,7 @@ func TestHistoryEffectsReducer_TranscriptBoundaryChangeRebasesPendingHandoff(t *
 	}
 }
 
-func TestHistoryEffectsReducer_TranscriptBoundaryChangeInvalidatesInFlightHandoff(t *testing.T) {
+func TestHistoryEffectsReducer_TranscriptBoundaryChangeKeepsClaimedInvalidationPending(t *testing.T) {
 	state, token := historyEffectBoundaryChangeState(t)
 	if !state.HistoryEffects.HasPending() {
 		t.Fatal("fixture did not expose pending history")
@@ -515,15 +515,77 @@ func TestHistoryEffectsReducer_TranscriptBoundaryChangeInvalidatesInFlightHandof
 	if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitQueued || state.HistoryEffects.WriteCursor != token {
 		t.Fatalf("begin history = %#v cursor=%d", entry, state.HistoryEffects.WriteCursor)
 	}
+	claimGeneration := historyCommitEntry(t, state, token).Commit.LayoutGeneration
 	beforeToken := state.HistoryEffects.NextToken
 
 	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: historyEffectBoundaryChangedSnapshot(state)}, 4)
 	entry := historyCommitEntry(t, state, token)
-	if !entry.IsInvalidated() || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown {
-		t.Fatalf("changed in-flight payload was not fail-closed: entry=%#v state=%#v", entry, state.HistoryEffects)
+	// The cursor says only that a claim exists, not that bytes crossed the
+	// writer: the invalidation intent stays pending until the write result
+	// (which carries the proof) resolves it.
+	if entry.State != HistoryCommitQueued || !entry.InvalidationPending {
+		t.Fatalf("claimed invalidation must wait for the write proof: entry=%#v", entry)
 	}
-	if state.HistoryEffects.NextToken != beforeToken || state.HistoryEffects.HasPending() {
-		t.Fatalf("in-flight invalidation minted or exposed a duplicate handoff: next=%d->%d pending=%#v", beforeToken, state.HistoryEffects.NextToken, state.HistoryEffects.Pending())
+	if state.HistoryEffects.WriteCursor != token {
+		t.Fatalf("pending invalidation released the claim before any proof: cursor=%d", state.HistoryEffects.WriteCursor)
+	}
+	if state.HistoryEffects.ProjectionUnknown || entry.MayHavePartiallyWritten {
+		t.Fatalf("pending invalidation guessed a recovery obligation: entry=%#v state=%#v", entry, state.HistoryEffects)
+	}
+	if state.HistoryEffects.NextToken != beforeToken {
+		t.Fatalf("in-flight invalidation minted a duplicate handoff: next=%d->%d", beforeToken, state.HistoryEffects.NextToken)
+	}
+
+	// Zero-write proof (Deferred) resolves the invalidation cleanly: nothing
+	// reached the host, so the projection stays known and no recovery is owed.
+	state = reduceUIControllerState(state, HistoryCommitDeferred{Token: token, LayoutGeneration: claimGeneration}, 5)
+	entry = historyCommitEntry(t, state, token)
+	if !entry.IsInvalidated() || entry.MayHavePartiallyWritten || entry.InvalidationPending {
+		t.Fatalf("zero-write invalidation must resolve clean: %#v", entry)
+	}
+	if state.HistoryEffects.WriteCursor != 0 || state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
+		t.Fatalf("clean invalidation raised a recovery obligation: %#v", state.HistoryEffects)
+	}
+	// The remaining tail work is still deliverable: a clean invalidation must
+	// not mask the queue behind a recovery obligation (the old cursor
+	// inference set ProjectionUnknown, which did exactly that until settle).
+	remaining := 0
+	for _, commit := range state.HistoryEffects.Pending() {
+		if commit.Token == token {
+			t.Fatalf("resolved invalidation still exposes its own token as pending")
+		}
+		remaining++
+	}
+	if remaining == 0 {
+		t.Fatalf("fixture expected remaining tail work after the invalidated claim")
+	}
+}
+
+func TestHistoryEffectsReducer_ClaimedInvalidationResolvedByAckIsUnresolved(t *testing.T) {
+	state, token := historyEffectBoundaryChangeState(t)
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.Commit.Token >= token || entry.State != HistoryCommitQueued {
+			continue
+		}
+		state = reduceUIControllerState(state, BeginHistoryCommit{Token: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation}, 3)
+		state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: entry.Commit.Token, Frame: entry.Commit.Token, LayoutGeneration: state.Geometry.Generation}, 3)
+	}
+	state = reduceUIControllerState(state, BeginHistoryCommit{Token: token, LayoutGeneration: state.Geometry.Generation}, 3)
+	claimGeneration := historyCommitEntry(t, state, token).Commit.LayoutGeneration
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: historyEffectBoundaryChangedSnapshot(state)}, 4)
+
+	// The write committed before the invalidation resolved: the old bytes are
+	// on screen without a matching source, so the ack must not become delivery.
+	state = reduceUIControllerState(state, HistoryCommitAcknowledged{Token: token, Frame: 8, LayoutGeneration: claimGeneration}, 5)
+	entry := historyCommitEntry(t, state, token)
+	if entry.State == HistoryCommitDelivered {
+		t.Fatalf("invalidated payload was acknowledged as delivered: %#v", entry)
+	}
+	if !entry.IsInvalidated() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
+		t.Fatalf("committed invalidated payload must be unresolved: %#v", entry)
+	}
+	if state.HistoryEffects.WriteCursor != 0 || !state.HistoryEffects.ProjectionUnknown {
+		t.Fatalf("committed invalidated payload left the projection known: %#v", state.HistoryEffects)
 	}
 }
 

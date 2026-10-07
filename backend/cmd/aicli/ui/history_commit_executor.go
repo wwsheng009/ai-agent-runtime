@@ -180,7 +180,19 @@ func (e *HistoryCommitExecutor) runOne() bool {
 		return false
 	}
 	e.controller.WaitIdle()
-	if !historyCommitClaimCurrent(e.controller.historyCommitGateOf(commit.Token), commit) {
+	gate := e.controller.historyCommitGateOf(commit.Token)
+	if gate.EntryFound && gate.WriteCursor == commit.Token && gate.EntryInvalidationPending {
+		// The claim was invalidated before the payload crossed the writer:
+		// release it with the zero-write proof instead of writing stale bytes.
+		// The reducer resolves the pending invalidation as clean (no recovery).
+		_ = e.controller.Post(HistoryCommitDeferred{
+			Token:            commit.Token,
+			LayoutGeneration: commit.LayoutGeneration,
+		})
+		e.controller.WaitIdle()
+		return false
+	}
+	if !historyCommitClaimCurrent(gate, commit) {
 		return false
 	}
 

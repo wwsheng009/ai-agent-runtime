@@ -946,6 +946,10 @@ type historyCommitGate struct {
 	EntryFound      bool
 	EntryState      HistoryCommitState
 	EntryGeneration uint64
+	// EntryInvalidationPending reports that the claimed token's source was
+	// invalidated before its payload crossed the writer. The executor releases
+	// such a claim with a zero-write Deferred instead of writing stale bytes.
+	EntryInvalidationPending bool
 }
 
 // historyCommitGateOf reads one token's gate projection under the actor mutex
@@ -968,6 +972,7 @@ func (c *UIController) historyCommitGateOf(token uint64) historyCommitGate {
 		gate.EntryFound = true
 		gate.EntryState = entry.State
 		gate.EntryGeneration = entry.Commit.LayoutGeneration
+		gate.EntryInvalidationPending = entry.InvalidationPending
 	}
 	return gate
 }
