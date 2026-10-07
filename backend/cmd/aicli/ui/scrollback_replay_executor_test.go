@@ -108,9 +108,6 @@ func TestTerminalSessionExecutorLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	if loadIndex := writer.firstWriteIndexOf([]byte("loaded session")); loadIndex == 0 {
 		t.Fatal("loaded transcript never reached the host")
 	}
-	if projection := session.ProjectionState(); projection.ScrollbackResetCount != 0 {
-		t.Fatalf("projection counted %d scrollback resets after a load: %+v", projection.ScrollbackResetCount, projection)
-	}
 
 	// A later resize must also repaint without replaying.
 	if !controller.Post(Resize{Width: 80, Height: 14, Generation: 9}) {

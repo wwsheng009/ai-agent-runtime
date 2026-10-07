@@ -102,20 +102,6 @@ func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 		t.Fatalf("sticky insert missing from bounded stream tail: %q", streamTail)
 	}
 
-	// 5) 显式 scrollback reset：整族证明一起失效。
-	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, resetScrollback: true}); result.Frame.Err != nil {
-		t.Fatalf("scrollback reset = %#v", result)
-	}
-	if session.historyStreamTailRows != nil || session.historyTailCells != nil {
-		t.Fatalf("reset retained stream proof: tail=%d cells=%d",
-			len(session.historyStreamTailRows), len(session.historyTailCells))
-	}
-	if session.historyTopAligned {
-		t.Fatal("reset must clear the sticky top-align state")
-	}
-	if !session.historyProjectionKnown {
-		t.Fatal("reset must re-establish a known projection")
-	}
 }
 
 // 半写是「本会话的已交付行证明」唯一不可信的路径：stream tail / provenance /

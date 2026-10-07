@@ -74,7 +74,7 @@ func (h *resumeReplayE2EHarness) flush(t *testing.T) {
 // advances (no scrollback reset happened), the physical session never
 // performed a scrollback reset, and the byte stream stays within the
 // incremental-write bound (a reset+replay rewrites the whole transcript).
-func (h *resumeReplayE2EHarness) assertNoReplay(t *testing.T, baselineEpoch, baselineResetCount, baselineBytes, delta int) {
+func (h *resumeReplayE2EHarness) assertNoReplay(t *testing.T, baselineEpoch, baselineBytes, delta int) {
 	t.Helper()
 	state := h.controller.State()
 	if state.HistoryEffects.ReconciliationRequired {
@@ -87,10 +87,6 @@ func (h *resumeReplayE2EHarness) assertNoReplay(t *testing.T, baselineEpoch, bas
 	if epoch := int(state.HistoryEffects.TerminalEpoch); epoch != baselineEpoch {
 		t.Fatalf("delta %d: TerminalEpoch advanced %d -> %d; a reducer-confirmed scrollback "+
 			"reset+replay was performed", delta, baselineEpoch, epoch)
-	}
-	if resetCount := int(h.executor.session.ProjectionState().ScrollbackResetCount); resetCount != baselineResetCount {
-		t.Fatalf("delta %d: physical ScrollbackResetCount advanced %d -> %d; the terminal "+
-			"actually reset and replayed native scrollback", delta, baselineResetCount, resetCount)
 	}
 	// Incremental appends only grow the stream by the new chunk. A reset+replay
 	// re-emits the whole transcript, so the growth per delta explodes.
@@ -149,7 +145,6 @@ func TestResumeStreamingDeltasNoScrollbackResetReplayE2E(t *testing.T) {
 	}
 
 	baselineEpoch := int(h.controller.State().HistoryEffects.TerminalEpoch)
-	baselineResetCount := int(h.executor.session.ProjectionState().ScrollbackResetCount)
 	baselineBytes := h.writer.bytes.Len()
 
 	// A stream of deltas grows the active cell append-only; the acked prefix
@@ -165,7 +160,7 @@ func TestResumeStreamingDeltasNoScrollbackResetReplayE2E(t *testing.T) {
 			},
 		}})
 		h.flush(t)
-		h.assertNoReplay(t, baselineEpoch, baselineResetCount, baselineBytes, index)
+		h.assertNoReplay(t, baselineEpoch, baselineBytes, index)
 	}
 }
 
@@ -204,7 +199,6 @@ func TestResumeSceneRebuildNewSceneIDNoScrollbackResetReplayE2E(t *testing.T) {
 	}
 
 	baselineEpoch := int(h.controller.State().HistoryEffects.TerminalEpoch)
-	baselineResetCount := int(h.executor.session.ProjectionState().ScrollbackResetCount)
 	baselineBytes := h.writer.bytes.Len()
 
 	// Every delta arrives under a NEW SceneID (fresh event-log rebuild).
@@ -219,7 +213,7 @@ func TestResumeSceneRebuildNewSceneIDNoScrollbackResetReplayE2E(t *testing.T) {
 			},
 		}})
 		h.flush(t)
-		h.assertNoReplay(t, baselineEpoch, baselineResetCount, baselineBytes, index)
+		h.assertNoReplay(t, baselineEpoch, baselineBytes, index)
 	}
 }
 

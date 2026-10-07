@@ -950,17 +950,17 @@ func TestComposeTerminalTransactionPlanRetainsCompleteFrameContract(t *testing.T
 	t.Fatal("exported transaction composer omitted finalized transcript rows")
 }
 
-// 需求：只有 /resume 首次全量重放（显式 resetScrollback 计划）才允许重建
-// native scrollback。resize 属于正常交互，必须保持投影内容与诊断计数不变。
-func TestTerminalSessionOnlyExplicitReplayResetsScrollbackDiagnostics(t *testing.T) {
+// 需求：native scrollback 是 append-only——任何交互（含 resize）都不得重建
+// scrollback 或推进语义 epoch；投影必须保持 known。
+func TestTerminalSessionNeverResetsScrollbackDiagnostics(t *testing.T) {
 	var output bytes.Buffer
 	session := NewTerminalSession(&output)
 	initial := terminalSessionPlan(1, 24, 6, 4, LeaseState{})
 	if result := session.Flush(initial); result.Err != nil {
 		t.Fatalf("initial flush = %#v", result)
 	}
-	if state := session.ProjectionState(); state.ScrollbackResetCount != 0 || state.LastScrollbackResetReason != "" || state.TerminalEpoch != 0 {
-		t.Fatalf("initial projection reported a reset: %#v", state)
+	if state := session.ProjectionState(); state.TerminalEpoch != 0 {
+		t.Fatalf("initial projection advanced the terminal epoch: %#v", state)
 	}
 
 	resized := terminalSessionPlan(2, 30, 8, 6, LeaseState{})
@@ -968,23 +968,11 @@ func TestTerminalSessionOnlyExplicitReplayResetsScrollbackDiagnostics(t *testing
 		t.Fatalf("resize flush = %#v", result)
 	}
 	state := session.ProjectionState()
-	if state.ScrollbackResetCount != 0 || state.LastScrollbackResetReason != "" || state.TerminalEpoch != 0 {
-		t.Fatalf("resize reset the scrollback diagnostics instead of repainting locally: %#v", state)
+	if state.TerminalEpoch != 0 {
+		t.Fatalf("resize advanced the terminal epoch: %#v", state)
 	}
 	if state.Validity != renderengine.ProjectionKnown {
 		t.Fatalf("resize did not keep the projection known: %#v", state)
-	}
-
-	// 显式授权的重放（/resume 首次全量重放）仍然重建 scrollback 并推进 epoch。
-	result := session.FlushTransaction(TerminalTransactionPlan{
-		Frame: resized, resetScrollback: true, TerminalEpoch: state.TerminalEpoch,
-	})
-	if result.Frame.Err != nil || !result.ScrollbackReset {
-		t.Fatalf("authorized replay reset = %#v", result)
-	}
-	state = session.ProjectionState()
-	if state.ScrollbackResetCount != 1 || state.LastScrollbackResetReason != "reconciliation" || state.TerminalEpoch != 1 {
-		t.Fatalf("authorized replay diagnostics = %#v", state)
 	}
 }
 

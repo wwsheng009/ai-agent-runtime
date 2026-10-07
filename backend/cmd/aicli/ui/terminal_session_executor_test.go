@@ -860,11 +860,6 @@ func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredProjection(t *te
 	if state.HistoryEffects.TerminalEpoch != 0 {
 		t.Fatalf("normal-interaction recovery minted a terminal epoch: %d", state.HistoryEffects.TerminalEpoch)
 	}
-	for _, entry := range executor.RecoveryDiag().Entries {
-		if entry.ScrollbackReset {
-			t.Fatal("success-mode backoff recovery replaced scrollback")
-		}
-	}
 }
 
 func TestTerminalSessionExecutorPartialHistoryWriteReconcilesWithoutResize(t *testing.T) {
@@ -1243,9 +1238,6 @@ func TestTerminalSessionExecutorReconciliationRetryAfterDeadlock(t *testing.T) {
 	// scrollback: only an authorized resume/load replay may do that.
 	foundRepaint := false
 	for _, entry := range executor.RecoveryDiag().Entries {
-		if entry.ScrollbackReset {
-			t.Fatal("retry cycle replaced native scrollback")
-		}
 		if entry.FullRepaint {
 			foundRepaint = true
 		}
@@ -1394,37 +1386,6 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 		t.Fatal("racing progress was blocked by stale backoff")
 	}
 
-	// 5. Successful scrollback reset, obligation already cleared (the executor's
-	// own HistoryProjectionRecovered / reconcile posts were
-	// reduced by WaitIdle before armRecoveryBackoff runs), generation unchanged:
-	// this is the actual production reset+replay loop — the reconcile handler
-	// replanned the whole transcript, the next cycle is recoveryActionable
-	// again, and the obligation check alone never sees it. A successful reset
-	// at an unchanged layout generation must arm the guard.
-	controller.mu.Lock()
-	controller.state.Geometry.Generation = startGen // restore: no racing progress
-	controller.state.HistoryEffects.ProjectionUnknown = false
-	controller.state.HistoryEffects.ReconciliationRequired = false
-	controller.mu.Unlock()
-	if controller.LayoutGeneration() != startGen {
-		t.Fatal("test setup failed: generation was not restored")
-	}
-	if !executor.armRecoveryBackoff(TerminalTransactionResult{
-		ScrollbackReset: true,
-		TerminalEpoch:   9,
-	}, startGen) {
-		t.Fatal("successful scrollback reset without generation advance did not arm backoff")
-	}
-	executor.mu.Lock()
-	gotEpoch := executor.lastResetEpoch
-	gotResetGen := executor.lastResetGeneration
-	executor.mu.Unlock()
-	if gotEpoch != 9 {
-		t.Fatalf("scrollback-reset arm recorded epoch %d, want 9", gotEpoch)
-	}
-	if gotResetGen != startGen {
-		t.Fatalf("scrollback-reset arm recorded generation %d, want start %d", gotResetGen, startGen)
-	}
 }
 
 // TestTerminalSessionExecutorFlushesWhileSuccessBackoff locks in the
@@ -1505,9 +1466,6 @@ func TestTerminalSessionExecutorFlushesWhileSuccessBackoff(t *testing.T) {
 	last := diag.Entries[len(diag.Entries)-1]
 	if !last.BackoffEngaged || !last.FlushedWhileBackoff {
 		t.Fatalf("last diag entry missing backoff-flush markers: %+v", last)
-	}
-	if last.ScrollbackReset {
-		t.Fatal("success-mode backoff flush unexpectedly performed a scrollback reset")
 	}
 }
 
@@ -1604,9 +1562,6 @@ func TestTerminalSessionExecutorHandsOffPendingHistoryWhileSuccessBackoff(t *tes
 	// obligation under the engaged backoff instead of a viewport-only flush
 	// (which would keep the obligation forever), but it must do so by proving
 	// the viewport from source: normal interaction never replaces scrollback.
-	if diag.ScrollbackResetsInWindow != 0 {
-		t.Fatalf("recovery under success-mode backoff replaced scrollback: %+v", diag)
-	}
 	if bytes.Contains(writer.bytes.Bytes(), []byte("\x1b[3J")) {
 		t.Fatalf("success-mode backoff recovery reset scrollback: %q", writer.bytes.String())
 	}
@@ -1617,9 +1572,6 @@ func TestTerminalSessionExecutorHandsOffPendingHistoryWhileSuccessBackoff(t *tes
 	for _, entry := range diag.Entries {
 		if entry.BackoffEngaged && entry.HandoffWhileBackoff {
 			found = true
-			if entry.ScrollbackReset {
-				t.Fatal("pending handoff unexpectedly performed a scrollback reset")
-			}
 		}
 	}
 	if !found {
@@ -1932,7 +1884,6 @@ func TestExecutorDiagTextSummarySmoke(t *testing.T) {
 			{Seq: 2, Branch: "scheduled", Generation: 1, Revision: 20, RevisionAfter: 30, FrameErr: "write: broken pipe"},
 			{Seq: 3, Branch: "scheduled", Generation: 1, Revision: 30, RevisionAfter: 40, BackoffEngaged: true},
 			{Seq: 4, Branch: "scheduled", Generation: 2, Revision: 40, RevisionAfter: 50, FullRepaint: true},
-			{Seq: 5, Branch: "scheduled", Generation: 2, Revision: 50, RevisionAfter: 60, ScrollbackReset: true},
 		},
 	}
 	summary := executorDiagTextSummary(d)
@@ -1952,9 +1903,6 @@ func TestExecutorDiagTextSummarySmoke(t *testing.T) {
 	}
 	if !strings.Contains(summary, "frameErrorsInWindow") {
 		t.Fatal("text summary missing frameErrorsInWindow")
-	}
-	if !strings.Contains(summary, "scrollbackResetsInWindow") {
-		t.Fatal("text summary missing scrollbackResetsInWindow")
 	}
 }
 

@@ -30,7 +30,6 @@ type ExecutorRecoveryDiagEntry struct {
 	// layout generation.
 	HandoffWhileBackoff bool   `json:"handoffWhileBackoff"`
 	FullRepaint         bool   `json:"fullRepaint"`
-	ScrollbackReset     bool   `json:"scrollbackReset"`
 	FrameErr            string `json:"frameErr"`
 	ObligationPending   bool   `json:"obligationPending"`
 	ArmedBackoff        bool   `json:"armedBackoff"`
@@ -106,10 +105,6 @@ type ExecutorRecoveryDiag struct {
 	// dead-guard loop (no errors, armed but never engaged) from a genuinely
 	// failing writer (errors on every iteration).
 	FrameErrorsInWindow int `json:"frameErrorsInWindow"`
-	// ScrollbackResetsInWindow counts how many retained iterations performed a
-	// full scrollback reset+replay. A high count under one generation is the
-	// visible replay-loop signature.
-	ScrollbackResetsInWindow int `json:"scrollbackResetsInWindow"`
 	// LastGeneration is the layout generation of the most recent entry.
 	LastGeneration uint64 `json:"lastGeneration"`
 }
@@ -332,9 +327,6 @@ func (e *TerminalSessionExecutor) RecoveryDiag() ExecutorRecoveryDiag {
 	for _, en := range entries {
 		if en.FrameErr != "" {
 			d.FrameErrorsInWindow++
-		}
-		if en.ScrollbackReset {
-			d.ScrollbackResetsInWindow++
 		}
 	}
 	if len(entries) > 0 {
@@ -603,7 +595,7 @@ func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration u
 // armRecoveryBackoff decides whether to arm the scrollback-reset backoff guard
 // after a recovery flush. It returns true when the guard was armed.
 //
-// Two distinct cases arm the guard:
+// Two cases arm the guard:
 //
 //  1. FAILED flush (Frame.Err != nil): every failure posts
 //     HistoryProjectionInvalidated, which advances the actor revision. We must
@@ -614,7 +606,7 @@ func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration u
 //     generation did NOT advance during the flush. A successful flush that posts
 //     no outcome (viewport-only recovery that fails to prove FullRepaint or a
 //     known projection) leaves the obligation in place with an unchanged
-//     generation — the signature of a non-progressing reset+replay loop.
+//     generation — the signature of a non-progressing recovery loop.
 //     Recording startGeneration (which equals the settled generation here)
 //     makes the next no-progress cycle match and the backoff yields the worker.
 //
@@ -622,17 +614,6 @@ func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration u
 // is genuine progress (e.g. a resize that raced the in-flight transaction) and
 // must NOT arm the guard: the next pending generation recovery must run
 // immediately.
-//
-//  3. SUCCESSFUL scrollback reset whose layout generation did NOT advance.
-//     This is the reset+replay-loop signature the obligation check cannot see:
-//     the executor's own HistoryProjectionRecovered posts are reduced
-//     (WaitIdle) before this function runs, so
-//     terminalHistoryRecoveryObligationPending() is already false even though
-//     the reconcile handler replanned the entire transcript (memo misses on
-//     every TerminalEpoch bump) and the next worker cycle re-enters recovery.
-//     The successful flush genuinely reset the terminal (epoch advanced), but
-//     the loop that follows is non-progressing; only a real geometry/theme
-//     change (new layout generation) must run the next recovery immediately.
 //
 // NOTE: LayoutGeneration, not Revision, is the progress discriminator. A
 // transcript replay / streaming resume posts hundreds of actions per executor
@@ -647,14 +628,6 @@ func (e *TerminalSessionExecutor) armRecoveryBackoff(result TerminalTransactionR
 		return true
 	}
 	if e.controller.terminalHistoryRecoveryObligationPending() && e.controller.LayoutGeneration() == startGeneration {
-		e.recordScrollbackReset(result.TerminalEpoch, startGeneration, false)
-		return true
-	}
-	if result.ScrollbackReset && e.controller.LayoutGeneration() == startGeneration {
-		// Successful reset at an unchanged layout generation: the reconcile
-		// handler replans the full transcript (TerminalEpoch memo miss) and the
-		// next cycle is recoveryActionable again. Arm so the worker yields on
-		// the next same-generation recovery instead of busy-looping at ~2 cores.
 		e.recordScrollbackReset(result.TerminalEpoch, startGeneration, false)
 		return true
 	}
@@ -974,7 +947,6 @@ func (e *TerminalSessionExecutor) runOne() bool {
 							BackoffEngaged:      true,
 							HandoffWhileBackoff: true,
 							FullRepaint:         result.Frame.FullRepaint,
-							ScrollbackReset:     result.ScrollbackReset,
 							FrameErr:            frameErrString(result.Frame.Err),
 							ObligationPending:   e.controller.terminalHistoryRecoveryObligationPending(),
 							Continued:           continued,
@@ -1014,7 +986,6 @@ func (e *TerminalSessionExecutor) runOne() bool {
 						BackoffEngaged:      true,
 						FlushedWhileBackoff: true,
 						FullRepaint:         result.Frame.FullRepaint,
-						ScrollbackReset:     result.ScrollbackReset,
 						FrameErr:            frameErrString(result.Frame.Err),
 						ObligationPending:   e.controller.terminalHistoryRecoveryObligationPending(),
 						ArmedBackoff:        armed,
@@ -1062,7 +1033,6 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			ProjectionUnknown: snapshot.projectionUnknown,
 			ReconciliationReq: snapshot.reconciliationRequired,
 			FullRepaint:       result.Frame.FullRepaint,
-			ScrollbackReset:   result.ScrollbackReset,
 			FrameErr:          frameErrString(result.Frame.Err),
 			ObligationPending: e.controller.terminalHistoryRecoveryObligationPending(),
 			ArmedBackoff:      armed,
@@ -1096,7 +1066,6 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			ProjectionUnknown: snapshot.projectionUnknown,
 			ReconciliationReq: snapshot.reconciliationRequired,
 			FullRepaint:       result.Frame.FullRepaint,
-			ScrollbackReset:   result.ScrollbackReset,
 			FrameErr:          frameErrString(result.Frame.Err),
 			ObligationPending: e.controller.terminalHistoryRecoveryObligationPending(),
 			ArmedBackoff:      armed,
@@ -1223,22 +1192,17 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 	// A bottom-viewport repaint is not proof that the independently owned top
 	// history projection recovered. Publish the reducer barrier only when the
 	// terminal owner confirms both facts; partial history writes remain
-	// fail-closed until an explicit scrollback reconciliation.
+	// fail-closed until an explicit settle.
 	if result.Frame.FullRepaint && e.session.ProjectionState().HistoryKnown {
 		e.postControllerActionTracked(HistoryProjectionRecovered{LayoutGeneration: generation})
 	}
 	// A non-destructive recovery proves the visible frame without replacing
 	// scrollback. Publish the settle barrier so the reducer quarantines the
-	// unprovable resident range and resumes ordered handoff; it is skipped while
-	// an authorized replay is still pending, because that replay owns the
-	// obligation and a settle must never race it.
+	// unprovable resident range and resumes ordered handoff.
 	if result.SettledHistoryProjection && result.Frame.Err == nil && !result.Frame.Deferred {
 		e.postControllerActionTracked(HistoryReconciliationSettled{LayoutGeneration: generation})
 	}
 	e.waitLastControllerAction()
-	if result.ScrollbackReset {
-		return e.controller.terminalSessionHasActionableWork()
-	}
 	if historyAcknowledged && claimed != nil && e.controller.terminalSessionCommitAckedAndHasPending(claimed.Token) {
 		return true
 	}

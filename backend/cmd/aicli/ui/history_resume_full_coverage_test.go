@@ -83,8 +83,8 @@ func assertHistoryCoverage(t *testing.T, controller *UIController, session *Term
 	}
 }
 
-// 需求：resume 的销毁式重放（\x1b[3J + 重新投递）之后，规划必须把**整份** transcript
-// 交付到原生 scrollback，而不是停在「预算恰好能走到的那个前缀」上。
+// 需求：resume 装载（append-only：不清屏、按序追加）之后，规划必须把**整份**
+// transcript 交付到原生 scrollback，而不是停在「预算恰好能走到的那个前缀」上。
 //
 // live 事故（session_20260924072950_ltYRU9tG，端口 56311 的进程）：6622 cell /
 // 291842 物理行的会话 resume 之后，ledger 只有 322 条 acked 提交、pending=0、

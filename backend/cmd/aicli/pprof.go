@@ -264,7 +264,7 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// /debug/pprof/executor 暴露 TerminalSessionExecutor 的 recovery-loop 逐次
 	// 诊断（环形缓冲 + 计数器）。这是 CPU/goroutine profile 之外的观测手段：
 	// 它显示每次 recovery flush 的 revision 前后值、generation、epoch、
-	// ProjectionUnknown/ReconciliationRequired、FullRepaint/ScrollbackReset、
+	// ProjectionUnknown/ReconciliationRequired、FullRepaint、
 	// frame 错误、backoff 是否 arm/触发，并给出派生的循环健康诊断
 	// （WindowDiagnosis 为当前窗口判决、Diagnosis 为 since_start 历史判决；
 	// 取值 idle / healthy / backoff_engaged / backoff_engaged_handing_off / dead_guard）——

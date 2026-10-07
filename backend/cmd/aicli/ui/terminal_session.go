@@ -101,22 +101,16 @@ type TerminalTransactionPlan struct {
 	Frame            TerminalFramePlan
 	History          *HistoryCommit
 	BootstrapHistory []HistoryCommit
-	// resetScrollback requests a source-backed replacement of an uncertain
-	// native-scrollback projection in the current layout generation. It is
-	// unexported on purpose: no package outside ui may fabricate a destructive
-	// plan, and the only production path that sets it is the executor's
-	// reducer-armed replay branch. Debug and test projections use
-	// ComposeScrollbackReconciliationPlanForDebug.
-	resetScrollback bool
-	// SettleHistoryProjection is the non-destructive recovery counterpart of
-	// resetScrollback. The frame proves the visible viewport without replacing
-	// native scrollback, so an unprovable resident range is quarantined in
-	// place: the rows stay physically resident, are never re-emitted, and the
-	// incremental handoff resumes immediately after the last proven row. It
-	// never clears scrollback and never leaves a hole in the delivered stream.
+	// SettleHistoryProjection is the only recovery mode. The frame proves the
+	// visible viewport without replacing native scrollback, so an unprovable
+	// resident range is quarantined in place: the rows stay physically
+	// resident, are never re-emitted, and the incremental handoff resumes
+	// immediately after the last proven row. It never clears scrollback and
+	// never leaves a hole in the delivered stream.
 	SettleHistoryProjection bool
-	// TerminalEpoch is the reducer-confirmed scrollback generation. A replaced
-	// TerminalSession advances from this value instead of restarting at one.
+	// TerminalEpoch is the reducer-confirmed semantic generation. It is retained
+	// as a plan-input fence; append-only delivery has no production writer that
+	// advances it (a physical scrollback replacement no longer exists).
 	TerminalEpoch uint64
 }
 
@@ -161,26 +155,6 @@ func composeTerminalViewportFramePlan(state AppState) TerminalFramePlan {
 	return ComposeTerminalFramePlan(state)
 }
 
-// ComposeScrollbackReconciliationPlanForDebug builds a full-frame destructive
-// reconciliation. Production callers must never reach it directly: replacing
-// native scrollback requires a reducer-armed replay authorization, and
-// terminalHistoryRecoveryPlan is the only path that holds one (it selects
-// composeTerminalViewportScrollbackReconciliationPlan). This exported form
-// exists for debug and test projections, which deliberately exercise the
-// reset path without a live grant; the production-file inventory test pins
-// that no non-test file under cmd/aicli names it.
-func ComposeScrollbackReconciliationPlanForDebug(state AppState) TerminalTransactionPlan {
-	plan := ComposeTerminalTransactionPlan(state, nil)
-	plan.resetScrollback = true
-	return plan
-}
-
-func composeTerminalViewportScrollbackReconciliationPlan(state AppState) TerminalTransactionPlan {
-	plan := composeTerminalViewportTransactionPlan(state, nil)
-	plan.resetScrollback = true
-	return plan
-}
-
 func (p TerminalTransactionPlan) Valid() bool {
 	if !p.Frame.Valid() || (p.History != nil && !p.History.Valid()) {
 		return false
@@ -222,19 +196,17 @@ func cloneHistoryCommits(commits []HistoryCommit) []HistoryCommit {
 // history source; callers can observe validity without treating ScreenModel as
 // a business-data source.
 type TerminalProjectionState struct {
-	Geometry                  GeometryState
-	Viewport                  ViewportArea
-	HistoryRows               int
-	HistoryKnown              bool
-	LayoutGeneration          uint64
-	Lease                     LeaseState
-	OutputBottomRow           int
-	Frame                     uint64
-	TerminalEpoch             uint64
-	ScrollbackResetCount      uint64
-	LastScrollbackResetReason string
-	Validity                  renderengine.ProjectionValidity
-	Cursor                    *AppCursor
+	Geometry         GeometryState
+	Viewport         ViewportArea
+	HistoryRows      int
+	HistoryKnown     bool
+	LayoutGeneration uint64
+	Lease            LeaseState
+	OutputBottomRow  int
+	Frame            uint64
+	TerminalEpoch    uint64
+	Validity         renderengine.ProjectionValidity
+	Cursor           *AppCursor
 }
 
 // ViewportArea is the only mutable primary-screen region owned by
@@ -272,7 +244,6 @@ type TerminalFrameResult struct {
 type TerminalTransactionResult struct {
 	Frame                    TerminalFrameResult
 	History                  *HistoryCommitResult
-	ScrollbackReset          bool
 	SettledHistoryProjection bool
 	TerminalEpoch            uint64
 }
@@ -361,14 +332,12 @@ type TerminalSession struct {
 	// blank headroom between scrollback and the same semantic message. Before
 	// the first overflow, bottom alignment keeps a short transcript near the
 	// composer without creating non-semantic scrollback.
-	historyTopAligned         bool
-	historyProjectionKnown    bool
-	historyProjectionStarted  bool
-	frame                     uint64
-	terminalEpoch             uint64
-	scrollbackResetCount      uint64
-	lastScrollbackResetReason string
-	cursor                    *AppCursor
+	historyTopAligned        bool
+	historyProjectionKnown   bool
+	historyProjectionStarted bool
+	frame                    uint64
+	terminalEpoch            uint64
+	cursor                   *AppCursor
 	// alternateLeaseID records actual DEC 1049 transport ownership. It is
 	// deliberately independent of AppState.Lease because the physical enter
 	// completes before LeaseAcquired is posted to the actor, and the physical
@@ -453,19 +422,17 @@ func (s *TerminalSession) projectionStateLocked() TerminalProjectionState {
 		validity = s.screen.ProjectionValidity()
 	}
 	return TerminalProjectionState{
-		Geometry:                  s.geometry,
-		Viewport:                  s.viewport,
-		HistoryRows:               len(s.historyTailRows),
-		HistoryKnown:              s.historyProjectionKnown,
-		LayoutGeneration:          s.generation,
-		Lease:                     s.lease,
-		OutputBottomRow:           s.outputBottom,
-		Frame:                     s.frame,
-		TerminalEpoch:             s.terminalEpoch,
-		ScrollbackResetCount:      s.scrollbackResetCount,
-		LastScrollbackResetReason: s.lastScrollbackResetReason,
-		Validity:                  validity,
-		Cursor:                    cloneTerminalCursor(s.cursor),
+		Geometry:         s.geometry,
+		Viewport:         s.viewport,
+		HistoryRows:      len(s.historyTailRows),
+		HistoryKnown:     s.historyProjectionKnown,
+		LayoutGeneration: s.generation,
+		Lease:            s.lease,
+		OutputBottomRow:  s.outputBottom,
+		Frame:            s.frame,
+		TerminalEpoch:    s.terminalEpoch,
+		Validity:         validity,
+		Cursor:           cloneTerminalCursor(s.cursor),
 	}
 }
 
@@ -895,13 +862,8 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		!s.viewportBoundaryKnown && s.viewport.Top == 0
 	resizeRebuild := s.frame > 0 && s.geometry.Width > 0 && s.geometry.Height > 0 &&
 		(s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height)
-	forceScrollbackReset := plan.resetScrollback
-	// Settling is only meaningful when no authorized replay owns this
-	// transaction: a reset replaces the projection outright and re-anchors
-	// implicitly.
-	settleHistoryProjection := plan.SettleHistoryProjection && !forceScrollbackReset
-	scrollbackResetReason := terminalScrollbackResetReason(forceScrollbackReset)
-	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild && !forceScrollbackReset
+	settleHistoryProjection := plan.SettleHistoryProjection
+	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild
 	hadKnownProjection := s.screen.ProjectionValidity() == renderengine.ProjectionKnown && !s.lease.Active
 	projectionKnown := hadKnownProjection
 	candidateScreen := s.screen.Clone()
@@ -913,7 +875,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
-	if resizeRebuild || forceScrollbackReset {
+	if resizeRebuild {
 		candidateScreen.Invalidate()
 		projectionKnown = false
 	}
@@ -969,16 +931,12 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	// never become history.
 	transitionBytes := ""
 	nextHistoryTopAligned := s.historyTopAligned
-	// Only an explicit replay authorization may replace native scrollback. A
-	// terminal resize has already changed the host's physical row mapping, but
-	// it is not a reason to replay history: trust the host reflow, keep the
+	// A terminal resize has already changed the host's physical row mapping,
+	// but it is not a reason to replay history: trust the host reflow, keep the
 	// delivered rows, and source-repaint only the new bottom viewport. The
 	// viewport band that used to be reserved is cleared locally so prompt or
 	// status rows can never masquerade as history when the reserve shrinks.
-	if forceScrollbackReset {
-		transitionBytes = terminalResetScrollbackANSI()
-		nextHistoryTopAligned = false
-	} else if resizeRebuild {
+	if resizeRebuild {
 		transitionBytes = terminalViewportBandClearANSI(s.viewport, area, frame.Geometry.Height, s.viewportBoundaryKnown)
 	} else if initializeHistoryProjection {
 		transitionBytes = terminalClearHistoryRegionANSI(frame.OutputBottomRow)
@@ -999,9 +957,6 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	// occupancy-aware: an underfilled region is repainted without scrolling;
 	// overflow uses HandoffPlan only for rows that must actually cross row one.
 	baseHistoryTail := terminalRetainHistoryTailRows(s.historyTailRows, frame.OutputBottomRow)
-	if forceScrollbackReset {
-		baseHistoryTail = nil
-	}
 	if historyInsertedRows > 0 {
 		// A replay-free settlement re-delivers a range whose bytes are still
 		// resident when an in-flight delivery lost its ledger proof. The
@@ -1091,12 +1046,12 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	}
 	candidateScreen.ConfirmFlush()
 	if os.Getenv("TERM_SESSION_TRACE") != "" {
-		fmt.Printf("TERMTRACE frame=%d gen=%d outBottom=%d area.Top=%d area.H=%d prevTop=%d prevH=%d prevKnown=%v prevTermH=%d histKnown=%v histStarted=%v topAligned=%v tailRows=%d transitionBytes=%d historyBytes=%d histInsertedRows=%d fullRepaint=%v initHist=%v resize=%v reset=%v\n",
+		fmt.Printf("TERMTRACE frame=%d gen=%d outBottom=%d area.Top=%d area.H=%d prevTop=%d prevH=%d prevKnown=%v prevTermH=%d histKnown=%v histStarted=%v topAligned=%v tailRows=%d transitionBytes=%d historyBytes=%d histInsertedRows=%d fullRepaint=%v initHist=%v resize=%v\n",
 			s.frame, frame.LayoutGeneration, frame.OutputBottomRow, area.Top, area.Height,
 			s.viewport.Top, s.viewport.Height, s.viewportBoundaryKnown, s.viewportTerminalHeight,
 			s.historyProjectionKnown, s.historyProjectionStarted, s.historyTopAligned, len(s.historyTailRows),
 			len(transitionBytes), len(historyBytes), historyInsertedRows, fullRepaint,
-			initializeHistoryProjection, resizeRebuild, forceScrollbackReset)
+			initializeHistoryProjection, resizeRebuild)
 		if os.Getenv("TERM_SESSION_TRACE_BYTES") != "" {
 			fmt.Printf("TERMTRACE_BYTES frame=%d:\n%q\n", s.frame, bytes)
 		}
@@ -1114,18 +1069,6 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		// The resize frame only repaints the bottom viewport band. Already
 		// delivered history rows stay untouched; incremental handoff resumes on
 		// the next stable frame.
-	case forceScrollbackReset:
-		s.historyProjectionStarted = true
-		s.historyProjectionKnown = true
-		s.historyTailRows = nil
-		s.historyStreamTailRows = nil
-		s.historyTailCells = nil
-		if plan.TerminalEpoch > s.terminalEpoch {
-			s.terminalEpoch = plan.TerminalEpoch
-		}
-		s.terminalEpoch++
-		s.scrollbackResetCount++
-		s.lastScrollbackResetReason = scrollbackResetReason
 	case settleHistoryProjection:
 		// A source-backed viewport repaint without a scrollback replacement.
 		// The unprovable resident range stays quarantined in place: its rows
@@ -1164,17 +1107,9 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	return TerminalTransactionResult{
 		Frame:                    frameResult,
 		History:                  historyResult,
-		ScrollbackReset:          forceScrollbackReset,
 		SettledHistoryProjection: settleHistoryProjection,
 		TerminalEpoch:            s.terminalEpoch,
 	}
-}
-
-func terminalScrollbackResetReason(reconciliation bool) string {
-	if reconciliation {
-		return "reconciliation"
-	}
-	return ""
 }
 
 // confirmWriteLocked is the single allocation point for the writer frame
@@ -1712,10 +1647,6 @@ func terminalClearHistoryRegionRowsANSI(first, last int) string {
 		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
 	}
 	return output.String()
-}
-
-func terminalResetScrollbackANSI() string {
-	return "\x1b[r\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b[H"
 }
 
 // terminalViewportBandClearANSI blanks only the rows that the previous viewport

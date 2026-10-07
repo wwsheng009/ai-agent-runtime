@@ -128,9 +128,6 @@ func TestDebugDisplayIncludesAppStatePresenterDiagnostics(t *testing.T) {
 	if result := session.TerminalSession.FlushTransaction(ui.ComposeTerminalTransactionPlan(appState, nil)); result.Frame.Err != nil {
 		t.Fatalf("initial terminal projection: %v", result.Frame.Err)
 	}
-	if result := session.TerminalSession.FlushTransaction(ui.ComposeScrollbackReconciliationPlanForDebug(appState)); result.Frame.Err != nil {
-		t.Fatalf("terminal reconciliation projection: %v", result.Frame.Err)
-	}
 
 	plain := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
 	for _, marker := range []string{
@@ -147,8 +144,6 @@ func TestDebugDisplayIncludesAppStatePresenterDiagnostics(t *testing.T) {
 		"Mutable Viewport:",
 		"Resident History:",
 		"Terminal Epoch:",
-		"Scrollback Resets:",
-		"count=1 last=reconciliation",
 		"AppState Frame Parity:",
 		"parity:",
 	} {

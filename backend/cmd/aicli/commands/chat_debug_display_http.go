@@ -446,7 +446,6 @@ type chatDebugDisplayExecutorInfo struct {
 	WindowRecoveriesPerSec   float64                            `json:"window_recoveries_per_sec"`
 	GenerationAdvancesWindow int                                `json:"generation_advances_in_window"`
 	FrameErrorsWindow        int                                `json:"frame_errors_in_window"`
-	ScrollbackResetsWindow   int                                `json:"scrollback_resets_in_window"`
 	LastGeneration           uint64                             `json:"last_generation"`
 	LastEntry                *chatDebugDisplayExecutorEntryInfo `json:"last_entry,omitempty"`
 }
@@ -464,7 +463,6 @@ type chatDebugDisplayExecutorEntryInfo struct {
 	BackoffEngaged      bool   `json:"backoff_engaged"`
 	ArmedBackoff        bool   `json:"armed_backoff"`
 	FullRepaint         bool   `json:"full_repaint"`
-	ScrollbackReset     bool   `json:"scrollback_reset"`
 	FrameErr            string `json:"frame_error,omitempty"`
 	FlushedWhileBackoff bool   `json:"flushed_while_backoff"`
 	HandoffWhileBackoff bool   `json:"handoff_while_backoff"`
@@ -476,15 +474,13 @@ type chatDebugDisplayExecutorEntryInfo struct {
 // is direct evidence that the terminal believes it cannot trust the scrollback,
 // which is exactly the condition that makes the executor refuse to commit.
 type chatDebugDisplayProjectionInfo struct {
-	HistoryRows               int    `json:"history_rows"`
-	HistoryKnown              bool   `json:"history_known"`
-	LayoutGeneration          uint64 `json:"layout_generation"`
-	TerminalEpoch             uint64 `json:"terminal_epoch"`
-	Frame                     uint64 `json:"frame"`
-	ScrollbackResetCount      uint64 `json:"scrollback_reset_count"`
-	LastScrollbackResetReason string `json:"last_scrollback_reset_reason,omitempty"`
-	Validity                  string `json:"validity"`
-	OutputBottomRow           int    `json:"output_bottom_row"`
+	HistoryRows      int    `json:"history_rows"`
+	HistoryKnown     bool   `json:"history_known"`
+	LayoutGeneration uint64 `json:"layout_generation"`
+	TerminalEpoch    uint64 `json:"terminal_epoch"`
+	Frame            uint64 `json:"frame"`
+	Validity         string `json:"validity"`
+	OutputBottomRow  int    `json:"output_bottom_row"`
 }
 
 // ============================================================================
@@ -941,7 +937,6 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			WindowRecoveriesPerSec:   diag.WindowRecoveriesPerSec,
 			GenerationAdvancesWindow: diag.GenerationAdvancesInWindow,
 			FrameErrorsWindow:        diag.FrameErrorsInWindow,
-			ScrollbackResetsWindow:   diag.ScrollbackResetsInWindow,
 			LastGeneration:           diag.LastGeneration,
 		}
 		if len(diag.Entries) > 0 {
@@ -958,7 +953,6 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 				BackoffEngaged:      last.BackoffEngaged,
 				ArmedBackoff:        last.ArmedBackoff,
 				FullRepaint:         last.FullRepaint,
-				ScrollbackReset:     last.ScrollbackReset,
 				FrameErr:            last.FrameErr,
 				FlushedWhileBackoff: last.FlushedWhileBackoff,
 				HandoffWhileBackoff: last.HandoffWhileBackoff,
@@ -972,15 +966,13 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 	if session.TerminalSession != nil {
 		proj := session.TerminalSession.ProjectionState()
 		snap.Projection = &chatDebugDisplayProjectionInfo{
-			HistoryRows:               proj.HistoryRows,
-			HistoryKnown:              proj.HistoryKnown,
-			LayoutGeneration:          proj.LayoutGeneration,
-			TerminalEpoch:             proj.TerminalEpoch,
-			Frame:                     proj.Frame,
-			ScrollbackResetCount:      proj.ScrollbackResetCount,
-			LastScrollbackResetReason: proj.LastScrollbackResetReason,
-			Validity:                  proj.Validity.String(),
-			OutputBottomRow:           proj.OutputBottomRow,
+			HistoryRows:      proj.HistoryRows,
+			HistoryKnown:     proj.HistoryKnown,
+			LayoutGeneration: proj.LayoutGeneration,
+			TerminalEpoch:    proj.TerminalEpoch,
+			Frame:            proj.Frame,
+			Validity:         proj.Validity.String(),
+			OutputBottomRow:  proj.OutputBottomRow,
 		}
 	}
 

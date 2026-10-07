@@ -14,7 +14,7 @@ import (
 // 清屏重放。装载内容是 append-only 的：
 //  1. 同一修订（同身份）重复装载不得再追加任何字节（delivery ledger 去重）；
 //  2. 新修订只追加修正（新身份追加，旧行物理保留）；
-//  3. 全路径不写 \x1b[3J，ScrollbackResetCount 恒 0，语义 epoch 不因装载推进。
+//  3. 全路径不写 \x1b[3J，语义 epoch 不因装载推进。
 func TestResumeLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	const width, height = 72, 12
 	markers := make([]string, 30)
@@ -79,9 +79,6 @@ func TestResumeLoadKeepsScrollbackAppendOnly(t *testing.T) {
 		ReplaceTranscriptAction{Snapshot: regressionCommittedSnapshot(1, cell(1))},
 	)
 	converge()
-	if reset := session.ProjectionState().ScrollbackResetCount; reset != 0 {
-		t.Fatalf("normal transcript delivery reset scrollback %d times", reset)
-	}
 	if rows := session.ProjectionState().HistoryRows; rows == 0 {
 		t.Fatalf("normal transcript delivery left no resident history rows: %+v", session.ProjectionState())
 	}
@@ -102,9 +99,6 @@ func TestResumeLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	projection := session.ProjectionState()
 	if state.HistoryEffects.TerminalEpoch != 0 {
 		t.Fatalf("resume advanced the semantic epoch without a physical act: %#v", state.HistoryEffects)
-	}
-	if projection.ScrollbackResetCount != 0 {
-		t.Fatalf("resume reset scrollback %d times, want 0: %+v", projection.ScrollbackResetCount, projection)
 	}
 	if strings.Contains(physical.String(), "\x1b[3J") {
 		t.Fatal("resume wrote a scrollback reset sequence")
@@ -127,9 +121,6 @@ func TestResumeLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	})
 	converge()
 
-	if resets := session.ProjectionState().ScrollbackResetCount; resets != 0 {
-		t.Fatalf("corrected resume reset scrollback %d times, want 0", resets)
-	}
 	if strings.Contains(physical.String(), "\x1b[3J") {
 		t.Fatal("corrected resume wrote a scrollback reset sequence")
 	}

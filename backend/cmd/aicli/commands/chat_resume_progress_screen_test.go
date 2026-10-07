@@ -249,7 +249,7 @@ func TestResumeProgressDynamicRowSurvivesIncrementalHistoryPublishOnScreen(t *te
 	require.True(t, settleVisible, "收尾阶段动态行必须仍显示装载历史：%q", rows)
 	require.NotEmpty(t, rows[len(rows)-1], "补齐完成后最后一行必须仍是持久状态行")
 
-	// 收尾窗口：授权式 reset（\x1b[2J\x1b[3J）会清掉整屏（含 composer band），
+	// 收尾窗口：任何清屏事务（\x1b[2J）都会清掉整屏（含 composer band），
 	// 这类事务必须在同一批里把 composer（状态行/输入行）整段重画回来。
 	postBatches := sink.SnapshotBatches()
 	for index, batch := range postBatches[len(stableBatches):] {

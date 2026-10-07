@@ -57,7 +57,6 @@ func executorDiagTextSummary(d ExecutorRecoveryDiag) string {
 	fmt.Fprintf(&b, "  claimMissReleases        : %d\n", d.ClaimMissReleases)
 	fmt.Fprintf(&b, "  generationAdvancesInWin  : %d\n", d.GenerationAdvancesInWindow)
 	fmt.Fprintf(&b, "  frameErrorsInWindow      : %d\n", d.FrameErrorsInWindow)
-	fmt.Fprintf(&b, "  scrollbackResetsInWindow : %d\n", d.ScrollbackResetsInWindow)
 	fmt.Fprintf(&b, "  recoveriesPerSec         : %.1f\n", d.WindowRecoveriesPerSec)
 	if len(d.Entries) > 0 {
 		last := d.Entries[len(d.Entries)-1]
@@ -70,7 +69,6 @@ func executorDiagTextSummary(d ExecutorRecoveryDiag) string {
 		fmt.Fprintf(&b, "  lastReconciliationReq    : %v\n", last.ReconciliationReq)
 		fmt.Fprintf(&b, "  lastObligationPending    : %v\n", last.ObligationPending)
 		fmt.Fprintf(&b, "  lastFullRepaint          : %v\n", last.FullRepaint)
-		fmt.Fprintf(&b, "  lastScrollbackReset      : %v\n", last.ScrollbackReset)
 		fmt.Fprintf(&b, "  lastFrameErr             : %q\n", last.FrameErr)
 		fmt.Fprintf(&b, "  lastBackoffEngaged       : %v\n", last.BackoffEngaged)
 		fmt.Fprintf(&b, "  lastFlushedWhileBackoff  : %v\n", last.FlushedWhileBackoff)

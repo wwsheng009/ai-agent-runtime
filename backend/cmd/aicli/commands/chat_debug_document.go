@@ -459,17 +459,12 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	}
 	if session.TerminalSession != nil {
 		projection := session.TerminalSession.ProjectionState()
-		resetReason := projection.LastScrollbackResetReason
-		if resetReason == "" {
-			resetReason = "<none>"
-		}
 		builder.heading("TerminalSession Projection:")
 		builder.meta("Projection Validity:", projection.Validity.String())
 		builder.meta("Terminal Geometry:", fmt.Sprintf("%dx%d (generation %d)", projection.Geometry.Width, projection.Geometry.Height, projection.LayoutGeneration))
 		builder.meta("Mutable Viewport:", fmt.Sprintf("top=%d height=%d width=%d", projection.Viewport.Top, projection.Viewport.Height, projection.Viewport.Width))
 		builder.meta("Resident History:", fmt.Sprintf("rows=%d known=%t", projection.HistoryRows, projection.HistoryKnown))
 		builder.meta("Terminal Epoch:", strconv.FormatUint(projection.TerminalEpoch, 10))
-		builder.meta("Scrollback Resets:", fmt.Sprintf("count=%d last=%s", projection.ScrollbackResetCount, resetReason))
 	}
 	if session.Surface == nil {
 		builder.heading("AppState Frame Parity: (GET /debug/chat/status#app_state)")
@@ -584,14 +579,14 @@ func appendChatDebugExecutorLines(builder *chatDebugDocumentBuilder) {
 		diag.TotalRecoveries, diag.BackoffEngaged, diag.ArmedBackoff))
 	builder.meta("While Backoff:", fmt.Sprintf("flushes=%d handoffs=%d",
 		diag.FlushesWhileBackoff, diag.HandoffsWhileBackoff))
-	builder.meta("Retained Ring:", fmt.Sprintf("frameErrors=%d scrollbackResets=%d generationAdvances=%d recoveriesPerSec=%.1f",
-		diag.FrameErrorsInWindow, diag.ScrollbackResetsInWindow, diag.GenerationAdvancesInWindow, diag.WindowRecoveriesPerSec))
+	builder.meta("Retained Ring:", fmt.Sprintf("frameErrors=%d generationAdvances=%d recoveriesPerSec=%.1f",
+		diag.FrameErrorsInWindow, diag.GenerationAdvancesInWindow, diag.WindowRecoveriesPerSec))
 	if len(diag.Entries) > 0 {
 		last := diag.Entries[len(diag.Entries)-1]
 		builder.meta("Last Iteration:", fmt.Sprintf(
-			"seq=%d branch=%s generation=%d revision=%d->%d epoch=%d backoffEngaged=%t flushWhileBackoff=%t handoffWhileBackoff=%t scrollbackReset=%t frameErr=%s",
+			"seq=%d branch=%s generation=%d revision=%d->%d epoch=%d backoffEngaged=%t flushWhileBackoff=%t handoffWhileBackoff=%t frameErr=%s",
 			last.Seq, last.Branch, last.Generation, last.Revision, last.RevisionAfter, last.TerminalEpoch,
-			last.BackoffEngaged, last.FlushedWhileBackoff, last.HandoffWhileBackoff, last.ScrollbackReset,
+			last.BackoffEngaged, last.FlushedWhileBackoff, last.HandoffWhileBackoff,
 			chatDebugValueOrNone(last.FrameErr)))
 	}
 }

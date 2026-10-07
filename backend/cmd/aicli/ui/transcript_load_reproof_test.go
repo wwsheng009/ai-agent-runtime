@@ -48,7 +48,7 @@ func TestReplaceTranscriptActionLoadNeverArmsDestructiveReplay(t *testing.T) {
 	if len(loaded.Transcript.Cells) != 1 || loaded.Transcript.Cells[0].Source != "loaded session" {
 		t.Fatalf("load transcript = %+v, want the replacement snapshot installed by the same reduction", loaded.Transcript)
 	}
-	if plan := scrollbackGrantRecoveryPlan(loaded); plan.resetScrollback || !plan.SettleHistoryProjection {
+	if plan := scrollbackGrantRecoveryPlan(loaded); !plan.SettleHistoryProjection {
 		t.Fatalf("load recovery plan = %+v, want non-destructive settle only", plan)
 	}
 }
@@ -83,7 +83,7 @@ func TestLoadKeepsDeliveryLedgerAuthoritative(t *testing.T) {
 	if !state.HistoryEffects.ProjectionUnknown || !state.HistoryEffects.ReconciliationRequired {
 		t.Fatalf("replacement that drops delivered cells must request a settle: %#v", state.HistoryEffects)
 	}
-	if plan := scrollbackGrantRecoveryPlan(state); plan.resetScrollback || !plan.SettleHistoryProjection {
+	if plan := scrollbackGrantRecoveryPlan(state); !plan.SettleHistoryProjection {
 		t.Fatalf("invalidating replacement recovery plan = %+v, want non-destructive settle", plan)
 	}
 }
