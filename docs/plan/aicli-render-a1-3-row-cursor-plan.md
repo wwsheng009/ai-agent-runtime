@@ -65,7 +65,7 @@
 | **3a** | ledger 增 `mintedFrontier` + `remintable` 集，在 `Enqueue`/`pruneEntry` 处维护；纯镜像 | 无 | 等价性测试：任意 fixture 序列下 `sourceKey ≤ frontier`（+例外）≡ 旧 `hasTerminalRecordForSource` / `compactedTerminalSources` 并集判定 |
 | **3b** | 规划 skip 切换：`enqueueHistoryCandidatesRetained`、`hasSettledRecordForSource`、`retainedQueuedCommitForSource` 改走 frontier + live 检查；旧路径留作测试双跑对照 | 无（双跑断言） | 双跑一致 + prepend/retention/生成漂移族绿 |
 | **3c** | 压缩改造：装载边界墓碑剪枝（R5 修复版） | **已实施（见 §6）**：墓碑保留为精确阻断真相；`ReplaceTranscriptAction` 整体替换（armed 装载/较早页插入，或 cell 集合收缩）时剪除 `cellID ∉ 新 transcript` 的压缩来源。frontier 退回纯加速器 | 剪枝/保留双向用例 + 装载/前缀生产流绿 + 宽回归绿 |
-| **3d** | 删除面落地（按 §3 结论）：Quarantine 子类折叠评估、`bySource` 降级、`byRange` 收敛、ackBatch 形态复核 | 视评估 | 逐项迁移记录 + fail-closed 语义不回退 |
+| **3d** | 删除面落地（按 §3 结论）：Quarantine 子类折叠、`bySource`/`byRange` live-only 复核、ackBatch 形态复核 | **已实施（见 §6）**：Quarantine 折叠为 `retired` + 两布尔轴；`bySource`/`byRange` 复核确认已 live-only（无代码变更）；ackBatch 复核保留（连续前缀化不可行，反例 `[1,3]`） | 等价矩阵测试 + 宽回归绿 + 逐项迁移记录 |
 | **3e** | 验收：宽回归（ui + commands + `-race`）+ 真机 e2e（exactly-once 72 行 + resume 页序） | — | 全绿 + 台账/设计文档同步 |
 
 ## 3. 删除面评估（前置结论，3d 实施时复核）
@@ -73,10 +73,10 @@
 | 对象 | 判定 | 依据 / 前提 |
 |---|---|---|
 | `compactedTerminalSources`（tombstone） | **保留（精确阻断真相），装载边界按当前 transcript 剪枝** | frontier 只作加速器（3b）；「已铸造」的精确真相是墓碑本身（R5：装载可引入低于旧 frontier 的新来源）。装载边界剪除被移除 cell 的来源后，规模 ≤ 当前会话来源数 |
-| `bySource` | **降级为 live-only 索引**（3d） | 终态压缩后无需保留：已铸造判定走 frontier；live 检查只需现存条目 |
-| `byRange` | **保留但收敛为 live-only** | 同代重复区间入队去重仍需要（防同一 pass 内重复候选）；终态压缩后由 frontier 判定，无需保留 |
-| Quarantine 子类（Failed/Invalidated/Settled） | **评估折叠**为 `retired` + `unresolved bool` + `remintable bool` | 行为差异只剩三项：unresolved 计数、可压缩性、可重铸性；折叠前须有逐行为等价测试 |
-| `ackBatch`（covered 集） | **保留** | 它是「一笔事务写了哪些 token」的物理事实（proof），不是特例；3d 只复核是否可收敛为 claim 批次前缀的简化形态 |
+| `bySource` | **已是 live-only（3d 复核确认，无变更）** | `pruneEntry` 同步删除 token 与空集；已铸造判定走 frontier + 墓碑，live 检查只扫现存条目（3b 双跑等价已证） |
+| `byRange` | **已是 live-only（3d 复核确认，无变更）** | 同代重复区间入队去重仍需要（防同一 pass 内重复候选）；`pruneEntry` 仅在键仍指向本 token 时删除（新 live token 的登记不是残留） |
+| Quarantine 子类（Failed/Invalidated/Settled） | **已折叠（3d）**为 `retired` + `UnresolvedDelivery`/`MayRemint` 两轴 | 三行为差异（未决/压缩/重铸）精确等价（矩阵测试钉住）；failed 与 partial-invalidated 两轴同形，诊断 `quarantined-failed` 计数并入 `quarantined-unresolved`；settled 的 covered 强化不得转未决（回归用例） |
+| `ackBatch`（covered 集） | **保留（3d 复核）** | covered 集为「head + 合格 follower」严格升序前缀，允许空洞（跳过终态/旧代 token 后继续）；连续 token 前缀化不可行（生产反例 `[1,3]`：强制连续会把成功写升级为假未决）；「批序前缀」已是现状 |
 | `unresolvedCount` / `hasUnresolvedTerminalDelivery` | **保留** | A1-2c 已定稿为 proof 谓词 |
 
 ## 4. 测试与验收矩阵
@@ -174,3 +174,32 @@
   `TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail` 保持绿；宽回归 ui（110s）
   + commands（196s）exit 0。frontier 维持 3b 纯加速器语义，不再承担跨代际
   「已铸造」真相；墓碑上界 = 当前 transcript 来源数。
+- **3d（`43499641`，2026-10-07）**：删除面落地，逐项记录：
+  1. **Quarantine 子类折叠（已实施）**：删除 `HistoryCommitQuarantine` 枚举（4 常量）
+     与 `Quarantine` 字段，替换为条目上的 `UnresolvedDelivery` / `MayRemint` 两布尔轴；
+     `Unresolved()`/`BlocksRemint()`/`prunableResolvedEntry`（退化为 `!unresolved`）改由
+     两轴表达；`IsFailed()`/`IsInvalidated()` 删除（无法忠实派生），`IsSettled()` 保留为
+     派生谓词。写点对齐：fail → (true,false)；invalidate → (partial, !partial)；
+     settle → (false,false)；covered 强化仅对 invalidated-clean 转未决并撤回重铸许可
+     （settled 强化只写物理事实、不得转未决——回归用例
+     `TestQuarantineAxesBehaviorMatrix/covered_strengthening_preserves_axes` 钉住）。
+     等价矩阵测试 `TestQuarantineAxesBehaviorMatrix` 覆盖 fail/settle、invalidate
+     clean/partial、covered 三态强化与压缩/墓碑/重铸拒绝。**诊断口径变化**：
+     failed 与 partial-invalidated 在两轴上同形，`Summary.QuarantinedFailed` 删除，
+     debug 文本 `quarantined-failed=` 并入 `quarantined-unresolved=`（
+     `chat_debug_document.go`，同步更新 walk 等价测试）。
+  2. **`bySource`/`byRange` live-only（复核确认，无代码变更）**：`pruneEntry` 已同步清除
+     `byToken/byRange/bySource/tokens`（`byRange` 仅在键仍指向本 token 时删除，属新
+     live token 登记，非残留）；全部读取方以墓碑/`mintedThrough` 先行、`bySource` 只扫
+     live 条目；`history_commit_test.go:155-198` 等已断言零索引残留。
+  3. **`ackBatch`（复核保留）**：covered 集 =「claimed head + 合格 follower」严格升序，
+     允许空洞（跳过终态或旧代 token 后继续扫描；预算耗尽即前缀截断）。连续 token 前缀化
+     **不可行**：生产反例 head=1 有效、token=2 被 reconcile 置 invalidated、token=3 仍
+     当前代 → 批为 `[1,3]`，强制连续会整批 fail-closed，把一次成功物理写升级为假未决
+     恢复义务（`terminal_session_snapshot.go:130-141`、`history_effect_queue.go:714-722`）。
+     「批序前缀」已是现状，保留现形态。
+  4. **实现与设计措辞差异记录**：§1.3 的 ledger 级 `remintable` 集合未落地为独立容器——
+     其语义由「已铸造但无墓碑」隐式表达（invalidated-clean 压缩后不留墓碑即允许重铸，
+     `pruneEntry` 注释与 `TestPrunedRemintableSourceStillRequiresMaterialization` 钉住）。
+     条目级 `MayRemint` 与之同义、极性相反（`MayRemint=true ⇔ BlocksRemint=false`）。
+  宽回归：ui（110s）+ commands（182s）exit 0；gofmt 干净；无残留标识符（rg 复核）。
