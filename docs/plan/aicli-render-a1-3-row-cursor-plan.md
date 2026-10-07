@@ -64,7 +64,7 @@
 |---|---|---|---|
 | **3a** | ledger 增 `mintedFrontier` + `remintable` 集，在 `Enqueue`/`pruneEntry` 处维护；纯镜像 | 无 | 等价性测试：任意 fixture 序列下 `sourceKey ≤ frontier`（+例外）≡ 旧 `hasTerminalRecordForSource` / `compactedTerminalSources` 并集判定 |
 | **3b** | 规划 skip 切换：`enqueueHistoryCandidatesRetained`、`hasSettledRecordForSource`、`retainedQueuedCommitForSource` 改走 frontier + live 检查；旧路径留作测试双跑对照 | 无（双跑断言） | 双跑一致 + prepend/retention/生成漂移族绿 |
-| **3c** | 压缩改造：`compactResolvedIfLarge` 更新 frontier/例外集；删除 `compactedTerminalSources` | 无 | 压缩等价测试 + 长会话载荷/内存核算 |
+| **3c** | 压缩改造：删除 `compactedTerminalSources` | **阻塞（2026-10-07 发现反例，代码已回退）**：frontier 的「≤ frontier ⇒ 已铸造」在 `ReplaceTranscriptAction` 整体替换 transcript 后不成立（新会话 cell 在旧 frontier 之下铸造），无墓碑判定会把新来源误判为「已压缩阻断」而丢行 | 解除条件见 §5 R5 |
 | **3d** | 删除面落地（按 §3 结论）：Quarantine 子类折叠评估、`bySource` 降级、`byRange` 收敛、ackBatch 形态复核 | 视评估 | 逐项迁移记录 + fail-closed 语义不回退 |
 | **3e** | 验收：宽回归（ui + commands + `-race`）+ 真机 e2e（exactly-once 72 行 + resume 页序） | — | 全绿 + 台账/设计文档同步 |
 
@@ -72,7 +72,7 @@
 
 | 对象 | 判定 | 依据 / 前提 |
 |---|---|---|
-| `compactedTerminalSources`（tombstone） | **可删**（3c 后） | 「已铸造」由 frontier 承担；「可重铸」由 `remintable` 承担；唯一消费者是 `Enqueue` 去重与 `retainedQueuedCommitForSource`，均已切换 |
+| `compactedTerminalSources`（tombstone） | **暂不可删（3c 阻塞，见 R5）** | 「已铸造」由 frontier 承担的前提是 allocation 序定理**跨 transcript 代际**成立；会话装载是反例。解除条件：跨装载精确的覆盖表示（epoch 域 source 身份，或装载边界处的有界精确集） |
 | `bySource` | **降级为 live-only 索引**（3d） | 终态压缩后无需保留：已铸造判定走 frontier；live 检查只需现存条目 |
 | `byRange` | **保留但收敛为 live-only** | 同代重复区间入队去重仍需要（防同一 pass 内重复候选）；终态压缩后由 frontier 判定，无需保留 |
 | Quarantine 子类（Failed/Invalidated/Settled） | **评估折叠**为 `retired` + `unresolved bool` + `remintable bool` | 行为差异只剩三项：unresolved 计数、可压缩性、可重铸性；折叠前须有逐行为等价测试 |
@@ -100,6 +100,18 @@
 4. **R4 `sourceEnd` 在游标比较中的角色**：fragment 划分下同 `sourceStart` 不同 `sourceEnd`
    的键必须有序且无歧义；比较器定为
    `(cellID, revision, sourceStart, fragmentID, sourceEnd)`，由等价性测试钉住。
+5. **R5 会话装载是 allocation 序定理的反例（2026-10-07 发现，阻塞 3c 删除面）**：
+   `ReplaceTranscriptAction` 整体替换 transcript 时 ledger 与 frontier 均保留
+   （append-only 语义要求），但新 transcript 的 cell 是**新来源**，其 key 可以落在
+   旧 frontier 之下。此时 `mintedThrough(key)=true` 而该来源从未铸造：
+   - 规划 skip 会把新 cell 误判为「已压缩终态」→ 不物化 → 内容永不交付；
+   - `Enqueue` 守卫会拒绝其铸造；
+   - 反向（装载同一会话）又确实需要旧 key 的阻断（防重复追加）。
+   实测：`TestTerminalSessionExecutorLoadKeepsScrollbackAppendOnly`（装载未送达）与
+   `TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail`（截断前缀不铸前缀）在 3c
+   判定下失败。**结论**：frontier 只能当加速器，不能当精确「已铸造」真相；删除
+   `compactedTerminalSources` 必须先给出跨装载精确的覆盖表示，否则 3c 保持阻塞、
+   墓碑保留。
 
 ## 6. 实施记录
 
@@ -126,3 +138,13 @@
   unsettled，重规划仍可再铸，不丢行）绿。全量回归：专项族 119.8s、ui 135.9s、
   commands 189.9s 绿。**结论**：3c 可删 `compactedTerminalSources` 的消费面
   （`hasSettled`/`hasTerminal` 已由游标承担主判定），并将 bySource 降级为 live-only。
+
+- **3c 尝试（2026-10-07，未落地，代码已回退到 `d23bc10a`）**：按 §2 实现「删
+  `compactedTerminalSources` → 由 frontier + remintable 例外承担阻断/结算判定 +
+  `Enqueue` 守卫改走同一判据」，并补 3c 等价/内存用例（交付型压缩 5000 条后例外集
+  为空、`bySource` live-only、压缩阻断仍生效）。专项族与部分回归绿，但**全量回归
+  暴露 §5 R5 反例**：会话装载与截断前缀两个生产流用例失败，证明 frontier 覆盖不跨
+  transcript 代际。已整体回退（`git checkout HEAD --` 7 个文件），复跑装载/前缀/
+  3b 等价族绿。**下一步**：先解 R5（epoch 域身份或有界精确集），再重启 3c；期间
+  tombstone 保留（成本 = 交付来源数 × 小键，由 P2-1 窗口压缩的 live 上界之外独立
+  增长，A3 台账继续跟踪）。
