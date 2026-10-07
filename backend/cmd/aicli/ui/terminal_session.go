@@ -44,11 +44,16 @@ var (
 // state, but its physical writer is fenced before the presenter attaches.
 type TerminalFramePlan struct {
 	LayoutGeneration uint64
-	Theme            style.ThemeContext
-	Geometry         GeometryState
-	Lease            LeaseState
-	OutputBottomRow  int
-	Rows             []AppScreenRow
+	// TerminalEpoch is the reducer-owned semantic generation
+	// (HistoryEffectQueueState.TerminalEpoch) projected into this frame.
+	// TerminalSession keeps only this projection and never advances an
+	// independent copy (§4 行 5 归一口径).
+	TerminalEpoch   uint64
+	Theme           style.ThemeContext
+	Geometry        GeometryState
+	Lease           LeaseState
+	OutputBottomRow int
+	Rows            []AppScreenRow
 	// RenderRows is the structured counterpart of Rows. It is either empty
 	// for a legacy/test plain plan or has exactly one render.Line per physical
 	// row. Keeping both during the migration makes text parity explicit while
@@ -70,6 +75,7 @@ func ComposeTerminalFramePlan(state AppState) TerminalFramePlan {
 	}
 	return TerminalFramePlan{
 		LayoutGeneration: frame.LayoutGeneration,
+		TerminalEpoch:    state.HistoryEffects.TerminalEpoch,
 		Theme:            cloneThemeContext(state.Theme),
 		Geometry:         frame.Geometry,
 		Lease:            frame.Lease,
@@ -336,8 +342,11 @@ type TerminalSession struct {
 	historyProjectionKnown   bool
 	historyProjectionStarted bool
 	frame                    uint64
-	terminalEpoch            uint64
-	cursor                   *AppCursor
+	// terminalEpoch is a projection of the reducer-owned semantic generation
+	// (HistoryEffectQueueState.TerminalEpoch), refreshed from each confirmed
+	// frame plan. The session never advances it independently (§4 行 5).
+	terminalEpoch uint64
+	cursor        *AppCursor
 	// alternateLeaseID records actual DEC 1049 transport ownership. It is
 	// deliberately independent of AppState.Lease because the physical enter
 	// completes before LeaseAcquired is posted to the actor, and the physical
@@ -1059,6 +1068,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	s.screen = candidateScreen
 	s.geometry = frame.Geometry
 	s.generation = frame.LayoutGeneration
+	s.terminalEpoch = frame.TerminalEpoch
 	s.lease = frame.Lease
 	s.outputBottom = frame.OutputBottomRow
 	s.viewport = area

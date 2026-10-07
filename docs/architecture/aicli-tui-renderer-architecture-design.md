@@ -236,7 +236,7 @@ flowchart TB
 | 2 | layout generation | `AppState.LayoutGeneration` | frame/plan/session 持值副本（stale 拒绝） | `executor.lastResetGeneration` 已随 S4（`7ade9732`）删除 | 已落地 |
 | 3 | 几何 | `AppState.Geometry`（probe 单点输入 + Resize barrier 回投） | session 持"已应用几何" | 删除 presenter `lastWidth/lastHeight` 镜像（改派生比较） | P1-2b 主体已落地 |
 | 4 | 历史交付进度 | **交付游标**（§3.4） | executor 诊断只读 | 删除 claim 拒绝计数 / `historyTailRows` / `historyTailCells` / diag 镜像或降级 /debug | P1-1/P1-2 部分 |
-| 5 | scrollback/terminal epoch | `TerminalSession.terminalEpoch` | `AppState` 持引用 | `ProvenScrollbackEpoch` 已随 S2（`9a205572`）删除；**剩余**：session 与 `HistoryEffectQueueState.TerminalEpoch` 两份可变值归一 | 部分 |
+| 5 | scrollback/terminal epoch | `TerminalSession.terminalEpoch`（reducer 权威值的**投影**，随 frame 刷新） | `AppState` 持引用 | `ProvenScrollbackEpoch` 已随 S2（`9a205572`）删除；session 侧副本归并为投影（`TerminalFramePlan.TerminalEpoch` ← `HistoryEffectQueueState.TerminalEpoch`，2026-10-07），session 不再独立推进 | 已落地 |
 | 6 | lease | `AppState.Lease` | session 持应用态 | 归并 `alternateLeaseID` / `ScreenLease.ID` 副本 | 部分 |
 | 7 | 帧号 | **writer 单点分配**（`TerminalSession.frame`） | `PaintTrace`/gateway 各自观测独立编号 | 删除跨层"同一帧号"假设；观测编号不参与正确性 | 部分 |
 | 8 | 流序号 | 编码器 `streamOrder` | payload `sequence/coalesced_from` 仅作输入元数据 | 禁止下游二次编号 | 已落地 |
