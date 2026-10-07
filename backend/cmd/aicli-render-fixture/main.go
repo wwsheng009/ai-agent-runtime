@@ -3,9 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -36,7 +39,8 @@ func main() {
 
 	controller := ui.NewUIController(ui.UIControllerConfig{}, nil, nil)
 	go controller.Run()
-	executor := ui.NewTerminalSessionExecutor(controller, ui.NewTerminalSession(os.Stdout))
+	counter := &scrollbackClearCounter{inner: os.Stdout}
+	executor := ui.NewTerminalSessionExecutor(controller, ui.NewTerminalSession(counter))
 	defer func() {
 		executor.Close()
 		controller.Close()
@@ -65,7 +69,42 @@ func main() {
 	executor.WaitIdle()
 	controller.WaitIdle()
 	assertHistoryAcknowledged(controller)
+	assertAppendOnly(controller)
 
+	// Session load: re-publish the same Scene with the load marker. The load
+	// must re-prove the plan without re-emitting the delivered rows and without
+	// clearing native scrollback.
+	post(controller, ui.ReplaceTranscriptAction{
+		Snapshot:            fixtureSnapshot(historyCount),
+		ArmScrollbackReplay: true,
+	})
+	controller.WaitIdle()
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+	assertHistoryAcknowledged(controller)
+	assertAppendOnly(controller)
+
+	// Append after the load: the new row must be appended by the ordinary
+	// ordered handoff while every earlier row stays exactly once.
+	appended := fixtureSnapshot(historyCount)
+	appended.Cells = append(appended.Cells, &scene.TranscriptCell{
+		ID:       scene.CellID(historyCount + 2),
+		Sequence: uint64(historyCount + 2),
+		Revision: 1,
+		Kind:     scene.KindAssistant,
+		Source:   "AICLI-E2E-HISTORY-072",
+		Phase:    scene.CellCommitted,
+	})
+	post(controller, ui.ReplaceTranscriptAction{Snapshot: appended})
+	controller.WaitIdle()
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+	assertHistoryAcknowledged(controller)
+	assertAppendOnly(controller)
+
+	fmt.Fprintf(os.Stdout, "AICLI-E2E-CLEAR-3J=%d\r\n", counter.count())
 	fmt.Fprintf(os.Stdout, "\x1b]0;AICLI-E2E-READY-%s\x07", runID)
 	hold := 30 * time.Second
 	if milliseconds, parseErr := strconv.Atoi(os.Getenv("AICLI_RENDER_FIXTURE_HOLD_MS")); parseErr == nil && milliseconds > 0 {
@@ -81,6 +120,47 @@ func assertHistoryAcknowledged(controller *ui.UIController) {
 			os.Exit(3)
 		}
 	}
+}
+
+// assertAppendOnly fails the fixture when a load/append phase left a recovery
+// obligation or advanced the terminal epoch (append-only delivery never does).
+func assertAppendOnly(controller *ui.UIController) {
+	state := controller.State()
+	if state.HistoryEffects.TerminalEpoch != 0 ||
+		state.HistoryEffects.ProjectionUnknown ||
+		state.HistoryEffects.ReconciliationRequired {
+		fmt.Fprintf(os.Stderr, "load/append left append-only state: %#v\n", state.HistoryEffects)
+		os.Exit(3)
+	}
+}
+
+// scrollbackClearCounter counts CSI 3J sequences crossing the session writer,
+// including sequences split across Write calls. It only observes bytes; the
+// fixture prints the final count for the e2e script to assert zero.
+type scrollbackClearCounter struct {
+	inner   io.Writer
+	mu      sync.Mutex
+	tail    []byte
+	count3J int
+}
+
+func (c *scrollbackClearCounter) Write(data []byte) (int, error) {
+	c.mu.Lock()
+	combined := append(append([]byte(nil), c.tail...), data...)
+	c.count3J += bytes.Count(combined, []byte("\x1b[3J"))
+	if len(combined) >= 2 {
+		c.tail = append(c.tail[:0], combined[len(combined)-2:]...)
+	} else {
+		c.tail = append(c.tail[:0], combined...)
+	}
+	c.mu.Unlock()
+	return c.inner.Write(data)
+}
+
+func (c *scrollbackClearCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.count3J
 }
 
 func post(controller *ui.UIController, action ui.UIAction) {

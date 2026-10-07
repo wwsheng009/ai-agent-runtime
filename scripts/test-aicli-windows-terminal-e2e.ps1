@@ -11,7 +11,7 @@ $outputDir = Join-Path $repoRoot "output\aicli-terminal-e2e"
 $fixture = Join-Path $outputDir "aicli-render-fixture.exe"
 $runID = [Guid]::NewGuid().ToString("N")
 $windowTitle = "aicli-render-fixture-" + $runID.Substring(0, 12)
-$lastMarker = "AICLI-E2E-HISTORY-071"
+$lastMarker = "AICLI-E2E-HISTORY-072"
 $promptMarker = "AICLI-E2E-PROMPT-VIEWPORT"
 $statusMarker = "AICLI-E2E-STATUS-VIEWPORT"
 $markdownMarkers = @(
@@ -188,12 +188,21 @@ foreach ($rawMarkdown in @(
         $failures.Add("raw Markdown syntax leaked into the Windows Terminal document: '$rawMarkdown'")
     }
 }
-for ($index = 0; $index -lt 72; $index++) {
+for ($index = 0; $index -lt 73; $index++) {
     $marker = "AICLI-E2E-HISTORY-{0:D3}" -f $index
     $count = ([regex]::Matches($document, [regex]::Escape($marker))).Count
     if ($count -ne 1) {
         $failures.Add("history marker '$marker' count=$count, want exactly 1")
     }
+}
+# The fixture counts CSI 3J (scrollback clear) bytes crossing the session
+# writer, including the session-load replay phase. Any clear means the load
+# replaced native scrollback instead of appending.
+$clearMatches = [regex]::Matches($document, "AICLI-E2E-CLEAR-3J=(\d+)")
+if ($clearMatches.Count -ne 1) {
+    $failures.Add("clear counter marker count=$($clearMatches.Count), want exactly 1")
+} elseif ($clearMatches[0].Groups[1].Value -ne "0") {
+    $failures.Add("session writer emitted CSI 3J $($clearMatches[0].Groups[1].Value) time(s), want 0")
 }
 if ($visible.Contains($first)) {
     $failures.Add("oldest history marker remained in the visible viewport instead of scrolling out")
@@ -215,9 +224,10 @@ if ($failures.Count -gt 0) {
     throw (($failures -join [Environment]::NewLine) + [Environment]::NewLine + "buffer dump: $dump" + [Environment]::NewLine + "visible dump: $visibleDump")
 }
 
-Write-Host "PASS: Windows Terminal document contains all 72 history rows exactly once."
+Write-Host "PASS: Windows Terminal document contains all 73 history rows exactly once."
 Write-Host "PASS: oldest and newest history remain reachable through the host text buffer."
 Write-Host "PASS: incremental history moved the visible tail while the oldest row entered scrollback."
+Write-Host "PASS: session-load replay and post-load append delivered without CSI 3J scrollback clear."
 Write-Host "PASS: prompt and status remain present exactly once."
 Write-Host "PASS: committed Markdown is rendered once without raw heading/emphasis/code syntax."
 Write-Host "Terminal: process=$($terminalProcess.ProcessName).exe PID=$($terminalDocument.ProcessId) HWND=0x$([Convert]::ToString($terminalDocument.WindowHandle, 16)) title=$($terminalDocument.WindowTitle)"
