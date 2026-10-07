@@ -214,6 +214,13 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
 （UI stall p95/max，`test-aicli-resume-startup-perf-e2e.ps1`）与 S3 的 PaintTrace
 工作计数共同约束。
 
+> **测量修正（2026-10-08，见 §5.3）**：本报告与 §5.2 的每 delta 绝对值含挂具噪声——
+> 挂具 `stepOnce` 每 delta 调 `UIController.State()`，其 `AppState.Clone()` 深拷贝整张
+> `HistoryCommitLedger`（300 cells 时占挂具分配 **75%**）；生产逐帧路径
+> （`terminalSessionSchedule`/`terminalSessionSnapshot`）从不克隆账本。挂具修正后的
+> 真实基线为 **526KB/delta、2407 allocs/delta**；上文时延/分配绝对值按同比例缩水，
+> S1 的相对 A/B 结论不变。
+
 ### 5.2 S1 实施记录（viewport-only 物化，已完成）
 
 - 实现（`terminal_session.go`，commit `9415f683`）：新增
@@ -235,3 +242,29 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
   会被测试框架丢弃，须在循环后上报）。
 - 归因注：分配大头不在物化面——S1 只去掉编码/VT 展开，剩余大头在全屏深拷贝（S2）
   与全行扫描/失效（S3）。
+
+### 5.3 S2 实施记录（去全屏深拷贝：稳态就地事务 + 延迟提交，已完成）
+
+- 测量修正（先导，pprof 实锤）：挂具改用无账本访问器（`ActiveCellState`/
+  `DiagnosticState`，与生产适配器一致）。修正后真实基线 **526KB/delta、2407 allocs/delta**；
+  S0 报告的 2.64MB/delta 中约 79% 是挂具账本克隆噪声（S1 的 7% 相对收益不受影响）。
+- 实现：
+  1. `TerminalSession.FlushTransaction` 删除 `plan.Clone()`、`CommitHistory` 删除
+     `commit.Clone()` →「只读契约 + 一次构造」（compose 阶段已克隆载荷；执行器提交的
+     claim 快照已分离），新增契约注记。
+  2. `flushTransactionLocked` 稳态帧**就地事务化**（删除每帧 `ScreenModel.Clone()`）：
+     结构变更帧（租约/几何/视口位置或尺寸变化，需 Resize/Invalidate 清空双缓冲）仍走
+     事务性候选克隆——零字节失败保持已确认模型的既有契约由此保留；`Clone()` 保留为
+     回退开关。
+  3. `ScreenModel.PrepareFlush` **延迟提交**：不再暂存推进 front / 不再置投影 Unknown /
+     不清 `forceRepaint`；`ConfirmFlush` 才提交（front←back、清 forceRepaint、Known）。
+     就地路径的零字节失败因此保持已确认状态（下一帧仍可增量 diff），写失败恢复语义仍由
+     `MarkWriteFailed` 保证；`TestScreenModelWriteFailureRequiresRecoveryBeforeDiff`
+     断言更新为新契约（prepare 后 Known，MarkWriteFailed 后 Unknown）。
+- 验收：全量 `ui/...` + `commands` 绿（ui 15.0s、renderengine 2.4s、commands 173.7s）；
+  真机 e2e 6 项 PASS（73 行 exactly-once / 无 3J / markdown 一次渲染）。
+- 收益（同机 A/B，`-count=3` 中位数；两侧同一修正挂具）：B/delta 524.3→399.4KB（**-23.8%**）、
+  allocs 2406→2367、p50 808→595µs（**-26.4%**）、p95 1.68→0.97ms（**-42%**）。
+- 剩余热点（修正后 pprof）：`vt.blankRow` 24.7%、`normalizeRow` 13.3%、
+  `vt.(*Screen).CellRows` 10.3%、`ProjectActiveCellBandWithTheme` 11.7% cum →
+  转入 S3（脏行）与 markdown 增量（S4 前置）。
