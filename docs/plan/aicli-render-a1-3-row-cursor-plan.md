@@ -64,7 +64,7 @@
 |---|---|---|---|
 | **3a** | ledger 增 `mintedFrontier` + `remintable` 集，在 `Enqueue`/`pruneEntry` 处维护；纯镜像 | 无 | 等价性测试：任意 fixture 序列下 `sourceKey ≤ frontier`（+例外）≡ 旧 `hasTerminalRecordForSource` / `compactedTerminalSources` 并集判定 |
 | **3b** | 规划 skip 切换：`enqueueHistoryCandidatesRetained`、`hasSettledRecordForSource`、`retainedQueuedCommitForSource` 改走 frontier + live 检查；旧路径留作测试双跑对照 | 无（双跑断言） | 双跑一致 + prepend/retention/生成漂移族绿 |
-| **3c** | 压缩改造：删除 `compactedTerminalSources` | **阻塞（2026-10-07 发现反例，代码已回退）**：frontier 的「≤ frontier ⇒ 已铸造」在 `ReplaceTranscriptAction` 整体替换 transcript 后不成立（新会话 cell 在旧 frontier 之下铸造），无墓碑判定会把新来源误判为「已压缩阻断」而丢行 | 解除条件见 §5 R5 |
+| **3c** | 压缩改造：装载边界墓碑剪枝（R5 修复版） | **已实施（见 §6）**：墓碑保留为精确阻断真相；`ReplaceTranscriptAction` 整体替换（armed 装载/较早页插入，或 cell 集合收缩）时剪除 `cellID ∉ 新 transcript` 的压缩来源。frontier 退回纯加速器 | 剪枝/保留双向用例 + 装载/前缀生产流绿 + 宽回归绿 |
 | **3d** | 删除面落地（按 §3 结论）：Quarantine 子类折叠评估、`bySource` 降级、`byRange` 收敛、ackBatch 形态复核 | 视评估 | 逐项迁移记录 + fail-closed 语义不回退 |
 | **3e** | 验收：宽回归（ui + commands + `-race`）+ 真机 e2e（exactly-once 72 行 + resume 页序） | — | 全绿 + 台账/设计文档同步 |
 
@@ -72,7 +72,7 @@
 
 | 对象 | 判定 | 依据 / 前提 |
 |---|---|---|
-| `compactedTerminalSources`（tombstone） | **暂不可删（3c 阻塞，见 R5）** | 「已铸造」由 frontier 承担的前提是 allocation 序定理**跨 transcript 代际**成立；会话装载是反例。解除条件：跨装载精确的覆盖表示（epoch 域 source 身份，或装载边界处的有界精确集） |
+| `compactedTerminalSources`（tombstone） | **保留（精确阻断真相），装载边界按当前 transcript 剪枝** | frontier 只作加速器（3b）；「已铸造」的精确真相是墓碑本身（R5：装载可引入低于旧 frontier 的新来源）。装载边界剪除被移除 cell 的来源后，规模 ≤ 当前会话来源数 |
 | `bySource` | **降级为 live-only 索引**（3d） | 终态压缩后无需保留：已铸造判定走 frontier；live 检查只需现存条目 |
 | `byRange` | **保留但收敛为 live-only** | 同代重复区间入队去重仍需要（防同一 pass 内重复候选）；终态压缩后由 frontier 判定，无需保留 |
 | Quarantine 子类（Failed/Invalidated/Settled） | **评估折叠**为 `retired` + `unresolved bool` + `remintable bool` | 行为差异只剩三项：unresolved 计数、可压缩性、可重铸性；折叠前须有逐行为等价测试 |
@@ -122,6 +122,12 @@
    - 上界：墓碑 ≤ 当前 transcript 的来源数（会话自身即有界），不再是「历史交付
      行数」的无界增长；frontier 退回纯加速器（3b 语义，双跑已证等价）。
 
+   **R5 状态：已解（3c-redesign，见 §6）** —— `HistoryCommitLedger.
+   pruneCompactedSourcesNotInTranscript` 在 `ReplaceTranscriptAction` 整体替换
+   （门控：armed 装载/较早页插入，或 cell 集合收缩）时剪除被移除 cell 的来源；
+   墓碑保留为精确阻断。装载不同会话 → 释放（新来源可铸）；重装同一会话 → 保留
+   （防重复追加）。
+
 ## 6. 实施记录
 
 - **3a（`1f375719`，2026-10-07）**：`HistoryCommitLedger` 增 `mintedFrontier` +
@@ -157,3 +163,14 @@
   3b 等价族绿。**下一步**：先解 R5（epoch 域身份或有界精确集），再重启 3c；期间
   tombstone 保留（成本 = 交付来源数 × 小键，由 P2-1 窗口压缩的 live 上界之外独立
   增长，A3 台账继续跟踪）。
+- **3c-redesign（`17c10e53`，2026-10-07）**：按 R5 定稿落地——`HistoryCommitLedger.
+  pruneCompactedSourcesNotInTranscript`（装载边界按新 transcript 的 cell 集合剪除被
+  移除来源的压缩墓碑）+ `ReplaceTranscriptAction` 门控调用（非 active-only 且
+  armed 装载/较早页插入，或 cell 集合收缩；纯追加不扫，空墓碑零成本）。新增
+  `history_ledger_transcript_prune_test.go` 三用例：装载不同会话释放墓碑且低于旧
+  frontier 的新来源可铸（R5 回归点）、重装同一会话保留阻断（Enqueue 仍拒绝重复
+  铸造）、reducer 装载路径按 cell 集合双向剪枝/保留。生产流
+  `TestTerminalSessionExecutorLoadKeepsScrollbackAppendOnly` 与
+  `TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail` 保持绿；宽回归 ui（110s）
+  + commands（196s）exit 0。frontier 维持 3b 纯加速器语义，不再承担跨代际
+  「已铸造」真相；墓碑上界 = 当前 transcript 来源数。
