@@ -506,7 +506,20 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 	// 只有计数时这与「正在健康写入」无法区分。
 	// A1-3 步 3d：quarantined 子类折叠为两轴后，failed 与 partial-invalidated
 	// 不可区分，原 quarantined-failed 读数并入 quarantined-unresolved。
-	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d",
+	//
+	// 兼容别名（P1-1/P2 计数改名后的旧消费方，如 resume 性能门禁
+	// test-aicli-resume-startup-perf-e2e.ps1 与 E2E-RESUME-01 仍按旧字段解析）：
+	//   pending   ← queued（claimed 已折叠进 queued：设计 §3.4「至多一个在途 claim」）
+	//   in-flight ← WriteCursor 非零（claim 未结算；空闲时 WriteCursor=0）
+	//   acked     ← delivered + compacted（累计已交付行/token，单调；compacted 是
+	//               交付后回收的条目，两者之和即 next 已覆盖的交付量）
+	// 这些别名只增不改：旧解析器拿到与改名之前相同口径的推进轨迹。
+	inFlight := 0
+	if summary.ClaimedToken != 0 {
+		inFlight = 1
+	}
+	acked := uint64(summary.Delivered) + summary.LedgerCompacted
+	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d pending=%d in-flight=%d acked=%d",
 		summary.Queued, summary.Delivered, summary.Quarantined,
 		summary.QuarantinedUnresolved, summary.QuarantinedSettled,
 		summary.LedgerEntries,
@@ -517,7 +530,8 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 		effects.NextToken, effects.TerminalEpoch,
 		summary.ClaimedToken, summary.ClaimedGeneration,
 		summary.ClaimSkipsStaleAction, summary.ClaimRejectsOutOfOrder,
-		summary.ClaimRejectsGate, summary.ClaimRejectsStale, summary.ClaimRejectsInvalid)
+		summary.ClaimRejectsGate, summary.ClaimRejectsStale, summary.ClaimRejectsInvalid,
+		summary.Queued, inFlight, acked)
 }
 
 // appendChatDebugUIActorLines 输出消费端成本快照（docs/plan/ui-event-bridge-drop-hardening.md

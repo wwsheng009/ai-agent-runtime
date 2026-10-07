@@ -251,6 +251,7 @@ $convergedMs = $null
 $endpointsReadyMs = $null
 $profileProc = $null
 $stable = 0
+$deferredSettledMs = 0   # resume_history_deferred（收尾全量替换起点）+ 余量；循环内从 stderr 探测
 $converged = $false
 $exitDuringRun = $null
 $lastStatus = $null
@@ -397,12 +398,29 @@ while ((Get-Date) -lt $deadline) {
   Add-Content -Path $timelinePath -Value ($sample | ConvertTo-Json -Compress) -Encoding UTF8
 
   # 收敛判据与 E2E-RESUME-01 一致：idle 不是 pending=0，而是计划完整 + 队列排空 + 交付覆盖。
-  if ($cells -gt 0 -and $fx -and $gates -and
+  # P1-1/P2 后装载是「首帧最新页 → 后台补齐 → 收尾授权式全量替换」两段式：收尾替换会把
+  # next 从首页规模抬到全量规模，因此必须用 acked >= next（而不是 acked >= cells）判定
+  # 交付覆盖；并等 resume_history_deferred（收尾替换起点）之后再计入稳定性，否则会在
+  # 收尾替换之前提前判收敛（实测：1.7-3s 时 next=12163 全交付，其后 next 跳到 86864）。
+  # $marks 在采样结束后才解析，循环内必须直接从 stderr 探测该打点（共享读打开）。
+  if ($deferredSettledMs -le 0 -and (Test-Path $stderrLog)) {
+    try {
+      $fs = [System.IO.File]::Open($stderrLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+      $reader = New-Object System.IO.StreamReader($fs)
+      $stderrNow = $reader.ReadToEnd()
+      $reader.Close(); $fs.Close()
+      if ($stderrNow -match 'resume_history_deferred=\+\S+\s+\(total ([\d.]+)s\)') {
+        $deferredSettledMs = ([double]$Matches[1] * 1000) + 1500
+      }
+    } catch { }
+  }
+  if ($cells -gt 0 -and $fx -and $gates -and $next -gt 0 -and
     (-not [bool]$gates.plan_incomplete) -and (-not [bool]$gates.plan_stalled) -and
-    $fx['pending'] -eq '0' -and $fx['in-flight'] -eq '0' -and $acked -ge $cells) {
+    $fx['pending'] -eq '0' -and $fx['in-flight'] -eq '0' -and $acked -ge $next -and
+    $tMs -ge $deferredSettledMs) {
     $stable++
   } else { $stable = 0 }
-  if ($stable -ge 3) { $converged = $true; $convergedMs = $tMs; break }
+  if ($stable -ge 5) { $converged = $true; $convergedMs = $tMs; break }
 
   Start-Sleep -Milliseconds $SampleIntervalMs
 }
@@ -526,15 +544,34 @@ try {
   # P2 是用户报告的直接形式：进程启动到 composer ready 之间不允许有长时间静默。
   Add-Result 'P2 startup-ready-budget' (($null -ne $readyTotalMs) -and ($readyTotalMs -le $ReadyBudgetMs)) `
     "ready=+${readyTotalMs}ms total (budget ${ReadyBudgetMs}ms): $stageDetail"
-  Add-Result 'P2b recovery-before-plan-settled' (($null -ne $firstRecoveryMs) -and ($null -ne $planCompleteMs) -and ($firstRecoveryMs -le $planCompleteMs)) `
-    "first_recovery=$firstRecoveryMs ms plan_settled=$planCompleteMs ms (recovery must interleave with delivery, not start after the whole plan)"
+  # P1-1 Stage 4 起「续跑组」删除，plan_incomplete 是 deprecated 零值：翻假时刻不再
+  # 存在。语义（恢复必须与交付交错，而不是整份计划算完才开始写）改由「首次 recovery
+  # 迭代早于收敛」表达；只有旧二进制仍给出翻假时刻时才用旧口径。
+  $recoveryInterleaved = if ($null -ne $planCompleteMs) {
+    ($null -ne $firstRecoveryMs) -and ($firstRecoveryMs -le $planCompleteMs)
+  } else {
+    ($null -ne $firstRecoveryMs) -and ($null -ne $convergedMs) -and ($firstRecoveryMs -lt $convergedMs)
+  }
+  Add-Result 'P2b recovery-before-plan-settled' $recoveryInterleaved `
+    "first_recovery=$firstRecoveryMs ms plan_settled=$(if ($null -ne $planCompleteMs) { "$planCompleteMs ms" } else { 'n/a (deprecated plan_incomplete; using convergence)' }) converged=$convergedMs ms (recovery must interleave with delivery, not start after the whole plan)"
   Add-Result 'P3 incremental-delivery' ($ackedAdvanceTimes.Count -ge $MinProgressSamples) `
     "acked advanced in $($ackedAdvanceTimes.Count) distinct samples (want >= $MinProgressSamples; a single final dump means history is batched, not streamed)"
-  if ($null -eq $maxExecGapMs -or $recoveryBySeq.Count -lt 2) {
-    Add-Result 'P4 no-silent-window' $true "not enough recovery iterations observed ($($recoveryBySeq.Count)) — metric reported only: max_gap=$maxExecGapMs ms"
+  # P4 无静默窗口（P1-1/P2 口径）：交付已事件驱动，recovery 迭代只在恢复尝试时发生
+  #（实测 recovery 6→19 可跨 95s，而同一窗口 acked 连续推进、窗口诊断 healthy）。
+  # 进度信号改用「未收敛期间 acked 相邻推进的最大间隔」；acked 从未推进时只有零行
+  # 装载才健康，否则判 FAIL。recovery 间隔保留为参考读数。
+  $advanceGapMs = $null
+  for ($i = 1; $i -lt $ackedAdvanceTimes.Count; $i++) {
+    $gapMs = [int64]$ackedAdvanceTimes[$i] - [int64]$ackedAdvanceTimes[$i - 1]
+    if ($null -eq $advanceGapMs -or $gapMs -gt $advanceGapMs) { $advanceGapMs = $gapMs }
+  }
+  if ($ackedAdvanceTimes.Count -eq 0) {
+    Add-Result 'P4 no-silent-window' $converged "no acked advance observed (converged=$converged) — zero-row load is the only healthy case"
+  } elseif ($null -eq $advanceGapMs) {
+    Add-Result 'P4 no-silent-window' $true "single acked advance at $($ackedAdvanceTimes[0]) ms — no interval to bound; recovery-iteration max gap=$maxExecGapMs ms (informational)"
   } else {
-    Add-Result 'P4 no-silent-window' ($maxExecGapMs -le ($SilentWindowSec * 1000)) `
-      "max gap between consecutive recovery iterations = $maxExecGapMs ms (bound ${SilentWindowSec}s)$(if ($worstGap) { "; worst seq $($worstGap.from_seq)->$($worstGap.to_seq)" })"
+    Add-Result 'P4 no-silent-window' ($advanceGapMs -le ($SilentWindowSec * 1000)) `
+      "max gap between acked advances = $advanceGapMs ms (bound ${SilentWindowSec}s); recovery-iteration max gap=$maxExecGapMs ms is informational only post-P1-1 (delivery is event-driven)"
   }
   $stallDump = $stderrText -match 'chat startup stalled'
   Add-Result 'P5 no-startup-stall-dump' (-not $stallDump) `
@@ -545,9 +582,12 @@ try {
   $lastAcked = if ($lastFx.ContainsKey('acked')) { [int]$lastFx['acked'] } else { 0 }
   Add-Result 'P6 converged' ($converged -and $lastGates -and (-not [bool]$lastGates.plan_incomplete) -and (-not [bool]$lastGates.plan_stalled) -and $lastFx['pending'] -eq '0' -and $lastFx['in-flight'] -eq '0' -and $lastAcked -ge $lastCells) `
     "converged=$converged plan_incomplete=$($lastGates.plan_incomplete) plan_stalled=$($lastGates.plan_stalled) pending=$($lastFx['pending']) in-flight=$($lastFx['in-flight']) acked=$lastAcked cells=$lastCells"
-  $hasReplayMarks = @($marks | Where-Object { $_.name -eq 'eventlog_parse' }).Count -gt 0
-  Add-Result 'P8 startup-timing-enabled' (($null -ne $timingLine) -and $hasReplayMarks) `
-    $(if ($null -eq $timingLine) { 'no startup timing line — AICLI_STARTUP_TIMING was not honored' } else { "timing line parsed: marks=$($marks.Count) replay/seed-marks=$hasReplayMarks (eventlog_read/parse/apply + history_seed)" })
+  # 装载路径可能是事件日志重放（eventlog_*）或 canonical seed（history_seed/
+  # resume_history）——P2 装载切片后两者都是合法来源；P8 只要求打点确实覆盖了
+  # 「进入恢复」的至少一个内容阶段，不强制重放存在。
+  $hasLoadMarks = @($marks | Where-Object { $_.name -in @('eventlog_read', 'eventlog_parse', 'eventlog_apply', 'history_seed', 'resume_history') }).Count -gt 0
+  Add-Result 'P8 startup-timing-enabled' (($null -ne $timingLine) -and $hasLoadMarks) `
+    $(if ($null -eq $timingLine) { 'no startup timing line — AICLI_STARTUP_TIMING was not honored' } else { "timing line parsed: marks=$($marks.Count) load-stage-marks=$hasLoadMarks (eventlog_* 或 history_seed/resume_history)" })
   Add-Result 'P9 first-content-budget' (($null -ne $firstAckedMs) -and ($firstAckedMs -le $FirstContentBudgetMs)) `
     "first delivered row at $firstAckedMs ms from process start (budget ${FirstContentBudgetMs}ms) — this is the user-visible 'stuck before recovery' duration"
   Add-Result 'P10 delivery-monotonic' ($ackedResets.Count -eq 0) `
@@ -565,10 +605,13 @@ try {
   # 这两条把「重放裁剪」的收益固化下来，防止回退到全量 json.Unmarshal）。
   $parseMark = $marks | Where-Object { $_.name -eq 'eventlog_parse' } | Select-Object -First 1
   $applyMark = $marks | Where-Object { $_.name -eq 'eventlog_apply' } | Select-Object -First 1
-  Add-Result 'P14 replay-parse-budget' (($null -ne $parseMark) -and ($parseMark.delta_ms -le $ReplayParseBudgetMs)) `
-    "eventlog_parse=+$(if ($parseMark) { $parseMark.delta_ms } else { 'n/a' })ms (budget ${ReplayParseBudgetMs}ms)"
-  Add-Result 'P15 replay-apply-budget' (($null -ne $applyMark) -and ($applyMark.delta_ms -le $ReplayApplyBudgetMs)) `
-    "eventlog_apply=+$(if ($applyMark) { $applyMark.delta_ms } else { 'n/a' })ms (budget ${ReplayApplyBudgetMs}ms)"
+  # 重放不在当前装载路径上时（无 eventlog 打点且 replayed=0），两条预算不适用：
+  # 显式给出 n/a 说明而不是把「没跑重放」当成「重放超预算」。有打点时预算照旧生效。
+  $replayRan = ($null -ne $parseMark) -or ($null -ne $applyMark) -or (($null -ne $eventLogReplayed) -and ($eventLogReplayed -gt 0))
+  Add-Result 'P14 replay-parse-budget' ((-not $replayRan) -or (($null -ne $parseMark) -and ($parseMark.delta_ms -le $ReplayParseBudgetMs))) `
+    $(if (-not $replayRan) { 'eventlog_parse n/a — replay not on this load path (replayed=0; canonical seed is the load source)' } else { "eventlog_parse=+$(if ($parseMark) { $parseMark.delta_ms } else { 'n/a' })ms (budget ${ReplayParseBudgetMs}ms)" })
+  Add-Result 'P15 replay-apply-budget' ((-not $replayRan) -or (($null -ne $applyMark) -and ($applyMark.delta_ms -le $ReplayApplyBudgetMs))) `
+    $(if (-not $replayRan) { 'eventlog_apply n/a — replay not on this load path (replayed=0; canonical seed is the load source)' } else { "eventlog_apply=+$(if ($applyMark) { $applyMark.delta_ms } else { 'n/a' })ms (budget ${ReplayApplyBudgetMs}ms)" })
   # P16 是 P12 的归因断言：端点冻结（用户被卡住）必须能判到「规划器 screening +
   # 铸 commit」这一段；plan-max-ms 无观测（老二进制/无 uiActor）时记 SKIP 语义的
   # 通过说明，不能把「没测到」当成「规划很快」。
