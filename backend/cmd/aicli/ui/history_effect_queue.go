@@ -248,6 +248,53 @@ func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSour
 	return true
 }
 
+// retainedQueuedCommitForSource 判定某来源能否在复用段分拣中被整行保留，
+// 并返回需要并回完整计划的已排队提交（复用段不重铸，但 replay/rebase 消费方
+// 需要"完整有效集合"，缺了它们会把在途条目误判为缺席）。
+//
+// 语义（与旧候选口径逐字对齐）：
+//   - terminal=false：来源尚无任何记录，必须铸新 commit；
+//   - terminal=true, safe=false：存在 Queued 记录但呈现代（LayoutGeneration）
+//     不一致 —— 必须回退重铸以触发 rebase，否则执行器 generation 闸门会一直
+//     Defer 旧条目；
+//   - terminal=true, safe=true：可整行保留；hasQueued=true 仅当存在 Queued 且
+//     代一致（Delivered/已结算/压缩墓碑只标记 terminal，不并回 —— 旧实现同样把
+//     已结算行排除在候选之外）。
+func (s HistoryEffectQueueState) retainedQueuedCommitForSource(key historyCommitSourceKey, generation uint64) (commit HistoryCommit, hasQueued bool, terminal bool, safe bool) {
+	if s.ledger == nil {
+		return HistoryCommit{}, false, false, false
+	}
+	if _, blocked := s.ledger.compactedTerminalSources[key]; blocked {
+		return HistoryCommit{}, false, true, true
+	}
+	tokens := s.ledger.bySource[key]
+	if len(tokens) == 0 {
+		return HistoryCommit{}, false, false, false
+	}
+	terminal = false
+	for token := range tokens {
+		entry, ok := s.ledger.byToken[token]
+		if !ok {
+			continue
+		}
+		if !entry.BlocksRemint() {
+			continue
+		}
+		terminal = true
+		if entry.State == HistoryCommitQueued {
+			if entry.Commit.LayoutGeneration != generation {
+				return HistoryCommit{}, false, true, false
+			}
+			commit = entry.Commit
+			hasQueued = true
+		}
+	}
+	if !terminal {
+		return HistoryCommit{}, false, false, false
+	}
+	return commit, hasQueued, true, true
+}
+
 // recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。
 // 耗时与计数分列：PlanCount>0 且 MaxPlanMs 接近冻结窗口，才说明 P12 的卡顿
 // 花在规划器上。

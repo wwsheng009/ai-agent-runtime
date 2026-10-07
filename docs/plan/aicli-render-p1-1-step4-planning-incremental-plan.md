@@ -255,3 +255,40 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
 （`TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan`、`TestDeferredOlderPagePrependReplansAndCoversOlderCells`）保持绿。
 
 **回滚**：单提交；retained 参数缺省 nil 时行为与当前逐字一致（可分步落地）。
+
+> 注：实际落地采用 §1.9 的简化形态（复用物理行缓存做逐行分拣，无新增段 memo）；
+> 本节的"保留集模型/混合 cell"表述以 §1.9 为准，安全条件与管线改动面仍然有效。
+
+### 1.9 Stage 1c/1d 实施记录（2026-10-07，已完成）
+
+**落点修正（相对 §1.8）**：不新增段 memo —— `sharedHistoryPlan` 物理行已携带
+source/fragment 身份，复用段分拣直接在缓存命中路径逐行进行：
+
+- 行级 `retainedQueuedCommitForSource`：无记录 → 回退重铸；Queued 代漂移
+  （LayoutGeneration 不一致）→ 回退重铸（触发 rebase，防止执行器 generation
+  闸门永久 Defer）；终态且代一致 → 保留；Delivered/已结算/压缩墓碑 → 只保留
+  不并回（与旧候选口径逐字对齐）。
+- 保留段把台账中的 Queued 提交**按计划顺序并回完整并集**
+  （`mintTranscriptPlanWindow` 返回并集），保住 `planEligibleHistoryCommits` 的
+  "完整有效集合"契约（`rebasePendingHistoryEffects`/replay 消费方）——这是 1d
+  的关键安全条件，缺失会把在途条目误逐出（混跑 ArmedResume 曾实证）。
+- integration：`syncHistoryEffectCandidatesRetained` 只对非保留段构建 valid/
+  对账；`enqueueHistoryCandidatesRetained` 跳过保留段；零值保留集 = 旧语义
+  （兼容入口 `syncHistoryEffectCandidates`/`enqueueHistoryCandidates` 保留）。
+- 完整覆盖与 `skipRows==0` 才分拣（截断窗口前缀语义不变，逐出仍留给全量 pass）。
+
+**测试**：`history_plan_retention_test.go`（保留 pass 台账零抖动/零新铸 + 并集
+顺序 older→newer；代漂移拒绝保留）。
+
+**基准**（本机 `-benchtime 3x`，同口径）：`second_plan_prepend`
+**522.4 → 356.2ms（-31.8%）**、837k → 536k allocs（**-36.0%**）、
+346.6 → 295.7MB；`first_plan`/`plan_only` 不变（229.5→230.7 / 135.5→131.4ms）。
+按 §1.5/§1.7 差分口径（second − first − older_layout = 超出理想增量的存量重算
+超额）：**291.4 → 123.8ms（-57.5%）**，达成 ≥50% 验收。
+
+**回归**：ui 全量 108.4s ok、commands 全量 168.9s ok；四个语义组
+（Prepend / ResumeUnion / Truncated / ArmedResume）绿。
+
+**残余（不阻塞 Stage 2）**：1b 复用段 DisplayRange 常量偏移重写（当前保留提交
+沿用入队时坐标；D2 后 display 不参与等价/键、无交付消费方，仅簿记精度）；
+1e 段命中/复用计数诊断（可观测性项）。

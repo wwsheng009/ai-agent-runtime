@@ -176,10 +176,30 @@ func dispatchTranscriptPlanWindow(state *UIControllerState, inputs transcriptPla
 	return true
 }
 
+// transcriptPlanRetention 记录"整 cell 提交集可保留"的复用段：cell 内容
+// 寻址键未变（物理行缓存命中且窗口完整覆盖），且段内每一行都已有终态记录
+// （Queued/Delivered/已结算/压缩墓碑）且呈现代一致。完整 pass 的 reconcile
+// 可以整 cell 跳过这些条目：候选集（新增工作）与呈现都未变。
+type transcriptPlanRetention struct {
+	cells map[transcriptPlanCellIdentity]struct{}
+}
+
+type transcriptPlanCellIdentity struct {
+	id       scene.CellID
+	revision uint64
+}
+
+func (r *transcriptPlanRetention) mark(id scene.CellID, revision uint64) {
+	if r.cells == nil {
+		r.cells = make(map[transcriptPlanCellIdentity]struct{})
+	}
+	r.cells[transcriptPlanCellIdentity{id: id, revision: revision}] = struct{}{}
+}
+
 // mintTranscriptPlanWindow 是 P1.2 的铸 commit 相位（锁内）：按快照的 byID/width/
 // theme/generation 解读 rows，其余输入（frontier、settled）一律在 live 状态上求值。
 // A2 第二刀：active 不再铸提交（停铸），finalize 从 source 0 全量铸；skipRows 恒 0。
-func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows []AppScreenRow, screenRowsBefore int) []HistoryCommit {
+func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows []AppScreenRow, screenRowsBefore int) ([]HistoryCommit, transcriptPlanRetention) {
 	frontierCells, _ := canonicalHistoryCommitFrontier(state)
 	// A2 第一刀（停铸 active）：mutable 期间不再铸 active 提交；finalize 时从
 	// source 0 一次性铸全量 transcript 提交。旧 active 铸路径保留在
@@ -187,6 +207,10 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 	// 已结算分片（Acked/Failed/Abandoned/Invalidated）不再参与 reconcile，
 	// 规划时直接跳过，避免每次 transcript 迁移都把整段历史重新物化 payload。
 	settled := state.HistoryEffects.hasSettledRecordForSource
+	// 复用段分拣：行级终态 + 呈现代一致性（见 retainedQueuedCommitForSource）。
+	retainedQueued := func(key historyCommitSourceKey) (HistoryCommit, bool, bool, bool) {
+		return state.HistoryEffects.retainedQueuedCommitForSource(key, snap.generation)
+	}
 	// The primary frame now owns only the mutable/bottom inline viewport.
 	// Finalized transcript rows all belong to native terminal history; retaining
 	// a screen-sized transcript tail here would make those rows disappear as
@@ -201,6 +225,7 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 	// lines here would hand off a CJK/wrapped/tab-expanded cell while some of
 	// its physical rows are still visible in the primary viewport.
 	commits := make([]HistoryCommit, 0)
+	retention := transcriptPlanRetention{}
 	for start := 0; start < len(rows); {
 		cellID := rows[start].CellID
 		end := start + 1
@@ -214,8 +239,11 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 			// whole-cell 兜底仅需"cell 完整包含在窗口内"。
 			if cellUsesStructuredPresentation(cell) {
 				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, 0, snap.generation, snap.byID, settled)...)
-			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, 0, snap.width, themeFingerprint(snap.theme), snap.generation, snap.byID, settled); mapped {
+			} else if segments, mapped, retained := planPlainCellHistoryCommits(cell, rows[start:end], displayStart+start, firstVisible, 0, snap.width, themeFingerprint(snap.theme), snap.generation, snap.byID, settled, retainedQueued); mapped {
 				commits = append(commits, segments...)
+				if retained {
+					retention.mark(cell.ID, cell.Revision)
+				}
 			} else if end <= firstVisible {
 				// whole-cell fallback（控制符/tab 等无法逐行映射的 plain cell）的
 				// 判据是"cell 完整包含在窗口内"，不再是"整份 transcript 已走完"：
@@ -230,7 +258,7 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 		}
 		start = end
 	}
-	return commits
+	return commits, retention
 }
 
 // planEligibleHistoryCommitsWithin 是带预算的规划实现。complete 为 false 表示
@@ -239,7 +267,7 @@ func mintTranscriptPlanWindow(state AppState, snap transcriptPlanSnapshot, rows 
 // cell 会永远失去被提交的机会。下一次 reduce 会重试，而重试时布局缓存已经装
 // 着这一轮算出来的 cell，因此每一轮都在推进而不是重复烧同样的 CPU。
 func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]HistoryCommit, bool) {
-	commits, complete, _, _ := planEligibleHistoryCommitsWithinFrom(state, deadline, 0, 0)
+	commits, complete, _, _, _ := planEligibleHistoryCommitsWithinFrom(state, deadline, 0, 0)
 	return commits, complete
 }
 
@@ -256,9 +284,9 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 //
 // DisplayRange 必须全局化：historyCommitKey 把 DisplayRange 计入提交身份，局部
 // 下标会在续跑轮产生与全量规划不同的 key（重复 token 或去重失效）。
-func planEligibleHistoryCommitsWithinFrom(state AppState, deadline time.Time, startRow, screenRowsBefore int) ([]HistoryCommit, bool, int, int) {
+func planEligibleHistoryCommitsWithinFrom(state AppState, deadline time.Time, startRow, screenRowsBefore int) ([]HistoryCommit, bool, int, int, transcriptPlanRetention) {
 	if state.Geometry.Width < 1 || state.Geometry.Height < 1 {
-		return nil, true, startRow, screenRowsBefore
+		return nil, true, startRow, screenRowsBefore, transcriptPlanRetention{}
 	}
 	// 场景语义布局（LayoutTranscript）没有部分结果，是这一轮的前置工作：在 resume
 	// 会话上它单独就可能超过 historyCommitPlanningBudget（4497 cell → 159k 行，
@@ -287,8 +315,8 @@ func planEligibleHistoryCommitsWithinFrom(state AppState, deadline time.Time, st
 	// 本轮覆盖的物理行数累加到全局 DisplayRange 基址上；预算守卫保证截断不会
 	// 返回空前缀，所以空窗口只能是"走到末尾/游标越界"，由 complete/nextRow 表达。
 	screenRows := screenRowsBefore + len(rows)
-	commits := mintTranscriptPlanWindow(state, snap, rows, screenRowsBefore)
-	return commits, complete, nextRow, screenRows
+	commits, retention := mintTranscriptPlanWindow(state, snap, rows, screenRowsBefore)
+	return commits, complete, nextRow, screenRows, retention
 }
 
 // canonicalHistoryCommitFrontier enforces the transcript's single physical
@@ -453,10 +481,41 @@ func sourceLineRanges(source string) []sourceLineRange {
 //
 // Markdown is handled by planMarkdownCellHistoryCommits because its renderer
 // can add/remove physical rows and therefore has no source-byte fragment map.
-func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows, width int, themeFp string, generation uint64, byID map[scene.CellID]scene.TranscriptCell, settled func(historyCommitSourceKey) bool) ([]HistoryCommit, bool) {
+// classifyPlainSegmentRetention 在物理行缓存命中时以逐行身份分拣复用段：
+// 全部行要么已有终态记录且呈现代一致（整 cell 保留），要么任一行为新来源/
+// 代漂移（返回 classified=false，回退重铸路径 —— 新行必须入候选，代漂移必须
+// 触发 rebase）。仅完整覆盖（所有行在可见窗口内）与 skipRows==0 时分拣，
+// 保证与无预算全量 pass 等价。
+func classifyPlainSegmentRetention(cell scene.TranscriptCell, physical []planPhysicalRow, leadingGaps, displayStart, firstVisible, skipRows int, retainedQueued func(historyCommitSourceKey) (HistoryCommit, bool, bool, bool)) (commits []HistoryCommit, classified bool, retained bool) {
+	if retainedQueued == nil || skipRows != 0 {
+		return nil, false, false
+	}
+	if displayStart+leadingGaps+len(physical) > firstVisible {
+		return nil, false, false
+	}
+	commits = make([]HistoryCommit, 0, len(physical))
+	for _, pr := range physical {
+		key := historyCommitSourceIdentity(HistoryCommit{
+			CellID:      cell.ID,
+			Revision:    cell.Revision,
+			SourceRange: pr.source,
+			FragmentID:  pr.fragment,
+		})
+		commit, hasQueued, terminal, safe := retainedQueued(key)
+		if !terminal || !safe {
+			return nil, false, false
+		}
+		if hasQueued {
+			commits = append(commits, commit)
+		}
+	}
+	return commits, true, true
+}
+
+func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows, width int, themeFp string, generation uint64, byID map[scene.CellID]scene.TranscriptCell, settled func(historyCommitSourceKey) bool, retainedQueued func(historyCommitSourceKey) (HistoryCommit, bool, bool, bool)) ([]HistoryCommit, bool, bool) {
 	lineRanges := sourceLineRanges(cell.Source)
 	if len(lineRanges) == 0 {
-		return nil, false
+		return nil, false, false
 	}
 
 	row := 0
@@ -481,7 +540,10 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 			}
 		}
 		if aligned {
-			return assemblePlainHistoryCommits(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, generation, settled), true
+			if retainedCommits, classified, retained := classifyPlainSegmentRetention(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, retainedQueued); classified {
+				return retainedCommits, true, retained
+			}
+			return assemblePlainHistoryCommits(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, generation, settled), true, false
 		}
 	}
 
@@ -513,11 +575,11 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 			fragmentIDs = make([]uint64, len(sourceRows))
 		}
 		if !mapped || len(wrapped) == 0 || row+len(wrapped) > len(rows) {
-			return nil, false
+			return nil, false, false
 		}
 		for offset, text := range wrapped {
 			if rows[row+offset].TranscriptGap || rows[row+offset].Text != text || len(rows[row+offset].RenderLine.Spans) != 0 {
-				return nil, false
+				return nil, false, false
 			}
 		}
 		for offset, sourceRange := range sourceRows {
@@ -532,10 +594,10 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 		row += len(wrapped)
 	}
 	if row != len(rows) {
-		return nil, false
+		return nil, false, false
 	}
 	sharedHistoryPlan.put(key, physical)
-	return assemblePlainHistoryCommits(cell, physical, leadingGaps, displayStart, firstVisible, skipRows, generation, settled), true
+	return assemblePlainHistoryCommits(cell, physical, leadingGaps, displayStart, firstVisible, skipRows, generation, settled), true, false
 }
 
 // assemblePlainHistoryCommits 按当前动态状态把物理行组装为 HistoryCommit：
@@ -725,7 +787,7 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 		// 完整结果落账。启动期与纯几何变化期的派发是纯粹的空往返（P1.2 B3）。
 		if len(state.Transcript.Cells) == 0 {
 			effects.clearTranscriptPlanResume()
-			return applyTranscriptPlanWindow(state, false, 0, nil, true, 0, 0, inputs)
+			return applyTranscriptPlanWindow(state, false, 0, nil, true, 0, 0, transcriptPlanRetention{}, inputs)
 		}
 		if effects.planRequestInFlight {
 			return false, false
@@ -748,21 +810,21 @@ func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline ti
 	// "next 不变 / PlanStalled 永久置位"的根因。
 	if effects.planResumeValid && effects.planResumeInputs == inputs {
 		beforeRow := effects.planResumeRow
-		commits, complete, nextRow, screenRows := planEligibleHistoryCommitsWithinFrom(
+		commits, complete, nextRow, screenRows, retention := planEligibleHistoryCommitsWithinFrom(
 			state.AppState, deadline, beforeRow, effects.planResumeScreenRows)
-		return applyTranscriptPlanWindow(state, true, beforeRow, commits, complete, nextRow, screenRows, inputs)
+		return applyTranscriptPlanWindow(state, true, beforeRow, commits, complete, nextRow, screenRows, retention, inputs)
 	}
 
 	// 无游标或输入已变：从 0 开始，旧游标作废。
 	effects.clearTranscriptPlanResume()
-	commits, complete, nextRow, screenRows := planEligibleHistoryCommitsWithinFrom(state.AppState, deadline, 0, 0)
-	return applyTranscriptPlanWindow(state, false, 0, commits, complete, nextRow, screenRows, inputs)
+	commits, complete, nextRow, screenRows, retention := planEligibleHistoryCommitsWithinFrom(state.AppState, deadline, 0, 0)
+	return applyTranscriptPlanWindow(state, false, 0, commits, complete, nextRow, screenRows, retention, inputs)
 }
 
 // applyTranscriptPlanWindow 把一次已铸好的 screening 窗口结果落到队列状态上，
 // 同步路径与异步结果 action（handleHistoryPlanWindowReady）共用这一份实现，保证
 // 两条路径的投递语义逐字一致。
-func applyTranscriptPlanWindow(state *UIControllerState, resume bool, startRow int, commits []HistoryCommit, complete bool, nextRow, screenRows int, inputs transcriptPlanInputs) (completed, advanced bool) {
+func applyTranscriptPlanWindow(state *UIControllerState, resume bool, startRow int, commits []HistoryCommit, complete bool, nextRow, screenRows int, retained transcriptPlanRetention, inputs transcriptPlanInputs) (completed, advanced bool) {
 	effects := &state.HistoryEffects
 	if resume {
 		if complete {
@@ -777,7 +839,7 @@ func applyTranscriptPlanWindow(state *UIControllerState, resume bool, startRow i
 	}
 	if complete {
 		effects.PlanIncomplete = false
-		syncHistoryEffectCandidates(state, commits)
+		syncHistoryEffectCandidatesRetained(state, commits, retained)
 		recordTranscriptPlanMemo(state, len(commits))
 		return true, true
 	}
@@ -830,11 +892,11 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 	}
 	mintStarted := time.Now()
 	snap := transcriptPlanMintSnapshotFor(state.AppState)
-	commits := mintTranscriptPlanWindow(state.AppState, snap, a.rows, a.screenRowsBefore)
+	commits, retention := mintTranscriptPlanWindow(state.AppState, snap, a.rows, a.screenRowsBefore)
 	// 归因：screening 由 worker 侧计时，这里补上锁内 mint + 收尾的部分。
 	effects.recordTranscriptPlanTiming(a.screenDuration + time.Since(mintStarted))
 	applyTranscriptPlanWindow(state, a.resume, a.startRow, commits, a.complete, a.nextRow,
-		a.screenRowsBefore+len(a.rows), a.inputs)
+		a.screenRowsBefore+len(a.rows), retention, a.inputs)
 }
 
 // finishResumedTranscriptPlan 在游标走到 transcript 末尾后完成这次被截断的规划：
@@ -842,14 +904,14 @@ func handleHistoryPlanWindowReady(state *UIControllerState, a HistoryPlanWindowR
 // Queued token 误杀），因此必须再做一次无预算全量 pass —— 此时布局
 // 缓存已被前几轮全部热起来，代价远低于首轮冷启动。完成后清游标、落 memo。
 func finishResumedTranscriptPlan(state *UIControllerState) bool {
-	full, complete := planEligibleHistoryCommitsWithin(state.AppState, time.Time{})
+	full, complete, _, _, retention := planEligibleHistoryCommitsWithinFrom(state.AppState, time.Time{}, 0, 0)
 	if !complete {
 		// 零 deadline 不会截断；保底不改变投递语义，保留游标等下一次机会。
 		syncHistoryEffectCandidatesPrefix(state, full)
 		state.HistoryEffects.PlanIncomplete = true
 		return false
 	}
-	syncHistoryEffectCandidates(state, full)
+	syncHistoryEffectCandidatesRetained(state, full, retention)
 	state.HistoryEffects.clearTranscriptPlanResume()
 	state.HistoryEffects.PlanIncomplete = false
 	state.HistoryEffects.PlanStalled = false
@@ -1116,8 +1178,25 @@ func transcriptFinalizedCellCount(transcript TranscriptState) int {
 // syncHistoryEffectCandidates reconciles a planned candidate set with the
 // reducer-owned ledger.
 func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryCommit) {
+	syncHistoryEffectCandidatesRetained(state, candidates, transcriptPlanRetention{})
+}
+
+// syncHistoryEffectCandidatesRetained 在完整 pass 上消费复用段保留集：
+// retained.cells 中的条目候选集与呈现都未变（分拣保证），跳过逐条
+// invalidate/rebase 对账；其余条目仍按"候选列表 == 完整有效集合"处理。
+func syncHistoryEffectCandidatesRetained(state *UIControllerState, candidates []HistoryCommit, retained transcriptPlanRetention) {
+	retainedCell := func(commit HistoryCommit) bool {
+		if len(retained.cells) == 0 {
+			return false
+		}
+		_, ok := retained.cells[transcriptPlanCellIdentity{id: commit.CellID, revision: commit.Revision}]
+		return ok
+	}
 	valid := make(map[historyCommitSourceKey]HistoryCommit, len(candidates))
 	for _, candidate := range candidates {
+		if retainedCell(candidate) {
+			continue
+		}
 		valid[historyCommitSourceIdentity(candidate)] = candidate
 	}
 	if ledger := state.HistoryEffects.ledger; ledger != nil {
@@ -1151,10 +1230,15 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 			}
 		}
 		for _, entry := range ledger.byToken {
+			if len(retained.cells) > 0 {
+				if _, ok := retained.cells[transcriptPlanCellIdentity{id: entry.Commit.CellID, revision: entry.Commit.Revision}]; ok {
+					continue
+				}
+			}
 			reconcile(entry)
 		}
 	}
-	enqueueHistoryCandidates(state, candidates)
+	enqueueHistoryCandidatesRetained(state, candidates, retained)
 }
 
 // syncHistoryEffectCandidatesPrefix 用于**被预算截断**的规划结果：candidates 是
@@ -1172,7 +1256,18 @@ func syncHistoryEffectCandidatesPrefix(state *UIControllerState, candidates []Hi
 // enqueueHistoryCandidates 把候选入队到 reducer 自有 ledger。入队本身是幂等的：
 // 已经有 terminal 记录的来源直接跳过，重复区间由 ErrDuplicateCommitRange 吸收。
 func enqueueHistoryCandidates(state *UIControllerState, candidates []HistoryCommit) {
+	enqueueHistoryCandidatesRetained(state, candidates, transcriptPlanRetention{})
+}
+
+// enqueueHistoryCandidatesRetained 跳过保留段：其台账记录仍在（候选集完整
+// 契约由 mint 的并集保证），无需重复的 terminal 查询与入队。
+func enqueueHistoryCandidatesRetained(state *UIControllerState, candidates []HistoryCommit, retained transcriptPlanRetention) {
 	for _, candidate := range candidates {
+		if len(retained.cells) > 0 {
+			if _, ok := retained.cells[transcriptPlanCellIdentity{id: candidate.CellID, revision: candidate.Revision}]; ok {
+				continue
+			}
+		}
 		if state.HistoryEffects.hasTerminalRecordForSource(candidate) {
 			continue
 		}

@@ -160,7 +160,7 @@ func TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan(t *testing.T) {
 		if passes > 64 {
 			t.Fatalf("续跑轮数异常：cursor=%d", cursor)
 		}
-		commits, complete, next, rows := planEligibleHistoryCommitsWithinFrom(state, time.Now().Add(time.Second), cursor, screenRows)
+		commits, complete, next, rows, _ := planEligibleHistoryCommitsWithinFrom(state, time.Now().Add(time.Second), cursor, screenRows)
 		if next < cursor || rows < screenRows {
 			t.Fatalf("续跑游标回退：pass=%d cursor=%d next=%d screenRows=%d→%d", passes, cursor, next, screenRows, rows)
 		}
