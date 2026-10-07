@@ -31,6 +31,14 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// chatTerminalWriterState is the lock-free snapshot of the unified terminal
+// writer binding consumed by control-sequence adapters (terminal title, bell,
+// editor mode switches). See terminalWriterSnapshot.
+type chatTerminalWriterState struct {
+	unified bool
+	session *ui.TerminalSession
+}
+
 type chatInteractionCoordinator struct {
 	session       *ChatSession
 	writer        io.Writer
@@ -192,13 +200,20 @@ type chatInteractionCoordinator struct {
 	renderOutputFile string
 	// terminalExecutor remains a diagnostic compatibility alias. New code must
 	// use primaryPresenter so effect binding and shutdown stay paired.
-	terminalExecutor      *ui.TerminalSessionExecutor
-	activeFrameDue        time.Time
-	activeFrameGeneration uint64
-	stableCommitQueue     []activeStableCommitLine
-	stableCommitTimerSeq  uint64
-	stableCommitDelay     time.Duration
-	stableCommitCatchUp   bool
+	terminalExecutor *ui.TerminalSessionExecutor
+	// terminalWriterSnapshot mirrors {unifiedRenderer, terminalSession} for the
+	// control-sequence adapters. Those adapters run inside
+	// renderengine.WriteTerminalText, which holds the shared terminal write
+	// lock; taking c.mu there inverts the paint-path lock order
+	// (c.mu -> surface.mu -> terminalWriteMu) and deadlocks the session.
+	// Writers refresh the snapshot under c.mu.
+	terminalWriterSnapshot atomic.Pointer[chatTerminalWriterState]
+	activeFrameDue         time.Time
+	activeFrameGeneration  uint64
+	stableCommitQueue      []activeStableCommitLine
+	stableCommitTimerSeq   uint64
+	stableCommitDelay      time.Duration
+	stableCommitCatchUp    bool
 	// Synthetic surfaces normally drain synchronously. Queue-policy tests set
 	// this flag to advance commits explicitly without wall-clock timers.
 	stableCommitManual            bool
@@ -703,6 +718,7 @@ func (c *chatInteractionCoordinator) SetPrimaryPresenter(presenter *ui.TerminalS
 	c.unifiedRenderer = true
 	c.terminalSession = presenter.Session()
 	c.terminalExecutor = presenter.Executor()
+	c.refreshTerminalWriterSnapshotLocked()
 	// 把 executor 的 recovery-loop 诊断接到 pprof /debug/pprof/executor 端点，
 	// 使真实 resume 会话的逐次 recovery flush 状态可观测（观测手段）。
 	ui.SetExecutorDiagProvider(c.terminalExecutor.RecoveryDiag)
@@ -5328,6 +5344,35 @@ func (c *chatInteractionCoordinator) WritePromptEditorText(writer io.Writer, row
 	return c.surface.WritePromptEditorText(writer, rowOffset, col, text)
 }
 
+// refreshTerminalWriterSnapshotLocked republishes the unified writer binding
+// for lock-free readers. Callers must hold c.mu and invoke it after changing
+// unifiedRenderer or terminalSession.
+func (c *chatInteractionCoordinator) refreshTerminalWriterSnapshotLocked() {
+	if c == nil {
+		return
+	}
+	c.terminalWriterSnapshot.Store(&chatTerminalWriterState{
+		unified: c.unifiedRenderer,
+		session: c.terminalSession,
+	})
+}
+
+// terminalWriterSnapshotLoad returns the lock-free snapshot of the unified
+// writer binding. It never takes c.mu: the control-sequence write path runs
+// under the shared terminal write lock (renderengine.WriteTerminalText), where
+// acquiring c.mu would invert the paint-path lock order
+// (c.mu -> surface.mu -> terminalWriteMu) and deadlock the session.
+func (c *chatInteractionCoordinator) terminalWriterSnapshotLoad() (bool, *ui.TerminalSession) {
+	if c == nil {
+		return false, nil
+	}
+	snapshot := c.terminalWriterSnapshot.Load()
+	if snapshot == nil {
+		return false, nil
+	}
+	return snapshot.unified, snapshot.session
+}
+
 // WritePromptEditorControl routes editor-owned terminal mode sequences
 // (bracketed paste / focus change / cursor visibility) through the unified
 // terminal session when it is the primary writer. It returns false when no
@@ -5338,10 +5383,7 @@ func (c *chatInteractionCoordinator) WritePromptEditorControl(sequence string) b
 	if c == nil || sequence == "" {
 		return false
 	}
-	c.mu.Lock()
-	session := c.terminalSession
-	unified := c.unifiedRenderer
-	c.mu.Unlock()
+	unified, session := c.terminalWriterSnapshotLoad()
 	if !unified || session == nil {
 		return false
 	}
@@ -5355,10 +5397,7 @@ func (c *chatInteractionCoordinator) WriteTerminalTitle(sequence string) bool {
 	if c == nil || sequence == "" {
 		return false
 	}
-	c.mu.Lock()
-	session := c.terminalSession
-	unified := c.unifiedRenderer
-	c.mu.Unlock()
+	unified, session := c.terminalWriterSnapshotLoad()
 	if !unified || session == nil {
 		return false
 	}
@@ -5371,10 +5410,7 @@ func (c *chatInteractionCoordinator) WriteTerminalBell(sequence string) bool {
 	if c == nil || sequence == "" {
 		return false
 	}
-	c.mu.Lock()
-	session := c.terminalSession
-	unified := c.unifiedRenderer
-	c.mu.Unlock()
+	unified, session := c.terminalWriterSnapshotLoad()
 	if !unified || session == nil {
 		return false
 	}
@@ -5389,9 +5425,8 @@ func (c *chatInteractionCoordinator) UnifiedRendererActive() bool {
 	if c == nil {
 		return false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.unifiedRenderer
+	unified, _ := c.terminalWriterSnapshotLoad()
+	return unified
 }
 
 func (c *chatInteractionCoordinator) DebugSummary() string {
@@ -5541,6 +5576,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.surface = nil
 	c.terminalSession = nil
 	c.terminalExecutor = nil
+	c.refreshTerminalWriterSnapshotLocked()
 	gw := c.renderGateway
 	c.renderGateway = nil
 	c.mu.Unlock()

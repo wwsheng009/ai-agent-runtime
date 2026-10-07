@@ -227,6 +227,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithPort(port outputpk
 	}
 	surface := c.surface
 	c.unifiedRenderer = true
+	c.refreshTerminalWriterSnapshotLocked()
 	c.mu.Unlock()
 	if surface != nil {
 		surface.SetPhysicalWritesEnabled(false)
@@ -235,6 +236,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithPort(port outputpk
 	if actor == nil {
 		c.mu.Lock()
 		c.unifiedRenderer = false
+		c.refreshTerminalWriterSnapshotLocked()
 		c.mu.Unlock()
 		return false
 	}
@@ -242,6 +244,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithPort(port outputpk
 		!actor.Post(ui.SetSemanticActiveCellProjectionAction{Enabled: true}) {
 		c.mu.Lock()
 		c.unifiedRenderer = false
+		c.refreshTerminalWriterSnapshotLocked()
 		c.mu.Unlock()
 		return false
 	}
@@ -254,6 +257,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithPort(port outputpk
 	if c.primaryPresenter == nil {
 		c.unifiedRenderer = false
 	}
+	c.refreshTerminalWriterSnapshotLocked()
 	c.mu.Unlock()
 	return false
 }
@@ -277,6 +281,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	}
 	surface := c.surface
 	c.unifiedRenderer = true
+	c.refreshTerminalWriterSnapshotLocked()
 	c.mu.Unlock()
 	if writer == nil {
 		// 登记（A1-8c）：测试/legacy 直写辅助入口；生产经
@@ -293,6 +298,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	if actor == nil {
 		c.mu.Lock()
 		c.unifiedRenderer = false
+		c.refreshTerminalWriterSnapshotLocked()
 		c.mu.Unlock()
 		return false
 	}
@@ -304,6 +310,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 		!actor.Post(ui.SetSemanticActiveCellProjectionAction{Enabled: true}) {
 		c.mu.Lock()
 		c.unifiedRenderer = false
+		c.refreshTerminalWriterSnapshotLocked()
 		c.mu.Unlock()
 		if chatDebugFlagEnabled() {
 			aicliDiagRawln("[aicli-diag] enableUnifiedRendererWithWriter: actor.Post failed -> unified renderer OFF")
@@ -322,6 +329,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	if c.primaryPresenter == nil {
 		c.unifiedRenderer = false
 	}
+	c.refreshTerminalWriterSnapshotLocked()
 	c.mu.Unlock()
 	return false
 }
@@ -992,6 +1000,7 @@ func (c *chatInteractionCoordinator) closeUIActor() {
 	c.primaryPresenter = nil
 	c.terminalSession = nil
 	c.terminalExecutor = nil
+	c.refreshTerminalWriterSnapshotLocked()
 	if c.session != nil {
 		c.session.TerminalSession = nil
 		c.session.TerminalSessionExecutor = nil
