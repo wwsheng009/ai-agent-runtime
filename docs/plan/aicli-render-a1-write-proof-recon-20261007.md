@@ -121,6 +121,28 @@
 验证脚本：`go test ./cmd/aicli/ui/ -run '<1-6|8>' -count=1`（先红）→ 修复后 `-count=40`
 与 `-race -count=1`，结果写入 plan/ledger。
 
+### 5.1 实施记录（2026-10-07，A1-1 批 1+2 落地）
+
+- **#1 DEC 2026 内失败**：不适用统一会话——DEC 2026 帧包裹是冻结的 legacy-only 路径
+  （`renderengine/terminal_lock.go:31-34` 明示 unified sessions 禁止启用；属 P0 写端债务），
+  统一会话无此注入缝。
+- **#2 行中间截断**：`TestTerminalSessionPartialHistoryWriteMidRowStaysFailClosed`
+  （helper 扩展 `cutMarker/cutOffset` 定点截断）：VT 屏级断言"前缀可见、标记行不成行、
+  不入 scrollback" + 投影失证 + 下一笔 Deferred 零字节。
+- **#3 合并事务 history 段截断**：`TestTerminalSessionMergedTransactionCutInsideHistoryFailsClosed`
+  ——截断点后 viewport 字节零泄漏（新 viewport 标记缺席）、frame/history 双 ErrShortWrite+partial、
+  投影 unknown、下一笔 Deferred。
+- **#5 abort 中历史移交**：`TestTerminalSessionExecutorAbortDuringBlockedHistoryHandoffStaysFailClosed`
+  ——零写证明 → Deferred（token 保持 Queued 可重试）；收敛后 ProjectionUnknown=true、
+  WriteCursor=0；中止后重试不再触达物理 writer（writeCount 不增）、无 3J。
+- **#4 校正**：resume/replay 失败注入已有覆盖（`TestResumeFailingWriterReconciliationStopsWithinBoundE2E`：
+  `short=true` + unknown 投影 + 有界重试），无需新用例。
+- **#6 lease**：session 级 partial 进出备用屏已有覆盖（`terminal_session_test.go` 备用屏组）；
+  executor 级 lease 不写由既有用例保证，暂不新增。
+- **#8 回归记录**：drain + a2 守护（`TestTerminalSessionExecutorDrainsFinalTranscriptDeliveryAfterStreaming`、
+  `TestFinalizeActiveCellPlansWholeSourceFromZero/WithoutDeferral`）`-count=40` 与 `-race` 均绿。
+- 提交：`1e223029`（批 1+2）；验证：三用例 `-count=20`/`-race` 绿、既有 partial 家族绿。
+
 ## 6. 风险与开放问题
 
 1. **settle vs epoch 冲突**：§3.4 行 172 说 settle 保留、行 175-176/§9.3.4 说失败→epoch 恢复；
