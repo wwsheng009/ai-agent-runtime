@@ -331,14 +331,7 @@ type TerminalSession struct {
 	// stream tail when its leading commit belongs to a cell this session
 	// already delivered. Bare text equality would also drop genuinely new rows
 	// whenever a different cell renders identical lines.
-	historyTailCells map[uint64]struct{}
-	// historyTopAligned becomes sticky after this session has moved a semantic
-	// row into native scrollback. From that point the resident tail must begin
-	// at physical row one, otherwise later viewport contraction would insert
-	// blank headroom between scrollback and the same semantic message. Before
-	// the first overflow, bottom alignment keeps a short transcript near the
-	// composer without creating non-semantic scrollback.
-	historyTopAligned        bool
+	historyTailCells         map[uint64]struct{}
 	historyProjectionKnown   bool
 	historyProjectionStarted bool
 	frame                    uint64
@@ -543,7 +536,6 @@ func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 			s.historyTailRows = nil
 			s.historyStreamTailRows = nil
 			s.historyTailCells = nil
-			s.historyTopAligned = false
 			s.historyProjectionKnown = false
 			s.historyProjectionStarted = true
 		}
@@ -626,7 +618,6 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 		s.historyTailRows = nil
 		s.historyStreamTailRows = nil
 		s.historyTailCells = nil
-		s.historyTopAligned = false
 		s.historyProjectionKnown = false
 		s.historyProjectionStarted = true
 	}
@@ -939,7 +930,6 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	// capacity; contraction clears former viewport rows so prompt/status can
 	// never become history.
 	transitionBytes := ""
-	nextHistoryTopAligned := s.historyTopAligned
 	// A terminal resize has already changed the host's physical row mapping,
 	// but it is not a reason to replay history: trust the host reflow, keep the
 	// delivered rows, and source-repaint only the new bottom viewport. The
@@ -949,10 +939,9 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		transitionBytes = terminalViewportBandClearANSI(s.viewport, area, frame.Geometry.Height, s.viewportBoundaryKnown)
 	} else if initializeHistoryProjection {
 		transitionBytes = terminalClearHistoryRegionANSI(frame.OutputBottomRow)
-		nextHistoryTopAligned = false
 	} else if s.historyProjectionKnown && s.viewportBoundaryKnown && s.viewportTerminalHeight == frame.Geometry.Height {
-		transitionBytes, nextHistoryTopAligned = terminalViewportTransitionANSI(
-			s.viewport, area, frame.Geometry.Height, s.historyTailRows, nextHistoryTopAligned,
+		transitionBytes = terminalViewportTransitionANSI(
+			s.viewport, area, frame.Geometry.Height, s.historyTailRows,
 		)
 	} else if s.viewport.validFor(frame.Geometry) && area.Top > s.viewport.Top {
 		// 完整的边界转换被跳过（历史投影/边界未知，或几何高度刚变化）：至少要清掉
@@ -983,15 +972,10 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		historyInsertedRows = len(historyInsertedPayload)
 	}
 	if historyInsertedRows > 0 {
-		// A2（停铸 active）：交付分支与 Origin 无关，统一走 resident 插入。
-		if s.historyInsertionContinuesScrollback(frame.Geometry.Height, frame.OutputBottomRow) {
-			// resident 模型为空，但已有行跨入 native scrollback：本次插入续写
-			// 归档流，必须从 row 1 起，否则会在 scrollback 与可见行之间留下
-			// 空白空档。
-			nextHistoryTopAligned = true
-		}
-		historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
-			frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
+		// 锚定统一（P2 锚定切片）：交付统一为「resident 之后按序写，写满 LF
+		// 溢出」，不再有底锚/续接启发式。
+		historyBytes = terminalHistoryInsertionANSI(
+			frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload,
 		)
 	}
 	// composer band 是本事务的最后一个写入段，而且只要本事务在其上方写过任何字节
@@ -1039,7 +1023,6 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 				s.historyTailRows = nil
 				s.historyStreamTailRows = nil
 				s.historyTailCells = nil
-				s.historyTopAligned = false
 				s.historyProjectionKnown = false
 				s.historyProjectionStarted = true
 			}
@@ -1055,10 +1038,10 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	}
 	candidateScreen.ConfirmFlush()
 	if os.Getenv("TERM_SESSION_TRACE") != "" {
-		fmt.Printf("TERMTRACE frame=%d gen=%d outBottom=%d area.Top=%d area.H=%d prevTop=%d prevH=%d prevKnown=%v prevTermH=%d histKnown=%v histStarted=%v topAligned=%v tailRows=%d transitionBytes=%d historyBytes=%d histInsertedRows=%d fullRepaint=%v initHist=%v resize=%v\n",
+		fmt.Printf("TERMTRACE frame=%d gen=%d outBottom=%d area.Top=%d area.H=%d prevTop=%d prevH=%d prevKnown=%v prevTermH=%d histKnown=%v histStarted=%v tailRows=%d transitionBytes=%d historyBytes=%d histInsertedRows=%d fullRepaint=%v initHist=%v resize=%v\n",
 			s.frame, frame.LayoutGeneration, frame.OutputBottomRow, area.Top, area.Height,
 			s.viewport.Top, s.viewport.Height, s.viewportBoundaryKnown, s.viewportTerminalHeight,
-			s.historyProjectionKnown, s.historyProjectionStarted, s.historyTopAligned, len(s.historyTailRows),
+			s.historyProjectionKnown, s.historyProjectionStarted, len(s.historyTailRows),
 			len(transitionBytes), len(historyBytes), historyInsertedRows, fullRepaint,
 			initializeHistoryProjection, resizeRebuild)
 		if os.Getenv("TERM_SESSION_TRACE_BYTES") != "" {
@@ -1084,8 +1067,8 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		// The unprovable resident range stays quarantined in place: its rows
 		// remain physically resident and are never re-emitted, while the
 		// retained tail keeps the handoff anchored immediately after the last
-		// proven row. Discarding the anchor would resume bottom-aligned and
-		// leave a blank row between two delivered rows.
+		// proven row. Discarding the anchor would resume at row one and
+		// overwrite (or interleave with) the quarantined rows.
 		s.historyProjectionStarted = true
 		s.historyProjectionKnown = true
 	case initializeHistoryProjection:
@@ -1094,7 +1077,6 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	}
 	if s.historyProjectionKnown {
 		s.historyTailRows = baseHistoryTail
-		s.historyTopAligned = nextHistoryTopAligned
 		if historyInsertedRows > 0 {
 			// The stream tail proves every row that physically crossed the
 			// writer, resident or archived. The resident region model only
@@ -1231,20 +1213,11 @@ func (s *TerminalSession) commitHistoryEarlyResultLocked(commit HistoryCommit) (
 }
 
 func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []string) HistoryCommitResult {
-	// The top-anchored region ends immediately above the inline viewport. Since
-	// its top margin is physical row one, overflow becomes native scrollback;
-	// prompt/status rows below outputBottom never participate in the scroll.
-	// A2 第一刀（停铸 active）：交付与 Origin 无关，统一走 resident 插入。
-	var bytes string
-	var nextHistoryTopAligned bool
-	topAligned := s.historyTopAligned
-	if s.historyInsertionContinuesScrollback(s.geometry.Height, s.outputBottom) {
-		// resident 模型为空但已有行跨入 native scrollback：本次插入必须从
-		// row 1 起续写，避免空白空档。
-		topAligned = true
-	}
-	bytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
-		s.geometry.Height, s.outputBottom, s.historyTailRows, rows, topAligned,
+	// 锚定统一（P2 锚定切片）：resident 区紧贴 inline viewport 上方，语义行一律
+	// 从 resident 后缀之后按序写，写满后由 LF 把最早的行送入 native scrollback；
+	// prompt/status 行位于 outputBottom 之下，永不参与滚动。
+	bytes := terminalHistoryInsertionANSI(
+		s.geometry.Height, s.outputBottom, s.historyTailRows, rows,
 	)
 	if bytes == "" {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
@@ -1258,7 +1231,6 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 			s.historyTailRows = nil
 			s.historyStreamTailRows = nil
 			s.historyTailCells = nil
-			s.historyTopAligned = false
 			s.historyProjectionKnown = false
 			s.historyProjectionStarted = true
 			s.preparedHistory = nil
@@ -1272,31 +1244,10 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	s.confirmWriteLocked()
 	s.historyStreamTailRows = terminalAppendHistoryTailRows(s.historyStreamTailRows, rows, s.outputBottom)
 	s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, []HistoryCommit{commit})
-	// A2 第一刀：统一交付后 resident 模型无条件跟随已交付行。
+	// 锚定统一：交付后 resident 模型无条件跟随已交付行。
 	s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
-	s.historyTopAligned = nextHistoryTopAligned
 	s.preparedHistory = nil
 	return HistoryCommitResult{Frame: s.frame}
-}
-
-// historyInsertionContinuesScrollback reports whether a finalized insertion
-// with an empty resident model must start at row one because earlier rows
-// already crossed into native scrollback (e.g. a settle/retention path left
-// the stream tail ahead of the resident model), so the visible suffix must
-// continue the stream instead of being bottom-anchored with blank headroom
-// between scrollback and the visible rows (which would break the
-// one-continuous-native-history-stream contract).
-func (s *TerminalSession) historyInsertionContinuesScrollback(height, capacity int) bool {
-	if s == nil || s.historyTopAligned {
-		return false
-	}
-	if capacity > height {
-		capacity = height
-	}
-	if len(terminalRetainHistoryTailRows(s.historyTailRows, capacity)) > 0 {
-		return false
-	}
-	return len(s.historyStreamTailRows) > 0
 }
 
 // terminalHistoryHandoffRows retains the existing rich render IR through the
@@ -1423,13 +1374,18 @@ func terminalOffsetViewportANSI(value string, area ViewportArea) (string, error)
 	return output.String(), nil
 }
 
-func terminalViewportTransitionANSI(previous, next ViewportArea, physicalHeight int, historyTailRows []string, topAligned bool) (string, bool) {
+// terminalViewportTransitionANSI reconciles the history region when the inline
+// viewport moves. 锚定统一（P2 锚定切片）后 resident 常驻 row 1 起：扩张只需清掉
+// 刚转交的旧 viewport 行（不再有 IL 补偿把 resident 推到底部）；收缩时超出新容量
+// 的最早语义行经 LF 进入 native scrollback（HandoffPlan），不再有底锚 headroom
+// 删除补偿。
+func terminalViewportTransitionANSI(previous, next ViewportArea, physicalHeight int, historyTailRows []string) string {
 	if previous.Height <= 0 || previous == next || physicalHeight < 1 {
-		return "", topAligned
+		return ""
 	}
 	oldCapacity, newCapacity := previous.Top-1, next.Top-1
 	if oldCapacity < 1 || newCapacity < 0 {
-		return "", topAligned
+		return ""
 	}
 	resident := len(historyTailRows)
 	if resident > oldCapacity {
@@ -1437,38 +1393,16 @@ func terminalViewportTransitionANSI(previous, next ViewportArea, physicalHeight 
 	}
 
 	if newCapacity < oldCapacity {
-		if topAligned {
-			overflow := resident - newCapacity
-			if overflow <= 0 {
-				return "", true
-			}
-			return renderengine.NewHandoffPlan(
-				physicalHeight, oldCapacity, make([]string, overflow),
-			).ANSI(), true
-		}
-		delta := oldCapacity - newCapacity
-		blankHeadroom := oldCapacity - resident
-		shift := delta
-		if shift > blankHeadroom {
-			shift = blankHeadroom
-		}
-		var output strings.Builder
-		// Delete only unused headroom inside the old bounded region. CSI M
-		// shifts resident rows upward but, unlike LF at row one, never appends
-		// the deleted blank line to native scrollback.
-		if shift > 0 && resident > 0 {
-			output.WriteString(terminalHistoryDeleteLinesANSI(oldCapacity, 1, shift))
-		}
 		overflow := resident - newCapacity
-		if overflow > 0 {
-			output.WriteString(renderengine.NewHandoffPlan(
-				physicalHeight, oldCapacity, make([]string, overflow),
-			).ANSI())
+		if overflow <= 0 {
+			return ""
 		}
-		return output.String(), overflow > 0
+		return renderengine.NewHandoffPlan(
+			physicalHeight, oldCapacity, make([]string, overflow),
+		).ANSI()
 	}
 	if newCapacity == oldCapacity {
-		return "", topAligned
+		return ""
 	}
 
 	var output strings.Builder
@@ -1477,11 +1411,7 @@ func terminalViewportTransitionANSI(previous, next ViewportArea, physicalHeight 
 	for row := oldCapacity + 1; row <= newCapacity && row <= physicalHeight; row++ {
 		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
 	}
-	if resident > 0 && !topAligned {
-		start := oldCapacity - resident + 1
-		output.WriteString(terminalHistoryInsertLinesANSI(newCapacity, start, newCapacity-oldCapacity))
-	}
-	return output.String(), topAligned
+	return output.String()
 }
 
 func terminalRetainHistoryTailRows(rows []string, capacity int) []string {
@@ -1578,14 +1508,12 @@ func terminalAppendHistoryTailCells(current map[uint64]struct{}, delivered []His
 }
 
 // terminalHistoryInsertionANSI appends semantic history without placing blank
-// headroom inside one continuous native-history stream. Before the first
-// overflow, a short resident tail stays bottom-aligned near the composer. Once
-// overflow has reached native scrollback, the resident suffix is top-aligned;
-// any later capacity growth remains below the suffix and new rows fill it in
-// document order. Only rows beyond the physical capacity use LF.
-func terminalHistoryInsertionANSI(height, capacity int, resident, inserted []string, topAligned bool) (string, bool) {
+// headroom inside one continuous native-history stream: rows always start at
+// the first free row after the resident suffix, and only rows beyond the
+// physical capacity use LF (HandoffPlan) to cross into native scrollback.
+func terminalHistoryInsertionANSI(height, capacity int, resident, inserted []string) string {
 	if height < 1 || capacity < 1 || len(inserted) == 0 {
-		return "", topAligned
+		return ""
 	}
 	if capacity > height {
 		capacity = height
@@ -1599,14 +1527,7 @@ func terminalHistoryInsertionANSI(height, capacity int, resident, inserted []str
 	if fill > 0 {
 		output.WriteString("\x1b[s")
 		fmt.Fprintf(&output, "\x1b[1;%dr", capacity)
-		if len(resident) > 0 && !topAligned {
-			start := capacity - len(resident) - fill + 1
-			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[%dM", start, fill)
-		}
-		start := capacity - fill + 1
-		if topAligned {
-			start = len(resident) + 1
-		}
+		start := len(resident) + 1
 		for index, row := range inserted[:fill] {
 			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", start+index)
 			output.WriteString(row)
@@ -1615,19 +1536,7 @@ func terminalHistoryInsertionANSI(height, capacity int, resident, inserted []str
 	}
 	if fill < len(inserted) {
 		output.WriteString(renderengine.NewHandoffPlan(height, capacity, inserted[fill:]).ANSI())
-		topAligned = true
 	}
-	return output.String(), topAligned
-}
-
-func terminalHistoryDeleteLinesANSI(capacity, row, count int) string {
-	if capacity < 1 || row < 1 || row > capacity || count < 1 {
-		return ""
-	}
-	var output strings.Builder
-	output.WriteString("\x1b[s")
-	fmt.Fprintf(&output, "\x1b[1;%dr\x1b[%d;1H\x1b[%dM", capacity, row, count)
-	output.WriteString("\x1b[r\x1b[u")
 	return output.String()
 }
 
@@ -1692,17 +1601,6 @@ func terminalViewportBandClearANSI(previous, next ViewportArea, capacity int, bo
 	for row := first; row <= last; row++ {
 		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
 	}
-	return output.String()
-}
-
-func terminalHistoryInsertLinesANSI(capacity, row, count int) string {
-	if capacity < 1 || row < 1 || row > capacity || count < 1 {
-		return ""
-	}
-	var output strings.Builder
-	output.WriteString("\x1b[s")
-	fmt.Fprintf(&output, "\x1b[1;%dr\x1b[%d;1H\x1b[%dL", capacity, row, count)
-	output.WriteString("\x1b[r\x1b[u")
 	return output.String()
 }
 

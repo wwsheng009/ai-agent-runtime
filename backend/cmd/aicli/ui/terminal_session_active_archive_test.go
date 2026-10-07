@@ -161,10 +161,6 @@ func TestTerminalSessionActiveOriginInsertionKeepsResidentContinuity(t *testing.
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &active}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("active delivery = %#v", result)
 	}
-	if session.historyInsertionContinuesScrollback(height, outputBottom) {
-		t.Fatal("resident model owns delivered rows; continuation must not be claimed")
-	}
-
 	next := terminalSessionCommit(1, line("fin-01"), line("fin-02"))
 	next.Token = 3
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &next}); result.History == nil || result.History.Err != nil || result.History.Deferred {

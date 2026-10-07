@@ -98,8 +98,11 @@ func TestTerminalSessionTransactionInsertsHistoryAboveInlineViewport(t *testing.
 	if !strings.Contains(output.String(), "\x1b[1;3r") || strings.Contains(output.String(), "\x1b[1;5r") {
 		t.Fatalf("history did not use the region above the inline viewport: %q", output.String())
 	}
-	if got := screen.Lines(3, 5); strings.Join(got, "\n") != "outgoing history\n> prompt\nstatus" {
-		t.Fatalf("history/viewport boundary = %#v, screen:\n%s", got, screen.Dump())
+	if got := strings.Join(screen.Lines(1, 3), "\n"); got != "outgoing history\n\n" {
+		t.Fatalf("history region = %q, screen:\n%s", got, screen.Dump())
+	}
+	if got := strings.Join(screen.Lines(4, 5), "\n"); got != "> prompt\nstatus" {
+		t.Fatalf("inline viewport = %q, screen:\n%s", got, screen.Dump())
 	}
 	if scrollback := strings.Join(screen.ScrollbackLines(), "\n"); strings.Contains(scrollback, "> prompt") || strings.Contains(scrollback, "status") {
 		t.Fatalf("inline viewport leaked into scrollback: %q", scrollback)
@@ -587,7 +590,7 @@ func TestTerminalSessionViewportContractionKeepsNativeHistoryContiguous(t *testi
 	}
 }
 
-func TestTerminalSessionViewportExpansionMovesHeadroomBeforeSemanticOverflow(t *testing.T) {
+func TestTerminalSessionViewportExpansionScrollsSemanticOverflowWithoutHeadroomMove(t *testing.T) {
 	const width, height = 26, 6
 	var output bytes.Buffer
 	session := NewTerminalSession(&output)
@@ -608,9 +611,13 @@ func TestTerminalSessionViewportExpansionMovesHeadroomBeforeSemanticOverflow(t *
 	if result := session.Flush(expanded); result.Err != nil {
 		t.Fatalf("expanded frame = %#v", result)
 	}
+	// 锚定统一后收缩只滚动语义溢出，不再有底锚 headroom 删除补偿。
 	transition := output.String()[before:]
-	if !strings.Contains(transition, "\x1b[1;1H\x1b[1M") || !strings.Contains(transition, "\x1b[4;1H\r\n") {
-		t.Fatalf("mixed expansion omitted headroom delete or semantic scroll: %q", transition)
+	if strings.Contains(transition, "\x1b[1;1H\x1b[1M") {
+		t.Fatalf("contraction must not move top-anchored resident history: %q", transition)
+	}
+	if !strings.Contains(transition, "\x1b[4;1H\r\n") {
+		t.Fatalf("contraction omitted semantic overflow scroll: %q", transition)
 	}
 	screen := vt.NewScreen(width, height)
 	screen.Feed(output.String())
@@ -661,7 +668,7 @@ func TestTerminalSessionViewportContractionClearsFormerPromptRowsBeforeHistory(t
 	}
 }
 
-func TestTerminalSessionViewportContractionMovesResidentHistoryToNewBottom(t *testing.T) {
+func TestTerminalSessionViewportContractionKeepsResidentHistoryTopAnchored(t *testing.T) {
 	const width, height = 28, 6
 	var output bytes.Buffer
 	session := NewTerminalSession(&output)
@@ -684,18 +691,21 @@ func TestTerminalSessionViewportContractionMovesResidentHistoryToNewBottom(t *te
 	if result := session.Flush(contracted); result.Err != nil {
 		t.Fatalf("contracted frame = %#v", result)
 	}
+	// 锚定统一：扩张只清刚转交的 viewport 行；resident 常驻 row 1 起，不再有
+	// IL 补偿把它推到新底部。
 	transition := output.String()[before:]
-	clear := strings.Index(transition, "\x1b[3;1H\x1b[0m\x1b[K")
-	move := strings.Index(transition, "\x1b[1;1H\x1b[2L")
-	if clear < 0 || move < clear {
-		t.Fatalf("contraction did not clear former viewport before moving history: %q", transition)
+	if !strings.Contains(transition, "\x1b[3;1H\x1b[0m\x1b[K") {
+		t.Fatalf("contraction did not clear former viewport rows: %q", transition)
+	}
+	if strings.Contains(transition, "\x1b[1;1H\x1b[2L") {
+		t.Fatalf("contraction must not move top-anchored resident history: %q", transition)
 	}
 	screen := vt.NewScreen(width, height)
 	screen.Feed(output.String())
 	if got := screen.ScrollbackLines(); len(got) != 0 {
 		t.Fatalf("contraction created scrollback: %#v\n%s", got, screen.Dump())
 	}
-	if got := strings.Join(screen.Lines(1, 4), "\n"); got != "\n\nMOVE-DOWN-1\nMOVE-DOWN-2" {
+	if got := strings.Join(screen.Lines(1, 4), "\n"); got != "MOVE-DOWN-1\nMOVE-DOWN-2\n\n" {
 		t.Fatalf("contracted history tail = %q\n%s", got, screen.Dump())
 	}
 	physical := strings.Join(screen.Lines(1, height), "\n")
@@ -725,8 +735,8 @@ func TestTerminalSessionHistoryGrowthAfterScrollbackKeepsTranscriptContinuous(t 
 	}
 
 	// Completing an active cell grows the history region. Once a semantic row
-	// is already in native scrollback, resident history must stay at row one;
-	// otherwise bottom alignment puts blank headroom in the middle of the stream.
+	// is already in native scrollback, resident history must stay at row one
+	// and the newly added capacity must remain below the resident suffix.
 	expanded := terminalSessionPlan(1, width, height, 6, LeaseState{})
 	if result := session.Flush(expanded); result.Err != nil {
 		t.Fatalf("expanded history frame = %#v", result)
@@ -1360,8 +1370,10 @@ func TestTerminalSessionZeroWriteRetriesHistoryBoundaryTransition(t *testing.T) 
 		t.Fatalf("transition retry = %#v", result)
 	}
 	retry := writer.bytes.String()[retryStart:]
-	if !strings.Contains(retry, "\x1b[1;1H\x1b[2M") {
-		t.Fatalf("retry omitted the uncommitted headroom transition: %q", retry)
+	// 锚定统一：resident 常驻 row 1 起，收缩（2 行 ≤ 新容量 2）无需任何历史
+	// 过渡字节，重试只补 band。
+	if strings.Contains(retry, "\x1b[1;1H\x1b[2M") {
+		t.Fatalf("retry must not move top-anchored resident history: %q", retry)
 	}
 	screen := vt.NewScreen(22, 6)
 	screen.Feed(writer.bytes.String())
@@ -1646,7 +1658,7 @@ func TestTerminalSessionCommitHistoryUsesRichHandoffAndUpdatesFrame(t *testing.T
 		t.Fatalf("history handoff = %#v", result)
 	}
 	ansi := output.String()
-	for _, want := range []string{"\x1b[s", "\x1b[1;6r", "\x1b[6;1H", "rich handoff", "\x1b[1;38;2;10;20;30m", "\x1b[r", "\x1b[u"} {
+	for _, want := range []string{"\x1b[s", "\x1b[1;6r", "\x1b[1;1H", "rich handoff", "\x1b[1;38;2;10;20;30m", "\x1b[r", "\x1b[u"} {
 		if !strings.Contains(ansi, want) {
 			t.Fatalf("handoff bytes missing %q: %q", want, ansi)
 		}

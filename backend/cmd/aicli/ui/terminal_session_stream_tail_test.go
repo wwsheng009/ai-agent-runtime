@@ -9,15 +9,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
-// P1-2b：historyStreamTailRows / historyTopAligned 降级为 writer 私有 ack 证明
-// 的不变量钉。
+// P1-2b：historyStreamTailRows 降级为 writer 私有 ack 证明的不变量钉。
 //
 // 事实源是「物理写成功」：一次 acked 的历史交付向 stream tail append 一次，
 // 半写/失败必须整族失效（stream tail、resident tail、cell provenance、
-// topAligned、投影已知位一起复位），topAligned 只在语义行真正越过 row 1 进入
-// native scrollback 后置位并 sticky，直到显式 scrollback reset。这些字段不得
-// 回喂 reducer，因此本测试驱动真实事务并断言字段状态机与屏幕事实一致，而不是
-// 只对纯函数做单测。
+// 投影已知位一起复位）。这些字段不得回喂 reducer，因此本测试驱动真实事务并
+// 断言字段状态机与屏幕事实一致，而不是只对纯函数做单测。
 func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 	const width, height, outputBottom = 24, 8, 5
 	line := func(text string) render.Line {
@@ -30,7 +27,7 @@ func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 		t.Fatalf("initial frame = %#v", result)
 	}
 
-	// 1) finalized 贴底插入：stream tail 与 resident tail 同步记录本批 3 行。
+	// 1) finalized 按序插入：stream tail 与 resident tail 同步记录本批 3 行。
 	finalized := terminalSessionCommit(1, line("fin-01"), line("fin-02"), line("fin-03"))
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &finalized}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("finalized commit = %#v", result)
@@ -40,12 +37,6 @@ func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 	}
 	if _, ok := session.historyTailCells[uint64(scene.CellID(7))]; !ok {
 		t.Fatal("acked finalized delivery must record cell provenance")
-	}
-	if session.historyTopAligned {
-		t.Fatal("bottom-anchored insert without overflow must not top-align")
-	}
-	if session.historyInsertionContinuesScrollback(height, outputBottom) {
-		t.Fatal("resident tail non-empty must not claim scrollback continuation")
 	}
 
 	// 2) 统一交付（A2 第一刀）：交付与 Origin 无关，stream tail 与 resident
@@ -66,18 +57,12 @@ func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 	if got := len(session.historyTailRows); got != outputBottom {
 		t.Fatalf("resident tail after second delivery = %d rows, want %d", got, outputBottom)
 	}
-	if !session.historyTopAligned {
-		t.Fatal("second delivery overflow past capacity must top-align")
-	}
-
-	// 3) finalized 溢出：语义行越过 row 1 进入 scrollback 后 topAligned 置位。
+	// 3) finalized 溢出：最早语义行越过 row 1 进入 native scrollback，stream
+	//    tail 保留有界后缀。
 	overflow := terminalSessionCommit(1, line("msg-01"), line("msg-02"), line("msg-03"), line("msg-04"))
 	overflow.Token = 3
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &overflow}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("overflow commit = %#v", result)
-	}
-	if !session.historyTopAligned {
-		t.Fatal("finalized overflow past row 1 must top-align")
 	}
 	if got := len(session.historyStreamTailRows); got != outputBottom {
 		t.Fatalf("stream tail after overflow = %d rows, want %d (bounded suffix)", got, outputBottom)
@@ -86,14 +71,11 @@ func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 		t.Fatalf("overflow rows missing from bounded stream tail: %q", streamTail)
 	}
 
-	// 4) sticky：溢出后的短插入不回落，直到显式 reset。
+	// 4) 溢出后的短插入继续按序追加（无底锚回落特例）。
 	next := terminalSessionCommit(1, line("msg-05"))
 	next.Token = 4
 	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &next}); result.History == nil || result.History.Err != nil || result.History.Deferred {
 		t.Fatalf("sticky commit = %#v", result)
-	}
-	if !session.historyTopAligned {
-		t.Fatal("top-aligned state must be sticky across later short inserts")
 	}
 	if got := len(session.historyStreamTailRows); got != outputBottom {
 		t.Fatalf("stream tail after sticky insert = %d rows, want %d (bounded suffix)", got, outputBottom)
@@ -105,7 +87,7 @@ func TestTerminalSessionStreamTailProofTracksAckedWrites(t *testing.T) {
 }
 
 // 半写是「本会话的已交付行证明」唯一不可信的路径：stream tail / provenance /
-// topAligned / 投影已知位必须一起复位，否则后续 dedup 会基于不可信证明裁行。
+// 投影已知位必须一起复位，否则后续 dedup 会基于不可信证明裁行。
 func TestTerminalSessionStreamTailProofResetsOnPartialWrite(t *testing.T) {
 	writer := &terminalSessionShortWriter{}
 	session := NewTerminalSession(writer)
@@ -133,12 +115,8 @@ func TestTerminalSessionStreamTailProofResetsOnPartialWrite(t *testing.T) {
 		t.Fatalf("partial write retained stream proof: tail=%d cells=%d",
 			len(session.historyStreamTailRows), len(session.historyTailCells))
 	}
-	if session.historyTopAligned || session.historyProjectionKnown {
-		t.Fatalf("partial write retained derived state: topAligned=%t known=%t",
-			session.historyTopAligned, session.historyProjectionKnown)
-	}
-	if got := session.historyInsertionContinuesScrollback(6, 4); got {
-		t.Fatalf("partial write must not claim scrollback continuation (got %t)", got)
+	if session.historyProjectionKnown {
+		t.Fatalf("partial write retained derived state: known=%t", session.historyProjectionKnown)
 	}
 }
 
