@@ -11,9 +11,9 @@
 
 | # | 缺陷 | 证据 | 根治前提 | 现状 |
 |---|---|---|---|---|
-| A1 | **写证明缺口**：ledger 无法区分「已落盘 / 未落盘」（no-replay 语义） | 硬化计划 §525-540：WIP 修复「作废→丢行、不作废→双写」被拒，原文「ledger/规划层无法决定是否发射」 | 写事务化 + 提交证明：写成功→提交记录落账；失败/中止→source-backed 恢复重绘 + 幂等。行级所有权状态机（移交/写互斥由状态迁移保证，而非在途时序门槛） | 未开始；resident-tail 双写已以帧/移交门槛止血（`1cace024`），属时序条件，非状态机保证 |
+| A1 | **写证明缺口**：ledger 无法区分「已落盘 / 未落盘」（no-replay 语义） | 硬化计划 §525-540：WIP 修复「作废→丢行、不作废→双写」被拒，原文「ledger/规划层无法决定是否发射」 | 写事务化 + 提交证明：写成功→提交记录落账；失败/中止→source-backed 恢复重绘 + 幂等。行级所有权状态机（移交/写互斥由状态迁移保证，而非在途时序门槛） | **侦察完成（2026-10-07）**：`docs/plan/aicli-render-a1-write-proof-recon-20261007.md`；基线校正——`1cace024` 门槛已随 A2 第二刀（`e3236de9`）整体删除，resident-tail 保护现为 planner 不 rebase 游标 token + generation→Deferred + 会话侧 tail 去重（仍属时序条件）；`TerminalEpoch` 无生产推进点（恢复恒 settle）。切片 A1-1 partial-write 矩阵进行中 |
 | A2 | **P2 特例族**：active 溢出归档 / sticky top-align / scrollback replay / reset backoff / settle-unresolved | 审计 §5 根因 2/3、§6 P2；当日两次现场缺陷（resident-tail 双写、中部插入）均落此族 | 历史线性化：finalized-only 进 history；可见窗口 W 行 + 溢出按行序 append；mutable 内容不提前入 scrollback（等 finalized 一次性写）；resize 只重画窗口 | **已完成（2026-10-07）**：archive 停铸（Slice 1 `130cc7f5`/`7471d34a`/`80738513`/`e3236de9`）；replay S1–S5（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`）；锚定统一（`90d3342d`，+76/−192）；backoff 收敛（§9.5）；真机 e2e 73 行 exactly-once + 无 3J |
-| A3 | **P2-1b 载荷聚合**：Acked+Active 前缀证明的渲染行载荷随会话单调增长；tombstone 每 range 一个 key | 硬化计划 §520；`activeAckedRenderedPrefixRows`（history_effect_planner.go:331-367）依赖结构化载荷做行等价匹配（显式拒绝文本哈希） | 证明载荷的可聚合表示——本质是 A1 写证明的一部分（行等价证明的新数据结构） | 未实施（设计依赖 A1） |
+| A3 | **P2-1b 载荷聚合**：Acked+Active 前缀证明的渲染行载荷随会话单调增长；tombstone 每 range 一个 key | 硬化计划 §520；~~`activeAckedRenderedPrefixRows`~~（**已随 A2 第二刀删除**，依据 stale） | 证明载荷的可聚合表示——本质是 A1 写证明的一部分（行等价证明的新数据结构） | **重估（2026-10-07）**：Ack 即 `Lines=nil`（`history_commit.go:388`），已交付载荷增长已止血；剩余增长面 = tombstone 集合（每 range 一个 key、无聚合）+ Queued 载荷。随 A1-3 行序游标决定 tombstone 聚合或删除 |
 | A4 | **P3 全量渲染基线**：每帧全屏克隆/物化/强制重绘，成本与变化量脱钩 | 审计 §4 TOP1/2/3/7 | 增量编码（viewport 外占位不编码）+ 脏行 diff + 去全屏深拷贝 | 未开始（可先做 Stage 1 计划增量） |
 | A5 | **P1-1 第 4 步**：规划续跑组删除 | P1 计划 §1；子计划 §4 依赖 | 规划单线程化：子计划 Stage 1–5 | **已完成（2026-10-07）**：Stage 1 段级增量（`9d82756c` 等）→ Stage 2 无预算单遍（`72f7f7f4`）→ Stage 3 去异步（`c2745fb5`）→ Stage 4 续跑组删除（`9651f07b`，+60/−162）；全量 ui/commands + `-race` 点检绿 |
 
