@@ -72,10 +72,11 @@ delta 成本 O(delta) 证明。
 
 ### S0 基线仪器（先做；0.5–1 天）
 
-- **帧时延分布**：新增 `ui/frame_latency_bench_test.go`——确定性 N 行/s 注入
-  （`UIController.Post` 定速 `UpdateActiveCellAction`）→ reduce → Layout → compose → flush
-  （fake presenter）；逐帧时长入 `sampleRingP95`，`b.ReportMetric(p50/p95/max)`；
-  断言稳态 p95 < 16ms（本机口径）。
+- **帧时延分布**：新增 `ui/frame_latency_bench_test.go`——确定性 delta 注入
+  （`UpdateActiveCellAction`）→ reduce → compose → flush（计数 writer）；
+  批测摊薄（16 delta/样本；本机紧循环 `time.Now()` 读数量化 ~0.5ms，单 delta 计时
+  不可靠，见 §5.1 口径）后 `b.ReportMetric(p50/p95/max)`。报告口径；
+  硬断言（p95 < 16ms）在 S1–S4 差分验收启用。
 - **每帧分配/GC**：`runtime.ReadMemStats` 前后差 / 帧数 + `testing.AllocsPerOp`；
   跨历史规模（300 / 2000 / 6719 cells）断言**分配不随历史总量增长**。
 - **O(delta) 矩阵**：历史规模 × 恒定 delta 数，报 `ns/delta`、`allocs/delta`；
@@ -168,3 +169,47 @@ delta 成本 O(delta) 证明。
   脏行缺口）；基准与验收设施（现有 bench 清单、Stage 0 基线方法与归因、可复用计数设施、
   5 项测量缺口、CI 集成点）；active markdown（每帧重复计算 10 项、缓存键表、增量可行性判定、
   最小接口草图 A–E）。以上结论已并入 §1–§2。
+
+### 5.1 S0 基线报告（2026-10-07，本机 AMD Ryzen 7 5800H / Windows）
+
+仪器：`backend/cmd/aicli/ui/frame_latency_bench_test.go`（挂具与生产统一路径同构：
+UIController → presenter.Attach → TerminalSessionExecutor → TerminalSession → 计数 writer；
+终端 100×24；delta = 3 行 ~100B；`flushed/delta = 1.000`，每 delta 一帧）。
+
+**计时口径**：本机紧循环内 `time.Now()` 读数量化 ~0.5ms（单 delta 常读出 0，
+实测：批测摊薄后稳定）。故每样本 = 16 delta 批耗时 / 16（量子误差 ≈30µs/delta）；
+分布 = 批均值的 p50/p95/max。硬断言在 S1–S4 差分验收启用。
+
+命令：
+
+```powershell
+go test ./cmd/aicli/ui/ -run '^$' -bench BenchmarkFrameLatencyStreaming -benchtime 50x
+go test ./cmd/aicli/ui/ -run '^$' -bench BenchmarkFrameCostScale -benchtime 20x
+go test ./cmd/aicli/ui/ -run '^$' -bench BenchmarkFrameAllocsPerDelta -benchtime 5x
+```
+
+**主基线（300 finalized cells 背景）**：p50 **2.05ms/delta**，p95 **2.47ms/delta**，
+max 2.61ms/delta（mean ≈2.0ms/delta）。
+
+**规模矩阵（per delta）**：
+
+| 历史 cells | mean | p50 | p95 | max |
+|---|---|---|---|---|
+| 0 | 0.74ms | 611µs | 1.37ms | 1.53ms |
+| 300 | 1.99ms | 1.82ms | 2.69ms | 3.90ms |
+| 2000 | 4.01ms | 3.88ms | 4.41ms | 4.71ms |
+| 6719 | 11.3ms | 11.2ms | **14.5ms** | 15.1ms |
+
+**每 delta 分配（300 cells）**：2.64MB/delta、8,906 allocs/delta、~23 GC/64-delta 批。
+
+**判据结论**：
+1. 成本随历史总量近似线性/超线性增长（300→2000 ×2.1；2000→6719 ×2.9），
+   **未与变化量脱钩**——O(delta) 目标不成立，即 S1–S4 的收敛对象。
+2. 6719 cells 时 p95 14.5ms 已逼近 16ms 目标线（微挂具、无真实终端渲染），
+   真机长会话风险更高；该矩阵同时是 S3/S4 验收的对照基线。
+3. 每 delta 2.64MB / 8.9k allocs 是 §1.1「全屏克隆/物化」清单的直接量化。
+
+**S0 未覆盖项（转入 S1–S4 验收）**：锁持有时长——本机时钟量子 ~0.5ms 使 µs 级
+临界区计时不可靠，且「不引入生产埋点」前提下无低侵入门；改由真机 perf e2e P12
+（UI stall p95/max，`test-aicli-resume-startup-perf-e2e.ps1`）与 S3 的 PaintTrace
+工作计数共同约束。
