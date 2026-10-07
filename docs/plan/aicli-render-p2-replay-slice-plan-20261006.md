@@ -2,7 +2,7 @@
 
 > 依据：`docs/architecture/aicli-tui-renderer-architecture-design.md` §7.4 第 2 条（replay/settle 族）、
 > `docs/plan/aicli-render-p2-recon-20261006.md` §1（三路只读侦察 + 可删性表 + 切片建议）。
-> 状态：**S1/S2/S3/S4 已完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`）**；S5 待启动（本文件随切片推进回填证据与提交锚点）。
+> 状态：**S1–S5 全部完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`）**。本切片收尾：目标语义用例与真机 e2e 装载/追加阶段均已落地。
 
 ## 0. 目标语义与行为变更（产品口径）
 
@@ -122,13 +122,35 @@
   **ok 181.5s**；`go vet`/`go build ./...`/gofmt 干净；真机 e2e PASS（72 行 exactly-once）。
   净删 96 行（22 文件，+183/−279）。
 
-## 5. S5：目标语义用例（新增）
+## 5. S5：目标语义用例（已完成，`473da400`）
 
-1. 装载后追加交付不重发（旧内容在 scrollback 保留、新内容按序 append）；
-2. settle 后从最后已证明行续写无空洞（交付流连续、无重复行）；
-3. 语义代后旧 token 的 ack/fail 不可复活（已有用例保留并扩展到装载场景）；
-4. 全交互路径 `3J` 计数恒 0（含 /resume、/backtrack、失败恢复）；
-5. 真机 e2e：装载路径 marker exactly-once、无清屏闪烁。
+新增 `history_append_only_semantics_test.go`：
+
+1. `TestSessionLoadThenAppendDeliversOnlyNewRows`：装载替换（ArmScrollbackReplay）不重发
+   已交付前缀，随后普通追加按序交付新行；逐行 exactly-once、物理顺序单调、无 `3J`、
+   epoch 不推进、无恢复义务。
+2. `TestSettleAfterPartialWriteContinuesRemainingRowsExactlyOnce`：首笔短写失败 → settle
+   原地隔离（部分写入行最多一次），其余行按序恰好一次续写；settle 后同源不再重铸。
+3. `TestHistoryEffectsReducer_LoadAfterFailedHandoffCannotResurrectOldToken`：在途交付期间
+   装载只重证明（不换 ledger、不推进 epoch、不重铸同源 token）；随后旧 token 的
+   fail/settle/迟到 ack 均不可复活它；settle 后再次装载亦不重铸。
+
+新增 `scrollback_clear_fence_test.go`（S5-4 源码栅栏）：
+
+- 递归扫描 `ui` 树 + `commands` 树的生产 `.go`，禁止任何 `[3J` 字节序列回归
+  （`/resume`、`/backtrack`、失败恢复等全部交互路径在 S3 后已无物理清屏写点）。
+
+真机 e2e（S5-5）：
+
+- 夹具 `aicli-render-fixture` 新增两阶段：装载替换（同 Scene + 装载标记）与装载后追加
+  （第 073 行）；`TerminalSession` 写出经 3J 计数包装，末尾打印 `AICLI-E2E-CLEAR-3J=<n>`。
+- 脚本断言：73 行历史 + markdown + prompt/status 全部 exactly-once；装载与追加后
+  最老/最新行仍可达；`AICLI-E2E-CLEAR-3J=0`。
+- 结果：**PASS**（"session-load replay and post-load append delivered without CSI 3J
+  scrollback clear"）。
+
+验收（已达成）：`go test ./cmd/aicli/ui` **ok 117.2s**；`./cmd/aicli/commands`
+**ok 175.3s**；`go vet`/`go build ./...`/gofmt 干净；真机 e2e PASS。新增 403 行（4 文件）。
 
 ## 6. 回滚
 
