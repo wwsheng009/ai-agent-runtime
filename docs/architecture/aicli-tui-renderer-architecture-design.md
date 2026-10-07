@@ -168,7 +168,8 @@ flowchart TB
 - **事实**：已交付的 finalized 行前缀（单调游标）+ 至多一个在途 claim（单飞写证明）。
 - **提交身份**：`(cell 身份, revision, source range, fragment)`；display 位置为**簿记**，不参与字节等价
   （P1-1 §1.6 的 D2 方向：`byRange` 去 display）。
-- **删除面**：账本事务语义（六态已于 P1-1 第 2 步归一为三态 queued/delivered/quarantined，目标再降为
+- **删除面**：账本事务语义（六态已于 P1-1 第 2 步归一为三态 queued/delivered/quarantined，
+  A1-3 3d 再把隔离态折叠为 retired + `UnresolvedDelivery`/`MayRemint` 两轴；目标再降为
   行序交付游标）、scrollback replay/reconcile（**settle 保留**，它就是目标语义）、reset backoff、
   `PlanIncomplete/PlanStalled/续跑组`——**已删除**（P1-1 Stage 2–4，`72f7f7f4`/`c2745fb5`/`9651f07b`；
   单线程序列化与单向交付后均无存在理由）。

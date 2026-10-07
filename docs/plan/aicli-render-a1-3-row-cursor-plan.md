@@ -66,7 +66,7 @@
 | **3b** | 规划 skip 切换：`enqueueHistoryCandidatesRetained`、`hasSettledRecordForSource`、`retainedQueuedCommitForSource` 改走 frontier + live 检查；旧路径留作测试双跑对照 | 无（双跑断言） | 双跑一致 + prepend/retention/生成漂移族绿 |
 | **3c** | 压缩改造：装载边界墓碑剪枝（R5 修复版） | **已实施（见 §6）**：墓碑保留为精确阻断真相；`ReplaceTranscriptAction` 整体替换（armed 装载/较早页插入，或 cell 集合收缩）时剪除 `cellID ∉ 新 transcript` 的压缩来源。frontier 退回纯加速器 | 剪枝/保留双向用例 + 装载/前缀生产流绿 + 宽回归绿 |
 | **3d** | 删除面落地（按 §3 结论）：Quarantine 子类折叠、`bySource`/`byRange` live-only 复核、ackBatch 形态复核 | **已实施（见 §6）**：Quarantine 折叠为 `retired` + 两布尔轴；`bySource`/`byRange` 复核确认已 live-only（无代码变更）；ackBatch 复核保留（连续前缀化不可行，反例 `[1,3]`） | 等价矩阵测试 + 宽回归绿 + 逐项迁移记录 |
-| **3e** | 验收：宽回归（ui + commands + `-race`）+ 真机 e2e（exactly-once 72 行 + resume 页序） | — | 全绿 + 台账/设计文档同步 |
+| **3e** | 验收：宽回归（ui + commands + `-race`）+ 真机 e2e（exactly-once + resume 页序） | **已完成（见 §6）**：`-race` 双包 exit 0 无竞争；真机 e2e 6 项 PASS（73 行 exactly-once、无 3J） | 全绿 + 台账/设计文档同步 |
 
 ## 3. 删除面评估（前置结论，3d 实施时复核）
 
@@ -203,3 +203,11 @@
      `pruneEntry` 注释与 `TestPrunedRemintableSourceStillRequiresMaterialization` 钉住）。
      条目级 `MayRemint` 与之同义、极性相反（`MayRemint=true ⇔ BlocksRemint=false`）。
   宽回归：ui（110s）+ commands（182s）exit 0；gofmt 干净；无残留标识符（rg 复核）。
+- **3e（2026-10-07）**：验收达成——宽回归 `go test -race ./cmd/aicli/ui`（约 6.5 分钟）
+  与 `go test -race ./cmd/aicli/commands`（约 7 分钟）均 exit 0，输出无 DATA RACE/panic；
+  真机 e2e（`scripts/test-aicli-windows-terminal-e2e.ps1`，Windows Terminal fixture）
+  exit 0，6 项 PASS：历史 exactly-once（73 行；行数 72→73 为 fixture 漂移，判据不变）、
+  oldest/newest 经宿主文本缓冲可达、增量尾部推进且最老行进入 scrollback、会话装载重放 +
+  装载后追加无 CSI 3J、prompt/status 恰好一次、committed Markdown 恰好一次。文档同步：
+  设计文档 §3.4 删除面（隔离态两轴折叠）、剩余缺陷台账 A1 行（A1-3 3a–3e 完成）与 A3 行
+  （墓碑有界化，聚合/删除问题关闭）。
