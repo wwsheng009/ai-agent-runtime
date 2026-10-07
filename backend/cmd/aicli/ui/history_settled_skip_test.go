@@ -2,7 +2,6 @@ package ui
 
 import (
 	"testing"
-	"time"
 )
 
 // 需求：已结算（Acked/Failed/Abandoned/Invalidated）分片不得在后续规划中被
@@ -19,9 +18,9 @@ func TestReplanSkipsSettledFragments(t *testing.T) {
 		Snapshot: scrollbackGrantSnapshot(1, "loaded session"),
 	}, 2)
 
-	first, complete := planEligibleHistoryCommitsWithin(state.AppState, time.Time{})
-	if !complete || len(first) == 0 {
-		t.Fatalf("fixture produced no plan: complete=%t commits=%d", complete, len(first))
+	first, _ := planEligibleHistoryCommitsWithin(state.AppState)
+	if len(first) == 0 {
+		t.Fatalf("fixture produced no plan: commits=%d", len(first))
 	}
 	if len(state.HistoryEffects.ledger.byToken) == 0 {
 		t.Fatal("fixture planned candidates but queued no ledger entries")
@@ -29,7 +28,7 @@ func TestReplanSkipsSettledFragments(t *testing.T) {
 
 	// 未结算分片必须继续出现在候选集里：reconcile 需要它们做
 	// historyCommitPresentationEqual / RebasePending。
-	again, _ := planEligibleHistoryCommitsWithin(state.AppState, time.Time{})
+	again, _ := planEligibleHistoryCommitsWithin(state.AppState)
 	if countFinalizedCandidates(again) == 0 {
 		t.Fatal("pending finalized fragments must stay in the candidate set for reconciliation")
 	}
@@ -51,7 +50,7 @@ func TestReplanSkipsSettledFragments(t *testing.T) {
 		t.Fatal("fixture queued nothing to acknowledge")
 	}
 
-	settled, _ := planEligibleHistoryCommitsWithin(state.AppState, time.Time{})
+	settled, _ := planEligibleHistoryCommitsWithin(state.AppState)
 	if got := countFinalizedCandidates(settled); got != 0 {
 		t.Fatalf("re-plan rebuilt %d settled finalized fragments; want 0", got)
 	}

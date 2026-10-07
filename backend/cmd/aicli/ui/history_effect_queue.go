@@ -21,38 +21,15 @@ type HistoryEffectQueueState struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
-	// PlanIncomplete records that the most recent transcript plan was cut off by
-	// historyCommitPlanningBudget: the ledger holds a valid *oldest prefix* of
-	// the eligible history, and the cells the layout walk never reached were
-	// never planned at all. The prefix is not a delivered session, and nothing
-	// re-plans on its own — syncHistoryEffectsForTranscript runs on transcript
-	// transitions, and an idle resumed session has none. The executor drains the
-	// prefix, the ledger then reads pending=0/acked=N over a transcript whose
-	// layout is hundreds of thousands of rows (live: next=1068, acked=356,
-	// layout_rows=290957), and the rows the walk never reached stay missing from
-	// native scrollback with nothing left to schedule. The flag makes that state
-	// observable: the ack handlers continue the plan as soon as the delivered
-	// prefix drains (continueTruncatedHistoryPlan), so a truncated plan is
-	// carried to completion instead of waiting for an interaction that never
-	// comes. It clears only when a plan reports complete.
+	// PlanIncomplete 是预算截断时代的"欠账计划"标记。P1-1 Stage 2 起规划无预算
+	// 单遍（planEligibleHistoryCommitsWithin），不存在截断前缀，本字段不再被置位；
+	// Stage 4 删除字段与其全部消费方，当前保留用于诊断 JSON 兼容。
 	PlanIncomplete bool
-	// PlanStalled records that a continuation pass at the current plan inputs
-	// minted nothing while the plan stayed incomplete: every candidate the
-	// budgeted layout walk reaches is already terminal in this epoch (delivered,
-	// or quarantined by a settle), so another pass would only burn one more
-	// layout budget without moving the queue. It is the spin guard for the
-	// executor-side continuation kick, which stays armed while PlanIncomplete is
-	// set and this flag is clear. Any plan-input change that misses the plan
-	// memo (a transcript transition, a new epoch, geometry/theme) clears it and
-	// allows a fresh attempt, so a stalled epoch heals as soon as it can make
-	// progress again.
+	// PlanStalled 曾是续跑停滞的自旋守卫。Stage 2 起无截断计划，本字段不再被
+	// 置位；Stage 4 删除，当前保留用于诊断 JSON 兼容。
 	PlanStalled bool
-	// planResume* 是 P1.1b 的截断续跑游标：被预算截断的 transcript 规划记录
-	// "布局 walk 走到哪一语义行、此前已产出多少物理行、当时的输入指纹"。下一次
-	// pass 在指纹仍匹配时从游标继续，而不是从 0 重走已规划前缀（那正是锁内无界
-	// 重复布局的根因）。指纹与 transcriptPlanMemoHit 的输入一一对应；显式 memo
-	// 失效（装载替换 / no-op install）同时清游标 —— ledger 可能已被整体替换，
-	// 前缀永远不会再被规划（漏规划前缀导致缺行的成因）。
+	// planResume* 是 P1.1b 的截断续跑游标。Stage 2 起规划单遍完整，游标不再写入；
+	// Stage 4 删除字段与 clear/store 方法，当前保留用于诊断 JSON 兼容。
 	planResumeValid      bool
 	planResumeRow        int
 	planResumeScreenRows int

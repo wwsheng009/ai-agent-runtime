@@ -9,13 +9,9 @@ import (
 )
 
 // TestAsyncPlanWorkerConvergesResumedSessionThroughActor 是最接近生产的端到端：
-// 控制器开启 plan worker，0 预算强制多轮截断，executor 负责交付/ack/kick，最终
-// 必须收敛且 finalized cell 全覆盖——与既有同步 E2E 的断言一致。
+// 控制器开启 plan worker，screening 在 worker 上无预算单遍完成，executor 负责
+// 交付/ack，最终必须收敛且 finalized cell 全覆盖——与既有同步 E2E 的断言一致。
 func TestAsyncPlanWorkerConvergesResumedSessionThroughActor(t *testing.T) {
-	restoreBudget := historyCommitPlanningBudget
-	defer func() { historyCommitPlanningBudget = restoreBudget }()
-	historyCommitPlanningBudget = 0
-
 	controller := NewUIController(UIControllerConfig{MailboxSize: 256, AsyncTranscriptPlan: true}, nil, nil)
 	go controller.Run()
 	physical := &bytes.Buffer{}

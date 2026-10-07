@@ -3,7 +3,6 @@ package ui
 import (
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
@@ -188,81 +187,23 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 	if len(themes) > 0 {
 		theme = themes[0]
 	}
-	result, _ := layoutTranscriptScreenRowsWithin(rows, cells, mutable, width, time.Time{}, theme)
-	return result
+	return layoutTranscriptScreenRowsImpl(rows, cells, mutable, width, theme)
 }
 
-// layoutBudgetCheckRows 是预算检查的采样间隔。逐行调用 time.Now() 会给
-// 146k 行的遍历加上毫秒级固定开销；每 N 行采样一次把开销压到可忽略，同时
-// 仍让预算以远小于单帧的粒度生效。
-const layoutBudgetCheckRows = 4096
-
-// layoutTranscriptScreenRowsWithin 是带预算的布局实现。deadline 为零值表示
-// 不设预算（逐帧渲染路径：帧必须完整，截断会画错屏）。
-//
-// 预算耗尽时返回**已经布局好的前缀**并把 complete 置为 false。前缀是安全的
-// 部分结果：消费方只有在 complete 为真时才把它当作完整布局（例如
-// syncHistoryEffectsForTranscript 只在完整规划后才记录 memo），否则下一次
-// reduce 会重试。这条路径让 historyCommitPlanningBudget 真正覆盖布局本身 ——
-// 此前预算只在 commit 循环里建立，昂贵的布局在预算建立之前就已经跑完了。
-func layoutTranscriptScreenRowsWithin(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, deadline time.Time, theme style.ThemeContext) ([]AppScreenRow, bool) {
-	result, complete, _ := layoutTranscriptScreenRowsFrom(rows, cells, mutable, width, deadline, theme, 0)
-	return result, complete
-}
-
-// layoutTranscriptScreenRowsFrom 是 layoutTranscriptScreenRowsWithin 的续跑
-// 形式：从语义行 startRow 开始布局，返回本轮结果、是否走到末尾，以及下一轮
-// 续跑应使用的语义行下标 nextRow。startRow 必须落在 cell 边界（gap 行，或某个
-// cell 非 gap 连续段的第一行），由调用方（规划游标）保证——与
-// alignTranscriptCellStart 的约束同源：布局缓存按 cell 内容寻址，从 cell 中部
-// 开始会把残缺行集合写进该 cell 的缓存条目。
-//
-// 截断点必须让每个窗口只含完整的 cell：plan 侧按 rows[start].CellID 分组，一个
-// 残缺切片（结构化/折叠 cell 的中途语义行，或只带上了前导 gap 的 cell）会被当成
-// 完整 cell 规划，产生与全量规划不同的身份（错位 fragment / whole-cell 回退），
-// 续跑就会重复投递这些行。因此预算命中后先把当前 cell 处理完（连同它的前导
-// gap），再在下一个 cell 的起始行返回；nextRow 天然落在 cell 边界。
-//
-// startRow 越界视为已经走到末尾（续跑方可能带着覆盖全部行的游标进来），返回
-// complete=true。nextRow == startRow 只可能来自非法输入（startRow 落在 cell
-// 中部），调用方应将其视为 stalled，绝不能当作"没有历史"。
-func layoutTranscriptScreenRowsFrom(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, deadline time.Time, theme style.ThemeContext, startRow int) ([]AppScreenRow, bool, int) {
-	if startRow < 0 {
-		startRow = 0
+// layoutTranscriptScreenRowsImpl 是布局投影的唯一实现（P1-1 Stage 2：无预算单遍）。
+// 规划与逐帧渲染共用它：帧必须完整，截断会画错屏，因此这里不存在部分结果；
+// 规划侧不再有预算/游标/窗口参数。
+func layoutTranscriptScreenRowsImpl(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, theme style.ThemeContext) []AppScreenRow {
+	if len(rows) == 0 {
+		return nil
 	}
-	if len(rows) == 0 || startRow >= len(rows) {
-		return nil, true, len(rows)
-	}
-	result := make([]AppScreenRow, 0, len(rows)-startRow)
+	result := make([]AppScreenRow, 0, len(rows))
 	renderedStructured := make(map[scene.CellID]struct{})
 	fp := themeFingerprint(theme)
 	cache := sharedCellRows
 	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
 	foldTarget := toolFoldTargetRows(rows, cells, mutable)
-	// 预算耗尽后先把当前 cell 走完再返回（见上方截断语义）：budgetExpiredCell 是
-	// 命中时正在处理的 cell，只有遇到不同 CellID 的行才是合法返回点。
-	budgetExpired := false
-	budgetExpiredCell := scene.CellID(0)
-	for index := startRow; index < len(rows); index++ {
-		// 预算绝不能把结果截断成**空前缀**：规划器把「行集为空」当作「没有可交付
-		// 历史」（planEligibleHistoryCommits 在 len(rows)==0 时直接返回），而 resume
-		// 会话里 LayoutTranscript + fold target 这两段前置工作本身就可能吃掉整个
-		// 预算，于是 index=0 的第一次检查就命中并返回空结果 —— 每一轮重试都如此，
-		// 规划永远是 0 候选（live: next=0 / pending=0），armed 的销毁式重放清空
-		// scrollback 之后无内容可写，屏幕永久空白。至少产出一行才能让「截断前缀」
-		// 与「没有历史」可区分，也才能让重试严格前进。
-		// 用 !Before 而不是 After：Windows 上 time.Now() 的刻度可能比两次调用
-		// 间隔更粗，budget=0（deadline == 创建时刻）时 After 可能整轮为 false，
-		// 于是"0 预算必然截断"的契约（E2E/单元测试都依赖它）会随机失效。相等
-		// 即视为已过期，预算语义与文档一致。
-		if !budgetExpired && !deadline.IsZero() && len(result) > 0 &&
-			index%layoutBudgetCheckRows == 0 && !time.Now().Before(deadline) {
-			budgetExpired = true
-			budgetExpiredCell = rows[index].CellID
-		}
-		if budgetExpired && rows[index].CellID != budgetExpiredCell {
-			return result, false, index
-		}
+	for index := 0; index < len(rows); index++ {
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
 			continue
@@ -333,7 +274,7 @@ func layoutTranscriptScreenRowsFrom(rows []scene.LayoutRow, cells map[scene.Cell
 		result = appendCachedCellRows(result, row.CellID, cellRows)
 		index-- // 补偿 for 步进：index 已指向下一个不同 cell 或末尾
 	}
-	return result, true, len(rows)
+	return result
 }
 
 // layoutTranscriptTailScreenRows 只布局 transcript 的尾部，返回结果与「全量布局

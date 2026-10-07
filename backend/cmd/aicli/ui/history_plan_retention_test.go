@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -27,10 +26,7 @@ func TestPrependPlanRetainsQueuedCellsAndKeepsLedgerStable(t *testing.T) {
 	prepended = append(prepended, active)
 	state = prependReplanInstall(state, prepended, 3, true)
 
-	commits, complete, _, _, retention := planEligibleHistoryCommitsWithinFrom(state.AppState, time.Time{}, 0, 0)
-	if !complete {
-		t.Fatal("zero-deadline full pass must be complete")
-	}
+	commits, retention := planEligibleHistoryCommitsWithin(state.AppState)
 	wantCells := transcriptFinalizedCellCount(state.Transcript)
 	if len(retention.cells) != wantCells {
 		t.Fatalf("retention cells=%d, want %d (all queued finalized cells must be classified as reusable)",

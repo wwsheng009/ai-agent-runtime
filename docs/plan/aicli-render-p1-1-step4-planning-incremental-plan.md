@@ -106,6 +106,51 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
 - **诊断 schema**：`HistoryEffectDiagnostics` 四字段保留为 deprecated 零值（跨包 JSON 稳定性优先），commands 注释标注；不破坏 debug API。
 - **active-cell 预算**（planner `:526`）：属"单 chunk 软早退"，非计划截断，保留并注明。
 
+### 2.4 Stage 2 实施记录（2026-10-07，已完成）
+
+**2a 无预算单遍**：
+
+- 删除 `historyCommitPlanningBudget`、`planEligibleHistoryCommitsWithinFrom` 的
+  deadline/`startRow`/`screenRowsBefore`/`nextRow`/`screenRows` 全部截断与续跑
+  参数；`planEligibleHistoryCommitsWithin(state)` 收敛为唯一实现（返回完整候选集
+  + 复用段保留集）。
+- 布局层 `layoutTranscriptScreenRowsWithin`/`From` 合并为无预算单遍
+  `layoutTranscriptScreenRowsImpl`（规划与逐帧渲染共用；预算检查/采样常量删除）。
+- `mintTranscriptPlanWindow` 去掉 `screenRowsBefore`（displayStart 恒 0）；异步
+  请求/结果 payload 去掉 resume/startRow/complete/nextRow 字段；worker 只回
+  `rows + screenDuration`。
+- `applyTranscriptPlan`（原 `applyTranscriptPlanWindow`）只保留完整落账路径：
+  membership reconcile（复用段跳过）+ memo；前缀入队、`PlanIncomplete` 置位、
+  游标存储、`finishResumedTranscriptPlan` 全部删除。
+- 诊断 `LayoutRowsBudgeted/LayoutBudgetComplete` 退化为与 Screened 同值
+  （字段保留，JSON schema 不变）。
+
+**2b 在途/欠账替代**：ack / batch-ack / settle / projection-recovered /
+`ContinueHistoryPlanAction` 五个触发点改为**无条件重跑规划**
+（`syncHistoryEffectsForTranscript`；输入未变时 memo 命中即 O(1) 空操作），
+替代原 `continueTruncatedHistoryPlan` 门控续跑；该函数已删除。
+
+**2c memo 契约**：删除 `transcriptPlanMemoHit` 的 `PlanIncomplete` 早退；
+memo 语义回归"完整规划已落"（无预算单遍下每次落账都完整）。
+
+**测试面**：删除纯截断/续跑用例（`transcript_layout_resume_test.go`、
+`history_planning_budget_test.go`、`TestExecutorContinuesIncompletePlanWithoutAckTrigger`、
+`TestLayoutTranscriptScreenRowsWithinHonoursBudget`）；重写异步窗口组
+（单遍收敛/陈旧结果重派发/epoch 失效/回退同步）与 worker E2E、ArmedResume
+全覆盖组；`resumeParitySnapshot` 助手移入 `transcript_plan_resume_fixture_test.go`。
+**Stage 4 前遗留**（不再被置位，仅存字段与消费方）：`PlanIncomplete`/`PlanStalled`/
+`planResume*`/`planContinuationPending`/executor kick/wake 门/snapshot 读点。
+
+**实测（同 harness，`-benchtime 3x`）**：`first_plan` 229.5 → **190.1ms**、
+`second_plan_prepend` 522.4 → **338.4ms**（含 state_clone 103.9ms）、
+`plan_only` 135.5 → **114.4ms**、`state_clone` 148.8 → **103.9ms**、
+`PlanEligibleHistoryCommitsPlainTranscript` 208.5µs。即冷/热单次规划锁内成本
+≈190ms / ≈338ms（无预算上限，最坏 = 完整布局 + 全量铸造）。
+
+**回归**：ui 113.2s ok、commands 176.8s ok（一次组合首跑负载型偶发，单包与复跑
+均绿）。**Stage 3 门控**：单次规划成本已知且有界（4001 cell ≈ 190ms；resume 级
+会话的 E2E 单遍收敛总时长 93s 主要花在交付写盘），去异步可启动。
+
 ## 3. 分阶段实施（每阶段独立提交，失败即回滚）
 
 ### Stage 0 基线与门禁（已完成，2026-10-06；实测记录见 §1.5）
@@ -127,7 +172,7 @@ Stage 1（A）→ 重测 → Stage 2（无预算同步化）→ Stage 3（去异
   prepend 覆盖与顺序（`TestDeferredOlderPagePrependReplansAndCoversOlderCells` 保持绿）。
 - 验收：`second_plan_prepend` ≤174ms（1/3 × 522ms）；宽回归组（History/Transcript/Plan/Sync/Executor/NativeScrollback/两个 E2E）绿。
 
-### Stage 2 无预算同步化（1–2 天）
+### Stage 2 无预算同步化（已完成，2026-10-07；实施记录见 §2.4）
 
 - 2a：transcript 路径切无预算单遍；删 deadline 形参/截断分支/`startRow/screenRowsBefore/nextRow/screenRows` 续跑参数；`planEligibleHistoryCommitsWithinFrom` 收敛为单一实现。
 - 2b：在途批次挂起替代（§2.3）。

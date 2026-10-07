@@ -88,18 +88,13 @@ func (c *UIController) runPlanWorker() {
 		case <-c.planWorker.done:
 			return
 		case req := <-c.planWorker.req:
-			rows, complete, nextRow, screenMs := screenTranscriptPlanWindowRequest(req)
+			rows, screenMs := screenTranscriptPlanWindowRequest(req)
 			action := HistoryPlanWindowReady{
-				seq:              req.Seq,
-				planInputsEpoch:  req.PlanInputsEpoch,
-				inputs:           req.Inputs,
-				resume:           req.Resume,
-				startRow:         req.StartRow,
-				screenRowsBefore: req.ScreenRowsBefore,
-				rows:             rows,
-				complete:         complete,
-				nextRow:          nextRow,
-				screenDuration:   screenMs,
+				seq:             req.Seq,
+				planInputsEpoch: req.PlanInputsEpoch,
+				inputs:          req.Inputs,
+				rows:            rows,
+				screenDuration:  screenMs,
 			}
 			if !c.Post(action) {
 				// Close 之后放弃结果：规划随会话关闭一起收敛。

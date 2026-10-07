@@ -528,22 +528,9 @@ func (HistoryReconciliationSettled) isUIAction()         {}
 func (HistoryReconciliationSettled) Class() ActionClass  { return ClassBarrier }
 func (HistoryReconciliationSettled) CoalesceKey() string { return "" }
 
-// ContinueHistoryPlanAction asks the reducer to carry a budget-truncated
-// transcript plan forward.
-//
-// A truncated plan mints only the oldest prefix the layout walk could reach
-// inside historyCommitPlanningBudget, and the continuation that carries it to
-// completion used to run from the ack handlers alone. That single trigger is
-// what strands a resumed session: every gate that can block the one attempt
-// (projection unknown, an unresolved delivery, a settle that quarantined a
-// delivered batch) clears through a transition that is *not* an ack, so no
-// later ack ever retries the continuation. The executor then finds an empty
-// queue, no recovery obligation, and a transcript it only partly delivered
-// (live: 6622 cells / 291842 rows, next=1288, acked=322, pending=0, projection
-// known, executor idle) — and nothing in the system schedules the missing
-// tail. The executor posts this action in exactly that state, so an incomplete
-// plan self-heals instead of depending on one trigger that may already have
-// been consumed.
+// ContinueHistoryPlanAction 曾是"预算截断计划"的续跑请求（executor kick）。
+// P1-1 Stage 2 起规划无预算单遍，不存在截断计划；动作与执行器 kick 在 Stage 4
+// 一并删除，当前保留为兼容壳。
 type ContinueHistoryPlanAction struct{}
 
 func (ContinueHistoryPlanAction) isUIAction()         {}
@@ -554,16 +541,11 @@ func (ContinueHistoryPlanAction) CoalesceKey() string { return "" }
 // ClassBarrier：批处理 merge 丢弃它等于让规划永久停摆；CoalesceKey 为空表示不可
 // 合并。字段不导出——只有 ui 包内部（worker/测试）构造它。
 type HistoryPlanWindowReady struct {
-	seq              uint64
-	planInputsEpoch  uint64
-	inputs           transcriptPlanInputs
-	resume           bool
-	startRow         int
-	screenRowsBefore int
-	rows             []AppScreenRow
-	complete         bool
-	nextRow          int
-	screenDuration   time.Duration
+	seq             uint64
+	planInputsEpoch uint64
+	inputs          transcriptPlanInputs
+	rows            []AppScreenRow
+	screenDuration  time.Duration
 }
 
 func (HistoryPlanWindowReady) isUIAction()         {}

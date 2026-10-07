@@ -306,13 +306,10 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		if errors.Is(ackErr, ErrStaleLayoutGeneration) {
 			state.HistoryEffects.ProjectionUnknown = true
 		} else if ackErr == nil {
-			// A budget-truncated plan mints only its oldest prefix, and an idle
-			// resumed session produces no later transcript transition to carry
-			// it forward. The prefix has now been delivered, so continue the
-			// plan here; without this the remaining cells are never planned
-			// (pending=0 / acked=N / executor idle) and stay missing from native
-			// scrollback forever.
-			continueTruncatedHistoryPlan(&state)
+			// Stage 2：交付证明可能伴随 ledger 变化；无条件重跑规划（memo 命中
+			// 时是 O(1) 空操作，输入真的变了才重规划）。旧实现只在"截断计划欠账"
+			// 时续跑，现已无欠账状态。
+			syncHistoryEffectsForTranscript(&state)
 		}
 		traceHistoryReduction(state, "ack token=%d tokenGen=%d frame=%d err=%v", a.Token, a.LayoutGeneration, a.Frame, ackErr)
 	case HistoryCommitsAcknowledged:
@@ -327,9 +324,8 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.HistoryEffects.markDeliveredBatchUnresolved(a.Commits, ackErr)
 			state.HistoryEffects.ProjectionUnknown = true
 		} else if len(a.Commits) > 0 {
-			// Same continuation rule as the single ack above: the batch may have
-			// been the truncated plan's delivered prefix.
-			continueTruncatedHistoryPlan(&state)
+			// 同单条 ack：无条件重跑规划（memo 命中即空操作）。
+			syncHistoryEffectsForTranscript(&state)
 		}
 		firstToken, lastToken := uint64(0), uint64(0)
 		if len(a.Commits) > 0 {
@@ -366,18 +362,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// delivery has no destructive transaction for a race to short-circuit.
 		if a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.settleUnresolvedWithoutReplay()
-			// Settling is the transition that clears the unresolved-delivery
-			// gate, and it is not an ack. A continuation attempt that ran while
-			// that gate was set returned early; without retrying it here the
-			// truncated plan is stranded with pending=0 and an idle executor.
-			continueTruncatedHistoryPlan(&state)
+			// Settling clears the unresolved-delivery gate and is not an ack;
+			// 重跑规划以保证任何输入变化都被重新对账（memo 命中即空操作）。
+			syncHistoryEffectsForTranscript(&state)
 		}
 	case ContinueHistoryPlanAction:
-		// The executor found no pending token and no recovery obligation while
-		// the plan still owes cells. Carrying the plan forward from here is what
-		// makes an incomplete plan self-heal: the ack handlers remain the fast
-		// path, but they are no longer the only trigger.
-		continueTruncatedHistoryPlan(&state)
+		// 旧续跑 kick 的兼容入口（Stage 4 删除）：按当前输入重跑规划，memo
+		// 命中即空操作。
+		syncHistoryEffectsForTranscript(&state)
 	case HistoryPlanWindowReady:
 		// plan worker 的 screening 结果（P1.2 Stage B1）：seq/失效序号/指纹/恢复门
 		// 全部通过后，在锁内铸 commit 并走与同步路径共用的收尾。
@@ -385,11 +377,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case HistoryProjectionRecovered:
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.markProjectionKnown()
-			// Clearing ProjectionUnknown is the other non-ack transition that
-			// unblocks the continuation gate: nothing else replans a truncated
-			// plan, and it would stay stranded forever. The call is cheap when
-			// the plan is not truncated (the pending gate returns early).
-			continueTruncatedHistoryPlan(&state)
+			// Clearing ProjectionUnknown is a non-ack transition; 重跑规划保证
+			// 投影恢复后输入变化立即对账（memo 命中即空操作）。
+			syncHistoryEffectsForTranscript(&state)
 		}
 	case HistoryProjectionInvalidated:
 		if a.LayoutGeneration == state.Geometry.Generation {

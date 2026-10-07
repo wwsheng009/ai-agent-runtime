@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -57,8 +56,8 @@ type HistoryPlanDiagnosis struct {
 	// but no commit was ever planned: the planner lays out the finalized cells
 	// and returns an empty candidate set when that layout yields no rows. Total
 	// is the raw scene layout, Screened is the same rows after the AppScreenRow
-	// projection with no deadline, and Budgeted is the projection under the real
-	// historyCommitPlanningBudget — the planner's actual input.
+	// projection — the planner's actual input. Stage 2 起规划无预算单遍，
+	// Budgeted/Complete 与 Screened 同值（字段保留用于诊断 JSON 稳定性）。
 	LayoutRowsTotal      int
 	LayoutRowsScreened   int
 	LayoutRowsBudgeted   int
@@ -110,14 +109,11 @@ func DiagnoseHistoryPlan(state UIControllerState) HistoryPlanDiagnosis {
 		mutable := mutableTranscriptCellIDs(appState.Transcript)
 		layoutRows := appState.Transcript.LayoutRows(appState.Geometry.Generation)
 		diag.LayoutRowsTotal = len(layoutRows)
-		screened, _ := layoutTranscriptScreenRowsWithin(
-			layoutRows, byID, mutable, appState.Geometry.Width, time.Time{}, appState.Theme)
+		screened := layoutTranscriptScreenRows(
+			layoutRows, byID, mutable, appState.Geometry.Width, appState.Theme)
 		diag.LayoutRowsScreened = len(screened)
-		rows, complete := layoutTranscriptScreenRowsWithin(
-			layoutRows, byID, mutable, appState.Geometry.Width,
-			time.Now().Add(historyCommitPlanningBudget), appState.Theme)
-		diag.LayoutRowsBudgeted = len(rows)
-		diag.LayoutBudgetComplete = complete
+		diag.LayoutRowsBudgeted = diag.LayoutRowsScreened
+		diag.LayoutBudgetComplete = true
 	}
 	return diag
 }
