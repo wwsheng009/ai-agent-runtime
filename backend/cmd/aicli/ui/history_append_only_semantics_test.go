@@ -254,3 +254,76 @@ func TestHistoryEffectsReducer_LoadAfterFailedHandoffCannotResurrectOldToken(t *
 		t.Fatalf("post-settle load re-minted a settled source: next=%d want %d", state.HistoryEffects.NextToken, tokensBefore)
 	}
 }
+
+// A1-2c：settle 终态定稿——unresolved gate 是 proof 谓词：Committed（Ack）与
+// FailedZero（Deferred）都不置位；Partial/Abandoned 未决隔离置位；settle 原地
+// 吸收后清位，来源身份保持终态（永不重铸、迟到 ack 不复活、幂等）。
+func TestHistoryEffectsReducer_SettleTerminalStateIsProofDerived(t *testing.T) {
+	state := historyEffectTestState(t, 2)
+	entries := state.HistoryEffects.Entries()
+	if len(entries) < 2 {
+		t.Fatalf("fixture entries = %#v, want at least two", entries)
+	}
+	deliveredToken := entries[0].Commit.Token
+	retriedToken := entries[1].Commit.Token
+
+	// Committed proof → Ack：交付不产生恢复义务。
+	state = reduceUIControllerState(state, BeginHistoryCommit{Token: deliveredToken, LayoutGeneration: 2}, 3)
+	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
+		Token: deliveredToken, Frame: 5, LayoutGeneration: 2,
+	}, 4)
+	if entry := historyCommitEntry(t, state, deliveredToken); entry.State != HistoryCommitDelivered {
+		t.Fatalf("committed token not delivered: %#v", entry)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired ||
+		state.HistoryEffects.hasUnresolvedTerminalDelivery() {
+		t.Fatalf("committed delivery raised the unresolved gate: %#v", state.HistoryEffects)
+	}
+
+	// FailedZero proof → Deferred：token 保持可重试，不产生恢复义务。
+	state = reduceUIControllerState(state, BeginHistoryCommit{Token: retriedToken, LayoutGeneration: 2}, 5)
+	state = reduceUIControllerState(state, HistoryCommitDeferred{Token: retriedToken, LayoutGeneration: 2}, 6)
+	if entry := historyCommitEntry(t, state, retriedToken); entry.State != HistoryCommitQueued {
+		t.Fatalf("zero-write deferred token must stay queued: %#v", entry)
+	}
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired ||
+		state.HistoryEffects.hasUnresolvedTerminalDelivery() {
+		t.Fatalf("zero-write deferral raised the unresolved gate: %#v", state.HistoryEffects)
+	}
+
+	// Partial proof（不可证明）→ Failed 未决隔离：gate 置位。
+	state = reduceUIControllerState(state, BeginHistoryCommit{Token: retriedToken, LayoutGeneration: 2}, 7)
+	state = reduceUIControllerState(state, HistoryCommitFailed{
+		Token: retriedToken, LayoutGeneration: 2, Err: errors.New("short write"), MayHavePartiallyWritten: true,
+	}, 8)
+	if entry := historyCommitEntry(t, state, retriedToken); !entry.IsFailed() || !entry.MayHavePartiallyWritten {
+		t.Fatalf("partial delivery must be quarantined unresolved: %#v", entry)
+	}
+	if !state.HistoryEffects.ProjectionUnknown || !state.HistoryEffects.ReconciliationRequired ||
+		!state.HistoryEffects.hasUnresolvedTerminalDelivery() {
+		t.Fatalf("unproven delivery did not raise the unresolved gate: %#v", state.HistoryEffects)
+	}
+
+	// settle 定稿：原地吸收未决区间，gate 清位；显式放弃区分（不重试、不重导）。
+	state = reduceUIControllerState(state, HistoryReconciliationSettled{LayoutGeneration: 2}, 9)
+	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired ||
+		state.HistoryEffects.hasUnresolvedTerminalDelivery() {
+		t.Fatalf("settle did not clear the proof gate: %#v", state.HistoryEffects)
+	}
+	settled := historyCommitEntry(t, state, retriedToken)
+	if !settled.IsSettled() {
+		t.Fatalf("unresolved token must settle in place: %#v", settled)
+	}
+	if entry := historyCommitEntry(t, state, deliveredToken); entry.State != HistoryCommitDelivered {
+		t.Fatalf("settle touched a proven delivery: %#v", entry)
+	}
+	if state.HistoryEffects.ledger.SettleUnresolvedWithoutReplay() {
+		t.Fatal("settle must be idempotent once no unresolved delivery remains")
+	}
+	state = reduceUIControllerState(state, HistoryCommitAcknowledged{
+		Token: retriedToken, Frame: 99, LayoutGeneration: 2,
+	}, 10)
+	if entry := historyCommitEntry(t, state, retriedToken); entry.State == HistoryCommitDelivered {
+		t.Fatalf("late acknowledgement resurrected a settled token: %#v", entry)
+	}
+}
