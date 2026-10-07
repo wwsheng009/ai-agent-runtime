@@ -288,6 +288,8 @@ source/fragment 身份，复用段分拣直接在缓存命中路径逐行进行�
 
 **回归**：ui 全量 108.4s ok、commands 全量 168.9s ok；四个语义组
 （Prepend / ResumeUnion / Truncated / ArmedResume）绿。
+（1b 收尾后双包并行复跑 ui 113.9s / commands 173.8s 绿；其间一次双包并行
+首跑出现负载型偶发失败，ui 单包与双包复跑均绿，未复现。）
 
 **残余（不阻塞 Stage 2）**：1e 段命中/复用计数诊断（可观测性项）。1b 已随本批
 落地（保留段 DisplayRange 按当前全局坐标常量偏移重写 + 测试断言单调推进）。
