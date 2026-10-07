@@ -23,25 +23,14 @@ func scrollbackGrantRecoveryPlan(state UIControllerState) TerminalTransactionPla
 		appState:               terminalViewportAppState(state.AppState),
 		projectionUnknown:      state.HistoryEffects.ProjectionUnknown,
 		reconciliationRequired: state.HistoryEffects.ReconciliationRequired,
-		scrollbackReplayArmed:  state.HistoryEffects.ScrollbackReplayArmed,
 	})
 }
 
-func TestReplaceTranscriptActionLoadNeverArmsDestructiveReplay(t *testing.T) {
-	plain := reduceUIControllerState(UIControllerState{}, ReplaceTranscriptAction{
-		Snapshot: scrollbackGrantSnapshot(1, "regular update"),
-	}, 1)
-	if plain.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("a regular replacement armed a scrollback replay")
-	}
-
+func TestReplaceTranscriptActionLoadKeepsAppendOnlyRecovery(t *testing.T) {
 	loaded := reduceUIControllerState(UIControllerState{}, ReplaceTranscriptAction{
 		Snapshot:            scrollbackGrantSnapshot(1, "loaded session"),
 		ArmScrollbackReplay: true,
 	}, 1)
-	if loaded.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("a session load armed a destructive replay; native scrollback is append-only")
-	}
 	if loaded.HistoryEffects.TerminalEpoch != 0 {
 		t.Fatalf("load started a terminal epoch without a physical act: %d", loaded.HistoryEffects.TerminalEpoch)
 	}
@@ -108,9 +97,6 @@ func TestLoadReproofOnNoOpInstallRePlansFromSource(t *testing.T) {
 		ArmScrollbackReplay: true,
 	}, 3)
 
-	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("no-op load armed a destructive replay")
-	}
 	if state.HistoryEffects.NextToken <= planned {
 		t.Fatalf("no-op load trusted a memo over an empty ledger: next=%d planned=%d",
 			state.HistoryEffects.NextToken, planned)

@@ -4003,9 +4003,9 @@ applyEntries:
 }
 
 // publishReplayedScene posts the replayed Scene as one immutable snapshot. The
-// session-load variant carries the one-shot scrollback-replay authorization
-// inside that same action, so the reducer installs the loaded Scene and its
-// replay grant in one transition.
+// session-load variant carries the load re-proof marker inside that same
+// action, so the reducer installs the loaded Scene and re-proves its plan from
+// source in one transition.
 func (b *chatRuntimeEventBridge) publishReplayedScene(sessionLoad bool) {
 	if b == nil || b.session == nil || b.session.Interaction == nil {
 		return

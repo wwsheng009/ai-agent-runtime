@@ -486,17 +486,12 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 	// O(entire history x payload) per poll of a document that prints six
 	// integers.
 	summary := effects.Summary
-	// scrollback-replay-armed is the reducer-installed one-shot authorization
-	// that lets the executor replace native scrollback and replay history. It is
-	// the state that explains why a history obligation will (or will not) reset
-	// the physical projection, so it belongs next to the commit gates.
 	// next is the monotonic token counter. With every entry state at zero it is
 	// the only way to distinguish "the reducer never planned this transcript"
-	// (next=0: nothing can ever be delivered, so an armed destructive replay
-	// clears scrollback and writes nothing back — a blank screen) from "a plan
-	// exists but is not deliverable yet" (next>0: the gate is the
-	// projection/freeze barrier, not planning). epoch is the terminal epoch the
-	// ledger was last reconciled into.
+	// (next=0: nothing can ever be delivered) from "a plan exists but is not
+	// deliverable yet" (next>0: the gate is the projection/freeze barrier, not
+	// planning). epoch is the terminal epoch the ledger was last reconciled
+	// into (append-only delivery: no production writer advances it).
 	// ledger-entries is the whole token inventory, which only grows: it is what
 	// makes a "pending=0" line ambiguous between an idle queue and a ledger that
 	// is accumulating terminal entries forever, and it is the size driver of
@@ -511,14 +506,14 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 	// claimed-token/gen 给出被 claim 的 token 身份：其 generation 落后于当前
 	// layout generation 即 stranded claim 签名（releaseClaimMiss 修复的病态），
 	// 只有计数时这与「正在健康写入」无法区分。
-	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-failed=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d",
+	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-failed=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d",
 		summary.Queued, summary.Delivered, summary.Quarantined,
 		summary.QuarantinedUnresolved, summary.QuarantinedFailed, summary.QuarantinedSettled,
 		summary.LedgerEntries,
 		summary.LedgerCompacted, summary.LedgerTerminalSources,
 		summary.PlanCount, summary.LastPlanMs, summary.MaxPlanMs,
 		effects.PlanRequestInFlight, effects.PlanWindowsDelegated,
-		effects.Frozen, effects.ScrollbackReplayArmed,
+		effects.Frozen,
 		effects.NextToken, effects.TerminalEpoch,
 		summary.ClaimedToken, summary.ClaimedGeneration,
 		summary.ClaimSkipsStaleAction, summary.ClaimRejectsOutOfOrder,

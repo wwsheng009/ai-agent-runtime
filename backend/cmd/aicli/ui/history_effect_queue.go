@@ -21,13 +21,6 @@ type HistoryEffectQueueState struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
-	// ScrollbackReplayArmed authorizes exactly one physical scrollback
-	// replacement as part of a session load (/resume, /load, startup restore).
-	// Normal interaction (resize, theme, streaming, writer recovery) must
-	// converge without clearing native scrollback, so the executor only selects
-	// the destructive reconciliation plan while this authorization is set; the
-	// reducer clears it after the replay or when the load reconciled cleanly.
-	ScrollbackReplayArmed bool
 	// PlanIncomplete records that the most recent transcript plan was cut off by
 	// historyCommitPlanningBudget: the ledger holds a valid *oldest prefix* of
 	// the eligible history, and the cells the layout walk never reached were
@@ -58,8 +51,8 @@ type HistoryEffectQueueState struct {
 	// "布局 walk 走到哪一语义行、此前已产出多少物理行、当时的输入指纹"。下一次
 	// pass 在指纹仍匹配时从游标继续，而不是从 0 重走已规划前缀（那正是锁内无界
 	// 重复布局的根因）。指纹与 transcriptPlanMemoHit 的输入一一对应；显式 memo
-	// 失效（armed replay / no-op install）同时清游标 —— ledger 可能已被整体替换，
-	// 前缀永远不会再被规划（销毁式重放后空屏的成因）。
+	// 失效（装载替换 / no-op install）同时清游标 —— ledger 可能已被整体替换，
+	// 前缀永远不会再被规划（漏规划前缀导致缺行的成因）。
 	planResumeValid      bool
 	planResumeRow        int
 	planResumeScreenRows int
@@ -72,7 +65,7 @@ type HistoryEffectQueueState struct {
 	//     即视为被更新的请求取代，直接丢弃且不清 in-flight（新请求仍有效）。
 	//   - planRequestInFlight 期间 planContinuationPending 为 false：screening 已
 	//     委托，executor 不得再 kick，否则是无 sleep 的热旋转。
-	//   - planInputsEpoch 由 invalidateTranscriptPlanMemo 自增：armed replay /
+	//   - planInputsEpoch 由 invalidateTranscriptPlanMemo 自增：装载替换 /
 	//     no-op 安装这类"显式失效"不进任何指纹，没有它，失效前产生的结果会通过
 	//     指纹比对并复活刚被清掉的游标（P1.2 审查漏项 A）。
 	planRequestSeq      uint64
@@ -424,7 +417,6 @@ type HistoryEffectDiagnostics struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
-	ScrollbackReplayArmed  bool
 	PlanIncomplete         bool
 	PlanStalled            bool
 	// P1.2 Stage B2 委派读数：worker 是否持有未结算窗口、累计受理的窗口请求数。
@@ -445,7 +437,6 @@ func (s HistoryEffectQueueState) Diagnostics() HistoryEffectDiagnostics {
 		Frozen:                 s.Frozen,
 		ProjectionUnknown:      s.ProjectionUnknown,
 		ReconciliationRequired: s.ReconciliationRequired,
-		ScrollbackReplayArmed:  s.ScrollbackReplayArmed,
 		PlanIncomplete:         s.PlanIncomplete,
 		PlanStalled:            s.PlanStalled,
 		PlanRequestInFlight:    s.planRequestInFlight,

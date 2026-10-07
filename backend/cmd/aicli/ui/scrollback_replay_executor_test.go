@@ -75,9 +75,6 @@ func TestTerminalSessionExecutorLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	}
 	controller.WaitIdle()
 	loaded := controller.State()
-	if loaded.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("load armed a destructive replay")
-	}
 	if loaded.HistoryEffects.TerminalEpoch != 0 {
 		t.Fatalf("load started a terminal epoch without a physical act: %d", loaded.HistoryEffects.TerminalEpoch)
 	}
@@ -95,9 +92,6 @@ func TestTerminalSessionExecutorLoadKeepsScrollbackAppendOnly(t *testing.T) {
 	state := controller.State()
 	if _, ok := state.HistoryEffects.Entry(inflightToken); !ok {
 		t.Fatalf("in-flight delivery record disappeared after the load: %#v", state.HistoryEffects)
-	}
-	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("load left a destructive authorization armed")
 	}
 	if state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
 		t.Fatalf("load left an obligation: %#v", state.HistoryEffects)

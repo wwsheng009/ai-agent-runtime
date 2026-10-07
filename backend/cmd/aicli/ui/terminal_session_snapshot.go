@@ -14,7 +14,6 @@ const (
 type terminalSessionScheduleSnapshot struct {
 	projectionUnknown      bool
 	reconciliationRequired bool
-	scrollbackReplayArmed  bool
 	recoveryActionable     bool
 	// planIncomplete reports a budget-truncated transcript plan that still owes
 	// cells and has not been proven unable to advance at the current plan inputs
@@ -32,7 +31,6 @@ type terminalSessionControllerSnapshot struct {
 	appState               AppState
 	projectionUnknown      bool
 	reconciliationRequired bool
-	scrollbackReplayArmed  bool
 	claimed                *HistoryCommit
 	bootstrap              []HistoryCommit
 }
@@ -50,7 +48,6 @@ func (c *UIController) terminalSessionSchedule() terminalSessionScheduleSnapshot
 	snapshot := terminalSessionScheduleSnapshot{
 		projectionUnknown:      effects.ProjectionUnknown,
 		reconciliationRequired: effects.ReconciliationRequired,
-		scrollbackReplayArmed:  effects.ScrollbackReplayArmed,
 		recoveryActionable:     terminalHistoryRecoveryActionable(c.state),
 		planIncomplete:         effects.planContinuationPending(),
 		stateRevision:          c.revision,
@@ -88,7 +85,6 @@ func (c *UIController) terminalSessionSnapshot(claimedToken uint64) terminalSess
 		appState:               terminalViewportAppState(c.state.AppState),
 		projectionUnknown:      c.state.HistoryEffects.ProjectionUnknown,
 		reconciliationRequired: c.state.HistoryEffects.ReconciliationRequired,
-		scrollbackReplayArmed:  c.state.HistoryEffects.ScrollbackReplayArmed,
 	}
 	if claimedToken != 0 {
 		snapshot.claimed, snapshot.bootstrap = terminalSessionClaimedBatchLocked(c.state, claimedToken)
@@ -112,7 +108,6 @@ func terminalViewportAppState(state AppState) AppState {
 			Frozen:                 effects.Frozen,
 			ProjectionUnknown:      effects.ProjectionUnknown,
 			ReconciliationRequired: effects.ReconciliationRequired,
-			ScrollbackReplayArmed:  effects.ScrollbackReplayArmed,
 		},
 	}
 }
@@ -235,7 +230,7 @@ func terminalHistoryRecoveryActionable(state UIControllerState) bool {
 // non-converging scrollback reset: a flush that succeeded at the terminal
 // layer but left the recovery obligation in place must be treated like a
 // failure for backoff purposes, otherwise the worker re-enters the full
-// reset+replay every cycle with no yield (the reported continuous replay).
+// recovery repaint every cycle with no yield (the reported continuous replay).
 func (c *UIController) terminalHistoryRecoveryObligationPending() bool {
 	if c == nil {
 		return false

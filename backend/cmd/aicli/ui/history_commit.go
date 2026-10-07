@@ -452,8 +452,8 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 // while its source identity stays terminal so the same range is never minted
 // twice. The trade-off is deliberate and visible: an unproven range is not
 // re-emitted, and a partially written range may leave visible rows incomplete.
-// Only an explicit resume/load replay authorization may rebuild scrollback
-// instead.
+// Append-only delivery never rebuilds scrollback; the settle quarantines the
+// unproven range in place instead.
 func (l *HistoryCommitLedger) SettleUnresolvedWithoutReplay() bool {
 	if l == nil || l.unresolvedCount == 0 {
 		return false

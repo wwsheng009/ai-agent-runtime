@@ -350,7 +350,7 @@ func TestResumeFailingWriterReconciliationStopsWithinBoundE2E(t *testing.T) {
 
 	// Expiring the window must still allow exactly one bounded retry: the guard
 	// is a rate limit for a writer that may heal, not a permanent dead end.
-	frozenNanos.Add(int64(terminalScrollbackResetBackoff + 50*time.Millisecond))
+	frozenNanos.Add(int64(terminalRecoveryBackoff + 50*time.Millisecond))
 	h.executor.Request()
 	h.executor.WaitIdle()
 	h.controller.WaitIdle()

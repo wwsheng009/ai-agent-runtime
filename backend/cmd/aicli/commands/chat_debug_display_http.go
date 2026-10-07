@@ -370,15 +370,9 @@ func chatDebugCacheHitRate(hits, misses uint64) float64 {
 }
 
 type chatDebugDisplayHistoryGateInfo struct {
-	Frozen                 bool `json:"frozen"`
-	ProjectionUnknown      bool `json:"projection_unknown"`
-	ReconciliationRequired bool `json:"reconciliation_required"`
-	// ScrollbackReplayArmed is the reducer-installed one-shot authorization for
-	// the session-load replay, and the only state that lets the executor replace
-	// native scrollback. Armed=true while RecoveryActionable=false means the
-	// authorized replay has not been composed yet; armed=false with an
-	// outstanding obligation means the recovery will settle in place instead.
-	ScrollbackReplayArmed  bool   `json:"scrollback_replay_armed"`
+	Frozen                 bool   `json:"frozen"`
+	ProjectionUnknown      bool   `json:"projection_unknown"`
+	ReconciliationRequired bool   `json:"reconciliation_required"`
 	RecoveryActionable     bool   `json:"recovery_actionable"`
 	QueuedCount            int    `json:"queued_count"`
 	OldestQueuedToken      uint64 `json:"oldest_queued_token,omitempty"`
@@ -807,7 +801,6 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			Frozen:                 effects.Frozen,
 			ProjectionUnknown:      effects.ProjectionUnknown,
 			ReconciliationRequired: effects.ReconciliationRequired,
-			ScrollbackReplayArmed:  effects.ScrollbackReplayArmed,
 			RecoveryActionable: !state.Lease.Active && !effects.Frozen &&
 				(effects.ProjectionUnknown || effects.ReconciliationRequired),
 			PlanIncomplete: effects.PlanIncomplete,

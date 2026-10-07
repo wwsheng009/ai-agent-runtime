@@ -74,7 +74,7 @@ func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Me
 // generation unreplanned (memo over a stale plan), so the terminal owner would
 // never append the loaded content. Regular Scene updates must keep using
 // seedPersistedHistory so resize/stream/theme traffic can never trigger a load
-// re-proof or a scrollback act.
+// re-proof.
 func (b *chatRuntimeEventBridge) seedPersistedHistoryForSessionLoad(messages []runtimetypes.Message, header string) {
 	b.seedPersistedHistoryWithLoadGrant(messages, header, true)
 }

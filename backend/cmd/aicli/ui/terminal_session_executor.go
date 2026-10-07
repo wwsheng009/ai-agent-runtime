@@ -44,13 +44,13 @@ type ExecutorRecoveryDiag struct {
 	BackoffEngaged uint64                      `json:"backoffEngaged"`
 	ArmedBackoff   uint64                      `json:"armedBackoff"`
 	// FlushesWhileBackoff counts plain viewport flushes performed while the
-	// scrollback-reset backoff was engaged. A growing count proves the bottom
+	// recovery backoff was engaged. A growing count proves the bottom
 	// surface (prompt input) is still being rendered under backoff — the guard
-	// suppresses scrollback resets only, not live rendering.
+	// suppresses source-backed recovery repaints only, not live rendering.
 	FlushesWhileBackoff uint64 `json:"flushesWhileBackoff"`
 	// HandoffsWhileBackoff counts pending history commits delivered while the
-	// scrollback-reset backoff was engaged (success mode). The backoff must
-	// suppress the expensive reset+replay only — new message content still has
+	// recovery backoff was engaged (success mode). The backoff must suppress
+	// the expensive recovery repaint only — new message content still has
 	// to cross into native scrollback, otherwise post-resume messages never
 	// render.
 	HandoffsWhileBackoff uint64 `json:"handoffsWhileBackoff"`
@@ -129,24 +129,24 @@ const (
 // would risk an untracked terminal write.
 var ErrTerminalTransactionMissingResult = errors.New("terminal transaction omitted claimed history result")
 
-// terminalScrollbackResetBackoff bounds how frequently the executor may re-enter
-// a full scrollback reset + replay after a failed or dropped reconciliation.
-// A persistently failing physical writer would otherwise spin on
-// reset -> replay-all -> fail -> reset forever; production pprof observed this
-// as unbounded history replay plus GC pressure. The backoff yields the worker
-// so the next explicit Request (from a real state change) retries instead of
-// the executor burning CPU in a tight recovery loop.
+// terminalRecoveryBackoff bounds how frequently the executor may re-enter a
+// full source-backed recovery (settle repaint) after a failed or dropped
+// reconciliation. A persistently failing physical writer would otherwise spin
+// on recover -> fail -> recover forever; production pprof observed this as
+// unbounded history replay plus GC pressure. The backoff yields the worker so
+// the next explicit Request (from a real state change) retries instead of the
+// executor burning CPU in a tight recovery loop.
 //
-// terminalScrollbackResetBackoffYield is the per-engaged-check sleep. It must
+// terminalRecoveryBackoffYield is the per-engaged-check sleep. It must
 // be well below the window above so a failed-mode backoff does not consume the
 // window while the worker is yielding (a Request that lands inside the window
 // must still be rate-limited).
 const (
-	terminalScrollbackResetBackoff      = 100 * time.Millisecond
-	terminalScrollbackResetBackoffYield = 10 * time.Millisecond
-	// terminalScrollbackResetRetryWindow bounds how long a SUCCESS-mode
+	terminalRecoveryBackoff      = 100 * time.Millisecond
+	terminalRecoveryBackoffYield = 10 * time.Millisecond
+	// terminalRecoveryRetryWindow bounds how long a SUCCESS-mode
 	// (flush-ok-but-non-converging) backoff stays engaged before the executor
-	// is allowed one more same-generation scrollback reset. It must be
+	// is allowed one more same-generation recovery attempt. It must be
 	// comfortably above one recovery cycle (WaitIdle drains the transcript
 	// replay, ~500ms in production): a window below the cycle always expires
 	// before the next schedule read and the guard never engages (the original
@@ -155,13 +155,13 @@ const (
 	// a reconciliation that was dropped because ProjectionUnknown was still
 	// set when its first barrier arrived gets a second chance once the
 	// projection has recovered.
-	terminalScrollbackResetRetryWindow = 2 * time.Second
-	// terminalScrollbackResetMaxRetries caps consecutive same-generation
-	// success-mode resets. Once the budget is exhausted the guard parks until
+	terminalRecoveryRetryWindow = 2 * time.Second
+	// terminalRecoveryMaxRetries caps consecutive same-generation
+	// success-mode recovery attempts. Once the budget is exhausted the guard parks until
 	// a real geometry/theme change (new LayoutGeneration); a genuinely
-	// non-converging obligation must not re-run the expensive reset+replay at
-	// the retry cadence forever.
-	terminalScrollbackResetMaxRetries = 3
+	// non-converging obligation must not re-run the expensive recovery repaint
+	// at the retry cadence forever.
+	terminalRecoveryMaxRetries = 3
 )
 
 // TerminalSessionExecutor is the bounded physical worker used by
@@ -221,15 +221,15 @@ type TerminalSessionExecutor struct {
 	// therefore measures release attempts, not confirmed rebases.
 	diagClaimMissReleases uint64
 
-	// lastResetAt / lastResetEpoch are the scrollback recovery progress guard.
+	// lastRecoveryBackoffAt / lastRecoveryEpoch are the recovery progress guard.
 	// A reconciliation that did not converge must not be re-armed on the next
-	// worker cycle; these fields rate-limit full scrollback resets so a failing
-	// writer cannot turn the executor into an unbounded reset+replay loop.
-	lastResetAt    time.Time
-	lastResetEpoch uint64
-	// lastResetGeneration is the controller LayoutGeneration recorded AFTER the
+	// worker cycle; these fields rate-limit full recovery attempts so a failing
+	// writer cannot turn the executor into an unbounded recovery loop.
+	lastRecoveryBackoffAt time.Time
+	lastRecoveryEpoch     uint64
+	// lastRecoveryGeneration is the controller LayoutGeneration recorded AFTER the
 	// executor published its own transaction outcome for the last scrollback
-	// reset attempt. The backoff only engages when the layout generation has
+	// recovery attempt. The backoff only engages when the layout generation has
 	// NOT advanced since that settled generation (i.e., a non-progressing
 	// loop). LayoutGeneration — not Revision — is the progress signal: a
 	// transcript replay / streaming resume posts hundreds of actions per cycle
@@ -238,28 +238,28 @@ type TerminalSessionExecutor struct {
 	// executor busy-loops at ~2 cores. Only a real geometry/theme change
 	// (Resize, SetThemeContextAction) advances LayoutGeneration and must run
 	// the next recovery immediately.
-	lastResetGeneration uint64
-	// lastResetFailed distinguishes the two recovery-failure modes:
+	lastRecoveryGeneration uint64
+	// lastRecoveryFailed distinguishes the two recovery-failure modes:
 	//   - true:  the physical writer failed (Frame.Err). The writer may heal,
 	//     so the guard is a bounded rate-limit window and a later retry is
 	//     allowed after the window expires.
 	//   - false: the flush succeeded but did NOT converge (ProjectionUnknown /
-	//     ReconciliationRequired still pending, or a scrollback reset whose
-	//     generation did not advance). Transcript replay re-arms the
+	//     ReconciliationRequired still pending, and the layout generation did
+	//     not advance). Transcript replay re-arms the
 	//     obligation every cycle (~238 actions/cycle, Revision +240). The
-	//     guard engages for a bounded retry window (terminalScrollbackResetRetryWindow)
+	//     guard engages for a bounded retry window (terminalRecoveryRetryWindow)
 	//     to rate-limit the loop while still allowing a bounded number of
 	//     same-generation retries, so a reconciliation whose first barrier was
 	//     dropped while ProjectionUnknown was set gets a second chance after
-	//     the projection recovers. After terminalScrollbackResetMaxRetries
+	//     the projection recovers. After terminalRecoveryMaxRetries
 	//     consecutive non-converging attempts the guard parks until a real
 	//     geometry/theme change.
-	lastResetFailed bool
-	// lastResetSuccessRetries counts consecutive non-converging same-generation
-	// success-mode resets, consumed from the retry budget. Reset to 0 on
+	lastRecoveryFailed bool
+	// lastRecoveryRetries counts consecutive non-converging same-generation
+	// success-mode recovery attempts, consumed from the retry budget. Reset to 0 on
 	// generation change (new LayoutGeneration) or on a writer-failure record.
-	lastResetSuccessRetries int
-	// now is the wall clock behind the reset-backoff windows above. It exists as
+	lastRecoveryRetries int
+	// now is the wall clock behind the recovery-backoff windows above. It exists as
 	// a seam because those windows are wall-clock gated: an end-to-end driver
 	// that loops external wakes observes a host-speed-dependent number of
 	// retries (each engaged wake yields for 10ms, so a loaded host expires the
@@ -280,7 +280,7 @@ func NewTerminalSessionExecutor(controller *UIController, session *TerminalSessi
 }
 
 // nowTime returns the executor wall clock. Callers MUST hold e.mu: every
-// production read happens inside scrollbackResetBackoff / recordScrollbackReset,
+// production read happens inside recoveryBackoffActive / recordRecoveryBackoff,
 // and setNowFunc writes the field under the same mutex.
 func (e *TerminalSessionExecutor) nowTime() time.Time {
 	if e.now != nil {
@@ -514,81 +514,81 @@ func (e *TerminalSessionExecutor) recordRecoveryDiag(entry ExecutorRecoveryDiagE
 	e.diagRing = append(e.diagRing, entry)
 }
 
-// scrollbackResetBackoff reports whether the executor must yield before
-// attempting another full scrollback reset. It engages when the controller
+// recoveryBackoffActive reports whether the executor must yield before
+// attempting another full source-backed recovery. It engages when the controller
 // layout generation has not advanced since the executor settled its own
-// outcome posts for the last reset attempt — the signature of a
-// non-progressing reset+replay loop. A real external geometry/theme change
+// outcome posts for the last recovery attempt — the signature of a
+// non-progressing recovery loop. A real external geometry/theme change
 // (new layout generation) always allows recovery.
 //
-// The engagement semantics depend on how the last reset failed:
-//   - Writer failure (lastResetFailed=true): bounded rate-limit window. The
+// The engagement semantics depend on how the last recovery failed:
+//   - Writer failure (lastRecoveryFailed=true): bounded rate-limit window. The
 //     physical writer may heal, so after the window expires the same
 //     generation may retry once.
-//   - Success without convergence (lastResetFailed=false): bounded retry
-//     window (terminalScrollbackResetRetryWindow). A recovery cycle is
+//   - Success without convergence (lastRecoveryFailed=false): bounded retry
+//     window (terminalRecoveryRetryWindow). A recovery cycle is
 //     dominated by WaitIdle draining the transcript replay (~238 actions/cycle
 //     in production, ~500ms), so the window must be comfortably ABOVE the
 //     cycle: a window shorter than the cycle always expires before the next
 //     schedule read and the guard never engages (observed with the original
 //     100ms window: 439 arms, 0 engages, executor pinned at ~2 cores). With a
-//     window above the cycle the guard rate-limits the reset+replay loop AND
-//     still expires, allowing a bounded retry (terminalScrollbackResetMaxRetries
+//     window above the cycle the guard rate-limits the recovery loop AND
+//     still expires, allowing a bounded retry (terminalRecoveryMaxRetries
 //     consecutive attempts) so a reconciliation whose first barrier was
 //     dropped while ProjectionUnknown was set can converge after the
 //     projection recovers. After the budget is exhausted the guard parks
 //     until a real geometry/theme change advances LayoutGeneration.
-func (e *TerminalSessionExecutor) scrollbackResetBackoff(stateGeneration uint64) bool {
+func (e *TerminalSessionExecutor) recoveryBackoffActive(stateGeneration uint64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.lastResetAt.IsZero() || e.lastResetGeneration != stateGeneration {
+	if e.lastRecoveryBackoffAt.IsZero() || e.lastRecoveryGeneration != stateGeneration {
 		return false
 	}
-	if e.lastResetFailed {
-		return e.nowTime().Sub(e.lastResetAt) < terminalScrollbackResetBackoff
+	if e.lastRecoveryFailed {
+		return e.nowTime().Sub(e.lastRecoveryBackoffAt) < terminalRecoveryBackoff
 	}
 	// Success mode: engage for the retry window, park permanently once the
 	// same-generation retry budget is exhausted.
-	if e.lastResetSuccessRetries >= terminalScrollbackResetMaxRetries {
+	if e.lastRecoveryRetries >= terminalRecoveryMaxRetries {
 		return true
 	}
-	return e.nowTime().Sub(e.lastResetAt) < terminalScrollbackResetRetryWindow
+	return e.nowTime().Sub(e.lastRecoveryBackoffAt) < terminalRecoveryRetryWindow
 }
 
-// scrollbackResetSuccessMode reports whether the engaged backoff came from a
-// successful-but-non-converging recovery (lastResetFailed=false). In that mode
+// recoveryBackoffSuccessMode reports whether the engaged backoff came from a
+// successful-but-non-converging recovery (lastRecoveryFailed=false). In that mode
 // the physical writer is healthy and the executor may still perform plain
 // viewport flushes to keep the bottom surface (prompt input) live while
-// suppressing the expensive scrollback reset+replay. In failed mode the writer
+// suppressing the expensive recovery repaint. In failed mode the writer
 // is broken and must not be touched until the bounded window expires.
-func (e *TerminalSessionExecutor) scrollbackResetSuccessMode() bool {
+func (e *TerminalSessionExecutor) recoveryBackoffSuccessMode() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return !e.lastResetFailed
+	return !e.lastRecoveryFailed
 }
 
-// recordScrollbackReset persists the progress-guard state after a scrollback
-// reset attempt so the next worker cycle can rate-limit a non-converging
+// recordRecoveryBackoff persists the progress-guard state after a recovery
+// attempt so the next worker cycle can rate-limit a non-converging
 // recovery without blocking legitimate retries under a new generation.
 // stateGeneration MUST be read after the executor has published its outcome
 // and the actor has settled (see runOne): the settled generation is what the
 // next cycle observes when no external geometry/theme change intervened.
-func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration uint64, failed bool) {
+func (e *TerminalSessionExecutor) recordRecoveryBackoff(epoch, stateGeneration uint64, failed bool) {
 	e.mu.Lock()
-	e.lastResetAt = e.nowTime()
-	e.lastResetEpoch = epoch
-	if e.lastResetGeneration != stateGeneration || failed {
+	e.lastRecoveryBackoffAt = e.nowTime()
+	e.lastRecoveryEpoch = epoch
+	if e.lastRecoveryGeneration != stateGeneration || failed {
 		// New generation (first attempt or a real geometry/theme change) or a
 		// writer-failure record: start a fresh retry budget. A failure does not
 		// consume the success-mode budget; the writer heals independently.
-		e.lastResetSuccessRetries = 0
+		e.lastRecoveryRetries = 0
 	} else {
 		// Another consecutive same-generation success-mode reset: consume one
 		// retry-budget slot. The backoff then parks once the budget is spent.
-		e.lastResetSuccessRetries++
+		e.lastRecoveryRetries++
 	}
-	e.lastResetGeneration = stateGeneration
-	e.lastResetFailed = failed
+	e.lastRecoveryGeneration = stateGeneration
+	e.lastRecoveryFailed = failed
 	e.mu.Unlock()
 }
 
@@ -624,11 +624,11 @@ func (e *TerminalSessionExecutor) recordScrollbackReset(epoch, stateGeneration u
 // geometry/theme change advances LayoutGeneration.
 func (e *TerminalSessionExecutor) armRecoveryBackoff(result TerminalTransactionResult, startGeneration uint64) bool {
 	if result.Frame.Err != nil {
-		e.recordScrollbackReset(result.TerminalEpoch, e.controller.LayoutGeneration(), true)
+		e.recordRecoveryBackoff(result.TerminalEpoch, e.controller.LayoutGeneration(), true)
 		return true
 	}
 	if e.controller.terminalHistoryRecoveryObligationPending() && e.controller.LayoutGeneration() == startGeneration {
-		e.recordScrollbackReset(result.TerminalEpoch, startGeneration, false)
+		e.recordRecoveryBackoff(result.TerminalEpoch, startGeneration, false)
 		return true
 	}
 	return false
@@ -888,37 +888,37 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	e.waitControllerAcceptedApplied()
 	schedule := e.controller.terminalSessionSchedule()
 	if schedule.recoveryActionable {
-		// Scrollback-reset backoff: a failing writer must not turn the
-		// executor into an unbounded reset+replay loop. If the last reset
+		// Recovery backoff: a failing writer must not turn the
+		// executor into an unbounded recovery loop. If the last recovery
 		// happened within the backoff window AND the layout generation has not
 		// advanced since then, yield the worker. A real geometry/theme change
-		// (new layout generation) always allows recovery — the reset is a
+		// (new layout generation) always allows recovery — the retry is a
 		// genuine retry, not a loop.
-		if e.scrollbackResetBackoff(schedule.stateGeneration) {
+		if e.recoveryBackoffActive(schedule.stateGeneration) {
 			// Backoff engaged. Two failure modes:
-			//   - failed mode (lastResetFailed=true): the physical writer is
+			//   - failed mode (lastRecoveryFailed=true): the physical writer is
 			//     broken; do not touch it until the bounded window expires.
-			//   - success mode (lastResetFailed=false): the writer is healthy
+			//   - success mode (lastRecoveryFailed=false): the writer is healthy
 			//     but the recovery obligation will not converge at this layout
-			//     generation. A full scrollback reset would re-enter the
-			//     reset+replay loop (the observed ~2-core busy loop), so that
-			//     stays suppressed. Suppressing the reset must NOT suppress the
+			//     generation. A full recovery repaint would re-enter the
+			//     non-converging loop (the observed ~2-core busy loop), so that
+			//     stays suppressed. Suppressing the repaint must NOT suppress the
 			//     handoff of new content: the active band commits new messages
 			//     as pending history tokens, and if the executor never claims
 			//     them the message never reaches the unified renderer's
 			//     scrollback (post-resume messages render nothing). Claim and
 			//     deliver pending tokens exactly like the normal path, just
-			//     without the reset+replay. When no token is pending, perform a
+			//     without the recovery repaint. When no token is pending, perform a
 			//     plain viewport transaction instead, which keeps prompt
 			//     rendering live while still suppressing the expensive
-			//     reset+replay. publishResult may also post
+			//     recovery repaint. publishResult may also post
 			//     HistoryProjectionRecovered when the viewport repaint proves
 			//     the projection known, which heals the obligation and exits
 			//     the guard naturally.
-			if e.scrollbackResetSuccessMode() {
+			if e.recoveryBackoffSuccessMode() {
 				if schedule.pendingToken != 0 {
-					// New content exists: deliver it now. The scrollback reset
-					// stays suppressed (it would re-enter the reset+replay
+					// New content exists: deliver it now. The recovery repaint
+					// stays suppressed (it would re-enter the non-converging
 					// loop), but a pending commit is genuine forward progress —
 					// the active band's stable prefix crossing into native
 					// scrollback. Without this, new messages after `resume`
@@ -1003,9 +1003,9 @@ func (e *TerminalSessionExecutor) runOne() bool {
 			// external replay that keeps re-arming the recovery obligation would
 			// otherwise turn this into a tight Request() -> check -> false loop.
 			// The sleep bounds that churn; only a real generation change breaks
-			// the guard. Must stay well below terminalScrollbackResetBackoff
+			// the guard. Must stay well below terminalRecoveryBackoff
 			// so a failed-mode window is not consumed during the yield itself.
-			time.Sleep(terminalScrollbackResetBackoffYield)
+			time.Sleep(terminalRecoveryBackoffYield)
 			return false
 		}
 

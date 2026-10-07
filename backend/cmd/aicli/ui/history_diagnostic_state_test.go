@@ -77,7 +77,6 @@ func TestDiagnosticStateDropsHistoryPayload(t *testing.T) {
 		diag.HistoryEffects.Frozen != full.HistoryEffects.Frozen ||
 		diag.HistoryEffects.ProjectionUnknown != full.HistoryEffects.ProjectionUnknown ||
 		diag.HistoryEffects.ReconciliationRequired != full.HistoryEffects.ReconciliationRequired ||
-		diag.HistoryEffects.ScrollbackReplayArmed != full.HistoryEffects.ScrollbackReplayArmed ||
 		diag.HistoryEffects.PlanIncomplete != full.HistoryEffects.PlanIncomplete ||
 		diag.HistoryEffects.PlanStalled != full.HistoryEffects.PlanStalled {
 		t.Fatalf("diagnostic queue scalars diverged: %#v vs %#v", diag.HistoryEffects, full.HistoryEffects)
@@ -90,7 +89,6 @@ func TestDiagnosticStateDropsHistoryPayload(t *testing.T) {
 	if projected.Frozen != full.HistoryEffects.Frozen ||
 		projected.ProjectionUnknown != full.HistoryEffects.ProjectionUnknown ||
 		projected.ReconciliationRequired != full.HistoryEffects.ReconciliationRequired ||
-		projected.ScrollbackReplayArmed != full.HistoryEffects.ScrollbackReplayArmed ||
 		projected.PlanIncomplete != full.HistoryEffects.PlanIncomplete ||
 		projected.PlanStalled != full.HistoryEffects.PlanStalled ||
 		projected.NextToken != full.HistoryEffects.NextToken ||

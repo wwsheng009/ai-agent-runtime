@@ -820,7 +820,7 @@ func TestTerminalSessionExecutorSuccessBackoffReconcilesRequiredProjection(t *te
 	controller.state.HistoryEffects.ReconciliationRequired = true
 	generation := controller.state.Geometry.Generation
 	controller.mu.Unlock()
-	executor.recordScrollbackReset(0, generation, false) // success-mode arm
+	executor.recordRecoveryBackoff(0, generation, false) // success-mode arm
 
 	writer.bytes.Reset() // only observe the backoff-cycle transaction
 
@@ -884,7 +884,7 @@ func TestTerminalSessionExecutorPartialHistoryWriteReconcilesWithoutResize(t *te
 	// observe, so the retry must wait out the rate-limit window — the same
 	// throttle a production transient writer failure gets when no state
 	// change intervenes.
-	time.Sleep(terminalScrollbackResetBackoff + 50*time.Millisecond)
+	time.Sleep(terminalRecoveryBackoff + 50*time.Millisecond)
 	writer.short = false
 	executor.Request()
 	executor.WaitIdle()
@@ -1056,26 +1056,26 @@ func TestTerminalSessionExecutorWorkerTeardownReusesFreshDoneChannel(t *testing.
 	}
 }
 
-// TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased locks in
+// TestTerminalSessionExecutorRecoveryBackoffIsGenerationBased locks in
 // the dual-factor progress guard: a failing writer is rate-limited by a bounded
 // window, a successful-but-non-converging reset is rate-limited by a bounded
 // retry window (above the ~500ms cycle to guarantee engagement) and a retry
 // budget, and a genuine layout change (new generation) always allows the next
 // recovery attempt. The predicate is exercised directly so the test is
 // deterministic and has no wall-clock races.
-func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testing.T) {
+func TestTerminalSessionExecutorRecoveryBackoffIsGenerationBased(t *testing.T) {
 	controller := NewUIController(UIControllerConfig{}, nil, nil)
 	executor := NewTerminalSessionExecutor(controller, NewTerminalSession(&bytes.Buffer{}))
 
 	// No prior reset: recovery is always allowed.
-	if executor.scrollbackResetBackoff(7) {
+	if executor.recoveryBackoffActive(7) {
 		t.Fatal("backoff engaged before any scrollback reset")
 	}
 
 	// A confirmed reset at generation 7 must block a same-generation retry
 	// (Non-failed mode: success without convergence — persistent backoff.)
-	executor.recordScrollbackReset(3, 7, false)
-	if !executor.scrollbackResetBackoff(7) {
+	executor.recordRecoveryBackoff(3, 7, false)
+	if !executor.recoveryBackoffActive(7) {
 		t.Fatal("same-generation recovery was not rate-limited after a reset")
 	}
 
@@ -1083,13 +1083,13 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testi
 	// even within the window — the reset is a genuine retry, not a
 	// non-progressing loop. Revision advance alone must NOT break it: a
 	// transcript replay advances Revision ~240/cycle without converging.
-	if executor.scrollbackResetBackoff(8) {
+	if executor.recoveryBackoffActive(8) {
 		t.Fatal("new-generation recovery was blocked by stale backoff")
 	}
 
 	// A second reset at the new generation re-arms the guard for that generation.
-	executor.recordScrollbackReset(4, 8, false)
-	if !executor.scrollbackResetBackoff(8) {
+	executor.recordRecoveryBackoff(4, 8, false)
+	if !executor.recoveryBackoffActive(8) {
 		t.Fatal("same-generation recovery was not rate-limited after the second reset")
 	}
 
@@ -1101,59 +1101,59 @@ func TestTerminalSessionExecutorScrollbackResetBackoffIsGenerationBased(t *testi
 	// reconciliation whose first barrier was dropped while ProjectionUnknown
 	// was set can converge after the projection recovers.
 	executor.mu.Lock()
-	executor.lastResetAt = time.Now().Add(-time.Hour)
+	executor.lastRecoveryBackoffAt = time.Now().Add(-time.Hour)
 	executor.mu.Unlock()
-	if executor.scrollbackResetBackoff(8) {
+	if executor.recoveryBackoffActive(8) {
 		t.Fatal("same-generation retry was blocked after the retry window expired (budget not exhausted)")
 	}
 
 	// After a second success-mode record at the same generation the retry
 	// budget is consumed (retries=0 → 1). The window elapses, and the
 	// backoff releases again (budget still has room).
-	executor.recordScrollbackReset(6, 8, false)
+	executor.recordRecoveryBackoff(6, 8, false)
 	executor.mu.Lock()
-	executor.lastResetAt = time.Now().Add(-time.Hour)
+	executor.lastRecoveryBackoffAt = time.Now().Add(-time.Hour)
 	executor.mu.Unlock()
-	if executor.scrollbackResetBackoff(8) {
+	if executor.recoveryBackoffActive(8) {
 		t.Fatal("same-generation retry blocked after second window expiry")
 	}
 
-	// After the budget is exhausted (>= terminalScrollbackResetMaxRetries),
+	// After the budget is exhausted (>= terminalRecoveryMaxRetries),
 	// the guard parks permanently at the same generation until a real
 	// geometry/theme change.
-	executor.recordScrollbackReset(7, 8, false) // retries = 2
-	executor.recordScrollbackReset(8, 8, false) // retries = 3 ≥ maxRetries
-	if !executor.scrollbackResetBackoff(8) {
+	executor.recordRecoveryBackoff(7, 8, false) // retries = 2
+	executor.recordRecoveryBackoff(8, 8, false) // retries = 3 ≥ maxRetries
+	if !executor.recoveryBackoffActive(8) {
 		t.Fatal("same-generation retry was not parked after budget exhausted")
 	}
 	executor.mu.Lock()
-	executor.lastResetAt = time.Now().Add(-time.Hour)
+	executor.lastRecoveryBackoffAt = time.Now().Add(-time.Hour)
 	executor.mu.Unlock()
-	if !executor.scrollbackResetBackoff(8) {
+	if !executor.recoveryBackoffActive(8) {
 		t.Fatal("exhausted-budget same-generation retry was not still blocked after window expiry")
 	}
 
 	// A new generation always resets the budget and allows recovery.
-	if executor.scrollbackResetBackoff(9) {
+	if executor.recoveryBackoffActive(9) {
 		t.Fatal("new-generation recovery was blocked by stale backoff")
 	}
 
 	// Writer-failure mode: unchanged — bounded rate-limit window so a
 	// transient writer error can heal and retry.
-	executor.recordScrollbackReset(5, 9, true)
-	if !executor.scrollbackResetBackoff(9) {
+	executor.recordRecoveryBackoff(5, 9, true)
+	if !executor.recoveryBackoffActive(9) {
 		t.Fatal("failed-mode backoff did not rate-limit within window")
 	}
 	executor.mu.Lock()
-	executor.lastResetAt = time.Now().Add(-terminalScrollbackResetBackoff - 50*time.Millisecond)
+	executor.lastRecoveryBackoffAt = time.Now().Add(-terminalRecoveryBackoff - 50*time.Millisecond)
 	executor.mu.Unlock()
-	if executor.scrollbackResetBackoff(9) {
+	if executor.recoveryBackoffActive(9) {
 		t.Fatal("failed-mode expired window still blocked a same-generation retry")
 	}
 
 	// The epoch bookkeeping follows the reset that armed the guard.
 	executor.mu.Lock()
-	gotEpoch, gotGeneration, gotFailed, gotRetries := executor.lastResetEpoch, executor.lastResetGeneration, executor.lastResetFailed, executor.lastResetSuccessRetries
+	gotEpoch, gotGeneration, gotFailed, gotRetries := executor.lastRecoveryEpoch, executor.lastRecoveryGeneration, executor.lastRecoveryFailed, executor.lastRecoveryRetries
 	executor.mu.Unlock()
 	if gotEpoch != 5 || gotGeneration != 9 || !gotFailed || gotRetries != 0 {
 		t.Fatalf("last reset bookkeeping = epoch %d gen %d failed %t retries %d, want 5 / 9 / true / 0", gotEpoch, gotGeneration, gotFailed, gotRetries)
@@ -1195,22 +1195,22 @@ func TestTerminalSessionExecutorReconciliationRetryAfterDeadlock(t *testing.T) {
 	controller.state.HistoryEffects.ProjectionUnknown = false
 	controller.state.HistoryEffects.ReconciliationRequired = true
 	controller.mu.Unlock()
-	executor.recordScrollbackReset(1, startGen, false)
+	executor.recordRecoveryBackoff(1, startGen, false)
 
 	// Verify the backoff is engaged (within the retry window).
-	if !executor.scrollbackResetBackoff(startGen) {
+	if !executor.recoveryBackoffActive(startGen) {
 		t.Fatal("backoff not engaged after a non-converging reset at the same generation")
 	}
-	if !executor.scrollbackResetSuccessMode() {
+	if !executor.recoveryBackoffSuccessMode() {
 		t.Fatal("backoff not in success mode")
 	}
 
 	// Expire the retry window: the fix allows a bounded retry at the same
 	// generation after the window elapses.
 	executor.mu.Lock()
-	executor.lastResetAt = time.Now().Add(-terminalScrollbackResetRetryWindow - time.Millisecond)
+	executor.lastRecoveryBackoffAt = time.Now().Add(-terminalRecoveryRetryWindow - time.Millisecond)
 	executor.mu.Unlock()
-	if executor.scrollbackResetBackoff(startGen) {
+	if executor.recoveryBackoffActive(startGen) {
 		t.Fatal("backoff did not release after retry window expired (deadlock fix missing)")
 	}
 
@@ -1337,7 +1337,7 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 		t.Fatal("failed flush did not arm backoff")
 	}
 	executor.mu.Lock()
-	failGen := executor.lastResetGeneration
+	failGen := executor.lastRecoveryGeneration
 	executor.mu.Unlock()
 	if failGen != controller.LayoutGeneration() {
 		t.Fatalf("failed flush recorded generation %d, want controller generation %d", failGen, controller.LayoutGeneration())
@@ -1354,7 +1354,7 @@ func TestTerminalSessionExecutorArmRecoveryBackoffSuccessNonConverging(t *testin
 		t.Fatal("non-converging success without generation advance did not arm backoff")
 	}
 	executor.mu.Lock()
-	gotGen := executor.lastResetGeneration
+	gotGen := executor.lastRecoveryGeneration
 	executor.mu.Unlock()
 	if gotGen != startGen {
 		t.Fatalf("non-converging success recorded generation %d, want start %d", gotGen, startGen)
@@ -1434,13 +1434,13 @@ func TestTerminalSessionExecutorFlushesWhileSuccessBackoff(t *testing.T) {
 	startGen := controller.LayoutGeneration()
 
 	// Arm the success-mode backoff exactly as armRecoveryBackoff does for a
-	// successful-but-non-converging recovery: lastResetFailed=false at the
+	// successful-but-non-converging recovery: lastRecoveryFailed=false at the
 	// settled generation.
 	if !executor.armRecoveryBackoff(TerminalTransactionResult{}, startGen) {
 		t.Fatal("success-mode backoff was not armed")
 	}
 	executor.mu.Lock()
-	successMode := !executor.lastResetFailed
+	successMode := !executor.lastRecoveryFailed
 	executor.mu.Unlock()
 	if !successMode {
 		t.Fatal("test setup: backoff not in success mode")
@@ -1497,8 +1497,8 @@ func TestTerminalSessionExecutorHandsOffPendingHistoryWhileSuccessBackoff(t *tes
 	if !schedule.recoveryActionable || schedule.pendingToken == 0 {
 		t.Fatalf("test setup did not expose recovery plus pending history: %+v", schedule)
 	}
-	executor.recordScrollbackReset(1, schedule.stateGeneration, false)
-	if !executor.scrollbackResetBackoff(schedule.stateGeneration) {
+	executor.recordRecoveryBackoff(1, schedule.stateGeneration, false)
+	if !executor.recoveryBackoffActive(schedule.stateGeneration) {
 		t.Fatal("test setup did not engage success-mode backoff")
 	}
 

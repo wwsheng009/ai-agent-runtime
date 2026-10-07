@@ -623,15 +623,13 @@ func (RuntimeEvent) CoalesceKey() string { return "" }
 // is migrated. Callers must not synthesize it from ScreenModel/historyWindow.
 type ReplaceTranscriptAction struct {
 	Snapshot *scene.Snapshot
-	// ArmScrollbackReplay requests the one-shot authorization to replace native
-	// scrollback from semantic source as part of a session load (/resume,
-	// /load, startup restore) or an explicit canonical-history rewrite
-	// (/backtrack). It travels inside this action instead of as a separate
-	// action so the reducer installs the authorizing Scene and the
-	// authorization in one transition: an executor can never observe an armed
-	// grant against the pre-replacement Scene, which would spend the one shot on
-	// stale content and leave the loaded generation unreplayed. Resize, theme
-	// changes, stream deltas and writer recovery must never set it.
+	// ArmScrollbackReplay marks a session-load replacement (re-proof from
+	// source under the memo barrier). Native scrollback is append-only, so the
+	// marker no longer authorizes any physical replacement. It is set by
+	// session load (/resume, /load, startup restore) and explicit
+	// canonical-history rewrite (/backtrack) so the reducer installs the
+	// replacement Scene and the re-proof trigger in one transition. Resize,
+	// theme changes, stream deltas and writer recovery must never set it.
 	ArmScrollbackReplay bool
 }
 

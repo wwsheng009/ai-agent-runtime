@@ -1,9 +1,7 @@
 package commands
 
 import (
-	"encoding/json"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -13,8 +11,8 @@ import (
 )
 
 // scrollbackReplayGrantHarness wires a real coordinator/UI actor to a bridge
-// without enabling the unified terminal writer, so the one-shot replay grant can
-// be observed in AppState before any executor consumes it.
+// without enabling the unified terminal writer, so load-path AppState can be
+// observed before any executor consumes it.
 func scrollbackReplayGrantHarness(t *testing.T) (*chatRuntimeEventBridge, *chatInteractionCoordinator) {
 	t.Helper()
 	runtimeSession := runtimechat.NewSession("tester")
@@ -46,9 +44,9 @@ func uiActorStateForGrantTest(t *testing.T, coordinator *chatInteractionCoordina
 	return actor.State()
 }
 
-// TestSessionLoadNeverArmsDestructiveReplay：装载（含空会话）仍然发布 replacement
-// snapshot 并触发从源重证明，但绝不授权销毁式重放 —— native scrollback append-only。
-func TestSessionLoadNeverArmsDestructiveReplay(t *testing.T) {
+// TestSessionLoadKeepsAppendOnlyProjection：装载（含空会话）仍然发布 replacement
+// snapshot 并触发从源重证明，但不推进语义 epoch —— native scrollback append-only。
+func TestSessionLoadKeepsAppendOnlyProjection(t *testing.T) {
 	bridge, coordinator := scrollbackReplayGrantHarness(t)
 	// start() is the /resume, --session and startup-restore entry point. The
 	// event log intentionally does not exist here, which also pins that an empty
@@ -57,26 +55,23 @@ func TestSessionLoadNeverArmsDestructiveReplay(t *testing.T) {
 	coordinator.waitUIActorIdle()
 
 	state := uiActorStateForGrantTest(t, coordinator)
-	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("session load armed a destructive scrollback replay")
-	}
 	if state.HistoryEffects.TerminalEpoch != 0 {
 		t.Fatalf("session load advanced the terminal epoch without a physical act: %d",
 			state.HistoryEffects.TerminalEpoch)
 	}
 }
 
-func TestNonLoadReplayDoesNotGrantScrollbackReplay(t *testing.T) {
+func TestNonLoadReplayDoesNotAdvanceEpoch(t *testing.T) {
 	bridge, coordinator := scrollbackReplayGrantHarness(t)
 	// replayEventLog is the diagnostic/unit-test entry point: it republishes the
-	// Scene without ever authorizing a destructive scrollback replacement.
+	// Scene through the ordinary (non-load) replacement path.
 	if _, err := bridge.replayEventLog(); err != nil {
 		t.Fatalf("non-load replay: %v", err)
 	}
 	coordinator.waitUIActorIdle()
 
-	if state := uiActorStateForGrantTest(t, coordinator); state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("non-load replay authorized a scrollback replacement")
+	if state := uiActorStateForGrantTest(t, coordinator); state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("non-load replay advanced the epoch: %d", state.HistoryEffects.TerminalEpoch)
 	}
 }
 
@@ -84,8 +79,7 @@ func TestNonLoadReplayDoesNotGrantScrollbackReplay(t *testing.T) {
 // policy: importing canonical units the Scene does not have publishes a load
 // replacement (re-proof from source, appended by the ordinary handoff);
 // re-presenting the same canonical history (/history, resume presentation
-// requested twice) imports nothing and publishes no replacement; no seed ever
-// arms a destructive scrollback replay.
+// requested twice) imports nothing and publishes no replacement.
 func TestCanonicalHistorySeedReProvesOnlyForImportedUnits(t *testing.T) {
 	bridge, coordinator := scrollbackReplayGrantHarness(t)
 	if !coordinator.postUIAction(ui.Resize{Width: 80, Height: 24, Generation: 1}) {
@@ -100,9 +94,6 @@ func TestCanonicalHistorySeedReProvesOnlyForImportedUnits(t *testing.T) {
 	bridge.seedPersistedHistory(history, "已加载历史会话")
 	coordinator.waitUIActorIdle()
 	state := uiActorStateForGrantTest(t, coordinator)
-	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("canonical seed armed a destructive replay")
-	}
 	firstEntries := len(state.HistoryEffects.Entries())
 	if firstEntries == 0 {
 		t.Fatalf("canonical seed planned no delivery: %#v", state.HistoryEffects)
@@ -113,9 +104,6 @@ func TestCanonicalHistorySeedReProvesOnlyForImportedUnits(t *testing.T) {
 	bridge.seedPersistedHistory(history, "已加载历史会话")
 	coordinator.waitUIActorIdle()
 	state = uiActorStateForGrantTest(t, coordinator)
-	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("re-presenting the same canonical history armed a replay")
-	}
 	if got := len(state.HistoryEffects.Entries()); got != firstEntries {
 		t.Fatalf("re-presenting the same canonical history re-planned %d entries (want %d)", got, firstEntries)
 	}
@@ -127,33 +115,7 @@ func TestCanonicalHistorySeedReProvesOnlyForImportedUnits(t *testing.T) {
 	bridge.seedPersistedHistory(grown, "已加载历史会话")
 	coordinator.waitUIActorIdle()
 	state = uiActorStateForGrantTest(t, coordinator)
-	if state.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("growing canonical history armed a destructive replay")
-	}
 	if got := len(state.HistoryEffects.Entries()); got <= firstEntries {
 		t.Fatalf("new canonical unit was not planned: entries %d -> %d", firstEntries, got)
-	}
-}
-
-// TestHistoryEffectDiagnosticsExposeScrollbackReplayGrant keeps the one-shot
-// authorization observable: without it, an operator cannot tell from /debug
-// whether an outstanding history obligation will replace native scrollback or
-// settle in place.
-func TestHistoryEffectDiagnosticsExposeScrollbackReplayGrant(t *testing.T) {
-	spent := chatDebugHistoryEffectSummary(ui.HistoryEffectDiagnostics{})
-	if !strings.Contains(spent, "scrollback-replay-armed=false") {
-		t.Fatalf("history effect summary hides the replay grant: %q", spent)
-	}
-	armed := chatDebugHistoryEffectSummary(ui.HistoryEffectDiagnostics{ScrollbackReplayArmed: true})
-	if !strings.Contains(armed, "scrollback-replay-armed=true") {
-		t.Fatalf("history effect summary hides the armed replay grant: %q", armed)
-	}
-
-	raw, err := json.Marshal(chatDebugDisplayHistoryGateInfo{ScrollbackReplayArmed: true})
-	if err != nil {
-		t.Fatalf("marshal history gates: %v", err)
-	}
-	if !strings.Contains(string(raw), `"scrollback_replay_armed":true`) {
-		t.Fatalf("debug HTTP history gates lost the replay grant field: %s", raw)
 	}
 }

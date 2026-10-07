@@ -282,7 +282,7 @@ func (c *chatInteractionCoordinator) historyReplayDeliverySettled() bool {
 		return true
 	}
 	diagnostics := actor.HistoryEffectDiagnostics()
-	if diagnostics.ScrollbackReplayArmed || diagnostics.ProjectionUnknown || diagnostics.Frozen {
+	if diagnostics.ProjectionUnknown || diagnostics.Frozen {
 		return false
 	}
 	// 三态归一后「未完成提交」= queued（含已被写游标 claim 的 token）。

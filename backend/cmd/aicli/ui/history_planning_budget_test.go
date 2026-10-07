@@ -66,10 +66,10 @@ func TestTruncatedPlanPrefixDoesNotRequeueDeliveredSources(t *testing.T) {
 
 // 需求：被预算截断的计划必须自己走到 complete，而不是把最老前缀当成整份计划。
 //
-// live 事故（session_20260924072950_ltYRU9tG）：resume 的销毁式重放只投递了
+// live 事故（session_20260924072950_ltYRU9tG）：resume 装载只投递了
 // epoch2 的 356 个 acked 提交（next=1068），而 transcript 是 6585 cell /
-// 290957 行；随后执行器空闲 8 分钟，pending=0、scrollback-replay-armed=false、
-// recovery_actionable=false，缺口既不在 scrollback 也不在常驻区，且不可自愈。
+// 290957 行；随后执行器空闲 8 分钟，pending=0、recovery_actionable=false，
+// 缺口既不在 scrollback 也不在常驻区，且不可自愈。
 // 原因是截断路径把续跑寄托在「下一次 reduce」上，但 resume 后的空闲会话没有任何
 // transcript 迁移，ack 处理器当时也不重规划 —— 前缀排空就是这条计划的终点。
 //

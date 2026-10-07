@@ -362,9 +362,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case HistoryReconciliationSettled:
 		// The terminal owner proved a source-backed viewport without replacing
 		// scrollback. Quarantine unproven deliveries in place and resume
-		// ordered handoff; an authorized replay must never be short-circuited
-		// by a settle that raced it.
-		if a.LayoutGeneration == state.Geometry.Generation && !state.HistoryEffects.ScrollbackReplayArmed {
+		// ordered handoff. Settle is the only recovery path: append-only
+		// delivery has no destructive transaction for a race to short-circuit.
+		if a.LayoutGeneration == state.Geometry.Generation {
 			state.HistoryEffects.settleUnresolvedWithoutReplay()
 			// Settling is the transition that clears the unresolved-delivery
 			// gate, and it is not an ack. A continuation attempt that ran while
@@ -427,14 +427,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// replay/backtrack rebuilds with coincident revisions from being skipped.
 		if transcriptSnapshotAlreadyInstalled(state.Transcript, a.Snapshot) {
 			// The install is a no-op, but an armed replacement must never be
-			// observable with an empty queue: this authorization is destructive
-			// (the executor clears native scrollback before replaying), so a
-			// ledger that never held this plan — the snapshot was installed by
-			// an earlier reduction while the geometry was still zero, which
-			// records the plan memo against an empty candidate set — would
-			// clear the screen and write nothing back. Re-prove the plan from
-			// source under the memo barrier; a ledger that already holds it is
-			// reconciled in place (identity-keyed, no duplicate tokens).
+			// observable with an empty queue: the snapshot may have been
+			// installed by an earlier reduction while the geometry was still
+			// zero, which records the plan memo against an empty candidate set.
+			// Re-prove the plan from source under the memo barrier; a ledger
+			// that already holds it is reconciled in place (identity-keyed, no
+			// duplicate tokens).
 			if a.ArmScrollbackReplay {
 				state.HistoryEffects.invalidateTranscriptPlanMemo()
 				syncHistoryEffectsForTranscript(&state)

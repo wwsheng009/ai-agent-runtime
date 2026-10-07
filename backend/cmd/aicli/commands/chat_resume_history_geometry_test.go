@@ -34,9 +34,6 @@ func TestSessionLoadBeforeGeometryStillDeliversTranscript(t *testing.T) {
 	if len(loaded.Transcript.Cells) == 0 {
 		t.Fatal("load seeded no transcript cells")
 	}
-	if loaded.HistoryEffects.ScrollbackReplayArmed {
-		t.Fatal("load armed a destructive scrollback replay")
-	}
 	if len(loaded.HistoryEffects.Entries()) != 0 {
 		t.Fatalf("precondition: geometry-free load planned %d entries, want 0",
 			len(loaded.HistoryEffects.Entries()))

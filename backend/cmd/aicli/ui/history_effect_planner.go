@@ -864,7 +864,7 @@ func finishResumedTranscriptPlan(state *UIControllerState) bool {
 // The delivered prefix was therefore the whole plan: the executor drained it,
 // the ledger read pending=0/acked=N, and every row the walk never reached stayed
 // missing from native scrollback (live resume: 356 acked commits for a
-// 290,957-row transcript, executor idle, replay authorization already spent).
+// 290,957-row transcript, executor idle, no recovery obligation pending).
 // Called from the ack handlers, this replaces "wait for a transition that may
 // never come" with "continue as soon as the prefix has actually been delivered".
 //

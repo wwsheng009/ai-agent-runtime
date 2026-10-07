@@ -129,9 +129,9 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 
 // printVisibleSessionLoadHistory is the session-load entry point (/resume,
 // /load, startup restore). Unlike /history and truncation replays it also
-// authorizes the one-shot native-scrollback replacement, because a loaded
-// generation must reach the terminal owner even when the Scene already
-// reconciled with the replayed runtime event log (seeded=false).
+// publishes a load replacement when the Scene already reconciled with the
+// replayed runtime event log (seeded=false), because the loaded generation
+// must be re-proved from source and reach the terminal owner (append-only).
 func printVisibleSessionLoadHistory(session *ChatSession, header string) int {
 	return printVisibleChatHistoryWithLoadGrant(session, resumeHistoryLoadHeader(session, header), true)
 }
