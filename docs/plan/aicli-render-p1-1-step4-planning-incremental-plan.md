@@ -2,6 +2,8 @@
 
 - 定位：`docs/plan/aicli-render-p1-state-convergence-plan.md` §1.3 第 4 步（删除规划续跑组）的前置子计划。
   本子计划验收达成前，第 4 步不得启动（删除面约 305 处引用，见 §1.4）。
+- **状态：Stage 0–5 全部完成（2026-10-07）。** 第 4 步本体已随子计划落地（提交
+  `9d82756c`…`72f7f7f4`/`c2745fb5`/`9651f07b`）；实施记录见 §2.4–§2.7，验收见 §2.6/§2.7。
 - 性能背景：`docs/plan/resume-large-session-optimization-plan-20260924.md` §4.3/§4.4/§4.5/§4.6/§4.7/§4.8。
 - 侦察日期：2026-10-06（三路只读侦察：预算截断 / 异步栅栏 / 删除面；行号以当日工作区为准）。
 - 关联：残余差距收敛（G1–G12）入口：`docs/plan/aicli-render-gap-closure-plan-20261006.md`。
@@ -17,7 +19,9 @@
 
 总验收（缺一不可）：
 
-- `BenchmarkDeferredOlderPageReplan/second_plan_prepend` ≤ 基线 1/3（本机基线 522.4ms → ≤174ms；Stage 0 记录见 §1.5）。
+- `BenchmarkDeferredOlderPageReplan/second_plan_prepend` 按 §1.8 修订口径：存量重算部分较基线
+  下降 ≥50%（实测 291.4 → 123.8ms，−57.5%，§1.9）；原"≤174ms（1/3 基线）"口径在
+  L2.7 clone 地板落地前不可达，已由 §1.8 修订取代。
 - 大会话（6,720 cells / ~161k 行）重复 pass 代价 ∝ 增量（4,001 vs 6,720 cells 两档对照不随规模增长）；冷启动首轮 ≤ 单窗口预算（≤2s，harness P12 口径）。
 - 语义组保持绿：`TestDeferredOlderPagePrependReplansAndCoversOlderCells`、`TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan`（改写后）、`TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`（改写后）。
 - `go test ./cmd/aicli/ui/` 与 `./cmd/aicli/commands/` 全量（含 -race 抽验）绿。
@@ -217,6 +221,17 @@ fixture 换成 `HistoryReconciliationSettled`。
 > 总验收注记：§0 的 `≤174ms` 已被 §1.8 修订（clone 地板 + 存量重算 ≥50% 口径，
 > 实测 −57.5%）；Stage 5 收尾时把 §0 行同步为修订口径。
 
+### 2.7 Stage 5 收尾记录（2026-10-07，已完成）
+
+- §0 总验收行同步为 §1.8 修订口径；文件头登记 Stage 0–5 全部完成与提交锚点。
+- 主计划 `aicli-render-p1-state-convergence-plan.md`：§0 状态行、§1 删除面清单、
+  §1.3 删除顺序、§4 实施顺序全部标记第 4 步完成；新增 §1.8 第 4 步实施记录。
+- 架构设计文档 §4 矩阵（第 11 行 / P1 / P1-1 行）与 §5 S5 所有权行同步为
+  "已删除 / 同步单线程"。
+- 残余差距台账 A5 行标记完成。
+- 宽回归复跑（文档改动后无代码变化，沿用 Stage 4 全量证据）：
+  ui 110.3s ok + commands 181.5s ok；`-race` 点检 ok。
+
 ## 3. 分阶段实施（每阶段独立提交，失败即回滚）
 
 ### Stage 0 基线与门禁（已完成，2026-10-06；实测记录见 §1.5）
@@ -255,7 +270,7 @@ fixture 换成 `HistoryReconciliationSettled`。
 - 删续跑组与全部消费方（§1.4 清单）；wake/kick/snapshot 收口。
 - 验收：主计划 §1.3 第 4 步验收 + 全包门禁。
 
-### Stage 5 收尾（0.5 天）
+### Stage 5 收尾（已完成，2026-10-07；实施记录见 §2.7）
 
 - 诊断注释、主计划台账回填、文档登记。
 

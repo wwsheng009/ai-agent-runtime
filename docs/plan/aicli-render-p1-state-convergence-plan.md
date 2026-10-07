@@ -2,7 +2,7 @@
 
 > 来源：`docs/plan/aicli-unified-render-architecture-audit-20261005.md` §6 P1。
 > 基线：`feat/render-p0-writer-unification` @ `44f31cbf`（P0 写端归一完成，18 提交）。
-> 状态：**侦察完成 + P1-1 第 1/2/3 步、P1-2a、P1-2b 第 1/3 小步与几何收敛第 1 部分、P1-3 第 1/2 小步已实施**
+> 状态：**侦察完成 + P1-1 第 1/2/3/4 步（含前置子计划 Stage 0–5）、P1-2a、P1-2b 第 1/3 小步与几何收敛第 1 部分、P1-3 第 1/2 小步已实施**
 >（2026-10-06；三路 explore 原始报告要点已归档于 §6，全部证据带 `文件:行`）。
 > 关联：残余差距收敛入口 `docs/plan/aicli-render-gap-closure-plan-20261006.md`
 >（B1 复核 §3.7 保留项；C 批交付账收紧；本计划 §3.7 的保留决策为该方案输入）。
@@ -43,10 +43,11 @@
    reducer 分支 controller_state.go:283-299/:360-369。
 2. `claimSkips*/claimRejects*` 计数器（:108-112、:331-347）→ 并入单调计数器。
 3. `Enqueued 区间` → 规划只按 Acked 游标推进后成为派生值（planner :1577-1622）；`Stable` 不可删。
-4. 规划续跑组 `PlanIncomplete/PlanStalled/planResume*/planRequest*`（queue :57-92）→ 前提是规划单线程增量
-   （无预算截断、无异步 screening）。
-   前置子计划已产出：`docs/plan/aicli-render-p1-1-step4-planning-incremental-plan.md`
-   （终态四要件、Stage 0–5 分阶段验收、5 个关键耦合处置、冷启动敞口门控）。
+4. 规划续跑组 `PlanIncomplete/PlanStalled/planResume*/planRequest*`（queue :57-92）→ **已删除**
+   （2026-10-07；子计划 Stage 2–4：无预算单遍 → 去异步 → 续跑组本体删除，
+   提交 `72f7f7f4`/`c2745fb5`/`9651f07b`）。
+   前置子计划：`docs/plan/aicli-render-p1-1-step4-planning-incremental-plan.md`
+   （终态四要件、Stage 0–5 分阶段验收、5 个关键耦合处置、冷启动敞口门控；已全部完成）。
 5. `lastPlanned*` memo（:119-182）→ 与 6 态解耦，可用单调 generation 显式失效，后置。
 
 **必须保留**：Acked（交付事实 + 防重铸锚点，需"每 cell 已交付 source 前缀 + 来源身份 tombstone"表达）；
@@ -62,8 +63,8 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 2. **六态归一**（queued/delivered/quarantined）：Fail/Invalidate/Settle history_commit.go:473-521、
    queue :649-716、controller_state.go:349-382、action.go:471-529；保留 unresolvedCount 与阻断语义。
 3. **pendingCount/minNonTerminalToken 游标化**（队列头指针 + 交付游标）：history_commit.go:197-205/:301-310/:467-471/:703-708。
-4. **规划续跑组删除**：planner :956-1070/:1168-1227、queue :57-92、action.go:549-589、executor :1039-1053
-   ——必须在规划单线程化之后。
+4. **规划续跑组删除**（已完成 `9651f07b`）：planner :956-1070/:1168-1227、queue :57-92、action.go:549-589、executor :1039-1053
+   ——在规划单线程化（子计划 Stage 1–3）之后落地；诊断四字段保留为 deprecated 零值。
 
 ### 1.4 风险（删除前必须钉测试）
 
@@ -153,6 +154,24 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
   `HasPending`/`hasOlderQueuedToken` 与全表扫描；barrier-flip 测试改用
   `QueuedCount()` 断言。
 - 验证：ui 全量 + commands 全量通过；定向 `-race` 通过。
+
+### 1.8 P1-1 第 4 步实施记录（规划续跑组删除，已完成）
+
+前置子计划 `docs/plan/aicli-render-p1-1-step4-planning-incremental-plan.md`
+Stage 0–5 全部完成（2026-10-07）：
+
+- **Stage 1 段级增量装配**（`9d82756c` 等）：per-cell 计划段 + 复用/重定基 +
+  提交级 settled 过滤 + diff 集成；存量重算 291.4 → 123.8ms（−57.5%，§1.8/§1.9）。
+- **Stage 2 无预算同步化**（`72f7f7f4`）：单遍规划为唯一实现，删预算/截断/续跑参数；
+  ack/settle 改 memo 守卫的按需重规划。
+- **Stage 3 去异步**（`c2745fb5`）：删 plan worker/sink/请求/`HistoryPlanWindowReady`/
+  三重栅栏/wiring/`WaitIdle` 例外/`AsyncTranscriptPlan` 配置（+81/−775）。
+- **Stage 4 续跑组删除**（`9651f07b`）：删 `PlanIncomplete/PlanStalled/planResume*`/
+  `ContinueHistoryPlanAction`/executor kick/空队列 wake 分支/快照读点（+60/−162）；
+  `HistoryEffectDiagnostics` 四字段保留为 deprecated 零值（跨包 schema 稳定）。
+- **验收**：全量组合 ui 110.3s ok + commands 181.5s ok；`-race` 点检
+  （Wake/Reducer/Schedule + commands Debug）ok；全仓 grep 零生产引用；
+  语义组（prepend/resume union/ArmedResume E2E）保持绿。
 
 ## 2. P1-2 可推导镜像收敛
 
@@ -428,7 +447,7 @@ HandoffFrontier（渲染行坐标系，trim 重定基，与 ledger token 不可�
 1. **P1-2a**（已完成）：`LayoutGeneration` 字段删除；`historyTailCells` 撤回、`historyPrepareHits/Misses` 暂缓（见 §2.1/§2.5）。
 2. **P1-3**（2-3 提交）：`WaitActionApplied` + Post 通知（controller.go，**第 1 小步已完成**，见 §3.5）
    → executor 五处替换 → bridge 三态 ack。
-3. **P1-1**（4 提交，每步先加钉测试再删实现）：InFlight/claim → 六态归一 → 计数器游标 → 规划续跑组（后置，依赖规划单线程化）。
+3. **P1-1**（4 提交，每步先加钉测试再删实现）：InFlight/claim → 六态归一 → 计数器游标 → 规划续跑组（**四步全部完成**；第 4 步见 §1.8）。
 4. **P1-2b**（2-3 提交）：streamTailRows/topAligned 派生 → 几何收敛 → frame 单点 + 更名隔离。
 - 每步独立可回滚；任一步 `-race` 或长会话验收不过即回滚该步，不带病前进。
 

@@ -15,9 +15,9 @@
 | A2 | **P2 特例族**：active 溢出归档 / sticky top-align / scrollback replay / reset backoff / settle-unresolved | 审计 §5 根因 2/3、§6 P2；当日两次现场缺陷（resident-tail 双写、中部插入）均落此族 | 历史线性化：finalized-only 进 history；可见窗口 W 行 + 溢出按行序 append；mutable 内容不提前入 scrollback（等 finalized 一次性写）；resize 只重画窗口 | 未开始（验收矩阵 = 审计 §6 P2 八项场景 + 真机 e2e） |
 | A3 | **P2-1b 载荷聚合**：Acked+Active 前缀证明的渲染行载荷随会话单调增长；tombstone 每 range 一个 key | 硬化计划 §520；`activeAckedRenderedPrefixRows`（history_effect_planner.go:331-367）依赖结构化载荷做行等价匹配（显式拒绝文本哈希） | 证明载荷的可聚合表示——本质是 A1 写证明的一部分（行等价证明的新数据结构） | 未实施（设计依赖 A1） |
 | A4 | **P3 全量渲染基线**：每帧全屏克隆/物化/强制重绘，成本与变化量脱钩 | 审计 §4 TOP1/2/3/7 | 增量编码（viewport 外占位不编码）+ 脏行 diff + 去全屏深拷贝 | 未开始（可先做 Stage 1 计划增量） |
-| A5 | **P1-1 第 4 步**：规划续跑组删除（≈305 refs） | P1 计划 §1；子计划 §4 依赖 | 规划单线程化：子计划 Stage 1「段级增量装配」（Stage 0 已完成 `b93cc1e4`，热点归因见其 §1.5） | 子计划已就绪，待 Stage 1 |
+| A5 | **P1-1 第 4 步**：规划续跑组删除 | P1 计划 §1；子计划 §4 依赖 | 规划单线程化：子计划 Stage 1–5 | **已完成（2026-10-07）**：Stage 1 段级增量（`9d82756c` 等）→ Stage 2 无预算单遍（`72f7f7f4`）→ Stage 3 去异步（`c2745fb5`）→ Stage 4 续跑组删除（`9651f07b`，+60/−162）；全量 ui/commands + `-race` 点检绿 |
 
-**建议顺序**：A5（Stage 1，解锁第 4 步并顺带压掉 resume 慢用例）→ A2（含 A1 写证明件）→ A4；A3 随 A1 一并设计。
+**建议顺序**：A5 已完成 → A2（含 A1 写证明件）→ A4；A3 随 A1 一并设计。
 
 ## 2. 本轮已清理（确定性修复）
 

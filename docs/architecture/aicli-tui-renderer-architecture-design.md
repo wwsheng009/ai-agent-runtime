@@ -170,7 +170,8 @@ flowchart TB
   （P1-1 §1.6 的 D2 方向：`byRange` 去 display）。
 - **删除面**：账本事务语义（六态已于 P1-1 第 2 步归一为三态 queued/delivered/quarantined，目标再降为
   行序交付游标）、scrollback replay/reconcile（**settle 保留**，它就是目标语义）、reset backoff、
-  `PlanIncomplete/PlanStalled/续跑组`——单线程序列化与单向交付后均无存在理由（P1/P1-1/P2）。
+  `PlanIncomplete/PlanStalled/续跑组`——**已删除**（P1-1 Stage 2–4，`72f7f7f4`/`c2745fb5`/`9651f07b`；
+  单线程序列化与单向交付后均无存在理由）。
 - **失败语义**：写入结果不可证明 → 不重试旧 token；标记投影 unknown → source-backed 重建 + 新 terminal epoch
   （§3.6）；恢复不需要旧账本的事务回执。
 
@@ -242,7 +243,7 @@ flowchart TB
 | 8 | 流序号 | 编码器 `streamOrder` | payload `sequence/coalesced_from` 仅作输入元数据 | 禁止下游二次编号 | 已落地 |
 | 9 | assistant 去重 | 编码器 `assistantSnapshotBy` | — | 删除 `renderedAssistantDeltaContent/digest/length` 与 **`renderedAssistantFinal/finalDigest/finalLength`**（扫描补登） | P1 部分 |
 | 10 | 行内容镜像 | `ScreenModel`（唯一屏幕镜像） | 历史行由 source 派生（不落镜像） | 删除 `historyStreamTailRows` / `historyTailCells` / `SoftOutputState.lines` / `PaintTrace` 内容 hash（或降级 /debug）；**扫描补登**：bridge 侧 `historySeedSeen/historySeedClaimedItems` 与 legacy `FixedBottomSurface.lastWidth/lastHeight` | P1-2a 部分；`historyTailCells` 保留待替换 |
-| 11 | plan 完整性 | —（不存在） | — | 规划单线程同步后删除 `PlanIncomplete/PlanStalled/续跑组`（P1-1 Stage 2–4） | Stage 1 设计完成 |
+| 11 | plan 完整性 | —（不存在） | — | `PlanIncomplete/PlanStalled/续跑组`已删除（P1-1 Stage 2–4，`9651f07b`）；诊断四字段保留 deprecated 零值 | **已收敛** |
 | 12 | 空闲判定 | —（事件驱动 ack） | — | `waitControllerIdle` 已删、executor 已改 `WaitActionApplied`；**残余**：`WaitIdleTimeout` 的 1ms 轮询仍在（`controller.go:852`），经 P1-3 §3.7 明确**保留的有界超时兜底**触达（close drain / legacy 辅助 / `waitUIActorIdleBounded` 5s）→ 可选事件化见差距收敛方案 B1 | **部分**（残余为显式保留项） |
 | 13 | backoff 进度 | —（fail-closed + 恢复） | — | reset backoff 状态机已随 S3/S4（`9e7383c1`/`7ade9732`）删除；guard 降级为 `recoveryBackoff*` 限速（§9.5） | 已收敛 |
 | 14 | 降级/预算遥测 | 事件桥单点计数器 | 只读快照 | `lateDropStats` 与上报水位合并为单点计数器（`Reported*` 同址，2026-10-07） | 已落地 |
@@ -478,8 +479,8 @@ sequenceDiagram
 | 阶段 | 目标 | 已完成 | 进行中 / 待办 |
 |---|---|---|---|
 | **P0 写端归一** | 所有字节经统一边界；旁路可记录 | 控制序列旁路（`c159a118`：标题/铃/编辑器序列）；守卫与回归栅栏（`09190ee8`，64 项债务台账）；legacy surface 单向栅栏；**CI 门禁接线（2026-10-07：release workflow 显式运行 ui+commands writer inventory）；StatusBar legacy 直写渲染面删除（Render 族 + `Layout.Render/Refresh`，基线同步）** | stderr 边缘路径持续收口（选择输出已 claim-first，其余分类登记）；FixedBottomSurface 直写族清理 |
-| **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–3（单飞写游标、六态归一、计数器游标）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | P1-1 第 4 步（删续跑组 ≈305 refs，受 P1-1 子计划门控）；残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
-| **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 522ms/op + CPU profile 归因）；Stage 1 设计细化（§1.6：身份模型/D2 反例） | Stage 1 编码（D2 测试先行 → 1c/1d → 基准 ≤174ms）；Stage 2（无预算同步化，冷启动门控）；Stage 3（去异步）；Stage 4（删续跑组） |
+| **P1 状态收敛** | 状态字段/镜像缩减；事件驱动同步 | P1-1 步骤 1–4（单飞写游标、六态归一、计数器游标、**续跑组删除 `9651f07b`**）；P1-2a（零风险删除）；P1-2b 主体（几何收敛、去重镜像删除）；P1-3（`WaitIdle` → 事件驱动 ack，**部分：残余 1ms 轮询**，见 §7.5 G1） | 残余镜像（§4 标注"部分/待"）；P1-3 轮询收尾 |
+| **P1-1 规划增量** | 单线程 + 增量 + 无预算截断 | Stage 0（基线 + CPU profile）；Stage 1（段级增量装配，存量重算 −57.5%）；Stage 2（无预算同步化 `72f7f7f4`）；Stage 3（去异步 `c2745fb5`）；Stage 4（删续跑组 `9651f07b`）；Stage 5 收尾 | 已全部完成（2026-10-07） |
 | **P2 历史线性化** | 单向交付；删特例族 | 三路只读侦察完成（2026-10-06，结论见 §7.4）；目标规则定稿（§3.4）；**Slice 1 全部完成**（第一刀 `130cc7f5`；第二刀 `7471d34a`/`80738513`/`e3236de9`）；**replay 切片 S1–S5 全部完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`/`473da400`：恒 settle、3J 路径与 armed 诊断全删、目标语义用例 + 真机 e2e 装载/追加阶段）** | 锚定切片；剩余特例族 |
 | **P3 性能** | O(delta) 成本模型 | 基准与热点归因（P1-1 Stage 0）；部分缓存（`sharedCellRows`/`sharedHistoryPlan`） | 增量编码（viewport 物化 + 脏行 diff）；去全屏克隆（plan 单所有者、ScreenModel swap）；active markdown 增量解析 |
 
@@ -489,7 +490,7 @@ sequenceDiagram
 |---|---|---|
 | P0 | 单写端断言；真机 e2e 全绿；CI 门禁生效（白名单外 0 命中） | 低 |
 | P1 | 状态字段/队列计数缩减（before/after）；`-race` 全绿；长会话 marker exactly-once | 中 |
-| P1-1 | `second_plan_prepend` ≤174ms；增量 == 全量（身份多重集 + 顺序）；宽回归绿 | 中 |
+| P1-1 | `second_plan_prepend` 存量重算 ≥50% 下降（实测 −57.5%，§1.8 修订口径；原 ≤174ms 受 L2.7 clone 地板阻隔）；增量 == 全量（身份多重集 + 顺序）；宽回归绿 | 中 |
 | P2 | 8 项场景矩阵（流式溢出/归档/finalize/resize 收缩+扩张/lease 往返/partial write/resume-replay/≥5k cells）+ 真机 marker exactly-once + 无异常空行 | 中高 |
 | P3 | 新基准（p95 帧时延 < 16ms 稳态；每帧分配/GC/锁持有）；delta 成本 O(delta) 证明 | 中 |
 
@@ -605,7 +606,7 @@ sequenceDiagram
 | S2 | 输入/命令 producer → mailbox | typed `UIAction`（durable/coalescable/barrier/followup） | 唯一入口；禁止直改状态或写终端 | 非 typed 调用 = 评审/门禁违规 |
 | S3 | mailbox → reducer | action 批（≤64） | 单 goroutine；durable 保序、coalescable latest-wins；followup 先于外部 mailbox | reducer panic 丢弃本 action 的 causal children（不半提交） |
 | S4 | reducer → Scene | `ReplaceTranscriptAction`（快照） | 全有或全无；与规划同一次归约（S4 先于 S5） | 无快照不替换；失败不产生半场景 |
-| S5 | reducer → planner | transcript+active+geometry+theme+lease（纯输入） | 目标：同线程同步（无 worker、无结果 action）；**迁移中**：当前仍有 plan worker/异步（P1-1 Stage 3） | 无（纯函数） |
+| S5 | reducer → planner | transcript+active+geometry+theme+lease（纯输入） | **同线程同步（无 worker、无结果 action）**；P1-1 Stage 3 已完成（`c2745fb5`） | 无（纯函数） |
 | S6 | planner → 交付账 | 候选（身份 = source range + revision + fragment） | 同源去重（`hasTerminalRecordForSource`）；**Queued 可 rebase，claimed 只 invalidate、永不 rebase** | 重复铸造/身份冲突 → 拒绝入账 |
 | S7 | 交付账 → executor | Pending 批 + claim（单飞） | `markInFlight` 门：`!Frozen && !Unknown && !hasUnresolvedDelivery` | `ErrHistoryCommitFrozen` / `ErrHistoryProjectionUnknown` / `ErrHistoryCommitRecoveryPending` |
 | S8 | executor → TerminalSession | claimed 批快照（plan + payload） | prepare→write；单 writer；geometry 已发布（S11 先于 S8） | 短写/错误 = fail-closed（不静默降级） |
