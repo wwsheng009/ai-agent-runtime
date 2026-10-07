@@ -245,6 +245,7 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
 
 ### 5.3 S2 实施记录（去全屏深拷贝：稳态就地事务 + 延迟提交，已完成）
 
+- 提交锚点：代码 `fa39502d`、本记录 `cb4be221`（锚点行于 `cb4be221` 后补记）。
 - 测量修正（先导，pprof 实锤）：挂具改用无账本访问器（`ActiveCellState`/
   `DiagnosticState`，与生产适配器一致）。修正后真实基线 **526KB/delta、2407 allocs/delta**；
   S0 报告的 2.64MB/delta 中约 79% 是挂具账本克隆噪声（S1 的 7% 相对收益不受影响）。
