@@ -486,7 +486,7 @@ func sourceLineRanges(source string) []sourceLineRange {
 // 代漂移（返回 classified=false，回退重铸路径 —— 新行必须入候选，代漂移必须
 // 触发 rebase）。仅完整覆盖（所有行在可见窗口内）与 skipRows==0 时分拣，
 // 保证与无预算全量 pass 等价。
-func classifyPlainSegmentRetention(cell scene.TranscriptCell, physical []planPhysicalRow, leadingGaps, displayStart, firstVisible, skipRows int, retainedQueued func(historyCommitSourceKey) (HistoryCommit, bool, bool, bool)) (commits []HistoryCommit, classified bool, retained bool) {
+func classifyPlainSegmentRetention(cell scene.TranscriptCell, physical []planPhysicalRow, leadingGaps, displayStart, firstVisible, skipRows int, generation uint64, retainedQueued func(historyCommitSourceKey) (HistoryCommit, bool, bool, bool)) (commits []HistoryCommit, classified bool, retained bool) {
 	if retainedQueued == nil || skipRows != 0 {
 		return nil, false, false
 	}
@@ -494,7 +494,7 @@ func classifyPlainSegmentRetention(cell scene.TranscriptCell, physical []planPhy
 		return nil, false, false
 	}
 	commits = make([]HistoryCommit, 0, len(physical))
-	for _, pr := range physical {
+	for index, pr := range physical {
 		key := historyCommitSourceIdentity(HistoryCommit{
 			CellID:      cell.ID,
 			Revision:    cell.Revision,
@@ -506,6 +506,15 @@ func classifyPlainSegmentRetention(cell scene.TranscriptCell, physical []planPhy
 			return nil, false, false
 		}
 		if hasQueued {
+			// 1b：复用段不重跑 assemble，但 DisplayRange 按当前全局行坐标做常量
+			// 偏移重写（与 assemble 的 start/end 规则一致），保持簿记精确。
+			start := leadingGaps + index
+			if index == 0 {
+				start = 0
+			}
+			end := leadingGaps + index + 1
+			commit.DisplayRange = DisplayRange{Start: displayStart + start, End: displayStart + end}
+			commit.LayoutGeneration = generation
 			commits = append(commits, commit)
 		}
 	}
@@ -540,7 +549,7 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 			}
 		}
 		if aligned {
-			if retainedCommits, classified, retained := classifyPlainSegmentRetention(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, retainedQueued); classified {
+			if retainedCommits, classified, retained := classifyPlainSegmentRetention(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, generation, retainedQueued); classified {
 				return retainedCommits, true, retained
 			}
 			return assemblePlainHistoryCommits(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, generation, settled), true, false

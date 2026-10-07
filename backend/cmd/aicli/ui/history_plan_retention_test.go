@@ -59,6 +59,19 @@ func TestPrependPlanRetainsQueuedCellsAndKeepsLedgerStable(t *testing.T) {
 		t.Fatalf("retained union must keep plan order (older before newer): firstOlder=%d firstNewer=%d",
 			firstOlder, firstNewer)
 	}
+	// 1b 断言：并集（含保留段按当前坐标重写的 DisplayRange）必须沿计划顺序
+	// 单调推进 —— 若保留段沿用入队时旧坐标，prepend 后会出现坐标倒退。
+	lastStart := -1
+	for index, commit := range commits {
+		if !commit.Valid() {
+			t.Fatalf("commit %d is invalid after retention merge: %+v", index, commit)
+		}
+		if commit.DisplayRange.Start <= lastStart {
+			t.Fatalf("union display ranges must advance monotonically: commit %d start=%d last=%d",
+				index, commit.DisplayRange.Start, lastStart)
+		}
+		lastStart = commit.DisplayRange.Start
+	}
 
 	beforeTokens := state.HistoryEffects.NextToken
 	before := retentionEntryFingerprint(state)
