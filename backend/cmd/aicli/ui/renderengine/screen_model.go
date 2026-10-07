@@ -147,6 +147,14 @@ func (m *ScreenModel) StageFrame(rows [][]vt.Cell) {
 		if r < len(rows) {
 			row = rows[r]
 		}
+		// P3-S3 脏行短路：宽度已规范且与当前 staged 行逐 cell 相等的行直接
+		// 复用既有 back 切片，不再 normalizeRow 重分配。稳态帧里视口大多数
+		// 行不变、只有流式行变化，此路径把「每帧每行一次分配」降为「仅变更
+		// 行分配」。跳过是语义无操作：back[r] 已等于该内容，PrepareFlush 的
+		// diff/行哈希读取的仍是同一份 cell 数据。
+		if len(row) == m.width && rowCellsEqual(row, m.back[r]) {
+			continue
+		}
 		m.back[r] = normalizeRow(row, m.width)
 	}
 }

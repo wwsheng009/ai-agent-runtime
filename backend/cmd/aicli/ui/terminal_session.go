@@ -1883,6 +1883,13 @@ func terminalFrameCellsWindow(rows []AppScreenRow, renderRows []render.Line, wid
 	}
 	frame := make([][]vt.Cell, rowCount)
 	windowStart := topRow - 1
+	// P3-S3 行物化复用：同一窗口内的行共用一个 vt.Screen（Reset 复用已分配
+	// 的 width×2 行缓冲），不再每行 NewScreen 分配新矩阵。生产 pprof 里
+	// NewScreen 的 blankRow 占全帧分配 26%、CellRows 拷贝占 15.4%，而
+	// vt.Screen.Reset 的既有语义（"callers that replay many single-line
+	// streams do not allocate a fresh width×height matrix per line"）正是
+	// 为这条路径准备的。VT 展开规则仍是唯一的（同一 Screen.Feed）。
+	var materializer *vt.Screen
 	for index, row := range rows {
 		if row.Row != 0 && row.Row != index+1 {
 			return nil, fmt.Errorf("%w: row %d declared as %d", ErrInvalidTerminalFrame, index+1, row.Row)
@@ -1913,9 +1920,13 @@ func terminalFrameCellsWindow(rows []AppScreenRow, renderRows []render.Line, wid
 		if !inWindow {
 			continue
 		}
-		screen := vt.NewScreen(width, 2)
-		screen.Feed(text)
-		frame[index-windowStart] = screen.CellRows(1, 1)[0]
+		if materializer == nil {
+			materializer = vt.NewScreen(width, 2)
+		} else {
+			materializer.Reset()
+		}
+		materializer.Feed(text)
+		frame[index-windowStart] = materializer.CellRows(1, 1)[0]
 	}
 	return frame, nil
 }
