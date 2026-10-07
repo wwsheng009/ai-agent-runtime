@@ -1161,11 +1161,15 @@ func terminalViewportCells(frame TerminalFramePlan, area ViewportArea, theme sty
 	if !area.validFor(frame.Geometry) {
 		return nil, ErrInvalidTerminalFrame
 	}
-	rows, err := terminalFrameCells(frame.Rows, frame.RenderRows, frame.Geometry.Width, frame.Geometry.Height, theme)
+	rows, err := terminalFrameCellsWindow(
+		frame.Rows, frame.RenderRows,
+		frame.Geometry.Width, frame.Geometry.Height,
+		area.Top, area.Height, theme,
+	)
 	if err != nil || area.Height == 0 {
 		return nil, err
 	}
-	return rows[area.Top-1:], nil
+	return rows, nil
 }
 
 // CommitHistory implements HistoryCommitSink for the unified one-writer
@@ -1840,17 +1844,33 @@ func cloneTerminalCursor(cursor *AppCursor) *AppCursor {
 // existing plain test/compatibility plans valid. The shared VT model remains
 // the only width/SGR expansion rule.
 func terminalFrameCells(rows []AppScreenRow, renderRows []render.Line, width, height int, theme style.ThemeContext) ([][]vt.Cell, error) {
+	return terminalFrameCellsWindow(rows, renderRows, width, height, 1, height, theme)
+}
+
+// terminalFrameCellsWindow materializes only the requested 1-based row window
+// [topRow, topRow+rowCount). Frame-wide validation is deliberately preserved:
+// row identity, text parity and line controls are checked for every row (the
+// preflight contract rejects a frame as a whole), but rows outside the window
+// are neither SGR-encoded nor VT-expanded. Those rows are unreachable in the
+// physical projection cache — finalized history above ViewportArea.Top never
+// enters ScreenModel — so encoding them was pure per-frame waste (P3-S1).
+func terminalFrameCellsWindow(rows []AppScreenRow, renderRows []render.Line, width, height, topRow, rowCount int, theme style.ThemeContext) ([][]vt.Cell, error) {
 	if width < 1 || height < 1 || len(rows) != height {
 		return nil, ErrInvalidTerminalFrame
 	}
 	if len(renderRows) != 0 && len(renderRows) != height {
 		return nil, ErrInvalidTerminalFrame
 	}
-	frame := make([][]vt.Cell, height)
+	if topRow < 1 || rowCount < 0 || topRow-1+rowCount > height {
+		return nil, ErrInvalidTerminalFrame
+	}
+	frame := make([][]vt.Cell, rowCount)
+	windowStart := topRow - 1
 	for index, row := range rows {
 		if row.Row != 0 && row.Row != index+1 {
 			return nil, fmt.Errorf("%w: row %d declared as %d", ErrInvalidTerminalFrame, index+1, row.Row)
 		}
+		inWindow := index >= windowStart && index < windowStart+rowCount
 		text := row.Text
 		if len(renderRows) > 0 {
 			line := renderRows[index]
@@ -1862,14 +1882,23 @@ func terminalFrameCells(rows []AppScreenRow, renderRows []render.Line, width, he
 					return nil, fmt.Errorf("%w: structured row %d plain text %q differs from text row %q", ErrInvalidTerminalFrame, index+1, plain, row.Text)
 				}
 			}
+			if !inWindow {
+				if strings.ContainsAny(row.Text, "\r\n") {
+					return nil, fmt.Errorf("%w: row %d contains a line control", ErrInvalidTerminalFrame, index+1)
+				}
+				continue
+			}
 			text = style.RenderDocument(render.LinesDoc(line), theme)
 		}
 		if strings.ContainsAny(text, "\r\n") {
 			return nil, fmt.Errorf("%w: row %d contains a line control", ErrInvalidTerminalFrame, index+1)
 		}
+		if !inWindow {
+			continue
+		}
 		screen := vt.NewScreen(width, 2)
 		screen.Feed(text)
-		frame[index] = screen.CellRows(1, 1)[0]
+		frame[index-windowStart] = screen.CellRows(1, 1)[0]
 	}
 	return frame, nil
 }

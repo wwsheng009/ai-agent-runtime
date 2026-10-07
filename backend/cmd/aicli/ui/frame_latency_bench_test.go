@@ -96,10 +96,12 @@ func (s *frameLatencySamples) addBatch(elapsed time.Duration, deltas, flushed in
 }
 
 type frameLatencyHarness struct {
-	controller *UIController
-	presenter  *TerminalSessionPresenter
-	writer     *frameBenchWriter
-	source     strings.Builder
+	controller   *UIController
+	presenter    *TerminalSessionPresenter
+	writer       *frameBenchWriter
+	source       strings.Builder
+	viewportRows int
+	skippedRows  int
 }
 
 // newFrameLatencyHarness 构建与生产同构的统一会话挂具。historyCells=0 表示
@@ -142,6 +144,12 @@ func newFrameLatencyHarness(b *testing.B, historyCells int) *frameLatencyHarness
 
 	harness := &frameLatencyHarness{controller: controller, presenter: presenter, writer: writer}
 	harness.source.WriteString(frameBenchInitialSource)
+	// 窗口占比：S1 起每帧只物化 viewport 行；rows 1..Top-1（历史区）不再
+	// SGR 编码/VT 展开。此处只记录，循环结束后上报（计时循环前的
+	// ReportMetric 会被测试框架丢弃）。
+	probe := ComposeTerminalFramePlan(controller.State().AppState)
+	harness.viewportRows = terminalFrameViewportArea(probe).Height
+	harness.skippedRows = probe.Geometry.Height - harness.viewportRows
 	return harness
 }
 
@@ -197,6 +205,8 @@ func runFrameDeltaLatency(b *testing.B, historyCells int) {
 	b.ReportMetric(float64(dist.p50), "p50_ns/delta")
 	b.ReportMetric(float64(dist.p95), "p95_ns/delta")
 	b.ReportMetric(float64(dist.max), "max_ns/delta")
+	b.ReportMetric(float64(harness.viewportRows), "viewport_rows")
+	b.ReportMetric(float64(harness.skippedRows), "skipped_rows")
 	if samples.deltas > 0 {
 		b.ReportMetric(float64(samples.flushed)/float64(samples.deltas), "flushed/delta")
 	}

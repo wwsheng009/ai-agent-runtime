@@ -1051,6 +1051,42 @@ func TestTerminalSessionRejectsMismatchedStructuredFrameText(t *testing.T) {
 	}
 }
 
+// P3-S1：viewport-only 物化必须与「全帧物化后取窗口」逐 cell 等价；
+// 同时钉住窗口行数（历史区行不再产生任何 cell）。
+func TestTerminalViewportCellsWindowMatchesFullFrameMaterialization(t *testing.T) {
+	theme := style.BuildThemeContext(style.ThemeSelection{
+		PaletteName: style.PaletteFocus,
+		Mode:        style.ThemeModeDark,
+	}, style.ColorProfile{ColorProfile: render.TrueColorProfile(), Background: style.BackgroundDark})
+
+	plan := terminalSessionPlan(1, 24, 8, 5, LeaseState{})
+	plan.RenderRows = make([]render.Line, len(plan.Rows))
+	for index, row := range plan.Rows {
+		plan.RenderRows[index] = render.Line{Spans: []render.Span{{
+			Text: row.Text, Style: render.Style{Role: string(style.RoleUser)},
+		}}}
+	}
+	full, err := terminalFrameCells(plan.Rows, plan.RenderRows, plan.Geometry.Width, plan.Geometry.Height, theme)
+	if err != nil {
+		t.Fatalf("full frame cells = %v", err)
+	}
+	area := terminalFrameViewportArea(plan)
+	if area.Top <= 1 {
+		t.Fatalf("fixture does not exercise a skipped history region: %#v", area)
+	}
+	want := full[area.Top-1:]
+	got, err := terminalViewportCells(plan, area, theme)
+	if err != nil {
+		t.Fatalf("viewport cells = %v", err)
+	}
+	if len(got) != area.Height {
+		t.Fatalf("viewport cells rows = %d, want %d", len(got), area.Height)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("viewport-only materialization diverged from the full frame window:\ngot=%#v\nwant=%#v", got, want)
+	}
+}
+
 func TestTerminalSessionLeaseReleaseForcesPrimaryRecovery(t *testing.T) {
 	var output bytes.Buffer
 	session := NewTerminalSession(&output)
