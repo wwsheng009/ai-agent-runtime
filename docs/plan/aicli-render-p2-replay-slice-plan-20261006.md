@@ -2,7 +2,7 @@
 
 > 依据：`docs/architecture/aicli-tui-renderer-architecture-design.md` §7.4 第 2 条（replay/settle 族）、
 > `docs/plan/aicli-render-p2-recon-20261006.md` §1（三路只读侦察 + 可删性表 + 切片建议）。
-> 状态：**S1/S2/S3 已完成（`59ac603d`/`9a205572`/`9e7383c1`）**；S4 待启动（本文件随切片推进回填证据与提交锚点）。
+> 状态：**S1/S2/S3/S4 已完成（`59ac603d`/`9a205572`/`9e7383c1`/`7ade9732`）**；S5 待启动（本文件随切片推进回填证据与提交锚点）。
 
 ## 0. 目标语义与行为变更（产品口径）
 
@@ -106,11 +106,21 @@
   **ok 177.9s（3395 pass）**；`go vet`/`go build ./...`/gofmt 干净；真机 e2e PASS
   （72 行 exactly-once）。净删 285 行（17 文件，+84/−369）。
 
-## 4. S4：诊断字段 / debug composer / guard 清理
+## 4. S4：诊断字段 / debug composer / guard 清理（已完成，`7ade9732`）
 
-- `ScrollbackReplayArmed`（state/diagnostics/debug JSON/status 行）、相关唤醒列表项删除。
-- S3 保留的 `scrollbackReset*` 命名（backoff/record 等）重命名为 `recoveryBackoff*`
-  并清理 "reset+replay" 时代注释。
+- `ScrollbackReplayArmed` 全表面删除：`HistoryEffectQueueState`/`HistoryEffectDiagnostics`
+  字段、`terminalSessionScheduleSnapshot`/`terminalSessionControllerSnapshot` 镜像、
+  `/debug/chat/status` JSON（`scrollback_replay_armed`）、debug document
+  `scrollback-replay-armed` 读数、`chat_resume_progress` 的武装门。
+- `ReplaceTranscriptAction.ArmScrollbackReplay` **保留**：它是装载替换的"从源重证明"
+  标记（触发 memo 失效 + re-proof），与物理重放无关；注释已按 append-only 语义改写。
+- `scrollbackReset*` → `recoveryBackoff*` 命名清理：`terminalRecoveryBackoff[Yield]`/
+  `terminalRecoveryRetryWindow`/`terminalRecoveryMaxRetries`/`recoveryBackoffActive`/
+  `recoveryBackoffSuccessMode`/`recordRecoveryBackoff`/`lastRecovery*`；guard 语义改写为
+  "限速非收敛的 source-backed recovery 重证"，"reset+replay" 时代注释全量重写。
+- 验收（已达成）：`go test ./cmd/aicli/ui` **ok 117.7s**；`./cmd/aicli/commands`
+  **ok 181.5s**；`go vet`/`go build ./...`/gofmt 干净；真机 e2e PASS（72 行 exactly-once）。
+  净删 96 行（22 文件，+183/−279）。
 
 ## 5. S5：目标语义用例（新增）
 
