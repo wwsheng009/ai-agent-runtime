@@ -113,6 +113,15 @@
    `compactedTerminalSources` 必须先给出跨装载精确的覆盖表示，否则 3c 保持阻塞、
    墓碑保留。
 
+   **R5 解法方向（已定稿，3c-redesign 按此实施）**：精确性不能来自 frontier；
+   墓碑保留为「已铸造」真相，改为**按当前 transcript 有界化**——
+   `ReplaceTranscriptAction`（非 active-only）时，把 `cellID ∉ nextTranscript`
+   的压缩来源从墓碑集合中剪除（O(cells) 的稀有事件扫描）：
+   - 装载不同会话：旧来源不在新 transcript → 墓碑释放，新来源可铸（修 R5 丢行）；
+   - 重装同一会话：来源仍在 transcript → 墓碑保留（防重复追加，与旧行为一致）；
+   - 上界：墓碑 ≤ 当前 transcript 的来源数（会话自身即有界），不再是「历史交付
+     行数」的无界增长；frontier 退回纯加速器（3b 语义，双跑已证等价）。
+
 ## 6. 实施记录
 
 - **3a（`1f375719`，2026-10-07）**：`HistoryCommitLedger` 增 `mintedFrontier` +
