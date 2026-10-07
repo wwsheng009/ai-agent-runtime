@@ -147,6 +147,10 @@
   未决隔离）、executor 按 proof 分类（Q6 关闭）；设计与实施记录见
   `docs/plan/aicli-render-a1-2-write-proof-record-plan.md`。
 
+- **A1-2b（`b99c6bd1`）**：claimed 失效改 pending-invalidation + 结果动作 proof 解析
+  （Q2 关闭）；executor 写前门控零写 Deferred；`markDeliveredBatchUnresolved` 释放
+  被 claim 游标（Q4 邻近修复）。Q3 covered 集为尾项（见设计记录 §7.2）。
+
 ## 6. 风险与开放问题
 
 1. **settle vs epoch 冲突**：§3.4 行 172 说 settle 保留、行 175-176/§9.3.4 说失败→epoch 恢复；

@@ -57,8 +57,8 @@ type terminalWriteProof struct {
 |---|---|---|
 | Q6（executor 零写判据） | `history.Err != nil && result.Frame.Err != nil && !partial` 合取 | `proof.Outcome == FailedZero`（proof 为 nil 时保留旧合取兜底） |
 | abort 二义 | 两类取消折叠 + wrapper 不区分派发 | Abandoned 事实 + probe partial 标记 |
-| Q2（queue invalidate） | `WriteCursor==token` 推定可能已写（`history_effect_queue.go:496-510`） | A1-2b：读最近 proof（按 token 记录 outcome） |
-| Q3/Q4（batch 失配） | `markDeliveredBatchUnresolved` 兜底（`:607-639`） | A1-2b：ack 携带 covered 集，失配结构性不可达 |
+| Q2（queue invalidate） | `WriteCursor==token` 推定可能已写（`history_effect_queue.go:496-510`） | **已落地（A1-2b，§7.2）**：pending-invalidation + 结果动作 proof 解析 |
+| Q3/Q4（batch 失配） | `markDeliveredBatchUnresolved` 兜底（`:607-639`） | Q4 游标释放已落地（§7.2）；Q3 covered 集为 A1-2b 尾项 |
 | Q5（Deferred 条件） | 由 `Deferred && Err==nil && !partial` 驱动 | 保留 + 零写分支改 proof 驱动（A1-2a） |
 | S6（session tail 去重） | 物理投影证明 + 文本重合 | A1-2c 评估（ledger proof 落账后） |
 
@@ -68,6 +68,7 @@ type terminalWriteProof struct {
   executor 按 proof 分类（Q6 关闭）+ A1-1 abort 用例纠偏（in-flight abort = unresolved）。
 - **A1-2b**：queue/reducer 推定替换：invalidate 不再读 WriteCursor，改读最近 proof
   （executor 在结果动作中携带 outcome）；batch covered 集直接判。
+  **状态（2026-10-07）**：Q2 + Q4 游标释放已落地（§7.2）；Q3 covered 集尾项待做。
 - **A1-2c**：settle 定稿为 proof 终态（放弃区分谓词化）+ 门槛删除面评估
   （E1/E2/E3/S3/S4/S6），更新设计文档 §3.4/§3.6。
 
@@ -114,3 +115,24 @@ type terminalWriteProof struct {
 - **验证**：定向组（含 CloseTimeout / zero-byte 重试 / panic / gateway abort）绿；
   家族 `-count=20` 绿；`-race` 绿；ui 全量 88.0s 绿；commands 全量随提交记录。
 - **待办**：A1-2b（Q2/Q3/Q4 推定替换）、A1-2c（settle proof 终态 + 门槛删除面）。
+
+### 7.2 A1-2b（2026-10-07，Q2/Q4 已落地）
+
+- **pending-invalidation 模型（Q2 关闭）**：`HistoryCommitEntry.InvalidationPending` +
+  `ledger.MarkInvalidationPending/ResolveInvalidation`。`queue.invalidate` 对 claimed
+  token 只登记意图、保留 claim；分类由写结果动作的 proof 解析：
+  - Deferred / 零写失败 → 干净失效（**不置 ProjectionUnknown**，尾部工作继续交付）；
+  - Ack（已提交）→ 失效 + `MayHavePartiallyWritten`（旧字节在屏、来源已变）→ 未决隔离；
+  - partial 失败 → 失效 + partial → 未决隔离。
+- **executor 写前门控**：`historyCommitGate.EntryInvalidationPending`；`runOne` 在 claim
+  校验前发现失效即发零写 Deferred（不把失效载荷写出去）。
+- **Q4 邻近修复**：`markDeliveredBatchUnresolved` 终结被 claim 成员时释放 `WriteCursor`
+  （此前游标会钉死在一个已终态 token 上，后续 claim 永远 out-of-order）；`ackBatch`
+  校验新增 pending-invalidation fail-closed。
+- **行为变化**：claimed 失效不再立即置 unknown；零写证明下投影保持已知、尾部工作不中断。
+  原 `TranscriptBoundaryChangeInvalidatesInFlightHandoff` 用例改为 pending + 解析矩阵
+  （Deferred 干净 / Ack 未决），新增 fail 矩阵、batch 游标释放、executor 零写门控用例。
+- **验证**：queue/reducer `-count=20` 绿；executor `-count=10` 绿；`-race` 绿；ui 全量
+  113.5s 绿；commands 全量随提交记录。
+- **尾项**：Q3——`HistoryCommitsAcknowledged` 携带 covered 集，使
+  `markDeliveredBatchUnresolved` 失配路径结构性不可达（当前仍为兜底）。
