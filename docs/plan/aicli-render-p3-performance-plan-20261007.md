@@ -213,3 +213,25 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
 临界区计时不可靠，且「不引入生产埋点」前提下无低侵入门；改由真机 perf e2e P12
 （UI stall p95/max，`test-aicli-resume-startup-perf-e2e.ps1`）与 S3 的 PaintTrace
 工作计数共同约束。
+
+### 5.2 S1 实施记录（viewport-only 物化，已完成）
+
+- 实现（`terminal_session.go`，commit `9415f683`）：新增
+  `terminalFrameCellsWindow(rows, renderRows, width, height, topRow, rowCount, theme)`
+  按 1-based 窗口物化；`terminalFrameCells` 退化为全帧包装（直接调用面/错误语义不变），
+  `terminalViewportCells` 以 `area.Top/area.Height` 直调窗口函数，不再「全帧物化后切片」。
+- **校验契约保持全帧**：行身份 / 文本 parity / 行控制检查仍覆盖每一行——viewport 之外的
+  行也必须报错（`TestTerminalSessionRejectsMismatchedStructuredFrameText`、
+  `TestTerminalSessionTransactionDefersPreparedHistoryWhenFramePreflightFails` 钉住）；
+  仅窗口外行跳过 `style.RenderDocument` SGR 编码与 `vt.NewScreen`/`Feed`/`CellRows` 展开。
+- 等价判据：新增 `TestTerminalViewportCellsWindowMatchesFullFrameMaterialization`
+  （全帧物化取窗口 vs viewport-only 逐 cell `reflect.DeepEqual` + 返回行数）；
+  全量 ui/commands 绿（118.4s / 186.7s）；真机 e2e 6 项 PASS
+  （73 行 exactly-once / 无 3J / markdown 一次渲染）。
+- 收益（同机 A/B，`-count=3` 中位数；窗口 4 行 / 跳过 20 行，100×24、300 finalized cells）：
+  p50 2.41→2.18ms（**-9.5%**）、p95 3.93→2.71ms（**-31%**）、
+  B/delta 2.634→2.454MB（**-6.8%**）、allocs/delta 8905→8808（-1.1%）。
+  基准新增 `viewport_rows`/`skipped_rows` 报告（注：计时循环前的 `ReportMetric`
+  会被测试框架丢弃，须在循环后上报）。
+- 归因注：分配大头不在物化面——S1 只去掉编码/VT 展开，剩余大头在全屏深拷贝（S2）
+  与全行扫描/失效（S3）。
