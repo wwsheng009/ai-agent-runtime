@@ -71,6 +71,8 @@
   "可能已写"、Q3/Q4 批量证明、Q5 Deferred、Q6 fail 未分离零写。
 - **可删候选**：E1/E2（→proof record 结算）、E3（claim+snapshot 原子化后）、S3/S4（→claim
   Attached + 事务级 proof）、S6（ledger proof 落账后）、Q2-Q6 推定分支。
+  **A1-2c 定稿判定（2026-10-07）**：六门槛全部转为「带前提的保留项」，本轮无删除项；
+  逐条判定与前提见 §5 A1-2c。
 - **必须保留**：generation 身份栅栏、排序护栏（`hasOlderQueuedToken`/`queueHeadToken`）、
   unresolved 未结算门（改 proof 谓词）、lease/freeze、S5/S7/S9 物理缓存与 partial 失效、
   gateway 字节事实、ticket ordering fence。
@@ -156,10 +158,34 @@
   证明分类（pending 失效→未决隔离、身份/同代变化→仅该 token 隔离、竞态 rebase
   照常交付）。见设计记录 §7.3。
 
+- **A1-2c（2026-10-07）**：settle 定稿为 proof 终态 + 门槛删除面评估。
+  - **定稿**：Partial/Abandoned（不可证明）→ Failed+partial 未决隔离 → source-backed 原地重建
+    （viewport 重绘；不清 scrollback、不推进 epoch、不重导）→ settle 原地吸收。**显式放弃区分**：
+    不再判定未证明字节是否落盘；settle 是所有不可证明记录的唯一恢复终态。unresolved gate =
+    proof 谓词（`hasUnresolvedTerminalDelivery()` ⇔ Failed / invalidated-partial 终态）。
+  - **设计文档对齐**：§1.2 G5、§3.4、§3.6、§5.2/§5.4/§5.6、§9.3.4、§9.4、INV-8 的
+    「失败 → 新 epoch 导入」表述全部改为 settle 终态（§3.4/§3.6 为本轮验收面）。
+  - **专项用例**：`TestHistoryEffectsReducer_SettleTerminalStateIsProofDerived`
+    （Committed/FailedZero 不置位；Partial 置位；settle 清位 + 幂等 + 迟到 ack 不复活）。
+  - **门槛删除面（逐条判定；无本轮可删项）**：
+
+    | 门槛 | 证据 | 判定 | 删除前提 |
+    |---|---|---|---|
+    | E1/E2 恢复墙钟退避 | `terminal_session_executor.go:541-556, 625-635` | 保留 | 「成功但义务未清」循环结构性不可达（恢复帧事务内携带 settle 决策），或恢复循环整体退役（P3）；proof record 本身不消解该循环 |
+    | E3 claim-miss 补偿 | `terminal_session_executor.go:864-876` | 保留 | claim+snapshot 原子化（同一 reducer 版本栅栏内接受 claim，头指针不能在其下变化）；此前删除会留下 stranded claim 死锁（无 aging watchdog） |
+    | S3/S4 历史可写性 | `terminal_session.go:866-871, 913` | 保留 | claim 携带 Attached 投影证明（投影已知/边界已知并入 claim 快照），写端不再自行判定；属 A1-3/A2 结构面 |
+    | S6 tail 去重 | `terminal_session.go:962-978, 1469-1488` | 保留 | ledger 行级 proof 落账（重发结构性不可能）+ planner 不 rebase 游标 token；否则 resident-tail 双写回归 |
+    | E4/E5/E6/E7、Q1、S5/S7/S9 | §2 清单 | 保留 | 既有保留项，不在本轮删除面 |
+
+  - **风险 #1 关闭**：settle 与 epoch 冲突以「settle 终态 + 不推进 epoch」定稿；partial 区间在
+    settle 后原地退役（来源身份终态、永不重发），后续 token 按行序从 resident 之后续写——
+    不需要 partial-token ack，也不需要新的行游标起点定义。
+
 ## 6. 风险与开放问题
 
-1. **settle vs epoch 冲突**：§3.4 行 172 说 settle 保留、行 175-176/§9.3.4 说失败→epoch 恢复；
-   需定稿 partial 时行游标起点如何确定（`HistoryCommit` 无 partial-token ack）。
+1. ~~**settle vs epoch 冲突**~~ **已关闭（A1-2c，2026-10-07）**：设计文档统一为 settle 终态
+   （不推进 epoch、不重导）；partial 区间 settle 后原地退役，后续 token 按行序续写，
+   无 partial-token ack 需求。见 §5 A1-2c。
 2. **游标粒度**：physical display row vs `(cell, source range, fragment)`；Markdown fragment 与
    wrap 行不一一对应，resize 改行数（generation）。
 3. **tombstone 去留**：游标后若只从游标之后规划可删；否则 A3 需先有聚合表示。

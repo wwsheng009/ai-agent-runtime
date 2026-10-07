@@ -71,6 +71,7 @@ type terminalWriteProof struct {
   **状态（2026-10-07）**：Q2/Q4（§7.2）+ Q3 覆盖集逐 token 解析（§7.3）全部落地。
 - **A1-2c**：settle 定稿为 proof 终态（放弃区分谓词化）+ 门槛删除面评估
   （E1/E2/E3/S3/S4/S6），更新设计文档 §3.4/§3.6。
+  **状态（2026-10-07）**：settle 定稿 + 六门槛逐条判定 + 设计文档对齐全部落地（§7.4）。
 
 ## 5. 验收
 
@@ -78,6 +79,9 @@ type terminalWriteProof struct {
   + 既有 fail-closed 组 + CloseTimeout/presenter/output abort 组 + 全量 ui 绿。
 - A1-2b：门槛清单 Q2/Q3/Q4 逐条有替代迁移记录；fail-closed 语义不回退。
 - A1-2c：设计文档 §3.4 与实现一致；settle 终态有专项用例。
+  **已完成（2026-10-07）**：§1.2 G5/§3.4/§3.6/§5.2/§5.4/§5.6/§9.3.4/§9.4/INV-8 统一为
+  settle 终态（不推进 epoch、不重导）；`TestHistoryEffectsReducer_SettleTerminalStateIsProofDerived`
+  绿；门槛判定见 §7.4。
 
 ## 6. 风险
 
@@ -157,3 +161,32 @@ type terminalWriteProof struct {
   `TestHistoryEffectQueue_CoveredBatchResolvesPendingInvalidationPerToken`、
   `TestHistoryEffectQueue_BatchUnresolvedReleasesClaimedCursor`；queue/reducer `-count=20`
   绿、`-race` 绿、ui 全量 101.2s 绿、commands 全量随提交记录。
+
+### 7.4 A1-2c settle 终态定稿 + 门槛删除面评估（2026-10-07，已落地）
+
+- **settle 定稿（放弃区分谓词化）**：Partial/Abandoned（不可证明）→ Failed+partial 未决隔离 →
+  source-backed 原地重建（viewport 重绘；不清 scrollback、不写 `3J`、不推进 epoch、不重导）→
+  settle 原地吸收（永不重发；来源身份保持终态防重铸）。不再尝试判定未证明字节是否落盘，
+  settle 是所有不可证明记录的唯一恢复终态。
+- **unresolved gate = proof 谓词**：`hasUnresolvedTerminalDelivery()` ⇔ 存在 Failed /
+  invalidated-partial 终态条目；Committed（Ack）与 FailedZero（Deferred）均不置位。
+- **设计文档对齐**（验收面 §3.4/§3.6）：§1.2 G5、§3.4 失败语义 + unresolved gate、§3.6 导入/失败恢复、
+  §5.2 note、§5.4 标题/note、§5.6 恢复图、§9.3.4 note、§9.4 resume/replay 行、INV-8——
+  「失败 → 新 epoch 导入」表述全部改为 settle 终态。
+- **专项用例**：`TestHistoryEffectsReducer_SettleTerminalStateIsProofDerived`
+  （Committed/FailedZero 不置位；Partial 置位；settle 清位 + 幂等 + Delivered 不被触碰 +
+  迟到 ack 不复活）。
+- **门槛删除面（E1/E2/E3/S3/S4/S6；本轮无删除项，全部转为带前提的保留项）**：
+  - **E1/E2 恢复墙钟退避**（`terminal_session_executor.go:541-556, 625-635`）：保留。删除前提 =
+    「成功但义务未清」循环结构性不可达（恢复帧事务内携带 settle 决策），或恢复循环整体退役（P3）；
+    proof record 本身不消解该循环。
+  - **E3 claim-miss 补偿**（`:864-876`）：保留。删除前提 = claim+snapshot 原子化（同一 reducer
+    版本栅栏内接受 claim）；此前删除会留下 stranded claim 死锁（无 aging watchdog）。
+  - **S3/S4 历史可写性**（`terminal_session.go:866-871, 913`）：保留。删除前提 = claim 携带
+    Attached 投影证明（投影已知/边界已知并入 claim 快照），属 A1-3/A2 结构面。
+  - **S6 tail 去重**（`:962-978, 1469-1488`）：保留。删除前提 = ledger 行级 proof 落账
+    （重发结构性不可能）+ planner 不 rebase 游标 token；否则 resident-tail 双写回归。
+  - E4/E5/E6/E7、Q1、S5/S7/S9：既有保留项，不在本轮删除面。
+- **风险关闭**：侦察 §6 风险 #1（settle vs epoch 冲突）关闭——partial 区间 settle 后原地退役，
+  后续 token 按行序从 resident 之后续写，无 partial-token ack 需求。
+- **验证**：专项用例 `-count=20`/`-race` 绿；ui 全量 + commands 全量随提交记录。

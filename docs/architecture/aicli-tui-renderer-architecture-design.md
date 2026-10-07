@@ -28,7 +28,7 @@ native scrollback 只做 append-only 单向交付（写出的字节永不回读�
 | G2 | **单写端与边界闭合** | 交互期唯一物理写 = `TerminalSession`；标题/铃/编辑器序列/stderr 走显式旁路 | 6 类未栅栏字节出口（审计 §2.2） |
 | G3 | **单向 scrollback** | 不可回读介质不做事务回执；mutable 内容不提前进入；finalized 一次性交付 | 6 态 ledger + replay/settle/reconcile/backoff |
 | G4 | **O(delta) 成本** | 稳态每 delta 工作量 ∝ delta；全屏级克隆/物化/重绘不得作为基线 | 每帧 ≥2 次全屏克隆、全屏物化、全屏强制重绘 |
-| G5 | **确定化恢复** | 无法证明写入结果 → fail-closed → source-backed 重建 + 新 epoch；不盲目重试 | 多守卫补偿叠加（backoff/recovery/unknown/reconcile） |
+| G5 | **确定化恢复** | 无法证明写入结果 → fail-closed → 未决隔离 + source-backed 原地重建（settle，不推进 epoch）；不盲目重试 | 多守卫补偿叠加（backoff/recovery/unknown/reconcile） |
 
 ### 1.3 非目标（明确不做）
 
@@ -172,8 +172,14 @@ flowchart TB
   行序交付游标）、scrollback replay/reconcile（**settle 保留**，它就是目标语义）、reset backoff、
   `PlanIncomplete/PlanStalled/续跑组`——**已删除**（P1-1 Stage 2–4，`72f7f7f4`/`c2745fb5`/`9651f07b`；
   单线程序列化与单向交付后均无存在理由）。
-- **失败语义**：写入结果不可证明 → 不重试旧 token；标记投影 unknown → source-backed 重建 + 新 terminal epoch
-  （§3.6）；恢复不需要旧账本的事务回执。
+- **失败语义（A1-2c 定稿）**：写事务证明分三类——Committed → 覆盖集逐 token ack；FailedZero →
+  Deferred 同 token 重试；Partial/Abandoned（不可证明）→ Failed+partial 未决隔离，标记投影 unknown →
+  source-backed 原地重建（viewport 重绘，不清 scrollback、不推进 epoch、不重导）→ settle 原地吸收
+  （永不重发；来源身份保持终态防重铸）。**显式放弃区分**：不再尝试判定未证明字节是否落盘，
+  settle 是所有不可证明记录的唯一恢复终态；恢复不需要旧账本的事务回执。
+- **unresolved gate**：`hasUnresolvedTerminalDelivery()` ⇔ 存在 Failed / invalidated-partial 终态条目
+  （proof 谓词）；Committed / FailedZero 均不置位（专项用例
+  `TestHistoryEffectsReducer_SettleTerminalStateIsProofDerived`）。
 
 **可见窗口与 scrollback 边界**
 
@@ -198,10 +204,12 @@ flowchart TB
   短写/错误/panic = 失败（fail-closed），不静默降级。
 - **历史插入**：与 viewport diff 在**同一事务**内按 `history insert → viewport diff → cursor restore` 顺序执行；
   较早行进入 native scrollback；resident tail 保持可见窗口连续性。
-- **导入（resume/新 epoch）**：清屏 + 全量有序导入 + viewport + cursor 为**一次事务**；
-  导入后的字节流即新 epoch 的 append-only 流。
-- **失败恢复**：投影标记 unknown → 停止盲目重试 → 以语义源（Scene/AppState）重建 source-backed 帧 +
-  新 epoch 导入；恢复后交付游标从新 epoch 重新开始。
+- **导入（resume）**：清屏 + 全量有序导入 + viewport + cursor 为**一次事务**；导入即当前（初始）
+  epoch 的 append-only 流起点；装载/重证明不额外推进 epoch（A1-2c 定稿）。
+- **失败恢复（A1-2c 定稿）**：投影标记 unknown → 停止盲目重试 → 以语义源（Scene/AppState）重建
+  source-backed viewport 帧（不清 scrollback、不写 `3J`、不推进 epoch）→ settle 原地隔离未证明区间；
+  交付从最后已证明行续写。replay 仅在装载授权（`ArmScrollbackReplay`）时执行，且只做从源重证明、
+  不推进 epoch。语义 `TerminalEpoch` 保留为陈旧回调栅栏（§7.4 S1）。
 
 ### 3.7 输出网关与帧调度
 
@@ -308,7 +316,7 @@ sequenceDiagram
     TS->>GW: 原子写批次
     GW-->>TS: 写完成
     TS-->>DC: 交付确认 → 游标单调前进（载荷释放）
-    Note over PL,DC: 目标形态无 6 态事务、无 replay/settle/reconcile/backoff；<br/>失败即 epoch 恢复（§5.6）。
+    Note over PL,DC: 目标形态无 6 态事务、无 replay/reconcile/backoff 特例；<br/>失败即未决隔离 + settle 原地吸收（§5.6/§9.3.4）。
 ```
 
 ### 5.3 active finalize（mutable 内容零提前进入）
@@ -330,7 +338,7 @@ sequenceDiagram
     Note over AS,TS: active 期间只在底部 band 渲染（可见窗口 W 行）；<br/>溢出内容不提前归档；finalize 后一次写入。
 ```
 
-### 5.4 resume / 历史导入（新 terminal epoch，一次性导入）
+### 5.4 resume / 历史导入（一次性导入；不额外推进 epoch）
 
 ```mermaid
 sequenceDiagram
@@ -346,8 +354,8 @@ sequenceDiagram
     SC->>RD: ReplaceTranscriptAction（一次全量快照）
     RD->>PL: 首轮规划（单遍；无预算截断）
     PL->>TS: 导入事务：清屏 → 有序插入 → viewport → cursor
-    TS->>TTY: 原子写（新 epoch 起点）
-    Note over PL,TS: 恢复不依赖 scrollback 回读；<br/>导入结果即新 epoch 的 append-only 事实。
+    TS->>TTY: 原子写（当前 epoch 的流起点）
+    Note over PL,TS: 恢复不依赖 scrollback 回读；<br/>导入结果即当前 epoch 的 append-only 事实。
 ```
 
 ### 5.5 resize / theme（generation bump；只重画窗口）
@@ -384,10 +392,12 @@ sequenceDiagram
     TS->>GW: 写批次
     GW--xTS: 短写 / 错误 / panic
     TS->>TS: 投影标记 unknown（fail-closed，不盲目重试）
-    TS-->>RD: ProjectionUnknown + epoch 恢复提议
+    TS-->>RD: ProjectionUnknown + 恢复义务（proof 未证明）
     RD->>PL: 以语义源重建（Scene/AppState）
-    PL-->>RD: 恢复帧 + 新 epoch 一次性导入
-    Note over RD,TS: 恢复路径不依赖旧 token 的事务回执；<br/>恢复后交付游标从新 epoch 重新开始。
+    PL-->>RD: 恢复帧（viewport 重绘；不清 scrollback、不推进 epoch）
+    RD->>DC: settle：未证明区间原地隔离（永不重发）
+    DC-->>EX: 从最后已证明行续写（按行序）
+    Note over RD,TS: 恢复路径不依赖旧 token 的事务回执；<br/>settle 是唯一恢复终态（§9.3.4）。
 ```
 
 ### 5.7 fullscreen lease 往返
@@ -405,7 +415,7 @@ sequenceDiagram
     RD->>TS: 冻结历史交付（经同一 presenter transport）
     TS->>TTY: 切副屏
     CMD->>RD: EndLease
-    RD->>TS: 回主屏 + 重画窗口（必要时新 epoch 导入）
+    RD->>TS: 回主屏 + 重画窗口
     TS->>TTY: 原子写
     Note over RD,TS: lease 不另开 writer；<br/>冻结期内 finalized 行只入账不投递。
 ```
@@ -464,7 +474,7 @@ sequenceDiagram
 | INV-5 | **顺序**：cell 内按 source 顺序；跨 cell 按 transcript 顺序；交付游标单调 | 顺序断言 + 覆盖度测试 |
 | INV-6 | **原子帧**：一帧一次原子写（DEC 2026 包裹）；短写 = 失败（fail-closed） | 短写注入测试 |
 | INV-7 | **O(delta)**：稳态每 delta 工作量 ∝ delta；全屏级克隆/物化/重绘不得作基线 | 基准（p50/p95、分配、GC、锁持有） |
-| INV-8 | **确定化恢复**：写入结果不可证明 → unknown → source-backed 重建 + 新 epoch；不盲目重试 | 故障注入 + epoch 断言 |
+| INV-8 | **确定化恢复**：写入结果不可证明 → unknown → source-backed 原地重建 + settle（不推进 epoch）；不盲目重试 | 故障注入 + settle 终态断言 |
 | INV-9 | **generation**：布局代次单调；旧代次回调不得确认新布局 | generation 栅栏测试 |
 | INV-10 | **lease**：lease 活跃冻结历史交付；lease 走同一 transport | lease 往返测试 |
 | INV-11 | **边界闭合**：所有可见字节经统一边界或显式旁路（串行、可记录、lease 感知） | 写端清单 + 门禁白名单 |
@@ -651,7 +661,7 @@ sequenceDiagram
 | A 流式 | `UpdateActiveCellAction` | reducer → band 投影（`ProjectActiveCellBand`） | band 尾部（≤ `ActiveBandRows` 预算） | 不铸 token、不写 scrollback、不写 resident | 无 |
 | B finalize | `FinalizeActiveCellAction` | reducer → planner | 无（仅规划） | — | cell 转 transcript；整段铸造候选（skipRows=0） |
 | C 交付 | 交付唤醒（事件驱动） | executor → `TerminalSession` | 单事务：history insert（resident 窗口 + 溢出按行序 append）→ viewport diff → cursor restore | 不改写 scrollback、不重发已证明行 | claim → 写 → 交付游标前进 |
-| D 账目 | 回执 | reducer / 交付账 | — | 不复活旧 token | ack=游标单调；失败=settle/quarantine 或 epoch 恢复 |
+| D 账目 | 回执 | reducer / 交付账 | — | 不复活旧 token | ack=游标单调；失败=未决隔离 + settle 原地吸收（不推进 epoch） |
 
 ### 9.3 时序图
 
@@ -741,7 +751,7 @@ sequenceDiagram
     TS-->>RD: Failed / ProjectionUnknown
     RD->>DC: settle：不可证明区间原地隔离（永不重发）
     DC-->>EX: 从最后已证明行继续（按行序）
-    Note over RD,TS: 不重试旧 token；<br/>若 settle 无法收敛 → 语义 epoch 恢复（§5.6）。
+    Note over RD,TS: 不重试旧 token；<br/>settle 是唯一恢复终态（不推进 epoch、不重导）。
 ```
 
 > 前置条件：settle 仅在 `LayoutGeneration == 当前代数 && !ScrollbackReplayArmed` 时执行
@@ -755,7 +765,7 @@ sequenceDiagram
 | finalize | 立即转 B（同归约） | 迁移期：等批 ack 后补铸；目标：无 active 批 | 直接铸全量 |
 | lease begin/end | 交付冻结（queued 只入账） | 冻结期 claim 延后；lease 结束恢复 | 不受影响 |
 | 部分写失败 | — | proofs 复位 → settle（从最后已证明行续写） | 不受影响 |
-| resume / replay | 新 epoch 一次性导入（不依赖旧账） | 新 epoch 取消旧在途 | 旧 epoch 游标作废 |
+| resume / replay | 从源重证明（不推进 epoch、不写 3J；append-only 去重） | 在途继续按 ledger 身份交付 | 陈旧回调按语义 epoch 栅栏拒绝 |
 | 长 mutable 溢出 | 超出 band 预算部分 finalize 前不可见（§9.6） | — | — |
 | 队列满 / 背压 | 候选有界入账（不入渲染） | claim 延后，不丢已确认事实 | — |
 
@@ -903,8 +913,10 @@ Panel = { Owner, Instance, Layer(above-prompt | below-prompt | fullscreen),
 1. **D2 提交身份决策**（P1-1 §1.6）：`historyCommitRangeKey` 去 display + finalized 跳过 display 比较；
    已识别中部插入反例（仅跳过重定基会丢行），需测试先行钉住"无重复铸造 / 无丢行"不变式。
 2. **P2 切片顺序**：待三路侦察回报后定稿（预期：先删 active 溢出归档 → 再收 replay/settle → 最后锚定与 backoff）。
-3. **写证明范围**：单向交付 + fail-closed 恢复下，是否需要 per-commit 写证明——设计倾向**否**
-   （epoch 恢复取代事务回执）；需在 P2 验收中验证 partial write 场景。
+3. **写证明范围**：~~单向交付 + fail-closed 恢复下，是否需要 per-commit 写证明——设计倾向否
+   （epoch 恢复取代事务回执）~~ **已定稿（A1-2c）**：per-commit 写事务证明已落地
+   （A1-1/A1-2：Outcome 分类 + 覆盖集逐 token）；不可证明 → 未决隔离 + settle 原地吸收
+   （不推进 epoch）；partial write 场景由 A1-1 矩阵覆盖。
 4. **冷启动首轮锁内预算**：P1-1 Stage 2 的实测门控（超预算则先落 ledger 克隆地板 L2.7）。
 5. **测试改写策略**：5,296 个固化断言中，哪些随 P2/P3 语义改写、哪些删除、哪些新增为结构断言——
    需在 P2 切片计划中列明（避免"改一处、重写多处断言"的回归噪声）。
