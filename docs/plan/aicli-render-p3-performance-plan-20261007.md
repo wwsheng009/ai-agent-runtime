@@ -4,7 +4,7 @@
 > `docs/architecture/aicli-tui-renderer-architecture-design.md` §7.1 P3 行、§7.2 验收行；`docs/plan/aicli-render-remaining-defect-ledger-20261006.md` A4。
 > 基线：`feat/render-p0-writer-unification` @ `8f6b32b8`（工作树干净）。
 > 前置侦察：2026-10-07 三路只读（帧路径成本解剖 / 基准与验收设施 / active markdown 增量可行性），结论并入 §1，不另设侦察文档。
-> 状态：**侦察完成；S0 待启动**。
+> 状态：**S0–S3 完成（S4 待启动）**；切片记录见 §5。
 
 ## 0. 目标与验收
 
@@ -269,3 +269,39 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
 - 剩余热点（修正后 pprof）：`vt.blankRow` 24.7%、`normalizeRow` 13.3%、
   `vt.(*Screen).CellRows` 10.3%、`ProjectActiveCellBandWithTheme` 11.7% cum →
   转入 S3（脏行）与 markdown 增量（S4 前置）。
+
+### 5.4 S3 实施记录（脏行短路 + 行物化复用，已完成）
+
+- 提交锚点：代码与测试 `e61b971f`。
+- 侦察（S2 后稳态 pprof，alloc_space）：`vt.blankRow` 26.0% + `vt.(*Screen).CellRows`
+  15.4%（`terminalFrameCellsWindow` 每个 viewport 行 `vt.NewScreen(width,2)` 的
+  width×2 空白矩阵 + 逐 cell 拷贝）、`normalizeRow` 7.4%（StageFrame 每帧每行重分配）
+  ——三者合计约 49% 的分配面，是 S3 的主战场。
+- 实现：
+  1. `terminalFrameCellsWindow`：窗口内各行共用一个 `vt.Screen`，行间 `Reset()` 复用
+     已分配的行缓冲（其文档语义即「重放单行流不得每行新建 width×height 矩阵」）；
+     VT 展开规则不变（仍是同一 `Screen.Feed`）。
+  2. `ScreenModel.StageFrame` **脏行短路**：宽度已规范且与当前 staged 行逐 cell 相等
+     的行直接复用既有 back 切片，不再 `normalizeRow` 重分配。稳态帧视口大多数行不变、
+     只有流式行变化，此路径把「每帧每行一次分配」降为「仅变更行分配」；跳过是语义
+     无操作（back[r] 已等于该内容）。
+  3. 历史写入的「视口段全量重绘」**维持不变**（评估后不做）：视口模型自 S1 起只有
+     `area.Height` 行（挂具 4 行），且历史插入可经终端滚动影响保留区（§1.1 末行），
+     全量重绘是正确性要求且成本有界；pprof 未显示其为分配大头。收窄方案（令
+     `terminalHistoryInsertionANSI` 报告是否发生跨行一滚动、仅 underfill 时跳过重绘）
+     登记为遗留项：收益上限 = 4 行强制重绘，且触及 P2 锚定/滚动正确性，暂不启动。
+- 等价判据（新增测试，全部绿）：
+  - `renderengine/screen_model_dirty_rows_test.go`：短路实现 vs「逐行全量 normalize」
+    参考实现——staged 网格 `DeepEqual` + `PrepareFlush` 字节相等；未变更行切片身份
+    保持（无重分配）；相同行重复 StageFrame 零字节。
+  - `ui/frame_dirty_rows_test.go`：稳态连续 6 帧单行变更——每帧仅变更行的 CUP 输出
+    （未变更行零字节）、PaintTrace `PaintedRows==1`、`White==0`、`Missing==0`（累计同）；
+    `terminalFrameCellsWindow` 复用实现 vs「每行独立 NewScreen」参考实现逐 cell 等价，
+    且带样式行之后的未着色行无 SGR 泄漏。
+- 收益（同机 A/B，`-count=3` 中位数；仅两生产文件差异）：B/delta 399.0→232.7KB
+  （**-41.7%**）、allocs/delta 2367→2322、GC/iter 3–4→2、p50 601→545µs（-9.3%）、
+  p95 1011→881µs（-12.9%）。
+- 验收：全量 `ui/...` + `commands` 绿（ui 13.5s、commands 173.2s）；`-race` 两包绿
+  （ui 36.5s、renderengine 3.4s）；真机 e2e 6/6 PASS（73 行 exactly-once / 无 3J）。
+- 剩余热点（S4 面）：`ProjectActiveCellBandWithTheme` 9.1% cum（active markdown 每帧
+  全量重算）→ S4 接线 `suffixProjector` + 跨帧前缀缓存。
