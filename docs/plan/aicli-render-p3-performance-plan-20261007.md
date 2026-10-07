@@ -4,7 +4,7 @@
 > `docs/architecture/aicli-tui-renderer-architecture-design.md` §7.1 P3 行、§7.2 验收行；`docs/plan/aicli-render-remaining-defect-ledger-20261006.md` A4。
 > 基线：`feat/render-p0-writer-unification` @ `8f6b32b8`（工作树干净）。
 > 前置侦察：2026-10-07 三路只读（帧路径成本解剖 / 基准与验收设施 / active markdown 增量可行性），结论并入 §1，不另设侦察文档。
-> 状态：**S0–S3 完成（S4 待启动）**；切片记录见 §5。
+> 状态：**S0–S4 完成**（S4 以 profile 修正后的真实热点落地，见 §5.5；结构化源增量缓存登记为后续项）；切片记录见 §5。
 
 ## 0. 目标与验收
 
@@ -305,3 +305,42 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
   （ui 36.5s、renderengine 3.4s）；真机 e2e 6/6 PASS（73 行 exactly-once / 无 3J）。
 - 剩余热点（S4 面）：`ProjectActiveCellBandWithTheme` 9.1% cum（active markdown 每帧
   全量重算）→ S4 接线 `suffixProjector` + 跨帧前缀缓存。
+
+### 5.5 S4 实施记录（profile 修正后的真实热点：plain band 尾部展开 + 检测去 regexp，已完成）
+
+- 提交锚点：代码与测试 `608124dc`。
+- 侦察修正（先测量再动刀）：S4 原定的「markdown 每帧全量重渲」在当前挂具上**不是**
+  最大头——pprof 中 `activeMarkdownSuffixLines` 根本不出现；真实分布是
+  `wrapPlainAppScreenText` 37% cum（`activeCellBandRows` 对**整段源**逐逻辑行 wrap，
+  随后只保留视口尾部 maxRows 行）与 `LooksLikeMarkdown` 31.8% cum（每帧两处调用：
+  投影 + `deriveActiveStableEnd`；其中 regexp 回溯 23%）。
+- 实现（两生产文件）：
+  1. `activeCellBandTailRows`（`active_cell_projection.go`）：从尾部反向数至多
+     maxRows 个换行，只展开尾部逻辑行、返回尾部 maxRows 个可视行。wrap 按逻辑行
+     独立展开（不跨行携带状态），尾部展开与「全量展开后取尾部」逐行等价；
+     `ProjectActiveCellBandWithTheme` plain 分支接线。每帧成本从 O(源长度) 降为
+     O(视口行)。
+  2. `LooksLikeMarkdown` 去 regexp、去全源 Split：线性字节扫描 + 字节门卫
+     （标题/引用必含 `#`/`>`，表格行必含 `|`，否则跳过 TrimLeft/TrimSpace 的
+     逐 rune 扫描——门卫前两者占该函数成本三分之一以上）。语义与旧正则实现
+     逐例等价。
+- 等价判据（新增测试，全绿）：
+  - `active_cell_band_tail_test.go`：13 组源（含 CRLF/控制序列/组合字符/超宽行）
+    × 4 宽度 × 4 maxRows 的「尾部 vs 全量尾部」`DeepEqual`；2 万行头部 +
+    小尾部的分配有界断言（≤64 allocs，防回退全源展开）；投影接线后逐行等于
+    全量展开尾部。
+  - `markdown/detect_test.go`：70+ 例语料 + **20,000 例固定种子随机串**与旧
+    regexp 参考实现逐例等价；另有直接真值钉点。
+- 收益（同机 A/B，`-count=3` 中位数；基线 = S3 `e61b971f`）：B/delta
+  231.8→119.4KB（**-48.5%**）、allocs/delta 2322→610.7（**-73.7%**）、
+  ns/op 8.77→2.97ms（**-66.1%**）、p50 539.7→189.3µs（**-64.9%**）、
+  p95 942.3→255.9µs（**-72.8%**）；字节门卫追加后 p50 中位 169µs。
+- 累计（对 S0 修正基线 526KB / 2407 allocs / p50 808µs / p95 1.68ms）：
+  B/delta **-77.3%**、allocs **-74.6%**、p50 **-79.1%**、p95 **-84.9%**。
+- 验收：`ui/...` + `commands` 全量绿（commands 168s）；`-race`（ui + markdown）
+  绿；真机 e2e 6/6 PASS（73 行 exactly-once / 无 3J）。
+- 遗留（登记不实施，需先补挂具）：结构化（markdown/reasoning）源仍每帧 1–2 次
+  全源渲染（`activeMarkdownSuffixLines`/`activeReasoningSuffixLines` 的
+  full+prefix 双渲），本挂具未覆盖；下一步先加 markdown 流式挂具量化，再按
+  原 S4-A/B（`suffixProjector` 接线 + 跨帧前缀缓存）评估；C/D/E（stable/holdback
+  拆分、chroma memo、回退护栏）随之。
