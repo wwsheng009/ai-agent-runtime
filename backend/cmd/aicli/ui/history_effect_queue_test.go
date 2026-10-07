@@ -182,7 +182,7 @@ func TestHistoryEffectsReducer_BootstrapBatchMismatchQuarantinesOnlyChangedToken
 		t.Fatalf("unchanged covered head must stay delivered: %#v", head)
 	}
 	changed := historyCommitEntry(t, state, commits[1].Token)
-	if !changed.IsFailed() || changed.AckFrame != 0 ||
+	if !changed.Unresolved() || changed.AckFrame != 0 ||
 		!changed.MayHavePartiallyWritten || !errors.Is(changed.Failure, ErrCommitSourceChanged) {
 		t.Fatalf("changed covered token was not quarantined: %#v", changed)
 	}
@@ -480,7 +480,7 @@ func TestHistoryEffectsReducer_LeaseFreezesAndReplacementInvalidatesPending(t *t
 	invalidated := false
 	for _, entry := range state.HistoryEffects.Entries() {
 		if entry.Commit.Token == token {
-			invalidated = entry.IsInvalidated()
+			invalidated = entry.State == HistoryCommitQuarantined
 		}
 	}
 	if !invalidated {
@@ -556,7 +556,7 @@ func TestHistoryEffectsReducer_TranscriptBoundaryChangeKeepsClaimedInvalidationP
 	// reached the host, so the projection stays known and no recovery is owed.
 	state = reduceUIControllerState(state, HistoryCommitDeferred{Token: token, LayoutGeneration: claimGeneration}, 5)
 	entry = historyCommitEntry(t, state, token)
-	if !entry.IsInvalidated() || entry.MayHavePartiallyWritten || entry.InvalidationPending {
+	if !entry.MayRemint || entry.MayHavePartiallyWritten || entry.InvalidationPending {
 		t.Fatalf("zero-write invalidation must resolve clean: %#v", entry)
 	}
 	if state.HistoryEffects.WriteCursor != 0 || state.HistoryEffects.ProjectionUnknown || state.HistoryEffects.ReconciliationRequired {
@@ -597,7 +597,7 @@ func TestHistoryEffectsReducer_ClaimedInvalidationResolvedByAckIsUnresolved(t *t
 	if entry.State == HistoryCommitDelivered {
 		t.Fatalf("invalidated payload was acknowledged as delivered: %#v", entry)
 	}
-	if !entry.IsInvalidated() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
+	if !entry.Unresolved() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
 		t.Fatalf("committed invalidated payload must be unresolved: %#v", entry)
 	}
 	if state.HistoryEffects.WriteCursor != 0 || !state.HistoryEffects.ProjectionUnknown {

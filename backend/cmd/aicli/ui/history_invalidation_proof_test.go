@@ -32,7 +32,7 @@ func TestHistoryEffectQueue_ClaimedInvalidationResolvesFromFailProof(t *testing.
 		t.Fatalf("fail: %v", err)
 	}
 	entry := queue.Entries()[0]
-	if !entry.IsInvalidated() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
+	if !entry.Unresolved() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
 		t.Fatalf("partial failure must resolve as unresolved invalidation: %#v", entry)
 	}
 	if queue.WriteCursor != 0 || !queue.ProjectionUnknown || !queue.ReconciliationRequired {
@@ -54,7 +54,7 @@ func TestHistoryEffectQueue_ClaimedInvalidationResolvesFromFailProof(t *testing.
 		t.Fatalf("fail: %v", err)
 	}
 	entry = queue.Entries()[0]
-	if !entry.IsInvalidated() || entry.MayHavePartiallyWritten {
+	if !entry.MayRemint || entry.MayHavePartiallyWritten {
 		t.Fatalf("zero-write failure must resolve clean: %#v", entry)
 	}
 	if queue.WriteCursor != 0 || queue.ProjectionUnknown || queue.ReconciliationRequired {
@@ -162,7 +162,7 @@ func TestHistoryCommitExecutor_InvalidatedClaimDefersWithoutWrite(t *testing.T) 
 	}
 	state = controller.State()
 	entry = historyCommitEntry(t, state, claimed.Commit.Token)
-	if !entry.IsInvalidated() || entry.MayHavePartiallyWritten || entry.InvalidationPending {
+	if !entry.MayRemint || entry.MayHavePartiallyWritten || entry.InvalidationPending {
 		t.Fatalf("gate refusal must resolve the invalidation clean: %#v", entry)
 	}
 	if state.HistoryEffects.WriteCursor != 0 || state.HistoryEffects.ProjectionUnknown {
@@ -210,7 +210,7 @@ func TestHistoryEffectQueue_CoveredBatchResolvesPendingInvalidationPerToken(t *t
 		return HistoryCommitEntry{}
 	}
 	entry := findEntry(head.Token)
-	if !entry.IsInvalidated() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
+	if !entry.Unresolved() || !entry.MayHavePartiallyWritten || entry.InvalidationPending {
 		t.Fatalf("covered invalidation must resolve as unresolved isolation: %#v", entry)
 	}
 	tailEntry := findEntry(tail.Token)

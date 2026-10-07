@@ -748,7 +748,7 @@ func TestTerminalSessionExecutorFrameFailureReconcilesWithoutBlindHandoff(t *tes
 
 	state := controller.State()
 	entry := historyCommitEntry(t, state, firstToken)
-	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
+	if !entry.Unresolved() || !entry.MayHavePartiallyWritten || !state.HistoryEffects.ProjectionUnknown || writer.writes != 1 {
 		t.Fatalf("failed bootstrap did not fail closed: entry=%#v unknown=%t writes=%d", entry, state.HistoryEffects.ProjectionUnknown, writer.writes)
 	}
 
@@ -981,7 +981,7 @@ func TestTerminalSessionExecutorMissingHistoryResultFailsConservatively(t *testi
 	executor.publishResult(commit.LayoutGeneration, &commit, result)
 	controller.WaitIdle()
 	entry := historyCommitEntry(t, controller.State(), commit.Token)
-	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrTerminalTransactionMissingResult) {
+	if !entry.Unresolved() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrTerminalTransactionMissingResult) {
 		t.Fatalf("missing terminal result was not conservatively failed: %#v", entry)
 	}
 	if !controller.State().HistoryEffects.ProjectionUnknown {

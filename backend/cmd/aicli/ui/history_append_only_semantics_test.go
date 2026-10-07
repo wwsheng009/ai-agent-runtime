@@ -296,7 +296,7 @@ func TestHistoryEffectsReducer_SettleTerminalStateIsProofDerived(t *testing.T) {
 	state = reduceUIControllerState(state, HistoryCommitFailed{
 		Token: retriedToken, LayoutGeneration: 2, Err: errors.New("short write"), MayHavePartiallyWritten: true,
 	}, 8)
-	if entry := historyCommitEntry(t, state, retriedToken); !entry.IsFailed() || !entry.MayHavePartiallyWritten {
+	if entry := historyCommitEntry(t, state, retriedToken); !entry.Unresolved() || !entry.MayHavePartiallyWritten {
 		t.Fatalf("partial delivery must be quarantined unresolved: %#v", entry)
 	}
 	if !state.HistoryEffects.ProjectionUnknown || !state.HistoryEffects.ReconciliationRequired ||

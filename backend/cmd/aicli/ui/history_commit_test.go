@@ -118,7 +118,7 @@ func TestHistoryCommitLedger_FailurePreservesPartialWriteSignal(t *testing.T) {
 		t.Fatalf("Fail: %v", err)
 	}
 	entry, ok := ledger.Entry(commit.Token)
-	if !ok || !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, cause) {
+	if !ok || !entry.Unresolved() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, cause) {
 		t.Fatalf("entry = %+v, found=%t", entry, ok)
 	}
 }

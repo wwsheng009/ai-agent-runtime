@@ -366,7 +366,7 @@ func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
 	// 正是两条路径必须分开的原因，也说明上面的断言不是恒真。
 	syncHistoryEffectCandidates(state, []HistoryCommit{prefix})
 	tailEntry, ok = state.HistoryEffects.ledger.Entry(1)
-	if !ok || !tailEntry.IsInvalidated() {
+	if !ok || tailEntry.State != HistoryCommitQuarantined || !tailEntry.MayRemint {
 		t.Fatalf("完整规划语义下，不在有效集合里的 pending 条目应当被置为 invalidated: ok=%t state=%s", ok, tailEntry.State)
 	}
 }

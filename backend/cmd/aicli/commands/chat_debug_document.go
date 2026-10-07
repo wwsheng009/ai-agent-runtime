@@ -504,9 +504,11 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 	// claimed-token/gen 给出被 claim 的 token 身份：其 generation 落后于当前
 	// layout generation 即 stranded claim 签名（releaseClaimMiss 修复的病态），
 	// 只有计数时这与「正在健康写入」无法区分。
-	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-failed=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d",
+	// A1-3 步 3d：quarantined 子类折叠为两轴后，failed 与 partial-invalidated
+	// 不可区分，原 quarantined-failed 读数并入 quarantined-unresolved。
+	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-inflight=%t plan-windows=%d frozen=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d",
 		summary.Queued, summary.Delivered, summary.Quarantined,
-		summary.QuarantinedUnresolved, summary.QuarantinedFailed, summary.QuarantinedSettled,
+		summary.QuarantinedUnresolved, summary.QuarantinedSettled,
 		summary.LedgerEntries,
 		summary.LedgerCompacted, summary.LedgerTerminalSources,
 		summary.PlanCount, summary.LastPlanMs, summary.MaxPlanMs,

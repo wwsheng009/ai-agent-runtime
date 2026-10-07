@@ -137,14 +137,12 @@ func assertSummaryMatchesEntryWalk(t *testing.T, state UIControllerState) {
 			want.Delivered++
 		case HistoryCommitQuarantined:
 			want.Quarantined++
-			switch entry.Quarantine {
-			case HistoryCommitQuarantineFailed:
-				want.QuarantinedFailed++
-			case HistoryCommitQuarantineSettled:
-				want.QuarantinedSettled++
-			}
 			if entry.Unresolved() {
 				want.QuarantinedUnresolved++
+			} else if !entry.MayRemint {
+				// A1-3 步 3d：settled 与 invalidated-clean 由两轴区分；后者
+				// 允许重铸，不计入 settled。
+				want.QuarantinedSettled++
 			}
 		}
 	}
@@ -192,8 +190,8 @@ func TestHistoryEffectQueueSummaryMatchesEntryWalk(t *testing.T) {
 	executor.Request()
 	executor.WaitIdle()
 	state := failing.State()
-	if summary := state.HistoryEffects.Summary(); summary.QuarantinedFailed == 0 {
-		t.Fatalf("expected a failed entry after a refusing sink: %#v", summary)
+	if summary := state.HistoryEffects.Summary(); summary.QuarantinedUnresolved == 0 {
+		t.Fatalf("expected an unresolved entry after a refusing sink: %#v", summary)
 	}
 	assertSummaryMatchesEntryWalk(t, state)
 }

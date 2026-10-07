@@ -91,7 +91,7 @@ func TestHistoryCommitExecutor_FailureStopsDrainAndMarksUnknown(t *testing.T) {
 		t.Fatalf("calls=%d unknown=%t, want one failed call and Unknown", calls, state.HistoryEffects.ProjectionUnknown)
 	}
 	entries := state.HistoryEffects.Entries()
-	if len(entries) < 2 || !entries[0].IsFailed() || !entries[0].MayHavePartiallyWritten {
+	if len(entries) < 2 || !entries[0].Unresolved() || !entries[0].MayHavePartiallyWritten {
 		t.Fatalf("failed head entry = %#v", entries)
 	}
 	if entries[1].State != HistoryCommitQueued {
@@ -112,7 +112,7 @@ func TestHistoryCommitExecutor_PossiblePartialWriteWithoutErrorFails(t *testing.
 	executor.WaitIdle()
 
 	entry := controller.State().HistoryEffects.Entries()[0]
-	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitPartialWriteWithoutError) {
+	if !entry.Unresolved() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitPartialWriteWithoutError) {
 		t.Fatalf("partial-without-error entry = %#v", entry)
 	}
 	if !controller.State().HistoryEffects.ProjectionUnknown {
@@ -133,7 +133,7 @@ func TestHistoryCommitExecutor_SinkPanicFailsAndLeavesNoWorkerHang(t *testing.T)
 	executor.WaitIdle()
 
 	entry := controller.State().HistoryEffects.Entries()[0]
-	if !entry.IsFailed() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitSinkPanic) {
+	if !entry.Unresolved() || !entry.MayHavePartiallyWritten || !errors.Is(entry.Failure, ErrHistoryCommitSinkPanic) {
 		t.Fatalf("panic entry = %#v", entry)
 	}
 	if !controller.State().HistoryEffects.ProjectionUnknown {

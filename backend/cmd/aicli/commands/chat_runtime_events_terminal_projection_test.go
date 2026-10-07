@@ -470,7 +470,7 @@ func TestLateReasoningBarrierWithholdsLongAssistantFromNativeHistory(t *testing.
 	}
 	for _, entry := range final.HistoryEffects.Entries() {
 		if entry.State == ui.HistoryCommitQueued ||
-			entry.IsFailed() || entry.MayHavePartiallyWritten {
+			entry.Unresolved() || entry.MayHavePartiallyWritten {
 			t.Fatalf("late reasoning history effect not settled: %#v", entry)
 		}
 	}
@@ -649,7 +649,7 @@ func TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory(t *test
 	}
 	for _, entry := range state.HistoryEffects.Entries() {
 		if entry.State == ui.HistoryCommitQueued ||
-			entry.IsFailed() || entry.MayHavePartiallyWritten {
+			entry.Unresolved() || entry.MayHavePartiallyWritten {
 			t.Fatalf("history effect not acknowledged: %#v", entry)
 		}
 	}

@@ -86,24 +86,11 @@ const (
 	// HistoryCommitDelivered：物理写成功并已进滚动区（原 Acked）。
 	HistoryCommitDelivered
 	// HistoryCommitQuarantined：交付不可证明或被拒绝（原 Failed/Invalidated/
-	// Abandoned）。不再阻断有序交付，但按 Quarantine 子类保留未决计数、压缩
-	// 资格与"同源防重铸"三个行为差异。
+	// Abandoned）。不再阻断有序交付；A1-3 步 3d 后不再细分 kind，未决计数、
+	// 压缩资格与"同源防重铸"三个行为差异由条目上的 UnresolvedDelivery /
+	// MayRemint 两个布尔轴表达（Failed 与 partial-invalidated 在两轴上同形，
+	// 无法也无需区分）。
 	HistoryCommitQuarantined
-)
-
-// HistoryCommitQuarantine 是 quarantined 的子类，只保留无法合并的行为差异：
-//   - Failed：写失败，恒未决（settle 前不可压缩、阻断同源再铸）；
-//   - Invalidated：语义替换取消；MayHavePartiallyWritten 时未决且阻断再铸，
-//     否则已解决、可压缩、不阻断同源再铸；
-//   - Settled：settle 后的隔离终态：不再未决、可压缩，但永久阻断同源再铸
-//     （无重放策略下不可由内存证明的交付既不重发也不重铸）。
-type HistoryCommitQuarantine uint8
-
-const (
-	HistoryCommitQuarantineNone HistoryCommitQuarantine = iota
-	HistoryCommitQuarantineFailed
-	HistoryCommitQuarantineInvalidated
-	HistoryCommitQuarantineSettled
 )
 
 func (s HistoryCommitState) String() string {
@@ -119,25 +106,18 @@ func (s HistoryCommitState) String() string {
 	}
 }
 
-func (q HistoryCommitQuarantine) String() string {
-	switch q {
-	case HistoryCommitQuarantineFailed:
-		return "failed"
-	case HistoryCommitQuarantineInvalidated:
-		return "invalidated"
-	case HistoryCommitQuarantineSettled:
-		return "settled"
-	default:
-		return "none"
-	}
-}
-
 // HistoryCommitEntry is an immutable snapshot of one ledger item.
 type HistoryCommitEntry struct {
-	Commit                  HistoryCommit
-	State                   HistoryCommitState
-	Quarantine              HistoryCommitQuarantine
-	AckFrame                uint64
+	Commit   HistoryCommit
+	State    HistoryCommitState
+	AckFrame uint64
+	// UnresolvedDelivery（仅隔离态）: 交付不可证明，settle 前保持未决——不可
+	// 压缩、阻断有序交付。与 MayHavePartiallyWritten 区分：后者是物理事实
+	// （covered 强化会给已 settle 条目也写入该事实），前者是恢复义务。
+	UnresolvedDelivery bool
+	// MayRemint（仅隔离态）: 允许同一来源再次铸造（仅"invalidated 且未部分
+	// 写入"一类）；其余隔离终态永久阻断同源重铸。Queued/Delivered 恒阻断。
+	MayRemint               bool
 	MayHavePartiallyWritten bool
 	Failure                 error
 	// InvalidationPending marks a Queued entry whose source/presentation was
@@ -158,32 +138,25 @@ func (e HistoryCommitEntry) Clone() HistoryCommitEntry {
 // failed write is always unresolved, an invalidated write only when bytes may
 // have partially landed. Settled quarantines are resolved by definition.
 func (e HistoryCommitEntry) Unresolved() bool {
-	return e.Quarantine == HistoryCommitQuarantineFailed ||
-		(e.Quarantine == HistoryCommitQuarantineInvalidated && e.MayHavePartiallyWritten)
+	return e.State == HistoryCommitQuarantined && e.UnresolvedDelivery
 }
 
-func (e HistoryCommitEntry) IsFailed() bool {
-	return e.State == HistoryCommitQuarantined && e.Quarantine == HistoryCommitQuarantineFailed
-}
-
-func (e HistoryCommitEntry) IsInvalidated() bool {
-	return e.State == HistoryCommitQuarantined && e.Quarantine == HistoryCommitQuarantineInvalidated
-}
-
+// IsSettled reports the settle 终态：已解决（无恢复义务）且永久阻断重铸。
 func (e HistoryCommitEntry) IsSettled() bool {
-	return e.State == HistoryCommitQuarantined && e.Quarantine == HistoryCommitQuarantineSettled
+	return e.State == HistoryCommitQuarantined && !e.UnresolvedDelivery && !e.MayRemint
 }
 
 // BlocksRemint reports whether this entry's source identity must block a second
 // mint of the same range within the terminal epoch. Delivered and every
-// quarantine kind block except a pure (non-partial) invalidation, whose source
-// was never physically delivered and is therefore free to be planned again.
+// quarantine block except an invalidated-clean identity (MayRemint), whose
+// source was never physically delivered and is therefore free to be planned
+// again.
 func (e HistoryCommitEntry) BlocksRemint() bool {
 	switch e.State {
 	case HistoryCommitQueued, HistoryCommitDelivered:
 		return true
 	case HistoryCommitQuarantined:
-		return e.Quarantine != HistoryCommitQuarantineInvalidated || e.MayHavePartiallyWritten
+		return !e.MayRemint
 	default:
 		return false
 	}
@@ -439,11 +412,12 @@ func (l *HistoryCommitLedger) invalidateQueued(token uint64, mayHavePartiallyWri
 		return ErrCommitNotPending
 	}
 	entry.State = HistoryCommitQuarantined
-	entry.Quarantine = HistoryCommitQuarantineInvalidated
+	entry.UnresolvedDelivery = mayHavePartiallyWritten
+	entry.MayRemint = !mayHavePartiallyWritten
 	entry.InvalidationPending = false
+	entry.MayHavePartiallyWritten = mayHavePartiallyWritten
 	if mayHavePartiallyWritten {
 		l.unresolvedCount++
-		entry.MayHavePartiallyWritten = true
 	}
 	l.byToken[token] = entry
 	l.advanceQueueHeadAfterTerminal(token)
@@ -521,7 +495,8 @@ func (l *HistoryCommitLedger) Fail(token uint64, err error, mayHavePartiallyWrit
 		return ErrCommitNotInFlight
 	}
 	entry.State = HistoryCommitQuarantined
-	entry.Quarantine = HistoryCommitQuarantineFailed
+	entry.UnresolvedDelivery = true
+	entry.MayRemint = false
 	entry.Failure = err
 	entry.MayHavePartiallyWritten = mayHavePartiallyWritten
 	// A failed quarantine is always unresolved regardless of
@@ -552,7 +527,8 @@ func (l *HistoryCommitLedger) SettleUnresolvedWithoutReplay() bool {
 			continue
 		}
 		entry.State = HistoryCommitQuarantined
-		entry.Quarantine = HistoryCommitQuarantineSettled
+		entry.UnresolvedDelivery = false
+		entry.MayRemint = false
 		entry.MayHavePartiallyWritten = false
 		l.byToken[token] = entry
 		settled = true
@@ -634,8 +610,8 @@ func (l *HistoryCommitLedger) holdsPlan() bool {
 }
 
 // prunableResolvedEntry 判定一个已终结的条目是否仍被任何读取方消费载荷。
-// 保留集合只有一类：failed / invalidated-with-partial 隔离——未决交付，
-// settle 之前必须保持可寻址。
+// 保留集合只有一类：未决交付（UnresolvedDelivery）——settle 之前必须保持
+// 可寻址。
 //
 // 其余终态（Delivered、settled 隔离、invalidated 且未部分写入）的载荷
 // 无人再读，只剩"该来源已交付"这一身份事实，可压缩为 tombstone。
@@ -644,8 +620,7 @@ func prunableResolvedEntry(entry HistoryCommitEntry) bool {
 	case HistoryCommitDelivered:
 		return true
 	case HistoryCommitQuarantined:
-		return entry.Quarantine == HistoryCommitQuarantineSettled ||
-			(entry.Quarantine == HistoryCommitQuarantineInvalidated && !entry.MayHavePartiallyWritten)
+		return !entry.UnresolvedDelivery
 	default:
 		return false
 	}

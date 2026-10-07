@@ -324,10 +324,11 @@ type HistoryEffectQueueSummary struct {
 	Delivered             int
 	// Quarantined counts every terminal non-delivery; the sub-counters keep the
 	// two behaviours a soak must tell apart: unresolved entries still gate
-	// recovery, settled entries no longer do.
+	// recovery, settled entries no longer do. A1-3 步 3d 折叠后不再单列
+	// "failed"：failed 与 partial-invalidated 在两轴上同形（未决、阻断重铸），
+	// 统一计入 QuarantinedUnresolved。
 	Quarantined            int
 	QuarantinedUnresolved  int
-	QuarantinedFailed      int
 	QuarantinedSettled     int
 	OldestQueuedToken      uint64
 	OldestQueuedGeneration uint64
@@ -394,14 +395,12 @@ func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
 			summary.Delivered++
 		case HistoryCommitQuarantined:
 			summary.Quarantined++
-			switch entry.Quarantine {
-			case HistoryCommitQuarantineFailed:
-				summary.QuarantinedFailed++
-			case HistoryCommitQuarantineSettled:
-				summary.QuarantinedSettled++
-			}
 			if entry.Unresolved() {
 				summary.QuarantinedUnresolved++
+			} else if !entry.MayRemint {
+				// settled 终态（已解决且永久阻断重铸）；invalidated-clean 是
+				// 唯一"已解决且允许重铸"的隔离态，不计入 settled。
+				summary.QuarantinedSettled++
 			}
 		}
 	}
@@ -682,11 +681,16 @@ func (s *HistoryEffectQueueState) quarantineCoveredToken(token uint64, cause err
 	switch entry.State {
 	case HistoryCommitQueued:
 		entry.State = HistoryCommitQuarantined
-		entry.Quarantine = HistoryCommitQuarantineFailed
+		entry.UnresolvedDelivery = true
+		entry.MayRemint = false
 	case HistoryCommitQuarantined:
-		// Failed stays failed, an invalidated identity is kept but its physical
-		// fact is strengthened, and a settled quarantine keeps its settled kind
-		// (already resolved by the no-replay policy).
+		// Failed / settled keep their axes (settled 保持"已解决"语义，强化
+		// 只写物理事实不改恢复义务）；invalidated-clean 的物理事实强化为
+		// "可能已部分落盘"：撤回重铸许可并转为未决。
+		if entry.MayRemint {
+			entry.UnresolvedDelivery = true
+			entry.MayRemint = false
+		}
 	}
 	entry.Failure = cause
 	entry.MayHavePartiallyWritten = true

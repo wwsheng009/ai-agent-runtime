@@ -47,7 +47,7 @@ func assertHistoryCoverage(t *testing.T, controller *UIController, session *Term
 	counts := make(map[HistoryCommitState]int)
 	for _, entry := range state.HistoryEffects.Entries() {
 		counts[entry.State]++
-		if entry.IsInvalidated() || entry.IsSettled() {
+		if entry.State == HistoryCommitQuarantined {
 			continue
 		}
 		covered[entry.Commit.CellID] = struct{}{}
