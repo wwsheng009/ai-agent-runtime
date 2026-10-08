@@ -209,10 +209,10 @@ buildChatSession
 
 | 位置 | 内容 | 处置建议 |
 |---|---|---|
-| `chat_setup.go:891` | 恢复停放团队的 stderr 信息行（unified 可达，无 TTY 门控） | 收口到 `NotifyChatDiagnostic` |
-| `chat_setup.go:867` | 退出恢复提示 `fmt.Printf`（仅 `Layout != nil`，Interaction.Shutdown 之后） | 决策点：shutdown 后是否允许 stdout（如允许，登记为 sanctioned） |
-| `inputbox_editor.go:151,157` | secret 读经 `WriteTerminalText/Line(os.Stdout,…)` 绕过 gateway（M1 可达） | 经 editor hook / session 控制序列收口；需保留密码输入语义 |
-| `chat.go:943`、`chat_setup.go:108` | stderr warning | 评估收口或登记 |
+| `chat_setup.go:891` | 恢复停放团队的 stderr 信息行（unified 可达，无 TTY 门控） | **已收口（L2）**：统一渲染存活时经 `NotifyChatDiagnostic` 走动态栏；未登记出口保留 stderr 兜底 |
+| `chat_setup.go:867` | 退出恢复提示 `fmt.Printf`（仅 `Layout != nil`，Interaction.Shutdown 之后） | **已登记（L2）**：sanctioned——Shutdown 之后的退出提示，无 unified 渲染窗口可污染 |
+| `inputbox_editor.go:151,157` | secret 读经 `WriteTerminalText/Line(os.Stdout,…)` 绕过 gateway（M1 可达） | **已收口（L2）**：`LineEditorHooks.OnTerminalText` 认领（标签经提示行预渲染 + 尾换行）；未认领保留 raw 兜底 |
+| `chat.go:943`、`chat_setup.go:108` | stderr warning | **已收口/已登记（L2）**：`chat.go:943` 经 `NotifyChatDiagnostic`（stderr 兜底）；`chat_setup.go:108` 无 ANSI 降级告警 sanctioned（plain 模式无 unified 渲染窗口） |
 
 ---
 
@@ -282,6 +282,27 @@ buildChatSession
 - 扩展单写端断言：`TestUnifiedSessionSinglePhysicalWriterFence` 增加 secret 路径驱动；
 - `chat_setup.go:867` 按 D0 决策登记或改造。
 - 验收：单写端栅栏 PASS + 门禁计数下降 + 真机 e2e（unified 场景）。
+
+**L2 执行记录（2026-10-08，提交 `657bf253`）**
+
+- secret 收口（D0-2 选 (a)）：新增 `LineEditorHooks.OnTerminalText` 与
+  `ReadTransientSecretPromptWithHooks`；`chatSecretComposerPrompt` 先经提示行预渲染
+  （`showRuntimeComposerPrompt`）、再经 `ClaimSecretPromptOutput` 认领；未认领保留 raw 兜底
+  （非 unified 字节不变）。编辑器自有字节的 raw 兜底收敛到 `writeEditorRaw` 单一出口。
+- 通知收口：`chat_setup.go:891` resume 通知、`chat.go:943` 配置加载告警改经
+  `NotifyChatDiagnostic`（未登记交互出口保留 stderr 兜底）；`printChatExitResumeHint`、
+  `buildChatSession` 无 ANSI 降级告警登记为 sanctioned console writer。
+- 门禁：ui 直写债务 **35 → 34（net −1）**、raw 引用 3→1（net −2）：摘除
+  `ReadTransientSecretPrompt`/`writeEditorControlSequence` 条目、新增 `writeEditorRaw`。
+- 测试：ui 新增 secret hooks 认领/回退两用例；`TestUnifiedSessionSinglePhysicalWriterFence`
+  增加 secret 路径驱动（stdout/stderr 零字节 + 提示行标签进入统一写端）。
+- 验收：`gofmt` 干净；`go build ./...` 绿；`go test ./cmd/aicli/ui`（含门禁）绿；
+  `go test ./cmd/aicli/commands` 全量绿（192s）。**真机 e2e（unified 场景）未在本机执行**
+  （无 TTY 环境），以单写端栅栏 + 全量套件替代；建议人工在真实终端复跑一次 `/login`
+  （secret 输入）与 resume-停队提示。
+- 环境登记：低内存期 go 编译出现 `runtime: cannot allocate memory`（commands 测试构建），
+  `GOMAXPROCS=2` 后稳定；team 时序用例（`TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled`、
+  `...FailedAutoStartTeamClosesNonLeadTeammateSessionAfterTerminal`）在同代码的多次全量运行间偶发。
 
 ### L3 FixedBottomSurface 拆壳（C 类，3 小刀）
 

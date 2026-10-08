@@ -82,6 +82,14 @@
   - 验证：ui 全量（含 -race 子集）、commands 全量（174s）、`go build ./...`、门禁绿；
     环境偶发与暂缓项（InputBox legacy 方法簇）见方案 §5 执行记录。
 
+- [x] **L2 unified 残留直写收口**（2026-10-08，`657bf253`；退役方案 §4.5 四项全部处置）。
+  - secret 读经 `LineEditorHooks.OnTerminalText` 认领（标签经提示行预渲染 + 尾换行；
+    未认领保留 raw 兜底，非 unified 字节不变）；编辑器自有字节 raw 兜底收敛 `writeEditorRaw`。
+  - resume 通知 / runtime 配置加载告警改经 `NotifyChatDiagnostic`（stderr 兜底保留）；
+    退出恢复提示与无 ANSI 降级告警登记 sanctioned console writer。
+  - 门禁：**ui 债务 35→34（net −1，raw 引用 3→1）**；`TestUnifiedSessionSinglePhysicalWriterFence`
+    扩展 secret 驱动；ui/commands 全量绿（commands 192s）；真机 e2e 待人工复跑（见方案 §5）。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
