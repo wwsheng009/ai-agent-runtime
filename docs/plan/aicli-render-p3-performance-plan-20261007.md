@@ -4,7 +4,7 @@
 > `docs/architecture/aicli-tui-renderer-architecture-design.md` §7.1 P3 行、§7.2 验收行；`docs/plan/aicli-render-remaining-defect-ledger-20261006.md` A4。
 > 基线：`feat/render-p0-writer-unification` @ `8f6b32b8`（工作树干净）。
 > 前置侦察：2026-10-07 三路只读（帧路径成本解剖 / 基准与验收设施 / active markdown 增量可行性），结论并入 §1，不另设侦察文档。
-> 状态：**S0–S4 完成**（S4 以 profile 修正后的真实热点落地，见 §5.5；结构化源增量缓存登记为后续项）；切片记录见 §5。
+> 状态：**S0–S4 完成**（S4：§5.5 plain 热点收敛 + §5.6 结构化路径窗口化）；切片记录见 §5。
 
 ## 0. 目标与验收
 
@@ -343,4 +343,48 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
   全源渲染（`activeMarkdownSuffixLines`/`activeReasoningSuffixLines` 的
   full+prefix 双渲），本挂具未覆盖；下一步先加 markdown 流式挂具量化，再按
   原 S4-A/B（`suffixProjector` 接线 + 跨帧前缀缓存）评估；C/D/E（stable/holdback
-  拆分、chroma memo、回退护栏）随之。
+  拆分、chroma memo、回退护栏）随之。→ 已由 §5.6 落地（markdown 流式挂具 +
+  锚定窗口缓存 + 增量稳定切分；reasoning 走尾部行有界路径）。
+
+### 5.6 S4b 实施记录（结构化路径窗口化：锚定窗口缓存 + RenderTail + 增量稳定切分，已完成）
+
+- 提交锚点：代码与测试 `63a56627`。
+- 新挂具（先量化）：`BenchmarkFrameLatencyStreamingMarkdown`（每 delta 追加
+  「标题 + 列表 + 闭合 Go 代码栅栏 + 段落」小节；240KB 源）暴露结构化路径
+  真实成本：p50 **19.9ms** / p95 **57ms** / **5.5MB/delta** / **49k allocs/delta**
+  （同挂具 plain 路径仅 0.17ms / 120KB / 611）——远超 16ms 硬线。两层根因：
+  1. active band 投影每帧对整段源 `markdown.Render`（parse + 行内 + chroma）；
+  2. `deriveActiveStableEnd` 每帧新建 `StreamCollector` 对整段源做稳定切分扫描
+     （栅栏 + 表格全源扫描）。
+- 实现（三处，全部带校验/回退）：
+  1. `markdown.RenderTail(source, opts, minLines)`：整段源仍 parse（块结构上下文
+     相关），但只渲染覆盖预算的**尾部块**；`ApplyBlockSpacing` 只依赖相邻块，
+     故尾部行序列是全量渲染行序列的精确后缀。
+  2. `active_markdown_window.go`：锚定窗口缓存——首帧全量渲染作基线，在尾部
+     搜索候选边界（空行之后的行首），候选必须满足「单独解析 `source[cut:]` 的
+     渲染 == 基线后缀」且覆盖视口预算（该检查同时证明 cut 是真实块边界）；
+     此后源只增（prefix 校验）时每帧只解析/渲染窗口（≈预算行）并尝试前移 cut，
+     前移同样以后缀校验为准。任何校验失败回退全量路径，正确性不依赖启发式。
+  3. `deriveActiveStableEnd` 增量化：按 cell 缓存 `StreamCollector`、只推增量；
+     `StreamCollector.recompute` 改为只扫描上一稳定点之后的尾部（各分支等价性
+     见注释，并由推流语料逐步对比钉住）。
+- 等价判据（新增测试，全绿）：
+  - `markdown/render_tail_test.go`：13 例语料 + 流式追加 × 多预算的「尾部 ==
+    全量后缀」；机制钉点（头部栅栏零高亮调用）。
+  - `markdown/stream_incremental_test.go`：11 组推流语料逐步对比「增量 stable ==
+    全量重建 stable/holdback/raw」。
+  - `active_markdown_window_test.go`：流式语料逐步「窗口投影 == 全量尾部」；
+    维护路径零触碰头部块（计数高亮器）；源替换重建；单段落无边界退化源正确；
+    60 次追加后窗口长度 ≤2KB（有界）。
+  - `active_cell_stable_incremental_test.go`：stable-end 增量 == 每次全量重建。
+- 收益（同机 A/B，`-count=3` 中位数；同挂具）：
+  - p50 19.9ms → **0.213ms（-98.9%）**；p95 57ms → **0.29ms（-99.5%）**；
+    B/delta 5.5MB → **242KB（-95.6%）**；allocs/delta 49060 → **1004（-98.0%）**。
+  - 分步：仅 RenderTail 时 p50 13.3ms / allocs 35836；窗口+增量后达标。
+  - 对照 plain 路径（0.169ms / 611 allocs / 119.5KB）：结构化路径已同档，
+    不再是帧瓶颈；plain 路径无回归。
+- 验收：`ui/...` 全量绿；`-race`（ui 聚焦 + markdown 全包）绿；`commands`
+  全量绿（169.2s）；真机 e2e 6/6 PASS（73 行 exactly-once / 无 3J）。
+- 机制边界（诚实记录）：窗口只服务 start==0（未交接）流式路径；start>0 交接
+  路径保持原「全量 + 前缀校验」实现（生产 `MarkActiveAcked` 目前无调用者）。
+  无块边界/始终无候选的退化源自动回退全量路径，正确性不受影响。
