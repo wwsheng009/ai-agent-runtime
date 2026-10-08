@@ -5615,12 +5615,14 @@ tools: ["echo_tool"]
 	assert.Contains(t, startRec.Body.String(), `"started":true`)
 	assert.Contains(t, startRec.Body.String(), `"watching":true`)
 	assert.Contains(t, startRec.Body.String(), `"skillCount":1`)
-	events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
-		EventType: "skills.changed",
-		Limit:     10,
+	// skills.changed 来自两条链路：请求内同步发布的 start 事件，以及
+	// ReloadDone 回调异步广播的 reload 事件（attachEmbeddingHotReloadSync 的
+	// 刻意行为，TestAttachEmbeddingHotReloadSync_* 已钉住）。到达顺序不受保证，
+	// 所以按 action 等待而不是按下标断言。
+	startPayload := waitSkillsChangedPayload(t, handler, func(payload map[string]interface{}) bool {
+		return payload["action"] == skillMutationActionHotReloadStart
 	})
-	require.Len(t, events, 1)
-	assert.Equal(t, skillMutationActionHotReloadStart, events[0].Payload["action"])
+	assert.Equal(t, true, startPayload["watching"])
 	require.Equal(t, 1, registry.Count())
 	loadedSkill, ok := registry.Get("hot-skill")
 	require.True(t, ok)
@@ -5659,12 +5661,12 @@ tools: ["echo_tool"]
 	assert.Contains(t, reloadRec.Body.String(), `"reloaded":true`)
 	_, exists := registry.Get("hot-skill-updated")
 	assert.True(t, exists)
-	events = handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
-		EventType: "skills.changed",
-		Limit:     10,
+	// 手动 reload 端点同步发布 run 事件（带 affected_count）；ReloadDone 广播的
+	// run 事件不带该字段，用它能与 start 阶段的异步广播区分开。
+	reloadPayload := waitSkillsChangedPayload(t, handler, func(payload map[string]interface{}) bool {
+		return payload["action"] == skillMutationActionHotReloadRun && payload["affected_count"] != nil
 	})
-	require.Len(t, events, 2)
-	assert.Equal(t, skillMutationActionHotReloadRun, events[1].Payload["action"])
+	assert.Equal(t, skillMutationActionHotReloadRun, reloadPayload["action"])
 
 	stopReq := httptest.NewRequest(http.MethodPost, "/api/runtime/skills/hot-reload/stop", nil)
 	stopReq.RemoteAddr = "127.0.0.1:1234"
@@ -5673,12 +5675,33 @@ tools: ["echo_tool"]
 	require.Equal(t, http.StatusOK, stopRec.Code)
 	assert.Contains(t, stopRec.Body.String(), `"stopped":true`)
 	assert.Contains(t, stopRec.Body.String(), `"watching":false`)
-	events = handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
-		EventType: "skills.changed",
-		Limit:     10,
+	stopPayload := waitSkillsChangedPayload(t, handler, func(payload map[string]interface{}) bool {
+		return payload["action"] == skillMutationActionHotReloadStop
 	})
-	require.Len(t, events, 3)
-	assert.Equal(t, skillMutationActionHotReloadStop, events[2].Payload["action"])
+	assert.Equal(t, false, stopPayload["watching"])
+}
+
+// waitSkillsChangedPayload waits (bounded) until a skills.changed event whose
+// payload matches arrives and returns that payload. Hot-reload broadcasts are
+// published asynchronously (the ReloadDone callback) and can interleave with
+// request-scoped events, so callers must wait by action instead of asserting on
+// slice positions.
+func waitSkillsChangedPayload(t *testing.T, handler *Handler, match func(payload map[string]interface{}) bool) map[string]interface{} {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, event := range handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+			EventType: "skills.changed",
+			Limit:     50,
+		}) {
+			if match(event.Payload) {
+				return event.Payload
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("skills.changed event was not published")
+	return nil
 }
 
 func TestPublishHotReloadSkillChangedEvent_PublishesRuntimeEvent(t *testing.T) {
