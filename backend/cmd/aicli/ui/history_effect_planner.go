@@ -691,7 +691,17 @@ func transcriptFinalizedPrefixFence(transcript TranscriptState) uint64 {
 // transcriptFenceFoldString folds a grouping key into the finalized-prefix
 // fence. Chain keys are identity-relevant layout inputs (gap decisions), so
 // they must be part of the fingerprint even for unversioned snapshots.
+//
+// 按 8 字节字折叠（FNV 乘子链每字一次，尾字节逐字节），覆盖全部字节且
+// 确定性不变：BoundaryGroupKey 可能是长键，逐字节折叠实测 90ms/4225 cell，
+// 是 memo 检查里最贵的一段。
 func transcriptFenceFoldString(h uint64, s string, prime uint64) uint64 {
+	for len(s) >= 8 {
+		h ^= uint64(s[0]) | uint64(s[1])<<8 | uint64(s[2])<<16 | uint64(s[3])<<24 |
+			uint64(s[4])<<32 | uint64(s[5])<<40 | uint64(s[6])<<48 | uint64(s[7])<<56
+		h *= prime
+		s = s[8:]
+	}
 	for i := 0; i < len(s); i++ {
 		h ^= uint64(s[i])
 		h *= prime

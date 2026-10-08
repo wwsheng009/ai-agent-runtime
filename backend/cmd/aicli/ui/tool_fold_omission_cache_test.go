@@ -107,9 +107,10 @@ func TestFoldOmissionCacheMatchesUncachedJudgement(t *testing.T) {
 	}
 }
 
-// TestToolFoldTargetRowsChecksEachCellOnce 锁定逐行去重：同一个 cell 占据多行
-// 时只做一次 omission 判定（否则一个长 cell 会把同一次 BuildPreview 判定重复
-// N 遍）；mutable cell 完全跳过。
+// TestToolFoldTargetRowsChecksEachCellOnce 锁定逐行去重与倒序早停：同一个 cell
+// 占据多行时只做一次 omission 判定（否则一个长 cell 会把同一次 BuildPreview
+// 判定重复 N 遍）；mutable cell 完全跳过；倒序扫描在最后一个折叠 cell 处即停，
+// 更早的 cell 不再判定（结果不变，判定次数更少）。
 func TestToolFoldTargetRowsChecksEachCellOnce(t *testing.T) {
 	sharedFoldOmissions.reset()
 	t.Cleanup(sharedFoldOmissions.reset)
@@ -136,9 +137,10 @@ func TestToolFoldTargetRowsChecksEachCellOnce(t *testing.T) {
 		t.Fatalf("toolFoldTargetRows = %d, want 2（最近一次折叠是 cell 2）", got)
 	}
 	hits, misses, _, entries, _ := sharedFoldOmissions.stats()
-	// 去重后每个非 mutable cell 恰好查一次：cell 1/2/3 → 3 miss；若逐行判定，
-	// 同 source 的后续查询会变成 cache hit（hits 远大于 0）。
-	if misses != 3 || hits != 0 || entries != 3 {
-		t.Fatalf("stats hits=%d misses=%d entries=%d，want 0/3/3（逐行去重失效）", hits, misses, entries)
+	// 去重：每个**访问到的** cell 至多判定一次（同 source 的后续逐行查询会变成
+	// cache hit，hits 必须为 0）。倒序 + 命中即停：cell 4（mutable，跳过）、
+	// cell 3、cell 2 被访问，cell 1 在命中点之后不再判定 → 2 miss / 2 entries。
+	if misses != 2 || hits != 0 || entries != 2 {
+		t.Fatalf("stats hits=%d misses=%d entries=%d，want 0/2/2（去重失效或未在命中处停止）", hits, misses, entries)
 	}
 }

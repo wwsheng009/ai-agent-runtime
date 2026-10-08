@@ -81,11 +81,15 @@ func toolFoldTarget(cells []scene.TranscriptCell) scene.CellID {
 // toolFoldTargetRows 同 toolFoldTarget，但输入是 layout rows：同一个 cell 可能
 // 占据多行，且未提交（mutable）的 cell 由 active band 渲染，不参与折叠归属。
 func toolFoldTargetRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}) scene.CellID {
-	target := scene.CellID(0)
 	// 同一个 cell 可能连续占据多行（gap/换行/wrap）；判定按 cell 只做一次，
 	// 否则一个长 cell 会把同一次 BuildPreview 判定重复 N 遍。
 	checked := make(map[scene.CellID]struct{}, 16)
-	for _, row := range rows {
+	// 目标 = 行序中**最后一个**折叠 tool cell。倒序扫描 + 首个命中即返回：
+	// 最近的 tool 调用在转录尾部，常见情况下只判几个 cell（正序扫描要为每个
+	// cell 做一次 source 内容寻址查询，实测 120ms/86k 行）；全无命中时退化
+	// 为与正序等价的 O(全部 cell)。checked 去重保证同一 cell 不逐行重判。
+	for index := len(rows) - 1; index >= 0; index-- {
+		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
 			continue
 		}
@@ -100,7 +104,7 @@ func toolFoldTargetRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.Tra
 		if !cellUsesFoldedToolPresentation(candidate) || !toolFoldOmits(candidate.Source) {
 			continue
 		}
-		target = candidate.ID
+		return candidate.ID
 	}
-	return target
+	return 0
 }
