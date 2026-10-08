@@ -13,6 +13,17 @@
   - 扫描语义：`ui/*.go` 生产文件的 `os.Stdout/os.Stderr` 触碰点（纯 `Fd()` 探测除外）、`fmt.Print*`、`TerminalOutput()`。
   - 基线分组：P0 实活目标（inputbox_editor ×3 组、status 兜底、osc_live）；lease/全屏已改道的 raw 兜底；
     legacy 死链打印机；被栅栏的 FixedBottomSurface；`TERM_SESSION_TRACE` 调试追踪。
+- [x] **legacy 打印机孤岛删除 Batch 1**（2026-10-08）。
+  - 删除 `ui/progress.go`（Progress/Spinner + PrintProgress/PrintSpinner）、`ui/shell_feedback.go`、
+    `ui/toolcall.go` 及各自测试；`ui/output.go` 裁剪为仅存活符号 `TruncateVisible`
+    （commands/chat_debug_document.go、ui/active_cell_projection.go 在用）。
+  - 门禁基线 **65→50 条目（net −15）**：progress 6、shell_feedback 3、toolcall 4、output 2。
+    判定依据：符号级 repo-wide 交叉验证（非测试引用 = 0；deadcode 因机器内存不足未能全量运行，
+    以编译器 + 全量测试兜底）。
+  - 验证：`go build ./cmd/aicli/commands` 绿；`go test ./cmd/aicli/ui` 13s 绿；
+    `go test ./cmd/aicli/commands` 210s 绿；`TestUIInteractiveDirectWriterInventory` 绿。
+  - `tool_output_safety_test.go` 保留活覆盖（SanitizeToolOutput / PreviewToolOutputANSI /
+    StatusLine golden）；`ui/README.md` 章节目录同步。
 - [x] **控制序列旁路 API + inputbox_editor 模式序列迁移**（commit `c159a118`）。
   - `TerminalSession.WritePromptEditorControl(sequence)`：以 `TransactionPromptEditor` kind 提交，
     与帧/历史共用 `transactionMu`（控制字节不可能插入帧字节中间）。

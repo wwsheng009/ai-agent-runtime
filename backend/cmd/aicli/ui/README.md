@@ -68,49 +68,38 @@ cmd/aicli/
 - PrintThinSeparator() - 打印细分隔线
 - 支持自定义分隔符样式
 
-### 9. progress.go - 进度条组件
-- PrintProgress() - 打印进度条
-- PrintSpinner() - 打印旋转加载器
-- 支持百分比显示
-
-### 10. shell_feedback.go - Shell 命令执行反馈组件
-- DisplayShellCommand() - 显示执行的命令
-- DisplayShellOutput() - 显示命令输出
-- DisplayShellError() - 显示命令错误
-- 命令执行状态指示
-
-### 11. status.go - 状态指示组件
+### 9. status.go - 状态指示组件
 - PrintSuccess() - 成功提示
 - PrintError() - 错误提示
 - PrintWarning() - 警告提示
 - PrintInfo() - 信息提示
 - 支持不同颜色和图标
 
-### 12. statusbar.go - 状态栏组件
+### 10. statusbar.go - 状态栏组件
 - Update() - 更新状态栏项
 - SetThinking() - 设置 AI 思考状态（固定显示在状态栏）
 - SetModel(), SetTokens(), SetMsgCount() - 更新重要状态信息
 - 固定在屏幕底部，不影响聊天信息流
 
-### 13. terminal.go - 终端控制组件
+### 11. terminal.go - 终端控制组件
 - MoveTo(), MoveToRow() - 移动光标位置
 - Clear(), ClearFromCursor() - 清屏和光标清除
 - SaveCursor(), RestoreCursor() - 光标位置保存和恢复
 - HideCursor(), ShowCursor() - 光标显示控制
 
-### 14. layout.go - 屏幕布局管理器
+### 12. layout.go - 屏幕布局管理器
 - NewLayout() - 创建新的布局（支持简单/高级模式）
 - ChatArea(), InputArea(), StatusArea() - 获取各区域
 - PrintMessage() - 在聊天区域打印消息
 - Render() - 渲染完整布局
 
-### 15. fullscreen_list.go - 全屏列表选择器
+### 13. fullscreen_list.go - 全屏列表选择器
 - SelectFullScreenList() - 在备用屏幕中选择列表项目
 - 支持上下移动、翻页、首尾跳转、搜索、确认和取消
 - 可选删除键（x/X/Delete）：配置了 OnDelete 时，按删除键以 DeleteRequested 结果关闭列表，由调用方确认并持久化后重开列表
 - 离开选择器时恢复原聊天屏幕、滚动区域、光标和终端 raw mode
 
-### 16. inputbox.go - 输入框组件
+### 14. inputbox.go - 输入框组件
 - Read() - 读取单行输入
 - ReadMultiLine() - 读取多行输入
 - 支持历史记录导航
