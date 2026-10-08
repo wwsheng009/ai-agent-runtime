@@ -317,22 +317,6 @@ func (l *Layout) writeDoc(doc render.Document) {
 	_, _ = WriteTerminalText(os.Stdout, text)
 }
 
-func (l *Layout) writeRightAligned(row int, plainWidth int, styled string) {
-	if l == nil || l.terminal == nil {
-		return
-	}
-	width := l.terminal.Width()
-	if width <= 0 {
-		width = 80
-	}
-	pad := width - plainWidth
-	if pad < 0 {
-		pad = 0
-	}
-	l.terminal.MoveToRow(row)
-	_, _ = WriteTerminalText(os.Stdout, strings.Repeat(" ", pad)+styled)
-}
-
 // RenderInputArea 渲染输入区域（Document + WriteTerminal*）
 func (l *Layout) RenderInputArea(prompt, input string) {
 	if !l.enabled || l.inputArea == nil {
@@ -355,80 +339,6 @@ func (l *Layout) RenderInputArea(prompt, input string) {
 
 	text := l.FormatInputArea(prompt, input)
 	_, _ = WriteTerminalText(os.Stdout, text+clearToEOL)
-
-	l.terminal.RestoreCursor()
-}
-
-// PrintMessage 打印消息到聊天区域（先消毒再写出）
-func (l *Layout) PrintMessage(content string) {
-	text := FormatLayoutMessage(content)
-	if !l.enabled {
-		_, _ = WriteTerminalLine(os.Stdout, text)
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	l.terminal.SaveCursor()
-	_, _ = WriteTerminalLine(os.Stdout, text)
-	l.terminal.RestoreCursor()
-}
-
-// PrintToChat 在聊天区域指定位置打印（先消毒再写出）
-func (l *Layout) PrintToChat(row, col int, text string) {
-	safe := SanitizeTerminalText(text)
-	if !l.enabled {
-		_, _ = WriteTerminalLine(os.Stdout, safe)
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if l.chatArea == nil {
-		return
-	}
-
-	l.terminal.SaveCursor()
-
-	actualRow := l.chatArea.Row + row - 1
-	if actualRow < l.chatArea.Row {
-		actualRow = l.chatArea.Row
-	}
-	if actualRow > l.chatArea.Row+l.chatArea.Height-1 {
-		actualRow = l.chatArea.Row + l.chatArea.Height - 1
-	}
-
-	actualCol := l.chatArea.Col + col - 1
-	if actualCol < l.chatArea.Col {
-		actualCol = l.chatArea.Col
-	}
-	if actualCol > l.chatArea.Col+l.chatArea.Width-1 {
-		actualCol = l.chatArea.Col + l.chatArea.Width - 1
-	}
-
-	l.terminal.PrintAt(actualRow, actualCol, safe)
-	l.terminal.RestoreCursor()
-}
-
-// ClearChatArea 清空聊天区域
-func (l *Layout) ClearChatArea() {
-	if !l.enabled || l.chatArea == nil {
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	l.terminal.SaveCursor()
-
-	for i := 0; i < l.chatArea.Height; i++ {
-		t := l.terminal
-		t.MoveToRow(l.chatArea.Row + i)
-		t.ClearFromCursor()
-		_, _ = WriteTerminalText(os.Stdout, clearToEOL)
-	}
 
 	l.terminal.RestoreCursor()
 }

@@ -225,16 +225,6 @@ func DisplaySystemMessage(content string) {
 	NewMessage(MessageSystem, content).Print()
 }
 
-// DisplayToolMessage 显示工具消息
-func DisplayToolMessage(content string) {
-	NewMessage(MessageTool, content).Print()
-}
-
-// DisplayErrorMessage 显示错误消息
-func DisplayErrorMessage(content string) {
-	NewMessage(MessageError, content).Print()
-}
-
 // FormatUserMessage 格式化用户消息
 func FormatUserMessage(content string) string {
 	return NewMessage(MessageUser, content).Format()

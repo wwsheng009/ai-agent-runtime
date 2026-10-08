@@ -110,28 +110,6 @@ func PrintEmptyLine() {
 	_, _ = WriteTerminalLine(os.Stdout, "")
 }
 
-// PrintEmptyLines 打印多行空行
-func PrintEmptyLines(count int) {
-	for i := 0; i < count; i++ {
-		PrintEmptyLine()
-	}
-}
-
-// PrintSeparator 快捷方法：打印普通分隔线
-func PrintSeparator() {
-	NewSeparator().Print()
-}
-
-// PrintThickSeparator 快捷方法：打印粗分隔线
-func PrintThickSeparator() {
-	NewSeparator().SetType(SeparatorThick).Print()
-}
-
-// PrintThinSeparator 快捷方法：打印细分隔线
-func PrintThinSeparator() {
-	NewSeparator().SetType(SeparatorThin).Print()
-}
-
 // PrintTitledSeparator 快捷方法：打印带标题的分隔线
 func PrintTitledSeparator(title string) {
 	NewSeparator().SetTitle(title).Print()

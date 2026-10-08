@@ -187,16 +187,6 @@ func (t *Theme) String() string {
 	}
 }
 
-// PrintSeparator 打印分隔线
-func (t *Theme) PrintSeparator(width int) {
-	_, _ = WriteTerminalLine(os.Stdout, RenderRoleTextWithTheme(strings.Repeat(t.Separator, width), style.RoleBorder, t))
-}
-
-// PrintBorder 打印边框分隔线
-func (t *Theme) PrintBorder(width int) {
-	_, _ = WriteTerminalLine(os.Stdout, RenderRoleTextWithTheme(strings.Repeat(t.BorderHorizontal, width), style.RoleBorder, t))
-}
-
 // FormatUser 格式化用户消息
 func (t *Theme) FormatUser(text string) string {
 	return t.formatRolePrefix(style.RoleUser, t.UserIcon, text)

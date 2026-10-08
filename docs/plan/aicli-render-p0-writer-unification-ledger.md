@@ -24,6 +24,20 @@
     `go test ./cmd/aicli/commands` 210s 绿；`TestUIInteractiveDirectWriterInventory` 绿。
   - `tool_output_safety_test.go` 保留活覆盖（SanitizeToolOutput / PreviewToolOutputANSI /
     StatusLine golden）；`ui/README.md` 章节目录同步。
+- [x] **legacy 打印机孤岛删除 Batch 2**（2026-10-08）。
+  - 删除零调用方函数：`welcome.go` PrintHelp/PrintGoodbye（帮助改为命令侧 structured 输出）；
+    `theme.go` `(Theme).PrintBorder/PrintSeparator`；`layout.go`
+    PrintMessage/PrintToChat/ClearChatArea/writeRightAligned；`input.go` PromptAssistant。
+  - 附带清理（无门禁条目，纯死代码）：`message.go` DisplayToolMessage/DisplayErrorMessage；
+    `separator.go` PrintEmptyLines/PrintSeparator/PrintThickSeparator/PrintThinSeparator
+    （`PrintTitledSeparator`/`PrintSection`/`PrintEmptyLine` 保留：命令侧 legacy 兜底在用）。
+  - 门禁基线 **50→41 条目（net −9）**；判定同 Batch 1（零调用方 + 编译器/测试兜底）。
+  - 验证：`go test ./cmd/aicli/ui` 15.3s 绿；守卫门禁绿；`gofmt` 干净。
+  - commands 全量复跑说明：本机资源紧张期出现 3 个互不相同的 team/streaming 时序用例偶发
+    失败（`AutoStartTeamClosesNonLeadTeammate…`、`ReplayedTerminalEventClosesNonLeadTeammate…`、
+    `StreamingAssistantFinalTailTransfersExactlyOnce…`）；同一用例隔离复跑 ×5/×20 全绿，
+    期间编译器一度报 `Insufficient system resources`，按**环境偶发**登记。
+    Batch 2 删除面全部为 ui 包零引用死代码（commands 编译器引用面为零，无法影响其运行期行为）。
 - [x] **控制序列旁路 API + inputbox_editor 模式序列迁移**（commit `c159a118`）。
   - `TerminalSession.WritePromptEditorControl(sequence)`：以 `TransactionPromptEditor` kind 提交，
     与帧/历史共用 `transactionMu`（控制字节不可能插入帧字节中间）。

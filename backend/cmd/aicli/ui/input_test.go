@@ -125,21 +125,3 @@ func TestInputBoxFormatPrompt_Document(t *testing.T) {
 		t.Fatalf("context FormatPrompt = %q, want %q", got, "ctx ")
 	}
 }
-
-func TestPromptAssistant_WritesSanitizedLine(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	SetTheme(ThemeAuto)
-
-	output := captureUIStdout(t, func() {
-		PromptAssistant("hi\x1b[0m")
-	})
-	if strings.Contains(output, "\x1b") {
-		t.Fatalf("expected no ESC in output, got %q", output)
-	}
-	if !strings.Contains(output, "hi") {
-		t.Fatalf("expected message body, got %q", output)
-	}
-	if !strings.HasSuffix(output, "\n") {
-		t.Fatalf("expected trailing newline, got %q", output)
-	}
-}

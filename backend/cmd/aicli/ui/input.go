@@ -218,16 +218,6 @@ func PromptUser() string {
 	return input
 }
 
-// PromptAssistant 助手输入辅助（用于测试或特殊场景）
-func PromptAssistant(message string) {
-	theme := GetTheme(ThemeAuto)
-	text := renderInputDocument(AssistantMessageDocument(message), theme)
-	if text == "" {
-		return
-	}
-	_, _ = WriteTerminalLine(os.Stdout, text)
-}
-
 // FormatUserPrompt 格式化用户输入提示
 func FormatUserPrompt() string {
 	return FormatUserPromptWithAttachments(0)

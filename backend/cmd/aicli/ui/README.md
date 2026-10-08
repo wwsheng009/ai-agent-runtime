@@ -64,9 +64,9 @@ cmd/aicli/
 - 表格格式化输出
 
 ### 8. separator.go - 分隔线组件
-- PrintSeparator() - 打印分隔线
-- PrintThinSeparator() - 打印细分隔线
-- 支持自定义分隔符样式
+- NewSeparator().Build() - 构建分隔线（命令/选择输出在用）
+- PrintEmptyLine()/PrintSection() - 空行与节标题（legacy 兜底路径在用）
+- 支持自定义分隔符样式与类型（Thick/Thin）
 
 ### 9. status.go - 状态指示组件
 - PrintSuccess() - 成功提示
@@ -90,8 +90,8 @@ cmd/aicli/
 ### 12. layout.go - 屏幕布局管理器
 - NewLayout() - 创建新的布局（支持简单/高级模式）
 - ChatArea(), InputArea(), StatusArea() - 获取各区域
-- PrintMessage() - 在聊天区域打印消息
-- Render() - 渲染完整布局
+- RenderInputArea() - 渲染输入区域（legacy 输入框路径）
+- SetEnabled()/IsEnabled() - 布局启用状态（命令侧接线）
 
 ### 13. fullscreen_list.go - 全屏列表选择器
 - SelectFullScreenList() - 在备用屏幕中选择列表项目
