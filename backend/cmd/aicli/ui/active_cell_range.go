@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
@@ -66,20 +67,70 @@ func sourceRangePrefix(source, prefix string) bool {
 // The returned offset is measured directly in semantic source coordinates.
 // Ordinary assistant chrome is not stored in Source, so presentation and
 // ledger offsets can no longer diverge.
-func deriveActiveStableEnd(source string) int {
+//
+// 增量缓存：同一 cell 的源只增时，把增量推给既有 StreamCollector 即可——其
+// recompute 只扫描上一稳定点之后的尾部。避免每帧对整段源做全量稳定切分
+// 扫描（P3-S4：240KB markdown 源下该扫描曾占帧 CPU 近半）。
+func deriveActiveStableEnd(cellID scene.CellID, source string) int {
 	if source == "" {
 		return 0
 	}
 	if !markdown.LooksLikeMarkdown(source) {
 		return len(source)
 	}
+	if cellID != 0 {
+		cache := activeStableCollectors
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		if entry := cache.entries[cellID]; entry != nil && strings.HasPrefix(source, entry.source) {
+			if source != entry.source {
+				_ = entry.collector.Push(source[len(entry.source):])
+				entry.source = source
+			}
+			cache.seq++
+			entry.seq = cache.seq
+			return len(entry.collector.Stable())
+		}
+		var collector markdown.StreamCollector
+		_ = collector.SetContent(source)
+		cache.seq++
+		cache.entries[cellID] = &activeStableCollectorEntry{source: source, collector: &collector, seq: cache.seq}
+		for len(cache.entries) > activeStableCollectorEntries {
+			var oldest scene.CellID
+			oldestSeq := ^uint64(0)
+			for id, entry := range cache.entries {
+				if entry.seq < oldestSeq {
+					oldestSeq = entry.seq
+					oldest = id
+				}
+			}
+			delete(cache.entries, oldest)
+		}
+		return len(collector.Stable())
+	}
 	var collector markdown.StreamCollector
 	_ = collector.SetContent(source)
 	return len(collector.Stable())
 }
 
+const activeStableCollectorEntries = 8
+
+type activeStableCollectorEntry struct {
+	source    string
+	collector *markdown.StreamCollector
+	seq       uint64
+}
+
+type activeStableCollectorCache struct {
+	mu      sync.Mutex
+	entries map[scene.CellID]*activeStableCollectorEntry
+	seq     uint64
+}
+
+var activeStableCollectors = &activeStableCollectorCache{entries: map[scene.CellID]*activeStableCollectorEntry{}}
+
 func normalizeActiveStableRange(active ActiveCellState, minimum int) ActiveCellState {
-	stableEnd := deriveActiveStableEnd(active.Source)
+	stableEnd := deriveActiveStableEnd(active.CellID, active.Source)
 	if active.Stable.Start == 0 && active.Stable.End > stableEnd {
 		// An adapter with a stronger streaming parser may explicitly release a
 		// prefix. Never move a producer-owned stable boundary backwards.

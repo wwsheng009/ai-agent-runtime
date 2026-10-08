@@ -33,6 +33,23 @@ const (
 	frameBenchBatchDeltas    = 16
 )
 
+// frameBenchMarkdownChunk 是结构化（Markdown + Go 代码栅栏）流式挂具的增量。
+// 每个 delta 追加一个完整小节：标题、列表（含行内 code/链接）、闭合代码栅栏、
+// 正文段落——覆盖 goldmark 解析 + 行内渲染 + chroma 高亮的典型组合，且保证
+// 渲染尾部逐帧变化（物理帧栅栏不会因无变化而跳过）。
+const frameBenchMarkdownChunk = "## 流式小节标题\n\n" +
+	"- 列表项一：`inline code` 与 **强调** 混排的典型行。\n" +
+	"- 列表项二：[链接](https://example.com) 与普通文本。\n\n" +
+	"```go\n" +
+	"func benchHandler(ctx context.Context) error {\n" +
+	"\tif err := ctx.Err(); err != nil {\n" +
+	"\t\treturn err\n" +
+	"\t}\n" +
+	"\treturn nil\n" +
+	"}\n" +
+	"```\n\n" +
+	"正文段落：包含中英文混合 token 与标点的典型流式输出，用于撑起渲染宽度。\n"
+
 // frameBenchWriter 计数并丢弃物理字节（不引入终端模拟开销）。
 type frameBenchWriter struct {
 	writes atomic.Uint64
@@ -100,6 +117,7 @@ type frameLatencyHarness struct {
 	presenter    *TerminalSessionPresenter
 	writer       *frameBenchWriter
 	source       strings.Builder
+	chunk        string
 	viewportRows int
 	skippedRows  int
 }
@@ -107,6 +125,13 @@ type frameLatencyHarness struct {
 // newFrameLatencyHarness 构建与生产同构的统一会话挂具。historyCells=0 表示
 // 纯 active 流（无 finalized 历史）。
 func newFrameLatencyHarness(b *testing.B, historyCells int) *frameLatencyHarness {
+	b.Helper()
+	return newFrameLatencyHarnessWithChunk(b, historyCells, frameBenchChunk)
+}
+
+// newFrameLatencyHarnessWithChunk 与 newFrameLatencyHarness 同构，但用给定增量
+// 文本驱动 active 流（结构化源基准用）。
+func newFrameLatencyHarnessWithChunk(b *testing.B, historyCells int, chunk string) *frameLatencyHarness {
 	b.Helper()
 	controller := NewUIController(UIControllerConfig{}, nil, nil)
 	go controller.Run()
@@ -142,7 +167,7 @@ func newFrameLatencyHarness(b *testing.B, historyCells int) *frameLatencyHarness
 	presenter.Request()
 	presenter.WaitIdle()
 
-	harness := &frameLatencyHarness{controller: controller, presenter: presenter, writer: writer}
+	harness := &frameLatencyHarness{controller: controller, presenter: presenter, writer: writer, chunk: chunk}
 	harness.source.WriteString(frameBenchInitialSource)
 	// 窗口占比：S1 起每帧只物化 viewport 行；rows 1..Top-1（历史区）不再
 	// SGR 编码/VT 展开。此处只记录，循环结束后上报（计时循环前的
@@ -160,7 +185,7 @@ func newFrameLatencyHarness(b *testing.B, historyCells int) *frameLatencyHarness
 // stepOnce 推进一个流式 delta 并等待其物理帧完成，返回本步是否发生物理写。
 func (h *frameLatencyHarness) stepOnce(b *testing.B) bool {
 	b.Helper()
-	h.source.WriteString(frameBenchChunk)
+	h.source.WriteString(h.chunk)
 	// 只读 active 栅栏：与生产适配器一致地使用无账本访问器；不得用
 	// State()/AppState()（它们会克隆整张投递账本）。
 	current := h.controller.ActiveCellState()
@@ -197,7 +222,13 @@ func (h *frameLatencyHarness) runBatch(b *testing.B, count int) (time.Duration, 
 // runFrameDeltaLatency 在给定历史规模下测量逐 delta 帧时延分布（批均值口径）。
 func runFrameDeltaLatency(b *testing.B, historyCells int) {
 	b.Helper()
-	harness := newFrameLatencyHarness(b, historyCells)
+	runFrameDeltaLatencyWithChunk(b, historyCells, frameBenchChunk)
+}
+
+// runFrameDeltaLatencyWithChunk 是 runFrameDeltaLatency 的增量文本参数化版本。
+func runFrameDeltaLatencyWithChunk(b *testing.B, historyCells int, chunk string) {
+	b.Helper()
+	harness := newFrameLatencyHarnessWithChunk(b, historyCells, chunk)
 	b.ResetTimer()
 	samples := &frameLatencySamples{}
 	for b.Loop() {
@@ -227,6 +258,13 @@ func BenchmarkFrameLatencyStreaming(b *testing.B) {
 	runFrameDeltaLatency(b, 300)
 }
 
+// BenchmarkFrameLatencyStreamingMarkdown：结构化源（Markdown + 代码栅栏）的
+// 逐 delta 帧时延分布。量化 active band 每帧全源 markdown.Render 的成本，
+// 作为结构化增量（跨帧缓存）的基线与差分判据。
+func BenchmarkFrameLatencyStreamingMarkdown(b *testing.B) {
+	runFrameDeltaLatencyWithChunk(b, 300, frameBenchMarkdownChunk)
+}
+
 // BenchmarkFrameCostScale：历史规模矩阵。ns/delta 随历史规模的增长斜率是
 // 「成本与历史总量脱钩」的直接判据（2× 规模斜率比 ≈1 为目标）。
 func BenchmarkFrameCostScale(b *testing.B) {
@@ -241,8 +279,18 @@ func BenchmarkFrameCostScale(b *testing.B) {
 // BenchmarkFrameAllocsPerDelta：每 delta 分配与 GC（ReadMemStats 口径）。
 // 每轮迭代 64 个 delta，报告 B/delta、allocs/delta、GC/轮。
 func BenchmarkFrameAllocsPerDelta(b *testing.B) {
+	runFrameAllocsPerDelta(b, frameBenchChunk)
+}
+
+// BenchmarkFrameAllocsPerDeltaMarkdown：结构化源的同口径分配/GC 报告。
+func BenchmarkFrameAllocsPerDeltaMarkdown(b *testing.B) {
+	runFrameAllocsPerDelta(b, frameBenchMarkdownChunk)
+}
+
+func runFrameAllocsPerDelta(b *testing.B, chunk string) {
+	b.Helper()
 	const batch = 64
-	harness := newFrameLatencyHarness(b, 300)
+	harness := newFrameLatencyHarnessWithChunk(b, 300, chunk)
 	b.ResetTimer()
 	var before, after runtime.MemStats
 	for b.Loop() {

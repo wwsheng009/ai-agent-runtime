@@ -136,7 +136,15 @@ func (c *StreamCollector) Finalize() string {
 
 func (c *StreamCollector) recompute() {
 	all := c.raw.String()
-	cut := stableMarkdownCut(all)
+	base := c.stable
+	if base > len(all) {
+		base = len(all)
+	}
+	// 稳定点之前的区域已经闭合：无开放栅栏/表格，边界为行首，且 partial-lead
+	// 判定只看尾部行。因此 stableMarkdownCut 的每个分支在 all[base:] 上都与
+	// 全量扫描等价（stableMarkdownCut(all[base:]) + base）。流式路径借此把
+	// 每帧的稳定切分扫描限制在「上一稳定点之后的尾部」，而不是整段源。
+	cut := base + stableMarkdownCut(all[base:])
 	if cut < c.stable {
 		// Stable region never shrinks during a stream (avoids flicker/rewrites
 		// of already-emitted transcript). Incomplete earlier structures stay

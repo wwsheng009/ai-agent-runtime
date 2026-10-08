@@ -32,6 +32,65 @@ func (r *renderer) render(source string) render.Document {
 	return render.ApplyBlockSpacing(render.Document{Blocks: blocks}, r.opts.Spacing.Policy())
 }
 
+// RenderTail renders only the document tail: top-level blocks are taken from
+// the end of the parsed document until their rendered lines cover at least
+// minLines. Blocks before that boundary are never rendered (no inline
+// processing, no syntax highlighting), so a streaming band projection stays
+// bounded by the viewport budget instead of the full source length.
+//
+// The parse itself still covers the complete source because block structure is
+// context-sensitive. The returned document is the full render restricted to
+// the selected blocks with block spacing applied among them; ApplyBlockSpacing
+// only depends on adjacent block kinds, so the result's line sequence is an
+// exact suffix of the full render's lines. minLines <= 0 renders the complete
+// document.
+func RenderTail(source string, opts Options, minLines int) render.Document {
+	if stringsTrimSpace(source) == "" {
+		return render.Document{}
+	}
+	if opts.Width <= 0 {
+		opts.Width = 80
+	}
+	if opts.Highlighter == nil {
+		opts.Highlighter = syntax.Default
+	}
+	r := &renderer{opts: opts}
+	return r.renderTail(source, minLines)
+}
+
+func (r *renderer) renderTail(source string, minLines int) render.Document {
+	if minLines <= 0 {
+		return r.render(source)
+	}
+	r.src = []byte(source)
+	docNode := parseCached(source)
+
+	var nodes []ast.Node
+	for node := docNode.FirstChild(); node != nil; node = node.NextSibling() {
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
+		return render.Document{}
+	}
+	groups := make([][]render.Block, 0, 4)
+	covered := 0
+	for index := len(nodes) - 1; index >= 0; index-- {
+		rendered := r.renderBlock(nodes[index])
+		groups = append(groups, rendered)
+		for _, block := range rendered {
+			covered += len(block.Lines)
+		}
+		if covered >= minLines {
+			break
+		}
+	}
+	blocks := make([]render.Block, 0, covered)
+	for index := len(groups) - 1; index >= 0; index-- {
+		blocks = append(blocks, groups[index]...)
+	}
+	return render.ApplyBlockSpacing(render.Document{Blocks: blocks}, r.opts.Spacing.Policy())
+}
+
 func (r *renderer) renderBlock(node ast.Node) []render.Block {
 	switch n := node.(type) {
 	case *ast.Heading:

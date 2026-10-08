@@ -124,11 +124,29 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 	reasoning := active.Kind == scene.KindReasoning
 	markdownSource := active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source)
 	structuredSource := reasoning || markdownSource
+	maxRows := ActiveBandRows(geometry.Height)
 	if structuredSource {
 		var projected bool
-		if reasoning {
+		switch {
+		case reasoning && start == 0:
+			// 流式主路径（未发生交接）：reasoning 是逐行字面投影，只展开覆盖
+			// 视口的尾部行，成本与源长度脱钩。
+			lines = activeReasoningTailLines(active.Source, width, maxRows)
+			projected = true
+		case !reasoning && start == 0:
+			// 流式主路径（未发生交接）：优先走锚定窗口缓存——每帧只解析/渲染
+			// 覆盖视口预算的源后缀窗口（≈预算行），窗口经「全量渲染基线后缀」
+			// 校验并随流前移，帧成本与源长度脱钩。窗口不可用时退回 RenderTail
+			// （全量 parse + 尾部块渲染），仍显著优于整段渲染。
+			var windowed bool
+			lines, windowed = activeMarkdownWindowedTailLines(active.CellID, active.Source, width, theme, highlighter, maxRows)
+			if !windowed {
+				lines = activeMarkdownTailLines(active.Source, width, theme, highlighter, maxRows)
+			}
+			projected = true
+		case reasoning:
 			lines, projected = activeReasoningSuffixLines(active.Source, start, width, theme, highlighter)
-		} else {
+		default:
 			lines, projected = activeMarkdownSuffixLines(active.Source, start, width, theme, highlighter)
 		}
 		if !projected {
@@ -143,7 +161,7 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 		}
 	}
 	if len(lines) == 0 && !structuredSource {
-		rows := activeCellBandTailRows(active.Source[start:], width, ActiveBandRows(geometry.Height))
+		rows := activeCellBandTailRows(active.Source[start:], width, maxRows)
 		role := appTranscriptRenderRole(active.Kind)
 		lines = make([]render.Line, 0, len(rows))
 		for _, row := range rows {
@@ -153,7 +171,6 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 			}}})
 		}
 	}
-	maxRows := ActiveBandRows(geometry.Height)
 	if len(lines) > maxRows {
 		lines = lines[len(lines)-maxRows:]
 	}
@@ -232,6 +249,31 @@ func trimReasoningContinuationCursor(lines []render.Line, prefix string, continu
 // terminal-width wrapping. The closing divider appears only after finalization.
 func activeReasoningBandLines(source string, width int, _ style.ThemeContext, _ syntax.Highlighter) []render.Line {
 	return reasoningProjectionLines(source, width, false)
+}
+
+// activeBandTailMarginLines 是尾部窗口相对视口预算的余量：窗口首块之前的块
+// 间隔（ApplyBlockSpacing 的 Gap ≤ 1 行）不在窗口内，余量保证视口裁剪后的
+// 尾部行与全量渲染逐行一致。
+const activeBandTailMarginLines = 4
+
+// activeMarkdownTailLines 只渲染覆盖视口预算的尾部块。整段源仍会 parse（块
+// 结构上下文相关），但其之前各块不再渲染——流式帧成本与源长度脱钩。
+func activeMarkdownTailLines(source string, width int, theme style.ThemeContext, highlighter syntax.Highlighter, maxRows int) []render.Line {
+	doc := markdown.RenderTail(source, activeBandMarkdownOptions(width, theme, highlighter), maxRows+activeBandTailMarginLines)
+	return activeMarkdownBandLines(doc)
+}
+
+// activeReasoningTailLines 是 activeReasoningBandLines 的尾部有界版本：只展开
+// 覆盖视口的尾部行（reasoning 为逐行字面投影、无跨行状态），与全量展开的
+// 尾部逐行等价。
+func activeReasoningTailLines(source string, width, maxRows int) []render.Line {
+	lines := reasoningDividerBandLines(reasoningChromeLine("reasoning"), width)
+	for _, text := range activeCellBandTailRows(source, width, maxRows) {
+		lines = append(lines, render.Line{Spans: []render.Span{{
+			Text: text, Style: render.Style{Role: string(style.RoleReasoning)},
+		}}})
+	}
+	return lines
 }
 
 func activeMarkdownBandLines(doc render.Document) []render.Line {
