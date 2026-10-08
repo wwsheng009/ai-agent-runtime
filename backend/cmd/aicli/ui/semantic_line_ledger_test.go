@@ -123,3 +123,13 @@ func assertSemanticLinesAbsentFromScrollback(t *testing.T, width, height int, ra
 			strings.Join(leaked, ", "), screen.ScrollbackLines(), dumpScreen(screen))
 	}
 }
+
+// dumpScreen 将 vt.Screen 渲染为带行号的诊断文本（L3-2 测试迁移时自被删除的
+// fixed_bottom_surface_overflow_render_test.go 迁入，供本文件复用）。
+func dumpScreen(screen *vt.Screen) string {
+	var b strings.Builder
+	for row := 1; row <= screen.Height(); row++ {
+		fmt.Fprintf(&b, "%2d|%s\n", row, screen.Line(row))
+	}
+	return b.String()
+}
