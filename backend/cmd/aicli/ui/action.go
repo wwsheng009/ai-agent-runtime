@@ -975,6 +975,16 @@ func (SetPromptEditorStatusAction) isUIAction()         {}
 func (SetPromptEditorStatusAction) Class() ActionClass  { return ClassCoalescable }
 func (SetPromptEditorStatusAction) CoalesceKey() string { return "prompt-editor-status" }
 
+// WarmTranscriptLayoutAction 请求对装载中的 transcript 做一块布局预热（只填
+// cell 行缓存，不碰 ledger）。它由 DeferHistoryDelivery 分支经状态位自投递
+// （见 UIController.Run 的 follow-up 钩子），把收尾全量规划的首次渲染摊进装载
+// 窗口。同 key 待处理时合并：一块一块串行推进，重复投递无意义。
+type WarmTranscriptLayoutAction struct{}
+
+func (WarmTranscriptLayoutAction) isUIAction()         {}
+func (WarmTranscriptLayoutAction) Class() ActionClass  { return ClassCoalescable }
+func (WarmTranscriptLayoutAction) CoalesceKey() string { return "transcript-layout-warm" }
+
 // SetComposerPreviewAction/ClearComposerPreviewAction retain the legacy
 // transitional composer API as an ordered BottomPane intent. They are not a
 // second composer owner: the reducer updates the same BottomPaneState that

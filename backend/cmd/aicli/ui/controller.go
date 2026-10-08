@@ -497,6 +497,14 @@ func (c *UIController) Run() {
 				if historyCommitWakeNeeded(action, c.state) {
 					effects = append(effects, HistoryCommitWakeEffect{})
 				}
+				if c.state.HistoryEffects.transcriptLayoutWarmContinue {
+					// 装载期布局预热的自投递：本块做完仍有剩余，作为因果
+					// follow-up 立即续跑（与 reducer 自身的 follow-up 同队列、
+					// 同顺序，先于外部 mailbox）。装载结束后该位不再置起，
+					// 循环自然终止。
+					c.state.HistoryEffects.transcriptLayoutWarmContinue = false
+					c.followups = append(c.followups, WarmTranscriptLayoutAction{})
+				}
 			} else if len(c.followups) > followupStart {
 				// A reducer panic aborts the current action's causal continuation.
 				// Letting those follow-ups run would publish a partial transaction

@@ -461,6 +461,16 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// 走 transcript 规划（memo 命中时为空转）。
 		syncHistoryEffectsForTranscript(&state)
 		refreshTranscriptOverlayPager(&state)
+	case WarmTranscriptLayoutAction:
+		// 装载期布局预热块（P16）：只填 cell 行缓存，不碰 ledger。装载已结束
+		// 后仍有缺口时，同一入口续跑收尾规划（sync 内的收尾预热门会继续按块
+		// 补齐，最后一块完成的那次直接铸出提交）；无缺口时空转。
+		if state.HistoryEffects.DeferHistoryDelivery {
+			state.HistoryEffects.transcriptLayoutWarmContinue = warmTranscriptLayoutChunk(&state)
+		} else if state.HistoryEffects.transcriptLayoutWarmCells > 0 &&
+			state.HistoryEffects.transcriptLayoutWarmCells < len(state.Transcript.Cells) {
+			syncHistoryEffectsForTranscript(&state)
+		}
 	case SetActiveCellAction:
 		if a.Active.Phase == ActiveCellInactive {
 			state.Active = ActiveCellState{}

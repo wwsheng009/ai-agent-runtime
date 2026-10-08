@@ -519,13 +519,17 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
 		inFlight = 1
 	}
 	acked := uint64(summary.Delivered) + summary.LedgerCompacted
-	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-cells=%d plan-screen-ms=%d plan-mint-ms=%d plan-apply-ms=%d plan-inflight=%t plan-windows=%d frozen=%t defer-history=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d pending=%d in-flight=%d acked=%d",
+	return fmt.Sprintf("queued=%d delivered=%d quarantined=%d quarantined-unresolved=%d quarantined-settled=%d ledger-entries=%d compacted=%d terminal-sources=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d plan-cells=%d plan-screen-ms=%d plan-snapshot-ms=%d plan-layout-hits=%d plan-layout-misses=%d plan-mint-ms=%d plan-apply-ms=%d plan-warm-cells=%d plan-warm-rows=%d plan-inflight=%t plan-windows=%d frozen=%t defer-history=%t next=%d epoch=%d claimed-token=%d claimed-gen=%d claim-skips-stale-action=%d claim-rejects-outoforder=%d claim-rejects-gate=%d claim-rejects-stale=%d claim-rejects-invalid=%d pending=%d in-flight=%d acked=%d",
 		summary.Queued, summary.Delivered, summary.Quarantined,
 		summary.QuarantinedUnresolved, summary.QuarantinedSettled,
 		summary.LedgerEntries,
 		summary.LedgerCompacted, summary.LedgerTerminalSources,
 		summary.PlanCount, summary.LastPlanMs, summary.MaxPlanMs,
-		summary.PlanCells, summary.PlanScreenMs, summary.PlanMintMs, summary.PlanApplyMs,
+		summary.PlanCells, summary.PlanScreenMs,
+		summary.PlanSnapshotMs, summary.PlanLayoutHits, summary.PlanLayoutMisses,
+		summary.PlanMintMs, summary.PlanApplyMs,
+		summary.PlanWarmCells,
+		summary.PlanWarmRows,
 		effects.PlanRequestInFlight, effects.PlanWindowsDelegated,
 		effects.Frozen, effects.DeferHistoryDelivery,
 		effects.NextToken, effects.TerminalEpoch,

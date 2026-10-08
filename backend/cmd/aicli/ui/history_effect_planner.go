@@ -172,14 +172,20 @@ func planEligibleHistoryCommitsWithinTimed(state AppState) ([]HistoryCommit, tra
 	}
 	screenStart := time.Now()
 	snap := transcriptPlanSnapshotFor(state)
+	snapshotMs := time.Since(screenStart).Milliseconds()
+	layoutHitsBefore, layoutMissesBefore, _, _, _ := sharedCellRows.stats()
 	rows := screenTranscriptPlanWindow(snap)
+	layoutHitsAfter, layoutMissesAfter, _, _, _ := sharedCellRows.stats()
 	screenMs := time.Since(screenStart).Milliseconds()
 	mintStart := time.Now()
 	commits, retention := mintTranscriptPlan(state, snap, rows)
 	phases := transcriptPlanPhaseTiming{
-		cells:    len(snap.cells),
-		screenMs: screenMs,
-		mintMs:   time.Since(mintStart).Milliseconds(),
+		cells:        len(snap.cells),
+		screenMs:     screenMs,
+		snapshotMs:   snapshotMs,
+		layoutHits:   int64(layoutHitsAfter - layoutHitsBefore),
+		layoutMisses: int64(layoutMissesAfter - layoutMissesBefore),
+		mintMs:       time.Since(mintStart).Milliseconds(),
 	}
 	return commits, retention, phases
 }
@@ -631,6 +637,24 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 		// 必须等到收尾的授权式替换**一次性按 cell 顺序**铸出，否则最新一页
 		// 先写、较早页后写，append-only 的 scrollback 会读成「新在前、旧在后」，
 		// 有限缓冲下被挤掉的正是最新消息。
+		//
+		// P16：同一窗口顺带按块预热 cell 行缓存（warmTranscriptLayoutChunk）——
+		// 收尾全量规划的 screen 相位主体就是这批首次渲染，摊进装载后收尾只付
+		// 命中 + 装配。预热不碰 ledger、不记 memo，挂起语义不变。
+		state.HistoryEffects.transcriptLayoutWarmContinue = warmTranscriptLayoutChunk(state)
+		return
+	}
+	// P16 收尾：装载期预热尚未覆盖全部 cell 时，先把缺口按块补齐再规划。中间
+	// 安装会被合并/丢弃（actor 忙时非阻塞投递直接放弃），因此收尾那次 transcript
+	// 才是大头——把它的首次渲染留到规划里就是一次长锁内持有（P16 红项）。每块
+	// 一个 action（followup），单次锁内 ≤ 一块；只在预热已启动（>0）且仍有缺口
+	// 时生效，普通会话（从未预热）不受影响。最后一块完成的那次直接续跑规划
+	// （缓存已热），无需额外触发。
+	effects := &state.HistoryEffects
+	if effects.transcriptLayoutWarmCells > 0 &&
+		effects.transcriptLayoutWarmCells < len(state.Transcript.Cells) &&
+		warmTranscriptLayoutChunk(state) {
+		effects.transcriptLayoutWarmContinue = true
 		return
 	}
 	if transcriptPlanMemoHit(state) {
@@ -641,7 +665,6 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	}
 	// A memo miss means the plan inputs moved. Stage 2 起不存在"欠账"计划：下面的
 	// 单遍规划要么完整覆盖，要么没有候选。
-	effects := &state.HistoryEffects
 	// P16：规划器本体（screening + 铸 commit，含入队）的耗时归因。这是锁内最贵
 	// 的一段，必须能回答「P12 的冻结是不是花在规划上」；memo 命中（上方早退）
 	// 不算一次规划，因此不记录，避免把空转计成规划。
@@ -662,6 +685,63 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 func applyTranscriptPlan(state *UIControllerState, commits []HistoryCommit, retained transcriptPlanRetention) {
 	syncHistoryEffectCandidatesRetained(state, commits, retained)
 	recordTranscriptPlanMemo(state, len(commits))
+}
+
+// transcriptLayoutWarmChunkCells 是单次预热块的 cell 上限。块只做布局投影
+// （miss 走 worker 池并行渲染），实测 ~20-60ms 墙钟；调大块数少但单次锁内更久，
+// 调小则自投递次数多。它只影响装载期的一次性成本分布，不影响任何输出。
+var transcriptLayoutWarmChunkCells = 512
+
+// warmTranscriptLayoutChunk 对 transcript 尾部未预热的一段 cell 做布局投影，
+// 只填 cell 行缓存：不铸提交、不入队、不记 memo。返回是否还有未预热部分。
+//
+// 与全量 pass 的等价性依赖两点：(1) cell 行缓存按 (source, width, theme,
+// foldHint) 内容寻址，块内渲染与全量渲染写的是同一批条目；(2) 唯一的跨 cell
+// 输入是「最近一次折叠」的提示位（foldTarget），块内计算会把它落在块的最后一个
+// 折叠上（全量 pass 落在全局最后一个）——提示位本身在缓存键里，错位条目只是白
+// 渲染一次，不会污染正确条目。因此收尾规划仍命中绝大部分条目，未命中者按老路
+// 渲染，输出与纯冷渲染逐行一致（缓存只做复用，不改变投影结果）。
+func warmTranscriptLayoutChunk(state *UIControllerState) bool {
+	if state == nil {
+		return false
+	}
+	transcript := state.Transcript
+	if len(transcript.Cells) == 0 {
+		return false
+	}
+	effects := &state.HistoryEffects
+	rows := transcript.LayoutRows(state.Geometry.Generation)
+	if len(rows) == 0 {
+		return false
+	}
+	if effects.transcriptLayoutWarmRows > len(rows) {
+		// 换会话或 transcript 收缩：尾部锚点失效，归零从尾部重来。
+		effects.transcriptLayoutWarmRows = 0
+	}
+	to := len(rows) - effects.transcriptLayoutWarmRows
+	if to <= 0 {
+		return false
+	}
+	// 从 to 向前收集整 cell（gap row 归属后继 cell，与 cell 同 ID，一并收进块；
+	// 布局会跳过它），直到达到块上限。
+	from := to
+	chunkCells := 0
+	for from > 0 && chunkCells < transcriptLayoutWarmChunkCells {
+		previous := from - 1
+		id := rows[previous].CellID
+		for from > 0 && rows[from-1].CellID == id {
+			from--
+		}
+		chunkCells++
+	}
+	width := state.Geometry.Width
+	if width < 1 {
+		width = 80
+	}
+	layoutTranscriptScreenRows(rows[from:to], transcriptCellsByID(transcript), mutableTranscriptCellIDs(transcript), width, state.Theme)
+	effects.transcriptLayoutWarmRows += to - from
+	effects.transcriptLayoutWarmCells += chunkCells
+	return effects.transcriptLayoutWarmRows < len(rows)
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell

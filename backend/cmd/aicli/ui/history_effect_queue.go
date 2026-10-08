@@ -27,6 +27,24 @@ type HistoryEffectQueueState struct {
 	// mints no history commit, so the loaded generation reaches the
 	// append-only scrollback as one ordered pass instead of newest-page-first.
 	DeferHistoryDelivery bool
+	// transcriptLayoutWarm* 是装载期布局预热的进度（P16）：收尾全量规划的
+	// screen 相位主体是全部 cell 的首次渲染（实测 346ms / 4256 cell），且整段
+	// 发生在 UIController.mu 内。装载窗口（DeferHistoryDelivery）本来就不铸
+	// 提交，于是把这段渲染按块摊进装载：每块只填 cell 行缓存（纯函数，不碰
+	// ledger、不记 memo），单次锁内 ≤ 一块。
+	//
+	// 游标是**从尾部（最新）向前已预热的布局行数**：尾部锚点在较早页前插时天然
+	// 稳定（前插只增加头部行），且与 CellID 无关——真实会话里不同页可能复用
+	// CellID，按身份扫描会把「最旧已预热」错认成更早的同名 cell，虚高进度、提前
+	// 收工（生产实测：预热只覆盖 ~620 cell，收尾规划仍冷渲染 3640 cell）。
+	// 行数超过当前 transcript 行数（换会话/收缩）时归零重来。
+	transcriptLayoutWarmRows int
+	// transcriptLayoutWarmCells 是累计已预热 cell 数（诊断：块内 cell 数累加）。
+	transcriptLayoutWarmCells int
+	// transcriptLayoutWarmContinue 是「还有未预热 cell」的一次性请求位：
+	// UIController.Run 在 reduce 后把它转成一条自投递 action（followup），与
+	// reducer 自身的因果 follow-up 同队列、同顺序，装载结束后自动终止。
+	transcriptLayoutWarmContinue bool
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
@@ -119,6 +137,12 @@ type transcriptPlanPhaseTiming struct {
 	screenMs int64
 	mintMs   int64
 	applyMs  int64
+	// snapshotMs 是 screen 里的快照段（byID/mutable/LayoutRows 派生）；layoutHits/
+	// layoutMisses 是本次 screen 布局对共享 cell 行缓存的命中/未命中增量。
+	// P16 归因：screen 仍高时必须能区分「快照派生贵」「首渲染冷」与「串行装配贵」。
+	snapshotMs   int64
+	layoutHits   int64
+	layoutMisses int64
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
@@ -375,6 +399,16 @@ type HistoryEffectQueueSummary struct {
 	PlanScreenMs int64
 	PlanMintMs   int64
 	PlanApplyMs  int64
+	// PlanSnapshotMs / PlanLayoutHits / PlanLayoutMisses 把 screen 再拆开：
+	// 快照派生耗时与本次布局的缓存命中/未命中增量。
+	PlanSnapshotMs   int64
+	PlanLayoutHits   int64
+	PlanLayoutMisses int64
+	// PlanWarmCells 是装载期布局预热的进度（已预热 cell 数，从尾部向前），
+	// 装载结束时等于 cell 总数即预热全覆盖；它是 P16 的直接归因读数。
+	PlanWarmCells int
+	// PlanWarmRows 是预热游标（从尾部向前已预热的布局行数）。
+	PlanWarmRows int
 	// Claim-refusal counters mirror the same reducer-side events as the private
 	// fields above; they are queue scalars, not ledger-derived (copied like the
 	// plan timing in Summary).
@@ -397,6 +431,11 @@ func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
 	summary.PlanScreenMs = s.MaxPlanPhases.screenMs
 	summary.PlanMintMs = s.MaxPlanPhases.mintMs
 	summary.PlanApplyMs = s.MaxPlanPhases.applyMs
+	summary.PlanSnapshotMs = s.MaxPlanPhases.snapshotMs
+	summary.PlanLayoutHits = s.MaxPlanPhases.layoutHits
+	summary.PlanLayoutMisses = s.MaxPlanPhases.layoutMisses
+	summary.PlanWarmCells = s.transcriptLayoutWarmCells
+	summary.PlanWarmRows = s.transcriptLayoutWarmRows
 	summary.ClaimSkipsStaleAction = s.claimSkipsStaleAction
 	summary.ClaimRejectsOutOfOrder = s.claimRejectsOutOfOrder
 	summary.ClaimRejectsGate = s.claimRejectsGate
