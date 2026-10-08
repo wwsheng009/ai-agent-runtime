@@ -2,6 +2,7 @@
 
 > 对象：`test-aicli-resume-startup-perf-e2e.ps1` 的 P16（跨帧最大单次 transcript 规划耗时
 > ≤ 250ms）在大会话（4225 cell / 86,864 行）恢复时实测 1.34–1.77s，是性能门禁唯一红项。
+> **状态：已闭合（2026-10-08，`d60c0165`，220ms/250ms，见 §5）。**
 > 本文是实测归因（非推断），供 P3 后续切片（S4+ / 规划器）实施参考。
 
 ## 0. TL;DR
@@ -103,9 +104,14 @@ fold_omit: hits=1058 misses=1959 evictions=0
 | 收敛（全量交付） | 9.9–10.4s | 9.1–9.4s |
 | 全量布局（锁内） | 1.37s | 0.54s cum（串行段：fence 折叠 + foldTarget + mint + reconcile） |
 
-**剩余差距**：P16 距 250ms 预算仍需**流式/增量 plan**（把「一次铸全量提交」改为
-「按页/按块铸提交」与交付窗口摊还），或继续压缩串行段（fence 折叠/`toolFoldTargetRows`/
-membership reconcile）。两条都属 P3 后续切片的设计裁决范围。
+**已闭合（2026-10-08，`d60c0165`）**：把收尾全量替换后的首次渲染**按块摊进装载窗口**
+——`warmTranscriptLayoutChunk` 只填 cell 行缓存（单次锁内 ≤ 512 cell，~25–60ms），
+游标取「从尾部向前已预热的布局行数」（跨页复用 CellID 时行锚点与 ID 无关，生产实测
+warm-rows=70733 全覆盖），装载期自投递续块、收尾前先补齐缺口再续跑规划。
+**P16 规划 max 549ms → 220ms（≤250ms 预算达标）**；权威运行
+`artifacts/aicli-resume-startup-perf-e2e/20261008-114244`：**P16 PASS（max=220ms）、
+P12 PASS（0ms 冻结）、P1–P16 全 PASS**。§4 的「流式/增量 plan」与串行段压缩仍可
+作为后续架构简化选项，但不再是门禁阻塞项。
 
 **分相位读数（2026-10-08 晚，新增 `plan-cells/plan-screen-ms/plan-mint-ms/plan-apply-ms`
 进 status，harness 可直接读）**：最长一次规划（4224 cells，509–536ms）的拆分：
@@ -118,10 +124,11 @@ membership reconcile）。两条都属 P3 后续切片的设计裁决范围。
 
 读法：最长一次规划的成本主体是**新增 ~3500 cell 的首次渲染**（screen），不是重复
 screening/铸提交。因此「增量 screening」只能省已渲染 cell 的重复部分；把首次渲染
-提前到装载期（逐页补齐中间步落地即预热 cell 行缓存）实测只到 536→509ms——中间安装
-仍被合并，收益小于预期。彻底达标仍需流式铸提交（与 ~10s 交付窗口摊还）。
+提前到装载期（逐页补齐中间步落地即预热 cell 行缓存）早期只到 536→509ms——中间安装
+仍被合并，收益小于预期。**最终由 `d60c0165` 的「装载期分块预热 + 尾部行锚点游标 +
+收尾前补齐缺口」达成 220ms**（不依赖流式铸提交），见上。
 
-- 门禁：P16 唯一红项；P12 已绿（用户可见冻结消除）。
+- 门禁：P16 已闭合（220ms/250ms，`d60c0165`）；P12 已绿（用户可见冻结消除）。
 - 一次性 vs 稳态：稳态流式（P3-S1/S2/S3 后）已 O(delta)；本条是装载末次单遍的成本。
 - 测量入口：`-CpuProfileSeconds` + `app_state.layout_cache` + goroutine-stall dump，
   三件套已可直接复现本文全部数字。

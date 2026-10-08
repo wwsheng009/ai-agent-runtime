@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [int]$TimeoutSeconds = 45,
+    [int]$TimeoutSeconds = 60,
     [switch]$KeepWindow
 )
 
@@ -14,6 +14,8 @@ $windowTitle = "aicli-render-fixture-" + $runID.Substring(0, 12)
 $lastMarker = "AICLI-E2E-HISTORY-072"
 $promptMarker = "AICLI-E2E-PROMPT-VIEWPORT"
 $statusMarker = "AICLI-E2E-STATUS-VIEWPORT"
+$streamEndMarker = "AICLI-E2E-STREAM-END"
+$streamMarkers = 0..15 | ForEach-Object { "AICLI-E2E-STREAM-{0:D3}" -f $_ }
 $markdownMarkers = @(
     "AICLI-E2E-MARKDOWN-HEADING",
     "AICLI-E2E-MARKDOWN-BOLD",
@@ -132,15 +134,36 @@ public static class AicliTerminalAutomation {
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $terminalDocument = $null
 $lastDocument = $null
+$streamEnded = $false
+$streamSamples = 0
+$streamMaxCounts = @{}
 while ((Get-Date) -lt $deadline) {
     $candidate = [AicliTerminalAutomation]::FindByTitle($windowTitle)
     if ($candidate) {
         $lastDocument = $candidate
+        if (-not $streamEnded) {
+            # The active band repaints over any plain "begin" line, so the
+            # streaming phase is detected from the numbered markers themselves.
+            if ($candidate.All -match 'AICLI-E2E-STREAM-\d{3}') {
+                $streamSamples++
+                foreach ($streamMarker in $streamMarkers) {
+                    $count = ([regex]::Matches($candidate.All, [regex]::Escape($streamMarker))).Count
+                    if (-not $streamMaxCounts.ContainsKey($streamMarker) -or $count -gt $streamMaxCounts[$streamMarker]) {
+                        $streamMaxCounts[$streamMarker] = $count
+                    }
+                }
+            }
+            if ($candidate.All.Contains($streamEndMarker)) {
+                $streamEnded = $true
+            }
+        }
     }
     if ($candidate -and
         $candidate.All.Contains($lastMarker) -and
         $candidate.All.Contains($promptMarker) -and
-        $candidate.All.Contains($statusMarker)) {
+        $candidate.All.Contains($statusMarker) -and
+        $candidate.All.Contains($streamEndMarker) -and
+        $candidate.All.Contains("AICLI-E2E-CLEAR-3J=")) {
         $terminalDocument = $candidate
         break
     }
@@ -207,12 +230,27 @@ if ($clearMatches.Count -ne 1) {
 if ($visible.Contains($first)) {
     $failures.Add("oldest history marker remained in the visible viewport instead of scrolling out")
 }
-if (-not $visible.Contains($last)) {
-    $failures.Add("newest history marker is absent from the visible viewport")
+$newestStreamMarker = $streamMarkers[-1]
+if (-not $visible.Contains($newestStreamMarker)) {
+    $failures.Add("newest finalized streaming marker '$newestStreamMarker' is absent from the visible viewport")
 }
 foreach ($marker in @($prompt, $status)) {
     if (-not $visible.Contains($marker)) {
         $failures.Add("inline viewport marker '$marker' is absent from the visible viewport")
+    }
+}
+if (-not $streamEnded) {
+    $failures.Add("streaming phase never completed ('$streamEndMarker' missing) before readiness")
+} elseif ($streamSamples -lt 3) {
+    $failures.Add("streaming phase was sampled $streamSamples time(s), want >= 3 to prove mid-stream stability")
+}
+foreach ($streamMarker in $streamMarkers) {
+    $count = ([regex]::Matches($document, [regex]::Escape($streamMarker))).Count
+    if ($count -ne 1) {
+        $failures.Add("streamed marker '$streamMarker' count=$count in the final document, want exactly 1")
+    }
+    if ($streamMaxCounts.ContainsKey($streamMarker) -and $streamMaxCounts[$streamMarker] -gt 1) {
+        $failures.Add("streamed marker '$streamMarker' was duplicated mid-stream (max observed count=$($streamMaxCounts[$streamMarker]))")
     }
 }
 
@@ -230,6 +268,8 @@ Write-Host "PASS: incremental history moved the visible tail while the oldest ro
 Write-Host "PASS: session-load replay and post-load append delivered without CSI 3J scrollback clear."
 Write-Host "PASS: prompt and status remain present exactly once."
 Write-Host "PASS: committed Markdown is rendered once without raw heading/emphasis/code syntax."
+Write-Host "PASS: streaming Markdown cell was sampled mid-stream without duplicated rows."
+Write-Host "PASS: finalized streaming content appears exactly once after the ordered handoff."
 Write-Host "Terminal: process=$($terminalProcess.ProcessName).exe PID=$($terminalDocument.ProcessId) HWND=0x$([Convert]::ToString($terminalDocument.WindowHandle, 16)) title=$($terminalDocument.WindowTitle)"
 
 if ($KeepWindow) {

@@ -1,6 +1,7 @@
 # aicli TUI 统一 AppState/Scene、单屏所有者与事务式渲染长期重构设计
 
-状态：**approved target architecture / core inline rendering implemented（唯一规范性终局；legacy/producer cleanup 继续）**
+状态：**approved target architecture / core inline rendering implemented（legacy/producer cleanup 继续）**
+**注意（2026-10-08）：本文档已按现行权威声明降级为历史注记——`docs/architecture/aicli-tui-renderer-architecture-design.md` §7.3；与其冲突的表述以该文为准。**
 
 更新时间：**2026-08-06**
 

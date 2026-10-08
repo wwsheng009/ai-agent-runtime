@@ -505,6 +505,12 @@ sequenceDiagram
 | P2 | 8 项场景矩阵（流式溢出/归档/finalize/resize 收缩+扩张/lease 往返/partial write/resume-replay/≥5k cells）+ 真机 marker exactly-once + 无异常空行 | 中高 |
 | P3 | 新基准（p95 帧时延 < 16ms 稳态；每帧分配/GC/锁持有）；delta 成本 O(delta) 证明 | 中 |
 
+> **开放验收项（2026-10-08）**：跨终端人工验收——Windows Terminal/ConPTY 已由
+> `scripts/test-aicli-windows-terminal-e2e.ps1` 自动化覆盖（73 行 exactly-once、无 3J、
+> 流式 mid-stream 采样无重复，8 项 PASS）；**至少一种非 Windows ANSI terminal 的
+> 人工验收仍开放**（环境受限，登记待做；来源：
+> `docs/plan/aicli-activeband-scrollback-compensation-blank-lines-fix-plan.md` Phase 5）。
+
 ### 7.3 与旧文档的关系（规范性声明）
 
 - 自本文起，**本文件是 aicli TUI 渲染的唯一规范源**。
@@ -514,6 +520,10 @@ sequenceDiagram
   为**现状说明**（含已过期的单写端宣称，见审计 §2.2），不具规范性。
 - 审计（10-05）是本文的设计依据与证据来源；P0–P3 各专项计划是本文的实现子计划，
   仅在"与本文一致"的范围内有效。
+- `docs/plan/aicli-event-stream-rendering-order-todo.md`（08-02，draft）的「渲染面」
+  结论以本文为准；其未完成的 P3「生产数据面切换到 `EventEncoder→Scene`」**不在本文
+  P0–P3 范围内**（本文保持既有数据面；`AICLI_SCENE_PRESENTER` 影子面默认关闭、保留，
+  作为未来可选项，不阻塞 P0–P3 验收）。
 
 ### 7.4 P2 侦察结论（2026-10-06，三路只读，支撑 §3.4）
 

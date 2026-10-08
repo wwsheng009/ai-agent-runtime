@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,10 @@ import (
 )
 
 const historyCount = 72
+
+// streamDeltaCount is the number of mutable-cell revisions in the streaming
+// phase; the host script samples the real terminal while they are applied.
+const streamDeltaCount = 16
 
 const markdownFixtureSource = "# AICLI-E2E-MARKDOWN-HEADING\n\n**AICLI-E2E-MARKDOWN-BOLD**\n\n`AICLI-E2E-MARKDOWN-CODE`"
 
@@ -103,6 +108,35 @@ func main() {
 	controller.WaitIdle()
 	assertHistoryAcknowledged(controller)
 	assertAppendOnly(controller)
+
+	// Streaming phase: a mutable assistant cell grows one line per delta while
+	// the host samples the real terminal. The structured streaming window path
+	// (P3-S4b) must render every prefix exactly once in the active band, and the
+	// finalized content must hand off to native scrollback exactly once. The
+	// host detects the phase from the numbered stream markers themselves; a
+	// "begin" line would be overwritten by the active band repaint.
+	streamLines := make([]string, 0, streamDeltaCount)
+	for step := 1; step <= streamDeltaCount; step++ {
+		streamLines = append(streamLines, fmt.Sprintf("AICLI-E2E-STREAM-%03d", step-1))
+		post(controller, ui.ReplaceTranscriptAction{
+			Snapshot: streamFixtureSnapshot(uint64(step), strings.Join(streamLines, "\n\n"), false),
+		})
+		controller.WaitIdle()
+		executor.Request()
+		executor.WaitIdle()
+		controller.WaitIdle()
+		time.Sleep(300 * time.Millisecond)
+	}
+	post(controller, ui.ReplaceTranscriptAction{
+		Snapshot: streamFixtureSnapshot(uint64(streamDeltaCount+1), strings.Join(streamLines, "\n\n"), true),
+	})
+	controller.WaitIdle()
+	executor.Request()
+	executor.WaitIdle()
+	controller.WaitIdle()
+	assertHistoryAcknowledged(controller)
+	assertAppendOnly(controller)
+	fmt.Fprintf(os.Stdout, "AICLI-E2E-STREAM-END\r\n")
 
 	fmt.Fprintf(os.Stdout, "AICLI-E2E-CLEAR-3J=%d\r\n", counter.count())
 	fmt.Fprintf(os.Stdout, "\x1b]0;AICLI-E2E-READY-%s\x07", runID)
@@ -191,4 +225,32 @@ func fixtureSnapshot(count int) *scene.Snapshot {
 		})
 	}
 	return &scene.Snapshot{Revision: 1, Cells: cells}
+}
+
+// streamFixtureSnapshot keeps the delivered append row in place and appends a
+// mutable (or finalized) streaming assistant cell at the transcript tail.
+func streamFixtureSnapshot(revision uint64, source string, committed bool) *scene.Snapshot {
+	snapshot := fixtureSnapshot(historyCount)
+	snapshot.Cells = append(snapshot.Cells, &scene.TranscriptCell{
+		ID:       scene.CellID(historyCount + 2),
+		Sequence: uint64(historyCount + 2),
+		Revision: 1,
+		Kind:     scene.KindAssistant,
+		Source:   "AICLI-E2E-HISTORY-072",
+		Phase:    scene.CellCommitted,
+	})
+	phase := scene.CellMutable
+	if committed {
+		phase = scene.CellCommitted
+	}
+	snapshot.Cells = append(snapshot.Cells, &scene.TranscriptCell{
+		ID:       scene.CellID(historyCount + 3),
+		Sequence: uint64(historyCount + 3),
+		Revision: revision,
+		Kind:     scene.KindAssistant,
+		Source:   source,
+		Phase:    phase,
+	})
+	snapshot.Revision = revision
+	return snapshot
 }

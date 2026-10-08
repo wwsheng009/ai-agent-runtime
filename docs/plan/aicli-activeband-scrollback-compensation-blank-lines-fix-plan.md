@@ -348,11 +348,19 @@ ActiveBand。长回复结束时，满高度 ActiveBand 可能一次释放 6–14
 
 - [x] owned 路径不再读写/依赖 `scrollCompensatedRows` 做布局；
 - [x] owned 路径不再积累/flush `pendingScrollDownRows`；
-- [ ] 删除新路径不再需要的 `outputCursorOnBlankRow` / `outputScrollDebtRows` 推断；
-- [ ] 反转 `TestBottomReserveShrinkCompensationDrawsBlanksAtTop`，改为历史不得丢失；
-- [ ] 更新 P5 总体设计和相关 implementation review；
-- [ ] 完成 Windows Terminal/ConPTY 与至少一种非 Windows ANSI terminal 的人工验收；
-- [ ] 观察一版后决定是否移除旧路径/killswitch。
+- [x] 删除新路径不再需要的 `outputCursorOnBlankRow` / `outputScrollDebtRows` 推断
+  （2026-10-08 复核：`rg` 全仓 0 命中，已随 P2 锚定切片删除）；
+- [x] 反转 `TestBottomReserveShrinkCompensationDrawsBlanksAtTop`，改为历史不得丢失
+  （已由 `TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop` 取代，
+  `fixed_bottom_surface_compensation_top_bug_test.go`）；
+- [ ] 更新 P5 总体设计和相关 implementation review（本文档已降级为历史注记，
+  现行权威为 `docs/architecture/aicli-tui-renderer-architecture-design.md` §7.3）；
+- [x] Windows Terminal/ConPTY 验收（真机 e2e 自动化覆盖：73 行 exactly-once、
+  无 3J、流式 mid-stream 采样无重复）；
+- [ ] 至少一种非 Windows ANSI terminal 的人工验收（环境受限，开放项；
+  已登记于现行权威设计文档 §7.2 开放验收项）；
+- [ ] 观察一版后决定是否移除旧路径/killswitch（现行跟踪：设计文档 §7.1 P0 行
+  「legacy surface 单向栅栏 / FixedBottomSurface 直写族清理」）。
 
 退出条件：
 

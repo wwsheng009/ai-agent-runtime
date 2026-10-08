@@ -411,3 +411,21 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
 - 实测（本轮接线时）：p95 plain 366µs / markdown 451µs（余量 >35×）；成本
   6719/0 = **1.36×**（≤2×）；分配 6719/300 = **0.999×（B/delta）/ 0.9997×
   （allocs/delta，610.2→610.0）**（≤3×）——历史规模不变量在最大矩阵档仍成立。
+
+### 5.8 流式真机场景（S4b 覆盖补齐，已完成）
+
+- 背景：S4b 的窗口化路径此前只有单测/基准覆盖；真机 e2e（Windows Terminal UIA）
+  只录制「已提交 markdown」的最终态，没有对**流式过程**的断言。
+- 落地（本轮）：
+  1. `backend/cmd/aicli-render-fixture` 增流式相位：16 个可变（`CellMutable`）
+     markdown 修订 × 300ms 逐行增长，随后 finalize 交付；宿主从**编号流式标记**
+     本身检测相位（普通 "begin" 行会被活动带重绘覆盖，实测 buffer 中为 0）。
+  2. `scripts/test-aicli-windows-terminal-e2e.ps1` 在流式期间持续采样真机 UIA 文本：
+     - 中途：任一 `AICLI-E2E-STREAM-###` 计数 >1 即失败（重复渲染类缺陷的直接断言）；
+     - 终态：16 个标记在宿主缓冲区各恰好 1 次（交付恰好一次）；
+     - 采样数 <3 判失败（「没测到」不能当「通过」）；可见区判据改用最终流式尾行
+       （`STREAM-015`，流式内容成为最新可见内容）。
+- 负向对照：向 finalize 源注入重复标记 → 断言红
+  （`count=2` + 中途重复检出）；还原后真机绿（**8 项 PASS**，~9–13s）。
+- 触发：`pwsh -NoProfile -File scripts/test-aicli-windows-terminal-e2e.ps1`
+  （需真实 Windows Terminal；默认超时 60s）。
