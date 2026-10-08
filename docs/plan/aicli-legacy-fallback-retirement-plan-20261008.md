@@ -221,15 +221,27 @@ buildChatSession
 > 原则：**行为等价优先**——B/C 类删除在 unified 路径本已是 no-op（fence 已生效），每刀保证
 > `ui`+`commands` 全量绿 + 门禁绿；一刀一提交；文档同步。C 类每小刀先"测试迁移"后"删实现"。
 
-### D0 前置决策（半天，产出记录进本文档）
+### D0 前置决策（已完成，2026-10-08 决议记录）
 
-1. **外部 API 确认**：`ui` 包导出符号（`InputBox.Read/Show/Update`、`Terminal.RawMode/DisableEcho`、
-   `WaitForESC`）是否存在仓库外消费者——由 owner 确认；无则进 L1，有则保留并加注释。
-2. **secret 收口方案**：选择 (a) 新增 `LineEditorHooks`/session 侧 secret 写入口；(b) 保留直写并登记为
-   sanctioned（不推荐，违背单写端）。
-3. **门禁语义重构口径**（L3）：把 writer inventory 拆成「sanctioned console writers（白名单类）」与
-   「migration debt（必须递减）」两组；总数仍作为回归栅栏，但债务数只统计待删实现。
-4. **compat/plain 正规化命名**：`legacyConsole*` → `consoleMode*`（或文档层改名），并纳入正式验收矩阵。
+> 决议人：owner（2026-10-08）。执行原则：删除前逐符号 `rg` 复核仓库内调用面；与本文表格不一致处
+> 以复核事实为准并回填。
+
+1. **外部 API 确认 → 无仓库外消费者，L1 直接删。** 证据：模块根在 `backend/go.mod` 且模块路径无
+   `/backend` 后缀（外部 `go get` 结构上无法解析该模块）；goproxy.cn 404、proxy.golang.org 网络超时、
+   Sourcegraph 被访问策略拦截；owner 确认无外部消费者。→ §4.2 待删导出符号不再按「保留 + 注释」处理。
+2. **secret 收口方案 → 选 (a)**：新增 `LineEditorHooks`/session 侧 secret 写入口（L2 执行）；
+   不采用 (b) sanctioned 登记。
+3. **门禁语义重构口径（L3）→ 按默认口径执行**：writer inventory 拆「sanctioned console writers
+   （白名单类）」与「migration debt（必须递减）」两组；总数仍作回归栅栏。
+4. **compat/plain 正规化命名 → 按默认口径执行**：`legacyConsole*` 先行文档层改称 `consoleMode*`
+   （L4 执行），并纳入正式验收矩阵。
+
+**L1 执行修正（复核发现的计划偏差，先于删除登记）**：
+
+- `KeyHandler.Notify` 为 Windows 生产派发调用（`keyhandler_windows.go:65`），**保留**；`WaitForESC`
+  仅测试引用，按计划删除（测试迁移为本地 helper）。
+- `Status` 族：`PrintTo`/`PrintErrorTo`/`PrintWarningTo` 有生产调用方（`chat.go:1080`、
+  `chat_selection_output.go:129`），**保留**；`PrintSuccessTo`/`PrintInfoTo` 零调用方，删除。
 
 ### L1 死码直删（B 类，1–2 提交）
 
@@ -299,9 +311,9 @@ L5 独立，依赖各自前置
 | 13 个 surface 测试文件钉住 legacy paint 语义 | L3 工期与回归面最大项 | 先迁移断言（state-only/租赁 transport），再删实现；每小刀独立提交 |
 | secret 读直写收口改变密码输入路径 | Win7/compat IME 语义 | 保留原 console 分支；unified 分支仅换写入口；真机回归 |
 | `FixedBottomSurface` facade 读（popup/几何）仍被 unified 依赖 | 误删会破坏 unified 弹层 | 明确列入 D 类，须先补 presenter API（L5） |
-| 仓库外消费者调用 ui 导出符号 | 删除造成外部破坏 | D0-1 确认；不确定则保留 + 注释 |
+| 仓库外消费者调用 ui 导出符号 | 删除造成外部破坏 | **已关闭（D0-1，2026-10-08）：无外部消费者**；逐符号复核后删除 |
 | 门禁语义重构削弱约束 | 新增直写可能漏检 | sanctioned 类仍按"类白名单 + 零新增"扫描；债务计数独立递减 |
-| `WaitForESC`/unix `KeyHandler` SIGUSR2 是否产品行为 | 误删调试/中断能力 | D0-1 确认；无结论前保留 |
+| `WaitForESC`/unix `KeyHandler` SIGUSR2 是否产品行为 | 误删调试/中断能力 | **已核查**：`WaitForESC` 仅测试引用→删（测试迁移 helper）；`Notify` 为 Windows 生产派发→保留；SIGUSR2 路径保留 |
 | JSON 模式是否隐含 `NoInteractive`、debug_overlay 非租约入口未穷举 | 模式矩阵边缘缺口 | 标注"需人工确认"，不据此删除 |
 
 ## 8. 附录：证据来源

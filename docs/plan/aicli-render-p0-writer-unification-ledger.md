@@ -7,7 +7,8 @@
 > 关联：残余写端差距（G2/G3/G9/G11）收敛见 `docs/plan/aicli-render-gap-closure-plan-20261006.md` 批次 A；
 > 本台账条目与该方案 A1 逐项/登记表互相对应。
 > 后续：legacy fallback 链退役分析与实施方案见 `docs/plan/aicli-legacy-fallback-retirement-plan-20261008.md`
-> （结论：整体退役不可行——compat/plain 为产品承诺；可删死码与可拆物理绘制族按该方案 L1–L4 分批执行）。
+> （结论：整体退役不可行——compat/plain 为产品承诺；可删死码与可拆物理绘制族按该方案 L1–L4 分批执行；
+> D0 决议 2026-10-08：无外部消费者 → L1 直删；secret 收口选 (a)）。
 
 ## 1. 已完成
 
