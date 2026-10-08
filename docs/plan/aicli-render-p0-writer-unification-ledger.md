@@ -78,7 +78,7 @@
   - L1-c `0b0fe123`：screen_lease raw DEC 1049 分支退役（租约统一走 transport、缺失 fail-closed）；
     `Disable` 租约退出 transport-only；测试迁移到 transport 断言；commands screen-framework helper
     注入 transport（修复 12 个 screen-framework 用例对 raw 租约路径的依赖）。
-  - 门禁基线 **41→35 条目（net −6）**：`readPrompt`、`PrintAt`、`screen_lease`×3、`Disable`。
+  - 门禁基线 **40→34 条目（net −6，口径校正详见方案 §5 L3-1 记录）**：`readPrompt`、`PrintAt`、`screen_lease`×3、`Disable`。
   - 验证：ui 全量（含 -race 子集）、commands 全量（174s）、`go build ./...`、门禁绿；
     环境偶发与暂缓项（InputBox legacy 方法簇）见方案 §5 执行记录。
 
@@ -87,8 +87,13 @@
     未认领保留 raw 兜底，非 unified 字节不变）；编辑器自有字节 raw 兜底收敛 `writeEditorRaw`。
   - resume 通知 / runtime 配置加载告警改经 `NotifyChatDiagnostic`（stderr 兜底保留）；
     退出恢复提示与无 ANSI 降级告警登记 sanctioned console writer。
-  - 门禁：**ui 债务 35→34（net −1，raw 引用 3→1）**；`TestUnifiedSessionSinglePhysicalWriterFence`
+  - 门禁：**ui 债务 34→33（net −1，raw 引用 3→1）**；`TestUnifiedSessionSinglePhysicalWriterFence`
     扩展 secret 驱动；ui/commands 全量绿（commands 192s）；真机 e2e 待人工复跑（见方案 §5）。
+
+- [x] **L3-1 FixedBottomSurface 拆壳首刀**（2026-10-08，`d57cf71b`）。
+  - `Enable` 首帧块退役；DEC2026 framing 全链删除（开关/查询/包裹分支 + 裸 os.Stdout 写），
+    写锁本体保留；`Disable` framing reset 随之删除；freeze 测试随符号删除，sync 用例收敛为「永不包裹」。
+  - 门禁：**条目 33→32**；ui 全量（12.8s）+ commands 相关子集绿；基线口径校正（L1 40→34、L2 34→33）。
 
 ## 2. 关键侦察结论（决定迁移顺序）
 

@@ -194,8 +194,8 @@ buildChatSession
 
 | 目标 | 说明 |
 |---|---|
-| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；非租约 paint 分支与其余各项仍待 L3） |
-| DEC2026 true 分支 + `SetTerminalSynchronizedFrames(true)` | 唯一 true 开关在 fence 内；`withTerminalWriteLock` 锁本身保留（presenter batch 合法命中） |
+| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；`Enable` 首帧块已随 L3-1 删除；非租约 paint 分支与其余各项仍待 L3） |
+| DEC2026 true 分支 + `SetTerminalSynchronizedFrames(true)` | **已执行（L3-1）**：framing 全链删除（开关/查询/包裹分支 + 裸 `os.Stdout` 写）；`withTerminalWriteLock` 锁本体保留（presenter batch 合法命中） |
 | `surface.Apply`（legacy reducer 路径） | 仅 `!UnifiedRendererEnabled()` 可达；`chat_ui_actor.go:1139` 注释明确拒绝 unified 调用 |
 | `TerminalOutput()` 默认 stdout 依赖 | 无生产注入；启动 `ClearIfSupported` 改显式 writer 后可去默认 stdout（保留 proxy） |
 
@@ -264,7 +264,7 @@ buildChatSession
   transport 断言（新增 `recordingLeaseTransport`）；commands 三文件注入最小 transport
   （`newChatScreenTestSession` helper 修复 12 个 screen-framework 用例的 raw 租约依赖）；门禁 −4
   （screen_lease×3 + `Disable`）。
-- **门禁基线：ui 直写债务 41 → 35（net −6）**。
+- **门禁基线：ui 直写债务 40 → 34（net −6；按 `writer_inventory_test.go` 条目数计）**。
 - **偏差记录**：screen_lease raw 的测试迁移面大于计划预期（17 处调用点、多个用例需语义迁移），
   故拆为独立小刀 L1-c；`ReleaseExitFailureStillRepaints` 删除（由 `FailedUnifiedExitRetainsRetryableLease`
   覆盖更优语义）。
@@ -292,7 +292,7 @@ buildChatSession
 - 通知收口：`chat_setup.go:891` resume 通知、`chat.go:943` 配置加载告警改经
   `NotifyChatDiagnostic`（未登记交互出口保留 stderr 兜底）；`printChatExitResumeHint`、
   `buildChatSession` 无 ANSI 降级告警登记为 sanctioned console writer。
-- 门禁：ui 直写债务 **35 → 34（net −1）**、raw 引用 3→1（net −2）：摘除
+- 门禁：ui 直写债务 **34 → 33（net −1）**、raw 引用 3→1（net −2）：摘除
   `ReadTransientSecretPrompt`/`writeEditorControlSequence` 条目、新增 `writeEditorRaw`。
 - 测试：ui 新增 secret hooks 认领/回退两用例；`TestUnifiedSessionSinglePhysicalWriterFence`
   增加 secret 路径驱动（stdout/stderr 零字节 + 提示行标签进入统一写端）。
@@ -312,8 +312,22 @@ buildChatSession
 - **L3-2**：删物理绘制实现（`appendOwnedDirectPaintLocked`/`insertHistoryLinesInRegionLocked`/`flush*`/
   `renderOwnedViewportLocked` 写体/`writeOutput` 物理分支），保留 state-only 语义；迁移 13 个 surface 测试文件。
 - **L3-3**：删 `clearActiveBand` paint 分支、`Disable` legacy paint、`repaintActiveBandLocked` 分支、
-  `surface.Apply`；门禁基线同步（预计 ui 债务 41 → ~25）。
+  `surface.Apply`；门禁基线同步（基线随刀同步：L3 起点 33 条目，L3-1 后 32）。
 - 每刀验收：`go test ./cmd/aicli/ui`（含 inventory）+ `./cmd/aicli/commands` 相关子集；一刀一提交。
+
+**L3-1 执行记录（2026-10-08，提交 `d57cf71b`）**
+
+- `Enable` 首帧块（DECSTBM reset + 首帧合成）删除：生产恒为 fence 内不可达；`Enable` 仅建立状态。
+- DEC2026 全链退役：`SetTerminalSynchronizedFrames`/`TerminalSynchronizedFramesEnabled`/
+  `syncFramesEnabled` + `withTerminalWriteLock` 包裹分支（裸 `os.Stdout` 写）整体删除；
+  写锁本体保留（presenter batch 合法命中）。`Disable` 的 framing reset 随之删除。
+- 测试：`terminal_write_lock_sync_test.go` 收敛为「永不包裹」断言（含 `?2026` 不存在断言）；
+  `terminal_write_lock_freeze_test.go` 随符号删除而删除；`fixed_bottom_surface_test.go` 无 legacy
+  开启断言（计划所列迁移不适用），`fixed_bottom_surface_profile_test.go` 不受影响。
+- 门禁：摘除 `renderengine/terminal_lock.go` 条目，**条目 33 → 32**（口径校正：L1/L2 记录按
+  `writer_inventory_test.go` 条目数实测应为 **40→34**、**34→33**，已同步修正上两条记录）。
+- 验证：残留引用 rg 0 命中；gofmt 干净；`go build ./...` 绿；`go test ./cmd/aicli/ui` 全量（12.8s）绿；
+  commands 相关子集（inventory+fence、`Compat|Plain|Surface|Enable`）绿。
 
 ### L4 门禁语义重构与降级正规化（1 提交，纯文档/测试）
 

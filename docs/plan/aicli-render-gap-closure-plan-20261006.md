@@ -71,7 +71,7 @@ A 与 B 文件面无交集，可并行；C 与 B 的建议顺序仅为避免 set
 
 | # | 位置 | 处置 | 钉测试/证据 | 风险 |
 |---|---|---|---|---|
-| 1 | `ui/renderengine/terminal_lock.go:72-76`（syncFrames DEC2026 直写 os.Stdout） | 首选**登记 + 冻结**（legacy-only；unified 不开启，随 legacy surface 退役删除）；二选注入 sink/经 session 事务 | 递归门禁命中基线；`syncFramesEnabled` 唯一开启点核对 | 低（legacy 面） |
+| 1 | `ui/renderengine/terminal_lock.go:72-76`（syncFrames DEC2026 直写 os.Stdout） | 首选**登记 + 冻结**（legacy-only；unified 不开启，随 legacy surface 退役删除——**已于 L3-1 删除，2026-10-08**）；二选注入 sink/经 session 事务 | 递归门禁命中基线；`syncFramesEnabled` 唯一开启点核对 | 低（legacy 面） |
 | 2 | `ui/terminal_output.go:18-21`（包级 var os.Stdout） | 保持兼容 sink 语义；**修正注释**（删除/改写 `SetLegacyBinding` 声明，标注"legacy 适配器退役后删除"）+ 登记 | 盲区扫描命中；注释不再声称不存在的实现 | 低 |
 | 3 | `commands/chat_notification.go:613`、`chat_notification_sound.go:170`（`raw: os.Stdout` 结构体字面量） | 改经 **session 旁路接口**（S14）；submit 失败路径 OSC/BEL 不得绕过 | 新钉测试：失败路径经旁路记录、stdout 零字节 | 中（旁路接口只增不改） |
 | 4 | `commands/chat_legacy_console_editor_windows.go:60-66`（包级闭包写 stderr） | 收编 `NotifyChatDiagnostic` 或函数内化并登记 | 盲区扫描命中消失/入台账 | 低 |

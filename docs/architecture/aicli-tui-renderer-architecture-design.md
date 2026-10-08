@@ -571,7 +571,7 @@ sequenceDiagram
 | # | 差距 | 证据 | 严重度 | 处置 |
 |---|---|---|---|---|
 | G1 | **1ms 轮询残余（保留项）**：`WaitIdleTimeout` 内部 1ms 轮询仍在，经 `waitUIActorIdleBounded`（5s）/close drain/legacy 辅助触达；P1-3 §3.7 已决策**保留**（有界兜底） | `controller.go:852`；`chat_ui_actor.go`（close drain / `waitUIActorIdleBounded`）；`chat_runtime_events.go`（legacy 辅助） | 低-中 | 实施方案 B0/B1：登记清单化；事件化（可选） |
-| G2 | **写端门禁盲区**：ui 门禁 glob 非递归漏 `renderengine/terminal_lock.go:73,76`（os.Stdout DEC2026）；两个扫描器不覆盖包级 var / 结构体字面量 / 非 arg0 | `terminal_output.go:21`；`chat_notification.go:613`；`chat_notification_sound.go:170`；`chat_legacy_console_editor_windows.go:60-66`；`chat_tool_executor.go:95,117` | 中 | P0 门禁增强（递归 + 盲区扫描）+ 缺口登记 |
+| G2 | **写端门禁盲区**：ui 门禁 glob 非递归漏 `renderengine/terminal_lock.go:73,76`（os.Stdout DEC2026；已随 L3-1 退役，2026-10-08）；两个扫描器不覆盖包级 var / 结构体字面量 / 非 arg0 | `terminal_output.go:21`；`chat_notification.go:613`；`chat_notification_sound.go:170`；`chat_legacy_console_editor_windows.go:60-66`；`chat_tool_executor.go:95,117` | 中 | P0 门禁增强（递归 + 盲区扫描）+ 缺口登记 |
 | G3 | **stderr 边缘未收口**：交互期仍有 os.Stderr 直写（与 stdout 同 tty） | `chat_setup.go:108/139/233/268` 及 `printChatSessionInfoRow` 调用点；`chat_selection_output.go:129`；`chat.go:1073` | 中 | §3.8 持续收口（P0 尾项） |
 | G4 | **claimed 路径 rebase/invalidate 缺口**：`rebasePendingHistoryEffects` 对 claimed 且 presentation 改变的 token 静默跳过，靠 generation 失配→Deferred 释放后收敛 | `history_effect_planner.go:1643-1661`；`history_effect_queue.go:560-567` | 中 | P2 前收紧；§9.3.3/§8 已标注 |
 | G5 | **skipRows 证明 0 二义性**：`activeAckedRenderedPrefixRows` 返回 0 兼表"无前缀/前缀不等价"，后者由 finalize 兜底置 `ProjectionUnknown` | `history_effect_planner.go:335-367`；`controller_state.go:594-597` | 中 | P2 Slice 1 后消失；先加注释/测试钉住 |
