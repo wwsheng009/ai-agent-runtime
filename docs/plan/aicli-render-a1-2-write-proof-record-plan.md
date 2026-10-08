@@ -118,7 +118,7 @@ type terminalWriteProof struct {
   `TestAbortableTerminalWriterAbortBeforeDispatchIsZeroProven`（派发二义单测）。
 - **验证**：定向组（含 CloseTimeout / zero-byte 重试 / panic / gateway abort）绿；
   家族 `-count=20` 绿；`-race` 绿；ui 全量 88.0s 绿；commands 全量随提交记录。
-- **待办**：A1-2b（Q2/Q3/Q4 推定替换）、A1-2c（settle proof 终态 + 门槛删除面）。
+- **状态**：A1-2b（`b99c6bd1`/`30dd09a0`）、A1-2c settle 终态（设计文档 §3.4/§3.6 对齐）均已落地；Q3 覆盖集逐 token 解析（`31cf5f72`，整批回退删除）。
 
 ### 7.2 A1-2b（2026-10-07，Q2/Q4 已落地）
 

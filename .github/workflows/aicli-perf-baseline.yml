@@ -1,0 +1,72 @@
+name: aicli perf baseline (manual)
+
+# P3（性能收敛）预算制度在 CI 的执行端：手动触发跑帧时延/分配基准。
+# 硬断言内建于基准（backend/cmd/aicli/ui/frame_latency_bench_test.go）：
+#   - 稳态流式 p95 < 16ms 帧预算（plain + markdown 两条）；
+#   - 历史规模 6719/0 的 p50/delta 比 ≤ 2×（成本与历史总量脱钩）；
+#   - 分配规模 6719/300 的 B/delta 与 allocs/delta 比 ≤ 3×。
+# 超线即 step 失败（红灯）；报告以 artifact 留存。
+#
+# 依据：docs/plan/aicli-render-p3-performance-plan-20261007.md §3 门禁集成。
+# 用途：
+# - 优化前后各跑一次对比（A/B 基线）；
+# - 不接发布管道——性能基准是测量/治理工具，不阻塞发布；
+# - 每轮优化后复测并把新基线回填 P3 计划 §5，再决定是否收紧红线。
+#
+# 触发：仓库 Actions 页手动运行（workflow_dispatch）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchtime:
+        description: 帧时延基准轮数（-benchtime，如 50x 或 2s）
+        type: string
+        default: 50x
+
+jobs:
+  baseline:
+    name: Frame latency + allocation baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Prepare report directory
+        run: mkdir -p .artifacts/perf
+
+      - name: Frame latency baselines (p95 < 16ms hard assertion)
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./cmd/aicli/ui/ -run '^$' \
+            -bench 'BenchmarkFrameLatencyStreaming$|BenchmarkFrameLatencyStreamingMarkdown$' \
+            -benchtime '${{ inputs.benchtime }}' -count=3 | tee .artifacts/perf/framebench-latency.txt
+
+      - name: Scale baselines (slope + allocation scale hard assertions)
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./cmd/aicli/ui/ -run '^$' \
+            -bench 'BenchmarkFrameCostScale|BenchmarkFrameAllocsScale' \
+            -benchtime 50x -count=1 | tee .artifacts/perf/framebench-scale.txt
+          go test ./cmd/aicli/ui/ -run '^$' \
+            -bench 'BenchmarkFrameAllocsPerDelta$|BenchmarkFrameAllocsPerDeltaMarkdown$' \
+            -benchtime 3x -count=1 | tee .artifacts/perf/framebench-allocs.txt
+
+      - name: Upload perf reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: aicli-perf-reports
+          path: backend/.artifacts/perf
+          if-no-files-found: error
+          retention-days: 30

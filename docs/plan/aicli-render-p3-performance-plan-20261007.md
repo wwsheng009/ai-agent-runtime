@@ -4,7 +4,7 @@
 > `docs/architecture/aicli-tui-renderer-architecture-design.md` §7.1 P3 行、§7.2 验收行；`docs/plan/aicli-render-remaining-defect-ledger-20261006.md` A4。
 > 基线：`feat/render-p0-writer-unification` @ `8f6b32b8`（工作树干净）。
 > 前置侦察：2026-10-07 三路只读（帧路径成本解剖 / 基准与验收设施 / active markdown 增量可行性），结论并入 §1，不另设侦察文档。
-> 状态：**S0–S4 完成**（S4：§5.5 plain 热点收敛 + §5.6 结构化路径窗口化）；切片记录见 §5。
+> 状态：**S0–S4 完成，§3 门禁已接线**（S4：§5.5 plain 热点收敛 + §5.6 结构化路径窗口化；§5.7 硬断言 + perf workflow）；切片记录见 §5。
 
 ## 0. 目标与验收
 
@@ -148,10 +148,13 @@ delta 成本 O(delta) 证明。
   每帧分配不随历史总量增长；ui / commands 全量 + `-race` 绿；真机 e2e 不回归。
 - **门禁集成**：
   - 扩展 `scripts/test-aicli-resume-startup-perf-e2e.ps1`（P12 已打印 UI stall p95/max、
-    P16 规划预算；复用为帧延迟代理）；
+    P16 规划预算；复用为帧延迟代理）；**已按「复用 P12/P16 代理」解释**——脚本无需
+    改动（结构化流式场景由基准内嵌断言覆盖，见 §5.7）；
   - 新建 `aicli-perf-baseline.yml`（照 `frontend-perf-baseline.yml` 形态：手动触发 +
     报告 artifact + 红线脚本）；Go benchmark 不默认进 `go test`，需显式步骤；
+    **已落地（2026-10-08）**：`.github/workflows/aicli-perf-baseline.yml`；
   - `release-aicli.yml` 保持既有测试门禁（E4/parity/writer inventory），新增 perf 步骤为可选。
+    （不额外接入发布管道——性能基准是测量/治理工具。）
 
 ## 4. 风险与回滚
 
@@ -388,3 +391,23 @@ max 2.61ms/delta（mean ≈2.0ms/delta）。
 - 机制边界（诚实记录）：窗口只服务 start==0（未交接）流式路径；start>0 交接
   路径保持原「全量 + 前缀校验」实现（生产 `MarkActiveAcked` 目前无调用者）。
   无块边界/始终无候选的退化源自动回退全量路径，正确性不受影响。
+
+### 5.7 门禁收口（§3 硬断言接线 + perf workflow，已完成）
+
+- 背景：§5.5/§5.6 的验收结论此前只由「显式跑基准 + 人工读数」承载；§3 的
+  硬验收（p95 < 16ms、O(delta) 斜率、分配不随历史总量增长）尚未成为可失败
+  断言，`aicli-perf-baseline.yml` 与 A4 台账行亦缺。
+- 落地（本轮）：
+  1. 基准内嵌硬断言（`frame_latency_bench_test.go`，只在显式 `-bench` 运行时
+     校验，不进默认 `go test`）：
+     - 稳态流式（plain + markdown）**p95 < 16ms** 帧预算；
+     - `BenchmarkFrameCostScale`：6719/0 的 p50/delta 比 ≤ **2×**；
+     - 新增 `BenchmarkFrameAllocsScale`：6719/300 的 B/delta 与 allocs/delta
+       比 ≤ **3×**（`runFrameAllocsPerDelta` 同步改为轮均值口径并回报结果）。
+  2. `.github/workflows/aicli-perf-baseline.yml`：手动触发（`workflow_dispatch`，
+     `-benchtime` 入参）→ 三条基准步（latency / scale / allocs）→ 报告 artifact
+     `aicli-perf-reports`；超线即 step 失败。不入发布管道。
+  3. 台账 A4 行与「建议顺序」回填（S0–S4 + S4b 完成与提交锚点）。
+- 实测（本轮接线时）：p95 plain 366µs / markdown 451µs（余量 >35×）；成本
+  6719/0 = **1.36×**（≤2×）；分配 6719/300 = **0.999×（B/delta）/ 0.9997×
+  （allocs/delta，610.2→610.0）**（≤3×）——历史规模不变量在最大矩阵档仍成立。
