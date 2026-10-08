@@ -8,10 +8,25 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+// waitForKeyHandlerESC is the test-local form of the retired production
+// WaitForESC helper: assert on the handler's ESC channel with a timeout.
+func waitForKeyHandlerESC(kh *KeyHandler, timeout time.Duration) bool {
+	if kh == nil || !kh.IsEnabled() {
+		return false
+	}
+	select {
+	case <-kh.GetESCChannel():
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
 
 func TestKeyHandlerStart_DoesNotPrintStartupHint(t *testing.T) {
 	kh := NewKeyHandler()
@@ -38,7 +53,7 @@ func TestKeyHandlerStart_IgnoresMissingSessionEscape(t *testing.T) {
 	defer kh.Stop()
 	kh.Start()
 
-	if kh.WaitForESC(windowsEscapePollInterval * 3) {
+	if waitForKeyHandlerESC(kh, windowsEscapePollInterval*3) {
 		t.Fatal("expected handler to ignore ESC absent from this session's stdin")
 	}
 }
@@ -58,7 +73,7 @@ func TestKeyHandlerStart_DoesNotPollWhileDisarmed(t *testing.T) {
 	defer kh.Stop()
 	kh.Start()
 
-	if kh.WaitForESC(windowsEscapePollInterval * 3) {
+	if waitForKeyHandlerESC(kh, windowsEscapePollInterval*3) {
 		t.Fatal("expected ordinary composer input to keep ESC polling disarmed")
 	}
 	if got := reads.Load(); got != 0 {
@@ -78,7 +93,7 @@ func TestKeyHandlerStart_NotifiesForSessionEscape(t *testing.T) {
 	kh.Start()
 	kh.Arm()
 
-	if !kh.WaitForESC(windowsEscapePollInterval * 3) {
+	if !waitForKeyHandlerESC(kh, windowsEscapePollInterval*3) {
 		t.Fatal("expected ESC from this session's stdin to be reported")
 	}
 }
@@ -100,14 +115,14 @@ func TestKeyHandlerStart_DoesNotPollSessionInputWhileSuspended(t *testing.T) {
 	kh.Start()
 	kh.Arm()
 
-	if kh.WaitForESC(windowsEscapePollInterval * 3) {
+	if waitForKeyHandlerESC(kh, windowsEscapePollInterval*3) {
 		t.Fatal("expected suspended handler not to consume the composer's stdin")
 	}
 	if got := reads.Load(); got != 0 {
 		t.Fatalf("expected no stdin polling while suspended, got %d reads", got)
 	}
 	kh.Resume()
-	if !kh.WaitForESC(windowsEscapePollInterval * 3) {
+	if !waitForKeyHandlerESC(kh, windowsEscapePollInterval*3) {
 		t.Fatal("expected resumed handler to poll its session input")
 	}
 }

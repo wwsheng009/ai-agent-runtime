@@ -106,7 +106,6 @@ func uiDirectWriterInventory() []uiDirectWriterInventoryEntry {
 		{File: "message.go", Func: "method Print", Kind: "os.Std*", Count: 1},
 		{File: "separator.go", Func: "PrintEmptyLine", Kind: "os.Std*", Count: 1},
 		{File: "separator.go", Func: "method Print", Kind: "os.Std*", Count: 1},
-		{File: "terminal.go", Func: "method PrintAt", Kind: "TerminalOutput()", Count: 1},
 		{File: "terminal.go", Func: "method emitControl", Kind: "TerminalOutput()", Count: 1},
 		{File: "welcome.go", Func: "PrintWelcomeWithConfig", Kind: "os.Std*", Count: 1},
 		// --- 审计补登（G2 盲区：子包递归 + 包级 var，2026-10-06）---

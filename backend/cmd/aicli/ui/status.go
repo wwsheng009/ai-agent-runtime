@@ -201,11 +201,6 @@ func PrintDebug(format string, args ...interface{}) {
 	NewStatus(StatusDebug, fmt.Sprintf(format, args...)).Print()
 }
 
-// PrintSuccessTo 打印成功消息到指定输出流
-func PrintSuccessTo(writer *os.File, format string, args ...interface{}) {
-	NewStatus(StatusSuccess, fmt.Sprintf(format, args...)).PrintTo(writer)
-}
-
 // PrintErrorTo 打印错误消息到指定输出流
 func PrintErrorTo(writer *os.File, format string, args ...interface{}) {
 	NewStatus(StatusError, fmt.Sprintf(format, args...)).PrintTo(writer)
@@ -214,9 +209,4 @@ func PrintErrorTo(writer *os.File, format string, args ...interface{}) {
 // PrintWarningTo 打印警告消息到指定输出流
 func PrintWarningTo(writer *os.File, format string, args ...interface{}) {
 	NewStatus(StatusWarning, fmt.Sprintf(format, args...)).PrintTo(writer)
-}
-
-// PrintInfoTo 打印信息消息到指定输出流
-func PrintInfoTo(writer *os.File, format string, args ...interface{}) {
-	NewStatus(StatusInfo, fmt.Sprintf(format, args...)).PrintTo(writer)
 }

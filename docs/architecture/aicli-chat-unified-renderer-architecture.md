@@ -1166,9 +1166,9 @@ effects 经 session-scoped gateway / 协议输出各自管理 / console 是可�
   完整且经测试（`parity_test.go`/`capture_upgrade_test.go`），但生产只配置过 stdout
   primary。非 stdout primary（文件/PTY/远端）属 v2 能力，届时需在真实替代 sink 上
   验证 reconfigure barrier 与 mirror 一致性。
-- `emitControl`/`PrintAt` 仍解析 process `TerminalOutput()`（process-compat
-  allowlist）；active session 内主要调用点已被 fence/owned 守卫覆盖，但该出口对
-  未来调用者保持开放。
+- `emitControl` 仍解析 process `TerminalOutput()`（process-compat allowlist）；
+  active session 内主要调用点已被 fence/owned 守卫覆盖，但该出口对未来调用者保持开放。
+  （legacy `PrintAt` 已于 2026-10-08 L1 退役。）
 
 建议的演进优先级：
 

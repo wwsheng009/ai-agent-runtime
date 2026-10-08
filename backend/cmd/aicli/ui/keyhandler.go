@@ -2,7 +2,6 @@ package ui
 
 import (
 	"sync/atomic"
-	"time"
 )
 
 // KeyHandler 键盘事件处理器
@@ -90,21 +89,6 @@ func (kh *KeyHandler) GetESCChannel() <-chan bool {
 	return kh.notifyChan
 }
 
-// WaitForESC 等待 ESC 键按下（带超时）
-// 返回 true 表示检测到 ESC 键，false 表示超时
-func (kh *KeyHandler) WaitForESC(timeout time.Duration) bool {
-	if kh == nil || !kh.enabled.Load() {
-		return false
-	}
-
-	select {
-	case <-kh.notifyChan:
-		return true
-	case <-time.After(timeout):
-		return false
-	}
-}
-
 // IsEnabled 检查键盘监听是否启用
 func (kh *KeyHandler) IsEnabled() bool {
 	return kh != nil && kh.enabled.Load()
@@ -121,9 +105,4 @@ func (kh *KeyHandler) Armed() bool {
 // component (for example the busy composer capture) owns the session stdin.
 func (kh *KeyHandler) Suspended() bool {
 	return kh != nil && kh.suspended.Load()
-}
-
-// ManualInterrupt 手动触发中断（用于从代码中模拟 ESC 键）
-func (kh *KeyHandler) ManualInterrupt() {
-	kh.Notify()
 }

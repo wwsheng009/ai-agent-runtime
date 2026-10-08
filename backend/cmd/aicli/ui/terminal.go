@@ -3,10 +3,8 @@ package ui
 import (
 	"fmt"
 	"os"
-	"os/signal"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -341,14 +339,6 @@ func (t *Terminal) NewLine() {
 	t.emitControl("\r\n")
 }
 
-// PrintAt 在指定位置打印（经 WriteTerminalText 串行化）。
-func (t *Terminal) PrintAt(row, col int, text string) {
-	t.SaveCursor()
-	t.MoveTo(row, col)
-	_, _ = WriteTerminalText(TerminalOutput(), text)
-	t.RestoreCursor()
-}
-
 // GetTerminalSize 获取终端大小：优先读进程级单探针缓存（driver.ProbeSize
 // 发布），无缓存时做一次 raw 探测并发布；两者都不可用返回 80x24 兜底。
 func GetTerminalSize() (width, height int) {
@@ -390,47 +380,6 @@ func SetupTerminal() (cleanup func()) {
 	}
 
 	return cleanup
-}
-
-// EnsureExitOnSigInt 确保 Ctrl+C 时退出并清理
-func EnsureExitOnSigInt(cleanup func()) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		if cleanup != nil {
-			cleanup()
-		}
-		os.Exit(0)
-	}()
-}
-
-// RawMode 进入原始模式（仅 Unix-like）
-func RawMode() func() {
-	if runtime.GOOS == "windows" {
-		return func() {}
-	}
-
-	fd := int(os.Stdin.Fd())
-	state, err := term.MakeRaw(fd)
-	if err != nil {
-		return func() {}
-	}
-	return func() {
-		_ = term.Restore(fd, state)
-	}
-}
-
-// DisableEcho 禁用回显（用于密码输入）
-func DisableEcho() func() {
-	if runtime.GOOS == "windows" {
-		// Windows: 使用 syscall 设置
-		return func() {}
-	}
-
-	// Unix-like: 简化处理
-	return func() {}
 }
 
 // IsInteractiveTerminal 返回 stdin/stdout 是否都连接到交互式终端

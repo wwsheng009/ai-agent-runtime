@@ -243,13 +243,13 @@ func classifyEntry(rel, symbol, kind string) (classification, reason, removalPha
 		return "diagnostic-stderr",
 			"stderr 诊断输出（[aicli-diag]），调试/日志路径，非交互渲染",
 			"", ""
-	case strings.HasSuffix(rel, "ui/terminal.go") && (symbol == "emitControl" || symbol == "PrintAt"):
+	case strings.HasSuffix(rel, "ui/terminal.go") && symbol == "emitControl":
 		// 依据设计计划 legacy terminal-control facade 行：production
 		// TerminalOutput() 只留 startup/process-compat allowlist。
 		// emitControl 是控制序列统一出口（process proxy 物理出口），
-		// PrintAt 是 legacy fallback——两者即该 allowlist 的现存成员。
+		// 是该 allowlist 的现存成员（legacy PrintAt 已于 2026-10-08 L1 退役）。
 		return "process-compat-startup",
-			"process TerminalOutput() 允许列表：控制序列统一出口/legacy fallback",
+			"process TerminalOutput() 允许列表：控制序列统一出口",
 			"phase-6", "legacy_immediate"
 	default:
 		return "gateway-terminal-effect", "", "phase-6", "frame"
