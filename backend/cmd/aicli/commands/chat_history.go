@@ -224,10 +224,15 @@ const (
 	// 覆盖语义转录与原生 scrollback，本次快照必被立刻覆盖。
 	resumeHistorySnapshotSkip resumeHistorySnapshotMode = iota
 	// resumeHistorySnapshotAwait：阻塞投递，保证这一帧真的进邮箱并被画出来。用于首步
-	// ——它是「边读边画」对用户的第一次承诺，也是小历史下唯一的可见更新。
+	// ——它是「边读边画」对用户的第一次承诺，也是小历史下唯一的可见更新——以及
+	// 其后的各个中间步：cell 行缓存 + 并行首渲染之后，增量步的规划只覆盖本步新增
+	// 的 cell（实测 ~47-49ms/步，见 docs/e2e/resume-incremental-publish-coalescing.md
+	// §10 的成本模型更新），落地即把该步 cell 的行渲染预热进缓存；装载收尾的授权式
+	// 替换因此命中缓存，锁内 screen 相位从全量首渲染退化为查表（P16）。
 	resumeHistorySnapshotAwait
 	// resumeHistorySnapshotTry：非阻塞投递，actor 忙时放弃这次中间态（数据面已在 Scene
-	// 里，下一次发布或收尾的授权式替换会补上）。用于首步之后的各个步子。
+	// 里，下一次发布或收尾的授权式替换会补上）。保留给流式运行事件等不能停等的
+	// 后台生产者；逐页历史补齐不再使用（放弃会让收尾承担全部首渲染，见上）。
 	resumeHistorySnapshotTry
 )
 
@@ -237,10 +242,10 @@ func resumeHistorySnapshotModeForStep(visited, stride, estimatedPages int, hasMo
 	if !hasMore || resumeHistoryIncrementalStepIsLast(visited, stride, estimatedPages) {
 		return resumeHistorySnapshotSkip
 	}
-	if visited <= 1 {
-		return resumeHistorySnapshotAwait
-	}
-	return resumeHistorySnapshotTry
+	// 首步与中间步同档：每一步都必须落地。中间步一旦被放弃，其 cell 的首次渲染
+	// 就被推迟到装载收尾的授权式替换里一次性发生——那正是 P12 冻结/P16 红项的
+	// 来源（收尾规划实测 536ms，其中 screen 360ms）。步长仍然有界（~6 步）。
+	return resumeHistorySnapshotAwait
 }
 
 // renderResumeHistoryPageIncremental 把「刚取回的较早一页」增量装配进统一渲染

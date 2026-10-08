@@ -418,14 +418,15 @@ func TestResumeHistoryIncrementalStepIsLast(t *testing.T) {
 	require.False(t, resumeHistoryIncrementalStepIsLast(9, 3, 0))
 }
 
-// TestResumeHistorySnapshotModeForStep 固化逐页补齐的三档快照策略：首步阻塞投递
-// （保证第一次可见）、中间步子非阻塞投递（actor 忙就不再停等）、末步跳过（收尾的
-// 授权式替换必覆盖它）。成本依据见 docs/e2e/resume-incremental-publish-coalescing.md §10。
+// TestResumeHistorySnapshotModeForStep 固化逐页补齐的两档快照策略：首步与中间步
+// 都阻塞投递（增量步规划只覆盖新增 cell、~47-49ms/步，落地即预热行缓存；放弃会
+// 让收尾的授权式替换承担全部首渲染，见 P16 归因），末步跳过（收尾的授权式替换
+// 必覆盖它）。成本模型更新见 docs/e2e/resume-incremental-publish-coalescing.md §10。
 func TestResumeHistorySnapshotModeForStep(t *testing.T) {
 	// 42 页 + 步长 8。
 	require.Equal(t, resumeHistorySnapshotAwait, resumeHistorySnapshotModeForStep(1, 8, 43, true))
-	require.Equal(t, resumeHistorySnapshotTry, resumeHistorySnapshotModeForStep(8, 8, 43, true))
-	require.Equal(t, resumeHistorySnapshotTry, resumeHistorySnapshotModeForStep(32, 8, 43, true))
+	require.Equal(t, resumeHistorySnapshotAwait, resumeHistorySnapshotModeForStep(8, 8, 43, true))
+	require.Equal(t, resumeHistorySnapshotAwait, resumeHistorySnapshotModeForStep(32, 8, 43, true))
 	require.Equal(t, resumeHistorySnapshotSkip, resumeHistorySnapshotModeForStep(40, 8, 43, true))
 
 	// 最后一页必跳过，即便它是首步（其后紧跟装载收尾）。
