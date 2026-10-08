@@ -135,7 +135,7 @@
 6. [x] 单写端断言测试：`TestUnifiedSessionSinglePhysicalWriterFence` 注入计数 writer，
    在统一会话存活期驱动标题/铃/编辑器模式序列/动态诊断/直写输出/命令输出，
    断言全部落在同一物理 writer、进程 stdout/stderr 零字节。
-   （门禁运行说明见 §4 验收与 README 待补。）
+   （门禁运行说明见 §4 验收与 README「写端门禁」小节。）
 
 ## 3.1 已知基线问题（非本分支引入）
 

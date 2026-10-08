@@ -241,3 +241,23 @@ TrueColor、ANSI-256、ANSI-16 或 Plain。
 - 考虑无彩色模式的回退方案
 - 确保输出在不同终端宽度下正常显示
 - 避免输出过多控制字符影响性能
+
+## 写端门禁（writer inventory gate）
+
+ui 生产文件的终端直写基线门禁（P0 写端归一）。
+语义：`ui/*.go`（递归子包）中触碰 `os.Stdout/os.Stderr`（纯 `Fd()` 探测除外）、
+`fmt.Print*`、`TerminalOutput()` 的调用点；该基线是**迁移债务台账，不是新功能授权**。
+
+```powershell
+# 在 backend/ 下运行
+go test ./cmd/aicli/ui/ -run TestUIInteractiveDirectWriterInventory
+```
+
+- 迁移一处 → 从 `ui/writer_inventory_test.go` 基线删除对应条目；不得为任何新交互功能新增条目。
+- 交互期运行时单写端门禁（ui + commands 联动）：
+
+```powershell
+go test ./cmd/aicli/commands/ -run 'TestUnifiedSessionSinglePhysicalWriterFence|TestChatSelectionOutputClaimsToDiagnosticSinkWhenSessionActive|TestChatControlSequenceWriter'
+```
+
+- 验收口径见 `docs/plan/aicli-render-p0-writer-unification-ledger.md` §4。
