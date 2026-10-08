@@ -127,17 +127,24 @@ var interactiveInputCarryover struct {
 // echoed or added to history; non-interactive input stays line-buffered for
 // tests and piped usage.
 func (ib *InputBox) ReadTransientSecretPrompt(prompt string) (string, error) {
+	return ib.ReadTransientSecretPromptWithHooks(prompt, LineEditorHooks{})
+}
+
+// ReadTransientSecretPromptWithHooks is ReadTransientSecretPrompt with the
+// editor text channel: the prompt label and the trailing newline are offered
+// to hooks.OnTerminalText first, so a unified host can keep the bytes with the
+// single terminal writer. Unclaimed text keeps the raw fallback, which is
+// byte-identical for non-unified callers.
+func (ib *InputBox) ReadTransientSecretPromptWithHooks(prompt string, hooks LineEditorHooks) (string, error) {
 	if ib == nil {
 		return "", io.EOF
 	}
-	if prompt != "" {
-		_, _ = WriteTerminalText(os.Stdout, prompt)
-	}
+	writeEditorText(hooks, prompt)
 	if !IsInteractiveTerminal() {
 		return readBufferedLine(os.Stdin)
 	}
 	raw, err := term.ReadPassword(int(os.Stdin.Fd()))
-	_, _ = WriteTerminalLine(os.Stdout, "")
+	writeEditorText(hooks, "\n")
 	if err != nil {
 		return "", err
 	}
@@ -210,7 +217,27 @@ func writeEditorControlSequence(hooks LineEditorHooks, sequence string) {
 	if hooks.OnTerminalControl != nil && hooks.OnTerminalControl(sequence) {
 		return
 	}
-	_, _ = WriteTerminalText(os.Stdout, sequence)
+	writeEditorRaw(sequence)
+}
+
+// writeEditorText delivers plain editor-owned text (the secret prompt label
+// and its trailing newline). Unified hosts claim it via
+// LineEditorHooks.OnTerminalText; unclaimed callers keep the raw fallback.
+func writeEditorText(hooks LineEditorHooks, text string) {
+	if text == "" {
+		return
+	}
+	if hooks.OnTerminalText != nil && hooks.OnTerminalText(text) {
+		return
+	}
+	writeEditorRaw(text)
+}
+
+// writeEditorRaw is the single raw fallback point for editor-owned bytes
+// (mode sequences, secret prompt label/newline). The writer inventory tracks
+// this entry instead of every editor caller.
+func writeEditorRaw(text string) {
+	_, _ = WriteTerminalText(os.Stdout, text)
 }
 
 func readBufferedLine(reader io.Reader) (string, error) {

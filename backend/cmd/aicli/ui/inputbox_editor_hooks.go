@@ -63,9 +63,15 @@ type LineEditorHooks struct {
 	// delivered the sequence through the unified terminal writer; returning
 	// false keeps the legacy raw path (load-bearing for non-unified callers).
 	OnTerminalControl func(sequence string) bool
-	OnComplete        func(LineEditorSnapshot) (LineEditorReplacement, bool)
-	OnNavigate        func(LineEditorSnapshot, int) bool
-	OnMove            func(LineEditorSnapshot, int) bool
+	// OnTerminalText offers plain editor-owned text (the secret prompt label
+	// and its trailing newline) to the host before the editor falls back to its
+	// raw writer. Returning true means the host owns the bytes (the unified
+	// presenter paints the prompt row itself); returning false keeps the raw
+	// fallback, which stays load-bearing for non-unified callers.
+	OnTerminalText func(text string) bool
+	OnComplete     func(LineEditorSnapshot) (LineEditorReplacement, bool)
+	OnNavigate     func(LineEditorSnapshot, int) bool
+	OnMove         func(LineEditorSnapshot, int) bool
 	// OnTranscriptRequested may claim Ctrl+T for a host-level read-only
 	// transcript overlay. Returning false preserves the editor's normal
 	// transpose-character behavior, so non-chat editors are unchanged.

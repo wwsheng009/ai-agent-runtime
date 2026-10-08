@@ -940,7 +940,11 @@ func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg
 	resolved, _, err := loadCachedRuntimeConfig(configPath)
 	if err != nil || resolved == nil {
 		reason := formatRuntimeConfigLoadFallback(configPath, err)
-		fmt.Fprintf(os.Stderr, "Warning: 加载 runtime tools 配置失败，已退回默认 sandbox 配置: %s\n", reason)
+		// 统一渲染存活时经动态栏投递；未登记交互出口回退 stderr（字节不变，L2 收口）。
+		warning := fmt.Sprintf("Warning: 加载 runtime tools 配置失败，已退回默认 sandbox 配置: %s", reason)
+		if !NotifyChatDiagnostic(warning) {
+			fmt.Fprintf(os.Stderr, "%s\n", warning)
+		}
 		logpkg.Warnf("AICLI runtime tools config load failed: %s", reason)
 		return runtimecfg.DefaultRuntimeConfig()
 	}

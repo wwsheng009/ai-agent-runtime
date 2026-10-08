@@ -61,11 +61,10 @@ func uiDirectWriterInventory() []uiDirectWriterInventoryEntry {
 	return []uiDirectWriterInventoryEntry{
 		// --- P0 live targets: unified-render must claim these next ---
 		// 模式序列已改经 LineEditorHooks.OnTerminalControl 进入 TerminalSession
-		// （TransactionPromptEditor）；余下 1 处是编辑器读循环自身的 stdin/stdout
-		// 绑定，writeEditorControlSequence 是未认领时的 legacy 回退。
-		{File: "inputbox_editor.go", Func: "writeEditorControlSequence", Kind: "os.Std*", Count: 1},
+		// （TransactionPromptEditor）；secret 标签/尾换行经 OnTerminalText 认领
+		// （L2）。编辑器自有字节的 raw 兜底收敛到 writeEditorRaw 单一出口。
 		{File: "inputbox_editor.go", Func: "method readPromptWithHooksContext", Kind: "os.Std*", Count: 1},
-		{File: "inputbox_editor.go", Func: "method ReadTransientSecretPrompt", Kind: "os.Std*", Count: 2},
+		{File: "inputbox_editor.go", Func: "writeEditorRaw", Kind: "os.Std*", Count: 1},
 		// status.go Print* 仅由 no-popup/legacy 兜底分支调用（unified 会话
 		// 走与 !unifiedInteractiveOutputMustFailClosed 相反的路径）。
 		{File: "status.go", Func: "method Print", Kind: "os.Std*", Count: 2},

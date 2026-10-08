@@ -5390,6 +5390,19 @@ func (c *chatInteractionCoordinator) WritePromptEditorControl(sequence string) b
 	return session.WritePromptEditorControl(sequence) == nil
 }
 
+// ClaimSecretPromptOutput reports whether the unified presenter owns the prompt
+// row, in which case the secret prompt reader must not emit raw stdout bytes
+// (its label is pre-rendered through showRuntimeComposerPrompt and the trailing
+// newline is covered by the presenter's row repaint). It never writes anything;
+// returning false keeps the raw fallback for non-unified callers.
+func (c *chatInteractionCoordinator) ClaimSecretPromptOutput() bool {
+	if c == nil {
+		return false
+	}
+	unified, session := c.terminalWriterSnapshotLoad()
+	return unified && session != nil
+}
+
 // WriteTerminalTitle routes one OSC terminal-title sequence through the
 // unified terminal session when it is the primary writer. It returns false
 // when no unified session exists so the caller keeps its raw legacy fallback.

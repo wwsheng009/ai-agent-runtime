@@ -93,6 +93,33 @@ func TestUnifiedSessionSinglePhysicalWriterFence(t *testing.T) {
 		NotifyChatDiagnostic("Warning: single-writer probe")
 		printDirectInteractiveOutput(session, "single-writer direct output\n")
 		printChatCommandOutput(session, "single-writer command output\n")
+		// L2：secret 读取路径——标签经提示行预渲染，raw 写经 OnTerminalText 认领。
+		session.InputBox = ui.NewInputBox(nil)
+		secretPrompt := newChatSecretComposerPrompt(session, "Password: ")
+		oldStdin := os.Stdin
+		stdinRead, stdinWrite, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatalf("secret stdin pipe: %v", pipeErr)
+		}
+		os.Stdin = stdinRead
+		if _, writeErr := stdinWrite.WriteString("s3cr3t\n"); writeErr != nil {
+			t.Fatalf("secret stdin write: %v", writeErr)
+		}
+		secret, secretErr := secretPrompt.ReadLine()
+		os.Stdin = oldStdin
+		_ = stdinRead.Close()
+		_ = stdinWrite.Close()
+		if secretErr != nil {
+			t.Fatalf("secret ReadLine: %v", secretErr)
+		}
+		if secret != "s3cr3t" {
+			t.Fatalf("secret line = %q, want s3cr3t", secret)
+		}
+		// ReadLine 在读取完成后立即清理预渲染，故单独驱动一次，验证 secret
+		// 标签确实经提示行进入统一写端（probe 断言）。
+		if !showRuntimeComposerPrompt(session, "Password: ") {
+			t.Fatal("secret prompt preview was not routed to the surface")
+		}
 		coordinator.waitUIActorIdle()
 	})
 	awaitUnifiedPresenterIdle(t, coordinator)
@@ -108,11 +135,13 @@ func TestUnifiedSessionSinglePhysicalWriterFence(t *testing.T) {
 		title,
 		"\a",
 		"\x1b[?2004h",
+		// 提示行渲染会裁掉标签尾随空格（probe 中为 "Password:"）。
+		"Password:",
 		"single-writer direct output",
 		"single-writer command output",
 	} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("unified physical writer missing %q", want)
+			t.Fatalf("unified physical writer missing %q; probe=%q", want, out)
 		}
 	}
 }

@@ -1036,12 +1036,33 @@ func (c *chatSecretComposerPrompt) ReadLine() (string, error) {
 	restoreInputMode := pushChatComposerInputMode(c.session, chatInputModeSecret)
 	defer restoreInputMode()
 	resetChatComposerPromptInput(c.session)
-	line, err := c.session.InputBox.ReadTransientSecretPrompt(c.prompt)
+	// Mirror the priority-secret path: when the prompt row can host a preview,
+	// the label is painted there instead of being written raw (L2 secret 收口).
+	readPrompt := c.prompt
+	if strings.TrimSpace(readPrompt) != "" && showRuntimeComposerPrompt(c.session, readPrompt) {
+		readPrompt = ""
+		defer clearRuntimeComposerPrompt(c.session)
+	}
+	line, err := c.session.InputBox.ReadTransientSecretPromptWithHooks(readPrompt, c.hooks())
 	if err == nil {
 		resetChatComposerPrompt(c.session)
 		return line, nil
 	}
 	return line, normalizeChatComposerReadError(c.session, err)
+}
+
+// hooks wires the secret read's plain-text channel: claimed label/newline
+// bytes stay with the unified terminal writer; unclaimed bytes keep the raw
+// fallback (non-unified byte-identical).
+func (c *chatSecretComposerPrompt) hooks() ui.LineEditorHooks {
+	return ui.LineEditorHooks{OnTerminalText: c.onTerminalText}
+}
+
+func (c *chatSecretComposerPrompt) onTerminalText(_ string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.ClaimSecretPromptOutput()
 }
 
 func resetChatComposerPromptInput(session *ChatSession) {

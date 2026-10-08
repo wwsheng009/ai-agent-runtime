@@ -1034,6 +1034,8 @@ func (writer chatDirectWriter) inventoryKey() string {
 // exact lines in the scanner only: source movement must not churn this baseline.
 func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 	return []chatDirectWriterInventoryEntry{
+		// runtime tools 配置加载告警：统一渲染存活时经 NotifyChatDiagnostic 走
+		// 动态栏；stderr 仅为未登记出口（启动早期 / 非交互）的兜底（L2 收口）。
 		{File: "chat.go", Func: "loadRuntimeToolConfig", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat.go", Func: "renderChatResponse", Kind: "fmt.Print", Count: 1},
 		{File: "chat.go", Func: "runChatLoop", Kind: "fmt.Print", Count: 2},
@@ -1172,6 +1174,8 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_setup.go", Func: "discoverChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		// 3 = Skills 初始化告警 + cleanup 的 Skills/LSP 停止告警。
 		{File: "chat_setup.go", Func: "attachChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 3},
+		// 退出恢复提示：Interaction.Shutdown 之后的进程退出输出，属 sanctioned
+		// console writer（无 unified 渲染窗口可污染）。
 		{File: "chat_setup.go", Func: "printChatExitResumeHint", Kind: "fmt.Print", Count: 1},
 		{File: "chat_setup.go", Func: "printChatSessionPreamble", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		// 11 = 迁移前基线 10 + per-skill 启停（/skills disable|enable）在 legacy
@@ -1237,10 +1241,14 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_selection_output.go", Func: "printChatSelectionParts", Kind: "os.Std*", Count: 1},
 		{File: "chat_selection_output.go", Func: "printChatSelectionPrompt", Kind: "os.Std*", Count: 1},
 		{File: "chat_selection_output.go", Func: "printChatSelectionWarning", Kind: "os.Std*", Count: 1},
+		// 4 = 构造期绑定 + 无 ANSI 降级路径的 stderr 告警（sanctioned：plain
+		// 模式无 unified 渲染窗口）。
 		{File: "chat_setup.go", Func: "buildChatSession", Kind: "os.Std*", Count: 4},
 		{File: "chat_setup.go", Func: "presentChatSession", Kind: "os.Std*", Count: 3},
 		{File: "chat_setup.go", Func: "printChatCurrentRuntimeSessionStderr", Kind: "os.Std*", Count: 12},
 		{File: "chat_setup.go", Func: "printChatSessionPreamble", Kind: "os.Std*", Count: 25},
+		// resume 提示行：统一渲染存活时经 NotifyChatDiagnostic 走动态栏；
+		// stderr 兜底保留（L2 收口）。
 		{File: "chat_setup.go", Func: "restoreLocalRuntimeHostTeamState", Kind: "os.Std*", Count: 1},
 		{File: "chat_surface_output.go", Func: "writeDirectInteractiveOutput", Kind: "os.Std*", Count: 1},
 		{File: "chat_tool_executor.go", Func: "withLiveChatToolOutput", Kind: "os.Std*", Count: 2},

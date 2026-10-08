@@ -74,3 +74,76 @@ func TestWriteEditorControlSequenceFallsBackToRawWriter(t *testing.T) {
 		})
 	}
 }
+
+// newSecretPromptStdin swaps os.Stdin for a pipe carrying payload and returns
+// a restore function. The non-interactive path is exercised (stdout is not a
+// TTY under capture), so the secret reader stays line-buffered.
+func newSecretPromptStdin(t *testing.T, payload string) func() {
+	t.Helper()
+	oldStdin := os.Stdin
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdin = reader
+	if _, err := writer.WriteString(payload); err != nil {
+		t.Fatalf("write secret stdin: %v", err)
+	}
+	return func() {
+		os.Stdin = oldStdin
+		_ = reader.Close()
+		_ = writer.Close()
+	}
+}
+
+// TestReadTransientSecretPromptWithHooksClaimsTerminalText：宿主通过
+// OnTerminalText 认领后，secret 提示标签不得再落到 raw stdout。
+func TestReadTransientSecretPromptWithHooksClaimsTerminalText(t *testing.T) {
+	restore := newSecretPromptStdin(t, "hunter2\n")
+	defer restore()
+
+	var claimed []string
+	hooks := LineEditorHooks{OnTerminalText: func(text string) bool {
+		claimed = append(claimed, text)
+		return true
+	}}
+	var line string
+	raw := captureEditorStdout(t, func() {
+		var readErr error
+		line, readErr = NewInputBox(nil).ReadTransientSecretPromptWithHooks("Password: ", hooks)
+		if readErr != nil {
+			t.Fatalf("ReadTransientSecretPromptWithHooks: %v", readErr)
+		}
+	})
+	if line != "hunter2" {
+		t.Fatalf("secret line = %q, want hunter2", line)
+	}
+	if raw != "" {
+		t.Fatalf("claimed secret prompt reached raw stdout: %q", raw)
+	}
+	if len(claimed) != 1 || claimed[0] != "Password: " {
+		t.Fatalf("claimed = %#v want [Password: ]", claimed)
+	}
+}
+
+// TestReadTransientSecretPromptWithHooksFallsBackToRawWriter：未设置
+// OnTerminalText（或宿主不认领）时保留 raw 回退（非 unified 承重行为）。
+func TestReadTransientSecretPromptWithHooksFallsBackToRawWriter(t *testing.T) {
+	restore := newSecretPromptStdin(t, "hunter2\n")
+	defer restore()
+
+	var line string
+	raw := captureEditorStdout(t, func() {
+		var readErr error
+		line, readErr = NewInputBox(nil).ReadTransientSecretPrompt("Password: ")
+		if readErr != nil {
+			t.Fatalf("ReadTransientSecretPrompt: %v", readErr)
+		}
+	})
+	if line != "hunter2" {
+		t.Fatalf("secret line = %q, want hunter2", line)
+	}
+	if !strings.Contains(raw, "Password: ") {
+		t.Fatalf("fallback raw stdout = %q, want contains Password: ", raw)
+	}
+}

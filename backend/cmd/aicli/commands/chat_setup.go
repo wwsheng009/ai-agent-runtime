@@ -856,6 +856,9 @@ func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
 	}
 }
 
+// printChatExitResumeHint runs from the shutdown callback after
+// Interaction.Shutdown released the unified writer; stdout here is a sanctioned
+// post-shutdown console notice (there is no live render window to corrupt).
 func printChatExitResumeHint(session *ChatSession) {
 	if session == nil || session.Ephemeral || session.runtimeSessionUnpersisted {
 		return
@@ -886,9 +889,13 @@ func restoreLocalRuntimeHostTeamState(session *ChatSession) {
 		// 团队执行停放到 paused，而不是在启动阶段重新拉起 loop 继续执行。
 		// 否则 interactiveTeamPending 恒为 true，主循环阻塞在
 		// waitForTeamTerminal，composer 永不渲染（UI 却显示执行状态）。
-		// 复用 preamble 的信息行渲染，避免在 chat_setup.go 引入新的直接写入者
-		// （chat direct-writer inventory 是不允许扩张的回归围栏）。
-		printChatSessionInfoRow(os.Stderr, "Resume:", resumeTeamSuspendedNotice(teamID), chatSessionMetaLabelWidth)
+		// 统一渲染存活时经动态栏投递（与 mesh/profile 告警同一出口，L2 收口）；
+		// 未登记交互出口（启动早期 / 非交互）回退既有 preamble 信息行，
+		// 不新增直接写入者（chat direct-writer inventory 是回归围栏）。
+		notice := resumeTeamSuspendedNotice(teamID)
+		if !NotifyChatDiagnostic(notice) {
+			printChatSessionInfoRow(os.Stderr, "Resume:", notice, chatSessionMetaLabelWidth)
+		}
 	} else if activeTeam := chatSessionActiveTeam(session); activeTeam != nil && strings.TrimSpace(activeTeam.TeamID) != "" {
 		session.LocalRuntimeHost.replayStoredTerminalTeamLifecycleEvents(activeTeam.TeamID)
 	}
