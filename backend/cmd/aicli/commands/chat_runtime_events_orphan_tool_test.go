@@ -51,7 +51,7 @@ func TestChatRuntimeEventBridge_BeginRunClosesOrphanedToolRunningCell(t *testing
 		},
 	})
 	interaction.waitUIActorIdle()
-	if band := strings.Join(surface.ActiveBandLines(), "\n"); !strings.Contains(band, "• Running [meta] rg --files") {
+	if band := s2BandText(t, interaction); !strings.Contains(band, "• Running [meta] rg --files") {
 		t.Fatalf("precondition: ActiveBand running row missing, got %q", band)
 	}
 
@@ -76,7 +76,7 @@ func TestChatRuntimeEventBridge_BeginRunClosesOrphanedToolRunningCell(t *testing
 	if !found {
 		t.Fatalf("no tool cell in render model after sweep: %#v", model.Items)
 	}
-	if band := strings.Join(surface.ActiveBandLines(), "\n"); strings.Contains(band, "• Running ") {
+	if band := s2BandText(t, interaction); strings.Contains(band, "• Running ") {
 		t.Fatalf("ActiveBand still shows a running row after BeginRun sweep: %q", band)
 	}
 }

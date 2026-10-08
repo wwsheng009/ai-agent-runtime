@@ -34,24 +34,15 @@ func TestChatSessionIDLineE2E_PublishedOnSurfaceMount(t *testing.T) {
 	session.Interaction = interaction
 	interaction.waitUIActorIdle()
 
-	frame := commandResultFrameText(surface)
-	if !strings.Contains(frame, "会话 lead-session") {
-		t.Fatalf("session ID line missing after surface mount:\n%s", frame)
+	// L3-3：状态模型经 reducer 落在 AppState（非统一路径的 surface Apply
+	// 投递已退役，合成帧不再接收该模型）；双行状态栏的行布局口径由 ui 层
+	// app_layout_test.TestLayoutTwoRowStatus 覆盖。
+	st := interaction.uiActor.AppState()
+	if !strings.Contains(st.Bottom.SessionIDLine, "会话 lead-session") {
+		t.Fatalf("session ID line missing in AppState after surface mount: %q", st.Bottom.SessionIDLine)
 	}
-	if !strings.Contains(frame, "--pprof off") || !strings.Contains(frame, "--debug off") {
-		t.Fatalf("flag status missing on second status row:\n%s", frame)
-	}
-	// 双行状态栏：session 行必须在 status 行上方（12 行终端 → index 11 是
-	// status，index 10 是 session）。
-	rows := strings.Split(strings.TrimRight(frame, "\n"), "\n")
-	if len(rows) < 12 {
-		t.Fatalf("composed frame rows=%d, want >= 12", len(rows))
-	}
-	if !strings.Contains(rows[10], "会话 lead-session") {
-		t.Fatalf("session line not on row 11 (statusRow-1):\n%q", rows[10])
-	}
-	if rows[11] == "" {
-		t.Fatalf("status line on row 12 is empty; want a non-empty status line:\n%s", frame)
+	if !strings.Contains(st.Bottom.SessionIDLine, "--pprof off") || !strings.Contains(st.Bottom.SessionIDLine, "--debug off") {
+		t.Fatalf("flag status missing on session ID line: %q", st.Bottom.SessionIDLine)
 	}
 }
 
@@ -67,22 +58,16 @@ func TestChatSessionIDLineE2E_ShowsFlagStatusWithoutRuntimeSession(t *testing.T)
 	session.Interaction = interaction
 	interaction.waitUIActorIdle()
 
-	frame := commandResultFrameText(surface)
-	if strings.Contains(frame, "会话 ") {
-		t.Fatalf("session ID line rendered without a bound runtime session:\n%s", frame)
+	// L3-3：改读 AppState 的 session ID 行（surface 帧不再接收状态模型）。
+	st := interaction.uiActor.AppState()
+	if strings.Contains(st.Bottom.SessionIDLine, "会话 ") {
+		t.Fatalf("session ID line rendered without a bound runtime session: %q", st.Bottom.SessionIDLine)
 	}
-	if !strings.Contains(frame, "--pprof off") {
-		t.Fatalf("expected --pprof off in second status row but not found:\n%s", frame)
+	if !strings.Contains(st.Bottom.SessionIDLine, "--pprof off") {
+		t.Fatalf("expected --pprof off in session ID line, got %q", st.Bottom.SessionIDLine)
 	}
-	if !strings.Contains(frame, "--debug off") {
-		t.Fatalf("expected --debug off in second status row but not found:\n%s", frame)
-	}
-	rows := strings.Split(strings.TrimRight(frame, "\n"), "\n")
-	if len(rows) < 12 {
-		t.Fatalf("composed frame rows=%d, want >= 12", len(rows))
-	}
-	if rows[11] == "" {
-		t.Fatalf("status line on row 12 is empty:\n%s", frame)
+	if !strings.Contains(st.Bottom.SessionIDLine, "--debug off") {
+		t.Fatalf("expected --debug off in session ID line, got %q", st.Bottom.SessionIDLine)
 	}
 }
 

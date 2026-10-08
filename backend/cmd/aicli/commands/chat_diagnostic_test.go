@@ -100,9 +100,11 @@ func TestNotifyChatDiagnosticRoutesToDynamicStatusRow(t *testing.T) {
 		t.Fatalf("dynamic status row must stay single-line: %q", row)
 	}
 
-	// 2) 界面合成帧把同一行放在动态栏上（用户可见的唯一位置）。
-	if frame := composedSurfaceFrameText(surface); !strings.Contains(frame, "mesh: peer node-12504 stream lost") {
-		t.Fatalf("surface frame lost the diagnostic row:\n%s", frame)
+	// 2) 统一 AppState 的动态栏模型承载同一行（presenter 渲染的唯一位置；
+	//    L3-3 后 surface 合成帧不再接收状态模型）。
+	if st := coordinator.uiActor.AppState(); st.Bottom.DynamicStatusModel == nil ||
+		!strings.Contains(statusModelPlainText(st.Bottom.DynamicStatusModel, 160), "mesh: peer node-12504 stream lost") {
+		t.Fatalf("AppState lost the diagnostic row: %+v", st.Bottom.DynamicStatusModel)
 	}
 
 	// 3) 历史信息流（scene/transcript）与持久历史必须保持干净。

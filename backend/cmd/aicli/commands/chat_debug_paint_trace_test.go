@@ -84,7 +84,9 @@ func TestDebugDisplayIncludesRenderPaintTrace(t *testing.T) {
 		}
 	})
 	plain := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
-	for _, marker := range []string{"Render Paint Trace:", "Paint Trace: frames=", "emits", "white", "miss"} {
+	// L3-3：物理绘制退役后 probe 无事件；/debug 段展示 state-only 兜底文案 +
+	// Row Ownership 表（引擎级 frames/emits 统计仅在真实 paint 事件时出现）。
+	for _, marker := range []string{"Render Paint Trace:", "no paint events recorded", "Row Ownership"} {
 		if !strings.Contains(plain, marker) {
 			t.Errorf("/debug display document missing %q:\n%s", marker, plain)
 		}
@@ -103,7 +105,7 @@ func TestDebugDisplayNoRenderPaintTraceWithoutEvents(t *testing.T) {
 		}
 	})
 	plain := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
-	if !strings.Contains(plain, "no events recorded") {
+	if !strings.Contains(plain, "no paint events recorded") && !strings.Contains(plain, "no events recorded") {
 		t.Errorf("empty trace must explain the no-events state:\n%s", plain)
 	}
 }

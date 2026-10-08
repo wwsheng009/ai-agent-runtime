@@ -55,8 +55,9 @@ func TestSuccessfulSendFreezesWorkedSummaryAtAPICompletion(t *testing.T) {
 
 		coord.waitUIActorIdle()
 		afterAPI := frameText()
-		if !strings.Contains(afterAPI, "Worked for ") {
-			t.Fatalf("API completion did not freeze the work summary:\n%s", afterAPI)
+		// L3-3：完成摘要位于统一动态栏模型（surface 帧不再接收状态模型）。
+		if row := chatDynamicStatusRowText(coord, 160); !strings.Contains(row, "Worked for ") {
+			t.Fatalf("API completion did not freeze the work summary: %q", row)
 		}
 		if !strings.Contains(afterAPI, ">") {
 			t.Fatalf("ready composer prompt missing after API completion:\n%s", afterAPI)
@@ -74,8 +75,8 @@ func TestSuccessfulSendFreezesWorkedSummaryAtAPICompletion(t *testing.T) {
 		if !strings.Contains(afterFinalize, ">") {
 			t.Fatalf("ready composer prompt missing after finalization:\n%s", afterFinalize)
 		}
-		if !strings.Contains(afterFinalize, "Worked for ") {
-			t.Fatalf("completed activity summary missing after successful finalization:\n%s", afterFinalize)
+		if row := chatDynamicStatusRowText(coord, 160); !strings.Contains(row, "Worked for ") {
+			t.Fatalf("completed activity summary missing after successful finalization: %q", row)
 		}
 		if strings.Contains(afterFinalize, "Analyzing") {
 			t.Fatalf("live activity should be replaced by the completion summary:\n%s", afterFinalize)

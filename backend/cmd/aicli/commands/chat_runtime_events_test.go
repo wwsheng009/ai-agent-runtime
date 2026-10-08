@@ -163,7 +163,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	// 由 TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell 断言。
 	require.NotContains(t, history.String(), "Running")
 	interaction.waitUIActorIdle()
-	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
+	require.Contains(t, s2BandText(t, interaction), "• Running [meta] go test ./...")
 
 	bridge.handleEvent(runtimeevents.Event{
 		Type:      "tool.progress",
@@ -177,7 +177,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 		},
 	})
 	interaction.waitUIActorIdle()
-	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./...")
+	require.Contains(t, s2BandText(t, interaction), "• Running [meta] go test ./...")
 	require.NotContains(t, history.String(), "Progress")
 
 	completed := runtimeevents.Event{
@@ -198,7 +198,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	bridge.handleEvent(completed)
 	bridge.handleEvent(completed)
 	interaction.waitUIActorIdle()
-	require.NotContains(t, strings.Join(surface.ActiveBandLines(), "\n"), "Running")
+	require.NotContains(t, s2BandText(t, interaction), "Running")
 	require.Equal(t, 1, strings.Count(history.String(), "• Completed [meta] go test ./..."))
 
 	failedRequested := requested
@@ -211,7 +211,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	}
 	bridge.handleEvent(failedRequested)
 	interaction.waitUIActorIdle()
-	require.Contains(t, strings.Join(surface.ActiveBandLines(), "\n"), "• Running [meta] go test ./failed")
+	require.Contains(t, s2BandText(t, interaction), "• Running [meta] go test ./failed")
 
 	failed := runtimeevents.Event{
 		Type:      "tool.failed",
@@ -232,7 +232,7 @@ func TestChatRuntimeEvents_ToolRunningIsViewportOnlyAndFinalCommitsOnce(t *testi
 	// requested/progress/completed 断言保持同一 drain 边界，避免在 failed
 	// action 尚未消费时读取旧 ActiveBand 投影。
 	interaction.waitUIActorIdle()
-	require.NotContains(t, strings.Join(surface.ActiveBandLines(), "\n"), "Running")
+	require.NotContains(t, s2BandText(t, interaction), "Running")
 	require.Equal(t, 1, strings.Count(history.String(), "• Failed [meta] go test ./failed"))
 }
 
@@ -466,7 +466,7 @@ func TestChatRuntimeEventBridge_ActiveBandRunningRowSurvivesRealAgentEvent(t *te
 		},
 	})
 	interaction.waitUIActorIdle()
-	band := strings.Join(surface.ActiveBandLines(), "\n")
+	band := s2BandText(t, interaction)
 	if !strings.Contains(band, "• Running ping -n 4 127.0.0.1 >nul & echo hello") {
 		t.Fatalf("ActiveBand running row degraded to fallback, got %q", band)
 	}
@@ -532,7 +532,7 @@ func TestChatRuntimeEventBridge_ActiveBandRunningRowFullReplay(t *testing.T) {
 		if ev.Type == "tool.requested" {
 			requestedSeen = true
 			interaction.waitUIActorIdle()
-			bandAtRequested = strings.Join(surface.ActiveBandLines(), "\n")
+			bandAtRequested = s2BandText(t, interaction)
 		}
 	}
 	interaction.waitUIActorIdle()
@@ -7501,7 +7501,7 @@ func TestChatRuntimeEventBridge_RunEndResolvesOpenToolRunningHead(t *testing.T) 
 			"command_text": "go test ./...",
 		},
 	})
-	band := strings.Join(surface.ActiveBandLines(), "\n")
+	band := s2BandText(t, interaction)
 	if !strings.Contains(band, "• Running go test ./...") {
 		t.Fatalf("precondition: ActiveBand running row missing, got %q", band)
 	}
@@ -7524,7 +7524,7 @@ func TestChatRuntimeEventBridge_RunEndResolvesOpenToolRunningHead(t *testing.T) 
 	if !strings.Contains(cell.Source, "• Completed go test ./...") {
 		t.Fatalf("finalized tool head missing completion label, got %q", cell.Source)
 	}
-	band = strings.Join(surface.ActiveBandLines(), "\n")
+	band = s2BandText(t, interaction)
 	if strings.Contains(band, "• Running ") {
 		t.Fatalf("ActiveBand still shows running row after session_end: %q", band)
 	}

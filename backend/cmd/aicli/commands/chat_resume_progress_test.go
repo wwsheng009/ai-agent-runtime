@@ -211,10 +211,8 @@ func TestDeferredResumeHistoryBackfillShowsProgressOnDynamicStatusRow(t *testing
 	require.Eventually(t, func() bool {
 		return strings.Contains(chatDynamicStatusRowText(coordinator, 160), "恢复历史会话 200/250")
 	}, 10*time.Second, 5*time.Millisecond, "每读回一页必须推进动态栏计数")
-	// 进度行必须真的落在合成帧上（用户可见位置），而不只是缓存的模型。
-	require.Eventually(t, func() bool {
-		return strings.Contains(composedSurfaceFrameText(surface), "恢复历史会话 200/250")
-	}, 10*time.Second, 5*time.Millisecond, "composer dynamic row must carry the resume progress text")
+	// L3-3：状态模型不再投递到 surface 合成帧（非统一路径 Apply 已退役）；
+	// 用户可见性由下方统一 AppState 底部保留区断言承载。
 	// 统一渲染面（生产 presenter 的唯一数据源）的底部状态行必须同时带上进度：
 	// 历史页发布后 AppState 底部保留区仍要给进度行留出那一行，历史行不得占用。
 	require.Eventually(t, func() bool {

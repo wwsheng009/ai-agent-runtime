@@ -219,9 +219,8 @@ func TestChatSystemOutputWriter_ActiveTurnMirrorSurvivesOwnedViewportRepaint(t *
 	const width, height = 80, 30
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
-	screen := newScreenVT(width, height)
 
-	stream := captureSurfaceStdout(t, func() {
+	captureSurfaceStdout(t, func() {
 		_, err, handled := surface.WriteOutput(os.Stdout, "seed-transcript-marker\n")
 		if err != nil || !handled {
 			t.Fatalf("seed output: handled=%t err=%v", handled, err)
@@ -247,31 +246,37 @@ func TestChatSystemOutputWriter_ActiveTurnMirrorSurvivesOwnedViewportRepaint(t *
 			"  repaint-marker",
 		})
 	})
-	screen.feed(stream)
 
+	// L3-3：物理绘制已退役，观察面为合成帧（内容唯一性 + 内容区空洞）。
 	for _, marker := range []string{
 		"seed-transcript-marker",
 		"tool-progress-marker",
 		"repaint-marker",
 	} {
-		if rows := screen.RowsContaining(marker); len(rows) != 1 {
-			t.Fatalf("%q physical rows=%v want exactly one:\n%s", marker, rows, screen.dump())
-		}
 		if count := strings.Count(composedSurfaceFrameText(surface), marker); count != 1 {
 			t.Fatalf("%q composed-frame count=%d want 1:\n%s", marker, count, composedSurfaceFrameText(surface))
 		}
 	}
 
+	frameLines := strings.Split(strings.TrimRight(composedSurfaceFrameText(surface), "\n"), "\n")
 	bottomStart := height - len(surface.BottomRowsSnapshot()) + 1
-	if run, at := maxBlankRunAboveBottom(screen, bottomStart); run > 2 {
-		t.Fatalf("mirror commit followed by repaint left %d blank rows at %d:\n%s", run, at, screen.dump())
+	contentStart := 0
+	for i, line := range frameLines[:bottomStart-1] {
+		if strings.TrimSpace(line) != "" {
+			contentStart = i
+			break
+		}
+	}
+	if run := s2MaxBlankRun(frameLines[contentStart : bottomStart-1]); run > 2 {
+		t.Fatalf("mirror commit followed by repaint left %d blank rows above the bottom pane:\n%s",
+			run, composedSurfaceFrameText(surface))
 	}
 
-	screen.feed(captureSurfaceStdout(t, func() {
+	captureSurfaceStdout(t, func() {
 		surface.ClearActiveBand()
-	}))
-	if rows := screen.RowsContaining("tool-progress-marker"); len(rows) != 1 {
-		t.Fatalf("active-band shrink lost or duplicated mirror output: rows=%v\n%s", rows, screen.dump())
+	})
+	if count := strings.Count(composedSurfaceFrameText(surface), "tool-progress-marker"); count != 1 {
+		t.Fatalf("active-band shrink lost or duplicated mirror output: count=%d\n%s", count, composedSurfaceFrameText(surface))
 	}
 }
 

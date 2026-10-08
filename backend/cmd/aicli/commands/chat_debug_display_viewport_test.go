@@ -69,7 +69,7 @@ func TestDebugDisplayViewportKeepsAllSectionsTallTerminal(t *testing.T) {
 	feed(func() {
 		coord.PrintPrompt()
 	})
-	raw := feed(func() {
+	feed(func() {
 		if dispatchChatCommand(session, "/debug display", false) {
 			t.Fatal("/debug display unexpectedly requested chat exit")
 		}
@@ -89,16 +89,11 @@ func TestDebugDisplayViewportKeepsAllSectionsTallTerminal(t *testing.T) {
 			t.Errorf("tall terminal visible frame missing %q", marker)
 		}
 	}
-	// 中间节（用户实测缺失的部分）必须完整出现在移交输出（原生 scrollback）
-	// 中，证明 viewport 渲染没有吞内容，只是把超屏行滚出了可见区。
-	plain := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
-	for _, marker := range debugDisplayViewportMarkers {
-		if !strings.Contains(plain, marker) {
-			continue // 该节在本次会话条件下不输出（如 Runtime Core 需 ChatExecutor）
-		}
-		if !strings.Contains(raw, marker) {
-			t.Errorf("tall terminal scrollback handoff missing %q", marker)
-		}
+	// L3-3：legacy 直写退役后不存在物理 scrollback 字节面；超屏内容的完整性
+	// 由 plain 投影对照测试（TestDebugDisplayDocumentPlainIsComplete）与
+	// handoff frontier 推进共同证明；完全滚出保留窗口的行按设计不可回读。
+	if handedOff == 0 {
+		t.Errorf("tall terminal overflow must advance the handoff frontier")
 	}
 }
 
@@ -150,7 +145,7 @@ func TestDebugDisplayViewportKeepsAllSectionsShortTerminal(t *testing.T) {
 	feed(func() {
 		coord.PrintPrompt()
 	})
-	raw := feed(func() {
+	feed(func() {
 		if dispatchChatCommand(session, "/debug display", false) {
 			t.Fatal("/debug display unexpectedly requested chat exit")
 		}
@@ -165,15 +160,11 @@ func TestDebugDisplayViewportKeepsAllSectionsShortTerminal(t *testing.T) {
 			t.Errorf("short terminal visible frame missing %q", marker)
 		}
 	}
-	// 移交输出：中间节完整进入原生 scrollback。
-	plain := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
-	for _, marker := range []string{"会话文件与目录:", "Session Store:", "Session File:", "运行时调试:", "AICLI Config Path:", "Agent Target:"} {
-		if !strings.Contains(plain, marker) {
-			continue
-		}
-		if !strings.Contains(raw, marker) {
-			t.Errorf("short terminal scrollback handoff missing %q", marker)
-		}
+	// L3-3：legacy 直写退役后不存在物理 scrollback 字节面；超屏内容的证据 =
+	// handoff frontier 推进（完全滚出保留窗口的行按设计不可回读；文档完整性
+	// 由 TestDebugDisplayDocumentPlainIsComplete 的 plain 对照覆盖）。
+	if surface.HistoryHandedOffForTest() == 0 {
+		t.Errorf("short terminal overflow must advance the handoff frontier")
 	}
 }
 
