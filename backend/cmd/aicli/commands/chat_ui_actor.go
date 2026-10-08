@@ -1132,13 +1132,8 @@ func (c *chatInteractionCoordinator) reduceUIActionWithContext(revision uint64, 
 		ui.SetComposerPreviewAction, ui.ClearComposerPreviewAction,
 		ui.ShowPopupAction, ui.ClearPopupAction, ui.UpdatePopupAction:
 		// In the unified session UIController has already incorporated this
-		// action into AppState. Calling the facade's legacy Apply path here would
-		// recreate a second mutable screen owner even when its writer is fenced.
-		if !c.UnifiedRendererEnabled() {
-			if surface := c.uiSurface.Load(); surface != nil {
-				surface.Apply(action)
-			}
-		}
+		// action into AppState; the legacy facade Apply sink is retired (L3-3),
+		// so there is no second mutable screen owner to update here.
 	default:
 		// Phase 2+ 扩展；P1 其余 action 为定义性类型，尚未接线。
 	}

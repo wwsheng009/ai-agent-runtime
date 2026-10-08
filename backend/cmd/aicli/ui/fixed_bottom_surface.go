@@ -194,11 +194,13 @@ type FixedBottomSurface struct {
 	// longer than DefaultGeometryProbeMinInterval.
 	lastGeometryProbeAt time.Time
 	// uiPoster 是 UI actor 投递入口（Phase 1，实施指南任务 4）：非 nil 时
-	// facade 组内部只投递 action；reducer 经 Apply 同步应用，输出不变。
+	// facade 组内部只投递 action；reducer 消费该 action（surface Apply 已随
+	// L3-3 退役）。
 	uiPoster func(UIAction) bool
-	// activeBandGeneration fences queued transient paints. Finalization advances
-	// it before committing permanent history, so a stale actor action cannot
-	// remount a completed stream after the commit transaction.
+	// activeBandGeneration stamps facade band actions; finalization advances it
+	// before committing permanent history. The surface-side fence (Apply) is
+	// retired in L3-3; unified frames gate facade payloads via
+	// SemanticActiveCellProjection in the reducer.
 	activeBandGeneration uint64
 }
 
@@ -1304,93 +1306,6 @@ func (s *FixedBottomSurface) postFacadeAction(a UIAction) bool {
 		return false
 	}
 	return poster(a)
-}
-
-// Apply 是 Phase 1 legacy adapter 的 action 应用入口（任务 5）：reducer
-// 端调用，直接执行同步实现（不经 poster，避免再入队），输出与改造前一致。
-// 未识别的 action 返回 false。必须在 UI actor goroutine（或独占 surface
-// 的路径）内调用。
-func (s *FixedBottomSurface) Apply(action UIAction) bool {
-	switch a := action.(type) {
-	case SetActiveBandAction:
-		if !s.activeBandActionCurrent(a.Generation) {
-			return true
-		}
-		if a.RawLines != nil {
-			return s.setActiveBandImpl(a.RawLines)
-		}
-		return s.setActiveBandStyledImpl(a.Lines)
-	case ClearActiveBandAction:
-		if !s.activeBandActionCurrent(a.Generation) {
-			return true
-		}
-		return s.clearActiveBand()
-	case SetStatusModelsAction:
-		s.setStatusModelsImpl(a.Status, a.Dynamic)
-		return true
-	case SetStatusModelAction:
-		s.setStatusModelImpl(a.Status)
-		return true
-	case SetDynamicStatusModelAction:
-		s.setDynamicStatusModelImpl(a.Dynamic)
-		return true
-	case SetSessionIDLineAction:
-		return s.setSessionIDLineImpl(a.Line)
-	case ShowPromptAction:
-		return s.showPromptImpl(a.Line)
-	case ClearPromptRowsAction:
-		return s.clearPromptRowsImpl(a.Rows)
-	case SetPromptStateAction:
-		return s.setPromptInputStateImpl(a.Line, a.Input, a.Rows, a.CursorRow, a.CursorCol)
-	case TrackPromptInputAction:
-		return s.trackPromptInputStateImpl(a.Line, a.Input, a.Rows, a.CursorRow, a.CursorCol)
-	case ResetPromptAction:
-		return s.resetPromptImpl(a.Line, a.Rows)
-	case SetPromptRowsAction:
-		return s.setPromptRowsImpl(a.Rows)
-	case SetPromptNoticeAction:
-		return s.setPromptNoticeLineImpl(a.Line)
-	case SetPromptEditorStatusAction:
-		return s.setPromptEditorStatusLineImpl(a.Line)
-	case SetComposerPreviewAction:
-		s.setComposerPreviewImpl(a.Line)
-		return true
-	case ClearComposerPreviewAction:
-		s.clearComposerPreviewImpl()
-		return true
-	case ShowPopupAction:
-		if a.Handle != nil && a.Handle.Valid() {
-			return s.beginPopupInputForHandleImpl(a.Lines, a.Prompt, *a.Handle, a.Viewport)
-		}
-		if a.Input || a.Prompt != "" {
-			s.showPopupInputForOwnerImpl(a.Lines, a.Prompt, a.Owner, a.PreserveCursor)
-			return true
-		}
-		if a.PreserveCursor {
-			s.showPopupPreserveCursorForOwner(a.Lines, a.Owner, a.BelowPrompt)
-			return true
-		}
-		s.showPopupImpl(a.Lines)
-		return true
-	case ClearPopupAction:
-		if a.Handle != nil && a.Handle.Valid() {
-			s.clearPopupHandlePreserveCursorImpl(*a.Handle)
-			return true
-		}
-		if a.Owner != "" {
-			s.clearPopupForOwnerPreserveCursorImpl(a.Owner)
-			return true
-		}
-		if a.PreserveCursor {
-			s.clearPopupPreserveCursorImpl()
-			return true
-		}
-		s.clearPopupImpl()
-		return true
-	case UpdatePopupAction:
-		return s.updatePopupInputForHandleImpl(a.Handle, a.Lines, a.Prompt, a.PreserveCursor)
-	}
-	return false
 }
 
 func (s *FixedBottomSurface) ShowPrompt(line string) bool {
@@ -2947,23 +2862,11 @@ func popupOwnerPriority(owner string) int {
 	}
 }
 
-func (s *FixedBottomSurface) activeBandActionCurrent(generation uint64) bool {
-	if s == nil {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Zero is the compatibility generation used by direct Apply callers in
-	// existing tests and migration adapters. Facade-originated actions always
-	// carry a non-zero/current generation and are fenced after finalization.
-	return generation == 0 || generation == s.activeBandGeneration
-}
-
 // ReleaseActiveBandForFinalizedOutput synchronously removes the transient
-// projection and fences all previously queued band paints. It is intentionally
-// narrower than a generic facade escape hatch: only the terminal transaction
-// that immediately commits a finalized transcript cell may use it during the
-// Phase 1 legacy-adapter transition.
+// projection (state-only since L3-3; the legacy queued-action fence retired
+// with the Apply sink). It is intentionally narrower than a generic facade
+// escape hatch: only the terminal transaction that immediately commits a
+// finalized transcript cell may use it.
 func (s *FixedBottomSurface) ReleaseActiveBandForFinalizedOutput() bool {
 	if s == nil {
 		return false

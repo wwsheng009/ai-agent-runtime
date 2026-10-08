@@ -374,10 +374,10 @@ func TestChatInteractionCoordinatorUnifiedEditorWriteNeverFallsBackToRawWriter(t
 }
 
 // This is the cutover fence: a surface facade action must update AppState and
-// reach the TerminalSession presenter, but must not re-enter FixedBottomSurface
-// through Apply. Physical-write fencing alone is insufficient because Apply
-// would leave the old surface as a competing screen-state authority.
-func TestChatInteractionCoordinatorUnifiedFacadeActionBypassesLegacySurfaceApply(t *testing.T) {
+// reach the TerminalSession presenter, but must not mutate the legacy
+// FixedBottomSurface state. The Apply sink is retired in L3-3; the surface
+// must never become a competing screen-state authority.
+func TestChatInteractionCoordinatorUnifiedFacadeActionDoesNotMutateLegacySurface(t *testing.T) {
 	session := &ChatSession{}
 	coordinator := newTestChatInteractionCoordinator(t, session)
 	t.Cleanup(coordinator.Shutdown)
