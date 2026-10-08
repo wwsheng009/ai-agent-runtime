@@ -11,7 +11,7 @@
 2. **统一渲染器是交互式 TTY 的强制生产路径，不是特性开关**：`chat_setup.go:206-245` 先对 legacy surface 建立物理写入栅栏，再挂载 `EnableUnifiedRendererGateway()`；factory 失败即 fail-closed 终止会话，**明确不回退直写**（`chat_setup.go:226-239`；`chat_ui_actor.go:225` 注释确认直写渲染器仅保留给测试）。
 3. **legacy 兼容层不能被整体删除，但大部分代码已"死而未删"**：
    - `FixedBottomSurface` 在统一模式下已退化为**语义 facade + 几何/lease 桥**（约 40 个生产方法、约 700–900 行承重），物理写入被**单向栅栏**永久关闭；
-   - 其物理写路径与 legacy `Apply`/`*Impl` 渲染孪生体（约 150 个方法、4000+ 行）在交互式统一模式下不可达，属于 fenced-dead；
+   - 其物理写路径与 legacy `Apply`/`*Impl` 渲染孪生体（约 150 个方法、4000+ 行）在交互式统一模式下不可达，属于 fenced-dead（**物理绘制实现族已随 L3-2 删除，2026-10-08**；余 `Apply`/`*Impl` 与 L3-3 四项待清理）；
    - 仍有 6 个测试专用方法属于内部清理项。
 4. **复活风险为零（当前代码面）**：栅栏一旦锁定，`SetPhysicalWritesEnabled(true)` 被拒绝（`fixed_bottom_surface.go:265-268`），fenced `writeOutput` 返回 `handled=true`（`:978-991`），调用方不会回退 raw stdout。唯一残余口是"绕过 `buildChatSession` 新建 surface"，当前不存在这种非测试构造。
 5. **移除建议**：按三类处理——A 必须保留（承重 facade / plain、win7、pipe 模式路径 / Ctrl+T pager / lease 与几何 / debug 观测）、B 先迁移后删除（fenced-dead 大块与模式相关路径，含前置条件）、C 可立即清理的小件；整体删除会直接破坏交互式会话。详见第 5 节。
@@ -94,7 +94,7 @@ flowchart TB
 | 类别 | 规模（约） | 代表成员 | 判定 |
 | --- | --- | --- | --- |
 | **A 承重（生产仍运行）** | ~40 方法 / 700–900 行 | `Enabled()`；`TerminalGeometry()`（唯一 presenter 的几何来源，`chat_interaction.go:709 → chat_ui_actor.go:219`）；`MeasuredGeometry()`；ActiveBand 尺寸与读写（`chat_interaction.go:6911,6908,6918,6978,5469`）；prompt/bottom-pane 语义态生产者；status model；popup 态与 picker；fullscreen lease 入口（`screen_lease.go` 是本类型的方法集）；fence/lifecycle（`chat_setup.go:83,84,230,295`）；`/debug` 观测钩子 | **必须保留** |
-| **B fenced-dead（统一模式下不可达）** | ~150 方法 / 4000+ 行 | 全部物理 writer（`WriteOutput`/`BeginOutput`/`WritePromptEditorText`/`SettleOutputDebt`/`RewriteSoftOutputTail`/`Reconcile`…）；`Apply()` 及全部 `*Impl` 渲染孪生体（reducer 入口在 `chat_ui_actor.go:1013-1017` 被跳过）；私有 paint/layout/render 辅助 | 死而未删；删除需满足 5.3 前置条件 |
+| **B fenced-dead（统一模式下不可达）** | ~150 方法 / 4000+ 行 | 全部物理 writer（`WriteOutput`/`BeginOutput`/`WritePromptEditorText`/`SettleOutputDebt`/`RewriteSoftOutputTail`/`Reconcile`…）；`Apply()` 及全部 `*Impl` 渲染孪生体（reducer 入口在 `chat_ui_actor.go:1013-1017` 被跳过）；私有 paint/layout/render 辅助 | 物理绘制实现族已随 L3-2 删除（state-only 收敛，2026-10-08）；余 `Apply`/`*Impl` 与 L3-3 项死而未删；删除需满足 5.3 前置条件 |
 | **C 测试专用** | 6 方法 | `EnableForTest`、`HistoryWindowForTest`、`HistoryHandedOffForTest`、`LegacyReserveStateForTest`、`visibleOutputRowsForTest`、`RowOwnersForTest` | 内部清理项 |
 
 栅栏检查点（grep 实测）：`fixed_bottom_surface.go` 49 处、`fixed_bottom_surface_snapshot.go` 2 处、`screen_lease.go` 3 处。

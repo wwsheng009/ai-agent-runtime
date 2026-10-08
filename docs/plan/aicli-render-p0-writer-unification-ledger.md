@@ -97,6 +97,18 @@
   - 文档口径：`tui-render-architecture.md` §2.2 已修正（删除「DEC 2026 同步框包裹」表述——实现为
     单帧一次 Write 原子提交）；「session 侧 2026 包裹」登记为跟踪项（方案 §5，默认不上路）。
 
+- [x] **L3-2 FixedBottomSurface 物理绘制退役（state-only 收敛）**（2026-10-08，9 提交 `e3eff2fc`..`55c08567`）。
+  - 删除物理绘制实现：`writeOutput` 物理分支、`appendOwnedDirectPaintLocked`、`insertHistoryLines*`、
+    `flushHoldingLock`/`flushHandoffHoldingLock`、`renderOwnedViewportLocked`、`stageOwnedFrameLocked`、
+    `reconcileOwnedViewportLocked`；三 `render*Locked` 保留 guard-only 空壳（~23 调用点不动）；
+    fence API 及调用点保留，生产恒 fenced。
+  - 语义保留：eager state-only handoff（前沿推进 + 双保留窗口软裁剪，无字节）；无效几何守卫；
+    `/debug` paint trace 无事件时回退 row-ownership 表。
+  - 测试：13 个 surface 测试文件迁移到 composed-frame/state oracle；A 组 3 文件删除；paint-trace
+    白重绘计数族退役（引擎契约由 renderengine 测试保留）。
+  - 门禁：**条目 32→27（net −5）**；`clearActiveBand`（:88）保留待 L3-3。
+  - 验证：gofmt/vet/build 绿；ui 全量（11.8s/12.3s 双跑）绿；commands 相关子集绿；inventory 门禁绿。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**

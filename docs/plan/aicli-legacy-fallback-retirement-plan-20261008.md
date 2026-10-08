@@ -194,7 +194,7 @@ buildChatSession
 
 | 目标 | 说明 |
 |---|---|
-| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；`Enable` 首帧块已随 L3-1 删除；非租约 paint 分支与其余各项仍待 L3） |
+| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；`Enable` 首帧块已随 L3-1 删除；**物理绘制实现族已随 L3-2 删除（state-only 收敛）**；余 `clearActiveBand`/`Disable` legacy paint/`repaintActiveBandLocked`/`surface.Apply` 待 L3-3） |
 | DEC2026 true 分支 + `SetTerminalSynchronizedFrames(true)` | **已执行（L3-1）**：framing 全链删除（开关/查询/包裹分支 + 裸 `os.Stdout` 写）；`withTerminalWriteLock` 锁本体保留（presenter batch 合法命中） |
 | `surface.Apply`（legacy reducer 路径） | 仅 `!UnifiedRendererEnabled()` 可达；`chat_ui_actor.go:1139` 注释明确拒绝 unified 调用 |
 | `TerminalOutput()` 默认 stdout 依赖 | 无生产注入；启动 `ClearIfSupported` 改显式 writer 后可去默认 stdout（保留 proxy） |
@@ -312,7 +312,7 @@ buildChatSession
 - **L3-2**：删物理绘制实现（`appendOwnedDirectPaintLocked`/`insertHistoryLinesInRegionLocked`/`flush*`/
   `renderOwnedViewportLocked` 写体/`writeOutput` 物理分支），保留 state-only 语义；迁移 13 个 surface 测试文件。
 - **L3-3**：删 `clearActiveBand` paint 分支、`Disable` legacy paint、`repaintActiveBandLocked` 分支、
-  `surface.Apply`；门禁基线同步（基线随刀同步：L3 起点 33 条目，L3-1 后 32）。
+  `surface.Apply`；门禁基线同步（基线随刀同步：L3 起点 33 → L3-1 后 32 → L3-2 后 27）。
 - 每刀验收：`go test ./cmd/aicli/ui`（含 inventory）+ `./cmd/aicli/commands` 相关子集；一刀一提交。
 
 **L3-1 执行记录（2026-10-08，提交 `d57cf71b`）**
@@ -328,6 +328,29 @@ buildChatSession
   `writer_inventory_test.go` 条目数实测应为 **40→34**、**34→33**，已同步修正上两条记录）。
 - 验证：残留引用 rg 0 命中；gofmt 干净；`go build ./...` 绿；`go test ./cmd/aicli/ui` 全量（12.8s）绿；
   commands 相关子集（inventory+fence、`Compat|Plain|Surface|Enable`）绿。
+
+**L3-2 执行记录（2026-10-08，9 提交 `e3eff2fc`..`55c08567`）**
+
+- 物理绘制实现退役（state-only 收敛）：`writeOutput` 物理分支、`appendOwnedDirectPaintLocked`、
+  `insertHistoryLinesLocked`/`insertHistoryLinesInRegionLocked`、`flushHoldingLock`/`flushHandoffHoldingLock`、
+  `renderOwnedViewportLocked`、`stageOwnedFrameLocked`、`reconcileOwnedViewportLocked` 删除；三个
+  `render*Locked` 保留 guard-only 空壳与全部调用点（~23 处不动）；fence API 与调用点保留、生产恒 fenced。
+- 状态语义回接：`writeOutput` 接 eager state-only handoff（行超出可见区即推进 `handoffFrontier` 并
+  软裁剪双保留窗口，不发射字节）；`commitExcessHistoryToScrollbackLocked` 增加无效几何守卫
+  （替代原物理插入失败语义）；`/debug` paint trace 无 paint 事件时回退输出 row-ownership 表。
+- 测试迁移（13 个 surface 测试文件，含主套件 33 项、snapshot 5 项）：字节断言 → composed-frame
+  （`ComposedFrameForTest`/`frameDump`）+ 保留状态 oracle（`LegacyReserveStateForTest`/
+  `HistoryHandedOffForTest`/状态字段）。
+- 偏差记录：paint-trace 白重绘计数族随物理绘制退役失去观察对象（2 迁移 + 4 删除；引擎计数契约由
+  `renderengine/paint_trace_test.go` 保留）；A 组 3 个字节契约测试文件整删（band-restore/overflow/
+  reconcile，状态语义由既有用例覆盖）。
+- 门禁：**条目 32 → 27（net −5）**：`appendOwnedDirectPaintLocked`×2、`insertHistoryLinesInRegionLocked`、
+  `writeOutput`、`renderOwnedViewportLocked`；`clearActiveBand`（`:88`）保留待 L3-3。
+- 验证：gofmt 干净；`go vet ./cmd/aicli/ui`、`go build ./...` 绿；`go test ./cmd/aicli/ui` 全量
+  （11.8s / 12.3s 双跑）绿；commands 相关子集（单写端 fence / 控制序列 / selection diagnostic）绿；
+  `TestUIInteractiveDirectWriterInventory` 门禁绿。
+- 禁动项（L3-3 范围）未触碰：`clearActiveBand`、`Disable` legacy paint、`repaintActiveBandLocked`、
+  `surface.Apply`。
 
 ### L4 门禁语义重构与降级正规化（1 提交，纯文档/测试）
 
