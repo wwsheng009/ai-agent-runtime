@@ -588,6 +588,18 @@ type ReplaceTranscriptAction struct {
 	// replacement Scene and the re-proof trigger in one transition. Resize,
 	// theme changes, stream deltas and writer recovery must never set it.
 	ArmScrollbackReplay bool
+	// DeferHistoryDelivery holds native-scrollback delivery while a windowed
+	// session load is still backfilling earlier pages. The Scene installs and
+	// the viewport renders, but no history commit is minted: the loaded
+	// generation must reach the append-only native scrollback as ONE ordered
+	// pass. Without the hold, the initial newest page is delivered first and
+	// every earlier page — prepended afterwards — is appended after newer
+	// rows, so the terminal transcript reads newest-first and any bounded
+	// scrollback evicts the newest messages instead of the oldest ones.
+	// The releasing publish is the load-completion replacement (armed, holding
+	// cleared); it re-proves the plan from source and mints the complete
+	// transcript in cell order (oldest -> newest).
+	DeferHistoryDelivery bool
 }
 
 func (ReplaceTranscriptAction) isUIAction()         {}

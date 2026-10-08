@@ -987,6 +987,32 @@ func (s *ChatSession) deferResumeHistoryCompletionWithProgress(sessionID string,
 	s.resumeHistoryDeferredBeforeSeq = beforeSeq
 	s.resumeHistoryDeferredTotal = total
 	s.resumeHistoryDeferredLoaded = loaded
+	// 登记补齐任务的同时挂起原生 scrollback 交付：装载的历史必须按 cell 顺序
+	// 一次性写入（见 resumeHistoryBackfillInFlight 的说明）。清理由补齐任务
+	// 的每条退出路径与装载收尾负责。
+	s.resumeHistoryBackfillInFlight = true
+}
+
+// resumeHistoryBackfillInFlight 报告较早页后台补齐是否仍在进行：期间 UI 侧
+// 必须挂起原生 scrollback 交付（ReplaceTranscriptAction.DeferHistoryDelivery）。
+func (s *ChatSession) resumeHistoryBackfillInFlightNow() bool {
+	if s == nil {
+		return false
+	}
+	s.resumeHistoryMu.Lock()
+	defer s.resumeHistoryMu.Unlock()
+	return s.resumeHistoryBackfillInFlight
+}
+
+// clearResumeHistoryBackfillInFlight 结束交付挂起：调用后下一次授权式装载
+// 替换会一次性按 cell 顺序铸造完整 transcript 并写入终端。
+func (s *ChatSession) clearResumeHistoryBackfillInFlight() {
+	if s == nil {
+		return
+	}
+	s.resumeHistoryMu.Lock()
+	defer s.resumeHistoryMu.Unlock()
+	s.resumeHistoryBackfillInFlight = false
 }
 
 // 补齐较早页时「画几次」是这一段的成本杠杆。读取、前插与 reconcile 都必须逐页
@@ -1090,6 +1116,8 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 	if session.SessionManager == nil {
 		// 没有会话管理器就不可能有待补齐任务；清掉调用方在同步回放期间展示的
 		// 进度行，避免无持久化会话把「恢复历史会话…」永久留在动态栏。
+		// 同时释放交付挂起：没有补齐任务接手，挂起必须立即结束。
+		session.clearResumeHistoryBackfillInFlight()
 		clearChatResumeProgress(session)
 		return
 	}
@@ -1107,6 +1135,7 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 	if sessionID == "" || beforeSeq <= 0 {
 		// 没有待补齐任务：清掉调用方在同步回放期间展示的恢复进度
 		// （replayLoadedSessionHistory / presentChatStartupSession 的 best-effort 收尾）。
+		session.clearResumeHistoryBackfillInFlight()
 		clearChatResumeProgress(session)
 		return
 	}
@@ -1156,12 +1185,14 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 		if aborted {
 			// 本次补齐被整体替换：清除自己登记的进度；接手的恢复操作会在自己的
 			// 下一次更新里重新亮出进度行。
+			session.clearResumeHistoryBackfillInFlight()
 			clearChatResumeProgress(session)
 			return
 		}
 		if pages == 0 {
 			// 游标表明仍有较早页，因此「一页都没取到」只可能是存储读取失败。
 			// 静默放弃会让用户以为会话只恢复了最新一页，必须显式提示。
+			session.clearResumeHistoryBackfillInFlight()
 			clearChatResumeProgress(session)
 			notifyDeferredResumeHistoryFailure(session)
 			return
@@ -1196,6 +1227,10 @@ func completeDeferredResumeHistoryLoad(session *ChatSession, pages int, err erro
 	// 补齐较早页会触发全量 seed + 统一帧，是 ready 之后最贵的一段；立刻补
 	// 一次 flush，否则这段耗时只能靠 500ms 采样间接推断。
 	flushChatStartupTiming()
+	// 收官之前先释放交付挂起：renderFinal 的授权式替换会从源重证明完整
+	// transcript，并按 cell 顺序一次性铸造 + 写入原生 scrollback。释放必须
+	// 早于 renderFinal，否则这一批仍会被挂起（装载的历史到不了终端）。
+	session.clearResumeHistoryBackfillInFlight()
 	if renderFinal != nil {
 		renderFinal()
 	}

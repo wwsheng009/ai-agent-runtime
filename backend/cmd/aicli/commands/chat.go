@@ -118,6 +118,13 @@ type ChatSession struct {
 	// 存储未给出总数，此时只展示已加载条数。
 	resumeHistoryDeferredTotal  int
 	resumeHistoryDeferredLoaded int
+	// resumeHistoryBackfillInFlight 报告「较早页后台补齐」任务是否仍在进行。
+	// 只要在飞，原生 scrollback 的交付就必须挂起：装载是「最新页先到、较早页
+	// 后到」的窗口化过程，append-only 的终端按交付顺序落字，先交付最新页就会
+	// 让整段转录读成「新在前、旧在后」，有限 scrollback 下被挤掉的正是最新
+	// 消息（用户看到的就是「最新消息没有渲染、输出被截断」）。收尾的授权式
+	// 替换清掉本标志后，完整 generation 一次性按 cell 顺序铸出并写入。
+	resumeHistoryBackfillInFlight bool
 	// resumeHistoryGeneration 在展示历史被整体替换/清空时递增，使在途的
 	// 后台补齐任务放弃写入已经失效的旧快照。
 	resumeHistoryGeneration   uint64

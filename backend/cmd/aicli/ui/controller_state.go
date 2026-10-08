@@ -386,6 +386,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ReplaceTranscriptAction:
+		// 窗口化装载的交付挂起是**装载边界状态**：翻转时必须使规划 memo 失效，
+		// 否则「释放」那一次会因为 memo 命中而跳过整批铸造（被挂起的装载历史
+		// 就永远到不了原生 scrollback）。释放发生在装载收尾的授权式替换上，
+		// 它随即从源重证明并按 cell 顺序一次性铸造完整 transcript。
+		if state.HistoryEffects.DeferHistoryDelivery != a.DeferHistoryDelivery {
+			state.HistoryEffects.DeferHistoryDelivery = a.DeferHistoryDelivery
+			state.HistoryEffects.invalidateTranscriptPlanMemo()
+		}
 		// A session load re-proves the plan from source rather than trusting a
 		// memo. The delivery ledger and the semantic epoch are deliberately
 		// untouched: native scrollback is append-only, so records for content

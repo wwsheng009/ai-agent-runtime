@@ -958,8 +958,26 @@ func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridgeWithReplayA
 	// 拆开后定论在**投递**侧（构造 0-134ms，post 74ms-1.12s），因此增量载荷不是正解，
 	// 非阻塞 ingress 才是（见 tryPostTranscriptSnapshotFromBridge）。
 	markChatStartup("transcript_snapshot_build")
-	_ = c.postUIAction(ui.ReplaceTranscriptAction{Snapshot: snapshot, ArmScrollbackReplay: armReplay})
+	_ = c.postUIAction(ui.ReplaceTranscriptAction{
+		Snapshot:             snapshot,
+		ArmScrollbackReplay:  armReplay,
+		DeferHistoryDelivery: c.historyDeliveryDeferred(),
+	})
 	markChatStartup("transcript_snapshot_post")
+}
+
+// historyDeliveryDeferred reports whether native-scrollback delivery must be
+// held back: a windowed session load is still backfilling earlier pages. While
+// held, the Scene installs and the viewport renders, but no history commit is
+// minted — the loaded generation has to cross into the append-only native
+// scrollback as one ordered pass, after the load-completion replacement
+// re-proves the complete transcript (see
+// ui.ReplaceTranscriptAction.DeferHistoryDelivery).
+func (c *chatInteractionCoordinator) historyDeliveryDeferred() bool {
+	if c == nil || c.session == nil {
+		return false
+	}
+	return c.session.resumeHistoryBackfillInFlightNow()
 }
 
 // tryPostTranscriptSnapshotFromBridge 是 postTranscriptSnapshotFromBridge 的非阻塞
@@ -978,7 +996,10 @@ func (c *chatInteractionCoordinator) tryPostTranscriptSnapshotFromBridge(bridge 
 		return false
 	}
 	markChatStartup("transcript_snapshot_build")
-	posted := c.tryPostUIAction(ui.ReplaceTranscriptAction{Snapshot: snapshot})
+	posted := c.tryPostUIAction(ui.ReplaceTranscriptAction{
+		Snapshot:             snapshot,
+		DeferHistoryDelivery: c.historyDeliveryDeferred(),
+	})
 	markChatStartup("transcript_snapshot_post")
 	return posted
 }

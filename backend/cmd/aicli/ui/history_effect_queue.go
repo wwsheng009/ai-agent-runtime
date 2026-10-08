@@ -21,6 +21,12 @@ type HistoryEffectQueueState struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
+	// DeferHistoryDelivery holds native-scrollback delivery while a windowed
+	// session load is still backfilling earlier pages (see
+	// ReplaceTranscriptAction.DeferHistoryDelivery). While set, the planner
+	// mints no history commit, so the loaded generation reaches the
+	// append-only scrollback as one ordered pass instead of newest-page-first.
+	DeferHistoryDelivery bool
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
@@ -441,6 +447,9 @@ type HistoryEffectDiagnostics struct {
 	Frozen                 bool
 	ProjectionUnknown      bool
 	ReconciliationRequired bool
+	// DeferHistoryDelivery reports a held windowed-load delivery (see
+	// HistoryEffectQueueState.DeferHistoryDelivery).
+	DeferHistoryDelivery bool
 	// PlanIncomplete/PlanStalled 与 P1.2 worker 的这两项均为 deprecated 零值：
 	// 续跑组已删除（P1-1 Stage 4）、worker 已删除（Stage 3），字段仅为
 	// debug JSON/文档的跨包稳定性保留。
@@ -461,6 +470,7 @@ func (s HistoryEffectQueueState) Diagnostics() HistoryEffectDiagnostics {
 		Frozen:                 s.Frozen,
 		ProjectionUnknown:      s.ProjectionUnknown,
 		ReconciliationRequired: s.ReconciliationRequired,
+		DeferHistoryDelivery:   s.DeferHistoryDelivery,
 		NextToken:              s.NextToken,
 		TerminalEpoch:          s.TerminalEpoch,
 		Summary:                s.Summary(),

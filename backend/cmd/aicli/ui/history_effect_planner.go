@@ -625,6 +625,14 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	if state == nil {
 		return
 	}
+	if state.HistoryEffects.DeferHistoryDelivery {
+		// 窗口化装载（较早页补齐）进行中：不铸任何提交，也不记录 memo。
+		// 场景与视口照常安装/渲染（帧路径不读 ledger），但被装载的 generation
+		// 必须等到收尾的授权式替换**一次性按 cell 顺序**铸出，否则最新一页
+		// 先写、较早页后写，append-only 的 scrollback 会读成「新在前、旧在后」，
+		// 有限缓冲下被挤掉的正是最新消息。
+		return
+	}
 	if transcriptPlanMemoHit(state) {
 		// The finalized transcript prefix and every layout input it depends on
 		// are unchanged. A2 第二刀后 active 不再铸提交，因此 memo 命中即无工作
