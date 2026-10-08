@@ -899,6 +899,13 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 		s.invalidateSoftOutputLocked()
 	}
 	s.appendHistoryWindowLocked(text)
+	// Eager state-only handoff (L3-2): rows older than the visible output
+	// region advance the logical frontier and soft-trim the dual-retained
+	// window, exactly as the retired direct-scroll append did. No bytes are
+	// emitted; the unified presenter owns scrollback rendering.
+	if s.ownedViewport {
+		s.commitExcessHistoryToScrollbackLocked()
+	}
 	s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
 	return len(output), nil, true
 }
@@ -4458,6 +4465,12 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() bool {
 		// leased alternate screen owns the output region. Native scrollback
 		// handoff bytes must not be emitted here; the release repaint replays
 		// retained state and commits pending history then.
+		return false
+	}
+	if s.terminal.width < 1 || s.terminal.height < 1 {
+		// State-only stand-in for the retired physical insert: a terminal with
+		// invalid geometry cannot accept a handoff, so the logical boundary
+		// must not advance (a failed insert must never lose transcript rows).
 		return false
 	}
 	handedOff := false

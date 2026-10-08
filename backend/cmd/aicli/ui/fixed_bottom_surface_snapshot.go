@@ -522,6 +522,11 @@ func (s *FixedBottomSurface) RowPlanDebugString() string {
 	if height < 1 {
 		height = 24
 	}
+	return s.rowPlanDebugStringLocked(width, height)
+}
+
+// rowPlanDebugStringLocked renders the ownership table; callers must hold s.mu.
+func (s *FixedBottomSurface) rowPlanDebugStringLocked(width, height int) string {
 	plan := s.composedPlanLocked(width, height, false)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Row Ownership (%dx%d):\n", width, height)
@@ -539,7 +544,8 @@ func (s *FixedBottomSurface) RowPlanDebugString() string {
 // the engine-owned probe since the last /debug on. It classifies per row how
 // often it was emitted, how often those emits were white repaints (content
 // unchanged), and whether any content change was left unpainted (missing
-// coverage). Empty when no engine is wired or no events were recorded.
+// coverage). Empty when no engine is wired; the row-ownership table is
+// appended when no paint events were recorded (state-only mode).
 func (s *FixedBottomSurface) PaintTraceDebugString() string {
 	if s == nil || s.terminal == nil {
 		return ""
@@ -559,7 +565,17 @@ func (s *FixedBottomSurface) PaintTraceDebugString() string {
 	// Refresh the ownership cache from the state-only frame builder: the
 	// physical paint path that used to refresh it is retired in L3-2.
 	s.lastRowOwners = planOwnersCopy(s.composedPlanLocked(width, height, false))
-	return s.engine.Trace().DebugString(s.lastRowOwners)
+	report := s.engine.Trace().DebugString(s.lastRowOwners)
+	if len(s.engine.Trace().Stats()) == 0 {
+		// State-only mode records no paint events, so the trace table is
+		// empty; the ownership plan is still available and keeps /debug
+		// useful for locating which component owns each row.
+		if s.engine.Trace().Enabled() {
+			report = "Paint Trace: no paint events recorded (state-only mode)\n"
+		}
+		report += s.rowPlanDebugStringLocked(width, height)
+	}
+	return report
 }
 
 func cellRowPlainText(cells []vt.Cell) string {
