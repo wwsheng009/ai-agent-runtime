@@ -139,7 +139,17 @@ func driveTTYLiveLoop(t *testing.T, session *ChatSession, script []ttyLiveScript
 		surface.EnableForTest(width, height)
 		session.Interaction.SetSurface(surface)
 		session.Interaction.SetWriter(os.Stdout)
+		// L3-3：legacy surface 直写已退役；真实交互字节由 unified presenter
+		// （直写测试模式，test-only）产生，vt.Screen 重建路径不变。
+		if !session.Interaction.enableUnifiedRendererWithWriter(os.Stdout) {
+			t.Fatal("unified renderer did not attach")
+		}
 		runChatLoop(session, false, "")
+		// L3-3：退出路径的最后一帧（如 /exit 的「再见！」）经 unified
+		// 管线异步提交；先排空 actor 邮箱再等 presenter 排空，最后才关闭
+		// 捕获窗口，避免末帧被截断（legacy 直写是同步字节，无此竞态）。
+		session.Interaction.waitUIActorIdle()
+		awaitUnifiedPresenterIdle(t, session.Interaction)
 		// runChatLoop 返回后立即停掉 FramePump 异步渲染调度器：它仍驻留
 		// 并周期 tick，会向"当前 os.Stdout"（已被后续测试替换的捕获管道）
 		// 泄漏渲染组字节——完整包回归失败（chat_interactive_selection_test
@@ -346,7 +356,9 @@ func TestTTY_LiveLoop_UnknownCommandRendersError(t *testing.T) {
 	if run.executor.called {
 		t.Fatalf("未知命令不应触发 executor 调用")
 	}
-	for _, want := range []string{"未知命令", "/bogus"} {
+	// L3-3：统一交互路径下未迁移命令的错误文案为「尚未迁移到统一渲染命令
+	// 通道」（legacy「未知命令」文案随直写路径退役）。
+	for _, want := range []string{"尚未迁移到统一渲染命令通道", "/bogus"} {
 		if !strings.Contains(run.raw, want) {
 			t.Errorf("渲染流中未找到 %q; raw=%q", want, run.raw)
 		}
