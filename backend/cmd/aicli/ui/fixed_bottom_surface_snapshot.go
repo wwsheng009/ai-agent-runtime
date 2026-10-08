@@ -65,6 +65,42 @@ func (s *FixedBottomSurface) ComposedFrameForTest() [][]vt.Cell {
 	return renderengine.PlanCells(s.composedPlanLocked(width, height, true))
 }
 
+// refreshPaintBookkeepingLocked keeps the popup/prompt paint bookkeeping
+// coherent on the state-only path. L3-2 retired the owned-viewport staging
+// (stageOwnedFrameLocked) that used to refresh these fields right before a
+// physical flush; cursor placement and capability fallback still read them,
+// so the same derivation now runs without staging or flushing any terminal
+// bytes. Callers hold the surface lock and have already checked
+// enabled/owned/fence/lease guards.
+func (s *FixedBottomSurface) refreshPaintBookkeepingLocked() {
+	if s == nil || s.terminal == nil || !s.enabled || !s.ownedViewport {
+		return
+	}
+	if !s.physicalWritesEnabledLocked() || s.leaseID != 0 {
+		return
+	}
+	width, height := s.terminal.Width(), s.terminal.Height()
+	if width < 1 {
+		width = 80
+	}
+	if height < 1 {
+		height = 24
+	}
+	state := s.bottomPaneStateLocked()
+	popupPlan := s.popupPaintPlanLocked(state, height)
+	s.popupRenderedRows = popupPlan.reservedRows
+	s.popupRenderedGapRows = popupPlan.gapRows
+	s.popupRenderedStartRow = popupPlan.startRow
+	promptPlan := s.promptPaintPlanLocked(state, width)
+	if promptPlan.skip || promptPlan.empty {
+		s.promptRenderedStartRow = 0
+		s.promptRenderedRows = 0
+	} else {
+		s.promptRenderedStartRow = promptPlan.startRow
+		s.promptRenderedRows = promptPlan.areaRows
+	}
+}
+
 // composedPlanLocked builds the full-screen owned frame (history + bottom
 // reserve) with per-row ownership annotations, the single authoritative
 // layout of the owned path.

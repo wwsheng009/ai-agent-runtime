@@ -1425,6 +1425,7 @@ func (s *FixedBottomSurface) showPromptImpl(line string) bool {
 	}
 	// Logical prompt state committed above; the unified presenter renders from
 	// retained state (legacy byte emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -1464,6 +1465,7 @@ func (s *FixedBottomSurface) resetPromptImpl(line string, rows int) bool {
 	s.promptReservedRows = 1
 	s.promptViewportStart = 0
 	s.setPromptCursorToLineEndLocked(line)
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -1493,6 +1495,7 @@ func (s *FixedBottomSurface) setPromptRowsImpl(rows int) bool {
 	// Unified presenter renders from retained state; commit the new row budget
 	// logically only (legacy byte emission retired in L3-2).
 	s.promptReservedRows = rows
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -1521,6 +1524,7 @@ func (s *FixedBottomSurface) setPromptNoticeLineImpl(line string) bool {
 	}
 	// Unified presenter renders from retained state (legacy byte emission
 	// retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -1652,6 +1656,10 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 			// history into rows freed by a shrink. Legacy multi-pass paint and
 			// scroll-down compensation are not used on this path.
 			s.applyLayoutLocked()
+			// Keep the paint bookkeeping coherent for cursor placement and
+			// capability fallback; the retired stageOwnedFrameLocked used to
+			// refresh these fields on this path.
+			s.refreshPaintBookkeepingLocked()
 			if restorePromptCursor {
 				s.restoreStoredPromptCursorLocked()
 			} else {
@@ -1907,6 +1915,7 @@ func (s *FixedBottomSurface) setPromptEditorStatusLineImpl(line string) bool {
 	}
 	// Unified presenter renders from retained state (legacy byte emission
 	// retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -1960,6 +1969,7 @@ func (s *FixedBottomSurface) trackPromptInputStateImpl(line string, input string
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
 	// Logical prompt state committed above; unified presenter renders from
 	// retained state (legacy byte emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -1990,6 +2000,7 @@ func (s *FixedBottomSurface) setPromptInputStateImpl(line string, input string, 
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
 	// Logical prompt state committed above; unified presenter renders from
 	// retained state (legacy byte emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -2087,6 +2098,7 @@ func (s *FixedBottomSurface) clearPromptRowsImpl(rows int) bool {
 	s.promptCursorCol = 0
 	s.promptRenderedStartRow = 0
 	s.promptRenderedRows = 0
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -2110,6 +2122,7 @@ func (s *FixedBottomSurface) showPopupImpl(lines []string) {
 	}
 	// Unified presenter renders from retained popup state (legacy byte
 	// emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 }
 
 func (s *FixedBottomSurface) ShowPopupPreserveCursor(lines []string) {
@@ -2147,6 +2160,7 @@ func (s *FixedBottomSurface) showPopupPreserveCursorForOwner(lines []string, own
 	}
 	// Unified presenter renders from retained popup state (legacy byte
 	// emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 }
 
 func (s *FixedBottomSurface) ShowPopupInput(lines []string, prompt string) {
@@ -2219,6 +2233,7 @@ func (s *FixedBottomSurface) beginPopupInputForHandleImpl(lines []string, prompt
 	}
 	// Unified presenter renders from retained popup state (legacy byte
 	// emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -2251,6 +2266,7 @@ func (s *FixedBottomSurface) updatePopupInputForHandleImpl(handle PopupHandle, l
 	}
 	// Unified presenter renders from retained popup state (legacy byte
 	// emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -2286,6 +2302,7 @@ func (s *FixedBottomSurface) showPopupInputForOwnerImpl(lines []string, prompt s
 	}
 	// Unified presenter renders from retained popup state (legacy byte
 	// emission retired in L3-2).
+	s.refreshPaintBookkeepingLocked()
 }
 
 func (s *FixedBottomSurface) ShowPopupInputPreserveCursor(lines []string, prompt string) {
@@ -2341,6 +2358,7 @@ func (s *FixedBottomSurface) clearPopupImpl() {
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		if s.ownedViewport {
+			s.refreshPaintBookkeepingLocked()
 			return
 		}
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
@@ -2392,6 +2410,7 @@ func (s *FixedBottomSurface) clearPopupPreserveCursorImpl() {
 		}
 		s.applyLayoutLocked()
 		if s.ownedViewport {
+			s.refreshPaintBookkeepingLocked()
 			return
 		}
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
@@ -2459,6 +2478,7 @@ func (s *FixedBottomSurface) clearPopupForOwnerPreserveCursorImpl(owner string) 
 		}
 		s.applyLayoutLocked()
 		if s.ownedViewport {
+			s.refreshPaintBookkeepingLocked()
 			return
 		}
 		s.clearPopupAreaLocked(previousRows, previousGapRows)
@@ -2515,6 +2535,7 @@ func (s *FixedBottomSurface) clearPopupHandlePreserveCursorImpl(handle PopupHand
 		}
 		s.applyLayoutLocked()
 		if s.ownedViewport {
+			s.refreshPaintBookkeepingLocked()
 			return
 		}
 		s.clearPopupAreaLocked(previousRows, previousGapRows)
@@ -3121,6 +3142,7 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 		height = 24
 	}
 	bottomRows := s.effectiveBottomRowsLocked(height)
+	firstLayout := s.lastWidth == 0 || s.lastHeight == 0
 	sizeChanged := width != s.lastWidth || height != s.lastHeight
 	bottomChanged := bottomRows != s.lastBottomRows
 	s.lastWidth = width
@@ -3135,8 +3157,10 @@ func (s *FixedBottomSurface) applyOwnedViewportGeometryLocked(width, height int)
 	}
 	// Only a real terminal resize invalidates the trailing-blank marker:
 	// band/popup grow-shrink must keep it so Compose can restore the owned
-	// transcript tail.
-	if sizeChanged {
+	// transcript tail. A first-ever geometry application is initialization,
+	// not a resize: L3-2 retires eager prompt-time layout, so the first
+	// application can arrive on the first post-write repaint.
+	if sizeChanged && !firstLayout {
 		s.legacyReserve.CursorOnBlankRow = false
 	}
 	// Owned frames address absolute rows and must not inherit a narrower legacy
@@ -3176,6 +3200,7 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 		return
 	}
 	if s.ownedViewport {
+		s.refreshPaintBookkeepingLocked()
 		return
 	}
 	// Legacy body removed (Phase 6): owned mode handles status rendering via
@@ -3195,6 +3220,7 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 		return
 	}
 	if s.ownedViewport {
+		s.refreshPaintBookkeepingLocked()
 		return
 	}
 	// Legacy body removed (Phase 6): owned mode handles popup rendering via
@@ -3494,6 +3520,7 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		return
 	}
 	if s.ownedViewport {
+		s.refreshPaintBookkeepingLocked()
 		return
 	}
 	// Legacy body removed (Phase 6): owned mode handles prompt rendering via
