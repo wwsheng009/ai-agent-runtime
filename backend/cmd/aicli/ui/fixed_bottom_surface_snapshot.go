@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -66,93 +65,6 @@ func (s *FixedBottomSurface) ComposedFrameForTest() [][]vt.Cell {
 	return renderengine.PlanCells(s.composedPlanLocked(width, height, true))
 }
 
-// renderOwnedViewportLocked materializes the complete application-owned frame
-// and reconciles it through the shared double-buffer backend. Callers hold both
-// the surface lock and the terminal write lock.
-func (s *FixedBottomSurface) renderOwnedViewportLocked() {
-	if s == nil || s.terminal == nil || !s.enabled || !s.ownedViewport {
-		return
-	}
-	if !s.physicalWritesEnabledLocked() {
-		// The surface remains a logical compatibility projection while the
-		// unified TerminalSession owns physical output. Do not stage/flush a
-		// second terminal projection here.
-		return
-	}
-	if s.leaseID != 0 {
-		// Alternate-screen lease active: primary flush is suspended; state
-		// is retained and replayed by the release repaint.
-		return
-	}
-	s.stageOwnedFrameLocked()
-	if diff := s.viewportBackend.PrepareFlush(); diff != "" {
-		if err := s.flushHoldingLock(TerminalOutput(), func(w io.Writer) {
-			_, _ = io.WriteString(w, diff)
-		}); err != nil {
-			s.viewportBackend.MarkWriteFailed()
-		} else {
-			s.viewportBackend.ConfirmFlush()
-			s.ownedFrameFlushCount++
-		}
-	} else if s.viewportBackend.ProjectionValidity() == renderengine.ProjectionUnknown {
-		// An empty recovery diff is possible only for an empty frame; it is
-		// nevertheless the full projection of that frame.
-		s.viewportBackend.ConfirmFlush()
-	}
-}
-
-// stageOwnedFrameLocked materializes the complete application-owned frame
-// into the double-buffer back plane without emitting bytes. It is shared by
-// the full-frame paint (renderOwnedViewportLocked) and the direct-scroll
-// append path (appendOwnedDirectPaintLocked), which stages the same frame but
-// commits the already-scrolled history rows silently before flushing so only
-// the bottom pane delta is emitted. Callers hold the surface lock and the
-// terminal write lock.
-func (s *FixedBottomSurface) stageOwnedFrameLocked() {
-	if s == nil || s.terminal == nil || !s.enabled || !s.ownedViewport {
-		return
-	}
-	width, height := s.terminal.Width(), s.terminal.Height()
-	if width < 1 {
-		width = 80
-	}
-	if height < 1 {
-		height = 24
-	}
-	if s.viewportBackend == nil {
-		s.viewportBackend = renderengine.NewScreenModel(width, height)
-		s.viewportBackend.Invalidate()
-	} else if backendWidth, backendHeight := s.viewportBackend.Size(); backendWidth != width || backendHeight != height {
-		s.viewportBackend.Resize(width, height)
-	}
-	if s.engine != nil && s.engine.Trace() != nil {
-		// The reconciliation probe is owned by the engine and shared; this
-		// attach is idempotent and survives backend rebuilds on resize.
-		s.viewportBackend.AttachTrace(s.engine.Trace())
-	}
-
-	// Keep the old bookkeeping fields coherent for cursor placement and for
-	// capability fallback after a lifecycle transition. They no longer drive
-	// terminal scrolling on the owned path.
-	state := s.bottomPaneStateLocked()
-	popupPlan := s.popupPaintPlanLocked(state, height)
-	s.popupRenderedRows = popupPlan.reservedRows
-	s.popupRenderedGapRows = popupPlan.gapRows
-	s.popupRenderedStartRow = popupPlan.startRow
-	promptPlan := s.promptPaintPlanLocked(state, width)
-	if promptPlan.skip || promptPlan.empty {
-		s.promptRenderedStartRow = 0
-		s.promptRenderedRows = 0
-	} else {
-		s.promptRenderedStartRow = promptPlan.startRow
-		s.promptRenderedRows = promptPlan.areaRows
-	}
-
-	plan := s.composedPlanLocked(width, height, false)
-	s.lastRowOwners = planOwnersCopy(plan)
-	s.viewportBackend.StageFrame(renderengine.PlanCells(plan))
-}
-
 // composedPlanLocked builds the full-screen owned frame (history + bottom
 // reserve) with per-row ownership annotations, the single authoritative
 // layout of the owned path.
@@ -163,6 +75,11 @@ func (s *FixedBottomSurface) composedPlanLocked(width, height int, debugStars bo
 		historyPlan[i] = renderengine.PlanRow{Owner: renderengine.RowOwnerTranscript, Cells: history[i]}
 	}
 	plan := s.composerLocked().ComposePlan(width, height, historyPlan, s.bottomRowsWithOwnersLocked())
+	// Keep the row-ownership cache updated from the state-only frame builder.
+	// The physical paint path that used to refresh it (stageOwnedFrameLocked)
+	// is retired in L3-2; /debug readers (PaintTraceDebugString) refresh
+	// through this same builder.
+	s.lastRowOwners = planOwnersCopy(plan)
 	s.annotateDebugRowsLocked(plan, width, debugStars)
 	return plan
 }
@@ -296,40 +213,16 @@ func planOwnersCopy(plan []renderengine.PlanRow) []renderengine.RowOwner {
 	return owners
 }
 
-// reconcileOwnedViewportLocked forces a full-frame repaint so the physical
-// terminal converges on the composed scene even when a previous frame was
-// written outside the double buffer (legacy popup clearing, host-side
-// scroll, geometry transitions). Callers hold the surface lock and the
-// terminal write lock.
-func (s *FixedBottomSurface) reconcileOwnedViewportLocked() {
-	if s == nil || !s.enabled || !s.ownedViewport {
-		return
-	}
-	if s.viewportBackend != nil {
-		s.viewportBackend.Invalidate()
-	}
-	s.renderOwnedViewportLocked()
-}
-
-// Reconcile forces the owned viewport to a full-frame repaint on the next
-// write lock acquisition, repairing any divergence between the double-buffer
-// front frame and the physical terminal. It is the public hook for
-// reconciliation timings that live outside the surface (finalize, phase
-// transitions); surface-internal timings (resize, lease release, popup
-// close) already reconcile inline.
+// Reconcile is retained as a state-only lifecycle hook. Physical full-frame
+// reconciliation was retired in L3-2: the unified TerminalSession presenter is
+// the single physical writer, and the surface only keeps the retained state
+// it is read from. Callers may keep invoking it; it no longer emits bytes.
 func (s *FixedBottomSurface) Reconcile() {
 	if s == nil || !s.enabled || !s.ownedViewport {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.physicalWritesEnabledLocked() {
-		return
-	}
-	WithTerminalWriteLock(func() {
-		s.reconcileOwnedViewportLocked()
-		s.restoreStoredPromptCursorLocked()
-	})
 }
 
 type fixedBottomPaintRow struct {
@@ -411,133 +304,9 @@ func (s *FixedBottomSurface) expandHistoryLinesLocked(lines []string) [][]vt.Cel
 	return screen.CellRows(1, end)
 }
 
-// expandHistorySegmentToPhysicalTextLocked expands a handoff segment whose
-// logical lines wrap at the current width into physical-row text. Each
-// returned row occupies exactly one terminal row, so the DECSTBM \r\n scroll
-// count stays 1:1 with the terminal. The expansion goes through vt.Screen so
-// wide runes and ANSI-deferred wrapping match real terminal behavior. Filler
-// rows are repainted by the owned full-frame render immediately after handoff,
-// so plain physical text (without re-emitted SGR) is sufficient here.
-func (s *FixedBottomSurface) expandHistorySegmentToPhysicalTextLocked(segment []string) []string {
-	if len(segment) == 0 {
-		return nil
-	}
-	width := s.terminal.Width()
-	if width < 1 {
-		return nil
-	}
-	rows := s.expandHistoryLinesLocked(segment)
-	if len(rows) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(rows))
-	for _, cells := range rows {
-		out = append(out, historyCellsToPlainText(cells))
-	}
-	return out
-}
-
-// historyCellsToPlainText flattens one physical row of reconstructed cells to
-// plain text, mirroring vt.Screen.Line: wide-run continuation columns are
-// skipped, blank cells become spaces, and trailing blanks are trimmed. The
-// result is exactly one terminal row, so the handoff scroll count stays 1:1.
-func historyCellsToPlainText(cells []vt.Cell) string {
-	var b strings.Builder
-	for _, c := range cells {
-		if c.Cont {
-			continue
-		}
-		if c.Text == "" {
-			b.WriteByte(' ')
-		} else {
-			b.WriteString(c.Text)
-		}
-	}
-	return strings.TrimRight(b.String(), " ")
-}
-
-// expandHistoryLinesToStyledTextLocked expands a visible-tail segment whose
-// logical lines wrap at the current width into physical-row text WITH
-// re-emitted SGR styling. Scrollback handoff can use plain text (the owned
-// full-frame repaint re-renders the visible window from styled source), but
-// the direct-scroll append paints the visible tail through the native scroll
-// region and only flushes the bottom-pane delta afterwards — the transcript is
-// never repainted, so the rows written here must carry their own styling.
-func (s *FixedBottomSurface) expandHistoryLinesToStyledTextLocked(segment []string) []string {
-	if len(segment) == 0 {
-		return nil
-	}
-	width := s.terminal.Width()
-	if width < 1 {
-		return nil
-	}
-	rows := s.expandHistoryLinesLocked(segment)
-	if len(rows) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(rows))
-	for _, cells := range rows {
-		out = append(out, historyCellsToStyledText(cells))
-	}
-	return out
-}
-
-// historyCellsToStyledText re-emits one physical row of reconstructed cells as
-// ANSI text: SGR changes become CSI m sequences, wide-run continuation columns
-// are skipped, and blank cells become spaces. Trailing blanks are trimmed and
-// the row ends with an SGR reset, so the result is exactly one terminal row
-// with self-contained styling (a trailing styled blank cannot bleed into the
-// next emitted row).
-func historyCellsToStyledText(cells []vt.Cell) string {
-	high := -1
-	for column, cell := range cells {
-		if cell.Text != "" || cell.Cont || len(cell.SGR) > 0 {
-			high = column
-		}
-	}
-	if high < 0 {
-		return ""
-	}
-	var b strings.Builder
-	var activeSGR []string
-	haveActiveSGR := false
-	for column := 0; column <= high; column++ {
-		cell := cells[column]
-		if cell.Cont {
-			continue
-		}
-		if !haveActiveSGR || !sgrEqual(activeSGR, cell.SGR) {
-			b.WriteString("\x1b[0m")
-			if len(cell.SGR) > 0 {
-				b.WriteString("\x1b[")
-				b.WriteString(strings.Join(cell.SGR, ";"))
-				b.WriteByte('m')
-			}
-			activeSGR = cell.SGR
-			haveActiveSGR = true
-		}
-		if cell.Text == "" {
-			b.WriteByte(' ')
-		} else {
-			b.WriteString(cell.Text)
-		}
-	}
-	b.WriteString("\x1b[0m")
-	return b.String()
-}
-
-// sgrEqual reports whether two SGR code lists are identical.
-func sgrEqual(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
-}
+// expandHistorySegmentToPhysicalTextLocked, expandHistoryLinesToStyledTextLocked
+// and their historyCellsToPlainText/historyCellsToStyledText/sgrEqual helpers
+// were retired in L3-2 with the direct-scroll paint path they served.
 
 func (s *FixedBottomSurface) historyRowsWithCursorBlankLocked() [][]vt.Cell {
 	rows := s.historyRowsSnapshotLocked()
@@ -744,6 +513,16 @@ func (s *FixedBottomSurface) PaintTraceDebugString() string {
 	if !s.enabled || !s.ownedViewport || s.engine == nil || s.engine.Trace() == nil {
 		return ""
 	}
+	width, height := s.terminal.Width(), s.terminal.Height()
+	if width < 1 {
+		width = 80
+	}
+	if height < 1 {
+		height = 24
+	}
+	// Refresh the ownership cache from the state-only frame builder: the
+	// physical paint path that used to refresh it is retired in L3-2.
+	s.lastRowOwners = planOwnersCopy(s.composedPlanLocked(width, height, false))
 	return s.engine.Trace().DebugString(s.lastRowOwners)
 }
 
