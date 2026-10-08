@@ -1328,6 +1328,8 @@ func TestChatInteractionCoordinatorScreenLeaseUsesBarrierActions(t *testing.T) {
 
 		surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 		surface.EnableForTest(80, 24)
+		surface.SetPhysicalWritesEnabled(false)
+		surface.SetAlternateScreenLeaseTransport(&surfaceLeaseTransportForTest{})
 		coordinator.SetSurface(surface)
 		coordinator.waitUIActorIdle()
 

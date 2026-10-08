@@ -10,10 +10,34 @@ import (
 
 // P2-4b ④：主循环读输入前等待忙时副屏关闭（以 surface 租约为事实源）。
 
+// surfaceLeaseTransportForTest is a minimal ui.AlternateScreenLeaseTransport
+// for commands tests: after the raw DEC 1049 fallback was retired (L1-c) every
+// lease must travel through a transport.
+type surfaceLeaseTransportForTest struct {
+	entered []uint64
+	exited  []uint64
+}
+
+func (t *surfaceLeaseTransportForTest) EnterAlternateScreen(leaseID uint64) error {
+	t.entered = append(t.entered, leaseID)
+	return nil
+}
+
+func (t *surfaceLeaseTransportForTest) WriteAlternateScreen(uint64, string) error { return nil }
+
+func (t *surfaceLeaseTransportForTest) ExitAlternateScreen(leaseID uint64) error {
+	t.exited = append(t.exited, leaseID)
+	return nil
+}
+
+func (t *surfaceLeaseTransportForTest) RequestPrimaryRecovery() {}
+
 func newBusyScreenGateSurface(t *testing.T) *ui.FixedBottomSurface {
 	t.Helper()
 	surface := ui.NewFixedBottomSurface(nil)
 	surface.EnableForTest(72, 18)
+	surface.SetPhysicalWritesEnabled(false)
+	surface.SetAlternateScreenLeaseTransport(&surfaceLeaseTransportForTest{})
 	return surface
 }
 

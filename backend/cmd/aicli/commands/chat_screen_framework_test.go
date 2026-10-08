@@ -49,6 +49,9 @@ func newChatScreenTestSession(t *testing.T) *ChatSession {
 	t.Helper()
 	surface := ui.NewFixedBottomSurface(nil)
 	surface.EnableForTest(72, 18)
+	// L1-c：租约一律要求 unified transport（raw DEC 1049 分支已退役），
+	// screen-framework 用例面注入最小 transport。
+	surface.SetAlternateScreenLeaseTransport(&surfaceLeaseTransportForTest{})
 	session := &ChatSession{Surface: surface}
 	session.Interaction = newTestChatInteractionCoordinator(t, session)
 	return session

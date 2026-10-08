@@ -10,8 +10,7 @@ import (
 // P2-4 前置①：租约等待（AcquireAlternateScreenWait）。
 
 func TestAcquireAlternateScreenWaitFreeSurface(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 
 	lease, err := surface.AcquireAlternateScreenWait(context.Background(), FullscreenRequest{Title: "free"}, time.Second)
 	if err != nil {
@@ -26,8 +25,7 @@ func TestAcquireAlternateScreenWaitFreeSurface(t *testing.T) {
 }
 
 func TestAcquireAlternateScreenWaitWaitsForRelease(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	held, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "held"})
@@ -56,8 +54,7 @@ func TestAcquireAlternateScreenWaitWaitsForRelease(t *testing.T) {
 }
 
 func TestAcquireAlternateScreenWaitBudgetExhausted(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	held, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "held"})
@@ -80,8 +77,7 @@ func TestAcquireAlternateScreenWaitBudgetExhausted(t *testing.T) {
 }
 
 func TestAcquireAlternateScreenWaitContextCancel(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 
 	held, err := surface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "held"})
 	if err != nil {
@@ -125,8 +121,7 @@ func TestAcquireAlternateScreenWaitPropagatesFatalErrors(t *testing.T) {
 // P2-4b：SetAlternateScreenWaitBudget 让既有 AcquireAlternateScreen 调用点
 // （各 S 档 screen handler）无需改动即可获得忙时等待能力。
 func TestAcquireAlternateScreenHonorsSurfaceWaitBudget(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	if got := surface.AlternateScreenWaitBudget(); got != 0 {
@@ -169,8 +164,7 @@ func TestAcquireAlternateScreenHonorsSurfaceWaitBudget(t *testing.T) {
 }
 
 func TestAcquireAlternateScreenWaitBudgetCanBeReset(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	surface.SetAlternateScreenWaitBudget(5 * time.Second)

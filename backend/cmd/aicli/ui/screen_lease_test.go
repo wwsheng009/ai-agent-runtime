@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
@@ -39,11 +39,90 @@ func (t *terminalSessionLeaseTransportForTest) RequestPrimaryRecovery() {
 	t.recoveries++
 }
 
+// recordingLeaseTransport is a minimal AlternateScreenLeaseTransport for
+// lease-mechanics tests: after the raw DEC 1049 fallback was retired (L1-c)
+// every lease travels through a transport.
+type recordingLeaseTransport struct {
+	mu         sync.Mutex
+	entered    []uint64
+	exited     []uint64
+	written    []string
+	recoveries int
+	enterErr   error
+	exitErr    error
+}
+
+func (t *recordingLeaseTransport) EnterAlternateScreen(leaseID uint64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.enterErr != nil {
+		err := t.enterErr
+		t.enterErr = nil
+		return err
+	}
+	t.entered = append(t.entered, leaseID)
+	return nil
+}
+
+func (t *recordingLeaseTransport) WriteAlternateScreen(leaseID uint64, value string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.written = append(t.written, value)
+	return nil
+}
+
+func (t *recordingLeaseTransport) ExitAlternateScreen(leaseID uint64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.exitErr != nil {
+		err := t.exitErr
+		t.exitErr = nil
+		return err
+	}
+	t.exited = append(t.exited, leaseID)
+	return nil
+}
+
+func (t *recordingLeaseTransport) RequestPrimaryRecovery() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.recoveries++
+}
+
+func (t *recordingLeaseTransport) enteredIDs() []uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]uint64(nil), t.entered...)
+}
+
+func (t *recordingLeaseTransport) exitedIDs() []uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]uint64(nil), t.exited...)
+}
+
+func (t *recordingLeaseTransport) recoveryCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.recoveries
+}
+
+// newFencedLeaseTestSurface returns a test surface whose physical writer is
+// fenced and whose leases travel through a recording transport (L1-c).
+func newFencedLeaseTestSurface(t *testing.T) (*FixedBottomSurface, *recordingLeaseTransport) {
+	t.Helper()
+	surface := NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+	transport := &recordingLeaseTransport{}
+	surface.SetAlternateScreenLeaseTransport(transport)
+	return surface, transport
+}
+
 // TestFixedBottomSurface_AcquireAlternateScreenLifecycle covers the lease
 // contract: acquire, single-lease invariant, idempotent release, and reuse.
 func TestFixedBottomSurface_AcquireAlternateScreenLifecycle(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	lease, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "test"})
@@ -247,20 +326,19 @@ func TestFixedBottomSurface_FencedLeaseFailsClosedWithoutTerminalTransport(t *te
 	}
 }
 
-// TestFixedBottomSurface_LeaseSuppressesPrimaryFlushAndReleaseRepaints is the
-// core screen-ownership guarantee: while the lease is active the primary
-// presenter keeps retained state but emits no terminal bytes, and Release
-// repaints a full frame from that retained state.
+// TestFixedBottomSurface_LeaseSuppressesPrimaryFlushAndReleaseRepaints pins
+// the screen-ownership guarantee for the transport-backed lease (L1-c): a
+// fenced surface never emits primary bytes while the lease is active, and
+// Release hands the primary recovery to the lease transport.
 func TestFixedBottomSurface_LeaseSuppressesPrimaryFlushAndReleaseRepaints(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, transport := newFencedLeaseTestSurface(t)
 
-	if _, err, ok := surface.WriteOutput(os.Stdout, "line-1\n"); !ok || err != nil {
+	var captured bytes.Buffer
+	if _, err, ok := surface.WriteOutput(&captured, "line-1\n"); !ok || err != nil {
 		t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 	}
-	before := surface.ownedFrameFlushCount
-	if before < 1 {
-		t.Fatalf("initial frame should have flushed, count=%d", before)
+	if captured.Len() != 0 {
+		t.Fatalf("fenced surface wrote primary bytes: %q", captured.String())
 	}
 
 	lease, err := surface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "picker"})
@@ -268,41 +346,35 @@ func TestFixedBottomSurface_LeaseSuppressesPrimaryFlushAndReleaseRepaints(t *tes
 		t.Fatalf("AcquireAlternateScreen: %v", err)
 	}
 
-	// State updates during the lease must be retained but never flushed.
-	if _, err, ok := surface.WriteOutput(os.Stdout, "line-2\n"); !ok || err != nil {
+	// State updates during the lease are retained, never written.
+	if _, err, ok := surface.WriteOutput(&captured, "line-2\n"); !ok || err != nil {
 		t.Fatalf("WriteOutput during lease: ok=%t err=%v", ok, err)
 	}
 	surface.SetStatusModel(style.StatusLineModel{State: style.RunStreaming, StateText: "streaming"})
-	if surface.SyncTerminalGeometry() {
-		t.Fatalf("geometry should not report a change on a stable test surface")
-	}
-	if got := surface.ownedFrameFlushCount; got != before {
-		t.Fatalf("primary flushed during lease: count=%d want=%d", got, before)
+	if captured.Len() != 0 {
+		t.Fatalf("primary bytes leaked during lease: %q", captured.String())
 	}
 	if !surface.LeaseActive() {
 		t.Fatalf("lease should still be active")
 	}
 
-	// Release must repaint the full frame from retained state.
+	// Release must hand the primary recovery to the lease transport.
 	if err := lease.Release(context.Background()); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	if surface.LeaseActive() {
 		t.Fatalf("lease must be inactive after release")
 	}
-	if got := surface.ownedFrameFlushCount; got <= before {
-		t.Fatalf("release must repaint: count=%d want > %d", got, before)
+	if transport.recoveryCount() != 1 {
+		t.Fatalf("release must request primary recovery, got %d", transport.recoveryCount())
 	}
 }
 
 // TestFixedBottomSurface_DisableDuringLeaseIsTeardownSafe ensures shutdown
-// while a picker is open does not paint into the alternate screen and the
-// pending Release becomes a no-op.
+// while a picker is open asks the lease transport to leave DEC 1049 without
+// painting a primary frame; the pending Release becomes a no-op.
 func TestFixedBottomSurface_DisableDuringLeaseIsTeardownSafe(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
-	writer := &errorWriter{}
-	surface.alternateWriter = writer
+	surface, transport := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	lease, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "picker"})
@@ -313,15 +385,14 @@ func TestFixedBottomSurface_DisableDuringLeaseIsTeardownSafe(t *testing.T) {
 		t.Fatalf("lease should be active")
 	}
 
-	writer.buffer = nil
-	// Teardown during the lease: Disable exits the alternate buffer without
-	// repainting a primary frame.
+	// Teardown during the lease: Disable exits the alternate buffer via the
+	// transport without repainting a primary frame.
 	surface.Disable()
 	if surface.LeaseActive() {
 		t.Fatalf("Disable must drop the lease")
 	}
-	if got := writer.String(); !strings.Contains(got, "\x1b[?1049l") {
-		t.Fatalf("Disable must exit the alternate screen, got %q", got)
+	if got := transport.exitedIDs(); len(got) != 1 || got[0] != lease.ID() {
+		t.Fatalf("Disable must exit the alternate screen via transport, got %v", got)
 	}
 	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("Release after Disable must be a no-op, got %v", err)
@@ -343,8 +414,7 @@ func TestFixedBottomSurface_DisableDuringLeaseIsTeardownSafe(t *testing.T) {
 }
 
 func TestFixedBottomSurface_StaleLeaseDoesNotReportActive(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	first, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "first"})
@@ -368,8 +438,7 @@ func TestFixedBottomSurface_StaleLeaseDoesNotReportActive(t *testing.T) {
 }
 
 func TestFixedBottomSurface_LeaseSuppressesPromptAndActiveBandWrites(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
+	surface, _ := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 	lease, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "picker"})
 	if err != nil {
@@ -421,47 +490,34 @@ func (w *errorWriter) String() string {
 }
 
 // TestFixedBottomSurface_LeaseOwnsEnterExitSequences verifies the DEC 1049
-// transport moved into the lease: Acquire emits the enter sequence and Release
-// emits the exit sequence, so the picker no longer writes them itself.
+// transport moved into the lease (L1-c): Acquire enters and Release exits
+// through the lease transport, so the picker no longer writes them itself.
 func TestFixedBottomSurface_LeaseOwnsEnterExitSequences(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
-	writer := &errorWriter{}
-	surface.alternateWriter = writer
+	surface, transport := newFencedLeaseTestSurface(t)
 	ctx := context.Background()
 
 	lease, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "picker"})
 	if err != nil {
 		t.Fatalf("AcquireAlternateScreen: %v", err)
 	}
-	enter := writer.String()
-	for _, want := range []string{"\x1b[?1049h", "\x1b[r", "\x1b[?25l", "\x1b[2J", "\x1b[H"} {
-		if !strings.Contains(enter, want) {
-			t.Fatalf("enter sequence missing %q, got %q", want, enter)
-		}
+	if got := transport.enteredIDs(); len(got) != 1 || got[0] != lease.ID() {
+		t.Fatalf("acquire must enter the alternate screen via transport, got %v", got)
 	}
-	writer.buffer = nil
 
 	if err := lease.Release(ctx); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	exit := writer.String()
-	for _, want := range []string{"\x1b[?25h", "\x1b[r", "\x1b[?1049l"} {
-		if !strings.Contains(exit, want) {
-			t.Fatalf("exit sequence missing %q, got %q", want, exit)
-		}
+	if got := transport.exitedIDs(); len(got) != 1 || got[0] != lease.ID() {
+		t.Fatalf("release must exit the alternate screen via transport, got %v", got)
 	}
 }
 
-// TestFixedBottomSurface_AcquireEnterFailureRollsBack ensures a failed enter
-// sequence leaves no suspended state behind: the lease is not granted, the
-// surface is not marked leased, and a best-effort exit rollback is emitted so
-// the primary screen is not wedged in the alternate buffer.
+// TestFixedBottomSurface_AcquireEnterFailureRollsBack ensures a failed
+// transport enter leaves no suspended state behind: the lease is not granted,
+// the surface is not marked leased, and a retry can re-acquire.
 func TestFixedBottomSurface_AcquireEnterFailureRollsBack(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
-	writer := &errorWriter{failOn: 2} // first sequence writes, second fails
-	surface.alternateWriter = writer
+	surface, transport := newFencedLeaseTestSurface(t)
+	transport.enterErr = errors.New("enter unavailable")
 	ctx := context.Background()
 
 	lease, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "picker"})
@@ -474,10 +530,6 @@ func TestFixedBottomSurface_AcquireEnterFailureRollsBack(t *testing.T) {
 	if surface.LeaseActive() {
 		t.Fatalf("failed acquire must not leave the surface leased")
 	}
-	rollback := writer.String()
-	if !strings.Contains(rollback, "\x1b[?1049l") {
-		t.Fatalf("failed acquire must emit exit rollback, got %q", rollback)
-	}
 
 	// The surface must be immediately re-leasable after the failure.
 	lease2, err := surface.AcquireAlternateScreen(ctx, FullscreenRequest{Title: "again"})
@@ -486,34 +538,5 @@ func TestFixedBottomSurface_AcquireEnterFailureRollsBack(t *testing.T) {
 	}
 	if err := lease2.Release(ctx); err != nil {
 		t.Fatalf("Release lease2: %v", err)
-	}
-}
-
-// TestFixedBottomSurface_ReleaseExitFailureStillRepaints ensures an exit
-// sequence write failure is surfaced to the caller but does not skip the
-// primary repaint: the retained scene must still come back on screen.
-func TestFixedBottomSurface_ReleaseExitFailureStillRepaints(t *testing.T) {
-	surface := NewFixedBottomSurface(nil)
-	surface.EnableForTest(80, 24)
-	if _, err, ok := surface.WriteOutput(os.Stdout, "line-1\n"); !ok || err != nil {
-		t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
-	}
-	before := surface.ownedFrameFlushCount
-
-	writer := &errorWriter{}
-	surface.alternateWriter = writer
-	lease, err := surface.AcquireAlternateScreen(context.Background(), FullscreenRequest{Title: "picker"})
-	if err != nil {
-		t.Fatalf("AcquireAlternateScreen: %v", err)
-	}
-	writer.failOn = writer.calls + 1 // next write (exit) fails
-	if err := lease.Release(context.Background()); err == nil {
-		t.Fatalf("Release must surface exit write failure")
-	}
-	if surface.LeaseActive() {
-		t.Fatalf("lease must be cleared despite exit failure")
-	}
-	if got := surface.ownedFrameFlushCount; got <= before {
-		t.Fatalf("release must still repaint after exit failure: count=%d want > %d", got, before)
 	}
 }

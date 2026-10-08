@@ -78,16 +78,12 @@ func uiDirectWriterInventory() []uiDirectWriterInventoryEntry {
 		{File: "fullscreen_list.go", Func: "SelectFullScreenList", Kind: "os.Std*", Count: 1},
 		{File: "fullscreen_list.go", Func: "SelectFullScreenListWithLease", Kind: "os.Std*", Count: 1},
 		{File: "transcript_pager.go", Func: "RunTranscriptPagerWithLease", Kind: "os.Std*", Count: 1},
-		{File: "screen_lease.go", Func: "method acquireAlternateScreenOnce", Kind: "os.Std*", Count: 1},
-		{File: "screen_lease.go", Func: "method releaseAlternateScreen", Kind: "os.Std*", Count: 1},
-		{File: "screen_lease.go", Func: "method writeAlternateScreen", Kind: "os.Std*", Count: 1},
 		// TERM_SESSION_TRACE 门控的会话调试追踪（诊断通道，非交互输出）。
 		{File: "terminal_session.go", Func: "method flushTransactionLocked", Kind: "fmt.Print", Count: 3},
 		// console/UTF8 句柄初始化（进程启动期，非帧输出）。
 		{File: "terminal_driver.go", Func: "EnsureConsoleUTF8Output", Kind: "os.Std*", Count: 1},
 		{File: "terminal.go", Func: "NewTerminal", Kind: "os.Std*", Count: 1},
 		// --- legacy surface helpers still fenced by FixedBottomSurface ----
-		{File: "fixed_bottom_surface.go", Func: "method Disable", Kind: "os.Std*", Count: 1},
 		{File: "fixed_bottom_surface.go", Func: "method appendOwnedDirectPaintLocked", Kind: "TerminalOutput()", Count: 1},
 		{File: "fixed_bottom_surface.go", Func: "method appendOwnedDirectPaintLocked", Kind: "os.Std*", Count: 1},
 		{File: "fixed_bottom_surface.go", Func: "method clearActiveBand", Kind: "TerminalOutput()", Count: 1},

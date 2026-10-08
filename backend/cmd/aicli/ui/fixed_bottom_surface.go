@@ -506,25 +506,10 @@ func (s *FixedBottomSurface) Disable() {
 	leased := s.leaseID != 0
 	if leased {
 		leaseID := s.leaseID
-		writer := s.alternateWriter
-		if writer == nil {
-			if s.testMode {
-				writer = io.Discard
-			} else {
-				writer = os.Stdout
-			}
-		}
-		// Disable owns teardown when the surface is shut down while a modal
-		// lease is open. Do not invalidate the lease id before emitting the
-		// exit sequence, otherwise the handle's later Release cannot clean up.
-		if s.physicalWritesEnabledLocked() {
-			WithTerminalWriteLock(func() {
-				_ = writeLeaseSequencesLocked(writer, "\x1b[?25h", "\x1b[r", "\x1b[?1049l")
-			})
-		} else if transport := s.alternateTransport; transport != nil {
-			// The compatibility facade may be torn down while a unified pager is
-			// open. It still must ask TerminalSession to leave DEC 1049; doing
-			// nothing here would strand the process in the alternate buffer.
+		// The compatibility facade may be torn down while a unified pager is
+		// open. It still must ask TerminalSession to leave DEC 1049; doing
+		// nothing here would strand the process in the alternate buffer.
+		if transport := s.alternateTransport; transport != nil {
 			_ = transport.ExitAlternateScreen(leaseID)
 		}
 		s.leaseID = 0
