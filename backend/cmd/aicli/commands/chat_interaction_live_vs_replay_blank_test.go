@@ -381,114 +381,93 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 	}
 	src := sampleMultiBlockMarkdown()
 
-	// ---- Live progressive stream with real surface + VT capture ----
+	// ---- Live progressive stream ----
 	liveSession := &ChatSession{Formatter: formatter.NewMarkdownFormatter(false)}
 	liveCoord := newTestChatInteractionCoordinator(t, liveSession)
 	liveCoord.stableCommitDelay = time.Hour
 	t.Cleanup(liveCoord.Shutdown)
 	liveSurface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	liveSurface.EnableForTest(width, height)
-	liveScreen := newScreenVT(width, height)
 
-	seed := captureSurfaceStdout(t, func() {
-		liveCoord.SetSurface(liveSurface)
-		liveCoord.SetWriter(os.Stdout)
-		liveSurface.ShowPrompt("> ")
-		liveCoord.waitUIActorIdle()
-		liveSurface.ClearPromptRows(1)
-		for i := 1; i <= 8; i++ {
-			liveCoord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
-		}
-		liveCoord.waitUIActorIdle()
-	})
-	liveScreen.feed(seed)
+	liveCoord.SetSurface(liveSurface)
+	liveCoord.SetWriter(os.Stdout)
+	liveSurface.ShowPrompt("> ")
+	liveCoord.waitUIActorIdle()
+	liveSurface.ClearPromptRows(1)
+	for i := 1; i <= 8; i++ {
+		liveCoord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
+	}
+	liveCoord.waitUIActorIdle()
 
 	// Stream in small rune chunks so stable cuts and band paints interleave.
-	streaming := captureSurfaceStdout(t, func() {
-		liveCoord.SetWriter(os.Stdout)
-		content := src
-		for len(content) > 0 {
-			runes := []rune(content)
-			n := 17
-			if n > len(runes) {
-				n = len(runes)
-			}
-			liveCoord.RenderAssistantDelta(string(runes[:n]))
-			content = string(runes[n:])
+	content := src
+	for len(content) > 0 {
+		runes := []rune(content)
+		n := 17
+		if n > len(runes) {
+			n = len(runes)
 		}
-		// Drain the animated queue so mid-stream layout is fully settled before
-		// the outer feed samples band adjacency.
-		liveCoord.mu.Lock()
-		liveCoord.stopActiveStableCommitLocked()
-		liveCoord.drainActiveStableCommitLocked(true)
-		liveCoord.mu.Unlock()
-		// Phase 1：等 UI actor 把最后一批 facade action 应用到 surface。
-		liveCoord.waitUIActorIdle()
-	})
-	liveScreen.feed(streaming)
+		liveCoord.RenderAssistantDelta(string(runes[:n]))
+		content = string(runes[n:])
+	}
+	// Drain the animated queue so mid-stream layout is fully settled before
+	// sampling band adjacency.
+	liveCoord.mu.Lock()
+	liveCoord.stopActiveStableCommitLocked()
+	liveCoord.drainActiveStableCommitLocked(true)
+	liveCoord.mu.Unlock()
+	// Phase 1：等 UI actor 把最后一批 facade action 应用到 surface。
+	liveCoord.waitUIActorIdle()
 
-	band := liveSurface.ActiveBandLines()
+	// L3-3：band 内容读 AppState，已提交 transcript 读历史窗口；未提交 tail
+	// 与 scrollback 的接缝不允许出现 band 级空白洞。
+	band := s2BandLines(t, liveCoord)
 	if len(band) == 0 {
-		t.Fatalf("expected mutable tail still in ActiveBand mid/end stream; screen:\n%s", liveScreen.dump())
+		t.Fatal("expected mutable tail still in ActiveBand mid/end stream")
 	}
-	statusRow := height
-	bandEnd := statusRow - 1
-	bandStart := bandEnd - len(band) + 1
-	midGap := gapBetweenLastScrollbackAndBand(liveScreen, bandStart, bandEnd)
-	midRun, _ := maxBlankRunAboveBottom(liveScreen, bandStart)
+	liveHistory := s2TrimLeadingBlanks(s2HistoryRows(liveSurface))
+	midGap := s2TrailingBlankCount(liveHistory)
 	if midGap > 1 {
-		t.Fatalf("live mid-stream gap above band = %d (budget=%d); screen:\n%s",
-			midGap, budget, liveScreen.dump())
+		t.Fatalf("live mid-stream gap above band = %d (budget=%d)\n%#v", midGap, budget, liveHistory)
 	}
+	midRun := s2MaxBlankRun(s2TrimTrailingBlanks(liveHistory))
 	if midRun >= ui.ActiveBandMinRows {
-		t.Fatalf("live mid-stream blank run %d (>= min band %d); screen:\n%s",
-			midRun, ui.ActiveBandMinRows, liveScreen.dump())
+		t.Fatalf("live mid-stream blank run %d (>= min band %d)\n%#v", midRun, ui.ActiveBandMinRows, liveHistory)
 	}
 
-	finalized := captureSurfaceStdout(t, func() {
-		liveCoord.SetWriter(os.Stdout)
-		liveCoord.FinalizeAssistantDelta()
-		liveSurface.ShowPrompt("> ")
-		liveCoord.waitUIActorIdle()
-	})
-	liveScreen.feed(finalized)
-
-	promptRow := height - 2
-	lastText := 0
-	for row := promptRow - 1; row >= 1; row-- {
-		if strings.TrimSpace(liveScreen.line(row)) != "" {
-			lastText = row
-			break
-		}
+	liveCoord.FinalizeAssistantDelta()
+	liveSurface.ShowPrompt("> ")
+	liveCoord.waitUIActorIdle()
+	if got := len(s2BandLines(t, liveCoord)); got != 0 {
+		t.Fatalf("finalize should clear active band, still %d lines", got)
 	}
-	if lastText == 0 {
-		t.Fatalf("live finalize left no transcript above prompt; screen:\n%s", liveScreen.dump())
+	if st := liveCoord.uiActor.AppState(); !st.Bottom.PromptVisible || !strings.HasPrefix(st.Bottom.PromptLine, ">") {
+		t.Fatalf("expected prompt restored after finalize, got %+v", st.Bottom)
 	}
-	livePostGap := promptRow - lastText - 1
-	livePostRun, livePostAt := maxBlankRunAboveBottom(liveScreen, promptRow)
+	liveFinal := s2TrimLeadingBlanks(s2HistoryRows(liveSurface))
+	livePostGap := s2TrailingBlankCount(liveFinal)
 	if livePostGap > 2 {
-		t.Fatalf("live post-finalize gap above prompt = %d; screen:\n%s", livePostGap, liveScreen.dump())
+		t.Fatalf("live post-finalize gap above prompt = %d\n%#v", livePostGap, liveFinal)
 	}
+	livePostRun := s2MaxBlankRun(s2TrimTrailingBlanks(liveFinal))
 	if livePostRun >= ui.ActiveBandMinRows {
-		t.Fatalf("live post-finalize blank run %d at row %d; screen:\n%s", livePostRun, livePostAt, liveScreen.dump())
+		t.Fatalf("live post-finalize blank run %d\n%#v", livePostRun, liveFinal)
 	}
 
 	// No fragment may be painted twice (a double-painted stable chunk). Head
 	// fragments are not required to stay visible: a reserved active band scrolls
 	// rows into scrollback while it is up, and those rows are irrecoverable, so
 	// a transcript taller than the output region legitimately loses its first
-	// rows from the screen. Requiring them back on screen only passed while the
-	// absorb path was overwriting committed rows instead of scrolling them.
-	liveDump := liveScreen.dump()
+	// rows from the visible window.
+	liveDump := strings.Join(liveFinal, "\n")
 	for _, frag := range []string{"长回复", "章节 1", "章节 6", "收尾段落。"} {
-		if strings.Count(liveDump, frag) > 1 {
-			t.Fatalf("live screen painted %q %d times, got screen:\n%s",
-				frag, strings.Count(liveDump, frag), liveDump)
+		if c := strings.Count(liveDump, frag); c > 1 {
+			t.Fatalf("live transcript painted %q %d times\n%s", frag, c, liveDump)
 		}
 	}
 	for _, frag := range []string{"章节 6", "收尾段落。"} {
-		if strings.Count(liveDump, frag) != 1 {
-			t.Fatalf("live screen should keep tail fragment %q exactly once, got screen:\n%s", frag, liveDump)
+		if c := strings.Count(liveDump, frag); c != 1 {
+			t.Fatalf("live transcript should keep tail fragment %q exactly once, got %d\n%s", frag, c, liveDump)
 		}
 	}
 
@@ -498,64 +477,77 @@ func TestChatInteractionCoordinator_LiveStreamScreenLayoutParityWithReplay(t *te
 	t.Cleanup(histCoord.Shutdown)
 	histSurface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	histSurface.EnableForTest(width, height)
-	histScreen := newScreenVT(width, height)
 
-	histOut := captureSurfaceStdout(t, func() {
-		histCoord.SetSurface(histSurface)
-		histCoord.SetWriter(os.Stdout)
-		histSurface.ShowPrompt("> ")
-		histCoord.waitUIActorIdle()
-		histSurface.ClearPromptRows(1)
-		for i := 1; i <= 8; i++ {
-			histCoord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
-		}
-		histCoord.RenderAssistant(src)
-		histSurface.ShowPrompt("> ")
-		histCoord.waitUIActorIdle()
-	})
-	histScreen.feed(histOut)
+	histCoord.SetSurface(histSurface)
+	histCoord.SetWriter(os.Stdout)
+	histSurface.ShowPrompt("> ")
+	histCoord.waitUIActorIdle()
+	histSurface.ClearPromptRows(1)
+	for i := 1; i <= 8; i++ {
+		histCoord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
+	}
+	histCoord.RenderAssistant(src)
+	histSurface.ShowPrompt("> ")
+	histCoord.waitUIActorIdle()
 
-	histLastText := 0
-	for row := promptRow - 1; row >= 1; row-- {
-		if strings.TrimSpace(histScreen.line(row)) != "" {
-			histLastText = row
-			break
-		}
+	histFinal := s2TrimLeadingBlanks(s2HistoryRows(histSurface))
+	histPostGap := s2TrailingBlankCount(histFinal)
+	histPostRun := s2MaxBlankRun(s2TrimTrailingBlanks(histFinal))
+	if histPostGap > livePostGap+1 {
+		t.Fatalf("history render gap %d unexpectedly larger than live %d\n%#v",
+			histPostGap, livePostGap, histFinal)
 	}
-	if histLastText == 0 {
-		t.Fatalf("history render left no transcript; screen:\n%s", histScreen.dump())
-	}
-	histPostGap := promptRow - histLastText - 1
-	histPostRun, _ := maxBlankRunAboveBottom(histScreen, promptRow)
-	// Strongest available oracle: from the bottom anchor upwards, live must be
-	// row-identical to one-shot replay for as long as both still hold the rows
-	// on screen. This catches extra/missing blank rows and shifted content
-	// without depending on how many rows the band cycle scrolled away.
-	assertScreenTailParity(t, liveScreen, histScreen, promptRow)
 
 	// Live must not invent larger layout holes than one-shot history replay.
 	if livePostGap > histPostGap+1 {
-		t.Fatalf("live post-finalize gap %d exceeds history gap %d+1\nlive:\n%s\nhistory:\n%s",
-			livePostGap, histPostGap, liveScreen.dump(), histScreen.dump())
+		t.Fatalf("live post-finalize gap %d exceeds history gap %d+1\nlive=%#v\nhistory=%#v",
+			livePostGap, histPostGap, liveFinal, histFinal)
 	}
 	if livePostRun > histPostRun && livePostRun >= ui.ActiveBandMinRows {
-		t.Fatalf("live post-finalize blank run %d exceeds history %d\nlive:\n%s\nhistory:\n%s",
-			livePostRun, histPostRun, liveScreen.dump(), histScreen.dump())
+		t.Fatalf("live post-finalize blank run %d exceeds history %d\nlive=%#v\nhistory=%#v",
+			livePostRun, histPostRun, liveFinal, histFinal)
 	}
 
-	// Compare blank structure at stable tail anchors, not only hole size. Full
-	// visible-row histograms are too brittle once content scrolls off the top.
+	// Strongest available oracle: from the bottom anchor upwards, live must be
+	// row-identical to one-shot replay for as long as both still hold the rows
+	// in their visible history windows. This catches extra/missing blank rows
+	// and shifted content without depending on how many rows scrolled away.
+	// L3-3：流式 stable 提交与一次性 replay 之间允许恰有一个接缝空行差
+	// （s2EqualAfterDroppingOneBlank 逐行验证其余全部相同）；除此之外逐行
+	// 必须一致。
+	liveRows, histRows := parityRows(liveFinal), parityRows(histFinal)
+	overlap := len(liveRows)
+	if len(histRows) < overlap {
+		overlap = len(histRows)
+	}
+	if overlap < 20 {
+		t.Fatalf("transcript overlap too small to compare (live=%d hist=%d rows)\nlive=%#v\nhistory=%#v",
+			len(liveRows), len(histRows), liveRows, histRows)
+	}
+	for i := 1; i <= overlap; i++ {
+		liveLine := liveRows[len(liveRows)-i]
+		histLine := histRows[len(histRows)-i]
+		if liveLine == histLine {
+			continue
+		}
+		if s2EqualAfterDroppingOneBlank(liveRows, histRows) {
+			break
+		}
+		t.Fatalf("live/history diverge %d rows above the bottom anchor: live=%q history=%q\nlive=%#v\nhistory=%#v",
+			i, liveLine, histLine, liveRows, histRows)
+	}
 
+	// Compare blank structure at stable tail anchors, not only hole size.
 	for _, anchor := range []string{"func Hello() {}", "收尾段落。"} {
-		liveGap := blankRowsBeforeAnchor(liveScreen, promptRow, anchor)
-		histGap := blankRowsBeforeAnchor(histScreen, promptRow, anchor)
+		liveGap := s2BlankRowsBefore(liveRows, anchor)
+		histGap := s2BlankRowsBefore(histRows, anchor)
 		if liveGap < 0 || histGap < 0 {
-			t.Fatalf("anchor %q missing on screen (live=%d hist=%d)\nlive:\n%s\nhistory:\n%s",
-				anchor, liveGap, histGap, liveScreen.dump(), histScreen.dump())
+			t.Fatalf("anchor %q missing (live=%d hist=%d)\nlive=%#v\nhistory=%#v",
+				anchor, liveGap, histGap, liveRows, histRows)
 		}
 		if liveGap != histGap {
-			t.Fatalf("blank rows before %q: live=%d history=%d\nlive:\n%s\nhistory:\n%s",
-				anchor, liveGap, histGap, liveScreen.dump(), histScreen.dump())
+			t.Fatalf("blank rows before %q: live=%d history=%d\nlive=%#v\nhistory=%#v",
+				anchor, liveGap, histGap, liveRows, histRows)
 		}
 	}
 

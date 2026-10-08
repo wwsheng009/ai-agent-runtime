@@ -111,54 +111,66 @@ func TestChatInteractionCoordinator_MidStreamScreenRowsMatchReplayRows(t *testin
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
 
-	screen.feed(captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-	}))
-	screen.feed(captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		streamRuneChunks(coord, src, 12)
-		settleBandFrame(coord)
-	}))
+	coord.SetWriter(os.Stdout)
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	streamRuneChunks(coord, src, 12)
+	settleBandFrame(coord)
 
-	band := surface.ActiveBandLines()
+	// L3-3：band 不再有 surface 物理绘制面（facade action 只投递到 UI actor）。
+	// 权威观察面是 AppState band（header + body）与 surface 历史窗口（已提交
+	// scrollback）；按屏幕顺序拼接后仍必须与一次性 replay 的渲染行逐一相同。
+	band := s2BandLines(t, coord)
 	if len(band) < 2 {
-		t.Fatalf("expected a mid-stream band with a header and body, got %v\n%s", band, screen.dump())
+		t.Fatalf("expected a mid-stream band with a header and body, got %v", band)
 	}
-	bandStart, bandEnd := bandRegion(t, screen, band)
-	if rows := screen.OverflowRows(); len(rows) != 0 {
-		t.Fatalf("rows %v exceeded the terminal width\n%s", rows, screen.dump())
-	}
-
-	got := make([]string, 0, height)
-	for row := 1; row < bandStart; row++ {
-		got = append(got, parityRow(screen.line(row)))
-	}
-	for len(got) > 0 && got[0] == "" {
-		got = got[1:]
-	}
-	for row := bandStart + 1; row <= bandEnd; row++ {
-		got = append(got, parityRow(screen.line(row)))
-	}
+	history := parityRows(s2TrimLeadingBlanks(s2HistoryRows(surface)))
+	got := append(history, parityRows(band[1:])...)
 	for len(got) > 0 && got[len(got)-1] == "" {
 		got = got[:len(got)-1]
 	}
+	s2RowsWithinWidth(t, "mid-stream", got, width)
 
 	want := parityRows(normalizeWriteLines(ui.FormatAssistantRendered(
 		strings.TrimRight(session.Formatter.Format(src), "\r\n"))))
-
-	if len(got) != len(want) {
-		t.Fatalf("mid-stream rows=%d replay rows=%d\ngot=%#v\nwant=%#v\nscreen:\n%s",
-			len(got), len(want), got, want, screen.dump())
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("mid-stream row[%d]=%q replay=%q\ngot=%#v\nwant=%#v\nscreen:\n%s",
-				i, got[i], want[i], got, want, screen.dump())
+	// 旧观察面里 band 上方有一行物理保留区块分隔空行（band 区域外的
+	// screen 行）；L3-3 后该行不再暴露于历史窗口/AppState band。它最多只能
+	// 是接缝处的一个空行：允 want 在该处少一个空行，其余内容/行序/空行
+	// 结构必须逐一相同。
+	wantShorter := want
+	if len(band) > 1 {
+		anchor := ""
+		for _, row := range parityRows(band[1:]) {
+			if row != "" {
+				anchor = row
+				break
+			}
 		}
+		if anchor != "" {
+			for i := 1; i < len(want); i++ {
+				if want[i] == anchor && want[i-1] == "" {
+					wantShorter = append(append([]string(nil), want[:i-1]...), want[i:]...)
+					break
+				}
+			}
+		}
+	}
+	rowsEqual := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	if !rowsEqual(got, want) && !rowsEqual(got, wantShorter) {
+		t.Fatalf("mid-stream rows=%d replay rows=%d (seam-adjusted %d)\ngot=%#v\nwant=%#v\nwantShorter=%#v\nhistory=%#v\nband=%#v",
+			len(got), len(want), len(wantShorter), got, want, wantShorter, history, band)
 	}
 }
 
@@ -208,32 +220,24 @@ func TestChatInteractionCoordinator_MidStreamBandKeepsBlockSeparatorBeforeHoldba
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
 			coord.SetSurface(surface)
-			screen := newScreenVT(width, height)
 
-			screen.feed(captureSurfaceStdout(t, func() {
-				coord.SetWriter(os.Stdout)
-				surface.ShowPrompt("> ")
-				surface.ClearPromptRows(1)
-			}))
-			screen.feed(captureSurfaceStdout(t, func() {
-				coord.SetWriter(os.Stdout)
-				streamRuneChunks(coord, tc.source, 8)
-				settleBandFrame(coord)
-			}))
+			coord.SetWriter(os.Stdout)
+			surface.ShowPrompt("> ")
+			surface.ClearPromptRows(1)
+			streamRuneChunks(coord, tc.source, 8)
+			settleBandFrame(coord)
 
-			band := surface.ActiveBandLines()
+			band := s2BandLines(t, coord)
 			if len(band) == 0 {
-				t.Fatalf("expected a mid-stream band\n%s", screen.dump())
+				t.Fatal("expected a mid-stream band")
 			}
 			if joined := strings.Join(band, "\n"); !strings.Contains(joined, tc.holdback) {
-				t.Fatalf("mutable tail %q missing from band %#v\n%s", tc.holdback, band, screen.dump())
+				t.Fatalf("mutable tail %q missing from band %#v", tc.holdback, band)
 			}
-			if rows := screen.OverflowRows(); len(rows) != 0 {
-				t.Fatalf("rows %v exceeded the terminal width\n%s", rows, screen.dump())
-			}
-			if got := blankRowsBeforeAnchor(screen, screen.Height(), tc.holdback); got != tc.wantBlank {
-				t.Fatalf("blank rows before the mutable tail %q = %d, want %d\n%s",
-					tc.holdback, got, tc.wantBlank, screen.dump())
+			s2RowsWithinWidth(t, "band", band, width)
+			if got := s2BlankRowsBefore(band, tc.holdback); got != tc.wantBlank {
+				t.Fatalf("blank rows before the mutable tail %q = %d, want %d\nband=%#v",
+					tc.holdback, got, tc.wantBlank, band)
 			}
 		})
 	}
@@ -262,28 +266,33 @@ func TestChatInteractionCoordinator_MidStreamBandHoldbackStaysDim(t *testing.T) 
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
 
-	screen.feed(captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-	}))
-	screen.feed(captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		streamRuneChunks(coord, source, 8)
-		settleBandFrame(coord)
-	}))
+	coord.SetWriter(os.Stdout)
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	streamRuneChunks(coord, source, 8)
+	settleBandFrame(coord)
 
-	rows := screen.RowsContaining(holdback)
-	if len(rows) != 1 {
-		t.Fatalf("mutable tail should be painted once, got rows %v\n%s", rows, screen.dump())
+	// L3-3：dim 属性改从 AppState 的结构化 band 行读取（与旧 VT 屏的
+	// per-cell SGR 同源：active stream 为 holdback span 标注 Role=text-muted
+	// + Dim）。
+	styled := s2BandStyled(t, coord)
+	matches := 0
+	dim := false
+	for _, line := range styled {
+		var text strings.Builder
+		for _, span := range line.Spans {
+			text.WriteString(span.Text)
+		}
+		if strings.Contains(text.String(), holdback) {
+			matches++
+			dim = s2LineIsDim(line)
+		}
 	}
-	codes := screen.RowSGRCodes(rows[0])
-	if len(codes) == 0 {
-		t.Fatalf("expected styled holdback SGR on row %d, got none\n%s", rows[0], screen.dump())
+	if matches != 1 {
+		t.Fatalf("mutable tail should be painted once in the styled band, got %d\n%#v", matches, styled)
 	}
-	if !codes["2"] {
-		t.Fatalf("mutable tail row %d lost its dim attribute, codes=%v\n%s", rows[0], codes, screen.dump())
+	if !dim {
+		t.Fatalf("mutable tail lost its dim attribute\n%#v", styled)
 	}
 }

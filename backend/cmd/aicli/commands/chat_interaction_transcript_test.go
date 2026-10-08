@@ -888,8 +888,10 @@ func TestChatInteractionCoordinator_ProgressiveCommitSoftTailEndToEnd(t *testing
 	if got := surface.SoftOutputTailLineCount(); got != len(softLines) {
 		t.Fatalf("surface soft line count=%d want coordinator %d", got, len(softLines))
 	}
-	if !strings.Contains(output.String(), "one") {
-		t.Fatalf("expected scrollback write of drained head, got %q", output.String())
+	// L3-3：surfaceWriter 路径的 drain 将已发射行写入 surface 软窗口
+	// （不再经过 writer 缓冲）；断言保持「drained head 已达 surface」原语义。
+	if tail := strings.Join(surface.SoftOutputTailLines(), "\n"); !strings.Contains(tail, "one") {
+		t.Fatalf("expected drained head in surface soft window, got %q", tail)
 	}
 
 	// Keep still-pending stable content so Refresh rebuilds queue cut while

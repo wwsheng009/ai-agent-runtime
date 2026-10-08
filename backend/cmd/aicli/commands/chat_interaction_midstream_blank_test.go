@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -65,116 +66,81 @@ func TestChatInteractionCoordinator_MidStreamActiveBandLeavesNoBlankGap(t *testi
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
 
-	screen := newScreenVT(width, height)
-
 	// Seed scrollback so a reserve-growth hole is visible against real content.
-	seed := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-		for i := 1; i <= 20; i++ {
-			coord.RenderAsyncLine(fmt.Sprintf("seed-line-%02d prior transcript", i))
-		}
-	})
-	screen.feed(seed)
+	coord.SetWriter(os.Stdout)
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	for i := 1; i <= 20; i++ {
+		coord.RenderAsyncLine(fmt.Sprintf("seed-line-%02d prior transcript", i))
+	}
 
 	// Stream the long reply in small chunks and inspect AFTER the band has
 	// grown, still mid-stream (before finalize).
-	streaming := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		content := reply.String()
-		// Character-ish chunks to force many band growth/paint steps.
-		for len(content) > 0 {
-			n := 24
-			if n > len(content) {
-				n = len(content)
-			}
-			// avoid splitting multi-byte runes roughly by cutting on bytes then
-			// letting the stream normalizer handle it; keep simple rune walk.
-			runes := []rune(content)
-			if n > len(runes) {
-				n = len(runes)
-			}
-			chunk := string(runes[:n])
-			content = string(runes[n:])
-			coord.RenderAssistantDelta(chunk)
+	content := reply.String()
+	// Character-ish chunks to force many band growth/paint steps.
+	for len(content) > 0 {
+		runes := []rune(content)
+		n := 24
+		if n > len(runes) {
+			n = len(runes)
 		}
-		coord.mu.Lock()
-		coord.stopActiveStableCommitLocked()
-		coord.drainActiveStableCommitLocked(true)
-		coord.mu.Unlock()
-		coord.waitUIActorIdle()
-	})
-	screen.feed(streaming)
+		chunk := string(runes[:n])
+		content = string(runes[n:])
+		coord.RenderAssistantDelta(chunk)
+	}
+	coord.mu.Lock()
+	coord.stopActiveStableCommitLocked()
+	coord.drainActiveStableCommitLocked(true)
+	coord.mu.Unlock()
+	coord.waitUIActorIdle()
 
-	band := surface.ActiveBandLines()
+	// L3-3：band 与已提交 transcript 分属 AppState 与历史窗口（band 的物理
+	// 屏面已退役）。逐项断言原语义：band 有界且含最新 mutable tail；旧稳定块
+	// 在 scrollback；历史区/接缝没有 band 级空白洞。
+	band := s2BandLines(t, coord)
 	if len(band) == 0 {
-		t.Fatalf("expected active band mid-stream, screen:\n%s", screen.dump())
+		t.Fatal("expected active band mid-stream")
 	}
 	if len(band) > wantBandBudget {
-		t.Fatalf("active tail exceeded budget %d, got %d lines: %v\nscreen:\n%s",
-			wantBandBudget, len(band), band, screen.dump())
+		t.Fatalf("active tail exceeded budget %d, got %d lines: %v", wantBandBudget, len(band), band)
 	}
 	if joined := strings.Join(band, "\n"); !strings.Contains(joined, "收尾段落") {
-		t.Fatalf("expected newest mutable tail in ActiveBand, got %v\nscreen:\n%s", band, screen.dump())
+		t.Fatalf("expected newest mutable tail in ActiveBand, got %v", band)
 	}
-	if !strings.Contains(screen.dump(), "章节 29") {
-		t.Fatalf("expected older stable blocks in scrollback, screen:\n%s", screen.dump())
-	}
-
-	// Band is laid out bottom-up above the status row while prompt is hidden.
-	statusRow := height
-	bandEnd := statusRow - 1
-	bandStart := bandEnd - len(band) + 1
-	if bandStart < 1 {
-		t.Fatalf("band geometry invalid start=%d end=%d, screen:\n%s", bandStart, bandEnd, screen.dump())
+	if strings.TrimSpace(band[len(band)-1]) == "" {
+		t.Fatalf("band tail row must stay painted, got %v", band)
 	}
 
-	// Status and bottom band row must stay painted.
-	if got := screen.line(statusRow); strings.TrimSpace(got) == "" {
-		t.Fatalf("status row blank, screen:\n%s", screen.dump())
+	history := s2TrimLeadingBlanks(s2HistoryRows(surface))
+	if n := s2Count(history, "章节 29"); n != 1 {
+		t.Fatalf("expected older stable block 章节 29 exactly once in history window, got %d\n%#v", n, history)
 	}
-	if got := screen.line(bandEnd); strings.TrimSpace(got) == "" {
-		t.Fatalf("band tail row %d blank, screen:\n%s", bandEnd, screen.dump())
+	if run := s2MaxBlankRun(s2TrimTrailingBlanks(history)); run >= ui.ActiveBandMinRows {
+		t.Fatalf("mid-stream history window has band-sized blank run %d (>= min band %d)\n%#v",
+			run, ui.ActiveBandMinRows, history)
 	}
-
-	gap := gapBetweenLastScrollbackAndBand(screen, bandStart, bandEnd)
-	if gap < 0 {
-		t.Fatalf("could not locate scrollback/band boundary (start=%d end=%d), screen:\n%s",
-			bandStart, bandEnd, screen.dump())
-	}
-	if gap > 1 {
-		t.Fatalf("mid-stream blank gap above active band = %d (band rows=%d budget=%d); screen:\n%s",
-			gap, len(band), wantBandBudget, screen.dump())
-	}
-
-	// Also forbid a long blank run anywhere above the band (the classic ~14 hole).
-	if maxRun, at := maxBlankRunAboveBottom(screen, bandStart); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("mid-stream blank run of %d rows starting at row %d (>= min band %d); screen:\n%s",
-			maxRun, at, ui.ActiveBandMinRows, screen.dump())
+	// 历史尾部与 band 之间最多一个分隔空行。
+	if gap := s2TrailingBlankCount(history); gap > 1 {
+		t.Fatalf("mid-stream blank gap above active band = %d (band rows=%d budget=%d)\n%#v",
+			gap, len(band), wantBandBudget, history)
 	}
 
 	// Finalize must still keep transcript adjacent to the restored prompt.
-	final := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		coord.FinalizeAssistantDelta()
-		surface.ShowPrompt("> ")
-	})
-	screen.feed(final)
-
-	promptRow := height - 2
-	lastText := 0
-	for row := promptRow - 1; row >= 1; row-- {
-		if strings.TrimSpace(screen.line(row)) != "" {
-			lastText = row
-			break
-		}
+	coord.FinalizeAssistantDelta()
+	surface.ShowPrompt("> ")
+	coord.waitUIActorIdle()
+	if got := len(s2BandLines(t, coord)); got != 0 {
+		t.Fatalf("finalize should clear active band, still %d lines", got)
 	}
-	if lastText == 0 {
-		t.Fatalf("expected finalized transcript, screen:\n%s", screen.dump())
+	finalRows := s2TrimLeadingBlanks(s2HistoryRows(surface))
+	if n := s2Count(finalRows, "收尾段落"); n != 1 {
+		t.Fatalf("expected finalized tail 收尾段落 exactly once, got %d\n%#v", n, finalRows)
 	}
-	if gap := promptRow - lastText - 1; gap > 2 {
-		t.Fatalf("post-finalize gap above prompt = %d, screen:\n%s", gap, screen.dump())
+	if run := s2MaxBlankRun(s2TrimTrailingBlanks(finalRows)); run > 1 {
+		t.Fatalf("post-finalize transcript left a %d-row blank hole\n%#v", run, finalRows)
+	}
+	if gap := s2TrailingBlankCount(finalRows); gap > 2 {
+		t.Fatalf("post-finalize gap above prompt = %d\n%#v", gap, finalRows)
 	}
 }
 
@@ -187,39 +153,35 @@ func TestFixedBottomSurface_MidStreamBandGrowthKeepsScrollbackAdjacent(t *testin
 	budget := ui.ActiveBandRows(height)
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
-	screen := newScreenVT(width, height)
-
-	seed := captureSurfaceStdout(t, func() {
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-		for i := 1; i <= 25; i++ {
-			_, err, ok := surface.WriteOutput(os.Stdout, fmt.Sprintf("prior-%02d\n", i))
-			if !ok || err != nil {
-				t.Fatalf("WriteOutput prior: ok=%v err=%v", ok, err)
-			}
+	// 该 surface 无 coordinator poster，facade 走同步路径；L3-2 后物理绘制
+	// 退役，权威观察面是 ComposedFrameForTest（历史 + band + 保留区）。
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	for i := 1; i <= 25; i++ {
+		if _, err, ok := surface.WriteOutput(io.Discard, fmt.Sprintf("prior-%02d\n", i)); !ok || err != nil {
+			t.Fatalf("WriteOutput prior: ok=%v err=%v", ok, err)
 		}
-	})
-	screen.feed(seed)
+	}
 
 	lines := make([]string, 0, budget)
 	for row := 1; row <= budget; row++ {
 		lines = append(lines, fmt.Sprintf("band-row-%02d", row))
-		step := captureSurfaceStdout(t, func() {
-			if !surface.SetActiveBand(lines) {
-				t.Fatal("SetActiveBand failed")
-			}
-		})
-		screen.feed(step)
-
-		bandStart := height - 1 - len(lines) + 1
-		gap := gapBetweenLastScrollbackAndBand(screen, bandStart, height-1)
-		if gap > 1 {
-			t.Fatalf("after growing to %d band rows, gap above band = %d; screen:\n%s",
-				len(lines), gap, screen.dump())
+		if !surface.SetActiveBand(lines) {
+			t.Fatal("SetActiveBand failed")
 		}
-		if maxRun, at := maxBlankRunAboveBottom(screen, bandStart); maxRun >= ui.ActiveBandMinRows {
-			t.Fatalf("after growing to %d band rows, blank run %d at row %d; screen:\n%s",
-				len(lines), maxRun, at, screen.dump())
+		frame := composedFrameLines(surface)
+		bandStart := frameRowOf(t, surface, "band-row-01")
+		priorRow := frameRowOf(t, surface, "prior-25")
+		if gap := bandStart - priorRow - 1; gap > 1 {
+			t.Fatalf("after growing to %d band rows, gap above band = %d\n%s",
+				len(lines), gap, composedFrameText(surface))
+		}
+		if run := s2MaxBlankRun(frame[priorRow-1 : bandStart-1]); run >= ui.ActiveBandMinRows {
+			t.Fatalf("after growing to %d band rows, blank run %d above band\n%s",
+				len(lines), run, composedFrameText(surface))
+		}
+		for _, bandLine := range lines {
+			assertFrameMarkerOnce(t, fmt.Sprintf("band growth %d", len(lines)), surface, bandLine)
 		}
 	}
 }
@@ -231,33 +193,36 @@ func TestFixedBottomSurface_StableCommitThenBandShrinkKeepsAdjacency(t *testing.
 	const width, height = 80, 48
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
-	screen := newScreenVT(width, height)
 
-	seed := captureSurfaceStdout(t, func() {
-		for i := 1; i <= 20; i++ {
-			if _, err, ok := surface.WriteOutput(os.Stdout, fmt.Sprintf("prior-%02d\n", i)); !ok || err != nil {
-				t.Fatalf("WriteOutput prior: ok=%v err=%v", ok, err)
-			}
+	for i := 1; i <= 20; i++ {
+		if _, err, ok := surface.WriteOutput(io.Discard, fmt.Sprintf("prior-%02d\n", i)); !ok || err != nil {
+			t.Fatalf("WriteOutput prior: ok=%v err=%v", ok, err)
 		}
-		if !surface.SetActiveBand([]string{"assistant", "one", "two", "three", "four", "five"}) {
-			t.Fatal("SetActiveBand failed")
-		}
-	})
-	screen.feed(seed)
+	}
+	if !surface.SetActiveBand([]string{"assistant", "one", "two", "three", "four", "five"}) {
+		t.Fatal("SetActiveBand failed")
+	}
 
-	transition := captureSurfaceStdout(t, func() {
-		if _, err, ok := surface.WriteOutput(os.Stdout, "heading\n\nbody\n"); !ok || err != nil {
-			t.Fatalf("WriteOutput stable prefix: ok=%v err=%v", ok, err)
-		}
-		if !surface.SetActiveBand([]string{"assistant", "mutable tail"}) {
-			t.Fatal("SetActiveBand shrink failed")
-		}
-	})
-	screen.feed(transition)
+	if _, err, ok := surface.WriteOutput(io.Discard, "heading\n\nbody\n"); !ok || err != nil {
+		t.Fatalf("WriteOutput stable prefix: ok=%v err=%v", ok, err)
+	}
+	if !surface.SetActiveBand([]string{"assistant", "mutable tail"}) {
+		t.Fatal("SetActiveBand shrink failed")
+	}
 
-	bandStart := height - len(surface.ActiveBandLines())
-	if gap := gapBetweenLastScrollbackAndBand(screen, bandStart, height-1); gap > 1 {
-		t.Fatalf("stable commit + band shrink left gap=%d; screen:\n%s", gap, screen.dump())
+	// 收缩后的合成帧：提交前缀（heading/body）在 band 上方相邻，旧 band 行
+	// 不得残留或重复，新 mutable tail 恰好一次。
+	bandRow := frameRowOf(t, surface, "assistant")
+	bodyRow := frameRowOf(t, surface, "body")
+	if gap := bandRow - bodyRow - 1; gap > 1 {
+		t.Fatalf("stable commit + band shrink left gap=%d\n%s", gap, composedFrameText(surface))
+	}
+	assertFrameMarkerOnce(t, "shrink", surface, "mutable tail")
+	for _, released := range []string{"one", "two", "three", "four", "five"} {
+		if rows := frameRowsContaining(composedFrameLines(surface), released); len(rows) != 0 {
+			t.Fatalf("released band row %q still in composed frame at %v\n%s",
+				released, rows, composedFrameText(surface))
+		}
 	}
 }
 
@@ -280,120 +245,114 @@ func TestFixedBottomSurface_EOSFusionLeavesNoBlankGap(t *testing.T) {
 
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
-	screen := newScreenVT(width, height)
-
-	seed := captureSurfaceStdout(t, func() {
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-		for i := 1; i <= 20; i++ {
-			if _, err, ok := surface.WriteOutput(os.Stdout, fmt.Sprintf("prior-%02d\n", i)); !ok || err != nil {
-				t.Fatalf("WriteOutput prior: ok=%v err=%v", ok, err)
-			}
+	// 无 coordinator poster：facade 走同步路径；物理绘制退役后由合成帧观察布局。
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	for i := 1; i <= 20; i++ {
+		if _, err, ok := surface.WriteOutput(io.Discard, fmt.Sprintf("prior-%02d\n", i)); !ok || err != nil {
+			t.Fatalf("WriteOutput prior: ok=%v err=%v", ok, err)
 		}
-	})
-	screen.feed(seed)
+	}
 
 	bandLines := make([]string, 0, budget)
 	for i := 1; i <= budget; i++ {
 		bandLines = append(bandLines, fmt.Sprintf("live-band-%02d", i))
 	}
-	grow := captureSurfaceStdout(t, func() {
-		if !surface.SetActiveBand(bandLines) {
-			t.Fatal("SetActiveBand failed")
-		}
-	})
-	screen.feed(grow)
+	if !surface.SetActiveBand(bandLines) {
+		t.Fatal("SetActiveBand failed")
+	}
 
 	// Step 1: commit final transcript while the band is still reserved.
-	commit := captureSurfaceStdout(t, func() {
-		if _, err, ok := surface.WriteOutput(os.Stdout, "final-committed-line\n"); !ok || err != nil {
-			t.Fatalf("WriteOutput final: ok=%v err=%v", ok, err)
-		}
-	})
-	screen.feed(commit)
+	if _, err, ok := surface.WriteOutput(io.Discard, "final-committed-line\n"); !ok || err != nil {
+		t.Fatalf("WriteOutput final: ok=%v err=%v", ok, err)
+	}
 
-	bandStart := height - 1 - budget + 1
-	if gap := gapBetweenLastScrollbackAndBand(screen, bandStart, height-1); gap > 1 {
-		t.Fatalf("after commit-with-band, gap above band = %d (budget=%d); screen:\n%s",
-			gap, budget, screen.dump())
-	}
-	if maxRun, at := maxBlankRunAboveBottom(screen, bandStart); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("after commit-with-band, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
-	}
-	foundFinal := false
-	for row := 1; row < bandStart; row++ {
-		if strings.Contains(screen.line(row), "final-committed-line") {
-			foundFinal = true
+	frame := composedFrameLines(surface)
+	bandStart := frameRowOf(t, surface, "live-band-01")
+	// 最后一次提交（final-committed-line）是 band 上方最后一行 transcript。
+	lastScrollback := 0
+	for row := bandStart - 1; row >= 1; row-- {
+		if strings.TrimSpace(frame[row-1]) != "" {
+			lastScrollback = row
 			break
 		}
 	}
-	if !foundFinal {
-		t.Fatalf("expected final line in scrollback above band, screen:\n%s", screen.dump())
+	if lastScrollback == 0 {
+		t.Fatalf("expected scrollback above band\n%s", composedFrameText(surface))
+	}
+	if gap := bandStart - lastScrollback - 1; gap > 1 {
+		t.Fatalf("after commit-with-band, gap above band = %d (budget=%d)\n%s",
+			gap, budget, composedFrameText(surface))
+	}
+	if run := s2MaxBlankRun(frame[lastScrollback-1 : bandStart-1]); run >= ui.ActiveBandMinRows {
+		t.Fatalf("after commit-with-band, blank run %d above band\n%s", run, composedFrameText(surface))
+	}
+	if finalRow := frameRowOf(t, surface, "final-committed-line"); finalRow >= bandStart {
+		t.Fatalf("expected final line in scrollback above band (row %d, band start %d)\n%s",
+			finalRow, bandStart, composedFrameText(surface))
 	}
 
 	// Step 2: release the band — freed rows must be reclaimed by scroll-down.
-	release := captureSurfaceStdout(t, func() {
-		if !surface.ClearActiveBand() {
-			t.Fatal("ClearActiveBand failed")
+	if !surface.ClearActiveBand() {
+		t.Fatal("ClearActiveBand failed")
+	}
+	// Owned path recomposes the full frame; assert the final frame content instead of CSI T.
+	frame = composedFrameLines(surface)
+	for _, bandLine := range bandLines {
+		if rows := frameRowsContaining(frame, bandLine); len(rows) != 0 {
+			t.Fatalf("released band row %q still in composed frame at %v\n%s",
+				bandLine, rows, composedFrameText(surface))
 		}
-	})
-	screen.feed(release)
-	// Owned path recomposes the full frame; assert the final screen content instead of CSI T.
-	if maxRun, at := maxBlankRunAboveBottom(screen, height); maxRun > 1 {
-		t.Fatalf("after ClearActiveBand, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
 	}
 	if got := len(surface.ActiveBandLines()); got != 0 {
 		t.Fatalf("expected band cleared, still %d lines", got)
 	}
-
-	statusRow := height
-	lastText := 0
-	for row := statusRow - 1; row >= 1; row-- {
-		if strings.TrimSpace(screen.line(row)) != "" {
-			lastText = row
+	// 只检查第一行内容与 status 之间的空洞；transcript 短于可见区时屏幕
+	// 顶部必然留白，那不是 band 收缩失败。
+	contentStart := 0
+	for i, line := range frame[:len(frame)-1] {
+		if strings.TrimSpace(line) != "" {
+			contentStart = i
 			break
 		}
 	}
-	if lastText == 0 {
-		t.Fatalf("expected transcript after band release, screen:\n%s", screen.dump())
+	if run := s2MaxBlankRun(frame[contentStart : len(frame)-1]); run > 1 {
+		t.Fatalf("after ClearActiveBand, blank run %d above status\n%s", run, composedFrameText(surface))
+	}
+	trimmed := s2TrimTrailingBlanks(s2TrimLeadingBlanks(frame))
+	if len(trimmed) == 0 {
+		t.Fatalf("expected transcript after band release\n%s", composedFrameText(surface))
 	}
 	// No prompt yet: content should sit against status with at most one blank.
-	if gap := statusRow - lastText - 1; gap > 1 {
-		t.Fatalf("after ClearActiveBand, gap above status = %d (budget=%d); screen:\n%s",
-			gap, budget, screen.dump())
-	}
-	if maxRun, at := maxBlankRunAboveBottom(screen, statusRow); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("after ClearActiveBand, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
+	if gap := s2TrailingBlankCount(frame); gap > 1 {
+		t.Fatalf("after ClearActiveBand, gap above status = %d (budget=%d)\n%s",
+			gap, budget, composedFrameText(surface))
 	}
 
 	// Step 3: restore prompt — still no band-sized hole above it.
-	promptOut := captureSurfaceStdout(t, func() {
-		if !surface.ShowPrompt("> ") {
-			t.Fatal("ShowPrompt failed")
-		}
-	})
-	screen.feed(promptOut)
-
-	promptRow := height - 2
-	if got := screen.line(promptRow); !strings.HasPrefix(strings.TrimSpace(got), ">") {
-		t.Fatalf("expected prompt on row %d, got %q, screen:\n%s", promptRow, got, screen.dump())
+	if !surface.ShowPrompt("> ") {
+		t.Fatal("ShowPrompt failed")
 	}
-	lastText = 0
-	for row := promptRow - 1; row >= 1; row-- {
-		if strings.TrimSpace(screen.line(row)) != "" {
-			lastText = row
+	frame = composedFrameLines(surface)
+	promptRow := frameRowOf(t, surface, ">")
+	if promptRow != height-2 {
+		t.Fatalf("expected prompt on frame row %d, got row %d\n%s",
+			height-2, promptRow, composedFrameText(surface))
+	}
+	// 与上一步同口径：只检查内容区内的空洞，顶部自然留白不计。
+	contentStart = 0
+	for i, line := range frame[:promptRow-1] {
+		if strings.TrimSpace(line) != "" {
+			contentStart = i
 			break
 		}
 	}
-	if lastText == 0 {
-		t.Fatalf("expected transcript above prompt, screen:\n%s", screen.dump())
+	if run := s2MaxBlankRun(frame[contentStart : promptRow-1]); run >= ui.ActiveBandMinRows {
+		t.Fatalf("after ShowPrompt, blank run %d above prompt\n%s", run, composedFrameText(surface))
 	}
-	if gap := promptRow - lastText - 1; gap > 2 {
-		t.Fatalf("after ShowPrompt, gap above prompt = %d (budget=%d); screen:\n%s",
-			gap, budget, screen.dump())
-	}
-	if maxRun, at := maxBlankRunAboveBottom(screen, promptRow); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("after ShowPrompt, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
+	if gap := s2TrailingBlankCount(frame[:promptRow-1]); gap > 2 {
+		t.Fatalf("after ShowPrompt, gap above prompt = %d (budget=%d)\n%s",
+			gap, budget, composedFrameText(surface))
 	}
 }
 
@@ -418,25 +377,17 @@ func TestChatInteractionCoordinator_PendingStableQueueKeepsBandFilled(t *testing
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
 
-	seed := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-		for i := 1; i <= 10; i++ {
-			coord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
-		}
-	})
-	screen.feed(seed)
+	coord.SetWriter(os.Stdout)
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	for i := 1; i <= 10; i++ {
+		coord.RenderAsyncLine(fmt.Sprintf("seed-prior-%02d", i))
+	}
 
-	pending := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
-		coord.RenderAssistantDelta("eight\n")
-		coord.waitUIActorIdle()
-	})
-	screen.feed(pending)
+	coord.RenderAssistantDelta("one\ntwo\nthree\nfour\nfive\nsix\nseven\n")
+	coord.RenderAssistantDelta("eight\n")
+	coord.waitUIActorIdle()
 
 	coord.mu.Lock()
 	queued := len(coord.stableCommitQueue)
@@ -448,54 +399,46 @@ func TestChatInteractionCoordinator_PendingStableQueueKeepsBandFilled(t *testing
 			queued, enqueued, emitted)
 	}
 
-	band := surface.ActiveBandLines()
+	band := s2BandLines(t, coord)
 	if len(band) == 0 {
-		t.Fatalf("pending queue must keep ActiveBand filled, screen:\n%s", screen.dump())
+		t.Fatal("pending queue must keep ActiveBand filled")
 	}
 	joined := strings.Join(band, "\n")
 	if !strings.Contains(joined, "one") || !strings.Contains(joined, "eight") {
-		t.Fatalf("queued stable rows must remain in ActiveBand until drain, got %q\nscreen:\n%s",
-			joined, screen.dump())
+		t.Fatalf("queued stable rows must remain in ActiveBand until drain, got %q", joined)
 	}
-
-	statusRow := height
-	bandEnd := statusRow - 1
-	bandStart := bandEnd - len(band) + 1
-	if gap := gapBetweenLastScrollbackAndBand(screen, bandStart, bandEnd); gap > 1 {
-		t.Fatalf("pending queue left gap=%d above band (budget=%d); screen:\n%s",
-			gap, budget, screen.dump())
+	history := s2TrimLeadingBlanks(s2HistoryRows(surface))
+	if run := s2MaxBlankRun(s2TrimTrailingBlanks(history)); run >= ui.ActiveBandMinRows {
+		t.Fatalf("pending queue left blank run %d in history window (budget=%d)\n%#v",
+			run, budget, history)
 	}
-	if maxRun, at := maxBlankRunAboveBottom(screen, bandStart); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("pending queue left blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
+	if gap := s2TrailingBlankCount(history); gap > 1 {
+		t.Fatalf("pending queue left gap=%d above band (budget=%d)\n%#v", gap, budget, history)
 	}
 
 	// Drain must move queued lines to scrollback and shrink the band without a hole.
-	drained := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		coord.mu.Lock()
-		coord.stopActiveStableCommitLocked()
-		coord.drainActiveStableCommitLocked(true)
-		coord.mu.Unlock()
-		coord.waitUIActorIdle()
-	})
-	screen.feed(drained)
+	coord.mu.Lock()
+	coord.stopActiveStableCommitLocked()
+	coord.drainActiveStableCommitLocked(true)
+	coord.mu.Unlock()
+	coord.waitUIActorIdle()
 
-	band = surface.ActiveBandLines()
+	band = s2BandLines(t, coord)
 	joined = strings.Join(band, "\n")
 	if strings.Contains(joined, "one") {
 		t.Fatalf("emitted stable prefix should leave ActiveBand after drain, got %q", joined)
 	}
-	if len(band) == 0 || !strings.Contains(joined, "eight") {
-		// "eight" may still be mutable tail or last retained rows depending on cut.
-		// Require a non-empty band so the viewport did not collapse to a hole.
-		if len(band) == 0 {
-			t.Fatalf("expected mutable tail remaining in band after drain, screen:\n%s", screen.dump())
-		}
+	// "eight" may still be mutable tail or last retained rows depending on cut.
+	// Require a non-empty band so the viewport did not collapse to a hole.
+	if len(band) == 0 {
+		t.Fatal("expected mutable tail remaining in band after drain")
 	}
-	bandEnd = statusRow - 1
-	bandStart = bandEnd - len(band) + 1
-	if gap := gapBetweenLastScrollbackAndBand(screen, bandStart, bandEnd); gap > 1 {
-		t.Fatalf("after drain, gap above band = %d; screen:\n%s", gap, screen.dump())
+	history = s2TrimLeadingBlanks(s2HistoryRows(surface))
+	if n := s2Count(history, "one"); n != 1 {
+		t.Fatalf("drained stable row one should land in scrollback exactly once, got %d\n%#v", n, history)
+	}
+	if gap := s2TrailingBlankCount(history); gap > 1 {
+		t.Fatalf("after drain, gap above band = %d\n%#v", gap, history)
 	}
 }
 
@@ -524,114 +467,78 @@ func TestChatInteractionCoordinator_EOSFusionAfterFullBand(t *testing.T) {
 	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
 
-	seed := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-		for i := 1; i <= 12; i++ {
-			coord.RenderAsyncLine(fmt.Sprintf("seed-%02d", i))
-		}
-	})
-	screen.feed(seed)
+	coord.SetWriter(os.Stdout)
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	for i := 1; i <= 12; i++ {
+		coord.RenderAsyncLine(fmt.Sprintf("seed-%02d", i))
+	}
 
-	streaming := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		content := reply.String()
-		for len(content) > 0 {
-			runes := []rune(content)
-			n := 32
-			if n > len(runes) {
-				n = len(runes)
-			}
-			coord.RenderAssistantDelta(string(runes[:n]))
-			content = string(runes[n:])
+	content := reply.String()
+	for len(content) > 0 {
+		runes := []rune(content)
+		n := 32
+		if n > len(runes) {
+			n = len(runes)
 		}
-		coord.waitUIActorIdle()
-	})
-	screen.feed(streaming)
-	band := surface.ActiveBandLines()
+		coord.RenderAssistantDelta(string(runes[:n]))
+		content = string(runes[n:])
+	}
+	coord.waitUIActorIdle()
+	band := s2BandLines(t, coord)
 	if got := len(band); got == 0 || got > budget {
-		t.Fatalf("expected bounded mutable tail before finalize, got %d want 1..%d; screen:\n%s",
-			got, budget, screen.dump())
+		t.Fatalf("expected bounded mutable tail before finalize, got %d want 1..%d", got, budget)
 	}
 	if !strings.Contains(strings.Join(band, "\n"), "融合收尾") {
-		t.Fatalf("expected final mutable paragraph in ActiveBand, got %v; screen:\n%s", band, screen.dump())
+		t.Fatalf("expected final mutable paragraph in ActiveBand, got %v", band)
 	}
 
 	// Finalize alone: commit + ClearActiveBand (no prompt yet).
-	finalized := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		coord.FinalizeAssistantDelta()
-		coord.waitUIActorIdle()
-	})
-	screen.feed(finalized)
-	if got := len(surface.ActiveBandLines()); got != 0 {
+	coord.FinalizeAssistantDelta()
+	coord.waitUIActorIdle()
+	if got := len(s2BandLines(t, coord)); got != 0 {
 		t.Fatalf("finalize should clear active band, still %d lines", got)
 	}
-	statusRow := height
-	lastText := 0
-	for row := statusRow - 1; row >= 1; row-- {
-		if strings.TrimSpace(screen.line(row)) != "" {
-			lastText = row
-			break
-		}
+	history := s2TrimLeadingBlanks(s2HistoryRows(surface))
+	if n := s2Count(history, "融合收尾"); n != 1 {
+		t.Fatalf("expected committed 融合收尾 exactly once after finalize, got %d\n%#v", n, history)
 	}
-	if lastText == 0 {
-		t.Fatalf("expected committed transcript after finalize, screen:\n%s", screen.dump())
+	if run := s2MaxBlankRun(s2TrimTrailingBlanks(history)); run >= ui.ActiveBandMinRows {
+		t.Fatalf("after finalize, blank run %d in history window\n%#v", run, history)
 	}
-	if gap := statusRow - lastText - 1; gap > 1 {
-		t.Fatalf("after finalize(clear band), gap above status = %d; screen:\n%s", gap, screen.dump())
-	}
-	if maxRun, at := maxBlankRunAboveBottom(screen, statusRow); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("after finalize, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
+	if gap := s2TrailingBlankCount(history); gap > 1 {
+		t.Fatalf("after finalize(clear band), gap above status = %d\n%#v", gap, history)
 	}
 
 	// A later output is the user-visible failure mode: if release only clears
 	// the band without pulling the transcript down, WriteOutput jumps to the new
 	// output bottom and leaves the released 14 rows as a hole in the middle.
-	continued := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		coord.RenderAsyncLine("post-release-output")
-	})
-	screen.feed(continued)
-	if maxRun, at := maxBlankRunAboveBottom(screen, statusRow); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("continued output exposed a post-release blank run %d at row %d; screen:\n%s",
-			maxRun, at, screen.dump())
+	coord.RenderAsyncLine("post-release-output")
+	history = s2TrimLeadingBlanks(s2HistoryRows(surface))
+	if n := s2Count(history, "post-release-output"); n != 1 {
+		t.Fatalf("expected continued output after band release exactly once, got %d\n%#v", n, history)
 	}
-	foundContinued := false
-	for row := 1; row < statusRow; row++ {
-		if strings.Contains(screen.line(row), "post-release-output") {
-			foundContinued = true
-			break
-		}
-	}
-	if !foundContinued {
-		t.Fatalf("expected continued output after band release, screen:\n%s", screen.dump())
+	if run := s2MaxBlankRun(s2TrimTrailingBlanks(history)); run >= ui.ActiveBandMinRows {
+		t.Fatalf("continued output exposed a post-release blank run %d\n%#v", run, history)
 	}
 
-	promptOut := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		surface.ShowPrompt("> ")
-	})
-	screen.feed(promptOut)
-
-	promptRow := height - 2
-	lastText = 0
-	for row := promptRow - 1; row >= 1; row-- {
-		if strings.TrimSpace(screen.line(row)) != "" {
-			lastText = row
-			break
-		}
+	if !surface.ShowPrompt("> ") {
+		t.Fatal("ShowPrompt failed")
 	}
-	if lastText == 0 {
-		t.Fatalf("expected transcript above prompt, screen:\n%s", screen.dump())
+	coord.waitUIActorIdle()
+	st := coord.uiActor.AppState()
+	if !st.Bottom.PromptVisible || !strings.HasPrefix(st.Bottom.PromptLine, ">") {
+		t.Fatalf("expected prompt visible in AppState after ShowPrompt, got %+v", st.Bottom)
 	}
-	if gap := promptRow - lastText - 1; gap > 2 {
-		t.Fatalf("after ShowPrompt, gap above prompt = %d; screen:\n%s", gap, screen.dump())
+	history = s2TrimLeadingBlanks(s2HistoryRows(surface))
+	if n := s2Count(history, "融合收尾"); n != 1 {
+		t.Fatalf("expected transcript above prompt exactly once, got %d\n%#v", n, history)
 	}
-	if maxRun, at := maxBlankRunAboveBottom(screen, promptRow); maxRun >= ui.ActiveBandMinRows {
-		t.Fatalf("after ShowPrompt, blank run %d at row %d; screen:\n%s", maxRun, at, screen.dump())
+	if gap := s2TrailingBlankCount(history); gap > 2 {
+		t.Fatalf("after ShowPrompt, gap above prompt = %d\n%#v", gap, history)
+	}
+	if run := s2MaxBlankRun(s2TrimTrailingBlanks(history)); run >= ui.ActiveBandMinRows {
+		t.Fatalf("after ShowPrompt, blank run %d\n%#v", run, history)
 	}
 }

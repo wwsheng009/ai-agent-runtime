@@ -84,74 +84,70 @@ func TestChatInteractionCoordinator_StreamLeavesNoBlankRowsAbovePrompt(t *testin
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
 
-			screen := newScreenVT(width, height)
-
-			streaming := captureSurfaceStdout(t, func() {
-				// SetSurface publishes the initial persistent status frame. Keep
-				// it in the same byte stream that is replayed into screen;
-				// otherwise the owned viewport front buffer legitimately omits
-				// that unchanged row from subsequent minimal diffs.
-				coord.SetSurface(surface)
-				coord.SetWriter(os.Stdout)
-				surface.ShowPrompt("> ")
-				coord.waitUIActorIdle()
-				// The chat loop clears the prompt when the user submits, so the
-				// band renders while no prompt rows are reserved.
-				surface.ClearPromptRows(1)
-				coord.RenderAsyncLine("[tool] view backend/main.go")
-				for _, chunk := range strings.SplitAfter(markdownReply, "\n") {
-					if chunk != "" {
-						coord.RenderAssistantDelta(chunk)
-					}
-				}
-				// Phase 1：facade action 由 UI actor 异步应用，capture 结束前等
-				// actor 排空，保证重放字节流包含完整渲染。
-				coord.waitUIActorIdle()
-			})
-			screen.feed(streaming)
-
-			if got := screen.line(height); strings.TrimSpace(got) == "" {
-				t.Fatalf("expected status row %d to stay painted, screen:\n%s", height, screen.dump())
-			}
-			if got := screen.line(height - 1); strings.TrimSpace(got) == "" {
-				t.Fatalf("active band must reach row %d, leaving no blank gap above the status row, screen:\n%s",
-					height-1, screen.dump())
-			}
-
-			final := captureSurfaceStdout(t, func() {
-				coord.SetWriter(os.Stdout)
-				coord.FinalizeAssistantDelta()
-				surface.ShowPrompt("> ")
-				coord.waitUIActorIdle()
-			})
-			screen.feed(final)
-
-			// statusbar 占两行（第二行显示 --pprof/--debug flag 状态），prompt
-			// 位于 height-3；旧单行 status 假设已过时。
-			promptRow := height - 3
-			if got := screen.line(promptRow); !strings.HasPrefix(got, ">") {
-				t.Fatalf("expected prompt on row %d, got %q, screen:\n%s", promptRow, got, screen.dump())
-			}
-			if got := screen.line(height); strings.TrimSpace(got) == "" {
-				t.Fatalf("expected status row %d to stay painted, screen:\n%s", height, screen.dump())
-			}
-			lastText := 0
-			for row := promptRow - 1; row >= 1; row-- {
-				if strings.TrimSpace(screen.line(row)) != "" {
-					lastText = row
-					break
+			// L3-3：band/prompt/status 由 AppState 承载，已提交 transcript 由
+			// surface 历史窗口承载。band 直接渲染在保留区上方，不存在“band
+			// 画在保留行之上留下空洞”的物理路径；仍钉住 band 有界有尾内容、
+			// 历史无 band 级空洞、finalize 后 prompt/status 就绪。
+			coord.SetSurface(surface)
+			coord.SetWriter(os.Stdout)
+			surface.ShowPrompt("> ")
+			coord.waitUIActorIdle()
+			// The chat loop clears the prompt when the user submits, so the
+			// band renders while no prompt rows are reserved.
+			surface.ClearPromptRows(1)
+			coord.RenderAsyncLine("[tool] view backend/main.go")
+			for _, chunk := range strings.SplitAfter(markdownReply, "\n") {
+				if chunk != "" {
+					coord.RenderAssistantDelta(chunk)
 				}
 			}
-			if lastText == 0 {
-				t.Fatalf("expected committed transcript above the prompt, screen:\n%s", screen.dump())
+			coord.waitUIActorIdle()
+
+			band := s2BandLines(t, coord)
+			if len(band) == 0 {
+				t.Fatal("expected active band mid-stream")
 			}
-			if gap := promptRow - lastText - 1; gap > 2 {
-				t.Fatalf("expected only the composer top margin and one transcript separator above the prompt, got %d blank rows, screen:\n%s",
-					gap, screen.dump())
+			if strings.TrimSpace(band[len(band)-1]) == "" {
+				t.Fatalf("active band tail row must stay painted, got %v", band)
 			}
-			if got := screen.line(lastText); !strings.Contains(got, "收尾说明。") {
-				t.Fatalf("expected the last committed markdown line above the prompt, got %q, screen:\n%s",
-					got, screen.dump())
+			if state := coord.uiActor.AppState(); strings.TrimSpace(statusModelPlainText(state.Bottom.StatusModel, width)) == "" {
+				t.Fatalf("expected a non-empty status model mid-stream, got %+v", state.Bottom)
+			}
+			midHistory := s2TrimLeadingBlanks(s2HistoryRows(surface))
+			if run := s2MaxBlankRun(s2TrimTrailingBlanks(midHistory)); run >= ui.ActiveBandMinRows {
+				t.Fatalf("mid-stream history window left a %d-row blank hole\n%#v", run, midHistory)
+			}
+
+			coord.FinalizeAssistantDelta()
+			surface.ShowPrompt("> ")
+			coord.waitUIActorIdle()
+
+			state := coord.uiActor.AppState()
+			if !state.Bottom.PromptVisible || !strings.HasPrefix(state.Bottom.PromptLine, ">") {
+				t.Fatalf("expected ready composer prompt after finalize, got %+v", state.Bottom)
+			}
+			if strings.TrimSpace(statusModelPlainText(state.Bottom.StatusModel, width)) == "" {
+				t.Fatalf("expected a non-empty status model after finalize, got %+v", state.Bottom)
+			}
+			if got := len(s2BandLines(t, coord)); got != 0 {
+				t.Fatalf("finalize should clear active band, still %d lines", got)
+			}
+
+			history := s2TrimLeadingBlanks(s2HistoryRows(surface))
+			trimmed := s2TrimTrailingBlanks(history)
+			if len(trimmed) == 0 {
+				t.Fatalf("expected committed transcript above the prompt\n%#v", history)
+			}
+			if n := s2Count(trimmed, "收尾说明。"); n != 1 {
+				t.Fatalf("expected the last committed markdown line above the prompt exactly once, got %d\n%#v",
+					n, history)
+			}
+			if gap := s2TrailingBlankCount(history); gap > 2 {
+				t.Fatalf("expected only the composer top margin and one transcript separator above the prompt, got %d blank rows\n%#v",
+					gap, history)
+			}
+			if run := s2MaxBlankRun(trimmed); run > 1 {
+				t.Fatalf("expected no multi-row transcript hole above the prompt, got run %d\n%#v", run, history)
 			}
 		})
 	}
@@ -175,56 +171,51 @@ func TestChatInteractionCoordinator_SubmittedUserInputDoesNotOverwriteHistory(t 
 	surface.EnableForTest(width, height)
 	coord.SetSurface(surface)
 
-	screen := newScreenVT(width, height)
-
 	// Establish layout, write a completed history line (trailing LF), then show the
 	// ready prompt so it absorbs that blank into the bottom reserve — the state
 	// the submit path used to overwrite.
-	seed := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		if !surface.ShowPrompt(ui.UserPromptText(0)) {
-			t.Fatal("expected initial ShowPrompt")
-		}
-		if !surface.ClearPromptRows(1) {
-			t.Fatal("expected ClearPromptRows")
-		}
-		coord.RenderAssistant("上一轮助手回复内容")
-		if !surface.ShowPrompt(ui.UserPromptText(0)) {
-			t.Fatal("expected ready ShowPrompt")
-		}
-		coord.mu.Lock()
-		coord.promptVisible = true
-		coord.promptRenderedOnSurface = true
-		coord.waitingActive = true
-		coord.mu.Unlock()
-	})
-	screen.feed(seed)
+	coord.SetWriter(os.Stdout)
+	if !surface.ShowPrompt(ui.UserPromptText(0)) {
+		t.Fatal("expected initial ShowPrompt")
+	}
+	if !surface.ClearPromptRows(1) {
+		t.Fatal("expected ClearPromptRows")
+	}
+	coord.RenderAssistant("上一轮助手回复内容")
+	if !surface.ShowPrompt(ui.UserPromptText(0)) {
+		t.Fatal("expected ready ShowPrompt")
+	}
+	coord.mu.Lock()
+	coord.promptVisible = true
+	coord.promptRenderedOnSurface = true
+	coord.waitingActive = true
+	coord.mu.Unlock()
+	coord.waitUIActorIdle()
 
-	if !strings.Contains(screen.dump(), "上一轮助手回复内容") {
-		t.Fatalf("precondition: history must be on screen, got:\n%s", screen.dump())
+	// 合成帧是历史 + 底部保留区的权威投影（该 surface 的历史写入不经 poster）。
+	frame := composedFrameLines(surface)
+	if dump := strings.Join(frame, "\n"); !strings.Contains(dump, "上一轮助手回复内容") {
+		t.Fatalf("precondition: history must be in composed frame, got:\n%s", dump)
 	}
 
 	// Bug path: submit echo without an external ClearPromptRows. The coordinator
 	// itself must free the composer before writing the user block.
-	echo := captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		coord.RenderSubmittedUserInput("用户新问题")
-	})
-	screen.feed(echo)
+	coord.RenderSubmittedUserInput("用户新问题")
+	coord.waitUIActorIdle()
 
-	dump := screen.dump()
+	frame = composedFrameLines(surface)
+	dump := strings.Join(frame, "\n")
 	if !strings.Contains(dump, "上一轮助手回复内容") {
-		t.Fatalf("user echo must not overwrite prior history, screen:\n%s", dump)
+		t.Fatalf("user echo must not overwrite prior history, frame:\n%s", dump)
 	}
 	// FormatUserMessage may include icon chrome; match on the user text itself.
 	if !strings.Contains(dump, "用户新问题") {
-		t.Fatalf("expected submitted user text on its own row, screen:\n%s", dump)
+		t.Fatalf("expected submitted user text on its own row, frame:\n%s", dump)
 	}
 	// History and user echo must not share a single reconstructed row.
-	for row := 1; row <= height; row++ {
-		line := screen.line(row)
+	for i, line := range frame {
 		if strings.Contains(line, "上一轮助手回复内容") && strings.Contains(line, "用户新问题") {
-			t.Fatalf("history and user echo overlapped on row %d: %q\nscreen:\n%s", row, line, dump)
+			t.Fatalf("history and user echo overlapped on frame row %d: %q\n%s", i+1, line, dump)
 		}
 	}
 }
