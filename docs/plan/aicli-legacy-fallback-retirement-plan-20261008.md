@@ -341,6 +341,16 @@ buildChatSession
 - presenter popup/几何 API 迁移 → 再删 surface facade 读；
 - legacy 命令处理器批量迁 `CommandResult` → 删 `chat_unified_command_gate` 硬门禁。
 
+### 跟踪项（新功能候选，非退役范围）
+
+- **session 侧 DEC 2026 同步帧包裹（待定）**：当前唯一物理 writer（`TerminalSession`）以
+  「单飞 executor + 每帧一次 `Write` + 写锁串行」实现帧原子提交，**无** emulator 级 2026 包裹；
+  原 `SetTerminalSynchronizedFrames` 开关为 legacy-only，已随 L3-1 删除（全仓扫描 0 发射者）。
+  若后续真机观测到撕裂、需恢复该防护：必须**经 session writer/事务发射** `\x1b[?2026h/l`
+  （禁止裸 stdout——这正是 legacy 版本被退役的原因）。相关资产：`TerminalDriver.SynchronizedOutput`
+  能力位（保留、当前无消费者）；`AICLI_DISABLE_SYNC_UPDATE`（已无代码引用，仅历史文档提及）。
+  决策门槛：默认不上路；真机 tearing 证据后再立项。
+
 ### 批次依赖与回滚
 
 ```

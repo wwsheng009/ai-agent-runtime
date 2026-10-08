@@ -94,6 +94,8 @@
   - `Enable` 首帧块退役；DEC2026 framing 全链删除（开关/查询/包裹分支 + 裸 os.Stdout 写），
     写锁本体保留；`Disable` framing reset 随之删除；freeze 测试随符号删除，sync 用例收敛为「永不包裹」。
   - 门禁：**条目 33→32**；ui 全量（12.8s）+ commands 相关子集绿；基线口径校正（L1 40→34、L2 34→33）。
+  - 文档口径：`tui-render-architecture.md` §2.2 已修正（删除「DEC 2026 同步框包裹」表述——实现为
+    单帧一次 Write 原子提交）；「session 侧 2026 包裹」登记为跟踪项（方案 §5，默认不上路）。
 
 ## 2. 关键侦察结论（决定迁移顺序）
 

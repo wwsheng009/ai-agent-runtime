@@ -55,7 +55,7 @@ flowchart TB
 - **FramePump 合并**：单 goroutine `ui/frame_pump.go:101,118-144`；每个 key 只保留一个 pending job，重调度即替换 `:53-59`；调度键为 dynamicStatus / stableCommit / activeFrame / prompt；帧率预算下限 `:169-174`（默认 60 FPS）。
 - **定时器不落笔**：超时/定时回调只 `Post(DrawRequested)`，不直接绘制（`chat_interaction.go:6711-6721`）；reducer 是唯一读取 active stream 状态的地方。
 - **active stream 绘制**：`paintActiveStreamLocked`（`chat_interaction.go:5808-5831`）只更新语义态，"从不写 transcript writer"。
-- **单次物理写**：`TerminalSessionPresenter`（`terminal_session_presenter.go:86-101`）→ 单飞 executor（`terminal_session_executor.go:667-687`）→ `TerminalSession` 每帧一次 `Write`，DEC 2026 同步框包裹，以终端写锁串行化。
+- **单次物理写**：`TerminalSessionPresenter`（`terminal_session_presenter.go:86-101`）→ 单飞 executor（`terminal_session_executor.go:667-687`）→ `TerminalSession` 每帧一次 `Write`，以终端写锁串行化（单次 Write 即原子提交；DEC 2026 包裹属 legacy-only、已随 L3-1 退役——如需 emulator 级同步帧，须经 session writer 发射，登记见退役方案 §5 跟踪项）。
 - **fullscreen/alternate-screen 同样受约束**：lease 必须走同一 presenter transport；transport 缺失时 fail-closed 而不是另开 stdout 写口（`fixed_bottom_surface.go:288-299`）。
 
 ### 2.3 流式事件的三车道（`chat_runtime_events.go:1151-1215`）
