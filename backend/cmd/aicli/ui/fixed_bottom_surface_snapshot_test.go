@@ -50,17 +50,20 @@ func TestFixedBottomSurface_HistoryRowsSnapshotMaterializesWrapBlankStyleAndWide
 	}
 }
 
+// TestFixedBottomSurface_BottomRowsSnapshotMatchesLegacyVT is migrated to the
+// L3-2 state-only surface: the legacy byte writer is retired, so the bottom
+// reserve snapshot is compared against the authoritative composed frame
+// instead of a vt.Screen replay. Every prompt/status/band/popup transition
+// must keep BottomRowsSnapshot equal to the composed frame's bottom rows.
 func TestFixedBottomSurface_BottomRowsSnapshotMatchesLegacyVT(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 
 	const width, height = 32, 24
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
-	screen := vt.NewScreen(width, height)
 	apply := func(name string, paint func()) {
 		t.Helper()
-		output := captureUIStdout(t, paint)
-		screen.Feed(output)
-		assertBottomRowsSnapshotMatchesScreen(t, name, surface, screen)
+		captureUIStdout(t, paint)
+		assertBottomRowsSnapshotMatchesComposedFrame(t, name, surface)
 	}
 
 	apply("prompt", func() {
@@ -101,6 +104,10 @@ func TestFixedBottomSurface_BottomRowsSnapshotMatchesLegacyVT(t *testing.T) {
 	})
 }
 
+// TestFixedBottomSurface_BottomRowsSnapshotPreservesStyledCells is migrated to
+// the L3-2 state-only surface: the snapshot must still preserve SGR styles and
+// wide-cell continuation markers after the legacy byte writer retirement, and
+// must stay equal to the composed frame's bottom rows.
 func TestFixedBottomSurface_BottomRowsSnapshotPreservesStyledCells(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("AICLI_COLOR_DEPTH", "truecolor")
@@ -109,8 +116,7 @@ func TestFixedBottomSurface_BottomRowsSnapshotPreservesStyledCells(t *testing.T)
 	const width, height = 36, 24
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
 	surface.terminal.driver.caps = TerminalCapabilities{Interactive: true, ANSI: true}
-	screen := vt.NewScreen(width, height)
-	output := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		surface.ShowPrompt("> ")
 		surface.SetStatusModels(style.StatusLineModel{
 			HideState: true,
@@ -124,9 +130,8 @@ func TestFixedBottomSurface_BottomRowsSnapshotPreservesStyledCells(t *testing.T)
 			{Spans: []render.Span{{Text: "中", Style: render.Style{Foreground: render.RGB(255, 0, 0)}}}},
 		})
 	})
-	screen.Feed(output)
 
-	assertBottomRowsSnapshotMatchesScreen(t, "styled active/status", surface, screen)
+	assertBottomRowsSnapshotMatchesComposedFrame(t, "styled active/status", surface)
 	snapshot := surface.BottomRowsSnapshot()
 	foundStyle, foundWide := false, false
 	for _, row := range snapshot {
@@ -187,22 +192,21 @@ func TestFixedBottomSurface_ActiveBandHasOneCollapsibleTopGap(t *testing.T) {
 	}
 }
 
+// TestFixedBottomSurface_ComposedFrameShadowMatchesLegacyBeforeShrink is
+// migrated to the L3-2 state-only surface: the legacy vt.Screen shadow is
+// retired with the byte writer. The equivalent characterization is that the
+// composed frame is always terminal-height, its bottom reserve equals
+// BottomRowsSnapshot, and its history section is the newest retained history
+// rows - so band growth may only hide the oldest retained rows and the band
+// shrink restores them without dropping or duplicating rows.
 func TestFixedBottomSurface_ComposedFrameShadowMatchesLegacyBeforeShrink(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width, height = 32, 24
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
-	screen := vt.NewScreen(width, height)
-	feed := func(name string, paint func()) int {
+	feed := func(name string, paint func()) {
 		t.Helper()
-		screen.Feed(captureUIStdout(t, paint))
-		expected := surface.ComposedFrameForTest()
-		actual := screen.CellRows(1, height)
-		differences := frameCellDifferences(expected, actual)
-		if differences > 0 {
-			t.Logf("%s: shadow frame differs in %d cells", name, differences)
-		}
-		assertBottomRowsSnapshotMatchesScreen(t, name, surface, screen)
-		return differences
+		captureUIStdout(t, paint)
+		assertComposedFrameMatchesRetainedState(t, name, surface)
 	}
 
 	feed("prompt", func() {
@@ -214,37 +218,30 @@ func TestFixedBottomSurface_ComposedFrameShadowMatchesLegacyBeforeShrink(t *test
 			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 		}
 	})
-	if differences := feed("dynamic status", func() {
+	feed("dynamic status", func() {
 		dynamic := style.StatusLineModel{State: style.RunThinking, StateText: "◦ Working"}
 		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, &dynamic)
-	}); differences != 0 {
-		t.Fatalf("dynamic status should be frame-equivalent, differences=%d", differences)
-	}
-	if differences := feed("active band growth", func() {
+	})
+	feed("active band growth", func() {
 		surface.SetActiveBand([]string{"assistant", "中文 active", "tool progress"})
-	}); differences != 0 {
-		t.Fatalf("active-band growth should be frame-equivalent, differences=%d", differences)
-	}
-
-	if differences := feed("active band shrink", func() {
+	})
+	feed("active band shrink", func() {
 		surface.SetActiveBand([]string{"tool done"})
-	}); differences != 0 {
-		t.Fatalf("owned-history reserve shrink differs from composed frame: differences=%d", differences)
-	}
+	})
 }
 
+// TestFixedBottomSurface_ActiveBandShrinkRestoresOwnedHistoryRows pins the
+// L3-2 state-only restoration contract: history that fits the visible output
+// region is never handed off, band growth may hide its oldest rows from the
+// composed frame, and clearing the band restores the exact pre-growth frame.
+// The regression checks exact row identity rather than treating every blank as
+// compensation noise.
 func TestFixedBottomSurface_ActiveBandShrinkRestoresOwnedHistoryRows(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width, height = 32, 12
 
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
-	screen := vt.NewScreen(width, height)
-	feed := func(paint func()) {
-		t.Helper()
-		screen.Feed(captureUIStdout(t, paint))
-	}
-
-	feed(func() {
+	captureUIStdout(t, func() {
 		surface.ShowPrompt("> ")
 	})
 	outputBottom := surface.outputBottomRowLocked()
@@ -255,94 +252,196 @@ func TestFixedBottomSurface_ActiveBandShrinkRestoresOwnedHistoryRows(t *testing.
 	// Preserve one intentional Markdown-style blank row. The regression checks
 	// exact row identity rather than treating every blank as compensation noise.
 	history[3] = ""
-	feed(func() {
+	captureUIStdout(t, func() {
 		text := strings.Join(history, "\n") + "\n"
 		if _, err, ok := surface.WriteOutput(os.Stdout, text); !ok || err != nil {
 			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 		}
 	})
 	wantOutput := append(append([]string(nil), history...), "")
-	if got := screen.Lines(1, outputBottom); !reflect.DeepEqual(got, wantOutput) {
-		t.Fatalf("precondition: output rows=%q want=%q\n%s", got, wantOutput, screen.Dump())
+	assertOutputRows := func(label string) {
+		t.Helper()
+		lines := strings.Split(frameDump(surface.ComposedFrameForTest()), "\n")
+		if len(lines) < outputBottom {
+			t.Fatalf("%s: composed frame rows=%d want at least %d", label, len(lines), outputBottom)
+		}
+		if got := lines[:outputBottom]; !reflect.DeepEqual(got, wantOutput) {
+			t.Fatalf("%s: owned output rows=%q want=%q\n%s", label, got, wantOutput, strings.Join(lines, "\n"))
+		}
 	}
+	assertOutputRows("precondition")
 
-	feed(func() {
+	if got := surface.HistoryHandedOffForTest(); got != 0 {
+		t.Fatalf("history that fits the visible output region must not hand off, frontier=%d", got)
+	}
+	beforeGrow := frameDump(surface.ComposedFrameForTest())
+
+	captureUIStdout(t, func() {
 		surface.SetActiveBand([]string{"active-1", "active-2", "active-3"})
 	})
-	feed(func() {
+	captureUIStdout(t, func() {
 		surface.ClearActiveBand()
 	})
 
-	if got := screen.Lines(1, outputBottom); !reflect.DeepEqual(got, wantOutput) {
-		t.Fatalf("owned history was not restored after band shrink\ngot:  %q\nwant: %q\n%s", got, wantOutput, screen.Dump())
+	if got := frameDump(surface.ComposedFrameForTest()); got != beforeGrow {
+		t.Fatalf("owned history was not restored after band shrink\ngot:  %q\nwant: %q", got, beforeGrow)
 	}
-	if differences := frameCellDifferences(surface.ComposedFrameForTest(), screen.CellRows(1, height)); differences != 0 {
-		t.Fatalf("production frame differs from owned composition after shrink: differences=%d\n%s", differences, screen.Dump())
-	}
+	assertOutputRows("after band shrink")
 }
 
+// TestFixedBottomSurface_ComposedFrameShadowCharacterizesPopupClose is
+// migrated to the L3-2 state-only surface: the legacy vt.Screen shadow is
+// retired with the byte writer. The characterization now pins that popup
+// growth does not disturb the retained history window (handed-off rows never
+// re-enter the composed frame) and that popup close plus output settle
+// restores the exact pre-popup frame.
 func TestFixedBottomSurface_ComposedFrameShadowCharacterizesPopupClose(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width, height = 32, 24
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
-	screen := vt.NewScreen(width, height)
-	feed := func(name string, paint func()) int {
-		t.Helper()
-		screen.Feed(captureUIStdout(t, paint))
-		assertBottomRowsSnapshotMatchesScreen(t, name, surface, screen)
-		return frameCellDifferences(surface.ComposedFrameForTest(), screen.CellRows(1, height))
-	}
-
-	feed("seed prompt and history", func() {
+	captureUIStdout(t, func() {
 		surface.ShowPrompt("> ")
 		text := strings.Repeat("popup history\n", 40)
 		if _, err, ok := surface.WriteOutput(os.Stdout, text); !ok || err != nil {
 			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
 		}
 	})
-	if differences := feed("popup growth", func() {
+	assertComposedFrameMatchesRetainedState(t, "seed prompt and history", surface)
+	beforePopup := frameDump(surface.ComposedFrameForTest())
+
+	captureUIStdout(t, func() {
 		surface.ShowPopup([]string{"commands", "> /help", "  /clear"})
-	}); differences != 0 {
-		t.Fatalf("popup growth should be frame-equivalent, differences=%d", differences)
+	})
+	assertComposedFrameMatchesRetainedState(t, "popup growth", surface)
+	if frame := frameDump(surface.ComposedFrameForTest()); !strings.Contains(frame, "> /help") {
+		t.Fatalf("popup growth must render popup content:\n%s", frame)
 	}
-	feed("popup close", func() {
+
+	captureUIStdout(t, func() {
 		surface.ClearPopup()
 	})
-	if differences := feed("popup settle", func() {
+	captureUIStdout(t, func() {
 		surface.SettleOutputDebt()
-	}); differences != 0 {
-		t.Fatalf("owned-history popup settle differs from composed frame: differences=%d", differences)
+	})
+	assertComposedFrameMatchesRetainedState(t, "popup settle", surface)
+	if got := frameDump(surface.ComposedFrameForTest()); got != beforePopup {
+		t.Fatalf("owned-history popup settle differs from pre-popup frame\ngot:\n%s\nwant:\n%s", got, beforePopup)
+	}
+	if frame := frameDump(surface.ComposedFrameForTest()); strings.Contains(frame, "> /help") {
+		t.Fatalf("popup content leaked after close:\n%s", frame)
 	}
 }
 
-func frameCellDifferences(a, b [][]vt.Cell) int {
-	rows := len(a)
-	if len(b) > rows {
-		rows = len(b)
+// assertBottomRowsSnapshotMatchesComposedFrame pins the L3-2 state-only
+// contract: the bottom reserve snapshot must equal the bottom rows of the
+// authoritative composed frame after every state transition.
+func assertBottomRowsSnapshotMatchesComposedFrame(t *testing.T, name string, surface *FixedBottomSurface) {
+	t.Helper()
+	got := surface.BottomRowsSnapshot()
+	if len(got) == 0 {
+		t.Fatalf("%s: empty bottom snapshot", name)
 	}
-	differences := 0
-	for row := 0; row < rows; row++ {
-		cols := 0
-		if row < len(a) {
-			cols = len(a[row])
-		}
-		if row < len(b) && len(b[row]) > cols {
-			cols = len(b[row])
-		}
-		for col := 0; col < cols; col++ {
-			var left, right vt.Cell
-			if row < len(a) && col < len(a[row]) {
-				left = a[row][col]
-			}
-			if row < len(b) && col < len(b[row]) {
-				right = b[row][col]
-			}
-			if !reflect.DeepEqual(left, right) {
-				differences++
+	frame := surface.ComposedFrameForTest()
+	if len(frame) < len(got) {
+		t.Fatalf("%s: composed frame rows=%d shorter than bottom snapshot rows=%d", name, len(frame), len(got))
+	}
+	want := frame[len(frame)-len(got):]
+	if reflect.DeepEqual(got, want) {
+		return
+	}
+	for row := range got {
+		for col := range got[row] {
+			if !reflect.DeepEqual(got[row][col], want[row][col]) {
+				t.Fatalf(
+					"%s: bottom snapshot cell mismatch at frame row %d col %d: got=%s want=%s",
+					name,
+					len(frame)-len(got)+row+1,
+					col+1,
+					formatSnapshotCell(got[row][col]),
+					formatSnapshotCell(want[row][col]),
+				)
 			}
 		}
 	}
-	return differences
+	t.Fatalf("%s: bottom snapshot row dimensions differ: got=%d want=%d", name, len(got), len(want))
+}
+
+// assertComposedFrameMatchesRetainedState pins the L3-2 state-only frame
+// contract: the composed frame is terminal-height, its bottom reserve equals
+// BottomRowsSnapshot, and its history section is the newest retained history
+// rows (optionally followed by the cursor-parking blank row). Rows handed off
+// to scrollback never re-enter the frame, and reserve growth may only hide
+// rows at the oldest edge.
+func assertComposedFrameMatchesRetainedState(t *testing.T, name string, surface *FixedBottomSurface) {
+	t.Helper()
+	frame := surface.ComposedFrameForTest()
+	if got, want := len(frame), surface.terminal.Height(); got != want {
+		t.Fatalf("%s: composed frame rows=%d want %d", name, got, want)
+	}
+	bottom := surface.BottomRowsSnapshot()
+	if len(bottom) == 0 || len(bottom) > len(frame) {
+		t.Fatalf("%s: bottom snapshot rows=%d frame rows=%d", name, len(bottom), len(frame))
+	}
+	tail := frame[len(frame)-len(bottom):]
+	if !reflect.DeepEqual(tail, bottom) {
+		t.Fatalf("%s: bottom reserve diverges from composed frame:\n%s", name, frameDump(frame))
+	}
+	head := frame[:len(frame)-len(bottom)]
+	history := surface.HistoryRowsSnapshot()
+	if !frameHistorySectionMatches(head, history) {
+		t.Fatalf(
+			"%s: composed history rows are not the newest retained rows (frame history=%d retained=%d)\n%s",
+			name,
+			len(head),
+			len(history),
+			frameDump(frame),
+		)
+	}
+}
+
+// frameHistorySectionMatches reports whether the frame's history section is
+// blank padding plus the newest retained history rows, with an optional
+// trailing cursor-parking blank row.
+func frameHistorySectionMatches(head, history [][]vt.Cell) bool {
+	if len(history) == 0 {
+		return allFrameRowsBlank(head)
+	}
+	if matchHistorySuffix(head, history) {
+		return true
+	}
+	if len(head) > 0 && isBlankFrameRow(head[len(head)-1]) {
+		return matchHistorySuffix(head[:len(head)-1], history)
+	}
+	return false
+}
+
+func matchHistorySuffix(head, history [][]vt.Cell) bool {
+	rows := len(history)
+	if rows > len(head) {
+		rows = len(head)
+	}
+	if !reflect.DeepEqual(head[len(head)-rows:], history[len(history)-rows:]) {
+		return false
+	}
+	return allFrameRowsBlank(head[:len(head)-rows])
+}
+
+func allFrameRowsBlank(rows [][]vt.Cell) bool {
+	for _, row := range rows {
+		if !isBlankFrameRow(row) {
+			return false
+		}
+	}
+	return true
+}
+
+func isBlankFrameRow(row []vt.Cell) bool {
+	for _, cell := range row {
+		if cell.Text != "" || cell.Cont || len(cell.SGR) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func frameDump(rows [][]vt.Cell) string {
@@ -357,40 +456,6 @@ func frameDump(rows [][]vt.Cell) string {
 		lines = append(lines, line.String())
 	}
 	return strings.Join(lines, "\n")
-}
-
-func assertBottomRowsSnapshotMatchesScreen(
-	t *testing.T,
-	name string,
-	surface *FixedBottomSurface,
-	screen *vt.Screen,
-) {
-	t.Helper()
-	got := surface.BottomRowsSnapshot()
-	if len(got) == 0 {
-		t.Fatalf("%s: empty bottom snapshot", name)
-	}
-	start := screen.Height() - len(got) + 1
-	want := screen.CellRows(start, screen.Height())
-	if reflect.DeepEqual(got, want) {
-		return
-	}
-	for row := range got {
-		for col := range got[row] {
-			if !reflect.DeepEqual(got[row][col], want[row][col]) {
-				t.Fatalf(
-					"%s: cell mismatch at absolute (%d,%d): got=%s want=%s\nlegacy:\n%s",
-					name,
-					start+row,
-					col+1,
-					formatSnapshotCell(got[row][col]),
-					formatSnapshotCell(want[row][col]),
-					screen.Dump(),
-				)
-			}
-		}
-	}
-	t.Fatalf("%s: row dimensions differ: got=%d want=%d", name, len(got), len(want))
 }
 
 func formatSnapshotCell(cell vt.Cell) string {

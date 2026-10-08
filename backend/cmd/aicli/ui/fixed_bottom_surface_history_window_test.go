@@ -68,37 +68,23 @@ func TestFixedBottomSurface_HistoryWindowBounds(t *testing.T) {
 }
 
 // TestFixedBottomSurface_OverflowHistoryHandsOffToScrollback pins that when
-// history exceeds the visible output region, the oldest lines are inserted into
-// native scrollback (via insertHistoryLines) once. The window dual-retains up to
-// visible+headroom for shrink restore. This fixes "off-screen history missing
-// on scroll" — handoff must not wait for the headroom soft bound.
+// history exceeds the visible output region, the oldest lines advance the
+// logical handoff frontier (once) and the window dual-retains up to
+// visible+headroom for shrink restore. L3-2 state-only form: the frontier is
+// bookkeeping for the composed-frame window and the unified presenter owns the
+// physical scrollback bytes; handoff must not wait for the headroom soft bound.
 func TestFixedBottomSurface_OverflowHistoryHandsOffToScrollback(t *testing.T) {
 	// Use a small terminal so visible+headroom is modest and we exceed it.
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
-	output := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		for i := 0; i < 100; i++ {
 			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
 		}
 	})
-	// Correct handoff uses the Codex-aligned path (region 1..outputBottom + \r\n + line),
-	// NOT CSI T (Scroll Down) which never enters native scrollback.
-	if !strings.Contains(output, "\x1b[1;") || !strings.Contains(output, "r") {
-		snippet := output
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		t.Fatalf("expected DECSTBM handoff sequence, got %q", snippet)
-	}
-	if !strings.Contains(output, "\r\n") {
-		t.Fatalf("expected Codex-style \\r\\n before history lines in handoff")
-	}
-	// Fail only on genuine CSI nT scroll-down (not letter T in plain text).
-	if strings.Contains(output, "\x1b[1T") || strings.Contains(output, "\x1b[2T") ||
-		strings.Contains(output, terminalScrollDownSequence(1)) {
-		t.Fatalf("handoff must not use CSI T scroll-down (does not enter scrollback)")
-	}
-	if !strings.Contains(output, terminalResetScrollRegionSequence(20)) {
-		t.Fatalf("expected scroll-region reset after handoff")
+	// State-only handoff: overflow advances the logical frontier; the retired
+	// physical path (DECSTBM + \r\n emission) is no longer observable here.
+	if got := surface.HistoryHandedOffForTest(); got <= 0 {
+		t.Fatalf("overflow must advance the handoff frontier, got %d", got)
 	}
 	// Soft bound keeps visible + headroom; hard cap is a safety net.
 	history := surface.HistoryWindowForTest()
@@ -124,11 +110,11 @@ func TestFixedBottomSurface_OverflowHistoryHandsOffToScrollback(t *testing.T) {
 }
 
 // TestFixedBottomSurface_StreamingAppendDoesNotRepaintHistory pins that the
-// log-style append path (history exceeding the visible region) emits only the
-// handoff scroll plus the bottom-pane delta on each write, never a full-screen
-// repaint of the retained history rows. The previous behavior invalidated the
-// viewport backend inside insertHistoryLinesLocked on every handoff, which
-// forced the next Flush to re-emit every history row on every streaming write.
+// log-style append path (history exceeding the visible region) keeps the newest
+// row observable through the composed frame. L3-2 state-only form: the append
+// updates retained state without painting history rows (the retired path
+// invalidated the viewport backend and re-emitted every row); the unified
+// presenter renders the next frame from that state.
 func TestFixedBottomSurface_StreamingAppendDoesNotRepaintHistory(t *testing.T) {
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
 	// Exceed the visible output region so further writes take the direct-scroll
@@ -138,22 +124,22 @@ func TestFixedBottomSurface_StreamingAppendDoesNotRepaintHistory(t *testing.T) {
 			surface.WriteOutput(io.Discard, fmt.Sprintf("line-%d\n", i))
 		}
 	})
-	output := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		surface.WriteOutput(io.Discard, "line-30\n")
 	})
-	if strings.Contains(output, "\x1b[1;1H") {
-		t.Fatalf("streaming append repainted history row 1 (full-screen redraw): %q", output)
-	}
-	if !strings.Contains(output, "line-30") {
-		t.Fatalf("new history row missing from append output: %q", output)
+	frame := frameDump(surface.ComposedFrameForTest())
+	if !strings.Contains(frame, "line-30") {
+		t.Fatalf("new history row missing from composed frame")
 	}
 }
 
 // TestFixedBottomSurface_OffScreenHistoryHandsOffBeforeHeadroom pins the live
-// bug: lines that leave the visible output region must enter native scrollback
-// immediately, even when total history is still within visible+headroom.
-// Previously handoff waited until visible+40, so typical sessions never put
-// anything into host scrollback and "scroll up" showed nothing.
+// bug: lines that leave the visible output region must advance the logical
+// handoff frontier immediately, even when total history is still within
+// visible+headroom. Previously handoff waited until visible+40, so typical
+// sessions never put anything into host scrollback and "scroll up" showed
+// nothing. L3-2 state-only form: the frontier advance is the observable; the
+// unified presenter owns the scrollback bytes.
 func TestFixedBottomSurface_OffScreenHistoryHandsOffBeforeHeadroom(t *testing.T) {
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 20)
 	surface.ShowPrompt("> ")
@@ -167,17 +153,14 @@ func TestFixedBottomSurface_OffScreenHistoryHandsOffBeforeHeadroom(t *testing.T)
 	if total >= visible+historyWindowHeadroom {
 		total = visible + historyWindowHeadroom - 1
 	}
-	output := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		for i := 0; i < total; i++ {
 			surface.WriteOutput(io.Discard, fmt.Sprintf("offscreen-%d\n", i))
 		}
 	})
-	if !strings.Contains(output, "\x1b[1;") || !strings.Contains(output, "\r\n") {
-		t.Fatalf("expected Codex-aligned DECSTBM handoff once history exceeded visible=%d (total=%d); no handoff sequence", visible, total)
-	}
-	// Oldest off-screen line must appear in the insert stream.
-	if !strings.Contains(output, "offscreen-0") {
-		t.Fatalf("expected oldest off-screen line in scrollback handoff output; total=%d visible=%d", total, visible)
+	frame := frameDump(surface.ComposedFrameForTest())
+	if !strings.Contains(frame, fmt.Sprintf("offscreen-%d", total-1)) {
+		t.Fatalf("newest line missing from composed frame; total=%d visible=%d", total, visible)
 	}
 	history := surface.HistoryWindowForTest()
 	if len(history) != total {
@@ -341,7 +324,7 @@ func TestFixedBottomSurface_WrappedHistoryHandsOffViaPhysicalExpansion(t *testin
 	total := visible + 8
 	longLine := strings.Repeat("x", width+5)
 
-	output := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		for i := 0; i < total; i++ {
 			surface.WriteOutput(io.Discard, fmt.Sprintf("%s-%02d\n", longLine, i))
 		}
@@ -359,15 +342,9 @@ func TestFixedBottomSurface_WrappedHistoryHandsOffViaPhysicalExpansion(t *testin
 	if len(history) != total {
 		t.Fatalf("wrapped history was trimmed before handoff completed: got %d lines want %d", len(history), total)
 	}
-	// Handoff bytes must be the Codex-aligned DECSTBM path.
-	if !strings.Contains(output, "\x1b[1;") || !strings.Contains(output, "\r\n") {
-		t.Fatalf("expected DECSTBM physical-row handoff sequence; total=%d visible=%d", total, visible)
-	}
-	// The oldest wrapped logical line's first physical row must appear in the
-	// handoff stream (expansion preserves content, not just the boundary).
-	if !strings.Contains(output, strings.Repeat("x", width)) {
-		t.Fatalf("oldest wrapped line's physical rows missing from handoff output")
-	}
+	// State-only handoff: the wrapped segment advances the same logical
+	// frontier; the physical-row expansion is now accounted for by
+	// HistoryRowsSnapshot (precondition above) instead of emitted bytes.
 	for i, line := range history {
 		want := fmt.Sprintf("%s-%02d", longLine, i)
 		if line != want {
