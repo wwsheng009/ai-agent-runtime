@@ -2567,12 +2567,20 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 	if r != nil && r.Host != nil {
 		baseSessionID = r.Host.baseRuntimeSessionID()
 	}
-	parentSessionID = firstNonEmptyChatValue(strings.TrimSpace(args.ParentSessionID), strings.TrimSpace(parentSessionID), baseSessionID)
+	parentSessionID = firstNonEmptyChatValue(strings.TrimSpace(parentSessionID), baseSessionID)
+	// Scope is host-derived: resolve the caller to its main agent (the root
+	// session of its tree) so a subagent defaults to its root's tree. The
+	// model cannot name a scope (broker dispatch drops parent_session_id) and
+	// an unresolvable caller fails closed instead of scanning every session.
+	scopeSessionID := r.localAgentScopeSessionID(ctx, parentSessionID)
+	if scopeSessionID == "" {
+		return &toolbroker.AgentListResult{}, nil
+	}
 	if store := r.localAgentRegistryStore(); store != nil {
 		if err := r.materializeLocalAgentRegistry(ctx); err != nil {
 			return nil, err
 		}
-		result, err := r.listLocalAgentsFromRegistry(ctx, parentSessionID, args, store)
+		result, err := r.listLocalAgentsFromRegistry(ctx, scopeSessionID, args, store)
 		if err != nil {
 			return nil, err
 		}
@@ -2602,9 +2610,12 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 		}
 	}
 
-	rootSessionID := parentSessionID
-	if parent := byID[parentSessionID]; parent != nil {
-		rootSessionID = localAgentRootSessionID(parent, parentSessionID)
+	rootSessionID := scopeSessionID
+	if parent := byID[scopeSessionID]; parent != nil {
+		rootSessionID = localAgentRootSessionID(parent, scopeSessionID)
+	}
+	if rootSessionID == "" {
+		return &toolbroker.AgentListResult{}, nil
 	}
 	pathPrefix := strings.TrimSpace(args.PathPrefix)
 	agents := make([]toolbroker.AgentStatusResult, 0)
@@ -2615,10 +2626,7 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 		if !args.IncludeClosed && isClosedLocalAgentSession(session) {
 			continue
 		}
-		if rootSessionID != "" && localAgentRootSessionID(session, "") != rootSessionID && !localAgentHasAncestor(session, parentSessionID, byID) {
-			continue
-		}
-		if parentSessionID != "" && rootSessionID == "" && !localAgentHasAncestor(session, parentSessionID, byID) {
+		if localAgentRootSessionID(session, "") != rootSessionID && !localAgentHasAncestor(session, scopeSessionID, byID) {
 			continue
 		}
 		path := localAgentSessionPath(session)
@@ -4854,6 +4862,27 @@ func localAgentRootSessionID(session *runtimechat.Session, fallback string) stri
 		sessionID = session.ID
 	}
 	return agentcontrol.RootSessionID(session, sessionID, fallback)
+}
+
+// localAgentScopeSessionID resolves a host-supplied caller session id to the
+// main agent (tree root) it belongs to, so a subagent's default scope is its
+// root session's tree instead of its own container id. The root is read from
+// the durable session context (agent_root_session_id); when the session cannot
+// be loaded the caller id is used as-is, and an empty caller id returns "" so
+// callers fail closed.
+func (r *localActorRegistry) localAgentScopeSessionID(ctx context.Context, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
+		return sessionID
+	}
+	session, err := r.Host.SessionStore.Load(ctx, sessionID)
+	if err != nil || session == nil {
+		return sessionID
+	}
+	return localAgentRootSessionID(session, sessionID)
 }
 
 func localAgentChildPath(parent *runtimechat.Session, sessionID string) string {

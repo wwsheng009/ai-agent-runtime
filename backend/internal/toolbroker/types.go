@@ -606,6 +606,10 @@ type WaitAgentArgs struct {
 
 // ListAgentsArgs lists lightweight child-agent sessions under a parent/root.
 type ListAgentsArgs struct {
+	// ParentSessionID is retained for internal/operator callers only. The
+	// model-facing list_agents dispatch derives the scope from the calling
+	// session (its root session) and ignores any model-supplied value, so a
+	// call can never read another agent's tree.
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 	PathPrefix      string `json:"path_prefix,omitempty"`
 	IncludeClosed   bool   `json:"include_closed,omitempty"`

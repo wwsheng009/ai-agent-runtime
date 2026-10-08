@@ -95,9 +95,8 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"reason":  toolArgFieldString,
 	},
 	ToolListAgents: {
-		"include_closed":    toolArgFieldBool,
-		"parent_session_id": toolArgFieldString,
-		"path_prefix":       toolArgFieldString,
+		"include_closed": toolArgFieldBool,
+		"path_prefix":    toolArgFieldString,
 	},
 	ToolSendMessage: {
 		"id":         toolArgFieldString,

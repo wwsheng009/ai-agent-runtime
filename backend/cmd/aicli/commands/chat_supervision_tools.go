@@ -128,14 +128,11 @@ func (c *localSupervisionToolController) decisionScopes(ctx context.Context, par
 }
 
 // callerSessionID is the identity the tool entry acts as: the tool call's own
-// parent session, falling back to the rendered session when the broker passes
-// an empty id.
+// parent session. There is deliberately no rendered-session fallback — a call
+// that cannot name its caller must fail closed ("supervision scope is
+// required") instead of silently reading another session's supervision scope.
 func (c *localSupervisionToolController) callerSessionID(parentSessionID string) string {
-	sessionID := strings.TrimSpace(parentSessionID)
-	if sessionID == "" && c.session != nil {
-		sessionID = strings.TrimSpace(currentRuntimeSessionID(c.session))
-	}
-	return sessionID
+	return strings.TrimSpace(parentSessionID)
 }
 
 func (c *localSupervisionToolController) SupervisionSnapshot(ctx context.Context, parentSessionID string, args toolbroker.SupervisionSnapshotArgs) (*supervision.Digest, error) {

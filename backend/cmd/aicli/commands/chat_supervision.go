@@ -246,17 +246,21 @@ func chatSupervisionBuildReport(ctx context.Context, session *ChatSession, req c
 	if len(report.Scopes) == 0 {
 		return report, fmt.Errorf("supervision scope is required：当前会话缺少 runtime session id")
 	}
+	sessionID := strings.TrimSpace(currentRuntimeSessionID(session))
+	if sessionID == "" {
+		return report, fmt.Errorf("supervision scope is required：当前会话缺少 runtime session id")
+	}
 	controller := chatSupervisionController(session)
 	if controller == nil {
 		return report, fmt.Errorf("当前会话没有 supervision 控制面：本地宿主未启用监督控制面（durable store 未接线）")
 	}
-	digest, err := controller.SupervisionSnapshot(ctx, "", toolbroker.SupervisionSnapshotArgs{Limit: req.Limit})
+	digest, err := controller.SupervisionSnapshot(ctx, sessionID, toolbroker.SupervisionSnapshotArgs{Limit: req.Limit})
 	if err != nil {
 		return report, fmt.Errorf("读取 lifecycle digest 失败：%w", err)
 	}
 	report.Digest = digest
 	if detailed {
-		snapshot, err := controller.SupervisionDescendants(ctx, "", toolbroker.SupervisionDescendantsArgs{
+		snapshot, err := controller.SupervisionDescendants(ctx, sessionID, toolbroker.SupervisionDescendantsArgs{
 			Mode:            "descendants",
 			Health:          "any",
 			IncludeTerminal: false,

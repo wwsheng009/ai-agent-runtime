@@ -945,6 +945,25 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected list_agents result/meta: %#v %#v", rawList, meta)
 	}
 
+	// The scope is host-derived: a model-supplied parent_session_id is ignored
+	// so the call can never read another agent's tree, and the dropped key is
+	// reported back instead of silently steering the lookup.
+	_, scopeMeta, err := broker.Execute(context.Background(), "parent-session", ToolListAgents, map[string]interface{}{
+		"parent_session_id": "other-root-session",
+	})
+	if err != nil {
+		t.Fatalf("list_agents with foreign scope failed: %v", err)
+	}
+	if controller.lastParent != "parent-session" {
+		t.Fatalf("model-supplied parent_session_id changed the scope: parent=%q", controller.lastParent)
+	}
+	if controller.lastList.ParentSessionID != "" {
+		t.Fatalf("model-supplied parent_session_id reached the controller: %#v", controller.lastList)
+	}
+	if ignored, _ := scopeMeta["ignored_args"].([]string); len(ignored) != 1 || ignored[0] != "parent_session_id" {
+		t.Fatalf("expected parent_session_id to be reported as ignored, got %#v", scopeMeta["ignored_args"])
+	}
+
 	rawMsg, meta, err := broker.Execute(context.Background(), "parent-session", ToolSendMessage, map[string]interface{}{
 		"target":  "child-1",
 		"message": "note only",

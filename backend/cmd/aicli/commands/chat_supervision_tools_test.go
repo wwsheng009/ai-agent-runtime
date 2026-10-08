@@ -106,6 +106,31 @@ func TestLocalSupervisionToolController_SnapshotThenAckConverges(t *testing.T) {
 	require.Zero(t, digest.CriticalUnresolved, "acknowledged row must leave the model-facing digest")
 }
 
+// TestLocalSupervisionToolController_RequiresHostDerivedCallerScope pins the
+// fail-closed rule: there is no rendered-session fallback, so a call that
+// cannot name its caller errors instead of silently reading another scope.
+func TestLocalSupervisionToolController_RequiresHostDerivedCallerScope(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	controller := newLocalSupervisionToolController(host, session)
+	require.NotNil(t, controller)
+
+	_, err := controller.SupervisionSnapshot(context.Background(), "", toolbroker.SupervisionSnapshotArgs{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "supervision scope is required")
+
+	_, err = controller.SupervisionDescendants(context.Background(), "", toolbroker.SupervisionDescendantsArgs{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "supervision scope is required")
+
+	_, err = controller.AckLifecycle(context.Background(), "", toolbroker.AckLifecycleArgs{
+		NotificationID: "notification-1",
+		Decision:       "acknowledge",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "supervision scope is required")
+}
+
 // recordingDescendantProvider captures the scope each inspection used, so the
 // tests can assert the model cannot widen it.
 type recordingDescendantProvider struct {

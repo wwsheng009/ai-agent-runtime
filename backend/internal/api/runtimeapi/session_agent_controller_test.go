@@ -85,6 +85,44 @@ func TestSessionAgentController_PathTargetsAndCloseSubtree(t *testing.T) {
 	assert.Equal(t, 3, listResult.Count)
 }
 
+// TestSessionAgentControllerListScopeIsHostDerived pins the same contract for
+// the HTTP host: the model cannot steer list_agents, a subagent defaults to
+// its main agent's tree, and an empty caller fails closed.
+func TestSessionAgentControllerListScopeIsHostDerived(t *testing.T) {
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	defer sessionManager.Stop()
+	defer handler.getSessionHub().StopAll()
+	handler.SetSessionManager(sessionManager)
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agents.MaxDepth = 2
+	handler.SetRuntimeConfig(cfg, "")
+
+	const userID = "user-session-agent-controller-scope"
+	rootA, err := sessionManager.Create(ctx, userID)
+	require.NoError(t, err)
+	rootB, err := sessionManager.Create(ctx, userID)
+	require.NoError(t, err)
+
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+	_, err = controller.Spawn(ctx, rootA.ID, toolbroker.SpawnAgentArgs{ID: "scope-api-a-child"})
+	require.NoError(t, err)
+	_, err = controller.Spawn(ctx, rootB.ID, toolbroker.SpawnAgentArgs{ID: "scope-api-b-child"})
+	require.NoError(t, err)
+
+	list, err := controller.List(ctx, "scope-api-a-child", toolbroker.ListAgentsArgs{ParentSessionID: rootB.ID})
+	require.NoError(t, err)
+	require.Equal(t, 1, list.Count)
+	require.Equal(t, "scope-api-a-child", list.Agents[0].SessionID)
+
+	list, err = controller.List(ctx, "", toolbroker.ListAgentsArgs{})
+	require.NoError(t, err)
+	require.Equal(t, 0, list.Count)
+}
+
 func TestSessionAgentControllerSpawnPersistsRouteContext(t *testing.T) {
 	ctx := context.Background()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)

@@ -547,13 +547,12 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolListAgents,
-				Description: "List lightweight spawn_agent child sessions for the current root session. This is separate from spawn_team task progress.",
+				Description: "List lightweight spawn_agent child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from spawn_team task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"parent_session_id": map[string]interface{}{"type": "string", "description": "Optional parent/root session id. Defaults to the current session."},
-						"path_prefix":       map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter, for example /root."},
-						"include_closed":    map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
+						"path_prefix":    map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter inside the caller's tree, for example /root."},
+						"include_closed": map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
 					},
 				},
 			},
@@ -740,13 +739,12 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolListAgents,
-				Description: "List lightweight spawn_agent child sessions for the current root session. This is separate from spawn_team task progress.",
+				Description: "List lightweight spawn_agent child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from spawn_team task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"parent_session_id": map[string]interface{}{"type": "string", "description": "Optional parent/root session id. Defaults to the current session."},
-						"path_prefix":       map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter, for example /root."},
-						"include_closed":    map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
+						"path_prefix":    map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter inside the caller's tree, for example /root."},
+						"include_closed": map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
 					},
 				},
 			},
@@ -2182,17 +2180,17 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
 		request := ListAgentsArgs{}
-		if value, ok := args["parent_session_id"].(string); ok {
-			request.ParentSessionID = strings.TrimSpace(value)
-		}
 		if value, ok := args["path_prefix"].(string); ok {
 			request.PathPrefix = strings.TrimSpace(value)
 		}
 		if value, ok := args["include_closed"].(bool); ok {
 			request.IncludeClosed = value
 		}
-		parentSessionID := firstNonEmptyToolValue(request.ParentSessionID, strings.TrimSpace(sessionID))
-		result, err := b.AgentSessions.List(ctx, parentSessionID, request)
+		// Scope is host-derived: the calling session's root session (its main
+		// agent). A model-supplied parent_session_id is deliberately ignored so
+		// a call can never read another agent's tree; the dropped key surfaces
+		// through annotateIgnoredBrokerToolArgs.
+		result, err := b.AgentSessions.List(ctx, strings.TrimSpace(sessionID), request)
 		if err != nil {
 			return nil, nil, err
 		}

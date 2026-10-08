@@ -29,7 +29,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolTaskMonitor:          {"cancel", "check_after_ms", "job_id", "max_duration_ms", "task_id"},
 	ToolTaskControl:          {"action", "job_id", "reason", "task_id"},
 	ToolSpawnAgent:           spawnAgentToolArgKeys,
-	ToolListAgents:           {"include_closed", "parent_session_id", "path_prefix"},
+	ToolListAgents:           {"include_closed", "path_prefix"},
 	ToolSendMessage:          {"id", "message", "session_id", "target"},
 	ToolFollowupTask:         {"id", "message", "session_id", "target"},
 	ToolSendInput:            {"id", "interrupt", "message", "session_id"},

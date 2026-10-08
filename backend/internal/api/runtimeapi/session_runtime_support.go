@@ -1748,9 +1748,22 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 	if c == nil || c.handler == nil || c.handler.sessionManager == nil {
 		return nil, fmt.Errorf("session manager not configured")
 	}
-	parentSessionID = firstNonEmptyString(strings.TrimSpace(args.ParentSessionID), strings.TrimSpace(parentSessionID))
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	// Scope is host-derived: resolve the caller to its main agent (the root
+	// session of its tree). The model cannot name a scope (broker dispatch
+	// drops parent_session_id) and an unresolvable caller fails closed
+	// instead of scanning every session.
+	scopeSessionID := parentSessionID
+	if parentSessionID != "" {
+		if parent, err := c.handler.sessionManager.Get(ctx, parentSessionID); err == nil && parent != nil {
+			scopeSessionID = apiAgentRootSessionID(parent, parentSessionID)
+		}
+	}
+	if scopeSessionID == "" {
+		return &toolbroker.AgentListResult{}, nil
+	}
 	if store := c.handler.getAgentControlAgentStore(); store != nil {
-		result, err := c.listAgentsFromRegistry(ctx, parentSessionID, args, store)
+		result, err := c.listAgentsFromRegistry(ctx, scopeSessionID, args, store)
 		if err != nil {
 			return nil, err
 		}
@@ -1758,7 +1771,7 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 			return result, nil
 		}
 	}
-	sessions, err := c.listSessions(ctx, parentSessionID)
+	sessions, err := c.listSessions(ctx, scopeSessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1768,9 +1781,12 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 			byID[strings.TrimSpace(session.ID)] = session
 		}
 	}
-	rootSessionID := parentSessionID
-	if parent := byID[parentSessionID]; parent != nil {
-		rootSessionID = apiAgentRootSessionID(parent, parentSessionID)
+	rootSessionID := scopeSessionID
+	if parent := byID[scopeSessionID]; parent != nil {
+		rootSessionID = apiAgentRootSessionID(parent, scopeSessionID)
+	}
+	if rootSessionID == "" {
+		return &toolbroker.AgentListResult{}, nil
 	}
 	pathPrefix := strings.TrimSpace(args.PathPrefix)
 	agents := make([]toolbroker.AgentStatusResult, 0)
@@ -1781,7 +1797,7 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 		if !args.IncludeClosed && isClosedAPIAgentSession(session) {
 			continue
 		}
-		if rootSessionID != "" && apiAgentRootSessionID(session, "") != rootSessionID && !apiAgentHasAncestor(session, parentSessionID, byID) {
+		if apiAgentRootSessionID(session, "") != rootSessionID && !apiAgentHasAncestor(session, scopeSessionID, byID) {
 			continue
 		}
 		path := apiAgentSessionPath(session)

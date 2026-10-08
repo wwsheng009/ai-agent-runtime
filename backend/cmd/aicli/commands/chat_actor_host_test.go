@@ -1074,6 +1074,71 @@ func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 	}
 }
 
+// TestLocalActorRegistry_ListScopeIsHostDerived pins the scope contract: the
+// model cannot steer list_agents (parent_session_id is ignored), a subagent
+// defaults to its main agent's tree, and an unresolvable caller fails closed
+// instead of scanning every session.
+func TestLocalActorRegistry_ListScopeIsHostDerived(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootA, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create(rootA): %v", err)
+	}
+	rootB, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create(rootB): %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{})
+	host := newLocalOrchestrationTestHost(t, manager, userID, llmRuntime, teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Agents.MaxThreads = 4
+	host.RuntimeConfig.Agents.MaxDepth = 2
+	host.BaseSession = &ChatSession{
+		RuntimeSession: rootA,
+		SessionUserID:  userID,
+	}
+	registry := host.ActorRegistry
+
+	if _, err := registry.Spawn(ctx, rootA.ID, toolbroker.SpawnAgentArgs{ID: "scope-a-child"}); err != nil {
+		t.Fatalf("spawn scope-a-child: %v", err)
+	}
+	if _, err := registry.Spawn(ctx, rootB.ID, toolbroker.SpawnAgentArgs{ID: "scope-b-child"}); err != nil {
+		t.Fatalf("spawn scope-b-child: %v", err)
+	}
+
+	// A subagent caller defaults to its main agent's tree; a foreign
+	// parent_session_id cannot widen or redirect the lookup.
+	list, err := registry.List(ctx, "scope-a-child", toolbroker.ListAgentsArgs{ParentSessionID: rootB.ID})
+	if err != nil {
+		t.Fatalf("list from child caller: %v", err)
+	}
+	if list.Count != 1 || list.Agents[0].SessionID != "scope-a-child" {
+		t.Fatalf("child caller must read its own main-agent tree only: %#v", list)
+	}
+
+	// An unresolvable caller fails closed instead of listing every session.
+	host.BaseSession = nil
+	list, err = registry.List(ctx, "", toolbroker.ListAgentsArgs{})
+	if err != nil {
+		t.Fatalf("list with empty caller: %v", err)
+	}
+	if list == nil || list.Count != 0 {
+		t.Fatalf("empty caller must fail closed, got %#v", list)
+	}
+}
+
 func TestLocalActorRegistrySpawnPersistsDifficultyRouteContext(t *testing.T) {
 	ctx := context.Background()
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
