@@ -41,7 +41,7 @@ func captureEditorStdout(t *testing.T, fn func()) string {
 func TestWriteEditorControlSequenceClaimsViaHook(t *testing.T) {
 	const sequence = "\x1b[?2004h\x1b[?1004h"
 	var claimed []string
-	hooks := &LineEditorHooks{OnTerminalControl: func(sequence string) bool {
+	hooks := LineEditorHooks{OnTerminalControl: func(sequence string) bool {
 		claimed = append(claimed, sequence)
 		return true
 	}}
@@ -56,13 +56,13 @@ func TestWriteEditorControlSequenceClaimsViaHook(t *testing.T) {
 	}
 }
 
-// TestWriteEditorControlSequenceFallsBackToRawWriter：无 hooks 或宿主不认领
-// 时保留 raw 回退（非 unified 编辑器路径的承重行为）。
+// TestWriteEditorControlSequenceFallsBackToRawWriter：未设置 OnTerminalControl
+// 或宿主不认领时保留 raw 回退（非 unified 编辑器路径的承重行为）。
 func TestWriteEditorControlSequenceFallsBackToRawWriter(t *testing.T) {
 	const sequence = "\x1b[?2004l"
-	for name, hooks := range map[string]*LineEditorHooks{
-		"no hooks":  nil,
-		"unclaimed": {OnTerminalControl: func(string) bool { return false }},
+	for name, hooks := range map[string]LineEditorHooks{
+		"no control hook": {},
+		"unclaimed":       {OnTerminalControl: func(string) bool { return false }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			raw := captureEditorStdout(t, func() {

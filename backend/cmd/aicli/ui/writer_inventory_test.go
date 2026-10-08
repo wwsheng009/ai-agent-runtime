@@ -65,7 +65,6 @@ func uiDirectWriterInventory() []uiDirectWriterInventoryEntry {
 		// 绑定，writeEditorControlSequence 是未认领时的 legacy 回退。
 		{File: "inputbox_editor.go", Func: "writeEditorControlSequence", Kind: "os.Std*", Count: 1},
 		{File: "inputbox_editor.go", Func: "method readPromptWithHooksContext", Kind: "os.Std*", Count: 1},
-		{File: "inputbox_editor.go", Func: "method readPrompt", Kind: "os.Std*", Count: 1},
 		{File: "inputbox_editor.go", Func: "method ReadTransientSecretPrompt", Kind: "os.Std*", Count: 2},
 		// status.go Print* 仅由 no-popup/legacy 兜底分支调用（unified 会话
 		// 走与 !unifiedInteractiveOutputMustFailClosed 相反的路径）。

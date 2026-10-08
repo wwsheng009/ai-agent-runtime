@@ -122,23 +122,6 @@ var interactiveInputCarryover struct {
 	bytes []byte
 }
 
-// ReadWithHistoryPrompt reads a single line using a local line editor.
-//
-// The caller is expected to have already rendered the prompt when running in
-// interactive chat mode. This method therefore only redraws the active line and
-// keeps the history state on the InputBox.
-func (ib *InputBox) ReadWithHistoryPrompt(prompt string, onChange func(string)) (string, error) {
-	return ib.readPrompt(prompt, onChange, true, true, true, defaultPasteBurstHoldFirstRune())
-}
-
-// ReadTransientPrompt reads a single line with the same editing surface as
-// ReadWithHistoryPrompt, but it does not add the submitted text to history,
-// suppresses the final submit newline echo, and keeps the first character
-// visible immediately for modal prompts.
-func (ib *InputBox) ReadTransientPrompt(prompt string, onChange func(string)) (string, error) {
-	return ib.readPrompt(prompt, onChange, false, false, true, false)
-}
-
 // ReadTransientSecretPrompt reads a secret value for modal prompts. Interactive
 // terminals use the platform password reader so the submitted text is not
 // echoed or added to history; non-interactive input stays line-buffered for
@@ -159,72 +142,6 @@ func (ib *InputBox) ReadTransientSecretPrompt(prompt string) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
-}
-
-// ReadTransientLine reads a transient response without a visible prompt label.
-// This is used by modal questions that already printed their own prompt text.
-func (ib *InputBox) ReadTransientLine(onChange func(string)) (string, error) {
-	return ib.readPrompt("", onChange, false, false, false, false)
-}
-
-func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory bool, echoSubmit bool, useDefaultPrompt bool, holdFirstRune bool) (string, error) {
-	if ib == nil {
-		return "", io.EOF
-	}
-
-	if prompt == "" && useDefaultPrompt {
-		prompt = ib.GetPrompt()
-	}
-
-	if onChange != nil {
-		onChange("")
-	}
-
-	// Non-interactive terminals keep line-buffered behavior.
-	if !IsInteractiveTerminal() {
-		line, err := readBufferedLine(os.Stdin)
-		if err == nil && keepHistory && strings.TrimSpace(line) != "" {
-			ib.AddToHistory(line)
-		}
-		if onChange != nil {
-			onChange("")
-		}
-		return line, err
-	}
-
-	fd := int(os.Stdin.Fd())
-	state, err := term.MakeRaw(fd)
-	if err != nil {
-		line, readErr := readBufferedLine(os.Stdin)
-		if readErr == nil && strings.TrimSpace(line) != "" {
-			ib.AddToHistory(line)
-		}
-		if onChange != nil {
-			onChange("")
-		}
-		return line, readErr
-	}
-	defer func() {
-		writeEditorControlSequence(nil, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
-		_ = term.Restore(fd, state)
-	}()
-	// 启用 bracketed paste 后，终端会给粘贴块加上明确边界，
-	// 这样我们就能把块内换行当作文本而不是 Enter。
-	// 同时启用 focus change reporting，用于 Codex 风格的失焦通知。
-	writeEditorControlSequence(nil, bracketedPasteEnableSequence+focusChangeEnableSequence)
-	// 提示符已经由调用方渲染到屏幕上了。
-	// 重绘时使用相对光标移动定位输入区，避免依赖会被滚动失效的
-	// `\x1b[s` / `\x1b[u` 绝对锚点（多行粘贴触发滚动后会把同一段输入
-	// 反复打印到错误行）。
-
-	line, readErr := readInteractiveLineWithOptions(os.Stdin, os.Stdout, prompt, ib.history, onChange, echoSubmit, holdFirstRune)
-	if readErr == nil && keepHistory && strings.TrimSpace(line) != "" {
-		ib.AddToHistory(line)
-	}
-	if onChange != nil {
-		onChange("")
-	}
-	return line, readErr
 }
 
 func (ib *InputBox) readPromptWithHooks(prompt string, hooks LineEditorHooks, keepHistory bool, echoSubmit bool, useDefaultPrompt bool, holdFirstRune bool) (string, error) {
@@ -261,10 +178,10 @@ func (ib *InputBox) readPromptWithHooksContext(ctx context.Context, prompt strin
 		return line, readErr
 	}
 	defer func() {
-		writeEditorControlSequence(&hooks, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
+		writeEditorControlSequence(hooks, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
 		_ = term.Restore(fd, state)
 	}()
-	writeEditorControlSequence(&hooks, bracketedPasteEnableSequence+focusChangeEnableSequence)
+	writeEditorControlSequence(hooks, bracketedPasteEnableSequence+focusChangeEnableSequence)
 
 	editorHistory := lineEditorHistory(ib.history, keepHistory)
 	line, readErr := readInteractiveLineWithHooksContext(ctx, os.Stdin, os.Stdout, prompt, editorHistory, nil, &hooks, echoSubmit, holdFirstRune)
@@ -283,14 +200,14 @@ func lineEditorHistory(history []string, enabled bool) []string {
 
 // writeEditorControlSequence delivers one editor-owned terminal mode sequence.
 // Unified hosts claim it via LineEditorHooks.OnTerminalControl so the bytes go
-// through the single terminal writer (TerminalSession); legacy/no-hook callers
-// keep the raw fallback, which stays load-bearing for the non-unified editor
-// path (bracketed paste and focus reporting).
-func writeEditorControlSequence(hooks *LineEditorHooks, sequence string) {
+// through the single terminal writer (TerminalSession); unclaimed callers keep
+// the raw fallback, which stays load-bearing for the non-unified editor path
+// (bracketed paste and focus reporting).
+func writeEditorControlSequence(hooks LineEditorHooks, sequence string) {
 	if sequence == "" {
 		return
 	}
-	if hooks != nil && hooks.OnTerminalControl != nil && hooks.OnTerminalControl(sequence) {
+	if hooks.OnTerminalControl != nil && hooks.OnTerminalControl(sequence) {
 		return
 	}
 	_, _ = WriteTerminalText(os.Stdout, sequence)
@@ -311,6 +228,9 @@ func readBufferedLine(reader io.Reader) (string, error) {
 	return "", nil
 }
 
+// readInteractiveLine / readInteractiveLineWithOptions / readInteractiveLineWithHooks
+// 是无 hooks 的编辑器测试入口：生产交互读经 readPromptWithHooksContext，
+// 这三者仅由包内测试（editor/keymap/completion）使用。
 func readInteractiveLine(reader io.Reader, writer io.Writer, prompt string, history []string, onChange func(string)) (string, error) {
 	return readInteractiveLineWithOptions(reader, writer, prompt, history, onChange, true, defaultPasteBurstHoldFirstRune())
 }

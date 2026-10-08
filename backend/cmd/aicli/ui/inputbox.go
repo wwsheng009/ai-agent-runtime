@@ -141,12 +141,6 @@ func (ib *InputBox) ReadMultiLine() (string, error) {
 	return result, nil
 }
 
-// ReadWithHistory 读取输入（支持历史记录导航）
-func (ib *InputBox) ReadWithHistory() (string, error) {
-	ib.Show()
-	return ib.ReadWithHistoryPrompt(ib.GetPrompt(), nil)
-}
-
 // ReadWithHistoryPromptWithHooks reads a line with history and editor hooks.
 func (ib *InputBox) ReadWithHistoryPromptWithHooks(prompt string, hooks LineEditorHooks) (string, error) {
 	return ib.readPromptWithHooks(prompt, hooks, true, true, true, defaultPasteBurstHoldFirstRune())
