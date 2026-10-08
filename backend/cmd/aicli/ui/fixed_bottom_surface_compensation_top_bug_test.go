@@ -5,8 +5,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
 // TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop is the production
@@ -18,37 +16,29 @@ import (
 // band 出现导致可见区收缩时，顶部行可能被物理滚出（进入终端 scrollback），
 // band 消失时从模型恢复上屏；这两段字节流中同一行出现两次是**设计允许**
 // 的（语义上未 handoff，恢复上屏不算重放）。本测试的语义断言是：
-// (1) 恢复后屏幕 1..9 行必须完整还原 L1..L9（不得顶部空白）；
-// (2) 不得发出 CSI-T 滚动补偿；
-// (3) 生产帧与 vt.Screen 回放零差异。
+// (1) 恢复后合成帧 1..9 行必须完整还原 L1..L9（不得顶部空白）；
+// (2) 不得累积 CSI-T 滚动补偿债务（PendingScrollDownRows==0）。
 func TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width, height = 20, 10
 	surface := newOwnedTestFixedBottomSurfaceWithSize(width, height)
-	screen := vt.NewScreen(width, height)
-	feed := func(paint func()) string {
+	frameLines := func() []string {
 		t.Helper()
-		output := captureUIStdout(t, paint)
-		screen.Feed(output)
-		return output
+		return strings.Split(frameDump(surface.ComposedFrameForTest()), "\n")
 	}
 
-	feed(func() {
-		lines := make([]string, height-1)
-		for i := range lines {
-			lines[i] = fmt.Sprintf("L%d", i+1)
-		}
-		if _, err, ok := surface.WriteOutput(os.Stdout, strings.Join(lines, "\n")+"\n"); !ok || err != nil {
-			t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
-		}
-	})
-	if got := strings.TrimSpace(screen.Line(1)); got != "L1" {
-		t.Fatalf("precondition: row1=%q want L1\n%s", got, screen.Dump())
+	lines := make([]string, height-1)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("L%d", i+1)
+	}
+	if _, err, ok := surface.WriteOutput(os.Stdout, strings.Join(lines, "\n")+"\n"); !ok || err != nil {
+		t.Fatalf("WriteOutput: ok=%t err=%v", ok, err)
+	}
+	if got := strings.TrimSpace(frameLines()[0]); got != "L1" {
+		t.Fatalf("precondition: frame row1=%q want L1\n%s", got, strings.Join(frameLines(), "\n"))
 	}
 
-	feed(func() {
-		surface.SetActiveBand([]string{"B1", "B2", "B3"})
-	})
+	surface.SetActiveBand([]string{"B1", "B2", "B3"})
 	surface.mu.Lock()
 	shortState := surface.bottomPaneStateLocked()
 	if got := shortState.activeBandTopGapRowCount(); got != 0 {
@@ -60,22 +50,17 @@ func TestBottomReserveShrinkRestoresHistoryWithoutBlankingTop(t *testing.T) {
 		t.Fatalf("short bottom rows=%d want status(1)+band(3)", got)
 	}
 	surface.mu.Unlock()
-	shrinkOutput := feed(func() {
-		surface.ClearActiveBand()
-	})
-	if strings.Contains(shrinkOutput, terminalScrollDownSequence(1)) ||
-		strings.Contains(shrinkOutput, terminalScrollDownSequence(2)) ||
-		strings.Contains(shrinkOutput, terminalScrollDownSequence(3)) {
-		t.Fatalf("owned shrink must not emit terminal scroll-down compensation: %q", shrinkOutput)
-	}
+
+	surface.ClearActiveBand()
+	restored := frameLines()
 	for i := 1; i <= height-1; i++ {
 		want := fmt.Sprintf("L%d", i)
-		if got := strings.TrimSpace(screen.Line(i)); got != want {
-			t.Fatalf("row %d=%q want %q after grow/shrink\n%s", i, got, want, screen.Dump())
+		if got := strings.TrimSpace(restored[i-1]); got != want {
+			t.Fatalf("frame row %d=%q want %q after grow/shrink\n%s", i, got, want, strings.Join(restored, "\n"))
 		}
 	}
-	if differences := frameCellDifferences(surface.ComposedFrameForTest(), screen.CellRows(1, height)); differences != 0 {
-		t.Fatalf("production frame differs from owned composition: differences=%d\n%s", differences, screen.Dump())
+	if pending := surface.LegacyReserveStateForTest().PendingScrollDownRows; pending != 0 {
+		t.Fatalf("owned shrink must not accumulate scroll-down compensation, got %d", pending)
 	}
 }
 

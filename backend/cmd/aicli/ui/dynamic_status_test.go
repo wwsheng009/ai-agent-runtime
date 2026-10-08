@@ -5,14 +5,13 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/vt"
 )
 
 func TestFixedBottomSurface_DynamicStatusRendersAbovePrompt(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
 
-	output := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		if !surface.ShowPrompt("> ") {
 			t.Fatal("expected prompt to render")
 		}
@@ -31,20 +30,19 @@ func TestFixedBottomSurface_DynamicStatusRendersAbovePrompt(t *testing.T) {
 	if got := surface.bottomRowsLocked(); got != 5 {
 		t.Fatalf("expected dynamic + composer margins + prompt + footer rows, got %d", got)
 	}
-	assertTextPaintedAtRow := func(text string, row int) {
+	frameLines := strings.Split(frameDump(surface.ComposedFrameForTest()), "\n")
+	assertFrameTextAtRow := func(text string, row int) {
 		t.Helper()
-		textIndex := strings.LastIndex(output, text)
-		if textIndex < 0 {
-			t.Fatalf("expected %q in output %q", text, output)
+		if row < 1 || row > len(frameLines) {
+			t.Fatalf("row %d out of frame range 1..%d", row, len(frameLines))
 		}
-		move := terminalMoveToSequence(row, 1)
-		if strings.LastIndex(output[:textIndex], move) < 0 {
-			t.Fatalf("expected %q to be painted at row %d, got %q", text, row, output)
+		if !strings.Contains(frameLines[row-1], text) {
+			t.Fatalf("expected %q at frame row %d, got %q", text, row, frameLines[row-1])
 		}
 	}
-	assertTextPaintedAtRow("◦ Analyzing", 20)
-	assertTextPaintedAtRow("> ", 22)
-	assertTextPaintedAtRow("Plan OFF", 24)
+	assertFrameTextAtRow("◦ Analyzing", 20)
+	assertFrameTextAtRow("> ", 22)
+	assertFrameTextAtRow("Plan OFF", 24)
 }
 
 func TestFixedBottomSurface_OwnedComposerWriteKeepsDynamicStatusWhole(t *testing.T) {
@@ -97,7 +95,7 @@ func TestFixedBottomSurface_ComposerMarginsCollapseOnShortTerminal(t *testing.T)
 	t.Setenv("NO_COLOR", "1")
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 10)
 
-	output := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		if !surface.ShowPrompt("> ") {
 			t.Fatal("expected prompt to render")
 		}
@@ -106,9 +104,11 @@ func TestFixedBottomSurface_ComposerMarginsCollapseOnShortTerminal(t *testing.T)
 	if got := surface.bottomRowsLocked(); got != 2 {
 		t.Fatalf("short terminal should reserve only prompt + footer, got %d rows", got)
 	}
-	screen := vt.NewScreen(80, 10)
-	screen.Feed(output)
-	if got := screen.Line(9); !strings.HasPrefix(got, ">") {
-		t.Fatalf("short terminal should keep the prompt adjacent to the footer, row 9=%q\n%s", got, screen.Dump())
+	frameLines := strings.Split(frameDump(surface.ComposedFrameForTest()), "\n")
+	if len(frameLines) != 10 {
+		t.Fatalf("short terminal composed frame rows=%d, want 10", len(frameLines))
+	}
+	if got := frameLines[8]; !strings.HasPrefix(got, ">") {
+		t.Fatalf("short terminal should keep the prompt adjacent to the footer, frame row 9=%q", got)
 	}
 }

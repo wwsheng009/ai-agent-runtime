@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -114,13 +115,13 @@ func TestFacadeAction_PosterRejectFallsBackToSync(t *testing.T) {
 	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
 	surface.SetUIActorPoster(func(UIAction) bool { return false })
 
-	out := captureUIStdout(t, func() {
+	captureUIStdout(t, func() {
 		if !surface.ShowPrompt("> ") {
 			t.Fatal("sync fallback should render prompt")
 		}
 	})
-	if out == "" {
-		t.Fatal("sync fallback produced no output")
+	if frame := frameDump(surface.ComposedFrameForTest()); !strings.Contains(frame, ">") {
+		t.Fatalf("sync fallback should render prompt into composed frame:\n%s", frame)
 	}
 	surface.mu.Lock()
 	if surface.promptLine != "> " {
