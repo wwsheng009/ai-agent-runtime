@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -1653,7 +1652,6 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 			// history into rows freed by a shrink. Legacy multi-pass paint and
 			// scroll-down compensation are not used on this path.
 			s.applyLayoutLocked()
-			s.renderOwnedViewportLocked()
 			if restorePromptCursor {
 				s.restoreStoredPromptCursorLocked()
 			} else {
@@ -2343,7 +2341,6 @@ func (s *FixedBottomSurface) clearPopupImpl() {
 	WithTerminalWriteLock(func() {
 		s.applyLayoutLocked()
 		if s.ownedViewport {
-			s.reconcileOwnedViewportLocked()
 			return
 		}
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
@@ -2395,7 +2392,6 @@ func (s *FixedBottomSurface) clearPopupPreserveCursorImpl() {
 		}
 		s.applyLayoutLocked()
 		if s.ownedViewport {
-			s.reconcileOwnedViewportLocked()
 			return
 		}
 		s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
@@ -2463,7 +2459,6 @@ func (s *FixedBottomSurface) clearPopupForOwnerPreserveCursorImpl(owner string) 
 		}
 		s.applyLayoutLocked()
 		if s.ownedViewport {
-			s.reconcileOwnedViewportLocked()
 			return
 		}
 		s.clearPopupAreaLocked(previousRows, previousGapRows)
@@ -2520,7 +2515,6 @@ func (s *FixedBottomSurface) clearPopupHandlePreserveCursorImpl(handle PopupHand
 		}
 		s.applyLayoutLocked()
 		if s.ownedViewport {
-			s.reconcileOwnedViewportLocked()
 			return
 		}
 		s.clearPopupAreaLocked(previousRows, previousGapRows)
@@ -3182,7 +3176,6 @@ func (s *FixedBottomSurface) renderStatusLocked() {
 		return
 	}
 	if s.ownedViewport {
-		s.renderOwnedViewportLocked()
 		return
 	}
 	// Legacy body removed (Phase 6): owned mode handles status rendering via
@@ -3202,7 +3195,6 @@ func (s *FixedBottomSurface) renderPopupLocked() {
 		return
 	}
 	if s.ownedViewport {
-		s.renderOwnedViewportLocked()
 		return
 	}
 	// Legacy body removed (Phase 6): owned mode handles popup rendering via
@@ -3502,7 +3494,6 @@ func (s *FixedBottomSurface) renderPromptRowsLocked(clear bool) {
 		return
 	}
 	if s.ownedViewport {
-		s.renderOwnedViewportLocked()
 		return
 	}
 	// Legacy body removed (Phase 6): owned mode handles prompt rendering via
@@ -4464,29 +4455,9 @@ func (s *FixedBottomSurface) commitExcessHistoryToScrollbackLocked() bool {
 		if len(softLines) > 0 {
 			softStart, softSuffixOwned = s.ownedHistorySuffixStartLocked(softLines)
 		}
-		segment := s.historyWindow[s.handoffFrontier.Value():needHandedOff]
-		var handoff []string
-		if s.historySegmentIsSinglePhysicalRowsLocked(segment) {
-			// Fast path: every logical line is exactly one terminal row, so
-			// write the styled source verbatim (preserves ANSI styling in
-			// native scrollback).
-			handoff = append([]string(nil), segment...)
-		} else {
-			// Wrapped segment: expand each logical line into its physical
-			// rows so the DECSTBM \r\n scroll count stays 1:1 with the
-			// terminal. Rows are plain text; the owned full-frame repaint
-			// immediately re-renders the visible window from styled source.
-			handoff = s.expandHistorySegmentToPhysicalTextLocked(segment)
-			if len(handoff) == 0 {
-				return false
-			}
-		}
-		if !s.insertHistoryLinesLocked(handoff) {
-			// A failed terminal write must not advance the logical boundary:
-			// doing so would make these rows permanently disappear from future
-			// handoff attempts.
-			return false
-		}
+		// L3-2: physical scrollback emission retired (state-only). Advance the
+		// logical handoff frontier and drop soft-output ownership without
+		// emitting bytes; the retained window keeps the dual-retain accounting.
 		s.handoffFrontier.AdvanceTo(needHandedOff, len(s.historyWindow))
 		if s.softOutput.Valid() && (!softSuffixOwned || s.handoffFrontier.Value() > softStart) {
 			// Native scrollback is immutable. Once handoff reaches any part of
@@ -4521,61 +4492,4 @@ func (s *FixedBottomSurface) softTrimRetainedHistoryLocked(keep int) {
 	}
 	s.historyWindow = append([]string(nil), s.historyWindow[drop:]...)
 	s.handoffFrontier.TrimPrefix(drop, len(s.historyWindow))
-}
-
-// insertHistoryLinesLocked is the single primitive for moving history into
-// native scrollback. Cursor-neutral. Codex-aligned DECSTBM path:
-//
-//  1. Limit the scroll region to rows 1..regionBottom (above the bottom band).
-//  2. Park the cursor on the last row of that region.
-//  3. For each history line emit "\r\n" then the line — the LF at the region
-//     bottom scrolls the top of the region into host scrollback without
-//     touching the reserved bottom band.
-//
-// This must be the ONLY path for history to reach scrollback. CSI T (Scroll
-// Down) is wrong: it does not enter scrollback and corrupts the double-buffer
-// front state. Do not write at row 1 of a multi-row region either — that only
-// advances the cursor downward and never scrolls until the region is full.
-func (s *FixedBottomSurface) insertHistoryLinesLocked(rows []string) bool {
-	if s == nil || s.terminal == nil || len(rows) == 0 {
-		return false
-	}
-	height := s.terminal.Height()
-	if height < 1 {
-		height = 24
-	}
-	outputBottom := outputBottomRowForHeight(height, s.bottomRowsLocked())
-	_, ok := s.insertHistoryLinesInRegionLocked(rows, outputBottom)
-	return ok
-}
-
-// insertHistoryLinesInRegionLocked is the parameterized scroll-region form of
-// insertHistoryLinesLocked. The default form uses rows 1..outputBottom (above
-// the reserved bottom band); direct-scroll appends pass a narrower region that
-// additionally excludes the ActiveBand so a commit scroll never displaces the
-// live stream viewport. It returns the emitted handoff plan so callers can
-// mirror the identical bytes to non-stdout capture writers.
-func (s *FixedBottomSurface) insertHistoryLinesInRegionLocked(rows []string, regionBottom int) (renderengine.HandoffPlan, bool) {
-	if s == nil || s.terminal == nil || len(rows) == 0 {
-		return renderengine.HandoffPlan{}, false
-	}
-	if !s.physicalWritesEnabledLocked() {
-		// Native scrollback is a physical effect. Retain the source rows and do
-		// not advance handoff frontiers while the unified presenter is active.
-		return renderengine.HandoffPlan{}, false
-	}
-	width, height := s.terminal.Width(), s.terminal.Height()
-	if width < 1 || height < 1 {
-		return renderengine.HandoffPlan{}, false
-	}
-	if regionBottom < 1 {
-		regionBottom = 1
-	}
-	// Presenter owns the cursor-neutral DECSTBM bytes and batches them as one
-	// handoff plan, so no Terminal fmt.Print call can interleave with a frame.
-	plan := renderengine.NewHandoffPlan(height, regionBottom, rows)
-	if err := s.flushHandoffHoldingLock(TerminalOutput(), plan); err != nil {
-		return renderengine.HandoffPlan{}, false
-	}
-	return plan, true
 }
