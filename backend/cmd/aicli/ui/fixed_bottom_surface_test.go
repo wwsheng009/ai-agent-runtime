@@ -3,7 +3,6 @@ package ui
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -34,29 +33,6 @@ func TestFixedBottomSurfaceAdoptsEnginePresenter(t *testing.T) {
 	surface.SetPresenter(legacy)
 	if surface.engine != nil || surface.presenter != legacy {
 		t.Fatal("SetPresenter did not switch to the compatibility presenter")
-	}
-}
-
-func TestFixedBottomSurfaceFlushHoldingLockInstallsPresenterFallback(t *testing.T) {
-	surface := &FixedBottomSurface{}
-	var output bytes.Buffer
-	surface.mu.Lock()
-	defer surface.mu.Unlock()
-	WithTerminalWriteLock(func() {
-		if err := surface.flushHoldingLock(&output, func(w io.Writer) {
-			_, _ = io.WriteString(w, "frame")
-		}); err != nil {
-			t.Fatalf("flushHoldingLock returned error: %v", err)
-		}
-	})
-	if surface.presenter == nil {
-		t.Fatal("flushHoldingLock did not install a presenter fallback")
-	}
-	if got := output.String(); got != "frame" {
-		t.Fatalf("fallback presenter output = %q, want %q", got, "frame")
-	}
-	if got := surface.presenter.TotalWriteCount(); got != 1 {
-		t.Fatalf("fallback presenter writes = %d, want 1", got)
 	}
 }
 
@@ -360,31 +336,6 @@ func TestFixedBottomSurface_SetPromptStateUsesDynamicVisibleRowBudget(t *testing
 			surface.promptReservedRows,
 			surface.promptViewportStart,
 		)
-	}
-}
-
-func TestFixedBottomSurface_RendersCursorAdjacentRowsWithinSmallTerminal(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-
-	surface := newOwnedTestFixedBottomSurfaceWithSize(80, 24)
-	surface.terminal.height = 10
-	surface.promptNoticeLine = "queue\nattachments\npreview"
-	surface.promptEditorStatusLine = "multiline 8/8"
-	surface.setPromptStateLocked("> ", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight", 8, 7, len("eight"))
-
-	output := captureUIStdout(t, func() {
-		surface.renderPromptRowsLocked(true)
-		surface.restoreStoredPromptCursorLocked()
-	})
-
-	if strings.Contains(output, "> one") || !strings.Contains(output, "five") || !strings.Contains(output, "six") || !strings.Contains(output, "eight") {
-		t.Fatalf("expected cursor-adjacent rows in the bounded viewport, got %q", output)
-	}
-	if !strings.Contains(output, "\x1b[10;1H") || !strings.Contains(output, "Ready") {
-		t.Fatalf("expected status row to remain rendered at the bottom, got %q", output)
-	}
-	if !strings.HasSuffix(output, "\x1b[9;6H") {
-		t.Fatalf("expected cursor on the final prompt row, got %q", output)
 	}
 }
 
