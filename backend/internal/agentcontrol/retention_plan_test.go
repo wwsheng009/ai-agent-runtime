@@ -41,6 +41,57 @@ func purgeStatementPlan(t *testing.T, store *SQLiteGlobalAgentRegistryStore, sta
 	return strings.Join(details, " | ")
 }
 
+// TestWakeOverflowCountStaysIndexUsable pins the observe-mode overflow count to
+// the covering (agent_id, status) index. The statement is the reconcile pass's
+// only unbounded read of the append-only wake log, and its shape decides whether
+// a pass streams the index or materializes + sorts the whole non-terminal slice:
+// the previous ROW_NUMBER window cost 1.1s on a 200k-row log natively and tens
+// of seconds under wasm SQLite — the reconciler's immediate startup pass was the
+// dominant CPU consumer of a resume (86% of a 25s profile). Without the covering
+// pair the per-agent aggregate degrades to one random table lookup per row.
+func TestWakeOverflowCountStaysIndexUsable(t *testing.T) {
+	store := newTestGlobalAgentRegistryStore(t)
+	require.NoError(t, store.ensure())
+	seedNonTerminalWakeRows(t, store, 20000, 200)
+	if _, err := store.db.ExecContext(context.Background(), "ANALYZE"); err != nil {
+		t.Fatalf("analyze agent registry: %v", err)
+	}
+	keep := 200
+	plan := purgeStatementPlan(t, store, countAgentWakeActiveOverflowSQL,
+		keep, keep, AgentStatusClosed, AgentStatusStale)
+	require.Contains(t, plan, "idx_agent_control_agent_wake_agent_status",
+		"the overflow count must stream the covering (agent_id, status) index, got plan: %s", plan)
+	require.NotContains(t, plan, "TEMP B-TREE",
+		"the per-agent aggregate must not materialize a sort, got plan: %s", plan)
+	t.Logf("overflow count plan: %s", plan)
+}
+
+// seedNonTerminalWakeRows appends rows evenly across agents, all non-terminal
+// (NULL status), so the aggregate has one overflowing group per agent.
+func seedNonTerminalWakeRows(t testing.TB, store *SQLiteGlobalAgentRegistryStore, rows, agents int) {
+	t.Helper()
+	require.NoError(t, store.ensure(), "the fixture writes rows through the store's own connection")
+	tx, err := store.db.Begin()
+	require.NoError(t, err)
+	stmt, err := tx.Prepare(`
+		INSERT INTO agent_control_agent_wake_events (
+			agent_id, root_session_id, agent_path, depth, status, event_kind, created_at
+		) VALUES (?, ?, ?, 1, NULL, 'upsert', ?)`)
+	require.NoError(t, err)
+	defer func() { _ = stmt.Close() }()
+	stamp := formatAgentTime(time.Now().UTC())
+	perAgent := rows / agents
+	for a := 0; a < agents; a++ {
+		agentID := fmt.Sprintf("wake-overflow-%04d", a)
+		path := "/root/" + agentID
+		for i := 0; i < perAgent; i++ {
+			_, err = stmt.Exec(agentID, "wake-root", path, stamp)
+			require.NoError(t, err)
+		}
+	}
+	require.NoError(t, tx.Commit())
+}
+
 // seedAgedTerminalRows fills the fixture with raw SQL: these tests care about
 // row counts and ages, not about the identity rules UpsertAgentControlAgent
 // enforces (which would append a wake event per row and dominate the fixture).
