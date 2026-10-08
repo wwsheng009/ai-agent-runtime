@@ -369,43 +369,6 @@ func (s *FixedBottomSurface) presenterLocked() *renderengine.Presenter {
 	return s.presenter
 }
 
-func (s *FixedBottomSurface) flushHoldingLock(writer io.Writer, render func(io.Writer)) error {
-	if s == nil {
-		return nil
-	}
-	if !s.physicalWritesEnabledLocked() {
-		return nil
-	}
-	if s.engine != nil {
-		return s.engine.FlushHoldingLock(writer, render)
-	}
-	if presenter := s.presenterLocked(); presenter != nil {
-		return presenter.FlushHoldingLock(writer, render)
-	}
-	// Owned viewport writes must always use the frame presenter, even when a
-	// synthetic surface was assembled without the normal Engine wiring. This
-	// keeps the fallback deterministic and avoids reintroducing direct writes.
-	s.presenter = renderengine.NewPresenter()
-	return s.presenter.FlushHoldingLock(writer, render)
-}
-
-func (s *FixedBottomSurface) flushHandoffHoldingLock(writer io.Writer, plan renderengine.HandoffPlan) error {
-	if s == nil {
-		return nil
-	}
-	if !s.physicalWritesEnabledLocked() {
-		return nil
-	}
-	if s.engine != nil {
-		return s.engine.FlushHandoffHoldingLock(writer, plan)
-	}
-	if presenter := s.presenterLocked(); presenter != nil {
-		return presenter.FlushHandoffHoldingLock(writer, plan)
-	}
-	s.presenter = renderengine.NewPresenter()
-	return s.presenter.FlushHandoffHoldingLock(writer, plan)
-}
-
 func (s *FixedBottomSurface) Enable() bool {
 	if s == nil || s.terminal == nil {
 		return false
@@ -648,25 +611,10 @@ func (s *FixedBottomSurface) SettleOutputDebt() {
 		// release repaint recomposes the frame from retained state.
 		return
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Keep geometry/debt bookkeeping coherent for the compatibility surface,
-		// but do not let this legacy maintenance hook move the real cursor or
-		// flush a scroll-region sequence while TerminalSession owns the writer.
-		s.applyLayoutLocked()
-		return
-	}
-	WithTerminalWriteLock(func() {
-		if s.ownedViewport {
-			// Owned frames recompose from historyWindow; there is no CSI-T
-			// shrink debt or absorb-scroll debt to flush.
-			s.applyLayoutLocked()
-			s.renderOwnedViewportLocked()
-			s.restoreStoredPromptCursorLocked()
-			return
-		}
-		s.applyLayoutLocked()
-		s.moveToOutputLocked()
-	})
+	// State-only maintenance hook: keep geometry/debt bookkeeping coherent for
+	// the compatibility surface. Physical paints (owned full-frame flush or the
+	// legacy cursor park) were retired in L3-2; TerminalSession owns the writer.
+	s.applyLayoutLocked()
 }
 
 // SyncTerminalGeometry re-probes terminal size and applies scroll-region layout
@@ -839,20 +787,11 @@ func (s *FixedBottomSurface) BeginOutput() {
 	}
 	if s.ownedViewport {
 		// Permanent output must go through WriteOutput so it enters the retained
-		// transcript. BeginOutput remains a compatibility hook for callers that
-		// only need to dismiss transient UI.
+		// transcript. BeginOutput remains a state-only compatibility hook for
+		// callers that only need to dismiss transient UI.
 		return
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter owns the screen; suppress legacy cursor park.
-		return
-	}
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		// Raw writers (fmt.Println after beginDirectInteractiveOutput) paint at
-		// the cursor this call parks.
-		s.moveToOutputLocked()
-	})
+	// Legacy cursor park retired in L3-2: the unified presenter owns the screen.
 }
 
 func (s *FixedBottomSurface) PromptCursorPrefix(rowOffset, col int) (string, bool) {
@@ -949,260 +888,20 @@ func (s *FixedBottomSurface) writeOutput(writer io.Writer, text string, trackSof
 	if !s.enabled {
 		return 0, nil, false
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Treat the semantic write as consumed while retaining exactly the state
-		// needed by snapshots/recovery. No caller-provided writer is touched: a
-		// bytes.Buffer is still a physical observation point for tests and must be
-		// fenced just like os.Stdout.
-		output := normalizeFixedSurfaceOutputText(text)
-		if trackSoft {
-			s.noteSoftOutputLocked(text)
-		} else {
-			s.invalidateSoftOutputLocked()
-		}
-		s.appendHistoryWindowLocked(text)
-		s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
-		return len(output), nil, true
+	// State-only semantics (physical paint retired in L3-2): treat the semantic
+	// write as consumed while retaining exactly the state needed by
+	// snapshots/recovery. No caller-provided writer is touched: a bytes.Buffer
+	// is still a physical observation point for tests and must stay fenced just
+	// like os.Stdout.
+	output := normalizeFixedSurfaceOutputText(text)
+	if trackSoft {
+		s.noteSoftOutputLocked(text)
+	} else {
+		s.invalidateSoftOutputLocked()
 	}
-	var n int
-	var err error
-	WithTerminalWriteLock(func() {
-		if s.ownedViewport {
-			output := normalizeFixedSurfaceOutputText(text)
-			if trackSoft {
-				s.noteSoftOutputLocked(text)
-			} else {
-				s.invalidateSoftOutputLocked()
-			}
-			s.appendHistoryWindowLocked(text)
-			n = len(output)
-			s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
-			if s.leaseID != 0 {
-				// Lease active: retain state only; the release repaint
-				// flushes the frame.
-				return
-			}
-			if s.shouldAppendDirectLocked() {
-				// History now exceeds the visible region: write through the native
-				// scroll region (log-style natural scrolling) instead of a
-				// full-frame repaint. If the rewriteable soft tail no longer fits
-				// the scroll region, drop soft ownership so reflow cannot rewrite
-				// rows that scrolled off screen.
-				if trackSoft && s.softOutput.Valid() {
-					height := s.terminal.Height()
-					if height < 1 {
-						height = 24
-					}
-					if s.softOutput.LineCount() > s.directScrollRegionRowsLocked(height) {
-						s.invalidateSoftOutputLocked()
-					}
-				}
-				s.appendOwnedDirectPaintLocked(writer, output)
-			} else {
-				s.renderOwnedViewportLocked()
-			}
-			// Live TTY paint already went through the double-buffer above. Mirror
-			// plain text only to non-stdout writers so buffer/file capture paths
-			// (and tests that assert irreversible scrollback bytes) still see
-			// the drained head without double-painting the interactive screen.
-			if writer != os.Stdout {
-				if wn, werr := io.WriteString(writer, output); werr != nil {
-					err = werr
-					n = wn
-				}
-			}
-			s.restoreStoredPromptCursorLocked()
-			return
-		}
-		if s.leaseID != 0 {
-			// Lease active: absorb legacy-mode writes without emitting bytes.
-			return
-		}
-		s.applyLayoutLocked()
-		s.moveToOutputLocked()
-		output := normalizeFixedSurfaceOutputText(text)
-		n, err = io.WriteString(writer, output)
-		if n > 0 {
-			fullWrite := err == nil && n == len(output)
-			if fullWrite {
-				if trackSoft {
-					s.noteSoftOutputLocked(text)
-				} else {
-					// Foreign/plain writes break 1:1 soft ownership at the surface
-					// boundary so callers cannot forget a second invalidate.
-					s.invalidateSoftOutputLocked()
-				}
-				s.appendHistoryWindowLocked(text)
-				// Trailing newline parks the cursor on a blank row at the output
-				// bottom. Later bottom-reserve growth must absorb that blank or it
-				// becomes a visible hole above the active band / prompt.
-				s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
-			} else {
-				// A short/erroring writer leaves only an unknown byte prefix on
-				// screen. Restart ownership from future writes; once a complete
-				// output region has accumulated, owned restore becomes safe again.
-				s.invalidateSoftOutputLocked()
-				s.resetOwnedHistoryLocked()
-				written := output
-				if n < len(written) {
-					written = written[:n]
-				}
-				s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(written, "\n")
-			}
-		}
-		s.restoreStoredPromptCursorLocked()
-	})
-	return n, err, true
-}
-
-// shouldAppendDirectLocked reports whether the committed history now exceeds
-// the visible scroll region, in which case newly written rows should go
-// through the native scroll region (log-style natural scrolling) instead of a
-// full-frame repaint. The history model must already include the pending
-// write (appendHistoryWindowLocked ran before this check).
-func (s *FixedBottomSurface) shouldAppendDirectLocked() bool {
-	if s == nil || s.terminal == nil {
-		return false
-	}
-	height := s.terminal.Height()
-	if height < 1 {
-		height = 24
-	}
-	region := s.directScrollRegionRowsLocked(height)
-	// Logical lines never expand to fewer physical rows, so a window that
-	// already exceeds the scroll region in logical lines cannot fit in the
-	// visible area. Take this lower-bound fast path in steady state instead of
-	// expanding the full retained history on every streaming write (the
-	// subsequent stageOwnedFrameLocked expands it again for rendering).
-	if len(s.historyWindow) > region {
-		return true
-	}
-	return len(s.expandHistoryLinesLocked(s.historyWindow)) > region
-}
-
-// directScrollRegionRowsLocked returns the number of rows available for
-// natural log scrolling: the output region minus the ActiveBand rows that
-// stay anchored above the prompt. The band is excluded from the scroll region
-// so a commit scroll never displaces the live stream viewport.
-func (s *FixedBottomSurface) directScrollRegionRowsLocked(height int) int {
-	regionBottom := outputBottomRowForHeight(height, s.bottomRowsLocked()) - s.bottomPaneStateLocked().activeBandVisibleRowCount()
-	if regionBottom < 1 {
-		regionBottom = 1
-	}
-	return regionBottom
-}
-
-// appendOwnedDirectPaintLocked writes the rows this write added through the
-// native scroll region so the terminal scrolls naturally like a log once
-// history exceeds the visible region: each \r\n parks at the region bottom
-// and scrolls the region up one row before the row content is written,
-// exactly like insertHistoryLinesLocked. The scroll is the single text entry
-// into native scrollback: rows pushed off the top are the only rows that
-// enter it, and only the newly added rows are ever re-emitted (single scroll
-// channel, INV-SCROLL-01). The handoff frontier advances as bookkeeping for
-// the composed-frame window; the double buffer is mirrored with
-// ApplyRegionAppend instead of a CommitRange coverage compensation (D6) so
-// the following flush only emits the bottom-pane delta
-// (ActiveBand/prompt/status). Callers hold the surface lock and the terminal
-// write lock.
-func (s *FixedBottomSurface) appendOwnedDirectPaintLocked(writer io.Writer, output string) {
-	if s == nil || s.terminal == nil || output == "" {
-		return
-	}
-	height := s.terminal.Height()
-	if height < 1 {
-		height = 24
-	}
-	regionBottom := s.directScrollRegionRowsLocked(height)
-	// Paint only the rows this write added (appendHistoryWindowLocked already
-	// captured them; partial-line coalescing may have merged the first segment
-	// into the previous retained row, so take the window tail). Rows already
-	// on screen or in scrollback are never re-emitted.
-	added := len(strings.Split(strings.TrimSuffix(output, "\n"), "\n"))
-	if added < 1 {
-		return
-	}
-	window := s.historyWindow
-	if added > len(window) {
-		added = len(window)
-	}
-	rows := window[len(window)-added:]
-	// Paint through the single scroll primitive
-	// (insertHistoryLinesInRegionLocked) with the band-excluding region: the
-	// DECSTBM scroll bytes are constructed in exactly one place
-	// (INV-SCROLL-01: one scroll channel). A wrapped visible tail is expanded
-	// to physical rows with re-emitted SGR so the \r\n scroll count stays 1:1
-	// with terminal rows (INV-SCROLL-02: logical/physical alignment; the
-	// direct-scroll path does not repaint the transcript afterwards, so the
-	// written rows must carry their own styling).
-	paint := rows
-	if !s.historySegmentIsSinglePhysicalRowsLocked(rows) {
-		paint = s.expandHistoryLinesToStyledTextLocked(rows)
-		if len(paint) == 0 {
-			return
-		}
-	}
-	// The caller already holds terminalWriteMu through writeOutput. Reuse the
-	// shared handoff plan/presenter without reacquiring the non-reentrant lock.
-	plan, ok := s.insertHistoryLinesInRegionLocked(paint, regionBottom)
-	if !ok {
-		return
-	}
-	if writer != os.Stdout {
-		_, _ = plan.WriteTo(writer)
-	}
-	// The terminal scrolled once per painted physical row; rows pushed off the
-	// top entered native scrollback. Advance the frontier (bookkeeping for the
-	// composed-frame window: rows older than the visible tail are reached by
-	// native scrollback only and never re-painted).
-	visible := s.visibleOutputRowsLocked()
-	if visible < 1 {
-		visible = 1
-	}
-	if keep := len(s.historyWindow) - visible; keep > 0 {
-		s.handoffFrontier.AdvanceTo(keep, len(s.historyWindow))
-	}
-	// Dual-retain bound (Phase 2 transitional form of the D9 trim): drop
-	// already-handed-off rows past visible+headroom so the retained window
-	// stays bounded until the mutableRows rework removes headroom semantics.
-	keepForRestore := visible + historyWindowHeadroom
-	if keepForRestore > historyWindowMaxLines {
-		keepForRestore = historyWindowMaxLines
-	}
-	s.softTrimRetainedHistoryLocked(keepForRestore)
-	// Mirror the scroll into the double buffer with the same region semantics
-	// the terminal applied: front and back move together so the diffing Flush
-	// below only emits the bottom-pane delta (D6 removes the CommitRange
-	// coverage compensation for known scrolls).
-	if s.viewportBackend == nil {
-		width := s.terminal.Width()
-		if width < 1 {
-			width = 80
-		}
-		s.viewportBackend = renderengine.NewScreenModel(width, height)
-	}
-	if cells := s.expandHistoryLinesLocked(rows); len(cells) > 0 {
-		s.viewportBackend.ApplyRegionAppend(1, regionBottom, cells)
-	}
-	// The handoff presenter completed before this physical mirror is applied.
-	// It is therefore safe to use the mirrored front/back for the following
-	// bottom-pane diff even when this was the first owned output write.
-	s.viewportBackend.MarkKnown()
-	// The scroll region of front/back now mirrors the terminal exactly; a
-	// stale full-repaint flag (e.g. from backend creation) must not force a
-	// second emission of the rows the scroll just painted.
-	s.viewportBackend.ClearForceRepaint()
-	s.stageOwnedFrameLocked()
-	if diff := s.viewportBackend.PrepareFlush(); diff != "" {
-		if err := s.flushHoldingLock(TerminalOutput(), func(w io.Writer) {
-			_, _ = io.WriteString(w, diff)
-		}); err != nil {
-			s.viewportBackend.MarkWriteFailed()
-		} else {
-			s.viewportBackend.ConfirmFlush()
-			s.ownedFrameFlushCount++
-		}
-	}
+	s.appendHistoryWindowLocked(text)
+	s.legacyReserve.CursorOnBlankRow = strings.HasSuffix(output, "\n")
+	return len(output), nil, true
 }
 
 // SoftOutputTailValid reports whether the surface still owns a rewriteable
@@ -1320,23 +1019,6 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 		s.invalidateSoftOutputLocked()
 		return false
 	}
-	oldCount := len(softLines)
-	onBlank := s.legacyReserve.CursorOnBlankRow
-	// Capture pre-layout geometry so we clear the rows the soft tail currently
-	// occupies even when this rewrite is triggered by a terminal resize.
-	prevHeight := s.lastHeight
-	prevBottomRows := s.lastBottomRows
-	if prevHeight <= 0 {
-		prevHeight = s.terminal.Height()
-	}
-	if prevBottomRows <= 0 {
-		prevBottomRows = s.effectiveBottomRowsLocked(prevHeight)
-	}
-	prevBottom := outputBottomRowForHeight(prevHeight, prevBottomRows)
-	prevStart := prevBottom - oldCount
-	if !onBlank {
-		prevStart = prevBottom - oldCount + 1
-	}
 	if newLines == nil {
 		newLines = []string{}
 	}
@@ -1354,90 +1036,17 @@ func (s *FixedBottomSurface) RewriteSoftOutputTail(writer io.Writer, newLines []
 			return false
 		}
 		s.softOutput.Replace(normalized)
-		if !s.physicalWritesEnabledLocked() {
-			// Source-backed reflow remains committed in the logical history; the
-			// unified presenter will render the replacement from its next frame.
-			return true
-		}
-		s.legacyReserve.CursorOnBlankRow = false
-		if s.leaseID != 0 {
-			// Retain the rewritten soft tail without touching the alternate
-			// screen. Release will repaint the latest owned frame.
-			return true
-		}
-		WithTerminalWriteLock(func() {
-			// A growing reflow may move older, non-soft rows beyond the visible
-			// output region. Hand them off before repainting; the preflight above
-			// guarantees the rewritten suffix itself remains mutable.
-			if s.commitExcessHistoryToScrollbackLocked() {
-				// The physical output region scrolled outside the double buffer;
-				// the following diffing Flush must start from a clean slate.
-				s.viewportBackend.Invalidate()
-			}
-			s.renderOwnedViewportLocked()
-			s.restoreStoredPromptCursorLocked()
-		})
+		// Source-backed reflow remains committed in the logical history; the
+		// unified presenter will render the replacement from its next frame.
 		return true
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Keep ownership metadata synchronized without allowing this legacy
-		// rewrite path to emit cursor/clear/write bytes into the unified screen.
-		s.replaceOwnedHistorySuffixLocked(softLines, normalized)
-		s.softOutput.Replace(normalized)
-		s.legacyReserve.CursorOnBlankRow = false
-		return true
-	}
-	var rewritten bool
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		if prevStart < 1 {
-			s.invalidateSoftOutputLocked()
-			rewritten = false
-			return
-		}
-		clearEnd := prevBottom
-		if clearEnd < prevStart {
-			clearEnd = prevStart
-		}
-		for row := prevStart; row <= clearEnd; row++ {
-			s.terminal.MoveTo(row, 1)
-			s.terminal.ClearLine()
-		}
-		s.terminal.MoveTo(prevStart, 1)
-		if len(normalized) == 0 {
-			s.replaceOwnedHistorySuffixLocked(softLines, nil)
-			s.softOutput.Invalidate()
-			s.legacyReserve.CursorOnBlankRow = false
-			s.legacyReserve.OutputScrollDebtRows = 0
-			s.restoreStoredPromptCursorLocked()
-			rewritten = true
-			return
-		}
-		var builder strings.Builder
-		for i, line := range normalized {
-			if i > 0 {
-				builder.WriteString("\n")
-			}
-			builder.WriteString(line)
-		}
-		// Match WriteOutput / writeLineLocked: always terminate so the output
-		// cursor parks on a blank row at the region bottom.
-		builder.WriteString("\n")
-		output := normalizeFixedSurfaceOutputText(builder.String())
-		if n, err := io.WriteString(writer, output); err != nil || n != len(output) {
-			s.invalidateSoftOutputLocked()
-			s.resetOwnedHistoryLocked()
-			rewritten = false
-			return
-		}
-		s.replaceOwnedHistorySuffixLocked(softLines, normalized)
-		s.softOutput.Replace(normalized)
-		s.legacyReserve.CursorOnBlankRow = true
-		s.legacyReserve.OutputScrollDebtRows = 0
-		s.restoreStoredPromptCursorLocked()
-		rewritten = true
-	})
-	return rewritten
+	// Unified mode: keep ownership metadata synchronized without allowing this
+	// legacy rewrite path to emit cursor/clear/write bytes into the unified
+	// screen.
+	s.replaceOwnedHistorySuffixLocked(softLines, normalized)
+	s.softOutput.Replace(normalized)
+	s.legacyReserve.CursorOnBlankRow = false
+	return true
 }
 
 // ClearCommittedHistoryForReplay wipes the visible rows of the committed
@@ -1473,38 +1082,11 @@ func (s *FixedBottomSurface) ClearCommittedHistoryForReplay() bool {
 	if bottom < 1 {
 		return false
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified mode: clear retained-history projection without emitting
-		// erase bytes into the unified screen.
-		s.resetOwnedHistoryLocked()
-		s.invalidateSoftOutputLocked()
-		s.legacyReserve = renderengine.LegacyReserveState{}
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		if s.leaseID != 0 {
-			// Lease active: retain state only; the release repaint flushes a
-			// clean frame. Do not emit erase bytes while the surface is leased.
-			s.resetOwnedHistoryLocked()
-			s.invalidateSoftOutputLocked()
-			s.legacyReserve = renderengine.LegacyReserveState{}
-			return
-		}
-		if s.ownedViewport {
-			// The physical output region is being erased out-of-band from the
-			// double buffer; the next diffing Flush must start from a clean
-			// slate so stale committed cells cannot resurface.
-			s.viewportBackend.Invalidate()
-		}
-		for row := 1; row <= bottom; row++ {
-			s.terminal.MoveTo(row, 1)
-			s.terminal.ClearLine()
-		}
-		s.resetOwnedHistoryLocked()
-		s.invalidateSoftOutputLocked()
-		s.legacyReserve = renderengine.LegacyReserveState{}
-		s.restoreStoredPromptCursorLocked()
-	})
+	// Unified mode: clear retained-history projection without emitting erase
+	// bytes into the unified screen.
+	s.resetOwnedHistoryLocked()
+	s.invalidateSoftOutputLocked()
+	s.legacyReserve = renderengine.LegacyReserveState{}
 	return true
 }
 
@@ -1842,18 +1424,8 @@ func (s *FixedBottomSurface) showPromptImpl(line string) bool {
 		// terminal. Release will repaint it on the primary screen.
 		return true
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Logical prompt state committed above; unified presenter renders
-		// from retained state. Suppress legacy byte emission.
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		s.restoreStoredPromptCursorLocked()
-	})
+	// Logical prompt state committed above; the unified presenter renders from
+	// retained state (legacy byte emission retired in L3-2).
 	return true
 }
 
@@ -1886,30 +1458,13 @@ func (s *FixedBottomSurface) resetPromptImpl(line string, rows int) bool {
 	if !s.enabled {
 		return false
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained state; still commit the
-		// logical reset so snapshots/recovery stay coherent.
-		s.promptLine = line
-		s.promptInput = ""
-		s.promptReservedRows = 1
-		s.promptViewportStart = 0
-		s.setPromptCursorToLineEndLocked(line)
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		s.clearPromptRowsLocked(rows)
-		s.promptLine = line
-		s.promptInput = ""
-		s.promptReservedRows = 1
-		s.promptViewportStart = 0
-		s.setPromptCursorToLineEndLocked(line)
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		s.restoreStoredPromptCursorLocked()
-	})
+	// Unified presenter renders from retained state; still commit the logical
+	// reset so snapshots/recovery stay coherent (legacy byte emission retired).
+	s.promptLine = line
+	s.promptInput = ""
+	s.promptReservedRows = 1
+	s.promptViewportStart = 0
+	s.setPromptCursorToLineEndLocked(line)
 	return true
 }
 
@@ -1936,36 +1491,9 @@ func (s *FixedBottomSurface) setPromptRowsImpl(rows int) bool {
 	if s.promptReservedRows == rows {
 		return true
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained state; commit the new row
-		// budget logically only.
-		s.promptReservedRows = rows
-		return true
-	}
-	restorePromptCursor := s.bottomPaneStateLocked().popupExpandsBelowPrompt()
-	WithTerminalWriteLock(func() {
-		if restorePromptCursor {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-		}
-		if !restorePromptCursor {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-		if s.popupRenderedRows > 0 {
-			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-			s.clearPopupRenderStateLocked()
-		}
-		s.promptReservedRows = rows
-		s.promptViewportStart = 0
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		if restorePromptCursor {
-			s.restoreStoredPromptCursorLocked()
-		}
-	})
+	// Unified presenter renders from retained state; commit the new row budget
+	// logically only (legacy byte emission retired in L3-2).
+	s.promptReservedRows = rows
 	return true
 }
 
@@ -1992,26 +1520,8 @@ func (s *FixedBottomSurface) setPromptNoticeLineImpl(line string) bool {
 	if !s.enabled {
 		return false
 	}
-	if !s.physicalWritesEnabledLocked() {
-		return true
-	}
-	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
-	WithTerminalWriteLock(func() {
-		if restorePromptCursor {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-		} else {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		if restorePromptCursor {
-			s.restoreStoredPromptCursorLocked()
-		}
-	})
+	// Unified presenter renders from retained state (legacy byte emission
+	// retired in L3-2).
 	return true
 }
 
@@ -2397,18 +1907,8 @@ func (s *FixedBottomSurface) setPromptEditorStatusLineImpl(line string) bool {
 	if !s.enabled {
 		return false
 	}
-	if !s.physicalWritesEnabledLocked() {
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		s.terminal.HideCursor()
-		defer s.terminal.ShowCursor()
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		s.restoreStoredPromptCursorLocked()
-	})
+	// Unified presenter renders from retained state (legacy byte emission
+	// retired in L3-2).
 	return true
 }
 
@@ -2459,26 +1959,9 @@ func (s *FixedBottomSurface) trackPromptInputStateImpl(line string, input string
 	if !s.enabled {
 		return false
 	}
-	previousRows := s.promptReservedRows
-	previousViewportStart := s.promptViewportStart
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
-	if !s.physicalWritesEnabledLocked() {
-		// Logical prompt state committed above; unified presenter renders
-		// from retained state.
-		return true
-	}
-	needsRender := previousRows != s.promptReservedRows || previousViewportStart != s.promptViewportStart
-	if needsRender {
-		WithTerminalWriteLock(func() {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-			s.applyLayoutLocked()
-			s.renderPopupLocked()
-			s.renderStatusLocked()
-			s.renderPromptRowsLocked(true)
-			s.restoreStoredPromptCursorLocked()
-		})
-	}
+	// Logical prompt state committed above; unified presenter renders from
+	// retained state (legacy byte emission retired in L3-2).
 	return true
 }
 
@@ -2507,24 +1990,8 @@ func (s *FixedBottomSurface) setPromptInputStateImpl(line string, input string, 
 		return false
 	}
 	s.setPromptStateLocked(line, input, rows, cursorRow, cursorCol)
-	if !s.physicalWritesEnabledLocked() {
-		// Logical prompt state committed above; unified presenter renders
-		// from retained state.
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		s.terminal.HideCursor()
-		defer s.terminal.ShowCursor()
-		if s.popupRenderedRows > 0 && !s.bottomPaneStateLocked().popupExpandsBelowPrompt() {
-			s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-			s.clearPopupRenderStateLocked()
-		}
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		s.restoreStoredPromptCursorLocked()
-	})
+	// Logical prompt state committed above; unified presenter renders from
+	// retained state (legacy byte emission retired in L3-2).
 	return true
 }
 
@@ -2610,37 +2077,18 @@ func (s *FixedBottomSurface) clearPromptRowsImpl(rows int) bool {
 	if !s.enabled {
 		return false
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained prompt state.
-		s.promptNoticeLine = ""
-		s.promptEditorStatusLine = ""
-		s.promptLine = ""
-		s.promptInput = ""
-		s.promptReservedRows = 0
-		s.promptViewportStart = 0
-		s.promptCursorRow = 0
-		s.promptCursorCol = 0
-		s.promptRenderedStartRow = 0
-		s.promptRenderedRows = 0
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		s.clearPromptRowsLocked(rows)
-		s.promptNoticeLine = ""
-		s.promptEditorStatusLine = ""
-		s.promptLine = ""
-		s.promptInput = ""
-		s.promptReservedRows = 0
-		s.promptViewportStart = 0
-		s.promptCursorRow = 0
-		s.promptCursorCol = 0
-		s.promptRenderedStartRow = 0
-		s.promptRenderedRows = 0
-		s.applyLayoutLocked()
-		s.renderPromptRowsLocked(true)
-		s.moveToOutputLocked()
-	})
+	// Unified presenter renders from retained prompt state (legacy byte
+	// emission retired in L3-2).
+	s.promptNoticeLine = ""
+	s.promptEditorStatusLine = ""
+	s.promptLine = ""
+	s.promptInput = ""
+	s.promptReservedRows = 0
+	s.promptViewportStart = 0
+	s.promptCursorRow = 0
+	s.promptCursorCol = 0
+	s.promptRenderedStartRow = 0
+	s.promptRenderedRows = 0
 	return true
 }
 
@@ -2662,17 +2110,8 @@ func (s *FixedBottomSurface) showPopupImpl(lines []string) {
 	if !s.enabled {
 		return
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained popup state.
-		return
-	}
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		s.moveToOutputLocked()
-	})
+	// Unified presenter renders from retained popup state (legacy byte
+	// emission retired in L3-2).
 }
 
 func (s *FixedBottomSurface) ShowPopupPreserveCursor(lines []string) {
@@ -2708,28 +2147,8 @@ func (s *FixedBottomSurface) showPopupPreserveCursorForOwner(lines []string, own
 	if !s.enabled {
 		return
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained popup state.
-		return
-	}
-	restorePromptCursor := belowPrompt || s.bottomPaneStateLocked().popupExpandsBelowPrompt()
-	WithTerminalWriteLock(func() {
-		if restorePromptCursor {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-		}
-		if !restorePromptCursor {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		if restorePromptCursor {
-			s.restoreStoredPromptCursorLocked()
-		}
-	})
+	// Unified presenter renders from retained popup state (legacy byte
+	// emission retired in L3-2).
 }
 
 func (s *FixedBottomSurface) ShowPopupInput(lines []string, prompt string) {
@@ -2800,16 +2219,8 @@ func (s *FixedBottomSurface) beginPopupInputForHandleImpl(lines []string, prompt
 	if !s.beginPopupInstanceLocked(cloneAndSanitizePopupLines(lines), prompt, handle, viewport) || !s.enabled {
 		return true
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained popup state.
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.moveToPopupInputLocked()
-	})
+	// Unified presenter renders from retained popup state (legacy byte
+	// emission retired in L3-2).
 	return true
 }
 
@@ -2840,22 +2251,8 @@ func (s *FixedBottomSurface) updatePopupInputForHandleImpl(handle PopupHandle, l
 	if !active || !s.enabled {
 		return active
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained popup state.
-		return true
-	}
-	WithTerminalWriteLock(func() {
-		if preserveCursor {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		if !preserveCursor {
-			s.moveToPopupInputLocked()
-		}
-	})
+	// Unified presenter renders from retained popup state (legacy byte
+	// emission retired in L3-2).
 	return true
 }
 
@@ -2889,22 +2286,8 @@ func (s *FixedBottomSurface) showPopupInputForOwnerImpl(lines []string, prompt s
 	if !s.enabled {
 		return
 	}
-	if !s.physicalWritesEnabledLocked() {
-		// Unified presenter renders from retained popup state.
-		return
-	}
-	WithTerminalWriteLock(func() {
-		if preserveCursor {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		if !preserveCursor {
-			s.moveToPopupInputLocked()
-		}
-	})
+	// Unified presenter renders from retained popup state (legacy byte
+	// emission retired in L3-2).
 }
 
 func (s *FixedBottomSurface) ShowPopupInputPreserveCursor(lines []string, prompt string) {
