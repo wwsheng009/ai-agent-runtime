@@ -113,6 +113,11 @@ func assertSummaryMatchesEntryWalk(t *testing.T, state UIControllerState) {
 	want.PlanCount = state.HistoryEffects.PlanCount
 	want.LastPlanMs = state.HistoryEffects.LastPlanDuration.Milliseconds()
 	want.MaxPlanMs = state.HistoryEffects.MaxPlanDuration.Milliseconds()
+	// 分相位拆分（P16 归因）同样是 pass 级标量，按状态原值搬运。
+	want.PlanCells = state.HistoryEffects.MaxPlanPhases.cells
+	want.PlanScreenMs = state.HistoryEffects.MaxPlanPhases.screenMs
+	want.PlanMintMs = state.HistoryEffects.MaxPlanPhases.mintMs
+	want.PlanApplyMs = state.HistoryEffects.MaxPlanPhases.applyMs
 	// claim-refusal counters（观测）与规划耗时一样不是 ledger 遍历结果，按原值搬运。
 	want.ClaimSkipsStaleAction = state.HistoryEffects.claimSkipsStaleAction
 	want.ClaimRejectsOutOfOrder = state.HistoryEffects.claimRejectsOutOfOrder

@@ -99,6 +99,20 @@ type HistoryEffectQueueState struct {
 	PlanCount        uint64
 	LastPlanDuration time.Duration
 	MaxPlanDuration  time.Duration
+	// LastPlanPhases / MaxPlanPhases 把一次规划 pass 拆成 screen（快照 + 全量布局，
+	// 含并行首渲染的墙钟）/ mint（铸 commit）/ apply（membership reconcile + 入队）
+	// 三段并带上 cell 数：P16 归因必须能回答「最长那次规划的时间花在哪一段」，
+	// 否则增量 screening 的取舍没有依据。纯诊断标量，不参与任何投递判定。
+	LastPlanPhases transcriptPlanPhaseTiming
+	MaxPlanPhases  transcriptPlanPhaseTiming
+}
+
+// transcriptPlanPhaseTiming 是一次 transcript 规划 pass 的分相位耗时。
+type transcriptPlanPhaseTiming struct {
+	cells    int
+	screenMs int64
+	mintMs   int64
+	applyMs  int64
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
@@ -272,14 +286,16 @@ func (s *HistoryEffectQueueState) pruneCompactedSourcesNotInTranscript(transcrip
 // recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。
 // 耗时与计数分列：PlanCount>0 且 MaxPlanMs 接近冻结窗口，才说明 P12 的卡顿
 // 花在规划器上。
-func (s *HistoryEffectQueueState) recordTranscriptPlanTiming(duration time.Duration) {
+func (s *HistoryEffectQueueState) recordTranscriptPlanTiming(duration time.Duration, phases transcriptPlanPhaseTiming) {
 	if s == nil {
 		return
 	}
 	s.PlanCount++
 	s.LastPlanDuration = duration
+	s.LastPlanPhases = phases
 	if duration > s.MaxPlanDuration {
 		s.MaxPlanDuration = duration
+		s.MaxPlanPhases = phases
 	}
 }
 
@@ -346,6 +362,13 @@ type HistoryEffectQueueSummary struct {
 	PlanCount  uint64
 	LastPlanMs int64
 	MaxPlanMs  int64
+	// PlanCells/PlanScreenMs/PlanMintMs/PlanApplyMs 是**最大那次**规划的拆分
+	// （cells = 规划时的 cell 数）：screen 含并行首渲染墙钟，mint 是铸 commit，
+	// apply 是 membership reconcile + 入队。P16 的直接归因读数。
+	PlanCells    int
+	PlanScreenMs int64
+	PlanMintMs   int64
+	PlanApplyMs  int64
 	// Claim-refusal counters mirror the same reducer-side events as the private
 	// fields above; they are queue scalars, not ledger-derived (copied like the
 	// plan timing in Summary).
@@ -364,6 +387,10 @@ func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
 	summary.PlanCount = s.PlanCount
 	summary.LastPlanMs = s.LastPlanDuration.Milliseconds()
 	summary.MaxPlanMs = s.MaxPlanDuration.Milliseconds()
+	summary.PlanCells = s.MaxPlanPhases.cells
+	summary.PlanScreenMs = s.MaxPlanPhases.screenMs
+	summary.PlanMintMs = s.MaxPlanPhases.mintMs
+	summary.PlanApplyMs = s.MaxPlanPhases.applyMs
 	summary.ClaimSkipsStaleAction = s.claimSkipsStaleAction
 	summary.ClaimRejectsOutOfOrder = s.claimRejectsOutOfOrder
 	summary.ClaimRejectsGate = s.claimRejectsGate

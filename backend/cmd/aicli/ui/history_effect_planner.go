@@ -159,13 +159,29 @@ func mintTranscriptPlan(state AppState, snap transcriptPlanSnapshot, rows []AppS
 // 返回完整候选集与复用段保留集；不存在截断前缀，调用方可以在结果上直接做
 // membership reconcile 并记录 memo。
 func planEligibleHistoryCommitsWithin(state AppState) ([]HistoryCommit, transcriptPlanRetention) {
+	commits, retention, _ := planEligibleHistoryCommitsWithinTimed(state)
+	return commits, retention
+}
+
+// planEligibleHistoryCommitsWithinTimed 与 planEligibleHistoryCommitsWithin 同义，
+// 额外返回分相位耗时（P16 归因）：screen = 快照 + 全量布局（含并行首渲染墙钟），
+// mint = 铸 commit。apply（reconcile + 入队）由调用方补。
+func planEligibleHistoryCommitsWithinTimed(state AppState) ([]HistoryCommit, transcriptPlanRetention, transcriptPlanPhaseTiming) {
 	if state.Geometry.Width < 1 || state.Geometry.Height < 1 {
-		return nil, transcriptPlanRetention{}
+		return nil, transcriptPlanRetention{}, transcriptPlanPhaseTiming{}
 	}
+	screenStart := time.Now()
 	snap := transcriptPlanSnapshotFor(state)
 	rows := screenTranscriptPlanWindow(snap)
+	screenMs := time.Since(screenStart).Milliseconds()
+	mintStart := time.Now()
 	commits, retention := mintTranscriptPlan(state, snap, rows)
-	return commits, retention
+	phases := transcriptPlanPhaseTiming{
+		cells:    len(snap.cells),
+		screenMs: screenMs,
+		mintMs:   time.Since(mintStart).Milliseconds(),
+	}
+	return commits, retention, phases
 }
 
 // canonicalHistoryCommitFrontier enforces the transcript's single physical
@@ -622,10 +638,14 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	// 的一段，必须能回答「P12 的冻结是不是花在规划上」；memo 命中（上方早退）
 	// 不算一次规划，因此不记录，避免把空转计成规划。
 	planStarted := time.Now()
-	defer func() { effects.recordTranscriptPlanTiming(time.Since(planStarted)) }()
+	planPhases := transcriptPlanPhaseTiming{}
+	defer func() { effects.recordTranscriptPlanTiming(time.Since(planStarted), planPhases) }()
 
-	commits, retention := planEligibleHistoryCommitsWithin(state.AppState)
+	commits, retention, screenPhases := planEligibleHistoryCommitsWithinTimed(state.AppState)
+	planPhases = screenPhases
+	applyStart := time.Now()
 	applyTranscriptPlan(state, commits, retention)
+	planPhases.applyMs = time.Since(applyStart).Milliseconds()
 }
 
 // applyTranscriptPlan 把一次完整规划（无预算单遍）落到队列状态上：membership

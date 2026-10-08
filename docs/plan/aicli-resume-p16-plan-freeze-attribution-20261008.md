@@ -107,6 +107,20 @@ fold_omit: hits=1058 misses=1959 evictions=0
 「按页/按块铸提交」与交付窗口摊还），或继续压缩串行段（fence 折叠/`toolFoldTargetRows`/
 membership reconcile）。两条都属 P3 后续切片的设计裁决范围。
 
+**分相位读数（2026-10-08 晚，新增 `plan-cells/plan-screen-ms/plan-mint-ms/plan-apply-ms`
+进 status，harness 可直接读）**：最长一次规划（4224 cells，509–536ms）的拆分：
+
+| 相位 | 耗时 | 构成 |
+|---|---|---|
+| screen | **324–360ms** | 快照 + 全量布局（含并行首渲染墙钟；渲染 CPU 实测 3.1s/16 worker，其中 `diff.Document` 1.70s、`foldedToolChainScreenRows` 0.69s、RenderCache 0.26s；串行装配仅 ~50ms） |
+| mint | 32–37ms | 铸 commit（86,863 行） |
+| apply | 138–151ms | membership reconcile + 入队（86k ledger 遍历 + ~3.5k 新候选） |
+
+读法：最长一次规划的成本主体是**新增 ~3500 cell 的首次渲染**（screen），不是重复
+screening/铸提交。因此「增量 screening」只能省已渲染 cell 的重复部分；把首次渲染
+提前到装载期（逐页补齐中间步落地即预热 cell 行缓存）实测只到 536→509ms——中间安装
+仍被合并，收益小于预期。彻底达标仍需流式铸提交（与 ~10s 交付窗口摊还）。
+
 - 门禁：P16 唯一红项；P12 已绿（用户可见冻结消除）。
 - 一次性 vs 稳态：稳态流式（P3-S1/S2/S3 后）已 O(delta)；本条是装载末次单遍的成本。
 - 测量入口：`-CpuProfileSeconds` + `app_state.layout_cache` + goroutine-stall dump，
