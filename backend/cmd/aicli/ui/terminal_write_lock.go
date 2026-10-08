@@ -6,34 +6,12 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 )
 
-// The terminal write lock and DEC 2026 synchronized-framing state live in the
-// renderengine package (owned by the Presenter batch path). The ui package
-// forwards to it so every TUI write path shares one lock without an
-// ui -> renderengine -> ui import cycle.
-
-// synchronizedUpdate* are ui-package aliases of the renderengine sequences,
-// kept for legacy same-package test references.
-const (
-	synchronizedUpdateBeginSequence = renderengine.SynchronizedUpdateBeginSequence
-	synchronizedUpdateEndSequence   = renderengine.SynchronizedUpdateEndSequence
-)
-
-// SetTerminalSynchronizedFrames toggles DEC 2026 framing around
-// WithTerminalWriteLock batches.
+// The terminal write lock lives in the renderengine package (owned by the
+// Presenter batch path). The ui package forwards to it so every TUI write path
+// shares one lock without an ui -> renderengine -> ui import cycle.
 //
-// Freeze (gap G2/A1-1): the only production toggler is the legacy
-// FixedBottomSurface Enable/Disable pair. Unified sessions must never enable
-// it — renderengine writes the brackets directly to os.Stdout (writer
-// inventory: renderengine/terminal_lock.go), which would bypass the session
-// writer. TestSynchronizedFramesToggledOnlyByLegacySurface enforces this.
-func SetTerminalSynchronizedFrames(enabled bool) {
-	renderengine.SetTerminalSynchronizedFrames(enabled)
-}
-
-// TerminalSynchronizedFramesEnabled reports the current framing state.
-func TerminalSynchronizedFramesEnabled() bool {
-	return renderengine.TerminalSynchronizedFramesEnabled()
-}
+// The DEC 2026 synchronized-framing toggle was retired with the legacy
+// FixedBottomSurface pair (L3-1); batches are no longer wrapped.
 
 // WithTerminalWriteLock serializes terminal control sequences that may move the
 // cursor. See renderengine.WithTerminalWriteLock.

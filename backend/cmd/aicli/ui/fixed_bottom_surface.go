@@ -426,23 +426,10 @@ func (s *FixedBottomSurface) Enable() bool {
 	if s.presenterLocked() == nil {
 		s.presenter = renderengine.NewPresenter()
 	}
-	if s.physicalWritesEnabledLocked() {
-		// The legacy surface may have left DECSTBM restricted to the output
-		// region. Owned frames address the whole screen, so reset before the first
-		// frame is composed.
-		s.terminal.ResetScrollRegion()
-		// Codex wraps every frame in a synchronized update; mirror that for the
-		// real interactive surface so multi-step repaints (layout + scroll +
-		// content) land atomically.
-		SetTerminalSynchronizedFrames(s.terminal.Capabilities().SynchronizedOutput)
-		WithTerminalWriteLock(func() {
-			s.applyLayoutLocked()
-			s.renderPopupLocked()
-			s.renderStatusLocked()
-			s.renderPromptRowsLocked(true)
-			s.moveToOutputLocked()
-		})
-	}
+	// L3-1: the legacy first-frame paint block (DECSTBM reset + DEC 2026
+	// framing + initial composite) is retired. Production enables the surface
+	// with physical writes fenced, so the block was unreachable; Enable only
+	// establishes state now.
 	return true
 }
 
@@ -539,9 +526,6 @@ func (s *FixedBottomSurface) Disable() {
 	s.ownedViewport = false
 	s.viewportBackend = nil
 	s.presenter = nil
-	// Stop framing writes once the surface is torn down so any later plain output
-	// path is not wrapped in a dangling synchronized update.
-	SetTerminalSynchronizedFrames(false)
 	s.legacyReserve = renderengine.LegacyReserveState{}
 	s.invalidateSoftOutputLocked()
 	s.resetOwnedHistoryLocked()

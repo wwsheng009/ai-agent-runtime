@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 )
 
 // captureSyncFrameStdout redirects os.Stdout for the duration of fn and returns
-// everything written. WithTerminalWriteLock writes its DEC 2026 brackets to the
-// live os.Stdout, so the redirect must be in place before fn runs.
+// everything written through the raw stdout path. The redirect must be in place
+// before fn runs.
 func captureSyncFrameStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stdout
@@ -33,65 +34,21 @@ func captureSyncFrameStdout(t *testing.T, fn func()) string {
 	return out
 }
 
-func TestWithTerminalWriteLock_SynchronizedFramesDisabledByDefault(t *testing.T) {
-	// The global defaults off; guarantee it regardless of prior tests.
-	SetTerminalSynchronizedFrames(false)
-	if TerminalSynchronizedFramesEnabled() {
-		t.Fatal("synchronized frames should default to disabled")
-	}
-	out := captureSyncFrameStdout(t, func() {
-		WithTerminalWriteLock(func() { fmt.Print("X") })
-	})
-	if out != "X" {
-		t.Fatalf("disabled framing must not add brackets, got %q", out)
-	}
-}
-
-func TestWithTerminalWriteLock_SynchronizedFramesWrapBatchAtomically(t *testing.T) {
-	SetTerminalSynchronizedFrames(true)
-	t.Cleanup(func() { SetTerminalSynchronizedFrames(false) })
-	if !TerminalSynchronizedFramesEnabled() {
-		t.Fatal("expected synchronized frames enabled")
-	}
+// TestWithTerminalWriteLockNeverWrapsBatches：DEC 2026 帧包裹属已退役的
+// legacy surface 路径（L3-1 整链路删除）。通用写锁只负责串行化，不再产生
+// 任何 2026 括号（历史「legacy 开启 / 环境急停」断言收敛为「永不包裹」）。
+func TestWithTerminalWriteLockNeverWrapsBatches(t *testing.T) {
 	out := captureSyncFrameStdout(t, func() {
 		WithTerminalWriteLock(func() {
-			// A multi-step batch: the whole thing must be wrapped once.
 			fmt.Print("row-1\n")
 			fmt.Print("row-2\n")
 		})
 	})
-	want := synchronizedUpdateBeginSequence + "row-1\nrow-2\n" + synchronizedUpdateEndSequence
-	if out != want {
-		t.Fatalf("expected batch wrapped in one 2026 frame\n got %q\nwant %q", out, want)
+	if out != "row-1\nrow-2\n" {
+		t.Fatalf("write-lock batches must not be wrapped: got %q", out)
 	}
-}
-
-func TestWithTerminalWriteLock_SequentialBatchesEachGetOwnFrame(t *testing.T) {
-	SetTerminalSynchronizedFrames(true)
-	t.Cleanup(func() { SetTerminalSynchronizedFrames(false) })
-	out := captureSyncFrameStdout(t, func() {
-		WithTerminalWriteLock(func() { fmt.Print("A") })
-		WithTerminalWriteLock(func() { fmt.Print("B") })
-	})
-	want := synchronizedUpdateBeginSequence + "A" + synchronizedUpdateEndSequence +
-		synchronizedUpdateBeginSequence + "B" + synchronizedUpdateEndSequence
-	if out != want {
-		t.Fatalf("expected balanced per-batch frames\n got %q\nwant %q", out, want)
-	}
-}
-
-func TestSetTerminalSynchronizedFrames_EnvKillSwitch(t *testing.T) {
-	t.Setenv("AICLI_DISABLE_SYNC_UPDATE", "1")
-	SetTerminalSynchronizedFrames(true)
-	t.Cleanup(func() { SetTerminalSynchronizedFrames(false) })
-	if TerminalSynchronizedFramesEnabled() {
-		t.Fatal("env kill switch must force synchronized frames off")
-	}
-	out := captureSyncFrameStdout(t, func() {
-		WithTerminalWriteLock(func() { fmt.Print("X") })
-	})
-	if out != "X" {
-		t.Fatalf("kill switch must suppress brackets, got %q", out)
+	if strings.Contains(out, "?2026") {
+		t.Fatalf("DEC 2026 brackets must not be emitted: %q", out)
 	}
 }
 

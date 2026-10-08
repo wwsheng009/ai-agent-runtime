@@ -9,9 +9,8 @@ import (
 // Presenter owns the terminal write path.
 //
 // Each frame is assembled in memory and written to the target exactly once
-// while holding the shared terminal write lock. The lock also supplies DEC
-// 2026 synchronized-update framing when enabled by the live surface, so a
-// repaint cannot be observed half way through.
+// while holding the shared terminal write lock, so a repaint cannot be
+// observed half way through.
 //
 // Write statistics are diagnostic counters used by frame-path acceptance
 // tests: one Flush is one frame, and one non-empty frame performs one target

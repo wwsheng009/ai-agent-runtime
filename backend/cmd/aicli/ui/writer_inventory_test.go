@@ -104,9 +104,7 @@ func uiDirectWriterInventory() []uiDirectWriterInventoryEntry {
 		{File: "terminal.go", Func: "method emitControl", Kind: "TerminalOutput()", Count: 1},
 		{File: "welcome.go", Func: "PrintWelcomeWithConfig", Kind: "os.Std*", Count: 1},
 		// --- 审计补登（G2 盲区：子包递归 + 包级 var，2026-10-06）---
-		// DEC2026 帧包裹的 legacy surface 路径（syncFramesEnabled 仅在
-		// legacy FixedBottomSurface 开启；unified 路径不触达）。
-		{File: "renderengine/terminal_lock.go", Func: "withTerminalWriteLock", Kind: "os.Std*", Count: 2},
+		// （renderengine/terminal_lock.go 的 DEC2026 直写已随 L3-1 退役。）
 		// legacy 兼容 sink 的默认 writer（包级 var；写路径经 proxy 串行化，
 		// 生产 interactive 由 TerminalSession 注入 writer）。
 		{File: "terminal_output.go", Func: "var processTerminalOutput", Kind: "os.Std*", Count: 1},
@@ -122,7 +120,7 @@ func collectUIDirectWriters(t *testing.T) []uiDirectWriter {
 	uiDir := filepath.Dir(currentFile)
 	// Recursive walk: subpackages (renderengine, scene, render, …) are part
 	// of the same terminal-byte surface, so a flat ui/*.go glob is a blind
-	// spot (see audit gap G2: renderengine/terminal_lock.go).
+	// spot (audit gap G2: 子包与包级 var 扫描盲区).
 	var paths []string
 	err := filepath.WalkDir(uiDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
