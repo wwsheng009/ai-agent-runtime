@@ -2,32 +2,36 @@ package commands
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
-// screenRowsContaining reports every 1-based screen row that contains marker.
-// Bottom-reserve compensation must never duplicate or erase committed rows, so
-// the expected result is always exactly one row per marker.
-func screenRowsContaining(screen *screenVT, marker string) []int {
-	return screen.RowsContaining(marker)
-}
+// 本文件是 FixedBottomSurface 保留区布局中性（layout neutral）契约的测试。
+//
+// L3-2 起物理绘制退役，旧观察面（把 stdout 字节回放到 vt.Screen 再看行）
+// 恒为空屏；新的权威观察面是 ComposedFrameForTest()：历史 + 底部保留区 +
+// 提示行的合成帧，与生产快照路径同源。布局中性 = 一次 band / popup /
+// settle / 软尾重写周期结束后，合成帧必须与「从未展示过该保留区」的基线
+// 逐行一致，且已提交的历史行不得被覆盖、重复或乱序。
 
-// assertCommittedRowsIntact fails when a committed transcript marker was
-// overwritten, duplicated or reordered by reserve growth/shrink compensation.
-func assertCommittedRowsIntact(t *testing.T, screen *screenVT, markers []string, stage string) int {
+// assertFrameCommittedRowsIntact 断言每个已提交 marker 在合成帧里恰好出现
+// 一次且严格按序，返回最后一个 marker 的行号。
+func assertFrameCommittedRowsIntact(t *testing.T, surface *ui.FixedBottomSurface, markers []string, stage string) int {
 	t.Helper()
+	lines := composedFrameLines(surface)
 	last := 0
 	for _, marker := range markers {
-		rows := screenRowsContaining(screen, marker)
+		rows := frameRowsContaining(lines, marker)
 		if len(rows) != 1 {
-			t.Fatalf("%s: expected %q exactly once on screen, got rows %v\n%s", stage, marker, rows, screen.dump())
+			t.Fatalf("%s: expected %q exactly once in composed frame, got rows %v\n%s",
+				stage, marker, rows, strings.Join(lines, "\n"))
 		}
 		if rows[0] <= last {
-			t.Fatalf("%s: %q landed on row %d, out of order after row %d\n%s", stage, marker, rows[0], last, screen.dump())
+			t.Fatalf("%s: %q landed on frame row %d, out of order after row %d\n%s",
+				stage, marker, rows[0], last, strings.Join(lines, "\n"))
 		}
 		last = rows[0]
 	}
@@ -44,32 +48,31 @@ func surfaceBandLines(count int) []string {
 
 func writeSurfaceTranscriptRow(t *testing.T, surface *ui.FixedBottomSurface, marker string) {
 	t.Helper()
-	if _, err, ok := surface.WriteOutput(os.Stdout, marker+" committed transcript row\n"); !ok || err != nil {
+	if _, err, ok := surface.WriteOutput(io.Discard, marker+" committed transcript row\n"); !ok || err != nil {
 		t.Fatalf("WriteOutput(%s): ok=%t err=%v", marker, ok, err)
 	}
 }
 
-func surfacePromptRow(t *testing.T, screen *screenVT) int {
+// surfaceLayoutBaselineFrame 是布局 oracle：同一批已提交行写在一个从未
+// 扩展过底部保留区的新 surface 上，返回其合成帧。任何 band / popup /
+// settle 周期都必须把布局留在与这份基线相同的行上。
+func surfaceLayoutBaselineFrame(t *testing.T, width, height int, markers []string) []string {
 	t.Helper()
-	for row := screen.Height(); row >= 1; row-- {
-		if strings.HasPrefix(screen.line(row), ">") {
-			return row
-		}
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(width, height)
+	surface.ShowPrompt("> ")
+	surface.ClearPromptRows(1)
+	for _, marker := range markers {
+		writeSurfaceTranscriptRow(t, surface, marker)
 	}
-	t.Fatalf("prompt row not found\n%s", screen.dump())
-	return 0
+	surface.ShowPrompt("> ")
+	assertFrameCommittedRowsIntact(t, surface, markers, "baseline")
+	return composedFrameLines(surface)
 }
 
-// TestFixedBottomSurface_ActiveBandIsLayoutNeutral replays the real byte stream
-// of a streaming turn on a reconstructed terminal instead of asserting the
-// compensation sequences themselves.
-//
-// Two invariants matter and neither is visible at byte level:
-//   - committed transcript rows are irreversible: reserve growth may scroll
-//     them, never overwrite them (absorbing the trailing blank row used to park
-//     content on the row every writer targets, silently eating one line);
-//   - an active band that appears and is released again must be layout neutral:
-//     the final transcript position must match a turn that never showed a band.
+// TestFixedBottomSurface_ActiveBandIsLayoutNeutral 用合成帧观察一次流式
+// 回合：band 增长时已提交行不可逆（不得被覆盖或重复），band 释放后整体
+// 布局必须与从未出现过 band 的基线一致。
 func TestFixedBottomSurface_ActiveBandIsLayoutNeutral(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width = 80
@@ -81,92 +84,45 @@ func TestFixedBottomSurface_ActiveBandIsLayoutNeutral(t *testing.T) {
 				markers = append(markers, fmt.Sprintf("L%02d", i))
 			}
 
-			baseScreen, baseLast, basePrompt := surfaceLayoutBaseline(t, width, height, markers)
+			baseFrame := surfaceLayoutBaselineFrame(t, width, height, markers)
 
 			// Live: the band grows over the trailing blank output row, more rows
 			// commit underneath it, then the band is released and the prompt
 			// returns.
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
-			screen := newScreenVT(width, height)
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ShowPrompt("> ")
-				surface.ClearPromptRows(1)
-				for _, marker := range markers[:5] {
-					writeSurfaceTranscriptRow(t, surface, marker)
-				}
-				surface.SetActiveBand(surfaceBandLines(6))
-				for _, marker := range markers[5:] {
-					writeSurfaceTranscriptRow(t, surface, marker)
-				}
-			}))
-			bandLast := assertCommittedRowsIntact(t, screen, markers, "band growth")
+			surface.ShowPrompt("> ")
+			surface.ClearPromptRows(1)
+			for _, marker := range markers[:5] {
+				writeSurfaceTranscriptRow(t, surface, marker)
+			}
+			surface.SetActiveBand(surfaceBandLines(6))
+			for _, marker := range markers[5:] {
+				writeSurfaceTranscriptRow(t, surface, marker)
+			}
+			bandLast := assertFrameCommittedRowsIntact(t, surface, markers, "band growth")
 			for _, band := range surfaceBandLines(6) {
-				if rows := screenRowsContaining(screen, band); len(rows) != 1 {
-					t.Fatalf("band row %q should be painted once, got %v\n%s", band, rows, screen.dump())
-				}
+				assertFrameMarkerOnce(t, "band growth", surface, band)
 			}
 			// One blank row is expected: the output region bottom row is the
 			// position every writer targets, so it stays empty between writes.
 			// Anything larger is a reserve-growth hole.
-			if bandStart := screenRowsContaining(screen, "band-01"); len(bandStart) == 1 && bandStart[0]-bandLast > 2 {
-				t.Fatalf("transcript left a %d-row hole above the active band\n%s", bandStart[0]-bandLast-1, screen.dump())
+			if bandStart := frameRowOf(t, surface, "band-01"); bandStart-bandLast > 2 {
+				t.Fatalf("transcript left a %d-row hole above the active band\n%s",
+					bandStart-bandLast-1, composedFrameText(surface))
 			}
 
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ClearActiveBand()
-				surface.ShowPrompt("> ")
-			}))
-			liveLast := assertCommittedRowsIntact(t, screen, markers, "band release")
-			livePrompt := surfacePromptRow(t, screen)
+			surface.ClearActiveBand()
+			surface.ShowPrompt("> ")
+			assertFrameCommittedRowsIntact(t, surface, markers, "band release")
 			for _, band := range surfaceBandLines(6) {
-				if rows := screenRowsContaining(screen, band); len(rows) != 0 {
-					t.Fatalf("released band row %q still on screen at %v\n%s", band, rows, screen.dump())
+				if rows := frameRowsContaining(composedFrameLines(surface), band); len(rows) != 0 {
+					t.Fatalf("released band row %q still in composed frame at %v\n%s",
+						band, rows, composedFrameText(surface))
 				}
 			}
-			if livePrompt != basePrompt {
-				t.Fatalf("prompt row %d != baseline %d\nlive:\n%s\nbaseline:\n%s",
-					livePrompt, basePrompt, screen.dump(), baseScreen.dump())
-			}
-			if got, want := livePrompt-liveLast, basePrompt-baseLast; got != want {
-				t.Fatalf("gap between transcript and prompt = %d rows, baseline %d\nlive:\n%s\nbaseline:\n%s",
-					got-1, want-1, screen.dump(), baseScreen.dump())
-			}
+			assertComposedFramesEqual(t, "band cycle", composedFrameLines(surface), baseFrame)
 		})
-	}
-}
-
-// surfaceLayoutBaseline replays the same committed rows on a fresh surface that
-// never reserves anything beyond prompt+status. It is the layout oracle: any
-// band / popup / settle cycle must leave the transcript and the prompt on the
-// same rows as this run.
-func surfaceLayoutBaseline(t *testing.T, width, height int, markers []string) (*screenVT, int, int) {
-	t.Helper()
-	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
-	surface.EnableForTest(width, height)
-	screen := newScreenVT(width, height)
-	screen.feed(captureSurfaceStdout(t, func() {
-		surface.ShowPrompt("> ")
-		surface.ClearPromptRows(1)
-		for _, marker := range markers {
-			writeSurfaceTranscriptRow(t, surface, marker)
-		}
-		surface.ShowPrompt("> ")
-	}))
-	return screen, assertCommittedRowsIntact(t, screen, markers, "baseline"), surfacePromptRow(t, screen)
-}
-
-// assertLayoutMatchesBaseline compares a reserve-cycle run against the oracle:
-// same prompt row, same last transcript row, therefore the same gap.
-func assertLayoutMatchesBaseline(t *testing.T, stage string, live *screenVT, liveLast, livePrompt int, base *screenVT, baseLast, basePrompt int) {
-	t.Helper()
-	if livePrompt != basePrompt {
-		t.Fatalf("%s: prompt row %d != baseline %d\nlive:\n%s\nbaseline:\n%s",
-			stage, livePrompt, basePrompt, live.dump(), base.dump())
-	}
-	if liveLast != baseLast {
-		t.Fatalf("%s: last transcript row %d != baseline %d (gap %d vs %d)\nlive:\n%s\nbaseline:\n%s",
-			stage, liveLast, baseLast, livePrompt-liveLast-1, basePrompt-baseLast-1, live.dump(), base.dump())
 	}
 }
 
@@ -191,60 +147,48 @@ func TestFixedBottomSurface_PopupIsLayoutNeutral(t *testing.T) {
 			// Baseline: the same turn boundary sequence, no popup.
 			baseSurface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			baseSurface.EnableForTest(width, height)
-			baseScreen := newScreenVT(width, height)
-			baseScreen.feed(captureSurfaceStdout(t, func() {
-				baseSurface.ShowPrompt("> ")
-				baseSurface.ClearPromptRows(1)
-				for _, marker := range markers[:5] {
-					writeSurfaceTranscriptRow(t, baseSurface, marker)
-				}
-				baseSurface.ShowPrompt("> ")
-				baseSurface.ClearPromptRows(1)
-				writeSurfaceTranscriptRow(t, baseSurface, markers[5])
-				baseSurface.ShowPrompt("> ")
-			}))
-			baseLast := assertCommittedRowsIntact(t, baseScreen, markers, "baseline")
-			basePrompt := surfacePromptRow(t, baseScreen)
+			baseSurface.ShowPrompt("> ")
+			baseSurface.ClearPromptRows(1)
+			for _, marker := range markers[:5] {
+				writeSurfaceTranscriptRow(t, baseSurface, marker)
+			}
+			baseSurface.ShowPrompt("> ")
+			baseSurface.ClearPromptRows(1)
+			writeSurfaceTranscriptRow(t, baseSurface, markers[5])
+			baseSurface.ShowPrompt("> ")
+			assertFrameCommittedRowsIntact(t, baseSurface, markers, "baseline")
+			baseFrame := composedFrameLines(baseSurface)
 
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
-			screen := newScreenVT(width, height)
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ShowPrompt("> ")
-				surface.ClearPromptRows(1)
-				for _, marker := range markers[:5] {
-					writeSurfaceTranscriptRow(t, surface, marker)
-				}
-				surface.ShowPrompt("> ")
-				surface.ShowPopup(popup)
-			}))
-			assertCommittedRowsIntact(t, screen, markers[:5], "popup open")
+			surface.ShowPrompt("> ")
+			surface.ClearPromptRows(1)
+			for _, marker := range markers[:5] {
+				writeSurfaceTranscriptRow(t, surface, marker)
+			}
+			surface.ShowPrompt("> ")
+			surface.ShowPopup(popup)
+			assertFrameCommittedRowsIntact(t, surface, markers[:5], "popup open")
 			for _, line := range popup {
-				if rows := screenRowsContaining(screen, line); len(rows) != 1 {
-					t.Fatalf("popup row %q should be painted once, got %v\n%s", line, rows, screen.dump())
-				}
+				assertFrameMarkerOnce(t, "popup open", surface, line)
 			}
 
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ClearPopup()
-			}))
-			assertCommittedRowsIntact(t, screen, markers[:5], "popup close")
+			surface.ClearPopup()
+			assertFrameCommittedRowsIntact(t, surface, markers[:5], "popup close")
 			for _, line := range popup {
-				if rows := screenRowsContaining(screen, line); len(rows) != 0 {
-					t.Fatalf("closed popup row %q still on screen at %v\n%s", line, rows, screen.dump())
+				if rows := frameRowsContaining(composedFrameLines(surface), line); len(rows) != 0 {
+					t.Fatalf("closed popup row %q still in composed frame at %v\n%s",
+						line, rows, composedFrameText(surface))
 				}
 			}
 
 			// Next turn: submitting input clears the prompt and the reply write
 			// pays the deferred popup compensation.
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ClearPromptRows(1)
-				writeSurfaceTranscriptRow(t, surface, markers[5])
-				surface.ShowPrompt("> ")
-			}))
-			liveLast := assertCommittedRowsIntact(t, screen, markers, "popup debt repaid")
-			assertLayoutMatchesBaseline(t, "popup cycle", screen, liveLast, surfacePromptRow(t, screen),
-				baseScreen, baseLast, basePrompt)
+			surface.ClearPromptRows(1)
+			writeSurfaceTranscriptRow(t, surface, markers[5])
+			surface.ShowPrompt("> ")
+			assertFrameCommittedRowsIntact(t, surface, markers, "popup debt repaid")
+			assertComposedFramesEqual(t, "popup cycle", composedFrameLines(surface), baseFrame)
 		})
 	}
 }
@@ -263,28 +207,24 @@ func TestFixedBottomSurface_HistorySettleIsLayoutNeutral(t *testing.T) {
 			for i := 1; i <= 6; i++ {
 				markers = append(markers, fmt.Sprintf("L%02d", i))
 			}
-			baseScreen, baseLast, basePrompt := surfaceLayoutBaseline(t, width, height, markers)
+			baseFrame := surfaceLayoutBaselineFrame(t, width, height, markers)
 
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
-			screen := newScreenVT(width, height)
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ShowPrompt("> ")
-				for _, marker := range markers[:2] {
-					writeSurfaceTranscriptRow(t, surface, marker)
-				}
-				// /resume: prompt rows are cleared, then already-final history is
-				// replayed after settling layout debt.
-				surface.ClearPromptRows(1)
-				surface.SettleOutputDebt()
-				for _, marker := range markers[2:] {
-					writeSurfaceTranscriptRow(t, surface, marker)
-				}
-				surface.ShowPrompt("> ")
-			}))
-			liveLast := assertCommittedRowsIntact(t, screen, markers, "history settle")
-			assertLayoutMatchesBaseline(t, "history settle", screen, liveLast, surfacePromptRow(t, screen),
-				baseScreen, baseLast, basePrompt)
+			surface.ShowPrompt("> ")
+			for _, marker := range markers[:2] {
+				writeSurfaceTranscriptRow(t, surface, marker)
+			}
+			// /resume: prompt rows are cleared, then already-final history is
+			// replayed after settling layout debt.
+			surface.ClearPromptRows(1)
+			surface.SettleOutputDebt()
+			for _, marker := range markers[2:] {
+				writeSurfaceTranscriptRow(t, surface, marker)
+			}
+			surface.ShowPrompt("> ")
+			assertFrameCommittedRowsIntact(t, surface, markers, "history settle")
+			assertComposedFramesEqual(t, "history settle", composedFrameLines(surface), baseFrame)
 		})
 	}
 }
@@ -303,42 +243,37 @@ func TestFixedBottomSurface_HistoryReplayThenStreamingTurnIsLayoutNeutral(t *tes
 			history := []string{"H01", "H02", "H03"}
 			reply := []string{"R01", "R02", "R03"}
 			all := append(append([]string{}, history...), reply...)
-			baseScreen, baseLast, basePrompt := surfaceLayoutBaseline(t, width, height, all)
+			baseFrame := surfaceLayoutBaselineFrame(t, width, height, all)
 
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
-			screen := newScreenVT(width, height)
 
 			// /resume: clear the prompt, settle layout debt, replay final history.
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ShowPrompt("> ")
-				surface.ClearPromptRows(1)
-				surface.SettleOutputDebt()
-				for _, marker := range history {
-					writeSurfaceTranscriptRow(t, surface, marker)
-				}
-				surface.ShowPrompt("> ")
-			}))
-			assertCommittedRowsIntact(t, screen, history, "history replay")
+			surface.ShowPrompt("> ")
+			surface.ClearPromptRows(1)
+			surface.SettleOutputDebt()
+			for _, marker := range history {
+				writeSurfaceTranscriptRow(t, surface, marker)
+			}
+			surface.ShowPrompt("> ")
+			assertFrameCommittedRowsIntact(t, surface, history, "history replay")
 
 			// Next turn: submit, stream behind an active band, release, restore.
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ClearPromptRows(1)
-				surface.SetActiveBand(surfaceBandLines(4))
-				for _, marker := range reply {
-					writeSurfaceTranscriptRow(t, surface, marker)
-				}
-				surface.ClearActiveBand()
-				surface.ShowPrompt("> ")
-			}))
-			liveLast := assertCommittedRowsIntact(t, screen, all, "streaming turn")
+			surface.ClearPromptRows(1)
+			surface.SetActiveBand(surfaceBandLines(4))
+			for _, marker := range reply {
+				writeSurfaceTranscriptRow(t, surface, marker)
+			}
+			surface.ClearActiveBand()
+			surface.ShowPrompt("> ")
+			assertFrameCommittedRowsIntact(t, surface, all, "streaming turn")
 			for _, band := range surfaceBandLines(4) {
-				if rows := screenRowsContaining(screen, band); len(rows) != 0 {
-					t.Fatalf("released band row %q still on screen at %v\n%s", band, rows, screen.dump())
+				if rows := frameRowsContaining(composedFrameLines(surface), band); len(rows) != 0 {
+					t.Fatalf("released band row %q still in composed frame at %v\n%s",
+						band, rows, composedFrameText(surface))
 				}
 			}
-			assertLayoutMatchesBaseline(t, "history replay + streaming turn", screen, liveLast,
-				surfacePromptRow(t, screen), baseScreen, baseLast, basePrompt)
+			assertComposedFramesEqual(t, "history replay + streaming turn", composedFrameLines(surface), baseFrame)
 		})
 	}
 }
@@ -347,8 +282,8 @@ func TestFixedBottomSurface_HistoryReplayThenStreamingTurnIsLayoutNeutral(t *tes
 // tail and rewrites it in place on every stable-commit cut. That rewrite has to
 // locate the rows the tail currently occupies, which depends on whether the
 // output cursor is parked on a blank row — exactly the state band growth mutates
-// when it absorbs that blank. Screen level is the only place where a one-row
-// error there is visible.
+// when it absorbs that blank. The composed frame is the only place where a
+// one-row error there is visible after the physical paint retired.
 func TestFixedBottomSurface_SoftTailRewriteUnderActiveBandIsLayoutNeutral(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	const width = 80
@@ -357,41 +292,33 @@ func TestFixedBottomSurface_SoftTailRewriteUnderActiveBandIsLayoutNeutral(t *tes
 	for _, height := range []int{24, 40} {
 		t.Run(fmt.Sprintf("height=%d", height), func(t *testing.T) {
 			markers := []string{"C01", "S01", "S02"}
-			baseScreen, baseLast, basePrompt := surfaceLayoutBaseline(t, width, height, markers)
+			baseFrame := surfaceLayoutBaselineFrame(t, width, height, markers)
 
 			surface := ui.NewFixedBottomSurface(ui.NewTerminal())
 			surface.EnableForTest(width, height)
-			screen := newScreenVT(width, height)
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ShowPrompt("> ")
-				surface.ClearPromptRows(1)
-				writeSurfaceTranscriptRow(t, surface, "C01")
-				// Band growth absorbs the trailing blank row here.
-				surface.SetActiveBand(surfaceBandLines(4))
-				if _, err, ok := surface.WriteSoftTrackedOutput(os.Stdout, row("D01-draft")+"\n"); !ok || err != nil {
-					t.Fatalf("WriteSoftTrackedOutput: ok=%t err=%v", ok, err)
-				}
-			}))
-			assertCommittedRowsIntact(t, screen, []string{"C01", "D01-draft"}, "soft draft")
+			surface.ShowPrompt("> ")
+			surface.ClearPromptRows(1)
+			writeSurfaceTranscriptRow(t, surface, "C01")
+			// Band growth absorbs the trailing blank row here.
+			surface.SetActiveBand(surfaceBandLines(4))
+			if _, err, ok := surface.WriteSoftTrackedOutput(io.Discard, row("D01-draft")+"\n"); !ok || err != nil {
+				t.Fatalf("WriteSoftTrackedOutput: ok=%t err=%v", ok, err)
+			}
+			assertFrameCommittedRowsIntact(t, surface, []string{"C01", "D01-draft"}, "soft draft")
 
 			// Stable commit: the draft tail is replaced by two final rows.
-			screen.feed(captureSurfaceStdout(t, func() {
-				if !surface.RewriteSoftOutputTail(os.Stdout, []string{row("S01"), row("S02")}) {
-					t.Fatal("expected soft tail rewrite to be accepted")
-				}
-			}))
-			if rows := screenRowsContaining(screen, "D01-draft"); len(rows) != 0 {
-				t.Fatalf("stale draft row still on screen at %v\n%s", rows, screen.dump())
+			if !surface.RewriteSoftOutputTail(io.Discard, []string{row("S01"), row("S02")}) {
+				t.Fatal("expected soft tail rewrite to be accepted")
 			}
-			assertCommittedRowsIntact(t, screen, markers, "soft rewrite")
+			if rows := frameRowsContaining(composedFrameLines(surface), "D01-draft"); len(rows) != 0 {
+				t.Fatalf("stale draft row still in composed frame at %v\n%s", rows, composedFrameText(surface))
+			}
+			assertFrameCommittedRowsIntact(t, surface, markers, "soft rewrite")
 
-			screen.feed(captureSurfaceStdout(t, func() {
-				surface.ClearActiveBand()
-				surface.ShowPrompt("> ")
-			}))
-			liveLast := assertCommittedRowsIntact(t, screen, markers, "band release")
-			assertLayoutMatchesBaseline(t, "soft tail rewrite under band", screen, liveLast,
-				surfacePromptRow(t, screen), baseScreen, baseLast, basePrompt)
+			surface.ClearActiveBand()
+			surface.ShowPrompt("> ")
+			assertFrameCommittedRowsIntact(t, surface, markers, "band release")
+			assertComposedFramesEqual(t, "soft tail rewrite under band", composedFrameLines(surface), baseFrame)
 		})
 	}
 }

@@ -272,13 +272,12 @@ func TestDispatchChatCommandDebugDisplaySurvivesOwnedViewportRepaints(t *testing
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
+	// L3-2 起物理绘制退役：不再回放 stdout 字节到 vt.Screen，直接在
+	// ComposedFrameForTest（与应用侧同源的合成帧）上断言。
 	feed := func(paint func()) {
 		t.Helper()
-		screen.feed(captureSurfaceStdout(t, func() {
-			coord.SetWriter(os.Stdout)
-			paint()
-		}))
+		coord.SetWriter(os.Stdout)
+		paint()
 	}
 
 	feed(func() {
@@ -289,23 +288,23 @@ func TestDispatchChatCommandDebugDisplaySurvivesOwnedViewportRepaints(t *testing
 			t.Fatal("/debug display unexpectedly requested chat exit")
 		}
 	})
-	assertSingleDebugCommandMarker(t, "initial command frame", surface, screen)
+	assertSingleDebugCommandMarker(t, "initial command frame", surface)
 
 	feed(func() {
 		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, nil)
 		surface.ShowPrompt("> ")
 	})
-	assertSingleDebugCommandMarker(t, "status and prompt repaint", surface, screen)
+	assertSingleDebugCommandMarker(t, "status and prompt repaint", surface)
 
 	feed(func() {
 		surface.SetActiveBand([]string{"• Running structured command check", "  retained active row"})
 	})
-	assertSingleDebugCommandMarker(t, "active band growth", surface, screen)
+	assertSingleDebugCommandMarker(t, "active band growth", surface)
 
 	feed(func() {
 		surface.ClearActiveBand()
 	})
-	assertSingleDebugCommandMarker(t, "active band shrink", surface, screen)
+	assertSingleDebugCommandMarker(t, "active band shrink", surface)
 
 	surface.EnableForTest(88, height)
 	if frame := commandResultFrameText(surface); strings.Count(frame, "Mailbox Pending:") != 1 {
@@ -788,13 +787,12 @@ func TestDispatchChatCommandStreamSurvivesOwnedViewportRepaints(t *testing.T) {
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
+	// L3-2 起物理绘制退役：不再回放 stdout 字节到 vt.Screen，直接在
+	// ComposedFrameForTest（与应用侧同源的合成帧）上断言。
 	feed := func(paint func()) {
 		t.Helper()
-		screen.feed(captureSurfaceStdout(t, func() {
-			coord.SetWriter(os.Stdout)
-			paint()
-		}))
+		coord.SetWriter(os.Stdout)
+		paint()
 	}
 
 	feed(func() {
@@ -805,23 +803,23 @@ func TestDispatchChatCommandStreamSurvivesOwnedViewportRepaints(t *testing.T) {
 			t.Fatal("/stream status unexpectedly requested chat exit")
 		}
 	})
-	assertSingleStreamCommandMarker(t, "initial command frame", surface, screen)
+	assertSingleStreamCommandMarker(t, "initial command frame", surface)
 
 	feed(func() {
 		surface.SetStatusModels(style.StatusLineModel{State: style.RunReady}, nil)
 		surface.ShowPrompt("> ")
 	})
-	assertSingleStreamCommandMarker(t, "status and prompt repaint", surface, screen)
+	assertSingleStreamCommandMarker(t, "status and prompt repaint", surface)
 
 	feed(func() {
 		surface.SetActiveBand([]string{"• Running structured command check", "  retained active row"})
 	})
-	assertSingleStreamCommandMarker(t, "active band growth", surface, screen)
+	assertSingleStreamCommandMarker(t, "active band growth", surface)
 
 	feed(func() {
 		surface.ClearActiveBand()
 	})
-	assertSingleStreamCommandMarker(t, "active band shrink", surface, screen)
+	assertSingleStreamCommandMarker(t, "active band shrink", surface)
 
 	surface.EnableForTest(88, height)
 	if frame := commandResultFrameText(surface); strings.Count(frame, "当前输出模式:") != 1 {
@@ -898,23 +896,16 @@ func TestDispatchChatCommandTitleSurvivesOwnedViewportRepaints(t *testing.T) {
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
+	// L3-2 起物理绘制退役：不再回放 stdout 字节到 vt.Screen，直接在
+	// ComposedFrameForTest（与应用侧同源的合成帧）上断言。
 	feed := func(paint func()) {
 		t.Helper()
-		screen.feed(captureSurfaceStdout(t, func() {
-			coord.SetWriter(os.Stdout)
-			paint()
-		}))
+		coord.SetWriter(os.Stdout)
+		paint()
 	}
 	assertSingleTitle := func(stage string) {
 		t.Helper()
-		frame := commandResultFrameText(surface)
-		if count := strings.Count(frame, "会话标题已更新"); count != 1 {
-			t.Fatalf("%s composed frame marker count=%d want 1:\n%s", stage, count, frame)
-		}
-		if rows := screen.RowsContaining("会话标题已更新"); len(rows) != 1 {
-			t.Fatalf("%s physical marker rows=%v want one:\n%s", stage, rows, screen.dump())
-		}
+		assertFrameMarkerOnce(t, stage, surface, "会话标题已更新")
 	}
 
 	feed(func() { coord.PrintPrompt() })
@@ -1511,28 +1502,16 @@ func diffDirectWriterInventory(want []chatDirectWriterInventoryEntry, got []chat
 	return strings.Join(lines, "\n")
 }
 
-func assertSingleDebugCommandMarker(t *testing.T, stage string, surface *ui.FixedBottomSurface, screen *screenVT) {
+func assertSingleDebugCommandMarker(t *testing.T, stage string, surface *ui.FixedBottomSurface) {
 	t.Helper()
 	const marker = "Mailbox Pending:"
-	frame := commandResultFrameText(surface)
-	if count := strings.Count(frame, marker); count != 1 {
-		t.Fatalf("%s composed frame marker count=%d want 1:\n%s", stage, count, frame)
-	}
-	if rows := screen.RowsContaining(marker); len(rows) != 1 {
-		t.Fatalf("%s physical screen marker rows=%v want one:\n%s", stage, rows, screen.dump())
-	}
+	assertFrameMarkerOnce(t, stage, surface, marker)
 }
 
-func assertSingleStreamCommandMarker(t *testing.T, stage string, surface *ui.FixedBottomSurface, screen *screenVT) {
+func assertSingleStreamCommandMarker(t *testing.T, stage string, surface *ui.FixedBottomSurface) {
 	t.Helper()
 	const marker = "当前输出模式:"
-	frame := commandResultFrameText(surface)
-	if count := strings.Count(frame, marker); count != 1 {
-		t.Fatalf("%s composed frame marker count=%d want 1:\n%s", stage, count, frame)
-	}
-	if rows := screen.RowsContaining(marker); len(rows) != 1 {
-		t.Fatalf("%s physical screen marker rows=%v want one:\n%s", stage, rows, screen.dump())
-	}
+	assertFrameMarkerOnce(t, stage, surface, marker)
 }
 
 func commandResultFrameText(surface *ui.FixedBottomSurface) string {

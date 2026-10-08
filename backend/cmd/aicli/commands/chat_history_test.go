@@ -490,37 +490,33 @@ func TestPrintVisibleChatHistory_SettlesSurfaceLayoutDebtBeforeContent(t *testin
 		*runtimetypes.NewAssistantMessage("好的，我先回顾上下文。"),
 	})
 
-	output := captureStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		if !surface.ShowPrompt("> ") {
-			t.Fatal("expected surface prompt")
-		}
-		coord.waitUIActorIdle()
-		coord.promptVisible = true
-		coord.promptRenderedOnSurface = true
-		// Same sequence as resume/startup: clear prompt (creates pending debt),
-		// then replay history. Settle must run before first content write.
-		beginDirectInteractiveOutput(session)
-		count := printVisibleChatHistory(session, "已加载历史会话")
-		if count != 2 {
-			t.Fatalf("expected 2 visible history messages, got %d", count)
-		}
-	})
+	coord.SetWriter(os.Stdout)
+	if !surface.ShowPrompt("> ") {
+		t.Fatal("expected surface prompt")
+	}
+	coord.waitUIActorIdle()
+	coord.promptVisible = true
+	coord.promptRenderedOnSurface = true
+	// Same sequence as resume/startup: clear prompt (creates pending debt),
+	// then replay history. Settle must run before first content write.
+	beginDirectInteractiveOutput(session)
+	count := printVisibleChatHistory(session, "已加载历史会话")
+	if count != 2 {
+		t.Fatalf("expected 2 visible history messages, got %d", count)
+	}
 
+	// L3-2 后物理绘制退役：回放内容的权威观察面是合成帧。
+	frame := composedFrameText(surface)
 	for _, expected := range []string{
 		"已加载历史会话",
 		"继续上次任务",
 		"好的，我先回顾上下文。",
 	} {
-		if !strings.Contains(output, expected) {
-			t.Fatalf("expected history settle/replay to contain %q, got:\n%q", expected, output)
+		if !strings.Contains(frame, expected) {
+			t.Fatalf("expected history settle/replay frame to contain %q, got:\n%s", expected, frame)
 		}
 	}
 	// Owned path recomposes the full frame; assert the content is present and no
-	// multi-row blank hole remains above the status.
-	screen := newScreenVT(80, 24)
-	screen.feed(output)
-	if run, at := maxBlankRunAboveBottom(screen, 24); run > 1 {
-		t.Fatalf("expected no multi-row blank hole after history settle, blank run %d at row %d\n%s", run, at, screen.dump())
-	}
+	// multi-row blank hole remains inside the replayed transcript.
+	assertNoFrameBlankRun(t, "history settle", surface, "已加载历史会话", "好的，我先回顾上下文。")
 }

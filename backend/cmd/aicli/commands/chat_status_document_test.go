@@ -147,25 +147,18 @@ func TestDispatchChatCommandStatusSurvivesOwnedViewportRepaints(t *testing.T) {
 	t.Cleanup(coord.Shutdown)
 	session.Interaction = coord
 	coord.SetSurface(surface)
-	screen := newScreenVT(width, height)
+	// L3-2 起物理绘制退役：不再回放 stdout 字节到 vt.Screen，直接在
+	// ComposedFrameForTest（与应用侧同源的合成帧）上断言。
 	feed := func(paint func()) {
 		t.Helper()
-		screen.feed(captureSurfaceStdout(t, func() {
-			coord.SetWriter(os.Stdout)
-			paint()
-		}))
+		coord.SetWriter(os.Stdout)
+		paint()
 	}
 
 	const marker = "Token usage"
 	assertSingle := func(stage string) {
 		t.Helper()
-		frame := commandResultFrameText(surface)
-		if count := strings.Count(frame, marker); count != 1 {
-			t.Fatalf("%s composed frame marker count=%d want 1:\n%s", stage, count, frame)
-		}
-		if rows := screen.RowsContaining(marker); len(rows) != 1 {
-			t.Fatalf("%s physical screen marker rows=%v want one:\n%s", stage, rows, screen.dump())
-		}
+		assertFrameMarkerOnce(t, stage, surface, marker)
 	}
 
 	feed(func() {

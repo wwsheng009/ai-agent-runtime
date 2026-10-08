@@ -491,23 +491,24 @@ func TestPrintRuntimeModelState_WritesThroughFixedBottomSurfaceAfterPromptClear(
 		BaseURL:      "http://localhost:8080/v1",
 	}
 
-	output := captureStdout(t, func() {
-		coord := newTestChatInteractionCoordinator(t, session)
-		session.Interaction = coord
-		session.Surface = surface
-		coord.SetSurface(surface)
-		// Rebind after stdout swap so ClearPrompt recognizes the interactive
-		// surface writer (writer == os.Stdout) and releases reserved rows.
-		coord.SetWriter(os.Stdout)
-		coord.promptAdvanceFn = func() bool { return false }
-		if !surface.ShowPrompt("> ") {
-			t.Fatal("expected surface prompt")
-		}
-		coord.promptVisible = true
-		coord.promptRenderedOnSurface = true
-		printRuntimeModelState(session)
-	})
+	coord := newTestChatInteractionCoordinator(t, session)
+	t.Cleanup(coord.Shutdown)
+	session.Interaction = coord
+	session.Surface = surface
+	coord.SetSurface(surface)
+	// Rebind the writer so ClearPrompt recognizes the interactive surface
+	// writer and releases reserved rows.
+	coord.SetWriter(os.Stdout)
+	coord.promptAdvanceFn = func() bool { return false }
+	if !surface.ShowPrompt("> ") {
+		t.Fatal("expected surface prompt")
+	}
+	coord.promptVisible = true
+	coord.promptRenderedOnSurface = true
+	printRuntimeModelState(session)
 
+	// L3-2 后物理绘制退役：状态写入的权威观察面是合成帧，不再回放字节。
+	frame := composedFrameText(surface)
 	for _, expected := range []string{
 		"当前 provider: OpenAI-go-away",
 		"当前 protocol: openai",
@@ -515,15 +516,11 @@ func TestPrintRuntimeModelState_WritesThroughFixedBottomSurfaceAfterPromptClear(
 		"当前 reasoning_effort: (无)",
 		"当前 baseURL: http://localhost:8080/v1",
 	} {
-		if !strings.Contains(output, expected) {
-			t.Fatalf("expected surface model-state output to contain %q, got:\n%s", expected, output)
+		if !strings.Contains(frame, expected) {
+			t.Fatalf("expected surface model-state frame to contain %q, got:\n%s", expected, frame)
 		}
 	}
 	// Owned path recomposes the full frame; assert the content is present and no
-	// multi-row blank hole remains above the status.
-	screen := newScreenVT(80, 24)
-	screen.feed(output)
-	if run, at := maxBlankRunAboveBottom(screen, 24); run > 1 {
-		t.Fatalf("expected no multi-row blank hole after model-state write, blank run %d at row %d\n%s", run, at, screen.dump())
-	}
+	// multi-row blank hole remains inside the model-state cell.
+	assertNoFrameBlankRun(t, "model-state write", surface, "当前 provider:", "当前 baseURL:")
 }

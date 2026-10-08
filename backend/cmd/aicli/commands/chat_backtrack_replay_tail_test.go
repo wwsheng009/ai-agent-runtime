@@ -37,41 +37,43 @@ func TestReplayAfterTruncationClearsRetainedTail(t *testing.T) {
 		t.Fatalf("seed messages: %v", err)
 	}
 
-	screen := newScreenVT(width, height)
-	stream := captureSurfaceStdout(t, func() {
-		// Paint the full history onto the transcript, simulating the pre-backtrack
-		// screen where all four messages (including the soon-to-be-removed turn)
-		// are visible.
-		beginDirectInteractiveOutput(session)
-		if got := printVisibleChatHistory(session, "回退前完整历史"); got != 4 {
-			t.Fatalf("expected 4 seeded visible messages, got %d", got)
-		}
-		// Simulate backtrack: truncate the canonical history back to turn 1.
-		truncated := []runtimetypes.Message{
-			*runtimetypes.NewSystemMessage("Profile system prompt."),
-			*runtimetypes.NewUserMessage("第一轮问题"),
-			*runtimetypes.NewAssistantMessage("第一轮回答"),
-		}
-		if err := replaceRuntimeMessages(session, truncated); err != nil {
-			t.Fatalf("truncate messages: %v", err)
-		}
-		// The post-backtrack replay: must clear the retained tail first, then
-		// replay only the surviving history behind the archive marker.
-		if got := replayVisibleChatHistoryAfterTruncation(session, "已回退到 user turn 1"); got != 2 {
-			t.Fatalf("expected 2 replayed messages, got %d", got)
-		}
-	})
-	screen.feed(stream)
-	dump := screen.dump()
+	// Paint the full history onto the transcript, simulating the pre-backtrack
+	// screen where all four messages (including the soon-to-be-removed turn)
+	// are visible.
+	beginDirectInteractiveOutput(session)
+	if got := printVisibleChatHistory(session, "回退前完整历史"); got != 4 {
+		t.Fatalf("expected 4 seeded visible messages, got %d", got)
+	}
+	// Simulate backtrack: truncate the canonical history back to turn 1.
+	truncated := []runtimetypes.Message{
+		*runtimetypes.NewSystemMessage("Profile system prompt."),
+		*runtimetypes.NewUserMessage("第一轮问题"),
+		*runtimetypes.NewAssistantMessage("第一轮回答"),
+	}
+	if err := replaceRuntimeMessages(session, truncated); err != nil {
+		t.Fatalf("truncate messages: %v", err)
+	}
+	// The post-backtrack replay: must clear the retained tail first, then
+	// replay only the surviving history behind the archive marker.
+	if got := replayVisibleChatHistoryAfterTruncation(session, "已回退到 user turn 1"); got != 2 {
+		t.Fatalf("expected 2 replayed messages, got %d", got)
+	}
 
-	if !strings.Contains(dump, "第一轮回答") {
-		t.Fatalf("expected surviving history visible on screen, dump:\n%s", dump)
+	// L3-2 后物理绘制退役：回放/截断的权威观察面是合成帧与保留历史窗口。
+	frame := composedFrameText(surface)
+	if !strings.Contains(frame, "第一轮回答") {
+		t.Fatalf("expected surviving history visible in composed frame:\n%s", frame)
 	}
-	if strings.Contains(dump, "将被回退") {
-		t.Fatalf("removed turn still visible on screen after replay; dump:\n%s", dump)
+	if strings.Contains(frame, "将被回退") {
+		t.Fatalf("removed turn still visible in composed frame after replay:\n%s", frame)
 	}
-	if !strings.Contains(stream, "上方旧消息已失效") {
-		t.Fatalf("expected archive marker in replay output, got:\n%s", stream)
+	if !strings.Contains(frame, "上方旧消息已失效") {
+		t.Fatalf("expected archive marker in composed frame:\n%s", frame)
+	}
+	for _, line := range surface.HistoryWindowForTest() {
+		if strings.Contains(line, "将被回退") {
+			t.Fatalf("removed turn leaked into retained history window: %q", line)
+		}
 	}
 	for _, line := range surface.SoftOutputTailLines() {
 		if strings.Contains(line, "将被回退") {

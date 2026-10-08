@@ -304,36 +304,32 @@ func TestPrintChatStatus_WritesThroughFixedBottomSurfaceAfterPromptClear(t *test
 	coord.SetSurface(surface)
 	coord.promptAdvanceFn = func() bool { return false }
 
-	output := captureStdout(t, func() {
-		// Rebind after stdout swap so ClearPrompt recognizes the interactive
-		// surface writer (writer == os.Stdout) and releases reserved rows.
-		coord.SetWriter(os.Stdout)
-		// Paint a real reserved prompt row, then mark the coordinator so
-		// ClearPrompt releases it (same state as an interactive /status).
-		if !surface.ShowPrompt("> ") {
-			t.Fatal("expected surface prompt")
-		}
-		coord.promptVisible = true
-		coord.promptRenderedOnSurface = true
-		printChatStatus(session)
-	})
+	// Rebind the writer so ClearPrompt recognizes the interactive surface
+	// writer and releases reserved rows.
+	coord.SetWriter(os.Stdout)
+	// Paint a real reserved prompt row, then mark the coordinator so
+	// ClearPrompt releases it (same state as an interactive /status).
+	if !surface.ShowPrompt("> ") {
+		t.Fatal("expected surface prompt")
+	}
+	coord.promptVisible = true
+	coord.promptRenderedOnSurface = true
+	printChatStatus(session)
 
+	// L3-2 后物理绘制退役：状态写入的权威观察面是合成帧，不再回放字节。
+	frame := composedFrameText(surface)
 	for _, expected := range []string{
 		"Token usage",
 		"Limits",
 		"╰",
 	} {
-		if !strings.Contains(output, expected) {
-			t.Fatalf("expected surface status output to contain %q, got:\n%s", expected, output)
+		if !strings.Contains(frame, expected) {
+			t.Fatalf("expected surface status frame to contain %q, got:\n%s", expected, frame)
 		}
 	}
 	// Owned path recomposes the full frame; assert the content is present and no
-	// multi-row blank hole remains above the status.
-	screen := newScreenVT(80, 24)
-	screen.feed(output)
-	if run, at := maxBlankRunAboveBottom(screen, 24); run > 1 {
-		t.Fatalf("expected no multi-row blank hole after status write, blank run %d at row %d\n%s", run, at, screen.dump())
-	}
+	// multi-row blank hole remains inside the status cell.
+	assertNoFrameBlankRun(t, "status write", surface, "Token usage", "╰")
 }
 
 func TestBuildChatStatusContextUsedValue_UsesContextWindow(t *testing.T) {

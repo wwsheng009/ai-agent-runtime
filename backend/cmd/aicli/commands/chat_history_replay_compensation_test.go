@@ -10,10 +10,13 @@ import (
 )
 
 // replayHistoryTranscriptSkeleton replays a fixed multi-turn history through a
-// real FixedBottomSurface and returns the reconstructed transcript region as a
+// real FixedBottomSurface and returns the composed-frame transcript region as a
 // CONTENT/BLANK skeleton. When armWaiting is true it first arms the ready-prompt
 // state (prompt reserved + waitingActive), reproducing a `/history` or `/resume`
 // issued while the composer is waiting for input.
+//
+// L3-2 后物理绘制退役：回放内容的权威观察面是 ComposedFrameForTest（历史 +
+// 底部保留区），不再回放 stdout 字节到 vt.Screen。
 func replayHistoryTranscriptSkeleton(t *testing.T, armWaiting bool) []string {
 	t.Helper()
 	const width, height = 80, 24
@@ -35,42 +38,36 @@ func replayHistoryTranscriptSkeleton(t *testing.T, armWaiting bool) []string {
 		*runtimetypes.NewAssistantMessage("第二个回答"),
 	})
 
-	screen := newScreenVT(width, height)
-	screen.feed(captureSurfaceStdout(t, func() {
-		coord.SetWriter(os.Stdout)
-		coord.SetSurface(surface)
-		// Establish a ready prompt exactly like the interactive loop does.
-		if !surface.ShowPrompt("> ") {
-			t.Fatal("expected initial ShowPrompt")
-		}
-		if armWaiting {
-			// The state a `/history` command runs in: prompt reserved and the
-			// turn armed for input. beginDirectInteractiveOutput clears the
-			// prompt but leaves waitingActive set.
-			coord.mu.Lock()
-			coord.promptVisible = true
-			coord.promptRenderedOnSurface = true
-			coord.waitingActive = true
-			coord.mu.Unlock()
-		}
-		// Real dispatch path: clear prompt (defers shrink), settle, replay.
-		beginDirectInteractiveOutput(session)
-		if count := printVisibleChatHistory(session, "对话历史"); count != 4 {
-			t.Fatalf("expected 4 replayed messages, got %d\n%s", count, screen.dump())
-		}
-	}))
+	coord.SetWriter(os.Stdout)
+	coord.SetSurface(surface)
+	// Establish a ready prompt exactly like the interactive loop does.
+	if !surface.ShowPrompt("> ") {
+		t.Fatal("expected initial ShowPrompt")
+	}
+	if armWaiting {
+		// The state a `/history` command runs in: prompt reserved and the
+		// turn armed for input. beginDirectInteractiveOutput clears the
+		// prompt but leaves waitingActive set.
+		coord.mu.Lock()
+		coord.promptVisible = true
+		coord.promptRenderedOnSurface = true
+		coord.waitingActive = true
+		coord.mu.Unlock()
+	}
+	// Real dispatch path: clear prompt (defers shrink), settle, replay.
+	beginDirectInteractiveOutput(session)
+	if count := printVisibleChatHistory(session, "对话历史"); count != 4 {
+		t.Fatalf("expected 4 replayed messages, got %d\n%s", count, composedFrameText(surface))
+	}
 
 	markers := []string{"第一个问题", "第一个回答", "第二个问题", "第二个回答"}
-	first := screen.RowsContaining("对话历史")
-	if len(first) != 1 {
-		t.Fatalf("expected history header once, got %v\n%s", first, screen.dump())
-	}
-	top := first[0]
+	lines := composedFrameLines(surface)
+	top := frameRowOf(t, surface, "对话历史")
 	last := top
 	for _, m := range markers {
-		rows := screen.RowsContaining(m)
+		rows := frameRowsContaining(lines, m)
 		if len(rows) != 1 {
-			t.Fatalf("expected %q exactly once, got %v\n%s", m, rows, screen.dump())
+			t.Fatalf("expected %q exactly once in composed frame, got %v\n%s", m, rows, strings.Join(lines, "\n"))
 		}
 		if rows[0] > last {
 			last = rows[0]
@@ -79,11 +76,11 @@ func replayHistoryTranscriptSkeleton(t *testing.T, armWaiting bool) []string {
 
 	skeleton := make([]string, 0, last-top+1)
 	for row := top; row <= last; row++ {
-		if strings.TrimSpace(screen.line(row)) == "" {
+		if strings.TrimSpace(lines[row-1]) == "" {
 			skeleton = append(skeleton, "BLANK")
 			continue
 		}
-		skeleton = append(skeleton, "CONTENT:"+strings.TrimSpace(screen.line(row)))
+		skeleton = append(skeleton, "CONTENT:"+strings.TrimSpace(lines[row-1]))
 	}
 	return skeleton
 }
