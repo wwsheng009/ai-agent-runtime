@@ -246,18 +246,29 @@ TrueColor、ANSI-256、ANSI-16 或 Plain。
 
 ui 生产文件的终端直写基线门禁（P0 写端归一）。
 语义：`ui/*.go`（递归子包）中触碰 `os.Stdout/os.Stderr`（纯 `Fd()` 探测除外）、
-`fmt.Print*`、`TerminalOutput()` 的调用点；该基线是**迁移债务台账，不是新功能授权**。
+`fmt.Print*`、`TerminalOutput()` 的调用点；该基线是**回归栅栏，不是新功能授权**。
 
 ```powershell
 # 在 backend/ 下运行
 go test ./cmd/aicli/ui/ -run TestUIInteractiveDirectWriterInventory
 ```
 
-- 迁移一处 → 从 `ui/writer_inventory_test.go` 基线删除对应条目；不得为任何新交互功能新增条目。
+L4 门禁语义重构（2026-10-08）后基线拆两组（两组并集仍做精确匹配，总数仍为栅栏）：
+
+- **sanctioned console writers（受认可白名单类）**：启动期探针/句柄初始化、TRACE/诊断通道、
+  console/plain（`--compat-mode`）降级承重链、平台差异、启动期无租约回退。
+  类白名单 + **零新增**：不得为任何新交互功能新增条目；条目只在实现退役时删除。
+- **migration debt（迁移债务，必须递减）**：InputBox legacy 方法链与默认 stdout 绑定等待整改；
+  删除实现时同步摘除条目，债务点位只能下降（`uiWriterMigrationDebtCeiling` 只降不升）。
+
+当前口径（机械计数）：受认可 21 条 / 24 点位；债务 4 条 / 4 点位；合计 25 条 / 28 点位。
+分类间移动条目必须同时更新对应 ceiling 常量与计划/台账（保证评审可见）。
+
 - 交互期运行时单写端门禁（ui + commands 联动）：
 
 ```powershell
 go test ./cmd/aicli/commands/ -run 'TestUnifiedSessionSinglePhysicalWriterFence|TestChatSelectionOutputClaimsToDiagnosticSinkWhenSessionActive|TestChatControlSequenceWriter'
 ```
 
-- 验收口径见 `docs/plan/aicli-render-p0-writer-unification-ledger.md` §4。
+- 验收口径见 `docs/plan/aicli-render-p0-writer-unification-ledger.md` §4 与
+  `docs/plan/aicli-legacy-fallback-retirement-plan-20261008.md` §5（L4 执行记录）。

@@ -381,6 +381,22 @@ buildChatSession
 - README「写端门禁」补充 sanctioned 类说明；`windows7-compat-internals.md` 与本文互链；
 - 验收矩阵新增 compat 场景（真机 e2e 或脚本化 PTY）。
 
+**L4 执行记录（2026-10-08，单提交：门禁重构 + 文档正规化）**
+
+- 门禁语义重构（`ui/writer_inventory_test.go`）：基线拆两组——**sanctioned console writers**
+  （受认可白名单类：启动期探针/句柄初始化、TRACE/诊断通道、console/plain 降级承重链、
+  平台差异、启动期无租约回退；零新增）与 **migration debt**（必须递减：InputBox legacy
+  方法链、默认 stdout 绑定）。并集仍做精确匹配；新增点位上限 `uiSanctionedConsoleWriterCeiling=24`
+  与 `uiWriterMigrationDebtCeiling=4`（只降不升；分类移动必须同时改 ceiling，评审可见）。
+- 机械口径复测（条 = 键数，点位 = Count 和）：受认可 21 条/24 点位 + 债务 4 条/4 点位
+  = 合计 **25 条/28 点位**。此前计划行的 33→32→27→26 为人工计数（含 +1 漂移），
+  本刀起以机械口径为准。
+- 降级正规化：compat/plain（console mode）链登记为受认可 writer；`consoleMode*` 命名
+  文档层先行（[windows7-compat-internals.md 第 6.2 节](../aicli/windows7-compat-internals.md)，
+  互链本文）；验收矩阵追加 compat 场景（§6 第 4 条）。
+- 验证：`go test ./cmd/aicli/ui -run TestUIInteractiveDirectWriterInventory` 绿；
+  ui 全量 + commands 单写端栅栏绿；gofmt/build/vet 绿。
+
 ### L5 观察项（可选，另行立项）
 
 - 启动期 picker 接租约 → 再删 fullscreen/pager/debug raw 分支；
@@ -417,7 +433,16 @@ L5 独立，依赖各自前置
 2. **包级回归**：`go test ./cmd/aicli/ui ./cmd/aicli/commands` 全绿；触及输入/编辑器时追加 `-race` 点检。
 3. **单写端**：`TestUnifiedSessionSinglePhysicalWriterFence` PASS（L2 起增加 secret 路径驱动）。
 4. **真机**：unified 场景 e2e（`scripts/test-aicli-windows-terminal-e2e.ps1`）保持 PASS；
-   L4 起追加 compat 场景（`--compat-mode` 基本可用性 + 无 ANSI 降级提示）。
+   **L4 起追加 compat 场景（每批真机执行）**：
+   - `--compat-mode` 基本可用性：无 TUI 启动（无 surface/keyHandler）→ 一轮对话
+     （输入回显 + 助手输出落 stdout）→ `/exit` 正常退出（退出码 0）；
+   - 无 ANSI 降级提示：不支持 ANSI scroll-region 的终端（Win7 conhost / 非 VT）在
+     `surface.Enable()` 失败路径输出
+     `Warning: terminal does not support ANSI scroll-region rendering; using plain interactive mode`
+     （stderr；此时无 unified 渲染窗口，无字节污染）。
+   - 载体：真机 Windows Terminal（wt.exe）运行；ConPTY 脚本化方案在本仓库已被环境限制废弃
+     （`chat_tty_live_loop_test.go` 头注），脚本化替代（in-process pipe harness）仅覆盖
+     会话级行为，真机项以 wt 运行为准。
 5. **文档**：每批同步 P0 台账 §4 与本文 §4 状态列。
 
 ## 7. 风险与需人工确认

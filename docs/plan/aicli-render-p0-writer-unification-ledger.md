@@ -117,6 +117,15 @@
   - 门禁：**条目 27→26**；FixedBottomSurface 物理写族清零。
   - 验证：commands 全量 4668/0（双跑；1 个已登记环境 flake 隔离全绿）；ui 全量绿；build/vet/gofmt 绿。
 
+- [x] **L4 门禁语义重构与降级正规化**（2026-10-08，单提交：门禁重构 + 文档正规化）。
+  - writer inventory 拆两组：sanctioned console writers（受认可白名单类，零新增）/
+    migration debt（必须递减，ceiling 只降不升）；并集精确匹配仍作回归栅栏。
+  - 机械口径复测：受认可 21 条/24 点位 + 债务 4 条/4 点位 = 合计 **25 条/28 点位**
+    （历史人工计数存在 +1 漂移，自 L4 起以机械口径为准）。
+  - 降级正规化：compat/plain（console mode）链登记为受认可 writer；`consoleMode*` 命名文档层
+    先行（`windows7-compat-internals.md` §6.2 互链）；验收矩阵追加 compat 场景（真机）。
+  - 验证：writer inventory 门禁绿；ui 全量 + commands 单写端栅栏绿；gofmt/build/vet 绿。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
@@ -209,11 +218,21 @@
 
 ## 4. 验收
 
-- 每次迁移：`go test ./cmd/aicli/ui/ -run TestUIInteractiveDirectWriterInventory`（计数必须按预期下降）+
-  目标包回归 + 真机 e2e（粘贴、焦点切换、标题、铃、长文本粘贴）。
+- 每次迁移：`go test ./cmd/aicli/ui/ -run TestUIInteractiveDirectWriterInventory`（基线并集精确匹配：
+  受认可类零新增、债务类只减不增；ceiling 常量只降不升）+ 目标包回归 + 真机 e2e
+  （粘贴、焦点切换、标题、铃、长文本粘贴）。
+- **L4 起追加 compat 场景（每批真机执行）**：`--compat-mode` 基本可用性（无 TUI 启动 →
+  一轮对话回显/输出 → `/exit` 退出码 0）+ 无 ANSI 降级提示
+  （`Warning: terminal does not support ANSI scroll-region rendering; using plain interactive mode`，
+  stderr，无渲染字节污染）。
 - 单写端运行时门禁（新增）：
   `go test ./cmd/aicli/commands/ -run 'TestUnifiedSessionSinglePhysicalWriterFence|TestChatSelectionOutputClaimsToDiagnosticSinkWhenSessionActive|TestChatControlSequenceWriter'`
   ——注入计数 writer + 进程 stdout/stderr 零字节断言，覆盖标题/铃/模式序列/动态诊断/直写/命令输出。
 - composer 出口门禁：`go test ./cmd/aicli/commands/ -run 'TestChatTransientLineComposer|TestChatMergedAnswerPrompt|TestChatModalComposer|TestChatAgentPanelComposer'`。
-- 完成态：ui 生产文件直写基线只剩白名单类（被栅栏 surface / TRACE / 启动期 probe），
-  交互期物理 writer 计数 = 1；CI 中门禁测试常开。
+- L4 门禁语义重构（2026-10-08）：基线拆 sanctioned console writers / migration debt 两组
+  （机械口径 25 条/28 点位 = 受认可 21/24 + 债务 4/4）；`uiWriterMigrationDebtCeiling` 只降不升；
+  分类移动必须同步更新 ceiling 与计划/台账。
+- 完成态：ui 生产文件直写基线只剩受认可白名单类（启动期探针/句柄初始化、TRACE/诊断、
+  console/plain 降级承重链、平台差异、启动期无租约回退；FixedBottomSurface 物理写族已清零）
+  与有限债务（4 点位，随 L1-d / `ClearIfSupported` 改造递减）；交互期物理 writer 计数 = 1；
+  CI 中门禁测试常开。

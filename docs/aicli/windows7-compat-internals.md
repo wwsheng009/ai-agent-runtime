@@ -138,7 +138,12 @@ Go 程序始终以 UTF-8 字节写 stdout，而 Win7 conhost 默认按 OEM 代�
 `platformTerminalSupportsANSI()` / `platformEnableVirtualTerminalProcessing()`
 用于探测并尝试开启 VT。
 
-### 6.2 输入：legacy 控制台行读取（三档策略）
+### 6.2 输入：console mode 控制台行读取（三档策略）
+
+> 命名正规化（L4，2026-10-08）：本链统一称 **console mode**（`consoleMode*`）；源码
+> 标识符（`legacyConsoleLineEditor` 等）保留，后续批次触及时再重命名。写端门禁将其
+> 登记为**受认可 console writer**（而非迁移债务），背景与口径见
+> [退役方案 §5（L4）](../plan/aicli-legacy-fallback-retirement-plan-20261008.md)。
 
 `cmd/aicli/commands/chat_legacy_console_line.go` 定义
 `chatConsoleLineInputMode`（disabled/auto/system/custom），由
