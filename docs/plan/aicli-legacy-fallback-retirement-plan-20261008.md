@@ -181,20 +181,20 @@ buildChatSession
 
 | 目标 | 证据 | 附带动作 |
 |---|---|---|
-| `InputBox.readPrompt` + 无 hooks 包装 `ReadWithHistoryPrompt`/`ReadTransientPrompt`/`ReadTransientLine` + `ReadWithHistory` | 侦察结论：生产调用者 = 0；仅测试 `inputbox_editor_test.go:1791` | 删测试用例；`writer_inventory_test.go:66-68` 基线同步 |
-| `writeEditorControlSequence` 的 `hooks==nil` 语义 | nil 传参仅存在于 `readPrompt`（`:208/:214`） | 删 readPrompt 后简化签名；改 `inputbox_editor_control_test.go:59-76` |
-| `Terminal.PrintAt` | 无生产调用者（lf-ui-surface §1） | writer 基线同步 |
-| `Status.PrintTo`/`PrintXxxTo` | 无生产调用者 | 测试引用核对后删 |
-| `screen_lease` raw 直写分支（`:286-330,:503-527`） | 仅 fence-on/测试可达 | 测试迁移到 transport 断言 |
-| `WaitForESC`/`Notify` | 仅测试引用 | **需确认是否保留为调试 API** |
-| `Terminal.RawMode`/`DisableEcho`/`EnsureExitOnSigInt` | 无调用者 | **需确认外部 API** |
-| `InputBox.Read/ReadMultiLine/Show/Update` 等 legacy 方法 | 仓库内无调用者 | **需确认外部 API**；与 `RenderInputArea/writeDoc` 联动评估 |
+| `InputBox.readPrompt` + 无 hooks 包装 `ReadWithHistoryPrompt`/`ReadTransientPrompt`/`ReadTransientLine` + `ReadWithHistory` | 侦察结论：生产调用者 = 0；仅测试 `inputbox_editor_test.go:1791` | **已执行（L1-a）**：删测试用例；`writer_inventory_test.go` 基线同步 |
+| `writeEditorControlSequence` 的 `hooks==nil` 语义 | nil 传参仅存在于 `readPrompt`（`:208/:214`） | **已执行（L1-a）**：签名改 `LineEditorHooks` 值类型；`inputbox_editor_control_test.go` 同步 |
+| `Terminal.PrintAt` | 无生产调用者（lf-ui-surface §1） | **已执行（L1-b）**：writer 基线 + terminal-inventory allowlist 同步 |
+| `Status.PrintTo`/`PrintXxxTo` | 无生产调用者 | **已复核（L1-b）**：`PrintTo`/`PrintErrorTo`/`PrintWarningTo` 有生产调用方（`chat.go:1080`、`chat_selection_output.go:129`）→ 保留；`PrintSuccessTo`/`PrintInfoTo` 已删 |
+| `screen_lease` raw 直写分支（`:286-330,:503-527`） | 仅 fence-on/测试可达 | **已执行（L1-c）**：租约统一走 transport（缺失 fail-closed）；测试迁移到 transport 断言 |
+| `WaitForESC`/`Notify` | 仅测试引用 | **已复核（L1-b）**：`WaitForESC` 删（测试转本地 helper）、`ManualInterrupt` 删（零调用）；`Notify` 保留（Windows 生产派发 `keyhandler_windows.go:65`） |
+| `Terminal.RawMode`/`DisableEcho`/`EnsureExitOnSigInt` | 无调用者 | **已执行（L1-b）**：D0-1 无外部消费者，直接删 |
+| `InputBox.Read/ReadMultiLine/Show/Update` 等 legacy 方法 | 仓库内无调用者 | **暂缓（评估后）**：联动面 `input.go`/`layout.go`（`writeInputDocument`/`RenderInputArea`/`writeDoc`/`InputAreaDocument`）需逐函数边界评估，作为独立小刀（L1-d）或 L2 前置 |
 
 ### 4.3 C 类——改造后删（半死：状态 facade 复用、物理侧可剥离）
 
 | 目标 | 说明 |
 |---|---|
-| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删 |
+| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；非租约 paint 分支与其余各项仍待 L3） |
 | DEC2026 true 分支 + `SetTerminalSynchronizedFrames(true)` | 唯一 true 开关在 fence 内；`withTerminalWriteLock` 锁本身保留（presenter batch 合法命中） |
 | `surface.Apply`（legacy reducer 路径） | 仅 `!UnifiedRendererEnabled()` 可达；`chat_ui_actor.go:1139` 注释明确拒绝 unified 调用 |
 | `TerminalOutput()` 默认 stdout 依赖 | 无生产注入；启动 `ClearIfSupported` 改显式 writer 后可去默认 stdout（保留 proxy） |
@@ -249,6 +249,31 @@ buildChatSession
 - 删 `Terminal.PrintAt`、`Status.PrintTo/PrintXxxTo`（确认后）、`screen_lease` raw 分支、`WaitForESC/Notify`（确认后）；
 - 同步测试：`inputbox_editor_test.go`、`inputbox_editor_control_test.go`、`writer_inventory_test.go` 基线。
 - 验收：`go test ./cmd/aicli/ui ./cmd/aicli/commands`；`-race` 点检输入相关用例；gofmt。
+
+**L1 执行记录（2026-10-08，3 个代码提交）**
+
+- **L1-a**（`48a9b3c5`）：编辑器死链——`readPrompt` + 3 无 hooks 包装 + `ReadWithHistory` 删除；
+  `writeEditorControlSequence` 去 nil 分支（`*LineEditorHooks` → `LineEditorHooks`）；`readInteractiveLine*`
+  保留为测试入口；门禁 −1（`readPrompt`）。
+- **L1-b**（`48ca07c8`）：`Terminal.PrintAt/RawMode/DisableEcho/EnsureExitOnSigInt`、`Status.PrintSuccessTo/PrintInfoTo`、
+  `KeyHandler.WaitForESC/ManualInterrupt` 删除；复核修正两处——`Notify/GetESCChannel` 为 Windows 生产派发（保留）、
+  `Status.PrintTo/PrintErrorTo/PrintWarningTo` 有生产调用方（保留）；门禁 −1（`PrintAt`）；
+  terminal-inventory allowlist 与架构文档同步。
+- **L1-c**（`0b0fe123`）：screen_lease raw DEC 1049 分支退役——acquire/write/release 统一要求 transport、
+  缺失 fail-closed；`Disable` 租约退出 transport-only；`writeLeaseSequencesLocked` 删除；测试迁移到
+  transport 断言（新增 `recordingLeaseTransport`）；commands 三文件注入最小 transport
+  （`newChatScreenTestSession` helper 修复 12 个 screen-framework 用例的 raw 租约依赖）；门禁 −4
+  （screen_lease×3 + `Disable`）。
+- **门禁基线：ui 直写债务 41 → 35（net −6）**。
+- **偏差记录**：screen_lease raw 的测试迁移面大于计划预期（17 处调用点、多个用例需语义迁移），
+  故拆为独立小刀 L1-c；`ReleaseExitFailureStillRepaints` 删除（由 `FailedUnifiedExitRetainsRetryableLease`
+  覆盖更优语义）。
+- **暂缓项**：`InputBox.Read/ReadMultiLine/Show/Update` 等 legacy 方法簇（零调用，D0-1 已排除外部消费者）
+  与 `input.go`/`layout.go` 联动面需逐函数边界评估，作为独立小刀（L1-d）或 L2 前置。
+- **环境偶发**：`TestTerminalSessionExecutorClaimMissReleasesStrandedInFlight` 在加载下偶发失败（本批 2 次）；
+  静默隔离复跑 ×10/×100 与全量复跑均绿，与 L1 文件面无关，按环境偶发登记。
+- **验收结果**：`gofmt` 干净；`go build ./...` 绿；`TestUIInteractiveDirectWriterInventory` 绿；
+  `go test ./cmd/aicli/ui` 绿（含 lease 子集 `-race`）；`go test ./cmd/aicli/commands` 全量绿（174s）。
 
 ### L2 残留直写收口（4.5，1–2 提交）
 

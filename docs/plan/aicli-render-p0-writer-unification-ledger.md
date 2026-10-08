@@ -70,6 +70,18 @@
   - 测试：`TestTerminalSessionWriteTerminalTitleAndBell`（gateway kind 断言）、
     `TestChatControlSequenceWriter{FallsBackToRawWriter,RoutesThroughUnifiedSession}`。
 
+- [x] **L1 legacy 死码退役（退役方案 L1-a/b/c，3 提交）**（2026-10-08）。
+  - L1-a `48a9b3c5`：编辑器死链——`readPrompt` 链 + 无 hooks 包装 + `ReadWithHistory`；
+    `writeEditorControlSequence` 去 nil 分支（`*LineEditorHooks` → `LineEditorHooks`）。
+  - L1-b `48ca07c8`：`Terminal.PrintAt/RawMode/DisableEcho/EnsureExitOnSigInt`、`Status.PrintSuccessTo/PrintInfoTo`、
+    `KeyHandler.WaitForESC/ManualInterrupt`；`Notify`/`PrintErrorTo`/`PrintWarningTo` 按逐符号复核保留。
+  - L1-c `0b0fe123`：screen_lease raw DEC 1049 分支退役（租约统一走 transport、缺失 fail-closed）；
+    `Disable` 租约退出 transport-only；测试迁移到 transport 断言；commands screen-framework helper
+    注入 transport（修复 12 个 screen-framework 用例对 raw 租约路径的依赖）。
+  - 门禁基线 **41→35 条目（net −6）**：`readPrompt`、`PrintAt`、`screen_lease`×3、`Disable`。
+  - 验证：ui 全量（含 -race 子集）、commands 全量（174s）、`go build ./...`、门禁绿；
+    环境偶发与暂缓项（InputBox legacy 方法簇）见方案 §5 执行记录。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
