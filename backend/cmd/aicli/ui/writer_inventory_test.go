@@ -82,9 +82,8 @@ func uiDirectWriterInventory() []uiDirectWriterInventoryEntry {
 		// console/UTF8 句柄初始化（进程启动期，非帧输出）。
 		{File: "terminal_driver.go", Func: "EnsureConsoleUTF8Output", Kind: "os.Std*", Count: 1},
 		{File: "terminal.go", Func: "NewTerminal", Kind: "os.Std*", Count: 1},
-		// --- legacy surface helper still fenced by FixedBottomSurface（L3-2 后
-		// 仅余 clearActiveBand，属 L3-3 范围）----
-		{File: "fixed_bottom_surface.go", Func: "method clearActiveBand", Kind: "TerminalOutput()", Count: 1},
+		// --- FixedBottomSurface 物理写族已全部退役（L3-2 删绘制实现；L3-3 删
+		// clearActiveBand paint 分支），此处不再有条目。----
 		// --- legacy printers: production call chains are dead today, but they
 		// have no fence and must never be re-wired outside the unified path ---
 		{File: "history_trace.go", Func: "method warnOnceLocked", Kind: "os.Std*", Count: 1},

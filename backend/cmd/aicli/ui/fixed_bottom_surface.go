@@ -464,18 +464,9 @@ func (s *FixedBottomSurface) Disable() {
 		s.leaseID = 0
 		s.leaseMode = ScreenModePrimary
 	}
-	if !leased {
-		if s.physicalWritesEnabledLocked() {
-			WithTerminalWriteLock(func() {
-				s.terminal.SaveCursor()
-				s.terminal.ResetScrollRegion()
-				s.clearPopupAreaLocked(s.popupRenderedRows, s.popupRenderedGapRows)
-				s.terminal.MoveTo(s.statusRowLocked(), 1)
-				s.terminal.ClearLine()
-				s.terminal.RestoreCursor()
-			})
-		}
-	}
+	// L3-3: the legacy teardown paint (scroll-region reset + popup/status row
+	// cleanup) is retired with the physical paint family; teardown is
+	// state-only and the unified presenter owns the final frame.
 	s.clearPopupRenderStateLocked()
 	s.clearPopupStateLocked(true)
 	s.clearComposerStateLocked()
@@ -1616,17 +1607,17 @@ func (s *FixedBottomSurface) setActiveBand(normalized []string, styled []render.
 	s.activeBandLines = normalized
 	s.activeBandStyled = cloneRenderLines(styled)
 	s.reflowPromptViewportLocked()
-	// The per-row prev diff is gone: both the owned and the legacy
-	// capability-fallback path repaint the full composed band. RenderEngine
-	// owns per-cell diffing; the surface must not reimplement row skipping.
-	// repaintActiveBandLocked may return false under an active lease (state is
-	// retained, rendering deferred); the update itself still succeeded.
+	// L3-3: no physical repaint remains; the band state above is authoritative
+	// and the unified presenter recomposes the frame. repaintActiveBandLocked
+	// may return false under an active lease (state is retained, rendering
+	// deferred); the update itself still succeeded.
 	s.repaintActiveBandLocked()
 	return true
 }
 
-// RefreshActiveBand repaints the stored frame after a theme or terminal
-// capability change, even when its structured content is unchanged.
+// RefreshActiveBand refreshes the stored band state after a theme or terminal
+// capability change, even when its structured content is unchanged. The
+// unified presenter recomposes the frame from retained state.
 func (s *FixedBottomSurface) RefreshActiveBand() bool {
 	if s == nil || s.terminal == nil {
 		return false
@@ -1649,41 +1640,11 @@ func (s *FixedBottomSurface) repaintActiveBandLocked() bool {
 		// same state through TerminalSession.
 		return true
 	}
-	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
-	WithTerminalWriteLock(func() {
-		if restorePromptCursor {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-		} else {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-		if s.ownedViewport {
-			// One full recompose covers prompt/band/status and restores owned
-			// history into rows freed by a shrink. Legacy multi-pass paint and
-			// scroll-down compensation are not used on this path.
-			s.applyLayoutLocked()
-			// Keep the paint bookkeeping coherent for cursor placement and
-			// capability fallback; the retired stageOwnedFrameLocked used to
-			// refresh these fields on this path.
-			s.refreshPaintBookkeepingLocked()
-			if restorePromptCursor {
-				s.restoreStoredPromptCursorLocked()
-			} else {
-				s.moveToOutputLocked()
-			}
-			return
-		}
-		s.applyLayoutLocked()
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		if restorePromptCursor {
-			s.restoreStoredPromptCursorLocked()
-		} else {
-			s.moveToOutputLocked()
-		}
-	})
+	// L3-3: the physical repaint (cursor save/hide + row emission) is retired
+	// with the paint family. Keep the layout/paint bookkeeping coherent for
+	// cursor placement and capability fallback; nothing is written here.
+	s.applyLayoutLocked()
+	s.refreshPaintBookkeepingLocked()
 	return true
 }
 
@@ -1706,10 +1667,9 @@ func (s *FixedBottomSurface) newClearActiveBandAction() ClearActiveBandAction {
 	return ClearActiveBandAction{Generation: generation}
 }
 
-// clearActiveBand releases the active viewport as one terminal-space
-// transaction. The old pixels must be erased before the enlarged output region
-// is scrolled down; repainting the old coordinates afterwards could erase the
-// transcript that was just moved into those rows.
+// clearActiveBand releases the active viewport state (L3-3 state-only): the
+// unified presenter recomposes the screen from retained history + the shrunk
+// bottom reserve; no terminal bytes are emitted here.
 func (s *FixedBottomSurface) clearActiveBand() bool {
 	if s == nil || s.terminal == nil {
 		return false
@@ -1720,8 +1680,6 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 		return s.enabled
 	}
 
-	oldStart := s.promptRenderedStartRow
-	oldRows := s.promptRenderedRows
 	s.activeBandLines = nil
 	s.activeBandStyled = nil
 	s.reflowPromptViewportLocked()
@@ -1730,8 +1688,6 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 	}
 
 	if s.ownedViewport {
-		// Owned frames recompose the full screen from retained history + the
-		// shrunk bottom reserve. No scroll-down compensation is required.
 		// Re-assert trailing blank so shrink restore works. historyPartial is
 		// false when the last write ended with a newline.
 		if !s.historyPartial && len(s.historyWindow) > 0 {
@@ -1739,48 +1695,8 @@ func (s *FixedBottomSurface) clearActiveBand() bool {
 		} else {
 			s.legacyReserve.CursorOnBlankRow = false
 		}
-		return s.repaintActiveBandLocked()
 	}
-
-	if !s.physicalWritesEnabledLocked() {
-		// Logical band state cleared above; unified presenter renders from
-		// retained state. Suppress the legacy erase-scroll-repaint sequence.
-		return true
-	}
-
-	restorePromptCursor := s.bottomPaneStateLocked().promptVisibleRowCount() > 0
-	WithTerminalWriteLock(func() {
-		if restorePromptCursor {
-			s.terminal.HideCursor()
-			defer s.terminal.ShowCursor()
-		} else {
-			s.terminal.SaveCursor()
-			defer s.terminal.RestoreCursor()
-		}
-
-		// Emit geometry contraction and stale-pixel cleanup as one write so a
-		// later output write never paints into the cleared band rows.
-		var transition strings.Builder
-		s.appendApplyLayoutSequenceLocked(&transition)
-		appendClearRowsSequence(&transition, oldStart, oldRows)
-		if transition.Len() > 0 {
-			fmt.Fprint(TerminalOutput(), transition.String())
-		}
-
-		// The old coordinates are invalid after scroll-down. The following
-		// repaint must only track rows belonging to the new bottom-pane state.
-		s.promptRenderedStartRow = 0
-		s.promptRenderedRows = 0
-		s.renderPopupLocked()
-		s.renderStatusLocked()
-		s.renderPromptRowsLocked(true)
-		if restorePromptCursor {
-			s.restoreStoredPromptCursorLocked()
-		} else {
-			s.moveToOutputLocked()
-		}
-	})
-	return true
+	return s.repaintActiveBandLocked()
 }
 
 // ActiveBandLines returns a copy of the current active band.
@@ -4328,16 +4244,6 @@ func terminalMoveToSequence(row, col int) string {
 		col = 1
 	}
 	return fmt.Sprintf("\x1b[%d;%dH", row, col)
-}
-
-func appendClearRowsSequence(builder *strings.Builder, startRow, rows int) {
-	if builder == nil || startRow < 1 || rows < 1 {
-		return
-	}
-	for row := startRow; row < startRow+rows; row++ {
-		builder.WriteString(terminalMoveToSequence(row, 1))
-		builder.WriteString("\x1b[K")
-	}
 }
 
 func terminalScrollDownSequence(rows int) string {
