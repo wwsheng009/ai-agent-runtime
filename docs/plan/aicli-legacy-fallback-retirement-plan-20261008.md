@@ -194,7 +194,7 @@ buildChatSession
 
 | 目标 | 说明 |
 |---|---|
-| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；`Enable` 首帧块已随 L3-1 删除；**物理绘制实现族已随 L3-2 删除（state-only 收敛）**；余 `clearActiveBand`/`Disable` legacy paint/`repaintActiveBandLocked`/`surface.Apply` 待 L3-3） |
+| `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；`Enable` 首帧块已随 L3-1 删除；**物理绘制实现族已随 L3-2 删除（state-only 收敛）；L3-3 残余（`clearActiveBand`/`Disable` legacy paint/`repaintActiveBandLocked`/`surface.Apply`）已于 2026-10-08 全部删除——C 类全族退役完成**） |
 | DEC2026 true 分支 + `SetTerminalSynchronizedFrames(true)` | **已执行（L3-1）**：framing 全链删除（开关/查询/包裹分支 + 裸 `os.Stdout` 写）；`withTerminalWriteLock` 锁本体保留（presenter batch 合法命中） |
 | `surface.Apply`（legacy reducer 路径） | 仅 `!UnifiedRendererEnabled()` 可达；`chat_ui_actor.go:1139` 注释明确拒绝 unified 调用 |
 | `TerminalOutput()` 默认 stdout 依赖 | 无生产注入；启动 `ClearIfSupported` 改显式 writer 后可去默认 stdout（保留 proxy） |
@@ -312,7 +312,7 @@ buildChatSession
 - **L3-2**：删物理绘制实现（`appendOwnedDirectPaintLocked`/`insertHistoryLinesInRegionLocked`/`flush*`/
   `renderOwnedViewportLocked` 写体/`writeOutput` 物理分支），保留 state-only 语义；迁移 13 个 surface 测试文件。
 - **L3-3**：删 `clearActiveBand` paint 分支、`Disable` legacy paint、`repaintActiveBandLocked` 分支、
-  `surface.Apply`；门禁基线同步（基线随刀同步：L3 起点 33 → L3-1 后 32 → L3-2 后 27）。
+  `surface.Apply`；门禁基线同步（基线随刀同步：L3 起点 33 → L3-1 后 32 → L3-2 后 27 → L3-3 后 26）。
 - 每刀验收：`go test ./cmd/aicli/ui`（含 inventory）+ `./cmd/aicli/commands` 相关子集；一刀一提交。
 
 **L3-1 执行记录（2026-10-08，提交 `d57cf71b`）**
@@ -351,6 +351,29 @@ buildChatSession
   `TestUIInteractiveDirectWriterInventory` 门禁绿。
 - 禁动项（L3-3 范围）未触碰：`clearActiveBand`、`Disable` legacy paint、`repaintActiveBandLocked`、
   `surface.Apply`。
+- 补记（2026-10-08，L3-3 期间）：全量 commands 首跑暴露 **56 个非统一路径存量失败**（本批退役 legacy
+  直写的测试面；验收只跑 ui 全量 + commands 子集，未覆盖全量）；已随 L3-3 完成全量迁移（commands
+  4668 通过 / 0 失败），详见 L3-3 记录。
+
+**L3-3 执行记录（2026-10-08，残余 paint 退役 `54037149`/`6174103b` + 测试迁移 `ee3d358b`..`e4a19aad`）**
+
+- 残余 paint 退役：`Disable` legacy teardown paint、`clearActiveBand` paint 分支、`repaintActiveBandLocked`
+  物理体（折叠为 guard 壳：enabled/lease 语义保留）删除；死代码 `appendClearRowsSequence` 删除。
+- `surface.Apply`（Phase 1 legacy adapter sink）与 actor 非统一路径的 facade-action 回灌删除；
+  统一会话本就在 reducer 后跳过，非统一路径的观察面迁移到 AppState/合成帧。
+- 测试迁移（61 个 commands 测试，S1–S4 分片）：观察面四类替换——composed frame（`ComposedFrameForTest`）/
+  保留历史窗口（`HistoryWindowForTest`+`HistoryHandedOffForTest`）/ `AppState`（`Bottom.*`）/
+  unified presenter harness（TTY live-loop 改挂 `enableUnifiedRendererWithWriter` + actor/presenter
+  双排空，末帧竞态消除）。
+- 偏差记录（重要）：全量 commands 首跑暴露 **56 个存量失败**（L3-1/L3-2 退役 legacy 直写所致；
+  此前每刀只跑 ui 全量 + commands 子集未覆盖全量）。归因矩阵：样本在 L3-2 前全绿、L3-2 后 56 稳定失败、
+  L3-3a/b 前后一致（确认非本刀引入）；已随本刀 S1–S4 一并迁移清零。
+- 门禁：**条目 27 → 26**（`clearActiveBand` TerminalOutput() 摘除；FixedBottomSurface 物理写族清零）。
+- 验证：`go test ./cmd/aicli/commands/` 全量 **4668 通过 / 0 失败**（双跑；二跑 1 个已登记环境
+  flake，隔离复跑 ×5 全绿）；`go test ./cmd/aicli/ui` 全量（12.0s）绿；`go build ./...`、`go vet` 绿；
+  gofmt 干净。
+- 登记（环境 flake，非本刀）：`TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled`、
+  `TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`（代码同、全量偶发，隔离复跑全绿）。
 
 ### L4 门禁语义重构与降级正规化（1 提交，纯文档/测试）
 

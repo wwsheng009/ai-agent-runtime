@@ -109,6 +109,14 @@
   - 门禁：**条目 32→27（net −5）**；`clearActiveBand`（:88）保留待 L3-3。
   - 验证：gofmt/vet/build 绿；ui 全量（11.8s/12.3s 双跑）绿；commands 相关子集绿；inventory 门禁绿。
 
+- [x] **L3-3 FixedBottomSurface 残余退役（C 类收口）**（2026-10-08，`54037149`..`e4a19aad` + 测试迁移）。
+  - 删除 `Disable` legacy teardown paint、`clearActiveBand` paint 分支、`repaintActiveBandLocked` 物理体
+    （guard 壳保留）与 `surface.Apply`；死代码 `appendClearRowsSequence` 删除。
+  - 测试：61 个 commands 测试迁移到 frame/历史窗口/AppState/unified presenter 四类观察面
+    （含全量首跑暴露的 56 个 L3-2 legacy 直写存量失败清零）。
+  - 门禁：**条目 27→26**；FixedBottomSurface 物理写族清零。
+  - 验证：commands 全量 4668/0（双跑；1 个已登记环境 flake 隔离全绿）；ui 全量绿；build/vet/gofmt 绿。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
