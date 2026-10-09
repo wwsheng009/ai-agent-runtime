@@ -167,6 +167,14 @@
   - 验证：gofmt/build/vet 绿；族聚焦 + 门禁绿；commands 全量仅剩已登记 flake（隔离 ×2 绿）；
   - B/C 族分批见 `docs/plan/aicli-d3-screen-capability-convergence-plan-20261009.md`。
 
+- [x] **D3 Batch C（部分）输出面 Enabled 读单点收敛**（2026-10-09，`f9f178d6`）。
+  - 语义清单：`surfaceOutputActiveLocked()`（既有单点，19 处引用）= `c.surface != nil && c.surface.Enabled()`；
+    coordinator 7 处裸读迁移（writer 归属 `:911`、viewport 分叉 `:7406/:7618`、探针块
+    `:7460/:7550`、行同步 `:7495`、prompt 谓词 `:5690`）；
+  - 机械门禁 `TestChatSurfaceOutputEnabledReadsFrozen`（链式 `X.surface.Enabled()` 白名单）；
+  - 剩余 1 处：`chat_ui_actor.go:1378 applyDrawRequested`（文件在途 WIP，收口后迁移并更新白名单）；
+  - 验证：gofmt/build/vet 绿；聚焦绿；commands 全量仅剩已登记 flake（隔离 ×3/×2 绿）。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**

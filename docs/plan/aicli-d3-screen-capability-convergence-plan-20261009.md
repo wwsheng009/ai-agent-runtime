@@ -74,7 +74,7 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
 |---|---|---|
 | Batch A | A 族 12 处 → `chatSurfaceScreenGate` + OwnedViewport 门禁 | **已执行（`8d4a4d45`/`48027017`）** |
 | Batch B | B 族 2 处 → `chatSurfaceLeased` + LeaseActive 门禁扩展 | 待办（等 busy_input WIP 收口） |
-| Batch C | C 族逐点语义清单 → 输出面单点（可选/不锁判据） | 待办（设计先行） |
+| Batch C | C 族逐点语义清单 → 输出面单点（可选/不锁判据） | **部分执行（`7211cf70`/`f9f178d6`）**：语义清单完成（`surfaceOutputActiveLocked` 既有单点，19 处引用）+ coordinator 7 处迁移 + `TestChatSurfaceOutputEnabledReadsFrozen` 门禁；剩余 1 处（`chat_ui_actor.go:1378 applyDrawRequested`）待 web WIP 收口 |
 
 每批验收：目标族聚焦绿 + `go vet` + commands 全量（仅剩已登记 flake）+ gofmt 空 +
 机械门禁绿；一刀一提交，文档同步。
@@ -93,3 +93,11 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
   验证：gofmt 空 / build 绿 / vet 绿 / picker·screen 族 + 门禁聚焦绿（3.0s）/
   commands 全量 186.7s 仅剩已登记环境 flake（`StreamingAssistantFinalTail…`，
   隔离 ×2 绿）/ 主仓复验绿。
+- 2026-10-09 Batch C（部分，`7211cf70`，主仓 `f9f178d6`）：C 族语义清单（逐点归类）
+  + coordinator 7 处裸读收敛至既有单点 `surfaceOutputActiveLocked()`（writer 归属
+  `:911`、viewport 分叉 `:7406/:7618`、探针块 `:7460/:7550`、行同步 `:7495`、
+  prompt 谓词 `:5690`）+ `TestChatSurfaceOutputEnabledReadsFrozen` 链式门禁
+  （白名单含剩余 1 处 `chat_ui_actor.go:1378`，待 WIP 收口后迁移）。
+  验证：gofmt 空 / build 绿 / vet 绿 / 冻结门禁 + coordinator·stream 族聚焦绿（3.5s）/
+  commands 全量 184.5s 仅剩已登记 flake（`AutoStartTeam…` 隔离 ×3、`StreamingAssistantFinalTail…`
+  隔离 ×2 全绿）/ 主仓复验绿。
