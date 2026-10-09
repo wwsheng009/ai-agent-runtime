@@ -44,6 +44,11 @@ type chatInteractionCoordinator struct {
 	writer        io.Writer
 	surfaceWriter bool
 	surface       *ui.FixedBottomSurface
+	// geometrySync 是 L5-2 Batch A 几何门面（ui.GeometrySyncPort）：SetSurface
+	// 就绪时注入，surface==nil 时为 nil（调用方安全降级为无探针路径）。
+	// 几何族调用（探针/读宽）一律经此门面，不得直读 surface 几何方法
+	// （门禁：TestChatGeometryFamilyDirectReadsFrozen，方案 §2 D2-a ①）。
+	geometrySync ui.GeometrySyncPort
 	// uiSurface 是 actor 侧（reduceUIAction）读取 surface 的原子指针：
 	// reducer 不得持有 c.mu 获取 surface（生产者可能在持 c.mu 时投递
 	// durable action，mailbox 满时避免锁环）；surface 自带锁。
@@ -642,6 +647,13 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	}
 	previousSurface := c.surface
 	c.surface = surface
+	// 几何门面与 surface 生命周期绑定：就绪即注入，卸载/替换即清空
+	// （surface==nil 时调用方安全降级为无探针路径，L5-2 Batch A D2-a ①）。
+	if surface != nil {
+		c.geometrySync = surface
+	} else {
+		c.geometrySync = nil
+	}
 	if c.session != nil {
 		// The coordinator and session must reference the same physical surface.
 		// Command/prompt overlays resolve their surface from ChatSession while
@@ -5587,6 +5599,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 		c.activeStream.Cancel()
 	}
 	c.surface = nil
+	c.geometrySync = nil
 	c.terminalSession = nil
 	c.terminalExecutor = nil
 	c.refreshTerminalWriterSnapshotLocked()
@@ -7412,13 +7425,17 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 	sizeChanged := false
 	geometryProbed := false
 	if c.surface != nil && c.surface.Enabled() {
-		if softNeedsReflow {
-			// Soft ownership already disagrees with the cached layout width —
-			// reflow now; also force an unthrottled probe so layout stays coherent.
-			sizeChanged = c.surface.SyncTerminalGeometry()
-			geometryProbed = true
-		} else {
-			sizeChanged, geometryProbed = c.surface.SyncTerminalGeometryThrottled(ui.DefaultGeometryProbeMinInterval)
+		// 几何探针经注入门面（L5-2 Batch A D2-a ①）；surface 内部语义不变
+		// （RefreshSize + applyLayoutWithSizeLocked + 100ms 节流）。门面未注入
+		// 时安全降级为无探针（等价于旧 surface==nil 分支）。
+		if port := c.geometrySync; port != nil {
+			if softNeedsReflow {
+				// Soft ownership already disagrees with the cached layout width —
+				// reflow now; also force an unthrottled probe so layout stays coherent.
+				sizeChanged, geometryProbed = port.RequestGeometrySync(0)
+			} else {
+				sizeChanged, geometryProbed = port.RequestGeometrySync(ui.DefaultGeometryProbeMinInterval)
+			}
 		}
 		// Unified mode: the probe above only refreshes the cached dimensions
 		// the presenter reads; the Resize post flows through the presenter
@@ -7498,7 +7515,10 @@ func (c *chatInteractionCoordinator) refreshActiveStreamViewportNow() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.surface != nil && c.surface.Enabled() {
-		_ = c.surface.SyncTerminalGeometry()
+		// 显式刷新走几何门面（L5-2 Batch A D2-a ①）；minInterval=0 强制探针。
+		if port := c.geometrySync; port != nil {
+			_, _ = port.RequestGeometrySync(0)
+		}
 		// Unified: the probe refreshes the cache for the presenter's next
 		// geometry publication; only legacy reports the measurement directly.
 		if !c.unifiedRendererEnabledLocked() {
@@ -7538,6 +7558,16 @@ func (c *chatInteractionCoordinator) reportMeasuredSurfaceGeometryLocked() {
 		return
 	}
 	_ = c.postCausalUIAction(ui.Resize{Width: width, Height: height, Applied: true})
+}
+
+// ActiveBandWidth 是几何门面的读侧入口（L5-2 Batch A D2-a ①）：surface 未
+// 挂载 / 门面未注入时返回 0，调用方回落到全局终端探针（与迁移前直读
+// session.Surface 的降级路径一致）。
+func (c *chatInteractionCoordinator) ActiveBandWidth() int {
+	if c == nil || c.geometrySync == nil {
+		return 0
+	}
+	return c.geometrySync.ActiveBandWidth()
 }
 
 // refreshActiveStreamViewportLocked runs soft reflow + stable queue rebuild +

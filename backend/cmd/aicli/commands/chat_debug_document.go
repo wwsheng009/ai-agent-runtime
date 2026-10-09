@@ -979,7 +979,9 @@ func sortedChatRouteProfileNames(profiles map[string]config.AICLISubagentRoutePr
 
 func chatDebugDocumentWidth(session *ChatSession) int {
 	if session != nil && session.Surface != nil && session.Surface.Enabled() {
-		if width, _ := session.Surface.ActiveBandViewportSize(); width > 0 {
+		// 宽度读经几何门面（L5-2 Batch A D2-a ①）；门面未就绪（Interaction
+		// 未接线 / 无 surface）时回落到全局终端探针。
+		if width := session.Interaction.ActiveBandWidth(); width > 0 {
 			return width
 		}
 	}
