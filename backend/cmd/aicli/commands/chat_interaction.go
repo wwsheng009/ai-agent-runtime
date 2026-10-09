@@ -908,7 +908,7 @@ func (c *chatInteractionCoordinator) ShowAnswerPrompt() bool {
 	if c.shutdown || c.session.NoInteractive || c.session.JSONOutput {
 		return false
 	}
-	if c.writer != os.Stdout || c.surface == nil || !c.surface.Enabled() {
+	if c.writer != os.Stdout || !c.surfaceOutputActiveLocked() {
 		return false
 	}
 	prompt := formatSessionUserPrompt(c.session)
@@ -5687,7 +5687,7 @@ func (c *chatInteractionCoordinator) beginMessageLocked() bool {
 }
 
 func (c *chatInteractionCoordinator) promptSurfaceActiveLocked() bool {
-	return c != nil && c.promptVisible && c.promptRenderedOnSurface && c.surface != nil && c.surface.Enabled()
+	return c != nil && c.promptVisible && c.promptRenderedOnSurface && c.surfaceOutputActiveLocked()
 }
 
 func (c *chatInteractionCoordinator) surfaceOutputActiveLocked() bool {
@@ -7403,7 +7403,7 @@ func (c *chatInteractionCoordinator) syncActiveStreamViewportLocked() {
 		return
 	}
 	var width, rows int
-	if viewport := c.activeBandViewport(); viewport.Unified() || (c.surface != nil && c.surface.Enabled()) {
+	if viewport := c.activeBandViewport(); viewport.Unified() || c.surfaceOutputActiveLocked() {
 		width, rows = viewport.ViewportSize()
 	} else {
 		width, rows = ui.GetTerminalWidth(), ui.ActiveBandRows(ui.GetTerminalHeight())
@@ -7457,7 +7457,7 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 
 	sizeChanged := false
 	geometryProbed := false
-	if c.surface != nil && c.surface.Enabled() {
+	if c.surfaceOutputActiveLocked() {
 		// 几何探针经注入门面（L5-2 Batch A D2-a ①）；surface 内部语义不变
 		// （RefreshSize + applyLayoutWithSizeLocked + 100ms 节流）。门面未注入
 		// 时安全降级为无探针（等价于旧 surface==nil 分支）。
@@ -7492,7 +7492,7 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 }
 
 func (c *chatInteractionCoordinator) syncActiveBandLinesLocked(frame []render.Line) {
-	if c == nil || c.surface == nil || !c.surface.Enabled() {
+	if !c.surfaceOutputActiveLocked() {
 		return
 	}
 	if strings.TrimSpace((render.PlainBackend{}).Render(render.LinesDoc(frame...))) == "" {
@@ -7547,7 +7547,7 @@ func (c *chatInteractionCoordinator) refreshActiveStreamViewportNow() {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.surface != nil && c.surface.Enabled() {
+	if c.surfaceOutputActiveLocked() {
 		// 显式刷新走几何门面（L5-2 Batch A D2-a ①）；minInterval=0 强制探针。
 		if port := c.geometrySync; port != nil {
 			_, _ = port.RequestGeometrySync(0)
@@ -7615,7 +7615,7 @@ func (c *chatInteractionCoordinator) refreshActiveStreamViewportLocked() {
 	c.reflowSoftEmittedTailLocked()
 	c.rebuildPendingStableCommitLocked(asMarkdown)
 	width, rows := c.currentStreamEmitWidthLocked(), ui.ActiveBandRows(ui.GetTerminalHeight())
-	if viewport := c.activeBandViewport(); viewport.Unified() || (c.surface != nil && c.surface.Enabled()) {
+	if viewport := c.activeBandViewport(); viewport.Unified() || c.surfaceOutputActiveLocked() {
 		if w, r := viewport.ViewportSize(); w > 0 {
 			width = w
 			if r > 0 {
