@@ -73,8 +73,8 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
 | 批次 | 范围 | 状态 |
 |---|---|---|
 | Batch A | A 族 12 处 → `chatSurfaceScreenGate` + OwnedViewport 门禁 | **已执行（`8d4a4d45`/`48027017`）** |
-| Batch B | B 族 2 处 → `chatSurfaceLeased` + LeaseActive 门禁扩展 | 待办（等 busy_input WIP 收口） |
-| Batch C | C 族逐点语义清单 → 输出面单点（可选/不锁判据） | **部分执行（`7211cf70`/`f9f178d6`）**：语义清单完成（`surfaceOutputActiveLocked` 既有单点，19 处引用）+ coordinator 7 处迁移 + `TestChatSurfaceOutputEnabledReadsFrozen` 门禁；剩余 1 处（`chat_ui_actor.go:1378 applyDrawRequested`）待 web WIP 收口 |
+| Batch B | B 族 2 处 → `chatSurfaceLeased` + LeaseActive 门禁扩展 | **已执行（`124967ca`/`bda38888`）** |
+| Batch C | C 族逐点语义清单 → 输出面单点（可选/不锁判据） | **已执行（`7211cf70`/`f9f178d6` + `bda38888` 收尾）**：语义清单完成（`surfaceOutputActiveLocked` 既有单点）+ coordinator 链式裸读 8 处全部收敛（含原剩余 `chat_ui_actor.go:1378`）；`TestChatSurfaceOutputEnabledReadsFrozen` 白名单收敛为单点本体；非链式 `Enabled()` 散点（其他接收者/语义）按 §1 登记保留，不属本单点语义 |
 
 每批验收：目标族聚焦绿 + `go vet` + commands 全量（仅剩已登记 flake）+ gofmt 空 +
 机械门禁绿；一刀一提交，文档同步。
@@ -101,3 +101,11 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
   验证：gofmt 空 / build 绿 / vet 绿 / 冻结门禁 + coordinator·stream 族聚焦绿（3.5s）/
   commands 全量 184.5s 仅剩已登记 flake（`AutoStartTeam…` 隔离 ×3、`StreamingAssistantFinalTail…`
   隔离 ×2 全绿）/ 主仓复验绿。
+- 2026-10-09 Batch B + C 收尾（`124967ca`，主仓 `bda38888`，web WIP 收口后）：
+  `chatSurfaceLeased` 单点（`chatBusyScreenActiveForSession` + `chatScreenCapability`
+  busy 标签 2 处）+ 输出面剩余 1 处（`chat_ui_actor.go:1378`）迁移至
+  `surfaceOutputActiveLocked`；双冻结门禁收敛（LeaseActive 白名单 = 2 单点；
+  链式 `c.surface.Enabled()` 白名单 = 仅单点本体）。
+  验证：gofmt 空 / build 绿 / vet 绿 / 聚焦绿（2.0s）/ commands 全量 183.2s 仅剩已登记
+  flake（`AutoStartTeam…`/`TTY_LiveLoop_LLMRetry…` 隔离 ×2 全绿）/ 主仓复验绿。
+  **D3 三批次（A/B/C）至此收口。**

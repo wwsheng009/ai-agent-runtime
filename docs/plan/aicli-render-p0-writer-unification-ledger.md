@@ -182,6 +182,13 @@
     合并隔离 ×3 全绿）；`go test ./internal/...` **全绿（exit 0，~6min）**；
   - 结论：主仓（含 web 工作流集成态 + L5 全链 + §4.3 + D3 A/C）无未归因失败。
 
+- [x] **D3 Batch B + C 收尾：租约/输出面单点收敛**（2026-10-09，`bda38888`）。
+  - `chatSurfaceLeased` 单点（`chatBusyScreenActiveForSession` + `chatScreenCapability`
+    busy 标签 2 处）；输出面剩余 1 处（`chat_ui_actor.go:1378`）迁移至 `surfaceOutputActiveLocked`；
+  - 双冻结门禁收敛：LeaseActive 白名单 = 2 单点；链式 `c.surface.Enabled()` 白名单 = 仅单点本体；
+  - 验证：gofmt/build/vet 绿；聚焦绿；commands 全量仅剩已登记 flake（隔离 ×2 绿）；
+  - **D3 三批次（A/B/C）收口**（方案：`aicli-d3-screen-capability-convergence-plan-20261009.md`）。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
