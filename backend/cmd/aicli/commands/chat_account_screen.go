@@ -84,8 +84,7 @@ func canOpenChatAccountScreen(session *ChatSession) bool {
 		session.Interaction == nil || session.Surface == nil {
 		return false
 	}
-	if !session.Surface.Enabled() || !session.Surface.OwnedViewport() ||
-		session.Surface.LeaseActive() || chatSessionPopupPort(session).HasActivePopup() {
+	if !chatSurfaceScreenGate(session) {
 		return false
 	}
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
