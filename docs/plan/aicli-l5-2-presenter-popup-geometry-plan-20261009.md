@@ -157,3 +157,22 @@ controller/AppState（已具备），几何刷新经 presenter/session 门面；
     ui 全量 14.7s + vet/build 干净；commands 全量（-skip web 在途用例）唯一失败为已登记
     team/streaming 环境 flake（纯基线同跑同败）；
   - 未决：D2-a ②（渲染器接管布局宽度，L5-2b）；Batch B/C 未启动。
+
+- 2026-10-09 **Batch B**（`f2d1e6f0` + `93089990`；worktree 执行 + 主仓集成）：
+  - D1 落地：`ui.PopupPort`（Begin/Show/Update/Clear + HasActive + pending paste；unified 直投
+    Show/Update/ClearPopupAction 复用 BottomPaneState，legacy/compat 回落 surface；handle 分配
+    上移门面边界经共享 `allocatePopupInstance`，token 单调唯一/FIFO）；`UIController.BottomPaneState()`
+    轻量访问器；coordinator 同型注入（atomic.Pointer，SetSurface/Shutdown 生命周期）；
+    `chatPromptOverlay` 16 处 + 其余 popup 族迁移 + HasActivePopup 12 处读迁移；
+  - 机械口径（commands 非测试）：popup 状态机族 **0 直读**（接收者为 `chatSessionPopupPort(...)`
+    的调用视为合规门面调用）；邻近白名单 5 处（`SetPromptEditorStatusLine`×4 /
+    `PromptInputMaxVisibleRows`×1，prompt-editor/composer 组、§1.3 判据外）按 file::func::method 冻结；
+  - 执行过程：子代理 run 在第三次全量等待期 stall（进度阈值）→ 父会话 `extend_deadline` +30m；
+    收尾回合未再执行（run 终止）→ 父会话接管：close 后 worktree/分支被运行时清理，经对象库恢复
+    （cherry-pick 2 提交；与并发工作流 WIP 零文件重叠）；
+  - 验证：恢复 worktree（clean 基线 + 本批）gofmt 干净 / build ok / ui 门禁 1.5s / **ui 全量 14.5s 绿** /
+    commands 聚焦（Popup|Geometry|fence|startup）2.3s 绿；主仓集成聚焦（Popup|Geometry）2.3s 绿；
+    commands 全量 177.4s → 2 失败（`TestTTY_LiveLoop_LLMRetryRendersAdvancingTimerE2E`、
+    `TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`），隔离 ×3 全绿
+    （环境 flake；后者与 Batch A 记录同源）；
+  - 未决：D2-a ②（L5-2b）；Batch C 未执行；prompt-editor/composer 邻近族迁移需先立项。

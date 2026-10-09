@@ -23,7 +23,7 @@
 | 项 | 一句话 | 触发条件（满足其一即立项） | 规模 |
 |---|---|---|---|
 | L5-1 | 启动期租约 → fullscreen/pager/debug raw 收编（**已收口**：Batch A/B/C；写端受认可 24→20） | 启动期 picker 需纳入统一渲染/租约；或启动期裸写引发实际冲突/需求 | 中（约 3–6 提交） |
-| L5-2 | presenter popup/几何 API → surface facade 读退役（**提前立项**：方案文档已出，Batch A 进行中） | 需要统一 popup/几何能力提升；或继续瘦身 surface 排期 | 中大（设计 + 分批迁移） |
+| L5-2 | presenter popup/几何 API → surface facade 读退役（**提前立项**：Batch A/B 完成，Batch C 待执行） | 需要统一 popup/几何能力提升；或继续瘦身 surface 排期 | 中大（设计 + 分批迁移） |
 | L5-3 | legacy 命令处理器 → CommandResult 批量迁移（已执行：Batch A/B/C 完成，三批次收口） | 排期「命令通道收口」批次（收益最直接：删硬门禁） | 大（逐命令小刀） |
 | T-1 | session 侧 DEC 2026 同步帧包裹 | 真机 tearing 证据（唯一门槛） | 小（约 1–2 提交 + 真机验证） |
 
@@ -100,6 +100,8 @@ Batch A/B/C 已收口（`dec13b68`/`3dca6215`）：D1/D2/D3 落地、三处启�
 **执行记录（2026-10-09）**：已升级为独立方案文档
 [aicli-l5-2-presenter-popup-geometry-plan-20261009.md](aicli-l5-2-presenter-popup-geometry-plan-20261009.md)；
 经用户「继续」指令**提前立项**（设计先行）；Batch A（几何族：D2 门面 + 3 处迁移）启动执行。
+**执行记录（2026-10-09 续）**：Batch A（`492f3f86`/`8e85961c`）与 Batch B（`f2d1e6f0`/`93089990`）
+均完成（两族零直读机械门禁 + 隔离/集成验证）；Batch C（全量收口 + 回填）待执行。
 
 ## 3. L5-3 legacy 命令处理器 → CommandResult 批量迁移（删硬门禁）
 
