@@ -256,10 +256,11 @@ L4 门禁语义重构（2026-10-08）后基线拆两组（两组并集仍做精�
 - **sanctioned console writers（受认可白名单类）**：启动期探针/句柄初始化、TRACE/诊断通道、
   console/plain（`--compat-mode`）降级承重链、平台差异、启动期无租约回退。
   类白名单 + **零新增**：不得为任何新交互功能新增条目；条目只在实现退役时删除。
-- **migration debt（迁移债务，必须递减）**：InputBox legacy 方法链与默认 stdout 绑定等待整改；
-  删除实现时同步摘除条目，债务点位只能下降（`uiWriterMigrationDebtCeiling` 只降不升）。
+- **migration debt（迁移债务，必须递减）**：已于 2026-10-09 **清零**（L1-d InputBox
+  legacy 显示链 + §4.3 `processTerminalOutput` 默认绑定退役）；`uiWriterMigrationDebtCeiling=0`
+  只降不升，任何新增债务都须经门禁评审。
 
-当前口径（机械计数）：受认可 21 条 / 24 点位；债务 4 条 / 4 点位；合计 25 条 / 28 点位。
+当前口径（机械计数）：受认可 17 条 / 20 点位；债务 0 条 / 0 点位；合计 17 条 / 20 点位。
 分类间移动条目必须同时更新对应 ceiling 常量与计划/台账（保证评审可见）。
 
 - 交互期运行时单写端门禁（ui + commands 联动）：

@@ -62,9 +62,11 @@ func TestUIInteractiveDirectWriterInventory(t *testing.T) {
 // 任何上调都等于重新分类，必须同步更新计划 §5 与 P0 台账 §4。
 // L1-d（2026-10-09）：InputBox legacy 显示链退役后，债务 1 条/1 点位，
 // 合计 18 条/21 点位。
+// §4.3（2026-10-09）：processTerminalOutput 默认绑定退役后，**债务清零**；
+// 受认可 17 条/20 点位，合计 17 条/20 点位。
 const (
 	uiSanctionedConsoleWriterCeiling = 20
-	uiWriterMigrationDebtCeiling     = 1
+	uiWriterMigrationDebtCeiling     = 0
 )
 
 type uiDirectWriter struct {
@@ -123,23 +125,22 @@ func uiSanctionedConsoleWriterInventory() []uiDirectWriterInventoryEntry {
 		{File: "message.go", Func: "method Print", Kind: "os.Std*", Count: 1},
 		{File: "separator.go", Func: "PrintEmptyLine", Kind: "os.Std*", Count: 1},
 		{File: "separator.go", Func: "method Print", Kind: "os.Std*", Count: 1},
-		// Terminal 控制序列统一出口（经 process sink；默认 stdout 绑定属债务组）。
+		// Terminal 控制序列统一出口（driver 显式 stdout 优先；注入/无 driver 回落
+		// process sink——默认绑定已随 §4.3 退役）。
 		{File: "terminal.go", Func: "method emitControl", Kind: "TerminalOutput()", Count: 1},
 		{File: "welcome.go", Func: "PrintWelcomeWithConfig", Kind: "os.Std*", Count: 1},
 	}
 }
 
 // uiWriterMigrationDebtInventory 是仍属迁移债务的直写（必须递减）：
-//   - processTerminalOutput 默认 stdout 绑定：ClearIfSupported 改显式 writer 后
-//     移除默认值（§4.3；proxy 保留）。
-//   - InputBox legacy 显示链（Read/ReadMultiLine/Show/Update/Hide/Clear）与其渲染
-//     出口 RenderInputArea/writeDoc/writeInputDocument 已于 L1-d 删除（§4.2）。
+//   - 已于 2026-10-09 清零：InputBox legacy 显示链（L1-d，§4.2）与
+//     processTerminalOutput 默认 stdout 绑定（§4.3，emitControl 改 driver
+//     显式 writer 优先）均已退役。
 //
-// 删除实现时同步摘除条目；uiWriterMigrationDebtCeiling 只降不升。
+// 删除实现时同步摘除条目；uiWriterMigrationDebtCeiling 归零（只降不升；
+// 任何新增债务都须经门禁评审并同步计划/台账）。
 func uiWriterMigrationDebtInventory() []uiDirectWriterInventoryEntry {
-	return []uiDirectWriterInventoryEntry{
-		{File: "terminal_output.go", Func: "var processTerminalOutput", Kind: "os.Std*", Count: 1},
-	}
+	return nil
 }
 
 func collectUIDirectWriters(t *testing.T) []uiDirectWriter {

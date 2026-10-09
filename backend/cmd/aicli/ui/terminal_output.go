@@ -2,23 +2,25 @@ package ui
 
 import (
 	"io"
-	"os"
 	"sync"
 )
 
-// processTerminalOutput is the compatibility sink used by legacy immediate
-// terminal controls. The owned TerminalSession has its own injected writer;
-// this sink exists only for the remaining legacy UI adapters.
+// processTerminalOutput is the compatibility/override sink for legacy UI
+// writes. Production terminal controls no longer depend on it: emitControl
+// prefers an explicitly injected sink and otherwise writes through the
+// terminal driver's explicit stdout. The former os.Stdout default binding was
+// retired (§4.3, 2026-10-09); with no override installed this sink discards,
+// which keeps late legacy adapters from touching the process stdout.
 //
-// Keeping the indirection synchronized matters even before those adapters are
-// removed: tests replace stdout to reconstruct ANSI frames while the UI actor
-// is allowed to complete an already-posted facade action. Reading os.Stdout
-// directly in that actor races with the replacement and can write to a closed
-// capture pipe. The proxy serializes writer selection with the actual write.
+// Keeping the indirection synchronized matters: tests replace stdout to
+// reconstruct ANSI frames while the UI actor is allowed to complete an
+// already-posted facade action. Reading os.Stdout directly in that actor races
+// with the replacement and can write to a closed capture pipe. The proxy
+// serializes writer selection with the actual write.
 var processTerminalOutput = struct {
 	mu     sync.RWMutex
 	writer io.Writer
-}{writer: os.Stdout}
+}{}
 
 type processTerminalOutputProxy struct{}
 
@@ -32,6 +34,14 @@ func (processTerminalOutputProxy) Write(p []byte) (int, error) {
 }
 
 var terminalOutputProxy io.Writer = processTerminalOutputProxy{}
+
+// terminalControlOverride returns the explicitly installed process sink
+// (SetTerminalOutputForTesting), or nil when none is installed.
+func terminalControlOverride() io.Writer {
+	processTerminalOutput.mu.RLock()
+	defer processTerminalOutput.mu.RUnlock()
+	return processTerminalOutput.writer
+}
 
 // TerminalOutput returns the process terminal sink for legacy UI controls.
 // Callers must pass this writer through existing terminal serialization rather

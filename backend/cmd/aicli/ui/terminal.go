@@ -20,10 +20,21 @@ type Terminal struct {
 	sizeProbeCount int // RefreshSize invocations; tests assert paint/layout probe budgets
 }
 
-// emitControl 是 terminal 控制序列的统一出口（Phase 6）：直接写 process
-// TerminalOutput()（interactive/legacy 路径均以该 writer 为唯一物理出口）。
+// emitControl 是 terminal 控制序列的统一出口（Phase 6）。写入优先级：
+//  1. 显式注入的 process sink（测试 seam，SetTerminalOutputForTesting）；
+//  2. terminal driver 的显式 stdout（生产 NewTerminal 路径；§4.3 后不再依赖
+//     进程默认 stdout 绑定）；
+//  3. process sink 回落（driver-less 合成实例；无注入时丢弃）。
 func (t *Terminal) emitControl(seq string) {
 	if seq == "" {
+		return
+	}
+	if writer := terminalControlOverride(); writer != nil {
+		fmt.Fprint(writer, seq)
+		return
+	}
+	if t != nil && t.driver != nil && t.driver.stdout != nil {
+		fmt.Fprint(t.driver.stdout, seq)
 		return
 	}
 	fmt.Fprint(TerminalOutput(), seq)
