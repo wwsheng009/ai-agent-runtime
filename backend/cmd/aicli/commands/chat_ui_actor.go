@@ -121,12 +121,21 @@ func (c *chatInteractionCoordinator) promptEditorState() (ui.BottomPaneState, ui
 	return actor.BottomPaneState(), actor.Geometry(), true
 }
 
-// activeBandGeometry 是 ActiveBand 视口门面的渲染链状态源（L5-2b）：actor
-// 存活时返回 reducer 权威的 GeometryState（ok=true），由门面投影视口
-// （geometry.Width + ActiveBandRows(geometry.Height)）；actor 未创建
-// （legacy/无 unified 渲染器）时 ok=false，门面回落 surface 终端缓存。
+// activeBandGeometry 是 ActiveBand 视口门面的渲染链状态源（L5-2b）：unified
+// 模式下返回 reducer 权威的 GeometryState（ok=true），由门面投影视口
+// （geometry.Width + ActiveBandRows(geometry.Height)）；否则 ok=false，门面回落
+// surface 终端缓存（legacy 原语义）。
+//
+// 门控必须取 unified 开关（无锁快照），不能只看 actor 是否存在：legacy/测试
+// 路径里 actor 可以存在，但 AppState.Geometry 只是 legacy 直报的异步镜像——
+// reducer adapter 先于 state reduce 执行、直报又是 causal follow-up，镜像会
+// 滞后一个 Resize barrier，同 pass 的 soft reflow 会读到旧宽度
+// （RefreshReflowsSoftTail / ProgressiveCommitSoftTail 回归）。
 func (c *chatInteractionCoordinator) activeBandGeometry() (ui.GeometryState, bool) {
 	if c == nil {
+		return ui.GeometryState{}, false
+	}
+	if unified, _ := c.terminalWriterSnapshotLoad(); !unified {
 		return ui.GeometryState{}, false
 	}
 	actor := c.currentUIActor()

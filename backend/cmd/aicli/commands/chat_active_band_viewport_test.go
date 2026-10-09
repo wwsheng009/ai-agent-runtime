@@ -75,3 +75,37 @@ func TestChatInteractionCoordinatorActiveBandViewportLegacyFallback(t *testing.T
 		t.Fatalf("no-surface viewport = (%d, %d), want (0, %d)", width, rows, ui.ActiveBandMinRows)
 	}
 }
+
+// TestChatInteractionCoordinatorActiveBandViewportLegacyIgnoresActorMirror
+// pins the L5-2b fix: with an actor alive but the unified renderer off, the
+// viewport port must ignore the AppState geometry mirror (which lags one async
+// Resize barrier) and fall back to the surface terminal cache. Before the fix,
+// the stale mirror (40) shadowed the freshly pinned terminal (20) and the
+// same-pass soft reflow kept the old width.
+func TestChatInteractionCoordinatorActiveBandViewportLegacyIgnoresActorMirror(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+
+	session := &ChatSession{}
+	coord := newTestChatInteractionCoordinator(t, session)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(20, 24)
+	surface.SetPhysicalWritesEnabled(false)
+	coord.SetSurface(surface)
+
+	// Actor alive; stale geometry mirror 40 vs freshly pinned terminal 20.
+	if !coord.postUIAction(ui.Resize{Width: 40, Height: 24, Applied: true, Generation: 1}) {
+		t.Fatal("expected resize barrier to be accepted")
+	}
+	coord.waitUIActorIdle()
+	if actor := coord.currentUIActor(); actor == nil || actor.Geometry().Width != 40 {
+		t.Fatalf("precondition: actor geometry mirror = %+v, want width 40", actor)
+	}
+
+	viewport := coord.activeBandViewport()
+	if viewport.Unified() {
+		t.Fatal("legacy coordinator must not treat the AppState mirror as the unified viewport source")
+	}
+	if width, rows := viewport.ViewportSize(); width != 20 || rows != ui.ActiveBandRows(24) {
+		t.Fatalf("legacy viewport = (%d, %d), want (20, %d)", width, rows, ui.ActiveBandRows(24))
+	}
+}
