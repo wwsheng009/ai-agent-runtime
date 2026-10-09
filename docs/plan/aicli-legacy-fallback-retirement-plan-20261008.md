@@ -202,7 +202,9 @@ buildChatSession
 ### 4.4 D 类——观察（依赖其他前置，本轮不承诺）
 
 - ~~fullscreen/pager/debug overlay 的 raw/no-lease 分支~~：**已完成**（L5-1 Batch A/B/C，2026-10-09：启动期 picker 经 `RunStartupFullScreenList` 接租约；`dec13b68`/`3dca6215`）；
-- `FixedBottomSurface` facade 读（popup 输入 `chat_surface_output.go:239,311`、几何 `chat_interaction.go:7401-7408`）：需 presenter 侧补齐 popup/几何 API 后才能迁；
+- ~~`FixedBottomSurface` facade 读（popup 输入 `chat_surface_output.go:239,311`、几何 `chat_interaction.go:7401-7408`）~~：**已完成**
+  （L5-2 Batch A/B，2026:10: 09：`ui.GeometrySyncPort`/`ui.PopupPort` 会话门面 + popup 族 39 点位/几何 3 处迁移
+  + 两族零直读机械门禁；`492f3f86`/`f2d1e6f0`/`93089990`）；legacy/compat 回落面保留待 compat 判定；
 - `chat_unified_command_gate.go` 硬门禁与 legacy 命令处理器须同批删除（handler 迁移到 `CommandResult`）。
 
 ### 4.5 unified 模式残留直写（先收口，是"单写端"完整性的缺口）
@@ -404,7 +406,8 @@ buildChatSession
 ### L5 观察项（可选，另行立项）
 
 - ~~启动期 picker 接租约 → 再删 fullscreen/pager/debug raw 分支~~（**已收口**：L5-1，2026-10-09）；
-- presenter popup/几何 API 迁移 → 再删 surface facade 读；
+- ~~presenter popup/几何 API 迁移 → 再删 surface facade 读~~（**已收口**：L5-2 Batch A/B/C，2026:10: 09；
+  legacy/compat 回落面按 §4.4 保留）；
 - legacy 命令处理器批量迁 `CommandResult` → 删 `chat_unified_command_gate` 硬门禁。
 
 > 立项评估（现状锚点/前置/完成判据/触发条件，2026-10-09）：
@@ -465,7 +468,7 @@ L5 独立，依赖各自前置
 |---|---|---|
 | 13 个 surface 测试文件钉住 legacy paint 语义 | L3 工期与回归面最大项 | 先迁移断言（state-only/租赁 transport），再删实现；每小刀独立提交 |
 | secret 读直写收口改变密码输入路径 | Win7/compat IME 语义 | 保留原 console 分支；unified 分支仅换写入口；真机回归 |
-| `FixedBottomSurface` facade 读（popup/几何）仍被 unified 依赖 | 误删会破坏 unified 弹层 | 明确列入 D 类，须先补 presenter API（L5） |
+| `FixedBottomSurface` facade 读（popup/几何）仍被 unified 依赖 | 误删会破坏 unified 弹层 | **已缓解（L5-2）**：presenter 门面（GeometrySyncPort/PopupPort）补齐，unified 不再直读；legacy/compat 回落保留 |
 | 仓库外消费者调用 ui 导出符号 | 删除造成外部破坏 | **已关闭（D0-1，2026-10-08）：无外部消费者**；逐符号复核后删除 |
 | 门禁语义重构削弱约束 | 新增直写可能漏检 | sanctioned 类仍按"类白名单 + 零新增"扫描；债务计数独立递减 |
 | `WaitForESC`/unix `KeyHandler` SIGUSR2 是否产品行为 | 误删调试/中断能力 | **已核查**：`WaitForESC` 仅测试引用→删（测试迁移 helper）；`Notify` 为 Windows 生产派发→保留；SIGUSR2 路径保留 |

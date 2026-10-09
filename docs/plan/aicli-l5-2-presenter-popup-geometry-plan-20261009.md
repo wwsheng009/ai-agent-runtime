@@ -176,3 +176,18 @@ controller/AppState（已具备），几何刷新经 presenter/session 门面；
     `TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`），隔离 ×3 全绿
     （环境 flake；后者与 Batch A 记录同源）；
   - 未决：D2-a ②（L5-2b）；Batch C 未执行；prompt-editor/composer 邻近族迁移需先立项。
+
+- 2026-10-09 **Batch C**（验证收口，无代码变更；HEAD `60922b95` 纯净 worktree 执行）：
+  - 门禁：ui writer inventory `ok` 1.5s；两族零直读冻结 + 单写端 fence `ok` 2.4s；
+  - ui 全量 `ok` 14.3s；**commands 全量（无 skip）`ok` 178.4s（exit 0）**——首跑 184.2s 仅 1 例
+    已登记环境 flake（`TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`）；
+    复验：基线（`398b4ca8`）与 HEAD 各 ×5 全绿（`TestTTY_LiveLoop_LLMRetryRendersAdvancingTimerE2E`
+    同法复验绿；两者与 L5-1/L5-3 记录同源，非本批引入）；
+  - fixture 真机 e2e **8/8 PASS**（exit 0；history exactly-once / 滚动可达 / replay 无 CSI 3J /
+    prompt-status 单例 / Markdown 单次 / 流式采样无重复 / finalized 单次）；
+  - compat 脚本（E2E-COMPAT-01）**6/6 PASS**（exit 0；无 TUI 启动 / mock 回环 / 回复落 stdout /
+    优雅退出 / 无 unified 渲染字节）；
+  - 回填：本文 §6、候选评估 §2、P0 台账、退役方案 §4.4/§L5/风险表。
+    **L5-2 三批次收口（`492f3f86`/`f2d1e6f0`/`93089990`；收口验证 2026-10-09）。**
+  - 保留项：D2-a ②（渲染器接管布局宽度，L5-2b 观察）；prompt-editor/composer 邻近族（L5-2c 候选，
+    需先立项）；legacy/compat 回落面（待 compat 判定后收）。
