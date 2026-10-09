@@ -20,10 +20,10 @@ import (
 //     HasActivePopup + pending paste preview，方案 §1.1 的 39 点位扣除邻近白名单）：
 //     零直读。全部调用必须经会话门面 chatSessionPopupPort / ui.PopupPort
 //     （unified 直投 controller；legacy 回落 surface），新增直读即门禁违规；
-//   - §1.1 邻近点位白名单（SetPromptEditorStatusLine 4 处 / PromptInputMaxVisibleRows
-//     1 处）：属 prompt-editor/composer facade 组、不参与 popup 状态机（§1.3 判据
-//     方法族不含它们），本批保持直读并按 file::func::method 冻结计数；迁移需先
-//     立项 prompt facade（D1 范围外）。
+//   - §1.1 邻近点位（SetPromptEditorStatusLine / PromptInputMaxVisibleRows）：
+//     已于 L5-2c 迁移至会话门面 chatSessionPromptPort / ui.PromptEditorPort
+//     （unified 直投状态行 action、预算走渲染器同源投影；legacy 回落 surface），
+//     本门禁按 file::func::method 冻结计数并期望为 0；新增直读即违规。
 //
 // 白名单按「文件 :: 函数 :: 方法」精确匹配（行号漂移不触发 churn）。门面接收者
 // 判定：调用接收者为 chatSessionPopupPort(...) 的调用表达式视为合规门面调用；
@@ -50,14 +50,8 @@ func TestChatPopupFamilyDirectReadsFrozen(t *testing.T) {
 			strings.Join(lines, "\n"))
 	}
 
-	// prompt-editor/composer 邻近点位白名单（§1.3 判据方法族之外，本批不迁移）。
-	want := map[string]int{
-		"chat_composer.go :: method (*chatComposerController) Close :: SetPromptEditorStatusLine":         1,
-		"chat_composer.go :: method (*chatComposerController) onChange :: SetPromptEditorStatusLine":      1,
-		"chat_composer.go :: method (*chatComposerController) onComplete :: SetPromptEditorStatusLine":    1,
-		"chat_composer.go :: method (*chatComposerController) setStatusLine :: SetPromptEditorStatusLine": 1,
-		"chat_composer.go :: func chatComposerMaxVisibleRows :: PromptInputMaxVisibleRows":                1,
-	}
+	// prompt-editor/composer 邻近点位（L5-2c 迁移后期望为 0；空表保留以冻结面）。
+	want := map[string]int{}
 	if !reflect.DeepEqual(adjacent, want) {
 		var lines []string
 		for _, site := range sites {
@@ -65,9 +59,9 @@ func TestChatPopupFamilyDirectReadsFrozen(t *testing.T) {
 				lines = append(lines, fmt.Sprintf("  %s:%d %s :: %s", site.File, site.Line, site.Func, site.Method))
 			}
 		}
-		t.Fatalf("popup 族邻近白名单直读面已变化（L5-2 Batch B 冻结）\n got: %#v\nwant: %#v\n当前邻近调用点:\n%s\n"+
-			"SetPromptEditorStatusLine / PromptInputMaxVisibleRows 属 prompt-editor/composer facade 组（非 popup 状态机），"+
-			"迁移须先立项 prompt facade；新增前须在方案中登记。", adjacent, want, strings.Join(lines, "\n"))
+		t.Fatalf("popup 族邻近白名单直读面已变化（L5-2c 冻结）\n got: %#v\nwant: %#v\n当前邻近调用点:\n%s\n"+
+			"SetPromptEditorStatusLine / PromptInputMaxVisibleRows 已迁移至 chatSessionPromptPort / ui.PromptEditorPort（L5-2c），"+
+			"此处期望为 0；新增直读即违规。", adjacent, want, strings.Join(lines, "\n"))
 	}
 }
 

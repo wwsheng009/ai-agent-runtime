@@ -108,7 +108,7 @@ func (c *chatComposerController) Close() {
 		c.skillCompletion.Clear()
 	}
 	if c.session != nil && c.session.Surface != nil {
-		c.session.Surface.SetPromptEditorStatusLine("")
+		chatSessionPromptPort(c.session).SetStatusLine("")
 	}
 }
 
@@ -144,7 +144,7 @@ func chatComposerMaxVisibleRows(session *ChatSession) int {
 	if session == nil || session.Surface == nil {
 		return ui.ChatComposerMaxVisibleRows
 	}
-	return session.Surface.PromptInputMaxVisibleRows()
+	return chatSessionPromptPort(session).MaxVisibleRows()
 }
 
 func chatComposerUsesFixedSurface(session *ChatSession) bool {
@@ -169,7 +169,7 @@ func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
 		c.skillCompletion.UpdateSnapshot(snapshot)
 	}
 	if c.session.Surface != nil {
-		c.session.Surface.SetPromptEditorStatusLine(formatChatComposerEditorStatus(snapshot))
+		chatSessionPromptPort(c.session).SetStatusLine(formatChatComposerEditorStatus(snapshot))
 	}
 }
 
@@ -257,7 +257,7 @@ func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.
 	}
 	if err := toggleChatPlanMode(c.session); err != nil {
 		if c.session != nil && c.session.Surface != nil {
-			c.session.Surface.SetPromptEditorStatusLine(fmt.Sprintf("Plan mode 切换失败：%v", err))
+			chatSessionPromptPort(c.session).SetStatusLine(fmt.Sprintf("Plan mode 切换失败：%v", err))
 		}
 		return ui.LineEditorReplacement{}, false
 	}
@@ -280,7 +280,7 @@ func (c *chatComposerController) setStatusLine(status string) {
 	if c == nil || c.session == nil || c.session.Surface == nil {
 		return
 	}
-	c.session.Surface.SetPromptEditorStatusLine(status)
+	chatSessionPromptPort(c.session).SetStatusLine(status)
 }
 
 func (c *chatComposerController) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {

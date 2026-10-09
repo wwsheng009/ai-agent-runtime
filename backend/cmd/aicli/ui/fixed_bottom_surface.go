@@ -696,6 +696,13 @@ func (s *FixedBottomSurface) syncTerminalGeometry(minInterval time.Duration) (si
 // output row, the status row, runtime notices, and a possible editor status
 // visible. Disabled surfaces retain the regular composer limit.
 func (s *FixedBottomSurface) PromptInputMaxVisibleRows() int {
+	return s.promptInputMaxVisibleRowsImpl()
+}
+
+// promptInputMaxVisibleRowsImpl 是预算主体：L5-2c 后 commands 侧经
+// ui.PromptEditorPort 调用（unified 走渲染器同源投影、legacy 回落本方法）；
+// 公开方法保留供既有调用与测试使用（冻结扫描按公开方法名，impl 不受影响）。
+func (s *FixedBottomSurface) promptInputMaxVisibleRowsImpl() int {
 	if s == nil || s.terminal == nil {
 		return ChatComposerMaxVisibleRows
 	}

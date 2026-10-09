@@ -58,6 +58,10 @@ type chatInteractionCoordinator struct {
 	// 读取点分布在命令处理器与编辑器回调，不保证持有 c.mu；因此与 uiSurface
 	// 同理用原子指针存储（SetSurface/Shutdown 为唯一写点）。
 	popupPort atomic.Pointer[ui.PopupPort]
+	// prompt-editor 门面（L5-2c）：composer 状态行与编辑器预算一律经此门面，
+	// 不得直读 surface（门禁：TestChatPopupFamilyDirectReadsFrozen 邻近族）；
+	// 与 popupPort 同生命周期（SetSurface/Shutdown 为唯一写点）。
+	promptEditorPort atomic.Pointer[ui.PromptEditorPort]
 	// uiSurface 是 actor 侧（reduceUIAction）读取 surface 的原子指针：
 	// reducer 不得持有 c.mu 获取 surface（生产者可能在持 c.mu 时投递
 	// durable action，mailbox 满时避免锁环）；surface 自带锁。
@@ -660,13 +664,18 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	// （surface==nil 时调用方安全降级为无探针路径，L5-2 Batch A D2-a ①）。
 	// popup 门面同生命周期绑定（L5-2 Batch B D1）：unified 直投 controller、
 	// legacy 回落 surface；状态查询源随 actor 存活动态判定。
+	// prompt-editor 门面（L5-2c）同生命周期绑定：unified 直投状态行 action /
+	// 预算走渲染器同源投影，legacy 回落 surface。
 	if surface != nil {
 		c.geometrySync = surface
 		port := ui.NewPopupPort(surface, c.popupBottomPaneState)
 		c.popupPort.Store(&port)
+		promptPort := ui.NewPromptEditorPort(surface, c.promptEditorState)
+		c.promptEditorPort.Store(&promptPort)
 	} else {
 		c.geometrySync = nil
 		c.popupPort.Store(nil)
+		c.promptEditorPort.Store(nil)
 	}
 	if c.session != nil {
 		// The coordinator and session must reference the same physical surface.
@@ -5615,6 +5624,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.surface = nil
 	c.geometrySync = nil
 	c.popupPort.Store(nil)
+	c.promptEditorPort.Store(nil)
 	c.terminalSession = nil
 	c.terminalExecutor = nil
 	c.refreshTerminalWriterSnapshotLocked()

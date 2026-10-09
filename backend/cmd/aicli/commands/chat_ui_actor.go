@@ -106,6 +106,21 @@ func (c *chatInteractionCoordinator) popupBottomPaneState() (ui.BottomPaneState,
 	return actor.BottomPaneState(), true
 }
 
+// promptEditorState 是 prompt-editor 门面的 unified 状态源（L5-2c）：actor
+// 存活时返回 reducer 权威的 BottomPaneState 与 GeometryState（ok=true），
+// 由门面按 BottomPanePolicyForGeometry 投影编辑器预算；actor 未创建
+// （legacy/无 unified 渲染器）时 ok=false，门面回落 surface 本地实现。
+func (c *chatInteractionCoordinator) promptEditorState() (ui.BottomPaneState, ui.GeometryState, bool) {
+	if c == nil {
+		return ui.BottomPaneState{}, ui.GeometryState{}, false
+	}
+	actor := c.currentUIActor()
+	if actor == nil {
+		return ui.BottomPaneState{}, ui.GeometryState{}, false
+	}
+	return actor.BottomPaneState(), actor.Geometry(), true
+}
+
 // 生产 interactive 会话必须经 EnableUnifiedRendererGateway——
 // PhysicalSink→RenderOutputGateway。直写 writer 模式仅存在于测试，
 // 见 enableUnifiedRendererWithWriter。
