@@ -23,7 +23,7 @@
 | 项 | 一句话 | 触发条件（满足其一即立项） | 规模 |
 |---|---|---|---|
 | L5-1 | 启动期租约 → fullscreen/pager/debug raw 收编（**已收口**：Batch A/B/C；写端受认可 24→20） | 启动期 picker 需纳入统一渲染/租约；或启动期裸写引发实际冲突/需求 | 中（约 3–6 提交） |
-| L5-2 | presenter popup/几何 API → surface facade 读退役（**已收口**：Batch A/B/C + L5-2c 邻近族；两族零直读门禁 + fixture 8/8 + compat 6/6） | 需要统一 popup/几何能力提升；或继续瘦身 surface 排期 | 中大（设计 + 分批迁移） |
+| L5-2 | presenter popup/几何 API → surface facade 读退役（**已收口**：Batch A/B/C + L5-2b 视口 + L5-2c 邻近族；两族零直读门禁 + fixture 8/8 + compat 6/6） | 需要统一 popup/几何能力提升；或继续瘦身 surface 排期 | 中大（设计 + 分批迁移） |
 | L5-3 | legacy 命令处理器 → CommandResult 批量迁移（已执行：Batch A/B/C 完成，三批次收口） | 排期「命令通道收口」批次（收益最直接：删硬门禁） | 大（逐命令小刀） |
 | T-1 | session 侧 DEC 2026 同步帧包裹 | 真机 tearing 证据（唯一门槛） | 小（约 1–2 提交 + 真机验证） |
 
@@ -106,6 +106,8 @@ Batch A/B/C 已收口（`dec13b68`/`3dca6215`）：D1/D2/D3 落地、三处启�
 178.4s（exit 0）/ fixture 真机 e2e 8/8 / compat 6/6；**L5-2 三批次收口**。
 **执行记录（2026-10-09 邻近族收口）**：L5-2c 立项并单批收口（prompt-editor 门面
 `ui.PromptEditorPort` + composer 5 点迁移 + 冻结白名单 5→0；`16698f11`）。
+**执行记录（2026-10-09 D2-a ② 收口）**：L5-2b 立项并单批收口（ActiveBand 视口门面
+`ui.ActiveBandViewportPort` 渲染链几何投影 + 4 点迁移 + 几何族白名单 4→0；`ca664a79`）。
 
 ## 3. L5-3 legacy 命令处理器 → CommandResult 批量迁移（删硬门禁）
 

@@ -93,6 +93,7 @@ controller/AppState（已具备），几何刷新经 presenter/session 门面；
     现状（布局宽度仍归 surface）；门禁判据 = 零 `.Surface.` 直读（接口注入不算）。
   - ②（后续 L5-2b）**渲染器接管布局宽度**：ActiveBand viewport 由 AppState/渲染链提供，
     surface 布局应用退役；依赖渲染器能力提升，另行评估。
+    （**已收口**：L5-2b，`ca664a79`；见 `docs/plan/aicli-l5-2b-renderer-activeband-viewport-plan-20261009.md`。）
 - 迁移点：`maybeRefreshStreamGeometryLocked`（:7414-7429）改经门面；显式刷新 :7501；
   `chat_debug_document.go:982` 读宽改经门面。
 - 保持：`reportMeasuredSurfaceGeometryLocked`（legacy 直报）不动；unified 下
@@ -189,6 +190,6 @@ controller/AppState（已具备），几何刷新经 presenter/session 门面；
     优雅退出 / 无 unified 渲染字节）；
   - 回填：本文 §6、候选评估 §2、P0 台账、退役方案 §4.4/§L5/风险表。
     **L5-2 三批次收口（`492f3f86`/`f2d1e6f0`/`93089990`；收口验证 2026-10-09）。**
-  - 保留项：D2-a ②（渲染器接管布局宽度，L5-2b 观察）；~~prompt-editor/composer 邻近族~~
-    （**已收口**：L5-2c 立项 + Batch A，`16698f11`；冻结白名单 5→0）；legacy/compat 回落面
-    （待 compat 判定后收）。
+  - 保留项：~~D2-a ②（渲染器接管布局宽度）~~（**已收口**：L5-2b，`ca664a79`；几何族
+    冻结白名单 4→0）；~~prompt-editor/composer 邻近族~~（**已收口**：L5-2c，
+    `16698f11`；冻结白名单 5→0）；legacy/compat 回落面（待 compat 判定后收）。

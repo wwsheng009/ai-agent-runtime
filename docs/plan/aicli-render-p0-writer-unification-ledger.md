@@ -15,7 +15,7 @@
 > Batch A/B/C：`dec13b68`/`3dca6215`，写端受认可 24→20）。
 > L5-2 **提前立项**（独立方案 `docs/plan/aicli-l5-2-presenter-popup-geometry-plan-20261009.md`；
 > **已收口**（Batch A/B/C：`492f3f86`/`f2d1e6f0`/`93089990`；fixture 8/8 + compat 6/6；
-> L5-2c 邻近族：`16698f11`）。
+> L5-2b 视口：`ca664a79`；L5-2c 邻近族：`16698f11`）。
 
 ## 1. 已完成
 
