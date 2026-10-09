@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -932,6 +933,13 @@ func resolveChatAgentTarget(session *ChatSession, target string) (*toolbroker.Ag
 	if selected := resolveChatAgentPickerChoice(target, agents); selected != nil {
 		return selected, nil
 	}
+	// 终态批任务不在 picker（includeClosed=false），但列表（includeClosed=true）
+	// 里选中的历史批任务行仍是合法 target：回退到批任务账本解析。
+	if batch, ok, batchErr := chatAgentBatchTarget(session, target); batchErr != nil {
+		return nil, batchErr
+	} else if ok {
+		return batch, nil
+	}
 	return nil, fmt.Errorf("unknown agent target: %s", strings.TrimSpace(target))
 }
 
@@ -965,7 +973,25 @@ func chatAgentGraphItems(session *ChatSession) ([]toolbroker.AgentStatusResult, 
 	return chatAgentItems(session, true)
 }
 
+// chatAgentItems 汇总会话可见的子 agent 行：注册表/会话存储来源 + 批任务账本来源。
+// 两个来源缺一不可：单发 spawn_agent 只登记 agent_control_agents；批量
+// spawn_subagents 只写批任务账本（2026-10-09 现场：3 个批任务代理在跑，
+// /agents 列表却显示"暂无子 agent"）。
 func chatAgentItems(session *ChatSession, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
+	agents, err := chatAgentItemsFromSources(session, includeClosed)
+	if err != nil {
+		return nil, err
+	}
+	batchAgents, err := chatAgentBatchItems(session, includeClosed)
+	if err != nil {
+		return nil, err
+	}
+	return chatAgentMergeItems(agents, batchAgents), nil
+}
+
+// chatAgentItemsFromSources 是注册表/会话存储来源的既有读取链（语义不变：
+// fast path 命中即返回，否则回退 ActorRegistry.List）。
+func chatAgentItemsFromSources(session *ChatSession, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
 	if agents, ok, err := chatAgentItemsFast(session, includeClosed); ok || err != nil {
 		return agents, err
 	}
@@ -1088,6 +1114,123 @@ func chatAgentItemsFromSessionStore(session *ChatSession, parentSessionID string
 		return left < right
 	})
 	return agents, true, nil
+}
+
+// chatAgentBatchItems 列出调用方父会话自己的批任务账本行（spawn_subagents 派发
+// 的子代理）。作用域纪律与 batchTaskSnapshot 一致：只扫本会话的批次，不跨会话
+// 取身份。includeClosed=false 时过滤终态任务（与注册表来源的 closed 过滤同口径）。
+func chatAgentBatchItems(session *ChatSession, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
+	host, parentSessionID := chatAgentBatchScope(session)
+	if host == nil || host.SubagentBatches == nil || parentSessionID == "" {
+		return nil, nil
+	}
+	batches, err := host.SubagentBatches.ListBatches(context.Background(), subagentbatch.BatchFilter{ParentSessionID: parentSessionID})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]toolbroker.AgentStatusResult, 0)
+	for _, batch := range batches {
+		tasks, err := host.SubagentBatches.ListTasks(context.Background(), batch.BatchID)
+		if err != nil {
+			return nil, err
+		}
+		for _, task := range tasks {
+			if !includeClosed && task.Status.Terminal() {
+				continue
+			}
+			items = append(items, chatAgentBatchItem(parentSessionID, batch.BatchID, task))
+		}
+	}
+	return items, nil
+}
+
+// chatAgentBatchTarget 按 task id 或子会话 id 在批任务账本里定位单个任务（含
+// 终态），供 picker（includeClosed=false，不含终态）未命中时的 target 解析回退：
+// 列表里选中的历史批任务行必须仍能打开 transcript。
+func chatAgentBatchTarget(session *ChatSession, target string) (*toolbroker.AgentStatusResult, bool, error) {
+	host, parentSessionID := chatAgentBatchScope(session)
+	if host == nil || host.SubagentBatches == nil || parentSessionID == "" {
+		return nil, false, nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" || strings.HasPrefix(target, "/") {
+		return nil, false, nil
+	}
+	task, batchID, ok, err := subagentbatch.FindTaskByIDInParentSession(context.Background(), host.SubagentBatches, parentSessionID, target)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		task, batchID, ok, err = subagentbatch.FindTaskByChildSessionIDInParentSession(context.Background(), host.SubagentBatches, parentSessionID, target)
+		if err != nil || !ok {
+			return nil, false, err
+		}
+	}
+	item := chatAgentBatchItem(parentSessionID, batchID, task)
+	return &item, true, nil
+}
+
+// chatAgentBatchScope 解析批任务账本的读取作用域：调用方 host 与父会话 id。
+// 父会话 id 缺省回退 host.baseRuntimeSessionID()（与 batchTaskSnapshot 同源）。
+func chatAgentBatchScope(session *ChatSession) (*localChatRuntimeHost, string) {
+	if session == nil || session.LocalRuntimeHost == nil {
+		return nil, ""
+	}
+	host := session.LocalRuntimeHost
+	parentSessionID := ""
+	if session.RuntimeSession != nil {
+		parentSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	}
+	if parentSessionID == "" {
+		parentSessionID = strings.TrimSpace(host.baseRuntimeSessionID())
+	}
+	return host, parentSessionID
+}
+
+// chatAgentBatchItem 把账本行投影成列表/选择器可用的 AgentStatusResult。ID 取
+// 子会话 id（未绑定回退任务 id，派发前失败的任务也要可见）；不设 Path——路径
+// 解析按 "/" 前缀走注册表，批任务没有注册表路径，合成路径会把 target 解析引到
+// "unknown agent path"，而子会话 id / 任务 id 已能被 resolveLocalAgentTargetSessionID
+// 正确解析。
+func chatAgentBatchItem(parentSessionID, batchID string, task subagentbatch.SubagentTaskRecord) toolbroker.AgentStatusResult {
+	id := firstNonEmptyChatValue(task.ChildSessionID, task.TaskID)
+	result := localBatchTaskStatusResult(id, batchID, task)
+	result.ParentSessionID = parentSessionID
+	return *result
+}
+
+// chatAgentMergeItems 合并两个来源并按身份去重（子会话 id / agent id / 路径任一
+// 命中即视为同一行，注册表来源优先），最后按既有的路径/会话 id 排序口径稳定排序。
+func chatAgentMergeItems(primary, extra []toolbroker.AgentStatusResult) []toolbroker.AgentStatusResult {
+	if len(extra) == 0 {
+		return primary
+	}
+	key := func(agent toolbroker.AgentStatusResult) string {
+		return strings.ToLower(firstNonEmptyChatValue(agent.SessionID, agent.ID, agent.Path))
+	}
+	seen := make(map[string]struct{}, len(primary)+len(extra))
+	merged := make([]toolbroker.AgentStatusResult, 0, len(primary)+len(extra))
+	for _, agent := range primary {
+		if k := key(agent); k != "" {
+			seen[k] = struct{}{}
+		}
+		merged = append(merged, agent)
+	}
+	for _, agent := range extra {
+		if k := key(agent); k != "" {
+			if _, exists := seen[k]; exists {
+				continue
+			}
+			seen[k] = struct{}{}
+		}
+		merged = append(merged, agent)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		left := firstNonEmptyChatValue(merged[i].Path, merged[i].SessionID, merged[i].ID)
+		right := firstNonEmptyChatValue(merged[j].Path, merged[j].SessionID, merged[j].ID)
+		return left < right
+	})
+	return merged
 }
 
 func chatAgentPickerStatusFromRecord(host *localChatRuntimeHost, record agentcontrol.AgentRecord) toolbroker.AgentStatusResult {
