@@ -160,6 +160,13 @@
     不变（emitControl 的 TerminalOutput() 回落条目保留）。
   - 验证：ui 全量 14.7s 绿（含 3 个新回归用例）；commands 全量仅剩已登记 flake。
 
+- [x] **D3 Batch A 副屏三联 gate 单点收敛**（2026-10-09，`48027017`）。
+  - `chatSurfaceScreenGate` 单点（Enabled ∧ OwnedViewport ∧ ¬LeaseActive ∧ ¬PopupActive）+
+    A 族 12 处迁移（10 个 `canOpenChatXxx` + `chatPickerSurfaceReady`/`chatScreenCapability`）；
+  - 机械门禁 `TestChatScreenGateTripleReadsFrozen`（`OwnedViewport()` 生产直读冻结为 1 处）；
+  - 验证：gofmt/build/vet 绿；族聚焦 + 门禁绿；commands 全量仅剩已登记 flake（隔离 ×2 绿）；
+  - B/C 族分批见 `docs/plan/aicli-d3-screen-capability-convergence-plan-20261009.md`。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**

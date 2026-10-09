@@ -103,6 +103,9 @@ controller/AppState（已具备），几何刷新经 presenter/session 门面；
 
 - `Enabled/OwnedViewport/LeaseActive` 三联 gate → 会话级能力查询 helper（单点语义），
   收敛 62 点位；另行立项。
+  （**已立项并执行 Batch A**：`docs/plan/aicli-d3-screen-capability-convergence-plan-20261009.md`；
+  A 族 12 处三联 gate 收敛为 `chatSurfaceScreenGate` 单点 + `OwnedViewport` 机械门禁，
+  `8d4a4d45`/`48027017`；B/C 族分批见该文档。）
 
 ## 3. 分批
 
