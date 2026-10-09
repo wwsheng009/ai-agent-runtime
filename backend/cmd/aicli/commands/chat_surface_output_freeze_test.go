@@ -18,9 +18,9 @@ import (
 // surfaceOutputActiveLocked()（chat_interaction.go，D3 方案 §2 D3）。
 //
 // 白名单（文件 :: 函数，行号漂移不触发 churn）：
-//   - surfaceOutputActiveLocked：单点本体（唯一合法直读）；
-//   - applyDrawRequested（chat_ui_actor.go:1378）：**剩余 1 处**——目标文件处于
-//     并发 WIP（web/resume 工作流），待其收口后迁移并从白名单删除（D3 Batch C 剩余项）。
+//   - surfaceOutputActiveLocked：单点本体（唯一合法直读）。
+//     （原剩余项 `chat_ui_actor.go:1378 applyDrawRequested` 已于 D3 Batch C 收尾
+//     迁移至本单点，白名单同步收敛。）
 //
 // 仅冻结链式形态（`X.surface.Enabled()`）；SetSurface 的局部参数 `surface.Enabled()`
 // 与 `session.Surface.Enabled()`（A 族已收敛）不在此门禁范围。
@@ -33,7 +33,6 @@ func TestChatSurfaceOutputEnabledReadsFrozen(t *testing.T) {
 	}
 	want := map[string]int{
 		"chat_interaction.go :: method (*chatInteractionCoordinator) surfaceOutputActiveLocked": 1,
-		"chat_ui_actor.go :: method (*chatInteractionCoordinator) applyDrawRequested":           1,
 	}
 	if !reflect.DeepEqual(got, want) {
 		var lines []string

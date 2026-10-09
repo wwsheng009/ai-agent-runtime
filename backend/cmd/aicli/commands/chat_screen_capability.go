@@ -21,3 +21,12 @@ func chatSurfaceScreenGate(session *ChatSession) bool {
 		!session.Surface.LeaseActive() &&
 		!chatSessionPopupPort(session).HasActivePopup()
 }
+
+// chatSurfaceLeased 是副屏租约繁忙的单点语义（D3 Batch B）：surface 副屏租约
+// 活跃 = 有备用屏/选择器正持有 stdin（租约释放即门打开，无需额外会话标志）。
+// 收敛范围：chatBusyScreenActiveForSession（忙时主循环门）与 chatScreenCapability
+// 的 degrade 原因标签（busy）；机械门禁见 chat_screen_gate_freeze_test.go
+// （LeaseActive 链式直读白名单：仅本文件两处单点）。
+func chatSurfaceLeased(session *ChatSession) bool {
+	return session != nil && session.Surface != nil && session.Surface.LeaseActive()
+}

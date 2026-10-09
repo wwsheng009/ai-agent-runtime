@@ -19,6 +19,8 @@ import (
 //
 //   - OwnedViewport() 在 commands 生产源码中仅允许单点 1 处（helper 本体）；
 //     新增直读即违规（先经单点，再扩展白名单需同步本测试与 D3 方案文档）；
+//   - LeaseActive() 链式直读冻结为 2 处（chat_screen_capability.go 的两个单点：
+//     chatSurfaceScreenGate / chatSurfaceLeased；D3 Batch B 收口）；
 //   - 内联组合形态 `!X.Surface.Enabled() || !X.Surface.OwnedViewport()` 零容忍。
 //
 // 白名单按「文件 :: 函数」精确匹配（行号漂移不触发 churn）；失败输出打印全部
@@ -44,6 +46,28 @@ func TestChatScreenGateTripleReadsFrozen(t *testing.T) {
 			"副屏 gate 一律经 chatSurfaceScreenGate 单点（chat_screen_capability.go）；内联复制即违规。",
 			owned, want, strings.Join(lines, "\n"))
 	}
+
+	leased := map[string]int{}
+	for _, site := range sites {
+		if site.Method == "LeaseActive" {
+			leased[site.File+" :: "+site.Func]++
+		}
+	}
+	wantLeased := map[string]int{
+		"chat_screen_capability.go :: func chatSurfaceScreenGate": 1,
+		"chat_screen_capability.go :: func chatSurfaceLeased":     1,
+	}
+	if !reflect.DeepEqual(leased, wantLeased) {
+		var lines []string
+		for _, site := range sites {
+			if site.Method == "LeaseActive" {
+				lines = append(lines, fmt.Sprintf("  %s:%d %s", site.File, site.Line, site.Func))
+			}
+		}
+		t.Fatalf("LeaseActive() 直读面已变化（D3 Batch B 冻结）\n got: %#v\nwant: %#v\n当前调用点:\n%s\n"+
+			"租约繁忙判定一律经 chatSurfaceLeased 单点（chat_screen_capability.go）；内联复制即违规。",
+			leased, wantLeased, strings.Join(lines, "\n"))
+	}
 }
 
 type chatScreenGateReadSite struct {
@@ -57,6 +81,7 @@ type chatScreenGateReadSite struct {
 // 不区分接收者，避免漏掉 session.Surface / c.surface 等变体）。
 var chatScreenGateMethodNames = map[string]bool{
 	"OwnedViewport": true,
+	"LeaseActive":   true,
 }
 
 func collectChatScreenGateReads(t *testing.T) []chatScreenGateReadSite {

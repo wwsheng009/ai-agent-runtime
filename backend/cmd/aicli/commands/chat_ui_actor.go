@@ -1375,7 +1375,7 @@ func (c *chatInteractionCoordinator) applyDrawRequested(action ui.DrawRequested)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.shutdown || c.surface == nil || !c.surface.Enabled() {
+	if c.shutdown || !c.surfaceOutputActiveLocked() {
 		return
 	}
 	if c.activeStream != nil && c.activeStream.Active() {

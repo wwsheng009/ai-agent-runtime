@@ -16,7 +16,7 @@ var supportsCancelableInteractiveInputRead = ui.SupportsCancelableInteractiveInp
 // chatBusyScreenActiveForSession 以 surface 的副屏租约为事实源判断
 // 「是否有副屏正持有 stdin」——无需额外会话标志，租约释放即门打开。
 func chatBusyScreenActiveForSession(session *ChatSession) bool {
-	return session != nil && session.Surface != nil && session.Surface.LeaseActive()
+	return chatSurfaceLeased(session)
 }
 
 // waitForBusyScreenIdle 是主循环读输入前的跨回合门（P2-4b ④）：

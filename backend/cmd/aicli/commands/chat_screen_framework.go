@@ -301,7 +301,7 @@ func openChatScreen(session *ChatSession, spec chatScreenSpec) chatScreenOutcome
 
 	if !chatScreenCapability(session) {
 		reason := "unavailable"
-		if session != nil && session.Surface != nil && session.Surface.LeaseActive() {
+		if chatSurfaceLeased(session) {
 			reason = "busy"
 		}
 		return chatScreenDegradeInline(session, spec, reason)
