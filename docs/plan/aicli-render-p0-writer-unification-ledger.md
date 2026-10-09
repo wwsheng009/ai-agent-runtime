@@ -13,6 +13,8 @@
 > `docs/plan/aicli-render-l5-candidates-20261009.md`（触发式立项）；L5-3 三批次已收口
 > （`2a125651`）；L5-1 **已收口**（独立方案 `docs/plan/aicli-l5-1-startup-lease-plan-20261009.md`；
 > Batch A/B/C：`dec13b68`/`3dca6215`，写端受认可 24→20）。
+> L5-2 **提前立项**（独立方案 `docs/plan/aicli-l5-2-presenter-popup-geometry-plan-20261009.md`；
+> Batch A 几何族执行中）。
 
 ## 1. 已完成
 
