@@ -113,6 +113,9 @@
 - 2026-10-09 Batch C compat 场景：`scripts/test-aicli-compat-mode-e2e.ps1`（E2E-COMPAT-01，
   本地 mock provider + 进程管道）6/6 PASS（exit 0；复跑一致）；无 ANSI 降级提示依赖非 VT
   终端（Win7 conhost），本机 VT 不可复现，留人工真机（锚点 `commands/chat_setup.go:89-122`）。
+- 2026-10-09 Batch C 真机 unified：`scripts/test-aicli-windows-terminal-e2e.ps1` 8/8 PASS
+  （exit 0；history exactly-once / 滚动可达 / replay 无 CSI 3J / prompt-status 单例 /
+  Markdown 单次 / 流式采样无重复 / finalized 单次）。
 - 2026-10-09 登记（环境 flake，非本刀）：`TestTTY_LiveLoop_LLMRetryRendersAdvancingTimerE2E`
   （全量负载下偶发：retry 状态行与 turn 完成的绘制竞态，测试注释已声明该时序脆弱性；
   隔离 ×10 全绿）；`TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`
