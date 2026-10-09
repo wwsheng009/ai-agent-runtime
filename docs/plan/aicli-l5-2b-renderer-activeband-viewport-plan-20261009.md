@@ -97,3 +97,11 @@
     未测量（0 宽/高或 ok=false）回落 surface/探针；`applyLayout`/owned-viewport
     应用仍在渲染后端承重，不属本批（见 §1 评估结论）；
   - 保留项：无（D2-a ② 收口）。L5-2 全链（Batch A/B/C + L5-2b + L5-2c）至此完成。
+- 2026-10-09 **回归修复**（`60915289`）：`activeBandGeometry` 的 unified 门控从
+  "actor 存在" 改为无锁 unified 快照（`terminalWriterSnapshotLoad`）——legacy 路径
+  actor 可以存在，但 AppState 几何只是 legacy 直报的异步镜像（reducer adapter 先于
+  state reduce 执行 + 直报是 causal follow-up，滞后一个 Resize barrier），同 pass 的
+  soft reflow 会读到旧宽度（`RefreshReflowsSoftTail` / `ProgressiveCommitSoftTail`
+  回归，commands 全量暴露）。修复后 legacy 回落 surface 终端缓存（原语义），
+  unified 行为不变；新增 pin `TestChatInteractionCoordinatorActiveBandViewportLegacyIgnoresActorMirror`。
+  验证：两例回归 + viewport 族绿；commands 全量仅剩已登记环境 flake（隔离 ×3 绿）。

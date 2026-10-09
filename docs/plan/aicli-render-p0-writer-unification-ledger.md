@@ -143,6 +143,23 @@
   - 验证：ui 全量 14.0s 绿（含 writer inventory 精确匹配 + ceiling）；commands 聚焦
     （InputQueue/Composer/MergedPrompt）绿；gofmt/build 绿。
 
+- [x] **L5-2b-fix 视口门面 unified 门控回归修复**（2026-10-09，`60915289`）。
+  - 根因：`activeBandGeometry` 按 actor 存在判定 unified；legacy 路径 actor 存在时
+    AppState 几何镜像滞后一个 Resize barrier，同 pass soft reflow 读到旧宽度
+    （commands 全量暴露 2 例：`RefreshReflowsSoftTailAndKeepsEmittedOwnership` /
+    `ProgressiveCommitSoftTailEndToEnd`）。
+  - 修复：门控改为无锁 unified 快照（`terminalWriterSnapshotLoad`）；legacy 回落
+    surface 终端缓存；新增 pin 测试 `...LegacyIgnoresActorMirror`。
+  - 验证：两例回归 + viewport 族 + commands 全量（仅剩已登记 flake，隔离 ×3 绿）。
+
+- [x] **§4.3 processTerminalOutput 默认绑定退役**（2026-10-09，`f23be281`）。
+  - `emitControl` 写入优先级：显式注入 sink（测试 seam）> driver 显式 stdout（生产）
+    > process sink 回落（driver-less；无注入即丢弃）；`processTerminalOutput` 删除
+    `os.Stdout` 默认绑定（proxy 保留）。
+  - 门禁：**债务 4→1→0 清零**（`uiWriterMigrationDebtCeiling=0`）；受认可 17 条/20 点位
+    不变（emitControl 的 TerminalOutput() 回落条目保留）。
+  - 验证：ui 全量 14.7s 绿（含 3 个新回归用例）；commands 全量仅剩已登记 flake。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
@@ -233,6 +250,9 @@
   - 新增单元测试 `TestTerminalSessionInsertionContinuesArchivedScrollback` 钉住该契约；
     `cmd/aicli/ui` 与 `cmd/aicli/commands` 全量回归均绿。
 
+- `TestHistoryEffectQueueSummaryMatchesEntryWalk`（ui）：`PlanLayoutHits` 计数在负载下
+  偶发不一致（1/3 隔离失败，随后 ×2 与全量均绿）。按**环境偶发**登记（2026-10-09）。
+
 ## 4. 验收
 
 - 每次迁移：`go test ./cmd/aicli/ui/ -run TestUIInteractiveDirectWriterInventory`（基线并集精确匹配：
@@ -247,11 +267,10 @@
   ——注入计数 writer + 进程 stdout/stderr 零字节断言，覆盖标题/铃/模式序列/动态诊断/直写/命令输出。
 - composer 出口门禁：`go test ./cmd/aicli/commands/ -run 'TestChatTransientLineComposer|TestChatMergedAnswerPrompt|TestChatModalComposer|TestChatAgentPanelComposer'`。
 - L4 门禁语义重构（2026-10-08）：基线拆 sanctioned console writers / migration debt 两组
-  （L4 机械口径 25 条/28 点位；L5-1 后 21 条/24 点位；**L1-d 后 18 条/21 点位** =
-  受认可 17/20 + 债务 1/1）；`uiWriterMigrationDebtCeiling` 只降不升；
-  分类移动必须同步更新 ceiling 与计划/台账。
+  （L4 机械口径 25 条/28 点位；L5-1 后 21 条/24 点位；L1-d 后 18 条/21 点位；
+  **§4.3 后 17 条/20 点位 = 受认可 17/20 + 债务 0/0**）；`uiWriterMigrationDebtCeiling`
+  归零后只降不升；分类移动必须同步更新 ceiling 与计划/台账。
 - 完成态：ui 生产文件直写基线只剩受认可白名单类（启动期探针/句柄初始化、TRACE/诊断、
-   console/plain 降级承重链、平台差异；FixedBottomSurface 物理写族已清零；启动期无租约
-  回退已随 L5-1 退役）
-  与有限债务（1 点位：`processTerminalOutput` 默认绑定，随 `ClearIfSupported` 改造递减；
-  L1-d 已递减 4→1）；交互期物理 writer 计数 = 1；CI 中门禁测试常开。
+  console/plain 降级承重链、平台差异；FixedBottomSurface 物理写族已清零；启动期无租约
+  回退已随 L5-1 退役；**债务已清零**——L1-d 4→1、§4.3 1→0，`uiWriterMigrationDebtCeiling=0`）；
+  交互期物理 writer 计数 = 1；CI 中门禁测试常开。

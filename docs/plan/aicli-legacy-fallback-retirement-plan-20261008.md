@@ -117,7 +117,7 @@ buildChatSession
 | `flushHoldingLock`/`flushHandoffHoldingLock` | `:372/:392`（fence :376/:396） | `:1228`、`snapshot.go:89`、`:5225` | **不可达** | 仅测试 | 可删 |
 | `clearActiveBand` paint 分支 | `:2253-2256` | facade/内部（unified 走 state-only） | 可达（仅 state） | legacy 可达 | 改造后删（paint 分支） |
 | `withTerminalWriteLock`（DEC2026） | `renderengine/terminal_lock.go:71/:22-24` | `renderengine/presenter.go:40`（unified 合法）；true 开关仅 `fixed_bottom_surface.go:437`（fence 内） | 锁=可达；DEC2026 true=**不可达** | legacy 测试 | 锁保留；true 分支改造后删 |
-| `processTerminalOutput`/`TerminalOutput()` | `terminal_output.go:18/:49` | 无生产注入；启动 `chat_setup.go:347` 经默认 stdout | 交互期不可达；启动期可达 | legacy/降级可达 | 保留（改造后可去默认 stdout） |
+| `processTerminalOutput`/`TerminalOutput()` | `terminal_output.go:18/:49` | 无生产注入；启动 `chat_setup.go:347` 经默认 stdout | 交互期不可达；启动期可达 | legacy/降级可达 | **已执行（§4.3，`f23be281`）**：默认绑定删除；`emitControl` 改显式 writer 优先级（注入 sink > driver 显式 stdout > sink 回落） |
 | `Terminal.PrintAt` | `terminal.go:345` | **无生产调用者** | 不可达 | 不可达 | **可删** |
 | `Status.PrintTo`/`PrintXxxTo` | `status.go:165/:205-221` | **无生产调用者** | 不可达 | 不可达 | **可删** |
 | `Status.Print`/`PrintXxx` | `status.go:121/:180-201` | `chat.go:1818,1946,1964,2039` 等（非统一分支） | 条件可达 | 降级/命令路径可达 | 保留 |
@@ -197,7 +197,7 @@ buildChatSession
 | `FixedBottomSurface` 物理绘制族：`Enable` 首帧块（`:429-445`）、`writeOutput` 物理分支（`:974-996`）、`appendOwnedDirectPaintLocked`（`:1139`）、`insertHistoryLinesInRegionLocked`（`:5206-5213`）、`renderOwnedViewportLocked`（`snapshot.go:72-80`）、`flushHoldingLock`/`flushHandoffHoldingLock`（`:372/:392`）、`clearActiveBand` paint 分支（`:2253-2256`）、`Disable` legacy paint 分支（`:520-543`）、`repaintActiveBandLocked` legacy 分支（`:2157-2161`） | 生产不可达已证；测试面大（13 个 surface 测试文件），需先迁移为 state-only 断言再删（注：`Disable` 的**租约**子分支已随 L1-c 改为 transport-only；`Enable` 首帧块已随 L3-1 删除；**物理绘制实现族已随 L3-2 删除（state-only 收敛）；L3-3 残余（`clearActiveBand`/`Disable` legacy paint/`repaintActiveBandLocked`/`surface.Apply`）已于 2026-10-08 全部删除——C 类全族退役完成**） |
 | DEC2026 true 分支 + `SetTerminalSynchronizedFrames(true)` | **已执行（L3-1）**：framing 全链删除（开关/查询/包裹分支 + 裸 `os.Stdout` 写）；`withTerminalWriteLock` 锁本体保留（presenter batch 合法命中） |
 | `surface.Apply`（legacy reducer 路径） | 仅 `!UnifiedRendererEnabled()` 可达；`chat_ui_actor.go:1139` 注释明确拒绝 unified 调用 |
-| `TerminalOutput()` 默认 stdout 依赖 | 无生产注入；启动 `ClearIfSupported` 改显式 writer 后可去默认 stdout（保留 proxy） |
+| `TerminalOutput()` 默认 stdout 依赖 | **已执行（§4.3，`f23be281`）**：`emitControl` 显式 writer 优先级（注入 sink > driver 显式 stdout > process sink 回落）；`processTerminalOutput` 默认绑定删除（proxy 保留为测试 seam）；writer 债务清零 |
 
 ### 4.4 D 类——观察（依赖其他前置，本轮不承诺）
 
@@ -409,6 +409,11 @@ buildChatSession
   `FormatInputArea`/`InputShowDocument` 保留（测试/语义 fixture 在用）。机械口径：
   **债务 4→1 条/1 点位**（ceiling 4→1；余 `processTerminalOutput` 默认绑定，§4.3）；
   受认可 17 条/20 点位不变，合计 18 条/21 点位。
+- §4.3 跟进（2026-10-09，`f23be281`）：`processTerminalOutput` 默认 stdout 绑定退役——
+  `emitControl` 写入优先级改为「显式注入 sink（测试 seam）> driver 显式 stdout（生产
+  NewTerminal）> process sink 回落（driver-less；无注入即丢弃）」；`ClearIfSupported`/
+  `CleanupOnExit`/启动选择器 transport 全部经 driver 显式 stdout。机械口径：**债务清零**
+  （4→1→0；`uiWriterMigrationDebtCeiling=0`），受认可 17 条/20 点位不变，合计 17 条/20 点位。
 
 ### L5 观察项（可选，另行立项）
 
