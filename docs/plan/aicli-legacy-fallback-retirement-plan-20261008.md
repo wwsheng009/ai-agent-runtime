@@ -406,7 +406,7 @@ buildChatSession
 ### L5 观察项（可选，另行立项）
 
 - ~~启动期 picker 接租约 → 再删 fullscreen/pager/debug raw 分支~~（**已收口**：L5-1，2026-10-09）；
-- ~~presenter popup/几何 API 迁移 → 再删 surface facade 读~~（**已收口**：L5-2 Batch A/B/C，2026:10: 09；
+- ~~presenter popup/几何 API 迁移 → 再删 surface facade 读~~（**已收口**：L5-2 Batch A/B/C + L5-2c 邻近族，2026:10: 09；
   legacy/compat 回落面按 §4.4 保留）；
 - legacy 命令处理器批量迁 `CommandResult` → 删 `chat_unified_command_gate` 硬门禁。
 

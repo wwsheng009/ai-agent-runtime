@@ -189,5 +189,6 @@ controller/AppState（已具备），几何刷新经 presenter/session 门面；
     优雅退出 / 无 unified 渲染字节）；
   - 回填：本文 §6、候选评估 §2、P0 台账、退役方案 §4.4/§L5/风险表。
     **L5-2 三批次收口（`492f3f86`/`f2d1e6f0`/`93089990`；收口验证 2026-10-09）。**
-  - 保留项：D2-a ②（渲染器接管布局宽度，L5-2b 观察）；prompt-editor/composer 邻近族（L5-2c 候选，
-    需先立项）；legacy/compat 回落面（待 compat 判定后收）。
+  - 保留项：D2-a ②（渲染器接管布局宽度，L5-2b 观察）；~~prompt-editor/composer 邻近族~~
+    （**已收口**：L5-2c 立项 + Batch A，`16698f11`；冻结白名单 5→0）；legacy/compat 回落面
+    （待 compat 判定后收）。
