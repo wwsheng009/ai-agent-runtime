@@ -958,7 +958,7 @@ func TestStructuredCommandHandlersHaveNoDirectTerminalWriter(t *testing.T) {
 		"chat_stream_document.go",
 		"chat_shell_command.go",
 		"chat_title_document.go",
-		"chat_unified_command_gate.go",
+		"chat_unified_command_fallback.go",
 	} {
 		sourcePath := filepath.Join(filepath.Dir(currentFile), name)
 		source, err := os.ReadFile(sourcePath)
