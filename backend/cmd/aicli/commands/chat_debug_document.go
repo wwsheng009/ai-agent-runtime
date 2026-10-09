@@ -252,7 +252,7 @@ func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDeb
 	}
 	builder.meta("Agent Target:", chatDebugValueOrNone(strings.TrimSpace(ctx.SelectedAgentTarget)))
 	if session.Surface != nil {
-		builder.meta("Surface:", chatDebugBool(session.Surface.Enabled()))
+		builder.meta("Surface:", chatDebugBool(chatSessionSurfaceUsable(session)))
 		if table := session.Surface.RowPlanDebugString(); table != "" {
 			builder.heading("Row Ownership (stage C): (GET /debug/chat/status#runtime)")
 			builder.plainLines(strings.Split(strings.TrimSuffix(table, "\n"), "\n"))
@@ -978,7 +978,7 @@ func sortedChatRouteProfileNames(profiles map[string]config.AICLISubagentRoutePr
 }
 
 func chatDebugDocumentWidth(session *ChatSession) int {
-	if session != nil && session.Surface != nil && session.Surface.Enabled() {
+	if chatSessionSurfaceUsable(session) {
 		// 宽度读经几何门面（L5-2 Batch A D2-a ①）；门面未就绪（Interaction
 		// 未接线 / 无 surface）时回落到全局终端探针。
 		if width := session.Interaction.ActiveBandWidth(); width > 0 {

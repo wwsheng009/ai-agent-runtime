@@ -341,7 +341,7 @@ func clearRetainedTranscriptTail(session *ChatSession) {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return
 	}
-	if session.Surface == nil || !session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(session) {
 		return
 	}
 	// Full-region wipe: replay re-prints every surviving canonical message

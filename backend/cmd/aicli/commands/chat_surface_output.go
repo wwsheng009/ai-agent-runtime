@@ -26,7 +26,7 @@ func newChatPromptOverlay(session *ChatSession) chatPromptOverlay {
 }
 
 func (o chatPromptOverlay) surfaceEnabled() bool {
-	return o.session != nil && o.session.Surface != nil && o.session.Surface.Enabled()
+	return chatSessionSurfaceUsable(o.session)
 }
 
 func (o chatPromptOverlay) resetPromptState() {
@@ -454,7 +454,7 @@ func settleInteractiveOutputLayout(session *ChatSession) {
 	if unifiedDirectInteractiveOutput(session) {
 		return
 	}
-	if session.Surface == nil || !session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(session) {
 		return
 	}
 	session.Surface.SettleOutputDebt()
@@ -477,7 +477,7 @@ func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
 	if text == "" {
 		return false
 	}
-	if session.Surface == nil || !session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(session) {
 		return false
 	}
 	if session.Interaction != nil {
@@ -665,7 +665,7 @@ func renderSubmittedUserInputEcho(session *ChatSession, input string) {
 		newAICLITranscriptRenderer(session).RenderUser(input)
 		return
 	}
-	if session.Surface == nil || !session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(session) {
 		return
 	}
 	newAICLITranscriptRenderer(session).RenderUser(input)

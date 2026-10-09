@@ -134,7 +134,7 @@ func executeStructuredLoginCommand(session *ChatSession, command string) (Comman
 	// enabled; without one its fallback would write prompts straight to stdout.
 	// Fail closed instead of reviving a raw writer under TerminalSession.
 	if unifiedDirectInteractiveOutput(session) &&
-		(session.Surface == nil || !session.Surface.Enabled()) {
+		!chatSessionSurfaceUsable(session) {
 		return commandErrorResult(fmt.Errorf("当前统一终端缺少可用 surface，无法安全进行交互式登录；请使用非交互参数（--api-key/--provider）重试")), true
 	}
 	parsed, err := parseChatLoginCommandRequest(command)

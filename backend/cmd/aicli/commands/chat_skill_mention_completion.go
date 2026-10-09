@@ -306,7 +306,7 @@ func newChatSkillMentionCompletionController(session *ChatSession) *chatSkillMen
 // shouldEnableSkillMentionCompletion 是 composer 挂载门控：Surface 可用且
 // gate==enabled（off/auto 非交互/auto 未信任项目均不创建控制器、不弹层）。
 func shouldEnableSkillMentionCompletion(session *ChatSession) bool {
-	if session == nil || session.Surface == nil || !session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(session) {
 		return false
 	}
 	return skillMentionResolveGate(session, true) == skillMentionGateEnabled
@@ -643,7 +643,7 @@ func (c *chatSkillMentionCompletionController) isSurfaceEnabledLocked() bool {
 	if c == nil || c.session == nil || c.session.Surface == nil {
 		return false
 	}
-	return c.session.Surface.Enabled()
+	return chatSessionSurfaceUsable(c.session)
 }
 
 func (c *chatSkillMentionCompletionController) isPopupBlockedLocked() bool {

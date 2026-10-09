@@ -164,7 +164,7 @@ func buildChatDebugDisplaySessionInfo(session *ChatSession) *chatDebugDisplaySes
 	info := &chatDebugDisplaySessionInfo{
 		SessionID:   chatDebugSessionID(session),
 		DebugMode:   ctx.DebugMode,
-		Surface:     session.Surface != nil && session.Surface.Enabled(),
+		Surface:     chatSessionSurfaceUsable(session),
 		Interaction: chatDebugInteractionSummary(session),
 	}
 	if descriptor, ok := chatRuntimeExecutorDescriptor(session.ChatExecutor); ok {
@@ -236,7 +236,7 @@ func buildChatDebugDisplayRuntimeInfo(session *ChatSession) *chatDebugDisplayRun
 		PermissionMode: chatDebugValueOrNone(string(ctx.PermissionMode)),
 		ApprovalReuse:  chatDebugValueOrNone(formatChatApprovalReuseMode(ctx.ApprovalReuseMode)),
 		AgentTarget:    chatDebugValueOrNone(strings.TrimSpace(ctx.SelectedAgentTarget)),
-		Surface:        session.Surface != nil && session.Surface.Enabled(),
+		Surface:        chatSessionSurfaceUsable(session),
 	}
 	if session.Config != nil {
 		info.AICLIConfigPath = chatDebugValueOrNone(resolveAbsoluteChatPath(session.Config.ConfigFilePath))

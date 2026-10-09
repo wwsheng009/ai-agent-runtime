@@ -521,7 +521,7 @@ func isChatAgentTranscriptTimelineEvent(eventType string) bool {
 }
 
 func showChatAgentTranscriptPopup(session *ChatSession, lines []string) {
-	if session == nil || session.Surface == nil || !session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(session) {
 		return
 	}
 	chatSessionPopupPort(session).ShowPopupPreserveCursorForOwner(lines, chatAgentTranscriptPopupOwner)

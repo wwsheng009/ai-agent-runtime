@@ -133,7 +133,7 @@ func newChatSelectionComposer(session *ChatSession, prompt string, controller *r
 		session:     session,
 		prompt:      prompt,
 		controller:  controller,
-		trackPrompt: session == nil || session.Surface == nil || !session.Surface.Enabled(),
+		trackPrompt: !chatSessionSurfaceUsable(session),
 	}
 }
 

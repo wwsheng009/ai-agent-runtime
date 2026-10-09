@@ -1270,10 +1270,10 @@ func shouldUseInteractiveLineEditor(session *ChatSession) bool {
 }
 
 func shouldEnableSlashCompletion(session *ChatSession) bool {
-	if session == nil || session.Surface == nil {
+	if !chatSessionSurfaceUsable(session) {
 		return false
 	}
-	return session.Surface.Enabled() && chatInputCommandAllowed(session, "/")
+	return chatInputCommandAllowed(session, "/")
 }
 
 func isSlashCommandInput(text string) bool {

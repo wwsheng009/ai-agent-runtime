@@ -377,7 +377,7 @@ func (c *chatSlashCompletionController) isSurfaceEnabledLocked() bool {
 	if c == nil || c.session == nil || c.session.Surface == nil {
 		return false
 	}
-	return c.session.Surface.Enabled()
+	return chatSessionSurfaceUsable(c.session)
 }
 
 func (c *chatSlashCompletionController) isPopupBlockedLocked() bool {

@@ -4775,7 +4775,7 @@ func (c *chatInteractionCoordinator) RenderCommandDocument(doc render.Document) 
 // native scrollback, so users learn the full output is available by scrolling
 // instead of assuming it was dropped by the viewport renderer.
 func (c *chatInteractionCoordinator) annotateCommandDocumentOverflow(doc render.Document) render.Document {
-	if c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(c.session) {
 		return doc
 	}
 	rows := doc.LineCount()
@@ -4812,7 +4812,7 @@ func (c *chatInteractionCoordinator) finalAssistantCellLocked(content string) as
 	} else {
 		cell = newAssistantStreamCell(content, false)
 	}
-	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() || c.finalizingAssistantProjection {
+	if c == nil || !chatSessionSurfaceUsable(c.session) || c.finalizingAssistantProjection {
 		return cell
 	}
 	rows := c.assistantBodyDisplayRowsLocked(content, cell)
@@ -4866,7 +4866,7 @@ func (c *chatInteractionCoordinator) finalAssistantOverflowHintLocked(content st
 	// 溢出提示，但 finalize 残差路径必须先于实际渲染计算出 hint，否则 live
 	// 与 one-shot RenderAssistant 对同一 source 的投影不对称。这里用同一
 	// 判定规则独立重算，保证两条入口的 hint 一致。
-	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+	if c == nil || !chatSessionSurfaceUsable(c.session) {
 		return ""
 	}
 	rows := c.assistantBodyDisplayRowsLocked(content, cell)

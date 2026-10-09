@@ -148,7 +148,7 @@ func chatComposerMaxVisibleRows(session *ChatSession) int {
 }
 
 func chatComposerUsesFixedSurface(session *ChatSession) bool {
-	return session != nil && session.Surface != nil && session.Surface.Enabled()
+	return chatSessionSurfaceUsable(session)
 }
 
 func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
@@ -629,7 +629,7 @@ func newChatModalComposerPrompt(session *ChatSession, prompt string) *chatModalC
 	return &chatModalComposerPrompt{
 		session:     session,
 		prompt:      prompt,
-		trackPrompt: session == nil || session.Surface == nil || !session.Surface.Enabled(),
+		trackPrompt: !chatSessionSurfaceUsable(session),
 	}
 }
 
@@ -691,7 +691,7 @@ func (c *chatModalComposerPrompt) onChange(snapshot ui.LineEditorSnapshot) {
 // 在底部 prompt 行显示（固定 surface 每秒重绘状态时钟还会擦掉编辑器的直写），
 // 表现为「Waiting for approval」下输入无反应。
 func foldChatPriorityPromptPopupInput(session *ChatSession, prompt string, text string) {
-	if session == nil || session.Surface == nil || !session.Surface.Enabled() {
+	if !chatSessionSurfaceUsable(session) {
 		return
 	}
 	handle := session.priorityPopupHandle
@@ -717,7 +717,7 @@ func (c *chatModalComposerPrompt) onCancel(ui.LineEditorSnapshot) bool {
 // double-draw. Without a valid popup the editor keeps its raw fallback so the
 // typed text stays visible.
 func (c *chatModalComposerPrompt) onTerminalWrite(_ ui.LineEditorSnapshot, _ ui.LineEditorRenderSnapshot, _ io.Writer, _ string) bool {
-	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+	if c == nil || !chatSessionSurfaceUsable(c.session) {
 		return false
 	}
 	return c.session.priorityPopupHandle.Valid()
