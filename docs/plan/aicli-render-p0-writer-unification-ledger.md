@@ -175,6 +175,13 @@
   - 剩余 1 处：`chat_ui_actor.go:1378 applyDrawRequested`（文件在途 WIP，收口后迁移并更新白名单）；
   - 验证：gofmt/build/vet 绿；聚焦绿；commands 全量仅剩已登记 flake（隔离 ×3/×2 绿）。
 
+- [x] **L5-1 遗留：主仓无 skip 全量复跑（web 工作流收口后）**（2026-10-09，关闭）。
+  - 前置：并发 web/resume 工作流全量提交（`c080e508`/`0405d4b1`/`a31f2b08` 等），主仓 WIP=0；
+  - 结果：`go build ./...` 绿；`go test ./cmd/aicli/...` 3 例失败全为已登记环境 flake
+    （`AutoStartTeam…` / `TTY_LiveLoop_LLMRetry…` / `StreamingAssistantFinalTail…`，
+    合并隔离 ×3 全绿）；`go test ./internal/...` **全绿（exit 0，~6min）**；
+  - 结论：主仓（含 web 工作流集成态 + L5 全链 + §4.3 + D3 A/C）无未归因失败。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
