@@ -108,6 +108,14 @@ func TestChatWebInvokeDecide(t *testing.T) {
 			s.Starts = 0
 			s.Finishes = 0
 		}, "settled", true},
+		// 文本输入（ExpectTurn=true）在冷启动准备窗口内不得按 settled 短路：
+		// 输入已消费但 turn 尚未开始（工具面/MCP 装载中），继续等待到真实终态。
+		{"expect-turn suppresses settled", func(s *chatWebInvokeSample) {
+			s.BusyAfterConsume = false
+			s.Starts = 0
+			s.Finishes = 0
+			s.ExpectTurn = true
+		}, "", false},
 		{"settled grace not reached", func(s *chatWebInvokeSample) {
 			s.BusyAfterConsume = false
 			s.Starts = 0
@@ -335,7 +343,7 @@ func TestChatWebInvokeWait_CompletedAfterTurnEvents(t *testing.T) {
 	watch.ensureSubscribed(session)
 	defer watch.closeSubscription()
 
-	resp := chatWebInvokeWait(context.Background(), session, watch, "", time.Now().Add(5*time.Second))
+	resp := chatWebInvokeWait(context.Background(), session, watch, "", true, time.Now().Add(5*time.Second))
 	if resp.Status != "completed" {
 		t.Fatalf("status = %q, want completed (resp=%+v)", resp.Status, resp)
 	}
@@ -395,7 +403,7 @@ func TestChatWebInvokeWait_ColdStartFreshAssistantCompletes(t *testing.T) {
 	watch := newChatWebInvokeWatch()
 	watch.baselineAssistantCount = chatWebInvokeAssistantMessageCount(session) // 0
 
-	resp := chatWebInvokeWait(context.Background(), session, watch, "", time.Now().Add(5*time.Second))
+	resp := chatWebInvokeWait(context.Background(), session, watch, "", true, time.Now().Add(5*time.Second))
 	if resp.Status != "completed" {
 		t.Fatalf("status = %q, want completed via fresh-assistant fallback (resp=%+v)", resp.Status, resp)
 	}
@@ -404,6 +412,40 @@ func TestChatWebInvokeWait_ColdStartFreshAssistantCompletes(t *testing.T) {
 	}
 	if resp.Assistant == nil || resp.Assistant.Content != "冷启动回复" {
 		t.Fatalf("assistant = %+v, want 冷启动回复", resp.Assistant)
+	}
+}
+
+// TestChatWebInvokeWait_ExpectTurnDoesNotSettle 锁定冷启动准备窗口的行为：文本
+// 输入已消费但 turn 尚未开始（无 busy 采样、无事件）时，不得按 settled 提前
+// 返回（会把"准备中的 turn"误报成"无 LLM turn"）；继续等待到 deadline。
+// 等待窗口取 2.6s（> chatWebInvokeNoLLMGrace），确保旧行为会 settled、新行为
+// 只能 timeout，从而真正锁住 ExpectTurn 抑制逻辑。
+func TestChatWebInvokeWait_ExpectTurnDoesNotSettle(t *testing.T) {
+	queue := newChatInputQueue(nil)
+	if result := queue.routeInputText("hello"); !result.queued() {
+		t.Fatal("route input failed")
+	}
+	session := &ChatSession{InputQueue: queue}
+	withWebTestSession(t, session)
+	withStubbedInvokeProbe(t, func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		return "session_cold", "turn_cold", false, nil, nil
+	})
+	// 主循环消费输入，但 turn 仍在准备窗口内（无任何事件/忙碌信号）。
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		select {
+		case <-queue.lines:
+		default:
+		}
+	}()
+
+	watch := newChatWebInvokeWatch()
+	resp := chatWebInvokeWait(context.Background(), session, watch, "", true, time.Now().Add(2600*time.Millisecond))
+	if resp.Status != "timeout" {
+		t.Fatalf("status = %q, want timeout（ExpectTurn 不得 settled，resp=%+v）", resp.Status, resp)
+	}
+	if !strings.Contains(resp.Reason, "deadline") {
+		t.Fatalf("reason = %q, want deadline exceeded", resp.Reason)
 	}
 }
 
@@ -462,7 +504,7 @@ func TestChatWebInvokeWait_SessionSwitchAborts(t *testing.T) {
 	t.Cleanup(func() { chatWebInvokeProbeFn = prevProbe })
 
 	watch := newChatWebInvokeWatch()
-	resp := chatWebInvokeWait(context.Background(), sessionA, watch, "", time.Now().Add(5*time.Second))
+	resp := chatWebInvokeWait(context.Background(), sessionA, watch, "", false, time.Now().Add(5*time.Second))
 	if resp.Status != "error" {
 		t.Fatalf("status = %q, want error (resp=%+v)", resp.Status, resp)
 	}

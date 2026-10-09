@@ -24,6 +24,10 @@ export type CacheRequestRecord = {
   schema_version: string;
   llm_request_id: string;
   session_id: string;
+  /** schema v9 父链维度：子代理请求的父/根会话与任务 id；顶层请求缺省。 */
+  parent_session_id?: string;
+  root_session_id?: string;
+  subagent_id?: string;
   trace_id?: string;
   turn_id?: string;
   step?: number;
@@ -89,6 +93,9 @@ export type CacheOverview = {
   requests_total: number;
   requests_with_usage: number;
   requests_cache_reported: number;
+  /** 父会话视图中的子会话事实（additive）：0/缺省 = 无子代理请求或旧后端。 */
+  child_session_count?: number;
+  child_requests_total?: number;
   tokens: CacheOverviewTokens;
   cache_hit_ratio?: number;
   cache_write_ratio?: number;

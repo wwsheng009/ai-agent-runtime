@@ -83,6 +83,9 @@ export type AnalyticsSessionRollup = {
   dropped_messages: number;
   reconciliation_status: string;
   reconciliation_delta: number;
+  /** schema v9 父链维度：子代理子会话的父会话与子代理任务 id；根会话缺省。 */
+  parent_session_id?: string;
+  subagent_id?: string;
 };
 
 export type AnalyticsGroupBucket = AnalyticsTokenTotals & {
@@ -215,11 +218,18 @@ export type AnalyticsStepUsage = {
   context_window_tokens?: number;
   prompt_budget?: number;
   context_utilization?: number;
+  /** schema v9 父链维度：产出该请求的实际会话（父视图展开后代时非空）。 */
+  session_id?: string;
+  parent_session_id?: string;
+  subagent_id?: string;
 };
 
 export type AnalyticsTurnUsage = {
   turn_id: string;
   trace_id: string;
+  /** 该 turn 归属的实际会话与子代理任务 id（父视图聚合后代时标注）。 */
+  session_id?: string;
+  subagent_id?: string;
   ordinal: number;
   started_at?: string;
   ended_at?: string;

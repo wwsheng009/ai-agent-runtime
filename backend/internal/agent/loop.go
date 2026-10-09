@@ -183,6 +183,16 @@ type ReActLoop struct {
 	// 把「模型反复尝试写操作烧 token」变成一次明确的终止。
 	readOnlyDenyStreak         int
 	readOnlyDenyEscalationSent bool
+	// runLineage 是本 run 的父链归属（子代理运行由调度器注入）：随
+	// llm.request.* 载荷落库，供父会话统计按 root 归集。生命周期等于一次 run()。
+	runLineage runLineage
+}
+
+// runLineage 描述本次运行的父链归属；全空 = 顶层运行（不注入载荷）。
+type runLineage struct {
+	ParentSessionID string
+	RootSessionID   string
+	SubagentID      string
 }
 
 type toolExecutionResult struct {
@@ -208,6 +218,12 @@ type toolSourceResolver interface {
 type loopRunOptions struct {
 	TraceID                 string
 	SessionID               string
+	// ParentSessionID / RootSessionID / SubagentID 是子代理运行的父链归属
+	// （schema v9）：非空时随 llm.request.* 载荷落库。RootSessionID 为空且
+	// 有父会话时，采集侧按父链回溯兜底（不在此猜测）。
+	ParentSessionID         string
+	RootSessionID           string
+	SubagentID              string
 	History                 []types.Message
 	IncludePrompt           bool
 	Depth                   int
@@ -718,6 +734,13 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	sessionID := options.SessionID
 	if sessionID == "" {
 		sessionID = "react_" + uuid.NewString()
+	}
+	// 父链归属随本 run 生命周期（子代理运行由调度器注入；顶层运行为空）。
+	// 每次 run 都显式重置，避免复用的 loop 实例把上一次运行的归属泄漏到本次。
+	loop.runLineage = runLineage{
+		ParentSessionID: strings.TrimSpace(options.ParentSessionID),
+		RootSessionID:   strings.TrimSpace(options.RootSessionID),
+		SubagentID:      strings.TrimSpace(options.SubagentID),
 	}
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：本回合的 obligation 批次全部终态时，
 	// 挂起记录必须被清掉，turn 才算真正结束；否则 nextTurnID 会永久复用挂起的 turn_id。
@@ -2455,6 +2478,17 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		"tool_count":         len(req.Tools),
 		"prompt_cache_epoch": requestCacheEpoch,
 		"prompt_cache_key":   requestCacheKey,
+	}
+	// 父链归属（子代理运行由调度器经 loopRunOptions 注入）：随 llm.request.*
+	// 载荷落库，父会话统计据此把子代理请求归集到 root 会话。
+	if lineage := loop.runLineage; lineage.ParentSessionID != "" {
+		requestPayload["parent_session_id"] = lineage.ParentSessionID
+		if lineage.RootSessionID != "" {
+			requestPayload["root_session_id"] = lineage.RootSessionID
+		}
+		if lineage.SubagentID != "" {
+			requestPayload["subagent_id"] = lineage.SubagentID
+		}
 	}
 	addRemainingBudgetMetadata(requestPayload, remainingBudget)
 	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {

@@ -366,7 +366,10 @@ func HandleChatWebAPIInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deadline := time.Now().Add(chatWebInvokeTimeout(req.TimeoutMs))
-	resp := chatWebInvokeWait(r.Context(), session, watch, baselineAssistant, deadline)
+	// 文本输入预期产生 LLM turn（禁用 settled 短路）；斜杠命令走命令闸门、
+	// wait_only 不注入，保持既有 settled 语义（见 chatWebInvokeDecide）。
+	resp := chatWebInvokeWait(r.Context(), session, watch, baselineAssistant,
+		!req.WaitOnly && chatWebInvokeExpectsTurn(prompt), deadline)
 	resp.ElapsedMs = time.Since(started).Milliseconds()
 	resp.Usage = chatWebInvokeUsageFrom(session)
 	if req.WaitOnly {
@@ -617,6 +620,13 @@ type chatWebInvokeSample struct {
 	Interrupted     bool
 	PendingApproval bool
 	PendingQuestion bool
+	// ExpectTurn 表示本次注入的输入预期产生一个 LLM turn（非斜杠命令文本）。
+	// 为 true 时禁用 settled 短路：settled 的判据是「消费后宽限期内没有观察到
+	// busy」，而冷启动首轮的工具面/MCP 装载发生在 turn 事件出现之前，会把
+	// 「正在准备中的 turn」误判成「无 LLM turn」（实测 invoke 返回 settled 后
+	// 模型仍正常回复，E2E 冷启动失败）。斜杠命令走命令闸门、可能确实不产生
+	// turn，保持原 settled 语义。
+	ExpectTurn      bool
 	AttentionStable bool // 审批/提问状态连续命中 chatWebInvokeAttentionTicks 拍
 	SinceActivity   time.Duration
 	SinceConsumed   time.Duration
@@ -632,7 +642,9 @@ type chatWebInvokeSample struct {
 //	              FreshAssistant 是事件丢失（冷启动晚订阅）时的兜底：首个 invoke
 //	              注入前 host/bus 可能尚未挂载，订阅补齐后 llm 完成事件已错过，
 //	              但会话里的新 assistant 回复足以证明 turn 已结束；
-//	settled    —— 输入已被消费但未观察到 LLM turn（斜杠命令等），宽限期后按就绪返回；
+//	settled    —— 输入已被消费但未观察到 LLM turn（斜杠命令等），宽限期后按
+//	              就绪返回；ExpectTurn=true（文本输入预期产生 turn）时不参与
+//	              判定，避免把冷启动准备中的 turn 误判成无 turn；
 //	interrupted—— 会话被中断且已空闲；
 //	requires_approval / requires_answer —— 会话停在审批/提问等待，需要调用方决策。
 func chatWebInvokeDecide(s chatWebInvokeSample) (string, bool) {
@@ -649,7 +661,7 @@ func chatWebInvokeDecide(s chatWebInvokeSample) (string, bool) {
 		(s.Finishes > 0 || s.FreshAssistant) {
 		return "completed", true
 	}
-	if s.Consumed && !s.BusyAfterConsume && !s.Busy && s.Pending == 0 &&
+	if !s.ExpectTurn && s.Consumed && !s.BusyAfterConsume && !s.Busy && s.Pending == 0 &&
 		s.SinceConsumed >= s.NoLLMGrace && s.SinceActivity >= s.Quiet {
 		return "settled", true
 	}
@@ -658,7 +670,7 @@ func chatWebInvokeDecide(s chatWebInvokeSample) (string, bool) {
 
 // chatWebInvokeWait 轮询等待注入的 turn 结束，返回最终响应。
 // ctx 由 HTTP 请求派生：调用方断开时立即停止等待（不再注入/订阅）。
-func chatWebInvokeWait(ctx context.Context, session *ChatSession, watch *chatWebInvokeWatch, baselineAssistant string, deadline time.Time) *chatWebInvokeResponse {
+func chatWebInvokeWait(ctx context.Context, session *ChatSession, watch *chatWebInvokeWatch, baselineAssistant string, expectTurn bool, deadline time.Time) *chatWebInvokeResponse {
 	resp := &chatWebInvokeResponse{Status: "timeout", Queued: true}
 	pinnedSessionID := currentRuntimeSessionID(session)
 	var (
@@ -725,6 +737,7 @@ func chatWebInvokeWait(ctx context.Context, session *ChatSession, watch *chatWeb
 			Interrupted:      ws.Interrupted,
 			PendingApproval:  approval != nil,
 			PendingQuestion:  question != nil,
+			ExpectTurn:       expectTurn,
 			AttentionStable:  attentionTicks >= chatWebInvokeAttentionTicks,
 			Quiet:            chatWebInvokeQuietWindow,
 			NoLLMGrace:       chatWebInvokeNoLLMGrace,
@@ -741,6 +754,14 @@ func chatWebInvokeWait(ctx context.Context, session *ChatSession, watch *chatWeb
 			return chatWebInvokeFinalize(resp, current, watch, baselineAssistant, status, "")
 		}
 	}
+}
+
+// chatWebInvokeExpectsTurn 判断注入的输入是否预期产生 LLM turn：非空且非斜杠
+// 命令。斜杠命令由命令闸门处理（可能不产生 turn，也可能立刻产生 turn），保持
+// settled 语义；文本输入一定进入 turn 执行路径，禁用 settled 短路。
+func chatWebInvokeExpectsTurn(prompt string) bool {
+	trimmed := strings.TrimSpace(prompt)
+	return trimmed != "" && !strings.HasPrefix(trimmed, "/")
 }
 
 // chatWebInvokeIdle 判断会话当前是否"无事可等"：无运行中 turn、无待审批/

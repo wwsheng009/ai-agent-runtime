@@ -120,6 +120,14 @@ type CacheRequestRecord struct {
 	SchemaVersion string     `json:"schema_version"`
 	LLMRequestID  string     `json:"llm_request_id"`
 	SessionID     string     `json:"session_id"`
+	// ParentSessionID / RootSessionID / SubagentID 是子代理请求的父链归属
+	// （additive 字段）：顶层请求 ParentSessionID/SubagentID 为空、RootSessionID
+	// 等于 SessionID；子代理请求的 RootSessionID 指向根会话，父会话视图据此
+	// 展开全部后代。旧记录缺省为空，读取方按
+	// COALESCE(NULLIF(root_session_id,''), session_id) 降级为旧口径。
+	ParentSessionID string     `json:"parent_session_id,omitempty"`
+	RootSessionID   string     `json:"root_session_id,omitempty"`
+	SubagentID      string     `json:"subagent_id,omitempty"`
 	TraceID       string     `json:"trace_id,omitempty"`
 	TurnID        string     `json:"turn_id,omitempty"`
 	Step          int        `json:"step,omitempty"`
@@ -197,6 +205,11 @@ type CacheOverview struct {
 	RequestsTotal           int                     `json:"requests_total"`
 	RequestsWithUsage       int                     `json:"requests_with_usage"`
 	RequestsCacheReported   int                     `json:"requests_cache_reported"`
+	// ChildSessionCount / ChildRequestsTotal 是父会话视图中包含的子会话事实
+	// （additive）：请求来源中的子会话数与子会话请求数。0 表示无子代理请求
+	// 或旧数据源未提供（前端显示"-"而不是伪造 0 语义）。
+	ChildSessionCount  int `json:"child_session_count,omitempty"`
+	ChildRequestsTotal int `json:"child_requests_total,omitempty"`
 	Tokens                  CacheOverviewTokens     `json:"tokens"`
 	CacheHitRatio           *float64                `json:"cache_hit_ratio,omitempty"`
 	CacheWriteRatio         *float64                `json:"cache_write_ratio,omitempty"`

@@ -15,6 +15,12 @@ import "time"
 type TerminalRecordInput struct {
 	LLMRequestID string
 	SessionID    string
+	// ParentSessionID / RootSessionID / SubagentID 是子代理请求的父链归属
+	// （可显式传入；为空时回退到 Payload 同名键）。RootSessionID 为空时
+	// 由 SessionID/ParentSessionID 兜底推导，保证新记录总有 root 值。
+	ParentSessionID string
+	RootSessionID   string
+	SubagentID      string
 	TraceID      string
 	TurnID       string
 	Step         int
@@ -39,10 +45,21 @@ type TerminalRecordInput struct {
 // BuildTerminalRecord 把终态输入归一化为不可变的 CacheRequestRecord。
 func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	finishedAt := in.FinishedAt
+	payload := in.Payload
+	parentSessionID := firstNonEmptyString(in.ParentSessionID, payloadString(payload, "parent_session_id"))
+	rootSessionID := firstNonEmptyString(in.RootSessionID, payloadString(payload, "root_session_id"))
+	if rootSessionID == "" {
+		// 兜底：有父链（1 级）时父即根；无父链时根即自身。深层嵌套由采集侧
+		// 显式传入 root，不做猜测式回溯。
+		rootSessionID = firstNonEmptyString(parentSessionID, in.SessionID)
+	}
 	record := CacheRequestRecord{
 		SchemaVersion:     SchemaVersion,
 		LLMRequestID:      in.LLMRequestID,
 		SessionID:         in.SessionID,
+		ParentSessionID:   parentSessionID,
+		RootSessionID:     rootSessionID,
+		SubagentID:        firstNonEmptyString(in.SubagentID, payloadString(payload, "subagent_id")),
 		TraceID:           in.TraceID,
 		TurnID:            in.TurnID,
 		Step:              in.Step,
@@ -59,7 +76,6 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	}
 	// 上下文事实先于错误分支提取：失败请求（如上下文超限被拒）同样携带窗口与预算，
 	// 前端仍能显示"已用 / 窗口 / 预算"。interrupted 兜底路径没有载荷，保持 0。
-	payload := in.Payload
 	record.ContextPromptTokens = payloadInt(payload, "context_prompt_tokens")
 	record.ContextWindowTokens = payloadInt(payload, "context_window_tokens")
 	record.PromptBudget = payloadInt(payload, "prompt_budget")

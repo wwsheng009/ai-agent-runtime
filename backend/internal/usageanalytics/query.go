@@ -71,12 +71,17 @@ type whereClause struct {
 }
 
 // buildWhere 构造过滤条件；sessionStart 为会话开始时间表达式
-// （schema v3 与旧聚合两种来源的占位方式不同）。
-func buildWhere(q Query, sessionStart string) whereClause {
+// （schema v3 与旧聚合两种来源的占位方式不同）。childFilter 是"仅根会话"表达式
+// （schema v9；旧库缺列时为空串 = 不过滤），默认排除子代理子会话行以避免
+// 全局统计重复计数（请求已 rollup 到根行）。
+func buildWhere(q Query, sessionStart, childFilter string) whereClause {
 	if strings.TrimSpace(sessionStart) == "" {
 		sessionStart = sessionStartExpr
 	}
 	clause := whereClause{sql: "1=1"}
+	if !q.IncludeChildSessions && strings.TrimSpace(childFilter) != "" {
+		clause.sql += " AND " + childFilter
+	}
 	if !q.From.IsZero() {
 		clause.sql += " AND " + sessionStart + " >= ?"
 		clause.args = append(clause.args, q.From.UnixNano())
@@ -112,6 +117,23 @@ func buildWhere(q Query, sessionStart string) whereClause {
 		clause.args = append(clause.args, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	return clause
+}
+
+// childSessionFilterExpr 返回"仅根会话"过滤表达式：usage_sessions 具备
+// parent_session_id 列（schema v9）时为 s.parent_session_id = ''；旧库缺列时
+// 返回空串（退化为旧行为，不报错）。能力探测结果按 Store 缓存。
+func (s *Store) childSessionFilterExpr() string {
+	if s == nil {
+		return ""
+	}
+	s.parentColumnOnce.Do(func() {
+		has, err := s.hasColumn("usage_sessions", "parent_session_id")
+		s.parentColumnExists = err == nil && has
+	})
+	if !s.parentColumnExists {
+		return ""
+	}
+	return "s.parent_session_id = ''"
 }
 
 func escapeLike(value string) string {
@@ -177,7 +199,7 @@ SELECT
   COALESCE(req.turn_count, 0) AS c_turn_count,
   COALESCE(req.failed_turns, 0) AS c_failed_turns,
   ` + sessionStartExpr + ` AS session_start,
-  ` + sessionLastExpr + ` AS session_last
+  ` + sessionLastExpr + ` AS session_last/*SESSION_LINEAGE_COLUMNS*/
 FROM usage_sessions s
 LEFT JOIN req ON req.session_id = s.session_id
 WHERE `
@@ -213,7 +235,7 @@ const sessionStatsSelect = `SELECT
   s.c_turn_count,
   s.c_failed_turns,
   ` + statsSessionStartExpr + ` AS session_start,
-  ` + statsSessionLastExpr + ` AS session_last
+  ` + statsSessionLastExpr + ` AS session_last/*SESSION_LINEAGE_COLUMNS*/
 FROM usage_sessions s
 WHERE `
 
@@ -224,10 +246,35 @@ type sessionQuerySource struct {
 }
 
 func (s *Store) sessionQuerySource() sessionQuerySource {
+	lineageColumns := s.sessionLineageSelectColumns()
 	if s.statsReady() {
-		return sessionQuerySource{selectSQL: sessionStatsSelect, startExpr: statsSessionStartExpr}
+		return sessionQuerySource{selectSQL: sessionStatsSelectWithLineage(lineageColumns), startExpr: statsSessionStartExpr}
 	}
-	return sessionQuerySource{selectSQL: sessionSelect, startExpr: sessionStartExpr}
+	return sessionQuerySource{selectSQL: sessionSelectWithLineage(lineageColumns), startExpr: sessionStartExpr}
+}
+
+// sessionLineageColumnsMarker 是两条会话 SELECT 的父链列注入点（列序必须与
+// scanSessionRows 的扫描顺序一致：追加在 session_last 之后）。
+const sessionLineageColumnsMarker = "/*SESSION_LINEAGE_COLUMNS*/"
+
+// sessionLineageSelectColumns 返回父链维度列（schema v9）：列存在时为真实列，
+// 只读旧库缺列时退化为空串常量（不报错）。列名是包内常量，不接受外部输入。
+func (s *Store) sessionLineageSelectColumns() string {
+	parentExpr := "''"
+	subagentExpr := "''"
+	if s != nil {
+		parentExpr = s.columnExpr("usage_sessions", "parent_session_id")
+		subagentExpr = s.columnExpr("usage_sessions", "subagent_id")
+	}
+	return ",\n  " + parentExpr + " AS parent_session_id,\n  " + subagentExpr + " AS subagent_id"
+}
+
+func sessionSelectWithLineage(lineageColumns string) string {
+	return strings.Replace(sessionSelect, sessionLineageColumnsMarker, lineageColumns, 1)
+}
+
+func sessionStatsSelectWithLineage(lineageColumns string) string {
+	return strings.Replace(sessionStatsSelect, sessionLineageColumnsMarker, lineageColumns, 1)
 }
 
 // scanSessionRows 读取会话聚合行。
@@ -259,6 +306,7 @@ func scanSessionRows(rows *sql.Rows) ([]SessionRollup, error) {
 			&totalDurationMs, &avgDurationMs, &totalFirstTokenMs, &avgFirstTokenMs, &firstTokenSamples,
 			&turnCount, &failedTurns,
 			&sessionStart, &sessionLast,
+			&rollup.ParentSessionID, &rollup.SubagentID,
 		); err != nil {
 			return nil, err
 		}
@@ -434,7 +482,7 @@ func (s *Store) ListSessions(q Query) (ListResult, error) {
 	result := emptyListResult(limit, offset)
 
 	source := s.sessionQuerySource()
-	where := buildWhere(q, source.startExpr)
+	where := buildWhere(q, source.startExpr, s.childSessionFilterExpr())
 	sessionQuery := source.selectSQL + where.sql
 
 	rows, ok, err := s.query("SELECT COUNT(*) FROM ("+sessionQuery+")", where.args...)
@@ -608,7 +656,7 @@ func (s *Store) Summarize(q Query) (SummaryResult, error) {
 	result := emptySummaryResult(groupBy)
 
 	source := s.sessionQuerySource()
-	where := buildWhere(q, source.startExpr)
+	where := buildWhere(q, source.startExpr, s.childSessionFilterExpr())
 	sessionQuery := source.selectSQL + where.sql
 
 	totals, coverage, window, err := s.aggregateTotals(sessionQuery, where.args)
@@ -735,7 +783,7 @@ func (s *Store) Dimensions(q Query) (DimensionsResult, error) {
 		Statuses:      []string{},
 	}
 	source := s.sessionQuerySource()
-	where := buildWhere(q, source.startExpr)
+	where := buildWhere(q, source.startExpr, s.childSessionFilterExpr())
 	sessionQuery := source.selectSQL + where.sql
 
 	// 5 个维度合并为一次 base 扫描（§8.1）：每段独立 ORDER BY + LIMIT，
@@ -813,7 +861,7 @@ func (s *Store) SessionUsage(sessionID string) (SessionUsageDetail, error) {
 		return SessionUsageDetail{}, err
 	}
 
-	rows, truncated, err := s.sessionSteps(trimmed)
+	rows, truncated, err := s.sessionSteps(trimmed, s.sessionUsageScope(trimmed))
 	if err != nil {
 		return SessionUsageDetail{}, err
 	}
@@ -887,20 +935,55 @@ func (s *Store) sessionRollup(sessionID string) (SessionRollup, bool, error) {
 
 // sessionStep 是请求明细行 + turn 归属键（turn_id 不进入对外 JSON 契约）。
 type sessionStep struct {
-	usage   StepUsage
-	turnID  string
-	traceID string
+	usage           StepUsage
+	turnID          string
+	traceID         string
+	sessionID       string
+	parentSessionID string
+	subagentID      string
 }
 
-// sessionSteps 读取会话请求明细（SQL 排序 + 上限保护）。
-func (s *Store) sessionSteps(sessionID string) ([]sessionStep, bool, error) {
+// sessionUsageScope 返回会话详情明细的作用域列（schema v9）：根会话用
+// root_session_id（自身 + 全部后代），子会话用 session_id（自身）；旧库缺列时
+// 退化为 session_id。
+func (s *Store) sessionUsageScope(sessionID string) string {
+	if s == nil || strings.TrimSpace(sessionID) == "" {
+		return "session_id"
+	}
+	if !s.rollupScopeAvailable() {
+		return "session_id"
+	}
+	rows, ok, err := s.query(`SELECT parent_session_id FROM usage_sessions WHERE session_id = ? LIMIT 1`, sessionID)
+	if err != nil || !ok {
+		return "root_session_id"
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var parent string
+		if err := rows.Scan(&parent); err == nil && strings.TrimSpace(parent) != "" {
+			return "session_id"
+		}
+	}
+	return "root_session_id"
+}
+
+// sessionSteps 读取会话请求明细（SQL 排序 + 上限保护）。scopeColumn 决定会话
+// 视图口径（根会话含后代 / 子会话仅自身），列名是包内常量，不接受外部输入。
+func (s *Store) sessionSteps(sessionID, scopeColumn string) ([]sessionStep, bool, error) {
 	steps := []sessionStep{}
+	if strings.TrimSpace(scopeColumn) == "" {
+		scopeColumn = "session_id"
+	}
+	sessionExpr := s.columnExpr("usage_requests", "session_id")
+	parentExpr := s.columnExpr("usage_requests", "parent_session_id")
+	subagentExpr := s.columnExpr("usage_requests", "subagent_id")
 	query := `SELECT llm_request_id, trace_id, turn_id, step, provider, model, status, cache_status,
        success, error_category, started_at_unix_nano, duration_ms,
        prompt_tokens, completion_tokens, cache_read_tokens, cache_creation_tokens,
-       reasoning_tokens, total_tokens, usage_available, record_json
+       reasoning_tokens, total_tokens, usage_available, record_json,
+       ` + sessionExpr + `, ` + parentExpr + `, ` + subagentExpr + `
 FROM usage_requests
-WHERE session_id = ?
+WHERE ` + scopeColumn + ` = ?
 ORDER BY started_at_unix_nano ASC, step ASC, llm_request_id ASC
 LIMIT ?`
 	rows, ok, err := s.query(query, sessionID, maxSessionSteps+1)
@@ -928,6 +1011,7 @@ LIMIT ?`
 			&status, &cacheStatus, &success, &errorCategory, &startedNano, &durationMs,
 			&prompt, &completion, &cacheRead, &cacheCreate, &reasoning, &totalTokens,
 			&usageAvailable, &raw,
+			&row.sessionID, &row.parentSessionID, &row.subagentID,
 		); err != nil {
 			return nil, false, fmt.Errorf("scan analytics session requests: %w", err)
 		}
@@ -938,6 +1022,9 @@ LIMIT ?`
 		step.UsageAvailable = usageAvailable == 1
 		step.ErrorCategory = errorCategory
 		step.CacheStatus = cacheStatus
+		step.SessionID = row.sessionID
+		step.ParentSessionID = row.parentSessionID
+		step.SubagentID = row.subagentID
 		step.StartedAt = timeFromUnixNano(startedNano)
 		step.Timestamp = step.StartedAt
 		step.DurationMs = durationMs
@@ -1050,15 +1137,23 @@ func detailCoverage(rollup SessionRollup, steps []StepUsage) Coverage {
 // turn 派生：usage_requests 按 (session_id, trace_id, turn_id) 分组的 Go 侧实现。
 // ---------------------------------------------------------------------------
 
-// stepTurnKey turn 分组键：trace_id → turn_id → "unknown"（与旧解析器一致）。
+// stepTurnKey turn 分组键：会话 id + (trace_id → turn_id → "unknown")。
+// 父会话视图展开后代后，不同子会话可能出现同名 turn key，必须按会话隔离，
+// 否则父子 turn 会被错误合并。
 func stepTurnKey(row sessionStep) string {
-	if key := strings.TrimSpace(row.traceID); key != "" {
-		return key
+	key := ""
+	switch {
+	case strings.TrimSpace(row.traceID) != "":
+		key = strings.TrimSpace(row.traceID)
+	case strings.TrimSpace(row.turnID) != "":
+		key = strings.TrimSpace(row.turnID)
+	default:
+		key = "unknown"
 	}
-	if key := strings.TrimSpace(row.turnID); key != "" {
-		return key
+	if sessionID := strings.TrimSpace(row.sessionID); sessionID != "" {
+		return sessionID + "\x00" + key
 	}
-	return "unknown"
+	return key
 }
 
 // stepTurnLabel 对外 turn_id：优先 turn_id，其次 trace_id。
@@ -1088,6 +1183,8 @@ func buildTurns(rows []sessionStep) []TurnUsage {
 			turns = append(turns, TurnUsage{
 				TurnID:       stepTurnLabel(row),
 				TraceID:      step.TraceID,
+				SessionID:    row.sessionID,
+				SubagentID:   row.subagentID,
 				Ordinal:      idx + 1,
 				UsageQuality: "missing",
 			})

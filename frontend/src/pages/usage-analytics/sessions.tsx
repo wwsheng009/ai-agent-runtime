@@ -226,6 +226,14 @@ export function SessionDetail() {
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="break-all text-base font-semibold">{detail.session.title || detail.session.session_id}</h2>
                     <Badge className={statusTone(detail.session.status)}>{detail.session.status || t("status.unknown")}</Badge>
+                    {detail.session.parent_session_id ? (
+                      <Badge
+                        className="border-analytics-info-border bg-analytics-info-soft text-analytics-info"
+                        title={detail.session.subagent_id ? `${detail.session.parent_session_id} · ${detail.session.subagent_id}` : detail.session.parent_session_id}
+                      >
+                        {t("detail.subagentBadge")}
+                      </Badge>
+                    ) : null}
                     <QualityBadge quality={detail.session.usage_quality} coverage={detail.session.usage_coverage} partial={detail.partial} />
                   </div>
                   <p className="mt-1 break-all text-xs leading-5 text-muted-foreground">{detail.session.session_id} · {detail.session.provider || "-"} / {detail.session.model || "-"} · {detail.session.project || t("status.unknown")} · {detail.session.directory || "-"} · {formatTimestamp(detail.session.start_time)}</p>
@@ -293,7 +301,7 @@ function SessionOverview({ detail }: { detail: AnalyticsSessionUsageDetail }) {
         <Metric label={t("metrics.duration")} value={formatDuration(session.total_duration_ms)} detail={t("detail.reconciliation", { status: t(reconciliationKey(session.reconciliation_status)), delta: formatNumber(Math.abs(session.reconciliation_delta)) })} />
         <Metric label={t("metrics.firstToken")} value={formatFirstToken(session.average_first_token_ms) ?? t("metrics.notCollected")} detail={t("metrics.firstTokenDetail", { count: session.first_token_samples ?? 0 })} />
       </section>
-      <TurnTable turns={detail.turns} compact />
+      <TurnTable turns={detail.turns} compact viewSessionId={session.session_id} />
     </>
   );
 }
@@ -362,10 +370,10 @@ function Diagnostics({ diagnostics }: { diagnostics: AnalyticsDiagnostic[] }) {
 function SessionTokens({ detail }: { detail: AnalyticsSessionUsageDetail }) {
   // 「LLM 请求明细」已并入缓存面板的「请求明细」表（新增 Trace / 轮次、耗时、结果三列），
   // 避免同一批逐请求事实在一页内重复渲染（步骤级 steps 仍由 analytics API 提供）。
-  return <TurnTable turns={detail.turns} />;
+  return <TurnTable turns={detail.turns} viewSessionId={detail.session.session_id} />;
 }
 
-function TurnTable({ turns, compact = false }: { turns: AnalyticsTurnUsage[]; compact?: boolean }) {
+function TurnTable({ turns, compact = false, viewSessionId }: { turns: AnalyticsTurnUsage[]; compact?: boolean; viewSessionId?: string }) {
   const { t } = useTranslation("usageAnalytics");
   const visibleTurns = compact ? turns.slice(-20) : turns;
   return (
@@ -374,7 +382,7 @@ function TurnTable({ turns, compact = false }: { turns: AnalyticsTurnUsage[]; co
       <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
         <table className="w-full min-w-[860px] border-collapse text-left text-sm">
           <thead className="bg-surface-softer text-xs text-muted-foreground"><tr className="border-b border-border"><th className="px-3 py-2 font-medium">{t("turns.columns.turn")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.time")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.tokens")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.requests")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.errors")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.firstToken")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.context")}</th><th className="px-3 py-2 font-medium">{t("turns.columns.outcome")}</th></tr></thead>
-          <tbody>{visibleTurns.length === 0 ? <tr><td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">{t("turns.empty")}</td></tr> : visibleTurns.map((turn) => <tr key={`${turn.trace_id}-${turn.ordinal}`} className="border-b border-border/70 last:border-b-0"><td className="px-3 py-2"><div className="font-medium">#{turn.ordinal}</div><div className="max-w-44 truncate font-mono text-xs text-muted-foreground" title={turn.turn_id}>{shortID(turn.turn_id || turn.trace_id)}</div></td><td className="px-3 py-2"><div>{formatTimestamp(turn.started_at)}</div><div className="text-xs text-muted-foreground">{formatDuration(turn.duration_ms)}</div></td><td className="px-3 py-2 tabular-nums"><div>{formatNumber(turn.usage.total_tokens)}</div><div className="text-xs text-muted-foreground">{formatPercent(turn.usage_coverage)}</div></td><td className="px-3 py-2 tabular-nums">{formatNumber(turn.llm_requests)}</td><td className="px-3 py-2 tabular-nums">{formatNumber(turn.llm_errors)}</td><td className="px-3 py-2 tabular-nums">{formatFirstToken(turn.first_token_ms) ?? t("metrics.notCollected")}</td><td className="px-3 py-2 tabular-nums">{formatPercent(turn.max_context_utilization)}</td><td className="px-3 py-2"><Badge className={outcomeTone(turn.outcome)}>{t(outcomeKey(turn.outcome))}</Badge></td></tr>)}</tbody>
+          <tbody>{visibleTurns.length === 0 ? <tr><td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">{t("turns.empty")}</td></tr> : visibleTurns.map((turn) => <tr key={`${turn.trace_id}-${turn.ordinal}`} className="border-b border-border/70 last:border-b-0"><td className="px-3 py-2"><div className="font-medium">#{turn.ordinal}</div><div className="max-w-44 truncate font-mono text-xs text-muted-foreground" title={turn.turn_id}>{shortID(turn.turn_id || turn.trace_id)}</div>{turn.session_id && viewSessionId && turn.session_id !== viewSessionId ? <div className="mt-0.5 flex items-center gap-1"><Badge className="border-analytics-info-border bg-analytics-info-soft text-analytics-info">{t("turns.subagentBadge")}</Badge><span className="max-w-32 truncate font-mono text-[10px] text-muted-foreground" title={turn.subagent_id ? `${turn.session_id} · ${turn.subagent_id}` : turn.session_id}>{shortID(turn.session_id)}</span></div> : null}</td><td className="px-3 py-2"><div>{formatTimestamp(turn.started_at)}</div><div className="text-xs text-muted-foreground">{formatDuration(turn.duration_ms)}</div></td><td className="px-3 py-2 tabular-nums"><div>{formatNumber(turn.usage.total_tokens)}</div><div className="text-xs text-muted-foreground">{formatPercent(turn.usage_coverage)}</div></td><td className="px-3 py-2 tabular-nums">{formatNumber(turn.llm_requests)}</td><td className="px-3 py-2 tabular-nums">{formatNumber(turn.llm_errors)}</td><td className="px-3 py-2 tabular-nums">{formatFirstToken(turn.first_token_ms) ?? t("metrics.notCollected")}</td><td className="px-3 py-2 tabular-nums">{formatPercent(turn.max_context_utilization)}</td><td className="px-3 py-2"><Badge className={outcomeTone(turn.outcome)}>{t(outcomeKey(turn.outcome))}</Badge></td></tr>)}</tbody>
         </table>
       </div>
     </section>

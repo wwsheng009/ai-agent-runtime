@@ -43,6 +43,13 @@ func (s *SQLiteRuntimeStore) SaveRequest(record cacheanalytics.CacheRequestRecor
 	if err != nil {
 		return fmt.Errorf("encode cache request %s: %w", record.LLMRequestID, err)
 	}
+	// 父链列与 record_json 同源：旧记录/兜底路径缺 root 时按"自身即根"补齐，
+	// 保证镜像回放与"父会话视图 = 自身 + 后代"的查询口径一致。
+	parentSessionID := strings.TrimSpace(record.ParentSessionID)
+	rootSessionID := strings.TrimSpace(record.RootSessionID)
+	if rootSessionID == "" {
+		rootSessionID = record.SessionID
+	}
 	startedNano := int64(0)
 	if !record.StartedAt.IsZero() {
 		startedNano = record.StartedAt.UnixNano()
@@ -52,16 +59,18 @@ func (s *SQLiteRuntimeStore) SaveRequest(record cacheanalytics.CacheRequestRecor
 	}
 	_, err = s.db.ExecContext(context.Background(), `
 		INSERT OR REPLACE INTO cache_requests
-			(llm_request_id, session_id, started_at_unix_nano, record_json, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, record.LLMRequestID, record.SessionID, startedNano, payload, time.Now().UTC().Format(time.RFC3339Nano))
+			(llm_request_id, session_id, parent_session_id, root_session_id, started_at_unix_nano, record_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, record.LLMRequestID, record.SessionID, parentSessionID, rootSessionID, startedNano, payload, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("save cache request %s: %w", record.LLMRequestID, err)
 	}
 	return nil
 }
 
-// LoadSessionRequests 加载指定会话的全部持久化缓存请求记录（started_at 升序）。
+// LoadSessionRequests 加载指定会话视图的全部持久化缓存请求记录（started_at 升序）：
+// 自身请求 + 以该会话为根（root_session_id）的全部后代子会话请求。子会话自身作为
+// 视图时只命中自身（root 指向根会话），语义与缓存查询口径一致。
 // 单行损坏（JSON 解码失败）跳过该行，不拖垮整体回放；会话无记录返回空切片。
 func (s *SQLiteRuntimeStore) LoadSessionRequests(sessionID string) ([]cacheanalytics.CacheRequestRecord, error) {
 	if s == nil {
@@ -77,9 +86,9 @@ func (s *SQLiteRuntimeStore) LoadSessionRequests(sessionID string) ([]cacheanaly
 	rows, err := s.db.QueryContext(context.Background(), `
 		SELECT record_json
 		FROM cache_requests
-		WHERE session_id = ?
+		WHERE session_id = ? OR root_session_id = ?
 		ORDER BY started_at_unix_nano ASC, llm_request_id ASC
-	`, sessionID)
+	`, sessionID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load cache requests for session %s: %w", sessionID, err)
 	}

@@ -37,6 +37,11 @@ type Query struct {
 
 	// MaxScan 仅为兼容旧查询参数保留：数据库查询无扫描上限。
 	MaxScan int
+
+	// IncludeChildSessions 在会话列表/汇总中同时返回子代理子会话行
+	// （schema v9）。默认 false：子会话请求已 rollup 到根会话行，列表只读
+	// 根行以避免全局统计重复计数；置 true 用于诊断/审计视图。
+	IncludeChildSessions bool
 }
 
 // SessionRollup is a coarse per-session usage record for list/global views.
@@ -104,6 +109,10 @@ type SessionRollup struct {
 	DroppedMessages      int      `json:"dropped_messages"`
 	ReconciliationStatus string   `json:"reconciliation_status"`
 	ReconciliationDelta  int      `json:"reconciliation_delta"`
+	// schema v9 父链维度：子代理子会话的父会话与子代理任务 id；根会话为空。
+	// 列表默认只返回根会话行（请求已 rollup），字段主要用于子会话详情/审计视图。
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	SubagentID      string `json:"subagent_id,omitempty"`
 }
 
 // TokenTotals aggregates token counters.
@@ -247,6 +256,12 @@ type StepUsage struct {
 	ContextWindowTokens int     `json:"context_window_tokens,omitempty"`
 	PromptBudget        int     `json:"prompt_budget,omitempty"`
 	ContextUtilization  float64 `json:"context_utilization,omitempty"`
+	// schema v9 父链维度（父会话视图展开后代时用于明细行标注）：
+	// SessionID 是产出该请求的实际会话（子会话非空时与父视图不同），
+	// ParentSessionID 是其直接父会话，SubagentID 是子代理任务 id。
+	SessionID       string `json:"session_id,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	SubagentID      string `json:"subagent_id,omitempty"`
 }
 
 // TurnUsage is a turn-level fact derived by grouping usage_requests on
@@ -254,6 +269,9 @@ type StepUsage struct {
 type TurnUsage struct {
 	TurnID     string    `json:"turn_id"`
 	TraceID    string    `json:"trace_id"`
+	// SessionID/SubagentID：该 turn 归属的实际会话（父视图聚合后代时标注子会话）。
+	SessionID  string `json:"session_id,omitempty"`
+	SubagentID string `json:"subagent_id,omitempty"`
 	Ordinal    int       `json:"ordinal"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	EndedAt    time.Time `json:"ended_at,omitempty"`

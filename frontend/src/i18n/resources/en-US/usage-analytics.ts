@@ -18,6 +18,8 @@ export const enUsageAnalytics = {
     metrics: {
       requests: "Total requests",
       withUsage: "{{count}} with usage",
+      childRequests: "Subagent requests",
+      childSessions: "{{count}} subagent sessions",
       hitRatio: "Cache hit ratio",
       writeRatio: "Write ratio {{value}}",
       cacheRead: "Cache read tokens",
@@ -45,6 +47,7 @@ export const enUsageAnalytics = {
     columns: {
       time: "Time",
       trace: "Trace / turn",
+      childSession: "Subagent session",
       providerModel: "Provider / Model",
       message: "Message ID",
       tokens: "Prompt / completion",
@@ -57,6 +60,7 @@ export const enUsageAnalytics = {
       firstToken: "First token",
       outcome: "Outcome",
     },
+    childSessionBadge: "Subagent",
     trace: {
       title: "Message cache trace",
       close: "Close",
@@ -341,6 +345,7 @@ export const enUsageAnalytics = {
     },
   },
   detail: {
+    subagentBadge: "Subagent session",
     title: "Session detail",
     selectPrompt: "Select a session to inspect step-level usage.",
     tokens: "Session tokens",
@@ -402,6 +407,7 @@ export const enUsageAnalytics = {
     recentTitle: "Recent turns",
     subtitle: "{{count}} user turns",
     empty: "No turn facts are available for this session.",
+    subagentBadge: "Subagent",
     columns: {
       turn: "Turn",
       time: "Time / duration",

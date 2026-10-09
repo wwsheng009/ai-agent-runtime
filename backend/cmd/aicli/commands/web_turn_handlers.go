@@ -71,6 +71,9 @@ type chatWebTurnRecord struct {
 	baseInput  int `json:"-"`
 	baseOutput int `json:"-"`
 	baseTotal  int `json:"-"`
+	// baseAssistantCount 是本轮起点（session_start 时刻）的 assistant 消息条数，
+	// 供 assistant_message 事件缺失时从会话历史回填预览做「是否增长」判定。
+	baseAssistantCount int `json:"-"`
 	startedAt  time.Time
 	finishedAt time.Time
 }
@@ -104,6 +107,10 @@ type chatWebTurnRecorder struct {
 	mu      sync.Mutex
 	records map[string]*chatWebTurnRecord // turn_id → record
 	order   []string                      // 打开顺序（最新在末尾）
+	// assistantBaseline 是记录器订阅时刻的 assistant 消息条数：session_end
+	// 兜底建账（未观测到 session_start）时用它当本轮基线，只有条数增长才回填
+	// 预览，避免把订阅前就存在的上一轮回复误挂到本轮。
+	assistantBaseline int
 }
 
 var chatWebTurnRecorders = struct {
@@ -123,7 +130,11 @@ func ensureChatWebTurnRecorder(session *ChatSession) {
 		chatWebTurnRecorders.mu.Unlock()
 		return
 	}
-	recorder := &chatWebTurnRecorder{session: session, records: map[string]*chatWebTurnRecord{}}
+	recorder := &chatWebTurnRecorder{
+		session:           session,
+		records:           map[string]*chatWebTurnRecord{},
+		assistantBaseline: chatWebInvokeAssistantMessageCount(session),
+	}
 	chatWebTurnRecorders.m[bus] = recorder
 	chatWebTurnRecorders.mu.Unlock()
 	bus.SubscribeCancelable("", recorder.observe)
@@ -168,6 +179,7 @@ func (r *chatWebTurnRecorder) observe(event runtimeevents.Event) {
 			record.baseInput = r.session.InputTokenCount
 			record.baseOutput = r.session.OutputTokenCount
 			record.baseTotal = r.session.TokenCount
+			record.baseAssistantCount = chatWebInvokeAssistantMessageCount(r.session)
 		}
 		r.records[turnID] = record
 		r.order = append(r.order, turnID)
@@ -252,6 +264,20 @@ func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, 
 			record.Usage = usage
 			record.UsageScope = scope
 			record.UsageSource = source
+		}
+	}
+	// assistant_message 事件缺失（记录器晚订阅/事件丢失）时从会话历史回填本轮
+	// 预览：正常记录以本轮起点条数为基线；session_end 兜底记录以订阅时刻条数为
+	// 基线。只有条数确实增长才认领最后一条 assistant 消息，避免串轮。
+	if record.AssistantPreview == "" && r.session != nil {
+		baseline := record.baseAssistantCount
+		if record.startedAt.IsZero() {
+			baseline = r.assistantBaseline
+		}
+		if chatWebInvokeAssistantMessageCount(r.session) > baseline {
+			if content := chatWebInvokeAssistantContent(r.session); content != "" {
+				record.AssistantPreview, record.AssistantChars = chatWebTurnAssistantPreview(content)
+			}
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -229,6 +230,28 @@ func (l *localSessionMetaLookup) SessionMeta(sessionID string) (usageanalytics.S
 	return meta, true
 }
 
+// SessionLineage 从会话 context 读取父链归属（本地 spawn_agent / spawn_team
+// 子会话：agent_parent_session_id / agent_root_session_id / agent_id）。顶层会话
+// 无父链，返回 ok=false（collector 按顶层处理）。
+func (l *localSessionMetaLookup) SessionLineage(sessionID string) (usageanalytics.SessionLineage, bool) {
+	if l == nil || l.store == nil || strings.TrimSpace(sessionID) == "" {
+		return usageanalytics.SessionLineage{}, false
+	}
+	session, err := l.store.Load(context.Background(), sessionID)
+	if err != nil || session == nil {
+		return usageanalytics.SessionLineage{}, false
+	}
+	parent := localContextString(session.Metadata.Context, agentcontrol.SessionContextParentSessionID)
+	if parent == "" {
+		return usageanalytics.SessionLineage{}, false
+	}
+	return usageanalytics.SessionLineage{
+		ParentSessionID: parent,
+		RootSessionID:   localContextString(session.Metadata.Context, agentcontrol.SessionContextRootSessionID),
+		SubagentID:      localContextString(session.Metadata.Context, agentcontrol.SessionContextAgentID),
+	}, true
+}
+
 // localSessionProfileLookup 把 host.SessionStore 适配为 usageledger 的 profile
 // 维度解析回调（FR-13）：读会话元数据中的声明名（sessionmeta.ProfileName），
 // 缺失时回退绑定 ref（sessionmeta.ProfileRef）。与 localSessionMetaLookup
@@ -313,9 +336,13 @@ func buildLocalUsageService(host *localChatRuntimeHost) *usageanalytics.Service 
 		return nil
 	}
 	var lookup usageanalytics.SessionMetaLookup
+	var lineage usageanalytics.SessionLineageLookup
 	var history cacheanalytics.HistoryLookup
 	if host.SessionStore != nil {
-		lookup = &localSessionMetaLookup{store: host.SessionStore}
+		metaLookup := &localSessionMetaLookup{store: host.SessionStore}
+		lookup = metaLookup
+		// 同一适配器同时实现 SessionLineageLookup：父链解析与元数据补齐同源。
+		lineage = metaLookup
 		history = &localCacheHistoryLookup{store: host.SessionStore}
 	}
 	path := usageanalytics.DefaultDBPath()
@@ -327,6 +354,7 @@ func buildLocalUsageService(host *localChatRuntimeHost) *usageanalytics.Service 
 	service, err := usageanalytics.Attach(host.EventBus, usageanalytics.Options{
 		Config:  usageanalytics.Config{Path: path},
 		Lookup:  lookup,
+		Lineage: lineage,
 		History: history,
 	})
 	if err != nil || service == nil {

@@ -1,6 +1,9 @@
 package usageanalytics
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ============================================================================
 // 预聚合列抽样对账（§6.3）：随机抽样 N 个会话，把 c_* 列与 usage_requests
@@ -53,8 +56,11 @@ var statsDriftFields = []struct {
 	{"c_last_started_at", "s.c_last_started_at", "COALESCE(l.last_started, 0)"},
 }
 
-// liveSessionStatsSelect 实时聚合（与旧 sessionSelect 的 req CTE 同式）。
-const liveSessionStatsSelect = `SELECT
+// liveSessionStatsSelectFor 实时聚合（与旧 sessionSelect 的 req CTE 同式）。
+// scopeColumn 决定会话视图口径（schema v9）：根会话用 root_session_id（自身 +
+// 全部后代），子会话用 session_id（自身）；列名为包内常量，不接受外部输入。
+func liveSessionStatsSelectFor(scopeColumn string) string {
+	return `SELECT
   COUNT(*) AS total_requests,
   SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS llm_successes,
   SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS llm_errors,
@@ -72,7 +78,8 @@ const liveSessionStatsSelect = `SELECT
   COUNT(DISTINCT CASE WHEN success = 0 THEN ` + statsTurnKeyExpr + ` END) AS failed_turns,
   COALESCE(MIN(NULLIF(started_at_unix_nano, 0)), 0) AS first_started,
   COALESCE(MAX(started_at_unix_nano), 0) AS last_started
-FROM usage_requests WHERE session_id = ?`
+FROM usage_requests WHERE ` + scopeColumn + ` = ?`
+}
 
 // sampleStatsDrift 随机抽样会话做字段级对账；降级/无会话时返回空结果。
 func (s *Store) sampleStatsDrift(limit int) *StatsDrift {
@@ -114,13 +121,14 @@ func (s *Store) sampleStatsDrift(limit int) *StatsDrift {
 
 // compareSessionStats 返回单会话的字段级偏差（无偏差返回空切片）。
 func (s *Store) compareSessionStats(sessionID string) ([]StatsDriftSample, error) {
+	scope := s.statsDriftScope(sessionID)
 	selects := make([]string, 0, len(statsDriftFields)*2)
 	for _, field := range statsDriftFields {
 		selects = append(selects, field.stored, field.live)
 	}
 	sqlText := `SELECT ` + joinComma(selects) + `
 FROM usage_sessions s
-LEFT JOIN (` + liveSessionStatsSelect + `) l ON 1=1
+LEFT JOIN (` + liveSessionStatsSelectFor(scope) + `) l ON 1=1
 WHERE s.session_id = ?`
 	rows, ok, err := s.query(sqlText, sessionID, sessionID)
 	if err != nil {
@@ -155,6 +163,33 @@ WHERE s.session_id = ?`
 		})
 	}
 	return samples, nil
+}
+
+// statsDriftScope 返回会话对账的实时聚合作用域：根会话（parent_session_id 为空）
+// 用 root_session_id（含后代），子会话用 session_id（自身）。旧库缺列时退化为
+// 旧口径（session_id），与读路径降级一致。
+func (s *Store) statsDriftScope(sessionID string) string {
+	if s == nil {
+		return "session_id"
+	}
+	if hasRoot, err := s.hasColumn("usage_requests", "root_session_id"); err != nil || !hasRoot {
+		return "session_id"
+	}
+	if hasParent, err := s.hasColumn("usage_sessions", "parent_session_id"); err != nil || !hasParent {
+		return "root_session_id"
+	}
+	rows, ok, err := s.query(`SELECT parent_session_id FROM usage_sessions WHERE session_id = ? LIMIT 1`, sessionID)
+	if err != nil || !ok {
+		return "root_session_id"
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var parent string
+		if err := rows.Scan(&parent); err == nil && strings.TrimSpace(parent) != "" {
+			return "session_id"
+		}
+	}
+	return "root_session_id"
 }
 
 func joinComma(values []string) string {

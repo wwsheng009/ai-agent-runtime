@@ -682,6 +682,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		result, runErr = loop.run(childCtx, task.Goal, loopRunOptions{
 			TraceID:       options.TraceID,
 			SessionID:     childSessionID,
+			// 父链归属（schema v9）：随 llm.request.* 载荷落库，父会话统计
+			// 据此把子代理请求归集到 root；root 由采集侧按父链回溯兜底。
+			ParentSessionID: options.ParentSessionID,
+			SubagentID:      task.ID,
 			IncludePrompt: true,
 			Depth:         options.Depth,
 			BudgetTokens:  task.BudgetTokens,

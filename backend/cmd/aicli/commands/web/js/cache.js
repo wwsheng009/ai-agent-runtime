@@ -33,6 +33,17 @@ function fmtInt(n) {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
+// shortCacheID 短 id 展示（超长截断）；完整 id 由调用方放 title 属性。
+function shortCacheID(id) {
+  if (!id) { return "-"; }
+  return id.length > 12 ? id.slice(0, 8) + "…" : id;
+}
+
+// isChildSessionRequest 判断请求是否来自子代理子会话（schema v9 父链字段）。
+function isChildSessionRequest(record) {
+  return !!(record && record.session_id && record.root_session_id && record.root_session_id !== record.session_id);
+}
+
 function fmtPct(ratio) {
   if (ratio === undefined || ratio === null) { return "-"; }
   return (Math.round(ratio * 1000) / 10).toFixed(1) + "%";
@@ -214,6 +225,7 @@ function renderOverviewCards(overview) {
   var coverage = overview.coverage || {};
   var cards = [];
   cards.push(card("请求总数", fmtInt(overview.requests_total)));
+  cards.push(card("子会话请求", fmtInt(overview.child_requests_total)));
   cards.push(card("缓存命中率", fmtPct(overview.cache_hit_ratio)));
   cards.push(card("缓存写入率", fmtPct(overview.cache_write_ratio)));
   cards.push(card("缓存读取 tokens", fmtInt(tokens.cache_read_tokens)));
@@ -273,6 +285,7 @@ function renderRequestsTable(requests) {
       + "<td>" + esc(fmtTime(r.started_at)) + "</td>"
       + "<td>" + esc((r.provider || "-") + "/" + (r.model || "-")) + "</td>"
       + "<td>" + esc(String(r.step || "-")) + "</td>"
+      + "<td>" + renderChildSessionCell(r) + "</td>"
       + "<td>" + esc(r.status || "-") + "</td>"
       + '<td><span class="cache-badge ' + statusBadgeClass(r.cache_status) + '">' + esc(statusLabel(r.cache_status)) + "</span></td>"
       + "<td>" + esc(fmtPct(r.cache_hit_ratio)) + "</td>"
@@ -286,11 +299,22 @@ function renderRequestsTable(requests) {
       + "</tr>";
   }
   return '<table class="cache-table"><thead><tr>'
-    + "<th>时间</th><th>provider/model</th><th>step</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>未缓存输入</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
+    + "<th>时间</th><th>provider/model</th><th>step</th><th>子会话</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>未缓存输入</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
     + "</tr></thead><tbody>" + rows + "</tbody></table>"
     + '<div class="cache-hint">点击行查看请求详情与消息追溯（trace_id / turn_id / 关联消息）</div>'
+    + '<div class="cache-hint">「子会话」列标注该请求由子代理（spawn_agent / spawn_subagents）产生，鼠标悬停可看完整子会话与子代理 ID。</div>'
     + '<div class="cache-hint">首字/耗时显示"未采集"表示该请求没有观测到（非流式请求、历史记录或首个增量前失败），不代表 0ms。</div>'
     + '<div id="cache-request-detail"></div>';
+}
+
+// renderChildSessionCell 子会话列：子代理请求显示徽标 + 短 id（title 给全 id）。
+function renderChildSessionCell(record) {
+  if (!isChildSessionRequest(record)) {
+    return '<span class="cache-child-none">-</span>';
+  }
+  var title = record.session_id + (record.subagent_id ? " · " + record.subagent_id : "");
+  return '<span class="cache-badge badge-write">子代理</span> '
+    + '<span class="cache-child-id" title="' + esc(title) + '">' + esc(shortCacheID(record.session_id)) + "</span>";
 }
 
 function bindRequestRows(el) {
@@ -318,6 +342,14 @@ function renderRequestDetail(record) {
   var usage = record.usage || {};
   var lines = [];
   lines.push(kv("llm_request_id", record.llm_request_id));
+  if (isChildSessionRequest(record)) {
+    lines.push(kv("子会话", record.session_id));
+    lines.push(kv("父会话", record.parent_session_id));
+    lines.push(kv("根会话", record.root_session_id));
+    if (record.subagent_id) {
+      lines.push(kv("子代理", record.subagent_id));
+    }
+  }
   lines.push(kv("trace_id", record.trace_id));
   lines.push(kv("turn_id", record.turn_id));
   lines.push(kv("step", record.step));

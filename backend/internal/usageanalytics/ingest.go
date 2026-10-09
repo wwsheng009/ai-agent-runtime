@@ -27,7 +27,14 @@ const (
 	EventToolRequested     = "tool.requested"
 	EventToolCompleted     = "tool.completed"
 	EventSubagentCompleted = "subagent.completed"
+	// EventSubagentStarted 是子代理开工事件（scheduler.go 发射，载荷含
+	// parent_session_id/subagent_id）：collector 据此学习 child→parent 映射，
+	// 作为 llm.request.* 载荷与宿主 lookup 都缺失时的父链兜底。
+	EventSubagentStarted = "subagent.started"
 )
+
+// maxLineageDepth 父链向上回溯的深度上限（防环/防异常链）。
+const maxLineageDepth = 16
 
 // SessionStatusCompleted / SessionStatusInterrupted 会话终态。
 const (
@@ -45,6 +52,11 @@ type SessionMeta struct {
 	Model            string
 	Protocol         string
 	Status           string
+	// ParentSessionID / SubagentID 是父链维度（schema v9）：子代理会话归属的
+	// 直接父会话与子代理任务 id；顶层会话为空。空值不覆盖已有值（与其余字段
+	// 的合并语义一致）。
+	ParentSessionID string
+	SubagentID      string
 }
 
 // SessionMetaLookup 由调用方注入的会话元数据来源
@@ -54,9 +66,29 @@ type SessionMetaLookup interface {
 	SessionMeta(sessionID string) (SessionMeta, bool)
 }
 
+// SessionLineage 描述会话的父链归属（schema v9）。
+type SessionLineage struct {
+	// ParentSessionID 直接父会话 id；顶层会话为空。
+	ParentSessionID string
+	// RootSessionID 根会话 id；顶层会话等于自身。父会话视图按 root 展开全部后代。
+	RootSessionID string
+	// SubagentID 子会话对应的子代理任务 id（调度器 task.ID / 控制面 agent_id）。
+	SubagentID string
+}
+
+// SessionLineageLookup 由宿主注入的父链来源（best-effort，可为 nil）：
+// runtime server / aicli 本地均从会话 context（agent_parent_session_id /
+// agent_root_session_id / agent_id）读取。
+type SessionLineageLookup interface {
+	SessionLineage(sessionID string) (SessionLineage, bool)
+}
+
 // inflightRequest 已开始未终态的请求登记（会话终止时兜底为 interrupted）。
 type inflightRequest struct {
 	sessionID         string
+	parentSessionID   string
+	rootSessionID     string
+	subagentID        string
 	traceID           string
 	turnID            string
 	step              int
@@ -73,6 +105,10 @@ type inflightRequest struct {
 type collector struct {
 	store  *Store
 	lookup SessionMetaLookup
+	// lineage 宿主父链来源（可为 nil）；learned 是 subagent.started/completed
+	// 事件学习到的 child→父链映射（mu 保护），作为第三优先级兜底。
+	lineage SessionLineageLookup
+	learned map[string]SessionLineage
 	now    func() time.Time
 
 	mu       sync.Mutex
@@ -86,16 +122,20 @@ type collector struct {
 	writeFailureCount atomic.Int64
 }
 
-func newCollector(store *Store, lookup SessionMetaLookup, now func() time.Time) *collector {
+func newCollector(store *Store, lookup SessionMetaLookup, now func() time.Time, lineage ...SessionLineageLookup) *collector {
 	if now == nil {
 		now = time.Now
 	}
-	return &collector{
+	collector := &collector{
 		store:    store,
 		lookup:   lookup,
 		now:      now,
 		inflight: make(map[string]*inflightRequest),
 	}
+	if len(lineage) > 0 {
+		collector.lineage = lineage[0]
+	}
+	return collector
 }
 
 // subscribe 订阅全部输入事件（幂等：重复调用只订阅一次由调用方保证）。
@@ -108,6 +148,7 @@ func (c *collector) subscribe(bus *runtimeevents.Bus) {
 		EventLLMRequestStartedAlias, EventLLMRequestFinishedAlias,
 		EventAssistantMessage, EventSessionStart, EventSessionEnd, EventSessionInterrupted,
 		EventToolRequested, EventToolCompleted, EventSubagentCompleted,
+		EventSubagentStarted,
 		// 路由切换观测（主 Agent / 子 Agent）：常量取 internal/events 的权威定义，
 		// 避免此处再抄一份字面量。
 		runtimeevents.EventSubagentRouteResolved,
@@ -165,6 +206,9 @@ func (c *collector) handleEvent(event runtimeevents.Event) {
 		c.onToolCompleted(event)
 	case EventSubagentCompleted:
 		c.onSubagentCompleted(event)
+		c.learnSubagentLineage(event)
+	case EventSubagentStarted:
+		c.learnSubagentLineage(event)
 	case runtimeevents.EventSubagentRouteResolved:
 		c.onSubagentRouteResolved(event)
 	case runtimeevents.EventMainAgentRouteApplied:
@@ -204,12 +248,16 @@ func (c *collector) onRequestStarted(event runtimeevents.Event) {
 	if traceID == "" {
 		traceID = payloadString(payload, "trace_id")
 	}
+	lineage := c.resolveLineage(sessionID, payload)
 	startedAt := event.Timestamp
 	if startedAt.IsZero() {
 		startedAt = c.now()
 	}
 	inflight := &inflightRequest{
 		sessionID:         sessionID,
+		parentSessionID:   lineage.ParentSessionID,
+		rootSessionID:     lineage.RootSessionID,
+		subagentID:        lineage.SubagentID,
 		traceID:           traceID,
 		turnID:            payloadString(payload, "logical_turn_id", "turn_id"),
 		step:              payloadInt(payload, "step"),
@@ -225,10 +273,11 @@ func (c *collector) onRequestStarted(event runtimeevents.Event) {
 	c.inflight[llmRequestID] = inflight
 	c.mu.Unlock()
 
-	c.upsertSession(sessionID, SessionMeta{
+	// 会话行用会话自身归属；请求行沿用 lineage（请求级归因）。
+	c.upsertSession(sessionID, c.sessionLineageMeta(sessionID, SessionMeta{
 		Provider: inflight.provider,
 		Model:    inflight.model,
-	}, startedAt, time.Time{})
+	}, lineage), startedAt, time.Time{})
 }
 
 func (c *collector) onRequestFinished(event runtimeevents.Event) {
@@ -271,6 +320,15 @@ func (c *collector) onRequestFinished(event runtimeevents.Event) {
 	if inflight.startedAt.IsZero() {
 		inflight.startedAt = now
 	}
+	// 父链兜底：started 事件缺失（进程重启/丢帧）时按 finished 载荷重新解析。
+	if inflight.parentSessionID == "" && inflight.rootSessionID == "" {
+		lineage := c.resolveLineage(inflight.sessionID, payload)
+		inflight.parentSessionID = lineage.ParentSessionID
+		inflight.rootSessionID = lineage.RootSessionID
+		if inflight.subagentID == "" {
+			inflight.subagentID = lineage.SubagentID
+		}
+	}
 	if inflight.sessionID == "" {
 		// 无会话归属的请求不进入分析库（无法归组）。
 		return
@@ -280,6 +338,9 @@ func (c *collector) onRequestFinished(event runtimeevents.Event) {
 	record := cacheanalytics.BuildTerminalRecord(cacheanalytics.TerminalRecordInput{
 		LLMRequestID:      llmRequestID,
 		SessionID:         inflight.sessionID,
+		ParentSessionID:   inflight.parentSessionID,
+		RootSessionID:     inflight.rootSessionID,
+		SubagentID:        inflight.subagentID,
 		TraceID:           inflight.traceID,
 		TurnID:            inflight.turnID,
 		Step:              inflight.step,
@@ -294,10 +355,14 @@ func (c *collector) onRequestFinished(event runtimeevents.Event) {
 		PromptFingerprint: inflight.promptFingerprint,
 		Payload:           payload,
 	})
-	c.persistRequestTerminal(record, SessionMeta{
+	c.persistRequestTerminal(record, c.sessionLineageMeta(record.SessionID, SessionMeta{
 		Provider: record.Provider,
 		Model:    record.Model,
-	}, record.StartedAt, finishedAt)
+	}, SessionLineage{
+		ParentSessionID: inflight.parentSessionID,
+		RootSessionID:   inflight.rootSessionID,
+		SubagentID:      inflight.subagentID,
+	}), record.StartedAt, finishedAt)
 }
 
 func (c *collector) onAssistantMessage(event runtimeevents.Event) {
@@ -344,6 +409,9 @@ func (c *collector) onSessionTerminal(event runtimeevents.Event) {
 		record := cacheanalytics.BuildTerminalRecord(cacheanalytics.TerminalRecordInput{
 			LLMRequestID:      orphan.id,
 			SessionID:         inflight.sessionID,
+			ParentSessionID:   inflight.parentSessionID,
+			RootSessionID:     inflight.rootSessionID,
+			SubagentID:        inflight.subagentID,
 			TraceID:           inflight.traceID,
 			TurnID:            inflight.turnID,
 			Step:              inflight.step,
@@ -357,7 +425,11 @@ func (c *collector) onSessionTerminal(event runtimeevents.Event) {
 			PromptFingerprint: inflight.promptFingerprint,
 			Interrupted:       true,
 		})
-		c.persistRequestTerminal(record, SessionMeta{}, record.StartedAt, finishedAt)
+		c.persistRequestTerminal(record, c.sessionLineageMeta(record.SessionID, SessionMeta{}, SessionLineage{
+			ParentSessionID: inflight.parentSessionID,
+			RootSessionID:   inflight.rootSessionID,
+			SubagentID:      inflight.subagentID,
+		}), record.StartedAt, finishedAt)
 	}
 
 	status := SessionStatusCompleted
@@ -367,6 +439,187 @@ func (c *collector) onSessionTerminal(event runtimeevents.Event) {
 	c.upsertSession(sessionID, SessionMeta{Status: status}, time.Time{}, now)
 	// schema v2：回合级终值（含工具失败/恢复计数），session_end 为权威。
 	c.upsertTurnTerminal(sessionID, event)
+}
+
+// ---------------------------------------------------------------------------
+// 父链解析（schema v9）：优先级 事件载荷 > 宿主 lookup > subagent.* 学习映射。
+// 解析结果随请求行与会话行落库；root 保证非空（顶层 = 自身）。
+// ---------------------------------------------------------------------------
+
+// learnSubagentLineage 从 subagent.started/completed 事件学习 child→父链映射。
+// 事件载荷（scheduler.go 发射点）含 parent_session_id/subagent_id，事件 SessionID
+// 即子会话 id；缺失标识的载荷直接忽略（不写猜测值）。
+func (c *collector) learnSubagentLineage(event runtimeevents.Event) {
+	if c == nil {
+		return
+	}
+	payload := event.Payload
+	child := strings.TrimSpace(event.SessionID)
+	if child == "" {
+		child = payloadString(payload, "child_session_id", "session_id")
+	}
+	parent := payloadString(payload, "parent_session_id")
+	if child == "" || parent == "" {
+		return
+	}
+	if parent == child {
+		// 自指父值非法（schema 语义：顶层会话 parent 为空）：subagent.* 事件由
+		// 父会话发射时 event.SessionID 可能就是父会话本身，学到自指映射会把
+		// 父会话误当子会话（实测父行 parent_session_id=自身）。
+		return
+	}
+	c.mu.Lock()
+	if c.learned == nil {
+		c.learned = make(map[string]SessionLineage)
+	}
+	c.learned[child] = SessionLineage{
+		ParentSessionID: parent,
+		SubagentID:      payloadString(payload, "subagent_id", "agent_id"),
+	}
+	c.mu.Unlock()
+}
+
+// learnedParent 读取学习映射（mu 保护）。
+func (c *collector) learnedParent(sessionID string) (SessionLineage, bool) {
+	if c == nil || sessionID == "" {
+		return SessionLineage{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	lineage, ok := c.learned[sessionID]
+	return lineage, ok
+}
+
+// parentOf 返回会话的直接父会话（学习映射优先于宿主 lookup）。
+func (c *collector) parentOf(sessionID string) string {
+	if c == nil || sessionID == "" {
+		return ""
+	}
+	if learned, ok := c.learnedParent(sessionID); ok && learned.ParentSessionID != "" {
+		return learned.ParentSessionID
+	}
+	if c.lineage != nil {
+		if looked, ok := c.lineage.SessionLineage(sessionID); ok {
+			return looked.ParentSessionID
+		}
+	}
+	return ""
+}
+
+// resolveRoot 从直接父会话向上回溯到根（深度上限 + 环保护）；无父链时 root=自身。
+func (c *collector) resolveRoot(sessionID, parentSessionID string) string {
+	if parentSessionID == "" {
+		return sessionID
+	}
+	current := parentSessionID
+	seen := map[string]bool{sessionID: true}
+	for depth := 0; depth < maxLineageDepth; depth++ {
+		if seen[current] {
+			return current
+		}
+		seen[current] = true
+		next := c.parentOf(current)
+		if next == "" {
+			return current
+		}
+		current = next
+	}
+	return current
+}
+
+// resolveLineage 解析会话的父链归属；RootSessionID 保证非空。
+func (c *collector) resolveLineage(sessionID string, payload map[string]interface{}) SessionLineage {
+	lineage := SessionLineage{
+		ParentSessionID: payloadString(payload, "parent_session_id"),
+		RootSessionID:   payloadString(payload, "root_session_id"),
+		SubagentID:      payloadString(payload, "subagent_id"),
+	}
+	if c != nil && c.lineage != nil && (lineage.ParentSessionID == "" || lineage.SubagentID == "") {
+		if looked, ok := c.lineage.SessionLineage(sessionID); ok {
+			if lineage.ParentSessionID == "" {
+				lineage.ParentSessionID = looked.ParentSessionID
+			}
+			if lineage.SubagentID == "" {
+				lineage.SubagentID = looked.SubagentID
+			}
+			if lineage.RootSessionID == "" {
+				lineage.RootSessionID = looked.RootSessionID
+			}
+		}
+	}
+	if lineage.ParentSessionID == "" {
+		if learned, ok := c.learnedParent(sessionID); ok {
+			lineage.ParentSessionID = learned.ParentSessionID
+			if lineage.SubagentID == "" {
+				lineage.SubagentID = learned.SubagentID
+			}
+		}
+	}
+	if lineage.RootSessionID == "" {
+		lineage.RootSessionID = c.resolveRoot(sessionID, lineage.ParentSessionID)
+	}
+	// 记住本次解析结果：重复终态事件 / 后续无载荷事件（载荷丢帧、跨进程回放）
+	// 仍能解析出同一父链，避免把子代理请求从根会话回退掉。
+	if lineage.ParentSessionID != "" {
+		c.rememberLineage(sessionID, lineage)
+	}
+	return lineage
+}
+
+// rememberLineage 把已解析的父链写入学习映射（幂等；只补不覆盖已知父链，
+// 仅补齐缺失的 subagent id）。
+func (c *collector) rememberLineage(sessionID string, lineage SessionLineage) {
+	if c == nil || strings.TrimSpace(sessionID) == "" || lineage.ParentSessionID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.learned == nil {
+		c.learned = make(map[string]SessionLineage)
+	}
+	existing, ok := c.learned[sessionID]
+	if !ok || existing.ParentSessionID == "" {
+		c.learned[sessionID] = lineage
+		return
+	}
+	if existing.SubagentID == "" && lineage.SubagentID != "" {
+		existing.SubagentID = lineage.SubagentID
+		c.learned[sessionID] = existing
+	}
+}
+
+// sessionLineageMeta 返回 usage_sessions 行应写入的父链维度。会话行归属以会话
+// 自身为准（宿主 lookup > subagent.* 学习映射），最后才退回请求级归因；自指父值
+// （parent=自身）按顶层处理——父会话在子代理在途期间替子代理代跑的请求带
+// parent_session_id=自身/subagent_id=子会话，这些是请求级标注，绝不能写进父会话
+// 自己的行：否则根会话会被列表过滤（s.parent_session_id = ''）漏掉，会话视图的
+// rollup 口径也会退化为"仅自身"（2026-10-09 实测父行 parent=自身）。
+func (c *collector) sessionLineageMeta(sessionID string, meta SessionMeta, requestLineage SessionLineage) SessionMeta {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return meta
+	}
+	candidate := SessionLineage{}
+	found := false
+	if c != nil && c.lineage != nil {
+		if looked, ok := c.lineage.SessionLineage(sessionID); ok {
+			candidate, found = looked, true
+		}
+	}
+	if !found {
+		if learned, ok := c.learnedParent(sessionID); ok {
+			candidate, found = learned, true
+		}
+	}
+	if !found && strings.TrimSpace(requestLineage.ParentSessionID) != "" {
+		candidate, found = requestLineage, true
+	}
+	if !found || strings.TrimSpace(candidate.ParentSessionID) == sessionID {
+		return meta
+	}
+	meta.ParentSessionID = strings.TrimSpace(candidate.ParentSessionID)
+	meta.SubagentID = strings.TrimSpace(candidate.SubagentID)
+	return meta
 }
 
 // upsertRequest 幂等写入一条请求终态行（同 llm_request_id 覆盖）。
@@ -411,12 +664,29 @@ func (c *collector) requestUpsertStatement(record cacheanalytics.CacheRequestRec
 	}
 	const statement = `
 INSERT INTO usage_requests (
-  llm_request_id, session_id, trace_id, turn_id, step, provider, model, status, cache_status,
+  llm_request_id, session_id, parent_session_id, root_session_id, subagent_id, trace_id, turn_id, step, provider, model, status, cache_status,
   success, error_category, started_at_unix_nano, duration_ms, first_token_ms, prompt_tokens, completion_tokens,
   cache_read_tokens, cache_creation_tokens, uncached_input_tokens, input_total_tokens, reasoning_tokens, total_tokens, usage_available, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(llm_request_id) DO UPDATE SET
   session_id = excluded.session_id,
+  parent_session_id = CASE
+    WHEN excluded.parent_session_id <> '' THEN excluded.parent_session_id
+    WHEN usage_requests.session_id = excluded.session_id THEN usage_requests.parent_session_id
+    ELSE '' END,
+  root_session_id = CASE
+    -- 同一会话且新值退化为自身、旧值有真实根：保留旧根（重复终态/丢帧回放）。
+    WHEN usage_requests.session_id = excluded.session_id
+      AND excluded.root_session_id = excluded.session_id
+      AND usage_requests.root_session_id <> ''
+      AND usage_requests.root_session_id <> excluded.session_id
+      THEN usage_requests.root_session_id
+    WHEN excluded.root_session_id <> '' THEN excluded.root_session_id
+    ELSE excluded.session_id END,
+  subagent_id = CASE
+    WHEN excluded.subagent_id <> '' THEN excluded.subagent_id
+    WHEN usage_requests.session_id = excluded.session_id THEN usage_requests.subagent_id
+    ELSE '' END,
   trace_id = excluded.trace_id,
   turn_id = excluded.turn_id,
   step = excluded.step,
@@ -439,9 +709,16 @@ ON CONFLICT(llm_request_id) DO UPDATE SET
   total_tokens = excluded.total_tokens,
   usage_available = excluded.usage_available,
   record_json = excluded.record_json`
+	rootSessionID := record.RootSessionID
+	if rootSessionID == "" {
+		rootSessionID = record.SessionID
+	}
 	return statement, []interface{}{
 		record.LLMRequestID,
 		record.SessionID,
+		record.ParentSessionID,
+		rootSessionID,
+		record.SubagentID,
 		record.TraceID,
 		record.TurnID,
 		record.Step,
@@ -507,10 +784,12 @@ func (c *collector) sessionUpsertStatement(sessionID string, meta SessionMeta, s
 	}
 	const statement = `
 INSERT INTO usage_sessions (
-  session_id, title, project_path, working_directory, provider, model, protocol, status,
+  session_id, parent_session_id, subagent_id, title, project_path, working_directory, provider, model, protocol, status,
   started_at_unix_nano, ended_at_unix_nano, updated_at_unix_nano, meta_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
 ON CONFLICT(session_id) DO UPDATE SET
+  parent_session_id = CASE WHEN excluded.parent_session_id <> '' THEN excluded.parent_session_id ELSE usage_sessions.parent_session_id END,
+  subagent_id = CASE WHEN excluded.subagent_id <> '' THEN excluded.subagent_id ELSE usage_sessions.subagent_id END,
   title = CASE WHEN excluded.title <> '' THEN excluded.title ELSE usage_sessions.title END,
   project_path = CASE WHEN excluded.project_path <> '' THEN excluded.project_path ELSE usage_sessions.project_path END,
   working_directory = CASE WHEN excluded.working_directory <> '' THEN excluded.working_directory ELSE usage_sessions.working_directory END,
@@ -526,6 +805,8 @@ ON CONFLICT(session_id) DO UPDATE SET
   updated_at_unix_nano = MAX(usage_sessions.updated_at_unix_nano, excluded.updated_at_unix_nano)`
 	return statement, []interface{}{
 		sessionID,
+		meta.ParentSessionID,
+		meta.SubagentID,
 		meta.Title,
 		meta.ProjectPath,
 		meta.WorkingDirectory,

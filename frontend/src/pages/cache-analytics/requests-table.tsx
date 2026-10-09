@@ -66,11 +66,12 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
       </div>
 
       <div className="mt-2 w-full max-w-full overflow-x-auto">
-        <table className="w-full min-w-[1440px] border-collapse text-left text-sm">
+        <table className="w-full min-w-[1600px] border-collapse text-left text-sm">
           <thead className="text-xs text-muted-foreground">
             <tr className="border-b border-border">
               <th className="px-2 py-2 font-medium">{t("cache.columns.time")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.trace")}</th>
+              <th className="px-2 py-2 font-medium">{t("cache.columns.childSession")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.providerModel")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.message")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.tokens")}</th>
@@ -87,7 +88,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
           <tbody>
             {requests.length === 0 && !loading ? (
               <tr>
-                <td colSpan={13} className="px-2 py-8 text-center text-sm text-muted-foreground">
+                <td colSpan={14} className="px-2 py-8 text-center text-sm text-muted-foreground">
                   {t("cache.emptyRequests")}
                 </td>
               </tr>
@@ -117,6 +118,21 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
                   <td className="whitespace-nowrap px-2 py-2.5 tabular-nums">{formatCacheTime(record.started_at)}</td>
                   <td className="max-w-52 truncate px-2 py-2.5 font-mono text-xs" title={traceId || undefined}>
                     {traceId ? shortID(traceId) : "-"}
+                  </td>
+                  <td className="max-w-40 px-2 py-2.5">
+                    {record.session_id && record.root_session_id && record.root_session_id !== record.session_id ? (
+                      <div className="flex items-center gap-1">
+                        <Badge className="border-analytics-info-border bg-analytics-info-soft text-analytics-info">{t("cache.childSessionBadge")}</Badge>
+                        <span
+                          className="truncate font-mono text-xs"
+                          title={record.subagent_id ? `${record.session_id} · ${record.subagent_id}` : record.session_id}
+                        >
+                          {shortID(record.session_id)}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">-</span>
+                    )}
                   </td>
                   <td className="max-w-52 px-2 py-2.5">
                     <div className="truncate">{record.provider || "-"}</div>

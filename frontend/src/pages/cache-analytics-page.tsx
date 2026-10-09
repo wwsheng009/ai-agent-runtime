@@ -141,6 +141,7 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
 
           <section aria-label={t("cache.overviewTitle")} className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
             <CacheMetric label={t("cache.metrics.requests")} value={formatCacheNumber(overview?.requests_total ?? 0)} detail={t("cache.metrics.withUsage", { count: overview?.requests_with_usage ?? 0 })} />
+            <CacheMetric label={t("cache.metrics.childRequests")} value={formatCacheNumber(overview?.child_requests_total ?? 0)} detail={t("cache.metrics.childSessions", { count: overview?.child_session_count ?? 0 })} />
             <CacheMetric label={t("cache.metrics.hitRatio")} value={formatCacheRatio(overview?.cache_hit_ratio)} detail={t("cache.metrics.writeRatio", { value: formatCacheRatio(overview?.cache_write_ratio) })} />
             <CacheMetric label={t("cache.metrics.cacheRead")} value={formatCacheNumber(overview?.tokens.cache_read_tokens ?? 0)} detail={t("cache.metrics.cacheWrite", { value: formatCacheNumber(overview?.tokens.cache_creation_tokens ?? 0) })} />
             <CacheMetric

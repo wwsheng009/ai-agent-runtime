@@ -33,6 +33,16 @@ func payloadString(payload map[string]interface{}, keys ...string) string {
 	return ""
 }
 
+// firstNonEmptyString 返回第一个非空（trim 后）字符串。
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func payloadInt(payload map[string]interface{}, keys ...string) int {
 	value, ok := payloadInt64(payload, keys...)
 	if !ok {

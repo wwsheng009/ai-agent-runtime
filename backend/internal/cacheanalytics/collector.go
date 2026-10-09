@@ -35,6 +35,9 @@ const DefaultMaxRequestsPerSession = 1000
 // inflightRequest 已开始未终态的请求登记（§6.2 输入事件）。
 type inflightRequest struct {
 	sessionID         string
+	parentSessionID   string
+	rootSessionID     string
+	subagentID        string
 	traceID           string
 	turnID            string
 	step              int
@@ -196,6 +199,9 @@ func (c *Collector) onRequestStarted(event runtimeevents.Event) {
 	}
 	inflight := &inflightRequest{
 		sessionID:         sessionID,
+		parentSessionID:   payloadString(payload, "parent_session_id"),
+		rootSessionID:     payloadString(payload, "root_session_id"),
+		subagentID:        payloadString(payload, "subagent_id"),
 		traceID:           traceID,
 		turnID:            turnID,
 		step:              payloadInt(payload, "step"),
@@ -253,11 +259,22 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 	if inflight.startedAt.IsZero() {
 		inflight.startedAt = now
 	}
+	// 父链兜底：started 事件丢失时按 finished 载荷补齐（缺省按顶层处理）。
+	if inflight.parentSessionID == "" && inflight.rootSessionID == "" {
+		inflight.parentSessionID = payloadString(payload, "parent_session_id")
+		inflight.rootSessionID = payloadString(payload, "root_session_id")
+		if inflight.subagentID == "" {
+			inflight.subagentID = payloadString(payload, "subagent_id")
+		}
+	}
 
 	finishedAt := now
 	record := BuildTerminalRecord(TerminalRecordInput{
 		LLMRequestID:      llmRequestID,
 		SessionID:         inflight.sessionID,
+		ParentSessionID:   inflight.parentSessionID,
+		RootSessionID:     inflight.rootSessionID,
+		SubagentID:        inflight.subagentID,
 		TraceID:           inflight.traceID,
 		TurnID:            inflight.turnID,
 		Step:              inflight.step,
@@ -414,6 +431,9 @@ func (c *Collector) onSessionTerminal(event runtimeevents.Event) {
 			SchemaVersion:     SchemaVersion,
 			LLMRequestID:      orphan.id,
 			SessionID:         inflight.sessionID,
+			ParentSessionID:   inflight.parentSessionID,
+			RootSessionID:     inflight.rootSessionID,
+			SubagentID:        inflight.subagentID,
 			TraceID:           inflight.traceID,
 			TurnID:            inflight.turnID,
 			Step:              inflight.step,

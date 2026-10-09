@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -63,6 +64,28 @@ func (l *managerSessionMetaLookup) SessionMeta(sessionID string) (usageanalytics
 		meta.Status = string(runtimechat.StateActive)
 	}
 	return meta, true
+}
+
+// SessionLineage 从会话 context 读取父链归属（spawn_agent / spawn_team 子会话：
+// agent_parent_session_id / agent_root_session_id / agent_id）。顶层会话无父链，
+// 返回 ok=false（collector 按顶层处理）。
+func (l *managerSessionMetaLookup) SessionLineage(sessionID string) (usageanalytics.SessionLineage, bool) {
+	if l == nil || l.manager == nil || strings.TrimSpace(sessionID) == "" {
+		return usageanalytics.SessionLineage{}, false
+	}
+	session, err := l.manager.Get(context.Background(), sessionID)
+	if err != nil || session == nil {
+		return usageanalytics.SessionLineage{}, false
+	}
+	parent := contextString(session.Metadata.Context, agentcontrol.SessionContextParentSessionID)
+	if parent == "" {
+		return usageanalytics.SessionLineage{}, false
+	}
+	return usageanalytics.SessionLineage{
+		ParentSessionID: parent,
+		RootSessionID:   contextString(session.Metadata.Context, agentcontrol.SessionContextRootSessionID),
+		SubagentID:      contextString(session.Metadata.Context, agentcontrol.SessionContextAgentID),
+	}, true
 }
 
 func contextString(values map[string]interface{}, keys ...string) string {
@@ -128,8 +151,11 @@ func attachUsageAnalyticsSingleton(
 		usageAnalyticsService = nil
 	}
 	service, err := usageanalytics.Attach(bus, usageanalytics.Options{
-		Config:  usageanalytics.Config{Path: path},
-		Lookup:  lookup,
+		Config: usageanalytics.Config{Path: path},
+		Lookup: lookup,
+		// 同一适配器同时实现 SessionLineageLookup（managerSessionMetaLookup）；
+		// 测试桩仅实现 SessionMetaLookup 时按 nil 处理（无父链，旧行为）。
+		Lineage: lineageLookupOf(lookup),
 		History: history,
 	})
 	if err != nil || service == nil {
@@ -137,6 +163,14 @@ func attachUsageAnalyticsSingleton(
 	}
 	usageAnalyticsService = service
 	return usageAnalyticsService
+}
+
+// lineageLookupOf 从元数据来源提取父链能力（未实现时返回 nil）。
+func lineageLookupOf(lookup usageanalytics.SessionMetaLookup) usageanalytics.SessionLineageLookup {
+	if lineage, ok := lookup.(usageanalytics.SessionLineageLookup); ok {
+		return lineage
+	}
+	return nil
 }
 
 // detachUsageAnalyticsService 关闭单例（测试/停机清理）。

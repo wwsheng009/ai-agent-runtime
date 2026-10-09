@@ -895,7 +895,7 @@ func errorPatternSessionScope(q ErrorPatternsQuery, sessionColumn string) (strin
 		Project:   q.Project,
 		Status:    q.Status,
 		Query:     q.Query,
-	}, errorPatternSessionStartExpr)
+	}, errorPatternSessionStartExpr, "")
 	return sessionColumn + " IN (SELECT s.session_id FROM usage_sessions s WHERE " + clause.sql + ")", clause.args
 }
 

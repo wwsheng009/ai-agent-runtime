@@ -2,6 +2,7 @@ package cacheanalytics
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -85,6 +86,29 @@ func (a *projectorAggregates) remove(record *CacheRequestRecord) {
 	}
 }
 
+// merge 把另一个聚合并入自身（父会话视图 = 自身 + 后代，schema v9）。
+func (a *projectorAggregates) merge(other projectorAggregates) {
+	a.total += other.total
+	a.withUsage += other.withUsage
+	a.cacheReported += other.cacheReported
+	a.sumPrompt += other.sumPrompt
+	a.sumCompletion += other.sumCompletion
+	a.sumTotal += other.sumTotal
+	a.sumCacheRead += other.sumCacheRead
+	a.sumCacheCreation += other.sumCacheCreation
+	a.sumUncachedInput += other.sumUncachedInput
+	a.sumReasoning += other.sumReasoning
+	a.sumInputTotalReadReported += other.sumInputTotalReadReported
+	a.sumCacheReadReported += other.sumCacheReadReported
+	a.sumInputTotalCreationReported += other.sumInputTotalCreationReported
+	a.sumCacheCreationReported += other.sumCacheCreationReported
+	a.dist.Hit += other.dist.Hit
+	a.dist.Write += other.dist.Write
+	a.dist.ReportedZero += other.dist.ReportedZero
+	a.dist.NotReported += other.dist.NotReported
+	a.dist.Error += other.dist.Error
+}
+
 func (d *CacheStatusDistribution) add(status string) {
 	switch status {
 	case CacheStatusHit:
@@ -144,6 +168,9 @@ type Projector struct {
 	//（方案 §710：Phase 3 sqlite 持久化后消除）。
 	persisted bool
 	sessions  map[string]*sessionState
+	// children 是 root→子会话集合索引（schema v9）：父会话视图据此合并后代
+	// 记录。淘汰只影响子会话自身状态，索引里的陈旧 id 查不到状态即忽略。
+	children map[string]map[string]struct{}
 }
 
 func newProjector(maxPerSession int) *Projector {
@@ -153,6 +180,7 @@ func newProjector(maxPerSession int) *Projector {
 	return &Projector{
 		maxPerSession: maxPerSession,
 		sessions:      make(map[string]*sessionState),
+		children:      make(map[string]map[string]struct{}),
 	}
 }
 
@@ -187,6 +215,14 @@ func (p *Projector) append(record *CacheRequestRecord) {
 	state.records = append(state.records, record)
 	state.index[record.LLMRequestID] = record
 	state.agg.add(record)
+	if root := strings.TrimSpace(record.RootSessionID); root != "" && root != record.SessionID {
+		set := p.children[root]
+		if set == nil {
+			set = make(map[string]struct{})
+			p.children[root] = set
+		}
+		set[record.SessionID] = struct{}{}
+	}
 	if !p.persisted {
 		for len(state.records) > p.maxPerSession {
 			oldest := state.records[0]
@@ -222,7 +258,22 @@ func (p *Projector) backfillMessageID(sessionID, llmRequestID, userMessageID, as
 	}
 }
 
-// overview 组装会话总览。
+// viewStatesLocked 返回会话视图的状态列表：自身 + 以该会话为 root 的子会话
+// （schema v9）。调用方须持有 p.mu（读或写）。
+func (p *Projector) viewStatesLocked(sessionID string) []*sessionState {
+	states := make([]*sessionState, 0, 4)
+	if state := p.sessions[sessionID]; state != nil {
+		states = append(states, state)
+	}
+	for childID := range p.children[sessionID] {
+		if state := p.sessions[childID]; state != nil {
+			states = append(states, state)
+		}
+	}
+	return states
+}
+
+// overview 组装会话总览（父会话视图 = 自身 + 全部后代记录合并）。
 func (p *Projector) overview(sessionID string) CacheOverview {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -231,13 +282,21 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 		SessionID:     sessionID,
 		GeneratedAt:   time.Now(),
 	}
-	state := p.sessions[sessionID]
-	if state == nil {
+	states := p.viewStatesLocked(sessionID)
+	if len(states) == 0 {
 		// 空会话不是数据损伤：requests_total=0 已自明，不置 partial
 		//（避免 UI 误显"仅保留最近 N 条"横幅，§4.2 partial 语义）。
 		return overview
 	}
-	agg := state.agg
+	merged := projectorAggregates{}
+	partialReasons := []string{}
+	var records []*CacheRequestRecord
+	for _, state := range states {
+		merged.merge(state.agg)
+		partialReasons = append(partialReasons, state.partialReasons...)
+		records = append(records, state.records...)
+	}
+	agg := merged
 	overview.RequestsTotal = agg.total
 	overview.RequestsWithUsage = agg.withUsage
 	overview.RequestsCacheReported = agg.cacheReported
@@ -259,21 +318,28 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 		overview.CacheWriteRatio = &ratio
 	}
 	overview.CacheStatusDistribution = agg.dist
-	overview.Coverage = buildCoverage(agg, state)
+	overview.Coverage = buildCoverage(agg, &sessionState{partialReasons: partialReasons})
+	// 子会话事实（additive）：视图中的后代会话数与请求数。
+	for childID := range p.children[sessionID] {
+		if state := p.sessions[childID]; state != nil && len(state.records) > 0 {
+			overview.ChildSessionCount++
+			overview.ChildRequestsTotal += len(state.records)
+		}
+	}
 	// 延迟均值：按记录线性扫描（与会话窗口 min/max 同量级），不新增增量状态。
-	overview.DurationSamples, overview.AverageDurationMS = averageLatency(state.records, func(record *CacheRequestRecord) int64 {
+	overview.DurationSamples, overview.AverageDurationMS = averageLatency(records, func(record *CacheRequestRecord) int64 {
 		return record.DurationMS
 	})
-	overview.FirstTokenSamples, overview.AverageFirstTokenMS = averageLatency(state.records, func(record *CacheRequestRecord) int64 {
+	overview.FirstTokenSamples, overview.AverageFirstTokenMS = averageLatency(records, func(record *CacheRequestRecord) int64 {
 		return record.FirstTokenMS
 	})
-	if len(state.records) > 0 {
+	if len(records) > 0 {
 		// 窗口取 min/max 而非 records[0]/last：镜像回放与在线事件交错时
 		// 追加序可能短暂非时间序，min/max 扫描使窗口与顺序无关（O(n)，
 		// 与 requests 查询同量级）。
-		from := state.records[0].StartedAt
+		from := records[0].StartedAt
 		to := from
-		for _, record := range state.records {
+		for _, record := range records {
 			if record.StartedAt.Before(from) {
 				from = record.StartedAt
 			}
@@ -340,16 +406,18 @@ func (p *Projector) requests(sessionID string, q RequestQuery) RequestListRespon
 		Offset:        q.Offset,
 		Requests:      []CacheRequestRecord{},
 	}
-	state := p.sessions[sessionID]
-	if state == nil {
+	states := p.viewStatesLocked(sessionID)
+	if len(states) == 0 {
 		return response
 	}
-	filtered := make([]*CacheRequestRecord, 0, len(state.records))
-	for _, record := range state.records {
-		if !matchQuery(record, q) {
-			continue
+	filtered := make([]*CacheRequestRecord, 0, 16)
+	for _, state := range states {
+		for _, record := range state.records {
+			if !matchQuery(record, q) {
+				continue
+			}
+			filtered = append(filtered, record)
 		}
-		filtered = append(filtered, record)
 	}
 	response.Total = len(filtered)
 	sort.Slice(filtered, func(i, j int) bool {
@@ -407,15 +475,21 @@ func matchQuery(record *CacheRequestRecord, q RequestQuery) bool {
 func (p *Projector) request(sessionID, llmRequestID string) (CacheRequestRecord, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	state := p.sessions[sessionID]
-	if state == nil {
-		return CacheRequestRecord{}, false
+	if state := p.sessions[sessionID]; state != nil {
+		if record, ok := state.index[llmRequestID]; ok {
+			return *record, true
+		}
 	}
-	record, ok := state.index[llmRequestID]
-	if !ok {
-		return CacheRequestRecord{}, false
+	for childID := range p.children[sessionID] {
+		state := p.sessions[childID]
+		if state == nil {
+			continue
+		}
+		if record, ok := state.index[llmRequestID]; ok {
+			return *record, true
+		}
 	}
-	return *record, true
+	return CacheRequestRecord{}, false
 }
 
 // turnSuccessfulRequests 返回 turn 内全部成功请求（登记顺序）。
@@ -459,11 +533,16 @@ func (p *Projector) requestsAfter(sessionID string, startedAt time.Time, limit i
 func (p *Projector) sessionRecordCount(sessionID string) int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	state := p.sessions[sessionID]
-	if state == nil {
-		return 0
+	count := 0
+	if state := p.sessions[sessionID]; state != nil {
+		count += len(state.records)
 	}
-	return len(state.records)
+	for childID := range p.children[sessionID] {
+		if state := p.sessions[childID]; state != nil {
+			count += len(state.records)
+		}
+	}
+	return count
 }
 
 // sortSessionRecords 按 StartedAt 升序重排会话记录：镜像回放与在线事件

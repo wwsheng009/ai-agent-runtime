@@ -4944,6 +4944,32 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 				ALTER TABLE session_runtime_state ADD COLUMN suspended_turn_id TEXT;
 			`,
 		},
+		{
+			// v23：缓存镜像的父链维度（子代理请求归集）。root_session_id 回填为
+			// session_id（历史行视为顶层，无父链来源不猜测）；索引服务
+			// "父会话视图 = 自身 + 全部后代"的回放查询（非 partial，参数化等值
+			// 查询无法让 SQLite 证明 partial 谓词）。
+			Version: 23,
+			Name:    "cache_requests_lineage",
+			UpSQL: `
+				ALTER TABLE cache_requests ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT '';
+				ALTER TABLE cache_requests ADD COLUMN root_session_id TEXT NOT NULL DEFAULT '';
+				UPDATE cache_requests SET root_session_id = session_id WHERE root_session_id = '';
+				CREATE INDEX IF NOT EXISTS idx_cache_requests_root_started
+				ON cache_requests(root_session_id, started_at_unix_nano ASC, llm_request_id ASC)
+				;
+			`,
+		},
+		{
+			// v24：把 v23 的 partial root 索引替换为非 partial（等值参数查询可用）。
+			Version: 24,
+			Name:    "cache_requests_root_index_nonpartial",
+			UpSQL: `
+				DROP INDEX IF EXISTS idx_cache_requests_root_started;
+				CREATE INDEX IF NOT EXISTS idx_cache_requests_root_started
+				ON cache_requests(root_session_id, started_at_unix_nano ASC, llm_request_id ASC);
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }

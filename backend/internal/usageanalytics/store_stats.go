@@ -233,6 +233,52 @@ func (s *Store) requestsStatsColumnsComplete() (bool, error) {
 	return true, nil
 }
 
+// rollupScopeAvailable 报告库是否具备 v9 父链列（usage_requests.root_session_id
+// 与 usage_sessions.parent_session_id）：具备时回填/对账按「根行聚合全部后代、
+// 子行聚合自身」口径；缺列（只读旧库/部分 schema）退化为旧自身口径。
+func (s *Store) rollupScopeAvailable() bool {
+	if s == nil {
+		return false
+	}
+	if hasRoot, err := s.hasColumn("usage_requests", "root_session_id"); err != nil || !hasRoot {
+		return false
+	}
+	if hasParent, err := s.hasColumn("usage_sessions", "parent_session_id"); err != nil || !hasParent {
+		return false
+	}
+	return true
+}
+
+// columnExistsTx 在事务内判定列存在性（PRAGMA table_info）。单连接池下写事务
+// 持有唯一连接，事务内不得走 s.db/hasColumn；表名/列名是包内常量，不接受外部输入。
+func columnExistsTx(tx *sql.Tx, table, column string) bool {
+	if tx == nil {
+		return false
+	}
+	rows, err := tx.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			columnTyp string
+			notNull   int
+			defaultV  sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &columnTyp, &notNull, &defaultV, &pk); err != nil {
+			return false
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
 // schemaVersion 读取 PRAGMA user_version（空库/降级返回 0）。
 func (s *Store) schemaVersion() (int, error) {
 	if s == nil || s.db == nil || s.empty {
@@ -274,10 +320,17 @@ func (s *Store) migrateStatsV3() error {
 		if err := ensureStatsColumnsTx(tx); err != nil {
 			return err
 		}
+		// v9 防御性回填（版本门控，一次性）：列存在但历史行为空（旧工具直写 /
+		// 迁移中途中断）时补齐 root=自身，保证重建与后续 root 视图查询不漏行。
+		if columnExistsTx(tx, "usage_requests", "root_session_id") {
+			if _, err := tx.Exec("UPDATE usage_requests SET root_session_id = session_id WHERE root_session_id = ''"); err != nil {
+				return fmt.Errorf("backfill usage_requests root_session_id: %w", err)
+			}
+		}
 		if _, err := tx.Exec(statsTurnKeysDDL); err != nil {
 			return fmt.Errorf("create %s: %w", statsTurnKeysTable, err)
 		}
-		if err := rebuildSessionStatsTx(tx, ""); err != nil {
+		if err := s.rebuildSessionStatsTx(tx, ""); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", statsSchemaVersion)); err != nil {
@@ -336,19 +389,39 @@ func ensureStatsColumnsTx(tx *sql.Tx) error {
 // sessionID 为空表示全库；否则仅重建该会话。
 // ---------------------------------------------------------------------------
 
-func rebuildSessionStatsTx(tx *sql.Tx, sessionID string) error {
+func (s *Store) rebuildSessionStatsTx(tx *sql.Tx, sessionID string) error {
 	if tx == nil {
 		return nil
 	}
+	trimmed := strings.TrimSpace(sessionID)
+	// 注意：本函数在写事务内执行，单连接池下不得用 s.hasColumn（走 s.db 会等待
+	// 事务持有的唯一连接而死锁）；列存在性用事务内 PRAGMA 判定。
+	rollup := s != nil &&
+		columnExistsTx(tx, "usage_requests", "root_session_id") &&
+		columnExistsTx(tx, "usage_sessions", "parent_session_id")
+	// 防御性回填：历史行/外部直写的 root 为空时按"自身即根"补齐，否则重建的
+	// root 口径聚合会漏掉这些行（与迁移期回填同语义；只更新空值行）。
+	if rollup {
+		if trimmed == "" {
+			if _, err := tx.Exec("UPDATE usage_requests SET root_session_id = session_id WHERE root_session_id = ''"); err != nil {
+				return fmt.Errorf("backfill root_session_id: %w", err)
+			}
+		} else if _, err := tx.Exec(
+			"UPDATE usage_requests SET root_session_id = session_id WHERE root_session_id = '' AND (session_id = ? OR parent_session_id = ?)",
+			trimmed, trimmed); err != nil {
+			return fmt.Errorf("backfill root_session_id: %w", err)
+		}
+	}
 	scope := ""
 	args := []interface{}{}
-	if trimmed := strings.TrimSpace(sessionID); trimmed != "" {
+	if trimmed != "" {
 		scope = " WHERE session_id = ?"
 		args = append(args, trimmed)
 	}
 	if _, err := tx.Exec("DELETE FROM "+statsTurnKeysTable+scope, args...); err != nil {
 		return fmt.Errorf("reset %s: %w", statsTurnKeysTable, err)
 	}
+	// 自身作用域的 turn 键（每个会话行 = 自身请求的去重键）。
 	insertKeys := `INSERT OR IGNORE INTO ` + statsTurnKeysTable + `(session_id, turn_key, failed)
 SELECT session_id, ` + statsTurnKeyExpr + `, MAX(CASE WHEN success = 0 THEN 1 ELSE 0 END)
 FROM usage_requests` + scope + `
@@ -356,24 +429,45 @@ GROUP BY session_id, ` + statsTurnKeyExpr
 	if _, err := tx.Exec(insertKeys, args...); err != nil {
 		return fmt.Errorf("rebuild %s: %w", statsTurnKeysTable, err)
 	}
+	// 根作用域的 turn 键（schema v9）：后代请求按 root 归集到根会话行。
+	if rollup {
+		rootScope := " WHERE root_session_id <> '' AND root_session_id <> session_id"
+		rootArgs := []interface{}{}
+		if trimmed != "" {
+			rootScope += " AND root_session_id = ?"
+			rootArgs = append(rootArgs, trimmed)
+		}
+		rootKeys := `INSERT OR IGNORE INTO ` + statsTurnKeysTable + `(session_id, turn_key, failed)
+SELECT root_session_id, ` + statsTurnKeyExpr + `, MAX(CASE WHEN success = 0 THEN 1 ELSE 0 END)
+FROM usage_requests` + rootScope + `
+GROUP BY root_session_id, ` + statsTurnKeyExpr
+		if _, err := tx.Exec(rootKeys, rootArgs...); err != nil {
+			return fmt.Errorf("rebuild %s root scope: %w", statsTurnKeysTable, err)
+		}
+	}
+	// 计数列作用域谓词：v9 根行聚合全部后代、子行聚合自身；旧库退化为自身口径。
+	scopePredicate := "r.session_id = usage_sessions.session_id"
+	if rollup {
+		scopePredicate = "(CASE WHEN usage_sessions.parent_session_id <> '' THEN r.session_id ELSE r.root_session_id END) = usage_sessions.session_id"
+	}
 	update := `UPDATE usage_sessions SET
-  c_total_requests      = COALESCE((SELECT COUNT(*) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_llm_successes       = COALESCE((SELECT SUM(CASE WHEN r.success = 1 THEN 1 ELSE 0 END) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_llm_errors          = COALESCE((SELECT SUM(CASE WHEN r.success = 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_requests_with_usage = COALESCE((SELECT SUM(CASE WHEN r.usage_available = 1 THEN 1 ELSE 0 END) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_total_tokens        = COALESCE((SELECT SUM(r.total_tokens) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_prompt_tokens       = COALESCE((SELECT SUM(r.prompt_tokens) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_completion_tokens   = COALESCE((SELECT SUM(r.completion_tokens) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_cached_tokens       = COALESCE((SELECT SUM(r.cache_read_tokens) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_reasoning_tokens    = COALESCE((SELECT SUM(r.reasoning_tokens) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_total_duration_ms   = COALESCE((SELECT SUM(r.duration_ms) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_duration_samples    = COALESCE((SELECT SUM(CASE WHEN r.duration_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_total_first_token_ms = COALESCE((SELECT SUM(r.first_token_ms) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_first_token_samples  = COALESCE((SELECT SUM(CASE WHEN r.first_token_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
+  c_total_requests      = COALESCE((SELECT COUNT(*) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_llm_successes       = COALESCE((SELECT SUM(CASE WHEN r.success = 1 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_llm_errors          = COALESCE((SELECT SUM(CASE WHEN r.success = 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_requests_with_usage = COALESCE((SELECT SUM(CASE WHEN r.usage_available = 1 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_total_tokens        = COALESCE((SELECT SUM(r.total_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_prompt_tokens       = COALESCE((SELECT SUM(r.prompt_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_completion_tokens   = COALESCE((SELECT SUM(r.completion_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_cached_tokens       = COALESCE((SELECT SUM(r.cache_read_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_reasoning_tokens    = COALESCE((SELECT SUM(r.reasoning_tokens) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_total_duration_ms   = COALESCE((SELECT SUM(r.duration_ms) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_duration_samples    = COALESCE((SELECT SUM(CASE WHEN r.duration_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_total_first_token_ms = COALESCE((SELECT SUM(r.first_token_ms) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_first_token_samples  = COALESCE((SELECT SUM(CASE WHEN r.first_token_ms <> 0 THEN 1 ELSE 0 END) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
   c_turn_count          = (SELECT COUNT(*) FROM ` + statsTurnKeysTable + ` k WHERE k.session_id = usage_sessions.session_id),
   c_failed_turns        = (SELECT COUNT(*) FROM ` + statsTurnKeysTable + ` k WHERE k.session_id = usage_sessions.session_id AND k.failed = 1),
-  c_first_started_at    = COALESCE((SELECT MIN(NULLIF(r.started_at_unix_nano, 0)) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0),
-  c_last_started_at     = COALESCE((SELECT MAX(r.started_at_unix_nano) FROM usage_requests r WHERE r.session_id = usage_sessions.session_id), 0)`
+  c_first_started_at    = COALESCE((SELECT MIN(NULLIF(r.started_at_unix_nano, 0)) FROM usage_requests r WHERE ` + scopePredicate + `), 0),
+  c_last_started_at     = COALESCE((SELECT MAX(r.started_at_unix_nano) FROM usage_requests r WHERE ` + scopePredicate + `), 0)`
 	if scope != "" {
 		update += scope
 	}
@@ -394,7 +488,7 @@ func (s *Store) RebuildSessionStats(sessionID string) error {
 		return fmt.Errorf("rebuild session stats: analytics schema v%d is not ready", statsSchemaVersion)
 	}
 	return s.withWriteTx(func(tx *sql.Tx) error {
-		return rebuildSessionStatsTx(tx, trimmed)
+		return s.rebuildSessionStatsTx(tx, trimmed)
 	})
 }
 
@@ -404,7 +498,7 @@ func (s *Store) RebuildAllSessionStats() error {
 		return fmt.Errorf("rebuild session stats: analytics schema v%d is not ready", statsSchemaVersion)
 	}
 	return s.withWriteTx(func(tx *sql.Tx) error {
-		return rebuildSessionStatsTx(tx, "")
+		return s.rebuildSessionStatsTx(tx, "")
 	})
 }
 

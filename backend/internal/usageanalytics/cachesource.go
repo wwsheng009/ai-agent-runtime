@@ -3,6 +3,7 @@ package usageanalytics
 import (
 	"database/sql"
 	"strings"
+	"sync"
 	"time"
 
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
@@ -24,6 +25,10 @@ type CacheSource struct {
 	maxRequests  int
 	supportsSSE  bool
 	capabilities cacheanalytics.Capabilities
+	// scopeOnce/hasRootColumn：usage_requests.root_session_id 能力探测缓存
+	// （父会话视图展开后代用；旧库缺列时退化为自身口径）。
+	scopeOnce     sync.Once
+	hasRootColumn bool
 }
 
 // NewCacheSource 构建数据库缓存数据源；store 为 nil 时返回 nil。
@@ -50,6 +55,28 @@ func NewCacheSource(store *Store, history cacheanalytics.HistoryLookup, supports
 		source.capabilities.SupportedEvents = []string{cacheanalytics.EventCacheRequestFinished}
 	}
 	return source
+}
+
+// requestScope 返回请求归属谓词与参数（schema v9）：父会话视图 = 自身 + 全部
+// 后代（session_id = ? OR root_session_id = ?）；子会话与旧库 = 自身。谓词列名
+// 是包内常量，不接受外部输入。
+func (s *CacheSource) requestScope(sessionID string) (string, []interface{}) {
+	if s.rootColumnAvailable() {
+		return "(session_id = ? OR root_session_id = ?)", []interface{}{sessionID, sessionID}
+	}
+	return "session_id = ?", []interface{}{sessionID}
+}
+
+// rootColumnAvailable 报告 usage_requests.root_session_id 是否存在（探测缓存）。
+func (s *CacheSource) rootColumnAvailable() bool {
+	if s == nil || s.store == nil {
+		return false
+	}
+	s.scopeOnce.Do(func() {
+		has, err := s.store.hasColumn("usage_requests", "root_session_id")
+		s.hasRootColumn = err == nil && has
+	})
+	return s.hasRootColumn
 }
 
 // Capabilities 报告数据源能力（持久化库：无每会话上限）。
@@ -98,6 +125,7 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
 			"WHEN uncached_input_tokens + cache_read_tokens > prompt_tokens THEN uncached_input_tokens + cache_read_tokens " +
 			"ELSE prompt_tokens END) ELSE 0 END), 0)"
 	}
+	scope, scopeArgs := s.requestScope(sessionID)
 	query := `SELECT
   COUNT(*),
   COALESCE(SUM(usage_available), 0),
@@ -122,9 +150,9 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
   COALESCE(SUM(CASE WHEN duration_ms <> 0 THEN 1 ELSE 0 END), 0),
   ` + firstTokenAvgExpr + `,
   ` + firstTokenSampleExpr + `
-FROM usage_requests WHERE session_id = ?`
+FROM usage_requests WHERE ` + scope
 
-	rows, ok, err := s.store.query(query, sessionID)
+	rows, ok, err := s.store.query(query, scopeArgs...)
 	if err != nil {
 		return overview, cacheanalytics.ErrInternal
 	}
@@ -167,6 +195,11 @@ FROM usage_requests WHERE session_id = ?`
 	if err := rows.Err(); err != nil {
 		return overview, cacheanalytics.ErrInternal
 	}
+	// 单连接池：主结果集必须先关闭，下面的子会话计数查询才能拿到连接
+	//（defer rows.Close 要到函数返回才执行）。
+	if err := rows.Close(); err != nil {
+		return overview, cacheanalytics.ErrInternal
+	}
 
 	overview.RequestsTotal = total
 	overview.RequestsWithUsage = withUsage
@@ -205,6 +238,18 @@ FROM usage_requests WHERE session_id = ?`
 	overview.AverageDurationMS = avgDurationMS
 	overview.FirstTokenSamples = firstTokenSamples
 	overview.AverageFirstTokenMS = avgFirstTokenMS
+	// 子会话事实（additive）：父会话视图中的后代请求数与子会话数。走
+	// idx_usage_requests_root_started 部分索引，只扫该根的子树。
+	if s.hasRootColumn {
+		if childRows, ok, err := s.store.query(
+			`SELECT COUNT(DISTINCT session_id), COUNT(*) FROM usage_requests WHERE root_session_id = ? AND session_id <> ?`,
+			sessionID, sessionID); err == nil && ok {
+			defer childRows.Close()
+			if childRows.Next() {
+				_ = childRows.Scan(&overview.ChildSessionCount, &overview.ChildRequestsTotal)
+			}
+		}
+	}
 	coverage := cacheanalytics.CoverageInfo{Partial: false, PartialReasons: []string{}}
 	if total > 0 {
 		usageRate := float64(withUsage) / float64(total)
@@ -235,8 +280,7 @@ func (s *CacheSource) Requests(sessionID string, q cacheanalytics.RequestQuery) 
 		return response, cacheanalytics.ErrSessionNotFound
 	}
 
-	where := "session_id = ?"
-	args := []interface{}{sessionID}
+	where, args := s.requestScope(sessionID)
 	if traceID := strings.TrimSpace(q.TraceID); traceID != "" {
 		where += " AND trace_id = ?"
 		args = append(args, traceID)
@@ -320,9 +364,11 @@ func (s *CacheSource) Request(sessionID, llmRequestID string) (cacheanalytics.Ca
 	if s == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(llmRequestID) == "" {
 		return cacheanalytics.CacheRequestRecord{}, cacheanalytics.ErrInvalidRequest
 	}
+	scope, scopeArgs := s.requestScope(sessionID)
+	requestArgs := append([]interface{}{llmRequestID}, scopeArgs...)
 	rows, ok, err := s.store.query(
-		"SELECT record_json FROM usage_requests WHERE session_id = ? AND llm_request_id = ? LIMIT 1",
-		sessionID, llmRequestID)
+		"SELECT record_json FROM usage_requests WHERE llm_request_id = ? AND "+scope+" LIMIT 1",
+		requestArgs...)
 	if err != nil {
 		return cacheanalytics.CacheRequestRecord{}, cacheanalytics.ErrInternal
 	}
@@ -417,9 +463,13 @@ func (s *CacheSource) MessageTrace(sessionID, messageID string) (cacheanalytics.
 
 // sessionMissing 会话在分析库与历史存储中都不存在。
 func (s *CacheSource) sessionMissing(sessionID string) (bool, error) {
-	rows, ok, err := s.store.query(
-		"SELECT (SELECT COUNT(*) FROM usage_sessions WHERE session_id = ?) + (SELECT COUNT(*) FROM usage_requests WHERE session_id = ?)",
-		sessionID, sessionID)
+	query := "SELECT (SELECT COUNT(*) FROM usage_sessions WHERE session_id = ?) + (SELECT COUNT(*) FROM usage_requests WHERE session_id = ?)"
+	args := []interface{}{sessionID, sessionID}
+	if s.rootColumnAvailable() {
+		query += " + (SELECT COUNT(*) FROM usage_requests WHERE root_session_id = ? AND session_id <> ?)"
+		args = append(args, sessionID, sessionID)
+	}
+	rows, ok, err := s.store.query(query, args...)
 	if err != nil {
 		return false, cacheanalytics.ErrInternal
 	}

@@ -860,3 +860,46 @@ sqlite 持久化回放、离线 `LogFileSource`（chataloganalytics 集成）、
 - **无契约破坏**：`persisted` 为新增可选字段，旧前端忽略之；事件、查询、SSE 契约（§4）均未变更。
 - **次序调整无行为差异**：publish 与 persist 之间无数据依赖（publish 只读 record，persist 序列化同一 record），仅时序变化；投影（projector.append）仍在最前，查询可见性不受影响。
 - **锁序不变**：仍为 `loadedMu → projector.mu` 单向，persist 在锁外执行（SaveRequest 自带 store 内部锁）。
+
+## 17. 父会话统计涵盖子代理（schema v9，2026-10-09）
+
+> 背景：会话 A 调用子代理 A-1/A-2 时，子代理 LLM 请求此前只记在合成子会话 ID
+> （`subagent_<taskID>_<uuid>` 或宿主子会话）名下，缓存页签与 /usage 会话统计按
+> 精确 `session_id` 过滤，父会话统计看不到这些请求。
+
+### 17.1 数据模型（additive）
+
+- `usage_requests` 增 `parent_session_id` / `root_session_id` / `subagent_id`（schema v9）；
+  新 partial index：`idx_usage_requests_root_started(root_session_id, started_at_unix_nano DESC)`
+  与 `idx_usage_requests_parent(parent_session_id) WHERE parent_session_id <> ''`。
+- `usage_sessions` 增 `parent_session_id` / `subagent_id` + `idx_usage_sessions_parent`。
+- `session_runtime.sqlite` 镜像 `cache_requests` 增 `parent_session_id` / `root_session_id`
+  （migration v23 + root partial index）。
+- `CacheRequestRecord` / `CacheOverview` / `StepUsage` / `TurnUsage` / `SessionRollup`
+  增父链字段；`CacheOverview` 增 `child_session_count` / `child_requests_total`（契约 v1 additive）。
+
+### 17.2 口径
+
+- **根会话行** `c_*` = 自身 + 全部后代请求；**子会话行** = 自身请求。列表/汇总默认
+  `WHERE parent_session_id = ''`（`Query.IncludeChildSessions` 可展开），全局不重复计数。
+- 缓存端点 `overview/requests/request` 按 `session_id = ? OR root_session_id = ?` 展开
+  （子会话自身查询仍只返回自身）；LiveSource 内存投影按 root 索引合并后代。
+- 明细（/usage turns/steps、缓存请求表、micro web 缓存页签）显示「子代理」徽标 +
+  子会话短 ID（tooltip 全 ID + subagent id）。
+
+### 17.3 采集（父链来源优先级）
+
+1. 调度器路径：`loopRunOptions.ParentSessionID/SubagentID` → `llm.request.*` payload
+   （`loop.go` think 注入；`scheduler.go` 派发时传入），root 由采集侧按父链回溯；
+2. 宿主路径（spawn_agent / spawn_team）：`SessionLineageLookup` 读会话 context
+   （`agent_parent_session_id` / `agent_root_session_id` / `agent_id`），runtime server
+   与 aicli 本地同源实现；
+3. `subagent.started/completed` 学习映射兜底（含解析结果记忆，重复终态/丢帧回放
+   不会把子代理请求从根会话回退）。
+
+### 17.4 性能
+
+- 列表/概览仍单表读 `usage_sessions` 预聚合列（不扫 `usage_requests`，保住
+  `query_stats_plan_test.go` 约束）；父会话明细/缓存展开走 root partial index。
+- 写入路径单事务「自身 + 根」双目标 delta（去重；覆盖写/换会话按目标差分回退）。
+- drift 对账按根/子作用域分支；`rebuild-stats` / 迁移含空 root 防御性回填（root=自身）。

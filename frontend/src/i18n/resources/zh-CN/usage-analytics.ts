@@ -16,6 +16,8 @@ export const zhUsageAnalytics = {
     metrics: {
       requests: "请求总数",
       withUsage: "含 usage {{count}} 条",
+      childRequests: "子会话请求",
+      childSessions: "含 {{count}} 个子会话",
       hitRatio: "缓存命中率",
       writeRatio: "写入率 {{value}}",
       cacheRead: "缓存读取 token",
@@ -43,6 +45,7 @@ export const zhUsageAnalytics = {
     columns: {
       time: "时间",
       trace: "Trace / 轮次",
+      childSession: "子会话",
       providerModel: "Provider / Model",
       message: "消息 ID",
       tokens: "输入 / 输出",
@@ -55,6 +58,7 @@ export const zhUsageAnalytics = {
       firstToken: "首字",
       outcome: "结果",
     },
+    childSessionBadge: "子代理",
     trace: {
       title: "消息缓存追溯",
       close: "关闭",
@@ -340,6 +344,7 @@ export const zhUsageAnalytics = {
   },
   detail: {
     title: "会话详情",
+    subagentBadge: "子代理会话",
     selectPrompt: "选择一个会话查看步骤级用量。",
     tokens: "会话 Token",
     llmSteps: "LLM 步骤",
@@ -400,6 +405,7 @@ export const zhUsageAnalytics = {
     recentTitle: "最近轮次",
     subtitle: "共 {{count}} 个用户轮次",
     empty: "该会话没有可用的轮次事实。",
+    subagentBadge: "子代理",
     columns: {
       turn: "轮次",
       time: "时间 / 耗时",

@@ -39,7 +39,7 @@ WHERE started_at_unix_nano > 0 AND started_at_unix_nano < ?`, cutoff.UnixNano())
 		if err != nil {
 			return fmt.Errorf("prune usage_requests rows: %w", err)
 		}
-		return rebuildSessionStatsTx(tx, "")
+		return s.rebuildSessionStatsTx(tx, "")
 	}); err != nil {
 		return 0, err
 	}

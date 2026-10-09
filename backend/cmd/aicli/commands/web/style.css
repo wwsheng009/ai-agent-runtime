@@ -2189,6 +2189,8 @@ body.sidebar-collapsed #sidebar {
 .cache-badge.badge-zero { color: var(--reasoningFg, #b8860b); border-color: var(--reasoningFg, #b8860b); background: transparent; }
 .cache-badge.badge-error { color: var(--red, #e5534b); border-color: var(--red, #e5534b); background: var(--redBg); }
 .cache-badge.badge-none { color: var(--fg4); }
+.cache-child-id { font-family: var(--mono, monospace); font-size: 11px; color: var(--fg3, var(--fg4)); }
+.cache-child-none { color: var(--fg4); }
 .cache-hint { margin-top: 6px; font-size: 11px; color: var(--fg4); }
 .cache-empty { padding: 10px 2px; font-size: 12px; color: var(--fg4); font-style: italic; }
 .cache-detail {

@@ -85,6 +85,10 @@ type Store struct {
 	// （可写迁移成功后直接置位；只读库按 user_version + 列集合惰性探测）。
 	statsOnce      sync.Once
 	statsAvailable bool
+	// parentColumnOnce/parentColumnExists：usage_sessions.parent_session_id
+	// 能力探测缓存（列表默认过滤子代理子会话用；只读旧库缺列时退化为不过滤）。
+	parentColumnOnce   sync.Once
+	parentColumnExists bool
 	// statsGen 写入代数：请求终态落库后自增，供服务端查询缓存惰性失效。
 	statsGen atomic.Uint64
 }
@@ -291,6 +295,9 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		`CREATE TABLE IF NOT EXISTS usage_requests (
   llm_request_id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
+  parent_session_id TEXT NOT NULL DEFAULT '',
+  root_session_id TEXT NOT NULL DEFAULT '',
+  subagent_id TEXT NOT NULL DEFAULT '',
   trace_id TEXT NOT NULL DEFAULT '',
   turn_id TEXT NOT NULL DEFAULT '',
   step INTEGER NOT NULL DEFAULT 0,
@@ -321,6 +328,8 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_requests_trace ON usage_requests(session_id, trace_id, step)`,
 		`CREATE TABLE IF NOT EXISTS usage_sessions (
   session_id TEXT PRIMARY KEY,
+  parent_session_id TEXT NOT NULL DEFAULT '',
+  subagent_id TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '',
   project_path TEXT NOT NULL DEFAULT '',
   working_directory TEXT NOT NULL DEFAULT '',
@@ -667,6 +676,55 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		} else if !hasBatch {
 			if err := s.migrateSubagentsBatchID(); err != nil {
 				return err
+			}
+		}
+	}
+	// v9：父链维度（子代理请求归集）。usage_requests 增 parent/root/subagent 列，
+	// usage_sessions 增 parent/subagent 列；历史行 root 回填为 session_id（顶层
+	// 口径；历史子会话无父链来源，不猜测）。只读库不改库，读路径按列存在性退化
+	// （见 cachesource.go / query.go 的 root 表达式分支）。
+	if !s.readOnly {
+		if hasParent, err := s.hasColumn("usage_requests", "parent_session_id"); err != nil {
+			return err
+		} else if !hasParent {
+			for _, column := range []string{"parent_session_id", "root_session_id", "subagent_id"} {
+				if _, err := s.db.Exec("ALTER TABLE usage_requests ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''"); err != nil {
+					return fmt.Errorf("migrate usage analytics db: %w", err)
+				}
+			}
+			// 历史行回填 root=session_id：让"父会话视图 = 自身"在新口径下仍然成立。
+			if _, err := s.db.Exec("UPDATE usage_requests SET root_session_id = session_id WHERE root_session_id = ''"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+		if hasSessionParent, err := s.hasColumn("usage_sessions", "parent_session_id"); err != nil {
+			return err
+		} else if !hasSessionParent {
+			for _, column := range []string{"parent_session_id", "subagent_id"} {
+				if _, err := s.db.Exec("ALTER TABLE usage_sessions ADD COLUMN " + column + " TEXT NOT NULL DEFAULT ''"); err != nil {
+					return fmt.Errorf("migrate usage analytics db: %w", err)
+				}
+			}
+		}
+		// 幂等修复（2026-10-09 实测）：父会话在子代理在途期间替子代理代跑的请求
+		// 带 parent_session_id=自身/subagent_id=子会话；早期版本把请求级归因写进了
+		// 会话行，导致根会话被列表过滤（s.parent_session_id = ''）漏掉、会话视图的
+		// rollup 口径退化为"仅自身"。自指父值按 schema 语义非法（顶层=空），抹平。
+		if _, err := s.db.Exec(`UPDATE usage_sessions SET parent_session_id = '', subagent_id = '' WHERE parent_session_id <> '' AND parent_session_id = session_id`); err != nil {
+			return fmt.Errorf("migrate usage analytics db: %w", err)
+		}
+		// 索引刻意不用 partial：查询是参数化等值（root_session_id = ?），SQLite
+		// 在 prepare 期无法证明 partial 谓词（<> ''），partial 索引会被规划器忽略
+		// （EXPLAIN 实测），root 展开会退化为全表扫描。先 DROP 兼容早期 partial 版本。
+		for _, statement := range []string{
+			`DROP INDEX IF EXISTS idx_usage_requests_root_started`,
+			`CREATE INDEX IF NOT EXISTS idx_usage_requests_root_started ON usage_requests(root_session_id, started_at_unix_nano DESC, llm_request_id DESC)`,
+			`DROP INDEX IF EXISTS idx_usage_requests_parent`,
+			`DROP INDEX IF EXISTS idx_usage_sessions_parent`,
+			`CREATE INDEX IF NOT EXISTS idx_usage_sessions_parent ON usage_sessions(parent_session_id)`,
+		} {
+			if _, err := s.db.Exec(statement); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
 			}
 		}
 	}

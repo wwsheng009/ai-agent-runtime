@@ -15,6 +15,9 @@ type Options struct {
 	Config
 	// Lookup 会话元数据补齐来源（best-effort，可为 nil）。
 	Lookup SessionMetaLookup
+	// Lineage 会话父链来源（best-effort，可为 nil）：子代理会话的
+	// parent/root/subagent 归属，供父会话统计 rollup 使用。
+	Lineage SessionLineageLookup
 	// History 消息/turn 反查来源，供缓存端点 message trace 使用（可为 nil）。
 	History cacheanalytics.HistoryLookup
 	// SupportsSSE 覆盖缓存能力位；默认 true。
@@ -46,7 +49,7 @@ func Attach(bus *runtimeevents.Bus, opts Options) (*Service, error) {
 	}
 	service := &Service{store: store, cache: newAnalyticsQueryCache(opts.Now)}
 	if bus != nil {
-		service.collector = newCollector(store, opts.Lookup, opts.Now)
+		service.collector = newCollector(store, opts.Lookup, opts.Now, opts.Lineage)
 		service.collector.subscribe(bus)
 	}
 	service.source = NewCacheSource(store, opts.History, opts.SupportsSSE)

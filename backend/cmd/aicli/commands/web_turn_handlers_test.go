@@ -9,6 +9,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // newTurnRecorderTestSession 构造带真实 EventBus 的测试会话，并清理注册表。
@@ -434,5 +435,55 @@ func TestChatWebTurnRecorderSynthesizesMissingStart(t *testing.T) {
 	}
 	if got.UsageScope != chatWebTurnUsageScopeTurn || got.UsageSource != "provider_reported" {
 		t.Fatalf("usage scope/source = %q/%q", got.UsageScope, got.UsageSource)
+	}
+}
+
+// TestChatWebTurnRecorderBackfillsPreviewFromSession 锁定预览回填：assistant_message
+// 事件缺失（晚订阅/事件丢失）时，只要会话历史在本轮内新增了 assistant 消息，
+// session_end 收尾必须把预览补上（E2E 首轮记录 assistant_preview 非空的契约）。
+func TestChatWebTurnRecorderBackfillsPreviewFromSession(t *testing.T) {
+	session := &ChatSession{}
+	recorder := &chatWebTurnRecorder{session: session, records: map[string]*chatWebTurnRecord{}}
+	recorder.observe(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_1"},
+	})
+	// assistant_message 事件丢失：回复只落进会话历史。
+	session.Messages = append(session.Messages, runtimetypes.Message{Role: "assistant", Content: "冷启动回填"})
+	recorder.observe(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_1", "success": true, "steps": 1},
+	})
+
+	record := recorder.lookup("turn_1")
+	if record == nil {
+		t.Fatal("turn_1 not recorded")
+	}
+	if record.AssistantPreview != "冷启动回填" || record.AssistantChars != 5 {
+		t.Fatalf("preview = %q chars = %d, want 回填内容/5", record.AssistantPreview, record.AssistantChars)
+	}
+}
+
+// TestChatWebTurnRecorderBackfillDoesNotCrossTurns 锁定回填的防串轮基线：兜底
+// 记录（未观测到 session_start）以订阅时刻的 assistant 条数为基线，本轮没有
+// 新增回复时不得把上一轮回复挂到本轮。
+func TestChatWebTurnRecorderBackfillDoesNotCrossTurns(t *testing.T) {
+	session := &ChatSession{Messages: []runtimetypes.Message{{Role: "assistant", Content: "上一轮回复"}}}
+	recorder := &chatWebTurnRecorder{
+		session:           session,
+		records:           map[string]*chatWebTurnRecord{},
+		assistantBaseline: chatWebInvokeAssistantMessageCount(session),
+	}
+	recorder.observe(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_cold", "success": true, "steps": 1},
+	})
+
+	record := recorder.lookup("turn_cold")
+	if record == nil {
+		t.Fatal("turn_cold not recorded")
+	}
+	if record.AssistantPreview != "" || record.AssistantChars != 0 {
+		t.Fatalf("不得把上一轮回复串到本轮: %+v", record)
 	}
 }

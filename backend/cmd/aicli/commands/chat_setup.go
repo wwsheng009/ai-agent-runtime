@@ -596,6 +596,11 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 	}
 	session.LocalRuntimeHost = localRuntimeHost
 	session.ActorFirstReady = true
+	// turn 记录器在能力面挂载点同步安装（幂等）：不能只靠 invoke 等待循环的
+	// 轮询安装——首轮 host 挂载与 session_start 可能落在两次轮询之间，记录器
+	// 晚订阅会丢掉 session_start/assistant_message，/web/api/turn 的首轮记录
+	// 只能走 session_end 兜底（无 started_at/assistant_preview，实测 E2E 失败）。
+	ensureChatWebTurnRecorder(session)
 	// LSP 观测接线：池事件 → 会话 EventBus（lsp.*，live-only）。runtime host
 	// 在工具管理器构造之后才建立，因此走可后置注入的 SetLSPObserver；构造期
 	// 已挂载的池也会从这一刻起把后续事件转发出去（方案 §3.2）。

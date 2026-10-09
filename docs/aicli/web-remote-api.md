@@ -564,6 +564,10 @@ curl -N -X POST http://127.0.0.1:61772/web/api/invoke \
 - SSE 与 invoke 均复用当前活动会话；无活动会话时返回 409 / `available=false`。
 - turn 记录只保留最近 128 条、30 分钟；服务重启后历史记录清空（持久用量查询请用
   `/web/api/analysis/*` 与 `/web/api/cache/*`）。
+- `/web/api/cache/*` 自 schema v9 起按「父会话 = 自身 + 全部子代理子会话」口径返回：
+  `overview` 新增 `child_session_count` / `child_requests_total`，请求记录新增
+  `parent_session_id` / `root_session_id` / `subagent_id`（additive，旧前端忽略）；
+  直接查询子会话 ID 时仍只返回其自身请求；缓存页签明细表有「子会话」列标注子代理请求。
 
 ### 8.1 远程调用者的能力边界（安全模型）
 
