@@ -189,6 +189,14 @@
   - 验证：gofmt/build/vet 绿；聚焦绿；commands 全量仅剩已登记 flake（隔离 ×2 绿）；
   - **D3 三批次（A/B/C）收口**（方案：`aicli-d3-screen-capability-convergence-plan-20261009.md`）。
 
+- [x] **D3 Batch D：会话级 surface 可用单点**（2026-10-09，`00127575`）。
+  - `chatSessionSurfaceUsable` 单点；24 处迁移（2 个既有命名 helper 收编 + 21 处内联
+    副本 + 1 处 nil 守卫块）；`chatSurfaceScreenGate` 重构复用本单点；
+  - 机械门禁 `TestChatSessionSurfaceEnabledReadsFrozen`（`X.Surface.Enabled()`
+    生产直读冻结为 1 处 = 单点本体）；
+  - 验证：gofmt/build/vet 绿；三冻结门禁 + 8 族聚焦绿；commands 全量仅剩已登记 flake
+    （隔离 ×2 绿）。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**

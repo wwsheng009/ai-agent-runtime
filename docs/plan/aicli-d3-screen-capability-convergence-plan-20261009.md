@@ -38,6 +38,13 @@
 - 语义是「统一渲染面正在承载主输出」，收敛需先定义输出面单点（见 §2 D3），
   且与 `surfaceOutputActiveLocked` 等既有内部判定对齐后再动，**不锁本方案判据**。
 
+### D 族——会话级 surface 可用（`X.Surface.Enabled()`，24 处，Batch D 收编）
+
+`session.Surface != nil && session.Surface.Enabled()` 谓词的会话级判定面：
+composer（`chatComposerUsesFixedSurface`）、prompt overlay（`surfaceEnabled`）、
+输入队列/补全/历史/transcript/调试展示/登录 picker 等——含 2 个既有命名 helper、
+21 处内联副本与 1 处 nil 守卫块（`shouldEnableSlashCompletion`）。
+
 ## 2. 设计
 
 ### D1 副屏能力单点（A 族，已落地）
@@ -52,21 +59,37 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
 **机械门禁**（`chat_screen_gate_freeze_test.go`）：`OwnedViewport()` 生产直读面冻结为
 **全仓 1 处**（helper 本体）；内联组合形态零容忍；白名单按「文件 :: 函数」精确匹配。
 
-### D2 租约/繁忙单点（B 族，Batch B 待办）
+### D2 租约/繁忙单点（B 族，**已执行**：`124967ca`/`bda38888`）
 
-- 新增 `chatSurfaceLeased(session) bool`（`Surface != nil && Surface.LeaseActive()`）；
-- `chat_screen_framework.go:305` 与 `chat_busy_input.go:19` 迁移；
-- 门禁扩展：`LeaseActive()` 生产直读冻结为 {helper, 迁移后调用点} 白名单。
-- **协调**：`chat_busy_input.go` 当前处于并发 WIP（web/resume 工作流），迁移须等其
-  工作区收口后执行（或经 cherry-pick 冲突预检）。
+- `chatSurfaceLeased(session) bool` 已落地（`chat_screen_capability.go`）；
+- `chat_screen_framework.go`（busy 标签）与 `chat_busy_input.go`
+  （`chatBusyScreenActiveForSession`）已迁移；
+- 门禁扩展：`LeaseActive()` 生产直读冻结为 2 单点白名单
+  （`chatSurfaceScreenGate` / `chatSurfaceLeased`）；
+- 注：迁移于 web/resume 工作流收口（主仓 WIP=0）后执行，无冲突。
 
-### D3 输出面活跃单点（C 族，Batch C 待办，先设计后迁移）
+### D3 输出面活跃单点（C 族，**已执行**：`7211cf70`/`f9f178d6` + `bda38888` 收尾）
 
-- 先输出语义清单（12+ 散点逐点归类：writer 归属 / prompt 可见 / 几何刷新 / 调试），
-  确认哪些是同一谓词、哪些必须保留独立读；
-- 单点候选：`chatSurfaceOutputActive(session)`（会话级「统一渲染面承载主输出」）；
-- 逐点迁移 + 机械门禁（`Surface.Enabled()` 白名单收敛）；
-- 本批不锁本方案判据（若语义无法单点化，保留并登记）。
+- 语义清单结论：coordinator 侧链式裸读（`c.surface.Enabled()`）与既有单点
+  `surfaceOutputActiveLocked()`（19 处引用）完全同义 → **不新增** `chatSurfaceOutputActive`，
+  直接收敛至既有单点（避免同义双点）；
+- 迁移：coordinator 链式裸读 8 处全部收敛（writer 归属 / viewport 分叉 / 探针块 /
+  行同步 / prompt 谓词 / `applyDrawRequested`）；
+- 机械门禁：`TestChatSurfaceOutputEnabledReadsFrozen`（链式 `X.surface.Enabled()`
+  白名单 = 仅单点本体）；
+- 非链式 `Enabled()` 散点（其他接收者/语义，如 SetSurface 局部参数）不在本单点
+  语义内，按 §1 登记保留。
+
+### D4 会话级 surface 可用单点（D 族，**已执行**：`00127575`）
+
+- `chatSessionSurfaceUsable(session) bool` 单点（`chat_screen_capability.go`）；
+- 24 处迁移：2 个既有命名 helper 收编（`chatComposerUsesFixedSurface` /
+  `(o chatPromptOverlay) surfaceEnabled` 变为薄包装）+ 21 处内联副本 + 1 处 nil
+  守卫块；`chatSurfaceScreenGate` 重构为复用本单点（启用判定不再直读 `Enabled`）；
+- 机械门禁：`TestChatSessionSurfaceEnabledReadsFrozen`（`X.Surface.Enabled()` 生产
+  直读冻结为 1 处 = 单点本体）；
+- 语义保持：各形态（nil 守卫 / trackPrompt 布尔 / 调试字段 / 正反向 guard）逐点
+  等价替换；原隐式不变量点（无 nil 检查）迁移后 nil 安全化（panic → fail-closed）。
 
 ## 3. 分批与验收
 
@@ -75,6 +98,7 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
 | Batch A | A 族 12 处 → `chatSurfaceScreenGate` + OwnedViewport 门禁 | **已执行（`8d4a4d45`/`48027017`）** |
 | Batch B | B 族 2 处 → `chatSurfaceLeased` + LeaseActive 门禁扩展 | **已执行（`124967ca`/`bda38888`）** |
 | Batch C | C 族逐点语义清单 → 输出面单点（可选/不锁判据） | **已执行（`7211cf70`/`f9f178d6` + `bda38888` 收尾）**：语义清单完成（`surfaceOutputActiveLocked` 既有单点）+ coordinator 链式裸读 8 处全部收敛（含原剩余 `chat_ui_actor.go:1378`）；`TestChatSurfaceOutputEnabledReadsFrozen` 白名单收敛为单点本体；非链式 `Enabled()` 散点（其他接收者/语义）按 §1 登记保留，不属本单点语义 |
+| Batch D | D 族（会话级可用）24 处 → `chatSessionSurfaceUsable` + 门禁 | **已执行（`00127575`）** |
 
 每批验收：目标族聚焦绿 + `go vet` + commands 全量（仅剩已登记 flake）+ gofmt 空 +
 机械门禁绿；一刀一提交，文档同步。
@@ -109,3 +133,9 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
   验证：gofmt 空 / build 绿 / vet 绿 / 聚焦绿（2.0s）/ commands 全量 183.2s 仅剩已登记
   flake（`AutoStartTeam…`/`TTY_LiveLoop_LLMRetry…` 隔离 ×2 全绿）/ 主仓复验绿。
   **D3 三批次（A/B/C）至此收口。**
+- 2026-10-09 Batch D（`00127575`，主仓同 SHA）：会话级 `X.Surface.Enabled()` 24 处
+  收敛至 `chatSessionSurfaceUsable`（含 2 命名 helper 收编 + `chatSurfaceScreenGate`
+  复用重构）+ 冻结门禁 `TestChatSessionSurfaceEnabledReadsFrozen`。
+  验证：gofmt 空 / build 绿 / vet 绿 / 三冻结门禁 + 8 族聚焦绿（3.8s）/ commands
+  全量 189.7s 仅剩已登记 flake（`TTY_LiveLoop_LLMRetry…`/`StreamingAssistantFinalTail…`
+  隔离 ×2 全绿）/ 主仓复验绿。
