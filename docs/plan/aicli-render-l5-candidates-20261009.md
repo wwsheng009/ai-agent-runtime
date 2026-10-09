@@ -101,7 +101,7 @@ Batch A/B/C 已收口（`dec13b68`/`3dca6215`）：D1/D2/D3 落地、三处启�
 [aicli-l5-2-presenter-popup-geometry-plan-20261009.md](aicli-l5-2-presenter-popup-geometry-plan-20261009.md)；
 经用户「继续」指令**提前立项**（设计先行）；Batch A（几何族：D2 门面 + 3 处迁移）启动执行。
 **执行记录（2026-10-09 续）**：Batch A（`492f3f86`/`8e85961c`）与 Batch B（`f2d1e6f0`/`93089990`）
-均完成（两族零直读机械门禁 + 隔离/集成验证）；Batch C（全量收口 + 回填）待执行。
+均完成（两族零直读机械门禁 + 隔离/集成验证）；Batch C（全量收口 + 回填）待执行（见下条收口记录）。
 **执行记录（2026-10-09 收口）**：Batch C 验证四件套通过——ui 全量 14.3s / commands 无 skip 全量
 178.4s（exit 0）/ fixture 真机 e2e 8/8 / compat 6/6；**L5-2 三批次收口**。
 **执行记录（2026-10-09 邻近族收口）**：L5-2c 立项并单批收口（prompt-editor 门面

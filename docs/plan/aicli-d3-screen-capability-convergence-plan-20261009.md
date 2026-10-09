@@ -139,3 +139,18 @@ func chatSurfaceScreenGate(session *ChatSession) bool // chat_screen_capability.
   验证：gofmt 空 / build 绿 / vet 绿 / 三冻结门禁 + 8 族聚焦绿（3.8s）/ commands
   全量 189.7s 仅剩已登记 flake（`TTY_LiveLoop_LLMRetry…`/`StreamingAssistantFinalTail…`
   隔离 ×2 全绿）/ 主仓复验绿。
+
+## 6. 残余登记（不收敛项，终审 2026-10-09）
+
+四批次后 `.Surface.` 生产直读面 74 → 26（其中 ~10 为注释/文档字符串命中），
+剩余真实读点分类：
+
+- `c.session.Surface.VisibleOutputRows()` ×3（`chat_interaction.go` 三个文档溢出
+  注解兄弟函数）——同文件小族；如需收敛建议随 L5-2b 视口门面
+  （`ActiveBandViewportPort`）一并扩展（未在既定判据内）；
+- `/debug` 观测族（`ComposedFrameForTest` / `PaintTraceDebugString` /
+  `RowPlanDebugString` / `SetPaintTraceEnabled` / `FrameParityWithAppLayout`）、
+  replay 辅助（`ClearCommittedHistoryForReplay`）、等待预算配置
+  （`SetAlternateScreenWaitBudget` ×2 / `AcquireAlternateScreenWait`）与物理写口
+  （`BeginOutput`/`WriteOutput`/`SettleOutputDebt`）——逐点语义各异或为既定写口，
+  不构成重复谓词族，保留。

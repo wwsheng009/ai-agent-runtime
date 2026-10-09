@@ -197,6 +197,14 @@
   - 验证：gofmt/build/vet 绿；三冻结门禁 + 8 族聚焦绿；commands 全量仅剩已登记 flake
     （隔离 ×2 绿）。
 
+- [x] **主仓全模块验证补全**（2026-10-09）。
+  - 两树（`cmd/aicli/...` + `internal/...`）之外 11 个含测试包
+    （aicli-console / contractgen / runtime-server / session-dedupe×2 / skillsapi-demo /
+    ssh-client / ssh-keygen / supervision-metrics / examples / pkg/skillsapi）全绿
+    （exit 0）；`go build ./...` 覆盖无测试包；
+  - **全模块（backend `./...`）验证闭环**：cmd/aicli 仅剩已登记 flake、internal 与
+    外围全绿。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
