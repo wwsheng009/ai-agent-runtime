@@ -87,7 +87,8 @@
 - commands/ui 全量绿；每刀一提交、可独立 revert；
 - 覆盖不回归：建议 Batch C 增加机械覆盖测试（目录全集逐个断言"被认领或显式 unknown"，
   禁止静默回落）——/normal 类缺口即由该法暴露；
-- 真机：unified 基本命令流 + compat 场景（退役方案 §6）PASS。
+- 真机：unified 基本命令流（`scripts/test-aicli-windows-terminal-e2e.ps1`）+ compat 场景
+  （`scripts/test-aicli-compat-mode-e2e.ps1`，E2E-COMPAT-01；退役方案 §6）PASS。
 
 ## 4. 风险
 
@@ -109,6 +110,9 @@
   收口，11 files，+280/−106）；新增目录覆盖/参数面/回落三组机械测试。
 - 2026-10-09 Batch C 验证：commands 全量复跑绿（183.9s，exit 0）；`尚未迁移…`（非测试）= 0；
   门禁符号 = 0；源扫描清单随改名同步（`ab5496a4`）。
+- 2026-10-09 Batch C compat 场景：`scripts/test-aicli-compat-mode-e2e.ps1`（E2E-COMPAT-01，
+  本地 mock provider + 进程管道）6/6 PASS（exit 0；复跑一致）；无 ANSI 降级提示依赖非 VT
+  终端（Win7 conhost），本机 VT 不可复现，留人工真机（锚点 `commands/chat_setup.go:89-122`）。
 - 2026-10-09 登记（环境 flake，非本刀）：`TestTTY_LiveLoop_LLMRetryRendersAdvancingTimerE2E`
   （全量负载下偶发：retry 状态行与 turn 完成的绘制竞态，测试注释已声明该时序脆弱性；
   隔离 ×10 全绿）；`TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`

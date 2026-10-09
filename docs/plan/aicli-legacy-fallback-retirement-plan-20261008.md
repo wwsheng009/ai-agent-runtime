@@ -446,9 +446,13 @@ L5 独立，依赖各自前置
      `surface.Enable()` 失败路径输出
      `Warning: terminal does not support ANSI scroll-region rendering; using plain interactive mode`
      （stderr；此时无 unified 渲染窗口，无字节污染）。
-   - 载体：真机 Windows Terminal（wt.exe）运行；ConPTY 脚本化方案在本仓库已被环境限制废弃
-     （`chat_tty_live_loop_test.go` 头注），脚本化替代（in-process pipe harness）仅覆盖
-     会话级行为，真机项以 wt 运行为准。
+   - 载体：**compat 基本可用性已脚本化**：`scripts/test-aicli-compat-mode-e2e.ps1`
+     （E2E-COMPAT-01：本地 mock provider + 进程管道；断言 compat/no-tui-start、
+     mock-roundtrip、roundtrip-reply、exit-graceful、no-unified-render-bytes）。
+     无 ANSI 降级提示依赖非 VT 终端（Win7 conhost / 非 VT），本机 VT 终端不可复现，
+     留人工真机。其余真机项（wt 交互渲染）以 `scripts/test-aicli-windows-terminal-e2e.ps1`
+     为准；ConPTY 脚本化方案在本仓库已被环境限制废弃（`chat_tty_live_loop_test.go` 头注），
+     脚本化替代仅覆盖会话级行为。
 5. **文档**：每批同步 P0 台账 §4 与本文 §4 状态列。
 
 ## 7. 风险与需人工确认

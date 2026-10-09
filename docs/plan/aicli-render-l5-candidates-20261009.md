@@ -127,7 +127,8 @@ Batch A 已执行（`f5c2286d`）：机械枚举 72 个目录命令后，唯一�
 修复 + 回归测试 4 子例。Batch B 已执行（`f396f2d9`）：/rewind 别名语义收编 + /resume
 typed 降级 + 迁移 fence 全量删除（13 files，+100/−130）。Batch C 已执行（`2a125651`）：
 硬门禁删除 + /exit 结构化 + 未知命令两档回落 + 目录覆盖机械守卫（72 名称），
-L5-3 三批次收口完成。
+L5-3 三批次收口完成；compat 场景已脚本化并全绿
+（`scripts/test-aicli-compat-mode-e2e.ps1`，E2E-COMPAT-01，6/6）。
 
 ## 4. 跟踪项：session 侧 DEC 2026 同步帧包裹（默认不上路）
 
