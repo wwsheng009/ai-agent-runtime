@@ -58,7 +58,7 @@
   `TestStructuredRewindNumericAliasCarriesTypedApply` + 新增 checkpoint typed 断言；
   timeline 测试 marker 同步。
 - 验证：定向 4 项 + 家族子集（Backtrack/Rewind/Resume/Timeline/Plan/Gate）绿；
-  gofmt/vet/build 绿；commands 全量回归（随本批执行，见 §5）。
+  gofmt/vet/build 绿；commands 全量复跑绿（180.8s）。
 - 验收：`rg 'unifiedInteractiveLegacyCommandFence|rejectUnifiedInteractiveLegacyCommand|已拒绝旧终端直写'`
   非测试 = 0；unified 下 fence 文案 = 0；compat/plain 行为不变。
 
@@ -95,3 +95,4 @@
   的 git 临时仓库初始化，与命令通道改动无文件面交集）。
 - 2026-10-09 Batch B：`f396f2d9`（/rewind 别名语义 + /resume typed 降级 + fence 全量删除，
   13 files，+100/−130）；fence 家族测试改写为正向 typed 断言。
+- 2026-10-09 Batch B 验证：commands 全量复跑绿（180.8s，exit 0）；非测试 fence 引用 = 0。
