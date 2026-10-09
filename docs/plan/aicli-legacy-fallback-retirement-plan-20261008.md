@@ -123,7 +123,7 @@ buildChatSession
 | `Status.Print`/`PrintXxx` | `status.go:121/:180-201` | `chat.go:1818,1946,1964,2039` 等（非统一分支） | 条件可达 | 降级/命令路径可达 | 保留 |
 | `screen_lease` raw 直写分支 | `screen_lease.go:286-330,:503-527` | 仅 fence-on/测试 | **不可达** | 仅 legacy/测试 | **可删** |
 | `screen_lease` transport 分支 | `:263-284,:364-370,:463-490` | `chat_screen_framework.go:387` | 可达（presenter=transport） | — | 保留 |
-| fullscreen/pager/debug 的 raw/no-lease 分支 | `fullscreen_list.go:423-455`、`transcript_pager.go:582-598`、`debug_overlay.go:114-121` | 启动期 picker `chat.go:1021,1214`、`login.go:278`；会话内带 lease | 带 lease 不可达 | 启动期/非租约可达 | 保留（依赖启动期租约改造） |
+| fullscreen/pager/debug 的 raw/no-lease 分支 | `fullscreen_list.go:423-455`、`transcript_pager.go:582-598`、`debug_overlay.go:114-121` | 启动期 picker `chat.go:1021,1214`、`login.go:278`；会话内带 lease | 带 lease 不可达 | 启动期/非租约可达 | **已退役**（L5-1：raw/no-lease 分支删除；启动期走 D2 租约流） |
 | `surface.Apply` | `:1765` | `chat_ui_actor.go:1139`（仅 `!UnifiedRendererEnabled()`） | **不可达** | 降级可达 | 改造后删 |
 
 ### 3.2 矩阵二：输入/编辑器/平台链（侦察：lf-input-editor）
@@ -201,7 +201,7 @@ buildChatSession
 
 ### 4.4 D 类——观察（依赖其他前置，本轮不承诺）
 
-- fullscreen/pager/debug overlay 的 raw/no-lease 分支：需先给启动期 picker（`chat.go:1021/1214`、`login.go:278`）接租约 transport；
+- ~~fullscreen/pager/debug overlay 的 raw/no-lease 分支~~：**已完成**（L5-1 Batch A/B/C，2026-10-09：启动期 picker 经 `RunStartupFullScreenList` 接租约；`dec13b68`/`3dca6215`）；
 - `FixedBottomSurface` facade 读（popup 输入 `chat_surface_output.go:239,311`、几何 `chat_interaction.go:7401-7408`）：需 presenter 侧补齐 popup/几何 API 后才能迁；
 - `chat_unified_command_gate.go` 硬门禁与 legacy 命令处理器须同批删除（handler 迁移到 `CommandResult`）。
 
@@ -396,10 +396,14 @@ buildChatSession
   互链本文）；验收矩阵追加 compat 场景（§6 第 4 条）。
 - 验证：`go test ./cmd/aicli/ui -run TestUIInteractiveDirectWriterInventory` 绿；
   ui 全量 + commands 单写端栅栏绿；gofmt/build/vet 绿。
+- L5-1 跟进（2026-10-09）：启动期无租约回退退役（`dec13b68`/`3dca6215`）→ 受认可
+  17 条/20 点位（ceiling 20；债务 4/4 不变）；裸入口 `SelectFullScreenList` 与
+  raw/no-lease 分支删除，启动选择器统一走 `RunStartupFullScreenList`（fail-closed）；
+  见 L5-1 方案 §6。
 
 ### L5 观察项（可选，另行立项）
 
-- 启动期 picker 接租约 → 再删 fullscreen/pager/debug raw 分支；
+- ~~启动期 picker 接租约 → 再删 fullscreen/pager/debug raw 分支~~（**已收口**：L5-1，2026-10-09）；
 - presenter popup/几何 API 迁移 → 再删 surface facade 读；
 - legacy 命令处理器批量迁 `CommandResult` → 删 `chat_unified_command_gate` 硬门禁。
 

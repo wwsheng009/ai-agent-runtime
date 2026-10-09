@@ -11,8 +11,8 @@
 > D0 决议 2026-10-08：无外部消费者 → L1 直删；secret 收口选 (a)）。
 > 后续登记：L5 候选与 DEC 2026 跟踪项的立项评估见
 > `docs/plan/aicli-render-l5-candidates-20261009.md`（触发式立项）；L5-3 三批次已收口
-> （`2a125651`）；L5-1 **提前立项**（独立方案 `docs/plan/aicli-l5-1-startup-lease-plan-20261009.md`，
-> 待执行）。
+> （`2a125651`）；L5-1 **已收口**（独立方案 `docs/plan/aicli-l5-1-startup-lease-plan-20261009.md`；
+> Batch A/B/C：`dec13b68`/`3dca6215`，写端受认可 24→20）。
 
 ## 1. 已完成
 
@@ -237,6 +237,7 @@
   （机械口径 25 条/28 点位 = 受认可 21/24 + 债务 4/4）；`uiWriterMigrationDebtCeiling` 只降不升；
   分类移动必须同步更新 ceiling 与计划/台账。
 - 完成态：ui 生产文件直写基线只剩受认可白名单类（启动期探针/句柄初始化、TRACE/诊断、
-  console/plain 降级承重链、平台差异、启动期无租约回退；FixedBottomSurface 物理写族已清零）
+  console/plain 降级承重链、平台差异；FixedBottomSurface 物理写族已清零；启动期无租约
+  回退已随 L5-1 退役）
   与有限债务（4 点位，随 L1-d / `ClearIfSupported` 改造递减）；交互期物理 writer 计数 = 1；
   CI 中门禁测试常开。

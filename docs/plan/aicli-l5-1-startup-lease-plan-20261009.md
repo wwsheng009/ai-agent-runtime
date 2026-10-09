@@ -142,3 +142,7 @@
   `TestChatWebSessionsAssetUsesSessionSwitchedEvent`（sse.js 文本 pin 与在途编辑冲突，
   与 L5-1 无关）；`-skip` 该用例后全量绿（176.4s，exit 0，go1.27.1）；待 web 工作流收口后
   应无 skip 复跑确证。
+- 2026-10-09 **Batch C**（验证收口）：门禁 `ok` 1.3s；ui 全量 `ok` 13.9s；fixture 真机 e2e
+  8/8（exit 0）；compat 脚本（重建含 L5-1 二进制）6/6；commands 全量见 Batch B。
+  启动选择器真机人工项留人工（交互选择器需真实控制台；自动化面由 fail-closed 契约 +
+  lease 流单测覆盖）。**L5-1 三批次收口（`dec13b68`/`3dca6215`）。**
