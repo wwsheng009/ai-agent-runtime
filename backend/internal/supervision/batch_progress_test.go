@@ -17,12 +17,14 @@ import (
 // projection need an implementation.
 type fakeBatchStore struct {
 	subagentbatch.BatchStore
-	batches   []subagentbatch.SubagentBatch
-	tasks     map[string][]subagentbatch.SubagentTaskRecord
-	listErr   error
-	taskErr   error
-	filters   []subagentbatch.BatchFilter
-	taskCalls []string
+	batches       []subagentbatch.SubagentBatch
+	tasks         map[string][]subagentbatch.SubagentTaskRecord
+	suspensions   []*subagentbatch.TurnSuspension
+	listErr       error
+	taskErr       error
+	suspensionErr error
+	filters       []subagentbatch.BatchFilter
+	taskCalls     []string
 }
 
 func (f *fakeBatchStore) ListBatches(_ context.Context, filter subagentbatch.BatchFilter) ([]subagentbatch.SubagentBatch, error) {
@@ -57,6 +59,23 @@ func (f *fakeBatchStore) ListTasks(_ context.Context, batchID string) ([]subagen
 		return nil, f.taskErr
 	}
 	return f.tasks[batchID], nil
+}
+
+func (f *fakeBatchStore) ListTurnSuspensions(_ context.Context, sessionID string) ([]*subagentbatch.TurnSuspension, error) {
+	if f.suspensionErr != nil {
+		return nil, f.suspensionErr
+	}
+	out := make([]*subagentbatch.TurnSuspension, 0, len(f.suspensions))
+	for _, record := range f.suspensions {
+		if record == nil {
+			continue
+		}
+		if sessionID != "" && record.SessionID != sessionID {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out, nil
 }
 
 func containsBatchStatus(values []subagentbatch.BatchStatus, want subagentbatch.BatchStatus) bool {

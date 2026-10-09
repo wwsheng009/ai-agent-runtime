@@ -285,6 +285,7 @@ func (c *WakeConsumer) buildResume(ctx context.Context, parentSessionID, rootSco
 		RootScopeID:     rootScopeID,
 		TurnID:          claimedTurnID(claimed),
 		Digest:          digest,
+		WakeReasons:     claimedWakeReasons(claimed),
 	}
 	builder := c.ResumeBuilder
 	if builder == nil {
@@ -306,6 +307,19 @@ func (c *WakeConsumer) buildResume(ctx context.Context, parentSessionID, rootSco
 		return nil
 	}
 	return resume
+}
+
+// claimedWakeReasons lists the claimed wakes' reasons in claim order (trimmed,
+// empties dropped). The resume builder only uses them to phrase the prompt
+// trigger — the join verdict always comes from the ledger projection.
+func claimedWakeReasons(claimed []WakePending) []string {
+	reasons := make([]string, 0, len(claimed))
+	for _, w := range claimed {
+		if reason := strings.TrimSpace(w.WakeReason); reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	return reasons
 }
 
 // announceResume forwards one bounded resume milestone to the host hook. The

@@ -13,8 +13,23 @@ import (
 // 以及终态项的 rollup 与失败清单是什么（§6.10 的终局综合输入）。两个答案都来自
 // durable batch/task 事实，本文件只把它们投影成 ObigationSource，不新建表、不新增
 // 事件、不写任何行。
+//
+// 2026-10-09 真机修复：spawn_agent / spawn_team 的轻量义务不在 batch 表里，只按
+// 批次投影会让 pending_count 恒为 0，把"子代理仍在运行"的挂起 turn 判成
+// can_finalize=true（wait_feedback 唤醒消息在 l5-2-batch-b 运行中宣告"所有
+// obligation 均已终态"）。投影因此必须同时读 §6.12 挂起记录里的
+// agent_session:/team: 义务，并用与 settle/wait 判定完全相同的 resolver 判定其
+// 终态；未接线或判读不到一律按非终态处理——"读不到"永远不能读成"已完成"。
 type BatchObligationSource struct {
 	Store subagentbatch.BatchStore
+	// AgentSessions / Teams judge the durable state of the child-session and
+	// team-run obligations parked in the §6.12 records. They are the same
+	// resolvers the settle/wait predicates use, so the resume verdict and the
+	// wake admission that scheduled it can never disagree. A nil resolver keeps
+	// every such row non-terminal: an unreadable child is never evidence that
+	// the work finished.
+	AgentSessions subagentbatch.AgentSessionObligationResolver
+	Teams         subagentbatch.TeamObligationResolver
 	// MaxBatches bounds the per-read page. Non-positive uses the default (32,
 	// the same bound the P0-B progress projection uses).
 	MaxBatches int
@@ -36,10 +51,19 @@ const (
 // resume projection. A nil store returns nil so unwired hosts keep the legacy
 // new-turn wake behavior exactly.
 func NewBatchObligationSource(store subagentbatch.BatchStore) ObligationSource {
+	return NewBatchObligationSourceWithResolvers(store, nil, nil)
+}
+
+// NewBatchObligationSourceWithResolvers is NewBatchObligationSource extended
+// with the child-session / team control planes. Hosts that can park
+// spawn_agent / spawn_team obligations must pass their resolvers here; a nil
+// resolver keeps those rows non-terminal (conservative, never a guessed
+// completion), so an unwired host can never finalize a turn over a live child.
+func NewBatchObligationSourceWithResolvers(store subagentbatch.BatchStore, agentSessions subagentbatch.AgentSessionObligationResolver, teams subagentbatch.TeamObligationResolver) ObligationSource {
 	if store == nil {
 		return nil
 	}
-	return &BatchObligationSource{Store: store}
+	return &BatchObligationSource{Store: store, AgentSessions: agentSessions, Teams: teams}
 }
 
 // ListObligations implements ObligationSource. Scope口径 与 progress 投影一致：
@@ -65,14 +89,111 @@ func (s *BatchObligationSource) ListObligations(ctx context.Context, parentSessi
 		return nil, err
 	}
 	out := make([]ObligationRef, 0, len(batches))
+	seen := make(map[string]struct{}, len(batches))
 	for _, batch := range batches {
 		if strings.TrimSpace(batch.BatchID) == "" {
 			continue
 		}
 		ref := s.obligationForBatch(ctx, batch)
+		if _, dup := seen[ref.ID]; dup {
+			continue
+		}
+		seen[ref.ID] = struct{}{}
 		out = append(out, ref)
 	}
+	// §6.12 挂起记录里的 agent_session:/team: 义务：它们不在 batch 表里，但
+	// 同样压住本 turn 的收尾判据（I1）。记录读取失败直接返回错误：宁可让
+	// resume 降级成 "unknown"，也不能在没有这份账本时宣告 can_finalize=true。
+	records, err := s.Store.ListTurnSuspensions(ctx, parentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	for index, record := range records {
+		if index >= limit {
+			break
+		}
+		if record == nil {
+			continue
+		}
+		turnID := strings.TrimSpace(record.TurnID)
+		for _, sessionID := range record.ObligationAgentSessionIDs() {
+			sessionID = strings.TrimSpace(sessionID)
+			if sessionID == "" {
+				continue
+			}
+			ref := s.obligationForAgentSession(ctx, sessionID, turnID)
+			if _, dup := seen[ref.ID]; dup {
+				continue
+			}
+			seen[ref.ID] = struct{}{}
+			out = append(out, ref)
+		}
+		for _, teamID := range record.ObligationTeamIDs() {
+			teamID = strings.TrimSpace(teamID)
+			if teamID == "" {
+				continue
+			}
+			ref := s.obligationForTeam(ctx, teamID, turnID)
+			if _, dup := seen[ref.ID]; dup {
+				continue
+			}
+			seen[ref.ID] = struct{}{}
+			out = append(out, ref)
+		}
+	}
 	return out, nil
+}
+
+// obligationForAgentSession projects one child-session obligation of a §6.12
+// record. The resolver is the same durable judge the settle/wait predicates
+// use. A missing row, an unwired resolver or a read error all keep the
+// obligation non-terminal (state=pending): the parent must never be told to
+// finalize over a child the control plane cannot vouch for.
+func (s *BatchObligationSource) obligationForAgentSession(ctx context.Context, sessionID, turnID string) ObligationRef {
+	ref := ObligationRef{
+		ID:           subagentbatch.AgentSessionObligationID(sessionID),
+		Kind:         "agent_session",
+		ParentTurnID: turnID,
+		State:        ObligationStatePending,
+	}
+	if s == nil || s.AgentSessions == nil {
+		return ref
+	}
+	terminal, found, err := s.AgentSessions.AgentSessionTerminal(ctx, sessionID)
+	if err != nil || !found {
+		return ref
+	}
+	if terminal {
+		ref.State = ObligationStateCompleted
+		ref.Terminal = true
+		return ref
+	}
+	ref.State = ObligationStateRunning
+	return ref
+}
+
+// obligationForTeam is the team-run twin of obligationForAgentSession.
+func (s *BatchObligationSource) obligationForTeam(ctx context.Context, teamID, turnID string) ObligationRef {
+	ref := ObligationRef{
+		ID:           subagentbatch.TeamObligationID(teamID),
+		Kind:         "team",
+		ParentTurnID: turnID,
+		State:        ObligationStatePending,
+	}
+	if s == nil || s.Teams == nil {
+		return ref
+	}
+	terminal, found, err := s.Teams.TeamTerminal(ctx, teamID)
+	if err != nil || !found {
+		return ref
+	}
+	if terminal {
+		ref.State = ObligationStateCompleted
+		ref.Terminal = true
+		return ref
+	}
+	ref.State = ObligationStateRunning
+	return ref
 }
 
 // obligationForBatch maps one durable batch (plus its task rows, best-effort)

@@ -139,6 +139,10 @@ type ResumeContext struct {
 	TurnID          string `json:"turn_id,omitempty"`
 	ParentSessionID string `json:"session_id,omitempty"`
 	RootScopeID     string `json:"root_scope_id,omitempty"`
+	// WakeReasons lists the wake reasons that claimed this resume (bounded,
+	// deduped). It only shapes the prompt wording — the join verdict itself
+	// always comes from the ledger projection.
+	WakeReasons []string `json:"wake_reasons,omitempty"`
 	// TotalCount / PendingCount are the join inputs (pending_count == 0 ⇒
 	// finalize). PendingCount is -1 when no obligation source was wired and the
 	// verdict is therefore unknown ("assume not final" is the safe reading).
@@ -189,7 +193,10 @@ type ResumeContextRequest struct {
 	// Digest is the claimed lifecycle digest (may be nil for a pure
 	// progress/deadline resume).
 	Digest *Digest
-	Budget ResumeBudget
+	// WakeReasons are the claimed wakes' reasons (e.g. wait_feedback). They
+	// only shape the prompt wording, never the verdict.
+	WakeReasons []string
+	Budget      ResumeBudget
 }
 
 // BuildResumeContext assembles the same-turn resume payload. It is best-effort
@@ -205,6 +212,7 @@ func BuildResumeContext(ctx context.Context, source ObligationSource, progress P
 		Status:          "unknown",
 		budget:          budget,
 	}
+	rc.WakeReasons = normalizeResumeWakeReasons(req.WakeReasons)
 	if req.Digest != nil {
 		rc.DigestText = req.Digest.Text
 	}
@@ -526,7 +534,14 @@ func truncateResumeText(text string, maxChars int) string {
 // re-derive it from history (H4); the text is already budget-bounded.
 func ResumePrompt(rc *ResumeContext) string {
 	var b strings.Builder
-	b.WriteString("[supervision] resume：子任务生命周期事件触发**同一 turn 续跑**")
+	trigger := "子任务生命周期事件触发"
+	if hasResumeWakeReason(rc, WakeReasonWaitFeedback) {
+		// 等待期兜底反馈不是子任务生命周期事件：用错触发词会让模型误判
+		// "有子任务完成了"（真机 2026-10-09，wait_feedback 唤醒被读成
+		// 生命周期收敛事件）。
+		trigger = "等待期兜底反馈（无新进度）触发"
+	}
+	b.WriteString("[supervision] resume：" + trigger + "**同一 turn 续跑**")
 	if rc != nil && strings.TrimSpace(rc.TurnID) != "" {
 		fmt.Fprintf(&b, "（turn_id=%s）", strings.TrimSpace(rc.TurnID))
 	}
@@ -544,6 +559,42 @@ func ResumePrompt(rc *ResumeContext) string {
 		}
 	}
 	return strings.TrimSpace(b.String()) + "\n"
+}
+
+// normalizeResumeWakeReasons bounds and dedupes the claimed wake reasons the
+// prompt wording may consult (I7: bounded output).
+func normalizeResumeWakeReasons(reasons []string) []string {
+	const maxReasons = 4
+	out := make([]string, 0, len(reasons))
+	seen := make(map[string]struct{}, len(reasons))
+	for _, reason := range reasons {
+		reason = strings.TrimSpace(reason)
+		if reason == "" {
+			continue
+		}
+		if _, dup := seen[reason]; dup {
+			continue
+		}
+		seen[reason] = struct{}{}
+		out = append(out, reason)
+		if len(out) >= maxReasons {
+			break
+		}
+	}
+	return out
+}
+
+// hasResumeWakeReason reports whether one claimed wake carried the reason.
+func hasResumeWakeReason(rc *ResumeContext, reason string) bool {
+	if rc == nil {
+		return false
+	}
+	for _, candidate := range rc.WakeReasons {
+		if strings.TrimSpace(candidate) == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmptyString(values ...string) string {

@@ -69,6 +69,10 @@ type apiProgressCheckParent struct {
 //   - 账本投影（G2）：resume 上下文要回答 pending_count（I1 收尾判据）与终态
 //     rollup / 失败清单（§16.4）；没有它，DeliverResume 只能拿到 pending=-1、
 //     status=unknown 的降级上下文。
+//     2026-10-09 修复：投影必须同时覆盖 §6.12 挂起记录里的 agent_session:/
+//     team: 义务（spawn_agent / spawn_team 的轻量义务不在 batch 表里），否则
+//     pending_count 恒为 0，子代理运行中的 turn 会被判成 can_finalize=true。
+//     终态判定复用与 settle/wait 完全相同的 resolver（未接线时保持非终态）。
 //
 // 只读、幂等，可在巡查前 / 控制面装配点重复调用；store 未装配时不做任何接线
 // （peek 不触发懒加载，避免为一次接线凭空虚建 store）。
@@ -78,7 +82,7 @@ func (h *Handler) wireSupervisionSources() {
 		return
 	}
 	if store := h.peekSubagentBatchStore(); store != nil {
-		scheduler.SetObligationSource(supervision.NewBatchObligationSource(store))
+		scheduler.SetObligationSource(supervision.NewBatchObligationSourceWithResolvers(store, h.agentSessionObligationResolver(), h.teamObligationResolver()))
 	}
 	scheduler.SetProgressSource(h.supervisionProgressSource())
 }

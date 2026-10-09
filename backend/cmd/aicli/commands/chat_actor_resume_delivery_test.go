@@ -124,3 +124,49 @@ func TestLocalSupervisionSourcesBuildResumeContextWithVerdict(t *testing.T) {
 	require.Contains(t, prompt, "所有 obligation 均已终态：请直接产出终局报告")
 	require.Contains(t, prompt, "batch_resume_terminal")
 }
+
+// TestLocalSupervisionSourcesParkedChildKeepsJoinOpen 是 2026-10-09 真机回归：
+// spawn_agent 轻量子会话是 agent_session: 义务，只存在于 §6.12 挂起记录里，不在
+// batch 表里。只按批次投影时 resume 上下文会输出
+// "obligations: total=0 pending=0 can_finalize=true"，在子代理仍在运行时宣告
+// "所有 obligation 均已终态"（wait_feedback 唤醒 episode 的真实故障）。本用例钉住
+// 宿主接线后的正确判读：运行中的子会话压住 I1，提示词不得给出收尾指令。
+func TestLocalSupervisionSourcesParkedChildKeepsJoinOpen(t *testing.T) {
+	ctx := context.Background()
+	host := newLocalSupervisionTestHost(t)
+	host.SubagentBatches = newTestSubagentBatchStore(t)
+
+	const parentSessionID = "resume-parent"
+	const turnID = "turn_parked"
+	const childID = "l5-2-batch-b"
+
+	// 派发方挂起 turn 时写入的记录：子会话义务，没有对应 batch 行。
+	require.NoError(t, host.SubagentBatches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		SessionID:     parentSessionID,
+		RootScopeID:   parentSessionID,
+		ObligationIDs: []string{subagentbatch.AgentSessionObligationID(childID)},
+		ParkedAt:      time.Now().UTC(),
+	}))
+
+	host.wireLocalSupervisionSources()
+
+	resume := host.Supervision.Wakes.BuildResumeContext(ctx, supervision.ResumeContextRequest{
+		ParentSessionID: parentSessionID,
+		RootScopeID:     parentSessionID,
+		TurnID:          turnID,
+		WakeReasons:     []string{supervision.WakeReasonWaitFeedback},
+	})
+	require.NotNil(t, resume)
+	require.Equal(t, 1, resume.TotalCount, "挂起记录里的子会话义务必须进入 resume 账本")
+	require.Equal(t, 1, resume.PendingCount, "运行中的 spawn_agent 子会话必须压住 I1 判据")
+	require.False(t, resume.Terminal)
+	require.Equal(t, turnID, resume.TurnID, "I3：resume 必须锚定挂起 turn")
+
+	prompt := supervision.AutoWakePromptFor(resume)
+	require.Contains(t, prompt, "等待期兜底反馈（无新进度）触发**同一 turn 续跑**",
+		"wait_feedback 不是子任务生命周期事件，触发词必须如实")
+	require.Contains(t, prompt, "仍有未终态 obligation：不得收尾（I1）")
+	require.NotContains(t, prompt, "请直接产出终局报告")
+	require.Contains(t, prompt, "agent_session:"+childID)
+}
