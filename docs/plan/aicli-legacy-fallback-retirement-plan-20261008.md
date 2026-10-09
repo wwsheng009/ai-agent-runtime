@@ -405,6 +405,8 @@ buildChatSession
 
 > 立项评估（现状锚点/前置/完成判据/触发条件，2026-10-09）：
 > [aicli-render-l5-candidates-20261009.md](aicli-render-l5-candidates-20261009.md)。
+> L5-3 已升级为独立方案文档并开工（Batch A `f5c2286d`）：
+> [aicli-l5-3-command-channel-closure-plan-20261009.md](aicli-l5-3-command-channel-closure-plan-20261009.md)。
 
 ### 跟踪项（新功能候选，非退役范围）
 
