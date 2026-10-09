@@ -140,4 +140,20 @@ controller/AppState（已具备），几何刷新经 presenter/session 门面；
 | legacy/compat 回落面 | 回落路径保留至 compat 真机验证；每批一提交可 revert |
 | 并发工作流（web）干扰全量 | skip 口径 + 收口后无 skip 复跑 |
 
-## 6. 执行记录（待填）
+## 6. 执行记录
+
+- 2026-10-09 **Batch A**（`492f3f86`；worktree 执行 + 主仓复验）：
+  - D2-a ① 落地：`ui.GeometrySyncPort{RequestGeometrySync, ActiveBandWidth}`（surface 实现，
+    编译期断言锁定）；coordinator `geometrySync` 注入/卸载/清空；3 处直读迁移
+    （`maybeRefreshStreamGeometryLocked` 探针、`refreshActiveStreamViewportNow` 显式刷新、
+    `chatDebugDocumentWidth` 读宽）；`reportMeasuredSurfaceGeometryLocked` 与 unified/legacy
+    分叉语义不动；
+  - 机械口径（commands 非测试）：`SyncTerminalGeometry*` **0 命中**；`ActiveBandViewportSize`
+    仅剩 4 处宽+行布局读（D2-a ② 债务，`TestChatGeometryFamilyDirectReadsFrozen` 按
+    file::func 白名单冻结，行号漂移免疫）；
+  - 验证：gofmt 干净；`go build ./...` ok；ui 门禁 ok 1.4s；ui 全量 ok 13.7s（主仓复跑；
+    首跑撞已登记环境 flake `TestTerminalSessionExecutorClaimMissReleasesStrandedInFlight`，
+    隔离 ×3 绿后复跑绿）；commands 聚焦（geometry+fence+startup）ok 2.0s；worktree 侧
+    ui 全量 14.7s + vet/build 干净；commands 全量（-skip web 在途用例）唯一失败为已登记
+    team/streaming 环境 flake（纯基线同跑同败）；
+  - 未决：D2-a ②（渲染器接管布局宽度，L5-2b）；Batch B/C 未启动。
