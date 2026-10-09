@@ -162,3 +162,51 @@ func TestProjectorAgentTurnPayloadKeepsWatermarkFields(t *testing.T) {
 		t.Fatalf("correlation lost: %+v", proj.Correlation)
 	}
 }
+
+// TestCollectorTurnMetricsDedupKeepsSecondTurn 是 2026-10-09 真机回归：同一会话的
+// 第二轮 turn.started/finished 曾被 (session, type) 去重键折叠成"重复投递"丢弃，
+// 结果是 running_turns 停在 1、last_turn.finished_at 永远为零。本用例走 consume
+// 全路径（含去重），锁定不同轮次互不折叠、同事件重复投递仍只计一次。
+func TestCollectorTurnMetricsDedupKeepsSecondTurn(t *testing.T) {
+	c := &Collector{
+		cfg:        Config{Enabled: true, MaxEventBytes: 65536, RetentionEvents: 32},
+		projector:  NewProjector(NewRedactor(nil, "", ""), false, 65536),
+		dedup:      make(map[uint64]struct{}),
+		dedupLimit: 1024,
+		nextSeq:    1,
+		ring:       make([]ringSlot, 32),
+	}
+	c.state.Runtime.FilteredByType = map[string]uint64{}
+	base := time.Unix(1700002000, 0).UTC()
+	events := []runtimeevents.Event{
+		{Type: EventAgentTurnStarted, Timestamp: base, SessionID: "session-x", TraceID: "trace-1",
+			Payload: map[string]interface{}{"turn_id": "turn-1", "max_steps": 10, "budget_level": "ok"}},
+		{Type: EventAgentTurnDone, Timestamp: base.Add(time.Minute), SessionID: "session-x", TraceID: "trace-1",
+			Payload: map[string]interface{}{"turn_id": "turn-1", "step": 3, "elapsed_ms": int64(60000)}},
+		{Type: EventAgentTurnStarted, Timestamp: base.Add(2 * time.Minute), SessionID: "session-x", TraceID: "trace-2",
+			Payload: map[string]interface{}{"turn_id": "turn-2", "max_steps": 10, "budget_level": "ok"}},
+		{Type: EventAgentTurnDone, Timestamp: base.Add(3 * time.Minute), SessionID: "session-x", TraceID: "trace-2",
+			Payload: map[string]interface{}{"turn_id": "turn-2", "step": 2, "elapsed_ms": int64(60000)}},
+	}
+	for _, event := range events {
+		c.consume(ingressItem{kind: "runtime", event: event})
+	}
+	if got := c.stateRunningTurns(); got != 0 {
+		t.Fatalf("second turn finished must decrement running_turns, got %d", got)
+	}
+	last := c.stateLastTurn()
+	if last == nil || last.FinishedAt.IsZero() {
+		t.Fatalf("last_turn must be closed by the second finished event: %+v", last)
+	}
+	if last.SessionID != "session-x" || last.Step != 2 {
+		t.Fatalf("unexpected last turn watermark: %+v", last)
+	}
+	// 同一事件重复投递仍必须只计一次（去重语义不能被修复破坏）。
+	c.consume(ingressItem{kind: "runtime", event: events[3]})
+	if got := c.stateRunningTurns(); got != 0 {
+		t.Fatalf("duplicate finished must stay deduplicated, running_turns=%d", got)
+	}
+	if got := c.latestSeq; got != 4 {
+		t.Fatalf("duplicate delivery must not append a new ring slot, latest_seq=%d", got)
+	}
+}

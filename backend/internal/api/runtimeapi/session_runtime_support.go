@@ -2521,9 +2521,17 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 		return nil, err
 	}
 	sessionIDs = expandedIDs
+	// 未绑定子会话的 durable 批任务：wait 的正确语义是继续等（绑定是异步的），
+	// 而不是硬失败把模型推去换 id 重试（与 CLI 宿主同修）。每轮重试解析；窗口内
+	// 绑定即转入正常快照路径，始终解析不出的按 pending 返回（pending_count 不漏报）。
+	unresolved := make(map[int]string)
 	for index, sessionID := range sessionIDs {
 		resolvedSessionID, err := c.resolveTargetSessionID(ctx, sessionID)
 		if err != nil {
+			if isTaskUnboundError(err) {
+				unresolved[index] = sessionID
+				continue
+			}
 			return nil, err
 		}
 		sessionIDs[index] = resolvedSessionID
@@ -2540,12 +2548,27 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 	wakeCh, unsubscribe := c.subscribeWaitEvents(waitCtx, sessionIDs)
 	defer unsubscribe()
 	for {
+		// 未绑定任务每轮重试一次：绑定完成后当轮即转入正常快照路径。
+		for index, target := range unresolved {
+			resolvedSessionID, err := c.resolveTargetSessionID(waitCtx, target)
+			if err != nil {
+				if isTaskUnboundError(err) {
+					continue
+				}
+				return nil, err
+			}
+			sessionIDs[index] = resolvedSessionID
+			delete(unresolved, index)
+		}
 		snapshots := make([]toolbroker.AgentStatusResult, 0, len(sessionIDs))
 		readyIDs := make([]string, 0, len(sessionIDs))
 		pendingIDs := make([]string, 0, len(sessionIDs))
 		var matched *toolbroker.AgentStatusResult
 		readyCount := 0
-		for _, sessionID := range sessionIDs {
+		for index, sessionID := range sessionIDs {
+			if _, pendingUnbound := unresolved[index]; pendingUnbound {
+				continue
+			}
 			result, err := c.snapshot(waitCtx, sessionID)
 			if err != nil {
 				return nil, err
@@ -2565,10 +2588,17 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 				pendingIDs = append(pendingIDs, firstNonEmptyString(result.ID, result.SessionID, sessionID))
 			}
 		}
+		pendingCount := len(snapshots) - readyCount
+		for index := range sessionIDs {
+			if target, ok := unresolved[index]; ok {
+				pendingIDs = append(pendingIDs, target)
+				pendingCount++
+			}
+		}
 		waitResult := &toolbroker.AgentWaitResult{
 			Agents:                 snapshots,
 			ReadyCount:             readyCount,
-			PendingCount:           len(snapshots) - readyCount,
+			PendingCount:           pendingCount,
 			ReadyIDs:               readyIDs,
 			PendingIDs:             pendingIDs,
 			WaitTimeoutMs:          int(timeout.Milliseconds()),
@@ -3351,10 +3381,32 @@ func (c *sessionAgentController) resolveAgentRecord(ctx context.Context, target 
 	return records[0].Normalize(), true, nil
 }
 
+// taskUnboundError 表示 durable 批任务已派发但尚未绑定子会话（绑定是异步的）。
+// wait 类工具必须把它当 pending 继续等待，而不是硬失败把模型推去换 id 重试；
+// read/send 类工具仍按硬错误处理——不存在的会话无法读写。
+type taskUnboundError struct {
+	taskID  string
+	status  subagentbatch.TaskStatus
+	batchID string
+}
+
+func (e *taskUnboundError) Error() string {
+	return fmt.Sprintf(
+		"batch task %s is %s but has no child session bound yet (batch %s); retry shortly or pass the child session id",
+		e.taskID, e.status, e.batchID,
+	)
+}
+
+// isTaskUnboundError 报告错误是否来自"批任务已派发但尚未绑定子会话"。
+func isTaskUnboundError(err error) bool {
+	var unbound *taskUnboundError
+	return stderrors.As(err, &unbound)
+}
+
 // resolveTaskChildSessionID 把 durable 批任务 id 解析成子会话 id（G4 / H7）。
 // 作用域只限调用方自己的父会话（模型不能借 task id 跨会话取身份）；任务已派发但
-// 尚未绑定子会话时返回**可执行错误**，而不是让上游把它当"未知会话"报 missing——
-// 后者会把"身份未就绪"与"这个 id 根本不存在"混为一谈。
+// 尚未绑定子会话时返回 *taskUnboundError（可执行状态，不是 missing——后者会把
+// "身份未就绪"与"这个 id 根本不存在"混为一谈）。
 func (c *sessionAgentController) resolveTaskChildSessionID(ctx context.Context, taskID string) (string, bool, error) {
 	if c == nil || c.handler == nil {
 		return "", false, nil
@@ -3379,10 +3431,7 @@ func (c *sessionAgentController) resolveTaskChildSessionID(ctx context.Context, 
 			// 让 snapshot 的账本投影给出可读的失败观测（状态/错误分类/结果胶囊）。
 			return "", false, nil
 		}
-		return "", false, fmt.Errorf(
-			"batch task %s is %s but has no child session bound yet (batch %s); retry shortly or pass the child session id",
-			taskID, task.Status, batchID,
-		)
+		return "", false, &taskUnboundError{taskID: taskID, status: task.Status, batchID: batchID}
 	}
 	return childSessionID, true, nil
 }

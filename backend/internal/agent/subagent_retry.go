@@ -227,6 +227,7 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 		"retry_reason":         disposition.Category,
 		"intermediate_attempt": true,
 		"source":               "scheduler",
+		"batch_id":             options.BatchID,
 		"error":                errText,
 		"budget_tokens":        task.BudgetTokens,
 		"parent_session_id":    options.ParentSessionID,

@@ -258,12 +258,26 @@ func (c *Collector) consume(item ingressItem) {
 			c.recordRuntimeEventDrop(item.event.Type)
 			return
 		}
+		// 事件级判别维度：LLM 事件用 llm_request_id/attempt_id；其余 runtime 事件
+		// （agent.turn.started/finished 等）没有这两个键，若只用 (session, type)
+		// 去重，同一会话第二个同类事件会被当成"重复投递"丢弃——真机后果是
+		// running_turns 永不回落、last_turn 永不收口（2026-10-09 观测悬空）。
+		// 改用 trace_id + turn_id 作为稳定身份：同一事件重复投递键不变（仍只计
+		// 一次），不同轮次/不同 trace 的事件互不折叠。
+		llmRequestID := payloadString(item.event.Payload["llm_request_id"])
+		if llmRequestID == "" {
+			llmRequestID = item.event.TraceID
+		}
+		attemptID := payloadString(item.event.Payload["attempt_id"])
+		if attemptID == "" {
+			attemptID = payloadString(item.event.Payload["turn_id"])
+		}
 		dedupKey = dedupKeyFor(
 			"agent_loop",
 			item.event.SessionID,
-			payloadString(item.event.Payload["llm_request_id"]),
+			llmRequestID,
 			proj.Type,
-			payloadString(item.event.Payload["attempt_id"]),
+			attemptID,
 		)
 	case "debug":
 		var k uint64

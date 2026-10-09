@@ -31,7 +31,10 @@ type SubagentCompletion struct {
 	SubagentID      string
 	ParentSessionID string
 	ChildSessionID  string
-	Role            string
+	// BatchID（schema v8）：派发批次维度；同一父会话的多次 spawn_subagents 会复用
+	// 合成 id（subagent_1…），批次维度用于把两次独立运行分开（历史/非批次载荷为空串）。
+	BatchID string
+	Role    string
 	// TaskType/TaskSubject（schema v7 增量列）：子代理分类轴与短说明，
 	// 由生产方在 subagent.completed / subagent.route.resolved 等事件载荷上附带；
 	// 历史载荷缺字段时留空串（不猜测、不从 role 反推）。
@@ -64,6 +67,7 @@ func NormalizeSubagentCompletion(event runtimeevents.Event) (SubagentCompletion,
 		SubagentID:      firstPayloadString(payload, "subagent_id", "agent_id", "id"),
 		ParentSessionID: firstPayloadString(payload, "parent_session_id", "root_session_id"),
 		ChildSessionID:  firstPayloadString(payload, "child_session_id", "session_id", "agent_id"),
+		BatchID:         firstPayloadString(payload, "batch_id"),
 		Role:            firstPayloadString(payload, "role", "agent_type", "target_role"),
 		TaskType:        firstPayloadString(payload, "task_type"),
 		TaskSubject:     firstPayloadString(payload, "task_subject"),

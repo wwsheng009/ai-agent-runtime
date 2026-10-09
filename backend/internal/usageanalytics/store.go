@@ -367,6 +367,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		`CREATE TABLE IF NOT EXISTS usage_subagents (
   subagent_id             TEXT NOT NULL DEFAULT '',
   parent_session_id       TEXT NOT NULL DEFAULT '',
+  batch_id                TEXT NOT NULL DEFAULT '',
   child_session_id        TEXT NOT NULL DEFAULT '',
   role                    TEXT NOT NULL DEFAULT '',
   task_type               TEXT NOT NULL DEFAULT '',
@@ -388,7 +389,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   source                  TEXT NOT NULL DEFAULT '',
   conflict_count          INTEGER NOT NULL DEFAULT 0,
   record_json             BLOB,
-  PRIMARY KEY (subagent_id, parent_session_id)
+  PRIMARY KEY (subagent_id, parent_session_id, batch_id)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_session ON usage_subagents(parent_session_id, completed_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_fail ON usage_subagents(success, failure_category)`,
@@ -654,6 +655,21 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			}
 		}
 	}
+	// v8：usage_subagents 主键补 batch_id（spawn_subagents 的合成 id 在同一父会话的
+	// 第二个批次会复用，旧主键 (subagent_id, parent_session_id) 会把两次独立运行并成
+	// 一行，token 取 MAX、read_only 被后到者覆盖）。新库 DDL 已直接带 batch_id；老库
+	// 需要重建表并整行搬移，历史行 batch_id 补空串（无从恢复批次归属，不猜测）。
+	// 列存在即视为已迁移（二次打开幂等）；只读库不改库，读路径按列存在性退化
+	// （见 query_v2.go 的 columnExpr）。
+	if !s.readOnly {
+		if hasBatch, err := s.hasColumn("usage_subagents", "batch_id"); err != nil {
+			return err
+		} else if !hasBatch {
+			if err := s.migrateSubagentsBatchID(); err != nil {
+				return err
+			}
+		}
+	}
 	// 版本门控迁移：v1/v2 基础表 → v2 版本号 → v3 预聚合列（§6.1）。
 	// 各步骤幂等；v3 迁移失败回滚后库保持 v2 可读。
 	version, err := s.schemaVersion()
@@ -666,6 +682,71 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		}
 	}
 	return s.migrateStatsV3()
+}
+
+// migrateSubagentsBatchID 把 v7 形态的 usage_subagents 重建为 v8 形态：主键
+// (subagent_id, parent_session_id, batch_id)，历史行整行搬移、batch_id 补空串。
+// 重建在单事务内完成（失败回滚，库保持 v7 可读）；调用方以 batch_id 列存在性
+// 做幂等门控，不会重复进入。表名/列名是包内常量，不接受外部输入。
+func (s *Store) migrateSubagentsBatchID() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrate usage analytics db: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS usage_subagents_v8`,
+		`CREATE TABLE usage_subagents_v8 (
+  subagent_id             TEXT NOT NULL DEFAULT '',
+  parent_session_id       TEXT NOT NULL DEFAULT '',
+  batch_id                TEXT NOT NULL DEFAULT '',
+  child_session_id        TEXT NOT NULL DEFAULT '',
+  role                    TEXT NOT NULL DEFAULT '',
+  task_type               TEXT NOT NULL DEFAULT '',
+  task_subject            TEXT NOT NULL DEFAULT '',
+  read_only               INTEGER NOT NULL DEFAULT 0,
+  success                 INTEGER,
+  completion_reason       TEXT NOT NULL DEFAULT '',
+  failure_category        TEXT NOT NULL DEFAULT '',
+  error_code              TEXT NOT NULL DEFAULT '',
+  attempt                 INTEGER NOT NULL DEFAULT 1,
+  max_attempts            INTEGER NOT NULL DEFAULT 1,
+  retry_reason            TEXT NOT NULL DEFAULT '',
+  id_synthesized          INTEGER NOT NULL DEFAULT 0,
+  duration_ms             INTEGER NOT NULL DEFAULT 0,
+  started_at_unix_nano    INTEGER NOT NULL DEFAULT 0,
+  completed_at_unix_nano  INTEGER NOT NULL DEFAULT 0,
+  usage_total_tokens      INTEGER NOT NULL DEFAULT 0,
+  budget_tokens           INTEGER NOT NULL DEFAULT 0,
+  source                  TEXT NOT NULL DEFAULT '',
+  conflict_count          INTEGER NOT NULL DEFAULT 0,
+  record_json             BLOB,
+  PRIMARY KEY (subagent_id, parent_session_id, batch_id)
+)`,
+		`INSERT INTO usage_subagents_v8 (
+  subagent_id, parent_session_id, batch_id, child_session_id, role, task_type, task_subject, read_only,
+  success, completion_reason, failure_category, error_code, attempt, max_attempts, retry_reason,
+  id_synthesized, duration_ms, started_at_unix_nano, completed_at_unix_nano, usage_total_tokens,
+  budget_tokens, source, conflict_count, record_json
+) SELECT
+  subagent_id, parent_session_id, '', child_session_id, role, task_type, task_subject, read_only,
+  success, completion_reason, failure_category, error_code, attempt, max_attempts, retry_reason,
+  id_synthesized, duration_ms, started_at_unix_nano, completed_at_unix_nano, usage_total_tokens,
+  budget_tokens, source, conflict_count, record_json
+FROM usage_subagents`,
+		`DROP TABLE usage_subagents`,
+		`ALTER TABLE usage_subagents_v8 RENAME TO usage_subagents`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_session ON usage_subagents(parent_session_id, completed_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_fail ON usage_subagents(success, failure_category)`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate usage analytics db: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrate usage analytics db: %w", err)
+	}
+	return nil
 }
 
 // query 在只读降级时返回 (nil, false)：调用方给出空结果。

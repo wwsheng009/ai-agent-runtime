@@ -220,7 +220,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 					},
 					"include_terminal": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Keep terminal (closed/terminated) rows in the matrix (default false). Turn it on when converging a finished batch: terminal_unacknowledged counts finished rows not yet acknowledged or closed.",
+						"description": "Keep terminal (closed/terminated) rows in the matrix (default false). Turn it on when converging a finished batch: terminal_unacknowledged counts finished rows with notifications newer than after_seq (cursor-based, not ack-based — acknowledging a notification does not clear it; pass after_seq=next_seq to advance and clear).",
 					},
 					"include_results": map[string]interface{}{
 						"type":        "boolean",
@@ -232,7 +232,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 					},
 					"after_seq": map[string]interface{}{
 						"type":        "integer",
-						"description": "Last lifecycle sequence already seen by the caller (use the previous next_seq); terminal rows newer than it are counted as terminal_unacknowledged.",
+						"description": "Last lifecycle sequence already seen by the caller (use the previous next_seq); terminal rows newer than it are counted as terminal_unacknowledged. Advancing after_seq clears the count even for already-acknowledged rows.",
 					},
 				},
 			},
@@ -402,7 +402,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 					},
 					"after_seq": map[string]interface{}{
 						"type":        "integer",
-						"description": "Your last seen sequence (use the previous next_seq): terminal rows newer than it are reported in terminal_delta[] and counted as terminal_unacknowledged; with include_digest=true it is also the digest cursor.",
+						"description": "Your last seen sequence (use the previous next_seq): terminal rows newer than it are reported in terminal_delta[] and counted as terminal_unacknowledged (advancing it clears the count even for already-acknowledged rows); with include_digest=true it is also the digest cursor.",
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
@@ -888,7 +888,11 @@ func supervisionDescendantsNextActionExcluding(snapshot *supervision.Snapshot, s
 		return "decide the action_required rows (notification_id + allowed_actions) with " + ToolControlDescendant + " or " + ToolAckLifecycle
 	}
 	if snapshot.Summary.TerminalUnacknowledged > 0 {
-		return "report the finished rows to the user, then " + ToolAckLifecycle + " or close_agent them to converge the lifecycle"
+		// 2026-10-09 真机：这一支只在"没有可裁决行"时到达——行已 acknowledge/
+		// auto-action（allowed_actions 只剩 inspect），计数仍因游标未推进而 >0。
+		// 旧的 "ack or close to converge" 指引会把模型推去重复 acknowledge（被
+		// 拒后失败）。改为只引导真正可行的动作：报告 + 关闭 + 推进游标。
+		return "report the finished rows to the user; already-acknowledged rows need no further acknowledge — close finished children with close_agent if they are still open, and advance after_seq=next_seq to clear terminal_unacknowledged"
 	}
 	if snapshot.Summary.Running+snapshot.Summary.Blocked > 0 {
 		return "children still running: continue independent work; re-read this matrix instead of polling wait_agent"

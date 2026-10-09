@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -65,4 +66,53 @@ func TestWaitAgentOnDispatchBatchIDExpandsToTaskChildren(t *testing.T) {
 	require.Len(t, result.Agents, 1)
 	require.Equal(t, "child-batch-wait", result.Agents[0].SessionID)
 	require.True(t, result.Agents[0].Exists)
+}
+
+// 2026-10-09 真机回归：spawn_subagents 派发后任务尚未绑定子会话时，
+// wait_agent(task_id) 曾直接以 TOOL_BROKER_FAILURE 硬失败（retryable=false），
+// 模型被迫改用 child session id 绕行。现在必须按 pending 继续等待：窗口内不
+// 绑定则超时返回 pending（保留任务 id），而不是抛错。
+func TestWaitAgentOnUnboundBatchTaskStaysPending(t *testing.T) {
+	host, _ := newLocalWaitLedgerHost(t, subagentbatch.BatchRunning, "turn-batch-unbound")
+	ctx := context.Background()
+	host.SessionStore = runtimechat.NewInMemoryStorage()
+	now := subagentbatch.Now()
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		RootScopeID:     localWaitLedgerTestSession,
+		ParentSessionID: localWaitLedgerTestSession,
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchRunning,
+		TaskCount:       1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		HeartbeatAt:     now,
+		Version:         1,
+	}
+	tasks := []subagentbatch.SubagentTaskRecord{{
+		TaskID:     "task-unbound",
+		BatchID:    batch.BatchID,
+		Status:     subagentbatch.TaskPending,
+		OrderIndex: 0,
+		UpdatedAt:  now,
+		Version:    1,
+	}}
+	created, err := host.SubagentBatches.CreateBatch(ctx, batch, tasks)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	registry := newLocalActorRegistry(host)
+	started := time.Now()
+	result, err := registry.waitForLocalAgentObserved(ctx, toolbroker.WaitAgentArgs{
+		ID:        "task-unbound",
+		TimeoutMs: 300,
+	})
+	require.NoError(t, err, "unbound pending task must not hard-fail the wait")
+	require.NotNil(t, result)
+	require.True(t, result.TimedOut)
+	require.Equal(t, 0, result.ReadyCount)
+	require.Equal(t, 1, result.PendingCount)
+	require.Contains(t, result.PendingIDs, "task-unbound")
+	require.GreaterOrEqual(t, time.Since(started), 250*time.Millisecond,
+		"wait must actually hold the observation window instead of returning immediately")
 }

@@ -1389,6 +1389,16 @@ func (r *localActorRegistry) handleLocalChildTerminal(ctx context.Context, paren
 	// 方案 §2.1 / D4：本地镜像载荷补齐规范化字段（success 权威、status
 	// 兼容别名），与 runtime-server 侧共用同一归一化实现。
 	payload["source"] = "agent_controller"
+	// v8：把批次维度带给分析侧（同一父会话的第二个 spawn_subagents 批次会复用
+	// 合成 id，缺 batch_id 时两次独立运行会被 usage_subagents 并成一行）。查不到
+	// （非批次 spawn_agent / 非 durable 宿主）保持缺省空串，不影响既有合并语义。
+	if r.Host.SubagentBatches != nil {
+		if _, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, childSessionID); err == nil && ok {
+			if trimmed := strings.TrimSpace(batchID); trimmed != "" {
+				payload["batch_id"] = trimmed
+			}
+		}
+	}
 	usageanalytics.NormalizeSubagentCompletionPayload(payload, localAgentCompletionStatus(event))
 	if store := r.localAgentRegistryStore(); store != nil && childPath != "" {
 		rootSessionID := localAgentRootSessionID(childSession, parentSessionID)
@@ -3235,9 +3245,17 @@ func (r *localActorRegistry) waitForLocalAgentObserved(ctx context.Context, args
 		return nil, err
 	}
 	sessionIDs = expandedIDs
+	// 未绑定子会话的 durable 批任务：wait 的正确语义是继续等（绑定是异步的），
+	// 而不是硬失败把模型推去换 id 重试。每轮重试解析；窗口内绑定即转入正常
+	// 快照路径，始终解析不出的按 pending 返回（pending_count 不漏报）。
+	unresolved := make(map[int]string)
 	for index, sessionID := range sessionIDs {
 		resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
 		if err != nil {
+			if isLocalTaskUnboundError(err) {
+				unresolved[index] = sessionID
+				continue
+			}
 			return nil, err
 		}
 		sessionIDs[index] = resolvedSessionID
@@ -3255,12 +3273,27 @@ func (r *localActorRegistry) waitForLocalAgentObserved(ctx context.Context, args
 	wakeCh, unsubscribe := r.subscribeLocalAgentWaitEvents(waitCtx, sessionIDs)
 	defer unsubscribe()
 	for {
+		// 未绑定任务每轮重试一次：绑定完成后当轮即转入正常快照路径。
+		for index, target := range unresolved {
+			resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(waitCtx, target)
+			if err != nil {
+				if isLocalTaskUnboundError(err) {
+					continue
+				}
+				return nil, err
+			}
+			sessionIDs[index] = resolvedSessionID
+			delete(unresolved, index)
+		}
 		snapshots := make([]toolbroker.AgentStatusResult, 0, len(sessionIDs))
 		readyIDs := make([]string, 0, len(sessionIDs))
 		pendingIDs := make([]string, 0, len(sessionIDs))
 		var matched *toolbroker.AgentStatusResult
 		readyCount := 0
-		for _, sessionID := range sessionIDs {
+		for index, sessionID := range sessionIDs {
+			if _, pendingUnbound := unresolved[index]; pendingUnbound {
+				continue
+			}
 			result, err := r.agentSnapshot(waitCtx, sessionID)
 			if err != nil {
 				return nil, err
@@ -3280,10 +3313,17 @@ func (r *localActorRegistry) waitForLocalAgentObserved(ctx context.Context, args
 				pendingIDs = append(pendingIDs, firstNonEmptyChatValue(result.ID, result.SessionID, sessionID))
 			}
 		}
+		pendingCount := len(snapshots) - readyCount
+		for index := range sessionIDs {
+			if target, ok := unresolved[index]; ok {
+				pendingIDs = append(pendingIDs, target)
+				pendingCount++
+			}
+		}
 		waitResult := &toolbroker.AgentWaitResult{
 			Agents:                 snapshots,
 			ReadyCount:             readyCount,
-			PendingCount:           len(snapshots) - readyCount,
+			PendingCount:           pendingCount,
 			ReadyIDs:               readyIDs,
 			PendingIDs:             pendingIDs,
 			WaitTimeoutMs:          int(timeout.Milliseconds()),
@@ -4284,9 +4324,31 @@ func (r *localActorRegistry) resolveLocalAgentTargetSessionID(ctx context.Contex
 	return "", fmt.Errorf("unknown agent path: %s", target)
 }
 
+// localTaskUnboundError 表示 durable 批任务已派发但尚未绑定子会话（绑定是异步的）。
+// wait 类工具必须把它当 pending 继续等待，而不是硬失败把模型推去换 id 重试；
+// read/send 类工具仍按硬错误处理——不存在的会话无法读写。
+type localTaskUnboundError struct {
+	taskID  string
+	status  subagentbatch.TaskStatus
+	batchID string
+}
+
+func (e *localTaskUnboundError) Error() string {
+	return fmt.Sprintf(
+		"batch task %s is %s but has no child session bound yet (batch %s); retry shortly or pass the child session id",
+		e.taskID, e.status, e.batchID,
+	)
+}
+
+// isLocalTaskUnboundError 报告错误是否来自"批任务已派发但尚未绑定子会话"。
+func isLocalTaskUnboundError(err error) bool {
+	var unbound *localTaskUnboundError
+	return stderrors.As(err, &unbound)
+}
+
 // resolveLocalTaskChildSessionID 把 durable 批任务 id 解析成子会话 id（G4 / H7）。
 // 只查调用方父会话自己的批次（不得由模型指定会话、不得跨会话取身份）；任务已派发
-// 但尚未绑定子会话时返回可执行错误，而不是让上游把它当"未知会话"报 missing。
+// 但尚未绑定子会话时返回 *localTaskUnboundError（可执行状态，不是 missing）。
 func (r *localActorRegistry) resolveLocalTaskChildSessionID(ctx context.Context, taskID string) (string, bool, error) {
 	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil {
 		return "", false, nil
@@ -4307,10 +4369,7 @@ func (r *localActorRegistry) resolveLocalTaskChildSessionID(ctx context.Context,
 			// 让 snapshot 的账本投影给出可读的失败观测（与 API 宿主同口径）。
 			return "", false, nil
 		}
-		return "", false, fmt.Errorf(
-			"batch task %s is %s but has no child session bound yet (batch %s); retry shortly or pass the child session id",
-			taskID, task.Status, batchID,
-		)
+		return "", false, &localTaskUnboundError{taskID: taskID, status: task.Status, batchID: batchID}
 	}
 	return childSessionID, true, nil
 }
