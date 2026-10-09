@@ -9,8 +9,10 @@
 > 后续：legacy fallback 链退役分析与实施方案见 `docs/plan/aicli-legacy-fallback-retirement-plan-20261008.md`
 > （结论：整体退役不可行——compat/plain 为产品承诺；可删死码与可拆物理绘制族按该方案 L1–L4 分批执行；
 > D0 决议 2026-10-08：无外部消费者 → L1 直删；secret 收口选 (a)）。
-> 后续登记（未排期）：L5 候选与 DEC 2026 跟踪项的立项评估见
-> `docs/plan/aicli-render-l5-candidates-20261009.md`（触发式立项）。
+> 后续登记：L5 候选与 DEC 2026 跟踪项的立项评估见
+> `docs/plan/aicli-render-l5-candidates-20261009.md`（触发式立项）；L5-3 三批次已收口
+> （`2a125651`）；L5-1 **提前立项**（独立方案 `docs/plan/aicli-l5-1-startup-lease-plan-20261009.md`，
+> 待执行）。
 
 ## 1. 已完成
 
