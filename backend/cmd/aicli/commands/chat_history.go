@@ -160,6 +160,14 @@ func printVisibleChatHistoryWithLoadGrant(session *ChatSession, header string, s
 		// physically fenced and would otherwise silently drop the conversation.
 		bridge := ensureChatRuntimeEventBridge(session)
 		if bridge != nil {
+			// 会话装载呈现（/resume、/load、启动恢复、/history）先做一次事件
+			// 日志重放：重放重建 canonical Scene 且只读事件日志，不依赖尚未
+			// 挂载的 runtime host。必须在 seed canonical history **之前**执行，
+			// 否则重放会推迟到首个 turn（start() 的 host 守卫），reset 换新
+			// cell 身份后已交付历史会被再次铸造、再次写入原生 scrollback
+			// （2026-10-09 真机：发送第一条消息后历史消息再次 replay）。
+			// 已重放过（或 run 进行中/日志路径未知）时是 no-op。
+			bridge.replaySessionLoadLogOnce()
 			seedHeader := ""
 			if strings.TrimSpace(header) != "" {
 				seedHeader = fmt.Sprintf("%s (%d 条消息):", strings.TrimSpace(header), len(messages))

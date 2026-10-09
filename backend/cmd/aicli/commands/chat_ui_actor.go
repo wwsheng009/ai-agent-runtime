@@ -913,7 +913,16 @@ func (c *chatInteractionCoordinator) unifiedSceneMountActionLocked() ui.UIAction
 		// unifiedSceneActiveCellActionLocked.
 		return nil
 	}
-	return ui.ReplaceTranscriptAction{Snapshot: snapshot}
+	// Windowed session load (windowed resume backfill) holds native-scrollback
+	// delivery until the load-completion replacement re-proves the complete
+	// transcript. A live delta must not release that hold: the mounted Scene is
+	// only a partial load (newest page), and minting it here would write the
+	// history out of order when the earlier pages arrive (2026-10-09 repro:
+	// sending the first message after `aicli resume` flushed/replayed history).
+	return ui.ReplaceTranscriptAction{
+		Snapshot:             snapshot,
+		DeferHistoryDelivery: c.historyDeliveryDeferred(),
+	}
 }
 
 // finalizeActiveCellShadowActionLocked creates the migration-only atomic
@@ -1253,7 +1262,18 @@ func (c *chatInteractionCoordinator) applyRuntimeEventActionWithContext(action u
 	// the terminal, ScreenModel, or legacy historyWindow.
 	if snapshot := payload.bridge.sceneSnapshot(); snapshot != nil {
 		if c.runtimeEventNeedsTranscriptReplace(payload.bridge, payload.event, snapshot) {
-			c.postCausalUIActionWithContext(context, ui.ReplaceTranscriptAction{Snapshot: snapshot})
+			// Carry the windowed-load delivery hold through the causal delta path.
+			// The bridge posts ReplaceTranscriptAction with
+			// DeferHistoryDelivery for its own snapshots, but this follow-up is a
+			// fresh action: leaving the field zero released the hold on the first
+			// assistant delta after `aicli resume`, minting the partially loaded
+			// transcript (newest page) to native scrollback and appending the
+			// earlier pages after it once the backfill completed — the visible
+			// "history replayed again on the first message" symptom.
+			c.postCausalUIActionWithContext(context, ui.ReplaceTranscriptAction{
+				Snapshot:             snapshot,
+				DeferHistoryDelivery: c.historyDeliveryDeferred(),
+			})
 		}
 	}
 }

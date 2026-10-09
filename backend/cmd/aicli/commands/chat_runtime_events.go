@@ -44,11 +44,15 @@ type chatRuntimeEventBridge struct {
 	// parkedEscapeMu / parkedEscapeStop hold the §6.12 parked-window ESC
 	// consumer: armed on turn.suspended, released on turn.resumed or interrupt
 	// cleanup, so ESC can abandon a parked turn that has no run to interrupt.
-	parkedEscapeMu      sync.Mutex
-	parkedEscapeStop    func()
-	primarySessionMu    sync.RWMutex
-	primarySessionID    string
-	startOnce           sync.Once
+	parkedEscapeMu   sync.Mutex
+	parkedEscapeStop func()
+	primarySessionMu sync.RWMutex
+	primarySessionID string
+	startOnce        sync.Once
+	// replayOnce 只保护会话加载的事件日志重放。它与 startOnce（EventBus 订阅 /
+	// 事件队列 worker）分开：重放不依赖 runtime host，而能力面在首帧之后才异步
+	// 挂载。绑在 host 守卫后面会让重放推迟到首个 turn（见 start 的说明）。
+	replayOnce          sync.Once
 	processorOnce       sync.Once
 	eventQueue          chan chatRuntimeQueuedEvent
 	eventQueueMu        sync.Mutex
@@ -917,15 +921,47 @@ func (b *chatRuntimeEventBridge) start() {
 		return
 	}
 	b.startOnce.Do(func() {
-		// 会话加载（/resume、--session、启动恢复）是唯一允许全量重放历史的入口：
-		// 事件日志重放重建 canonical Scene，并在发布 replacement snapshot 的
-		// 同一个 action 内请求一次性的 scrollback 替换授权。正常交互
-		// （resize/流式增量/主题切换/写入恢复）没有该授权，只能走非破坏性的
-		// 视口恢复，绝不重放历史。
-		// 重放失败不阻塞启动：计入 failures 供 /debug 审计，进程静默降级为无重放。
-		_, _ = b.replaySessionLoadEventLog()
+		// 非装载入口（首个 turn 的 ensure 等）保持既有语义：首个成功 start 时
+		// 重放一次会话事件日志。装载入口会更早调用 replaySessionLoadLogOnce，
+		// 两者共用 replayOnce，因此这里通常已是 no-op。
+		b.replaySessionLoadLogOnce()
 		b.startProcessor()
 		b.session.LocalRuntimeHost.EventBus.Subscribe("", b.Handle)
+	})
+}
+
+// replaySessionLoadLogOnce 在**会话装载呈现**路径上执行一次事件日志重放：
+// 装载（/resume、/load、启动恢复）是唯一允许全量重放历史的入口，重放重建
+// canonical Scene，并在发布 replacement snapshot 的同一个 action 内请求一次性
+// 的 scrollback 替换授权。正常交互（resize/流式增量/主题切换/写入恢复）没有该
+// 授权，只能走非破坏性的视口恢复，绝不重放历史。
+//
+// 为什么必须由装载路径显式调用、而不是只留在 start() 的 host 守卫后面：
+// 能力面（runtime host / EventBus）在首帧之后才异步挂载
+// （chat.go 的 prepareChatCapabilitiesAsync），resume 装载时 host 仍为 nil，
+// start() 的守卫会让重放推迟到首个 turn 的 ensure——那时 canonical 历史已按
+// seed 身份交付，重放的 resetCanonicalHistoryProjectionLocked 会换一整套 cell
+// 身份，ledger 的 append-only 去重失效，整段历史被再次铸造并写入原生 scrollback
+// （2026-10-09 真机：发送第一条消息后历史消息再次 replay）。重放本身只读事件
+// 日志，不依赖 host，因此可以在装载路径（canonical seed 之前）安全执行；事件
+// 总线订阅仍留在 start() 等 host 就绪。
+//
+// 事件日志路径未知（Logger 未就绪）或模型 run 进行中时不消费 replayOnce：
+// 前者等下一次装载/start 在路径可用后重放（不把"未知路径"当成"空会话"发布空
+// Scene），后者等 run 结束后的装载路径重放（绝不在流式渲染中重置 Scene）。
+// 重放失败不阻塞启动：计入 failures 供 /debug 审计，进程静默降级为无重放。
+func (b *chatRuntimeEventBridge) replaySessionLoadLogOnce() {
+	if b == nil || b.session == nil || b.eventLogFilePath() == "" {
+		return
+	}
+	b.renderMu.Lock()
+	runActive := b.runActive
+	b.renderMu.Unlock()
+	if runActive {
+		return
+	}
+	b.replayOnce.Do(func() {
+		_, _ = b.replaySessionLoadEventLog()
 	})
 }
 
