@@ -864,9 +864,9 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		case <-ticker.C:
 			if stream.lastEventAge() >= chatWebEventHeartbeatInterval {
-				stream.writeEvent("heartbeat", map[string]interface{}{
-					"timestamp": time.Now().UTC().Format(time.RFC3339),
-				}, "heartbeat")
+				// 载荷带权威 session_busy：前端据此在 turn_end 丢帧时收口流式气泡
+				// （见 chatWebHeartbeatPayload 的说明）。
+				stream.writeEvent("heartbeat", chatWebHeartbeatPayload(chatWebSession()), "heartbeat")
 				continue
 			}
 			stream.keepalive()

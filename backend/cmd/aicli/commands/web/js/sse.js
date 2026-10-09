@@ -9,7 +9,7 @@ import { handleParkedTurnSSEEvent } from "./parked.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
 import { handleMeshStreamEvent, loadSessions, meshResumeSeq, notifySessionSwitchedCompleted, notifySharedStreamState } from "./sessions.js";
-import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, resetStreamState, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
+import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, convergeFinishedStreamText, endStream, isStreamActive, isTurnLive, renderStream, resetStreamState, setStreamReasoning, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
 import { handleTodoSSEEvent } from "./todos.js";
 import { isNetDegraded, onNetStateChange, webAuthToken } from "./util.js";
 
@@ -41,7 +41,8 @@ function resyncConversationAfterGap() {
   var now = Date.now();
   if (now - lastStreamResyncAt < STREAM_RESYNC_MIN_INTERVAL_MS) { return; }
   lastStreamResyncAt = now;
-  refreshScreen(false, { keepStream: isStreamActive() });
+  // expandLiveTail：丢帧对账发生在回合中时，最新推理/工具块保持展开。
+  refreshScreen(false, { keepStream: isStreamActive(), expandLiveTail: isTurnLive() });
 }
 
 function setStatus(text, connected) {
@@ -71,7 +72,17 @@ function logEvent(name, data) {
   if (countEl) { countEl.textContent = eventLogEl.childNodes.length + " 条事件"; }
 }
 
-var refreshKeys = { "turn_end": 1, "tool_end": 1, "session_end": 1, "session_interrupted": 1, "error": 1, "screen_refresh": 1, "compact_end": 1 };
+// 非流式期间需要重拉权威屏幕的事件（switch default 分支消费）。除回合/工具
+// 终态外，还覆盖会改写 transcript / 上下文的事件：压缩（上下文变了）、
+// checkpoint、回退/回溯（历史被重写）、上下文调和、邮箱投递。
+var refreshKeys = {
+  "turn_end": 1, "tool_end": 1, "session_end": 1, "session_interrupted": 1,
+  "error": 1, "screen_refresh": 1,
+  "compact_start": 1, "compact_end": 1, "compact_skipped": 1, "compact_failed": 1,
+  "checkpoint_created": 1,
+  "rewind_end": 1, "backtrack_end": 1,
+  "context_reconciled": 1, "mailbox_received": 1,
+};
 
 // 工具终态后的节流 transcript 刷新：长回合中完成/取消的工具单元格会写入
 // 服务端权威 messages，但流式期间对话区默认不重绘（避免打断 stream 气泡），
@@ -88,7 +99,9 @@ function scheduleTranscriptRefresh() {
     transcriptRefreshTimer = null;
     transcriptRefreshLast = Date.now();
     // keepStream 仅在流式仍活跃时生效；回合结束后走常规刷新路径。
-    refreshScreen(false, { keepStream: isStreamActive() });
+    // expandLiveTail：回合进行中的工具/推理最新块保持展开（用户正跟随的内容
+    // 不因节流刷新被折回）。
+    refreshScreen(false, { keepStream: isStreamActive(), expandLiveTail: isTurnLive() });
   }, wait);
 }
 
@@ -204,6 +217,12 @@ function onSSEEvent(eventName, data) {
       if (isStreamActive()) {
         setStreamText(data.content);
         startTypeTimer();
+      } else if (data.content) {
+        // 迟到终稿：turn_end 已让打字机排空并收尾（finishStream 把气泡落成
+        // 本地兜底行）时，用权威全文收敛本地行，再拉一次权威快照——
+        // finishStream 那次刷新可能早于终稿落库，只靠它会让最后一段永远缺失。
+        convergeFinishedStreamText(data.content);
+        refreshScreen();
       }
       break;
     case "tool_start":
@@ -219,7 +238,9 @@ function onSSEEvent(eventName, data) {
         // 流式期间用节流快照刷新对话区，但保留 stream 气泡（keepStream）。
         scheduleTranscriptRefresh();
       } else {
-        refreshScreen();
+        // 工具刚完成 = 回合仍在进行（结果还要回传模型）：该工具行是当前最后
+        // 一块，按统一策略展开；被更新的块与回合结束时自动折叠回收。
+        refreshScreen(false, { expandLiveTail: true });
       }
       break;
     case "assistant_image_progress":
@@ -233,10 +254,30 @@ function onSSEEvent(eventName, data) {
       }
       break;
     case "turn_end":
+      // 请求边界权威快照：llm.request.finished 携带本次响应的
+      // assistant_snapshot / reasoning_snapshot（见 internal/agent/loop.go）。
+      // 服务端 SSE 队列满时增量是静默丢帧，丢失的部分只有靠全文快照整段
+      // 收敛才能补齐——与 TUI 渲染器（ui/render/encoding 的
+      // assistantSnapshotKey / reasoningSnapshotKey）同语义；否则 web 端会在
+      // 增量丢失后永久截断（TUI 完整、web 少最后一段）。
+      if (isStreamActive()) {
+        if (data.reasoning_snapshot) { setStreamReasoning(data.reasoning_snapshot); }
+        if (data.assistant_snapshot) { setStreamText(data.assistant_snapshot); }
+        startTypeTimer();
+      }
       setTurn("就绪");
       setUI("idle", "");
       endStream();
       loadStatusBar(); // 回合结束后刷新上下文/balance 状态
+      break;
+    case "heartbeat":
+      // 尾部丢帧自愈：turn_end 被服务端队列静默丢弃时，其后可能不再有任何帧
+      // 触发序号守卫的 gap 判定，气泡会永久停在「输出中」；heartbeat（无事件
+      // 30s 后的低频合成帧）带权威 session_busy，是最后的收口信号。
+      if (data && data.session_busy === false && isStreamActive()) {
+        endStream();
+        refreshScreen();
+      }
       break;
     case "approval_requested":
       showApproval(data);
@@ -351,11 +392,24 @@ function openEventSource() {
     try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }
     onSSEEvent("message", data);
   };
-  ["connected", "heartbeat", "screen_refresh", "turn_start", "turn_delta", "turn_end",
-   "session_start", "session_end", "session_switched", "session_interrupted", "reasoning_delta",
-   "assistant_delta", "assistant_image_progress", "tool_start", "tool_end", "approval_requested",
-   "approval_resolved", "question_asked", "question_answered", "dynamic_status", "model_changed",
-   "cache_request_finished"].forEach(function (name) {
+  // 注意：这里必须覆盖服务端会发送的全部事件名（chatWebSSEMappings + 合成事件
+  // connected/heartbeat/screen_refresh/session_switched/error）。EventSource 只把
+  // 命名事件派发给显式注册的监听器：漏注册 = 该帧被浏览器静默丢弃、switch 分支
+  // 永远不可达（assistant_message 终稿曾因此整帧丢失：TUI 完整、web 缺最后一段）。
+  // 同集约束由 Go 资产测试 TestChatWebSSEAsset_RegistersConsumedEventListeners
+  // 按映射表逐项守住，新增服务端事件时这里必须同步。
+  ["connected", "heartbeat", "screen_refresh", "session_switched", "error",
+   "session_start", "session_end", "session_interrupted",
+   "turn_start", "turn_delta", "turn_end",
+   "assistant_delta", "assistant_message", "assistant_image_progress", "reasoning_delta",
+   "tool_start", "tool_end", "approval_requested", "approval_resolved",
+   "question_asked", "question_answered",
+   "checkpoint_created",
+   "compact_start", "compact_end", "compact_skipped", "compact_failed",
+   "rewind_start", "rewind_end", "backtrack_start", "backtrack_end",
+   "job_started", "job_output", "job_finished", "job_cancelled",
+   "mailbox_received", "context_reconciled",
+   "dynamic_status", "model_changed", "cache_request_finished"].forEach(function (name) {
     es.addEventListener(name, function (e) {
       var data = {};
       try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }
@@ -366,8 +420,12 @@ function openEventSource() {
   // （续传游标 meshLastSeq、退避重连、200ms 合并刷新、10s 轮询兜底）。
   // mesh.unavailable 表示服务端未提供网格（--mesh=false / 扇入客户端超限），
   // 前端只降级不报错（§4.7）。
+  // 同集约束：必须覆盖 mesh.Frame* 全部帧类型 + 服务端合成的 mesh.unavailable
+  // 降级帧（见 web_handlers.go），由 Go 资产测试
+  // TestChatWebSSEAsset_RegistersMeshFrameListeners 逐项守住。
   ["mesh.ready", "mesh.unavailable", "mesh.peer.joined", "mesh.peer.left",
-   "mesh.peer.updated", "mesh.session.changed", "mesh.peer.event", "mesh.lagged"].forEach(function (name) {
+   "mesh.peer.updated", "mesh.session.changed", "mesh.call.invoked", "mesh.call.completed",
+   "mesh.peer.event", "mesh.lagged"].forEach(function (name) {
     es.addEventListener(name, function (e) {
       var data = {};
       try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }

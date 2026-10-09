@@ -286,27 +286,205 @@ export function refreshToolOutputToggles(root) {
   });
 }
 
-// 切换单条工具行的展开/收起（抬头控件点击/键盘触发）。
-// 抬头控件现在位于 .msg-head 内（不再是行的直接子节点），按 .msg-row 向上定位。
-function toggleToolOutput(labelEl) {
-  if (!labelEl || labelEl.classList.contains("tool-toggle-off")) { return; }
-  var rowEl = labelEl.closest ? labelEl.closest(".msg-row") : labelEl.parentNode;
+// 设置单条工具行的展开状态：抬头控件点击/键盘切换与活跃回合的自动展开共用。
+// 抬头控件位于 .msg-head 内（不再是行的直接子节点），按 .msg-row 定位；
+// 内容未溢出时控件被标记 tool-toggle-off（不可用），此时不改折叠态。
+function setToolOutputExpanded(rowEl, expanded) {
   if (!rowEl) { return; }
-  var output = rowEl.querySelector(".tool-output");
+  var labelEl = rowEl.querySelector ? rowEl.querySelector(".tool-toggle") : null;
+  if (labelEl && labelEl.classList && labelEl.classList.contains("tool-toggle-off")) { return; }
+  var output = rowEl.querySelector ? rowEl.querySelector(".tool-output") : null;
   if (!output) { return; }
-  var actionEl = labelEl.querySelector(".tool-toggle-action");
-  var iconEl = labelEl.querySelector(".tool-toggle-icon");
-  var collapsed = output.classList.contains("tool-collapsed");
-  if (collapsed) {
+  if (expanded) {
     output.classList.remove("tool-collapsed");
     output.classList.add("tool-expanded");
   } else {
     output.classList.remove("tool-expanded");
     output.classList.add("tool-collapsed");
   }
-  if (actionEl) { actionEl.textContent = collapsed ? "收起" : "展开"; }
-  if (iconEl) { iconEl.textContent = collapsed ? "▲" : "▼"; }
-  labelEl.setAttribute("aria-expanded", collapsed ? "true" : "false");
+  if (!labelEl) { return; }
+  var actionEl = labelEl.querySelector(".tool-toggle-action");
+  var iconEl = labelEl.querySelector(".tool-toggle-icon");
+  if (actionEl) { actionEl.textContent = expanded ? "收起" : "展开"; }
+  if (iconEl) { iconEl.textContent = expanded ? "▲" : "▼"; }
+  if (labelEl.setAttribute) { labelEl.setAttribute("aria-expanded", expanded ? "true" : "false"); }
+}
+
+// 切换单条工具行的展开/收起（抬头控件点击/键盘触发）。
+function toggleToolOutput(labelEl) {
+  if (!labelEl || labelEl.classList.contains("tool-toggle-off")) { return; }
+  var rowEl = labelEl.closest ? labelEl.closest(".msg-row") : labelEl.parentNode;
+  if (!rowEl) { return; }
+  var output = rowEl.querySelector(".tool-output");
+  if (!output) { return; }
+  var expanded = output.classList.contains("tool-collapsed");
+  setToolOutputExpanded(rowEl, expanded);
+  // 用户意图：手动展开的块不参与自动折叠；手动收起则连自动标记一起清除
+  // （用户想收起的块，下一轮活跃刷新按「最后一块总是展开」重新处理）。
+  if (rowEl.setAttribute) {
+    if (expanded) {
+      setRowAttr(rowEl, USER_EXPANDED_ATTR, "1");
+    } else {
+      clearRowAttr(rowEl, USER_EXPANDED_ATTR);
+      clearRowAttr(rowEl, AUTO_EXPANDED_ATTR);
+    }
+  }
+  rememberUserExpanded(rowEl, expanded); // 账本：窗口重建后仍保持用户展开
+}
+
+// ---- 活跃回合的展开/折叠统一策略 ----
+//
+// 状态机（挂在行上的 data 属性，随窗口重建自然复位）：
+//   data-auto-expanded：本块由「最后一块总是展开」策略展开——被更新的块与回合
+//     结束时自动折回默认折叠态；
+//   data-user-expanded：用户手动展开过——自动折叠永不回收（历史里手动展开的块
+//     同理：自动路径只处理自己标记过的块，且只作用于当前回合的行）。
+var AUTO_EXPANDED_ATTR = "data-auto-expanded";
+var USER_EXPANDED_ATTR = "data-user-expanded";
+
+// data 属性读写防御：行元素来自最小 DOM 桩（老验证脚本的桩只有 setAttribute）。
+function setRowAttr(el, name, value) {
+  if (el && el.setAttribute) { el.setAttribute(name, value); }
+}
+function clearRowAttr(el, name) {
+  if (el && el.removeAttribute) { el.removeAttribute(name); }
+}
+
+// 用户展开意图账本（按服务端绝对索引）：窗口刷新会重建行元素，行上的 data 属性
+// 会随元素丢失；把「用户手动展开过」记在索引上，重建后恢复展开——否则用户点开
+// 的推理/工具块会被下一次任意刷新折回（自动折叠不回收用户展开的要求跨刷新失效）。
+var userExpandedIndexes = {};
+
+function rememberUserExpanded(rowEl, expanded) {
+  var idx = (rowEl && rowEl.getAttribute) ? rowEl.getAttribute("data-msg-index") : null;
+  if (idx == null) { return; }
+  if (expanded) { userExpandedIndexes[idx] = 1; } else { delete userExpandedIndexes[idx]; }
+}
+
+function clearUserExpandedLedger() { userExpandedIndexes = {}; }
+
+// 窗口重建后恢复用户展开的行（推理面板 / 工具输出）。
+function restoreUserExpandedRows() {
+  if (!screenEl || !screenEl.querySelectorAll) { return; }
+  screenEl.querySelectorAll(".msg-row").forEach(function (row) {
+    var idx = row.getAttribute ? row.getAttribute("data-msg-index") : null;
+    if (idx == null || !userExpandedIndexes[idx]) { return; }
+    setRowAttr(row, USER_EXPANDED_ATTR, "1");
+    var details = row.querySelector(".reasoning-block");
+    if (details) {
+      if (!details.open) {
+        details.open = true;
+        if (details.setAttribute) { details.setAttribute("open", ""); }
+      }
+      return;
+    }
+    var output = row.querySelector(".tool-output");
+    if (output && !output.classList.contains("tool-expanded")) { setToolOutputExpanded(row, true); }
+  });
+}
+
+// 当前回合的行 = 最后一条用户消息之后（无用户行时视为整屏）。
+function liveTurnRows() {
+  if (!screenEl || !screenEl.querySelectorAll) { return []; }
+  var rows = screenEl.querySelectorAll(".msg-row");
+  if (!rows || !rows.length) { return []; }
+  var boundary = 0;
+  for (var i = 0; i < rows.length; i++) {
+    if (rowRole(rows[i]) === "user") { boundary = i + 1; }
+  }
+  var out = [];
+  for (var j = boundary; j < rows.length; j++) { out.push(rows[j]); }
+  return out;
+}
+
+function markAutoExpanded(rowEl) {
+  if (rowEl.getAttribute && !rowEl.getAttribute(USER_EXPANDED_ATTR)) {
+    setRowAttr(rowEl, AUTO_EXPANDED_ATTR, "1");
+  }
+}
+
+// 展开单块（推理面板 / 工具输出）；用户已接管的块只展开、不改自动标记。
+function autoExpandRow(rowEl) {
+  var details = rowEl.querySelector ? rowEl.querySelector(".reasoning-block") : null;
+  if (details) {
+    if (!details.open) {
+      details.open = true; // 真实 DOM：open 属性随属性反射；测试桩读该属性
+      if (details.setAttribute) { details.setAttribute("open", ""); }
+    }
+    markAutoExpanded(rowEl);
+    return;
+  }
+  var output = rowEl.querySelector ? rowEl.querySelector(".tool-output") : null;
+  if (!output) { return; }
+  var labelEl = rowEl.querySelector(".tool-toggle");
+  if (labelEl && labelEl.classList && labelEl.classList.contains("tool-toggle-off")) { return; }
+  if (!output.classList.contains("tool-expanded")) { setToolOutputExpanded(rowEl, true); }
+  markAutoExpanded(rowEl);
+}
+
+// 折叠单块：只回收「自动展开且用户没接管」的块；用户手动展开的保持展开。
+function autoCollapseRow(rowEl) {
+  if (!rowEl.getAttribute) { return; }
+  if (rowEl.getAttribute(USER_EXPANDED_ATTR)) {
+    clearRowAttr(rowEl, AUTO_EXPANDED_ATTR);
+    return;
+  }
+  if (!rowEl.getAttribute(AUTO_EXPANDED_ATTR)) { return; }
+  clearRowAttr(rowEl, AUTO_EXPANDED_ATTR);
+  var details = rowEl.querySelector ? rowEl.querySelector(".reasoning-block") : null;
+  if (details) {
+    if (details.open) {
+      details.open = false;
+      if (details.removeAttribute) { details.removeAttribute("open"); }
+    }
+    return;
+  }
+  var output = rowEl.querySelector ? rowEl.querySelector(".tool-output") : null;
+  if (output && output.classList.contains("tool-expanded")) { setToolOutputExpanded(rowEl, false); }
+}
+
+// 活跃回合刷新：最后一块（推理 / 工具）总是展开；被更新的自动展开块折回默认态。
+// 仅由活跃回合的刷新路径调用（refreshScreen 的 expandLiveTail 选项），静态/历史
+// 刷新不受影响。
+export function expandLiveTailBlocks() {
+  var rows = liveTurnRows();
+  if (!rows.length) { return; }
+  var lastReasoning = null;
+  var lastTool = null;
+  for (var i = 0; i < rows.length; i++) {
+    var role = rowRole(rows[i]);
+    if (role === "reasoning") { lastReasoning = rows[i]; }
+    else if (role === "tool") { lastTool = rows[i]; }
+  }
+  for (var j = 0; j < rows.length; j++) {
+    if (rows[j] === lastReasoning || rows[j] === lastTool) { continue; }
+    autoCollapseRow(rows[j]);
+  }
+  if (lastReasoning) { autoExpandRow(lastReasoning); }
+  if (lastTool) { autoExpandRow(lastTool); }
+}
+
+// 回合结束：本回合内自动展开的块折回默认折叠态（用户手动展开的不动）。
+export function collapseLiveTailBlocks() {
+  var rows = liveTurnRows();
+  for (var i = 0; i < rows.length; i++) { autoCollapseRow(rows[i]); }
+}
+
+// 记录「用户手动展开了推理面板」：点击 summary 的原生切换发生在 click 默认动作
+// 之后，延迟一拍读取切换后的状态（程序化 open 不经过本函数，不会被误记为用户）。
+function noteReasoningUserToggle(detailsEl) {
+  if (!detailsEl) { return; }
+  setTimeout(function () {
+    var rowEl = detailsEl.closest ? detailsEl.closest(".msg-row") : null;
+    if (!rowEl || !rowEl.setAttribute) { return; }
+    if (detailsEl.open) {
+      setRowAttr(rowEl, USER_EXPANDED_ATTR, "1");
+    } else {
+      clearRowAttr(rowEl, USER_EXPANDED_ATTR);
+      clearRowAttr(rowEl, AUTO_EXPANDED_ATTR);
+    }
+    rememberUserExpanded(rowEl, detailsEl.open);
+  }, 0);
 }
 
 // ---- 服务端消息窗口渲染 ----
@@ -569,6 +747,19 @@ export function appendLocalConversationRow(role, content, localKind) {
   }
 }
 
+// 替换同角色的本地行（迟到终稿收敛用，见 stream.js::convergeFinishedStreamText）：
+// 先移除旧的本地承载行再按既有顺序规则插入新行，保证同一段内容只有一个本地
+// 承载者。随后 refreshScreen 的权威窗口对账会按内容覆盖判定决定去留。
+export function replaceLocalConversationRow(role, content, localKind) {
+  if (!screenEl || !content) { return; }
+  var kind = localKind || "stream";
+  var stale = screenEl.querySelectorAll('[data-msg-local="' + kind + '"]');
+  stale.forEach(function (el) {
+    if (rowRole(el) === role) { el.remove(); }
+  });
+  appendLocalConversationRow(role, content, kind);
+}
+
 // 供 stream.js 记录基线：本地兜底行 / 乐观回显生成时的服务端窗口右边界。
 export function getServerWindowState() {
   return { start: loadedStart, end: loadedEnd, total: serverMessageTotal };
@@ -635,6 +826,9 @@ function applyServerWindow(messages, win) {
   orderConversationRows();
   renderPendingPrompts(messages, w);
   refreshToolOutputToggles();
+  // 窗口重建会丢掉行上的用户展开标记：按索引账本恢复（自动折叠只回收自动
+  // 展开的块，用户点开的内容不因刷新折回）。
+  restoreUserExpandedRows();
 }
 
 // 过滤下 0 命中：服务端返回空 messages（text 随之为空），显式给出「没有匹配」
@@ -888,6 +1082,13 @@ export function dropPendingUserPrompt(text) {
 // 正在显示的流式气泡（hideStreamMessage 会终止实时渲染视图）。
 export function refreshScreen(forceClear, options) {
   var keepStream = !!(options && options.keepStream);
+  // 活跃回合：窗口落地后把最后一块推理/工具展开、被更新的自动展开块折回
+  // （见 expandLiveTailBlocks）；回合结束的收尾刷新用 collapseLiveTail 把
+  // 本回合自动展开的块折叠回默认态（用户手动展开的不动）。
+  var expandLiveTail = !!(options && options.expandLiveTail);
+  var collapseLiveTail = !!(options && options.collapseLiveTail);
+  // 会话切换/新建（forceClear）：旧会话的用户展开意图不带进新会话。
+  if (forceClear) { clearUserExpandedLedger(); }
   var seq = ++screenReqSeq;
   // 只取最新一页（msg_limit）；更早的消息由上滚懒加载（loadOlderMessages）。
   // 过滤条件（roles/q）交给服务端：前端只持有最新一页，客户端过滤会漏掉未加载
@@ -926,6 +1127,10 @@ export function refreshScreen(forceClear, options) {
         screenEl.textContent = data.text || "";
         resetConversationWindow();
       }
+      // 放在窗口对账（含 refreshToolOutputToggles 的溢出测量）之后：先让控件
+      // 判定生效，再展开/折叠，避免刚展开就被折叠态覆盖。
+      if (collapseLiveTail) { collapseLiveTailBlocks(); }
+      else if (expandLiveTail) { expandLiveTailBlocks(); }
       if (!keepStream) {
         hideStreamMessage();
       }
@@ -1178,6 +1383,10 @@ export function initChat() {
       if (modeBtn) { toggleMessageRenderMode(modeBtn); return; }
       var labelEl = (e.target && e.target.closest) ? e.target.closest(".tool-toggle") : null;
       if (labelEl) { toggleToolOutput(labelEl); }
+      // 推理面板 summary：用户原生展开/收起（不拦截默认行为）→ 记录用户意图，
+      // 自动折叠永不回收用户手动展开的块。
+      var detailsEl = (e.target && e.target.closest) ? e.target.closest(".reasoning-block") : null;
+      if (detailsEl && e.target.tagName === "SUMMARY") { noteReasoningUserToggle(detailsEl); }
     });
     conversationEl.addEventListener("keydown", function (e) {
       if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") { return; }

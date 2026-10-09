@@ -8,6 +8,12 @@
 //      （不重建已有节点）、窗口右移时保留已加载的更早内容（游标不回退）
 //   5. 上滚触发 loadOlderMessages：msg_before 游标、前插顺序、scrollTop 锚定补偿、到顶停止
 //   6. 顶部提示行：还有更早消息时提示「上滚加载更早消息」，请求中显示加载态，到最早一条后移除
+//   17. 流式收口：turn_start 的 screen 刷新保留实时气泡（keepStream）、turn_end 用
+//       assistant_snapshot/reasoning_snapshot 收敛被丢弃的增量、迟到终稿补全本地兜底行、
+//       heartbeat 的权威 session_busy 收口气泡，以及 assistant_message/compact_end 监听注册
+//   18. 活跃回合展开/折叠统一策略：最后一块总是展开、被更新的块与回合结束时
+//       自动折叠、用户手动展开的块（含历史）不自动折叠；工具行同步抬头控件
+//       文案/aria，静态刷新不自动展开
 import assert from "node:assert";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -876,6 +882,194 @@ assert.strictEqual(liveAfterSwitch.reasoning, "", "旧会话推理不得带入�
 await flush();
 assert.strictEqual(screenEl.querySelectorAll('[data-msg-local="stream"]').length, 0,
   "复位后不得把旧会话内容落成新会话的本地兜底行");
+
+// ---- 17. 流式收口：turn_start 保留实时气泡 / turn_end 快照收敛 / 迟到终稿补全 ----
+function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+// 17-pre. 终稿/压缩事件必须注册监听：漏注册时 switch 分支永远不可达（静默丢帧）。
+["assistant_message", "compact_end"].forEach(function (name) {
+  assert.ok(es.listeners[name] && es.listeners[name].length > 0,
+    name + " 必须注册 EventSource 监听（否则服务端帧被浏览器静默丢弃）");
+});
+
+// 17a. beginStream 触发的 screen 刷新必须保留实时气泡（keepStream）：默认路径
+// 会在响应落地后隐藏气泡，整轮打字机不可见（只能等回合末的权威快照）。
+screenQueue.push(freshWindowPayload());
+stream.beginStream();
+await flush();
+assert.strictEqual(elements["stream-msg"].style.display, "block",
+  "turn_start 的 screen 刷新不得隐藏实时气泡（打字机可见性回归）");
+
+// 17b. 增量被服务端队列静默丢弃（模拟只到半截）时，turn_end 的请求边界快照
+// 必须整段收敛（与 TUI encoder 的 assistantSnapshotKey/reasoningSnapshotKey 同语义）。
+stream.appendStreamText("前半");
+es.emit("turn_end", {
+  _event: { sequence: 3 },
+  assistant_snapshot: "前半后半",
+  reasoning_snapshot: "完整推理",
+});
+var converged = stream.getLiveStreamState();
+assert.strictEqual(converged.text, "前半后半",
+  "turn_end 必须用 assistant_snapshot 收敛被丢弃的增量");
+assert.strictEqual(converged.reasoning, "完整推理",
+  "turn_end 必须用 reasoning_snapshot 收敛推理流");
+stream.resetStreamState(); // 收尾本节流式状态，避免打字机把落行带进下一节
+
+// 17c. 迟到终稿（assistant_message 在气泡收尾后到达）：本地兜底行必须用权威
+// 全文补全，而不是停留在截断的累积文本上。
+screenQueue.push(freshWindowPayload());
+stream.beginStream();
+await flush();
+stream.appendStreamText("半截");
+stream.endStream(); // turn_end 先到：打字机排空后 finishStream 落本地兜底行
+await sleep(160);
+assert.strictEqual(stream.isStreamActive(), false, "打字机排空后流式状态应已收尾");
+var fetchesBeforeLateFinal = screenFetchUrls().length;
+es.emit("assistant_message", { _event: { sequence: 4 }, content: "半截正文" });
+assert.strictEqual(stream.getLiveStreamState().text, "半截正文",
+  "迟到终稿必须收敛已收尾的本地兜底行");
+assert.ok(screenFetchUrls().length > fetchesBeforeLateFinal,
+  "迟到终稿应再拉一次权威快照（finishStream 那次可能早于终稿落库）");
+var lateRows = screenEl.querySelectorAll('[data-msg-local="stream"]').filter(function (row) {
+  return rowText(row).indexOf("半截正文") >= 0;
+});
+assert.strictEqual(lateRows.length, 1,
+  "本地兜底行应只有一条完整终稿（截断行被替换）");
+stream.resetStreamState();
+
+// 17d. turn_end 丢帧自愈：heartbeat 的权威 session_busy=false 收口流式气泡。
+screenQueue.push(freshWindowPayload());
+stream.beginStream();
+await flush();
+stream.appendStreamText("输出中");
+es.emit("heartbeat", { _event: { sequence: 5 }, session_busy: false, timestamp: "2026-01-01T00:00:00Z" });
+assert.strictEqual(stream.isStreamEnded(), true,
+  "heartbeat 的权威空闲态应收口流式气泡（turn_end 丢帧兜底）");
+stream.resetStreamState();
+
+// ---- 18. 活跃回合展开/折叠统一策略 ----
+// 策略：活跃时最后一块总是展开；被更新的块与回合结束时自动折叠；用户手动
+// 展开的块（含历史）永不自动折叠。
+var liveTailPayload = screenPayload(0, 5, 5, {
+  contents: { 0: "你好", 1: "旧推理内容", 2: "再来", 3: "新推理内容", 4: "工具输出第一行" },
+  roles: { 0: "user", 1: "reasoning", 2: "user", 3: "reasoning", 4: "tool" },
+});
+function reasoningRows() {
+  return screenEl.querySelectorAll(".msg-row").filter(function (row) {
+    return row.classList.contains("msg-reasoning");
+  });
+}
+function makeToolProbe() {
+  var row = parseHTML(chat.chatMsgRowHtml("tool", "line1\nline2\nline3", false, 900))[0];
+  screenEl.appendChild(row);
+  return row;
+}
+
+// 18a. 静态刷新（无 expandLiveTail）：推理保持折叠（历史回放语义不变）。
+screenQueue.length = 0; // 清掉前面小节未消费的快照，保证本节渲染的是本载荷
+screenQueue.push(liveTailPayload);
+chat.refreshScreen();
+await flush();
+assert.strictEqual(reasoningRows().length, 2, "窗口应渲染两条推理行");
+assert.ok(!reasoningRows()[1].querySelector(".reasoning-block").open,
+  "非活跃刷新不得自动展开推理（历史回放保持折叠）");
+
+// 18b. 活跃刷新（expandLiveTail）：最后一块总是展开；更早的推理（最后一条
+// 用户消息之前）保持折叠，不被波及。
+screenQueue.push(liveTailPayload);
+chat.refreshScreen(false, { expandLiveTail: true });
+await flush();
+assert.ok(!reasoningRows()[0].querySelector(".reasoning-block").open,
+  "历史推理（最后一条用户消息之前）保持折叠");
+assert.strictEqual(reasoningRows()[1].querySelector(".reasoning-block").open, true,
+  "活跃回合的最后一块推理必须自动展开");
+assert.strictEqual(reasoningRows()[1].getAttribute("data-auto-expanded"), "1",
+  "自动展开的块应带 data-auto-expanded 标记（自动折叠只回收自己展开的块）");
+
+// 18c. 工具行：自动展开并同步抬头控件文案/aria（直接构造折叠行，不依赖
+// 浏览器排版测量）。
+var probeRow = makeToolProbe();
+chat.expandLiveTailBlocks();
+var probeOutput = probeRow.querySelector(".tool-output");
+var probeToggle = probeRow.querySelector(".tool-toggle");
+assert.ok(probeOutput.classList.contains("tool-expanded"), "最后一块工具输出应自动展开");
+assert.strictEqual(probeToggle.querySelector(".tool-toggle-action").textContent, "收起",
+  "自动展开后抬头控件文案应为「收起」");
+assert.strictEqual(probeToggle.getAttribute("aria-expanded"), "true",
+  "自动展开后 aria-expanded 应为 true");
+
+// 18d. 被更新的块自动折叠：新的工具行成为最后一块后，旧的自动展开块折回折叠态。
+var probeRow2 = makeToolProbe();
+chat.expandLiveTailBlocks();
+assert.ok(!probeOutput.classList.contains("tool-expanded"),
+  "被更新的自动展开块应折回折叠态（完成后再折叠）");
+assert.strictEqual(probeToggle.querySelector(".tool-toggle-action").textContent, "展开",
+  "折叠后抬头控件文案应还原为「展开」");
+assert.ok(probeRow2.querySelector(".tool-output").classList.contains("tool-expanded"),
+  "新的最后一块工具输出应展开");
+probeRow.remove();
+probeRow2.remove();
+
+// 18e. 回合结束折叠：collapseLiveTailBlocks 回收本回合自动展开的块。
+screenQueue.push(liveTailPayload);
+chat.refreshScreen(false, { expandLiveTail: true });
+await flush();
+assert.strictEqual(reasoningRows()[1].querySelector(".reasoning-block").open, true,
+  "前置：活跃刷新后最后一块推理展开");
+chat.collapseLiveTailBlocks();
+assert.ok(!reasoningRows()[1].querySelector(".reasoning-block").open,
+  "回合完成后自动展开的推理应折回折叠态");
+assert.strictEqual(reasoningRows()[1].getAttribute("data-auto-expanded"), null,
+  "折叠后应清除自动展开标记");
+
+// 18f. 用户手动展开保护：手动展开的块不参与自动折叠（当前回合与历史同理）。
+var userRow = reasoningRows()[1];
+var userDetails = userRow.querySelector(".reasoning-block");
+function clickSummary(detailsEl) {
+  conversationEl.dispatch("click", {
+    target: detailsEl.querySelector("summary"), currentTarget: conversationEl,
+    preventDefault: function () {}, stopPropagation: function () {},
+  });
+}
+userDetails.open = true; // 模拟浏览器原生 toggle 的切换结果
+clickSummary(userDetails);
+await flush(); // noteReasoningUserToggle 延迟一拍读取切换后的状态
+assert.strictEqual(userRow.getAttribute("data-user-expanded"), "1",
+  "点击 summary 后应记录用户展开意图");
+chat.collapseLiveTailBlocks();
+assert.strictEqual(userDetails.open, true, "用户手动展开的块不得被自动折叠");
+userDetails.open = false; // 手动收起：清除用户标记
+clickSummary(userDetails);
+await flush();
+assert.strictEqual(userRow.getAttribute("data-user-expanded"), null,
+  "手动收起后应清除用户标记");
+// 历史块（最后一条用户消息之前）不在自动策略的作用域内：手动展开后保持原样。
+var historyDetails = reasoningRows()[0].querySelector(".reasoning-block");
+historyDetails.open = true;
+chat.collapseLiveTailBlocks();
+assert.strictEqual(historyDetails.open, true, "历史块不参与自动折叠（保持用户状态）");
+
+// 18g. 用户展开意图跨窗口重建保留（索引账本）；会话切换清空账本。
+var ledgerRow = screenEl.querySelector('[data-msg-index="3"]');
+var ledgerDetails = ledgerRow.querySelector(".reasoning-block");
+ledgerDetails.open = true;
+clickSummary(ledgerDetails);
+await flush();
+assert.strictEqual(ledgerRow.getAttribute("data-user-expanded"), "1",
+  "前置：用户展开意图已记录");
+screenQueue.push(liveTailPayload); // 同一窗口的普通刷新：行元素会被重建
+chat.refreshScreen();
+await flush();
+var rebuiltRow = screenEl.querySelector('[data-msg-index="3"]');
+assert.ok(rebuiltRow && rebuiltRow !== ledgerRow, "前置：窗口刷新应重建行元素");
+assert.strictEqual(rebuiltRow.querySelector(".reasoning-block").open, true,
+  "用户手动展开的块在窗口重建后应恢复展开（不自动折叠跨刷新成立）");
+screenQueue.push(liveTailPayload);
+chat.refreshScreen(true); // forceClear = 会话切换/新建
+await flush();
+var freshRow = screenEl.querySelector('[data-msg-index="3"]');
+assert.ok(!freshRow.querySelector(".reasoning-block").open,
+  "会话切换后不再恢复旧会话的用户展开意图（账本已清空）");
 
 clearTestIntervals();
 console.log("verify-micro-web-msg-window: 全部断言通过");

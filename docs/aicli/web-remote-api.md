@@ -506,7 +506,7 @@ curl -N http://127.0.0.1:61772/web/api/events
 curl -s http://127.0.0.1:61772/web/api/events/schema | jq '.[].event'
 ```
 
-事件含 `connected`（会话/忙碌/待审批快照）、`turn_start` / `turn_end`、`assistant_delta`、`tool_start` / `tool_end`、`approval_requested`、`question_asked`、`session_interrupted` 等；每条 data 带 `_event.sequence` 序列号，断线重连后可按序列补偿。
+事件含 `connected`（会话/忙碌/待审批快照）、`turn_start` / `turn_end`、`assistant_delta`、`assistant_message`（回合终稿完整文本）、`tool_start` / `tool_end`、`approval_requested`、`question_asked`、`session_interrupted` 等；每条 data 带 `_event.sequence` 序列号，断线重连后可按序列补偿。`turn_end`（每次 LLM 请求完成）额外携带请求边界权威快照 `assistant_snapshot` / `reasoning_snapshot`——SSE 队列满时增量是静默丢帧，消费端应在该边界用快照整段收敛（micro web client 与 TUI 渲染器同语义），否则丢失的增量会让输出永久截断。`heartbeat` 载荷带 `session_busy`，供客户端在 `turn_end` 丢帧时收口流式状态。
 
 ## 7. 端到端脚本示例（等待回答并取文本）
 

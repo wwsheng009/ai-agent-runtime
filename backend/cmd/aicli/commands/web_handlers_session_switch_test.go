@@ -145,7 +145,11 @@ func TestChatWebSessionsAssetUsesSessionSwitchedEvent(t *testing.T) {
 	sse := fetchChatWebAsset(t, "js/sse.js")
 	for _, token := range []string{
 		// 订阅列表：没有它，EventSource 不会把该事件交给 onSSEEvent。
-		`"session_switched", "session_interrupted"`,
+		// 按「符号存在」而不是相邻字面量断言：监听数组会随服务端事件全集
+		// 增删重排（如新增 error/compact_* 监听），逐字匹配相邻格式会把
+		// 无关变更变成假失败——与下方 import 的断言口径一致。
+		`"session_switched"`,
+		`"session_interrupted"`,
 		`case "session_switched":`,
 		`if (eventName === "session_switched") { notifySessionSwitchedCompleted(); }`,
 	} {

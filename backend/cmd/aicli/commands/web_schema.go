@@ -285,6 +285,14 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 		pickField(data, payload, "request_id")
 		pickField(data, payload, "finish_reason")
 		pickField(data, payload, "usage")
+		// 请求边界权威快照（internal/agent/loop.go 在每次 llm.request.finished
+		// 都带）：assistant_snapshot 是本次模型响应的全文，reasoning_snapshot 是
+		// 本次推理流全文。SSE 队列满时增量是静默丢帧（web_handlers.go enqueue），
+		// 客户端只有靠这两个快照才能在请求边界整段收敛——与 TUI 渲染器
+		// （ui/render/encoding 的 assistantSnapshotKey / reasoningSnapshotKey）
+		// 同语义；不透传则 web 端会在增量丢失后永久截断。
+		pickField(data, payload, "assistant_snapshot")
+		pickField(data, payload, "reasoning_snapshot")
 
 	case runtimechat.EventToolStarted:
 		pickField(data, payload, "turn_id")
@@ -463,6 +471,32 @@ func chatWebConnectedPayload(session *ChatSession) map[string]interface{} {
 					"suggestions": state.PendingQuestion.Suggestions,
 				}
 			}
+		}
+	}
+	return payload
+}
+
+// chatWebHeartbeatPayload 构建 heartbeat 事件的 data 字段（§5.2 合成事件）。
+//
+// 载荷带权威 session_busy：客户端在流式期间用它做「尾部丢帧自愈」——
+// turn_end（llm.request.finished）被 SSE 队列静默丢弃时，其后可能不再有任何
+// 帧触发序号守卫的 gap 判定，气泡会永久停在「输出中」；无事件 30s 后的这条
+// heartbeat 是最后的收口信号（见 web/js/sse.js 的 heartbeat 分支）。
+func chatWebHeartbeatPayload(session *ChatSession) map[string]interface{} {
+	payload := map[string]interface{}{
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		"session_id":   "",
+		"session_busy": false,
+	}
+	if session == nil || session.RuntimeSession == nil {
+		return payload
+	}
+	if sessionID := currentRuntimeSessionID(session); sessionID != "" {
+		payload["session_id"] = sessionID
+	}
+	if actor := chatWebSessionActor(session); actor != nil {
+		if state := actor.State(); state != nil {
+			payload["session_busy"] = state.Summary().Busy()
 		}
 	}
 	return payload

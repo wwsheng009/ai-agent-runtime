@@ -1,7 +1,7 @@
 // 打字机流式渲染:turn 增量累积、逐字揭示定时器、流式消息容器管理。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
-import { appendLocalConversationRow, copyTextToClipboard, getUserScrolledAway, refreshScreen, screenEl } from "./chat.js";
+import { appendLocalConversationRow, copyTextToClipboard, getUserScrolledAway, refreshScreen, replaceLocalConversationRow, screenEl } from "./chat.js";
 import { renderMarkdown } from "./markdown.js";
 import { filterAllowsRole, isFilterActive } from "./msg-filter.js";
 import { esc, showToast } from "./util.js";
@@ -133,8 +133,11 @@ export function beginStream() {
   if (visible && !getUserScrolledAway()) {
     streamMsgEl.scrollIntoView(false);
   }
-  // 并行加载对话历史（异步，不影响流式消息渲染）
-  refreshScreen();
+  // 并行加载对话历史（异步，不影响流式消息渲染）。
+  // 必须 keepStream：refreshScreen 默认在响应落地后隐藏流式气泡（那是收尾
+  // 路径的语义），不显式保留的话 turn_start 后第一次 screen 响应就会把刚显示
+  // 的实时气泡藏掉，整轮打字机不可见，用户只能等回合末的权威快照。
+  refreshScreen(false, { keepStream: true, expandLiveTail: true });
   startTypeTimer();
 }
 
@@ -174,7 +177,9 @@ function finishStream() {
     }
   }
   if (streamMsgEl) { streamMsgEl.style.display = "none"; }
-  refreshScreen();
+  // collapseLiveTail：回合完成 → 本回合内自动展开的推理/工具块折回默认折叠态
+  // （统一策略：活跃时最后一块总是展开，完成后折叠；用户手动展开的不回收）。
+  refreshScreen(false, { collapseLiveTail: true });
 }
 
 export function endStream() {
@@ -196,6 +201,9 @@ export function endStream() {
 // ---- 跨模块状态访问接口(拆分引入:可变流式状态不跨模块直读直写) ----
 export function isStreamActive() { return streamActive; }
 export function isStreamEnded() { return streamEnded; }
+// 回合是否仍在进行（turn_start → 打字机排空落行）：活跃回合的节流刷新据此
+// 决定是否展开最新推理/工具块（见 chat.js::expandLiveTailBlocks）。
+export function isTurnLive() { return streamActive || streamEnded; }
 // 实时气泡当前承载的内容：供 chat.js 的窗口对账判定"权威行是否与气泡同源"
 // （同源行让位给气泡，避免同一段内容被渲染两次）。
 export function getLiveStreamState() {
@@ -203,8 +211,28 @@ export function getLiveStreamState() {
 }
 export function appendStreamReasoning(text) { streamReasoning += text; }
 export function appendStreamText(text) { streamText += text; }
-export function setStreamText(text) { streamText = text || streamText; }
+// 请求边界权威快照整段替换（llm.request.finished 的 assistant_snapshot /
+// assistant_message 的终稿内容）：空值忽略；快照比已揭示长度短时收敛游标，
+// 避免揭示计数越过文本长度导致收尾判定异常。
+export function setStreamText(text) {
+  if (text) { streamText = text; }
+  if (streamRevealed > streamText.length) { streamRevealed = streamText.length; }
+}
+export function setStreamReasoning(text) {
+  if (text) { streamReasoning = text; }
+  if (streamReasoningRevealed > streamReasoning.length) { streamReasoningRevealed = streamReasoning.length; }
+}
 export function setStreamTool(text) { streamTool = text; }
+// 迟到终稿（assistant_message 在气泡收尾之后到达）：把权威全文补回已落行的
+// 本地兜底行。surface 可用时随后的 refreshScreen 会用权威行覆盖它；无 surface
+// 时本地行是唯一载体，不能停留在截断的累积文本上。
+export function convergeFinishedStreamText(text) {
+  if (!text || !streamText) { return false; }
+  if (text.length <= streamText.length || text.indexOf(streamText) !== 0) { return false; }
+  streamText = text;
+  replaceLocalConversationRow("assistant", text, "stream");
+  return true;
+}
 export function addStreamImage(src) {
   if (streamImages.indexOf(src) !== -1) { return false; }
   streamImages.push(src);

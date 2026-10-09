@@ -1049,6 +1049,24 @@ func TestChatWebSSEDataForEvent(t *testing.T) {
 	if !ok || img["image_id"] != "img-1" || img["url"] != "data:image/png;base64,AAAA" {
 		t.Fatalf("image_progress image field not passed through: %#v", data6)
 	}
+
+	// 7) turn_end（llm.request.finished）透传请求边界权威快照：
+	//    assistant_snapshot / reasoning_snapshot 是增量被静默丢弃后的整段收敛
+	//    来源（与 TUI encoder 的 assistantSnapshotKey / reasoningSnapshotKey 同源）。
+	data7 := chatWebSSEDataForEvent(runtimeevents.Event{
+		Type: runtimechat.EventLLMRequestFinished,
+		Payload: map[string]interface{}{
+			"turn_id": "t1", "request_id": "r1", "finish_reason": "stop",
+			"assistant_snapshot": "完整正文",
+			"reasoning_snapshot": "完整推理",
+		},
+	})
+	if data7["assistant_snapshot"] != "完整正文" || data7["reasoning_snapshot"] != "完整推理" {
+		t.Fatalf("turn_end snapshots not passed through: %#v", data7)
+	}
+	if data7["finish_reason"] != "stop" {
+		t.Fatalf("turn_end finish_reason missing: %#v", data7)
+	}
 }
 
 func TestChatWebConnectedPayload_NoSession(t *testing.T) {
@@ -1058,6 +1076,17 @@ func TestChatWebConnectedPayload_NoSession(t *testing.T) {
 	}
 	if payload["server_version"] == "" {
 		t.Fatal("server_version empty")
+	}
+}
+
+// heartbeat 带权威 session_busy：turn_end 丢帧后前端靠它收口流式气泡。
+func TestChatWebHeartbeatPayload_NoSession(t *testing.T) {
+	payload := chatWebHeartbeatPayload(nil)
+	if payload["session_busy"] != false {
+		t.Fatalf("session_busy = %v, want false", payload["session_busy"])
+	}
+	if payload["timestamp"] == "" {
+		t.Fatal("timestamp empty")
 	}
 }
 
