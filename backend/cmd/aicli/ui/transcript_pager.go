@@ -501,33 +501,32 @@ type transcriptPagerLoopHooks struct {
 	readKey     func(context.Context) (editorKey, bool, error)
 }
 
+// transcriptPagerLifecycle owns the stdin raw-mode restoration of one pager
+// session. The alternate-screen lease owns DEC 1049 enter/exit and every frame
+// byte (L5-1 D3), so enter is a no-op and close only restores stdin.
 type transcriptPagerLifecycle struct {
-	writer       io.Writer
-	restoreRaw   func() error
-	leaseManaged bool
+	restoreRaw func() error
 }
 
 const transcriptPagerPollInterval = 75 * time.Millisecond
 
-// RunTranscriptPagerWithLease opens a read-only transcript pager. When lease
-// is active it owns the alternate screen transport, otherwise the pager enters
-// and leaves alternate screen itself. A pager never writes into the primary
-// buffer while an alternate lease is held.
+// RunTranscriptPagerWithLease opens a read-only transcript pager under an
+// active alternate-screen lease. The lease owns the DEC 1049 enter/exit
+// transport and every frame byte; a missing or inactive lease is fail-closed
+// (ErrFullScreenUnavailable) and never falls back to raw stdout.
 func RunTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, lease ScreenLease) error {
 	leaseID := uint64(0)
-	leaseManaged := lease != nil && lease.Active()
-	if leaseManaged {
+	if lease != nil {
 		leaseID = lease.ID()
 	}
-	return runTranscriptPagerWithLease(ctx, terminal, options, os.Stdin, os.Stdout, lease, leaseManaged, leaseID)
+	return runTranscriptPagerWithLease(ctx, terminal, options, os.Stdin, lease, leaseID)
 }
 
-func runTranscriptPager(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, reader io.Reader, writer io.Writer, leaseManaged bool, leaseID uint64) error {
-	return runTranscriptPagerWithLease(ctx, terminal, options, reader, writer, nil, leaseManaged, leaseID)
-}
-
-func runTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, reader io.Reader, writer io.Writer, lease ScreenLease, leaseManaged bool, leaseID uint64) error {
-	if terminal == nil || !terminal.SupportsANSI() || (options.View == nil && options.Snapshot == nil) || reader == nil || writer == nil {
+func runTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, options TranscriptPagerOptions, reader io.Reader, lease ScreenLease, leaseID uint64) error {
+	if lease == nil || !lease.Active() {
+		return fullScreenUnavailable("transcript pager requires an active alternate-screen lease", nil)
+	}
+	if terminal == nil || !terminal.SupportsANSI() || (options.View == nil && options.Snapshot == nil) || reader == nil {
 		return ErrFullScreenUnavailable
 	}
 	stdinFile, _ := reader.(*os.File)
@@ -552,7 +551,7 @@ func runTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, option
 		postAction:  options.PostAction,
 		leaseID:     leaseID,
 		writeFrame: func(frame string) error {
-			return writeLeaseManagedFullScreenText(lease, writer, frame)
+			return writeLeaseManagedFullScreenText(lease, frame)
 		},
 		readKey: func(readCtx context.Context) (editorKey, bool, error) {
 			pollCtx, cancel := context.WithTimeout(readCtx, transcriptPagerPollInterval)
@@ -565,9 +564,7 @@ func runTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, option
 		},
 	}
 	lifecycle := transcriptPagerLifecycle{
-		writer:       writer,
-		restoreRaw:   func() error { return term.Restore(int(stdinFile.Fd()), rawState) },
-		leaseManaged: leaseManaged,
+		restoreRaw: func() error { return term.Restore(int(stdinFile.Fd()), rawState) },
 	}
 	if err := lifecycle.enter(); err != nil {
 		return fullScreenUnavailable("enter alternate screen", errors.Join(err, lifecycle.close()))
@@ -579,23 +576,16 @@ func runTranscriptPagerWithLease(ctx context.Context, terminal *Terminal, option
 	return runErr
 }
 
-func (l transcriptPagerLifecycle) enter() error {
-	if l.leaseManaged {
-		return nil
-	}
-	return writeFullScreenSequences(l.writer,
-		"\x1b[?1049h", "\x1b[r", "\x1b[?25l", "\x1b[2J", "\x1b[H")
+// enter is a no-op: the alternate-screen lease owns DEC 1049 enter/exit.
+func (transcriptPagerLifecycle) enter() error {
+	return nil
 }
 
 func (l transcriptPagerLifecycle) close() error {
-	var writeErr error
-	if !l.leaseManaged {
-		writeErr = writeFullScreenSequences(l.writer, "\x1b[?25h", "\x1b[r", "\x1b[?1049l")
-	}
 	if l.restoreRaw != nil {
-		writeErr = errors.Join(writeErr, l.restoreRaw())
+		return l.restoreRaw()
 	}
-	return writeErr
+	return nil
 }
 
 func runTranscriptPagerLoop(ctx context.Context, hooks transcriptPagerLoopHooks) error {

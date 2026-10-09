@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -307,18 +306,22 @@ func (s *FixedBottomSurface) writeAlternateScreen(id uint64, value string) error
 }
 
 // writeLeaseManagedFullScreenText keeps modal frame bytes with their lease
-// owner. Do not wrap AlternateScreenLeaseWriter in io.Writer and pass it to
-// writeFullScreenText: that helper takes the global terminal lock, while the
-// unified TerminalSession then takes its Presenter lock, which would recurse
-// on the non-reentrant lock. The transport writes directly through its own
-// transaction boundary instead.
-func writeLeaseManagedFullScreenText(lease ScreenLease, fallback io.Writer, value string) error {
-	if lease != nil && lease.Active() {
-		if writer, ok := lease.(AlternateScreenLeaseWriter); ok {
-			return writer.WriteAlternateScreen(value)
-		}
+// owner. The raw os.Stdout fallback was retired with L5-1 D3: a missing,
+// inactive, or transport-less lease is fail-closed instead of writing beside
+// the unified terminal owner. Do not wrap AlternateScreenLeaseWriter in
+// io.Writer and pass it to the legacy write helpers: those take the global
+// terminal lock, while the unified TerminalSession then takes its Presenter
+// lock, which would recurse on the non-reentrant lock. The transport writes
+// directly through its own transaction boundary instead.
+func writeLeaseManagedFullScreenText(lease ScreenLease, value string) error {
+	if lease == nil || !lease.Active() {
+		return fmt.Errorf("%w: alternate-screen lease is not active", ErrFullScreenUnavailable)
 	}
-	return writeFullScreenText(fallback, value)
+	writer, ok := lease.(AlternateScreenLeaseWriter)
+	if !ok {
+		return fmt.Errorf("%w: alternate-screen lease has no unified frame writer", ErrFullScreenUnavailable)
+	}
+	return writer.WriteAlternateScreen(value)
 }
 
 // LeaseActive reports whether an alternate-screen lease currently suspends

@@ -220,7 +220,7 @@ func TestFixedBottomSurface_FencedLeaseUsesTerminalSessionTransport(t *testing.T
 	if _, ok := lease.(AlternateScreenLeaseWriter); !ok {
 		t.Fatalf("unified lease does not expose alternate writer: %T", lease)
 	}
-	if err := writeLeaseManagedFullScreenText(lease, legacy, "pager-frame"); err != nil {
+	if err := writeLeaseManagedFullScreenText(lease, "pager-frame"); err != nil {
 		t.Fatalf("writeLeaseManagedFullScreenText: %v", err)
 	}
 	if !strings.Contains(output.String(), "pager-frame") {

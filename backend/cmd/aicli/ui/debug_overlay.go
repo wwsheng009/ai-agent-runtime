@@ -62,13 +62,17 @@ const debugOverlayPollInterval = 75 * time.Millisecond
 // (q/Q/Esc/Enter/Ctrl+C/Ctrl+D). It mirrors the transcript pager's
 // lease-managed lifecycle but keeps no actor-owned semantic state: every frame
 // is a pure projection of the captured body, and scroll state lives only in
-// this loop.
+// this loop. A missing or inactive lease is fail-closed
+// (ErrFullScreenUnavailable) and never falls back to raw stdout.
 func RunDebugOverlayWithLease(ctx context.Context, terminal *Terminal, options DebugOverlayOptions, lease ScreenLease) error {
-	return runDebugOverlayWithLease(ctx, terminal, options, os.Stdin, os.Stdout, lease, lease != nil && lease.Active())
+	return runDebugOverlayWithLease(ctx, terminal, options, os.Stdin, lease)
 }
 
-func runDebugOverlayWithLease(ctx context.Context, terminal *Terminal, options DebugOverlayOptions, reader io.Reader, writer io.Writer, lease ScreenLease, leaseManaged bool) error {
-	if terminal == nil || !terminal.SupportsANSI() || reader == nil || writer == nil {
+func runDebugOverlayWithLease(ctx context.Context, terminal *Terminal, options DebugOverlayOptions, reader io.Reader, lease ScreenLease) error {
+	if lease == nil || !lease.Active() {
+		return fullScreenUnavailable("debug overlay requires an active alternate-screen lease", nil)
+	}
+	if terminal == nil || !terminal.SupportsANSI() || reader == nil {
 		return ErrFullScreenUnavailable
 	}
 	stdinFile, _ := reader.(*os.File)
@@ -87,14 +91,12 @@ func runDebugOverlayWithLease(ctx context.Context, terminal *Terminal, options D
 	defer func() { storeInteractiveInputCarryover(pending) }()
 
 	lifecycle := debugOverlayLifecycle{
-		writer:       writer,
-		restoreRaw:   func() error { return term.Restore(int(stdinFile.Fd()), rawState) },
-		leaseManaged: leaseManaged,
+		restoreRaw: func() error { return term.Restore(int(stdinFile.Fd()), rawState) },
 	}
 	if err := lifecycle.enter(); err != nil {
 		return fullScreenUnavailable("enter alternate screen", errors.Join(err, lifecycle.close()))
 	}
-	runErr := runDebugOverlayLoop(ctx, terminal, options, reader, stdinFile, &pending, lease, writer)
+	runErr := runDebugOverlayLoop(ctx, terminal, options, reader, stdinFile, &pending, lease)
 	if closeErr := lifecycle.close(); closeErr != nil {
 		return fullScreenUnavailable("restore terminal", errors.Join(runErr, closeErr))
 	}
@@ -102,28 +104,19 @@ func runDebugOverlayWithLease(ctx context.Context, terminal *Terminal, options D
 }
 
 type debugOverlayLifecycle struct {
-	writer       io.Writer
-	restoreRaw   func() error
-	leaseManaged bool
+	restoreRaw func() error
 }
 
-func (l debugOverlayLifecycle) enter() error {
-	if l.leaseManaged {
-		return nil
-	}
-	return writeFullScreenSequences(l.writer,
-		"\x1b[?1049h", "\x1b[r", "\x1b[?25l", "\x1b[2J", "\x1b[H")
+// enter is a no-op: the alternate-screen lease owns DEC 1049 enter/exit.
+func (debugOverlayLifecycle) enter() error {
+	return nil
 }
 
 func (l debugOverlayLifecycle) close() error {
-	var writeErr error
-	if !l.leaseManaged {
-		writeErr = writeFullScreenSequences(l.writer, "\x1b[?25h", "\x1b[r", "\x1b[?1049l")
-	}
 	if l.restoreRaw != nil {
-		writeErr = errors.Join(writeErr, l.restoreRaw())
+		return l.restoreRaw()
 	}
-	return writeErr
+	return nil
 }
 
 // debugOverlayState is the local scroll state of the loop. It is deliberately
@@ -132,11 +125,11 @@ type debugOverlayState struct {
 	offset int
 }
 
-func runDebugOverlayLoop(ctx context.Context, terminal *Terminal, options DebugOverlayOptions, reader io.Reader, stdinFile *os.File, pending *[]byte, lease ScreenLease, writer io.Writer) error {
+func runDebugOverlayLoop(ctx context.Context, terminal *Terminal, options DebugOverlayOptions, reader io.Reader, stdinFile *os.File, pending *[]byte, lease ScreenLease) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if terminal == nil || reader == nil || stdinFile == nil || pending == nil || writer == nil {
+	if terminal == nil || reader == nil || stdinFile == nil || pending == nil {
 		return fullScreenUnavailable("debug overlay is not configured", nil)
 	}
 	title := options.Title
@@ -173,7 +166,7 @@ func runDebugOverlayLoop(ctx context.Context, terminal *Terminal, options DebugO
 		}
 		if dirty || width != lastWidth || height != lastHeight {
 			state.offset = clampDebugOverlayOffset(state.offset, len(wrapDebugOverlayBody(bodyLines, width)), height)
-			if err := writeLeaseManagedFullScreenText(lease, writer,
+			if err := writeLeaseManagedFullScreenText(lease,
 				renderDebugOverlayFrame(title, bodyLines, state.offset, width, height, refreshHint)); err != nil {
 				return fullScreenUnavailable("write debug overlay frame", err)
 			}

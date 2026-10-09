@@ -25,7 +25,7 @@ import (
 //
 //   - sanctioned console writers（受认可白名单类，
 //     uiSanctionedConsoleWriterInventory）：启动期探针/句柄初始化、TRACE/诊断通道、
-//     console/plain（--compat-mode）降级承重链、平台差异、启动期无租约回退。
+//     console/plain（--compat-mode）降级承重链、平台差异。
 //     类白名单 + 零新增：不得为任何新交互功能新增条目；条目只在实现退役时删除。
 //   - migration debt（迁移债务，uiWriterMigrationDebtInventory）：等待整改的直写
 //     （InputBox legacy 方法链、默认 stdout 绑定）。删除实现时同步摘除条目；
@@ -57,11 +57,11 @@ func TestUIInteractiveDirectWriterInventory(t *testing.T) {
 	}
 }
 
-// L4 机械口径（2026-10-08 复测）：受认可 21 条/24 点位 + 债务 4 条/4 点位
-// = 合计 25 条/28 点位。ceiling 只允许下调；任何上调都等于重新分类，
-// 必须同步更新计划 §5（L4 记录）与 P0 台账 §4。
+// L5-1 Batch A 机械口径（2026-10-09）：启动期无租约 raw 回落退役后，受认可
+// 17 条/20 点位 + 债务 4 条/4 点位 = 合计 21 条/24 点位。ceiling 只允许下调；
+// 任何上调都等于重新分类，必须同步更新计划 §5 与 P0 台账 §4。
 const (
-	uiSanctionedConsoleWriterCeiling = 24
+	uiSanctionedConsoleWriterCeiling = 20
 	uiWriterMigrationDebtCeiling     = 4
 )
 
@@ -100,12 +100,9 @@ func uiSanctionedConsoleWriterInventory() []uiDirectWriterInventoryEntry {
 		{File: "status.go", Func: "method PrintTo", Kind: "os.Std*", Count: 1},
 		// 启动期 OSC 查询（一次性探针，发生在 presenter attach 之前）。
 		{File: "osc_live.go", Func: "LiveOSCProbe", Kind: "os.Std*", Count: 1},
-		// 全屏/覆盖层：会话内路径已带 lease transport；raw 分支仅在 lease 缺失时
-		// 可达（启动选择）。plan §4.4 D 类：启动期 picker 接租约后再评估收编。
-		{File: "debug_overlay.go", Func: "RunDebugOverlayWithLease", Kind: "os.Std*", Count: 1},
-		{File: "fullscreen_list.go", Func: "SelectFullScreenList", Kind: "os.Std*", Count: 1},
-		{File: "fullscreen_list.go", Func: "SelectFullScreenListWithLease", Kind: "os.Std*", Count: 1},
-		{File: "transcript_pager.go", Func: "RunTranscriptPagerWithLease", Kind: "os.Std*", Count: 1},
+		// 全屏/覆盖层 raw 回落已退役（L5-1 Batch A）：启动选择器改经
+		// RunStartupFullScreenList 的租约流，三个 WithLease 入口 lease 必需且
+		// fail-closed，此处不再有条目。
 		// TERM_SESSION_TRACE 门控的会话调试追踪（诊断通道，非交互输出）。
 		{File: "terminal_session.go", Func: "method flushTransactionLocked", Kind: "fmt.Print", Count: 3},
 		// console/UTF8 句柄初始化与 Terminal 构造（进程启动期，非帧输出）。

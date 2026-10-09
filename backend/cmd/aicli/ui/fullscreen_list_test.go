@@ -265,23 +265,28 @@ func TestRunFullScreenListLoopRedrawsOnResizeWithoutKey(t *testing.T) {
 	}
 }
 
-func TestRunFullScreenListSessionRestoresTerminalOnWriteFailures(t *testing.T) {
+// TestRunFullScreenListSessionLeaseManagedContract pins the D3 contract: the
+// list lifecycle never writes alternate-screen sequences (the lease owns DEC
+// 1049 enter/exit and the frames), close restores stdin raw mode exactly once,
+// and a frame failure stays fail-closed (ErrFullScreenUnavailable).
+func TestRunFullScreenListSessionLeaseManagedContract(t *testing.T) {
 	tests := []struct {
 		name       string
-		failAt     int
+		failFrame  bool
 		restoreErr error
 	}{
-		{name: "enter alternate screen", failAt: 1},
-		{name: "frame", failAt: 6},
-		{name: "exit alternate screen", failAt: 9},
+		{name: "frame failure", failFrame: true},
 		{name: "raw restore", restoreErr: errors.New("restore raw failed")},
+		{name: "clean close"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			writer := &failAtFullScreenWriter{failAt: test.failAt}
+			writer := &errorWriter{}
+			if test.failFrame {
+				writer.failOn = 1
+			}
 			restoreCalls := 0
 			lifecycle := fullScreenListLifecycle{
-				writer: writer,
 				restoreRaw: func() error {
 					restoreCalls++
 					return test.restoreErr
@@ -290,50 +295,33 @@ func TestRunFullScreenListSessionRestoresTerminalOnWriteFailures(t *testing.T) {
 			hooks := fullScreenListLoopHooks{
 				refreshSize: func() (int, int) { return 80, 12 },
 				writeFrame: func(frame string) error {
-					return writeFullScreenText(writer, frame)
+					_, writeErr := writer.Write([]byte(frame))
+					return writeErr
 				},
 				readKey: func(context.Context) (editorKey, bool, error) {
 					return editorKey{kind: editorKeyCancelPopup}, true, nil
 				},
 			}
-			_, _, err := runFullScreenListSession(context.Background(), FullScreenListOptions{
+			result, _, err := runFullScreenListSession(context.Background(), FullScreenListOptions{
 				Items: []FullScreenListItem{{Title: "item"}},
 			}, hooks, lifecycle)
-			if !errors.Is(err, ErrFullScreenUnavailable) {
-				t.Fatalf("expected write or restore failure to return ErrFullScreenUnavailable, got %v", err)
+			if test.failFrame || test.restoreErr != nil {
+				if !errors.Is(err, ErrFullScreenUnavailable) {
+					t.Fatalf("expected lease-managed failure to return ErrFullScreenUnavailable, got %v", err)
+				}
+			} else if err != nil || !result.Cancelled {
+				t.Fatalf("expected clean cancel, result=%#v err=%v", result, err)
 			}
 			if restoreCalls != 1 {
 				t.Fatalf("expected raw mode to be restored exactly once, got %d", restoreCalls)
 			}
-			if !writer.saw("\x1b[?25h") || !writer.saw("\x1b[?1049l") {
-				t.Fatalf("expected best-effort cursor and alternate-screen restore, writes=%q", writer.writes)
+			for _, sequence := range []string{"\x1b[?1049h", "\x1b[?25h", "\x1b[?1049l", "\x1b[r"} {
+				if strings.Contains(writer.String(), sequence) {
+					t.Fatalf("lease-managed lifecycle wrote raw sequence %q: %q", sequence, writer.String())
+				}
 			}
 		})
 	}
-}
-
-type failAtFullScreenWriter struct {
-	failAt int
-	calls  int
-	writes []string
-}
-
-func (writer *failAtFullScreenWriter) Write(value []byte) (int, error) {
-	writer.calls++
-	writer.writes = append(writer.writes, string(value))
-	if writer.calls == writer.failAt {
-		return 0, errors.New("test write failed")
-	}
-	return len(value), nil
-}
-
-func (writer *failAtFullScreenWriter) saw(value string) bool {
-	for _, write := range writer.writes {
-		if write == value {
-			return true
-		}
-	}
-	return false
 }
 
 func TestRenderFullScreenListFrameSanitizesDataBeforeAddingTrustedStyle(t *testing.T) {
