@@ -36,7 +36,10 @@
 - `/normal` 缺口修复：守卫放行 + 结构化认领（与 /s、/n 同一处理器，stream=false）；
   回归测试 `TestStructuredStreamShortcuts_AllFormsClaimed`（4 子例：/s、/n、/normal-plain、
   /normal-unified）。
-- 验证：目标测试 + Stream 族绿；gofmt/vet/build 绿；commands 全量回归（随本批执行）。
+- 验证：目标测试 + Stream 族绿；gofmt/vet/build 绿；commands 全量复跑绿（187s）。
+  首跑出现 1 个环境 flake（`TestLocalActorRegistryDiscardWorktreeRefusesWhileChildRunning`：
+  `initLocalIsolationTestRepo` 内 git 临时仓库初始化偶发 "not a git repository"）——
+  隔离 ×5 全绿、actor 家族子集绿、全量复跑绿，按环境偶发登记（非本刀文件面）。
 
 ### Batch B 待执行：fence 残余迁移 → 删 fence
 
@@ -77,3 +80,6 @@
 
 - 2026-10-09 Batch A：`f5c2286d`（/normal 修复 + 回归测试 4 子例）；机械枚举口径
   （目录全集 − 分派认领 − 守卫 − 门禁）固化为 §1，后续批次复测同法。
+- 2026-10-09 登记（环境 flake，非本刀）：`TestLocalActorRegistryDiscardWorktreeRefusesWhileChildRunning`
+  （全量首跑偶发 1 次；隔离 ×5 / 家族子集 / 全量复跑全绿；失败点在 `initLocalIsolationTestRepo`
+  的 git 临时仓库初始化，与命令通道改动无文件面交集）。
