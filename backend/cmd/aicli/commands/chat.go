@@ -1976,6 +1976,13 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		// 处理命令
 		if strings.HasPrefix(input, "/") {
 			if !chatInputCommandAllowed(session, input) {
+				// 非 Ready（典型：托管挂起 "Waiting for subagents"，§6.12）时
+				// 主循环重新成为读侧；忙时 capture 通道随前台 run 结束已停止，
+				// 必须在此把 I/S 档命令接回忙时宿主，否则 /agents、/todos、
+				// /help 等设计上允许忙时打开副屏的命令会被整体拒绝（功能隔断）。
+				if dispatchBusySlashCommandFromMainLoop(session, input) {
+					continue
+				}
 				if session != nil && session.Interaction != nil {
 					session.Interaction.RenderLocalSupplement("[input] 当前状态不是 Ready，暂不接受 slash 命令；可等待 Ready 后重试，或连续按两次 Ctrl+C 中断/退出。")
 				}

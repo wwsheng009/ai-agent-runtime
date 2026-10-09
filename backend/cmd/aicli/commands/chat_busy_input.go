@@ -40,6 +40,31 @@ func waitForBusyScreenIdle(session *ChatSession) error {
 	return nil
 }
 
+// dispatchBusySlashCommandFromMainLoop 在主循环读到 slash 命令且会话非 Ready
+// （典型：托管挂起 "Waiting for subagents"，§6.12）时，把 I/S 档命令接回忙时
+// 通道，与 capture 通道（startBusyQueuedInputCapture -> consumeBusyCommand）
+// 共用同一策略解析与宿主执行入口（runtimeCommandHost.SubmitBusy）。
+//
+// 背景（功能隔断点）：忙时 capture 的生命周期绑定 sendMessage 的一次前台 run
+// （chat_send.go -> startBusyQueuedInputCapture）；托管挂起期间前台 run 已结束
+// （actor 仍 Busy 等待义务），capture 已停止，主循环重新成为读侧。若主循环只按
+// 「不是 Ready」整体拒绝，/agents、/todos、/help 等设计上允许忙时打开副屏的
+// 命令在挂起期全部不可用——I/S 档路由只存在于 capture 内，跨不过 run 边界。
+//
+// 返回 true 表示命令已被宿主占有（执行或拒绝并给出提示）；false 表示未占有
+// （非 I/S 档、能力/仲裁门降级等），调用方保持原有拒绝提示路径（fail-closed）。
+func dispatchBusySlashCommandFromMainLoop(session *ChatSession, text string) bool {
+	if session == nil || session.Interaction == nil || !isSlashCommandInput(text) {
+		return false
+	}
+	switch chatInputCommandBusyPolicy(session, text) {
+	case chatBusyPolicyImmediate, chatBusyPolicyScreen:
+		return runtimeCommandHostFor(session).SubmitBusy(text)
+	default:
+		return false
+	}
+}
+
 func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return func() {}
