@@ -13,20 +13,19 @@
 - 目录全集 `chatSlashCommandCatalog()`：72 个名称（60 主名 + 12 别名）。
 - 覆盖判定 = 结构化分派认领 ∪ 守卫允许清单（`chat_command_result.go:366-383`）∪ 门禁（/exit 等）：
   **唯一缺口 `/normal`**（目录全名，Alias=/n；`/n` 已认领、全名漏接）→ Batch A 已修复。
-- 残余拒绝面（Batch B 后）：
-  - `chat_unified_command_gate.go`：gate default（未认领命令 + unknown 命令）与
-    `/exit`/`/help` 兜底；`rejectUnmigratedUnifiedChatCommand` 保护 /call、/skill 等
-    非分派入口——Batch C 处理；
-  - `chat_debug_archive.go:57`：/debug 归档子命令未迁移（独立小项，Batch C 顺带）；
-  - fence（/backtrack、/rewind、/resume 残余变体）：**Batch B 已全量删除**（`f396f2d9`）。
+- 残余拒绝面（Batch C 后）：统一会话的最终回落为两档 typed 结果
+  （`chat_unified_command_fallback.go`）——未知命令 → "错误: 未知命令: X"；目录内命令的
+  未支持参数/状态形式 → "错误: X 的当前参数或状态形式不受支持"。无任何"尚未迁移"类文案。
+- 后续小项（登记）：/goal、/memory 的持久化/状态错误分支等仍落入"不受支持"档，可精确化为
+  逐分支 typed 文案；裸形式与主路径已全部 typed 并被覆盖测试机械守卫。
+- fence（/backtrack、/rewind、/resume 残余变体）：**Batch B 已全量删除**（`f396f2d9`）。
 - fence 曾覆盖的变体（Batch B 收编明细）：
   - `/rewind` 数字首参/空参/list：收编为 /backtrack 别名语义（typed，含 --apply/--submit）；
     其余（select/audit/checkpoint-id 等）：`rewindUnsupportedMessage` typed 提示（与 legacy 同文案）。
   - `/resume` picker 前置缺失分支：`resumePickerUnavailableMessage` typed 降级（fail-closed，
     plain/JSON 路径仍回落 legacy 行读取器不变）。
-- 门禁自身：`/exit`（"再见！"+ 进程退出）仍由 gate 处理；unknown 命令由 gate default 统一报
-  "尚未迁移…禁用"（收口后应改为"未知命令"语义）。`CommandQuit` 已是 CommandResult 既有动作
-  （`chat_command_result.go:24-25`；消费点 `chat_busy_command_exec.go:110`）。
+- 门禁（gate/reject）：**Batch C 已全量删除**（`2a125651`）；`/exit` 已结构化
+  （`CommandQuit`，消费点 `chat_busy_command_exec.go:110`），unknown 语义见上。
 
 ## 2. 分批
 
@@ -62,16 +61,26 @@
 - 验收：`rg 'unifiedInteractiveLegacyCommandFence|rejectUnifiedInteractiveLegacyCommand|已拒绝旧终端直写'`
   非测试 = 0；unified 下 fence 文案 = 0；compat/plain 行为不变。
 
-### Batch C 待执行：删硬门禁 + unknown 语义
+### Batch C 已执行（2026-10-09，`2a125651`）
 
-- `/exit` 结构化认领（farewell doc + `Action: CommandQuit`）；/debug 归档子命令补迁；
-- unknown 命令改为 typed"未知命令"结果（可附 /help 引导）；
-- 删除 `dispatchUnmigratedUnifiedChatCommand`/`rejectUnmigratedUnifiedChatCommand`；
-  `command.go:45-51` 回落分支替换为结构化 unknown 路径（legacy `handleCommand` 仅保留给
-  plain/compat/JSON 出口）；
-- 更新门禁相关测试与文档（README/help 文案）。
-- 验收：`rg '尚未迁移到统一渲染命令通道' backend/cmd/aicli/commands -g '!**/*_test.go'` = 0；
-  commands/ui 全量绿；compat 真机场景 PASS。
+- **硬门禁删除**：`dispatchUnmigratedUnifiedChatCommand`/`rejectUnmigratedUnifiedChatCommand`
+  删除（文件重命名为 `chat_unified_command_fallback.go`）；`command_invoke.go` 的 /call、/skill
+  保护移除；`command.go` 回落分支替换为 typed 未知命令路径。
+- **/exit 结构化**：`/exit`/`/quit`/`/q` 认领为 farewell 单元格 + `CommandQuit` 动作
+  （Phase B 统一退出；忙时既有 quit 拦截与 Reject 策略不变）。
+- **unknown 语义（两档回落）**：未知命令 → `错误: 未知命令: X\n输入 /help 查看可用命令`；
+  目录内命令的未支持参数/状态形式 → `错误: X 的当前参数或状态形式不受支持\n输入 /help 查看用法`。
+- **/help 全变体**：统一会话带参 /help 也直接渲染帮助文档（plain 保留 legacy 回落）。
+- **参数拒绝面收口**：/status、/new、/history 带参 → typed"不接受参数"；/load 缺参/解析/加载
+  错误、/title//rename 缺参与无会话 → typed 单元格；/goal --json → typed 提示。
+- **/debug**：export 早已结构化；残余兜底文案改为防御性 fail-closed（不可达）。
+- **机械守卫**：新增 `TestUnifiedCatalogCommandsNeverFallToUnknown`（72 名称全集逐一断言
+  被认领）+ `TestUnifiedKnownCommandVariantsStayTyped`（7 项参数拒绝面）+
+  `TestUnifiedFallbackDistinguishesKnownAndUnknown`（两档回落）。
+- 验证：定向 9 项绿；gofmt/vet/build 绿；commands 全量复跑绿（183.9s）；期间修复改名
+  导致的源扫描清单失败（`ab5496a4`）。
+- 验收：`rg '尚未迁移到统一渲染命令通道'`（非测试）= 0；门禁符号 = 0。
+- 登记后续小项：/goal、/memory 的持久化/状态错误分支等仍落入"不受支持"档（见 §1）。
 
 ## 3. 验收（每批适用）
 
@@ -96,3 +105,11 @@
 - 2026-10-09 Batch B：`f396f2d9`（/rewind 别名语义 + /resume typed 降级 + fence 全量删除，
   13 files，+100/−130）；fence 家族测试改写为正向 typed 断言。
 - 2026-10-09 Batch B 验证：commands 全量复跑绿（180.8s，exit 0）；非测试 fence 引用 = 0。
+- 2026-10-09 Batch C：`2a125651`（硬门禁删除 + /exit 结构化 + 未知命令两档回落 + 参数拒绝面
+  收口，11 files，+280/−106）；新增目录覆盖/参数面/回落三组机械测试。
+- 2026-10-09 Batch C 验证：commands 全量复跑绿（183.9s，exit 0）；`尚未迁移…`（非测试）= 0；
+  门禁符号 = 0；源扫描清单随改名同步（`ab5496a4`）。
+- 2026-10-09 登记（环境 flake，非本刀）：`TestTTY_LiveLoop_LLMRetryRendersAdvancingTimerE2E`
+  （全量负载下偶发：retry 状态行与 turn 完成的绘制竞态，测试注释已声明该时序脆弱性；
+  隔离 ×10 全绿）；`TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`
+  （再次偶发，隔离复跑绿，已在退役方案 §5 登记）。
