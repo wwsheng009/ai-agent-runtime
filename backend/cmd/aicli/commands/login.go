@@ -275,7 +275,7 @@ func (p *cliLoginPrompter) PromptSelect(label, kind string, options []string, cu
 			// confirm-and-persist flow below owns the actual deletion.
 			onDelete = func(int) error { return nil }
 		}
-		result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+		result, err := ui.RunStartupFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
 			Title:        "选择 " + label,
 			Subtitle:     subtitle,
 			EmptyMessage: fmt.Sprintf("没有匹配的 %s，可清空搜索或直接选择新建", kind),

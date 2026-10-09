@@ -124,4 +124,21 @@
 | 测试依赖裸入口/回落参数 | Batch A 内迁移到 lease 或测试 transport |
 | 回滚 | 每批一提交；Batch A 可独立 revert（ui 层）；Batch B 回退三处接线即恢复现状 |
 
-## 6. 执行记录（待填）
+## 6. 执行记录
+
+- 2026-10-09 **Batch A**（`dec13b68`；独立复核：worktree 内 gate/ui 全量/vet/build 全绿，
+  主仓复验 gate 1.4s + ui 14.7s 绿）：
+  - D1 `StartupAlternateScreenTransport`（terminal-backed；enter/exit 与退役 raw 分支
+    逐字节一致，byte-pin 测试）；D2 `RunStartupFullScreenList`（一次性 surface；任何不可用
+    fail-closed → `ErrFullScreenUnavailable`）；D3 三处 lifecycle 删 `leaseManaged`/writer
+    字段与 raw 分支、`writeLeaseManagedFullScreenText` 去 fallback、三个 WithLease 入口
+    lease 必需；
+  - 写端基线：受认可 24→20（4 条目摘除；ceiling 24→20；债务 4/4 不变）；
+  - 偏差（评审通过）：`SelectFullScreenList` 以 D2 兼容桥保留一个提交周期（Batch A 约束
+    禁改 commands，硬删会破坏全仓编译）；Batch B 迁移三处调用者后删除该符号。
+- 2026-10-09 **Batch B**（`chat.go` ×2 / `login.go` ×1 改走 `RunStartupFullScreenList`；
+  兼容桥删除 + `chat_startup_picker_lease_test.go` fail-closed 回归；ui 门禁+全量绿）：
+  commands 全量复跑（178.5s）：唯一失败为**并发 web 工作流在途用例**
+  `TestChatWebSessionsAssetUsesSessionSwitchedEvent`（sse.js 文本 pin 与在途编辑冲突，
+  与 L5-1 无关）；`-skip` 该用例后全量绿（176.4s，exit 0，go1.27.1）；待 web 工作流收口后
+  应无 skip 复跑确证。

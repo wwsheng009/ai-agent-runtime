@@ -149,18 +149,6 @@ func CanUseFullScreenList(terminal *Terminal) bool {
 	return height >= minFullScreenListHeight
 }
 
-// SelectFullScreenList opens the startup full-screen list.
-//
-// Deprecated: the raw (lease-less) entry was retired with L5-1 D3. This
-// compatibility bridge routes the three startup call sites through the
-// lease-managed RunStartupFullScreenList flow; Batch B migrates those call
-// sites to D2 directly, after which the bridge is deleted. It never writes raw
-// alternate-screen sequences and returns ErrFullScreenUnavailable whenever the
-// lease-managed flow is unavailable.
-func SelectFullScreenList(ctx context.Context, terminal *Terminal, options FullScreenListOptions) (FullScreenListResult, error) {
-	return RunStartupFullScreenList(ctx, terminal, options)
-}
-
 // SelectFullScreenListWithLease opens an alternate-screen list while an
 // alternate-screen lease is already active. The lease owns the DEC 1049
 // enter/exit sequences (see FixedBottomSurface.AcquireAlternateScreen), so the

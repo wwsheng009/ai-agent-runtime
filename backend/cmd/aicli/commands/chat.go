@@ -1022,7 +1022,7 @@ func selectProviderFullScreen(cfg *config.Config) (string, bool) {
 	// startup watchdog treats it as "waiting for user input", not a stall.
 	beginChatInputWait()
 	defer endChatInputWait()
-	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+	result, err := ui.RunStartupFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
 		Title:        "选择 Provider",
 		Subtitle:     "↑/↓ 选择 · 输入关键词模糊搜索 · Enter 确认 · Esc 取消",
 		EmptyMessage: "没有匹配的 provider",
@@ -1215,7 +1215,7 @@ func selectModelFullScreen(provider config.Provider) (string, bool) {
 	// startup watchdog treats it as "waiting for user input", not a stall.
 	beginChatInputWait()
 	defer endChatInputWait()
-	result, err := ui.SelectFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+	result, err := ui.RunStartupFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
 		Title:        "选择 Model",
 		Subtitle:     "↑/↓ 选择 · 输入关键词模糊搜索 · Enter 确认 · Esc 取消",
 		EmptyMessage: "没有可用的模型",
