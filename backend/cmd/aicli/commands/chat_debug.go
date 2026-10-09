@@ -713,7 +713,7 @@ func executeStructuredAgentPanelCommand(session *ChatSession, argument string) C
 	opts := parseChatAgentPanelOptions(argument, 8)
 	if strings.EqualFold(opts.Nav, "close") {
 		if session.Surface != nil {
-			session.Surface.ClearPopupForOwnerPreserveCursor(chatAgentPanelPopupOwner)
+			chatSessionPopupPort(session).ClearPopupForOwnerPreserveCursor(chatAgentPanelPopupOwner)
 		}
 		if session.Interaction != nil {
 			session.Interaction.RefreshStatus("")
@@ -1502,7 +1502,7 @@ func printChatAgentPanel(session *ChatSession, argument string) {
 	opts := parseChatAgentPanelOptions(argument, 8)
 	if strings.EqualFold(opts.Nav, "close") {
 		if session != nil && session.Surface != nil {
-			session.Surface.ClearPopupForOwnerPreserveCursor(chatAgentPanelPopupOwner)
+			chatSessionPopupPort(session).ClearPopupForOwnerPreserveCursor(chatAgentPanelPopupOwner)
 		}
 		if session != nil && session.Interaction != nil {
 			session.Interaction.RefreshStatus("")
@@ -1551,7 +1551,7 @@ func showChatAgentPanelPopup(session *ChatSession, lines []string) {
 	if session == nil || session.Surface == nil || !session.Surface.Enabled() {
 		return
 	}
-	session.Surface.ShowPopupPreserveCursorForOwner(lines, chatAgentPanelPopupOwner)
+	chatSessionPopupPort(session).ShowPopupPreserveCursorForOwner(lines, chatAgentPanelPopupOwner)
 }
 
 func chatAgentPanelLoadingLines(session *ChatSession) []string {

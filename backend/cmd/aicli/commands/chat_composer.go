@@ -701,7 +701,7 @@ func foldChatPriorityPromptPopupInput(session *ChatSession, prompt string, text 
 	lines := append([]string(nil), session.priorityPopupLines...)
 	// 输入行是单行渲染；多行输入只取首行，光标跟随首行输入末尾。
 	inputLine := strings.SplitN(text, "\n", 2)[0]
-	session.Surface.UpdatePopupInputForHandle(handle, lines, prompt+inputLine, true)
+	chatSessionPopupPort(session).UpdatePopupInputForHandle(handle, lines, prompt+inputLine, true)
 }
 
 func (c *chatModalComposerPrompt) onCancel(ui.LineEditorSnapshot) bool {

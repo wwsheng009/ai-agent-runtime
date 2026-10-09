@@ -153,7 +153,7 @@ func canOpenChatBacktrackPicker(session *ChatSession) bool {
 		return false
 	}
 	if !session.Surface.Enabled() || !session.Surface.OwnedViewport() ||
-		session.Surface.LeaseActive() || session.Surface.HasActivePopup() {
+		session.Surface.LeaseActive() || chatSessionPopupPort(session).HasActivePopup() {
 		return false
 	}
 	if session.RuntimeEventBridge != nil && session.RuntimeEventBridge.isRunActive() {

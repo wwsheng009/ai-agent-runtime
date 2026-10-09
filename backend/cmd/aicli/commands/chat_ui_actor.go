@@ -91,6 +91,21 @@ func (c *chatInteractionCoordinator) currentUIActor() *ui.UIController {
 	return c.uiActor
 }
 
+// popupBottomPaneState 是 popup 门面的 unified 状态源（L5-2 Batch B）：actor
+// 存活时返回 reducer 权威的 BottomPaneState（ok=true），由门面按
+// bottomPaneStatePopupActive 判据回答 HasActivePopup；actor 未创建
+// （legacy/无 unified 渲染器）时 ok=false，门面回落 surface 本地状态。
+func (c *chatInteractionCoordinator) popupBottomPaneState() (ui.BottomPaneState, bool) {
+	if c == nil {
+		return ui.BottomPaneState{}, false
+	}
+	actor := c.currentUIActor()
+	if actor == nil {
+		return ui.BottomPaneState{}, false
+	}
+	return actor.BottomPaneState(), true
+}
+
 // 生产 interactive 会话必须经 EnableUnifiedRendererGateway——
 // PhysicalSink→RenderOutputGateway。直写 writer 模式仅存在于测试，
 // 见 enableUnifiedRendererWithWriter。

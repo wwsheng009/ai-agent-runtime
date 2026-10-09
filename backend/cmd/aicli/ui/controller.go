@@ -1026,6 +1026,20 @@ func (c *UIController) AppState() AppState {
 	return c.state.AppState.Clone()
 }
 
+// BottomPaneState returns only the reducer-owned bottom-pane projection
+// (L5-2 Batch B：popup 门面的 unified HasActivePopup 查询路径)。它避免
+// AppState() 对 transcript/HistoryCommitLedger 的整体克隆：popup 活跃性查询
+// 只消费 Bottom 域。与 AppState 一样不得在持有 controller 互斥量时调用
+// （sync.Mutex 不可重入）。
+func (c *UIController) BottomPaneState() BottomPaneState {
+	if c == nil {
+		return BottomPaneState{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.AppState.Bottom.Clone()
+}
+
 // ActiveCellState returns only the reducer-owned mutable-cell projection.
 // ActiveCellState contains value fields and immutable strings, so copying it
 // under the controller mutex is enough isolation; callers must not pay for a

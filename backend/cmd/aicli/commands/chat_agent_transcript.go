@@ -524,7 +524,7 @@ func showChatAgentTranscriptPopup(session *ChatSession, lines []string) {
 	if session == nil || session.Surface == nil || !session.Surface.Enabled() {
 		return
 	}
-	session.Surface.ShowPopupPreserveCursorForOwner(lines, chatAgentTranscriptPopupOwner)
+	chatSessionPopupPort(session).ShowPopupPreserveCursorForOwner(lines, chatAgentTranscriptPopupOwner)
 }
 
 func clearChatAgentTranscriptPopup(session *ChatSession) {
@@ -533,7 +533,7 @@ func clearChatAgentTranscriptPopup(session *ChatSession) {
 		return
 	}
 	stopChatAgentTranscriptFollow(session)
-	session.Surface.ClearPopupForOwnerPreserveCursor(chatAgentTranscriptPopupOwner)
+	chatSessionPopupPort(session).ClearPopupForOwnerPreserveCursor(chatAgentTranscriptPopupOwner)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}

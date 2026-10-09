@@ -49,6 +49,15 @@ type chatInteractionCoordinator struct {
 	// 几何族调用（探针/读宽）一律经此门面，不得直读 surface 几何方法
 	// （门禁：TestChatGeometryFamilyDirectReadsFrozen，方案 §2 D2-a ①）。
 	geometrySync ui.GeometrySyncPort
+	// popupPort 是 L5-2 Batch B popup 门面（ui.PopupPort）：SetSurface 就绪时
+	// 注入（unified 直投 Show/Update/ClearPopupAction 到 controller，handle
+	// 分配上移到门面边界；legacy/compat 回落 surface 本地实现），surface==nil
+	// 时为 nil，调用方经 chatSessionPopupPort 安全降级。
+	// popup 族调用（含 HasActivePopup 读）一律经此门面，不得直读 surface
+	// （门禁：TestChatPopupFamilyDirectReadsFrozen，方案 §2 D1）。
+	// 读取点分布在命令处理器与编辑器回调，不保证持有 c.mu；因此与 uiSurface
+	// 同理用原子指针存储（SetSurface/Shutdown 为唯一写点）。
+	popupPort atomic.Pointer[ui.PopupPort]
 	// uiSurface 是 actor 侧（reduceUIAction）读取 surface 的原子指针：
 	// reducer 不得持有 c.mu 获取 surface（生产者可能在持 c.mu 时投递
 	// durable action，mailbox 满时避免锁环）；surface 自带锁。
@@ -649,10 +658,15 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	c.surface = surface
 	// 几何门面与 surface 生命周期绑定：就绪即注入，卸载/替换即清空
 	// （surface==nil 时调用方安全降级为无探针路径，L5-2 Batch A D2-a ①）。
+	// popup 门面同生命周期绑定（L5-2 Batch B D1）：unified 直投 controller、
+	// legacy 回落 surface；状态查询源随 actor 存活动态判定。
 	if surface != nil {
 		c.geometrySync = surface
+		port := ui.NewPopupPort(surface, c.popupBottomPaneState)
+		c.popupPort.Store(&port)
 	} else {
 		c.geometrySync = nil
+		c.popupPort.Store(nil)
 	}
 	if c.session != nil {
 		// The coordinator and session must reference the same physical surface.
@@ -5600,6 +5614,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	}
 	c.surface = nil
 	c.geometrySync = nil
+	c.popupPort.Store(nil)
 	c.terminalSession = nil
 	c.terminalExecutor = nil
 	c.refreshTerminalWriterSnapshotLocked()

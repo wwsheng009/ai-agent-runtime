@@ -2030,13 +2030,10 @@ func (s *FixedBottomSurface) beginPopupInputForOwner(lines []string, prompt stri
 		return PopupHandle{}
 	}
 	prompt = strings.TrimRight(SanitizeTerminalText(prompt), "\r\n")
-	s.mu.Lock()
-	s.nextPopupInstance++
-	if s.nextPopupInstance == 0 {
-		s.nextPopupInstance++
+	handle := PopupHandle{owner: owner, instance: s.allocatePopupInstance()}
+	if !handle.Valid() {
+		return PopupHandle{}
 	}
-	handle := PopupHandle{owner: owner, instance: s.nextPopupInstance}
-	s.mu.Unlock()
 
 	// The handle is allocated before posting. This preserves the synchronous
 	// API without letting an external popup caller mutate the surface directly:
@@ -2054,6 +2051,23 @@ func (s *FixedBottomSurface) beginPopupInputForOwner(lines []string, prompt stri
 	}
 	_ = s.beginPopupInputForHandleImpl(lines, prompt, handle, viewport)
 	return handle
+}
+
+// allocatePopupInstance 分配下一个 popup 实例 token。L5-2 Batch B 起分配点
+// 上移到 popup 门面边界（ui.PopupPort.Begin*）：门面与 surface 兼容路径共享
+// 同一计数器，保证同一 surface 上 token 单调唯一——既维持「先分配 token 后
+// 投递」的 FIFO 语义，也避免门面分配与 compat 直调分配串号。
+func (s *FixedBottomSurface) allocatePopupInstance() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextPopupInstance++
+	if s.nextPopupInstance == 0 {
+		s.nextPopupInstance++
+	}
+	return s.nextPopupInstance
 }
 
 // beginPopupInputForHandleImpl is the reducer-side counterpart of

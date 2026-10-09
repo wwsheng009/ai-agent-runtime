@@ -84,7 +84,7 @@ func (o chatPromptOverlay) showComposerPreview(prompt string) bool {
 		return false
 	}
 	o.beginDirectOutput()
-	o.session.Surface.ShowPopupInputForOwner(nil, prompt, chatComposerPreviewPopupOwner)
+	chatSessionPopupPort(o.session).ShowPopupInputForOwner(nil, prompt, chatComposerPreviewPopupOwner)
 	o.resetPromptState()
 	return true
 }
@@ -98,7 +98,7 @@ func (o chatPromptOverlay) showSelectionPopup(lines []string, prompt string) boo
 		return false
 	}
 	o.beginDirectOutput()
-	o.session.Surface.ShowPopupInputForOwner(lines, prompt, chatSelectionPopupOwner)
+	chatSessionPopupPort(o.session).ShowPopupInputForOwner(lines, prompt, chatSelectionPopupOwner)
 	return true
 }
 
@@ -107,7 +107,7 @@ func (o chatPromptOverlay) beginSelectionPopup(lines []string, prompt string) (u
 		return ui.PopupHandle{}, false
 	}
 	o.beginDirectOutput()
-	handle := o.session.Surface.BeginPopupInputForOwner(lines, prompt, chatSelectionPopupOwner)
+	handle := chatSessionPopupPort(o.session).BeginPopupInputForOwner(lines, prompt, chatSelectionPopupOwner)
 	return handle, handle.Valid()
 }
 
@@ -115,14 +115,14 @@ func (o chatPromptOverlay) updatePopupInput(handle ui.PopupHandle, lines []strin
 	if !o.surfaceEnabled() || !handle.Valid() {
 		return false
 	}
-	return o.session.Surface.UpdatePopupInputForHandle(handle, lines, prompt, preserveCursor)
+	return chatSessionPopupPort(o.session).UpdatePopupInputForHandle(handle, lines, prompt, preserveCursor)
 }
 
 func (o chatPromptOverlay) beginModalPopupInput(lines []string, prompt string) (ui.PopupHandle, bool) {
 	if !o.surfaceEnabled() {
 		return ui.PopupHandle{}, false
 	}
-	handle := o.session.Surface.BeginPopupInputForOwner(lines, prompt, chatModalPopupOwner)
+	handle := chatSessionPopupPort(o.session).BeginPopupInputForOwner(lines, prompt, chatModalPopupOwner)
 	return handle, handle.Valid()
 }
 
@@ -131,10 +131,10 @@ func (o chatPromptOverlay) renderModalPopupInput(lines []string, prompt string, 
 		return false
 	}
 	if preserveCursor {
-		o.session.Surface.ShowPopupInputPreserveCursorForOwner(lines, prompt, chatModalPopupOwner)
+		chatSessionPopupPort(o.session).ShowPopupInputPreserveCursorForOwner(lines, prompt, chatModalPopupOwner)
 		return true
 	}
-	o.session.Surface.ShowPopupInputForOwner(lines, prompt, chatModalPopupOwner)
+	chatSessionPopupPort(o.session).ShowPopupInputForOwner(lines, prompt, chatModalPopupOwner)
 	return true
 }
 
@@ -148,7 +148,7 @@ func (o chatPromptOverlay) clearModalPopup() {
 
 func (o chatPromptOverlay) clearPopupHandle(handle ui.PopupHandle) {
 	if o.session != nil && o.session.Surface != nil && handle.Valid() {
-		o.session.Surface.ClearPopupHandlePreserveCursor(handle)
+		chatSessionPopupPort(o.session).ClearPopupHandlePreserveCursor(handle)
 	}
 	o.resetPromptState()
 }
@@ -162,13 +162,13 @@ func (o chatPromptOverlay) clearPopupHandle(handle ui.PopupHandle) {
 // surface state is left behind here.
 func (o chatPromptOverlay) clearPopupHandlePreservePromptInput(handle ui.PopupHandle) {
 	if o.session != nil && o.session.Surface != nil && handle.Valid() {
-		o.session.Surface.ClearPopupHandlePreserveCursor(handle)
+		chatSessionPopupPort(o.session).ClearPopupHandlePreserveCursor(handle)
 	}
 }
 
 func (o chatPromptOverlay) clearOwnedModalPopup(owner string) {
 	if o.session != nil && o.session.Surface != nil {
-		o.session.Surface.ClearPopupForOwnerPreserveCursor(owner)
+		chatSessionPopupPort(o.session).ClearPopupForOwnerPreserveCursor(owner)
 	}
 	o.resetPromptState()
 }
@@ -177,13 +177,13 @@ func (o chatPromptOverlay) showOwnedPopupBelowPrompt(lines []string, owner strin
 	if !o.surfaceEnabled() {
 		return false
 	}
-	o.session.Surface.ShowPopupPreserveCursorForOwnerBelowPrompt(lines, owner)
+	chatSessionPopupPort(o.session).ShowPopupPreserveCursorForOwnerBelowPrompt(lines, owner)
 	return true
 }
 
 func (o chatPromptOverlay) clearOwnedPopup(owner string) {
 	if o.session != nil && o.session.Surface != nil {
-		o.session.Surface.ClearPopupForOwnerPreserveCursor(owner)
+		chatSessionPopupPort(o.session).ClearPopupForOwnerPreserveCursor(owner)
 	}
 }
 
@@ -194,7 +194,7 @@ func (o chatPromptOverlay) showPendingPasteDraft(lines int, text string) bool {
 	if lines < 1 {
 		lines = 1
 	}
-	o.session.Surface.ShowPendingPastePreview(lines, text)
+	chatSessionPopupPort(o.session).ShowPendingPastePreview(lines, text)
 	return true
 }
 
@@ -202,7 +202,7 @@ func (o chatPromptOverlay) clearPendingPasteDraft() bool {
 	if !o.surfaceEnabled() {
 		return false
 	}
-	o.session.Surface.ClearPendingPastePreview()
+	chatSessionPopupPort(o.session).ClearPendingPastePreview()
 	return true
 }
 
@@ -236,7 +236,7 @@ func (o chatPromptOverlay) showPriorityPrompt(lines []string, prompt string) (st
 	prompt = sanitizeInteractivePromptLine(prompt)
 	if o.surfaceEnabled() {
 		o.beginDirectOutput()
-		handle = o.session.Surface.BeginPopupInputForOwnerWithViewport(
+		handle = chatSessionPopupPort(o.session).BeginPopupInputForOwnerWithViewport(
 			lines,
 			prompt,
 			chatPriorityPromptPopupOwner,
@@ -308,7 +308,7 @@ func (o chatPromptOverlay) showPriorityPromptBody(lines []string) (func(), bool)
 		})
 	}
 	o.beginDirectOutput()
-	handle = o.session.Surface.BeginPopupInputForOwnerWithViewport(
+	handle = chatSessionPopupPort(o.session).BeginPopupInputForOwnerWithViewport(
 		lines,
 		"",
 		chatPriorityPromptPopupOwner,
