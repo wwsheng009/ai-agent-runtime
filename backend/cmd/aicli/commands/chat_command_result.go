@@ -366,7 +366,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/usage") && !commandMatches(cmdLower, "/load") &&
 		!commandMatches(cmdLower, "/account") && !commandMatches(cmdLower, "/accounts") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
-		cmdLower != "/s" && cmdLower != "/n" && !commandMatches(cmdLower, "/fast") && !commandMatches(cmdLower, "/reasoning") &&
+		cmdLower != "/s" && cmdLower != "/n" && cmdLower != "/normal" && !commandMatches(cmdLower, "/fast") && !commandMatches(cmdLower, "/reasoning") &&
 		!commandMatches(cmdLower, "/reasoning_effort") && !commandMatches(cmdLower, "/reasoning-effort") &&
 		!commandMatches(cmdLower, "/title") && !commandMatches(cmdLower, "/rename") && !commandMatches(cmdLower, "/function") &&
 		!commandMatches(cmdLower, "/describe") && !commandMatches(cmdLower, "/functions") && !commandMatches(cmdLower, "/catalog") &&
@@ -751,7 +751,10 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		return executeStructuredStreamCommand(session, command, nil), true, nil
 	}
 
-	if cmdLower == "/s" || cmdLower == "/n" {
+	// /normal 是 /n 的目录全名（catalog: Name=/normal，Alias=/n）；三个形式都必须在
+	// 结构化分派内被认领，否则全名会落到 legacy 门禁（"尚未迁移…已在 interactive TTY
+	// 中禁用"）——同一语义的三入口不允许有一个被拒。
+	if cmdLower == "/s" || cmdLower == "/n" || cmdLower == "/normal" {
 		stream := cmdLower == "/s"
 		return executeStructuredStreamCommand(session, command, &stream), true, nil
 	}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
@@ -110,6 +111,48 @@ func TestApplyStreamCommand_TogglePersistsPreference(t *testing.T) {
 	stored = loadStreamPreference(t, cfgPath)
 	if stored == nil || *stored != false {
 		t.Fatalf("expected persisted stream=false, got %+v", stored)
+	}
+}
+
+// TestStructuredStreamShortcuts_AllFormsClaimed 锁定 /s、/n、/normal 三个流式
+// 快捷形式在结构化分派内全部被认领。背景（L5-3 Batch A）：/normal 是目录全名
+// （catalog: Name=/normal，Alias=/n），此前只在 legacy switch 覆盖；统一渲染
+// 会话输入全名会落到 legacy 门禁（"尚未迁移…已在 interactive TTY 中禁用"）。
+func TestStructuredStreamShortcuts_AllFormsClaimed(t *testing.T) {
+	cases := []struct {
+		command    string
+		unified    bool
+		wantStream bool
+	}{
+		{command: "/s", wantStream: true},
+		{command: "/n", wantStream: false},
+		{command: "/normal", wantStream: false},
+		{command: "/normal", unified: true, wantStream: false},
+	}
+	for _, tc := range cases {
+		name := tc.command + "-plain"
+		if tc.unified {
+			name = tc.command + "-unified"
+		}
+		t.Run(name, func(t *testing.T) {
+			session, _ := newStreamCommandSession(t)
+			if tc.unified {
+				// 统一出口判定：terminal 所有权边界已跨越（无需真实 TTY）。
+				session.TerminalSession = &ui.TerminalSession{}
+			}
+			// 反相起点：确保快捷真正写入目标值，而不是 no-op。
+			session.Stream = !tc.wantStream
+			result, handled, err := tryExecuteStructuredChatCommand(session, tc.command)
+			if err != nil || !handled {
+				t.Fatalf("%s handled=%v err=%v（不得回落统一渲染门禁）", tc.command, handled, err)
+			}
+			if session.Stream != tc.wantStream {
+				t.Fatalf("%s stream=%v，期望 %v", tc.command, session.Stream, tc.wantStream)
+			}
+			if strings.TrimSpace(ui.RenderDocumentPlain(result.Document())) == "" {
+				t.Fatalf("%s 结果缺少命令单元格文档", tc.command)
+			}
+		})
 	}
 }
 
