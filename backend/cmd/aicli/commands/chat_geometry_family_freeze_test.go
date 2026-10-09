@@ -19,10 +19,9 @@ import (
 //   - SyncTerminalGeometry / SyncTerminalGeometryThrottled：零直读。探针一律
 //     经注入的 ui.GeometrySyncPort（RequestGeometrySync），新增调用必须先迁移
 //     到门面；
-//   - ActiveBandViewportSize：只允许 D2-a ②（L5-2b，渲染器接管布局宽度）遗留
-//     的布局宽度债务——这些读点需要 width+rows，而门面只收口宽度读
-//     （ActiveBandWidth）。新增任何直读都属门禁违规，必须先迁移到门面或在
-//     方案 §1.1/§2 重新登记。
+//   - ActiveBandViewportSize：已于 L5-2b 迁移至会话门面
+//     ui.ActiveBandViewportPort（unified 走渲染链几何投影、legacy 回落 surface
+//     终端缓存），本门禁冻结计数并期望为 0；新增直读即违规。
 //
 // 白名单按「文件 :: 函数」精确匹配（行号漂移不触发 churn）；失败输出会打印
 // 全部实际调用点，便于按迁移路径修正。
@@ -48,13 +47,8 @@ func TestChatGeometryFamilyDirectReadsFrozen(t *testing.T) {
 			strings.Join(lines, "\n"))
 	}
 
-	// D2-a ②（L5-2b）遗留债务白名单：宽+行布局读，等待渲染器接管布局宽度。
-	want := map[string]int{
-		"chat_interaction.go :: method (*chatInteractionCoordinator) commitActiveStableScrollbackLocked": 1,
-		"chat_interaction.go :: method (*chatInteractionCoordinator) currentStreamEmitWidthLocked":       1,
-		"chat_interaction.go :: method (*chatInteractionCoordinator) refreshActiveStreamViewportLocked":  1,
-		"chat_interaction.go :: method (*chatInteractionCoordinator) syncActiveStreamViewportLocked":     1,
-	}
+	// ActiveBandViewportSize 直读（L5-2b 迁移后期望为 0；空表保留以冻结面）。
+	want := map[string]int{}
 	if !reflect.DeepEqual(activeBandReads, want) {
 		var lines []string
 		for _, site := range sites {
@@ -62,9 +56,9 @@ func TestChatGeometryFamilyDirectReadsFrozen(t *testing.T) {
 				lines = append(lines, fmt.Sprintf("  %s:%d %s :: %s", site.File, site.Line, site.Func, site.Method))
 			}
 		}
-		t.Fatalf("ActiveBandViewportSize 直读面已变化（L5-2 Batch A 冻结）\n got: %#v\nwant: %#v\n当前调用点:\n%s\n"+
-			"宽度读请迁移到 ui.GeometrySyncPort.ActiveBandWidth；宽+行布局读属 D2-a ②（L5-2b）债务，"+
-			"新增前须在方案中登记。", activeBandReads, want, strings.Join(lines, "\n"))
+		t.Fatalf("ActiveBandViewportSize 直读面已变化（L5-2b 冻结）\n got: %#v\nwant: %#v\n当前调用点:\n%s\n"+
+			"宽+行视口读已迁移至 ui.ActiveBandViewportPort（L5-2b），此处期望为 0；新增直读即违规。",
+			activeBandReads, want, strings.Join(lines, "\n"))
 	}
 }
 

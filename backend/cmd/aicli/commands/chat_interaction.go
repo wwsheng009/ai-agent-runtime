@@ -62,6 +62,10 @@ type chatInteractionCoordinator struct {
 	// 不得直读 surface（门禁：TestChatPopupFamilyDirectReadsFrozen 邻近族）；
 	// 与 popupPort 同生命周期（SetSurface/Shutdown 为唯一写点）。
 	promptEditorPort atomic.Pointer[ui.PromptEditorPort]
+	// ActiveBand 视口门面（L5-2b，D2-a ②）：流式视口（宽+行）一律经此门面，
+	// 不得直读 surface（门禁：TestChatGeometryFamilyDirectReadsFrozen）；
+	// 与 popupPort 同生命周期（SetSurface/Shutdown 为唯一写点）。
+	activeBandViewportPort atomic.Pointer[ui.ActiveBandViewportPort]
 	// uiSurface 是 actor 侧（reduceUIAction）读取 surface 的原子指针：
 	// reducer 不得持有 c.mu 获取 surface（生产者可能在持 c.mu 时投递
 	// durable action，mailbox 满时避免锁环）；surface 自带锁。
@@ -666,16 +670,21 @@ func (c *chatInteractionCoordinator) SetSurface(surface *ui.FixedBottomSurface) 
 	// legacy 回落 surface；状态查询源随 actor 存活动态判定。
 	// prompt-editor 门面（L5-2c）同生命周期绑定：unified 直投状态行 action /
 	// 预算走渲染器同源投影，legacy 回落 surface。
+	// ActiveBand 视口门面（L5-2b）同生命周期绑定：unified 走渲染链几何投影
+	// （geometry.Width + ActiveBandRows），legacy 回落 surface 终端缓存。
 	if surface != nil {
 		c.geometrySync = surface
 		port := ui.NewPopupPort(surface, c.popupBottomPaneState)
 		c.popupPort.Store(&port)
 		promptPort := ui.NewPromptEditorPort(surface, c.promptEditorState)
 		c.promptEditorPort.Store(&promptPort)
+		viewportPort := ui.NewActiveBandViewportPort(surface, c.activeBandGeometry)
+		c.activeBandViewportPort.Store(&viewportPort)
 	} else {
 		c.geometrySync = nil
 		c.popupPort.Store(nil)
 		c.promptEditorPort.Store(nil)
+		c.activeBandViewportPort.Store(nil)
 	}
 	if c.session != nil {
 		// The coordinator and session must reference the same physical surface.
@@ -5625,6 +5634,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	c.geometrySync = nil
 	c.popupPort.Store(nil)
 	c.promptEditorPort.Store(nil)
+	c.activeBandViewportPort.Store(nil)
 	c.terminalSession = nil
 	c.terminalExecutor = nil
 	c.refreshTerminalWriterSnapshotLocked()
@@ -6417,7 +6427,7 @@ func (c *chatInteractionCoordinator) commitActiveStableScrollbackLocked(asMarkdo
 	if len(stable) <= c.streamEnqueuedPrefixLen {
 		return false
 	}
-	width, rows := c.surface.ActiveBandViewportSize()
+	width, rows := c.activeBandViewport().ViewportSize()
 	cut := plainStableScrollbackCut(stable, c.streamEnqueuedPrefixLen, width, rows)
 	if asMarkdown {
 		// Never split a Markdown paragraph. Move completed blocks as soon as a
@@ -6822,10 +6832,8 @@ func (c *chatInteractionCoordinator) rebuildPendingStableCommitLocked(asMarkdown
 }
 
 func (c *chatInteractionCoordinator) currentStreamEmitWidthLocked() int {
-	if c != nil && c.surface != nil {
-		if width, _ := c.surface.ActiveBandViewportSize(); width > 0 {
-			return width
-		}
+	if width, _ := c.activeBandViewport().ViewportSize(); width > 0 {
+		return width
 	}
 	if width := ui.GetTerminalWidth(); width > 0 {
 		return width
@@ -7395,8 +7403,8 @@ func (c *chatInteractionCoordinator) syncActiveStreamViewportLocked() {
 		return
 	}
 	var width, rows int
-	if c.surface != nil && c.surface.Enabled() {
-		width, rows = c.surface.ActiveBandViewportSize()
+	if viewport := c.activeBandViewport(); viewport.Unified() || (c.surface != nil && c.surface.Enabled()) {
+		width, rows = viewport.ViewportSize()
 	} else {
 		width, rows = ui.GetTerminalWidth(), ui.ActiveBandRows(ui.GetTerminalHeight())
 	}
@@ -7607,8 +7615,8 @@ func (c *chatInteractionCoordinator) refreshActiveStreamViewportLocked() {
 	c.reflowSoftEmittedTailLocked()
 	c.rebuildPendingStableCommitLocked(asMarkdown)
 	width, rows := c.currentStreamEmitWidthLocked(), ui.ActiveBandRows(ui.GetTerminalHeight())
-	if c.surface != nil && c.surface.Enabled() {
-		if w, r := c.surface.ActiveBandViewportSize(); w > 0 {
+	if viewport := c.activeBandViewport(); viewport.Unified() || (c.surface != nil && c.surface.Enabled()) {
+		if w, r := viewport.ViewportSize(); w > 0 {
 			width = w
 			if r > 0 {
 				rows = r

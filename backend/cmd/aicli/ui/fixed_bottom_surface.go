@@ -1511,6 +1511,13 @@ func (s *FixedBottomSurface) ActiveBandRowBudget() int {
 // budget for the in-progress stream viewport. Producers use it to keep their
 // frame buffer sized to the surface without extra terminal syscalls.
 func (s *FixedBottomSurface) ActiveBandViewportSize() (width, rows int) {
+	return s.activeBandViewportSizeImpl()
+}
+
+// activeBandViewportSizeImpl 是视口主体：L5-2b 后 commands 侧经
+// ui.ActiveBandViewportPort 调用（unified 走渲染链几何投影、legacy 回落本方法）；
+// 公开方法保留供既有调用与测试使用（冻结扫描按公开方法名，impl 不受影响）。
+func (s *FixedBottomSurface) activeBandViewportSizeImpl() (width, rows int) {
 	if s == nil || s.terminal == nil {
 		return 0, ActiveBandMinRows
 	}

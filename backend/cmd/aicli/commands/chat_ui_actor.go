@@ -121,6 +121,21 @@ func (c *chatInteractionCoordinator) promptEditorState() (ui.BottomPaneState, ui
 	return actor.BottomPaneState(), actor.Geometry(), true
 }
 
+// activeBandGeometry 是 ActiveBand 视口门面的渲染链状态源（L5-2b）：actor
+// 存活时返回 reducer 权威的 GeometryState（ok=true），由门面投影视口
+// （geometry.Width + ActiveBandRows(geometry.Height)）；actor 未创建
+// （legacy/无 unified 渲染器）时 ok=false，门面回落 surface 终端缓存。
+func (c *chatInteractionCoordinator) activeBandGeometry() (ui.GeometryState, bool) {
+	if c == nil {
+		return ui.GeometryState{}, false
+	}
+	actor := c.currentUIActor()
+	if actor == nil {
+		return ui.GeometryState{}, false
+	}
+	return actor.Geometry(), true
+}
+
 // 生产 interactive 会话必须经 EnableUnifiedRendererGateway——
 // PhysicalSink→RenderOutputGateway。直写 writer 模式仅存在于测试，
 // 见 enableUnifiedRendererWithWriter。
