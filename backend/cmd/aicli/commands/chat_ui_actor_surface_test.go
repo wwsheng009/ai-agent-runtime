@@ -479,9 +479,9 @@ func TestChatInteractionCoordinatorUnifiedLocalTranscriptUsesTerminalSessionOnly
 }
 
 // TerminalSession ownership is a hard command cutover. Migrated commands may
-// render a semantic document; every retained legacy command must instead be
-// rejected as a Scene cell, never execute its old raw writer/modal path.
-func TestDispatchChatCommandUnifiedCommandGateUsesTerminalSessionOnly(t *testing.T) {
+// render a semantic document; every unclaimed command must instead receive one
+// typed 未知命令 cell, never execute its old raw writer/modal path.
+func TestDispatchChatCommandUnifiedFallbackUsesTerminalSessionOnly(t *testing.T) {
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
 	session.RuntimeEventBridge = bridge
@@ -531,7 +531,7 @@ func TestDispatchChatCommandUnifiedCommandGateUsesTerminalSessionOnly(t *testing
 		"已清空 0 个待发送图片附件",
 		"当前 permission-mode:",
 		"当前 approval-reuse:",
-		"错误: /not-a-command 尚未迁移到统一渲染命令通道，已在 interactive TTY 中禁用。",
+		"错误: 未知命令: /not-a-command",
 		"错误: 需要指定 shell 命令",
 		"错误: 需要指定 function 名称",
 		"当前 provider:",

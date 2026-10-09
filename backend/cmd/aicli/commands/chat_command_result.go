@@ -299,6 +299,11 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/image") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredImageCommand(session, command), true, nil
 	}
+	// /exit、/quit、/q 是有限单发命令：一个 farewell 单元格 + CommandQuit 动作，
+	// Phase B 统一返回退出请求（忙时由 chatBusyCommandUnsafeEffect 拦截为 quit）。
+	if (commandMatches(cmdLower, "/exit") || commandMatches(cmdLower, "/quit") || commandMatches(cmdLower, "/q")) && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredExitCommand(), true, nil
+	}
 	// The unified interactive session has no legacy terminal writer. Commands
 	// whose old implementation still owns a raw prompt, a fullscreen picker, or
 	// Direct terminal output must be claimed here before dispatch clears the prompt or
@@ -385,7 +390,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	// output on the semantic command-cell path and prevents legacy terminal-write
 	// helpers (session rows in particular) from reaching a unified terminal.
 	if commandMatches(cmdLower, "/help") || commandMatches(cmdLower, "/?") {
-		if strings.TrimSpace(extractCommandArgument(command)) != "" {
+		// 统一会话对 /help 全变体（含带参形式）直接渲染帮助文档；plain/JSON
+		// 保留带参形式回落 legacy 的既有行为。
+		if strings.TrimSpace(extractCommandArgument(command)) != "" && !unifiedDirectInteractiveOutput(session) {
 			return CommandResult{}, false, nil
 		}
 		if unifiedDirectInteractiveOutput(session) {
@@ -516,6 +523,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/new") {
 		if strings.TrimSpace(extractCommandArgument(command)) != "" {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult("错误: /new 不接受参数\n用法: /new"), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		if session == nil {
@@ -534,6 +544,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/history") || commandMatches(cmdLower, "/h") {
 		if strings.TrimSpace(extractCommandArgument(command)) != "" {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult("错误: /history 不接受参数\n用法: /history"), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		// A unified session already owns one canonical Scene transcript. Replaying
@@ -558,9 +571,12 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 
 	if commandMatches(cmdLower, "/status") {
-		// /status accepts no arguments; the legacy handler reports the
-		// parameter error so the message stays visible in every mode.
+		// /status accepts no arguments. 统一会话提交 typed 拒绝；plain 保留
+		// legacy 报错路径（错误消息在所有模式可见）。
 		if strings.TrimSpace(extractCommandArgument(command)) != "" {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult("错误: /status 不接受参数\n用法: /status"), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		if unifiedDirectInteractiveOutput(session) {
@@ -590,21 +606,30 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 
 	if commandMatches(cmdLower, "/load") {
-		// /load 参数错误与加载失败保持 legacy：错误消息需在所有模式下可见，
-		// 与 /status 带参错误同一设计决策。成功路径结构化：加载副作用在此
-		// 执行，确认文档为原子命令 cell；历史回放（逐消息 cell）由 dispatch
-		// 在提交确认 cell 后通过 ReplayHistory 触发。
+		// 成功路径结构化：加载副作用在此执行，确认文档为原子命令 cell；历史
+		// 回放（逐消息 cell）由 dispatch 在提交确认 cell 后通过 ReplayHistory
+		// 触发。参数/加载错误在统一会话提交 typed 单元格；plain 保留 legacy
+		// 可见性路径。
 		sessionID, fullHistory, parseErr := parseSessionTargetAndFullFlag(extractCommandArgument(command))
 		if parseErr != nil {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult(fmt.Sprintf("错误: %v\n用法: /load <session-id> [--full]", parseErr)), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		sessionID = strings.TrimSpace(sessionID)
 		if sessionID == "" || session == nil {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult("错误: 需要指定会话 ID\n用法: /load <session-id> [--full]"), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		if err := session.withResumeFullHistory(fullHistory, func() error {
 			return loadRuntimeConversation(session, sessionID)
 		}); err != nil {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandErrorResult(err), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		return CommandResult{
@@ -618,10 +643,19 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/title") || commandMatches(cmdLower, "/rename") {
 		// A successful title mutation has no interactive prompt/modal behavior,
-		// so it can commit its confirmation as one retained command cell. Keep
-		// missing-argument and no-session errors on the legacy path.
+		// so it can commit its confirmation as one retained command cell.
+		// 缺参与无会话错误在统一会话提交 typed 单元格；plain 保留 legacy 路径。
 		title := strings.TrimSpace(extractCommandArgument(command))
-		if title == "" || session == nil || session.RuntimeSession == nil {
+		if title == "" {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult("错误: 需要指定会话标题\n用法: /title <title> 或 /rename <title>"), true, nil
+			}
+			return CommandResult{}, false, nil
+		}
+		if session == nil || session.RuntimeSession == nil {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandErrorResult(fmt.Errorf("当前没有活动会话")), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		if err := updateChatSessionTitle(session, title); err != nil {
@@ -666,6 +700,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		}
 		objective, jsonOutput := stripJSONOption(arg)
 		if jsonOutput {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult("提示: /goal --json 仅在非交互/脚本投影可用"), true, nil
+			}
 			return CommandResult{}, false, nil
 		}
 		result, handled := executeStructuredGoalSet(session, objective)
@@ -854,7 +891,7 @@ func tryExecuteStructuredDebugCommand(session *ChatSession, command string) (Com
 			Action: CommandContinue,
 		}, true
 	default:
-		return CommandResult{}, false
+		return commandTextResult("错误: 未知 /debug 子命令: " + action + "\n" + chatDebugUsageText()), true
 	}
 }
 
@@ -871,6 +908,13 @@ func executeStructuredDebugModeCommand(session *ChatSession, enabled bool) Comma
 		warnings = append(warnings, fmt.Errorf("切换 debug mode 后同步会话失败: %w", err))
 	}
 	return commandResultWithWarnings(buildChatDebugModeMutationDocument(enabled), warnings...)
+}
+
+func executeStructuredExitCommand() CommandResult {
+	return CommandResult{
+		Blocks: []RenderBlock{{Document: render.SingleLineDoc(render.TextSpan("再见！"))}},
+		Action: CommandQuit,
+	}
 }
 
 func executeStructuredQueueCommand(session *ChatSession, command string) CommandResult {

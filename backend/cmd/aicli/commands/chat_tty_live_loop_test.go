@@ -356,9 +356,9 @@ func TestTTY_LiveLoop_UnknownCommandRendersError(t *testing.T) {
 	if run.executor.called {
 		t.Fatalf("未知命令不应触发 executor 调用")
 	}
-	// L3-3：统一交互路径下未迁移命令的错误文案为「尚未迁移到统一渲染命令
-	// 通道」（legacy「未知命令」文案随直写路径退役）。
-	for _, want := range []string{"尚未迁移到统一渲染命令通道", "/bogus"} {
+	// L5-3 Batch C：统一交互路径下未认领命令回落为 typed「未知命令」单元格
+	// （原「尚未迁移」硬门禁文案随门禁删除退役）。
+	for _, want := range []string{"未知命令: /bogus", "/bogus"} {
 		if !strings.Contains(run.raw, want) {
 			t.Errorf("渲染流中未找到 %q; raw=%q", want, run.raw)
 		}

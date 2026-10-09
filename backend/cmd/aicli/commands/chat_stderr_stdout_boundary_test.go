@@ -68,7 +68,7 @@ func assertStderrZeroRenderIntersection(t *testing.T, stderr string, terminal *b
 func TestB4InteractiveErrorStderrZeroIntersection(t *testing.T) {
 	session, coord, terminal := newB4UnifiedSession(t)
 
-	// 已知错误 1：未知命令在 unified TTY 中被语义 gate 消费。
+	// 已知错误 1：未知命令在 unified TTY 中提交 typed 未知命令单元格。
 	// 已知错误 2：/retry 不接受参数（语义错误）。
 	_, stderr := captureStdoutStderr(t, func() {
 		for _, input := range []string{"/not-a-command", "/retry extra-arg"} {
@@ -81,14 +81,14 @@ func TestB4InteractiveErrorStderrZeroIntersection(t *testing.T) {
 	awaitUnifiedPresenterIdle(t, coord)
 
 	assertStderrZeroRenderIntersection(t, stderr, terminal,
-		"尚未迁移到统一渲染命令通道",
+		"错误: 未知命令: /not-a-command",
 		"/retry 不接受参数",
 	)
 }
 
-// TestB4InteractiveFenceErrorRenderedToStdout：fence 错误确实渲染到了
+// TestB4InteractiveUnknownCommandRenderedToStdout：未知命令错误确实渲染到了
 // stdout 代理（终端 buffer），证明错误走渲染通道而非 stderr。
-func TestB4InteractiveFenceErrorRenderedToStdout(t *testing.T) {
+func TestB4InteractiveUnknownCommandRenderedToStdout(t *testing.T) {
 	session, coord, terminal := newB4UnifiedSession(t)
 
 	_, stderr := captureStdoutStderr(t, func() {
@@ -99,11 +99,11 @@ func TestB4InteractiveFenceErrorRenderedToStdout(t *testing.T) {
 	coord.waitUIActorIdle()
 	awaitUnifiedPresenterIdle(t, coord)
 
-	if !strings.Contains(terminal.String(), "尚未迁移到统一渲染命令通道") {
-		t.Fatalf("fence error not rendered to stdout proxy: %q", terminal.String())
+	if !strings.Contains(terminal.String(), "错误: 未知命令: /not-a-command") {
+		t.Fatalf("unknown-command error not rendered to stdout proxy: %q", terminal.String())
 	}
-	if strings.Contains(stderr, "尚未迁移到统一渲染命令通道") {
-		t.Fatalf("fence error leaked to stderr: %q", stderr)
+	if strings.Contains(stderr, "错误: 未知命令: /not-a-command") {
+		t.Fatalf("unknown-command error leaked to stderr: %q", stderr)
 	}
 }
 

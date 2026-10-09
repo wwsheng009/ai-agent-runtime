@@ -27,9 +27,6 @@ type directFunctionInvokeReport struct {
 }
 
 func handleDirectFunctionCommand(session *ChatSession, command string) bool {
-	if rejectUnmigratedUnifiedChatCommand(session, "/call") {
-		return false
-	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -119,9 +116,6 @@ func executeStructuredDirectFunctionCommand(session *ChatSession, command string
 }
 
 func handleDirectSkillCommand(session *ChatSession, command string) bool {
-	if rejectUnmigratedUnifiedChatCommand(session, "/skill") {
-		return false
-	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false

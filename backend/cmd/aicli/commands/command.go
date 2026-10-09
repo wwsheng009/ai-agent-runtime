@@ -40,10 +40,11 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 	// TerminalSession ownership is a one-way renderer cutover. Do not route an
 	// unstructured command into handleCommand here: several retained handlers
 	// still contain direct stdout writes and legacy modal/surface lifecycles.
-	// The gate emits a typed Scene-backed result (or exits) and fail-closes the
-	// command until it has an explicit CommandResult/UI-action migration.
+	// Unclaimed commands fall back to one typed "未知命令" cell (fail-closed);
+	// every catalog command must be claimed by the structured dispatch, which
+	// TestUnifiedCatalogCommandsNeverFallToUnknown guards mechanically.
 	if unifiedDirectInteractiveOutput(session) {
-		return dispatchUnmigratedUnifiedChatCommand(session, command)
+		return dispatchUnifiedUnknownChatCommand(session, command)
 	}
 	if !noInteractive {
 		beginDirectInteractiveOutput(session)

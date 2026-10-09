@@ -54,7 +54,9 @@ func handleDebugCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		result, handled := tryExecuteStructuredDebugCommand(session, command)
 		if !handled {
-			result = commandTextResult("错误: /debug " + strings.TrimSpace(extractCommandArgument(command)) + " 尚未迁移到统一渲染命令通道。")
+			// 全部可解析的 /debug 变体已结构化（handled=false 不可达）；
+			// 防御性 fail-closed，绝不回落 legacy stdout 处理器。
+			result = commandTextResult("错误: /debug 变体无法通过统一渲染命令通道处理")
 		}
 		_ = renderChatCommandResult(session, result, false)
 		// /debug display is an alternate-screen viewer, not a Scene cell. It is

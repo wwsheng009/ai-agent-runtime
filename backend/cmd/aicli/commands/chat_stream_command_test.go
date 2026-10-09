@@ -117,7 +117,7 @@ func TestApplyStreamCommand_TogglePersistsPreference(t *testing.T) {
 // TestStructuredStreamShortcuts_AllFormsClaimed 锁定 /s、/n、/normal 三个流式
 // 快捷形式在结构化分派内全部被认领。背景（L5-3 Batch A）：/normal 是目录全名
 // （catalog: Name=/normal，Alias=/n），此前只在 legacy switch 覆盖；统一渲染
-// 会话输入全名会落到 legacy 门禁（"尚未迁移…已在 interactive TTY 中禁用"）。
+// 会话输入全名曾落到未迁移拒绝面（Batch A 修复，门禁已在 Batch C 删除）。
 func TestStructuredStreamShortcuts_AllFormsClaimed(t *testing.T) {
 	cases := []struct {
 		command    string
