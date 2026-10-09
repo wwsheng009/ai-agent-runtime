@@ -22,7 +22,7 @@
 
 | 项 | 一句话 | 触发条件（满足其一即立项） | 规模 |
 |---|---|---|---|
-| L5-1 | 启动期租约 → fullscreen/pager/debug raw 收编 | 启动期 picker 需纳入统一渲染/租约；或启动期裸写引发实际冲突/需求 | 中（约 3–6 提交） |
+| L5-1 | 启动期租约 → fullscreen/pager/debug raw 收编（**提前立项**：方案文档已出，待执行） | 启动期 picker 需纳入统一渲染/租约；或启动期裸写引发实际冲突/需求 | 中（约 3–6 提交） |
 | L5-2 | presenter popup/几何 API → surface facade 读退役 | 需要统一 popup/几何能力提升；或继续瘦身 surface 排期 | 中大（设计 + 分批迁移） |
 | L5-3 | legacy 命令处理器 → CommandResult 批量迁移（已执行：Batch A/B/C 完成，三批次收口） | 排期「命令通道收口」批次（收益最直接：删硬门禁） | 大（逐命令小刀） |
 | T-1 | session 侧 DEC 2026 同步帧包裹 | 真机 tearing 证据（唯一门槛） | 小（约 1–2 提交 + 真机验证） |
@@ -61,6 +61,10 @@ fail-closed 规则）；这是本项唯一的真正设计工作。
 `beginChatInputWait` 等启动看门狗语义需保持。
 
 **规模**：中等（约 3–6 提交：设计 1 + 三处接线/清理 + 测试迁移与真机）。
+
+**执行记录（2026-10-09）**：已升级为独立方案文档
+[aicli-l5-1-startup-lease-plan-20261009.md](aicli-l5-1-startup-lease-plan-20261009.md)；
+触发条件尚未满足，经用户授权**提前立项**（动机：写端基线受认可 24→20、启动期零裸写收尾）。
 
 ## 2. L5-2 presenter popup/几何 API → surface facade 读退役
 
