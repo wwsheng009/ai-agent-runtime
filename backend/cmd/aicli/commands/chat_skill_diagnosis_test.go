@@ -26,7 +26,7 @@ func TestSkillCatalogRootsExposeMountChainDiagnosis(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write SKILL.md: %v", err)
 	}
-	t.Chdir(workspace)
+	chdirTest(t, workspace)
 
 	// enabled=false：最常见的"配置没写 enabled"故障。
 	session := &ChatSession{
@@ -48,7 +48,7 @@ func TestSkillCatalogRootsExposeMountChainDiagnosis(t *testing.T) {
 	// 目录解析为空（enabled=true 但一个 skill 目录都没有）：诊断必须显示
 	// enabled=true 而 resolved_dirs=0，这样才和上面那行区分得开。
 	empty := t.TempDir()
-	t.Chdir(empty)
+	chdirTest(t, empty)
 	emptySession := &ChatSession{
 		FunctionRegistry: functions.NewFunctionRegistry(),
 		Config: &config.Config{

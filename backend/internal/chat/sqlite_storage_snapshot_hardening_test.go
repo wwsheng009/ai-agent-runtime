@@ -209,6 +209,9 @@ func sqliteTableColumns(t *testing.T, db *sql.DB, table string) []string {
 }
 
 func TestSnapshotSessionDoesNotBlockSessionWrites(t *testing.T) {
+	if win7compatBuild {
+		t.Skip("win7compat 退回 journal_mode=DELETE（见 sqlite_journal_policy_win7.go）：回滚日志下快照读事务会阻塞写提交，'读不阻塞写' 断言不适用")
+	}
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("snapshot-nonblocking-user")

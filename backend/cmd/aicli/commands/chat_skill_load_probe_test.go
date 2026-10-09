@@ -29,7 +29,7 @@ func TestProbeSkillLoadGatesWithoutConfiguredSkillDir(t *testing.T) {
 	workspace := t.TempDir()
 	writeWorkspaceSkillForProbe(t, workspace, "alpha")
 	writeWorkspaceSkillForProbe(t, workspace, "beta")
-	t.Chdir(workspace)
+	chdirTest(t, workspace)
 
 	cfg := &config.Config{
 		SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true, ConfigFile: "configs/runtime.yaml"},

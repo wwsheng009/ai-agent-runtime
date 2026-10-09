@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ func TestResolveMCPWritePathForScope(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 
 	path, err := resolveMCPWritePathForScope(mcpWriteScopeUser)
 	if err != nil {
@@ -138,7 +139,7 @@ func TestRunMCPAddCommandProjectScope(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 
 	previousConfigFile := mcpConfigFile
 	mcpConfigFile = ""
@@ -186,7 +187,7 @@ func TestMCPAdminServiceTargetsDefiningFile(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 
 	userPath := writeMCPConfigFileForTest(t, filepath.Join(home, ".aicli"), "mcp.yaml", `mcpServers:
   base:
@@ -228,7 +229,7 @@ func TestMCPAdminServiceTargetsDefiningFile(t *testing.T) {
 	}
 
 	// 删除项目级定义后，用户级定义应重新生效（同名覆盖的自然语义）。
-	if err := newMCPAdminServiceForServer("shared", false).Remove(t.Context(), "shared"); err != nil {
+	if err := newMCPAdminServiceForServer("shared", false).Remove(context.Background(), "shared"); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	result, err := loadMCPConfigLayered()

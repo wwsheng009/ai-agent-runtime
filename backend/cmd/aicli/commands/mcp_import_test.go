@@ -38,7 +38,7 @@ func TestRunMCPImportCommandDryRunThenApplyLocalScope(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 	importFixtureClaude(t, home)
 
 	previousConfigFile := mcpConfigFile
@@ -88,7 +88,7 @@ func TestRunMCPImportCommandProjectScopeMasksSecrets(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 	importFixtureClaude(t, home)
 
 	previousConfigFile := mcpConfigFile
@@ -120,7 +120,7 @@ func TestRunMCPImportCommandProjectScopeMasksSecrets(t *testing.T) {
 	home2 := filepath.Join(t.TempDir(), "home2")
 	isolateMCPCommandHome(t, home2)
 	project2 := t.TempDir()
-	t.Chdir(project2)
+	chdirTest(t, project2)
 	importFixtureClaude(t, home2)
 
 	rejected, err := runMCPImportCommand(mcpImportOptions{
@@ -142,7 +142,7 @@ func TestRunMCPImportCommandConflictPolicies(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 	importFixtureClaude(t, home)
 
 	previousConfigFile := mcpConfigFile
@@ -201,7 +201,7 @@ func TestRunMCPImportCommandConflictPolicies(t *testing.T) {
 func TestRunMCPImportCommandValidatesFlags(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	previousConfigFile := mcpConfigFile
 	mcpConfigFile = ""
@@ -340,7 +340,7 @@ func TestRunMCPAddJSONCommandProjectScopeRejectsPlaintext(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 
 	previousConfigFile := mcpConfigFile
 	mcpConfigFile = ""
@@ -478,7 +478,7 @@ func TestRunMCPImportCommandFromJSONFile(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	isolateMCPCommandHome(t, home)
 	project := t.TempDir()
-	t.Chdir(project)
+	chdirTest(t, project)
 
 	previousConfigFile := mcpConfigFile
 	mcpConfigFile = ""

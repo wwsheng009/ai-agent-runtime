@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
@@ -23,17 +24,17 @@ func storageTestSeedDB(t *testing.T, path string, autoVacuum string) {
 	require.NoError(t, err)
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	require.NoError(t, storageExec(t.Context(), db, "PRAGMA busy_timeout=5000"))
+	require.NoError(t, storageExec(context.Background(), db, "PRAGMA busy_timeout=5000"))
 	if autoVacuum != "" {
-		require.NoError(t, storageExec(t.Context(), db, "PRAGMA auto_vacuum="+autoVacuum))
+		require.NoError(t, storageExec(context.Background(), db, "PRAGMA auto_vacuum="+autoVacuum))
 	}
-	require.NoError(t, storageExec(t.Context(), db, `CREATE TABLE payload (id INTEGER PRIMARY KEY, body BLOB)`))
+	require.NoError(t, storageExec(context.Background(), db, `CREATE TABLE payload (id INTEGER PRIMARY KEY, body BLOB)`))
 	const rows = 64
 	for index := 0; index < rows; index++ {
-		_, err := db.ExecContext(t.Context(), `INSERT INTO payload (body) VALUES (?)`, bytes.Repeat([]byte("x"), 64<<10))
+		_, err := db.ExecContext(context.Background(), `INSERT INTO payload (body) VALUES (?)`, bytes.Repeat([]byte("x"), 64<<10))
 		require.NoError(t, err)
 	}
-	require.NoError(t, storageExec(t.Context(), db, `DELETE FROM payload WHERE id > 4`))
+	require.NoError(t, storageExec(context.Background(), db, `DELETE FROM payload WHERE id > 4`))
 }
 
 func storageTestOpen(t *testing.T, path string) *sql.DB {

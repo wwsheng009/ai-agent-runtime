@@ -26,7 +26,7 @@ func repoBackendDir(t *testing.T) string {
 // 这里只打印不断言，定位到具体失败点后再补断言。
 func TestProbeRealRepoSkillLoad(t *testing.T) {
 	backend := repoBackendDir(t)
-	t.Chdir(backend)
+	chdirTest(t, backend)
 
 	cfg := &config.Config{
 		SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true, ConfigFile: "configs/runtime.yaml"},
