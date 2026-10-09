@@ -67,9 +67,28 @@ func TestStructuredBacktrackApplyCarriesTypedMutationEffect(t *testing.T) {
 	}
 }
 
-func TestStructuredRewindApplyRemainsFenced(t *testing.T) {
-	if _, handled := executeStructuredBacktrackQueryCommand(&ChatSession{}, "/rewind 3 --apply"); handled {
-		t.Fatal("numeric /rewind unexpectedly entered backtrack apply transaction")
+func TestStructuredRewindNumericAliasCarriesTypedApply(t *testing.T) {
+	result, handled := executeStructuredBacktrackQueryCommand(&ChatSession{}, "/rewind 3 --apply")
+	if !handled {
+		t.Fatal("numeric /rewind must be claimed as the /backtrack alias")
+	}
+	if result.ApplyBacktrack == nil {
+		t.Fatal("numeric /rewind apply is missing its typed mutation effect")
+	}
+	request := result.ApplyBacktrack.Request
+	if request.UserTurnIndex == nil || *request.UserTurnIndex != 3 {
+		t.Fatalf("typed request user turn = %#v, want 3", request.UserTurnIndex)
+	}
+}
+
+func TestStructuredRewindCheckpointNamespaceStaysTyped(t *testing.T) {
+	result, handled := executeStructuredBacktrackQueryCommand(&ChatSession{}, "/rewind chk_deadbeef --apply")
+	if !handled {
+		t.Fatal("checkpoint-id /rewind must degrade to a typed message instead of the legacy path")
+	}
+	text := ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(text, "checkpoint-id 直接恢复未提供") {
+		t.Fatalf("checkpoint-id refusal text missing: %q", text)
 	}
 }
 

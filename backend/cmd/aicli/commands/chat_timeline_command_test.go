@@ -768,8 +768,9 @@ func TestDirectResumeTargetsStayOnUnifiedTerminalSession(t *testing.T) {
 	if handleResumeCommand(session, "/resume resume-unified-session") {
 		t.Fatal("direct unified /resume unexpectedly requested chat exit")
 	}
-	// This test runs without a real TTY, so bare /resume remains fail-closed;
-	// the compatible ANSI-TTY path is covered by the typed picker state tests.
+	// This test runs without a real TTY, so bare /resume degrades to the typed
+	// unavailable message; the compatible ANSI-TTY path is covered by the typed
+	// picker state tests.
 	if dispatchChatCommand(session, "/resume", false) {
 		t.Fatal("bare /resume unexpectedly requested chat exit")
 	}
@@ -786,7 +787,7 @@ func TestDirectResumeTargetsStayOnUnifiedTerminalSession(t *testing.T) {
 		"已恢复历史会话: Load fixture",
 		"我先检查目录。",
 		"当前已经在该会话中，无需恢复",
-		"错误: /resume 正在迁移到统一渲染器，已拒绝旧终端直写",
+		"当前无法打开历史会话选择器",
 	} {
 		if !strings.Contains(transcript.String(), marker) {
 			t.Fatalf("resume semantic transcript is missing %q:\n%s", marker, transcript.String())

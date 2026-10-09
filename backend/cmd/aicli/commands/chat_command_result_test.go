@@ -192,7 +192,7 @@ func TestDispatchChatCommandDebugDisplayDoesNotWriteRawStdout(t *testing.T) {
 	}
 }
 
-func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testing.T) {
+func TestUnifiedResidualCommandsStayTypedWithoutFence(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &ChatSession{}
 	bridge := newChatRuntimeEventBridge(session)
@@ -214,12 +214,16 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 	terminal.Reset()
 
 	commands := []struct {
-		input string
-		name  string
+		input  string
+		marker string
 	}{
-		{input: "/rewind 0", name: "/backtrack"},
-		{input: "/resume", name: "/resume"},
-		{input: "/rewind 5", name: "/backtrack"},
+		// 数字 /rewind 是 /backtrack 别名（与 legacy 路由一致）；无 runtime host
+		// 时提交 typed 错误单元格。
+		{input: "/rewind 0", marker: "错误: 当前没有可回退的持久化会话"},
+		// checkpoint-id 命名空间保留 legacy"未提供"提示，但必须是 typed 结果。
+		{input: "/rewind chk_deadbeef --apply", marker: "checkpoint-id 直接恢复未提供"},
+		// 无真实 TTY：picker 前置缺失 → typed 降级说明（fail-closed）。
+		{input: "/resume", marker: "当前无法打开历史会话选择器"},
 	}
 	raw := captureStdout(t, func() {
 		for _, test := range commands {
@@ -229,13 +233,13 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 		}
 	})
 	if raw != "" {
-		t.Fatalf("unified legacy command fence wrote raw stdout:\n%q", raw)
+		t.Fatalf("unified residual commands wrote raw stdout:\n%q", raw)
 	}
 
 	coord.waitUIActorIdle()
 	awaitUnifiedPresenterIdle(t, coord)
 	if got := surface.HistoryWindowForTest(); len(got) != 0 {
-		t.Fatalf("unified command fence populated legacy historyWindow: %#v", got)
+		t.Fatalf("unified residual commands populated legacy historyWindow: %#v", got)
 	}
 	snapshot := bridge.sceneSnapshot()
 	if snapshot == nil || len(snapshot.Cells) != len(commands) {
@@ -246,13 +250,12 @@ func TestUnifiedInteractiveLegacyCommandsAreFencedBeforeLegacyHandlers(t *testin
 		t.Fatalf("semantic command cells=%d want %d", count, len(commands))
 	}
 	for index, test := range commands {
-		marker := "错误: " + test.name + " 正在迁移到统一渲染器，已拒绝旧终端直写"
-		if !strings.Contains(snapshot.Cells[index].Source, marker) {
-			t.Fatalf("cell[%d] for %s did not contain fence marker %q: %+v", index, test.input, marker, snapshot.Cells[index])
+		if !strings.Contains(snapshot.Cells[index].Source, test.marker) {
+			t.Fatalf("cell[%d] for %s did not contain %q: %+v", index, test.input, test.marker, snapshot.Cells[index])
 		}
 	}
-	if !strings.Contains(terminal.String(), "已拒绝旧终端直写") {
-		t.Fatalf("TerminalSession did not render the semantic fence: %q", terminal.String())
+	if strings.Contains(terminal.String(), "正在迁移到统一渲染器") {
+		t.Fatalf("migration fence must be fully retired: %q", terminal.String())
 	}
 }
 

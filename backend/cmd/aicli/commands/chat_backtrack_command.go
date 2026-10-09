@@ -39,9 +39,9 @@ func handleBacktrackCommand(session *ChatSession, command string) bool {
 			}
 			return false
 		}
-		return rejectUnifiedInteractiveLegacyCommand(session, "/backtrack")
-	}
-	if rejectUnifiedInteractiveLegacyCommand(session, "/backtrack") {
+		// 全部输入已被结构化函数接管（handled=false 不可达）；防御性 fail-closed，
+		// 绝不回落 legacy stdout 处理器。
+		_ = renderChatCommandResult(session, commandTextResult("错误: /backtrack 变体无法通过统一渲染命令通道处理"), false)
 		return false
 	}
 	if session == nil {
@@ -196,6 +196,10 @@ func beginBacktrackSubmitRun(session *ChatSession, prompt string) func() {
 	return bridge.EndRun
 }
 
+// rewindUnsupportedMessage 是 /rewind 非别名命名空间（checkpoint-id 等）的
+// typed 提示，与 legacy 出口（command.go）同一文案。
+const rewindUnsupportedMessage = "提示: /rewind 仅支持数字 user turn 序号（等价 /backtrack <index>）与 list/select；checkpoint-id 直接恢复未提供\n用法: /backtrack [list|select|audit|<index> --apply|--both|--edit|--submit]"
+
 // executeStructuredBacktrackQueryCommand accepts finite read-only reports and
 // typed backtrack effects. Direct --apply/--submit carries its fully parsed
 // request to dispatch, which runs the destructive canonical-replacement
@@ -207,24 +211,30 @@ func executeStructuredBacktrackQueryCommand(session *ChatSession, command string
 	args := strings.TrimSpace(extractCommandArgument(command))
 	first := strings.ToLower(firstToken(args))
 	isBacktrack := commandMatches(strings.ToLower(strings.TrimSpace(command)), "/backtrack")
-	// Preserve /rewind's legacy checkpoint-id namespace until that command has
-	// its own semantic action model. Only its established list alias is a safe
-	// read-only projection here.
-	if !isBacktrack && first != "list" && first != "ls" {
-		return CommandResult{}, false
+	// /rewind 保持 legacy 路由的别名语义（command.go:298-312）：数字首参、
+	// 空参与 list/ls 等价 /backtrack（含 --apply/--submit typed 效应）；其余
+	// （select/audit/checkpoint-id 等）保留 legacy 的"未提供"提示，但以
+	// typed 结果提交——既不回落 legacy 直写，也不再有迁移 fence。
+	if !isBacktrack {
+		rewindAsBacktrack := first == "" || first == "list" || first == "ls"
+		if !rewindAsBacktrack {
+			if _, err := strconv.Atoi(first); err == nil {
+				rewindAsBacktrack = true
+			}
+		}
+		if !rewindAsBacktrack {
+			return commandTextResult(rewindUnsupportedMessage), true
+		}
 	}
 	if args == "" || first == "select" || first == "pick" || first == "ui" {
-		if isBacktrack {
-			if canOpenChatBacktrackPicker(session) {
-				return newBacktrackPickerCommandResult(), true
-			}
-			// No picker surface (non-TTY, run active, popup/lease held, or
-			// runtime host not ready): degrade to the finite read-only turn
-			// list so the bare command stays on the unified command cell
-			// instead of being rejected as an unmigrated legacy writer.
-			return executeStructuredBacktrackTurnsQuery(session), true
+		if canOpenChatBacktrackPicker(session) {
+			return newBacktrackPickerCommandResult(), true
 		}
-		return CommandResult{}, false
+		// No picker surface (non-TTY, run active, popup/lease held, or
+		// runtime host not ready): degrade to the finite read-only turn
+		// list so the bare command stays on the unified command cell
+		// instead of being rejected as an unmigrated legacy writer.
+		return executeStructuredBacktrackTurnsQuery(session), true
 	}
 
 	if first == "list" || first == "ls" {
@@ -236,9 +246,6 @@ func executeStructuredBacktrackQueryCommand(session *ChatSession, command string
 
 	req, apply, err := parseChatBacktrackArgs(args)
 	if err != nil {
-		if commandMatches(strings.ToLower(strings.TrimSpace(command)), "/rewind") {
-			return CommandResult{}, false
-		}
 		return commandTextResult(buildBacktrackUsageText(err)), true
 	}
 	if apply {

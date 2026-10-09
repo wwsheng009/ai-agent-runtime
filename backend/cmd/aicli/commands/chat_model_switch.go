@@ -47,9 +47,6 @@ func handleProviderCommand(session *ChatSession, command string, noInteractive b
 		_ = renderChatCommandResult(session, commandTextResult("错误: /provider 变体无法通过统一渲染命令通道处理"), false)
 		return false
 	}
-	if rejectUnifiedInteractiveLegacyCommand(session, "/provider") {
-		return false
-	}
 	if session == nil {
 		fmt.Println("错误: 当前没有活动会话")
 		return false
@@ -88,13 +85,9 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 			return false
 		}
 		// executeStructuredModelCommand handles every /model variant today, so
-		// this branch is defensive. The deny-list fence no longer contains
-		// /model (it is fully migrated), so rejectUnifiedInteractiveLegacyCommand
-		// would fail open into the legacy stdout handler; fail closed instead.
+		// this branch is defensive: fail closed instead of falling open into the
+		// legacy stdout handler.
 		_ = renderChatCommandResult(session, commandTextResult("错误: /model 变体无法通过统一渲染命令通道处理"), false)
-		return false
-	}
-	if rejectUnifiedInteractiveLegacyCommand(session, "/model") {
 		return false
 	}
 	if session == nil {

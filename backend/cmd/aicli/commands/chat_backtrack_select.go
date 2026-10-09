@@ -28,18 +28,14 @@ func handleInteractiveBacktrackSelect(session *ChatSession) bool {
 	}
 	if unifiedDirectInteractiveOutput(session) {
 		// Bare Esc is documented as equivalent to `/backtrack`, so it shares
-		// that command's unified behavior instead of the legacy migration
-		// fence: open the typed alternate-screen picker when the surface
-		// allows it, otherwise degrade to the finite turn list on the unified
-		// command cell.
+		// that command's unified behavior: open the typed alternate-screen
+		// picker when the surface allows it, otherwise degrade to the finite
+		// turn list on the unified command cell.
 		if canOpenChatBacktrackPicker(session) {
 			openChatBacktrackPicker(session, BacktrackPickerRequest{})
 			return false
 		}
 		_ = renderChatCommandResult(session, executeStructuredBacktrackTurnsQuery(session), false)
-		return false
-	}
-	if rejectUnifiedInteractiveLegacyCommand(session, "/backtrack") {
 		return false
 	}
 	if session == nil {

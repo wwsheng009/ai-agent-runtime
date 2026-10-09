@@ -268,8 +268,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	}
 	// The backtrack picker and apply path are effects, but list/audit/preview
 	// requests are finite read-only reports, and bare /backtrack degrades to
-	// the turn list when the picker is unavailable. Claim those here; only the
-	// /rewind checkpoint-id namespace keeps the unified fence.
+	// the turn list when the picker is unavailable. Claim those here; /rewind
+	// keeps its legacy alias semantics (numeric/empty/list) and its remaining
+	// checkpoint-id namespace degrades to one typed message.
 	if (commandMatches(cmdLower, "/backtrack") || commandMatches(cmdLower, "/rewind")) && unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredBacktrackQueryCommand(session, command); handled {
 			return result, true, nil
@@ -304,9 +305,6 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	// reaches handleCommand. Plain, JSON and --no-interactive projections keep
 	// their established command implementations until those commands receive a
 	// native semantic interaction model.
-	if result, fenced := unifiedInteractiveLegacyCommandFence(session, cmdLower); fenced {
-		return result, true, nil
-	}
 	if commandMatches(cmdLower, "/trust") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredTrustCommand(session, command), true, nil
 	}
@@ -873,47 +871,6 @@ func executeStructuredDebugModeCommand(session *ChatSession, enabled bool) Comma
 		warnings = append(warnings, fmt.Errorf("切换 debug mode 后同步会话失败: %w", err))
 	}
 	return commandResultWithWarnings(buildChatDebugModeMutationDocument(enabled), warnings...)
-}
-
-// unifiedInteractiveLegacyCommandFence turns an unported interactive command
-// into one retained semantic command cell. It is deliberately a deny-list for
-// the remaining complex flows, rather than an environment toggle: once a
-// TerminalSession owns the TTY, execution may not revive a legacy prompt,
-// alternate-screen writer, or raw stdout output.
-func unifiedInteractiveLegacyCommandFence(session *ChatSession, command string) (CommandResult, bool) {
-	if !unifiedDirectInteractiveOutput(session) {
-		return CommandResult{}, false
-	}
-
-	commandName := ""
-	switch {
-	case commandMatches(command, "/backtrack"), commandMatches(command, "/rewind"):
-		commandName = "/backtrack"
-	case commandMatches(command, "/resume"):
-		commandName = "/resume"
-	default:
-		return CommandResult{}, false
-	}
-
-	return CommandResult{
-		Blocks: []RenderBlock{{Document: render.SingleLineDoc(render.TextSpan(
-			fmt.Sprintf("错误: %s 正在迁移到统一渲染器，已拒绝旧终端直写", commandName),
-		))}},
-		Action: CommandContinue,
-	}, true
-}
-
-// rejectUnifiedInteractiveLegacyCommand protects direct handler invocations
-// outside dispatch (for example Esc-triggered backtrack selection). A missing
-// coordinator after TerminalSession ownership is intentionally treated as
-// handled: renderChatCommandResult then fails closed instead of using stdout.
-func rejectUnifiedInteractiveLegacyCommand(session *ChatSession, command string) bool {
-	result, fenced := unifiedInteractiveLegacyCommandFence(session, command)
-	if !fenced {
-		return false
-	}
-	_ = renderChatCommandResult(session, result, false)
-	return true
 }
 
 func executeStructuredQueueCommand(session *ChatSession, command string) CommandResult {

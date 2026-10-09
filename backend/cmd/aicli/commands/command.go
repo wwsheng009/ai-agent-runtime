@@ -307,7 +307,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		if arg == "" || strings.EqualFold(firstToken(arg), "list") || strings.EqualFold(firstToken(arg), "ls") {
 			return handleBacktrackCommand(session, "/backtrack "+arg)
 		}
-		printChatCommandOutput(session, "提示: /rewind 仅支持数字 user turn 序号（等价 /backtrack <index>）与 list/select；checkpoint-id 直接恢复未提供\n用法: /backtrack [list|select|audit|<index> --apply|--both|--edit|--submit]")
+		printChatCommandOutput(session, rewindUnsupportedMessage)
 		return false
 	}
 	if commandMatches(cmdLower, "/provider") {

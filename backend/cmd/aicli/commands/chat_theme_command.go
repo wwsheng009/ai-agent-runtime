@@ -292,13 +292,9 @@ func handleThemeCommand(session *ChatSession, command string, noInteractive bool
 			return false
 		}
 		// executeStructuredThemeCommand handles every /theme variant today, so
-		// this branch is defensive. The deny-list fence no longer contains
-		// /theme (it is fully migrated), so rejectUnifiedInteractiveLegacyCommand
-		// would fail open into the legacy stdout handler; fail closed instead.
+		// this branch is defensive: fail closed instead of falling open into the
+		// legacy stdout handler.
 		_ = renderChatCommandResult(session, commandTextResult("错误: /theme 变体无法通过统一渲染命令通道处理"), false)
-		return false
-	}
-	if rejectUnifiedInteractiveLegacyCommand(session, "/theme") {
 		return false
 	}
 	if session == nil {

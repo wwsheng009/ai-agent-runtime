@@ -39,9 +39,9 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 			}
 			return false
 		}
-		return rejectUnifiedInteractiveLegacyCommand(session, "/resume")
-	}
-	if rejectUnifiedInteractiveLegacyCommand(session, "/resume") {
+		// 全部输入已被结构化函数接管（handled=false 不可达）；防御性 fail-closed，
+		// 绝不回落 legacy stdout 处理器。
+		_ = renderChatCommandResult(session, commandTextResult("错误: /resume 变体无法通过统一渲染命令通道处理"), false)
 		return false
 	}
 	if session == nil {
@@ -91,6 +91,9 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 	argument := strings.TrimSpace(extractCommandArgument(command))
 	if argument == "" {
 		if !canOpenChatResumePicker(session) {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult(resumePickerUnavailableMessage), true
+			}
 			return CommandResult{}, false
 		}
 		return newResumePickerCommandResult(session.SessionFilter, false), true
@@ -109,6 +112,9 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 		// filter. Carry that filter in the typed request; never reinterpret it as
 		// `latest` or fall through to the legacy line reader.
 		if !canOpenChatResumePicker(session) {
+			if unifiedDirectInteractiveOutput(session) {
+				return commandTextResult(resumePickerUnavailableMessage), true
+			}
 			return CommandResult{}, false
 		}
 		return newResumePickerCommandResult(filter, fullHistory), true
@@ -201,6 +207,10 @@ var chatResumePickerLeaseHooks = chatPickerLeaseHooks{
 	Open:  func(leaseID uint64) ui.UIAction { return ui.OpenResumePicker{LeaseID: leaseID} },
 	Close: func(leaseID uint64) ui.UIAction { return ui.CloseResumePicker{LeaseID: leaseID} },
 }
+
+// resumePickerUnavailableMessage 是统一渲染会话在副屏/终端状态不可用时的
+// typed 降级（fail-closed：不回落 legacy 行读取器，也不再有迁移 fence）。
+const resumePickerUnavailableMessage = "错误: 当前无法打开历史会话选择器（副屏不可用或终端状态忙）；可改用 /resume <session-id> 直接恢复，或用 /sessions 查看列表"
 
 // openChatResumePicker runs the lease-bound fullscreen selector after the
 // command result has crossed the dispatch boundary. The picker itself has no
