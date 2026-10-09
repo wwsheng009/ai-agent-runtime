@@ -1,9 +1,7 @@
 package ui
 
 import (
-	"bufio"
 	"context"
-	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
@@ -11,12 +9,10 @@ import (
 
 // InputBox 输入框组件
 type InputBox struct {
-	layout    *Layout
-	terminal  *Terminal
-	theme     *Theme
-	multiLine bool
-	maxLines  int
-	history   []string
+	layout   *Layout
+	terminal *Terminal
+	theme    *Theme
+	history  []string
 }
 
 const defaultInputHistoryLimit = 200
@@ -24,12 +20,10 @@ const defaultInputHistoryLimit = 200
 // NewInputBox 创建新的输入框
 func NewInputBox(layout *Layout) *InputBox {
 	return &InputBox{
-		layout:    layout,
-		terminal:  NewTerminal(),
-		theme:     GetTheme(ThemeAuto),
-		multiLine: false,
-		maxLines:  1,
-		history:   make([]string, 0),
+		layout:   layout,
+		terminal: NewTerminal(),
+		theme:    GetTheme(ThemeAuto),
+		history:  make([]string, 0),
 	}
 }
 
@@ -49,96 +43,6 @@ func (ib *InputBox) SetTerminal(term *Terminal) *InputBox {
 func (ib *InputBox) SetTheme(theme *Theme) *InputBox {
 	ib.theme = theme
 	return ib
-}
-
-// SetMultiLine 设置是否支持多行输入
-func (ib *InputBox) SetMultiLine(multiLine bool) *InputBox {
-	ib.multiLine = multiLine
-	return ib
-}
-
-// SetMaxLines 设置最大行数
-func (ib *InputBox) SetMaxLines(maxLines int) *InputBox {
-	ib.maxLines = maxLines
-	return ib
-}
-
-// Show 显示输入提示符
-func (ib *InputBox) Show() {
-	if ib.layout != nil && ib.layout.IsEnabled() {
-		// 使用布局渲染
-		ib.layout.RenderInputArea(ib.GetPrompt(), "")
-	} else {
-		writeInputDocument(PromptLineDocument(ib.GetPrompt()), ib.theme)
-	}
-}
-
-// Read 读取用户输入
-func (ib *InputBox) Read() (string, error) {
-	ib.Show()
-
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-
-	input = strings.TrimSpace(input)
-
-	ib.AddToHistory(input)
-
-	return input, nil
-}
-
-// ReadMultiLine 读取多行输入
-func (ib *InputBox) ReadMultiLine() (string, error) {
-	var builder strings.Builder
-	lineCount := 0
-
-	ib.Show()
-
-	reader := bufio.NewReader(os.Stdin)
-
-	for {
-		prompt := ib.GetPrompt()
-		if lineCount > 0 {
-			prompt = "   ...> "
-		}
-
-		if ib.layout != nil && ib.layout.IsEnabled() {
-			ib.layout.RenderInputArea(prompt, "")
-		} else {
-			writeInputDocument(PromptLineDocument(prompt), ib.theme)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-
-		// 空行表示结束
-		if strings.TrimSpace(line) == "" {
-			break
-		}
-
-		if lineCount > 0 {
-			builder.WriteRune('\n')
-		}
-
-		builder.WriteString(strings.TrimSpace(line))
-		lineCount++
-
-		// 检查最大行数限制
-		if ib.maxLines > 0 && lineCount >= ib.maxLines {
-			break
-		}
-	}
-
-	result := builder.String()
-
-	ib.AddToHistory(result)
-
-	return result, nil
 }
 
 // ReadWithHistoryPromptWithHooks reads a line with history and editor hooks.
@@ -218,20 +122,6 @@ func (ib *InputBox) GetHistoryAt(index int) (string, bool) {
 	return ib.history[index], true
 }
 
-// Clear 清除输入框
-func (ib *InputBox) Clear() {
-	if ib.layout != nil && ib.layout.IsEnabled() {
-		ib.layout.RenderInputArea("", "")
-	}
-}
-
-// Update 更新输入显示
-func (ib *InputBox) Update(input string) {
-	if ib.layout != nil && ib.layout.IsEnabled() {
-		ib.layout.RenderInputArea(ib.GetPrompt(), input)
-	}
-}
-
 // GetPrompt 获取提示符字符串
 func (ib *InputBox) GetPrompt() string {
 	return UserPromptText(0)
@@ -281,13 +171,6 @@ func (ib *InputBox) Cursor(pos int) {
 		ib.terminal.SaveCursor()
 		ib.terminal.MoveTo(ib.layout.InputArea().Row, actualPos)
 		ib.terminal.RestoreCursor()
-	}
-}
-
-// Hide 隐藏输入框
-func (ib *InputBox) Hide() {
-	if ib.layout != nil && ib.layout.IsEnabled() {
-		ib.layout.RenderInputArea("", "")
 	}
 }
 

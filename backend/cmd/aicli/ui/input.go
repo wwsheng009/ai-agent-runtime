@@ -1,9 +1,7 @@
 package ui
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -18,15 +16,6 @@ const (
 	InputCommand                   // 命令输入
 	InputPassword                  // 密码输入（暂不实现）
 )
-
-// Input 组件
-type Input struct {
-	theme       *Theme
-	inputType   InputType
-	prefix      string
-	placeholder string
-	readOnly    bool
-}
 
 const defaultUserPrompt = "> "
 
@@ -124,98 +113,6 @@ func renderInputDocument(doc render.Document, theme *Theme) string {
 		theme = GetTheme(ThemeAuto)
 	}
 	return strings.TrimRight(renderDocumentWithProfile(doc, theme), "\n")
-}
-
-func writeInputDocument(doc render.Document, theme *Theme) {
-	text := renderInputDocument(doc, theme)
-	if text == "" {
-		return
-	}
-	_, _ = WriteTerminalText(os.Stdout, text)
-}
-
-// NewInput 创建新的输入组件
-func NewInput(inputType InputType) *Input {
-	return &Input{
-		theme:     GetTheme(ThemeAuto),
-		inputType: inputType,
-		prefix:    defaultUserPrompt,
-	}
-}
-
-// SetTheme 设置主题
-func (i *Input) SetTheme(theme *Theme) *Input {
-	i.theme = theme
-	return i
-}
-
-// SetPrefix 设置前缀
-func (i *Input) SetPrefix(prefix string) *Input {
-	i.prefix = prefix
-	return i
-}
-
-// SetPlaceholder 设置占位符
-func (i *Input) SetPlaceholder(placeholder string) *Input {
-	i.placeholder = placeholder
-	return i
-}
-
-// SetReadOnly 设置只读模式
-func (i *Input) SetReadOnly(readOnly bool) *Input {
-	i.readOnly = readOnly
-	return i
-}
-
-// Document builds the structured prompt model for this Input.
-func (i *Input) Document() render.Document {
-	theme := i.theme
-	if theme == nil {
-		theme = GetTheme(ThemeAuto)
-	}
-	return InputShowDocument(i.inputType, i.prefix, i.placeholder, theme.CommandIcon)
-}
-
-// Show 显示输入提示符（无尾随换行，走 Document + 终端写锁）
-func (i *Input) Show() {
-	theme := i.theme
-	if theme == nil {
-		theme = GetTheme(ThemeAuto)
-	}
-	writeInputDocument(i.Document(), theme)
-}
-
-// Read 读取用户输入
-func (i *Input) Read() (string, error) {
-	i.Show()
-
-	reader := bufio.NewReader(os.Stdin)
-	input, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(input), nil
-}
-
-// ReadLine 读取一行输入（快捷方法）
-func ReadLine() (string, error) {
-	return NewInput(InputDefault).Read()
-}
-
-// Prompt 提示用户输入（带自定义消息）
-func Prompt(prompt string) (string, error) {
-	i := NewInput(InputDefault)
-	i.SetPrefix(prompt)
-	return i.Read()
-}
-
-// PromptUser 用户输入提示符
-func PromptUser() string {
-	input, err := NewInput(InputDefault).Read()
-	if err != nil {
-		return ""
-	}
-	return input
 }
 
 // FormatUserPrompt 格式化用户输入提示

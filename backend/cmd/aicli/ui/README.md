@@ -90,7 +90,6 @@ cmd/aicli/
 ### 12. layout.go - 屏幕布局管理器
 - NewLayout() - 创建新的布局（支持简单/高级模式）
 - ChatArea(), InputArea(), StatusArea() - 获取各区域
-- RenderInputArea() - 渲染输入区域（legacy 输入框路径）
 - SetEnabled()/IsEnabled() - 布局启用状态（命令侧接线）
 
 ### 13. fullscreen_list.go - 全屏列表选择器
@@ -100,8 +99,7 @@ cmd/aicli/
 - 离开选择器时恢复原聊天屏幕、滚动区域、光标和终端 raw mode
 
 ### 14. inputbox.go - 输入框组件
-- Read() - 读取单行输入
-- ReadMultiLine() - 读取多行输入
+- ReadWithHistoryPromptWithHooks(Context)() / ReadTransient*WithHooks(Context)() - 编辑器链（经 LineEditorHooks）
 - 支持历史记录导航
 - 输入验证和清理
 
@@ -211,9 +209,9 @@ statusBar.SetThinking(true)
 // ... 处理请求 ...
 statusBar.SetThinking(false)
 
-// 创建输入框
+// 创建输入框（编辑器链；legacy Read/Show 显示链已退役，L1-d）
 inputBox := ui.NewInputBox(layout)
-input, err := inputBox.Read()
+input, err := inputBox.ReadWithHistoryPromptWithHooksContext(ctx, prompt, hooks)
 ```
 
 ## 依赖关系

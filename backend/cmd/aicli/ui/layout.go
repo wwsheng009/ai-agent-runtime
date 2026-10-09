@@ -1,16 +1,12 @@
 package ui
 
 import (
-	"os"
 	"strings"
 	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
-
-// clearToEOL is the CSI sequence that clears from cursor to end of line.
-const clearToEOL = "\033[K"
 
 // LayoutType 布局类型
 type LayoutType int
@@ -307,40 +303,6 @@ func (l *Layout) FormatSeparatorLine() string {
 // FormatMessage returns sanitized multi-line message text without writing.
 func FormatLayoutMessage(content string) string {
 	return strings.TrimRight(renderDocumentWithProfile(LayoutMessageDocument(content), GetTheme(ThemeAuto)), "\n")
-}
-
-func (l *Layout) writeDoc(doc render.Document) {
-	text := renderDocumentWithProfile(doc, l.themeOrDefault())
-	if text == "" {
-		return
-	}
-	_, _ = WriteTerminalText(os.Stdout, text)
-}
-
-// RenderInputArea 渲染输入区域（Document + WriteTerminal*）
-func (l *Layout) RenderInputArea(prompt, input string) {
-	if !l.enabled || l.inputArea == nil {
-		// 未启用布局：仍走 Document 消毒/角色着色，避免 raw ESC 直喷。
-		if prompt != "" || input != "" {
-			l.writeDoc(l.InputAreaDocument(prompt, input))
-		}
-		return
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.calculateAreas()
-
-	l.terminal.SaveCursor()
-
-	row := l.inputArea.Row
-	l.terminal.MoveTo(row, 1)
-	l.terminal.ClearFromCursor()
-
-	text := l.FormatInputArea(prompt, input)
-	_, _ = WriteTerminalText(os.Stdout, text+clearToEOL)
-
-	l.terminal.RestoreCursor()
 }
 
 // MoveToInput 移动光标到输入区域

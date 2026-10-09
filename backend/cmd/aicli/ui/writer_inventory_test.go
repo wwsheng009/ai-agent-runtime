@@ -60,9 +60,11 @@ func TestUIInteractiveDirectWriterInventory(t *testing.T) {
 // L5-1 Batch A 机械口径（2026-10-09）：启动期无租约 raw 回落退役后，受认可
 // 17 条/20 点位 + 债务 4 条/4 点位 = 合计 21 条/24 点位。ceiling 只允许下调；
 // 任何上调都等于重新分类，必须同步更新计划 §5 与 P0 台账 §4。
+// L1-d（2026-10-09）：InputBox legacy 显示链退役后，债务 1 条/1 点位，
+// 合计 18 条/21 点位。
 const (
 	uiSanctionedConsoleWriterCeiling = 20
-	uiWriterMigrationDebtCeiling     = 4
+	uiWriterMigrationDebtCeiling     = 1
 )
 
 type uiDirectWriter struct {
@@ -128,18 +130,14 @@ func uiSanctionedConsoleWriterInventory() []uiDirectWriterInventoryEntry {
 }
 
 // uiWriterMigrationDebtInventory 是仍属迁移债务的直写（必须递减）：
-//   - InputBox legacy 方法链（Read/ReadMultiLine/Show/Update/Hide）零生产调用者，
-//     其渲染出口 RenderInputArea/writeDoc/writeInputDocument 随之删除
-//     （退役方案 §4.2 暂缓项，独立小刀评估）；
 //   - processTerminalOutput 默认 stdout 绑定：ClearIfSupported 改显式 writer 后
 //     移除默认值（§4.3；proxy 保留）。
+//   - InputBox legacy 显示链（Read/ReadMultiLine/Show/Update/Hide/Clear）与其渲染
+//     出口 RenderInputArea/writeDoc/writeInputDocument 已于 L1-d 删除（§4.2）。
 //
 // 删除实现时同步摘除条目；uiWriterMigrationDebtCeiling 只降不升。
 func uiWriterMigrationDebtInventory() []uiDirectWriterInventoryEntry {
 	return []uiDirectWriterInventoryEntry{
-		{File: "input.go", Func: "writeInputDocument", Kind: "os.Std*", Count: 1},
-		{File: "layout.go", Func: "method RenderInputArea", Kind: "os.Std*", Count: 1},
-		{File: "layout.go", Func: "method writeDoc", Kind: "os.Std*", Count: 1},
 		{File: "terminal_output.go", Func: "var processTerminalOutput", Kind: "os.Std*", Count: 1},
 	}
 }
