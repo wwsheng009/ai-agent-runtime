@@ -133,6 +133,16 @@
     先行（`windows7-compat-internals.md` §6.2 互链）；验收矩阵追加 compat 场景（真机）。
   - 验证：writer inventory 门禁绿；ui 全量 + commands 单写端栅栏绿；gofmt/build/vet 绿。
 
+- [x] **L1-d InputBox legacy 显示链退役**（2026-10-09，`82f43683`）。
+  - 删除零调用者显示链：`InputBox.Read/ReadMultiLine/Show/Update/Hide/Clear/SetMultiLine/
+    SetMaxLines`（+ 字段 `multiLine/maxLines`）、`Input` 组件链（`writeInputDocument`/
+    `NewInput`/`ReadLine`/`Prompt`/`PromptUser`）、`layout.go` 渲染出口
+    （`RenderInputArea`/`writeDoc`/`clearToEOL`）。
+  - 机械口径：**债务 4→1 条/1 点位**（`uiWriterMigrationDebtCeiling` 4→1；余
+    `processTerminalOutput` 默认绑定，§4.3）；受认可 17 条/20 点位不变。
+  - 验证：ui 全量 14.0s 绿（含 writer inventory 精确匹配 + ceiling）；commands 聚焦
+    （InputQueue/Composer/MergedPrompt）绿；gofmt/build 绿。
+
 ## 2. 关键侦察结论（决定迁移顺序）
 
 1. **bracketed-paste / focus-change 序列是承重写，不能 claim 后丢弃。**
@@ -237,10 +247,11 @@
   ——注入计数 writer + 进程 stdout/stderr 零字节断言，覆盖标题/铃/模式序列/动态诊断/直写/命令输出。
 - composer 出口门禁：`go test ./cmd/aicli/commands/ -run 'TestChatTransientLineComposer|TestChatMergedAnswerPrompt|TestChatModalComposer|TestChatAgentPanelComposer'`。
 - L4 门禁语义重构（2026-10-08）：基线拆 sanctioned console writers / migration debt 两组
-  （机械口径 25 条/28 点位 = 受认可 21/24 + 债务 4/4）；`uiWriterMigrationDebtCeiling` 只降不升；
+  （L4 机械口径 25 条/28 点位；L5-1 后 21 条/24 点位；**L1-d 后 18 条/21 点位** =
+  受认可 17/20 + 债务 1/1）；`uiWriterMigrationDebtCeiling` 只降不升；
   分类移动必须同步更新 ceiling 与计划/台账。
 - 完成态：ui 生产文件直写基线只剩受认可白名单类（启动期探针/句柄初始化、TRACE/诊断、
-  console/plain 降级承重链、平台差异；FixedBottomSurface 物理写族已清零；启动期无租约
+   console/plain 降级承重链、平台差异；FixedBottomSurface 物理写族已清零；启动期无租约
   回退已随 L5-1 退役）
-  与有限债务（4 点位，随 L1-d / `ClearIfSupported` 改造递减）；交互期物理 writer 计数 = 1；
-  CI 中门禁测试常开。
+  与有限债务（1 点位：`processTerminalOutput` 默认绑定，随 `ClearIfSupported` 改造递减；
+  L1-d 已递减 4→1）；交互期物理 writer 计数 = 1；CI 中门禁测试常开。

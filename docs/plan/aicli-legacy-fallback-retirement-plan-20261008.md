@@ -188,7 +188,7 @@ buildChatSession
 | `screen_lease` raw 直写分支（`:286-330,:503-527`） | 仅 fence-on/测试可达 | **已执行（L1-c）**：租约统一走 transport（缺失 fail-closed）；测试迁移到 transport 断言 |
 | `WaitForESC`/`Notify` | 仅测试引用 | **已复核（L1-b）**：`WaitForESC` 删（测试转本地 helper）、`ManualInterrupt` 删（零调用）；`Notify` 保留（Windows 生产派发 `keyhandler_windows.go:65`） |
 | `Terminal.RawMode`/`DisableEcho`/`EnsureExitOnSigInt` | 无调用者 | **已执行（L1-b）**：D0-1 无外部消费者，直接删 |
-| `InputBox.Read/ReadMultiLine/Show/Update` 等 legacy 方法 | 仓库内无调用者 | **暂缓（评估后）**：联动面 `input.go`/`layout.go`（`writeInputDocument`/`RenderInputArea`/`writeDoc`/`InputAreaDocument`）需逐函数边界评估，作为独立小刀（L1-d）或 L2 前置 |
+| `InputBox.Read/ReadMultiLine/Show/Update/Hide/Clear` 等 legacy 方法 | 仓库内无调用者 | **已执行（L1-d，`82f43683`）**：显示链 + `Input` 组件链（`writeInputDocument`/`NewInput`/`ReadLine`/`Prompt`/`PromptUser`）+ `layout.go` 渲染出口（`RenderInputArea`/`writeDoc`/`clearToEOL`）全部删除；`InputAreaDocument`/`FormatInputArea`/`InputShowDocument` 保留（测试/语义 fixture 在用）；writer 债务 4→1 |
 
 ### 4.3 C 类——改造后删（半死：状态 facade 复用、物理侧可剥离）
 
@@ -402,6 +402,13 @@ buildChatSession
   17 条/20 点位（ceiling 20；债务 4/4 不变）；裸入口 `SelectFullScreenList` 与
   raw/no-lease 分支删除，启动选择器统一走 `RunStartupFullScreenList`（fail-closed）；
   见 L5-1 方案 §6。
+- L1-d 跟进（2026-10-09，`82f43683`）：InputBox legacy 显示链退役（§4.2 暂缓项收口）——
+  `Read/ReadMultiLine/Show/Update/Hide/Clear/SetMultiLine/SetMaxLines`、`Input` 组件链
+  （`writeInputDocument`/`NewInput`/`ReadLine`/`Prompt`/`PromptUser`）、`layout.go`
+  渲染出口（`RenderInputArea`/`writeDoc`/`clearToEOL`）全部删除；`InputAreaDocument`/
+  `FormatInputArea`/`InputShowDocument` 保留（测试/语义 fixture 在用）。机械口径：
+  **债务 4→1 条/1 点位**（ceiling 4→1；余 `processTerminalOutput` 默认绑定，§4.3）；
+  受认可 17 条/20 点位不变，合计 18 条/21 点位。
 
 ### L5 观察项（可选，另行立项）
 
