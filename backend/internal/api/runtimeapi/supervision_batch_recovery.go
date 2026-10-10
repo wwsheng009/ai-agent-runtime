@@ -376,7 +376,7 @@ func (h *Handler) sweepSettledParkedTurns(ctx context.Context, _ time.Time) (age
 			continue
 		}
 		outcome.Cleared++
-		h.publishParkedTurnSettledResume(record)
+		h.publishParkedTurnSettledResume(sweepCtx, record)
 	}
 	return outcome, nil
 }
@@ -384,17 +384,19 @@ func (h *Handler) sweepSettledParkedTurns(ctx context.Context, _ time.Time) (age
 // publishParkedTurnSettledResume 与 CLI 宿主同名助手一致：复刻 run 边界的非
 // wake 闭合事件，让只依赖 turn.resumed 清理挂起态的消费者（Web SSE）在清扫路径
 // 同样收敛；载荷字段与 settleParkedTurnOnRunEnd 对齐，另加 sweep=true 便于审计。
-func (h *Handler) publishParkedTurnSettledResume(record *subagentbatch.TurnSuspension) {
+//
+// 落盘：与子代理完成镜像同口径（session_runtime_support.go 的 mirrored 路径）
+// ——先 session event store AppendEvent 取 seq 再发总线；AppendEvent 失败保持
+// 实时发布（fail-open，不阻断横幅清理由）。
+func (h *Handler) publishParkedTurnSettledResume(ctx context.Context, record *subagentbatch.TurnSuspension) {
 	if h == nil || record == nil {
 		return
 	}
-	bus := h.getRuntimeEventBus()
-	if bus == nil {
-		return
-	}
-	bus.Publish(runtimeevents.Event{
+	event := runtimeevents.Event{
 		Type:      runtimeevents.EventTurnResumed,
+		AgentName: "reconcile",
 		SessionID: record.SessionID,
+		Timestamp: time.Now().UTC(),
 		Payload: map[string]interface{}{
 			"turn_id":          record.TurnID,
 			"session_id":       record.SessionID,
@@ -403,5 +405,13 @@ func (h *Handler) publishParkedTurnSettledResume(record *subagentbatch.TurnSuspe
 			"obligation_count": len(record.ObligationIDs),
 			"sweep":            true,
 		},
-	})
+	}
+	if store := h.getSessionEventStore(); store != nil {
+		if seq, err := store.AppendEvent(ctx, event); err == nil {
+			event.Payload["seq"] = seq
+		}
+	}
+	if bus := h.getRuntimeEventBus(); bus != nil {
+		bus.Publish(event)
+	}
 }

@@ -2,11 +2,13 @@ package runtimeapi
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
@@ -21,6 +23,16 @@ func TestSweepSettledParkedTurnsClearsOrphanAndResumes(t *testing.T) {
 	handler.SetSubagentBatchStore(batches)
 	ctx := context.Background()
 	now := time.Now().UTC()
+
+	// 清扫的 turn.resumed 必须先落 EventStore 带上 seq（ProducerPersistedEvent
+	// 的落盘判定），否则审计只进实时流。
+	var mu sync.Mutex
+	var resumed []runtimeevents.Event
+	handler.getRuntimeEventBus().Subscribe(runtimeevents.EventTurnResumed, func(event runtimeevents.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		resumed = append(resumed, event)
+	})
 
 	const sessionID = "sess_parent"
 	_, err := batches.CreateBatch(ctx, &subagentbatch.SubagentBatch{
@@ -92,4 +104,11 @@ func TestSweepSettledParkedTurnsClearsOrphanAndResumes(t *testing.T) {
 		}
 	}
 	require.True(t, settled, "the sweep must leave a durable settlement wake")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, resumed, 1, "the sweep must announce the settled closure exactly once")
+	require.Equal(t, true, resumed[0].Payload["sweep"])
+	require.True(t, runtimeevents.ProducerPersistedEvent(resumed[0]),
+		"the sweep closure event must carry a seq so it lands in the runtime-events audit")
 }

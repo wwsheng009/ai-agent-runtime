@@ -25,6 +25,11 @@ func TestSweepSettledParkedTurnsClearsOrphanAndResumes(t *testing.T) {
 
 	const sessionID = "root-session"
 	now := time.Now().UTC()
+	// 清扫的 turn.resumed 必须先落 EventStore 带上 seq（ProducerPersistedEvent
+	// 的落盘判定），否则审计只进实时流；夹具补上生产同款的 EventStore 绑定。
+	eventStore, ok := host.RuntimeStore.(runtimechat.EventStore)
+	require.True(t, ok, "the fixture runtime store must implement EventStore")
+	host.EventStore = eventStore
 	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
 		SessionID: sessionID,
 		Status:    runtimechat.SessionIdle,
@@ -124,4 +129,6 @@ func TestSweepSettledParkedTurnsClearsOrphanAndResumes(t *testing.T) {
 	require.Equal(t, "turn-orphan", resumed[0].Payload["turn_id"])
 	require.Equal(t, runtimeevents.TurnResumedTriggerSettled, resumed[0].Payload["trigger"])
 	require.Equal(t, true, resumed[0].Payload["sweep"])
+	require.True(t, runtimeevents.ProducerPersistedEvent(resumed[0]),
+		"the sweep closure event must carry a seq so it lands in the runtime-events audit")
 }

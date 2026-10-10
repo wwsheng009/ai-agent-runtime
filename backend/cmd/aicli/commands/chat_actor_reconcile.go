@@ -329,7 +329,7 @@ func (h *localChatRuntimeHost) sweepSettledParkedTurns(ctx context.Context, _ ti
 			continue
 		}
 		outcome.Cleared++
-		h.publishParkedTurnSettledResume(record)
+		h.publishParkedTurnSettledResume(sweepCtx, record)
 	}
 	return outcome, nil
 }
@@ -337,13 +337,20 @@ func (h *localChatRuntimeHost) sweepSettledParkedTurns(ctx context.Context, _ ti
 // publishParkedTurnSettledResume 复刻 run 边界的非 wake 闭合事件：只依赖
 // turn.resumed 清理挂起横幅的消费者（Web SSE）在清扫路径上同样收敛。载荷字段
 // 与 settleParkedTurnOnRunEnd 保持一致，另加 sweep=true 便于审计区分来源。
-func (h *localChatRuntimeHost) publishParkedTurnSettledResume(record *subagentbatch.TurnSuspension) {
-	if h == nil || h.EventBus == nil || record == nil {
+//
+// 落盘：runtime-events.jsonl 的写入判定（events.ProducerPersistedEvent）要求
+// payload 带 seq，因此这里与 agent completion 镜像同口径——先 EventStore
+// AppendEvent 取 seq 再发总线；AppendEvent 失败时保持实时发布（fail-open，
+// 实时消费者/横幅不受影响，只是审计缺一条），与其它宿主镜像的降级语义一致。
+func (h *localChatRuntimeHost) publishParkedTurnSettledResume(ctx context.Context, record *subagentbatch.TurnSuspension) {
+	if h == nil || record == nil {
 		return
 	}
-	h.EventBus.Publish(runtimeevents.Event{
+	event := runtimeevents.Event{
 		Type:      runtimeevents.EventTurnResumed,
+		AgentName: "reconcile",
 		SessionID: record.SessionID,
+		Timestamp: time.Now().UTC(),
 		Payload: map[string]interface{}{
 			"turn_id":          record.TurnID,
 			"session_id":       record.SessionID,
@@ -352,5 +359,13 @@ func (h *localChatRuntimeHost) publishParkedTurnSettledResume(record *subagentba
 			"obligation_count": len(record.ObligationIDs),
 			"sweep":            true,
 		},
-	})
+	}
+	if h.EventStore != nil {
+		if seq, err := h.EventStore.AppendEvent(ctx, event); err == nil {
+			event.Payload["seq"] = seq
+		}
+	}
+	if h.EventBus != nil {
+		h.EventBus.Publish(event)
+	}
 }
