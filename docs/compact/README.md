@@ -166,6 +166,14 @@ context:
 - 只有 model capability 明确声明远端能力时，才会切到 remote。
 - `context.compactionMode` 仍然只表示 context manager 的摘要/ledger 策略，不表示 auto compact 的 local/remote 模式。
 
+远端不可用时（provider 协议不是 codex，或远端调用失败）自动回退本地压缩：
+mid-turn 与 pre-turn 自动压缩都会改用 local 摘要，并在事件载荷里记
+`fallback_from_mode: remote` 与 `fallback_reason`；手动 `/compact remote` 是显式
+指定，不回退，按 `remote_compact_unsupported` 上报。
+
+也就是说，`supports_remote_compact` 只对实现了 `/responses/compact` 的 codex
+协议 provider 有意义；其他 provider 即使勾选，也会回退本地压缩而不是跳过。
+
 ### `context` 配置的职责
 
 `runtime config` 下的 `context` 配置仍然保留，但职责变为：

@@ -597,6 +597,18 @@ func (p *capturingSequenceProvider) ResolveModelCapability(requestedModel string
 	return requestedModel, capability, ok
 }
 
+// remoteUnsupportedProvider models a ProviderWrapper whose protocol is not
+// codex: it satisfies llm.RemoteCompactionProvider but reports the same
+// ErrRemoteCompactUnsupported the production wrapper returns for non-codex
+// providers.
+type remoteUnsupportedProvider struct {
+	*capturingSequenceProvider
+}
+
+func (p *remoteUnsupportedProvider) RemoteCompact(ctx context.Context, req llm.RemoteCompactRequest) (*llm.RemoteCompactResponse, error) {
+	return nil, llm.ErrRemoteCompactUnsupported
+}
+
 type simpleEchoMCPManager struct {
 	callCount int
 	messages  []string
@@ -2806,6 +2818,88 @@ func TestSessionActorMaybeAutoCompactSessionReplacesHistory(t *testing.T) {
 	}
 	require.Contains(t, eventTypes, EventSessionCompactStarted)
 	require.Contains(t, eventTypes, EventSessionCompactCompleted)
+}
+
+// A capability may declare supports_remote_compact while the provider protocol
+// cannot serve it: only codex exposes /responses/compact and every other
+// ProviderWrapper reports remote_compact_unsupported. Pre-turn compaction must
+// fall back to the local adapter instead of silently skipping — the skip left
+// the history growing into the send gate.
+func TestSessionActorMaybeAutoCompactSessionFallsBackToLocalWhenRemoteUnsupported(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-compact-remote-user")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		*types.NewSystemMessage("You are a helpful assistant."),
+		*types.NewUserMessage(strings.Repeat("older user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("older assistant context ", 80)),
+		*types.NewUserMessage(strings.Repeat("recent user context ", 80)),
+		*types.NewAssistantMessage(strings.Repeat("recent assistant context ", 80)),
+	})
+	setRuntimeSessionObservedTokenUsage(session, 140)
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "compact-remote-provider",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &remoteUnsupportedProvider{capturingSequenceProvider: &capturingSequenceProvider{
+		name: "compact-remote-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Preserve the prior investigation details and continue from the latest turn.", Model: "gpt-5"},
+		},
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 120, SupportsRemoteCompact: true},
+		},
+	}}
+	require.NoError(t, runtime.RegisterProvider("compact-remote-provider", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "compact-remote-provider"))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-compact-remote-test",
+		Provider: "compact-remote-provider",
+		Model:    "gpt-5",
+		Options: map[string]interface{}{
+			"context_keep_recent_messages": 1,
+		},
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	loaded, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	actor.maybeAutoCompactSession(ctx, loaded, "trace-compact-remote", nil, false)
+
+	updated, err := storage.Load(ctx, session.ID)
+	require.NoError(t, err)
+	require.Len(t, updated.History, 3, "remote-unsupported capability must fall back to local compaction")
+	require.Equal(t, "compaction", updated.History[1].Metadata["context_stage"])
+	require.Contains(t, updated.History[2].Content, "recent user context")
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	var completed map[string]interface{}
+	for _, event := range events {
+		if event.Type == EventSessionCompactCompleted {
+			completed = event.Payload
+		}
+	}
+	require.NotNil(t, completed)
+	require.Equal(t, compactruntime.ModeLocal, completed["mode"])
+	require.Equal(t, compactruntime.ModeRemote, completed["fallback_from_mode"])
+	require.Equal(t, "remote_compact_unsupported", completed["fallback_reason"])
 }
 
 func TestSessionActorMaybeAutoCompactSessionUsesObservedContextSnapshot(t *testing.T) {

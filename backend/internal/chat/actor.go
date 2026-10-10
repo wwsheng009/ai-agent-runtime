@@ -2315,7 +2315,7 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	tools := a.compactToolSurface(ctx, turnID)
 	inputBudget, toolSchemaTokens := agent.CompactTriggerBudget(a.llmRuntime, a.agent, tools)
 	runtime := compactruntime.New(a.llmRuntime, manager)
-	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
+	compactRequest := compactruntime.Request{
 		SessionID:             a.id,
 		TaskID:                taskID,
 		Provider:              firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
@@ -2330,7 +2330,22 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		InputBudget:           inputBudget,
 		ToolSchemaTokens:      toolSchemaTokens,
 		Tools:                 tools,
-	})
+	}
+	result, status, err := runtime.MaybeCompact(ctx, compactRequest)
+	// A model capability may resolve the mode to remote while the provider
+	// protocol cannot serve it (only codex exposes /responses/compact; every
+	// other provider reports remote_compact_unsupported). Mirror the mid-turn
+	// fallback so pre-turn compaction keeps working instead of silently
+	// skipping and letting the history grow into the send gate.
+	if status.Mode == compactruntime.ModeRemote && ctx.Err() == nil && (err != nil || result == nil || len(result.ReplacementHistory) == 0) {
+		fallbackReason := firstNonEmpty(status.Reason, "remote_compaction_unavailable")
+		compactRequest.Mode = compactruntime.ModeLocal
+		result, status, err = runtime.MaybeCompact(ctx, compactRequest)
+		if result != nil {
+			payload["fallback_from_mode"] = compactruntime.ModeRemote
+			payload["fallback_reason"] = fallbackReason
+		}
+	}
 	payload["reason"] = status.Reason
 	payload["mode"] = status.Mode
 	payload["token_before"] = status.TokenBefore
@@ -2520,12 +2535,13 @@ func (a *SessionActor) runManualCompact(
 	tools := a.compactToolSurface(ctx, traceID)
 	inputBudget, toolSchemaTokens := agent.CompactTriggerBudget(a.llmRuntime, a.agent, tools)
 	runtime := compactruntime.New(a.llmRuntime, manager)
-	result, resolvedStatus, err := runtime.MaybeCompact(ctx, compactruntime.Request{
+	requestedMode = strings.TrimSpace(requestedMode)
+	compactRequest := compactruntime.Request{
 		SessionID:             a.id,
 		TaskID:                taskID,
 		Provider:              firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
 		Model:                 firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
-		Mode:                  strings.TrimSpace(requestedMode),
+		Mode:                  requestedMode,
 		Force:                 true,
 		History:               session.GetMessages(),
 		KeepRecentMessages:    keepRecent,
@@ -2537,8 +2553,21 @@ func (a *SessionActor) runManualCompact(
 		InputBudget:           inputBudget,
 		ToolSchemaTokens:      toolSchemaTokens,
 		Tools:                 tools,
-	})
-	status = resolvedStatus
+	}
+	result, status, err := runtime.MaybeCompact(ctx, compactRequest)
+	// Capability-resolved remote modes fall back to local when the provider
+	// cannot serve remote compaction; an explicitly requested mode=remote is
+	// honored and reported as unsupported instead.
+	autoResolvedMode := requestedMode == "" || strings.EqualFold(requestedMode, compactruntime.ModeAuto)
+	if autoResolvedMode && status.Mode == compactruntime.ModeRemote && ctx.Err() == nil && (err != nil || result == nil || len(result.ReplacementHistory) == 0) {
+		fallbackReason := firstNonEmpty(status.Reason, "remote_compaction_unavailable")
+		compactRequest.Mode = compactruntime.ModeLocal
+		result, status, err = runtime.MaybeCompact(ctx, compactRequest)
+		if result != nil {
+			payload["fallback_from_mode"] = compactruntime.ModeRemote
+			payload["fallback_reason"] = fallbackReason
+		}
+	}
 	payload["reason"] = status.Reason
 	payload["mode"] = status.Mode
 	payload["token_before"] = status.TokenBefore
