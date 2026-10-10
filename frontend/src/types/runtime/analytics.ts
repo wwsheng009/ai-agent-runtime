@@ -325,8 +325,8 @@ export type AnalyticsSubagentStat = {
   /** 任务主体（发射端截断；未记录的历史行为空）。 */
   task_subject?: string;
   source?: string;
-  /** 该子代理任务是否按只读记账。注意"未声明"与"声明为可写"在账本中不可区分。 */
-  read_only: boolean;
+  /** 该子代理任务是否按只读记账（后端 omitempty：false 时字段可能缺失）。注意"未声明"与"声明为可写"在账本中不可区分。 */
+  read_only?: boolean;
   success: boolean | null;
   completion_reason: string;
   failure_category?: string;
