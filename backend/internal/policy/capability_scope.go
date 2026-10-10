@@ -50,6 +50,13 @@ func ReadOnlyChildCapabilities() []Capability {
 // child-side denial escalation.
 const ReadOnlyChildOptionDescription = "Hard child execution boundary. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and background_task are removed from the child's model-visible tool surface and denied at execution, while shell stays available but only for individually classified read-only commands. The delegation boundary (BlockDelegation / max depth) may remove spawn_agent/spawn_team as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks. Read-only children's shell stays allowlisted: redirection, command substitution and dynamic expansion are denied, and compound commands (&&, ||, ;, |) must be read-only in every segment — leave read_only unset for children that need writes or general shell syntax."
 
+// SubagentWriterPolicyDescription is the model-visible contract for writer
+// governance on spawn_subagents. It is the single source of truth for the
+// dispatch guidance: a batch may carry several writers (they serialize), the
+// process-wide fence serializes writers across batches, and declared disjoint
+// write_paths are how independent writers keep running in parallel.
+const SubagentWriterPolicyDescription = "Writer governance: writers are executed one at a time inside a batch, and a process-wide single-writer fence serializes writers across every batch of this process. Declare write_paths (the files or directories a task may modify) to keep independent work parallel: writers whose write_paths are disjoint run concurrently, while overlapping or undeclared writers wait for the fence. Prefer read_only=true for tasks that do not modify files; a batch with several undeclared writers serializes and reports a dispatch warning."
+
 func (p *ToolExecutionPolicy) SetCapabilityScope(capabilities []Capability) {
 	if p == nil {
 		return

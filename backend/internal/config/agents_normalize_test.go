@@ -93,3 +93,19 @@ func agentsProbeValue(t *testing.T, fieldType reflect.Type, defaultValue reflect
 		return reflect.Value{}
 	}
 }
+
+// singleWriterMode 三态：未设置 = enforce（默认开启进程级 writer 栅栏），
+// 显式 off 才是唯一关闭方式；其它值在校验期报错。
+func TestAgentsSingleWriterMode(t *testing.T) {
+	require.True(t, DefaultAgentsConfig().SingleWriterEnforced(), "default must keep the writer fence on")
+	require.True(t, NormalizeAgentsConfig(AgentsConfig{}).SingleWriterEnforced())
+	require.True(t, NormalizeAgentsConfig(AgentsConfig{SingleWriterMode: SingleWriterModeEnforce}).SingleWriterEnforced())
+	require.False(t, NormalizeAgentsConfig(AgentsConfig{SingleWriterMode: SingleWriterModeOff}).SingleWriterEnforced())
+	require.False(t, AgentsConfig{SingleWriterMode: "OFF"}.SingleWriterEnforced(), "the explicit opt-out is case-insensitive")
+
+	require.NoError(t, ValidateAgentsConfig(&AgentsConfig{}))
+	require.NoError(t, ValidateAgentsConfig(&AgentsConfig{SingleWriterMode: SingleWriterModeOff}))
+	err := ValidateAgentsConfig(&AgentsConfig{SingleWriterMode: "strict"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "agents.singleWriterMode")
+}

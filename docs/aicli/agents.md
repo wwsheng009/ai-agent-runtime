@@ -235,6 +235,15 @@ Agent Source:      profile · E:\repo\examples\profiles\coding\agents\coder\agen
 工具面会把已发现定义渲染进 `spawn_subagents` 的工具描述（`name: description (source, read-only)`），父模型无需自行扫描目录即可选择角色。
 参考实现：`internal/agent/agentdef_bridge.go`、`internal/agent/loop.go`（`decodeSubagentTasks`）。
 
+### `spawn_subagents` 的 writer 治理与 `write_paths`
+
+一个批次可以声明多个 writer（非 `read_only` 且工具面可写，或显式声明了 `write_paths` 的任务）：
+
+- **批内串行**：writer 在一个 batch 里逐个执行（reader 仍并发成波次）。
+- **跨批栅栏**：进程级单写者栅栏按声明路径仲裁——`write_paths` 不相交的 writer 可并发；路径重叠或未声明的 writer 串行等待（等待被取消时报 `single-writer fence wait cancelled ... next_action=retry_later_or_split_writers`）。
+- **声明建议**：能写文件的 shell 型任务请声明 `write_paths`（这也会让它被归类为 writer、纳入栅栏）；纯分析任务保持 `read_only=true`。多 writer 且未声明 `write_paths` 的批次会在派发回执里带 route_warning。
+- **关闭栅栏**：`agents.singleWriterMode: "off"`（默认 `enforce`，见 `MIGRATION.md` §9.4）。
+
 `completion_requirement` 对普通 `spawn_agent` 固定为 `none`：schema 不再宣传 `complete_task`，显式 snake/camel 或 agentdef 解析出 `complete_task` 会在创建 child 前被拒绝，并提示改用 `spawn_team` / Team assignment。fork 会复制父上下文，但 route context 会覆盖为 `none`；真正的 teammate `complete_task` 只由 `TeammateRunner` 在绑定了 `TeamID` + `CurrentTaskID` 的 `RunMeta` 上注入。
 
 子会话启动时还会按 def 叠加 tool allow/deny、read-only 与 **sandbox profile materialize**（local actor host；workspace 已知时写入 path bounds）。

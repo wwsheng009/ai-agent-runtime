@@ -228,8 +228,14 @@ type localChatRuntimeHost struct {
 	//（P1-4/H12）：同一 host 构建的每个 scheduler 共用同一 limiter 实例，
 	// 使 agents.maxThreads 成为「全部 batch 合计」的上限，而不是每个 batch
 	// 各自一份。首次构建后不再随配置热重载重建（见 subagentGlobalLimiter）。
-	subagentLimiterMu    sync.Mutex
-	subagentLimiter      *agent.SubagentConcurrencyLimiter
+	subagentLimiterMu sync.Mutex
+	subagentLimiter   *agent.SubagentConcurrencyLimiter
+	// writerArbiterMu / writerArbiter 缓存进程级单写者栅栏
+	//（agents.singleWriterMode，默认 enforce）：同一 host 构建的每个 scheduler
+	// 共用同一 arbiter，跨 batch 的 writer 不再并发改同一仓库；配置显式 off
+	// 时为 nil。首次构建后不再随配置热重载重建（见 subagentWriterArbiter）。
+	writerArbiterMu      sync.Mutex
+	writerArbiter        *agent.SubagentWriterArbiter
 	subagentMu           sync.Mutex
 	subagentCoordinators map[*agent.SubagentBatchCoordinator]struct{}
 	subagentOps          int
@@ -2129,6 +2135,26 @@ func (h *localChatRuntimeHost) subagentGlobalLimiter(maxThreads int) *agent.Suba
 	return h.subagentLimiter
 }
 
+// subagentWriterArbiter returns the ONE process-wide writer fence shared by
+// every scheduler this host builds (agents.singleWriterMode, default
+// "enforce"). Mirrors subagentGlobalLimiter: it is created on first use and
+// kept for the life of the host, so a config reload cannot strand waiters on a
+// retired arbiter; an explicit "off" keeps returning nil (no arbitration).
+func (h *localChatRuntimeHost) subagentWriterArbiter(enforce bool) *agent.SubagentWriterArbiter {
+	if !enforce {
+		return nil
+	}
+	if h == nil {
+		return agent.NewSubagentWriterArbiter()
+	}
+	h.writerArbiterMu.Lock()
+	defer h.writerArbiterMu.Unlock()
+	if h.writerArbiter == nil {
+		h.writerArbiter = agent.NewSubagentWriterArbiter()
+	}
+	return h.writerArbiter
+}
+
 // subagentCapacityView 返回 A6 resume 门控需要的进程级子代理准入瞬时视图。
 // 只读缓存字段：探测不得创建 limiter（未配置 agents.maxThreads 时 limiter 为
 // nil ⇒ 视图 Limit=0 ⇒ 放行），也不得触发配置解析——它跑在父会话 runnable
@@ -2330,6 +2356,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	scheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
 		Routing:       localChatSubagentRoutingConfig(session),
 		MaxConcurrent: agentsConfig.MaxConcurrent,
+		WriterArbiter: host.subagentWriterArbiter(agentsConfig.SingleWriterEnforced()),
 		GlobalLimiter: host.subagentGlobalLimiter(agentsConfig.MaxThreads),
 		MaxQueueDepth: agentsConfig.MaxConcurrentQueueDepth,
 		QueueTimeout:  time.Duration(agentsConfig.MaxConcurrentQueueTimeoutMs) * time.Millisecond,

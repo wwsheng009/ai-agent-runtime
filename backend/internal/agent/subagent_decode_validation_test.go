@@ -419,3 +419,50 @@ func containsWarning(items []string, want string) bool {
 	}
 	return false
 }
+
+// spawn_subagents 的 write_paths 是 writer 栅栏的声明入口：解码保留条目本身，
+// 栅栏侧（subagentWritePaths → NormalizeSubagentWritePaths）负责清理与去重，
+// 错类型必须点名报错而不是静默丢弃。
+func TestDecodeSubagentTasksAcceptsWritePaths(t *testing.T) {
+	tasks, err := decodeSubagentTasks(subagentDecodeArgs(map[string]interface{}{
+		"id":          "writer",
+		"goal":        "apply the patch",
+		"write_paths": []interface{}{"backend/internal/agent", "docs/"},
+	}))
+	if err != nil {
+		t.Fatalf("write_paths must decode, got %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(tasks))
+	}
+	if got, want := strings.Join(tasks[0].WritePaths, "|"), "backend/internal/agent|docs/"; got != want {
+		t.Fatalf("write_paths = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(subagentWritePaths(tasks[0]), "|"), "backend/internal/agent|docs"; got != want {
+		t.Fatalf("normalized write scope = %q, want %q", got, want)
+	}
+}
+
+func TestDecodeSubagentTasksRejectsMistypedWritePaths(t *testing.T) {
+	message := decodeSubagentTasksError(t, subagentDecodeArgs(map[string]interface{}{
+		"id":          "writer",
+		"goal":        "apply the patch",
+		"write_paths": "backend/internal/agent",
+	}))
+	for _, want := range []string{`"write_paths"`, "JSON array"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q does not mention %q", message, want)
+		}
+	}
+}
+
+func TestDecodeSubagentTasksRejectsBlankWritePathsItem(t *testing.T) {
+	message := decodeSubagentTasksError(t, subagentDecodeArgs(map[string]interface{}{
+		"id":          "writer",
+		"goal":        "apply the patch",
+		"write_paths": []interface{}{"backend", " "},
+	}))
+	if !strings.Contains(message, `"write_paths"`) {
+		t.Fatalf("error %q does not name write_paths", message)
+	}
+}

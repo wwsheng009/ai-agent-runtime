@@ -93,6 +93,13 @@ type AgentConfig struct {
 	DefaultPlanningMode  string        `yaml:"defaultPlanningMode,omitempty" json:"defaultPlanningMode,omitempty"`
 }
 
+// agents.singleWriterMode values: "enforce" (default) keeps the process-wide
+// writer fence on; "off" disables writer arbitration entirely.
+const (
+	SingleWriterModeEnforce = "enforce"
+	SingleWriterModeOff     = "off"
+)
+
 // AgentsConfig controls lightweight multi-agent collaboration limits.
 type AgentsConfig struct {
 	MaxThreads int `yaml:"maxThreads" json:"maxThreads"`
@@ -106,6 +113,13 @@ type AgentsConfig struct {
 	// concurrent children ≤ maxThreads whenever maxThreads > 0; -1 stays
 	// "explicitly unlimited" and leaves only the per-batch ceiling in force).
 	MaxConcurrent int `yaml:"maxConcurrent,omitempty" json:"maxConcurrent,omitempty"`
+	// SingleWriterMode selects the process-wide writer fence for spawned
+	// subagents: "enforce" (default) runs at most one writer at a time across
+	// every batch of the process unless the writers declare disjoint
+	// write_paths; "off" disables the fence (writers still execute one at a
+	// time inside a single batch, but different batches may write
+	// concurrently). Empty = unset → the default.
+	SingleWriterMode string `yaml:"singleWriterMode,omitempty" json:"singleWriterMode,omitempty"`
 	// MaxConcurrentQueueDepth / MaxConcurrentQueueTimeoutMs are the opt-in
 	// backpressure knobs for a reader wave (plan P1-4 §2). Both default to 0,
 	// which preserves the historical behavior: unbounded waiting for a
@@ -475,6 +489,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			// scheduler default (4) so an absent config changes nothing. The
 			// queue knobs stay 0 = backpressure disabled (fail-fast default).
 			MaxConcurrent:        4,
+			SingleWriterMode:     SingleWriterModeEnforce,
 			DefaultWaitTimeoutMs: int((30 * time.Second).Milliseconds()),
 			MinWaitTimeoutMs:     int((10 * time.Second).Milliseconds()),
 			// Wait-budget hardening (2026-09-26): the built-in active-wait
@@ -1309,6 +1324,11 @@ func ValidateAgentsConfig(config *AgentsConfig) error {
 	// P1-4/H12: 0 = 未设置（回退默认 4），正数 = 每个 batch 的并发上限。
 	if config.MaxConcurrent < 0 {
 		return errors.New(errors.ErrValidationFailed, "agents.maxConcurrent must be 0 (default) or a positive integer")
+	}
+	switch strings.ToLower(strings.TrimSpace(config.SingleWriterMode)) {
+	case "", SingleWriterModeEnforce, SingleWriterModeOff:
+	default:
+		return errors.New(errors.ErrValidationFailed, "agents.singleWriterMode must be enforce or off")
 	}
 	// 背压是可选项：0 = 关闭（保持「无限等待、无队列超时」的既有行为）。
 	if config.MaxConcurrentQueueDepth < 0 {

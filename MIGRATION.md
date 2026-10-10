@@ -401,3 +401,17 @@ ai-agent-runtime/
 - 回收动作在事件流中写 `reclaimed:<reason>`（`idle_timeout` / `session_missing` / `session_terminal`，空 reason 兜底 `quota`），与人工 `close_agent` 可区分。
 - 线程上限报错现在是 `AGENT_THREAD_LIMIT`，文案含 `next_action` 与 `occupants=[path=… status=… idle=…]`，可由模型直接按指引复用/关闭子会话。
 - `/agents cleanup [--dry-run] [--idle <时长>]` 提供手动一次性回收（与 spawn 闸门共用同一决策链），用于不等对账周期就释放配额。
+
+### 9.4 `agents.singleWriterMode` 与多 writer 批次语义（2026-10）
+
+新增键 `agents.singleWriterMode`（默认 `enforce`）：
+
+- `enforce`：进程级单写者栅栏。writer 在单个 batch 内逐个串行执行；跨 batch 的 writer 按声明路径仲裁——`write_paths` 不相交的 writer 可并发，路径重叠或未声明的 writer 串行等待。
+- `off`：关闭栅栏（writer 仍在一个 batch 内串行，但不同 batch 可并发写同一仓库；仅在明确接受该风险时使用，例如各自独立 worktree 的部署）。
+
+同时，`spawn_subagents` 的**多 writer 批次不再被整批拒绝**：
+
+- 旧行为：一个批次声明 ≥2 个 writer 时整批失败（`single-writer policy violation: N writer subagents requested`，0 个任务执行）。
+- 新行为：批次被接受并串行/仲裁执行；等待被取消时报 `single-writer fence wait cancelled ...`（`next_action=retry_later_or_split_writers`）。
+- 新增 per-task `write_paths` 字段（可选）：声明路径让不相交的 writer 保持并行；未声明时该 writer 视为独占（whole workspace）。声明 `write_paths` 也会把 shell 型任务归类为 writer（纳入栅栏）。
+- 多 writer 且未声明 `write_paths` 的批次会在派发回执里带 route_warning，提示声明 `write_paths` 或把纯分析任务设为 `read_only=true`。

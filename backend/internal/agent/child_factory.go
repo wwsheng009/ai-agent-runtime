@@ -177,6 +177,12 @@ func childSubagentSchedulerConfig(parentScheduler *SubagentScheduler, config Sub
 	if parentScheduler != nil && config.GlobalLimiter == nil {
 		config.GlobalLimiter = parentScheduler.config.GlobalLimiter
 	}
+	// The writer fence must span the whole process for the same reason: a
+	// nested scheduler that built its own arbiter would silently reopen the
+	// cross-batch writer race the arbiter exists to close.
+	if parentScheduler != nil && config.WriterArbiter == nil {
+		config.WriterArbiter = parentScheduler.config.WriterArbiter
+	}
 	return config
 }
 

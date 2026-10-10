@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	pathpkg "path"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,12 @@ type SubagentTask struct {
 	// CompletionRequirement is none|complete_task for child harness loops.
 	// Empty inherits none at the child factory (team workers set complete_task via RunMeta).
 	CompletionRequirement string `json:"completion_requirement,omitempty" yaml:"completion_requirement,omitempty"`
+	// WritePaths declares the files or directories this task may modify. It is
+	// the writer fence's cheap-path input: writers whose declared paths are
+	// disjoint may run concurrently, while overlapping or undeclared writers
+	// serialize on the process-wide SubagentWriterArbiter. Empty means "no
+	// declaration" (whole-workspace claim), never "cannot write".
+	WritePaths []string `json:"write_paths,omitempty" yaml:"write_paths,omitempty"`
 }
 
 // SubagentResult 是父代理可见的结构化回执。
@@ -111,9 +118,18 @@ type SubagentResult struct {
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
 type SubagentSchedulerConfig struct {
-	MaxConcurrent       int  `json:"maxConcurrent" yaml:"maxConcurrent"`
-	MaxDepth            int  `json:"maxDepth" yaml:"maxDepth"`
-	EnforceSingleWriter bool `json:"enforceSingleWriter" yaml:"enforceSingleWriter"`
+	MaxConcurrent int `json:"maxConcurrent" yaml:"maxConcurrent"`
+	MaxDepth      int `json:"maxDepth" yaml:"maxDepth"`
+	// WriterArbiter is the process-wide single-writer fence. Writers are
+	// already serialized inside one batch, so the real concurrency risk lives
+	// across batches: every scheduler a host builds shares the same arbiter and
+	// writers can no longer run concurrently by accident. Declared write_paths
+	// keep disjoint writers parallel; nil = no arbitration (writers only
+	// serialize inside their own batch, the pre-arbiter behavior). A depth-N
+	// delegation chain runs inside its ancestor's claim through the context
+	// (see withSubagentWriterClaim), so the fence cannot deadlock against
+	// itself.
+	WriterArbiter *SubagentWriterArbiter `json:"-" yaml:"-"`
 	// GlobalLimiter is an optional process-wide admission limiter shared by
 	// every SubagentScheduler a host builds. MaxConcurrent bounds one batch;
 	// GlobalLimiter bounds the sum of all batches running in the process, which
@@ -220,9 +236,6 @@ func NewSubagentScheduler(parent *Agent, config SubagentSchedulerConfig) *Subage
 	}
 	if config.MaxDepth <= 0 {
 		config.MaxDepth = 1
-	}
-	if !config.EnforceSingleWriter {
-		config.EnforceSingleWriter = true
 	}
 	if config.MaxConsecutiveFailures <= 0 {
 		config.MaxConsecutiveFailures = 2
@@ -366,6 +379,289 @@ func (s *SubagentScheduler) releaseGlobalSlot(acquired bool) {
 	s.config.GlobalLimiter.Release()
 }
 
+// SubagentWriterArbiter is the process-wide single-writer fence for spawned
+// subagents (see SubagentSchedulerConfig.WriterArbiter). Writers are already
+// serialized inside one batch; this arbiter closes the real gap: every
+// batch/scheduler in one process shares it, so two background batches can no
+// longer write the same workspace concurrently by accident.
+//
+// Declared write paths keep parallelism cheap: a task that declares write_paths
+// only waits for writers whose claims overlap, and disjoint claims run
+// concurrently. A writer without declared paths is exclusive — it waits for
+// every active claim and blocks later writers until it finishes.
+//
+// Concurrency semantics (mirrors SubagentConcurrencyLimiter):
+//   - Acquire is context-aware: a cancelled caller fails fast with an
+//     actionable error instead of occupying the queue forever.
+//   - A nil *SubagentWriterArbiter is valid and means "no arbitration"; all
+//     methods are nil-safe, so an unset arbiter keeps the pre-arbiter behavior
+//     (writers only serialize inside their own batch).
+//   - Waiting is not FIFO: every release re-checks all waiters, so a later
+//     disjoint writer may be admitted first. That is intentional — no claim can
+//     be held forever, because every acquire is paired with a deferred release
+//     on child completion, error or cancellation.
+//   - Claims are process-local in-memory state; nothing is persisted.
+type SubagentWriterArbiter struct {
+	mu     sync.Mutex
+	nextID int
+	claims []subagentWriterClaim
+	notify chan struct{}
+}
+
+type subagentWriterClaim struct {
+	id    int
+	owner string
+	paths []string // normalized, non-empty; nil = exclusive whole-workspace claim
+}
+
+// NewSubagentWriterArbiter returns an empty process-wide writer fence. Hosts
+// build exactly one per process (mirroring the shared concurrency limiter) and
+// hand it to every scheduler they create.
+func NewSubagentWriterArbiter() *SubagentWriterArbiter {
+	return &SubagentWriterArbiter{notify: make(chan struct{})}
+}
+
+// InFlight reports how many writer claims are active right now. It is a
+// point-in-time read for diagnostics and admission probes.
+func (a *SubagentWriterArbiter) InFlight() int {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.claims)
+}
+
+// ActiveOwners returns a snapshot of the active claim owners and their declared
+// scopes, for diagnostics and actionable wait errors.
+func (a *SubagentWriterArbiter) ActiveOwners() []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.claimSummariesLocked()
+}
+
+// Acquire waits until the caller's write scope may run and registers the claim.
+// The returned release func is idempotent and must always be called (normally
+// via defer); owner is a diagnostic label (the task id).
+//
+// A nil arbiter returns a no-op release. A context that already sits inside
+// this arbiter's claim (an ancestor writer's subtree) also returns a no-op
+// release, so a depth-N delegation chain stays inside its ancestor's claim
+// instead of deadlocking against itself.
+func (a *SubagentWriterArbiter) Acquire(ctx context.Context, owner string, paths []string) (func(), error) {
+	if a == nil {
+		return func() {}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	normalized := NormalizeSubagentWritePaths(paths)
+	for {
+		a.mu.Lock()
+		if a.admitsLocked(normalized) {
+			a.nextID++
+			claim := subagentWriterClaim{id: a.nextID, owner: strings.TrimSpace(owner), paths: normalized}
+			a.claims = append(a.claims, claim)
+			a.mu.Unlock()
+			var once sync.Once
+			return func() {
+				once.Do(func() { a.release(claim.id) })
+			}, nil
+		}
+		wait := a.notify
+		held := a.claimSummariesLocked()
+		a.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, subagentWriterWaitError(owner, normalized, held, ctx.Err())
+		}
+	}
+}
+
+func (a *SubagentWriterArbiter) release(id int) {
+	a.mu.Lock()
+	index := -1
+	for i := range a.claims {
+		if a.claims[i].id == id {
+			index = i
+			break
+		}
+	}
+	if index >= 0 {
+		a.claims = append(a.claims[:index], a.claims[index+1:]...)
+	}
+	a.broadcastLocked()
+	a.mu.Unlock()
+}
+
+// broadcastLocked wakes every waiter: closing the channel releases all of them
+// to re-check admission under the lock, and a fresh channel parks the next
+// generation. Callers must hold a.mu.
+func (a *SubagentWriterArbiter) broadcastLocked() {
+	close(a.notify)
+	a.notify = make(chan struct{})
+}
+
+func (a *SubagentWriterArbiter) admitsLocked(paths []string) bool {
+	for _, claim := range a.claims {
+		if subagentWriterScopesConflict(claim.paths, paths) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *SubagentWriterArbiter) claimSummariesLocked() []string {
+	if len(a.claims) == 0 {
+		return nil
+	}
+	summaries := make([]string, 0, len(a.claims))
+	for _, claim := range a.claims {
+		owner := claim.owner
+		if owner == "" {
+			owner = "subagent"
+		}
+		if len(claim.paths) == 0 {
+			summaries = append(summaries, owner+" (whole workspace)")
+			continue
+		}
+		summaries = append(summaries, owner+" ("+strings.Join(claim.paths, ", ")+")")
+	}
+	return summaries
+}
+
+// subagentWriterScopesConflict reports whether two claims overlap. An empty
+// (undeclared) scope is exclusive and conflicts with everything; declared
+// scopes conflict when any path pair overlaps.
+func subagentWriterScopesConflict(left, right []string) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return true
+	}
+	for _, a := range left {
+		for _, b := range right {
+			if subagentWritePathOverlap(a, b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// subagentWritePathOverlap treats files and directories alike: two normalized
+// paths overlap when they are equal or one contains the other at a path
+// boundary ("frontend/src" vs "frontend/src/app.ts" overlap; "a/bc" vs "a/b"
+// do not, because "a/bc" is not inside "a/b").
+func subagentWritePathOverlap(left, right string) bool {
+	if left == "" || right == "" {
+		return false
+	}
+	if left == right {
+		return true
+	}
+	return strings.HasPrefix(left+"/", right+"/") || strings.HasPrefix(right+"/", left+"/")
+}
+
+// NormalizeSubagentWritePaths trims, cleans and dedupes declared write paths so
+// claims compare consistently regardless of "./", backslashes or duplicates.
+// Entries that clean to the workspace root are dropped: an empty declaration
+// already means "whole workspace" for the fence, so "." must not silently turn
+// a scoped writer into an exclusive one.
+func NormalizeSubagentWritePaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(paths))
+	seen := make(map[string]bool, len(paths))
+	for _, raw := range paths {
+		cleaned := normalizeSubagentWritePath(raw)
+		if cleaned == "" || seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		normalized = append(normalized, cleaned)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func normalizeSubagentWritePath(raw string) string {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return ""
+	}
+	cleaned = strings.ReplaceAll(cleaned, "\\", "/")
+	cleaned = strings.TrimPrefix(cleaned, "./")
+	cleaned = pathpkg.Clean(cleaned)
+	if cleaned == "." || cleaned == "/" || cleaned == ".." {
+		return ""
+	}
+	return cleaned
+}
+
+// subagentWriterWaitError is the actionable failure surfaced when a writer's
+// fence wait is cancelled (task timeout, batch deadline, session close). The
+// reason keeps the "single-writer" prefix so the denial is classified as
+// single_writer in subagent.denied payloads.
+func subagentWriterWaitError(owner string, paths []string, held []string, cause error) error {
+	scope := "whole workspace (no write_paths declared)"
+	if len(paths) > 0 {
+		scope = "write_paths " + strings.Join(paths, ", ")
+	}
+	holders := strings.Join(held, "; ")
+	if holders == "" {
+		holders = "none observed"
+	}
+	return fmt.Errorf(
+		"single-writer fence wait cancelled for subagent %q (%s): %v; active writer claims: %s; next_action=retry_later_or_split_writers — declare disjoint write_paths so independent writers can run concurrently, keep at most one undeclared writer per process, or mark non-mutating tasks read_only=true",
+		strings.TrimSpace(owner), scope, cause, holders)
+}
+
+// subagentWriterClaimKey marks a context whose execution already sits inside a
+// claim of the named writer arbiter (either the claim it acquired itself or its
+// ancestor's). It is how a depth-N delegation chain stays inside one claim
+// instead of deadlocking against a saturated fence.
+type subagentWriterClaimKey struct{}
+
+func withSubagentWriterClaim(ctx context.Context, arbiter *SubagentWriterArbiter) context.Context {
+	if arbiter == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, subagentWriterClaimKey{}, arbiter)
+}
+
+func subagentWriterClaimHeld(ctx context.Context, arbiter *SubagentWriterArbiter) bool {
+	if ctx == nil || arbiter == nil {
+		return false
+	}
+	held, _ := ctx.Value(subagentWriterClaimKey{}).(*SubagentWriterArbiter)
+	return held == arbiter
+}
+
+// acquireWriterSlot takes the process-wide writer fence for one writer task.
+// The fence is acquired before the generic global concurrency slot so a writer
+// waiting for another writer never occupies a concurrency slot.
+func (s *SubagentScheduler) acquireWriterSlot(ctx context.Context, task SubagentTask) (func(), error) {
+	arbiter := s.config.WriterArbiter
+	if arbiter == nil || subagentWriterClaimHeld(ctx, arbiter) {
+		return func() {}, nil
+	}
+	return arbiter.Acquire(ctx, task.ID, subagentWritePaths(task))
+}
+
+// subagentWriterSerializationWarning tells the caller why a multi-writer batch
+// with undeclared writers will serialize, and what restores parallelism.
+func subagentWriterSerializationWarning(writers int) string {
+	return fmt.Sprintf(
+		"batch has %d writer tasks and this task declares no write_paths: undeclared writers serialize on the process-wide single-writer fence; declare disjoint write_paths to run in parallel or mark non-mutating tasks read_only=true",
+		writers)
+}
+
 const (
 	DelegationPolicyEnabled  = "enabled"
 	DelegationPolicyDisabled = "disabled"
@@ -492,6 +788,18 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 	completedByID := make(map[string]SubagentResult, len(tasks))
 	remaining := len(tasks)
 
+	if len(writers) > 1 {
+		// Dispatch-time advisory: undeclared writers in a multi-writer batch
+		// serialize on the process-wide fence, so the batch receipt says so up
+		// front instead of letting the model discover it as a stall.
+		warning := subagentWriterSerializationWarning(len(writers))
+		for i := range writers {
+			if len(subagentWritePaths(writers[i].task)) == 0 {
+				writers[i].task.RouteWarnings = append(writers[i].task.RouteWarnings, warning)
+			}
+		}
+	}
+
 	for remaining > 0 {
 		readyReaders, readyWriters, depErr := s.readyTasks(readers, writers, done, completedByID)
 		if depErr != nil {
@@ -516,7 +824,7 @@ func (s *SubagentScheduler) RunChildren(ctx context.Context, options SubagentRun
 		for _, item := range readyWriters {
 			task := s.enrichTaskFromDependencies(item.task, completedByID)
 			options.notifyTaskEvent(task.ID, "started")
-			result, err := s.runChild(ctx, options, task)
+			result, err := s.runWriterTask(ctx, options, task)
 			options.notifyTaskEvent(task.ID, "completed")
 			results[item.index] = result
 			done[item.index] = true
@@ -536,6 +844,58 @@ func (s *SubagentScheduler) runChild(ctx context.Context, options SubagentRunOpt
 	report, err := s.runChildUncontracted(ctx, options, task)
 	ensureSubagentResultContract(&report, task)
 	return report, err
+}
+
+// runWriterTask fences and admits one writer execution: the process-wide writer
+// fence first (so a queued writer never occupies a concurrency slot), then the
+// shared global limiter, then the child run. The per-batch loop already runs
+// writers one at a time; this is what makes writers safe across batches.
+func (s *SubagentScheduler) runWriterTask(ctx context.Context, options SubagentRunOptions, task SubagentTask) (SubagentResult, error) {
+	releaseWriter, err := s.acquireWriterSlot(ctx, task)
+	if err != nil {
+		s.emitSubagentDenied(options, task.ID, classifySubagentDeniedPolicy(err.Error()), err.Error(), map[string]interface{}{
+			"subagent_id": task.ID,
+			"write_paths": subagentWritePaths(task),
+		})
+		return subagentAdmissionFailureResult(task, options, err, "retry_later_or_split_writers"), err
+	}
+	defer releaseWriter()
+
+	childCtx := withSubagentWriterClaim(ctx, s.config.WriterArbiter)
+	acquired, err := s.acquireGlobalSlot(childCtx)
+	if err != nil {
+		s.emitSubagentDenied(options, task.ID, "concurrency", err.Error(), map[string]interface{}{
+			"subagent_id": task.ID,
+		})
+		return subagentAdmissionFailureResult(task, options, err, "retry_later"), err
+	}
+	defer s.releaseGlobalSlot(acquired)
+	if acquired {
+		childCtx = withSubagentGlobalSlot(childCtx, s.config.GlobalLimiter)
+	}
+	return s.runChild(childCtx, options, task)
+}
+
+// subagentAdmissionFailureResult is the parent-visible receipt for a writer
+// that never started because the fence or the shared concurrency limiter
+// rejected admission: the same shape as the other pre-child failures, marked
+// retryable so the parent retries later instead of treating it as a task bug.
+func subagentAdmissionFailureResult(task SubagentTask, options SubagentRunOptions, err error, retryAdvice string) SubagentResult {
+	return SubagentResult{
+		ID:                    task.ID,
+		Role:                  task.Role,
+		ParentSessionID:       options.ParentSessionID,
+		ParentToolCallID:      options.ParentToolCallID,
+		ReadOnly:              task.ReadOnly,
+		ReadOnlySource:        subagentReadOnlySource(task),
+		ReadOnlyFilteredTools: subagentReadOnlyFilteredTools(task),
+		BudgetTokens:          task.BudgetTokens,
+		Success:               false,
+		Error:                 err.Error(),
+		Summary:               err.Error(),
+		Retryable:             true,
+		RetryAdvice:           retryAdvice,
+	}
 }
 
 func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options SubagentRunOptions, task SubagentTask) (report SubagentResult, err error) {
@@ -684,16 +1044,16 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		// 发射点在 loop.run 之前，保证「跑没跑到终态」都有账。
 		s.emitSubagentRouteResolved(options, task, spec, childSessionID, childConfig.Name, attempt, maxAttempts)
 		result, runErr = loop.run(childCtx, task.Goal, loopRunOptions{
-			TraceID:       options.TraceID,
-			SessionID:     childSessionID,
+			TraceID:   options.TraceID,
+			SessionID: childSessionID,
 			// 父链归属（schema v9）：随 llm.request.* 载荷落库，父会话统计
 			// 据此把子代理请求归集到 root；root 由采集侧按父链回溯兜底。
 			ParentSessionID: options.ParentSessionID,
 			SubagentID:      task.ID,
-			IncludePrompt: true,
-			Depth:         options.Depth,
-			BudgetTokens:  task.BudgetTokens,
-			ToolWhitelist: task.ToolsWhitelist,
+			IncludePrompt:   true,
+			Depth:           options.Depth,
+			BudgetTokens:    task.BudgetTokens,
+			ToolWhitelist:   task.ToolsWhitelist,
 		})
 		if runErr == nil {
 			break
@@ -1615,7 +1975,13 @@ func (s *SubagentScheduler) childPolicy(task SubagentTask) *ToolExecutionPolicy 
 	return agentChildPolicy(parent, task)
 }
 
+// subagentWritePaths resolves the task's write scope for capability scoping and
+// the process-wide writer fence: declared write_paths win; the historical
+// patch-context paths are the fallback for callers that only describe patches.
 func subagentWritePaths(task SubagentTask) []string {
+	if len(task.WritePaths) > 0 {
+		return NormalizeSubagentWritePaths(task.WritePaths)
+	}
 	paths := make([]string, 0, len(task.PatchContext))
 	for _, patch := range task.PatchContext {
 		if path := strings.TrimSpace(patch.Path); path != "" {
@@ -1671,16 +2037,17 @@ func (s *SubagentScheduler) partitionTasks(tasks []SubagentTask) ([]indexedSubag
 		// read-only-only tools (or is empty/unrestricted after prepareTasks),
 		// the task cannot write and is treated as a reader. This lets callers
 		// run multiple read-only-only subagents concurrently with
-		// read_only=false without tripping the single-writer policy.
-		if len(task.ToolsWhitelist) == 0 || containsWriteLikeTool(task.ToolsWhitelist) {
+		// read_only=false. Writers run one at a time inside the batch and are
+		// additionally fenced process-wide by the writer arbiter (cross-batch),
+		// so a multi-writer batch is admitted and serialized instead of
+		// rejected. A declared write_paths list also classifies the task as a
+		// writer: it is how a shell-capable task that modifies files opts into
+		// the fence instead of staying an unclassified reader.
+		if len(task.ToolsWhitelist) == 0 || containsWriteLikeTool(task.ToolsWhitelist) || len(task.WritePaths) > 0 {
 			writers = append(writers, indexedSubagentTask{index: index, task: task})
 		} else {
 			readers = append(readers, indexedSubagentTask{index: index, task: task})
 		}
-	}
-
-	if s.config.EnforceSingleWriter && len(writers) > 1 {
-		return nil, nil, fmt.Errorf("single-writer policy violation: %d writer subagents requested", len(writers))
 	}
 
 	return readers, writers, nil

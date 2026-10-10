@@ -5822,7 +5822,7 @@ func TestDefaultToolsForRole(t *testing.T) {
 	assert.Equal(t, DefaultToolsForRole("verifier"), DefaultToolsForRole("tester"))
 }
 
-func TestSubagentScheduler_EnforcesSingleWriterPolicy(t *testing.T) {
+func TestSubagentScheduler_AdmitsMultipleWriters(t *testing.T) {
 	agent := &Agent{
 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
 	}
@@ -5835,21 +5835,75 @@ func TestSubagentScheduler_EnforcesSingleWriterPolicy(t *testing.T) {
 	})
 	agent.SetEventBus(bus)
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
-		MaxConcurrent:       2,
-		MaxDepth:            1,
-		EnforceSingleWriter: true,
+		MaxConcurrent: 2,
+		MaxDepth:      1,
 	})
 
-	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
-		TraceID: "trace_test",
-		Depth:   1,
-	}, []SubagentTask{
+	prepared, err := scheduler.prepareTasks([]SubagentTask{
 		{ID: "writer-1", Goal: "Modify config", ReadOnly: false},
 		{ID: "writer-2", Goal: "Modify code", ReadOnly: false},
 	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "single-writer policy violation")
-	assert.Contains(t, deniedReasons[0], "single-writer policy violation")
+	require.NoError(t, err)
+
+	readers, writers, err := scheduler.partitionTasks(prepared)
+	require.NoError(t, err)
+	assert.Empty(t, readers)
+	assert.Len(t, writers, 2, "a multi-writer batch is admitted and serialized inside the batch, not rejected")
+	assert.Empty(t, deniedReasons, "admission of a multi-writer batch must not emit a denial")
+
+	// Undeclared writers in a multi-writer batch carry the serialization
+	// advisory so the caller can restore parallelism with disjoint write_paths.
+	warning := subagentWriterSerializationWarning(2)
+	assert.Contains(t, warning, "write_paths")
+	assert.Contains(t, warning, "read_only")
+}
+
+// The process-wide writer fence replaced the batch-level rejection: writers are
+// admitted, but a second writer whose scope overlaps (or is undeclared) waits
+// until the first one releases, while disjoint scopes keep running in parallel.
+func TestSubagentScheduler_WriterFenceSerializesOverlappingScopes(t *testing.T) {
+	agent := &Agent{
+		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+	}
+	arbiter := NewSubagentWriterArbiter()
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 2,
+		MaxDepth:      1,
+		WriterArbiter: arbiter,
+	})
+
+	release, err := arbiter.Acquire(context.Background(), "batch-a", []string{"backend/internal/agent"})
+	require.NoError(t, err)
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, waitErr := scheduler.acquireWriterSlot(waitCtx, SubagentTask{
+		ID:         "batch-b",
+		WritePaths: []string{"backend/internal/agent/scheduler.go"},
+	})
+	require.Error(t, waitErr)
+	assert.Contains(t, waitErr.Error(), "single-writer fence")
+	assert.Contains(t, waitErr.Error(), "next_action=retry_later_or_split_writers")
+	assert.Equal(t, "single_writer", classifySubagentDeniedPolicy(waitErr.Error()))
+
+	// Disjoint scopes are admitted while the first claim is still held.
+	disjoint, err := scheduler.acquireWriterSlot(context.Background(), SubagentTask{
+		ID:         "batch-c",
+		WritePaths: []string{"frontend/src"},
+	})
+	require.NoError(t, err)
+	disjoint()
+
+	// A depth-N subtree inherits its ancestor's claim instead of deadlocking.
+	inherited, err := scheduler.acquireWriterSlot(
+		withSubagentWriterClaim(context.Background(), arbiter),
+		SubagentTask{ID: "nested"},
+	)
+	require.NoError(t, err)
+	inherited()
+
+	release()
+	assert.Zero(t, arbiter.InFlight())
 }
 
 func TestSubagentScheduler_ReadOnlyFiltersWriteLikeTools(t *testing.T) {
@@ -5857,9 +5911,8 @@ func TestSubagentScheduler_ReadOnlyFiltersWriteLikeTools(t *testing.T) {
 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
 	}
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
-		MaxConcurrent:       2,
-		MaxDepth:            1,
-		EnforceSingleWriter: true,
+		MaxConcurrent: 2,
+		MaxDepth:      1,
 	})
 
 	prepared, err := scheduler.prepareTasks([]SubagentTask{
@@ -5884,57 +5937,82 @@ func TestSubagentScheduler_ReadOnlyFiltersWriteLikeTools(t *testing.T) {
 }
 
 func TestSubagentScheduler_NonReadOnlyWithoutWriteLikeToolsIsReader(t *testing.T) {
- 	agent := &Agent{
- 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
- 	}
- 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
- 		MaxConcurrent:       4,
- 		MaxDepth:            1,
- 		EnforceSingleWriter: true,
- 	})
- 
- 	// Two non-read-only subagents whose whitelist contains only read-only
- 	// tools. Under the old logic both were classified as writers and the
- 	// single-writer policy rejected the batch. With the fix they are readers
- 	// and can run concurrently.
- 	prepared, err := scheduler.prepareTasks([]SubagentTask{
- 		{ID: "reader-1", Goal: "Inspect files", ReadOnly: false, ToolsWhitelist: []string{"view", "grep", "shell"}},
- 		{ID: "reader-2", Goal: "Inspect logs", ReadOnly: false, ToolsWhitelist: []string{"view", "grep", "shell"}},
- 	})
- 	require.NoError(t, err)
- 	require.Len(t, prepared, 2)
- 
- 	readers, writers, err := scheduler.partitionTasks(prepared)
- 	require.NoError(t, err)
- 	assert.Len(t, readers, 2)
- 	assert.Empty(t, writers)
- }
- 
- func TestSubagentScheduler_NonReadOnlyWithWriteLikeToolIsWriter(t *testing.T) {
- 	agent := &Agent{
- 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
- 	}
- 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
- 		MaxConcurrent:       2,
- 		MaxDepth:            1,
- 		EnforceSingleWriter: true,
- 	})
- 
- 	// A non-read-only subagent with a write-like tool in its whitelist is
- 	// still classified as a writer and subject to the single-writer policy.
- 	prepared, err := scheduler.prepareTasks([]SubagentTask{
- 		{ID: "writer-1", Goal: "Modify config", ReadOnly: false, ToolsWhitelist: []string{"view", "write", "shell"}},
- 		{ID: "writer-2", Goal: "Modify code", ReadOnly: false, ToolsWhitelist: []string{"view", "edit", "shell"}},
- 	})
- 	require.NoError(t, err)
- 	require.Len(t, prepared, 2)
- 
- 	_, _, err = scheduler.partitionTasks(prepared)
- 	require.Error(t, err)
- 	assert.Contains(t, err.Error(), "single-writer policy violation")
- }
- 
- func TestSubagentScheduler_RejectsDuplicateTaskID(t *testing.T) {
+	agent := &Agent{
+		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+	}
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 4,
+		MaxDepth:      1,
+	})
+
+	// Two non-read-only subagents whose whitelist contains only read-only
+	// tools. They are readers and can run concurrently.
+	prepared, err := scheduler.prepareTasks([]SubagentTask{
+		{ID: "reader-1", Goal: "Inspect files", ReadOnly: false, ToolsWhitelist: []string{"view", "grep", "shell"}},
+		{ID: "reader-2", Goal: "Inspect logs", ReadOnly: false, ToolsWhitelist: []string{"view", "grep", "shell"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, prepared, 2)
+
+	readers, writers, err := scheduler.partitionTasks(prepared)
+	require.NoError(t, err)
+	assert.Len(t, readers, 2)
+	assert.Empty(t, writers)
+}
+
+func TestSubagentScheduler_NonReadOnlyWithWriteLikeToolIsWriter(t *testing.T) {
+	agent := &Agent{
+		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+	}
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 2,
+		MaxDepth:      1,
+	})
+
+	// A non-read-only subagent with a write-like tool in its whitelist is
+	// still classified as a writer (and therefore fenced), but a batch with
+	// several writers is admitted and serialized instead of rejected.
+	prepared, err := scheduler.prepareTasks([]SubagentTask{
+		{ID: "writer-1", Goal: "Modify config", ReadOnly: false, ToolsWhitelist: []string{"view", "write", "shell"}},
+		{ID: "writer-2", Goal: "Modify code", ReadOnly: false, ToolsWhitelist: []string{"view", "edit", "shell"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, prepared, 2)
+
+	readers, writers, err := scheduler.partitionTasks(prepared)
+	require.NoError(t, err)
+	assert.Empty(t, readers)
+	assert.Len(t, writers, 2)
+}
+
+// Declaring write_paths opts a shell-capable task into the writer fence: it can
+// modify files even though its whitelist carries no write-like tool name, and
+// without the declaration it would silently stay an unclassified reader.
+func TestSubagentScheduler_DeclaredWritePathsClassifyWriter(t *testing.T) {
+	agent := &Agent{
+		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+	}
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 2,
+		MaxDepth:      1,
+	})
+
+	prepared, err := scheduler.prepareTasks([]SubagentTask{
+		{ID: "shell-writer", Goal: "regenerate fixtures", ReadOnly: false, ToolsWhitelist: []string{"shell", "view"}, WritePaths: []string{"testdata"}},
+		{ID: "shell-reader", Goal: "run tests", ReadOnly: false, ToolsWhitelist: []string{"shell", "view"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, prepared, 2)
+
+	readers, writers, err := scheduler.partitionTasks(prepared)
+	require.NoError(t, err)
+	require.Len(t, writers, 1)
+	assert.Equal(t, "shell-writer", writers[0].task.ID)
+	require.Len(t, readers, 1)
+	assert.Equal(t, "shell-reader", readers[0].task.ID)
+}
+
+func TestSubagentScheduler_RejectsDuplicateTaskID(t *testing.T) {
 	agent := &Agent{
 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
 	}
@@ -5947,9 +6025,8 @@ func TestSubagentScheduler_NonReadOnlyWithoutWriteLikeToolsIsReader(t *testing.T
 	})
 	agent.SetEventBus(bus)
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
-		MaxConcurrent:       2,
-		MaxDepth:            1,
-		EnforceSingleWriter: true,
+		MaxConcurrent: 2,
+		MaxDepth:      1,
 	})
 
 	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
@@ -5977,9 +6054,8 @@ func TestSubagentScheduler_RejectsUnknownDependency(t *testing.T) {
 	})
 	agent.SetEventBus(bus)
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
-		MaxConcurrent:       2,
-		MaxDepth:            1,
-		EnforceSingleWriter: true,
+		MaxConcurrent: 2,
+		MaxDepth:      1,
 	})
 
 	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
@@ -6010,9 +6086,8 @@ func TestSubagentScheduler_RejectsDependencyCycle(t *testing.T) {
 	})
 	agent.SetEventBus(bus)
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
-		MaxConcurrent:       2,
-		MaxDepth:            1,
-		EnforceSingleWriter: true,
+		MaxConcurrent: 2,
+		MaxDepth:      1,
 	})
 
 	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{
@@ -6035,9 +6110,8 @@ func TestSubagentScheduler_ReadOnlyParentNarrowsWritableSubagent(t *testing.T) {
 	agent.SetToolExecutionPolicy(NewToolExecutionPolicy(nil, true))
 
 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
-		MaxConcurrent:       2,
-		MaxDepth:            1,
-		EnforceSingleWriter: true,
+		MaxConcurrent: 2,
+		MaxDepth:      1,
 	})
 
 	prepared, err := scheduler.prepareTasks([]SubagentTask{

@@ -186,6 +186,13 @@ type Handler struct {
 	// 每批 agents.maxConcurrent。首次构建后不再重建（见 subagentGlobalLimiter）。
 	subagentLimiterMu sync.Mutex
 	subagentLimiter   *agent.SubagentConcurrencyLimiter
+	// writerArbiterMu / writerArbiter 缓存进程级单写者栅栏
+	//（agents.singleWriterMode，默认 enforce）：与 CLI 宿主同口径——本进程
+	// 构建的全部 scheduler 共用同一 arbiter，跨 batch 的 writer 不再并发改
+	// 同一仓库；显式 off 时为 nil。首次构建后不再重建（见
+	// subagentWriterArbiter）。
+	writerArbiterMu sync.Mutex
+	writerArbiter   *agent.SubagentWriterArbiter
 	// waitBudget bounds consecutive no-progress active wait segments per parent
 	// turn (design §16.2/§16.3): once spent, the host refuses to open a new
 	// wait_agent window and returns next_action=suspend. It lives on the
@@ -4432,6 +4439,26 @@ func (h *Handler) subagentGlobalLimiter(maxThreads int) *agent.SubagentConcurren
 	return h.subagentLimiter
 }
 
+// subagentWriterArbiter returns the ONE process-wide writer fence shared by
+// every scheduler this handler builds (agents.singleWriterMode, default
+// "enforce"). Mirrors subagentGlobalLimiter: created on first use and kept for
+// the process lifetime so a config change cannot strand waiters on a retired
+// arbiter; an explicit "off" keeps returning nil (no arbitration).
+func (h *Handler) subagentWriterArbiter(enforce bool) *agent.SubagentWriterArbiter {
+	if !enforce {
+		return nil
+	}
+	if h == nil {
+		return agent.NewSubagentWriterArbiter()
+	}
+	h.writerArbiterMu.Lock()
+	defer h.writerArbiterMu.Unlock()
+	if h.writerArbiter == nil {
+		h.writerArbiter = agent.NewSubagentWriterArbiter()
+	}
+	return h.writerArbiter
+}
+
 // subagentCapacityView 返回 A6 resume 门控需要的进程级子代理准入瞬时视图。
 // 与 CLI 宿主同口径：只读缓存字段，不创建 limiter、不解析配置（未配置
 // agents.maxThreads 时视图 Limit=0 ⇒ 门控放行，保持旧行为）。
@@ -4535,6 +4562,7 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 	subagentScheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
 		Routing:       h.subagentRoutingConfig(),
 		MaxConcurrent: agentsConfig.MaxConcurrent,
+		WriterArbiter: h.subagentWriterArbiter(agentsConfig.SingleWriterEnforced()),
 		GlobalLimiter: h.subagentGlobalLimiter(agentsConfig.MaxThreads),
 		MaxQueueDepth: agentsConfig.MaxConcurrentQueueDepth,
 		QueueTimeout:  time.Duration(agentsConfig.MaxConcurrentQueueTimeoutMs) * time.Millisecond,

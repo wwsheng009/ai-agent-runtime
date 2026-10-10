@@ -216,8 +216,8 @@ type toolSourceResolver interface {
 }
 
 type loopRunOptions struct {
-	TraceID                 string
-	SessionID               string
+	TraceID   string
+	SessionID string
 	// ParentSessionID / RootSessionID / SubagentID 是子代理运行的父链归属
 	// （schema v9）：非空时随 llm.request.* 载荷落库。RootSessionID 为空且
 	// 有父会话时，采集侧按父链回溯兜底（不在此猜测）。
@@ -6915,6 +6915,7 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		task.ToolsWhitelist = stringSliceValue(item["tools_whitelist"])
 		task.DependsOn = stringSliceValue(item["depends_on"])
 		task.PatchContext = filePatchSliceValue(item["patches"])
+		task.WritePaths = stringSliceValue(item["write_paths"])
 		if task.ID == "" {
 			task.ID = fmt.Sprintf("subagent_%d", index+1)
 		}
@@ -7062,6 +7063,7 @@ var decodedSubagentFieldTypes = []struct {
 	{"tools_whitelist", subagentFieldArray},
 	{"depends_on", subagentFieldArray},
 	{"patches", subagentFieldArray},
+	{"write_paths", subagentFieldArray},
 }
 
 func validateDecodedSubagentFieldTypes(index int, item map[string]interface{}) error {
@@ -7076,7 +7078,7 @@ func validateDecodedSubagentFieldTypes(index int, item map[string]interface{}) e
 				index, field.key, field.want, value, value)
 		}
 		switch field.key {
-		case "tools_whitelist", "depends_on":
+		case "tools_whitelist", "depends_on", "write_paths":
 			if err := validateDecodedSubagentStringItems(index, field.key, value); err != nil {
 				return err
 			}
@@ -7828,7 +7830,7 @@ func cloneOptionValue(value interface{}) interface{} {
 // crash. The dispatch itself stays asynchronous — P3 / C4-1 deleted the inline
 // blocking path, so nothing falls back to a synchronous wait any more.
 func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string) types.ToolDefinition {
-	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume."
+	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume. " + runtimepolicy.SubagentWriterPolicyDescription
 	if catalog := strings.TrimSpace(agentCatalog); catalog != "" {
 		description += "\n\nAvailable agent definitions (pass the name as agent_type to inherit its defaults):\n" + catalog
 	}
@@ -7892,6 +7894,11 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string)
 								"description": "Optional child tool allowlist. Tasks that must run commands (builds/tests/git/package managers) must include \"shell\"; omitting it hides the shell tool from the child and the run is wasted on tool-name guessing. Including shell exposes the tool, but each command remains subject to read-only command classification when read_only=true. In read-only tasks, write-like entries are automatically filtered instead of rejecting the whole child batch.",
 							},
 							"depends_on": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"write_paths": map[string]interface{}{
+								"type":        "array",
+								"items":       map[string]interface{}{"type": "string"},
+								"description": "Optional files or directories this task may modify. Declared paths make the process-wide writer fence cheap: writers whose write_paths are disjoint run concurrently, while overlapping or undeclared writers serialize. Declaring write_paths also classifies the task as a writer (fenced and serialized), so use it for shell-capable tasks that modify files. Paths are cleaned and compared textually; keep them relative to the project root and consistent with the other tasks. Omit for read-only tasks.",
+							},
 							"patches": map[string]interface{}{
 								"type": "array",
 								"items": map[string]interface{}{

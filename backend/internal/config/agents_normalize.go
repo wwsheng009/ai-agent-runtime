@@ -39,6 +39,9 @@ func NormalizeAgentsConfig(cfg AgentsConfig) AgentsConfig {
 	if cfg.MaxConcurrent == 0 {
 		cfg.MaxConcurrent = defaults.MaxConcurrent
 	}
+	if strings.TrimSpace(cfg.SingleWriterMode) == "" {
+		cfg.SingleWriterMode = defaults.SingleWriterMode
+	}
 	// 背压默认关闭：0 归一化后仍是 0，不会把「无限等待」意外变成有界队列。
 	if cfg.MaxConcurrentQueueDepth == 0 {
 		cfg.MaxConcurrentQueueDepth = defaults.MaxConcurrentQueueDepth
@@ -80,4 +83,16 @@ func NormalizeAgentsConfig(cfg AgentsConfig) AgentsConfig {
 		cfg.AutoCloseCompleted = defaults.AutoCloseCompleted
 	}
 	return cfg
+}
+
+// SingleWriterEnforced reports whether the process-wide writer fence is on.
+// Unset resolves to the built-in default ("enforce"); only the explicit "off"
+// disables arbitration. Hosts call this after NormalizeAgentsConfig, but the
+// helper also resolves an unnormalized zero value.
+func (c AgentsConfig) SingleWriterEnforced() bool {
+	mode := strings.ToLower(strings.TrimSpace(c.SingleWriterMode))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(DefaultAgentsConfig().SingleWriterMode))
+	}
+	return mode != SingleWriterModeOff
 }
