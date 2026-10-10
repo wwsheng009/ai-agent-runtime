@@ -292,7 +292,8 @@ func TestParseWebSearchProviders(t *testing.T) {
 		{name: "whitespace", in: "   ", want: ""},
 		{name: "single bing", in: "bing", want: "bing"},
 		{name: "reorder", in: "bing,duckduckgo", want: "bing,duckduckgo"},
-		{name: "case and dedupe", in: "BING, bing, unknown, duckduckgo,", want: "bing,duckduckgo"},
+		{name: "cn last", in: "bing,duckduckgo,bing_cn", want: "bing,duckduckgo,bing_cn"},
+		{name: "case and dedupe", in: "BING, bing, unknown, duckduckgo, BING_CN, bing_cn,", want: "bing,duckduckgo,bing_cn"},
 		{name: "all unknown", in: "google,yahoo", want: ""},
 	}
 	for _, tc := range cases {
@@ -310,13 +311,13 @@ func TestWebSearchTool_BingParsesResultsAndDecodesRedirect(t *testing.T) {
 	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.Host != "cn.bing.com" {
-				t.Fatalf("expected cn.bing.com request, got %s", req.URL.Host)
+			if req.URL.Host != "www.bing.com" {
+				t.Fatalf("expected www.bing.com request, got %s", req.URL.Host)
 			}
 			body := `<ol id="b_results">` +
 				`<li class="b_algo"><h2><a href="https://example.com/page" h="ID=SERP,1.1"><strong>示例</strong>标题</a></h2>` +
 				`<div class="b_caption"><p>这是第一条摘要&amp;更多。</p></div></li>` +
-				`<li class="b_algo"><h2><a href="https://cn.bing.com/ck/a?a=b&amp;u=a1a` + bingUParam("https://example.org/") + `&amp;ntb=1">跳转链接标题</a></h2>` +
+				`<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?a=b&amp;u=a1a` + bingUParam("https://example.org/") + `&amp;ntb=1">跳转链接标题</a></h2>` +
 				`<p>第二条摘要</p></li>` +
 				`<li class="b_algo"><h2><a href="https://plain.example/">第三&amp;四</a></h2><p>三</p></li>` +
 				`</ol>`
@@ -358,29 +359,30 @@ func TestWebSearchTool_BingParsesResultsAndDecodesRedirect(t *testing.T) {
 	}
 }
 
-func TestWebSearchTool_ProviderChainFallsBackToBing(t *testing.T) {
-	// 默认链 bing,duckduckgo：Bing 优先，Bing 不可达时回退 DDG。
+func TestWebSearchTool_DefaultChainFallsBackToDDG(t *testing.T) {
+	// 默认链 bing(www 英文版) → duckduckgo → bing_cn：Bing 失败时由
+	// DuckDuckGo 二级备份接管，且不先行触达 cn.bing.com。
 	tool := NewWebSearchTool()
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
-			case strings.Contains(req.URL.Host, "duckduckgo.com"):
-				return nil, &url.Error{
-					Op:  "Get",
-					URL: req.URL.String(),
-					Err: &net.OpError{
-						Op:  "dial",
-						Net: "tcp",
-						Err: errors.New("connectex: A connection attempt failed because the connected party did not properly respond after a period of time"),
-					},
-				}
-			case req.URL.Host == "cn.bing.com":
+			case req.URL.Host == "www.bing.com":
 				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(`<li class="b_algo"><h2><a href="https://bing.example/">Bing 兜底标题</a></h2><p>兜底摘要</p></li>`)),
+					StatusCode: http.StatusServiceUnavailable,
+					Body:       io.NopCloser(strings.NewReader("upstream unavailable")),
 					Header:     make(http.Header),
 					Request:    req,
 				}, nil
+			case strings.Contains(req.URL.Host, "api.duckduckgo.com"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"AbstractText":"DDG 备份摘要","Heading":"DDG 备份标题","AbstractURL":"https://ddg.example/"}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			case req.URL.Host == "cn.bing.com":
+				t.Fatalf("cn.bing.com must stay last: contacted before duckduckgo")
+				return nil, nil
 			default:
 				t.Fatalf("unexpected request host: %s", req.URL.Host)
 				return nil, nil
@@ -395,33 +397,43 @@ func TestWebSearchTool_ProviderChainFallsBackToBing(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !result.Success {
-		t.Fatalf("expected fallback success via bing, got %v", result.Error)
+		t.Fatalf("expected fallback success via duckduckgo, got %v", result.Error)
 	}
-	if result.Metadata["source"] != "bing" {
-		t.Fatalf("expected source=bing, got %#v", result.Metadata["source"])
+	if result.Metadata["source"] != "duckduckgo" {
+		t.Fatalf("expected source=duckduckgo, got %#v", result.Metadata["source"])
 	}
-	if !strings.Contains(result.Content, "Bing 兜底标题") {
-		t.Fatalf("expected bing content, got %q", result.Content)
+	if !strings.Contains(result.Content, "DDG 备份") {
+		t.Fatalf("expected ddg content, got %q", result.Content)
 	}
 }
 
-func TestWebSearchTool_BingCNFailsFallsBackToWWW(t *testing.T) {
+func TestWebSearchTool_DefaultChainFallsBackToCNLast(t *testing.T) {
+	// 默认链最后一级：Bing 英文版与 DuckDuckGo 都失败时才触达 cn.bing.com。
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			switch req.URL.Host {
-			case "cn.bing.com":
+			switch {
+			case req.URL.Host == "www.bing.com":
 				return &http.Response{
 					StatusCode: http.StatusServiceUnavailable,
 					Body:       io.NopCloser(strings.NewReader("upstream unavailable")),
 					Header:     make(http.Header),
 					Request:    req,
 				}, nil
-			case "www.bing.com":
+			case strings.Contains(req.URL.Host, "duckduckgo.com"):
+				return nil, &url.Error{
+					Op:  "Get",
+					URL: req.URL.String(),
+					Err: &net.OpError{
+						Op:  "dial",
+						Net: "tcp",
+						Err: errors.New("connectex: A connection attempt failed"),
+					},
+				}
+			case req.URL.Host == "cn.bing.com":
 				return &http.Response{
 					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(`<li class="b_algo"><h2><a href="https://www.example/">WWW 结果</a></h2><p>摘要</p></li>`)),
+					Body:       io.NopCloser(strings.NewReader(`<li class="b_algo"><h2><a href="https://www.example/">CN 兜底结果</a></h2><p>摘要</p></li>`)),
 					Header:     make(http.Header),
 					Request:    req,
 				}, nil
@@ -439,13 +451,141 @@ func TestWebSearchTool_BingCNFailsFallsBackToWWW(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !result.Success {
-		t.Fatalf("expected www.bing.com fallback success, got %v", result.Error)
+		t.Fatalf("expected cn.bing.com last-resort success, got %v", result.Error)
 	}
-	if result.Metadata["source"] != "bing" {
-		t.Fatalf("expected source=bing, got %#v", result.Metadata["source"])
+	if result.Metadata["source"] != "bing_cn" {
+		t.Fatalf("expected source=bing_cn, got %#v", result.Metadata["source"])
 	}
-	if !strings.Contains(result.Content, "WWW 结果") {
-		t.Fatalf("expected www bing content, got %q", result.Content)
+	if !strings.Contains(result.Content, "CN 兜底结果") {
+		t.Fatalf("expected cn bing content, got %q", result.Content)
+	}
+}
+
+func TestWebSearchTool_BingDefaultsToEnglishEndpoint(t *testing.T) {
+	// 默认搜索引擎为 Bing 英文版：请求 www.bing.com，携带英文市场参数与
+	// Accept-Language，避免按出口 IP 地区返回中文结果。
+	t.Setenv(webSearchBingSetLangEnv, "")
+	t.Setenv(webSearchBingMarketEnv, "")
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	var gotURL *url.URL
+	var gotAcceptLanguage string
+	tool.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotURL = req.URL
+			gotAcceptLanguage = req.Header.Get("Accept-Language")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`<html><body></body></html>`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"query": "english results",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+	if gotURL == nil {
+		t.Fatal("expected a bing request")
+	}
+	if gotURL.Host != "www.bing.com" {
+		t.Fatalf("expected default endpoint www.bing.com, got %s", gotURL.Host)
+	}
+	if gotURL.Query().Get("mkt") != "en-US" {
+		t.Fatalf("expected mkt=en-US, got %q", gotURL.Query().Get("mkt"))
+	}
+	if gotURL.Query().Get("setlang") != "en" {
+		t.Fatalf("expected setlang=en, got %q", gotURL.Query().Get("setlang"))
+	}
+	if !strings.HasPrefix(gotAcceptLanguage, "en-US") {
+		t.Fatalf("expected en-US Accept-Language, got %q", gotAcceptLanguage)
+	}
+}
+
+func TestWebSearchTool_BingLocaleFromEnv(t *testing.T) {
+	cases := []struct {
+		name           string
+		setLang        string
+		market         string
+		wantSetLang    string
+		wantMarket     string
+		wantLangHeader string
+	}{
+		{name: "defaults to english", setLang: "", market: "", wantSetLang: "en", wantMarket: "en-US", wantLangHeader: "en-US,en;q=0.9"},
+		{name: "env overrides", setLang: "zh-hans", market: "zh-CN", wantSetLang: "zh-hans", wantMarket: "zh-CN", wantLangHeader: "zh-CN,zh;q=0.9"},
+		{name: "underscore normalized", setLang: "en_GB", market: "en_gb", wantSetLang: "en-GB", wantMarket: "en-gb", wantLangHeader: "en-gb,en;q=0.9"},
+		{name: "invalid falls back", setLang: "en US", market: "not a market", wantSetLang: "en", wantMarket: "en-US", wantLangHeader: "en-US,en;q=0.9"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(webSearchBingSetLangEnv, tc.setLang)
+			t.Setenv(webSearchBingMarketEnv, tc.market)
+			tool := NewWebSearchTool()
+			tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+			var gotURL *url.URL
+			var gotAcceptLanguage string
+			tool.httpClient = &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					gotURL = req.URL
+					gotAcceptLanguage = req.Header.Get("Accept-Language")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`<html><body></body></html>`)),
+						Header:     make(http.Header),
+						Request:    req,
+					}, nil
+				}),
+			}
+
+			result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "locale config"})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !result.Success {
+				t.Fatalf("expected success, got %v", result.Error)
+			}
+			if gotURL == nil {
+				t.Fatal("expected a bing request")
+			}
+			if got := gotURL.Query().Get("setlang"); got != tc.wantSetLang {
+				t.Fatalf("setlang=%q want %q", got, tc.wantSetLang)
+			}
+			if got := gotURL.Query().Get("mkt"); got != tc.wantMarket {
+				t.Fatalf("mkt=%q want %q", got, tc.wantMarket)
+			}
+			if gotAcceptLanguage != tc.wantLangHeader {
+				t.Fatalf("Accept-Language=%q want %q", gotAcceptLanguage, tc.wantLangHeader)
+			}
+		})
+	}
+}
+
+func TestBuildBingSearchURL(t *testing.T) {
+	// 可配置值统一走 url.Values 编码：查询词与参数都不得以原文进入查询串。
+	got := buildBingSearchURL("https://www.bing.com/search", "a&b=c 中文", 5, bingSearchLocale{setLang: "en", mkt: "en-US"})
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse %q: %v", got, err)
+	}
+	if parsed.Host != "www.bing.com" || parsed.Path != "/search" {
+		t.Fatalf("unexpected endpoint: %s", got)
+	}
+	query := parsed.Query()
+	if query.Get("q") != "a&b=c 中文" {
+		t.Fatalf("q=%q", query.Get("q"))
+	}
+	if query.Get("count") != "5" || query.Get("setlang") != "en" || query.Get("mkt") != "en-US" {
+		t.Fatalf("unexpected params: %s", got)
+	}
+	if strings.Contains(got, "a&b=c") || strings.Contains(got, "中文") {
+		t.Fatalf("raw query must stay escaped: %s", got)
 	}
 }
 
@@ -484,11 +624,11 @@ func TestWebSearchTool_AllProvidersFailStampsAttempts(t *testing.T) {
 		t.Fatalf("error_code=%q want NETWORK_UNAVAILABLE meta=%#v", code, result.Metadata)
 	}
 	attempted, _ := result.Metadata["providers_attempted"].([]string)
-	if len(attempted) != 2 || attempted[0] != "bing" || attempted[1] != "duckduckgo" {
-		t.Fatalf("expected providers_attempted=[bing duckduckgo], got %#v", result.Metadata["providers_attempted"])
+	if len(attempted) != 3 || attempted[0] != "bing" || attempted[1] != "duckduckgo" || attempted[2] != "bing_cn" {
+		t.Fatalf("expected providers_attempted=[bing duckduckgo bing_cn], got %#v", result.Metadata["providers_attempted"])
 	}
 	perProvider, _ := result.Metadata["provider_errors"].(map[string]string)
-	if perProvider["duckduckgo"] == "" || perProvider["bing"] == "" {
+	if perProvider["duckduckgo"] == "" || perProvider["bing"] == "" || perProvider["bing_cn"] == "" {
 		t.Fatalf("expected per-provider errors, got %#v", result.Metadata["provider_errors"])
 	}
 }
@@ -551,23 +691,31 @@ func TestNewWebSearchTool_ProvidersFromEnv(t *testing.T) {
 		for _, p := range tool.providers {
 			names = append(names, p.name)
 		}
-		if strings.Join(names, ",") != "bing,duckduckgo" {
-			t.Fatalf("default providers = %v, want [bing duckduckgo]", names)
+		if strings.Join(names, ",") != "bing,duckduckgo,bing_cn" {
+			t.Fatalf("default providers = %v, want [bing duckduckgo bing_cn]", names)
 		}
 	})
 
 	t.Run("env overrides", func(t *testing.T) {
-		t.Setenv(webSearchProvidersEnv, "bing")
+		t.Setenv(webSearchProvidersEnv, "duckduckgo,bing_cn")
 		tool := NewWebSearchTool()
-		if len(tool.providers) != 1 || tool.providers[0].name != "bing" {
-			t.Fatalf("env providers = %v, want [bing]", tool.providers)
+		if len(tool.providers) != 2 || tool.providers[0].name != "duckduckgo" || tool.providers[1].name != "bing_cn" {
+			t.Fatalf("env providers = %v, want [duckduckgo bing_cn]", tool.providers)
+		}
+	})
+
+	t.Run("env reorders chain", func(t *testing.T) {
+		t.Setenv(webSearchProvidersEnv, "bing_cn,bing")
+		tool := NewWebSearchTool()
+		if len(tool.providers) != 2 || tool.providers[0].name != "bing_cn" || tool.providers[1].name != "bing" {
+			t.Fatalf("env providers = %v, want [bing_cn bing]", tool.providers)
 		}
 	})
 
 	t.Run("invalid env falls back to default", func(t *testing.T) {
 		t.Setenv(webSearchProvidersEnv, "google")
 		tool := NewWebSearchTool()
-		if len(tool.providers) != 2 || tool.providers[0].name != "bing" {
+		if len(tool.providers) != 3 || tool.providers[0].name != "bing" || tool.providers[1].name != "duckduckgo" || tool.providers[2].name != "bing_cn" {
 			t.Fatalf("invalid env providers = %v, want default chain", tool.providers)
 		}
 	})

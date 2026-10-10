@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,10 +30,12 @@ type WebSearchTool struct {
 	httpClient *http.Client
 	// providers 按优先级排列的搜索引擎后端链，由 WEB_SEARCH_PROVIDERS 配置。
 	providers []webSearchProvider
+	// bingLocale Bing 端点的 setlang/mkt 参数（默认英文 en / en-US）。
+	bingLocale bingSearchLocale
 }
 
 // webSearchProvider 一个搜索引擎后端。source 用于结果 metadata 标记
-// （duckduckgo / duckduckgo_html / bing）。
+// （duckduckgo / duckduckgo_html / bing / bing_cn）。
 type webSearchProvider struct {
 	name   string
 	search func(ctx context.Context, query string, count int) (source string, results []DuckDuckGoResult, err error)
@@ -39,12 +43,24 @@ type webSearchProvider struct {
 
 const (
 	// webSearchProvidersEnv 逗号分隔、按优先级排列的搜索引擎列表，取值
-	// duckduckgo 或 bing。默认 "bing,duckduckgo"：Bing 优先（内网/防火墙
-	// 场景 cn.bing.com 可达），Bing 不可达时自动回退 DDG。
+	// bing（Bing 英文版 www.bing.com）、duckduckgo、bing_cn（Bing 中文站
+	// cn.bing.com）。默认 "bing,duckduckgo,bing_cn"：Bing 英文版优先，
+	// DuckDuckGo 二级备份，cn.bing.com 最后兜底；链序与取舍均可配置。
 	webSearchProvidersEnv     = "WEB_SEARCH_PROVIDERS"
-	defaultWebSearchProviders = "bing,duckduckgo"
-	bingSearchURLCN           = "https://cn.bing.com/search?q=%s&count=%d"
-	bingSearchURLWWW          = "https://www.bing.com/search?q=%s&count=%d"
+	defaultWebSearchProviders = "bing,duckduckgo,bing_cn"
+	// webSearchBingSetLangEnv / webSearchBingMarketEnv Bing 的语言与市场
+	// 参数：setlang 控制界面与内容语言，mkt 控制结果市场（语言+地区）。
+	// 默认英文（en / en-US）；空值或非法值回退默认，避免按出口 IP 地区
+	// 返回中文结果。
+	webSearchBingSetLangEnv = "WEB_SEARCH_BING_SETLANG"
+	webSearchBingMarketEnv  = "WEB_SEARCH_BING_MKT"
+	defaultBingSetLang      = "en"
+	defaultBingMarket       = "en-US"
+	// bingSearchURLWWW 为 Bing 英文版默认端点，bingSearchURLCN 为中文站
+	// 端点（默认链中仅作最后兜底）。语言/市场参数由 searchBing 用
+	// url.Values 安全拼装，不在端点常量中硬编码。
+	bingSearchURLWWW          = "https://www.bing.com/search"
+	bingSearchURLCN           = "https://cn.bing.com/search"
 	webSearchConnectTimeout   = 5 * time.Second
 	webSearchTLSHandshakeTo   = 5 * time.Second
 	webSearchResponseHeaderTo = 8 * time.Second
@@ -82,12 +98,13 @@ func NewWebSearchTool() *WebSearchTool {
 	tool := &WebSearchTool{
 		BaseTool: toolkit.NewBaseTool(
 			"web_search",
-			"使用网络搜索引擎（默认 DuckDuckGo，可配置 Bing）搜索网络信息，返回相关网页标题、链接和摘要。若有多个不同搜索意图，请拆分为多个更小的 web_search 调用，每次只聚焦一个搜索目标。支持客户端域名过滤 allowed_domains/blocked_domains（互斥）。",
+			"使用网络搜索引擎（默认 Bing 英文版 www.bing.com，DuckDuckGo 二级备份，cn.bing.com 最后兜底）搜索网络信息，返回相关网页标题、链接和摘要。若有多个不同搜索意图，请拆分为多个更小的 web_search 调用，每次只聚焦一个搜索目标。支持客户端域名过滤 allowed_domains/blocked_domains（互斥）。",
 			"1.1.0",
 			parameters,
 			true,
 		),
 		httpClient: newSearchHTTPClient(),
+		bingLocale: resolveBingSearchLocale(),
 	}
 	tool.providers = tool.buildProviders()
 	return tool
@@ -124,6 +141,8 @@ func (w *WebSearchTool) buildProviders() []webSearchProvider {
 			out = append(out, webSearchProvider{name: name, search: w.searchDuckDuckGoProvider})
 		case "bing":
 			out = append(out, webSearchProvider{name: name, search: w.searchBingProvider})
+		case "bing_cn":
+			out = append(out, webSearchProvider{name: name, search: w.searchBingCNProvider})
 		}
 	}
 	return out
@@ -136,7 +155,7 @@ func parseWebSearchProviders(value string) []string {
 	var out []string
 	for _, part := range strings.Split(value, ",") {
 		name := strings.ToLower(strings.TrimSpace(part))
-		if name != "duckduckgo" && name != "bing" {
+		if name != "duckduckgo" && name != "bing" && name != "bing_cn" {
 			continue
 		}
 		if seen[name] {
@@ -146,6 +165,48 @@ func parseWebSearchProviders(value string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// bingSearchLocale Bing 请求的语言/市场参数：setlang 控制界面与内容语言，
+// mkt 控制结果市场（语言+地区）。
+type bingSearchLocale struct {
+	setLang string
+	mkt     string
+}
+
+// bingLocaleValuePattern 语言/市场取值形态：主语言 2-3 个字母，可选 1-2 段
+// 字母数字子标签（en、en-US、zh-hans）。
+var bingLocaleValuePattern = regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$`)
+
+// resolveBingSearchLocale 从环境变量解析 Bing 语言/市场，空值或非法值回退
+// 英文默认（en / en-US）；下划线分隔归一为连字符。
+func resolveBingSearchLocale() bingSearchLocale {
+	return bingSearchLocale{
+		setLang: normalizeBingLocaleValue(os.Getenv(webSearchBingSetLangEnv), defaultBingSetLang),
+		mkt:     normalizeBingLocaleValue(os.Getenv(webSearchBingMarketEnv), defaultBingMarket),
+	}
+}
+
+// normalizeBingLocaleValue 校验单个语言/市场值；空或非法回退默认值。
+func normalizeBingLocaleValue(raw, fallback string) string {
+	value := strings.ReplaceAll(strings.TrimSpace(raw), "_", "-")
+	if value == "" || !bingLocaleValuePattern.MatchString(value) {
+		return fallback
+	}
+	return value
+}
+
+// acceptLanguageForMarket 从 mkt 派生 Accept-Language 头，保持与 URL 参数
+// 一致：en-US → "en-US,en;q=0.9"，zh-CN → "zh-CN,zh;q=0.9"。
+func acceptLanguageForMarket(mkt string) string {
+	mkt = strings.TrimSpace(mkt)
+	if mkt == "" {
+		mkt = defaultBingMarket
+	}
+	if idx := strings.IndexByte(mkt, '-'); idx > 0 {
+		return fmt.Sprintf("%s,%s;q=0.9", mkt, mkt[:idx])
+	}
+	return mkt
 }
 
 func (w *WebSearchTool) DefinitionMetadata() map[string]interface{} {
@@ -469,23 +530,41 @@ func (w *WebSearchTool) searchDuckDuckGoProvider(ctx context.Context, query stri
 	return "", nil, errors.Join(instantErr, htmlErr)
 }
 
-// searchBingProvider 使用 Bing 搜索：CN 端点失败时回退 www 端点
-// （二者在国内外网络的可达性不同，双端点覆盖内网/防火墙场景）。
+// searchBingProvider 使用 Bing 英文版（www.bing.com）搜索：语言/市场由
+// WEB_SEARCH_BING_SETLANG / WEB_SEARCH_BING_MKT 配置，默认 en / en-US。
+// 是否回退其他引擎由 provider 链顺序（WEB_SEARCH_PROVIDERS）决定。
 func (w *WebSearchTool) searchBingProvider(ctx context.Context, query string, count int) (string, []DuckDuckGoResult, error) {
+	results, err := w.searchBing(ctx, query, count, bingSearchURLWWW)
+	if err != nil {
+		return "", nil, err
+	}
+	return "bing", results, nil
+}
+
+// searchBingCNProvider 使用 Bing 中文站（cn.bing.com）搜索：默认链中仅作为
+// 最后兜底（内网/防火墙场景可达），与英文站共用语言/市场配置。
+func (w *WebSearchTool) searchBingCNProvider(ctx context.Context, query string, count int) (string, []DuckDuckGoResult, error) {
 	results, err := w.searchBing(ctx, query, count, bingSearchURLCN)
-	if err == nil {
-		return "bing", results, nil
+	if err != nil {
+		return "", nil, err
 	}
-	wwwResults, wwwErr := w.searchBing(ctx, query, count, bingSearchURLWWW)
-	if wwwErr == nil {
-		return "bing", wwwResults, nil
-	}
-	return "", nil, errors.Join(err, wwwErr)
+	return "bing_cn", results, nil
+}
+
+// buildBingSearchURL 用 url.Values 安全拼装 Bing 搜索 URL：查询词与可配置的
+// 语言/市场值统一编码，避免注入额外查询参数。
+func buildBingSearchURL(endpoint, query string, count int, locale bingSearchLocale) string {
+	params := url.Values{}
+	params.Set("q", query)
+	params.Set("count", strconv.Itoa(count))
+	params.Set("setlang", locale.setLang)
+	params.Set("mkt", locale.mkt)
+	return endpoint + "?" + params.Encode()
 }
 
 // searchBing 请求单个 Bing 端点并解析 HTML 结果。
 func (w *WebSearchTool) searchBing(ctx context.Context, query string, count int, endpoint string) ([]DuckDuckGoResult, error) {
-	searchURL := fmt.Sprintf(endpoint, url.QueryEscape(query), count)
+	searchURL := buildBingSearchURL(endpoint, query, count, w.bingLocale)
 	if err := w.checkURL(searchURL); err != nil {
 		return nil, err
 	}
@@ -496,7 +575,7 @@ func (w *WebSearchTool) searchBing(ctx context.Context, query string, count int,
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	req.Header.Set("Accept-Language", acceptLanguageForMarket(w.bingLocale.mkt))
 
 	resp, err := w.httpClient.Do(req)
 	if err != nil {
