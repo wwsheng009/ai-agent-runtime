@@ -305,6 +305,12 @@ func (b *Bus) SubscribeCancelable(eventType string, handler Handler) Unsubscribe
 }
 
 // Publish 同步发布事件。
+//
+// P0-2（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md）：
+// 留存条目（递归尺寸估算 + payload 深拷贝）在独占锁外预构建，锁内只剩环形
+// 缓冲簿记与订阅快照；可重建的正文流式 delta（IsPersistStreamDeltaEventType）
+// 默认免留存——留存环只服务 Recent()/Query() 诊断，delta 全文在发布锁内
+// 每 chunk 深拷贝的成本远高于其诊断价值（此类事件另有 SQLite 落盘承载）。
 func (b *Bus) Publish(event Event) {
 	if b == nil {
 		return
@@ -313,9 +319,15 @@ func (b *Bus) Publish(event Event) {
 		event.Timestamp = time.Now().UTC()
 	}
 
+	// retention/byteLimit 仅构造期写入，锁外读取安全。
+	var slot retainedSlot
+	if b.retention > 0 && !IsPersistStreamDeltaEventType(event.Type) {
+		slot = newRetainedSlot(event, b.byteLimit)
+	}
+
 	b.mu.Lock()
-	if b.retention > 0 {
-		b.appendRetainedEvent(event)
+	if slot.retained {
+		b.appendRetainedSlot(slot)
 	}
 	typed := cloneSubscriptionHandlers(b.subscribers[event.Type])
 	all := cloneSubscriptionHandlers(b.all)
@@ -329,20 +341,32 @@ func (b *Bus) Publish(event Event) {
 	}
 }
 
-func (b *Bus) appendRetainedEvent(event Event) {
+// retainedSlot 是锁外预构建的留存条目：深拷贝与 ApproximateEventBytes 都不在
+// Publish 的独占锁临界区内执行。
+type retainedSlot struct {
+	event    Event
+	size     int64
+	retained bool
+}
+
+func newRetainedSlot(event Event, byteLimit int64) retainedSlot {
 	size := ApproximateEventBytes(event)
-	if b.byteLimit > 0 && size > b.byteLimit {
-		return
+	if byteLimit > 0 && size > byteLimit {
+		return retainedSlot{}
 	}
-	for b.eventCount >= b.retention || (b.byteLimit > 0 && b.eventBytes+size > b.byteLimit) {
+	return retainedSlot{event: cloneEvent(event), size: size, retained: true}
+}
+
+func (b *Bus) appendRetainedSlot(slot retainedSlot) {
+	for b.eventCount >= b.retention || (b.byteLimit > 0 && b.eventBytes+slot.size > b.byteLimit) {
 		b.evictOldestEvent()
 	}
 	b.ensureEventCapacity()
 	physical := (b.eventStart + b.eventCount) % len(b.events)
-	b.events[physical] = cloneEvent(event)
-	b.eventSizes[physical] = size
+	b.events[physical] = slot.event
+	b.eventSizes[physical] = slot.size
 	b.eventCount++
-	b.eventBytes += size
+	b.eventBytes += slot.size
 }
 
 func (b *Bus) ensureEventCapacity() {

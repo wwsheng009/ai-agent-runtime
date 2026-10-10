@@ -880,3 +880,59 @@ func TestBus_GovernanceStats_AggregatesProvenance(t *testing.T) {
 		t.Fatalf("unexpected provenance summary: %#v", stats.Provenance)
 	}
 }
+
+// P0-2：正文流式 delta 默认免留存（Recent/Query 环只承载诊断事件），
+// 且留存条目的深拷贝与尺寸估算不在 Publish 独占锁内执行。
+func TestBus_StreamDeltaEventsSkipRetention(t *testing.T) {
+	bus := NewBus()
+	bus.Publish(Event{Type: "assistant_delta", Payload: map[string]interface{}{"delta": "chunk"}})
+	bus.Publish(Event{Type: "assistant.reasoning", Payload: map[string]interface{}{"delta": "thought"}})
+	bus.Publish(Event{Type: "tool.completed", Payload: map[string]interface{}{"name": "demo"}})
+
+	events := bus.Recent(10)
+	if len(events) != 1 {
+		t.Fatalf("stream delta 必须免留存，仅 tool.completed 入环: %#v", events)
+	}
+	if events[0].Type != "tool.completed" {
+		t.Fatalf("unexpected retained type: %s", events[0].Type)
+	}
+}
+
+func TestBus_RetentionStillClonesNonDeltaPayload(t *testing.T) {
+	bus := NewBus()
+	event := Event{Type: "tool.completed", Payload: map[string]interface{}{"name": "demo"}}
+	bus.Publish(event)
+	// 发布方在 handler 之外修改 payload 不得污染留存副本（深拷贝语义保持）。
+	event.Payload["name"] = "mutated"
+
+	events := bus.Recent(10)
+	if len(events) != 1 || events[0].Payload["name"] != "demo" {
+		t.Fatalf("retained copy must be isolated from publisher mutations: %#v", events)
+	}
+}
+
+func BenchmarkBusPublishStreamDelta(b *testing.B) {
+	bus := NewBus()
+	bus.Subscribe("", func(Event) {})
+	bus.Subscribe("assistant_delta", func(Event) {})
+	payload := map[string]interface{}{
+		"stream_id": "s1",
+		"sequence":  1,
+		"delta":     "hello world chunk",
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		bus.Publish(Event{Type: "assistant_delta", TraceID: "t1", Payload: payload})
+	}
+}
+
+func BenchmarkBusPublishDiagnosticEvent(b *testing.B) {
+	bus := NewBus()
+	bus.Subscribe("", func(Event) {})
+	bus.Subscribe("tool.completed", func(Event) {})
+	payload := map[string]interface{}{"name": "demo", "index": 1}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		bus.Publish(Event{Type: "tool.completed", TraceID: "t1", Payload: payload})
+	}
+}
