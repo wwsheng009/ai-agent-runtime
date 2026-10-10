@@ -98,6 +98,15 @@ type ReconcileReport struct {
 	// enforce pass reclaims, and they stay counted in observe mode.
 	Worktrees     WorktreeReconcileOutcome `json:"worktrees,omitempty"`
 	WorktreeError string                   `json:"worktree_error,omitempty"`
+	// Sweep* fold the host parked-turn settlement sweep (self-heal layer 3,
+	// 2026-10-10) into the same pass: durable turn-suspension records whose
+	// obligations are all terminal are cleared even when the terminal wake and
+	// the next parent run both went missing — otherwise the session keeps
+	// rendering "Waiting for subagents" with a pinned turn_id forever. The
+	// sweep is bookkeeping repair (never touches an unsettled record), so it
+	// runs in both modes and a failure is recorded instead of failing the pass.
+	Sweep      TurnSweepOutcome `json:"sweep,omitempty"`
+	SweepError string           `json:"sweep_error,omitempty"`
 }
 
 // ReconcileAgentSessionConsistency audits the durable identity graph and, in
@@ -279,6 +288,12 @@ func (r ReconcileReport) Summary() string {
 	}
 	if errText := strings.TrimSpace(r.PurgeError); errText != "" {
 		parts = append(parts, "purge_error="+errText)
+	}
+	if r.Sweep.Cleared > 0 {
+		parts = append(parts, fmt.Sprintf("sweep_cleared=%d", r.Sweep.Cleared))
+	}
+	if errText := strings.TrimSpace(r.SweepError); errText != "" {
+		parts = append(parts, "sweep_error="+errText)
 	}
 	if !r.ReconciledAt.IsZero() {
 		parts = append(parts, "last_reconcile="+r.ReconciledAt.UTC().Format(time.RFC3339))

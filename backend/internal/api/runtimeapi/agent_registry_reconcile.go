@@ -106,8 +106,12 @@ func (h *Handler) ensureAgentRegistryReconciler() *agentcontrol.Reconciler {
 		// from a durable row back to its session context. A live worktree is
 		// therefore reported as an unmanaged registration rather than skipped.
 		Worktrees: h.reconcileAgentWorktrees,
-		Mode:      mode,
-		Interval:  interval,
+		// 第三层自愈：与 CLI 宿主同口径，把义务已全终态的孤儿挂起记录
+		// （终态 wake 与下一个 run 双缺）在对账节拍里清掉，见
+		// sweepSettledParkedTurns。
+		Sweep:    h.sweepSettledParkedTurns,
+		Mode:     mode,
+		Interval: interval,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.agentControlReconciler = reconciler

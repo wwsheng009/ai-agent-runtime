@@ -184,6 +184,51 @@ ORDER BY parked_at DESC, turn_id ASC`, sessionID)
 	return out, nil
 }
 
+// ListAllTurnSuspensions returns every parked-turn record in the store, newest
+// parked first. Read-only, store-wide: the periodic settlement sweep needs to
+// visit records of sessions whose terminal wake never arrived, so scoping the
+// read to one session would hide exactly the rows the sweep exists to repair.
+func (s *sqliteBatchStore) ListAllTurnSuspensions(ctx context.Context) ([]*TurnSuspension, error) {
+	db, err := s.dbc(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
+	decision_window_until, resume_queue_json
+FROM turn_suspensions
+ORDER BY parked_at DESC, session_id ASC, turn_id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("subagentbatch: list all turn suspensions: %w", err)
+	}
+	defer rows.Close()
+	var out []*TurnSuspension
+	for rows.Next() {
+		var (
+			record        TurnSuspension
+			obligations   string
+			resumeQueue   string
+			parkedAt      sql.NullString
+			decisionUntil sql.NullString
+		)
+		if err := rows.Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
+			&parkedAt, &decisionUntil, &resumeQueue); err != nil {
+			return nil, fmt.Errorf("subagentbatch: read all turn suspension row: %w", err)
+		}
+		record.ObligationIDs = decodeJSONIDList(obligations)
+		record.ResumeQueue = decodeJSONIDList(resumeQueue)
+		record.ParkedAt = parseBatchTime(parkedAt.String)
+		if until := parseNullableBatchTime(decisionUntil); until != nil {
+			record.DecisionWindowUntil = *until
+		}
+		out = append(out, &record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("subagentbatch: iterate all turn suspensions: %w", err)
+	}
+	return out, nil
+}
+
 // ClearTurnSuspension removes a parked-turn record once the turn resumes or is
 // abandoned. Removing an absent record is not an error.
 func (s *sqliteBatchStore) ClearTurnSuspension(ctx context.Context, sessionID, turnID string) error {

@@ -91,6 +91,13 @@ type BatchStore interface {
 	// to report the durable waiting state.
 	ListTurnSuspensions(ctx context.Context, sessionID string) ([]*TurnSuspension, error)
 
+	// ListAllTurnSuspensions returns every parked-turn record in the store,
+	// newest parked first. The periodic settlement sweep (self-heal layer 3,
+	// 真机 2026-10-10) needs a store-wide view: an orphaned record whose
+	// terminal wake and next run both went missing is otherwise never visited
+	// again, and the session keeps rendering "Waiting for subagents" forever.
+	ListAllTurnSuspensions(ctx context.Context) ([]*TurnSuspension, error)
+
 	// ClearTurnSuspension removes a parked-turn record (resume or abort).
 	ClearTurnSuspension(ctx context.Context, sessionID, turnID string) error
 

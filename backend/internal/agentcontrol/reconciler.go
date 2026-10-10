@@ -69,6 +69,15 @@ type Reconciler struct {
 	// owns, then reports (and, in enforce mode, reclaims) orphan directories
 	// and stale git registrations. A nil hook keeps the pass unchanged.
 	Worktrees func(ctx context.Context, records []AgentRecord, enforce bool, now time.Time) (WorktreeReconcileOutcome, error)
+	// Sweep is the host-side half of parked-turn settlement (self-heal layer 3,
+	// 2026-10-10): the host clears durable turn-suspension records whose
+	// obligations are all terminal — including orphans left behind when the
+	// terminal wake and the next run both went missing. It runs in both modes:
+	// clearing a provably settled record is bookkeeping repair, not a
+	// destructive action, and gating it behind enforce would leave the sticky
+	// "Waiting for subagents" state in the default configuration. A nil hook
+	// keeps the pass unchanged and a failure is recorded, never fatal.
+	Sweep func(ctx context.Context, now time.Time) (TurnSweepOutcome, error)
 
 	mu      sync.Mutex
 	running bool
@@ -89,6 +98,19 @@ type WorktreeReconcileOutcome struct {
 	ReclaimedDirs int  `json:"reclaimed_dirs,omitempty"`
 	ReclaimedGit  int  `json:"reclaimed_git,omitempty"`
 	Failed        int  `json:"failed,omitempty"`
+}
+
+// TurnSweepOutcome is the host-side summary of one parked-turn settlement
+// sweep (self-heal layer 3): every durable turn-suspension record whose
+// obligations are all terminal is cleared, including orphans whose terminal
+// wake and next run both went missing (真机 2026-10-10：批次全部成功、父会话
+// 数小时停在 "Waiting for subagents"). Supported=false means the host has no
+// durable batch control plane and the pass does nothing.
+type TurnSweepOutcome struct {
+	Supported bool `json:"supported,omitempty"`
+	Scanned   int  `json:"scanned,omitempty"`
+	Cleared   int  `json:"cleared,omitempty"`
+	Failed    int  `json:"failed,omitempty"`
 }
 
 // IntervalOrDefault returns the effective cadence.
@@ -182,6 +204,7 @@ func (r *Reconciler) runPass(ctx context.Context) (ReconcileReport, error) {
 	r.runPurgePass(ctx, &report)
 	r.runReclaimPass(ctx, &report, records)
 	r.runWorktreePass(ctx, &report, records)
+	r.runSweepPass(ctx, &report)
 	return report, nil
 }
 
@@ -243,6 +266,24 @@ func (r *Reconciler) runPurgePass(ctx context.Context, report *ReconcileReport) 
 	case strings.TrimSpace(outcome.FirstError) != "":
 		report.PurgeError = strings.TrimSpace(outcome.FirstError)
 	}
+}
+
+// runSweepPass folds the host parked-turn settlement sweep into the report
+// (self-heal layer 3). Unlike the other host passes it is not mode-gated: a
+// durable turn-suspension record whose obligations are all proven terminal is
+// stale bookkeeping, and leaving it in place keeps the session rendering
+// "Waiting for subagents" (真机 2026-10-10，默认 observe 配置). A failure is
+// recorded so the operator can see it, but it never fails the pass.
+func (r *Reconciler) runSweepPass(ctx context.Context, report *ReconcileReport) {
+	if r == nil || r.Sweep == nil || report == nil {
+		return
+	}
+	outcome, err := r.Sweep(ctx, time.Now().UTC())
+	if err != nil {
+		report.SweepError = err.Error()
+		return
+	}
+	report.Sweep = outcome
 }
 
 // RunLoop blocks until ctx is done: one immediate pass (so drift left by an

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestSQLiteBatchStoreIsDurable pins the I9 capability probe (§6.13): only an
@@ -156,4 +158,38 @@ func TestSQLiteBatchStoreTurnSuspensionRejectsIncompleteRecord(t *testing.T) {
 	if _, ok, err := store.GetTurnSuspension(ctx, "", "turn-1"); err != nil || ok {
 		t.Fatalf("blank session must read as absent, got (%v, %v)", ok, err)
 	}
+}
+
+// TestSQLiteBatchStoreListAllTurnSuspensions pins the store-wide read the
+// periodic settlement sweep depends on: records of every session must be
+// visible from one call, because the sweep exists for sessions whose terminal
+// wake never arrived and has no session id to enumerate with.
+func TestSQLiteBatchStoreListAllTurnSuspensions(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteBatchStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "sweep.db")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, record := range []*TurnSuspension{
+		{TurnID: "turn-a", SessionID: "sess-a", RootScopeID: "sess-a", ObligationIDs: []string{"batch-1", "task-1"}},
+		{TurnID: "turn-b", SessionID: "sess-a", RootScopeID: "sess-a", ObligationIDs: []string{"batch-2"}},
+		{TurnID: "turn-c", SessionID: "sess-b", RootScopeID: "sess-b", ObligationIDs: []string{"batch-3"}},
+	} {
+		require.NoError(t, store.ParkTurnSuspension(ctx, record))
+	}
+
+	oneSession, err := store.ListTurnSuspensions(ctx, "sess-a")
+	require.NoError(t, err)
+	require.Len(t, oneSession, 2, "the per-session read keeps its scope")
+
+	all, err := store.ListAllTurnSuspensions(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 3, "the sweep read must span sessions")
+	sessions := make(map[string]string, len(all))
+	for _, record := range all {
+		sessions[record.TurnID] = record.SessionID
+	}
+	require.Equal(t, "sess-a", sessions["turn-a"])
+	require.Equal(t, "sess-a", sessions["turn-b"])
+	require.Equal(t, "sess-b", sessions["turn-c"])
 }

@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
@@ -307,4 +309,99 @@ func (h *Handler) EnableDurableSubagentBatches(dir string) (io.Closer, error) {
 	h.StartSubagentBatchRecovery()
 	closer, _ := store.(io.Closer)
 	return closer, nil
+}
+
+// sweepSettledParkedTurns 是 §6.12 挂起回合的第三层自愈（与 CLI
+// chat_actor_reconcile.go 同口径）：跟随 P2-9 对账节拍扫描 durable 账本，把义务
+// 已全终态的挂起记录清掉——包括「终态 wake 与下一个 run 双缺」的孤儿记录，
+// runtime-server 的父会话否则会永久渲染挂起态。只清可证明结清的记录（谓词与
+// run 边界共用）；清理前先排结算 wake 并尝试投递（父会话可运行时消费未读批次
+// 汇报），投递失败也继续清账并补发 turn.resumed。
+func (h *Handler) sweepSettledParkedTurns(ctx context.Context, _ time.Time) (agentcontrol.TurnSweepOutcome, error) {
+	outcome := agentcontrol.TurnSweepOutcome{}
+	if h == nil {
+		return outcome, nil
+	}
+	// 探测而不懒加载：周期清扫不该为一个空账本新建库（与 wait 账本判读同口径）。
+	store := h.peekSubagentBatchStore()
+	// 不再按 IsDurable 过滤：Park 本身就要求 durable，非 durable store 不可能
+	// 持有挂起记录，扫描自然是 no-op；按它过滤只会让共享内存库的宿主静默跳过。
+	if store == nil {
+		return outcome, nil
+	}
+	outcome.Supported = true
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sweepCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	records, err := store.ListAllTurnSuspensions(sweepCtx)
+	if err != nil {
+		return outcome, err
+	}
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		outcome.Scanned++
+		settled, err := subagentbatch.TurnObligationsSettledWithTeams(
+			sweepCtx,
+			store,
+			record,
+			h.agentSessionObligationResolver(),
+			h.teamObligationResolver(),
+		)
+		if err != nil || !settled {
+			continue
+		}
+		rootScopeID := strings.TrimSpace(record.RootScopeID)
+		if rootScopeID == "" {
+			rootScopeID = strings.TrimSpace(record.SessionID)
+		}
+		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+			sweepCtx,
+			store,
+			h.agentSessionObligationResolver(),
+			h.teamObligationResolver(),
+			h.getSupervisionWakeScheduler(),
+			record.SessionID,
+			rootScopeID,
+		)
+		if err := h.drainSupervisedParentWake(sweepCtx, rootScopeID, record.SessionID); err != nil {
+			// 父忙/预算用尽是 durable 控制面的正常结果；清扫继续。
+			_ = err
+		}
+		if err := store.ClearTurnSuspension(sweepCtx, record.SessionID, record.TurnID); err != nil {
+			outcome.Failed++
+			continue
+		}
+		outcome.Cleared++
+		h.publishParkedTurnSettledResume(record)
+	}
+	return outcome, nil
+}
+
+// publishParkedTurnSettledResume 与 CLI 宿主同名助手一致：复刻 run 边界的非
+// wake 闭合事件，让只依赖 turn.resumed 清理挂起态的消费者（Web SSE）在清扫路径
+// 同样收敛；载荷字段与 settleParkedTurnOnRunEnd 对齐，另加 sweep=true 便于审计。
+func (h *Handler) publishParkedTurnSettledResume(record *subagentbatch.TurnSuspension) {
+	if h == nil || record == nil {
+		return
+	}
+	bus := h.getRuntimeEventBus()
+	if bus == nil {
+		return
+	}
+	bus.Publish(runtimeevents.Event{
+		Type:      runtimeevents.EventTurnResumed,
+		SessionID: record.SessionID,
+		Payload: map[string]interface{}{
+			"turn_id":          record.TurnID,
+			"session_id":       record.SessionID,
+			"trigger":          runtimeevents.TurnResumedTriggerSettled,
+			"settled":          true,
+			"obligation_count": len(record.ObligationIDs),
+			"sweep":            true,
+		},
+	})
 }
