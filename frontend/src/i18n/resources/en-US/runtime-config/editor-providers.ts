@@ -197,6 +197,7 @@ export const enRuntimeConfigEditorProviders = {
       editor: {
         modelCount: "{{visible}} / {{total}} models",
         modelCountAll: "{{total}} models",
+        configuredCount: "{{configured}} / {{total}} configured",
         filterPlaceholder: "Filter models…",
         addPlaceholder:
           "Enter model IDs; press Enter or click Add (multiple IDs can be pasted)",
@@ -211,6 +212,7 @@ export const enRuntimeConfigEditorProviders = {
         restored: "Restored {{model}}",
         empty: "Add models first, then configure capabilities per model.",
         emptyFiltered: "No models match \"{{filter}}\"",
+        clearFilter: "Clear filter",
         selectHint: "Click a model on the left to open its capability panel",
         defaultBadge: "default",
         unconfiguredBadge: "unconfigured",

@@ -2,13 +2,14 @@
  * 模型能力编辑器（列表 + 详情面板）——参照 aicli micro web client 的模型编辑器。
  *
  *   * 左侧列表：过滤、逐行摘要 chip、手动添加（支持一次粘贴多个）、移除；
+ *   * 列表支持键盘导航：↑/↓/Home/End 移动焦点、Enter 打开（roving tabindex）；
  *   * 右侧面板：单模型能力详情（ProviderModelDetailPanel）；
  *   * 移除带撤销，避免误点 × 丢掉已填配置；
  *   * 组件受控：所有变更通过 onChange 回写父级草稿，自身只保留选择 / 过滤 /
  *     提示等瞬态 UI 状态。
  */
 
-import { useMemo, useState } from "react";
+import { type KeyboardEvent, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -21,12 +22,9 @@ import {
   type ProviderModelDraft,
   splitProviderModelIDInput,
 } from "./model-capability-draft";
-import {
-  formatTokenCount,
-  summarizeProviderModelDraft,
-  type ProviderModelDraftSummary,
-} from "./model-capability-summary";
+import { summarizeProviderModelDraft } from "./model-capability-summary";
 import { ProviderModelDetailPanel } from "./provider-model-detail-panel";
+import { ModelListRow } from "./provider-model-list-row";
 
 type ProviderModelEditorProps = {
   defaultModel?: string;
@@ -62,6 +60,9 @@ export function ProviderModelEditor({
   const [lastRemoved, setLastRemoved] = useState<RemovedModelRecord | null>(
     null,
   );
+  // 列表键盘导航的 roving tabindex：只有「当前行」在 Tab 顺序里，方向键换行。
+  const [rovingModel, setRovingModel] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   const orderedModels = useMemo(() => normalizeProviderModelIDs(models), [models]);
   const visibleModels = useMemo(() => {
@@ -78,6 +79,71 @@ export function ProviderModelEditor({
     selectedModel && orderedModels.includes(selectedModel)
       ? selectedModel
       : null;
+
+  const configuredCount = useMemo(
+    () =>
+      orderedModels.filter((model) => {
+        const draft = drafts[model];
+        return draft ? hasConfiguredCapability(draft) : false;
+      }).length,
+    [drafts, orderedModels],
+  );
+
+  // 过滤后原 roving 行可能不可见：回退到当前选中行或首个可见行。
+  const tabbableModel =
+    rovingModel && visibleModels.includes(rovingModel)
+      ? rovingModel
+      : (activeModel ?? visibleModels[0] ?? null);
+
+  function handleListKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const keys = ["ArrowDown", "ArrowUp", "Home", "End", "Enter"];
+    if (!keys.includes(event.key)) {
+      return;
+    }
+    const rows = listRef.current
+      ? Array.from(
+          listRef.current.querySelectorAll<HTMLElement>("[data-model-row]"),
+        )
+      : [];
+    if (rows.length === 0) {
+      return;
+    }
+    const currentRow = document.activeElement?.closest("[data-model-row]");
+    const currentIndex = currentRow
+      ? rows.indexOf(currentRow as HTMLElement)
+      : -1;
+    if (currentIndex < 0) {
+      return;
+    }
+    if (event.key === "Enter") {
+      // 只接管「选中按钮」上的 Enter：移除按钮保持原生 click 语义。
+      if (
+        !(
+          event.target instanceof HTMLButtonElement &&
+          event.target.dataset.modelSelect === "true"
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.target.click();
+      return;
+    }
+    event.preventDefault();
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? rows.length - 1
+          : event.key === "ArrowDown"
+            ? Math.min(currentIndex + 1, rows.length - 1)
+            : Math.max(currentIndex - 1, 0);
+    const nextRow = rows[nextIndex];
+    setRovingModel(nextRow.dataset.modelRow ?? null);
+    nextRow
+      .querySelector<HTMLButtonElement>("button[data-model-select]")
+      ?.focus();
+  }
 
   function commit(nextModels: string[], nextDrafts: Record<string, ProviderModelDraft>) {
     onChange({ models: nextModels, drafts: nextDrafts });
@@ -184,17 +250,34 @@ export function ProviderModelEditor({
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-xs text-muted-foreground">
-          {orderedModels.length > 0
-            ? visibleModels.length === orderedModels.length
-              ? t("editor.providers.models.editor.modelCountAll", {
-                  total: String(orderedModels.length),
-                })
-              : t("editor.providers.models.editor.modelCount", {
-                  total: String(orderedModels.length),
-                  visible: String(visibleModels.length),
-                })
-            : ""}
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span>
+            {orderedModels.length > 0
+              ? visibleModels.length === orderedModels.length
+                ? t("editor.providers.models.editor.modelCountAll", {
+                    total: String(orderedModels.length),
+                  })
+                : t("editor.providers.models.editor.modelCount", {
+                    total: String(orderedModels.length),
+                    visible: String(visibleModels.length),
+                  })
+              : ""}
+          </span>
+          {orderedModels.length > 0 ? (
+            <span
+              className={cn(
+                "rounded-chip border px-1.5 py-0.5 app-text-10",
+                configuredCount > 0
+                  ? "border-accent-primary-border text-accent-primary"
+                  : "border-border text-muted-foreground",
+              )}
+            >
+              {t("editor.providers.models.editor.configuredCount", {
+                configured: String(configuredCount),
+                total: String(orderedModels.length),
+              })}
+            </span>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <input
@@ -243,16 +326,25 @@ export function ProviderModelEditor({
       ) : null}
 
       <div className="grid gap-2 lg:grid-cols-[minmax(15rem,20rem)_minmax(0,1fr)]">
-        <div className="max-h-[30rem] space-y-1.5 overflow-y-auto rounded-card border border-border bg-surface-softer p-2">
+        <div
+          className="max-h-[30rem] space-y-1.5 overflow-y-auto rounded-card border border-border bg-surface-softer p-2"
+          ref={listRef}
+          onKeyDown={handleListKeyDown}
+        >
           {orderedModels.length === 0 ? (
-            <div className="px-1 py-4 text-center text-xs text-muted-foreground">
+            <div className="px-1 py-6 text-center text-xs text-muted-foreground">
               {emptyHint ?? t("editor.providers.models.editor.empty")}
             </div>
           ) : visibleModels.length === 0 ? (
-            <div className="px-1 py-4 text-center text-xs text-muted-foreground">
-              {t("editor.providers.models.editor.emptyFiltered", {
-                filter: filter.trim(),
-              })}
+            <div className="flex flex-col items-center gap-1.5 px-1 py-5 text-center text-xs text-muted-foreground">
+              <span>
+                {t("editor.providers.models.editor.emptyFiltered", {
+                  filter: filter.trim(),
+                })}
+              </span>
+              <Button size="sm" variant="ghost" onClick={() => setFilter("")}>
+                {t("editor.providers.models.editor.clearFilter")}
+              </Button>
             </div>
           ) : (
             visibleModels.map((model) => (
@@ -268,6 +360,8 @@ export function ProviderModelEditor({
                 summary={summarizeProviderModelDraft(
                   drafts[model] ?? emptyProviderModelDraft(),
                 )}
+                tabIndex={model === tabbableModel ? 0 : -1}
+                onFocus={() => setRovingModel(model)}
                 onRemove={() => handleRemove(model)}
                 onSelect={() => {
                   setNotice(null);
@@ -293,191 +387,6 @@ export function ProviderModelEditor({
         </div>
       </div>
     </div>
-  );
-}
-
-function ModelListRow({
-  active,
-  configured,
-  defaultModel,
-  disabled,
-  model,
-  onRemove,
-  onSelect,
-  summary,
-}: {
-  active: boolean;
-  configured: boolean;
-  defaultModel: boolean;
-  disabled: boolean;
-  model: string;
-  onRemove: () => void;
-  onSelect: () => void;
-  summary: ProviderModelDraftSummary;
-}) {
-  const { t } = useTranslation("runtimeConfig");
-  return (
-    <div
-      className={cn(
-        "flex items-stretch rounded-card border transition-colors",
-        active
-          ? "border-accent-primary-border bg-accent-primary-soft"
-          : "border-border bg-surface-solid hover:border-accent-primary-border",
-      )}
-    >
-      <button
-        type="button"
-        className="min-w-0 flex-1 px-2 py-1.5 text-left"
-        aria-pressed={active}
-        onClick={onSelect}
-      >
-        <span className="flex items-center gap-1.5">
-          <span
-            className="min-w-0 truncate font-mono text-xs text-foreground"
-            title={model}
-          >
-            {model}
-          </span>
-          {defaultModel ? (
-            <span className="shrink-0 rounded-chip border border-accent-primary-border px-1.5 py-0.5 app-text-10 text-accent-primary">
-              {t("editor.providers.models.editor.defaultBadge")}
-            </span>
-          ) : configured ? null : (
-            <span className="shrink-0 rounded-chip border border-border px-1.5 py-0.5 app-text-10 text-muted-foreground">
-              {t("editor.providers.models.editor.unconfiguredBadge")}
-            </span>
-          )}
-        </span>
-        <span className="mt-1 flex flex-wrap gap-1">
-          <SummaryChips summary={summary} />
-        </span>
-      </button>
-      {defaultModel ? (
-        <span
-          className="grid w-7 place-items-center text-muted-foreground"
-          title={t("editor.providers.models.editor.pinnedHint")}
-        >
-          ·
-        </span>
-      ) : (
-        <button
-          type="button"
-          className="grid w-7 place-items-center rounded-r-card text-muted-foreground transition hover:bg-surface-soft hover:text-foreground disabled:opacity-40"
-          disabled={disabled}
-          title={t("editor.providers.models.editor.removeTitle", { model })}
-          aria-label={t("editor.providers.models.editor.removeTitle", { model })}
-          onClick={onRemove}
-        >
-          ×
-        </button>
-      )}
-    </div>
-  );
-}
-
-function SummaryChips({ summary }: { summary: ProviderModelDraftSummary }) {
-  const { t } = useTranslation("runtimeConfig");
-  const chips: Array<{ key: string; label: string; highlight?: boolean }> = [];
-  if (summary.maxContextTokens > 0) {
-    chips.push({
-      key: "context",
-      label: `ctx ${formatTokenCount(summary.maxContextTokens)}`,
-    });
-  }
-  if (summary.maxTokens > 0) {
-    chips.push({
-      key: "max-tokens",
-      label: `out ${formatTokenCount(summary.maxTokens)}`,
-    });
-  }
-  if (summary.reasoningModel) {
-    chips.push({ key: "reasoning", label: "reasoning", highlight: true });
-  }
-  if (summary.reasoningEffortCount > 0) {
-    chips.push({
-      key: "efforts",
-      label: t("editor.providers.models.editor.chipEfforts", {
-        count: summary.reasoningEffortCount,
-      }),
-    });
-  }
-  if (summary.defaultReasoningEffort) {
-    chips.push({
-      key: "default-effort",
-      label: t("editor.providers.models.editor.chipDefaultEffort", {
-        effort: summary.defaultReasoningEffort,
-      }),
-    });
-  }
-  if (summary.autoCompactTokenLimit > 0) {
-    chips.push({
-      key: "compact-limit",
-      label: t("editor.providers.models.editor.chipCompact", {
-        tokens: formatTokenCount(summary.autoCompactTokenLimit),
-      }),
-    });
-  }
-  if (summary.autoCompactMode) {
-    chips.push({
-      key: "compact-mode",
-      label: summary.autoCompactMode,
-    });
-  }
-  if (summary.supportsRemoteCompact) {
-    chips.push({
-      key: "remote-compact",
-      label: t("editor.providers.models.editor.chipRemoteCompact"),
-    });
-  }
-  if (summary.replayReasoningContent === true) {
-    chips.push({
-      key: "replay-on",
-      label: t("editor.providers.models.editor.chipReplayOn"),
-    });
-  } else if (summary.replayReasoningContent === false) {
-    chips.push({
-      key: "replay-off",
-      label: t("editor.providers.models.editor.chipReplayOff"),
-    });
-  }
-  if (summary.inputModalities.length > 0) {
-    chips.push({
-      key: "modalities",
-      label: summary.inputModalities.join("/"),
-    });
-  }
-  if (summary.imageGeneration) {
-    chips.push({
-      key: "image-generation",
-      label: t("editor.providers.models.editor.chipImageGeneration"),
-      highlight: true,
-    });
-  }
-  if (summary.imagesGenerationsApi) {
-    chips.push({
-      key: "images-api",
-      label: t("editor.providers.models.editor.chipImagesApi"),
-    });
-  }
-  if (chips.length === 0) {
-    return null;
-  }
-  return (
-    <>
-      {chips.map((chip) => (
-        <span
-          key={chip.key}
-          className={cn(
-            "rounded-chip border px-1.5 py-0.5 app-text-10",
-            chip.highlight
-              ? "border-accent-primary-border bg-accent-primary-soft text-accent-primary"
-              : "border-border bg-surface-softer text-muted-foreground",
-          )}
-        >
-          {chip.label}
-        </span>
-      ))}
-    </>
   );
 }
 

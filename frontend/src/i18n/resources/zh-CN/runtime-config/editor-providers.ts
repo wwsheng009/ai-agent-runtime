@@ -190,6 +190,7 @@ export const zhRuntimeConfigEditorProviders = {
       editor: {
         modelCount: "{{visible}} / {{total}} 个模型",
         modelCountAll: "{{total}} 个模型",
+        configuredCount: "已配置 {{configured}} / {{total}}",
         filterPlaceholder: "过滤模型…",
         addPlaceholder: "输入模型 ID，回车或点击添加（支持一次粘贴多个）",
         add: "添加",
@@ -203,6 +204,7 @@ export const zhRuntimeConfigEditorProviders = {
         restored: "已恢复 {{model}}",
         empty: "先添加模型，再逐模型配置能力。",
         emptyFiltered: "没有匹配「{{filter}}」的模型",
+        clearFilter: "清除过滤",
         selectHint: "点击左侧任一模型打开能力面板",
         defaultBadge: "默认模型",
         unconfiguredBadge: "未配置",

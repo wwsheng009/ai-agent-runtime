@@ -38,8 +38,9 @@ export function ProviderModelDetailPanel({
     onChange({ ...draft, ...patch });
 
   return (
-    <div className="rounded-card border border-border bg-surface-softer">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+    <div className="max-h-[30rem] overflow-y-auto rounded-card border border-border bg-surface-softer">
+      {/* 面板内部滚动时头部吸顶：长面板里模型名与配置路径始终可见。 */}
+      <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-softer px-3 py-2.5">
         <div className="min-w-0">
           <div className="truncate font-mono text-sm font-semibold text-foreground" title={model}>
             {model}

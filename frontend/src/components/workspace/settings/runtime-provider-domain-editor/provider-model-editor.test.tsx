@@ -115,6 +115,13 @@ describe("ProviderModelEditor", () => {
     expect(container.textContent).toContain(
       t("editor.providers.models.editor.defaultBadge"),
     );
+    // 列表头摘要：已配置计数与「未配置」行弱化配套（不改旧文案语义）。
+    expect(container.textContent).toContain(
+      t("editor.providers.models.editor.configuredCount", {
+        configured: "1",
+        total: "2",
+      }),
+    );
     // 默认模型固定：不提供移除按钮。
     expect(
       findButtonByAriaLabel(
@@ -244,5 +251,65 @@ describe("ProviderModelEditor", () => {
     );
     expect(imageChip?.getAttribute("aria-pressed")).toBe("true");
     expect(findModelRow(container, "o3")?.textContent).toContain("image");
+  });
+
+  it("navigates model rows with arrow keys and opens with Enter", () => {
+    act(() => root?.render(<Harness models={["gpt-4o", "o3", "claude"]} />));
+
+    // roving tabindex：只有当前行在 Tab 顺序里。
+    expect(findModelRow(container, "gpt-4o")?.getAttribute("tabindex")).toBe("0");
+    expect(findModelRow(container, "o3")?.getAttribute("tabindex")).toBe("-1");
+
+    const first = findModelRow(container, "gpt-4o");
+    act(() => first?.focus());
+    act(() =>
+      first?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+      ),
+    );
+    const afterDown = document.activeElement as HTMLElement | null;
+    expect(afterDown?.textContent).toContain("o3");
+
+    act(() =>
+      afterDown?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "End", bubbles: true }),
+      ),
+    );
+    const afterEnd = document.activeElement as HTMLElement | null;
+    expect(afterEnd?.textContent).toContain("claude");
+
+    act(() =>
+      afterEnd?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      ),
+    );
+    // Enter 打开详情面板：面板头显示该模型对应的配置路径。
+    expect(container.textContent).toContain(
+      t("editor.providers.models.editor.panelHint", {
+        key: "providers.items.<name>.model_capabilities.claude",
+      }),
+    );
+  });
+
+  it("clears the filter from the zero-hit empty state", () => {
+    act(() => root?.render(<Harness models={["o3"]} />));
+
+    const filterInput = Array.from(container.querySelectorAll("input")).find(
+      (input) =>
+        input.getAttribute("placeholder") ===
+        t("editor.providers.models.editor.filterPlaceholder"),
+    ) as HTMLInputElement;
+    act(() => setInputValue(filterInput, "zzz"));
+    expect(container.textContent).toContain(
+      t("editor.providers.models.editor.emptyFiltered", { filter: "zzz" }),
+    );
+
+    act(() =>
+      findButton(
+        container,
+        t("editor.providers.models.editor.clearFilter"),
+      )?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    expect(findModelRow(container, "o3")).toBeTruthy();
   });
 });
