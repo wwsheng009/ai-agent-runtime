@@ -66,6 +66,7 @@ func applyStreamCommand(session *ChatSession, command string) bool {
 		session.Stream = req.Value
 	}
 
+	syncChatSessionActorStreaming(session)
 	warnIfChatSessionSyncFails(session, "toggle stream", syncRuntimeSessionFromChat(session))
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
@@ -93,6 +94,7 @@ func applyStreamShortcut(session *ChatSession, value bool) bool {
 	}
 	previous := session.Stream
 	session.Stream = value
+	syncChatSessionActorStreaming(session)
 	warnIfChatSessionSyncFails(session, "toggle stream", syncRuntimeSessionFromChat(session))
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
@@ -106,6 +108,27 @@ func applyStreamShortcut(session *ChatSession, value bool) bool {
 		persistStreamCommandPreference(session)
 	}
 	return false
+}
+
+// syncChatSessionActorStreaming 把 /stream 的切换结果推送给当前会话已存在的
+// SessionActor。actor 的 LLM 请求读的是构建期固化的 agentConfig.Options["stream"]
+// （buildLocalChatAgent 写入，internal/agent loop 每次调用前读取），翻转
+// session.Stream 本身不会影响已建 actor，必须像 Web 注入路径
+// （injectChatWebPrompt）一样显式调用 EnableStreaming/DisableStreaming。
+// actor 尚未创建时无需处理：后续 buildLocalChatAgent 构建期会读到新值。
+func syncChatSessionActorStreaming(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	actor := chatWebSessionActor(session)
+	if actor == nil {
+		return
+	}
+	if session.Stream {
+		actor.EnableStreaming()
+	} else {
+		actor.DisableStreaming()
+	}
 }
 
 func printStreamCommandStatus(session *ChatSession) {

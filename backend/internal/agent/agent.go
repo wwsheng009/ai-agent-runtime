@@ -226,6 +226,24 @@ func (a *Agent) EnableStreaming() {
 	a.config.Options["stream"] = true
 }
 
+// DisableStreaming 与 EnableStreaming 对称：运行中关闭 LLM 流式输出，回到
+// 一次性非流式响应。幂等且线程安全；Options 尚未创建时说明从未开过流式，
+// 无需为关闭动作凭空建 map。
+func (a *Agent) DisableStreaming() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.config == nil || a.config.Options == nil {
+		return
+	}
+	if v, ok := a.config.Options["stream"]; ok && !boolValue(v) {
+		return
+	}
+	a.config.Options["stream"] = false
+}
+
 // GetState 获取状态
 func (a *Agent) GetState() AgentState {
 	a.mu.RLock()

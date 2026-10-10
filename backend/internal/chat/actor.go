@@ -875,6 +875,17 @@ func (a *SessionActor) EnableStreaming() {
 	}
 }
 
+// DisableStreaming 与 EnableStreaming 对称：运行中关闭此会话的流式输出，
+// 后续 LLM 调用回到一次性非流式响应。幂等。
+func (a *SessionActor) DisableStreaming() {
+	if a == nil {
+		return
+	}
+	if a.agent != nil {
+		a.agent.DisableStreaming()
+	}
+}
+
 // DeliverMailboxMessage notifies the actor of a mailbox message.
 func (a *SessionActor) DeliverMailboxMessage(ctx context.Context, message team.MailMessage) error {
 	if a == nil {

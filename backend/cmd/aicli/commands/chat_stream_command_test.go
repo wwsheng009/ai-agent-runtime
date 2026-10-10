@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimeagent "github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
 func newStreamCommandSession(t *testing.T) (*ChatSession, string) {
@@ -222,5 +225,77 @@ func TestApplyStreamShortcut_PersistsAndUpdatesSessionConfig(t *testing.T) {
 	stored = loadStreamPreference(t, cfgPath)
 	if stored == nil || *stored != false {
 		t.Fatalf("expected persisted stream=false, got %+v", stored)
+	}
+}
+
+// newStreamCommandSessionWithActor 在 newStreamCommandSession 基础上挂一个本地
+// runtime host + hub，actor 由工厂创建并捕获其 agent，供断言推送结果。
+func newStreamCommandSessionWithActor(t *testing.T, actorName string) (*ChatSession, *runtimeagent.Agent) {
+	t.Helper()
+	session, _ := newStreamCommandSession(t)
+	session.RuntimeSession = &runtimechat.Session{ID: "session-1"}
+
+	var testAgent *runtimeagent.Agent
+	hub := runtimechat.NewSessionHub(func(sessionID string) (*runtimechat.SessionActor, error) {
+		testAgent = runtimeagent.NewAgent(&runtimeagent.Config{Name: actorName}, nil)
+		return runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{Agent: testAgent})
+	})
+	t.Cleanup(hub.StopAll)
+	session.LocalRuntimeHost = &localChatRuntimeHost{SessionHub: hub}
+
+	// 会话启动期 actor 已预热创建，此时 stream 尚未开启。
+	if _, err := chatActorForSession(context.Background(), session); err != nil {
+		t.Fatalf("create session actor: %v", err)
+	}
+	if testAgent == nil {
+		t.Fatal("expected hub factory to create agent")
+	}
+	return session, testAgent
+}
+
+func streamAgentOptionEnabled(testAgent *runtimeagent.Agent) bool {
+	if testAgent == nil {
+		return false
+	}
+	cfg := testAgent.GetConfig()
+	if cfg == nil {
+		return false
+	}
+	enabled, _ := cfg.Options["stream"].(bool)
+	return enabled
+}
+
+// TestApplyStreamCommand_PushesToLiveSessionActor 锁定 /stream 对已建
+// SessionActor 的实时推送：actor 的 LLM 请求读的是构建期固化的
+// agentConfig.Options["stream"]，只翻转 session.Stream 不推送 actor 时命令对
+// 后续 LLM 请求不生效（TUI 实测回归：/stream on 后请求仍是 stream=false）。
+func TestApplyStreamCommand_PushesToLiveSessionActor(t *testing.T) {
+	session, testAgent := newStreamCommandSessionWithActor(t, "stream-toggle-legacy-test")
+
+	applyStreamCommand(session, "/stream on")
+	if !streamAgentOptionEnabled(testAgent) {
+		t.Fatalf("expected agent stream option enabled after /stream on, got %#v", testAgent.GetConfig().Options)
+	}
+
+	applyStreamCommand(session, "/stream off")
+	if streamAgentOptionEnabled(testAgent) {
+		t.Fatalf("expected agent stream option disabled after /stream off, got %#v", testAgent.GetConfig().Options)
+	}
+}
+
+// TestExecuteStructuredStreamCommand_PushesToLiveSessionActor 覆盖统一渲染路径
+// 的 /stream 与 /s、/n 快捷形式：同样的 actor 推送约束。
+func TestExecuteStructuredStreamCommand_PushesToLiveSessionActor(t *testing.T) {
+	session, testAgent := newStreamCommandSessionWithActor(t, "stream-toggle-structured-test")
+
+	executeStructuredStreamCommand(session, "/stream on", nil)
+	if !streamAgentOptionEnabled(testAgent) {
+		t.Fatalf("expected agent stream option enabled after structured /stream on, got %#v", testAgent.GetConfig().Options)
+	}
+
+	forcedOff := false
+	executeStructuredStreamCommand(session, "/n", &forcedOff)
+	if streamAgentOptionEnabled(testAgent) {
+		t.Fatalf("expected agent stream option disabled after structured /n, got %#v", testAgent.GetConfig().Options)
 	}
 }

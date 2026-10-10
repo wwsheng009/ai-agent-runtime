@@ -1134,6 +1134,7 @@ func executeStructuredStreamCommand(session *ChatSession, command string, forced
 	} else {
 		session.Stream = req.Value
 	}
+	syncChatSessionActorStreaming(session)
 	var warnings []error
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		warnings = append(warnings, fmt.Errorf("切换 stream 后同步会话失败: %w", err))

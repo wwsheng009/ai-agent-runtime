@@ -49,6 +49,54 @@ func TestAgentEnableStreaming(t *testing.T) {
 	})
 }
 
+func TestAgentDisableStreaming(t *testing.T) {
+	t.Run("nil agent safe", func(t *testing.T) {
+		var a *Agent
+		a.DisableStreaming() // must not panic
+	})
+
+	t.Run("nil config safe", func(t *testing.T) {
+		a := &Agent{}
+		a.DisableStreaming() // must not panic
+	})
+
+	t.Run("nil options stays nil", func(t *testing.T) {
+		a := &Agent{config: &Config{}}
+		a.DisableStreaming()
+		if a.config.Options != nil {
+			t.Fatalf("expected Options to stay nil, got %#v", a.config.Options)
+		}
+	})
+
+	t.Run("clears stream option", func(t *testing.T) {
+		a := &Agent{config: &Config{Options: map[string]interface{}{"stream": true}}}
+		a.DisableStreaming()
+		v, ok := a.config.Options["stream"]
+		if !ok || boolValue(v) {
+			t.Fatalf("stream option not disabled: %#v", a.config.Options)
+		}
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		a := &Agent{config: &Config{Options: map[string]interface{}{"stream": false}}}
+		a.DisableStreaming()
+		a.DisableStreaming()
+		if boolValue(a.config.Options["stream"]) {
+			t.Fatalf("stream option flapped back on: %#v", a.config.Options)
+		}
+	})
+
+	t.Run("round trip with enable", func(t *testing.T) {
+		a := &Agent{config: &Config{}}
+		a.EnableStreaming()
+		a.DisableStreaming()
+		a.EnableStreaming()
+		if !boolValue(a.config.Options["stream"]) {
+			t.Fatalf("stream option not re-enabled: %#v", a.config.Options)
+		}
+	})
+}
+
 func TestNewAgentWithLLM_DefersWorkspaceScanUntilBuild(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := NewAgentWithLLM(&Config{
