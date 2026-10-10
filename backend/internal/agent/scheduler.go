@@ -627,6 +627,10 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		_ = childAgent.Close()
 	}()
 	childSessionID := spec.SessionID
+	// 任务级开始时刻：subagent.completed 载荷过去不带耗时，分析库
+	// usage_subagents.duration_ms 因此恒为 0（批次事件自己记的 elapsed_ms
+	// 又完全对不上）。这里取 child 真正开跑的这一刻。
+	startedAt := time.Now()
 	// Runtime binding (P1-1 / H7): the child session id is known here, before
 	// the child loop runs. Publish it now so a durable coordinator can write
 	// child_session_id back while the task is still running instead of only at
@@ -751,6 +755,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			"batch_id":            options.BatchID,
 			"error":               runErr.Error(),
 			"budget_tokens":       task.BudgetTokens,
+			"duration_ms":         elapsedMS(startedAt),
 			"parent_session_id":   options.ParentSessionID,
 			"parent_tool_call_id": options.ParentToolCallID,
 			"child_agent_name":    childConfig.Name,
@@ -846,6 +851,7 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		"batch_id":            options.BatchID,
 		"error":               report.Error,
 		"budget_tokens":       task.BudgetTokens,
+		"duration_ms":         elapsedMS(startedAt),
 		"parent_session_id":   options.ParentSessionID,
 		"parent_tool_call_id": options.ParentToolCallID,
 		"child_agent_name":    childConfig.Name,
@@ -1100,6 +1106,17 @@ func (s *SubagentScheduler) emitPatchAppliedEvents(options SubagentRunOptions, w
 func buildSubagentSessionID(taskID string) string {
 	base := firstNonEmptyString(taskID, "subagent")
 	return fmt.Sprintf("subagent_%s_%s", base, strings.ReplaceAll(uuid.NewString(), "-", ""))
+}
+
+// elapsedMS 返回从任务开跑到当前的毫秒数（下限 0）。它给
+// subagent.completed 载荷补 duration_ms，使分析库 usage_subagents.duration_ms
+// 不再恒为 0。时钟回拨不产生负耗时。
+func elapsedMS(startedAt time.Time) int64 {
+	ms := time.Since(startedAt).Milliseconds()
+	if ms < 0 {
+		return 0
+	}
+	return ms
 }
 
 func (s *SubagentScheduler) runReaderWave(ctx context.Context, options SubagentRunOptions, readers []indexedSubagentTask, results []SubagentResult, done []bool, completedByID map[string]SubagentResult) error {

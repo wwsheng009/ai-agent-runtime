@@ -119,6 +119,15 @@ func FailureCategoryFromErrorCode(code string) string {
 		return FailureCategoryToolError
 	case strings.Contains(normalized, "NOT ALLOWED BY EXECUTION POLICY") || strings.Contains(normalized, "CAPABILITY NOT ALLOWED"):
 		return FailureCategoryToolError
+	// 2026-10-02 真机：spawn_subagents 只给子代理发 tools_whitelist:["shell"]
+	// 时，子代理调用 glob/ls/grep 被 agent/loop.go 的白名单闸门拒绝，终局错误
+	// 原文是 "tool not allowed for this agent: glob; ..."。这是上一条同类的
+	// 确定性工具侧拒绝，但措辞不同，同样漏在兜底之外：ClassifyFailureCode 先把
+	// 它压成笼统的 UPSTREAM_ERROR，本函数的文本兜底又认不出这句话，于是
+	// provider_error 留下、Retryable=true、retry_advice=retry_with_changed_inputs
+	// ——重试绝不可能成功，父代理却被引导去重试。
+	case strings.Contains(normalized, "NOT ALLOWED FOR THIS AGENT"):
+		return FailureCategoryToolError
 	case strings.Contains(normalized, "UPSTREAM") || strings.Contains(normalized, "PROVIDER"):
 		return FailureCategoryProviderError
 	}
