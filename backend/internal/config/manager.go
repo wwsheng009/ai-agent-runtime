@@ -299,7 +299,11 @@ type SessionRuntimeConfig struct {
 	StoreDSN           string `yaml:"storeDSN" json:"storeDSN"`
 	DefaultPersistence string `yaml:"defaultPersistence" json:"defaultPersistence"`
 	// EventPersist 是 P1.5 事件持久化批量化的灰度配置；
-	// BatchingEnabled 默认 false（桥接保持原逐条同步路径，行为逐字节不变）。
+	// aicli 本地宿主自 2026-10 起默认启用（disable=false），批量落盘 +
+	// AsyncDispatch 保证 LLM 回调链上零同步磁盘 I/O（P0-1，见
+	// docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md）；
+	// disable=true 是显式回滚开关（回退逐条同步路径）。
+	// runtime-server 宿主仍按 batchingEnabled 逐字段生效。
 	EventPersist EventPersistConfig `yaml:"eventPersist" json:"eventPersist"`
 	// ReadPool 是 P1.7 读写双池的灰度配置；默认启用（disable=false），
 	// 回滚时置 disable=true（读回落写池，行为与拆分前逐字节一致）。
@@ -322,7 +326,11 @@ type ReadPoolConfig struct {
 // EventPersistConfig 控制「总线 → session_runtime.sqlite」桥接的批量落盘。
 // 设计基线见 docs/plan/runtime-store-event-persistence-batching-and-async-plan-20260918.md §3.5。
 type EventPersistConfig struct {
-	BatchingEnabled bool          `yaml:"batchingEnabled" json:"batchingEnabled"`
+	BatchingEnabled bool `yaml:"batchingEnabled" json:"batchingEnabled"`
+	// Disable 是 P0-1 的显式回滚开关：true 时 aicli 本地宿主关闭批量落盘，
+	// 回退逐条同步路径。默认 false=启用（与 BatchingEnabled 的灰度语义解耦：
+	// 未配置时不再视为"关闭"）。runtime-server 仍只读 BatchingEnabled。
+	Disable         bool          `yaml:"disable" json:"disable"`
 	BatchSize       int           `yaml:"batchSize" json:"batchSize"`
 	FlushInterval   time.Duration `yaml:"flushInterval" json:"flushInterval"`
 	QueueLimit      int           `yaml:"queueLimit" json:"queueLimit"`

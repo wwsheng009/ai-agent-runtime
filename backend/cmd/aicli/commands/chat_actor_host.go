@@ -1054,23 +1054,27 @@ func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentS
 
 // bindRuntimeEventPersistence 安装本地 A 通道桥（总线 → 会话事件库）。
 //
-// runtimeEventPersistSettings 读取宿主的批量落盘配置（默认关闭、逐条同步路径）。
+// runtimeEventPersistSettings 读取宿主的批量落盘配置（P0-1 起默认启用：
+// 批量 + AsyncDispatch + delta 类溢出 drop，保证 LLM 回调链零同步磁盘 I/O；
+// disable=true 显式回退逐条同步路径）。
 func (h *localChatRuntimeHost) runtimeEventPersistSettings() runtimechat.EventPersistSettings {
 	if h == nil || h.RuntimeConfig == nil {
 		return runtimechat.EventPersistSettings{}
 	}
 	cfg := h.RuntimeConfig.SessionRuntime.EventPersist
 	return runtimechat.EventPersistSettings{
-		Enabled:         cfg.BatchingEnabled,
+		Enabled:         !cfg.Disable,
 		BatchSize:       cfg.BatchSize,
 		FlushInterval:   cfg.FlushInterval,
 		QueueLimit:      cfg.QueueLimit,
 		QueueBytesLimit: cfg.QueueBytesLimit,
 		ShutdownTimeout: cfg.ShutdownTimeout,
 		FailMode:        cfg.FailMode,
-		AsyncDispatch:   cfg.AsyncDispatch,
+		AsyncDispatch:   !cfg.Disable,
 		// D3：关键事件（approval / session 终态 / 工具完成 / checkpoint）立即 flush。
 		CriticalTypes: runtimeevents.IsPersistCriticalEventType,
+		// P0-1：可重建的正文流式增量溢出丢弃，绝不反压 LLM 回调链。
+		OverflowDropTypes: runtimeevents.IsPersistStreamDeltaEventType,
 	}
 }
 

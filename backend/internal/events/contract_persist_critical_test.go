@@ -38,3 +38,32 @@ func TestPersistCriticalRegistry(t *testing.T) {
 		}
 	}
 }
+
+// P0-1（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md）：
+// 可重建的正文流式增量登记清单——批量落盘溢出时允许丢弃，其余类型保守 block。
+func TestPersistStreamDeltaRegistry(t *testing.T) {
+	for _, eventType := range []string{
+		"assistant_delta",
+		"assistant_reasoning",
+		"assistant.reasoning",
+	} {
+		if !events.IsPersistStreamDeltaEventType(eventType) {
+			t.Fatalf("%q 必须是 persist_stream_delta（正文可由终态 assistant_message 重建）", eventType)
+		}
+		if !events.IsPersistedEventType(eventType) {
+			t.Fatalf("%q 声明了 persist_stream_delta 但不在 A 通道（session_store）", eventType)
+		}
+	}
+
+	for _, eventType := range []string{
+		"assistant.image_progress",
+		"session_end",
+		"tool.completed",
+		"tool.requested",
+		"unknown.event.type",
+	} {
+		if events.IsPersistStreamDeltaEventType(eventType) {
+			t.Fatalf("%q 不应是 persist_stream_delta（不可由终态事件重建或非正文增量）", eventType)
+		}
+	}
+}

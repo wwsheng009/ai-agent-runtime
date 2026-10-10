@@ -69,6 +69,11 @@ type Contract struct {
 	// 立即触发 flush（绕过 25ms 间隔等待），把崩溃窗口压到「当前批内更早的
 	// 事件」而非「≤batchSize 条任意事件」。仅对 ChannelSessionStore 类型有意义。
 	PersistCritical bool
+	// PersistStreamDelta 表示该类型是可重建的正文流式增量：批量落盘队列溢出时
+	// 允许丢弃（drop）而不产生同步落盘背压——终态 assistant_message 已承载
+	// 完整正文，delta 行只影响 resume 重放的打字机细粒度。仅对
+	// ChannelSessionStore 类型有意义。
+	PersistStreamDelta bool
 }
 
 // runtimeEventContracts 是封闭注册表：新增 runtime 事件类型必须在此表态。
@@ -93,9 +98,11 @@ var runtimeEventContracts = []Contract{
 	{Type: "session_interrupted", Channels: ChannelSessionStore, PersistCritical: true},
 	{Type: "context_reconciled", Channels: ChannelSessionStore},
 	// 方案B：增量打字机事件落盘，供 runtime/stream 长轮询实时消费。
-	{Type: "assistant_delta", Channels: ChannelSessionStore},
-	{Type: "assistant_reasoning", Channels: ChannelSessionStore},
-	{Type: "assistant.reasoning", Channels: ChannelSessionStore},
+	// 三者均为 PersistStreamDelta：正文可由终态 assistant_message 重建，
+	// 落盘队列溢出时允许丢弃（见 IsPersistStreamDeltaEventType）。
+	{Type: "assistant_delta", Channels: ChannelSessionStore, PersistStreamDelta: true},
+	{Type: "assistant_reasoning", Channels: ChannelSessionStore, PersistStreamDelta: true},
+	{Type: "assistant.reasoning", Channels: ChannelSessionStore, PersistStreamDelta: true},
 	{Type: "assistant.image_progress", Channels: ChannelSessionStore},
 
 	// ---- A 通道：主 Agent 动态 route 治理事件（方案 §6.2；MG3 的修复）----
@@ -302,6 +309,18 @@ func IsPersistCriticalEventType(eventType string) bool {
 		return false
 	}
 	return contract.PersistCritical && contract.Channels&ChannelSessionStore != 0
+}
+
+// IsPersistStreamDeltaEventType 判断类型是否可重建的正文流式增量（P0-1，
+// docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md）：
+// 批量落盘队列溢出时允许按 drop 处理而非同步落盘，保证「LLM 回调链绝不等待
+// 磁盘」不变式。未登记类型返回 false（保守：非 delta 事件溢出仍走 block 背压）。
+func IsPersistStreamDeltaEventType(eventType string) bool {
+	contract, ok := ContractFor(eventType)
+	if !ok {
+		return false
+	}
+	return contract.PersistStreamDelta && contract.Channels&ChannelSessionStore != 0
 }
 
 // ProducerPersistedEvent 判断事件是否**已由生产者写入会话事件库**：生产者

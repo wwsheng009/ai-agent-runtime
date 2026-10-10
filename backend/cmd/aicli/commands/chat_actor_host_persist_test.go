@@ -14,6 +14,21 @@ import (
 
 // P1.5 M3 接线回归（分册 §7.9–10 的 aicli 侧）。
 
+// stubBatchStore 只满足 EventPersistBatchStore 断言，供 settings 映射单测使用。
+type stubBatchStore struct{}
+
+func (stubBatchStore) AppendEvent(context.Context, runtimeevents.Event) (int64, error) {
+	return 0, nil
+}
+
+func (stubBatchStore) AppendEvents(_ context.Context, events []runtimeevents.Event) ([]int64, error) {
+	return make([]int64, len(events)), nil
+}
+
+func (stubBatchStore) ListEvents(context.Context, string, int64, int) ([]runtimeevents.Event, error) {
+	return nil, nil
+}
+
 func newPersistBridgeTestHost(t *testing.T, enabled bool) (*localChatRuntimeHost, *runtimechat.SQLiteRuntimeStore) {
 	t.Helper()
 	store, err := runtimechat.NewSQLiteRuntimeStore(&runtimechat.RuntimeStoreConfig{
@@ -27,7 +42,8 @@ func newPersistBridgeTestHost(t *testing.T, enabled bool) (*localChatRuntimeHost
 		EventStore: store,
 		RuntimeConfig: &runtimecfg.RuntimeConfig{SessionRuntime: runtimecfg.SessionRuntimeConfig{
 			EventPersist: runtimecfg.EventPersistConfig{
-				BatchingEnabled: enabled,
+				// P0-1：批量落盘默认启用，测试用 Disable 翻转回滚开关。
+				Disable:         !enabled,
 				BatchSize:       2,
 				FlushInterval:   20 * time.Millisecond,
 				ShutdownTimeout: time.Second,
@@ -75,6 +91,34 @@ func TestLocalRuntimeEventBridgeSyncPathWhenDisabled(t *testing.T) {
 	events, err := store.ListEvents(context.Background(), "bridge-sync", 0, 0)
 	require.NoError(t, err)
 	require.Len(t, events, 1, "关闭批量时必须保持同步逐条落盘")
+}
+
+// P0-1：零值配置（未配置 eventPersist）必须默认启用批量落盘 + AsyncDispatch +
+// delta 溢出 drop 接线，保证 LLM 回调链上零同步磁盘 I/O。
+func TestLocalRuntimeEventBridgeDefaultsToBatchingEnabled(t *testing.T) {
+	host := &localChatRuntimeHost{
+		EventBus:      runtimeevents.NewBus(),
+		EventStore:    &stubBatchStore{},
+		RuntimeConfig: &runtimecfg.RuntimeConfig{},
+	}
+	settings := host.runtimeEventPersistSettings()
+	require.True(t, settings.Enabled, "零值配置必须默认启用批量落盘")
+	require.True(t, settings.AsyncDispatch, "零值配置必须默认开启 AsyncDispatch")
+	require.NotNil(t, settings.OverflowDropTypes)
+	require.True(t, settings.OverflowDropTypes("assistant_delta"))
+	require.True(t, settings.OverflowDropTypes("assistant.reasoning"))
+	require.False(t, settings.OverflowDropTypes("tool.completed"), "非 delta 类不得进入 drop 名单")
+
+	host2 := &localChatRuntimeHost{
+		EventBus:   runtimeevents.NewBus(),
+		EventStore: &stubBatchStore{},
+		RuntimeConfig: &runtimecfg.RuntimeConfig{SessionRuntime: runtimecfg.SessionRuntimeConfig{
+			EventPersist: runtimecfg.EventPersistConfig{Disable: true},
+		}},
+	}
+	settings2 := host2.runtimeEventPersistSettings()
+	require.False(t, settings2.Enabled, "disable=true 必须回退逐条同步路径")
+	require.False(t, settings2.AsyncDispatch)
 }
 
 func TestLocalRuntimeEventBridgeKeepsPersistedSeqSkipRule(t *testing.T) {

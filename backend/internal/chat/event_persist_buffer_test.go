@@ -159,6 +159,34 @@ func TestEventPersistBufferOverflowDropsOnlyWhenConfigured(t *testing.T) {
 	require.Zero(t, fake.singleCalls)
 }
 
+// P0-1：可重建的 delta 类事件溢出按 drop 处理（不产生同步落盘背压），
+// 非 delta 事件仍走 FailMode 默认 block（同步落盘、不丢）。
+func TestEventPersistBufferOverflowDropsStreamDeltaByType(t *testing.T) {
+	ctx := context.Background()
+	fake := &fakePersistStore{}
+	buffer := NewEventPersistBuffer(fake, EventPersistBufferConfig{
+		BatchSize:     10,
+		FlushInterval: time.Hour,
+		QueueLimit:    1,
+		OverflowDropTypes: func(eventType string) bool {
+			return eventType == "assistant_delta" || eventType == "assistant.reasoning"
+		},
+	})
+	t.Cleanup(func() { _ = buffer.Close(ctx) })
+
+	buffer.Enqueue(bufferTestEvent("queued"))
+	buffer.Enqueue(bufferTestEvent("assistant_delta"))
+	buffer.Enqueue(bufferTestEvent("assistant.reasoning"))
+	stats := buffer.Stats()
+	require.Equal(t, int64(2), stats.Dropped, "delta 类溢出必须丢弃计数")
+	require.Zero(t, fake.singleCalls, "delta 类溢出不得触发同步落盘")
+
+	buffer.Enqueue(bufferTestEvent("overflow"))
+	require.Equal(t, 1, fake.singleCalls, "非 delta 事件溢出仍走同步落盘兜底")
+	require.NoError(t, buffer.Close(ctx))
+	require.Equal(t, 2, fake.count(), "block 模式下非 delta 事件不得丢失")
+}
+
 func TestEventPersistBufferRetriesOnBusyAndKeepsOrder(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakePersistStore{batchErr: func(call int) error {

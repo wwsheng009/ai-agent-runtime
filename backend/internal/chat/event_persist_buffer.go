@@ -66,6 +66,10 @@ type EventPersistBufferConfig struct {
 	DispatchWaitTimeout time.Duration
 	// CriticalTypes 命中时立即触发 flush（默认 nil=无关键类型）。
 	CriticalTypes func(eventType string) bool
+	// OverflowDropTypes 命中且队列溢出时直接丢弃计数，不产生同步落盘背压
+	// （默认 nil=全部按 FailMode 处理）。用于可重建的 delta 类事件：终态
+	// assistant_message 已承载完整正文，溢出丢 delta 不影响正确性。
+	OverflowDropTypes func(eventType string) bool
 	// AsyncDispatch 开启 P2.11 语义：发布链绝不直接做磁盘 I/O；队列满时先等待
 	// worker 腾挪（DispatchWaitTimeout），超时才同步兜底（计数可见）。
 	AsyncDispatch bool
@@ -75,28 +79,30 @@ type EventPersistBufferConfig struct {
 // EventPersistSettings 是宿主配置（internal/config）到缓冲配置的中性映射，
 // 双宿主共用，避免两处字段映射漂移。
 type EventPersistSettings struct {
-	Enabled         bool
-	BatchSize       int
-	FlushInterval   time.Duration
-	QueueLimit      int
-	QueueBytesLimit int64
-	ShutdownTimeout time.Duration
-	FailMode        string
-	AsyncDispatch   bool
-	CriticalTypes   func(eventType string) bool
+	Enabled           bool
+	BatchSize         int
+	FlushInterval     time.Duration
+	QueueLimit        int
+	QueueBytesLimit   int64
+	ShutdownTimeout   time.Duration
+	FailMode          string
+	AsyncDispatch     bool
+	CriticalTypes     func(eventType string) bool
+	OverflowDropTypes func(eventType string) bool
 }
 
 // BufferConfig 把宿主设置转换为缓冲配置（零值/未知 FailMode 由归一化兜底为 block）。
 func (s EventPersistSettings) BufferConfig() EventPersistBufferConfig {
 	return EventPersistBufferConfig{
-		BatchSize:       s.BatchSize,
-		FlushInterval:   s.FlushInterval,
-		QueueLimit:      s.QueueLimit,
-		QueueBytesLimit: s.QueueBytesLimit,
-		ShutdownTimeout: s.ShutdownTimeout,
-		FailMode:        EventPersistFailMode(s.FailMode),
-		AsyncDispatch:   s.AsyncDispatch,
-		CriticalTypes:   s.CriticalTypes,
+		BatchSize:         s.BatchSize,
+		FlushInterval:     s.FlushInterval,
+		QueueLimit:        s.QueueLimit,
+		QueueBytesLimit:   s.QueueBytesLimit,
+		ShutdownTimeout:   s.ShutdownTimeout,
+		FailMode:          EventPersistFailMode(s.FailMode),
+		AsyncDispatch:     s.AsyncDispatch,
+		CriticalTypes:     s.CriticalTypes,
+		OverflowDropTypes: s.OverflowDropTypes,
 	}
 }
 
@@ -299,6 +305,13 @@ func (b *EventPersistBuffer) Enqueue(event runtimeevents.Event) {
 	outcome := b.tryEnqueue(event, eventBytes, critical)
 	switch outcome {
 	case eventPersistEnqueueOverflow:
+		// P0-1：可重建的 delta 类事件溢出直接丢弃——LLM 回调链上绝不产生
+		// 同步落盘背压（block/AsyncDispatch 等待都属于背压）。
+		if b.cfg.OverflowDropTypes != nil && b.cfg.OverflowDropTypes(event.Type) {
+			b.counters.dropped.Add(1)
+			b.warnRateLimited("event persist queue overflow, stream delta dropped (type=%s session=%s)", event.Type, event.SessionID)
+			break
+		}
 		if b.cfg.FailMode == EventPersistFailDrop {
 			b.counters.dropped.Add(1)
 			b.warnRateLimited("event persist queue overflow, event dropped (type=%s session=%s)", event.Type, event.SessionID)
