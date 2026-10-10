@@ -96,7 +96,7 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		// Limits text may hard-wrap inside the fixed box; assert stable fragments.
 		"256000 context tokens",
 		"provider default",
-		"217600",
+		"230400",
 	}
 	for _, expected := range expectedFragments {
 		if !strings.Contains(output, expected) {
@@ -104,7 +104,7 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		}
 	}
 	// Full limits sentence should still be present once box borders / wrap gaps
-	// are stripped. Hard-wrap inserts "│" between "turn" and "217600)".
+	// are stripped. Hard-wrap inserts "│" between "turn" and "230400)".
 	compactOutput := strings.Map(func(r rune) rune {
 		switch {
 		case unicode.IsSpace(r):
@@ -115,7 +115,7 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 			return r
 		}
 	}, output)
-	if !strings.Contains(compactOutput, "256000contexttokens(providerdefault,activeturn217600)") {
+	if !strings.Contains(compactOutput, "256000contexttokens(providerdefault,activeturn230400)") {
 		t.Fatalf("expected collapsed limits sentence in status output, got:\n%s", output)
 	}
 	if !strings.Contains(output, "╭") || !strings.Contains(output, "╰") {
@@ -362,7 +362,7 @@ func TestBuildChatStatusLimitsValue_FallsBackToSessionWindow(t *testing.T) {
 		ContextWindowTokenCount: 128000,
 	}
 
-	if got := buildChatStatusLimitsValue(session); got != "128000 context tokens (session window, active turn 217600)" {
+	if got := buildChatStatusLimitsValue(session); got != "128000 context tokens (session window, active turn 230400)" {
 		t.Fatalf("expected limits fallback to session window, got %q", got)
 	}
 }
@@ -370,7 +370,7 @@ func TestBuildChatStatusLimitsValue_FallsBackToSessionWindow(t *testing.T) {
 func TestBuildChatStatusLimitsValue_FallsBackToProviderDefault(t *testing.T) {
 	session := &ChatSession{}
 
-	if got := buildChatStatusLimitsValue(session); got != "256000 context tokens (provider default, active turn 217600)" {
+	if got := buildChatStatusLimitsValue(session); got != "256000 context tokens (provider default, active turn 230400)" {
 		t.Fatalf("expected limits fallback to provider default, got %q", got)
 	}
 }

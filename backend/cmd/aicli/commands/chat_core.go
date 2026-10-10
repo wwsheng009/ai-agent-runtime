@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -21,8 +21,8 @@ const chatcoreReasoningMetadataKey = "chatcore_reasoning_content"
 
 // sharedChatDefaultAutoCompactRatio is the single CLI fallback ratio used when a
 // model capability does not declare AutoCompactTokenLimit / AutoCompactRatio.
-// Keep aligned with agent preflight and compactruntime defaults (0.85).
-const sharedChatDefaultAutoCompactRatio = 0.85
+// Keep aligned with agent preflight and compactruntime defaults (0.9).
+const sharedChatDefaultAutoCompactRatio = 0.9
 const sharedChatDefaultContextWindowTokens = 256000
 
 // chatSessionImageArtifactDir returns the session-local directory for
@@ -254,7 +254,7 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 			Interactive:     chatSkillMentionInteractiveTurn(session),
 			SystemGenerated: isGoalContinuation,
 			Pin:             skillPin,
-			UsedTokens:      countSharedChatMessagesTokens(history) + estimateSharedChatTokenCount(prompt) + 4,
+			UsedTokens:      countSharedChatMessagesTokensForSession(session, history) + estimateSharedChatTokenCount(prompt) + 4,
 			BudgetTokens:    promptBudget.ActiveTurnMaxTokens,
 		}); len(mentionFragments) > 0 {
 			history = append(history, mentionFragments...)
@@ -426,26 +426,21 @@ func resolveSharedChatPromptBudget(session *ChatSession) sharedChatPromptBudget 
 }
 
 func countSharedChatMessagesTokens(messages []runtimetypes.Message) int {
-	total := 0
-	for _, message := range messages {
-		total += estimateSharedChatTokenCount(message.Role)
-		total += estimateSharedChatTokenCount(message.Content)
-		total += estimateSharedChatTokenCount(message.ToolCallID)
-		total += 4
-		for _, call := range message.ToolCalls {
-			total += estimateSharedChatTokenCount(call.ID)
-			total += estimateSharedChatTokenCount(call.Name)
-			if len(call.Args) == 0 {
-				continue
-			}
-			if payload, err := json.Marshal(call.Args); err == nil {
-				total += estimateSharedChatTokenCount(string(payload))
-			} else {
-				total += estimateSharedChatTokenCount(fmt.Sprintf("%v", call.Args))
-			}
-		}
+	return tokenestimate.EstimateMessages(messages, tokenestimate.ProfileGeneric)
+}
+
+// countSharedChatMessagesTokensForSession prices the history with the profile
+// matching the session's provider/model (o200k vs cl100k vs Claude) instead of
+// the balanced generic fallback.
+func countSharedChatMessagesTokensForSession(session *ChatSession, messages []runtimetypes.Message) int {
+	return tokenestimate.EstimateMessages(messages, sharedChatTokenProfile(session))
+}
+
+func sharedChatTokenProfile(session *ChatSession) tokenestimate.Profile {
+	if session == nil {
+		return tokenestimate.ProfileGeneric
 	}
-	return total
+	return tokenestimate.ProfileFor(session.ProviderName, session.Model)
 }
 
 func estimateSharedChatTokenCount(text string) int {
@@ -453,11 +448,7 @@ func estimateSharedChatTokenCount(text string) int {
 	if text == "" {
 		return 0
 	}
-	tokens := len([]rune(text)) / 4
-	if tokens <= 0 {
-		return 1
-	}
-	return tokens
+	return tokenestimate.Estimate(text, tokenestimate.ProfileGeneric)
 }
 
 func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession, history []runtimetypes.Message) ([]runtimetypes.Message, *sharedChatAutoCompactReport, error) {

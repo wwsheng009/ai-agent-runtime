@@ -20,7 +20,6 @@ func TestUpdateWithStaleShorterHistoryKeepsNewestInProjection(t *testing.T) {
 	cfg := DefaultPersistentSessionStorageConfig(dir)
 	cfg.Path = filepath.Join(dir, "sessions.sqlite")
 	cfg.ImportLegacyJSON = false
-	cfg.HotHistoryMessages = 5
 	store, err := NewSQLiteSessionStorage(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.CloseStorage()) })
@@ -45,11 +44,11 @@ func TestUpdateWithStaleShorterHistoryKeepsNewestInProjection(t *testing.T) {
 	session.ReplaceHistory(history)
 	require.NoError(t, store.Save(ctx, session))
 
-	// 加载后 History 是热投影（最新的 5 条：message-03..07）。
+	// 加载后 History 是无损全量投影（8 条：message-00..07）。
 	loaded, err := store.Load(ctx, session.ID)
 	require.NoError(t, err)
 	require.True(t, loaded.HistoryLoaded)
-	require.Len(t, loaded.History, 5)
+	require.Len(t, loaded.History, 8)
 	require.Equal(t, "message-07", lastMessageContent(loaded.History))
 	require.Equal(t, 8, loaded.CanonicalMessageCount)
 
@@ -77,7 +76,7 @@ func TestUpdateWithStaleShorterHistoryKeepsNewestInProjection(t *testing.T) {
 	// 被过期的 stale 历史覆盖）。
 	after, err := store.Load(ctx, session.ID)
 	require.NoError(t, err)
-	require.Len(t, after.History, 5)
+	require.Len(t, after.History, 8)
 	require.Equal(t, "message-07", lastMessageContent(after.History), "stale sync must not drop the newest turn from the projection")
 }
 

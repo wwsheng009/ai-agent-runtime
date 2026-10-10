@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -1109,7 +1110,7 @@ func (s *Session) MarkClosed() {
 func (s *Session) GetTokenCount() int {
 	count := 0
 	for _, msg := range s.History {
-		count += len(msg.Content) / 4 // 粗略估计：4字符约1个token
+		count += tokenestimate.Estimate(msg.Content, tokenestimate.ProfileGeneric)
 	}
 	return count
 }

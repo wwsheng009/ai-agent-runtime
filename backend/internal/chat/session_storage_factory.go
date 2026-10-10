@@ -17,14 +17,17 @@ const (
 )
 
 // PersistentSessionStorageConfig controls the durable transcript store and
-// the bounded prompt projection loaded into runtime memory.
+// the prompt projection loaded into runtime memory.
+//
+// The projection is the model-visible history: it is persisted losslessly and
+// is only rewritten by model-driven compaction. There is deliberately no
+// fixed message/byte cap that could silently drop request messages or tool
+// calls; context pressure is handled by the compaction budget derived from the
+// model context window and its auto_compact_ratio / auto_compact_token_limit.
 type PersistentSessionStorageConfig struct {
 	Backend               string
 	Dir                   string
 	Path                  string
-	HotHistoryMessages    int
-	HotHistoryBytes       int
-	MaxHotMessageBytes    int
 	HistoryPageMessages   int
 	HistoryPageBytes      int
 	MaxInlineMessageBytes int
@@ -47,9 +50,6 @@ func DefaultPersistentSessionStorageConfig(dir string) PersistentSessionStorageC
 	return PersistentSessionStorageConfig{
 		Backend:               SessionStorageBackendSQLite,
 		Dir:                   strings.TrimSpace(dir),
-		HotHistoryMessages:    128,
-		HotHistoryBytes:       2 * 1024 * 1024,
-		MaxHotMessageBytes:    128 * 1024,
 		HistoryPageMessages:   100,
 		HistoryPageBytes:      4 * 1024 * 1024,
 		MaxInlineMessageBytes: 512 * 1024,
@@ -71,15 +71,6 @@ func normalizePersistentSessionStorageConfig(cfg PersistentSessionStorageConfig)
 		cfg.Path = filepath.Join(cfg.Dir, aiclipaths.DefaultSessionHistoryFileName)
 	} else if cfg.Path != "" && !filepath.IsAbs(cfg.Path) && cfg.Dir != "" {
 		cfg.Path = filepath.Join(cfg.Dir, cfg.Path)
-	}
-	if cfg.HotHistoryMessages <= 0 {
-		cfg.HotHistoryMessages = defaults.HotHistoryMessages
-	}
-	if cfg.HotHistoryBytes <= 0 {
-		cfg.HotHistoryBytes = defaults.HotHistoryBytes
-	}
-	if cfg.MaxHotMessageBytes <= 0 {
-		cfg.MaxHotMessageBytes = defaults.MaxHotMessageBytes
 	}
 	if cfg.HistoryPageMessages <= 0 {
 		cfg.HistoryPageMessages = defaults.HistoryPageMessages

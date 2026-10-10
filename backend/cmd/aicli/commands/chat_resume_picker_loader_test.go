@@ -19,7 +19,6 @@ func newResumePickerTestManager(t *testing.T, sessions int) (*runtimechat.Sessio
 	require.NoError(t, err)
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -143,7 +142,6 @@ func TestResumePickerSessionLoaderHasNoCandidatesWithoutConversation(t *testing.
 	require.NoError(t, err)
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

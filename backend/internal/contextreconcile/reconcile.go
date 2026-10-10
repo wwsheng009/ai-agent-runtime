@@ -99,9 +99,34 @@ func Reconcile(replacement []types.Message, snapshot Snapshot) ([]types.Message,
 	message.Metadata["drift_count"] = report.DriftCount
 	message.Metadata["corrections"] = report.Corrections
 	message.Metadata["evidence_refs"] = report.EvidenceRefs
-	result = append(result, *message)
+	result = appendCorrectionMessage(result, *message)
 	report.CorrectionMade = true
 	return result, report
+}
+
+// appendCorrectionMessage injects the correction as context, not as a turn
+// boundary. When the replacement still ends with the active user turn (a real
+// user message without a context stage), the correction is inserted before it:
+// callers detect "prompt already in history" by the trailing user message
+// (ReActLoop.RunWithSession), and a correction appended after it made the loop
+// re-append the prompt of the open turn. Live 2026-10-10 (session
+// session_20261010201220_MvgmioqR): pre-turn auto compact retained the active
+// 50K-char prompt, RUN_STATE_MISSING appended a correction after it, and the
+// provider request then carried that prompt twice (~95K prompt tokens).
+func appendCorrectionMessage(messages []types.Message, correction types.Message) []types.Message {
+	insertAt := len(messages)
+	if insertAt > 0 {
+		last := messages[insertAt-1]
+		if strings.EqualFold(strings.TrimSpace(last.Role), "user") &&
+			strings.TrimSpace(last.Metadata.GetString("context_stage", "")) == "" {
+			insertAt--
+		}
+	}
+	corrected := make([]types.Message, 0, len(messages)+1)
+	corrected = append(corrected, messages[:insertAt]...)
+	corrected = append(corrected, correction)
+	corrected = append(corrected, messages[insertAt:]...)
+	return corrected
 }
 
 func runHasState(run RunSnapshot) bool {

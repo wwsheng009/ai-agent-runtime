@@ -14,7 +14,6 @@ import (
 // SessionManagerConfig Session 管理器配置
 type SessionManagerConfig struct {
 	TTL             time.Duration `yaml:"ttl" json:"ttl"`                         // 会话生存时间
-	MaxHistory      int           `yaml:"maxHistory" json:"maxHistory"`           // 最大历史记录数
 	CleanupInterval time.Duration `yaml:"cleanupInterval" json:"cleanupInterval"` // 清理间隔
 	AutoArchive     bool          `yaml:"autoArchive" json:"autoArchive"`         // 自动归档空闲会话
 	IdleTimeout     time.Duration `yaml:"idleTimeout" json:"idleTimeout"`         // 空闲超时
@@ -39,7 +38,6 @@ type SessionManager struct {
 func DefaultSessionManagerConfig() *SessionManagerConfig {
 	return &SessionManagerConfig{
 		TTL:             7 * 24 * time.Hour, // 7天
-		MaxHistory:      100,                // 最多保留100条历史
 		CleanupInterval: 1 * time.Hour,      // 每小时清理一次
 		AutoArchive:     true,               // 自动归档空闲会话
 		IdleTimeout:     24 * time.Hour,     // 24小时空闲后归档
@@ -198,27 +196,12 @@ func (m *SessionManager) AddMessage(ctx context.Context, sessionID string, messa
 	}
 
 	if appender, ok := m.storage.(SessionStorageHistoryAppender); ok {
-		return appender.AddMessageWithLimit(ctx, sessionID, msg, m.config.MaxHistory)
+		return appender.AddMessageWithLimit(ctx, sessionID, msg, 0)
 	}
 
 	if err := m.storage.AddMessage(ctx, sessionID, msg); err != nil {
 		return err
 	}
-
-	if m.config.MaxHistory <= 0 {
-		return nil
-	}
-
-	session, err := m.storage.Load(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to load session: %w", err)
-	}
-	if len(session.History) > m.config.MaxHistory {
-		keepFrom := len(session.History) - m.config.MaxHistory
-		session.History = session.GetMessages()[keepFrom:]
-		return m.storage.Update(ctx, session)
-	}
-
 	return nil
 }
 

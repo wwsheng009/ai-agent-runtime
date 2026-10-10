@@ -332,11 +332,13 @@ func (s *InMemoryStorage) AddMessage(ctx context.Context, sessionID string, mess
 	return s.AddMessageWithLimit(ctx, sessionID, msg, 0)
 }
 
-// AddMessageWithLimit 原子追加消息，并在需要时截断历史
+// AddMessageWithLimit 原子追加消息。maxHistory 保留在接口签名中仅为兼容，
+// 固定条数上限已移除：请求历史只允许由模型驱动的压缩改写，不允许静默截断。
 func (s *InMemoryStorage) AddMessageWithLimit(ctx context.Context, sessionID string, message types.Message, maxHistory int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	_ = maxHistory
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -347,10 +349,6 @@ func (s *InMemoryStorage) AddMessageWithLimit(ctx context.Context, sessionID str
 	}
 
 	session.AddMessage(message)
-	if maxHistory > 0 && len(session.History) > maxHistory {
-		keepFrom := len(session.History) - maxHistory
-		session.History = append([]types.Message(nil), session.History[keepFrom:]...)
-	}
 
 	s.sessions[sessionID] = session
 

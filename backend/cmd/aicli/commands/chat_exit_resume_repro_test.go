@@ -11,7 +11,7 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-// TestExitThenResumeKeepsLastTurn 复现：长会话（超过热上下文投影上限 128 条）中
+// TestExitThenResumeKeepsLastTurn 复现：长会话（150 条消息）中
 // 完成最后一轮后退出，再 resume，最后 turn 的 user/assistant 消息不应丢失。
 //
 // 完整链路：
@@ -26,7 +26,6 @@ func TestExitThenResumeKeepsLastTurn(t *testing.T) {
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -39,7 +38,7 @@ func TestExitThenResumeKeepsLastTurn(t *testing.T) {
 	}
 	sessionID := session.ID
 
-	// 阶段 0：先写满 150 条历史（超过 HotHistoryMessages=128），模拟已进行多轮。
+	// 阶段 0：先写满 150 条历史（长会话），模拟已进行多轮。
 	seed := make([]runtimetypes.Message, 0, 150)
 	for index := 0; index < 150; index++ {
 		if index%2 == 0 {
@@ -135,7 +134,6 @@ func TestSendMessagePersistsUserPromptAtInputTime(t *testing.T) {
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

@@ -16,8 +16,6 @@ func BenchmarkSQLiteSessionStorageAppendBounded(b *testing.B) {
 	cfg := DefaultPersistentSessionStorageConfig(dir)
 	cfg.Path = filepath.Join(dir, "sessions.sqlite")
 	cfg.ImportLegacyJSON = false
-	cfg.HotHistoryMessages = 32
-	cfg.HotHistoryBytes = 256 * 1024
 	store, err := NewSQLiteSessionStorage(cfg)
 	if err != nil {
 		b.Fatal(err)
@@ -28,7 +26,7 @@ func BenchmarkSQLiteSessionStorageAppendBounded(b *testing.B) {
 	if err := store.Save(ctx, session); err != nil {
 		b.Fatal(err)
 	}
-	for index := 0; index < cfg.HotHistoryMessages; index++ {
+	for index := 0; index < 32; index++ {
 		session.AddMessage(*types.NewUserMessage(fmt.Sprintf("warmup-%d", index)))
 		if err := store.Update(ctx, session); err != nil {
 			b.Fatal(err)
@@ -54,8 +52,6 @@ func benchmarkUpdateSessionProjectionRebuild(b *testing.B, forceLegacy bool) {
 	cfg := DefaultPersistentSessionStorageConfig(dir)
 	cfg.Path = filepath.Join(dir, "sessions.sqlite")
 	cfg.ImportLegacyJSON = false
-	cfg.HotHistoryMessages = 128
-	cfg.HotHistoryBytes = 2 * 1024 * 1024
 	store, err := NewSQLiteSessionStorage(cfg)
 	if err != nil {
 		b.Fatal(err)

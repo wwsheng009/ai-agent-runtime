@@ -1595,6 +1595,14 @@ func TestSessionActorSubmitPrompt_PublishesAssistantMessageBeforeSessionEnd(t *t
 	require.Equal(t, result.Usage.PromptTokens, sessionEndPayload["usage_prompt_tokens"])
 	require.Equal(t, result.Usage.CompletionTokens, sessionEndPayload["usage_completion_tokens"])
 	require.Equal(t, result.Usage.TotalTokens, sessionEndPayload["usage_total_tokens"])
+
+	// Provider usage must be persisted as the observed context measurement so
+	// the next pre-turn auto-compact trigger uses real prompt_tokens instead of
+	// the heuristic estimator.
+	reloaded, err := manager.Get(ctx, session.ID)
+	require.NoError(t, err)
+	require.EqualValues(t, result.Usage.PromptTokens, runtimeSessionObservedTokenUsage(reloaded),
+		"provider prompt_tokens must survive as the session's observed context usage")
 }
 
 func TestSessionActorSubmitPrompt_PublishesReasoningOnlyAssistantMessage(t *testing.T) {

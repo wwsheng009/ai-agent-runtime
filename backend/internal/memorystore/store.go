@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 )
 
 const (
@@ -338,13 +340,14 @@ func FormatNotes(notes []Note, tokenBudget int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// EstimateTokens approximates tokens as utf-8 runes / 4 (min 1 for non-empty).
+// EstimateTokens uses the shared calibrated fallback estimator (min 1 for
+// non-empty text).
 func EstimateTokens(text string) int {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return 0
 	}
-	n := (len([]rune(text)) + 3) / 4
+	n := tokenestimate.Estimate(text, tokenestimate.ProfileGeneric)
 	if n < 1 {
 		return 1
 	}

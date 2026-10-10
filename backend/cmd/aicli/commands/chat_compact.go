@@ -207,7 +207,7 @@ func compactCapabilityHint(status compactruntime.Status) string {
 		wildcardPath = fmt.Sprintf("`providers.items.%s.model_capabilities.*`", provider)
 	}
 
-	hint := fmt.Sprintf("需要配置 %s 或 %s，至少补 `max_context_tokens` / `auto_compact_token_limit`", targetPath, wildcardPath)
+	hint := fmt.Sprintf("需要配置 %s 或 %s，至少补 `max_context_tokens` / `auto_compact_token_limit`（或 `auto_compact_ratio`，默认 0.9）", targetPath, wildcardPath)
 	if strings.EqualFold(strings.TrimSpace(status.Mode), compactruntime.ModeRemote) {
 		hint += "；如需远端压缩，再补 `supports_remote_compact: true` 或 `auto_compact_mode: remote`"
 	}

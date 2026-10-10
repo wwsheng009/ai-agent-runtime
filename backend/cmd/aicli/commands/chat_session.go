@@ -80,9 +80,6 @@ func newChatSessionManagerWithRuntimeConfig(dir string, runtimeConfig *runtimecf
 	if runtimeConfig != nil {
 		storageConfig.Backend = runtimeConfig.Sessions.Backend
 		storageConfig.Path = runtimeConfig.Sessions.StorePath
-		storageConfig.HotHistoryMessages = runtimeConfig.Sessions.MaxHistory
-		storageConfig.HotHistoryBytes = runtimeConfig.Sessions.HotHistoryBytes
-		storageConfig.MaxHotMessageBytes = runtimeConfig.Sessions.MaxHotMessageBytes
 		storageConfig.HistoryPageMessages = runtimeConfig.Sessions.HistoryPageMessages
 		storageConfig.HistoryPageBytes = runtimeConfig.Sessions.HistoryPageBytes
 		storageConfig.MaxInlineMessageBytes = runtimeConfig.Sessions.MaxInlineMessageBytes
@@ -95,7 +92,6 @@ func newChatSessionManagerWithRuntimeConfig(dir string, runtimeConfig *runtimecf
 	}
 
 	cfg := runtimechat.DefaultSessionManagerConfig()
-	cfg.MaxHistory = 200
 	cfg.CleanupInterval = 6 * time.Hour
 	cfg.IdleTimeout = 72 * time.Hour
 

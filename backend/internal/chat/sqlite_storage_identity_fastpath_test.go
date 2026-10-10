@@ -18,8 +18,6 @@ func newIdentityFastPathStore(t *testing.T) *SQLiteSessionStorage {
 	cfg := DefaultPersistentSessionStorageConfig(dir)
 	cfg.Path = filepath.Join(dir, "sessions.sqlite")
 	cfg.ImportLegacyJSON = false
-	cfg.HotHistoryMessages = 5
-	cfg.HotHistoryBytes = 64 * 1024
 	store, err := NewSQLiteSessionStorage(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.CloseStorage()) })

@@ -50,7 +50,7 @@ const emptyTerminalAssistantResponseError = "upstream model returned an empty re
 // so existing tests and call sites keep a stable local name.
 const repeatedSemanticToolCallNoticeThreshold = DoomLoopWarningThreshold
 const explorationStallNoticeThreshold = 12
-const defaultPromptPreflightAutoCompactRatio = 0.85
+const defaultPromptPreflightAutoCompactRatio = 0.9
 
 var errReActRunTimeout = stderrors.New("ReAct run duration limit reached")
 

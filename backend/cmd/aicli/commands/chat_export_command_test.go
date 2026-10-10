@@ -103,10 +103,10 @@ func TestExportChatSessionStreamsCompleteSQLiteCanonicalHistory(t *testing.T) {
 	}
 	loaded, err := manager.Get(context.Background(), runtimeSession.ID)
 	if err != nil {
-		t.Fatalf("load bounded session: %v", err)
+		t.Fatalf("load session: %v", err)
 	}
-	if len(loaded.History) >= loaded.CanonicalMessageCount {
-		t.Fatalf("test requires bounded projection, got history=%d canonical=%d", len(loaded.History), loaded.CanonicalMessageCount)
+	if len(loaded.History) != loaded.CanonicalMessageCount {
+		t.Fatalf("test requires lossless projection, got history=%d canonical=%d", len(loaded.History), loaded.CanonicalMessageCount)
 	}
 	outputPath := filepath.Join(t.TempDir(), "canonical-export.json")
 	result, err := exportChatSession(&ChatSession{

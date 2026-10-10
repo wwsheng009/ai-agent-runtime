@@ -609,7 +609,6 @@ func TestRestoreChatPersistenceState_LoadedSessionRestoresCanonicalHistory(t *te
 	require.NoError(t, err)
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -631,7 +630,7 @@ func TestRestoreChatPersistenceState_LoadedSessionRestoresCanonicalHistory(t *te
 	require.NoError(t, storage.Save(ctx, runtimeSession))
 	loaded, err := manager.Get(ctx, runtimeSession.ID)
 	require.NoError(t, err)
-	require.Less(t, len(loaded.History), messageCount, "loaded session should expose the compact prompt projection")
+	require.Equal(t, messageCount, len(loaded.History), "loaded session must expose the lossless prompt projection")
 
 	chatSession := &ChatSession{
 		SessionManager: manager,

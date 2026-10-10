@@ -2073,7 +2073,7 @@ func TestReActLoop_Run_PromptBudgetCompactsActiveTurnReplayBeforeThirdRequest(t 
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1400,
+			"context_max_prompt_tokens":    1200,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2154,7 +2154,7 @@ func TestReActLoop_RunWithSession_PromptOnlyActiveTurnCompactionDoesNotPersist(t
 		DefaultMaxTokens: 256,
 		SystemPrompt:     "You are a helpful assistant.",
 		Options: map[string]interface{}{
-			"context_max_prompt_tokens":    1400,
+			"context_max_prompt_tokens":    1200,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -2663,11 +2663,10 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 			// compaction recovery. A tighter value flips the first reduction
 			// into a preflight failure, so compaction consumes a different mock
 			// response and the assertion sequence below fails.
-			// v4（task_type 收编）给 spawn_subagents schema 增加了封闭枚举与
-			// 两个可选字段（tool_schema_tokens 575），首个越界点由 req2 承担的
-			// 约束把预算夹在 [req1_after=1666, req2_after=1791)：取 1750，
-			// 越界点与校准前的基线完全一致（req1 存活、req2 触发会话压缩）。
-			"context_max_prompt_tokens":    1750,
+			// 预算按校准后的 token 估算器重新标定：首个越界点仍由 req2 承担
+			// （req1 存活、req2 触发会话压缩）。旧的 len/4 基线（req1_after=1666,
+			// req2_after=1791, 预算 1750）仅作历史参考。
+			"context_max_prompt_tokens":    1300,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -3125,7 +3124,7 @@ func TestResolvePromptPreflightBudget_FallsBackToProviderContextLimitWhenCapabil
 	}
 
 	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
-	require.Equal(t, 6800, budget.PromptBudget)
+	require.Equal(t, 7200, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 8000, budget.ProviderContextLimit)
 	require.Equal(t, 2048, budget.ProviderOutputLimit)
@@ -3166,7 +3165,7 @@ func TestResolvePromptPreflightBudget_UsesProviderContextLimitWhenWildcardCapabi
 	}
 
 	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
-	require.Equal(t, 108800, budget.PromptBudget)
+	require.Equal(t, 115200, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 128000, budget.ProviderContextLimit)
 	require.Equal(t, 4096, budget.ProviderOutputLimit)

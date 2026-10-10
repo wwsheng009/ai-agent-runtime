@@ -53,7 +53,7 @@ func TestAgentChatRouteTransparencyResolvesAliasAndPersistsCanonicalContext(t *t
 
 func TestAttachSessionExecutionRouteAddsRouteToRuntimeAPIEnvelope(t *testing.T) {
 	manager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
-		TTL: time.Hour, MaxHistory: 20, CleanupInterval: time.Hour, IdleTimeout: time.Hour,
+		TTL: time.Hour, CleanupInterval: time.Hour, IdleTimeout: time.Hour,
 	})
 	defer manager.Stop()
 	session, err := manager.CreateSession(context.Background(), "tester")

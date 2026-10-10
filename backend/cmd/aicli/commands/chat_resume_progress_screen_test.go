@@ -112,7 +112,6 @@ func TestResumeProgressDynamicRowSurvivesIncrementalHistoryPublishOnScreen(t *te
 
 	manager := runtimechat.NewSessionManager(gated, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

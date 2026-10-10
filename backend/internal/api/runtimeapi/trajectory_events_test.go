@@ -290,7 +290,6 @@ func TestAgentChatTrajectoryEventsPersistedEndToEnd(t *testing.T) {
 
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,

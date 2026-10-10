@@ -829,7 +829,7 @@ func (s *SQLiteSessionStorage) createSessionTx(ctx context.Context, tx *sql.Tx, 
 	session.CanonicalMessageCount = count
 	session.HistoryLoaded = true
 	session.Metadata.TotalTurns = count
-	projection, err := s.buildHotProjection(session.History)
+	projection, err := s.buildPromptProjection(session.History)
 	if err != nil {
 		return err
 	}
@@ -934,7 +934,7 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 				// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
 				s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
 			}
-			projection, err := s.buildHotProjection(source)
+			projection, err := s.buildPromptProjection(source)
 			if err != nil {
 				return err
 			}
@@ -1543,6 +1543,16 @@ func (s *SQLiteSessionStorage) Load(ctx context.Context, sessionID string) (*Ses
 	if err != nil {
 		return nil, err
 	}
+	// Legacy self-heal: projections persisted before the fixed caps were
+	// removed were trimmed to a tail window without any compaction summary.
+	// Rebuild the model-visible history from the canonical transcript so those
+	// sessions regain the request messages the cap silently dropped. Sessions
+	// with a real compaction checkpoint are left untouched.
+	if healed, healErr := s.healLegacyTruncatedProjection(ctx, session, history); healErr != nil {
+		logpkg.Debugf("[session-history] legacy projection self-heal skipped: session=%s err=%v", sessionID, healErr)
+	} else if healed != nil {
+		history = healed
+	}
 	session.History = history
 	session.HistoryLoaded = true
 	if session.HeadOffset > len(history) {
@@ -1657,6 +1667,60 @@ func (s *SQLiteSessionStorage) loadPromptMessages(ctx context.Context, sessionID
 	return collapseDuplicateMessages(history), nil
 }
 
+// healLegacyTruncatedProjection restores the model-visible history of sessions
+// whose stored prompt projection was truncated by the removed fixed caps
+// (HotHistoryMessages / HotHistoryBytes / MaxHotMessageBytes). Those messages
+// still exist in the canonical transcript.
+//
+// A projection that is an exact identity tail of the canonical transcript and
+// carries no compaction summary is a legacy cap artifact, not a model-driven
+// compaction result: rebuild it from canonical. The healed projection is
+// persisted on the next write through the normal identity-aligned rebuild
+// path. Returns nil when no heal is needed.
+func (s *SQLiteSessionStorage) healLegacyTruncatedProjection(ctx context.Context, session *Session, projection []types.Message) ([]types.Message, error) {
+	if session == nil || len(projection) == 0 {
+		return nil, nil
+	}
+	if session.CanonicalMessageCount <= len(projection) {
+		return nil, nil
+	}
+	for index := range projection {
+		if strings.EqualFold(strings.TrimSpace(projection[index].Metadata.GetString("context_stage", "")), "compaction") {
+			return nil, nil
+		}
+	}
+	canonical, err := s.loadCanonicalMessagesReadOnly(ctx, session.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !isLegacyCapTrimmedTail(projection, canonical) {
+		return nil, nil
+	}
+	return canonical, nil
+}
+
+// isLegacyCapTrimmedTail reports whether projection is exactly the newest
+// len(projection) messages of canonical (by role+content identity) and starts
+// after the transcript's first message. The removed caps always kept the newest
+// messages, so their artifacts are exactly such tails; append-only growth keeps
+// them aligned with the transcript tail. A non-prefix replacement (compaction
+// summary, rewritten middle) is not a tail and is left untouched.
+func isLegacyCapTrimmedTail(projection, canonical []types.Message) bool {
+	if len(projection) == 0 || len(canonical) <= len(projection) {
+		return false
+	}
+	start := len(canonical) - len(projection)
+	if start <= 0 {
+		return false
+	}
+	for offset := range projection {
+		if !messageIdentityEqual(projection[offset], canonical[start+offset]) {
+			return false
+		}
+	}
+	return true
+}
+
 // loadCanonicalMessagesTx reads the full canonical transcript (session_messages)
 // in sequence order. It is used to rebuild the bounded prompt projection from
 // the source of truth instead of a caller-supplied history that may be stale or
@@ -1673,6 +1737,26 @@ func (s *SQLiteSessionStorage) loadCanonicalMessagesTx(ctx context.Context, tx *
 		return nil, fmt.Errorf("query canonical messages for projection rebuild: %w", err)
 	}
 	defer rows.Close()
+	return s.scanCanonicalMessages(rows)
+}
+
+// loadCanonicalMessagesReadOnly is the read-pool variant used by the legacy
+// projection self-heal on the Load path (no write transaction available).
+func (s *SQLiteSessionStorage) loadCanonicalMessagesReadOnly(ctx context.Context, sessionID string) ([]types.Message, error) {
+	rows, err := s.readPoolHandle().QueryContext(ctx, `
+		SELECT seq, payload_json, artifact_path, preview_json, byte_count, sha256
+		FROM session_messages
+		WHERE session_id = ?
+		ORDER BY seq ASC
+	`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query canonical messages: %w", err)
+	}
+	defer rows.Close()
+	return s.scanCanonicalMessages(rows)
+}
+
+func (s *SQLiteSessionStorage) scanCanonicalMessages(rows *sql.Rows) ([]types.Message, error) {
 	var messages []types.Message
 	for rows.Next() {
 		var sequence int
@@ -1840,8 +1924,15 @@ func loadPromptRowsTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]prom
 	return result, rows.Err()
 }
 
+// appendPromptMessageTx appends one message to the persisted prompt projection.
+//
+// The projection is lossless and has no fixed message/byte budget: dropping
+// request messages or truncating tool payloads here silently removed context
+// the model had already seen, and the truncated history could never reach the
+// compaction trigger. Context pressure is resolved by model-driven compaction
+// (see internal/compactruntime), not by this storage layer.
 func (s *SQLiteSessionStorage) appendPromptMessageTx(ctx context.Context, tx *sql.Tx, sessionID string, rows []promptProjectionRow, message types.Message) ([]promptProjectionRow, error) {
-	newMessage, err := s.encodeHotMessage(message)
+	newMessage, err := encodePromptMessage(message)
 	if err != nil {
 		return nil, err
 	}
@@ -1855,58 +1946,7 @@ func (s *SQLiteSessionStorage) appendPromptMessageTx(ctx context.Context, tx *sq
 	`, sessionID, nextPosition, newMessage.payload, newMessage.size); err != nil {
 		return nil, fmt.Errorf("append prompt projection: %w", err)
 	}
-	rows = append(rows, promptProjectionRow{position: nextPosition, encoded: newMessage})
-	selected := make(map[int]struct{})
-	usedBytes := 0
-	add := func(index int) {
-		if index < 0 || index >= len(rows) {
-			return
-		}
-		if _, exists := selected[index]; exists {
-			return
-		}
-		encoded := rows[index].encoded
-		if len(selected) > 0 && (len(selected) >= s.cfg.HotHistoryMessages || usedBytes+encoded.size > s.cfg.HotHistoryBytes) {
-			return
-		}
-		selected[index] = struct{}{}
-		usedBytes += encoded.size
-	}
-	add(len(rows) - 1)
-	for index := range rows {
-		role := strings.ToLower(strings.TrimSpace(rows[index].encoded.message.Role))
-		if role == "system" || role == "developer" {
-			add(index)
-		}
-	}
-	for index := len(rows) - 1; index >= 0; index-- {
-		if strings.EqualFold(rows[index].encoded.message.Metadata.GetString("context_stage", ""), "compaction") {
-			add(index)
-			break
-		}
-	}
-	for index := len(rows) - 1; index >= 0; index-- {
-		add(index)
-		if len(selected) >= s.cfg.HotHistoryMessages || usedBytes >= s.cfg.HotHistoryBytes {
-			break
-		}
-	}
-	deleteStatement, err := tx.PrepareContext(ctx, `DELETE FROM session_prompt_messages WHERE session_id = ? AND position = ?`)
-	if err != nil {
-		return nil, fmt.Errorf("prepare prompt projection trim: %w", err)
-	}
-	defer deleteStatement.Close()
-	projection := make([]promptProjectionRow, 0, len(selected))
-	for index := range rows {
-		if _, keep := selected[index]; keep {
-			projection = append(projection, rows[index])
-			continue
-		}
-		if _, err := deleteStatement.ExecContext(ctx, sessionID, rows[index].position); err != nil {
-			return nil, fmt.Errorf("trim prompt projection: %w", err)
-		}
-	}
-	return projection, nil
+	return append(rows, promptProjectionRow{position: nextPosition, encoded: newMessage}), nil
 }
 
 func replacePromptMessagesTx(ctx context.Context, tx *sql.Tx, sessionID string, messages []encodedSessionMessage) error {
@@ -1957,7 +1997,7 @@ func (s *SQLiteSessionStorage) insertCanonicalEncodedTx(ctx context.Context, tx 
 		inlinePayload = nil
 		artifactPath = relativePath
 	}
-	preview, err := s.encodeHotMessage(encoded.message)
+	preview, err := s.encodePreviewMessage(encoded.message)
 	if err != nil {
 		return err
 	}
@@ -2010,84 +2050,59 @@ func (s *SQLiteSessionStorage) writeMessageArtifact(sessionID, digest string, pa
 	return relativePath, true, nil
 }
 
-func (s *SQLiteSessionStorage) buildHotProjection(messages []types.Message) ([]encodedSessionMessage, error) {
+// buildPromptProjection encodes the full model-visible history in transcript
+// order, losslessly.
+//
+// This used to be a bounded "hot" projection that kept only the newest
+// HotHistoryMessages / HotHistoryBytes and truncated oversized messages. That
+// cap silently removed request messages and tool payloads, and because the
+// model never saw a history beyond the cap, the auto-compaction trigger
+// (window × ratio) could never fire. The projection is now the source of
+// truth; only model-driven compaction rewrites it.
+func (s *SQLiteSessionStorage) buildPromptProjection(messages []types.Message) ([]encodedSessionMessage, error) {
 	if len(messages) == 0 {
 		return nil, nil
 	}
-	selected := make(map[int]encodedSessionMessage)
-	usedBytes := 0
-	add := func(index int) error {
-		if index < 0 || index >= len(messages) {
-			return nil
-		}
-		if _, exists := selected[index]; exists {
-			return nil
-		}
-		encoded, err := s.encodeHotMessage(messages[index])
-		if err != nil {
-			return err
-		}
-		if len(selected) > 0 && (len(selected) >= s.cfg.HotHistoryMessages || usedBytes+encoded.size > s.cfg.HotHistoryBytes) {
-			return nil
-		}
-		selected[index] = encoded
-		usedBytes += encoded.size
-		return nil
-	}
-
-	// The newest message is mandatory. Stable instructions and the latest
-	// compaction checkpoint are then added as anchors before filling the tail.
-	if err := add(len(messages) - 1); err != nil {
-		return nil, err
-	}
+	projection := make([]encodedSessionMessage, 0, len(messages))
 	for index := range messages {
-		role := strings.ToLower(strings.TrimSpace(messages[index].Role))
-		if role == "system" || role == "developer" {
-			if err := add(index); err != nil {
-				return nil, err
-			}
-		}
-	}
-	for index := len(messages) - 1; index >= 0; index-- {
-		if strings.EqualFold(messages[index].Metadata.GetString("context_stage", ""), "compaction") {
-			if err := add(index); err != nil {
-				return nil, err
-			}
-			break
-		}
-	}
-	for index := len(messages) - 1; index >= 0; index-- {
-		if err := add(index); err != nil {
+		encoded, err := encodePromptMessage(messages[index])
+		if err != nil {
 			return nil, err
 		}
-		if len(selected) >= s.cfg.HotHistoryMessages || usedBytes >= s.cfg.HotHistoryBytes {
-			break
-		}
-	}
-	indexes := make([]int, 0, len(selected))
-	for index := range selected {
-		indexes = append(indexes, index)
-	}
-	sort.Ints(indexes)
-	projection := make([]encodedSessionMessage, 0, len(indexes))
-	for _, index := range indexes {
-		projection = append(projection, selected[index])
+		projection = append(projection, encoded)
 	}
 	return projection, nil
 }
 
-func (s *SQLiteSessionStorage) encodeHotMessage(message types.Message) (encodedSessionMessage, error) {
+// encodePromptMessage serializes one message for the prompt projection without
+// truncation. Tool calls, tool results and content parts must survive verbatim:
+// a truncated projection removes exactly the context that model-driven
+// compaction is supposed to summarize.
+func encodePromptMessage(message types.Message) (encodedSessionMessage, error) {
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return encodedSessionMessage{}, fmt.Errorf("encode prompt message: %w", err)
+	}
+	return encodedSessionMessage{message: message, payload: payload, size: len(payload)}, nil
+}
+
+// maxCanonicalPreviewBytes bounds the canonical row preview_json column only.
+// The preview is a UI/listing convenience and is never replayed into a model
+// request, so it may be truncated; the prompt projection must not be.
+const maxCanonicalPreviewBytes = 128 * 1024
+
+func (s *SQLiteSessionStorage) encodePreviewMessage(message types.Message) (encodedSessionMessage, error) {
 	payload, err := json.Marshal(message)
 	if err != nil {
 		return encodedSessionMessage{}, fmt.Errorf("encode hot message: %w", err)
 	}
-	if len(payload) <= s.cfg.MaxHotMessageBytes {
+	if len(payload) <= maxCanonicalPreviewBytes {
 		return encodedSessionMessage{message: message, payload: payload, size: len(payload)}, nil
 	}
 
 	bounded := *message.Clone()
 	originalBytes := len(payload)
-	contentBudget := s.cfg.MaxHotMessageBytes / 2
+	contentBudget := maxCanonicalPreviewBytes / 2
 	if contentBudget < 1024 {
 		contentBudget = 1024
 	}
@@ -2120,10 +2135,10 @@ func (s *SQLiteSessionStorage) encodeHotMessage(message types.Message) (encodedS
 	if err != nil {
 		return encodedSessionMessage{}, fmt.Errorf("encode bounded hot message: %w", err)
 	}
-	if len(payload) > s.cfg.MaxHotMessageBytes {
+	if len(payload) > maxCanonicalPreviewBytes {
 		minimal := types.Message{
 			Role:       truncateUTF8Middle(bounded.Role, 256),
-			Content:    truncateUTF8Middle(bounded.Content, max(s.cfg.MaxHotMessageBytes-2048, 256)),
+			Content:    truncateUTF8Middle(bounded.Content, max(maxCanonicalPreviewBytes-2048, 256)),
 			ToolCallID: truncateUTF8Middle(bounded.ToolCallID, 512),
 			Metadata: types.Metadata{
 				"session_storage_truncated":      true,
@@ -2142,7 +2157,7 @@ func (s *SQLiteSessionStorage) encodeHotMessage(message types.Message) (encodedS
 			minimal.Metadata["context_turn_id"] = truncateUTF8Middle(turnID, 256)
 		}
 		toolCallLimit := min(len(bounded.ToolCalls), 16)
-		rawInputBudget := max(s.cfg.MaxHotMessageBytes/4/max(toolCallLimit, 1), 64)
+		rawInputBudget := max(maxCanonicalPreviewBytes/4/max(toolCallLimit, 1), 64)
 		minimal.ToolCalls = make([]types.ToolCall, 0, toolCallLimit)
 		for index := 0; index < toolCallLimit; index++ {
 			minimal.ToolCalls = append(minimal.ToolCalls, types.ToolCall{
@@ -2159,9 +2174,9 @@ func (s *SQLiteSessionStorage) encodeHotMessage(message types.Message) (encodedS
 			return encodedSessionMessage{}, fmt.Errorf("encode minimal hot message: %w", err)
 		}
 	}
-	if len(payload) > s.cfg.MaxHotMessageBytes {
+	if len(payload) > maxCanonicalPreviewBytes {
 		bounded.ToolCalls = nil
-		bounded.Content = truncateUTF8Middle(bounded.Content, max(s.cfg.MaxHotMessageBytes-1024, 64))
+		bounded.Content = truncateUTF8Middle(bounded.Content, max(maxCanonicalPreviewBytes-1024, 64))
 		payload, err = json.Marshal(bounded)
 		if err != nil {
 			return encodedSessionMessage{}, fmt.Errorf("encode final hot message: %w", err)
@@ -2197,7 +2212,7 @@ func (s *SQLiteSessionStorage) AddMessage(ctx context.Context, sessionID string,
 	if !ok {
 		return ErrInvalidMessageType
 	}
-	return s.AddMessageWithLimit(ctx, sessionID, msg, s.cfg.HotHistoryMessages)
+	return s.AddMessageWithLimit(ctx, sessionID, msg, 0)
 }
 
 func (s *SQLiteSessionStorage) AddMessageWithLimit(ctx context.Context, sessionID string, message types.Message, maxHistory int) error {
@@ -2237,7 +2252,7 @@ func (s *SQLiteSessionStorage) AddMessageWithLimit(ctx context.Context, sessionI
 	session.AddMessage(message)
 	session.CanonicalMessageCount = count
 	session.Metadata.TotalTurns = count
-	_ = maxHistory // The store's byte and message budgets are authoritative.
+	_ = maxHistory // Fixed history caps are removed; only compaction may shrink history.
 	projectionRows, projectionErr := s.appendPromptMessageTx(ctx, tx, sessionID, promptRows, message)
 	if projectionErr != nil {
 		return projectionErr
@@ -2570,7 +2585,7 @@ func validateCanonicalPayload(payload []byte, byteCount int, digest string) erro
 }
 
 func (s *SQLiteSessionStorage) GetMessages(ctx context.Context, sessionID string) ([]interface{}, error) {
-	messages, err := s.GetRecentMessages(ctx, sessionID, s.cfg.HotHistoryMessages)
+	messages, err := s.GetRecentMessages(ctx, sessionID, s.cfg.HistoryPageMessages)
 	if err != nil {
 		return nil, err
 	}
@@ -2979,17 +2994,17 @@ func (s *SQLiteSessionStorage) GetStatistics(ctx context.Context, userID string)
 	return stats, nil
 }
 
-type legacyHotItem struct {
+type legacyPromptItem struct {
 	seq     int
 	message types.Message
 	size    int
 }
 
-type legacyHotCollector struct {
+type legacyPromptCollector struct {
 	store        *SQLiteSessionStorage
-	instructions []legacyHotItem
-	compaction   *legacyHotItem
-	tail         []legacyHotItem
+	instructions []legacyPromptItem
+	compaction   *legacyPromptItem
+	tail         []legacyPromptItem
 	tailBytes    int
 }
 
@@ -3115,7 +3130,7 @@ func (s *SQLiteSessionStorage) importLegacyJSONFile(ctx context.Context, path, s
 	if err := s.upsertSessionMetadataTx(ctx, tx, session, 0); err != nil {
 		return err
 	}
-	collector := &legacyHotCollector{store: s}
+	collector := &legacyPromptCollector{store: s}
 	messageCount := 0
 	for decoder.More() {
 		nameToken, err := decoder.Token()
@@ -3173,7 +3188,7 @@ func (s *SQLiteSessionStorage) importLegacyJSONFile(ctx context.Context, path, s
 	return nil
 }
 
-func (s *SQLiteSessionStorage) decodeLegacyHistory(ctx context.Context, decoder *json.Decoder, tx *sql.Tx, sessionID string, collector *legacyHotCollector, count *int) error {
+func (s *SQLiteSessionStorage) decodeLegacyHistory(ctx context.Context, decoder *json.Decoder, tx *sql.Tx, sessionID string, collector *legacyPromptCollector, count *int) error {
 	token, err := decoder.Token()
 	if err != nil || token != json.Delim('[') {
 		return fmt.Errorf("expected history array")
@@ -3198,18 +3213,15 @@ func (s *SQLiteSessionStorage) decodeLegacyHistory(ctx context.Context, decoder 
 	return err
 }
 
-func (c *legacyHotCollector) add(seq int, message types.Message) error {
-	encoded, err := c.store.encodeHotMessage(message)
+func (c *legacyPromptCollector) add(seq int, message types.Message) error {
+	encoded, err := encodePromptMessage(message)
 	if err != nil {
 		return err
 	}
-	item := legacyHotItem{seq: seq, message: encoded.message, size: encoded.size}
+	item := legacyPromptItem{seq: seq, message: encoded.message, size: encoded.size}
 	role := strings.ToLower(strings.TrimSpace(message.Role))
 	if role == "system" || role == "developer" {
 		c.instructions = append(c.instructions, item)
-		if len(c.instructions) > 16 {
-			c.instructions = append([]legacyHotItem(nil), c.instructions[len(c.instructions)-16:]...)
-		}
 	}
 	if strings.EqualFold(message.Metadata.GetString("context_stage", ""), "compaction") {
 		copyItem := item
@@ -3217,18 +3229,10 @@ func (c *legacyHotCollector) add(seq int, message types.Message) error {
 	}
 	c.tail = append(c.tail, item)
 	c.tailBytes += item.size
-	for len(c.tail) > c.store.cfg.HotHistoryMessages || c.tailBytes > c.store.cfg.HotHistoryBytes {
-		if len(c.tail) <= 1 {
-			break
-		}
-		c.tailBytes -= c.tail[0].size
-		c.tail[0] = legacyHotItem{}
-		c.tail = c.tail[1:]
-	}
 	return nil
 }
 
-func (c *legacyHotCollector) projection() ([]encodedSessionMessage, error) {
+func (c *legacyPromptCollector) projection() ([]encodedSessionMessage, error) {
 	bySequence := make(map[int]types.Message)
 	for _, item := range c.instructions {
 		bySequence[item.seq] = item.message
@@ -3248,5 +3252,5 @@ func (c *legacyHotCollector) projection() ([]encodedSessionMessage, error) {
 	for _, sequence := range sequences {
 		messages = append(messages, bySequence[sequence])
 	}
-	return c.store.buildHotProjection(messages)
+	return c.store.buildPromptProjection(messages)
 }

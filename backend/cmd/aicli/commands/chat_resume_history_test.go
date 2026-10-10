@@ -12,8 +12,8 @@ import (
 )
 
 // TestLoadResumeCanonicalHistoryRestoresFullTranscript 验证 Phase 1 核心行为：
-// 压缩/截断后的热上下文投影（session_prompt_messages，≤128 条）不应成为
-// /resume 回放的唯一来源——恢复后应展示 canonical 完整转录（session_messages）。
+// prompt 投影（session_prompt_messages）无损保留完整请求历史；/resume 展示
+// canonical 完整转录（session_messages），两者都不再有固定条数上限。
 func TestLoadResumeCanonicalHistoryRestoresFullTranscript(t *testing.T) {
 	storage, err := runtimechat.NewSQLiteSessionStorage(runtimechat.DefaultPersistentSessionStorageConfig(t.TempDir()))
 	if err != nil {
@@ -21,7 +21,6 @@ func TestLoadResumeCanonicalHistoryRestoresFullTranscript(t *testing.T) {
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -33,7 +32,7 @@ func TestLoadResumeCanonicalHistoryRestoresFullTranscript(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	const messageCount = 150 // 超过 HotHistoryMessages=128
+	const messageCount = 150 // 长会话：验证投影不再被固定上限截断
 	messages := make([]runtimetypes.Message, 0, messageCount)
 	for index := 0; index < messageCount; index++ {
 		if index%2 == 0 {
@@ -47,13 +46,13 @@ func TestLoadResumeCanonicalHistoryRestoresFullTranscript(t *testing.T) {
 		t.Fatalf("save session: %v", err)
 	}
 
-	// 重载后：模型热上下文投影应被截断到 HotHistoryMessages 以内。
+	// 重载后：prompt 投影必须无损保留全部 150 条（旧行为会被截断到 128 条）。
 	loaded, err := manager.Get(ctx, session.ID)
 	if err != nil {
 		t.Fatalf("reload session: %v", err)
 	}
-	if len(loaded.History) >= messageCount {
-		t.Fatalf("expected prompt projection truncated below %d, got %d", messageCount, len(loaded.History))
+	if len(loaded.History) != messageCount {
+		t.Fatalf("expected lossless prompt projection of %d messages, got %d", messageCount, len(loaded.History))
 	}
 	if len(loaded.History) == 0 {
 		t.Fatalf("expected non-empty prompt projection after save")
@@ -114,7 +113,6 @@ func TestLoadResumeCanonicalHistoryFallbackNoPager(t *testing.T) {
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

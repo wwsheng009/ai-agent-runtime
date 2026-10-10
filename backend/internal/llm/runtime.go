@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -887,28 +888,7 @@ func countTypedMessagesTokens(tokenizer *Tokenizer, messages []types.Message) in
 	if tokenizer == nil || len(messages) == 0 {
 		return 0
 	}
-	converted := make([]interface{}, len(messages))
-	for i, msg := range messages {
-		content := msg.Content
-		if len(msg.ContentParts) > 0 {
-			content = ""
-		}
-		converted[i] = map[string]interface{}{
-			"role":    msg.Role,
-			"content": content,
-			"name":    "",
-		}
-	}
-
-	total := tokenizer.CountMessages(converted)
-	for _, message := range messages {
-		total += countStructuredTokenField(tokenizer, message.ContentParts)
-		total += countStructuredTokenField(tokenizer, message.ToolCalls)
-		if toolCallID := strings.TrimSpace(message.ToolCallID); toolCallID != "" {
-			total += tokenizer.Count(toolCallID)
-		}
-	}
-	return total
+	return tokenestimate.EstimateMessages(messages, profileForStrategy(tokenizer.strategy))
 }
 
 func countChatMessagesTokens(tokenizer *Tokenizer, messages []Message) int {

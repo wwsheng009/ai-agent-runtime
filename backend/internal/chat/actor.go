@@ -29,6 +29,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -2129,22 +2130,9 @@ func countRuntimeChatContextTokens(llmRuntime *llm.LLMRuntime, messages []runtim
 			return count
 		}
 	}
-	total := 0
-	for _, message := range messages {
-		total += len(message.Role)/4 + len(message.Content)/4 + len(message.ToolCallID)/4 + 4
-		for _, call := range message.ToolCalls {
-			total += len(call.ID)/4 + len(call.Name)/4 + 4
-			if len(call.Args) > 0 {
-				if payload, err := json.Marshal(call.Args); err == nil {
-					total += len(payload) / 4
-				}
-			}
-		}
-	}
-	if total <= 0 {
-		return 0
-	}
-	return total + 8
+	// No runtime available: use the calibrated fallback estimator instead of
+	// byte-length/4 (which under-counts CJK and over-counts nothing else).
+	return tokenestimate.EstimateMessages(messages, tokenestimate.ProfileGeneric)
 }
 
 func runtimeSessionObservedTokenUsage(session *Session) int {
@@ -3000,6 +2988,13 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				stripMessagesWithMetadataKeys(session, run.stripMetadataKeys)
 			}
 			if !approvalDetached && a.sessionRunOwned(run) {
+				// Provider-reported usage is the authoritative context
+				// measurement. Persist it together with the turn history so the
+				// next pre-turn auto-compact trigger can compare against real
+				// prompt_tokens instead of the heuristic estimator.
+				if execErr == nil && result != nil && result.Usage != nil && result.Usage.PromptTokens > 0 {
+					setRuntimeSessionObservedTokenUsage(session, result.Usage.PromptTokens)
+				}
 				// Persist history before exposing an idle/stopped runtime state.
 				// Once the state is non-busy, a successor is allowed to load and
 				// append to this durable snapshot.

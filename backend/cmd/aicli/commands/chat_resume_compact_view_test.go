@@ -30,7 +30,6 @@ func newResumeCompactViewFixture(t *testing.T) (*runtimechat.SessionManager, str
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -215,7 +214,6 @@ func TestResumeWithoutCompactionKeepsCanonicalTranscript(t *testing.T) {
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

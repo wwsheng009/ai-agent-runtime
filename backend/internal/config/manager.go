@@ -239,9 +239,6 @@ type SessionsConfig struct {
 	Backend               string        `yaml:"backend" json:"backend"`
 	StorePath             string        `yaml:"storePath" json:"storePath"`
 	DefaultUserID         string        `yaml:"defaultUserId" json:"defaultUserId"`
-	MaxHistory            int           `yaml:"maxHistory" json:"maxHistory"`
-	HotHistoryBytes       int           `yaml:"hotHistoryBytes" json:"hotHistoryBytes"`
-	MaxHotMessageBytes    int           `yaml:"maxHotMessageBytes" json:"maxHotMessageBytes"`
 	HistoryPageMessages   int           `yaml:"historyPageMessages" json:"historyPageMessages"`
 	HistoryPageBytes      int           `yaml:"historyPageBytes" json:"historyPageBytes"`
 	MaxInlineMessageBytes int           `yaml:"maxInlineMessageBytes" json:"maxInlineMessageBytes"`
@@ -1041,7 +1038,7 @@ func ValidateSessionsConfig(config *SessionsConfig) error {
 	if backend != "" && backend != "file" && backend != "sqlite" {
 		return errors.New(errors.ErrValidationFailed, "sessions backend must be file or sqlite")
 	}
-	if config.HotHistoryBytes < 0 || config.MaxHotMessageBytes < 0 || config.HistoryPageMessages < 0 || config.HistoryPageBytes < 0 || config.MaxInlineMessageBytes < 0 || config.SQLiteCacheKiB < 0 {
+	if config.HistoryPageMessages < 0 || config.HistoryPageBytes < 0 || config.MaxInlineMessageBytes < 0 || config.SQLiteCacheKiB < 0 {
 		return errors.New(errors.ErrValidationFailed, "session storage memory and inline byte limits cannot be negative")
 	}
 	return nil

@@ -85,20 +85,18 @@ func TestSQLiteSessionStorageSkipsLegacyImportWhenNoJSON(t *testing.T) {
 
 func TestSQLiteSessionStorageKeepsCanonicalTranscriptAcrossProjectionReplacement(t *testing.T) {
 	ctx := context.Background()
-	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.HotHistoryMessages = 4
-	})
+	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("sqlite-user")
 	require.NoError(t, store.Save(ctx, session))
 
 	for index := 0; index < 10; index++ {
 		message := *types.NewUserMessage("message-" + string(rune('a'+index)))
-		require.NoError(t, store.AddMessageWithLimit(ctx, session.ID, message, 4))
+		require.NoError(t, store.AddMessage(ctx, session.ID, message))
 	}
 
 	loaded, err := store.Load(ctx, session.ID)
 	require.NoError(t, err)
-	require.LessOrEqual(t, len(loaded.History), 4)
+	require.Equal(t, 10, len(loaded.History), "prompt projection must retain the full request history")
 	require.Equal(t, 10, loaded.CanonicalMessageCount)
 
 	summary := *types.NewUserMessage("compacted summary")
@@ -150,11 +148,9 @@ func TestSQLiteSessionStorageListsMetadataWithoutLoadingHistory(t *testing.T) {
 	require.Len(t, previews, 1)
 }
 
-func TestSQLiteSessionStorageExternalizesLargeCanonicalMessagesAndBoundsHotCopy(t *testing.T) {
+func TestSQLiteSessionStorageExternalizesLargeCanonicalMessagesAndKeepsPromptCopyLossless(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.HotHistoryBytes = 4 * 1024
-		cfg.MaxHotMessageBytes = 1024
 		cfg.MaxInlineMessageBytes = 2048
 	})
 	session := NewSession("artifact-user")
@@ -165,8 +161,8 @@ func TestSQLiteSessionStorageExternalizesLargeCanonicalMessagesAndBoundsHotCopy(
 	loaded, err := store.Load(ctx, session.ID)
 	require.NoError(t, err)
 	require.Len(t, loaded.History, 1)
-	require.Less(t, len(loaded.History[0].Content), len(fullContent))
-	require.True(t, loaded.History[0].Metadata.GetBool("session_storage_truncated", false))
+	require.Equal(t, fullContent, loaded.History[0].Content, "prompt projection must not truncate request content")
+	require.False(t, loaded.History[0].Metadata.GetBool("session_storage_truncated", false))
 
 	canonical, err := store.GetRecentMessages(ctx, session.ID, 1)
 	require.NoError(t, err)
@@ -313,12 +309,9 @@ func TestSQLiteSessionStorageRemovesNewArtifactWhenTransactionRollsBack(t *testi
 	}
 }
 
-func TestSQLiteSessionStorageEnforcesHardHotMessageLimit(t *testing.T) {
+func TestSQLiteSessionStorageKeepsOversizedPromptMessageLossless(t *testing.T) {
 	ctx := context.Background()
-	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.MaxHotMessageBytes = 4096
-		cfg.HotHistoryBytes = 8192
-	})
+	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("hard-limit-user")
 	require.NoError(t, store.Save(ctx, session))
 	message := *types.NewAssistantMessage(strings.Repeat("answer", 4000))
@@ -336,19 +329,18 @@ func TestSQLiteSessionStorageEnforcesHardHotMessageLimit(t *testing.T) {
 	require.NoError(t, store.db.QueryRowContext(ctx, `
 		SELECT byte_count FROM session_prompt_messages WHERE session_id = ?
 	`, session.ID).Scan(&storedBytes))
-	require.LessOrEqual(t, storedBytes, store.cfg.MaxHotMessageBytes)
+	require.Greater(t, storedBytes, 4096, "prompt projection must not be bounded by a fixed byte cap")
 	loaded, err := store.Load(ctx, session.ID)
 	require.NoError(t, err)
 	require.Len(t, loaded.History, 1)
-	require.True(t, loaded.History[0].Metadata.GetBool("session_storage_truncated", false))
+	require.Equal(t, message.Content, loaded.History[0].Content)
+	require.Len(t, loaded.History[0].ToolCalls, 64)
+	require.False(t, loaded.History[0].Metadata.GetBool("session_storage_truncated", false))
 }
 
-func TestSQLiteSessionStoragePreservesCustomToolTransportWhenTruncated(t *testing.T) {
+func TestSQLiteSessionStoragePreservesCustomToolTransportLosslessly(t *testing.T) {
 	ctx := context.Background()
-	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.MaxHotMessageBytes = 4096
-		cfg.HotHistoryBytes = 8192
-	})
+	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("custom-tool-transport-user")
 	require.NoError(t, store.Save(ctx, session))
 
@@ -366,9 +358,9 @@ func TestSQLiteSessionStoragePreservesCustomToolTransportWhenTruncated(t *testin
 	require.Len(t, loaded.History[0].ToolCalls, 1)
 	stored := loaded.History[0].ToolCalls[0]
 	require.Equal(t, "custom_tool_call", stored.Type)
-	require.NotEmpty(t, stored.RawInput)
-	require.Less(t, len(stored.RawInput), len(raw))
-	require.Equal(t, true, stored.Args["_session_storage_omitted"])
+	require.Equal(t, raw, stored.RawInput, "tool transport payloads must survive the prompt projection verbatim")
+	require.Equal(t, raw, stored.Args["patch"])
+	require.NotContains(t, stored.Args, "_session_storage_omitted")
 
 	canonical, err := store.GetRecentMessages(ctx, session.ID, 1)
 	require.NoError(t, err)
@@ -376,12 +368,9 @@ func TestSQLiteSessionStoragePreservesCustomToolTransportWhenTruncated(t *testin
 	require.Equal(t, raw, canonical[0].ToolCalls[0].RawInput)
 }
 
-func TestSQLiteSessionStoragePreservesFrozenContextMetadataWhenTruncated(t *testing.T) {
+func TestSQLiteSessionStoragePreservesFrozenContextMetadataLosslessly(t *testing.T) {
 	ctx := context.Background()
-	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.MaxHotMessageBytes = 4096
-		cfg.HotHistoryBytes = 8192
-	})
+	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("snapshot-metadata-user")
 	require.NoError(t, store.Save(ctx, session))
 
@@ -396,19 +385,16 @@ func TestSQLiteSessionStoragePreservesFrozenContextMetadataWhenTruncated(t *test
 	require.NoError(t, err)
 	require.Len(t, loaded.History, 1)
 	stored := loaded.History[0]
-	require.True(t, stored.Metadata.GetBool("session_storage_truncated", false))
+	require.Equal(t, message.Content, stored.Content)
+	require.False(t, stored.Metadata.GetBool("session_storage_truncated", false))
 	require.Equal(t, "recall", stored.Metadata.GetString("context_stage", ""))
 	require.True(t, stored.Metadata.GetBool("context_snapshot", false))
 	require.Equal(t, "turn-cache-prefix", stored.Metadata.GetString("context_turn_id", ""))
 }
 
-func TestSQLiteSessionStorageKeepsProjectionBoundedAsTranscriptGrows(t *testing.T) {
+func TestSQLiteSessionStorageKeepsFullProjectionAsTranscriptGrows(t *testing.T) {
 	ctx := context.Background()
-	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.HotHistoryMessages = 12
-		cfg.HotHistoryBytes = 32 * 1024
-		cfg.MaxHotMessageBytes = 8 * 1024
-	})
+	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("long-session-user")
 	require.NoError(t, store.Save(ctx, session))
 	for index := 0; index < 300; index++ {
@@ -421,20 +407,18 @@ func TestSQLiteSessionStorageKeepsProjectionBoundedAsTranscriptGrows(t *testing.
 		SELECT COUNT(*), COALESCE(SUM(byte_count), 0)
 		FROM session_prompt_messages WHERE session_id = ?
 	`, session.ID).Scan(&count, &totalBytes))
-	require.LessOrEqual(t, count, store.cfg.HotHistoryMessages)
-	require.LessOrEqual(t, totalBytes, store.cfg.HotHistoryBytes)
+	require.Equal(t, 300, count, "every request message must remain in the prompt projection")
+	require.Greater(t, totalBytes, 0)
 	loaded, err := store.Load(ctx, session.ID)
 	require.NoError(t, err)
 	require.Equal(t, 300, loaded.CanonicalMessageCount)
-	require.LessOrEqual(t, len(loaded.History), store.cfg.HotHistoryMessages)
+	require.Equal(t, 300, len(loaded.History))
+	require.Equal(t, strings.Repeat("result", 500), loaded.History[len(loaded.History)-1].Content)
 }
 
 func TestSQLiteSessionStorageAppendDoesNotRewriteWholeProjection(t *testing.T) {
 	ctx := context.Background()
-	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.HotHistoryMessages = 8
-		cfg.HotHistoryBytes = 64 * 1024
-	})
+	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("write-amplification-user")
 	require.NoError(t, store.Save(ctx, session))
 	for index := 0; index < 8; index++ {
@@ -447,11 +431,11 @@ func TestSQLiteSessionStorageAppendDoesNotRewriteWholeProjection(t *testing.T) {
 	require.NoError(t, store.Update(ctx, session))
 	var after int64
 	require.NoError(t, store.db.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&after))
-	require.LessOrEqual(t, after-before, int64(4), "append should insert one canonical row, one prompt row, trim one prompt row, and update metadata")
-	require.LessOrEqual(t, len(session.History), store.cfg.HotHistoryMessages)
+	require.LessOrEqual(t, after-before, int64(3), "append should insert one canonical row, one prompt row, and update metadata")
+	require.Equal(t, 9, len(session.History))
 }
 
-func TestSQLiteSessionStorageMetadataOnlyUpdateReusesHotProjection(t *testing.T) {
+func TestSQLiteSessionStorageMetadataOnlyUpdateReusesPromptProjection(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("metadata-memory-user")
@@ -469,18 +453,15 @@ func TestSQLiteSessionStorageMetadataOnlyUpdateReusesHotProjection(t *testing.T)
 	require.Equal(t, "metadata only", loaded.Metadata.Title)
 }
 
-func TestSQLiteSessionStorageUpdateKeepsInMemoryProjectionBounded(t *testing.T) {
+func TestSQLiteSessionStorageUpdateKeepsInMemoryProjectionLossless(t *testing.T) {
 	ctx := context.Background()
-	store := newTestSQLiteSessionStorage(t, func(cfg *PersistentSessionStorageConfig) {
-		cfg.HotHistoryMessages = 10
-		cfg.HotHistoryBytes = 64 * 1024
-	})
+	store := newTestSQLiteSessionStorage(t, nil)
 	session := NewSession("live-memory-user")
 	require.NoError(t, store.Save(ctx, session))
 	for index := 0; index < 250; index++ {
 		session.AddMessage(*types.NewToolMessage(fmt.Sprintf("call-%d", index), strings.Repeat("output", 400)))
 		require.NoError(t, store.Update(ctx, session))
-		require.LessOrEqual(t, len(session.History), store.cfg.HotHistoryMessages)
+		require.Equal(t, index+1, len(session.History), "update must not trim the in-memory prompt projection")
 	}
 	require.Equal(t, 250, session.CanonicalMessageCount)
 }
@@ -558,7 +539,6 @@ func TestSQLiteSessionStorageStreamsLegacyJSONImport(t *testing.T) {
 
 	cfg := DefaultPersistentSessionStorageConfig(dir)
 	cfg.Path = filepath.Join(dir, "sessions.sqlite")
-	cfg.HotHistoryMessages = 5
 	store, err := NewSQLiteSessionStorage(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.CloseStorage()) })
@@ -566,7 +546,7 @@ func TestSQLiteSessionStorageStreamsLegacyJSONImport(t *testing.T) {
 	loaded, err := store.Load(ctx, legacy.ID)
 	require.NoError(t, err)
 	require.Equal(t, 25, loaded.CanonicalMessageCount)
-	require.LessOrEqual(t, len(loaded.History), 5)
+	require.Equal(t, 25, len(loaded.History), "legacy import must keep the full prompt projection")
 	canonical, err := store.GetRecentMessages(ctx, legacy.ID, 100)
 	require.NoError(t, err)
 	// Explicit history pages are independent from the much smaller runtime window.

@@ -107,7 +107,6 @@ func TestFileStorageRoundTripAndLatest(t *testing.T) {
 	}
 	manager := NewSessionManager(storage, &SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      10,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -327,7 +326,6 @@ func TestLoadRequestedRuntimeSessionReturnsLatestMeaningfulSessionForResume(t *t
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -463,7 +461,7 @@ func TestLoadLatestResumableRuntimeSessionUsesBoundedSQLitePreviews(t *testing.T
 	}
 }
 
-func TestSyncRuntimeSessionKeepsLongRunningCLIHistoryBounded(t *testing.T) {
+func TestSyncRuntimeSessionKeepsLongRunningCLIHistoryLossless(t *testing.T) {
 	manager, userID, _, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("create sqlite session manager: %v", err)
@@ -492,11 +490,11 @@ func TestSyncRuntimeSessionKeepsLongRunningCLIHistoryBounded(t *testing.T) {
 		if err := syncRuntimeSessionFromChat(session); err != nil {
 			t.Fatalf("sync message %d: %v", index, err)
 		}
-		if len(session.Messages) > 128 {
-			t.Fatalf("CLI history grew beyond hot message limit at %d: %d", index, len(session.Messages))
+		if len(session.Messages) != index+1 {
+			t.Fatalf("CLI history lost messages at %d: %d", index, len(session.Messages))
 		}
-		if len(session.RuntimeSession.History) > 128 {
-			t.Fatalf("runtime history grew beyond hot message limit at %d: %d", index, len(session.RuntimeSession.History))
+		if len(session.RuntimeSession.History) != index+1 {
+			t.Fatalf("runtime history lost messages at %d: %d", index, len(session.RuntimeSession.History))
 		}
 	}
 
@@ -506,17 +504,13 @@ func TestSyncRuntimeSessionKeepsLongRunningCLIHistoryBounded(t *testing.T) {
 		t.Fatalf("sync large tool result: %v", err)
 	}
 	if session.MsgCount != 777 {
-		t.Fatalf("expected cumulative message counter to survive projection trim, got %d", session.MsgCount)
+		t.Fatalf("expected cumulative message counter to survive sync, got %d", session.MsgCount)
 	}
 	if session.StatusMessageCount != countChatStatusMessages(session.Messages) {
-		t.Fatalf("status count does not match bounded CLI history: %d", session.StatusMessageCount)
+		t.Fatalf("status count does not match CLI history: %d", session.StatusMessageCount)
 	}
-	hotJSON, err := json.Marshal(session.Messages)
-	if err != nil {
-		t.Fatalf("marshal hot history: %v", err)
-	}
-	if len(hotJSON) > 2*1024*1024+1024 {
-		t.Fatalf("hot CLI history exceeded byte budget: %d", len(hotJSON))
+	if last := session.Messages[len(session.Messages)-1]; last.Content != largeContent {
+		t.Fatalf("large tool result must survive the lossless sync: got %d bytes", len(last.Content))
 	}
 
 	wantCanonicalCount := smallMessageCount + 1
@@ -543,7 +537,6 @@ func TestResumeLatestRuntimeConversationSkipsSystemOnlySession(t *testing.T) {
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -604,7 +597,6 @@ func TestResumeLatestRuntimeConversationSkipsCurrentSession(t *testing.T) {
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -729,7 +721,6 @@ func TestResumeLatestRuntimeConversationDoesNotFallbackToSystemOnlyAfterSkipping
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -772,7 +763,6 @@ func TestListResumeCandidateChatSessionsSkipsCurrentAndSystemOnly(t *testing.T) 
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

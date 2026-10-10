@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 )
 
 // DefaultShadowAlpha 是覆盖率阈值 α 的联调初值。
@@ -592,7 +592,11 @@ func estimateTokens(s string) int {
 	if s == "" {
 		return 0
 	}
-	return (utf8.RuneCountInString(s) + 3) / 4
+	tokens := tokenestimate.Estimate(s, tokenestimate.ProfileGeneric)
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
 }
 
 func countNonEmptyLines(s string) int {

@@ -138,6 +138,8 @@ providers:
 4. 否则如果 provider 暴露了 `MaxContextTokens`，按 provider context limit 的默认比例 `0.9` 计算。
 5. 最后才使用 `context.fallbackMaxPromptTokens`；如果该配置为空，则使用内置默认 `32000`。
 
+Provider 未返回 usage 时的兜底估算使用 `internal/tokenestimate`：按字符类别（ASCII 词、数字、符号串、空白、CJK/假名/谚文、西里尔、其它文字、emoji）分别定价，常量对齐 tiktoken `cl100k_base`/`o200k_base` 与 Anthropic tokenizer 的实测比例（校准语料平均相对误差约 12–14%）；消息框架按 OpenAI cookbook 公式（每条 3 + name 1 + 回复引导 3）。provider 返回的 `prompt_tokens`/`input_tokens` 始终优先，估算只用于缺失时的门禁与快照。
+
 `context.profile` 仍然控制组织策略，例如 recall 数量、observation 数量和 ledger/summary 策略；但 recent-window / ledger / summary 对原始 history 的重组只在显式允许 prompt compaction 时生效。它不再单独把已知大上下文模型的 prompt 预算压到 12k，也不在普通请求里缩短历史。需要主动限制请求大小时，应配置 `context.maxPromptTokens`，并依赖 preflight / session compact 在发送前处理。
 
 兜底预算可在 `backend/configs/runtime.yaml` 中配置：

@@ -292,7 +292,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 			Interactive:     chatSkillMentionInteractiveTurn(session),
 			SystemGenerated: chatSkillMentionSystemGeneratedPrompt(prompt),
 			Pin:             skillPin,
-			UsedTokens:      countSharedChatMessagesTokens(session.Messages) + skillMentionGuideTokens(skillPin),
+			UsedTokens:      countSharedChatMessagesTokensForSession(session, session.Messages) + skillMentionGuideTokens(skillPin),
 			BudgetTokens:    resolveSharedChatPromptBudget(session).ActiveTurnMaxTokens,
 		}); len(mentionFragments) > 0 {
 			turnMessages = append(turnMessages, mentionFragments...)

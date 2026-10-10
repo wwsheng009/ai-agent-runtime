@@ -98,7 +98,6 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 
 func newEphemeralChatPersistenceState(explicitUserID string) *chatPersistenceState {
 	managerConfig := runtimechat.DefaultSessionManagerConfig()
-	managerConfig.MaxHistory = 200
 	managerConfig.CleanupInterval = 6 * time.Hour
 	managerConfig.IdleTimeout = 72 * time.Hour
 	userID := sessionruntime.ResolveSessionUserID(sessionruntime.IdentitySource{

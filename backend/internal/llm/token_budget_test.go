@@ -23,9 +23,11 @@ func TestDefaultTokenizer(t *testing.T) {
 			expected: 3, // ~10 chars / 4 = 2.5 -> integer division gives 2
 		},
 		{
-			name:     "longer text",
-			text:     "This is a longer piece of text that should have more tokens.",
-			expected: 20, // ~82 chars / 4 = 20 (integer division)
+			name: "longer text",
+			text: "This is a longer piece of text that should have more tokens.",
+			// Calibrated estimator: word/class pricing, ~5 chars per token for
+			// English prose (real tiktoken gives ~10-11).
+			expected: 13,
 		},
 	}
 
@@ -136,6 +138,9 @@ func TestTokenBudgetManager_CanFit(t *testing.T) {
 			name: "large message",
 			messages: []map[string]string{
 				{"role": "user", "content": "This is a very long message that exceeds the budget. " +
+					"This is a very long message that exceeds the budget. " +
+					"This is a very long message that exceeds the budget. " +
+					"This is a very long message that exceeds the budget. " +
 					"This is a very long message that exceeds the budget. " +
 					"This is a very long message that exceeds the budget. " +
 					"This is a very long message that exceeds the budget. " +

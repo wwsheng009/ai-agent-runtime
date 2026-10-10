@@ -268,7 +268,7 @@ func countChatContextTokensForMessages(session *ChatSession, messages []runtimet
 			return count
 		}
 	}
-	return countSharedChatMessagesTokens(messages)
+	return countSharedChatMessagesTokensForSession(session, messages)
 }
 
 func restoreChatTokenCount(session *ChatSession, runtimeSession *runtimechat.Session) {

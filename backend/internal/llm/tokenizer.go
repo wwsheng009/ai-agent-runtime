@@ -2,7 +2,8 @@ package llm
 
 import (
 	"strings"
-	"unicode"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 )
 
 // Tokenizer Token 计数器
@@ -23,20 +24,16 @@ func NewTokenizer(strategy string) *Tokenizer {
 
 // Count 计算文本的 Token 数量
 func (t *Tokenizer) Count(text string) int {
-	switch t.strategy {
-	case "openai":
-		return t.countOpenAITokens(text)
-	case "anthropic":
-		return t.countAnthropicTokens(text)
-	default:
-		return t.countSimple(text)
-	}
+	return tokenestimate.Estimate(text, profileForStrategy(t.strategy))
 }
 
 // MessagesTokenCount 计算消息的 Token 数量（包括元数据）
 const (
-	TokenPerMessage = 4 // 每条消息的元数据开销
+	TokenPerMessage = 3 // 每条消息的元数据开销（OpenAI cookbook: tokensPerMessage=3）
 	TokenPerName    = 1 // 每个名称字段的 Token 开销
+	// ReplyPrimingTokens 是每次 chat completion 请求的回复引导开销
+	// （OpenAI cookbook: every reply is primed with <|start|>assistant<|message|>）。
+	ReplyPrimingTokens = 3
 )
 
 // CountMessages 计算消息列表的 Token 数量
@@ -67,87 +64,16 @@ func (t *Tokenizer) CountMessages(messages []interface{}) int {
 	return total
 }
 
-// countSimple 简单计数（按单词和字符的混合估算）
-func (t *Tokenizer) countSimple(text string) int {
-	if text == "" {
-		return 0
+// profileForStrategy maps a tokenizer strategy to the calibrated fallback
+// profile. Unknown/OpenAI-compatible providers get the balanced generic
+// profile; exact provider-reported usage always takes precedence upstream.
+func profileForStrategy(strategy string) tokenestimate.Profile {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "anthropic":
+		return tokenestimate.ProfileAnthropic
+	default:
+		return tokenestimate.ProfileGeneric
 	}
-
-	// 首先按空格分词
-	fields := strings.Fields(text)
-	wordCount := len(fields)
-
-	// 如果字符数远大于单词数*4（英文的平均 Token/Word 比），使用字符估算
-	charCount := len(text)
-	if charCount > wordCount*6 {
-		return charCount / 3 // 粗略估计：3个字符约等于1个Token
-	}
-
-	// 否则使用单词数 + 其他符号
-	return wordCount + charCount/10
-}
-
-// countOpenAITokens OpenAI 近似计数（基于 GPT-3/4）
-func (t *Tokenizer) countOpenAITokens(text string) int {
-	if text == "" {
-		return 0
-	}
-
-	// OpenAI 的 Tokenization 比较复杂，这里使用近似算法
-	// 1. 实际上应该使用 tiktoken 库
-	// 2. 粗略估计：英文约 4 字符 = 1 token
-	// 3. 中文字符每个约等于 2 个 Tokens
-
-	var chineseChars int
-	var asciiRunes int
-
-	for _, r := range text {
-		if r >= unicode.MaxASCII {
-			// 非ASCII字符（包括中文）
-			chineseChars++
-		} else {
-			asciiRunes++
-		}
-	}
-
-	// 中文每个字符约 2 tokens
-	tokens := chineseChars * 2
-
-	// 英文大约 4 字符 = 1 token，向上取整保证非空文本至少 1 token
-	tokens += (asciiRunes + 3) / 4
-
-	return tokens
-}
-
-// countAnthropicTokens Anthropic 近似计数（基于 Claude）
-func (t *Tokenizer) countAnthropicTokens(text string) int {
-	if text == "" {
-		return 0
-	}
-
-	// Anthropic 和 OpenAI 的 Tokenization 类似但略有不同
-	// 1. Claude 的 tokenization 使用自己的算法
-	// 2. 粗略估计：英文约 3.5 字符 = 1 token
-	// 3. 中文字符每个约等于 1.5-2 个 Tokens
-
-	var chineseChars int
-	var asciiRunes int
-
-	for _, r := range text {
-		if r >= unicode.MaxASCII {
-			chineseChars++
-		} else {
-			asciiRunes++
-		}
-	}
-
-	// 中文每个字符约 1.5 tokens
-	tokens := chineseChars * 3 / 2
-
-	// 英文大约 3.5 字符 = 1 token，向上取整保证非空文本至少 1 token
-	tokens += (asciiRunes*2 + 6) / 7
-
-	return tokens
 }
 
 // CountTokensWithStrategy 使用指定策略计算 Token 数
@@ -156,14 +82,7 @@ func (t *Tokenizer) CountTokensWithStrategy(text, strategy string) int {
 		strategy = t.strategy
 	}
 
-	switch strategy {
-	case "openai":
-		return t.countOpenAITokens(text)
-	case "anthropic":
-		return t.countAnthropicTokens(text)
-	default:
-		return t.countSimple(text)
-	}
+	return tokenestimate.Estimate(text, profileForStrategy(strategy))
 }
 
 // EstimateTotalTokens 估算请求的总 Token 数

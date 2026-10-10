@@ -23,7 +23,6 @@ func TestStreamOlderResumeHistoryPagesVisitsEachPageAsItArrives(t *testing.T) {
 	require.NoError(t, err)
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -231,7 +230,6 @@ func TestDeferredResumeHistoryBackfillStreamsPagesIntoScene(t *testing.T) {
 
 	manager := runtimechat.NewSessionManager(gated, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -321,7 +319,6 @@ func TestDeferredResumeHistoryBackfillAbortsWhenSnapshotReplaced(t *testing.T) {
 
 	manager := runtimechat.NewSessionManager(gated, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

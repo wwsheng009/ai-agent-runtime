@@ -15,8 +15,7 @@ import (
 // ReAct loop then hands the rebuilt history to Update through ReplaceHistory,
 // which does not advance CanonicalMessageCount. Before the substance fallback in
 // identityAlignedAppendStart, Update appended nothing in exactly that state: the
-// transcript stalled minutes behind the prompt projection and the newest
-// messages only stayed readable through the bounded hot window.
+// transcript stalled minutes behind the prompt projection.
 func TestUpdateAppendsTailWhenMessageIDsWereReissued(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteSessionStorage(t, nil)
@@ -26,7 +25,7 @@ func TestUpdateAppendsTailWhenMessageIDsWereReissued(t *testing.T) {
 	require.NoError(t, err)
 	window := loaded.GetMessages()
 	require.NotEmpty(t, window)
-	require.Less(t, len(window), 150, "expected a bounded projection window")
+	require.Equal(t, 150, len(window), "prompt projection is lossless and keeps the full history")
 	before := canonicalRowCount(t, store, session.ID)
 
 	durable := append(reissueMessageIDs(window),

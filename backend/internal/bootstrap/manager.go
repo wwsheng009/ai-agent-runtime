@@ -185,9 +185,6 @@ func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, 
 			storageConfig := chat.DefaultPersistentSessionStorageConfig(dir)
 			storageConfig.Backend = config.Sessions.Backend
 			storageConfig.Path = config.Sessions.StorePath
-			storageConfig.HotHistoryMessages = config.Sessions.MaxHistory
-			storageConfig.HotHistoryBytes = config.Sessions.HotHistoryBytes
-			storageConfig.MaxHotMessageBytes = config.Sessions.MaxHotMessageBytes
 			storageConfig.HistoryPageMessages = config.Sessions.HistoryPageMessages
 			storageConfig.HistoryPageBytes = config.Sessions.HistoryPageBytes
 			storageConfig.MaxInlineMessageBytes = config.Sessions.MaxInlineMessageBytes
@@ -195,9 +192,6 @@ func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, 
 			storageConfig.BusyTimeout = config.Sessions.BusyTimeout
 
 			managerConfig := chat.DefaultSessionManagerConfig()
-			if config.Sessions.MaxHistory > 0 {
-				managerConfig.MaxHistory = config.Sessions.MaxHistory
-			}
 			if config.Sessions.TTL > 0 {
 				managerConfig.TTL = config.Sessions.TTL
 			}

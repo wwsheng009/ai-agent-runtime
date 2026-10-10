@@ -89,12 +89,13 @@ type ChatSession struct {
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
 	FastMode bool
 	BaseURL  string
-	// Messages 是当前模型热上下文投影（压缩/截断后 ≤ HotHistoryMessages 条）。
+	// Messages 是当前模型可见的 prompt 投影：持久化无损，条数不再受固定上限
+	// 约束；只有模型驱动的压缩（上下文窗口 × auto_compact_ratio）会改写它。
 	Messages []runtimetypes.Message
 	// ResumeHistory 是恢复会话后用于展示的 canonical 完整转录
 	// （append-only session_messages 全量回放）。它与 Messages 严格分离：
-	// 模型上下文始终使用 Messages，ResumeHistory 只供用户可见的历史回放
-	// （/resume、启动恢复等），避免把完整长对话塞进模型上下文。
+	// 模型上下文始终使用 Messages（可能已被压缩摘要改写），ResumeHistory
+	// 只供用户可见的历史回放（/resume、启动恢复等），保留压缩前的原文。
 	ResumeHistory []runtimetypes.Message
 	// ResumeFullHistory 是 `--full`：恢复历史会话时回放 canonical 完整转录
 	// （历史行为）。默认 false 时，若恢复出的热上下文（session.Messages）

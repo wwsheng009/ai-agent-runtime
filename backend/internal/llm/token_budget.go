@@ -3,6 +3,8 @@ package llm
 import (
 	"fmt"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 )
 
 // TokenEstimator 接口定义了 Token 估算功能
@@ -20,12 +22,10 @@ func NewDefaultEstimator() *DefaultEstimator {
 	return &DefaultEstimator{}
 }
 
-// EstimateTokens 使用粗略估算：大约 3 个字符 = 1 token（英文）
+// EstimateTokens 使用与运行时一致的校准估算器（按字符类别定价，常量对齐
+// tiktoken cl100k/o200k 与 Anthropic tokenizer 的实测比例）。
 func (t *DefaultEstimator) EstimateTokens(text string) int {
-	if text == "" {
-		return 0
-	}
-	return (len(text) + 2) / 3
+	return tokenestimate.Estimate(text, tokenestimate.ProfileGeneric)
 }
 
 // EstimateTokensFromMessages 估算消息列表的 Token 数量

@@ -383,7 +383,7 @@ func TestMaybeCompactReducesOversizedInputBeforeProviderCompaction(t *testing.T)
 	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
 
 	history := compactTestHistory()
-	history = append(history, *types.NewToolMessage("call-large", strings.Repeat("large output ", 1000)))
+	history = append(history, *types.NewToolMessage("call-large", strings.Repeat("large output ", 3000)))
 	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
 		SessionID: "session-compact-preflight",
 		Provider:  "provider-a",
@@ -826,15 +826,15 @@ func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, result)
 	require.Equal(t, "below_limit", status.Reason)
-	require.Equal(t, 85, status.TriggerTokenLimit)
+	require.Equal(t, 90, status.TriggerTokenLimit)
 	require.Equal(t, 0, provider.callCount)
 }
 
 // TestMaybeCompactTriggerAlignsWithInputBudget pins the 2026-09-28 incident
-// fix: the capability trigger (window × 0.85, messages only) sat above the
+// fix: the capability trigger (window × 0.9, messages only) sat above the
 // provider send gate (window − reserved output, messages + tool schemas), so a
 // history read "below_limit" while the next provider request was still rejected
-// before it was sent (messages 98152 < trigger 108800, prompt 116025 > gate
+// before it was sent (messages 98152 < trigger 115200, prompt 116025 > gate
 // 96000). Passing the gate's numbers must make the same history compact.
 func TestMaybeCompactTriggerAlignsWithInputBudget(t *testing.T) {
 	newRuntime := func() (*llm.LLMRuntime, *compactTestProvider) {
@@ -858,7 +858,7 @@ func TestMaybeCompactTriggerAlignsWithInputBudget(t *testing.T) {
 	counter := func(messages []types.Message) int { return len(messages) * 19000 }
 	tokensBefore := counter(history)
 	require.Greater(t, tokensBefore, 78127, "fixture must sit in the trigger/gate blind spot")
-	require.Less(t, tokensBefore, 108800, "fixture must stay below the capability trigger")
+	require.Less(t, tokensBefore, 115200, "fixture must stay below the capability trigger")
 
 	// Pre-fix behavior: without the gate numbers the capability trigger skips.
 	runtime, provider := newRuntime()
@@ -874,7 +874,7 @@ func TestMaybeCompactTriggerAlignsWithInputBudget(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, result)
 	require.Equal(t, "below_limit", status.Reason)
-	require.Equal(t, 108800, status.TriggerTokenLimit)
+	require.Equal(t, 115200, status.TriggerTokenLimit)
 	require.Equal(t, 0, provider.streamCount)
 
 	// Aligned trigger: 96000 − 17873 = 78127, so the same history compacts.
@@ -1333,7 +1333,7 @@ func TestMaybeCompactMissingModelCapabilityUsesProviderContextWindow(t *testing.
 	require.Equal(t, "provider-a", status.ResolvedProvider)
 	require.Equal(t, "gpt-provider-default", status.ResolvedModel)
 	require.Equal(t, 96000, status.MaxContextTokens)
-	require.Equal(t, 81600, status.TriggerTokenLimit)
+	require.Equal(t, 86400, status.TriggerTokenLimit)
 	require.Equal(t, 1, provider.streamCount)
 }
 

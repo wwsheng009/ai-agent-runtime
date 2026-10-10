@@ -485,18 +485,15 @@ aicli --help
 
 当前启动时不再自动弹出历史会话选择菜单；默认创建新会话。恢复历史会话请使用 `--resume`、`--session`、`/resume`、`/sessions` 或 `/load`。
 
-### 会话存储与长会话内存上限
+### 会话存储与长会话上下文
 
-持久会话默认使用 SQLite。完整 canonical transcript 追加写入 `session_messages`，运行时只加载有界的 `session_prompt_messages` 投影；compact 只替换 prompt projection，不覆盖 compact 前的 canonical transcript。会话列表只读取 metadata，历史接口使用 `before_seq` 游标按页向前读取，因此恢复和列表不会随完整历史长度线性占用内存。
+持久会话默认使用 SQLite。完整 canonical transcript 追加写入 `session_messages`，运行时加载无损的 `session_prompt_messages` 投影（模型可见历史，不再有固定条数/字节上限）；上下文压力由模型窗口与 `auto_compact_ratio`（默认 0.9）/`auto_compact_token_limit` 驱动的模型压缩处理，compact 只替换 prompt projection，不覆盖 compact 前的 canonical transcript。会话列表只读取 metadata，历史接口使用 `before_seq` 游标按页向前读取，因此恢复和列表不会随完整历史长度线性占用内存。
 
 ```yaml
 sessions:
   backend: sqlite
   # 相对路径以 sessions.dir 为基准；留空时使用 session_history.sqlite
   storePath: session_history.sqlite
-  maxHistory: 128
-  hotHistoryBytes: 2097152
-  maxHotMessageBytes: 131072
   historyPageMessages: 100
   historyPageBytes: 4194304
   maxInlineMessageBytes: 524288
@@ -505,6 +502,7 @@ sessions:
 ```
 
 - 单条 canonical 消息超过 `maxInlineMessageBytes` 时，正文按内容哈希写入 `session-artifacts/<session-id>/`，SQLite 保存路径、大小、校验值和有界预览。
+- 升级前被旧固定上限裁剪过的 prompt 投影，在加载时会从 canonical transcript 自愈恢复完整请求历史；带 compact 检查点的投影保持压缩后的替换结果。
 - SQLite 使用单连接、WAL、`synchronous=NORMAL`、文件临时表、禁用 mmap 和小页缓存；关闭存储时执行 WAL truncate checkpoint，新数据库启用 incremental auto-vacuum。
 - 首次切换到 SQLite 时会流式导入 sessions 目录中的旧 JSON 会话。旧 JSON 默认保留作为回滚源，不会自动删除。
 - `resume latest`、会话选择和 slash 补全按 100 条 metadata/preview 分页读取；清理和 idle 归档按最多 128 条一批执行，避免会话文件或过期会话总数抬高峰值内存。

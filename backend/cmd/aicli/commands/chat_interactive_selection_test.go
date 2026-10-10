@@ -218,7 +218,6 @@ func TestPromptStartupSessionSelectionWithReader_RetriesAfterInvalidChoice(t *te
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
@@ -318,7 +317,6 @@ func TestMaybeSelectStartupSession_PreservesBufferedInputOnSharedReader(t *testi
 	}
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})

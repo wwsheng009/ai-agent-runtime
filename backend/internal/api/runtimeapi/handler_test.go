@@ -476,7 +476,6 @@ func TestExecuteSkill_AttachesMessagesToRequestedSession(t *testing.T) {
 	handler := NewHandler(registry, nil, mcpManager)
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,
@@ -700,7 +699,6 @@ func TestAgentChat_UsesLLMAndPersistsSession(t *testing.T) {
 
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,
@@ -785,7 +783,6 @@ func TestAgentChat_SessionHistoryAutoCompactsBeforeLLMFallback(t *testing.T) {
 
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,
@@ -938,7 +935,6 @@ func TestAgentChat_ReActReturnsStructuredFailureWhenMaxStepsIsReached(t *testing
 
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,
@@ -1061,7 +1057,6 @@ func TestAgentChat_EnableReAct_UsesAgentLoopAndPersistsSession(t *testing.T) {
 
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,
@@ -3723,7 +3718,6 @@ func TestSessionEndpoints_Lifecycle(t *testing.T) {
 	handler := NewHandler(registry, nil, mcpManager)
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,
@@ -3786,7 +3780,6 @@ func TestGetSessionHistory_EmptyHistoryUsesEmptyArray(t *testing.T) {
 	handler := NewHandler(registry, nil, nil)
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,
@@ -3853,7 +3846,6 @@ func TestSessionEndpoints_SearchUpdateAndBatchOperations(t *testing.T) {
 	handler := NewHandler(registry, nil, mcpManager)
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), &chat.SessionManagerConfig{
 		TTL:             time.Hour,
-		MaxHistory:      20,
 		CleanupInterval: time.Hour,
 		AutoArchive:     false,
 		IdleTimeout:     time.Hour,

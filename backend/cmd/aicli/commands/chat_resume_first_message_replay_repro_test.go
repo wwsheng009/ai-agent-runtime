@@ -311,7 +311,6 @@ func TestResumeWindowedBackfillFirstMessageDoesNotReplayHistory(t *testing.T) {
 	t.Cleanup(func() { _ = storage.CloseStorage() })
 	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{
 		TTL:             24 * time.Hour,
-		MaxHistory:      0,
 		CleanupInterval: 0,
 		AutoArchive:     false,
 	})
