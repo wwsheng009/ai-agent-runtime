@@ -226,7 +226,8 @@ aicli chat --pprof
   - [ ] 左侧 `#cfg-model-list` 按支持模型逐行渲染，每行是**可点击**的模型名 + 配置摘要 chip（`ctx 200K` / `out 32K` / `reasoning` / `N 档` / `压缩 150K` / 模态 / 原生工具 / 端点契约）；完全未配置的模型显示灰色「未配置」chip。
   - [ ] 点击模型行打开右侧 `#cfg-model-editor` 面板，按 6 个分组渲染 **model_capabilities 的全部可编辑字段**：上下文与输出（`max_context_tokens` / `max_tokens` / `auto_compact_ratio`）、Reasoning（`reasoning_model` / `reasoning_efforts` / 默认 effort / 压缩 effort）、Reasoning 预算（`reasoning_effort_budgets`，每行 `effort: tokens`）、自动压缩（`auto_compact_token_limit` / `auto_compact_mode` / `supports_remote_compact`）、输入模态与原生工具（`input_modalities` / `image_generation` / `images_generations_api`）、端点契约（`replay_reasoning_content` 三态下拉）。
   - [ ] 再次点击同一模型收起面板；面板头有「设为默认模型」（写入 `default_model` 后显示「默认模型」徽标）与「从列表移除」（同步删掉支持模型 textarea 中的该行并关闭面板）。
-  - [ ] 过滤框 `#cfg-model-filter` 按子串过滤模型名，计数显示 `N / M 个模型`；无匹配时列表显示提示而非空白。
+  - [ ] 过滤框 `#cfg-model-filter` 按子串过滤模型名，计数显示 `N / M 个模型`（有已配置项时追加 `· 已配置 K / M`）；无匹配时列表显示提示而非空白。
+  - [ ] **列表键盘路径**：Tab 可逐行聚焦（每行仍是原生按钮，Tab 顺序不变）；↑/↓ 在行间移动焦点、Home/End 到首尾、Enter/Space 打开；焦点行整行高亮（`:has(.cfg-model-open:focus-visible)`）。选中行、勾选的模态 chip 与开关背景统一用 `--activeBg`（回归：曾引用从未定义的 `--bg1`，整条声明被静默丢弃、选中态没有背景）。
   - [ ] **未声明值渲染为空串**（显示 placeholder），不是 `0`——数字框显示 `0` 会被误读成真实值；`0` / `false` / 空数组在保存时表示**显式清空**（后端从 config.yaml 移除该字段），留空同样不写入。
   - [ ] `replay_reasoning_content` 三态可区分：未声明（空）/ `true 强制回传` / `false 禁止注入`——三者在保存与回显后必须各自保持不变。
   - [ ] 已保存配置回显：编辑某 provider 后重新打开，模型编辑器应显示 `model_capabilities` 里的值（不再只回显 reasoning 四字段）。

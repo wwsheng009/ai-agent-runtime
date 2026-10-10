@@ -661,11 +661,18 @@ function renderModelList(models) {
     return !cfgModelFilter || m.toLowerCase().indexOf(cfgModelFilter) >= 0;
   });
   if (countEl) {
-    countEl.textContent = models.length
+    var base = models.length
       ? (visible.length === models.length
         ? models.length + " 个模型"
         : visible.length + " / " + models.length + " 个模型")
       : "";
+    // 已配置计数：扫列表时先知道「有多少模型真的配了东西」，不用逐行看 chip。
+    var configuredCount = models.filter(function (m) {
+      return !modelDraftIsEmpty(cfgModelDraft[m] || emptyModelDraft());
+    }).length;
+    countEl.textContent = base && configuredCount > 0
+      ? base + " · 已配置 " + configuredCount + " / " + models.length
+      : base;
   }
   if (models.length === 0) {
     listEl.innerHTML = '<div class="config-empty">在上方填写支持模型后在此逐模型编辑</div>';
@@ -1647,6 +1654,25 @@ export function initProviderEditor() {
         if (!row) { return; }
         e.preventDefault();
         toggleModelEditor(row.getAttribute("data-model") || "");
+      });
+      // 键盘捷径：↑/↓ 在行间移动焦点，Home/End 到首尾；Enter/Space 由按钮
+      // 原生语义触发打开。Tab 顺序不变（每行仍是原生可聚焦按钮），这里只
+      // 补一条不离开列表的方向键路径。
+      modelList.addEventListener("keydown", function (e) {
+        if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") { return; }
+        var rows = Array.prototype.slice.call(modelList.querySelectorAll(".cfg-model-item"));
+        if (!rows.length) { return; }
+        var current = e.target && e.target.closest ? e.target.closest(".cfg-model-item") : null;
+        var index = current ? rows.indexOf(current) : -1;
+        if (index < 0) { return; }
+        var next = e.key === "Home" ? 0
+          : e.key === "End" ? rows.length - 1
+            : e.key === "ArrowDown" ? Math.min(index + 1, rows.length - 1)
+              : Math.max(index - 1, 0);
+        var target = rows[next].querySelector(".cfg-model-open");
+        if (!target) { return; }
+        e.preventDefault();
+        target.focus();
       });
     }
     var modelAdd = configEl("cfg-model-add");

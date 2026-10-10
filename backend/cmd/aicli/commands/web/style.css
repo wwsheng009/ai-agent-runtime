@@ -1785,7 +1785,7 @@ body.sidebar-collapsed #sidebar {
   padding-right: 22px; margin-bottom: 2px;
 }
 #cfg-model-list .cfg-model-item:hover { background: var(--bg2); border-color: var(--border); }
-#cfg-model-list .cfg-model-item.active { background: var(--bg1); border-color: var(--accent); }
+#cfg-model-list .cfg-model-item.active { background: var(--activeBg); border-color: var(--accent); }
 #cfg-model-list .cfg-model-open {
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
   width: 100%; text-align: left; background: transparent; color: var(--fg2);
@@ -1929,7 +1929,7 @@ body.sidebar-collapsed #sidebar {
 }
 .cfg-mod:hover { border-color: var(--border2); }
 .cfg-mod input { margin: 0; width: auto; padding: 0; accent-color: var(--accent); }
-.cfg-mod:has(input:checked) { border-color: var(--accent); background: var(--bg1); }
+.cfg-mod:has(input:checked) { border-color: var(--accent); background: var(--activeBg); }
 .cfg-mod:focus-within { outline: 1px solid var(--accent); outline-offset: 1px; }
 .cfg-mod-name { font-size: 11px; color: var(--fg2); line-height: 1.4; }
 .cfg-mod:has(input:checked) .cfg-mod-name { color: var(--accent); }
@@ -1963,8 +1963,24 @@ body.sidebar-collapsed #sidebar {
 }
 .cfg-switch:hover { border-color: var(--border2); color: var(--fg); }
 .cfg-switch input { margin: 0; width: auto; padding: 0; accent-color: var(--accent); }
-.cfg-switch:has(input:checked) { border-color: var(--accent); color: var(--accent); background: var(--bg1); }
+.cfg-switch:has(input:checked) { border-color: var(--accent); color: var(--accent); background: var(--activeBg); }
 .cfg-switch:focus-within { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+/* 键盘在列表内移动焦点时整行高亮：焦点落在内层按钮上，用 :has 把行一起
+   点亮，与鼠标 hover / active 的视觉语言一致（Tab 与方向键路径都受益）。 */
+#cfg-model-list .cfg-model-item:has(.cfg-model-open:focus-visible) {
+  background: var(--bg2); border-color: var(--accent);
+}
+
+/* 窄屏密度：15 个字段的面板在 300px 高的窗口里要滚 3 屏多。只收分组间距
+   与内边距，不动控件高度——触控目标维持 30px 不变（见上面的媒体查询）。 */
+@media (max-width: 720px) {
+  .cfg-model-editor { gap: 6px; }
+  .cfg-model-editor-body { padding: 6px; }
+  .cfg-model-section { margin-bottom: 6px; }
+  .cfg-model-section-title { margin-bottom: 4px; padding-bottom: 2px; }
+  .cfg-model-toggles { margin-bottom: 5px; }
+}
 
 .config-form-actions { display: flex; align-items: center; gap: 8px; }
 .config-form-actions .cfg-status { font-size: 11px; }
