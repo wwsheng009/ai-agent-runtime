@@ -59,6 +59,21 @@ func TestSettleParkedTurnOnRunEnd(t *testing.T) {
 	require.False(t, ok, "a canceled run ctx must not block the settle clear")
 
 	// Unresolvable state is a no-op: no record, no session id, no coordinator.
+	// 孤儿记录自愈：义务已全终态的历史挂起记录，在任意 run 边界一并结清；
+	// 仍欠运行中义务的记录必须保留。
+	parkAgentSettleTurn(t, store, "turn-stale", "batch-stale")
+	seedAgentSettleBatch(t, store, "batch-stale", subagentbatch.BatchCompleted)
+	parkAgentSettleTurn(t, store, "turn-live", "batch-live")
+	seedAgentSettleBatch(t, store, "batch-live", subagentbatch.BatchRunning)
+
+	loop.settleParkedTurnOnRunEnd(ctx, "sess-1", "turn-live")
+	_, stale, err := store.GetTurnSuspension(ctx, "sess-1", "turn-stale")
+	require.NoError(t, err)
+	require.False(t, stale, "a terminal orphan record must be swept at any run boundary")
+	_, live, err := store.GetTurnSuspension(ctx, "sess-1", "turn-live")
+	require.NoError(t, err)
+	require.True(t, live, "a still-running obligation keeps its record")
+
 	loop.settleParkedTurnOnRunEnd(ctx, "sess-1", "turn-unknown")
 	loop.settleParkedTurnOnRunEnd(ctx, "", "turn-parked")
 	(&ReActLoop{}).settleParkedTurnOnRunEnd(ctx, "sess-1", "turn-parked")

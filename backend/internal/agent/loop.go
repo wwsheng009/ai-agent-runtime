@@ -7473,6 +7473,12 @@ func toolCallAutoStartDefaultTrue(call types.ToolCall) bool {
 // the check runs at the run boundary, where this loop still knows both the
 // session and the turn id.
 //
+// 结清范围是本会话的**全部**挂起记录：当前 turn 的记录先结清（常见路径），
+// 随后扫掉义务已全终态的历史孤儿记录。孤儿记录来自「最后一次唤醒丢失、成功
+// 批次又不产生下一个 run」这类断链——只认当前 turn 的话，它们会永久滞留，
+// 账户一直渲染 "Waiting for subagents"（真机 2026-10-10：7 个批次全部成功，
+// 记录停滞 6 小时）。
+//
 // A failure here must never fail the run: this is a bookkeeping clear, so a read
 // error or an unsettled record simply keeps the record for the next turn
 // boundary, and only a failed clear is projected as an I9 degradation.
@@ -7502,8 +7508,8 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 	}
 	settleCtx, cancel := context.WithTimeout(baseCtx, 5*time.Second)
 	defer cancel()
-	record, ok, err := store.GetTurnSuspension(settleCtx, sessionID, turnID)
-	if err != nil || !ok || record == nil {
+	records, err := store.ListTurnSuspensions(settleCtx, sessionID)
+	if err != nil || len(records) == 0 {
 		return
 	}
 	var agentSessionResolver subagentbatch.AgentSessionObligationResolver
@@ -7512,26 +7518,41 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 		agentSessionResolver = loop.config.AgentSessionObligations
 		teamResolver = loop.config.TeamObligations
 	}
-	settled, err := subagentbatch.TurnObligationsSettledWithTeams(settleCtx, store, record, agentSessionResolver, teamResolver)
-	if err != nil || !settled {
-		return
+	// 当前 turn 的记录排在最前：保留「结清当前 turn」的既有事件顺序，随后再
+	// 处理历史孤儿记录。
+	ordered := make([]*subagentbatch.TurnSuspension, 0, len(records))
+	for _, record := range records {
+		if record != nil && record.TurnID == turnID {
+			ordered = append(ordered, record)
+		}
 	}
-	if err := store.ClearTurnSuspension(settleCtx, sessionID, turnID); err != nil {
-		loop.agent.reportSuspensionDegraded(settleCtx, sessionID, "parked-state clear failed: "+err.Error())
-		return
+	for _, record := range records {
+		if record != nil && record.TurnID != turnID {
+			ordered = append(ordered, record)
+		}
 	}
-	// §6.8 / G3 闭合半边：义务全部终态 ⇒ 挂起态在**同一 run 内**闭合（没有、也不
-	// 会有 resume episode）。结清若静默清记录，则只有 turn.suspended 会到达消费者，
-	// 而前端契约是"只有 turn.resumed 清除挂起态"，挂起横幅会永久卡住（2026-09-26
-	// 真机 E2E：后台批次在父 turn 结束前就完成 ⇒ 永不出现 resume episode）。
-	// 因此补发一次非 wake 的闭合事件：trigger=settled，身份字段与 wake 版一致。
-	loop.emitRuntimeEvent(events.EventTurnResumed, sessionID, "", map[string]interface{}{
-		"turn_id":          turnID,
-		"session_id":       sessionID,
-		"trigger":          events.TurnResumedTriggerSettled,
-		"settled":          true,
-		"obligation_count": len(record.ObligationIDs),
-	})
+	for _, record := range ordered {
+		settled, err := subagentbatch.TurnObligationsSettledWithTeams(settleCtx, store, record, agentSessionResolver, teamResolver)
+		if err != nil || !settled {
+			continue
+		}
+		if err := store.ClearTurnSuspension(settleCtx, sessionID, record.TurnID); err != nil {
+			loop.agent.reportSuspensionDegraded(settleCtx, sessionID, "parked-state clear failed: "+err.Error())
+			continue
+		}
+		// §6.8 / G3 闭合半边：义务全部终态 ⇒ 挂起态在**同一 run 内**闭合（没有、也不
+		// 会有 resume episode）。结清若静默清记录，则只有 turn.suspended 会到达消费者，
+		// 而前端契约是"只有 turn.resumed 清除挂起态"，挂起横幅会永久卡住（2026-09-26
+		// 真机 E2E：后台批次在父 turn 结束前就完成 ⇒ 永不出现 resume episode）。
+		// 因此补发一次非 wake 的闭合事件：trigger=settled，身份字段与 wake 版一致。
+		loop.emitRuntimeEvent(events.EventTurnResumed, sessionID, "", map[string]interface{}{
+			"turn_id":          record.TurnID,
+			"session_id":       sessionID,
+			"trigger":          events.TurnResumedTriggerSettled,
+			"settled":          true,
+			"obligation_count": len(record.ObligationIDs),
+		})
+	}
 }
 
 // startBackgroundSubagentBatch persists a background batch and launches its

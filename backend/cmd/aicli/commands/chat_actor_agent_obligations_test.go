@@ -499,3 +499,69 @@ func TestProjectLocalAgentCompletionDoesNotDoubleWakeCriticalSettledTurn(t *test
 	require.NoError(t, err)
 	require.Empty(t, pending, "结算 wake 不得重复 critical 生命周期 wake")
 }
+
+// TestLocalSubagentBatchProjectorSchedulesSettledWake 钉住成功批次的结算缺边
+// （真机 2026-10-10：批次全部成功 → 没有 lifecycle wake → 父会话数小时停在
+// "Waiting for subagents"）：info 终态也必须在 durable 账本全终态时补排一笔
+// 结算 wake，并经正常 drain 恢复父会话；父会话在跑时 wake 保持 durable。
+func TestLocalSubagentBatchProjectorSchedulesSettledWake(t *testing.T) {
+	host, store, deliveries := newWakeConsumerTestHost(t, "aicli-batch-settled-wake")
+	ctx := context.Background()
+	attachSettledTurnWakeFixture(t, host, store, "batch-settled-wake")
+
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID: "root-session",
+		Status:    runtimechat.SessionRunning,
+		UpdatedAt: time.Now().UTC(),
+	}))
+
+	now := time.Now().UTC()
+	_, err := host.SubagentBatches.CreateBatch(ctx, &subagentbatch.SubagentBatch{
+		BatchID:         "batch-settled-ok",
+		RootScopeID:     "root-session",
+		ParentSessionID: "root-session",
+		ParentTurnID:    "turn-settled-batch",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchCompleted,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Version:         1,
+	}, nil)
+	require.NoError(t, err)
+	require.NoError(t, host.SubagentBatches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn-settled-batch",
+		SessionID:     "root-session",
+		RootScopeID:   "root-session",
+		ObligationIDs: []string{"batch-settled-ok", "task-1"},
+		ResumeQueue:   []string{"batch-settled-ok"},
+		ParkedAt:      now,
+	}))
+
+	projector := localSubagentBatchLifecycleProjector(host)
+	require.NoError(t, projector(ctx, agent.BatchTerminalLifecycle{
+		BatchID:         "batch-settled-ok",
+		RootScopeID:     "root-session",
+		ParentSessionID: "root-session",
+		Status:          subagentbatch.BatchCompleted,
+		EventType:       "subagent.batch.completed",
+		SubjectVersion:  2,
+		TaskCount:       1,
+		CompletedCount:  1,
+	}))
+
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "root-session", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "成功批次也必须为已结清的挂起 turn 排一笔结算 wake")
+	require.Equal(t, supervision.WakeReasonObligationSettled, pending[0].WakeReason)
+	require.Equal(t, "turn-settled-batch", pending[0].TurnID)
+	require.Equal(t, 0, deliveries.count(), "父会话在跑：结算 wake 保持 durable")
+
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID: "root-session",
+		Status:    runtimechat.SessionIdle,
+		UpdatedAt: time.Now().UTC(),
+	}))
+	require.NoError(t, host.supervisionWake.MaybeWakeParent(ctx, "root-session", "", "root-session"))
+	deliveries.wait(t, time.Second)
+	require.Equal(t, 1, deliveries.count(), "结算 wake 必须把成功批次的父会话恢复恰好一次")
+}

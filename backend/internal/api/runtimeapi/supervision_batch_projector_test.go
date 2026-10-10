@@ -280,3 +280,73 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	require.NoError(t, err)
 	require.Empty(t, pending, "投递成功后 wake 必须离开 pending（认领 + release）")
 }
+
+// TestAPIBatchLifecycleProjector_CompletedBatchSchedulesSettledWake 是 CLI
+// localSubagentBatchLifecycleProjector 同名用例的 API 侧对等：成功/警告终态没有
+// lifecycle wake，投影器必须在 durable 账本全终态时补排一笔结算 wake，否则
+// runtime-server 的父会话即使空闲也不会再起 run，永久停在 "Waiting for
+// subagents"（真机 2026-10-10，CLI 侧复现）。
+func TestAPIBatchLifecycleProjector_CompletedBatchSchedulesSettledWake(t *testing.T) {
+	handler, store := newAPISupervisionBudgetTestHandler(t, "api-batch-projector-settled")
+	handler.SetSubagentBatchStore(newAPISupervisionBatchStore(t))
+	ctx := context.Background()
+
+	batches := handler.getSubagentBatchStore()
+	require.NotNil(t, batches)
+	now := time.Now().UTC()
+	_, err := batches.CreateBatch(ctx, &subagentbatch.SubagentBatch{
+		BatchID:         "batch_api_settled",
+		RootScopeID:     "sess_parent",
+		ParentSessionID: "sess_parent",
+		ParentTurnID:    "turn_api_settled",
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchCompleted,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Version:         1,
+	}, nil)
+	require.NoError(t, err)
+	require.NoError(t, batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn_api_settled",
+		SessionID:     "sess_parent",
+		RootScopeID:   "sess_parent",
+		ObligationIDs: []string{"batch_api_settled", "task-1"},
+		ResumeQueue:   []string{"batch_api_settled"},
+		ParkedAt:      now,
+	}))
+
+	require.NoError(t, handler.apiBatchLifecycleProjector()(ctx, agent.BatchTerminalLifecycle{
+		BatchID:         "batch_api_settled",
+		RootScopeID:     "sess_parent",
+		ParentSessionID: "sess_parent",
+		Status:          subagentbatch.BatchCompleted,
+		EventType:       "subagent.batch.completed",
+		SubjectVersion:  1,
+		TaskCount:       1,
+		CompletedCount:  1,
+	}))
+
+	wakes, err := store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           "sess_parent",
+		TargetParentSessionID: "sess_parent",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	settled := false
+	for _, wake := range wakes {
+		if wake.WakeReason == supervision.WakeReasonObligationSettled {
+			settled = true
+		}
+	}
+	require.True(t, settled, "成功批次也必须留下结算 wake，否则父会话永久停在挂起态")
+
+	notifications, err := store.ListNotifications(ctx, supervision.NotificationFilter{
+		RootScopeID:     "sess_parent",
+		SubjectID:       "batch_api_settled",
+		IncludeResolved: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	require.Equal(t, supervision.SeverityInfo, notifications[0].Severity)
+	require.Equal(t, supervision.ResolutionClosed, notifications[0].ResolutionState)
+}

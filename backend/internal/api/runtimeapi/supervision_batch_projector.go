@@ -86,7 +86,7 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 			reason += ": " + strings.TrimSpace(terminal.Error)
 		}
 
-		if _, err := supervision.ProjectLifecycle(ctx, store, h.getSupervisionWakeScheduler(), supervision.LifecycleProjection{
+		notification, err := supervision.ProjectLifecycle(ctx, store, h.getSupervisionWakeScheduler(), supervision.LifecycleProjection{
 			RootScopeID:           rootScopeID,
 			TargetParentSessionID: parentSessionID,
 			SubjectKind:           supervision.SubjectAgentRun,
@@ -99,8 +99,25 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 			RecommendedAction:     recommended,
 			AllowedActions:        []string{string(supervision.ActionInspect), string(supervision.ActionCancel), string(supervision.ActionClose)},
 			ResolutionState:       resolution,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
+		}
+
+		// §6.12 成功批次缺边修复（与 CLI localSubagentBatchLifecycleProjector
+		// 同口径）：成功/警告终态没有 lifecycle wake，父会话的挂起记录只会在
+		// run 边界结清——没有这笔结算 wake，父会话即使空闲也不会再起 run，
+		// 永久停在 "Waiting for subagents"。谓词只在全部义务终态时排 wake。
+		if !supervision.LifecycleWakeScheduled(notification) {
+			_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+				ctx,
+				h.getSubagentBatchStore(),
+				h.agentSessionObligationResolver(),
+				h.teamObligationResolver(),
+				h.getSupervisionWakeScheduler(),
+				parentSessionID,
+				rootScopeID,
+			)
 		}
 
 		// P1-C 方案 C：batch 终态投影之后按策略收敛已完成的子会话（默认 off

@@ -600,7 +600,7 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		if convergeHint != "" {
 			reason += "; " + convergeHint
 		}
-		_, err := supervision.ProjectLifecycle(ctx, host.Supervision.Store, host.Supervision.Wakes, supervision.LifecycleProjection{
+		notification, err := supervision.ProjectLifecycle(ctx, host.Supervision.Store, host.Supervision.Wakes, supervision.LifecycleProjection{
 			RootScopeID:           rootScopeID,
 			TargetParentSessionID: parentSessionID,
 			SubjectKind:           supervision.SubjectAgentRun,
@@ -620,6 +620,25 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		// P1-C 方案 C：batch 终态投影之后按策略收敛已完成的子会话（默认 off
 		// 时该调用不产生任何写入）。
 		localConvergeTerminalBatchChildren(ctx, host, terminal)
+		// §6.12 成功批次缺边修复（真机 2026-10-10：批次全部成功、父会话数小时
+		// 停在 "Waiting for subagents"）：ProjectLifecycle 只为未决 critical 排
+		// wake，info/warning（含全部成功）拿不到生命周期 wake；而结清谓词只在
+		// run 边界跑、成功批次自己又不会再起下一个 run，于是 durable 挂起记录
+		// 永远清不掉、横幅永久卡住、turn_id 被永久复用。与子会话完成桥
+		// projectLocalAgentCompletion 同口径：没有 lifecycle wake 时补排一笔
+		// 结算 wake（谓词要求全部义务已终态才会排），下面的 drain 把它投递成
+		// 一次真实父 turn，run 结束时 settle 清账并补发 turn.resumed。
+		if !supervision.LifecycleWakeScheduled(notification) {
+			_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
+				ctx,
+				host.SubagentBatches,
+				host.agentSessionObligationResolver(),
+				host.teamObligationResolver(),
+				host.Supervision.Wakes,
+				parentSessionID,
+				rootScopeID,
+			)
+		}
 		if !drainWake {
 			return nil
 		}
