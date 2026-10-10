@@ -1820,7 +1820,8 @@ func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *te
 		"openai",
 		// used=28640 / window=128000 with Codex baseline → ~14%
 		"Context 14% used",
-		shortRoot,
+		// 工作目录已上移到会话 ID 行；段式状态行原位置是常驻 stream 状态。
+		"stream off",
 		"ai-gateway",
 		"feat/status-bar",
 		"128K window",
@@ -1836,7 +1837,8 @@ func TestBuildChatSurfaceStatusLine_PrioritizesAgentContextOverDiagnostics(t *te
 		t.Fatalf("expected Codex-style separator %q, got %q", chatSurfaceStatusSeparator, status)
 	}
 	// Provider appears as a bare name after the model segment; keep legacy labeled forms out.
-	for _, unwanted := range []string{"权限", "输入 ", "模型 ", "上下文 ", "目录 ", "目标 ", "reasoning_effort", "msgs 17"} {
+	// 目录段不再出现在段式状态行（只在会话 ID 行展示完整路径）。
+	for _, unwanted := range []string{"权限", "输入 ", "模型 ", "上下文 ", "目录 ", "目标 ", "reasoning_effort", "msgs 17", shortRoot} {
 		if strings.Contains(status, unwanted) {
 			t.Fatalf("expected status line to omit legacy diagnostic %q, got %q", unwanted, status)
 		}
@@ -1904,8 +1906,12 @@ func TestBuildChatSurfaceStatusLine_DedupesProjectWhenSameAsDirectory(t *testing
 	if strings.Contains(status, dup) {
 		t.Fatalf("expected project segment deduped when equal to cwd, got %q", status)
 	}
-	if !strings.Contains(status, "ai-agent-runtime") {
-		t.Fatalf("expected cwd name still present once, got %q", status)
+	// 工作目录已上移到会话 ID 行，段式状态行不再渲染目录路径。
+	if strings.Contains(status, root) {
+		t.Fatalf("expected directory path moved off the segment status row, got %q", status)
+	}
+	if !strings.Contains(buildChatSessionIDLine(session), root) {
+		t.Fatalf("expected cwd identity on the session ID row, got %q", buildChatSessionIDLine(session))
 	}
 	if !strings.Contains(status, "main") {
 		t.Fatalf("expected branch still present, got %q", status)
@@ -1935,17 +1941,15 @@ func TestBuildChatSurfaceStatusLine_KeepsDistinctProjectWhenCwdNested(t *testing
 	}
 	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 220)
 
+	// 工作目录已上移到会话 ID 行；嵌套 cwd（≠ 项目名）时项目段仍然保留。
 	if !strings.Contains(status, "ai-agent-runtime") {
 		t.Fatalf("expected project name from git root, got %q", status)
 	}
-	// Compact cwd should be the leaf directory when not equal to project.
-	if !strings.Contains(status, "cmd") && !strings.Contains(status, nested) {
-		t.Fatalf("expected nested cwd segment, got %q", status)
+	if strings.Contains(status, nested) {
+		t.Fatalf("expected directory path moved off the segment status row, got %q", status)
 	}
-	// Order is cwd then project when both are kept.
-	if !strings.Contains(status, "cmd"+chatSurfaceStatusSeparator+"ai-agent-runtime") &&
-		!strings.Contains(status, nested+chatSurfaceStatusSeparator+"ai-agent-runtime") {
-		t.Fatalf("expected distinct cwd · project pair, got %q", status)
+	if !strings.Contains(buildChatSessionIDLine(session), nested) {
+		t.Fatalf("expected nested cwd identity on the session ID row, got %q", buildChatSessionIDLine(session))
 	}
 }
 

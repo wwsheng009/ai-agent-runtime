@@ -161,6 +161,41 @@ func TestBuildChatPersistentStatusModelOmitsTransientState(t *testing.T) {
 	}
 }
 
+// chatSurfaceStreamStatusSegment：常驻段随 session.Stream 切换，关闭态用告警角色。
+func TestChatSurfaceStreamStatusSegmentFollowsSessionStream(t *testing.T) {
+	if seg := chatSurfaceStreamStatusSegment(nil); seg.full != "" {
+		t.Fatalf("nil session: got %q, want empty", seg.full)
+	}
+	off := chatSurfaceStreamStatusSegment(&ChatSession{Stream: false})
+	if off.full != "stream off" || off.compact != "stream off" || off.role != style.RoleWarning {
+		t.Fatalf("stream off segment mismatch: %+v", off)
+	}
+	on := chatSurfaceStreamStatusSegment(&ChatSession{Stream: true})
+	if on.full != "stream on" || on.compact != "stream on" || on.role != style.RoleInfo {
+		t.Fatalf("stream on segment mismatch: %+v", on)
+	}
+}
+
+// 工作目录已上移到会话 ID 行；段式状态行原位置必须是常驻 stream 状态，
+// 不再出现目录段（目录只在会话 ID 行展示）。
+func TestBuildChatSurfaceStatusSegmentsSwapDirectoryForStream(t *testing.T) {
+	session := &ChatSession{Model: "gpt-5.6-sol", Stream: false}
+	cwd := resolveChatStatusCurrentDirectory(session)
+	segments := buildChatSurfaceStatusSegments(session, chatSurfaceStatus{kind: chatSurfaceStatusIdle}, chatInputModeChat)
+	foundStream := false
+	for _, seg := range segments {
+		if seg.full == "stream off" {
+			foundStream = true
+		}
+		if cwd != "" && seg.full == cwd {
+			t.Fatalf("directory segment still rendered on segment status row: %q", seg.full)
+		}
+	}
+	if !foundStream {
+		t.Fatalf("persistent stream status segment missing: %+v", segments)
+	}
+}
+
 func TestFormatChatDynamicStatusElapsed(t *testing.T) {
 	tests := []struct {
 		input time.Duration

@@ -1562,12 +1562,17 @@ func buildChatPromptNoticeLineForWidth(session *ChatSession, s chatSurfaceStatus
 	return strings.Join(lines, "\n")
 }
 
-// buildChatSessionIDLine renders the second status row: the current persistent
-// session ID (when bound) combined with the --pprof / --debug flag status.
+// buildChatSessionIDLine renders the upper status row: the working directory,
+// the current persistent session ID (when bound) combined with the --pprof /
+// --debug flag status. 工作目录从下方段式状态行上移到此处，让该行成为
+// 「目录 · 会话 · 调试入口」的固定身份行。
 // The surface hides an empty session line entirely (both session unbound and
 // flags evaluated as empty).
 func buildChatSessionIDLine(session *ChatSession) string {
-	parts := make([]string, 0, 2)
+	parts := make([]string, 0, 3)
+	if cwd := resolveChatStatusCurrentDirectory(session); cwd != "" {
+		parts = append(parts, cwd)
+	}
 	if session != nil && session.RuntimeSession != nil {
 		if id := strings.TrimSpace(session.RuntimeSession.ID); id != "" {
 			parts = append(parts, "会话 "+id)
@@ -1578,11 +1583,12 @@ func buildChatSessionIDLine(session *ChatSession) string {
 }
 
 // buildChatFlagStatusLine returns the --pprof / --debug flag status segment.
-// Always non-empty (shows on/off for each flag) so the second status row
+// Always non-empty (shows on/off for each flag) so the session ID row
 // remains visible as a persistent diagnostic indicator.
-// When both --pprof and --debug are active, shows the actual pprof endpoint
-// URLs instead of the flag status text, since the user can see the flags are
-// on from the endpoint being available.
+// When both --pprof and --debug are active, shows the actual /debug/endpoints
+// URL instead of the flag status text, since the user can see the flags are
+// on from the endpoint being available. Web 客户端地址不再占用状态栏，
+// 由 /web open 打开。
 func buildChatFlagStatusLine() string {
 	pprofURL := chatDebugPprofEndpointURL()
 	pprof := "off"
@@ -1594,10 +1600,9 @@ func buildChatFlagStatusLine() string {
 		debug = "on"
 	}
 	// 当 --pprof 和 --debug 同时启用时，显示实际的端点地址代替 on/off 状态。
-	// endpoints 使用完整 URL（含随机端口），web 使用同主机同端口的 /web/ 路径，
-	// 两者均可直接访问（微 Web 客户端页面 + 调试端点清单）。
+	// endpoints 使用完整 URL（含随机端口）；web 地址不在此显示，由 /web open 打开。
 	if pprofURL != "" && chatDebugFlagEnabled() {
-		return "endpoints: " + chatDebugPprofEndpointsURL() + "  web: " + chatDebugPprofWebURL()
+		return "endpoints: " + chatDebugPprofEndpointsURL()
 	}
 	return "--pprof " + pprof + "  --debug " + debug
 }
@@ -2944,13 +2949,22 @@ func buildChatSurfaceStatusSegments(session *ChatSession, s chatSurfaceStatus, i
 	if contextSeg := chatSurfaceContextUsedStatusSegment(session); contextSeg.full != "" {
 		segments = append(segments, presentChatStatusSegment(contextSeg, style.StatusSegUsage, style.RoleProgress))
 	}
-	cwdSeg := chatSurfaceDirectoryStatusSegment(session)
-	if cwdSeg.full != "" {
-		segments = append(segments, presentChatStatusSegment(cwdSeg, style.StatusSegPath, style.RoleTextSecondary))
+	// 工作目录已上移到会话 ID 行（buildChatSessionIDLine）；原位置改为常驻
+	// stream 状态：非流式请求没有增量回调，first_token_ms / assistant_delta
+	// 会整体缺失且无任何提示（工作区偏好 stream:false 曾让整个工作区静默
+	// 降级，见 511 条无首字采样的事故复盘），这个开关必须一眼可见。
+	if streamSeg := chatSurfaceStreamStatusSegment(session); streamSeg.full != "" {
+		role := style.RoleInfo
+		if streamSeg.role != "" {
+			role = streamSeg.role
+		}
+		segments = append(segments, presentChatStatusSegment(streamSeg, style.StatusSegMode, role))
 	}
-	// Project is only useful when it adds identity beyond the cwd label. At the
-	// repo root, basename(cwd) == project and the status bar would otherwise
-	// render the same name twice (e.g. "ai-agent-runtime · ai-agent-runtime").
+	// Project is only useful when it adds identity beyond the directory label.
+	// The full cwd lives on the session ID row now; at the repo root,
+	// basename(cwd) == project and the two rows would otherwise render the same
+	// name twice (e.g. "E:\...\ai-agent-runtime" over "[ai-agent-runtime]").
+	cwdSeg := chatSurfaceDirectoryStatusSegment(session)
 	if projectSeg := chatSurfaceProjectStatusSegment(session); projectSeg.full != "" &&
 		!chatStatusProjectRedundantWithDirectory(cwdSeg, projectSeg) {
 		segments = append(segments, presentChatStatusSegment(projectSeg, style.StatusSegPath, style.RoleTextMuted))
@@ -3569,6 +3583,19 @@ func chatSurfaceFastStatusSegment(session *ChatSession) chatStatusSegment {
 		return chatStatusSegment{full: "Fast on", compact: "Fast on"}
 	}
 	return chatStatusSegment{full: "Fast off", compact: "Fast off"}
+}
+
+// chatSurfaceStreamStatusSegment 是常驻的流式开关状态段（Fast 段同款口径）。
+// 非流式请求没有增量回调，首字延迟等观测数据会静默缺失，开关状态必须可见；
+// 关闭态用告警角色提醒。/stream 切换后 RefreshStatus 会重建本段。
+func chatSurfaceStreamStatusSegment(session *ChatSession) chatStatusSegment {
+	if session == nil {
+		return chatStatusSegment{}
+	}
+	if session.Stream {
+		return chatStatusSegment{full: "stream on", compact: "stream on", role: style.RoleInfo}
+	}
+	return chatStatusSegment{full: "stream off", compact: "stream off", role: style.RoleWarning}
 }
 
 func resolveChatStatusProjectName(session *ChatSession) string {

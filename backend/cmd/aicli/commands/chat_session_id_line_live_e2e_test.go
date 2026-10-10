@@ -93,9 +93,9 @@ func TestBuildChatFlagStatusLine(t *testing.T) {
 		t.Fatalf("debug on: got %q", got)
 	}
 
-	// --pprof 开启（provider 返回端点 URL）
+	// --pprof 开启（provider 返回端点 URL）；web 地址不再上状态栏，由 /web open 打开
 	chatDebugPprofProvider = func() string { return "http://127.0.0.1:6060/debug/pprof/" }
-	if got := buildChatFlagStatusLine(); got != "endpoints: http://127.0.0.1:6060/debug/endpoints  web: http://127.0.0.1:6060/web/" {
+	if got := buildChatFlagStatusLine(); got != "endpoints: http://127.0.0.1:6060/debug/endpoints" {
 		t.Fatalf("both on: got %q", got)
 	}
 
@@ -103,6 +103,31 @@ func TestBuildChatFlagStatusLine(t *testing.T) {
 	setChatDebugFlag(false)
 	if got := buildChatFlagStatusLine(); got != "--pprof on  --debug off" {
 		t.Fatalf("pprof on only: got %q", got)
+	}
+}
+
+// 会话 ID 行（状态栏上行）：工作目录在前，其后是会话 ID 与标志状态。
+// 目录从下方段式状态行上移至此，构成「目录 · 会话 · 调试入口」身份行。
+func TestBuildChatSessionIDLineIncludesWorkingDirectory(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "lead-session"},
+	}
+	got := buildChatSessionIDLine(session)
+	cwd := resolveChatStatusCurrentDirectory(session)
+	if cwd == "" {
+		t.Skip("working directory unavailable")
+	}
+	idxDir := strings.Index(got, cwd)
+	idxSession := strings.Index(got, "会话 lead-session")
+	idxFlags := strings.Index(got, "--pprof off  --debug off")
+	if idxDir != 0 {
+		t.Fatalf("working directory must lead the session ID line: %q", got)
+	}
+	if idxSession <= idxDir {
+		t.Fatalf("session ID missing or out of order: %q", got)
+	}
+	if idxFlags <= idxSession {
+		t.Fatalf("flag status missing or out of order: %q", got)
 	}
 }
 
