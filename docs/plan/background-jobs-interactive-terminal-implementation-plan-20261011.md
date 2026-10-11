@@ -658,3 +658,41 @@ ConPTY 是 Windows 上唯一的官方伪终端 API，没有功能等价的替代
 ### 方案完成度
 
 方案全部条目落地：P0 交互核心、P1 复用/路由/Resize/pty、D4 审批缓存、P2 clean/指标/客户端、前端 API+实时输出流、detach 过渡、ConPTY、**detach 真正路由**。
+
+---
+
+## E2E 实测记录（2026-10-11，会话 session_20261011151815_KgbXYehX / canary :64788）
+
+### 实测环境
+
+- aicli canary（`aicli-4x.exe --yolo --pprof --debug`，loopback web 端点），经 `/web/api/invoke` 注入 prompt 驱动该会话内的 agent 实际调用新工具链。
+
+### 第一轮实测（修复前）——发现两个真实缺陷
+
+1. **交互会话被调度器二次执行**（已修复，`d42fd319`）：`OpenTerminal` 以 `StatusPending` 注册 job，`dispatchPending/pendingCandidates` 未排除 interactive → 同一 job 被再次派发走 detached/in-process 路径，一次性 runner 立即以 `cancel_source=parent_context` 收敛，覆盖了交互会话。证据：supervision 通知 `background job ... cancelled; command: more; cancel_source=parent_context`，而 `write_stdin` 返回 `SESSION_NOT_AVAILABLE`。
+   - 修复：`pendingCandidates`/`jobQueueDiagnostics` 跳过 `interactive` 作业（会话自管生命周期，不占调度槽——与设计 §2.1 契约一致）。
+   - 回归测试 `TestOpenTerminalJobIsNeverDispatched`（-count=3 稳定）：会话在派发窗口后仍可驱动，且无 `queued/launch_retry/recovered_queued` 事件。
+
+2. **kill-on-close 杀死跨 turn 会话**（已修复，本提交）：`OpenTerminal` 的 `attachProcessTree(pid, true)` 让会话进程树加入**当次工具调用的 job object**；工具调用返回即 job object 关闭 → 会话在 turn 边界被杀（第一轮实测：turn 1 内三步全部成功、turn 2 会话已死，output 尾部有 ConPTY 关闭序列 `\x1b[?9001l`）。
+   - 修复：交互会话（管道与 PTY 两条路径）改为 `attachProcessTree(pid, false)`——与 detached runner 同一契约（会话必须跨 turn 存活）。
+
+### 第二轮实测（修复后，重建二进制 + 重启 canary :62259）——通过 ✅
+
+单一 turn 内三步全绿：
+
+| 步骤 | 工具 | 结果 |
+|---|---|---|
+| 1 | `background_task command="more" interactive=true tty=true` | `running`，healthcheck passed |
+| 2 | `write_stdin chars="hello-e2e\r" yield=8000` | **wait_condition=`output`**，output 含 conhost 回显 + VT 序列 |
+| 3 | `write_stdin chars="" yield=3000` | **wait_condition=`timeout`**（会话存活、无输出） |
+
+会话在 turn 结束后保持 running（未被取消）——两个生命周期缺陷均已修复。
+
+### 遗留观察（非本次方案缺陷，记录待查）
+
+- **跨进程会话存储的别名覆盖**：canary 重启后（同 session id、新进程），旧进程注册的 `job_ref_*` 别名仍可被解析到旧进程的 job id，`write_stdin` 据此报 `SESSION_NOT_AVAILABLE`（真实 job 已随旧进程消失）。单进程内复用/路由已被单测覆盖；跨进程别名归属（owner_instance 校验优先于别名）值得单独立项加固。
+- 观察用 `/api/runtime/background/jobs*` 仅存在于 runtime-server；CLI 进程的 debug 面没有该端点（303 → /debug/endpoints），E2E 观测走 agent 自身调用 `task_output` 完成。
+
+### 结论
+
+交互会话在真实 CLI 会话中**端到端可用**：打开（PTY）→ 写 stdin → 读增量 → 跨工具调用存活 → 显式关闭。P0–P2 全部能力经真实模型驱动验证。

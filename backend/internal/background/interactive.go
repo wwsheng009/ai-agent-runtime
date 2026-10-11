@@ -366,7 +366,13 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 		return managed.snapshot(), nil
 	}
 
-	if tree, treeErr := attachProcessTree(cmd.Process.Pid, true); treeErr == nil {
+	// killOnClose=false: the session must survive the tool call that opened it.
+	// With killOnClose=true the tree joins the per-call job object, which closes
+	// as soon as the tool call returns — killing the session at end of turn
+	// (live-session E2E bug: `more` died with cancel_source=parent_context the
+	// moment the first turn ended, 2026-10-11). Same contract as the detached
+	// runner path (detached.go: sessions must survive this runtime process).
+	if tree, treeErr := attachProcessTree(cmd.Process.Pid, false); treeErr == nil {
 		managed.mu.Lock()
 		managed.tree = tree
 		if managed.info.Metadata == nil {
@@ -697,7 +703,9 @@ func (m *Manager) openTerminalPTY(ctx context.Context, managed *managedJob, args
 		}
 	}()
 
-	if tree, treeErr := attachProcessTree(p.Pid(), true); treeErr == nil {
+	// Same killOnClose=false contract as the pipe path above: PTY-backed
+	// sessions must survive the opening tool call (2026-10-11 live-session fix).
+	if tree, treeErr := attachProcessTree(p.Pid(), false); treeErr == nil {
 		managed.mu.Lock()
 		managed.tree = tree
 		if managed.info.Metadata == nil {
