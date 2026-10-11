@@ -82,7 +82,11 @@ func run(args []string) error {
 		Deliverer:         deliverer,
 		MaxAttempts:       cfg.MaxDeliveryAttempts,
 		FallbackToMailbox: cfg.Execution.FallbackToMailbox,
-		Logf:              func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+		// E1：session 租约仲裁（delegate 失败且会话空闲时允许 embedded 路径；
+		// Executor 尚未注入——E0 完整执行栈见 implementation-status §5）。
+		Executor: nil,
+		Arbiter:  newDaemonSessionArbiter(mesh.ResolvePaths()),
+		Logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	})
 
 	release := acquireSchedulerLease()

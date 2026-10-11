@@ -14,6 +14,9 @@ import (
 // maxTimerDelay 是单次定时器等待的上限，超过则分段重算。
 const maxTimerDelay = time.Hour
 
+// embeddedTurnTimeout 是一次内嵌 turn 的上限（方案 E2：maxTurnDuration 默认 10m）。
+const embeddedTurnTimeout = 10 * time.Minute
+
 // Deliverer 把到期提醒文本投递到原会话。
 type Deliverer interface {
 	Deliver(ctx context.Context, sessionID, text string) error
@@ -67,6 +70,11 @@ type RuntimeOptions struct {
 	Clock       Clock
 	Deliverer   Deliverer
 	MaxAttempts int
+	// Executor 与 Arbiter 支撑内嵌执行模式（E0/E1）：delegate 失败后，若两者
+	// 均配置且 mode 允许，daemon 先经 Arbiter 取 session 租约——拿到才内嵌执行
+	// （活跃会话绝不抢占），拿不到退回持久 mailbox。nil = 不启用内嵌。
+	Executor SessionExecutor
+	Arbiter  LeaseArbiter
 	// FallbackToMailbox 落持久兜底消息（宿主恢复后消费）；默认 true。
 	FallbackToMailbox bool
 	Logf              func(format string, args ...any)
@@ -211,6 +219,14 @@ func (r *Runtime) drive() {
 		deliverErr := r.opts.Deliverer.Deliver(ctx, task.SessionID, text)
 		cancel()
 		if deliverErr != nil {
+			// 内嵌执行（E0/E1）：delegate 失败且配置允许时，先经 Arbiter 取
+			// session 租约——拿到才自跑 turn（活跃会话绝不抢占）。
+			if r.tryEmbedded(task.SessionID, text) {
+				for _, member := range group {
+					r.commit(member, now)
+				}
+				continue
+			}
 			for _, member := range group {
 				r.markFailed(member.Record.ID, now)
 			}
@@ -280,6 +296,28 @@ func (r *Runtime) appendPending(task Task, deliverErr error, now time.Time) erro
 	}
 	return sqlStore.AppendPendingMessage(task.Record.ID, task.SessionID, task.Record.Prompt,
 		fmt.Sprintf("delivery failed: %v", deliverErr), now)
+}
+
+// tryEmbedded 是内嵌执行入口（E0/E1）：Executor 与 Arbiter 都配置才尝试。
+// 先取 session 租约（拿不到 = 会话被交互宿主持有，绝不抢占，返回 false），
+// 拿到后提交一次 turn 并释放租约。返回是否已内嵌执行成功。
+func (r *Runtime) tryEmbedded(sessionID, text string) bool {
+	if r.opts.Executor == nil || r.opts.Arbiter == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), embeddedTurnTimeout)
+	defer cancel()
+	release, ok := r.opts.Arbiter.AcquireSession(ctx, sessionID)
+	if !ok {
+		r.opts.Logf("schedule: session %s is held by another host; skip embedded execution", sessionID)
+		return false
+	}
+	defer release()
+	if err := r.opts.Executor.ExecuteTurn(ctx, sessionID, text); err != nil {
+		r.opts.Logf("schedule: embedded turn for %s failed: %v", sessionID, err)
+		return false
+	}
+	return true
 }
 
 // DrainPendingMessages 消费某会话的兜底消息：逐条尝试投递，成功即标记消费。
