@@ -4,6 +4,11 @@ import type { zhWorkspacePanelsSchedule } from "../../zh-CN/workspace/panels-sch
 
 export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanelsSchedule> = {
   title: "Automation tasks",
+  independentPage: "Independent page",
+  description:
+    "Cross-session reminder catalog: view active and settled tasks, edit name/instruction/timing, delete tasks; reminders deliver to their original session when due.",
+  backToRuntimeConfig: "Back to runtime config",
+  backToWorkspace: "Back to workspace",
   refresh: "Refresh automation tasks",
   empty: "No automation tasks yet; tasks created in sessions will appear here",
   activeSection: "Active",

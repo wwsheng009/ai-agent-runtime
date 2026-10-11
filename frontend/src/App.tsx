@@ -28,6 +28,10 @@ const loadSkillsPage: LazySurfaceLoader = () =>
   import("@/pages/skills-page").then((module) => ({
     default: module.SkillsPage,
   }));
+const loadSchedulePage: LazySurfaceLoader = () =>
+  import("@/pages/schedule-page").then((module) => ({
+    default: module.SchedulePage,
+  }));
 const loadWorkspacePage: LazySurfaceLoader = () =>
   import("@/pages/workspace-page").then((module) => ({
     default: module.WorkspacePage,
@@ -106,6 +110,15 @@ export default function App() {
               <RetryableLazyRoute
                 fallback={<AppRouteFallback />}
                 loader={loadSkillsPage}
+              />
+            }
+          />
+          <Route
+            path="/runtime/schedule"
+            element={
+              <RetryableLazyRoute
+                fallback={<AppRouteFallback />}
+                loader={loadSchedulePage}
               />
             }
           />

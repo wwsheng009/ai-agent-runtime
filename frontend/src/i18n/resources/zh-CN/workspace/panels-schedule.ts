@@ -2,6 +2,11 @@
 // en-US 同名模块需同步补齐（编译期对齐）。
 export const zhWorkspacePanelsSchedule = {
   title: "自动化任务",
+  independentPage: "独立页面",
+  description:
+    "跨会话的定时提醒目录：查看活动与未运行任务、编辑名称/内容/运行时间、删除任务；到点后提醒会投递到原会话。",
+  backToRuntimeConfig: "返回运行时配置",
+  backToWorkspace: "返回工作台",
   refresh: "刷新自动化任务",
   empty: "还没有自动化任务，在会话中创建的任务会显示在这里",
   activeSection: "已开启",
