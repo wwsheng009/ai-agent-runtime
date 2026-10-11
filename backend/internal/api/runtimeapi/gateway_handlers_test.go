@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/mux"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -20,6 +21,7 @@ type fakeGatewayController struct {
 	disconnect int
 	reconnect  int
 	err        error
+	sessions   []wire.SessionSummary
 }
 
 func (f *fakeGatewayController) Status() gatewayagent.Status { return f.status }
@@ -39,6 +41,9 @@ func (f *fakeGatewayController) Config() gatewayagent.Config { return f.cfg }
 func (f *fakeGatewayController) Configure(cfg gatewayagent.Config) error {
 	f.cfg = cfg
 	return f.err
+}
+func (f *fakeGatewayController) UpdateSessions(sessions []wire.SessionSummary) {
+	f.sessions = sessions
 }
 
 func newGatewayTestRouter(controller GatewayController) *mux.Router {

@@ -1034,6 +1034,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/background/jobs/{id}/requeue", h.RequeueBackgroundJob).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/events", h.ListBackgroundJobEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/input", h.WriteBackgroundJobInput).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/resize", h.ResizeBackgroundJob).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/mcps", h.CreateRuntimeMCP).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps/{name}", h.UpdateRuntimeMCP).Methods(http.MethodPut)
@@ -3031,6 +3033,9 @@ func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 网关：会话集合变化时增量推送（未接入网关时为 no-op）。
+	h.pushGatewaySessions()
+
 	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"session": session,
 	})
@@ -3248,6 +3253,9 @@ func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// 会话已删除：作废其待投递 wake 并解除巡检（best-effort，不影响删除结果）。
 	h.releaseSessionSupervisionObligations(context.Background(), sessionID)
+
+	// 网关：会话集合变化时增量推送（未接入网关时为 no-op）。
+	h.pushGatewaySessions()
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deleted": true,

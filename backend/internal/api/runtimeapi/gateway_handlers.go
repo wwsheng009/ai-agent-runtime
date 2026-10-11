@@ -24,6 +24,7 @@ type GatewayController interface {
 	Reconnect(ctx context.Context) error
 	Config() gatewayagent.Config
 	Configure(cfg gatewayagent.Config) error
+	UpdateSessions(sessions []wire.SessionSummary)
 }
 
 // SetGatewayController injects the gateway control plane (runtime-server startup).
@@ -59,6 +60,15 @@ func (h *Handler) GatewaySessions() []wire.SessionSummary {
 		})
 	}
 	return out
+}
+
+// pushGatewaySessions pushes the current session list to the gateway. It is a
+// no-op when no gateway controller is attached.
+func (h *Handler) pushGatewaySessions() {
+	if h == nil || h.gatewayController == nil {
+		return
+	}
+	h.gatewayController.UpdateSessions(h.GatewaySessions())
 }
 
 // gatewayControlTimeout bounds a manual connect/disconnect/reconnect so a hung
