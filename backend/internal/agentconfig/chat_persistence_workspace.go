@@ -23,8 +23,17 @@ import (
 // each workspace remembers its own provider/model/reasoning/stream defaults
 // and the interactive startup selectors stop firing once saved.
 //
+// Inheritance: reads walk the workspace's ancestor directories (from the
+// filesystem root down to the workspace) and deep-merge every existing
+// chat-prefs.yaml, nearest wins per key (see
+// WorkspacePrefsInheritanceChainPaths). A subdirectory therefore inherits its
+// parents' preferences and only has to persist the keys it overrides, while a
+// write always targets the workspace's own file — an inherited value is never
+// materialized into the child, so clearing the child falls back to the parent.
+//
 // Precedence (per key): CLI flag > restored session context > workspace
-// preference > global aicli.chat > interactive prompt > provider default.
+// preference (including inherited ancestors) > global aicli.chat > interactive
+// prompt > provider default.
 
 // workspacePrefsDirName is the directory under $HOME/.aicli holding the
 // per-workspace preference folders.
@@ -103,17 +112,31 @@ func WorkspacePrefsPathForPath(path string) string {
 	return filepath.Join(home, ".aicli", workspacePrefsDirName, id, workspacePrefsFileName)
 }
 
-// LoadWorkspaceChatPreferences reads the workspace-scoped chat preferences for
-// the current working directory. A missing file yields an empty struct and no
-// error; parse/read failures are reported so callers can warn.
+// LoadWorkspaceChatPreferences reads the effective workspace-scoped chat
+// preferences for the current working directory. Preferences are inherited
+// from ancestor directories (see WorkspacePrefsInheritanceChainPaths): the
+// nearest directory that defines a key wins, so a subdirectory only needs to
+// store the keys it overrides and inherits everything else from its parents.
+// A missing file yields (nil, nil); parse/read failures are reported so
+// callers can warn.
 func LoadWorkspaceChatPreferences() (*AICLIChatConfig, error) {
-	path := WorkspacePrefsPath()
-	if path == "" {
+	cwd, err := workspaceCwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
 		return nil, nil
 	}
-	return loadWorkspaceChatPreferencesAt(path)
+	return loadWorkspaceChatPreferencesMerged(cwd)
 }
 
+// LoadWorkspaceChatPreferencesForPath is the explicit-path variant of
+// LoadWorkspaceChatPreferences (方案 §3.3/N9：以会话绑定 workspace 路径为准)，
+// 同样包含父目录继承。
+func LoadWorkspaceChatPreferencesForPath(workspacePath string) (*AICLIChatConfig, error) {
+	return loadWorkspaceChatPreferencesMerged(workspacePath)
+}
+
+// loadWorkspaceChatPreferencesAt reads exactly one preference file, with no
+// inheritance. Writers use it to merge a patch into the file they own, so an
+// update never materializes inherited ancestor values into the child file.
 func loadWorkspaceChatPreferencesAt(path string) (*AICLIChatConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -127,6 +150,123 @@ func loadWorkspaceChatPreferencesAt(path string) (*AICLIChatConfig, error) {
 		return nil, fmt.Errorf("parse workspace chat preferences %s: %w", path, err)
 	}
 	return current, nil
+}
+
+// WorkspacePrefsInheritanceChainPaths returns the preference file paths to
+// merge for workspacePath, ordered from the outermost ancestor down to the
+// workspace itself. A subdirectory therefore inherits its parents' preferences
+// while its own file overrides individual keys (nearer wins). The slice is
+// empty when the path or the user home cannot be resolved.
+func WorkspacePrefsInheritanceChainPaths(workspacePath string) []string {
+	cleaned := strings.TrimSpace(workspacePath)
+	if cleaned == "" {
+		return nil
+	}
+	cleaned = filepath.Clean(cleaned)
+	home, err := userHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return nil
+	}
+
+	// Collect the directory and every ancestor up to the filesystem root.
+	dirs := make([]string, 0, 8)
+	for dir := cleaned; ; {
+		dirs = append(dirs, dir)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+
+	// Reverse so the outermost ancestor comes first: merging in this order lets
+	// the workspace's own file override its parents key by key.
+	paths := make([]string, 0, len(dirs))
+	for i := len(dirs) - 1; i >= 0; i-- {
+		id := WorkspacePrefsIDForCleanedPath(dirs[i])
+		if id == "" {
+			continue
+		}
+		paths = append(paths, filepath.Join(home, ".aicli", workspacePrefsDirName, id, workspacePrefsFileName))
+	}
+	return paths
+}
+
+// loadWorkspaceChatPreferencesMerged resolves the inheritance chain for
+// workspacePath and deep-merges every existing ancestor preference document
+// (root first, nearest last) so nearer directories override farther ones.
+func loadWorkspaceChatPreferencesMerged(workspacePath string) (*AICLIChatConfig, error) {
+	chain := WorkspacePrefsInheritanceChainPaths(workspacePath)
+	if len(chain) == 0 {
+		return nil, nil
+	}
+	merged := map[string]interface{}{}
+	found := false
+	for _, path := range chain {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("read workspace chat preferences %s: %w", path, err)
+		}
+		section, err := chatSectionMapFromYAML(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse workspace chat preferences %s: %w", path, err)
+		}
+		if len(section) == 0 {
+			continue
+		}
+		mergeStringMap(merged, section)
+		found = true
+	}
+	if !found {
+		return nil, nil
+	}
+	raw, err := yaml.Marshal(map[string]interface{}{
+		"aicli": map[string]interface{}{"chat": merged},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode merged workspace chat preferences: %w", err)
+	}
+	return currentAICLIChatConfigFromYAML(raw)
+}
+
+// chatSectionMapFromYAML decodes an aicli.chat-shaped YAML document into a
+// plain map, accepting both the top-level chat shape written by
+// writeWorkspacePrefsYAML and the nested aicli.chat shape, mirroring
+// currentAICLIChatConfigFromYAML.
+func chatSectionMapFromYAML(raw []byte) (map[string]interface{}, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, nil
+	}
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("decode workspace chat preferences: %w", err)
+	}
+	if doc == nil {
+		return nil, nil
+	}
+	if aicli, ok := doc["aicli"].(map[string]interface{}); ok {
+		chat, _ := aicli["chat"].(map[string]interface{})
+		return chat, nil
+	}
+	return doc, nil
+}
+
+// mergeStringMap deep-merges src into dst: nested mappings merge recursively
+// and every scalar/sequence value from src wins, so a nearer (child) document
+// overrides farther (parent) documents key by key.
+func mergeStringMap(dst, src map[string]interface{}) {
+	for key, srcValue := range src {
+		if srcMap, ok := srcValue.(map[string]interface{}); ok {
+			if dstMap, ok := dst[key].(map[string]interface{}); ok {
+				mergeStringMap(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[key] = srcValue
+	}
 }
 
 // SaveWorkspaceChatPreferences merges the update into the workspace preference

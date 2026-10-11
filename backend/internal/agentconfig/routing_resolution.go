@@ -165,23 +165,32 @@ func (p *AICLIWorkspaceRoutingPreferences) HasRoutingFields() bool {
 	return workspaceMainPresent(p.MainAgent) || workspaceSubPresent(p.SubAgent)
 }
 
-// LoadWorkspaceRoutingPreferences 读取当前 cwd 工作区偏好文件的 routing 子树
-// （方案 §3.3）。文件缺失返回 (nil, nil)。
+// LoadWorkspaceRoutingPreferences 读取当前 cwd 工作区的有效 routing 子树
+// （方案 §3.3），含父目录继承（见 WorkspacePrefsInheritanceChainPaths）。
+// 文件缺失返回 (nil, nil)。
 func LoadWorkspaceRoutingPreferences() (*AICLIWorkspaceRoutingPreferences, error) {
-	return loadWorkspaceRoutingPreferencesAt(WorkspacePrefsPath())
-}
-
-// LoadWorkspaceRoutingPreferencesForPath 读取指定工作区路径的 routing 子树
-// （§3.3/N9：以会话绑定 workspace 路径为准）。文件缺失返回 (nil, nil)。
-func LoadWorkspaceRoutingPreferencesForPath(workspacePath string) (*AICLIWorkspaceRoutingPreferences, error) {
-	return loadWorkspaceRoutingPreferencesAt(WorkspacePrefsPathForPath(workspacePath))
-}
-
-func loadWorkspaceRoutingPreferencesAt(path string) (*AICLIWorkspaceRoutingPreferences, error) {
-	if strings.TrimSpace(path) == "" {
+	cwd, err := workspaceCwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
 		return nil, nil
 	}
-	chatConfig, err := loadWorkspaceChatPreferencesAt(path)
+	return loadWorkspaceRoutingPreferencesForWorkspace(cwd)
+}
+
+// LoadWorkspaceRoutingPreferencesForPath 读取指定工作区路径的有效 routing
+// 子树（§3.3/N9：以会话绑定 workspace 路径为准），含父目录继承。
+// 文件缺失返回 (nil, nil)。
+func LoadWorkspaceRoutingPreferencesForPath(workspacePath string) (*AICLIWorkspaceRoutingPreferences, error) {
+	return loadWorkspaceRoutingPreferencesForWorkspace(workspacePath)
+}
+
+// loadWorkspaceRoutingPreferencesForWorkspace 读取工作区路径的有效 routing
+// 子树：与 LoadWorkspaceChatPreferencesForPath 同源，父目录的 routing 被子
+// 目录按字段合并继承（近者优先）。
+func loadWorkspaceRoutingPreferencesForWorkspace(workspacePath string) (*AICLIWorkspaceRoutingPreferences, error) {
+	if strings.TrimSpace(workspacePath) == "" {
+		return nil, nil
+	}
+	chatConfig, err := loadWorkspaceChatPreferencesMerged(workspacePath)
 	if err != nil {
 		return nil, err
 	}

@@ -207,3 +207,221 @@ func TestClearWorkspaceChatPreferences(t *testing.T) {
 		t.Fatalf("second clear should not error: %v", err)
 	}
 }
+
+// withWorkspaceHomeForTest pins the user home to a temp dir for the test.
+func withWorkspaceHomeForTest(t *testing.T, home string) {
+	t.Helper()
+	prev := userHomeDir
+	t.Cleanup(func() { userHomeDir = prev })
+	userHomeDir = func() (string, error) { return home, nil }
+}
+
+func TestWorkspacePrefsInheritFromAncestorDirectory(t *testing.T) {
+	withWorkspaceHomeForTest(t, t.TempDir())
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	child := filepath.Join(parent, "child")
+
+	withWorkspaceCwdForTest(t, parent)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		DefaultProvider: stringPtrForTest("inherited-provider"),
+		DefaultModel:    stringPtrForTest("inherited-model"),
+	}); err != nil {
+		t.Fatalf("save parent: %v", err)
+	}
+
+	// The child has no file of its own and must inherit the parent's values.
+	withWorkspaceCwdForTest(t, child)
+	prefs, err := LoadWorkspaceChatPreferences()
+	if err != nil {
+		t.Fatalf("load child: %v", err)
+	}
+	if prefs == nil || prefs.DefaultProvider != "inherited-provider" || prefs.DefaultModel != "inherited-model" {
+		t.Fatalf("child should inherit parent prefs, got %+v", prefs)
+	}
+}
+
+func TestWorkspacePrefsChildOverridesInheritedKeys(t *testing.T) {
+	withWorkspaceHomeForTest(t, t.TempDir())
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	child := filepath.Join(parent, "child")
+
+	withWorkspaceCwdForTest(t, parent)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		DefaultProvider: stringPtrForTest("parent-provider"),
+		DefaultModel:    stringPtrForTest("parent-model"),
+		ReasoningEffort: stringPtrForTest("low"),
+	}); err != nil {
+		t.Fatalf("save parent: %v", err)
+	}
+
+	// The child stores only the key it overrides; the rest is inherited.
+	withWorkspaceCwdForTest(t, child)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		DefaultModel: stringPtrForTest("child-model"),
+	}); err != nil {
+		t.Fatalf("save child: %v", err)
+	}
+
+	prefs, err := LoadWorkspaceChatPreferences()
+	if err != nil {
+		t.Fatalf("load child: %v", err)
+	}
+	if prefs == nil {
+		t.Fatalf("child prefs should load, got nil")
+	}
+	if prefs.DefaultModel != "child-model" {
+		t.Fatalf("child should override inherited model, got %q", prefs.DefaultModel)
+	}
+	if prefs.DefaultProvider != "parent-provider" {
+		t.Fatalf("child should inherit parent provider, got %q", prefs.DefaultProvider)
+	}
+	if prefs.ReasoningEffort != "low" {
+		t.Fatalf("child should inherit parent reasoning, got %q", prefs.ReasoningEffort)
+	}
+}
+
+func TestWorkspacePrefsInheritAcrossMultipleLevels(t *testing.T) {
+	withWorkspaceHomeForTest(t, t.TempDir())
+	root := t.TempDir()
+	grandparent := filepath.Join(root, "gp")
+	parent := filepath.Join(grandparent, "parent")
+	child := filepath.Join(parent, "child")
+
+	withWorkspaceCwdForTest(t, grandparent)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		DefaultProvider: stringPtrForTest("gp-provider"),
+	}); err != nil {
+		t.Fatalf("save grandparent: %v", err)
+	}
+	withWorkspaceCwdForTest(t, parent)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		DefaultModel: stringPtrForTest("parent-model"),
+	}); err != nil {
+		t.Fatalf("save parent: %v", err)
+	}
+	withWorkspaceCwdForTest(t, child)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		ReasoningEffort: stringPtrForTest("high"),
+	}); err != nil {
+		t.Fatalf("save child: %v", err)
+	}
+
+	// A deeper subdirectory accumulates the whole ancestor chain.
+	prefs, err := LoadWorkspaceChatPreferences()
+	if err != nil {
+		t.Fatalf("load child: %v", err)
+	}
+	if prefs == nil {
+		t.Fatalf("child prefs should load, got nil")
+	}
+	if prefs.DefaultProvider != "gp-provider" {
+		t.Fatalf("child should inherit grandparent provider, got %q", prefs.DefaultProvider)
+	}
+	if prefs.DefaultModel != "parent-model" {
+		t.Fatalf("child should inherit parent model, got %q", prefs.DefaultModel)
+	}
+	if prefs.ReasoningEffort != "high" {
+		t.Fatalf("child should keep its own reasoning, got %q", prefs.ReasoningEffort)
+	}
+}
+func TestWorkspacePrefsChildWriteDoesNotLeakIntoParent(t *testing.T) {
+	withWorkspaceHomeForTest(t, t.TempDir())
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	child := filepath.Join(parent, "child")
+
+	withWorkspaceCwdForTest(t, parent)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		DefaultProvider: stringPtrForTest("parent-provider"),
+	}); err != nil {
+		t.Fatalf("save parent: %v", err)
+	}
+	withWorkspaceCwdForTest(t, child)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		DefaultModel: stringPtrForTest("child-model"),
+	}); err != nil {
+		t.Fatalf("save child: %v", err)
+	}
+
+	// Inheritance only flows parent -> child; the parent must not pick up the
+	// descendant's keys.
+	withWorkspaceCwdForTest(t, parent)
+	prefs, err := LoadWorkspaceChatPreferences()
+	if err != nil {
+		t.Fatalf("load parent: %v", err)
+	}
+	if prefs == nil || prefs.DefaultModel != "" {
+		t.Fatalf("parent must not inherit from its child, got %+v", prefs)
+	}
+}
+
+func TestWorkspacePrefsInheritanceChainOrder(t *testing.T) {
+	withWorkspaceHomeForTest(t, t.TempDir())
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	child := filepath.Join(parent, "child")
+
+	chain := WorkspacePrefsInheritanceChainPaths(child)
+	if len(chain) == 0 {
+		t.Fatalf("inheritance chain should not be empty")
+	}
+	childPath := WorkspacePrefsPathForPath(child)
+	parentPath := WorkspacePrefsPathForPath(parent)
+	if got := chain[len(chain)-1]; got != childPath {
+		t.Fatalf("chain must end at the workspace's own prefs file: %s vs %s", got, childPath)
+	}
+	parentIdx, childIdx := -1, -1
+	for i, p := range chain {
+		if p == parentPath {
+			parentIdx = i
+		}
+		if p == childPath {
+			childIdx = i
+		}
+	}
+	if parentIdx < 0 || childIdx < 0 || parentIdx >= childIdx {
+		t.Fatalf("parent prefs must precede child prefs: parentIdx=%d childIdx=%d chain=%v", parentIdx, childIdx, chain)
+	}
+}
+
+func TestWorkspacePrefsDeepMergeRoutingSubtree(t *testing.T) {
+	withWorkspaceHomeForTest(t, t.TempDir())
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	child := filepath.Join(parent, "child")
+
+	withWorkspaceCwdForTest(t, parent)
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		Routing: &AICLIWorkspaceRoutingPreferences{
+			MainAgent: &AICLIMainAgentRoutingConfig{DefaultDifficulty: "standard"},
+		},
+	}); err != nil {
+		t.Fatalf("save parent routing: %v", err)
+	}
+
+	withWorkspaceCwdForTest(t, child)
+	subEnabled := true
+	if err := SaveWorkspaceChatPreferences(AICLIChatPreferenceUpdate{
+		Routing: &AICLIWorkspaceRoutingPreferences{
+			SubAgent: &AICLISubagentRoutingConfig{Enabled: &subEnabled},
+		},
+	}); err != nil {
+		t.Fatalf("save child routing: %v", err)
+	}
+
+	prefs, err := LoadWorkspaceRoutingPreferences()
+	if err != nil {
+		t.Fatalf("load routing: %v", err)
+	}
+	if prefs == nil {
+		t.Fatalf("routing prefs should load, got nil")
+	}
+	if prefs.MainAgent == nil || prefs.MainAgent.DefaultDifficulty != "standard" {
+		t.Fatalf("child should inherit parent routing.main_agent, got %+v", prefs.MainAgent)
+	}
+	if prefs.SubAgent == nil || prefs.SubAgent.Enabled == nil || !*prefs.SubAgent.Enabled {
+		t.Fatalf("child routing.sub_agent should be present, got %+v", prefs.SubAgent)
+	}
+}
