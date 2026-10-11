@@ -214,6 +214,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 指标 | `/metrics` | `aicli_gateway_push_subscriptions`；`/api/metrics` 亦含 `push_subscriptions` |
 | 控制台 PWA | `cmd/gateway/console/{sw.js,app.js,index.html}` | 服务进程 `push`/`notificationclick` 事件；`开启通知/关闭通知` 切换按钮，订阅后 POST 到网关 |
 | 配置 | `cmd/gateway` | `--push-enabled`（默认 true）、`--vapid-subject` |
+| 控制台收件箱/徽标/toast | `cmd/gateway/console/{app.js,style.css}` | 会话行渲染 `attention` 徽标（已完成/待审批/待回答/出错/等待中）；SSE 收到**新增**注意力时弹出可点击 toast（首次加载只做种子，不刷屏） |
 | agent（aicli）上报 | `cmd/aicli/commands/chat_gateway_attention.go`、`chat_mesh.go`、`chat_gateway_host.go` | turn 边界（`beginChatMeshTurn`）驱动 `attention`：开始时清空 + busy，结束时 `completed`/`error`（按 turn 最终 err）；随 `SESSION_UPDATE` 上报 |
 | agent（runtime-server）上报 | `internal/api/runtimeapi/gateway_attention.go`、`gateway_handlers.go` | 订阅运行时事件总线：`agent.turn.started/finished`、`approval_requested/resolved`、`question_asked/answered`、`session_end/interrupted` → `attention`/`busy`；`EnableGatewayAttention()` 在启动装配时调用 |
 
@@ -230,7 +231,8 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | presence 抑制（§5.4） | 控制台未上报"正在查看某会话"，因此无法抑制已读会话的推送 |
 | 时间窗合并（§5.5） | 连续 `completed` 未合并为"N 个会话已完成" |
 | 免打扰/静音（§5.6） | 未实现 |
-| 控制台收件箱/徽标/toast（§5.2） | 控制台已能收 SSE，但未渲染 `attention` 徽标与收件箱 |
+| 控制台独立收件箱视图 | 已有会话行徽标 + toast；未做聚合收件箱页面 |
 
-> 说明：网关侧推送链路（VAPID + 加密 + 订阅 + 触发 + SW 展示）已端到端打通并有单测；
-> 剩余待办集中在 **agent 侧上报** 与 **控制台展示/抑制** 两侧，不阻塞推送基础设施。
+> 说明：推送链路已**端到端打通**（agent 上报 → 网关注册表 → 去重触发 → VAPID 加密投递 →
+> Service Worker 展示 → 控制台徽标/toast），各段均有单测；剩余待办（presence 抑制、时间窗合并、
+> 免打扰、聚合收件箱、`NOTIFY` 帧）均为**增强项**，不影响主链路可用性。

@@ -26,6 +26,7 @@
 | base-path | aicli 微前端 + runtime-server SPA | `web_page.go`、`internal/webui/handler.go`、`frontend/vite.config.ts` |
 | 移动端 | 低带宽模式（微前端）+ 控制台 PWA | `web/js/ui.js`、`cmd/gateway/console/` |
 | 移动端 | 控制台 Web Push 订阅 + Service Worker 通知 | `cmd/gateway/console/{app.js,sw.js}` |
+| 控制台 | 会话 `attention` 徽标 + 新增注意力 toast | `cmd/gateway/console/{app.js,style.css}` |
 | 宿主 | 会话注意力上报（turn 边界 + 事件总线） | `cmd/aicli/commands/chat_gateway_attention.go`、`internal/api/runtimeapi/gateway_attention.go` |
 
 ---

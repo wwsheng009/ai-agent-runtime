@@ -112,6 +112,33 @@ form { display: flex; gap: 8px; margin-top: 8px; }
   white-space: nowrap;
 }
 
+/* Attention badge + toast (docs/gateway/08-notifications.md §5.2). */
+.attention {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(76, 139, 245, 0.16);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  max-width: min(90vw, 520px);
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+}
+
 /* Mobile / PWA (docs/gateway/07-console.md §9): safe areas + touch targets. */
 body {
   padding-bottom: env(safe-area-inset-bottom);

@@ -62,7 +62,59 @@
     return base + "?session=" + encodeURIComponent(sessionID);
   }
 
+  // --- Attention inbox / toast (docs/gateway/08-notifications.md §5.2) ------
+  var attentionLabels = {
+    completed: "已完成",
+    approval: "待审批",
+    question: "待回答",
+    error: "出错",
+    waiting: "等待中",
+  };
+
+  function attentionLabel(kind) {
+    return attentionLabels[kind] || kind;
+  }
+
+  var seenAttention = {};
+  var attentionSeeded = false;
+
+  // trackAttention diffs the current attention set against the last render and
+  // raises a toast for newly attentive sessions (the first load only seeds).
+  function trackAttention(nodes) {
+    var current = {};
+    var fresh = [];
+    (nodes || []).forEach(function (node) {
+      (node.sessions || []).forEach(function (session) {
+        if (!session.attention) { return; }
+        var key = node.node_id + "|" + session.session_id + "|" + session.attention;
+        current[key] = true;
+        if (!seenAttention[key]) { fresh.push({ node: node, session: session }); }
+      });
+    });
+    var seeded = attentionSeeded;
+    seenAttention = current;
+    attentionSeeded = true;
+    if (!seeded) { return; }
+    fresh.forEach(function (item) { showAttentionToast(item.node, item.session); });
+  }
+
+  function showAttentionToast(node, session) {
+    var toast = document.createElement("div");
+    toast.className = "toast";
+    toast.textContent =
+      (node.name || node.node_id) + " · " +
+      (session.title || session.session_id) + "：" +
+      attentionLabel(session.attention);
+    toast.addEventListener("click", function () {
+      window.open(sessionOpenTarget(node, session.session_id), "_blank");
+      toast.remove();
+    });
+    document.body.appendChild(toast);
+    setTimeout(function () { toast.remove(); }, 8000);
+  }
+
   function renderNodes(nodes) {
+    trackAttention(nodes);
     var list = el("node-list");
     list.innerHTML = "";
     if (!nodes.length) {
@@ -87,8 +139,13 @@
         sessions.forEach(function (session) {
           var row = document.createElement("div");
           row.className = "session-row";
-          row.innerHTML = '<span class="session-title"></span><button class="secondary" type="button">打开</button>';
+          row.innerHTML = '<span class="session-title"></span><span class="attention" hidden></span><button class="secondary" type="button">打开</button>';
           row.querySelector(".session-title").textContent = session.title || session.session_id;
+          if (session.attention) {
+            var badge = row.querySelector(".attention");
+            badge.textContent = attentionLabel(session.attention);
+            badge.hidden = false;
+          }
           row.querySelector("button").addEventListener("click", function () {
             window.open(sessionOpenTarget(node, session.session_id), "_blank");
           });
