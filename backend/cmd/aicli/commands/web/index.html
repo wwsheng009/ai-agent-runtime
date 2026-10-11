@@ -609,7 +609,79 @@
       <div class="skills-toolbar">
         <h2 class="skills-title">自动化任务</h2>
         <span class="config-toolbar-spacer"></span>
+        <button id="schedule-new-btn" type="button" title="人工创建一条自动化任务（投递到指定会话）">＋ 新建任务</button>
         <button id="schedule-refresh-btn" type="button" title="重新拉取 /api/runtime/schedule/catalog">⟳ 刷新</button>
+      </div>
+      <!-- 人工创建表单（P7）：与技能详情弹层同一 overlay/modal 约定。
+           规则类型切换只显示对应选择器的字段；提交调 POST /api/runtime/schedule/create
+           （origin=manual），校验复用后端服务层。 -->
+      <div id="schedule-form-overlay" role="dialog" aria-modal="true" aria-labelledby="schedule-form-title-label">
+        <div id="schedule-form-modal">
+          <div class="config-section-title" id="schedule-form-title-label">新建自动化任务</div>
+          <form id="schedule-form" autocomplete="off">
+            <div class="config-form-grid">
+              <label class="cfg-item">
+                <span class="cfg-label">目标会话 ID</span>
+                <input id="schedule-form-session" required placeholder="投递回哪个会话">
+              </label>
+              <label class="cfg-item">
+                <span class="cfg-label">任务名称</span>
+                <input id="schedule-form-title" required maxlength="120" placeholder="最多 120 字符">
+              </label>
+            </div>
+            <div class="config-form-block">
+              <label class="cfg-label" for="schedule-form-prompt">任务内容（到期投递给会话）</label>
+              <textarea id="schedule-form-prompt" rows="2" required placeholder="提醒内容"></textarea>
+            </div>
+            <div class="config-form-grid">
+              <label class="cfg-item">
+                <span class="cfg-label">规则类型</span>
+                <select id="schedule-form-kind">
+                  <option value="after">一次性（延迟）</option>
+                  <option value="at">一次性（绝对时间）</option>
+                  <option value="every">固定间隔</option>
+                  <option value="daily">每天</option>
+                  <option value="weekly">每周</option>
+                  <option value="cron">Cron</option>
+                </select>
+              </label>
+              <label class="cfg-item" id="schedule-form-amount-item">
+                <span class="cfg-label" id="schedule-form-amount-label">多少分钟后</span>
+                <input id="schedule-form-amount" type="number" min="1" step="1" value="30">
+              </label>
+              <label class="cfg-item" id="schedule-form-time-item" hidden>
+                <span class="cfg-label" id="schedule-form-time-label">具体时间</span>
+                <input id="schedule-form-time" type="datetime-local">
+              </label>
+              <label class="cfg-item" id="schedule-form-zone-item" hidden>
+                <span class="cfg-label">时区（IANA）</span>
+                <input id="schedule-form-zone" placeholder="如 Asia/Shanghai">
+              </label>
+            </div>
+            <div class="config-form-block" id="schedule-form-weekdays-item" hidden>
+              <span class="cfg-label">每周几（ISO 1=周一 … 7=周日）</span>
+              <div id="schedule-form-weekdays" class="schedule-weekday-row" role="group">
+                <label><input type="checkbox" value="1">一</label>
+                <label><input type="checkbox" value="2">二</label>
+                <label><input type="checkbox" value="3">三</label>
+                <label><input type="checkbox" value="4">四</label>
+                <label><input type="checkbox" value="5">五</label>
+                <label><input type="checkbox" value="6">六</label>
+                <label><input type="checkbox" value="7">日</label>
+              </div>
+            </div>
+            <div class="config-form-block" id="schedule-form-cron-item" hidden>
+              <label class="cfg-label" for="schedule-form-cron">Cron 表达式（五字段 Vixie）</label>
+              <input id="schedule-form-cron" placeholder="如 */5 * * * *">
+            </div>
+            <div class="config-form-actions">
+              <span id="schedule-form-status" class="cfg-status"></span>
+              <span class="config-toolbar-spacer"></span>
+              <button id="schedule-form-cancel" type="button">取消</button>
+              <button id="schedule-form-save" type="submit" class="primary-btn">创建</button>
+            </div>
+          </form>
+        </div>
       </div>
       <!-- 列表体由 js/schedule.js 渲染（textContent/esc 转义，查询串不进 innerHTML）；
            删除为两段式确认：第一次点击进入确认态，再次点击才调 DELETE。 -->

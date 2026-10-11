@@ -3122,3 +3122,38 @@ body.low-bandwidth img {
   border-color: var(--red);
   font-weight: 600;
 }
+
+/* ---- 人工创建表单（P7）：与技能详情弹层同一 overlay/modal 约定 ----
+   默认 display:none，js/schedule.js 加 .active 显示；表单字段复用
+   config-form-grid / config-form-block / cfg-item 既有骨架。 */
+#schedule-form-overlay {
+  display: none; position: fixed; z-index: 1100;
+  inset: 0; background: var(--overlayBg); padding: 16px;
+  justify-content: center; align-items: center;
+}
+#schedule-form-overlay.active { display: flex; }
+#schedule-form-modal {
+  position: relative; width: min(520px, calc(100vw - 32px));
+  max-height: min(86vh, 720px); overflow-y: auto;
+  background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 12px; padding: 14px 16px;
+  box-shadow: 0 12px 40px var(--shadow);
+}
+.schedule-weekday-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 4px 0;
+}
+.schedule-weekday-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+@media (max-width: 560px) {
+  #schedule-form-overlay { padding: 8px; }
+  #schedule-form-modal { width: calc(100vw - 16px); max-height: 92vh; }
+}

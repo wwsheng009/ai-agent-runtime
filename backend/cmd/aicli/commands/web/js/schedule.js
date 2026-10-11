@@ -1,7 +1,9 @@
-// 自动化任务（Schedule）页签:跨会话任务目录 + 行内删除确认(P4)。
+// 自动化任务（Schedule）页签:跨会话任务目录 + 行内删除确认(P4) + 人工创建(P7)。
 // aicli micro web client 前端模块(无构建步骤,由 app.js/ui.js 聚合)。
 // 数据来自 /api/runtime/schedule/*(与 E1 frontend、TUI /schedule 同一后端);
 // 展示口径:后端 UTC,本地展示;回执不代表模型执行完成。
+// 人工创建调 POST /schedule/create(origin=manual):选择器校验在后端服务层,
+// 与模型工具同一条管线;本端只做轻量的必填/形状预检。
 
 import { apiFetch, esc, showToast } from "./util.js";
 
@@ -161,4 +163,188 @@ export function initSchedule() {
   if (refreshBtn) {
     refreshBtn.addEventListener("click", function () { loadSchedule(true); });
   }
+  initCreateForm();
+}
+
+// ---- 人工创建（P7）----
+
+function initCreateForm() {
+  var newBtn = document.getElementById("schedule-new-btn");
+  var overlay = document.getElementById("schedule-form-overlay");
+  var form = document.getElementById("schedule-form");
+  if (!newBtn || !overlay || !form) { return; }
+  newBtn.addEventListener("click", function () {
+    openCreateForm();
+  });
+  var cancelBtn = document.getElementById("schedule-form-cancel");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", function () { closeCreateForm(); });
+  }
+  // Esc 关闭（与技能详情弹层同一约定）；弹层内部按键不冒泡。
+  overlay.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeCreateForm();
+    }
+  });
+  // 点击遮罩空白处关闭（与技能详情弹层行为一致）。
+  overlay.addEventListener("click", function (event) {
+    if (event.target === overlay) { closeCreateForm(); }
+  });
+  var kindSelect = document.getElementById("schedule-form-kind");
+  if (kindSelect) {
+    kindSelect.addEventListener("change", function () {
+      syncCreateFormFields(kindSelect.value);
+    });
+  }
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    submitCreateForm();
+  });
+}
+
+function openCreateForm() {
+  var overlay = document.getElementById("schedule-form-overlay");
+  var form = document.getElementById("schedule-form");
+  var status = document.getElementById("schedule-form-status");
+  if (!overlay || !form) { return; }
+  form.reset();
+  if (status) { status.textContent = ""; }
+  var zone = document.getElementById("schedule-form-zone");
+  if (zone && !zone.value) {
+    try { zone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (_) { zone.value = "UTC"; }
+  }
+  var kind = document.getElementById("schedule-form-kind");
+  syncCreateFormFields(kind ? kind.value : "after");
+  overlay.classList.add("active");
+  var first = document.getElementById("schedule-form-session");
+  if (first) { first.focus(); }
+}
+
+function closeCreateForm() {
+  var overlay = document.getElementById("schedule-form-overlay");
+  if (overlay) { overlay.classList.remove("active"); }
+}
+
+// 规则类型 → 可见字段（after/every 用 amount，at 用 time，daily/weekly/cron
+// 用 time+zone，weekly 另有 weekdays，cron 另有 expression）。
+function syncCreateFormFields(kind) {
+  var show = function (id, visible) {
+    var el = document.getElementById(id);
+    if (el) { el.hidden = !visible; }
+  };
+  var amountLabel = document.getElementById("schedule-form-amount-label");
+  show("schedule-form-amount-item", kind === "after" || kind === "every");
+  if (amountLabel) {
+    amountLabel.textContent = kind === "after" ? "多少分钟后" : "间隔（分钟，≥1）";
+  }
+  show("schedule-form-time-item", kind === "at");
+  show("schedule-form-zone-item", kind === "daily" || kind === "weekly" || kind === "cron");
+  show("schedule-form-weekdays-item", kind === "weekly");
+  show("schedule-form-cron-item", kind === "cron");
+  var timeLabel = document.getElementById("schedule-form-time-label");
+  if (timeLabel) { timeLabel.textContent = "具体时间"; }
+}
+
+// 由表单派生创建负载；返回 null 表示本地预检未过（状态栏提示）。
+function buildCreateRequest() {
+  var val = function (id) {
+    var el = document.getElementById(id);
+    return el ? String(el.value || "").trim() : "";
+  };
+  var sessionId = val("schedule-form-session");
+  var title = val("schedule-form-title");
+  var prompt = val("schedule-form-prompt");
+  var kindEl = document.getElementById("schedule-form-kind");
+  var kind = kindEl ? kindEl.value : "after";
+  if (!sessionId) { return { error: "请填写目标会话 ID" }; }
+  if (!title) { return { error: "请填写任务名称" }; }
+  if (!prompt) { return { error: "请填写任务内容" }; }
+  var base = { session_id: sessionId, title: title, prompt: prompt };
+  if (kind === "after" || kind === "every") {
+    var minutes = Number(val("schedule-form-amount"));
+    if (!isFinite(minutes) || minutes <= 0 || (kind === "every" && minutes < 1)) {
+      return { error: kind === "after" ? "延迟分钟数必须为正整数" : "间隔必须至少 1 分钟" };
+    }
+    if (kind === "after") { base.after_seconds = Math.round(minutes * 60); }
+    else { base.every_seconds = Math.round(minutes * 60); }
+    return base;
+  }
+  if (kind === "at") {
+    var raw = val("schedule-form-time");
+    if (!raw) { return { error: "请选择具体时间" }; }
+    var parsed = new Date(raw);
+    if (isNaN(parsed.getTime())) { return { error: "时间格式无效" }; }
+    base.at = parsed.toISOString();
+    return base;
+  }
+  var zone = val("schedule-form-zone");
+  if (!zone) { return { error: "请填写时区（IANA，如 Asia/Shanghai）" }; }
+  if (kind === "daily") {
+    var dailyTime = val("schedule-form-time");
+    if (!dailyTime) { return { error: "请填写本地时间（HH:MM[:SS]）" }; }
+    base.daily = { time: dailyTime, time_zone: zone };
+    return base;
+  }
+  if (kind === "weekly") {
+    var weeklyTime = val("schedule-form-time");
+    if (!weeklyTime) { return { error: "请填写本地时间（HH:MM[:SS]）" }; }
+    var boxes = document.querySelectorAll("#schedule-form-weekdays input[type=checkbox]:checked");
+    var weekdays = [];
+    for (var i = 0; i < boxes.length; i++) {
+      var day = Number(boxes[i].value);
+      if (day >= 1 && day <= 7) { weekdays.push(day); }
+    }
+    if (weekdays.length === 0) { return { error: "请至少勾选一个星期" }; }
+    weekdays.sort(function (a, b) { return a - b; });
+    base.weekly = { time: weeklyTime, time_zone: zone, weekdays: weekdays };
+    return base;
+  }
+  if (kind === "cron") {
+    var expression = val("schedule-form-cron");
+    if (!expression) { return { error: "请填写 Cron 表达式" }; }
+    base.cron = { expression: expression, time_zone: zone };
+    return base;
+  }
+  return { error: "未知规则类型: " + kind };
+}
+
+function submitCreateForm() {
+  var status = document.getElementById("schedule-form-status");
+  var saveBtn = document.getElementById("schedule-form-save");
+  var request = buildCreateRequest();
+  if (request.error) {
+    if (status) { status.textContent = request.error; }
+    return;
+  }
+  if (saveBtn) { saveBtn.disabled = true; }
+  if (status) { status.textContent = "创建中…"; }
+  apiFetch("/api/runtime/schedule/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  })
+    .then(function (res) {
+      return res.json().catch(function () { return null; }).then(function (payload) {
+        return { ok: res.ok, payload: payload };
+      });
+    })
+    .then(function (result) {
+      if (saveBtn) { saveBtn.disabled = false; }
+      if (result.ok) {
+        showToast("任务已创建（来源：人工）");
+        closeCreateForm();
+        loadSchedule(true);
+        return;
+      }
+      // 后端 400 携带 invalid_selector/not_future 等服务层错误码。
+      var message = result.payload && result.payload.error ? result.payload.error : "创建失败";
+      if (status) { status.textContent = message; }
+    })
+    .catch(function (error) {
+      if (saveBtn) { saveBtn.disabled = false; }
+      if (status) {
+        status.textContent = "创建失败: " + (error && error.message ? error.message : String(error));
+      }
+    });
 }
