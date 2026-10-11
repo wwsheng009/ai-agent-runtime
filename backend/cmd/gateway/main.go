@@ -37,17 +37,18 @@ func main() {
 
 func run() int {
 	var (
-		listen        = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
-		publicBaseURL = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
-		serverVersion = flag.String("server-version", "0.1.0", "server version reported in WELCOME")
-		deviceToken   = flag.String("device-token", "", "shared device token (Authorization: Bearer); empty accepts all (dev only)")
-		heartbeatSec  = flag.Int("heartbeat-interval", 0, "heartbeat interval (seconds) advertised in WELCOME; 0 uses the agent default")
-		tlsCert       = flag.String("tls-cert", "", "TLS certificate file (requires --tls-key)")
-		tlsKey        = flag.String("tls-key", "", "TLS key file (requires --tls-cert)")
-		ownerPassword = flag.String("owner-password", "", "owner login password (empty disables auth — dev only)")
-		sessionTTL    = flag.Duration("session-ttl", auth.DefaultTTL, "owner session lifetime")
-		rateLimit     = flag.Int("rate-limit", 0, "per-IP requests per minute for the proxy and tunnel upgrade; 0 disables")
-		dataDir       = flag.String("data-dir", "./data", "directory for persisted gateway state (device tokens)")
+		listen         = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
+		publicBaseURL  = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
+		serverVersion  = flag.String("server-version", "0.1.0", "server version reported in WELCOME")
+		deviceToken    = flag.String("device-token", "", "shared device token (Authorization: Bearer); empty accepts all (dev only)")
+		heartbeatSec   = flag.Int("heartbeat-interval", 0, "heartbeat interval (seconds) advertised in WELCOME; 0 uses the agent default")
+		tlsCert        = flag.String("tls-cert", "", "TLS certificate file (requires --tls-key)")
+		tlsKey         = flag.String("tls-key", "", "TLS key file (requires --tls-cert)")
+		ownerPassword  = flag.String("owner-password", "", "owner login password (empty disables auth — dev only)")
+		sessionTTL     = flag.Duration("session-ttl", auth.DefaultTTL, "owner session lifetime")
+		rateLimit      = flag.Int("rate-limit", 0, "per-IP requests per minute for the proxy and tunnel upgrade; 0 disables")
+		dataDir        = flag.String("data-dir", "./data", "directory for persisted gateway state (device tokens)")
+		trustedProxies = flag.String("trusted-proxies", "127.0.0.1/32,::1/128", "comma-separated trusted proxy CIDRs/IPs; X-Forwarded-For is honored only from these")
 	)
 	flag.Parse()
 
@@ -68,12 +69,13 @@ func run() int {
 
 	var metrics gatewayMetrics
 	limiter := ratelimit.New(*rateLimit, time.Minute)
+	resolver := ratelimit.NewResolver(strings.Split(*trustedProxies, ","))
 	limited := func(next http.Handler) http.Handler {
 		if *rateLimit <= 0 {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if ok, retry := limiter.Allow(ratelimit.ClientIP(r)); !ok {
+			if ok, retry := limiter.Allow(resolver.ClientIP(r)); !ok {
 				metrics.rateLimited.Add(1)
 				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
 				http.Error(w, "too many requests", http.StatusTooManyRequests)
