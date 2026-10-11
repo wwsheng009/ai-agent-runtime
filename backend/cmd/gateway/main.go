@@ -140,6 +140,8 @@ func run() int {
 		}
 		server.ServeProxy(w, r, nodeID, path)
 	})))
+	// Lightweight embedded console (registered last so specific routes win).
+	router.PathPrefix("/").Handler(consoleHandler())
 
 	httpServer := &http.Server{
 		Addr:              *listen,

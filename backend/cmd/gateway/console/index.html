@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aicli-gateway 控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>aicli-gateway</h1>
+  <div class="header-actions">
+    <button id="logout" type="button" hidden>退出</button>
+  </div>
+</header>
+<main>
+  <section id="login" hidden>
+    <h2>Owner 登录</h2>
+    <form id="login-form">
+      <input id="password" type="password" placeholder="Owner 密码" autocomplete="current-password">
+      <button type="submit">登录</button>
+    </form>
+    <p id="login-error" class="error" hidden></p>
+  </section>
+
+  <section id="nodes" hidden>
+    <div class="section-head">
+      <h2>设备与会话</h2>
+      <button id="refresh-nodes" type="button">刷新</button>
+    </div>
+    <div id="node-list" class="list"></div>
+  </section>
+
+  <section id="devices" hidden>
+    <div class="section-head">
+      <h2>设备令牌</h2>
+      <button id="refresh-devices" type="button">刷新</button>
+    </div>
+    <div id="device-list" class="list"></div>
+    <form id="device-form">
+      <input id="device-name" placeholder="设备名称">
+      <button type="submit">签发令牌</button>
+    </form>
+    <p id="device-token" class="token" hidden></p>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
