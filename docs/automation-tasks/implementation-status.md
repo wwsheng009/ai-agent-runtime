@@ -19,6 +19,7 @@
 | `aea74ee3` | P2：守护进程服务化（D1–D3） |
 | `c82faf1a` | P3：E1 frontend 自动化任务面板 |
 | `930f5415` | P4：E2 micro web 任务页签 + E3 TUI /schedule |
+| `ed3f6e0f` | 缺口修复：drain 接线 / schedule.changed / 搜索地平线 / 死锁 |
 
 ## 2. 已交付
 
@@ -111,10 +112,8 @@ go vet（相关包）  ✅
 
 ## 5. 未完成（后续阶段）
 
-- **P2 余项**：`DrainPendingMessages` 尚未接进宿主启动路径（当前由 daemon
-  暴露能力，宿主激活会话时调用即可补上）；pending 消息的死信上限。
-- **P3 余项**：全局页 `/runtime/schedule`（E1 右侧栏面 + E2/E3 页签已覆盖主要场景）；
-  `schedule.changed` SSE 事件名对齐（hook 目前按 `schedule` 前缀匹配）。
+- **全局页**：`/runtime/schedule` 独立路由页（E1 右侧栏面 + E2/E3 页签已覆盖
+  主要场景；全局页为增强）。
 - **P5 余项（E0 完整执行栈）**：daemon 注入真正的 `SessionExecutor` 需要
   `bootstrap.Manager` + `runtimeapi.Handler` 栈，但 aicli 会话执行强耦合
   per-session 状态（`ChatSession`/session store/workspace/profile）——无会话记录的
