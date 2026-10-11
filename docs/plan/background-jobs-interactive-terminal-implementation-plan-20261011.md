@@ -576,3 +576,46 @@ go test ./cmd/aicli/commands/ -run 'Schema|WebEvent'                            
 
 - ConPTY 重写与验证（Windows TTY）。
 - `detach` → 受管作业真正路由（需 toolkit↔broker 的 background-submitter seam）。
+
+---
+
+## P2 实施记录（2026-10-11，ConPTY 重写与验证 ✅）
+
+### 方案调研结论（先验证再实施）
+
+ConPTY 是 Windows 上唯一的官方伪终端 API，没有功能等价的替代品；可选的是**实现方式**：
+
+| 方案 | 结论 |
+|---|---|
+| 手搓 syscall（原 `cmd/conpty-probe` 逐字提取版） | ❌ 已实证 `STATUS_HEAP_CORRUPTION (0xC0000374)`；根因是 `[]byte` 切片头冒充 `STARTUPINFOEX` 的指针字段 + `NewLazySystemDLL/NewProc` 手动 Call |
+| **`golang.org/x/sys/windows` 官方封装**（仓库已有 v0.48.0，无新增依赖）：`CreatePseudoConsole` / `ResizePseudoConsole` / `ClosePseudoConsole` / `NewProcThreadAttributeList` + `ProcThreadAttributeListContainer.Update/Delete/List` / `StartupInfoEx` / `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` | ✅ **采用** |
+| 第三方库（`creack/pty` 仅 Unix；`aymanbagabas/go-pty` 的 conpty 实现可参考但引入依赖） | 不引入；仅作实现对照（`cmd_windows.go`） |
+
+### 实现要点（`backend/internal/pty/pty_windows.go` 全量重写）
+
+1. 全部改用 x/sys 官方封装，**零手搓 unsafe 结构体**。
+2. 能力探测 `platformSupported()`：真实 `CreatePseudoConsole(80x40)` + 关闭；Win7 等无 ConPTY 宿主 syscall 报错 → `Supported()=false` 走管道降级（已有测试覆盖）。
+3. 对照 go-pty 参考实现修正的关键点：
+   - `siEx.Cb = sizeof(StartupInfoEx)`（实测 112 = StartupInfo 104 + 指针 8）；
+   - **`siEx.ProcThreadAttributeList = attrs.List()` 必须绑定**（此前遗漏 → 子进程落到继承控制台，输出直接进了父进程 tty 而非管道）；
+   - **`STARTF_USESTDHANDLES` 必须设置**（与 go-pty 一致）；
+   - **必须传 UTF-16LE 环境块**（`CREATE_UNICODE_ENVIRONMENT` + 逐字节→rune 编码，同 go-pty/std）：`lpEnvironment=nil` 时 `cmd.exe` 以 `0xC0000142 STATUS_DLL_INIT_FAILED` 退出；
+   - **`Update` 的 attribute payload 必须是句柄值本身**（`unsafe.Pointer(hpc)`，同 go-pty）：传 `&local`（"更标准"写法）反而使子进程 `0xC0000142`。此为本次最大卡点，已用 A/B 实验定位。
+4. `ptyIn/ptyOut`（console 侧管道端）**保持打开至 PTY 生命周期结束**（早期关闭 → ConPTY 内部读写循环断开，子进程零输出）。
+5. `Wait`：`WaitForSingleObject(INFINITE)` + ctx 分支（goroutine + select）；`Read` 在 `ERROR_BROKEN_PIPE` 时先返回已读字节再上报错误，保证尾部可 drain。
+
+### 已知例外（记录在案）
+
+- `go vet ./internal/pty` 对 `attrs.Update(..., unsafe.Pointer(hpc), ...)` 报一条 `possible misuse of unsafe.Pointer`。这是 API 要求的写法（attribute value 是任意 8 字节 payload，非 Go 指针），x/sys 与 go-pty 内部同为该模式；已用 `uintptr` 中转与 `&local` 两种"更规范"写法实测均破坏 ConPTY 启动。**不要"修复"它**——源码处已加 KNOWN vet exception 注释。
+
+### 验证（本机 Windows 11 26200）
+
+- `go test ./internal/pty/ -count=3`（`TestPTYRoundTrip`：ConPTY 内 `cmd /c echo PTY_OK`，断言 exit=0 + 输出含 `PTY_OK`）：**PASS**（多轮稳定；此前同测试以 0xC0000374 崩溃）。
+- `internal/background`：新增 `TestOpenTerminalPTYSessionDrivesStdin` —— `OpenTerminal(TTY:true)`（`Command:"more"`）→ `Job.TTY=true`、`WriteStdin("hello\r")` 收到 conhost 回显（真实 VT 序列 `\x1b[?9001h` win32-input-mode 等）、`Resize(100,40)` 成功、`CloseTerminal` 干净收敛：**PASS**（`-count=5` 稳定）。
+- 交互测试注意点：PSReadLine 在 win32-input-mode 下期望编码按键事件而非原始字符，故 TTY 夹具用 `more`（conhost 行回显，与 PSReadLine 无关）；行结束符用 `\r`（ConPTY）而非 `\n`。
+- 回归：`go test ./internal/background/ ./internal/pty/ ./internal/toolbroker/` 全绿；`GOOS=linux go build ./internal/pty/` 通过。
+
+### 影响
+
+- Windows 上 `interactive=true` 的会话现在是**真 PTY**（TTY 语义 + resize + win32-input-mode VT 流），不再降级管道；`tty_fallback=pipe` 仅在无 ConPTY 的宿主（如 Win7）出现。
+- 方案中「ConPTY 需重写与验证」一项**完成**；剩余项仅 `detach` → 受管作业真正路由（toolkit↔broker seam）。

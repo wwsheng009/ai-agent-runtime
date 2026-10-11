@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestPTYRoundTrip(t *testing.T) {
 		if exe == "" {
 			exe = "cmd.exe"
 		}
-		args = []string{"/c", "echo PTY_OK"}
+		args = []string{"/c", "echo", "PTY_OK"}
 	} else {
 		exe = "/bin/sh"
 		args = []string{"-c", "echo PTY_OK"}
@@ -32,7 +33,6 @@ func TestPTYRoundTrip(t *testing.T) {
 
 	p, err := Start(exe, args, WithSize(80, 40))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = p.Close() })
 
 	var buf bytes.Buffer
 	done := make(chan struct{})
@@ -40,11 +40,11 @@ func TestPTYRoundTrip(t *testing.T) {
 		defer close(done)
 		tmp := make([]byte, 4096)
 		for {
-			n, err := p.Read(tmp)
+			n, readErr := p.Read(tmp)
 			if n > 0 {
 				buf.Write(tmp[:n])
 			}
-			if err != nil {
+			if readErr != nil {
 				return
 			}
 		}
@@ -52,10 +52,16 @@ func TestPTYRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	code, err := p.Wait(ctx)
-	require.NoError(t, err)
-	require.Equal(t, 0, code)
-	// Closing the pseudoconsole unblocks the reader once the child has exited.
+	code, waitErr := p.Wait(ctx)
+	require.NoError(t, waitErr)
+	require.Equal(t, 0, code, "cmd output so far: %q", buf.String())
+
+	// Drain the tail: conhost keeps the output pipe open briefly after the
+	// child exits; ClosePseudoConsole unblocks the reader.
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "PTY_OK") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	_ = p.Close()
 	<-done
 	require.Contains(t, buf.String(), "PTY_OK")

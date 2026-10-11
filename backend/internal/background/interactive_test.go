@@ -246,3 +246,49 @@ func TestCleanTerminals(t *testing.T) {
 	require.Equal(t, 0, manager.CleanTerminals(ctx, "session-other"))
 	require.Equal(t, 1, manager.CleanTerminals(ctx, "session-clean-c"))
 }
+
+func TestOpenTerminalPTYSessionDrivesStdin(t *testing.T) {
+	if !pty.Supported() {
+		t.Skip("ConPTY/pty not supported on this platform")
+	}
+	if runtime.GOOS != "windows" {
+		t.Skip("windows ConPTY fixture")
+	}
+	ctx := context.Background()
+	manager := NewManager(Config{LogDir: t.TempDir(), MonitorInterval: 50 * time.Millisecond})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	// `more` echoes every stdin line through the console host, independent of
+	// PSReadLine's win32-input-mode (which expects encoded key events instead
+	// of raw characters).
+	job, err := manager.OpenTerminal(ctx, "session-pty", TerminalOpenArgs{
+		Command: "more",
+		TTY:     true,
+		Cols:    80,
+		Rows:    30,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.True(t, job.TTY, "a PTY-backed session must report TTY")
+	require.Equal(t, StatusRunning, job.Status)
+
+	// Drain until the console host finishes its init sequence (VT mode setup,
+	// title, cursor) so the typed line is not racing conhost startup.
+	for i := 0; i < 5; i++ {
+		res, err := manager.WriteStdin(ctx, job.ID, "", 1000)
+		require.NoError(t, err)
+		if res.WaitCondition == "timeout" {
+			break
+		}
+	}
+
+	res, err := manager.WriteStdin(ctx, job.ID, "hello\r", 5000)
+	require.NoError(t, err)
+	// conhost echoes the typed line before `more` re-prints it.
+	require.Contains(t, res.Output, "hello")
+
+	require.NoError(t, manager.Resize(ctx, job.ID, 100, 40))
+
+	_, err = manager.CloseTerminal(ctx, job.ID)
+	require.NoError(t, err)
+}
