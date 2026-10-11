@@ -48,8 +48,12 @@ export type RuntimeEventType =
   | "hooks.stop_blocked"
   | "job_cancelled"
   | "job_finished"
+  | "job_interactive_not_recoverable"
   | "job_output"
   | "job_started"
+  | "job_terminal_closed"
+  | "job_terminal_opened"
+  | "job_terminal_resized"
   | "llm.max_output_tokens.escalated"
   | "llm.prompt_cache.backoff_applied"
   | "llm.prompt_cache.breaker_tripped"
@@ -156,8 +160,12 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "hooks.stop_blocked": [],
   "job_cancelled": [],
   "job_finished": [],
+  "job_interactive_not_recoverable": [],
   "job_output": [],
   "job_started": [],
+  "job_terminal_closed": [],
+  "job_terminal_opened": [],
+  "job_terminal_resized": [],
   "llm.max_output_tokens.escalated": [],
   "llm.prompt_cache.backoff_applied": [],
   "llm.prompt_cache.breaker_tripped": ["session_store"],

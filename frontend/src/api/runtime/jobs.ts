@@ -23,8 +23,13 @@ import type {
   RuntimeJobListResponse,
   RuntimeJobOutput,
   RuntimeJobOutputQuery,
+  RuntimeJobExchange,
+  RuntimeJobInputRequest,
+  RuntimeJobInputResponse,
   RuntimeJobRequeueResponse,
+  RuntimeJobResizeResponse,
   RuntimeJobStatus,
+  RuntimeTerminalsCleanResponse,
 } from "@/types/runtime";
 
 import {
@@ -60,6 +65,16 @@ function pickNumber(record: RawRecord, ...keys: string[]): number | null {
     }
   }
   return null;
+}
+
+function pickBoolean(record: RawRecord, ...keys: string[]): boolean {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "boolean") {
+      return value;
+    }
+  }
+  return false;
 }
 
 const jobStatuses: RuntimeJobStatus[] = [
@@ -104,6 +119,10 @@ export function normalizeRuntimeJob(raw: unknown): RuntimeJob {
     finishedAt: pickString(record, "FinishedAt", "finished_at"),
     exitCode: pickNumber(record, "ExitCode", "exit_code"),
     logPath: pickString(record, "LogPath", "log_path"),
+    interactive: pickBoolean(record, "Interactive", "interactive"),
+    tty: pickBoolean(record, "TTY", "tty"),
+    cols: pickNumber(record, "Cols", "cols") ?? 0,
+    rows: pickNumber(record, "Rows", "rows") ?? 0,
   };
 }
 
@@ -136,6 +155,11 @@ export function normalizeRuntimeJobOutput(raw: unknown): RuntimeJobOutput {
     exitCode: pickNumber(record, "exit_code", "ExitCode"),
     message: pickString(record, "message", "Message"),
     errorCode: pickString(record, "error_code", "ErrorCode"),
+    waitCondition: pickString(record, "wait_condition", "WaitCondition"),
+    waitedMs: pickNumber(record, "waited_ms", "WaitedMs") ?? 0,
+    osPid: pickNumber(record, "os_pid", "OSPID"),
+    cpuPercent: pickNumber(record, "cpu_percent", "CPUPercent"),
+    rssKb: pickNumber(record, "rss_kb", "RSSKB"),
   };
 }
 
@@ -242,4 +266,82 @@ export async function getRuntimeJobOutput(
   );
   const record = asRecord(payload) ?? {};
   return normalizeRuntimeJobOutput(record.output);
+}
+
+/** 一次 write_stdin 交换的归一化（2026-10-11）。 */
+export function normalizeRuntimeJobExchange(raw: unknown): RuntimeJobExchange {
+  const record = asRecord(raw) ?? {};
+  return {
+    jobId: pickString(record, "job_id", "JobID"),
+    status: pickString(record, "status", "Status"),
+    output: pickString(record, "output", "Output"),
+    offset: pickNumber(record, "offset", "Offset") ?? 0,
+    nextOffset: pickNumber(record, "next_offset", "NextOffset") ?? 0,
+    waitCondition: pickString(record, "wait_condition", "WaitCondition"),
+    waitedMs: pickNumber(record, "waited_ms", "WaitedMs") ?? 0,
+    exited: pickBoolean(record, "exited", "Exited"),
+    exitCode: pickNumber(record, "exit_code", "ExitCode"),
+    message: pickString(record, "message", "Message"),
+    osPid: pickNumber(record, "os_pid", "OSPID"),
+    cpuPercent: pickNumber(record, "cpu_percent", "CPUPercent"),
+    rssKb: pickNumber(record, "rss_kb", "RSSKB"),
+  };
+}
+
+/** 向交互会话写 stdin（2026-10-11）。 */
+export async function writeRuntimeJobInput(
+  jobId: string,
+  request: RuntimeJobInputRequest,
+): Promise<RuntimeJobInputResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    `${JOBS_PATH}/${encodeURIComponent(jobId)}/input`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chars: request.chars,
+        input: request.input,
+        yield_time_ms: request.yieldTimeMs,
+        close_stdin: request.closeStdin,
+      }),
+    },
+  );
+  const record = asRecord(payload) ?? {};
+  return { exchange: normalizeRuntimeJobExchange(record.exchange) };
+}
+
+/** 调整交互会话终端尺寸（无 PTY 时后端返回 409）。 */
+export async function resizeRuntimeJob(
+  jobId: string,
+  cols: number,
+  rows: number,
+): Promise<RuntimeJobResizeResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    `${JOBS_PATH}/${encodeURIComponent(jobId)}/resize`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ cols, rows }),
+    },
+  );
+  const record = asRecord(payload) ?? {};
+  return {
+    resized: pickBoolean(record, "resized", "Resized"),
+    cols: pickNumber(record, "cols", "Cols") ?? cols,
+    rows: pickNumber(record, "rows", "Rows") ?? rows,
+  };
+}
+
+/** 批量关闭交互会话（可选按 session 限定）。 */
+export async function cleanRuntimeTerminals(
+  sessionId?: string,
+): Promise<RuntimeTerminalsCleanResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrlWithQuery("/api/runtime/background/terminals/clean", {
+      session_id: sessionId,
+    }),
+    { method: "POST", headers: { Accept: "application/json" } },
+  );
+  const record = asRecord(payload) ?? {};
+  return { closed: pickNumber(record, "closed", "Closed") ?? 0 };
 }

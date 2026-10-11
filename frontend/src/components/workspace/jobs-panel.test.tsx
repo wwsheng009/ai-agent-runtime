@@ -9,6 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BackgroundJobsController } from "@/hooks/workspace/use-background-jobs";
+import { ingestJobOutputEvent, resetJobOutputStreams } from "@/lib/job-output-stream/store";
 import type { RuntimeJob } from "@/types/runtime";
 
 import { JobsPanel } from "./jobs-panel";
@@ -51,6 +52,7 @@ function makeController(
   return {
     cancel: vi.fn(async () => true),
     cancellingId: "",
+    cleanTerminals: vi.fn(async () => 0),
     error: null,
     hasLiveJobs: false,
     jobs: [],
@@ -58,7 +60,9 @@ function makeController(
     loading: false,
     pendingAction: null,
     refresh: vi.fn(),
+    resizeTerminal: vi.fn(async () => true),
     runAction: vi.fn(async () => true),
+    writeInput: vi.fn(async () => null),
     ...overrides,
   };
 }
@@ -79,6 +83,7 @@ describe("JobsPanel", () => {
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
     onClose.mockReset();
     getRuntimeJobOutputMock.mockReset();
+    resetJobOutputStreams();
   });
 
   afterEach(() => {
@@ -238,6 +243,58 @@ describe("JobsPanel", () => {
       limit: 8192,
     });
     expect(document.body.textContent).toContain("first");
+    expect(document.body.textContent).toContain("second");
+  });
+
+  it("展开的 live 任务跟随 job_output 事件增量（事件驱动）", async () => {
+    getRuntimeJobOutputMock
+      .mockResolvedValueOnce({
+        jobId: "live-1",
+        status: "running",
+        output: "first\n",
+        nextOffset: 6,
+        exitCode: null,
+        message: "",
+        errorCode: "",
+      })
+      .mockResolvedValueOnce({
+        jobId: "live-1",
+        status: "running",
+        output: "second\n",
+        nextOffset: 13,
+        exitCode: null,
+        message: "",
+        errorCode: "",
+      });
+
+    await renderPanel({
+      hasLiveJobs: true,
+      liveCount: 1,
+      jobs: [makeJob({ id: "live-1", command: "sleep 30" })],
+    });
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="查看 sleep 30 的输出"]')
+        ?.click();
+    });
+    await act(flush);
+    expect(getRuntimeJobOutputMock).toHaveBeenCalledTimes(1);
+
+    // 事件驱动：注入一条 job_output 信号 → 面板去抖后按 nextOffset 续读。
+    await act(async () => {
+      ingestJobOutputEvent({
+        type: "job_output",
+        payload: { job_id: "live-1", offset: 6, next_offset: 13, size: 7 },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 320));
+    });
+    await act(flush);
+
+    expect(getRuntimeJobOutputMock).toHaveBeenLastCalledWith("live-1", {
+      offset: 6,
+      limit: 8192,
+    });
     expect(document.body.textContent).toContain("second");
   });
 

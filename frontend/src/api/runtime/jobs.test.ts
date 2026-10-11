@@ -273,6 +273,11 @@ describe("normalizeRuntimeJobEvent / normalizeRuntimeJobOutput 容错", () => {
       exitCode: null,
       message: "",
       errorCode: "",
+      waitCondition: "",
+      waitedMs: 0,
+      osPid: null,
+      cpuPercent: null,
+      rssKb: null,
     });
   });
 });

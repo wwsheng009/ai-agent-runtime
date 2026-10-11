@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 import { SessionSwitchConfirmDialog } from "@/components/workspace/session-switch-confirm-dialog";
 import { SessionRuntimeNotices } from "@/components/workspace/session-runtime-notices";
@@ -26,6 +26,7 @@ import { useTrajectoryEarlierEntry } from "@/hooks/workspace/use-trajectory-earl
 import { useWorkspaceThreadPayloadRetention } from "@/hooks/workspace/use-workspace-thread-payload-retention";
 import { getErrorMessage } from "@/hooks/workspace/thread-runtime";
 import { withTransportDegradation } from "@/lib/connection-status";
+import { ingestJobOutputEvent } from "@/lib/job-output-stream/store";
 import {
   resetStoredRuntimeClientId,
   useRuntimeClientIdentity,
@@ -225,6 +226,15 @@ export function WorkspacePage() {
     runtimeState: sessionRuntimeState,
     getErrorMessage,
   });
+  // P2：runtime 事件流里的 `job_output` 增量同时喂给逐任务输出流 store，供 jobs
+  // 面板对展开的 live 任务做事件驱动的增量跟随（不再纯靠轮询）。
+  const handleRuntimeEvent = useCallback(
+    (event: Parameters<typeof applyPendingInteractionEvent>[0]) => {
+      applyPendingInteractionEvent(event);
+      ingestJobOutputEvent(event);
+    },
+    [applyPendingInteractionEvent],
+  );
   // 尾部优先回放：先回放「最近一页」事件，再放行实时流建连。顺序很重要——
   // 若先建连（after=0），后端会把整份事件日志按 SSE dump 重放一遍，窗口化
   // 就失效了；见 use-trajectory-recovery。
@@ -258,7 +268,7 @@ export function WorkspacePage() {
       deltaCoordinator: runtimeDeltaCoordinator,
       localResponding: isResponding,
       localTurnId: activeTurnId,
-      onRuntimeEvent: applyPendingInteractionEvent,
+      onRuntimeEvent: handleRuntimeEvent,
       refreshRuntimeState: refreshSessionRuntimeState,
       selectedThread,
       sessionActiveTurn,
@@ -316,7 +326,7 @@ export function WorkspacePage() {
     threadBySessionId,
   } = useWorkspaceMultiSessionRuntime({
     activeSessionKeys,
-    applyPendingInteractionEvent,
+    applyPendingInteractionEvent: handleRuntimeEvent,
     openThread: handleSelectThreadWithTrajectoryReset,
     pendingInteractionKind: pendingInteraction?.kind ?? null,
     responding: currentSessionResponding,

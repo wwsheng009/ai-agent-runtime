@@ -12,9 +12,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // 避免扩大 runtime-api barrel 的改动面。
 import {
   abandonRuntimeJob,
+  cleanRuntimeTerminals,
   pauseRuntimeJob,
   requeueRuntimeJob,
+  resizeRuntimeJob,
   resumeRuntimeJob,
+  writeRuntimeJobInput,
 } from "@/api/runtime/jobs";
 import {
   buildJobsReloadKey,
@@ -23,7 +26,7 @@ import {
   type JobActionPending,
 } from "@/components/workspace/jobs-panel-shared";
 import { cancelRuntimeJob, listRuntimeJobs } from "@/lib/runtime-api";
-import type { RuntimeJob } from "@/types/runtime";
+import type { RuntimeJob, RuntimeJobExchange, RuntimeJobInputRequest } from "@/types/runtime";
 
 // 事件后延迟刷新：等后端把状态落库，避免读到旧值。
 const runtimeEventRefreshDelayMs = 800;
@@ -179,9 +182,62 @@ export function useBackgroundJobs({
   const cancellingId =
     pendingAction && pendingAction.action === "cancel" ? pendingAction.jobId : "";
 
+  /** 交互会话：向运行中的会话写 stdin（2026-10-11）。 */
+  const writeInput = useCallback(
+    async (
+      jobId: string,
+      request: RuntimeJobInputRequest,
+    ): Promise<RuntimeJobExchange | null> => {
+      const target = jobId.trim();
+      if (!target) {
+        return null;
+      }
+      try {
+        const response = await writeRuntimeJobInput(target, request);
+        setRefreshToken((token) => token + 1);
+        return response.exchange;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+        return null;
+      }
+    },
+    [],
+  );
+
+  /** 交互会话：调整终端尺寸（无 PTY 时后端返回 409）。 */
+  const resizeTerminal = useCallback(
+    async (jobId: string, cols: number, rows: number): Promise<boolean> => {
+      const target = jobId.trim();
+      if (!target) {
+        return false;
+      }
+      try {
+        await resizeRuntimeJob(target, cols, rows);
+        return true;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+        return false;
+      }
+    },
+    [],
+  );
+
+  /** 批量关闭交互会话（按当前 session 限定）。 */
+  const cleanTerminals = useCallback(async (): Promise<number> => {
+    try {
+      const response = await cleanRuntimeTerminals(sid);
+      setRefreshToken((token) => token + 1);
+      return response.closed;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return 0;
+    }
+  }, [sid]);
+
   return {
     cancel,
     cancellingId,
+    cleanTerminals,
     error,
     hasLiveJobs,
     jobs,
@@ -189,7 +245,9 @@ export function useBackgroundJobs({
     loading,
     pendingAction,
     refresh,
+    resizeTerminal,
     runAction,
+    writeInput,
   };
 }
 

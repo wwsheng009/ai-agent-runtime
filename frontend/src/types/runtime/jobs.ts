@@ -39,6 +39,11 @@ export type RuntimeJob = {
   finishedAt: string;
   exitCode: number | null;
   logPath: string;
+  /** 交互会话（write_stdin）字段（2026-10-11）；旧后端/夹具可缺省。 */
+  interactive?: boolean;
+  tty?: boolean;
+  cols?: number;
+  rows?: number;
 };
 
 /** `POST .../requeue` 的响应：新任务 + 被重排队的旧任务 id。 */
@@ -93,4 +98,54 @@ export type RuntimeJobOutput = {
   exitCode: number | null;
   message: string;
   errorCode: string;
+  /** 交互会话字段（2026-10-11）：等待条件与进程资源指标。 */
+  waitCondition: string;
+  waitedMs: number;
+  osPid: number | null;
+  cpuPercent: number | null;
+  rssKb: number | null;
+};
+
+/** `POST .../{id}/input` 请求：向交互会话写 stdin（2026-10-11）。 */
+export type RuntimeJobInputRequest = {
+  chars?: string;
+  input?: string;
+  yieldTimeMs?: number;
+  closeStdin?: boolean;
+};
+
+/** 一次 write_stdin 交换的前端投影。 */
+export type RuntimeJobExchange = {
+  jobId: string;
+  status: string;
+  output: string;
+  offset: number;
+  nextOffset: number;
+  waitCondition: string;
+  waitedMs: number;
+  exited: boolean;
+  exitCode: number | null;
+  message: string;
+  osPid: number | null;
+  cpuPercent: number | null;
+  rssKb: number | null;
+};
+
+export type RuntimeJobInputResponse = {
+  exchange: RuntimeJobExchange;
+};
+
+export type RuntimeJobResizeRequest = {
+  cols: number;
+  rows: number;
+};
+
+export type RuntimeJobResizeResponse = {
+  resized: boolean;
+  cols: number;
+  rows: number;
+};
+
+export type RuntimeTerminalsCleanResponse = {
+  closed: number;
 };

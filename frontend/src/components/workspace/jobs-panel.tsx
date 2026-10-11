@@ -16,7 +16,7 @@ import {
   RefreshCwIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
@@ -39,6 +39,7 @@ import { type BackgroundJobsController } from "@/hooks/workspace/use-background-
 import { useElapsedTick } from "@/hooks/workspace/use-elapsed-tick";
 import { useFocusRestore } from "@/hooks/workspace/use-focus-restore";
 import { getRuntimeJobOutput } from "@/lib/runtime-api";
+import { subscribeJobOutput } from "@/lib/job-output-stream/store";
 import type { RuntimeJob, RuntimeJobStatus } from "@/types/runtime";
 import { cn } from "@/lib/utils";
 
@@ -79,10 +80,20 @@ export function JobsPanel({
   const [expandedJobId, setExpandedJobId] = useState("");
   const [outputs, setOutputs] = useState<Record<string, JobOutputState>>({});
 
+  // outputs 的最新值：订阅回调里读取，避免把 outputs 放进订阅依赖导致频繁重订阅。
+  const outputsRef = useRef(outputs);
+  useEffect(() => {
+    outputsRef.current = outputs;
+  }, [outputs]);
+
   useDialogLifecycle(open, onClose);
   useFocusRestore(open);
 
   const { live, settled } = useMemo(() => splitRuntimeJobs(jobs), [jobs]);
+  const expandedJobLive = useMemo(() => {
+    const job = jobs.find((candidate) => candidate.id === expandedJobId);
+    return Boolean(job && isLiveJobStatus(job.status));
+  }, [jobs, expandedJobId]);
   const now = useElapsedTick(open && hasLiveJobs);
 
   const loadOutput = useCallback(
@@ -123,6 +134,35 @@ export function JobsPanel({
     },
     [],
   );
+
+  // P2：展开的 live 任务跟随 `job_output` 事件增量（事件驱动，而非纯轮询）。
+  // 事件只作「有新数据」的信号；字节仍由权威 REST /output 按 offset 读取，
+  // 因此不会与分页游标出现双份拼接。
+  useEffect(() => {
+    if (!open || !expandedJobId || !expandedJobLive) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = subscribeJobOutput(expandedJobId, () => {
+      if (timer !== undefined) {
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = undefined;
+        const state = outputsRef.current[expandedJobId];
+        if (!state || state.loading) {
+          return;
+        }
+        void loadOutput(expandedJobId, state.nextOffset);
+      }, 250);
+    });
+    return () => {
+      unsubscribe();
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    };
+  }, [open, expandedJobId, expandedJobLive, loadOutput]);
 
   const handleToggleOutput = useCallback(
     (jobId: string) => {
