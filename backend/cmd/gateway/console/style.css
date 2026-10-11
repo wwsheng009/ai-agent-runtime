@@ -95,6 +95,23 @@ form { display: flex; gap: 8px; margin-top: 8px; }
 
 .token { font-family: ui-monospace, monospace; font-size: 13px; word-break: break-all; color: var(--muted); }
 
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 1 1 100%;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.session-title {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Mobile / PWA (docs/gateway/07-console.md §9): safe areas + touch targets. */
 body {
   padding-bottom: env(safe-area-inset-bottom);

@@ -31,6 +31,18 @@
     });
   }
 
+  function nodeWebBase(node) {
+    var webPath = node.kind === "runtime-server" ? "/" : "/web/";
+    return "/n/" + encodeURIComponent(node.node_id) + webPath;
+  }
+
+  function sessionOpenTarget(node, sessionID) {
+    var base = nodeWebBase(node);
+    // runtime-server's SPA manages its own session list; aicli takes ?session=.
+    if (node.kind === "runtime-server") { return base; }
+    return base + "?session=" + encodeURIComponent(sessionID);
+  }
+
   function renderNodes(nodes) {
     var list = el("node-list");
     list.innerHTML = "";
@@ -39,23 +51,38 @@
       return;
     }
     nodes.forEach(function (node) {
-      var webPath = node.kind === "runtime-server" ? "/" : "/web/";
-      var target = "/n/" + encodeURIComponent(node.node_id) + webPath;
+      var sessions = node.sessions || [];
       var card = document.createElement("div");
       card.className = "card";
       card.innerHTML =
         '<div class="card-head"><span class="card-title"></span><span class="badge"></span></div>' +
         '<div class="card-meta"></div>' +
-        '<div class="card-actions">' +
-        '<button class="secondary" data-open>打开会话</button>' +
-        '<button class="secondary" data-newtab>新标签打开</button>' +
-        "</div>";
+        '<div class="card-actions"></div>';
       card.querySelector(".card-title").textContent = node.name || node.device_name || node.node_id;
       card.querySelector(".badge").textContent =
-        (node.kind || "agent") + " · 会话 " + ((node.sessions || []).length);
+        (node.kind || "agent") + " · 会话 " + sessions.length;
       card.querySelector(".card-meta").textContent = node.node_id;
-      card.querySelector("[data-open]").addEventListener("click", function () { window.location.href = target; });
-      card.querySelector("[data-newtab]").addEventListener("click", function () { window.open(target, "_blank"); });
+      var actions = card.querySelector(".card-actions");
+
+      if (sessions.length) {
+        sessions.forEach(function (session) {
+          var row = document.createElement("div");
+          row.className = "session-row";
+          row.innerHTML = '<span class="session-title"></span><button class="secondary" type="button">打开</button>';
+          row.querySelector(".session-title").textContent = session.title || session.session_id;
+          row.querySelector("button").addEventListener("click", function () {
+            window.open(sessionOpenTarget(node, session.session_id), "_blank");
+          });
+          actions.appendChild(row);
+        });
+      } else {
+        var open = document.createElement("button");
+        open.className = "secondary";
+        open.type = "button";
+        open.textContent = "打开";
+        open.addEventListener("click", function () { window.open(nodeWebBase(node), "_blank"); });
+        actions.appendChild(open);
+      }
       list.appendChild(card);
     });
   }

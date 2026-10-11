@@ -3,15 +3,16 @@ package commands
 import (
 	"context"
 	"os"
+	"strings"
 
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
 // chatGatewayRegisterFunc supplies the REGISTER payload for this process. The
-// session list is populated by a later step; node identity, capabilities and
-// the reverse-proxy route allowlist are set here.
-func chatGatewayRegisterFunc(cfg gatewayagent.Config) gatewayagent.RegisterFunc {
+// session list reflects the session bound at dial time (a later step pushes
+// SESSION_UPDATE on switch).
+func chatGatewayRegisterFunc(cfg gatewayagent.Config, session *ChatSession) gatewayagent.RegisterFunc {
 	return func() wire.Register {
 		return wire.Register{
 			Kind:         "aicli",
@@ -19,8 +20,26 @@ func chatGatewayRegisterFunc(cfg gatewayagent.Config) gatewayagent.RegisterFunc 
 			DeviceName:   cfg.Name,
 			Capabilities: []string{"manifest", "screen", "status", "events", "invoke", "input", "sessions"},
 			Routes:       []string{"/web", "/web/api", "/debug/endpoints"},
+			Sessions:     chatGatewaySessions(session),
 		}
 	}
+}
+
+// chatGatewaySessions projects the process's active session for the gateway.
+func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
+	if session == nil || session.RuntimeSession == nil {
+		return nil
+	}
+	id := strings.TrimSpace(session.RuntimeSession.ID)
+	if id == "" {
+		return nil
+	}
+	summary := wire.SessionSummary{
+		SessionID: id,
+		Title:     chatMeshSessionTitle(session),
+		State:     "idle",
+	}
+	return []wire.SessionSummary{summary}
 }
 
 // attachChatGateway wires the gateway control plane into the session from
@@ -36,7 +55,7 @@ func attachChatGateway(session *ChatSession) {
 	if !cfg.Enabled {
 		return
 	}
-	controller := gatewayagent.NewController(cfg, chatGatewayRegisterFunc(cfg))
+	controller := gatewayagent.NewController(cfg, chatGatewayRegisterFunc(cfg, session))
 	// Point the agent at this process's loopback web server (recorded by
 	// cmd/aicli once it is listening) before the auto-connect dial.
 	controller.SetForward(chatGatewayForwardConfig())
