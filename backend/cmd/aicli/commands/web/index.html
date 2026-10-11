@@ -20,6 +20,10 @@
         <button class="menu-item" type="button" role="menuitem" data-menu-action="session-new">新建会话</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="session-refresh">刷新会话列表</button>
         <div class="menu-sep" role="separator"></div>
+        <!-- 整会话复制入口：移动端页面上不再显示浮动「复制」按钮（style.css <768px 隐藏
+             #screen-copy-btn），复制功能收进「文件」菜单。桌面端菜单项与浮动按钮并存；
+             菜单项只转发点击（js/menu.js → #screen-copy-btn），不另起一份复制实现。 -->
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="screen-copy">复制会话内容</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="export-full">导出会话（完整 JSON）</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="export-body">导出正文（Markdown）</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="export-tools">导出正文 + 工具调用</button>
@@ -34,9 +38,23 @@
         <button class="menu-item" type="button" role="menuitem" data-menu-action="composer-toggle">折叠/展开浮动输入面板（Ctrl+J）</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="low-bandwidth-toggle">低带宽模式（隐藏图片）</button>
         <div class="menu-sep" role="separator"></div>
+        <!-- 页签导航的移动端收口：<768px 隐藏页签栏（style.css 移动端媒体查询），
+             「视图」菜单成为唯一页签入口，主页面只保留对话视图。带 .mobile-only 的项
+             仅移动端显示；桌面端页签栏常驻，菜单里只保留原有三项，避免双份入口。
+             项序与页签栏一致（对话/技能/文件/GIT/MCP/任务/日志/配置/缓存/分析/LSP/调试/关于）。 -->
         <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-main">对话页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-skills">技能页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-files">文件页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-git">GIT 页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-mcp">MCP 页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-schedule">任务页签</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-log">日志页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-config">配置页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-cache">缓存分析页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-analysis">用量分析页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-lsp">LSP 观测页签</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-debug">调试页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-about">关于本客户端</button>
       </div>
     </div>
     <div class="menu-root">
@@ -621,8 +639,10 @@
           <form id="schedule-form" autocomplete="off">
             <div class="config-form-grid">
               <label class="cfg-item">
-                <span class="cfg-label">目标会话 ID</span>
-                <input id="schedule-form-session" required placeholder="投递回哪个会话">
+                <span class="cfg-label">目标会话（默认当前会话）</span>
+                <select id="schedule-form-session" required>
+                  <option value="">加载会话列表…</option>
+                </select>
               </label>
               <label class="cfg-item">
                 <span class="cfg-label">任务名称</span>
@@ -654,8 +674,8 @@
                 <input id="schedule-form-time" type="datetime-local">
               </label>
               <label class="cfg-item" id="schedule-form-zone-item" hidden>
-                <span class="cfg-label">时区（IANA）</span>
-                <input id="schedule-form-zone" placeholder="如 Asia/Shanghai">
+                <span class="cfg-label">时区</span>
+                <select id="schedule-form-zone"></select>
               </label>
             </div>
             <div class="config-form-block" id="schedule-form-weekdays-item" hidden>

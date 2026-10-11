@@ -6,6 +6,7 @@
 // 与模型工具同一条管线;本端只做轻量的必填/形状预检。
 
 import { apiFetch, esc, showToast } from "./util.js";
+import { getCurrentSessionID, getSessionSummaries } from "./sessions.js";
 
 var currentSessionId = "";
 var loaded = false;
@@ -210,15 +211,71 @@ function openCreateForm() {
   if (!overlay || !form) { return; }
   form.reset();
   if (status) { status.textContent = ""; }
-  var zone = document.getElementById("schedule-form-zone");
-  if (zone && !zone.value) {
-    try { zone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (_) { zone.value = "UTC"; }
-  }
+  fillSessionSelect();
+  fillZoneSelect();
   var kind = document.getElementById("schedule-form-kind");
   syncCreateFormFields(kind ? kind.value : "after");
   overlay.classList.add("active");
-  var first = document.getElementById("schedule-form-session");
+  var first = document.getElementById("schedule-form-title");
   if (first) { first.focus(); }
+}
+
+// 目标会话下拉：会话摘要来自 sessions.js 的 loadSessions 缓存（无第二份请求），
+// 默认选中当前会话；缓存未就绪（空列表）时注入当前会话占位项，保证「默认当前」成立。
+function fillSessionSelect() {
+  var select = document.getElementById("schedule-form-session");
+  if (!select) { return; }
+  var current = getCurrentSessionID();
+  var summaries = getSessionSummaries();
+  if (!summaries.length && current) {
+    summaries = [{ id: current, title: "(当前会话)" }];
+  }
+  var options = "";
+  var currentSeen = false;
+  for (var i = 0; i < summaries.length; i++) {
+    var s = summaries[i];
+    if (s.id === current) { currentSeen = true; }
+    var shortId = s.id.length > 22 ? s.id.slice(0, 22) + "…" : s.id;
+    options += '<option value="' + esc(s.id) + '"' + (s.id === current ? " selected" : "") + ">" +
+      esc(s.title) + "（" + esc(shortId) + "）</option>";
+  }
+  // 缓存里没有当前会话（异常态）：追加占位项而不是静默选第一个。
+  if (!currentSeen && current) {
+    options = '<option value="' + esc(current) + '" selected>(当前会话)（' + esc(current.slice(0, 22)) + "…）</option>" + options;
+  }
+  select.innerHTML = options;
+}
+
+// 时区下拉：Intl.supportedValuesOf('timeZone')（现代浏览器全量 IANA 清单），
+// 老浏览器回退到常用清单；默认选中浏览器时区。
+function fillZoneSelect() {
+  var select = document.getElementById("schedule-form-zone");
+  if (!select) { return; }
+  var zones = [];
+  try {
+    if (typeof Intl.supportedValuesOf === "function") {
+      zones = Intl.supportedValuesOf("timeZone") || [];
+    }
+  } catch (_) { /* 走回退清单 */ }
+  if (!zones.length) {
+    zones = ["UTC", "Asia/Shanghai", "Asia/Tokyo", "Asia/Singapore", "Asia/Hong_Kong",
+      "Europe/London", "Europe/Berlin", "Europe/Paris", "America/New_York",
+      "America/Chicago", "America/Los_Angeles", "Australia/Sydney"];
+  }
+  var local = "UTC";
+  try { local = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch (_) { /* keep UTC */ }
+  var options = "";
+  var localSeen = false;
+  for (var i = 0; i < zones.length; i++) {
+    var z = zones[i];
+    if (z === local) { localSeen = true; }
+    options += '<option value="' + esc(z) + '"' + (z === local ? " selected" : "") + ">" + esc(z) + "</option>";
+  }
+  // 浏览器时区不在清单（极端）：补在顶部，保证默认值可见。
+  if (!localSeen) {
+    options = '<option value="' + esc(local) + '" selected>' + esc(local) + "</option>" + options;
+  }
+  select.innerHTML = options;
 }
 
 function closeCreateForm() {
@@ -246,18 +303,19 @@ function syncCreateFormFields(kind) {
   if (timeLabel) { timeLabel.textContent = "具体时间"; }
 }
 
-// 由表单派生创建负载；返回 null 表示本地预检未过（状态栏提示）。
+// 由表单派生创建负载；返回 {error} 表示本地预检未过（状态栏提示）。
 function buildCreateRequest() {
   var val = function (id) {
     var el = document.getElementById(id);
     return el ? String(el.value || "").trim() : "";
   };
-  var sessionId = val("schedule-form-session");
+  var sessionSelect = document.getElementById("schedule-form-session");
+  var sessionId = sessionSelect ? String(sessionSelect.value || "").trim() : "";
   var title = val("schedule-form-title");
   var prompt = val("schedule-form-prompt");
   var kindEl = document.getElementById("schedule-form-kind");
   var kind = kindEl ? kindEl.value : "after";
-  if (!sessionId) { return { error: "请填写目标会话 ID" }; }
+  if (!sessionId) { return { error: "请选择目标会话" }; }
   if (!title) { return { error: "请填写任务名称" }; }
   if (!prompt) { return { error: "请填写任务内容" }; }
   var base = { session_id: sessionId, title: title, prompt: prompt };
@@ -279,7 +337,7 @@ function buildCreateRequest() {
     return base;
   }
   var zone = val("schedule-form-zone");
-  if (!zone) { return { error: "请填写时区（IANA，如 Asia/Shanghai）" }; }
+  if (!zone) { return { error: "请选择时区" }; }
   if (kind === "daily") {
     var dailyTime = val("schedule-form-time");
     if (!dailyTime) { return { error: "请填写本地时间（HH:MM[:SS]）" }; }

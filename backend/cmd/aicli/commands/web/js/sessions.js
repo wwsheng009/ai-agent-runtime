@@ -1315,6 +1315,17 @@ function createNewSession() {
 export function getInputHistory() { return inputHistory; }
 // 当前会话 id：分析页签等按会话判定快照是否过期（空串 = 尚未拿到会话列表响应）。
 export function getCurrentSessionID() { return currentSessionID; }
+// 会话摘要快照（[{id,title}]，loadSessions 缓存的拷贝）：自动化任务等跨会话
+// 表单用它填充「目标会话」下拉，避免第二份会话列表请求。title 归一与
+// currentSessionLabel 同口径（"(untitled)" → 中文占位）。
+export function getSessionSummaries() {
+  var out = [];
+  for (var i = 0; i < sessions.length; i++) {
+    var t = sessions[i].title || "";
+    out.push({ id: sessions[i].id, title: t && t !== "(untitled)" ? t : "(未命名会话)" });
+  }
+  return out;
+}
 export function getInputHistoryIdx() { return inputHistoryIdx; }
 export function setInputHistoryIdx(v) { inputHistoryIdx = v; }
 

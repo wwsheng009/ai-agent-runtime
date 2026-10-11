@@ -166,6 +166,9 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .menu-item:hover, .menu-item:focus-visible { background: var(--hoverBg2); color: var(--fg); outline: none; }
 .menu-item:disabled { opacity: 0.5; cursor: default; }
 .menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+/* 移动端专属菜单项（页签导航收进「视图」菜单）：桌面端页签栏常驻，不显示，
+   <768px 时由移动端媒体查询放开。 */
+.menu-item.mobile-only { display: none; }
 /* 右侧状态簇：连接 / 轮次 / 发送状态 + 主题切换图标，全部靠最右排列 */
 .header-status {
   grid-column: 3; justify-self: end;
@@ -1617,9 +1620,16 @@ body.sidebar-collapsed #sidebar {
   #cfg-bar.cfg-open .cfg-model-popup { max-height: min(240px, 40vh); }
   /* 检索框会被程序聚焦：字号必须 ≥16px，否则 iOS 聚焦时放大整页 */
   #cfg-bar .cfg-model-popup .cfg-popup-filter input { font-size: 16px; }
-  /* 六个页签（对话/日志/配置/缓存/调试/关于）在窄屏等分会被压得过窄，允许换行 */
-  .tabs { flex-wrap: wrap; }
-  .tab-btn { flex: 1 1 auto; min-width: 64px; padding: 7px 10px; }
+  /* 页签栏整体收进「视图」菜单（index.html 的 .mobile-only 菜单项）：移动端主页面
+     只保留对话视图，技能/文件/GIT/MCP/任务/配置等页签经「视图」菜单切换，
+     菜单项与页签按钮共用同一 activateTab 路径（js/menu.js 转发点击）。 */
+  .tabs { display: none; }
+  /* 浮动「复制」按钮在移动端不再单独占位：整会话复制收进「文件」菜单
+     （screen-copy 菜单项转发点击本按钮，display:none 不影响程序化 click）。
+     !important 用于压过 chat.js updateWelcome() 设置的内联 display。 */
+  #screen-copy-btn { display: none !important; }
+  /* 「视图」菜单里的移动端专属页签项：桌面默认隐藏（见 .menu-item.mobile-only 基础规则） */
+  .menu-item.mobile-only { display: block; }
   /* 底部状态栏：单行横向滚动，不再折成多行吃掉正文高度；上下留白一并收紧 */
   #footer { gap: 8px; margin-top: 4px; padding-top: 4px; }
   #status-bar-container { min-width: 0; max-width: 100%; }
