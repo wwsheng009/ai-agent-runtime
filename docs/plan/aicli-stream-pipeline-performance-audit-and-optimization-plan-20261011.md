@@ -150,7 +150,25 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 - delta drop 不影响终态正文：drop 仅发生在队列溢出（4096 条/16MB）时，终态 `assistant_message` 承载完整正文，resume 重放测试全绿。
 - 测试适配：`chat_actor_host_persist_test.go` 翻转 `Disable` 语义；`TestStreamMergeKey…` 重写为 `streamMergeIdentityEqual`；reasoning 合并测试断言从槽位 payload 迁移到累积器 + 投递副本。
 
-### 9.4 遗留（批次 2+ 承接）
+### 9.4 批次 2 实施记录（2026-10-11 续）
 
-- §3 P1 全部 10 项（每 delta 常数项）与 §4 P2、§5 缺口加固未动工。
-- 动工批次 2 前建议先跑 `aicli chat --pprof` 长流式采样确认热点占比排序（§8 未做项）。
+| 项 | 提交 | 内容与实测 |
+| --- | --- | --- |
+| P1-6 | `6b3c14cc` | RenderCache 命中路径零分配：docKey FNV-1a 直扫字符串（原 `[]byte(source)` 经接口逃逸每次复制全源）、主题指纹 memo（原每次 Render Sprintf 分配）、LRU 改 container/list O(1) touch/remove。**命中 597ns/op 0 allocs**（原 2 次分配 + O(256) 扫描） |
+| P1-8 | `0d76794d` | UIController.IsClosed() 短临界区检查；bridge worker 与 composer flusher 的满邮箱重试循环不再每轮跑完整 Stats()（两份 256 元素环拷贝 + 排序） |
+| P1-10 | `0d76794d` | 迟到/被拒事件 payload marshal + 同步 debug 写限频每秒一条（suppressed_total 随放行条目可见），闸门在 marshal 之前 |
+| P1-1 | `515286dc` | TuiScene.MutableCell() O(1) 快路径（缓存 cell ID + byID 验证，失效退化全扫）；`unifiedSceneActiveCellActionLocked` 与 reducer 替换判据两处 delta 热路径直取 cell，只在需要整快照替换（挂载/turn 边界）时回退 sceneSnapshot。门禁：6719 cells p50 263µs / p95 437µs（≤2×、<16ms 通过） |
+
+### 9.5 审计修正与缓办项（批次 2 复核结论）
+
+- **P1-2 证伪**：`streamBuffer` 是 `strings.Builder`，`String()` 为零拷贝 unsafe 转换——审计所述「每 delta 2 次全量拷贝」不成立；normalize 的 `HasSuffix` 是 O(len(delta))、`HasPrefix` 仅重传场景 O(n)，无分配。不改。
+- **P1-9 缓办**：`renderMu` 下的 epoch 读取是锁序相干性语义（streamMu→renderMu 保证纪元捕获与 BeginRun 清 pendingStreams 原子），改 atomic 需要重设 run 纪元一致性协议，风险大于收益；renderMu 持有读本身极短。缓办，若后续 profiler 显示 renderMu 竞争显著再做协议设计。
+- **P1-3（ApproximateEventBytes 4× 计算一部分已随 P0-2/P0-1 缓解）**：bus 侧已免算 delta；bridge/persist buffer 侧重复计算保留，需给 Event 增加旁路尺寸字段（跨包结构变更），留给批次 3。
+- **P1-4（payload 三键同串）**：持久化折叠需前端 TS 消费契约同步验证（content/delta/text 三键有独立读者），留批次 3 单独做兼容矩阵。
+- **P1-7（stable commit 双全前缀 Format）**：注释明确的正确性契约（与 history replay 同价），改增量渲染需重验 Scene 收敛，留批次 3。
+- **P1-5（LooksLikeMarkdown 每帧全源扫描）**：未动工；扫描是 memcmp 量级、无分配，实测占比待 pprof 确认后再决定节流方案。
+
+### 9.6 遗留（批次 3 承接）
+
+- §4 P2 全部（turn 收尾合并 sync、Recent 增量快照、EndRun 事件驱动排水等）与 §5 缺口加固中未做部分。
+- 批次 2 动工前建议的 pprof 采样仍未做（本机多轮链接触发 Windows 页面文件上限，重型采样建议单独环境跑）。
