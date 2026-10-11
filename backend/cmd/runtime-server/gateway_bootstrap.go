@@ -79,7 +79,7 @@ func runtimeServerGatewayResolveConfig(cfg *config.Config) gatewayagent.Config {
 func runtimeServerGatewayRegister(cfg gatewayagent.Config, sessions func() []wire.SessionSummary) gatewayagent.RegisterFunc {
 	return func() wire.Register {
 		reg := wire.Register{
-			NodeID:       gatewayagent.LoadOrCreateNodeID(),
+			NodeID:       gatewayagent.ProcessNodeID(),
 			Kind:         "runtime-server",
 			Name:         cfg.Name,
 			DeviceName:   cfg.Name,

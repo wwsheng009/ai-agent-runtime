@@ -1,0 +1,5 @@
+package agent
+
+import "time"
+
+func timeNowUnixNano() int64 { return time.Now().UnixNano() }

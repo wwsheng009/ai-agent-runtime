@@ -1,53 +1,56 @@
 package agent
 
 import (
-	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 )
 
-func TestLoadOrCreateNodeIDStable(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("AICLI_HOME", home)
-
-	first := LoadOrCreateNodeID()
+func TestProcessNodeIDStableWithinProcess(t *testing.T) {
+	first := ProcessNodeID()
 	if first == "" {
-		t.Fatal("LoadOrCreateNodeID returned empty id")
+		t.Fatal("ProcessNodeID returned empty")
 	}
-	if second := LoadOrCreateNodeID(); second != first {
-		t.Fatalf("id not stable: %q vs %q", first, second)
+	for i := 0; i < 5; i++ {
+		if got := ProcessNodeID(); got != first {
+			t.Fatalf("id changed between calls: %q vs %q", first, got)
+		}
 	}
-
-	data, err := os.ReadFile(filepath.Join(home, ".aicli", NodeIDFileName))
-	if err != nil {
-		t.Fatalf("identity file missing: %v", err)
+	// Concurrent callers must observe the same id.
+	var wg sync.WaitGroup
+	ids := make([]string, 8)
+	for i := range ids {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ids[i] = ProcessNodeID()
+		}(i)
 	}
-	if got := string(data[:len(data)-1]); got != first {
-		t.Fatalf("file content %q != %q", got, first)
+	wg.Wait()
+	for _, id := range ids {
+		if id != first {
+			t.Fatalf("concurrent call observed different id: %q vs %q", first, id)
+		}
 	}
 }
 
-func TestLoadOrCreateNodeIDWithoutHome(t *testing.T) {
-	t.Setenv("AICLI_HOME", "")
-	t.Setenv("USERPROFILE", "")
-	t.Setenv("HOME", "")
-	// Degrades to a per-process id (non-empty, never panics).
-	if LoadOrCreateNodeID() == "" {
-		t.Fatal("expected a fallback id, got empty")
+func TestGenerateNodeIDShape(t *testing.T) {
+	a := generateNodeID()
+	b := generateNodeID()
+	if a == b {
+		t.Fatalf("two generations must differ: %q", a)
+	}
+	const prefix = "node-"
+	if len(a) != len(prefix)+16 { // 8 bytes hex
+		t.Fatalf("id %q has unexpected length", a)
 	}
 }
 
-func TestLoadOrCreateNodeIDAdoptsExistingFile(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("AICLI_HOME", home)
-	dir := filepath.Join(home, ".aicli")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, NodeIDFileName), []byte("node-abc123\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := LoadOrCreateNodeID(); got != "node-abc123" {
-		t.Fatalf("existing id not adopted: %q", got)
+// The old shared-file behavior is intentionally gone: two processes on the same
+// machine must get different ids. This test pins that contract by generating
+// two ids and asserting inequality (the sync.Once cache is per-process, so
+// generateNodeID is the observable surface).
+func TestNodeIDNotSharedAcrossProcesses(t *testing.T) {
+	if generateNodeID() == generateNodeID() {
+		t.Fatal("ids must not collide across processes")
 	}
 }

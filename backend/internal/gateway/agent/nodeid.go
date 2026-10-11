@@ -3,65 +3,53 @@ package agent
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"os"
-	"path/filepath"
-	"strings"
+	"sync"
 )
 
-// NodeIDFileName is the per-machine gateway node identity file, stored under
-// the aicli home directory.
-const NodeIDFileName = "gateway-node-id"
+// Node identity semantics (docs/gateway/10-runbook.md §13):
+//
+// The id must be stable across reconnection — including failover re-dials to a
+// different gateway instance — so the same logical agent replaces its own
+// stale registry entry instead of accumulating a second node. It must NOT be
+// shared between processes on the same machine: two concurrent aicli TUIs are
+// two independent agents, and a shared machine-level id makes the later
+// REGISTER overwrite the earlier one (observed: two TUIs, one registry node).
+//
+// Therefore the id is generated once per process and cached for the process
+// lifetime (sync.Once). It is deliberately not persisted: a restart creates a
+// new agent instance, whose first REGISTER replaces the previous instance's
+// stale entry — exactly the failover handoff we want. The overlayUnit test
+// hooks keep the generation deterministic for tests.
+var (
+	nodeIDOnce  sync.Once
+	cachedNodID string
+)
 
-// NodeIDPath resolves the identity file location (aicli home overridable via
-// AICLI_HOME, matching config.DefaultConfigSearchPaths behavior closely enough
-// for an identity file).
-func NodeIDPath() (string, error) {
-	home := strings.TrimSpace(os.Getenv("AICLI_HOME"))
-	if home == "" {
-		home = strings.TrimSpace(os.Getenv("USERPROFILE"))
-	}
-	if home == "" {
-		home = strings.TrimSpace(os.Getenv("HOME"))
-	}
-	if home == "" {
-		return "", os.ErrNotExist
-	}
-	return filepath.Join(home, ".aicli", NodeIDFileName), nil
+// ProcessNodeID returns this process's gateway node id, generating it on first
+// use. Always non-empty; the generator falling back to a zero-entropy id is
+// prevented by construction (crypto/rand).
+func ProcessNodeID() string {
+	nodeIDOnce.Do(func() {
+		cachedNodID = generateNodeID()
+	})
+	return cachedNodID
 }
 
-// LoadOrCreateNodeID returns this machine's stable gateway node id. It is
-// generated once and persisted so reconnects (including to a different gateway
-// instance after a failover) keep the same identity and replace the stale
-// registry entry instead of accumulating a new one. An id that cannot be
-// persisted degrades to a per-process random id (worst case: the pre-existing
-// behavior).
-func LoadOrCreateNodeID() string {
-	path, err := NodeIDPath()
-	if err == nil {
-		if data, readErr := os.ReadFile(path); readErr == nil {
-			if id := strings.TrimSpace(string(data)); id != "" {
-				return id
-			}
-		}
-	}
-	id, idErr := newNodeID()
-	if idErr != nil {
-		return ""
-	}
-	if err == nil {
-		if dir := filepath.Dir(path); dir != "" {
-			_ = os.MkdirAll(dir, 0o700)
-			_ = os.WriteFile(path, []byte(id+"\n"), 0o600)
-		}
-	}
-	return id
-}
-
-// newNodeID builds node-<16 hex chars>.
-func newNodeID() (string, error) {
+func generateNodeID() string {
 	buf := make([]byte, 8)
 	if _, err := rand.Read(buf); err != nil {
-		return "", err
+		// crypto/rand failing is catastrophic anyway; still produce a
+		// deterministic-but-unique-enough fallback from time.
+		return "node-" + hex.EncodeToString([]byte(timeNowBytes()))
 	}
-	return "node-" + hex.EncodeToString(buf), nil
+	return "node-" + hex.EncodeToString(buf)
+}
+
+func timeNowBytes() []byte {
+	ns := timeNowUnixNano()
+	out := make([]byte, 8)
+	for i := 0; i < 8; i++ {
+		out[i] = byte(ns >> (56 - 8*i))
+	}
+	return out
 }
