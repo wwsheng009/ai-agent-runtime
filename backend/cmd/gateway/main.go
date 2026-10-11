@@ -97,6 +97,30 @@ func normalizeServeArgs(args []string) []string {
 	return nil
 }
 
+// isLoopbackListen reports whether the listen address only exposes loopback
+// interfaces (empty host means "all interfaces" and is NOT loopback).
+func isLoopbackListen(listen string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false // ":8443" binds every interface
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		resolved, err := net.LookupHost(host)
+		if err != nil || len(resolved) == 0 {
+			return false
+		}
+		ip = net.ParseIP(resolved[0])
+		if ip == nil {
+			return false
+		}
+	}
+	return ip.IsLoopback()
+}
+
 // usage prints the grouped, annotated flag reference (docs/gateway/
 // 14-implementation-record.md §2). The Go default lists flags alphabetically
 // with one-line texts; operators need the lifecycle around them too.
@@ -124,9 +148,12 @@ and exit 0.
 `)
 	flag.PrintDefaults()
 	fmt.Fprint(out, `
-Exit codes: 0 clean run or graceful shutdown; 1 runtime failure; 2 usage error.
-Docs: docs/gateway/14-implementation-record.md (run), 10-runbook.md (operate).
-`)
+Safety: a non-loopback --listen with no --owner-password and no device tokens
+is refused at startup; pass --allow-unprotected to accept that risk explicitly.
+ 
+ Exit codes: 0 clean run or graceful shutdown; 1 runtime failure; 2 usage error.
+ Docs: docs/gateway/14-implementation-record.md (run), 10-runbook.md (operate).
+ `)
 }
 
 func run() int {
@@ -153,6 +180,11 @@ func run() int {
 		presenceTTL    = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
 		coalesceWindow = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
 		quietHours     = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
+		// allowUnprotected lifts the fail-fast guard for "non-loopback listen
+		// without owner password and without any device token" — the combination
+		// that publishes an unauthenticated console AND an open agent tunnel to
+		// the network. Defaults stay dev-friendly on loopback.
+		allowUnprotected = flag.Bool("allow-unprotected", false, "start even when listening non-loopback with no owner password and no device token (overrides the safety refusal)")
 	)
 	// Parse the (possibly "serve"-stripped) argument list after all flags are
 	// registered, so the documented "gateway serve --flag ..." spelling works.
@@ -175,7 +207,6 @@ func run() int {
 	if !owner.Enabled() {
 		fmt.Fprintln(os.Stderr, "gateway: WARNING: --owner-password not set; console/API/proxy are UNPROTECTED (dev only)")
 	}
-
 	auditLog := audit.New(2000, filepath.Join(*dataDir, "audit.log"))
 	hub := newNodeHub()
 	var metrics gatewayMetrics
@@ -208,6 +239,16 @@ func run() int {
 	devices, err := device.Open(filepath.Join(*dataDir, "devices.json"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gateway: failed to open device store: %v\n", err)
+		return 1
+	}
+	// Safety refusal (docs/gateway/04-security.md): a non-loopback listener with
+	// neither an owner password nor any device-token path is an unauthenticated
+	// public exposure — refuse it instead of silently starting. Loopback keeps
+	// the frictionless dev default; --allow-unprotected overrides explicitly.
+	if !*allowUnprotected && !owner.Enabled() && !isLoopbackListen(*listen) &&
+		strings.TrimSpace(*deviceToken) == "" && devices.Count() == 0 {
+		fmt.Fprintln(os.Stderr, "gateway: refusing to start: non-loopback --listen with no --owner-password and no device tokens exposes the console and tunnel without authentication")
+		fmt.Fprintln(os.Stderr, "gateway: set --owner-password (recommended), issue device tokens, or pass --allow-unprotected to accept the risk")
 		return 1
 	}
 	var pushManager *push.Manager
