@@ -192,6 +192,44 @@ func run() int {
 			"devices":              devices.Count(),
 		})
 	}))).Methods(http.MethodGet)
+	// Ban management (owner-protected): list / manual ban / unban.
+	router.Handle("/api/bans", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{"bans": bans.Entries()})
+		case http.MethodPost:
+			var req struct {
+				IP  string `json:"ip"`
+				TTL string `json:"ttl"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.IP) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "ip is required"})
+				return
+			}
+			ttl := time.Duration(0)
+			if strings.TrimSpace(req.TTL) != "" {
+				if parsed, parseErr := time.ParseDuration(req.TTL); parseErr == nil {
+					ttl = parsed
+				}
+			}
+			bans.Ban(strings.TrimSpace(req.IP), ttl)
+			writeJSON(w, http.StatusOK, map[string]any{"bans": bans.Entries()})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})))
+	router.Handle("/api/bans/{ip}", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		ip := mux.Vars(r)["ip"]
+		if !bans.Unban(ip) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "ban not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"unbanned": ip})
+	})))
 	// Reverse proxy: /n/{node_id}/... → the node's local service.
 	router.PathPrefix("/n/{node_id}/").Handler(limited(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metrics.proxy.Add(1)
