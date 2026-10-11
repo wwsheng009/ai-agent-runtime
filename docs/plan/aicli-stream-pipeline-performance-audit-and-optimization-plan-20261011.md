@@ -177,6 +177,22 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 | P2-6（部分） | `94b9b296` | markdown AST 缓存 `fnvHash` 改字符串直扫，查找路径不再 `[]byte(s)` 复制整段源；`r.src` 的 goldmark 必需拷贝与 O(n) LRU 驱逐未动（S4b 窗口化后全源渲染只剩回退路径，占比小） |
 | P2-4 | `c43454da` | StreamCollector 开放栅栏增量扫描：structural delta 只扫新增完整行 + O(行长) partial 行 opener 补检，长代码块流式不再每 delta 重扫整个 holdback 尾部（消除最常见的真实 O(n²)——coding 助手长代码块输出）。等价性：opener 行补全刷新长度/布尔哨兵保持零值可用/稳定点前进重锚；stableMarkdownCut 全量实现保留作参照，200 行代码块逐步对照钉子测试 |
 
+### 9.8 远程实测（2026-10-11，会话 session_20261011103831_BmPuYkEo，/debug 端点 + pprof）
+
+实测环境：aicli 运行实例（loopback :50878），`/web/api/invoke` 驱动 3000 字长文流式 turn（含代码块/表格）。
+
+**不变式验证（全部成立）**：
+- 流式期间 `syncFallbackWrite` / runtime store `AppendEvent` 在 CPU profile 中零出现——P0-1「LLM 回调链零同步磁盘 I/O」成立；
+- SQLite（ncruces WASM）~0.5s cum，全部在异步 batch worker 上；
+- 桥降级计数全程 0：1728 事件 primary 全 committed，0 deferred / 0 rejected / 0 observer_drops；ui_actor peak_pending 11（容量 256），批 p95=4；
+- `event_journal_drops` 为观测日志环形淘汰（诊断性），非投递丢失。
+
+**新发现热点与修复（P3，`688c9dde`）**：
+- `chatRuntimeEventBridge.appendEventLog` 占流式 CPU **14.7%**：runtime-events.jsonl 每事件 open→append→close + 每事件 os.Stat 路径解析 + 全量 json.Marshal，且在 reducer 临界区内——原「事件频率低」假设在 delta 流时代失效（单 turn 1728 事件）；
+- 修复：进程级单一 journal writer（有界队列 1024 + 25ms flush + bufio 批量写，调用方零阻塞入队，队列满丢弃计数），按路径切换文件、空闲 200ms 关句柄；replay 与测试直读点统一全局 flush 读屏障。
+
+**实测遗留观察**：Windows syscall（createFile/writeFile/OpenProcess 等）占大头，含 pprof 自身开销与终端 I/O；`encoding/json/v2.marshalEncode` ~1.6%（appendEventLog 的 marshal，已随 P3 移出 reducer 路径的 I/O 部分）。下一轮实测建议：turn 内定时采样 goroutine profile 确认 writer 队列水位。
+
 ### 9.7 批次 3 剩余与缓办
 
 - **P2-1 剩余（三次写事务合并）**：已完成（`f69b00a4`）——新增 `restoreRuntimeSessionIntoCLI` 只读恢复变体，executor 成功路径与 ContinueGoal 路径的内存态变更顺序不变（restore → reconcilers → usage → write），三次全量 Update 合并为一次最终写，最终状态严格一致；每 turn 省 1-2 个全量写事务。Load 侧的增量化（`SessionManager.Get` 全量反序列化）仍留待有实测依据后做。
