@@ -20,13 +20,16 @@ type pushNotifier struct {
 	seen    map[string]string // "nodeID|sessionID" -> last attention value
 	manager *push.Manager
 	baseURL string
+	// presence suppresses pushes for sessions a console client is watching.
+	presence *presenceRegistry
 }
 
-func newPushNotifier(manager *push.Manager, baseURL string) *pushNotifier {
+func newPushNotifier(manager *push.Manager, baseURL string, presence *presenceRegistry) *pushNotifier {
 	return &pushNotifier{
-		seen:    make(map[string]string),
-		manager: manager,
-		baseURL: strings.TrimRight(baseURL, "/"),
+		seen:     make(map[string]string),
+		manager:  manager,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		presence: presence,
 	}
 }
 
@@ -45,6 +48,11 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 				continue
 			}
 			key := node.NodeID + "|" + sess.SessionID
+			// Suppress while a console client is viewing this session, and leave
+			// it unrecorded so the notification still fires once they look away.
+			if p.presence != nil && p.presence.Active(node.NodeID, sess.SessionID) {
+				continue
+			}
 			next[key] = sess.Attention
 			if prev, ok := p.seen[key]; ok && prev == sess.Attention {
 				continue

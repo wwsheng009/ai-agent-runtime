@@ -27,6 +27,7 @@
 | 移动端 | 低带宽模式（微前端）+ 控制台 PWA | `web/js/ui.js`、`cmd/gateway/console/` |
 | 移动端 | 控制台 Web Push 订阅 + Service Worker 通知 | `cmd/gateway/console/{app.js,sw.js}` |
 | 控制台 | 会话 `attention` 徽标 + 新增注意力 toast | `cmd/gateway/console/{app.js,style.css}` |
+| 控制台 | presence 抑制（可见时续期，网关据此免打扰） | `cmd/gateway/presence.go`、`cmd/gateway/console/app.js` |
 | 宿主 | 会话注意力上报（turn 边界 + 事件总线） | `cmd/aicli/commands/chat_gateway_attention.go`、`internal/api/runtimeapi/gateway_attention.go` |
 
 ---
@@ -160,7 +161,7 @@ cd frontend && npx tsc -b && npm run lint:i18n
 
 | 项 | 说明 |
 |----|------|
-| Web Push 的 presence 抑制/合并/静音 | 控制台未上报"正在查看"，无时间窗合并与免打扰 |
+| Web Push 的时间窗合并/静音 | 连续 `completed` 未合并为"N 个会话已完成"；无免打扰 |
 | 注册表持久化 | 节点表为内存；重连即恢复（影响小） |
 | 多实例 HA | 隧道态单实例；注册表未外置 |
 | `runtime-server` 增量心跳 | 会话增删已推送；busy/attention 变化未推送 |

@@ -95,6 +95,7 @@ func run() int {
 		metricsToken   = flag.String("metrics-token", "", "bearer token for /metrics; empty allows loopback only")
 		pushEnabled    = flag.Bool("push-enabled", true, "enable Web Push notifications (VAPID + RFC 8291)")
 		vapidSubject   = flag.String("vapid-subject", "mailto:gateway@localhost", "VAPID JWT subject (mailto: or https:)")
+		presenceTTL    = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
 	)
 	flag.Parse()
 
@@ -161,7 +162,8 @@ func run() int {
 		}
 		pushManager = push.NewManager(pushStore, vapid, *vapidSubject)
 	}
-	notifier := newPushNotifier(pushManager, *publicBaseURL)
+	presence := newPresenceRegistry(*presenceTTL)
+	notifier := newPushNotifier(pushManager, *publicBaseURL, presence)
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,
@@ -259,6 +261,7 @@ func run() int {
 			"nodes":                registry.Count(),
 			"devices":              devices.Count(),
 			"push_subscriptions":   pushSubscriptionCount(pushManager),
+			"presence_entries":     presence.Count(),
 		})
 	}))).Methods(http.MethodGet)
 	// Audit events (owner-protected).
@@ -362,6 +365,9 @@ func run() int {
 	router.Handle("/api/push/subscriptions", owner.RequireSession(handlePushSubscriptions(pushManager)))
 	router.Handle("/api/push/unsubscribe", owner.RequireSession(handlePushUnsubscribe(pushManager)))
 	router.Handle("/api/push/test", owner.RequireSession(handlePushTest(pushManager)))
+	// Presence: the console reports the session it is viewing so the gateway can
+	// suppress push notifications for it (docs/gateway/08-notifications.md §5.4).
+	router.Handle("/api/presence", owner.RequireSession(handlePresence(presence))).Methods(http.MethodPost)
 	// Prometheus text metrics (bearer token, or loopback when no token is set).
 	router.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if !authorizeMetrics(r, *metricsToken) {

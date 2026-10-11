@@ -49,7 +49,7 @@ func TestPushNotifierObserve(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := push.NewManager(store, vapid, "mailto:a@b.c")
-	n := newPushNotifier(manager, "https://gw.example.com")
+	n := newPushNotifier(manager, "https://gw.example.com", nil)
 
 	node := &tunnel.Node{
 		NodeID: "n1",

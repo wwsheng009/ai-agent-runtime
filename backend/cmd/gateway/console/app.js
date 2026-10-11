@@ -147,6 +147,7 @@
             badge.hidden = false;
           }
           row.querySelector("button").addEventListener("click", function () {
+            rememberPresence(node, session);
             window.open(sessionOpenTarget(node, session.session_id), "_blank");
           });
           actions.appendChild(row);
@@ -156,7 +157,10 @@
         open.className = "secondary";
         open.type = "button";
         open.textContent = "打开";
-        open.addEventListener("click", function () { window.open(nodeWebBase(node), "_blank"); });
+        open.addEventListener("click", function () {
+          rememberPresence(node, null);
+          window.open(nodeWebBase(node), "_blank");
+        });
         actions.appendChild(open);
       }
       list.appendChild(card);
@@ -313,6 +317,35 @@
       el("login-error").textContent = "通知操作失败（请检查浏览器权限）";
       el("login-error").hidden = false;
     });
+  });
+
+  // --- Presence: suppress notifications for what the user is watching --------
+  // (docs/gateway/08-notifications.md §5.4). We re-assert presence on an
+  // interval while the tab is visible; a hidden/closed tab simply stops, and the
+  // gateway's presence TTL expires.
+  var presenceTargets = {};
+
+  function rememberPresence(node, session) {
+    if (!node || !node.node_id) { return; }
+    var target = { node_id: node.node_id, session_id: session ? session.session_id : "" };
+    presenceTargets[target.node_id + "|" + target.session_id] = target;
+    sendPresence();
+  }
+
+  function sendPresence() {
+    if (document.hidden) { return; }
+    Object.keys(presenceTargets).forEach(function (key) {
+      api("/api/presence", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(presenceTargets[key]),
+      }).catch(function () { /* presence is best-effort */ });
+    });
+  }
+
+  setInterval(sendPresence, 30000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) { sendPresence(); }
   });
 
   loadNodes();

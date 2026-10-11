@@ -215,6 +215,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 控制台 PWA | `cmd/gateway/console/{sw.js,app.js,index.html}` | 服务进程 `push`/`notificationclick` 事件；`开启通知/关闭通知` 切换按钮，订阅后 POST 到网关 |
 | 配置 | `cmd/gateway` | `--push-enabled`（默认 true）、`--vapid-subject` |
 | 控制台收件箱/徽标/toast | `cmd/gateway/console/{app.js,style.css}` | 会话行渲染 `attention` 徽标（已完成/待审批/待回答/出错/等待中）；SSE 收到**新增**注意力时弹出可点击 toast（首次加载只做种子，不刷屏） |
+| presence 抑制 | `cmd/gateway/presence.go`、`cmd/gateway/console/app.js` | 控制台打开会话/设备时 `POST /api/presence`（可见时每 30s 续期，`--presence-ttl` 默认 90s）；网关对该会话**不推送**，且不记入去重快照，用户移开视线后仍会补发一次 |
 | agent（aicli）上报 | `cmd/aicli/commands/chat_gateway_attention.go`、`chat_mesh.go`、`chat_gateway_host.go` | turn 边界（`beginChatMeshTurn`）驱动 `attention`：开始时清空 + busy，结束时 `completed`/`error`（按 turn 最终 err）；随 `SESSION_UPDATE` 上报 |
 | agent（runtime-server）上报 | `internal/api/runtimeapi/gateway_attention.go`、`gateway_handlers.go` | 订阅运行时事件总线：`agent.turn.started/finished`、`approval_requested/resolved`、`question_asked/answered`、`session_end/interrupted` → `attention`/`busy`；`EnableGatewayAttention()` 在启动装配时调用 |
 
@@ -228,7 +229,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 项 | 说明 |
 |----|------|
 | `NOTIFY` 帧（§4.1） | 尚未新增帧；当前依赖 `SESSION_UPDATE` 的 `attention` 字段（已足以驱动网关推送） |
-| presence 抑制（§5.4） | 控制台未上报"正在查看某会话"，因此无法抑制已读会话的推送 |
+| presence 抑制的收件箱联动 | 已抑制推送；控制台尚未在收件箱中把"已读"与会话状态联动清除 |
 | 时间窗合并（§5.5） | 连续 `completed` 未合并为"N 个会话已完成" |
 | 免打扰/静音（§5.6） | 未实现 |
 | 控制台独立收件箱视图 | 已有会话行徽标 + toast；未做聚合收件箱页面 |
