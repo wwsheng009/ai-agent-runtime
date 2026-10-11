@@ -152,7 +152,9 @@ func TestMatchSlashCommandCandidates(t *testing.T) {
 		{
 			name:  "slash s prefix order",
 			query: "/s",
-			want:  []string{"/s", "/session", "/sessions", "/status", "/supervision", "/stream", "/skill", "/skills", "/shell"},
+			// P4 E3 引入 /schedule（930f5415）后目录全集为 10 项；排序沿用
+			// 既有规则：catalog 注册顺序优先，/schedule 排在 /session 之前。
+			want: []string{"/s", "/schedule", "/session", "/sessions", "/status", "/supervision", "/stream", "/skill", "/skills", "/shell"},
 		},
 		{
 			name:  "exact alias outranks prefix",

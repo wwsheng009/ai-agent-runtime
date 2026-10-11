@@ -1051,7 +1051,10 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_backtrack_select.go", Func: "promptBacktrackMode", Kind: "fmt.Print", Count: 2},
 		{File: "chat_backtrack_select.go", Func: "readBacktrackTurnPickPlain", Kind: "fmt.Print", Count: 3},
 		{File: "chat_bootstrap.go", Func: "prepareChatPersistence", Kind: "fmt.Fprint(os.Std*)", Count: 1},
-		{File: "chat_bootstrap.go", Func: "prepareChatRuntimeState", Kind: "fmt.Fprint(os.Std*)", Count: 3},
+		// 3→4（133033a3）：provider 未配置 default_model 的启动告警（交互模式
+		// 提示可用 /model）。与同函数 --fast/request-timeout 两条同类：启动期
+		// 配置告警 stderr 兜底，不是新的交互功能写入者，按基线契约增计。
+		{File: "chat_bootstrap.go", Func: "prepareChatRuntimeState", Kind: "fmt.Fprint(os.Std*)", Count: 4},
 		// 这 1 处不是交互输出，而是 NotifyChatDiagnostic 契约明文规定的 stderr 兜底
 		// （见 chat_diagnostic.go：「返回 false 表示当前没有可接收的交互式会话，
 		// 调用方应回退到 stderr」）：能力面在后台 goroutine 上发现失败时，先投递动态栏，

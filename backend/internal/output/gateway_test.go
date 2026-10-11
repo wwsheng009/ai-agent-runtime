@@ -270,7 +270,7 @@ func TestGateway_UsesCacheSafeSummaryOverrideFromToolMetadata(t *testing.T) {
 
 	envelope, err := gateway.Process(context.Background(), RawToolResult{
 		SessionID:  "session-cache-safe",
-		ToolName:   toolbroker.ToolSpawnTeam,
+		ToolName:   toolbroker.ToolTeamSpawn,
 		ToolCallID: "call-cache-safe",
 		Content: map[string]interface{}{
 			"team_id":  "team-dynamic-123",
