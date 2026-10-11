@@ -152,3 +152,43 @@ func TestStreamCollectorNoDuplicateStable(t *testing.T) {
 		t.Fatalf("duplicate stable emission: %q", b)
 	}
 }
+
+// P2-4：长代码块流式场景——开放栅栏期间每个 structural delta 只扫新增行。
+// 每一步都与全量参照（对同一前缀重放）的 Stable() 逐字节对照，保证增量
+// 与全量语义等价；栅栏闭合后全部内容转 stable。
+func TestStreamCollectorIncrementalFenceScanEquivalence(t *testing.T) {
+	codeLine := "func example(val int) error { return nil } // ``~~ || ##\n"
+
+	var inc StreamCollector
+	var ref StreamCollector
+	feed := []string{"intro\n\n", "```go\n"}
+	for i := 0; i < 200; i++ {
+		feed = append(feed, codeLine)
+	}
+	feed = append(feed, "}\n")
+
+	for _, chunk := range feed {
+		inc.Push(chunk)
+		ref.Push(chunk)
+		if inc.Stable() != ref.Stable() {
+			t.Fatalf("incremental stable diverged from reference after %q:\ninc=%q\nref=%q", chunk, inc.Stable(), ref.Stable())
+		}
+	}
+	if !inc.fenceOpen {
+		t.Fatalf("fence must still be open before the closing fence")
+	}
+	if !strings.Contains(inc.Holdback(), "func example") {
+		t.Fatalf("code must stay held while fence is open: %q", inc.Holdback())
+	}
+
+	for _, chunk := range []string{"```\n"} {
+		inc.Push(chunk)
+		ref.Push(chunk)
+		if inc.Stable() != ref.Stable() {
+			t.Fatalf("post-close stable diverged:\ninc=%q\nref=%q", inc.Stable(), ref.Stable())
+		}
+	}
+	if inc.Holdback() != "" {
+		t.Fatalf("everything must be stable after fence closes: %q", inc.Holdback())
+	}
+}

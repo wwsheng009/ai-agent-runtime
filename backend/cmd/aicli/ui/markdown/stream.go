@@ -16,6 +16,19 @@ import (
 type StreamCollector struct {
 	raw    strings.Builder
 	stable int // byte offset into raw that is committed stable
+	// P2-4（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md §4）：
+	// 开放栅栏的增量扫描状态。fenceScanOffset 是已扫完最后一行之后的位置
+	// （下一未扫行起点，绝对偏移）；开放栅栏存在时每个 structural delta 只扫
+	// 新增完整行，不再从栅栏起点重扫整个 holdback 尾部（长代码块流式的
+	// O(n²) 来源）。语义参照 stableMarkdownCut（保持全量实现，测试对照用）。
+	fenceScanOffset int
+	// fenceOpen 用独立布尔哨兵而非 fenceOpenAt=-1：零值 StreamCollector
+	// （var c StreamCollector）必须直接可用，int 零值 0 会被误读为
+	// 「栅栏在偏移 0 开启」。
+	fenceOpen       bool
+	fenceOpenAt     int
+	fenceMarker     byte
+	fenceOpenLength int
 }
 
 // Reset clears collector state.
@@ -25,6 +38,7 @@ func (c *StreamCollector) Reset() {
 	}
 	c.raw.Reset()
 	c.stable = 0
+	c.resetFenceScanState()
 }
 
 // Push appends a delta (or full snapshot suffix) and recomputes the stable cut.
@@ -84,6 +98,7 @@ func (c *StreamCollector) SetContent(content string) (newlyStable string) {
 	}
 	c.raw.Reset()
 	c.stable = 0
+	c.resetFenceScanState()
 	c.raw.WriteString(content)
 	c.recompute()
 	if c.stable == 0 {
@@ -144,7 +159,7 @@ func (c *StreamCollector) recompute() {
 	// 判定只看尾部行。因此 stableMarkdownCut 的每个分支在 all[base:] 上都与
 	// 全量扫描等价（stableMarkdownCut(all[base:]) + base）。流式路径借此把
 	// 每帧的稳定切分扫描限制在「上一稳定点之后的尾部」，而不是整段源。
-	cut := base + stableMarkdownCut(all[base:])
+	cut := base + c.stableCutIncremental(all, base)
 	if cut < c.stable {
 		// Stable region never shrinks during a stream (avoids flicker/rewrites
 		// of already-emitted transcript). Incomplete earlier structures stay
@@ -188,6 +203,104 @@ func stableMarkdownCut(src string) int {
 		return 0
 	}
 	return len(src)
+}
+
+// resetFenceScanState 清零增量栅栏扫描状态（Reset / SetContent 整体替换时）。
+func (c *StreamCollector) resetFenceScanState() {
+	c.fenceScanOffset = 0
+	c.fenceOpen = false
+	c.fenceOpenAt = 0
+	c.fenceMarker = 0
+	c.fenceOpenLength = 0
+}
+
+// stableCutIncremental 与 stableMarkdownCut(all[base:]) 等价，但开放栅栏检测
+// 增量执行：只扫 fenceScanOffset 之后新增的完整行 + O(行长) 的尾部 partial
+// 行 opener 补检；重锚（稳定点越过已扫位置，即栅栏闭合后稳定点前进，或
+// 整列表重置后越界）时清状态并从 base 重建。表格 / partial-lead / 默认切分
+// 与原实现逐分支一致（它们天然只作用于从稳定点起的小尾部）。
+func (c *StreamCollector) stableCutIncremental(all string, base int) int {
+	src := all[base:]
+	if src == "" {
+		return 0
+	}
+	if c.fenceScanOffset < base || c.fenceScanOffset > len(all) {
+		c.resetFenceScanState()
+		c.fenceScanOffset = base
+	}
+	c.advanceFenceScan(all)
+	if c.fenceOpen {
+		return c.fenceOpenAt - base
+	}
+	if cut, hold := tableHoldbackCut(src); hold {
+		return cut
+	}
+	if cut := partialLeadHoldback(src); cut >= 0 {
+		return cut
+	}
+	if i := strings.LastIndexByte(src, '\n'); i >= 0 {
+		return i + 1
+	}
+	if looksStructuralLead(src) {
+		return 0
+	}
+	if utf8.RuneCountInString(src) < 24 && !strings.ContainsAny(src, "。.!?;") {
+		return 0
+	}
+	return len(src)
+}
+
+// advanceFenceScan 从 fenceScanOffset 扫描到 all 的最后一个换行为止的完整行，
+// 维护开放栅栏状态；partial 尾行留待其完成后扫描，另做 O(行长) opener 补检。
+func (c *StreamCollector) advanceFenceScan(all string) {
+	lastNewline := strings.LastIndexByte(all, '\n')
+	scanEnd := lastNewline + 1
+	if scanEnd < c.fenceScanOffset {
+		scanEnd = c.fenceScanOffset
+	}
+	for offset := c.fenceScanOffset; offset < scanEnd; {
+		lineEnd := strings.IndexByte(all[offset:scanEnd], '\n')
+		if lineEnd < 0 {
+			break
+		}
+		lineEnd += offset
+		line := strings.TrimSuffix(all[offset:lineEnd], "\r")
+		marker, runLength, rest, ok := markdownFenceRun(line)
+		if ok {
+			switch {
+			case c.fenceOpen && offset == c.fenceOpenAt:
+				// opener 行由 partial 补检注册后在本轮补全：以完整行刷新
+				// marker/长度（更长的反引号串抬高闭合门槛），不作闭合判定。
+				c.fenceMarker = marker
+				c.fenceOpenLength = runLength
+			case !c.fenceOpen:
+				if marker != '`' || !strings.Contains(rest, "`") {
+					c.fenceOpen = true
+					c.fenceOpenAt = offset
+					c.fenceMarker = marker
+					c.fenceOpenLength = runLength
+				}
+			case marker == c.fenceMarker && runLength >= c.fenceOpenLength && strings.TrimSpace(rest) == "":
+				c.fenceOpen = false
+				c.fenceMarker = 0
+				c.fenceOpenLength = 0
+			}
+		}
+		offset = lineEnd + 1
+		c.fenceScanOffset = offset
+	}
+	// 尾部 partial 行 opener 补检：全量参照扫描包含 partial 行，增量路径用
+	// O(行长) 补齐，保证 ~~~ 等不在 partial-lead 白名单内的 opener 不漏判。
+	if !c.fenceOpen && lastNewline+1 < len(all) {
+		line := strings.TrimSuffix(all[lastNewline+1:], "\r")
+		if marker, runLength, rest, ok := markdownFenceRun(line); ok &&
+			(marker != '`' || !strings.Contains(rest, "`")) {
+			c.fenceOpen = true
+			c.fenceOpenAt = lastNewline + 1
+			c.fenceMarker = marker
+			c.fenceOpenLength = runLength
+		}
+	}
 }
 
 func openMarkdownFenceStart(src string) int {
