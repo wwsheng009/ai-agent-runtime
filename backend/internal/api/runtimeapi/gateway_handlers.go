@@ -7,8 +7,10 @@ import (
 	"strings"
 	"time"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
 // GatewayController is the runtime-server's view of the gateway connection
@@ -30,6 +32,33 @@ func (h *Handler) SetGatewayController(controller GatewayController) {
 		return
 	}
 	h.gatewayController = controller
+}
+
+// GatewaySessions returns a lightweight session summary list for the gateway
+// register. It is best-effort: an unavailable store yields an empty list.
+func (h *Handler) GatewaySessions() []wire.SessionSummary {
+	if h == nil || h.sessionManager == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sessions, err := h.sessionManager.SearchSessions(ctx, &runtimechat.SessionSearchOptions{})
+	if err != nil {
+		return nil
+	}
+	sessions = filterAddressableSessions(sessions)
+	out := make([]wire.SessionSummary, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil || strings.TrimSpace(session.ID) == "" {
+			continue
+		}
+		out = append(out, wire.SessionSummary{
+			SessionID: session.ID,
+			Title:     strings.TrimSpace(session.Metadata.Title),
+			State:     string(session.State),
+		})
+	}
+	return out
 }
 
 // gatewayControlTimeout bounds a manual connect/disconnect/reconnect so a hung

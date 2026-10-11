@@ -27,7 +27,7 @@ func startRuntimeServerGateway(handler *runtimeapi.Handler) *gatewayagent.Contro
 	if !cfg.Enabled {
 		return nil
 	}
-	controller := gatewayagent.NewController(cfg, runtimeServerGatewayRegister(cfg))
+	controller := gatewayagent.NewController(cfg, runtimeServerGatewayRegister(cfg, handler.GatewaySessions))
 	handler.SetGatewayController(controller)
 	if cfg.AutoConnect {
 		go func() {
@@ -43,15 +43,19 @@ func startRuntimeServerGateway(handler *runtimeapi.Handler) *gatewayagent.Contro
 // runtimeServerGatewayRegister supplies the REGISTER payload for this process.
 // The session list is populated by a later step; node identity, capabilities
 // and the reverse-proxy route allowlist are set here.
-func runtimeServerGatewayRegister(cfg gatewayagent.Config) gatewayagent.RegisterFunc {
+func runtimeServerGatewayRegister(cfg gatewayagent.Config, sessions func() []wire.SessionSummary) gatewayagent.RegisterFunc {
 	return func() wire.Register {
-		return wire.Register{
+		reg := wire.Register{
 			Kind:         "runtime-server",
 			Name:         cfg.Name,
 			DeviceName:   cfg.Name,
 			Capabilities: []string{"manifest", "runtime-api", "sessions"},
 			Routes:       []string{"/api/runtime", "/api/agent", "/healthz", "/"},
 		}
+		if sessions != nil {
+			reg.Sessions = sessions()
+		}
+		return reg
 	}
 }
 
