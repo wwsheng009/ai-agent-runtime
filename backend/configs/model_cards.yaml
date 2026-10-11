@@ -1017,3 +1017,756 @@ cards:
       auto_compact_token_limit: 900000
       input_modalities:
         - text
+# ---------------------------------------------------------------------------
+# 网关模型卡片（2026-10-11，来源：网关模型列表）
+#
+# 落卡规则：
+#   - 模型标识去掉 cn: / global: 区域前缀（区域前缀是网关分组展示，不是
+#     模型标识；同名跨区域模型合并为一张卡）；
+#   - 同名合并时：上下文取共同值，最大输出取更保守（较小）值，思考档位
+#     取并集，默认档取表格“默认档”列；
+#   - “off（可关）”映射为 none；“思考常开”不写入 none；固定档只保留该档；
+#   - 视觉 → input_modalities: [text, image]；工具能力运行时默认支持，
+#     卡片无对应字段，故不单独声明；
+#   - priority 80：低于各厂商协议特化卡片（90+），仅在其他卡片未覆盖的
+#     协议/模型上补齐能力，不覆盖已收录模型的既有卡片。
+# ---------------------------------------------------------------------------
+  - id: hy3-x
+    title: Hy3
+    priority: 80
+    match:
+      model_ids:
+        - hy3-x
+    capability:
+      max_context_tokens: 192000
+      max_tokens: 64000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - high
+
+  - id: hy3
+    title: Hy3
+    priority: 80
+    match:
+      model_ids:
+        - hy3
+    capability:
+      max_context_tokens: 192000
+      max_tokens: 64000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - high
+
+  - id: hy4-preview
+    title: Hy4 preview
+    priority: 80
+    match:
+      model_ids:
+        - hy4-preview
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 64000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - high
+
+  - id: hy4-preview-f
+    title: Hy4 preview
+    priority: 80
+    match:
+      model_ids:
+        - hy4-preview-f
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 64000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - high
+
+  - id: minimax-m3
+    title: MiniMax-M3
+    priority: 80
+    match:
+      model_ids:
+        - minimax-m3
+    capability:
+      max_context_tokens: 512000
+      max_tokens: 524000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: deepseek-v4-flash
+    title: Deepseek-V4-Flash
+    priority: 80
+    match:
+      model_ids:
+        - deepseek-v4-flash
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 50000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - high
+        - xhigh
+
+  - id: deepseek-v4-pro
+    title: Deepseek-V4-Pro
+    priority: 80
+    match:
+      model_ids:
+        - deepseek-v4-pro
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 393000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - high
+        - xhigh
+
+  - id: deepseek-v4.1-flash
+    title: Deepseek-V4.1-Flash
+    priority: 80
+    match:
+      model_ids:
+        - deepseek-v4.1-flash
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - high
+        - max
+
+  - id: deepseek-v4.1-flash-sg
+    title: Deepseek-V4.1-Flash
+    priority: 80
+    match:
+      model_ids:
+        - deepseek-v4.1-flash-sg
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - high
+
+  - id: glm-5.1
+    title: GLM-5.1
+    priority: 80
+    match:
+      model_ids:
+        - glm-5.1
+    capability:
+      max_context_tokens: 200000
+      max_tokens: 48000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: glm-5.2
+    title: GLM-5.2
+    priority: 80
+    match:
+      model_ids:
+        - glm-5.2
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 48000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - high
+        - xhigh
+
+  - id: glm-5.3
+    title: GLM-5.3
+    priority: 80
+    match:
+      model_ids:
+        - glm-5.3
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 48000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - high
+        - max
+
+  - id: glm-5.3-flash
+    title: GLM-5.3-Flash
+    priority: 80
+    match:
+      model_ids:
+        - glm-5.3-flash
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - high
+        - max
+
+  - id: glm-5v-turbo
+    title: GLM-5v-Turbo
+    priority: 80
+    match:
+      model_ids:
+        - glm-5v-turbo
+    capability:
+      max_context_tokens: 200000
+      max_tokens: 64000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: kimi-k2.6
+    title: Kimi-K2.6
+    priority: 80
+    match:
+      model_ids:
+        - kimi-k2.6
+    capability:
+      max_context_tokens: 256000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: kimi-k2.7
+    title: Kimi-K2.7-Code
+    priority: 80
+    match:
+      model_ids:
+        - kimi-k2.7
+    capability:
+      max_context_tokens: 256000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: kimi-k2.8-preview
+    title: Kimi-K2.8-Preview
+    priority: 80
+    match:
+      model_ids:
+        - kimi-k2.8-preview
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - medium
+        - high
+        - max
+
+  - id: kimi-k3
+    title: Kimi-K3
+    priority: 80
+    match:
+      model_ids:
+        - kimi-k3
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: kimi-k3-1
+    title: Kimi-K3
+    priority: 80
+    match:
+      model_ids:
+        - kimi-k3-1
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 1049000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: space-bunny
+    title: Space-Bunny
+    priority: 80
+    match:
+      model_ids:
+        - space-bunny
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: max
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: gpt-6.1-sol
+    title: GPT-6.1-Sol
+    priority: 80
+    match:
+      model_ids:
+        - gpt-6.1-sol
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+
+  - id: gpt-6-sol
+    title: GPT-6-Sol
+    priority: 80
+    match:
+      model_ids:
+        - gpt-6-sol
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+
+  - id: gpt-6-luna
+    title: GPT-6-Luna
+    priority: 80
+    match:
+      model_ids:
+        - gpt-6-luna
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+
+  - id: gpt-6-astra
+    title: GPT-6-Astra
+    priority: 80
+    match:
+      model_ids:
+        - gpt-6-astra
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: gpt-5.6-sol
+    title: GPT-5.6-Sol
+    priority: 80
+    match:
+      model_ids:
+        - gpt-5.6-sol
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: gpt-5.6-terra
+    title: GPT-5.6-Terra
+    priority: 80
+    match:
+      model_ids:
+        - gpt-5.6-terra
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: gpt-5.6-luna
+    title: GPT-5.6-Luna
+    priority: 80
+    match:
+      model_ids:
+        - gpt-5.6-luna
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - none
+        - low
+        - medium
+        - high
+        - xhigh
+        - max
+
+  - id: gpt-5.5
+    title: GPT-5.5
+    priority: 80
+    match:
+      model_ids:
+        - gpt-5.5
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+
+  - id: gpt-5.4
+    title: GPT-5.4
+    priority: 80
+    match:
+      model_ids:
+        - gpt-5.4
+    capability:
+      max_context_tokens: 272000
+      max_tokens: 72000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+
+  - id: gpt-5.3-codex
+    title: GPT-5.3-Codex
+    priority: 80
+    match:
+      model_ids:
+        - gpt-5.3-codex
+    capability:
+      max_context_tokens: 272000
+      max_tokens: 72000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: gemini-3.5-flash
+    title: Gemini-3.5-Flash
+    priority: 80
+    match:
+      model_ids:
+        - gemini-3.5-flash
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 66000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: grok-4.7
+    title: Grok-4.7
+    priority: 80
+    match:
+      model_ids:
+        - grok-4.7
+    capability:
+      max_context_tokens: 500000
+      max_tokens: 128000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - low
+        - medium
+        - high
+        - xhigh
+
+  - id: o4-mini
+    title: GPT-4o-Mini
+    priority: 80
+    match:
+      model_ids:
+        - o4-mini
+    capability:
+      max_context_tokens: 104000
+      max_tokens: 24000
+      input_modalities:
+        - text
+        - image
+
+  - id: primary-model
+    title: Primary
+    priority: 80
+    match:
+      model_ids:
+        - primary-model
+    capability:
+      max_context_tokens: 272000
+      max_tokens: 72000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - high
+
+  - id: balanced-model
+    title: Balanced
+    priority: 80
+    match:
+      model_ids:
+        - balanced-model
+    capability:
+      max_context_tokens: 256000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: fast-model
+    title: Fast
+    priority: 80
+    match:
+      model_ids:
+        - fast-model
+    capability:
+      max_context_tokens: 200000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: medium
+      reasoning_efforts:
+        - medium
+
+  - id: default-model
+    title: Auto
+    priority: 80
+    match:
+      model_ids:
+        - default-model
+    capability:
+      max_context_tokens: 176000
+      max_tokens: 24000
+      input_modalities:
+        - text
+        - image
+
+  - id: deep-model
+    title: Deep
+    priority: 80
+    match:
+      model_ids:
+        - deep-model
+    capability:
+      max_context_tokens: 176000
+      max_tokens: 24000
+      input_modalities:
+        - text
+        - image
+
+  - id: auto-chat
+    title: Auto
+    priority: 80
+    match:
+      model_ids:
+        - auto-chat
+    capability:
+      max_context_tokens: 168000
+      max_tokens: 32000
+      input_modalities:
+        - text
+
+  - id: enhance-1.0
+    title: Enhance-1.0
+    priority: 80
+    match:
+      model_ids:
+        - enhance-1.0
+    capability:
+      max_context_tokens: 1000000
+      max_tokens: 32000
+      input_modalities:
+        - text
+
+  - id: auto
+    title: Auto
+    priority: 80
+    match:
+      model_ids:
+        - auto
+    capability:
+      max_context_tokens: 256000
+      max_tokens: 32000
+      input_modalities:
+        - text
+        - image
+      reasoning_model: true
+      default_reasoning_effort: high
+      reasoning_efforts:
+        - high

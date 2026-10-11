@@ -173,6 +173,16 @@ func modelIDVariants(value string) []string {
 	if idx := strings.LastIndex(normalized, "."); idx >= 0 && idx+1 < len(normalized) && modelIDDotPrefixLooksNamespace(normalized[:idx]) {
 		add(normalized[idx+1:])
 	}
+	// 区域/分组前缀（如 cn:glm-5.3、global:gpt-6-sol）：冒号前缀是网关的
+	// 分组展示，不属于模型标识；剥离后作为模糊变体参与匹配（分值低于精确
+	// 命中），让去掉前缀的卡片能覆盖带前缀的网关模型 ID。纯数字后缀
+	//（如版本号 :0）不做前缀剥离，避免产生 "0" 之类的噪声变体。
+	if idx := strings.Index(normalized, ":"); idx > 0 && idx+1 < len(normalized) {
+		prefix, rest := normalized[:idx], normalized[idx+1:]
+		if modelIDColonPrefixLooksNamespace(prefix) && !modelIDAllDigits(rest) {
+			add(rest)
+		}
+	}
 	for _, variant := range append([]string(nil), out...) {
 		withoutVersionSuffix := strings.TrimSuffix(variant, ":0")
 		add(withoutVersionSuffix)
@@ -195,6 +205,33 @@ func modelIDDotPrefixLooksNamespace(prefix string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// modelIDColonPrefixLooksNamespace 判断冒号前缀是否像网关的区域/分组 token
+// （小写字母、数字、_、-，长度受限），用于 cn: / global: 一类前缀的剥离判定。
+func modelIDColonPrefixLooksNamespace(prefix string) bool {
+	if prefix == "" || len(prefix) > 32 {
+		return false
+	}
+	for _, r := range prefix {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func modelIDAllDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
 	}
 	return true
 }

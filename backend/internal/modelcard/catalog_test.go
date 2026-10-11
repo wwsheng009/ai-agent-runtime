@@ -410,6 +410,48 @@ cards:
 	}
 }
 
+func TestModelIDsFuzzyMatchRegionPrefixedGatewayIDs(t *testing.T) {
+	catalog, _, err := LoadSources([]Source{{
+		Name: "test.yaml",
+		Data: []byte(`
+version: 1
+cards:
+  - id: gateway.glm-5.3
+    match:
+      model_ids:
+        - glm-5.3
+    capability:
+      max_context_tokens: 1000000
+  - id: numeric.alias
+    match:
+      model_ids:
+        - "0"
+    capability:
+      max_context_tokens: 1
+`),
+	}}, true)
+	if err != nil {
+		t.Fatalf("LoadSources: %v", err)
+	}
+	// 区域/分组前缀（cn: / global:）应作为模糊变体命中去前缀卡片；
+	// 既有 :0 版本后缀行为保持，且不得产生纯数字 "0" 之类的噪声变体。
+	cases := []string{
+		"global:glm-5.3",
+		"cn:glm-5.3",
+		"GLobal:GLM-5.3",
+		"glm-5.3:0",
+	}
+	for _, modelID := range cases {
+		spec, applied := catalog.Resolve(Context{}, modelID)
+		if len(applied) != 1 || applied[0].CardID != "gateway.glm-5.3" {
+			t.Fatalf("expected region-prefixed match for %q, got spec=%+v applied=%+v", modelID, spec, applied)
+		}
+		if spec.MaxContextTokens != 1000000 {
+			t.Fatalf("unexpected capability for %q: %+v", modelID, spec)
+		}
+	}
+}
+
 func TestLoadSourcesProviderTemplateLaterWins(t *testing.T) {
 	catalog, warnings, err := LoadSources([]Source{
 		{
