@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -288,6 +289,56 @@ func TestOpenTerminalPTYSessionDrivesStdin(t *testing.T) {
 	require.Contains(t, res.Output, "hello")
 
 	require.NoError(t, manager.Resize(ctx, job.ID, 100, 40))
+
+	_, err = manager.CloseTerminal(ctx, job.ID)
+	require.NoError(t, err)
+}
+
+// TestOpenTerminalJobIsNeverDispatched guards the live-session bug found by the
+// E2E session run (2026-10-11): OpenTerminal registered the job as pending, so
+// the scheduler dispatched the SAME job through the detached/in-process path a
+// second time, clobbering the session with cancel_source=parent_context.
+func TestOpenTerminalJobIsNeverDispatched(t *testing.T) {
+	if !interactiveEchoSupported() {
+		t.Skip("interactive stdin echo is not portable under cmd.exe")
+	}
+	ctx := context.Background()
+	manager := NewManager(Config{LogDir: t.TempDir(), MonitorInterval: 50 * time.Millisecond})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	events := make([]string, 0, 16)
+	var eventsMu sync.Mutex
+	manager.eventHandler = func(event JobEvent) {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		events = append(events, event.Type)
+	}
+
+	job, err := manager.OpenTerminal(ctx, "session-no-dispatch", TerminalOpenArgs{Command: interactiveEchoCommand()})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, StatusRunning, job.Status)
+
+	// Give the dispatcher ample time to (wrongly) pick the pending job up.
+	time.Sleep(500 * time.Millisecond)
+
+	// The session must still be alive and driveable: no second execution may
+	// have converged it to a terminal state.
+	res, err := manager.WriteStdin(ctx, job.ID, "still-alive\n", 5000)
+	require.NoError(t, err)
+	require.Contains(t, res.Output, "echo:still-alive")
+
+	// No dispatch-side lifecycle events for this job (queued/launch_retry/
+	// process_created from a second run would indicate a double execution).
+	eventsMu.Lock()
+	recorded := append([]string(nil), events...)
+	eventsMu.Unlock()
+	for _, eventType := range recorded {
+		switch eventType {
+		case "queued", "launch_retry", "recovered_queued":
+			t.Fatalf("interactive job %s must not be dispatched, got event %q", job.ID, eventType)
+		}
+	}
 
 	_, err = manager.CloseTerminal(ctx, job.ID)
 	require.NoError(t, err)

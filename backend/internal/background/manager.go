@@ -2264,8 +2264,17 @@ func (m *Manager) pendingCandidates() (int, []*managedJob) {
 		managed.mu.RLock()
 		status := managed.info.Status
 		scheduled := managed.scheduled
+		interactive := managed.info.Interactive
 		_, waitingForRecovery := stringMetadataValue(managed.info.Metadata, backgroundMetaNextRecoveryAt)
 		managed.mu.RUnlock()
+		if interactive {
+			// Interactive sessions manage their own lifecycle (OpenTerminal
+			// starts the process and drives it via write_stdin); they must never
+			// enter the dispatcher, or the scheduler would run the same job a
+			// second time through the detached/in-process path and clobber the
+			// session's terminal state (live-session bug, 2026-10-11).
+			continue
+		}
 		if scheduled && waitingForRecovery {
 			continue
 		}
@@ -2301,11 +2310,17 @@ func (m *Manager) jobQueueDiagnostics(jobID string) (queuePosition, active, maxC
 		managed.mu.RLock()
 		status := managed.info.Status
 		scheduled := managed.scheduled
+		interactive := managed.info.Interactive
 		_, waitingForRecovery := stringMetadataValue(managed.info.Metadata, backgroundMetaNextRecoveryAt)
 		priority := managed.info.Priority
 		created := managed.info.CreatedAt
 		id := managed.info.ID
 		managed.mu.RUnlock()
+		if interactive {
+			// Mirror dispatchPending: interactive sessions are not queue members
+			// (2026-10-11 live-session fix).
+			continue
+		}
 		if scheduled && waitingForRecovery {
 			continue
 		}
