@@ -4246,15 +4246,19 @@ func (c *chatInteractionCoordinator) EstimateStreamFlushTimeout(content string) 
 	if c == nil {
 		return 500 * time.Millisecond
 	}
-	runeCount := len([]rune(content))
-	if runeCount <= 0 {
+	// P2-8（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md §4）：
+	// 原实现对全文做 []rune 转换只为估算排水时长，而调用方已把结果钳制到
+	// [8s, 10s]——精确 rune 数只在很窄的窗口内有意义。按字节估算（CJK 最坏
+	// 3 字节/rune）零分配，避免长输出上的 O(n) 拷贝。
+	estimatedRunes := len(content) / 3
+	if estimatedRunes <= 0 {
 		return 500 * time.Millisecond
 	}
 	delay := c.streamRuneDelay
 	if delay <= 0 {
 		delay = 500 * time.Microsecond
 	}
-	estimate := time.Duration(runeCount)*delay + 500*time.Millisecond
+	estimate := time.Duration(estimatedRunes)*delay + 500*time.Millisecond
 	if estimate < 500*time.Millisecond {
 		return 500 * time.Millisecond
 	}

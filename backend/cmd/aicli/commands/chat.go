@@ -25,6 +25,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -39,6 +40,15 @@ import (
 const chatSessionMetaLabelWidth = 18
 
 // ChatSession 聊天会话状态
+// chatGoalReconcileFingerprint 是 goal 增量扫描的前缀有效性守卫：
+// 消息列表整体替换（compact/restore/backtrack）几乎必然改变末条消息的
+// 角色/内容长度或列表长度；碰撞时的退化行为是多扫一遍（幂等 Put）。
+type chatGoalReconcileFingerprint struct {
+	length          int
+	lastRole        string
+	lastContentSize int
+}
+
 type ChatSession struct {
 	ProviderName    string
 	Provider        config.Provider
@@ -47,21 +57,29 @@ type ChatSession struct {
 	ReasoningEffort string
 	// TurnBudgetTokens 是 --budget-tokens 指定的单轮 token 预算（PR-4 §6.4）；
 	// 0 表示不限制，由 buildLocalChatLoopConfig 注入会话 actor 的 LoopReActConfig。
-	TurnBudgetTokens         int
-	RequestedProvider        string
-	EffectiveProvider        string
-	RequestedModel           string
-	EffectiveModel           string
-	RequestedReasoningEffort string
-	EffectiveReasoningEffort string
-	RequestedPermissionMode  string
-	EffectivePermissionMode  string
-	RouteWarnings            []string
-	FallbackUsed             bool
-	FallbackReason           string
-	SuppressReasoningOutput  bool
-	DisableTools             bool
-	DebugMode                bool
+	TurnBudgetTokens int
+	// P2-1：goal 完成度 reconciler 的增量扫描状态（仅 turn goroutine 访问）。
+	// 消息列表 append 时前缀扫描结果持续有效；compact/restore/backtrack 等
+	// 整体替换由 fingerprint 守卫检出并退化为全量重扫。lastCompleted 携带
+	// 已扫前缀的「最后一条 completed goal」，使增量扫描与全量扫描语义严格
+	// 等价（last-wins）。
+	goalReconcileScanned       int
+	goalReconcileFingerprint   chatGoalReconcileFingerprint
+	goalReconcileLastCompleted *runtimegoal.SessionGoal
+	RequestedProvider          string
+	EffectiveProvider          string
+	RequestedModel             string
+	EffectiveModel             string
+	RequestedReasoningEffort   string
+	EffectiveReasoningEffort   string
+	RequestedPermissionMode    string
+	EffectivePermissionMode    string
+	RouteWarnings              []string
+	FallbackUsed               bool
+	FallbackReason             string
+	SuppressReasoningOutput    bool
+	DisableTools               bool
+	DebugMode                  bool
 	// permissionModeCLIChanged 表示权限模式由命令行显式指定
 	// （--yolo / --permission-mode）。恢复或切换持久化会话时，
 	// 不得用会话中存储的权限模式覆盖 CLI 显式指定值。

@@ -1,7 +1,6 @@
 package markdown
 
 import (
-	"hash/fnv"
 	"sync"
 
 	"github.com/yuin/goldmark"
@@ -140,9 +139,18 @@ func (c *astCacheMemo) evictOldestLocked() bool {
 }
 
 func fnvHash(s string) uint64 {
-	h := fnv.New64a()
-	h.Write([]byte(s))
-	return h.Sum64()
+	// P2-6：FNV-1a 直接扫字符串，避免 []byte(s) 经 io.Writer 接口调用逃逸，
+	// 每次 AST 缓存查找都把整段源复制成 []byte。算法与 hash/fnv 一致。
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime64
+	}
+	return h
 }
 
 // AstCacheStats exposes cache accounting for tests and diagnostics.
