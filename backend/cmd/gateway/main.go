@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -53,6 +54,7 @@ func run() int {
 		banThreshold   = flag.Int("ban-threshold", 0, "penalty count within --ban-window before an IP is auto-banned; 0 disables")
 		banWindow      = flag.Duration("ban-window", time.Minute, "penalty window")
 		banTTL         = flag.Duration("ban-ttl", 10*time.Minute, "auto-ban duration")
+		metricsToken   = flag.String("metrics-token", "", "bearer token for /metrics; empty allows loopback only")
 	)
 	flag.Parse()
 
@@ -230,6 +232,15 @@ func run() int {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"unbanned": ip})
 	})))
+	// Prometheus text metrics (bearer token, or loopback when no token is set).
+	router.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeMetrics(r, *metricsToken) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		writePrometheusMetrics(w, &metrics, registry.Count(), devices.Count(), len(bans.Entries()))
+	})
 	// Reverse proxy: /n/{node_id}/... → the node's local service.
 	router.PathPrefix("/n/{node_id}/").Handler(limited(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metrics.proxy.Add(1)
@@ -301,4 +312,35 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// authorizeMetrics allows scraping with a bearer token, or from loopback when
+// no token is configured.
+func authorizeMetrics(r *http.Request, token string) bool {
+	token = strings.TrimSpace(token)
+	if token != "" {
+		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		const prefix = "Bearer "
+		return strings.HasPrefix(auth, prefix) && strings.TrimSpace(auth[len(prefix):]) == token
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// writePrometheusMetrics renders the process counters in Prometheus text format.
+func writePrometheusMetrics(w http.ResponseWriter, m *gatewayMetrics, nodes, devices, activeBans int) {
+	write := func(name, help, typ string, value int64) {
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, value)
+	}
+	write("aicli_gateway_requests_total", "Total HTTP requests.", "counter", m.requests.Load())
+	write("aicli_gateway_rate_limited_total", "Requests rejected by rate limiting.", "counter", m.rateLimited.Load())
+	write("aicli_gateway_banned_total", "Requests rejected by a ban.", "counter", m.banned.Load())
+	write("aicli_gateway_proxy_requests_total", "Authorized reverse-proxy requests.", "counter", m.proxy.Load())
+	write("aicli_gateway_nodes", "Registered nodes.", "gauge", int64(nodes))
+	write("aicli_gateway_devices", "Device tokens.", "gauge", int64(devices))
+	write("aicli_gateway_active_bans", "Active bans.", "gauge", int64(activeBans))
 }
