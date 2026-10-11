@@ -477,6 +477,12 @@ form { display: flex; gap: 8px; margin-top: 10px; }
 
 .token .btn { margin-top: 4px; }
 
+.token-note {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+}
+
 .toast {
   position: fixed;
   left: 50%; transform: translateX(-50%);

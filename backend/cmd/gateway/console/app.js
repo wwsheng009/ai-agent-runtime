@@ -523,7 +523,7 @@
       card.className = "card" + (d.revoked ? " offline" : "");
       card.innerHTML =
         '<div class="card-head"><span class="card-title"></span><span class="badge"></span></div>' +
-        '<div class="device-token-row"><code class="device-prefix"></code><button class="btn ghost sm" data-copy>复制前缀</button></div>' +
+        '<div class="device-token-row"><code class="device-prefix"></code><button class="btn ghost sm" data-copy>复制标识</button></div>' +
         '<div class="card-meta"></div>' +
         '<div class="card-actions"><button class="btn danger sm" data-revoke>撤销令牌</button></div>';
       card.querySelector(".card-title").textContent = d.name || d.id;
@@ -539,9 +539,10 @@
         (d.created_at ? new Date(d.created_at).toLocaleString() : "—") +
         (d.last_used && d.last_used.indexOf("0001") === -1
           ? " · 最近使用 " + new Date(d.last_used).toLocaleString() : "");
-      card.querySelector("[data-copy]").title = "复制令牌标识";
+      card.querySelector("[data-copy]").title =
+        "复制 8 位令牌标识（用于辨认；完整令牌仅签发时可见，不可恢复）";
       card.querySelector("[data-copy]").addEventListener("click", function () {
-        var done = function () { this.textContent = "已复制 ✓"; }.bind(this);
+        var done = function () { this.textContent = "已复制标识 ✓"; }.bind(this);
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(d.prefix).then(done, done);
         } else {
@@ -911,10 +912,14 @@
           }
         });
         var hint = document.createElement("div");
-        hint.textContent = "令牌仅显示一次，请立即复制保存：";
+        hint.textContent = "完整令牌仅显示这一次，关闭后将无法再次查看（只能撤销重建）——请立即复制保存：";
         tokenEl.appendChild(hint);
         tokenEl.appendChild(strong);
         tokenEl.appendChild(copy);
+        var note = document.createElement("div");
+        note.className = "token-note";
+        note.textContent = "列表中只会显示 8 位标识（" + r.body.device.prefix + "），用于辨认；完整令牌不会再次出现。";
+        tokenEl.appendChild(note);
         tokenEl.hidden = false;
       }
       loadDevices();
