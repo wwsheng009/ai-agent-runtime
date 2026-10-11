@@ -303,6 +303,7 @@ const INDEX_HTML = fs.readFileSync(path.join(WEB_DIR, "index.html"), "utf8");
 const STYLE_CSS = fs.readFileSync(path.join(WEB_DIR, "style.css"), "utf8");
 const APP_JS = fs.readFileSync(path.join(WEB_DIR, "app.js"), "utf8");
 const CHAT_JS = fs.readFileSync(path.join(JS_DIR, "chat.js"), "utf8");
+const FILTER_JS = fs.readFileSync(path.join(JS_DIR, "msg-filter.js"), "utf8");
 const STREAM_JS = fs.readFileSync(path.join(JS_DIR, "stream.js"), "utf8");
 
 var elements = {};
@@ -503,8 +504,22 @@ assert.ok(/\.msg-filter\s*\{[^}]*pointer-events:\s*none/.test(cssBlock.replace(/
 assert.ok(/\.msg-filter-panel\s*\{[^}]*pointer-events:\s*auto/.test(cssBlock.replace(/#conversation /g, "")),
   "面板本体应恢复 pointer-events:auto");
 assert.ok(/\.msg-filter-chip\[aria-pressed="true"\]/.test(cssBlock), "选中态应通过 aria-pressed 着色（不重建节点）");
-assert.ok(/@media \(max-width: 767px\)[\s\S]*\.msg-filter\s*\{[^}]*padding-top/.test(cssBlock),
-  "窄屏应下移面板避让会话复制按钮");
+// 窄屏：会话复制按钮已收进「文件」菜单（<768px 隐藏 #screen-copy-btn），
+// 过滤面板直接吸附信息流顶边，不再保留避让行高（旧 34px 避让随入口迁移一并删除）。
+assert.ok(!/\.msg-filter\s*\{[^}]*padding-top/.test(cssBlock.replace(/#conversation /g, "")),
+  "窄屏不应再为会话复制按钮保留避让行高（复制入口已移至「文件」菜单）");
+assert.ok(/#screen-copy-btn\s*\{[^}]*display:\s*none\s*!important/.test(STYLE_CSS),
+  "窄屏应隐藏浮动会话复制按钮（复制入口在「文件」菜单）");
+
+// ---- 1.2b 拖动把手（面板最左 ⠿）：结构与交互契约（与 composer 把手同一套）----
+assert.ok(/id="msg-filter-grip"/.test(INDEX_HTML), "index.html 应存在拖动把手 #msg-filter-grip");
+assert.ok(/class="msg-filter-panel"[^>]*>\s*<button id="msg-filter-grip"/.test(INDEX_HTML.replace(/\n\s*/g, " ")),
+  "把手应是过滤面板的第一个子节点（最左侧）");
+assert.ok(/bindFilterDrag\(\)/.test(FILTER_JS), "msg-filter.js 应绑定拖动事件（bindFilterDrag）");
+assert.ok(/aicli\.web\.msgfilter\.v1/.test(FILTER_JS), "拖动位置应落 localStorage（aicli.web.msgfilter.v1）");
+assert.ok(/\.msg-filter-grip\s*\{[^}]*touch-action:\s*none/.test(STYLE_CSS),
+  "把手应 touch-action:none（触屏拖把手不滚动消息区）");
+assert.ok(/body\.msgfilter-dragging/.test(STYLE_CSS), "拖动期间应锁定光标与选中（body.msgfilter-dragging）");
 
 // ---- 1.3 app.js / chat.js / stream.js 接线 ----
 assert.ok(/import\s*\{[^}]*initMsgFilter[^}]*\}\s*from\s*"\.\/js\/msg-filter\.js"/.test(APP_JS),

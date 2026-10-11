@@ -196,6 +196,14 @@ check("每个菜单动作都指向真实存在的目标控件", () => {
     "sidebar-toggle": "#sidebar-toggle",
     "theme-toggle": "#theme-toggle",
     "tab-main": "#tab-main-btn",
+    // 移动端专属页签项（.mobile-only，<768px 显示）：与页签栏一一对应转发点击，
+    // 页签栏在移动端隐藏后「视图」菜单是唯一页签入口（index.html 同序）。
+    "tab-skills": "#tab-skills-btn",
+    "tab-files": "#tab-files-btn",
+    "tab-git": "#tab-git-btn",
+    "tab-mcp": "#tab-mcp-btn",
+    "tab-schedule": "#tab-schedule-btn",
+    "tab-config": "#tab-config-btn",
     "tab-log": "#tab-log-btn",
     "tab-debug": "#tab-debug-btn",
     "tab-about": "#tab-about-btn",
@@ -203,6 +211,12 @@ check("每个菜单动作都指向真实存在的目标控件", () => {
     "tab-analysis": "#tab-analysis-btn",
     "tab-lsp": "#tab-lsp-btn",
     "shortcut-help": "#shortcut-help",
+    // 整会话复制（文件菜单）：转发点击对话页的浮动复制按钮（移动端该按钮被 CSS
+    // 隐藏，程序化 click 不受影响），复制实现仍以 chat.js 为唯一来源。
+    "screen-copy": "#screen-copy-btn",
+    // 低带宽模式：转发 ui.js 的 toggleLowBandwidth()，无单一目标控件——
+    // 它切换的是对话区图片的显隐，用对话区代检目标存在性。
+    "low-bandwidth-toggle": "#conversation",
     // 浮动 composer 面板的折叠开关：菜单动作转发到 js/composer.js 的
     // toggleComposerPanel()（而不是点击某个控件），面板本身即目标。
     "composer-toggle": "#composer-panel",

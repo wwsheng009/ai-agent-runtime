@@ -6,8 +6,8 @@
 // 的准确计数。服务端先按条件过滤，再在过滤后的序列上做 msg_limit/msg_before
 // 分页 —— 语义等同于搜索结果分页（见 web_handlers.go 的 HandleChatWebAPIScreen）。
 // 本模块只负责：面板 UI、过滤条件状态、把条件编码成查询串、展示服务端返回的
-// 匹配计数；条件变化时通过 onChange 回调通知 chat.js 整块重建对话区（索引语义
-// 随过滤改变，增量尾部替换会错位）。
+// 匹配计数，以及面板的拖动换位（最左 ⠿ 把手，见文件尾部拖动一节）；条件变化时通
+// 过 onChange 回调通知 chat.js 整块重建对话区（索引语义随过滤改变，增量尾部替换会错位）。
 
 // 角色词表：与 chat.js 的 MSG_LABELS、后端 chatWebRoleForCellKind 保持同一集合。
 // 后端只认这些值（未知角色按「忽略」处理，不会把结果集变成空），因此多选按钮
@@ -25,6 +25,13 @@ var FILTER_ROLES = [
 
 var SEARCH_DEBOUNCE_MS = 300; // 搜索输入去抖：连续打字只在停顿后发一次请求
 
+// 拖动把手（面板最左 ⠿）与 composer 把手同一套参数与交互契约：
+// 方向键 8px 微调 / Shift 1px 精调 / Home·双击复位；位置记忆落 localStorage。
+var STORAGE_KEY = "aicli.web.msgfilter.v1";
+var EDGE = 2;      // 拖动落点至少留在信息流内的边距（px）
+var KEY_STEP = 8;  // 方向键微调步长（px）
+var KEY_FINE = 1;  // Shift+方向键精调步长（px）
+
 var selected = {};            // 角色选中表（role -> true）；空 = 不按角色过滤
 var query = "";               // 搜索词（已 trim、保持原大小写；服务端按小写子串匹配）
 var searchOpen = false;       // 搜索输入框是否展开
@@ -40,6 +47,9 @@ var searchBtn = null;
 var searchEl = null;
 var countEl = null;
 var clearEl = null;
+var gripEl = null;
+var offset = { dx: 0, dy: 0 }; // 面板相对吸附点（sticky 顶部居中）的 translate 位移
+var dragState = null;          // { startX, startY, baseDx, baseDy }；非拖动中为 null
 
 // 已选角色列表：按 FILTER_ROLES 顺序输出（查询串稳定，便于日志/缓存比对）。
 function selectedRoleList() {
@@ -176,6 +186,150 @@ export function clearFilter() {
   apply();
 }
 
+// ---- 浮动工具栏拖动（把手 = 面板最左 ⠿，见 index.html #msg-filter-grip）----
+// 与 composer 把手同一套交互契约：指针拖动（Pointer 优先、回退鼠标事件）、
+// 方向键 8px 微调（Shift 1px 精调）、Home / 双击复位。位移是相对吸附点
+// （sticky 顶部居中）的 translate：sticky 吸附语义不变——滚动时工具栏仍钉在
+// 信息流可视区顶部，只是整体平移到用户拖到的位置。落点永远夹在 #conversation
+// 内（EDGE 边距）：既不会拖丢，也不会因 transform 溢出产生横向滚动条。
+// 位置落 localStorage（隐私模式等场景静默降级，本次会话内仍然生效）。
+
+// 记忆读写：localStorage 异常（隐私模式等）静默忽略。
+function storeOffset() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ dx: offset.dx, dy: offset.dy }));
+  } catch (e) { /* ignore */ }
+}
+
+function restoreOffset() {
+  try {
+    var raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) { return; }
+    var v = JSON.parse(raw);
+    if (v && typeof v === "object") {
+      offset.dx = Number(v.dx) || 0;
+      offset.dy = Number(v.dy) || 0;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function filterPanelEl() {
+  return (rootEl && rootEl.querySelector) ? rootEl.querySelector(".msg-filter-panel") : null;
+}
+
+// clampOffset 把位移夹回 #conversation 可视范围：横向以面板布局位（flex 居中的
+// 左缘）为基准换算可视边界；纵向 0 = 吸附顶边（不允许拖到消息区上方）。
+function clampOffset(dx, dy) {
+  var conv = document.getElementById("conversation");
+  var panel = filterPanelEl();
+  if (!conv || !panel) { return { dx: 0, dy: 0 }; }
+  var cw = conv.clientWidth, ch = conv.clientHeight;
+  var pw = panel.offsetWidth, ph = panel.offsetHeight;
+  var layoutLeft = (cw - pw) / 2;
+  var lo = EDGE - layoutLeft, hi = cw - EDGE - pw - layoutLeft;
+  if (lo > hi) { dx = (lo + hi) / 2; } // 面板比容器还宽：横移无意义，居中兜底
+  else { dx = Math.min(hi, Math.max(lo, dx)); }
+  var dyHi = ch - EDGE - ph;
+  dy = dyHi < 0 ? 0 : Math.min(dyHi, Math.max(0, dy));
+  return { dx: Math.round(dx), dy: Math.round(dy) };
+}
+
+function applyOffset() {
+  var panel = filterPanelEl();
+  if (!panel) { return; }
+  if (offset.dx || offset.dy) {
+    panel.style.transform = "translate(" + offset.dx + "px, " + offset.dy + "px)";
+  } else if (panel.style.transform) {
+    panel.style.transform = ""; // 默认位置不留内联样式，DOM 保持干净
+  }
+}
+
+function resetFilterPos() {
+  offset = { dx: 0, dy: 0 };
+  applyOffset();
+  storeOffset();
+}
+
+// coord 取指针坐标：指针/鼠标事件直接用 clientX/Y，触摸事件回退 touches。
+function coord(ev, axis) {
+  if (!ev) { return 0; }
+  var direct = axis === "x" ? ev.clientX : ev.clientY;
+  if (typeof direct === "number") { return direct; }
+  var list = ev.touches || ev.changedTouches;
+  if (list && list.length) { return axis === "x" ? list[0].clientX : list[0].clientY; }
+  return 0;
+}
+
+function onGripPointerDown(ev) {
+  if (ev && typeof ev.button === "number" && ev.button !== 0) { return; } // 只响应主键
+  if (ev && typeof ev.preventDefault === "function") { ev.preventDefault(); } // 拖动期间不要选中文字
+  dragState = { startX: coord(ev, "x"), startY: coord(ev, "y"), baseDx: offset.dx, baseDy: offset.dy };
+  if (document.body && document.body.classList) { document.body.classList.add("msgfilter-dragging"); }
+  // 指针捕获：指针移出把手/窗口仍能继续拖动（失败也不影响基本拖动）。
+  if (ev && typeof ev.pointerId === "number" && gripEl && typeof gripEl.setPointerCapture === "function") {
+    try { gripEl.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+  }
+}
+
+function onDragPointerMove(ev) {
+  if (!dragState) { return; }
+  if (ev && typeof ev.preventDefault === "function") { ev.preventDefault(); }
+  offset = clampOffset(
+    dragState.baseDx + coord(ev, "x") - dragState.startX,
+    dragState.baseDy + coord(ev, "y") - dragState.startY
+  );
+  applyOffset();
+}
+
+function onDragPointerUp() {
+  if (!dragState) { return; }
+  dragState = null;
+  if (document.body && document.body.classList) { document.body.classList.remove("msgfilter-dragging"); }
+  storeOffset(); // 只在落点确定时落盘，拖动过程中不反复写 localStorage
+}
+
+// 把手键盘微调：方向键 8px、Shift+方向键 1px、Home 复位（与 composer 把手一致）。
+function onGripKey(ev) {
+  var key = ev && ev.key;
+  if (!key) { return; }
+  if (key === "Home") { ev.preventDefault(); resetFilterPos(); return; }
+  var step = ev.shiftKey ? KEY_FINE : KEY_STEP;
+  var dx = 0, dy = 0;
+  if (key === "ArrowLeft") { dx = -step; }
+  else if (key === "ArrowRight") { dx = step; }
+  else if (key === "ArrowUp") { dy = -step; }
+  else if (key === "ArrowDown") { dy = step; }
+  else { return; }
+  ev.preventDefault();
+  offset = clampOffset(offset.dx + dx, offset.dy + dy);
+  applyOffset();
+  storeOffset();
+}
+
+function bindFilterDrag() {
+  if (!gripEl || typeof gripEl.addEventListener !== "function" || !document.addEventListener) { return; }
+  var hasPointer = typeof window !== "undefined" && typeof window.PointerEvent === "function";
+  if (hasPointer) {
+    gripEl.addEventListener("pointerdown", onGripPointerDown);
+    document.addEventListener("pointermove", onDragPointerMove);
+    document.addEventListener("pointerup", onDragPointerUp);
+    document.addEventListener("pointercancel", onDragPointerUp);
+  } else {
+    gripEl.addEventListener("mousedown", onGripPointerDown);
+    document.addEventListener("mousemove", onDragPointerMove);
+    document.addEventListener("mouseup", onDragPointerUp);
+  }
+  gripEl.addEventListener("dblclick", resetFilterPos);
+  gripEl.addEventListener("keydown", onGripKey);
+  // 窗口缩放后落点可能越界：重夹一次（clamp 对任意入参幂等，无位移时是空操作）。
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("resize", function () {
+      offset = clampOffset(offset.dx, offset.dy);
+      applyOffset();
+    });
+  }
+}
+
 export function initMsgFilter() {
   rootEl = document.getElementById("msg-filter");
   rolesEl = document.getElementById("msg-filter-roles");
@@ -234,4 +388,11 @@ export function initMsgFilter() {
   if (rootEl && rootEl.addEventListener) {
     rootEl.addEventListener("click", function (e) { if (e.stopPropagation) { e.stopPropagation(); } });
   }
+
+  // 拖动把手：绑定事件 + 恢复上次位置（夹回当前容器尺寸内再应用）。
+  gripEl = document.getElementById("msg-filter-grip");
+  bindFilterDrag();
+  restoreOffset();
+  offset = clampOffset(offset.dx, offset.dy);
+  applyOffset();
 }

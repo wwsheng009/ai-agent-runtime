@@ -134,13 +134,25 @@ function handleAction(action) {
       break;
     }
     case "shortcut-help": toggleShortcutHelp(); break;
+    // 整会话复制（文件菜单）：转发到对话页的浮动复制按钮，复制取词与 toast 反馈
+    // 全部沿用 chat.js 既有实现。移动端按钮被 CSS 隐藏（style.css <768px），
+    // 程序化 click 不受 display 影响，菜单入口照常工作。
+    case "screen-copy": clickExisting("screen-copy-btn"); break;
+    // 页签导航：与 index.html 页签栏一一对应（移动端页签栏隐藏后，「视图」菜单
+    // 是唯一页签入口；桌面端菜单里只露出其中三项，其余为 .mobile-only）。
     case "tab-main":
+    case "tab-skills":
+    case "tab-files":
+    case "tab-git":
+    case "tab-mcp":
+    case "tab-schedule":
     case "tab-log":
-    case "tab-debug":
-    case "tab-about":
+    case "tab-config":
     case "tab-cache":
     case "tab-analysis":
-    case "tab-lsp": clickExisting(action + "-btn"); break;
+    case "tab-lsp":
+    case "tab-debug":
+    case "tab-about": clickExisting(action + "-btn"); break;
     default: break;
   }
 }

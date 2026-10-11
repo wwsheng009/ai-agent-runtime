@@ -199,9 +199,13 @@
 
     <div id="tab-main" class="tab-panel active">
       <div id="conversation">
-        <!-- 消息过滤面板：角色多选 + 正文搜索；sticky 吸附在消息区顶部居中 -->
+        <!-- 消息过滤面板：角色多选 + 正文搜索；sticky 吸附在消息区顶部居中。
+             最左的 ⠿ 是拖动把手（js/msg-filter.js）：拖动换位 / 方向键微调 /
+             Home·双击复位，位移相对吸附点落 localStorage。 -->
         <div id="msg-filter" class="msg-filter">
           <div class="msg-filter-panel" role="group" aria-label="消息过滤">
+            <button id="msg-filter-grip" class="msg-filter-grip" type="button"
+              title="拖动移动工具栏（方向键微调，Home 复位）" aria-label="拖动移动过滤工具栏">⠿</button>
             <div id="msg-filter-roles" class="msg-filter-roles" role="group" aria-label="按角色过滤"></div>
             <button id="msg-filter-search-btn" class="msg-filter-icon-btn" type="button"
               aria-expanded="false" aria-controls="msg-filter-search"

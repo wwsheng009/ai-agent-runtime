@@ -257,11 +257,26 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   border: 1px solid var(--border2); border-radius: 999px;
 }
 #conversation .msg-filter-count { color: var(--fg4); white-space: nowrap; }
-/* 窄屏：会话复制按钮固定在信息流右上角（top:10px），面板下移一行避让。 */
+/* 窄屏：浮动「复制」按钮已收进「文件」菜单（<768px 隐藏 #screen-copy-btn），
+   面板不再留避让行高，直接吸附信息流顶边。 */
 @media (max-width: 767px) {
-  #conversation .msg-filter { padding-top: 34px; }
   #conversation .msg-filter-panel { border-radius: 10px; }
 }
+
+/* 拖动把手（面板最左 ⠿）：与 composer 把手同一交互（指针拖动 / 方向键微调 /
+   Home·双击复位），视觉按面板 11px 密度缩一档。touch-action:none 让触屏拖
+   把手时不滚动消息区；位移 transform 只落在面板本体（js/msg-filter.js）。 */
+#conversation .msg-filter-grip {
+  padding: 1px 5px; line-height: 1.6; font-size: 11px;
+  background: transparent; color: var(--fg4);
+  border: 1px solid transparent; border-radius: 999px;
+  cursor: grab;
+  touch-action: none;
+}
+#conversation .msg-filter-grip:hover { color: var(--fg); background: var(--hoverBg); }
+#conversation .msg-filter-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+body.msgfilter-dragging { cursor: grabbing; user-select: none; }
+body.msgfilter-dragging * { cursor: grabbing !important; user-select: none !important; }
 
 /* ---- 托管挂起/恢复横幅（turn.suspended / turn.resumed，方案 §6.8） ----
    与消息过滤面板同层吸附在消息区顶部；挂起态常驻（等待子任务 ≠ 卡死），
