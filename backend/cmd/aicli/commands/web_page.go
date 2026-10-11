@@ -108,6 +108,33 @@ const chatWebAuthFetchWrapperScript = `<script>
   // head 阶段同步把 meta 令牌写进 sessionStorage：ES 模块顶层（loadSessions 等）
   // 可能在 DOMContentLoaded 之前就发请求，不能等事件回调再落缓存。
   getAICLIToken();
+  // base-path 感知（docs/gateway/06-implementation-plan.md §4.1）：页面可能被网关
+  // 以 /n/{node}/web/ 前缀反向代理。把根绝对 /web/... 请求重写到该前缀下，使
+  // 微前端无需改动各处硬编码路径即可在网关后正常工作。
+  function computeBasePath() {
+    var path = window.location.pathname || '/';
+    var idx = path.indexOf('/web/');
+    if (idx === 0) { return ''; }
+    if (idx > 0) { return path.slice(0, idx); }
+    var m = path.match(/^(.*)\/web$/);
+    return m ? m[1] : '';
+  }
+  var BASE_PATH = computeBasePath();
+  function rewriteWebUrl(url) {
+    if (!BASE_PATH || typeof url !== 'string') { return url; }
+    if (url.indexOf('/web/') === 0 || url === '/web') { return BASE_PATH + url; }
+    return url;
+  }
+  // EventSource（SSE）无法设置请求头，且 URL 由 sse.js 以 /web/api/events... 给出；
+  // 包装构造函数即可让 SSE 也在前缀下命中网关。
+  if (typeof window.EventSource === 'function') {
+    var OriginalEventSource = window.EventSource;
+    var PatchedEventSource = function (url, config) {
+      return new OriginalEventSource(rewriteWebUrl(url), config);
+    };
+    PatchedEventSource.prototype = OriginalEventSource.prototype;
+    window.EventSource = PatchedEventSource;
+  }
   // 「关于」页的链接改写放在 DOMContentLoaded：那时 DOM 才完整。
   window.addEventListener('DOMContentLoaded', function () {
     // 非回环模式下：为关于页的所有外部链接附加 ?token=，
@@ -121,6 +148,7 @@ const chatWebAuthFetchWrapperScript = `<script>
       (function (link) {
         var href = link.getAttribute('href');
         if (!href || href.indexOf('token=') !== -1) { return; }
+        href = rewriteWebUrl(href);
         var sep = href.indexOf('?') !== -1 ? '&' : '?';
         link.setAttribute('href', href + sep + 'token=' + encodeURIComponent(token));
       })(links[i]);
@@ -130,6 +158,17 @@ const chatWebAuthFetchWrapperScript = `<script>
   var original = window.fetch.bind(window);
   window.fetch = function (input, init) {
     init = init || {};
+    if (typeof input === 'string') {
+      input = rewriteWebUrl(input);
+    } else if (BASE_PATH && input && typeof input === 'object' && typeof input.url === 'string' && typeof Request === 'function') {
+      try {
+        var abs = new URL(input.url, window.location.origin);
+        if (abs.pathname.indexOf('/web/') === 0) {
+          abs.pathname = BASE_PATH + abs.pathname;
+          input = new Request(abs.toString(), input);
+        }
+      } catch (e) { /* 保持原 input */ }
+    }
     var url = typeof input === 'string' ? input : (input && input.url) || '';
     var apiPath = url.indexOf('/web/api/') === 0 ||
       (window.location.origin && url.indexOf(window.location.origin + '/web/api/') === 0);
