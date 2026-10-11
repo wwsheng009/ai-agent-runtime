@@ -203,7 +203,7 @@ cmd/aicli/                        # --gateway/--gateway-token；启动 agent
 
 ```text
 aicli-gateway init                 # 初始化 owner 凭据 + 数据目录
-aicli-gateway serve \
+aicli-gateway serve \              # `serve` 为可选位置参数（被忽略，后续 --flags 正常解析）
   --listen :8443 \
   --data-dir ./data \
   --tls-cert cert.pem --tls-key key.pem \

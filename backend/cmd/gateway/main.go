@@ -75,6 +75,25 @@ func main() {
 	os.Exit(run())
 }
 
+// normalizeServeArgs accepts the documented "gateway serve --flag ..." spelling:
+// a single optional positional "serve" is stripped so the flags after it are
+// parsed; anything else is rejected instead of silently ignored (which would
+// bind the default port with default options).
+func normalizeServeArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	if args[0] == "serve" {
+		return args[1:]
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return args
+	}
+	fmt.Fprintf(os.Stderr, "gateway: unknown subcommand %q (this binary has no subcommands; see --help)\n", args[0])
+	os.Exit(2)
+	return nil
+}
+
 func run() int {
 	var (
 		listen         = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
@@ -99,7 +118,12 @@ func run() int {
 		coalesceWindow = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
 		quietHours     = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
 	)
-	flag.Parse()
+	// Parse the (possibly "serve"-stripped) argument list after all flags are
+	// registered, so the documented "gateway serve --flag ..." spelling works.
+	if err := flag.CommandLine.Parse(normalizeServeArgs(os.Args[1:])); err != nil {
+		fmt.Fprintf(os.Stderr, "gateway: %v\n", err)
+		return 2
+	}
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		fmt.Fprintln(os.Stderr, "both --tls-cert and --tls-key are required to enable TLS")

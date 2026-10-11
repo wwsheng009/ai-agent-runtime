@@ -59,6 +59,21 @@ go build -o bin/aicli-gateway ./cmd/gateway   # 在 backend/ 下
 - 打开 `https://gw.example.com/` → 控制台（owner 登录）。
 - 在控制台签发**设备令牌**（`POST /api/devices`，仅显示一次）。
 
+> 参数说明：网关无子命令；文档中的 `serve` 写法是**可选的位置参数**（会被忽略并继续解析后续 `--flags`）。
+> 其它未知位置参数会直接报错退出（exit 2），不会静默使用默认值启动。
+
+### 2.1.1 数据文件与重载语义
+
+`--data-dir`（默认 `./data`）下的状态文件均在**启动时一次性加载**，运行期间手工修改**不会**被重新读取（排障时需先停网关再改文件）：
+
+| 文件 | 内容 | 加载时机 |
+|------|------|----------|
+| `devices.json` | 设备令牌 | 启动（写入路径实时落盘） |
+| `vapid.key` | Web Push VAPID P-256 私钥（0600，缺失自动生成） | 启动 |
+| `push.json` | Web Push 订阅（0600） | 启动（写入路径实时落盘） |
+| `registry.json` | 节点注册表快照（0600，防抖 ~2s + 退出强制落盘） | 启动（恢复为 stale 条目，见 [08](./08-notifications.md) §10.1） |
+| `audit.log` | 审计事件（追加写） | 启动 |
+
 ### 2.2 本地进程接入
 
 `aicli` / `runtime-server` 通过分层配置 `gateway.*` 或环境变量接入（env 覆盖配置）：
