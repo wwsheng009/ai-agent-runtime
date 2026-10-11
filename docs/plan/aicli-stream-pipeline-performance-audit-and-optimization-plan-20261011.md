@@ -166,7 +166,7 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 - **P1-3（ApproximateEventBytes 4× 计算一部分已随 P0-2/P0-1 缓解）**：bus 侧已免算 delta；bridge/persist buffer 侧重复计算保留，需给 Event 增加旁路尺寸字段（跨包结构变更），留给批次 3。
 - **P1-4（payload 三键同串）**：持久化折叠需前端 TS 消费契约同步验证（content/delta/text 三键有独立读者），留批次 3 单独做兼容矩阵。
 - **P1-7（stable commit 双全前缀 Format）**：注释明确的正确性契约（与 history replay 同价），改增量渲染需重验 Scene 收敛，留批次 3。
-- **P1-5（LooksLikeMarkdown 每帧全源扫描）**：未动工；扫描是 memcmp 量级、无分配，实测占比待 pprof 确认后再决定节流方案。
+- **P1-5（LooksLikeMarkdown 每帧全源扫描）**：已完成（`66c1b9db`）——按 cell 缓存判定，源增长 <512B 走缓存（前后缀切片指纹命中），收缩/换内容立即重估，cellID==0 回退路径透传。
 
 ### 9.6 批次 3 实施记录（2026-10-11 续）
 
@@ -181,5 +181,5 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 
 - **P2-1 剩余（三次写事务合并）**：turn 收尾的 syncRuntimeSessionBackIntoCLI / reconcilers / usage 三次全量 Load+Update 涉及 token 高水位与 provider 快照的优先级语义，需要专项设计（合并为单次 restore + 单次 Update），未在本轮动。
 - **P2-2 缓办**：按键规整复核——稳态按键无 `\r` 时 ReplaceAll 零分配（仅 2 次线性扫描）；把规整移到生产端会改变程序化提交路径的行为，收益不抵风险。
-- **P2-3（transcript 弹层同步渲染）/ P2-5（Recent 全量克隆）/ P2-7（EndRun 事件驱动排水）/ P2-9/P2-10（legacy 路径）**：未动工，均为低频或回退路径。P2-4 栅栏部分已完成（见 §9.6），表格 holdback 尾部天然较小未再处理。
+- **P2-3（transcript 弹层同步渲染）/ P2-5（Recent 全量克隆）/ P2-9/P2-10（legacy 路径）**：未动工，均为低频或回退路径。P2-4 栅栏部分已完成（见 §9.6），表格 holdback 尾部天然较小未再处理；P2-7 的 WaitIdleTimeout 已改自适应退避（`66c1b9db`），WaitForCurrentEvents 的 5ms 轮询因驱动排水保留。
 - **P1-3 / P1-4 / P1-5 / P1-7**：维持 §9.5 结论（跨包结构变更 / 前端契约验证 / 待 pprof 定占比 / 正确性契约重验）。
