@@ -133,6 +133,10 @@ Usage:
 
   "serve" is an optional positional and is ignored; any other positional exits 2.
 
+Config file: --config gateway.yaml loads a YAML flagfile whose keys mirror the
+flag names (e.g. listen: ":8443", owner-password: "...", presence-ttl: 90s);
+command-line flags win over file entries, file entries win over defaults.
+
 State (under --data-dir, loaded once at startup — edit only while stopped):
   devices.json   device tokens (issue via the console API, shown once)
   vapid.key      Web Push identity, 0600, auto-created
@@ -159,6 +163,7 @@ is refused at startup; pass --allow-unprotected to accept that risk explicitly.
 func run() int {
 	flag.Usage = usage
 	var (
+		configPath     = flag.String("config", "", "optional YAML flagfile whose keys mirror flag names; command-line flags win over file entries")
 		listen         = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
 		publicBaseURL  = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
 		serverVersion  = flag.String("server-version", "0.1.0", "server version reported in WELCOME")
@@ -188,9 +193,27 @@ func run() int {
 	)
 	// Parse the (possibly "serve"-stripped) argument list after all flags are
 	// registered, so the documented "gateway serve --flag ..." spelling works.
-	if err := flag.CommandLine.Parse(normalizeServeArgs(os.Args[1:])); err != nil {
+	args := normalizeServeArgs(os.Args[1:])
+	if err := flag.CommandLine.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "gateway: %v\n", err)
 		return 2
+	}
+	// Flagfile fallback: apply --config entries for every flag the user did NOT
+	// pass explicitly (command line > file > defaults). A missing file is an
+	// error only when --config was given explicitly.
+	if path := strings.TrimSpace(*configPath); path != "" {
+		entries, cfgErr := loadFlagConfigFile(path)
+		if cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "gateway: --config %s: %v\n", path, cfgErr)
+			return 1
+		}
+		explicit := map[string]bool{}
+		flag.CommandLine.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		if applyErr := applyFlagConfig(flag.CommandLine, entries, explicit); applyErr != nil {
+			fmt.Fprintf(os.Stderr, "gateway: --config %s: %v\n", path, applyErr)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "gateway: applied %d config entries from %s\n", len(entries), path)
 	}
 
 	if (*tlsCert == "") != (*tlsKey == "") {

@@ -72,6 +72,7 @@ go build -o bin/aicli-gateway ./cmd/gateway   # 在 backend/ 下
 | 参数 | 默认 | 语义要点 |
 |------|------|----------|
 | `--listen` | `127.0.0.1:8090` | 同时承载 `/gw/agent` 隧道、控制台与反代；公网部署必须配 TLS 或前置反代 |
+| `--config` | 空 | **可选 YAML flagfile**（键=flag 名，值按 flag 类型解析）；优先级 **命令行 > 配置文件 > 默认值**；未知键/meta 键/无法解析的值一律拒绝启动；裸数字不作时长单位猜测（`presence-ttl: 90` 被拒，须写 `90s`） |
 | `--public-base-url` | 空 | 拼接 console URL / Web Push 点击跳转；不配则通知无跳转链接 |
 | `--owner-password` | 空 | **空=控制台/owner API 完全无认证（dev only）**；配置后存 PBKDF 哈希，不落盘明文 |
 | `--session-ttl` | `12h` | owner 登录会话时长 |
