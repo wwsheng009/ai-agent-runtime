@@ -97,7 +97,40 @@ func normalizeServeArgs(args []string) []string {
 	return nil
 }
 
+// usage prints the grouped, annotated flag reference (docs/gateway/
+// 14-implementation-record.md §2). The Go default lists flags alphabetically
+// with one-line texts; operators need the lifecycle around them too.
+func usage() {
+	out := flag.CommandLine.Output()
+	fmt.Fprint(out, `aicli-gateway — session gateway for aicli / runtime-server agents (docs/gateway/)
+
+Usage:
+  aicli-gateway [serve] --listen <host:port> [flags]
+
+  "serve" is an optional positional and is ignored; any other positional exits 2.
+
+State (under --data-dir, loaded once at startup — edit only while stopped):
+  devices.json   device tokens (issue via the console API, shown once)
+  vapid.key      Web Push identity, 0600, auto-created
+  push.json      push subscriptions
+  registry.json  node registry snapshot; restored as stale entries on start
+  audit.log      append-only security audit trail
+
+Shutdown: SIGINT/SIGTERM stop accepting, send GOAWAY to every live agent
+(they reconnect to the failover peer via their backoff), flush the snapshot
+and exit 0.
+
+─ Listen / identity ─────────────────────────────────────────────
+`)
+	flag.PrintDefaults()
+	fmt.Fprint(out, `
+Exit codes: 0 clean run or graceful shutdown; 1 runtime failure; 2 usage error.
+Docs: docs/gateway/14-implementation-record.md (run), 10-runbook.md (operate).
+`)
+}
+
 func run() int {
+	flag.Usage = usage
 	var (
 		listen         = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
 		publicBaseURL  = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
