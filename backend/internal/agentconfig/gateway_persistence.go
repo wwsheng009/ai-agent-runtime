@@ -26,6 +26,8 @@ type GatewayPreferenceUpdate struct {
 	// AutoConnect 三态：外层 nil=不修改；非 nil 写入该布尔（区分"未设置（默认
 	// true）"与"显式 false"）。
 	AutoConnect *bool
+	// ProxyURL 同 URL 的三态语义；空串=清除代理（回到直连）。
+	ProxyURL *string
 }
 
 // UpdateGatewayConfig updates the gateway section inside a config file without
@@ -86,6 +88,9 @@ func gatewayUpdateWriteKeys(update GatewayPreferenceUpdate) []string {
 	if update.AutoConnect != nil {
 		keys = append(keys, "gateway.auto_connect")
 	}
+	if update.ProxyURL != nil {
+		keys = append(keys, "gateway.proxy_url")
+	}
 	return keys
 }
 
@@ -110,6 +115,9 @@ func applyGatewayPreferenceUpdate(current *GatewayConfig, update GatewayPreferen
 		// stays distinct from an explicit false.
 		value := *update.AutoConnect
 		current.AutoConnect = &value
+	}
+	if update.ProxyURL != nil {
+		current.ProxyURL = strings.TrimSpace(*update.ProxyURL)
 	}
 }
 

@@ -143,7 +143,7 @@ func gatewayHelpText() string {
 		"/gateway disconnect 手动断开（抑制自动重连，不改配置）",
 		"/gateway reconnect  断开后立即重连",
 		"/gateway url        显示网关注册/控制台地址",
-		"/gateway config     查看/写入持久化配置（url/token/name/auto-connect/disable）",
+		"/gateway config     查看/写入持久化配置（url/token/name/auto-connect/proxy/disable）",
 		"/gateway help       显示本帮助",
 	}, "\n")
 }

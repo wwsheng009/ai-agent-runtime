@@ -41,7 +41,20 @@ func gatewayConfigKeyArgumentCandidates() []chatSlashCompletionCandidate {
 		{Command: "token", Summary: "设备注册令牌（agw_...，网关控制台签发）", Group: group, AcceptsArgs: true},
 		{Command: "name", Summary: "节点显示名", Group: group, AcceptsArgs: true},
 		{Command: "auto-connect", Summary: "启动自动连接 on|off", Group: group, AcceptsArgs: true},
+		{Command: "proxy", Summary: "隧道代理 socks5://... 或 http://...（off=直连）", Group: group, AcceptsArgs: true},
 		{Command: "disable", Summary: "清空 url/token 并停用网关", Group: group},
+	}
+}
+
+// gatewayProxyValueArgumentCandidates 是 `/gateway config proxy` 取值位的候选：
+// 清除代理的 off 枚举 + 常见 scheme 提示（host:port 为自由文本，不枚举）。
+func gatewayProxyValueArgumentCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupWeb)
+	return []chatSlashCompletionCandidate{
+		{Command: "off", Summary: "清除代理，恢复直连（none 等价）", Group: group},
+		{Command: "none", Summary: "off 的别名", Group: group, AliasOf: "off"},
+		{Command: "socks5://", Summary: "SOCKS5 代理前缀（如 socks5://127.0.0.1:1080）", Group: group, Informational: true},
+		{Command: "http://", Summary: "HTTP CONNECT 代理前缀（如 http://127.0.0.1:3128）", Group: group, Informational: true},
 	}
 }
 
@@ -65,6 +78,9 @@ func completeGatewaySlashArgs(session *ChatSession, argsText string, cursor int)
 	if gatewayAutoConnectValueFocus(ctx) {
 		return matchSlashArgumentCandidates(gatewayAutoConnectValueArgumentCandidates(), query)
 	}
+	if gatewayProxyValueFocus(ctx) {
+		return matchSlashArgumentCandidates(gatewayProxyValueArgumentCandidates(), query)
+	}
 
 	first := strings.ToLower(slashArgumentTokenText(ctx, 0))
 	if first == "" || slashArgumentCursorInToken(ctx, 0) {
@@ -86,6 +102,15 @@ func completeGatewaySlashArgs(session *ChatSession, argsText string, cursor int)
 // gatewayAutoConnectValueFocus 判断光标是否落在 config auto-connect 的取值位
 // （"auto-connect=on" 的等号后取值，或 "auto-connect " 之后的下一个 token）。
 func gatewayAutoConnectValueFocus(ctx slashArgumentContext) bool {
+	// `auto-connect=on` 等号形式：等号在光标所在 token 内 → 取值位。
+	// 不依赖 key 的下标：等号形式下 "auto-connect=" 就是 Current token。
+	if ctx.CurrentOK {
+		token := strings.ToLower(strings.TrimSpace(ctx.Current.Text))
+		if strings.HasPrefix(token, "auto-connect=") || strings.HasPrefix(token, "auto_connect=") ||
+			strings.HasPrefix(token, "autoconnect=") {
+			return true
+		}
+	}
 	if strings.HasPrefix(strings.ToLower(slashArgumentTokenText(ctx, 0)), "config") &&
 		strings.HasPrefix(strings.ToLower(slashArgumentTokenText(ctx, 1)), "auto-connect") {
 		// 光标在 auto-connect token 内且已越过等号 → 取值位。
@@ -100,12 +125,39 @@ func gatewayAutoConnectValueFocus(ctx slashArgumentContext) bool {
 		// 光标在第三个 token（等号被空格拆开或独立取值 token）。
 		return slashArgumentTokenText(ctx, 2) == "" || slashArgumentCursorInToken(ctx, 2)
 	}
-	// `config auto-connect=on` 形式：等号在同一 token。
-	if strings.EqualFold(slashArgumentTokenText(ctx, 1), "config") {
+	return false
+}
+
+// gatewayProxyValueFocus 判断光标是否落在 config proxy 的取值位（含 `proxy=`
+// 等号形式与 `proxy off/none` 清除枚举）。host:port 自由文本位不拦截，落到
+// 取值候选的 prefix 过滤：空查询给全量提示，输入自由文本时按前缀/摘要过滤，
+// 无命中即关闭弹窗（matchSlashArgumentCandidates 语义）。
+func gatewayProxyValueFocus(ctx slashArgumentContext) bool {
+	// `config proxy=...` / `proxy=...`：等号在光标所在 token 内 → 取值位。
+	// 不依赖 key 的下标：等号形式下 "proxy=" 就是 Current token。
+	if ctx.CurrentOK {
 		token := strings.ToLower(strings.TrimSpace(ctx.Current.Text))
-		if strings.HasPrefix(token, "auto-connect=") {
+		if strings.HasPrefix(token, "proxy=") || strings.HasPrefix(token, "proxy-url=") ||
+			strings.HasPrefix(token, "proxy_url=") || strings.HasPrefix(token, "proxyurl=") {
 			return true
 		}
 	}
-	return false
+	if !strings.HasPrefix(strings.ToLower(slashArgumentTokenText(ctx, 0)), "config") {
+		return false
+	}
+	second := strings.ToLower(slashArgumentTokenText(ctx, 1))
+	if second != "proxy" && second != "proxy-url" && second != "proxy_url" && second != "proxyurl" {
+		return false
+	}
+	// 光标在 proxy token 内且已越过等号 → 取值位（无等号则 key 还没写完）。
+	if slashArgumentCursorInToken(ctx, 1) {
+		token := strings.TrimSpace(ctx.Current.Text)
+		if eq := strings.Index(strings.ToLower(token), "="); eq >= 0 &&
+			ctx.Cursor-ctx.Current.Start > eq {
+			return true
+		}
+		return false
+	}
+	// 光标在第三个 token（等号被空格拆开或独立取值 token）。
+	return slashArgumentTokenText(ctx, 2) == "" || slashArgumentCursorInToken(ctx, 2)
 }

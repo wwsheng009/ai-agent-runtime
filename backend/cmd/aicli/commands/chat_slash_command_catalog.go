@@ -70,7 +70,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "disconnect", Summary: "手动断开（抑制自动重连，不改配置）"},
 				{Token: "reconnect", Summary: "断开后立即重连"},
 				{Token: "url", Summary: "显示网关注册/控制台地址"},
-				{Token: "config", Summary: "查看/写入持久化配置（url/token/name/auto-connect/disable）"},
+				{Token: "config", Summary: "查看/写入持久化配置（url/token/name/auto-connect/proxy/disable）"},
 				{Token: "help", Summary: "显示帮助"},
 			},
 		},

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -35,6 +36,7 @@ const (
 	gatewayConfigKeyName        gatewayCommandToken = "name"
 	gatewayConfigKeyAutoConnect gatewayCommandToken = "auto-connect"
 	gatewayConfigKeyDisable     gatewayCommandToken = "disable"
+	gatewayConfigKeyProxyURL    gatewayCommandToken = "proxy"
 )
 
 // gatewayConfigTokenForArgument 把小写参数映射为配置键；未匹配返回空。
@@ -48,6 +50,8 @@ func gatewayConfigTokenForArgument(arg string) gatewayCommandToken {
 		return gatewayConfigKeyName
 	case "auto-connect", "auto_connect", "autoconnect":
 		return gatewayConfigKeyAutoConnect
+	case "proxy", "proxy-url", "proxy_url", "proxyurl":
+		return gatewayConfigKeyProxyURL
 	case "disable":
 		return gatewayConfigKeyDisable
 	}
@@ -159,6 +163,19 @@ func executeStructuredGatewayConfigCommand(session *ChatSession, command string)
 			return commandTextResult("gateway config: auto-connect 取值必须是 on|off\n\n" + gatewayConfigUsageText()), true
 		}
 		result, _ = gatewayConfigApply(session, config.GatewayPreferenceUpdate{AutoConnect: &value}, fmt.Sprintf("auto-connect=%t", value))
+	case gatewayConfigKeyProxyURL:
+		if err := validateGatewayProxyValue(parsed.value); err != nil {
+			return commandTextResult("gateway config: " + err.Error() + "\n\n" + gatewayConfigUsageText()), true
+		}
+		value := parsed.value
+		label := "proxy " + value
+		// off/none = 清除代理恢复直连（必须写空串，而不是原样落盘——
+		// parseProxyURL 会把 "off" 补全成 socks5://off 当主机名）。
+		if strings.EqualFold(value, "off") || strings.EqualFold(value, "none") {
+			value = ""
+			label = "proxy off"
+		}
+		result, _ = gatewayConfigApply(session, config.GatewayPreferenceUpdate{ProxyURL: ptrString(value)}, label)
 	default:
 		return commandTextResult(gatewayConfigUsageText()), true
 	}
@@ -222,6 +239,11 @@ func gatewayConfigApply(session *ChatSession, update config.GatewayPreferenceUpd
 		return commandTextResult("gateway config 已写入 " + configPath +
 			"（" + label + "）\n注意: 环境变量 " + gatewayagent.EnvURL +
 			" 仍然生效并覆盖配置文件中的 url；如需使用配置文件请移除该环境变量。"), true
+	}
+	if envProxy := strings.TrimSpace(os.Getenv(gatewayagent.EnvProxyURL)); envProxy != "" && update.ProxyURL != nil {
+		return commandTextResult("gateway config 已写入 " + configPath +
+			"（" + label + "）\n注意: 环境变量 " + gatewayagent.EnvProxyURL +
+			" 仍然生效并覆盖配置文件中的 proxy_url；如需使用配置文件请移除该环境变量。"), true
 	}
 
 	hotApplied := hotApplyChatGatewayConfig(session)
@@ -295,7 +317,12 @@ func gatewayConfigSummaryText(session *ChatSession) string {
 		fmt.Fprintf(&b, "  name         %s\n", cfg.Name)
 	}
 	fmt.Fprintf(&b, "  auto_connect %t\n", cfg.AutoConnect)
-	b.WriteString("\n修改: /gateway config url|token|name|auto-connect <value>；/gateway config disable 停用并清空。")
+	if cfg.ProxyURL != "" {
+		fmt.Fprintf(&b, "  proxy_url    %s\n", cfg.ProxyURL)
+	} else {
+		b.WriteString("  proxy_url    （未设置，直连）\n")
+	}
+	b.WriteString("\n修改: /gateway config url|token|name|auto-connect|proxy <value>；/gateway config disable 停用并清空。")
 	return b.String()
 }
 
@@ -320,6 +347,11 @@ func gatewayConfigKeyText(session *ChatSession, key gatewayCommandToken) string 
 		return "gateway name: " + cfg.Name
 	case gatewayConfigKeyAutoConnect:
 		return fmt.Sprintf("gateway auto_connect: %t", cfg.AutoConnect)
+	case gatewayConfigKeyProxyURL:
+		if cfg.ProxyURL == "" {
+			return "gateway proxy: （未设置，直连）"
+		}
+		return "gateway proxy: " + cfg.ProxyURL
 	}
 	return gatewayConfigUsageText()
 }
@@ -334,6 +366,8 @@ func gatewayConfigUsageText() string {
 		"  /gateway config name <名称>     写入节点显示名",
 		"  /gateway config auto-connect on|off",
 		"                                  启动自动连接开关",
+		"  /gateway config proxy <socks5://host:port|http://host:port|off>",
+		"                                  经代理隧道连接网关（off=直连）",
 		"  /gateway config disable         清空 url/token 并停用网关（持久化变更）",
 		"写入立即落盘并热应用到当前会话；环境变量 AICLI_GATEWAY_* 优先于配置文件。",
 	}, "\n")
@@ -350,6 +384,32 @@ func validateGatewayURLValue(raw string) error {
 		return fmt.Errorf("url 无效: %v", err)
 	}
 	return nil
+}
+
+// validateGatewayProxyValue checks a proxy specification at config time (the
+// same parsing the dialer performs). "off"/"none" clears the proxy.
+func validateGatewayProxyValue(raw string) error {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fmt.Errorf("proxy 不能为空（清除请使用 /gateway config proxy off）")
+	}
+	if strings.EqualFold(value, "off") || strings.EqualFold(value, "none") {
+		return nil
+	}
+	if !strings.Contains(value, "://") {
+		value = "socks5://" + value
+	}
+	if _, err := url.Parse(value); err != nil {
+		return fmt.Errorf("proxy 无效: %v", err)
+	}
+	switch {
+	case strings.HasPrefix(strings.ToLower(value), "socks5://"),
+		strings.HasPrefix(strings.ToLower(value), "socks5h://"),
+		strings.HasPrefix(strings.ToLower(value), "http://"),
+		strings.HasPrefix(strings.ToLower(value), "https://"):
+		return nil
+	}
+	return fmt.Errorf("proxy scheme 只支持 socks5/http/https（got %q）", value)
 }
 
 // parseGatewayAutoConnectValue maps on/off/true/false to the boolean value.

@@ -38,10 +38,28 @@ func TestGatewayCompletionPrefixFilter(t *testing.T) {
 func TestGatewayCompletionConfigKeys(t *testing.T) {
 	candidates := completeGatewaySlashArgs(nil, "config ", 7)
 	names := completionCommandNames(candidates)
-	for _, want := range []string{"url", "token", "name", "auto-connect", "disable"} {
+	for _, want := range []string{"url", "token", "name", "auto-connect", "proxy", "disable"} {
 		if !containsString(names, want) {
 			t.Fatalf("config completion missing key %q: %v", want, names)
 		}
+	}
+}
+
+func TestGatewayCompletionProxyValues(t *testing.T) {
+	candidates := completeGatewaySlashArgs(nil, "config proxy ", 13)
+	names := completionCommandNames(candidates)
+	if !containsString(names, "off") || !containsString(names, "none") {
+		t.Fatalf("proxy value completion = %v, want off/none candidates", names)
+	}
+	// 等号形式同样给出取值候选。
+	candidates = completeGatewaySlashArgs(nil, "config proxy=", len([]rune("config proxy=")))
+	names = completionCommandNames(candidates)
+	if !containsString(names, "off") {
+		t.Fatalf("proxy= value completion = %v", names)
+	}
+	// 自由文本（socks5 地址）不枚举具体值：按前缀过滤后允许命中前缀提示或关闭弹窗。
+	if candidates := completeGatewaySlashArgs(nil, "config proxy 127.0.0.1:1080", len([]rune("config proxy 127.0.0.1:1080"))); len(candidates) > 2 {
+		t.Fatalf("free-text proxy value must not enumerate a large list: %v", completionCommandNames(candidates))
 	}
 }
 
@@ -84,6 +102,10 @@ func TestParseGatewayConfigArgs(t *testing.T) {
 		{"/gateway config name My Laptop", gatewayConfigKeyName, "My Laptop", true},
 		{"/gateway config auto-connect off", gatewayConfigKeyAutoConnect, "off", true},
 		{"/gateway config auto_connect off", gatewayConfigKeyAutoConnect, "off", true},
+		{"/gateway config proxy socks5://127.0.0.1:1080", gatewayConfigKeyProxyURL, "socks5://127.0.0.1:1080", true},
+		{"/gateway config proxy off", gatewayConfigKeyProxyURL, "off", true},
+		{"/gateway config proxy-url http://127.0.0.1:3128", gatewayConfigKeyProxyURL, "http://127.0.0.1:3128", true},
+		{"/gateway config proxy", gatewayConfigKeyProxyURL, "", false},
 		{"/gateway config disable", gatewayConfigKeyDisable, "", false},
 		{"/gateway config bogus x", "", "", false},
 	}
@@ -204,6 +226,90 @@ func TestGatewayConfigHelpTextListsConfig(t *testing.T) {
 	got := gatewayHelpText()
 	if !strings.Contains(got, "/gateway config") {
 		t.Fatalf("help text missing /gateway config:\n%s", got)
+	}
+}
+
+func TestGatewayConfigProxyWriteAndClear(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("gateway:\n  url: wss://gw.example.com\n  token: agw_secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := &ChatSession{Config: testChatGatewayConfig(configPath)}
+
+	// 写入代理：落盘 + 内存同步。
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/gateway config proxy socks5://127.0.0.1:1080")
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if !strings.Contains(resultText(result), "socks5://127.0.0.1:1080") {
+		t.Fatalf("unexpected result: %s", resultText(result))
+	}
+	if got := session.Config.Gateway.ProxyURL; got != "socks5://127.0.0.1:1080" {
+		t.Fatalf("in-memory proxy_url = %q", got)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(raw); !strings.Contains(text, "proxy_url: socks5://127.0.0.1:1080") {
+		t.Fatalf("proxy_url not persisted:\n%s", text)
+	}
+
+	// 无 scheme 的简写同样合法（拨号器默认 socks5://）。
+	if _, handled, err := tryExecuteStructuredChatCommand(session, "/gateway config proxy 192.168.1.1:7890"); err != nil || !handled {
+		t.Fatalf("shorthand: handled=%v err=%v", handled, err)
+	}
+	if got := session.Config.Gateway.ProxyURL; got != "192.168.1.1:7890" {
+		t.Fatalf("shorthand proxy_url = %q", got)
+	}
+
+	// off 清除代理（空串落盘 = 回到直连）。
+	if _, handled, err := tryExecuteStructuredChatCommand(session, "/gateway config proxy off"); err != nil || !handled {
+		t.Fatalf("off: handled=%v err=%v", handled, err)
+	}
+	if got := session.Config.Gateway.ProxyURL; got != "" {
+		t.Fatalf("proxy off must clear proxy_url, got %q", got)
+	}
+	raw, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(raw); strings.Contains(text, "proxy_url: off") || strings.Contains(text, "proxy_url: socks5") {
+		t.Fatalf("proxy off must not leave a stale value on disk:\n%s", text)
+	}
+
+	// 非法 scheme 在配置时报错。
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/gateway config proxy ftp://x")
+	if err != nil || !handled {
+		t.Fatalf("bad scheme: handled=%v err=%v", handled, err)
+	}
+	if !strings.Contains(resultText(result), "socks5") {
+		t.Fatalf("bad scheme must explain supported schemes: %s", resultText(result))
+	}
+}
+
+func TestGatewayConfigProxySummaryShowsValue(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("gateway:\n  url: wss://gw.example.com\n  token: agw_secret\n  proxy_url: socks5://127.0.0.1:1080\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := &ChatSession{Config: testChatGatewayConfig(configPath)}
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/gateway config")
+	if err != nil || !handled {
+		t.Fatalf("handled=%v err=%v", handled, err)
+	}
+	if !strings.Contains(resultText(result), "socks5://127.0.0.1:1080") {
+		t.Fatalf("summary must show proxy_url: %s", resultText(result))
+	}
+	// 单键查看。
+	result, handled, err = tryExecuteStructuredChatCommand(session, "/gateway config proxy")
+	if err != nil || !handled {
+		t.Fatalf("key view: handled=%v err=%v", handled, err)
+	}
+	if !strings.Contains(resultText(result), "socks5://127.0.0.1:1080") {
+		t.Fatalf("key view must show proxy_url: %s", resultText(result))
 	}
 }
 
