@@ -219,6 +219,10 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		// 逐位补全：二级子命令 → server 名（status/enable/disable/remove/auth 等）
 		// → auth 旗标，见 chat_mcp_completion.go。
 		return completeMCPLineSlashArgs(argsText, cursor)
+	case "/gateway":
+		// 逐位补全：二级子命令 → config <key> → key 取值（on|off 枚举），
+		// 见 chat_gateway_completion.go。
+		return completeGatewaySlashArgs(session, argsText, cursor)
 	case "/web":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "status", Summary: "显示 Web 服务器状态", Group: string(chatSlashCommandGroupWeb)},

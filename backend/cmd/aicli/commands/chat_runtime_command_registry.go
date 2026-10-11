@@ -502,6 +502,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"status":     rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
 			"url":        rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
 			"help":       rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
+			"config":     rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectLive, rtNotice("立即写入持久化配置并热应用（不改会话/turn 上下文）")),
 			"connect":    rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectLive, rtNotice("立即连接网关")),
 			"disconnect": rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectLive, rtNotice("立即断开，抑制自动重连（不改配置）")),
 			"reconnect":  rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectLive, rtNotice("立即重连网关")),

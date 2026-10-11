@@ -22,6 +22,11 @@ func executeStructuredGatewayCommand(session *ChatSession, command string) (Comm
 	}
 	controller := session.Gateway
 	sub := gatewaySubcommand(command)
+	// config 是持久化配置面，必须在 controller==nil 之前处理：它正是"未配置
+	// 时写入配置"的入口（docs/gateway/12-connection-control.md §6.2）。
+	if sub == "config" {
+		return executeStructuredGatewayConfigCommand(session, command)
+	}
 	if controller == nil {
 		return commandTextResult(gatewayNotConfiguredText()), true
 	}
@@ -36,6 +41,10 @@ func executeStructuredGatewayCommand(session *ChatSession, command string) (Comm
 		return gatewayAction(controller, "disconnect", controller.Disconnect), true
 	case "reconnect":
 		return gatewayAction(controller, "reconnect", controller.Reconnect), true
+	case "config":
+		// `/gateway config` 是持久化配置面（docs/gateway/
+		// 12-connection-control.md §6.2）：写 gateway.* 键并热应用。
+		return executeStructuredGatewayConfigCommand(session, command)
 	case "help":
 		return commandTextResult(gatewayHelpText()), true
 	default:
@@ -116,7 +125,10 @@ func formatGatewayURL(st gatewayagent.Status) string {
 // gatewayNotConfiguredText explains how to enable the gateway.
 func gatewayNotConfiguredText() string {
 	return "gateway: 未配置\n\n" +
-		"本会话未接入网关。配置后可用 /gateway connect 手动连接：\n" +
+		"本会话未接入网关。可即时写入配置（无需重启会话）：\n" +
+		"  /gateway config url wss://gw.example.com\n" +
+		"  /gateway config token agw_xxx（网关控制台签发，配置后 /gateway connect 立即连接）\n" +
+		"或以启动参数/环境变量提供：\n" +
 		"  --gateway <wss://gw.example.com> --gateway-token <agw_...>\n" +
 		"  或配置 gateway.enabled/url/token（见 docs/gateway/12-connection-control.md）\n\n" +
 		gatewayHelpText()
@@ -131,6 +143,7 @@ func gatewayHelpText() string {
 		"/gateway disconnect 手动断开（抑制自动重连，不改配置）",
 		"/gateway reconnect  断开后立即重连",
 		"/gateway url        显示网关注册/控制台地址",
+		"/gateway config     查看/写入持久化配置（url/token/name/auto-connect/disable）",
 		"/gateway help       显示本帮助",
 	}, "\n")
 }
