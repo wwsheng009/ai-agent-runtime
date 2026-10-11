@@ -78,9 +78,18 @@ func (s *Service) Create(sessionID string, req CreateRequest) (Record, error) {
 	if req.EverySeconds != nil {
 		selectors++
 	}
+	if req.Daily != nil {
+		selectors++
+	}
+	if req.Weekly != nil {
+		selectors++
+	}
+	if req.Cron != nil {
+		selectors++
+	}
 	if selectors != 1 {
 		return Record{}, inputError(CodeInvalidSelector,
-			"exactly one of after_seconds, at, every_seconds is required.")
+			"exactly one of after_seconds, at, every_seconds, daily, weekly, cron is required.")
 	}
 	id := NewID()
 	now := s.clock()
@@ -95,6 +104,12 @@ func (s *Service) Create(sessionID string, req CreateRequest) (Record, error) {
 		record, err = CreateAt(id, req.Prompt, req.Title, *req.At, now)
 	case req.EverySeconds != nil:
 		record, err = CreateEvery(id, req.Prompt, req.Title, *req.EverySeconds, now)
+	case req.Daily != nil:
+		record, err = CreateDaily(id, req.Prompt, req.Title, *req.Daily, now)
+	case req.Weekly != nil:
+		record, err = CreateWeekly(id, req.Prompt, req.Title, *req.Weekly, now)
+	case req.Cron != nil:
+		err = inputError(CodeInvalidRule, "cron reminders are not enabled in this build.")
 	}
 	if err != nil {
 		return Record{}, err
@@ -262,9 +277,45 @@ func applyTimingChange(current Record, prompt, title string, change *TimingChang
 			return withContent(current, title, prompt), nil
 		}
 		return CreateEvery(current.ID, prompt, title, *change.EverySeconds, now)
+	case KindDaily:
+		if change.Daily == nil {
+			return Record{}, inputError(CodeInvalidRule, "daily timing change requires daily.")
+		}
+		created, err := CreateDaily(current.ID, prompt, title, *change.Daily, now)
+		if err != nil {
+			return Record{}, err
+		}
+		if current.Kind == KindDaily && created.Time == current.Time && created.TimeZone == current.TimeZone {
+			return withContent(current, title, prompt), nil
+		}
+		return created, nil
+	case KindWeekly:
+		if change.Weekly == nil {
+			return Record{}, inputError(CodeInvalidRule, "weekly timing change requires weekly.")
+		}
+		created, err := CreateWeekly(current.ID, prompt, title, *change.Weekly, now)
+		if err != nil {
+			return Record{}, err
+		}
+		if current.Kind == KindWeekly && created.Time == current.Time && created.TimeZone == current.TimeZone && intSlicesEqual(created.Weekdays, current.Weekdays) {
+			return withContent(current, title, prompt), nil
+		}
+		return created, nil
 	default:
 		return Record{}, inputError(CodeInvalidRule, "unsupported timing change kind %q", change.Kind)
 	}
+}
+
+func intSlicesEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func withContent(current Record, title, prompt string) Record {

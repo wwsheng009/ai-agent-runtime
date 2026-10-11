@@ -43,6 +43,23 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 						"type":        "integer",
 						"description": fmt.Sprintf("Fixed-rate interval in whole seconds, at least %d, aligned to the creation time.", schedule.MinEveryIntervalSeconds),
 					},
+					"daily": map[string]interface{}{
+						"type":        "object",
+						"description": "Every day at a local time in an explicit IANA zone.",
+						"properties": map[string]interface{}{
+							"time":      map[string]interface{}{"type": "string", "description": "HH:mm:ss with optional 1-3 fractional digits."},
+							"time_zone": map[string]interface{}{"type": "string", "description": "Explicit IANA Area/Location, for example Asia/Shanghai."},
+						},
+					},
+					"weekly": map[string]interface{}{
+						"type":        "object",
+						"description": "On the given ISO weekdays at a local time in an explicit IANA zone.",
+						"properties": map[string]interface{}{
+							"time":      map[string]interface{}{"type": "string", "description": "HH:mm:ss with optional 1-3 fractional digits."},
+							"time_zone": map[string]interface{}{"type": "string", "description": "Explicit IANA Area/Location."},
+							"weekdays":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}, "description": "ISO weekdays 1..7 (Monday..Sunday), unique."},
+						},
+					},
 				},
 				"required": []string{"prompt", "title"},
 			},
@@ -78,6 +95,23 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 					"every_seconds": map[string]interface{}{
 						"type":        "integer",
 						"description": fmt.Sprintf("New fixed-rate interval in whole seconds, at least %d.", schedule.MinEveryIntervalSeconds),
+					},
+					"daily": map[string]interface{}{
+						"type":        "object",
+						"description": "New daily local time in an explicit IANA zone.",
+						"properties": map[string]interface{}{
+							"time":      map[string]interface{}{"type": "string"},
+							"time_zone": map[string]interface{}{"type": "string"},
+						},
+					},
+					"weekly": map[string]interface{}{
+						"type":        "object",
+						"description": "New weekly local time and ISO weekday set.",
+						"properties": map[string]interface{}{
+							"time":      map[string]interface{}{"type": "string"},
+							"time_zone": map[string]interface{}{"type": "string"},
+							"weekdays":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}},
+						},
 					},
 				},
 				"required": []string{"id"},
@@ -136,6 +170,12 @@ func (b *Broker) executeScheduleCreate(sessionID string, args map[string]interfa
 	} else if ok {
 		req.EverySeconds = &value
 	}
+	if daily, ok := dailyArg(args); ok {
+		req.Daily = daily
+	}
+	if weekly, ok := weeklyArg(args); ok {
+		req.Weekly = weekly
+	}
 	record, err := b.Schedule.Create(sessionID, req)
 	if err != nil {
 		return scheduleFailure(err), nil, nil
@@ -188,6 +228,18 @@ func (b *Broker) executeScheduleUpdate(sessionID string, args map[string]interfa
 		}
 		change = &schedule.TimingChange{Kind: schedule.KindEvery, EverySeconds: &value}
 	}
+	if daily, ok := dailyArg(args); ok {
+		if change != nil {
+			return scheduleError(schedule.CodeInvalidSelector, "at most one timing parameter is allowed."), nil, nil
+		}
+		change = &schedule.TimingChange{Kind: schedule.KindDaily, Daily: daily}
+	}
+	if weekly, ok := weeklyArg(args); ok {
+		if change != nil {
+			return scheduleError(schedule.CodeInvalidSelector, "at most one timing parameter is allowed."), nil, nil
+		}
+		change = &schedule.TimingChange{Kind: schedule.KindWeekly, Weekly: weekly}
+	}
 	result, err := b.Schedule.Update(sessionID, id, expected, content, change)
 	if err != nil {
 		return scheduleFailure(err), nil, nil
@@ -238,6 +290,35 @@ func stringArg(args map[string]interface{}, key string) string {
 		return value
 	}
 	return ""
+}
+
+// dailyArg 解析 daily 对象参数（{time, time_zone}）。
+func dailyArg(args map[string]interface{}) (*schedule.DailyInput, bool) {
+	raw, ok := args["daily"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	return &schedule.DailyInput{Time: stringArg(raw, "time"), TimeZone: stringArg(raw, "time_zone")}, true
+}
+
+// weeklyArg 解析 weekly 对象参数（{time, time_zone, weekdays}）。
+func weeklyArg(args map[string]interface{}) (*schedule.WeeklyInput, bool) {
+	raw, ok := args["weekly"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	input := &schedule.WeeklyInput{Time: stringArg(raw, "time"), TimeZone: stringArg(raw, "time_zone")}
+	if list, ok := raw["weekdays"].([]interface{}); ok {
+		for _, item := range list {
+			switch value := item.(type) {
+			case float64:
+				input.Weekdays = append(input.Weekdays, int(value))
+			case int:
+				input.Weekdays = append(input.Weekdays, value)
+			}
+		}
+	}
+	return input, true
 }
 
 // int64Arg 读取一个 JSON number 的整数参数；非整数返回错误。

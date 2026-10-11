@@ -129,6 +129,10 @@ func ResolveOccurrence(rec Record, acceptedAt time.Time) (Occurrence, error) {
 		occurrence := target.Add(steps * interval)
 		next := occurrence.Add(interval)
 		return Occurrence{OccurrenceAt: occurrence, NextScheduledAt: &next}, nil
+	case KindDaily:
+		return resolveDailyOccurrence(rec, accepted)
+	case KindWeekly:
+		return resolveWeeklyOccurrence(rec, accepted)
 	default:
 		return Occurrence{}, inputError(CodeInvalidRule, "unsupported reminder kind %q", rec.Kind)
 	}
@@ -184,8 +188,18 @@ func ValidateRecord(rec Record) error {
 		if rec.EverySeconds < MinEveryIntervalSeconds {
 			return logError("record %s every_seconds must be at least %d", rec.ID, MinEveryIntervalSeconds)
 		}
-	case KindDaily, KindWeekly, KindCron:
-		// P1 落地；P0 不会写入这些 kind。
+	case KindDaily:
+		if strings.TrimSpace(rec.Time) == "" || strings.TrimSpace(rec.TimeZone) == "" {
+			return logError("record %s daily rule needs time and timeZone", rec.ID)
+		}
+	case KindWeekly:
+		if strings.TrimSpace(rec.Time) == "" || strings.TrimSpace(rec.TimeZone) == "" {
+			return logError("record %s weekly rule needs time and timeZone", rec.ID)
+		}
+		if _, err := NormalizeWeekdays(rec.Weekdays); err != nil {
+			return logError("record %s has an invalid weekday set", rec.ID)
+		}
+	case KindCron:
 		return logError("record %s uses kind %q which is not enabled in this build", rec.ID, rec.Kind)
 	default:
 		return logError("record %s has unknown kind %q", rec.ID, rec.Kind)

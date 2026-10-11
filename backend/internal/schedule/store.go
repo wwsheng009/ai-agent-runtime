@@ -3,6 +3,7 @@ package schedule
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -174,6 +175,7 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	task.Record.Time = localTime.String
 	task.Record.TimeZone = timeZone.String
 	task.Record.Expression = expression.String
+	task.Record.Weekdays = decodeWeekdays(weekdaysRaw)
 	task.Status = Status(status)
 	task.StateVersion = version
 	if lastSched.Valid && lastDeliv.Valid && lastMsgID.Valid {
@@ -244,9 +246,33 @@ func recordArgs(task Task) []any {
 	return []any{
 		task.Record.ID, task.SessionID, string(task.Record.Kind), task.Record.Title, task.Record.Prompt,
 		formatInstant(task.Record.ScheduledAt), nullableInt(task.Record.AfterSeconds), nullableInt(task.Record.EverySeconds),
-		nullableString(task.Record.Time), nullableString(task.Record.TimeZone), nullableString(""), nullableString(task.Record.Expression),
+		nullableString(task.Record.Time), nullableString(task.Record.TimeZone), encodeWeekdays(task.Record.Weekdays), nullableString(task.Record.Expression),
 		string(task.Status),
 	}
+}
+
+// encodeWeekdays 把星期集合编码为 JSON 文本（空集合存 NULL）。
+func encodeWeekdays(days []int) any {
+	if len(days) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(days)
+	if err != nil {
+		return nil
+	}
+	return string(encoded)
+}
+
+// decodeWeekdays 解码已存储的星期集合；损坏返回 nil（由 ValidateRecord 兜底）。
+func decodeWeekdays(raw sql.NullString) []int {
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return nil
+	}
+	var days []int
+	if err := json.Unmarshal([]byte(raw.String), &days); err != nil {
+		return nil
+	}
+	return days
 }
 
 func nullableInt(value int64) any {
@@ -282,13 +308,13 @@ func (s *SQLiteStore) UpdateCAS(task Task, expectedVersion int64) (bool, error) 
 	res, err := s.db.ExecContext(context.Background(), `
 UPDATE schedule_tasks SET
     session_id = ?, kind = ?, title = ?, prompt = ?, scheduled_at = ?,
-    after_seconds = ?, every_seconds = ?, local_time = ?, time_zone = ?, expression = ?,
+    after_seconds = ?, every_seconds = ?, local_time = ?, time_zone = ?, weekdays_json = ?, expression = ?,
     status = ?, last_scheduled_at = ?, last_delivered_at = ?, last_message_id = ?,
     state_version = state_version + 1, updated_at = ?
 WHERE id = ? AND state_version = ?`,
 		task.SessionID, string(task.Record.Kind), task.Record.Title, task.Record.Prompt, formatInstant(task.Record.ScheduledAt),
 		nullableInt(task.Record.AfterSeconds), nullableInt(task.Record.EverySeconds), nullableString(task.Record.Time),
-		nullableString(task.Record.TimeZone), nullableString(task.Record.Expression),
+		nullableString(task.Record.TimeZone), encodeWeekdays(task.Record.Weekdays), nullableString(task.Record.Expression),
 		string(task.Status), lastScheduled(task), lastDelivered(task), lastMessageID(task),
 		now, task.Record.ID, expectedVersion)
 	if err != nil {

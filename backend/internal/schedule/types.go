@@ -120,6 +120,30 @@ type CreateRequest struct {
 	AfterSeconds *int64
 	At           *string
 	EverySeconds *int64
+	Daily        *DailyInput
+	Weekly       *WeeklyInput
+	Cron         *CronInput
+}
+
+// DailyInput 是每日本地钟表时间选择器。
+type DailyInput struct {
+	// Time 是 HH:mm:ss 及可选 1-3 位小数秒。
+	Time string `json:"time"`
+	// TimeZone 是显式 IANA/UTC 时区。
+	TimeZone string `json:"time_zone"`
+}
+
+// WeeklyInput 是每周本地钟表时间 + ISO 星期集合选择器。
+type WeeklyInput struct {
+	Time     string `json:"time"`
+	TimeZone string `json:"time_zone"`
+	Weekdays []int  `json:"weekdays"`
+}
+
+// CronInput 是五字段 Vixie 表达式 + 显式时区选择器。
+type CronInput struct {
+	Expression string `json:"expression"`
+	TimeZone   string `json:"time_zone"`
 }
 
 // UpdateContent 是可选的名称/指令替换。
@@ -133,4 +157,7 @@ type TimingChange struct {
 	Kind         Kind
 	At           *string
 	EverySeconds *int64
+	Daily        *DailyInput
+	Weekly       *WeeklyInput
+	Cron         *CronInput
 }
