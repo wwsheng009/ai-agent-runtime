@@ -254,7 +254,7 @@
       card.className = "session-card" + (node.stale ? " offline" : "") + (s.attention ? " att-" + s.attention : "");
       card.innerHTML =
         '<div class="s-title"><span class="dot ' + (node.stale ? "offline" : "live") + '"></span><span class="s-name"></span></div>' +
-        '<span class="attention" hidden></span><span class="s-time"></span>' +
+        '<span class="att-badge s-badge" hidden></span><span class="s-time"></span>' +
         '<div class="s-node"></div>' +
         (s.preview ? '<div class="s-preview"></div>' : "") +
         '<div class="s-actions"><button class="btn ghost sm" data-open>打开</button>' +
@@ -264,9 +264,9 @@
       card.querySelector(".s-node").textContent =
         (node.name || node.node_id) + " · " + (node.kind || "agent");
       if (s.attention) {
-        var b = card.querySelector(".attention");
+        var b = card.querySelector(".s-badge");
         b.textContent = attentionLabel(s.attention);
-        b.className = "attention att-" + s.attention;
+        b.className = "att-badge s-badge att-" + s.attention;
         b.hidden = false;
       }
       var t = card.querySelector(".s-time");
@@ -311,13 +311,13 @@
       var row = document.createElement("div");
       row.className = "card";
       row.innerHTML =
-        '<div class="card-head"><span class="card-title"></span><span class="attention" hidden></span></div>' +
+        '<div class="card-head"><span class="card-title"></span><span class="att-badge" hidden></span></div>' +
         '<div class="card-meta"></div>';
       row.querySelector(".card-title").textContent =
         (item.node.name || item.node.node_id) + " · " + sessionLabelOf(item.session);
-      var b = row.querySelector(".attention");
+      var b = row.querySelector(".att-badge");
       b.textContent = attentionLabel(item.session.attention);
-      b.className = "attention att-" + item.session.attention;
+      b.className = "att-badge att-" + item.session.attention;
       b.hidden = false;
       row.querySelector(".card-meta").textContent = item.node.node_id;
       row.addEventListener("click", function () { openSession(item.node, item.session); });
@@ -334,6 +334,7 @@
     card.innerHTML =
       '<div class="card-head"><span class="card-title"></span><span class="badge"></span></div>' +
       '<div class="card-meta"></div>' +
+      '<div class="node-sessions"></div>' +
       '<div class="card-actions"></div>';
     card.querySelector(".card-title").innerHTML =
       '<span class="dot ' + (node.stale ? "offline" : "live") + '"></span>' +
@@ -342,6 +343,9 @@
       (node.kind || "agent") + " · 会话 " + sessions.length;
     card.querySelector(".card-meta").textContent = node.node_id;
 
+    // Session rows live in their own divider list; .card-actions stays
+    // button-only so the two never share a flex row.
+    var sessionsHost = card.querySelector(".node-sessions");
     var actions = card.querySelector(".card-actions");
     if (sessions.length) {
       sessions.slice(0, 3).forEach(function (session) {
@@ -349,17 +353,17 @@
         row.className = "session-row";
         row.innerHTML =
           '<div class="session-info"><span class="session-title"></span><div class="session-preview" hidden></div></div>' +
-          '<span class="attention" hidden></span><button class="btn ghost sm" type="button">打开</button>';
+          '<span class="att-badge" hidden></span><button class="btn ghost sm" type="button">打开</button>';
         row.querySelector(".session-title").textContent = sessionLabelOf(session);
         var p = row.querySelector(".session-preview");
         if (session.preview) {
           p.textContent = session.preview;
           p.hidden = false;
         }
-        var b = row.querySelector(".attention");
+        var b = row.querySelector(".att-badge");
         if (session.attention) {
           b.textContent = attentionLabel(session.attention);
-          b.className = "attention att-" + session.attention;
+          b.className = "att-badge att-" + session.attention;
         } else {
           b.hidden = true;
         }
@@ -367,7 +371,7 @@
           e.stopPropagation();
           openSession(node, session);
         });
-        actions.appendChild(row);
+        sessionsHost.appendChild(row);
       });
       if (sessions.length > 3) {
         var more = document.createElement("button");
@@ -683,7 +687,10 @@
     return out;
   }
 
-  function setPushLabel(text) { el("push-toggle").textContent = text; }
+  function setPushLabel(text) {
+    var label = el("push-toggle-label");
+    if (label) { label.textContent = text; }
+  }
 
   function pushSupported() {
     return "serviceWorker" in navigator && "PushManager" in window;
@@ -696,7 +703,7 @@
         pushRegistration = reg;
         return reg.pushManager.getSubscription();
       })
-      .then(function (sub) { setPushLabel(sub ? "🔔 关闭通知" : "🔔 开启通知"); })
+      .then(function (sub) { setPushLabel(sub ? "关闭通知" : "开启通知"); })
       .catch(function () {});
   }
 
@@ -734,7 +741,7 @@
         }),
       }).then(function (r) {
         if (!r.res.ok) { throw new Error("网关订阅失败（HTTP " + r.res.status + "）"); }
-        setPushLabel("🔔 关闭通知");
+        setPushLabel("关闭通知");
       });
     });
   }
@@ -750,7 +757,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ endpoint: endpoint }),
         });
-      }).then(function () { setPushLabel("🔔 开启通知"); });
+      }).then(function () { setPushLabel("开启通知"); });
     });
   }
 
@@ -764,12 +771,11 @@
     } else {
       document.documentElement.removeAttribute("data-theme");
     }
+    var label = theme === "light" ? "亮色" : theme === "dark" ? "暗色" : "跟随系统";
+    var labelEl = el("theme-label");
+    if (labelEl) { labelEl.textContent = label; }
     var btn = el("theme-toggle");
-    if (btn) {
-      var label = theme === "light" ? "☀ 亮色" : theme === "dark" ? "🌙 暗色" : "🌗 跟随系统";
-      btn.textContent = label;
-      btn.title = "当前：" + label.replace(/^\S+\s/, "") + "（点击切换）";
-    }
+    if (btn) { btn.title = "当前：" + label + "（点击切换）"; }
   }
 
   function cycleTheme() {
@@ -824,17 +830,17 @@
   var pushBusy = false;
   el("push-toggle").addEventListener("click", function () {
     if (pushBusy) { return; }
-    var enabling = el("push-toggle").textContent.indexOf("开启") !== -1;
+    var enabling = el("push-toggle-label").textContent.indexOf("开启") !== -1;
     pushBusy = true;
+    setPushLabel(enabling ? "开启中…" : "关闭中…");
     var btn = el("push-toggle");
-    btn.textContent = "⏳ " + (enabling ? "开启中…" : "关闭中…");
     btn.disabled = true;
     Promise.resolve(enabling ? enablePush() : disablePush())
       .then(function () {
         notify(enabling ? "已开启通知" : "已关闭通知", "ok");
       })
       .catch(function (err) {
-        setPushLabel(enabling ? "🔔 开启通知" : "🔔 关闭通知");
+        setPushLabel(enabling ? "开启通知" : "关闭通知");
         notify("通知操作失败：" + (err && err.message ? err.message : "请检查浏览器通知权限"), "error");
       })
       .finally(function () {
@@ -908,6 +914,11 @@
       var tokenEl = el("device-token");
       if (r.body && r.body.token) {
         tokenEl.innerHTML = "";
+        var hint = document.createElement("div");
+        hint.className = "token-hint";
+        hint.textContent = "完整令牌仅显示这一次，关闭后将无法再次查看（只能撤销重建）——请立即复制保存：";
+        var row = document.createElement("div");
+        row.className = "token-row";
         var strong = document.createElement("strong");
         strong.textContent = r.body.token;
         var copy = document.createElement("button");
@@ -928,11 +939,10 @@
             done();
           }
         });
-        var hint = document.createElement("div");
-        hint.textContent = "完整令牌仅显示这一次，关闭后将无法再次查看（只能撤销重建）——请立即复制保存：";
+        row.appendChild(strong);
+        row.appendChild(copy);
         tokenEl.appendChild(hint);
-        tokenEl.appendChild(strong);
-        tokenEl.appendChild(copy);
+        tokenEl.appendChild(row);
         var note = document.createElement("div");
         note.className = "token-note";
         note.textContent = "列表中只会显示 8 位标识（" + r.body.device.prefix + "），用于辨认；完整令牌不会再次出现。";
