@@ -4,56 +4,94 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>aicli-gateway 控制台</title>
-<meta name="theme-color" content="#0f1115">
+<meta name="theme-color" content="#0b0e14">
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-<header>
-  <h1>aicli-gateway</h1>
-  <div class="header-actions">
-    <button id="push-toggle" type="button" hidden>开启通知</button>
-    <button id="logout" type="button" hidden>退出</button>
+<header class="topbar">
+  <div class="topbar-brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div class="brand-text">
+      <h1>aicli-gateway</h1>
+      <span class="brand-sub">会话网关控制台</span>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <button id="push-toggle" type="button" class="btn ghost" hidden>开启通知</button>
+    <button id="logout" type="button" class="btn ghost" hidden>退出</button>
   </div>
 </header>
-<main>
-  <section id="login" hidden>
+
+<main class="shell">
+
+  <!-- Owner 登录 -->
+  <section id="login" class="login-card" hidden>
     <h2>Owner 登录</h2>
+    <p class="login-hint">输入网关启动时设置的 owner 密码以管理节点、会话与通知。</p>
     <form id="login-form">
       <input id="password" type="password" placeholder="Owner 密码" autocomplete="current-password">
-      <button type="submit">登录</button>
+      <button type="submit" class="btn primary">登录</button>
     </form>
     <p id="login-error" class="error" hidden></p>
   </section>
 
-  <section id="inbox" hidden>
-    <div class="section-head">
-      <h2>待处理 <span id="inbox-count" class="badge"></span></h2>
-    </div>
-    <div id="inbox-list" class="list"></div>
-  </section>
+  <div id="app" class="dashboard" hidden>
 
-  <section id="nodes" hidden>
-    <div class="section-head">
-      <h2>设备与会话</h2>
-      <button id="refresh-nodes" type="button">刷新</button>
-    </div>
-    <div id="node-list" class="list"></div>
-  </section>
+    <!-- 概览统计 -->
+    <section class="stats" aria-label="概览">
+      <div class="stat">
+        <span class="stat-num" id="stat-online">0</span>
+        <span class="stat-label">在线节点</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num" id="stat-offline">0</span>
+        <span class="stat-label">离线快照</span>
+      </div>
+      <div class="stat">
+        <span class="stat-num" id="stat-sessions">0</span>
+        <span class="stat-label">活跃会话</span>
+      </div>
+      <div class="stat attention">
+        <span class="stat-num" id="stat-attention">0</span>
+        <span class="stat-label">待处理</span>
+      </div>
+    </section>
 
-  <section id="devices" hidden>
-    <div class="section-head">
-      <h2>设备令牌</h2>
-      <button id="refresh-devices" type="button">刷新</button>
-    </div>
-    <div id="device-list" class="list"></div>
-    <form id="device-form">
-      <input id="device-name" placeholder="设备名称">
-      <button type="submit">签发令牌</button>
-    </form>
-    <p id="device-token" class="token" hidden></p>
-  </section>
+    <!-- 待处理收件箱 -->
+    <section id="inbox" class="panel inbox">
+      <div class="panel-head">
+        <h2>待处理</h2>
+        <span id="inbox-count" class="pill attention-pill"></span>
+      </div>
+      <div id="inbox-list" class="list"></div>
+    </section>
+
+    <!-- 节点与会话 -->
+    <section id="nodes" class="panel">
+      <div class="panel-head">
+        <h2>节点与会话</h2>
+        <button id="refresh-nodes" type="button" class="btn ghost sm">刷新</button>
+      </div>
+      <div id="node-list" class="list"></div>
+    </section>
+
+    <!-- 设备令牌 -->
+    <section id="devices" class="panel">
+      <div class="panel-head">
+        <h2>设备令牌</h2>
+        <button id="refresh-devices" type="button" class="btn ghost sm">刷新</button>
+      </div>
+      <div id="device-list" class="list"></div>
+      <form id="device-form" class="inline-form">
+        <input id="device-name" placeholder="设备名称（如 vince-laptop）">
+        <button type="submit" class="btn primary sm">签发令牌</button>
+      </form>
+      <p id="device-token" class="token" hidden></p>
+    </section>
+
+  </div>
 </main>
 <script src="./app.js"></script>
 </body>

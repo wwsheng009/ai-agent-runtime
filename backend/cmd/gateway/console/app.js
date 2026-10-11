@@ -5,9 +5,7 @@
 
   function setAuthed(authed) {
     el("login").hidden = authed;
-    el("inbox").hidden = !authed;
-    el("nodes").hidden = !authed;
-    el("devices").hidden = !authed;
+    el("app").hidden = !authed;
     el("push-toggle").hidden = !authed;
     el("logout").hidden = !authed;
   }
@@ -143,7 +141,7 @@
     if (count) { count.textContent = items.length ? String(items.length) : ""; }
     list.innerHTML = "";
     if (!items.length) {
-      list.innerHTML = '<p class="badge">暂无待处理会话。</p>';
+      list.innerHTML = '<p class="empty">暂无待处理会话。</p>';
       return;
     }
     items.forEach(function (item) {
@@ -208,32 +206,52 @@
     setTimeout(function () { toast.remove(); }, 8000);
   }
 
+  function updateStats(nodes) {
+    var live = 0, offline = 0, sessions = 0;
+    (nodes || []).forEach(function (node) {
+      if (node.stale) { offline++; } else { live++; }
+      (node.sessions || []).forEach(function (session) {
+        if (session.attention && !node.stale && !readAttention[attentionKey(node, session)]) { sessions++; }
+      });
+    });
+    // Active sessions = live node session rows (snapshot rows are history).
+    var active = 0;
+    (nodes || []).forEach(function (node) {
+      if (!node.stale) { active += (node.sessions || []).length; }
+    });
+    var attention = inboxItems(nodes).length;
+    el("stat-online").textContent = String(live);
+    el("stat-offline").textContent = String(offline);
+    el("stat-sessions").textContent = String(active);
+    el("stat-attention").textContent = String(attention);
+  }
+
   function renderNodes(nodes) {
     lastNodes = nodes || [];
     trackAttention(lastNodes);
     renderInbox(lastNodes);
+    updateStats(lastNodes);
     var list = el("node-list");
     list.innerHTML = "";
     if (!nodes.length) {
-      list.innerHTML = '<p class="badge">暂无已注册设备。</p>';
+      list.innerHTML = '<p class="empty">暂无已注册设备 —— 在 aicli / runtime-server 配置 gateway.url 后会自动出现在这里。</p>';
       return;
     }
     nodes.forEach(function (node) {
       var sessions = node.sessions || [];
       var card = document.createElement("div");
-      card.className = "card";
+      card.className = "card" + (node.stale ? " offline" : "");
       card.innerHTML =
         '<div class="card-head"><span class="card-title"></span><span class="badge"></span></div>' +
         '<div class="card-meta"></div>' +
         '<div class="card-actions"></div>';
-      card.querySelector(".card-title").textContent = node.name || node.device_name || node.node_id;
-      // Stale = restored from the registry snapshot; the agent is not connected.
+      var title = card.querySelector(".card-title");
+      title.innerHTML =
+        '<span class="dot ' + (node.stale ? "offline" : "live") + '"></span>' +
+        (node.name || node.device_name || node.node_id);
       card.querySelector(".badge").textContent =
-        (node.kind || "agent") + " · 会话 " + sessions.length + (node.stale ? " · 离线（快照）" : "");
+        (node.kind || "agent") + " · 会话 " + sessions.length;
       card.querySelector(".card-meta").textContent = node.node_id;
-      if (node.stale) {
-        card.style.opacity = "0.55";
-      }
       var actions = card.querySelector(".card-actions");
 
       if (sessions.length) {
@@ -242,7 +260,7 @@
           row.className = "session-row";
           row.innerHTML =
             '<div class="session-info"><span class="session-title"></span><div class="session-preview" hidden></div></div>' +
-            '<span class="attention" hidden></span><button class="secondary" type="button">打开</button>';
+            '<span class="attention" hidden></span><span class="session-time"></span><button class="btn ghost sm" type="button">打开</button>';
           var preview = row.querySelector(".session-preview");
           var bits = [];
           if (session.preview) { bits.push(session.preview); }
@@ -260,7 +278,15 @@
           if (session.attention) {
             var badge = row.querySelector(".attention");
             badge.textContent = attentionLabel(session.attention);
+            badge.className = "attention att-" + session.attention;
             badge.hidden = false;
+          }
+          var timeChip = row.querySelector(".session-time");
+          if (timeChip && session.updated_at) {
+            var td = new Date(session.updated_at);
+            if (!isNaN(td.getTime())) {
+              timeChip.textContent = td.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            }
           }
           row.querySelector("button").addEventListener("click", function () {
             openSession(node, session);
@@ -269,7 +295,7 @@
         });
       } else {
         var open = document.createElement("button");
-        open.className = "secondary";
+        open.className = "btn ghost sm";
         open.type = "button";
         open.textContent = "打开";
         open.addEventListener("click", function () {
