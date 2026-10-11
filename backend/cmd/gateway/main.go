@@ -8,16 +8,27 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/device"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ratelimit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 )
+
+// gatewayMetrics holds simple process counters exposed at /api/metrics.
+type gatewayMetrics struct {
+	requests    atomic.Int64
+	rateLimited atomic.Int64
+	proxy       atomic.Int64
+}
 
 func main() {
 	os.Exit(run())
@@ -34,6 +45,7 @@ func run() int {
 		tlsKey        = flag.String("tls-key", "", "TLS key file (requires --tls-cert)")
 		ownerPassword = flag.String("owner-password", "", "owner login password (empty disables auth — dev only)")
 		sessionTTL    = flag.Duration("session-ttl", auth.DefaultTTL, "owner session lifetime")
+		rateLimit     = flag.Int("rate-limit", 0, "per-IP requests per minute for the proxy and tunnel upgrade; 0 disables")
 	)
 	flag.Parse()
 
@@ -52,6 +64,23 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "gateway: WARNING: --owner-password not set; console/API/proxy are UNPROTECTED (dev only)")
 	}
 
+	var metrics gatewayMetrics
+	limiter := ratelimit.New(*rateLimit, time.Minute)
+	limited := func(next http.Handler) http.Handler {
+		if *rateLimit <= 0 {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ok, retry := limiter.Allow(ratelimit.ClientIP(r)); !ok {
+				metrics.rateLimited.Add(1)
+				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
 	registry := tunnel.NewRegistry()
 	devices := device.NewStore()
 	server := tunnel.NewServer(tunnel.Config{
@@ -66,7 +95,7 @@ func run() int {
 	})
 
 	router := mux.NewRouter()
-	router.Handle("/gw/agent", server)
+	router.Handle("/gw/agent", limited(server))
 	router.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "nodes": registry.Count()})
 	})
@@ -131,21 +160,34 @@ func run() int {
 	router.Handle("/api/nodes", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": registry.List()})
 	}))).Methods(http.MethodGet)
+	router.Handle("/api/metrics", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"requests_total":       metrics.requests.Load(),
+			"rate_limited_total":   metrics.rateLimited.Load(),
+			"proxy_requests_total": metrics.proxy.Load(),
+			"nodes":                registry.Count(),
+			"devices":              devices.Count(),
+		})
+	}))).Methods(http.MethodGet)
 	// Reverse proxy: /n/{node_id}/... → the node's local service.
-	router.PathPrefix("/n/{node_id}/").Handler(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	router.PathPrefix("/n/{node_id}/").Handler(limited(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metrics.proxy.Add(1)
 		nodeID := mux.Vars(r)["node_id"]
 		path := strings.TrimPrefix(r.URL.Path, "/n/"+nodeID)
 		if path == "" {
 			path = "/"
 		}
 		server.ServeProxy(w, r, nodeID, path)
-	})))
+	}))))
 	// Lightweight embedded console (registered last so specific routes win).
 	router.PathPrefix("/").Handler(consoleHandler())
 
 	httpServer := &http.Server{
-		Addr:              *listen,
-		Handler:           router,
+		Addr: *listen,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			metrics.requests.Add(1)
+			router.ServeHTTP(w, r)
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
