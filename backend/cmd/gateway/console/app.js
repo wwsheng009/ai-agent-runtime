@@ -529,13 +529,17 @@
       card.querySelector(".card-title").textContent = d.name || d.id;
       card.querySelector(".badge").textContent = d.revoked ? "已撤销" : "有效";
       var prefixEl = card.querySelector(".device-prefix");
-      prefixEl.textContent = d.prefix + "…";
+      // The API only exposes the 8-char identifier (the full token is hashed at
+      // rest and shown once at issue time), so render it as the complete id.
+      prefixEl.textContent = d.prefix;
+      prefixEl.title = "令牌标识（完整令牌仅在签发时显示一次）";
       if (d.revoked) { prefixEl.style.textDecoration = "line-through"; }
       var meta = card.querySelector(".card-meta");
       meta.textContent = "id " + d.id + " · 签发于 " +
         (d.created_at ? new Date(d.created_at).toLocaleString() : "—") +
         (d.last_used && d.last_used.indexOf("0001") === -1
           ? " · 最近使用 " + new Date(d.last_used).toLocaleString() : "");
+      card.querySelector("[data-copy]").title = "复制令牌标识";
       card.querySelector("[data-copy]").addEventListener("click", function () {
         var done = function () { this.textContent = "已复制 ✓"; }.bind(this);
         if (navigator.clipboard && navigator.clipboard.writeText) {

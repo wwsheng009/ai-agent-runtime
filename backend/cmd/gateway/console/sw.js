@@ -1,7 +1,7 @@
 // Service worker for the aicli-gateway console (docs/gateway/07-console.md).
 // Caches the app shell so the console opens instantly; API, tunnel and proxy
 // traffic is never cached (data must stay live).
-const CACHE = "aicli-gateway-shell-v11";
+const CACHE = "aicli-gateway-shell-v12";
 const SHELL = ["./", "./index.html", "./app.js", "./style.css", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {

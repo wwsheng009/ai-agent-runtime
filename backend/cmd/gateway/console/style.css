@@ -282,7 +282,7 @@ a.stat:hover { border-color: var(--accent); transform: translateY(-1px); }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .card-title { font-weight: 600; font-size: 13.5px; }
 .card-meta { color: var(--fg-faint); font-size: 12px; margin-top: 3px; word-break: break-all; }
-.card-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.card-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 .card.offline { opacity: 0.6; }
 .card.offline .card-title::after {
