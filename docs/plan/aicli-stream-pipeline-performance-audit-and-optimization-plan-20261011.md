@@ -168,7 +168,17 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 - **P1-7（stable commit 双全前缀 Format）**：注释明确的正确性契约（与 history replay 同价），改增量渲染需重验 Scene 收敛，留批次 3。
 - **P1-5（LooksLikeMarkdown 每帧全源扫描）**：未动工；扫描是 memcmp 量级、无分配，实测占比待 pprof 确认后再决定节流方案。
 
-### 9.6 遗留（批次 3 承接）
+### 9.6 批次 3 实施记录（2026-10-11 续）
 
-- §4 P2 全部（turn 收尾合并 sync、Recent 增量快照、EndRun 事件驱动排水等）与 §5 缺口加固中未做部分。
-- 批次 2 动工前建议的 pprof 采样仍未做（本机多轮链接触发 Windows 页面文件上限，重型采样建议单独环境跑）。
+| 项 | 提交 | 内容 |
+| --- | --- | --- |
+| P2-1（部分） | `94b9b296` | `reconcileGoalCompletionFromToolMessages` 改增量扫描：append-only 前缀由游标 + lastCompleted 携带，last-wins 与全量扫描严格等价；fingerprint（长度 + 末条角色/内容长度）失配检出整列表替换（compact/restore/backtrack）并退化为全量重扫。消除每 turn 收尾对全部 tool 消息的 json.Unmarshal（O(history)/turn）。三个语义钉子测试 |
+| P2-8 | `94b9b296` | `EstimateStreamFlushTimeout` 去掉 `[]rune` 全文转换——调用方已把结果钳制到 [8s,10s]，精确 rune 数只在窄窗口有意义；按字节估算零分配 |
+| P2-6（部分） | `94b9b296` | markdown AST 缓存 `fnvHash` 改字符串直扫，查找路径不再 `[]byte(s)` 复制整段源；`r.src` 的 goldmark 必需拷贝与 O(n) LRU 驱逐未动（S4b 窗口化后全源渲染只剩回退路径，占比小） |
+
+### 9.7 批次 3 剩余与缓办
+
+- **P2-1 剩余（三次写事务合并）**：turn 收尾的 syncRuntimeSessionBackIntoCLI / reconcilers / usage 三次全量 Load+Update 涉及 token 高水位与 provider 快照的优先级语义，需要专项设计（合并为单次 restore + 单次 Update），未在本轮动。
+- **P2-2 缓办**：按键规整复核——稳态按键无 `\r` 时 ReplaceAll 零分配（仅 2 次线性扫描）；把规整移到生产端会改变程序化提交路径的行为，收益不抵风险。
+- **P2-3（transcript 弹层同步渲染）/ P2-4（栅栏/表格 holdback 增量扫描）/ P2-5（Recent 全量克隆）/ P2-7（EndRun 事件驱动排水）/ P2-9/P2-10（legacy 路径）**：未动工，均为低频或回退路径。
+- **P1-3 / P1-4 / P1-5 / P1-7**：维持 §9.5 结论（跨包结构变更 / 前端契约验证 / 待 pprof 定占比 / 正确性契约重验）。
