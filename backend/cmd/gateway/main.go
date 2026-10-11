@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/device"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 )
 
@@ -52,12 +53,13 @@ func run() int {
 	}
 
 	registry := tunnel.NewRegistry()
+	devices := device.NewStore()
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,
 		PublicBaseURL:        *publicBaseURL,
 		Registry:             registry,
-		Authenticate:         deviceTokenAuth(*deviceToken),
+		Authenticate:         deviceAuth(devices, *deviceToken),
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
 		},
@@ -92,6 +94,39 @@ func run() int {
 		http.SetCookie(w, auth.ClearCookie(secure))
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 	}).Methods(http.MethodPost)
+	// Device tokens (owner-protected): issue once, list, revoke.
+	router.Handle("/api/devices", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{"devices": devices.List()})
+		case http.MethodPost:
+			var req struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			token, info, err := devices.Create(req.Name)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create device token"})
+				return
+			}
+			// The plaintext token is returned exactly once.
+			writeJSON(w, http.StatusCreated, map[string]any{"token": token, "device": info})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})))
+	router.Handle("/api/devices/{id}", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := mux.Vars(r)["id"]
+		if !devices.Revoke(id) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "device not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"revoked": id})
+	})))
 	// Owner-protected node list.
 	router.Handle("/api/nodes", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": registry.List()})
@@ -130,20 +165,30 @@ func run() int {
 	return 0
 }
 
-// deviceTokenAuth returns a request authenticator, or nil when no token is
-// configured (development only — production must set a token).
-func deviceTokenAuth(token string) func(*http.Request) error {
-	token = strings.TrimSpace(token)
-	if token == "" {
+// deviceAuth returns the tunnel upgrade authenticator. It accepts a store-issued
+// device token or the static --device-token fallback. It returns nil (dev mode)
+// only when neither is configured.
+func deviceAuth(store *device.Store, staticToken string) func(*http.Request) error {
+	staticToken = strings.TrimSpace(staticToken)
+	if store == nil && staticToken == "" {
 		return nil
 	}
 	return func(r *http.Request) error {
 		auth := strings.TrimSpace(r.Header.Get("Authorization"))
 		const prefix = "Bearer "
-		if !strings.HasPrefix(auth, prefix) || strings.TrimSpace(auth[len(prefix):]) != token {
-			return fmt.Errorf("invalid device token")
+		if !strings.HasPrefix(auth, prefix) {
+			return fmt.Errorf("missing device token")
 		}
-		return nil
+		token := strings.TrimSpace(auth[len(prefix):])
+		if staticToken != "" && token == staticToken {
+			return nil
+		}
+		if store != nil {
+			if _, ok := store.Authenticate(token); ok {
+				return nil
+			}
+		}
+		return fmt.Errorf("invalid device token")
 	}
 }
 
