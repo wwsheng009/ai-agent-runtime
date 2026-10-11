@@ -5994,15 +5994,24 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		requestID, _ := event.Payload["request_id"].(string)
 		approval := b.approvalRequestForEvent(event)
 		approvalContextLines := approvalRequestContextLines(event.Payload)
+		// gateway：等待用户审批是一个持久的注意力状态（docs/gateway/
+		// 08-notifications.md §3）。自动批准路径不进入等待，状态随后被清除。
+		// setGatewayAttention 只改内存投影，必须同步推送 SESSION_UPDATE。
+		setGatewayAttention(event.SessionID, gatewayAttentionApproval)
+		syncChatGatewaySession(b.session)
 		if grantKey := b.autoApprovalGrantKey(event.SessionID, approval); grantKey != "" && b.hasApprovalGrant(grantKey) {
 			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true, "", ""); err != nil {
 				b.setRunError(err)
 			}
+			setGatewayAttention(event.SessionID, "")
+			syncChatGatewaySession(b.session)
 			return
 		}
 		if b.session.NoInteractive && !b.preferInteractiveApprovals {
 			b.setRunError(b.nonInteractiveApprovalError(approval))
 			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false, "", "")
+			setGatewayAttention(event.SessionID, "")
+			syncChatGatewaySession(b.session)
 			return
 		}
 		reason, _ := event.Payload["reason"].(string)
@@ -6048,6 +6057,8 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			return
 		}
 		b.renderApprovalDecision(approval, answer.Allowed)
+		setGatewayAttention(event.SessionID, "")
+		syncChatGatewaySession(b.session)
 		if answer.Allowed && answer.Reuse {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
 		}
@@ -6059,15 +6070,22 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		prompt, _ := event.Payload["prompt"].(string)
 		required, _ := event.Payload["required"].(bool)
 		suggestions := interfaceSliceToStrings(event.Payload["suggestions"])
+		// gateway：等待用户回答同样是持久注意力状态；headless/接管路径立即恢复。
+		setGatewayAttention(event.SessionID, gatewayAttentionQuestion)
+		syncChatGatewaySession(b.session)
 		if b.session.NoInteractive {
 			// Headless hosts with a question panel (ACP session/request_question)
 			// answer the prompt through the client instead of failing the turn.
 			if answer, ok := b.answerQuestionHeadless(prompt, suggestions, required); ok {
 				_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, answer)
+				setGatewayAttention(event.SessionID, "")
+				syncChatGatewaySession(b.session)
 				return
 			}
 			b.setRunError(b.nonInteractiveQuestionError(prompt))
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
+			setGatewayAttention(event.SessionID, "")
+			syncChatGatewaySession(b.session)
 			return
 		}
 		if b.externalInputCaptureOwnsInput() {

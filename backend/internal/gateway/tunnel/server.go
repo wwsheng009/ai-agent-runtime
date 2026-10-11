@@ -224,11 +224,14 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	s.registry.Upsert(node)
 	s.notifyRegistryChangedAndPersist()
 	defer func() {
-		// Only remove our own entry: a reconnecting node with the same NodeID
-		// has already replaced it (fresher heartbeat, non-stale), and dropping
-		// the replacement would lose the live registration (and, with registry
-		// persistence, revert the snapshot to stale data).
-		if cur, ok := s.registry.Get(nodeID); !ok || cur.Stale || !cur.LastHeartbeat.After(node.LastHeartbeat) {
+		// Only remove our own registration: identify the entry by the RemoteAddr
+		// observed at handshake, not by heartbeat timestamps. The heartbeat loop
+		// overwrites LastHeartbeat, so time-based comparison would almost never
+		// match and a normal disconnect would leak the entry (never removed).
+		// A reconnecting node with the same NodeID has already replaced the
+		// entry (new RemoteAddr), and removing ours would lose the live
+		// registration (and, with persistence, revert the snapshot to stale).
+		if cur, ok := s.registry.Get(nodeID); ok && !cur.Stale && cur.RemoteAddr == node.RemoteAddr {
 			s.registry.Remove(nodeID)
 		}
 		s.notifyRegistryChangedAndPersist()
