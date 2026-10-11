@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +69,7 @@ func TestChatRuntimeEvents_StreamCoalescingConcurrentWithBeginRun(t *testing.T) 
 	bridge.streamMu.Unlock()
 }
 
-func TestStreamMergeKeyIncludesIdentityAndSequence(t *testing.T) {
+func TestStreamMergeIdentityIncludesIdentityAndSequence(t *testing.T) {
 	base := runtimeevents.Event{Type: runtimechat.EventAssistantDelta, TraceID: "trace-1"}
 	ev1 := base
 	ev1.Payload = map[string]interface{}{"turn_id": "turn-a", "stream_id": "stream-a", "sequence": uint64(1)}
@@ -79,17 +80,17 @@ func TestStreamMergeKeyIncludesIdentityAndSequence(t *testing.T) {
 	ev4 := base
 	ev4.Payload = map[string]interface{}{"turn_id": "turn-a", "stream_id": "stream-b"}
 
-	if streamMergeKey(ev1) == streamMergeKey(ev2) {
-		t.Fatal("distinct sequences must not share a coalescing key")
+	if streamMergeIdentityEqual(ev1, ev2) {
+		t.Fatal("distinct sequences must not share a coalescing identity")
 	}
-	if streamMergeKey(ev1) == streamMergeKey(ev3) {
-		t.Fatal("distinct turn ids must not share a coalescing key")
+	if streamMergeIdentityEqual(ev1, ev3) {
+		t.Fatal("distinct turn ids must not share a coalescing identity")
 	}
-	if streamMergeKey(ev1) == streamMergeKey(ev4) {
-		t.Fatal("distinct stream ids must not share a coalescing key")
+	if streamMergeIdentityEqual(ev1, ev4) {
+		t.Fatal("distinct stream ids must not share a coalescing identity")
 	}
 	legacy := runtimeevents.Event{Type: runtimechat.EventAssistantDelta, TraceID: "trace-1", Payload: map[string]interface{}{"delta": "a"}}
-	if streamMergeKey(legacy) != streamMergeKey(base) {
+	if !streamMergeIdentityEqual(legacy, base) {
 		t.Fatal("identity-free legacy deltas should remain mergeable by type+trace")
 	}
 }
@@ -193,7 +194,7 @@ func TestEnqueueStreamEventCoalescesContiguousSequenceIntoOnePendingEntry(t *tes
 	var sequence uint64
 	hasSequence := false
 	if count > 0 {
-		text = streamEventText(bridge.backlog[0].event)
+		text = streamSlotText(bridge.backlog[0])
 		sequence, hasSequence = assistantEventSequence(bridge.backlog[0].event)
 	}
 	bytes := bridge.backlogBytes
@@ -437,7 +438,7 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 	count := len(bridge.backlog)
 	var text string
 	if count > 0 {
-		text = streamEventText(bridge.backlog[0].event)
+		text = streamSlotText(bridge.backlog[0])
 	}
 	bridge.streamMu.Unlock()
 
@@ -451,8 +452,13 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 	if _, ok := bridge.backlog[0].event.Payload["reasoning"]; ok {
 		t.Fatal("merged event still carries stale nested reasoning block")
 	}
-	if got := bridge.backlog[0].event.Payload["text"]; got != want {
-		t.Fatalf("merged event text payload = %q, want %q", got, want)
+	// P0-3：合并文本持有在累积器中，成功投递时才物化进投递副本的 "text" 键。
+	delivered := headlessDeliverBacklogHead(t, bridge)
+	if got := delivered.Payload["text"]; got != want {
+		t.Fatalf("delivered event text payload = %q, want %q", got, want)
+	}
+	if _, ok := delivered.Payload["reasoning"]; ok {
+		t.Fatal("delivered event still carries stale nested reasoning block")
 	}
 }
 
@@ -580,7 +586,7 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverByteBudget(t *testing.T) {
 	count := len(bridge.backlog)
 	var lastText string
 	if count > 0 {
-		lastText = streamEventText(bridge.backlog[count-1].event)
+		lastText = streamSlotText(bridge.backlog[count-1])
 	}
 	bridge.streamMu.Unlock()
 	if count != 2 {
@@ -650,7 +656,7 @@ func TestAssistantTerminalDropsStalePendingAndEnqueues(t *testing.T) {
 			continue
 		}
 		if index == 0 {
-			first = streamEventText(slot.event)
+			first = streamSlotText(slot)
 		}
 		kinds = append(kinds, slot.event.Type)
 	}
@@ -752,7 +758,7 @@ func TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas(t *testing.
 	pending := len(bridge.backlog)
 	coalesced := ""
 	if pending == 3 {
-		coalesced = streamEventText(bridge.backlog[1].event)
+		coalesced = streamSlotText(bridge.backlog[1])
 	}
 	bridge.streamMu.Unlock()
 	if pending != 3 {
@@ -815,5 +821,109 @@ func TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas(t *testing.
 		if order[index] != wantOrder[index] || texts[index] != wantTexts[index] {
 			t.Fatalf("delivery[%d] = %s(%q), want %s(%q); order=%v", index, order[index], texts[index], wantOrder[index], wantTexts[index], order)
 		}
+	}
+}
+
+// P0-3（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md）：
+// 背压合并必须走缓冲累积——合并期字节分配不随已累积长度线性放大
+// （原实现每次合并重拼全串，200 条 5KB ≈ 100MB 纯 memcpy，且全部发生在
+// 持有 streamMu 的 LLM 回调 goroutine 上）；成功投递时累积文本物化进
+// 独立 payload 副本，未合并槽位保持首块旧值。
+func TestBacklogStreamMergeAccumulatesInBufferWithoutQuadraticCopies(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "coalesce-buffer"},
+	})
+	bridge.eventQueue = make(chan chatRuntimeQueuedEvent, 1)
+	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
+	t.Cleanup(func() {
+		bridge.streamMu.Lock()
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
+		bridge.streamMu.Unlock()
+	})
+
+	const chunks = 200
+	chunk := strings.Repeat("a", 5*1024)
+	wantText := strings.Repeat(chunk, chunks)
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	for sequence := uint64(1); sequence <= chunks; sequence++ {
+		bridge.Handle(runtimeevents.Event{
+			Type:      runtimechat.EventAssistantDelta,
+			SessionID: "coalesce-buffer",
+			TraceID:   "trace-buffer",
+			Payload: map[string]interface{}{
+				"turn_id":   "turn-buffer",
+				"stream_id": "stream-buffer",
+				"sequence":  sequence,
+				"mode":      "append",
+				"delta":     chunk,
+			},
+		})
+	}
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	bridge.streamMu.Lock()
+	if len(bridge.backlog) != 1 {
+		bridge.streamMu.Unlock()
+		t.Fatalf("200 条连续 delta 必须折叠进单一槽位, got %d slots", len(bridge.backlog))
+	}
+	slot := bridge.backlog[0]
+	if got := streamSlotText(slot); got != wantText {
+		bridge.streamMu.Unlock()
+		t.Fatalf("缓冲视图必须承载完整合并文本: got %d bytes, want %d bytes", len(got), len(wantText))
+	}
+	if got := slot.event.Payload["delta"]; got != chunk {
+		bridge.streamMu.Unlock()
+		t.Fatalf("未投递前槽位 payload 保持首块文本(缓冲未物化), got %d bytes", len(fmt.Sprint(got)))
+	}
+	bridge.streamMu.Unlock()
+
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 20<<20 {
+		t.Fatalf("合并期分配 %d 字节超过缓冲累积上界(原全串重拼接约 100MB)", allocated)
+	}
+
+	// 成功投递：独立 payload 副本承载完整文本，槽位缓冲原样保留。
+	delivered := headlessDeliverBacklogHead(t, bridge)
+	if got := streamEventText(delivered); got != wantText {
+		t.Fatalf("投递副本必须承载完整合并文本: got %d bytes, want %d bytes", len(got), len(wantText))
+	}
+	slot.event.Payload["alias-probe"] = "slot-only"
+	if _, aliased := delivered.Payload["alias-probe"]; aliased {
+		t.Fatal("投递载荷必须持有独立 payload map，与 backlog 槽位无别名")
+	}
+	delete(slot.event.Payload, "alias-probe")
+	if streamSlotText(slot) != wantText {
+		t.Fatal("失败/未投递路径不得改变槽位累积器")
+	}
+}
+
+// headlessDeliverBacklogHead 清空占位队列后手动投递 backlog 队头，返回投递载荷。
+func headlessDeliverBacklogHead(t *testing.T, bridge *chatRuntimeEventBridge) runtimeevents.Event {
+	t.Helper()
+bridgeLoop:
+	for {
+		select {
+		case <-bridge.eventQueue:
+		default:
+			break bridgeLoop
+		}
+	}
+	bridge.streamMu.Lock()
+	defer bridge.streamMu.Unlock()
+	if !bridge.tryDeliverBacklogHeadLocked() {
+		t.Fatal("backlog 队头必须可以成功投递")
+	}
+	select {
+	case queued := <-bridge.eventQueue:
+		return queued.event
+	default:
+		t.Fatal("投递后载荷必须在有界队列中")
+		return runtimeevents.Event{}
 	}
 }

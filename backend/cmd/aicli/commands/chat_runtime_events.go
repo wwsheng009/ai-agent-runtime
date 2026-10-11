@@ -306,6 +306,158 @@ type chatRuntimeQueuedEvent struct {
 	// 保持 ingress 时刻的 epoch——旧 run 的残留 delta 必须在消费端被拒绝，
 	// 不能被延迟投递"漂白"进新 run。
 	stampAtAdmission bool
+	// streamAcc 是 P0-3 的合并累积器（docs/plan/aicli-stream-pipeline-
+	// performance-audit-and-optimization-plan-20261011.md）：相邻同流 delta
+	// 折叠时只把新增量 append 进字节缓冲，槽位 payload 的文本键保持首块旧值；
+	// 成功投递时才把累积文本物化进**投递副本的独立 payload map**（见
+	// tryDeliverBacklogHeadLocked）。原实现每次合并把已累积全串 + 新增量
+	// 重新拼接一个新 string（不可变），总长 L 的槽位需 O(k×L) 拷贝，且全部
+	// 发生在持有 streamMu 的 LLM 回调 goroutine 上。nil=槽位从未合并过，
+	// payload 即权威文本。
+	streamAcc *chatStreamAccumulator
+}
+
+// chatStreamAccumulator 累积一个 backlog 槽位的流文本。fold 的分支语义与
+// mergeStreamEvents 逐条对应——后者已重构为本结构的纯函数包装（测试直接
+// 构造调用），两处不得独立演进。
+type chatStreamAccumulator struct {
+	key  string
+	text []byte
+}
+
+func newChatStreamAccumulator(event runtimeevents.Event) *chatStreamAccumulator {
+	return &chatStreamAccumulator{
+		key:  chatStreamMergePayloadKey(event.Type),
+		text: []byte(streamEventText(event)),
+	}
+}
+
+// chatStreamMergePayloadKey 返回该流家族合并文本落 payload 的键：assistant
+// 正文合并写 "delta"，reasoning 合并写 "text"（与 mergeStreamEvents 原行为
+// 一致，即使槽位文本最初来自 summary/嵌套 reasoning 块也物化到 "text"）。
+func chatStreamMergePayloadKey(eventType string) string {
+	if assistantStreamAliasType(eventType) == runtimechat.EventAssistantReasoning {
+		return "text"
+	}
+	return "delta"
+}
+
+func (acc *chatStreamAccumulator) append(text string) {
+	if text == "" {
+		return
+	}
+	acc.text = append(acc.text, text...)
+}
+
+func (acc *chatStreamAccumulator) replace(text string) {
+	acc.text = append(acc.text[:0], text...)
+}
+
+func (acc *chatStreamAccumulator) view() string {
+	return string(acc.text)
+}
+
+// foldStreamEvent 把 incoming 折叠进槽位累积器。前置条件：槽位与 incoming
+// 同流家族（appendBacklogSlotLocked 的 identity/contiguous 判据保证）且
+// incoming 携带非空文本、槽位累积器已初始化。
+func (q *chatRuntimeQueuedEvent) foldStreamEvent(incoming runtimeevents.Event) {
+	acc := q.streamAcc
+	if acc == nil {
+		return
+	}
+	incomingText := streamEventText(incoming)
+	switch assistantStreamAliasType(q.event.Type) {
+	case runtimechat.EventAssistantReasoning:
+		aSeq, aHasSeq := assistantEventSequence(q.event)
+		bSeq, bHasSeq := assistantEventSequence(incoming)
+		if aHasSeq && bHasSeq && aSeq == bSeq {
+			// Sequence identity, not text equality, defines a duplicate.
+			return
+		}
+		aDelta := encoding.ReasoningOperationForEvent(q.event) == encoding.ReasoningOperationAppend
+		bDelta := encoding.ReasoningOperationForEvent(incoming) == encoding.ReasoningOperationAppend
+		switch {
+		case bDelta:
+			acc.append(incomingText)
+			if aDelta {
+				q.event.Payload[encoding.ReasoningStreamDeltaKey] = true
+			} else {
+				// A snapshot followed by a delta is still an authoritative
+				// replacement containing the snapshot plus its later suffix.
+				delete(q.event.Payload, encoding.ReasoningStreamDeltaKey)
+			}
+		default:
+			// The latest snapshot is authoritative. Do not infer replay or
+			// overlap from its textual contents.
+			acc.replace(incomingText)
+			delete(q.event.Payload, encoding.ReasoningStreamDeltaKey)
+		}
+		delete(q.event.Payload, "reasoning")
+		delete(q.event.Payload, "summary")
+	case runtimechat.EventAssistantDelta:
+		aSeq, aHasSeq := assistantEventSequence(q.event)
+		bSeq, bHasSeq := assistantEventSequence(incoming)
+		if aHasSeq && bHasSeq && aSeq == bSeq {
+			// Sequence identity, not repeated prose, defines retransmission.
+			return
+		}
+		mode := strings.ToLower(strings.TrimSpace(payloadStringValue(incoming.Payload["mode"])))
+		if mode == "" {
+			mode = strings.ToLower(strings.TrimSpace(payloadStringValue(incoming.Payload["operation"])))
+		}
+		switch mode {
+		case "append", "delta":
+			// Explicit append chunks are transport bytes. Equal or prefix-like
+			// prose is still legal repeated content and must not be collapsed.
+			acc.append(incomingText)
+		case "replace", "snapshot":
+			acc.replace(incomingText)
+		default:
+			// Compatibility only for legacy providers that carry no operation.
+			acc.replace(mergeStreamText(acc.view(), incomingText))
+		}
+	}
+}
+
+// mergeStreamEventIntoSlot 把 incoming 折叠进槽位：返回 false 表示命中
+// mergeStreamEvents 的「槽位无文本 ⇒ 整事件替换为 incoming」分支，调用方
+// 必须用 incoming 整体替换槽位事件（sequence/coalesced_from 等簿记随其后）。
+func (q *chatRuntimeQueuedEvent) mergeStreamEventIntoSlot(incoming runtimeevents.Event) bool {
+	if streamEventText(incoming) == "" {
+		return true // 镜像 mergeStreamEvents：b 无文本 ⇒ 保持 a 不变
+	}
+	if q.streamAcc == nil {
+		if streamEventText(q.event) == "" {
+			return false
+		}
+		q.streamAcc = newChatStreamAccumulator(q.event)
+	}
+	q.foldStreamEvent(incoming)
+	return true
+}
+
+// streamMaterializedPayload 返回合并槽位的投递 payload：复制槽位 payload 并
+// 把累积文本替换进合并键。只在成功投递前调用一次（每槽位交付恰好一次），
+// 失败的投递尝试零成本；消费者拿到的是私有 map，与 backlog 槽位无别名。
+func (q *chatRuntimeQueuedEvent) streamMaterializedPayload() map[string]interface{} {
+	out := make(map[string]interface{}, len(q.event.Payload)+1)
+	for key, value := range q.event.Payload {
+		out[key] = value
+	}
+	out[q.streamAcc.key] = q.streamAcc.view()
+	return out
+}
+
+// streamSlotText 读取槽位当前权威流文本（缓冲感知）：诊断与测试共用，
+// 直接读 payload 在缓冲未物化时会拿到合并前的旧值。
+func streamSlotText(q *chatRuntimeQueuedEvent) string {
+	if q == nil {
+		return ""
+	}
+	if q.streamAcc != nil {
+		return q.streamAcc.view()
+	}
+	return streamEventText(q.event)
 }
 
 type chatAssistantStreamState struct {
@@ -1624,7 +1776,7 @@ func (b *chatRuntimeEventBridge) appendBacklogSlotLocked(q *chatRuntimeQueuedEve
 		if n := len(b.backlog); n > 0 {
 			last := b.backlog[n-1]
 			if last != nil && isMergeableStreamEvent(last.event.Type) &&
-				(streamMergeKey(last.event) == streamMergeKey(q.event) || contiguousStreamEvent(last.event, q.event)) {
+				(streamMergeIdentityEqual(last.event, q.event) || contiguousStreamEvent(last.event, q.event)) {
 				return b.mergeStreamSlotLocked(last, q)
 			}
 		}
@@ -1725,7 +1877,12 @@ func (b *chatRuntimeEventBridge) mergeStreamSlotLocked(last *chatRuntimeQueuedEv
 			from, hasFrom = seq, true
 		}
 	}
-	last.event = mergeStreamEvents(last.event, q.event)
+	// P0-3：缓冲累积合并（语义与 mergeStreamEvents 一致）；仅当命中
+	// 「槽位无文本 ⇒ 整事件替换」分支时才整体替换槽位事件。
+	if !last.mergeStreamEventIntoSlot(q.event) {
+		last.event = q.event
+		last.streamAcc = nil
+	}
 	if seq, ok := assistantEventSequence(q.event); ok {
 		last.event.Payload["sequence"] = seq
 	}
@@ -1903,13 +2060,19 @@ func (b *chatRuntimeEventBridge) tryDeliverBacklogHeadLocked() bool {
 		b.backlog = b.backlog[1:]
 		return true
 	}
+	// P0-3：合并槽位投递独立 payload 副本（累积文本物化进副本），失败尝试
+	// 零拷贝；普通未合并槽位保持原事件别名语义不变。
+	deliveredEvent := head.event
+	if head.streamAcc != nil {
+		deliveredEvent.Payload = head.streamMaterializedPayload()
+	}
 	ok := false
 	if head.stampAtAdmission {
 		b.renderMu.Lock()
 		epoch := b.runEpoch
 		b.renderMu.Unlock()
 		q := chatRuntimeQueuedEvent{
-			event:            head.event,
+			event:            deliveredEvent,
 			size:             head.size,
 			epoch:            epoch,
 			queuedAt:         head.queuedAt,
@@ -1930,7 +2093,7 @@ func (b *chatRuntimeEventBridge) tryDeliverBacklogHeadLocked() bool {
 			return false
 		}
 		q := chatRuntimeQueuedEvent{
-			event:    head.event,
+			event:    deliveredEvent,
 			size:     head.size,
 			epoch:    head.epoch,
 			queuedAt: head.queuedAt,
@@ -2398,14 +2561,24 @@ func isAssistantStreamTerminalEvent(event runtimeevents.Event) bool {
 	return event.Type == runtimechat.EventAssistantMessage
 }
 
-func streamMergeKey(event runtimeevents.Event) string {
-	turnID, streamID := assistantEventIdentity(event)
-	sequence, hasSequence := assistantEventSequence(event)
-	key := event.Type + "\x00" + event.TraceID + "\x00" + turnID + "\x00" + streamID
-	if hasSequence {
-		key += "\x00" + strconv.FormatUint(sequence, 10)
+// streamMergeIdentityEqual 判断两条流事件是否同一流身份（type/trace/turn/
+// stream/sequence 全等）：命中即视为重传，折叠时保持槽位原文本。与旧
+// streamMergeKey 字符串键等价，但不在每次 delta 入队时构造两段拼接串。
+func streamMergeIdentityEqual(a, b runtimeevents.Event) bool {
+	if a.Type != b.Type || a.TraceID != b.TraceID {
+		return false
 	}
-	return key
+	aTurn, aStream := assistantEventIdentity(a)
+	bTurn, bStream := assistantEventIdentity(b)
+	if aTurn != bTurn || aStream != bStream {
+		return false
+	}
+	aSeq, aHas := assistantEventSequence(a)
+	bSeq, bHas := assistantEventSequence(b)
+	if aHas != bHas {
+		return false
+	}
+	return !aHas || aSeq == bSeq
 }
 
 // enqueueStreamEvent admits one streaming delta without ever blocking the
@@ -2701,6 +2874,13 @@ func (b *chatRuntimeEventBridge) accountEventQueueBytes(size int64) {
 // stream deltas append byte-for-byte, while an authoritative snapshot replaces
 // earlier content. The merged delta marker survives removal of the nested
 // ReasoningBlock so every downstream consumer keeps append semantics.
+// mergeStreamEvents 把两条同流事件按家族语义合并为一条，是
+// chatStreamAccumulator 折叠路径的纯函数包装：槽位路径（mergeStreamSlotLocked）
+// 与本函数共享同一套分支实现，禁止独立演进。折叠语义：
+//   - b 无文本 ⇒ 保持 a；a 无文本 ⇒ 整体替换为 b；
+//   - sequence 相同视为重传，保持 a；
+//   - 正文按 mode（append/replace/legacy 前缀重叠）合并进 "delta"；
+//   - reasoning 按 operation（append/snapshot）合并进 "text"。
 func mergeStreamEvents(a, b runtimeevents.Event) runtimeevents.Event {
 	if streamEventText(b) == "" {
 		return a
@@ -2708,58 +2888,13 @@ func mergeStreamEvents(a, b runtimeevents.Event) runtimeevents.Event {
 	if streamEventText(a) == "" {
 		return b
 	}
-	switch assistantStreamAliasType(a.Type) {
-	case runtimechat.EventAssistantReasoning:
-		aSeq, aHasSeq := assistantEventSequence(a)
-		bSeq, bHasSeq := assistantEventSequence(b)
-		if aHasSeq && bHasSeq && aSeq == bSeq {
-			// Sequence identity, not text equality, defines a duplicate.
-			return a
-		}
-		aDelta := encoding.ReasoningOperationForEvent(a) == encoding.ReasoningOperationAppend
-		bDelta := encoding.ReasoningOperationForEvent(b) == encoding.ReasoningOperationAppend
-		switch {
-		case bDelta:
-			a.Payload["text"] = streamEventText(a) + streamEventText(b)
-			if aDelta {
-				a.Payload[encoding.ReasoningStreamDeltaKey] = true
-			} else {
-				// A snapshot followed by a delta is still an authoritative
-				// replacement containing the snapshot plus its later suffix.
-				delete(a.Payload, encoding.ReasoningStreamDeltaKey)
-			}
-		default:
-			// The latest snapshot is authoritative. Do not infer replay or
-			// overlap from its textual contents.
-			a.Payload["text"] = streamEventText(b)
-			delete(a.Payload, encoding.ReasoningStreamDeltaKey)
-		}
-		delete(a.Payload, "reasoning")
-		delete(a.Payload, "summary")
-	case runtimechat.EventAssistantDelta:
-		aSeq, aHasSeq := assistantEventSequence(a)
-		bSeq, bHasSeq := assistantEventSequence(b)
-		if aHasSeq && bHasSeq && aSeq == bSeq {
-			// Sequence identity, not repeated prose, defines retransmission.
-			return a
-		}
-		mode := strings.ToLower(strings.TrimSpace(payloadStringValue(b.Payload["mode"])))
-		if mode == "" {
-			mode = strings.ToLower(strings.TrimSpace(payloadStringValue(b.Payload["operation"])))
-		}
-		switch mode {
-		case "append", "delta":
-			// Explicit append chunks are transport bytes. Equal or prefix-like
-			// prose is still legal repeated content and must not be collapsed.
-			a.Payload["delta"] = streamEventText(a) + streamEventText(b)
-		case "replace", "snapshot":
-			a.Payload["delta"] = streamEventText(b)
-		default:
-			// Compatibility only for legacy providers that carry no operation.
-			a.Payload["delta"] = mergeStreamText(streamEventText(a), streamEventText(b))
-		}
+	slot := chatRuntimeQueuedEvent{event: a}
+	slot.streamAcc = newChatStreamAccumulator(a)
+	slot.foldStreamEvent(b)
+	if a.Payload != nil {
+		a.Payload[slot.streamAcc.key] = slot.streamAcc.view()
 	}
-	return a
+	return slot.event
 }
 
 // streamEventText extracts the streaming text carried by a coalescible event.
