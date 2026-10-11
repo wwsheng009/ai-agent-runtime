@@ -1,8 +1,8 @@
 package renderengine
 
 import (
+	"container/list"
 	"fmt"
-	"hash/fnv"
 	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
@@ -37,7 +37,7 @@ type RenderCache struct {
 	mu         sync.Mutex
 	docs       map[DocKey]*cachedDoc
 	flights    map[cacheFlightKey]chan struct{}
-	lru        []DocKey // 简单 LRU：尾=最近使用
+	lru        *list.List // 简单 LRU：Front=最旧，Back=最近使用；元素值为 DocKey
 	max        int
 	maxBytes   int
 	bytes      int
@@ -58,6 +58,8 @@ type cachedDoc struct {
 	source string // 二次校验，防止 hash 碰撞返回错误文档
 	doc    render.Document
 	bytes  int
+	// lruElem 是 P1-6 的 O(1) LRU 元素指针（c.lru 中，Value 为 DocKey）。
+	lruElem *list.Element
 }
 
 // NewRenderCache 创建具有默认 64 MiB 估算字节预算的缓存；maxDocs<=0 时取
@@ -79,6 +81,7 @@ func NewRenderCacheWithBudget(maxDocs, maxBytes int) *RenderCache {
 	return &RenderCache{
 		docs:     make(map[DocKey]*cachedDoc, maxDocs/2),
 		flights:  make(map[cacheFlightKey]chan struct{}),
+		lru:      list.New(),
 		max:      maxDocs,
 		maxBytes: maxBytes,
 	}
@@ -94,7 +97,7 @@ func (c *RenderCache) Render(mode, source string, opts markdown.Options) (render
 		c.mu.Lock()
 		if cd, ok := c.docs[key]; ok && cd.source == source {
 			c.hits++
-			c.touchLocked(key)
+			c.touchLocked(cd)
 			c.mu.Unlock()
 			return cd.doc, true
 		}
@@ -189,19 +192,17 @@ func (c *RenderCache) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.docs = make(map[DocKey]*cachedDoc, c.max/2)
-	c.lru = c.lru[:0]
+	c.lru.Init()
 	c.bytes = 0
 	c.generation++
 	c.hits, c.miss, c.evict = 0, 0, 0
 }
 
-func (c *RenderCache) touchLocked(key DocKey) {
-	for i, k := range c.lru {
-		if k == key {
-			copy(c.lru[i:], c.lru[i+1:])
-			c.lru[len(c.lru)-1] = key
-			return
-		}
+// touchLocked O(1)（P1-6）：元素指针随 cachedDoc 携带，MoveToBack 无需扫描；
+// 原 []DocKey 扫描+移位在 maxDocs=256 下是命中路径的每次 O(n) 开销。
+func (c *RenderCache) touchLocked(cd *cachedDoc) {
+	if cd != nil && cd.lruElem != nil {
+		c.lru.MoveToBack(cd.lruElem)
 	}
 }
 
@@ -216,25 +217,27 @@ func (c *RenderCache) insertLocked(key DocKey, source string, doc render.Documen
 	if current, ok := c.docs[key]; ok {
 		c.bytes -= current.bytes
 		delete(c.docs, key)
-		c.removeLocked(key)
+		c.removeLocked(current)
 	}
-	for len(c.lru) >= c.max || c.bytes+bytes > c.maxBytes {
+	for len(c.docs) >= c.max || c.bytes+bytes > c.maxBytes {
 		if !c.evictOldestLocked() {
 			break
 		}
 	}
-	c.lru = append(c.lru, key)
-	c.docs[key] = &cachedDoc{source: source, doc: doc, bytes: bytes}
+	cd := &cachedDoc{source: source, doc: doc, bytes: bytes, lruElem: c.lru.PushBack(key)}
+	c.docs[key] = cd
 	c.bytes += bytes
 }
 
 func (c *RenderCache) evictOldestLocked() bool {
-	if len(c.lru) == 0 {
+	elem := c.lru.Front()
+	if elem == nil {
 		return false
 	}
-	oldest := c.lru[0]
-	c.lru = c.lru[1:]
+	oldest := elem.Value.(DocKey)
+	c.lru.Remove(elem)
 	if doc, ok := c.docs[oldest]; ok {
+		doc.lruElem = nil
 		c.bytes -= doc.bytes
 		delete(c.docs, oldest)
 		c.evict++
@@ -242,13 +245,10 @@ func (c *RenderCache) evictOldestLocked() bool {
 	return true
 }
 
-func (c *RenderCache) removeLocked(key DocKey) {
-	for i, existing := range c.lru {
-		if existing == key {
-			copy(c.lru[i:], c.lru[i+1:])
-			c.lru = c.lru[:len(c.lru)-1]
-			return
-		}
+func (c *RenderCache) removeLocked(cd *cachedDoc) {
+	if cd != nil && cd.lruElem != nil {
+		c.lru.Remove(cd.lruElem)
+		cd.lruElem = nil
 	}
 }
 
@@ -271,16 +271,43 @@ func estimateCachedDocumentBytes(source string, doc render.Document) int {
 }
 
 func docKey(mode, source string, opts markdown.Options) DocKey {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(mode))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(source))
 	return DocKey{
-		Hash:  h.Sum64(),
+		// P1-6：FNV-1a 直接扫字符串，不做 []byte(source) 转换——原实现经
+		// io.Writer 接口调用，编译器无法证明不逃逸，每次 Render 命中都把
+		// 整段源复制成 []byte。字节流与旧实现逐字节一致（mode + 0x00 + source）。
+		Hash:  fnv1aStrings(mode, "\x00", source),
 		Width: opts.Width,
 		Theme: themeFingerprint(opts.SyntaxTheme, opts.Theme),
 		Mode:  mode,
 	}
+}
+
+func fnv1aStrings(parts ...string) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for _, part := range parts {
+		for i := 0; i < len(part); i++ {
+			h ^= uint64(part[i])
+			h *= prime64
+		}
+	}
+	return h
+}
+
+// themeFingerprintMemo 记忆最近一次指纹输入：主题因子进程级几乎不变，
+// 原实现每次 Render 都 fmt.Sprintf 分配一个新串（P1-6）。比较只覆盖指纹
+// 依赖的四个因子——ThemeContext 含 Palette，整体不可比较。
+var themeFingerprintMemo struct {
+	mu          sync.Mutex
+	syntaxTheme string
+	syntaxName  string
+	colorProf   render.ColorProfile
+	hyperlink   bool
+	fp          string
+	valid       bool
 }
 
 // themeFingerprint 覆盖影响文档结构（而非仅 ANSI 编码）的主题因子：
@@ -288,7 +315,29 @@ func docKey(mode, source string, opts markdown.Options) DocKey {
 // 超链接策略。调色板只影响 Role -> 颜色编码，不影响 Document 本身，
 // 不参与指纹。
 func themeFingerprint(syntaxTheme string, t style.ThemeContext) string {
-	return fmt.Sprintf("%s|%s|%v|%t", syntaxTheme, t.SyntaxName, t.Terminal.ColorProfile, t.UseHyperlink)
+	memo := &themeFingerprintMemo
+	memo.mu.Lock()
+	if memo.valid && memo.syntaxTheme == syntaxTheme &&
+		memo.syntaxName == t.SyntaxName &&
+		memo.colorProf == t.Terminal.ColorProfile &&
+		memo.hyperlink == t.UseHyperlink {
+		fp := memo.fp
+		memo.mu.Unlock()
+		return fp
+	}
+	memo.mu.Unlock()
+
+	fp := fmt.Sprintf("%s|%s|%v|%t", syntaxTheme, t.SyntaxName, t.Terminal.ColorProfile, t.UseHyperlink)
+
+	memo.mu.Lock()
+	memo.syntaxTheme = syntaxTheme
+	memo.syntaxName = t.SyntaxName
+	memo.colorProf = t.Terminal.ColorProfile
+	memo.hyperlink = t.UseHyperlink
+	memo.fp = fp
+	memo.valid = true
+	memo.mu.Unlock()
+	return fp
 }
 
 // sharedCache 是进程级共享实例；ActiveStreamController 与
