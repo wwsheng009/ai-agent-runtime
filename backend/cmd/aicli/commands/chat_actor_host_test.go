@@ -2631,7 +2631,7 @@ func TestLocalActorRegistry_SpawnRejectsCompleteTaskCompletionRequirement(t *tes
 		Message:               "inspect",
 		CompletionRequirement: "complete_task",
 	})
-	if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+	if err == nil || !strings.Contains(err.Error(), "use team_spawn") {
 		t.Fatalf("expected actionable complete_task rejection, got %v", err)
 	}
 	if _, getErr := manager.Get(context.Background(), "reject-complete-child"); getErr == nil {

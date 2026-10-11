@@ -16,7 +16,7 @@ func TestBroker_Execute_SpawnAgentResolvesMessageAliases(t *testing.T) {
 			controller := &fakeAgentSessionController{}
 			broker := &Broker{AgentSessions: controller}
 
-			_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+			_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 				alias:        "  inspect the delegation bug  ",
 				"agent_type": "explorer",
 			})
@@ -47,7 +47,7 @@ func TestBroker_Execute_SpawnAgentRejectsMissingTaskPrompt(t *testing.T) {
 			controller := &fakeAgentSessionController{}
 			broker := &Broker{AgentSessions: controller}
 
-			_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, args)
+			_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, args)
 			if err == nil || !strings.Contains(err.Error(), "message is required") {
 				t.Fatalf("expected message-required error, got %v", err)
 			}
@@ -65,7 +65,7 @@ func TestBroker_Execute_SpawnAgentRejectsUnsupportedArgs(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":         "inspect",
 		"tools_whitelist": []string{"view", "grep"},
 	})
@@ -85,7 +85,7 @@ func TestBroker_Execute_SpawnAgentRejectsUnsupportedArgs(t *testing.T) {
 func TestBroker_Definitions_SpawnAgentDocumentsTaskPrompt(t *testing.T) {
 	broker := &Broker{AgentSessions: &fakeAgentSessionController{}}
 	for _, def := range broker.Definitions() {
-		if def.Name != ToolSpawnAgent {
+		if def.Name != ToolSubagentSpawn {
 			continue
 		}
 		if !strings.Contains(def.Description, "Required: message") {

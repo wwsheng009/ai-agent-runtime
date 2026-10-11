@@ -1847,9 +1847,9 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 	}
 	// P0-3a/M5: v2 语义（默认关，关闭时与灰度前逐字段一致）。
 	v2 := c.handler.supervisionConfig.MessageSemanticsV2Enabled()
-	toolName := toolbroker.ToolSendMessage
+	toolName := toolbroker.ToolSubagentSend
 	if trigger {
-		toolName = toolbroker.ToolFollowupTask
+		toolName = toolbroker.ToolSubagentFollowup
 	}
 	if v2 && c.apiAgentSessionTerminal(ctx, sessionID) {
 		closedErr := toolbroker.AgentSessionClosedError(toolName, sessionID)
@@ -2064,10 +2064,10 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 	// P0-3a/M5: v2 语义（默认关）。关闭时保持灰度前的 busy 报错行为。
 	v2 := c.handler.supervisionConfig.MessageSemanticsV2Enabled()
 	if v2 && c.apiAgentSessionTerminal(ctx, sessionID) {
-		closedErr := toolbroker.AgentSessionClosedError(toolbroker.ToolSendInput, sessionID)
+		closedErr := toolbroker.AgentSessionClosedError(toolbroker.ToolSubagentInput, sessionID)
 		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 			TargetSessionID: sessionID,
-			Tool:            toolbroker.ToolSendInput,
+			Tool:            toolbroker.ToolSubagentInput,
 			Status:          chat.MailboxDeliveryStatusFailed,
 			Error:           closedErr.Error(),
 		})
@@ -2100,7 +2100,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 				if deliverErr != nil {
 					c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 						TargetSessionID: sessionID,
-						Tool:            toolbroker.ToolSendInput,
+						Tool:            toolbroker.ToolSubagentInput,
 						Status:          chat.MailboxDeliveryStatusFailed,
 						Error:           deliverErr.Error(),
 					})
@@ -2122,7 +2122,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 				}
 				c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 					TargetSessionID: sessionID,
-					Tool:            toolbroker.ToolSendInput,
+					Tool:            toolbroker.ToolSubagentInput,
 					MessageID:       chat.MailboxDeliveryResultMessageID(delivery),
 					Status:          chat.MailboxDeliveryStatusQueued,
 					Delivered:       true,
@@ -2149,7 +2149,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 		if v2 {
 			c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 				TargetSessionID: sessionID,
-				Tool:            toolbroker.ToolSendInput,
+				Tool:            toolbroker.ToolSubagentInput,
 				Status:          chat.MailboxDeliveryStatusFailed,
 				Error:           err.Error(),
 			})
@@ -2166,7 +2166,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 		result.Triggered = true
 		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 			TargetSessionID: sessionID,
-			Tool:            toolbroker.ToolSendInput,
+			Tool:            toolbroker.ToolSubagentInput,
 			Status:          chat.MailboxDeliveryStatusDelivered,
 			Delivered:       true,
 			Triggered:       true,
@@ -3802,7 +3802,7 @@ func (c *sessionAgentController) enforceSpawnLimits(ctx context.Context, parentS
 	if limits.MaxDepth > 0 && childDepth > limits.MaxDepth {
 		return runtimeerrors.Newf(
 			runtimeerrors.ErrAgentSpawnDepthLimit,
-			"agent spawn depth limit reached: max_depth=%d requested_depth=%d; next_action=complete_locally_or_use_spawn_team — continue the work in the current agent, reuse an existing child, or use spawn_team; do not retry the same spawn_agent",
+			"agent spawn depth limit reached: max_depth=%d requested_depth=%d; next_action=complete_locally_or_use_team_spawn — continue the work in the current agent, reuse an existing child, or use team_spawn; do not retry the same subagent_spawn",
 			limits.MaxDepth, childDepth,
 		)
 	}
@@ -4834,7 +4834,7 @@ func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 	if toolPolicy.DeniedTools == nil {
 		toolPolicy.DeniedTools = map[string]bool{}
 	}
-	for _, toolName := range []string{"spawn_agent", "spawn_subagents", "spawn_team"} {
+	for _, toolName := range []string{"spawn_agent", "subagent_spawn", "spawn_subagents", "spawn_team", "team_spawn"} {
 		toolPolicy.DeniedTools[toolName] = true
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)

@@ -79,6 +79,12 @@ func (f *fakePersistStore) eventTypes() []string {
 	return types
 }
 
+func (f *fakePersistStore) snapshot() []runtimeevents.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]runtimeevents.Event(nil), f.events...)
+}
+
 func bufferTestEvent(eventType string) runtimeevents.Event {
 	return runtimeevents.Event{Type: eventType, SessionID: "buffer-session", Payload: map[string]interface{}{"type": eventType}}
 }
@@ -264,6 +270,30 @@ func TestEventPersistBufferSkipsAlreadyPersistedSeq(t *testing.T) {
 	require.Equal(t, int64(1), stats.SkippedPersisted)
 	require.Zero(t, stats.Enqueued)
 	require.Zero(t, fake.count())
+}
+
+// 回归：Enqueue 必须冻结 payload 快照。Bus.Publish 在发布方 goroutine 内同步回调
+// 入队，Enqueue 返回后发布方仍可能继续写入自己持有的 map；若落盘侧继续别名同一张
+// map，worker 的 json.Marshal 会与发布方写入竞态，触发 internal/runtime/maps.fatal
+// （concurrent map read and map write，栈顶为 makeMapArshaler/MapIndex）。
+func TestEventPersistBufferSnapshotsPayloadAtEnqueue(t *testing.T) {
+	ctx := context.Background()
+	fake := &fakePersistStore{}
+	buffer := NewEventPersistBuffer(fake, EventPersistBufferConfig{BatchSize: 1, FlushInterval: time.Hour})
+	t.Cleanup(func() { _ = buffer.Close(ctx) })
+
+	nested := map[string]interface{}{"value": "before"}
+	payload := map[string]interface{}{"value": "before", "nested": nested}
+	buffer.Enqueue(runtimeevents.Event{Type: "tool.completed", SessionID: "snapshot-session", Payload: payload})
+
+	// 入队返回后，发布方继续改写自己持有的 map（真实竞态场景）。
+	payload["value"] = "after"
+	nested["value"] = "after"
+
+	require.Eventually(t, func() bool { return fake.count() == 1 }, 2*time.Second, 5*time.Millisecond)
+	stored := fake.snapshot()[0]
+	require.Equal(t, "before", stored.Payload["value"], "buffer 必须在入队时冻结 payload 顶层快照")
+	require.Equal(t, "before", stored.Payload["nested"].(map[string]interface{})["value"], "嵌套 map 同样必须被深拷贝")
 }
 
 // P0-1 验收基准（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md §6）：

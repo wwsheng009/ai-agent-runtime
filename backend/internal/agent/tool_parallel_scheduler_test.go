@@ -179,42 +179,42 @@ func TestParallelToolBatchPlan_RejectsBrokerTools(t *testing.T) {
 		{
 			name: "spawn_team_with_read_only_tool",
 			calls: []types.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolSpawnTeam, Args: map[string]interface{}{}},
+				{ID: "call-1", Name: toolbroker.ToolTeamSpawn, Args: map[string]interface{}{}},
 				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
 			},
 		},
 		{
 			name: "spawn_agent_with_read_only_tool",
 			calls: []types.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolSpawnAgent, Args: map[string]interface{}{}},
+				{ID: "call-1", Name: toolbroker.ToolSubagentSpawn, Args: map[string]interface{}{}},
 				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
 			},
 		},
 		{
 			name: "two_spawn_agent_calls_stay_serial",
 			calls: []types.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolSpawnAgent, Args: map[string]interface{}{}},
-				{ID: "call-2", Name: toolbroker.ToolSpawnAgent, Args: map[string]interface{}{}},
+				{ID: "call-1", Name: toolbroker.ToolSubagentSpawn, Args: map[string]interface{}{}},
+				{ID: "call-2", Name: toolbroker.ToolSubagentSpawn, Args: map[string]interface{}{}},
 			},
 		},
 		{
 			name: "wait_agent_with_read_only_tool",
 			calls: []types.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolWaitAgent, Args: map[string]interface{}{}},
+				{ID: "call-1", Name: toolbroker.ToolSubagentWait, Args: map[string]interface{}{}},
 				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
 			},
 		},
 		{
 			name: "close_agent_with_read_only_tool",
 			calls: []types.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolCloseAgent, Args: map[string]interface{}{}},
+				{ID: "call-1", Name: toolbroker.ToolSubagentClose, Args: map[string]interface{}{}},
 				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
 			},
 		},
 		{
 			name: "read_agent_events_with_read_only_tool",
 			calls: []types.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolReadAgentEvents, Args: map[string]interface{}{}},
+				{ID: "call-1", Name: toolbroker.ToolSubagentEvents, Args: map[string]interface{}{}},
 				{ID: "call-2", Name: "read_a", Args: map[string]interface{}{}},
 			},
 		},

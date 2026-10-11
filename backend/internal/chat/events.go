@@ -60,5 +60,5 @@ const (
 	EventJobTerminalClosed            = "job_terminal_closed"
 	EventJobTerminalResized           = "job_terminal_resized"
 	EventJobInteractiveNotRecoverable = "job_interactive_not_recoverable"
-	EventMailboxReceived         = "mailbox_received"
+	EventMailboxReceived              = "mailbox_received"
 )

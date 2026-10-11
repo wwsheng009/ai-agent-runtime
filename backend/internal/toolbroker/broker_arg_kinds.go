@@ -48,11 +48,11 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"required":    toolArgFieldBool,
 		"suggestions": toolArgFieldStringOrList,
 	},
-	ToolEnterPlanMode: {
+	ToolPlanEnter: {
 		"plan_path":        toolArgFieldStringOrList,
 		"plan_write_paths": toolArgFieldStringOrList,
 	},
-	ToolExitPlanMode: {
+	ToolPlanExit: {
 		"decision": toolArgFieldString,
 	},
 	ToolPlanReview: {
@@ -107,26 +107,26 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"yield_time_ms": toolArgFieldNumber,
 		"close_stdin":   toolArgFieldBool,
 	},
-	ToolListAgents: {
+	ToolSubagentList: {
 		"include_closed": toolArgFieldBool,
 		"path_prefix":    toolArgFieldString,
 	},
-	ToolSendMessage: {
+	ToolSubagentSend: {
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 		"target":     toolArgFieldString,
 	},
-	ToolFollowupTask: {
+	ToolSubagentFollowup: {
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 		"target":     toolArgFieldString,
 	},
-	ToolResolveAgentApproval: {
+	ToolSubagentApprove: {
 		"allow":        toolArgFieldBool,
 		"request_id":   toolArgFieldString,
 		"patched_args": toolArgFieldObject,
 	},
-	ToolWaitAgent: {
+	ToolSubagentWait: {
 		"id":          toolArgFieldString,
 		"session_id":  toolArgFieldString,
 		"ids":         toolArgFieldStringOrList,
@@ -134,7 +134,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"after_seq":   toolArgFieldNumber,
 		"timeout_ms":  toolArgFieldNumber,
 	},
-	ToolReadAgentEvents: {
+	ToolSubagentEvents: {
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 		"view":       toolArgFieldString,
@@ -142,38 +142,38 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"limit":      toolArgFieldNumber,
 		"wait_ms":    toolArgFieldNumber,
 	},
-	ToolCloseAgent: {
+	ToolSubagentClose: {
 		"batch_id":   toolArgFieldString,
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 	},
-	ToolResumeAgent: {
+	ToolSubagentResume: {
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 	},
-	ToolApplyAgentWorktree: {
+	ToolSubagentApplyWorktree: {
 		"keep":       toolArgFieldBool,
 		"force":      toolArgFieldBool,
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 		"paths":      toolArgFieldStringOrList,
 	},
-	ToolDiscardAgentWorktree: {
+	ToolSubagentDiscardWorktree: {
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 	},
-	// spawn_team is intentionally absent: validateSpawnTeamArgTypes already
+	// team_spawn is intentionally absent: validateSpawnTeamArgTypes already
 	// checks every documented top-level key (including allow_existing,
 	// auto_start, team_id, workspace_id, lead_session_id, strategy, status),
 	// and the tasks[]/teammates[] entries have their own validators.
-	ToolWaitTeam: {
+	ToolTeamWait: {
 		"require_summary": toolArgFieldBool,
 		"team_id":         toolArgFieldString,
 		"after_seq":       toolArgFieldNumber,
 		"limit":           toolArgFieldNumber,
 		"timeout_ms":      toolArgFieldNumber,
 	},
-	ToolSendTeamMessage: {
+	ToolTeamSend: {
 		"body":     toolArgFieldString,
 		"kind":     toolArgFieldString,
 		"metadata": toolArgFieldObject,
@@ -181,17 +181,17 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"team_id":  toolArgFieldString,
 		"to_agent": toolArgFieldString,
 	},
-	ToolReadMailboxDigest: {
+	ToolTeamMailbox: {
 		"agent_id":  toolArgFieldString,
 		"mark_read": toolArgFieldBool,
 		"team_id":   toolArgFieldString,
 		"limit":     toolArgFieldNumber,
 	},
-	ToolReadTaskSpec: {
+	ToolTeamTaskSpec: {
 		"task_id": toolArgFieldString,
 		"team_id": toolArgFieldString,
 	},
-	ToolReadTaskContext: {
+	ToolTeamTaskContext: {
 		"include_dependencies": toolArgFieldBool,
 		"include_mailbox":      toolArgFieldBool,
 		"mark_read":            toolArgFieldBool,
@@ -200,7 +200,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"context_budget":       toolArgFieldNumber,
 		"mailbox_limit":        toolArgFieldNumber,
 	},
-	ToolReportTaskOutcome: {
+	ToolTeamTaskReport: {
 		"auto_replan": toolArgFieldBool,
 		"blocker":     toolArgFieldString,
 		"handoff_to":  toolArgFieldString,
@@ -211,7 +211,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"task_status": toolArgFieldString,
 		"team_id":     toolArgFieldString,
 	},
-	ToolBlockCurrentTask: {
+	ToolTeamTaskBlock: {
 		"auto_replan": toolArgFieldBool,
 		"blocker":     toolArgFieldString,
 		"handoff_to":  toolArgFieldString,

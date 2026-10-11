@@ -50,8 +50,8 @@ func TestCollaborationToolSchemasShareWaitBoundsAndDiscipline(t *testing.T) {
 		seen := map[string]int{}
 		for _, def := range definitions {
 			switch def.Name {
-			case ToolWaitAgent:
-				seen[ToolWaitAgent]++
+			case ToolSubagentWait:
+				seen[ToolSubagentWait]++
 				if !strings.Contains(def.Description, agentguidance.WaitDisciplineText()) {
 					t.Fatalf("%s: wait_agent must carry the shared wait discipline, got: %s", label, def.Description)
 				}
@@ -61,13 +61,13 @@ func TestCollaborationToolSchemasShareWaitBoundsAndDiscipline(t *testing.T) {
 				if got := waitSchemaPropDescription(t, def, "timeout_ms"); got != wantTimeout {
 					t.Fatalf("%s: wait_agent timeout_ms must describe the enforced bounds, got: %s", label, got)
 				}
-			case ToolReadAgentEvents:
-				seen[ToolReadAgentEvents]++
+			case ToolSubagentEvents:
+				seen[ToolSubagentEvents]++
 				if got := waitSchemaPropDescription(t, def, "wait_ms"); got != wantWait {
 					t.Fatalf("%s: read_agent_events wait_ms must describe the enforced bounds, got: %s", label, got)
 				}
-			case ToolWaitTeam:
-				seen[ToolWaitTeam]++
+			case ToolTeamWait:
+				seen[ToolTeamWait]++
 				if !strings.Contains(def.Description, agentguidance.WaitDisciplineText()) {
 					t.Fatalf("%s: wait_team must carry the shared wait discipline, got: %s", label, def.Description)
 				}
@@ -76,10 +76,10 @@ func TestCollaborationToolSchemasShareWaitBoundsAndDiscipline(t *testing.T) {
 				}
 			}
 		}
-		if seen[ToolWaitAgent] > 0 && seen[ToolReadAgentEvents] > 0 {
+		if seen[ToolSubagentWait] > 0 && seen[ToolSubagentEvents] > 0 {
 			exposed++
 		}
-		if seen[ToolWaitTeam] > 0 {
+		if seen[ToolTeamWait] > 0 {
 			teamExposed++
 		}
 	}
@@ -125,18 +125,18 @@ func TestCollaborationToolSchemaSourceHasNoLegacyWaitText(t *testing.T) {
 	counts := map[string]int{}
 	for i, line := range lines {
 		switch {
-		case strings.Contains(line, "Name:        ToolWaitAgent"):
-			counts[ToolWaitAgent]++
+		case strings.Contains(line, "Name:        ToolSubagentWait"):
+			counts[ToolSubagentWait]++
 			if !containsWithin(lines, i, 6, "agentguidance.WaitDisciplineText()") {
 				t.Fatalf("wait_agent definition at broker.go:%d does not attach the shared discipline text", i+1)
 			}
-		case strings.Contains(line, "Name:        ToolReadAgentEvents"):
-			counts[ToolReadAgentEvents]++
+		case strings.Contains(line, "Name:        ToolSubagentEvents"):
+			counts[ToolSubagentEvents]++
 			if !containsWithin(lines, i, 24, "agentguidance.EventsWaitArgText(") {
 				t.Fatalf("read_agent_events definition at broker.go:%d does not describe the enforced wait bounds", i+1)
 			}
-		case strings.Contains(line, "Name:        ToolWaitTeam"):
-			counts[ToolWaitTeam]++
+		case strings.Contains(line, "Name:        ToolTeamWait"):
+			counts[ToolTeamWait]++
 			if !containsWithin(lines, i, 24, "agentguidance.WaitTimeoutArgText(") {
 				t.Fatalf("wait_team definition at broker.go:%d does not describe the enforced wait bounds", i+1)
 			}
@@ -145,7 +145,7 @@ func TestCollaborationToolSchemaSourceHasNoLegacyWaitText(t *testing.T) {
 			}
 		}
 	}
-	if counts[ToolWaitAgent] < 2 || counts[ToolReadAgentEvents] < 2 || counts[ToolWaitTeam] < 1 {
+	if counts[ToolSubagentWait] < 2 || counts[ToolSubagentEvents] < 2 || counts[ToolTeamWait] < 1 {
 		t.Fatalf("expected both host variants of each collaboration wait tool, got %v", counts)
 	}
 }

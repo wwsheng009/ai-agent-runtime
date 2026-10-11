@@ -64,13 +64,13 @@ func TestDoomLoopTracker_ResetsOnDifferentArgs(t *testing.T) {
 func TestDoomLoopTracker_ExemptsPollingTools(t *testing.T) {
 	for _, toolName := range []string{
 		"task_output",
-		"wait_agent",
-		"read_agent_events",
-		"list_agents",
-		"wait_team",
-		"read_mailbox_digest",
-		"read_task_spec",
-		"read_task_context",
+		"subagent_wait",
+		"subagent_events",
+		"subagent_list",
+		"team_wait",
+		"team_mailbox",
+		"team_task_spec",
+		"team_task_context",
 		"get_goal",
 	} {
 		t.Run(toolName, func(t *testing.T) {

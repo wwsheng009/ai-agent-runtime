@@ -159,7 +159,7 @@ func IsRuntimeOwnedEssentialTool(toolName string) bool {
 	switch normalizeToolName(toolName) {
 	case "search_tool",
 		"ask_user_question",
-		"enter_plan_mode", "exit_plan_mode", "plan_review",
+		"plan_enter", "plan_exit", "plan_review",
 		"todos", "get_goal", "read_goal", "update_goal",
 		"background_task", "job_start", "task_output", "job_output", "job_list", "job_search",
 		"spawn_agent", "spawn_subagents", "spawn_team",

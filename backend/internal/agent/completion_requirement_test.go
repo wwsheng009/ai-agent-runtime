@@ -24,15 +24,15 @@ func TestNormalizeCompletionRequirement(t *testing.T) {
 func TestHasSuccessfulTaskOutcomeObservation(t *testing.T) {
 	assert.False(t, HasSuccessfulTaskOutcomeObservation(nil))
 	assert.False(t, HasSuccessfulTaskOutcomeObservation([]types.Observation{
-		{Tool: toolbroker.ToolReportTaskOutcome, Success: false},
+		{Tool: toolbroker.ToolTeamTaskReport, Success: false},
 		{Tool: "view", Success: true},
 	}))
 	assert.True(t, HasSuccessfulTaskOutcomeObservation([]types.Observation{
 		{Tool: "view", Success: true},
-		{Tool: toolbroker.ToolReportTaskOutcome, Success: true},
+		{Tool: toolbroker.ToolTeamTaskReport, Success: true},
 	}))
 	assert.True(t, HasSuccessfulTaskOutcomeObservation([]types.Observation{
-		{Tool: toolbroker.ToolBlockCurrentTask, Success: true},
+		{Tool: toolbroker.ToolTeamTaskBlock, Success: true},
 	}))
 }
 
@@ -47,7 +47,7 @@ func TestReActLoop_CompleteTaskRecoversThenSucceeds(t *testing.T) {
 				Model:   "test-model",
 				ToolCalls: []types.ToolCall{{
 					ID:   "call-outcome",
-					Name: toolbroker.ToolReportTaskOutcome,
+					Name: toolbroker.ToolTeamTaskReport,
 					Args: map[string]interface{}{
 						"task_status": "done",
 						"summary":     "analysis complete",
@@ -104,7 +104,7 @@ func TestReActLoop_CompleteTaskSkipsWhenAlreadyObserved(t *testing.T) {
 				Model:   "test-model",
 				ToolCalls: []types.ToolCall{{
 					ID:   "call-outcome",
-					Name: toolbroker.ToolReportTaskOutcome,
+					Name: toolbroker.ToolTeamTaskReport,
 					Args: map[string]interface{}{"task_status": "done", "summary": "done"},
 				}},
 			},
@@ -177,7 +177,7 @@ func (m *completionOutcomeMCPManager) CallTool(ctx interface{}, mcpName, toolNam
 	_ = mcpName
 	_ = args
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
-	case toolbroker.ToolReportTaskOutcome, toolbroker.ToolBlockCurrentTask:
+	case toolbroker.ToolTeamTaskReport, toolbroker.ToolTeamTaskBlock:
 		return map[string]interface{}{
 			"status":  "done",
 			"outcome": "done",
@@ -190,7 +190,7 @@ func (m *completionOutcomeMCPManager) CallTool(ctx interface{}, mcpName, toolNam
 
 func (m *completionOutcomeMCPManager) ListTools() []skill.ToolInfo {
 	return []skill.ToolInfo{
-		{Name: toolbroker.ToolReportTaskOutcome, Description: "Report task outcome", Enabled: true, MCPName: "completion-mcp"},
-		{Name: toolbroker.ToolBlockCurrentTask, Description: "Block current task", Enabled: true, MCPName: "completion-mcp"},
+		{Name: toolbroker.ToolTeamTaskReport, Description: "Report task outcome", Enabled: true, MCPName: "completion-mcp"},
+		{Name: toolbroker.ToolTeamTaskBlock, Description: "Block current task", Enabled: true, MCPName: "completion-mcp"},
 	}
 }

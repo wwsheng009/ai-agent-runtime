@@ -5205,10 +5205,10 @@ func TestReActLoop_GetAvailableTools_HidesTeamOnlyBrokerToolsUntilRunMetaActive(
 	for _, tool := range tools {
 		names = append(names, tool.Name)
 	}
-	assert.Contains(t, names, toolbroker.ToolSpawnTeam)
-	assert.NotContains(t, names, toolbroker.ToolReadTaskSpec)
-	assert.NotContains(t, names, toolbroker.ToolReadTaskContext)
-	assert.NotContains(t, names, toolbroker.ToolSendTeamMessage)
+	assert.Contains(t, names, toolbroker.ToolTeamSpawn)
+	assert.NotContains(t, names, toolbroker.ToolTeamTaskSpec)
+	assert.NotContains(t, names, toolbroker.ToolTeamTaskContext)
+	assert.NotContains(t, names, toolbroker.ToolTeamSend)
 
 	runCtx := team.WithRunMeta(context.Background(), &team.RunMeta{
 		Team: &team.TeamRunMeta{
@@ -5222,10 +5222,10 @@ func TestReActLoop_GetAvailableTools_HidesTeamOnlyBrokerToolsUntilRunMetaActive(
 	for _, tool := range tools {
 		names = append(names, tool.Name)
 	}
-	assert.Contains(t, names, toolbroker.ToolSpawnTeam)
-	assert.Contains(t, names, toolbroker.ToolReadTaskSpec)
-	assert.Contains(t, names, toolbroker.ToolReadTaskContext)
-	assert.Contains(t, names, toolbroker.ToolSendTeamMessage)
+	assert.Contains(t, names, toolbroker.ToolTeamSpawn)
+	assert.Contains(t, names, toolbroker.ToolTeamTaskSpec)
+	assert.Contains(t, names, toolbroker.ToolTeamTaskContext)
+	assert.Contains(t, names, toolbroker.ToolTeamSend)
 }
 
 func TestReActLoop_Run_FreezesToolSurfaceWithinActiveTurnAfterSpawnTeam(t *testing.T) {
@@ -5253,7 +5253,7 @@ func TestReActLoop_Run_FreezesToolSurfaceWithinActiveTurnAfterSpawnTeam(t *testi
 				ToolCalls: []types.ToolCall{
 					{
 						ID:   "tool_spawn_team",
-						Name: toolbroker.ToolSpawnTeam,
+						Name: toolbroker.ToolTeamSpawn,
 						Args: map[string]interface{}{
 							"team_id":    "team-cache-freeze",
 							"auto_start": false,
@@ -5282,12 +5282,12 @@ func TestReActLoop_Run_FreezesToolSurfaceWithinActiveTurnAfterSpawnTeam(t *testi
 
 	firstNames := toolDefinitionNames(provider.requests[0].Tools)
 	secondNames := toolDefinitionNames(provider.requests[1].Tools)
-	assert.Contains(t, firstNames, toolbroker.ToolSpawnTeam)
-	assert.NotContains(t, firstNames, toolbroker.ToolReadTaskSpec)
+	assert.Contains(t, firstNames, toolbroker.ToolTeamSpawn)
+	assert.NotContains(t, firstNames, toolbroker.ToolTeamTaskSpec)
 	assert.Equal(t, firstNames, secondNames)
-	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskSpec)
-	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskContext)
-	assert.NotContains(t, secondNames, toolbroker.ToolSendTeamMessage)
+	assert.NotContains(t, secondNames, toolbroker.ToolTeamTaskSpec)
+	assert.NotContains(t, secondNames, toolbroker.ToolTeamTaskContext)
+	assert.NotContains(t, secondNames, toolbroker.ToolTeamSend)
 }
 
 func TestReActLoop_GetAvailableTools_RecomputesForIndependentTurnSnapshots(t *testing.T) {
@@ -5310,8 +5310,8 @@ func TestReActLoop_GetAvailableTools_RecomputesForIndependentTurnSnapshots(t *te
 	firstTurnTools, err := loop.getAvailableTools(firstTurnCtx, "coordinate team tasks", nil)
 	require.NoError(t, err)
 	firstTurnNames := toolDefinitionNames(firstTurnTools)
-	assert.Contains(t, firstTurnNames, toolbroker.ToolSpawnTeam)
-	assert.NotContains(t, firstTurnNames, toolbroker.ToolReadTaskSpec)
+	assert.Contains(t, firstTurnNames, toolbroker.ToolTeamSpawn)
+	assert.NotContains(t, firstTurnNames, toolbroker.ToolTeamTaskSpec)
 
 	secondTurnCtx := ensureTurnToolSurfaceSnapshot(context.Background())
 	secondTurnCtx = team.WithRunMeta(secondTurnCtx, &team.RunMeta{
@@ -5323,10 +5323,10 @@ func TestReActLoop_GetAvailableTools_RecomputesForIndependentTurnSnapshots(t *te
 	secondTurnTools, err := loop.getAvailableTools(secondTurnCtx, "coordinate team tasks", nil)
 	require.NoError(t, err)
 	secondTurnNames := toolDefinitionNames(secondTurnTools)
-	assert.Contains(t, secondTurnNames, toolbroker.ToolSpawnTeam)
-	assert.Contains(t, secondTurnNames, toolbroker.ToolReadTaskSpec)
-	assert.Contains(t, secondTurnNames, toolbroker.ToolReadTaskContext)
-	assert.Contains(t, secondTurnNames, toolbroker.ToolSendTeamMessage)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolTeamSpawn)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolTeamTaskSpec)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolTeamTaskContext)
+	assert.Contains(t, secondTurnNames, toolbroker.ToolTeamSend)
 }
 
 func TestReActLoop_Run_EmitsRuntimeEvents(t *testing.T) {

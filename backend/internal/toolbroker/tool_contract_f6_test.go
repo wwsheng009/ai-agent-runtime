@@ -13,7 +13,7 @@ func TestBrokerCloseAgentAcceptsBatchID(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolCloseAgent, map[string]interface{}{
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentClose, map[string]interface{}{
 		"batch_id": "batch_727ab892152acd39",
 	})
 	require.NoError(t, err)
@@ -24,7 +24,7 @@ func TestBrokerCloseAgentAcceptsBatchID(t *testing.T) {
 	// 定义面必须文档化 batch_id（模型只能看见 schema 里存在的参数）。
 	found := false
 	for _, definition := range broker.Definitions() {
-		if definition.Name != ToolCloseAgent {
+		if definition.Name != ToolSubagentClose {
 			continue
 		}
 		properties, _ := definition.Parameters["properties"].(map[string]interface{})

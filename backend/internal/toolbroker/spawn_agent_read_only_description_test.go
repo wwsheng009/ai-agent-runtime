@@ -19,7 +19,7 @@ func TestSpawnAgentReadOnlyDescriptionMatchesPolicyConstant(t *testing.T) {
 	for name, broker := range brokers {
 		var description string
 		for _, def := range broker.Definitions() {
-			if def.Name != ToolSpawnAgent {
+			if def.Name != ToolSubagentSpawn {
 				continue
 			}
 			properties, ok := def.Parameters["properties"].(map[string]interface{})

@@ -15,7 +15,7 @@ func TestBrokerSpawnTeamCacheSafeSummaryIncludesTeamIDAndOmitsTaskIDsInEnvelope(
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store}
 
-	raw, meta, err := broker.Execute(context.Background(), "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, meta, err := broker.Execute(context.Background(), "session-1", ToolTeamSpawn, map[string]interface{}{
 		"auto_start": false,
 		"teammates": []interface{}{
 			map[string]interface{}{"name": "planner"},
@@ -39,7 +39,7 @@ func TestBrokerSpawnTeamCacheSafeSummaryIncludesTeamIDAndOmitsTaskIDsInEnvelope(
 
 	envelope, err := output.NewGateway(nil).Process(context.Background(), output.RawToolResult{
 		SessionID:  "session-1",
-		ToolName:   ToolSpawnTeam,
+		ToolName:   ToolTeamSpawn,
 		ToolCallID: "call-team-1",
 		Content:    raw,
 		Metadata: map[string]interface{}{
@@ -86,7 +86,7 @@ func TestBrokerReadMailboxDigestCacheSafeSummaryPreservesDigestWithoutMessageIDs
 		},
 	})
 
-	raw, meta, err := broker.Execute(runCtx, "session-1", ToolReadMailboxDigest, map[string]interface{}{"limit": 5})
+	raw, meta, err := broker.Execute(runCtx, "session-1", ToolTeamMailbox, map[string]interface{}{"limit": 5})
 	require.NoError(t, err)
 
 	result, ok := raw.(ReadMailboxDigestResult)
@@ -100,7 +100,7 @@ func TestBrokerReadMailboxDigestCacheSafeSummaryPreservesDigestWithoutMessageIDs
 
 	envelope, err := output.NewGateway(nil).Process(ctx, output.RawToolResult{
 		SessionID:  "session-1",
-		ToolName:   ToolReadMailboxDigest,
+		ToolName:   ToolTeamMailbox,
 		ToolCallID: "call-mail-1",
 		Content:    raw,
 		Metadata: map[string]interface{}{

@@ -21,8 +21,11 @@ const (
 	chatPreferenceSourceDefault     chatPreferenceSource = "default"
 )
 
-// resolveWorkspaceChatPreferences loads the workspace-scoped chat preferences
-// (decision D5): $HOME/.aicli/workspace/<hash>/chat-prefs.yaml. It sits below
+// resolveWorkspaceChatPreferences loads the effective workspace-scoped chat
+// preferences (decision D5): $HOME/.aicli/workspace/<hash>/chat-prefs.yaml.
+// Preferences are inherited from ancestor directories (nearest wins per key),
+// so a subdirectory automatically reuses its parent's provider/model/reasoning
+// defaults and only needs its own file for the keys it overrides. It sits below
 // the restored session context and above the global aicli.chat defaults so a
 // workspace that already made an interactive choice stops re-prompting, while
 // unconfigured workspaces fall back to the global defaults and then the

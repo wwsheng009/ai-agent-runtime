@@ -445,7 +445,7 @@ func TestSessionActorModelApproveRaisesApprovalCard(t *testing.T) {
 	// The user declines with feedback: plan mode stays active and the feedback
 	// reaches the model through the tool error.
 	outcome, pending := startModelPlanExit(t, actor, "approve", "plan is ready")
-	require.Equal(t, toolbroker.ToolExitPlanMode, pending.ToolName)
+	require.Equal(t, toolbroker.ToolPlanExit, pending.ToolName)
 	require.Equal(t, planmode.ExitApprovalReasonApprove, pending.Reason)
 	// The payload is the host contract for richer card copy: the TUI renders
 	// plan_path/decision/notes as readable lines (see humanApprovalReason).

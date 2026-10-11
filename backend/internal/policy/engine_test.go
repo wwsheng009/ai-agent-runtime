@@ -547,7 +547,7 @@ func TestEnginePlanModeAllowsEnterExitPlanModeTools(t *testing.T) {
 		Mode:                ModePlan,
 		PlanWriteAllowPaths: DefaultPlanWriteAllowPaths(),
 	}
-	for _, toolName := range []string{"enter_plan_mode", "exit_plan_mode"} {
+	for _, toolName := range []string{"plan_enter", "plan_exit"} {
 		decision, err := engine.Evaluate(context.Background(), EvalRequest{
 			ToolName: toolName,
 			Mode:     ModePlan,

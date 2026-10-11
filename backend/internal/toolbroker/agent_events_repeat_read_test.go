@@ -36,7 +36,7 @@ func (c *scriptedReadController) ReadEvents(ctx context.Context, args ReadAgentE
 
 func executeReadAgentEvents(t *testing.T, broker *Broker, caller string, args map[string]interface{}) (*AgentEventsResult, map[string]interface{}) {
 	t.Helper()
-	rawResult, meta, err := broker.Execute(context.Background(), caller, ToolReadAgentEvents, args)
+	rawResult, meta, err := broker.Execute(context.Background(), caller, ToolSubagentEvents, args)
 	if err != nil {
 		t.Fatalf("read_agent_events failed: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestBroker_CloseAgent_ForgetsReadWindowStreak(t *testing.T) {
 	if result := read(); result.Unchanged {
 		t.Fatalf("first read must not be marked unchanged: %#v", result)
 	}
-	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolCloseAgent, map[string]interface{}{"id": "child-1"}); err != nil {
+	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentClose, map[string]interface{}{"id": "child-1"}); err != nil {
 		t.Fatalf("close_agent failed: %v", err)
 	}
 	if result := read(); result.Unchanged {
@@ -291,7 +291,7 @@ func TestBrokerDefinitions_ReadAgentEventsDocumentsUnchangedSignal(t *testing.T)
 	broker := &Broker{AgentSessions: &fakeAgentSessionController{}}
 	seen := 0
 	for _, definition := range broker.Definitions() {
-		if definition.Name != ToolReadAgentEvents {
+		if definition.Name != ToolSubagentEvents {
 			continue
 		}
 		seen++

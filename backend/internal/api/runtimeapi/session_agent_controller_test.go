@@ -209,7 +209,7 @@ func TestSessionAgentControllerSpawnRejectsCompleteTaskCompletionRequirement(t *
 		CompletionRequirement: "complete_task",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "use spawn_team")
+	assert.Contains(t, err.Error(), "use team_spawn")
 
 	_, getErr := sessionManager.Get(ctx, "api-reject-complete-child")
 	require.Error(t, getErr)
@@ -1536,7 +1536,7 @@ func TestSessionAgentControllerV2SendInputBusyQueuesWithAudit(t *testing.T) {
 		foundAudit = true
 		assert.Equal(t, chat.MailboxDeliveryStatusQueued, event.Payload["mailbox_delivery_status"])
 		assert.Equal(t, "api-v2-sendinput-child", event.Payload["target_session_id"])
-		assert.Equal(t, toolbroker.ToolSendInput, event.Payload["tool"])
+		assert.Equal(t, toolbroker.ToolSubagentInput, event.Payload["tool"])
 	}
 	assert.True(t, foundAudit, "target session must keep a readable delivery audit record")
 }

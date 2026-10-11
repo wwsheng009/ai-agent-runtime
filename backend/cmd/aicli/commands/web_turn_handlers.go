@@ -74,8 +74,8 @@ type chatWebTurnRecord struct {
 	// baseAssistantCount 是本轮起点（session_start 时刻）的 assistant 消息条数，
 	// 供 assistant_message 事件缺失时从会话历史回填预览做「是否增长」判定。
 	baseAssistantCount int `json:"-"`
-	startedAt  time.Time
-	finishedAt time.Time
+	startedAt          time.Time
+	finishedAt         time.Time
 }
 
 // chatWebTurnQueryResponse 是 GET /web/api/turn 的响应体。

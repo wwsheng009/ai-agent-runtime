@@ -25,7 +25,7 @@ func TestReActLoop_OnProgressReportsRunTicks(t *testing.T) {
 				Model:   "test-model",
 				ToolCalls: []types.ToolCall{{
 					ID:   "call-outcome",
-					Name: toolbroker.ToolReportTaskOutcome,
+					Name: toolbroker.ToolTeamTaskReport,
 					Args: map[string]interface{}{"task_status": "done", "summary": "done"},
 				}},
 			},

@@ -189,7 +189,7 @@ func isBuiltinCoreToolName(name string) bool {
 		"view", "grep", "glob", "ls",
 		"write", "edit", "multiedit", "apply_patch", "append_write",
 		"todos", "artifact_read", "web_search", "fetch", "download",
-		"ask_user_question", "enter_plan_mode", "exit_plan_mode",
+		"ask_user_question", "plan_enter", "plan_exit",
 		"job_start", "job_output", "job_cancel", "job_monitor", "job_control", "job_input", "job_list", "job_search",
 		"background_task", "task_output",
 		"write_stdin", "task_input",

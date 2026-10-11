@@ -436,7 +436,7 @@ func (p *docsTeamRegressionProvider) Call(ctx context.Context, req *runtimellm.L
 			ToolCalls: []runtimetypes.ToolCall{
 				{
 					ID:   "call-spawn-docs",
-					Name: toolbroker.ToolSpawnTeam,
+					Name: toolbroker.ToolTeamSpawn,
 					Args: map[string]interface{}{
 						"team_id":    "team_docs",
 						"auto_start": true,
@@ -504,7 +504,7 @@ func (p *docsTeamRegressionProvider) handleTeammateRequest(sessionID string, req
 	case "team_docs__docs_arch":
 		switch toolCallID {
 		case "":
-			return singleToolResponse(req.Model, "call-docs-arch-spec", toolbroker.ToolReadTaskSpec, map[string]interface{}{})
+			return singleToolResponse(req.Model, "call-docs-arch-spec", toolbroker.ToolTeamTaskSpec, map[string]interface{}{})
 		case "call-docs-arch-spec":
 			return singleToolResponse(req.Model, "call-docs-arch-ls", "ls", map[string]interface{}{
 				"path":  filepath.Join(p.workspaceRoot, "docs"),
@@ -525,7 +525,7 @@ func (p *docsTeamRegressionProvider) handleTeammateRequest(sessionID string, req
 	case "team_docs__docs_api":
 		switch toolCallID {
 		case "":
-			return singleToolResponse(req.Model, "call-docs-api-context", toolbroker.ToolReadTaskContext, map[string]interface{}{})
+			return singleToolResponse(req.Model, "call-docs-api-context", toolbroker.ToolTeamTaskContext, map[string]interface{}{})
 		case "call-docs-api-context":
 			return singleToolResponse(req.Model, "call-docs-api-view", "view", map[string]interface{}{
 				"file_path": filepath.Join(p.workspaceRoot, "docs", "guides", "getting-started.md"),
@@ -625,7 +625,7 @@ func (p *docsListTranscriptProvider) Call(ctx context.Context, req *runtimellm.L
 				ToolCalls: []runtimetypes.ToolCall{
 					{
 						ID:   "call-spawn-list-based",
-						Name: toolbroker.ToolSpawnTeam,
+						Name: toolbroker.ToolTeamSpawn,
 						Args: map[string]interface{}{
 							"team_id":    "team_list_docs",
 							"auto_start": false,
@@ -641,7 +641,7 @@ func (p *docsListTranscriptProvider) Call(ctx context.Context, req *runtimellm.L
 			ToolCalls: []runtimetypes.ToolCall{
 				{
 					ID:   "call-spawn-ghost",
-					Name: toolbroker.ToolSpawnTeam,
+					Name: toolbroker.ToolTeamSpawn,
 					Args: map[string]interface{}{
 						"team_id":    "team_wrong_docs",
 						"auto_start": false,

@@ -458,7 +458,7 @@ func TestTeammateRunnerRecoversStructuredBlockedWhenCompleteTaskMissing(t *testi
 		Sessions: &staticSessionClient{
 			result: &SessionResult{
 				Success: false,
-				Error:   "completion requirement complete_task was not satisfied: no successful report_task_outcome or block_current_task observation",
+				Error:   "completion requirement complete_task was not satisfied: no successful team_task_report or team_task_block observation",
 				Output:  "Scanned docs root and agents intro.\n\n```json\n{\"task_status\":\"blocked\",\"summary\":\"waiting on focused API guide summary\",\"blocker\":\"need a dedicated summary for docs/guides/getting-started.md\"}\n```",
 			},
 		},
@@ -490,7 +490,7 @@ func TestTeammateRunnerRecoversStructuredDoneWhenCompleteTaskMissing(t *testing.
 		Sessions: &staticSessionClient{
 			result: &SessionResult{
 				Success: false,
-				Error:   "completion requirement complete_task was not satisfied: no successful report_task_outcome or block_current_task observation",
+				Error:   "completion requirement complete_task was not satisfied: no successful team_task_report or team_task_block observation",
 				Output:  "Focused guide reviewed.\n\n```json\n{\"task_status\":\"done\",\"summary\":\"docs/guides/getting-started.md explains how to start using the docs toolkit\"}\n```",
 			},
 		},
@@ -674,7 +674,7 @@ func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 	assert.Contains(t, client.prompt, "check the latest task context")
 	assert.Contains(t, client.prompt, "- Difficulty: hard")
 	assert.Contains(t, client.prompt, "- Difficulty rationale: Requires shared context review.")
-	assert.Contains(t, client.prompt, "read_task_spec or read_task_context")
+	assert.Contains(t, client.prompt, "team_task_spec or team_task_context")
 	assert.Contains(t, client.prompt, "protocol error")
 	assert.Contains(t, client.prompt, "prefer direct read-only tools such as ls, glob, grep, and view")
 	assert.Contains(t, client.prompt, "The local grep tool prefers ripgrep (rg) when it is available")
@@ -731,8 +731,8 @@ func TestTeammateRunnerMarksMailboxDigestReadWhenInjected(t *testing.T) {
 	assert.Contains(t, client.prompt, "-n/-H/-N/--no-filename/--color")
 	assert.Contains(t, client.prompt, "line_number/heading/no_heading/with_filename/no_filename/color")
 	assert.Contains(t, client.prompt, "Do not use background_task or shell commands for basic file listing or file reading")
-	assert.Contains(t, client.prompt, "Prefer report_task_outcome for done/failed/blocked/handoff outcomes")
-	assert.Contains(t, client.prompt, "If you do not call report_task_outcome or block_current_task, end your final response with a structured status block")
+	assert.Contains(t, client.prompt, "Prefer team_task_report for done/failed/blocked/handoff outcomes")
+	assert.Contains(t, client.prompt, "If you do not call team_task_report or team_task_block, end your final response with a structured status block")
 
 	remaining, err := store.ListMail(ctx, MailFilter{
 		TeamID:           teamID,

@@ -3929,7 +3929,7 @@ func TestSessionActorAnswerQuestionResumesWithFrozenToolSurfaceWithinSameTurn(t 
 				ToolCalls: []types.ToolCall{
 					{
 						ID:   "tool_spawn_team",
-						Name: toolbroker.ToolSpawnTeam,
+						Name: toolbroker.ToolTeamSpawn,
 						Args: map[string]interface{}{
 							"team_id":    "team-frozen-tools",
 							"auto_start": false,
@@ -4000,10 +4000,10 @@ func TestSessionActorAnswerQuestionResumesWithFrozenToolSurfaceWithinSameTurn(t 
 	require.NotNil(t, state)
 	assert.True(t, state.FrozenTurnToolsSet)
 	frozenNames := toolDefinitionNames(state.FrozenTurnTools)
-	assert.Contains(t, frozenNames, toolbroker.ToolSpawnTeam)
-	assert.NotContains(t, frozenNames, toolbroker.ToolReadTaskSpec)
-	assert.NotContains(t, frozenNames, toolbroker.ToolReadTaskContext)
-	assert.NotContains(t, frozenNames, toolbroker.ToolSendTeamMessage)
+	assert.Contains(t, frozenNames, toolbroker.ToolTeamSpawn)
+	assert.NotContains(t, frozenNames, toolbroker.ToolTeamTaskSpec)
+	assert.NotContains(t, frozenNames, toolbroker.ToolTeamTaskContext)
+	assert.NotContains(t, frozenNames, toolbroker.ToolTeamSend)
 
 	actor2, err := NewSessionActor(session.ID, SessionActorConfig{
 		Agent:        apiAgent,
@@ -4044,10 +4044,10 @@ func TestSessionActorAnswerQuestionResumesWithFrozenToolSurfaceWithinSameTurn(t 
 	firstNames := toolDefinitionNames(provider.requests[0].Tools)
 	secondNames := toolDefinitionNames(provider.requests[1].Tools)
 	assert.Equal(t, firstNames, secondNames)
-	assert.Contains(t, secondNames, toolbroker.ToolSpawnTeam)
-	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskSpec)
-	assert.NotContains(t, secondNames, toolbroker.ToolReadTaskContext)
-	assert.NotContains(t, secondNames, toolbroker.ToolSendTeamMessage)
+	assert.Contains(t, secondNames, toolbroker.ToolTeamSpawn)
+	assert.NotContains(t, secondNames, toolbroker.ToolTeamTaskSpec)
+	assert.NotContains(t, secondNames, toolbroker.ToolTeamTaskContext)
+	assert.NotContains(t, secondNames, toolbroker.ToolTeamSend)
 }
 
 func TestSessionActorApproveToolResumesWithoutInMemoryWaiter(t *testing.T) {

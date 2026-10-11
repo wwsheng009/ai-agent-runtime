@@ -2052,7 +2052,7 @@ func applyLocalChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 	if toolPolicy.DeniedTools == nil {
 		toolPolicy.DeniedTools = map[string]bool{}
 	}
-	for _, toolName := range []string{"spawn_agent", "spawn_subagents", "spawn_team"} {
+	for _, toolName := range []string{"spawn_agent", "subagent_spawn", "spawn_subagents", "spawn_team", "team_spawn"} {
 		toolPolicy.DeniedTools[toolName] = true
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
@@ -2761,14 +2761,14 @@ func buildLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) stri
 			"Interpret \"当前目录\", \".\", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.",
 			"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 			"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
-			"Team collaboration tools such as read_task_spec, read_task_context, send_team_message, read_mailbox_digest, report_task_outcome, and block_current_task require an active team run. Ordinary spawn_agent children only support completion_requirement=none; use spawn_team or a Team assignment when a structured complete_task outcome is required.",
+			"Team collaboration tools such as team_task_spec, team_task_context, team_send, team_mailbox, team_task_report, and team_task_block require an active team run. Ordinary subagent_spawn children only support completion_requirement=none; use team_spawn or a Team assignment when a structured complete_task outcome is required.",
 			"When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id=\"current\" for teammates.",
 			"For simple single-command checks such as `git status`, inspect them directly in the parent session; do not spawn a child agent unless the user explicitly asks for subagents or the task benefits from parallel delegation.",
-			"When the user explicitly requests a trusted bounded child agent task that must run local tools, pass spawn_agent permission_mode=\"bypass_permissions\" only if the task is safe and scoped; otherwise keep the default approval behavior and expect the child may wait for approval.",
-			"If a spawn_agent child reaches waiting_approval, inspect pending_approval_id or the approval_requested event and call resolve_agent_approval with allow=true or allow=false; do not repeatedly wait, poll, rerun the same tool in the parent, or start a fallback agent for that approval.",
-			"When calling spawn_team from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
-			"When you call spawn_team with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
-			"After spawn_team auto_start=true, call wait_team with the returned team_id to wait for durable team.completed/team.summary. Do not use wait_agent or read_agent_events for spawn_team teammate ids such as member-1; those tools are only for spawn_agent child sessions.",
+			"When the user explicitly requests a trusted bounded child agent task that must run local tools, pass subagent_spawn permission_mode=\"bypass_permissions\" only if the task is safe and scoped; otherwise keep the default approval behavior and expect the child may wait for approval.",
+			"If a subagent_spawn child reaches waiting_approval, inspect pending_approval_id or the approval_requested event and call subagent_approve with allow=true or allow=false; do not repeatedly wait, poll, rerun the same tool in the parent, or start a fallback agent for that approval.",
+			"When calling team_spawn from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
+			"When you call team_spawn with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
+			"After team_spawn auto_start=true, call team_wait with the returned team_id to wait for durable team.completed/team.summary. Do not use subagent_wait or subagent_events for team_spawn teammate ids such as member-1; those tools are only for subagent_spawn child sessions.",
 		)
 	}
 	return strings.Join(lines, "\n\n")

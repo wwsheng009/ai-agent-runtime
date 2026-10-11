@@ -58,7 +58,7 @@ func TestBrokerExecuteWaitTeamLedgerFinalizesDrainedTaskLedger(t *testing.T) {
 	require.NoError(t, err)
 
 	broker := &Broker{TeamStore: store}
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 5000,
 	})
@@ -107,7 +107,7 @@ func TestBrokerExecuteWaitTeamLedgerKeepsPendingRowsOutOfFinalize(t *testing.T) 
 			return agentcontrol.WaitTimeoutPolicy{DefaultMs: 1, MinMs: 1, MaxMs: 1000}
 		},
 	}
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 1,
 	})
@@ -154,7 +154,7 @@ func TestBrokerExecuteWaitTeamLedgerReportsTaskThatFinishedDuringWait(t *testing
 			return agentcontrol.WaitTimeoutPolicy{DefaultMs: 400, MinMs: 1, MaxMs: 1000}
 		},
 	}
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 400,
 	})
@@ -181,7 +181,7 @@ func TestBrokerExecuteWaitTeamLedgerFailsOpenOnTaskStoreError(t *testing.T) {
 	wrapper := &failingListTasksStore{SQLiteStore: store}
 
 	broker := &Broker{TeamStore: wrapper}
-	raw, _, err := broker.Execute(context.Background(), "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(context.Background(), "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 5000,
 	})

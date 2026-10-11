@@ -135,6 +135,32 @@ go vet（相关包）  ✅
 - 测试：`TestTaskOriginPersistence`（manual/model round-trip + 旧行回落）、
   `TestCreateScheduleTask_ManualOrigin`/`_ReusesServiceValidation`（HTTP 层）。
 
+### P8（命名契约执行——B1–B4 全量落地）
+`docs/automation-tasks/tool-surface-inventory-and-naming-review.md` §4/§5/§7 的
+迁移批次全部完成：
+- **B1**：后台作业归一为 `job_*`（`job_start/output/cancel/monitor/control/input`），
+  新增 `job_list`/`job_search` 读取面（ListJobs 客户端侧过滤）；旧名
+  `background_task`/`task_*`/`write_stdin`/`task_input` 保留为可调用别名
+  （normalizeToolName 映射）。
+- **B2**：团队域归一为 `team_*`（`team_spawn/wait/send/mailbox/task_spec/
+  task_context/task_report/task_block`）。**关键修复**：`applyObservedTaskOutcome`
+  与 complete_task 结果观察的匹配表补入新名——旧名匹配导致 teammate 的
+  `team_task_report` 观察被丢弃、任务终态从不落地（FailedAutoStart 集成测试
+  3/3 复现钉住）；lead-planner 摘要提示与 teammate 提示同步改名。
+- **B3**：子代理域归一为 `subagent_*`（`subagent_spawn/list/send/followup/
+  input/approve/wait/events/close/resume/apply_worktree/discard_worktree`）。
+- **B4**：计划模式归一为 `plan_enter/plan_exit`（`plan_review` 不变）。
+- **契约测试**：`tool_naming_contract_test.go` 四断言——广告面全部匹配
+  `<domain>_<verb>`（域封闭集合 + 动词封闭集合 + 核心原语白名单）、全部旧名
+  别名仍可 normalize、广告面不含任何旧名、canonical 名是 normalize 不动点。
+  新增工具将被测试拦截，防止命名再次漂移。
+- 深度策略/只读策略/capability 表/taxonomy/listable/doom-loop 豁免与
+  轮询软刹车（`subagent_wait` 等）、本地宿主系统提示、深度上限 deny 表
+  （subagent_spawn/team_spawn 双名）全部同步。
+- 已知边界：`agentcontrol.WorkflowSpawnTeam = "spawn_team"` 是**持久化 workflow
+  标签**（DB 行值），不是工具名，保持不变；`/s` 斜杠候选与 catalog 等失败的
+  项属 P4 调度命令交付的既有问题，与命名契约无关。
+
 ### C3 结论（不做自动化桥）
 作业终态已有 supervision 投影 + wake 投递（`projectLocalBackgroundJobTerminal`），
 模型在下一 turn 可见结果——再自动创建 `at` 提醒会引入双投递，且违反"创建始终

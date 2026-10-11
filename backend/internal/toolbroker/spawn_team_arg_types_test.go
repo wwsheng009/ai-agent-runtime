@@ -110,7 +110,7 @@ func TestBrokerSpawnTeamRejectsKindMismatchBeforeCreatingTeam(t *testing.T) {
 	ctx := context.Background()
 	broker := &Broker{TeamStore: store}
 
-	_, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	_, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":    "team-kind-mismatch",
 		"auto_start": "false",
 		"tasks":      []interface{}{map[string]interface{}{"goal": "do the work"}},
@@ -132,7 +132,7 @@ func TestBrokerSpawnTeamReadsEveryJSONNumberSpelling(t *testing.T) {
 	ctx := context.Background()
 	broker := &Broker{TeamStore: store}
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":       "team-number-spellings",
 		"auto_start":    false,
 		"max_teammates": json.Number("2"),
@@ -168,7 +168,7 @@ func TestBrokerSpawnTeamRejectsFractionalLimit(t *testing.T) {
 	ctx := context.Background()
 	broker := &Broker{TeamStore: store}
 
-	_, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	_, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":       "team-fractional",
 		"max_teammates": 2.5,
 	})

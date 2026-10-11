@@ -693,7 +693,7 @@ func TestSyncTeamLifecycleLoopsCompletesTeamWhenTeammateReportsOutcomeViaBroker(
 				ToolCalls: []types.ToolCall{
 					{
 						ID:   "tool_report_outcome_1",
-						Name: toolbroker.ToolReportTaskOutcome,
+						Name: toolbroker.ToolTeamTaskReport,
 						Args: map[string]interface{}{
 							"task_status": "done",
 							"summary":     "auto team ok",

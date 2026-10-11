@@ -216,7 +216,7 @@ func TestBroker_Definitions_ExposeAgentToolsWhenControllerConfigured(t *testing.
 		seen[def.Name] = true
 	}
 
-	for _, name := range []string{ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree} {
+	for _, name := range []string{ToolSubagentSpawn, ToolSubagentList, ToolSubagentSend, ToolSubagentFollowup, ToolSubagentInput, ToolSubagentApprove, ToolSubagentWait, ToolSubagentEvents, ToolSubagentClose, ToolSubagentResume, ToolSubagentApplyWorktree, ToolSubagentDiscardWorktree} {
 		if !seen[name] {
 			t.Fatalf("expected %s in broker definitions", name)
 		}
@@ -227,7 +227,7 @@ func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
 	broker := &Broker{AgentSessions: &fakeAgentSessionController{}}
 	var spawnDef map[string]interface{}
 	for _, def := range broker.Definitions() {
-		if def.Name == ToolSpawnAgent {
+		if def.Name == ToolSubagentSpawn {
 			spawnDef = def.Parameters
 			break
 		}
@@ -286,7 +286,7 @@ func TestBroker_Definitions_ExposeResolveAgentApprovalSchema(t *testing.T) {
 	broker := &Broker{AgentSessions: &fakeAgentSessionController{}}
 	var approveDef map[string]interface{}
 	for _, def := range broker.Definitions() {
-		if def.Name == ToolResolveAgentApproval {
+		if def.Name == ToolSubagentApprove {
 			approveDef = def.Parameters
 			break
 		}
@@ -409,7 +409,7 @@ func TestBroker_Execute_SpawnAgentParsesRouteHints(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":              "inspect routing",
 		"agent_type":           "worker",
 		"difficulty":           "HARD",
@@ -445,7 +445,7 @@ func TestBroker_ExecuteToolCall_SpawnAgentInjectsParentToolCallID(t *testing.T) 
 
 	_, _, err := broker.ExecuteToolCall(context.Background(), "parent-session", types.ToolCall{
 		ID:   "call-spawn-42",
-		Name: ToolSpawnAgent,
+		Name: ToolSubagentSpawn,
 		Args: map[string]interface{}{"message": "inspect"},
 	})
 	if err != nil {
@@ -456,7 +456,7 @@ func TestBroker_ExecuteToolCall_SpawnAgentInjectsParentToolCallID(t *testing.T) 
 	}
 
 	// 旧入口（无 tool call id）不得伪造归位信息。
-	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"}); err != nil {
+	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"}); err != nil {
 		t.Fatalf("spawn_agent failed: %v", err)
 	}
 	if controller.lastSpawn.ParentToolCallID != "" {
@@ -469,7 +469,7 @@ func TestBroker_Execute_SpawnAgentInheritsPermissionModeFromRunMeta(t *testing.T
 	broker := &Broker{AgentSessions: controller}
 	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "bypass_permissions"})
 
-	_, _, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"})
+	_, _, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"})
 	if err != nil {
 		t.Fatalf("spawn_agent failed: %v", err)
 	}
@@ -484,11 +484,11 @@ func TestBroker_Execute_SpawnAgentRejectsCompleteTaskCompletionRequirement(t *te
 			controller := &fakeAgentSessionController{}
 			broker := &Broker{AgentSessions: controller}
 
-			_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+			_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 				"message": "finish with outcome",
 				key:       "Complete-Task",
 			})
-			if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+			if err == nil || !strings.Contains(err.Error(), "use team_spawn") {
 				t.Fatalf("expected actionable complete_task rejection, got %v", err)
 			}
 			if controller.lastParent != "" {
@@ -511,7 +511,7 @@ func TestBroker_Execute_SpawnAgentDoesNotInheritCompletionRequirementFromRunMeta
 		},
 	})
 
-	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"})
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"})
 	if err != nil {
 		t.Fatalf("spawn_agent failed: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestBroker_Execute_SpawnAgentRejectsUnknownCompletionRequirement(t *testing
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":                "inspect",
 		"completion_requirement": "must_finish",
 	})
@@ -546,7 +546,7 @@ func TestBroker_Execute_SpawnAgentParsesIsolation(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":   "inspect isolation",
 		"isolation": " WorkTree ",
 	})
@@ -569,7 +569,7 @@ func TestBroker_Execute_SpawnAgentDefaultsIsolationNone(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message": "default isolation",
 	})
 	if err != nil {
@@ -587,7 +587,7 @@ func TestBroker_Execute_SpawnAgentRejectsInvalidIsolation(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":   "bad isolation",
 		"isolation": "sandbox",
 	})
@@ -606,7 +606,7 @@ func TestBroker_Execute_SpawnAgentAppliesAgentdefDefaults(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":    "scout the tree",
 		"agent_type": "explore",
 	})
@@ -628,7 +628,7 @@ func TestBroker_Execute_SpawnAgentExplicitArgsWinOverAgentdef(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":         "override",
 		"agent_type":      "explore",
 		"permission_mode": "bypass_permissions",
@@ -654,7 +654,7 @@ func TestBroker_Execute_ReadOnlySpawnDefaultsToPlanMode(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "bypass_permissions"})
 
-	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":   "review only",
 		"read_only": true,
 	})
@@ -673,7 +673,7 @@ func TestBroker_Execute_SpawnAgentRejectsInvalidPermissionMode(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":         "inspect",
 		"permission_mode": "unsafe",
 	})
@@ -689,7 +689,7 @@ func TestBroker_Execute_SpawnAgentUsesThinkingEffortAlias(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":         "inspect",
 		"thinking_effort": "medium",
 	})
@@ -708,7 +708,7 @@ func TestBroker_Execute_SpawnAgentRejectsInvalidDifficulty(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":    "inspect",
 		"difficulty": "extreme",
 	})
@@ -861,7 +861,7 @@ func TestNormalizeOrdinarySpawnAgentArgsRejectsCompleteTask(t *testing.T) {
 		Message:               "inspect",
 		CompletionRequirement: "complete_task",
 	})
-	if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+	if err == nil || !strings.Contains(err.Error(), "use team_spawn") {
 		t.Fatalf("expected complete_task rejection, got %v", err)
 	}
 	got, err := NormalizeOrdinarySpawnAgentArgs(SpawnAgentArgs{
@@ -902,7 +902,7 @@ func TestNormalizeOrdinarySpawnAgentArgsRejectsCompleteTaskAgentdef(t *testing.T
 		Message:   "inspect",
 		AgentType: "worker-complete",
 	})
-	if err == nil || !strings.Contains(err.Error(), "use spawn_team") {
+	if err == nil || !strings.Contains(err.Error(), "use team_spawn") {
 		t.Fatalf("expected agentdef complete_task rejection, got %v", err)
 	}
 }
@@ -911,7 +911,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	result, meta, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	result, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":      "inspect repo",
 		"agent_type":   "explorer",
 		"fork_turns":   "1",
@@ -930,7 +930,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected spawn result/meta: %#v %#v", result, meta)
 	}
 
-	rawList, meta, err := broker.Execute(context.Background(), "parent-session", ToolListAgents, map[string]interface{}{
+	rawList, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentList, map[string]interface{}{
 		"path_prefix":    "/root",
 		"include_closed": true,
 	})
@@ -948,7 +948,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	// The scope is host-derived: a model-supplied parent_session_id is ignored
 	// so the call can never read another agent's tree, and the dropped key is
 	// reported back instead of silently steering the lookup.
-	_, scopeMeta, err := broker.Execute(context.Background(), "parent-session", ToolListAgents, map[string]interface{}{
+	_, scopeMeta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentList, map[string]interface{}{
 		"parent_session_id": "other-root-session",
 	})
 	if err != nil {
@@ -964,7 +964,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("expected parent_session_id to be reported as ignored, got %#v", scopeMeta["ignored_args"])
 	}
 
-	rawMsg, meta, err := broker.Execute(context.Background(), "parent-session", ToolSendMessage, map[string]interface{}{
+	rawMsg, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSend, map[string]interface{}{
 		"target":  "child-1",
 		"message": "note only",
 	})
@@ -979,7 +979,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected send_message result/meta: %#v %#v", rawMsg, meta)
 	}
 
-	rawFollow, meta, err := broker.Execute(context.Background(), "parent-session", ToolFollowupTask, map[string]interface{}{
+	rawFollow, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentFollowup, map[string]interface{}{
 		"target":  "child-1",
 		"message": "new task",
 	})
@@ -994,7 +994,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected followup_task result/meta: %#v %#v", rawFollow, meta)
 	}
 
-	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSendInput, map[string]interface{}{
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentInput, map[string]interface{}{
 		"id":        "child-1",
 		"message":   "continue",
 		"interrupt": true,
@@ -1006,7 +1006,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected send_input args: %#v", controller.lastInput)
 	}
 
-	rawApprove, meta, err := broker.Execute(context.Background(), "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+	rawApprove, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentApprove, map[string]interface{}{
 		"id":         "child-1",
 		"request_id": "approval-1",
 		"allow":      true,
@@ -1025,7 +1025,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected resolve_agent_approval result/meta: %#v %#v", rawApprove, meta)
 	}
 
-	_, _, err = broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentWait, map[string]interface{}{
 		"id":         "child-1",
 		"timeout_ms": float64((5 * time.Second).Milliseconds()),
 	})
@@ -1036,7 +1036,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected wait args: %#v", controller.lastWait)
 	}
 
-	_, _, err = broker.Execute(context.Background(), "parent-session", ToolCloseAgent, map[string]interface{}{"id": "child-1"})
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentClose, map[string]interface{}{"id": "child-1"})
 	if err != nil {
 		t.Fatalf("close_agent failed: %v", err)
 	}
@@ -1044,7 +1044,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected close id: %s", controller.lastClose)
 	}
 
-	_, _, err = broker.Execute(context.Background(), "parent-session", ToolCloseAgent, map[string]interface{}{"id": "/root/child-1"})
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentClose, map[string]interface{}{"id": "/root/child-1"})
 	if err != nil {
 		t.Fatalf("close_agent path failed: %v", err)
 	}
@@ -1052,7 +1052,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected close path: %s", controller.lastClose)
 	}
 
-	_, _, err = broker.Execute(context.Background(), "parent-session", ToolResumeAgent, map[string]interface{}{"id": "child-1"})
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentResume, map[string]interface{}{"id": "child-1"})
 	if err != nil {
 		t.Fatalf("resume_agent failed: %v", err)
 	}
@@ -1060,7 +1060,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected resume id: %s", controller.lastResume)
 	}
 
-	rawApply, applyMeta, err := broker.Execute(context.Background(), "parent-session", ToolApplyAgentWorktree, map[string]interface{}{
+	rawApply, applyMeta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentApplyWorktree, map[string]interface{}{
 		"id":    "child-1",
 		"paths": []interface{}{"src/a.go"},
 		"keep":  true,
@@ -1076,7 +1076,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		t.Fatalf("unexpected apply result/meta: %#v %#v", rawApply, applyMeta)
 	}
 
-	rawDiscard, discardMeta, err := broker.Execute(context.Background(), "parent-session", ToolDiscardAgentWorktree, map[string]interface{}{
+	rawDiscard, discardMeta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentDiscardWorktree, map[string]interface{}{
 		"session_id": "child-2",
 	})
 	if err != nil {
@@ -1100,7 +1100,7 @@ func TestBroker_Execute_RejectsSelfWorktreeOperation(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 	ctx := context.Background()
 
-	_, _, err := broker.Execute(ctx, "child-1", ToolApplyAgentWorktree, map[string]interface{}{"id": "child-1"})
+	_, _, err := broker.Execute(ctx, "child-1", ToolSubagentApplyWorktree, map[string]interface{}{"id": "child-1"})
 	if err == nil || !strings.Contains(err.Error(), "parent-side operation") {
 		t.Fatalf("expected self-apply rejection, got %v", err)
 	}
@@ -1108,7 +1108,7 @@ func TestBroker_Execute_RejectsSelfWorktreeOperation(t *testing.T) {
 		t.Fatalf("self-apply must not reach the controller, got %#v", controller.lastApply)
 	}
 
-	_, _, err = broker.Execute(ctx, "child-1", ToolDiscardAgentWorktree, map[string]interface{}{"id": "child-1"})
+	_, _, err = broker.Execute(ctx, "child-1", ToolSubagentDiscardWorktree, map[string]interface{}{"id": "child-1"})
 	if err == nil || !strings.Contains(err.Error(), "parent-side operation") {
 		t.Fatalf("expected self-discard rejection, got %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestBroker_Execute_RejectsSelfWorktreeOperation(t *testing.T) {
 	}
 
 	// The parent/orchestrator flow still works.
-	rawApply, _, err := broker.Execute(ctx, "parent-session", ToolApplyAgentWorktree, map[string]interface{}{"id": "child-1"})
+	rawApply, _, err := broker.Execute(ctx, "parent-session", ToolSubagentApplyWorktree, map[string]interface{}{"id": "child-1"})
 	if err != nil {
 		t.Fatalf("parent apply failed: %v", err)
 	}
@@ -1133,7 +1133,7 @@ func TestBroker_Execute_WaitAgentAcceptsBatchIDs(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	rawResult, meta, err := broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
+	rawResult, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentWait, map[string]interface{}{
 		"ids":         []interface{}{"child-1", "child-2"},
 		"session_ids": []interface{}{"child-2", "child-3"},
 		"timeout_ms":  1000,
@@ -1278,7 +1278,7 @@ func TestBroker_Execute_WaitAgentWithoutTargetWaitsParentMailbox(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	rawResult, meta, err := broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
+	rawResult, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentWait, map[string]interface{}{
 		"timeout_ms": 1000,
 		"after_seq":  12,
 	})
@@ -1301,7 +1301,7 @@ func TestBroker_Execute_FollowupTaskRejectsCurrentSession(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolFollowupTask, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentFollowup, map[string]interface{}{
 		"target":  "parent-session",
 		"message": "do this",
 	})
@@ -1317,7 +1317,7 @@ func TestBroker_Execute_ResolveAgentApprovalValidatesRequiredArgs(t *testing.T) 
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentApprove, map[string]interface{}{
 		"id":         "child-1",
 		"request_id": "approval-1",
 	})
@@ -1325,7 +1325,7 @@ func TestBroker_Execute_ResolveAgentApprovalValidatesRequiredArgs(t *testing.T) 
 		t.Fatalf("expected allow validation error, got %v", err)
 	}
 
-	_, _, err = broker.Execute(context.Background(), "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentApprove, map[string]interface{}{
 		"id":    "child-1",
 		"allow": true,
 	})
@@ -1341,7 +1341,7 @@ func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	rawResult, meta, err := broker.Execute(context.Background(), "parent-session", ToolReadAgentEvents, map[string]interface{}{
+	rawResult, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"id":        "child-1",
 		"after_seq": float64(5),
 		"limit":     float64(10),
@@ -1366,7 +1366,7 @@ func TestBroker_Execute_ReadAgentEventsAppliesToolProgressView(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	rawResult, _, err := broker.Execute(context.Background(), "parent-session", ToolReadAgentEvents, map[string]interface{}{
+	rawResult, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"id":   "child-1",
 		"view": "tool_progress",
 	})
@@ -1390,7 +1390,7 @@ func TestBroker_Execute_ReadAgentEventsWithoutTargetReadsParentMailbox(t *testin
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolReadAgentEvents, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"after_seq": float64(5),
 		"limit":     float64(10),
 		"wait_ms":   float64(250),
@@ -1422,52 +1422,52 @@ func TestBroker_Execute_AgentToolsRejectTeamTeammateIDs(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller, TeamStore: store}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolWaitAgent, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentWait, map[string]interface{}{
 		"id": "member-1",
 	})
-	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
 		t.Fatalf("expected wait_agent teammate id error, got %v", err)
 	}
 	if controller.lastWait.ID != "" {
 		t.Fatalf("expected wait_agent not to reach controller, got %#v", controller.lastWait)
 	}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolReadAgentEvents, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"id": "member-1",
 	})
-	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
 		t.Fatalf("expected read_agent_events teammate id error, got %v", err)
 	}
 	if controller.lastRead.ID != "" {
 		t.Fatalf("expected read_agent_events not to reach controller, got %#v", controller.lastRead)
 	}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentApprove, map[string]interface{}{
 		"id":         "member-1",
 		"request_id": "approval-1",
 		"allow":      true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
 		t.Fatalf("expected resolve_agent_approval teammate id error, got %v", err)
 	}
 	if controller.lastApprove.ID != "" {
 		t.Fatalf("expected resolve_agent_approval not to reach controller, got %#v", controller.lastApprove)
 	}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolApplyAgentWorktree, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentApplyWorktree, map[string]interface{}{
 		"id": "member-1",
 	})
-	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
 		t.Fatalf("expected apply_agent_worktree teammate id error, got %v", err)
 	}
 	if controller.lastApply.ID != "" || controller.lastApply.SessionID != "" {
 		t.Fatalf("expected apply_agent_worktree not to reach controller, got %#v", controller.lastApply)
 	}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolDiscardAgentWorktree, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentDiscardWorktree, map[string]interface{}{
 		"id": "member-1",
 	})
-	if err == nil || !strings.Contains(err.Error(), "spawn_team teammate id") {
+	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
 		t.Fatalf("expected discard_agent_worktree teammate id error, got %v", err)
 	}
 	if controller.lastDiscard.ID != "" || controller.lastDiscard.SessionID != "" {
@@ -1504,7 +1504,7 @@ func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeamm
 	}
 	broker := &Broker{AgentSessions: controller, TeamStore: store}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolWaitAgent, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentWait, map[string]interface{}{
 		"id": "agent-a",
 	})
 	if err != nil {
@@ -1514,7 +1514,7 @@ func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeamm
 		t.Fatalf("expected wait_agent to reach controller with child id, got %#v", controller.lastWait)
 	}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolReadAgentEvents, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"id": "/root/agent-a",
 	})
 	if err != nil {
@@ -1524,7 +1524,7 @@ func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeamm
 		t.Fatalf("expected read_agent_events to reach controller with child path, got %#v", controller.lastRead)
 	}
 
-	_, _, err = broker.Execute(ctx, "parent-session", ToolResolveAgentApproval, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentApprove, map[string]interface{}{
 		"id":         "agent-a",
 		"request_id": "approval-1",
 		"allow":      false,

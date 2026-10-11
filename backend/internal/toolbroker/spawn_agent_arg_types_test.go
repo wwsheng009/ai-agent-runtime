@@ -150,7 +150,7 @@ func TestBroker_SpawnAgentJSONNumberTimeoutsReachRequest(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":              "run a bounded task",
 		"timeout_sec":          float64(600),
 		"progress_timeout_sec": json.Number("120"),
@@ -181,7 +181,7 @@ func TestBroker_SpawnAgentJSONNumberNegativeTimeoutFailsClosed(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":     "run a bounded task",
 		"timeout_sec": float64(-5),
 	})
@@ -197,7 +197,7 @@ func TestBroker_SpawnAgentKindMismatchFailsClosed(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":   "inspect repo",
 		"read_only": "true",
 	})
@@ -215,7 +215,7 @@ func TestBroker_SpawnAgentForkTurnsStringHonorsOverride(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":      "inspect repo",
 		"fork_turns":   "2",
 		"fork_context": true,

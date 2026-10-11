@@ -19,45 +19,45 @@ import (
 // (spawnAgentToolArgKeys); every other tool reports the dropped keys, because
 // models legitimately add harmless extra keys that must not fail the call.
 var brokerToolArgKeys = map[string][]string{
-	ToolAskUserQuestion:      {"prompt", "required", "suggestions"},
-	ToolEnterPlanMode:        {"plan_path", "plan_write_paths"},
-	ToolExitPlanMode:         {"decision", "notes"},
-	ToolPlanReview:           {"plan_id", "plan_path", "version", "compare_version"},
-	ToolJobStart:             {"command", "cwd", "priority", "restart_policy", "startup_acceptance", "timeout_sec", "interactive", "tty", "cols", "rows"},
-	ToolJobOutput:            {"job_id", "limit", "offset", "timeout_ms", "wait"},
-	ToolJobCancel:            {"job_id", "reason", "task_id"},
-	ToolJobMonitor:           {"cancel", "check_after_ms", "job_id", "max_duration_ms", "task_id"},
-	ToolJobControl:           {"action", "job_id", "reason", "task_id"},
-	ToolJobInput:             {"job_id", "task_id", "session_id", "chars", "input", "yield_time_ms", "close_stdin"},
-	ToolSpawnAgent:           spawnAgentToolArgKeys,
-	ToolListAgents:           {"include_closed", "path_prefix"},
-	ToolSendMessage:          {"id", "message", "session_id", "target"},
-	ToolFollowupTask:         {"id", "message", "session_id", "target"},
-	ToolSendInput:            {"id", "interrupt", "message", "session_id"},
-	ToolResolveAgentApproval: {"allow", "id", "patched_args", "request_id", "session_id"},
-	ToolWaitAgent:            {"after_seq", "id", "ids", "session_id", "session_ids", "timeout_ms"},
-	ToolReadAgentEvents:      {"after_seq", "id", "limit", "session_id", "view", "wait_ms"},
-	ToolCloseAgent:           {"batch_id", "id", "session_id"},
-	ToolResumeAgent:          {"id", "session_id"},
-	ToolApplyAgentWorktree:   {"force", "id", "keep", "paths", "session_id"},
-	ToolDiscardAgentWorktree: {"id", "session_id"},
-	ToolSpawnTeam: {
+	ToolAskUserQuestion:         {"prompt", "required", "suggestions"},
+	ToolPlanEnter:               {"plan_path", "plan_write_paths"},
+	ToolPlanExit:                {"decision", "notes"},
+	ToolPlanReview:              {"plan_id", "plan_path", "version", "compare_version"},
+	ToolJobStart:                {"command", "cwd", "priority", "restart_policy", "startup_acceptance", "timeout_sec", "interactive", "tty", "cols", "rows"},
+	ToolJobOutput:               {"job_id", "limit", "offset", "timeout_ms", "wait"},
+	ToolJobCancel:               {"job_id", "reason", "task_id"},
+	ToolJobMonitor:              {"cancel", "check_after_ms", "job_id", "max_duration_ms", "task_id"},
+	ToolJobControl:              {"action", "job_id", "reason", "task_id"},
+	ToolJobInput:                {"job_id", "task_id", "session_id", "chars", "input", "yield_time_ms", "close_stdin"},
+	ToolSubagentSpawn:           spawnAgentToolArgKeys,
+	ToolSubagentList:            {"include_closed", "path_prefix"},
+	ToolSubagentSend:            {"id", "message", "session_id", "target"},
+	ToolSubagentFollowup:        {"id", "message", "session_id", "target"},
+	ToolSubagentInput:           {"id", "interrupt", "message", "session_id"},
+	ToolSubagentApprove:         {"allow", "id", "patched_args", "request_id", "session_id"},
+	ToolSubagentWait:            {"after_seq", "id", "ids", "session_id", "session_ids", "timeout_ms"},
+	ToolSubagentEvents:          {"after_seq", "id", "limit", "session_id", "view", "wait_ms"},
+	ToolSubagentClose:           {"batch_id", "id", "session_id"},
+	ToolSubagentResume:          {"id", "session_id"},
+	ToolSubagentApplyWorktree:   {"force", "id", "keep", "paths", "session_id"},
+	ToolSubagentDiscardWorktree: {"id", "session_id"},
+	ToolTeamSpawn: {
 		"allow_existing", "auto_start", "lead_session_id", "max_teammates", "max_writers",
 		"status", "strategy", "tasks", "team_id", "teammates", "workspace_id",
 	},
-	ToolWaitTeam:          {"after_seq", "limit", "require_summary", "team_id", "timeout_ms"},
-	ToolSendTeamMessage:   {"body", "kind", "metadata", "task_id", "team_id", "to_agent"},
-	ToolReadMailboxDigest: {"agent_id", "limit", "mark_read", "team_id"},
-	ToolReadTaskSpec:      {"task_id", "team_id"},
-	ToolReadTaskContext: {
+	ToolTeamWait:     {"after_seq", "limit", "require_summary", "team_id", "timeout_ms"},
+	ToolTeamSend:     {"body", "kind", "metadata", "task_id", "team_id", "to_agent"},
+	ToolTeamMailbox:  {"agent_id", "limit", "mark_read", "team_id"},
+	ToolTeamTaskSpec: {"task_id", "team_id"},
+	ToolTeamTaskContext: {
 		"context_budget", "include_dependencies", "include_mailbox",
 		"mailbox_limit", "mark_read", "task_id", "team_id",
 	},
-	ToolReportTaskOutcome: {
+	ToolTeamTaskReport: {
 		"auto_replan", "blocker", "handoff_to", "notify_lead",
 		"result_ref", "summary", "task_id", "task_status", "team_id",
 	},
-	ToolBlockCurrentTask: {
+	ToolTeamTaskBlock: {
 		"auto_replan", "blocker", "handoff_to", "notify_lead",
 		"summary", "task_id", "task_status", "team_id",
 	},
@@ -87,17 +87,17 @@ func brokerIgnoredArgHint(toolName, key string) string {
 		"task_type", "task_subject", "isolation",
 		"fork_context", "fork_turns", "completion_requirement", "provider", "model",
 		"reasoning_effort", "thinking_effort":
-		return "delegation options are accepted by spawn_agent, spawn_subagents and spawn_team"
+		return "delegation options are accepted by subagent_spawn, spawn_subagents and team_spawn"
 	case "job_id", "job_ref":
 		return "job_output addresses a background job by job_id"
 	case "task_id", "task_status":
-		return "task-scoped tools are read_task_spec, read_task_context, report_task_outcome, block_current_task and send_team_message"
+		return "task-scoped tools are team_task_spec, team_task_context, team_task_report, team_task_block and team_send"
 	case "team_id", "to_agent":
-		return "team-scoped tools are spawn_team, wait_team, send_team_message, read_mailbox_digest, read_task_spec and read_task_context"
+		return "team-scoped tools are team_spawn, team_wait, team_send, team_mailbox, team_task_spec and team_task_context"
 	case "notification_id":
 		return "supervision notifications belong to subagent_status(include_digest=true), subagent_ack_lifecycle and subagent_control"
 	case "agent_id":
-		return "read_mailbox_digest addresses a mailbox by agent_id; child sessions use id/session_id"
+		return "team_mailbox addresses a mailbox by agent_id; child sessions use id/session_id"
 	case "target":
 		return "send_message and followup_task address a child by target/id/session_id"
 	case "keep":

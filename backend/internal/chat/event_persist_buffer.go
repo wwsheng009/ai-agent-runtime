@@ -299,6 +299,15 @@ func (b *EventPersistBuffer) Enqueue(event runtimeevents.Event) {
 		}
 	}
 
+	// P0-2 所有权边界：Enqueue 由 Bus.Publish 在发布方 goroutine 内同步调用，返回后
+	// 发布方仍持有 payload map 并可继续写入；worker 稍后才 json.Marshal 落盘
+	// （session_runtime_store_batch.go:73）。若入队继续别名同一张 map，就会与发布方
+	// 的后续写入形成 "concurrent map read and map write" 致命错误
+	// （internal/runtime/maps.fatal，栈顶为 makeMapArshaler/MapIndex）。
+	// 在发布方重新获得控制权之前深拷贝，落盘侧从此只读自己拥有的副本；
+	// 与 Bus 留存路径（newRetainedSlot 的 cloneEvent）保持同一契约。
+	event = runtimeevents.CloneEvent(event)
+
 	start := time.Now()
 	eventBytes := runtimeevents.ApproximateEventBytes(event)
 	critical := b.cfg.CriticalTypes != nil && b.cfg.CriticalTypes(event.Type)

@@ -19,28 +19,28 @@ func TestValidateBrokerToolArgKindsRejectsMismatchedKinds(t *testing.T) {
 		value    interface{}
 		wantKind string
 	}{
-		{"apply keep as string", ToolApplyAgentWorktree, "keep", "true", toolArgFieldBool},
-		{"resolve allow as string", ToolResolveAgentApproval, "allow", "true", toolArgFieldBool},
-		{"digest mark_read as string", ToolReadMailboxDigest, "mark_read", "true", toolArgFieldBool},
-		{"task context mark_read as string", ToolReadTaskContext, "mark_read", "1", toolArgFieldBool},
-		{"list include_closed as string", ToolListAgents, "include_closed", "true", toolArgFieldBool},
+		{"apply keep as string", ToolSubagentApplyWorktree, "keep", "true", toolArgFieldBool},
+		{"resolve allow as string", ToolSubagentApprove, "allow", "true", toolArgFieldBool},
+		{"digest mark_read as string", ToolTeamMailbox, "mark_read", "true", toolArgFieldBool},
+		{"task context mark_read as string", ToolTeamTaskContext, "mark_read", "1", toolArgFieldBool},
+		{"list include_closed as string", ToolSubagentList, "include_closed", "true", toolArgFieldBool},
 		{"snapshot include_resolved as string", ToolSupervisionSnapshot, "include_resolved", "1", toolArgFieldBool},
-		{"outcome notify_lead as string", ToolReportTaskOutcome, "notify_lead", "true", toolArgFieldBool},
-		{"block auto_replan as number", ToolBlockCurrentTask, "auto_replan", 1, toolArgFieldBool},
-		{"wait team require_summary as string", ToolWaitTeam, "require_summary", "yes", toolArgFieldBool},
+		{"outcome notify_lead as string", ToolTeamTaskReport, "notify_lead", "true", toolArgFieldBool},
+		{"block auto_replan as number", ToolTeamTaskBlock, "auto_replan", 1, toolArgFieldBool},
+		{"wait team require_summary as string", ToolTeamWait, "require_summary", "yes", toolArgFieldBool},
 		{"ask required as string", ToolAskUserQuestion, "required", "false", toolArgFieldBool},
-		{"wait agent id as number", ToolWaitAgent, "id", 42, toolArgFieldString},
-		{"read events session_id as bool", ToolReadAgentEvents, "session_id", true, toolArgFieldString},
+		{"wait agent id as number", ToolSubagentWait, "id", 42, toolArgFieldString},
+		{"read events session_id as bool", ToolSubagentEvents, "session_id", true, toolArgFieldString},
 		{"task_output job_id as number", ToolJobOutput, "job_id", 7, toolArgFieldString},
-		{"wait_team team_id as number", ToolWaitTeam, "team_id", 3, toolArgFieldString},
-		{"resolve request_id as number", ToolResolveAgentApproval, "request_id", 9, toolArgFieldString},
+		{"wait_team team_id as number", ToolTeamWait, "team_id", 3, toolArgFieldString},
+		{"resolve request_id as number", ToolSubagentApprove, "request_id", 9, toolArgFieldString},
 		{"control notification_id as number", ToolControlDescendant, "notification_id", 1, toolArgFieldString},
 		{"ack decision as number", ToolAckLifecycle, "decision", 1, toolArgFieldString},
-		{"patched_args as stringified object", ToolResolveAgentApproval, "patched_args", `{"command":"rm -rf /"}`, toolArgFieldObject},
+		{"patched_args as stringified object", ToolSubagentApprove, "patched_args", `{"command":"rm -rf /"}`, toolArgFieldObject},
 		{"startup_acceptance as stringified object", ToolJobStart, "startup_acceptance", `{"probe":"process"}`, toolArgFieldObject},
-		{"send_team_message metadata as string", ToolSendTeamMessage, "metadata", "kind=note", toolArgFieldObject},
-		{"ids with non-string item", ToolWaitAgent, "ids", []interface{}{"child-1", 2}, toolArgFieldStringOrList},
-		{"paths as number", ToolApplyAgentWorktree, "paths", 3, toolArgFieldStringOrList},
+		{"send_team_message metadata as string", ToolTeamSend, "metadata", "kind=note", toolArgFieldObject},
+		{"ids with non-string item", ToolSubagentWait, "ids", []interface{}{"child-1", 2}, toolArgFieldStringOrList},
+		{"paths as number", ToolSubagentApplyWorktree, "paths", 3, toolArgFieldStringOrList},
 		{"suggestions with non-string item", ToolAskUserQuestion, "suggestions", []interface{}{1}, toolArgFieldStringOrList},
 	}
 	for _, tc := range cases {
@@ -95,25 +95,25 @@ func TestValidateBrokerToolArgKindsAcceptsDocumentedKinds(t *testing.T) {
 		tool string
 		args map[string]interface{}
 	}{
-		{"apply keep true", ToolApplyAgentWorktree, map[string]interface{}{"id": "child", "keep": true}},
-		{"apply keep false", ToolApplyAgentWorktree, map[string]interface{}{"id": "child", "keep": false}},
-		{"resolve allow false", ToolResolveAgentApproval, map[string]interface{}{"allow": false, "request_id": "req-1"}},
-		{"list include_closed", ToolListAgents, map[string]interface{}{"include_closed": true, "path_prefix": "/root"}},
+		{"apply keep true", ToolSubagentApplyWorktree, map[string]interface{}{"id": "child", "keep": true}},
+		{"apply keep false", ToolSubagentApplyWorktree, map[string]interface{}{"id": "child", "keep": false}},
+		{"resolve allow false", ToolSubagentApprove, map[string]interface{}{"allow": false, "request_id": "req-1"}},
+		{"list include_closed", ToolSubagentList, map[string]interface{}{"include_closed": true, "path_prefix": "/root"}},
 		{"snapshot include_resolved", ToolSupervisionSnapshot, map[string]interface{}{"include_resolved": true}},
-		{"wait agent id", ToolWaitAgent, map[string]interface{}{"id": "child", "timeout_ms": 1500}},
-		{"read events view", ToolReadAgentEvents, map[string]interface{}{"id": "child", "view": "tool_progress"}},
-		{"task context flags", ToolReadTaskContext, map[string]interface{}{"include_mailbox": true, "include_dependencies": false}},
+		{"wait agent id", ToolSubagentWait, map[string]interface{}{"id": "child", "timeout_ms": 1500}},
+		{"read events view", ToolSubagentEvents, map[string]interface{}{"id": "child", "view": "tool_progress"}},
+		{"task context flags", ToolTeamTaskContext, map[string]interface{}{"include_mailbox": true, "include_dependencies": false}},
 		{"ack until duration", ToolAckLifecycle, map[string]interface{}{"notification_id": "n-1", "decision": "defer", "until": "30m"}},
-		{"patched_args object", ToolResolveAgentApproval, map[string]interface{}{"allow": true, "request_id": "req-1", "patched_args": map[string]interface{}{"command": "echo hi"}}},
+		{"patched_args object", ToolSubagentApprove, map[string]interface{}{"allow": true, "request_id": "req-1", "patched_args": map[string]interface{}{"command": "echo hi"}}},
 		{"startup_acceptance object", ToolJobStart, map[string]interface{}{"command": "echo hi", "startup_acceptance": map[string]interface{}{"probe": "process", "timeout_ms": 1500}}},
-		{"ids array", ToolWaitAgent, map[string]interface{}{"ids": []interface{}{"child-1", "child-2"}}},
-		{"session_ids string", ToolWaitAgent, map[string]interface{}{"session_ids": "/root/worker"}},
-		{"paths string slice", ToolApplyAgentWorktree, map[string]interface{}{"paths": []string{"a.go"}}},
+		{"ids array", ToolSubagentWait, map[string]interface{}{"ids": []interface{}{"child-1", "child-2"}}},
+		{"session_ids string", ToolSubagentWait, map[string]interface{}{"session_ids": "/root/worker"}},
+		{"paths string slice", ToolSubagentApplyWorktree, map[string]interface{}{"paths": []string{"a.go"}}},
 		{"suggestions array", ToolAskUserQuestion, map[string]interface{}{"prompt": "which?", "suggestions": []interface{}{"a", "b"}}},
-		{"metadata object", ToolSendTeamMessage, map[string]interface{}{"body": "hi", "metadata": map[string]interface{}{"kind": "note"}}},
+		{"metadata object", ToolTeamSend, map[string]interface{}{"body": "hi", "metadata": map[string]interface{}{"kind": "note"}}},
 		{"explicit null stays lenient", ToolJobOutput, map[string]interface{}{"job_id": nil}},
-		{"empty args stay lenient", ToolReadMailboxDigest, map[string]interface{}{}},
-		{"unknown key stays advisory", ToolReadMailboxDigest, map[string]interface{}{"mark_read": true, "extra": 1}},
+		{"empty args stay lenient", ToolTeamMailbox, map[string]interface{}{}},
+		{"unknown key stays advisory", ToolTeamMailbox, map[string]interface{}{"mark_read": true, "extra": 1}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,7 +143,7 @@ func TestBrokerToolArgKindsStayWithinDeclaredToolKeys(t *testing.T) {
 			}
 		}
 	}
-	for _, tool := range []string{ToolSpawnAgent, ToolSpawnTeam, ToolSendInput} {
+	for _, tool := range []string{ToolSubagentSpawn, ToolTeamSpawn, ToolSubagentInput} {
 		if _, ok := brokerToolArgKinds[tool]; ok {
 			t.Fatalf("%s kinds must stay in its dedicated validator", tool)
 		}
@@ -155,7 +155,7 @@ func TestBrokerToolArgKindsStayWithinDeclaredToolKeys(t *testing.T) {
 // still reports the kind mismatch instead of a "not configured" error.
 func TestExecuteValidatesBrokerToolArgKindsBeforeDispatch(t *testing.T) {
 	broker := &Broker{}
-	_, _, err := broker.execute(context.Background(), "session-1", ToolApplyAgentWorktree,
+	_, _, err := broker.execute(context.Background(), "session-1", ToolSubagentApplyWorktree,
 		map[string]interface{}{"id": "child", "keep": "true"}, "")
 	if err == nil {
 		t.Fatal("keep=\"true\" must fail closed instead of deleting the worktree")
@@ -164,7 +164,7 @@ func TestExecuteValidatesBrokerToolArgKindsBeforeDispatch(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, _, err = broker.execute(context.Background(), "session-1", ToolWaitAgent,
+	_, _, err = broker.execute(context.Background(), "session-1", ToolSubagentWait,
 		map[string]interface{}{"timeout_ms": "1500"}, "")
 	if err == nil {
 		t.Fatal("timeout_ms=\"1500\" must fail closed instead of waiting on the default budget")

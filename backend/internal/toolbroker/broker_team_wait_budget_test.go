@@ -81,7 +81,7 @@ func TestBrokerExecuteWaitTeamExhaustedBudgetSkipsWindow(t *testing.T) {
 	broker := &Broker{TeamStore: store, WaitBudget: budget, WaitTimeoutPolicy: subSecondWaitPolicy()}
 
 	started := time.Now()
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 5000,
 	})
@@ -114,7 +114,7 @@ func TestBrokerExecuteWaitTeamTimeoutBillsNoProgressWindow(t *testing.T) {
 
 	budget := &recordingWaitBudget{active: true, limit: 2}
 	broker := &Broker{TeamStore: store, WaitBudget: budget, WaitTimeoutPolicy: subSecondWaitPolicy()}
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 1,
 	})
@@ -158,7 +158,7 @@ func TestBrokerExecuteWaitTeamTaskCompletionCountsAsProgress(t *testing.T) {
 		})
 	}()
 
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 3000,
 	})
@@ -193,7 +193,7 @@ func TestBrokerExecuteWaitTeamWithoutBudgetKeepsLegacyResult(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			recorder, _ := budget.(*recordingWaitBudget)
 			broker := &Broker{TeamStore: store, WaitBudget: budget, WaitTimeoutPolicy: subSecondWaitPolicy()}
-			raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+			raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 				"team_id":    teamID,
 				"timeout_ms": 1,
 			})

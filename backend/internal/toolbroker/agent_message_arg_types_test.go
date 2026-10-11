@@ -8,14 +8,14 @@ import (
 
 func TestValidateAgentMessageArgTypes(t *testing.T) {
 	// Known keys of the documented kind pass.
-	if err := validateAgentMessageArgTypes(ToolSendInput, map[string]interface{}{
+	if err := validateAgentMessageArgTypes(ToolSubagentInput, map[string]interface{}{
 		"id":        "child-1",
 		"message":   "continue",
 		"interrupt": true,
 	}); err != nil {
 		t.Fatalf("documented send_input kinds must pass, got %v", err)
 	}
-	if err := validateAgentMessageArgTypes(ToolSendMessage, map[string]interface{}{
+	if err := validateAgentMessageArgTypes(ToolSubagentSend, map[string]interface{}{
 		"target":  "child-1",
 		"message": "note only",
 	}); err != nil {
@@ -23,7 +23,7 @@ func TestValidateAgentMessageArgTypes(t *testing.T) {
 	}
 	// The message tools are not fail-closed on unknown keys: unrelated
 	// arguments stay untouched.
-	if err := validateAgentMessageArgTypes(ToolSendMessage, map[string]interface{}{
+	if err := validateAgentMessageArgTypes(ToolSubagentSend, map[string]interface{}{
 		"target": "child-1",
 		"note":   5,
 	}); err != nil {
@@ -39,35 +39,35 @@ func TestValidateAgentMessageArgTypes(t *testing.T) {
 	}{
 		{
 			name:     "send_input interrupt as string",
-			tool:     ToolSendInput,
+			tool:     ToolSubagentInput,
 			args:     map[string]interface{}{"id": "child-1", "message": "stop", "interrupt": "true"},
 			wantKey:  "interrupt",
 			wantKind: "JSON boolean",
 		},
 		{
 			name:     "send_input interrupt as number",
-			tool:     ToolSendInput,
+			tool:     ToolSubagentInput,
 			args:     map[string]interface{}{"id": "child-1", "message": "stop", "interrupt": 1},
 			wantKey:  "interrupt",
 			wantKind: "JSON boolean",
 		},
 		{
 			name:     "send_message target as number",
-			tool:     ToolSendMessage,
+			tool:     ToolSubagentSend,
 			args:     map[string]interface{}{"target": 7, "message": "note"},
 			wantKey:  "target",
 			wantKind: "JSON string",
 		},
 		{
 			name:     "followup_task message as number",
-			tool:     ToolFollowupTask,
+			tool:     ToolSubagentFollowup,
 			args:     map[string]interface{}{"target": "child-1", "message": 42},
 			wantKey:  "message",
 			wantKind: "JSON string",
 		},
 		{
 			name:     "send_input session_id as bool",
-			tool:     ToolSendInput,
+			tool:     ToolSubagentInput,
 			args:     map[string]interface{}{"session_id": true, "message": "continue"},
 			wantKey:  "session_id",
 			wantKind: "JSON string",
@@ -99,7 +99,7 @@ func TestBroker_SendInputStringInterruptFailsClosed(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSendInput, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentInput, map[string]interface{}{
 		"id":        "child-1",
 		"message":   "continue",
 		"interrupt": "true",
@@ -116,7 +116,7 @@ func TestBroker_SendMessageNumericTargetFailsClosed(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSendMessage, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSend, map[string]interface{}{
 		"target":  7,
 		"message": "note only",
 	})

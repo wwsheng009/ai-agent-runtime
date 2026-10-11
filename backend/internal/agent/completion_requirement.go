@@ -11,7 +11,7 @@ import (
 const (
 	// CompletionRequirementNone does not require a terminal outcome tool.
 	CompletionRequirementNone = string(agentdef.CompletionNone)
-	// CompletionRequirementCompleteTask requires report_task_outcome (or block_current_task).
+	// CompletionRequirementCompleteTask requires team_task_report (or team_task_block).
 	CompletionRequirementCompleteTask = string(agentdef.CompletionCompleteTask)
 
 	defaultCompletionRecoveryTurns = 1
@@ -47,8 +47,8 @@ func normalizeCompletionRecoveryTurns(maxTurns int, requirement string) int {
 	return maxTurns
 }
 
-// HasSuccessfulTaskOutcomeObservation reports a successful report_task_outcome
-// or block_current_task observation (aligned with team.teammate_runner).
+// HasSuccessfulTaskOutcomeObservation reports a successful team_task_report
+// or team_task_block observation (aligned with team.teammate_runner).
 func HasSuccessfulTaskOutcomeObservation(observations []types.Observation) bool {
 	for i := len(observations) - 1; i >= 0; i-- {
 		obs := observations[i]
@@ -56,7 +56,7 @@ func HasSuccessfulTaskOutcomeObservation(observations []types.Observation) bool 
 			continue
 		}
 		switch normalizeTaskOutcomeToolName(obs.Tool) {
-		case toolbroker.ToolReportTaskOutcome, toolbroker.ToolBlockCurrentTask:
+		case toolbroker.ToolTeamTaskReport, toolbroker.ToolTeamTaskBlock:
 			return true
 		}
 	}
@@ -78,8 +78,8 @@ func completionRequirementReminder(requirement string, attempt, maxTurns int) st
 	}
 	body := strings.TrimSpace(strings.Join([]string{
 		"This worker run requires a structured task completion.",
-		"Before finishing, call report_task_outcome with task_status done|failed|blocked|handoff and a short summary",
-		"(block_current_task remains a compatibility alias for blocked/handoff).",
+		"Before finishing, call team_task_report with task_status done|failed|blocked|handoff and a short summary",
+		"(team_task_block remains a compatibility alias for blocked/handoff).",
 		"Do not end with text only; emit the completion tool call now.",
 		"This is recovery attempt " + itoaMin1(attempt) + " of " + itoaMin1(maxTurns) +
 			" (" + itoaMin1(remaining) + " remaining including this turn).",
@@ -137,7 +137,7 @@ func itoaMin1(n int) string {
 
 func missingCompletionRequirementMessage(requirement string) string {
 	_ = requirement
-	return "completion requirement complete_task was not satisfied: no successful report_task_outcome or block_current_task observation"
+	return "completion requirement complete_task was not satisfied: no successful team_task_report or team_task_block observation"
 }
 
 func applyCompletionResultFields(result *Result, requirement string, satisfied bool, recoveryTurns int) {

@@ -41,7 +41,7 @@ func TestBrokerAgentMessageV1ResultKeepsLegacyFields(t *testing.T) {
 	}
 	broker := &Broker{AgentSessions: controller}
 
-	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSendMessage, map[string]interface{}{
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSend, map[string]interface{}{
 		"target":  "child-1",
 		"message": "legacy note",
 	})
@@ -71,7 +71,7 @@ func TestBrokerAgentMessageV2ResultSurfacesQueuedAndDuplicate(t *testing.T) {
 	}
 	broker := &Broker{AgentSessions: controller}
 
-	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolFollowupTask, map[string]interface{}{
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentFollowup, map[string]interface{}{
 		"target":  "child-1",
 		"message": "queued while busy",
 	})
@@ -102,7 +102,7 @@ func TestBrokerSendInputV2ResultSurfacesDeliveryFields(t *testing.T) {
 	}
 	broker := &Broker{AgentSessions: controller}
 
-	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSendInput, map[string]interface{}{
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentInput, map[string]interface{}{
 		"id":      "child-1",
 		"message": "continue",
 	})
@@ -125,7 +125,7 @@ func TestBrokerSendInputV1ResultOmitsV2Fields(t *testing.T) {
 	}
 	broker := &Broker{AgentSessions: controller}
 
-	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSendInput, map[string]interface{}{
+	raw, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentInput, map[string]interface{}{
 		"id":      "child-1",
 		"message": "continue",
 	})
@@ -146,18 +146,18 @@ func TestBrokerInstructionToolDescriptionsMatchV2Semantics(t *testing.T) {
 	descriptions := map[string]string{}
 	for _, def := range broker.Definitions() {
 		switch def.Name {
-		case ToolSendMessage, ToolFollowupTask, ToolSendInput:
+		case ToolSubagentSend, ToolSubagentFollowup, ToolSubagentInput:
 			descriptions[def.Name] = def.Description
 		}
 	}
-	for _, name := range []string{ToolSendMessage, ToolFollowupTask, ToolSendInput} {
+	for _, name := range []string{ToolSubagentSend, ToolSubagentFollowup, ToolSubagentInput} {
 		description := descriptions[name]
 		require.NotEmpty(t, description, "%s definition missing", name)
 		require.Contains(t, description, "delivered/queued/triggered/duplicate", "%s must document the return fields", name)
 		require.Contains(t, description, "closed", "%s must document the terminal error", name)
 	}
-	require.Contains(t, descriptions[ToolSendMessage], "without starting a new turn")
-	require.Contains(t, descriptions[ToolFollowupTask], "trigger_turn=true")
-	require.Contains(t, descriptions[ToolSendInput], "interrupt=false")
-	require.False(t, strings.Contains(descriptions[ToolSendMessage], "interrupt"), "send_message must not imply interruption")
+	require.Contains(t, descriptions[ToolSubagentSend], "without starting a new turn")
+	require.Contains(t, descriptions[ToolSubagentFollowup], "trigger_turn=true")
+	require.Contains(t, descriptions[ToolSubagentInput], "interrupt=false")
+	require.False(t, strings.Contains(descriptions[ToolSubagentSend], "interrupt"), "send_message must not imply interruption")
 }

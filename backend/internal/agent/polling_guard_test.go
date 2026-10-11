@@ -17,7 +17,7 @@ import (
 func waitAgentCall(id, timeoutMs string) types.ToolCall {
 	return types.ToolCall{
 		ID:   id,
-		Name: "wait_agent",
+		Name: "subagent_wait",
 		Args: map[string]interface{}{"ids": []string{"child-1"}, "timeout_ms": timeoutMs},
 	}
 }
@@ -39,14 +39,14 @@ func TestPollingBackoffTracker_NotifiesAfterThreshold(t *testing.T) {
 	for i := 1; i <= PollingBackoffNoticeThreshold; i++ {
 		obs := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 		require.Equal(t, i, obs.RepeatCount)
-		require.Equal(t, []string{"wait_agent"}, obs.Tools)
+		require.Equal(t, []string{"subagent_wait"}, obs.Tools)
 		if i < PollingBackoffNoticeThreshold {
 			require.Empty(t, obs.Advisory, "advisory must stay silent below the threshold")
 			require.False(t, obs.EmitNotice)
 			continue
 		}
 		require.Contains(t, obs.Advisory, "polling/control request")
-		require.Contains(t, obs.Advisory, "wait_agent")
+		require.Contains(t, obs.Advisory, "subagent_wait")
 		require.Contains(t, obs.Advisory, "Execution was not blocked")
 		require.Contains(t, obs.Advisory, "not a context/token budget")
 		require.True(t, obs.EmitNotice, "crossing the threshold emits the product event once")
@@ -62,7 +62,7 @@ func TestPollingBackoffTracker_NotifiesAfterThreshold(t *testing.T) {
 	// Mixed polling tools in one batch still count as a polling streak.
 	mixed := tracker.ObserveToolResults([]toolExecutionResult{
 		{Call: waitAgentCall("call-a", "1000")},
-		{Call: types.ToolCall{ID: "call-b", Name: "read_agent_events", Args: map[string]interface{}{"id": "child-1", "after_seq": 3}}},
+		{Call: types.ToolCall{ID: "call-b", Name: "subagent_events", Args: map[string]interface{}{"id": "child-1", "after_seq": 3}}},
 	})
 	require.Equal(t, 1, mixed.RepeatCount, "a different polling batch restarts the streak")
 }
@@ -150,7 +150,7 @@ func TestPollingBackoffTracker_TimingArgsDoNotBreakStreak(t *testing.T) {
 	otherTarget := tracker.ObserveToolResults([]toolExecutionResult{{
 		Call: types.ToolCall{
 			ID:   "call-2",
-			Name: "wait_agent",
+			Name: "subagent_wait",
 			Args: map[string]interface{}{"ids": []string{"child-2"}, "timeout_ms": "60000"},
 		},
 		Output: map[string]interface{}{"ok": true, "waited_ms": "1000"},
@@ -292,7 +292,7 @@ func TestReActLoop_InjectsPollingBackoffAdvisoryWithoutStopping(t *testing.T) {
 			Model:   "test-model",
 			ToolCalls: []types.ToolCall{{
 				ID:   fmt.Sprintf("call-%d", index),
-				Name: "wait_agent",
+				Name: "subagent_wait",
 				Args: map[string]interface{}{
 					"ids":        []string{"child-1"},
 					"timeout_ms": 30000,
@@ -328,7 +328,7 @@ func TestReActLoop_InjectsPollingBackoffAdvisoryWithoutStopping(t *testing.T) {
 	require.Equal(t, PollingBackoffNoticeThreshold, manager.callCount, "polling must not be blocked")
 	require.Len(t, backoffEvents, 1)
 	require.Equal(t, PollingBackoffNoticeThreshold, backoffEvents[0].Payload["repeat_count"])
-	require.Equal(t, []string{"wait_agent"}, backoffEvents[0].Payload["tools"])
+	require.Equal(t, []string{"subagent_wait"}, backoffEvents[0].Payload["tools"])
 	require.Equal(t, "tool_result.waited_ms", backoffEvents[0].Payload["wait_measurement"])
 	require.Equal(t, "current_run_polling_streak", backoffEvents[0].Payload["scope"])
 	require.Empty(t, doomWarnings, "polling/control tools stay doom-loop exempt")

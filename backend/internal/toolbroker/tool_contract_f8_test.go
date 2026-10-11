@@ -26,7 +26,7 @@ func TestBrokerApplyAgentWorktreePlumbsArgs(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	result, summary, err := broker.Execute(context.Background(), "parent-session", ToolApplyAgentWorktree, map[string]interface{}{
+	result, summary, err := broker.Execute(context.Background(), "parent-session", ToolSubagentApplyWorktree, map[string]interface{}{
 		"id":    "child-1",
 		"paths": []interface{}{"docs/a.md", "docs/b.md"},
 		"keep":  true,
@@ -54,7 +54,7 @@ func TestBrokerApplyAgentWorktreeSurfacesRefusedApply(t *testing.T) {
 	}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolApplyAgentWorktree, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentApplyWorktree, map[string]interface{}{
 		"id": "child-1",
 	})
 	require.Error(t, err)

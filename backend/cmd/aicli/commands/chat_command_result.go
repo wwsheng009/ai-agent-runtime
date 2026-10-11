@@ -423,6 +423,13 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		return executeStructuredTodosCommand(session, command), true, nil
 	}
 
+	// /schedule（P4）：自动化任务只读目录，数据面 = in-process schedule store
+	// （与 schedule_* 工具、frontend 面板、micro web 任务页签同源）。运行时
+	// 交互注册声明见 chat_schedule_command.go 顶部注释（业务域 C12 / inline / read）。
+	if commandMatches(cmdLower, chatScheduleCommandName) {
+		return executeStructuredScheduleCommand(session, command), true, nil
+	}
+
 	if commandMatches(cmdLower, "/attach") {
 		return executeStructuredAttachmentCommand(session, command), true, nil
 	}

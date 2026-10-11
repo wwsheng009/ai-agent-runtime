@@ -110,7 +110,7 @@ func TestBrokerSpawnRegistersSupervisedRun(t *testing.T) {
 
 	raw, meta, err := broker.ExecuteToolCall(ctx, "parent-1", types.ToolCall{
 		ID:   "call-sup-1",
-		Name: ToolSpawnAgent,
+		Name: ToolSubagentSpawn,
 		Args: map[string]interface{}{
 			"message":     "run a bounded task",
 			"timeout_sec": int64(90),
@@ -142,7 +142,7 @@ func TestBrokerSpawnWithoutSupervisorKeepsLegacyBehavior(t *testing.T) {
 	}
 	_, meta, err := broker.ExecuteToolCall(context.Background(), "parent-1", types.ToolCall{
 		ID:   "call-sup-2",
-		Name: ToolSpawnAgent,
+		Name: ToolSubagentSpawn,
 		Args: map[string]interface{}{
 			"message": "legacy spawn",
 		},

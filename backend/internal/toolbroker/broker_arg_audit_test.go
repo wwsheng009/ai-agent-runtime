@@ -12,12 +12,12 @@ import (
 // never restrict their surface) this package already fixed at the tool level.
 func TestBrokerToolArgKeys_CoversEveryBrokerTool(t *testing.T) {
 	tools := []string{
-		ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolJobStart,
-		ToolJobOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask,
-		ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents,
-		ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree,
-		ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest,
-		ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask,
+		ToolAskUserQuestion, ToolPlanEnter, ToolPlanExit, ToolJobStart,
+		ToolJobOutput, ToolSubagentSpawn, ToolSubagentList, ToolSubagentSend, ToolSubagentFollowup,
+		ToolSubagentInput, ToolSubagentApprove, ToolSubagentWait, ToolSubagentEvents,
+		ToolSubagentClose, ToolSubagentResume, ToolSubagentApplyWorktree, ToolSubagentDiscardWorktree,
+		ToolTeamSpawn, ToolTeamWait, ToolTeamSend, ToolTeamMailbox,
+		ToolTeamTaskSpec, ToolTeamTaskContext, ToolTeamTaskReport, ToolTeamTaskBlock,
 		ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult,
 		ToolAckLifecycle, ToolControlDescendant,
 	}
@@ -76,7 +76,7 @@ func TestBrokerToolArgKeys_MatchToolDefinitions(t *testing.T) {
 // contract: an unused key is reported with a hint and merged into next_action,
 // which the agent runtime renders back to the model.
 func TestAnnotateIgnoredBrokerToolArgs_ReportsDroppedKeys(t *testing.T) {
-	metadata := annotateIgnoredBrokerToolArgs(ToolWaitAgent, map[string]interface{}{
+	metadata := annotateIgnoredBrokerToolArgs(ToolSubagentWait, map[string]interface{}{
 		"goal":       "wait for the child",
 		"timeout_ms": 5,
 	}, map[string]interface{}{"next_action": "existing guidance"})
@@ -93,7 +93,7 @@ func TestAnnotateIgnoredBrokerToolArgs_ReportsDroppedKeys(t *testing.T) {
 		t.Fatalf("next_action must explain the dropped key and the tool that takes it, got %q", next)
 	}
 
-	supported := annotateIgnoredBrokerToolArgs(ToolWaitAgent, map[string]interface{}{"timeout_ms": 5}, nil)
+	supported := annotateIgnoredBrokerToolArgs(ToolSubagentWait, map[string]interface{}{"timeout_ms": 5}, nil)
 	if _, ok := supported["ignored_args"]; ok {
 		t.Fatalf("supported keys must not be reported: %#v", supported)
 	}
@@ -106,7 +106,7 @@ func TestBroker_Execute_ReportsIgnoredArgumentsInsteadOfDroppingThem(t *testing.
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, metadata, err := broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
+	_, metadata, err := broker.Execute(context.Background(), "parent-session", ToolSubagentWait, map[string]interface{}{
 		"goal":       "wait for the child",
 		"timeout_ms": 10,
 	})
@@ -135,17 +135,17 @@ func TestBroker_Execute_SupportedArgumentsAreNotReported(t *testing.T) {
 		tool string
 		args map[string]interface{}
 	}{
-		{ToolResumeAgent, map[string]interface{}{"id": "child-1"}},
-		{ToolCloseAgent, map[string]interface{}{"session_id": "child-1"}},
-		{ToolCloseAgent, map[string]interface{}{"batch_id": "batch-1"}},
-		{ToolListAgents, map[string]interface{}{"include_closed": true}},
-		{ToolSpawnAgent, map[string]interface{}{"message": "inspect", "read_only": true, "difficulty": "normal"}},
-		{ToolApplyAgentWorktree, map[string]interface{}{"id": "child-1", "paths": []interface{}{"a.go"}, "keep": true}},
-		{ToolDiscardAgentWorktree, map[string]interface{}{"id": "child-1"}},
-		{ToolReadAgentEvents, map[string]interface{}{"id": "child-1", "after_seq": float64(1), "limit": float64(5), "view": "tool_progress"}},
-		{ToolResolveAgentApproval, map[string]interface{}{"id": "child-1", "request_id": "req-1", "allow": true}},
-		{ToolSendInput, map[string]interface{}{"id": "child-1", "message": "go on", "interrupt": true}},
-		{ToolSendMessage, map[string]interface{}{"target": "child-1", "message": "status?"}},
+		{ToolSubagentResume, map[string]interface{}{"id": "child-1"}},
+		{ToolSubagentClose, map[string]interface{}{"session_id": "child-1"}},
+		{ToolSubagentClose, map[string]interface{}{"batch_id": "batch-1"}},
+		{ToolSubagentList, map[string]interface{}{"include_closed": true}},
+		{ToolSubagentSpawn, map[string]interface{}{"message": "inspect", "read_only": true, "difficulty": "normal"}},
+		{ToolSubagentApplyWorktree, map[string]interface{}{"id": "child-1", "paths": []interface{}{"a.go"}, "keep": true}},
+		{ToolSubagentDiscardWorktree, map[string]interface{}{"id": "child-1"}},
+		{ToolSubagentEvents, map[string]interface{}{"id": "child-1", "after_seq": float64(1), "limit": float64(5), "view": "tool_progress"}},
+		{ToolSubagentApprove, map[string]interface{}{"id": "child-1", "request_id": "req-1", "allow": true}},
+		{ToolSubagentInput, map[string]interface{}{"id": "child-1", "message": "go on", "interrupt": true}},
+		{ToolSubagentSend, map[string]interface{}{"target": "child-1", "message": "status?"}},
 	}
 	for _, call := range calls {
 		_, metadata, err := broker.Execute(context.Background(), "parent-session", call.tool, call.args)

@@ -336,7 +336,7 @@ type SessionActor struct {
 	lastApprovalOutcome approvalOutcome
 	// abandonHooks cascade a parked turn's non-batch obligations on abandon.
 	abandonHooks SuspendedTurnAbandonHooks
-	activeRunWG         sync.WaitGroup
+	activeRunWG  sync.WaitGroup
 }
 
 // NewSessionActor creates a new session actor.

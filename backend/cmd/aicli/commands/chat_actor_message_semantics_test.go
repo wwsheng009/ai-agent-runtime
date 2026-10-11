@@ -83,7 +83,7 @@ func TestLocalActorRegistryV2SendInputBusyQueuesInsteadOfError(t *testing.T) {
 		case runtimechat.EventMailboxDelivery:
 			auditSeen = true
 			assert.Equal(t, runtimechat.MailboxDeliveryStatusQueued, event.Payload["mailbox_delivery_status"])
-			assert.Equal(t, toolbroker.ToolSendInput, event.Payload["tool"])
+			assert.Equal(t, toolbroker.ToolSubagentInput, event.Payload["tool"])
 			assert.Equal(t, "cli-v2-sendinput-child", event.Payload["target_session_id"])
 		}
 	}

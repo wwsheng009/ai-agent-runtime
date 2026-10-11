@@ -54,7 +54,7 @@ func TestBrokerSendMessageSummaryStatesNoTurn(t *testing.T) {
 		fakeAgentSessionController: &fakeAgentSessionController{},
 	}}
 
-	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSendMessage, map[string]interface{}{
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSend, map[string]interface{}{
 		"target":  "child-1",
 		"message": "note only",
 	})
@@ -63,7 +63,7 @@ func TestBrokerSendMessageSummaryStatesNoTurn(t *testing.T) {
 	require.Equal(t, true, meta["no_turn_expected"], "an idle child cannot consume the message on its own")
 	require.Contains(t, meta["next_action"], "followup_task")
 
-	_, followMeta, err := broker.Execute(context.Background(), "parent-session", ToolFollowupTask, map[string]interface{}{
+	_, followMeta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentFollowup, map[string]interface{}{
 		"target":  "child-1",
 		"message": "start now",
 	})

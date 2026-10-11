@@ -85,7 +85,7 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 	switch normalizedToolName {
 	case "ask_user_question":
 		return []Capability{CapAskUser}, true
-	case "enter_plan_mode", "exit_plan_mode":
+	case "plan_enter", "plan_exit":
 		// Control tools usable while already in plan mode (read-only + ask_user).
 		return []Capability{CapReadOnly, CapAskUser}, true
 	case "background_task", "job_start":

@@ -15,9 +15,9 @@ import "fmt"
 // The message tools are not fail-closed on unknown keys, so this only checks the
 // known keys and leaves other arguments alone.
 var agentMessageToolStringKeys = map[string][]string{
-	ToolSendMessage:  {"id", "message", "session_id", "target"},
-	ToolFollowupTask: {"id", "message", "session_id", "target"},
-	ToolSendInput:    {"id", "message", "session_id"},
+	ToolSubagentSend:     {"id", "message", "session_id", "target"},
+	ToolSubagentFollowup: {"id", "message", "session_id", "target"},
+	ToolSubagentInput:    {"id", "message", "session_id"},
 }
 
 func validateAgentMessageArgTypes(toolName string, args map[string]interface{}) error {
@@ -32,7 +32,7 @@ func validateAgentMessageArgTypes(toolName string, args map[string]interface{}) 
 		return fmt.Errorf("%s argument %q must be a %s, got %T (%v); omit it to use the runtime default",
 			toolName, key, toolArgFieldString, value, value)
 	}
-	if toolName != ToolSendInput {
+	if toolName != ToolSubagentInput {
 		return nil
 	}
 	if value, exists := args["interrupt"]; exists && value != nil {

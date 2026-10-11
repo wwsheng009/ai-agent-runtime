@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
-	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimeagent "github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 

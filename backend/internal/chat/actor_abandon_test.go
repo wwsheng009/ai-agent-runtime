@@ -136,8 +136,8 @@ func TestAbandonSuspendedTurnCascadesNonBatchObligations(t *testing.T) {
 	h := newResumeEpisodeHarness(t)
 	h.seedSuspendedTurn(t, "turn_parked")
 	require.NoError(t, h.batches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
-		TurnID:     "turn_parked",
-		SessionID:  h.session.ID,
+		TurnID:    "turn_parked",
+		SessionID: h.session.ID,
 		ObligationIDs: []string{
 			subagentbatch.AgentSessionObligationID("child-1"),
 			subagentbatch.TeamObligationID("team-1"),

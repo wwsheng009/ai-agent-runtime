@@ -8,13 +8,13 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-const activeTeamRunRequirementText = "Requires an active team run. If no team run exists yet, call spawn_team first and only use this tool after spawn_team succeeds."
+const activeTeamRunRequirementText = "Requires an active team run. If no team run exists yet, call team_spawn first and only use this tool after team_spawn succeeds."
 
 // RequiresActiveTeamRun reports whether a broker tool depends on an existing
 // active team run rather than creating one.
 func RequiresActiveTeamRun(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask:
+	case ToolTeamSend, ToolTeamMailbox, ToolTeamTaskSpec, ToolTeamTaskContext, ToolTeamTaskReport, ToolTeamTaskBlock:
 		return true
 	default:
 		return false
@@ -44,7 +44,7 @@ func metadataRequiresActiveTeamRun(existing map[string]interface{}) map[string]i
 
 // DefinitionsForContext returns broker tools visible for the current request
 // context. Team-only tools stay hidden until an active team run is bound into
-// ctx; ordinary spawn_agent children never receive Team outcome tools.
+// ctx; ordinary subagent_spawn children never receive Team outcome tools.
 func (b *Broker) DefinitionsForContext(ctx context.Context) []types.ToolDefinition {
 	defs := b.Definitions()
 	if len(defs) == 0 || hasActiveTeamRun(ctx) {

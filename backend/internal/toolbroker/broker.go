@@ -33,9 +33,12 @@ import (
 
 const (
 	ToolAskUserQuestion = "ask_user_question"
-	ToolEnterPlanMode   = "enter_plan_mode"
-	ToolExitPlanMode    = "exit_plan_mode"
-	ToolPlanReview      = "plan_review"
+	// Plan family (naming contract B4, tool-surface-inventory §4.5, optional
+	// low-priority batch): plan_* is canonical; the *_plan_mode spellings stay
+	// callable as aliases.
+	ToolPlanEnter  = "plan_enter"
+	ToolPlanExit   = "plan_exit"
+	ToolPlanReview = "plan_review"
 	// Background jobs (naming contract B1, tool-surface-inventory §4.1): the
 	// job_* family is the canonical wire spelling for background command jobs;
 	// task_* / write_stdin / task_input stay callable through normalizeToolName
@@ -48,28 +51,34 @@ const (
 	ToolJobInput   = "job_input"
 	// Job list/search round out the job_* read surface (§4.1): job_list answers
 	// "what is running" without a job_id; job_search full-text scans commands.
-	ToolJobList                = "job_list"
-	ToolJobSearch              = "job_search"
-	ToolSpawnAgent             = "spawn_agent"
-	ToolListAgents             = "list_agents"
-	ToolSendMessage            = "send_message"
-	ToolFollowupTask           = "followup_task"
-	ToolSendInput              = "send_input"
-	ToolResolveAgentApproval   = "resolve_agent_approval"
-	ToolWaitAgent              = "wait_agent"
-	ToolReadAgentEvents        = "read_agent_events"
-	ToolCloseAgent             = "close_agent"
-	ToolResumeAgent            = "resume_agent"
-	ToolApplyAgentWorktree     = "apply_agent_worktree"
-	ToolDiscardAgentWorktree   = "discard_agent_worktree"
-	ToolSpawnTeam              = "spawn_team"
-	ToolWaitTeam               = "wait_team"
-	ToolSendTeamMessage        = "send_team_message"
-	ToolReadMailboxDigest      = "read_mailbox_digest"
-	ToolReadTaskSpec           = "read_task_spec"
-	ToolReadTaskContext        = "read_task_context"
-	ToolReportTaskOutcome      = "report_task_outcome"
-	ToolBlockCurrentTask       = "block_current_task"
+	ToolJobList   = "job_list"
+	ToolJobSearch = "job_search"
+	// Subagent family (naming contract B3, tool-surface-inventory §4.4):
+	// subagent_* is the canonical wire spelling for the child-session surface;
+	// the *_agent and generic spellings stay callable as aliases.
+	ToolSubagentSpawn           = "subagent_spawn"
+	ToolSubagentList            = "subagent_list"
+	ToolSubagentSend            = "subagent_send"
+	ToolSubagentFollowup        = "subagent_followup"
+	ToolSubagentInput           = "subagent_input"
+	ToolSubagentApprove         = "subagent_approve"
+	ToolSubagentWait            = "subagent_wait"
+	ToolSubagentEvents          = "subagent_events"
+	ToolSubagentClose           = "subagent_close"
+	ToolSubagentResume          = "subagent_resume"
+	ToolSubagentApplyWorktree   = "subagent_apply_worktree"
+	ToolSubagentDiscardWorktree = "subagent_discard_worktree"
+	// Team family (naming contract B2, tool-surface-inventory §4.3): team_* is
+	// the canonical wire spelling; the mixed spawn_team/wait_team/read_task_*
+	// spellings stay callable through normalizeToolName as aliases.
+	ToolTeamSpawn              = "team_spawn"
+	ToolTeamWait               = "team_wait"
+	ToolTeamSend               = "team_send"
+	ToolTeamMailbox            = "team_mailbox"
+	ToolTeamTaskSpec           = "team_task_spec"
+	ToolTeamTaskContext        = "team_task_context"
+	ToolTeamTaskReport         = "team_task_report"
+	ToolTeamTaskBlock          = "team_task_block"
 	ToolSupervisionSnapshot    = "supervision_snapshot"
 	ToolSupervisionDescendants = "supervision_descendants"
 	ToolReadAgentResult        = "read_agent_result"
@@ -214,7 +223,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 
 func isVolatileEmptyReplayTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolJobOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult:
+	case ToolJobOutput, ToolSubagentList, ToolSubagentWait, ToolSubagentEvents, ToolTeamWait, ToolTeamMailbox, ToolTeamTaskSpec, ToolTeamTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult:
 		return true
 	default:
 		return false
@@ -224,7 +233,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolJobStart, ToolJobOutput, ToolJobCancel, ToolJobMonitor, ToolJobControl, ToolJobInput, ToolJobList, ToolJobSearch, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolPlanEnter, ToolPlanExit, ToolPlanReview, ToolJobStart, ToolJobOutput, ToolJobCancel, ToolJobMonitor, ToolJobControl, ToolJobInput, ToolJobList, ToolJobSearch, ToolSubagentSpawn, ToolSubagentList, ToolSubagentSend, ToolSubagentFollowup, ToolSubagentInput, ToolSubagentApprove, ToolSubagentWait, ToolSubagentEvents, ToolSubagentClose, ToolSubagentResume, ToolSubagentApplyWorktree, ToolSubagentDiscardWorktree, ToolTeamSpawn, ToolTeamWait, ToolTeamSend, ToolTeamMailbox, ToolTeamTaskSpec, ToolTeamTaskContext, ToolTeamTaskReport, ToolTeamTaskBlock, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -260,7 +269,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 	if b != nil && b.PlanMode != nil {
 		definitions = append(definitions,
 			types.ToolDefinition{
-				Name:        ToolEnterPlanMode,
+				Name:        ToolPlanEnter,
 				Description: "Enter plan mode for the current session. Restricts writes to the plan artifact (default plan.md) until exit_plan_mode. Prefer this before large implementation work when a plan should be reviewed first. Nested re-enter keeps the original previous permission mode. Entering is user-gated by default: the request is confirmed interactively (or denied when there is no interactive user, e.g. headless runs) unless the host runs with model autonomy enabled, so ask the user to confirm instead of retrying a denial.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -292,7 +301,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolExitPlanMode,
+				Name:        ToolPlanExit,
 				Description: "Submit the plan for review or exit plan mode. decision=approve asks the user to approve and start implementation: interactive hosts raise the ordinary approval prompt (allow = exit plan mode and implement; deny = stay in plan mode and the user's feedback comes back to you), while hosts running with model autonomy apply it directly. request_changes stays in plan mode for your own revision pass; quit asks the user to close plan mode without executing. After a denial, revise the plan instead of retrying the same request.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -628,14 +637,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		}
 		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
-				Name:        ToolSpawnAgent,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
+				Name:        ToolSubagentSpawn,
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
 						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
+						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. a subagent_spawn call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
 						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
 						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
 						"prompt":               map[string]interface{}{"type": "string", "description": "Alias for message."},
@@ -656,7 +665,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
 						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions, plan, or dont_ask keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
-						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
+						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use team_spawn for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
@@ -670,8 +679,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolListAgents,
-				Description: "List lightweight spawn_agent child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from spawn_team task progress.",
+				Name:        ToolSubagentList,
+				Description: "List lightweight subagent_spawn child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from team_spawn task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -681,8 +690,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolSendMessage,
-				Description: "Deliver a plain message to a spawn_agent child session mailbox without starting a new turn (idle or busy); the child reads it on its next natural turn. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed instead of silently dropping the message. This does not address spawn_team teammates.",
+				Name:        ToolSubagentSend,
+				Description: "Deliver a plain message to a subagent_spawn child session mailbox without starting a new turn (idle or busy); the child reads it on its next natural turn. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed instead of silently dropping the message. This does not address team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -695,8 +704,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolFollowupTask,
-				Description: "Send a follow-up task to a spawn_agent child session and start a new turn. If the child is busy, the message is queued in its mailbox with trigger_turn=true and a new turn starts automatically when the current run ends (returns queued=true); interrupt=true is not needed. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed.",
+				Name:        ToolSubagentFollowup,
+				Description: "Send a follow-up task to a subagent_spawn child session and start a new turn. If the child is busy, the message is queued in its mailbox with trigger_turn=true and a new turn starts automatically when the current run ends (returns queued=true); interrupt=true is not needed. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -709,8 +718,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolSendInput,
-				Description: "Send input to an existing spawn_agent child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address spawn_team teammates.",
+				Name:        ToolSubagentInput,
+				Description: "Send input to an existing subagent_spawn child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -723,8 +732,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolResolveAgentApproval,
-				Description: "Approve or deny a pending tool approval request in a spawn_agent child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
+				Name:        ToolSubagentApprove,
+				Description: "Approve or deny a pending tool approval request in a subagent_spawn child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -738,8 +747,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolWaitAgent,
-				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Do not use this for spawn_team teammate ids. " + agentguidance.WaitDisciplineText(),
+				Name:        ToolSubagentWait,
+				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Do not use this for team_spawn teammate ids. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -753,8 +762,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1.",
+				Name:        ToolSubagentEvents,
+				Description: "Read collaboration events. With id, reads recent runtime events for a subagent_spawn child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer subagent_wait for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for team_spawn teammate ids such as member-1.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -768,7 +777,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolCloseAgent,
+				Name:        ToolSubagentClose,
 				Description: "Stop and close a child agent session, agent path, or a spawn_subagents batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -780,7 +789,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolResumeAgent,
+				Name:        ToolSubagentResume,
 				Description: "Recreate an in-memory actor for an existing child agent session.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -791,8 +800,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolApplyAgentWorktree,
-				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply and a session cannot apply or discard its own worktree. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); unrelated main-tree paths are never touched, branch-side deletions are reported as deferred_deletions instead of being applied, and local main-tree changes in the applied paths are refused unless force=true.",
+				Name:        ToolSubagentApplyWorktree,
+				Description: "Apply a subagent_spawn child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply and a session cannot apply or discard its own worktree. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); unrelated main-tree paths are never touched, branch-side deletions are reported as deferred_deletions instead of being applied, and local main-tree changes in the applied paths are refused unless force=true.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -805,8 +814,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolDiscardAgentWorktree,
-				Description: "Discard a spawn_agent child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; only the parent/orchestrator can discard a child's worktree (a session cannot discard its own), and close_agent also cleans up remaining worktrees.",
+				Name:        ToolSubagentDiscardWorktree,
+				Description: "Discard a subagent_spawn child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; only the parent/orchestrator can discard a child's worktree (a session cannot discard its own), and close_agent also cleans up remaining worktrees.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -820,14 +829,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 	if b.AgentSessions != nil {
 		definitions = append(definitions,
 			types.ToolDefinition{
-				Name:        ToolSpawnAgent,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from spawn_team teammates.",
+				Name:        ToolSubagentSpawn,
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
 						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
+						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. a subagent_spawn call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
 						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
 						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
 						"prompt":               map[string]interface{}{"type": "string", "description": "Alias for message."},
@@ -848,7 +857,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
 						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions, plan, or dont_ask keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
-						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use spawn_team for complete_task Team workers."},
+						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use team_spawn for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
@@ -862,8 +871,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolListAgents,
-				Description: "List lightweight spawn_agent child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from spawn_team task progress.",
+				Name:        ToolSubagentList,
+				Description: "List lightweight subagent_spawn child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from team_spawn task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -873,8 +882,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolSendMessage,
-				Description: "Deliver a plain message to a spawn_agent child session mailbox without starting a new turn (idle or busy); the child reads it on its next natural turn. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed instead of silently dropping the message. This does not address spawn_team teammates.",
+				Name:        ToolSubagentSend,
+				Description: "Deliver a plain message to a subagent_spawn child session mailbox without starting a new turn (idle or busy); the child reads it on its next natural turn. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed instead of silently dropping the message. This does not address team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -887,8 +896,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolFollowupTask,
-				Description: "Send a follow-up task to a spawn_agent child session and start a new turn. If the child is busy, the message is queued in its mailbox with trigger_turn=true and a new turn starts automatically when the current run ends (returns queued=true); interrupt=true is not needed. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed.",
+				Name:        ToolSubagentFollowup,
+				Description: "Send a follow-up task to a subagent_spawn child session and start a new turn. If the child is busy, the message is queued in its mailbox with trigger_turn=true and a new turn starts automatically when the current run ends (returns queued=true); interrupt=true is not needed. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -901,8 +910,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolSendInput,
-				Description: "Send input to an existing spawn_agent child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address spawn_team teammates.",
+				Name:        ToolSubagentInput,
+				Description: "Send input to an existing subagent_spawn child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -915,8 +924,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolResolveAgentApproval,
-				Description: "Approve or deny a pending tool approval request in a spawn_agent child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
+				Name:        ToolSubagentApprove,
+				Description: "Approve or deny a pending tool approval request in a subagent_spawn child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -930,8 +939,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolWaitAgent,
-				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Use wait_team for spawn_team teammates. " + agentguidance.WaitDisciplineText(),
+				Name:        ToolSubagentWait,
+				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Use team_wait for team_spawn teammates. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -944,8 +953,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolReadAgentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a spawn_agent child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer wait_agent for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for spawn_team teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
+				Name:        ToolSubagentEvents,
+				Description: "Read collaboration events. With id, reads recent runtime events for a subagent_spawn child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer subagent_wait for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for team_spawn teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -959,7 +968,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolCloseAgent,
+				Name:        ToolSubagentClose,
 				Description: "Stop and close a child agent session, agent path, or a spawn_subagents batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -971,7 +980,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolResumeAgent,
+				Name:        ToolSubagentResume,
 				Description: "Recreate an in-memory actor for an existing child agent session.",
 				Parameters: map[string]interface{}{
 					"type": "object",
@@ -982,8 +991,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolApplyAgentWorktree,
-				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); refuses to overwrite local main-tree changes unless force=true.",
+				Name:        ToolSubagentApplyWorktree,
+				Description: "Apply a subagent_spawn child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); refuses to overwrite local main-tree changes unless force=true.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -996,8 +1005,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				},
 			},
 			types.ToolDefinition{
-				Name:        ToolDiscardAgentWorktree,
-				Description: "Discard a spawn_agent child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; close_agent also cleans up remaining worktrees.",
+				Name:        ToolSubagentDiscardWorktree,
+				Description: "Discard a subagent_spawn child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; close_agent also cleans up remaining worktrees.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1017,7 +1026,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 	blockOutcomeProperties, _ := blockOutcomeSchema["properties"].(map[string]interface{})
 	definitions = append(definitions,
 		types.ToolDefinition{
-			Name:        ToolSpawnTeam,
+			Name:        ToolTeamSpawn,
 			Description: "Create a team with optional teammates and tasks. Use when the user asks to spin up a team or delegate work to multiple agents. If auto_start is true, the team starts running immediately in the background.",
 			Parameters: map[string]interface{}{
 				"type": "object",
@@ -1161,8 +1170,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolWaitTeam,
-			Description: "Wait for a spawn_team run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after spawn_team auto_start=true instead of wait_agent/read_agent_events; those are only for spawn_agent child sessions. " + agentguidance.WaitDisciplineText(),
+			Name:        ToolTeamWait,
+			Description: "Wait for a team_spawn run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after spawn_team auto_start=true instead of subagent_wait/subagent_events; those are only for subagent_spawn child sessions. " + agentguidance.WaitDisciplineText(),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1190,7 +1199,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolSendTeamMessage,
+			Name:        ToolTeamSend,
 			Description: describeRequiresActiveTeamRun("Send a direct or broadcast mailbox message within the current team."),
 			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
@@ -1225,7 +1234,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolReadMailboxDigest,
+			Name:        ToolTeamMailbox,
 			Description: describeRequiresActiveTeamRun("Read unread mailbox context for the current teammate, including broadcast messages."),
 			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
@@ -1251,7 +1260,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolReadTaskSpec,
+			Name:        ToolTeamTaskSpec,
 			Description: describeRequiresActiveTeamRun("Read the current task specification for the team run."),
 			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
@@ -1269,7 +1278,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolReadTaskContext,
+			Name:        ToolTeamTaskContext,
 			Description: describeRequiresActiveTeamRun("Read the current task specification plus richer team context for the active task."),
 			Metadata:    metadataRequiresActiveTeamRun(nil),
 			Parameters: map[string]interface{}{
@@ -1307,11 +1316,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolReportTaskOutcome,
+			Name:        ToolTeamTaskReport,
 			Description: describeRequiresActiveTeamRun("Report a structured done, failed, blocked, or handoff outcome for the current team task."),
 			Metadata: metadataRequiresActiveTeamRun(map[string]interface{}{
 				"canonical": true,
-				"replaces":  []string{ToolBlockCurrentTask},
+				"replaces":  []string{ToolTeamTaskBlock},
 			}),
 			Parameters: map[string]interface{}{
 				"type": "object",
@@ -1345,11 +1354,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolBlockCurrentTask,
-			Description: describeRequiresActiveTeamRun("Compatibility alias for report_task_outcome when reporting blocked or handoff outcomes."),
+			Name:        ToolTeamTaskBlock,
+			Description: describeRequiresActiveTeamRun("Compatibility alias for team_task_report when reporting blocked or handoff outcomes."),
 			Metadata: metadataRequiresActiveTeamRun(map[string]interface{}{
 				"compatibility_alias": true,
-				"canonical_tool":      ToolReportTaskOutcome,
+				"canonical_tool":      ToolTeamTaskReport,
 			}),
 			Parameters: map[string]interface{}{
 				"type": "object",
@@ -1543,7 +1552,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			toolresult.MetadataKey: toolresult.KindStructured,
 		}, nil
 
-	case ToolEnterPlanMode:
+	case ToolPlanEnter:
 		if b.PlanMode == nil {
 			return nil, nil, fmt.Errorf("plan mode controller is not configured")
 		}
@@ -1563,7 +1572,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return result, meta, nil
 
-	case ToolExitPlanMode:
+	case ToolPlanExit:
 		if b.PlanMode == nil {
 			return nil, nil, fmt.Errorf("plan mode controller is not configured")
 		}
@@ -2115,7 +2124,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return b.monitorBackgroundTask(ctx, resolvedJobID, displayJobID, args)
 
-	case ToolSpawnAgent:
+	case ToolSubagentSpawn:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2133,13 +2142,13 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		request := SpawnAgentArgs{Message: message, ParentToolCallID: strings.TrimSpace(toolCallID)}
 		if value, ok := args["id"].(string); ok {
 			request.ID = strings.TrimSpace(value)
-			if err := rejectRenderedPlaceholderID(ToolSpawnAgent, "id", request.ID); err != nil {
+			if err := rejectRenderedPlaceholderID(ToolSubagentSpawn, "id", request.ID); err != nil {
 				return nil, nil, err
 			}
 		}
 		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
 			request.SessionID = strings.TrimSpace(value)
-			if err := rejectRenderedPlaceholderID(ToolSpawnAgent, "session_id", request.SessionID); err != nil {
+			if err := rejectRenderedPlaceholderID(ToolSubagentSpawn, "session_id", request.SessionID); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -2295,7 +2304,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			actualSessionID = firstNonEmptyToolValue(result.SessionID, result.ID)
 		}
 		if handleAliases != nil && !explicitSessionID && actualSessionID != "" {
-			handleAliases.Sessions.register(actualSessionID, deterministicHandleAlias(agentSessionAliasPrefix, toolCallID, ToolSpawnAgent, args))
+			handleAliases.Sessions.register(actualSessionID, deterministicHandleAlias(agentSessionAliasPrefix, toolCallID, ToolSubagentSpawn, args))
 			if err := b.saveSessionHandleAliases(ctx, sessionID, handleAliases); err != nil {
 				return nil, nil, err
 			}
@@ -2411,7 +2420,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return aliasedResult, attachCacheSafeSummary(metadata, agentStatusCacheSafeSummary(aliasedResult)), nil
 
-	case ToolListAgents:
+	case ToolSubagentList:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2435,7 +2444,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"count": valueOrZeroAgentListCount(result),
 		}, agentListCacheSafeSummary(aliasedResult)), nil
 
-	case ToolSendMessage, ToolFollowupTask:
+	case ToolSubagentSend, ToolSubagentFollowup:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2470,7 +2479,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, err
 		}
 		var result *AgentMessageResult
-		if toolName == ToolFollowupTask {
+		if toolName == ToolSubagentFollowup {
 			if strings.TrimSpace(actualSessionID) == strings.TrimSpace(sessionID) {
 				return nil, nil, fmt.Errorf("followup_task target cannot be the current/root session")
 			}
@@ -2499,7 +2508,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		// F4: send_message never starts a turn. Surface that in the delivery
 		// receipt (and point an idle child at followup_task) so "delivered"
 		// cannot be mistaken for "the child will act on this".
-		if toolName == ToolSendMessage && result != nil && !result.Triggered {
+		if toolName == ToolSubagentSend && result != nil && !result.Triggered {
 			summary["turn_started"] = false
 			nextAction := "message_queued_no_turn: send_message never starts a turn; the child reads it on its next natural turn. Use followup_task if the child must act now."
 			if result.Status != nil && strings.EqualFold(strings.TrimSpace(result.Status.Status), "idle") {
@@ -2510,7 +2519,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return aliasedResult, attachCacheSafeSummary(summary, agentMessageCacheSafeSummary(aliasedResult)), nil
 
-	case ToolSendInput:
+	case ToolSubagentInput:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2576,7 +2585,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 	case ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return b.executeSupervisionTool(ctx, toolName, sessionID, args)
 
-	case ToolResolveAgentApproval:
+	case ToolSubagentApprove:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2616,7 +2625,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				return nil, nil, err
 			}
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolResolveAgentApproval, actualSessionID); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolSubagentApprove, actualSessionID); err != nil {
 			return nil, nil, err
 		}
 		if strings.TrimSpace(request.ID) != "" {
@@ -2652,7 +2661,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        status,
 		}, agentApprovalCacheSafeSummary(aliasedResult)), nil
 
-	case ToolWaitAgent:
+	case ToolSubagentWait:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2663,12 +2672,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
 			request.SessionID = strings.TrimSpace(value)
 		}
-		if value, ok, err := brokerToolArgInt(ToolWaitAgent, args, "timeout_ms"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolSubagentWait, args, "timeout_ms"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.TimeoutMs = value
 		}
-		if value, ok, err := toolArgInt64(ToolWaitAgent, args, "after_seq"); err != nil {
+		if value, ok, err := toolArgInt64(ToolSubagentWait, args, "after_seq"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.AfterSeq = value
@@ -2697,10 +2706,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				}
 			}
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolWaitAgent, request.ID, request.SessionID); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolSubagentWait, request.ID, request.SessionID); err != nil {
 			return nil, nil, err
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolWaitAgent, append(request.IDs, request.SessionIDs...)...); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolSubagentWait, append(request.IDs, request.SessionIDs...)...); err != nil {
 			return nil, nil, err
 		}
 		result, err := b.AgentSessions.Wait(ctx, request)
@@ -2733,7 +2742,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return aliasedResult, attachCacheSafeSummary(summary, agentWaitCacheSafeSummary(aliasedResult)), nil
 
-	case ToolReadAgentEvents:
+	case ToolSubagentEvents:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2744,17 +2753,17 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["session_id"].(string); ok && strings.TrimSpace(request.ID) == "" {
 			request.SessionID = strings.TrimSpace(value)
 		}
-		if value, ok, err := toolArgInt64(ToolReadAgentEvents, args, "after_seq"); err != nil {
+		if value, ok, err := toolArgInt64(ToolSubagentEvents, args, "after_seq"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.AfterSeq = value
 		}
-		if value, ok, err := brokerToolArgInt(ToolReadAgentEvents, args, "limit"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolSubagentEvents, args, "limit"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.Limit = value
 		}
-		if value, ok, err := brokerToolArgInt(ToolReadAgentEvents, args, "wait_ms"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolSubagentEvents, args, "wait_ms"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.WaitMs = value
@@ -2776,7 +2785,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 		}
 		if !request.MailboxOnly {
-			if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolReadAgentEvents, actualSessionID); err != nil {
+			if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolSubagentEvents, actualSessionID); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -2824,7 +2833,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return aliasedResult, attachCacheSafeSummary(summary, agentEventsCacheSafeSummary(aliasedResult)), nil
 
-	case ToolCloseAgent:
+	case ToolSubagentClose:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2865,7 +2874,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        valueOrEmptyAgentStatus(result),
 		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
-	case ToolResumeAgent:
+	case ToolSubagentResume:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2898,7 +2907,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":        valueOrEmptyAgentStatus(result),
 		}, agentStatusCacheSafeSummary(aliasedResult)), nil
 
-	case ToolApplyAgentWorktree:
+	case ToolSubagentApplyWorktree:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2927,10 +2936,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				return nil, nil, err
 			}
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolApplyAgentWorktree, actualSessionID); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolSubagentApplyWorktree, actualSessionID); err != nil {
 			return nil, nil, err
 		}
-		if err := b.rejectSelfWorktreeOperation(sessionID, actualSessionID, ToolApplyAgentWorktree); err != nil {
+		if err := b.rejectSelfWorktreeOperation(sessionID, actualSessionID, ToolSubagentApplyWorktree); err != nil {
 			return nil, nil, err
 		}
 		if strings.TrimSpace(request.ID) != "" {
@@ -2957,7 +2966,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"worktree_path": valueOrEmptyWorktreePath(result),
 		}, agentWorktreeCacheSafeSummary(aliasedResult)), nil
 
-	case ToolDiscardAgentWorktree:
+	case ToolSubagentDiscardWorktree:
 		if b.AgentSessions == nil {
 			return nil, nil, fmt.Errorf("agent session controller is not configured")
 		}
@@ -2979,10 +2988,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				return nil, nil, err
 			}
 		}
-		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolDiscardAgentWorktree, actualSessionID); err != nil {
+		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolSubagentDiscardWorktree, actualSessionID); err != nil {
 			return nil, nil, err
 		}
-		if err := b.rejectSelfWorktreeOperation(sessionID, actualSessionID, ToolDiscardAgentWorktree); err != nil {
+		if err := b.rejectSelfWorktreeOperation(sessionID, actualSessionID, ToolSubagentDiscardWorktree); err != nil {
 			return nil, nil, err
 		}
 		if strings.TrimSpace(request.ID) != "" {
@@ -3008,7 +3017,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"worktree_path": valueOrEmptyWorktreePath(result),
 		}, agentWorktreeCacheSafeSummary(aliasedResult)), nil
 
-	case ToolSpawnTeam:
+	case ToolTeamSpawn:
 		if b.TeamStore == nil {
 			return nil, nil, fmt.Errorf("team store is not configured")
 		}
@@ -3018,7 +3027,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		if value, ok := args["team_id"].(string); ok {
 			request.TeamID = strings.TrimSpace(value)
-			if err := rejectRenderedPlaceholderID(ToolSpawnTeam, "team_id", request.TeamID); err != nil {
+			if err := rejectRenderedPlaceholderID(ToolTeamSpawn, "team_id", request.TeamID); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -3032,7 +3041,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			request.LeadSessionID = strings.TrimSpace(sessionID)
 		}
 		if currentSessionID := strings.TrimSpace(sessionID); currentSessionID != "" {
-			// For chat-originated spawn_team calls, keep the lead bound to the
+			// For chat-originated team_spawn calls, keep the lead bound to the
 			// current session. This prevents the model from inventing a detached
 			// lead_session_id that would break ambient team state and prompt gating.
 			request.LeadSessionID = currentSessionID
@@ -3147,7 +3156,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 				spec.ReadPaths = coerceStringSlice(entry["read_paths"])
 				spec.WritePaths = coerceStringSlice(entry["write_paths"])
 				spec.Deliverables = coerceStringSlice(entry["deliverables"])
-				if value, ok, err := toolArgInt64("spawn_team tasks[]", entry, "priority"); err != nil {
+				if value, ok, err := toolArgInt64("team_spawn tasks[]", entry, "priority"); err != nil {
 					return nil, nil, err
 				} else if ok {
 					spec.Priority = int(value)
@@ -3432,22 +3441,22 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return result, attachCacheSafeSummary(rawMeta, spawnTeamCacheSafeSummary(result)), nil
 
-	case ToolWaitTeam:
+	case ToolTeamWait:
 		request := WaitTeamArgs{}
 		if value, ok := args["team_id"].(string); ok {
 			request.TeamID = strings.TrimSpace(value)
 		}
-		if value, ok, err := toolArgInt64(ToolWaitTeam, args, "after_seq"); err != nil {
+		if value, ok, err := toolArgInt64(ToolTeamWait, args, "after_seq"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.AfterSeq = value
 		}
-		if value, ok, err := brokerToolArgInt(ToolWaitTeam, args, "timeout_ms"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolTeamWait, args, "timeout_ms"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.TimeoutMs = value
 		}
-		if value, ok, err := brokerToolArgInt(ToolWaitTeam, args, "limit"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolTeamWait, args, "limit"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.Limit = value
@@ -3480,7 +3489,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"waited_ms":      result.WaitedMs,
 		}, waitTeamCacheSafeSummary(result)), nil
 
-	case ToolSendTeamMessage:
+	case ToolTeamSend:
 		if b.TeamStore == nil {
 			return nil, nil, fmt.Errorf("team store is not configured")
 		}
@@ -3560,7 +3569,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"to_agent":   message.ToAgent,
 		}, sendTeamMessageCacheSafeSummary(result)), nil
 
-	case ToolReadMailboxDigest:
+	case ToolTeamMailbox:
 		if b.TeamStore == nil {
 			return nil, nil, fmt.Errorf("team store is not configured")
 		}
@@ -3571,7 +3580,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["agent_id"].(string); ok {
 			request.AgentID = strings.TrimSpace(value)
 		}
-		if value, ok, err := brokerToolArgInt(ToolReadMailboxDigest, args, "limit"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolTeamMailbox, args, "limit"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.Limit = value
@@ -3613,7 +3622,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"marked_read":   digestResult.MarkedRead,
 		}, readMailboxDigestCacheSafeSummary(result)), nil
 
-	case ToolReadTaskSpec:
+	case ToolTeamTaskSpec:
 		if b.TeamStore == nil {
 			return nil, nil, fmt.Errorf("team store is not configured")
 		}
@@ -3635,7 +3644,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"status":  string(task.Status),
 		}, readTaskSpecCacheSafeSummary(result)), nil
 
-	case ToolReadTaskContext:
+	case ToolTeamTaskContext:
 		if b.TeamStore == nil {
 			return nil, nil, fmt.Errorf("team store is not configured")
 		}
@@ -3652,7 +3661,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["include_mailbox"].(bool); ok {
 			request.IncludeMailbox = &value
 		}
-		if value, ok, err := brokerToolArgInt(ToolReadTaskContext, args, "mailbox_limit"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolTeamTaskContext, args, "mailbox_limit"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.MailboxLimit = value
@@ -3660,7 +3669,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["mark_read"].(bool); ok {
 			request.MarkRead = &value
 		}
-		if value, ok, err := brokerToolArgInt(ToolReadTaskContext, args, "context_budget"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolTeamTaskContext, args, "context_budget"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.ContextBudget = value
@@ -3728,7 +3737,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"mailbox_marked_read": result.MarkedRead,
 		}, readTaskContextCacheSafeSummary(result)), nil
 
-	case ToolBlockCurrentTask:
+	case ToolTeamTaskBlock:
 		request := ReportTaskOutcomeArgs{}
 		if value, ok := args["team_id"].(string); ok {
 			request.TeamID = strings.TrimSpace(value)
@@ -3761,7 +3770,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return BlockCurrentTaskResult(result), meta, nil
 
-	case ToolReportTaskOutcome:
+	case ToolTeamTaskReport:
 		request := ReportTaskOutcomeArgs{}
 		if value, ok := args["team_id"].(string); ok {
 			request.TeamID = strings.TrimSpace(value)
@@ -3949,7 +3958,7 @@ func unsupportedSpawnAgentArgHint(key string) string {
 	}
 }
 
-// normalizeSpawnAgentToolArgs validates a spawn_agent call and resolves its task
+// normalizeSpawnAgentToolArgs validates a subagent_spawn call and resolves its task
 // prompt. It fails closed on unsupported keys and on a missing prompt so the
 // caller can correct the call instead of receiving a child session that has no
 // task in context.
@@ -4014,7 +4023,7 @@ func (b *Broker) prepareSpawnTaskSpecs(specs []SpawnTaskSpec) ([]SpawnTaskSpec, 
 			continue
 		}
 		if _, ok := seenIDs[id]; ok {
-			return nil, fmt.Errorf("duplicate spawn_team task id %q", id)
+			return nil, fmt.Errorf("duplicate team_spawn task id %q", id)
 		}
 		seenIDs[id] = struct{}{}
 	}
@@ -4022,7 +4031,7 @@ func (b *Broker) prepareSpawnTaskSpecs(specs []SpawnTaskSpec) ([]SpawnTaskSpec, 
 		if strings.TrimSpace(resolved[index].Goal) != "" || strings.TrimSpace(resolved[index].Title) != "" {
 			continue
 		}
-		return nil, fmt.Errorf("spawn_team task %d is missing goal: every task needs goal (or title) so the teammate receives its assignment; note that spawn_agent uses message, while spawn_team tasks declare the assignment as goal", index+1)
+		return nil, fmt.Errorf("team_spawn task %d is missing goal: every task needs goal (or title) so the teammate receives its assignment; note that subagent_spawn uses message, while team_spawn tasks declare the assignment as goal", index+1)
 	}
 	if root == "" {
 		return resolved, nil
@@ -4145,10 +4154,12 @@ func normalizeToolName(name string) string {
 	switch name {
 	case "askuserquestion":
 		return ToolAskUserQuestion
-	case "enterplanmode":
-		return ToolEnterPlanMode
-	case "exitplanmode":
-		return ToolExitPlanMode
+	// Plan family (naming contract B4): canonical plan_* plus the legacy
+	// *_plan_mode spellings, which stay callable.
+	case "plan_enter", "planenter", "enterplanmode", "enter_plan_mode":
+		return ToolPlanEnter
+	case "plan_exit", "planexit", "exitplanmode", "exit_plan_mode":
+		return ToolPlanExit
 	case "planreview":
 		return ToolPlanReview
 	// Job family (naming contract B1): the canonical job_* spellings plus the
@@ -4169,46 +4180,50 @@ func normalizeToolName(name string) string {
 		return ToolJobList
 	case "job_search", "jobsearch":
 		return ToolJobSearch
-	case "spawnagent":
-		return ToolSpawnAgent
-	case "listagents":
-		return ToolListAgents
-	case "sendmessage":
-		return ToolSendMessage
-	case "followuptask":
-		return ToolFollowupTask
-	case "sendinput":
-		return ToolSendInput
-	case "resolveagentapproval", "approve_agent_tool", "approveagenttool", "approve_child_tool", "approvechildtool":
-		return ToolResolveAgentApproval
-	case "waitagent":
-		return ToolWaitAgent
-	case "readagentevents":
-		return ToolReadAgentEvents
-	case "closeagent":
-		return ToolCloseAgent
-	case "resumeagent":
-		return ToolResumeAgent
-	case "applyagentworktree", "apply_worktree", "applyworktree":
-		return ToolApplyAgentWorktree
-	case "discardagentworktree", "discard_worktree", "discardworktree":
-		return ToolDiscardAgentWorktree
-	case "spawnteam":
-		return ToolSpawnTeam
-	case "waitteam":
-		return ToolWaitTeam
-	case "sendteammessage":
-		return ToolSendTeamMessage
-	case "readmailboxdigest":
-		return ToolReadMailboxDigest
-	case "readtaskspec":
-		return ToolReadTaskSpec
-	case "readtaskcontext":
-		return ToolReadTaskContext
-	case "reporttaskoutcome":
-		return ToolReportTaskOutcome
-	case "blockcurrenttask":
-		return ToolBlockCurrentTask
+	// Subagent family (naming contract B3): canonical subagent_* plus the
+	// legacy *_agent / generic spellings, which stay callable.
+	case "subagent_spawn", "subagentspawn", "spawnagent", "spawn_agent":
+		return ToolSubagentSpawn
+	case "subagent_list", "subagentlist", "listagents", "list_agents":
+		return ToolSubagentList
+	case "subagent_send", "subagentsend", "sendmessage", "send_message":
+		return ToolSubagentSend
+	case "subagent_followup", "subagentfollowup", "followuptask", "followup_task":
+		return ToolSubagentFollowup
+	case "subagent_input", "subagentinput", "sendinput", "send_input":
+		return ToolSubagentInput
+	case "subagent_approve", "subagentapprove", "resolveagentapproval", "resolve_agent_approval", "approve_agent_tool", "approveagenttool", "approve_child_tool", "approvechildtool":
+		return ToolSubagentApprove
+	case "subagent_wait", "subagentwait", "waitagent", "wait_agent":
+		return ToolSubagentWait
+	case "subagent_events", "subagentevents", "readagentevents", "read_agent_events":
+		return ToolSubagentEvents
+	case "subagent_close", "subagentclose", "closeagent", "close_agent":
+		return ToolSubagentClose
+	case "subagent_resume", "subagentresume", "resumeagent", "resume_agent":
+		return ToolSubagentResume
+	case "subagent_apply_worktree", "subagentapplyworktree", "applyagentworktree", "apply_agent_worktree", "apply_worktree", "applyworktree":
+		return ToolSubagentApplyWorktree
+	case "subagent_discard_worktree", "subagentdiscardworktree", "discardagentworktree", "discard_agent_worktree", "discard_worktree", "discardworktree":
+		return ToolSubagentDiscardWorktree
+	// Team family (naming contract B2): canonical team_* plus the mixed legacy
+	// spellings, which stay callable.
+	case "team_spawn", "teamspawn", "spawnteam", "spawn_team":
+		return ToolTeamSpawn
+	case "team_wait", "teamwait", "waitteam", "wait_team":
+		return ToolTeamWait
+	case "team_send", "teamsend", "sendteammessage", "send_team_message":
+		return ToolTeamSend
+	case "team_mailbox", "teammailbox", "readmailboxdigest", "read_mailbox_digest":
+		return ToolTeamMailbox
+	case "team_task_spec", "teamtaskspec", "readtaskspec", "read_task_spec":
+		return ToolTeamTaskSpec
+	case "team_task_context", "teamtaskcontext", "readtaskcontext", "read_task_context":
+		return ToolTeamTaskContext
+	case "team_task_report", "teamtaskreport", "reporttaskoutcome", "report_task_outcome":
+		return ToolTeamTaskReport
+	case "team_task_block", "teamtaskblock", "blockcurrenttask", "block_current_task":
+		return ToolTeamTaskBlock
 	case "supervisionsnapshot":
 		return ToolSupervisionSnapshot
 	case "supervisiondescendants":
@@ -4404,7 +4419,7 @@ func coerceObjectArray(value interface{}, field string) ([]map[string]interface{
 func (b *Broker) resolveTeamScope(ctx context.Context, sessionID, explicitTeamID string) (teamID string, agentID string, taskID string, err error) {
 	runMeta, ok := team.GetRunMeta(ctx)
 	if !ok || runMeta == nil || runMeta.Team == nil || strings.TrimSpace(runMeta.Team.TeamID) == "" {
-		return "", "", "", fmt.Errorf("team tools require an active team run; call spawn_team first from the lead chat or continue within an active team task")
+		return "", "", "", fmt.Errorf("team tools require an active team run; call team_spawn first from the lead chat or continue within an active team task")
 	}
 	teamID = strings.TrimSpace(explicitTeamID)
 	runTeamID := strings.TrimSpace(runMeta.Team.TeamID)
@@ -4823,9 +4838,9 @@ func normalizeSpawnAgentCompletionRequirement(raw string) (string, error) {
 	case string(agentdef.CompletionNone):
 		return string(agentdef.CompletionNone), nil
 	case string(agentdef.CompletionCompleteTask), "complete-task", "completetask":
-		return "", runtimeerrors.Newf(runtimeerrors.ErrValidationFailed, "spawn_agent completion_requirement %q is not supported: ordinary child sessions have no Team task identity; use spawn_team or a Team assignment for complete_task workers", trimmed)
+		return "", runtimeerrors.Newf(runtimeerrors.ErrValidationFailed, "subagent_spawn completion_requirement %q is not supported: ordinary child sessions have no Team task identity; use team_spawn or a Team assignment for complete_task workers", trimmed)
 	default:
-		return "", runtimeerrors.Newf(runtimeerrors.ErrValidationFailed, "invalid spawn_agent completion_requirement %q: ordinary child sessions only support none", trimmed)
+		return "", runtimeerrors.Newf(runtimeerrors.ErrValidationFailed, "invalid subagent_spawn completion_requirement %q: ordinary child sessions only support none", trimmed)
 	}
 }
 
@@ -5162,7 +5177,7 @@ func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, parentSessionI
 		if teammate == nil {
 			continue
 		}
-		return fmt.Errorf("%s is a spawn_agent child-session tool, but %q is a spawn_team teammate id in team %q; use spawn_agent child session ids/paths with this tool, or call wait_team with team_id %q for spawn_team progress", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
+		return fmt.Errorf("%s is a subagent_spawn child-session tool, but %q is a team_spawn teammate id in team %q; use subagent_spawn child session ids/paths with this tool, or call team_wait with team_id %q for spawn_team progress", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
 	}
 	return nil
 }

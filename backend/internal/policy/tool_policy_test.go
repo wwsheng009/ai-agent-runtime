@@ -97,7 +97,7 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *te
 func TestToolExecutionPolicy_AllowTool_AllowsRuntimeOwnedEssentialsOutsideAllowlist(t *testing.T) {
 	policy := NewToolExecutionPolicy([]string{"view", "grep"}, false)
 	essentials := []string{
-		"enter_plan_mode", "exit_plan_mode", "plan_review", "ask_user_question",
+		"plan_enter", "plan_exit", "plan_review", "ask_user_question",
 		"todos", "get_goal", "update_goal",
 		"spawn_agent", "list_agents", "wait_agent", "resolve_agent_approval",
 		"task_output", "search_tool",
@@ -118,8 +118,8 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeOwnedEssentialsOutsideAllowl
 		t.Fatal("expected non-essential shell tool to remain allowlist-gated")
 	}
 	// Explicit deny still wins over essential bypass.
-	policy.DeniedTools = map[string]bool{"Enter_Plan_Mode": true}
-	if err := policy.AllowTool("enter_plan_mode"); err == nil {
+	policy.DeniedTools = map[string]bool{"Plan_Enter": true}
+	if err := policy.AllowTool("plan_enter"); err == nil {
 		t.Fatal("expected normalized explicit deny to block enter_plan_mode")
 	}
 }
@@ -141,13 +141,13 @@ func TestToolExecutionPolicy_AllowTool_EmptyAllowlistBlocksEssentials(t *testing
 func TestToolExecutionPolicy_AllowTool_EssentialStillHonorsCapabilityScope(t *testing.T) {
 	// enter_plan_mode requires CapReadOnly + CapAskUser; network alone is insufficient.
 	policy := NewCapabilityScopedToolExecutionPolicy([]string{"view"}, []Capability{CapReadOnly, CapAskUser, CapNetwork})
-	if err := policy.AllowTool("enter_plan_mode"); err != nil {
-		t.Fatalf("expected enter_plan_mode under read_only+ask_user+network scope, got %v", err)
+	if err := policy.AllowTool("plan_enter"); err != nil {
+		t.Fatalf("expected plan_enter under read_only+ask_user+network scope, got %v", err)
 	}
 	// Without CapAskUser, enter_plan_mode is still capability-gated (allowlist bypass is not enough).
 	narrow := NewCapabilityScopedToolExecutionPolicy([]string{"view"}, []Capability{CapReadOnly, CapNetwork})
-	if err := narrow.AllowTool("enter_plan_mode"); err == nil {
-		t.Fatal("expected enter_plan_mode to remain capability-gated without CapAskUser")
+	if err := narrow.AllowTool("plan_enter"); err == nil {
+		t.Fatal("expected plan_enter to remain capability-gated without CapAskUser")
 	}
 	// Agent management still requires CapAgentManagement.
 	if err := policy.AllowTool("spawn_agent"); err == nil {

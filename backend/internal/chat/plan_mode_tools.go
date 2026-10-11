@@ -306,7 +306,7 @@ func (a *SessionActor) confirmModelPlanExit(ctx context.Context, state planmode.
 	}
 	return a.RequestApproval(ctx, runtimepolicy.ApprovalRequest{
 		SessionID: a.id,
-		ToolName:  toolbroker.ToolExitPlanMode,
+		ToolName:  toolbroker.ToolPlanExit,
 		ArgsJSON:  argsJSON,
 		Reason:    planmode.ExitApprovalReason(decision),
 	})

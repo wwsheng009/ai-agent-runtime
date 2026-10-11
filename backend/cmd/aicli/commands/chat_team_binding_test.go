@@ -225,7 +225,7 @@ func TestInferAmbientTeamBinding_FromSpawnTeamToolResult(t *testing.T) {
 		{
 			Role: "assistant",
 			ToolCalls: []runtimetypes.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolSpawnTeam},
+				{ID: "call-1", Name: toolbroker.ToolTeamSpawn},
 			},
 			Metadata: runtimetypes.NewMetadata(),
 		},
@@ -259,7 +259,7 @@ func TestInferAmbientTeamBinding_FromSpawnTeamToolMetadata(t *testing.T) {
 		{
 			Role: "assistant",
 			ToolCalls: []runtimetypes.ToolCall{
-				{ID: "call-1", Name: toolbroker.ToolSpawnTeam},
+				{ID: "call-1", Name: toolbroker.ToolTeamSpawn},
 			},
 			Metadata: runtimetypes.NewMetadata(),
 		},

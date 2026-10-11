@@ -151,7 +151,7 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	}
 	spawnRaw, spawnMeta, err := brokerOne.ExecuteToolCall(ctx, "parent-session", types.ToolCall{
 		ID:   "call-agent-1",
-		Name: ToolSpawnAgent,
+		Name: ToolSubagentSpawn,
 		Args: map[string]interface{}{
 			"message": "inspect repo",
 		},
@@ -169,7 +169,7 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 		AgentSessions:       controller,
 		SessionContextStore: store,
 	}
-	_, sendMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolSendInput, map[string]interface{}{
+	_, sendMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolSubagentInput, map[string]interface{}{
 		"id":      spawnResult.SessionID,
 		"message": "continue",
 	})
@@ -178,7 +178,7 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	assert.Equal(t, "child-1", controller.lastInput.ID)
 	assert.Equal(t, spawnResult.SessionID, sendMeta["session_alias"])
 
-	waitRaw, waitMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolWaitAgent, map[string]interface{}{
+	waitRaw, waitMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolSubagentWait, map[string]interface{}{
 		"id":         spawnResult.SessionID,
 		"timeout_ms": 1000,
 	})
@@ -191,7 +191,7 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	assert.Equal(t, "child-1", waitMeta["session_id"])
 	assert.Equal(t, spawnResult.SessionID, waitMeta["session_alias"])
 
-	eventsRaw, eventsMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolReadAgentEvents, map[string]interface{}{
+	eventsRaw, eventsMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"id": spawnResult.SessionID,
 	})
 	require.NoError(t, err)
@@ -204,14 +204,14 @@ func TestBrokerAgentAliasesPersistAcrossBrokerInstances(t *testing.T) {
 	assert.Equal(t, "child-1", eventsMeta["session_id"])
 	assert.Equal(t, spawnResult.SessionID, eventsMeta["session_alias"])
 
-	_, closeMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolCloseAgent, map[string]interface{}{
+	_, closeMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolSubagentClose, map[string]interface{}{
 		"id": spawnResult.SessionID,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "child-1", controller.lastClose)
 	assert.Equal(t, spawnResult.SessionID, closeMeta["session_alias"])
 
-	_, resumeMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolResumeAgent, map[string]interface{}{
+	_, resumeMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolSubagentResume, map[string]interface{}{
 		"id": spawnResult.SessionID,
 	})
 	require.NoError(t, err)
@@ -249,7 +249,7 @@ func TestBrokerWaitAgentUnknownAliasFailsBeforeControllerWithStableErrorCode(t *
 		SessionContextStore: newFakeSessionContextStore(),
 	}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolWaitAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentWait, map[string]interface{}{
 		"id":         reference,
 		"timeout_ms": 1000,
 	})
@@ -264,7 +264,7 @@ func TestClassifyBrokerExecutionErrorAgentSessionNotFoundFallback(t *testing.T) 
 		"unknown agent session reference: session_ref_missing",
 		"agent session not found: child-missing",
 	} {
-		err := classifyBrokerExecutionError(ToolWaitAgent, errors.New(message))
+		err := classifyBrokerExecutionError(ToolSubagentWait, errors.New(message))
 		assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrAgentSessionNotFound), "message=%q err=%v", message, err)
 	}
 }
@@ -280,7 +280,7 @@ func TestBrokerAgentCacheSafeSummaryOmitsDynamicTurnIDs(t *testing.T) {
 
 	raw, meta, err := broker.ExecuteToolCall(ctx, "parent-session", types.ToolCall{
 		ID:   "call-agent-summary-1",
-		Name: ToolSpawnAgent,
+		Name: ToolSubagentSpawn,
 		Args: map[string]interface{}{
 			"message": "inspect repo",
 		},
@@ -289,7 +289,7 @@ func TestBrokerAgentCacheSafeSummaryOmitsDynamicTurnIDs(t *testing.T) {
 
 	envelope, err := output.NewGateway(nil).Process(ctx, output.RawToolResult{
 		SessionID:  "parent-session",
-		ToolName:   ToolSpawnAgent,
+		ToolName:   ToolSubagentSpawn,
 		ToolCallID: "call-agent-summary-1",
 		Content:    raw,
 		Metadata: map[string]interface{}{

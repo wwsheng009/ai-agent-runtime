@@ -189,7 +189,7 @@ type SpawnTaskSpec struct {
 	DependsOn           []string `json:"depends_on,omitempty"`
 }
 
-// SpawnTeamResult returns created entities for a spawn_team call.
+// SpawnTeamResult returns created entities for a team_spawn call.
 type SpawnTeamResult struct {
 	TeamID        string   `json:"team_id"`
 	CreatedTeam   bool     `json:"created_team"`
@@ -267,7 +267,7 @@ type TeamMailboxDispatcher interface {
 	DispatchTeamMailboxMessage(ctx context.Context, message team.MailMessage) error
 }
 
-// TeamTeammateAgentProjector optionally projects spawn_team teammates into the
+// TeamTeammateAgentProjector optionally projects team_spawn teammates into the
 // AgentControl identity graph immediately after team store writes.
 type TeamTeammateAgentProjector interface {
 	SyncTeamTeammateAgent(ctx context.Context, previous *team.Teammate, teammate team.Teammate) error
@@ -849,7 +849,7 @@ func FinalizeAgentEventsResult(result *AgentEventsResult) *AgentEventsResult {
 	default:
 		// Non-blocking empty read (wait_ms=0 or no wait). Explicitly steer away
 		// from tight unchanged polling loops that doom-loop exempts.
-		result.NextAction = "stop_empty_event_poll: 0 events returned; do not immediately re-call read_agent_events with the same id/after_seq. Prefer wait_agent for readiness, or use wait_ms>0 once if waiting for a specific new event"
+		result.NextAction = "stop_empty_event_poll: 0 events returned; do not immediately re-call read_agent_events with the same id/after_seq. prefer subagent_wait for readiness, or use wait_ms>0 once if waiting for a specific new event"
 	}
 	return result
 }
@@ -1596,7 +1596,7 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	if effectivePermissionMode != "" {
 		session.SetContext(AgentSessionContextEffectivePermissionMode, effectivePermissionMode)
 	}
-	// Forking copies parent context, but ordinary spawn_agent children never own
+	// Forking copies parent context, but ordinary subagent_spawn children never own
 	// the parent's Team completion contract. Persist none even when omitted so a
 	// cloned complete_task value cannot survive into initial or resumed runs.
 	session.SetContext(AgentSessionContextCompletionRequirement, "none")

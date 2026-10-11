@@ -1386,7 +1386,7 @@ func TestBuildLocalChatToolPolicy_AllowsBrokerTeamTools(t *testing.T) {
 		t.Fatal("expected allowlist policy")
 	}
 
-	for _, name := range []string{"bash", "edit", agent.SpawnSubagentsToolName, toolbroker.ToolSpawnTeam, toolbroker.ToolReadTaskSpec} {
+	for _, name := range []string{"bash", "edit", agent.SpawnSubagentsToolName, toolbroker.ToolTeamSpawn, toolbroker.ToolTeamTaskSpec} {
 		if !policy.AllowedTools[name] {
 			t.Fatalf("expected %q to be allowed, got %#v", name, policy.AllowedTools)
 		}
@@ -1818,11 +1818,11 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 		`Interpret "当前目录", ".", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.`,
 		"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
 		"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
-		"Team collaboration tools such as read_task_spec, read_task_context, send_team_message, read_mailbox_digest, report_task_outcome, and block_current_task require an active team run. Ordinary spawn_agent children only support completion_requirement=none; use spawn_team or a Team assignment when a structured complete_task outcome is required.",
+		"Team collaboration tools such as team_task_spec, team_task_context, team_send, team_mailbox, team_task_report, and team_task_block require an active team run. Ordinary subagent_spawn children only support completion_requirement=none; use team_spawn or a Team assignment when a structured complete_task outcome is required.",
 		`When calling team tools, leave teammate session_id unset unless you truly need a fixed explicit session. Never use session_id="current" for teammates.`,
-		"When calling spawn_team from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
-		"When you call spawn_team with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
-		"After spawn_team auto_start=true, call wait_team with the returned team_id to wait for durable team.completed/team.summary.",
+		"When calling team_spawn from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
+		"When you call team_spawn with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
+		"After team_spawn auto_start=true, call team_wait with the returned team_id to wait for durable team.completed/team.summary.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected system prompt to contain %q, got %q", want, got)

@@ -65,7 +65,7 @@ func TestBrokerExecuteSendTeamMessageUsesRunMetaDefaults(t *testing.T) {
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolSendTeamMessage, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamSend, map[string]interface{}{
 		"to_agent": "lead",
 		"kind":     "question",
 		"body":     "blocked on tests",
@@ -98,9 +98,9 @@ func TestBrokerDefinitionsMarkCanonicalAndCompatibilityOutcomeTools(t *testing.T
 	var reportDef, blockDef *types.ToolDefinition
 	for i := range defs {
 		switch defs[i].Name {
-		case ToolReportTaskOutcome:
+		case ToolTeamTaskReport:
 			reportDef = &defs[i]
-		case ToolBlockCurrentTask:
+		case ToolTeamTaskBlock:
 			blockDef = &defs[i]
 		}
 	}
@@ -112,7 +112,7 @@ func TestBrokerDefinitionsMarkCanonicalAndCompatibilityOutcomeTools(t *testing.T
 	assert.Equal(t, true, reportDef.Metadata["canonical"])
 	assert.Contains(t, reportDef.Description, "structured done, failed, blocked, or handoff")
 	assert.Equal(t, true, blockDef.Metadata["compatibility_alias"])
-	assert.Equal(t, ToolReportTaskOutcome, blockDef.Metadata["canonical_tool"])
+	assert.Equal(t, ToolTeamTaskReport, blockDef.Metadata["canonical_tool"])
 	assert.Contains(t, blockDef.Description, "Compatibility alias")
 
 	reportParams, ok := reportDef.Parameters["properties"].(map[string]interface{})
@@ -148,14 +148,14 @@ func TestBrokerDefinitionsDisableEmptyReplayCacheForVolatileReads(t *testing.T) 
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store, AgentSessions: &fakeAgentSessionController{}}
 	wantVolatile := map[string]bool{
-		ToolJobOutput:         false,
-		ToolListAgents:        false,
-		ToolWaitAgent:         false,
-		ToolReadAgentEvents:   false,
-		ToolWaitTeam:          false,
-		ToolReadMailboxDigest: false,
-		ToolReadTaskSpec:      false,
-		ToolReadTaskContext:   false,
+		ToolJobOutput:       false,
+		ToolSubagentList:    false,
+		ToolSubagentWait:    false,
+		ToolSubagentEvents:  false,
+		ToolTeamWait:        false,
+		ToolTeamMailbox:     false,
+		ToolTeamTaskSpec:    false,
+		ToolTeamTaskContext: false,
 	}
 	for _, def := range broker.Definitions() {
 		if _, tracked := wantVolatile[def.Name]; !tracked {
@@ -180,12 +180,12 @@ func TestBrokerDefinitionsAnnotateActiveTeamRunRequirements(t *testing.T) {
 
 	defs := broker.Definitions()
 	required := map[string]bool{
-		ToolSendTeamMessage:   false,
-		ToolReadMailboxDigest: false,
-		ToolReadTaskSpec:      false,
-		ToolReadTaskContext:   false,
-		ToolReportTaskOutcome: false,
-		ToolBlockCurrentTask:  false,
+		ToolTeamSend:        false,
+		ToolTeamMailbox:     false,
+		ToolTeamTaskSpec:    false,
+		ToolTeamTaskContext: false,
+		ToolTeamTaskReport:  false,
+		ToolTeamTaskBlock:   false,
 	}
 
 	for _, def := range defs {
@@ -197,7 +197,7 @@ func TestBrokerDefinitionsAnnotateActiveTeamRunRequirements(t *testing.T) {
 		assert.Equal(t, "requires_active_team_run", def.Metadata["availability"])
 		assert.Equal(t, true, def.Metadata["defer_loading"])
 		assert.Contains(t, def.Description, "Requires an active team run")
-		assert.Contains(t, def.Description, "call spawn_team first")
+		assert.Contains(t, def.Description, "call team_spawn first")
 	}
 
 	for name, found := range required {
@@ -210,15 +210,15 @@ func TestBrokerDefinitionsForContext_HidesTeamOnlyToolsWithoutActiveRun(t *testi
 	broker := &Broker{TeamStore: store}
 
 	names := toolDefinitionNames(broker.DefinitionsForContext(context.Background()))
-	assert.Contains(t, names, ToolSpawnTeam)
-	assert.Contains(t, names, ToolWaitTeam)
+	assert.Contains(t, names, ToolTeamSpawn)
+	assert.Contains(t, names, ToolTeamWait)
 	for _, hidden := range []string{
-		ToolSendTeamMessage,
-		ToolReadMailboxDigest,
-		ToolReadTaskSpec,
-		ToolReadTaskContext,
-		ToolReportTaskOutcome,
-		ToolBlockCurrentTask,
+		ToolTeamSend,
+		ToolTeamMailbox,
+		ToolTeamTaskSpec,
+		ToolTeamTaskContext,
+		ToolTeamTaskReport,
+		ToolTeamTaskBlock,
 	} {
 		assert.NotContains(t, names, hidden)
 	}
@@ -237,14 +237,14 @@ func TestBrokerDefinitionsForContext_IncludesTeamOnlyToolsWithActiveRun(t *testi
 
 	names := toolDefinitionNames(broker.DefinitionsForContext(runCtx))
 	for _, required := range []string{
-		ToolSpawnTeam,
-		ToolWaitTeam,
-		ToolSendTeamMessage,
-		ToolReadMailboxDigest,
-		ToolReadTaskSpec,
-		ToolReadTaskContext,
-		ToolReportTaskOutcome,
-		ToolBlockCurrentTask,
+		ToolTeamSpawn,
+		ToolTeamWait,
+		ToolTeamSend,
+		ToolTeamMailbox,
+		ToolTeamTaskSpec,
+		ToolTeamTaskContext,
+		ToolTeamTaskReport,
+		ToolTeamTaskBlock,
 	} {
 		assert.Contains(t, names, required)
 	}
@@ -259,17 +259,17 @@ func TestBrokerDefinitionsForContext_HidesOutcomeToolsWithoutActiveTeamRun(t *te
 
 	names := toolDefinitionNames(broker.DefinitionsForContext(runCtx))
 	for _, hidden := range []string{
-		ToolReportTaskOutcome,
-		ToolBlockCurrentTask,
-		ToolSendTeamMessage,
-		ToolReadMailboxDigest,
-		ToolReadTaskSpec,
-		ToolReadTaskContext,
+		ToolTeamTaskReport,
+		ToolTeamTaskBlock,
+		ToolTeamSend,
+		ToolTeamMailbox,
+		ToolTeamTaskSpec,
+		ToolTeamTaskContext,
 	} {
 		assert.NotContains(t, names, hidden)
 	}
 
-	_, _, err := broker.Execute(runCtx, "standalone-child", ToolReportTaskOutcome, map[string]interface{}{
+	_, _, err := broker.Execute(runCtx, "standalone-child", ToolTeamTaskReport, map[string]interface{}{
 		"task_status": "done",
 		"summary":     "review completed",
 	})
@@ -308,7 +308,7 @@ func TestBrokerExecuteWaitTeamReturnsDurableSummary(t *testing.T) {
 	// be large enough that the context cannot expire before that first read on
 	// a slow/scheduled CI machine: timeout_ms=1 made this flaky (TimedOut was
 	// observed spuriously). 5s keeps the success path instant.
-	raw, meta, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, meta, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 5000,
 	})
@@ -340,7 +340,7 @@ func TestBrokerExecuteWaitTeamReturnsPartialStructuredSummary(t *testing.T) {
 	require.NoError(t, err)
 
 	broker := &Broker{TeamStore: store}
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id": teamID, "timeout_ms": 1000,
 	})
 	require.NoError(t, err)
@@ -392,7 +392,7 @@ func TestBrokerExecuteWaitTeamWaitsForSummaryWhenPlannerConfigured(t *testing.T)
 		})
 	}()
 
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 2000,
 	})
@@ -447,7 +447,7 @@ func TestBrokerExecuteWaitTeamEventDrivenWakeReturnsFast(t *testing.T) {
 	}()
 
 	started := time.Now()
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 5000,
 	})
@@ -483,7 +483,7 @@ func TestBrokerExecuteWaitTeamTimeoutReportsExecutionContinues(t *testing.T) {
 			return agentcontrol.WaitTimeoutPolicy{DefaultMs: 1, MinMs: 1, MaxMs: 1000}
 		},
 	}
-	raw, meta, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, meta, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"team_id":    teamID,
 		"timeout_ms": 1,
 	})
@@ -525,7 +525,7 @@ func TestBrokerExecuteWaitTeamInfersSingleLeadTeam(t *testing.T) {
 	// snapshot read. Use a generous budget (5s) instead of timeout_ms=1: the
 	// 1ms budget could expire before that first read on a slow/scheduled CI
 	// machine, spuriously flipping the result to the timeout path.
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolWaitTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamWait, map[string]interface{}{
 		"timeout_ms": 5000,
 	})
 	require.NoError(t, err)
@@ -543,7 +543,7 @@ func TestBrokerExecuteTeamToolRequiresRunMeta(t *testing.T) {
 	require.NoError(t, err)
 
 	broker := &Broker{TeamStore: store}
-	_, _, err = broker.Execute(ctx, "session-1", ToolSendTeamMessage, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "session-1", ToolTeamSend, map[string]interface{}{
 		"team_id": teamID,
 		"body":    "should fail without run meta",
 	})
@@ -590,7 +590,7 @@ func TestBrokerExecuteReadMailboxDigestUsesUnreadMessagesForCurrentAgent(t *test
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolReadMailboxDigest, map[string]interface{}{"limit": 5})
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamMailbox, map[string]interface{}{"limit": 5})
 	require.NoError(t, err)
 
 	result, ok := raw.(ReadMailboxDigestResult)
@@ -644,7 +644,7 @@ func TestBrokerExecuteReadTaskSpecUsesCurrentTaskRunMeta(t *testing.T) {
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolReadTaskSpec, map[string]interface{}{})
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskSpec, map[string]interface{}{})
 	require.NoError(t, err)
 
 	result, ok := raw.(ReadTaskSpecResult)
@@ -684,7 +684,7 @@ func TestBrokerExecuteReadTaskSpecFallsBackToCurrentRunTeamForUnknownExplicitTea
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolReadTaskSpec, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskSpec, map[string]interface{}{
 		"team_id": "team-hallucinated",
 		"task_id": taskID,
 	})
@@ -711,7 +711,7 @@ func TestBrokerExecuteSendTeamMessageFallsBackToCurrentRunTeamForUnknownExplicit
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolSendTeamMessage, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamSend, map[string]interface{}{
 		"team_id":  "team-hallucinated",
 		"to_agent": "planner",
 		"kind":     "info",
@@ -775,7 +775,7 @@ func TestBrokerExecuteReadTaskContextCombinesSpecContextAndMailbox(t *testing.T)
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolReadTaskContext, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskContext, map[string]interface{}{
 		"mailbox_limit": 5,
 	})
 	require.NoError(t, err)
@@ -853,7 +853,7 @@ func TestBrokerExecuteBlockCurrentTaskBlocksAndReplans(t *testing.T) {
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolBlockCurrentTask, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskBlock, map[string]interface{}{
 		"task_status": "blocked",
 		"summary":     "waiting on architecture decision",
 		"blocker":     "waiting on architecture decision",
@@ -932,7 +932,7 @@ func TestBrokerExecuteBlockCurrentTaskAcceptsStructuredHandoffOutcome(t *testing
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolBlockCurrentTask, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskBlock, map[string]interface{}{
 		"task_status": "handoff",
 		"summary":     "pass to reviewer",
 		"blocker":     "need review",
@@ -985,7 +985,7 @@ func TestBrokerExecuteBlockCurrentTaskRejectsInvalidStructuredOutcome(t *testing
 		},
 	})
 
-	_, _, err = broker.Execute(runCtx, "session-1", ToolBlockCurrentTask, map[string]interface{}{
+	_, _, err = broker.Execute(runCtx, "session-1", ToolTeamTaskBlock, map[string]interface{}{
 		"task_status": "handoff",
 		"summary":     "pass to reviewer",
 		"blocker":     "need review",
@@ -1025,7 +1025,7 @@ func TestBrokerExecuteReportTaskOutcomeMarksTaskDone(t *testing.T) {
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolReportTaskOutcome, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskReport, map[string]interface{}{
 		"task_status": "done",
 		"summary":     "task finished",
 		"result_ref":  "artifact://done-task",
@@ -1084,7 +1084,7 @@ func TestBrokerExecuteReportTaskOutcomeMarksTeamDoneWhenLastTaskCompletes(t *tes
 		},
 	})
 
-	_, _, err = broker.Execute(runCtx, "session-1", ToolReportTaskOutcome, map[string]interface{}{
+	_, _, err = broker.Execute(runCtx, "session-1", ToolTeamTaskReport, map[string]interface{}{
 		"task_status": "done",
 		"summary":     "final task finished",
 	})
@@ -1132,7 +1132,7 @@ func TestBrokerExecuteReportTaskOutcomeHandlesHandoff(t *testing.T) {
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolReportTaskOutcome, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskReport, map[string]interface{}{
 		"task_status": "handoff",
 		"summary":     "pass to reviewer",
 		"blocker":     "need review",
@@ -1162,7 +1162,7 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 	loopCalls := 0
 	broker.TeamLifecycleChanged = func() { loopCalls++ }
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":       "team-auto",
 		"workspace_id":  "ws-1",
 		"max_teammates": 2,
@@ -1247,7 +1247,7 @@ func TestBrokerExecuteSpawnTeamCreatesTeamTeammatesAndTasks(t *testing.T) {
 			CurrentTaskID: "task-1",
 		},
 	})
-	rawSpec, _, err := broker.Execute(runCtx, "session-1", ToolReadTaskSpec, map[string]interface{}{})
+	rawSpec, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskSpec, map[string]interface{}{})
 	require.NoError(t, err)
 	spec, ok := rawSpec.(ReadTaskSpecResult)
 	require.True(t, ok)
@@ -1260,7 +1260,7 @@ func TestBrokerExecuteSpawnTeamAcceptsJSONStringTeammatesAndTasks(t *testing.T) 
 	ctx := context.Background()
 	broker := &Broker{TeamStore: store}
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":    "team-json-args",
 		"auto_start": false,
 		"teammates":  `[{"id":"mate-a","name":"planner"},{"id":"mate-b","name":"reviewer"}]`,
@@ -1295,7 +1295,7 @@ func TestBrokerExecuteSpawnTeamAcceptsJSONStringTeammatesAndTasks(t *testing.T) 
 			CurrentTaskID: "task-1",
 		},
 	})
-	rawSpec, _, err := broker.Execute(runCtx, "session-1", ToolReadTaskSpec, map[string]interface{}{})
+	rawSpec, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskSpec, map[string]interface{}{})
 	require.NoError(t, err)
 	spec, ok := rawSpec.(ReadTaskSpecResult)
 	require.True(t, ok)
@@ -1312,7 +1312,7 @@ func TestBrokerExecuteSpawnTeamRejectsInvalidTaskDifficulty(t *testing.T) {
 	ctx := context.Background()
 	broker := &Broker{TeamStore: store}
 
-	_, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	_, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id": "team-invalid-difficulty",
 		"tasks": []interface{}{
 			map[string]interface{}{
@@ -1331,7 +1331,7 @@ func TestBrokerExecuteSpawnTeamRejectsDuplicateTaskIDs(t *testing.T) {
 	ctx := context.Background()
 	broker := &Broker{TeamStore: store}
 
-	_, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	_, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id": "team-duplicate-task",
 		"tasks": []interface{}{
 			map[string]interface{}{"id": "task-1", "title": "first task"},
@@ -1339,7 +1339,7 @@ func TestBrokerExecuteSpawnTeamRejectsDuplicateTaskIDs(t *testing.T) {
 		},
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `duplicate spawn_team task id "task-1"`)
+	assert.Contains(t, err.Error(), `duplicate team_spawn task id "task-1"`)
 }
 
 func TestBrokerExecuteSpawnTeamProjectsTeammatesImmediately(t *testing.T) {
@@ -1348,7 +1348,7 @@ func TestBrokerExecuteSpawnTeamProjectsTeammatesImmediately(t *testing.T) {
 	dispatcher := &teammateProjectorStub{}
 	broker := &Broker{TeamStore: store, TeamDispatcher: dispatcher}
 
-	raw, _, err := broker.Execute(ctx, "lead-session", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", ToolTeamSpawn, map[string]interface{}{
 		"team_id": "team-registry",
 		"teammates": []interface{}{
 			map[string]interface{}{
@@ -1381,7 +1381,7 @@ func TestBrokerExecuteSpawnTeamAutoStartSynthesizesTeammatesForTasks(t *testing.
 	loopCalls := 0
 	broker.TeamLifecycleChanged = func() { loopCalls++ }
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":    "team-docs",
 		"auto_start": true,
 		"tasks": []interface{}{
@@ -1463,7 +1463,7 @@ func TestBrokerReportTaskOutcomePersistsTaskEventBeforeTeamCompleted(t *testing.
 		},
 	})
 
-	raw, _, err := broker.Execute(runCtx, "session-1", ToolReportTaskOutcome, map[string]interface{}{
+	raw, _, err := broker.Execute(runCtx, "session-1", ToolTeamTaskReport, map[string]interface{}{
 		"task_status": "done",
 		"summary":     "finished",
 	})
@@ -1510,7 +1510,7 @@ func TestBrokerExecuteSpawnTeamRehomesTerminalTeamAndTaskIDConflicts(t *testing.
 	})
 	require.NoError(t, err)
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":        "team_docs_explore",
 		"allow_existing": true,
 		"auto_start":     false,
@@ -1563,7 +1563,7 @@ func TestBrokerExecuteSpawnTeamRehomesActiveTeamWhenLeadSessionDiffers(t *testin
 	})
 	require.NoError(t, err)
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":         "team_docs_explore",
 		"lead_session_id": "session-1",
 		"allow_existing":  true,
@@ -1601,7 +1601,7 @@ func TestBrokerExecuteSpawnTeamResolvesCurrentLeadAndTeammateSessionPlaceholders
 	broker := &Broker{TeamStore: store}
 	broker.TeamDispatcher = teammateSessionAllocatorStub{}
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":         "team-current",
 		"lead_session_id": "current",
 		"workspace_id":    "current",
@@ -1645,7 +1645,7 @@ func TestBrokerExecuteSpawnTeamForcesCurrentLeadSession(t *testing.T) {
 	ctx := context.Background()
 	broker := &Broker{TeamStore: store}
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":         "team-foreign-lead",
 		"lead_session_id": "lead-docs-explore",
 		"auto_start":      false,
@@ -1678,7 +1678,7 @@ func TestBrokerExecuteSpawnTeamRejectsMissingReadPathsWhenWorkspaceRootKnown(t *
 		TeamClaims: team.NewPathClaimManager(store, root),
 	}
 
-	_, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	_, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":    "team-missing-read-path",
 		"auto_start": false,
 		"tasks": []interface{}{
@@ -1708,7 +1708,7 @@ func TestBrokerExecuteSpawnTeamNormalizesExistingReadPathsAgainstWorkspaceRoot(t
 		TeamClaims: team.NewPathClaimManager(store, root),
 	}
 
-	raw, _, err := broker.Execute(ctx, "session-1", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolTeamSpawn, map[string]interface{}{
 		"team_id":    "team-existing-read-path",
 		"auto_start": false,
 		"tasks": []interface{}{

@@ -52,7 +52,7 @@ func executeWaitTeamPolicyCall(t *testing.T, broker *Broker, teamID string, args
 	for key, value := range args {
 		callArgs[key] = value
 	}
-	raw, meta, err := broker.Execute(context.Background(), "lead-session", ToolWaitTeam, callArgs)
+	raw, meta, err := broker.Execute(context.Background(), "lead-session", ToolTeamWait, callArgs)
 	if err != nil {
 		return WaitTeamResult{}, nil, err
 	}

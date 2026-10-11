@@ -5,10 +5,10 @@ import (
 	"fmt"
 )
 
-// spawn_team argument kinds, mirroring the fail-closed contract that
+// team_spawn argument kinds, mirroring the fail-closed contract that
 // spawn_subagents applies in internal/agent/loop.go (decodeSubagentTasks).
 //
-// The spawn_team decode path reads these keys with direct type assertions (and
+// The team_spawn decode path reads these keys with direct type assertions (and
 // coerceStringSlice for list fields), which fold a mismatched JSON kind into the
 // zero value. That is not harmless for a delegating tool:
 //
@@ -91,7 +91,7 @@ func validateSpawnTeamArgTypes(args map[string]interface{}) error {
 // validateSpawnTeamTeammateTypes checks one teammates[] entry.
 func validateSpawnTeamTeammateTypes(index int, entry map[string]interface{}) error {
 	for _, field := range spawnTeamTeammateFieldKinds {
-		owner := fmt.Sprintf("spawn_team teammates[%d]", index)
+		owner := fmt.Sprintf("team_spawn teammates[%d]", index)
 		if err := validateSpawnTeamFieldType(owner, field.key, field.want, entry[field.key]); err != nil {
 			return err
 		}

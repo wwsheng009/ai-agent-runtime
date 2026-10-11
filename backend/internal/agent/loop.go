@@ -21,8 +21,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
-	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextledger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
@@ -1103,7 +1103,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				return result, err
 			}
 
-			// Worker harness: require report_task_outcome / block_current_task.
+			// Worker harness: require team_task_report / team_task_block.
 			if RequiresCompleteTask(completionRequirement) {
 				if HasSuccessfulTaskOutcomeObservation(observations) {
 					completionSatisfied = true
@@ -4780,7 +4780,7 @@ func promoteTeamRunContext(ctx context.Context, results []toolExecutionResult) c
 }
 
 func promoteTeamRunContextFromResult(ctx context.Context, result toolExecutionResult) context.Context {
-	if strings.TrimSpace(result.Error) != "" || !strings.EqualFold(strings.TrimSpace(result.Call.Name), toolbroker.ToolSpawnTeam) {
+	if strings.TrimSpace(result.Error) != "" || !strings.EqualFold(strings.TrimSpace(result.Call.Name), toolbroker.ToolTeamSpawn) {
 		return ctx
 	}
 	teamID, taskID := spawnTeamContextIDs(result)
@@ -7670,7 +7670,7 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 func (loop *ReActLoop) parkTeamObligationsFromResults(ctx context.Context, sessionID string, results []toolExecutionResult) {
 	for _, result := range results {
 		if strings.TrimSpace(result.Error) != "" ||
-			!strings.EqualFold(strings.TrimSpace(result.Call.Name), toolbroker.ToolSpawnTeam) {
+			!strings.EqualFold(strings.TrimSpace(result.Call.Name), toolbroker.ToolTeamSpawn) {
 			continue
 		}
 		if !toolCallAutoStartDefaultTrue(result.Call) {

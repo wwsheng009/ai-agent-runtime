@@ -186,7 +186,7 @@ func TestBroker_Execute_SpawnAgentPinsPermissionModeInYoloSession(t *testing.T) 
 	broker := &Broker{AgentSessions: controller}
 	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "bypass_permissions"})
 
-	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":         "implement the fix",
 		"permission_mode": "accept_edits",
 	})
@@ -212,7 +212,7 @@ func TestBroker_Execute_SpawnAgentPinsPlanSessionChild(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "plan"})
 
-	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":         "write the code",
 		"permission_mode": "default",
 	})
@@ -232,7 +232,7 @@ func TestBroker_Execute_SpawnAgentMarksInheritedPermissionMode(t *testing.T) {
 	broker := &Broker{AgentSessions: controller}
 	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "bypass_permissions"})
 
-	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{"message": "inspect"})
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"})
 	if err != nil {
 		t.Fatalf("spawn_agent failed: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestBroker_Execute_SpawnAgentBlocksPermissionEscalationWithNextAction(t *te
 	broker := &Broker{AgentSessions: controller}
 	ctx := team.WithRunMeta(context.Background(), &team.RunMeta{PermissionMode: "accept_edits"})
 
-	_, meta, err := broker.Execute(ctx, "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":         "run with more authority",
 		"permission_mode": "bypass_permissions",
 	})

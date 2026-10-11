@@ -143,16 +143,16 @@ func TestAICLIChatActorExecutor_SpawnTeamKeepsFrozenToolSurfaceWithinSameTurn(t 
 	if len(snapshots) < 3 {
 		t.Fatalf("expected at least three llm requests, got %+v", snapshots)
 	}
-	if !containsToolName(snapshots[0], toolbroker.ToolSpawnTeam) {
+	if !containsToolName(snapshots[0], toolbroker.ToolTeamSpawn) {
 		t.Fatalf("expected spawn_team in initial tool set, got %+v", snapshots[0])
 	}
 	for _, hidden := range []string{
-		toolbroker.ToolReadTaskSpec,
-		toolbroker.ToolReadTaskContext,
-		toolbroker.ToolSendTeamMessage,
-		toolbroker.ToolReadMailboxDigest,
-		toolbroker.ToolReportTaskOutcome,
-		toolbroker.ToolBlockCurrentTask,
+		toolbroker.ToolTeamTaskSpec,
+		toolbroker.ToolTeamTaskContext,
+		toolbroker.ToolTeamSend,
+		toolbroker.ToolTeamMailbox,
+		toolbroker.ToolTeamTaskReport,
+		toolbroker.ToolTeamTaskBlock,
 	} {
 		if containsToolName(snapshots[0], hidden) {
 			t.Fatalf("did not expect %s in initial tool set before spawn_team, got %+v", hidden, snapshots[0])
@@ -1660,7 +1660,7 @@ func (p *localOrchestrationProvider) Call(ctx context.Context, req *runtimellm.L
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-spawn",
-							Name: toolbroker.ToolSpawnTeam,
+							Name: toolbroker.ToolTeamSpawn,
 							Args: map[string]interface{}{
 								"team_id":    "team-1",
 								"auto_start": false,
@@ -1681,7 +1681,7 @@ func (p *localOrchestrationProvider) Call(ctx context.Context, req *runtimellm.L
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-read",
-							Name: toolbroker.ToolReadTaskSpec,
+							Name: toolbroker.ToolTeamTaskSpec,
 							Args: map[string]interface{}{},
 						},
 					},
@@ -1739,7 +1739,7 @@ func (p *sameTurnSpawnReadTaskSpecProvider) Call(ctx context.Context, req *runti
 			ToolCalls: []runtimetypes.ToolCall{
 				{
 					ID:   "call-read-same-turn",
-					Name: toolbroker.ToolReadTaskSpec,
+					Name: toolbroker.ToolTeamTaskSpec,
 					Args: map[string]interface{}{},
 				},
 			},
@@ -1753,7 +1753,7 @@ func (p *sameTurnSpawnReadTaskSpecProvider) Call(ctx context.Context, req *runti
 				ToolCalls: []runtimetypes.ToolCall{
 					{
 						ID:   "call-spawn-same-turn",
-						Name: toolbroker.ToolSpawnTeam,
+						Name: toolbroker.ToolTeamSpawn,
 						Args: map[string]interface{}{
 							"team_id":    "team-1",
 							"auto_start": false,
@@ -1873,7 +1873,7 @@ func (p *interruptibleAutoStartLocalOrchestrationProvider) Call(ctx context.Cont
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-spawn-interrupt-slow",
-							Name: toolbroker.ToolSpawnTeam,
+							Name: toolbroker.ToolTeamSpawn,
 							Args: map[string]interface{}{
 								"team_id":    "team-interrupt-slow",
 								"auto_start": true,
@@ -1982,7 +1982,7 @@ func (p *autoStartLocalOrchestrationProvider) Call(ctx context.Context, req *run
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-spawn-auto",
-							Name: toolbroker.ToolSpawnTeam,
+							Name: toolbroker.ToolTeamSpawn,
 							Args: map[string]interface{}{
 								"team_id":    "team-auto",
 								"auto_start": true,
@@ -2022,7 +2022,7 @@ func (p *autoStartLocalOrchestrationProvider) Call(ctx context.Context, req *run
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-report-auto",
-							Name: toolbroker.ToolReportTaskOutcome,
+							Name: toolbroker.ToolTeamTaskReport,
 							Args: map[string]interface{}{
 								"task_status": "done",
 								"summary":     "auto smoke finished",
@@ -2076,7 +2076,7 @@ func (p *emptyReplyAfterSpawnTeamProvider) Call(ctx context.Context, req *runtim
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-spawn-empty",
-							Name: toolbroker.ToolSpawnTeam,
+							Name: toolbroker.ToolTeamSpawn,
 							Args: map[string]interface{}{
 								"team_id":    "team-empty",
 								"auto_start": true,
@@ -2107,7 +2107,7 @@ func (p *emptyReplyAfterSpawnTeamProvider) Call(ctx context.Context, req *runtim
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-report-empty",
-							Name: toolbroker.ToolReportTaskOutcome,
+							Name: toolbroker.ToolTeamTaskReport,
 							Args: map[string]interface{}{
 								"task_status": "done",
 								"summary":     "empty reply teammate finished",
@@ -2170,7 +2170,7 @@ func (p *failedAutoStartLocalOrchestrationProvider) Call(ctx context.Context, re
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-spawn-failed",
-							Name: toolbroker.ToolSpawnTeam,
+							Name: toolbroker.ToolTeamSpawn,
 							Args: map[string]interface{}{
 								"team_id":    "team-failed",
 								"auto_start": true,
@@ -2203,7 +2203,7 @@ func (p *failedAutoStartLocalOrchestrationProvider) Call(ctx context.Context, re
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-report-failed",
-							Name: toolbroker.ToolReportTaskOutcome,
+							Name: toolbroker.ToolTeamTaskReport,
 							Args: map[string]interface{}{
 								"task_status": "failed",
 								"summary":     "auto smoke failed",
@@ -2259,7 +2259,7 @@ func (p *streamErrorAutoStartLocalOrchestrationProvider) Call(ctx context.Contex
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-spawn-stream-error",
-							Name: toolbroker.ToolSpawnTeam,
+							Name: toolbroker.ToolTeamSpawn,
 							Args: map[string]interface{}{
 								"team_id":    "team-stream-error",
 								"auto_start": true,
@@ -2348,7 +2348,7 @@ func (p *serialAutoStartLocalOrchestrationProvider) Call(ctx context.Context, re
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-spawn-serial",
-							Name: toolbroker.ToolSpawnTeam,
+							Name: toolbroker.ToolTeamSpawn,
 							Args: map[string]interface{}{
 								"team_id":    "team-serial",
 								"auto_start": true,
@@ -2400,7 +2400,7 @@ func (p *serialAutoStartLocalOrchestrationProvider) Call(ctx context.Context, re
 					ToolCalls: []runtimetypes.ToolCall{
 						{
 							ID:   "call-report-serial",
-							Name: toolbroker.ToolReportTaskOutcome,
+							Name: toolbroker.ToolTeamTaskReport,
 							Args: map[string]interface{}{
 								"task_status": "done",
 								"summary":     summary,

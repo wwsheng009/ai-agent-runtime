@@ -39,7 +39,7 @@ func TestBroker_Execute_ResumeAgentTreatsNullIDAsMissing(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolResumeAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentResume, map[string]interface{}{
 		"id":         nil,
 		"session_id": nil,
 	})
@@ -60,10 +60,10 @@ func TestBroker_Execute_RejectsRenderedPlaceholderSessionRef(t *testing.T) {
 		tool string
 		key  string
 	}{
-		"resume id":         {ToolResumeAgent, "id"},
-		"resume session_id": {ToolResumeAgent, "session_id"},
-		"close id":          {ToolCloseAgent, "id"},
-		"close session_id":  {ToolCloseAgent, "session_id"},
+		"resume id":         {ToolSubagentResume, "id"},
+		"resume session_id": {ToolSubagentResume, "session_id"},
+		"close id":          {ToolSubagentClose, "id"},
+		"close session_id":  {ToolSubagentClose, "session_id"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -120,7 +120,7 @@ func TestBroker_Execute_SpawnAgentRejectsRenderedPlaceholderID(t *testing.T) {
 				controller := &fakeAgentSessionController{}
 				broker := &Broker{AgentSessions: controller}
 
-				_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+				_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 					"message": "inspect the delegation path",
 					field:     placeholder,
 				})
@@ -141,7 +141,7 @@ func TestBroker_Execute_SpawnAgentGeneratesIDForNullID(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}
 
-	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnAgent, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{
 		"message":    "inspect",
 		"id":         nil,
 		"session_id": nil,
@@ -165,14 +165,14 @@ func TestBroker_Execute_SpawnTeamNormalizesPlaceholderIDs(t *testing.T) {
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store}
 
-	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnTeam, map[string]interface{}{
+	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolTeamSpawn, map[string]interface{}{
 		"team_id": "<nil>",
 		"tasks":   []interface{}{map[string]interface{}{"goal": "do the work"}},
 	}); err == nil || !strings.Contains(err.Error(), "placeholder") {
 		t.Fatalf("a placeholder team_id must fail closed, got %v", err)
 	}
 
-	raw, _, err := broker.Execute(context.Background(), "parent-session", ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(context.Background(), "parent-session", ToolTeamSpawn, map[string]interface{}{
 		"auto_start": false,
 		"teammates": []interface{}{
 			map[string]interface{}{"id": "<nil>", "session_id": "null", "name": "planner"},

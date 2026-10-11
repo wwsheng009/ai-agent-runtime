@@ -178,6 +178,10 @@ var chatWebSSEMappings = []chatWebSSEMapping{
 	{BusEvent: runtimechat.EventJobOutput, SSEEvent: "job_output", Desc: "Job 输出"},
 	{BusEvent: runtimechat.EventJobFinished, SSEEvent: "job_finished", Desc: "Job 完成"},
 	{BusEvent: runtimechat.EventJobCancelled, SSEEvent: "job_cancelled", Desc: "Job 取消"},
+	{BusEvent: runtimechat.EventJobTerminalOpened, SSEEvent: "job_terminal_opened", Desc: "后台交互会话已打开"},
+	{BusEvent: runtimechat.EventJobTerminalClosed, SSEEvent: "job_terminal_closed", Desc: "后台交互会话已关闭"},
+	{BusEvent: runtimechat.EventJobTerminalResized, SSEEvent: "job_terminal_resized", Desc: "后台交互会话尺寸变更"},
+	{BusEvent: runtimechat.EventJobInteractiveNotRecoverable, SSEEvent: "job_interactive_not_recoverable", Desc: "后台交互会话重启不可恢复"},
 	{BusEvent: runtimechat.EventMailboxReceived, SSEEvent: "mailbox_received", Desc: "邮箱消息"},
 	{BusEvent: runtimechat.EventContextReconciled, SSEEvent: "context_reconciled", Desc: "上下文调和"},
 	{BusEvent: chatWebDynamicStatusBusEvent, SSEEvent: "dynamic_status", Desc: "动态状态栏更新（Retrying/Analyzing/Running…）"},
@@ -351,7 +355,9 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 		pickField(data, payload, "turn_id")
 
 	case runtimechat.EventJobStarted, runtimechat.EventJobOutput,
-		runtimechat.EventJobFinished, runtimechat.EventJobCancelled:
+		runtimechat.EventJobFinished, runtimechat.EventJobCancelled,
+		runtimechat.EventJobTerminalOpened, runtimechat.EventJobTerminalClosed,
+		runtimechat.EventJobTerminalResized, runtimechat.EventJobInteractiveNotRecoverable:
 		pickField(data, payload, "job_id")
 		pickField(data, payload, "turn_id")
 

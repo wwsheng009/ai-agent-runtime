@@ -72,7 +72,7 @@ func TaskOutcomePromptLines(allowed ...TaskOutcomeStatus) []string {
 	statusSummary := strings.Join(statuses, "|")
 	statusDescription := joinTaskOutcomeStatuses(allowed...)
 	return []string{
-		"- Prefer calling report_task_outcome for terminal task state changes. If you do not call report_task_outcome or block_current_task, end your final response with a structured status block.",
+		"- Prefer calling team_task_report for terminal task state changes. If you do not call team_task_report or team_task_block, end your final response with a structured status block.",
 		fmt.Sprintf("- Preferred format: ```json {\"task_status\":\"%s\",\"summary\":\"...\",\"blocker\":\"...\",\"handoff_to\":\"...\"} ```", statusSummary),
 		"- Fallback line format: TASK_STATUS:, TASK_SUMMARY:, TASK_BLOCKER:, TASK_HANDOFF:.",
 		fmt.Sprintf("- Allowed task_status values: %s.", statusDescription),

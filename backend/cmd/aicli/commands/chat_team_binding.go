@@ -267,7 +267,7 @@ func inferAmbientTeamBinding(session *ChatSession, runtimeSession *runtimechat.S
 			}
 		}
 		switch toolName {
-		case toolbroker.ToolSpawnTeam:
+		case toolbroker.ToolTeamSpawn:
 			teamID := firstNonEmptyChatValue(payloadStringValue(payload["team_id"]))
 			taskID := firstNonEmptyChatValue(payloadStringValue(payload["task_id"]))
 			if teamID == "" {
@@ -285,7 +285,7 @@ func inferAmbientTeamBinding(session *ChatSession, runtimeSession *runtimechat.S
 				session.ActiveTeam.PermissionMode = session.PermissionMode
 			}
 			return
-		case toolbroker.ToolReadTaskSpec, toolbroker.ToolReadTaskContext, toolbroker.ToolReportTaskOutcome, toolbroker.ToolBlockCurrentTask:
+		case toolbroker.ToolTeamTaskSpec, toolbroker.ToolTeamTaskContext, toolbroker.ToolTeamTaskReport, toolbroker.ToolTeamTaskBlock:
 			teamID := firstNonEmptyChatValue(payloadStringValue(payload["team_id"]), payloadNestedStringValue(payload, "spec", "team_id"))
 			taskID := firstNonEmptyChatValue(payloadStringValue(payload["task_id"]), payloadNestedStringValue(payload, "spec", "task_id"))
 			if teamID == "" && session.ActiveTeam == nil {
@@ -299,7 +299,7 @@ func inferAmbientTeamBinding(session *ChatSession, runtimeSession *runtimechat.S
 			}
 			if taskID != "" {
 				session.ActiveTeam.TaskID = taskID
-			} else if toolName == toolbroker.ToolReportTaskOutcome || toolName == toolbroker.ToolBlockCurrentTask {
+			} else if toolName == toolbroker.ToolTeamTaskReport || toolName == toolbroker.ToolTeamTaskBlock {
 				session.ActiveTeam.TaskID = ""
 			}
 			if session.ActiveTeam.AgentID == "" {

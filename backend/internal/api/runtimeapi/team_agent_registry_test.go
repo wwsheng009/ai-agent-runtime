@@ -174,7 +174,7 @@ func TestSpawnTeamToolProjectsTeammatesIntoAgentRegistryImmediately(t *testing.T
 		TeamDispatcher: handler,
 	}
 
-	raw, _, err := broker.Execute(ctx, "lead-session", toolbroker.ToolSpawnTeam, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "lead-session", toolbroker.ToolTeamSpawn, map[string]interface{}{
 		"team_id": "team-tool",
 		"teammates": []interface{}{
 			map[string]interface{}{
@@ -219,7 +219,7 @@ func TestSpawnTeamToolUsesRuntimeConfigAgentRegistryStore(t *testing.T) {
 		TeamStore:      teamStore,
 		TeamDispatcher: handler,
 	}
-	_, _, err = broker.Execute(ctx, "lead-session", toolbroker.ToolSpawnTeam, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "lead-session", toolbroker.ToolTeamSpawn, map[string]interface{}{
 		"team_id": "team-configured",
 		"teammates": []interface{}{
 			map[string]interface{}{

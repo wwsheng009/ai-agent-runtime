@@ -62,7 +62,7 @@ func (c *capturingPlanModeController) ExitPlanMode(ctx context.Context, sessionI
 func TestBrokerDefinitionsIncludePlanModeToolsWhenControllerSet(t *testing.T) {
 	without := (&Broker{}).Definitions()
 	for _, def := range without {
-		if def.Name == ToolEnterPlanMode || def.Name == ToolExitPlanMode {
+		if def.Name == ToolPlanEnter || def.Name == ToolPlanExit {
 			t.Fatalf("expected plan mode tools absent without controller, found %s", def.Name)
 		}
 	}
@@ -71,7 +71,7 @@ func TestBrokerDefinitionsIncludePlanModeToolsWhenControllerSet(t *testing.T) {
 	var foundEnter, foundExit bool
 	for _, def := range with {
 		switch def.Name {
-		case ToolEnterPlanMode:
+		case ToolPlanEnter:
 			foundEnter = true
 			// plan_path is a write target that usually does not exist yet, so
 			// the read-path existence preflight must be explicitly disabled;
@@ -86,7 +86,7 @@ func TestBrokerDefinitionsIncludePlanModeToolsWhenControllerSet(t *testing.T) {
 			planPathProp, _ := props["plan_path"].(map[string]interface{})
 			require.NotNil(t, planPathProp, "enter_plan_mode plan_path schema missing")
 			assert.NotEmpty(t, planPathProp["anyOf"], "plan_path must advertise string|array input")
-		case ToolExitPlanMode:
+		case ToolPlanExit:
 			foundExit = true
 			required, _ := def.Parameters["required"].([]string)
 			assert.Contains(t, required, "decision")
@@ -110,7 +110,7 @@ func TestBrokerExecuteEnterPlanMode(t *testing.T) {
 
 	raw, meta, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_1",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{
 			"plan_path": "docs/feature-plan.md",
 		},
@@ -139,7 +139,7 @@ func TestBrokerExecuteEnterPlanModeAcceptsPlanPathArray(t *testing.T) {
 
 	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_array",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{
 			"plan_path": []interface{}{"docs/plan-a.md", "docs/plan-b.md"},
 		},
@@ -160,7 +160,7 @@ func TestBrokerExecuteEnterPlanModeAcceptsPlanWritePaths(t *testing.T) {
 
 	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_extra_paths",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{
 			"plan_path":        "docs/plan-a.md",
 			"plan_write_paths": []interface{}{"docs/plan-b.md", " docs/plan-a.md ", "docs/plan-b.md", "  "},
@@ -183,7 +183,7 @@ func TestBrokerExecuteEnterPlanModeWritePathsWithoutPrimary(t *testing.T) {
 
 	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_extra_only",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{
 			"plan_write_paths": []string{"docs/plan-b.md"},
 		},
@@ -198,7 +198,7 @@ func TestBrokerExecuteEnterPlanModeRejectsNonStringPathList(t *testing.T) {
 	broker := &Broker{PlanMode: &capturingPlanModeController{}}
 	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_bad_kind",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{
 			"plan_path": []interface{}{"docs/plan-a.md", 42},
 		},
@@ -212,7 +212,7 @@ func TestBrokerExecuteExitPlanModeRequiresDecision(t *testing.T) {
 	broker := &Broker{PlanMode: &capturingPlanModeController{}}
 	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_exit_missing",
-		Name: ToolExitPlanMode,
+		Name: ToolPlanExit,
 		Args: map[string]interface{}{},
 	})
 	require.Error(t, err)
@@ -247,7 +247,7 @@ func TestBrokerExecutePlanModeWithoutController(t *testing.T) {
 	broker := &Broker{}
 	_, _, err := broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_missing",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{},
 	})
 	require.Error(t, err)
@@ -255,7 +255,7 @@ func TestBrokerExecutePlanModeWithoutController(t *testing.T) {
 
 	_, _, err = broker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_exit_missing_ctrl",
-		Name: ToolExitPlanMode,
+		Name: ToolPlanExit,
 		Args: map[string]interface{}{"decision": "quit"},
 	})
 	require.Error(t, err)
@@ -263,14 +263,14 @@ func TestBrokerExecutePlanModeWithoutController(t *testing.T) {
 }
 
 func TestNormalizeToolNamePlanMode(t *testing.T) {
-	assert.Equal(t, ToolEnterPlanMode, normalizeToolName(ToolEnterPlanMode))
-	assert.Equal(t, ToolExitPlanMode, normalizeToolName(ToolExitPlanMode))
-	assert.Equal(t, ToolEnterPlanMode, normalizeToolName("EnterPlanMode"))
-	assert.Equal(t, ToolExitPlanMode, normalizeToolName("exit-plan-mode"))
+	assert.Equal(t, ToolPlanEnter, normalizeToolName(ToolPlanEnter))
+	assert.Equal(t, ToolPlanExit, normalizeToolName(ToolPlanExit))
+	assert.Equal(t, ToolPlanEnter, normalizeToolName("EnterPlanMode"))
+	assert.Equal(t, ToolPlanExit, normalizeToolName("exit-plan-mode"))
 
 	broker := &Broker{}
-	assert.True(t, broker.IsBrokerTool(ToolEnterPlanMode))
-	assert.True(t, broker.IsBrokerTool(ToolExitPlanMode))
+	assert.True(t, broker.IsBrokerTool(ToolPlanEnter))
+	assert.True(t, broker.IsBrokerTool(ToolPlanExit))
 	assert.True(t, broker.IsBrokerTool("EnterPlanMode"))
 	assert.True(t, broker.IsBrokerTool("exit-plan-mode"))
 }
@@ -283,7 +283,7 @@ func TestBrokerExecuteEnterPlanModeDoesNotMislabelSessionNotFound(t *testing.T) 
 	}}
 	_, _, err := rawBroker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_raw_session_missing",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{},
 	})
 	require.Error(t, err)
@@ -296,7 +296,7 @@ func TestBrokerExecuteEnterPlanModeDoesNotMislabelSessionNotFound(t *testing.T) 
 	}}
 	_, _, err = typedBroker.ExecuteToolCall(context.Background(), "session-plan", types.ToolCall{
 		ID:   "call_enter_typed_session_missing",
-		Name: ToolEnterPlanMode,
+		Name: ToolPlanEnter,
 		Args: map[string]interface{}{},
 	})
 	require.Error(t, err)
