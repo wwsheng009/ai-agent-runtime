@@ -107,7 +107,68 @@ func TestProxyNodeOffline(t *testing.T) {
 
 func testRegisterFunc(nodeID string) func() wire.Register {
 	return func() wire.Register {
-		return wire.Register{NodeID: nodeID, Kind: "aicli", DeviceName: "laptop"}
+		return wire.Register{NodeID: nodeID, Kind: "aicli", DeviceName: "laptop", Routes: []string{"/"}}
+	}
+}
+
+func TestProxyRouteNotAllowed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "should not reach")
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	tunnelHTTP := httptest.NewServer(http.HandlerFunc(server.ServeHTTP))
+	t.Cleanup(tunnelHTTP.Close)
+
+	connector := testConnector("node-routes")
+	connector.Register = func() wire.Register {
+		return wire.Register{NodeID: "node-routes", Kind: "aicli", Routes: []string{"/web"}}
+	}
+	connector.Forward = agent.ForwardConfig{LocalBaseURL: upstream.URL}
+	conn, err := connector.Dial(context.Background(), agent.Config{Enabled: true, URL: tunnelHTTP.URL, Token: "agw_x"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	waitFor(t, func() bool { _, ok := server.Registry().Get("node-routes"); return ok })
+
+	proxy := startProxy(t, server, "node-routes")
+	resp, err := http.Get(proxy.URL + "/api/runtime/secret")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestProxyEmptyRoutesDenied(t *testing.T) {
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	tunnelHTTP := httptest.NewServer(http.HandlerFunc(server.ServeHTTP))
+	t.Cleanup(tunnelHTTP.Close)
+
+	connector := testConnector("node-noroute")
+	connector.Register = func() wire.Register {
+		return wire.Register{NodeID: "node-noroute", Kind: "aicli"}
+	}
+	conn, err := connector.Dial(context.Background(), agent.Config{Enabled: true, URL: tunnelHTTP.URL, Token: "agw_x"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	waitFor(t, func() bool { _, ok := server.Registry().Get("node-noroute"); return ok })
+
+	proxy := startProxy(t, server, "node-noroute")
+	resp, err := http.Get(proxy.URL + "/anything")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (empty allowlist is fail-closed)", resp.StatusCode)
 	}
 }
 

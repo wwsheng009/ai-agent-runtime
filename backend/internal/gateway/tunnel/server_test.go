@@ -41,7 +41,13 @@ func testConnector(nodeID string) *agent.WSConnector {
 	return &agent.WSConnector{
 		AgentVersion: "test",
 		Register: func() wire.Register {
-			return wire.Register{NodeID: nodeID, Kind: "aicli", DeviceName: "laptop", Capabilities: []string{"manifest"}}
+			return wire.Register{
+				NodeID:       nodeID,
+				Kind:         "aicli",
+				DeviceName:   "laptop",
+				Capabilities: []string{"manifest"},
+				Routes:       []string{"/"},
+			}
 		},
 		HeartbeatInterval: 200 * time.Millisecond,
 	}
