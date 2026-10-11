@@ -35,9 +35,10 @@ import (
 type BashTool struct {
 	*toolkit.BaseTool
 	sandboxPolicy
-	executer  CommandExecuter
-	timeout   time.Duration
-	blacklist []string
+	executer    CommandExecuter
+	timeout     time.Duration
+	blacklist   []string
+	bgSubmitter BackgroundSubmitter
 }
 
 // 危险命令黑名单
@@ -189,6 +190,16 @@ func (b *BashTool) DefinitionMetadata() map[string]interface{} {
 		// model-facing shell surface is `shell` (agent-side dedupe keeps one).
 		"alias_of": "shell",
 	}
+}
+
+// SetBackgroundSubmitter wires the toolkit↔broker seam (internal/tools/manager.go).
+// Non-nil routes detach=true through the managed background manager instead of
+// the deprecated fire-and-forget launcher (2026-10-11).
+func (b *BashTool) SetBackgroundSubmitter(submitter BackgroundSubmitter) {
+	if b == nil {
+		return
+	}
+	b.bgSubmitter = submitter
 }
 
 type CommandExecutionResult struct {
@@ -1192,6 +1203,15 @@ func resolveMaxShellCommandTimeout() time.Duration {
 // no output capture. It returns immediately with the PID so the caller can
 // manage the process explicitly.
 func (b *BashTool) executeDetachedCommand(ctx context.Context, command, resolvedWorkdir string) (*toolkit.ToolResult, error) {
+	// Managed routing (2026-10-11): when the broker injected a background
+	// submitter, detach=true becomes a supervised job (captured output, job
+	// lifecycle, process tree, supervision wake) — an interactive session when
+	// the caller asks for a TTY-shaped command, otherwise a one-shot job. The
+	// legacy fire-and-forget launcher stays as the fallback for tool instances
+	// constructed without the seam (tests, toolkit-mcp-server).
+	if b.bgSubmitter != nil {
+		return b.executeDetachedManaged(ctx, command, resolvedWorkdir)
+	}
 	if !runtimeexecutor.ResolveDetachAllowed() {
 		return toolResultFailureWithCode(
 			fmt.Errorf("detach=true 已被运行时禁用（%s=0）", runtimeexecutor.DetachAllowedEnv),

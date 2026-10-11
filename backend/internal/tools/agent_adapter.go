@@ -20,6 +20,17 @@ func NewAgentAdapter(manager *Manager) *AgentAdapter {
 	return &AgentAdapter{manager: manager}
 }
 
+// UnderlyingToolsManager exposes the wrapped tools manager for host-side
+// wiring seams that are built after the tool surface (e.g. the runtime-server
+// lazily-created background manager injecting the detach→managed-job submitter,
+// 2026-10-11). Returns nil when the adapter has no manager.
+func (a *AgentAdapter) UnderlyingToolsManager() *Manager {
+	if a == nil {
+		return nil
+	}
+	return a.manager
+}
+
 // SetLSPObserver 把 LSP 池事件观察者转发到底层工具 Manager（runtime-server
 // 观测接线用；未启用 LSP 或未挂池时是安全 no-op）。
 func (a *AgentAdapter) SetLSPObserver(observer lsp.Observer) {

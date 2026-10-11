@@ -619,3 +619,42 @@ ConPTY 是 Windows 上唯一的官方伪终端 API，没有功能等价的替代
 
 - Windows 上 `interactive=true` 的会话现在是**真 PTY**（TTY 语义 + resize + win32-input-mode VT 流），不再降级管道；`tty_fallback=pipe` 仅在无 ConPTY 的宿主（如 Win7）出现。
 - 方案中「ConPTY 需重写与验证」一项**完成**；剩余项仅 `detach` → 受管作业真正路由（toolkit↔broker seam）。
+
+---
+
+## P2 实施记录（2026-10-11，`detach` → 受管作业真正路由 ✅）
+
+### 架构（toolkit↔broker seam）
+
+- **接口定义在 toolkit 层**（`internal/toolkit/tools/background_submitter.go`，避免 tools→toolkit 反向依赖导致 import cycle）：
+  - `BackgroundSubmitter`：`SubmitBackgroundShell(ctx, sessionID, command, cwd)`（一次性作业）+ `OpenInteractiveSession(ctx, sessionID, command, cwd, tty, cols, rows)`（交互会话）；
+  - 归属会话取自 ambient ctx `toolctx.SessionID`（执行链路已携带，无需新 context key）。
+- **BashTool 注入点**：`BashTool.SetBackgroundSubmitter`（bash/shell/execute_shell_command 三个面共享同一 `*BashTool` 实现，一处注入三面生效）。
+- **执行路由**（`bash.go: executeDetachedCommand`）：`bgSubmitter != nil` → `executeDetachedManaged`（受管路径）；否则保持 legacy fire-and-forget（测试/toolkit-mcp-server 等未接缝场景）。
+- **受管路径**（`bash_detach_managed.go`）：
+  - `managedDetachPrefersInteractive` 启发式（dev server / REPL / TUI 特征：npm run dev、npm start、pnpm dev、uvicorn、flask run、vite、next dev、air…）→ 交互会话（write_stdin 可继续驱动）；其余 → 一次性作业；
+  - 结果 Content/Metadata：`detached_managed=true`、`job_id`、`job_status`、`next_action` 指引 `task_output`（wait=output|exit）与 `write_stdin`（交互会话，`\r` 结尾）；
+  - 提交失败是**硬失败**（PROCESS_START_FAILED + next_action），不是静默回退。
+- **broker 侧适配器**（`internal/tools/background_seam.go`）：`NewBackgroundSubmitter(manager)` 实现 seam → `SubmitShell` / `OpenTerminal`；`Manager.SetBackgroundSubmitter` 遍历 `registry.List()` 注入到实现该接口的工具。
+- **AgentAdapter**：新增 `UnderlyingToolsManager()` 访问器（host 侧延迟接缝用）。
+- **两处 host 接线**：
+  - CLI（`chat_actor_host.go`）：`backgroundManager` 构建后立即注入 `toolManager`；
+  - runtime-server（`runtimeapi/handler.go getBackgroundManager`）：懒创建 manager 后按接口断言 `h.mcpManager.(interface{ UnderlyingToolsManager() *runtimetools.Manager })` 注入进程级共享工具面（config key 变化重建 manager 时以新实例再注入）。
+
+### 语义变化（有意为之）
+
+- **接缝注入后**：`shell/bash/execute_shell_command` 的 `detach=true` = 受管后台作业/交互会话（输出可读、生命周期可控、终态唤醒），不再是 fire-and-forget；
+- **未注入**（测试、toolkit-mcp-server 等独立工具面）：保持 legacy 行为；
+- 返回 PID 的语义变为返回 `job_id`（Content 与 metadata 同步），`deprecated` 标记保留在 legacy 路径。
+
+### 验证
+
+- `internal/tools/background_seam_test.go`：
+  - `TestShellDetachRoutesThroughBackgroundSubmitter`：`shell detach=true` → 受管作业（Content 含「受管」/`task_output`；job 落库且归属 ambient session，Command 一致）；
+  - `TestShellDetachWithoutSubmitterKeepsLegacyPath`：未注入 → 不出现受管标记（legacy 路径保持）；
+  - `TestShellDetachOpensInteractiveSessionForServers`：`npm run dev` detach → **交互会话**（`Job.Interactive=true`，可 CancelJob 收敛）。
+- `go test ./internal/tools/ ./internal/toolkit/...` 全绿；`go vet`（tools/toolkit-tools/aicli-commands/runtimeapi）通过；`go build ./internal/... ./cmd/...` 通过。
+
+### 方案完成度
+
+方案全部条目落地：P0 交互核心、P1 复用/路由/Resize/pty、D4 审批缓存、P2 clean/指标/客户端、前端 API+实时输出流、detach 过渡、ConPTY、**detach 真正路由**。
