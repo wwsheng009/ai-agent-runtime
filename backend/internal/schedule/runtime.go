@@ -289,6 +289,15 @@ func (r *Runtime) commit(task Task, now time.Time) {
 		r.opts.Logf("schedule: commit %s skipped (stale state version)", task.Record.ID)
 		return
 	}
+	// 同一提交写入历史表（"追加回执 + 推进任务"同批；存储文档 §4.3）。
+	if sqlStore, ok := r.opts.Store.(*SQLiteStore); ok && receipt != nil {
+		if err := sqlStore.AppendDeliveryRecord(task.Record.ID, DeliveryRecord{
+			DeliveryReceipt: *receipt,
+			Prompt:          task.Record.Prompt,
+		}); err != nil {
+			r.opts.Logf("schedule: append delivery history for %s: %v", task.Record.ID, err)
+		}
+	}
 	r.mu.Lock()
 	delete(r.attempts, task.Record.ID)
 	delete(r.failedUntil, task.Record.ID)

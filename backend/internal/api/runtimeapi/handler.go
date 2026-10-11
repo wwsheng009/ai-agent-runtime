@@ -1049,6 +1049,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// registers reminders that deliver to their original Session when due.
 	runtimeRouter.HandleFunc("/schedule/catalog", h.GetScheduleCatalog).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/schedule/list", h.ListScheduleTasks).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/schedule/history", h.GetScheduleDeliveryHistory).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/schedule/update", h.UpdateScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/schedule/delete", h.DeleteScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/terminals/clean", h.CleanBackgroundTerminals).Methods(http.MethodPost)

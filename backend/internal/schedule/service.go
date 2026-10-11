@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,6 +34,25 @@ type UpdateResult struct {
 	Record  *Record `json:"record,omitempty"`
 	Code    Code    `json:"code,omitempty"`
 	Message string  `json:"message,omitempty"`
+}
+
+// HistoryRequest 是一次有界的历史查询。
+type HistoryRequest struct {
+	SessionID string
+	ID        string
+	Limit     int
+	Before    string // message id 游标（排他）
+}
+
+// HistoryResult 是历史查询结果：记录从新到旧，附游标与保留上限。
+type HistoryResult struct {
+	ID                        string           `json:"id"`
+	Records                   []DeliveryRecord `json:"records"`
+	NextBefore                string           `json:"nextBefore,omitempty"`
+	EarlierRecordsUnavailable bool             `json:"earlierRecordsUnavailable"`
+	EarlierRecordsPruned      bool             `json:"earlierRecordsPruned"`
+	RetentionDays             int              `json:"retentionDays"`
+	RetentionRecords          int              `json:"retentionRecords"`
 }
 
 // Service 是共享管理服务：读、删除与时间编辑都不激活会话。
@@ -168,6 +188,57 @@ func (s *Service) Get(sessionID, id string) (Record, bool, error) {
 		return Record{}, false, err
 	}
 	return task.Record, true, nil
+}
+
+// History 读取已保存投递记录：limit 1..100；before 为 message id 排他游标。
+func (s *Service) History(request HistoryRequest) (HistoryResult, error) {
+	if request.Limit < 1 || request.Limit > 100 {
+		return HistoryResult{}, inputError(CodeInvalidRule, "limit must be a safe integer from 1 through 100.")
+	}
+	task, ok, err := s.store.Get(request.ID)
+	if err != nil {
+		return HistoryResult{}, err
+	}
+	if !ok || task.SessionID != request.SessionID {
+		return HistoryResult{}, inputError(CodeNotFound, "schedule_not_found")
+	}
+	var beforeSeq int64
+	if strings.TrimSpace(request.Before) != "" {
+		sqlStore, isSQL := s.store.(*SQLiteStore)
+		if !isSQL {
+			return HistoryResult{}, inputError(CodeCursorNotFound, "delivery_cursor_not_found")
+		}
+		seq, found, err := sqlStore.FindHistorySeqByMessage(request.ID, request.Before)
+		if err != nil {
+			return HistoryResult{}, err
+		}
+		if !found {
+			return HistoryResult{}, inputError(CodeCursorNotFound, "delivery_cursor_not_found")
+		}
+		beforeSeq = seq
+	}
+	sqlStore, isSQL := s.store.(*SQLiteStore)
+	if !isSQL {
+		return HistoryResult{ID: request.ID, Records: []DeliveryRecord{}}, nil
+	}
+	records, err := sqlStore.ListHistoryPage(request.ID, beforeSeq, request.Limit)
+	if err != nil {
+		return HistoryResult{}, err
+	}
+	result := HistoryResult{
+		ID:      request.ID,
+		Records: records,
+	}
+	if task.DeliveryHistory != nil {
+		result.EarlierRecordsUnavailable = task.DeliveryHistory.EarlierRecordsUnavailable
+		result.EarlierRecordsPruned = task.DeliveryHistory.EarlierRecordsPruned
+	}
+	if len(records) == request.Limit {
+		// 追加序持续递增：以本页最早记录的 message id 为下一页游标。
+		oldest := records[len(records)-1]
+		result.NextBefore = oldest.MessageID
+	}
+	return result, nil
 }
 
 // Delete 删除一条属于 sessionID 的任务（硬删除，含历史）。

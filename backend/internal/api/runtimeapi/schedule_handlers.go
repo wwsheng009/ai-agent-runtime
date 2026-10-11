@@ -46,6 +46,47 @@ func (h *Handler) ListScheduleTasks(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{"tasks": records, "count": len(records)})
 }
 
+// GetScheduleDeliveryHistory returns saved delivery records for one reminder,
+// newest-first in append order with an exclusive message-id cursor.
+func (h *Handler) GetScheduleDeliveryHistory(w http.ResponseWriter, r *http.Request) {
+	service := h.getScheduleService()
+	if service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "schedule service not configured"))
+		return
+	}
+	query := r.URL.Query()
+	sessionID := strings.TrimSpace(query.Get("session_id"))
+	id := strings.TrimSpace(query.Get("id"))
+	if sessionID == "" || id == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id and id are required"))
+		return
+	}
+	limit, err := strconv.Atoi(strings.TrimSpace(query.Get("limit")))
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "limit must be an integer from 1 through 100"))
+		return
+	}
+	result, err := service.History(schedule.HistoryRequest{
+		SessionID: sessionID,
+		ID:        id,
+		Limit:     limit,
+		Before:    strings.TrimSpace(query.Get("before")),
+	})
+	if err != nil {
+		if input, ok := schedule.IsInputError(err); ok {
+			status := http.StatusBadRequest
+			if input.Code == schedule.CodeNotFound || input.Code == schedule.CodeCursorNotFound {
+				status = http.StatusNotFound
+			}
+			h.writeError(w, status, errors.New(errors.ErrValidationFailed, input.Message))
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, result)
+}
+
 type scheduleUpdateRequest struct {
 	SessionID string                `json:"session_id"`
 	ID        string                `json:"id"`

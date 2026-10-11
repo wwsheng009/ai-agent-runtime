@@ -327,6 +327,38 @@ WHERE id = ? AND state_version = ?`,
 	return affected > 0, nil
 }
 
+// AppendDeliveryRecord 追加一条投递历史（seq 单调递增）。
+func (s *SQLiteStore) AppendDeliveryRecord(scheduleID string, record DeliveryRecord) error {
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var maxSeq sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT MAX(seq) FROM schedule_delivery_history WHERE schedule_id = ?`, scheduleID).Scan(&maxSeq); err != nil {
+		return err
+	}
+	seq := int64(1)
+	if maxSeq.Valid {
+		seq = maxSeq.Int64 + 1
+	}
+	var prompt any
+	if record.Prompt != "" {
+		prompt = record.Prompt
+	}
+	const insertHistory = `INSERT INTO schedule_delivery_history
+(schedule_id, seq, scheduled_at, delivered_at, message_id, prompt)
+VALUES (?, ?, ?, ?, ?, ?)`
+	if _, err := tx.ExecContext(ctx, insertHistory,
+		scheduleID, seq, formatInstant(record.ScheduledAt), formatInstant(record.DeliveredAt),
+		record.MessageID, prompt); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func lastScheduled(task Task) any {
 	if task.LastDelivery == nil {
 		return nil
@@ -371,4 +403,74 @@ func (s *SQLiteStore) Delete(id string) (bool, error) {
 		return false, err
 	}
 	return affected > 0, nil
+}
+
+// ListHistoryPage 读取某任务的一段历史：追加序逆序、beforeSeq 为排他 seq 游标。
+func (s *SQLiteStore) ListHistoryPage(id string, beforeSeq int64, limit int) ([]DeliveryRecord, error) {
+	query := `SELECT scheduled_at, delivered_at, message_id, prompt
+FROM schedule_delivery_history WHERE schedule_id = ?`
+	args := []any{id}
+	if beforeSeq > 0 {
+		query += ` AND seq < ?`
+		args = append(args, beforeSeq)
+	}
+	query += ` ORDER BY seq DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := []DeliveryRecord{}
+	for rows.Next() {
+		var scheduledAt, deliveredAt, messageID string
+		var prompt sql.NullString
+		if err := rows.Scan(&scheduledAt, &deliveredAt, &messageID, &prompt); err != nil {
+			return nil, err
+		}
+		scheduled, err := parseInstant(scheduledAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse history scheduled_at: %w", err)
+		}
+		delivered, err := parseInstant(deliveredAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse history delivered_at: %w", err)
+		}
+		record := DeliveryRecord{
+			DeliveryReceipt: DeliveryReceipt{ScheduledAt: scheduled, DeliveredAt: delivered, MessageID: messageID},
+		}
+		if prompt.Valid {
+			record.Prompt = prompt.String
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+// MaxHistorySeq 返回某任务的最大追加序号（ok=false 表示无历史）。
+func (s *SQLiteStore) MaxHistorySeq(id string) (int64, bool, error) {
+	var maxSeq sql.NullInt64
+	err := s.db.QueryRow(`SELECT MAX(seq) FROM schedule_delivery_history WHERE schedule_id = ?`, id).Scan(&maxSeq)
+	if err != nil {
+		return 0, false, err
+	}
+	if !maxSeq.Valid {
+		return 0, false, nil
+	}
+	return maxSeq.Int64, true, nil
+}
+
+// FindHistorySeqByMessage 把 message_id 游标解析为排他 seq（从新到旧第一处）。
+func (s *SQLiteStore) FindHistorySeqByMessage(id, messageID string) (int64, bool, error) {
+	var seq int64
+	err := s.db.QueryRow(
+		`SELECT seq FROM schedule_delivery_history WHERE schedule_id = ? AND message_id = ? ORDER BY seq DESC LIMIT 1`,
+		id, messageID).Scan(&seq)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return seq, true, nil
 }
