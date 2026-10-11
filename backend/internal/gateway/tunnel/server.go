@@ -30,6 +30,9 @@ type Config struct {
 	Authenticate func(*http.Request) error
 	// Logf receives non-fatal diagnostics; nil disables logging.
 	Logf func(format string, args ...any)
+	// OnRouteDenied is called when a proxy request is rejected by the route
+	// allowlist (used for penalty bans). Optional.
+	OnRouteDenied func(*http.Request)
 	// Upgrader overrides the WebSocket upgrader (tests).
 	Upgrader *websocket.Upgrader
 }

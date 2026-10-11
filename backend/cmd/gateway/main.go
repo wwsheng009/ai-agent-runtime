@@ -29,6 +29,7 @@ type gatewayMetrics struct {
 	requests    atomic.Int64
 	rateLimited atomic.Int64
 	proxy       atomic.Int64
+	banned      atomic.Int64
 }
 
 func main() {
@@ -49,6 +50,9 @@ func run() int {
 		rateLimit      = flag.Int("rate-limit", 0, "per-IP requests per minute for the proxy and tunnel upgrade; 0 disables")
 		dataDir        = flag.String("data-dir", "./data", "directory for persisted gateway state (device tokens)")
 		trustedProxies = flag.String("trusted-proxies", "127.0.0.1/32,::1/128", "comma-separated trusted proxy CIDRs/IPs; X-Forwarded-For is honored only from these")
+		banThreshold   = flag.Int("ban-threshold", 0, "penalty count within --ban-window before an IP is auto-banned; 0 disables")
+		banWindow      = flag.Duration("ban-window", time.Minute, "penalty window")
+		banTTL         = flag.Duration("ban-ttl", 10*time.Minute, "auto-ban duration")
 	)
 	flag.Parse()
 
@@ -70,16 +74,23 @@ func run() int {
 	var metrics gatewayMetrics
 	limiter := ratelimit.New(*rateLimit, time.Minute)
 	resolver := ratelimit.NewResolver(strings.Split(*trustedProxies, ","))
+	bans := ratelimit.NewBanList(*banThreshold, *banWindow, *banTTL)
 	limited := func(next http.Handler) http.Handler {
-		if *rateLimit <= 0 {
-			return next
-		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if ok, retry := limiter.Allow(resolver.ClientIP(r)); !ok {
-				metrics.rateLimited.Add(1)
-				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
-				http.Error(w, "too many requests", http.StatusTooManyRequests)
+			ip := resolver.ClientIP(r)
+			if bans.IsBanned(ip) {
+				metrics.banned.Add(1)
+				http.Error(w, "banned", http.StatusForbidden)
 				return
+			}
+			if *rateLimit > 0 {
+				if ok, retry := limiter.Allow(ip); !ok {
+					metrics.rateLimited.Add(1)
+					bans.Record(ip)
+					w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
+					http.Error(w, "too many requests", http.StatusTooManyRequests)
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -97,6 +108,9 @@ func run() int {
 		PublicBaseURL:        *publicBaseURL,
 		Registry:             registry,
 		Authenticate:         deviceAuth(devices.Store, *deviceToken),
+		OnRouteDenied: func(r *http.Request) {
+			bans.Record(resolver.ClientIP(r))
+		},
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
 		},
@@ -172,6 +186,7 @@ func run() int {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"requests_total":       metrics.requests.Load(),
 			"rate_limited_total":   metrics.rateLimited.Load(),
+			"banned_total":         metrics.banned.Load(),
 			"proxy_requests_total": metrics.proxy.Load(),
 			"nodes":                registry.Count(),
 			"devices":              devices.Count(),

@@ -34,6 +34,9 @@ func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 		return
 	}
 	if !routeAllowed(node.Routes, path) {
+		if s.cfg.OnRouteDenied != nil {
+			s.cfg.OnRouteDenied(r)
+		}
 		http.Error(w, "route not allowed", http.StatusForbidden)
 		return
 	}
