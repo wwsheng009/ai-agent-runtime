@@ -4,6 +4,7 @@
 //   GET  /api/runtime/schedule/catalog
 //   GET  /api/runtime/schedule/list?session_id=
 //   GET  /api/runtime/schedule/history?session_id=&id=&limit=&before=
+//   POST /api/runtime/schedule/create
 //   POST /api/runtime/schedule/update
 //   POST /api/runtime/schedule/delete
 //
@@ -11,10 +12,13 @@
 
 import type {
   RuntimeScheduleCatalogResponse,
+  RuntimeScheduleCreateRequest,
+  RuntimeScheduleCreateResponse,
   RuntimeScheduleDeleteResponse,
   RuntimeScheduleHistoryResponse,
   RuntimeScheduleKind,
   RuntimeScheduleListResponse,
+  RuntimeScheduleOrigin,
   RuntimeScheduleRecord,
   RuntimeScheduleTask,
   RuntimeScheduleUpdateRequest,
@@ -108,10 +112,12 @@ export function normalizeScheduleTask(raw: unknown): RuntimeScheduleTask {
   const record = asRecord(raw) ?? {};
   const base = normalizeScheduleRecord(raw);
   const lastDeliveryRaw = asRecord(record.lastDelivery ?? record.LastDelivery);
+  const origin = pickString(record, "origin", "Origin");
   return {
     ...base,
     sessionId: pickString(record, "sessionId", "SessionID", "session_id"),
     status: pickString(record, "status", "Status") === "inactive" ? "inactive" : "active",
+    origin: (origin === "manual" ? "manual" : "model") as RuntimeScheduleOrigin,
     lastDelivery: lastDeliveryRaw
       ? {
           scheduledAt: pickString(lastDeliveryRaw, "scheduledAt", "ScheduledAt"),
@@ -226,5 +232,22 @@ export async function deleteScheduleTask(
     id: pickString(record, "id", "ID"),
     deleted: record.deleted === true,
     code: pickString(record, "code", "Code") || undefined,
+  };
+}
+
+/** 人工创建（origin=manual）：选择器校验在后端服务层，与模型工具同一条管线。 */
+export async function createScheduleTask(
+  request: RuntimeScheduleCreateRequest,
+): Promise<RuntimeScheduleCreateResponse> {
+  const payload = await fetchRuntimeJson<unknown>(`${SCHEDULE_PATH}/create`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const record = asRecord(payload) ?? {};
+  const created = normalizeScheduleRecord(record.record ?? record.Record);
+  return {
+    record: created,
+    origin: "manual",
   };
 }

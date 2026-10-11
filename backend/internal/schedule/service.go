@@ -17,6 +17,7 @@ type CatalogEntry struct {
 	Record
 	SessionID    string           `json:"sessionId"`
 	Status       Status           `json:"status"`
+	Origin       Origin           `json:"origin,omitempty"`
 	LastDelivery *DeliveryReceipt `json:"lastDelivery,omitempty"`
 }
 
@@ -130,7 +131,8 @@ func (s *Service) WithLock(work func() error) error {
 }
 
 // Create 创建一条绑定到 sessionID 的提醒（不激活会话）。
-func (s *Service) Create(sessionID string, req CreateRequest) (Record, error) {
+// origin 标记创建来源：空值回落 model（模型工具路径保持兼容）。
+func (s *Service) Create(sessionID string, req CreateRequest, origin Origin) (Record, error) {
 	selectors := 0
 	if req.AfterSeconds != nil {
 		selectors++
@@ -183,6 +185,7 @@ func (s *Service) Create(sessionID string, req CreateRequest) (Record, error) {
 		SessionID:       sessionID,
 		Record:          record,
 		Status:          StatusActive,
+		Origin:          origin,
 		DeliveryHistory: &DeliveryHistory{Records: []DeliveryRecord{}},
 	}
 	if err := s.store.Put(task); err != nil {
@@ -214,7 +217,7 @@ func (s *Service) Catalog() ([]CatalogEntry, error) {
 	entries := make([]CatalogEntry, 0, len(tasks))
 	for _, task := range tasks {
 		entries = append(entries, CatalogEntry{
-			Record: task.Record, SessionID: task.SessionID, Status: task.Status, LastDelivery: task.LastDelivery,
+			Record: task.Record, SessionID: task.SessionID, Status: task.Status, Origin: task.Origin, LastDelivery: task.LastDelivery,
 		})
 	}
 	return entries, nil

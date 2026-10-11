@@ -95,7 +95,7 @@ func TestServiceCreateListDeleteAndConflict(t *testing.T) {
 	svc := NewService(store, fixedClock(now))
 
 	delay := int64(600)
-	rec, err := svc.Create("session-1", CreateRequest{Prompt: "check", Title: "Check", AfterSeconds: &delay})
+	rec, err := svc.Create("session-1", CreateRequest{Prompt: "check", Title: "Check", AfterSeconds: &delay}, OriginModel)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -142,10 +142,58 @@ func TestServiceSelectorXOR(t *testing.T) {
 	svc := NewService(store, fixedClock(time.Now()))
 	delay := int64(60)
 	every := int64(60)
-	if _, err := svc.Create("s", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay, EverySeconds: &every}); err == nil {
+	if _, err := svc.Create("s", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay, EverySeconds: &every}, OriginModel); err == nil {
 		t.Fatal("two selectors must be rejected")
 	}
-	if _, err := svc.Create("s", CreateRequest{Prompt: "x", Title: "t"}); err == nil {
+	if _, err := svc.Create("s", CreateRequest{Prompt: "x", Title: "t"}, OriginModel); err == nil {
 		t.Fatal("zero selectors must be rejected")
+	}
+}
+
+// TestTaskOriginPersistence 钉住创建来源的持久化语义：
+// manual 写入后 round-trip 保持；空/未知值回落 model（旧库行零迁移）。
+func TestTaskOriginPersistence(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	svc := NewService(store, fixedClock(now))
+
+	delay := int64(600)
+	rec, err := svc.Create("session-manual", CreateRequest{Prompt: "p", Title: "Manual", AfterSeconds: &delay}, OriginManual)
+	if err != nil {
+		t.Fatalf("Create manual: %v", err)
+	}
+	task, ok, err := store.Get(rec.ID)
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if task.Origin != OriginManual {
+		t.Fatalf("origin = %q, want manual", task.Origin)
+	}
+
+	// 模型路径默认来源。
+	rec2, err := svc.Create("session-model", CreateRequest{Prompt: "p", Title: "Model", AfterSeconds: &delay}, OriginModel)
+	if err != nil {
+		t.Fatalf("Create model: %v", err)
+	}
+	if task, _, _ := store.Get(rec2.ID); task.Origin != OriginModel {
+		t.Fatalf("origin = %q, want model", task.Origin)
+	}
+
+	// 旧数据语义：直接写一行无来源的记录，scan 回落 model。
+	if err := store.ExecRaw(`INSERT INTO schedule_tasks
+		(id, session_id, kind, title, prompt, scheduled_at, status, state_version, created_at, updated_at)
+		VALUES ('schedule-legacy', 's', 'at', 't', 'p', '2027-01-01T00:00:00.000Z', 'active', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	legacy, ok, err := store.Get("schedule-legacy")
+	if err != nil || !ok {
+		t.Fatalf("Get legacy: ok=%v err=%v", ok, err)
+	}
+	if legacy.Origin != OriginModel {
+		t.Fatalf("legacy origin = %q, want model fallback", legacy.Origin)
 	}
 }

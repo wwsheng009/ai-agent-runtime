@@ -57,10 +57,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
-	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspaceregistry"
@@ -1051,6 +1051,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/schedule/catalog", h.GetScheduleCatalog).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/schedule/list", h.ListScheduleTasks).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/schedule/history", h.GetScheduleDeliveryHistory).Methods(http.MethodGet)
+	// Manual creation entry (origin=manual): the service-side validation is the
+	// same pipeline the model tool uses; see CreateScheduleTask.
+	runtimeRouter.HandleFunc("/schedule/create", h.CreateScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/schedule/update", h.UpdateScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/schedule/delete", h.DeleteScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/terminals/clean", h.CleanBackgroundTerminals).Methods(http.MethodPost)

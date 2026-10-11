@@ -37,7 +37,7 @@ func TestRuntimeMetricsReflectDrive(t *testing.T) {
 	svc := NewService(store, clock)
 
 	delay := int64(60)
-	if _, err := svc.Create("session-1", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}); err != nil {
+	if _, err := svc.Create("session-1", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}, OriginModel); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

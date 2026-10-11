@@ -12,11 +12,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  createScheduleTask,
   deleteScheduleTask,
   fetchScheduleCatalog,
   updateScheduleTask,
 } from "@/api/runtime/schedule";
 import type {
+  RuntimeScheduleCreateRequest,
   RuntimeScheduleTask,
   RuntimeScheduleUpdateRequest,
 } from "@/types/runtime";
@@ -52,6 +54,7 @@ export function useScheduleTasks({
   const [eventRefreshKey, setEventRefreshKey] = useState("");
   const [deletingId, setDeletingId] = useState("");
   const [savingId, setSavingId] = useState("");
+  const [creating, setCreating] = useState(false);
   const requestIdRef = useRef(0);
   const sid = sessionId?.trim() ?? "";
 
@@ -193,6 +196,31 @@ export function useScheduleTasks({
     [tasks, sid],
   );
 
+  /** 人工创建：绑定指定会话（origin=manual）；成功后重拉目录。 */
+  const createTask = useCallback(
+    async (
+      request: Omit<RuntimeScheduleCreateRequest, "sessionId"> & { sessionId: string },
+    ): Promise<ScheduleDeleteOutcome> => {
+      if (!request.sessionId.trim()) {
+        return { ok: false, message: "session id unavailable" };
+      }
+      setCreating(true);
+      try {
+        await createScheduleTask(request);
+        setRefreshToken((token) => token + 1);
+        return { ok: true };
+      } catch (caught) {
+        return {
+          ok: false,
+          message: caught instanceof Error ? caught.message : String(caught),
+        };
+      } finally {
+        setCreating(false);
+      }
+    },
+    [],
+  );
+
   return {
     tasks,
     loading,
@@ -201,9 +229,11 @@ export function useScheduleTasks({
     activeCount,
     deletingId,
     savingId,
+    creating,
     refresh,
     removeTask,
     saveTask,
+    createTask,
   };
 }
 

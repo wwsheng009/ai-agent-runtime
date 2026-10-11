@@ -137,6 +137,12 @@ CREATE TABLE IF NOT EXISTS schedule_pending_messages (
 CREATE INDEX IF NOT EXISTS idx_schedule_pending_session
 ON schedule_pending_messages(session_id, consumed_at);
 `,
+	}, {
+		Version: 3,
+		Name:    "schedule_tasks_origin",
+		UpSQL: `
+ALTER TABLE schedule_tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'model';
+`,
 	}}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -152,9 +158,15 @@ func (s *SQLiteStore) Close() error {
 // DB 暴露底层句柄（供历史查询等同包扩展使用）。
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
 
+// ExecRaw 执行一条原始 SQL（测试用：构造持久层边界数据）。
+func (s *SQLiteStore) ExecRaw(query string, args ...any) error {
+	_, err := s.db.ExecContext(context.Background(), query, args...)
+	return err
+}
+
 const taskColumns = `id, session_id, kind, title, prompt, scheduled_at, after_seconds, every_seconds,
     local_time, time_zone, weekdays_json, expression, status,
-    last_scheduled_at, last_delivered_at, last_message_id, state_version`
+    last_scheduled_at, last_delivered_at, last_message_id, state_version, origin`
 
 func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	var (
@@ -173,10 +185,11 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 		lastDeliv   sql.NullString
 		lastMsgID   sql.NullString
 		version     int64
+		origin      string
 	)
 	if err := scanner.Scan(&id, &task.SessionID, &kind, &task.Record.Title, &task.Record.Prompt, &scheduledAt,
 		&afterRaw, &everyRaw, &localTime, &timeZone, &weekdaysRaw, &expression, &status,
-		&lastSched, &lastDeliv, &lastMsgID, &version); err != nil {
+		&lastSched, &lastDeliv, &lastMsgID, &version, &origin); err != nil {
 		return Task{}, err
 	}
 	target, err := parseInstant(scheduledAt)
@@ -194,6 +207,12 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	task.Record.Weekdays = decodeWeekdays(weekdaysRaw)
 	task.Status = Status(status)
 	task.StateVersion = version
+	// 未知/空来源回落 model：旧数据与外部写入零迁移语义。
+	if origin == string(OriginManual) {
+		task.Origin = OriginManual
+	} else {
+		task.Origin = OriginModel
+	}
 	if lastSched.Valid && lastDeliv.Valid && lastMsgID.Valid {
 		delivered, derr := parseInstant(lastDeliv.String)
 		if derr != nil {
@@ -267,6 +286,14 @@ func recordArgs(task Task) []any {
 	}
 }
 
+// originArg 把任务来源归一化为可存储值（空/未知 → model）。
+func originArg(task Task) string {
+	if task.Origin == OriginManual {
+		return string(OriginManual)
+	}
+	return string(OriginModel)
+}
+
 // encodeWeekdays 把星期集合编码为 JSON 文本（空集合存 NULL）。
 func encodeWeekdays(days []int) any {
 	if len(days) == 0 {
@@ -310,8 +337,8 @@ func (s *SQLiteStore) Put(task Task) error {
 	now := formatInstant(time.Now())
 	_, err := s.db.ExecContext(context.Background(), `
 INSERT INTO schedule_tasks (`+taskColumns+`, owner_instance_id, lease_expires_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, ?, ?)`,
-		append(recordArgs(task), task.StateVersion, now, now)...)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL, ?, ?)`,
+		append(recordArgs(task), task.StateVersion, originArg(task), now, now)...)
 	if err != nil {
 		return fmt.Errorf("insert schedule task %s: %w", task.Record.ID, err)
 	}

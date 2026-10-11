@@ -52,12 +52,17 @@ export type RuntimeScheduleTask = {
   expression?: string;
   sessionId: string;
   status: RuntimeScheduleStatus;
+  /** 创建来源：model=模型工具；manual=人工管理端（旧数据回落 model）。 */
+  origin?: RuntimeScheduleOrigin;
   lastDelivery?: {
     scheduledAt: string;
     deliveredAt: string;
     messageId: string;
   } | null;
 };
+
+/** 创建来源（与后端 `schedule.Origin` 同形）。 */
+export type RuntimeScheduleOrigin = "model" | "manual";
 
 export type RuntimeScheduleCatalogResponse = {
   tasks: RuntimeScheduleTask[];
@@ -118,4 +123,22 @@ export type RuntimeScheduleUpdateRequest = {
   title?: string;
   prompt?: string;
   change?: RuntimeScheduleTimingChange;
+};
+
+/** 人工创建请求（恰好一个选择器；与后端 `scheduleCreateRequest` 同形）。 */
+export type RuntimeScheduleCreateRequest = {
+  sessionId: string;
+  title: string;
+  prompt: string;
+  after_seconds?: number;
+  at?: string;
+  every_seconds?: number;
+  daily?: { time: string; time_zone: string };
+  weekly?: { time: string; time_zone: string; weekdays: number[] };
+  cron?: { expression: string; time_zone: string };
+};
+
+export type RuntimeScheduleCreateResponse = {
+  record: RuntimeScheduleRecord;
+  origin: RuntimeScheduleOrigin;
 };

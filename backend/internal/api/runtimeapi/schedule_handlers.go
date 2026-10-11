@@ -115,6 +115,63 @@ type scheduleTimingChange struct {
 	} `json:"cron,omitempty"`
 }
 
+type scheduleCreateRequest struct {
+	SessionID    string                `json:"session_id"`
+	Title        string                `json:"title"`
+	Prompt       string                `json:"prompt"`
+	AfterSeconds *int64                `json:"after_seconds,omitempty"`
+	At           *string               `json:"at,omitempty"`
+	EverySeconds *int64                `json:"every_seconds,omitempty"`
+	Daily        *schedule.DailyInput  `json:"daily,omitempty"`
+	Weekly       *schedule.WeeklyInput `json:"weekly,omitempty"`
+	Cron         *schedule.CronInput   `json:"cron,omitempty"`
+}
+
+// CreateScheduleTask creates one reminder bound to a Session through the
+// management surface (origin=manual). The service-side validation pipeline —
+// single selector, title/prompt rules, DST handling, cron normalization — is
+// shared verbatim with the model tool; this endpoint adds no extra rules.
+func (h *Handler) CreateScheduleTask(w http.ResponseWriter, r *http.Request) {
+	service := h.getScheduleService()
+	if service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "schedule service not configured"))
+		return
+	}
+	var request scheduleCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
+		return
+	}
+	if strings.TrimSpace(request.SessionID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id is required"))
+		return
+	}
+	req := schedule.CreateRequest{
+		Prompt:       request.Prompt,
+		Title:        request.Title,
+		AfterSeconds: request.AfterSeconds,
+		At:           request.At,
+		EverySeconds: request.EverySeconds,
+		Daily:        request.Daily,
+		Weekly:       request.Weekly,
+		Cron:         request.Cron,
+	}
+	record, err := service.Create(request.SessionID, req, schedule.OriginManual)
+	if err != nil {
+		if input, ok := schedule.IsInputError(err); ok {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, string(input.Code)+": "+input.Message))
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"record": record,
+		"origin": schedule.OriginManual,
+		"view":   schedule.BuildView(record, service.Now()),
+	})
+}
+
 // UpdateScheduleTask edits one reminder in place within its original Session binding.
 func (h *Handler) UpdateScheduleTask(w http.ResponseWriter, r *http.Request) {
 	service := h.getScheduleService()

@@ -46,7 +46,7 @@ func TestRuntimeDeliversDueOneShotAndDeactivates(t *testing.T) {
 	svc := NewService(store, clock)
 
 	delay := int64(60)
-	rec, err := svc.Create("session-1", CreateRequest{Prompt: "check", Title: "Check", AfterSeconds: &delay})
+	rec, err := svc.Create("session-1", CreateRequest{Prompt: "check", Title: "Check", AfterSeconds: &delay}, OriginModel)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestRuntimeAdvancesEveryTask(t *testing.T) {
 	svc := NewService(store, clock)
 
 	every := int64(300)
-	rec, err := svc.Create("session-1", CreateRequest{Prompt: "queue", Title: "Queue", EverySeconds: &every})
+	rec, err := svc.Create("session-1", CreateRequest{Prompt: "queue", Title: "Queue", EverySeconds: &every}, OriginModel)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

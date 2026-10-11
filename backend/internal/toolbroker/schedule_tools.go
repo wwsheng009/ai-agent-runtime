@@ -225,7 +225,7 @@ func (b *Broker) executeScheduleCreate(sessionID string, args map[string]interfa
 	if cron, ok := cronArg(args); ok {
 		req.Cron = cron
 	}
-	record, err := b.Schedule.Create(sessionID, req)
+	record, err := b.Schedule.Create(sessionID, req, schedule.OriginModel)
 	if err != nil {
 		return scheduleFailure(err), nil, nil
 	}

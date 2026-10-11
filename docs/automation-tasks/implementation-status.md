@@ -122,6 +122,19 @@ go vet（相关包）  ✅
   daemon 在投递前确认 runtime-server 可达并仅依赖 delegate。**机制已全部就位**：
   注入 Executor 即启用，`mode=delegate` 默认行为不变。
 
+### P7（人工创建入口）
+- 参考调研：deepseek-harness 的"新建"按钮只开新会话让模型创建（其管理页
+  刻意无创建表单）；本项目的 P7 是对该做法的扩展——提供真正的人工创建。
+- `schedule.Origin`（model/manual）+ migration v3（`origin` 列 DEFAULT 'model'，
+  未知/空值 scan 回落 model，旧库零迁移）；`Service.Create` 增加 origin 参数。
+- HTTP `POST /api/runtime/schedule/create`（origin=manual）：会话绑定 + 恰好一个
+  选择器，校验复用服务层与模型工具完全相同的管线（title/prompt/DST/cron）。
+- 前端面板/全局页"新建任务"表单：六种规则全覆盖（after/every 分钟数、at
+  datetime-local、daily/weekly/cron 时间+时区+星期集合），人工任务行内
+  "人工"徽章；i18n zh/en 同步。
+- 测试：`TestTaskOriginPersistence`（manual/model round-trip + 旧行回落）、
+  `TestCreateScheduleTask_ManualOrigin`/`_ReusesServiceValidation`（HTTP 层）。
+
 ### C3 结论（不做自动化桥）
 作业终态已有 supervision 投影 + wake 投递（`projectLocalBackgroundJobTerminal`），
 模型在下一 turn 可见结果——再自动创建 `at` 提醒会引入双投递，且违反"创建始终

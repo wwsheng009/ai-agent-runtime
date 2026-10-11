@@ -15,7 +15,7 @@ func TestServiceHistoryPaginationAndCursor(t *testing.T) {
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 	svc := NewService(store, fixedClock(now))
 	every := int64(60)
-	rec, err := svc.Create("session-1", CreateRequest{Prompt: "tick", Title: "Tick", EverySeconds: &every})
+	rec, err := svc.Create("session-1", CreateRequest{Prompt: "tick", Title: "Tick", EverySeconds: &every}, OriginModel)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

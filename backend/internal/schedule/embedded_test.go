@@ -61,7 +61,7 @@ func TestTryEmbeddedExecutesWhenLeaseGranted(t *testing.T) {
 	svc := NewService(store, clock)
 
 	delay := int64(60)
-	rec, err := svc.Create("session-1", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay})
+	rec, err := svc.Create("session-1", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}, OriginModel)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestTryEmbeddedSkipsWhenLeaseHeld(t *testing.T) {
 	svc := NewService(store, clock)
 
 	delay := int64(60)
-	if _, err := svc.Create("session-busy", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}); err != nil {
+	if _, err := svc.Create("session-busy", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}, OriginModel); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestTryEmbeddedNoopWithoutExecutor(t *testing.T) {
 	svc := NewService(store, clock)
 
 	delay := int64(60)
-	if _, err := svc.Create("session-1", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}); err != nil {
+	if _, err := svc.Create("session-1", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}, OriginModel); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

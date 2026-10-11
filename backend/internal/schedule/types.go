@@ -34,6 +34,17 @@ const (
 	StatusInactive Status = "inactive"
 )
 
+// Origin 是任务的创建来源。
+type Origin string
+
+const (
+	// OriginModel 是模型工具（schedule_create）创建的默认来源。
+	// 持久层缺省/未知值一律回落到它，保证旧数据零迁移语义。
+	OriginModel Origin = "model"
+	// OriginManual 是人工通过 HTTP 管理端创建的来源。
+	OriginManual Origin = "manual"
+)
+
 // ScheduleState 是从记录与墙钟派生的时间态（与 Status 是两个概念）。
 type ScheduleState string
 
@@ -90,9 +101,12 @@ type DeliveryHistory struct {
 
 // Task 是持久任务：记录 + 原会话绑定 + 生命周期 + 回执 + CAS 版本。
 type Task struct {
-	SessionID       string           `json:"sessionId"`
-	Record          Record           `json:"record"`
-	Status          Status           `json:"status"`
+	SessionID string `json:"sessionId"`
+	Record    Record `json:"record"`
+	Status    Status `json:"status"`
+	// Origin 是创建来源（model=模型工具；manual=人工管理端）。
+	// 旧库行缺省为空，scan 时回落 OriginModel。
+	Origin          Origin           `json:"origin,omitempty"`
 	LastDelivery    *DeliveryReceipt `json:"lastDelivery,omitempty"`
 	DeliveryHistory *DeliveryHistory `json:"deliveryHistory,omitempty"`
 	StateVersion    int64            `json:"stateVersion"`
