@@ -10,6 +10,7 @@ import { enWorkspacePanelsInteractions } from "./panels-interactions";
 import { enWorkspacePanelsJobs } from "./panels-jobs";
 import { enWorkspacePanelsMessages } from "./panels-messages";
 import { enWorkspacePanelsPreview } from "./panels-preview";
+import { enWorkspacePanelsSchedule } from "./panels-schedule";
 import { enWorkspacePanelsSessionDetail } from "./panels-session-detail";
 import { enWorkspacePanelsSessionMcp } from "./panels-session-mcp";
 import { enWorkspaceSessionSearch } from "./panels-session-search";
@@ -30,6 +31,7 @@ export const enWorkspace = {
     jobs: enWorkspacePanelsJobs,
     messages: enWorkspacePanelsMessages,
     preview: enWorkspacePanelsPreview,
+    schedule: enWorkspacePanelsSchedule,
     sessionDetail: enWorkspacePanelsSessionDetail,
     sessionMcp: enWorkspacePanelsSessionMcp,
     sessionSearch: enWorkspaceSessionSearch,

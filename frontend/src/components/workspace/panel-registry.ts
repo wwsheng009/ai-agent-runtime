@@ -9,6 +9,7 @@
 
 import { lazy, type ComponentType, type LazyExoticComponent, type ReactNode } from "react";
 import {
+  CalendarClockIcon,
   FileCode2Icon,
   FileTextIcon,
   FolderTreeIcon,
@@ -31,6 +32,7 @@ export type WorkspacePanelSurfaceId =
   | "plans"
   | "files"
   | "git"
+  | "schedule"
   | "sessionDetail"
   | "sessionMcp";
 
@@ -153,6 +155,21 @@ export const WORKSPACE_PANEL_SURFACES: readonly WorkspacePanelSurfaceSpec[] = [
     surface: lazySurface(() =>
       import("@/components/workspace/git-surface").then((module) => ({
         default: module.GitSurface,
+      })),
+    ),
+  },
+  {
+    // 自动化任务（Schedule）：跨会话提醒目录 + 行内编辑/删除（P3）。
+    // 全局目录（不依赖当前会话），复用 artifact tone（无专属配色）。
+    id: "schedule",
+    labelKey: "panels.shell.panelTabs.schedule",
+    icon: CalendarClockIcon,
+    tone: "artifact",
+    requiresSession: false,
+    widthClass: "content",
+    surface: lazySurface(() =>
+      import("@/components/workspace/schedule-panel").then((module) => ({
+        default: module.SchedulePanel,
       })),
     ),
   },

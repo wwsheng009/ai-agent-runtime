@@ -5,6 +5,7 @@ export const zhWorkspacePanelsShell = {
   panelTabs: {
     files: "文件",
     git: "Git 变更",
+    schedule: "自动化任务",
     disabledNoSession: "该页签需要先选择一个会话",
   },
   rightRail: {

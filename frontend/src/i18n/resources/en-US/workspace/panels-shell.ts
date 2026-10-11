@@ -6,6 +6,7 @@ export const enWorkspacePanelsShell = {
   panelTabs: {
     files: "Files",
     git: "Git changes",
+    schedule: "Automation tasks",
     disabledNoSession: "Select a session to use this tab",
   },
   rightRail: {

@@ -11,6 +11,7 @@ import { zhWorkspacePanelsInteractions } from "./panels-interactions";
 import { zhWorkspacePanelsJobs } from "./panels-jobs";
 import { zhWorkspacePanelsMessages } from "./panels-messages";
 import { zhWorkspacePanelsPreview } from "./panels-preview";
+import { zhWorkspacePanelsSchedule } from "./panels-schedule";
 import { zhWorkspacePanelsSessionDetail } from "./panels-session-detail";
 import { zhWorkspacePanelsSessionMcp } from "./panels-session-mcp";
 import { zhWorkspaceSessionSearch } from "./panels-session-search";
@@ -31,6 +32,7 @@ export const zhWorkspace = {
     jobs: zhWorkspacePanelsJobs,
     messages: zhWorkspacePanelsMessages,
     preview: zhWorkspacePanelsPreview,
+    schedule: zhWorkspacePanelsSchedule,
     sessionDetail: zhWorkspacePanelsSessionDetail,
     sessionMcp: zhWorkspacePanelsSessionMcp,
     sessionSearch: zhWorkspaceSessionSearch,

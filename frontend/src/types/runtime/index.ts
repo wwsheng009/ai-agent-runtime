@@ -12,6 +12,7 @@ export * from "./routing-analytics";
 export * from "./session-routing";
 export * from "./teams";
 export * from "./jobs";
+export * from "./schedule";
 export * from "./usage";
 export * from "./files";
 export * from "./uploads";
