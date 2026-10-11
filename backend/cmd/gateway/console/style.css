@@ -1,6 +1,7 @@
 :root {
-  color-scheme: light dark;
-  /* Design tokens */
+  /* Design tokens — dark theme is the default; light overrides below.
+     data-theme="light|dark" on <html> pins a theme; without it we follow the OS. */
+  color-scheme: dark;
   --bg: #0b0e14;
   --bg-elev: #11151f;
   --panel: #151a26;
@@ -24,8 +25,32 @@
   --sidebar-w: 216px;
 }
 
+/* Light theme tokens (also applied when the OS prefers light and no pin). */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6fa;
+  --bg-elev: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f2f5fa;
+  --border: #e2e7ef;
+  --border-strong: #cbd4e1;
+  --fg: #1b2230;
+  --fg-muted: #5b6880;
+  --fg-faint: #8b97ab;
+  --accent: #2f6bf0;
+  --accent-soft: rgba(47, 107, 240, 0.1);
+  --ok: #1f9d6c;
+  --ok-soft: rgba(31, 157, 108, 0.12);
+  --warn: #b97f14;
+  --warn-soft: rgba(185, 127, 20, 0.13);
+  --danger: #d64540;
+  --danger-soft: rgba(214, 69, 64, 0.1);
+  --shadow: 0 6px 24px rgba(24, 39, 75, 0.08);
+}
+
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme]) {
+    color-scheme: light;
     --bg: #f4f6fa;
     --bg-elev: #ffffff;
     --panel: #ffffff;
@@ -363,6 +388,10 @@ form { display: flex; gap: 8px; margin-top: 10px; }
   display: flex; align-items: flex-start; justify-content: center;
   padding: 12vh 16px 16px;
 }
+
+/* The hidden attribute must always win over component display rules. */
+[hidden] { display: none !important; }
+
 .modal {
   background: var(--panel);
   border: 1px solid var(--border-strong);
@@ -401,11 +430,21 @@ form { display: flex; gap: 8px; margin-top: 10px; }
 .token {
   font-family: ui-monospace, monospace; font-size: 12.5px;
   word-break: break-all; color: var(--fg-muted);
-  margin: 10px 0 0; padding: 10px;
+  margin: 10px 0 0; padding: 12px;
   background: var(--bg-elev);
   border-radius: var(--radius-sm);
   border: 1px dashed var(--border-strong);
 }
+
+.token strong {
+  display: block;
+  margin: 8px 0;
+  font-size: 13px;
+  color: var(--fg);
+  user-select: all;
+}
+
+.token .btn { margin-top: 4px; }
 
 .toast {
   position: fixed;

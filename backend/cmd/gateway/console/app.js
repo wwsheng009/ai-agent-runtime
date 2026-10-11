@@ -586,6 +586,40 @@
     });
   }
 
+  /* ─────────────────────── theme ─────────────────────────────── */
+
+  // Three-state cycle: follow-system → light → dark → follow-system.
+  // Persisted in localStorage; rendered pre-paint by the inline head script.
+  function applyTheme(theme) {
+    if (theme === "light" || theme === "dark") {
+      document.documentElement.setAttribute("data-theme", theme);
+    } else {
+      document.documentElement.removeAttribute("data-theme");
+    }
+    var btn = el("theme-toggle");
+    if (btn) {
+      var label = theme === "light" ? "☀ 亮色" : theme === "dark" ? "🌙 暗色" : "🌗 跟随系统";
+      btn.textContent = label;
+      btn.title = "当前：" + label.replace(/^\S+\s/, "") + "（点击切换）";
+    }
+  }
+
+  function cycleTheme() {
+    var cur = document.documentElement.getAttribute("data-theme");
+    var next;
+    if (!cur) { next = "light"; }        // system → light
+    else if (cur === "light") { next = "dark"; }
+    else { next = null; }                // dark → system
+    try {
+      if (next) { localStorage.setItem("aicli-gw-theme", next); }
+      else { localStorage.removeItem("aicli-gw-theme"); }
+    } catch (e) { /* storage unavailable */ }
+    applyTheme(next);
+  }
+
+  el("theme-toggle").addEventListener("click", cycleTheme);
+  applyTheme(document.documentElement.getAttribute("data-theme"));
+
   /* ─────────────────────── wiring ────────────────────────────── */
 
   el("login-form").addEventListener("submit", function (e) {
@@ -615,6 +649,9 @@
   el("logout-top").addEventListener("click", doLogout);
 
   el("refresh").addEventListener("click", function () { loadNodes(); loadDevices(); });
+  // Keep the standalone nodes-panel refresh working too (same data source).
+  var refreshNodes = el("refresh-nodes");
+  if (refreshNodes) { refreshNodes.addEventListener("click", function () { loadNodes(); }); }
 
   el("push-toggle").addEventListener("click", function () {
     var enabling = el("push-toggle").textContent.indexOf("开启") !== -1;
@@ -675,7 +712,32 @@
       el("device-name").value = "";
       var tokenEl = el("device-token");
       if (r.body && r.body.token) {
-        tokenEl.textContent = "令牌（仅显示一次，立即复制保存）：" + r.body.token;
+        tokenEl.innerHTML = "";
+        var strong = document.createElement("strong");
+        strong.textContent = r.body.token;
+        var copy = document.createElement("button");
+        copy.className = "btn ghost sm";
+        copy.type = "button";
+        copy.textContent = "复制";
+        copy.addEventListener("click", function () {
+          var done = function () { copy.textContent = "已复制 ✓"; };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(r.body.token).then(done, done);
+          } else {
+            var ta = document.createElement("textarea");
+            ta.value = r.body.token;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand("copy"); } catch (err) { /* legacy */ }
+            ta.remove();
+            done();
+          }
+        });
+        var hint = document.createElement("div");
+        hint.textContent = "令牌仅显示一次，请立即复制保存：";
+        tokenEl.appendChild(hint);
+        tokenEl.appendChild(strong);
+        tokenEl.appendChild(copy);
         tokenEl.hidden = false;
       }
       loadDevices();

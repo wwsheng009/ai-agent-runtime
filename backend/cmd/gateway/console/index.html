@@ -8,6 +8,17 @@
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="stylesheet" href="./style.css">
+<script>
+/* Theme pre-paint: apply the persisted choice before first render (no flash). */
+(function () {
+  try {
+    var t = localStorage.getItem("aicli-gw-theme");
+    if (t === "light" || t === "dark") {
+      document.documentElement.setAttribute("data-theme", t);
+    }
+  } catch (e) { /* storage unavailable: follow the OS */ }
+})();
+</script>
 </head>
 <body>
 
@@ -54,6 +65,7 @@
       <h2 class="view-title" id="view-title">仪表盘</h2>
       <div class="topbar-actions">
         <span class="conn-chip" id="conn-chip"><span class="dot live"></span>已连接</span>
+        <button id="theme-toggle" type="button" class="btn ghost sm" title="切换主题（跟随系统 → 亮 → 暗）">🌗</button>
         <button id="refresh" type="button" class="btn ghost sm">⟳ 刷新</button>
         <button id="logout-top" type="button" class="btn ghost sm" hidden>退出</button>
       </div>
