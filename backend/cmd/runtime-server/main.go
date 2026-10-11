@@ -27,6 +27,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filebrowse"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
+	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gitbrowse"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -434,6 +435,8 @@ func runServe(args []string) int {
 	defer app.close()
 
 	addr := resolveListenAddr(cfg, opts.ListenAddr)
+	// 网关接入：监听地址确定后，把本机回环地址告诉 agent（反向代理目标）。
+	app.setGatewayForward(addr)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		fields := []zapcore.Field{logger.Err(err), logger.String("listen", addr)}
@@ -1002,6 +1005,9 @@ type runtimeServerApp struct {
 	// knowledge 是本进程持有的知识层接入句柄（Phase 1 交付 6）。
 	// mode=off 时为 nil；close() 里释放并等待后台首次索引退出。
 	knowledge *knowledge.Activation
+	// gatewayController 是外网会话网关的连接控制面（docs/gateway/12-connection-control.md）。
+	// 未配置时为 nil；runServe 在监听地址确定后调用 setGatewayForward。
+	gatewayController *gatewayagent.Controller
 }
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
@@ -1344,21 +1350,22 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 
 	// 网关接入：按环境变量构造连接控制面并注入 handler（未配置则保持 nil，
 	// 控制 API 返回 503）。自动连接为 best-effort，不影响启动。
-	startRuntimeServerGateway(handler)
+	gatewayController := startRuntimeServerGateway(handler)
 
 	return &runtimeServerApp{
-		router:          router,
-		handler:         handler,
-		cfg:             cfg,
-		skillsCfg:       skillsCfg,
-		runtimeManager:  runtimeManager,
-		bootstrap:       bootstrapManager,
-		mcpManager:      manager,
-		toolAdapter:     toolAdapterCloser,
-		ledgerStore:     ledgerStore,
-		supervision:     supervisionPlane,
-		subagentBatches: subagentBatches,
-		knowledge:       knowledgeActivation,
+		router:            router,
+		handler:           handler,
+		cfg:               cfg,
+		skillsCfg:         skillsCfg,
+		runtimeManager:    runtimeManager,
+		bootstrap:         bootstrapManager,
+		mcpManager:        manager,
+		toolAdapter:       toolAdapterCloser,
+		ledgerStore:       ledgerStore,
+		supervision:       supervisionPlane,
+		subagentBatches:   subagentBatches,
+		knowledge:         knowledgeActivation,
+		gatewayController: gatewayController,
 	}, nil
 }
 

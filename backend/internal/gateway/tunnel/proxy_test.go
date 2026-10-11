@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
 // startProxy exposes the tunnel's ServeProxy for a fixed node id so the test can
@@ -101,5 +102,44 @@ func TestProxyNodeOffline(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+}
+
+func testRegisterFunc(nodeID string) func() wire.Register {
+	return func() wire.Register {
+		return wire.Register{NodeID: nodeID, Kind: "aicli", DeviceName: "laptop"}
+	}
+}
+
+// TestProxyThroughControllerForward validates that the controller's
+// ForwardProvider wiring (SetForward before dial) reaches the local service.
+func TestProxyThroughControllerForward(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "via controller")
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	tunnelHTTP := httptest.NewServer(http.HandlerFunc(server.ServeHTTP))
+	t.Cleanup(tunnelHTTP.Close)
+
+	controller := agent.NewController(agent.Config{Enabled: true, URL: tunnelHTTP.URL, Token: "agw_x"}, testRegisterFunc("node-ctl"))
+	controller.SetForward(agent.ForwardConfig{LocalBaseURL: upstream.URL})
+	if err := controller.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = controller.Disconnect(context.Background()) })
+	waitFor(t, func() bool { _, ok := server.Registry().Get("node-ctl"); return ok })
+
+	proxy := startProxy(t, server, "node-ctl")
+	resp, err := http.Get(proxy.URL + "/x")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "via controller" {
+		t.Fatalf("body = %q, want via controller", body)
 	}
 }

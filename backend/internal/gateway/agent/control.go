@@ -91,6 +91,9 @@ type Controller struct {
 	state  State
 	conn   Conn
 	status Status
+
+	forwardMu sync.RWMutex
+	forward   ForwardConfig
 }
 
 // New creates a Controller. The initial state is StateDisabled when the config

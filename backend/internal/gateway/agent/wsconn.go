@@ -42,6 +42,9 @@ type WSConnector struct {
 	Logf func(format string, args ...any)
 	// Forward configures reverse-proxy forwarding to the local service.
 	Forward ForwardConfig
+	// ForwardProvider, when set, overrides Forward at dial time. Hosts use it to
+	// supply the local base URL once their loopback server is listening.
+	ForwardProvider func() ForwardConfig
 }
 
 // Dial establishes the tunnel: connect, HELLO/WELCOME, REGISTER/REGISTER_ACK,
@@ -74,6 +77,10 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 		return nil, classifyHandshakeError(err, resp)
 	}
 
+	forward := c.Forward
+	if c.ForwardProvider != nil {
+		forward = c.ForwardProvider()
+	}
 	conn := &wsConn{
 		ws:                ws,
 		nodeID:            "",
@@ -81,7 +88,7 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 		heartbeatInterval: c.heartbeatInterval(),
 		register:          c.Register,
 		logf:              c.Logf,
-		forward:           c.Forward,
+		forward:           forward,
 		done:              make(chan struct{}),
 	}
 

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
@@ -50,5 +52,29 @@ func runtimeServerGatewayRegister(cfg gatewayagent.Config) gatewayagent.Register
 			Capabilities: []string{"manifest", "runtime-api", "sessions"},
 			Routes:       []string{"/api/runtime", "/api/agent", "/healthz", "/"},
 		}
+	}
+}
+
+// setGatewayForward points the gateway agent at this server's loopback address
+// once it is listening, so reverse-proxied requests reach the local API/SPA.
+// Called from runServe after the listen address is resolved.
+func (a *runtimeServerApp) setGatewayForward(addr string) {
+	if a == nil || a.gatewayController == nil {
+		return
+	}
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+	a.gatewayController.SetForward(gatewayagent.ForwardConfig{
+		LocalBaseURL: "http://" + net.JoinHostPort(host, port),
+	})
+	// Apply immediately to a live connection (the auto-connect may have run
+	// before the address was known).
+	if a.gatewayController.Status().Connected() {
+		go func() { _ = a.gatewayController.Reconnect(context.Background()) }()
 	}
 }

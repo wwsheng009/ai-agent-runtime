@@ -34,3 +34,15 @@ func TestNewControllerNilRegisterFailsClosed(t *testing.T) {
 		t.Fatalf("state = %s, want error", c.Status().State)
 	}
 }
+
+func TestSetForwardAndForwardConfig(t *testing.T) {
+	c := NewController(Config{Enabled: true, URL: "wss://gw", Token: "agw_x"}, nil)
+	if got := c.ForwardConfig(); got.LocalBaseURL != "" {
+		t.Fatalf("expected empty forward, got %+v", got)
+	}
+	c.SetForward(ForwardConfig{LocalBaseURL: "http://127.0.0.1:1234", LocalToken: "tok"})
+	got := c.ForwardConfig()
+	if got.LocalBaseURL != "http://127.0.0.1:1234" || got.LocalToken != "tok" {
+		t.Fatalf("forward not set: %+v", got)
+	}
+}
