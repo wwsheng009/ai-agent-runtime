@@ -214,6 +214,8 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 指标 | `/metrics` | `aicli_gateway_push_subscriptions`；`/api/metrics` 亦含 `push_subscriptions` |
 | 控制台 PWA | `cmd/gateway/console/{sw.js,app.js,index.html}` | 服务进程 `push`/`notificationclick` 事件；`开启通知/关闭通知` 切换按钮，订阅后 POST 到网关 |
 | 配置 | `cmd/gateway` | `--push-enabled`（默认 true）、`--vapid-subject` |
+| agent（aicli）上报 | `cmd/aicli/commands/chat_gateway_attention.go`、`chat_mesh.go`、`chat_gateway_host.go` | turn 边界（`beginChatMeshTurn`）驱动 `attention`：开始时清空 + busy，结束时 `completed`/`error`（按 turn 最终 err）；随 `SESSION_UPDATE` 上报 |
+| agent（runtime-server）上报 | `internal/api/runtimeapi/gateway_attention.go`、`gateway_handlers.go` | 订阅运行时事件总线：`agent.turn.started/finished`、`approval_requested/resolved`、`question_asked/answered`、`session_end/interrupted` → `attention`/`busy`；`EnableGatewayAttention()` 在启动装配时调用 |
 
 **通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时广播一次 Web Push。因此：
 
@@ -225,7 +227,6 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 项 | 说明 |
 |----|------|
 | `NOTIFY` 帧（§4.1） | 尚未新增帧；当前依赖 `SESSION_UPDATE` 的 `attention` 字段（已足以驱动网关推送） |
-| agent 侧事件订阅 | `aicli`/`runtime-server` 尚未把本地事件总线（`agent.turn.finished` 等）映射为 `attention` 上报；需补 `chat_gateway_host.go` / `gateway_handlers.go` 的订阅 |
 | presence 抑制（§5.4） | 控制台未上报"正在查看某会话"，因此无法抑制已读会话的推送 |
 | 时间窗合并（§5.5） | 连续 `completed` 未合并为"N 个会话已完成" |
 | 免打扰/静音（§5.6） | 未实现 |

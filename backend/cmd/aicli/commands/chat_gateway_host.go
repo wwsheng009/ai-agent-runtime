@@ -40,10 +40,17 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	if id == "" {
 		return nil
 	}
+	st := gatewaySessionStateFor(id)
+	state := "idle"
+	if st.Busy {
+		state = "running"
+	}
 	return []wire.SessionSummary{{
 		SessionID: id,
 		Title:     chatMeshSessionTitle(session),
-		State:     "idle",
+		State:     state,
+		Attention: st.Attention,
+		Busy:      st.Busy,
 	}}
 }
 

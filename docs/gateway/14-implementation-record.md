@@ -26,6 +26,7 @@
 | base-path | aicli 微前端 + runtime-server SPA | `web_page.go`、`internal/webui/handler.go`、`frontend/vite.config.ts` |
 | 移动端 | 低带宽模式（微前端）+ 控制台 PWA | `web/js/ui.js`、`cmd/gateway/console/` |
 | 移动端 | 控制台 Web Push 订阅 + Service Worker 通知 | `cmd/gateway/console/{app.js,sw.js}` |
+| 宿主 | 会话注意力上报（turn 边界 + 事件总线） | `cmd/aicli/commands/chat_gateway_attention.go`、`internal/api/runtimeapi/gateway_attention.go` |
 
 ---
 
@@ -158,7 +159,6 @@ cd frontend && npx tsc -b && npm run lint:i18n
 
 | 项 | 说明 |
 |----|------|
-| Web Push 的 agent 侧上报 | 网关推送链路已通；`aicli`/`runtime-server` 尚未把本地事件总线映射为 `attention` 上报 |
 | Web Push 的 presence 抑制/合并/静音 | 控制台未上报"正在查看"，无时间窗合并与免打扰 |
 | 注册表持久化 | 节点表为内存；重连即恢复（影响小） |
 | 多实例 HA | 隧道态单实例；注册表未外置 |
@@ -181,4 +181,9 @@ cd frontend && npx tsc -b && npm run lint:i18n
 > 2026-10-11 再补记：**Web Push**（`internal/gateway/push`：VAPID/ES256 + RFC 8291 aes128gcm + 订阅存储 +
 > 投递 + `ErrGone` 自动清理）、网关侧注意力侦测与推送触发（`cmd/gateway/push.go`）、控制台推送 API
 > 与 Service Worker 通知/点击跳转、`--push-enabled` / `--vapid-subject` 配置均已实现并有单测。
-> 剩余待办集中在 agent 侧事件上报与控制台展示/抑制，见 [08-notifications.md](./08-notifications.md) §10。
+>
+> 2026-10-11 三补记：**agent 侧注意力上报**已落地——aicli 在 turn 边界（`beginChatMeshTurn`）上报
+> `completed`/`error`/`busy`；runtime-server 订阅运行时事件总线（`agent.turn.*`、`approval_*`、
+> `question_*`、`session_end/interrupted`）映射为 `attention`。**推送链路已端到端打通**：
+> agent 上报 → 网关注册表 → `pushNotifier` 去重触发 → VAPID 加密投递 → Service Worker 展示。
+> 剩余待办集中在控制台展示与 presence 抑制，见 [08-notifications.md](./08-notifications.md) §10.2。

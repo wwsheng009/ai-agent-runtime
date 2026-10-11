@@ -502,7 +502,7 @@ func (e *aicliRuntimeServerChatExecutor) RuntimeServerURL() string {
 	return strings.TrimRight(strings.TrimSpace(e.serverURL), "/")
 }
 
-func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (execOut string, execErr error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
@@ -513,8 +513,9 @@ func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *C
 		ctx = context.Background()
 	}
 	// mesh：一个 turn 的边界（S2）——翻转节点档案的 session.busy。
+	// gateway：同一处边界驱动 attention（completed/error）。
 	releaseMeshTurn := beginChatMeshTurn(session)
-	defer releaseMeshTurn()
+	defer func() { releaseMeshTurn(execErr) }()
 	if len(session.ImagePaths) > 0 {
 		return "", fmt.Errorf("aicli runtime-server 模式暂不支持本地图片附件，请改用本地模式或移除 --image")
 	}
@@ -529,7 +530,7 @@ func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *C
 	return output, nil
 }
 
-func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
+func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (execOut string, execErr error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
@@ -540,8 +541,9 @@ func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, sessi
 		ctx = context.Background()
 	}
 	// mesh：goal 续写同样是一个 turn（S2）。
+	// gateway：同一处边界驱动 attention（completed/error）。
 	releaseMeshTurn := beginChatMeshTurn(session)
-	defer releaseMeshTurn()
+	defer func() { releaseMeshTurn(execErr) }()
 	output, result, err := e.executeRuntimeContinuation(ctx, session)
 	if err != nil {
 		return "", err

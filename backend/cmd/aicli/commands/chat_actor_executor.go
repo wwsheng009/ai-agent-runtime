@@ -200,13 +200,14 @@ func (e *aicliActorChatExecutor) RuntimeDescriptor() aicliRuntimeExecutorDescrip
 	return newAICLIActorRuntimeDescriptor(aicliRuntimeTransportInProcess)
 }
 
-func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSession, prompt string) (execOut string, execErr error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
 	// mesh：一个 turn 的边界（S2）——翻转节点档案的 session.busy。
+	// gateway：同一处边界驱动 attention（completed/error）。
 	releaseMeshTurn := beginChatMeshTurn(session)
-	defer releaseMeshTurn()
+	defer func() { releaseMeshTurn(execErr) }()
 	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
 		return "", fmt.Errorf("local runtime host is not configured")
 	}
@@ -360,13 +361,14 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	return response, nil
 }
 
-func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
+func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (execOut string, execErr error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
 	// mesh：goal 续写同样是一个 turn（S2）。
+	// gateway：同一处边界驱动 attention（completed/error）。
 	releaseMeshTurn := beginChatMeshTurn(session)
-	defer releaseMeshTurn()
+	defer func() { releaseMeshTurn(execErr) }()
 	if session.RuntimeSession == nil {
 		return "", fmt.Errorf("runtime session is not configured")
 	}

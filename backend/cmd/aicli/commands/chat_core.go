@@ -160,13 +160,14 @@ func (e *aicliSharedChatExecutor) ContinueGoal(ctx context.Context, session *Cha
 	return e.execute(ctx, session, "", sharedChatExecuteOptions{ContinuationPrompt: goalAutoContinuationPrompt})
 }
 
-func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSession, prompt string, opts sharedChatExecuteOptions) (string, error) {
+func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSession, prompt string, opts sharedChatExecuteOptions) (execOut string, execErr error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
 	// mesh：一个 turn 的边界（S2）——翻转节点档案的 session.busy。
+	// gateway：同一处边界驱动 attention（completed/error），供网关派生 Web Push。
 	releaseMeshTurn := beginChatMeshTurn(session)
-	defer releaseMeshTurn()
+	defer func() { releaseMeshTurn(execErr) }()
 	if ctx == nil {
 		ctx = context.Background()
 	}

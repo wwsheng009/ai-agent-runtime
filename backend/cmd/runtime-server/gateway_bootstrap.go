@@ -30,6 +30,9 @@ func startRuntimeServerGateway(handler *runtimeapi.Handler, cfg *config.Config) 
 	}
 	controller := gatewayagent.NewController(agentCfg, runtimeServerGatewayRegister(agentCfg, handler.GatewaySessions))
 	handler.SetGatewayController(controller)
+	// Derive per-session attention from the runtime event bus so the gateway can
+	// push notifications (docs/gateway/08-notifications.md §3).
+	handler.EnableGatewayAttention()
 	if agentCfg.AutoConnect {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), runtimeServerGatewayConnectTimeout)

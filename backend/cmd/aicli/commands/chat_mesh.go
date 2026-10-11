@@ -140,24 +140,24 @@ func chatMeshSessionTitle(session *ChatSession) string {
 // function. Callers use it as:
 //
 //	releaseMeshTurn := beginChatMeshTurn(session)
-//	defer releaseMeshTurn()
+//	defer func() { releaseMeshTurn(err) }()   // err = the turn's final error
 //
-// The returned function is idempotent and safe on the no-mesh path.
-func beginChatMeshTurn(session *ChatSession) func() {
-	if mesh.Current() == nil {
-		return func() {}
-	}
-	turnID := meshTurnIDForSession(session)
-	meshTurnMu.Lock()
-	meshTurnDepth++
-	if meshTurnDepth == 1 {
-		mesh.SetCurrentBusy(true, turnID)
-	}
-	meshTurnMu.Unlock()
+// It also drives the gateway attention state (docs/gateway/08-notifications.md):
+// a turn start clears attention, and the release records completed/error. The
+// returned function is idempotent and safe on the no-mesh path.
+func beginChatMeshTurn(session *ChatSession) func(err error) {
+	finishGateway := beginChatGatewayTurn(session)
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
+	var releaseMesh func()
+	if mesh.Current() != nil {
+		turnID := meshTurnIDForSession(session)
+		meshTurnMu.Lock()
+		meshTurnDepth++
+		if meshTurnDepth == 1 {
+			mesh.SetCurrentBusy(true, turnID)
+		}
+		meshTurnMu.Unlock()
+		releaseMesh = func() {
 			meshTurnMu.Lock()
 			meshTurnDepth--
 			if meshTurnDepth <= 0 {
@@ -165,6 +165,16 @@ func beginChatMeshTurn(session *ChatSession) func() {
 				mesh.SetCurrentBusy(false, "")
 			}
 			meshTurnMu.Unlock()
+		}
+	}
+
+	var once sync.Once
+	return func(err error) {
+		once.Do(func() {
+			if releaseMesh != nil {
+				releaseMesh()
+			}
+			finishGateway(err)
 		})
 	}
 }

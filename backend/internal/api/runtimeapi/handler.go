@@ -213,7 +213,11 @@ type Handler struct {
 	agentMaxStepsProvider       AgentMaxStepsProvider
 	runtimeConfigLayersProvider RuntimeConfigLayersProvider
 	// gatewayController is the gateway connection control plane (docs/gateway/12-connection-control.md).
-	gatewayController        GatewayController
+	gatewayController GatewayController
+	// gateway attention projection (docs/gateway/08-notifications.md §3).
+	gatewayAttentionOnce     sync.Once
+	gatewayAttentionMu       sync.Mutex
+	gatewayAttention         map[string]gatewaySessionState
 	serviceControlService    RuntimeServiceControlService
 	fileTransferService      FileTransferService
 	logFilePath              string

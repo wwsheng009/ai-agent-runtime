@@ -53,10 +53,17 @@ func (h *Handler) GatewaySessions() []wire.SessionSummary {
 		if session == nil || strings.TrimSpace(session.ID) == "" {
 			continue
 		}
+		st := h.gatewaySessionStateFor(session.ID)
+		state := string(session.State)
+		if st.busy {
+			state = "running"
+		}
 		out = append(out, wire.SessionSummary{
 			SessionID: session.ID,
 			Title:     strings.TrimSpace(session.Metadata.Title),
-			State:     string(session.State),
+			State:     state,
+			Attention: st.attention,
+			Busy:      st.busy,
 		})
 	}
 	return out
