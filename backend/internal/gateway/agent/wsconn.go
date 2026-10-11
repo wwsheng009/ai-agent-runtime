@@ -163,7 +163,10 @@ type wsConn struct {
 	ws        *websocket.Conn
 	writeMu   sync.Mutex
 	closeOnce sync.Once
-	done      chan struct{}
+	// deadOnce guards the death channel; separate from closeOnce so Close can
+	// still send DEREGISTER after a GOAWAY/network path already marked closed.
+	deadOnce sync.Once
+	done     chan struct{}
 
 	nodeID     string
 	consoleURL string
@@ -184,12 +187,27 @@ type wsConn struct {
 func (c *wsConn) NodeID() string     { return c.nodeID }
 func (c *wsConn) ConsoleURL() string { return c.consoleURL }
 
+// Done exposes the connection death channel so the controller's auto-reconnect
+// watcher can detect GOAWAY / network loss (docs/gateway/12-connection-control.md).
+func (c *wsConn) Done() <-chan struct{} { return c.done }
+
+// markClosed closes the death channel exactly once. Every path that ends the
+// connection (operator Close, gateway GOAWAY, network drop in the read loop)
+// must route through it — the controller's auto-reconnect watcher keys off
+// this channel, so a path that skips it leaks a zombie connection that never
+// triggers failover.
+func (c *wsConn) markClosed() {
+	c.deadOnce.Do(func() {
+		close(c.done)
+	})
+}
+
 // Close sends a best-effort DEREGISTER, then closes the socket. It is
 // idempotent.
 func (c *wsConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		close(c.done)
+		c.markClosed()
 		_ = c.writeControl(wire.TypeDeregister, wire.Deregister{Reason: "client shutdown"})
 		err = c.ws.Close()
 	})
@@ -343,6 +361,9 @@ func (c *wsConn) readLoop() {
 	for {
 		frame, err := c.readFrame()
 		if err != nil {
+			// Network drop: the connection is dead regardless of the close
+			// handshake outcome — surface it to the reconnect watcher.
+			c.markClosed()
 			if !errors.Is(err, websocket.ErrCloseSent) {
 				c.logf0("gateway agent: read loop ended: %v", err)
 			}
@@ -360,6 +381,7 @@ func (c *wsConn) readLoop() {
 			// no-op
 		case wire.TypeError, wire.TypeGoAway:
 			c.logf0("gateway agent: gateway signalled %s", frame.Type)
+			c.markClosed()
 			_ = c.ws.Close()
 			return
 		case wire.TypeStreamOpen:

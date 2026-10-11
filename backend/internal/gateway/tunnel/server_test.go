@@ -74,8 +74,12 @@ func TestHandshakeRegistersAndDeregisters(t *testing.T) {
 
 	_ = conn.Close()
 	waitFor(t, func() bool {
-		_, ok := registry.Get("node-local")
-		return !ok
+		// Disconnect downgrades the entry to a stale last-known snapshot
+		// (docs/gateway/08-notifications.md §10.1) rather than deleting it: the
+		// console keeps the node/session view and the persisted snapshot feeds
+		// a restart/failover restore. A reconnect flips it back to live.
+		node, ok := registry.Get("node-local")
+		return ok && node.Stale
 	})
 }
 

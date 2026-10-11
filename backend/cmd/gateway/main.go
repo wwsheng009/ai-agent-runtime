@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,11 +13,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -227,7 +230,15 @@ func run() int {
 	router := mux.NewRouter()
 	router.Handle("/gw/agent", limited(server))
 	router.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "nodes": registry.Count()})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok",
+			// nodes = registry entries (live + stale snapshots); live_nodes = only
+			// connected agents. A load balancer's failover check should treat a
+			// gateway as serving when it can accept /gw/agent upgrades, not based
+			// on node counts (a just-restarted instance legitimately has 0).
+			"nodes":      registry.Count(),
+			"live_nodes": registry.CountLive(),
+		})
 	})
 	// Owner login/logout (unauthenticated; the login route verifies the password).
 	router.HandleFunc("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
@@ -447,10 +458,31 @@ func run() int {
 	}
 	fmt.Fprintf(os.Stdout, "aicli-gateway listening on %s://%s (public=%s)\n", scheme, *listen, strings.TrimSpace(*publicBaseURL))
 
-	if *tlsCert != "" {
-		err = httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)
-	} else {
-		err = httpServer.ListenAndServe()
+	serveErr := make(chan error, 1)
+	go func() {
+		if *tlsCert != "" {
+			serveErr <- httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)
+		} else {
+			serveErr <- httpServer.ListenAndServe()
+		}
+	}()
+	// Graceful shutdown: on SIGINT/SIGTERM (or a server error) stop accepting,
+	// send GOAWAY to every live agent (they fail over to the standby gateway
+	// via their retryable reconnect path), flush the registry snapshot, and
+	// give in-flight proxy requests a short drain window.
+	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	select {
+	case err = <-serveErr:
+	case <-stopCtx.Done():
+		fmt.Fprintln(os.Stderr, "gateway: shutting down (signal received)")
+	}
+	server.CloseAll("gateway shutting down for failover")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpServer.Shutdown(shutdownCtx)
+	if err == nil || err == http.ErrServerClosed {
+		err = nil
 	}
 	if err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "gateway: server exited: %v\n", err)

@@ -109,6 +109,22 @@ func (r *Registry) Count() int {
 	return len(r.nodes)
 }
 
+// CountLive returns the number of nodes with a live connection (non-stale).
+func (r *Registry) CountLive() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	n := 0
+	for _, node := range r.nodes {
+		if !node.Stale {
+			n++
+		}
+	}
+	return n
+}
+
 // Restore seeds the registry from a persisted snapshot (gateway restart). Every
 // restored node is marked Stale: it is last-known state, not a live agent. A
 // reconnect with the same NodeID replaces the entry and clears the flag.

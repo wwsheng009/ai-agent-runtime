@@ -55,6 +55,14 @@ func (e *ConnectError) Error() string {
 	return "gateway/agent: " + e.Message
 }
 
+// doneConn is the optional death-signal capability of a Conn: implementations
+// that expose Done() (the real wsConn) can be watched for self-inflicted
+// termination, enabling the auto-reconnect loop. Minimal fakes omit it.
+type doneConn interface{ Done() <-chan struct{} }
+
+// autoReconnectDelays is the reconnect backoff ladder (capped).
+var autoReconnectDelays = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+
 // asConnectError normalises an arbitrary dial error into a *ConnectError.
 func asConnectError(err error) *ConnectError {
 	if err == nil {
@@ -91,6 +99,11 @@ type Controller struct {
 	state  State
 	conn   Conn
 	status Status
+
+	// reconnectGen invalidates a stale auto-reconnect watcher: any explicit
+	// Disconnect/Connect bumps the generation so only the latest watcher runs.
+	reconnectGen uint64
+	backoffIdx   int
 
 	forwardMu sync.RWMutex
 	forward   ForwardConfig
@@ -241,7 +254,71 @@ func (c *Controller) connect(ctx context.Context, mode string) error {
 	c.status.ErrorCode = ""
 	c.status.Retryable = false
 	c.transition(StateConnected)
+	c.backoffIdx = 0
+	c.armConnectionLostWatcher(conn)
 	return nil
+}
+
+// armConnectionLostWatcher spawns the auto-reconnect loop for a freshly
+// established connection: when the connection dies on its own (gateway GOAWAY,
+// network drop), the controller enters Reconnecting and re-dials with a capped
+// backoff until it reconnects or the operator intervenes. Generation counting
+// ensures only the newest watcher acts; conns without Done() (minimal fakes)
+// are not watched, so hosts/tests keep full manual control.
+func (c *Controller) armConnectionLostWatcher(conn Conn) {
+	dc, ok := conn.(doneConn)
+	if !ok || dc == nil {
+		return
+	}
+	done := dc.Done()
+	if done == nil {
+		return
+	}
+	c.reconnectGen++
+	gen := c.reconnectGen
+	go func() {
+		for {
+			<-done
+
+			c.mu.Lock()
+			if c.reconnectGen != gen || c.conn != conn {
+				c.mu.Unlock()
+				return
+			}
+			// Detach the dead connection before the loss bookkeeping: the guard
+			// above (and HandleConnectionLost's own teardown) key off c.conn.
+			c.conn = nil
+			if c.status.OperatorDisconnected {
+				c.mu.Unlock()
+				return
+			}
+			c.mu.Unlock()
+			c.HandleConnectionLost(ErrCodeNetwork, "connection lost", true)
+
+			for {
+				c.mu.Lock()
+				if c.reconnectGen != gen {
+					c.mu.Unlock()
+					return
+				}
+				delay := autoReconnectDelays[min(c.backoffIdx, len(autoReconnectDelays)-1)]
+				c.backoffIdx++
+				c.mu.Unlock()
+
+				time.Sleep(delay)
+
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				err := c.Connect(ctx)
+				cancel()
+				if err == nil {
+					return // new watcher armed by Connect
+				}
+				if ce, ok := err.(*ConnectError); ok && !ce.Retryable {
+					return
+				}
+			}
+		}
+	}()
 }
 
 // Disconnect closes the tunnel and sets the operator-disconnected flag, which

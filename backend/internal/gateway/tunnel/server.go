@@ -123,6 +123,42 @@ func (s *Server) PersistSnapshot() {
 	s.persist.Close()
 }
 
+// CloseAll drains every live agent connection: each agent receives GOAWAY and
+// closes, its registry entry is marked stale (preserving the last-known
+// sessions/attention for the snapshot the standby restores), and in-flight
+// proxy streams fail with a clean reset. Agents reconnect (their retryable
+// connection-lost path) to the next gateway instance and flip the entry back
+// to live — this is the active/passive failover handoff. Entries are marked
+// rather than removed so a graceful shutdown leaves the same snapshot a crash
+// would; the reason string is advisory metadata for the agent's logs.
+func (s *Server) CloseAll(reason string) {
+	if s == nil {
+		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "gateway shutting down"
+	}
+	s.sessMu.Lock()
+	sessions := make(map[string]*session, len(s.sessions))
+	for id, sess := range s.sessions {
+		sessions[id] = sess
+	}
+	s.sessMu.Unlock()
+	for nodeID, sess := range sessions {
+		_ = sess.writeJSON(wire.TypeGoAway, 0, wire.GoAway{
+			Code:    "shutdown",
+			Message: reason,
+		})
+		_ = sess.ws.Close()
+		sess.closeAll("node_offline", reason)
+		if cur, ok := s.registry.Get(nodeID); ok && !cur.Stale {
+			cur.Stale = true
+			s.registry.Upsert(cur)
+		}
+	}
+	s.notifyRegistryChangedAndPersist()
+}
+
 func (s *Server) logf(format string, args ...any) {
 	if s.cfg.Logf != nil {
 		s.cfg.Logf(format, args...)
@@ -224,15 +260,17 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	s.registry.Upsert(node)
 	s.notifyRegistryChangedAndPersist()
 	defer func() {
-		// Only remove our own registration: identify the entry by the RemoteAddr
-		// observed at handshake, not by heartbeat timestamps. The heartbeat loop
-		// overwrites LastHeartbeat, so time-based comparison would almost never
-		// match and a normal disconnect would leak the entry (never removed).
-		// A reconnecting node with the same NodeID has already replaced the
-		// entry (new RemoteAddr), and removing ours would lose the live
-		// registration (and, with persistence, revert the snapshot to stale).
+		// Only downgrade our own registration: identify the entry by the
+		// RemoteAddr observed at handshake (the heartbeat loop rewrites
+		// LastHeartbeat, so time comparisons are unusable). The entry becomes a
+		// stale last-known snapshot — identical to the crash path — and the
+		// reconnecting agent flips it back to live. Removing outright would
+		// erase the attention state that the snapshot (and, on failover, the
+		// standby's Seed) depends on; skipping the downgrade would leak a live
+		// row when the owner never returns.
 		if cur, ok := s.registry.Get(nodeID); ok && !cur.Stale && cur.RemoteAddr == node.RemoteAddr {
-			s.registry.Remove(nodeID)
+			cur.Stale = true
+			s.registry.Upsert(cur)
 		}
 		s.notifyRegistryChangedAndPersist()
 	}()
