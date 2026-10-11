@@ -585,3 +585,32 @@ step 146: E=171,384, U=262,948（旧实现：HTTP 400）
 - 评估工具复现：`go run ./tools/estimate_eval <事故请求捕获体> 262948` → `ProfileGeneric` 前缀估算 63,833，折算全量 253,030（byte-ratio）/280,610（rune-ratio），provider_ratio 0.962..1.067（±7% 内）。
 - `go build ./cmd/aicli/... ./internal/config/` ✅
 - **`cmd/aicli/commands` 全量回归暂被并发工作流阻塞（非本次改动）**：第二轮实施期间，工作区另一条工作流正在重构事件日志 flush 路径（`flushEventLog` 被删除、`event_persist_buffer` / `chat_actor_executor` / `chat_post_turn_reconcile` 等文件持续在改），期间出现包不可编译与约 20 个 `*EventLog*` / `*Replay*` 用例失败（如 `TestChatRuntimeEventBridge_EphemeralSupplementNotJournaled`：durable supplement 未落日志），失败域与上下文计量无交集；本次全部定向用例（上列）在该工作区状态下仍通过。建议待该工作流收敛后复跑 `go test ./cmd/aicli/commands/`。
+
+## 12. 实机验证记录（2026-10-11，57718 实例）
+
+**验证对象**：`aicli-3x.exe`（构建 11:37:54，二进制含 `context_projection_source` / `aicli_context_token_fingerprint` / `context.usage_over_budget` / `accountingMode` 标记）；会话 `session_20261011113800_l6hXN7tO`；provider `workbuddy/cn:hy3`（本地网关），窗口 192,000，prompt budget 172,800。
+
+### 12.1 回合 1（无锚点退化路径）
+
+- `llm.request.started`：`context_projection_source=estimated`、`context_projection_invalid_reason=no_anchor`、投影 25,408；
+- `llm.request.finished`：`usage_prompt_tokens=24,523`、`usage_source=provider_reported`；
+- 状态栏：`used_tokens=24,559`、`Context 7% used`（provider 口径；同一时刻的布局指标仅 3,933，证明状态栏已不再使用布局口径）；
+- 无 `context.usage_over_budget` 事件（24,523 < 172,800，符合预期）。
+
+### 12.2 回合 2（跨回合锚定路径）
+
+- `llm.request.started`：`context_projection_source=anchored`、`context_anchor_tokens=24,559`、`context_delta_tokens=37`、投影 25,445（= `max(anchor+Δ, E)` 的估算 floor 生效）；
+- 证明链路完整：loop 按次观测 → hooks 持久化（结构化 7 键）→ 下一回合 `LoadContextUsage` → 投影判定锚定。
+
+### 12.3 验证中发现并修复的问题
+
+**CLI→runtime 同步覆写锚点**：回合收尾的 `syncRuntimeSessionFromChatMode` 把显示口径 `ContextTokenCount`（provider total 或估算）写回 `aicli_context_token_count`，覆盖 loop 写入的精确锚点（实测 24,523 → 24,559；provider 不报用量时会以估算值覆盖真实锚点）。
+
+- 修复：`internal/chat.HasRuntimeSessionContextAnchor` + 同步侧存在结构化锚点时跳过写回（legacy 会话保留历史行为）；
+- 回归测试：`TestSyncRuntimeSessionFromChatPreservesLoopContextAnchor`（锚点不被覆写 + legacy 写回不变），隔离工作树验证通过（含既有 7 个 sync/restore 上下文用例）；
+- 提交：`8489834c fix(context): 防止 CLI 同步覆写 loop 上下文锚点（实机验证发现）`。
+
+### 12.4 备注
+
+- 本轮实机验证覆盖"观测 → 锚定 → 投影 → 状态栏"全链路；压缩触发本身由单测/回放测试覆盖（实机触发需要 ~172K 真实上下文，成本不划算）。
+- `cmd/aicli/commands` 全量回归仍受并发工作流的事件日志重构影响（多个测试文件在改、暂不可编译），待其收敛后复跑。
