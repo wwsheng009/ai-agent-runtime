@@ -35,10 +35,43 @@ export const enSettings = {
       label: "Harness",
       description: "Permissions, memory, and local plugins",
     },
+    gateway: {
+      label: "Gateway",
+      description: "External session gateway connection",
+    },
     about: {
       label: "About",
       description: "Runtime summary and local storage",
     },
+  },
+  gateway: {
+    title: "External session gateway",
+    description:
+      "Inspect the connection status, connect / disconnect / reconnect manually, and configure the endpoint and device token.",
+    state: "State",
+    nodeId: "Node ID",
+    consoleUrl: "Console URL",
+    sessions: "Sessions",
+    reconnects: "Reconnects",
+    mode: "Mode",
+    notConfigured: "Gateway is not configured: enter the gateway URL and device token, then save.",
+    connect: "Connect",
+    disconnect: "Disconnect",
+    reconnect: "Reconnect",
+    configTitle: "Connection config",
+    configDescription:
+      "Gateway endpoint and device token. The token is never echoed; leave it blank to keep the stored value.",
+    url: "Gateway URL",
+    urlPlaceholder: "wss://gw.example.com",
+    name: "Node name",
+    namePlaceholder: "e.g. vince-laptop",
+    token: "Device token",
+    tokenPlaceholder: "agw_… (leave blank to keep)",
+    tokenHint: "Configured: {{hint}}",
+    autoConnect: "Connect on startup",
+    autoConnectDescription:
+      "Register with the gateway automatically on startup; a manual disconnect does not change this.",
+    save: "Save config",
   },
   localization: {
     title: "Language and region",

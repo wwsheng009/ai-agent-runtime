@@ -1,6 +1,7 @@
 import {
   BellIcon,
   InfoIcon,
+  NetworkIcon,
   PaletteIcon,
   Settings2Icon,
   ShieldIcon,
@@ -25,6 +26,7 @@ import { useTranslation } from "react-i18next";
 import { AboutSettingsPage } from "./about-settings-page";
 import { AppearanceSettingsPage } from "./appearance-settings-page";
 import { ChatSettingsPage } from "./chat-settings-page";
+import { GatewaySettingsPage } from "./gateway-settings-page";
 import { HarnessSettingsPage } from "./harness-settings-page";
 import { LocalizationSettings } from "./localization-settings";
 import { NotificationSettingsPage } from "./notification-settings-page";
@@ -36,6 +38,7 @@ export type SettingsSectionId =
   | "chat"
   | "notifications"
   | "harness"
+  | "gateway"
   | "about";
 
 type SettingsDialogProps = {
@@ -135,6 +138,12 @@ export function SettingsDialog({
         label: t("sections.harness.label"),
         description: t("sections.harness.description"),
         icon: ShieldIcon,
+      },
+      {
+        id: "gateway",
+        label: t("sections.gateway.label"),
+        description: t("sections.gateway.description"),
+        icon: NetworkIcon,
       },
       {
         id: "about",
@@ -252,6 +261,7 @@ export function SettingsDialog({
             {activeSection === "harness" ? (
               <HarnessSettingsPage runtimeClient={runtimeClient} />
             ) : null}
+            {activeSection === "gateway" ? <GatewaySettingsPage /> : null}
             {activeSection === "about" ? (
               <AboutSettingsPage
                 providerOptions={providerOptions}

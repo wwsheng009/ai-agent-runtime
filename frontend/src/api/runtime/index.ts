@@ -13,6 +13,21 @@ export {
   saveRuntimeConfigDocument,
   writeRuntimeConfigDocument,
 } from "./config";
+export {
+  connectGateway,
+  disconnectGateway,
+  getGatewayConfig,
+  getGatewayStatus,
+  reconnectGateway,
+  updateGatewayConfig,
+} from "./gateway";
+export type {
+  RuntimeGatewayConfig,
+  RuntimeGatewayConfigUpdate,
+  RuntimeGatewaySnapshot,
+  RuntimeGatewayState,
+  RuntimeGatewayStatus,
+} from "./gateway";
 export { sendAgentChat } from "./agent-chat";
 export {
   appendHarnessMemory,
