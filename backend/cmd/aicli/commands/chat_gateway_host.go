@@ -9,17 +9,23 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
+// chatGatewayDefaultRoutes is the reverse-proxy allowlist when the config does
+// not override it.
+var chatGatewayDefaultRoutes = []string{"/web", "/web/api", "/debug/endpoints"}
+
 // chatGatewayRegisterFunc supplies the REGISTER payload for this process. The
-// session list reflects the session bound at dial time (a later step pushes
-// SESSION_UPDATE on switch).
-func chatGatewayRegisterFunc(cfg gatewayagent.Config, session *ChatSession) gatewayagent.RegisterFunc {
+// session list reflects the session bound at dial time.
+func chatGatewayRegisterFunc(cfg gatewayagent.Config, routes []string, session *ChatSession) gatewayagent.RegisterFunc {
 	return func() wire.Register {
+		if len(routes) == 0 {
+			routes = chatGatewayDefaultRoutes
+		}
 		return wire.Register{
 			Kind:         "aicli",
 			Name:         cfg.Name,
 			DeviceName:   cfg.Name,
 			Capabilities: []string{"manifest", "screen", "status", "events", "invoke", "input", "sessions"},
-			Routes:       []string{"/web", "/web/api", "/debug/endpoints"},
+			Routes:       append([]string(nil), routes...),
 			Sessions:     chatGatewaySessions(session),
 		}
 	}
@@ -34,12 +40,11 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	if id == "" {
 		return nil
 	}
-	summary := wire.SessionSummary{
+	return []wire.SessionSummary{{
 		SessionID: id,
 		Title:     chatMeshSessionTitle(session),
 		State:     "idle",
-	}
-	return []wire.SessionSummary{summary}
+	}}
 }
 
 // syncChatGatewaySession pushes the current session list to the gateway. It is
@@ -51,20 +56,56 @@ func syncChatGatewaySession(session *ChatSession) {
 	session.Gateway.UpdateSessions(chatGatewaySessions(session))
 }
 
-// attachChatGateway wires the gateway control plane into the session from
-// environment configuration (AICLI_GATEWAY_URL/TOKEN/NAME/AUTO_CONNECT, see
-// gatewayagent.ConfigFromEnv). It never fails the chat: an unconfigured gateway
-// leaves session.Gateway nil (the /gateway command then explains how to enable
-// it), and a failed auto-connect is left for /gateway status to surface.
+// chatGatewayResolveConfig merges the layered gateway.* config with the
+// AICLI_GATEWAY_* environment overrides (non-empty env wins).
+func chatGatewayResolveConfig(session *ChatSession) gatewayagent.Config {
+	cfg := gatewayagent.Config{AutoConnect: true}
+	if session != nil && session.Config != nil && session.Config.Gateway != nil {
+		gatewayCfg := session.Config.Gateway
+		cfg.URL = strings.TrimSpace(gatewayCfg.URL)
+		cfg.Token = strings.TrimSpace(gatewayCfg.Token)
+		cfg.Name = strings.TrimSpace(gatewayCfg.Name)
+		if gatewayCfg.AutoConnect != nil {
+			cfg.AutoConnect = *gatewayCfg.AutoConnect
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvURL)); v != "" {
+		cfg.URL = v
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvToken)); v != "" {
+		cfg.Token = v
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvName)); v != "" {
+		cfg.Name = v
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvAutoConnect)); v != "" {
+		cfg.AutoConnect = !strings.EqualFold(v, "false") && v != "0"
+	}
+	cfg.Enabled = cfg.URL != "" && cfg.Token != ""
+	return cfg
+}
+
+// chatGatewayRoutes returns the configured reverse-proxy allowlist (nil = default).
+func chatGatewayRoutes(session *ChatSession) []string {
+	if session != nil && session.Config != nil && session.Config.Gateway != nil && len(session.Config.Gateway.Routes) > 0 {
+		return append([]string(nil), session.Config.Gateway.Routes...)
+	}
+	return nil
+}
+
+// attachChatGateway wires the gateway control plane into the session. It never
+// fails the chat: an unconfigured gateway leaves session.Gateway nil (the
+// /gateway command then explains how to enable it), and a failed auto-connect
+// is left for /gateway status to surface.
 func attachChatGateway(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	cfg := gatewayagent.ConfigFromEnv(os.Getenv)
+	cfg := chatGatewayResolveConfig(session)
 	if !cfg.Enabled {
 		return
 	}
-	controller := gatewayagent.NewController(cfg, chatGatewayRegisterFunc(cfg, session))
+	controller := gatewayagent.NewController(cfg, chatGatewayRegisterFunc(cfg, chatGatewayRoutes(session), session))
 	// Point the agent at this process's loopback web server (recorded by
 	// cmd/aicli once it is listening) before the auto-connect dial.
 	controller.SetForward(chatGatewayForwardConfig())

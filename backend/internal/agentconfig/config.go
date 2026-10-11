@@ -40,6 +40,7 @@ type Config struct {
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker" mapstructure:"circuit_breaker"`
 	AICLI          *AICLIConfig          `yaml:"aicli" mapstructure:"aicli"`
 	Profiles       *ProfilesConfig       `yaml:"profiles" mapstructure:"profiles"`
+	Gateway        *GatewayConfig        `yaml:"gateway" mapstructure:"gateway"`
 	SkillsRuntime  *SkillsRuntimeConfig  `yaml:"skills_runtime" mapstructure:"skills_runtime"`
 	Supervision    supervision.Config    `yaml:"supervision" mapstructure:"supervision"`
 	Log            logger.LogConfig      `yaml:"log" mapstructure:"log"`
@@ -53,6 +54,20 @@ type Config struct {
 	// them, which is what write routing (see config_write_route.go) needs.
 	ConfigOriginFiles map[string]string `yaml:"-" mapstructure:"-"`
 	ConfigMergeMode   MergeMode         `yaml:"-" mapstructure:"-"`
+}
+
+// GatewayConfig configures the external session gateway connection
+// (docs/gateway/12-connection-control.md). Environment variables
+// (AICLI_GATEWAY_*) override these values when set.
+type GatewayConfig struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	URL     string `yaml:"url" mapstructure:"url"`
+	Token   string `yaml:"token" mapstructure:"token"`
+	Name    string `yaml:"name" mapstructure:"name"`
+	// AutoConnect is a pointer so "unset" (nil → default true) is distinct from
+	// an explicit false.
+	AutoConnect *bool    `yaml:"auto_connect" mapstructure:"auto_connect"`
+	Routes      []string `yaml:"routes" mapstructure:"routes"`
 }
 
 // ProvidersConfig holds the provider collection configuration.

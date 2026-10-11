@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
@@ -19,17 +20,17 @@ const runtimeServerGatewayConnectTimeout = 20 * time.Second
 // environment configuration (docs/gateway/12-connection-control.md) and injects
 // it into the handler. It never fails startup: an unconfigured gateway leaves
 // the handler without a controller (the control API then returns 503).
-func startRuntimeServerGateway(handler *runtimeapi.Handler) *gatewayagent.Controller {
+func startRuntimeServerGateway(handler *runtimeapi.Handler, cfg *config.Config) *gatewayagent.Controller {
 	if handler == nil {
 		return nil
 	}
-	cfg := gatewayagent.ConfigFromEnv(os.Getenv)
-	if !cfg.Enabled {
+	agentCfg := runtimeServerGatewayResolveConfig(cfg)
+	if !agentCfg.Enabled {
 		return nil
 	}
-	controller := gatewayagent.NewController(cfg, runtimeServerGatewayRegister(cfg, handler.GatewaySessions))
+	controller := gatewayagent.NewController(agentCfg, runtimeServerGatewayRegister(agentCfg, handler.GatewaySessions))
 	handler.SetGatewayController(controller)
-	if cfg.AutoConnect {
+	if agentCfg.AutoConnect {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), runtimeServerGatewayConnectTimeout)
 			defer cancel()
@@ -38,6 +39,35 @@ func startRuntimeServerGateway(handler *runtimeapi.Handler) *gatewayagent.Contro
 		}()
 	}
 	return controller
+}
+
+// runtimeServerGatewayResolveConfig merges the layered gateway.* config with the
+// AICLI_GATEWAY_* environment overrides (non-empty env wins).
+func runtimeServerGatewayResolveConfig(cfg *config.Config) gatewayagent.Config {
+	out := gatewayagent.Config{AutoConnect: true}
+	if cfg != nil && cfg.Gateway != nil {
+		gatewayCfg := cfg.Gateway
+		out.URL = strings.TrimSpace(gatewayCfg.URL)
+		out.Token = strings.TrimSpace(gatewayCfg.Token)
+		out.Name = strings.TrimSpace(gatewayCfg.Name)
+		if gatewayCfg.AutoConnect != nil {
+			out.AutoConnect = *gatewayCfg.AutoConnect
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvURL)); v != "" {
+		out.URL = v
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvToken)); v != "" {
+		out.Token = v
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvName)); v != "" {
+		out.Name = v
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvAutoConnect)); v != "" {
+		out.AutoConnect = !strings.EqualFold(v, "false") && v != "0"
+	}
+	out.Enabled = out.URL != "" && out.Token != ""
+	return out
 }
 
 // runtimeServerGatewayRegister supplies the REGISTER payload for this process.
