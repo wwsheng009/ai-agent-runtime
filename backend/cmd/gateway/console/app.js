@@ -7,6 +7,7 @@
     el("login").hidden = authed;
     el("nodes").hidden = !authed;
     el("devices").hidden = !authed;
+    el("push-toggle").hidden = !authed;
     el("logout").hidden = !authed;
   }
 
@@ -180,8 +181,86 @@
     });
   });
 
+  // --- Web Push notifications (docs/gateway/08-notifications.md) ------------
+  var pushRegistration = null;
+
+  function urlBase64ToUint8Array(base64) {
+    var padding = "=".repeat((4 - (base64.length % 4)) % 4);
+    var normalized = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+    var raw = atob(normalized);
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) { out[i] = raw.charCodeAt(i); }
+    return out;
+  }
+
+  function setPushLabel(text) { el("push-toggle").textContent = text; }
+
+  function pushSupported() {
+    return "serviceWorker" in navigator && "PushManager" in window;
+  }
+
+  function initPush() {
+    if (!pushSupported()) { el("push-toggle").hidden = true; return; }
+    navigator.serviceWorker.ready
+      .then(function (reg) {
+        pushRegistration = reg;
+        return reg.pushManager.getSubscription();
+      })
+      .then(function (sub) { setPushLabel(sub ? "关闭通知" : "开启通知"); })
+      .catch(function () { /* notifications are optional */ });
+  }
+
+  function enablePush() {
+    return apiJSON("/api/push/config").then(function (r) {
+      if (!r.body || !r.body.enabled || !r.body.public_key) { return null; }
+      return navigator.serviceWorker.ready.then(function (reg) {
+        pushRegistration = reg;
+        return reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(r.body.public_key),
+        });
+      });
+    }).then(function (sub) {
+      if (!sub) { return; }
+      var json = sub.toJSON();
+      return apiJSON("/api/push/subscriptions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          endpoint: json.endpoint,
+          keys: json.keys || {},
+          label: (navigator.platform || "") + (navigator.userAgent.indexOf("Mobile") !== -1 ? " mobile" : ""),
+        }),
+      }).then(function () { setPushLabel("关闭通知"); });
+    });
+  }
+
+  function disablePush() {
+    if (!pushRegistration) { return Promise.resolve(); }
+    return pushRegistration.pushManager.getSubscription().then(function (sub) {
+      if (!sub) { return; }
+      var endpoint = sub.endpoint;
+      return sub.unsubscribe().then(function () {
+        return apiJSON("/api/push/unsubscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: endpoint }),
+        });
+      }).then(function () { setPushLabel("开启通知"); });
+    });
+  }
+
+  el("push-toggle").addEventListener("click", function () {
+    var enabling = el("push-toggle").textContent !== "关闭通知";
+    Promise.resolve(enabling ? enablePush() : disablePush()).catch(function () {
+      el("login-error").textContent = "通知操作失败（请检查浏览器权限）";
+      el("login-error").hidden = false;
+    });
+  });
+
   loadNodes();
   loadDevices();
+  initPush();
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {

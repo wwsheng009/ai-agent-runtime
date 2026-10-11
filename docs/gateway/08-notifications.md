@@ -196,3 +196,40 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 - [ ] 未配置网关时，本地通知（终端标题/声音）与 hooks 行为**逐字不变**。
 - [ ] 点会话卡片可在控制台 iframe 内打开本机 aicli 微前端 / runtime-server SPA 并正常交互。
 - [ ] 通知与预览均**不含正文**（除非显式开启 `report_preview`，且通知仍不含正文）。
+
+---
+
+## 10. 实现状态（2026-10-11）
+
+### 10.1 已实现
+
+| 项 | 位置 | 说明 |
+|----|------|------|
+| VAPID 密钥 | `internal/gateway/push/vapid.go` | P-256 密钥生成/持久化（`data/vapid.key`，0600）；`SignVAPIDJWT`（ES256） |
+| 载荷加密 | `internal/gateway/push/encrypt.go` | RFC 8291（`aes128gcm`）+ RFC 8188 记录；HKDF-SHA256 派生 CEK/NONCE |
+| 订阅存储 | `internal/gateway/push/store.go` | `data/push.json`（0600），按 endpoint upsert/去重 |
+| 投递 | `internal/gateway/push/sender.go` | `Sender.Send` / `Manager.Broadcast`；404/410 视为 `ErrGone` 并自动清理 |
+| 注意力侦测 | `cmd/gateway/push.go`（`pushNotifier`） | 对比注册表 `attention` 快照，**新增/变化**时推送；状态清除后再触发可再次通知（天然去重） |
+| 控制台 API | `cmd/gateway/main.go` | `GET /api/push/config`、`GET|POST /api/push/subscriptions`、`POST /api/push/unsubscribe`、`POST /api/push/test`（均 owner 保护） |
+| 指标 | `/metrics` | `aicli_gateway_push_subscriptions`；`/api/metrics` 亦含 `push_subscriptions` |
+| 控制台 PWA | `cmd/gateway/console/{sw.js,app.js,index.html}` | 服务进程 `push`/`notificationclick` 事件；`开启通知/关闭通知` 切换按钮，订阅后 POST 到网关 |
+| 配置 | `cmd/gateway` | `--push-enabled`（默认 true）、`--vapid-subject` |
+
+**通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时广播一次 Web Push。因此：
+
+- 同一注意力状态**重复上报不会重复推送**（等价 `dedup_key` 的粗粒度实现）；
+- 状态被清除（`attention` 变空）后再进入注意力，会**再次**通知。
+
+### 10.2 待办（与 §3/§5/§9 的差距）
+
+| 项 | 说明 |
+|----|------|
+| `NOTIFY` 帧（§4.1） | 尚未新增帧；当前依赖 `SESSION_UPDATE` 的 `attention` 字段（已足以驱动网关推送） |
+| agent 侧事件订阅 | `aicli`/`runtime-server` 尚未把本地事件总线（`agent.turn.finished` 等）映射为 `attention` 上报；需补 `chat_gateway_host.go` / `gateway_handlers.go` 的订阅 |
+| presence 抑制（§5.4） | 控制台未上报"正在查看某会话"，因此无法抑制已读会话的推送 |
+| 时间窗合并（§5.5） | 连续 `completed` 未合并为"N 个会话已完成" |
+| 免打扰/静音（§5.6） | 未实现 |
+| 控制台收件箱/徽标/toast（§5.2） | 控制台已能收 SSE，但未渲染 `attention` 徽标与收件箱 |
+
+> 说明：网关侧推送链路（VAPID + 加密 + 订阅 + 触发 + SW 展示）已端到端打通并有单测；
+> 剩余待办集中在 **agent 侧上报** 与 **控制台展示/抑制** 两侧，不阻塞推送基础设施。

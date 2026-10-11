@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/audit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/device"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ratelimit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 )
@@ -92,6 +93,8 @@ func run() int {
 		banWindow      = flag.Duration("ban-window", time.Minute, "penalty window")
 		banTTL         = flag.Duration("ban-ttl", 10*time.Minute, "auto-ban duration")
 		metricsToken   = flag.String("metrics-token", "", "bearer token for /metrics; empty allows loopback only")
+		pushEnabled    = flag.Bool("push-enabled", true, "enable Web Push notifications (VAPID + RFC 8291)")
+		vapidSubject   = flag.String("vapid-subject", "mailto:gateway@localhost", "VAPID JWT subject (mailto: or https:)")
 	)
 	flag.Parse()
 
@@ -144,6 +147,21 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "gateway: failed to open device store: %v\n", err)
 		return 1
 	}
+	var pushManager *push.Manager
+	if *pushEnabled {
+		vapid, vapidErr := push.LoadOrCreateVAPID(filepath.Join(*dataDir, "vapid.key"))
+		if vapidErr != nil {
+			fmt.Fprintf(os.Stderr, "gateway: failed to initialize VAPID key: %v\n", vapidErr)
+			return 1
+		}
+		pushStore, storeErr := push.OpenStore(filepath.Join(*dataDir, "push.json"))
+		if storeErr != nil {
+			fmt.Fprintf(os.Stderr, "gateway: failed to open push store: %v\n", storeErr)
+			return 1
+		}
+		pushManager = push.NewManager(pushStore, vapid, *vapidSubject)
+	}
+	notifier := newPushNotifier(pushManager, *publicBaseURL)
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,
@@ -153,7 +171,10 @@ func run() int {
 		OnRouteDenied: func(r *http.Request) {
 			bans.Record(resolver.ClientIP(r))
 		},
-		OnRegistryChanged: hub.notify,
+		OnRegistryChanged: func() {
+			hub.notify()
+			notifier.observe(registry.List())
+		},
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
 		},
@@ -237,6 +258,7 @@ func run() int {
 			"proxy_requests_total": metrics.proxy.Load(),
 			"nodes":                registry.Count(),
 			"devices":              devices.Count(),
+			"push_subscriptions":   pushSubscriptionCount(pushManager),
 		})
 	}))).Methods(http.MethodGet)
 	// Audit events (owner-protected).
@@ -335,6 +357,11 @@ func run() int {
 		auditLog.Record(audit.Event{Type: audit.TypeManualUnban, IP: ip})
 		writeJSON(w, http.StatusOK, map[string]any{"unbanned": ip})
 	})))
+	// Web Push (owner-protected): VAPID config, subscription management, test send.
+	router.Handle("/api/push/config", owner.RequireSession(handlePushConfig(pushManager))).Methods(http.MethodGet)
+	router.Handle("/api/push/subscriptions", owner.RequireSession(handlePushSubscriptions(pushManager)))
+	router.Handle("/api/push/unsubscribe", owner.RequireSession(handlePushUnsubscribe(pushManager)))
+	router.Handle("/api/push/test", owner.RequireSession(handlePushTest(pushManager)))
 	// Prometheus text metrics (bearer token, or loopback when no token is set).
 	router.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if !authorizeMetrics(r, *metricsToken) {
@@ -342,7 +369,7 @@ func run() int {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		writePrometheusMetrics(w, &metrics, registry.Count(), devices.Count(), len(bans.Entries()))
+		writePrometheusMetrics(w, &metrics, registry.Count(), devices.Count(), len(bans.Entries()), pushSubscriptionCount(pushManager))
 	})
 	// Reverse proxy: /n/{node_id}/... → the node's local service.
 	router.PathPrefix("/n/{node_id}/").Handler(limited(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -417,6 +444,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// pushSubscriptionCount reports stored push subscriptions (0 when disabled).
+func pushSubscriptionCount(manager *push.Manager) int {
+	if manager == nil {
+		return 0
+	}
+	return manager.Store().Count()
+}
+
 // authorizeMetrics allows scraping with a bearer token, or from loopback when
 // no token is configured.
 func authorizeMetrics(r *http.Request, token string) bool {
@@ -435,7 +470,7 @@ func authorizeMetrics(r *http.Request, token string) bool {
 }
 
 // writePrometheusMetrics renders the process counters in Prometheus text format.
-func writePrometheusMetrics(w http.ResponseWriter, m *gatewayMetrics, nodes, devices, activeBans int) {
+func writePrometheusMetrics(w http.ResponseWriter, m *gatewayMetrics, nodes, devices, activeBans, pushSubs int) {
 	write := func(name, help, typ string, value int64) {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, value)
 	}
@@ -446,4 +481,5 @@ func writePrometheusMetrics(w http.ResponseWriter, m *gatewayMetrics, nodes, dev
 	write("aicli_gateway_nodes", "Registered nodes.", "gauge", int64(nodes))
 	write("aicli_gateway_devices", "Device tokens.", "gauge", int64(devices))
 	write("aicli_gateway_active_bans", "Active bans.", "gauge", int64(activeBans))
+	write("aicli_gateway_push_subscriptions", "Stored Web Push subscriptions.", "gauge", int64(pushSubs))
 }

@@ -1,7 +1,7 @@
 // Service worker for the aicli-gateway console (docs/gateway/07-console.md).
 // Caches the app shell so the console opens instantly; API, tunnel and proxy
 // traffic is never cached (data must stay live).
-const CACHE = "aicli-gateway-shell-v1";
+const CACHE = "aicli-gateway-shell-v2";
 const SHELL = ["./", "./index.html", "./app.js", "./style.css", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -48,6 +48,45 @@ self.addEventListener("fetch", (event) => {
           return response;
         })
         .catch(() => cached);
+    }),
+  );
+});
+
+// Web Push: render an OS notification for attention events pushed by the
+// gateway (docs/gateway/08-notifications.md).
+self.addEventListener("push", (event) => {
+  let data = { title: "aicli-gateway", body: "会话需要处理", url: "./" };
+  if (event.data) {
+    try {
+      data = Object.assign(data, event.data.json());
+    } catch (err) {
+      data.body = event.data.text();
+    }
+  }
+  event.waitUntil(
+    self.registration.showNotification(data.title, {
+      body: data.body,
+      tag: data.tag,
+      data: { url: data.url },
+      icon: "./icon.svg",
+      badge: "./icon.svg",
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || "./";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if (client.url.indexOf(target) !== -1 && "focus" in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(target);
+      }
     }),
   );
 });

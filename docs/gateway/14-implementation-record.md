@@ -17,6 +17,7 @@
 | 服务端 | 限流 + 可信代理 + 惩罚封禁 | `backend/internal/gateway/ratelimit` |
 | 服务端 | 审计事件 | `backend/internal/gateway/audit` |
 | 服务端 | Prometheus `/metrics` + 实时 `/api/events` SSE | `backend/cmd/gateway` |
+| 服务端 | Web Push（VAPID + RFC 8291 + 订阅 + 触发） | `backend/internal/gateway/push`、`backend/cmd/gateway/push.go` |
 | 服务端 | 二进制 + 轻量控制台（PWA） | `backend/cmd/gateway`（`console/`） |
 | 宿主 | aicli `/gateway` 命令 + 自动连接 + 转发目标 + 会话上报 | `backend/cmd/aicli/commands/chat_gateway_*.go`、`chat_mesh.go`、`cmd/aicli/main.go` |
 | 宿主 | runtime-server 控制 API + 启动装配 + 会话上报 | `backend/internal/api/runtimeapi/gateway_handlers.go`、`backend/cmd/runtime-server/gateway_bootstrap.go` |
@@ -24,6 +25,7 @@
 | 配置 | 分层 `gateway.*` + env 覆盖 | `backend/internal/agentconfig/config.go` |
 | base-path | aicli 微前端 + runtime-server SPA | `web_page.go`、`internal/webui/handler.go`、`frontend/vite.config.ts` |
 | 移动端 | 低带宽模式（微前端）+ 控制台 PWA | `web/js/ui.js`、`cmd/gateway/console/` |
+| 移动端 | 控制台 Web Push 订阅 + Service Worker 通知 | `cmd/gateway/console/{app.js,sw.js}` |
 
 ---
 
@@ -156,7 +158,8 @@ cd frontend && npx tsc -b && npm run lint:i18n
 
 | 项 | 说明 |
 |----|------|
-| Web Push | 移动端后台通知（需推送服务 + VAPID + 订阅管理） |
+| Web Push 的 agent 侧上报 | 网关推送链路已通；`aicli`/`runtime-server` 尚未把本地事件总线映射为 `attention` 上报 |
+| Web Push 的 presence 抑制/合并/静音 | 控制台未上报"正在查看"，无时间窗合并与免打扰 |
 | 注册表持久化 | 节点表为内存；重连即恢复（影响小） |
 | 多实例 HA | 隧道态单实例；注册表未外置 |
 | `runtime-server` 增量心跳 | 会话增删已推送；busy/attention 变化未推送 |
@@ -174,3 +177,8 @@ cd frontend && npx tsc -b && npm run lint:i18n
 > 2026-10-11 补记：流控（WINDOW_UPDATE，1 MiB/流）、Prometheus `/metrics`、安全审计事件 + `/api/audit`、
 > 控制台实时 SSE（`/api/events`）、封禁管理 API、分层 `gateway.*` 配置、设备令牌持久化、
 > 会话增删增量推送、微前端低带宽模式均已实现并测试通过。
+>
+> 2026-10-11 再补记：**Web Push**（`internal/gateway/push`：VAPID/ES256 + RFC 8291 aes128gcm + 订阅存储 +
+> 投递 + `ErrGone` 自动清理）、网关侧注意力侦测与推送触发（`cmd/gateway/push.go`）、控制台推送 API
+> 与 Service Worker 通知/点击跳转、`--push-enabled` / `--vapid-subject` 配置均已实现并有单测。
+> 剩余待办集中在 agent 侧事件上报与控制台展示/抑制，见 [08-notifications.md](./08-notifications.md) §10。
