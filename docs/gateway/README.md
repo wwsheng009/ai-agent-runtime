@@ -66,6 +66,7 @@
 | [11-security-config-examples.md](./11-security-config-examples.md) | 可直接复制的安全配置示例（边缘防护、认证加固、GeoIP、monitor→enforce、上线检查） |
 | [12-connection-control.md](./12-connection-control.md) | 连接控制面：自动/手动连接、aicli TUI `/gateway` 命令、runtime-server 前端入口与 API、状态机与语义 |
 | [13-connection-control-tasks.md](./13-connection-control-tasks.md) | 连接控制面实现任务清单（文件级改动点 + 测试点 + PR 序列 + DoD） |
+| [14-implementation-record.md](./14-implementation-record.md) | 实现记录：落地状态、运行方式、命令/API 参考、测试、已知缺口 |
 
 ---
 
@@ -112,4 +113,5 @@
 8. 安全事件处置见 [10-runbook.md](./10-runbook.md)，配置示例见 [11-security-config-examples.md](./11-security-config-examples.md)；
 9. 手动连接/断开控制面见 [12-connection-control.md](./12-connection-control.md)；
 10. 控制面实现任务见 [13-connection-control-tasks.md](./13-connection-control-tasks.md)；
-11. 排期与验收见 [06-implementation-plan.md](./06-implementation-plan.md)。
+11. 已实现的落地状态与运行方式见 [14-implementation-record.md](./14-implementation-record.md)；
+12. 排期与验收见 [06-implementation-plan.md](./06-implementation-plan.md)。
