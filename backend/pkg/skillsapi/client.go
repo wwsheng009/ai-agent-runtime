@@ -2399,20 +2399,24 @@ type ListSessionAgentControlMailboxResponse struct {
 }
 
 type BackgroundJob struct {
-	ID         string                 `json:"id"`
-	SessionID  string                 `json:"session_id"`
-	Kind       string                 `json:"kind,omitempty"`
-	Command    string                 `json:"command,omitempty"`
-	Cwd        string                 `json:"cwd,omitempty"`
-	Priority   int                    `json:"priority,omitempty"`
-	Status     string                 `json:"status"`
-	Message    string                 `json:"message,omitempty"`
-	CreatedAt  time.Time              `json:"created_at"`
-	StartedAt  *time.Time             `json:"started_at,omitempty"`
-	FinishedAt *time.Time             `json:"finished_at,omitempty"`
-	ExitCode   *int                   `json:"exit_code,omitempty"`
-	LogPath    string                 `json:"log_path,omitempty"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	ID          string                 `json:"id"`
+	SessionID   string                 `json:"session_id"`
+	Kind        string                 `json:"kind,omitempty"`
+	Command     string                 `json:"command,omitempty"`
+	Cwd         string                 `json:"cwd,omitempty"`
+	Priority    int                    `json:"priority,omitempty"`
+	Status      string                 `json:"status"`
+	Message     string                 `json:"message,omitempty"`
+	CreatedAt   time.Time              `json:"created_at"`
+	StartedAt   *time.Time             `json:"started_at,omitempty"`
+	FinishedAt  *time.Time             `json:"finished_at,omitempty"`
+	ExitCode    *int                   `json:"exit_code,omitempty"`
+	LogPath     string                 `json:"log_path,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	Interactive bool                   `json:"interactive,omitempty"`
+	TTY         bool                   `json:"tty,omitempty"`
+	Cols        int                    `json:"cols,omitempty"`
+	Rows        int                    `json:"rows,omitempty"`
 }
 
 type BackgroundJobListResponse struct {
@@ -2438,15 +2442,64 @@ type BackgroundJobEventsResponse struct {
 }
 
 type BackgroundJobOutput struct {
-	JobID      string `json:"job_id"`
-	Status     string `json:"status"`
-	Output     string `json:"output,omitempty"`
-	NextOffset int64  `json:"next_offset"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
+	JobID         string   `json:"job_id"`
+	Status        string   `json:"status"`
+	Output        string   `json:"output,omitempty"`
+	NextOffset    int64    `json:"next_offset"`
+	ExitCode      *int     `json:"exit_code,omitempty"`
+	WaitCondition string   `json:"wait_condition,omitempty"`
+	WaitedMs      int64    `json:"waited_ms,omitempty"`
+	OSPID         *int     `json:"os_pid,omitempty"`
+	CPUPercent    *float64 `json:"cpu_percent,omitempty"`
+	RSSKB         *int64   `json:"rss_kb,omitempty"`
 }
 
 type BackgroundJobOutputResponse struct {
 	Output BackgroundJobOutput `json:"output"`
+}
+
+// BackgroundJobInputRequest writes stdin to an interactive background session.
+type BackgroundJobInputRequest struct {
+	Chars       string `json:"chars,omitempty"`
+	Input       string `json:"input,omitempty"`
+	YieldTimeMs int    `json:"yield_time_ms,omitempty"`
+	CloseStdin  bool   `json:"close_stdin,omitempty"`
+}
+
+// BackgroundJobExchange mirrors one write_stdin exchange.
+type BackgroundJobExchange struct {
+	JobID         string   `json:"job_id"`
+	Status        string   `json:"status"`
+	Output        string   `json:"output,omitempty"`
+	Offset        int64    `json:"offset"`
+	NextOffset    int64    `json:"next_offset"`
+	WaitCondition string   `json:"wait_condition,omitempty"`
+	WaitedMs      int64    `json:"waited_ms,omitempty"`
+	Exited        bool     `json:"exited,omitempty"`
+	ExitCode      *int     `json:"exit_code,omitempty"`
+	Message       string   `json:"message,omitempty"`
+	OSPID         *int     `json:"os_pid,omitempty"`
+	CPUPercent    *float64 `json:"cpu_percent,omitempty"`
+	RSSKB         *int64   `json:"rss_kb,omitempty"`
+}
+
+type BackgroundJobInputResponse struct {
+	Exchange BackgroundJobExchange `json:"exchange"`
+}
+
+type BackgroundJobResizeRequest struct {
+	Cols int `json:"cols"`
+	Rows int `json:"rows"`
+}
+
+type BackgroundJobResizeResponse struct {
+	Resized bool `json:"resized"`
+	Cols    int  `json:"cols"`
+	Rows    int  `json:"rows"`
+}
+
+type BackgroundTerminalsCleanResponse struct {
+	Closed int `json:"closed"`
 }
 
 type CheckpointSummary struct {
@@ -4697,6 +4750,49 @@ func (c *Client) teamTaskOutcomeAction(ctx context.Context, teamID, taskID, acti
 func (c *Client) GetBackgroundJob(ctx context.Context, jobID string) (*BackgroundJobResponse, error) {
 	var response BackgroundJobResponse
 	if err := c.doJSON(ctx, http.MethodGet, "/api/runtime/background/jobs/"+url.PathEscape(jobID), nil, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// WriteBackgroundJobInput writes stdin to a running interactive background
+// session (2026-10-11).
+func (c *Client) WriteBackgroundJobInput(ctx context.Context, jobID string, req BackgroundJobInputRequest) (*BackgroundJobInputResponse, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, fmt.Errorf("jobID is required")
+	}
+	var response BackgroundJobInputResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/background/jobs/"+url.PathEscape(jobID)+"/input", nil, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// ResizeBackgroundJob changes the terminal size of an interactive session
+// (2026-10-11).
+func (c *Client) ResizeBackgroundJob(ctx context.Context, jobID string, cols, rows int) (*BackgroundJobResizeResponse, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, fmt.Errorf("jobID is required")
+	}
+	var response BackgroundJobResizeResponse
+	req := BackgroundJobResizeRequest{Cols: cols, Rows: rows}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/background/jobs/"+url.PathEscape(jobID)+"/resize", nil, req, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+// CleanBackgroundTerminals closes interactive sessions, optionally scoped to a
+// session id (2026-10-11).
+func (c *Client) CleanBackgroundTerminals(ctx context.Context, sessionID string) (*BackgroundTerminalsCleanResponse, error) {
+	query := url.Values{}
+	if strings.TrimSpace(sessionID) != "" {
+		query.Set("session_id", strings.TrimSpace(sessionID))
+	}
+	var response BackgroundTerminalsCleanResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/api/runtime/background/terminals/clean", query, nil, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

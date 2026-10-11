@@ -21,6 +21,10 @@ const (
 	GrantPatternPath    = "path:"
 	GrantPatternHost    = "host:"
 	GrantPatternExact   = "exact:"
+	// GrantPatternJob binds a grant to one background job/session id
+	// (write_stdin). It exists so an interactive-stdin approval is remembered
+	// for that session only, never tool-wide (2026-10-11).
+	GrantPatternJob = "job:"
 )
 
 // DeriveGrantPattern returns the narrowest remembered-grant pattern that still
@@ -34,6 +38,12 @@ const (
 //   - 文件工具记该次调用的路径（path:）；URL 工具记域名（host:）；
 //   - 其余工具返回空模式（工具级 grant，与旧行为一致）。
 func DeriveGrantPattern(toolName string, args map[string]interface{}) string {
+	if IsJobScopedGrantTool(toolName) {
+		if id := grantJobID(args); id != "" {
+			return GrantPatternJob + id
+		}
+		return ""
+	}
 	if commands := grantShellCommands(args); len(commands) > 0 {
 		return deriveCommandGrantPattern(commands)
 	}
@@ -155,6 +165,10 @@ func grantPatternMatches(args map[string]interface{}, pattern, root string) bool
 			return false
 		}
 		return domainPatternMatches(body, host, true)
+	case strings.HasPrefix(lower, GrantPatternJob):
+		body := strings.TrimSpace(pattern[len(GrantPatternJob):])
+		id := grantJobID(args)
+		return body != "" && id != "" && strings.EqualFold(body, id)
 	case strings.HasPrefix(lower, GrantPatternExact):
 		text := strings.TrimSpace(pattern[len(GrantPatternExact):])
 		if text == "" {
@@ -259,6 +273,28 @@ func containsFold(values []string, target string) bool {
 // specifiers instead of failing closed.
 type RootedGrantFinder interface {
 	FindWithRoot(toolName string, args map[string]interface{}, root string) (Grant, bool)
+}
+
+// IsJobScopedGrantTool reports tools whose remembered grant must bind to a
+// single background job/session id instead of the whole tool. Interactive stdin
+// (write_stdin) is approved once and then reused for that job only, so a
+// remembered grant can never widen to every session (2026-10-11).
+func IsJobScopedGrantTool(toolName string) bool {
+	switch normalizeToolName(toolName) {
+	case "write_stdin", "task_input":
+		return true
+	default:
+		return false
+	}
+}
+
+// grantJobID returns the background job/session id a job-scoped grant covers.
+func grantJobID(args map[string]interface{}) string {
+	id, ok := firstStringArg(args, "job_id", "task_id", "session_id")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(id)
 }
 
 // findRememberedGrant consults a store, preferring the rooted lookup.

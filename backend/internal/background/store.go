@@ -339,8 +339,9 @@ func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
         INSERT INTO background_jobs (
             id, session_id, kind, status, message, command, cwd, priority, created_at,
             started_at, finished_at, exit_code, log_path, metadata_json, state_version,
-            owner_instance_id, lease_expires_at, queued_at, deadline_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            owner_instance_id, lease_expires_at, queued_at, deadline_at,
+            interactive, tty, cols, rows
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             session_id = excluded.session_id,
             kind = excluded.kind,
@@ -359,7 +360,11 @@ func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
             owner_instance_id = excluded.owner_instance_id,
             lease_expires_at = excluded.lease_expires_at,
             queued_at = excluded.queued_at,
-            deadline_at = excluded.deadline_at
+            deadline_at = excluded.deadline_at,
+            interactive = excluded.interactive,
+            tty = excluded.tty,
+            cols = excluded.cols,
+            rows = excluded.rows
     `,
 		job.ID,
 		sessionID,
@@ -380,6 +385,10 @@ func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
 		formatTimePtr(job.LeaseExpiresAt),
 		formatTimePtr(job.QueuedAt),
 		formatTimePtr(job.DeadlineAt),
+		job.Interactive,
+		job.TTY,
+		job.Cols,
+		job.Rows,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert background job: %w", err)
@@ -402,7 +411,8 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, session_id, kind, status, message, command, cwd, priority, created_at,
                started_at, finished_at, exit_code, log_path, metadata_json, state_version,
-               owner_instance_id, lease_expires_at, queued_at, deadline_at
+               owner_instance_id, lease_expires_at, queued_at, deadline_at,
+               interactive, tty, cols, rows
         FROM background_jobs
         WHERE id = ?
     `, jobID)
@@ -425,6 +435,10 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 		leaseRaw         sql.NullString
 		queuedAtRaw      sql.NullString
 		deadlineRaw      sql.NullString
+		interactiveRaw   sql.NullInt64
+		ttyRaw           sql.NullInt64
+		colsRaw          sql.NullInt64
+		rowsRaw          sql.NullInt64
 	)
 	if err := row.Scan(
 		&job.ID,
@@ -446,6 +460,10 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 		&leaseRaw,
 		&queuedAtRaw,
 		&deadlineRaw,
+		&interactiveRaw,
+		&ttyRaw,
+		&colsRaw,
+		&rowsRaw,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -498,6 +516,14 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	job.LeaseExpiresAt = parseTimePtr(leaseRaw)
 	job.QueuedAt = parseTimePtr(queuedAtRaw)
 	job.DeadlineAt = parseTimePtr(deadlineRaw)
+	job.Interactive = interactiveRaw.Valid && interactiveRaw.Int64 != 0
+	job.TTY = ttyRaw.Valid && ttyRaw.Int64 != 0
+	if colsRaw.Valid {
+		job.Cols = int(colsRaw.Int64)
+	}
+	if rowsRaw.Valid {
+		job.Rows = int(rowsRaw.Int64)
+	}
 	job.RestartPolicy = normalizeLoadedRestartPolicy(job)
 
 	return &job, nil
@@ -543,7 +569,8 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 	query := `
 		SELECT id, session_id, kind, status, message, command, cwd, priority, created_at,
 		       started_at, finished_at, exit_code, log_path, metadata_json, state_version,
-		       owner_instance_id, lease_expires_at, queued_at, deadline_at
+		       owner_instance_id, lease_expires_at, queued_at, deadline_at,
+		       interactive, tty, cols, rows
 		FROM background_jobs
 	`
 	if len(clauses) > 0 {
@@ -589,6 +616,10 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 			leaseRaw         sql.NullString
 			queuedAtRaw      sql.NullString
 			deadlineRaw      sql.NullString
+			interactiveRaw   sql.NullInt64
+			ttyRaw           sql.NullInt64
+			colsRaw          sql.NullInt64
+			rowsRaw          sql.NullInt64
 		)
 		if err := rows.Scan(
 			&job.ID,
@@ -610,6 +641,10 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 			&leaseRaw,
 			&queuedAtRaw,
 			&deadlineRaw,
+			&interactiveRaw,
+			&ttyRaw,
+			&colsRaw,
+			&rowsRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan background job: %w", err)
 		}
@@ -658,6 +693,14 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 		job.LeaseExpiresAt = parseTimePtr(leaseRaw)
 		job.QueuedAt = parseTimePtr(queuedAtRaw)
 		job.DeadlineAt = parseTimePtr(deadlineRaw)
+		job.Interactive = interactiveRaw.Valid && interactiveRaw.Int64 != 0
+		job.TTY = ttyRaw.Valid && ttyRaw.Int64 != 0
+		if colsRaw.Valid {
+			job.Cols = int(colsRaw.Int64)
+		}
+		if rowsRaw.Valid {
+			job.Rows = int(rowsRaw.Int64)
+		}
 		job.RestartPolicy = normalizeLoadedRestartPolicy(job)
 		jobs = append(jobs, job)
 	}
@@ -912,6 +955,17 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 	}
 	if err := s.ensureBackgroundJobsColumn(ctx, "deadline_at", "TEXT"); err != nil {
 		return err
+	}
+	// Interactive session columns (2026-10-11): additive, default-off.
+	for _, column := range []struct{ name, typ string }{
+		{"interactive", "INTEGER NOT NULL DEFAULT 0"},
+		{"tty", "INTEGER NOT NULL DEFAULT 0"},
+		{"cols", "INTEGER"},
+		{"rows", "INTEGER"},
+	} {
+		if err := s.ensureBackgroundJobsColumn(ctx, column.name, column.typ); err != nil {
+			return err
+		}
 	}
 	return nil
 }

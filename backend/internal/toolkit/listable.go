@@ -191,6 +191,7 @@ func isBuiltinCoreToolName(name string) bool {
 		"todos", "artifact_read", "web_search", "fetch", "download",
 		"ask_user_question", "enter_plan_mode", "exit_plan_mode",
 		"background_task", "task_output",
+		"write_stdin", "task_input",
 		"spawn_agent", "spawn_team", "spawn_subagents",
 		"wait_agent", "wait_team", "list_agents",
 		"send_message", "send_input", "followup_task",

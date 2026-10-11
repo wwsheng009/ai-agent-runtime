@@ -178,6 +178,8 @@ func semanticToolCallRepeatExempt(name string) bool {
 	switch normalized {
 	case "background_task",
 		"task_output",
+		"write_stdin",
+		"task_input",
 		"wait_agent",
 		"read_agent",
 		"read_agent_events",

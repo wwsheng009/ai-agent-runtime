@@ -53,5 +53,12 @@ const (
 	EventJobOutput               = "job_output"
 	EventJobCancelled            = "job_cancelled"
 	EventJobFinished             = "job_finished"
+	// Interactive terminal session events (2026-10-11). The manager emits
+	// terminal_* job events and mapBackgroundEventType prefixes them with
+	// "job_", so these are the names that reach the runtime event bus.
+	EventJobTerminalOpened            = "job_terminal_opened"
+	EventJobTerminalClosed            = "job_terminal_closed"
+	EventJobTerminalResized           = "job_terminal_resized"
+	EventJobInteractiveNotRecoverable = "job_interactive_not_recoverable"
 	EventMailboxReceived         = "mailbox_received"
 )

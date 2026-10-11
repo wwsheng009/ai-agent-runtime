@@ -68,6 +68,10 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"startup_acceptance": toolArgFieldObject,
 		"timeout_sec":        toolArgFieldNumber,
 		"priority":           toolArgFieldNumber,
+		"interactive":        toolArgFieldBool,
+		"tty":                toolArgFieldBool,
+		"cols":               toolArgFieldNumber,
+		"rows":               toolArgFieldNumber,
 	},
 	ToolTaskOutput: {
 		"job_id":     toolArgFieldString,
@@ -93,6 +97,15 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"task_id": toolArgFieldString,
 		"action":  toolArgFieldString,
 		"reason":  toolArgFieldString,
+	},
+	ToolWriteStdin: {
+		"job_id":        toolArgFieldString,
+		"task_id":       toolArgFieldString,
+		"session_id":    toolArgFieldString,
+		"chars":         toolArgFieldString,
+		"input":         toolArgFieldString,
+		"yield_time_ms": toolArgFieldNumber,
+		"close_stdin":   toolArgFieldBool,
 	},
 	ToolListAgents: {
 		"include_closed": toolArgFieldBool,

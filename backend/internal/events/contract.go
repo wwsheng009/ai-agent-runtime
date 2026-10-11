@@ -217,6 +217,11 @@ var runtimeEventContracts = []Contract{
 	{Type: "job_output"},
 	{Type: "job_cancelled"},
 	{Type: "job_finished"},
+	// Interactive terminal session events (2026-10-11).
+	{Type: "job_terminal_opened"},
+	{Type: "job_terminal_closed"},
+	{Type: "job_terminal_resized"},
+	{Type: "job_interactive_not_recoverable"},
 	{Type: "mailbox_received"},
 	// 总线真实别名 / 宿主侧事件（runtimeobserve 已知目录的来源 4/5）。
 	{Type: "assistant.delta"},
@@ -239,6 +244,7 @@ var runtimeEventContracts = []Contract{
 	{Type: "context.preflight.failed"},             // loop.go
 	{Type: "context.tool_schema.compacted"},        // loop.go
 	{Type: "context.tool_schema.frozen"},           // loop.go
+	{Type: "context.usage_over_budget"},            // loop.go
 	{Type: "hooks.stop_blocked"},                   // loop.go
 	{Type: "llm.request.started"},                  // loop.go（点分隔形；下划线形见上）
 	{Type: "llm.request.finished"},                 // loop.go（点分隔形；下划线形见上）

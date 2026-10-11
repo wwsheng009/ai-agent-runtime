@@ -1,6 +1,8 @@
 package runtimeapi
 
 import (
+	"encoding/json"
+	stderrors "errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -351,4 +353,105 @@ func parseOptionalOffset64(raw string) (int64, error) {
 		return 0, errors.New(errors.ErrValidationFailed, "invalid offset value")
 	}
 	return value, nil
+}
+
+// WriteBackgroundJobInput writes stdin to a running interactive background job
+// and returns the output produced since the previous exchange (2026-10-11).
+func (h *Handler) WriteBackgroundJobInput(w http.ResponseWriter, r *http.Request) {
+	manager := h.getBackgroundManager(h.runtimeConfig)
+	if manager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "background manager not configured"))
+		return
+	}
+
+	jobID := strings.TrimSpace(mux.Vars(r)["id"])
+	if jobID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "job id is required"))
+		return
+	}
+
+	var payload struct {
+		Chars       string `json:"chars"`
+		Input       string `json:"input"`
+		YieldTimeMs int    `json:"yield_time_ms"`
+		CloseStdin  bool   `json:"close_stdin"`
+	}
+	// An empty body is a valid read-only poll; ignore the decode error.
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+	input := payload.Chars
+	if input == "" {
+		input = payload.Input
+	}
+
+	exchange, err := manager.WriteStdin(r.Context(), jobID, input, payload.YieldTimeMs)
+	if err != nil {
+		switch {
+		case stderrors.Is(err, background.ErrNotInteractive),
+			stderrors.Is(err, background.ErrSessionNotLocal),
+			stderrors.Is(err, background.ErrSessionNotAvailable):
+			h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, err.Error()))
+		default:
+			h.writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	if payload.CloseStdin {
+		_, _ = manager.CloseTerminal(r.Context(), jobID)
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"exchange": exchange,
+	})
+}
+
+// ResizeBackgroundJob changes the terminal size of an interactive background
+// job. Without a PTY the manager reports ErrTTYUnsupported (2026-10-11).
+func (h *Handler) ResizeBackgroundJob(w http.ResponseWriter, r *http.Request) {
+	manager := h.getBackgroundManager(h.runtimeConfig)
+	if manager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "background manager not configured"))
+		return
+	}
+	jobID := strings.TrimSpace(mux.Vars(r)["id"])
+	if jobID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "job id is required"))
+		return
+	}
+	var payload struct {
+		Cols int `json:"cols"`
+		Rows int `json:"rows"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	if err := manager.Resize(r.Context(), jobID, payload.Cols, payload.Rows); err != nil {
+		switch {
+		case stderrors.Is(err, background.ErrTTYUnsupported),
+			stderrors.Is(err, background.ErrSessionNotAvailable):
+			h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, err.Error()))
+		default:
+			h.writeError(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"resized": true,
+		"cols":    payload.Cols,
+		"rows":    payload.Rows,
+	})
+}
+
+// CleanBackgroundTerminals closes live interactive sessions and reports how many
+// were closed. An optional session_id query scopes the clean to one session
+// (2026-10-11).
+func (h *Handler) CleanBackgroundTerminals(w http.ResponseWriter, r *http.Request) {
+	manager := h.getBackgroundManager(h.runtimeConfig)
+	if manager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "background manager not configured"))
+		return
+	}
+	sessionID := chat.NormalizeSessionID(r.URL.Query().Get("session_id"))
+	closed := manager.CleanTerminals(r.Context(), sessionID)
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"closed": closed,
+	})
 }

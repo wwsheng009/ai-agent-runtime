@@ -350,7 +350,7 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	// 4) Remembered grants (skipped under bypass — bypass already allows without ask).
 	// Both the session store and the durable project store are consulted; the
 	// workspace root resolves "/"-anchored path patterns (§4.8).
-	if decision.Type == "" && mode != ModeBypassPermissions && !IsDangerousTool(req.ToolName) {
+	if decision.Type == "" && mode != ModeBypassPermissions && grantEligible(req.ToolName) {
 		grantRoot := toolctx.WorkspaceRoot(ctx)
 		for _, store := range []GrantStore{e.Grants, e.ProjectGrants} {
 			if grant, ok := findRememberedGrant(store, req.ToolName, req.Args, grantRoot); ok {
@@ -1003,7 +1003,7 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 	}
 	// §4.8：把「记住会记住什么」提前告诉宿主 UI（危险工具/硬问询/敏感写/外部目录
 	// 准入不可 remember，此时不给建议模式）。
-	if !grantRememberForbidden(decision) && !IsDangerousTool(req.ToolName) {
+	if !grantRememberForbidden(decision) && grantEligible(req.ToolName) {
 		approvalReq.RememberPattern = DeriveGrantPattern(req.ToolName, req.Args)
 	}
 	resp, err := e.AskHandler.RequestApproval(ctx, approvalReq)
@@ -1043,7 +1043,7 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 	// session-scoped memory.
 	// An allow may carry a feedback note as well; it is recorded on the grant
 	// decision reason so the model sees the user's constraint.
-	if resp.ShouldRemember() && !grantRememberForbidden(decision) && !IsDangerousTool(req.ToolName) {
+	if resp.ShouldRemember() && !grantRememberForbidden(decision) && grantEligible(req.ToolName) {
 		scope := resp.NormalizedRememberScope()
 		pattern := strings.TrimSpace(resp.RememberPattern)
 		if pattern == "" {
@@ -1121,6 +1121,14 @@ func grantRememberForbidden(decision Decision) bool {
 	default:
 		return false
 	}
+}
+
+// grantEligible reports whether remembered grants may be consulted and stored
+// for a tool. Dangerous tools are excluded, except job-scoped interactive stdin
+// (write_stdin) whose grant is deliberately bounded to one session/job by the
+// "job:" pattern, so it can never widen to the whole tool (2026-10-11).
+func grantEligible(toolName string) bool {
+	return !IsDangerousTool(toolName) || IsJobScopedGrantTool(toolName)
 }
 
 // grantBlockedBySafetyGate reports whether a call that a remembered grant would

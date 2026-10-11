@@ -85,7 +85,7 @@ func (s *MemoryGrantStore) Remember(grant Grant) error {
 	if grant.Tool == "" {
 		return nil
 	}
-	if IsDangerousTool(grant.Tool) {
+	if !grantRememberAllowed(grant) {
 		return errDangerousGrant
 	}
 	grant.Pattern = strings.TrimSpace(grant.Pattern)
@@ -164,6 +164,17 @@ func (s *MemoryGrantStore) Revoke(toolName, pattern string, matchEmptyPattern bo
 
 var errDangerousGrant = monadicError("grant_rejected_dangerous_tool")
 
+// grantRememberAllowed reports whether a grant may be stored. Dangerous tools
+// are rejected, except a job-scoped interactive-stdin grant whose pattern binds
+// it to a single session/job (2026-10-11). This keeps write_stdin out of
+// tool-wide always-allow while still letting one approval cover one session.
+func grantRememberAllowed(grant Grant) bool {
+	if !IsDangerousTool(grant.Tool) {
+		return true
+	}
+	return IsJobScopedGrantTool(grant.Tool) && strings.HasPrefix(strings.TrimSpace(grant.Pattern), GrantPatternJob)
+}
+
 // IsDangerousGrantError reports whether Remember rejected a dangerous tool.
 func IsDangerousGrantError(err error) bool {
 	return err != nil && err.Error() == string(errDangerousGrant)
@@ -177,7 +188,7 @@ func (e monadicError) Error() string { return string(e) }
 func IsDangerousTool(toolName string) bool {
 	name := normalizeToolName(toolName)
 	switch name {
-	case "shell", "bash", "aicli_exec", "background_task", "task_kill", "task_monitor", "task_control":
+	case "shell", "bash", "aicli_exec", "background_task", "task_kill", "task_monitor", "task_control", "write_stdin", "task_input":
 		return true
 	default:
 		return false

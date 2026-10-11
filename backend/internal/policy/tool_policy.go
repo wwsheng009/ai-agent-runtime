@@ -136,7 +136,7 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		return fmt.Errorf("tool %s: %w", toolName, err)
 	}
 	if p.ReadOnly {
-		if normalizedToolName == "background_task" || normalizedToolName == "task_kill" || normalizedToolName == "task_monitor" || normalizedToolName == "task_control" {
+		if normalizedToolName == "background_task" || normalizedToolName == "task_kill" || normalizedToolName == "task_monitor" || normalizedToolName == "task_control" || normalizedToolName == "write_stdin" || normalizedToolName == "task_input" {
 			return fmt.Errorf("read-only policy blocks background command execution: %s", toolName)
 		}
 		if IsWriteLikeToolName(toolName) {

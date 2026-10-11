@@ -41,6 +41,7 @@ const (
 	ToolTaskKill               = "task_kill"
 	ToolTaskMonitor            = "task_monitor"
 	ToolTaskControl            = "task_control"
+	ToolWriteStdin             = "write_stdin"
 	ToolSpawnAgent             = "spawn_agent"
 	ToolListAgents             = "list_agents"
 	ToolSendMessage            = "send_message"
@@ -215,7 +216,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolTaskMonitor, ToolTaskControl, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolTaskMonitor, ToolTaskControl, ToolWriteStdin, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -394,6 +395,24 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 							},
 						},
 					},
+					"interactive": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Open a long-lived interactive session whose stdin stays open for write_stdin instead of a fire-and-forget command job. Default false.",
+					},
+					"tty": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Request a PTY for an interactive session; platforms without ConPTY fall back to a pipe. Default false.",
+					},
+					"cols": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional terminal width for an interactive session.",
+					},
+					"rows": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional terminal height for an interactive session.",
+					},
 				},
 				"required": []string{"command"},
 			},
@@ -425,6 +444,45 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"type":        "integer",
 						"minimum":     1,
 						"description": "Optional wait budget in milliseconds for wait=output/exit. Defaults to 30000, clamped to 1000..120000.",
+					},
+				},
+				"required": []string{"job_id"},
+			},
+		},
+		types.ToolDefinition{
+			Name:        ToolWriteStdin,
+			Description: "Write to the stdin of a running interactive background session (alias: task_input) and return the output produced since the previous exchange. Use background_task with interactive=true to open a session; one-shot jobs are not interactive and return not_interactive (use task_output instead). Prefer wait over repeated polling: the call blocks until new output appears, the session exits, or yield_time_ms elapses, and reports wait_condition (output/exit/timeout) plus waited_ms. The result's next_offset is the authoritative cursor to pass to task_output next. Never guess or synthesize a job_id.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Interactive session job id returned by background_task (interactive=true).",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Alias for job_id.",
+					},
+					"session_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Alias for job_id.",
+					},
+					"chars": map[string]interface{}{
+						"type":        "string",
+						"description": "Characters to write to the session's stdin (append a newline to submit a line).",
+					},
+					"input": map[string]interface{}{
+						"type":        "string",
+						"description": "Alias for chars.",
+					},
+					"yield_time_ms": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional wait budget in milliseconds. Defaults to 250 (empty input 5000); clamped to 250..30000.",
+					},
+					"close_stdin": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Optional: close the session's stdin after writing, so a well-behaved process exits on EOF.",
 					},
 				},
 				"required": []string{"job_id"},
@@ -1578,9 +1636,40 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			startup.URL, _ = value["url"].(string)
 			req.Startup = startup
 		}
-		job, err := b.Background.SubmitShell(ctx, sessionID, req)
-		if err != nil {
-			return nil, nil, err
+		if value, ok := args["interactive"].(bool); ok {
+			req.Interactive = value
+		}
+		if value, ok := args["tty"].(bool); ok {
+			req.TTY = value
+		}
+		if value, ok, colsErr := brokerToolArgInt(ToolBackgroundTask, args, "cols"); colsErr != nil {
+			return nil, nil, colsErr
+		} else if ok {
+			req.Cols = value
+		}
+		if value, ok, rowsErr := brokerToolArgInt(ToolBackgroundTask, args, "rows"); rowsErr != nil {
+			return nil, nil, rowsErr
+		} else if ok {
+			req.Rows = value
+		}
+		var job *background.Job
+		var submitErr error
+		if req.Interactive {
+			// Interactive sessions keep stdin open for write_stdin instead of
+			// entering the detached runner (2026-10-11).
+			job, submitErr = b.Background.OpenTerminal(ctx, sessionID, background.TerminalOpenArgs{
+				Command:    command,
+				Cwd:        req.Cwd,
+				TTY:        req.TTY,
+				Cols:       req.Cols,
+				Rows:       req.Rows,
+				TimeoutSec: req.TimeoutSec,
+			})
+		} else {
+			job, submitErr = b.Background.SubmitShell(ctx, sessionID, req)
+		}
+		if submitErr != nil {
+			return nil, nil, submitErr
 		}
 		jobAlias := strings.TrimSpace(job.ID)
 		if handleAliases != nil {
@@ -1723,6 +1812,87 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			MaxConcurrent: output.MaxConcurrent, SchedulerState: output.SchedulerState,
 			NextAction: output.NextAction,
 		}, outputMetadata, nil
+
+	case ToolWriteStdin:
+		if b.Background == nil {
+			return nil, nil, fmt.Errorf("background manager is not configured")
+		}
+		jobID := brokerTaskStringArg(args, "job_id")
+		if jobID == "" {
+			jobID = brokerTaskStringArg(args, "task_id")
+		}
+		if jobID == "" {
+			jobID = brokerTaskStringArg(args, "session_id")
+		}
+		if jobID == "" {
+			return nil, nil, fmt.Errorf("job_id is required (task_id/session_id are accepted as aliases)")
+		}
+		resolvedJobID := jobID
+		displayJobID := jobID
+		if handleAliases != nil {
+			resolvedJobID, displayJobID, err = handleAliases.Jobs.resolve(jobID, backgroundJobAliasPrefix, "background job")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		// Read stdin payloads raw: a trailing newline is what submits a line to
+		// an interactive process, so trimming would silently break REPL input.
+		input, _ := args["chars"].(string)
+		if input == "" {
+			input, _ = args["input"].(string)
+		}
+		yieldMs := 0
+		if value, ok, yieldErr := brokerToolArgInt(ToolWriteStdin, args, "yield_time_ms"); yieldErr != nil {
+			return nil, nil, yieldErr
+		} else if ok {
+			yieldMs = value
+		}
+		closeStdin, _ := args["close_stdin"].(bool)
+
+		exchange, writeErr := b.Background.WriteStdin(ctx, resolvedJobID, input, yieldMs)
+		if writeErr != nil {
+			if errorCode, nextAction, actionable := classifyWriteStdinError(writeErr); actionable {
+				// Actionable content result: a non-interactive or non-local
+				// session is the wrong tool/instance, not a crash.
+				return map[string]interface{}{
+					"job_id":      displayJobID,
+					"ok":          false,
+					"error_code":  errorCode,
+					"message":     writeErr.Error(),
+					"next_action": nextAction,
+				}, map[string]interface{}{
+					toolresult.MetadataKey: toolresult.KindStructured,
+					"job_id":               strings.TrimSpace(jobID),
+					"job_alias":            displayJobID,
+					"ok":                   false,
+					"error_code":           errorCode,
+				}, nil
+			}
+			return nil, nil, writeErr
+		}
+		if closeStdin {
+			_, _ = b.Background.CloseTerminal(ctx, resolvedJobID)
+		}
+		writeMetadata := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+			"job_id":               strings.TrimSpace(exchange.JobID),
+			"job_alias":            displayJobID,
+			"status":               exchange.Status,
+			"next_offset":          exchange.NextOffset,
+			"wait_condition":       exchange.WaitCondition,
+			"waited_ms":            exchange.WaitedMs,
+			"exited":               exchange.Exited,
+		}
+		return map[string]interface{}{
+			"job_id":         displayJobID,
+			"status":         exchange.Status,
+			"output":         exchange.Output,
+			"next_offset":    exchange.NextOffset,
+			"wait_condition": exchange.WaitCondition,
+			"waited_ms":      exchange.WaitedMs,
+			"exited":         exchange.Exited,
+			"exit_code":      exchange.ExitCode,
+		}, writeMetadata, nil
 
 	case ToolTaskKill:
 		if b.Background == nil {
@@ -3889,6 +4059,28 @@ func spawnTaskLabel(spec SpawnTaskSpec) string {
 	return "unnamed task"
 }
 
+// classifyWriteStdinError maps the background package's interactive sentinels
+// onto an actionable content result instead of a hard tool failure
+// (2026-10-11).
+func classifyWriteStdinError(err error) (code, nextAction string, actionable bool) {
+	switch {
+	case stderrors.Is(err, background.ErrNotInteractive):
+		return "NOT_INTERACTIVE",
+			"Use background_task with interactive=true to open a session, or task_output for one-shot jobs; do not retry write_stdin on a non-interactive job.",
+			true
+	case stderrors.Is(err, background.ErrSessionNotLocal):
+		return "SESSION_NOT_LOCAL",
+			"This interactive session is owned by another runtime instance; drive it from that instance, or use task_output/task_kill here.",
+			true
+	case stderrors.Is(err, background.ErrSessionNotAvailable):
+		return "SESSION_NOT_AVAILABLE",
+			"The session has closed or exited; open a new one with background_task interactive=true, or read the final output with task_output.",
+			true
+	default:
+		return "", "", false
+	}
+}
+
 func normalizeToolName(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	name = strings.ReplaceAll(name, "-", "_")
@@ -3905,6 +4097,8 @@ func normalizeToolName(name string) string {
 		return ToolBackgroundTask
 	case "taskoutput":
 		return ToolTaskOutput
+	case "writestdin", "taskinput", "write_stdin", "task_input":
+		return ToolWriteStdin
 	case "spawnagent":
 		return ToolSpawnAgent
 	case "listagents":

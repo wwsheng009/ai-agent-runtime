@@ -159,6 +159,11 @@ func buildKnownEventTypes() map[string]bool {
 		"job_output",                // :37
 		"job_cancelled",             // :38
 		"job_finished",              // :39
+		// 交互会话事件（2026-10-11）。
+		"job_terminal_opened",
+		"job_terminal_closed",
+		"job_terminal_resized",
+		"job_interactive_not_recoverable",
 		// P3 控制面 / 队列终态：handler.go 的 job 事件映射默认分支产出
 		// job_<type>，这些名字不进目录就会被计成 unknown_events_dropped。
 		"job_paused",       // paused
@@ -249,6 +254,7 @@ func buildKnownEventTypes() map[string]bool {
 		"context.preflight.failed",             // agent/loop.go
 		"context.tool_schema.compacted",        // agent/loop.go
 		"context.tool_schema.frozen",           // agent/loop.go
+		"context.usage_over_budget",            // agent/loop.go
 		"hooks.stop_blocked",                   // agent/loop.go
 		"llm.max_output_tokens.escalated",      // agent/loop.go
 		"llm.prompt_cache.backoff_applied",     // agent/loop.go

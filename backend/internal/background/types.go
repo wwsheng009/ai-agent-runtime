@@ -66,6 +66,13 @@ type BackgroundTaskArgs struct {
 	Priority      int                `json:"priority,omitempty"`
 	RestartPolicy RestartPolicy      `json:"restart_policy,omitempty"`
 	Startup       *StartupAcceptance `json:"startup_acceptance,omitempty"`
+	// Interactive opens a long-lived session whose stdin stays open for
+	// write_stdin instead of a fire-and-forget command job (2026-10-11).
+	Interactive bool `json:"interactive,omitempty"`
+	// TTY requests a PTY; platforms without ConPTY fall back to a pipe.
+	TTY  bool `json:"tty,omitempty"`
+	Cols int  `json:"cols,omitempty"`
+	Rows int  `json:"rows,omitempty"`
 }
 
 // BackgroundTaskResult reports a submitted job.
@@ -134,6 +141,15 @@ type TaskOutputResult struct {
 	// (2026-09-28): a pending job past DeadlineAt becomes terminal "expired".
 	QueuedAt   string `json:"queued_at,omitempty"`
 	DeadlineAt string `json:"deadline_at,omitempty"`
+	// Interactive session fields (2026-10-11): write_stdin exchanges report the
+	// wait condition and the caller's next output offset.
+	Interactive   bool     `json:"interactive,omitempty"`
+	TTY           bool     `json:"tty,omitempty"`
+	WaitCondition string   `json:"wait_condition,omitempty"`
+	WaitedMs      int64    `json:"waited_ms,omitempty"`
+	OSPID         *int     `json:"os_pid,omitempty"`
+	CPUPercent    *float64 `json:"cpu_percent,omitempty"`
+	RSSKB         *int64   `json:"rss_kb,omitempty"`
 }
 
 // JobFilter filters background job queries.
@@ -176,6 +192,43 @@ type Job struct {
 	// dispatched before it becomes terminal "expired".
 	QueuedAt   *time.Time
 	DeadlineAt *time.Time
+	// Interactive marks a long-lived session whose stdin stays open for
+	// write_stdin; TTY reports whether it runs behind a PTY (2026-10-11).
+	Interactive bool `json:"interactive,omitempty"`
+	TTY         bool `json:"tty,omitempty"`
+	Cols        int  `json:"cols,omitempty"`
+	Rows        int  `json:"rows,omitempty"`
+}
+
+// TerminalOpenArgs opens a long-lived interactive session (2026-10-11).
+type TerminalOpenArgs struct {
+	Command    string
+	Cwd        string
+	TTY        bool
+	Cols       int
+	Rows       int
+	TimeoutSec int
+	YieldMs    int
+}
+
+// TerminalReadResult reports one write_stdin exchange. Offset is the buffer
+// position the returned Output starts at; NextOffset is what the caller passes
+// to task_output next (the single authoritative cursor, 2026-10-11).
+type TerminalReadResult struct {
+	JobID         string `json:"job_id"`
+	Status        string `json:"status"`
+	Output        string `json:"output,omitempty"`
+	Offset        int64  `json:"offset"`
+	NextOffset    int64  `json:"next_offset"`
+	WaitCondition string `json:"wait_condition,omitempty"`
+	WaitedMs      int64  `json:"waited_ms,omitempty"`
+	Exited        bool   `json:"exited,omitempty"`
+	ExitCode      *int   `json:"exit_code,omitempty"`
+	Message       string `json:"message,omitempty"`
+	// Resource metrics of the session process (2026-10-11).
+	OSPID      *int     `json:"os_pid,omitempty"`
+	CPUPercent *float64 `json:"cpu_percent,omitempty"`
+	RSSKB      *int64   `json:"rss_kb,omitempty"`
 }
 
 // RuntimeInstance captures a live runtime process that owns background work.

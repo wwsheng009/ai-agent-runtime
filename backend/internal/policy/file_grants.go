@@ -90,7 +90,7 @@ func (s *FileGrantStore) Remember(grant Grant) error {
 	if grant.Tool == "" {
 		return nil
 	}
-	if IsDangerousTool(grant.Tool) {
+	if !grantRememberAllowed(grant) {
 		return errDangerousGrant
 	}
 	grant.Pattern = strings.TrimSpace(grant.Pattern)

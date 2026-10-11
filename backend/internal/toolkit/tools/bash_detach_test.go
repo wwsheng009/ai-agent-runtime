@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 func detachProbeCommand() string {
@@ -182,5 +183,32 @@ func TestBashToolDetachSurvivesGuardTerminate(t *testing.T) {
 	}
 	if !detachedProcessAlive(pid) {
 		t.Fatalf("detached process %d was killed by a sibling command's guard terminate", pid)
+	}
+}
+
+func TestBashToolDetachIsMarkedDeprecatedWithGuidance(t *testing.T) {
+	tool := NewShellTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"command": detachProbeCommand(),
+		"detach":  true,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result == nil || !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if pid, _ := result.Metadata["detached_pid"].(int); pid > 0 {
+		t.Cleanup(func() { killDetachedProcess(pid) })
+	}
+	if result.Metadata["deprecated"] != true {
+		t.Fatalf("expected deprecated=true metadata, got %#v", result.Metadata)
+	}
+	nextAction, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+	if !strings.Contains(nextAction, "background_task") {
+		t.Fatalf("next_action must guide toward background_task, got %q", nextAction)
+	}
+	if !strings.Contains(result.Content, "background_task") {
+		t.Fatalf("content must mention background_task, got %q", result.Content)
 	}
 }

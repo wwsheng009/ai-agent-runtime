@@ -33,8 +33,11 @@ type Config struct {
 	StoreDSN                string
 	LogDir                  string
 	MaxConcurrentJobs       int
-	Retention               time.Duration
-	CleanupInterval         time.Duration
+	// MaxInteractiveSessions bounds live interactive (write_stdin) sessions.
+	// They do not consume MaxConcurrentJobs scheduling slots (2026-10-11).
+	MaxInteractiveSessions int
+	Retention              time.Duration
+	CleanupInterval        time.Duration
 	// InstanceID identifies this runtime process in the shared background
 	// store. Empty generates a fresh per-process id (2026-09-28).
 	InstanceID string
@@ -74,6 +77,7 @@ func DefaultConfig() Config {
 		StoreDSN:                "",
 		LogDir:                  "",
 		MaxConcurrentJobs:       4,
+		MaxInteractiveSessions:  64,
 		Retention:               30 * 24 * time.Hour,
 		CleanupInterval:         time.Hour,
 		LeaseTTL:                60 * time.Second,
@@ -156,6 +160,18 @@ type Manager struct {
 	// only the instance that spawned a tree can terminate it as a unit.
 	killWatchMu sync.Mutex
 	killWatch   map[string]*killWatchEntry
+	// interactive holds live interactive sessions keyed by job id (2026-10-11).
+	// Handles are in-memory only: a session cannot be driven after the owning
+	// process restarts, so it is never persisted. Guarded by mu.
+	interactive    map[string]*interactiveSession
+	maxInteractive int
+	// interactiveBySession maps a session id to its live interactive job id so
+	// OpenTerminal can reuse an already-open session (2026-10-11).
+	interactiveBySession map[string]string
+	// metricsMu guards lastUsage, the per-job previous CPU sample used to derive
+	// a CPU percentage (2026-10-11).
+	metricsMu sync.Mutex
+	lastUsage map[string]usageSample
 }
 
 type managedJob struct {
@@ -189,6 +205,9 @@ func NewManager(cfg Config) *Manager {
 	}
 	if cfg.MaxConcurrentJobs <= 0 {
 		cfg.MaxConcurrentJobs = DefaultConfig().MaxConcurrentJobs
+	}
+	if cfg.MaxInteractiveSessions <= 0 {
+		cfg.MaxInteractiveSessions = DefaultConfig().MaxInteractiveSessions
 	}
 	if cfg.MonitorInterval <= 0 {
 		cfg.MonitorInterval = DefaultConfig().MonitorInterval
@@ -231,14 +250,18 @@ func NewManager(cfg Config) *Manager {
 		cfg.QueueTimeout = DefaultConfig().QueueTimeout
 	}
 	manager := &Manager{
-		config:            cfg,
-		jobs:              make(map[string]*managedJob),
-		dispatchCh:        make(chan struct{}, 1),
-		maxConcurrentJobs: cfg.MaxConcurrentJobs,
-		stopCh:            make(chan struct{}),
-		doneCh:            make(chan struct{}),
-		instanceID:        strings.TrimSpace(cfg.InstanceID),
-		instanceStartedAt: time.Now().UTC(),
+		config:               cfg,
+		jobs:                 make(map[string]*managedJob),
+		dispatchCh:           make(chan struct{}, 1),
+		maxConcurrentJobs:    cfg.MaxConcurrentJobs,
+		interactive:          make(map[string]*interactiveSession),
+		interactiveBySession: make(map[string]string),
+		lastUsage:            make(map[string]usageSample),
+		maxInteractive:       cfg.MaxInteractiveSessions,
+		stopCh:               make(chan struct{}),
+		doneCh:               make(chan struct{}),
+		instanceID:           strings.TrimSpace(cfg.InstanceID),
+		instanceStartedAt:    time.Now().UTC(),
 	}
 	if host, err := os.Hostname(); err == nil {
 		manager.instanceHost = strings.TrimSpace(host)
@@ -300,6 +323,18 @@ func (m *Manager) Close() error {
 		for _, cancel := range cancels {
 			cancel()
 		}
+		// Drop in-memory interactive handles: their job contexts were just
+		// cancelled above, so the wait goroutines will converge the jobs to a
+		// terminal state (2026-10-11).
+		m.mu.Lock()
+		for _, sess := range m.interactive {
+			if sess != nil {
+				sess.closeStdin()
+			}
+		}
+		m.interactive = map[string]*interactiveSession{}
+		m.interactiveBySession = map[string]string{}
+		m.mu.Unlock()
 		<-m.doneCh
 		m.jobWG.Wait()
 		m.markInstanceStopped(context.Background())
@@ -442,7 +477,9 @@ func (m *Manager) ReadOutput(ctx context.Context, req TaskOutputArgs) (TaskOutpu
 	if logPath != "" {
 		result, readErr := m.readOutputFromLog(logPath, jobID, status, exitCode, req.Offset, req.Limit)
 		applyPendingQueueDiagnostics(&result, pendingDiag)
-		return decorateTaskOutputResult(result, info), readErr
+		decorated := decorateTaskOutputResult(result, info)
+		m.attachProcessMetrics(&decorated, info)
+		return decorated, readErr
 	}
 
 	output, nextOffset := managed.output.Read(req.Offset, req.Limit)
@@ -454,7 +491,9 @@ func (m *Manager) ReadOutput(ctx context.Context, req TaskOutputArgs) (TaskOutpu
 		ExitCode:   exitCode,
 	}
 	applyPendingQueueDiagnostics(&result, pendingDiag)
-	return decorateTaskOutputResult(result, info), nil
+	decorated := decorateTaskOutputResult(result, info)
+	m.attachProcessMetrics(&decorated, info)
+	return decorated, nil
 }
 
 func applyPendingQueueDiagnostics(result *TaskOutputResult, diag TaskOutputResult) {
@@ -2543,6 +2582,27 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 			}
 			m.interruptStoredJob(context.Background(), job, "owner process gone; not auto-resumed")
 		case StatusRunning:
+			if job.Interactive {
+				// Interactive sessions cannot be recovered after a restart: the
+				// stdin handle lived only in the dead process. Converge to a
+				// terminal state instead of resurrecting a session no one can
+				// drive (2026-10-11).
+				recovered := job
+				managed := m.managedJobFromStored(recovered)
+				if managed == nil {
+					continue
+				}
+				m.mu.Lock()
+				if _, exists := m.jobs[job.ID]; !exists {
+					m.jobs[job.ID] = managed
+				}
+				m.mu.Unlock()
+				m.appendJobEvent(ctx, job.ID, "interactive_not_recoverable", map[string]interface{}{
+					"status": StatusRunning,
+				})
+				m.orphanJob(managed, "interactive session cannot be recovered after a runtime restart")
+				continue
+			}
 			if m.recoverDetachedRunningJob(job) {
 				continue
 			}
