@@ -1044,6 +1044,13 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/input", h.WriteBackgroundJobInput).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/resize", h.ResizeBackgroundJob).Methods(http.MethodPost)
+
+	// Automation tasks (Schedule). Distinct from /background/jobs: schedule_*
+	// registers reminders that deliver to their original Session when due.
+	runtimeRouter.HandleFunc("/schedule/catalog", h.GetScheduleCatalog).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/schedule/list", h.ListScheduleTasks).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/schedule/update", h.UpdateScheduleTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/schedule/delete", h.DeleteScheduleTask).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/terminals/clean", h.CleanBackgroundTerminals).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/mcps", h.CreateRuntimeMCP).Methods(http.MethodPost)
