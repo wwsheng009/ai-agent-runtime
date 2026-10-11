@@ -3495,8 +3495,17 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // ArchiveSession 归档会话
+//
+// 归档准入（方案 §8.3）：有活动自动化任务的会话拒绝归档，直到任务停止
+// （显式删除）。这是**新增检查点**——本项目没有 dsh 式可插拔准入族。
 func (h *Handler) ArchiveSession(w http.ResponseWriter, r *http.Request) {
 	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
+		if service := h.getScheduleService(); service != nil {
+			if active, err := service.ActiveTasks(sessionID); err == nil && len(active) > 0 {
+				return errors.New(errors.ErrValidationFailed,
+					"session has active automation tasks; delete them before archiving")
+			}
+		}
 		return h.sessionManager.ArchiveSession(ctx, sessionID)
 	}, "archived", false)
 }
@@ -3547,6 +3556,12 @@ func (h *Handler) BatchDeleteSessions(w http.ResponseWriter, r *http.Request) {
 // BatchArchiveSessions 批量归档会话
 func (h *Handler) BatchArchiveSessions(w http.ResponseWriter, r *http.Request) {
 	h.batchSessionAction(w, r, func(ctx context.Context, sessionID string) error {
+		if service := h.getScheduleService(); service != nil {
+			if active, err := service.ActiveTasks(sessionID); err == nil && len(active) > 0 {
+				return errors.New(errors.ErrValidationFailed,
+					"session has active automation tasks; delete them before archiving")
+			}
+		}
 		return h.sessionManager.ArchiveSession(ctx, sessionID)
 	}, "archived", false)
 }

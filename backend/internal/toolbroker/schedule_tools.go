@@ -150,9 +150,18 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 	}
 }
 
-func (b *Broker) executeScheduleTool(_ context.Context, sessionID, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
+func (b *Broker) executeScheduleTool(ctx context.Context, sessionID, toolName string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
 	if b.Schedule == nil {
 		return scheduleError(schedule.CodeInternal, "schedule service is unavailable"), nil, nil
+	}
+	// 被委派子 Agent（depth > 0）不能设置提醒：投递永远无法到达子会话。
+	// create/update 拒绝；list/delete 仍可服务（遗留任务可查看/删除）。
+	switch toolName {
+	case ToolScheduleCreate, ToolScheduleUpdate:
+		if depth, ok := b.scheduleCallerDepth(ctx, sessionID); ok && depth > 0 {
+			return scheduleError(schedule.CodeSubagentSession,
+				"A delegated subagent cannot set reminders; delivery can never reach this session."), nil, nil
+		}
 	}
 	switch toolName {
 	case ToolScheduleCreate:
@@ -165,6 +174,27 @@ func (b *Broker) executeScheduleTool(_ context.Context, sessionID, toolName stri
 		return b.executeScheduleDelete(sessionID, args)
 	default:
 		return scheduleError(schedule.CodeInternal, "unknown schedule tool"), nil, nil
+	}
+}
+
+// scheduleCallerDepth 读取调用会话的委派深度；读不到（无 store/无记录）返回 ok=false。
+func (b *Broker) scheduleCallerDepth(ctx context.Context, sessionID string) (int, bool) {
+	if b.SessionContextStore == nil {
+		return 0, false
+	}
+	value, err := b.SessionContextStore.LoadContextValue(ctx, sessionID, AgentSessionContextDepth)
+	if err != nil || value == nil {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	default:
+		return 0, false
 	}
 }
 
