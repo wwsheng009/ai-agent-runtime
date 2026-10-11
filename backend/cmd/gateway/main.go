@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -46,6 +47,7 @@ func run() int {
 		ownerPassword = flag.String("owner-password", "", "owner login password (empty disables auth — dev only)")
 		sessionTTL    = flag.Duration("session-ttl", auth.DefaultTTL, "owner session lifetime")
 		rateLimit     = flag.Int("rate-limit", 0, "per-IP requests per minute for the proxy and tunnel upgrade; 0 disables")
+		dataDir       = flag.String("data-dir", "./data", "directory for persisted gateway state (device tokens)")
 	)
 	flag.Parse()
 
@@ -82,13 +84,17 @@ func run() int {
 	}
 
 	registry := tunnel.NewRegistry()
-	devices := device.NewStore()
+	devices, err := device.Open(filepath.Join(*dataDir, "devices.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gateway: failed to open device store: %v\n", err)
+		return 1
+	}
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,
 		PublicBaseURL:        *publicBaseURL,
 		Registry:             registry,
-		Authenticate:         deviceAuth(devices, *deviceToken),
+		Authenticate:         deviceAuth(devices.Store, *deviceToken),
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
 		},
