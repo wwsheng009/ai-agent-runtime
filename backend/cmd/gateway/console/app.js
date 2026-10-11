@@ -137,4 +137,12 @@
 
   loadNodes();
   loadDevices();
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("./sw.js").catch(function () {
+        /* offline shell is an enhancement; ignore failures */
+      });
+    });
+  }
 })();

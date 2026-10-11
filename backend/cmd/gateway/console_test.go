@@ -28,7 +28,7 @@ func TestConsoleServesIndex(t *testing.T) {
 }
 
 func TestConsoleServesAssets(t *testing.T) {
-	for _, path := range []string{"/style.css", "/app.js"} {
+	for _, path := range []string{"/style.css", "/app.js", "/sw.js", "/icon.svg", "/manifest.webmanifest"} {
 		rec := getConsole(path)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s status = %d, want 200", path, rec.Code)
@@ -36,6 +36,11 @@ func TestConsoleServesAssets(t *testing.T) {
 		if rec.Body.Len() == 0 {
 			t.Fatalf("%s served an empty body", path)
 		}
+	}
+
+	rec := getConsole("/manifest.webmanifest")
+	if ct := rec.Header().Get("Content-Type"); ct != "application/manifest+json" {
+		t.Fatalf("manifest content type = %q, want application/manifest+json", ct)
 	}
 }
 

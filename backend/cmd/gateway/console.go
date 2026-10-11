@@ -46,6 +46,10 @@ func consoleHandler() http.Handler {
 			servePath = "/"
 			w.Header().Set("Cache-Control", "no-cache")
 		}
+		if name == "manifest.webmanifest" {
+			// Go's extension MIME table is unreliable on Windows; set it here.
+			w.Header().Set("Content-Type", "application/manifest+json")
+		}
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = servePath
 		fileServer.ServeHTTP(w, r2)
