@@ -54,6 +54,32 @@ export function toggleTheme() {
 
 applyTheme();
 
+// ---- 低带宽模式：隐藏图片、供未来降低非必要刷新（localStorage 记忆，默认关闭） ----
+// 网关/移动端弱网下用户可手动开启（docs/gateway/05-wan-and-mobile.md §2.6）。
+var lowBandwidth = false;
+try { lowBandwidth = localStorage.getItem("webLowBandwidth") === "1"; } catch (e) { /* ignore */ }
+
+export function applyLowBandwidth() {
+  if (document && document.body && document.body.classList) {
+    document.body.classList.toggle("low-bandwidth", lowBandwidth);
+  }
+}
+
+export function toggleLowBandwidth() {
+  lowBandwidth = !lowBandwidth;
+  try { localStorage.setItem("webLowBandwidth", lowBandwidth ? "1" : "0"); } catch (e) { /* ignore */ }
+  applyLowBandwidth();
+  // 供其他模块（如渲染/刷新节奏）响应模式变化；未接线时为 no-op。
+  if (typeof window !== "undefined" && typeof window.__aicliLowBandwidthChanged === "function") {
+    try { window.__aicliLowBandwidthChanged(lowBandwidth); } catch (e) { /* ignore */ }
+  }
+  return lowBandwidth;
+}
+
+export function isLowBandwidth() { return lowBandwidth; }
+
+applyLowBandwidth();
+
 var tabConfigBtn = document.getElementById("tab-config-btn");
 var tabConfigEl = document.getElementById("tab-config");
 var tabCacheBtn = document.getElementById("tab-cache-btn");

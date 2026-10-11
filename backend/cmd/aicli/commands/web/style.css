@@ -3034,3 +3034,8 @@ body.pane-resizing * { cursor: col-resize !important; user-select: none !importa
   #git-diff-modal { width: calc(100vw - 16px); max-height: 92vh; }
   .files-meta, .git-row-meta { display: none; }
 }
+
+/* 低带宽模式：隐藏图片（docs/gateway/05-wan-and-mobile.md §2.6）。 */
+body.low-bandwidth img {
+  display: none !important;
+}

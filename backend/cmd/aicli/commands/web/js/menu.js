@@ -13,7 +13,7 @@
 //   3. 菜单开合只做"单选展开":点击菜单按钮切换自身、点击其它菜单按钮切换过去、
 //      点击外部或 Esc 关闭(把焦点还给菜单按钮)。
 
-import { toggleShortcutHelp } from "./ui.js";
+import { toggleLowBandwidth, toggleShortcutHelp } from "./ui.js";
 import { toggleComposerPanel } from "./composer.js";
 import { showToast } from "./util.js";
 
@@ -128,6 +128,11 @@ function handleAction(action) {
     // 浮动 composer 面板：直接调 composer.js 的入口（与 Ctrl+J 同一函数），
     // 不转发点击——面板按钮的语义是"折叠"，菜单项语义是"折叠/展开"，转发会多一次翻转。
     case "composer-toggle": toggleComposerPanel(); break;
+    case "low-bandwidth-toggle": {
+      var lowBandwidthOn = toggleLowBandwidth();
+      showToast(lowBandwidthOn ? "低带宽模式：开（已隐藏图片）" : "低带宽模式：关");
+      break;
+    }
     case "shortcut-help": toggleShortcutHelp(); break;
     case "tab-main":
     case "tab-log":
