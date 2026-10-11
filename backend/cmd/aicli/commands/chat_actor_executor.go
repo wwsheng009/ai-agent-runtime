@@ -330,14 +330,18 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 			return "", humanizeActorExecutorError(session, runErr)
 		}
 	}
-	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+	// P2-1：turn 收尾的三次全量写（restore 写 / reconciler 写 / usage 写）
+	// 合并为一次最终写——内存态变更顺序不变（restore → reconcilers → usage
+	// → write），最终状态严格一致；actor 已写库，本写只回带 CLI 侧显示态，
+	// 合并不扩大崩溃窗口。
+	if err := restoreRuntimeSessionIntoCLI(session); err != nil {
 		return "", err
 	}
-	warnIfChatSessionSyncFails(session, "actor post-turn reconcile", runPostTurnReconcilersAndSync(session))
+	warnIfChatSessionSyncFails(session, "actor post-turn reconcile", runPostTurnReconcilersReported(session))
 	if result != nil {
 		applyChatTokenUsage(session, result.Usage)
 	}
-	warnIfChatSessionSyncFails(session, "actor usage sync", syncRuntimeSessionFromChat(session))
+	warnIfChatSessionSyncFails(session, "actor post-turn sync", syncRuntimeSessionFromChat(session))
 	warnIfChatSessionSyncFails(session, "actor team lifecycle sync", syncAmbientTeamLifecycleState(session))
 	if result == nil {
 		return "", nil
@@ -435,14 +439,15 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 			return "", humanizeActorExecutorError(session, runErr)
 		}
 	}
-	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
+	// P2-1：与成功路径同口径的三写合一（见上文说明）。
+	if err := restoreRuntimeSessionIntoCLI(session); err != nil {
 		return "", err
 	}
-	warnIfChatSessionSyncFails(session, "actor goal continuation post-turn reconcile", runPostTurnReconcilersAndSync(session))
+	warnIfChatSessionSyncFails(session, "actor goal continuation post-turn reconcile", runPostTurnReconcilersReported(session))
 	if result != nil {
 		applyChatTokenUsage(session, result.Usage)
 	}
-	warnIfChatSessionSyncFails(session, "actor goal continuation usage sync", syncRuntimeSessionFromChat(session))
+	warnIfChatSessionSyncFails(session, "actor goal continuation sync", syncRuntimeSessionFromChat(session))
 	warnIfChatSessionSyncFails(session, "actor goal continuation team lifecycle sync", syncAmbientTeamLifecycleState(session))
 	if result == nil {
 		return "", nil
@@ -652,6 +657,21 @@ func syncRuntimeSessionBackIntoCLIAfterFailure(session *ChatSession) error {
 }
 
 func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshContextFromHistory bool) error {
+	if err := restoreRuntimeSessionIntoCLIWithOptions(session, refreshContextFromHistory); err != nil {
+		return err
+	}
+	return syncRuntimeSessionFromChat(session)
+}
+
+// restoreRuntimeSessionIntoCLI 是 P2-1 的只读恢复变体（docs/plan/aicli-stream-
+// pipeline-performance-audit-and-optimization-plan-20261011.md §4）：只做
+// Load + CLI 状态恢复 + token 快照，不落盘——turn 收尾的多次全量 Update
+// 由调用方合并为一次最终写（与 usage / reconciler 状态一起）。
+func restoreRuntimeSessionIntoCLI(session *ChatSession) error {
+	return restoreRuntimeSessionIntoCLIWithOptions(session, true)
+}
+
+func restoreRuntimeSessionIntoCLIWithOptions(session *ChatSession, refreshContextFromHistory bool) error {
 	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
 		return nil
 	}
@@ -687,7 +707,7 @@ func syncRuntimeSessionBackIntoCLIWithOptions(session *ChatSession, refreshConte
 		}
 		applyChatContextTokensFromUsage(session, &runtimetypes.TokenUsage{TotalTokens: providerContextTokens}, providerContextWindowTokens, true)
 	}
-	return syncRuntimeSessionFromChat(session)
+	return nil
 }
 
 func resolveActorExecutorResponse(output string, session *ChatSession, previousAssistant string) string {

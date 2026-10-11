@@ -62,6 +62,13 @@ func runPostTurnReconcilersAndSync(session *ChatSession) error {
 	return err
 }
 
+// runPostTurnReconcilersReported 运行全部 post-turn reconciler 并上抛错误，
+// 但不做落盘 sync（P2-1：turn 收尾的落盘由调用方的最终单次写统一承载）。
+func runPostTurnReconcilersReported(session *ChatSession) error {
+	_, err := runPostTurnReconcilers(session)
+	return err
+}
+
 func formatPostTurnReconcileDebug(names []string, changedNames []string, errors []string) string {
 	payload := map[string]interface{}{
 		"names": names,
