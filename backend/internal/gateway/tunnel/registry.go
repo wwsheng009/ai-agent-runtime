@@ -68,6 +68,35 @@ func (r *Registry) Remove(nodeID string) {
 	delete(r.nodes, nodeID)
 }
 
+// RemoveSession deletes one session entry from a node, reporting whether the
+// node and session existed. Used by the console "remove" action to clear dead
+// entries (typically stale snapshot sessions that will never resolve).
+func (r *Registry) RemoveSession(nodeID, sessionID string) bool {
+	if r == nil || nodeID == "" || sessionID == "" {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	node, ok := r.nodes[nodeID]
+	if !ok {
+		return false
+	}
+	out := node.Sessions[:0]
+	found := false
+	for _, s := range node.Sessions {
+		if s.SessionID == sessionID {
+			found = true
+			continue
+		}
+		out = append(out, s)
+	}
+	if !found {
+		return false
+	}
+	node.Sessions = out
+	return true
+}
+
 // Get returns a copy of the node record.
 func (r *Registry) Get(nodeID string) (*Node, bool) {
 	if r == nil {

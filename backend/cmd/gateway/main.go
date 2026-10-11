@@ -402,6 +402,29 @@ func run() int {
 	router.Handle("/api/nodes", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": registry.List()})
 	}))).Methods(http.MethodGet)
+	// Owner-protected registry cleanup: remove a stale node or a dead session
+	// entry (docs/gateway/10-runbook.md — orphan snapshot rows never resolve on
+	// their own). Live agents simply re-register on their next sync, so the
+	// operation is safe on both.
+	router.Handle("/api/nodes/{node_id}", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nodeID := mux.Vars(r)["node_id"]
+		registry.Remove(nodeID)
+		auditLog.Record(audit.Event{Type: audit.TypeNodeRemoved, Detail: nodeID, IP: resolver.ClientIP(r)})
+		hub.notify()
+		notifier.observe(registry.List())
+		writeJSON(w, http.StatusOK, map[string]any{"removed": nodeID})
+	}))).Methods(http.MethodDelete)
+	router.Handle("/api/nodes/{node_id}/sessions/{session_id}", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		nodeID, sessionID := vars["node_id"], vars["session_id"]
+		removed := registry.RemoveSession(nodeID, sessionID)
+		if removed {
+			auditLog.Record(audit.Event{Type: audit.TypeSessionRemoved, Detail: nodeID + "/" + sessionID, IP: resolver.ClientIP(r)})
+			hub.notify()
+			notifier.observe(registry.List())
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "node": nodeID, "session": sessionID})
+	}))).Methods(http.MethodDelete)
 	router.Handle("/api/metrics", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"requests_total":       metrics.requests.Load(),

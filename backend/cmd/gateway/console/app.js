@@ -44,6 +44,15 @@
     });
   }
 
+  function notify(text, kind) {
+    var n = document.createElement("div");
+    n.className = "toast" + (kind ? " toast-" + kind : "");
+    n.textContent = text;
+    n.addEventListener("click", function () { n.remove(); });
+    document.body.appendChild(n);
+    setTimeout(function () { n.remove(); }, 3500);
+  }
+
   function setAuthed(authed) {
     el("login").hidden = authed;
     el("app").hidden = !authed;
@@ -240,7 +249,10 @@
         '<div class="s-title"><span class="dot ' + (node.stale ? "offline" : "live") + '"></span><span class="s-name"></span></div>' +
         '<span class="attention" hidden></span><span class="s-time"></span>' +
         '<div class="s-node"></div>' +
-        (s.preview ? '<div class="s-preview"></div>' : "");
+        (s.preview ? '<div class="s-preview"></div>' : "") +
+        '<div class="s-actions"><button class="btn ghost sm" data-open>打开</button>' +
+        (node.stale ? '<button class="btn danger sm" data-remove>移除</button>' : '') +
+        '</div>';
       card.querySelector(".s-name").textContent = sessionLabelOf(s);
       card.querySelector(".s-node").textContent =
         (node.name || node.node_id) + " · " + (node.kind || "agent");
@@ -255,6 +267,21 @@
       if (time) { t.textContent = time; } else { t.hidden = true; }
       if (s.preview) { card.querySelector(".s-preview").textContent = s.preview; }
       card.addEventListener("click", function () { openSession(node, s); });
+      card.querySelector("[data-open]").addEventListener("click", function (e) {
+        e.stopPropagation();
+        openSession(node, s);
+      });
+      var rmBtn = card.querySelector("[data-remove]");
+      if (rmBtn) {
+        rmBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (!window.confirm("从注册表移除该会话条目？\n（仅清除网关侧快照，不影响 agent 上的会话数据。）")) { return; }
+          api("/api/nodes/" + encodeURIComponent(node.node_id) +
+              "/sessions/" + encodeURIComponent(s.session_id), { method: "DELETE" })
+            .then(function () { notify("会话条目已移除", "ok"); loadNodes(); })
+            .catch(function (err) { notify("移除失败：" + err, "error"); });
+        });
+      }
       host.appendChild(card);
     });
   }
@@ -354,6 +381,23 @@
       });
       actions.appendChild(open);
     }
+    // Snapshot rows never resolve on their own; give the operator a cleanup
+    // action. Live nodes are protected (removing them would just be undone by
+    // the next heartbeat sync and would confuse more than help).
+    if (node.stale) {
+      var rm = document.createElement("button");
+      rm.className = "btn danger sm";
+      rm.type = "button";
+      rm.textContent = "移除";
+      rm.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (!window.confirm("移除离线快照节点 " + (node.name || node.node_id) + "？\n该节点的所有会话条目会一并删除（agent 重新上线会自动重新注册）。")) { return; }
+        api("/api/nodes/" + encodeURIComponent(node.node_id), { method: "DELETE" })
+          .then(function () { notify("节点已移除：" + (node.name || node.node_id), "ok"); loadNodes(); })
+          .catch(function (err) { notify("移除失败：" + err, "error"); });
+      });
+      actions.appendChild(rm);
+    }
     return card;
   }
 
@@ -387,9 +431,72 @@
     }
   }
 
+  function renderAttentionBreakdown(nodes) {
+    var panel = el("attention-breakdown");
+    if (!panel) { return; }
+    var counts = { approval: 0, question: 0, error: 0, completed: 0 };
+    var any = false;
+    (nodes || []).forEach(function (node) {
+      if (node.stale) { return; }
+      (node.sessions || []).forEach(function (s) {
+        if (s.attention && counts[s.attention] !== undefined) {
+          counts[s.attention]++;
+          any = true;
+        }
+      });
+    });
+    panel.hidden = !any;
+    ["approval", "question", "error", "completed"].forEach(function (k) {
+      var n = el("attn-" + k);
+      if (n) { n.textContent = String(counts[k]); }
+    });
+  }
+
+  function renderActivityFeed(nodes) {
+    var host = el("activity-feed");
+    if (!host) { return; }
+    // Aggregate: every session with an updated_at, newest first, cap 8.
+    var items = allSessions(nodes).filter(function (item) {
+      return item.session.updated_at;
+    }).sort(function (a, b) {
+      return new Date(b.session.updated_at) - new Date(a.session.updated_at);
+    }).slice(0, 8);
+    host.innerHTML = "";
+    if (!items.length) {
+      host.innerHTML = '<p class="empty">暂无会话活动。</p>';
+      return;
+    }
+    items.forEach(function (item) {
+      var s = item.session;
+      var row = document.createElement("div");
+      row.className = "activity-row";
+      var when = new Date(s.updated_at);
+      var fresh = (Date.now() - when.getTime()) < 5 * 60 * 1000;
+      row.innerHTML =
+        '<span class="dot ' + (item.node.stale ? "offline" : "live") + '"></span>' +
+        '<div class="activity-main">' +
+        '<span class="activity-title"></span>' +
+        '<span class="activity-when"></span>' +
+        '</div>';
+      row.querySelector(".activity-title").textContent =
+        (item.node.name || item.node.node_id) + " · " + sessionLabelOf(s) +
+        (s.attention ? "（" + attentionLabel(s.attention) + "）" : "");
+      row.querySelector(".activity-when").textContent =
+        when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
+        (fresh ? " · 刚刚" : "");
+      if (fresh) { row.classList.add("fresh"); }
+      row.addEventListener("click", function () { openSession(item.node, s); });
+      host.appendChild(row);
+    });
+    var win = el("activity-window");
+    if (win) { win.textContent = "最近 " + items.length + " 条"; }
+  }
+
   function renderAll(nodes) {
     updateStats(nodes);
     renderInbox(nodes);
+    renderAttentionBreakdown(nodes);
+    renderActivityFeed(nodes);
     renderNodeLists(nodes);
     renderSessionTable(nodes);
   }
@@ -406,15 +513,38 @@
     }
     devices.forEach(function (d) {
       var card = document.createElement("div");
-      card.className = "card";
+      card.className = "card" + (d.revoked ? " offline" : "");
       card.innerHTML =
         '<div class="card-head"><span class="card-title"></span><span class="badge"></span></div>' +
+        '<div class="device-token-row"><code class="device-prefix"></code><button class="btn ghost sm" data-copy>复制前缀</button></div>' +
         '<div class="card-meta"></div>' +
-        '<div class="card-actions"><button class="btn danger sm" data-revoke>撤销</button></div>';
+        '<div class="card-actions"><button class="btn danger sm" data-revoke>撤销令牌</button></div>';
       card.querySelector(".card-title").textContent = d.name || d.id;
-      card.querySelector(".badge").textContent = d.revoked ? "已撤销" : d.prefix + "…";
-      card.querySelector(".card-meta").textContent = "id " + d.id;
+      card.querySelector(".badge").textContent = d.revoked ? "已撤销" : "有效";
+      var prefixEl = card.querySelector(".device-prefix");
+      prefixEl.textContent = d.prefix + "…";
+      if (d.revoked) { prefixEl.style.textDecoration = "line-through"; }
+      var meta = card.querySelector(".card-meta");
+      meta.textContent = "id " + d.id + " · 签发于 " +
+        (d.created_at ? new Date(d.created_at).toLocaleString() : "—") +
+        (d.last_used && d.last_used.indexOf("0001") === -1
+          ? " · 最近使用 " + new Date(d.last_used).toLocaleString() : "");
+      card.querySelector("[data-copy]").addEventListener("click", function () {
+        var done = function () { this.textContent = "已复制 ✓"; }.bind(this);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(d.prefix).then(done, done);
+        } else {
+          var ta = document.createElement("textarea");
+          ta.value = d.prefix;
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand("copy"); } catch (err) { /* legacy */ }
+          ta.remove();
+          done();
+        }
+      });
       card.querySelector("[data-revoke]").addEventListener("click", function () {
+        if (!window.confirm("撤销令牌 " + (d.name || d.id) + "？使用它的 agent 将无法再注册。")) { return; }
         api("/api/devices/" + encodeURIComponent(d.id), { method: "DELETE" }).then(loadDevices);
       });
       list.appendChild(card);
@@ -567,7 +697,10 @@
           keys: json.keys || {},
           label: (navigator.platform || "") + (navigator.userAgent.indexOf("Mobile") !== -1 ? " mobile" : ""),
         }),
-      }).then(function () { setPushLabel("🔔 关闭通知"); });
+      }).then(function (r) {
+        if (!r.res.ok) { throw new Error("网关订阅失败（HTTP " + r.res.status + "）"); }
+        setPushLabel("🔔 关闭通知");
+      });
     });
   }
 
@@ -653,12 +786,26 @@
   var refreshNodes = el("refresh-nodes");
   if (refreshNodes) { refreshNodes.addEventListener("click", function () { loadNodes(); }); }
 
+  var pushBusy = false;
   el("push-toggle").addEventListener("click", function () {
+    if (pushBusy) { return; }
     var enabling = el("push-toggle").textContent.indexOf("开启") !== -1;
-    Promise.resolve(enabling ? enablePush() : disablePush()).catch(function () {
-      el("login-error").textContent = "通知操作失败（请检查浏览器权限）";
-      el("login-error").hidden = false;
-    });
+    pushBusy = true;
+    var btn = el("push-toggle");
+    btn.textContent = "⏳ " + (enabling ? "开启中…" : "关闭中…");
+    btn.disabled = true;
+    Promise.resolve(enabling ? enablePush() : disablePush())
+      .then(function () {
+        notify(enabling ? "已开启通知" : "已关闭通知", "ok");
+      })
+      .catch(function (err) {
+        setPushLabel(enabling ? "🔔 开启通知" : "🔔 关闭通知");
+        notify("通知操作失败：" + (err && err.message ? err.message : "请检查浏览器通知权限"), "error");
+      })
+      .finally(function () {
+        pushBusy = false;
+        btn.disabled = false;
+      });
   });
 
   // Mobile sidebar

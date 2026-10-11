@@ -97,6 +97,16 @@
             <a class="stat attention" href="#sessions?attention=1"><span class="stat-num" id="stat-attention">0</span><span class="stat-label">待处理</span></a>
           </div>
 
+          <div class="attention-breakdown panel" id="attention-breakdown" hidden>
+            <div class="panel-head"><h2>待处理构成</h2></div>
+            <div class="attn-row">
+              <a class="attn-chip att-approval" href="#sessions?attention=1" data-kind="approval">待审批 <b id="attn-approval">0</b></a>
+              <a class="attn-chip att-question" href="#sessions?attention=1" data-kind="question">待回答 <b id="attn-question">0</b></a>
+              <a class="attn-chip att-error" href="#sessions?attention=1" data-kind="error">出错 <b id="attn-error">0</b></a>
+              <a class="attn-chip att-completed" href="#sessions?attention=1" data-kind="completed">已完成 <b id="attn-completed">0</b></a>
+            </div>
+          </div>
+
           <div class="dash-grid">
             <section class="panel inbox" id="inbox-panel">
               <div class="panel-head">
@@ -107,10 +117,18 @@
             </section>
 
             <section class="panel">
-              <div class="panel-head"><h2>节点概览</h2></div>
-              <div id="dash-node-list" class="list"></div>
+              <div class="panel-head">
+                <h2>最近活动</h2>
+                <span class="badge" id="activity-window"></span>
+              </div>
+              <div id="activity-feed" class="list"></div>
             </section>
           </div>
+
+          <section class="panel" style="margin-top: 12px;">
+            <div class="panel-head"><h2>节点概览</h2></div>
+            <div id="dash-node-list" class="list"></div>
+          </section>
         </section>
 
         <!-- 会话 -->

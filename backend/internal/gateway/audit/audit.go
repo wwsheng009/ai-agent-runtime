@@ -21,6 +21,8 @@ const (
 	TypeRateLimited        = "rate_limited"
 	TypeTunnelConnected    = "tunnel_connected"
 	TypeTunnelDisconnected = "tunnel_disconnected"
+	TypeNodeRemoved        = "node_removed"
+	TypeSessionRemoved     = "session_removed"
 )
 
 // Event is one audit record.
