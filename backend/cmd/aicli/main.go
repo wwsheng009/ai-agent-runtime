@@ -173,6 +173,8 @@ func main() {
 			listenHost, listenPort := loopbackServerHostPort(pprofHandle)
 			if listenPort > 0 {
 				mesh.SetProcessEndpoint(listenHost, listenPort)
+				// 网关接入：把本机回环地址与写令牌告诉 agent，作为反向代理目标。
+				commands.SetChatGatewayLoopbackEndpoint(listenHost, listenPort, commands.EnsureChatWebAuthToken())
 				// mesh：节点档案补上 endpoint/auth/capabilities，本节点从此可被
 				// 其他节点调用（architecture §3.1 / §4.1）。
 				if meshHost != nil {

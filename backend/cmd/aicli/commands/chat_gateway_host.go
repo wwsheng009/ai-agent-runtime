@@ -37,6 +37,9 @@ func attachChatGateway(session *ChatSession) {
 		return
 	}
 	controller := gatewayagent.NewController(cfg, chatGatewayRegisterFunc(cfg))
+	// Point the agent at this process's loopback web server (recorded by
+	// cmd/aicli once it is listening) before the auto-connect dial.
+	controller.SetForward(chatGatewayForwardConfig())
 	session.Gateway = controller
 	if !cfg.AutoConnect {
 		return
