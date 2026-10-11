@@ -837,11 +837,12 @@ func (c *chatInteractionCoordinator) unifiedSceneActiveCellActionLocked() ui.UIA
 	if actor == nil {
 		return nil
 	}
-	snapshot := c.session.RuntimeEventBridge.sceneSnapshot()
-	if snapshot == nil {
+	// P1-1：delta 热路径 O(1) 直取可变 cell，不再逐 chunk 重建 O(cells) 快照。
+	cell := c.session.RuntimeEventBridge.activeMutableCell()
+	if cell == nil {
 		return nil
 	}
-	next, ok := ui.ActiveCellFromSnapshot(snapshot)
+	next, ok := ui.ActiveCellFromTranscriptCell(cell)
 	if !ok || next.Phase != ui.ActiveCellMutable {
 		return nil
 	}
@@ -1260,6 +1261,15 @@ func (c *chatInteractionCoordinator) applyRuntimeEventActionWithContext(action u
 	// the event's mapping transaction succeeds, then make the AppState mirror a
 	// causal follow-up of this RuntimeEvent. This never derives transcript from
 	// the terminal, ScreenModel, or legacy historyWindow.
+	// P1-1：先走 O(1) 活跃 cell 快路径——同一 cell 的后续 delta 已由因果
+	// UpdateActiveCellAction 投影，无需为每个 chunk 构建整快照；快路径判定
+	// 需要替换时才回退全量 Snapshot（挂载/turn 边界，低频）。
+	if cell := payload.bridge.activeMutableCell(); cell != nil {
+		if next, ok := ui.ActiveCellFromTranscriptCell(cell); ok &&
+			!c.runtimeEventNeedsTranscriptReplaceForCell(payload.bridge, payload.event, next) {
+			return
+		}
+	}
 	if snapshot := payload.bridge.sceneSnapshot(); snapshot != nil {
 		if c.runtimeEventNeedsTranscriptReplace(payload.bridge, payload.event, snapshot) {
 			// Carry the windowed-load delivery hold through the causal delta path.
@@ -1289,14 +1299,23 @@ func (c *chatInteractionCoordinator) runtimeEventNeedsTranscriptReplace(bridge *
 	if c == nil || snapshot == nil {
 		return true
 	}
+	next, ok := ui.ActiveCellFromSnapshot(snapshot)
+	if !ok || next.Phase != ui.ActiveCellMutable {
+		return true
+	}
+	return c.runtimeEventNeedsTranscriptReplaceForCell(bridge, event, next)
+}
+
+// runtimeEventNeedsTranscriptReplaceForCell 是替换判据的 cell 直取形态
+// （P1-1）：判据只消费活跃 cell 与 actor 状态，不需要整快照。
+func (c *chatInteractionCoordinator) runtimeEventNeedsTranscriptReplaceForCell(bridge *chatRuntimeEventBridge, event runtimeevents.Event, next ui.ActiveCellState) bool {
+	if c == nil {
+		return true
+	}
 	if c.session == nil || !c.UnifiedRendererEnabled() || !shouldRenderInteractiveOutput(c.session) {
 		return true
 	}
 	if bridge == nil || !bridge.isPrimarySessionEvent(event) {
-		return true
-	}
-	next, ok := ui.ActiveCellFromSnapshot(snapshot)
-	if !ok || next.Phase != ui.ActiveCellMutable {
 		return true
 	}
 	expectedKind := scene.KindAssistant

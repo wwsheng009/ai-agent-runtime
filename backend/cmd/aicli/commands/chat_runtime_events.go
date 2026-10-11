@@ -4244,6 +4244,23 @@ func (b *chatRuntimeEventBridge) sceneSnapshot() *scene.Snapshot {
 	return b.renderScene.Snapshot()
 }
 
+// activeMutableCell 以 O(1) 快路径返回当前可变 cell（P1-1）：delta 热路径
+// 不再为投影一个 cell 重建 O(cells) 的 Snapshot。只需要活跃 cell 的调用方
+// 必须用本方法而不是 sceneSnapshot；需要整快照（挂载/替换/诊断）时仍走
+// sceneSnapshot。
+func (b *chatRuntimeEventBridge) activeMutableCell() *scene.TranscriptCell {
+	if b == nil {
+		return nil
+	}
+	b.sceneMu.RLock()
+	defer b.sceneMu.RUnlock()
+	if b.renderScene == nil {
+		return nil
+	}
+	cell, _ := b.renderScene.MutableCell()
+	return cell
+}
+
 // sceneStats 返回 Scene 映射统计（/debug 诊断用）。
 func (b *chatRuntimeEventBridge) sceneStats() (cells, revision, failures uint64, lastErr string) {
 	if b == nil {

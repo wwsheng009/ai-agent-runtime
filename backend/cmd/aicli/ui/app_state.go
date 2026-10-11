@@ -399,6 +399,13 @@ func ActiveCellFromSnapshot(snapshot *scene.Snapshot) (ActiveCellState, bool) {
 	return ActiveCellState{}, false
 }
 
+// ActiveCellFromTranscriptCell 是 activeCellFromTranscriptCell 的导出包装：
+// P1-1 的 O(1) 活跃 cell 直取路径使用——调用方经 scene.MutableCell 拿 cell，
+// 不必为投影一个 cell 构建全量 Snapshot。
+func ActiveCellFromTranscriptCell(cell *scene.TranscriptCell) (ActiveCellState, bool) {
+	return activeCellFromTranscriptCell(cell)
+}
+
 func activeCellFromTranscriptCell(cell *scene.TranscriptCell) (ActiveCellState, bool) {
 	if cell == nil || cell.Phase != scene.CellMutable {
 		return ActiveCellState{}, false

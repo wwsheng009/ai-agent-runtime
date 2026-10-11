@@ -197,6 +197,10 @@ type TuiScene struct {
 	lastSnapshot   *Snapshot
 	byID           map[CellID]*TranscriptCell
 	byChain        map[string]*TranscriptCell // ChainKey -> 链首 cell（仅供校验）
+	// P1-1：可变 cell 的 O(1) 快路径缓存（见 MutableCell）。调用方与
+	// Snapshot 同一场景锁临界区，无独立同步。
+	mutableCellID     CellID
+	mutableCellCached bool
 }
 
 // New 创建空 Scene。
@@ -234,6 +238,40 @@ func (s *TuiScene) Cells() []*TranscriptCell {
 		out = append(out, c)
 	}
 	return out
+}
+
+// MutableCell 返回当前可消费的可变 cell（P1-1，docs/plan/aicli-stream-
+// pipeline-performance-audit-and-optimization-plan-20261011.md §3）：delta
+// 热路径逐 chunk 调用，此前只能构建 O(cells) 的 Snapshot 再正扫；这里缓存
+// 上次命中的 cell ID，命中时经 byID O(1) 验证，失效（cell 终态化/换 cell）
+// 时退化一次全扫并更新缓存。多可变 cell 并存不是合法场景状态：单活跃 cell
+// 不变式下，缓存命中语义与 ActiveCellFromSnapshot 的「首个可消费可变 cell」
+// 等价。调用方持有场景锁（与 Snapshot 同一临界区）。
+func (s *TuiScene) MutableCell() (*TranscriptCell, bool) {
+	if s == nil {
+		return nil, false
+	}
+	if s.mutableCellCached {
+		if cell, ok := s.byID[s.mutableCellID]; ok && mutableCellEligible(cell) {
+			return cell, true
+		}
+		s.mutableCellCached = false
+	}
+	for _, cell := range s.cells {
+		if mutableCellEligible(cell) {
+			s.mutableCellID = cell.ID
+			s.mutableCellCached = true
+			return cell, true
+		}
+	}
+	return nil, false
+}
+
+// mutableCellEligible 与 ui.activeCellFromTranscriptCell 的可消费判据一致：
+// 可变 + 非空 reasoning 占位（历史排序栅栏不进活动带）。两处必须同步演进。
+func mutableCellEligible(cell *TranscriptCell) bool {
+	return cell != nil && cell.Phase == CellMutable &&
+		!(cell.Kind == KindReasoning && cell.Source == "")
 }
 
 // Cell 按 ID 查询。COW 语义下返回只读引用（调用方不得修改）。
