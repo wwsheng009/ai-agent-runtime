@@ -1,7 +1,7 @@
-# 实施状态（P0 + P1 + P2 + P3）
+# 实施状态（P0–P4）
 
 > 依据：[`analysis-and-implementation-plan.md`](./analysis-and-implementation-plan.md) §10 统一路线图。
-> 状态：**P0–P3 已完成并分批提交**；P4（E2 micro web + E3 TUI）起未开始。
+> 状态：**P0–P4 已完成并分批提交**；P5（内嵌执行）起未开始。
 
 ---
 
@@ -18,6 +18,7 @@
 | `cdf46221` | P1f：子 Agent 拒绝 + 归档准入 |
 | `aea74ee3` | P2：守护进程服务化（D1–D3） |
 | `c82faf1a` | P3：E1 frontend 自动化任务面板 |
+| `930f5415` | P4：E2 micro web 任务页签 + E3 TUI /schedule |
 
 ## 2. 已交付
 
@@ -64,6 +65,16 @@
   content 宽度 / requiresSession=false）。
 - i18n：zh-CN 与 en-US 的 `panels-schedule` 模块 + `shell.panelTabs.schedule`。
 
+### P4（E2 micro web + E3 TUI）
+- **E2**：`web/js/schedule.js`（任务目录模块：进入即重拉、两段式删除确认、esc
+  转义）+ `index.html` 页签/面板 + `ui.js`/`app.js` 接线 + `style.css`（全部走
+  已定义 token）+ `scripts/verify-micro-web-schedule.mjs`（静态契约 + 迷你 DOM
+  行为验证全过）。
+- **E3**：TUI `/schedule [all|active|inactive]` 只读目录命令
+  （`chat_schedule_command.go`，数据面 = `session.LocalRuntimeHost.Schedule`
+  in-process store，与 `schedule_*` 工具同源）；`command.go` 路由 + legacy 出口、
+  C12 inline/read 注册、slash 补全条目与一致性测试同步。
+
 ## 3. 与设计的差异（诚实记录）
 
 | 设计 | 实现 | 说明 |
@@ -92,8 +103,7 @@ go vet（相关包）  ✅
 
 - **P2 余项**：`DrainPendingMessages` 尚未接进宿主启动路径（当前由 daemon
   暴露能力，宿主激活会话时调用即可补上）；pending 消息的死信上限。
-- **P3 余项**：全局页 `/runtime/schedule`（当前只有右侧栏面）；
+- **P3 余项**：全局页 `/runtime/schedule`（E1 右侧栏面 + E2/E3 页签已覆盖主要场景）；
   `schedule.changed` SSE 事件名对齐（hook 目前按 `schedule` 前缀匹配）。
-- **P4**：E2 micro web + E3 TUI。
 - **P5**：内嵌执行（E0–E3）。
 - **P6**：E4 gateway、观测收敛、作业终态→提醒桥。
