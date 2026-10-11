@@ -403,6 +403,53 @@ a.stat:hover {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   margin-top: 1px;
 }
+
+/* Full last message block: multi-line, unlike the one-line preview. */
+.session-card .s-last {
+  grid-column: 1 / -1;
+  margin-top: 3px;
+  padding: 7px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px; line-height: 1.55; color: var(--fg);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 9.5em; overflow-y: auto;
+}
+.session-card .s-last-role {
+  display: inline-block;
+  font-size: 10.5px; font-weight: 600;
+  padding: 1px 7px; border-radius: 999px;
+  margin-right: 7px; vertical-align: 1px;
+  background: var(--bg); color: var(--fg-faint);
+  border: 1px solid var(--border);
+}
+.session-card .s-last-role.role-user { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.session-card .s-last-role.role-assistant { background: rgba(80, 160, 110, 0.16); color: var(--ok); border-color: transparent; }
+
+/* Inline reply form (one per live session card with the "input" capability). */
+.session-card .s-reply {
+  grid-column: 1 / -1;
+  margin-top: 3px;
+  display: flex; flex-direction: column; gap: 5px;
+}
+.session-card .s-reply .s-reply-input {
+  width: 100%;
+  resize: vertical; min-height: 44px; max-height: 180px;
+  font: inherit; font-size: 12.5px;
+  padding: 7px 9px;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+.session-card .s-reply .s-reply-input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.session-card .s-reply .s-reply-row {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+}
+.session-card .s-reply .s-reply-hint { font-size: 11.5px; color: var(--fg-faint); margin-right: auto; }
 .session-card .s-badge { grid-column: 2; justify-self: end; }
 .session-card .s-time {
   grid-column: 3;

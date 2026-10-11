@@ -220,10 +220,80 @@
     if (sessionFilterKind === "offline" && !item.node.stale) { return false; }
     if (sessionFilterText) {
       var q = sessionFilterText.toLowerCase();
-      var hay = ((s.title || "") + " " + (s.preview || "") + " " + s.session_id).toLowerCase();
+      var hay = ((s.title || "") + " " + (s.preview || "") + " " + (s.last_message || "") + " " + s.session_id).toLowerCase();
       if (hay.indexOf(q) === -1) { return false; }
     }
     return true;
+  }
+
+  var ROLE_LABELS = { user: "用户", assistant: "助手", tool: "工具", system: "系统" };
+
+  function roleLabelOf(role) {
+    return ROLE_LABELS[role] || (role || "消息");
+  }
+
+  // Reply box rendered inside each session card. It posts through the gateway
+  // reverse proxy (/n/{node}/web/api/input) to the agent's own input endpoint:
+  // the agent's forwarder injects the local write token and rewrites Origin,
+  // so no extra auth wiring is needed here. Rendered only when the node
+  // advertises the "input" capability (older agents keep the old card).
+  function buildReplyForm(node, session) {
+    var form = document.createElement("form");
+    form.className = "s-reply";
+    form.innerHTML =
+      '<textarea class="s-reply-input" rows="2" placeholder="回复该会话…（Enter 发送，Shift+Enter 换行）"></textarea>' +
+      '<div class="s-reply-row"><span class="s-reply-hint" hidden></span>' +
+      '<button class="btn sm" type="submit">发送</button></div>';
+    var input = form.querySelector(".s-reply-input");
+    var hint = form.querySelector(".s-reply-hint");
+    var busy = false;
+    // Keep clicks inside the reply box from triggering the card's "open
+    // session" navigation handler.
+    form.addEventListener("click", function (e) { e.stopPropagation(); });
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var text = (input.value || "").trim();
+      if (!text || busy) { return; }
+      if (node.stale) {
+        notify("节点「" + (node.name || node.node_id) + "」离线，无法回复。", "error");
+        return;
+      }
+      busy = true;
+      hint.textContent = "发送中…";
+      hint.hidden = false;
+      api("/n/" + encodeURIComponent(node.node_id) + "/web/api/input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: text })
+      }).then(function (res) {
+        return res.json().catch(function () { return null; }).then(function (body) {
+          if (!res.ok) {
+            throw new Error((body && body.reason) || ("HTTP " + res.status));
+          }
+          if (body && body.status === "queued") {
+            notify("已发送到会话：" + sessionLabelOf(session), "ok");
+            input.value = "";
+            hint.hidden = true;
+            hint.textContent = "";
+          } else {
+            throw new Error((body && body.reason) || (body && body.status) || "发送被拒绝");
+          }
+        });
+      }).catch(function (err) {
+        notify("回复失败：" + err.message, "error");
+        hint.textContent = "发送失败，可重试";
+      }).finally(function () {
+        busy = false;
+      });
+    });
+    // Enter submits; Shift+Enter inserts a newline (textarea default).
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        form.dispatchEvent(new Event("submit", { cancelable: true }));
+      }
+    });
+    return form;
   }
 
   function sessionSorter(a, b) {
@@ -257,6 +327,7 @@
         '<span class="att-badge s-badge" hidden></span><span class="s-time"></span>' +
         '<div class="s-node"></div>' +
         (s.preview ? '<div class="s-preview"></div>' : "") +
+        '<div class="s-last" hidden></div>' +
         '<div class="s-actions"><button class="btn ghost sm" data-open>打开</button>' +
         (node.stale ? '<button class="btn danger sm" data-remove>移除</button>' : '') +
         '</div>';
@@ -273,11 +344,34 @@
       var time = timeOf(s);
       if (time) { t.textContent = time; } else { t.hidden = true; }
       if (s.preview) { card.querySelector(".s-preview").textContent = s.preview; }
+      // Full last message (multi-line, unlike the one-line preview). Falls back
+      // to the preview when the agent build predates the field.
+      var lastBlock = card.querySelector(".s-last");
+      var lastText = s.last_message || "";
+      if (lastText) {
+        var role = s.last_message_role || "";
+        var label = document.createElement("span");
+        label.className = "s-last-role" + (role ? " role-" + role : "");
+        label.textContent = roleLabelOf(role);
+        var body = document.createElement("span");
+        body.className = "s-last-text";
+        body.textContent = lastText;
+        lastBlock.appendChild(label);
+        lastBlock.appendChild(body);
+        lastBlock.hidden = false;
+      }
       card.addEventListener("click", function () { openSession(node, s); });
       card.querySelector("[data-open]").addEventListener("click", function (e) {
         e.stopPropagation();
         openSession(node, s);
       });
+      // Inline reply: POST through the gateway reverse proxy to the agent's
+      // own /web/api/input (the agent injects its local write token and the
+      // route allowlist already covers /web). Gated on the agent advertising
+      // the "input" capability so stale agents just hide the form.
+      if (!node.stale && (node.capabilities || []).indexOf("input") !== -1) {
+        card.appendChild(buildReplyForm(node, s));
+      }
       var rmBtn = card.querySelector("[data-remove]");
       if (rmBtn) {
         rmBtn.addEventListener("click", function (e) {

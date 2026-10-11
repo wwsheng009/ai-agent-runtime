@@ -59,16 +59,57 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	if p := session.RuntimeSession.BuildPreview(); p != nil {
 		preview = strings.TrimSpace(p.Summary)
 	}
+	lastRole, lastMessage := chatGatewayLastMessage(session)
 	updatedAt := session.RuntimeSession.UpdatedAt
 	return []wire.SessionSummary{{
-		SessionID: id,
-		Title:     chatMeshSessionTitle(session),
-		State:     state,
-		Attention: st.Attention,
-		Busy:      st.Busy,
-		Preview:   preview,
-		UpdatedAt: updatedAt,
+		SessionID:       id,
+		Title:           chatMeshSessionTitle(session),
+		State:           state,
+		Attention:       st.Attention,
+		Busy:            st.Busy,
+		Preview:         preview,
+		LastMessageRole: lastRole,
+		LastMessage:     lastMessage,
+		UpdatedAt:       updatedAt,
 	}}
+}
+
+// chatGatewayLastMessageLimit caps the inline "last message" payload sent to
+// the gateway. It is deliberately larger than the 120-char preview (the console
+// renders the full text) but bounded so heartbeats/registry snapshots and the
+// SSE broadcast stay cheap even for huge transcripts.
+const chatGatewayLastMessageLimit = 2000
+
+// chatGatewayLastMessage returns the truncated role+content of the session's
+// last visible message for the gateway console session row.
+func chatGatewayLastMessage(session *ChatSession) (role, content string) {
+	if session == nil || session.RuntimeSession == nil {
+		return "", ""
+	}
+	msg := session.RuntimeSession.LastMessage()
+	if msg == nil {
+		return "", ""
+	}
+	content = strings.TrimSpace(msg.Content)
+	if content == "" && len(msg.ContentParts) > 0 {
+		// Multimodal turns: surface the text parts; image-only messages fall
+		// back to a placeholder instead of an empty block.
+		var parts []string
+		for _, part := range msg.ContentParts {
+			if strings.TrimSpace(part.Text) != "" {
+				parts = append(parts, strings.TrimSpace(part.Text))
+			}
+		}
+		content = strings.Join(parts, "\n")
+		if content == "" {
+			content = "[附件/图片]"
+		}
+	}
+	runes := []rune(content)
+	if len(runes) > chatGatewayLastMessageLimit {
+		content = string(runes[:chatGatewayLastMessageLimit]) + "…"
+	}
+	return strings.TrimSpace(msg.Role), content
 }
 
 // syncChatGatewaySession pushes the current session list to the gateway. It is

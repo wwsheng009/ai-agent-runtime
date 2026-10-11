@@ -55,6 +55,12 @@ type SessionSummary struct {
 	TurnID    string         `json:"turn_id,omitempty"`
 	UpdatedAt time.Time      `json:"updated_at,omitempty"`
 	Preview   string         `json:"preview,omitempty"`
+	// LastMessage / LastMessageRole expose the latest transcript message (role
+	// "user"|"assistant"|"tool"|...) so the gateway console can render the full
+	// last turn inline. The agent truncates the content (2000 runes) before
+	// sending; the gateway treats both fields as opaque display strings.
+	LastMessageRole string `json:"last_message_role,omitempty"`
+	LastMessage     string `json:"last_message,omitempty"`
 	Workspace *WorkspaceInfo `json:"workspace,omitempty"`
 }
 
