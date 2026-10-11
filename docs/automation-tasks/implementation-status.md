@@ -1,7 +1,7 @@
-# 实施状态（P0–P4 + P5 机制）
+# 实施状态（P0–P4 + P5 机制；主链路完整）
 
 > 依据：[`analysis-and-implementation-plan.md`](./analysis-and-implementation-plan.md) §10 统一路线图。
-> 状态：**P0–P4 已完成并分批提交；P5 机制层就绪**（E0 完整执行栈待路径 B 重构）。
+> 状态：**P0–P4 全量 + 全局页 + 四缺口修复 已提交**；P5 机制层就绪（E0 完整执行栈待路径 B 重构）；P6 为增强项。
 
 ---
 
@@ -20,6 +20,7 @@
 | `c82faf1a` | P3：E1 frontend 自动化任务面板 |
 | `930f5415` | P4：E2 micro web 任务页签 + E3 TUI /schedule |
 | `ed3f6e0f` | 缺口修复：drain 接线 / schedule.changed / 搜索地平线 / 死锁 |
+| `e668a252` | 全局页 /runtime/schedule（P3 余项收敛） |
 
 ## 2. 已交付
 
@@ -112,8 +113,6 @@ go vet（相关包）  ✅
 
 ## 5. 未完成（后续阶段）
 
-- **全局页**：`/runtime/schedule` 独立路由页（E1 右侧栏面 + E2/E3 页签已覆盖
-  主要场景；全局页为增强）。
 - **P5 余项（E0 完整执行栈）**：daemon 注入真正的 `SessionExecutor` 需要
   `bootstrap.Manager` + `runtimeapi.Handler` 栈，但 aicli 会话执行强耦合
   per-session 状态（`ChatSession`/session store/workspace/profile）——无会话记录的
@@ -121,4 +120,10 @@ go vet（相关包）  ✅
   可行路径：路径 B 抽取 `internal/runtimehost.Executor`（独立重构批次），或
   daemon 在投递前确认 runtime-server 可达并仅依赖 delegate。**机制已全部就位**：
   注入 Executor 即启用，`mode=delegate` 默认行为不变。
-- **P6**：E4 gateway、观测收敛、作业终态→提醒桥。
+- **P6（增强）**：E4 gateway console 只读面、观测指标收敛（投递成功/失败/
+  重试、逾期数、执行时长）。
+
+### C3 结论（不做自动化桥）
+作业终态已有 supervision 投影 + wake 投递（`projectLocalBackgroundJobTerminal`），
+模型在下一 turn 可见结果——再自动创建 `at` 提醒会引入双投递，且违反"创建始终
+由模型完成"的产品原则（daemon 无会话创建权限）。**以文档结论代替实现**。
