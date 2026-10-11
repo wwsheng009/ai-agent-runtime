@@ -22,6 +22,7 @@ func TestChatRuntimeEventBridge_EphemeralSupplementNotJournaled(t *testing.T) {
 
 	bridge.submitEphemeralSupplement("正在退出...")
 
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("read event log: %v", err)
@@ -36,6 +37,7 @@ func TestChatRuntimeEventBridge_EphemeralSupplementNotJournaled(t *testing.T) {
 
 	// 对照：同一入口的持久补充仍然落日志（不能把持久语义一起改掉）。
 	bridge.submitSupplement("[goal] keep me")
+	chatEventLogFlush()
 	raw, err = os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
@@ -96,6 +98,7 @@ func TestChatInteractionCoordinator_EphemeralSupplementNotJournaled(t *testing.T
 
 	coordinator.RenderEphemeralSupplement("正在退出...")
 	coordinator.waitUIActorIdle()
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("read event log: %v", err)
@@ -109,6 +112,7 @@ func TestChatInteractionCoordinator_EphemeralSupplementNotJournaled(t *testing.T
 
 	coordinator.RenderLocalSupplement("[retry] durable notice")
 	coordinator.waitUIActorIdle()
+	chatEventLogFlush()
 	raw, err = os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)

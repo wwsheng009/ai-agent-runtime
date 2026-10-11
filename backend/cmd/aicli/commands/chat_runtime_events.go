@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -272,6 +273,14 @@ type chatRuntimeEventBridge struct {
 	eventLogCheapStarted  uint64 // llm.request.started 走便宜解析的行数（L1.2）
 	eventLogCheapFallback uint64 // 便宜解析在 apply 期回落全量解码的次数
 	eventLogDirEnsured    bool   // 会话 events/ 目录已确保存在（惰性 MkdirAll）
+	// P3（实测热点，docs/plan/aicli-stream-pipeline-performance-audit-and-
+	// optimization-plan-20261011.md §9.8）：runtime-events.jsonl 的写入移出
+	// 调用方 goroutine——delta 流时代每事件 open→append→close（外加每事件
+	// os.Stat 的路径解析）占流式 CPU ~15% 且在 reducer 临界区内。进程级
+	// 单一 journal writer（按路径切换文件，空闲自动关句柄）+ 有界队列 +
+	// 周期 flush；崩溃丢失窗口 ≤ flush 周期。
+	eventLogResolvedPath string
+	eventLogDropped      uint64 // 队列满时的丢弃计数（journal 为重放缓存，可丢）
 
 	// 渲染层双跑文本对照（切片 9）：coordinator 每个完整块提交后调用
 	// checkTextParity，把旧路径实际写出的行序列与 Scene 快照 RenderText
@@ -3850,41 +3859,191 @@ func (b *chatRuntimeEventBridge) appendInteractionLogDocument(text string, docum
 	b.appendInjectionLog(rec)
 }
 
-// appendEventLogLine 写入单行日志记录（open→append→close）。
+// appendEventLogLine 把单行日志记录投递给进程级 journal writer（P3）：调用方
+// 只做一次有界入队 + 一次缓存的路径解析，不再逐行 open→append→close +
+// os.Stat。队列满时丢弃并计数——journal 是渲染模型重放缓存，权威会话数据
+// 在 SQLite store，绝不阻塞调用方（与 P0-1 同一原则）。
 func (b *chatRuntimeEventBridge) appendEventLogLine(line []byte) {
 	if b == nil {
 		return
 	}
-	path := b.eventLogFilePath()
-	if path == "" {
-		return
-	}
-	b.eventLogMu.Lock()
-	defer b.eventLogMu.Unlock()
-	// O_CREATE 只创建文件、不会创建会话 events/ 目录：目录缺失时
-	// 每次 append 都以 ENOENT 失败并被静默计入 eventLogFailures，导致
-	// runtime-events.jsonl 整会话缺失、/resume 无法重放重建渲染模型。
-	// 旧会话（启动早于 ensureSessionArtifactLayout 修复）也依赖这里的惰性创建。
-	if !b.eventLogDirEnsured {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			b.eventLogFailures++
+	if b.eventLogResolvedPath == "" {
+		path := b.eventLogFilePath()
+		if path == "" {
 			return
 		}
-		b.eventLogDirEnsured = true
+		b.eventLogResolvedPath = path
 	}
-	// 每次 open→append→close：不持有长生命周期句柄，避免文件占用
-	// （事件频率低，open/close 开销可忽略）。
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		b.eventLogFailures++
+	if !chatEventLogStartWriter() {
 		return
 	}
-	defer f.Close()
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		b.eventLogFailures++
+	select {
+	case chatEventLogJournal.queue <- eventLogWriteItem{path: b.eventLogResolvedPath, line: string(line)}:
+		b.eventLogMu.Lock()
+		b.eventLogCount++
+		b.eventLogMu.Unlock()
+	default:
+		b.eventLogMu.Lock()
+		b.eventLogDropped++
+		b.eventLogMu.Unlock()
+	}
+}
+
+const (
+	eventLogQueueCapacity    = 1024
+	eventLogFlushInterval    = 25 * time.Millisecond
+	eventLogFlushBufferBytes = 32 << 10
+	// 空闲自动关句柄：流式期间写入连续，句柄保持打开；turn 间/测试收尾
+	// 的静默期后关闭，TempDir 清理与外部工具不再受句柄占用。
+	eventLogIdleCloseAfter = 200 * time.Millisecond
+)
+
+type eventLogWriteItem struct {
+	path string
+	line string
+}
+
+// chatEventLogJournal 是进程级单一 journal writer（P3）：runtime-events.jsonl
+// 的唯一物理写者，按写入项的路径切换文件（多 bridge / 会话共存）。
+var chatEventLogJournal = struct {
+	once     sync.Once
+	queue    chan eventLogWriteItem
+	flushReq chan chan error
+	failures atomic.Uint64
+}{}
+
+func chatEventLogStartWriter() bool {
+	chatEventLogJournal.once.Do(func() {
+		chatEventLogJournal.queue = make(chan eventLogWriteItem, eventLogQueueCapacity)
+		chatEventLogJournal.flushReq = make(chan chan error, 1)
+		go chatEventLogRunWriter()
+	})
+	return chatEventLogJournal.queue != nil
+}
+
+// chatEventLogFlush 是全局读屏障：排空队列并 flush 缓冲后返回。重放与
+// 测试读文件前必须调用（跨 bridge 实例的写入方也一并覆盖）。
+func chatEventLogFlush() {
+	if chatEventLogJournal.flushReq == nil {
 		return
 	}
-	b.eventLogCount++
+	ack := make(chan error, 1)
+	select {
+	case chatEventLogJournal.flushReq <- ack:
+		select {
+		case <-ack:
+		case <-time.After(2 * time.Second):
+		}
+	default:
+	}
+}
+
+// chatEventLogRunWriter 持有长生命周期句柄 + bufio 批量写 + 25ms 周期
+// flush；空闲超过 eventLogIdleCloseAfter 关闭句柄。O_CREATE 只创建文件、
+// 不会创建会话 events/ 目录：目录缺失时按路径惰性 MkdirAll（旧会话依赖，
+// 见历史注释）。Go 在 Windows 以共享读/写打开文件，本进程重放与外部读取
+// 不受长句柄影响。
+func chatEventLogRunWriter() {
+	ticker := time.NewTicker(eventLogFlushInterval)
+	defer ticker.Stop()
+	var (
+		currentPath string
+		f           *os.File
+		buf         *bufio.Writer
+		bufLen      int
+		dirEnsured  = map[string]bool{}
+		lastWrite   time.Time
+	)
+	noteFailure := func() {
+		chatEventLogJournal.failures.Add(1)
+	}
+	ensureDir := func(path string) bool {
+		if dirEnsured[path] {
+			return true
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			noteFailure()
+			return false
+		}
+		dirEnsured[path] = true
+		return true
+	}
+	closeFile := func() {
+		if buf != nil && bufLen > 0 {
+			if err := buf.Flush(); err != nil {
+				noteFailure()
+			}
+			bufLen = 0
+		}
+		if f != nil {
+			_ = f.Close()
+			f = nil
+			buf = nil
+		}
+	}
+	writeLine := func(item eventLogWriteItem) {
+		if currentPath != item.path || f == nil {
+			closeFile()
+			currentPath = item.path
+		}
+		if f == nil {
+			if !ensureDir(currentPath) {
+				return
+			}
+			fh, err := os.OpenFile(currentPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				noteFailure()
+				return
+			}
+			f = fh
+			buf = bufio.NewWriterSize(f, eventLogFlushBufferBytes)
+		}
+		n, err := buf.WriteString(item.line)
+		bufLen += n
+		if err == nil {
+			err = buf.WriteByte('\n')
+			bufLen++
+		}
+		if err != nil || n != len(item.line) {
+			noteFailure()
+			return
+		}
+		lastWrite = time.Now()
+	}
+	flush := func() {
+		if buf != nil && bufLen > 0 {
+			if err := buf.Flush(); err != nil {
+				noteFailure()
+			}
+			bufLen = 0
+		}
+	}
+	for {
+		select {
+		case item := <-chatEventLogJournal.queue:
+			writeLine(item)
+		drain:
+			for drained := 0; drained < eventLogQueueCapacity; drained++ {
+				select {
+				case more := <-chatEventLogJournal.queue:
+					writeLine(more)
+				default:
+					break drain
+				}
+			}
+			if bufLen >= eventLogFlushBufferBytes {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+			if f != nil && time.Since(lastWrite) > eventLogIdleCloseAfter {
+				closeFile()
+			}
+		case ack := <-chatEventLogJournal.flushReq:
+			flush()
+			ack <- nil
+		}
+	}
 }
 
 // replayEventLog 从事件日志重放全部记录（事件 + 用户输入，保持全序），
@@ -3908,6 +4067,9 @@ func (b *chatRuntimeEventBridge) replaySessionLoadEventLog() (uint64, error) {
 }
 
 func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad bool) (uint64, error) {
+	// P3：journal 已异步化——重放读文件前先落盘在途行（全局读屏障，
+	// 覆盖跨 bridge 实例的写入方）。
+	chatEventLogFlush()
 	if b == nil || b.renderEncoder == nil {
 		return 0, nil
 	}
@@ -4199,7 +4361,7 @@ func (b *chatRuntimeEventBridge) eventLogStats() (path string, count, replayed, 
 	}
 	b.eventLogMu.Lock()
 	defer b.eventLogMu.Unlock()
-	return b.eventLogFilePath(), b.eventLogCount, b.eventLogReplayed, b.eventLogFailures
+	return b.eventLogFilePath(), b.eventLogCount, b.eventLogReplayed, b.eventLogFailures + chatEventLogJournal.failures.Load()
 }
 
 // eventLogTrimStats 返回恢复重放便宜路径的计数（/debug 归因用，L1.1/L1.2）。

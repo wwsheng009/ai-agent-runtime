@@ -56,6 +56,7 @@ func TestChatRuntimeEventBridge_PersistsLSPRequestFinished(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var raw []byte
 	for {
+		chatEventLogFlush()
 		content, readErr := os.ReadFile(logPath)
 		if readErr == nil && strings.Contains(string(content), runtimeevents.EventLSPRequestFinished) {
 			raw = content

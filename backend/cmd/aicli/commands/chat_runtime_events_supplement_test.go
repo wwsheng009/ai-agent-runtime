@@ -128,6 +128,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresLocalSupplement(t *testing.T) {
 	bridge1.eventLogPathOverride = logPath
 	bridge1.submitSupplement("[goal] auto continuation limit reached")
 
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
@@ -156,6 +157,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresLocalAssistant(t *testing.T) {
 	bridge1 := newChatRuntimeEventBridge(&ChatSession{})
 	bridge1.eventLogPathOverride = logPath
 	bridge1.submitAssistant("legacy executor response")
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
@@ -304,6 +306,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresPriorityPromptWithoutDuplicate(t *
 	if ok := bridge1.submitPriorityTranscript(runtimechat.EventQuestionAsked, "question-replay-1", transcript); !ok {
 		t.Fatal("priority transcript was not applied")
 	}
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
@@ -515,6 +518,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresDirectToolChain(t *testing.T) {
 	wantDisplay := "• Completed read_file path=a.go"
 	bridge1.submitToolResultDisplay("call-direct", "read_file", "file content", "", true, wantDisplay)
 
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
@@ -554,6 +558,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresStructuredToolBlock(t *testing.T) 
 	want := strings.Join(tooloutline.TreeIndentLines(append([]string{head}, content...)), "\n")
 	bridge1.submitToolResultBlock("call-structured", "shell", "hi", "", true, head, content, "")
 
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
@@ -596,6 +601,7 @@ func TestChatRuntimeEventBridge_ReplayRestoresStructuredRunningBlock(t *testing.
 	bridge1.submitToolRequestedBlock("call-running", "shell", map[string]interface{}{"command": "echo hi"}, block)
 	want := block.render()
 
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)

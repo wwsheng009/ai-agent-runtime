@@ -101,6 +101,7 @@ func TestChatRuntimeEventBridge_EventLogPersistAndReplayRebuildsModel(t *testing
 	if path != logPath || count != 3 || replayed != 0 || failures != 0 {
 		t.Fatalf("stats after encode: path=%q count=%d replayed=%d failures=%d", path, count, replayed, failures)
 	}
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
@@ -150,6 +151,7 @@ func TestChatRuntimeEventBridge_EventLogAppendAfterRestart(t *testing.T) {
 		Payload:   map[string]interface{}{"prompt": "choose a model", "answer": "gpt-test"},
 	})
 
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)

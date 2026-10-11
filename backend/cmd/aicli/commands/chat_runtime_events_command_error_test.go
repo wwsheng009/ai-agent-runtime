@@ -121,6 +121,7 @@ func TestRenderLayer_Scene_ReplayRestoresCommandAndError(t *testing.T) {
 	if path != logPath || count != 13 || replayed != 0 || failures != 0 {
 		t.Fatalf("stats after write: path=%q count=%d replayed=%d failures=%d", path, count, replayed, failures)
 	}
+	chatEventLogFlush()
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read event log: %v", err)
