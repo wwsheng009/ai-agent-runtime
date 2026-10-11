@@ -75,7 +75,8 @@ func deriveActiveStableEnd(cellID scene.CellID, source string) int {
 	if source == "" {
 		return 0
 	}
-	if !markdown.LooksLikeMarkdown(source) {
+	// P1-5：节流判定（增长 <512B 走缓存），见 markdown_looks_memo.go。
+	if !looksLikeMarkdownThrottled(cellID, source) {
 		return len(source)
 	}
 	if cellID != 0 {

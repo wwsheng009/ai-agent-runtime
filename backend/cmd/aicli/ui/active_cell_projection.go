@@ -122,7 +122,7 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 	// This keeps live/final rows identical without putting chrome into source
 	// offsets or asking Markdown to interpret the divider as body text.
 	reasoning := active.Kind == scene.KindReasoning
-	markdownSource := active.Kind == scene.KindAssistant && markdown.LooksLikeMarkdown(active.Source)
+	markdownSource := active.Kind == scene.KindAssistant && looksLikeMarkdownThrottled(active.CellID, active.Source)
 	structuredSource := reasoning || markdownSource
 	maxRows := ActiveBandRows(geometry.Height)
 	if structuredSource {

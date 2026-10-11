@@ -811,6 +811,10 @@ func (c *UIController) WaitIdleTimeout(timeout time.Duration) bool {
 		return false
 	}
 	deadline := time.Now().Add(timeout)
+	// P2-7：自适应退避（1ms 起步、8ms 封顶）。本循环是纯观察（不驱动任何
+	// 排水），恒定 1ms 在 5s 上限时意味着每 turn 收尾最多 ~1600 次锁采集；
+	// 退避后 ~300 次，空闲检测粒度最差 8ms——对 turn 收尾路径可忽略。
+	delay := time.Millisecond
 	for {
 		c.mu.Lock()
 		idle := len(c.queue) == 0 && len(c.followups) == 0 && !c.inFlight && !c.delivering
@@ -821,7 +825,10 @@ func (c *UIController) WaitIdleTimeout(timeout time.Duration) bool {
 		if !time.Now().Before(deadline) {
 			return false
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(delay)
+		if delay < 8*time.Millisecond {
+			delay *= 2
+		}
 	}
 }
 
