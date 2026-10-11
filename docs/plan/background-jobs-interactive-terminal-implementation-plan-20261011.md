@@ -767,3 +767,36 @@ Linux/Unix **没有也不需要 ConPTY 的等价 API——ptmx 本身就是原�
 实现细节：`Setsid + Setctty` 使子进程成为会话首进程并拥有控制终端（Codex 同款语义）；`TIOCSPTLCK=0` 解锁 pts（等价 `unlockpt`）；`TIOCGPTN` 取 pts 编号（等价 `ptsname`）。第三方 Go 库（creack/pty、go-pty）只是这些 syscall 的封装，不提供额外能力——本方案的零依赖实现与其行为一致，已由 WSL2 实测验证。
 
 **结论**：Linux 上 ptmx 即"原生 ConPTY"，本方案已在 `internal/pty` 双平台等价实现并均经真机验证（Windows 11 实机 + WSL2 Ubuntu）。
+
+---
+
+## E2E 实测记录 v2（2026-10-11，最新 canary，发现并修复第三个生命周期缺陷）
+
+### 第三轮实测（最新构建，:60357）——发现 PTY 路径残留缺陷
+
+kill-on-close 修复后重建 canary 再测，**PTY 路径仍跨 turn 死亡**（管道路径已好）。逐行核查 `OpenTerminal` 发现根因：
+
+- **PTY 分支把 caller 的 turn ctx 传给了 `openTerminalPTY`**：`waitInteractivePTY` 的 `p.Wait(ctx)` 挂在 turn ctx 上，turn 结束 → ctx cancel → `markCancelled`（`cancel_source=parent_context`）。管道路径用的是 `jobCtx`（正确），PTY 路径漏改。
+- 修复（`cfa76b28`）：`openTerminalPTY(jobCtx, ...)`；新增回归测试 `TestOpenTerminalPTYSurvivesCallerContextCancel`（open 后 cancel caller ctx，会话必须仍 running 且可回显输入）——本机 ConPTY 验证通过。
+
+### 第四轮实测（修复后重建 canary :63063）——**跨 turn 全链路通过 ✅**
+
+| 轮次 | 操作 | 结果 |
+|---|---|---|
+| turn 1 | ① `background_task more interactive=true tty=true` → ② `write_stdin "hello-v3\r"` → ③ 空轮询 | ① running（无任何取消通知！）② running ③ running |
+| **turn 2** | ① 同一会话 `write_stdin "second-turn-ok\r"` → ② `task_output` 全文 | ① running ✅ ② output 全文含 **`hello-v3\rsecond-turn-ok\r`**——两个 turn 的写入都送达同一 ConPTY 会话 ✅ |
+| turn 3 | ① `task_kill` → ② `task_output` 复核 | ① `cancel_source=user_request`（**取消来源语义正确**：用户请求 ≠ parent_context），进程树清理完成 ② `cancelled / process_alive=false / cancel_source=user_request` ✅ |
+
+### 三个生命周期缺陷的完整修复链
+
+| # | 缺陷 | 修复 | 发现方式 |
+|---|---|---|---|
+| 1 | 调度器二次派发交互会话 | `pendingCandidates`/`jobQueueDiagnostics` 跳过 interactive | E2E 第 1 轮（:64788） |
+| 2 | kill-on-close 树随 job object 关闭 | `attachProcessTree(pid, false)` | E2E 第 1 轮 |
+| 3 | **PTY 等待协程挂在 turn ctx** | `openTerminalPTY(jobCtx, ...)` | **E2E 第 3 轮（本节）** |
+
+> 单元测试覆盖了 #1/#2（含 `TestOpenTerminalPTYSurvivesCallerContextCancel` 直接覆盖 #3 的 caller-cancel 场景），但 #3 在修复前的单测中未暴露——因为 PTY 用例从未在「caller ctx 已 cancel」后继续驱动。本条为真实会话 E2E 价值的直接证明。
+
+### 最终结论
+
+交互会话在真实 CLI 会话中**全生命周期闭环**：打开（ConPTY）→ 写 stdin（跨 turn 多次）→ 增量/全文读取 → 显式 kill（来源语义正确）→ 进程树清理。P0–P2 全部能力经两轮真实模型驱动 E2E 验证，三个生命周期缺陷均由 E2E 发现并修复。
