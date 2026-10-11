@@ -523,7 +523,7 @@
       card.className = "card" + (d.revoked ? " offline" : "");
       card.innerHTML =
         '<div class="card-head"><span class="card-title"></span><span class="badge"></span></div>' +
-        '<div class="device-token-row"><code class="device-prefix"></code><button class="btn ghost sm" data-copy>复制标识</button></div>' +
+        '<div class="device-token-row"><code class="device-prefix"></code></div>' +
         '<div class="card-meta"></div>' +
         '<div class="card-actions"><button class="btn danger sm" data-revoke>撤销令牌</button></div>';
       card.querySelector(".card-title").textContent = d.name || d.id;
@@ -539,22 +539,6 @@
         (d.created_at ? new Date(d.created_at).toLocaleString() : "—") +
         (d.last_used && d.last_used.indexOf("0001") === -1
           ? " · 最近使用 " + new Date(d.last_used).toLocaleString() : "");
-      card.querySelector("[data-copy]").title =
-        "复制 8 位令牌标识（用于辨认；完整令牌仅签发时可见，不可恢复）";
-      card.querySelector("[data-copy]").addEventListener("click", function () {
-        var done = function () { this.textContent = "已复制标识 ✓"; }.bind(this);
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(d.prefix).then(done, done);
-        } else {
-          var ta = document.createElement("textarea");
-          ta.value = d.prefix;
-          document.body.appendChild(ta);
-          ta.select();
-          try { document.execCommand("copy"); } catch (err) { /* legacy */ }
-          ta.remove();
-          done();
-        }
-      });
       card.querySelector("[data-revoke]").addEventListener("click", function () {
         if (!window.confirm("撤销令牌 " + (d.name || d.id) + "？使用它的 agent 将无法再注册。")) { return; }
         api("/api/devices/" + encodeURIComponent(d.id), { method: "DELETE" }).then(loadDevices);

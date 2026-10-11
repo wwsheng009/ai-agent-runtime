@@ -552,6 +552,7 @@ form { display: flex; gap: 8px; margin-top: 10px; }
   margin-top: 6px;
   min-width: 0;
 }
+
 .device-prefix {
   font-family: ui-monospace, monospace;
   font-size: 12.5px;
@@ -560,8 +561,9 @@ form { display: flex; gap: 8px; margin-top: 10px; }
   border-radius: 6px;
   padding: 4px 8px;
   color: var(--fg);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  flex: 1 1 auto; min-width: 0;
+  width: fit-content;
+  min-width: 88px;
+  text-align: center;
 }
 
 /* ── Session row actions ─────────────────────────────────────── */
