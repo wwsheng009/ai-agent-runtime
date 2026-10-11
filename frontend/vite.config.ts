@@ -165,6 +165,10 @@ export default defineConfig(({ mode }) => {
       : undefined;
 
   return {
+    // Relative asset URLs so the SPA keeps working when reverse-proxied under a
+    // mount prefix (gateway /n/{node}/): runtime-server injects <base href> and
+    // these relative references resolve against it (docs/gateway/06 §4.1).
+    base: "./",
     plugins: [themeBootPlugin(), react(), tailwindcss()],
     resolve: {
       alias: {
