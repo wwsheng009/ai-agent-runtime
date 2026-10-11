@@ -680,12 +680,23 @@
 
   function enablePush() {
     return apiJSON("/api/push/config").then(function (r) {
-      if (!r.body || !r.body.enabled || !r.body.public_key) { return null; }
+      if (!r.body || !r.body.enabled || !r.body.public_key) {
+        throw new Error("网关未启用推送（--push-enabled 或 VAPID 初始化失败）");
+      }
       return navigator.serviceWorker.ready.then(function (reg) {
         pushRegistration = reg;
         return reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(r.body.public_key),
+        }).catch(function (err) {
+          // Map raw browser errors to actionable messages.
+          if (err && err.name === "AbortError") {
+            throw new Error("浏览器推送服务拒绝了订阅 —— 通常因为当前网络无法访问浏览器的推送服务器，或浏览器策略禁用了推送。可改用 Chrome/Edge 正常网络环境，或使用控制台实时更新替代。");
+          }
+          if (err && err.name === "NotAllowedError") {
+            throw new Error("通知权限被拒绝 —— 请在浏览器地址栏的权限设置中允许通知后重试。");
+          }
+          throw err;
         });
       });
     }).then(function (sub) {
