@@ -377,7 +377,7 @@
         more.addEventListener("click", function () { navigate("sessions"); });
         actions.appendChild(more);
       }
-    } else {
+    } else if (!node.stale) {
       var open = document.createElement("button");
       open.className = "btn ghost sm";
       open.type = "button";
@@ -573,6 +573,12 @@
 
   function openSession(node, session) {
     if (!node) { return; }
+    // Offline (stale snapshot) nodes have no tunnel: the proxy would answer
+    // 502. Tell the operator instead of pretending to navigate.
+    if (node.stale) {
+      notify("节点「" + (node.name || node.node_id) + "」当前离线，无法打开 —— 等它重新上线后再试，或先在节点页移除该快照。", "error");
+      return;
+    }
     if (session) { markRead(node, session); }
     rememberPresence(node, session);
     window.open(sessionOpenTarget(node, session ? session.session_id : ""), "_blank");
@@ -821,6 +827,19 @@
     el("sidebar-scrim").hidden = false;
   });
   el("sidebar-scrim").addEventListener("click", closeSidebar);
+
+  // Desktop collapse: icon rail, persisted across sessions.
+  try {
+    if (localStorage.getItem("aicli-gw-sb-collapsed") === "1") {
+      document.body.classList.add("sb-collapsed");
+    }
+  } catch (e) { /* storage unavailable */ }
+  function setCollapsed(collapsed) {
+    document.body.classList.toggle("sb-collapsed", collapsed);
+    try { localStorage.setItem("aicli-gw-sb-collapsed", collapsed ? "1" : "0"); } catch (e) {}
+  }
+  el("sidebar-collapse").addEventListener("click", function () { setCollapsed(true); });
+  el("sidebar-expand").addEventListener("click", function () { setCollapsed(false); });
 
   // Session filters
   el("session-filter").addEventListener("input", function (e) {
