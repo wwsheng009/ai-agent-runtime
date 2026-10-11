@@ -21,6 +21,7 @@
 | `930f5415` | P4：E2 micro web 任务页签 + E3 TUI /schedule |
 | `ed3f6e0f` | 缺口修复：drain 接线 / schedule.changed / 搜索地平线 / 死锁 |
 | `e668a252` | 全局页 /runtime/schedule（P3 余项收敛） |
+| `3a518144` | P6 观测收敛：metrics + daemon /status 暴露 |
 
 ## 2. 已交付
 
@@ -120,10 +121,20 @@ go vet（相关包）  ✅
   可行路径：路径 B 抽取 `internal/runtimehost.Executor`（独立重构批次），或
   daemon 在投递前确认 runtime-server 可达并仅依赖 delegate。**机制已全部就位**：
   注入 Executor 即启用，`mode=delegate` 默认行为不变。
-- **P6（增强）**：E4 gateway console 只读面、观测指标收敛（投递成功/失败/
-  重试、逾期数、执行时长）。
 
 ### C3 结论（不做自动化桥）
 作业终态已有 supervision 投影 + wake 投递（`projectLocalBackgroundJobTerminal`），
 模型在下一 turn 可见结果——再自动创建 `at` 提醒会引入双投递，且违反"创建始终
 由模型完成"的产品原则（daemon 无会话创建权限）。**以文档结论代替实现**。
+
+### P6（观测收敛）
+- `internal/schedule/metrics.go`：原子计数器
+  （deliveredTotal / deliveryFailedTotal / embeddedTotal / embeddedSkippedTotal /
+  retriesScheduled / deadLetterTotal）+ `MetricsSnapshot` 只读快照。
+- `runtime` 埋点：投递成功（delegate/内嵌）、内嵌被租约仲裁跳过、退避重排、
+  死信（达 MaxDeliveryAttempts）；`Metrics()` 访问器。
+- daemon `/status`（127.0.0.1:8919）携带 metrics 快照。
+- 口径：`deliveryFailedTotal` 只计"未被内嵌接住的失败"——内嵌接住的失败直接
+  转化为 embeddedTotal+deliveredTotal。
+- **P6 余项（增强）**：E4 gateway console 只读面；metrics 并入宿主 Prometheus
+  端点（可复用 `Runtime.Metrics()`）。
