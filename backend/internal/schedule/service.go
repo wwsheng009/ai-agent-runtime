@@ -109,7 +109,7 @@ func (s *Service) Create(sessionID string, req CreateRequest) (Record, error) {
 	case req.Weekly != nil:
 		record, err = CreateWeekly(id, req.Prompt, req.Title, *req.Weekly, now)
 	case req.Cron != nil:
-		err = inputError(CodeInvalidRule, "cron reminders are not enabled in this build.")
+		record, err = CreateCron(id, req.Prompt, req.Title, *req.Cron, now)
 	}
 	if err != nil {
 		return Record{}, err
@@ -298,6 +298,18 @@ func applyTimingChange(current Record, prompt, title string, change *TimingChang
 			return Record{}, err
 		}
 		if current.Kind == KindWeekly && created.Time == current.Time && created.TimeZone == current.TimeZone && intSlicesEqual(created.Weekdays, current.Weekdays) {
+			return withContent(current, title, prompt), nil
+		}
+		return created, nil
+	case KindCron:
+		if change.Cron == nil {
+			return Record{}, inputError(CodeInvalidRule, "cron timing change requires cron.")
+		}
+		created, err := CreateCron(current.ID, prompt, title, *change.Cron, now)
+		if err != nil {
+			return Record{}, err
+		}
+		if current.Kind == KindCron && created.Expression == current.Expression && created.TimeZone == current.TimeZone {
 			return withContent(current, title, prompt), nil
 		}
 		return created, nil

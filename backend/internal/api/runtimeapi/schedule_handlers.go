@@ -68,6 +68,10 @@ type scheduleTimingChange struct {
 		TimeZone string `json:"time_zone"`
 		Weekdays []int  `json:"weekdays"`
 	} `json:"weekly,omitempty"`
+	Cron *struct {
+		Expression string `json:"expression"`
+		TimeZone   string `json:"time_zone"`
+	} `json:"cron,omitempty"`
 }
 
 // UpdateScheduleTask edits one reminder in place within its original Session binding.
@@ -134,6 +138,9 @@ func toTimingChange(change *scheduleTimingChange) *schedule.TimingChange {
 	}
 	if change.Weekly != nil {
 		out.Weekly = &schedule.WeeklyInput{Time: change.Weekly.Time, TimeZone: change.Weekly.TimeZone, Weekdays: change.Weekly.Weekdays}
+	}
+	if change.Cron != nil {
+		out.Cron = &schedule.CronInput{Expression: change.Cron.Expression, TimeZone: change.Cron.TimeZone}
 	}
 	return out
 }

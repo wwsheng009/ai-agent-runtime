@@ -133,6 +133,8 @@ func ResolveOccurrence(rec Record, acceptedAt time.Time) (Occurrence, error) {
 		return resolveDailyOccurrence(rec, accepted)
 	case KindWeekly:
 		return resolveWeeklyOccurrence(rec, accepted)
+	case KindCron:
+		return resolveCronOccurrence(rec, accepted)
 	default:
 		return Occurrence{}, inputError(CodeInvalidRule, "unsupported reminder kind %q", rec.Kind)
 	}
@@ -200,7 +202,12 @@ func ValidateRecord(rec Record) error {
 			return logError("record %s has an invalid weekday set", rec.ID)
 		}
 	case KindCron:
-		return logError("record %s uses kind %q which is not enabled in this build", rec.ID, rec.Kind)
+		if strings.TrimSpace(rec.Expression) == "" || strings.TrimSpace(rec.TimeZone) == "" {
+			return logError("record %s cron rule needs expression and timeZone", rec.ID)
+		}
+		if canonical, err := ParseCron(rec.Expression); err != nil || canonical != rec.Expression {
+			return logError("record %s cron expression is not canonical", rec.ID)
+		}
 	default:
 		return logError("record %s has unknown kind %q", rec.ID, rec.Kind)
 	}

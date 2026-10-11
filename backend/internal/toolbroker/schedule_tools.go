@@ -60,6 +60,14 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 							"weekdays":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}, "description": "ISO weekdays 1..7 (Monday..Sunday), unique."},
 						},
 					},
+					"cron": map[string]interface{}{
+						"type":        "object",
+						"description": "Five-field Vixie cron expression in an explicit IANA zone (minute hour day-of-month month day-of-week).",
+						"properties": map[string]interface{}{
+							"expression": map[string]interface{}{"type": "string", "description": `For example "*/15 9-17 * * 1-5". When both day fields are restricted, a date matches if either one matches.`},
+							"time_zone":  map[string]interface{}{"type": "string", "description": "Explicit IANA Area/Location."},
+						},
+					},
 				},
 				"required": []string{"prompt", "title"},
 			},
@@ -111,6 +119,14 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 							"time":      map[string]interface{}{"type": "string"},
 							"time_zone": map[string]interface{}{"type": "string"},
 							"weekdays":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}},
+						},
+					},
+					"cron": map[string]interface{}{
+						"type":        "object",
+						"description": "New five-field Vixie cron expression in an explicit IANA zone.",
+						"properties": map[string]interface{}{
+							"expression": map[string]interface{}{"type": "string"},
+							"time_zone":  map[string]interface{}{"type": "string"},
 						},
 					},
 				},
@@ -176,6 +192,9 @@ func (b *Broker) executeScheduleCreate(sessionID string, args map[string]interfa
 	if weekly, ok := weeklyArg(args); ok {
 		req.Weekly = weekly
 	}
+	if cron, ok := cronArg(args); ok {
+		req.Cron = cron
+	}
 	record, err := b.Schedule.Create(sessionID, req)
 	if err != nil {
 		return scheduleFailure(err), nil, nil
@@ -239,6 +258,12 @@ func (b *Broker) executeScheduleUpdate(sessionID string, args map[string]interfa
 			return scheduleError(schedule.CodeInvalidSelector, "at most one timing parameter is allowed."), nil, nil
 		}
 		change = &schedule.TimingChange{Kind: schedule.KindWeekly, Weekly: weekly}
+	}
+	if cron, ok := cronArg(args); ok {
+		if change != nil {
+			return scheduleError(schedule.CodeInvalidSelector, "at most one timing parameter is allowed."), nil, nil
+		}
+		change = &schedule.TimingChange{Kind: schedule.KindCron, Cron: cron}
 	}
 	result, err := b.Schedule.Update(sessionID, id, expected, content, change)
 	if err != nil {
@@ -319,6 +344,15 @@ func weeklyArg(args map[string]interface{}) (*schedule.WeeklyInput, bool) {
 		}
 	}
 	return input, true
+}
+
+// cronArg 解析 cron 对象参数（{expression, time_zone}）。
+func cronArg(args map[string]interface{}) (*schedule.CronInput, bool) {
+	raw, ok := args["cron"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	return &schedule.CronInput{Expression: stringArg(raw, "expression"), TimeZone: stringArg(raw, "time_zone")}, true
 }
 
 // int64Arg 读取一个 JSON number 的整数参数；非整数返回错误。

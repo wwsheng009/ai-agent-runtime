@@ -68,9 +68,9 @@ var brokerToolArgKeys = map[string][]string{
 	ToolReadAgentResult:        {"id", "limit", "max_chars", "offset", "sections", "task_id"},
 	ToolAckLifecycle:           {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
 	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version", "extend_by_ms", "new_deadline", "extend_which"},
-	ToolScheduleCreate:         {"after_seconds", "at", "daily", "every_seconds", "prompt", "title", "weekly"},
+	ToolScheduleCreate:         {"after_seconds", "at", "cron", "daily", "every_seconds", "prompt", "title", "weekly"},
 	ToolScheduleList:           {},
-	ToolScheduleUpdate:         {"at", "daily", "every_seconds", "id", "prompt", "title", "weekly"},
+	ToolScheduleUpdate:         {"at", "cron", "daily", "every_seconds", "id", "prompt", "title", "weekly"},
 	ToolScheduleDelete:         {"id"},
 }
 
