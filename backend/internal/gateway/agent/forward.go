@@ -165,6 +165,13 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 	if token := strings.TrimSpace(c.forward.LocalToken); token != "" {
 		req.Header.Set("X-AICLI-Token", token)
 	}
+	// Rewrite Origin/Referer to the local service origin: the browser speaks to
+	// the gateway, so a forwarded Origin points at the gateway while the local
+	// server's same-origin check compares it against its own host — leaving the
+	// browser value in place fails every asset/GET request with 403
+	// cross-origin (observed: /web/app.js -> 403 through the tunnel). A reverse
+	// proxy rewrites these to the upstream origin; do the same.
+	rewriteForwardOriginHeaders(req.Header, base)
 
 	client := c.forward.Client
 	if client == nil {
@@ -303,6 +310,29 @@ func copyForwardRequestHeaders(dst http.Header, src map[string][]string) {
 		}
 		for _, value := range values {
 			dst.Add(key, value)
+		}
+	}
+}
+
+// rewriteForwardOriginHeaders points Origin/Referer at the local service origin
+// so same-origin checks on the loopback server accept tunneled requests. base is
+// the local base URL (scheme://host:port).
+func rewriteForwardOriginHeaders(h http.Header, base string) {
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Host == "" {
+		return
+	}
+	localOrigin := parsed.Scheme + "://" + parsed.Host
+	if origin := strings.TrimSpace(h.Get("Origin")); origin != "" {
+		h.Set("Origin", localOrigin)
+	}
+	if referer := strings.TrimSpace(h.Get("Referer")); referer != "" {
+		if ref, err := url.Parse(referer); err == nil && ref.Host != "" {
+			ref.Host = parsed.Host
+			if parsed.Scheme != "" {
+				ref.Scheme = parsed.Scheme
+			}
+			h.Set("Referer", ref.String())
 		}
 	}
 }
