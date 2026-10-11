@@ -1,0 +1,232 @@
+# 07 · 轻量独立控制台设计（参考 micro web client）
+
+> 上游：[02-architecture.md](./02-architecture.md)、[05-wan-and-mobile.md](./05-wan-and-mobile.md)、[06-implementation-plan.md](./06-implementation-plan.md)
+> 决策：网关控制台采用**新增轻量独立控制台**，实现范式对齐 `aicli micro web client`
+> （`go:embed` + 零构建 + 原生 ES 模块），首期**不复用** `frontend/`（React/Vite 完整工作台）。
+
+---
+
+## 1. 定位与决策
+
+| 项 | 内容 |
+|----|------|
+| 是什么 | 网关自带的 hub 视图：跨设备**会话聚合 + 切换 + 打开**，设备/令牌管理，连接与审计状态 |
+| 不是什么 | 不是又一个完整工作台（不做文件/Git/MCP/技能/分析的全套 UI——那些在**被代理的会话视图**里已有） |
+| 技术范式 | 与 `micro web client` 同源：`//go:embed` 静态资源、`index.html` + `style.css` + `app.js` + `js/*.js`（ES 模块）、**零构建步骤** |
+| 首期不选 `frontend/` | React/Vite 工作台面向"单 runtime-server 全功能管理"，体积/构建/依赖与网关"轻量 hub"目标不匹配；且它需要 `VITE_API_BASE_URL` 指向后端，与网关的反向代理模型不同 |
+
+**与 `frontend/` 的关系**：二者共存、职责不同。`frontend/` 是 `runtime-server` 的完整工作台（可经网关
+`/n/{node}/` 反向访问）；本控制台是**网关层**的跨设备入口。P2+ 若确有深度功能需求，再评估是否合并，
+但首期不为它引入前端构建链。
+
+---
+
+## 2. 复用的 micro web client 范式（附现有实现证据）
+
+| 范式 | 现有实现（证据） | 控制台如何复用 |
+|------|------------------|----------------|
+| `go:embed` 目录 | `backend/cmd/aicli/commands/web_page.go:15` `//go:embed web` | `internal/gateway/console/console/` 用 `//go:embed console` 嵌入 |
+| 单 handler 伺服静态资源 | `HandleChatWebPage`（`web_page.go:23`）：按扩展名给 `Content-Type`、拒绝 `..`/绝对路径、`index.html` 走 `no-cache` | 同构实现，增加 CSP 与 owner Cookie 引导 |
+| 内联引导脚本 | `chatWebAuthFetchWrapperScript`（`web_page.go:63`）在 ES 模块前注入令牌包装 | 控制台改为：注入 `window.__GATEWAY__` 配置 + CSRF 双提交引导（**不注入本机令牌**） |
+| 原生 ES 模块 | `web/js/*.js`（sessions/composer/sse/stream/markdown/files/git/mcp/skills/analysis…） | `console/js/*.js`（auth/sessions/nodes/devices/iframe/sse/notify/mobile） |
+| SSE 客户端独立处理 | `web/js/sse.js`（EventSource 无法设头，单独拼 URL） | 控制台不直连会话 SSE（由 iframe 内的微前端负责）；控制台自身只订阅**节点/会话状态 SSE** |
+| h2c 连接预算 | `pprof.go:505` `newChatWebH2CHandler(...)` | 网关用 TLS 下的 HTTP/2（或前置明文 h2c），同一动机 |
+| 缓存策略 | `index.html` `no-cache`；页面资源 `no-cache, no-store` | 控制台外壳可缓存（PWA），但 `index.html` 与 `/api/*` 不缓存 |
+
+> 结论：控制台**不需要新前端技术栈**，把 `micro web client` 的"单页 + 原生模块 + 嵌入"范式直接平移即可，
+> 复用其工程经验（路径穿越防护、引导脚本时序、SSE 独立处理、连接预算）。
+
+---
+
+## 3. 与 micro web client 的关键差异（不可照搬）
+
+| 维度 | micro web client | 网关控制台 |
+|------|------------------|-----------|
+| 认证 | 本机写令牌 `X-AICLI-Token`（meta 注入 + fetch 包装） | **owner HttpOnly Cookie + CSRF**；浏览器**绝不接触**本机令牌 |
+| 会话范围 | 单进程、当前会话（+本机会话列表） | **跨设备、多会话聚合** |
+| 数据来源 | 本地 `/web/api/*` | 网关管理 API `/api/*`（元数据）+ 反向代理 `/s/{id}/web/`（交互） |
+| 会话正文 | 自己渲染 | **不重复渲染**：以 iframe/跳转打开被代理的微前端 |
+| 移动端 | 已有响应式基础 | 明确以移动优先为首要目标（hub 的主要使用场景是手机） |
+| 离线外壳 | 无 | PWA service worker 缓存外壳 |
+
+---
+
+## 4. 信息架构与页面
+
+```text
+/                     → 登录页（未登录）/ 会话总览（已登录）
+/s/{session_id}/web/  → 会话视图（iframe 嵌入被代理的 micro web client，见 §6）
+/devices              → 设备与令牌管理
+/status               → 连接/审计/版本
+/about                → 关于（版本、协议、连接诊断）
+```
+
+### 4.1 会话总览（首页，核心）
+
+```text
+┌───────────────────────────────────────────────┐
+│ aicli-gateway        [搜索…]   ⚙  🔔 2   👤   │  顶栏：品牌 / 搜索 / 设置 / 通知 / 账户
+├───────────────────────────────────────────────┤
+│ ▸ vince-laptop（在线 · 2 会话）                │  设备分组（可折叠）
+│   ┌─────────────────────────────────────────┐ │
+│   │ ● 网关设计        运行中 · 3s 前          │ │  会话卡片：状态点 + 标题 + 注意力徽标
+│   │   最后：…差分屏幕与移动端优化…            │ │           + 相对时间 + 预览（截断）
+│   ├─────────────────────────────────────────┤ │
+│   │ ⚠ 重构任务        等待审批 · 1m 前        │ │  注意力徽标：审批 / 提问 / 完成 / 出错
+│   └─────────────────────────────────────────┘ │
+│ ▸ build-server（离线 · 1 会话，最近 2h 前）     │  离线设备灰化 + 最近活跃
+└───────────────────────────────────────────────┘
+```
+
+- **顶部聚合条**：`N 个会话需要处理`（attention ≠ none 计数），点击过滤。
+- **分组**：按设备分组；同设备多会话可折叠；设备显示在线/离线/最近活跃。
+- **过滤/搜索**：状态、设备、关键词（标题 + 预览）。
+- **卡片动作**：打开、置顶、（可选）在微前端中新建/恢复会话。
+
+### 4.2 会话视图
+
+- 主体是 **iframe**：`src=/s/{session_id}/web/`（同源，见 §6），承载完整的会话交互 UI。
+- 顶部**网关工具栏**（在 iframe 之上，固定）：返回列表、会话切换下拉、设备名、连接状态、全屏。
+- **不重复实现**聊天/文件/Git/MCP UI——它们由被代理的微前端提供。
+
+### 4.3 设备与令牌、状态、关于
+
+- 设备页：列出设备与令牌前缀、创建（仅显示一次）、撤销、最近使用。
+- 状态页：在线节点数、活跃隧道/流、延迟分位、最近审计事件、协议版本。
+- 关于页：网关版本、协议版本、连接诊断（浏览器↔网关 RTT、隧道 RTT）。
+
+---
+
+## 5. 关键 UX 流程
+
+### 5.1 首次运行（空态引导）
+
+- 登录后若无任何设备：显示"还没有设备接入"，给出三步指引：
+  1. 在网关创建**设备令牌**（页内按钮，生成后仅显示一次 + 复制按钮）；
+  2. 在本机运行：`aicli chat --gateway <url> --gateway-token <tok>`（可复制命令）；
+  3. 等待设备出现在列表（自动刷新 + SSE 推送）。
+- 空态是**首次成功的关键路径**，必须有明确下一步，而不是空白页。
+
+### 5.2 设备离线
+
+- 卡片灰化 + "最近活跃 X 前"；设备分组标题显示离线。
+- 打开离线会话时给出明确提示（"设备离线，无法连接"），而不是无限加载。
+- 设备重连后自动恢复（SSE `node.online` 事件）。
+
+### 5.3 会话切换
+
+- 列表 → 会话视图：**懒加载 iframe**；返回列表时保留滚动位置与过滤条件。
+- 会话视图内切换：更新 iframe `src`（或复用同一 iframe + 会话深链），不整页刷新。
+- 记住"上次打开的会话"（localStorage，仅 ID，不含正文）。
+
+### 5.4 注意力与通知
+
+- 徽标实时更新（订阅网关 `/api/events` SSE 的会话状态事件）。
+- 可选 Web Push（见 05 §2.5）：点击通知直达对应会话视图。
+- 去重：同一会话同一注意力状态在时间窗内只提醒一次。
+- 完整的**通知/注意力模型**（事件→`attention` 映射、`NOTIFY` 帧、presence 抑制、免打扰）见
+  [08-notifications.md](./08-notifications.md)；控制台只消费网关聚合结果，不直接解析本地事件。
+
+### 5.5 错误态（必须显式，不静默）
+
+| 场景 | 呈现 |
+|------|------|
+| 隧道不可用 | 会话视图横幅："设备已离线"；列表卡片灰化 |
+| 上游 502/504 | iframe 内/上方提示："本地服务无响应（502/504）" + 重试按钮 |
+| 路由 403 | "该路径未被授权访问"（白名单/能力位） |
+| 设备令牌被撤销 | 设备消失 + 状态页审计记录；agent 侧提示重新签发 |
+| owner 会话过期 | 跳登录页，保留原目标路径（登录后回跳） |
+
+### 5.6 断线
+
+- 顶部持久横幅："与网关连接中断，正在重连…"（SSE 断开 + 重连退避）。
+- 重连成功后自动刷新会话列表并对齐状态（不整页刷新）。
+
+---
+
+## 6. 与反向代理 / 微前端的边界
+
+- **同源**：控制台与被代理的微前端都在网关同源下（`/` 与 `/s/{id}/web/`），iframe 无跨域问题，
+  owner Cookie 自动携带（`SameSite=Lax` 同源导航）。
+- **切换即打开本地 Web UI**：点会话卡片 → iframe 载入 `/s/{id}/web/`（aicli 微前端）
+  或 `/s/{id}/`（runtime-server SPA），网关反向代理到本机回环；完整链路与要求见
+  [08-notifications.md](./08-notifications.md) §7。
+- **前置依赖**：微前端需 **base-path 感知**（[06](./06-implementation-plan.md) §4.1），否则
+  `/s/{id}/web/` 前缀代理下其根绝对路径会指回网关根。这是 P1/P2 的前置改造。
+- **iframe 安全**：微前端响应可设 `Content-Security-Policy: frame-ancestors 'self'`；
+  控制台设 `frame-src 'self'`；避免第三方嵌入。
+- **不重复实现**：控制台不解析 SSE 事件内容、不渲染消息，只做"外壳 + 导航 + 状态"。
+
+---
+
+## 7. 技术实现
+
+### 7.1 目录布局
+
+```text
+internal/gateway/console/
+├── console.go              # //go:embed console；伺服 handler（参考 HandleChatWebPage）
+├── console/                # 静态资源（零构建，直接编辑后 go build 生效）
+│   ├── index.html
+│   ├── style.css
+│   ├── app.js              # 引导 + 路由
+│   ├── manifest.webmanifest
+│   ├── sw.js               # service worker（缓存外壳）
+│   └── js/
+│       ├── auth.js         # 登录/登出/会话过期
+│       ├── api.js          # 管理 API 封装（含 CSRF 头）
+│       ├── nodes.js        # 设备分组渲染
+│       ├── sessions.js     # 会话列表/过滤/卡片
+│       ├── view.js         # 会话视图 iframe 生命周期
+│       ├── events.js       # 控制台自身 SSE（节点/会话状态）
+│       ├── notify.js       # 通知/PWA 安装引导
+│       └── mobile.js       # 视口/键盘/抽屉
+└── console_test.go         # 静态资源伺服 + 路径穿越防护测试
+```
+
+### 7.2 伺服 handler 要点（照搬 micro web 的成熟做法）
+
+- `//go:embed console`；按扩展名给 `Content-Type`；拒绝 `..` 与绝对路径（防穿越）。
+- `index.html`：`Cache-Control: no-cache`，并注入引导脚本（`window.__GATEWAY__` 配置、CSRF token）。
+- 静态资源：PWA 外壳可长缓存（带指纹）或 `no-cache`（首期简单起见统一 `no-cache`，与 micro web 一致）。
+- 安全响应头：`Content-Security-Policy`、`X-Content-Type-Options: nosniff`、`Referrer-Policy`。
+- **不注入任何本机令牌**（与 micro web 的令牌注入形成对照）。
+
+### 7.3 开发体验
+
+- 与 micro web 一致：编辑 `console/` 下文件 → `go build` → 生效；无 npm/vite/watch 依赖。
+- 可选：`--console-dev-dir` 指向本地目录（仅开发），避免每次 rebuild（默认关闭，仅回环）。
+
+---
+
+## 8. 无障碍与 i18n
+
+- **a11y**：语义化标签、`aria-label`、键盘可达（Tab/Enter/Esc）、焦点可见、对比度 ≥ 4.5:1。
+- **i18n**：中文优先；文案集中为键值表（`js/i18n.js`），为后续扩展留接口；
+  与 `frontend/` 的 i18n 口径不必强绑（控制台文案量小）。
+- **主题**：跟随系统 `prefers-color-scheme`，支持手动切换（复用 micro web 的主题思路）。
+
+---
+
+## 9. 移动端（与 05 对齐）
+
+- 响应式断点：`<640px` 单列卡片 + 抽屉；`≥1024px` 双栏（列表 + 会话视图）。
+- PWA：`manifest.webmanifest` + `sw.js`（缓存外壳，**不缓存** `/api/*` 与 iframe 内容）。
+- 软键盘：会话视图的输入在 iframe 内，由微前端负责键盘适配（见 05 §2.2）；控制台自身表单同样适配。
+- 低带宽：控制台外壳极小，主要带宽在 iframe 内的会话视图（由 05 的低带宽模式覆盖）。
+- 触控：卡片点击区 ≥ 44px；滑动手势（左滑返回列表）为增强，不阻塞基本操作。
+
+---
+
+## 10. 验收清单
+
+- [ ] `cmd/gateway` 单二进制即可提供控制台（`//go:embed`，无外部静态文件依赖）。
+- [ ] 零构建：修改 `console/` 后 `go build` 即生效；CI 无 npm/vite 依赖。
+- [ ] 静态资源伺服通过路径穿越负向测试（`..`、绝对路径、编码绕过）。
+- [ ] 登录 → 空态引导 → 设备接入 → 会话出现（全链路可见）。
+- [ ] 会话列表：设备分组、状态、注意力徽标、过滤/搜索。
+- [ ] 会话视图：iframe 打开被代理微前端，切换会话不整页刷新。
+- [ ] 设备离线/隧道 502/路由 403/会话过期均有显式错误态。
+- [ ] 移动端：可安装 PWA、软键盘不遮挡、横向不溢出、触控目标达标。
+- [ ] 控制台**不接触**任何本机令牌；`/api/*` 不缓存。
+- [ ] a11y：键盘可完成"登录 → 打开会话 → 返回列表"。
