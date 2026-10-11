@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 )
 
@@ -49,18 +50,27 @@ func run() int {
 		},
 	})
 
-	mux := http.NewServeMux()
-	mux.Handle("/gw/agent", server)
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+	router := mux.NewRouter()
+	router.Handle("/gw/agent", server)
+	router.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "nodes": registry.Count()})
 	})
-	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": registry.List()})
+	})
+	// Reverse proxy: /n/{node_id}/... → the node's local service.
+	router.PathPrefix("/n/{node_id}/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nodeID := mux.Vars(r)["node_id"]
+		path := strings.TrimPrefix(r.URL.Path, "/n/"+nodeID)
+		if path == "" {
+			path = "/"
+		}
+		server.ServeProxy(w, r, nodeID, path)
 	})
 
 	httpServer := &http.Server{
 		Addr:              *listen,
-		Handler:           mux,
+		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

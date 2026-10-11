@@ -40,6 +40,8 @@ type WSConnector struct {
 	HeartbeatInterval time.Duration
 	// Logf receives non-fatal diagnostics; nil disables logging.
 	Logf func(format string, args ...any)
+	// Forward configures reverse-proxy forwarding to the local service.
+	Forward ForwardConfig
 }
 
 // Dial establishes the tunnel: connect, HELLO/WELCOME, REGISTER/REGISTER_ACK,
@@ -79,6 +81,7 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 		heartbeatInterval: c.heartbeatInterval(),
 		register:          c.Register,
 		logf:              c.Logf,
+		forward:           c.Forward,
 		done:              make(chan struct{}),
 	}
 
@@ -159,6 +162,10 @@ type wsConn struct {
 	heartbeatInterval time.Duration
 	register          RegisterFunc
 	logf              func(format string, args ...any)
+	forward           ForwardConfig
+
+	mu      sync.Mutex
+	streams map[uint32]*inboundStream
 }
 
 func (c *wsConn) NodeID() string     { return c.nodeID }
@@ -331,8 +338,16 @@ func (c *wsConn) readLoop() {
 			c.logf0("gateway agent: gateway signalled %s", frame.Type)
 			_ = c.ws.Close()
 			return
+		case wire.TypeStreamOpen:
+			c.handleStreamOpen(frame.StreamID, frame)
+		case wire.TypeStreamData:
+			c.handleStreamData(frame.StreamID, frame)
+		case wire.TypeStreamEnd:
+			c.handleStreamEnd(frame.StreamID)
+		case wire.TypeStreamReset:
+			c.handleStreamReset(frame.StreamID)
 		default:
-			// Stream frames are handled by the proxy workstream.
+			// Unknown frames are ignored for forward compatibility.
 		}
 	}
 }

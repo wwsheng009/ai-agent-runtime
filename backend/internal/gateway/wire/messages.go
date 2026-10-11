@@ -129,6 +129,28 @@ type Deregister struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// StreamOpen is the payload of a STREAM_OPEN frame (G→A, stream >0): the
+// gateway asks the agent to forward one HTTP request to its local service.
+type StreamOpen struct {
+	Method  string              `json:"method"`
+	Path    string              `json:"path"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	BodyLen int64               `json:"body_len,omitempty"`
+}
+
+// ResponseHeaders is the first STREAM_DATA payload of a response (JSON flag
+// set); subsequent STREAM_DATA frames on the same stream carry the raw body.
+type ResponseHeaders struct {
+	Status  int                 `json:"status"`
+	Headers map[string][]string `json:"headers,omitempty"`
+}
+
+// StreamReset is the payload of a STREAM_RESET frame.
+type StreamReset struct {
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 // ErrorMessage is the payload of an ERROR frame (either direction, stream 0).
 type ErrorMessage struct {
 	Code    string `json:"code"`

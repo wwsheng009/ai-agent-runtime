@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -38,6 +39,9 @@ type Server struct {
 	cfg      Config
 	registry *Registry
 	upgrader websocket.Upgrader
+
+	sessMu   sync.RWMutex
+	sessions map[string]*session
 }
 
 // NewServer builds a tunnel server.
@@ -54,7 +58,37 @@ func NewServer(cfg Config) *Server {
 	if cfg.Upgrader != nil {
 		upgrader = *cfg.Upgrader
 	}
-	return &Server{cfg: cfg, registry: registry, upgrader: upgrader}
+	return &Server{
+		cfg:      cfg,
+		registry: registry,
+		upgrader: upgrader,
+		sessions: make(map[string]*session),
+	}
+}
+
+// registerSession records a live connection for reverse proxying.
+func (s *Server) registerSession(nodeID string, sess *session) {
+	s.sessMu.Lock()
+	s.sessions[nodeID] = sess
+	s.sessMu.Unlock()
+}
+
+// unregisterSession removes the connection only if it is still the registered
+// one (a reconnecting node may have replaced it).
+func (s *Server) unregisterSession(nodeID string, sess *session) {
+	s.sessMu.Lock()
+	if s.sessions[nodeID] == sess {
+		delete(s.sessions, nodeID)
+	}
+	s.sessMu.Unlock()
+}
+
+// session returns the live connection for a node.
+func (s *Server) session(nodeID string) (*session, bool) {
+	s.sessMu.RLock()
+	defer s.sessMu.RUnlock()
+	sess, ok := s.sessions[nodeID]
+	return sess, ok
 }
 
 // Registry returns the node registry.
@@ -146,6 +180,13 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	s.registry.Upsert(node)
 	defer s.registry.Remove(nodeID)
 
+	sess := newSession(nodeID, ws)
+	s.registerSession(nodeID, sess)
+	defer func() {
+		s.unregisterSession(nodeID, sess)
+		sess.closeAll("node_offline", "agent connection closed")
+	}()
+
 	if err := writeJSON(ws, wire.TypeRegisterAck, wire.RegisterAck{
 		NodeID:         nodeID,
 		ConsoleURL:     s.consoleURL(nodeID),
@@ -175,8 +216,26 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 			}
 		case wire.TypeDeregister, wire.TypeGoAway:
 			return nil
+		case wire.TypeStreamData:
+			if frame.IsJSON() {
+				headers, decodeErr := wire.DecodePayload[wire.ResponseHeaders](frame)
+				if decodeErr == nil {
+					sess.dispatch(frame.StreamID, streamEvent{
+						kind:    streamHeaders,
+						status:  headers.Status,
+						headers: headers.Headers,
+					})
+				}
+				continue
+			}
+			sess.dispatch(frame.StreamID, streamEvent{kind: streamData, data: frame.Payload})
+		case wire.TypeStreamEnd:
+			sess.dispatch(frame.StreamID, streamEvent{kind: streamEnd})
+		case wire.TypeStreamReset:
+			reset, _ := wire.DecodePayload[wire.StreamReset](frame)
+			sess.dispatch(frame.StreamID, streamEvent{kind: streamReset, code: reset.Code, message: reset.Message})
 		default:
-			// Stream frames are handled by the reverse-proxy step.
+			// Unknown frames are ignored for forward compatibility.
 		}
 	}
 }
