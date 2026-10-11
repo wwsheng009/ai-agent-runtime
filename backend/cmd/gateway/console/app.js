@@ -113,6 +113,9 @@
   function inboxItems(nodes) {
     var items = [];
     (nodes || []).forEach(function (node) {
+      if (node.stale) { return; } // snapshot rows: the agent is offline, its
+      // attention/busy fields are last-known values frozen at disconnect — they
+      // can never resolve, so counting them as actionable misleads the user.
       (node.sessions || []).forEach(function (session) {
         if (!session.attention) { return; }
         if (readAttention[attentionKey(node, session)]) { return; }
@@ -165,9 +168,10 @@
     var current = {};
     var fresh = [];
     (nodes || []).forEach(function (node) {
-      (node.sessions || []).forEach(function (session) {
+      if (node.stale) { return; } // snapshot rows never resolve; no toasts
+       (node.sessions || []).forEach(function (session) {
         if (!session.attention) { return; }
-        var key = node.node_id + "|" + session.session_id + "|" + session.attention;
+         var key = node.node_id + "|" + session.session_id + "|" + session.attention;
         current[key] = true;
         if (isWatching(node.node_id, session.session_id)) {
           // The user is already viewing it: presence suppression implies read.
