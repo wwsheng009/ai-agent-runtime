@@ -251,3 +251,60 @@ aicli-gateway security policy rollback --reason "P1 回滚误伤策略" --json
 
 > 说明：命令/端点名称以 [02-architecture.md](./02-architecture.md) §4.1 与实现为准；
 > 本文给出的是设计约定的目标形态，落地时若命名调整需同步更新。
+
+---
+
+## 13. 场景 F：主备切换（active/passive failover）
+
+当前实现（`b484018a` + 稳定 node id）已支持**主备热切换**：agent 侧具备 GOAWAY 触发的自动重连
+（2/5/10/30s 封顶退避），网关具备优雅下线广播（`CloseAll` → GOAWAY + 注册表条目转 stale）与
+注册表快照恢复（standby 启动时还原为 stale 条目）。
+
+### 13.1 部署形态
+
+```text
+            ┌──── LB / DNS（健康检查：GET /api/health）────┐
+console ──▶ │  active:  gateway-1 (:8443, data/ 共享或同步) │
+            │  standby: gateway-2（冷备或热备）             │
+            └──────────────────────────────────────────────┘
+                  ▲ agents 断线后按 backoff 重连当前 active
+```
+
+- **数据目录**：主备共享同一 `--data-dir` 内容（共享盘 / 定时同步 / 对象存储），
+  包含 `registry.json`（快照）、`devices.json`（令牌）、`vapid.key`（Web Push 身份）、`push.json`；
+- **VAPID 密钥必须主备一致**（否则 Web Push 订阅在切换后失效）；
+- 健康检查判定"可服务"以 `/gw/agent` 可升级为准，`nodes=0` 是刚重启实例的合法状态
+  （`live_nodes` 字段仅用于观测，不作为摘除依据）。
+
+### 13.2 计划内切换（升级/维护 active）
+
+1. standby 就绪（同版本 + 同步的数据目录）；
+2. 向 active 发 `SIGINT`/`SIGTERM`：网关对全部 live agent 广播 `GOAWAY`，
+   注册表条目转 stale 并落盘快照，退出码 0；
+3. LB 把流量切到 standby；standby 读快照 → stale 条目原样可见；
+4. agents 按 backoff 重连（同 NodeID 替换 stale 条目 → live）；
+5. 验收：`GET /api/health` → `live_nodes` 回升到切换前数量；
+   控制台会话/attention 视图与切换前一致。
+
+### 13.3 故障切换（active 崩溃）
+
+- LB 健康检查失败自动摘除 → standby 接管；agents 因连接断开走同一条自动重连路径；
+- active 若来不及写快照，standby 用最后一次防抖快照（最多丢 ~2s 的注册表变更，
+  agent 重连即重建，无实质影响）。
+
+### 13.4 验证
+
+`backend/.tmp/ha-e2e/failover_e2e.ps1` 是一次完整的真实进程演练（起 A → 注册 →
+CTRL_BREAK 优雅停止 → 起 B（同数据目录）→ 断言同一 NodeID 以 live 状态出现在 B，
+即 stale 条目被替换）。核心断言：
+
+```text
+A registry: node=node-<id> LIVE
+（drain A, start B on the same data dir）
+B registry: node=node-<id> LIVE   # 同 ID 替换 stale，而非新增第二个节点
+```
+
+**身份前提**：aicli / runtime-server 的 REGISTER 携带机器稳定 node id
+（`~/.aicli/gateway-node-id`，`gatewayagent.LoadOrCreateNodeID`）。若该文件缺失
+（极端环境无法写 home），agent 退化为每次进程随机 id——failover 仍工作，
+但 standby 上会短暂并存一条 stale 条目直到 TTL/人工清理，不影响可用性。

@@ -33,6 +33,11 @@
 | 协议/宿主 | `NOTIFY` 帧（事件元数据 + `dedup_key`） | `internal/gateway/wire/messages.go`、`internal/gateway/tunnel/notify.go`、`internal/gateway/agent/controller.go` |
 | 控制台 | 聚合收件箱（按优先级 + 已读联动） | `cmd/gateway/console/{index.html,app.js,style.css}` |
 | 服务端 | 注册表持久化（防抖快照 + 重启恢复 stale） | `internal/gateway/tunnel/{registry,persist}.go`、`cmd/gateway/main.go` |
+| 服务端 | 主备切换原语（GOAWAY 下线广播 + 优雅退出 + live/stable 计数） | `internal/gateway/tunnel/server.go`（`CloseAll`）、`cmd/gateway/main.go`（SIGINT/SIGTERM） |
+| agent | 断线自动重连（GOAWAY 触发，2/5/10/30s 退避） | `internal/gateway/agent/{control,wsconn}.go` |
+| 宿主 | 机器稳定 node id（failover 后同 ID 替换 stale 条目） | `internal/gateway/agent/nodeid.go`、`cmd/aicli/commands/chat_gateway_host.go`、`cmd/runtime-server/gateway_bootstrap.go` |
+| 运维 | 主备切换 runbook（场景 F） | `docs/gateway/10-runbook.md` §13 |
+
 
 ---
 

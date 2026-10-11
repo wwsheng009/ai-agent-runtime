@@ -15,13 +15,18 @@ import (
 var chatGatewayDefaultRoutes = []string{"/web", "/web/api", "/debug/endpoints"}
 
 // chatGatewayRegisterFunc supplies the REGISTER payload for this process. The
-// session list reflects the session bound at dial time.
+// session list reflects the session bound at dial time. The node id is the
+// machine-stable identity (gatewayagent.LoadOrCreateNodeID) so a reconnect
+// after a gateway failover replaces the stale registry entry on the standby
+// instead of registering a second node.
 func chatGatewayRegisterFunc(cfg gatewayagent.Config, routes []string, session *ChatSession) gatewayagent.RegisterFunc {
+	nodeID := gatewayagent.LoadOrCreateNodeID()
 	return func() wire.Register {
 		if len(routes) == 0 {
 			routes = chatGatewayDefaultRoutes
 		}
 		return wire.Register{
+			NodeID:       nodeID,
 			Kind:         "aicli",
 			Name:         cfg.Name,
 			DeviceName:   cfg.Name,
