@@ -28,7 +28,25 @@
       if (r.res.status === 401) { setAuthed(false); return; }
       setAuthed(true);
       renderNodes((r.body && r.body.nodes) || []);
+      subscribeEvents();
     });
+  }
+
+  var eventsSubscribed = false;
+  function subscribeEvents() {
+    if (eventsSubscribed || typeof EventSource !== "function") { return; }
+    eventsSubscribed = true;
+    var source = new EventSource("/api/events");
+    source.addEventListener("nodes", function (event) {
+      try {
+        var payload = JSON.parse(event.data);
+        renderNodes((payload && payload.nodes) || []);
+      } catch (err) {
+        /* ignore malformed frame */
+      }
+    });
+    // The browser reconnects automatically; nothing to do on error.
+    source.addEventListener("error", function () {});
   }
 
   function nodeWebBase(node) {

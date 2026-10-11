@@ -33,6 +33,9 @@ type Config struct {
 	// OnRouteDenied is called when a proxy request is rejected by the route
 	// allowlist (used for penalty bans). Optional.
 	OnRouteDenied func(*http.Request)
+	// OnRegistryChanged is called when the node registry changes (register,
+	// unregister or session update); used to push live console updates. Optional.
+	OnRegistryChanged func()
 	// Upgrader overrides the WebSocket upgrader (tests).
 	Upgrader *websocket.Upgrader
 }
@@ -100,6 +103,12 @@ func (s *Server) Registry() *Registry { return s.registry }
 func (s *Server) logf(format string, args ...any) {
 	if s.cfg.Logf != nil {
 		s.cfg.Logf(format, args...)
+	}
+}
+
+func (s *Server) notifyRegistryChanged() {
+	if s.cfg.OnRegistryChanged != nil {
+		s.cfg.OnRegistryChanged()
 	}
 }
 
@@ -181,7 +190,11 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		LastHeartbeat: nowUTC(),
 	}
 	s.registry.Upsert(node)
-	defer s.registry.Remove(nodeID)
+	s.notifyRegistryChanged()
+	defer func() {
+		s.registry.Remove(nodeID)
+		s.notifyRegistryChanged()
+	}()
 
 	sess := newSession(nodeID, ws)
 	s.registerSession(nodeID, sess)

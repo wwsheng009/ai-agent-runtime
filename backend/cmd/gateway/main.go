@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,41 @@ type gatewayMetrics struct {
 	rateLimited atomic.Int64
 	proxy       atomic.Int64
 	banned      atomic.Int64
+}
+
+// nodeHub broadcasts registry changes to console SSE subscribers.
+type nodeHub struct {
+	mu   sync.Mutex
+	subs map[chan struct{}]struct{}
+}
+
+func newNodeHub() *nodeHub {
+	return &nodeHub{subs: make(map[chan struct{}]struct{})}
+}
+
+func (h *nodeHub) subscribe() chan struct{} {
+	ch := make(chan struct{}, 1)
+	h.mu.Lock()
+	h.subs[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *nodeHub) unsubscribe(ch chan struct{}) {
+	h.mu.Lock()
+	delete(h.subs, ch)
+	h.mu.Unlock()
+}
+
+func (h *nodeHub) notify() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func main() {
@@ -75,6 +111,7 @@ func run() int {
 	}
 
 	auditLog := audit.New(2000, filepath.Join(*dataDir, "audit.log"))
+	hub := newNodeHub()
 	var metrics gatewayMetrics
 	limiter := ratelimit.New(*rateLimit, time.Minute)
 	resolver := ratelimit.NewResolver(strings.Split(*trustedProxies, ","))
@@ -116,6 +153,7 @@ func run() int {
 		OnRouteDenied: func(r *http.Request) {
 			bans.Record(resolver.ClientIP(r))
 		},
+		OnRegistryChanged: hub.notify,
 		Logf: func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "gateway: "+format+"\n", args...)
 		},
@@ -210,6 +248,52 @@ func run() int {
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"events": auditLog.Entries(limit)})
+	}))).Methods(http.MethodGet)
+	// Live registry events for the console (owner-protected SSE).
+	router.Handle("/api/events", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		send := func() bool {
+			payload, err := json.Marshal(map[string]any{"nodes": registry.List(), "count": registry.Count()})
+			if err != nil {
+				return false
+			}
+			if _, err := fmt.Fprintf(w, "event: nodes\ndata: %s\n\n", payload); err != nil {
+				return false
+			}
+			flusher.Flush()
+			return true
+		}
+		if !send() {
+			return
+		}
+		ch := hub.subscribe()
+		defer hub.unsubscribe(ch)
+		heartbeat := time.NewTicker(20 * time.Second)
+		defer heartbeat.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ch:
+				if !send() {
+					return
+				}
+			case <-heartbeat.C:
+				if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+		}
 	}))).Methods(http.MethodGet)
 	// Ban management (owner-protected): list / manual ban / unban.
 	router.Handle("/api/bans", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
