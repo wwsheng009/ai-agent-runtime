@@ -212,15 +212,17 @@ type Handler struct {
 	agentMaxStepsPersister      AgentMaxStepsPersister
 	agentMaxStepsProvider       AgentMaxStepsProvider
 	runtimeConfigLayersProvider RuntimeConfigLayersProvider
-	serviceControlService       RuntimeServiceControlService
-	fileTransferService         FileTransferService
-	logFilePath                 string
-	usageAnalyticsDBPath        string
-	profileRegistry             *profilesys.Registry
-	profileDefaultRef           string
-	profileGlobalRuntimePath    string
-	profileGlobalMCPPath        string
-	profileGlobalSkillDirs      []string
+	// gatewayController is the gateway connection control plane (docs/gateway/12-connection-control.md).
+	gatewayController        GatewayController
+	serviceControlService    RuntimeServiceControlService
+	fileTransferService      FileTransferService
+	logFilePath              string
+	usageAnalyticsDBPath     string
+	profileRegistry          *profilesys.Registry
+	profileDefaultRef        string
+	profileGlobalRuntimePath string
+	profileGlobalMCPPath     string
+	profileGlobalSkillDirs   []string
 	// profileAutoRoute 是 FR-11 的提示词路由表（`profiles.auto`；零值 = 内置默认）。
 	profileAutoRoute profilesys.AutoRouteConfig
 
@@ -979,6 +981,13 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/skills/config/write", h.WriteConfigDocument).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/config/agent/max-steps", h.UpdateAgentMaxSteps).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/config/agent/max-steps", h.GetAgentMaxSteps).Methods(http.MethodGet)
+	// 网关连接控制面（docs/gateway/12-connection-control.md）：状态 / 手动连接 / 断开 / 重连 / 配置。
+	runtimeRouter.HandleFunc("/gateway/status", h.GetGatewayStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/gateway/connect", h.ConnectGateway).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/gateway/disconnect", h.DisconnectGateway).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/gateway/reconnect", h.ReconnectGateway).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/gateway/config", h.GetGatewayConfig).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/gateway/config", h.UpdateGatewayConfig).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/config/approval-explain", h.UpdateApprovalExplainSettings).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/config/approval-explain", h.GetApprovalExplainSettings).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
