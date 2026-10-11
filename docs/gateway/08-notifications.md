@@ -221,6 +221,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 通知策略（合并/免打扰） | `cmd/gateway/push.go`、`notify_policy.go` | 低优先（`completed`/`waiting`）按 `--notify-coalesce-window`（默认 30s）合并为"N 个会话已完成"；`--notify-quiet-hours`（`HH:MM-HH:MM`，本地时间）内静音低优先；`approval`/`question`/`error` 高优先立即投递并穿透免打扰 |
 | `NOTIFY` 帧 | `internal/gateway/wire/messages.go`、`tunnel/notify.go`、`agent/controller.go` | 新增 `Notify`（`kind`/`priority`/`title`/`dedup_key`/`ts`）；agent 在 turn 边界/事件变化时随 `SESSION_UPDATE` 一并上报；网关按 `dedup_key` 去重并更新注册表 `attention`（不覆盖 `SESSION_UPDATE` 其它字段） |
 | 控制台聚合收件箱 | `cmd/gateway/console/{index.html,app.js,style.css}` | "待处理"聚合视图（按优先级排序 + 计数）；打开会话即标记已读（presence 即已读联动），注意力再次变化后重新出现 |
+| 注册表持久化 | `tunnel/registry.go`、`tunnel/persist.go`、`cmd/gateway/main.go` | 注册表防抖快照到 `data/registry.json`（0600，默认 2s 合并窗口，退出时强制落盘）；重启恢复为 **stale** 条目（控制台显示"离线（快照）"），agent 重连（同 NodeID）即替换为 live；快照同时种子化推送去重快照，重启不会重推旧注意力；断开清理只删除自己的注册条目（比较 LastHeartbeat），避免覆盖重连后的 live 条目 |
 
 **通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时广播一次 Web Push。因此：
 
@@ -231,10 +232,9 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 
 | 项 | 说明 |
 |----|------|
-| 注册表持久化 | 节点/会话/`attention` 仅存于网关内存，重启后依赖 agent 重连重建；未做持久化 |
-| 多实例 HA | 注册表与 presence 为单进程内存状态；未做共享存储/多实例一致性 |
+| 多实例 HA | 注册表快照与 presence 为单进程内存/单文件状态；多实例部署需共享存储（如 SQLite/Redis）+ 节点归属路由（同一 agent 只连一个实例）+ WebSocket 广播层；当前单实例可用性不受影响 |
 
 > 说明：推送链路已**端到端打通**（agent 上报 → 网关注册表 → 去重/合并/免打扰 → VAPID 加密投递 →
 > Service Worker 展示 → 控制台徽标/toast/收件箱），各段均有单测；§3/§5/§9 的增强项（`NOTIFY` 帧、
-> presence 收件箱联动、时间窗合并、免打扰/静音、聚合收件箱）均已落地，剩余两项为部署级增强，
+> presence 收件箱联动、时间窗合并、免打扰/静音、聚合收件箱、注册表持久化）均已落地，剩余多实例 HA 为部署级增强，
 > 不影响单实例可用性。

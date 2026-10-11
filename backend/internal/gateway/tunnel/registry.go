@@ -29,6 +29,10 @@ type Node struct {
 	RemoteAddr    string                `json:"remote_addr,omitempty"`
 	RegisteredAt  time.Time             `json:"registered_at"`
 	LastHeartbeat time.Time             `json:"last_heartbeat"`
+	// Stale marks a node restored from the persisted registry snapshot: the
+	// entry carries the last-known sessions/attention, but no live connection
+	// exists (proxy requests fail closed with 502). A fresh REGISTER clears it.
+	Stale bool `json:"stale,omitempty"`
 }
 
 // Registry is an in-memory node registry. Live connections are not persisted;
@@ -103,4 +107,26 @@ func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.nodes)
+}
+
+// Restore seeds the registry from a persisted snapshot (gateway restart). Every
+// restored node is marked Stale: it is last-known state, not a live agent. A
+// reconnect with the same NodeID replaces the entry and clears the flag.
+func (r *Registry) Restore(nodes []*Node) int {
+	if r == nil {
+		return 0
+	}
+	restored := 0
+	for _, node := range nodes {
+		if node == nil || node.NodeID == "" {
+			continue
+		}
+		cp := *node
+		cp.Stale = true
+		r.mu.Lock()
+		r.nodes[cp.NodeID] = &cp
+		r.mu.Unlock()
+		restored++
+	}
+	return restored
 }

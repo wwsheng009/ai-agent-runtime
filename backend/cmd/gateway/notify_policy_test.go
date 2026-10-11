@@ -168,3 +168,46 @@ func TestPushNotifierQuietHours(t *testing.T) {
 		t.Fatal("high-priority push must pierce quiet hours")
 	}
 }
+
+// TestPushNotifierSeedPreventsRestartRepush mirrors a gateway restart: the
+// restored (stale) registry state seeds the dedup snapshot, so the first
+// observe after startup does not re-push the pre-restart attention.
+func TestPushNotifierSeedPreventsRestartRepush(t *testing.T) {
+	hits := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- struct{}{}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	n := testNotifier(t, srv.URL+"/sub")
+	n.Seed([]*tunnel.Node{{
+		NodeID: "n1",
+		Stale:  true,
+		Sessions: []wire.SessionSummary{
+			{SessionID: "s1", Attention: "approval"},
+		},
+	}})
+
+	// The agent reconnects and reports the same attention state: no push.
+	n.observe([]*tunnel.Node{{
+		NodeID: "n1",
+		Sessions: []wire.SessionSummary{
+			{SessionID: "s1", Attention: "approval"},
+		},
+	}})
+	if waitHit(hits, 300*time.Millisecond) {
+		t.Fatal("seeded attention must not re-push after restart")
+	}
+
+	// A different attention state for the same session still notifies.
+	n.observe([]*tunnel.Node{{
+		NodeID: "n1",
+		Sessions: []wire.SessionSummary{
+			{SessionID: "s1", Attention: "question"},
+		},
+	}})
+	if !waitHit(hits, 2*time.Second) {
+		t.Fatal("attention change after seed must push")
+	}
+}

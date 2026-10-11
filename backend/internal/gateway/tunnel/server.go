@@ -36,6 +36,9 @@ type Config struct {
 	// OnRegistryChanged is called when the node registry changes (register,
 	// unregister or session update); used to push live console updates. Optional.
 	OnRegistryChanged func()
+	// DataDir enables registry persistence (registry.json under DataDir,
+	// debounced). Empty disables persistence. Optional.
+	DataDir string
 	// Upgrader overrides the WebSocket upgrader (tests).
 	Upgrader *websocket.Upgrader
 }
@@ -53,6 +56,9 @@ type Server struct {
 	// (docs/gateway/08-notifications.md §4.1).
 	notifyMu   sync.Mutex
 	notifySeen map[string]struct{}
+
+	// persist debounces registry snapshots (nil when persistence is disabled).
+	persist *persister
 }
 
 // NewServer builds a tunnel server.
@@ -75,6 +81,7 @@ func NewServer(cfg Config) *Server {
 		upgrader:   upgrader,
 		sessions:   make(map[string]*session),
 		notifySeen: make(map[string]struct{}),
+		persist:    NewPersister(registry, cfg.DataDir, 0),
 	}
 }
 
@@ -106,6 +113,16 @@ func (s *Server) session(nodeID string) (*session, bool) {
 // Registry returns the node registry.
 func (s *Server) Registry() *Registry { return s.registry }
 
+// PersistSnapshot forces a registry snapshot write (used on shutdown, after the
+// debounced scheduled write has been cancelled or not yet fired). No-op when
+// persistence is disabled.
+func (s *Server) PersistSnapshot() {
+	if s == nil || s.persist == nil {
+		return
+	}
+	s.persist.Close()
+}
+
 func (s *Server) logf(format string, args ...any) {
 	if s.cfg.Logf != nil {
 		s.cfg.Logf(format, args...)
@@ -115,6 +132,15 @@ func (s *Server) logf(format string, args ...any) {
 func (s *Server) notifyRegistryChanged() {
 	if s.cfg.OnRegistryChanged != nil {
 		s.cfg.OnRegistryChanged()
+	}
+}
+
+// notifyRegistryChangedAndPersist fans out a registry change to the callback
+// and schedules a debounced snapshot write.
+func (s *Server) notifyRegistryChangedAndPersist() {
+	s.notifyRegistryChanged()
+	if s.persist != nil {
+		s.persist.Schedule()
 	}
 }
 
@@ -196,10 +222,16 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		LastHeartbeat: nowUTC(),
 	}
 	s.registry.Upsert(node)
-	s.notifyRegistryChanged()
+	s.notifyRegistryChangedAndPersist()
 	defer func() {
-		s.registry.Remove(nodeID)
-		s.notifyRegistryChanged()
+		// Only remove our own entry: a reconnecting node with the same NodeID
+		// has already replaced it (fresher heartbeat, non-stale), and dropping
+		// the replacement would lose the live registration (and, with registry
+		// persistence, revert the snapshot to stale data).
+		if cur, ok := s.registry.Get(nodeID); !ok || cur.Stale || !cur.LastHeartbeat.After(node.LastHeartbeat) {
+			s.registry.Remove(nodeID)
+		}
+		s.notifyRegistryChangedAndPersist()
 	}()
 
 	sess := newSession(nodeID, ws)

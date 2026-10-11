@@ -173,11 +173,20 @@ func run() int {
 	}
 	notifier.coalesceWindow = *coalesceWindow
 	notifier.quietHours = quietRanges
+	// Registry persistence (docs/gateway/08-notifications.md §10.2): restore the
+	// last-known snapshot (marked stale) so the console keeps node/session/attention
+	// rows and restarts do not re-push old attention, then persist changes going
+	// forward via the server's debounced snapshot writer.
+	if restored := registry.Restore(tunnel.LoadSnapshot(*dataDir)); restored > 0 {
+		notifier.Seed(registry.List())
+		fmt.Fprintf(os.Stderr, "gateway: restored %d node(s) from %s\n", restored, filepath.Join(*dataDir, "registry.json"))
+	}
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,
 		PublicBaseURL:        *publicBaseURL,
 		Registry:             registry,
+		DataDir:              *dataDir,
 		Authenticate:         deviceAuth(devices.Store, *deviceToken),
 		OnRouteDenied: func(r *http.Request) {
 			bans.Record(resolver.ClientIP(r))
@@ -421,8 +430,10 @@ func run() int {
 	}
 	if err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "gateway: server exited: %v\n", err)
+		server.PersistSnapshot()
 		return 1
 	}
+	server.PersistSnapshot()
 	return 0
 }
 

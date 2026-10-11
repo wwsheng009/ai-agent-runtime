@@ -223,9 +223,13 @@
         '<div class="card-meta"></div>' +
         '<div class="card-actions"></div>';
       card.querySelector(".card-title").textContent = node.name || node.device_name || node.node_id;
+      // Stale = restored from the registry snapshot; the agent is not connected.
       card.querySelector(".badge").textContent =
-        (node.kind || "agent") + " · 会话 " + sessions.length;
+        (node.kind || "agent") + " · 会话 " + sessions.length + (node.stale ? " · 离线（快照）" : "");
       card.querySelector(".card-meta").textContent = node.node_id;
+      if (node.stale) {
+        card.style.opacity = "0.55";
+      }
       var actions = card.querySelector(".card-actions");
 
       if (sessions.length) {

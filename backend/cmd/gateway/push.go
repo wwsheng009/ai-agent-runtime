@@ -47,6 +47,30 @@ func newPushNotifier(manager *push.Manager, baseURL string, presence *presenceRe
 	}
 }
 
+// Seed pre-populates the dedup snapshot from persisted/last-known registry
+// state (gateway restart): sessions that already had an attention state before
+// the restart are not re-pushed. Callers pass the restored nodes (typically
+// marked stale) before any agent reconnects.
+func (p *pushNotifier) Seed(nodes []*tunnel.Node) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		for _, sess := range node.Sessions {
+			attention := strings.TrimSpace(sess.Attention)
+			if attention == "" {
+				continue
+			}
+			p.seen[node.NodeID+"|"+sess.SessionID] = attention
+		}
+	}
+}
+
 // pendingNotification pairs a notification with the attention kind that
 // produced it so coalescing can group by kind.
 type pendingNotification struct {

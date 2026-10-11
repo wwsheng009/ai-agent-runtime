@@ -29,7 +29,7 @@ func (s *Server) applyNotify(nodeID string, n wire.Notify) {
 	}
 	node.Sessions = applyNotifyToSessions(node.Sessions, n)
 	s.registry.Upsert(node)
-	s.notifyRegistryChanged()
+	s.notifyRegistryChangedAndPersist()
 }
 
 // markNotifySeen records a dedup key, reporting whether it was already present.

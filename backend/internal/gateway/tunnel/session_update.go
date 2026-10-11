@@ -24,7 +24,7 @@ func (s *Server) applySessionUpdate(nodeID string, update wire.SessionUpdate) {
 		node.Sessions = append([]wire.SessionSummary(nil), update.Sessions...)
 	}
 	s.registry.Upsert(node)
-	s.notifyRegistryChanged()
+	s.notifyRegistryChangedAndPersist()
 }
 
 func upsertSession(sessions []wire.SessionSummary, session wire.SessionSummary) []wire.SessionSummary {
