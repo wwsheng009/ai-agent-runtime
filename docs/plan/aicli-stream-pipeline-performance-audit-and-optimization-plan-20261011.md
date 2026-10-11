@@ -3,6 +3,8 @@
 > 审计对象：TUI 聊天会话中「LLM SSE → 事件总线 → 桥 → UI actor → 物理 writer → SQLite」全链路。
 > 审计方法：三路并行代码审计（桥/actor 热路径、活动流渲染成本、事件发布与持久化），关键结论逐条到源码人工复核。
 > 结论先行：**并发架构（LLM 请求不等 UI）形态正确，但默认配置下存在一处直接违反该不变式的 P0 缺口（每 delta 同步写 SQLite），以及若干随流长/会话长增长的 O(n²) 热点。**
+>
+> **实施状态（2026-10-11 收口）：批次 1 全部完成**，见文末 §9 实施记录。
 
 ## 1. 链路与不变式
 
@@ -120,3 +122,35 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 - 三路并行审计（bridge/UI actor、活动流渲染、发布/持久化），关键结论（P0-1 batching 默认关、P0-2 锁内深拷贝、P0-3 合并拼接、merge key 构造、retention 默认 512/8MB）已逐条人工读源复核。
 - 量级数据引用自仓库既有实测记录：`docs/plan/aicli-render-p3-performance-plan-20261007.md` §5（S4b 前后对比）、`session_event_payload_cap.go:37`（907MB 会话库 75% 为 delta 字节）。
 - 未做项：运行时 profile 实测（pprof 采样佐证各热点占比）。批次 1 动工前建议先跑一轮 `aicli chat --pprof` 长流式会话采样，确认 P0 三项的实际占比排序。
+
+## 9. 实施记录（批次 1 收口，2026-10-11）
+
+### 9.1 提交清单
+
+| 项 | 提交 | 内容 |
+| --- | --- | --- |
+| P0-1 | `492cf038` | aicli 本地宿主 eventPersist 默认启用 batching+AsyncDispatch；新增 `disable: true` 回滚开关（runtime-server 仍按 `batchingEnabled`）；契约登记 `PersistStreamDelta`（assistant_delta / assistant_reasoning / assistant.reasoning），EventPersistBuffer 溢出按 drop 处理，不再 block 背压 |
+| P0-2 | `990d7094` | Bus.Publish 留存条目（ApproximateEventBytes + cloneEvent 深拷贝）移出独占锁；流式 delta 免留存 |
+| P0-2 收口 | 本提交 | 订阅列表 copy-on-write（Subscribe/Unsubscribe 重建切片，Publish 锁外直接迭代已发布切片），稳态发布零快照分配 |
+| P0-3 | `e346d6e6` | chatStreamAccumulator 缓冲累积合并；成功投递物化进独立 payload 副本（失败尝试零拷贝、与槽位无别名）；mergeStreamEvents 重构为累积器纯函数包装；streamMergeKey 字符串键改结构化比较 |
+
+### 9.2 验收基准实测（对照 §6 批次 1）
+
+| 验收项 | 目标 | 实测 |
+| --- | --- | --- |
+| Bus delta 发布热路径 | allocs ≤1 | **59ns/op，0 allocs**（单发布者）；**并发 4 发布者 111ns/op，0 allocs** |
+| Bus 诊断事件发布 | — | 456ns/op，2 allocs（留存深拷贝，设计内） |
+| EventPersistBuffer 溢出 drop 热路径 | p99 ≤10µs，零同步 AppendEvent | **141.9ns/op，2 allocs**，基准断言 singleCalls==0 |
+| EventPersistBuffer 非溢出快路径 | 无磁盘 I/O | 390ns/op，0 allocs |
+| backlog 合并 200×5KB | 分配较 O(n²) 降一个量级 | 钉子测试上界 ≤20MB（原实现约 100MB 纯 memcpy），单槽折叠 + 投递副本完整文本/无别名断言 |
+
+### 9.3 回归与测试
+
+- `go build ./...` 全仓干净；`internal/events`、`internal/chat`、`internal/config` 全量测试通过；`cmd/aicli/commands` 全量套件（387+ 测试）219s 通过；合并/锁路径 `-race` 通过。
+- delta drop 不影响终态正文：drop 仅发生在队列溢出（4096 条/16MB）时，终态 `assistant_message` 承载完整正文，resume 重放测试全绿。
+- 测试适配：`chat_actor_host_persist_test.go` 翻转 `Disable` 语义；`TestStreamMergeKey…` 重写为 `streamMergeIdentityEqual`；reasoning 合并测试断言从槽位 payload 迁移到累积器 + 投递副本。
+
+### 9.4 遗留（批次 2+ 承接）
+
+- §3 P1 全部 10 项（每 delta 常数项）与 §4 P2、§5 缺口加固未动工。
+- 动工批次 2 前建议先跑 `aicli chat --pprof` 长流式采样确认热点占比排序（§8 未做项）。

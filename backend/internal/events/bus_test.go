@@ -936,3 +936,22 @@ func BenchmarkBusPublishDiagnosticEvent(b *testing.B) {
 		bus.Publish(Event{Type: "tool.completed", TraceID: "t1", Payload: payload})
 	}
 }
+
+// P0-2 收口：并发发布基准——4 发布者共享总线（留存免 delta + COW 订阅列表），
+// 稳态应为零分配、亚微秒级。
+func BenchmarkBusPublishStreamDeltaConcurrent(b *testing.B) {
+	bus := NewBus()
+	bus.Subscribe("", func(Event) {})
+	bus.Subscribe("assistant_delta", func(Event) {})
+	payload := map[string]interface{}{
+		"stream_id": "s1",
+		"sequence":  1,
+		"delta":     "hello world chunk",
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			bus.Publish(Event{Type: "assistant_delta", TraceID: "t1", Payload: payload})
+		}
+	})
+}

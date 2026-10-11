@@ -265,3 +265,45 @@ func TestEventPersistBufferSkipsAlreadyPersistedSeq(t *testing.T) {
 	require.Zero(t, stats.Enqueued)
 	require.Zero(t, fake.count())
 }
+
+// P0-1 验收基准（docs/plan/aicli-stream-pipeline-performance-audit-and-optimization-plan-20261011.md §6）：
+// 默认配置语义下（delta 溢出 drop、critical block），生产者 Enqueue 热路径
+// （含恒定溢出的 drop 分支）必须亚 10µs 且不触碰 store——LLM 回调链零同步磁盘 I/O。
+func BenchmarkEventPersistBufferEnqueueStreamDeltaOverflowDrop(b *testing.B) {
+	fake := &fakePersistStore{}
+	buffer := NewEventPersistBuffer(fake, EventPersistBufferConfig{
+		BatchSize:         64,
+		FlushInterval:     time.Hour,
+		QueueLimit:        1,
+		OverflowDropTypes: runtimeevents.IsPersistStreamDeltaEventType,
+		CriticalTypes:     runtimeevents.IsPersistCriticalEventType,
+	})
+	defer func() { _ = buffer.Close(context.Background()) }()
+	buffer.Enqueue(bufferTestEvent("assistant_delta")) // 占满队列：此后恒定溢出
+	event := bufferTestEvent("assistant_delta")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buffer.Enqueue(event)
+	}
+	b.StopTimer()
+	if fake.singleCalls != 0 {
+		b.Fatalf("drop 路径不得触发同步落盘, singleCalls=%d", fake.singleCalls)
+	}
+}
+
+// 非溢出快路径：队列写入 + 触发信号，无任何磁盘 I/O。
+func BenchmarkEventPersistBufferEnqueueFastPath(b *testing.B) {
+	fake := &fakePersistStore{}
+	buffer := NewEventPersistBuffer(fake, EventPersistBufferConfig{
+		BatchSize:     1 << 20,
+		FlushInterval: time.Hour,
+	})
+	defer func() { _ = buffer.Close(context.Background()) }()
+	event := bufferTestEvent("assistant_delta")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buffer.Enqueue(event)
+	}
+}

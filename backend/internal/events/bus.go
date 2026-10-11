@@ -279,9 +279,9 @@ func (b *Bus) SubscribeCancelable(eventType string, handler Handler) Unsubscribe
 	id := b.nextID
 	item := subscription{id: id, handler: handler}
 	if eventType == "" {
-		b.all = append(b.all, item)
+		b.all = appendSubscription(b.all, item)
 	} else {
-		b.subscribers[eventType] = append(b.subscribers[eventType], item)
+		b.subscribers[eventType] = appendSubscription(b.subscribers[eventType], item)
 	}
 	b.mu.Unlock()
 
@@ -329,15 +329,17 @@ func (b *Bus) Publish(event Event) {
 	if slot.retained {
 		b.appendRetainedSlot(slot)
 	}
-	typed := cloneSubscriptionHandlers(b.subscribers[event.Type])
-	all := cloneSubscriptionHandlers(b.all)
+	// P0-2 收口：订阅列表由 Subscribe/Unsubscribe 以 copy-on-write 维护，
+	// 已发布切片不可变，这里直接引用、锁外迭代——稳态发布零分配。
+	typed := b.subscribers[event.Type]
+	all := b.all
 	b.mu.Unlock()
 
-	for _, handler := range all {
-		handler(event)
+	for _, sub := range all {
+		sub.handler(event)
 	}
-	for _, handler := range typed {
-		handler(event)
+	for _, sub := range typed {
+		sub.handler(event)
 	}
 }
 
@@ -419,11 +421,23 @@ func (b *Bus) retainedEventsLocked() []Event {
 	return events
 }
 
+// appendSubscription 以 copy-on-write 方式追加订阅：返回全新切片，绝不复用
+// 旧切片的底层数组——Publish 在锁外直接迭代已发布切片，依赖其不可变性
+// （P0-2 收口）。订阅是低频操作，O(n) 复制可忽略。
+func appendSubscription(items []subscription, item subscription) []subscription {
+	updated := make([]subscription, len(items)+1)
+	copy(updated, items)
+	updated[len(items)] = item
+	return updated
+}
+
+// removeSubscriptionByID 以 copy-on-write 方式移除订阅：原实现 items[:0]
+// 原地过滤会改写已发布切片的底层数组，与锁外迭代冲突。
 func removeSubscriptionByID(items []subscription, id int64) []subscription {
 	if len(items) == 0 {
 		return nil
 	}
-	filtered := items[:0]
+	filtered := make([]subscription, 0, len(items))
 	for _, item := range items {
 		if item.id != id {
 			filtered = append(filtered, item)
@@ -433,19 +447,6 @@ func removeSubscriptionByID(items []subscription, id int64) []subscription {
 		return nil
 	}
 	return filtered
-}
-
-func cloneSubscriptionHandlers(items []subscription) []Handler {
-	if len(items) == 0 {
-		return nil
-	}
-	handlers := make([]Handler, 0, len(items))
-	for _, item := range items {
-		if item.handler != nil {
-			handlers = append(handlers, item.handler)
-		}
-	}
-	return handlers
 }
 
 // Recent 返回最近留存的事件。
