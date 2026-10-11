@@ -98,4 +98,3 @@ func TestScheduleToolsSelectorAndErrorCodes(t *testing.T) {
 		t.Fatalf("blank title = %#v, want invalid_prompt", result)
 	}
 }
-

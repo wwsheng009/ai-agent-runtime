@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/migrate"
+	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 

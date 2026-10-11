@@ -51,6 +51,7 @@ import (
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -347,6 +348,9 @@ type Handler struct {
 	backgroundMu        sync.Mutex
 	backgroundManager   *background.Manager
 	backgroundConfigKey string
+
+	scheduleMu      sync.Mutex
+	scheduleService *schedule.Service
 
 	codexSkillsListMu           sync.RWMutex
 	codexSkillsListCache        map[string]codexSkillsListResponse
@@ -1040,6 +1044,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/input", h.WriteBackgroundJobInput).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/resize", h.ResizeBackgroundJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/terminals/clean", h.CleanBackgroundTerminals).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/mcps", h.CreateRuntimeMCP).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/mcps/{name}", h.UpdateRuntimeMCP).Methods(http.MethodPut)
@@ -5694,6 +5699,15 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		}
 		broker.Background = bgManager
 	}
+
+	if scheduleService := h.getScheduleService(); scheduleService != nil {
+		broker := a.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			a.SetToolBroker(broker)
+		}
+		broker.Schedule = scheduleService
+	}
 }
 
 // getExecutionSupervisor lazily builds the P3 child-run watchdog (doc 5.2 /
@@ -5752,6 +5766,42 @@ func (h *Handler) getExecutionSupervisor() *supervision.ExecutionSupervisor {
 	h.executionSupervisorStop = cancel
 	go supervisor.RunLoop(ctx)
 	return supervisor
+}
+
+// getScheduleService lazily opens the shared schedule store when the schedule
+// subsystem is enabled. Disabled or unopenable returns nil, so the schedule_*
+// tools stay out of the model tool surface entirely.
+func (h *Handler) getScheduleService() *schedule.Service {
+	if h == nil {
+		return nil
+	}
+	cfg := h.runtimeConfig
+	if cfg == nil || !cfg.Schedule.Enabled {
+		return nil
+	}
+	sc := cfg.Schedule.WithDefaults()
+	path := strings.TrimSpace(sc.StorePath)
+	if path == "" {
+		base := filepath.Dir(agentconfig.DefaultAuthStorePath())
+		if base == "" || base == "." {
+			return nil
+		}
+		path = filepath.Join(base, "data", "schedule", "schedule.sqlite")
+	}
+	h.scheduleMu.Lock()
+	defer h.scheduleMu.Unlock()
+	if h.scheduleService != nil {
+		return h.scheduleService
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil
+	}
+	store, err := schedule.OpenStore(path)
+	if err != nil {
+		return nil
+	}
+	h.scheduleService = schedule.NewService(store, schedule.SystemClock)
+	return h.scheduleService
 }
 
 func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *background.Manager {
