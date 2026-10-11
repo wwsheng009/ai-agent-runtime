@@ -10,89 +10,162 @@
 <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-<header class="topbar">
-  <div class="topbar-brand">
-    <span class="brand-mark" aria-hidden="true"></span>
-    <div class="brand-text">
-      <h1>aicli-gateway</h1>
-      <span class="brand-sub">会话网关控制台</span>
+
+<div class="workspace">
+
+  <!-- ── 侧边导航 ─────────────────────────────────────────── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div class="brand-text">
+        <h1>aicli-gateway</h1>
+        <span class="brand-sub">会话网关</span>
+      </div>
     </div>
-  </div>
-  <div class="topbar-actions">
-    <button id="push-toggle" type="button" class="btn ghost" hidden>开启通知</button>
-    <button id="logout" type="button" class="btn ghost" hidden>退出</button>
-  </div>
-</header>
 
-<main class="shell">
+    <nav class="nav" id="nav" aria-label="主导航">
+      <a class="nav-item" href="#dashboard" data-view="dashboard">
+        <span class="nav-ico" aria-hidden="true">▤</span>仪表盘
+      </a>
+      <a class="nav-item" href="#sessions" data-view="sessions">
+        <span class="nav-ico" aria-hidden="true">❯</span>会话
+        <span class="nav-badge" id="nav-badge-sessions" hidden></span>
+      </a>
+      <a class="nav-item" href="#nodes" data-view="nodes">
+        <span class="nav-ico" aria-hidden="true">☰</span>节点
+      </a>
+      <a class="nav-item" href="#tokens" data-view="tokens">
+        <span class="nav-ico" aria-hidden="true">⚿</span>设备令牌
+      </a>
+    </nav>
 
-  <!-- Owner 登录 -->
-  <section id="login" class="login-card" hidden>
-    <h2>Owner 登录</h2>
-    <p class="login-hint">输入网关启动时设置的 owner 密码以管理节点、会话与通知。</p>
-    <form id="login-form">
-      <input id="password" type="password" placeholder="Owner 密码" autocomplete="current-password">
-      <button type="submit" class="btn primary">登录</button>
+    <div class="sidebar-foot">
+      <button id="push-toggle" type="button" class="btn ghost sm" hidden>🔔 开启通知</button>
+      <button id="logout" type="button" class="btn ghost sm" hidden>退出登录</button>
+    </div>
+  </aside>
+  <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+
+  <!-- ── 主区 ─────────────────────────────────────────────── -->
+  <div class="workspace-main">
+
+    <header class="topbar">
+      <button id="nav-toggle" type="button" class="btn ghost sm nav-toggle" aria-label="打开导航">☰</button>
+      <h2 class="view-title" id="view-title">仪表盘</h2>
+      <div class="topbar-actions">
+        <span class="conn-chip" id="conn-chip"><span class="dot live"></span>已连接</span>
+        <button id="refresh" type="button" class="btn ghost sm">⟳ 刷新</button>
+        <button id="logout-top" type="button" class="btn ghost sm" hidden>退出</button>
+      </div>
+    </header>
+
+    <main class="views">
+
+      <!-- 登录 -->
+      <section id="login" class="view login-view" hidden>
+        <div class="login-card">
+          <h2>Owner 登录</h2>
+          <p class="login-hint">输入网关启动时设置的 owner 密码以管理节点、会话与通知。</p>
+          <form id="login-form">
+            <input id="password" type="password" placeholder="Owner 密码" autocomplete="current-password">
+            <button type="submit" class="btn primary">登录</button>
+          </form>
+          <p id="login-error" class="error" hidden></p>
+        </div>
+      </section>
+
+      <div id="app" class="app-views" hidden>
+
+        <!-- 仪表盘 -->
+        <section class="view" data-view="dashboard">
+          <div class="stats">
+            <a class="stat" href="#sessions"><span class="stat-num" id="stat-online">0</span><span class="stat-label">在线节点</span></a>
+            <div class="stat"><span class="stat-num" id="stat-offline">0</span><span class="stat-label">离线快照</span></div>
+            <a class="stat" href="#sessions"><span class="stat-num" id="stat-sessions">0</span><span class="stat-label">活跃会话</span></a>
+            <a class="stat attention" href="#sessions?attention=1"><span class="stat-num" id="stat-attention">0</span><span class="stat-label">待处理</span></a>
+          </div>
+
+          <div class="dash-grid">
+            <section class="panel inbox" id="inbox-panel">
+              <div class="panel-head">
+                <h2>需要处理</h2>
+                <span class="pill attention-pill" id="inbox-count" hidden></span>
+              </div>
+              <div id="inbox-list" class="list"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><h2>节点概览</h2></div>
+              <div id="dash-node-list" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <!-- 会话 -->
+        <section class="view" data-view="sessions" hidden>
+          <div class="toolbar">
+            <input id="session-filter" class="filter-input" type="search" placeholder="按标题 / 摘要 / 会话 ID 过滤…">
+            <div class="seg" role="tablist" aria-label="会话筛选">
+              <button class="seg-btn active" data-sfilter="all">全部</button>
+              <button class="seg-btn" data-sfilter="attention">需处理</button>
+              <button class="seg-btn" data-sfilter="running">运行中</button>
+              <button class="seg-btn" data-sfilter="offline">离线快照</button>
+            </div>
+            <select id="session-sort" class="select" aria-label="排序">
+              <option value="activity">按最近活动</option>
+              <option value="title">按标题</option>
+              <option value="node">按节点</option>
+            </select>
+          </div>
+          <div id="session-table" class="session-table"></div>
+          <p id="session-empty" class="empty" hidden>没有匹配的会话。</p>
+        </section>
+
+        <!-- 节点 -->
+        <section class="view" data-view="nodes" hidden>
+          <div class="dash-grid">
+            <section class="panel">
+              <div class="panel-head"><h2>在线节点</h2></div>
+              <div id="node-live-list" class="list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><h2>离线快照</h2></div>
+              <div id="node-offline-list" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <!-- 设备令牌 -->
+        <section class="view" data-view="tokens" hidden>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>已签发令牌</h2>
+              <button id="issue-token" type="button" class="btn primary sm">+ 签发新令牌</button>
+            </div>
+            <div id="device-list" class="list"></div>
+          </section>
+        </section>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- 令牌签发模态 -->
+<div class="modal-scrim" id="token-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="token-modal-title">
+    <div class="modal-head">
+      <h3 id="token-modal-title">签发设备令牌</h3>
+      <button class="btn ghost sm" id="token-modal-close" aria-label="关闭">✕</button>
+    </div>
+    <form id="device-form">
+      <input id="device-name" placeholder="设备名称（如 vince-laptop）" autocomplete="off">
+      <button type="submit" class="btn primary">签发</button>
     </form>
-    <p id="login-error" class="error" hidden></p>
-  </section>
-
-  <div id="app" class="dashboard" hidden>
-
-    <!-- 概览统计 -->
-    <section class="stats" aria-label="概览">
-      <div class="stat">
-        <span class="stat-num" id="stat-online">0</span>
-        <span class="stat-label">在线节点</span>
-      </div>
-      <div class="stat">
-        <span class="stat-num" id="stat-offline">0</span>
-        <span class="stat-label">离线快照</span>
-      </div>
-      <div class="stat">
-        <span class="stat-num" id="stat-sessions">0</span>
-        <span class="stat-label">活跃会话</span>
-      </div>
-      <div class="stat attention">
-        <span class="stat-num" id="stat-attention">0</span>
-        <span class="stat-label">待处理</span>
-      </div>
-    </section>
-
-    <!-- 待处理收件箱 -->
-    <section id="inbox" class="panel inbox">
-      <div class="panel-head">
-        <h2>待处理</h2>
-        <span id="inbox-count" class="pill attention-pill"></span>
-      </div>
-      <div id="inbox-list" class="list"></div>
-    </section>
-
-    <!-- 节点与会话 -->
-    <section id="nodes" class="panel">
-      <div class="panel-head">
-        <h2>节点与会话</h2>
-        <button id="refresh-nodes" type="button" class="btn ghost sm">刷新</button>
-      </div>
-      <div id="node-list" class="list"></div>
-    </section>
-
-    <!-- 设备令牌 -->
-    <section id="devices" class="panel">
-      <div class="panel-head">
-        <h2>设备令牌</h2>
-        <button id="refresh-devices" type="button" class="btn ghost sm">刷新</button>
-      </div>
-      <div id="device-list" class="list"></div>
-      <form id="device-form" class="inline-form">
-        <input id="device-name" placeholder="设备名称（如 vince-laptop）">
-        <button type="submit" class="btn primary sm">签发令牌</button>
-      </form>
-      <p id="device-token" class="token" hidden></p>
-    </section>
-
+    <p id="device-token" class="token" hidden></p>
   </div>
-</main>
+</div>
+
 <script src="./app.js"></script>
 </body>
 </html>
