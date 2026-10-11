@@ -1766,13 +1766,25 @@ func renderChatResponse(session *ChatSession, response string) {
 // runChatLoop 运行聊天循环
 func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string) {
 	if !noInteractive {
-		if shouldUseInteractiveLineEditor(session) {
+		// AICLI_CHAT_INPUT_LINE_MODE=1：强制按行队列（ConPTY E2E helper 缝）。
+		// 伪控制台下 IsInteractiveTerminal() 为真会选中逐键编辑器，而
+		// win32-input-mode（?9001）下按键经 conhost 编码，注入原始字符的逐键
+		// 路径无法成行——helper 需要确定性的按行语义（2026-10-11）。生产环境
+		// 不设置该变量，行为不变。
+		forcedLineMode := os.Getenv("AICLI_CHAT_INPUT_LINE_MODE") == "1"
+		switch {
+		case forcedLineMode:
+			ensureChatInputQueue(session)
+			if chatDebugFlagEnabled() {
+				aicliDiagln("[aicli-diag] input path: line-mode queue (forced by AICLI_CHAT_INPUT_LINE_MODE=1)")
+			}
+		case shouldUseInteractiveLineEditor(session):
 			// 交互 TTY 场景使用逐键 line editor，不再走按行队列。
 			session.InputQueue = nil
 			if chatDebugFlagEnabled() {
 				aicliDiagln("[aicli-diag] input path: interactive line editor (TUI composer)")
 			}
-		} else if chatPipeLineEditorPreferredFn() {
+		case chatPipeLineEditorPreferredFn():
 			// 管道/PTY 场景（MobaXterm、cygwin/mintty、winpty、SSH 等）：
 			// legacy 控制台编辑器不可用，且 stdin/stdout 是管道或字符设备。
 			// 不启动 queue/pump，由 chatInteractiveReadLine 回退分支独占 stdin
@@ -1781,7 +1793,7 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			if chatDebugFlagEnabled() {
 				aicliDiagln("[aicli-diag] input path: pipe/PTY interactive line editor (direct reader)")
 			}
-		} else {
+		default:
 			ensureChatInputQueue(session)
 			if chatDebugFlagEnabled() {
 				aicliDiagln("[aicli-diag] input path: line-mode queue (pump/legacy editor)")

@@ -35,8 +35,11 @@ type Option func(*startOptions)
 // WithWorkDir sets the child's working directory.
 func WithWorkDir(dir string) Option { return func(o *startOptions) { o.workDir = dir } }
 
-// WithEnv overrides the child environment (platform support varies; Windows
-// currently inherits the parent environment).
+// WithEnv overrides the child environment. On Linux the slice is passed to
+// os/exec verbatim (nil inherits the parent). On Windows the slice is encoded
+// into the UTF-16LE environment block; an empty/nil slice inherits the parent
+// environment (a truly empty block would fail console startup with
+// STATUS_DLL_INIT_FAILED).
 func WithEnv(env []string) Option { return func(o *startOptions) { o.env = env } }
 
 // WithSize sets the initial terminal size.

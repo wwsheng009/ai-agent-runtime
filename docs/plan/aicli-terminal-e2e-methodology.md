@@ -100,7 +100,7 @@ go vet ./cmd/aicli/ui ./cmd/aicli/commands
 
 > 注意：Go module 根在 `backend/`，必须在 `backend` 目录下执行，否则报 `directory prefix cmd\aicli does not contain main module`。
 
-机制（本机 ConPTY 不可用，`CreateProcess` 挂 `PSEUDOCONSOLE` attribute 会 `0xC0000142 STATUS_DLL_INIT_FAILED`，已废弃 `chat_tty_conpty*`）：
+机制（os.Pipe 层；**2026-10-11 更新**：曾废弃的 ConPTY 路线已修复并恢复为可选层 L3-ConPTY-01，见文末补记）：
 
 - `os.Pipe` 替换 `os.Stdin`，向真实 chat 主循环注入脚本化输入（`waitReady` 步骤先轮询会话回到 Ready 再发下一行，模拟真实排队语义）；
 - `runChatLoop` 真实主循环（`prepareInteractiveRead` → 逐行读取 → slash 命令处理 → 退出）；
@@ -108,6 +108,16 @@ go vet ./cmd/aicli/ui ./cmd/aicli/commands
 - `ui/vt.Screen` 把字节流重建为"用户看到的屏幕"并断言。
 
 覆盖场景：普通多轮对话、未知命令错误渲染、`/clear` 确认流（取消+确认）、`/help` 帮助列表、`!` 真实 shell 子进程执行、输入回显与 assistant 渲染。
+
+### 4.1 L3-ConPTY-01（2026-10-11 新增可选层：真终端语义 + 无头可跑）
+
+> **恢复原因**：§4 原记载的 `0xC0000142 STATUS_DLL_INIT_FAILED` 已在 `internal/pty` 定位并修复——① console 子进程需要 **UTF-16LE 环境块**（`lpEnvironment=nil` 会 DLL init 失败）；② `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` 的 payload 必须是**句柄值本身**（`&local` 写法同样 0xC0000142）；③ `ptyIn/ptyOut` 需存活至 PTY 生命周期结束。可行性证明见 `internal/pty/pty_conpty_e2e_feasibility_test.go`（`IsOutputRedirected=False` = 真 isatty 语义）。
+
+- **实现**：[chat_tty_conpty_live_test.go](../../backend/cmd/aicli/commands/chat_tty_conpty_live_test.go)——本测试二进制作 helper 子进程经 `internal/pty` 挂伪控制台，**不替换 os.Stdin/os.Stdout**（isatty 自然为真，无猴补丁）；同包复用 `fakeChatExecutor`/`chatInteractionCoordinator`。
+- **强制按行队列**：helper 设 `AICLI_CHAT_INPUT_LINE_MODE=1`——伪控制台下 `IsInteractiveTerminal()`=true 会选逐键编辑器，而 win32-input-mode（`?9001`）下原始字符注入无法成行（composer 经 conhost 编码读按键）；该缝仅 helper 生效，生产行为不变。
+- **断言双通道**：① 归一化 VT 流（剔除 `?9001/?1004/?25` 等 conhost 注入序列后 grep）；② `vt.Screen` 重建 + 相邻重复行哨兵。节拍按「上一轮回复可见」。
+- **门禁**：`pty.Supported()`=false（Win7/老 CI）自动 skip，os.Pipe 层矩阵不受影响。
+- **验证**：`go test ./cmd/aicli/commands/ -run TestChatTTY_LiveLoop_ConPTY -count=2` 两用例稳定绿（RendersRealScreen + UnknownCommandRendersError）；`-count=1` 约 3s/用例。
 
 ## 5. 断言清单与观测手段
 

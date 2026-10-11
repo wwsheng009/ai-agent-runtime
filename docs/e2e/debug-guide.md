@@ -27,6 +27,10 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1
 
 # 工具链端到端（E2E-TOOLS-01，需真实 provider；三轮 invoke 驱动 view/write/edit）
 pwsh -NoProfile -File scripts/test-aicli-tools-e2e.ps1
+
+# L3 ConPTY 层（新增，2026-10-11）：真终端语义（isatty）下的进程内交互 E2E，
+# 无头 CI 可跑（无需交互桌面 / Windows Terminal 窗口）；Win7/老 CI 自动 skip
+go test ./cmd/aicli/commands/ -run 'TestChatTTY_LiveLoop_ConPTY' -count=1 -v
 ```
 
 ```powershell
@@ -404,11 +408,14 @@ pwsh -NoProfile -File scripts/test-aicli-tools-e2e.ps1 -InvokeTimeoutMs 420000 -
 | 统一渲染 + marker exactly-once | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` | 真实 provider + Windows Terminal（UI Automation）下的渲染/历史/退出；`-Provider` / `-Model` / `-ReasoningEffort` 可覆盖（默认 `opencode.ai` / `deepseek-v4-flash` / `max`），某个模型额度耗尽时可用本机可用模型复跑**同一套**断言。**2026-09-24 已转全绿**（`opencode-wt-3c82e753…`、`opencode-wt-7f825835…` 两轮 `status=passed`、`failures=[]`、marker exactly-once 违例 0）；`manifest.json` 的 `reasoning_projection_skipped` 非空 = 该 provider 本次没返回带签名的 reasoning summary，投影断言按 §6 显式跳过（记录见 [debug-guide-evidence.md](./debug-guide-evidence.md)） | 交互桌面 |
 | 终端渲染基线 | `scripts/test-aicli-windows-terminal-e2e.ps1` | 合成数据在真实宿主终端中的渲染 | 交互桌面 |
 | turn 预算 / 生命周期 | `scripts/test-aicli-turn-budget-e2e.ps1` | 受控注入（无网络）的 turn 生命周期、预算熔断 | 无 |
+| **L3-ConPTY-01**（[§4 方法论](../plan/aicli-terminal-e2e-methodology.md)，**2026-10-11 已转可跑**） | `go test ./cmd/aicli/commands/ -run TestChatTTY_LiveLoop_ConPTY`（源码 [chat_tty_conpty_live_test.go](../../backend/cmd/aicli/commands/chat_tty_conpty_live_test.go)） | 真实 chat 主循环在**伪控制台**内运行（本测试二进制作 helper 子进程，`internal/pty`）：stdin/stdout 是真终端设备 → `IsInteractiveTerminal()`=true、真实渲染决策全开；断言双通道（① 归一化 VT 流：`?9001/?1004/?25` 序列剔除后 grep；② `vt.Screen` 屏幕重建 + 相邻重复行哨兵）；节拍按「上一轮回复可见」而非固定毫秒；能力门禁 `pty.Supported()`，Win7/老 CI 自动 skip | 无交互桌面要求（headless CI 可跑）；Windows 10 1809+（ConPTY）；Win7 → skip（管道层用例仍跑）。**曾因 `0xC0000142` 废弃，根因（UTF-16LE 环境块缺失 + attribute payload 形状）已在 `internal/pty` 修复，2026-10-11 起可跑**（两用例 `-count=2` 稳定绿） |
 | **E2E-RESUME-01**（[手册](./resume-history-e2e.md)） | `scripts/test-aicli-resume-history-e2e.ps1` | resume 历史交付闭环：计划完整（`plan_incomplete=false`）、续跑未死锁（`plan_stalled=false`）、队列排空、每个 cell 已交付（`acked >= cells`）、整份 transcript 已规划（`cell_rows_misses`/`plan_misses` >= 90% cells）、尾部真的写到终端、`/exit` 优雅退出；渲染器模式 7 断言 / 行模式 5 断言 | 真实 provider + **已存在的大 transcript 会话**（首次固化：291,920 行）；渲染器模式需交互桌面，行模式（`-RedirectTerminalStream`）无桌面要求 |
 
 > 三者互补：本场景回答"HTTP 控制面能不能可靠驱动/验收一次真实 turn"；
 > E2E-DEBUG-03 回答"多个进程能不能互相发现、定向调用且不互相踩"；
 > Windows Terminal 场景回答"用户实际看到的终端渲染对不对"。
+> L3-ConPTY-01 补第四角："**无头环境**下能否以真终端语义（isatty）驱动真实交互渲染"——
+> 无需交互桌面即可覆盖原 Windows Terminal 场景里的颜色/进度条/行编辑分支。
 > 方法论见 [../plan/aicli-terminal-e2e-methodology.md](../plan/aicli-terminal-e2e-methodology.md)。
 
 ## 10. 相关文档

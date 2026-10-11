@@ -18,6 +18,10 @@ func Start(executable string, args []string, opts ...Option) (*PTY, error) {
 func (p *PTY) Read(b []byte) (int, error)  { return 0, ErrUnsupported }
 func (p *PTY) Write(b []byte) (int, error) { return 0, ErrUnsupported }
 func (p *PTY) Pid() int                    { return 0 }
+
+// Kill force-terminates the child; unsupported platforms return ErrUnsupported.
+func (p *PTY) Kill() error { return ErrUnsupported }
+
 func (p *PTY) Resize(cols, rows int) error { return ErrUnsupported }
 func (p *PTY) Wait(ctx context.Context) (int, error) {
 	return -1, ErrUnsupported

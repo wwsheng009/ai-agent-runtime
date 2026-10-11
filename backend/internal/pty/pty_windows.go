@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -178,8 +179,14 @@ func Start(executable string, args []string, opts ...Option) (*PTY, error) {
 
 	// A console program cannot start with an empty environment (cmd.exe fails
 	// with STATUS_DLL_NOT_FOUND / 0xC0000142 without SystemRoot etc.), so the
-	// child inherits the runtime environment through a proper unicode block.
-	envBlock := createEnvBlock(os.Environ())
+	// child gets a proper unicode block: the WithEnv slice when provided,
+	// otherwise the parent environment (matches the Linux implementation's
+	// nil-env inheritance).
+	childEnv := o.env
+	if len(childEnv) == 0 {
+		childEnv = os.Environ()
+	}
+	envBlock := createEnvBlock(childEnv)
 
 	cmdLine, err := windows.UTF16PtrFromString(composeCommandLine(executable, args))
 	if err != nil {
@@ -228,6 +235,15 @@ func (p *PTY) Read(b []byte) (int, error)  { return p.cmdOut.Read(b) }
 func (p *PTY) Write(b []byte) (int, error) { return p.cmdIn.Write(b) }
 func (p *PTY) Pid() int                    { return int(p.pi.ProcessId) }
 
+// Kill force-terminates the attached child (cleanup path for hung tests). It
+// does not wait for exit; callers follow with Wait/Close.
+func (p *PTY) Kill() error {
+	if p == nil || p.pi.Process == 0 {
+		return fmt.Errorf("pty: nil")
+	}
+	return windows.TerminateProcess(p.pi.Process, 1)
+}
+
 // Resize changes the pseudoconsole dimensions.
 func (p *PTY) Resize(cols, rows int) error {
 	if p == nil || p.hpc == 0 {
@@ -241,29 +257,38 @@ func (p *PTY) Resize(cols, rows int) error {
 }
 
 // Wait blocks until the child exits or ctx is cancelled, returning the exit code.
+//
+// NOTE: poll loop instead of WaitForSingleObject. The test binary build
+// (-race, cgo) observed immediate spurious wakeups from WaitForSingleObject
+// on the child process handle, reporting exit code 0 while the child was
+// still running (2026-10-11, interactive E2E driver). GetExitCodeProcess
+// polling is semantically equivalent for a non-0-terminated contract and
+// immune to that failure mode.
 func (p *PTY) Wait(ctx context.Context) (int, error) {
 	if p == nil || p.pi.Process == 0 {
 		return -1, fmt.Errorf("pty: nil")
 	}
-	waiter := make(chan struct{})
-	go func() {
-		defer close(waiter)
-		_, _ = windows.WaitForSingleObject(p.pi.Process, windows.INFINITE)
-	}()
-	if ctx != nil {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	const stillActive = 259 // windows.STILL_ACTIVE
+	tick := time.NewTimer(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var exitCode uint32
+		if err := windows.GetExitCodeProcess(p.pi.Process, &exitCode); err != nil {
+			return -1, err
+		}
+		if exitCode != stillActive {
+			return int(exitCode), nil
+		}
 		select {
 		case <-ctx.Done():
 			return -1, ctx.Err()
-		case <-waiter:
+		case <-tick.C:
+			tick.Reset(20 * time.Millisecond)
 		}
-	} else {
-		<-waiter
 	}
-	var exitCode uint32
-	if err := windows.GetExitCodeProcess(p.pi.Process, &exitCode); err != nil {
-		return -1, err
-	}
-	return int(exitCode), nil
 }
 
 func (p *PTY) Close() error {

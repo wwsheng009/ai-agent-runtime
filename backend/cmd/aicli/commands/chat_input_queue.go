@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -1263,6 +1264,13 @@ func finishChatInteractiveReadPromptState(session *ChatSession, readErr error) {
 }
 
 func shouldUseInteractiveLineEditor(session *ChatSession) bool {
+	// AICLI_CHAT_INPUT_LINE_MODE=1（ConPTY E2E helper 缝）：伪控制台下
+	// IsInteractiveTerminal() 为真，但 win32-input-mode（?9001）下 composer
+	// 逐键编辑器经 conhost 编码读按键，注入的原始字符永远无法成行——强制
+	// 回落到行队列。生产不设置该变量，行为不变（2026-10-11）。
+	if os.Getenv("AICLI_CHAT_INPUT_LINE_MODE") == "1" {
+		return false
+	}
 	if session == nil || session.InputBox == nil {
 		return false
 	}
