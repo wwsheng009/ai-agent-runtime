@@ -207,6 +207,9 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		ImagePaths:               opts.ImagePaths,
 	}
 	session.Interaction = newChatInteractionCoordinator(session)
+	// 网关接入：按环境变量构造连接控制面并挂到会话（未配置则保持 nil，
+	// /gateway 命令给出明确提示）。自动连接为 best-effort，不影响 chat 启动。
+	attachChatGateway(session)
 	session.Interaction.renderOutputFile = opts.RenderOutputFile
 	// The compatibility facade is already physically fenced above, so it is
 	// safe to mount its geometry and semantic bottom-pane inputs before the
