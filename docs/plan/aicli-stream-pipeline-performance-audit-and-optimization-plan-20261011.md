@@ -179,7 +179,7 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 
 ### 9.7 批次 3 剩余与缓办
 
-- **P2-1 剩余（三次写事务合并）**：turn 收尾的 syncRuntimeSessionBackIntoCLI / reconcilers / usage 三次全量 Load+Update 涉及 token 高水位与 provider 快照的优先级语义，需要专项设计（合并为单次 restore + 单次 Update），未在本轮动。
+- **P2-1 剩余（三次写事务合并）**：已完成（`f69b00a4`）——新增 `restoreRuntimeSessionIntoCLI` 只读恢复变体，executor 成功路径与 ContinueGoal 路径的内存态变更顺序不变（restore → reconcilers → usage → write），三次全量 Update 合并为一次最终写，最终状态严格一致；每 turn 省 1-2 个全量写事务。Load 侧的增量化（`SessionManager.Get` 全量反序列化）仍留待有实测依据后做。
 - **P2-2 缓办**：按键规整复核——稳态按键无 `\r` 时 ReplaceAll 零分配（仅 2 次线性扫描）；把规整移到生产端会改变程序化提交路径的行为，收益不抵风险。
 - **P2-3（transcript 弹层同步渲染）/ P2-5（Recent 全量克隆）/ P2-9/P2-10（legacy 路径）**：未动工，均为低频或回退路径。P2-4 栅栏部分已完成（见 §9.6），表格 holdback 尾部天然较小未再处理；P2-7 的 WaitIdleTimeout 已改自适应退避（`66c1b9db`），WaitForCurrentEvents 的 5ms 轮询因驱动排水保留。
 - **P1-3 / P1-4 / P1-5 / P1-7**：维持 §9.5 结论（跨包结构变更 / 前端契约验证 / 待 pprof 定占比 / 正确性契约重验）。
