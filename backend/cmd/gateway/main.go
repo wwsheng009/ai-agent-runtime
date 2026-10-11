@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/audit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/device"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ratelimit"
@@ -73,6 +74,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "gateway: WARNING: --owner-password not set; console/API/proxy are UNPROTECTED (dev only)")
 	}
 
+	auditLog := audit.New(2000, filepath.Join(*dataDir, "audit.log"))
 	var metrics gatewayMetrics
 	limiter := ratelimit.New(*rateLimit, time.Minute)
 	resolver := ratelimit.NewResolver(strings.Split(*trustedProxies, ","))
@@ -89,6 +91,7 @@ func run() int {
 				if ok, retry := limiter.Allow(ip); !ok {
 					metrics.rateLimited.Add(1)
 					bans.Record(ip)
+					auditLog.Record(audit.Event{Type: audit.TypeRateLimited, IP: ip})
 					w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retry.Seconds()))))
 					http.Error(w, "too many requests", http.StatusTooManyRequests)
 					return
@@ -133,10 +136,12 @@ func run() int {
 			return
 		}
 		if !owner.Enabled() || !owner.VerifyPassword(req.Password) {
+			auditLog.Record(audit.Event{Type: audit.TypeLoginFailure, IP: resolver.ClientIP(r)})
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
 			return
 		}
 		token, expiry := owner.Issue()
+		auditLog.Record(audit.Event{Type: audit.TypeLoginSuccess, IP: resolver.ClientIP(r)})
 		http.SetCookie(w, auth.SessionCookie(token, owner.TTL(), secure))
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "expires_at": expiry})
 	}).Methods(http.MethodPost)
@@ -162,6 +167,7 @@ func run() int {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to create device token"})
 				return
 			}
+			auditLog.Record(audit.Event{Type: audit.TypeDeviceCreated, Detail: info.ID, IP: resolver.ClientIP(r)})
 			// The plaintext token is returned exactly once.
 			writeJSON(w, http.StatusCreated, map[string]any{"token": token, "device": info})
 		default:
@@ -178,6 +184,7 @@ func run() int {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "device not found"})
 			return
 		}
+		auditLog.Record(audit.Event{Type: audit.TypeDeviceRevoked, Detail: id, IP: resolver.ClientIP(r)})
 		writeJSON(w, http.StatusOK, map[string]any{"revoked": id})
 	})))
 	// Owner-protected node list.
@@ -193,6 +200,16 @@ func run() int {
 			"nodes":                registry.Count(),
 			"devices":              devices.Count(),
 		})
+	}))).Methods(http.MethodGet)
+	// Audit events (owner-protected).
+	router.Handle("/api/audit", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := 100
+		if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": auditLog.Entries(limit)})
 	}))).Methods(http.MethodGet)
 	// Ban management (owner-protected): list / manual ban / unban.
 	router.Handle("/api/bans", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +232,7 @@ func run() int {
 				}
 			}
 			bans.Ban(strings.TrimSpace(req.IP), ttl)
+			auditLog.Record(audit.Event{Type: audit.TypeManualBan, IP: strings.TrimSpace(req.IP)})
 			writeJSON(w, http.StatusOK, map[string]any{"bans": bans.Entries()})
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -230,6 +248,7 @@ func run() int {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "ban not found"})
 			return
 		}
+		auditLog.Record(audit.Event{Type: audit.TypeManualUnban, IP: ip})
 		writeJSON(w, http.StatusOK, map[string]any{"unbanned": ip})
 	})))
 	// Prometheus text metrics (bearer token, or loopback when no token is set).
