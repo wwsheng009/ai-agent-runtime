@@ -3,12 +3,16 @@
 package pty
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode/utf16"
 	"unsafe"
 
@@ -304,6 +308,54 @@ func closeHandles(handles ...windows.Handle) error {
 	}
 	return firstErr
 }
+
+// osCommandOutput runs a helper command hidden (lifecycle diagnostics/tests).
+func osCommandOutput(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd.Output()
+}
+
+// StartPipeForBench starts the same command through a plain pipe pair (no
+// pseudoconsole) so benchmarks can compare pipe vs ConPTY throughput.
+// Diagnostics-only entry point; the interactive manager always picks via
+// Supported().
+func StartPipeForBench(executable string, args []string) (*PipeProc, error) {
+	cmd := exec.Command(executable, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &PipeProc{cmd: cmd, stdout: stdout}, nil
+}
+
+// PipeProc is a minimal pipe-backed child used only by benchmarks/diagnostics.
+type PipeProc struct {
+	cmd    *exec.Cmd
+	stdout io.ReadCloser
+}
+
+func (p *PipeProc) Read(b []byte) (int, error) { return p.stdout.Read(b) }
+
+func (p *PipeProc) Close() error {
+	if p == nil {
+		return nil
+	}
+	_ = p.stdout.Close()
+	if p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
+	return p.cmd.Wait()
+}
+
+var (
+	_ = bytes.MinRead // keep bytes import for future drain helpers
+	_ = context.Background
+)
 
 // createEnvBlock converts environment strings into the NUL-delimited UTF-16
 // block CreateProcess expects (double NUL terminated). Mirrors go-pty/std.
