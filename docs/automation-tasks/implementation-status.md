@@ -1,7 +1,7 @@
-# 实施状态（P0–P4）
+# 实施状态（P0–P4 + P5 机制）
 
 > 依据：[`analysis-and-implementation-plan.md`](./analysis-and-implementation-plan.md) §10 统一路线图。
-> 状态：**P0–P4 已完成并分批提交**；P5（内嵌执行）起未开始。
+> 状态：**P0–P4 已完成并分批提交；P5 机制层就绪**（E0 完整执行栈待路径 B 重构）。
 
 ---
 
@@ -75,6 +75,16 @@
   in-process store，与 `schedule_*` 工具同源）；`command.go` 路由 + legacy 出口、
   C12 inline/read 注册、slash 补全条目与一致性测试同步。
 
+### P5（内嵌执行：机制就绪）
+- `internal/schedule/executor.go`：`SessionExecutor` + `LeaseArbiter` 接缝。
+- `runtime.tryEmbedded`：delegate 失败 → Arbiter 取 **session 排他租约**（拿不到
+  = 活跃会话，绝不抢占，退回 pending mailbox）→ 拿到才自跑 turn（10m 上限）→
+  成功即 commit 推进任务。
+- `cmd/scheduled`：`daemonSessionArbiter`（mesh `purpose=session` /
+  `key=session-<sid>`，与 `mesh.Host` 约定一致；windows/other 双构建）。
+- 测试：租约授予→内嵌执行并 commit；租约被持有→绝不抢占并退回 pending；
+  未注入 Executor→恒走兜底。
+
 ## 3. 与设计的差异（诚实记录）
 
 | 设计 | 实现 | 说明 |
@@ -105,5 +115,11 @@ go vet（相关包）  ✅
   暴露能力，宿主激活会话时调用即可补上）；pending 消息的死信上限。
 - **P3 余项**：全局页 `/runtime/schedule`（E1 右侧栏面 + E2/E3 页签已覆盖主要场景）；
   `schedule.changed` SSE 事件名对齐（hook 目前按 `schedule` 前缀匹配）。
-- **P5**：内嵌执行（E0–E3）。
+- **P5 余项（E0 完整执行栈）**：daemon 注入真正的 `SessionExecutor` 需要
+  `bootstrap.Manager` + `runtimeapi.Handler` 栈，但 aicli 会话执行强耦合
+  per-session 状态（`ChatSession`/session store/workspace/profile）——无会话记录的
+  daemon 无法低成本构造 actor（诚实评估见 embedded-execution-design.md §3）。
+  可行路径：路径 B 抽取 `internal/runtimehost.Executor`（独立重构批次），或
+  daemon 在投递前确认 runtime-server 可达并仅依赖 delegate。**机制已全部就位**：
+  注入 Executor 即启用，`mode=delegate` 默认行为不变。
 - **P6**：E4 gateway、观测收敛、作业终态→提醒桥。
