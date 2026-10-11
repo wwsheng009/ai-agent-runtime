@@ -43,6 +43,7 @@ type RuntimeConfig struct {
 	Checkpoint     CheckpointConfig          `yaml:"checkpoint" json:"checkpoint"`
 	Background     BackgroundConfig          `yaml:"background" json:"background"`
 	Images         ImagesConfig              `yaml:"images" json:"images"`
+	Schedule       ScheduleConfig            `yaml:"schedule" json:"schedule"`
 
 	// 性能配置
 	Performance PerformanceConfig `yaml:"performance" json:"performance"`
@@ -369,6 +370,89 @@ type CheckpointConfig struct {
 	MaxCheckpointsPerSession int    `yaml:"maxCheckpointsPerSession" json:"maxCheckpointsPerSession"`
 }
 
+// Schedule execution modes.
+const (
+	// ScheduleModeDelegate delivers due reminders through the runtime-server HTTP API.
+	ScheduleModeDelegate = "delegate"
+	// ScheduleModeEmbedded executes due reminders inside the scheduler daemon.
+	ScheduleModeEmbedded = "embedded"
+	// ScheduleModeAuto tries delegate, then embedded, then a durable mailbox.
+	ScheduleModeAuto = "auto"
+)
+
+// ScheduleConfig controls the automation-task (Schedule) subsystem.
+type ScheduleConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// StorePath overrides the schedule.sqlite path (default <data>/schedule/schedule.sqlite).
+	StorePath string `yaml:"storePath" json:"storePath"`
+	// DeliveryHistoryDays / DeliveryHistoryRecords bound retained delivery history per task.
+	DeliveryHistoryDays    int `yaml:"deliveryHistoryDays" json:"deliveryHistoryDays"`
+	DeliveryHistoryRecords int `yaml:"deliveryHistoryRecords" json:"deliveryHistoryRecords"`
+	// MaxActivePerSession bounds active reminders per session (0 = unlimited).
+	MaxActivePerSession int `yaml:"maxActivePerSession" json:"maxActivePerSession"`
+	// MaxDeliveryAttempts bounds delivery retries before a task goes inactive.
+	MaxDeliveryAttempts int `yaml:"maxDeliveryAttempts" json:"maxDeliveryAttempts"`
+	// Execution selects how due reminders are executed.
+	Execution ScheduleExecutionConfig `yaml:"execution" json:"execution"`
+}
+
+// ScheduleExecutionConfig selects the reminder execution mode.
+type ScheduleExecutionConfig struct {
+	// Mode is one of delegate | embedded | auto (default delegate).
+	Mode string `yaml:"mode" json:"mode"`
+	// RuntimeServerURL is the delegate target.
+	RuntimeServerURL string `yaml:"runtimeServerURL" json:"runtimeServerURL"`
+	// Profile bounds the tool surface for embedded execution.
+	Profile string `yaml:"profile" json:"profile"`
+	// MaxConcurrentExecutions bounds embedded concurrent runs (default 1).
+	MaxConcurrentExecutions int `yaml:"maxConcurrentExecutions" json:"maxConcurrentExecutions"`
+	// MaxTurnDuration bounds one embedded run (default 10m).
+	MaxTurnDuration time.Duration `yaml:"maxTurnDuration" json:"maxTurnDuration"`
+	// FallbackToMailbox writes a durable mailbox message when delegate/embedded fail.
+	FallbackToMailbox bool `yaml:"fallbackToMailbox" json:"fallbackToMailbox"`
+}
+
+// DefaultScheduleConfig returns the shipped Schedule defaults (disabled, delegate).
+func DefaultScheduleConfig() ScheduleConfig {
+	return ScheduleConfig{
+		Enabled:                false,
+		DeliveryHistoryDays:    30,
+		DeliveryHistoryRecords: 200,
+		MaxDeliveryAttempts:    5,
+		Execution: ScheduleExecutionConfig{
+			Mode:                    ScheduleModeDelegate,
+			MaxConcurrentExecutions: 1,
+			MaxTurnDuration:         10 * time.Minute,
+			FallbackToMailbox:       true,
+		},
+	}
+}
+
+// WithDefaults fills unset fields with shipped defaults.
+func (c ScheduleConfig) WithDefaults() ScheduleConfig {
+	def := DefaultScheduleConfig()
+	out := c
+	if out.DeliveryHistoryDays <= 0 {
+		out.DeliveryHistoryDays = def.DeliveryHistoryDays
+	}
+	if out.DeliveryHistoryRecords <= 0 {
+		out.DeliveryHistoryRecords = def.DeliveryHistoryRecords
+	}
+	if out.MaxDeliveryAttempts <= 0 {
+		out.MaxDeliveryAttempts = def.MaxDeliveryAttempts
+	}
+	if strings.TrimSpace(out.Execution.Mode) == "" {
+		out.Execution.Mode = def.Execution.Mode
+	}
+	if out.Execution.MaxConcurrentExecutions <= 0 {
+		out.Execution.MaxConcurrentExecutions = def.Execution.MaxConcurrentExecutions
+	}
+	if out.Execution.MaxTurnDuration <= 0 {
+		out.Execution.MaxTurnDuration = def.Execution.MaxTurnDuration
+	}
+	return out
+}
+
 // BackgroundConfig controls background task persistence.
 type BackgroundConfig struct {
 	StorePath               string          `yaml:"storePath" json:"storePath"`
@@ -634,6 +718,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Observe:   runtimeobserve.DefaultConfig(),
 		Knowledge: knowledge.DefaultConfig(),
 		LSP:       runtimelsp.DefaultConfig(),
+		Schedule:  DefaultScheduleConfig(),
 	}
 }
 

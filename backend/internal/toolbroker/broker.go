@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
@@ -76,6 +77,13 @@ const (
 	// read_agent_result - no new storage is created.
 	ToolSubagentStatus      = "subagent_status"
 	ToolSubagentInspectTask = "subagent_inspect_task"
+	// Schedule (automation tasks) family. Distinct from job_* (background jobs)
+	// and team_* / read_task_* (workflow): schedule_* delivers a reminder to the
+	// original session when due.
+	ToolScheduleCreate = "schedule_create"
+	ToolScheduleList   = "schedule_list"
+	ToolScheduleUpdate = "schedule_update"
+	ToolScheduleDelete = "schedule_delete"
 )
 
 // WaitSegmentBudget is the host-provided accounting for consecutive no-progress
@@ -135,6 +143,9 @@ type Broker struct {
 	// (plan §16.3 同口径). nil keeps team waits unbounded by this judgement.
 	WaitBudget  WaitSegmentBudget
 	Supervision AgentSupervisionController
+	// Schedule backs the schedule_* automation-task tools. Optional: nil keeps
+	// the whole family out of Definitions() and the execute switch.
+	Schedule *schedule.Service
 	// agentEventsReads remembers the last read_agent_events window per
 	// caller/target cursor so an identical repeated read can answer with an
 	// explicit unchanged/repeat_count signal (plan P1-7 待补) instead of a
@@ -323,6 +334,9 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 	}
 	if b != nil && b.Supervision != nil {
 		definitions = append(definitions, supervisionToolDefinitions()...)
+	}
+	if b != nil && b.Schedule != nil {
+		definitions = append(definitions, scheduleToolDefinitions()...)
 	}
 	definitions = append(definitions,
 		types.ToolDefinition{
@@ -3556,6 +3570,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		// Team outcome execution always resolves through an active scoped task.
 		return b.executeReportTaskOutcome(ctx, sessionID, request, "", true, team.TaskOutcomeDone, team.TaskOutcomeFailed, team.TaskOutcomeBlocked, team.TaskOutcomeHandoff)
+
+	case ToolScheduleCreate, ToolScheduleList, ToolScheduleUpdate, ToolScheduleDelete:
+		return b.executeScheduleTool(ctx, sessionID, toolName, args)
 
 	default:
 		return nil, nil, fmt.Errorf("unknown broker tool: %s", toolName)

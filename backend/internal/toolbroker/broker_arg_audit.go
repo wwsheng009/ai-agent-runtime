@@ -67,6 +67,10 @@ var brokerToolArgKeys = map[string][]string{
 	ToolReadAgentResult:        {"id", "limit", "max_chars", "offset", "sections", "task_id"},
 	ToolAckLifecycle:           {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
 	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version", "extend_by_ms", "new_deadline", "extend_which"},
+	ToolScheduleCreate:         {"after_seconds", "at", "every_seconds", "prompt", "title"},
+	ToolScheduleList:           {},
+	ToolScheduleUpdate:         {"at", "every_seconds", "id", "prompt", "title"},
+	ToolScheduleDelete:         {"id"},
 }
 
 // brokerIgnoredArgHint explains what to use instead of a key the addressed tool

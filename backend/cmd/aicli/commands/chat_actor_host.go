@@ -37,6 +37,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -166,6 +167,7 @@ type localChatRuntimeHost struct {
 	AgentControl       *agentcontrol.RegistryService
 	AgentRegistryStore agentcontrol.AgentRegistryStore
 	Background         *background.Manager
+	Schedule           *schedule.Service
 	TeamClaims         *team.PathClaimManager
 	Orchestrator       *team.Orchestrator
 	ToolSurface        runtimeskill.MCPManager
@@ -1393,6 +1395,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		AgentControl:       agentControlRegistry,
 		AgentRegistryStore: globalAgentStore,
 		Background:         backgroundManager,
+		Schedule:           newLocalScheduleService(runtimeConfig),
 		ToolSurface:        runtimeMCP,
 		EventBus:           eventBus,
 		SessionStore:       sessionStore,
@@ -2510,6 +2513,14 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
 		}
 		broker.Background = host.Background
+	}
+	if host.Schedule != nil {
+		broker := apiAgent.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			apiAgent.SetToolBroker(broker)
+		}
+		broker.Schedule = host.Schedule
 	}
 	// P2-12 方案 3: expose the durable supervision control plane to the model
 	// when the local host has one. A host without a store leaves the field nil
