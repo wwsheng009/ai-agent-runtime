@@ -134,6 +134,11 @@ var runtimeEventContracts = []Contract{
 	{Type: "tool.progress", Channels: ChannelLiveOnly},
 	{Type: "subagent.progress", Channels: ChannelLiveOnly},
 	{Type: "subagent.batch.progress", Channels: ChannelLiveOnly},
+	// 自动化任务（Schedule，P5）："schedule.changed" 是无载荷失效信号——任务
+	// 变更（创建/更新/删除/投递推进）提交后发布一次，前端刷新目录；权威状态
+	// 仍是 GET /api/runtime/schedule/catalog（重连后重拉）。live-only：无载荷、
+	// 高频（每次投递推进一发），落盘无价值。
+	{Type: "schedule.changed", Channels: ChannelLiveOnly},
 	// LSP 观测：请求事件挂 A 通道（§3 预留的"长窗口复算再挂 session_store"
 	// 在 M4 兑现）——每文件一次编辑即一行标量，是 §4.3 覆盖率/命中率/降级率/
 	// 等待 P50/P95 的唯一可复算事实源；池生命周期与诊断发布保持 live-only

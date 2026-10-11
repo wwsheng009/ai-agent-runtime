@@ -361,10 +361,26 @@ func nextCronTarget(expression string, loc *time.Location, now time.Time, afterD
 		start = afterDate.AddDate(0, 0, 1)
 	}
 	date := start
-	for i := 0; i < 800; i++ {
+	// 小时预计算：把分钟集合折叠成「每小时是否有匹配」的位图。400 年地平线
+	// 下，无匹配小时的日期必须 O(1) 跳过——否则整段搜索是 O(days×1440)
+	//（曾致测试挂死）。
+	minuteHasMatch := make([]bool, 60)
+	hourHasMatch := make([]bool, 24)
+	for h := 0; h < 24; h++ {
+		for m := 0; m < 60; m++ {
+			if cronTimeMatches(m, h, sets) {
+				minuteHasMatch[m] = true
+				hourHasMatch[h] = true
+			}
+		}
+	}
+	for i := 0; i < scheduleHorizonDays; i++ {
 		y, mo, d := date.Date()
+		if y > 9998 {
+			break
+		}
 		if cronDateMatches(date, sets, starred, loc) {
-			// 当天逐分钟向前扫（从 max(now, 00:00) 起）。
+			// 当天逐分钟向前扫（从 max(now, 00:00) 起），只扫匹配小时/分钟。
 			var from time.Time
 			if date.Equal(localDateOf(now, loc)) {
 				from = now.In(loc).Truncate(time.Minute).Add(time.Minute)
@@ -373,19 +389,22 @@ func nextCronTarget(expression string, loc *time.Location, now time.Time, afterD
 			}
 			end := time.Date(y, mo, d, 23, 59, 0, 0, loc)
 			for cursor := from; !cursor.After(end); cursor = cursor.Add(time.Minute) {
+				h := cursor.Hour()
+				if !hourHasMatch[h] {
+					// 跳到下一个整点（O(1) 跳过整个不匹配小时）。
+					cursor = time.Date(y, mo, d, h, 59, 0, 0, loc)
+					continue
+				}
+				if !minuteHasMatch[cursor.Minute()] {
+					continue
+				}
 				if _, offset := cursor.Zone(); offset != cursorMinuteOffset(date, cursor) {
 					continue // 跳过分歧分钟（DST 切换分钟）
 				}
-				h, m, _ := cursor.Clock()
-				if cronTimeMatches(m, h, sets) {
-					return cursor.UTC(), true
-				}
+				return cursor.UTC(), true
 			}
 		}
 		date = date.AddDate(0, 0, 1)
-		if y > 9998 {
-			break
-		}
 	}
 	return time.Time{}, false
 }

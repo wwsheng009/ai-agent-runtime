@@ -61,8 +61,18 @@ type HistoryResult struct {
 type Service struct {
 	store Store
 	clock Clock
+	// notify 在每次任务变更提交后调用（schedule.changed 通知；nil = no-op）。
+	// 发布失败绝不影响管理写本身（通知不是事务参与者）。
+	notify func()
+	// hostRuntime 是宿主侧兜底消费运行时（缺口 1：ActivateSession 消费
+	// daemon 落库的 pending 提醒）；nil = 宿主未注册（pending 只能由 daemon 消费）。
+	hostRuntime *Runtime
 
-	mu sync.Mutex
+	// notifyMu 保护 notify 的装配期写入与运行期读取。**绝不能与 mu 混用**：
+	// Create/Update/Delete 持有 mu 期间调用 emitChanged，若 emitChanged 再取
+	// mu 会自死锁（曾致测试挂死）。
+	notifyMu sync.RWMutex
+	mu       sync.Mutex
 }
 
 // NewService 构造管理服务。
@@ -73,8 +83,41 @@ func NewService(store Store, clock Clock) *Service {
 	return &Service{store: store, clock: clock}
 }
 
+// SetNotifier 注入 schedule.changed 发布回调（宿主在装配时接入 EventBus）。
+func (s *Service) SetNotifier(notify func()) {
+	if notify == nil {
+		notify = nopPublisher
+	}
+	s.notifyMu.Lock()
+	s.notify = notify
+	s.notifyMu.Unlock()
+}
+
+// emitChanged 发布一次变更通知（同步监听器失败只记日志，不影响调用方）。
+func (s *Service) emitChanged() {
+	s.notifyMu.RLock()
+	notify := s.notify
+	s.notifyMu.RUnlock()
+	if notify == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			// 同步监听器 panic 不得打断管理写；调用方（宿主）自行记日志。
+			_ = r
+		}
+	}()
+	notify()
+}
+
 // Store 返回底层存储（供运行时读写）。
 func (s *Service) Store() Store { return s.store }
+
+// Runtime 返回宿主侧兜底消费运行时（drain pending 用）；未注册时为 nil。
+func (s *Service) Runtime() *Runtime { return s.hostRuntime }
+
+// SetRuntime 注册宿主侧兜底消费运行时。
+func (s *Service) SetRuntime(rt *Runtime) { s.hostRuntime = rt }
 
 // Now 返回当前时钟读数。
 func (s *Service) Now() time.Time { return s.clock() }
@@ -145,6 +188,7 @@ func (s *Service) Create(sessionID string, req CreateRequest) (Record, error) {
 	if err := s.store.Put(task); err != nil {
 		return Record{}, err
 	}
+	s.emitChanged()
 	return record, nil
 }
 
@@ -259,6 +303,7 @@ func (s *Service) Delete(sessionID, id string) (DeleteResult, error) {
 	if !deleted {
 		return DeleteResult{ID: id, Deleted: false, Code: CodeNotFound}, nil
 	}
+	s.emitChanged()
 	return DeleteResult{ID: id, Deleted: true}, nil
 }
 
@@ -319,6 +364,7 @@ func (s *Service) Update(sessionID, id string, expected Record, content UpdateCo
 	if !applied {
 		return UpdateResult{ID: id, Updated: false, Code: CodeConflict}, nil
 	}
+	s.emitChanged()
 	return UpdateResult{ID: id, Updated: true, Record: &updated}, nil
 }
 

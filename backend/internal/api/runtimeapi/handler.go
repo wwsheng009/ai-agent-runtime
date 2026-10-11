@@ -3512,9 +3512,16 @@ func (h *Handler) ArchiveSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // ActivateSession 激活会话
+//
+// 激活同时消费持久兜底消息（缺口 1）：daemon 在宿主离线期间落库的提醒此刻
+// 补投到会话（best-effort，失败不阻断激活）。
 func (h *Handler) ActivateSession(w http.ResponseWriter, r *http.Request) {
 	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
-		return h.sessionManager.Activate(ctx, sessionID)
+		if err := h.sessionManager.Activate(ctx, sessionID); err != nil {
+			return err
+		}
+		h.drainSchedulePending(sessionID)
+		return nil
 	}, "active", false)
 }
 
@@ -5824,8 +5831,49 @@ func (h *Handler) getScheduleService() *schedule.Service {
 	if err != nil {
 		return nil
 	}
-	h.scheduleService = schedule.NewService(store, schedule.SystemClock)
+	service := schedule.NewService(store, schedule.SystemClock)
+	// schedule.changed（缺口 2）：任务变更提交后发布 runtime 事件（B 通道
+	// live-only，contract.go 已注册），前端面板据此刷新目录。
+	if bus := h.getRuntimeEventBus(); bus != nil {
+		service.SetNotifier(func() {
+			bus.Publish(runtimeevents.Event{Type: "schedule.changed"})
+		})
+	}
+	h.scheduleService = service
 	return h.scheduleService
+}
+
+// drainSchedulePending 消费某会话的持久兜底消息（缺口 1）：会话激活时调用，
+// daemon 在宿主离线期间落库的提醒此刻补投到会话。best-effort：失败只记日志，
+// 不阻断激活（消息留在库里，下次激活再试）。
+func (h *Handler) drainSchedulePending(sessionID string) {
+	if h == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	cfg := h.runtimeConfig
+	if cfg == nil || !cfg.Schedule.Enabled {
+		return
+	}
+	service := h.getScheduleService()
+	if service == nil {
+		return
+	}
+	runtime := service.Runtime()
+	if runtime == nil {
+		return
+	}
+	consumed, err := runtime.DrainPendingMessages(context.Background(), sessionID, 20)
+	if err != nil {
+		logger.Warn("schedule: drain pending messages failed",
+			logger.String("session", sessionID),
+			logger.Err(err))
+		return
+	}
+	if consumed > 0 {
+		logger.Info("schedule: drained pending reminders",
+			logger.String("session", sessionID),
+			logger.Int("count", consumed))
+	}
 }
 
 func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *background.Manager {

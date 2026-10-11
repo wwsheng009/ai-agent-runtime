@@ -88,6 +88,10 @@ func run(args []string) error {
 		Arbiter:  newDaemonSessionArbiter(mesh.ResolvePaths()),
 		Logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	})
+	// 注册宿主侧兜底消费运行时引用：宿主（aicli/runtime-server）的
+	// drainSchedulePending 经 service.Runtime() 触达同一 daemon Runtime 的
+	// DrainPendingMessages（共享 store，pending 表两端可读写）。
+	service.SetRuntime(runtime)
 
 	release := acquireSchedulerLease()
 	defer release()

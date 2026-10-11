@@ -394,6 +394,17 @@ func (r *Runtime) commit(task Task, now time.Time) {
 	delete(r.attempts, task.Record.ID)
 	delete(r.failedUntil, task.Record.ID)
 	r.mu.Unlock()
+	// 投递推进也是一次任务变更：发布 schedule.changed（通知失败不影响投递）。
+	r.notifyChanged()
+}
+
+// notifyChanged 通过 Service 的通知接缝发布 schedule.changed（nil 安全；
+// emitChanged 内部自持锁并 recover，投递路径不受监听器异常影响）。
+func (r *Runtime) notifyChanged() {
+	if r.opts.Service == nil {
+		return
+	}
+	r.opts.Service.emitChanged()
 }
 
 func (r *Runtime) renderGroup(group []Task) string {

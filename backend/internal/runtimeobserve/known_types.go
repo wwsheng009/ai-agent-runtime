@@ -207,6 +207,7 @@ func buildKnownEventTypes() map[string]bool {
 		"tool.progress",           // toolprotocol/progress.go:25：工具中途进度
 		"subagent.progress",       // supervision/subagent_progress.go:21：子代理进度（父流镜像）
 		"subagent.batch.progress", // agent/subagent_batch_coordinator.go：批次进度写回失败/降级（events/contract.go 登记为 live-only）
+		"schedule.changed",        // internal/schedule/service.go emitChanged：自动化任务变更失效信号（events/contract.go 登记为 live-only；无载荷）
 	)
 
 	// 来源 7：交付契约注册表登记的 chat 侧产品事件（见文件头说明）。它们经 A 通道

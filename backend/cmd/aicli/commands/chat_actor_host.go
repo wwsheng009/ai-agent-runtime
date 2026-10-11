@@ -1401,7 +1401,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		AgentControl:       agentControlRegistry,
 		AgentRegistryStore: globalAgentStore,
 		Background:         backgroundManager,
-		Schedule:           newLocalScheduleService(runtimeConfig),
+		Schedule:           newLocalScheduleService(runtimeConfig, eventBus),
 		ToolSurface:        runtimeMCP,
 		EventBus:           eventBus,
 		SessionStore:       sessionStore,

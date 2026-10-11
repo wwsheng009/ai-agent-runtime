@@ -204,6 +204,11 @@ func CreateWeekly(id, prompt, title string, in WeeklyInput, now time.Time) (Reco
 	}, nil
 }
 
+// scheduleHorizonDays 是本地钟表规则的未来搜索地平线（方案 §5.2 设计为
+// cron 的 CRON_SEARCH_HORIZON_YEARS=400；此处统一为 400 年的天数上界，
+// 循环按日期递增并在越界年提前退出）。
+const scheduleHorizonDays = 400 * 366
+
 // nextWallClockTarget 找 now 之后第一个匹配的本地发生时点。
 //
 // weekdays 为 nil 表示每日（任意日期）；afterDate 非 nil 时从该日期次日起算。
@@ -213,17 +218,17 @@ func nextWallClockTarget(loc *time.Location, clock wallClock, now time.Time, aft
 		date = afterDate.AddDate(0, 0, 1)
 	}
 	selected := weekdaySet(weekdays)
-	for i := 0; i < 800; i++ {
+	for i := 0; i < scheduleHorizonDays; i++ {
 		y, mo, d := date.Date()
+		if y > 9998 {
+			break
+		}
 		if selected(isoWeekday(date)) {
 			if candidate, ok := localInstant(y, mo, d, clock, loc); ok && candidate.After(now) {
 				return candidate, true
 			}
 		}
 		date = date.AddDate(0, 0, 1)
-		if y > 9998 {
-			break
-		}
 	}
 	return time.Time{}, false
 }
