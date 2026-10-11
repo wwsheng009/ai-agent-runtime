@@ -213,3 +213,19 @@ func WriteFrame(w io.Writer, f Frame) error {
 	_, err = w.Write(buf)
 	return err
 }
+
+// EncodeWindowUpdate builds a WINDOW_UPDATE frame carrying a 4-byte
+// little-endian credit delta (docs/gateway/03-protocol.md §2.1).
+func EncodeWindowUpdate(streamID, delta uint32) Frame {
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint32(payload, delta)
+	return Frame{Version: ProtocolVersion, Type: TypeWindowUpdate, StreamID: streamID, Payload: payload}
+}
+
+// DecodeWindowUpdate reads the credit delta from a WINDOW_UPDATE frame.
+func DecodeWindowUpdate(f Frame) (uint32, bool) {
+	if f.Type != TypeWindowUpdate || len(f.Payload) < 4 {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(f.Payload), true
+}

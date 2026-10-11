@@ -90,6 +90,8 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 		logf:              c.Logf,
 		forward:           forward,
 		done:              make(chan struct{}),
+		sendCredit:        make(map[uint32]int64),
+		flowSignal:        make(chan struct{}, 1),
 	}
 
 	if err := conn.handshake(ctx, c.AgentVersion, cfg); err != nil {
@@ -173,6 +175,10 @@ type wsConn struct {
 
 	mu      sync.Mutex
 	streams map[uint32]*inboundStream
+
+	flowMu     sync.Mutex
+	sendCredit map[uint32]int64
+	flowSignal chan struct{}
 }
 
 func (c *wsConn) NodeID() string     { return c.nodeID }
@@ -358,6 +364,10 @@ func (c *wsConn) readLoop() {
 			c.handleStreamEnd(frame.StreamID)
 		case wire.TypeStreamReset:
 			c.handleStreamReset(frame.StreamID)
+		case wire.TypeWindowUpdate:
+			if delta, ok := wire.DecodeWindowUpdate(frame); ok {
+				c.addCredit(frame.StreamID, int64(delta))
+			}
 		default:
 			// Unknown frames are ignored for forward compatibility.
 		}

@@ -110,6 +110,8 @@ func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 				if _, err := w.Write(ev.data); err != nil {
 					return
 				}
+				// Replenish the agent's send credit for the consumed bytes.
+				_ = sess.writeFrame(wire.EncodeWindowUpdate(id, uint32(len(ev.data))))
 				if flusher != nil {
 					flusher.Flush()
 				}

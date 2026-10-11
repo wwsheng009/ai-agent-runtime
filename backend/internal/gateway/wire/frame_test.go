@@ -147,3 +147,17 @@ func TestFrameTypeString(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowUpdateRoundTrip(t *testing.T) {
+	frame := EncodeWindowUpdate(7, 4096)
+	if frame.Type != TypeWindowUpdate || frame.StreamID != 7 {
+		t.Fatalf("unexpected frame: %+v", frame)
+	}
+	delta, ok := DecodeWindowUpdate(frame)
+	if !ok || delta != 4096 {
+		t.Fatalf("delta = %d ok=%v, want 4096/true", delta, ok)
+	}
+	if _, ok := DecodeWindowUpdate(Frame{Type: TypePing}); ok {
+		t.Fatal("non-window frame must not decode as a window update")
+	}
+}

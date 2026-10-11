@@ -49,6 +49,48 @@ func (c *wsConn) handleStreamOpen(id uint32, frame wire.Frame) {
 	}
 	c.streams[id] = &inboundStream{open: open, cancel: cancel}
 	c.mu.Unlock()
+
+	c.flowMu.Lock()
+	c.sendCredit[id] = flowControlWindow
+	c.flowMu.Unlock()
+}
+
+// flowControlWindow bounds in-flight response bytes per stream (docs/gateway/03-protocol.md §5).
+const flowControlWindow = 1 << 20
+
+func (c *wsConn) addCredit(id uint32, delta int64) {
+	if delta <= 0 {
+		return
+	}
+	c.flowMu.Lock()
+	c.sendCredit[id] += delta
+	c.flowMu.Unlock()
+	select {
+	case c.flowSignal <- struct{}{}:
+	default:
+	}
+}
+
+// acquireCredit blocks until n bytes of credit are available for the stream, or
+// ctx is done. The gateway replenishes credit with WINDOW_UPDATE as it consumes.
+func (c *wsConn) acquireCredit(ctx context.Context, id uint32, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	for {
+		c.flowMu.Lock()
+		if c.sendCredit[id] >= n {
+			c.sendCredit[id] -= n
+			c.flowMu.Unlock()
+			return nil
+		}
+		c.flowMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.flowSignal:
+		}
+	}
 }
 
 func (c *wsConn) handleStreamData(id uint32, frame wire.Frame) {
@@ -144,6 +186,9 @@ func (c *wsConn) forwardStream(id uint32, in *inboundStream) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
+			if err := c.acquireCredit(ctx, id, int64(len(chunk))); err != nil {
+				return
+			}
 			if err := c.writeStreamData(id, chunk, 0); err != nil {
 				return
 			}

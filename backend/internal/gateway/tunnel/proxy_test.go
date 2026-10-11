@@ -247,3 +247,47 @@ func TestSessionUpdateReconcile(t *testing.T) {
 		return ok && len(node.Sessions) == 2
 	})
 }
+
+// TestProxyLargeResponse exercises response flow control: the body exceeds the
+// per-stream window, so the agent must wait for WINDOW_UPDATE credit from the
+// gateway as it drains the stream.
+func TestProxyLargeResponse(t *testing.T) {
+	const size = 2 << 20 // 2 MiB > the 1 MiB flow-control window
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		chunk := make([]byte, 64*1024)
+		for i := range chunk {
+			chunk[i] = byte(i)
+		}
+		written := 0
+		for written < size {
+			n := len(chunk)
+			if size-written < n {
+				n = size - written
+			}
+			if _, err := w.Write(chunk[:n]); err != nil {
+				return
+			}
+			written += n
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	dialAgent(t, server, "node-large", upstream.URL)
+
+	proxy := startProxy(t, server, "node-large")
+	resp, err := http.Get(proxy.URL + "/blob")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if len(body) != size {
+		t.Fatalf("body length = %d, want %d", len(body), size)
+	}
+}
