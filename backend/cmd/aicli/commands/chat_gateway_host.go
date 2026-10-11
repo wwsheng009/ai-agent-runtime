@@ -42,6 +42,15 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	return []wire.SessionSummary{summary}
 }
 
+// syncChatGatewaySession pushes the current session list to the gateway. It is
+// a no-op when the gateway is not attached or not connected.
+func syncChatGatewaySession(session *ChatSession) {
+	if session == nil || session.Gateway == nil {
+		return
+	}
+	session.Gateway.UpdateSessions(chatGatewaySessions(session))
+}
+
 // attachChatGateway wires the gateway control plane into the session from
 // environment configuration (AICLI_GATEWAY_URL/TOKEN/NAME/AUTO_CONNECT, see
 // gatewayagent.ConfigFromEnv). It never fails the chat: an unconfigured gateway

@@ -1,5 +1,13 @@
 package agent
 
+import "github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+
+// SessionReporter is implemented by connections that can push SESSION_UPDATE
+// frames (the WebSocket tunnel does).
+type SessionReporter interface {
+	SendSessionUpdate(wire.SessionUpdate) error
+}
+
 // NewController builds a Controller wired to the WebSocket transport. The
 // register function supplies the REGISTER payload on each dial. Passing a nil
 // register is allowed only when no connect is expected (the dial then fails
@@ -29,4 +37,22 @@ func (c *Controller) ForwardConfig() ForwardConfig {
 	c.forwardMu.RLock()
 	defer c.forwardMu.RUnlock()
 	return c.forward
+}
+
+// UpdateSessions pushes the current session list to the gateway as a
+// reconcile SESSION_UPDATE. It is a no-op when not connected. Hosts call it on
+// session create/switch/resume so the gateway registry stays fresh without a
+// reconnect.
+func (c *Controller) UpdateSessions(sessions []wire.SessionSummary) {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	reporter, ok := conn.(SessionReporter)
+	if !ok || reporter == nil {
+		return
+	}
+	_ = reporter.SendSessionUpdate(wire.SessionUpdate{
+		Op:       wire.SessionOpReconcile,
+		Sessions: sessions,
+	})
 }

@@ -298,6 +298,11 @@ func (c *wsConn) writeControl(t wire.FrameType, payload any) error {
 	return c.writeFrame(f)
 }
 
+// SendSessionUpdate pushes a SESSION_UPDATE frame to the gateway.
+func (c *wsConn) SendSessionUpdate(update wire.SessionUpdate) error {
+	return c.writeControl(wire.TypeSessionUpdate, update)
+}
+
 // heartbeatLoop sends periodic HEARTBEAT frames until the connection closes.
 func (c *wsConn) heartbeatLoop() {
 	interval := c.heartbeatInterval

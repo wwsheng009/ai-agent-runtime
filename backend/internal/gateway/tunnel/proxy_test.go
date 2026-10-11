@@ -225,3 +225,25 @@ func TestProxyThroughControllerForward(t *testing.T) {
 		t.Fatalf("body = %q, want via controller", body)
 	}
 }
+
+func TestSessionUpdateReconcile(t *testing.T) {
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	tunnelHTTP := httptest.NewServer(http.HandlerFunc(server.ServeHTTP))
+	t.Cleanup(tunnelHTTP.Close)
+
+	controller := agent.NewController(agent.Config{Enabled: true, URL: tunnelHTTP.URL, Token: "agw_x"}, testRegisterFunc("node-sess"))
+	if err := controller.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = controller.Disconnect(context.Background()) })
+	waitFor(t, func() bool { _, ok := server.Registry().Get("node-sess"); return ok })
+
+	controller.UpdateSessions([]wire.SessionSummary{
+		{SessionID: "s1", Title: "one"},
+		{SessionID: "s2", Title: "two"},
+	})
+	waitFor(t, func() bool {
+		node, ok := server.Registry().Get("node-sess")
+		return ok && len(node.Sessions) == 2
+	})
+}

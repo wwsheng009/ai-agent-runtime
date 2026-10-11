@@ -234,6 +234,11 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		case wire.TypeStreamReset:
 			reset, _ := wire.DecodePayload[wire.StreamReset](frame)
 			sess.dispatch(frame.StreamID, streamEvent{kind: streamReset, code: reset.Code, message: reset.Message})
+		case wire.TypeSessionUpdate:
+			update, decodeErr := wire.DecodePayload[wire.SessionUpdate](frame)
+			if decodeErr == nil {
+				s.applySessionUpdate(nodeID, update)
+			}
 		default:
 			// Unknown frames are ignored for forward compatibility.
 		}

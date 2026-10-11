@@ -115,6 +115,8 @@ type SessionUpdate struct {
 	Op       string           `json:"op"`
 	Session  *SessionSummary  `json:"session,omitempty"`
 	Sessions []SessionSummary `json:"sessions,omitempty"`
+	// SessionID is the target of a "remove" update.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // SessionUpdate operation values.

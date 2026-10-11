@@ -91,6 +91,8 @@ func turnIDForIndex(index int) string {
 // / restoreChatStateFromRuntimeSession), so /new, resume, web session switch and
 // goal reconciliation are all covered by one hook.
 func syncChatMeshSession(session *ChatSession) {
+	// Gateway session reporting runs regardless of mesh availability.
+	syncChatGatewaySession(session)
 	host := mesh.Current()
 	if host == nil || session == nil || session.RuntimeSession == nil {
 		return
