@@ -365,6 +365,17 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"brief":  rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 		},
 	},
+	// 自动化任务（Schedule，P4）：inline 只读目录，数据面 = in-process schedule
+	// store（chat_schedule_command.go）。与 /todos 相邻；与 job_* 后台作业区分。
+	"/schedule": {
+		Bare: rtBare(rtSpec("/schedule", categoryTasksTodos, runtimeModeInline, runtimeEffectRead)),
+		Variants: map[string]runtimeCommandSpec{
+			"all":      rtSpec("/schedule", categoryTasksTodos, runtimeModeInline, runtimeEffectRead),
+			"active":   rtSpec("/schedule", categoryTasksTodos, runtimeModeInline, runtimeEffectRead),
+			"inactive": rtSpec("/schedule", categoryTasksTodos, runtimeModeInline, runtimeEffectRead),
+			"list":     rtSpec("/schedule", categoryTasksTodos, runtimeModeInline, runtimeEffectRead),
+		},
+	},
 	"/image": {Bare: rtBare(rtSpec("/image", categoryNetworkLongTasks, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")))},
 	"/login": {Bare: rtBare(rtSpec("/login", categoryNetworkLongTasks, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")))},
 

@@ -169,6 +169,7 @@
       <button class="tab-btn" id="tab-files-btn" type="button" title="当前会话工作目录的文件管理器（/web/api/fs/*，与 runtime-server 文件浏览器同源）">文件</button>
       <button class="tab-btn" id="tab-git-btn" type="button" title="当前会话工作目录的 git 状态 / diff / 提交（/web/api/git/*，与 runtime-server git 查看器同源）">GIT</button>
       <button class="tab-btn" id="tab-mcp-btn" type="button" title="MCP Server 管理：列表 / 新增 / 编辑 / 启停 / 热重载（与 /web/api/mcps 同源）">MCP</button>
+      <button class="tab-btn" id="tab-schedule-btn" type="button" title="自动化任务：跨会话定时提醒目录（/api/runtime/schedule/*，与 frontend 面板、TUI /schedule 同源）">任务</button>
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
       <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
       <button class="tab-btn" id="tab-cache-btn" type="button" title="LLM 请求与缓存分析（cache.analytics.v1）">缓存</button>
@@ -602,6 +603,17 @@
           </div>
         </form>
       </div>
+    </div>
+
+    <div id="tab-schedule" class="tab-panel">
+      <div class="skills-toolbar">
+        <h2 class="skills-title">自动化任务</h2>
+        <span class="config-toolbar-spacer"></span>
+        <button id="schedule-refresh-btn" type="button" title="重新拉取 /api/runtime/schedule/catalog">⟳ 刷新</button>
+      </div>
+      <!-- 列表体由 js/schedule.js 渲染（textContent/esc 转义，查询串不进 innerHTML）；
+           删除为两段式确认：第一次点击进入确认态，再次点击才调 DELETE。 -->
+      <div id="schedule-list" class="schedule-list"><p class="schedule-empty">正在加载…</p></div>
     </div>
 
     <div id="tab-log" class="tab-panel">

@@ -288,6 +288,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/todos") {
 		return handleTodosCommand(session, command)
 	}
+	// /schedule（P4）：结构化路径在 tryExecuteStructuredChatCommand 中接管；
+	// 这里保留路由使 handleCommand 与 catalog 一致（无 legacy 出口，直接提示）。
+	if commandMatches(cmdLower, "/schedule") {
+		return handleScheduleCommand(session, command)
+	}
 	// /account 与 /accounts 与 `aicli balance` 同源（抓取/换算实现共用）：结构化
 	// 路径在 tryExecuteStructuredChatCommand 中接管，这里只保留 legacy/JSON 出口。
 	// 旧的 /balance 别名已移除。
@@ -531,6 +536,18 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		printfChatCommandOutput(session, "错误: 未知命令: %s\n输入 /help 查看可用命令", cmd)
 	}
 
+	return false
+}
+
+// handleScheduleCommand 是 /schedule 的 legacy/plain 出口：与 /todos 的
+// handleTodosCommand 同构——结构化路径优先，这里兜底渲染同一份目录文档。
+func handleScheduleCommand(session *ChatSession, command string) bool {
+	result := executeStructuredScheduleCommand(session, command)
+	if len(result.Blocks) > 0 {
+		printChatCommandOutput(session, ui.RenderDocumentPlain(result.Blocks[0].Document))
+	} else {
+		printChatCommandOutput(session, "自动化任务目录不可用")
+	}
 	return false
 }
 

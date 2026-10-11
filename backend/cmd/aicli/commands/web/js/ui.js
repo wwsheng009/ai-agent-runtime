@@ -10,6 +10,7 @@ import { loadDebugInfo, refreshDebugInfo } from "./debug.js";
 import { loadFiles } from "./files.js";
 import { loadGit } from "./git.js";
 import { loadMCPs } from "./mcp.js";
+import { initSchedule, loadSchedule } from "./schedule.js";
 import { loadSkills } from "./skills.js";
 import { apiFetch, esc, showToast } from "./util.js";
 
@@ -25,6 +26,8 @@ var tabGitBtn = document.getElementById("tab-git-btn");
 var tabGitEl = document.getElementById("tab-git");
 var tabMCPBtn = document.getElementById("tab-mcp-btn");
 var tabMCPEl = document.getElementById("tab-mcp");
+var tabScheduleBtn = document.getElementById("tab-schedule-btn");
+var tabScheduleEl = document.getElementById("tab-schedule");
 var themeToggleBtn = document.getElementById("theme-toggle");
 var shortcutHelpEl = document.getElementById("shortcut-help");
 // ---- 主题：深色/浅色（localStorage 记忆，默认跟随系统） ----
@@ -104,6 +107,7 @@ function activateTab(tabName) {
   var isFiles = tabName === "files";
   var isGit = tabName === "git";
   var isMCP = tabName === "mcp";
+  var isSchedule = tabName === "schedule";
   var isLog = tabName === "log";
   var isConfig = tabName === "config";
   var isCache = tabName === "cache";
@@ -116,6 +120,7 @@ function activateTab(tabName) {
   if (tabFilesBtn) { tabFilesBtn.classList.toggle("active", isFiles); }
   if (tabGitBtn) { tabGitBtn.classList.toggle("active", isGit); }
   if (tabMCPBtn) { tabMCPBtn.classList.toggle("active", isMCP); }
+  if (tabScheduleBtn) { tabScheduleBtn.classList.toggle("active", isSchedule); }
   tabLogBtn.classList.toggle("active", isLog);
   if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
   if (tabCacheBtn) { tabCacheBtn.classList.toggle("active", isCache); }
@@ -128,6 +133,7 @@ function activateTab(tabName) {
   if (tabFilesEl) { tabFilesEl.classList.toggle("active", isFiles); }
   if (tabGitEl) { tabGitEl.classList.toggle("active", isGit); }
   if (tabMCPEl) { tabMCPEl.classList.toggle("active", isMCP); }
+  if (tabScheduleEl) { tabScheduleEl.classList.toggle("active", isSchedule); }
   tabLogEl.classList.toggle("active", isLog);
   if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
   if (tabCacheEl) { tabCacheEl.classList.toggle("active", isCache); }
@@ -148,6 +154,9 @@ function activateTab(tabName) {
   // MCP 页签：管理本地 mcp.yaml（进程级，非会话数据），首次激活懒加载，之后每次
   // 进入都重拉一次，保证列表反映外部改动与服务端热重载后的最新状态。
   if (isMCP) { loadMCPs(); }
+  // 任务页签：跨会话目录（进程级），进入即重拉（状态随时被 daemon 改变），
+  // 两段式删除确认后重拉一次。
+  if (isSchedule) { loadSchedule(); }
   if (isConfig) { loadConfigAdmin(); }
   // 会话感知按需拉取：cache.js 内部对比已渲染数据与当前会话 id，仅在首次进入、
   // 会话变化时重拉；同会话重复切页签不重复发请求（页内更新由 SSE 增量刷新兜底）。
@@ -413,6 +422,7 @@ export function initTabs() {
   if (tabFilesBtn) { tabFilesBtn.addEventListener("click", function () { activateTab("files"); }); }
   if (tabGitBtn) { tabGitBtn.addEventListener("click", function () { activateTab("git"); }); }
   if (tabMCPBtn) { tabMCPBtn.addEventListener("click", function () { activateTab("mcp"); }); }
+  if (tabScheduleBtn) { tabScheduleBtn.addEventListener("click", function () { activateTab("schedule"); }); }
   tabLogBtn.addEventListener("click", function () { activateTab("log"); });
   if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }
   if (tabCacheBtn) { tabCacheBtn.addEventListener("click", function () { activateTab("cache"); }); }

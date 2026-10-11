@@ -13,6 +13,7 @@ import { initProviderImport } from "./js/provider-import.js";
 import { initApprovals } from "./js/approvals.js";
 import { initRuntimeBar, loadRuntimeMeta } from "./js/runtime.js";
 import { initSessions, loadSessions } from "./js/sessions.js";
+import { initSchedule } from "./js/schedule.js";
 import { initSkills } from "./js/skills.js";
 import { initFiles } from "./js/files.js";
 import { initGit } from "./js/git.js";
@@ -52,6 +53,7 @@ initSkills();
 initFiles(); // 「文件」页签：文件管理器（预览弹窗 reparent + 工具栏事件绑定）
 initGit();   // 「GIT」页签：git 管理器（diff 弹窗 reparent + 工具栏事件绑定）
 initMCP();
+initSchedule(); // 「任务」页签：自动化任务目录（删除两段式确认 + 刷新）
 initAnalysis();
 initLSP();
 
