@@ -11,12 +11,14 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 )
 
-// statusServer 暴露 loopback 运维端点（D3）：
+// statusServer 暴露 loopback 运维端点（D3 + P6）：
 //
 //	GET /healthz —— 存储可达 + 运行中
 //	GET /status  —— 租约、模式、runtime-server URL
+//	GET /metrics —— 投递成功/失败/重试/内嵌/死信累计（P6 观测收敛）
 type statusServer struct {
 	store         *schedule.SQLiteStore
+	runtime       *schedule.Runtime
 	mode          string
 	runtimeServer string
 	startedAt     time.Time
@@ -35,12 +37,16 @@ func (s *statusServer) Serve(port int) (func(), error) {
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		payload := map[string]interface{}{
 			"mode":           s.mode,
 			"runtime_server": s.runtimeServer,
 			"started_at":     s.startedAt.UTC().Format(time.RFC3339),
 			"uptime":         time.Since(s.startedAt).Round(time.Second).String(),
-		})
+		}
+		if s.runtime != nil {
+			payload["metrics"] = s.runtime.Metrics()
+		}
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {

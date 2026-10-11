@@ -99,6 +99,7 @@ func run(args []string) error {
 	// D3：loopback 运维端点（127.0.0.1:8919）。
 	status := &statusServer{
 		store:         store,
+		runtime:       runtime, // P6：/status 携带 metrics 快照
 		mode:          cfg.Execution.Mode,
 		runtimeServer: cfg.Execution.RuntimeServerURL,
 		startedAt:     time.Now(),

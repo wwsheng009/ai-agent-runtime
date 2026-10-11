@@ -83,6 +83,7 @@ type RuntimeOptions struct {
 // Runtime 拥有至多一个定时器，负责启动扫描、到期投递与重试退避。
 type Runtime struct {
 	opts RuntimeOptions
+	mtr  metrics
 
 	mu          sync.Mutex
 	timer       *time.Timer
@@ -133,6 +134,9 @@ func (r *Runtime) Stop() {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// Metrics 返回累计计数快照（P6：运维端点/HTTP API 直接序列化）。
+func (r *Runtime) Metrics() MetricsSnapshot { return r.mtr.Snapshot() }
 
 // RequestDrive 请求一次驱动；若已有 drive 在跑则合并。
 func (r *Runtime) RequestDrive() {
@@ -222,11 +226,14 @@ func (r *Runtime) drive() {
 			// 内嵌执行（E0/E1）：delegate 失败且配置允许时，先经 Arbiter 取
 			// session 租约——拿到才自跑 turn（活跃会话绝不抢占）。
 			if r.tryEmbedded(task.SessionID, text) {
+				r.mtr.embeddedTotal.Add(int64(len(group)))
+				r.mtr.deliveredTotal.Add(int64(len(group)))
 				for _, member := range group {
 					r.commit(member, now)
 				}
 				continue
 			}
+			r.mtr.deliveryFailedTotal.Add(int64(len(group)))
 			for _, member := range group {
 				r.markFailed(member.Record.ID, now)
 			}
@@ -245,6 +252,7 @@ func (r *Runtime) drive() {
 		for _, member := range group {
 			r.commit(member, now)
 		}
+		r.mtr.deliveredTotal.Add(int64(len(group)))
 	}
 	r.scheduleNext(now)
 }
@@ -280,7 +288,9 @@ func (r *Runtime) markFailed(id string, now time.Time) {
 	attempt := r.attempts[id]
 	if attempt >= r.opts.MaxAttempts {
 		r.opts.Logf("schedule: reminder %s reached max delivery attempts (%d)", id, attempt)
+		r.mtr.deadLetterTotal.Add(1)
 	}
+	r.mtr.retriesScheduled.Add(1)
 	backoff := time.Duration(attempt) * 30 * time.Second
 	if backoff > 10*time.Minute {
 		backoff = 10 * time.Minute
@@ -310,6 +320,7 @@ func (r *Runtime) tryEmbedded(sessionID, text string) bool {
 	release, ok := r.opts.Arbiter.AcquireSession(ctx, sessionID)
 	if !ok {
 		r.opts.Logf("schedule: session %s is held by another host; skip embedded execution", sessionID)
+		r.mtr.embeddedSkippedTotal.Add(1)
 		return false
 	}
 	defer release()
