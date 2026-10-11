@@ -191,7 +191,11 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 - `chatRuntimeEventBridge.appendEventLog` 占流式 CPU **14.7%**：runtime-events.jsonl 每事件 open→append→close + 每事件 os.Stat 路径解析 + 全量 json.Marshal，且在 reducer 临界区内——原「事件频率低」假设在 delta 流时代失效（单 turn 1728 事件）；
 - 修复：进程级单一 journal writer（有界队列 1024 + 25ms flush + bufio 批量写，调用方零阻塞入队，队列满丢弃计数），按路径切换文件、空闲 200ms 关句柄；replay 与测试直读点统一全局 flush 读屏障。
 
-**实测遗留观察**：Windows syscall（createFile/writeFile/OpenProcess 等）占大头，含 pprof 自身开销与终端 I/O；`encoding/json/v2.marshalEncode` ~1.6%（appendEventLog 的 marshal，已随 P3 移出 reducer 路径的 I/O 部分）。下一轮实测建议：turn 内定时采样 goroutine profile 确认 writer 队列水位。
+**P3 修复后对照（2026-10-11 12:15，新二进制 session_20261011121409_KWdXauXl，同口径 3000 字流式 turn）**：
+- `appendEventLog` 在 15s CPU profile 中**完全消失**（原 14.7% cum）；`json.marshalEncode` 1.63%→0.57%；
+- 流式期间总 CPU 采样 2.45s→1.75s（-28%）；reducer 每事件耗时 ~416µs→~297µs（-29%）；
+- journal 落盘验证：1121 行全合法 JSONL、turn 后 size 稳定（空闲关句柄生效、在途数据已刷）；投递 1477 committed / 0 降级；
+- 观察项：ui_actor 计 `dropped:1`（2846 中 1 次，0.04%，待后续归因；推测为合批 DrawRequested 计数口径）。
 
 ### 9.7 批次 3 剩余与缓办
 
