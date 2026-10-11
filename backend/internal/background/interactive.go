@@ -321,7 +321,12 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 		managed.mu.Unlock()
 	}
 	if usePTY {
-		return m.openTerminalPTY(ctx, managed, args)
+		// Pass jobCtx (NOT the caller's turn ctx): the session must survive the
+		// tool call that opened it. The PTY wait goroutine previously hung off
+		// the turn ctx, so end-of-turn cancelled the session with
+		// cancel_source=parent_context (E2E canary 2026-10-11, session
+		// _20261011162136_52gX0Jys). The pipe path already used jobCtx.
+		return m.openTerminalPTY(jobCtx, managed, args)
 	}
 
 	cmd := buildShellCommand(jobCtx, command)

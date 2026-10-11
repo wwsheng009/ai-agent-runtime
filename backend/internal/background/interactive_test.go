@@ -343,3 +343,53 @@ func TestOpenTerminalJobIsNeverDispatched(t *testing.T) {
 	_, err = manager.CloseTerminal(ctx, job.ID)
 	require.NoError(t, err)
 }
+
+// TestOpenTerminalPTYSurvivesCallerContextCancel guards the E2E canary bug
+// (session_20261011162136_52gX0Jys): the PTY wait goroutine hung off the
+// CALLER's ctx, so end-of-turn cancelled the session (cancel_source=
+// parent_context). The session must live on jobCtx and survive a caller cancel.
+func TestOpenTerminalPTYSurvivesCallerContextCancel(t *testing.T) {
+	if !pty.Supported() {
+		t.Skip("ConPTY/pty not supported on this platform")
+	}
+	if runtime.GOOS != "windows" {
+		t.Skip("windows ConPTY fixture")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := NewManager(Config{LogDir: t.TempDir(), MonitorInterval: 50 * time.Millisecond})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	job, err := manager.OpenTerminal(ctx, "session-pty-survive", TerminalOpenArgs{
+		Command: "more",
+		TTY:     true,
+		Cols:    80,
+		Rows:    30,
+	})
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, job.Status)
+
+	// Simulate end-of-turn: cancel the CALLER's context. The session must NOT
+	// be cancelled with it.
+	cancel()
+	time.Sleep(300 * time.Millisecond)
+
+	// Drain the conhost init sequence first (VT mode setup may still stream).
+	for i := 0; i < 5; i++ {
+		res, err := manager.WriteStdin(ctx, job.ID, "", 500)
+		require.NoError(t, err)
+		if res.WaitCondition == "timeout" {
+			break
+		}
+	}
+
+	res, err := manager.WriteStdin(context.Background(), job.ID, "after-cancel\r", 6000)
+	require.NoError(t, err)
+	require.Contains(t, res.Output, "after-cancel", "session must survive caller ctx cancel and still echo input")
+
+	current, err := manager.GetJob(context.Background(), job.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, current.Status, "session must not converge when the caller ctx is cancelled")
+
+	_, err = manager.CloseTerminal(context.Background(), job.ID)
+	require.NoError(t, err)
+}
