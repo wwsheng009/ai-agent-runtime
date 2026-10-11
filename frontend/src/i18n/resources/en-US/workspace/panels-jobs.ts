@@ -38,6 +38,12 @@ export const enWorkspacePanelsJobs = {
     empty: "No output yet",
     loadMore: "Load more",
   },
+  input: {
+    label: "Send input to {{command}}",
+    placeholder: "Type input for the interactive session (Enter to submit)",
+    send: "Send input",
+    failed: "Send failed: the session may have exited or belongs to another instance",
+  },
   status: {
     pending: "Pending",
     paused: "Paused",

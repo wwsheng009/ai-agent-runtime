@@ -12,6 +12,7 @@ import {
   AlertTriangleIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  CornerDownLeftIcon,
   ListChecksIcon,
   RefreshCwIcon,
   XIcon,
@@ -54,6 +55,12 @@ type JobOutputState = {
   error: string | null;
 };
 
+type JobInputState = {
+  value: string;
+  sending: boolean;
+  error: string | null;
+};
+
 const emptyOutputState: JobOutputState = {
   text: "",
   nextOffset: 0,
@@ -79,6 +86,7 @@ export function JobsPanel({
     controller;
   const [expandedJobId, setExpandedJobId] = useState("");
   const [outputs, setOutputs] = useState<Record<string, JobOutputState>>({});
+  const [inputs, setInputs] = useState<Record<string, JobInputState>>({});
 
   // outputs 的最新值：订阅回调里读取，避免把 outputs 放进订阅依赖导致频繁重订阅。
   const outputsRef = useRef(outputs);
@@ -185,6 +193,55 @@ export function JobsPanel({
     [loadOutput, outputs],
   );
 
+  // P2：交互会话「发送输入」控件（2026-10-11）。行尾回车提交（\r 由此处统一
+  // 附加，模型/用户无需关心 ConPTY 行规程）；发送后清空输入框。
+  const handleSendInput = useCallback(
+    async (jobId: string) => {
+      const state = inputs[jobId];
+      const value = (state?.value ?? "").trim();
+      if (!value || state?.sending) {
+        return;
+      }
+      setInputs((current) => ({
+        ...current,
+        [jobId]: { value: "", sending: true, error: null },
+      }));
+      const exchange = await controller.writeInput(jobId, { chars: `${value}\r` });
+      setInputs((current) => ({
+        ...current,
+        [jobId]: {
+          value: "",
+          sending: false,
+          error: exchange ? null : (t("panels.jobs.input.failed") as string),
+        },
+      }));
+      if (exchange) {
+        // Route the returned bytes through the same output window so the user
+        // sees the reply without waiting for the next event/refresh.
+        setOutputs((current) => {
+          const previous = current[jobId] ?? emptyOutputState;
+          return {
+            ...current,
+            [jobId]: {
+              ...previous,
+              text: previous.text + exchange.output,
+              nextOffset: exchange.nextOffset,
+              hasMore: true,
+            },
+          };
+        });
+      }
+    },
+    [controller, inputs, t],
+  );
+
+  const handleInputChange = useCallback((jobId: string, value: string) => {
+    setInputs((current) => ({
+      ...current,
+      [jobId]: { value, sending: current[jobId]?.sending ?? false, error: null },
+    }));
+  }, []);
+
   if (!open) {
     return null;
   }
@@ -273,6 +330,9 @@ export function JobsPanel({
               now={now}
               onToggleOutput={handleToggleOutput}
               onLoadMore={handleLoadMore}
+              onSendInput={handleSendInput}
+              onInputChange={handleInputChange}
+              inputs={inputs}
               expandedJobId={expandedJobId}
               outputs={outputs}
             />
@@ -288,6 +348,9 @@ export function JobsPanel({
               now={now}
               onToggleOutput={handleToggleOutput}
               onLoadMore={handleLoadMore}
+              onSendInput={handleSendInput}
+              onInputChange={handleInputChange}
+              inputs={inputs}
               expandedJobId={expandedJobId}
               outputs={outputs}
             />
@@ -306,10 +369,13 @@ type JobSectionProps = {
   now: number;
   expandedJobId: string;
   outputs: Record<string, JobOutputState>;
+  inputs: Record<string, JobInputState>;
   pendingAction: JobActionPending;
   onAction: (jobId: string, action: JobAction) => void;
   onToggleOutput: (jobId: string) => void;
   onLoadMore: (jobId: string) => void;
+  onSendInput: (jobId: string) => void;
+  onInputChange: (jobId: string, value: string) => void;
 };
 
 function JobSection({
@@ -322,7 +388,10 @@ function JobSection({
   onAction,
   onLoadMore,
   onToggleOutput,
+  onInputChange,
+  onSendInput,
   outputs,
+  inputs,
 }: JobSectionProps) {
   return (
     <section className={className} aria-label={label}>
@@ -340,7 +409,10 @@ function JobSection({
             onAction={onAction}
             onLoadMore={onLoadMore}
             onToggleOutput={onToggleOutput}
+            onSendInput={onSendInput}
+            onInputChange={onInputChange}
             output={outputs[job.id]}
+            input={inputs[job.id]}
           />
         ))}
       </ul>
@@ -353,20 +425,26 @@ type JobRowProps = {
   job: RuntimeJob;
   now: number;
   output?: JobOutputState;
+  input?: JobInputState;
   pendingAction: JobActionPending;
   onAction: (jobId: string, action: JobAction) => void;
   onToggleOutput: (jobId: string) => void;
   onLoadMore: (jobId: string) => void;
+  onSendInput: (jobId: string) => void;
+  onInputChange: (jobId: string, value: string) => void;
 };
 
 function JobRow({
   expanded,
   job,
   now,
+  input,
   pendingAction,
   onAction,
   onLoadMore,
   onToggleOutput,
+  onInputChange,
+  onSendInput,
   output,
 }: JobRowProps) {
   const { t } = useTranslation("workspace");
@@ -466,6 +544,42 @@ function JobRow({
             </Button>
           ) : null}
         </div>
+      ) : null}
+
+      {job.interactive && live ? (
+        // 输入框独立于输出展开态：用户可以不展开输出直接向会话发指令
+        //（2026-10-11）。发送回执由控制器返回的 exchange 追加进输出窗口。
+        <form
+          className="mt-2 flex items-center gap-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onSendInput(job.id);
+          }}
+        >
+          <input
+            aria-label={t("panels.jobs.input.label", { command: job.command })}
+            className="h-7 min-w-0 flex-1 rounded-card border border-border bg-surface px-2 app-text-11 text-foreground placeholder:text-muted-foreground"
+            data-testid="job-input"
+            disabled={input?.sending}
+            onChange={(event) => onInputChange(job.id, event.target.value)}
+            placeholder={t("panels.jobs.input.placeholder")}
+            type="text"
+            value={input?.value ?? ""}
+          />
+          <Button
+            aria-label={t("panels.jobs.input.send")}
+            className="h-7 w-7 shrink-0 px-0"
+            disabled={input?.sending || !(input?.value ?? "").trim()}
+            size="icon"
+            type="submit"
+            variant="ghost"
+          >
+            <CornerDownLeftIcon size={13} />
+          </Button>
+          {input?.error ? (
+            <span className="app-text-10 text-analytics-danger">{input.error}</span>
+          ) : null}
+        </form>
       ) : null}
     </li>
   );

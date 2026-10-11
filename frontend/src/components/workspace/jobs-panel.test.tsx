@@ -314,6 +314,92 @@ describe("JobsPanel", () => {
     expect(actionLabels("done task")).toEqual(["重新排队"]);
   });
 
+  it("交互会话的 live 行渲染输入框，非交互/终态不渲染", async () => {
+    await renderPanel({
+      hasLiveJobs: true,
+      liveCount: 2,
+      jobs: [
+        makeJob({ id: "live-interactive", command: "more", status: "running", interactive: true }),
+        makeJob({ id: "live-plain", command: "sleep 30", status: "running" }),
+      ],
+    });
+
+    const interactiveInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="job-input"]',
+    );
+    expect(interactiveInput).not.toBeNull();
+    // Only the interactive live row carries an input; the plain live row and
+    // (no) settled rows render none.
+    expect(document.body.querySelectorAll('input[data-testid="job-input"]').length).toBe(1);
+    expect(interactiveInput?.disabled).toBe(false);
+  });
+
+  it("提交输入把 chars 转发给 writeInput 并把回显追加到输出窗口", async () => {
+    // 控制器契约：writeInput 返回解包后的 RuntimeJobExchange（或 null）。
+    const writeInput = vi.fn(async () => ({
+      jobId: "live-interactive",
+      status: "running",
+      output: "echo:hi\r\n",
+      offset: 7,
+      nextOffset: 16,
+      waitCondition: "output",
+      waitedMs: 40,
+      exited: false,
+      exitCode: null,
+      message: "",
+      osPid: null,
+      cpuPercent: null,
+      rssKb: null,
+    }));
+    getRuntimeJobOutputMock.mockResolvedValue({
+      jobId: "live-interactive",
+      status: "running",
+      output: "",
+      nextOffset: 7,
+      exitCode: null,
+      message: "",
+      errorCode: "",
+      waitCondition: "",
+      waitedMs: 0,
+      osPid: null,
+      cpuPercent: null,
+      rssKb: null,
+    });
+    await renderPanel({
+      hasLiveJobs: true,
+      liveCount: 1,
+      jobs: [makeJob({ id: "live-interactive", command: "more", status: "running", interactive: true })],
+      writeInput,
+    });
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="查看 more 的输出"]')
+        ?.click();
+    });
+    await act(flush);
+
+    const input = document.body.querySelector<HTMLInputElement>('input[data-testid="job-input"]');
+    expect(input).not.toBeNull();
+    // React-controlled input: route through the native value setter so the
+    // synthetic onChange fires (direct .value assignment is ignored by React).
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      nativeSetter?.call(input!, "hi");
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      input!.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(flush);
+
+    expect(writeInput).toHaveBeenCalledWith("live-interactive", { chars: "hi\r" });
+    expect(document.body.textContent).toContain("echo:hi");
+  });
+
   it("点击动作按钮把 (jobId, action) 转发给控制器", async () => {
     const controller = await renderPanel({
       hasLiveJobs: true,

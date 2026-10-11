@@ -36,6 +36,12 @@ export const zhWorkspacePanelsJobs = {
     empty: "暂无输出",
     loadMore: "加载更多",
   },
+  input: {
+    label: "向 {{command}} 发送输入",
+    placeholder: "输入要发送到交互会话的内容（回车提交）",
+    send: "发送输入",
+    failed: "发送失败：会话可能已退出或不属于当前实例",
+  },
   status: {
     pending: "排队中",
     paused: "已暂停",
