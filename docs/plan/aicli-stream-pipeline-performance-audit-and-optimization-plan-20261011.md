@@ -197,6 +197,8 @@ P2-1 收益随会话长度增长（长会话 turn 收尾从 O(history)×N 降为
 - journal 落盘验证：1121 行全合法 JSONL、turn 后 size 稳定（空闲关句柄生效、在途数据已刷）；投递 1477 committed / 0 降级；
 - 观察项：ui_actor 计 `dropped:1`（2846 中 1 次，0.04%，待后续归因；推测为合批 DrawRequested 计数口径）。
 
+**P3 v2 修正（`2c809100`，全量门禁暴露的语义回归）**：注入记录与低频事件的消费方依赖写后立即可见（惰性建目录、legacy 布局偏好、TempDir 清理），全异步破坏了这些不变式。修正为分类双路径：delta 类（千级/turn）走异步 writer，注入与其余低频事件保留同步路径（写前 flush 异步队列保证同文件全序）；实测收益不变（delta 才是量级来源）。同时修复 headlessDeliverBacklogHead 与 backlog worker 的固有竞态（等待式交付 + 匹配谓词）。门禁 3485 过，唯一失败为并行工作线 modelcard 既有失败（stash 已验）。
+
 ### 9.7 批次 3 剩余与缓办
 
 - **P2-1 剩余（三次写事务合并）**：已完成（`f69b00a4`）——新增 `restoreRuntimeSessionIntoCLI` 只读恢复变体，executor 成功路径与 ContinueGoal 路径的内存态变更顺序不变（restore → reconcilers → usage → write），三次全量 Update 合并为一次最终写，最终状态严格一致；每 turn 省 1-2 个全量写事务。Load 侧的增量化（`SessionManager.Get` 全量反序列化）仍留待有实测依据后做。
