@@ -51,10 +51,18 @@ func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 	id, ch := sess.allocStream()
 	defer sess.releaseStream(id)
 
+	// Forward the mount prefix so the local service can inject a <base href>
+	// (runtime-server SPA base-path awareness, docs/gateway/06 §4.1). The
+	// gateway overwrites any client-supplied value.
+	headers := make(map[string][]string, len(r.Header)+1)
+	for key, values := range r.Header {
+		headers[key] = values
+	}
+	headers["X-Forwarded-Prefix"] = []string{"/n/" + nodeID}
 	open := wire.StreamOpen{
 		Method:  r.Method,
 		Path:    path,
-		Headers: map[string][]string(r.Header),
+		Headers: headers,
 		BodyLen: int64(len(body)),
 	}
 	if err := sess.writeJSON(wire.TypeStreamOpen, id, open); err != nil {

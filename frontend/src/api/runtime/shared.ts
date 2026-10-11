@@ -55,6 +55,15 @@ export function trimTrailingSlash(value: string) {
 }
 
 export function getRuntimeBaseUrl() {
+  // Injected by runtime-server when the SPA is served under a reverse-proxy
+  // mount (gateway /n/{node}/): every API call must carry the same prefix.
+  if (typeof window !== "undefined") {
+    const injected = (window as unknown as { __RUNTIME_BASE__?: string })
+      .__RUNTIME_BASE__;
+    if (injected && injected.trim()) {
+      return trimTrailingSlash(injected.trim());
+    }
+  }
   const configured = import.meta.env.VITE_API_BASE_URL;
   if (configured && configured.trim()) {
     return trimTrailingSlash(configured.trim());

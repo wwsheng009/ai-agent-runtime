@@ -105,6 +105,27 @@ func TestProxyNodeOffline(t *testing.T) {
 	}
 }
 
+func TestProxyForwardsPrefixHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Prefix", r.Header.Get("X-Forwarded-Prefix"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	dialAgent(t, server, "node-prefix", upstream.URL)
+
+	proxy := startProxy(t, server, "node-prefix")
+	resp, err := http.Get(proxy.URL + "/x")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("X-Seen-Prefix"); got != "/n/node-prefix" {
+		t.Fatalf("upstream saw X-Forwarded-Prefix = %q, want /n/node-prefix", got)
+	}
+}
+
 func testRegisterFunc(nodeID string) func() wire.Register {
 	return func() wire.Register {
 		return wire.Register{NodeID: nodeID, Kind: "aicli", DeviceName: "laptop", Routes: []string{"/"}}

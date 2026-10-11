@@ -2,9 +2,11 @@ package webui
 
 import (
 	"bytes"
+	"html"
 	"io/fs"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -70,6 +72,12 @@ func (h *spaHandler) serveFile(w http.ResponseWriter, r *http.Request, name stri
 			http.NotFound(w, r)
 			return
 		}
+		// Base-path awareness (docs/gateway/06 §4.1): when the SPA is served
+		// under a reverse-proxy mount (the gateway forwards X-Forwarded-Prefix),
+		// inject a <base href> so relative asset/API URLs resolve under it.
+		if prefix := forwardedPrefix(r); prefix != "" {
+			contents = injectBasePath(contents, prefix)
+		}
 		info, err := fs.Stat(h.assets, name)
 		if err != nil {
 			http.NotFound(w, r)
@@ -85,4 +93,30 @@ func (h *spaHandler) serveFile(w http.ResponseWriter, r *http.Request, name stri
 	request.URL.Path = "/" + name
 	request.URL.RawPath = ""
 	h.fileServer.ServeHTTP(w, request)
+}
+
+// forwardedPrefix returns a safe mount prefix from X-Forwarded-Prefix, or "".
+func forwardedPrefix(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	prefix := strings.TrimSpace(r.Header.Get("X-Forwarded-Prefix"))
+	if prefix == "" || !strings.HasPrefix(prefix, "/") || strings.Contains(prefix, "..") {
+		return ""
+	}
+	return strings.TrimRight(prefix, "/")
+}
+
+// injectBasePath inserts a <base href> and a global base value into index.html.
+func injectBasePath(contents []byte, prefix string) []byte {
+	prefix = strings.TrimRight(prefix, "/")
+	if prefix == "" {
+		return contents
+	}
+	snippet := []byte(`<base href="` + html.EscapeString(prefix+"/") + `">` +
+		`<script>window.__RUNTIME_BASE__=` + strconv.Quote(prefix) + `;</script>`)
+	if bytes.Contains(contents, []byte("<head>")) {
+		return bytes.Replace(contents, []byte("<head>"), append([]byte("<head>"), snippet...), 1)
+	}
+	return append(snippet, contents...)
 }
