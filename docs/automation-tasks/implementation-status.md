@@ -1,7 +1,7 @@
-# 实施状态（P0 + P1 + P2）
+# 实施状态（P0 + P1 + P2 + P3）
 
 > 依据：[`analysis-and-implementation-plan.md`](./analysis-and-implementation-plan.md) §10 统一路线图。
-> 状态：**P0、P1、P2 已完成并分批提交**；P3（E1 frontend）起未开始。
+> 状态：**P0–P3 已完成并分批提交**；P4（E2 micro web + E3 TUI）起未开始。
 
 ---
 
@@ -17,6 +17,7 @@
 | `ded5de5b` | P1d：投递历史读写与分页 |
 | `cdf46221` | P1f：子 Agent 拒绝 + 归档准入 |
 | `aea74ee3` | P2：守护进程服务化（D1–D3） |
+| `c82faf1a` | P3：E1 frontend 自动化任务面板 |
 
 ## 2. 已交付
 
@@ -51,6 +52,18 @@
   提示 systemd（见设计文档）。
 - **D3** 运维端点：`127.0.0.1:8919` 的 `/healthz` 与 `/status`。
 
+### P3（E1 frontend）
+- `types/runtime/schedule.ts` + `api/runtime/schedule.ts`：类型与 REST 客户端
+  （catalog/list/history/update/delete）。
+- `hooks/workspace/use-schedule-tasks.ts`：目录数据 hook（事件延迟刷新、active
+  兜底轮询、失败保留最近已知、删除/保存统一入口）。
+- `components/workspace/schedule-panel.tsx`：右侧栏**自包含面**（活动/未运行分区、
+  行内编辑草稿——仅钟表规则可改时间、完整 `expected` CAS 保存、冲突保留草稿、
+  删除二次确认）+ `schedule-panel-shared.ts` 纯函数（6 例单测）。
+- `panel-registry.ts`：注册 `schedule` 面（CalendarClockIcon / artifact tone /
+  content 宽度 / requiresSession=false）。
+- i18n：zh-CN 与 en-US 的 `panels-schedule` 模块 + `shell.panelTabs.schedule`。
+
 ## 3. 与设计的差异（诚实记录）
 
 | 设计 | 实现 | 说明 |
@@ -79,7 +92,8 @@ go vet（相关包）  ✅
 
 - **P2 余项**：`DrainPendingMessages` 尚未接进宿主启动路径（当前由 daemon
   暴露能力，宿主激活会话时调用即可补上）；pending 消息的死信上限。
-- **P3**：E1 frontend（`/runtime/schedule` 页 + panel + api/hook/i18n）。
+- **P3 余项**：全局页 `/runtime/schedule`（当前只有右侧栏面）；
+  `schedule.changed` SSE 事件名对齐（hook 目前按 `schedule` 前缀匹配）。
 - **P4**：E2 micro web + E3 TUI。
 - **P5**：内嵌执行（E0–E3）。
 - **P6**：E4 gateway、观测收敛、作业终态→提醒桥。
