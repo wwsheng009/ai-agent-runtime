@@ -159,7 +159,14 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	}
 
 	requestedProvider, providerSource := resolveChatProviderChoice(cfg, opts, loadedRuntimeSession)
-	providerContext, details, err := resolveProviderExecutionContext(cfg, requestedProvider, "")
+	// 首次解析只为了确定 provider 与其协议（决定 SessionFilter 与会话恢复
+	// 校验），此时模型选择还没走完：模型可能来自 --model / 恢复会话 /
+	// workspace 偏好（default_model），甚至可能在交互式选择器里产生。
+	// 因此这里允许 provider 暂无 default_model，否则项目层 .aicli/config.yaml
+	// 只含 gateway 段、遮蔽用户级 providers 配置时（preset 提供的
+	// opencode.ai 条目没有 default_model），workspace 偏好里明明存了
+	// default_model 也会在模型解析之前硬报错退出。
+	providerContext, details, err := resolveProviderContextAllowMissingModel(cfg, requestedProvider)
 	if err != nil {
 		return nil, details, err
 	}
@@ -177,9 +184,23 @@ func prepareChatRuntimeState(cfg *config.Config, opts *chatCommandOptions, loade
 	}
 
 	requestedModel, modelSource := resolveChatModelChoice(cfg, provider, providerSource, opts, loadedRuntimeSession)
-	finalContext, details, err := resolveProviderExecutionContext(cfg, providerContext.ProviderName, requestedModel)
+	finalContext, details, err := resolveProviderContextAllowMissingModel(cfg, providerContext.ProviderName)
 	if err != nil {
 		return nil, details, err
+	}
+	if requestedModel != "" {
+		withModel, withModelDetails, modelErr := resolveProviderExecutionContext(cfg, providerContext.ProviderName, requestedModel)
+		if modelErr != nil {
+			return nil, withModelDetails, modelErr
+		}
+		finalContext = withModel
+		details = withModelDetails
+	} else if opts != nil && opts.Headless {
+		// headless（管道/远端调用）没有交互式模型选择器兜底，空模型会在
+		// 首次请求时才失败且信息不可读；这里显式报错并带上 provider 上下文。
+		return nil, details, fmt.Errorf("no model specified and no default model configured for provider '%s' (set --model or providers.items.%s.default_model)", providerContext.ProviderName, providerContext.ProviderName)
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: provider '%s' 未配置 default_model，也未通过 --model/workspace 偏好指定模型；可用 /model 命令在会话内选择\n", providerContext.ProviderName)
 	}
 	provider = finalContext.Provider
 	modelName := finalContext.Model

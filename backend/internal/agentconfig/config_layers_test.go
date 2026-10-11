@@ -30,7 +30,7 @@ func writeConfigLayerFile(t *testing.T, path, content string) {
 
 func TestParseMergeModeNormalisesValues(t *testing.T) {
 	cases := map[string]MergeMode{
-		"":        MergeModeOff,
+		"":        MergeModeOn,
 		"off":     MergeModeOff,
 		"false":   MergeModeOff,
 		"bogus":   MergeModeOff,

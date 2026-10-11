@@ -74,6 +74,20 @@ func headerTemplateProjectID() string {
 }
 
 func resolveProviderExecutionContext(cfg *config.Config, providerFlag, modelFlag string) (*providerExecutionContext, map[string]interface{}, error) {
+	return resolveProviderContextWithModel(cfg, providerFlag, modelFlag, false)
+}
+
+// resolveProviderContextAllowMissingModel is the chat-bootstrap variant of
+// resolveProviderExecutionContext: the provider must exist and be enabled,
+// but an absent model is tolerated. The chat path resolves the model from
+// flags / restored session / workspace preferences right after this call and
+// re-resolves the context with the final model, so failing here on a missing
+// default_model would abort startup even when a usable model choice exists.
+func resolveProviderContextAllowMissingModel(cfg *config.Config, providerFlag string) (*providerExecutionContext, map[string]interface{}, error) {
+	return resolveProviderContextWithModel(cfg, providerFlag, "", true)
+}
+
+func resolveProviderContextWithModel(cfg *config.Config, providerFlag, modelFlag string, allowMissingModel bool) (*providerExecutionContext, map[string]interface{}, error) {
 	details := map[string]interface{}{}
 	if cfg == nil {
 		return nil, details, fmt.Errorf("config is nil")
@@ -104,7 +118,7 @@ func resolveProviderExecutionContext(cfg *config.Config, providerFlag, modelFlag
 	if modelName == "" {
 		modelName = provider.DefaultModel
 	}
-	if modelName == "" {
+	if modelName == "" && !allowMissingModel {
 		return nil, details, fmt.Errorf("no model specified and no default model configured for provider '%s'", providerName)
 	}
 	requestedModel := modelName

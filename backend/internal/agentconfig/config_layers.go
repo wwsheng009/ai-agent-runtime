@@ -37,11 +37,16 @@ const (
 	dryRunReportKeyLimit = 20
 )
 
-// ParseMergeMode normalises a raw AICLI_CONFIG_MERGE value. Unknown values fall
+// ParseMergeMode normalises a raw AICLI_CONFIG_MERGE value. An empty value
+// defaults to MergeModeOn: the project layer only overrides the keys it
+// explicitly writes, so a project .aicli/config.yaml that only carries a
+// gateway section no longer shadows user-level providers. Unknown values fall
 // back to MergeModeOff so a typo can never silently enable layering.
 func ParseMergeMode(raw string) MergeMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "off", "false", "0", "no", "disabled":
+	case "":
+		return MergeModeOn
+	case "off", "false", "0", "no", "disabled":
 		return MergeModeOff
 	case "dry-run", "dryrun", "preview", "warn":
 		return MergeModeDryRun
@@ -52,7 +57,7 @@ func ParseMergeMode(raw string) MergeMode {
 	}
 }
 
-// MergeModeFromEnv returns the configured merge mode (default: off).
+// MergeModeFromEnv returns the configured merge mode (default: on).
 func MergeModeFromEnv() MergeMode {
 	return ParseMergeMode(os.Getenv(MergeConfigEnvVar))
 }
