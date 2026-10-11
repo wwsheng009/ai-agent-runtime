@@ -24,8 +24,12 @@ type NotifyReporter interface {
 // only learn their local loopback address after startup call SetForward once it
 // is known; the value is applied on the next dial.
 func NewController(cfg Config, register RegisterFunc, opts ...Option) *Controller {
-	connector := &WSConnector{Register: register}
-	controller := New(cfg, connector.Dial, opts...)
+	controller := New(cfg, nil, opts...)
+	connector := &WSConnector{
+		Register:       register,
+		OnHeartbeatAck: controller.MarkHeartbeat,
+	}
+	controller.dial = connector.Dial
 	connector.ForwardProvider = controller.ForwardConfig
 	return controller
 }

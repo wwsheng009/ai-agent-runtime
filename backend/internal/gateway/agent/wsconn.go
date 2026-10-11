@@ -45,6 +45,10 @@ type WSConnector struct {
 	// ForwardProvider, when set, overrides Forward at dial time. Hosts use it to
 	// supply the local base URL once their loopback server is listening.
 	ForwardProvider func() ForwardConfig
+	// OnHeartbeatAck, when set, fires on every gateway liveness signal. The
+	// controller constructor wires it to MarkHeartbeat so Status.LastHeartbeat
+	// reflects acknowledged heartbeats.
+	OnHeartbeatAck func()
 }
 
 // Dial establishes the tunnel: connect, HELLO/WELCOME, REGISTER/REGISTER_ACK,
@@ -89,10 +93,12 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 		register:          c.Register,
 		logf:              c.Logf,
 		forward:           forward,
+		onHeartbeatAck:    c.OnHeartbeatAck,
 		done:              make(chan struct{}),
 		sendCredit:        make(map[uint32]int64),
 		flowSignal:        make(chan struct{}, 1),
 	}
+	conn.createdAt = time.Now()
 
 	if err := conn.handshake(ctx, c.AgentVersion, cfg); err != nil {
 		_ = ws.Close()
@@ -101,6 +107,7 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 
 	go conn.heartbeatLoop()
 	go conn.readLoop()
+	go conn.staleHeartbeatWatchdog()
 	return conn, nil
 }
 
@@ -175,9 +182,22 @@ type wsConn struct {
 	register          RegisterFunc
 	logf              func(format string, args ...any)
 	forward           ForwardConfig
+	// onHeartbeatAck, when set, fires on every HEARTBEAT_ACK (the controller
+	// uses it to refresh Status.LastHeartbeat for /gateway status).
+	onHeartbeatAck func()
 
 	mu      sync.Mutex
 	streams map[uint32]*inboundStream
+
+	// lastAck tracks the most recent gateway liveness signal (HEARTBEAT_ACK or
+	// PONG, monotonic clock). The stale-heartbeat watchdog compares it against
+	// a 3× interval deadline to detect half-open connections where writes keep
+	// landing in a dead socket buffer and the read loop never wakes.
+	lastAckMu     sync.Mutex
+	createdAt     time.Time
+	lastAck       time.Time
+	haveAck       bool
+	watchDogFired bool
 
 	flowMu     sync.Mutex
 	sendCredit map[uint32]int64
@@ -354,6 +374,90 @@ func (c *wsConn) heartbeatLoop() {
 	}
 }
 
+// staleHeartbeatTimeout is how long the connection may go without any gateway
+// liveness signal (HEARTBEAT_ACK or PONG) before the watchdog declares it dead.
+// Three heartbeat intervals ride out a couple of lost frames without being
+// twitchy; with the 20s default this bounds silent-connection detection at 60s.
+func staleHeartbeatTimeout(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		interval = DefaultHeartbeatInterval
+	}
+	return 3 * interval
+}
+
+// recordGatewayLiveness stamps the most recent gateway liveness signal and
+// fires the host callback (first ack only marks the watchdog primed; every ack
+// refreshes the deadline).
+func (c *wsConn) recordGatewayLiveness() {
+	c.lastAckMu.Lock()
+	c.lastAck = time.Now()
+	c.haveAck = true
+	c.lastAckMu.Unlock()
+	if cb := c.onHeartbeatAck; cb != nil {
+		cb()
+	}
+}
+
+// lastGatewayLiveness returns the most recent ack time and whether any was
+// seen since the connection was established.
+func (c *wsConn) lastGatewayLiveness() (time.Time, bool) {
+	c.lastAckMu.Lock()
+	defer c.lastAckMu.Unlock()
+	return c.lastAck, c.haveAck
+}
+
+// staleHeartbeatWatchdog closes a half-open connection: when no HEARTBEAT_ACK
+// (or PONG) arrives within staleHeartbeatTimeout of the handshake (or of the
+// last ack), the socket is almost certainly dead even though writes still
+// succeed locally — TCP black hole, NAT idle timeout, gateway wedged. Closing
+// it routes through markClosed → Done() → the controller's auto-reconnect
+// watcher, which re-dials with backoff. Failures here must look exactly like
+// any other network loss, so no special state is introduced.
+func (c *wsConn) staleHeartbeatWatchdog() {
+	timeout := staleHeartbeatTimeout(c.heartbeatInterval)
+	ticker := time.NewTicker(timeout / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			last, have := c.lastGatewayLiveness()
+			if have && time.Since(last) < timeout {
+				continue
+			}
+			if !have {
+				// No ack ever since dial. The handshake (HELLO/WELCOME/
+				// REGISTER/REGISTER_ACK) completed, so the gateway answered
+				// once; treat total silence since then as dead.
+				ackSinceHandshake := time.Since(c.handshakeCompletedAt())
+				if ackSinceHandshake < timeout {
+					continue
+				}
+			}
+			c.lastAckMu.Lock()
+			if c.watchDogFired {
+				c.lastAckMu.Unlock()
+				return
+			}
+			c.watchDogFired = true
+			c.lastAckMu.Unlock()
+			c.logf0("gateway agent: no heartbeat ack for %s — closing half-open connection to trigger reconnect", timeout)
+			c.markClosed()
+			_ = c.ws.Close()
+			return
+		}
+	}
+}
+
+// handshakeCompletedAt returns the reference point used when no ack has been
+// seen: the moment Dial finished the handshake.
+func (c *wsConn) handshakeCompletedAt() time.Time {
+	c.lastAckMu.Lock()
+	defer c.lastAckMu.Unlock()
+	return c.createdAt
+}
+
 // readLoop services control frames until the socket closes. Stream frames are
 // not yet handled here (the reverse proxy lands in a later workstream); they are
 // ignored so the read loop never blocks the heartbeat.
@@ -377,7 +481,11 @@ func (c *wsConn) readLoop() {
 		switch frame.Type {
 		case wire.TypePing:
 			_ = c.writeControl(wire.TypePong, map[string]any{})
-		case wire.TypePong, wire.TypeHeartbeatAck, wire.TypeWelcome:
+		case wire.TypeHeartbeatAck, wire.TypePong:
+			// Gateway liveness: refresh the watchdog deadline and the host's
+			// LastHeartbeat (Status) so /gateway status stays accurate.
+			c.recordGatewayLiveness()
+		case wire.TypeWelcome:
 			// no-op
 		case wire.TypeError, wire.TypeGoAway:
 			c.logf0("gateway agent: gateway signalled %s", frame.Type)

@@ -19,6 +19,9 @@ type fakeGatewayConfig struct {
 	sendError    bool
 	errorCode    string
 	heartbeatSec int
+	// silent makes the gateway swallow HEARTBEAT frames without acknowledging
+	// them (half-open/wedged gateway simulation for the watchdog tests).
+	silent bool
 }
 
 type fakeGateway struct {
@@ -86,6 +89,10 @@ func newFakeGateway(t *testing.T, cfg fakeGatewayConfig) (*httptest.Server, *fak
 				select {
 				case g.heartbeats <- struct{}{}:
 				default:
+				}
+				if cfg.silent {
+					// Half-open simulation: absorb the heartbeat, never ack.
+					continue
 				}
 				_ = writeWSJSON(ws, wire.TypeHeartbeatAck, wire.HeartbeatAck{ServerTime: time.Now().UTC()})
 			case wire.TypeDeregister:
