@@ -48,3 +48,48 @@ func TestConfigTokenHint(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigFromEnvDefaults(t *testing.T) {
+	cfg := ConfigFromEnv(func(string) string { return "" })
+	if cfg.Enabled {
+		t.Fatal("empty env must not be enabled")
+	}
+	if !cfg.AutoConnect {
+		t.Fatal("auto-connect must default to true")
+	}
+}
+
+func TestConfigFromEnvConfigured(t *testing.T) {
+	env := map[string]string{
+		EnvURL:         " wss://gw.example.com ",
+		EnvToken:       "agw_secret",
+		EnvName:        "laptop",
+		EnvAutoConnect: "false",
+	}
+	cfg := ConfigFromEnv(func(key string) string { return env[key] })
+	if !cfg.Enabled {
+		t.Fatal("url+token present must be enabled")
+	}
+	if cfg.URL != "wss://gw.example.com" || cfg.Token != "agw_secret" || cfg.Name != "laptop" {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if cfg.AutoConnect {
+		t.Fatal("auto-connect must be disabled for false")
+	}
+}
+
+func TestConfigFromEnvAutoConnectVariants(t *testing.T) {
+	base := map[string]string{EnvURL: "wss://gw", EnvToken: "agw_x"}
+	for _, raw := range []string{"0", "false", "FALSE"} {
+		env := map[string]string{EnvURL: base[EnvURL], EnvToken: base[EnvToken], EnvAutoConnect: raw}
+		if ConfigFromEnv(func(k string) string { return env[k] }).AutoConnect {
+			t.Fatalf("auto-connect must be false for %q", raw)
+		}
+	}
+	for _, raw := range []string{"1", "true", "yes"} {
+		env := map[string]string{EnvURL: base[EnvURL], EnvToken: base[EnvToken], EnvAutoConnect: raw}
+		if !ConfigFromEnv(func(k string) string { return env[k] }).AutoConnect {
+			t.Fatalf("auto-connect must be true for %q", raw)
+		}
+	}
+}

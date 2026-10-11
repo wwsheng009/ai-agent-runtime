@@ -2,8 +2,40 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
+
+// Environment variable names for gateway configuration, shared by every host
+// (docs/gateway/12-connection-control.md §6.2).
+const (
+	EnvURL         = "AICLI_GATEWAY_URL"
+	EnvToken       = "AICLI_GATEWAY_TOKEN"
+	EnvName        = "AICLI_GATEWAY_NAME"
+	EnvAutoConnect = "AICLI_GATEWAY_AUTO_CONNECT"
+)
+
+// ConfigFromEnv resolves the gateway configuration from environment variables.
+// Enabled is derived from URL+token presence; AutoConnect defaults to true
+// unless explicitly disabled ("false"/"0"). getenv may be nil (os.Getenv).
+func ConfigFromEnv(getenv func(string) string) Config {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	auto := true
+	if raw := strings.TrimSpace(getenv(EnvAutoConnect)); raw != "" {
+		auto = !strings.EqualFold(raw, "false") && raw != "0"
+	}
+	url := strings.TrimSpace(getenv(EnvURL))
+	token := strings.TrimSpace(getenv(EnvToken))
+	return Config{
+		Enabled:     url != "" && token != "",
+		URL:         url,
+		Token:       token,
+		Name:        strings.TrimSpace(getenv(EnvName)),
+		AutoConnect: auto,
+	}
+}
 
 // Config is the gateway connection configuration shared by both hosts. It maps
 // one-to-one onto the layered-config keys documented in

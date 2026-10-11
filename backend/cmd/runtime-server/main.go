@@ -1342,6 +1342,10 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// 与 shadow 观察器同源；mode=off 时句柄为 nil，端点返回 mode=off 载荷。
 	handler.SetKnowledgeActivation(knowledgeActivation)
 
+	// 网关接入：按环境变量构造连接控制面并注入 handler（未配置则保持 nil，
+	// 控制 API 返回 503）。自动连接为 best-effort，不影响启动。
+	startRuntimeServerGateway(handler)
+
 	return &runtimeServerApp{
 		router:          router,
 		handler:         handler,
