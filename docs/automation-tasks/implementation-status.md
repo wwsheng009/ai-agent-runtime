@@ -1,7 +1,7 @@
-# 实施状态（P0 + P1）
+# 实施状态（P0 + P1 + P2）
 
 > 依据：[`analysis-and-implementation-plan.md`](./analysis-and-implementation-plan.md) §10 统一路线图。
-> 状态：**P0、P1 已完成并分批提交**；P2（守护进程服务化）起未开始。
+> 状态：**P0、P1、P2 已完成并分批提交**；P3（E1 frontend）起未开始。
 
 ---
 
@@ -16,6 +16,7 @@
 | `48294340` | P1b/c：cron 解析/规范化/发生点 + 工具与 API |
 | `ded5de5b` | P1d：投递历史读写与分页 |
 | `cdf46221` | P1f：子 Agent 拒绝 + 归档准入 |
+| `aea74ee3` | P2：守护进程服务化（D1–D3） |
 
 ## 2. 已交付
 
@@ -42,14 +43,22 @@
 - **P1f** 权限边界：`create/update` 对 `agent_depth>0` 拒绝（`subagent_session`）；
   `ArchiveSession`/`BatchArchiveSessions` 归档准入（活动任务阻止归档）。
 
+### P2（D1–D3）
+- **D1** 持久兜底：`schedule_pending_messages` 表（migration v2）；投递失败即落
+  pending（`FallbackToMailbox` 可关）；`DrainPendingMessages` 供宿主恢复后消费。
+- **D2** 服务化：Windows Service（SCM：`install/uninstall/start/stop/status`，
+  服务名 `ai-agent-runtime-scheduled`，StartType=Automatic）；非 Windows 显式
+  提示 systemd（见设计文档）。
+- **D3** 运维端点：`127.0.0.1:8919` 的 `/healthz` 与 `/status`。
+
 ## 3. 与设计的差异（诚实记录）
 
 | 设计 | 实现 | 说明 |
 |---|---|---|
 | `runMeta.source="schedule"` | `[SCHEDULE REMINDER]` 固定文本 | `team.RunMeta` 无通用 source 字段 |
 | 回执 messageId | 合成 id `schedule:<id>:<ms>` | delegate HTTP 响应未回传消息 id |
-| `schedule.changed` 事件 | 未实现 | P2 观测面 |
-| 归档 stop 语义（stop 删除活动行） | 仅拒绝归档，未提供"停止任务再归档"的原子 stop | P2 随 UI 交付补 |
+| `schedule.changed` 事件 | 未实现 | P3 随 frontend 交付补 |
+| 归档 stop 语义（stop 删除活动行） | 仅拒绝归档，未提供"停止任务再归档"的原子 stop | P3 随 UI 交付补 |
 | cron 400 年搜索地平线 | 800 天（date loop）| P1 简化；规范化/语义不变 |
 | 归档准入读取路径 | 每次归档读一次 catalog | 未做缓存，量级小 |
 
@@ -68,9 +77,8 @@ go vet（相关包）  ✅
 
 ## 5. 未完成（后续阶段）
 
-- **P2（D1–D3）**：持久 mailbox 兜底 + 重试/死信计数落地（config 已有
-  `maxDeliveryAttempts`，内存 map 已退避）；Windows Service/systemd 安装；
-  `healthz`/`status`。
+- **P2 余项**：`DrainPendingMessages` 尚未接进宿主启动路径（当前由 daemon
+  暴露能力，宿主激活会话时调用即可补上）；pending 消息的死信上限。
 - **P3**：E1 frontend（`/runtime/schedule` 页 + panel + api/hook/i18n）。
 - **P4**：E2 micro web + E3 TUI。
 - **P5**：内嵌执行（E0–E3）。
