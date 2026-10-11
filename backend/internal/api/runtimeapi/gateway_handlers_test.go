@@ -22,6 +22,7 @@ type fakeGatewayController struct {
 	reconnect  int
 	err        error
 	sessions   []wire.SessionSummary
+	notifies   []wire.Notify
 }
 
 func (f *fakeGatewayController) Status() gatewayagent.Status { return f.status }
@@ -45,6 +46,7 @@ func (f *fakeGatewayController) Configure(cfg gatewayagent.Config) error {
 func (f *fakeGatewayController) UpdateSessions(sessions []wire.SessionSummary) {
 	f.sessions = sessions
 }
+func (f *fakeGatewayController) SendNotify(n wire.Notify) { f.notifies = append(f.notifies, n) }
 
 func newGatewayTestRouter(controller GatewayController) *mux.Router {
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)

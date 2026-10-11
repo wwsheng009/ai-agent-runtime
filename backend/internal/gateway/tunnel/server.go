@@ -48,6 +48,11 @@ type Server struct {
 
 	sessMu   sync.RWMutex
 	sessions map[string]*session
+
+	// notifyMu guards notifySeen, a bounded set of recent NOTIFY dedup keys
+	// (docs/gateway/08-notifications.md §4.1).
+	notifyMu   sync.Mutex
+	notifySeen map[string]struct{}
 }
 
 // NewServer builds a tunnel server.
@@ -65,10 +70,11 @@ func NewServer(cfg Config) *Server {
 		upgrader = *cfg.Upgrader
 	}
 	return &Server{
-		cfg:      cfg,
-		registry: registry,
-		upgrader: upgrader,
-		sessions: make(map[string]*session),
+		cfg:        cfg,
+		registry:   registry,
+		upgrader:   upgrader,
+		sessions:   make(map[string]*session),
+		notifySeen: make(map[string]struct{}),
 	}
 }
 
@@ -254,6 +260,11 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 			update, decodeErr := wire.DecodePayload[wire.SessionUpdate](frame)
 			if decodeErr == nil {
 				s.applySessionUpdate(nodeID, update)
+			}
+		case wire.TypeNotify:
+			notify, decodeErr := wire.DecodePayload[wire.Notify](frame)
+			if decodeErr == nil {
+				s.applyNotify(nodeID, notify)
 			}
 		default:
 			// Unknown frames are ignored for forward compatibility.

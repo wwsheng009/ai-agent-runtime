@@ -29,6 +29,32 @@ func TestNewJSONFrame(t *testing.T) {
 	}
 }
 
+func TestNotifyRoundTrip(t *testing.T) {
+	in := Notify{
+		SessionID: "session_1",
+		Kind:      NotifyKindApproval,
+		Priority:  NotifyPriorityHigh,
+		Title:     "网关设计",
+		DedupKey:  "turn_1",
+		TS:        time.Unix(1000, 0).UTC(),
+	}
+	f, err := NewJSONFrame(TypeNotify, 0, in)
+	if err != nil {
+		t.Fatalf("NewJSONFrame: %v", err)
+	}
+	if f.Type != TypeNotify || f.Type.String() != "NOTIFY" {
+		t.Fatalf("frame type = %v (%s)", f.Type, f.Type)
+	}
+	got, err := DecodePayload[Notify](f)
+	if err != nil {
+		t.Fatalf("DecodePayload: %v", err)
+	}
+	if got.SessionID != in.SessionID || got.Kind != in.Kind || got.Priority != in.Priority ||
+		got.Title != in.Title || got.DedupKey != in.DedupKey || !got.TS.Equal(in.TS) {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
 func TestDecodePayloadRoundTripRegister(t *testing.T) {
 	in := Register{
 		NodeID:       "node-aicli-9f3a",

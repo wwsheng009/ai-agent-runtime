@@ -213,27 +213,28 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | 控制台 API | `cmd/gateway/main.go` | `GET /api/push/config`、`GET|POST /api/push/subscriptions`、`POST /api/push/unsubscribe`、`POST /api/push/test`（均 owner 保护） |
 | 指标 | `/metrics` | `aicli_gateway_push_subscriptions`；`/api/metrics` 亦含 `push_subscriptions` |
 | 控制台 PWA | `cmd/gateway/console/{sw.js,app.js,index.html}` | 服务进程 `push`/`notificationclick` 事件；`开启通知/关闭通知` 切换按钮，订阅后 POST 到网关 |
-| 配置 | `cmd/gateway` | `--push-enabled`（默认 true）、`--vapid-subject` |
+| 配置 | `cmd/gateway` | `--push-enabled`（默认 true）、`--vapid-subject`、`--presence-ttl`（默认 90s）、`--notify-coalesce-window`（默认 30s）、`--notify-quiet-hours`（默认空） |
 | 控制台收件箱/徽标/toast | `cmd/gateway/console/{app.js,style.css}` | 会话行渲染 `attention` 徽标（已完成/待审批/待回答/出错/等待中）；SSE 收到**新增**注意力时弹出可点击 toast（首次加载只做种子，不刷屏） |
 | presence 抑制 | `cmd/gateway/presence.go`、`cmd/gateway/console/app.js` | 控制台打开会话/设备时 `POST /api/presence`（可见时每 30s 续期，`--presence-ttl` 默认 90s）；网关对该会话**不推送**，且不记入去重快照，用户移开视线后仍会补发一次 |
 | agent（aicli）上报 | `cmd/aicli/commands/chat_gateway_attention.go`、`chat_mesh.go`、`chat_gateway_host.go` | turn 边界（`beginChatMeshTurn`）驱动 `attention`：开始时清空 + busy，结束时 `completed`/`error`（按 turn 最终 err）；随 `SESSION_UPDATE` 上报 |
 | agent（runtime-server）上报 | `internal/api/runtimeapi/gateway_attention.go`、`gateway_handlers.go` | 订阅运行时事件总线：`agent.turn.started/finished`、`approval_requested/resolved`、`question_asked/answered`、`session_end/interrupted` → `attention`/`busy`；`EnableGatewayAttention()` 在启动装配时调用 |
+| 通知策略（合并/免打扰） | `cmd/gateway/push.go`、`notify_policy.go` | 低优先（`completed`/`waiting`）按 `--notify-coalesce-window`（默认 30s）合并为"N 个会话已完成"；`--notify-quiet-hours`（`HH:MM-HH:MM`，本地时间）内静音低优先；`approval`/`question`/`error` 高优先立即投递并穿透免打扰 |
+| `NOTIFY` 帧 | `internal/gateway/wire/messages.go`、`tunnel/notify.go`、`agent/controller.go` | 新增 `Notify`（`kind`/`priority`/`title`/`dedup_key`/`ts`）；agent 在 turn 边界/事件变化时随 `SESSION_UPDATE` 一并上报；网关按 `dedup_key` 去重并更新注册表 `attention`（不覆盖 `SESSION_UPDATE` 其它字段） |
+| 控制台聚合收件箱 | `cmd/gateway/console/{index.html,app.js,style.css}` | "待处理"聚合视图（按优先级排序 + 计数）；打开会话即标记已读（presence 即已读联动），注意力再次变化后重新出现 |
 
 **通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时广播一次 Web Push。因此：
 
 - 同一注意力状态**重复上报不会重复推送**（等价 `dedup_key` 的粗粒度实现）；
 - 状态被清除（`attention` 变空）后再进入注意力，会**再次**通知。
 
-### 10.2 待办（与 §3/§5/§9 的差距）
+### 10.2 待办（部署级增强项）
 
 | 项 | 说明 |
 |----|------|
-| `NOTIFY` 帧（§4.1） | 尚未新增帧；当前依赖 `SESSION_UPDATE` 的 `attention` 字段（已足以驱动网关推送） |
-| presence 抑制的收件箱联动 | 已抑制推送；控制台尚未在收件箱中把"已读"与会话状态联动清除 |
-| 时间窗合并（§5.5） | 连续 `completed` 未合并为"N 个会话已完成" |
-| 免打扰/静音（§5.6） | 未实现 |
-| 控制台独立收件箱视图 | 已有会话行徽标 + toast；未做聚合收件箱页面 |
+| 注册表持久化 | 节点/会话/`attention` 仅存于网关内存，重启后依赖 agent 重连重建；未做持久化 |
+| 多实例 HA | 注册表与 presence 为单进程内存状态；未做共享存储/多实例一致性 |
 
-> 说明：推送链路已**端到端打通**（agent 上报 → 网关注册表 → 去重触发 → VAPID 加密投递 →
-> Service Worker 展示 → 控制台徽标/toast），各段均有单测；剩余待办（presence 抑制、时间窗合并、
-> 免打扰、聚合收件箱、`NOTIFY` 帧）均为**增强项**，不影响主链路可用性。
+> 说明：推送链路已**端到端打通**（agent 上报 → 网关注册表 → 去重/合并/免打扰 → VAPID 加密投递 →
+> Service Worker 展示 → 控制台徽标/toast/收件箱），各段均有单测；§3/§5/§9 的增强项（`NOTIFY` 帧、
+> presence 收件箱联动、时间窗合并、免打扰/静音、聚合收件箱）均已落地，剩余两项为部署级增强，
+> 不影响单实例可用性。

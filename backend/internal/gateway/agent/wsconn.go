@@ -309,6 +309,12 @@ func (c *wsConn) SendSessionUpdate(update wire.SessionUpdate) error {
 	return c.writeControl(wire.TypeSessionUpdate, update)
 }
 
+// SendNotify pushes a NOTIFY frame (an instantaneous attention event) to the
+// gateway.
+func (c *wsConn) SendNotify(n wire.Notify) error {
+	return c.writeControl(wire.TypeNotify, n)
+}
+
 // heartbeatLoop sends periodic HEARTBEAT frames until the connection closes.
 func (c *wsConn) heartbeatLoop() {
 	interval := c.heartbeatInterval

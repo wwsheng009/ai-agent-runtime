@@ -5,6 +5,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
@@ -72,5 +73,39 @@ func TestEnableGatewayAttentionIsIdempotent(t *testing.T) {
 	handler.getRuntimeEventBus().Publish(runtimeevents.Event{Type: runtimeobserve.EventAgentTurnDone, SessionID: "s3"})
 	if st := handler.gatewaySessionStateFor("s3"); st.attention != gatewayAttentionCompleted {
 		t.Fatalf("after double enable: %+v", st)
+	}
+}
+
+// TestGatewayAttentionEmitsNotify verifies the host also emits a NOTIFY event
+// (docs/gateway/08-notifications.md §4.1) alongside the SESSION_UPDATE state.
+func TestGatewayAttentionEmitsNotify(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	controller := &fakeGatewayController{}
+	handler.SetGatewayController(controller)
+	handler.EnableGatewayAttention()
+	bus := handler.getRuntimeEventBus()
+
+	bus.Publish(runtimeevents.Event{Type: runtimechat.EventApprovalRequested, SessionID: "s1"})
+	if len(controller.notifies) != 1 {
+		t.Fatalf("notifies = %+v", controller.notifies)
+	}
+	n := controller.notifies[0]
+	if n.SessionID != "s1" || n.Kind != wire.NotifyKindApproval || n.Priority != wire.NotifyPriorityHigh {
+		t.Fatalf("notify = %+v", n)
+	}
+
+	// A resolved approval clears attention and emits no NOTIFY event.
+	bus.Publish(runtimeevents.Event{Type: runtimechat.EventApprovalResolved, SessionID: "s1"})
+	if len(controller.notifies) != 1 {
+		t.Fatalf("resolution should not notify: %+v", controller.notifies)
+	}
+
+	// Turn completion is a normal-priority event.
+	bus.Publish(runtimeevents.Event{Type: runtimeobserve.EventAgentTurnDone, SessionID: "s1"})
+	if len(controller.notifies) != 2 {
+		t.Fatalf("turn done notifies = %+v", controller.notifies)
+	}
+	if got := controller.notifies[1]; got.Kind != wire.NotifyKindTurnCompleted || got.Priority != wire.NotifyPriorityNormal {
+		t.Fatalf("turn-done notify = %+v", got)
 	}
 }

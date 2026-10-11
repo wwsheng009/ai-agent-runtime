@@ -5,6 +5,7 @@
 
   function setAuthed(authed) {
     el("login").hidden = authed;
+    el("inbox").hidden = !authed;
     el("nodes").hidden = !authed;
     el("devices").hidden = !authed;
     el("push-toggle").hidden = !authed;
@@ -77,6 +78,86 @@
 
   var seenAttention = {};
   var attentionSeeded = false;
+  var lastNodes = [];
+  // presenceTargets tracks the node|session the console is watching; the same
+  // set drives presence suppression and the inbox read state (§5.4).
+  var presenceTargets = {};
+
+  var attentionPriority = { approval: 0, question: 1, error: 2, completed: 3, waiting: 4 };
+
+  // readAttention remembers attention states the user acknowledged by opening
+  // the session, so the inbox lists only unread items (§10.2).
+  var readAttention = {};
+
+  function attentionKey(node, session) {
+    return node.node_id + "|" + session.session_id + "|" + session.attention;
+  }
+
+  function isWatching(nodeID, sessionID) {
+    return !!presenceTargets[nodeID + "|" + (sessionID || "")];
+  }
+
+  function openSession(node, session) {
+    if (!node) { return; }
+    if (session) { markRead(node, session); }
+    rememberPresence(node, session);
+    window.open(sessionOpenTarget(node, session ? session.session_id : ""), "_blank");
+  }
+
+  function markRead(node, session) {
+    if (!node || !session || !session.attention) { return; }
+    readAttention[attentionKey(node, session)] = true;
+    renderInbox(lastNodes);
+  }
+
+  function inboxItems(nodes) {
+    var items = [];
+    (nodes || []).forEach(function (node) {
+      (node.sessions || []).forEach(function (session) {
+        if (!session.attention) { return; }
+        if (readAttention[attentionKey(node, session)]) { return; }
+        items.push({ node: node, session: session });
+      });
+    });
+    items.sort(function (a, b) {
+      var pa = attentionPriority[a.session.attention];
+      var pb = attentionPriority[b.session.attention];
+      if (pa === undefined) { pa = 99; }
+      if (pb === undefined) { pb = 99; }
+      if (pa !== pb) { return pa - pb; }
+      var ta = a.session.title || a.session.session_id;
+      var tb = b.session.title || b.session.session_id;
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
+    });
+    return items;
+  }
+
+  function renderInbox(nodes) {
+    var list = el("inbox-list");
+    if (!list) { return; }
+    var count = el("inbox-count");
+    var items = inboxItems(nodes);
+    if (count) { count.textContent = items.length ? String(items.length) : ""; }
+    list.innerHTML = "";
+    if (!items.length) {
+      list.innerHTML = '<p class="badge">暂无待处理会话。</p>';
+      return;
+    }
+    items.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "card inbox-row";
+      row.innerHTML =
+        '<div class="card-head"><span class="card-title"></span><span class="attention"></span></div>' +
+        '<div class="card-meta"></div>';
+      row.querySelector(".card-title").textContent =
+        (item.node.name || item.node.node_id) + " · " +
+        (item.session.title || item.session.session_id);
+      row.querySelector(".attention").textContent = attentionLabel(item.session.attention);
+      row.querySelector(".card-meta").textContent = item.node.node_id;
+      row.addEventListener("click", function () { openSession(item.node, item.session); });
+      list.appendChild(row);
+    });
+  }
 
   // trackAttention diffs the current attention set against the last render and
   // raises a toast for newly attentive sessions (the first load only seeds).
@@ -88,10 +169,20 @@
         if (!session.attention) { return; }
         var key = node.node_id + "|" + session.session_id + "|" + session.attention;
         current[key] = true;
+        if (isWatching(node.node_id, session.session_id)) {
+          // The user is already viewing it: presence suppression implies read.
+          readAttention[key] = true;
+          return;
+        }
         if (!seenAttention[key]) { fresh.push({ node: node, session: session }); }
       });
     });
     var seeded = attentionSeeded;
+    // Drop read markers whose attention state is gone, so a later recurrence of
+    // the same state surfaces in the inbox again.
+    Object.keys(readAttention).forEach(function (k) {
+      if (!current[k]) { delete readAttention[k]; }
+    });
     seenAttention = current;
     attentionSeeded = true;
     if (!seeded) { return; }
@@ -114,7 +205,9 @@
   }
 
   function renderNodes(nodes) {
-    trackAttention(nodes);
+    lastNodes = nodes || [];
+    trackAttention(lastNodes);
+    renderInbox(lastNodes);
     var list = el("node-list");
     list.innerHTML = "";
     if (!nodes.length) {
@@ -147,8 +240,7 @@
             badge.hidden = false;
           }
           row.querySelector("button").addEventListener("click", function () {
-            rememberPresence(node, session);
-            window.open(sessionOpenTarget(node, session.session_id), "_blank");
+            openSession(node, session);
           });
           actions.appendChild(row);
         });
@@ -323,8 +415,6 @@
   // (docs/gateway/08-notifications.md §5.4). We re-assert presence on an
   // interval while the tab is visible; a hidden/closed tab simply stops, and the
   // gateway's presence TTL expires.
-  var presenceTargets = {};
-
   function rememberPresence(node, session) {
     if (!node || !node.node_id) { return; }
     var target = { node_id: node.node_id, session_id: session ? session.session_id : "" };

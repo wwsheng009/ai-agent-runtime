@@ -139,6 +139,12 @@ form { display: flex; gap: 8px; margin-top: 8px; }
   z-index: 20;
 }
 
+/* Aggregated attention inbox (docs/gateway/08-notifications.md §10.2). */
+.inbox-row {
+  cursor: pointer;
+  border-left: 3px solid var(--accent);
+}
+
 /* Mobile / PWA (docs/gateway/07-console.md §9): safe areas + touch targets. */
 body {
   padding-bottom: env(safe-area-inset-bottom);

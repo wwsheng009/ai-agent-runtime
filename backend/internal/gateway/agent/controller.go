@@ -8,6 +8,12 @@ type SessionReporter interface {
 	SendSessionUpdate(wire.SessionUpdate) error
 }
 
+// NotifyReporter is implemented by connections that can push NOTIFY frames (an
+// instantaneous attention event, docs/gateway/08-notifications.md §4.1).
+type NotifyReporter interface {
+	SendNotify(wire.Notify) error
+}
+
 // NewController builds a Controller wired to the WebSocket transport. The
 // register function supplies the REGISTER payload on each dial. Passing a nil
 // register is allowed only when no connect is expected (the dial then fails
@@ -55,4 +61,18 @@ func (c *Controller) UpdateSessions(sessions []wire.SessionSummary) {
 		Op:       wire.SessionOpReconcile,
 		Sessions: sessions,
 	})
+}
+
+// SendNotify pushes an instantaneous attention event to the gateway. It is a
+// best-effort no-op when not connected or when the transport cannot report
+// notifications.
+func (c *Controller) SendNotify(n wire.Notify) {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	reporter, ok := conn.(NotifyReporter)
+	if !ok || reporter == nil {
+		return
+	}
+	_ = reporter.SendNotify(n)
 }

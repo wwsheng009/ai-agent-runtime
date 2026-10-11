@@ -1,6 +1,10 @@
 package commands
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+)
 
 // 本文件维护 aicli 上报给网关的"注意力"状态（docs/gateway/08-notifications.md §3）。
 //
@@ -50,11 +54,16 @@ func beginChatGatewayTurn(session *ChatSession) func(err error) {
 	syncChatGatewaySession(session)
 	return func(err error) {
 		attention := gatewayAttentionCompleted
+		kind := wire.NotifyKindTurnCompleted
+		priority := wire.NotifyPriorityNormal
 		if err != nil {
 			attention = gatewayAttentionError
+			kind = wire.NotifyKindError
+			priority = wire.NotifyPriorityHigh
 		}
 		setGatewayAttention(sessionID, attention)
 		setGatewayBusy(sessionID, false)
 		syncChatGatewaySession(session)
+		notifyChatGatewaySession(session, kind, priority)
 	}
 }

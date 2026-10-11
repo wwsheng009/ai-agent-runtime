@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"time"
 
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
@@ -61,6 +62,25 @@ func syncChatGatewaySession(session *ChatSession) {
 		return
 	}
 	session.Gateway.UpdateSessions(chatGatewaySessions(session))
+}
+
+// notifyChatGatewaySession emits a NOTIFY event (best-effort) alongside the
+// persistent SESSION_UPDATE attention state (docs/gateway/08-notifications.md §4.1).
+func notifyChatGatewaySession(session *ChatSession, kind, priority string) {
+	if session == nil || session.Gateway == nil {
+		return
+	}
+	id := chatSessionID(session)
+	if id == "" {
+		return
+	}
+	session.Gateway.SendNotify(wire.Notify{
+		SessionID: id,
+		Kind:      kind,
+		Priority:  priority,
+		Title:     chatMeshSessionTitle(session),
+		TS:        time.Now().UTC(),
+	})
 }
 
 // chatGatewayResolveConfig merges the layered gateway.* config with the

@@ -96,6 +96,8 @@ func run() int {
 		pushEnabled    = flag.Bool("push-enabled", true, "enable Web Push notifications (VAPID + RFC 8291)")
 		vapidSubject   = flag.String("vapid-subject", "mailto:gateway@localhost", "VAPID JWT subject (mailto: or https:)")
 		presenceTTL    = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
+		coalesceWindow = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
+		quietHours     = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
 	)
 	flag.Parse()
 
@@ -164,6 +166,13 @@ func run() int {
 	}
 	presence := newPresenceRegistry(*presenceTTL)
 	notifier := newPushNotifier(pushManager, *publicBaseURL, presence)
+	quietRanges, quietErr := parseQuietHours(*quietHours)
+	if quietErr != nil {
+		fmt.Fprintf(os.Stderr, "gateway: invalid --notify-quiet-hours: %v\n", quietErr)
+		return 1
+	}
+	notifier.coalesceWindow = *coalesceWindow
+	notifier.quietHours = quietRanges
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,

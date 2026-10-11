@@ -126,6 +126,35 @@ const (
 	SessionOpReconcile = "reconcile"
 )
 
+// Notify kind values (docs/gateway/08-notifications.md §4.1).
+const (
+	NotifyKindTurnCompleted = "turn_completed"
+	NotifyKindApproval      = "approval"
+	NotifyKindQuestion      = "question"
+	NotifyKindError         = "error"
+	NotifyKindWaiting       = "waiting"
+)
+
+// Notify priority values.
+const (
+	NotifyPriorityHigh   = "high"
+	NotifyPriorityNormal = "normal"
+)
+
+// Notify is an instantaneous attention event (A→G, stream 0,
+// docs/gateway/08-notifications.md §4.1). It carries metadata only — never
+// session body content — and complements the persistent attention carried by
+// SESSION_UPDATE. The gateway uses it to update the registry attention and to
+// derive a notification, deduplicated by DedupKey.
+type Notify struct {
+	SessionID string    `json:"session_id"`
+	Kind      string    `json:"kind"`
+	Priority  string    `json:"priority,omitempty"`
+	Title     string    `json:"title,omitempty"`
+	DedupKey  string    `json:"dedup_key,omitempty"`
+	TS        time.Time `json:"ts,omitempty"`
+}
+
 // Deregister is sent on graceful shutdown (A→G, stream 0).
 type Deregister struct {
 	Reason string `json:"reason,omitempty"`

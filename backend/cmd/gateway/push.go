@@ -15,6 +15,10 @@ import (
 
 // pushNotifier watches the registry and delivers a Web Push notification when a
 // session newly enters an attention state (docs/gateway/08-notifications.md).
+//
+// Notification policy (§5.5-5.6): approval/question/error are high priority and
+// are delivered immediately, piercing quiet hours; completed/waiting are
+// coalesced within coalesceWindow and muted during quietHours.
 type pushNotifier struct {
 	mu      sync.Mutex
 	seen    map[string]string // "nodeID|sessionID" -> last attention value
@@ -22,6 +26,15 @@ type pushNotifier struct {
 	baseURL string
 	// presence suppresses pushes for sessions a console client is watching.
 	presence *presenceRegistry
+
+	// coalesceWindow merges low-priority notifications arriving close together
+	// (0 disables coalescing). quietHours mutes low-priority notifications.
+	coalesceWindow time.Duration
+	quietHours     []quietRange
+	now            func() time.Time
+
+	batch map[string][]push.Notification
+	timer *time.Timer
 }
 
 func newPushNotifier(manager *push.Manager, baseURL string, presence *presenceRegistry) *pushNotifier {
@@ -30,21 +43,31 @@ func newPushNotifier(manager *push.Manager, baseURL string, presence *presenceRe
 		manager:  manager,
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		presence: presence,
+		now:      time.Now,
 	}
 }
 
+// pendingNotification pairs a notification with the attention kind that
+// produced it so coalescing can group by kind.
+type pendingNotification struct {
+	attention string
+	note      push.Notification
+}
+
 // observe diffs the current attention states against the previous snapshot and
-// broadcasts a notification for each newly-attentive session.
+// notifies for each newly-attentive session.
 func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 	if p == nil || p.manager == nil {
 		return
 	}
 	p.mu.Lock()
 	next := make(map[string]string)
-	var pending []push.Notification
+	var immediate []push.Notification
+	var batched []pendingNotification
 	for _, node := range nodes {
 		for _, sess := range node.Sessions {
-			if strings.TrimSpace(sess.Attention) == "" {
+			attention := strings.TrimSpace(sess.Attention)
+			if attention == "" {
 				continue
 			}
 			key := node.NodeID + "|" + sess.SessionID
@@ -53,29 +76,83 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 			if p.presence != nil && p.presence.Active(node.NodeID, sess.SessionID) {
 				continue
 			}
-			next[key] = sess.Attention
-			if prev, ok := p.seen[key]; ok && prev == sess.Attention {
+			next[key] = attention
+			if prev, ok := p.seen[key]; ok && prev == attention {
 				continue
 			}
-			pending = append(pending, push.Notification{
+			note := push.Notification{
 				Title: attentionTitle(sess.Title),
-				Body:  attentionBody(node, sess.Attention),
+				Body:  attentionBody(node, attention),
 				Tag:   key,
 				URL:   p.sessionURL(node.NodeID, sess.SessionID),
-			})
+			}
+			if isHighPriorityAttention(attention) {
+				immediate = append(immediate, note)
+			} else {
+				batched = append(batched, pendingNotification{attention: attention, note: note})
+			}
 		}
 	}
 	p.seen = next
+	if p.coalesceWindow > 0 {
+		for _, item := range batched {
+			if p.batch == nil {
+				p.batch = make(map[string][]push.Notification)
+			}
+			p.batch[item.attention] = append(p.batch[item.attention], item.note)
+		}
+		if len(batched) > 0 && p.timer == nil {
+			p.timer = time.AfterFunc(p.coalesceWindow, p.flush)
+		}
+	} else {
+		for _, item := range batched {
+			immediate = append(immediate, item.note)
+		}
+	}
 	p.mu.Unlock()
 
-	if len(pending) == 0 {
+	p.dispatch(immediate)
+}
+
+// flush emits the coalesced low-priority batch unless quiet hours are active.
+func (p *pushNotifier) flush() {
+	p.mu.Lock()
+	batch := p.batch
+	p.batch = nil
+	p.timer = nil
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	quiet := inQuietHours(p.quietHours, now())
+	p.mu.Unlock()
+
+	if len(batch) == 0 || quiet {
 		return
 	}
+	out := make([]push.Notification, 0, len(batch))
+	for attention, items := range batch {
+		note := coalesceNotifications(attention, items)
+		if len(items) > 1 && p.baseURL != "" {
+			note.URL = p.baseURL + "/"
+		}
+		out = append(out, note)
+	}
+	p.dispatch(out)
+}
+
+// dispatch delivers notifications asynchronously so the registry callback never
+// blocks on the push services.
+func (p *pushNotifier) dispatch(notes []push.Notification) {
+	if len(notes) == 0 {
+		return
+	}
+	manager := p.manager
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		for _, n := range pending {
-			p.manager.Broadcast(ctx, n)
+		for _, n := range notes {
+			manager.Broadcast(ctx, n)
 		}
 	}()
 }

@@ -29,6 +29,9 @@
 | 控制台 | 会话 `attention` 徽标 + 新增注意力 toast | `cmd/gateway/console/{app.js,style.css}` |
 | 控制台 | presence 抑制（可见时续期，网关据此免打扰） | `cmd/gateway/presence.go`、`cmd/gateway/console/app.js` |
 | 宿主 | 会话注意力上报（turn 边界 + 事件总线） | `cmd/aicli/commands/chat_gateway_attention.go`、`internal/api/runtimeapi/gateway_attention.go` |
+| 服务端 | 通知策略（时间窗合并 + 免打扰/静音） | `cmd/gateway/push.go`、`cmd/gateway/notify_policy.go` |
+| 协议/宿主 | `NOTIFY` 帧（事件元数据 + `dedup_key`） | `internal/gateway/wire/messages.go`、`internal/gateway/tunnel/notify.go`、`internal/gateway/agent/controller.go` |
+| 控制台 | 聚合收件箱（按优先级 + 已读联动） | `cmd/gateway/console/{index.html,app.js,style.css}` |
 
 ---
 
