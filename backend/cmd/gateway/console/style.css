@@ -112,6 +112,24 @@ form { display: flex; gap: 8px; margin-top: 8px; }
   white-space: nowrap;
 }
 
+/* Last-message summary + time under the session title (§3.2 preview). */
+.session-row { align-items: flex-start; }
+
+.session-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.session-preview {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60vw;
+}
+
 /* Attention badge + toast (docs/gateway/08-notifications.md §5.2). */
 .attention {
   font-size: 12px;

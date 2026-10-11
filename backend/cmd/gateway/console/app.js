@@ -240,7 +240,22 @@
         sessions.forEach(function (session) {
           var row = document.createElement("div");
           row.className = "session-row";
-          row.innerHTML = '<span class="session-title"></span><span class="attention" hidden></span><button class="secondary" type="button">打开</button>';
+          row.innerHTML =
+            '<div class="session-info"><span class="session-title"></span><div class="session-preview" hidden></div></div>' +
+            '<span class="attention" hidden></span><button class="secondary" type="button">打开</button>';
+          var preview = row.querySelector(".session-preview");
+          var bits = [];
+          if (session.preview) { bits.push(session.preview); }
+          if (session.updated_at) {
+            var d = new Date(session.updated_at);
+            if (!isNaN(d.getTime())) {
+              bits.push(d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+            }
+          }
+          if (bits.length) {
+            preview.textContent = bits.join(" · ");
+            preview.hidden = false;
+          }
           row.querySelector(".session-title").textContent = session.title || session.session_id;
           if (session.attention) {
             var badge = row.querySelector(".attention");

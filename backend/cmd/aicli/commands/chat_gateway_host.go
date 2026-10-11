@@ -51,12 +51,23 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	if st.Busy {
 		state = "running"
 	}
+	// Last-message summary for the gateway console session row (docs/gateway/
+	// 02-architecture.md §3.2 preview: truncated, provided at the local agent's
+	// discretion — it never leaves the machine un-truncated and contains no
+	// secrets beyond what the session itself already shows in its own web UI).
+	var preview string
+	if p := session.RuntimeSession.BuildPreview(); p != nil {
+		preview = strings.TrimSpace(p.Summary)
+	}
+	updatedAt := session.RuntimeSession.UpdatedAt
 	return []wire.SessionSummary{{
 		SessionID: id,
 		Title:     chatMeshSessionTitle(session),
 		State:     state,
 		Attention: st.Attention,
 		Busy:      st.Busy,
+		Preview:   preview,
+		UpdatedAt: updatedAt,
 	}}
 }
 
