@@ -10,18 +10,20 @@
 | 层 | 组件 | 位置 |
 |----|------|------|
 | 协议 | 帧编解码 + 控制消息 | `backend/internal/gateway/wire` |
-| 客户端 | 连接状态机 + 控制面 + WS 拨号 + 反向转发 | `backend/internal/gateway/agent` |
-| 服务端 | 隧道（握手/注册/心跳/注销）+ 注册表 + 反向代理 | `backend/internal/gateway/tunnel` |
+| 客户端 | 连接状态机 + 控制面 + WS 拨号 + 反向转发 + 流控 | `backend/internal/gateway/agent` |
+| 服务端 | 隧道（握手/注册/心跳/注销）+ 注册表 + 反向代理 + 流控 | `backend/internal/gateway/tunnel` |
 | 服务端 | owner 认证 | `backend/internal/gateway/auth` |
 | 服务端 | 设备令牌（含持久化） | `backend/internal/gateway/device` |
 | 服务端 | 限流 + 可信代理 + 惩罚封禁 | `backend/internal/gateway/ratelimit` |
 | 服务端 | 审计事件 | `backend/internal/gateway/audit` |
+| 服务端 | Prometheus `/metrics` + 实时 `/api/events` SSE | `backend/cmd/gateway` |
 | 服务端 | 二进制 + 轻量控制台（PWA） | `backend/cmd/gateway`（`console/`） |
 | 宿主 | aicli `/gateway` 命令 + 自动连接 + 转发目标 + 会话上报 | `backend/cmd/aicli/commands/chat_gateway_*.go`、`chat_mesh.go`、`cmd/aicli/main.go` |
 | 宿主 | runtime-server 控制 API + 启动装配 + 会话上报 | `backend/internal/api/runtimeapi/gateway_handlers.go`、`backend/cmd/runtime-server/gateway_bootstrap.go` |
 | 前端 | runtime-server "Gateway" 设置页 | `frontend/src/components/workspace/settings/gateway-settings-page.tsx`、`api/runtime/gateway.ts` |
 | 配置 | 分层 `gateway.*` + env 覆盖 | `backend/internal/agentconfig/config.go` |
 | base-path | aicli 微前端 + runtime-server SPA | `web_page.go`、`internal/webui/handler.go`、`frontend/vite.config.ts` |
+| 移动端 | 低带宽模式（微前端）+ 控制台 PWA | `web/js/ui.js`、`cmd/gateway/console/` |
 
 ---
 
@@ -155,11 +157,10 @@ cd frontend && npx tsc -b && npm run lint:i18n
 | 项 | 说明 |
 |----|------|
 | Web Push | 移动端后台通知（需推送服务 + VAPID + 订阅管理） |
-| 低带宽模式 | 微前端降级渲染（差分/节流/按需历史） |
-| 流控（WINDOW_UPDATE） | 当前隧道无信用窗口；慢消费者靠 TCP 背压 |
 | 注册表持久化 | 节点表为内存；重连即恢复（影响小） |
 | 多实例 HA | 隧道态单实例；注册表未外置 |
 | `runtime-server` 增量心跳 | 会话增删已推送；busy/attention 变化未推送 |
+| 低带宽模式深化 | 已隐藏图片并提供模式钩子；差分/节流/按需历史未接线 |
 | 微前端 base-path 的 query 透传 | `?session=` 深链已支持；更复杂的路由前缀透传未覆盖 |
 
 ---
@@ -169,3 +170,7 @@ cd frontend && npx tsc -b && npm run lint:i18n
 - 设备令牌持久化用 **JSON 文件**（`devices.json`）而非 SQLite（`gateway-registry.db`）——语义等价、依赖更少；SQLite 可作为后续替换。
 - 审计用 **JSONL 追加** 而非 SQLite 表。
 - 网关控制台为**轻量独立控制台**（`go:embed`，零构建），与 [07](./07-console.md) 一致。
+
+> 2026-10-11 补记：流控（WINDOW_UPDATE，1 MiB/流）、Prometheus `/metrics`、安全审计事件 + `/api/audit`、
+> 控制台实时 SSE（`/api/events`）、封禁管理 API、分层 `gateway.*` 配置、设备令牌持久化、
+> 会话增删增量推送、微前端低带宽模式均已实现并测试通过。
