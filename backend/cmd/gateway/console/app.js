@@ -59,6 +59,13 @@
     el("push-toggle").hidden = !authed;
     el("logout").hidden = !authed;
     el("logout-top").hidden = !authed;
+    // Two-screen layout: pre-auth = standalone login page (chrome hidden),
+    // authed = full workspace. The class also gates the chrome via CSS.
+    document.body.classList.toggle("login-mode", !authed);
+    if (!authed) {
+      closeSidebar();
+      el("password").focus();
+    }
   }
 
   /* ─────────────────────── hash router ───────────────────────── */

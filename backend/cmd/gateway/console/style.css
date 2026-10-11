@@ -87,6 +87,39 @@ body {
 
 .workspace { display: flex; min-height: 100vh; }
 
+/* Pre-auth: the login screen replaces the whole chrome. body.login-mode hides
+   every data-auth block; the login section itself is toggled by JS. */
+body.login-mode [data-auth] { display: none !important; }
+
+/* ── Standalone login screen ─────────────────────────────────── */
+
+.login-screen {
+  position: fixed; inset: 0; z-index: 30;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 22px;
+  padding: 24px;
+  background:
+    radial-gradient(900px 420px at 50% -10%, var(--accent-soft), transparent 65%),
+    var(--bg);
+}
+
+.login-hero { text-align: center; }
+.login-hero h1 { margin: 12px 0 2px; font-size: 24px; letter-spacing: 0.4px; }
+.login-sub { margin: 0; font-size: 13px; color: var(--fg-muted); }
+
+.login-mark { width: 52px; height: 52px; border-radius: 15px; display: inline-block; }
+
+.login-screen .login-card {
+  width: 100%; max-width: 380px;
+  margin: 0;
+}
+
+.login-foot {
+  font-size: 11.5px; color: var(--fg-faint);
+  max-width: 380px; text-align: center; margin: 0;
+}
+
 .sidebar {
   width: var(--sidebar-w);
   flex-shrink: 0;
@@ -403,11 +436,9 @@ form { display: flex; gap: 8px; margin-top: 10px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .modal-head h3 { margin: 0; font-size: 15px; }
 
-/* ── Login ───────────────────────────────────────────────────── */
+/* ── Login card (shared by the standalone login screen) ──────── */
 
-.login-view { display: flex; justify-content: center; padding-top: 8vh; }
 .login-card {
-  width: 100%; max-width: 380px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);

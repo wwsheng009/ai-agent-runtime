@@ -20,12 +20,12 @@
 })();
 </script>
 </head>
-<body>
+<body class="login-mode">
 
 <div class="workspace">
 
   <!-- ── 侧边导航 ─────────────────────────────────────────── -->
-  <aside class="sidebar" id="sidebar">
+  <aside class="sidebar" id="sidebar" data-auth>
     <div class="sidebar-brand">
       <span class="brand-mark" aria-hidden="true"></span>
       <div class="brand-text">
@@ -60,7 +60,7 @@
   <!-- ── 主区 ─────────────────────────────────────────────── -->
   <div class="workspace-main">
 
-    <header class="topbar">
+    <header class="topbar" data-auth>
       <button id="nav-toggle" type="button" class="btn ghost sm nav-toggle" aria-label="打开导航">☰</button>
       <h2 class="view-title" id="view-title">仪表盘</h2>
       <div class="topbar-actions">
@@ -72,19 +72,6 @@
     </header>
 
     <main class="views">
-
-      <!-- 登录 -->
-      <section id="login" class="view login-view" hidden>
-        <div class="login-card">
-          <h2>Owner 登录</h2>
-          <p class="login-hint">输入网关启动时设置的 owner 密码以管理节点、会话与通知。</p>
-          <form id="login-form">
-            <input id="password" type="password" placeholder="Owner 密码" autocomplete="current-password">
-            <button type="submit" class="btn primary">登录</button>
-          </form>
-          <p id="login-error" class="error" hidden></p>
-        </div>
-      </section>
 
       <div id="app" class="app-views" hidden>
 
@@ -180,6 +167,25 @@
     </main>
   </div>
 </div>
+
+<!-- ── 登录页（独立入口屏，登录前替代整个工作区） ────────── -->
+<section id="login" class="login-screen" hidden>
+  <div class="login-hero">
+    <span class="brand-mark login-mark" aria-hidden="true"></span>
+    <h1>aicli-gateway</h1>
+    <p class="login-sub">会话网关控制台</p>
+  </div>
+  <div class="login-card">
+    <h2>Owner 登录</h2>
+    <p class="login-hint">输入网关启动时设置的 owner 密码以管理节点、会话与通知。</p>
+    <form id="login-form">
+      <input id="password" type="password" placeholder="Owner 密码" autocomplete="current-password">
+      <button type="submit" class="btn primary">登录</button>
+    </form>
+    <p id="login-error" class="error" hidden></p>
+  </div>
+  <p class="login-foot">登录即表示你同意在该网关上管理本机的 aicli / runtime-server 会话。</p>
+</section>
 
 <!-- 令牌签发模态 -->
 <div class="modal-scrim" id="token-modal" hidden>
