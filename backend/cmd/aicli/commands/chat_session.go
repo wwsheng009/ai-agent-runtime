@@ -1532,10 +1532,19 @@ func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt, pla
 	} else {
 		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.OutputTokenCount, chatRuntimeContextOutputTokenCount)
 	}
-	if session.ContextTokenCount > 0 {
-		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, session.ContextTokenCount, chatRuntimeContextContextTokenCount)
-	} else {
-		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, chatRuntimeContextContextTokenCount)
+	// The context anchor is owned by the ReAct loop (written per LLM call with
+	// prompt identity). session.ContextTokenCount is a display value (provider
+	// total or a local estimate); writing it back would clobber the anchor —
+	// observed 2026-10-11: the CLI sync replaced the precise InputTotal anchor
+	// (24,523) with the display total (24,559), and a session without provider
+	// usage would replace it with an estimate. Legacy sessions without a
+	// structured anchor keep the historical write-back.
+	if !runtimechat.HasRuntimeSessionContextAnchor(runtimeSession) {
+		if session.ContextTokenCount > 0 {
+			sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, session.ContextTokenCount, chatRuntimeContextContextTokenCount)
+		} else {
+			sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, chatRuntimeContextContextTokenCount)
+		}
 	}
 	if session.ContextWindowTokenCount > 0 {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextWindowCount, session.ContextWindowTokenCount, chatRuntimeContextContextWindowTokenCount)

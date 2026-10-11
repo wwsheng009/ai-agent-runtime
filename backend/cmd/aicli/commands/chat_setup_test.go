@@ -736,6 +736,82 @@ func TestSyncAndRestoreChatTokenCountRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSyncRuntimeSessionFromChatPreservesLoopContextAnchor pins the 2026-10-11
+// verification finding: the CLI post-turn sync must not clobber the
+// loop-written structured context anchor (prompt identity present) with the
+// display-oriented ContextTokenCount, while legacy sessions without a
+// structured anchor keep the historical write-back.
+func TestSyncRuntimeSessionFromChatPreservesLoopContextAnchor(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	if runtimeSession.Metadata.Context == nil {
+		runtimeSession.Metadata.Context = make(map[string]interface{})
+	}
+	// Simulate the loop-written anchor: provider InputTotal + prompt identity.
+	runtimeSession.Metadata.Context["aicli_context_token_fingerprint"] = "fp-loop-anchor"
+	runtimeSession.Metadata.Context[chatRuntimeContextContextTokenCount] = 24523
+
+	session := &ChatSession{
+		ProviderName:      "codex_ee",
+		Provider:          config.Provider{Protocol: "codex"},
+		Config:            &config.Config{ConfigFilePath: filepath.Join(t.TempDir(), "config.yaml")},
+		Model:             "gpt-5.2-code",
+		SessionManager:    manager,
+		RuntimeSession:    runtimeSession,
+		ContextTokenCount: 24559, // display total; must NOT overwrite the anchor
+		Messages: []runtimetypes.Message{
+			*runtimetypes.NewUserMessage("hello"),
+			*runtimetypes.NewAssistantMessage("world"),
+		},
+	}
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		t.Fatalf("syncRuntimeSessionFromChat: %v", err)
+	}
+	cloned, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextContextTokenCount); !ok || got != 24523 {
+		t.Fatalf("loop anchor must survive the CLI sync, got ok=%v value=%d", ok, got)
+	}
+
+	// Legacy sessions without a structured anchor keep the historical write-back.
+	legacy, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create(legacy): %v", err)
+	}
+	legacySession := &ChatSession{
+		ProviderName:      "codex_ee",
+		Provider:          config.Provider{Protocol: "codex"},
+		Config:            &config.Config{ConfigFilePath: filepath.Join(t.TempDir(), "config.yaml")},
+		Model:             "gpt-5.2-code",
+		SessionManager:    manager,
+		RuntimeSession:    legacy,
+		ContextTokenCount: 321,
+		Messages: []runtimetypes.Message{
+			*runtimetypes.NewUserMessage("hello"),
+		},
+	}
+	if err := syncRuntimeSessionFromChat(legacySession); err != nil {
+		t.Fatalf("syncRuntimeSessionFromChat(legacy): %v", err)
+	}
+	clonedLegacy, err := manager.Get(context.Background(), legacy.ID)
+	if err != nil {
+		t.Fatalf("manager.Get(legacy): %v", err)
+	}
+	if got, ok := runtimeSessionContextInt(clonedLegacy, chatRuntimeContextContextTokenCount); !ok || got != 321 {
+		t.Fatalf("legacy sessions must keep the write-back, got ok=%v value=%d", ok, got)
+	}
+}
+
 func TestRestoreChatStateFromRuntimeSessionClearsMissingTokenCount(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.AddMessage(*runtimetypes.NewUserMessage("hello"))

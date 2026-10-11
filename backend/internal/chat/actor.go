@@ -2237,6 +2237,24 @@ func loadRuntimeSessionContextObservation(session *Session) (contextledger.Obser
 	return observation, true
 }
 
+// RuntimeContextAnchorFingerprintKey marks a structured, loop-written context
+// anchor in the runtime session context (see
+// storeRuntimeSessionContextObservation).
+const RuntimeContextAnchorFingerprintKey = aicliRuntimeContextTokenFingerprintKey
+
+// HasRuntimeSessionContextAnchor reports whether the runtime session carries a
+// structured context anchor written per LLM call by the ReAct loop. Hosts that
+// sync a display-oriented context size back into the session (the CLI session
+// snapshot) must not clobber the anchor: it is prompt-identity verified while
+// the display value may be a provider total or a local estimate.
+func HasRuntimeSessionContextAnchor(session *Session) bool {
+	if session == nil || session.Metadata.Context == nil {
+		return false
+	}
+	_, ok := session.Metadata.Context[aicliRuntimeContextTokenFingerprintKey]
+	return ok
+}
+
 // runtimeSessionActiveContextTokens returns the pre-turn context measurement.
 // It uses the same anchored projection as the ReAct loop: provider anchor +
 // estimated delta, floored by the local full estimate. Legacy token-count-only
