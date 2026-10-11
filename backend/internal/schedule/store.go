@@ -121,6 +121,22 @@ CREATE TABLE IF NOT EXISTS schedule_delivery_history (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_history_task_seq ON schedule_delivery_history(schedule_id, seq);
 `,
+	}, {
+		Version: 2,
+		Name:    "schedule_pending_messages",
+		UpSQL: `
+CREATE TABLE IF NOT EXISTS schedule_pending_messages (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id  TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    prompt       TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    consumed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_pending_session
+ON schedule_pending_messages(session_id, consumed_at);
+`,
 	}}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -473,4 +489,59 @@ func (s *SQLiteStore) FindHistorySeqByMessage(id, messageID string) (int64, bool
 		return 0, false, err
 	}
 	return seq, true, nil
+}
+
+// PendingMessage 是一次投递失败后落库的兜底消息（宿主恢复后消费）。
+type PendingMessage struct {
+	ID         int64
+	ScheduleID string
+	SessionID  string
+	Prompt     string
+	Reason     string
+	CreatedAt  time.Time
+}
+
+// AppendPendingMessage 落库一条兜底消息。
+func (s *SQLiteStore) AppendPendingMessage(scheduleID, sessionID, prompt, reason string, now time.Time) error {
+	_, err := s.db.Exec(`
+INSERT INTO schedule_pending_messages (schedule_id, session_id, prompt, reason, created_at)
+VALUES (?, ?, ?, ?, ?)`,
+		scheduleID, sessionID, prompt, reason, formatInstant(now))
+	if err != nil {
+		return fmt.Errorf("append pending message: %w", err)
+	}
+	return nil
+}
+
+// ListPendingMessages 返回某会话未消费的兜底消息（旧到新）。
+func (s *SQLiteStore) ListPendingMessages(sessionID string, limit int) ([]PendingMessage, error) {
+	rows, err := s.db.Query(`
+SELECT id, schedule_id, session_id, prompt, reason, created_at
+FROM schedule_pending_messages
+WHERE session_id = ? AND consumed_at IS NULL
+ORDER BY id ASC LIMIT ?`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := []PendingMessage{}
+	for rows.Next() {
+		var message PendingMessage
+		var createdRaw string
+		if err := rows.Scan(&message.ID, &message.ScheduleID, &message.SessionID, &message.Prompt,
+			&message.Reason, &createdRaw); err != nil {
+			return nil, err
+		}
+		message.CreatedAt, _ = parseInstant(createdRaw)
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
+// MarkPendingMessageConsumed 标记一条兜底消息已消费。
+func (s *SQLiteStore) MarkPendingMessageConsumed(id int64, now time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE schedule_pending_messages SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`,
+		formatInstant(now), id)
+	return err
 }

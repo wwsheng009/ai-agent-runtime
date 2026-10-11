@@ -67,7 +67,9 @@ type RuntimeOptions struct {
 	Clock       Clock
 	Deliverer   Deliverer
 	MaxAttempts int
-	Logf        func(format string, args ...any)
+	// FallbackToMailbox 落持久兜底消息（宿主恢复后消费）；默认 true。
+	FallbackToMailbox bool
+	Logf              func(format string, args ...any)
 }
 
 // Runtime 拥有至多一个定时器，负责启动扫描、到期投递与重试退避。
@@ -102,8 +104,8 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 }
 
 // Start 启动：立即驱动一次（含启动扫描），随后按最近目标排定定时器。
-func (r *Runtime) Start(ctx context.Context) {
-	_ = ctx
+// ctx 目前未使用（保留签名以便后续接取消）。
+func (r *Runtime) Start(_ context.Context) {
 	r.RequestDrive()
 }
 
@@ -212,6 +214,15 @@ func (r *Runtime) drive() {
 			for _, member := range group {
 				r.markFailed(member.Record.ID, now)
 			}
+			// 兜底（存储文档 §4.3 / 守护进程文档 D1）：失败即落持久 pending
+			// 消息，宿主恢复后消费——宿主离线时消息不丢。
+			if r.opts.FallbackToMailbox {
+				for _, member := range group {
+					if err := r.appendPending(member, deliverErr, now); err != nil {
+						r.opts.Logf("schedule: append pending for %s: %v", member.Record.ID, err)
+					}
+				}
+			}
 			r.opts.Logf("schedule: reminders %v were not delivered: %v", groupIDs(group), deliverErr)
 			continue
 		}
@@ -259,6 +270,49 @@ func (r *Runtime) markFailed(id string, now time.Time) {
 		backoff = 10 * time.Minute
 	}
 	r.failedUntil[id] = now.Add(backoff)
+}
+
+// appendPending 把一次失败的投递落成持久兜底消息（`schedule_pending_messages`）。
+func (r *Runtime) appendPending(task Task, deliverErr error, now time.Time) error {
+	sqlStore, ok := r.opts.Store.(*SQLiteStore)
+	if !ok {
+		return nil
+	}
+	return sqlStore.AppendPendingMessage(task.Record.ID, task.SessionID, task.Record.Prompt,
+		fmt.Sprintf("delivery failed: %v", deliverErr), now)
+}
+
+// DrainPendingMessages 消费某会话的兜底消息：逐条尝试投递，成功即标记消费。
+// 宿主启动/会话激活时调用；返回消费条数。
+func (r *Runtime) DrainPendingMessages(ctx context.Context, sessionID string, limit int) (int, error) {
+	sqlStore, ok := r.opts.Store.(*SQLiteStore)
+	if !ok {
+		return 0, nil
+	}
+	messages, err := sqlStore.ListPendingMessages(sessionID, limit)
+	if err != nil {
+		return 0, err
+	}
+	consumed := 0
+	now := r.opts.Clock()
+	for _, message := range messages {
+		if err := ctx.Err(); err != nil {
+			return consumed, err
+		}
+		deliverCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		deliverErr := r.opts.Deliverer.Deliver(deliverCtx, message.SessionID, message.Prompt)
+		cancel()
+		if deliverErr != nil {
+			r.opts.Logf("schedule: pending %d redelivery failed: %v", message.ID, deliverErr)
+			continue
+		}
+		if err := sqlStore.MarkPendingMessageConsumed(message.ID, now); err != nil {
+			r.opts.Logf("schedule: mark pending %d consumed: %v", message.ID, err)
+			continue
+		}
+		consumed++
+	}
+	return consumed, nil
 }
 
 func (r *Runtime) commit(task Task, now time.Time) {

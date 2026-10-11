@@ -41,6 +41,11 @@ func run(args []string) error {
 		return err
 	}
 
+	// 服务管理子命令（需管理员）：install/uninstall/start/stop/status。
+	if fs.NArg() > 0 {
+		return runServiceCommand(fs.Arg(0))
+	}
+
 	cfg := config.DefaultScheduleConfig()
 	if strings.TrimSpace(*configPath) != "" {
 		manager := config.NewRuntimeManager(*configPath)
@@ -72,15 +77,43 @@ func run(args []string) error {
 	service := schedule.NewService(store, schedule.SystemClock)
 	deliverer := &schedule.HTTPDeliverer{BaseURL: cfg.Execution.RuntimeServerURL}
 	runtime := schedule.NewRuntime(schedule.RuntimeOptions{
-		Store:       store,
-		Service:     service,
-		Deliverer:   deliverer,
-		MaxAttempts: cfg.MaxDeliveryAttempts,
-		Logf:        func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+		Store:             store,
+		Service:           service,
+		Deliverer:         deliverer,
+		MaxAttempts:       cfg.MaxDeliveryAttempts,
+		FallbackToMailbox: cfg.Execution.FallbackToMailbox,
+		Logf:              func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	})
 
 	release := acquireSchedulerLease()
 	defer release()
+
+	// D3：loopback 运维端点（127.0.0.1:8919）。
+	status := &statusServer{
+		store:         store,
+		mode:          cfg.Execution.Mode,
+		runtimeServer: cfg.Execution.RuntimeServerURL,
+		startedAt:     time.Now(),
+	}
+	stopStatus, err := status.Serve(8919)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scheduled: warning: status endpoint unavailable: %v\n", err)
+	} else {
+		defer stopStatus()
+	}
+
+	// Windows 服务模式：由 SCM 启动时改走服务循环（不装 signal handler）。
+	if err := runAsWindowsService(func(stop <-chan struct{}) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		runtime.Start(ctx)
+		<-stop
+		runtime.Stop()
+	}); err == nil {
+		return nil
+	} else if err != errNotService {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -91,6 +124,27 @@ func run(args []string) error {
 	<-ctx.Done()
 	runtime.Stop()
 	return nil
+}
+
+// runServiceCommand 处理 install/uninstall/start/stop/status；
+// 无参数时是普通前台运行。服务模式（SCM 启动）由 runAsWindowsService 检测。
+func runServiceCommand(command string) error {
+	executable, _ := os.Executable()
+	switch command {
+	case "install":
+		return installWindowsService(executable)
+	case "uninstall":
+		return uninstallWindowsService()
+	case "start", "stop", "status":
+		status, err := controlWindowsService(command)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, status)
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q (supported: install, uninstall, start, stop, status)", command)
+	}
 }
 
 func resolveStorePath(flagStore, flagDataDir string, cfg config.ScheduleConfig) (string, error) {
