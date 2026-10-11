@@ -273,7 +273,8 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 	// 目前唯一：/title <text>（next-turn）——Phase A 仅写会话元数据，下一回合由
 	// 会话字段直接承载，无需 actor 重建（G.12）。
 	auditedInlineWrites := map[string]string{
-		"/title": "next-turn：Phase A 写 Metadata.Title，下一回合读取",
+		"/title":   "next-turn：Phase A 写 Metadata.Title，下一回合读取",
+		"/gateway": "live：connect/disconnect/reconnect 仅改网关隧道状态，不触碰 turn/会话上下文，忙时可即时执行（docs/gateway/12-connection-control.md）",
 	}
 
 	for name, entry := range runtimeCommandRegistry {

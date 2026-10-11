@@ -488,6 +488,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/shell", forms: []string{"/shell", "/cmd"}, acceptsArgs: true, requiresArgs: true},
 		{canonical: "/usage", forms: []string{"/usage"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/hotkeys", forms: []string{"/hotkeys"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/gateway", forms: []string{"/gateway"}, acceptsArgs: true, requiresArgs: false},
 	}
 
 	sourceRoutes := extractHandleCommandRouteSet(t)

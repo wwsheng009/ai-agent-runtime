@@ -25,6 +25,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
+	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
@@ -102,8 +103,11 @@ type ChatSession struct {
 	// 从下一个 turn 生效：buildLocalChatAgent 构造运行时配置副本时应用它，
 	// 工具面据此决定是否走语义通道。绝不写回全局配置。
 	KnowledgeLSPModeOverride string
-	HTTPDebug                bool
-	Stream                   bool
+	// Gateway 是本会话的网关连接控制面（docs/gateway/12-connection-control.md）。
+	// nil 表示本会话未接入网关；/gateway 命令据此给出明确提示而不是失败。
+	Gateway   *gatewayagent.Controller
+	HTTPDebug bool
+	Stream    bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
 	FastMode bool
 	BaseURL  string

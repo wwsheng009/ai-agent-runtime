@@ -213,6 +213,13 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		_ = renderChatCommandResult(session, executeStructuredWebCommand(session, command), false)
 		return false
 	}
+	if commandMatches(cmdLower, "/gateway") {
+		// /gateway 是结构化命令：非 JSON 模式由 dispatchChatCommand 提前认领；
+		// 这里为 JSON 输出保留同一份命令单元的渲染路径，不引入新的原始终端写入。
+		result, _ := executeStructuredGatewayCommand(session, command)
+		_ = renderChatCommandResult(session, result, false)
+		return false
+	}
 	if commandMatches(cmdLower, "/sessions") {
 		filter := session.SessionFilter
 		filter.Query = strings.TrimSpace(extractCommandArgument(command))

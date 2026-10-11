@@ -59,6 +59,21 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			AcceptsArgs: true,
 		},
 		{
+			Name:        "/gateway",
+			Usage:       "/gateway [status|connect|disconnect|reconnect|url|help]",
+			Summary:     "外网会话网关：查看状态 / 手动连接 / 断开 / 重连（见 docs/gateway/12-connection-control.md）",
+			Group:       string(chatSlashCommandGroupWeb),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "status", Summary: "显示连接状态（默认）"},
+				{Token: "connect", Summary: "手动连接网关"},
+				{Token: "disconnect", Summary: "手动断开（抑制自动重连，不改配置）"},
+				{Token: "reconnect", Summary: "断开后立即重连"},
+				{Token: "url", Summary: "显示网关注册/控制台地址"},
+				{Token: "help", Summary: "显示帮助"},
+			},
+		},
+		{
 			Name:        "/exit",
 			Aliases:     []string{"/quit", "/q"},
 			Usage:       "/exit",

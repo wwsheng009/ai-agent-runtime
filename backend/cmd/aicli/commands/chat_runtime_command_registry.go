@@ -485,6 +485,17 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"open":      rtSpec("/web", categoryDiagnostics, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")),
 		},
 	},
+	"/gateway": {
+		Bare: rtBare(rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead)),
+		Variants: map[string]runtimeCommandSpec{
+			"status":     rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
+			"url":        rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
+			"help":       rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
+			"connect":    rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectLive, rtNotice("立即连接网关")),
+			"disconnect": rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectLive, rtNotice("立即断开，抑制自动重连（不改配置）")),
+			"reconnect":  rtSpec("/gateway", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectLive, rtNotice("立即重连网关")),
+		},
+	},
 
 	// C10 输出与外观
 	"/stream": {

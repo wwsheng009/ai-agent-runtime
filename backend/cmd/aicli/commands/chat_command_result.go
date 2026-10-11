@@ -200,6 +200,14 @@ func (r CommandResult) Document() render.Document {
 // legacy stdout handler.
 func tryExecuteStructuredChatCommand(session *ChatSession, command string) (CommandResult, bool, error) {
 	cmdLower := strings.ToLower(strings.TrimSpace(command))
+	// /gateway is claimed unconditionally: it has no legacy handler and must be
+	// recognized in every output mode (docs/gateway/12-connection-control.md).
+	if commandMatches(cmdLower, "/gateway") {
+		result, handled := executeStructuredGatewayCommand(session, command)
+		if handled {
+			return result, true, nil
+		}
+	}
 	// /provider and /model are fully migrated: status is a finite read-only
 	// report, bare /provider opens the typed provider→model→reasoning picker,
 	// bare /model opens the model-only picker, and explicit mutations apply
