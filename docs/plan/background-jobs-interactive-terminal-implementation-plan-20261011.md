@@ -734,3 +734,36 @@ ConPTY 是 Windows 上唯一的官方伪终端 API，没有功能等价的替代
 ### 结论
 
 **方案全部条目（P0/P1/P2 + 四项决策 + 专项验证）已实施并验证完毕**；遗留 5 项均为后续独立工作，不影响本方案验收。
+
+---
+
+## 遗留项处理记录（2026-10-11，`dbd6bdc7`）
+
+| 遗留项 | 处理 | 结论 |
+|---|---|---|
+| 1. 跨进程 `job_ref_*` 别名陈旧 | 代码审查确认：`WriteStdin` 已有 `owner_instance` 守卫（`ErrSessionNotLocal`）与无句柄时的 `ErrSessionNotAvailable`，均为可操作错误 + next_action。E2E 观察到的行为**符合设计**（拒绝跨实例驱动），无需改码 | ✅ 按设计工作，关闭 |
+| 3. 前端「发送输入」UI | jobs 面板：`interactive && live` 行渲染输入框（独立于输出展开态）；提交经 `controller.writeInput`（自动补 `\r` 适配 ConPTY 行规程），返回的 exchange 回显追加到输出窗口；zh/en i18n；2 个新测试（渲染门控、提交契约 + React native-setter 输入事件） | ✅ 完成 |
+| 4. Unix ptmx 真机运行期验证 | **WSL2 Ubuntu**（6.18 microsoft-standard）实跑：`internal/pty` round-trip PASS（`/bin/sh -c echo` 经 /dev/ptmx，exit 0 + 输出断言）+ `internal/background` 全部 6 个交互用例 PASS（roundtrip/reuse/no-dispatch/metrics/clean/restart-orphan） | ✅ 完成（bench 文件补 windows build tag 使 Linux 套件可编译） |
+
+剩余遗留（需真机/独立立项，维持原判）：
+
+- **沙箱决策 B**（交互会话接沙箱编排）：维持 D1=A。
+- **终端 E2E L3 层 ConPTY 化改造**：可行性已验证（isatty 语义），改造单独立项。
+
+### Linux 上 ConPTY 的替代项（问题答复，已落实为现状）
+
+Linux/Unix **没有也不需要 ConPTY 的等价 API——ptmx 本身就是原生机制**，且优于 ConPTY：
+
+| 维度 | Linux ptmx（`internal/pty/pty_linux.go` 现状） | Windows ConPTY |
+|---|---|---|
+| 内核机制 | `/dev/ptmx` + `/dev/pts/N`（内核原生，`openpty` 语义） | 用户态 conhost 进程桥接 |
+| 额外进程 | **无**（无 conhost 等价物） | 每会话 +1 conhost |
+| 性能 | 零额外开销（syscall 直通） | +12% 生命周期固定成本（实测） |
+| isatty | 天然 true | 通过伪控制台模拟 |
+| resize | `TIOCSWINSZ` ioctl | `ResizePseudoConsole` |
+| 依赖 | 零第三方库（`x/sys/unix`） | `x/sys/windows` |
+| Win7 等价问题 | 无（所有 Linux 内核都有 ptmx） | Win10 1809+ 才有，Win7 降级管道 |
+
+实现细节：`Setsid + Setctty` 使子进程成为会话首进程并拥有控制终端（Codex 同款语义）；`TIOCSPTLCK=0` 解锁 pts（等价 `unlockpt`）；`TIOCGPTN` 取 pts 编号（等价 `ptsname`）。第三方 Go 库（creack/pty、go-pty）只是这些 syscall 的封装，不提供额外能力——本方案的零依赖实现与其行为一致，已由 WSL2 实测验证。
+
+**结论**：Linux 上 ptmx 即"原生 ConPTY"，本方案已在 `internal/pty` 双平台等价实现并均经真机验证（Windows 11 实机 + WSL2 Ubuntu）。
