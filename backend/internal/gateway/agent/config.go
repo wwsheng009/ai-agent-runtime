@@ -13,6 +13,7 @@ const (
 	EnvToken       = "AICLI_GATEWAY_TOKEN"
 	EnvName        = "AICLI_GATEWAY_NAME"
 	EnvAutoConnect = "AICLI_GATEWAY_AUTO_CONNECT"
+	EnvProxyURL    = "AICLI_GATEWAY_PROXY_URL"
 )
 
 // ConfigFromEnv resolves the gateway configuration from environment variables.
@@ -34,6 +35,7 @@ func ConfigFromEnv(getenv func(string) string) Config {
 		Token:       token,
 		Name:        strings.TrimSpace(getenv(EnvName)),
 		AutoConnect: auto,
+		ProxyURL:    strings.TrimSpace(getenv(EnvProxyURL)),
 	}
 }
 
@@ -55,6 +57,10 @@ type Config struct {
 	AutoConnect bool `json:"auto_connect"`
 	// Routes overrides the default reverse-proxy route allowlist (advanced).
 	Routes []string `json:"routes,omitempty"`
+	// ProxyURL, when set, tunnels the agent→gateway connection through an HTTP
+	// CONNECT or SOCKS5 proxy (e.g. socks5://127.0.0.1:1080). Applies only to
+	// the tunnel; reverse-proxy traffic to the local loopback is unaffected.
+	ProxyURL string `json:"proxy_url,omitempty"`
 }
 
 // Mode values reported by Status.Mode.

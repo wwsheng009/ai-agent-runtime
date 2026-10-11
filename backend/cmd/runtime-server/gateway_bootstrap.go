@@ -53,6 +53,7 @@ func runtimeServerGatewayResolveConfig(cfg *config.Config) gatewayagent.Config {
 		out.URL = strings.TrimSpace(gatewayCfg.URL)
 		out.Token = strings.TrimSpace(gatewayCfg.Token)
 		out.Name = strings.TrimSpace(gatewayCfg.Name)
+		out.ProxyURL = strings.TrimSpace(gatewayCfg.ProxyURL)
 		if gatewayCfg.AutoConnect != nil {
 			out.AutoConnect = *gatewayCfg.AutoConnect
 		}
@@ -68,6 +69,9 @@ func runtimeServerGatewayResolveConfig(cfg *config.Config) gatewayagent.Config {
 	}
 	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvAutoConnect)); v != "" {
 		out.AutoConnect = !strings.EqualFold(v, "false") && v != "0"
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvProxyURL)); v != "" {
+		out.ProxyURL = v
 	}
 	out.Enabled = out.URL != "" && out.Token != ""
 	return out

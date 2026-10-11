@@ -68,6 +68,9 @@ type GatewayConfig struct {
 	// an explicit false.
 	AutoConnect *bool    `yaml:"auto_connect" mapstructure:"auto_connect"`
 	Routes      []string `yaml:"routes" mapstructure:"routes"`
+	// ProxyURL tunnels the agent→gateway connection through an HTTP CONNECT or
+	// SOCKS5 proxy (e.g. socks5://127.0.0.1:1080). Optional; empty = direct.
+	ProxyURL string `yaml:"proxy_url" mapstructure:"proxy_url"`
 }
 
 // ProvidersConfig holds the provider collection configuration.

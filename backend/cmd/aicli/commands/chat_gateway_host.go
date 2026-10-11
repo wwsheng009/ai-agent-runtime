@@ -108,6 +108,7 @@ func chatGatewayResolveConfig(session *ChatSession) gatewayagent.Config {
 		cfg.URL = strings.TrimSpace(gatewayCfg.URL)
 		cfg.Token = strings.TrimSpace(gatewayCfg.Token)
 		cfg.Name = strings.TrimSpace(gatewayCfg.Name)
+		cfg.ProxyURL = strings.TrimSpace(gatewayCfg.ProxyURL)
 		if gatewayCfg.AutoConnect != nil {
 			cfg.AutoConnect = *gatewayCfg.AutoConnect
 		}
@@ -120,6 +121,9 @@ func chatGatewayResolveConfig(session *ChatSession) gatewayagent.Config {
 	}
 	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvName)); v != "" {
 		cfg.Name = v
+	}
+	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvProxyURL)); v != "" {
+		cfg.ProxyURL = v
 	}
 	if v := strings.TrimSpace(os.Getenv(gatewayagent.EnvAutoConnect)); v != "" {
 		cfg.AutoConnect = !strings.EqualFold(v, "false") && v != "0"

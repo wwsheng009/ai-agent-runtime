@@ -34,7 +34,7 @@ type WSConnector struct {
 	// Register supplies the REGISTER payload. Required.
 	Register RegisterFunc
 	// Dialer overrides the WebSocket dialer (tests use it to shorten timeouts).
-	Dialer *websocket.Dialer
+	Dialer *websocket.Dialer // deprecated: use Config.ProxyURL
 	// HeartbeatInterval overrides the default heartbeat cadence. WELCOME may
 	// still shorten it.
 	HeartbeatInterval time.Duration
@@ -68,9 +68,9 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.Token))
 
-	dialer := c.Dialer
-	if dialer == nil {
-		dialer = websocket.DefaultDialer
+	dialer, derr := websocketDialer(cfg)
+	if derr != nil {
+		return nil, &ConnectError{Code: ErrCodeConfigInvalid, Message: "proxy config invalid: " + derr.Error(), Retryable: false}
 	}
 	ws, resp, err := dialer.DialContext(ctx, endpoint, header)
 	if err != nil {
