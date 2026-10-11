@@ -863,6 +863,19 @@ func (c *UIController) Geometry() GeometryState {
 }
 
 // Stats 返回一致的诊断快照。
+// IsClosed 以短临界区报告 controller 是否已关闭。供重试循环使用：完整
+// Stats() 每次要拷贝两份 256 元素样本环并排序（P1-8），满邮箱自旋场景下
+// 逐轮调用会把诊断成本变成热点。
+func (c *UIController) IsClosed() bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	return closed
+}
+
 func (c *UIController) Stats() ControllerStats {
 	if c == nil {
 		return ControllerStats{}

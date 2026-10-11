@@ -488,7 +488,7 @@ func (c *chatInteractionCoordinator) postPromptInputAction(action ui.InputEvent)
 		c.clearPromptInputDispatchThrough(action.Sequence)
 		return true
 	}
-	if actor.Stats().Closed {
+	if actor.IsClosed() {
 		return false
 	}
 
@@ -587,7 +587,7 @@ func (c *chatInteractionCoordinator) flushPromptInputDispatch(actor *ui.UIContro
 			c.clearPromptInputDispatchThrough(action.Sequence)
 			continue
 		}
-		if actor.Stats().Closed {
+		if actor.IsClosed() {
 			c.promptInputDispatchMu.Lock()
 			c.promptInputDispatchPending = nil
 			c.promptInputDispatchMu.Unlock()
@@ -640,7 +640,7 @@ func (c *chatInteractionCoordinator) postPromptEditorStatusAction(actor *ui.UICo
 		c.clearPromptEditorStatusDispatch(action)
 		return true
 	}
-	if actor.Stats().Closed {
+	if actor.IsClosed() {
 		return false
 	}
 	c.promptEditorStatusDispatchMu.Lock()
@@ -712,7 +712,7 @@ func (c *chatInteractionCoordinator) flushPromptEditorStatusDispatch(actor *ui.U
 			c.clearPromptEditorStatusDispatch(action)
 			continue
 		}
-		if actor.Stats().Closed {
+		if actor.IsClosed() {
 			c.promptEditorStatusDispatchMu.Lock()
 			c.promptEditorStatusDispatchPending = nil
 			c.promptEditorStatusDispatchMu.Unlock()

@@ -63,6 +63,11 @@ type chatRuntimeEventBridge struct {
 	// admission. Zero falls back to uiActionPostBudget; tests may shorten it
 	// to exercise the stall path without sleeping for the full budget.
 	uiActionPostTimeout time.Duration
+	// P1-10：迟到/被拒事件的 debug 落盘限频状态。payload json.Marshal +
+	// 同步 debug 文件写在事件洪峰（turn 边界错乱/子代理风暴/邮箱停滞）下
+	// 会放大停滞；限频为每秒至多一条，被限流条目计入 suppressed_total。
+	lateDebugLastWriteNano   atomic.Int64
+	lateDebugSuppressedTotal atomic.Uint64
 	// streamMu guards the single ordered backlog shared by every event family:
 	// streaming deltas, coalescible latest-wins events and ordered/critical
 	// events all retain FIFO order here, and nothing may bypass a non-empty
@@ -3155,7 +3160,7 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 			return false, false
 		}
 		actor := coordinator.currentUIActor()
-		if actor == nil || actor.Stats().Closed {
+		if actor == nil || actor.IsClosed() {
 			return false, false
 		}
 		// A bounded mailbox is normal backpressure, but waiting for it must
@@ -4886,17 +4891,41 @@ func (b *chatRuntimeEventBridge) publishRenderFenceDrops(turnID string) {
 	})
 }
 
-func (b *chatRuntimeEventBridge) writeLateRuntimeDebug(event runtimeevents.Event, reason string) {
+// chatLateDebugWriteInterval 限频 P1-10：迟到/被拒事件 debug 落盘每秒至多一条。
+const chatLateDebugWriteInterval = time.Second
+
+// writeLateRuntimeDebugThrottled 是 payload marshal + 同步 debug 写的限频闸门：
+// 每秒放行至多一条，被限流条目只累计计数（suppressed_total 随放行条目可见）。
+// 调用方必须把 marshal 移到本闸门之后，避免被拒事件仍付出序列化成本。
+func (b *chatRuntimeEventBridge) writeLateRuntimeDebugThrottled(event runtimeevents.Event, message string) {
 	if b == nil || b.session == nil {
 		return
+	}
+	now := time.Now().UnixNano()
+	for {
+		last := b.lateDebugLastWriteNano.Load()
+		if last != 0 && now-last < int64(chatLateDebugWriteInterval) {
+			b.lateDebugSuppressedTotal.Add(1)
+			return
+		}
+		if b.lateDebugLastWriteNano.CompareAndSwap(last, now) {
+			break
+		}
 	}
 	payload, _ := json.Marshal(event.Payload)
 	writeSessionDebugInfo(
 		b.session,
-		fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q current_run_epoch=%d run_active=%t payload=%s",
-			reason, event.Type, event.SessionID, event.TraceID, b.currentRunEpoch(), b.isRunActive(), payload),
+		fmt.Sprintf("%s suppressed_total=%d payload=%s", message, b.lateDebugSuppressedTotal.Load(), payload),
 		false,
 	)
+}
+
+func (b *chatRuntimeEventBridge) writeLateRuntimeDebug(event runtimeevents.Event, reason string) {
+	if b == nil || b.session == nil {
+		return
+	}
+	b.writeLateRuntimeDebugThrottled(event, fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q current_run_epoch=%d run_active=%t",
+		reason, event.Type, event.SessionID, event.TraceID, b.currentRunEpoch(), b.isRunActive()))
 }
 
 // currentRunEpoch reports the bridge's current run epoch (0 when no run has
@@ -5570,13 +5599,10 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			// adding any signal.
 			return
 		}
-		payload, _ := json.Marshal(event.Payload)
-		writeSessionDebugInfo(
-			b.session,
-			fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q payload=%s",
-				"event turn does not match active run", event.Type, event.SessionID, event.TraceID, payload),
-			false,
-		)
+		// P1-10：限频闸门在 marshal 之前——被拒事件洪峰不得放大为
+		// 序列化 + 同步文件写风暴。
+		b.writeLateRuntimeDebugThrottled(event, fmt.Sprintf("[runtime-event] render suppressed reason=%q type=%q session_id=%q trace_id=%q",
+			"event turn does not match active run", event.Type, event.SessionID, event.TraceID))
 		return
 	}
 	if b.session.ExecEventBridge != nil && !b.isForeignSessionContentEvent(event) {
