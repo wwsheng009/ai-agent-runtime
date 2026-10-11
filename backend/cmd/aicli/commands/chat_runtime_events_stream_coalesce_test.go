@@ -453,7 +453,9 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 		t.Fatal("merged event still carries stale nested reasoning block")
 	}
 	// P0-3：合并文本持有在累积器中，成功投递时才物化进投递副本的 "text" 键。
-	delivered := headlessDeliverBacklogHead(t, bridge)
+	delivered := headlessDeliverBacklogHead(t, bridge, func(ev runtimeevents.Event) bool {
+		return ev.Type == runtimechat.EventAssistantReasoning
+	})
 	if got := delivered.Payload["text"]; got != want {
 		t.Fatalf("delivered event text payload = %q, want %q", got, want)
 	}
@@ -889,7 +891,10 @@ func TestBacklogStreamMergeAccumulatesInBufferWithoutQuadraticCopies(t *testing.
 	}
 
 	// 成功投递：独立 payload 副本承载完整文本，槽位缓冲原样保留。
-	delivered := headlessDeliverBacklogHead(t, bridge)
+	delivered := headlessDeliverBacklogHead(t, bridge, func(ev runtimeevents.Event) bool {
+		return ev.Type == runtimechat.EventAssistantDelta &&
+			len(streamEventText(ev)) == len(wantText)
+	})
 	if got := streamEventText(delivered); got != wantText {
 		t.Fatalf("投递副本必须承载完整合并文本: got %d bytes, want %d bytes", len(got), len(wantText))
 	}
@@ -903,27 +908,26 @@ func TestBacklogStreamMergeAccumulatesInBufferWithoutQuadraticCopies(t *testing.
 	}
 }
 
-// headlessDeliverBacklogHead 清空占位队列后手动投递 backlog 队头，返回投递载荷。
-func headlessDeliverBacklogHead(t *testing.T, bridge *chatRuntimeEventBridge) runtimeevents.Event {
+// headlessDeliverBacklogHead 等待 backlog 队头被投递进有界队列并返回其载荷。
+// backlog worker goroutine 与本助手并发（worker 可能把队头先行提升进队列），
+// 因此不直接断言 tryDeliverBacklogHeadLocked,而是循环消费队列、用 match
+// 跳过占位/非目标项,直到匹配载荷出现或超时。
+func headlessDeliverBacklogHead(t *testing.T, bridge *chatRuntimeEventBridge, match func(runtimeevents.Event) bool) runtimeevents.Event {
 	t.Helper()
-bridgeLoop:
+	if match == nil {
+		match = func(runtimeevents.Event) bool { return true }
+	}
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		select {
-		case <-bridge.eventQueue:
-		default:
-			break bridgeLoop
+		case queued := <-bridge.eventQueue:
+			if match(queued.event) {
+				return queued.event
+			}
+		case <-time.After(20 * time.Millisecond):
 		}
-	}
-	bridge.streamMu.Lock()
-	defer bridge.streamMu.Unlock()
-	if !bridge.tryDeliverBacklogHeadLocked() {
-		t.Fatal("backlog 队头必须可以成功投递")
-	}
-	select {
-	case queued := <-bridge.eventQueue:
-		return queued.event
-	default:
-		t.Fatal("投递后载荷必须在有界队列中")
-		return runtimeevents.Event{}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for backlog head delivery")
+		}
 	}
 }

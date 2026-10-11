@@ -3695,6 +3695,11 @@ func (b *chatRuntimeEventBridge) eventLogFilePath() string {
 
 // appendEventLog 把事件 JSON 追加到事件日志（best-effort：失败只计数，不阻塞事件循环）。
 // 日志为 append-only，同一会话重启后由 replayEventLog 幂等重建模型。
+//
+// P3 分类：可重建的正文流式 delta（IsPersistStreamDeltaEventType，单 turn
+// 千级事件）走异步 journal writer——实测同步 open/close/Stat 占流式 CPU
+// ~15% 且在 reducer 临界区内；其余低频事件与所有注入记录走同步路径
+// （appendEventLogLine），保留写后立即可见语义。
 func (b *chatRuntimeEventBridge) appendEventLog(event runtimeevents.Event) {
 	if b == nil {
 		return
@@ -3704,6 +3709,10 @@ func (b *chatRuntimeEventBridge) appendEventLog(event runtimeevents.Event) {
 		b.eventLogMu.Lock()
 		b.eventLogFailures++
 		b.eventLogMu.Unlock()
+		return
+	}
+	if runtimeevents.IsPersistStreamDeltaEventType(event.Type) {
+		b.appendEventLogLineAsync(line)
 		return
 	}
 	b.appendEventLogLine(line)
@@ -3859,11 +3868,55 @@ func (b *chatRuntimeEventBridge) appendInteractionLogDocument(text string, docum
 	b.appendInjectionLog(rec)
 }
 
-// appendEventLogLine 把单行日志记录投递给进程级 journal writer（P3）：调用方
-// 只做一次有界入队 + 一次缓存的路径解析，不再逐行 open→append→close +
-// os.Stat。队列满时丢弃并计数——journal 是渲染模型重放缓存，权威会话数据
-// 在 SQLite store，绝不阻塞调用方（与 P0-1 同一原则）。
+// appendEventLogLine 写入单行日志记录（同步路径，P3 分类后保留给注入记录
+// 与低频事件）：每行一次 open→append→close + 路径解析。调用方依赖写后
+// 立即可见（测试直读、注入记录的崩溃持久性），且频率低（相对 delta 流），
+// 同步成本可忽略。若同一文件存在尚未落盘的异步 delta 行，先 flush 再写，
+// 保证 journal 内的全序（重放按行序重建渲染模型）。
 func (b *chatRuntimeEventBridge) appendEventLogLine(line []byte) {
+	if b == nil {
+		return
+	}
+	chatEventLogFlush()
+	path := b.eventLogFilePath()
+	if path == "" {
+		return
+	}
+	b.eventLogMu.Lock()
+	defer b.eventLogMu.Unlock()
+	// O_CREATE 只创建文件、不会创建会话 events/ 目录：目录缺失时
+	// 每次 append 都以 ENOENT 失败并被静默计入 eventLogFailures，导致
+	// runtime-events.jsonl 整会话缺失、/resume 无法重放重建渲染模型。
+	// 旧会话（启动早于 ensureSessionArtifactLayout 修复）也依赖这里的惰性创建。
+	if !b.eventLogDirEnsured {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			b.eventLogFailures++
+			return
+		}
+		b.eventLogDirEnsured = true
+	}
+	// 每次 open→append→close：不持有长生命周期句柄，避免文件占用
+	// （同步路径仅承载低频事件，open/close 开销可忽略）。
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		b.eventLogFailures++
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		b.eventLogFailures++
+		return
+	}
+	b.eventLogCount++
+}
+
+// appendEventLogLineAsync 把 delta 类高频事件行投递给进程级 journal writer
+// （P3 异步路径）：调用方只做一次有界入队 + 一次缓存的路径解析，不再逐行
+// open→append→close + os.Stat。队列满时丢弃并计数——journal 是渲染模型
+// 重放缓存，权威会话数据在 SQLite store，绝不阻塞调用方（与 P0-1 同一
+// 原则）。同一文件上的同步写入方（appendEventLogLine）写前会 flush 本队列，
+// 保证 journal 全序。
+func (b *chatRuntimeEventBridge) appendEventLogLineAsync(line []byte) {
 	if b == nil {
 		return
 	}
