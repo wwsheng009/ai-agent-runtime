@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 )
 
@@ -30,12 +31,24 @@ func run() int {
 		heartbeatSec  = flag.Int("heartbeat-interval", 0, "heartbeat interval (seconds) advertised in WELCOME; 0 uses the agent default")
 		tlsCert       = flag.String("tls-cert", "", "TLS certificate file (requires --tls-key)")
 		tlsKey        = flag.String("tls-key", "", "TLS key file (requires --tls-cert)")
+		ownerPassword = flag.String("owner-password", "", "owner login password (empty disables auth — dev only)")
+		sessionTTL    = flag.Duration("session-ttl", auth.DefaultTTL, "owner session lifetime")
 	)
 	flag.Parse()
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		fmt.Fprintln(os.Stderr, "both --tls-cert and --tls-key are required to enable TLS")
 		return 1
+	}
+	secure := *tlsCert != ""
+
+	owner, err := auth.NewOwner(*ownerPassword, *sessionTTL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gateway: failed to initialize owner auth: %v\n", err)
+		return 1
+	}
+	if !owner.Enabled() {
+		fmt.Fprintln(os.Stderr, "gateway: WARNING: --owner-password not set; console/API/proxy are UNPROTECTED (dev only)")
 	}
 
 	registry := tunnel.NewRegistry()
@@ -55,18 +68,43 @@ func run() int {
 	router.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "nodes": registry.Count()})
 	})
-	router.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
+	// Owner login/logout (unauthenticated; the login route verifies the password).
+	router.HandleFunc("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid request body"})
+			return
+		}
+		if !owner.Enabled() || !owner.VerifyPassword(req.Password) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
+			return
+		}
+		token, expiry := owner.Issue()
+		http.SetCookie(w, auth.SessionCookie(token, owner.TTL(), secure))
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "expires_at": expiry})
+	}).Methods(http.MethodPost)
+	router.HandleFunc("/api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		if cookie, err := r.Cookie(auth.CookieName); err == nil {
+			owner.Revoke(cookie.Value)
+		}
+		http.SetCookie(w, auth.ClearCookie(secure))
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+	}).Methods(http.MethodPost)
+	// Owner-protected node list.
+	router.Handle("/api/nodes", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"nodes": registry.List()})
-	})
+	}))).Methods(http.MethodGet)
 	// Reverse proxy: /n/{node_id}/... → the node's local service.
-	router.PathPrefix("/n/{node_id}/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	router.PathPrefix("/n/{node_id}/").Handler(owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nodeID := mux.Vars(r)["node_id"]
 		path := strings.TrimPrefix(r.URL.Path, "/n/"+nodeID)
 		if path == "" {
 			path = "/"
 		}
 		server.ServeProxy(w, r, nodeID, path)
-	})
+	})))
 
 	httpServer := &http.Server{
 		Addr:              *listen,
@@ -80,7 +118,6 @@ func run() int {
 	}
 	fmt.Fprintf(os.Stdout, "aicli-gateway listening on %s://%s (public=%s)\n", scheme, *listen, strings.TrimSpace(*publicBaseURL))
 
-	var err error
 	if *tlsCert != "" {
 		err = httpServer.ListenAndServeTLS(*tlsCert, *tlsKey)
 	} else {
