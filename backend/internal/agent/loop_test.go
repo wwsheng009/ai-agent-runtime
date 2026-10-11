@@ -4931,7 +4931,7 @@ func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata
 	}
 
 	loop := NewReActLoop(agent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
-	tools, err := loop.getAvailableTools(context.Background(), "", []string{"list_mcp_resources", "view", toolbroker.ToolBackgroundTask})
+	tools, err := loop.getAvailableTools(context.Background(), "", []string{"list_mcp_resources", "view", toolbroker.ToolJobStart})
 	require.NoError(t, err)
 
 	var metaSource interface{}
@@ -4943,7 +4943,7 @@ func TestReActLoop_GetAvailableTools_PreservesMetaToolkitAndBrokerSourceMetadata
 			metaSource = tool.Metadata[toolresult.SourceKey]
 		case "view":
 			toolkitSource = tool.Metadata[toolresult.SourceKey]
-		case toolbroker.ToolBackgroundTask:
+		case toolbroker.ToolJobStart:
 			brokerSource = tool.Metadata[toolresult.SourceKey]
 		}
 	}
@@ -5180,7 +5180,7 @@ func TestResolveToolSourceForRequest_PrefersResolvedRuntimeSource(t *testing.T) 
 	assert.Equal(t, toolresult.SourceMeta, resolveToolSourceForRequest(agent, "list_mcp_resources"))
 	assert.Equal(t, toolresult.SourceToolkit, resolveToolSourceForRequest(agent, "view"))
 	agent.toolBroker = &toolbroker.Broker{}
-	assert.Equal(t, toolresult.SourceBroker, resolveToolSourceForRequest(agent, toolbroker.ToolBackgroundTask))
+	assert.Equal(t, toolresult.SourceBroker, resolveToolSourceForRequest(agent, toolbroker.ToolJobStart))
 }
 
 func TestReActLoop_GetAvailableTools_HidesTeamOnlyBrokerToolsUntilRunMetaActive(t *testing.T) {

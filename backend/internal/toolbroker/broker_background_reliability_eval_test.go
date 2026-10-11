@@ -38,7 +38,7 @@ func TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideE
 
 	firstRaw, firstMeta, err := broker.ExecuteToolCall(ctx, "session-retry-eval", types.ToolCall{
 		ID:   "call-retry-attempt-1",
-		Name: ToolBackgroundTask,
+		Name: ToolJobStart,
 		Args: map[string]interface{}{
 			"command": brokerReliabilityAppendCommand(commandDelay, effectFile, "timed-out-attempt"),
 			"cwd":     workdir,
@@ -66,7 +66,7 @@ func TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideE
 
 	firstOutputRaw, firstOutputMeta, err := broker.ExecuteToolCall(ctx, "session-retry-eval", types.ToolCall{
 		ID:   "call-retry-output-1",
-		Name: ToolTaskOutput,
+		Name: ToolJobOutput,
 		Args: map[string]interface{}{"job_id": first.JobID},
 	})
 	require.NoError(t, err)
@@ -82,7 +82,7 @@ func TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideE
 
 	retryRaw, retryMeta, err := broker.ExecuteToolCall(ctx, "session-retry-eval", types.ToolCall{
 		ID:   "call-retry-attempt-2",
-		Name: ToolBackgroundTask,
+		Name: ToolJobStart,
 		Args: map[string]interface{}{
 			"command":     brokerReliabilityAppendCommand(0, effectFile, "retry-succeeded"),
 			"cwd":         workdir,
@@ -105,7 +105,7 @@ func TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideE
 
 	retryOutputRaw, _, err := broker.ExecuteToolCall(ctx, "session-retry-eval", types.ToolCall{
 		ID:   "call-retry-output-2",
-		Name: ToolTaskOutput,
+		Name: ToolJobOutput,
 		Args: map[string]interface{}{"job_id": retry.JobID},
 	})
 	require.NoError(t, err)

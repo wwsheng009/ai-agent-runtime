@@ -24,7 +24,7 @@ func TestBrokerExecuteBackgroundTaskReturnsRestartPolicy(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 
 	broker := &Broker{Background: manager}
-	raw, _, err := broker.Execute(ctx, "session-1", ToolBackgroundTask, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-1", ToolJobStart, map[string]interface{}{
 		"command":        "echo ok",
 		"restart_policy": "rerun",
 	})
@@ -46,7 +46,7 @@ func TestBackgroundTaskResultRemainsReusableInModelToolMessage(t *testing.T) {
 	broker := &Broker{Background: manager}
 	call := types.ToolCall{
 		ID:   "call-background-contract",
-		Name: ToolBackgroundTask,
+		Name: ToolJobStart,
 		Args: map[string]interface{}{"command": "echo ok"},
 	}
 
@@ -73,7 +73,7 @@ func TestBrokerExecuteBackgroundTaskParsesStartupAcceptance(t *testing.T) {
 	defer func() { require.NoError(t, manager.Close()) }()
 	broker := &Broker{Background: manager}
 
-	raw, metadata, err := broker.Execute(context.Background(), "session-startup", ToolBackgroundTask, map[string]interface{}{
+	raw, metadata, err := broker.Execute(context.Background(), "session-startup", ToolJobStart, map[string]interface{}{
 		"command": "echo ok",
 		"startup_acceptance": map[string]interface{}{
 			"probe":           "none",
@@ -93,7 +93,7 @@ func TestBrokerRejectsInvalidStartupAcceptance(t *testing.T) {
 	defer func() { require.NoError(t, manager.Close()) }()
 	broker := &Broker{Background: manager}
 
-	_, _, err := broker.Execute(context.Background(), "session-startup", ToolBackgroundTask, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "session-startup", ToolJobStart, map[string]interface{}{
 		"command":            "echo ok",
 		"startup_acceptance": map[string]interface{}{"probe": "tcp"},
 	})
@@ -106,10 +106,10 @@ func TestBrokerTaskOutputMissingJobReturnsActionableError(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 	broker := &Broker{Background: manager}
 
-	_, _, err := broker.Execute(context.Background(), "session-missing-job", ToolTaskOutput, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "session-missing-job", ToolJobOutput, map[string]interface{}{
 		"job_id": "job_guess_1",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "exact job_id returned by background_task")
+	assert.Contains(t, err.Error(), "exact job_id returned by job_start")
 	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
 }

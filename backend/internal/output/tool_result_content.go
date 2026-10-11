@@ -432,7 +432,8 @@ func isTaskOutputToolResult(envelope *Envelope) bool {
 	if envelope == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(envelope.ToolName), "task_output")
+	name := strings.ToLower(strings.TrimSpace(envelope.ToolName))
+	return name == "task_output" || name == "job_output"
 }
 
 // isCollaborationResult reports whether the tool result carries the parent's
@@ -461,7 +462,7 @@ func isBackgroundTaskResult(envelope *Envelope) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(envelope.ToolName)) {
-	case "background_task":
+	case "background_task", "job_start":
 		return true
 	default:
 		return false

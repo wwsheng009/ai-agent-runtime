@@ -88,22 +88,22 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 	case "enter_plan_mode", "exit_plan_mode":
 		// Control tools usable while already in plan mode (read-only + ask_user).
 		return []Capability{CapReadOnly, CapAskUser}, true
-	case "background_task":
+	case "background_task", "job_start":
 		return []Capability{CapBackgroundTask}, true
-	case "task_kill", "task_control":
+	case "task_kill", "task_control", "job_cancel", "job_control":
 		// 终止后台进程与启动它同级：都要 background_task 能力，并在
 		// accept_edits/dont_ask 等模式下走 ask/deny。
 		return []Capability{CapBackgroundTask}, true
-	case "write_stdin", "task_input":
+	case "write_stdin", "task_input", "job_input":
 		// Driving a running session's stdin is the same authority as starting
 		// it: a capability scope that allows background_task also allows
 		// write_stdin, and a read-only scope blocks it (2026-10-11).
 		return []Capability{CapBackgroundTask}, true
-	case "task_monitor":
+	case "task_monitor", "job_monitor":
 		// 巡检本身只读，但 max_duration_ms 能终止进程，故与 background_task
 		// 同级授权（宁可多问一次，不给只读通道开后门）。
 		return []Capability{CapBackgroundTask}, true
-	case "task_output":
+	case "task_output", "job_output", "job_list", "job_search":
 		return []Capability{CapReadOnly}, true
 	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
 		return []Capability{CapReadOnly, CapAgentManagement}, true
@@ -156,17 +156,17 @@ func normalizeToolName(name string) string {
 		return "enter_plan_mode"
 	case "exitplanmode":
 		return "exit_plan_mode"
-	case "backgroundtask":
+	case "backgroundtask", "jobstart", "job_start":
 		return "background_task"
-	case "taskoutput":
+	case "joboutput", "job_output", "taskoutput":
 		return "task_output"
-	case "taskkill":
+	case "jobcancel", "job_cancel", "taskkill":
 		return "task_kill"
-	case "taskmonitor":
+	case "jobmonitor", "job_monitor", "taskmonitor":
 		return "task_monitor"
-	case "taskcontrol":
+	case "jobcontrol", "job_control", "taskcontrol":
 		return "task_control"
-	case "writestdin", "taskinput", "write_stdin", "task_input":
+	case "jobinput", "job_input", "writestdin", "taskinput", "write_stdin", "task_input":
 		return "write_stdin"
 	case "spawnagent":
 		return "spawn_agent"

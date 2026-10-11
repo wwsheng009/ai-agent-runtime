@@ -12,8 +12,8 @@ import (
 // never restrict their surface) this package already fixed at the tool level.
 func TestBrokerToolArgKeys_CoversEveryBrokerTool(t *testing.T) {
 	tools := []string{
-		ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask,
-		ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask,
+		ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolJobStart,
+		ToolJobOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask,
 		ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents,
 		ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree,
 		ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest,

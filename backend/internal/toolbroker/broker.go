@@ -32,16 +32,24 @@ import (
 )
 
 const (
-	ToolAskUserQuestion        = "ask_user_question"
-	ToolEnterPlanMode          = "enter_plan_mode"
-	ToolExitPlanMode           = "exit_plan_mode"
-	ToolPlanReview             = "plan_review"
-	ToolBackgroundTask         = "background_task"
-	ToolTaskOutput             = "task_output"
-	ToolTaskKill               = "task_kill"
-	ToolTaskMonitor            = "task_monitor"
-	ToolTaskControl            = "task_control"
-	ToolWriteStdin             = "write_stdin"
+	ToolAskUserQuestion = "ask_user_question"
+	ToolEnterPlanMode   = "enter_plan_mode"
+	ToolExitPlanMode    = "exit_plan_mode"
+	ToolPlanReview      = "plan_review"
+	// Background jobs (naming contract B1, tool-surface-inventory §4.1): the
+	// job_* family is the canonical wire spelling for background command jobs;
+	// task_* / write_stdin / task_input stay callable through normalizeToolName
+	// as compatibility aliases (no second advertised name).
+	ToolJobStart   = "job_start"
+	ToolJobOutput  = "job_output"
+	ToolJobCancel  = "job_cancel"
+	ToolJobMonitor = "job_monitor"
+	ToolJobControl = "job_control"
+	ToolJobInput   = "job_input"
+	// Job list/search round out the job_* read surface (§4.1): job_list answers
+	// "what is running" without a job_id; job_search full-text scans commands.
+	ToolJobList                = "job_list"
+	ToolJobSearch              = "job_search"
 	ToolSpawnAgent             = "spawn_agent"
 	ToolListAgents             = "list_agents"
 	ToolSendMessage            = "send_message"
@@ -206,7 +214,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 
 func isVolatileEmptyReplayTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult:
+	case ToolJobOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult:
 		return true
 	default:
 		return false
@@ -216,7 +224,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolTaskMonitor, ToolTaskControl, ToolWriteStdin, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolJobStart, ToolJobOutput, ToolJobCancel, ToolJobMonitor, ToolJobControl, ToolJobInput, ToolJobList, ToolJobSearch, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -341,8 +349,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 	}
 	definitions = append(definitions,
 		types.ToolDefinition{
-			Name:        ToolBackgroundTask,
-			Description: "Run a long-running task in the background and return a job id. Pass that exact job_id to task_output; never guess or synthesize an id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command. A finished process with a non-zero exit code completes the job (status completed + exit_code); only launch/timeout/cancel/healthcheck failures hard-fail.",
+			Name:        ToolJobStart,
+			Description: "Run a long-running background job and return a job id (naming contract: the job_* family owns background command jobs). Pass that exact job_id to job_output; never guess or synthesize an id. Commands execute through the detected user shell; prefer the cwd parameter for directory changes instead of embedding cd in the command. Use restart_policy=rerun only when automatic infrastructure-failure recovery is safe for the command. A finished process with a non-zero exit code completes the job (status completed + exit_code); only launch/timeout/cancel/healthcheck failures hard-fail. This is not a reminder: nothing waits for a future time (schedule_create owns reminders).",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -397,7 +405,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 					"interactive": map[string]interface{}{
 						"type":        "boolean",
-						"description": "Open a long-lived interactive session whose stdin stays open for write_stdin instead of a fire-and-forget command job. Default false.",
+						"description": "Open a long-lived interactive session whose stdin stays open for job_input instead of a fire-and-forget command job. Default false.",
 					},
 					"tty": map[string]interface{}{
 						"type":        "boolean",
@@ -418,8 +426,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolTaskOutput,
-			Description: "Read background task output, process/heartbeat health, quiet duration, and automatic recovery state by offset. Prefer wait=output/exit over repeated polling: the call blocks until new output appears, the job reaches a terminal state, or timeout_ms elapses, and reports wait_condition (immediate/output/exit/timeout) plus waited_ms. Inspect status and exit_code in the structured result; non-zero exit with status completed is a content result, not a tool crash. error_code is set only for hard failures.",
+			Name:        ToolJobOutput,
+			Description: "Read background job output, process/heartbeat health, quiet duration, and automatic recovery state by offset. Prefer wait=output/exit over repeated polling: the call blocks until new output appears, the job reaches a terminal state, or timeout_ms elapses, and reports wait_condition (immediate/output/exit/timeout) plus waited_ms. Inspect status and exit_code in the structured result; non-zero exit with status completed is a content result, not a tool crash. error_code is set only for hard failures.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -450,14 +458,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolWriteStdin,
-			Description: "Write to the stdin of a running interactive background session (alias: task_input) and return the output produced since the previous exchange. Use background_task with interactive=true to open a session; one-shot jobs are not interactive and return not_interactive (use task_output instead). Prefer wait over repeated polling: the call blocks until new output appears, the session exits, or yield_time_ms elapses, and reports wait_condition (output/exit/timeout) plus waited_ms. The result's next_offset is the authoritative cursor to pass to task_output next. Never guess or synthesize a job_id.",
+			Name:        ToolJobInput,
+			Description: "Write to the stdin of a running interactive background session (alias: task_input) and return the output produced since the previous exchange. Use job_start with interactive=true to open a session; one-shot jobs are not interactive and return not_interactive (use job_output instead). Prefer wait over repeated polling: the call blocks until new output appears, the session exits, or yield_time_ms elapses, and reports wait_condition (output/exit/timeout) plus waited_ms. The result's next_offset is the authoritative cursor to pass to job_output next. Never guess or synthesize a job_id.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"job_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Interactive session job id returned by background_task (interactive=true).",
+						"description": "Interactive session job id returned by job_start (interactive=true).",
 					},
 					"task_id": map[string]interface{}{
 						"type":        "string",
@@ -489,14 +497,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolTaskKill,
-			Description: "Terminate a running background task by job id (alias: task_id). Uses the same cancellation path as task_output: request cancel first, then process-tree termination. The structured result distinguishes unknown ids, already-finished jobs (cancelled=false), and accepted cancellations (cancelled=true); a non-zero exit_code on a finished job is a content result, not a tool crash.",
+			Name:        ToolJobCancel,
+			Description: "Terminate a running background job by job id (alias: task_id). Uses the same cancellation path as job_output: request cancel first, then process-tree termination. The structured result distinguishes unknown ids, already-finished jobs (cancelled=false), and accepted cancellations (cancelled=true); a non-zero exit_code on a finished job is a content result, not a tool crash.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"job_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Background job id returned by background_task.",
+						"description": "Background job id returned by job_start.",
 					},
 					"task_id": map[string]interface{}{
 						"type":        "string",
@@ -511,14 +519,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolTaskControl,
-			Description: "Control a background task's lifecycle (alias: task_id). action=pause holds a queued job (running jobs cannot be paused), action=resume re-queues a paused job with a fresh queue window, action=abandon drops a queued/paused job as terminal 'abandoned', action=requeue creates a NEW job from a terminal one (same session/command; the new job records requeued_from). Use task_kill to cancel a running job.",
+			Name:        ToolJobControl,
+			Description: "Control a background job's lifecycle (alias: task_id). action=pause holds a queued job (running jobs cannot be paused), action=resume re-queues a paused job with a fresh queue window, action=abandon drops a queued/paused job as terminal 'abandoned', action=requeue creates a NEW job from a terminal one (same session/command; the new job records requeued_from). Use job_cancel to cancel a running job.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"job_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Background job id returned by background_task.",
+						"description": "Background job id returned by job_start.",
 					},
 					"task_id": map[string]interface{}{
 						"type":        "string",
@@ -538,14 +546,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 		},
 		types.ToolDefinition{
-			Name:        ToolTaskMonitor,
-			Description: "Arm a one-shot check on a running background task (alias: task_id). When the deadline arrives the session is woken once with the job's current state, so a wait loop is never needed; the terminal transition wakes the session on its own as well. Optional max_duration_ms additionally terminates the job at its own deadline (cancel_source=monitor_max_duration) as a watchdog. Monitoring an already-finished job returns scheduled=false as a content result.",
+			Name:        ToolJobMonitor,
+			Description: "Arm a one-shot check on a running background job (alias: task_id). When the deadline arrives the session is woken once with the job's current state, so a wait loop is never needed; the terminal transition wakes the session on its own as well. Optional max_duration_ms additionally terminates the job at its own deadline (cancel_source=monitor_max_duration) as a watchdog. Monitoring an already-finished job returns scheduled=false as a content result.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"job_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Background job id returned by background_task.",
+						"description": "Background job id returned by job_start.",
 					},
 					"task_id": map[string]interface{}{
 						"type":        "string",
@@ -567,6 +575,50 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 				},
 				"required": []string{},
+			},
+		},
+		types.ToolDefinition{
+			Name:        ToolJobList,
+			Description: "List background jobs (the job_* read surface) without a job_id: newest-first page with id, status, kind, command, session, cwd, and exit code. Filter by session_id, status (pending/running/completed/failed/cancelled/timed_out/interrupted/expired/abandoned/paused), and limit (default 50, max 200). This is not a reminder listing; schedule_list owns automation tasks.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"session_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional session filter.",
+					},
+					"status": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"pending", "running", "completed", "failed", "cancelled", "timed_out", "interrupted", "expired", "abandoned", "paused"},
+						},
+						"description": "Optional status filter (repeatable).",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional page size. Defaults to 50, clamped to 200.",
+					},
+				},
+			},
+		},
+		types.ToolDefinition{
+			Name:        ToolJobSearch,
+			Description: "Search background jobs by a case-insensitive substring match over command text, job id, and cwd (the job_* read surface). Returns the newest 50 matches with the same summary shape as job_list. Use job_output with a returned job_id to read bytes.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "Case-insensitive substring to match against command/id/cwd.",
+					},
+					"session_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional session filter.",
+					},
+				},
+				"required": []string{"query"},
 			},
 		},
 	)
@@ -1591,7 +1643,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return result, meta, nil
 
-	case ToolBackgroundTask:
+	case ToolJobStart:
 		if b.Background == nil {
 			b.Background = background.NewManager(background.DefaultConfig())
 		}
@@ -1604,12 +1656,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["cwd"].(string); ok {
 			req.Cwd = strings.TrimSpace(value)
 		}
-		if value, ok, err := brokerToolArgInt(ToolBackgroundTask, args, "timeout_sec"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolJobStart, args, "timeout_sec"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			req.TimeoutSec = value
 		}
-		if value, ok, err := brokerToolArgInt(ToolBackgroundTask, args, "priority"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolJobStart, args, "priority"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			req.Priority = value
@@ -1622,12 +1674,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			if probe, ok := value["probe"].(string); ok {
 				startup.Probe = background.StartupProbeType(strings.TrimSpace(probe))
 			}
-			gracePeriodMs, _, err := brokerToolArgInt(ToolBackgroundTask+" startup_acceptance", value, "grace_period_ms")
+			gracePeriodMs, _, err := brokerToolArgInt(ToolJobStart+" startup_acceptance", value, "grace_period_ms")
 			if err != nil {
 				return nil, nil, err
 			}
 			startup.GracePeriodMs = gracePeriodMs
-			startupTimeoutMs, _, err := brokerToolArgInt(ToolBackgroundTask+" startup_acceptance", value, "timeout_ms")
+			startupTimeoutMs, _, err := brokerToolArgInt(ToolJobStart+" startup_acceptance", value, "timeout_ms")
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1642,12 +1694,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["tty"].(bool); ok {
 			req.TTY = value
 		}
-		if value, ok, colsErr := brokerToolArgInt(ToolBackgroundTask, args, "cols"); colsErr != nil {
+		if value, ok, colsErr := brokerToolArgInt(ToolJobStart, args, "cols"); colsErr != nil {
 			return nil, nil, colsErr
 		} else if ok {
 			req.Cols = value
 		}
-		if value, ok, rowsErr := brokerToolArgInt(ToolBackgroundTask, args, "rows"); rowsErr != nil {
+		if value, ok, rowsErr := brokerToolArgInt(ToolJobStart, args, "rows"); rowsErr != nil {
 			return nil, nil, rowsErr
 		} else if ok {
 			req.Rows = value
@@ -1655,7 +1707,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		var job *background.Job
 		var submitErr error
 		if req.Interactive {
-			// Interactive sessions keep stdin open for write_stdin instead of
+			// Interactive sessions keep stdin open for job_input instead of
 			// entering the detached runner (2026-10-11).
 			job, submitErr = b.Background.OpenTerminal(ctx, sessionID, background.TerminalOpenArgs{
 				Command:    command,
@@ -1673,7 +1725,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		jobAlias := strings.TrimSpace(job.ID)
 		if handleAliases != nil {
-			jobAlias = handleAliases.Jobs.register(job.ID, deterministicHandleAlias(backgroundJobAliasPrefix, toolCallID, ToolBackgroundTask, args))
+			jobAlias = handleAliases.Jobs.register(job.ID, deterministicHandleAlias(backgroundJobAliasPrefix, toolCallID, ToolJobStart, args))
 			if err := b.saveSessionHandleAliases(ctx, sessionID, handleAliases); err != nil {
 				return nil, nil, err
 			}
@@ -1697,7 +1749,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		outputSummary.JobID = jobAlias
 		return outputSummary, resultMetadata, nil
 
-	case ToolTaskOutput:
+	case ToolJobOutput:
 		if b.Background == nil {
 			return nil, nil, fmt.Errorf("background manager is not configured")
 		}
@@ -1716,12 +1768,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		offset := int64(0)
 		limit := 0
-		if value, ok, err := toolArgInt64(ToolTaskOutput, args, "offset"); err != nil {
+		if value, ok, err := toolArgInt64(ToolJobOutput, args, "offset"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			offset = value
 		}
-		if value, ok, err := brokerToolArgInt(ToolTaskOutput, args, "limit"); err != nil {
+		if value, ok, err := brokerToolArgInt(ToolJobOutput, args, "limit"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			limit = value
@@ -1735,7 +1787,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, fmt.Errorf("unsupported wait mode %q: use none, output or exit", waitMode)
 		}
 		timeoutMs := int64(0)
-		if value, ok, waitErr := toolArgInt64(ToolTaskOutput, args, "timeout_ms"); waitErr != nil {
+		if value, ok, waitErr := toolArgInt64(ToolJobOutput, args, "timeout_ms"); waitErr != nil {
 			return nil, nil, waitErr
 		} else if ok {
 			timeoutMs = value
@@ -1743,7 +1795,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		output, waitCondition, waitedMs, err := b.readTaskOutputWithWait(ctx, resolvedJobID, offset, limit, waitMode, timeoutMs)
 		if err != nil {
 			if runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound) {
-				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", err)
+				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by job_start instead of guessing an id", err)
 			}
 			return nil, nil, err
 		}
@@ -1813,7 +1865,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			NextAction: output.NextAction,
 		}, outputMetadata, nil
 
-	case ToolWriteStdin:
+	case ToolJobInput:
 		if b.Background == nil {
 			return nil, nil, fmt.Errorf("background manager is not configured")
 		}
@@ -1842,7 +1894,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			input, _ = args["input"].(string)
 		}
 		yieldMs := 0
-		if value, ok, yieldErr := brokerToolArgInt(ToolWriteStdin, args, "yield_time_ms"); yieldErr != nil {
+		if value, ok, yieldErr := brokerToolArgInt(ToolJobInput, args, "yield_time_ms"); yieldErr != nil {
 			return nil, nil, yieldErr
 		} else if ok {
 			yieldMs = value
@@ -1894,7 +1946,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"exit_code":      exchange.ExitCode,
 		}, writeMetadata, nil
 
-	case ToolTaskKill:
+	case ToolJobCancel:
 		if b.Background == nil {
 			return nil, nil, fmt.Errorf("background manager is not configured")
 		}
@@ -1924,7 +1976,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		if killErr != nil {
 			if runtimeerrors.Is(killErr, runtimeerrors.ErrJobNotFound) {
-				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", killErr)
+				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by job_start instead of guessing an id", killErr)
 			}
 			// 已结束不是错误：明确回报状态与 exit_code，避免模型把它当成 kill 失败。
 			if job != nil && strings.Contains(killErr.Error(), "already finished") {
@@ -1954,11 +2006,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"job_id":    displayJobID,
 			"status":    finalStatus,
 			"cancelled": true,
-			"message":   "cancel requested; process-tree termination may take a moment, re-read task_output for the final status",
+			"message":   "cancel requested; process-tree termination may take a moment, re-read job_output for the final status",
 			"exit_code": exitCode,
 		}, killMetadata, nil
 
-	case ToolTaskControl:
+	case ToolJobControl:
 		if b.Background == nil {
 			return nil, nil, fmt.Errorf("background manager is not configured")
 		}
@@ -2008,10 +2060,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		if controlErr != nil {
 			if runtimeerrors.Is(controlErr, runtimeerrors.ErrJobNotFound) {
-				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", controlErr)
+				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by job_start instead of guessing an id", controlErr)
 			}
 			// 状态冲突（已结束 / 运行中 / 未暂停 / 仍在进行）是内容结果：回报当前
-			// 状态让模型改走 task_kill 或先等待，而不是当成工具崩溃。
+			// 状态让模型改走 job_cancel 或先等待，而不是当成工具崩溃。
 			if controlled != nil {
 				status := string(controlled.Status)
 				controlMetadata["status"] = status
@@ -2037,7 +2089,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"action":  action,
 			"status":  status,
 			"applied": true,
-			"message": "control applied; re-read task_output for the current state",
+			"message": "control applied; re-read job_output for the current state",
 		}
 		if action == "requeue" && controlled != nil {
 			result["new_job_id"] = controlled.ID
@@ -2045,7 +2097,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return result, controlMetadata, nil
 
-	case ToolTaskMonitor:
+	case ToolJobMonitor:
 		if b.Background == nil {
 			return nil, nil, fmt.Errorf("background manager is not configured")
 		}
@@ -3744,6 +3796,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 	case ToolScheduleCreate, ToolScheduleList, ToolScheduleUpdate, ToolScheduleDelete:
 		return b.executeScheduleTool(ctx, sessionID, toolName, args)
 
+	case ToolJobList:
+		return b.executeJobList(ctx, sessionID, args)
+
+	case ToolJobSearch:
+		return b.executeJobSearch(ctx, sessionID, args)
+
 	default:
 		return nil, nil, fmt.Errorf("unknown broker tool: %s", toolName)
 	}
@@ -4066,15 +4124,15 @@ func classifyWriteStdinError(err error) (code, nextAction string, actionable boo
 	switch {
 	case stderrors.Is(err, background.ErrNotInteractive):
 		return "NOT_INTERACTIVE",
-			"Use background_task with interactive=true to open a session, or task_output for one-shot jobs; do not retry write_stdin on a non-interactive job.",
+			"Use job_start with interactive=true to open a session, or job_output for one-shot jobs; do not retry job_input on a non-interactive job.",
 			true
 	case stderrors.Is(err, background.ErrSessionNotLocal):
 		return "SESSION_NOT_LOCAL",
-			"This interactive session is owned by another runtime instance; drive it from that instance, or use task_output/task_kill here.",
+			"This interactive session is owned by another runtime instance; drive it from that instance, or use job_output/job_cancel here.",
 			true
 	case stderrors.Is(err, background.ErrSessionNotAvailable):
 		return "SESSION_NOT_AVAILABLE",
-			"The session has closed or exited; open a new one with background_task interactive=true, or read the final output with task_output.",
+			"The session has closed or exited; open a new one with job_start interactive=true, or read the final output with job_output.",
 			true
 	default:
 		return "", "", false
@@ -4093,12 +4151,24 @@ func normalizeToolName(name string) string {
 		return ToolExitPlanMode
 	case "planreview":
 		return ToolPlanReview
-	case "backgroundtask":
-		return ToolBackgroundTask
-	case "taskoutput":
-		return ToolTaskOutput
-	case "writestdin", "taskinput", "write_stdin", "task_input":
-		return ToolWriteStdin
+	// Job family (naming contract B1): the canonical job_* spellings plus the
+	// legacy task_*/background_task/write_stdin aliases, which stay callable.
+	case "job_start", "jobstart", "backgroundtask", "background_task", "task_start":
+		return ToolJobStart
+	case "job_output", "joboutput", "taskoutput", "task_output":
+		return ToolJobOutput
+	case "job_cancel", "jobcancel", "taskkill", "task_kill":
+		return ToolJobCancel
+	case "job_monitor", "jobmonitor", "taskmonitor", "task_monitor":
+		return ToolJobMonitor
+	case "job_control", "jobcontrol", "taskcontrol", "task_control":
+		return ToolJobControl
+	case "job_input", "jobinput", "writestdin", "taskinput", "write_stdin", "task_input":
+		return ToolJobInput
+	case "job_list", "joblist":
+		return ToolJobList
+	case "job_search", "jobsearch":
+		return ToolJobSearch
 	case "spawnagent":
 		return ToolSpawnAgent
 	case "listagents":

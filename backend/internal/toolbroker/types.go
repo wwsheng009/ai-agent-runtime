@@ -995,7 +995,7 @@ func ApplyWaitTeamTimeout(result *WaitTeamResult, requestedMs, effectiveMs int, 
 // spelled out instead of the subagent ones.
 func WaitTeamSuspendNextAction(consecutive, limit int) string {
 	return fmt.Sprintf(
-		"suspend: %d consecutive active waits observed no team-task progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the team once (read_mailbox_digest / task_output / subagent_status), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call wait_team again with the same team_id",
+		"suspend: %d consecutive active waits observed no team-task progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the team once (read_mailbox_digest / job_output / subagent_status), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call wait_team again with the same team_id",
 		consecutive, limit,
 	)
 }

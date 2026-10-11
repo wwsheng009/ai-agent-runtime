@@ -38,7 +38,7 @@ func clampMonitorMs(value, min, max int64) int64 {
 // 未知 job 走可修复错误；已结束的 job 走「内容结果 + scheduled=false」（终态唤醒
 // 本来就会覆盖它）。
 func (b *Broker) monitorBackgroundTask(ctx context.Context, resolvedJobID, displayJobID string, args map[string]interface{}) (interface{}, map[string]interface{}, error) {
-	checkAfterMs, hasCheck, err := toolArgInt64(ToolTaskMonitor, args, "check_after_ms")
+	checkAfterMs, hasCheck, err := toolArgInt64(ToolJobMonitor, args, "check_after_ms")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -47,7 +47,7 @@ func (b *Broker) monitorBackgroundTask(ctx context.Context, resolvedJobID, displ
 	} else {
 		checkAfterMs = clampMonitorMs(checkAfterMs, taskMonitorCheckAfterMinMs, taskMonitorCheckAfterMaxMs)
 	}
-	maxDurationMs, hasMaxDuration, err := toolArgInt64(ToolTaskMonitor, args, "max_duration_ms")
+	maxDurationMs, hasMaxDuration, err := toolArgInt64(ToolJobMonitor, args, "max_duration_ms")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -87,7 +87,7 @@ func (b *Broker) monitorBackgroundTask(ctx context.Context, resolvedJobID, displ
 	}
 	if monitorErr != nil {
 		if runtimeerrors.Is(monitorErr, runtimeerrors.ErrJobNotFound) {
-			return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", monitorErr)
+			return nil, nil, fmt.Errorf("%w; use the exact job_id returned by job_start instead of guessing an id", monitorErr)
 		}
 		if errors.Is(monitorErr, background.ErrJobNotRunning) {
 			// 已结束不是错误：终态唤醒已经覆盖这次交接，模型只需读结果。
@@ -95,7 +95,7 @@ func (b *Broker) monitorBackgroundTask(ctx context.Context, resolvedJobID, displ
 			result := map[string]interface{}{
 				"job_id":    displayJobID,
 				"scheduled": false,
-				"message":   "job already finished; nothing to monitor, read the outcome with task_output",
+				"message":   "job already finished; nothing to monitor, read the outcome with job_output",
 			}
 			if job, getErr := b.Background.GetJob(ctx, resolvedJobID); getErr == nil && job != nil {
 				metadata["status"] = string(job.Status)
@@ -118,7 +118,7 @@ func (b *Broker) monitorBackgroundTask(ctx context.Context, resolvedJobID, displ
 		"monitor_id":     info.MonitorID,
 		"scheduled":      true,
 		"check_after_ms": info.CheckAfter.Milliseconds(),
-		"message":        "one check wake is scheduled; the terminal transition wakes the session on its own, so no polling is needed. Call task_monitor again for another check, or task_kill to disarm by ending the job.",
+		"message":        "one check wake is scheduled; the terminal transition wakes the session on its own, so no polling is needed. Call job_monitor again for another check, or job_cancel to disarm by ending the job.",
 	}
 	if info.MaxDuration > 0 {
 		result["max_duration_ms"] = info.MaxDuration.Milliseconds()

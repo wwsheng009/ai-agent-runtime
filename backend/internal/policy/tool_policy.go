@@ -136,7 +136,7 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		return fmt.Errorf("tool %s: %w", toolName, err)
 	}
 	if p.ReadOnly {
-		if normalizedToolName == "background_task" || normalizedToolName == "task_kill" || normalizedToolName == "task_monitor" || normalizedToolName == "task_control" || normalizedToolName == "write_stdin" || normalizedToolName == "task_input" {
+		if normalizedToolName == "background_task" || normalizedToolName == "job_start" || normalizedToolName == "task_kill" || normalizedToolName == "job_cancel" || normalizedToolName == "task_monitor" || normalizedToolName == "job_monitor" || normalizedToolName == "task_control" || normalizedToolName == "job_control" || normalizedToolName == "write_stdin" || normalizedToolName == "task_input" || normalizedToolName == "job_input" {
 			return fmt.Errorf("read-only policy blocks background command execution: %s", toolName)
 		}
 		if IsWriteLikeToolName(toolName) {
@@ -161,7 +161,7 @@ func IsRuntimeOwnedEssentialTool(toolName string) bool {
 		"ask_user_question",
 		"enter_plan_mode", "exit_plan_mode", "plan_review",
 		"todos", "get_goal", "read_goal", "update_goal",
-		"background_task", "task_output",
+		"background_task", "job_start", "task_output", "job_output", "job_list", "job_search",
 		"spawn_agent", "spawn_subagents", "spawn_team",
 		"list_agents", "wait_agent", "read_agent_events",
 		"send_message", "send_input", "followup_task",

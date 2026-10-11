@@ -69,7 +69,7 @@ func TestBrokerBackgroundTaskPersistsStableJobAliasAcrossBrokerInstances(t *test
 	}
 	raw, meta, err := brokerOne.ExecuteToolCall(ctx, "parent-session", types.ToolCall{
 		ID:   "call-bg-1",
-		Name: ToolBackgroundTask,
+		Name: ToolJobStart,
 		Args: map[string]interface{}{
 			"command": "echo ok",
 		},
@@ -89,7 +89,7 @@ func TestBrokerBackgroundTaskPersistsStableJobAliasAcrossBrokerInstances(t *test
 		Background:          manager,
 		SessionContextStore: store,
 	}
-	outputRaw, outputMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolTaskOutput, map[string]interface{}{
+	outputRaw, outputMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolJobOutput, map[string]interface{}{
 		"job_id": result.JobID,
 	})
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestBrokerBackgroundAliasSurvivesManagerRestart(t *testing.T) {
 	brokerOne := &Broker{Background: managerOne, SessionContextStore: contextStore}
 
 	raw, meta, err := brokerOne.ExecuteToolCall(ctx, "parent-session", types.ToolCall{
-		ID: "call-bg-restart", Name: ToolBackgroundTask,
+		ID: "call-bg-restart", Name: ToolJobStart,
 		Args: map[string]interface{}{"command": "echo cross-restart"},
 	})
 	require.NoError(t, err)
@@ -129,7 +129,7 @@ func TestBrokerBackgroundAliasSurvivesManagerRestart(t *testing.T) {
 	managerTwo := background.NewManager(config)
 	defer func() { require.NoError(t, managerTwo.Close()) }()
 	brokerTwo := &Broker{Background: managerTwo, SessionContextStore: contextStore}
-	outputRaw, outputMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolTaskOutput, map[string]interface{}{
+	outputRaw, outputMeta, err := brokerTwo.Execute(ctx, "parent-session", ToolJobOutput, map[string]interface{}{
 		"job_id": alias,
 	})
 	require.NoError(t, err)

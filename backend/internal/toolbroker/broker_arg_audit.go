@@ -23,12 +23,12 @@ var brokerToolArgKeys = map[string][]string{
 	ToolEnterPlanMode:        {"plan_path", "plan_write_paths"},
 	ToolExitPlanMode:         {"decision", "notes"},
 	ToolPlanReview:           {"plan_id", "plan_path", "version", "compare_version"},
-	ToolBackgroundTask:       {"command", "cwd", "priority", "restart_policy", "startup_acceptance", "timeout_sec", "interactive", "tty", "cols", "rows"},
-	ToolTaskOutput:           {"job_id", "limit", "offset", "timeout_ms", "wait"},
-	ToolTaskKill:             {"job_id", "reason", "task_id"},
-	ToolTaskMonitor:          {"cancel", "check_after_ms", "job_id", "max_duration_ms", "task_id"},
-	ToolTaskControl:          {"action", "job_id", "reason", "task_id"},
-	ToolWriteStdin:           {"job_id", "task_id", "session_id", "chars", "input", "yield_time_ms", "close_stdin"},
+	ToolJobStart:             {"command", "cwd", "priority", "restart_policy", "startup_acceptance", "timeout_sec", "interactive", "tty", "cols", "rows"},
+	ToolJobOutput:            {"job_id", "limit", "offset", "timeout_ms", "wait"},
+	ToolJobCancel:            {"job_id", "reason", "task_id"},
+	ToolJobMonitor:           {"cancel", "check_after_ms", "job_id", "max_duration_ms", "task_id"},
+	ToolJobControl:           {"action", "job_id", "reason", "task_id"},
+	ToolJobInput:             {"job_id", "task_id", "session_id", "chars", "input", "yield_time_ms", "close_stdin"},
 	ToolSpawnAgent:           spawnAgentToolArgKeys,
 	ToolListAgents:           {"include_closed", "path_prefix"},
 	ToolSendMessage:          {"id", "message", "session_id", "target"},
@@ -89,7 +89,7 @@ func brokerIgnoredArgHint(toolName, key string) string {
 		"reasoning_effort", "thinking_effort":
 		return "delegation options are accepted by spawn_agent, spawn_subagents and spawn_team"
 	case "job_id", "job_ref":
-		return "task_output addresses a background job by job_id"
+		return "job_output addresses a background job by job_id"
 	case "task_id", "task_status":
 		return "task-scoped tools are read_task_spec, read_task_context, report_task_outcome, block_current_task and send_team_message"
 	case "team_id", "to_agent":

@@ -7136,11 +7136,11 @@ func TestFormatRuntimeLLMRequestDebugInfoIncludesContextProjection(t *testing.T)
 	started := formatRuntimeLLMRequestStartedDebugInfo(runtimeevents.Event{
 		Type: "llm.request.started",
 		Payload: map[string]interface{}{
-			"context_projection_tokens":   261559,
-			"context_projection_source":   "anchored",
-			"context_anchor_tokens":       258789,
-			"context_estimate_tokens":     168555,
-			"context_delta_tokens":        40,
+			"context_projection_tokens":         261559,
+			"context_projection_source":         "anchored",
+			"context_anchor_tokens":             258789,
+			"context_estimate_tokens":           168555,
+			"context_delta_tokens":              40,
 			"context_projection_invalid_reason": "",
 		},
 	})
@@ -7158,9 +7158,9 @@ func TestFormatRuntimeLLMRequestDebugInfoIncludesContextProjection(t *testing.T)
 	finished := formatRuntimeLLMRequestFinishedDebugInfo(runtimeevents.Event{
 		Type: "llm.request.finished",
 		Payload: map[string]interface{}{
-			"context_projection_tokens":            171384,
-			"context_projection_source":            "estimated",
-			"context_projection_invalid_reason":    "no_anchor",
+			"context_projection_tokens":         171384,
+			"context_projection_source":         "estimated",
+			"context_projection_invalid_reason": "no_anchor",
 		},
 	})
 	for _, want := range []string{

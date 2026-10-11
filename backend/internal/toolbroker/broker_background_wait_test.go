@@ -24,7 +24,7 @@ func newBackgroundTestBroker(t *testing.T) *Broker {
 
 func submitTestJob(t *testing.T, broker *Broker, command string) string {
 	t.Helper()
-	raw, _, err := broker.Execute(context.Background(), "session-wait", ToolBackgroundTask, map[string]interface{}{
+	raw, _, err := broker.Execute(context.Background(), "session-wait", ToolJobStart, map[string]interface{}{
 		"command": command,
 	})
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestTaskControlLifecycle(t *testing.T) {
 		return err == nil && job != nil && job.Status == background.StatusRunning
 	}, 30*time.Second, 100*time.Millisecond)
 
-	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolJobControl, map[string]interface{}{
 		"job_id": first,
 		"action": "requeue",
 	})
@@ -79,7 +79,7 @@ func TestTaskControlLifecycle(t *testing.T) {
 	require.NotEqual(t, first, newJobID)
 
 	// The requeued job is queued behind the blocker: abandon it.
-	raw, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+	raw, _, err = broker.Execute(ctx, "session-wait", ToolJobControl, map[string]interface{}{
 		"job_id": newJobID,
 		"action": "abandon",
 	})
@@ -89,7 +89,7 @@ func TestTaskControlLifecycle(t *testing.T) {
 	require.Equal(t, "abandoned", result["status"])
 
 	// Running jobs cannot be paused: content result with applied=false.
-	raw, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+	raw, _, err = broker.Execute(ctx, "session-wait", ToolJobControl, map[string]interface{}{
 		"job_id": blocker,
 		"action": "pause",
 	})
@@ -100,20 +100,20 @@ func TestTaskControlLifecycle(t *testing.T) {
 	message, _ := result["message"].(string)
 	require.Contains(t, message, "cannot pause")
 
-	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "session-wait", ToolJobControl, map[string]interface{}{
 		"job_id": "job_missing_control",
 		"action": "pause",
 	})
 	require.Error(t, err)
 	require.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
 
-	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "session-wait", ToolJobControl, map[string]interface{}{
 		"job_id": blocker,
 		"action": "explode",
 	})
 	require.Error(t, err)
 
-	_, _, killErr := broker.Execute(ctx, "session-wait", ToolTaskKill, map[string]interface{}{"job_id": blocker})
+	_, _, killErr := broker.Execute(ctx, "session-wait", ToolJobCancel, map[string]interface{}{"job_id": blocker})
 	require.NoError(t, killErr)
 }
 
@@ -133,7 +133,7 @@ func TestTaskOutputWaitExitMarksTerminalObserved(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	jobID := submitTestJob(t, broker, backgroundBriefCommand())
 
-	raw, metadata, err := broker.Execute(context.Background(), "session-wait", ToolTaskOutput, map[string]interface{}{
+	raw, metadata, err := broker.Execute(context.Background(), "session-wait", ToolJobOutput, map[string]interface{}{
 		"job_id":     jobID,
 		"wait":       "exit",
 		"timeout_ms": 15000,
@@ -156,7 +156,7 @@ func TestTaskOutputImmediateReadDoesNotMarkObserved(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	jobID := submitTestJob(t, broker, "echo ok")
 
-	_, metadata, err := broker.Execute(context.Background(), "session-wait", ToolTaskOutput, map[string]interface{}{
+	_, metadata, err := broker.Execute(context.Background(), "session-wait", ToolJobOutput, map[string]interface{}{
 		"job_id": jobID,
 		"wait":   "none",
 	})
@@ -179,7 +179,7 @@ func TestTaskOutputWaitExitReturnsOnTerminalState(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	jobID := submitTestJob(t, broker, "echo ok")
 
-	raw, metadata, err := broker.Execute(context.Background(), "session-wait", ToolTaskOutput, map[string]interface{}{
+	raw, metadata, err := broker.Execute(context.Background(), "session-wait", ToolJobOutput, map[string]interface{}{
 		"job_id":     jobID,
 		"wait":       "exit",
 		"timeout_ms": 10000,
@@ -195,7 +195,7 @@ func TestTaskOutputWaitTimeoutIsContentResult(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	jobID := submitTestJob(t, broker, backgroundSleeperCommand())
 
-	raw, metadata, err := broker.Execute(context.Background(), "session-wait", ToolTaskOutput, map[string]interface{}{
+	raw, metadata, err := broker.Execute(context.Background(), "session-wait", ToolJobOutput, map[string]interface{}{
 		"job_id":     jobID,
 		"wait":       "exit",
 		"timeout_ms": 1200,
@@ -208,7 +208,7 @@ func TestTaskOutputWaitTimeoutIsContentResult(t *testing.T) {
 	assert.GreaterOrEqual(t, metadata["waited_ms"], int64(0))
 
 	// 清理：确保长睡任务不会泄漏到测试结束之后。
-	_, _, killErr := broker.Execute(context.Background(), "session-wait", ToolTaskKill, map[string]interface{}{"job_id": jobID})
+	_, _, killErr := broker.Execute(context.Background(), "session-wait", ToolJobCancel, map[string]interface{}{"job_id": jobID})
 	require.NoError(t, killErr)
 }
 
@@ -216,7 +216,7 @@ func TestTaskOutputWaitRejectsUnknownMode(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	jobID := submitTestJob(t, broker, "echo ok")
 
-	_, _, err := broker.Execute(context.Background(), "session-wait", ToolTaskOutput, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "session-wait", ToolJobOutput, map[string]interface{}{
 		"job_id": jobID,
 		"wait":   "eventually",
 	})
@@ -227,11 +227,11 @@ func TestTaskOutputWaitRejectsUnknownMode(t *testing.T) {
 func TestTaskKillUnknownJobReturnsActionableError(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 
-	_, _, err := broker.Execute(context.Background(), "session-kill", ToolTaskKill, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "session-kill", ToolJobCancel, map[string]interface{}{
 		"job_id": "job_missing_1",
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "exact job_id returned by background_task")
+	assert.Contains(t, err.Error(), "exact job_id returned by job_start")
 	assert.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
 }
 
@@ -239,14 +239,14 @@ func TestTaskKillFinishedJobReportsNotCancelled(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	jobID := submitTestJob(t, broker, "echo ok")
 
-	_, _, err := broker.Execute(context.Background(), "session-kill", ToolTaskOutput, map[string]interface{}{
+	_, _, err := broker.Execute(context.Background(), "session-kill", ToolJobOutput, map[string]interface{}{
 		"job_id":     jobID,
 		"wait":       "exit",
 		"timeout_ms": 10000,
 	})
 	require.NoError(t, err)
 
-	raw, metadata, err := broker.Execute(context.Background(), "session-kill", ToolTaskKill, map[string]interface{}{
+	raw, metadata, err := broker.Execute(context.Background(), "session-kill", ToolJobCancel, map[string]interface{}{
 		"task_id": jobID,
 		"reason":  "test cleanup",
 	})
@@ -262,7 +262,7 @@ func TestTaskKillRunningJobCancels(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	jobID := submitTestJob(t, broker, backgroundSleeperCommand())
 
-	raw, metadata, err := broker.Execute(context.Background(), "session-kill", ToolTaskKill, map[string]interface{}{
+	raw, metadata, err := broker.Execute(context.Background(), "session-kill", ToolJobCancel, map[string]interface{}{
 		"job_id": jobID,
 	})
 	require.NoError(t, err)
@@ -272,7 +272,7 @@ func TestTaskKillRunningJobCancels(t *testing.T) {
 	assert.Equal(t, true, metadata["cancelled"])
 
 	// cancel 后应能观察到终态（轮询等待，避免依赖固定 sleep）。
-	_, waitMetadata, waitErr := broker.Execute(context.Background(), "session-kill", ToolTaskOutput, map[string]interface{}{
+	_, waitMetadata, waitErr := broker.Execute(context.Background(), "session-kill", ToolJobOutput, map[string]interface{}{
 		"job_id":     jobID,
 		"wait":       "exit",
 		"timeout_ms": 10000,

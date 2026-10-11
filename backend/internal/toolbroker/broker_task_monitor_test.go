@@ -17,7 +17,7 @@ func TestTaskMonitorSchedulesClampedCheck(t *testing.T) {
 	jobID := submitTestJob(t, broker, backgroundSleeperCommand())
 	ctx := context.Background()
 
-	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{
 		"job_id":         jobID,
 		"check_after_ms": 100,
 	})
@@ -32,7 +32,7 @@ func TestTaskMonitorSchedulesClampedCheck(t *testing.T) {
 	assert.Equal(t, 1, broker.Background.ActiveMonitorCount())
 
 	// 清理：取消长睡 job（终态会自动解除巡检计时器）。
-	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskKill, map[string]interface{}{"job_id": jobID})
+	_, _, err = broker.Execute(ctx, "session-wait", ToolJobCancel, map[string]interface{}{"job_id": jobID})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return broker.Background.ActiveMonitorCount() == 0
@@ -44,7 +44,7 @@ func TestTaskMonitorArmsMaxDurationWatchdog(t *testing.T) {
 	jobID := submitTestJob(t, broker, backgroundSleeperCommand())
 	ctx := context.Background()
 
-	raw, _, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{
 		"job_id":          jobID,
 		"check_after_ms":  600000,
 		"max_duration_ms": 1000,
@@ -55,7 +55,7 @@ func TestTaskMonitorArmsMaxDurationWatchdog(t *testing.T) {
 	assert.Equal(t, taskMonitorMaxDurationMinMs, result["max_duration_ms"], "watchdogs clamp to the minimum")
 	assert.Contains(t, result["message"], background.CancelSourceMonitorMaxDuration)
 
-	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskKill, map[string]interface{}{"job_id": jobID})
+	_, _, err = broker.Execute(ctx, "session-wait", ToolJobCancel, map[string]interface{}{"job_id": jobID})
 	require.NoError(t, err)
 }
 
@@ -70,7 +70,7 @@ func TestTaskMonitorReportsFinishedJobAsContent(t *testing.T) {
 		return err == nil && job != nil && background.IsTerminalStatus(job.Status)
 	}, 15*time.Second, 50*time.Millisecond, "job should finish")
 
-	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{
 		"job_id":         jobID,
 		"check_after_ms": 5000,
 	})
@@ -88,11 +88,11 @@ func TestTaskMonitorRepairHints(t *testing.T) {
 	broker := newBackgroundTestBroker(t)
 	ctx := context.Background()
 
-	_, _, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{})
+	_, _, err := broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "job_id is required")
 
-	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{"job_id": "job-not-real"})
+	_, _, err = broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{"job_id": "job-not-real"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exact job_id")
 }
@@ -104,14 +104,14 @@ func TestTaskMonitorCancelDisarmsWithoutTouchingTheJob(t *testing.T) {
 	jobID := submitTestJob(t, broker, backgroundSleeperCommand())
 	ctx := context.Background()
 
-	_, _, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+	_, _, err := broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{
 		"job_id":         jobID,
 		"check_after_ms": 600000,
 	})
 	require.NoError(t, err)
 	require.Equal(t, 1, broker.Background.ActiveMonitorCount())
 
-	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{
 		"job_id": jobID,
 		"cancel": true,
 	})
@@ -125,7 +125,7 @@ func TestTaskMonitorCancelDisarmsWithoutTouchingTheJob(t *testing.T) {
 	assert.Zero(t, broker.Background.ActiveMonitorCount())
 
 	// 幂等：再撤一次是 0，而不是错误。
-	raw, _, err = broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+	raw, _, err = broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{
 		"job_id": jobID,
 		"cancel": true,
 	})
@@ -135,7 +135,7 @@ func TestTaskMonitorCancelDisarmsWithoutTouchingTheJob(t *testing.T) {
 	assert.Equal(t, 0, result["cancelled_monitors"])
 
 	// 混用排期参数：明确拒绝，避免「替换还是追加」的歧义。
-	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+	_, _, err = broker.Execute(ctx, "session-wait", ToolJobMonitor, map[string]interface{}{
 		"job_id":         jobID,
 		"cancel":         true,
 		"check_after_ms": 60000,
@@ -148,6 +148,6 @@ func TestTaskMonitorCancelDisarmsWithoutTouchingTheJob(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, background.IsTerminalStatus(job.Status))
 
-	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskKill, map[string]interface{}{"job_id": jobID})
+	_, _, err = broker.Execute(ctx, "session-wait", ToolJobCancel, map[string]interface{}{"job_id": jobID})
 	require.NoError(t, err)
 }

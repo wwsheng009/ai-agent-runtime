@@ -61,7 +61,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"version":         toolArgFieldNumber,
 		"compare_version": toolArgFieldNumber,
 	},
-	ToolBackgroundTask: {
+	ToolJobStart: {
 		"command":            toolArgFieldString,
 		"cwd":                toolArgFieldString,
 		"restart_policy":     toolArgFieldString,
@@ -73,32 +73,32 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"cols":               toolArgFieldNumber,
 		"rows":               toolArgFieldNumber,
 	},
-	ToolTaskOutput: {
+	ToolJobOutput: {
 		"job_id":     toolArgFieldString,
 		"offset":     toolArgFieldNumber,
 		"limit":      toolArgFieldNumber,
 		"wait":       toolArgFieldString,
 		"timeout_ms": toolArgFieldNumber,
 	},
-	ToolTaskKill: {
+	ToolJobCancel: {
 		"job_id":  toolArgFieldString,
 		"task_id": toolArgFieldString,
 		"reason":  toolArgFieldString,
 	},
-	ToolTaskMonitor: {
+	ToolJobMonitor: {
 		"cancel":          toolArgFieldBool,
 		"job_id":          toolArgFieldString,
 		"task_id":         toolArgFieldString,
 		"check_after_ms":  toolArgFieldNumber,
 		"max_duration_ms": toolArgFieldNumber,
 	},
-	ToolTaskControl: {
+	ToolJobControl: {
 		"job_id":  toolArgFieldString,
 		"task_id": toolArgFieldString,
 		"action":  toolArgFieldString,
 		"reason":  toolArgFieldString,
 	},
-	ToolWriteStdin: {
+	ToolJobInput: {
 		"job_id":        toolArgFieldString,
 		"task_id":       toolArgFieldString,
 		"session_id":    toolArgFieldString,
@@ -363,7 +363,7 @@ var startupAcceptanceFieldKinds = map[string]string{
 }
 
 func validateBrokerToolNestedArgKinds(name string, args map[string]interface{}) error {
-	if name != ToolBackgroundTask {
+	if name != ToolJobStart {
 		return nil
 	}
 	startup, ok := args["startup_acceptance"].(map[string]interface{})

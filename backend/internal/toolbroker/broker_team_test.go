@@ -148,7 +148,7 @@ func TestBrokerDefinitionsDisableEmptyReplayCacheForVolatileReads(t *testing.T) 
 	store := newTeamStore(t)
 	broker := &Broker{TeamStore: store, AgentSessions: &fakeAgentSessionController{}}
 	wantVolatile := map[string]bool{
-		ToolTaskOutput:        false,
+		ToolJobOutput:         false,
 		ToolListAgents:        false,
 		ToolWaitAgent:         false,
 		ToolReadAgentEvents:   false,

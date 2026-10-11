@@ -29,7 +29,7 @@ func TestBrokerWriteStdinRoundTrip(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 	broker := &Broker{Background: manager}
 
-	raw, _, err := broker.Execute(ctx, "session-write-stdin", ToolBackgroundTask, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-write-stdin", ToolJobStart, map[string]interface{}{
 		"command":     brokerInteractiveEchoCommand(),
 		"interactive": true,
 	})
@@ -38,7 +38,7 @@ func TestBrokerWriteStdinRoundTrip(t *testing.T) {
 	require.True(t, ok)
 	require.NotEmpty(t, result.JobID)
 
-	out, metadata, err := broker.Execute(ctx, "session-write-stdin", ToolWriteStdin, map[string]interface{}{
+	out, metadata, err := broker.Execute(ctx, "session-write-stdin", ToolJobInput, map[string]interface{}{
 		"job_id":        result.JobID,
 		"chars":         "hello\n",
 		"yield_time_ms": 5000,
@@ -56,7 +56,7 @@ func TestBrokerWriteStdinOnOneShotJobIsContentResult(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, manager.Close()) })
 	broker := &Broker{Background: manager}
 
-	raw, _, err := broker.Execute(ctx, "session-one-shot", ToolBackgroundTask, map[string]interface{}{
+	raw, _, err := broker.Execute(ctx, "session-one-shot", ToolJobStart, map[string]interface{}{
 		"command": "echo ok",
 	})
 	require.NoError(t, err)
@@ -64,7 +64,7 @@ func TestBrokerWriteStdinOnOneShotJobIsContentResult(t *testing.T) {
 	require.True(t, ok)
 	require.NotEmpty(t, result.JobID)
 
-	out, metadata, err := broker.Execute(ctx, "session-one-shot", ToolWriteStdin, map[string]interface{}{
+	out, metadata, err := broker.Execute(ctx, "session-one-shot", ToolJobInput, map[string]interface{}{
 		"job_id": result.JobID,
 		"chars":  "x\n",
 	})

@@ -240,7 +240,7 @@ func TestGateway_BackgroundTaskResultPreservesJobIDInJSONSummary(t *testing.T) {
 
 	envelope, err := gateway.Process(context.Background(), RawToolResult{
 		SessionID:  "session-background",
-		ToolName:   toolbroker.ToolBackgroundTask,
+		ToolName:   toolbroker.ToolJobStart,
 		ToolCallID: "call-background",
 		Content: toolbroker.BackgroundTaskResult{
 			JobID:         "job_test123",

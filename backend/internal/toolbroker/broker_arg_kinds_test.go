@@ -31,13 +31,13 @@ func TestValidateBrokerToolArgKindsRejectsMismatchedKinds(t *testing.T) {
 		{"ask required as string", ToolAskUserQuestion, "required", "false", toolArgFieldBool},
 		{"wait agent id as number", ToolWaitAgent, "id", 42, toolArgFieldString},
 		{"read events session_id as bool", ToolReadAgentEvents, "session_id", true, toolArgFieldString},
-		{"task_output job_id as number", ToolTaskOutput, "job_id", 7, toolArgFieldString},
+		{"task_output job_id as number", ToolJobOutput, "job_id", 7, toolArgFieldString},
 		{"wait_team team_id as number", ToolWaitTeam, "team_id", 3, toolArgFieldString},
 		{"resolve request_id as number", ToolResolveAgentApproval, "request_id", 9, toolArgFieldString},
 		{"control notification_id as number", ToolControlDescendant, "notification_id", 1, toolArgFieldString},
 		{"ack decision as number", ToolAckLifecycle, "decision", 1, toolArgFieldString},
 		{"patched_args as stringified object", ToolResolveAgentApproval, "patched_args", `{"command":"rm -rf /"}`, toolArgFieldObject},
-		{"startup_acceptance as stringified object", ToolBackgroundTask, "startup_acceptance", `{"probe":"process"}`, toolArgFieldObject},
+		{"startup_acceptance as stringified object", ToolJobStart, "startup_acceptance", `{"probe":"process"}`, toolArgFieldObject},
 		{"send_team_message metadata as string", ToolSendTeamMessage, "metadata", "kind=note", toolArgFieldObject},
 		{"ids with non-string item", ToolWaitAgent, "ids", []interface{}{"child-1", 2}, toolArgFieldStringOrList},
 		{"paths as number", ToolApplyAgentWorktree, "paths", 3, toolArgFieldStringOrList},
@@ -73,7 +73,7 @@ func TestValidateBrokerToolArgKindsRejectsNestedStartupAcceptanceKinds(t *testin
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateBrokerToolArgKinds(ToolBackgroundTask, map[string]interface{}{
+			err := validateBrokerToolArgKinds(ToolJobStart, map[string]interface{}{
 				"command":            "echo hi",
 				"startup_acceptance": tc.startup,
 			})
@@ -105,13 +105,13 @@ func TestValidateBrokerToolArgKindsAcceptsDocumentedKinds(t *testing.T) {
 		{"task context flags", ToolReadTaskContext, map[string]interface{}{"include_mailbox": true, "include_dependencies": false}},
 		{"ack until duration", ToolAckLifecycle, map[string]interface{}{"notification_id": "n-1", "decision": "defer", "until": "30m"}},
 		{"patched_args object", ToolResolveAgentApproval, map[string]interface{}{"allow": true, "request_id": "req-1", "patched_args": map[string]interface{}{"command": "echo hi"}}},
-		{"startup_acceptance object", ToolBackgroundTask, map[string]interface{}{"command": "echo hi", "startup_acceptance": map[string]interface{}{"probe": "process", "timeout_ms": 1500}}},
+		{"startup_acceptance object", ToolJobStart, map[string]interface{}{"command": "echo hi", "startup_acceptance": map[string]interface{}{"probe": "process", "timeout_ms": 1500}}},
 		{"ids array", ToolWaitAgent, map[string]interface{}{"ids": []interface{}{"child-1", "child-2"}}},
 		{"session_ids string", ToolWaitAgent, map[string]interface{}{"session_ids": "/root/worker"}},
 		{"paths string slice", ToolApplyAgentWorktree, map[string]interface{}{"paths": []string{"a.go"}}},
 		{"suggestions array", ToolAskUserQuestion, map[string]interface{}{"prompt": "which?", "suggestions": []interface{}{"a", "b"}}},
 		{"metadata object", ToolSendTeamMessage, map[string]interface{}{"body": "hi", "metadata": map[string]interface{}{"kind": "note"}}},
-		{"explicit null stays lenient", ToolTaskOutput, map[string]interface{}{"job_id": nil}},
+		{"explicit null stays lenient", ToolJobOutput, map[string]interface{}{"job_id": nil}},
 		{"empty args stay lenient", ToolReadMailboxDigest, map[string]interface{}{}},
 		{"unknown key stays advisory", ToolReadMailboxDigest, map[string]interface{}{"mark_read": true, "extra": 1}},
 	}
