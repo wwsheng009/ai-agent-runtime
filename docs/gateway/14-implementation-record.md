@@ -67,6 +67,29 @@ go build -o bin/aicli-gateway ./cmd/gateway   # 在 backend/ 下
 > 参数说明：网关无子命令；文档中的 `serve` 写法是**可选的位置参数**（会被忽略并继续解析后续 `--flags`）。
 > 其它未知位置参数会直接报错退出（exit 2），不会静默使用默认值启动。
 
+完整参数参考始终以 `aicli-gateway --help` 为准（含数据文件清单与退出码说明）。逐参数补充语义：
+
+| 参数 | 默认 | 语义要点 |
+|------|------|----------|
+| `--listen` | `127.0.0.1:8090` | 同时承载 `/gw/agent` 隧道、控制台与反代；公网部署必须配 TLS 或前置反代 |
+| `--public-base-url` | 空 | 拼接 console URL / Web Push 点击跳转；不配则通知无跳转链接 |
+| `--owner-password` | 空 | **空=控制台/owner API 完全无认证（dev only）**；配置后存 PBKDF 哈希，不落盘明文 |
+| `--session-ttl` | `12h` | owner 登录会话时长 |
+| `--device-token` | 空 | 静态共享令牌；**与设备令牌并存**（store 命中或静态匹配任一通过）；两者皆空且 store 为空=隧道放行（dev only） |
+| `--data-dir` | `./data` | 状态根目录，见 §2.1.1；主备部署须共享其内容，**VAPID 密钥必须一致** |
+| `--tls-cert/--tls-key` | 空 | 成对出现才启用 https；只配其一直接拒绝启动 |
+| `--trusted-proxies` | `127.0.0.1/32,::1/128` | X-Forwarded-For 仅信这些来源；前置反代必须把反代网段加进来，否则限流/封禁按反代 IP 计 |
+| `--rate-limit` | `0`（关） | 每 IP 每分钟对 proxy + 隧道升级限流；超限计惩罚并返回 429 |
+| `--ban-threshold/--ban-window/--ban-ttl` | `0`（关） | 窗口内惩罚达阈值自动封禁；解除走控制台误封恢复（runbook §9） |
+| `--metrics-token` | 空 | `/metrics` bearer；空=仅回环可抓取 |
+| `--heartbeat-interval` | `0` | 写入 WELCOME 建议值；0 用 agent 默认（30s） |
+| `--push-enabled/--vapid-subject` | `true` / `mailto:…` | 关闭后控制台隐藏订阅入口；subject 需 mailto: 或 https: |
+| `--presence-ttl` | `90s` | 控制台"正在观看"抑制时长；期间该会话不推送且不记入去重快照 |
+| `--notify-coalesce-window` | `30s` | 低优先（completed/waiting）合并窗；0=逐条即发；高优先（approval/question/error）不受影响 |
+| `--notify-quiet-hours` | 空 | `HH:MM-HH:MM` 逗号分隔，本地时间，支持跨夜；仅静音低优先 |
+
+退出码：`0` 正常运行结束或优雅下线；`1` 运行失败（端口占用、数据文件损坏等）；`2` 用法错误（未知位置参数、flag 解析失败）。
+
 ### 2.1.1 数据文件与重载语义
 
 `--data-dir`（默认 `./data`）下的状态文件均在**启动时一次性加载**，运行期间手工修改**不会**被重新读取（排障时需先停网关再改文件）：
