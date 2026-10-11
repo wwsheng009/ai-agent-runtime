@@ -2883,6 +2883,11 @@ func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *
 		if runtimeConfig.Agent.MaxParallelToolCalls > 0 {
 			config.MaxParallelToolCalls = runtimeConfig.Agent.MaxParallelToolCalls
 		}
+		// context.accountingMode: provider_first（默认）| estimate_only（回退）。
+		// 未配置时保持空值，由 loop 回退到 agent options / 默认 provider_first。
+		if mode := strings.TrimSpace(runtimeConfig.Context.AccountingMode); mode != "" {
+			config.ContextAccountingMode = mode
+		}
 	}
 	// PR-4 §6.4（主 chat 接线）：--budget-tokens → ChatSession.TurnBudgetTokens →
 	// LoopReActConfig.TurnBudgetTokens；调用方显式的 loopRunOptions.BudgetTokens

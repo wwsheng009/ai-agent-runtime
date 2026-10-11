@@ -172,10 +172,26 @@ func TestIsContextWindowErrorSupportsAgentLevelRecovery(t *testing.T) {
 		"HTTP 502: Your input exceeds the context window of this model",
 		"maximum context length is 128000 tokens",
 		"prompt is too long",
+		// 2026-10-11 incident (commandgo/ling-3.1-flash): the provider 400
+		// body embedded the input size and the model window.
+		`HTTP 400: {"error":{"message":"{\"code\":\"500\",\"message\":\"{code=400, message=The input (262948 tokens) is longer than the model's context length (262144 tokens)., param=null, type=BadRequestError, integerCode=400}"}}`,
 	} {
 		require.True(t, IsContextWindowError(fmt.Errorf("%s", message)), message)
 	}
 	require.False(t, IsContextWindowError(fmt.Errorf("HTTP 502: upstream unavailable")))
+}
+
+func TestParseContextWindowExceededReadsProviderNumbers(t *testing.T) {
+	err := fmt.Errorf(`HTTP 400: {"error":{"message":"{\"code\":\"500\",\"message\":\"{code=400, message=The input (262948 tokens) is longer than the model's context length (262144 tokens)., param=null, type=BadRequestError, integerCode=400} trace_id: abc\"}"}}`)
+	input, window, ok := ParseContextWindowExceeded(err)
+	require.True(t, ok)
+	assert.Equal(t, 262948, input)
+	assert.Equal(t, 262144, window)
+
+	_, _, ok = ParseContextWindowExceeded(fmt.Errorf("HTTP 400: invalid request"))
+	assert.False(t, ok)
+	_, _, ok = ParseContextWindowExceeded(nil)
+	assert.False(t, ok)
 }
 
 func TestParseMaxTokensLimitError_AnthropicClaudeFableStyle(t *testing.T) {

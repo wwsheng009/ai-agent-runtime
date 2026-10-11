@@ -53,6 +53,10 @@ func (m *MockLLMProviderForChat) Call(ctx context.Context, req *llm.LLMRequest) 
 			TotalTokens:      promptTokens + completionTokens,
 		},
 		Model: "gpt-4",
+		// Real provider wrappers declare the usage source; the mock must too,
+		// otherwise the context ledger cannot distinguish reported usage from
+		// locally back-filled estimates.
+		Metadata: map[string]interface{}{"usage_source": "provider_reported"},
 	}
 
 	return response, nil

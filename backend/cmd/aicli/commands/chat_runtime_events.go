@@ -5604,6 +5604,13 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	// mutable UI/transcript paths below remain guarded by turn ownership.
 	b.handleStructuredLogEvent(event)
 	b.updateComposerAgentStageForAmbientPrimaryRunEvent(event)
+	// Context accounting is session-scoped observability, not viewport
+	// mutation: apply provider usage / compaction accounting before the
+	// turn-ownership gate so a mismatched active turn cannot suppress it
+	// (2026-10-11 incident: suppressed llm.request.* events left the status
+	// bar on the local estimate while the provider counted 261K/262K).
+	b.applyLLMRequestStatus(event)
+	b.applySessionCompactStatus(event)
 	if b.shouldSuppressMismatchedPrimaryTurnEvent(event) {
 		if isChatRenderDataPlaneSuppressedEvent(event.Type) {
 			// Mirror/diagnostic events (aicli.chat.dynamic_status, input.queue.*,
@@ -5625,8 +5632,6 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.session.ExecEventBridge != nil && !b.isForeignSessionContentEvent(event) {
 		b.session.ExecEventBridge.HandleRuntimeEvent(event)
 	}
-	b.applyLLMRequestStatus(event)
-	b.applySessionCompactStatus(event)
 	b.observeTurnBudgetWarning(event)
 	if b.shouldSuppressLatePrimaryRunEvent(event) {
 		return
@@ -6384,7 +6389,11 @@ func (b *chatRuntimeEventBridge) clearClosingTail(event runtimeevents.Event) {
 }
 
 func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event) {
-	if b == nil || b.session == nil || !b.isRunActive() || !b.isPrimarySessionEvent(event) {
+	// Provider usage accounting is session-scoped ("last confirmed context"),
+	// not run-scoped: a late or mismatched-turn usage report must still land so
+	// the context display and any downstream consumer track real prompt sizes
+	// (2026-10-11 incident). Turn ownership still guards all render paths.
+	if b == nil || b.session == nil || !b.isPrimarySessionEvent(event) {
 		return
 	}
 	switch event.Type {
@@ -10723,10 +10732,36 @@ func formatRuntimeLLMRequestStartedDebugInfo(event runtimeevents.Event) string {
 	if fingerprint := strings.TrimSpace(payloadStringValue(event.Payload["tool_surface_fingerprint"])); fingerprint != "" {
 		parts = append(parts, "tool_surface_fingerprint="+truncateChatRuntimeText(fingerprint, 80))
 	}
+	parts = appendContextProjectionDebugFields(parts, event.Payload)
 	if len(parts) == 0 {
 		return ""
 	}
 	return "[llm-debug] request_started " + strings.Join(parts, " ")
+}
+
+// appendContextProjectionDebugFields mirrors the context ledger's E/A/P
+// decision inputs into the [llm-debug] lines so any send-gate decision is
+// explainable from the session log alone (2026-10-11 incident fix).
+func appendContextProjectionDebugFields(parts []string, payload map[string]interface{}) []string {
+	if len(payload) == 0 {
+		return parts
+	}
+	if tokens := intPayloadValue(payload, "context_projection_tokens"); tokens > 0 {
+		parts = append(parts, fmt.Sprintf("context_projection_tokens=%d", tokens))
+	}
+	if source := strings.TrimSpace(payloadStringValue(payload["context_projection_source"])); source != "" {
+		parts = append(parts, "context_projection_source="+truncateChatRuntimeText(source, 40))
+	}
+	if anchor := intPayloadValue(payload, "context_anchor_tokens"); anchor > 0 {
+		parts = append(parts, fmt.Sprintf("context_anchor_tokens=%d", anchor))
+	}
+	if estimate := intPayloadValue(payload, "context_estimate_tokens"); estimate > 0 {
+		parts = append(parts, fmt.Sprintf("context_estimate_tokens=%d", estimate))
+	}
+	if invalid := strings.TrimSpace(payloadStringValue(payload["context_projection_invalid_reason"])); invalid != "" {
+		parts = append(parts, "context_projection_invalid_reason="+truncateChatRuntimeText(invalid, 40))
+	}
+	return parts
 }
 
 func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string {
@@ -10788,6 +10823,7 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 	if errText := strings.TrimSpace(payloadStringValue(event.Payload["error"])); errText != "" {
 		parts = append(parts, "error="+strconv.Quote(truncateChatRuntimeText(errText, 240)))
 	}
+	parts = appendContextProjectionDebugFields(parts, event.Payload)
 	if len(parts) == 0 {
 		return ""
 	}

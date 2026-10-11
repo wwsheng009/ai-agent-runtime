@@ -48,6 +48,14 @@ func ToolDefinitionsFingerprint(tools []types.ToolDefinition) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
+// PromptMessageFingerprint exposes the message fingerprint used by prompt-cache
+// prefix validation and context-ledger anchor identity. Hosts (e.g. the chat
+// actor pre-turn compaction) must use the same function so anchors written by
+// the loop validate across layers.
+func PromptMessageFingerprint(messages []types.Message) string {
+	return promptMessageFingerprint(messages)
+}
+
 // BuildToolSurfaceEligibilityKey captures diagnostics for the inputs that
 // selected a durable session-stable tool surface. A changed key does not mutate
 // an existing cache lane: permission/policy changes are enforced at execution

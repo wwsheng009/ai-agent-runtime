@@ -7129,6 +7129,51 @@ func TestFormatRuntimeLLMRequestStartedDebugInfoIncludesToolSurfaceFingerprint(t
 	}
 }
 
+// TestFormatRuntimeLLMRequestDebugInfoIncludesContextProjection pins the P2
+// observability slice: the E/A/P decision inputs must be readable from the
+// [llm-debug] lines alone (2026-10-11 incident fix).
+func TestFormatRuntimeLLMRequestDebugInfoIncludesContextProjection(t *testing.T) {
+	started := formatRuntimeLLMRequestStartedDebugInfo(runtimeevents.Event{
+		Type: "llm.request.started",
+		Payload: map[string]interface{}{
+			"context_projection_tokens":   261559,
+			"context_projection_source":   "anchored",
+			"context_anchor_tokens":       258789,
+			"context_estimate_tokens":     168555,
+			"context_delta_tokens":        40,
+			"context_projection_invalid_reason": "",
+		},
+	})
+	for _, want := range []string{
+		"context_projection_tokens=261559",
+		"context_projection_source=anchored",
+		"context_anchor_tokens=258789",
+		"context_estimate_tokens=168555",
+	} {
+		if !strings.Contains(started, want) {
+			t.Fatalf("expected %q in started debug info, got %q", want, started)
+		}
+	}
+
+	finished := formatRuntimeLLMRequestFinishedDebugInfo(runtimeevents.Event{
+		Type: "llm.request.finished",
+		Payload: map[string]interface{}{
+			"context_projection_tokens":            171384,
+			"context_projection_source":            "estimated",
+			"context_projection_invalid_reason":    "no_anchor",
+		},
+	})
+	for _, want := range []string{
+		"context_projection_tokens=171384",
+		"context_projection_source=estimated",
+		"context_projection_invalid_reason=no_anchor",
+	} {
+		if !strings.Contains(finished, want) {
+			t.Fatalf("expected %q in finished debug info, got %q", want, finished)
+		}
+	}
+}
+
 func TestRenderChatRuntimeEventLLMQuotaFailureIsActionable(t *testing.T) {
 	got := renderChatRuntimeEvent(runtimeevents.Event{
 		Type: "llm.request.finished",

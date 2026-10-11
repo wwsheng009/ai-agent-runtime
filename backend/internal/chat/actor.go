@@ -17,6 +17,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextledger"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
@@ -35,6 +36,20 @@ import (
 )
 
 const aicliRuntimeContextTokenCountKey = "aicli_context_token_count"
+
+// Structured context-ledger anchor keys. The plain token-count key above is
+// kept for backward compatibility (older sessions and the CLI restore path);
+// the structured keys carry the prompt identity that makes the anchor
+// verifiable across turns.
+const (
+	aicliRuntimeContextTokenFingerprintKey     = "aicli_context_token_fingerprint"
+	aicliRuntimeContextTokenMessageCountKey    = "aicli_context_token_message_count"
+	aicliRuntimeContextTokenMessageEstimateKey = "aicli_context_token_message_estimate"
+	aicliRuntimeContextTokenToolFingerprintKey = "aicli_context_token_tool_fingerprint"
+	aicliRuntimeContextTokenEpochKey           = "aicli_context_token_epoch"
+	aicliRuntimeContextTokenProviderKey        = "aicli_context_token_provider"
+	aicliRuntimeContextTokenModelKey           = "aicli_context_token_model"
+)
 
 const interruptedRunReplyGrace = 250 * time.Millisecond
 
@@ -2176,17 +2191,86 @@ func setRuntimeSessionObservedTokenUsage(session *Session, value int) {
 	delete(session.Metadata.Context, aicliRuntimeContextTokenCountKey)
 }
 
-func runtimeSessionActiveContextTokens(runtime *llm.LLMRuntime, session *Session, history []runtimetypes.Message) (int, bool) {
-	historyTokens := countRuntimeChatContextTokens(runtime, history)
-	observed, ok := runtimeSessionObservedContextTokenUsage(session)
-	if !ok || observed <= 0 {
-		return historyTokens, false
+// storeRuntimeSessionContextObservation persists one provider-observed anchor
+// (with its prompt identity) into the runtime session. Called once per LLM
+// call from the loop; the plain token-count key stays for compatibility.
+func storeRuntimeSessionContextObservation(session *Session, observation contextledger.Observation) {
+	if session == nil {
+		return
 	}
-	observed += countRuntimeChatPendingTokensAfterLastModelGenerated(runtime, history)
-	if historyTokens > observed {
-		observed = historyTokens
+	setRuntimeSessionObservedTokenUsage(session, observation.PromptTokens)
+	if session.Metadata.Context == nil {
+		session.Metadata.Context = make(map[string]interface{})
 	}
-	return observed, true
+	ctx := session.Metadata.Context
+	ctx[aicliRuntimeContextTokenFingerprintKey] = observation.Fingerprint
+	ctx[aicliRuntimeContextTokenMessageCountKey] = observation.MessageCount
+	ctx[aicliRuntimeContextTokenMessageEstimateKey] = observation.MessageEstimate
+	ctx[aicliRuntimeContextTokenToolFingerprintKey] = observation.ToolFingerprint
+	ctx[aicliRuntimeContextTokenEpochKey] = observation.Epoch
+	ctx[aicliRuntimeContextTokenProviderKey] = observation.Provider
+	ctx[aicliRuntimeContextTokenModelKey] = observation.Model
+}
+
+// loadRuntimeSessionContextObservation reads a structurally verifiable anchor.
+// Legacy anchors that only carry a token count return false; callers fall back
+// to the legacy max(anchor, estimate) behavior for those.
+func loadRuntimeSessionContextObservation(session *Session) (contextledger.Observation, bool) {
+	if session == nil || session.Metadata.Context == nil {
+		return contextledger.Observation{}, false
+	}
+	ctx := session.Metadata.Context
+	observation := contextledger.Observation{
+		PromptTokens:    contextIntValue(ctx, aicliRuntimeContextTokenCountKey),
+		MessageEstimate: contextIntValue(ctx, aicliRuntimeContextTokenMessageEstimateKey),
+		Fingerprint:     contextStringValue(ctx, aicliRuntimeContextTokenFingerprintKey),
+		MessageCount:    contextIntValue(ctx, aicliRuntimeContextTokenMessageCountKey),
+		ToolFingerprint: contextStringValue(ctx, aicliRuntimeContextTokenToolFingerprintKey),
+		Epoch:           contextIntValue(ctx, aicliRuntimeContextTokenEpochKey),
+		Provider:        contextStringValue(ctx, aicliRuntimeContextTokenProviderKey),
+		Model:           contextStringValue(ctx, aicliRuntimeContextTokenModelKey),
+		Source:          contextledger.SourceProviderReported,
+	}
+	if !observation.Valid() {
+		return contextledger.Observation{}, false
+	}
+	return observation, true
+}
+
+// runtimeSessionActiveContextTokens returns the pre-turn context measurement.
+// It uses the same anchored projection as the ReAct loop: provider anchor +
+// estimated delta, floored by the local full estimate. Legacy token-count-only
+// anchors keep the historical max(anchor + pending, estimate) behavior.
+func runtimeSessionActiveContextTokens(runtime *llm.LLMRuntime, session *Session, history []runtimetypes.Message, toolSchemaTokens int, toolFingerprint, provider, model string) (int, bool) {
+	messageEstimate := countRuntimeChatContextTokens(runtime, history)
+	if toolSchemaTokens < 0 {
+		toolSchemaTokens = 0
+	}
+	estimate := messageEstimate + toolSchemaTokens
+
+	observation, ok := loadRuntimeSessionContextObservation(session)
+	if !ok {
+		if observed, hasObserved := runtimeSessionObservedContextTokenUsage(session); hasObserved && observed > 0 {
+			observed += countRuntimeChatPendingTokensAfterLastModelGenerated(runtime, history)
+			if estimate > observed {
+				observed = estimate
+			}
+			return observed, true
+		}
+		return estimate, false
+	}
+
+	epoch := contextIntValue(session.Metadata.Context, agent.PromptCacheEpochSessionContextKey)
+	projection := contextledger.Project(observation, true, agent.PromptMessageFingerprint, contextledger.ProjectInput{
+		Messages:        history,
+		MessageEstimate: messageEstimate,
+		ToolTokens:      toolSchemaTokens,
+		ToolFingerprint: toolFingerprint,
+		Epoch:           epoch,
+		Provider:        provider,
+		Model:           model,
+	})
+	return projection.Tokens, true
 }
 
 func countRuntimeChatPendingTokensAfterLastModelGenerated(runtime *llm.LLMRuntime, history []runtimetypes.Message) int {
@@ -2318,19 +2402,24 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		return
 	}
 
-	observedTokens, hasObservedTokens := runtimeSessionActiveContextTokens(a.llmRuntime, session, history)
 	// The compaction trigger must measure the same quantity as the prompt
 	// preflight gate (messages + tool schemas against window − reserved output);
 	// otherwise a history reads "below_limit" and the next provider request is
 	// still rejected before it is sent (2026-09-28 incident).
 	tools := a.compactToolSurface(ctx, turnID)
 	inputBudget, toolSchemaTokens := agent.CompactTriggerBudget(a.llmRuntime, a.agent, tools)
+	compactProvider := firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider())
+	compactModel := firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel())
+	observedTokens, hasObservedTokens := runtimeSessionActiveContextTokens(
+		a.llmRuntime, session, history, toolSchemaTokens,
+		agent.ToolDefinitionsFingerprint(tools), compactProvider, compactModel,
+	)
 	runtime := compactruntime.New(a.llmRuntime, manager)
 	compactRequest := compactruntime.Request{
 		SessionID:             a.id,
 		TaskID:                taskID,
-		Provider:              firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
-		Model:                 firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
+		Provider:              compactProvider,
+		Model:                 compactModel,
 		History:               history,
 		KeepRecentMessages:    keepRecent,
 		Phase:                 compactruntime.PhasePreTurn,
@@ -3028,13 +3117,10 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				stripMessagesWithMetadataKeys(session, run.stripMetadataKeys)
 			}
 			if !approvalDetached && a.sessionRunOwned(run) {
-				// Provider-reported usage is the authoritative context
-				// measurement. Persist it together with the turn history so the
-				// next pre-turn auto-compact trigger can compare against real
-				// prompt_tokens instead of the heuristic estimator.
-				if execErr == nil && result != nil && result.Usage != nil && result.Usage.PromptTokens > 0 {
-					setRuntimeSessionObservedTokenUsage(session, result.Usage.PromptTokens)
-				}
+				// Context anchors are written per LLM call by the loop
+				// (cfg.ObserveContextUsage). Do NOT anchor on result.Usage:
+				// it is the run-level cumulative usage across all steps and
+				// would poison the anchor (2026-10-11 incident review).
 				// Persist history before exposing an idle/stopped runtime state.
 				// Once the state is non-busy, a successor is allowed to load and
 				// append to this durable snapshot.
@@ -3561,6 +3647,16 @@ func (a *SessionActor) historyCheckpointLoopConfig(routeOverride *RunRouteOverri
 	}
 	if session == nil {
 		return cfg
+	}
+	// Context ledger wiring (2026-10-11 incident): the loop reports one
+	// provider-observed anchor per LLM call; persist it on the runtime session
+	// so mid-turn and next-turn decisions project from real usage instead of
+	// the local estimator alone.
+	cfg.ObserveContextUsage = func(observation contextledger.Observation) {
+		storeRuntimeSessionContextObservation(session, observation)
+	}
+	cfg.LoadContextUsage = func() (contextledger.Observation, bool) {
+		return loadRuntimeSessionContextObservation(session)
 	}
 	// A5：该回调与落库节流解耦——即使中途落库被禁用（interval<0），也要在每个
 	// durable 历史提交点维护运行中的产物快照，供中断/停摆路径零 I/O 读取；

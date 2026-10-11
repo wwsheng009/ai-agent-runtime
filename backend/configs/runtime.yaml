@@ -41,6 +41,11 @@ context:
   # Used only when neither provider/model capability nor context.maxPromptTokens
   # can provide an effective prompt budget.
   fallbackMaxPromptTokens: 32000
+  # 上下文计量口径（2026-10-11 事故修复）：
+  #   provider_first（默认，留空即此值）— 发送前判定以 provider 上报用量为锚点，
+  #     本地估算只负责增量与兜底；
+  #   estimate_only — 回退到旧行为（仅本地估算），用于紧急回退/对照实验。
+  # accountingMode: provider_first
 
 images:
   cacheMaxAge: 1h

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
 
 // TestParseChatCommandOptions_BudgetTokens 钉住主 chat 的 --budget-tokens → ChatOptions
@@ -44,5 +45,27 @@ func TestBuildLocalChatLoopConfig_CopiesTurnBudgetTokens(t *testing.T) {
 	}
 	if got := buildLocalChatLoopConfig(nil, nil); got == nil || got.TurnBudgetTokens != 0 {
 		t.Fatalf("nil session must keep budget disabled, got %v", got)
+	}
+}
+
+// TestBuildLocalChatLoopConfig_ContextAccountingMode pins the P1-3 config
+// plumbing: context.accountingMode must reach LoopReActConfig, and an absent
+// value must keep the loop on its provider_first default.
+func TestBuildLocalChatLoopConfig_ContextAccountingMode(t *testing.T) {
+	cfg := buildLocalChatLoopConfig(&runtimecfg.RuntimeConfig{
+		Context: runtimecfg.ContextConfig{AccountingMode: "estimate_only"},
+	}, nil)
+	if cfg == nil || cfg.ContextAccountingMode != "estimate_only" {
+		t.Fatalf("ContextAccountingMode = %v, want estimate_only", cfg)
+	}
+
+	cfg = buildLocalChatLoopConfig(&runtimecfg.RuntimeConfig{}, nil)
+	if cfg == nil || cfg.ContextAccountingMode != "" {
+		t.Fatalf("unset accounting mode must stay empty (provider_first default), got %v", cfg)
+	}
+
+	cfg = buildLocalChatLoopConfig(nil, nil)
+	if cfg == nil || cfg.ContextAccountingMode != "" {
+		t.Fatalf("nil runtime config must keep accounting mode empty, got %v", cfg)
 	}
 }

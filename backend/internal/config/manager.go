@@ -240,6 +240,11 @@ type ContextConfig struct {
 	KeepRecentMessages      int    `yaml:"keepRecentMessages" json:"keepRecentMessages"`
 	MaxRecallResults        int    `yaml:"maxRecallResults" json:"maxRecallResults"`
 	MaxObservationItems     int    `yaml:"maxObservationItems" json:"maxObservationItems"`
+	// AccountingMode selects the context accounting source: "provider_first"
+	// (default, empty) anchors pre-send decisions on provider-reported usage
+	// with local estimation for the delta; "estimate_only" restores the legacy
+	// estimator-only behavior (kill switch, 2026-10-11 incident fix).
+	AccountingMode string `yaml:"accountingMode" json:"accountingMode"`
 }
 
 type CatalogConfig struct {
@@ -1268,6 +1273,7 @@ func ValidateContextConfig(config *ContextConfig) error {
 		{"recallMode", strings.TrimSpace(config.RecallMode), []string{"", runtimecontext.RecallModeDisabled, runtimecontext.RecallModeSignals, runtimecontext.RecallModeBroad}},
 		{"observationMode", strings.TrimSpace(config.ObservationMode), []string{"", runtimecontext.ObservationModeAll, runtimecontext.ObservationModeFailures}},
 		{"workspaceMode", strings.TrimSpace(config.WorkspaceMode), []string{"", runtimecontext.WorkspaceModeDisabled, runtimecontext.WorkspaceModeSignals, runtimecontext.WorkspaceModeBroad}},
+		{"accountingMode", strings.TrimSpace(config.AccountingMode), []string{"", "provider_first", "estimate_only"}},
 	} {
 		if item.value == "" {
 			continue

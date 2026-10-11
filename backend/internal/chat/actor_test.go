@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextledger"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -3041,10 +3042,49 @@ func TestRuntimeSessionActiveContextTokensAddsPendingAfterLastAssistant(t *testi
 		*types.NewUserMessage(strings.Repeat("pending user context ", 80)),
 	}
 
-	tokens, hasObserved := runtimeSessionActiveContextTokens(nil, session, history)
+	tokens, hasObserved := runtimeSessionActiveContextTokens(nil, session, history, 0, "", "", "")
 
 	require.True(t, hasObserved)
 	require.Greater(t, tokens, 100)
+}
+
+// TestRuntimeSessionActiveContextTokensUsesStructuredAnchor pins the actor
+// side of the 2026-10-11 fix: a structured provider observation (with prompt
+// identity) drives the projection, and any identity change invalidates it.
+func TestRuntimeSessionActiveContextTokensUsesStructuredAnchor(t *testing.T) {
+	session := NewSession("actor-context-ledger-anchor")
+	history := []types.Message{
+		*types.NewSystemMessage("sys"),
+		// Sized so the provider-anchor/local-estimate ratio stays within the
+		// ledger's plausibility guard (16x), like a real session would.
+		*types.NewUserMessage(strings.Repeat("context ", 800)),
+	}
+	storeRuntimeSessionContextObservation(session, contextledger.Observation{
+		PromptTokens:    9000,
+		MessageEstimate: 50,
+		Fingerprint:     agent.PromptMessageFingerprint(history),
+		MessageCount:    len(history),
+		ToolFingerprint: "tools-v1",
+		Epoch:           0,
+		Provider:        "compact-provider",
+		Model:           "gpt-5",
+		Source:          contextledger.SourceProviderReported,
+	})
+
+	tokens, hasObserved := runtimeSessionActiveContextTokens(nil, session, history, 0, "tools-v1", "compact-provider", "gpt-5")
+	require.True(t, hasObserved)
+	require.GreaterOrEqual(t, tokens, 9000, "provider anchor must dominate the local estimate")
+
+	// Tool surface change invalidates the anchor; the projection falls back to
+	// the local estimate.
+	tokens, _ = runtimeSessionActiveContextTokens(nil, session, history, 0, "tools-v2", "compact-provider", "gpt-5")
+	require.Less(t, tokens, 9000)
+
+	// A rewritten prefix (compaction) invalidates it as well.
+	rewritten := append([]types.Message{}, history...)
+	rewritten[1] = *types.NewUserMessage("rewritten")
+	tokens, _ = runtimeSessionActiveContextTokens(nil, session, rewritten, 0, "tools-v1", "compact-provider", "gpt-5")
+	require.Less(t, tokens, 9000)
 }
 
 func TestSessionActorMaybeAutoCompactSessionSkipsWhenContextBelowLimit(t *testing.T) {

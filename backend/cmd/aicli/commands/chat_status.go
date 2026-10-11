@@ -538,6 +538,18 @@ func resolveChatStatusContextUsedTokens(session *ChatSession) int {
 	if session == nil {
 		return 0
 	}
+	// The provider-observed anchor on the runtime session is the authoritative
+	// "last confirmed" active context size (docs/compact/README.md). Prefer it
+	// over local estimates: the estimator measures parsed content while the
+	// provider counts the wire payload (~1.18x on the 2026-10-11 incident),
+	// and the provider-usage event bridge did not always deliver (status bar
+	// read 171K — a content-only layout metric — while the real prompt was
+	// 262K).
+	if session.RuntimeSession != nil {
+		if anchor, ok := runtimeSessionContextInt(session.RuntimeSession, chatRuntimeContextContextTokenCount); ok && anchor > 0 {
+			return anchor
+		}
+	}
 	if session.ContextTokenCount > 0 {
 		return session.ContextTokenCount
 	}

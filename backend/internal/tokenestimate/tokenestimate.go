@@ -5,6 +5,14 @@
 // available; this estimator is the fallback for prompt gates, context snapshots
 // and usage back-fill.
 //
+// Wire-format caveat (2026-10-11 incident): estimates price parsed message
+// content (plus JSON-marshaled tool schemas / tool calls), while providers
+// count the serialized request body they actually receive. JSON escaping and
+// structural overhead can add ~15-25% on escape-heavy content — the incident's
+// send-gate estimate was 223,594 against a provider count of 262,948 for a 1MB
+// body — so absolute pre-send gates must anchor on provider-reported usage;
+// this estimator is for deltas and fallbacks only.
+//
 // The model is a pretokenization-class heuristic: text is split into runs
 // (word runs, digit runs, symbol runs, whitespace runs, script runs) and each
 // run is priced with the tokens-per-rune ratio measured for the target

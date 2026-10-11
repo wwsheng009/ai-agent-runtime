@@ -224,3 +224,30 @@ func TestChatInteractionCoordinator_StatusHintsKeepDegradationSuffix(t *testing.
 		"Running bash ... · ⚠ events degraded: merged=3 dropped=3 · "+line,
 		got.StateText)
 }
+
+// TestChatRuntimeEventBridge_ContextUsageAppliesDespiteTurnMismatch pins the
+// 2026-10-11 incident: llm.request.* events of the primary session were
+// suppressed by the turn-ownership gate before the usage handler ran, so the
+// status bar stayed on the local estimate (171K) while the provider counted
+// 261K. Context accounting is session-scoped and must not depend on turn
+// ownership; render paths keep the ownership guard.
+func TestChatRuntimeEventBridge_ContextUsageAppliesDespiteTurnMismatch(t *testing.T) {
+	const sessionID = "session-usage-mismatch"
+	bridge := newTurnBudgetTestBridge(t, sessionID, "turn-A")
+
+	deliverTurnBudgetEvent(bridge, runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"turn_id":                 "turn-B", // not the active render owner
+			"usage_prompt_tokens":     261559,
+			"usage_completion_tokens": 251,
+			"usage_total_tokens":      261810,
+			"usage_source":            "provider_reported",
+		},
+	})
+
+	if bridge.session.ContextTokenCount != 261810 {
+		t.Fatalf("provider usage must land despite turn mismatch, got %d", bridge.session.ContextTokenCount)
+	}
+}

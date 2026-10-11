@@ -2278,6 +2278,115 @@ func TestReActLoop_MidTurnSemanticCompactionContinuesWithoutReplacingDurableHist
 	}
 }
 
+// TestReActLoop_MidTurnCompactionAnchorsOnProviderUsage pins the 2026-10-11
+// incident: the send gate's parsed-content estimate read below the provider's
+// wire count (223,594 vs 262,948 at the failure step in production), the
+// estimator-gated trigger never fired, and the next request was rejected with
+// HTTP 400. With the context ledger the provider-reported usage anchors the
+// projection, so the mid-turn trigger must fire even though the raw estimate
+// stays far below the trigger line.
+func TestReActLoop_MidTurnCompactionAnchorsOnProviderUsage(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+		MaxRetries:      0,
+	})
+	provider := &SequenceLLMProvider{
+		name:         "test-provider",
+		defaultModel: "test-model",
+		modelCapabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"test-model": {MaxContextTokens: 10000, AutoCompactTokenLimit: 2500},
+		},
+		responses: []*llm.LLMResponse{
+			{
+				Content: "Inspect the failing log.",
+				Model:   "test-model",
+				Usage: &types.TokenUsage{
+					PromptTokens:     9000,
+					CompletionTokens: 50,
+					TotalTokens:      9050,
+				},
+				Metadata: map[string]interface{}{"usage_source": "provider_reported"},
+				ToolCalls: []types.ToolCall{{
+					ID: "call-anchor", Name: "read_logs", Args: map[string]interface{}{"path": "logs/app.log"},
+				}},
+			},
+			{
+				Content: "Semantic checkpoint: the context is anchored on provider usage; continue.",
+				Model:   "test-model",
+			},
+			{
+				Content: "Recovered after anchored compaction.",
+				Model:   "test-model",
+			},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "Current canonical instructions.",
+	}, &MockSequenceMCPManager{output: "log line\n"}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var startedEvents []runtimeevents.Event
+	bus.Subscribe("context.mid_turn_compact.started", func(event runtimeevents.Event) {
+		startedEvents = append(startedEvents, event)
+	})
+	var finishedEvents []runtimeevents.Event
+	bus.Subscribe("llm.request.finished", func(event runtimeevents.Event) {
+		finishedEvents = append(finishedEvents, event)
+	})
+	var overBudgetEvents []runtimeevents.Event
+	bus.Subscribe("context.usage_over_budget", func(event runtimeevents.Event) {
+		overBudgetEvents = append(overBudgetEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 0, EnableToolCalls: true})
+	// A realistically sized history keeps the local-estimate/anchor ratio in
+	// the same order of magnitude as the production incident (~1.5-5x)
+	// instead of a synthetic order-of-magnitude gap.
+	session := &testContextHistorySession{
+		testHistorySession: newTestHistorySession("session-anchor-replay"),
+		context:            map[string]interface{}{},
+	}
+	for index := 0; index < 20; index++ {
+		session.messages = append(session.messages,
+			*types.NewUserMessage(fmt.Sprintf("history request %d %s", index, strings.Repeat("context ", 50))),
+			*types.NewAssistantMessage(fmt.Sprintf("history answer %d", index)),
+		)
+	}
+	result, err := loop.RunWithSession(context.Background(), "Find and fix the build failure.", session)
+	require.NoError(t, err)
+	for index, event := range finishedEvents {
+		t.Logf("finished[%d]: usage_prompt_tokens=%v usage_source=%v context_prompt_tokens=%v",
+			index, event.Payload["usage_prompt_tokens"], event.Payload["usage_source"], event.Payload["context_prompt_tokens"])
+	}
+	require.NotEmpty(t, finishedEvents)
+	require.Equal(t, 9000, finishedEvents[0].Payload["usage_prompt_tokens"])
+	require.Equal(t, "provider_reported", finishedEvents[0].Payload["usage_source"])
+	require.True(t, result.Success)
+	require.Equal(t, "Recovered after anchored compaction.", result.Output)
+	require.Len(t, provider.requests, 3, "one business call, one compact stream, one recovered call")
+
+	require.Len(t, startedEvents, 1)
+	require.Equal(t, compactruntime.PhaseMidTurn, startedEvents[0].Payload["phase"])
+	require.Equal(t, "anchored", startedEvents[0].Payload["context_projection_source"])
+	require.Equal(t, 9000, startedEvents[0].Payload["context_anchor_tokens"])
+
+	// The first request was admitted on the estimate (no anchor yet) while the
+	// provider counted 9,000 > 2,500 budget: the monitoring signal must fire
+	// exactly once, with the projection inputs attached.
+	require.Len(t, overBudgetEvents, 1)
+	require.Equal(t, 9000, overBudgetEvents[0].Payload["provider_reported_input_tokens"])
+	require.Equal(t, 2500, overBudgetEvents[0].Payload["input_budget"])
+	require.Equal(t, "estimated", overBudgetEvents[0].Payload["context_projection_source"])
+	require.Equal(t, "no_anchor", overBudgetEvents[0].Payload["context_projection_invalid_reason"])
+}
+
 func TestReActLoop_PreTurnSemanticCompactionRunsBeforeFirstModelDecision(t *testing.T) {
 	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "test-provider",
@@ -2502,6 +2611,7 @@ func TestReActLoop_EnforcePromptPreflight_CountsToolSchemas(t *testing.T) {
 		1,
 		[]types.Message{*types.NewUserMessage("run the tool")},
 		tools,
+		0,
 		0,
 	)
 	require.Error(t, err)

@@ -114,12 +114,49 @@ func IsContextWindowError(err error) bool {
 		"input is too long for the context",
 		"maximum context length",
 		"prompt is too long",
+		// 2026-10-11 incident (commandgo/ling-3.1-flash):
+		// "The input (262948 tokens) is longer than the model's context
+		// length (262144 tokens)." Without these the provider 400 was neither
+		// classified as a context-window failure nor recovered by compaction.
+		"longer than the model's context length",
+		"is longer than the model",
 	} {
 		if strings.Contains(lower, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+// contextWindowExceededPatterns match provider messages that state both the
+// actual input size and the model window, e.g. the 2026-10-11 incident:
+// "The input (262948 tokens) is longer than the model's context length
+// (262144 tokens)."
+var contextWindowExceededPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)input\s*\((\d+)\s*tokens?\)\s*(?:is\s+)?longer than the model'?s context length\s*\((\d+)\s*tokens?\)`),
+}
+
+// ParseContextWindowExceeded extracts the provider-reported input size and
+// context window from an oversized-prompt error. The window may be used to
+// correct model cards; the input size is diagnostics.
+func ParseContextWindowExceeded(err error) (inputTokens int, windowTokens int, ok bool) {
+	if err == nil {
+		return 0, 0, false
+	}
+	message := err.Error()
+	for _, pattern := range contextWindowExceededPatterns {
+		matches := pattern.FindStringSubmatch(message)
+		if len(matches) != 3 {
+			continue
+		}
+		input, inputErr := strconv.Atoi(matches[1])
+		window, windowErr := strconv.Atoi(matches[2])
+		if inputErr != nil || windowErr != nil {
+			continue
+		}
+		return input, window, true
+	}
+	return 0, 0, false
 }
 
 var maxTokensLimitPatterns = []*regexp.Regexp{

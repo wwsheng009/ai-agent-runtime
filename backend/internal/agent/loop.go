@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -21,6 +22,7 @@ import (
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextledger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
@@ -144,6 +146,19 @@ type LoopReActConfig struct {
 	// terminal control-plane state. A record carrying team obligations never
 	// settles while this is nil (conservative: never clear on a guess).
 	TeamObligations subagentbatch.TeamObligationResolver `yaml:"-"`
+	// ObserveContextUsage receives one provider-reported context observation
+	// per LLM call (never the run-level cumulative usage). Hosts persist it so
+	// the next turn/run can project prompt size from a real anchor instead of
+	// the local estimator alone. nil = in-process ledger only.
+	ObserveContextUsage func(observation contextledger.Observation) `yaml:"-"`
+	// LoadContextUsage returns the host-persisted anchor for this session.
+	// nil = no cross-run anchor (estimation-only behavior).
+	LoadContextUsage func() (contextledger.Observation, bool) `yaml:"-"`
+	// ContextAccountingMode selects the context accounting source:
+	// "" / "provider_first" (default) uses the provider-observed anchor with
+	// local estimation for the delta; "estimate_only" restores the legacy
+	// estimator-only behavior (kill switch).
+	ContextAccountingMode string `yaml:"contextAccountingMode"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -151,6 +166,8 @@ type ReActLoop struct {
 	agent                        *Agent
 	llmRuntime                   *llm.LLMRuntime
 	config                       *LoopReActConfig
+	contextLedger                *contextledger.Ledger
+	contextLedgerOnce            sync.Once
 	turnID                       string
 	toolExecMemory               *toolexec.Memory
 	parallelToolCallsUnsupported atomic.Bool
@@ -322,12 +339,25 @@ func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActCon
 		agent.llmRuntime = llmRuntime
 	}
 
-	return &ReActLoop{
+	// Context accounting source: provider-observed anchor + estimated delta by
+	// default; "estimate_only" is the explicit kill switch that restores the
+	// pre-2026-10-11 estimator-only behavior.
+	accountingMode := strings.TrimSpace(config.ContextAccountingMode)
+	if accountingMode == "" && agent != nil && agent.config != nil {
+		accountingMode = strings.TrimSpace(optionString(agent.config.Options, "context_accounting_mode"))
+	}
+	config.ContextAccountingMode = accountingMode
+
+	loop := &ReActLoop{
 		agent:          agent,
 		llmRuntime:     llmRuntime,
 		config:         config,
 		toolExecMemory: toolexec.NewMemory(toolexec.DefaultTerminalFailureThreshold),
 	}
+	if !strings.EqualFold(accountingMode, "estimate_only") {
+		loop.contextLedger = contextledger.New(promptMessageFingerprint)
+	}
+	return loop
 }
 
 // DefaultLoopReActConfig 返回 NewReActLoop(nil) 使用的默认循环配置。宿主若要在
@@ -906,7 +936,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				step,
 				promptBuilder.Messages(),
 				0,
+				"",
 				nil,
+				promptCacheEpoch,
 				compactruntime.PhasePreTurn,
 				"active_turn_start_context_limit",
 			)
@@ -966,6 +998,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 					"reason":         "provider_context_window_recovery",
 					"provider_error": err.Error(),
 				}
+				if inputTokens, windowTokens, ok := llm.ParseContextWindowExceeded(err); ok {
+					recoveryMetadata["provider_reported_input_tokens"] = inputTokens
+					recoveryMetadata["provider_reported_context_limit"] = windowTokens
+				}
 				recoveryKind = "provider context window"
 			}
 			recoveryFingerprint := promptMessageFingerprint(recoveryHistory)
@@ -976,7 +1012,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				}
 			}
 			if recoveryKind != "" && markSessionCompactionRecoveryInput(sessionCompactionRecoveryInputs, recoveryFingerprint) {
-				recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(currentCtx, sessionID, traceID, step, recoveryHistory, recoveryMetadata)
+				recoveredHistory, recovered, recoveryErr := loop.trySessionCompactionRecovery(currentCtx, sessionID, traceID, step, recoveryHistory, recoveryMetadata, promptCacheEpoch)
 				if recoveryErr != nil {
 					loop.agent.AddError(fmt.Sprintf("session compaction recovery failed after %s error: %v", recoveryKind, recoveryErr))
 				} else if recovered && compactionRecoveryMadeProgress(loop.llmRuntime, recoveryHistory, recoveredHistory) {
@@ -1450,7 +1486,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			step,
 			promptBuilder.Messages(),
 			action.toolSchemaTokens,
+			action.toolFingerprint,
 			usage,
+			promptCacheEpoch,
 			compactruntime.PhaseMidTurn,
 			"context_limit",
 		)
@@ -2196,7 +2234,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		}
 	}
 	var preflightMetadata map[string]interface{}
-	managedHistory, preflightMetadata, err = loop.enforcePromptPreflightWithTools(traceID, sessionID, step, managedHistory, availableTools, remainingBudget)
+	managedHistory, preflightMetadata, err = loop.enforcePromptPreflightWithTools(traceID, sessionID, step, managedHistory, availableTools, remainingBudget, promptCacheEpoch)
 	if err != nil {
 		if boolValue(preflightMetadata["prompt_cache_epoch_break"]) {
 			if action.Metadata == nil {
@@ -2213,6 +2251,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	}
 	action.promptHistory = reusablePromptHistory(history, managedHistory)
 	action.toolSchemaTokens = estimateToolDefinitionTokens(loop.llmRuntime, availableTools)
+	// The fingerprint of the exact tool surface sent with this request (frozen
+	// surface + turn-pinned/routing overlays). The mid-turn context projection
+	// reuses it so the anchor identity compares like with like; the raw frozen
+	// snapshot does not contain the overlays.
+	action.toolFingerprint = ToolDefinitionsFingerprint(availableTools)
 	requestCacheEpoch := promptCacheEpoch
 	if promptPrefixRewritten {
 		requestCacheEpoch++
@@ -2531,6 +2574,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			requestPayload["context_window_tokens"] = value
 		}
 	}
+	copyContextProjectionFields(requestPayload, preflightMetadata)
 	if promptLayoutSummary != "" {
 		requestPayload["prompt_layout_summary"] = promptLayoutSummary
 	}
@@ -2883,6 +2927,7 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			finishedPayload["context_window_tokens"] = value
 		}
 	}
+	copyContextProjectionFields(finishedPayload, preflightMetadata)
 	usageSource := ""
 	if response != nil && response.Metadata != nil {
 		usageSource = strings.TrimSpace(stringValue(response.Metadata["usage_source"]))
@@ -3021,6 +3066,10 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if usage != nil {
 		usage.UsageSource = usageSource
 	}
+	// Anchor the context ledger on the usage of the request that was actually
+	// sent (before discarded-attempt usage is merged into the step total).
+	loop.observeContextUsage(req, response.Usage, usageSource, requestCacheEpoch)
+	loop.emitContextUsageOverBudget(sessionID, step, preflightMetadata, usageSource, response.Usage)
 	if discarded := discardedUsage.Usage(); discarded != nil {
 		// P0-3 item 4：被重放/丢弃尝试的 token 计入本步骤真实消耗（run 用量与预算
 		// 按真实成本扣减）；payload 侧保留 usage_discarded_* 明细供离线区分。
@@ -4840,6 +4889,7 @@ type AgentAction struct {
 	MessageMetadata         types.Metadata         `json:"messageMetadata,omitempty" yaml:"messageMetadata,omitempty"`
 	promptHistory           []types.Message
 	toolSchemaTokens        int
+	toolFingerprint         string
 	assistantStreamID       string
 	assistantStreamSequence uint64
 }
@@ -5674,6 +5724,174 @@ func estimatePromptMessageTokens(runtime *llm.LLMRuntime, messages []types.Messa
 	return runtime.CountMessagesTokens(messages)
 }
 
+// ensureContextLedger lazily loads the host-persisted anchor once per loop
+// instance. Returns nil when accounting is disabled (estimate_only).
+func (loop *ReActLoop) ensureContextLedger() *contextledger.Ledger {
+	if loop == nil || loop.contextLedger == nil {
+		return nil
+	}
+	loop.contextLedgerOnce.Do(func() {
+		if loop.config == nil || loop.config.LoadContextUsage == nil {
+			return
+		}
+		if observation, ok := loop.config.LoadContextUsage(); ok {
+			loop.contextLedger.Observe(observation)
+		}
+	})
+	return loop.contextLedger
+}
+
+// observeContextUsage records one provider-reported request usage as the new
+// context anchor. It must be called with the usage of the request that was
+// actually sent (never the run-level cumulative usage) and only when the
+// provider reported it.
+func (loop *ReActLoop) observeContextUsage(req *llm.LLMRequest, responseUsage *types.TokenUsage, usageSource string, epoch int) {
+	if loop == nil || req == nil || responseUsage == nil {
+		return
+	}
+	ledger := loop.ensureContextLedger()
+	if ledger == nil {
+		return
+	}
+	if strings.TrimSpace(usageSource) != contextledger.SourceProviderReported {
+		return
+	}
+	if strings.TrimSpace(stringValue(req.Metadata[llm.MetadataKeyInternalOperation])) == "compact" {
+		// Internal compaction requests must not poison the business anchor.
+		return
+	}
+	promptTokens := responseUsage.InputTotal()
+	if promptTokens <= 0 {
+		return
+	}
+	observation := contextledger.Observation{
+		PromptTokens:    promptTokens,
+		MessageEstimate: estimatePromptMessageTokens(loop.llmRuntime, req.Messages),
+		Fingerprint:     promptMessageFingerprint(req.Messages),
+		MessageCount:    len(req.Messages),
+		ToolFingerprint: ToolDefinitionsFingerprint(req.Tools),
+		Epoch:           epoch,
+		Provider:        req.Provider,
+		Model:           req.Model,
+		Source:          contextledger.SourceProviderReported,
+	}
+	if !ledger.Observe(observation) {
+		return
+	}
+	if loop.config != nil && loop.config.ObserveContextUsage != nil {
+		loop.config.ObserveContextUsage(observation)
+	}
+}
+
+// clearContextLedger drops the in-process anchor after a history rewrite
+// (compaction/recovery). The next provider response re-anchors.
+func (loop *ReActLoop) clearContextLedger() {
+	if loop == nil || loop.contextLedger == nil {
+		return
+	}
+	loop.contextLedger.Clear()
+}
+
+// projectPromptTokens returns the token size every pre-send decision must use:
+// provider anchor + estimated delta, floored by the local full estimate. Falls
+// back to the raw estimate when no anchor exists or accounting is disabled.
+func (loop *ReActLoop) projectPromptTokens(messages []types.Message, messageEstimate, toolTokens int, toolFingerprint string, epoch int) (int, contextledger.Projection) {
+	messageEstimate = maxIntValue(0, messageEstimate)
+	toolTokens = maxIntValue(0, toolTokens)
+	estimate := messageEstimate + toolTokens
+	ledger := loop.ensureContextLedger()
+	if ledger == nil {
+		return estimate, contextledger.Projection{
+			Tokens:         estimate,
+			EstimateTokens: estimate,
+			Source:         contextledger.ProjectionEstimated,
+			InvalidReason:  "accounting_disabled",
+		}
+	}
+	projection := ledger.Project(contextledger.ProjectInput{
+		Messages:        messages,
+		MessageEstimate: messageEstimate,
+		ToolTokens:      toolTokens,
+		ToolFingerprint: toolFingerprint,
+		Epoch:           epoch,
+		Provider:        loop.requestProvider(),
+		Model:           loop.requestModel(),
+	})
+	return projection.Tokens, projection
+}
+
+// addContextProjectionMetadata exposes the E/A/P decision inputs on runtime
+// events so any skip/trigger can be explained offline.
+func addContextProjectionMetadata(payload map[string]interface{}, projection contextledger.Projection) {
+	if payload == nil {
+		return
+	}
+	payload["context_projection_tokens"] = projection.Tokens
+	payload["context_projection_source"] = projection.Source
+	if projection.EstimateTokens > 0 {
+		payload["context_estimate_tokens"] = projection.EstimateTokens
+	}
+	if projection.Source == contextledger.ProjectionAnchored {
+		payload["context_anchor_tokens"] = projection.AnchorTokens
+		payload["context_delta_tokens"] = projection.DeltaTokens
+	} else if projection.InvalidReason != "" {
+		payload["context_projection_invalid_reason"] = projection.InvalidReason
+	}
+}
+
+// copyContextProjectionFields lifts the E/A/P decision inputs from a metadata
+// map (preflightMetadata) onto an event payload so the debug log line and
+// offline analysis see them without unpacking nested context_preflight.
+func copyContextProjectionFields(target, source map[string]interface{}) {
+	if target == nil || source == nil {
+		return
+	}
+	for _, key := range []string{
+		"context_projection_tokens",
+		"context_projection_source",
+		"context_estimate_tokens",
+		"context_anchor_tokens",
+		"context_delta_tokens",
+		"context_projection_invalid_reason",
+	} {
+		if value, ok := source[key]; ok && value != nil {
+			target[key] = value
+		}
+	}
+}
+
+// emitContextUsageOverBudget reports a provider-counted input that exceeds the
+// budget the send gate admitted it against. With provider-first accounting this
+// should be rare (the projection compacts first); a firing event means the
+// anchor was missing or stale on an oversized request and is the direct
+// monitoring signal for the 2026-10-11 failure class.
+func (loop *ReActLoop) emitContextUsageOverBudget(sessionID string, step int, preflightMetadata map[string]interface{}, usageSource string, usage *types.TokenUsage) {
+	if loop == nil || usage == nil || len(preflightMetadata) == 0 {
+		return
+	}
+	if strings.TrimSpace(usageSource) != contextledger.SourceProviderReported {
+		return
+	}
+	inputTokens := usage.InputTotal()
+	if inputTokens <= 0 {
+		return
+	}
+	budget := firstPositiveBudgetMetadataInt(preflightMetadata["effective_input_budget"], preflightMetadata["prompt_budget"])
+	if budget <= 0 || inputTokens <= budget {
+		return
+	}
+	payload := map[string]interface{}{
+		"step":                           step,
+		"provider_reported_input_tokens": inputTokens,
+		"input_budget":                   budget,
+	}
+	copyContextProjectionFields(payload, preflightMetadata)
+	if toolTokens := intValue(preflightMetadata["tool_schema_tokens"]); toolTokens > 0 {
+		payload["tool_schema_tokens"] = toolTokens
+	}
+	loop.emitRuntimeEvent("context.usage_over_budget", sessionID, "", payload)
+}
+
 func estimatePromptTokenBreakdown(runtime *llm.LLMRuntime, messages []types.Message) (historyTokens, toolResultTokens int) {
 	if runtime == nil || len(messages) == 0 {
 		return 0, 0
@@ -5882,10 +6100,10 @@ func newPromptPreflightError(
 }
 
 func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step int, messages []types.Message, remainingBudget int) ([]types.Message, map[string]interface{}, error) {
-	return loop.enforcePromptPreflightWithTools(traceID, sessionID, step, messages, nil, remainingBudget)
+	return loop.enforcePromptPreflightWithTools(traceID, sessionID, step, messages, nil, remainingBudget, 0)
 }
 
-func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string, step int, messages []types.Message, tools []types.ToolDefinition, remainingBudget int) ([]types.Message, map[string]interface{}, error) {
+func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string, step int, messages []types.Message, tools []types.ToolDefinition, remainingBudget int, promptCacheEpoch int) ([]types.Message, map[string]interface{}, error) {
 	if len(messages) == 0 || loop == nil || loop.llmRuntime == nil {
 		return messages, nil, nil
 	}
@@ -5901,7 +6119,15 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	messageTokensBefore := countPromptMessages(messages)
 	historyTokensBefore, toolResultTokensBefore := estimatePromptTokenBreakdown(loop.llmRuntime, messages)
 	toolSchemaTokens := estimateToolDefinitionTokens(loop.llmRuntime, tools)
-	promptTokensBefore := messageTokensBefore + toolSchemaTokens
+	estimateTokensBefore := messageTokensBefore + toolSchemaTokens
+	// The send gate must compare the anchored projection (provider-observed
+	// anchor + estimated delta), not the raw full-history estimate: the local
+	// estimator measures parsed message content while the provider counts the
+	// serialized wire payload. The 2026-10-11 incident gate estimate was
+	// 223,594 vs the provider's 262,948 (~1.18x, JSON escaping/structure
+	// overhead), so a request passed a 235,929 budget and still overflowed the
+	// 262,144 window.
+	promptTokensBefore, projection := loop.projectPromptTokens(messages, messageTokensBefore, toolSchemaTokens, ToolDefinitionsFingerprint(tools), promptCacheEpoch)
 	preflightMetadata := budget.Metadata()
 	if preflightMetadata == nil {
 		preflightMetadata = map[string]interface{}{}
@@ -5912,7 +6138,8 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	preflightMetadata["tool_result_tokens"] = toolResultTokensBefore
 	preflightMetadata["tool_schema_tokens"] = toolSchemaTokens
 	preflightMetadata["tool_count"] = len(tools)
-	preflightMetadata["estimated_input_tokens"] = promptTokensBefore
+	preflightMetadata["estimated_input_tokens"] = estimateTokensBefore
+	addContextProjectionMetadata(preflightMetadata, projection)
 	inputBudget := budget.enforcedInputBudget()
 	preflightMetadata["compaction_required"] = promptTokensBefore > inputBudget
 	if promptTokensBefore > inputBudget {
@@ -5933,6 +6160,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	startedPayload["tool_schema_tokens"] = toolSchemaTokens
 	startedPayload["tool_count"] = len(tools)
 	startedPayload["message_count"] = len(messages)
+	addContextProjectionMetadata(startedPayload, projection)
 	addRemainingBudgetMetadata(startedPayload, remainingBudget)
 	startedPayload["active_turn_replay"] = true
 	loop.emitRuntimeEvent("context.preflight.started", sessionID, "", startedPayload)
@@ -6064,7 +6292,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	return nil, preflightMetadata, failureErr
 }
 
-func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, sessionID, traceID string, step int, history []types.Message, budgetMetadata map[string]interface{}) ([]types.Message, bool, error) {
+func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, sessionID, traceID string, step int, history []types.Message, budgetMetadata map[string]interface{}, promptCacheEpoch int) ([]types.Message, bool, error) {
 	if loop == nil || loop.agent == nil || loop.llmRuntime == nil || len(history) == 0 {
 		return nil, false, nil
 	}
@@ -6075,6 +6303,9 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	provider = loop.requestProvider()
 	model = loop.requestModel()
 
+	recoveryTools := frozenTurnToolSurface(ctx)
+	messageTokens := loop.llmRuntime.CountMessagesTokens(history)
+	projectedTokens, projection := loop.projectPromptTokens(history, messageTokens, estimateToolDefinitionTokens(loop.llmRuntime, recoveryTools), ToolDefinitionsFingerprint(recoveryTools), promptCacheEpoch)
 	startedPayload := map[string]interface{}{
 		"session_id":    sessionID,
 		"trace_id":      traceID,
@@ -6085,8 +6316,9 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		"provider":      provider,
 		"model":         model,
 		"message_count": len(history),
-		"token_before":  loop.llmRuntime.CountMessagesTokens(history),
+		"token_before":  projectedTokens,
 	}
+	addContextProjectionMetadata(startedPayload, projection)
 	for key, value := range budgetMetadata {
 		if value == nil {
 			continue
@@ -6191,11 +6423,12 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 	}
 	loop.emitRuntimeEvent("session_compact_completed", sessionID, "", completedPayload)
 	loop.agent.dispatchPostCompactHook(ctx, completedPayload)
+	loop.clearContextLedger()
 
 	return cloneMessageHistory(result.ReplacementHistory), true, nil
 }
 
-func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sessionID, traceID string, step int, history []types.Message, toolSchemaTokens int, observedUsage *types.TokenUsage, phase, reason string) ([]types.Message, *types.TokenUsage, bool, error) {
+func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sessionID, traceID string, step int, history []types.Message, toolSchemaTokens int, toolFingerprint string, observedUsage *types.TokenUsage, promptCacheEpoch int, phase, reason string) ([]types.Message, *types.TokenUsage, bool, error) {
 	if loop == nil || loop.agent == nil || loop.llmRuntime == nil || len(history) == 0 {
 		return nil, nil, false, nil
 	}
@@ -6213,7 +6446,10 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		inputBudget = budget.PromptBudget
 	}
 	messageTokens := estimatePromptMessageTokens(loop.llmRuntime, history)
-	promptTokens := messageTokens + maxIntValue(0, toolSchemaTokens)
+	// Trigger on the anchored projection (provider anchor + estimated delta).
+	// The observed usage parameter is only an eligibility input; the raw
+	// estimate is not allowed to gate the trigger (2026-10-11 incident).
+	promptTokens, projection := loop.projectPromptTokens(history, messageTokens, toolSchemaTokens, toolFingerprint, promptCacheEpoch)
 	if promptTokens <= inputBudget || !activeTurnSemanticCompactionEligible(budget, observedUsage) {
 		return nil, nil, false, nil
 	}
@@ -6246,6 +6482,7 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 	startedPayload["message_tokens"] = messageTokens
 	startedPayload["tool_schema_tokens"] = toolSchemaTokens
 	startedPayload["prompt_tokens"] = promptTokens
+	addContextProjectionMetadata(startedPayload, projection)
 	startedPayload["replacement_token_limit"] = replacementTokenLimit
 	startedPayload["prompt_only"] = true
 	startedPayload["durable_history_replaced"] = false
@@ -6343,6 +6580,9 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 	}
 	loop.emitRuntimeEvent(eventPrefix+".completed", sessionID, "", completedPayload)
 	loop.agent.dispatchPostCompactHook(ctx, completedPayload)
+	// The replacement history rewrote the prompt prefix; the old anchor no
+	// longer describes the next request. The next provider response re-anchors.
+	loop.clearContextLedger()
 	return cloneMessageHistory(result.ReplacementHistory), result.Usage, true, nil
 }
 
