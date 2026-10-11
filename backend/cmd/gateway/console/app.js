@@ -520,14 +520,14 @@
     }
     devices.forEach(function (d) {
       var card = document.createElement("div");
-      card.className = "card" + (d.revoked ? " offline" : "");
+      card.className = "card device-card" + (d.revoked ? " offline" : "");
       card.innerHTML =
-        '<div class="card-head"><span class="card-title"></span><span class="badge"></span></div>' +
+        '<div class="card-head"><span class="card-title"></span><span class="status-chip ' + (d.revoked ? "chip-revoked" : "chip-active") + '"></span></div>' +
         '<div class="device-token-row"><code class="device-prefix"></code></div>' +
         '<div class="card-meta"></div>' +
-        '<div class="card-actions"><button class="btn danger sm" data-revoke>撤销令牌</button></div>';
+        '<div class="card-actions"></div>';
       card.querySelector(".card-title").textContent = d.name || d.id;
-      card.querySelector(".badge").textContent = d.revoked ? "已撤销" : "有效";
+      card.querySelector(".status-chip").textContent = d.revoked ? "已撤销" : "有效";
       var prefixEl = card.querySelector(".device-prefix");
       // The API only exposes the 8-char identifier (the full token is hashed at
       // rest and shown once at issue time), so render it as the complete id.
@@ -539,10 +539,32 @@
         (d.created_at ? new Date(d.created_at).toLocaleString() : "—") +
         (d.last_used && d.last_used.indexOf("0001") === -1
           ? " · 最近使用 " + new Date(d.last_used).toLocaleString() : "");
-      card.querySelector("[data-revoke]").addEventListener("click", function () {
-        if (!window.confirm("撤销令牌 " + (d.name || d.id) + "？使用它的 agent 将无法再注册。")) { return; }
-        api("/api/devices/" + encodeURIComponent(d.id), { method: "DELETE" }).then(loadDevices);
-      });
+      var actions = card.querySelector(".card-actions");
+      if (!d.revoked) {
+        var revoke = document.createElement("button");
+        revoke.className = "btn danger sm";
+        revoke.type = "button";
+        revoke.textContent = "撤销令牌";
+        revoke.addEventListener("click", function () {
+          if (!window.confirm("撤销令牌「" + (d.name || d.id) + "」？\n使用它的 agent 将无法再注册；撤销后可选择彻底删除记录。")) { return; }
+          api("/api/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
+            .then(function () { notify("令牌已撤销：" + (d.name || d.id), "ok"); loadDevices(); })
+            .catch(function (err) { notify("撤销失败：" + err, "error"); });
+        });
+        actions.appendChild(revoke);
+      } else {
+        var del = document.createElement("button");
+        del.className = "btn danger sm";
+        del.type = "button";
+        del.textContent = "删除记录";
+        del.addEventListener("click", function () {
+          if (!window.confirm("彻底删除已撤销令牌「" + (d.name || d.id) + "」的记录？\n此操作不可恢复（令牌本身已失效）。")) { return; }
+          api("/api/devices/" + encodeURIComponent(d.id) + "?purge=1", { method: "DELETE" })
+            .then(function () { notify("令牌记录已删除：" + (d.name || d.id), "ok"); loadDevices(); })
+            .catch(function (err) { notify("删除失败：" + err, "error"); });
+        });
+        actions.appendChild(del);
+      }
       list.appendChild(card);
     });
   }

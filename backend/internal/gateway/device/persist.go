@@ -71,6 +71,15 @@ func (p *PersistentStore) Revoke(id string) bool {
 	return ok
 }
 
+// Delete removes a revoked token record and persists the store.
+func (p *PersistentStore) Delete(id string) bool {
+	ok := p.Store.Delete(id)
+	if ok {
+		p.save()
+	}
+	return ok
+}
+
 func (p *PersistentStore) save() {
 	if p == nil || p.path == "" {
 		return

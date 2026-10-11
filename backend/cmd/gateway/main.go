@@ -391,6 +391,18 @@ func run() int {
 			return
 		}
 		id := mux.Vars(r)["id"]
+		if r.URL.Query().Get("purge") == "1" {
+			// Permanent removal of an already-revoked token record.
+			if !devices.Delete(id) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error": "only revoked tokens can be deleted — revoke it first",
+				})
+				return
+			}
+			auditLog.Record(audit.Event{Type: audit.TypeDeviceDeleted, Detail: id, IP: resolver.ClientIP(r)})
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
+			return
+		}
 		if !devices.Revoke(id) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "device not found"})
 			return

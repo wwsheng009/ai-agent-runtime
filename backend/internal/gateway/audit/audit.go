@@ -23,6 +23,7 @@ const (
 	TypeTunnelDisconnected = "tunnel_disconnected"
 	TypeNodeRemoved        = "node_removed"
 	TypeSessionRemoved     = "session_removed"
+	TypeDeviceDeleted      = "device_deleted"
 )
 
 // Event is one audit record.

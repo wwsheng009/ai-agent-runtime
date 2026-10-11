@@ -547,6 +547,18 @@ form { display: flex; gap: 8px; margin-top: 10px; }
 
 /* ── Device token rows ───────────────────────────────────────── */
 
+.device-card { display: flex; flex-direction: column; }
+
+.status-chip {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.status-chip.chip-active { background: var(--ok-soft); color: var(--ok); }
+.status-chip.chip-revoked { background: var(--danger-soft); color: var(--danger); }
+
 .device-token-row {
   display: flex; align-items: center; gap: 8px;
   margin-top: 6px;

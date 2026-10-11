@@ -110,6 +110,22 @@ func (s *Store) Revoke(id string) bool {
 	return true
 }
 
+// Delete removes a token record entirely. Only revoked tokens can be deleted —
+// deleting a live token would silently un-authenticate an agent with no audit
+// trail of a revocation, so the flow is always revoke first, then delete.
+func (s *Store) Delete(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.byID[id]
+	if !ok || !rec.Revoked {
+		return false
+	}
+	hash := rec.hash
+	delete(s.byID, id)
+	delete(s.byHash, hash)
+	return true
+}
+
 // List returns all tokens (never the secret), sorted by id.
 func (s *Store) List() []Token {
 	s.mu.RLock()
