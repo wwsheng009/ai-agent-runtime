@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
@@ -440,6 +441,7 @@ func resolveSQLiteDSN(dsn string) (string, error) {
 	if isSQLiteURI(dsn) || dsn == ":memory:" {
 		return dsn, nil
 	}
+	dsn = expandHomeDSN(dsn)
 	dir := filepath.Dir(dsn)
 	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -447,6 +449,19 @@ func resolveSQLiteDSN(dsn string) (string, error) {
 		}
 	}
 	return dsn, nil
+}
+
+// expandHomeDSN 把 "~" / "~/" / "~\" 前缀展开为当前用户主目录，使默认 DSN
+// 可以锚定在用户级数据目录（如 ~/.aicli/data/usage_ledger.db），而不是随进程
+// CWD 漂移到仓库工作树里（历史上默认 ./data/gateway.db 即因此落在 backend/data/）。
+//
+// 非 "~" 形式原样返回，不做 filepath.Clean：带查询串的 file: URI 与 :memory:
+// 已在调用方提前返回，此处保持其余 DSN 逐字不变，避免改写既有落点。
+func expandHomeDSN(dsn string) string {
+	if dsn != "~" && !strings.HasPrefix(dsn, "~/") && !strings.HasPrefix(dsn, "~\\") {
+		return dsn
+	}
+	return aiclipaths.ExpandUserPath(dsn)
 }
 
 func isSQLiteURI(dsn string) bool {

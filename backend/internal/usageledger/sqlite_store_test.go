@@ -1,6 +1,7 @@
 package usageledger
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -68,4 +69,21 @@ func TestSQLiteStore_CreateAndGetSince(t *testing.T) {
 	require.Len(t, filtered, 1)
 	require.Equal(t, "req-new", filtered[0].RequestID)
 	require.Equal(t, 28, filtered[0].TotalTokens)
+}
+
+// TestExpandHomeDSN 锁定默认 DSN 的用户目录锚定语义：只有 "~" 前缀会被展开，
+// 其余 DSN（相对路径、:memory:、file: URI）逐字保留，避免改写既有落点。
+func TestExpandHomeDSN(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	require.Equal(t,
+		filepath.Join(home, ".aicli", "data", "usage_ledger.db"),
+		expandHomeDSN("~/.aicli/data/usage_ledger.db"),
+	)
+	require.Equal(t, home, expandHomeDSN("~"))
+	require.Equal(t, "data/gateway.db", expandHomeDSN("data/gateway.db"))
+	require.Equal(t, "./data/gateway.db", expandHomeDSN("./data/gateway.db"))
+	require.Equal(t, ":memory:", expandHomeDSN(":memory:"))
+	require.Equal(t, "file:ledger.db?cache=shared", expandHomeDSN("file:ledger.db?cache=shared"))
 }

@@ -90,7 +90,11 @@ database:
   auto_migrate: true
   conn_max_lifetime: 3600
   driver: ${DATABASE_DRIVER:-sqlite}
-  dsn: ${DATABASE_DSN:-./data/gateway.db}
+  # usage ledger（token_usage_history / exploration_attribution）的 SQLite。
+  # 默认锚定用户级数据目录，避免随进程 CWD 漂移到仓库工作树（旧默认
+  # ./data/gateway.db 会落在 backend/data/，且与 aicli-gateway 命名冲突）。
+  # 迁移：把旧库原样移动到新路径即可（或设 DATABASE_DSN 指向旧文件）。
+  dsn: ${DATABASE_DSN:-~/.aicli/data/usage_ledger.db}
   log_level: ${DATABASE_LOG_LEVEL:-info}
   max_idle_conns: 10
   max_open_conns: 100

@@ -3,6 +3,8 @@ package knowledge
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,12 +15,21 @@ import (
 // TestPhase0TaskBaselineSummarize runs the Phase 0 task-side baseline data face
 // (04 §7.7) against the 5 real tasks just executed via aicli-ledger (mode=off).
 //
-// This is a manual baseline-run test (requires gateway.db with real ledger records);
-// it skips cleanly when the DB is absent so CI is unaffected.
+// This is a manual baseline-run test (requires a ledger DB with real records);
+// it reads KNOWLEDGE_BASELINE_LEDGER_DB when set, otherwise the user-level
+// default (~/.aicli/data/usage_ledger.db), and skips cleanly when the DB is
+// absent so CI is unaffected.
 func TestPhase0TaskBaselineSummarize(t *testing.T) {
-	dbPath := "E:/projects/ai/ai-agent-runtime/backend/data/gateway.db"
+	dbPath := strings.TrimSpace(os.Getenv("KNOWLEDGE_BASELINE_LEDGER_DB"))
+	if dbPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Skipf("cannot resolve user home for default ledger path: %v", err)
+		}
+		dbPath = filepath.Join(home, ".aicli", "data", "usage_ledger.db")
+	}
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		t.Skipf("gateway.db not found at %s; skipping task-side baseline run", dbPath)
+		t.Skipf("usage ledger DB not found at %s; skipping task-side baseline run", dbPath)
 	}
 	store, err := usageledger.NewSQLiteStore(&usageledger.Config{
 		Driver: "sqlite",
