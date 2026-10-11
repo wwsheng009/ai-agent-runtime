@@ -168,3 +168,19 @@ func TestCanonicalFamilyRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestIsBrokerToolCoversEveryAdvertisedName pins the schema-vs-execution
+// contract: every name advertised through Definitions() must also be classified
+// as a broker tool by IsBrokerTool. A missing case makes the loop skip the
+// broker path and fall into the MCP catalog lookup, so the advertised tool
+// fails at execution with "tool not found" despite being in the model schema
+// (regression found live: schedule_* were advertised but not classified after
+// the B1 rename).
+func TestIsBrokerToolCoversEveryAdvertisedName(t *testing.T) {
+	broker := &Broker{}
+	for _, def := range broker.Definitions() {
+		if !broker.IsBrokerTool(def.Name) {
+			t.Fatalf("advertised tool %q is not classified by IsBrokerTool; the model schema offers it but execution would fail with tool-not-found", def.Name)
+		}
+	}
+}
