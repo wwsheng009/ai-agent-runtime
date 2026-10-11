@@ -50,6 +50,7 @@ aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|tex
 aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin PATH] [--json]
 aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH] [--json]
 aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
+aicli-mesh stop --all [--workspace PATH]... [--force] [--wait 30s] [--json]
 aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
 aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
 aicli-mesh doctor [--json]
@@ -366,6 +367,7 @@ aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH
 
 ```text
 aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
+aicli-mesh stop --all [--workspace PATH]... [--force] [--wait 30s] [--json]
 ```
 
 两种模式（§5.7）：
@@ -387,12 +389,31 @@ aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
 - **没有回环控制面**（目标没带 `--pprof`）时 graceful 不可用（`mesh_no_endpoint`），
   用 `--force` 直接终止进程。
 
+**批量（`--all`）**：枚举当前所有**在线**（live）节点，逐个按单目标语义执行
+（治理门禁逐节点生效——没开 `--mesh-allow-stop` 的节点只得到 refused，其余照常停止）：
+
+- `--workspace PATH` 可重复，只停指定工作区的节点；非在线（stale/stopped）档案与
+  被过滤掉的节点记入汇总的 `skipped`，不做任何尝试；
+- 一个节点都没枚举到（空网格或过滤后为空）→ 退出码 0（幂等成功，不算错误）；
+- **聚合退出码按最严重的一档**：有节点 `timeout` → 3，有 `error` → 5，
+  有 `refused` → 6，有 `not_found` → 2；全部 stopped（含幂等的
+  `mesh_stop_already_stopped`）才是 0——「有节点没停掉」必须让脚本感知；
+- `--json` 输出 `{schema_version, mode, results[], counts}`：`results[]` 每行
+  `node_id` + 与单目标 `stop --json` 同形状的结果，`counts` 为
+  `{total, stopped, timeout, error, refused, not_found, skipped}`。
+
 ```bash
 # 优雅停掉某个会话所在的节点（先看它是不是真的该退）
 aicli-mesh stop session_20260924093535
 
 # 目标卡死 / 没有 --pprof：直接终止进程
 aicli-mesh stop node-22024 --force
+
+# 下班前一把梭：优雅停掉当前所有在线节点
+aicli-mesh stop --all
+
+# 只停某个工作区的节点；停不掉的直接终止
+aicli-mesh stop --all --workspace E:\work\proj-a --force
 ```
 
 ### 4.13 `watch` — 事件流（journal tail，不依赖节点存活）
@@ -615,6 +636,27 @@ aicli-mesh watch --session session_20260924093535 --once --json
 - `status` ∈ `stopped` / `not_found` / `refused` / `timeout` / `error`（§4.12 的退出码映射）；
 - 幂等成功带 `code=mesh_stop_already_stopped` 与 `message`；失败带 `code` 与 `message`；
 - `graceful=true` 只说明这次**投递**了 `/exit`，不代表对方已完成收尾——进程消失才是判据。
+
+`stop --all --json` 是批量信封：`results[]` 逐行内嵌上面的单目标结果（外加 `node_id`），
+`counts` 汇总各状态计数：
+
+```json
+{
+  "schema_version": 2,
+  "mode": "graceful",
+  "results": [
+    {
+      "node_id": "node-22024-20260924T073012Z",
+      "status": "stopped",
+      "pid": 22024,
+      "mode": "graceful",
+      "graceful": true,
+      "elapsed_ms": 1382
+    }
+  ],
+  "counts": { "total": 1, "stopped": 1, "skipped": 0 }
+}
+```
 
 ### 6.7 `watch --json`
 

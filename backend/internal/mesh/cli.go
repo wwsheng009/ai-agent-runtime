@@ -183,6 +183,7 @@ func (c *CLI) printUsage(w io.Writer) {
   aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin PATH] [--json]
   aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH] [--json]
   aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
+  aicli-mesh stop --all [--workspace PATH]... [--force] [--wait 30s] [--json]
   aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
   aicli-mesh doctor [--json]
@@ -216,6 +217,10 @@ func (c *CLI) printUsage(w io.Writer) {
   （不做收尾，残留档案由 gc 按「可证已死」回收）。停止是治理动作：**目标
   进程**必须显式开启 --mesh-allow-stop，否则一律 refused（CLI 无法绕过）。
   「目标已不在运行」按成功处理（幂等）；等不到进程消失时退出码 3。
+  --all 批量停止当前所有**在线**（live）节点（stale/stopped 档案跳过），
+  逐个按单目标语义执行；--workspace PATH 可只停某几个工作区的节点（可重复）。
+  批量聚合退出码按最严重的一档报告：timeout → 3，error → 5，refused → 6，
+  not_found → 2；全部 stopped（含幂等的 already_stopped）才是 0。
 
 观察（watch）: 直接 tail mesh/journal/*.ndjson，**不依赖任何节点存活**——进程全退
   之后仍可复盘（这是它与 /web/api/mesh/events 的分工）。默认先回放 --since 窗口
@@ -2691,12 +2696,20 @@ type stopResult struct {
 // CapabilityStop 拦（refused）——这样「谁能停我」由被停者决定，而不是由一台
 // 可能被入侵的调用方机器决定（§9.2：CLI / Web 都绕不过开关）。
 // CLI 不是节点：callerID 为空，自停检查天然不适用（CLI 没有可被停的档案）。
+//
+// --all 是批量形态：枚举当前所有**在线**（live）节点（--workspace PATH 可
+// 收窄范围），逐个按单目标语义执行。批量不做任何新的策略开关——治理门禁
+// 仍然逐节点生效（没开 --mesh-allow-stop 的节点只会得到 refused，其余节点
+// 照常停止），聚合退出码按最严重的一档报告（timeout > error/not_found >
+// refused），全部 stopped 才算成功。
 func (c *CLI) runStop(args []string) int {
 	parsed, err := parseArgs(args, flagSpec{
-		"force": flagBool,
-		"wait":  flagValue,
-		"json":  flagBool,
-		"help":  flagBool,
+		"all":       flagBool,
+		"workspace": flagMulti,
+		"force":     flagBool,
+		"wait":      flagValue,
+		"json":      flagBool,
+		"help":      flagBool,
 	})
 	if err != nil {
 		return c.fail(ExitUsage, "aicli-mesh stop: %v", err)
@@ -2704,9 +2717,6 @@ func (c *CLI) runStop(args []string) int {
 	if parsed.boolean("help") {
 		c.printUsage(c.out())
 		return ExitOK
-	}
-	if len(parsed.pos) != 1 {
-		return c.fail(ExitUsage, "aicli-mesh stop: 需要 <目标>（节点 ID / 会话 ID / pid:<PID>）")
 	}
 	paths := c.paths()
 	if !paths.Enabled() {
@@ -2719,6 +2729,15 @@ func (c *CLI) runStop(args []string) int {
 	mode := StopModeGraceful
 	if parsed.boolean("force") {
 		mode = StopModeForce
+	}
+	if parsed.boolean("all") {
+		if len(parsed.pos) > 0 {
+			return c.fail(ExitUsage, "aicli-mesh stop: --all 不接受位置参数（收到 %q）；范围收窄用 --workspace", parsed.pos[0])
+		}
+		return c.runStopAll(paths, parsed.list("workspace"), mode, wait, parsed.boolean("json"))
+	}
+	if len(parsed.pos) != 1 {
+		return c.fail(ExitUsage, "aicli-mesh stop: 需要 <目标>（节点 ID / 会话 ID / pid:<PID>），或用 --all 停止全部在线节点")
 	}
 	result := Stop(context.Background(), paths, "", StopRequest{
 		Target: parsed.pos[0],
@@ -2733,6 +2752,172 @@ func (c *CLI) runStop(args []string) int {
 		c.printStopHuman(result)
 	}
 	return stopExitCode(result.Status)
+}
+
+// runStopAll 是 stop --all 的批量编排：枚举在线节点并逐个停止，聚合报告。
+// 治理语义与单目标完全一致（逐节点门禁、幂等成功），这里只做「选哪些目标、
+// 怎么汇总」。
+func (c *CLI) runStopAll(paths Paths, workspaces []string, mode string, wait time.Duration, asJSON bool) int {
+	view := BuildView(paths, ViewOptions{Now: c.now()})
+	targets := make([]NodeView, 0, len(view.Nodes))
+	for _, node := range view.Nodes {
+		if node.State != NodeStateLive {
+			continue
+		}
+		if len(workspaces) > 0 && !workspaceIn(node, workspaces) {
+			continue
+		}
+		targets = append(targets, node)
+	}
+	if len(targets) == 0 {
+		if asJSON {
+			if err := c.printJSON(stopAllResult{
+				SchemaVersion: SchemaVersion,
+				Mode:          mode,
+				Results:       []stopAllEntry{},
+				Counts:        stopAllCounts{},
+			}); err != nil {
+				return c.fail(ExitFailure, "aicli-mesh stop: 输出 JSON 失败: %v", err)
+			}
+			return ExitOK
+		}
+		fmt.Fprintln(c.out(), "没有在线节点；无事可做（幂等成功）。")
+		return ExitOK
+	}
+	entries := make([]stopAllEntry, 0, len(targets))
+	counts := stopAllCounts{Total: len(targets)}
+	// skipped = 枚举到的档案中因「非在线」或 --workspace 过滤而没被尝试的。
+	counts.Skipped = len(view.Nodes) - len(targets)
+	// 聚合退出码按最严重的一档：timeout（进程可能还活着）> error > refused
+	// > not_found（罕见的枚举/停止间竞态），全部 stopped 才是 0。各状态对应的
+	// 退出码数值大小与严重度不一致（not_found=2 < timeout=3），所以用显式
+	// 严重度排名而不是直接比较退出码。
+	worst, worstRank := "", -1
+	exit := ExitOK
+	for _, target := range targets {
+		result := Stop(context.Background(), paths, "", StopRequest{
+			Target: target.NodeID,
+			Mode:   mode,
+			Wait:   wait,
+		})
+		entry := stopAllEntry{NodeID: target.NodeID, StopResult: result}
+		entries = append(entries, entry)
+		counts.count(result.Status)
+		if result.Status != StopStatusStopped {
+			if rank := stopAllSeverity(result.Status); rank > worstRank {
+				worst, worstRank = result.Status, rank
+			}
+		}
+	}
+	if worst != "" {
+		exit = stopExitCode(worst)
+	}
+	if asJSON {
+		if err := c.printJSON(stopAllResult{
+			SchemaVersion: SchemaVersion,
+			Mode:          mode,
+			Results:       entries,
+			Counts:        counts,
+		}); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh stop: 输出 JSON 失败: %v", err)
+		}
+	} else {
+		c.printStopAllHuman(mode, entries, counts)
+	}
+	return exit
+}
+
+// stopAllSeverity 排名批量停止中单个失败结果的严重度（越大越严重）：
+// timeout 说明进程可能仍在运行、需要人工介入，排最前；not_found 只在
+// 枚举与停止之间档案被删的竞态里出现，排最后。
+func stopAllSeverity(status string) int {
+	switch status {
+	case StopStatusTimeout:
+		return 3
+	case StopStatusError:
+		return 2
+	case StopStatusRefused:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// stopAllEntry 是批量停止中单节点的结果行（node_id 与单目标结果同形状）。
+type stopAllEntry struct {
+	NodeID string `json:"node_id"`
+	*StopResult
+}
+
+// stopAllCounts 是批量停止的汇总：total = 尝试停止的目标数；skipped =
+// 档案总数中因「非在线」或 --workspace 过滤而未尝试的节点数。
+type stopAllCounts struct {
+	Total    int `json:"total"`
+	Stopped  int `json:"stopped"`
+	Timeout  int `json:"timeout,omitempty"`
+	Error    int `json:"error,omitempty"`
+	Refused  int `json:"refused,omitempty"`
+	NotFound int `json:"not_found,omitempty"`
+	Skipped  int `json:"skipped"`
+}
+
+func (s *stopAllCounts) count(status string) {
+	switch status {
+	case StopStatusStopped:
+		s.Stopped++
+	case StopStatusTimeout:
+		s.Timeout++
+	case StopStatusError:
+		s.Error++
+	case StopStatusRefused:
+		s.Refused++
+	case StopStatusNotFound:
+		s.NotFound++
+	}
+}
+
+// stopAllResult 是 `stop --all --json` 的输出：单目标结果逐行 + 汇总。
+type stopAllResult struct {
+	SchemaVersion int            `json:"schema_version"`
+	Mode          string         `json:"mode"`
+	Results       []stopAllEntry `json:"results"`
+	Counts        stopAllCounts  `json:"counts"`
+}
+
+// printStopAllHuman 是批量停止的人读输出：逐节点一行 + 汇总行。
+func (c *CLI) printStopAllHuman(mode string, entries []stopAllEntry, counts stopAllCounts) {
+	for _, entry := range entries {
+		switch entry.Status {
+		case StopStatusStopped:
+			verb := "已终止"
+			if entry.Graceful {
+				verb = "已优雅退出"
+			}
+			fmt.Fprintf(c.out(), "%s节点 %s（pid %d，模式 %s）\n", verb, entry.NodeID, entry.PID, mode)
+		default:
+			fmt.Fprintf(c.errOut(), "停止未成功（%s）：节点 %s：%s\n", entry.Status, entry.NodeID, entry.Message)
+			if entry.Code != "" {
+				fmt.Fprintf(c.errOut(), "原因码：%s（节点 %s）\n", entry.Code, entry.NodeID)
+			}
+		}
+	}
+	summary := fmt.Sprintf("共 %d 个在线节点：stopped=%d", counts.Total, counts.Stopped)
+	if counts.Timeout > 0 {
+		summary += fmt.Sprintf(" timeout=%d", counts.Timeout)
+	}
+	if counts.Error > 0 {
+		summary += fmt.Sprintf(" error=%d", counts.Error)
+	}
+	if counts.Refused > 0 {
+		summary += fmt.Sprintf(" refused=%d（目标未开启 --mesh-allow-stop）", counts.Refused)
+	}
+	if counts.NotFound > 0 {
+		summary += fmt.Sprintf(" not_found=%d", counts.NotFound)
+	}
+	if counts.Skipped > 0 {
+		summary += fmt.Sprintf(" skipped=%d（非在线或不在 --workspace 范围内）", counts.Skipped)
+	}
+	fmt.Fprintln(c.out(), summary)
 }
 
 // printStopHuman 是停止结果的人读输出：成功一行，失败给原因与下一步。
