@@ -361,3 +361,26 @@ func runtimeSessionAnchoredContextInt(session *runtimechat.Session) (int, string
 	}
 	return 0, "", false
 }
+
+// isChatProviderReportedUsageSource 判断事件 usage_source 是否属于 provider
+// 上报类（与 loop 锚点准入条件一致，估算值不得写回锚点）。
+func isChatProviderReportedUsageSource(source string) bool {
+	return strings.EqualFold(strings.TrimSpace(source), "provider_reported")
+}
+
+// updateChatRuntimeSessionContextAnchor 把 provider 确认的输入总量写回 CLI 侧
+// runtime session 副本的锚点双键（legacy + canonical）。actor 在自己的会话对象上
+// 按次写锚点，而 CLI 副本此前只在 resume/compact 刷新——长回合中状态栏 tier-1
+// 因此读到冻结旧值（2026-10-12 现场：请求结束后 used 不更新，resume 后正常）。
+func updateChatRuntimeSessionContextAnchor(session *ChatSession, inputTokens int) {
+	if session == nil || session.RuntimeSession == nil || inputTokens <= 0 {
+		return
+	}
+	ctx := session.RuntimeSession.Metadata.Context
+	if ctx == nil {
+		ctx = make(map[string]interface{})
+		session.RuntimeSession.Metadata.Context = ctx
+	}
+	ctx[chatRuntimeContextContextTokenCount] = inputTokens
+	ctx[sessionmeta.ContextTokenCount] = inputTokens
+}

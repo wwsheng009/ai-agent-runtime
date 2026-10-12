@@ -6651,10 +6651,21 @@ func (b *chatRuntimeEventBridge) applyLLMRequestStatus(event runtimeevents.Event
 			CacheCreationTokens: cacheCreationTokens,
 			CacheReadReported:   payloadBoolValue(event.Payload, "usage_cache_read_reported") || cacheReadTokens > 0,
 			ReasoningTokens:     firstPositivePayloadInt(event.Payload, "usage_reasoning_tokens", "reasoning_tokens", "thinking_tokens"),
+			InputTotalTokens:    firstPositivePayloadInt(event.Payload, "usage_input_total_tokens"),
+			UncachedInputTokens: firstPositivePayloadInt(event.Payload, "usage_uncached_input_tokens"),
 		}
 		if applied := applyChatContextTokensFromUsage(b.session, usage, windowTokens, true); applied <= 0 {
 			if estimateTokens := firstPositivePayloadInt(event.Payload, "context_prompt_tokens", "total_tokens"); estimateTokens > 0 {
 				applyChatContextTokens(b.session, estimateTokens, windowTokens, true)
+			}
+		}
+		// 2026-10-12 现场复现（长回合状态栏冻结）：CLI 侧 runtime session 副本的
+		// 锚点只在 resume/compact 时刷新，tier-1 读到冻结旧值并遮蔽上面按事件写入
+		// 的 ContextTokenCount；把本次 provider 确认的输入总量（与 loop 锚点同口径）
+		// 写回 CLI 副本双键，请求结束后状态栏即可即时更新，无需 resume。
+		if isChatProviderReportedUsageSource(payloadStringValue(event.Payload["usage_source"])) {
+			if inputTotal := usage.InputTotal(); inputTotal > 0 {
+				updateChatRuntimeSessionContextAnchor(b.session, inputTotal)
 			}
 		}
 	default:

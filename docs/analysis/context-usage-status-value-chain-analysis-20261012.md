@@ -356,6 +356,35 @@ go test ./cmd/aicli/commands/ -run 'TestResolveChatStatusContextUsedTokensWithSo
 - 部署：`install -m 0755` 到 `~/.local/bin/aicli`，旧版备份 `~/.local/bin/aicli.bak-20261012-132858`；
 - 校验：源/目标 sha256 一致；`aicli version` → `dev` / `2026-10-12T05:28:28Z`；二进制含修复标记 `anchor_legacy`、`used_tokens_source`（`grep -a`）；`go version -m` 显示 Go 1.27.1 静态构建。
 
+### 5.8 长回合状态栏冻结：现场问题与修复（2026-10-12，运行中会话）
+
+**现场**（新部署进程，debug 端点 `http://127.0.0.1:36294`）：
+
+- 用户报告：LLM 请求结束后状态栏 context used 不更新；重新 resume 后正常。
+- 实时取证（WSL）：
+  - statusbar：`used_tokens=606147`，`used_tokens_source=anchor_legacy`；
+  - store（05:52:05Z 落库）：`context_token_count = aicli_context_token_count = 629293`（actor 按请求落库，实时）；
+  - 事件流最新锚点：`614395 → 626305 → 628464 → 629293`（按次递增）。
+- 定性：**actor/store 侧按次更新正常；CLI 侧 runtime session 副本的锚点只在 resume/compact 刷新** → 状态栏 tier-1 读到冻结副本（606147）并遮蔽事件桥刚写入的 tier-2 新值；resume 重载副本后恢复。
+
+**根因链**：
+1. loop `observeContextUsage` 每次 LLM 调用写 actor 会话对象并落库（本次实测 629293）；
+2. 事件桥 `llm.request.finished` 只更新 `session.ContextTokenCount`（tier-2），未更新 CLI 副本锚点；
+3. 状态栏 tier-1（结构化锚点）优先 → 冻结值遮蔽 tier-2；
+4. CLI 副本刷新函数 `restoreRuntimeSessionIntoCLI` 只在 turn 收尾/compact/backtrack 调用（`chat_actor_executor.go:338/445`），长回合内不生效。
+
+**修复**：
+
+- `chat_runtime_events.go`：`llm.request.finished` 且 `usage_source=provider_reported` 时，把本次 provider 输入总量（`usage.InputTotal()`；同时回填 `usage_input_total_tokens` / `usage_uncached_input_tokens` 字段，与 loop 锚点同口径）写回 CLI 副本锚点双键——`chat_token_usage.go` 新增 `updateChatRuntimeSessionContextAnchor`；估算类 usage（`local_estimate`）不写锚点（与 loop 准入一致）。
+- 回归测试 `TestChatRuntimeEventBridge_RefreshesCLISessionAnchorFromFinished`：resume 冻结形态（双键 111 + fingerprint）+ 现场真实数值（prompt 629293 / cache_read 628416）→ 事件后 resolver 返回 `(629293, anchor_legacy)` 且 canonical 同步；`local_estimate` 不覆盖。
+- Windows/WSL 定向测试全绿；隔离 worktree（避开并发工作流半成品）交叉编译 linux/amd64。
+
+**部署与生效**：
+
+- 产物 sha256 `675a8caa2666a7e5ec48794bc2446270b57e0027f6e3d8e06c4cd84cafd1e86`（51,916,960 B，build_time `2026-10-12T05:59:54Z`）；
+- 已安装至 WSL `~/.local/bin/aicli`（备份 `aicli.bak-20261012-140032`）；校验：sha256 两端一致、`file`=静态 ELF、`grep -a` 含 `updateChatRuntimeSessionContextAnchor` / `isChatProviderReportedUsageSource` 标记。
+- **生效条件**：运行中的旧进程需 resume 一次加载新二进制；此后每个 `provider_reported` 的 LLM 请求结束，状态栏 used 即时更新，无需再次 resume。
+
 ## 6. 附录：验证命令与证据
 
 ### 6.1 命令清单（工作目录 `backend/`）

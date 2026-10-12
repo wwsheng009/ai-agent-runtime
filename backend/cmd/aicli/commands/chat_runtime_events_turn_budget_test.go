@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 )
@@ -249,5 +250,63 @@ func TestChatRuntimeEventBridge_ContextUsageAppliesDespiteTurnMismatch(t *testin
 
 	if bridge.session.ContextTokenCount != 261810 {
 		t.Fatalf("provider usage must land despite turn mismatch, got %d", bridge.session.ContextTokenCount)
+	}
+}
+
+// TestChatRuntimeEventBridge_RefreshesCLISessionAnchorFromFinished pins the
+// 2026-10-12 live regression (session_20261012111114_8DyOk3e2): the status bar
+// kept showing the resume-time anchor because the per-request provider anchor
+// only reached the actor/store copy, while tier-1 reads the frozen CLI-side
+// runtime session copy. Every provider-reported llm.request.finished must
+// mirror the input total onto the CLI copy (legacy + canonical), and estimated
+// usage must not.
+func TestChatRuntimeEventBridge_RefreshesCLISessionAnchorFromFinished(t *testing.T) {
+	const sessionID = "session-anchor-live-refresh"
+	bridge := newTurnBudgetTestBridge(t, sessionID, "turn-A")
+
+	ctx := bridge.session.RuntimeSession.Metadata.Context
+	if ctx == nil {
+		ctx = map[string]interface{}{}
+		bridge.session.RuntimeSession.Metadata.Context = ctx
+	}
+	// Resume-time copy: stale anchor + structured identity.
+	ctx[runtimechat.RuntimeContextAnchorFingerprintKey] = "fp-resume-time"
+	ctx[chatRuntimeContextContextTokenCount] = 111
+	ctx[sessionmeta.ContextTokenCount] = 111
+
+	deliverTurnBudgetEvent(bridge, runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"turn_id":                 "turn-A",
+			"usage_prompt_tokens":     629293,
+			"usage_completion_tokens": 1241,
+			"usage_total_tokens":      630534,
+			"usage_cache_read_tokens": 628416,
+			"usage_source":            "provider_reported",
+		},
+	})
+
+	got, source := resolveChatStatusContextUsedTokensWithSource(&ChatSession{RuntimeSession: bridge.session.RuntimeSession})
+	if got != 629293 || source != chatContextUsedSourceAnchorLegacy {
+		t.Fatalf("finished event must refresh the CLI anchor copy, got value=%d source=%q", got, source)
+	}
+	if value, ok := runtimeSessionContextRawInt(bridge.session.RuntimeSession, sessionmeta.ContextTokenCount); !ok || value != 629293 {
+		t.Fatalf("canonical twin must be refreshed too, got value=%v ok=%v", value, ok)
+	}
+
+	// Estimated usage must not become an anchor (gate mirrors the loop).
+	deliverTurnBudgetEvent(bridge, runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"turn_id":             "turn-A",
+			"usage_prompt_tokens": 999999,
+			"usage_source":        "local_estimate",
+		},
+	})
+	got, _ = resolveChatStatusContextUsedTokensWithSource(&ChatSession{RuntimeSession: bridge.session.RuntimeSession})
+	if got != 629293 {
+		t.Fatalf("estimated usage must not overwrite the anchor, got %d", got)
 	}
 }
