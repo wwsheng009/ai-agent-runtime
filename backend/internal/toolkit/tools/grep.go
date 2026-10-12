@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
@@ -26,6 +28,14 @@ import (
 )
 
 var errGrepLimitReached = errors.New("grep match limit reached")
+
+// errGrepOutputLimit 表示一次 rg 调用的 stdout 超过原始输出上限、已被提前停止：
+// 它属于「结果不完整但仍有部分证据」的中断类错误，调用方保留已收集内容并标注 partial。
+var errGrepOutputLimit = errors.New("grep raw output limit reached")
+
+// errGrepLineBudget 表示一次 rg 调用已收满本次需要的行数、被主动提前停止：
+// 它不是错误也不是 partial——属于正常分页语义（结果按「还有更多匹配」收尾即可）。
+var errGrepLineBudget = errors.New("grep stream line budget reached")
 
 // grepMode defines the output format for search results.
 type grepMode string
@@ -3399,6 +3409,9 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 	allLines := make([]string, 0, 32)
 	totalMatchCount := 0
 	truncated := false
+	// pageStopped 记录「读取因收满页被提前终止」：此时 match_count 只是停止前
+	// 观察到的行数，需要显式标注（见 stampGrepPageStop / match_count_scopeKey）。
+	pageStopped := false
 	var aggregatedStats *grepStats
 
 	collectLimit := g.grepCollectLimit(opts)
@@ -3407,11 +3420,32 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 	// instead of being thrown away with the process.
 	stopErr := error(nil)
 	for _, scope := range opts.searchScopes {
+		if len(allLines) >= collectLimit {
+			// 已收满一页：不再为后续 scope 启动 rg（收满页即停）。仍有未搜索的
+			// scope 说明可能存在更多匹配，按截断/分页语义收尾。
+			truncated = true
+			break
+		}
+		remaining := collectLimit - len(allLines)
+		scopeCtx := ctx
+		if !opts.stats && !opts.jsonOutput {
+			// 收满页即停：行预算 = 本 scope 还需要的行数 + 探针余量，读满即终止 rg，
+			// 不再为已经足够的结果扫描整棵树（长尾耗时）。--stats/--json 需要尾部
+			// 汇总行，保持读满（仍受字节上限保护）。
+			scopeCtx = withGrepStreamLineBudget(ctx, remaining+grepStreamLineProbe)
+		}
 		args := buildRipgrepArgs(opts, scope, collectLimit)
-		output, err := g.runCommand(ctx, rgPath, scope.workingDir, args)
-		hasOutput := len(strings.TrimSpace(string(output))) > 0
+		lineBudgetStopped := false
+		output, err := g.runCommand(scopeCtx, rgPath, scope.workingDir, args)
+		// 用字节判断是否有产出：旧写法 string(output) 会把整个输出再复制一份，
+		// 在输出接近读取上限时白白多占一份内存。
+		hasOutput := len(bytes.TrimSpace(output)) > 0
 		if err != nil {
 			switch {
+			case errors.Is(err, errGrepLineBudget):
+				// 收满页即停：属于正常分页（不是错误、不是 partial）。收敛为
+				// truncated=true 让调用方给出 next_offset 续读提示。
+				lineBudgetStopped = true
 			case ctx.Err() != nil && !hasOutput:
 				// 超时/取消且 rg 没有任何产出：无可用证据，如实返回 ctx 错误。
 				return nil, false, ctx.Err()
@@ -3478,6 +3512,10 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 				truncated = true
 			}
 		}
+		if lineBudgetStopped {
+			truncated = true
+			pageStopped = true
+		}
 		if stopErr != nil {
 			// 已提前停止：ctx 已取消或 rg 已报错，后续 scope 不再执行。
 			break
@@ -3494,22 +3532,116 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 			}
 			return nil, false, nil
 		}
-		return buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "rg", rgPath), true, nil
+		return stampGrepPageStop(buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "rg", rgPath), pageStopped), true, nil
 	}
 	if stopErr != nil {
 		reason := grepInterruptionReason(stopErr, ctx)
-		result := buildGrepResultWithEngine(
+		result := stampGrepPageStop(buildGrepResultWithEngine(
 			opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath,
 			grepPartialNotice(reason, len(allLines)),
-		)
+		), pageStopped)
 		return markGrepPartial(result, reason, grepInterruptionTimedOut(stopErr, ctx)), true, nil
 	}
-	return buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath), true, nil
+	return stampGrepPageStop(buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath), pageStopped), true, nil
 }
 
 // grepCollectHardCap 是分页抓取的安全上限：head_limit=0（不限）或深分页也不会
 // 无限收集；输出侧另有 grepOutputBudgetBytes 字节预算兜底。
 const grepCollectHardCap = 5000
+
+// grepRawOutputBudget 是单次 rg 调用 stdout 的字节上限（读取侧硬闸），
+// 也是「默认值 + 环境变量覆盖」的配置项。
+//
+// 背景（2026-10-12 事故）：`grep pattern=gateway path=C:/Users/vince/.aicli glob=*.json`
+// 让 rg 产出约 1.97 GB；旧实现用 bytes.Buffer 全量接收 stdout 后再做逐行
+// regex/Sprintf 归一化，而收集上限（5000 行）在归一化之后才生效，进程私有内存
+// 涨到 ~5.7 GB。现在把闸门前移到读取侧：超过上限立即停止读取并终止 rg，
+// 超量输出绝不进入内存，截断发生在任何归一化之前。
+//
+// 默认 16 MiB 的取值依据：模型可见窗口 grepOutputBudgetBytes=32 KiB，
+// 收集上限 5000 行 × 典型 1–4 KiB/行 ≈ 5–20 MiB；16 MiB 足以填满一次分页抓取，
+// 同时把峰值内存钉在几十 MB 以内（读取 + 归一化副本），比事故现场低两个数量级。
+// 可用 AICLI_GREP_MAX_OUTPUT_BYTES 调整；off/0/unlimited 关闭上限（不推荐）。
+const (
+	defaultGrepRawOutputBudgetBytes = 16 * 1024 * 1024
+	grepRawOutputBudgetEnv          = "AICLI_GREP_MAX_OUTPUT_BYTES"
+
+	// grepContentLineBudgetBytes 是归一化前单行内容的字节上限（默认 4 KiB）。
+	// 单行超长（如数百 KB 的 minified JSON / 日志行）会放大逐行 regex 与
+	// fmt.Sprintf 的开销，并在展示窗口里挤掉其他匹配；截断保持 UTF-8 边界
+	// 并附确定性标记。可用 AICLI_GREP_MAX_LINE_BYTES 调整；off/0/unlimited 关闭。
+	defaultGrepContentLineBudgetBytes = 4 * 1024
+	grepContentLineBudgetEnv          = "AICLI_GREP_MAX_LINE_BYTES"
+
+	// grepStderrBudgetBytes 是 stderr 诊断的保留上限（只留头部）：rg 的权限/用法
+	// 报错只用于排障，超大 stderr（例如整棵树权限拒绝）不应无限进内存。
+	grepStderrBudgetBytes = 32 * 1024
+
+	// grepStreamLineProbe 是「收满页即停」的余量：行预算按还需要的行数 + 本值
+	// 设定，保证在归一化丢弃空行/上下文分隔行（"--"）后页面仍然填得满；停止本身
+	// 通过 errGrepLineBudget 显式上报，不依赖行数推断。
+	grepStreamLineProbe = 8
+
+	// matchCountScopeKey / matchCountScopeObserved 标注 match_count 的口径：
+	// 结果不完整（truncated 或 partial）时它只表示「停止前观察到的匹配行数」，
+	// 不是查询总数——消费者（TUI/trace 摘要）据此避免把观测值当成总数复述。
+	matchCountScopeKey      = toolresult.MetadataMatchCountScopeKey
+	matchCountScopeObserved = toolresult.MatchCountScopeObservedBeforeStop
+)
+
+// grepStreamLineBudgetKey 携带「本次 rg 调用最多需要收集的内容行数」。
+// 通过 context 传递而不是改 runCommand 签名：runner 是测试注入点
+// （30+ 处桩实现），签名变更会波及大量无关测试；未设置预算时行为与旧版
+// 逐字一致（只受字节上限约束）。
+type grepStreamLineBudgetKey struct{}
+
+// withGrepStreamLineBudget 给 ctx 附加行预算；lines<=0 时原样返回（不限行数）。
+func withGrepStreamLineBudget(ctx context.Context, lines int) context.Context {
+	if ctx == nil || lines <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, grepStreamLineBudgetKey{}, lines)
+}
+
+// grepStreamLineBudget 读取行预算；未设置返回 0（不限）。
+func grepStreamLineBudget(ctx context.Context) int {
+	if ctx == nil {
+		return 0
+	}
+	if value, ok := ctx.Value(grepStreamLineBudgetKey{}).(int); ok && value > 0 {
+		return value
+	}
+	return 0
+}
+
+// resolveGrepRawOutputBudget 解析单次 rg stdout 的字节上限。
+// 未设置或非法值 → 默认 16 MiB；off/0/unlimited → 0（关闭上限，风险自负）。
+func resolveGrepRawOutputBudget() int {
+	return resolveGrepByteBudgetEnv(grepRawOutputBudgetEnv, defaultGrepRawOutputBudgetBytes)
+}
+
+// resolveGrepContentLineBudget 解析归一化前的单行字节上限（env 语义同 raw 上限）。
+func resolveGrepContentLineBudget() int {
+	return resolveGrepByteBudgetEnv(grepContentLineBudgetEnv, defaultGrepContentLineBudgetBytes)
+}
+
+// resolveGrepByteBudgetEnv 是 grep 字节限额的统一解析器：正值生效，关闭词返回 0，
+// 未设置/非法值回退默认——与 bash.go 的超时 env 解析保持同一风格（不因手滑值静默收紧）。
+func resolveGrepByteBudgetEnv(envKey string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(envKey))
+	if raw == "" {
+		return fallback
+	}
+	switch strings.ToLower(raw) {
+	case "off", "disable", "disabled", "unlimited", "none", "0":
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
 
 // grepCollectLimit 返回本次调用抓取的匹配上限：显式 head_limit 决定页大小，
 // offset 决定需要跳过多少（因此要多抓 offset 条）；未显式分页时沿用内置上限。
@@ -3895,6 +4027,7 @@ func splitRipgrepStatsLines(rawLines []string) ([]string, []string) {
 }
 
 func normalizeRipgrepContentLines(rawLines []string) []string {
+	lineBudget := resolveGrepContentLineBudget()
 	lines := make([]string, 0, len(rawLines))
 	for _, line := range rawLines {
 		if line == "" {
@@ -3904,6 +4037,9 @@ func normalizeRipgrepContentLines(rawLines []string) []string {
 		if line == "--" {
 			continue
 		}
+		// 归一化前先截断超长行：逐行 regex + Sprintf 的开销与单行长度成正比，
+		// 数百 KB 的单行既会拖慢归一化，又会在展示窗口里挤掉其他匹配。
+		line = clampGrepContentLine(line, lineBudget)
 		if matches := ripgrepMatchLineWithColumnPattern.FindStringSubmatch(line); len(matches) == 5 {
 			line = fmt.Sprintf("%s:%s:%s: %s", matches[1], matches[2], matches[3], matches[4])
 		} else if matches := ripgrepMatchLinePattern.FindStringSubmatch(line); len(matches) == 4 {
@@ -3914,6 +4050,20 @@ func normalizeRipgrepContentLines(rawLines []string) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+// clampGrepContentLine 把单行内容截到 max 字节（保持 UTF-8 边界）并附确定性标记；
+// max<=0 表示不限制。截断只影响行尾文本：`path:line:col:` 前缀保留在行首，
+// 其后的匹配行 regex 仍可正常解析。返回长度可能略超 max（标记本身的开销）。
+func clampGrepContentLine(line string, max int) string {
+	if max <= 0 || len(line) <= max {
+		return line
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + fmt.Sprintf("…[+%d bytes truncated]", len(line)-cut)
 }
 
 func isRipgrepStatsLine(line string) bool {
@@ -4159,6 +4309,12 @@ func grepInterruptionReason(err error, ctx context.Context) string {
 	if errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
 		return "搜索被取消"
 	}
+	if errors.Is(err, errGrepOutputLimit) {
+		if budget := resolveGrepRawOutputBudget(); budget > 0 {
+			return fmt.Sprintf("单次 rg 原始输出超过上限 %d MiB（已提前停止读取）", budget/(1024*1024))
+		}
+		return "单次 rg 原始输出超过上限（已提前停止读取）"
+	}
 	return "搜索提前停止（rg/遍历报错）"
 }
 
@@ -4185,9 +4341,30 @@ func markGrepPartial(result *toolkit.ToolResult, reason string, timedOut bool) *
 	if timedOut {
 		result.Metadata["timed_out"] = true
 	}
+	if _, exists := result.Metadata[matchCountScopeKey]; !exists {
+		// 中断类结果同样只统计「停止前观察到的行数」，标注口径保持一致。
+		result.Metadata[matchCountScopeKey] = matchCountScopeObserved
+	}
 	result.Metadata[toolresult.MetadataNextActionKey] = fmt.Sprintf(
 		"grep 结果不完整（%s）：收窄 pattern/paths 或减小范围后重试，不要原样重试同一查询。", reason,
 	)
+	return result
+}
+
+// stampGrepPageStop 记录「读取因收满页被提前终止」这一停止原因。
+// 此时 truncated=true、match_count 是观测值（buildGrepResult 已统一标注
+// match_count_scope），truncation_reason 给出更具体的停止原因；字节预算已经
+// 给出交付侧原因（byte_budget）时不覆盖，保持单一权威原因。
+func stampGrepPageStop(result *toolkit.ToolResult, pageStopped bool) *toolkit.ToolResult {
+	if result == nil || !pageStopped {
+		return result
+	}
+	if result.Metadata == nil {
+		result.Metadata = map[string]interface{}{}
+	}
+	if _, exists := result.Metadata["truncation_reason"]; !exists {
+		result.Metadata["truncation_reason"] = "page_stop"
+	}
 	return result
 }
 
@@ -4204,6 +4381,117 @@ func grepWalkerPartialResult(opts *grepOptions, results []string, matchCount int
 	return markGrepPartial(result, reason, grepInterruptionTimedOut(err, ctx))
 }
 
+// grepCaptureStop 说明捕获为什么停止。
+type grepCaptureStop uint8
+
+const (
+	// grepCaptureStopEOF：数据源自然结束（rg 跑完）。
+	grepCaptureStopEOF grepCaptureStop = iota
+	// grepCaptureStopByteLimit：字节上限命中（证明还有更多数据，多读了 1 字节）。
+	grepCaptureStopByteLimit
+	// grepCaptureStopLineBudget：行预算命中（已收满本次需要的行数，提前停止）。
+	grepCaptureStopLineBudget
+)
+
+// captureLimitedOutputByLines 从 r 读取 stdout，叠加两道闸门：
+//   - maxBytes>0：字节上限（证明超限只需多读 1 字节，内存与上限成正比）；
+//   - maxLines>0：行预算（数换行符，读满即返回，调用方随即终止数据源进程）。
+//
+// 返回的字节是从流头部截取的完整前缀；命中行预算时会带一行可能与后续内容
+// 断开的残尾，下游按行归一化会把它当作普通行处理（截断判定由调用方的
+// 收集上限完成）。maxBytes<=0 且 maxLines<=0 表示不限（读完整流）。
+func captureLimitedOutputByLines(r io.Reader, maxBytes, maxLines int) ([]byte, grepCaptureStop, error) {
+	if r == nil {
+		return nil, grepCaptureStopEOF, nil
+	}
+	var buf bytes.Buffer
+	newlines := 0
+	chunk := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(chunk)
+		if n > 0 {
+			if maxBytes > 0 {
+				allowed := maxBytes + 1 - buf.Len()
+				if allowed <= 0 {
+					return buf.Bytes()[:maxBytes], grepCaptureStopByteLimit, nil
+				}
+				if n > allowed {
+					// 写满 maxBytes+1 字节即证明源还有更多数据。
+					_, _ = buf.Write(chunk[:allowed])
+					return buf.Bytes()[:maxBytes], grepCaptureStopByteLimit, nil
+				}
+			}
+			_, _ = buf.Write(chunk[:n])
+			if maxLines > 0 {
+				newlines += bytes.Count(chunk[:n], []byte{'\n'})
+				if newlines >= maxLines {
+					data := buf.Bytes()
+					if maxBytes > 0 && len(data) > maxBytes {
+						return data[:maxBytes], grepCaptureStopByteLimit, nil
+					}
+					return data, grepCaptureStopLineBudget, nil
+				}
+			}
+		}
+		if err != nil {
+			data := buf.Bytes()
+			if err == io.EOF {
+				if maxBytes > 0 && len(data) > maxBytes {
+					return data[:maxBytes], grepCaptureStopByteLimit, nil
+				}
+				return data, grepCaptureStopEOF, nil
+			}
+			return data, grepCaptureStopEOF, err
+		}
+	}
+}
+
+// captureLimitedOutput 是字节闸门的兼容包装：返回是否还有更多数据（exceeded）。
+func captureLimitedOutput(r io.Reader, limit int) ([]byte, bool, error) {
+	data, stop, err := captureLimitedOutputByLines(r, limit, 0)
+	return data, stop == grepCaptureStopByteLimit, err
+}
+
+// headLimitedBuffer 是 stderr 诊断的头部限额缓冲：超过 limit 后继续接受写入
+// （必须返回 len(p)，否则子进程写满管道会阻塞/死锁），但只保留前 limit 字节，
+// 并标记发生过截断。
+type headLimitedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *headLimitedBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		_, _ = b.buf.Write(p)
+		return len(p), nil
+	}
+	remaining := b.limit - b.buf.Len()
+	switch {
+	case remaining <= 0:
+		if len(p) > 0 {
+			b.truncated = true
+		}
+	case remaining >= len(p):
+		_, _ = b.buf.Write(p)
+	default:
+		_, _ = b.buf.Write(p[:remaining])
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *headLimitedBuffer) String() string {
+	if b == nil {
+		return ""
+	}
+	text := b.buf.String()
+	if b.truncated {
+		text += "\n...[stderr truncated]"
+	}
+	return text
+}
+
 func runGrepCommand(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 	cmd.Dir = workingDir
@@ -4215,17 +4503,55 @@ func runGrepCommand(ctx context.Context, binaryPath, workingDir string, args []s
 	// 报错在 0 匹配时被当作「有输出」，被 searchWithRipgrep 误判为 partial
 	// success（2026-09-27 证据：stderr 伪成功）。exit 1（无匹配）仍由包装后的
 	// *exec.ExitError 识别。
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	//
+	// stdout 走有界读取而不是 bytes.Buffer：读取上限是内存闸门，必须在任何
+	// 归一化/收集之前生效（2026-10-12 的 1.97 GB 输出事故）。
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("grep stdout pipe: %w", err)
+	}
+	stderr := &headLimitedBuffer{limit: grepStderrBudgetBytes}
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	budget := resolveGrepRawOutputBudget()
+	lineBudget := grepStreamLineBudget(ctx)
+	output, stop, readErr := captureLimitedOutputByLines(stdout, budget, lineBudget)
+	if stop != grepCaptureStopEOF {
+		// 字节上限或行预算命中即停：终止 rg，避免它继续向已停止读取的管道写入
+		// （阻塞/拖时间），也避免把剩余输出读进内存；丢弃管道残余后回收进程。
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_, _ = io.Copy(io.Discard, stdout)
+	}
+	waitErr := cmd.Wait()
+
+	switch stop {
+	case grepCaptureStopByteLimit:
+		// 上限命中优先于 wait 的退出错误：调用方据此保留已收集的部分结果。
+		err = errGrepOutputLimit
+	case grepCaptureStopLineBudget:
+		// 主动收满一页而终止 rg：交给调用方按正常分页语义收尾（不是错误、
+		// 不是 partial），因此返回专用哨兵而不是 wait 的退出错误。
+		err = errGrepLineBudget
+	default:
+		if waitErr != nil {
+			err = waitErr
+		} else {
+			err = readErr
+		}
+	}
 	if err != nil {
 		if message := strings.TrimSpace(stderr.String()); message != "" {
-			return stdout.Bytes(), fmt.Errorf("%w: %s", err, message)
+			return output, fmt.Errorf("%w: %s", err, message)
 		}
-		return stdout.Bytes(), err
+		return output, err
 	}
-	return stdout.Bytes(), nil
+	return output, nil
 }
 
 // --- Builtin walker engine ---
@@ -5756,6 +6082,10 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		"next_offset":                      pageStart + len(results),
 		"has_more":                         hasMore,
 		"engine":                           engine,
+	}
+	if truncated {
+		// 页窗口/字节预算截断时 match_count 只是观测值，显式标注口径。
+		metadata[matchCountScopeKey] = matchCountScopeObserved
 	}
 	// grep owns its own byte/line window and publishes its own truncation and
 	// refinement guidance, so the render layer (L4) must never fold the payload

@@ -1082,7 +1082,7 @@ func summarizeToolMetadata(metadata map[string]interface{}) string {
 	}
 
 	if matchCount, ok := intToolMetadataValue(metadata["match_count"]); ok {
-		parts := []string{formatCountSummary(matchCount, "match", "matches")}
+		parts := []string{formatMatchCountSummary(matchCount, metadata)}
 		if truncatedToolMetadata(metadata["truncated"]) {
 			parts = append(parts, "truncated")
 		}
@@ -1133,6 +1133,25 @@ func formatCountSummary(count int, singular, plural string) string {
 		return fmt.Sprintf("1 %s", singular)
 	}
 	return fmt.Sprintf("%d %s", count, plural)
+}
+
+// formatMatchCountSummary 渲染匹配数摘要：当工具标注了「停止前观察到的下界」
+// 口径（toolresult.MetadataMatchCountScopeKey = observed_before_stop）时，用
+// "108+ matches" 表示下界而不是把观测值当成查询总数复述。
+func formatMatchCountSummary(count int, metadata map[string]interface{}) string {
+	if !observedMatchCountScope(metadata) {
+		return formatCountSummary(count, "match", "matches")
+	}
+	if count == 1 {
+		return "1+ match"
+	}
+	return fmt.Sprintf("%d+ matches", count)
+}
+
+// observedMatchCountScope 识别 match_count 的观测口径标注（扁平键）。
+func observedMatchCountScope(metadata map[string]interface{}) bool {
+	scope, ok := metadata[toolresult.MetadataMatchCountScopeKey].(string)
+	return ok && strings.TrimSpace(scope) == toolresult.MatchCountScopeObservedBeforeStop
 }
 
 func extractToolTextOutput(value interface{}) string {

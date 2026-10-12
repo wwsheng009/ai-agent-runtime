@@ -168,6 +168,18 @@ func SkipsRenderTruncation(metadata map[string]interface{}) bool {
 // "tool_metadata".
 const MetadataModelVisibleBudgetKey = "model_visible_budget_bytes"
 
+// MetadataMatchCountScopeKey annotates the semantics of a tool's "match_count"
+// when the result is incomplete: the number is only what the tool observed
+// before it stopped reading/collecting, not the query's total.
+//
+// Consumers (runtime event summaries) must not restate such a count as the
+// total; the conventional render is a lower bound ("108+ matches").
+const MetadataMatchCountScopeKey = "match_count_scope"
+
+// MatchCountScopeObservedBeforeStop is the MetadataMatchCountScopeKey value for
+// "observed before stop" semantics (grep page/byte-budget stops, partial stops).
+const MatchCountScopeObservedBeforeStop = "observed_before_stop"
+
 // ModelVisibleBudgetBytes returns the declared model-visible byte budget, or 0
 // when the tool did not declare one. Both a flat key and the nested
 // tool_metadata map are honored.
