@@ -249,7 +249,8 @@ def _default_dest() -> str:
     repo_root = _repo_root()
     if repo_root:
         return os.path.join(repo_root, ".agents", "skills")
-    return os.path.join(str(Path.home()), ".aicli", "skills")
+    # aicli 用户级技能发现布局：~/.aicli/.agents/skills（roots.go user scope）。
+    return os.path.join(str(Path.home()), ".aicli", ".agents", "skills")
 
 
 def _parse_args(argv: list[str]) -> Args:
@@ -274,8 +275,8 @@ def _parse_args(argv: list[str]) -> Args:
     parser.epilog = (
         "When run from this repository's skill package, the default destination "
         "is the workspace-local ./.agents/skills directory; otherwise it falls "
-        "back to ~/.aicli/skills. Use --dest ~/.aicli/agents/skills if you need "
-        "the alternate user skills root."
+        "back to ~/.aicli/.agents/skills (the live aicli user skills root). Use "
+        "--dest to pin another destination."
     )
     return parser.parse_args(argv, namespace=Args())
 

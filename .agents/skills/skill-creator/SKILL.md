@@ -253,7 +253,7 @@ For example, when building an image-editor skill, relevant questions include:
 - "Can you give some examples of how this skill would be used?"
 - "I can imagine users asking for things like 'Remove the red-eye from this image' or 'Rotate this image'. Are there other ways you imagine this skill being used?"
 - "What would a user say that should trigger this skill?"
-- "Where should I create this skill? If you do not have a preference, I will place it in `./.agents/skills` for this workspace so Codex can discover it automatically; if you want a personal skill instead, I will use `~/.aicli/skills`, or `~/.aicli/agents/skills` if you want the alternate user-root layout."
+- "Where should I create this skill? If you do not have a preference, I will place it in `./.agents/skills` for this workspace so the runtime can discover it automatically; if you want a personal skill instead, I will use `~/.aicli/.agents/skills`."
 
 To avoid overwhelming users, avoid asking too many questions in a single message. Start with the most important questions and follow up as needed for better effectiveness.
 
@@ -289,7 +289,7 @@ At this point, it is time to actually create the skill.
 
 Skip this step only if the skill being developed already exists. In this case, continue to the next step.
 
-Before running `init_skill.py`, ask where the user wants the skill created. If they do not specify a location, default to `./.agents/skills` when working in this repository so the runtime auto-loads it; when the user wants a personal skill instead, use `~/.aicli/skills` and only switch to `~/.aicli/agents/skills` if they explicitly ask for that alternate layout.
+Before running `init_skill.py`, ask where the user wants the skill created. If they do not specify a location, default to `./.agents/skills` when working in this repository so the runtime auto-loads it; when the user wants a personal skill instead, use `~/.aicli/.agents/skills` (the user root the aicli runtime discovers).
 
 When creating a new skill from scratch, always run the `init_skill.py` script. The script conveniently generates a new template skill directory that automatically includes everything a skill requires, making the skill creation process much more efficient and reliable.
 

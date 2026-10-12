@@ -1,6 +1,6 @@
 ---
 name: skill-installer
-description: Install Codex skills into this workspace's .agents/skills or the user's ~/.aicli/skills and ~/.aicli/agents/skills directories from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).
+description: Install Codex skills into this workspace's .agents/skills or the user's ~/.aicli/.agents/skills directory from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).
 metadata:
   short-description: Install curated skills from openai/skills or other repos
 ---
@@ -9,7 +9,7 @@ metadata:
 
 Helps install skills. By default these are from https://github.com/openai/skills/tree/main/skills/.curated, but users can also provide other locations. Experimental skills live in https://github.com/openai/skills/tree/main/skills/.experimental and can be installed the same way.
 
-If the skill should be auto-loaded by this repository, the repo-local copy of this installer will place it into `./.agents/skills` by default; use `--dest` only when you need to override the destination. If it is meant for a personal installation, use `~/.aicli/skills` by default and `~/.aicli/agents/skills` when you need the alternate user skills root.
+If the skill should be auto-loaded by this repository, the repo-local copy of this installer will place it into `./.agents/skills` by default; use `--dest` only when you need to override the destination. If it is meant for a personal installation, prefer `~/.aicli/.agents/skills` — the aicli runtime's live user skills root. (`~/.aicli/skills` is also a standard candidate root, but only after that directory exists.) Pass `--dest` explicitly to pin the destination.
 
 Use the helper scripts based on the task:
 - List skills when the user asks what is available, or if the user uses this skill without specifying what to do. Default listing is `.curated`, but you can pass `--path skills/.experimental` when they ask about experimental skills.
@@ -29,7 +29,7 @@ Skills from {repo}:
 Which ones would you like installed?
 """
 
-After installing a skill, tell the user: "Restart Codex to pick up new skills."
+After installing a skill, tell the user how it is picked up: the aicli runtime registers the new skill on the next turn (hot reload, no restart); Codex/Claude clients that cache the skill catalog need a restart.
 
 ## Scripts
 
@@ -42,7 +42,7 @@ All of these scripts use network, so when running in the sandbox, request escala
 - `scripts/install-skill-from-github.py --url https://github.com/<owner>/<repo>/tree/<ref>/<path>`
 - Example (experimental skill): `scripts/install-skill-from-github.py --repo openai/skills --path skills/.experimental/<skill-name>`
 - Example (repo-local install, default in this workspace): `scripts/install-skill-from-github.py --repo <owner>/<repo> --path <path/to/skill>`
-- Example (explicit user install): `scripts/install-skill-from-github.py --repo <owner>/<repo> --path <path/to/skill> --dest ~/.aicli/agents/skills`
+- Example (explicit user install): `scripts/install-skill-from-github.py --repo <owner>/<repo> --path <path/to/skill> --dest ~/.aicli/.agents/skills`
 
 ## Behavior and Options
 
@@ -50,8 +50,8 @@ All of these scripts use network, so when running in the sandbox, request escala
 - If download fails with auth/permission errors, falls back to git sparse checkout.
 - Aborts if the destination skill directory already exists.
 - Installs into `./.agents/skills/<skill-name>` by default when this repository copy is used.
-- Falls back to `~/.aicli/skills/<skill-name>` when run outside a repo-local workspace.
-- Use `--dest ~/.aicli/agents/skills` when the alternate user skills root is required.
+- Falls back to `~/.aicli/skills/<skill-name>` when run outside a repo-local workspace; on aicli prefer `--dest ~/.aicli/.agents/skills` so the install lands in the root that is already live.
+- Use `--dest ~/.aicli/.agents/skills` for the aicli user skills root (workspace root: `./.agents/skills`).
 - Use `--dest` when you need a different target directory.
 - Multiple `--path` values install multiple skills in one run, each named from the path basename unless `--name` is supplied.
 - Options: `--ref <ref>` (default `main`), `--dest <path>`, `--method auto|download|git`.
@@ -62,4 +62,5 @@ All of these scripts use network, so when running in the sandbox, request escala
 - Private GitHub repos can be accessed via existing git credentials or optional `GITHUB_TOKEN`/`GH_TOKEN` for download.
 - Git fallback tries HTTPS first, then SSH.
 - The skills at https://github.com/openai/skills/tree/main/skills/.system are preinstalled, so no need to help users install those. If they ask, just explain this. If they insist, you can download and overwrite.
-- Installed annotations come from the repository-local `./.agents/skills` directory when this workspace copy is used, and from the user's `~/.aicli/skills` or `~/.aicli/agents/skills` directories otherwise.
+- Installed annotations come from the repository-local `./.agents/skills` directory when this workspace copy is used, and from the user's `~/.aicli/.agents/skills` directory otherwise.
+- aicli discovery roots (only existing directories count): `./.agents/skills` (workspace) and `~/.aicli/.agents/skills` (user); `~/.aicli/skills` / `~/.aicli/agents/skills` are legacy candidates discovered only after they exist. Prefer installing into a root that already exists.
