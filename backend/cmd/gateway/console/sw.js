@@ -1,8 +1,20 @@
 // Service worker for the aicli-gateway console (docs/gateway/07-console.md).
 // Caches the app shell so the console opens instantly; API, tunnel and proxy
 // traffic is never cached (data must stay live).
-const CACHE = "aicli-gateway-shell-v29";
-const SHELL = ["./", "./index.html", "./app.js", "./style.css", "./manifest.webmanifest", "./icon.svg"];
+// Cache-busting version: bump together with the ?v= query in index.html and
+// the register() URL in app.js on every release (Cloudflare edge-caches
+// *.js/*.css for 4h, so a new URL is what makes the update land immediately).
+const CACHE = "aicli-gateway-shell-v31";
+const SHELL = [
+  "./",
+  "./index.html",
+  "./app.js?v=31",
+  "./style.css?v=31",
+  "./manifest.webmanifest",
+  "./icon.svg",
+  "./icon-192.png",
+  "./icon-512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -68,10 +80,55 @@ self.addEventListener("push", (event) => {
       body: data.body,
       tag: data.tag,
       data: { url: data.url },
-      icon: "./icon.svg",
-      badge: "./icon.svg",
+      // PNG, not SVG: iOS and Android system notifications do not render SVG
+      // icons (the notification still shows, but with a blank/missing icon).
+      icon: "./icon-192.png",
+      badge: "./badge-96.png",
     }),
   );
+});
+
+function urlBase64ToUint8Array(base64) {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const normalized = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(normalized);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) { out[i] = raw.charCodeAt(i); }
+  return out;
+}
+
+// Browsers rotate or invalidate push endpoints (subscription expiry, iOS PWA
+// reinstall, storage eviction). Without this handler the gateway keeps a dead
+// endpoint until it happens to receive a 404/410 — and the device silently
+// stops receiving notifications. Re-subscribe and upsert the new endpoint.
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil((async () => {
+    try {
+      let sub = event.newSubscription || null;
+      if (!sub) {
+        const res = await fetch("/api/push/config", { credentials: "same-origin" });
+        const cfg = await res.json();
+        if (!cfg || !cfg.enabled || !cfg.public_key) { return; }
+        sub = await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(cfg.public_key),
+        });
+      }
+      const json = sub.toJSON();
+      await fetch("/api/push/subscriptions", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          endpoint: json.endpoint,
+          keys: json.keys || {},
+          label: "service-worker re-subscribe",
+        }),
+      });
+    } catch (err) {
+      // The console retries the subscription on its next open.
+    }
+  })());
 });
 
 self.addEventListener("notificationclick", (event) => {

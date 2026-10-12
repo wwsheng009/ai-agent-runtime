@@ -86,7 +86,9 @@ func TestCoalesceNotifications(t *testing.T) {
 	}
 
 	merged := coalesceNotifications("completed", []push.Notification{
-		{Title: "A"}, {Title: "B"}, {Title: "A"},
+		{Title: "A", Urgency: "normal", TTL: time.Hour},
+		{Title: "B", Urgency: "normal", TTL: time.Hour},
+		{Title: "A", Urgency: "normal", TTL: time.Hour},
 	})
 	if merged.Title != "3 sessions completed" {
 		t.Fatalf("merged title = %q", merged.Title)
@@ -96,6 +98,9 @@ func TestCoalesceNotifications(t *testing.T) {
 	}
 	if merged.Tag != "batch|completed" {
 		t.Fatalf("merged tag = %q", merged.Tag)
+	}
+	if merged.Urgency != "normal" || merged.TTL != time.Hour {
+		t.Fatalf("merged delivery hints = %q/%v, want normal/1h", merged.Urgency, merged.TTL)
 	}
 }
 
@@ -140,6 +145,35 @@ func TestPushNotifierHighPriorityIsImmediate(t *testing.T) {
 	n.observe([]*tunnel.Node{node})
 	if !waitHit(hits, 2*time.Second) {
 		t.Fatal("high-priority attention should be delivered immediately")
+	}
+}
+
+// TestPushNotifierDeliveryHints asserts high-priority attention is sent with
+// RFC 8030 Urgency: high (so mobile push services do not defer it to a Doze
+// maintenance window) and a short TTL, while low-priority keeps normal urgency.
+func TestPushNotifierDeliveryHints(t *testing.T) {
+	type delivery struct{ urgency, ttl string }
+	got := make(chan delivery, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- delivery{urgency: r.Header.Get("Urgency"), ttl: r.Header.Get("TTL")}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	n := testNotifier(t, srv.URL+"/sub")
+	n.coalesceWindow = time.Hour // low priority must not be flushed in this test
+
+	n.observe([]*tunnel.Node{{
+		NodeID:   "n1",
+		Sessions: []wire.SessionSummary{{SessionID: "s1", Title: "A", Attention: "approval"}},
+	}})
+	select {
+	case d := <-got:
+		if d.urgency != "high" || d.ttl != "600" {
+			t.Fatalf("high-priority headers = %q/%q, want high/600", d.urgency, d.ttl)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no high-priority push received")
 	}
 }
 

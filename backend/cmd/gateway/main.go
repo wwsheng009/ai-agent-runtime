@@ -673,6 +673,7 @@ func run() int {
 	// Presence: the console reports the session it is viewing so the gateway can
 	// suppress push notifications for it (docs/gateway/08-notifications.md §5.4).
 	router.Handle("/api/presence", owner.RequireSession(handlePresence(presence))).Methods(http.MethodPost)
+	router.Handle("/api/presence/release", owner.RequireSession(handlePresenceRelease(presence))).Methods(http.MethodPost)
 	// Prometheus text metrics (bearer token, or loopback when no token is set).
 	router.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if !authorizeMetrics(r, *metricsToken) {

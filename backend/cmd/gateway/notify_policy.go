@@ -117,9 +117,11 @@ func coalesceNotifications(attention string, items []push.Notification) push.Not
 		titles = append(titles, t)
 	}
 	return push.Notification{
-		Title: fmt.Sprintf("%d sessions %s", len(items), attention),
-		Body:  strings.Join(titles, ", "),
-		Tag:   "batch|" + attention,
-		URL:   items[0].URL,
+		Title:   fmt.Sprintf("%d sessions %s", len(items), attention),
+		Body:    strings.Join(titles, ", "),
+		Tag:     "batch|" + attention,
+		URL:     items[0].URL,
+		Urgency: items[0].Urgency,
+		TTL:     items[0].TTL,
 	}
 }

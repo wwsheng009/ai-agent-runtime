@@ -110,6 +110,7 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 				Tag:   key,
 				URL:   p.sessionURL(node.NodeID, sess.SessionID),
 			}
+			applyDeliveryPolicy(&note, attention)
 			if isHighPriorityAttention(attention) {
 				immediate = append(immediate, note)
 			} else {
@@ -205,6 +206,21 @@ func attentionBody(node *tunnel.Node, attention string) string {
 		name = node.NodeID
 	}
 	return fmt.Sprintf("%s: %s", name, attention)
+}
+
+// applyDeliveryPolicy maps an attention kind onto push-service delivery hints
+// (RFC 8030): high-priority attention (approval/question/error) is sent with
+// Urgency: high so Android/iOS do not defer it to a Doze maintenance window,
+// and with a short TTL so a stale alert does not pop long after it matters.
+// Low-priority attention keeps normal urgency and may be retained for later.
+func applyDeliveryPolicy(note *push.Notification, attention string) {
+	if isHighPriorityAttention(attention) {
+		note.Urgency = "high"
+		note.TTL = 10 * time.Minute
+		return
+	}
+	note.Urgency = "normal"
+	note.TTL = time.Hour
 }
 
 // handlePushConfig returns the VAPID public key so the service worker can

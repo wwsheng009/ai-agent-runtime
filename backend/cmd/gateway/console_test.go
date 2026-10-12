@@ -28,7 +28,7 @@ func TestConsoleServesIndex(t *testing.T) {
 }
 
 func TestConsoleServesAssets(t *testing.T) {
-	for _, path := range []string{"/style.css", "/app.js", "/sw.js", "/icon.svg", "/manifest.webmanifest"} {
+	for _, path := range []string{"/style.css", "/app.js", "/sw.js", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-180.png", "/badge-96.png", "/manifest.webmanifest"} {
 		rec := getConsole(path)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s status = %d, want 200", path, rec.Code)

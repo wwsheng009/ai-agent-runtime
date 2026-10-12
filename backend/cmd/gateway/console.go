@@ -40,11 +40,18 @@ func consoleHandler() http.Handler {
 			name = "index.html"
 		}
 		servePath := "/" + name
+		// Console shell assets must revalidate: CDN edges (Cloudflare) cache
+		// *.js/*.css for hours by default, which would otherwise delay a
+		// release until the TTL expires. Versioned ?v= URLs in index.html are
+		// the primary mechanism; this header is defense in depth.
+		switch name {
+		case "index.html", "app.js", "style.css", "sw.js":
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		if name == "index.html" {
 			// FileServer redirects /index.html -> ./, so serve the directory
 			// index via "/" instead.
 			servePath = "/"
-			w.Header().Set("Cache-Control", "no-cache")
 		}
 		if name == "manifest.webmanifest" {
 			// Go's extension MIME table is unreliable on Windows; set it here.

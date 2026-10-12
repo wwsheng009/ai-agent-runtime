@@ -1118,6 +1118,18 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 }
 .conn-chip.conn-lost { border-color: var(--danger); color: var(--danger-ink); }
 
+/* Install guidance: iOS Web Push only works from the home-screen PWA, and
+   Android shows a deferred install prompt — both surfaced here. */
+.install-hint {
+  position: sticky; top: 0; z-index: 39;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.install-hint-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
 /* Relative-time labels (内容/同步/心跳) past their freshness threshold. */
 .age-stale { color: var(--warn-ink) !important; }
 

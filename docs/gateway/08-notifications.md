@@ -222,6 +222,10 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | `NOTIFY` 帧 | `internal/gateway/wire/messages.go`、`tunnel/notify.go`、`agent/controller.go` | 新增 `Notify`（`kind`/`priority`/`title`/`dedup_key`/`ts`）；agent 在 turn 边界/事件变化时随 `SESSION_UPDATE` 一并上报；网关按 `dedup_key` 去重并更新注册表 `attention`（不覆盖 `SESSION_UPDATE` 其它字段） |
 | 控制台聚合收件箱 | `cmd/gateway/console/{index.html,app.js,style.css}` | "待处理"聚合视图（按优先级排序 + 计数）；打开会话即标记已读（presence 即已读联动），注意力再次变化后重新出现 |
 | 注册表持久化 | `tunnel/registry.go`、`tunnel/persist.go`、`cmd/gateway/main.go` | 注册表防抖快照到 `data/registry.json`（0600，默认 2s 合并窗口，退出时强制落盘）；重启恢复为 **stale** 条目（控制台显示"离线（快照）"），agent 重连（同 NodeID）即替换为 live；快照同时种子化推送去重快照，重启不会重推旧注意力；断开清理只删除自己的注册条目（比较 LastHeartbeat），避免覆盖重连后的 live 条目 |
+| 投递分级与重试 | `internal/gateway/push/sender.go`、`cmd/gateway/push.go` | `Notification.Urgency/TTL` 映射为 RFC 8030 请求头：`approval`/`question`/`error` → `Urgency: high` + TTL 10min（避免 Android Doze 把高优先提醒压到维护窗口），`completed`/`waiting` → `normal` + TTL 1h；429/5xx/网络失败退避重试（尊重 `Retry-After`），401/403 归为 `ErrRejected` 并记日志（VAPID 不一致不再静默失效） |
+| presence 主动释放 | `cmd/gateway/presence.go`、`console/app.js` | 新增 `POST /api/presence/release`（`{all:true}` 或 `{node_id,session_id}`）；页面 `visibilitychange(hidden)` / `pagehide` 时用 keepalive 释放，切后台后不再被 presence 抑制最长 90s |
+| 订阅自愈 | `console/sw.js` | 处理 `pushsubscriptionchange`：浏览器轮换/失效 endpoint 后自动重新订阅并回传网关（upsert），不再静默失联 |
+| 移动端可发现性与权限 | `console/app.js`、`console/index.html`、`console/manifest.webmanifest`、`console/*.png` | 点击手势内先 `Notification.requestPermission()`（iOS 要求）；HTTP 非安全上下文 / iOS 未安装 / 权限被拒绝均给出显性原因；A2HS 与 `beforeinstallprompt` 安装引导；`/api/push/test` 测试通知按钮；PNG 图标（192/512/180/apple-touch-icon + 通知 badge），修复 SVG 图标在系统通知中不显示的问题 |
 
 **通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时广播一次 Web Push。因此：
 
@@ -238,3 +242,26 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 > Service Worker 展示 → 控制台徽标/toast/收件箱），各段均有单测；§3/§5/§9 的增强项（`NOTIFY` 帧、
 > presence 收件箱联动、时间窗合并、免打扰/静音、聚合收件箱、注册表持久化）均已落地；主备热切换已支持（runbook §13），剩余双活为部署级增强，
 > 不影响单实例可用性。
+
+### 10.3 移动端收不到通知：排查清单
+
+按顺序核对（每条对应一个已实现的显性提示或修复）：
+
+1. **HTTPS**：Web Push 只在安全上下文可用。用 `http://<IP>:<port>` 访问时浏览器不注册 Service
+   Worker，控制台通知按钮显示"通知不可用"并在 tooltip 说明。启用 `--tls-cert/--tls-key`，或前置
+   Caddy/Nginx 终止 TLS（[02-architecture.md](./02-architecture.md) TLS 终止建议）。
+2. **iOS 必须安装为 PWA**：iOS 16.4+ 仅对"添加到主屏幕"的 PWA 投递 Web Push。用 Safari 打开 →
+   分享 → 添加到主屏幕 → 从桌面图标打开；未安装时控制台按钮显示"先安装到主屏幕"并出现安装引导横幅。
+   另需在 *设置 → 通知* 中允许该 PWA。
+3. **权限在手势内请求**：点击"开启通知"时控制台先调用 `Notification.requestPermission()`
+   （15s 超时保护）。若显示"通知被禁用"，在浏览器/系统设置中允许后刷新页面。
+4. **Android 网络环境**：Chrome/Edge 的 Web Push 依赖 Google FCM，国内无 GMS / FCM 不可达时会订阅
+   失败（AbortError，提示文案已说明）或订阅成功但收不到。此时改用桌面端控制台，或规划替代通道
+   （ntfy / Bark / IM webhook 等，见 §10.2 之外的多通道立项）。
+5. **系统层限制**：Android 需允许 Chrome/Edge 通知、关闭对浏览器的电池优化；检查是否处于静音渠道。
+6. **订阅存活**：点击侧栏"发送测试通知"（`POST /api/push/test`）查看投递结果：
+   - `0/N`：多为 VAPID 不匹配（`data/vapid.key` 被重建 / 主备实例不一致）——设备关闭再开启通知可重建订阅；
+   - 桌面收到、手机未收：设备侧问题（第 2/4/5 条）；
+   - 全部收到但延迟：高优先 `approval/question/error` 已用 `Urgency: high`，低优先合并/免打扰属预期行为。
+7. **数据目录稳定**：`data/vapid.key` 与 `data/push.json` 必须持久（含主备一致），否则订阅会在无声中失效；
+   401/403 现在会在网关日志中以 `push: ... rejected (VAPID mismatch?)` 记录。

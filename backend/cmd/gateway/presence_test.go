@@ -100,3 +100,53 @@ func TestPresenceEndpointRequiresNode(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
+
+func TestPresenceRelease(t *testing.T) {
+	p := newPresenceRegistry(time.Minute)
+	p.Touch("n1", "s1", false)
+	p.Touch("n1", "s2", true)
+	p.Touch("n2", "s3", false)
+
+	if n := p.Release("n1", "s1"); n != 1 || p.Active("n1", "s1") {
+		t.Fatalf("release session: n=%d active=%v", n, p.Active("n1", "s1"))
+	}
+	if n := p.Release("n1", ""); n != 1 || p.Active("n1", "s2") {
+		t.Fatalf("release node: n=%d active=%v", n, p.Active("n1", "s2"))
+	}
+	if n := p.Release("", ""); n != 1 || p.Count() != 0 {
+		t.Fatalf("release all: n=%d count=%d", n, p.Count())
+	}
+	// Releasing again is an idempotent no-op.
+	if n := p.Release("", ""); n != 0 {
+		t.Fatalf("second release all = %d, want 0", n)
+	}
+}
+
+func TestPresenceReleaseEndpoint(t *testing.T) {
+	p := newPresenceRegistry(time.Minute)
+	p.Touch("n1", "s1", false)
+	handler := handlePresenceRelease(p)
+
+	rec := httptest.NewRecorder()
+	handler(rec, httptest.NewRequest(http.MethodPost, "/api/presence/release", strings.NewReader(`{"all":true}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["released"] != float64(1) {
+		t.Fatalf("body = %v, want released=1", body)
+	}
+	if p.Count() != 0 {
+		t.Fatalf("presence not cleared: %d", p.Count())
+	}
+
+	// An empty body must stay a no-op success (pagehide keepalive path).
+	rec = httptest.NewRecorder()
+	handler(rec, httptest.NewRequest(http.MethodPost, "/api/presence/release", strings.NewReader(``)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty body status = %d", rec.Code)
+	}
+}

@@ -8,11 +8,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"math/big"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -210,6 +212,95 @@ func TestSenderSendGone(t *testing.T) {
 	sub := Subscription{Endpoint: srv.URL + "/sub", P256dh: mustP256dh(t), Auth: mustAuth(t)}
 	if err := sender.Send(t.Context(), sub, Notification{Title: "x"}); err != ErrGone {
 		t.Fatalf("err = %v, want ErrGone", err)
+	}
+}
+
+func TestSenderSendDeliveryHeaders(t *testing.T) {
+	var gotUrgency, gotTTL, gotTopic string
+	srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotUrgency = r.Header.Get("Urgency")
+		gotTTL = r.Header.Get("TTL")
+		gotTopic = r.Header.Get("Topic")
+		w.WriteHeader(http.StatusCreated)
+	})
+	defer srv.Close()
+	v, _ := LoadOrCreateVAPID("")
+	sender := NewSender(v, "mailto:a@b.c")
+	sub := Subscription{Endpoint: srv.URL + "/sub", P256dh: mustP256dh(t), Auth: mustAuth(t)}
+	if err := sender.Send(t.Context(), sub, Notification{
+		Title: "x", Urgency: "high", TTL: 5 * time.Minute, Topic: "alert",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if gotUrgency != "high" || gotTTL != "300" || gotTopic != "alert" {
+		t.Fatalf("headers = urgency %q ttl %q topic %q, want high/300/alert", gotUrgency, gotTTL, gotTopic)
+	}
+}
+
+func TestSenderSendDefaultDeliveryHeaders(t *testing.T) {
+	var gotUrgency, gotTTL string
+	srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotUrgency = r.Header.Get("Urgency")
+		gotTTL = r.Header.Get("TTL")
+		w.WriteHeader(http.StatusCreated)
+	})
+	defer srv.Close()
+	v, _ := LoadOrCreateVAPID("")
+	sender := NewSender(v, "mailto:a@b.c")
+	sub := Subscription{Endpoint: srv.URL + "/sub", P256dh: mustP256dh(t), Auth: mustAuth(t)}
+	if err := sender.Send(t.Context(), sub, Notification{Title: "x"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if gotUrgency != "normal" || gotTTL != "3600" {
+		t.Fatalf("headers = urgency %q ttl %q, want normal/3600", gotUrgency, gotTTL)
+	}
+}
+
+func TestSenderRetriesTransientFailure(t *testing.T) {
+	attempts := 0
+	srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	defer srv.Close()
+	v, _ := LoadOrCreateVAPID("")
+	sender := NewSender(v, "mailto:a@b.c")
+	sender.retryBackoff = time.Millisecond
+	sub := Subscription{Endpoint: srv.URL + "/sub", P256dh: mustP256dh(t), Auth: mustAuth(t)}
+	if err := sender.Send(t.Context(), sub, Notification{Title: "x"}); err != nil {
+		t.Fatalf("send after retry: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestSenderRejectsPermanentFailure(t *testing.T) {
+	srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	defer srv.Close()
+	v, _ := LoadOrCreateVAPID("")
+	sender := NewSender(v, "mailto:a@b.c")
+	sub := Subscription{Endpoint: srv.URL + "/sub", P256dh: mustP256dh(t), Auth: mustAuth(t)}
+	err := sender.Send(t.Context(), sub, Notification{Title: "x"})
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("err = %v, want ErrRejected", err)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	if got := parseRetryAfter("120"); got != 2*time.Minute {
+		t.Fatalf("parseRetryAfter(120) = %v", got)
+	}
+	for _, bad := range []string{"", "0", "-1", "soon", "Wed, 21 Oct 2015 07:28:00 GMT"} {
+		if got := parseRetryAfter(bad); got != 0 {
+			t.Fatalf("parseRetryAfter(%q) = %v, want 0", bad, got)
+		}
 	}
 }
 

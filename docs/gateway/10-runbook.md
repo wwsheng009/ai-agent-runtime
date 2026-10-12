@@ -310,3 +310,45 @@ B registry: node=node-<id> LIVE   # 同 ID 替换 stale，而非新增第二个�
 （极端环境无法写 home），agent 退化为每次进程随机 id——failover 仍工作，
 但 standby 上会短暂并存一条 stale 条目直到 TTL/人工清理（控制台「节点 → 离线快照 → 清除全部」一键批量
 清除，等价 `DELETE /api/nodes?stale=1`；仅删 stale，不影响 live 节点），不影响可用性。
+
+---
+
+## 14. 线上入口：gateway-edge 多域名反代
+
+线上 80/443 由 **ai-gateway-edge**（另一仓库 `ai-gateway` 的 `cmd/gateway-edge`）持有，
+ACME（Let's Encrypt，http-01）与按 Host 路由都在 Edge 侧完成；控制台不要另装 Caddy（会端口冲突）。
+路由规则支持 `match.hosts`（**精确匹配**，不支持通配符）到不同 backend group。
+
+| 域名 | 后端 | 说明 |
+|------|------|------|
+| `ttai.online` / `api.ttai.online` | `127.0.0.1:18443`（ai-gateway，默认组） | 经 Cloudflare 代理 |
+| `aicli.ttai.online` | `127.0.0.1:8080`（aicli-gateway 控制台） | 经 Cloudflare 代理（源站证书 LE，边缘为 CF 通用证书）；独立域名满足 Service Worker / Web Push 的 scope 与同源要求 |
+| agent 隧道 | `wss://aicli.ttai.online/gw/agent`（443） | CF → edge → `127.0.0.1:8080/gw/agent`；网关只监听回环，公网 8080 已关闭 |
+
+> 2026-10-12 14:48 UTC 完成端口收敛：`--listen 0.0.0.0:8080` → `--listen 127.0.0.1:8080`，
+> 公网 `ttai.online:8080` 不再可达。各 agent 需把 gateway URL 改为 `wss://aicli.ttai.online/gw/agent`
+> （旧 `wss://ttai.online:8080/gw/agent` 已失效，agent 会持续重试直到更新配置）。
+> 回滚：还原 `/etc/systemd/system/aicli-gateway.service.bak-*` → `systemctl daemon-reload && systemctl restart aicli-gateway`。
+
+配置与生效（`/opt/ai-gateway-edge/configs/config.yaml`）：
+
+- `runtime.edge.tls.acme.domains`：新增域名必须在此登记，且**需要 `systemctl restart ai-gateway-edge`**
+  才会签发（热加载会置 `tls_restart_required=true` 并提示 controlled restart）；
+- `runtime.edge.edge_backend_groups` + `edge_route_rules`（`match.hosts` + `path_prefixes: ["/"]`）：支持热加载；
+- 校验：`cd /opt/ai-gateway-edge && ./bin/gateway-edge configtest -c configs/config.yaml`
+  （需在服务目录下运行，token 由 `configs/.env` 自动加载）；
+- 验证：`curl --resolve aicli.ttai.online:443:127.0.0.1 https://aicli.ttai.online/`。
+
+网关侧：`aicli-gateway.service` 需带 `--public-base-url https://aicli.ttai.online`
+（Web Push 点击深链由此生成），改后 `systemctl daemon-reload && systemctl restart aicli-gateway`。
+
+**发布（含缓存）**：Cloudflare 会按扩展名缓存 `*.js`/`*.css` 4 小时（HTML/manifest 默认不缓存）。
+因此每次发布必须同步 bump 控制台资源版本（当前 `v=31`）：
+`console/index.html` 的 `app.js?v=`/`style.css?v=`、`console/sw.js` 的 `CACHE` 与 `SHELL`、
+`console/app.js` 里 `serviceWorker.register("./sw.js?v=")`；否则手机端会继续拿到旧 JS，
+直到 CF TTL（4h）过期或手动 purge。发布步骤：`GOOS=linux GOARCH=amd64 go build -trimpath -o gateway ./cmd/gateway`
+→ 上传替换 `/opt/aicli-gateway/gateway`（保留 `gateway.bak-*`）→ `systemctl restart aicli-gateway`
+→ 校验 `curl -s 'https://aicli.ttai.online/app.js?v=<新版本>' | grep -c 'push-test'`。
+
+回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
+`/etc/systemd/system/aicli-gateway.service.bak-*`。

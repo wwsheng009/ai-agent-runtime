@@ -100,6 +100,38 @@ func (p *presenceRegistry) Count() int {
 	return len(p.seen)
 }
 
+// Release drops presence entries so notifications stop being suppressed
+// immediately instead of waiting for the TTL. An empty sessionID releases
+// every session of the node; an empty nodeID releases everything.
+func (p *presenceRegistry) Release(nodeID, sessionID string) int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	released := 0
+	switch {
+	case nodeID == "":
+		released = len(p.seen)
+		p.seen = make(map[string]presenceEntry)
+	case sessionID == "":
+		prefix := nodeID + "|"
+		for key := range p.seen {
+			if strings.HasPrefix(key, prefix) {
+				delete(p.seen, key)
+				released++
+			}
+		}
+	default:
+		key := presenceKey(nodeID, sessionID)
+		if _, ok := p.seen[key]; ok {
+			delete(p.seen, key)
+			released = 1
+		}
+	}
+	return released
+}
+
 func (p *presenceRegistry) pruneLocked(now time.Time) {
 	for key, entry := range p.seen {
 		if !entry.expiry.After(now) {
@@ -127,5 +159,38 @@ func handlePresence(presence *presenceRegistry) http.HandlerFunc {
 		}
 		presence.Touch(strings.TrimSpace(req.NodeID), strings.TrimSpace(req.SessionID), req.Tail)
 		writeJSON(w, http.StatusOK, map[string]any{"watching": true})
+	}
+}
+
+// handlePresenceRelease clears presence entries when the console page goes to
+// the background or is unloaded (app.js sends this via keepalive fetch /
+// pagehide). Without it a backgrounded phone keeps suppressing notifications
+// for the session it last viewed until the presence TTL expires.
+func handlePresenceRelease(presence *presenceRegistry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			NodeID    string `json:"node_id"`
+			SessionID string `json:"session_id"`
+			All       bool   `json:"all"`
+		}
+		// An empty body is treated as "release everything" so a bare keepalive
+		// POST from pagehide still works.
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if !req.All && strings.TrimSpace(req.NodeID) == "" {
+			// No node and no all=true: nothing to do, but treat it as success
+			// (idempotent no-op) to keep the unload path simple.
+			writeJSON(w, http.StatusOK, map[string]any{"released": 0})
+			return
+		}
+		nodeID := strings.TrimSpace(req.NodeID)
+		if req.All {
+			nodeID = ""
+		}
+		released := presence.Release(nodeID, strings.TrimSpace(req.SessionID))
+		writeJSON(w, http.StatusOK, map[string]any{"released": released})
 	}
 }

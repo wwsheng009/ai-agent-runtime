@@ -127,7 +127,6 @@
     authedState = !!authed;
     el("login").hidden = authed;
     el("app").hidden = !authed;
-    el("push-toggle").hidden = !authed;
     el("logout").hidden = !authed;
     el("logout-top").hidden = !authed;
     // Two-screen layout: pre-auth = standalone login page (chrome hidden),
@@ -137,7 +136,10 @@
       closeSidebar();
       el("password").setAttribute("aria-invalid", "false");
       el("password").focus();
+      pushConfig = null; // re-read gateway push config on the next login
     }
+    refreshPushState();
+    renderInstallHint();
   }
 
   /* ─────────────────────── hash router ───────────────────────── */
@@ -1732,19 +1734,43 @@
     });
   }
 
+  // releasePresence clears the gateway-side suppression as soon as the page is
+  // hidden or unloaded. Without it a phone that backgrounded the console keeps
+  // suppressing pushes for the session it last viewed until the presence TTL
+  // (default 90s) expires — the classic "切后台后没有及时提醒" report.
+  function releasePresence() {
+    if (!Object.keys(presenceTargets).length) { return; }
+    var body = JSON.stringify({ all: true });
+    try {
+      fetch("/api/presence/release", {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: true,
+        headers: { "Content-Type": "application/json" },
+        body: body,
+      }).catch(function () {});
+    } catch (e) { /* keepalive unsupported: the TTL still bounds the window */ }
+  }
+
   setInterval(sendPresence, 30000);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) {
-      sendPresence();
-      // Coming back from a suspended tab: if the SSE feed has been quiet for
-      // a long stretch, pull a fresh snapshot instead of trusting the cache.
-      if (eventsSubscribed && lastEventAt && Date.now() - lastEventAt > 60000) { loadNodes(); }
+    if (document.hidden) {
+      releasePresence();
+      return;
     }
+    sendPresence();
+    // Coming back from a suspended tab: if the SSE feed has been quiet for
+    // a long stretch, pull a fresh snapshot instead of trusting the cache.
+    if (eventsSubscribed && lastEventAt && Date.now() - lastEventAt > 60000) { loadNodes(); }
   });
+  window.addEventListener("pagehide", releasePresence);
 
   /* ─────────────────────── Web Push ──────────────────────────── */
 
   var pushRegistration = null;
+  var pushConfig = null;       // cached GET /api/push/config
+  var pushConfigPromise = null;
+  var pushSynced = false;      // per-page guard for the idempotent re-register
 
   function urlBase64ToUint8Array(base64) {
     var padding = "=".repeat((4 - (base64.length % 4)) % 4);
@@ -1760,44 +1786,178 @@
     if (label) { label.textContent = text; }
   }
 
-  function pushSupported() {
-    return "serviceWorker" in navigator && "PushManager" in window;
+  function isIOSDevice() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   }
 
-  function initPush() {
-    if (!pushSupported()) { el("push-toggle").hidden = true; return; }
-    navigator.serviceWorker.ready
+  function isStandalone() {
+    return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+      navigator.standalone === true;
+  }
+
+  // pushEnvironment explains whether Web Push can work here and, when it
+  // cannot, why. The reason is surfaced in the toggle tooltip and in error
+  // toasts instead of silently hiding the button: on plain HTTP or in an iOS
+  // Safari tab the user previously saw no notification affordance at all.
+  function pushEnvironment() {
+    if (window.isSecureContext === false) {
+      return { ok: false, reason: "当前地址不是 HTTPS（安全上下文），浏览器禁用了 Service Worker 与推送。请改用 https:// 访问网关，或用 --tls-cert/--tls-key 让网关直接提供 TLS。" };
+    }
+    if (isIOSDevice() && !isStandalone()) {
+      return { ok: false, needsInstall: true, reason: "iOS 的 Web Push 只在“添加到主屏幕”后的 PWA 中生效：请用 Safari 打开本页 → 分享 → 添加到主屏幕，再从桌面图标打开并开启通知。" };
+    }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      return { ok: false, reason: "当前浏览器不支持 Web Push。请使用 Chrome / Edge / Safari 16.4+，或改用控制台实时更新。" };
+    }
+    return { ok: true };
+  }
+
+  function loadPushConfig() {
+    if (pushConfig) { return Promise.resolve(pushConfig); }
+    if (pushConfigPromise) { return pushConfigPromise; }
+    pushConfigPromise = apiJSON("/api/push/config").then(function (r) {
+      pushConfig = (r && r.res && r.res.ok && r.body) ? r.body : { enabled: false };
+    }).catch(function () {
+      pushConfig = { enabled: false };
+    }).then(function () {
+      pushConfigPromise = null;
+      return pushConfig;
+    });
+    return pushConfigPromise;
+  }
+
+  function pushLabel() {
+    var label = navigator.platform || "";
+    if (navigator.userAgent.indexOf("Mobile") !== -1) { label += " mobile"; }
+    if (isIOSDevice()) { label += " ios"; }
+    return label.trim();
+  }
+
+  // Re-POST an existing browser subscription: the gateway upserts by endpoint,
+  // so this self-heals a lost/restored push store without user action.
+  function syncPushSubscription(sub) {
+    if (!sub || pushSynced || !sub.toJSON) { return; }
+    pushSynced = true;
+    var json = sub.toJSON();
+    apiJSON("/api/push/subscriptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        endpoint: json.endpoint,
+        keys: json.keys || {},
+        label: pushLabel(),
+      }),
+    }).catch(function () {});
+  }
+
+  function refreshPushState() {
+    var btn = el("push-toggle");
+    var test = el("push-test");
+    if (!btn) { return; }
+    btn.hidden = !authedState;
+    if (!authedState) { return; }
+    var env = pushEnvironment();
+    if (!env.ok) {
+      setPushLabel(env.needsInstall ? "先安装到主屏幕" : "通知不可用");
+      btn.title = env.reason;
+      if (test) { test.hidden = true; }
+      return;
+    }
+    if (!("Notification" in window) || !Notification.requestPermission) {
+      setPushLabel("通知不可用");
+      btn.title = "当前浏览器不支持系统通知。";
+      if (test) { test.hidden = true; }
+      return;
+    }
+    if (Notification.permission === "denied") {
+      setPushLabel("通知被禁用");
+      btn.title = "浏览器/系统已拒绝通知权限：请在站点设置或系统通知设置中允许后刷新页面。";
+      if (test) { test.hidden = true; }
+      return;
+    }
+    loadPushConfig().then(function (cfg) {
+      if (!cfg || !cfg.enabled) {
+        setPushLabel("通知未启用");
+        btn.title = "网关未启用推送（--push-enabled=false 或 VAPID 初始化失败）。";
+        if (test) { test.hidden = true; }
+        return;
+      }
+      btn.title = "";
+      return navigator.serviceWorker.ready
       .then(function (reg) {
         pushRegistration = reg;
         return reg.pushManager.getSubscription();
       })
-      .then(function (sub) { setPushLabel(sub ? "关闭通知" : "开启通知"); })
-      .catch(function () {});
+      .then(function (sub) {
+        if (sub && Notification.permission === "granted") {
+          setPushLabel("关闭通知");
+          if (test) { test.hidden = false; }
+          syncPushSubscription(sub);
+        } else {
+          setPushLabel("开启通知");
+          if (test) { test.hidden = true; }
+        }
+      });
+    }).catch(function () {});
   }
 
+  function mapPushError(err) {
+    if (err && err.name === "AbortError") {
+      return new Error("浏览器推送服务拒绝了订阅 —— 常见原因：当前网络无法访问浏览器的推送服务器（国内 Android 的 Chrome/Edge 依赖 Google FCM，可能不可用），或系统/浏览器策略禁用了推送。iOS 请确认已“添加到主屏幕”；也可改用桌面端控制台或配置替代通知通道。");
+    }
+    if (err && err.name === "NotAllowedError") {
+      return new Error("通知权限被拒绝 —— 请在浏览器地址栏/系统设置中允许通知后重试。");
+    }
+    return err instanceof Error ? err : new Error(String(err));
+  }
+
+  // requestPushPermission must be called inside the click gesture. The race
+  // guards against a never-settling promise (seen in Chromium without user
+  // activation) so the toggle cannot hang on "开启中…" forever.
+  function requestPushPermission() {
+    var req = Notification.requestPermission();
+    return Promise.race([
+      req,
+      new Promise(function (_, reject) {
+        setTimeout(function () {
+          reject(new Error("通知权限请求超时未响应：请在浏览器/系统弹出的权限提示中做出选择后重试。"));
+        }, 15000);
+      }),
+    ]);
+  }
+
+  // enablePush must run inside the user gesture: iOS/Safari only shows the
+  // permission prompt while the activation is live, so requestPermission is
+  // called synchronously, before any async work (config fetch,
+  // serviceWorker.ready, ...).
   function enablePush() {
-    return apiJSON("/api/push/config").then(function (r) {
-      if (!r.body || !r.body.enabled || !r.body.public_key) {
+    var env = pushEnvironment();
+    if (!env.ok) { return Promise.reject(new Error(env.reason)); }
+    var permission;
+    if ("Notification" in window && Notification.requestPermission) {
+      permission = requestPushPermission();
+    } else {
+      permission = Promise.resolve("granted");
+    }
+    return permission.then(function (state) {
+      if (state !== "granted") {
+        throw new Error("通知权限未授予（当前：" + state + "）。请在浏览器/系统设置中允许通知后重试。");
+      }
+      return loadPushConfig();
+    }).then(function (cfg) {
+      if (!cfg || !cfg.enabled || !cfg.public_key) {
         throw new Error("网关未启用推送（--push-enabled 或 VAPID 初始化失败）");
       }
       return navigator.serviceWorker.ready.then(function (reg) {
         pushRegistration = reg;
         return reg.pushManager.subscribe({
           userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(r.body.public_key),
-        }).catch(function (err) {
-          // Map raw browser errors to actionable messages.
-          if (err && err.name === "AbortError") {
-            throw new Error("浏览器推送服务拒绝了订阅 —— 通常因为当前网络无法访问浏览器的推送服务器，或浏览器策略禁用了推送。可改用 Chrome/Edge 正常网络环境，或使用控制台实时更新替代。");
-          }
-          if (err && err.name === "NotAllowedError") {
-            throw new Error("通知权限被拒绝 —— 请在浏览器地址栏的权限设置中允许通知后重试。");
-          }
-          throw err;
+          applicationServerKey: urlBase64ToUint8Array(cfg.public_key),
         });
       });
     }).then(function (sub) {
-      if (!sub) { return; }
+      if (!sub) { return null; }
       var json = sub.toJSON();
       return apiJSON("/api/push/subscriptions", {
         method: "POST",
@@ -1805,12 +1965,14 @@
         body: JSON.stringify({
           endpoint: json.endpoint,
           keys: json.keys || {},
-          label: (navigator.platform || "") + (navigator.userAgent.indexOf("Mobile") !== -1 ? " mobile" : ""),
+          label: pushLabel(),
         }),
       }).then(function (r) {
         if (!r.res.ok) { throw new Error("网关订阅失败（HTTP " + r.res.status + "）"); }
-        setPushLabel("关闭通知");
+        return sub;
       });
+    }).catch(function (err) {
+      throw mapPushError(err);
     });
   }
 
@@ -1825,7 +1987,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ endpoint: endpoint }),
         });
-      }).then(function () { setPushLabel("开启通知"); });
+      });
     });
   }
 
@@ -1945,17 +2107,36 @@
   var pushBusy = false;
   el("push-toggle").addEventListener("click", function () {
     if (pushBusy) { return; }
-    var enabling = el("push-toggle-label").textContent.indexOf("开启") !== -1;
+    // The click handler is the only entry point for enabling: it must stay
+    // synchronous up to Notification.requestPermission() (see enablePush).
+    var env = pushEnvironment();
+    if (!env.ok) { notify(env.reason, "error"); return; }
+    if (!("Notification" in window) || !Notification.requestPermission) {
+      notify("当前浏览器不支持系统通知。", "error");
+      return;
+    }
+    if (Notification.permission === "denied") {
+      notify("通知权限被拒绝：请在浏览器/系统设置中允许通知后刷新页面。", "error");
+      return;
+    }
+    if (pushConfig && pushConfig.enabled === false) {
+      notify("网关未启用推送（--push-enabled=false 或 VAPID 初始化失败）。", "error");
+      return;
+    }
+    var disabling = el("push-toggle-label").textContent.indexOf("关闭") !== -1;
     pushBusy = true;
-    setPushLabel(enabling ? "开启中…" : "关闭中…");
+    setPushLabel(disabling ? "关闭中…" : "开启中…");
     var btn = el("push-toggle");
+    var test = el("push-test");
     btn.disabled = true;
-    Promise.resolve(enabling ? enablePush() : disablePush())
+    Promise.resolve(disabling ? disablePush() : enablePush())
       .then(function () {
-        notify(enabling ? "已开启通知" : "已关闭通知", "ok");
+        setPushLabel(disabling ? "开启通知" : "关闭通知");
+        if (test) { test.hidden = disabling; }
+        notify(disabling ? "已关闭通知" : "已开启通知", "ok");
       })
       .catch(function (err) {
-        setPushLabel(enabling ? "开启通知" : "关闭通知");
+        refreshPushState();
         notify("通知操作失败：" + (err && err.message ? err.message : "请检查浏览器通知权限"), "error");
       })
       .finally(function () {
@@ -1963,6 +2144,29 @@
         btn.disabled = false;
       });
   });
+
+  var pushTest = el("push-test");
+  if (pushTest) {
+    pushTest.addEventListener("click", function () {
+      pushTest.disabled = true;
+      apiJSON("/api/push/test", { method: "POST" }).then(function (r) {
+        if (!r.res.ok) { throw new Error("HTTP " + r.res.status); }
+        var delivered = (r.body && r.body.delivered) || 0;
+        var total = (r.body && r.body.subscriptions) || 0;
+        if (total === 0) {
+          notify("网关没有已保存的订阅：请先在本设备开启通知。", "error");
+          return;
+        }
+        if (delivered === 0) {
+          notify("推送服务拒收了全部 " + total + " 个订阅（0/" + total + "）：请关闭后重新开启通知，并确认 data/vapid.key 未被重建。", "error");
+          return;
+        }
+        notify("已投递 " + delivered + "/" + total + " 个订阅。若本机未弹出：iOS 需从主屏幕图标打开；Android 请检查系统通知与电池优化。", delivered === total ? "ok" : "error");
+      }).catch(function (err) {
+        notify("测试通知失败：" + (err && err.message ? err.message : err), "error");
+      }).finally(function () { pushTest.disabled = false; });
+    });
+  }
 
   // Mobile sidebar
   el("nav-toggle").addEventListener("click", function () {
@@ -2163,11 +2367,60 @@
     }
   }
 
+  /* ─────────────────────── PWA install hint ─────────────────── */
+
+  var deferredInstall = null;
+
+  window.addEventListener("beforeinstallprompt", function (event) {
+    // Android/Chrome: keep the prompt for an explicit "安装" click instead of
+    // letting the mini-infobar disappear without teaching the user why.
+    event.preventDefault();
+    deferredInstall = event;
+    renderInstallHint();
+  });
+
+  function installHintDismissed() {
+    try { return localStorage.getItem("aicli-gw-install-hint-dismissed") === "1"; } catch (e) { return false; }
+  }
+
+  function renderInstallHint() {
+    var hint = el("install-hint");
+    if (!hint) { return; }
+    if (!authedState || installHintDismissed()) { hint.hidden = true; return; }
+    var action = el("install-hint-action");
+    if (deferredInstall) {
+      el("install-hint-text").textContent = "安装到主屏幕后可像 App 一样打开，并在后台收到通知提醒。";
+      action.hidden = false;
+      hint.hidden = false;
+      return;
+    }
+    if (isIOSDevice() && !isStandalone()) {
+      el("install-hint-text").textContent = "iPhone/iPad 需先安装：Safari 分享 → 添加到主屏幕，再从桌面图标打开，后台通知才会生效。";
+      action.hidden = true;
+      hint.hidden = false;
+      return;
+    }
+    hint.hidden = true;
+  }
+
+  el("install-hint-dismiss").addEventListener("click", function () {
+    el("install-hint").hidden = true;
+    try { localStorage.setItem("aicli-gw-install-hint-dismissed", "1"); } catch (e) { /* storage unavailable */ }
+  });
+  el("install-hint-action").addEventListener("click", function () {
+    var ev = deferredInstall;
+    deferredInstall = null;
+    el("install-hint").hidden = true;
+    if (ev && ev.prompt) { ev.prompt(); }
+  });
+
   /* ─────────────────────── boot ──────────────────────────────── */
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("./sw.js").catch(function () {});
+      // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
+      // keep serving an old worker script.
+      navigator.serviceWorker.register("./sw.js?v=31").catch(function () {});
     });
   }
 
@@ -2182,5 +2435,6 @@
   loadNodes().then(function () {
     if (authedState) { loadDevices(); }
   });
-  initPush();
+  renderInstallHint();
+  refreshPushState();
 })();
