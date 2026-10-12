@@ -47,7 +47,7 @@ func executeStructuredWebStatusCommand(session *ChatSession) CommandResult {
 	webURL := chatDebugPprofWebURL()
 	if webURL == "" {
 		builder.meta("状态:", "未启用")
-		builder.plain("  启动时加 --pprof / --debug 启用 HTTP 服务器，或用 --web-port <端口>")
+		builder.plain("  启动时加 --web 启用 micro Web client，或用 --web-port <端口>")
 		builder.plain("  --web-host 0.0.0.0 在 IPv4 局域网访问，--web-host :: 在 IPv6")
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: builder.document()}},
@@ -149,7 +149,7 @@ func executeStructuredWebStartCommand(session *ChatSession) CommandResult {
 	if webURL == "" {
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: render.SingleLineDoc(render.TextSpan(
-				"错误: Web 服务器未启用。启动时加 --pprof / --debug / --web-port <端口> 启用",
+				"错误: Web 服务器未启用。启动时加 --web / --web-port <端口> 启用",
 			))}},
 			Action: CommandContinue,
 		}

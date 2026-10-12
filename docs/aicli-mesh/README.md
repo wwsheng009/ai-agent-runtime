@@ -40,9 +40,9 @@
 pwsh scripts/build.ps1 -Tools aicli-mesh      # 独立二进制
 # 或直接用内置别名：aicli mesh <子命令>
 
-# 1) 起两个节点（--pprof 开启回环控制面，端口自选）
-aicli chat --yolo --pprof
-aicli chat --yolo --pprof
+# 1) 起两个节点（--web 开启回环控制面，端口自选）
+aicli chat --yolo --web
+aicli chat --yolo --web
 
 # 1b) 或让网格起一个新会话（子进程生成会话 ID，返回可打开的窗口 URL）
 aicli-mesh new --workspace $PWD
@@ -109,6 +109,6 @@ aicli-mesh doctor                        # 体检；problems > 0 → 退出码 5
 | 组件 | 关系 |
 |------|------|
 | `internal/mesh` | 唯一实现：CLI（`aicli-mesh` / `aicli mesh`）、HTTP 端点、E2E 全部复用它 |
-| 节点内 HTTP 控制面 | `--pprof` / `--web-port` 开启；`/web/api/mesh/self\|peers\|events\|call\|spawn\|stop` 见 web-remote-api.md §9 |
+| 节点内 HTTP 控制面 | `--web` / `--web-port` 开启；`/web/api/mesh/self\|peers\|events\|call\|spawn\|stop` 见 web-remote-api.md §9 |
 | 微前端（`/web/`） | 会话页的「在新窗口打开」/停止走 spawn/stop；失败文案按 `code` 分支，不解析散文 |
 | E2E harness | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1`（E2E-DEBUG-03，断言基线 13 条） |

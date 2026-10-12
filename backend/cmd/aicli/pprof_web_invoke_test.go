@@ -13,9 +13,9 @@ import (
 //   - /web/api/invoke 的路由注册与无会话行为（不依赖 LLM 会话）；
 //   - P0 鉴权：Host/Origin 校验 + 写操作令牌 + 页面自动注入令牌。
 func TestPprofServerWebRemoteInvokeEndpoints(t *testing.T) {
-	handle, err := startPprofServer("127.0.0.1:0")
+	handle, err := startLoopbackServer("127.0.0.1:0", loopbackServiceOptions{pprof: true, web: true})
 	if err != nil {
-		t.Fatalf("startPprofServer() error = %v", err)
+		t.Fatalf("startLoopbackServer() error = %v", err)
 	}
 	defer handle.Close()
 	base := "http://" + handle.Addr()

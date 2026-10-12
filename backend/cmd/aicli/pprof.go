@@ -42,17 +42,23 @@ func newChatWebH2CHandler(handler http.Handler) http.Handler {
 	return h2c.NewHandler(handler, &http2.Server{IdleTimeout: chatWebH2CIdleTimeout})
 }
 
-// pprofServerHandle 持有按需启动的 pprof HTTP 服务器。
+// pprofServerHandle 持有按需启动的 loopback HTTP 服务器。
 // 默认监听 127.0.0.1 上的随机空闲端口；仅本机可访问，
 // 避免把可触发 GC / 执行分析代码的端点暴露到网络上。
 // 当 --web-host 指定非回环地址（如 0.0.0.0）时，监听所有接口并
 // 启用非回环鉴权模式（所有请求需令牌）。
+//
+// 服务器按服务面拆分注册：pprof/debug 诊断路由与 /web/* 微型 Web 客户端
+// 路由分别由 --pprof（或 --debug）与 --web 控制。两者共用监听地址时
+// 仍是两个独立的逻辑服务，避免历史遗留的“开 pprof 就暴露 Web”行为。
 type pprofServerHandle struct {
 	server *http.Server
 	addr   string
 	// tokenQueryParam 是非回环模式下的 token 查询参数后缀（?token=xxxxx），
 	// 回环模式下为空串。用于构造带令牌的访问 URL。
 	tokenQueryParam string
+	pprofEnabled    bool
+	webEnabled      bool
 }
 
 // chatDisplayPath 是会话渲染/显示状态快照端点的独立路径。
@@ -94,9 +100,23 @@ func (h *pprofServerHandle) WebPort() string {
 	return portStr
 }
 
+// PprofEnabled 返回本服务器是否注册了 pprof/debug 诊断服务。
+func (h *pprofServerHandle) PprofEnabled() bool {
+	return h != nil && h.pprofEnabled
+}
+
+// WebEnabled 返回本服务器是否注册了 micro Web client 服务。
+func (h *pprofServerHandle) WebEnabled() bool {
+	return h != nil && h.webEnabled
+}
+
 // URL 返回 pprof 索引页面的完整 URL（不含 token 查询参数；
 // 非回环模式下 URL 构造处会附加 ChatWebTokenQueryParam()）。
+// 未启用 pprof 服务时返回空串。
 func (h *pprofServerHandle) URL() string {
+	if !h.PprofEnabled() {
+		return ""
+	}
 	addr := h.Addr()
 	if addr == "" {
 		return ""
@@ -105,7 +125,11 @@ func (h *pprofServerHandle) URL() string {
 }
 
 // DisplayURL 返回会话渲染/显示状态快照端点的完整 URL。
+// 未启用 pprof/debug 服务时返回空串。
 func (h *pprofServerHandle) DisplayURL() string {
+	if !h.PprofEnabled() {
+		return ""
+	}
 	addr := h.Addr()
 	if addr == "" {
 		return ""
@@ -114,7 +138,11 @@ func (h *pprofServerHandle) DisplayURL() string {
 }
 
 // ScreenURL 返回当前屏幕合成帧端点的完整 URL。
+// 未启用 pprof/debug 服务时返回空串。
 func (h *pprofServerHandle) ScreenURL() string {
+	if !h.PprofEnabled() {
+		return ""
+	}
 	addr := h.Addr()
 	if addr == "" {
 		return ""
@@ -123,7 +151,11 @@ func (h *pprofServerHandle) ScreenURL() string {
 }
 
 // EndpointsURL 返回调试端点清单端点的完整 URL。
+// 未启用 pprof/debug 服务时返回空串。
 func (h *pprofServerHandle) EndpointsURL() string {
+	if !h.PprofEnabled() {
+		return ""
+	}
 	addr := h.Addr()
 	if addr == "" {
 		return ""
@@ -132,8 +164,11 @@ func (h *pprofServerHandle) EndpointsURL() string {
 }
 
 // WebURL 返回微型 Web 客户端页面（/web/）的完整 URL。
-// 非回环模式下附加 ?token= 便于直接从局域网访问。
+// 未启用 Web 服务时返回空串；非回环模式下附加 ?token= 便于直接从局域网访问。
 func (h *pprofServerHandle) WebURL() string {
+	if !h.WebEnabled() {
+		return ""
+	}
 	addr := h.Addr()
 	if addr == "" {
 		return ""
@@ -142,7 +177,11 @@ func (h *pprofServerHandle) WebURL() string {
 }
 
 // InvokeURL 返回同步远程调用端点（POST /web/api/invoke）的完整 URL。
+// 未启用 Web 服务时返回空串。
 func (h *pprofServerHandle) InvokeURL() string {
+	if !h.WebEnabled() {
+		return ""
+	}
 	addr := h.Addr()
 	if addr == "" {
 		return ""
@@ -163,17 +202,24 @@ func (h *pprofServerHandle) Close() error {
 	return h.server.Close()
 }
 
-// resolveLoopbackServerAddr 解析 loopback 服务器（Web 客户端 / /debug 端点）的监听地址。
+// resolveLoopbackServerAddr 是旧签名的兼容包装：不携带 --web 时仍解析
+// pprof/debug 地址；新启动路径请调用 resolveLoopbackServerAddrWithWeb。
+func resolveLoopbackServerAddr(pprofFlag, debugFlag bool, webPort int, webPortSet bool, webHost, pprofEnv string) (string, error) {
+	return resolveLoopbackServerAddrWithWeb(pprofFlag, false, debugFlag, webPort, webPortSet, webHost, pprofEnv)
+}
+
+// resolveLoopbackServerAddrWithWeb 解析 loopback 服务器（诊断/Web 客户端）的监听地址。
 // 优先级（高 → 低）：
 //  1. --web-port <port>：显式端口，展开为 <webHost>:<port>；端口越界直接报错，
 //     避免"手滑写成 70000"这类笔误静默退化成随机端口；
 //  2. AICLI_PPROF 环境变量：非空即启用，并按原样作为地址（可含自定义 host，保持既有语义）；
-//  3. --pprof / --debug：<webHost>:0，随机空闲端口；
+//  3. --pprof / --debug / --web（含 --web-host、--web-port 触发的有效 Web 开关）：
+//     <webHost>:0，随机空闲端口；
 //  4. 都未设置：返回空串，不启动服务器。
 //
 // webHost 默认为 127.0.0.1；--web-host 0.0.0.0 或 AICLI_WEB_HOST=0.0.0.0 时监听
 // 所有接口，进入非回环鉴权模式（所有请求需 token）。--web-host :: 使用 IPv6 双栈。
-func resolveLoopbackServerAddr(pprofFlag, debugFlag bool, webPort int, webPortSet bool, webHost, pprofEnv string) (string, error) {
+func resolveLoopbackServerAddrWithWeb(pprofFlag, webFlag, debugFlag bool, webPort int, webPortSet bool, webHost, pprofEnv string) (string, error) {
 	if webPortSet {
 		if webPort < 1 || webPort > 65535 {
 			return "", fmt.Errorf("invalid --web-port %d: must be between 1 and 65535", webPort)
@@ -183,7 +229,7 @@ func resolveLoopbackServerAddr(pprofFlag, debugFlag bool, webPort int, webPortSe
 	if env := strings.TrimSpace(pprofEnv); env != "" {
 		return env, nil
 	}
-	if pprofFlag || debugFlag {
+	if pprofFlag || webFlag || debugFlag {
 		return webHost + ":0", nil
 	}
 	return "", nil
@@ -217,11 +263,46 @@ func resolveLoopbackServerNetwork(addr string) string {
 	return "tcp"
 }
 
-// startPprofServer 启动 pprof HTTP 服务器。
+// loopbackServiceOptions 描述本次 loopback 服务器要注册哪些服务面。
+// 至少应启用一个；调用方在启动前根据 --pprof/--debug/--web、--web-host、
+// --web-port 计算。
+type loopbackServiceOptions struct {
+	pprof bool
+	web   bool
+}
+
+// resolveLoopbackServices 根据启动开关计算服务面：
+//   - --pprof / --debug / AICLI_PPROF 打开诊断服务；
+//   - --web、--web-host 或 --web-port 的显式使用打开 micro Web client；
+//   - 三个 Web 开关可与 --pprof 同时开启并共用监听地址。
+func resolveLoopbackServices(pprofFlag, webFlag, debugFlag, webHostSet, webPortSet bool, pprofEnv string) loopbackServiceOptions {
+	pprof := pprofFlag || debugFlag || strings.TrimSpace(pprofEnv) != ""
+	web := webServiceRequested(webFlag, webHostSet, webPortSet)
+	return loopbackServiceOptions{pprof: pprof, web: web}
+}
+
+// webServiceRequested 返回是否应自动启用 micro Web client。
+// 除显式 --web 外，显式传入 --web-host 或 --web-port 也视为启用请求；
+// 仅读取 AICLI_WEB_HOST 环境变量不会隐式启动服务器。
+func webServiceRequested(webFlag, webHostSet, webPortSet bool) bool {
+	return webFlag || webHostSet || webPortSet
+}
+
+// startPprofServer 启动仅含 pprof/debug 诊断服务的 loopback 服务器。
+// 需要同时注册 micro Web client 时请显式调用 startLoopbackServer 并传入
+// loopbackServiceOptions{pprof: true, web: true}。
+func startPprofServer(addr string) (*pprofServerHandle, error) {
+	return startLoopbackServer(addr, loopbackServiceOptions{pprof: true})
+}
+
+// startLoopbackServer 启动按服务面拆分的 loopback HTTP 服务器。
 // addr 为空时使用 127.0.0.1:0（随机空闲端口）；传入其他地址时按原样监听。
 // 当 addr 绑定在非回环地址（如 0.0.0.0）时，自动开启非回环鉴权模式
 // （所有请求需携带写令牌），并在 URL 方法中附加 ?token= 供局域网访问。
-func startPprofServer(addr string) (*pprofServerHandle, error) {
+func startLoopbackServer(addr string, opts loopbackServiceOptions) (*pprofServerHandle, error) {
+	if !opts.pprof && !opts.web {
+		return nil, fmt.Errorf("loopback server requires at least one service (--pprof/--debug or --web)")
+	}
 	if strings.TrimSpace(addr) == "" {
 		addr = "127.0.0.1:0"
 	}
@@ -230,7 +311,7 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	network := resolveLoopbackServerNetwork(addr)
 	ln, err := net.Listen(network, addr)
 	if err != nil {
-		return nil, fmt.Errorf("pprof listen on %s: %w", addr, err)
+		return nil, fmt.Errorf("loopback listen on %s: %w", addr, err)
 	}
 
 	// 确保写令牌已初始化（用于非回环模式的 URL 构造与鉴权）。
@@ -250,6 +331,67 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	}
 
 	mux := http.NewServeMux()
+	if opts.pprof {
+		registerPprofDiagnosticRoutes(mux)
+	}
+	if opts.web {
+		registerChatWebRoutes(mux)
+	}
+	// 根路径 "/"：诊断服务优先保持历史行为（重定向到 /debug/endpoints）；
+	// 仅启用 Web 时重定向到微型 Web 客户端页面。其它未注册路径直接 404，
+	// 避免把被关闭的服务面伪装成可用入口。
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "" && r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		target := chatEndpointsPath + "?format=text"
+		if !opts.pprof {
+			target = commands.ChatWebPath
+		}
+		if r.URL.Query().Get("token") != "" {
+			sep := "?"
+			if strings.Contains(target, "?") {
+				sep = "&"
+			}
+			target += sep + "token=" + url.QueryEscape(r.URL.Query().Get("token"))
+		} else if tokenQueryParam != "" {
+			target += tokenQueryParam
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+	})
+	server := &http.Server{
+		// h2c（HTTP/2 cleartext，§4.2.1 连接预算）：
+		//
+		// 本服务只监听回环明文，但页面要维持两条常驻 SSE（/web/api/events 与
+		// /web/api/mesh/events）。HTTP/1.1 下浏览器对单 host 的并发连接上限约
+		// 6 条，多开两个标签页就占满连接池，之后所有 /web/api/* 请求在浏览器侧
+		// 永久排队——页面既不报错也不恢复（表现为「打不开 / 卡死」）。
+		//
+		// h2c 让支持明文 HTTP/2 的客户端（Go 客户端、aicli 自身、脚本、代理）
+		// 把多条流复用到一个 TCP 连接；不支持 h2c 的客户端（浏览器对明文 HTTP/2
+		// 尚不启用）继续走 HTTP/1.1，行为与之前逐字一致——因此这里是纯增量能力，
+		// 不是「必须协商成功」的依赖。浏览器侧的连接预算由
+		// /web/api/events?mesh=1 单连接合并解决（见 HandleChatWebAPIEvents）。
+		Handler: newChatWebH2CHandler(commands.ChatWebAuthGuard(mux.ServeHTTP)),
+		// 本地诊断端点：读请求头超时收紧，避免残留连接占用；
+		// profile 下载期属于 body 读取，不受此限制影响。
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		_ = server.Serve(ln)
+	}()
+
+	return &pprofServerHandle{
+		server:          server,
+		addr:            ln.Addr().String(),
+		tokenQueryParam: tokenQueryParam,
+		pprofEnabled:    opts.pprof,
+		webEnabled:      opts.web,
+	}, nil
+}
+
+func registerPprofDiagnosticRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -369,7 +511,12 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	if observePrefix != "" {
 		mux.HandleFunc(observePrefix+"/", commands.HandleChatDebugObserveRequest)
 	}
+}
 
+// registerChatWebRoutes 注册 micro Web client 与 mesh 控制面端点。
+// 仅在 --web（或兼容路径 --web-port 单独启用）时调用，保证 --pprof
+// 只暴露诊断服务。
+func registerChatWebRoutes(mux *http.ServeMux) {
 	// /web/* 微型 Web 客户端端点族（同源，无 CORS）。
 	// 页面由本机 loopback 服务器直接提供；EventSource 事件流 / 屏幕快照 /
 	// 状态快照 / 输入注入全部复用 commands 包内现有会话与 EventBus。
@@ -474,42 +621,4 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIGitPath+"/", commands.HandleChatWebAPIGit)
 	// style.css / app.js / js/*.js 等静态资源由 HandleChatWebPage 统一伺服
 	// （go:embed 嵌入 web/ 目录，按文件名 + 扩展名 Content-Type 返回）。
-
-	// 写令牌：本机 Web/调试端点统一鉴权（Host/Origin 校验 + 写操作令牌）。
-	// 服务器开始对外服务：Handler 已通过 EnsureChatWebAuthToken() 在
-	// startPprofServer 开始时同步初始化过，此处无需重复。
-	// 根路径 "/" 重定向到 /debug/endpoints?format=text，便于浏览器粘贴
-	// 包含 token 的基础 URL 直接看到调试信息。
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		target := chatEndpointsPath + "?format=text"
-		if r.URL.Query().Get("token") != "" {
-			target += "&token=" + url.QueryEscape(r.URL.Query().Get("token"))
-		} else if tokenQueryParam != "" {
-			target += tokenQueryParam
-		}
-		http.Redirect(w, r, target, http.StatusSeeOther)
-	})
-	server := &http.Server{
-		// h2c（HTTP/2 cleartext，§4.2.1 连接预算）：
-		//
-		// 本服务只监听回环明文，但页面要维持两条常驻 SSE（/web/api/events 与
-		// /web/api/mesh/events）。HTTP/1.1 下浏览器对单 host 的并发连接上限约
-		// 6 条，多开两个标签页就占满连接池，之后所有 /web/api/* 请求在浏览器侧
-		// 永久排队——页面既不报错也不恢复（表现为「打不开 / 卡死」）。
-		//
-		// h2c 让支持明文 HTTP/2 的客户端（Go 客户端、aicli 自身、脚本、代理）
-		// 把多条流复用到一个 TCP 连接；不支持 h2c 的客户端（浏览器对明文 HTTP/2
-		// 尚不启用）继续走 HTTP/1.1，行为与之前逐字一致——因此这里是纯增量能力，
-		// 不是「必须协商成功」的依赖。浏览器侧的连接预算由
-		// /web/api/events?mesh=1 单连接合并解决（见 HandleChatWebAPIEvents）。
-		Handler: newChatWebH2CHandler(commands.ChatWebAuthGuard(mux.ServeHTTP)),
-		// 本地诊断端点：读请求头超时收紧，避免残留连接占用；
-		// profile 下载期属于 body 读取，不受此限制影响。
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		_ = server.Serve(ln)
-	}()
-
-	return &pprofServerHandle{server: server, addr: ln.Addr().String(), tokenQueryParam: tokenQueryParam}, nil
 }

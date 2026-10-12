@@ -97,7 +97,7 @@ var (
 	chatWebAuthTokenSource = chatWebAuthTokenSourceRandom
 	// chatWebLoopbackMode 控制鉴权模式：true=回环模式（Host/Origin+写令牌），
 	// false=非回环模式（所有请求需令牌，放宽 Host/Origin）。默认 true，
-	// 当 --web-host 指定非回环地址（如 0.0.0.0）时由 startPprofServer 设为 false。
+	// 当 --web-host 指定非回环地址（如 0.0.0.0）时由 startLoopbackServer 设为 false。
 	chatWebLoopbackMode = true
 	// chatWebDevMode 开启开发模式：仅在回环模式下生效，跳过对写令牌的校验
 	//（POST/PUT/DELETE 等），便于本机开发无需携带 --web-token。
@@ -205,7 +205,7 @@ func ChatWebLocalAddresses() []string {
 	return addrs
 }
 
-// SetChatWebLoopbackMode 切换鉴权模式。仅在服务器启动前由 startPprofServer 调用：
+// SetChatWebLoopbackMode 切换鉴权模式。仅在服务器启动前由 startLoopbackServer 调用：
 // --web-host 指定非回环地址（如 0.0.0.0）时设为 false，回环地址时保持 true。
 // 不能运行中动态切换：避免"已注入页面的 meta 与服务器期望值不一致"这类半途换模式状态。
 func SetChatWebLoopbackMode(loopback bool) {

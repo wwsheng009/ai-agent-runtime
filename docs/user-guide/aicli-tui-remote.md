@@ -3,7 +3,8 @@
 > 对应程序：`backend/cmd/aicli`（`aicli` / `aicli.exe`）
 > 作用：在**本机**对**正在运行的** aicli TUI 会话做脚本化远程操作——注入 prompt、
 > 等待/流式取回复、回答审批与提问、中断、切换会话、抓取"用户当前看到的屏幕"。
-> 前提：TUI 以 `--pprof`（或 `--debug` / `--web-port` / `AICLI_PPROF`）启动，loopback HTTP 服务器已开启。
+> 前提：TUI 以 `--web`、`--web-host <地址>` 或 `--web-port <端口>` 启动（后两者自动启用 Web），loopback HTTP 服务器已开启；
+> `--pprof` / `--debug` 只启用诊断端点，不会暴露 `/web/*`。
 
 ---
 
@@ -22,7 +23,7 @@
 
 ## 1. 概述
 
-`aicli chat` 的 TUI 是人机交互界面；当它以 `--pprof` 启动时，会在 `127.0.0.1`
+`aicli chat` 的 TUI 是人机交互界面；当它以 `--web` 启动时，会在 `127.0.0.1`
 的随机空闲端口上额外开启一个 **loopback HTTP 服务器**，把同一个会话暴露成一组
 `/web/api/*` 接口，于是**脚本、外部 Agent、CI 任务、另一个终端**都能远程操作它：
 
@@ -49,20 +50,20 @@
 
 ```powershell
 # 1) 显式开启（监听 127.0.0.1 的随机空闲端口）
-aicli chat --pprof
+aicli chat --web
 
-# 2) 用 --debug 启动 chat 时也会自动开启（内置渲染状态端点）
-aicli chat --debug
+# 2) 用 --debug 启动 chat 时会开启诊断端点；要同时使用 Web 客户端请再加 --web
+aicli chat --debug --web
 
-# 3) 用 --web-port 固定端口（推荐；等价 AICLI_PPROF=127.0.0.1:<port> 且优先级更高）
-aicli chat --web-port 64562
+# 3) 用 --web-port 固定端口（推荐；地址优先级 AICLI_PPROF < --web-port）
+aicli chat --web --web-port 64562
 
 # 4) 用环境变量固定地址（可带自定义 host，便于书签/脚本复用）
 $env:AICLI_PPROF = '127.0.0.1:64562'
-aicli chat
+aicli chat --web
 ```
 
-`--pprof` 是根命令的持久 flag，`aicli chat --pprof` 与 `aicli --pprof chat` 等价；
+`--web` 是根命令的持久 flag，`aicli chat --web` 与 `aicli --web chat` 等价；
 `--web-port` 是它的端口版：只接受 1-65535，固定绑定 `127.0.0.1`，越界或占用会直接报错退出
 （不会静默退化成随机端口）；优先级 **`--web-port` > `AICLI_PPROF` > 随机空闲端口**。
 固定后端口不再变化，脚本可以硬编码 `http://127.0.0.1:64562`。
@@ -74,11 +75,11 @@ aicli chat
 
 ```powershell
 # 1) 命令行指定
-aicli chat --pprof --web-token 0123456789abcdef0123456789abcdef
+aicli chat --web --web-token 0123456789abcdef0123456789abcdef
 
 # 2) 环境变量（推荐给脚本/容器：不出现在进程命令行里）
 $env:AICLI_WEB_TOKEN = '0123456789abcdef0123456789abcdef'
-aicli chat --pprof
+aicli chat --web
 ```
 
 | 项 | 说明 |
@@ -99,14 +100,12 @@ aicli chat --pprof
 服务器就绪后终端会打印（节选，实际端口以输出为准）：
 
 ```text
-Info: pprof endpoint enabled: http://127.0.0.1:64562/debug/pprof/
-Info: chat render status endpoint: http://127.0.0.1:64562/debug/chat/status (JSON; ?format=text for plain text)
-Info: chat screen content endpoint: http://127.0.0.1:64562/debug/chat/screen (JSON; ?format=text for plain text)
-Info: chat debug endpoints list: http://127.0.0.1:64562/debug/endpoints (JSON; ?format=text for plain text)
 Info: chat web client / remote invoke endpoint: http://127.0.0.1:64562/web/ (POST http://127.0.0.1:64562/web/api/invoke)
 Info: web write token (X-AICLI-Token): 3f9c8a1b2c3d4e5f60718293a4b5c6d7 (POST /web/api/* 必需)
-Info: runtime observe plane: http://127.0.0.1:64562/api/runtime/observe/v1 (local in-process; ...)
 ```
+
+> `--pprof` / `--debug` 会另外打印 pprof、`/debug/chat/*` 与 runtime-observe 行；
+> 与 `--web` 同时开启时这些行会一起出现。
 
 ### 2.4 TUI 内查看（`/debug display`）
 
@@ -126,9 +125,12 @@ web  (微型 Web 客户端 / 远程调用 API)
 ```
 
 > TUI 未开启 loopback 服务器时该区块显示 `Status: 未启用` 与开启提示
-> （`--pprof` / `--debug`，或 `--web-port <端口>` / `AICLI_PPROF=127.0.0.1:<端口>` 固定地址）。
+> （`--web` / `--web-host <地址>` / `--web-port <端口>` / `AICLI_PPROF=127.0.0.1:<端口>`；`--pprof` 只提供诊断端点）。
 
 ### 2.5 机器可读的入口清单
+
+> `/debug/endpoints` 属于诊断服务：仅 `--web` 启动时请再加 `--pprof`（或 `--debug`）；
+> 只开 Web 时直接调用下面的 `/web/api/*` 端点即可。
 
 ```powershell
 # 文本（人读）
@@ -495,7 +497,7 @@ curl -s -X POST http://127.0.0.1:64562/web/api/invoke \
 
 | 现象 | 原因与处理 |
 |------|------------|
-| 启动行没有 `write token`，`/debug/endpoints` 没有 `web` 分组，`POST /web/api/invoke` 返回 `405 method not allowed` | 该进程是**旧构建**（未包含远程调用/令牌能力）。重新构建并重启：`go build ./cmd/aicli` 后用 `--pprof` 启动 |
+| 启动行没有 `write token`，`/debug/endpoints` 没有 `web` 分组，`POST /web/api/invoke` 返回 `405 method not allowed` | 该进程是**旧构建**（未包含远程调用/令牌能力）。重新构建并重启：`go build ./cmd/aicli` 后用 `--web` 启动 |
 | `403 missing or invalid X-AICLI-Token` | 令牌取自另一个进程/重启前，或用了 `?token=` 但参数被 shell 吃掉；重新 `GET /web/api/token` |
 | `wait_only` 立刻返回 `settled` | 正常：会话本来空闲（无在跑的 turn），短路返回而不是空等到 `timeout`；`busy=false`、`reason` 含 `session already idle` |
 | 启动时传了 token，写请求仍 `403` | 传的值与**当前进程**实际生效值不一致（旧实例、输错、被 shell 截断）；`GET /web/api/token` 对照即可 |
@@ -503,7 +505,7 @@ curl -s -X POST http://127.0.0.1:64562/web/api/invoke \
 | `409 no active chat session` | 服务器已就绪但会话还没绑定；轮询 `current_session_id` 或把 409 视为可重试 |
 | `timeout` 后 TUI 仍在跑 | 正常：长任务/后台作业未结束；用 `events`、`turn`、`screen` 继续观察，或再发 `wait_only` 等待 |
 | 端口每次都变 | 未固定端口；用 `--web-port 64562`（推荐）或 `AICLI_PPROF=127.0.0.1:64562` 固定 |
-| `--pprof` 后终端无输出 | 服务器地址打在 **stderr**；若在管道/重定向中启动，把 stderr 落文件再 grep `web write token` |
+| `--web` 后终端无输出 | 服务器地址打在 **stderr**；若在管道/重定向中启动，把 stderr 落文件再 grep `web write token` |
 
 ### 6.3 快速自检脚本
 

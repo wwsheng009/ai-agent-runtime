@@ -10,6 +10,16 @@ import (
 // 因此通过 RegisterChatDebugPprofProvider 在启动时注册取值函数。
 var chatDebugPprofProvider = func() string { return "" }
 
+// chatDebugWebProvider 提供当前进程 micro Web client 页面 URL（未启用返回空串）。
+// 与 pprof provider 分开，保证 /debug/endpoints 能准确区分两个服务面。
+var chatDebugWebProvider = func() string { return "" }
+
+// chatDebugWebProviderConfigured 标记 Web provider 是否由 main 注册过。
+// 未注册时（旧测试/旧调用方只注入 pprof provider）回退到 pprof 地址，
+// 保持历史清单行为；main 启动路径总是注册本 provider，因此不会把
+// --pprof-only 误判成 Web 已启用。
+var chatDebugWebProviderConfigured bool
+
 // RegisterChatDebugPprofProvider 注册 pprof 端点信息提供者。
 // provider 返回完整端点 URL（如 http://127.0.0.1:54321/debug/pprof/），
 // 未启用 pprof 时应返回空串。
@@ -17,6 +27,32 @@ func RegisterChatDebugPprofProvider(provider func() string) {
 	if provider != nil {
 		chatDebugPprofProvider = provider
 	}
+}
+
+// RegisterChatDebugWebProvider 注册 micro Web client 页面提供者。
+// provider 返回完整页面 URL（如 http://127.0.0.1:54321/web/），
+// 未启用 Web 服务时应返回空串。
+func RegisterChatDebugWebProvider(provider func() string) {
+	if provider != nil {
+		chatDebugWebProvider = provider
+		chatDebugWebProviderConfigured = true
+	}
+}
+
+// chatDebugWebEndpointURL 返回当前 micro Web client 页面 URL；未启用时返回空串。
+func chatDebugWebEndpointURL() string {
+	if !chatDebugWebProviderConfigured {
+		// 兼容只注入 pprof provider 的旧调用方/测试：历史清单把两者视作
+		// 同一 loopback 服务；main 启动路径会显式注册 Web provider。
+		if base := chatDebugPprofBaseURL(); base != "" {
+			return base + ChatWebPath
+		}
+		return ""
+	}
+	if chatDebugWebProvider == nil {
+		return ""
+	}
+	return chatDebugWebProvider()
 }
 
 // chatDebugPprofEndpointURL 返回当前 pprof 端点 URL；未启用时返回空串。
@@ -48,10 +84,14 @@ func chatDebugPprofBaseURL() string {
 	return base
 }
 
-// chatDebugListenAddr 返回 pprof 服务器的监听地址（host:port，不含 scheme）。
-// 未启用 pprof 时返回空串。用于非回环模式下显示实际绑定地址（IPv4 优先于IPv6格式）。
+// chatDebugListenAddr 返回 loopback 服务器的监听地址（host:port，不含 scheme）。
+// 优先使用 pprof 诊断服务地址；仅启用 Web 时回退到 Web 地址。
+// 未启用任何服务时返回空串。用于非回环模式下显示实际绑定地址（IPv4 优先于IPv6格式）。
 func chatDebugListenAddr() string {
 	base := chatDebugPprofBaseURL()
+	if base == "" {
+		base = chatDebugWebBaseURL()
+	}
 	if base == "" {
 		return ""
 	}
@@ -60,7 +100,7 @@ func chatDebugListenAddr() string {
 }
 
 // chatDebugListenPort 从监听地址中提取端口号字符串（不含前导冒号）。
-// 未启用 pprof 或地址不含端口时返回空串。供非回环模式下构造 LAN 访问 URL 使用。
+// 未启用任何服务或地址不含端口时返回空串。供非回环模式下构造 LAN 访问 URL 使用。
 func chatDebugListenPort() string {
 	addr := chatDebugListenAddr()
 	if addr == "" {
@@ -104,13 +144,26 @@ func chatDebugPprofEndpointsURL() string {
 }
 
 // chatDebugPprofWebURL 返回 /web/ 微型 Web 客户端端点的完整 URL；
-// 未启用 pprof 时返回空串。
+// 未启用 Web 服务时返回空串。
 func chatDebugPprofWebURL() string {
-	base := chatDebugPprofBaseURL()
-	if base == "" {
+	return chatDebugWebEndpointURL()
+}
+
+// chatDebugWebBaseURL 从 Web 页面 URL 中提取基础地址（scheme + host:port）。
+// 未启用 Web 服务时返回空串。
+func chatDebugWebBaseURL() string {
+	url := chatDebugWebEndpointURL()
+	if url == "" {
 		return ""
 	}
-	return base + ChatWebPath
+	if idx := strings.Index(url, "?"); idx >= 0 {
+		url = url[:idx]
+	}
+	base := strings.TrimSuffix(url, ChatWebPath)
+	if base == url {
+		base = strings.TrimSuffix(url, "/")
+	}
+	return base
 }
 
 // appendChatDebugPprofLines 在 /debug display 中追加 pprof 诊断区块：
@@ -124,7 +177,7 @@ func appendChatDebugPprofLines(builder *chatDebugDocumentBuilder) {
 		builder.meta("Status:", "未启用")
 		builder.plain("  启动时加 --pprof / --debug（随机空闲端口），或用 --web-port <端口>、")
 		builder.plain("  --web-host 0.0.0.0（局域网访问）、AICLI_PPROF=127.0.0.1:<端口> 固定地址；")
-		builder.plain("  Web 客户端与 /debug 端点共用该端口")
+		builder.plain("  micro Web client 由 --web 单独启用（可与 --pprof 共用端口）")
 		return
 	}
 	base := strings.TrimSuffix(url, "/")

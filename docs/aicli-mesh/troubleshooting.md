@@ -62,7 +62,7 @@ aicli-mesh watch --since 10m   # 4) 时间线：谁起停、谁接管、谁调�
 | `mesh_nonloopback_denied` | 6 | 非回环调用：跨机一律拒绝（本机 127.0.0.1 才行）。目标以非回环地址监听时**整机**退出网格写路径（连回环客户端也拒）；逃生门 `--mesh-allow-nonloopback=true` 开在**目标进程**上、默认关 |
 | `mesh_cross_workspace_denied` | 6 | 目标开了 `--mesh-restrict-workspace` 且这是**跨工作区写调用**：改用同工作区节点，或让目标关掉该开关（只读不受影响） |
 | `mesh_token_stale` | 6 | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次仍失败——`show` 确认目标心跳并直接取回新令牌（或 `url --with-token`） |
-| `mesh_no_endpoint` | 2 | 目标没开回环控制面（纯 TUI）：让目标带 `--pprof` / `--web-port` 启动 |
+| `mesh_no_endpoint` | 2 | 目标没开回环控制面（纯 TUI）：让目标带 `--web` / `--web-port` 启动 |
 | `mesh_target_stopped` | 2 | 目标档案已标 `stopped`：它已退出，改选活节点 |
 | `mesh_target_ambiguous` | 2 | 目标引用命中多个：改用完整 ID 或 `pid:<PID>` |
 | `mesh_target_not_found` | 2 | 目标不存在 |
@@ -105,7 +105,7 @@ aicli-mesh watch --since 10m   # 4) 时间线：谁起停、谁接管、谁调�
 | `ls` 空但 `ls -a` 有 `stale`/`stopped` 档案 | 正常：默认只列在线；残留档案用 `aicli-mesh gc --apply` 回收 |
 | `ls -a` 列表里一堆 `stale` | 已退出进程的正常残留：`aicli-mesh gc --apply` |
 | `show` 报歧义 | 前缀命中多个目标：按列出的候选改用完整 ID 或 `pid:<PID>` |
-| `url` 退出码 3 | 目标没有 HTTP 端点（纯 TUI，未开 `--pprof`/`--web-port`） |
+| `url` 退出码 3 | 目标没有 HTTP 端点（纯 TUI，未开 `--web`/`--web-port`） |
 | 两个进程都显示同一会话（`conflict`） | `doctor` 的 `ownership` 报 problem：`show` 看两边心跳与租约，再停掉过期的一方；这是**设计要暴露**的状态，不是 bug |
 | `call` 退出码 3 + `unreachable` | 档案还在但端口已关：目标已退出或未监听（`ls -a` 看状态、`doctor` 看 `stale-nodes`） |
 | `call` 退出码 4 + `busy` | 目标已有 invoke 在等待（单飞锁）：等结束再重试；**不要**换 `client_request_id` 重发 |

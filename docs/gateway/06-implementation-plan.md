@@ -41,7 +41,7 @@ cmd/aicli/                        # --gateway/--gateway-token；启动 agent
 
 ### 2.3 验收（P0）
 
-- [ ] `aicli chat --pprof --gateway wss://... --gateway-token agw_...` 后，网关侧 `/n/{node}/web/` 可打开微前端。
+- [ ] `aicli chat --web --gateway wss://... --gateway-token agw_...` 后，网关侧 `/n/{node}/web/` 可打开微前端。
 - [ ] 外网浏览器能读到屏幕快照、能 `POST invoke` 发消息（写令牌由 agent 注入，浏览器无感）。
 - [ ] 未配置 `--gateway` 时，`aicli` 行为与现状**逐字一致**（回归测试）。
 - [ ] 本地进程未新增任何公网监听端口（`netstat` 断言）。

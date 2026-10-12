@@ -250,7 +250,7 @@ aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--a
 3. 幂等：`--client-request-id` 透传给目标端点的幂等键（仅 `invoke` 使用），
    **网格层不重复实现幂等**——重复提交同 id 时目标回放首次结果（`duplicate: true`）；
 4. `--timeout` 是**等待上限**（默认 130s），超时按 `timeout` 记账而不是「目标挂了」；
-5. 目标必须**开着回环控制面**（`--pprof` / `--web-port`）：纯 TUI 节点没有端点，
+5. 目标必须**开着回环控制面**（`--web` / `--web-port`）：纯 TUI 节点没有端点，
    返回 `not_found` + `mesh_no_endpoint`；
 6. **跨工作区默认放行**（工作区是筛选维度、不是权限边界）：只有目标进程以
    `--mesh-restrict-workspace` 启动时，跨工作区的**写**调用才被拒（`refused` +
@@ -267,7 +267,7 @@ aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--cli
 prompt 支持多词（`parsed.pos[1:]` 以空格拼接）。
 
 ```powershell
-# A 让 B 跑一轮（B 需要 --pprof 与写令牌；令牌由 CLI 自动从档案读取）
+# A 让 B 跑一轮（B 需要 --web 与写令牌；令牌由 CLI 自动从档案读取）
 aicli-mesh send session_20260924093535 "只回复两个字：收到" --allow-write
 # → 收到
 ```
@@ -386,7 +386,7 @@ aicli-mesh stop --all [--workspace PATH]... [--force] [--wait 30s] [--json]
   `code=mesh_stop_already_stopped`，退出码 0，重试安全；
 - **等待预算**：`--wait` 默认 30s；graceful 投递成功但进程在预算内没消失 → `timeout`
   （退出码 3），提示加大 `--wait` 或改用 `--force`；
-- **没有回环控制面**（目标没带 `--pprof`）时 graceful 不可用（`mesh_no_endpoint`），
+- **没有回环控制面**（目标没带 `--web`）时 graceful 不可用（`mesh_no_endpoint`），
   用 `--force` 直接终止进程。
 
 **批量（`--all`）**：枚举当前所有**在线**（live）节点，逐个按单目标语义执行
@@ -406,7 +406,7 @@ aicli-mesh stop --all [--workspace PATH]... [--force] [--wait 30s] [--json]
 # 优雅停掉某个会话所在的节点（先看它是不是真的该退）
 aicli-mesh stop session_20260924093535
 
-# 目标卡死 / 没有 --pprof：直接终止进程
+# 目标卡死 / 没有 --web：直接终止进程
 aicli-mesh stop node-22024 --force
 
 # 下班前一把梭：优雅停掉当前所有在线节点
@@ -775,11 +775,11 @@ aicli-mesh doctor --json
 | `ls` 总是空，`doctor` 报「根目录未解析」 | 没有可用的主目录（既无 `AICLI_MESH_DIR` 也无 `AICLI_HOME`/用户主目录）。设置 `AICLI_MESH_DIR` 或检查运行账户的 Profile |
 | 列表里一堆 `stale` | 已退出进程的档案，属正常残留；`aicli-mesh gc --apply` 清理 |
 | `show` 报歧义 | 前缀同时命中多个节点/会话，按列出的候选改用完整 ID 或 `pid:<PID>` |
-| `url` 退出码 3 | 目标没有 HTTP 端点（纯 TUI 会话，未开 `--pprof`/`--web-port`） |
+| `url` 退出码 3 | 目标没有 HTTP 端点（纯 TUI 会话，未开 `--web`/`--web-port`） |
 | `doctor` 报 `permissions` 告警 | `AICLI_MESH_DIR` 指向了用户 Profile 之外的位置；确认该目录的访问控制，或改回默认位置 |
 | `gc --apply` 退出码 5 | 个别文件被占用/无权限：`errors[]` 给出具体路径与原因，其余项已删除，可直接重跑 |
 | 两个进程都显示同一会话 | `doctor` 的 `ownership` 会报 problem（双占用）；先 `show` 看两边的心跳与租约，再停掉过期的一方 |
-| `call` 退出码 2 + `mesh_no_endpoint` | 目标没开回环控制面（纯 TUI 节点）：让目标带 `--pprof` / `--web-port` 启动 |
+| `call` 退出码 2 + `mesh_no_endpoint` | 目标没开回环控制面（纯 TUI 节点）：让目标带 `--web` / `--web-port` 启动 |
 | `call` 退出码 6 + `mesh_write_not_allowed` | 写 op（`invoke`/`input`/`cancel`/`sessions.resume`）缺 `--allow-write`：确认意图后显式加上 |
 | `call` 退出码 6 + `mesh_token_stale` | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次，仍失败说明档案里的令牌已过期——`aicli-mesh show` 确认目标心跳并直接取回新令牌（或 `url --with-token`） |
 | `call` 退出码 3 + `unreachable` | 目标档案还在但端口已关：目标进程已退出或未监听；`ls` 看状态、`doctor` 看 `permissions`/`stale-nodes` |

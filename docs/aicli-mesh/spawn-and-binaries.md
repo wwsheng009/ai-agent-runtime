@@ -23,7 +23,7 @@ aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin 
 拉起的子进程命令行（固定）：
 
 ```text
-<解析出的 aicli>  resume <会话>  --pprof  --web-host 127.0.0.1  [--web-port N]  [--web-token <令牌>]
+<解析出的 aicli>  resume <会话>  --web  --web-host 127.0.0.1  [--web-port N]  [--web-token <令牌>]
 ```
 
 四态与退出码：`reused` / `started` → 0，`not_running` → 3，`failed` → 5。
@@ -39,7 +39,7 @@ aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH
 ```
 
 ```text
-<解析出的 aicli>  chat  --pprof  --web-host 127.0.0.1  [--web-port N]  [--web-token <令牌>]
+<解析出的 aicli>  chat  --web  --web-host 127.0.0.1  [--web-port N]  [--web-token <令牌>]
 ```
 
 | 方面 | 行为 |

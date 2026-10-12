@@ -302,10 +302,14 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | `--theme <name>` | 主题配色/明暗：`classic`、`focus`、`contrast`、`mono` 或 `auto`/`dark`/`light` |
 | `--syntax-theme <name>` | 代码语法高亮主题（`auto` 或 Chroma 主题名） |
 | `--envelope` | JSON 输出时使用统一 envelope 结构（ok/command/data） |
-| `--pprof` | 启用 pprof 诊断端点（127.0.0.1；新会话随机空闲端口，`resume <session-id>` 复用该会话上次的端口） |
-| `--web-port <port>` | 指定 loopback 服务器（Web 客户端 / `/debug` 端点共用）监听端口（1-65535）；等价 `AICLI_PPROF=127.0.0.1:<port>` 且优先级更高，越界直接报错退出；显式指定会覆盖该会话已保存的粘性端口 |
+| `--pprof` | 启用 pprof 诊断端点（127.0.0.1；新会话随机空闲端口，`resume <session-id>` 复用该会话上次的端口；不启用 micro Web client） |
+| `--web` | 启用 micro Web client（`/web/` 页面与 `/web/api/*` 远程调用端点；可与 `--pprof` 同时开启） |
+| `--web-port <port>` | 指定 loopback 服务器监听端口并自动启用 micro Web client（1-65535）；等价 `AICLI_PPROF=127.0.0.1:<port>` 且优先级更高，越界直接报错退出；显式指定会覆盖该会话已保存的粘性端口 |
+| `--web-host <host>` | 指定 loopback 服务器监听地址并自动启用 micro Web client（默认 `127.0.0.1`；`0.0.0.0`/`::` 开放局域网访问，需令牌） |
 | `--web-token <token>` | 预设 Web 写令牌（默认每进程随机；未指定时也可用 `AICLI_WEB_TOKEN`；详见 [aicli-tui-remote.md](aicli-tui-remote.md) 第 2.2 节） |
 | `--console-host` | Windows：stdin/stdout 为 PTY/pipe 时在新 Console 窗口重启（MobaXterm/mintty 场景） |
+
+显式传入 `--web=false` 会关闭 `--web-host` / `--web-port` 带来的自动启用；此时只启用其它已选择的服务面。
 
 主题优先级：**命令行 `--theme` > 环境变量 > 配置文件**。
 
@@ -316,7 +320,7 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | `AICLI_THEME` | 主题名 |
 | `AICLI_THEME_MODE` | 明暗模式（auto/dark/light） |
 | `AICLI_THEME_SYNTAX` | 语法主题 |
-| `AICLI_PPROF` | loopback 服务器监听地址（Web 客户端 / `/debug` 端点）；非空即启用、无需 `--pprof`，可带自定义 host；`--web-port` 优先于它 |
+| `AICLI_PPROF` | loopback 服务器监听地址（诊断端点；非空即启用、无需 `--pprof`，可带自定义 host；`--web-port` 优先于它；启用 Web 使用 `--web`、`--web-host` 或 `--web-port`） |
 | `AICLI_MESH_DIR` | 网格根目录（节点档案 `nodes/`、会话绑定 `bindings/`、租约 `leases/`、网格日志 `journal/`；默认 `$HOME/.aicli/mesh/`）；设空/未设用默认值，测试或多环境隔离时可覆盖。会话粘性端口存于 `mesh/bindings/<session-id>.json`，旧的 `AICLI_WEB_PORTS_DIR` 不再被读取 |
 | `AICLI_WEB_TOKEN` | 预设 Web 写令牌（等价 `--web-token`，flag 优先；≥16 位 URL 安全字符） |
 | `AICLI_EXECUTION_SUPERVISOR_MODE` | 本地子 Agent 看门狗模式：`observe`（默认，仅提醒）或 `enforce`（interrupt + cancel grace，见 §4.8） |

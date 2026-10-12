@@ -37,13 +37,14 @@ aicli-mesh doctor --json     # 机器读：problems/warnings 计数
 
 ```powershell
 # 窗口 A
-aicli chat --yolo --pprof
+aicli chat --yolo --web
 
 # 窗口 B
-aicli chat --yolo --pprof
+aicli chat --yolo --web
 ```
 
-- `--pprof`：开启回环 HTTP 控制面，端口**自选**（网格负责发现，脚本不需要记端口）；
+- `--web`：开启回环 HTTP 控制面（含 `/web/` 与 mesh 端点），端口**自选**（网格负责发现，脚本不需要记端口）；
+- `--pprof` 只开启诊断服务，不会暴露 mesh/Web 端点；
 - 要固定端口用 `--web-port 51234`（1–65535，**不接受 0**）；
 - 两者都不带的**纯 TUI** 节点仍在网格里（`ls` 能看到），但**没有端点**：`url` 退出码 3、
   `call` 返回 `mesh_no_endpoint`。
@@ -133,7 +134,7 @@ aicli-mesh watch --since 1h --once --json  # 脚本：只回放，跑完就退
 # 优雅停止（目标必须自己开了 --mesh-allow-stop=true，否则 refused + 退出码 6）
 aicli-mesh stop session_20260924093535
 
-# 目标卡死 / 没开 --pprof：直接终止进程（无收尾，残留档案交给 gc）
+# 目标卡死 / 没开 --web：直接终止进程（无收尾，残留档案交给 gc）
 aicli-mesh stop session_20260924093535 --force
 
 # 清理：先看计划，再执行（存活进程的档案永不删）

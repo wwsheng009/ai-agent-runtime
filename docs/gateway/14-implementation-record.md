@@ -123,7 +123,7 @@ gateway:
 # 或环境变量
 $env:AICLI_GATEWAY_URL = "wss://gw.example.com"
 $env:AICLI_GATEWAY_TOKEN = "agw_..."
-aicli chat --pprof            # 自动注册；TUI 内 /gateway 可手动连/断
+aicli chat --web            # 自动注册；TUI 内 /gateway 可手动连/断
 runtime-server serve          # 同样自动注册
 ```
 

@@ -330,7 +330,7 @@ func ResolveTargetNode(paths Paths, ref string) (*CallTarget, error) {
 }
 
 // ResolveCallTarget 在 ResolveTargetNode 之上再加「必须能调用」的约束：
-// 没有回环控制面的节点（启动时没带 --pprof）不可调用，早失败早提示。
+// 没有回环控制面的节点（启动时没带 --web）不可调用，早失败早提示。
 func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
 	target, err := ResolveTargetNode(paths, ref)
 	if err != nil {
@@ -340,7 +340,7 @@ func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
 	if record.Endpoint == nil || strings.TrimSpace(record.Endpoint.BaseURL) == "" || record.Endpoint.Port <= 0 {
 		return nil, &CallTargetError{
 			Code:    CallCodeNoEndpoint,
-			Message: fmt.Sprintf("node %s has no loopback control plane (start it with --pprof)", target.NodeID),
+			Message: fmt.Sprintf("node %s has no loopback control plane (start it with --web)", target.NodeID),
 		}
 	}
 	return target, nil

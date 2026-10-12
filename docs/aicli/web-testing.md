@@ -15,7 +15,7 @@
 ### 方式 A：真实后端（推荐做最终验证）
 
 ```bash
-aicli chat --pprof
+aicli chat --web
 # 启动后终端 /debug display 区块会给出 Web 客户端地址
 # 浏览器打开 http://127.0.0.1:<port>/web/
 ```
@@ -42,6 +42,17 @@ aicli chat --pprof
 | `GET /web/api/skills` | `{ count: N, skills: [{ name, function_name, kind, description, category, version, labels, capabilities }] }`（技能页签目录，与 `/skills` 同源） |
 | `GET /web/api/skills/{name}` | 单个 skill 详情（`name` 可用目录名或可调用名）；列表字段 + `triggers` / `dependencies` / `source` / `metadata`，无值字段可省略；未知名称返回 404 `{ error: { code: "skill_not_found", message } }` |
 | 其余 `/web/api/*` | 统一返回 `{ status: "ok" }`（POST 类操作直接成功） |
+
+> 启动加载次序（2026-10 性能约定，入口见 `app.js` 启动序列）：
+> ① 当前会话信息优先——先发 `GET /web/api/screen`（当前会话屏幕快照），
+> 主壳小请求 `/web/api/runtime`、`/web/api/statusbar` 同期发出（各仅一次）；
+> ② 会话列表其次——`GET /web/api/sessions` 由 `sessions.js::holdSessionsLoad()` 挂起，
+> 等屏幕快照请求落地（或 1.5s 兜底超时）后 `releaseSessionsLoad()` 异步放行，
+> 不与首屏请求争抢连接池；并发触发由在途请求合并（至多一个在途 + 一次补拉）；
+> ③ 其它页签（技能/文件/GIT/MCP/任务/日志/配置/缓存/分析/LSP/调试/关于）不在启动期
+> 预热，由 `ui.js::activateTab` 在用户点击页签时才加载（`initXxx()` 只绑定事件）。
+> 验证回归时应注意：启动后的首批请求中不应出现 `/web/api/skills`、`/web/api/mcps` 等
+> 页签端点；`/web/api/sessions` 应晚于 `/web/api/screen`。
 
 注意事项：
 
@@ -303,7 +314,7 @@ aicli chat --pprof
 ### 2.7 网格窗口（会话列表「⧉ 在新窗口打开」+ 深链）
 
 数据源：`POST /web/api/mesh/spawn`（架构 §5.7，契约见
-[web-remote-api.md](web-remote-api.md) §9.6）。前置：两个 `aicli chat`/`resume --pprof --mesh`
+[web-remote-api.md](web-remote-api.md) §9.6）。前置：两个 `aicli chat`/`resume --web --mesh`
 进程（或同一进程即可覆盖「复用」路径），DevTools 打开 Network 与 Application 面板。
 
 > 状态（2026-09-24 回填）：`⧉` 流程、深链与 spawn 端点**已落地**（S9）；侧栏徽标 / 端点行 /
@@ -341,7 +352,7 @@ aicli chat --pprof
 
 #### 2.7.1 侧栏网格视图与 resume 冲突（S11）
 
-前置：两个 `aicli chat --pprof --mesh` 进程（**不同工作区**，用于覆盖分组），DevTools 打开 Network；
+前置：两个 `aicli chat --web --mesh` 进程（**不同工作区**，用于覆盖分组），DevTools 打开 Network；
 在其中一个进程的 web 页操作。数据源：`GET /web/api/sessions?scope=all`（契约见
 [web-remote-api.md](web-remote-api.md) §9.7）。
 
@@ -371,7 +382,7 @@ aicli chat --pprof
 
 #### 2.7.2 网格实时刷新与降级（S12）
 
-前置：两个 `aicli chat --pprof --mesh` 进程（不同工作区）；在 A 的 web 页操作，DevTools 打开
+前置：两个 `aicli chat --web --mesh` 进程（不同工作区）；在 A 的 web 页操作，DevTools 打开
 Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/events`（SSE 扇入，契约见
 [web-remote-api.md](web-remote-api.md) §9.4）；前端行为 = Web 子方案 §5.6。
 
@@ -399,7 +410,7 @@ Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/event
 
 #### 2.7.3 P2 打磨：窗口标题（会话标题 + 节点后缀）与 refused 文案（S13 / 2026-09-25）
 
-前置：两个 `aicli chat --pprof --mesh` 进程（不同工作区）。
+前置：两个 `aicli chat --web --mesh` 进程（不同工作区）。
 
 - [ ] **标题会话 + 节点后缀**：窗口标题为
       `[●|…|✗ ]<会话标题> · aicli micro web client · <工作区> · <节点短 id>`（`node_id` 前 8 位）。
@@ -423,7 +434,7 @@ Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/event
 
 #### 2.7.4 会话切换事件化与断连兜底（S14）
 
-前置：一个 `aicli chat --pprof --mesh` 进程；DevTools 打开 Network（筛 `web/api/events`）与 Console。
+前置：一个 `aicli chat --web --mesh` 进程；DevTools 打开 Network（筛 `web/api/events`）与 Console。
 数据源：SSE `session_switched`（服务端合成：handler 每 250ms 看 `current_session_id` 变化，
 契约见 `web_handlers.go::chatWebSSESchema()`；实施计划 §22）。
 
@@ -632,6 +643,7 @@ node scripts/verify-micro-web-event-sequence.mjs # SSE 帧序号守卫（纯逻�
 node scripts/verify-micro-web-parked-turn.mjs  # 托管挂起/恢复横幅（js/parked.js）：turn.suspended 常驻（义务数 + batch）、无计数回退文案、turn.resumed 恢复通知（trigger/pending/终态）不被恢复 run 的 turn_start 清掉、挂起态在 turn_start / session_switched 清除、元素缺失静默降级
 node scripts/verify-micro-web-msg-filter.mjs   # 对话页签过滤面板：面板结构（sticky 居中吸附）与样式不变量、角色多选（aria-pressed/查询串顺序）、搜索图标展开与 300ms 去抖/回车立即提交/Esc 先清词再收起、服务端过滤接线（roles/q + msg_limit 组合 = 搜索结果分页）、匹配计数与 0 命中空态、条件变化作废在途分页请求、复制带过滤条件
 node scripts/verify-micro-web-menu.mjs         # 顶部菜单栏 + 会话导出：菜单栏/右侧状态簇结构、data-menu-action 均指向真实控件、开合与 Esc 回焦、导出请求与 Content-Disposition 命名下载、失败不下载；CSS 侧校验「无 fallback 的 var(--token) 必须已定义」与快捷键面板背景为不透明语义变量
+node scripts/verify-micro-web-load-order.mjs   # 启动加载次序：会话信息（/web/api/screen）先发、会话列表由门闩挂起后放行（含 1.5s 兜底）；app.js 不再直接调 loadSessions；各页签 initXxx 只绑定事件不发请求（代理 DOM + fetch 记账）；sessions.js 门闩 + 在途合并（至多一个在途 + 恰好一次补拉）
 node scripts/verify-micro-web-render-mode.mjs  # assistant 消息 md|txt 渲染：默认 md（行生成时同步渲染）、切换控件在气泡右上角（正文之前）、按钮 active/aria-pressed 同步、点击委托、复制取 .msg-text 原文、代码块复制委托（流式气泡 + md 气泡）
 node scripts/verify-micro-web-copy-msg.mjs     # 单条消息复制：所有角色（含 error 回退）抬头行 ⧉ 图标、只取本行正文（标签/控件/相邻消息/md 产物均不入内）、行间隔离与 ✓ 反馈、整会话复制不受影响、工具行展开收起仍可用、流式气泡复制不重复响应
 node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议项 / 自由回答（Enter、提交按钮、Shift+Enter、IME、空答案）→ question_answer payload、收起对话框保留 composer 答案路由、服务端回执分支（stale 未送达告警 / resolved 不误报）、审批语义不变、index.html/style.css 静态不变量

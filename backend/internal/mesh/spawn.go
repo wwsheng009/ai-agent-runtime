@@ -21,7 +21,7 @@ import (
 //  2. 否则抢 leases/spawn-<sid>.lock（单飞）；抢不到 → 再读一次档案 → reused，
 //     仍没有则等对方的进程起来（同一个 wait 预算）；
 //  3. 抢到 → 锁内二次检查 → 解析工作区/端口/令牌 → detach 启动
-//     `aicli resume <sid> --pprof --web-host 127.0.0.1 [--web-port <port>]
+//     `aicli resume <sid> --web --web-host 127.0.0.1 [--web-port <port>]
 //     --web-token <tok>`（cwd = 会话工作区，stdout/stderr → 日志文件）；
 //  4. 轮询 nodes/ 直到新节点 live（或 wait 超时）→ started / not_running；
 //  5. 进程启动失败 → failed（附日志尾部 20 行）。
@@ -321,7 +321,7 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 func spawnArgs(sessionID string, port int, token string) []string {
 	args := []string{
 		"resume", sessionID,
-		"--pprof",
+		"--web",
 		"--web-host", "127.0.0.1",
 	}
 	return appendSpawnWebArgs(args, port, token)
@@ -334,7 +334,7 @@ func spawnArgs(sessionID string, port int, token string) []string {
 func spawnNewArgs(port int, token string) []string {
 	args := []string{
 		"chat",
-		"--pprof",
+		"--web",
 		"--web-host", "127.0.0.1",
 	}
 	return appendSpawnWebArgs(args, port, token)

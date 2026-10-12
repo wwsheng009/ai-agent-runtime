@@ -18,7 +18,7 @@ aicli 在 **`--debug`** 或 **`--pprof`** 模式下自动启动 loopback HTTP �
 | `/debug/chat/screen` | 当前屏幕合成帧内容（用户实际看到的文本） |
 | `/debug/endpoints` | 全部调试相关端点清单（含 runtime-observe API 端点） |
 | `/api/runtime/observe/v1/*` | Runtime Observation Plane（本地 in-process，默认随 `--pprof on` 开启）：`capabilities` / `snapshot` / `sessions/{id}` / `events` |
-| `/web/api/*` | 微型 Web 客户端 / 远程调用 API：`POST /web/api/invoke`（同步调用：prompt → 等待 turn 结束 → 状态+渲染）、`POST /web/api/input`、`GET /web/api/screen`（`?view=tui` 取 TUI 合成帧）、`GET /web/api/events`（SSE）；详见 [web-remote-api.md](./web-remote-api.md) |
+| `/web/api/*` | 微型 Web 客户端 / 远程调用 API（需 `--web`，或显式 `--web-host` / `--web-port` 自动启用；`--pprof` 单独不暴露此组）：`POST /web/api/invoke`（同步调用：prompt → 等待 turn 结束 → 状态+渲染）、`POST /web/api/input`、`GET /web/api/screen`（`?view=tui` 取 TUI 合成帧）、`GET /web/api/events`（SSE）；详见 [web-remote-api.md](./web-remote-api.md) |
 
 ## `/debug/chat/status` — 渲染器状态快照（面向两种方式显示）
 
@@ -47,12 +47,14 @@ aicli 在 **`--debug`** 或 **`--pprof`** 模式下自动启动 loopback HTTP �
 |------|------|
 | `--pprof` 显式开启 | `aicli resume session_<id> --pprof on` |
 | `--debug` 自动开启 | `aicli resume session_<id> --debug on` |
-| `--web-port` 固定端口 | `aicli resume session_<id> --web-port 64562` |
+| `--web` 开启 Web 客户端（可与上面的诊断开关叠加） | `aicli resume session_<id> --web` |
+| `--web-port` 固定端口并自动启用 Web（与 `--pprof` / `--debug` 同用时同时启用诊断） | `aicli resume session_<id> --pprof --web-port 64562` |
 | 环境变量 | `AICLI_PPROF=127.0.0.1:0 aicli resume session_<id>` |
 
-> **会话粘性端口（默认行为）**：`--pprof` / `--debug` 未配合 `--web-port`（或
+> **会话粘性端口（默认行为）**：`--pprof` / `--debug` / `--web` 未配合 `--web-port`（或
 > `AICLI_PPROF`）时，resume 指定会话会**复用该会话上次实际监听的端口**，而不是每次
-> 重新申请随机端口，因此 `/debug/chat/*`、`/web/` 等 URL 在 resume 前后保持不变。
+> 重新申请随机端口，因此 `/debug/chat/*`（诊断开关）与 `/web/`（`--web`）等 URL 在 resume
+> 前后保持不变。
 > 会话绑定写在 `~/.aicli/mesh/bindings/<session-id>.json`（网格根目录可用
 > `AICLI_MESH_DIR` 覆盖）；`--web-port` / `AICLI_PPROF` 显式指定时以显式值为准，
 > 并把该端口写入绑定；绑定端口被占用（例如会话已在另一个进程中运行）时回退随机
@@ -74,6 +76,8 @@ Info: web write token (X-AICLI-Token): 3f9c8a... (开发模式: 回环地址跳�
 Info: runtime observe plane: http://127.0.0.1:50679/api/runtime/observe/v1 (local in-process; capabilities/snapshot/sessions/events)
 ```
 
+> 上例同时传了 `--pprof --web`；只传 `--pprof` 时不会打印 Web/写令牌行，只传 `--web` 时不会打印 pprof/诊断行。
+
 > `/web/*` 与 `/debug/*` 端点叠加 Host/Origin 校验：Host 必须是回环地址、携带 Origin 的请求
 > 必须同源，非 GET 写请求必须携带 `X-AICLI-Token`（内置 Web 页面自动注入并附加）。
 > **开发模式**（`--web-dev`，默认在 `127.0.0.1`/`localhost` 回环地址自动开启，`--web-dev=false`
@@ -84,7 +88,7 @@ Info: runtime observe plane: http://127.0.0.1:50679/api/runtime/observe/v1 (loca
 > 详见 `docs/aicli/web-remote-api.md`。
 
 > **Runtime Observation Plane（本地模式）默认随 `--pprof on` 开启。**
-> 只要 loopback HTTP 服务器启动（`--pprof` / `--debug` / `--web-port` / `AICLI_PPROF`），本地 in-process 会话就会自动构建
+> 只要诊断 loopback HTTP 服务器启动（`--pprof` / `--debug` / `AICLI_PPROF`，或与诊断开关同用的 `--web-port`），本地 in-process 会话就会自动构建
 > observe 服务，把 `/api/runtime/observe/v1/*` 端点挂到同一个 loopback 服务器上
 > （见下文 [Runtime Observation Plane（本地模式）](#runtime-observation-plane本地模式)）。
 > 与 runtime-server 模式不同，这里**不需要**任何远端服务，也**不会** fallback 到
@@ -797,7 +801,7 @@ curl http://127.0.0.1:50679/debug/chat/screen | python -m json.tool
 
 返回当前环境**全部调试相关 HTTP 端点**的统一清单，便于脚本/工具一次性发现所有调试入口。默认返回 JSON；`?format=text` 返回纯文本。
 
-端点按 **loopback**（本机 `--pprof` 调试端点）、**web**（`/web/*` 微型 Web 客户端 / 远程调用 API）与 **runtime-observe**（Runtime Observation Plane）三个分组展示，每个端点带方法、`[enabled]` / `[disabled]` 标记与用途说明。
+端点按 **loopback**（本机 `--pprof` 调试端点）、**web**（`/web/*` 微型 Web 客户端 / 远程调用 API，需 `--web` 或显式 `--web-host` / `--web-port`）与 **runtime-observe**（Runtime Observation Plane）三个分组展示，每个端点带方法、`[enabled]` / `[disabled]` 标记与用途说明。
 
 ```powershell
 # JSON 格式（默认）
@@ -807,7 +811,7 @@ curl http://127.0.0.1:50679/debug/endpoints
 curl 'http://127.0.0.1:50679/debug/endpoints?format=text'
 ```
 
-纯文本输出示例（`?format=text`，本地模式 + `--pprof` 开启时）：
+纯文本输出示例（`?format=text`，本地模式 + `--pprof --web` 开启时）：
 
 ```text
 loopback  (aicli --pprof 本机调试服务器)
@@ -849,7 +853,7 @@ loopback HTTP 服务器上，前缀为 `/api/runtime/observe/v1`。**默认随 `
 
 启用条件（二者满足其一即可）：
 
-- pprof loopback HTTP 服务器已开启（`--pprof` / `--debug` / `--web-port` / `AICLI_PPROF`）→ 默认开启；
+- pprof loopback HTTP 服务器已开启（`--pprof` / `--debug` / `AICLI_PPROF`，或与诊断开关同用的 `--web-port`）→ 默认开启；
 - `observe.enabled = true`（显式配置）。
 
 服务为**惰性构建**：首次被 HTTP 请求或 `/debug display` 触发时创建一次并缓存，

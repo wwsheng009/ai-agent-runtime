@@ -228,7 +228,7 @@ Cookie 天然按域隔离。代价是 DNS 通配符与证书。作为 Phase 2+ �
 
 ```text
 本地进程启动
-  ├─ 启动回环服务（aicli: --pprof/--web-port；runtime-server: 默认 8101）
+  ├─ 启动回环服务（aicli: --web/--web-port；runtime-server: 默认 8101）
   ├─ 若配置了 gateway：启动 agent
   │     ├─ 连接 wss://gateway/gw/agent（设备令牌）
   │     ├─ 发送 REGISTER（元数据 + 路由白名单 + 会话列表）

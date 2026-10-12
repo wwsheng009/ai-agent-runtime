@@ -167,3 +167,57 @@ func TestStartPprofServerTokenQueryParam(t *testing.T) {
 		t.Fatalf("loopback TokenQueryParam() = %q, want empty", handle.TokenQueryParam())
 	}
 }
+
+// TestStartLoopbackServerServiceSplit 锁定 --pprof 与 --web 的服务面拆分：
+// pprof-only 不注册 /web/*，web-only 不注册 /debug/*，两者可独立启动。
+func TestStartLoopbackServerServiceSplit(t *testing.T) {
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	t.Run("pprof only", func(t *testing.T) {
+		handle, err := startLoopbackServer("127.0.0.1:0", loopbackServiceOptions{pprof: true})
+		if err != nil {
+			t.Fatalf("startLoopbackServer() error = %v", err)
+		}
+		defer handle.Close()
+		if !handle.PprofEnabled() || handle.WebEnabled() {
+			t.Fatalf("service flags = pprof:%v web:%v, want pprof:true web:false", handle.PprofEnabled(), handle.WebEnabled())
+		}
+		if handle.WebURL() != "" || handle.InvokeURL() != "" {
+			t.Fatalf("pprof-only WebURL/InvokeURL = %q/%q, want empty", handle.WebURL(), handle.InvokeURL())
+		}
+		resp, err := client.Get("http://" + handle.Addr() + commands.ChatWebPath)
+		if err != nil {
+			t.Fatalf("GET /web/ error = %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("pprof-only /web/ response = %d, want 404", resp.StatusCode)
+		}
+	})
+
+	t.Run("web only", func(t *testing.T) {
+		handle, err := startLoopbackServer("127.0.0.1:0", loopbackServiceOptions{web: true})
+		if err != nil {
+			t.Fatalf("startLoopbackServer() error = %v", err)
+		}
+		defer handle.Close()
+		if handle.PprofEnabled() || !handle.WebEnabled() {
+			t.Fatalf("service flags = pprof:%v web:%v, want pprof:false web:true", handle.PprofEnabled(), handle.WebEnabled())
+		}
+		if handle.URL() != "" || handle.DisplayURL() != "" || handle.EndpointsURL() != "" {
+			t.Fatalf("web-only diagnostic URLs = %q/%q/%q, want empty", handle.URL(), handle.DisplayURL(), handle.EndpointsURL())
+		}
+		resp, err := client.Get("http://" + handle.Addr() + "/debug/pprof/")
+		if err != nil {
+			t.Fatalf("GET /debug/pprof/ error = %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("web-only /debug/pprof/ response = %d, want 404", resp.StatusCode)
+		}
+	})
+}

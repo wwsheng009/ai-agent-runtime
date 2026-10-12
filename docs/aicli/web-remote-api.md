@@ -1,9 +1,12 @@
 # aicli Web 远程调用 API（`/web/api/*`）
 
 > 适用版本：集成微型 Web 客户端之后的 aicli。
-> 前提：`aicli chat` / `aicli resume` / `aicli` 以 `--pprof`（或 `--debug`，或 `--web-port <端口>` /
-> `AICLI_PPROF`）启动，
-> loopback HTTP 服务器已开启。服务器仅监听 `127.0.0.1`，并叠加
+> 前提：`aicli chat` / `aicli resume` / `aicli` 以 `--web`、`--web-host <地址>` 或
+> `--web-port <端口>` 启动（后两者会自动启用 Web），loopback HTTP 服务器已开启；
+> `--pprof` 只启用诊断服务，不会暴露 `/web/*`。
+> 下文若使用 `/debug/endpoints` 做入口发现，请同时加 `--pprof`（或 `--debug`）；
+> 只开 `--web` 时可直接访问 `/web/api/*`。
+> 服务器仅监听 `127.0.0.1`，并叠加
 > Host/Origin 校验与写令牌（`X-AICLI-Token`）；即便如此也不要转发/暴露到网络。
 
 ## 1. 入口发现
@@ -1001,7 +1004,7 @@ curl -s -X POST http://127.0.0.1:51234/web/api/mesh/stop \
   -H 'Content-Type: application/json' \
   -d '{"target":"node-9001-20260924T073500Z"}'
 
-# 强制停止：目标卡死 / 没有回环控制面（没带 --pprof）时用
+# 强制停止：目标卡死 / 没有回环控制面（没带 --web）时用
 curl -s -X POST http://127.0.0.1:51234/web/api/mesh/stop \
   -H 'Content-Type: application/json' \
   -d '{"target":"node-9001-20260924T073500Z","mode":"force","wait_ms":5000}'

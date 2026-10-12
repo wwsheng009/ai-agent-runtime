@@ -175,9 +175,12 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 	}
 	snap.Available = true
 
-	// === Loopback 本机端点（aicli --pprof HTTP 服务器）===
+	// === Loopback 本机端点（aicli --pprof/--debug 诊断服务器）===
 	loopbackBase := chatDebugPprofBaseURL()
 	loopbackActive := loopbackBase != ""
+	// === Web 远程调用端点（/web/*，由 --web 单独控制）===
+	webBase := chatDebugWebBaseURL()
+	webActive := webBase != ""
 	// 非回环模式下，端点 URL 也需要 token，但为避免在 JSON /debug/endpoints
 	// 响应中泄露令牌，token 不写入 info.URL；而是在 TUI 显示区单独展示。
 	if loopbackActive {
@@ -205,9 +208,8 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 	} else {
 		snap.ListenMode = "non-loopback"
 	}
-	// === Web 远程调用端点（/web/*，与 loopback 同服务器同源）===
-	if loopbackActive {
-		snap.WebBaseURL = loopbackBase + "/web"
+	if webActive {
+		snap.WebBaseURL = webBase + "/web"
 		snap.WriteAuthHeader = ChatWebAuthTokenHeader
 		if IsChatWebLoopbackMode() {
 			snap.WriteAuthHint = "POST 请求需携带 " + ChatWebAuthTokenHeader +
@@ -224,21 +226,21 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 			Method:  ep.Method,
 			Path:    ep.Path,
 			Scheme:  "web",
-			Enabled: loopbackActive,
+			Enabled: webActive,
 			Note:    ep.Note,
 		}
-		if loopbackActive {
+		if webActive {
 			// JSON 响应中不带 token；TUI 文字渲染时补充。
-			info.URL = loopbackBase + ep.Path
+			info.URL = webBase + ep.Path
 		}
 		snap.Endpoints = append(snap.Endpoints, info)
 	}
 
 	// === 网格控制面端点（/web/api/health + /web/api/mesh/*）===
-	// 与 loopback / web 同服务器同源，但语义独立：--mesh=false 时进程不写档案、
-	// 不订阅、也不注册 mesh/* 路由（§9.7），此时清单里对应行显示为 [disabled]——
-	// 「只认清单」的脚本据此即可判断本进程是否参与网格，不必先探一次。
-	meshActive := loopbackActive && mesh.Current() != nil
+	// 与 Web 同源，但语义独立：--mesh=false 时不注册 mesh/* 路由（§9.7），
+	// 此时清单里对应行显示为 [disabled]——「只认清单」的脚本据此即可判断
+	// 本进程是否参与网格，不必先探一次。
+	meshActive := webActive && mesh.Current() != nil
 	for _, ep := range meshDebugEndpoints {
 		info := chatDebugEndpointInfo{
 			Method:  ep.Method,
@@ -247,8 +249,8 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 			Enabled: meshActive,
 			Note:    ep.Note,
 		}
-		if loopbackActive {
-			info.URL = loopbackBase + ep.Path
+		if webActive {
+			info.URL = webBase + ep.Path
 		}
 		snap.Endpoints = append(snap.Endpoints, info)
 	}
@@ -379,8 +381,8 @@ func BuildChatDebugEndpointsText() string {
 		case "web":
 			base = snap.WebBaseURL
 		case "mesh":
-			// 网格端点与 loopback/web 同服务器：base 复用 loopback 地址。
-			base = snap.LoopbackBaseURL
+			// 网格端点与 Web 同服务器：base 复用 Web 地址（pprof-only 时该组 disabled）。
+			base = snap.WebBaseURL
 		case "runtime-observe":
 			base = snap.ObserveBaseURL
 		}

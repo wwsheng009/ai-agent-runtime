@@ -178,7 +178,7 @@ func TestCallTargetResolutionFailures(t *testing.T) {
 	stopped.Liveness.State = string(NodeStateStopped)
 	writeViewNode(t, paths, stopped)
 
-	// 活节点但没有回环控制面（没开 --pprof）。
+	// 活节点但没有回环控制面（没开 --web）。
 	writeViewNode(t, paths, viewNodeRecord("node-noend-20260924T100000Z", os.Getpid(), now.Add(-5*time.Second), "", ""))
 	// 前缀歧义：两条档案共享前缀，引用不完整 node_id。
 	writeViewNode(t, paths, viewNodeRecord("node-amb-20260924T100000Z", os.Getpid(), now.Add(-5*time.Second), "", ""))

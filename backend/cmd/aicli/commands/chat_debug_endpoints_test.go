@@ -361,6 +361,48 @@ func TestChatDebugEndpointsTextUsageGuide(t *testing.T) {
 	}
 }
 
+// TestChatDebugEndpointListSeparatesWebProvider 锁定服务面拆分后的清单语义：
+// pprof provider 有值但 Web provider 显式返回空时，web/mesh 组必须是 disabled。
+func TestChatDebugEndpointListSeparatesWebProvider(t *testing.T) {
+	prevPprof := chatDebugPprofProvider
+	prevWeb := chatDebugWebProvider
+	prevConfigured := chatDebugWebProviderConfigured
+	t.Cleanup(func() {
+		chatDebugPprofProvider = prevPprof
+		chatDebugWebProvider = prevWeb
+		chatDebugWebProviderConfigured = prevConfigured
+	})
+
+	RegisterChatDebugPprofProvider(func() string {
+		return "http://127.0.0.1:43210/debug/pprof/"
+	})
+	RegisterChatDebugWebProvider(func() string { return "" })
+
+	session := &ChatSession{ProviderName: "test", Model: "test-model"}
+	prevDisplay := chatDebugDisplaySessionProvider
+	t.Cleanup(func() { chatDebugDisplaySessionProvider = prevDisplay })
+	RegisterChatDebugDisplayProvider(func() *ChatSession { return session })
+
+	snap := BuildChatDebugEndpointsSnapshot()
+	if !snap.Available {
+		t.Fatal("snapshot must be available")
+	}
+	if snap.LoopbackBaseURL == "" {
+		t.Fatal("pprof loopback base must remain available")
+	}
+	if snap.WebBaseURL != "" {
+		t.Fatalf("web base = %q, want empty when Web provider is disabled", snap.WebBaseURL)
+	}
+	for _, ep := range snap.Endpoints {
+		if ep.Scheme == "web" && ep.Enabled {
+			t.Fatalf("web endpoint %s marked enabled without Web provider", ep.Path)
+		}
+		if ep.Scheme == "mesh" && ep.Enabled {
+			t.Fatalf("mesh endpoint %s marked enabled without Web provider", ep.Path)
+		}
+	}
+}
+
 // TestChatDebugEndpointsTextUsageGuideWithoutSession 锁定"清单不可用"时也带使用说明：
 // 没有活动会话恰恰是新手最需要指路的时候，早退分支不得把速览吞掉。
 func TestChatDebugEndpointsTextUsageGuideWithoutSession(t *testing.T) {

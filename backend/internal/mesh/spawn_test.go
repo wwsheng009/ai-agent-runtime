@@ -176,7 +176,7 @@ func TestSpawnStartsDetachedNode(t *testing.T) {
 		t.Fatalf("url = %q, want session deep link + record token", result.URL)
 	}
 	// §5.7 command line, and the parent handshake env of §3.1.
-	wantArgs := []string{"resume", "sess-2", "--pprof", "--web-host", "127.0.0.1", "--web-token", spawnTestToken}
+	wantArgs := []string{"resume", "sess-2", "--web", "--web-host", "127.0.0.1", "--web-token", spawnTestToken}
 	if strings.Join(captured.Args, " ") != strings.Join(wantArgs, " ") {
 		t.Fatalf("args = %v, want %v", captured.Args, wantArgs)
 	}
@@ -307,7 +307,7 @@ func TestSpawnLaunchFailureCarriesRedactedLogTail(t *testing.T) {
 		return 0, errors.New("exec: executable file not found in %PATH%")
 	})
 	logPath := filepath.Join(opts.LogDir, spawnLogPrefix+"sess-4"+spawnLogSuffix)
-	body := "Info: aicli resume sess-4 --pprof --web-token " + spawnTestToken + "\nboom: cannot open config\n"
+	body := "Info: aicli resume sess-4 --web --web-token " + spawnTestToken + "\nboom: cannot open config\n"
 	if err := os.WriteFile(logPath, []byte(body), SpawnLogFilePerm); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
@@ -529,19 +529,19 @@ func TestSpawnArgsOmitZeroPort(t *testing.T) {
 			name:  "random port",
 			port:  0,
 			token: "tok-1234567890abcdef",
-			want:  []string{"resume", "sid", "--pprof", "--web-host", "127.0.0.1", "--web-token", "tok-1234567890abcdef"},
+			want:  []string{"resume", "sid", "--web", "--web-host", "127.0.0.1", "--web-token", "tok-1234567890abcdef"},
 		},
 		{
 			name:  "sticky port",
 			port:  55124,
 			token: "tok-1234567890abcdef",
-			want:  []string{"resume", "sid", "--pprof", "--web-host", "127.0.0.1", "--web-port", "55124", "--web-token", "tok-1234567890abcdef"},
+			want:  []string{"resume", "sid", "--web", "--web-host", "127.0.0.1", "--web-port", "55124", "--web-token", "tok-1234567890abcdef"},
 		},
 		{
 			name:  "no token (dev mode)",
 			port:  0,
 			token: "",
-			want:  []string{"resume", "sid", "--pprof", "--web-host", "127.0.0.1"},
+			want:  []string{"resume", "sid", "--web", "--web-host", "127.0.0.1"},
 		},
 	}
 	for _, tc := range cases {

@@ -54,7 +54,7 @@ func TestSpawnNewSessionLaunchesChatAndLearnsSessionID(t *testing.T) {
 		t.Fatalf("url = %q, want the new session deep link + record token", result.URL)
 	}
 	// `new` 的命令行：chat 无会话 ID，其余旗标与 open 相同（§5.7 的窗口契约）。
-	wantArgs := []string{"chat", "--pprof", "--web-host", "127.0.0.1", "--web-token", spawnTestToken}
+	wantArgs := []string{"chat", "--web", "--web-host", "127.0.0.1", "--web-token", spawnTestToken}
 	if strings.Join(captured.Args, " ") != strings.Join(wantArgs, " ") {
 		t.Fatalf("args = %v, want %v", captured.Args, wantArgs)
 	}
