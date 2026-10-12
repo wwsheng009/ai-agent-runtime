@@ -122,11 +122,30 @@ func (s *Server) ServeProxy(w http.ResponseWriter, r *http.Request, nodeID, path
 				return
 			case streamReset:
 				if !headersWritten {
-					http.Error(w, ev.message, http.StatusBadGateway)
+					http.Error(w, proxyResetMessage(ev.code, ev.message), http.StatusBadGateway)
 				}
 				return
 			}
 		}
+	}
+}
+
+// proxyResetMessage renders an agent-side STREAM_RESET as an actionable HTTP
+// body. Reset codes are protocol-internal; `no_local_base` in particular used
+// to surface as the cryptic "agent has no local base url" even though the
+// operator-visible condition is "this node has no local Web service". Nodes
+// now trim their routes instead of accepting such requests (fail closed with
+// 403), but an older agent can still answer this way, so keep the translation.
+func proxyResetMessage(code, message string) string {
+	switch code {
+	case "no_local_base":
+		return "node has no local web service (the agent was started without its web client); reverse proxy is unavailable for this node"
+	default:
+		message = strings.TrimSpace(message)
+		if message == "" {
+			return "stream reset by node"
+		}
+		return message
 	}
 }
 

@@ -28,7 +28,20 @@ func startRuntimeServerGateway(handler *runtimeapi.Handler, cfg *config.Config) 
 	if !agentCfg.Enabled {
 		return nil
 	}
-	controller := gatewayagent.NewController(agentCfg, runtimeServerGatewayRegister(agentCfg, handler.GatewaySessions))
+	// REGISTER reads the live forwarding target: this process learns its
+	// loopback address only once the listen address is resolved
+	// (setGatewayForward), which can race the startup auto-connect. Advertising
+	// the reverse-proxy routes before that target exists would let the gateway
+	// stream /n/{node}/... requests to an agent that can only fail them with
+	// "no local base url".
+	var controller *gatewayagent.Controller
+	register := runtimeServerGatewayRegister(agentCfg, handler.GatewaySessions, func() gatewayagent.ForwardConfig {
+		if controller == nil {
+			return gatewayagent.ForwardConfig{}
+		}
+		return controller.ForwardConfig()
+	})
+	controller = gatewayagent.NewController(agentCfg, register)
 	handler.SetGatewayController(controller)
 	// Derive per-session attention from the runtime event bus so the gateway can
 	// push notifications (docs/gateway/08-notifications.md §3).
@@ -79,16 +92,25 @@ func runtimeServerGatewayResolveConfig(cfg *config.Config) gatewayagent.Config {
 
 // runtimeServerGatewayRegister supplies the REGISTER payload for this process.
 // The session list is populated by a later step; node identity, capabilities
-// and the reverse-proxy route allowlist are set here.
-func runtimeServerGatewayRegister(cfg gatewayagent.Config, sessions func() []wire.SessionSummary) gatewayagent.RegisterFunc {
+// and the reverse-proxy route allowlist are set here. forward reports the live
+// loopback forwarding target: until it exists the node advertises no proxy
+// routes (fail closed, gateway → 403) instead of accepting requests it cannot
+// serve. A nil provider keeps the historical unconditional allowlist.
+func runtimeServerGatewayRegister(cfg gatewayagent.Config, sessions func() []wire.SessionSummary, forward func() gatewayagent.ForwardConfig) gatewayagent.RegisterFunc {
 	return func() wire.Register {
+		routes := []string{"/api/runtime", "/api/agent", "/healthz", "/"}
+		if forward != nil {
+			if strings.TrimRight(strings.TrimSpace(forward().LocalBaseURL), "/") == "" {
+				routes = nil
+			}
+		}
 		reg := wire.Register{
 			NodeID:       gatewayagent.ProcessNodeID(),
 			Kind:         "runtime-server",
 			Name:         cfg.Name,
 			DeviceName:   cfg.Name,
 			Capabilities: []string{"manifest", "runtime-api", "sessions"},
-			Routes:       []string{"/api/runtime", "/api/agent", "/healthz", "/"},
+			Routes:       routes,
 		}
 		if sessions != nil {
 			reg.Sessions = sessions()

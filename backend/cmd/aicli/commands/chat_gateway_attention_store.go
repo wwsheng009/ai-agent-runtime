@@ -1,53 +1,41 @@
 package commands
 
-import "sync"
+import (
+	"strings"
+	"time"
 
-// gatewaySessionState is the process-local projection of one session's runtime
-// state reported to the gateway (docs/gateway/08-notifications.md §3).
-type gatewaySessionState struct {
-	Attention string
-	Busy      bool
+	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
+)
+
+// 本文件是共享核心（internal/gateway/agent.SessionStateStore）在 aicli 侧的
+// 单例与别名，不再自建状态表：
+//
+//   - 状态词表、attention↔state 耦合、turn 生命周期、变更检测全部归核心所有，
+//     aicli 与 runtime-server 共用同一套语义（docs/gateway/08-notifications.md §3）；
+//   - aicli 只负责把本地事件映射到核心调用（见 chat_gateway_attention.go）。
+var gatewayAttentionStore = gatewayagent.NewSessionStateStore()
+
+// Live-output tail throttle (shared cadence + duplicate suppression, see
+// internal/gateway/agent.TailThrottle): the console renders at human speed,
+// so at most one tail push per second per session.
+var gatewayTailThrottle = gatewayagent.NewTailThrottle(time.Second)
+
+// gatewayAttention 取值别名（与 wire.SessionSummary.Attention 对应）。
+const (
+	gatewayAttentionCompleted = gatewayagent.AttentionCompleted
+	gatewayAttentionError     = gatewayagent.AttentionError
+	gatewayAttentionApproval  = gatewayagent.AttentionApproval
+	gatewayAttentionQuestion  = gatewayagent.AttentionQuestion
+	gatewayAttentionWaiting   = gatewayagent.AttentionWaiting
+)
+
+// setGatewayAttention records (or clears, when attention == "") the attention
+// state for sessionID.
+func setGatewayAttention(sessionID, attention string) {
+	gatewayAttentionStore.SetAttention(strings.TrimSpace(sessionID), strings.TrimSpace(attention))
 }
 
-// gatewayAttentionStore is a tiny concurrency-safe sessionID→state map. It is
-// process-local and never persisted: the gateway registry is the durable
-// projection (rebuilt from the next SESSION_UPDATE after a reconnect).
-type gatewayAttentionStoreImpl struct {
-	mu     sync.Mutex
-	values map[string]gatewaySessionState
-}
-
-func newGatewayAttentionStore() *gatewayAttentionStoreImpl {
-	return &gatewayAttentionStoreImpl{values: make(map[string]gatewaySessionState)}
-}
-
-func (s *gatewayAttentionStoreImpl) setAttention(sessionID, attention string) {
-	if sessionID == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.values[sessionID]
-	st.Attention = attention
-	s.values[sessionID] = st
-}
-
-func (s *gatewayAttentionStoreImpl) setBusy(sessionID string, busy bool) {
-	if sessionID == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.values[sessionID]
-	st.Busy = busy
-	s.values[sessionID] = st
-}
-
-func (s *gatewayAttentionStoreImpl) get(sessionID string) gatewaySessionState {
-	if sessionID == "" {
-		return gatewaySessionState{}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.values[sessionID]
+// gatewaySessionStateFor returns the shared projection for sessionID.
+func gatewaySessionStateFor(sessionID string) gatewayagent.SessionState {
+	return gatewayAttentionStore.Get(strings.TrimSpace(sessionID))
 }

@@ -4,8 +4,8 @@ import (
 	"testing"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestAttachChatGatewayUnconfigured(t *testing.T) {
@@ -108,5 +108,74 @@ func TestChatGatewayLastMessageEmptyIsSafe(t *testing.T) {
 	role, content := chatGatewayLastMessage(img)
 	if role != "user" || content != "[附件/图片]" {
 		t.Fatalf("image-only: %q/%q", role, content)
+	}
+}
+
+func TestChatGatewayEffectiveRegistrationTrimsWithoutWeb(t *testing.T) {
+	routes, caps := chatGatewayEffectiveRegistration(nil, "")
+	if len(routes) != 0 {
+		t.Fatalf("routes = %v, want none (fail closed without a local Web origin)", routes)
+	}
+	for _, web := range chatGatewayWebCapabilities {
+		if containsString(caps, web) {
+			t.Fatalf("capabilities = %v, must not advertise %q without a Web client", caps, web)
+		}
+	}
+	for _, core := range chatGatewayCoreCapabilities {
+		if !containsString(caps, core) {
+			t.Fatalf("capabilities = %v, missing core bit %q", caps, core)
+		}
+	}
+
+	// With a local Web origin the defaults (and the Web-API bits) come back;
+	// a trailing slash on the recorded origin must not change that.
+	routes, caps = chatGatewayEffectiveRegistration(nil, "http://127.0.0.1:5555/")
+	if !containsString(routes, "/web") || !containsString(routes, "/web/api") {
+		t.Fatalf("routes = %v, want the default /web allowlist", routes)
+	}
+	if !containsString(caps, "input") {
+		t.Fatalf("capabilities = %v, want the Web-API bits with a live target", caps)
+	}
+
+	// Configured routes win over the defaults and are copied, not aliased.
+	custom := []string{"/web/api"}
+	routes, _ = chatGatewayEffectiveRegistration(custom, "http://127.0.0.1:5555")
+	if len(routes) != 1 || routes[0] != "/web/api" {
+		t.Fatalf("routes = %v, want the configured allowlist", routes)
+	}
+	routes[0] = "/mutated"
+	if custom[0] != "/web/api" {
+		t.Fatalf("configured routes must be copied, got alias to %v", custom)
+	}
+}
+
+func TestChatGatewayRegisterFuncReflectsForwardTarget(t *testing.T) {
+	resetChatGatewayEndpoint(t)
+	prev := chatDebugDisplaySessionProvider
+	chatDebugDisplaySessionProvider = func() *ChatSession { return nil }
+	t.Cleanup(func() {
+		chatDebugDisplaySessionProvider = prev
+		resetChatGatewayEndpoint(t)
+	})
+
+	register := chatGatewayRegisterFunc(gatewayagent.Config{Name: "laptop"}, nil, &ChatSession{})
+	got := register()
+	if got.NodeID == "" || got.Kind != "aicli" {
+		t.Fatalf("register = %+v", got)
+	}
+	if len(got.Routes) != 0 {
+		t.Fatalf("routes = %v, want none before the Web client is recorded", got.Routes)
+	}
+	if containsString(got.Capabilities, "input") {
+		t.Fatalf("capabilities = %v, want no Web-API bits before the Web client is recorded", got.Capabilities)
+	}
+
+	SetChatGatewayLoopbackEndpoint("127.0.0.1", 5555, "tok")
+	got = register()
+	if !containsString(got.Routes, "/web") {
+		t.Fatalf("routes = %v, want the default allowlist once the Web client is recorded", got.Routes)
+	}
+	if !containsString(got.Capabilities, "input") {
+		t.Fatalf("capabilities = %v, want the Web-API bits once the Web client is recorded", got.Capabilities)
 	}
 }

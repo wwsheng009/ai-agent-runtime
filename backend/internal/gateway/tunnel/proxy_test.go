@@ -193,6 +193,31 @@ func TestProxyEmptyRoutesDenied(t *testing.T) {
 	}
 }
 
+// An agent that never recorded a local Web origin resets the stream with
+// no_local_base; the gateway surfaces an actionable message instead of the
+// protocol-internal one (older agents can still answer this way).
+func TestProxyNoLocalBaseMessage(t *testing.T) {
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	dialAgent(t, server, "node-noweb", "")
+
+	proxy := startProxy(t, server, "node-noweb")
+	resp, err := http.Get(proxy.URL + "/web/")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "no local web service") {
+		t.Fatalf("body = %q, want the translated no-local-web-service message", body)
+	}
+	if strings.Contains(string(body), "no local base url") {
+		t.Fatalf("body = %q, must not leak the protocol-internal message", body)
+	}
+}
+
 // TestProxyThroughControllerForward validates that the controller's
 // ForwardProvider wiring (SetForward before dial) reaches the local service.
 func TestProxyThroughControllerForward(t *testing.T) {

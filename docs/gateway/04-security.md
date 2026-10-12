@@ -107,6 +107,10 @@ owner 登录按"**先观察、再挑战、后阻断**"的**分级风控**处理�
 3. 方法在允许集合内（默认：`GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS`，可按能力裁剪）；
 4. 未命中 → **403**（`route_not_allowed` / `capability_not_granted`），并记审计。
 
+**注册方义务**：节点必须只声明**真正可服务**的 `routes` / `capabilities`。本机未启用 Web 服务的
+`aicli`（未带 `--web`）不得声明 `/web`；`runtime-server` 在回环监听地址就绪前不得声明代理路由。
+未声明时网关按 403 fail-closed，而不是把请求交给一个只会在 agent 内以 `no_local_base`（502）失败的节点。
+
 默认白名单（`aicli`）：
 
 ```text

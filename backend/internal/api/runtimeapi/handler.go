@@ -36,6 +36,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -216,10 +217,15 @@ type Handler struct {
 	runtimeConfigLayersProvider RuntimeConfigLayersProvider
 	// gatewayController is the gateway connection control plane (docs/gateway/12-connection-control.md).
 	gatewayController GatewayController
-	// gateway attention projection (docs/gateway/08-notifications.md §3).
+	// gateway session-state projection (docs/gateway/08-notifications.md §3).
+	// Shared with aicli via internal/gateway/agent.SessionStateStore so both
+	// hosts use one state vocabulary and one transition table; the mutex only
+	// guards lazy store creation.
 	gatewayAttentionOnce     sync.Once
 	gatewayAttentionMu       sync.Mutex
-	gatewayAttention         map[string]gatewaySessionState
+	gatewaySessionStates     *gatewayagent.SessionStateStore
+	gatewayTailThrottleInst  *gatewayagent.TailThrottle
+	gatewayTailBuffer        map[string]string
 	serviceControlService    RuntimeServiceControlService
 	fileTransferService      FileTransferService
 	logFilePath              string

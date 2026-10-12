@@ -49,22 +49,22 @@ func (h *Handler) GatewaySessions() []wire.SessionSummary {
 	}
 	sessions = filterAddressableSessions(sessions)
 	out := make([]wire.SessionSummary, 0, len(sessions))
+	store := h.gatewayStateStore()
 	for _, session := range sessions {
 		if session == nil || strings.TrimSpace(session.ID) == "" {
 			continue
 		}
-		st := h.gatewaySessionStateFor(session.ID)
-		state := string(session.State)
-		if st.busy {
-			state = "running"
-		}
-		out = append(out, wire.SessionSummary{
+		summary := wire.SessionSummary{
 			SessionID: session.ID,
 			Title:     strings.TrimSpace(session.Metadata.Title),
-			State:     state,
-			Attention: st.attention,
-			Busy:      st.busy,
-		})
+			// Pre-set the host's own session state; the shared projection
+			// overrides it whenever it has tracked a richer state.
+			State: string(session.State),
+		}
+		if store != nil {
+			store.Get(session.ID).Apply(&summary)
+		}
+		out = append(out, summary)
 	}
 	return out
 }

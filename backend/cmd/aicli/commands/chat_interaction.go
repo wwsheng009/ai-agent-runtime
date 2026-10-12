@@ -283,6 +283,14 @@ type chatInteractionCoordinator struct {
 	webStatusLaneOnce sync.Once
 	webStatusLane     chan webDynamicStatusMessage
 	webStatusLaneStop chan struct{}
+	// gatewayStatusLane 把网关状态同步移出 c.mu 临界区：活动状态转换（tool /
+	// streaming / approval…）在锁内只做共享核心（gatewayagent.SessionStateStore）
+	// 的变更检测与非阻塞入队，实际 SESSION_UPDATE 推送由专用 goroutine 完成
+	// （容量 1，latest-wins）。与 webStatusLane 同因：慢/阻塞的网关写入不得
+	// 回压持有 c.mu 的 UI reducer。
+	gatewayStatusLaneOnce sync.Once
+	gatewayStatusLane     chan gatewayStatusSyncMessage
+	gatewayStatusLaneStop chan struct{}
 	// surfaceStatus 缓存最近一次 updateSurfaceStatusLocked 的结构化状态。
 	// 动态状态 tick 用它在每秒钟重建状态行：SetRetrying/SetNotice 等入口
 	// 写入的状态不落在 agentStage/activity flags 上，若 tick 重新派生会
@@ -950,6 +958,7 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 	now := time.Now()
 	c.updateDynamicStatusClockLocked(s, now)
 	c.repaintStatusModelsLocked()
+	c.publishGatewaySurfaceStatusLocked(s, now)
 	c.enqueueWebDynamicStatusLocked(s, now)
 }
 
@@ -1225,6 +1234,110 @@ func (c *chatInteractionCoordinator) publishWebDynamicStatusEvent(msg webDynamic
 	})
 }
 
+// gatewayStatusSyncMessage 是移出 c.mu 的网关状态同步快照：入队时（持 c.mu）
+// 只快照 session 指针，同步 goroutine 不再读 c.session 字段。
+type gatewayStatusSyncMessage struct {
+	session *ChatSession
+}
+
+// publishGatewaySurfaceStatusLocked 把实时活动状态投影到共享网关状态存储
+// （gatewayagent.SessionStateStore，见 chat_gateway_attention.go 的映射）。
+// 每秒 tick 也会调用本函数：只有 (state, text) 真正变化时才会触发同步，因此
+// 不会把时钟刷成网关流量。state 为空（idle/notice）时不触碰生命周期状态
+// （completed/interrupted/error/idle 归 turn finisher 所有）。
+func (c *chatInteractionCoordinator) publishGatewaySurfaceStatusLocked(s chatSurfaceStatus, now time.Time) {
+	if c == nil || c.session == nil {
+		return
+	}
+	sessionID := chatSessionID(c.session)
+	if sessionID == "" {
+		return
+	}
+	// Transitions also refresh the live-output tail (state changes often ride
+	// with fresh content; the shared throttle suppresses duplicates).
+	c.publishGatewayTailLocked(now)
+	state, text := gatewaySurfaceStatusFor(s, c.inputMode)
+	if state == "" {
+		return
+	}
+	if gatewayAttentionStore.SetSurface(sessionID, state, text, c.dynamicStatusStarted, now) {
+		c.enqueueGatewayStatusSyncLocked()
+	}
+}
+
+// publishGatewayTailLocked samples the in-progress assistant output and pushes
+// the display tail through the shared core (512-rune bound, 1s throttle).
+// Called from the 1Hz dynamic-status tick and from activity transitions; no
+// activity or an unchanged tail means no push.
+func (c *chatInteractionCoordinator) publishGatewayTailLocked(now time.Time) {
+	if c == nil || c.session == nil {
+		return
+	}
+	sessionID := chatSessionID(c.session)
+	if sessionID == "" {
+		return
+	}
+	// Sample the streaming buffer, never activeStream.Active(): the
+	// ActiveStreamController belongs to the legacy (non-unified) render path
+	// and stays inactive under the unified renderer — the production
+	// interactive default — while both paths keep streamBuffer current (the
+	// unified path mounts the Scene cell from the RuntimeEvent; the
+	// compatibility core loop feeds RenderAssistantDelta). Gating on the
+	// controller starved the tail on every unified-render session.
+	// An empty buffer samples as "" so a turn-end reset clears the tail
+	// through the shared throttle's change detection.
+	tail := ""
+	if c.streamBuffer.Len() > 0 {
+		tail = c.streamBuffer.String()
+	}
+	// P1-b presence gating: once the gateway advertises watch control, only
+	// watched sessions push tails (gateways that never advertise keep the
+	// ungated P1-a behavior via TailWanted's default).
+	if c.session.Gateway != nil && !c.session.Gateway.TailWanted(sessionID) {
+		return
+	}
+	if !gatewayTailThrottle.Allow(sessionID, tail, now) {
+		return
+	}
+	if gatewayAttentionStore.SetTail(sessionID, tail, now) {
+		c.enqueueGatewayStatusSyncLocked()
+	}
+}
+
+// enqueueGatewayStatusSyncLocked 在持 c.mu 期间只做快照 + 非阻塞入队（容量 1，
+// latest-wins），SESSION_UPDATE 推送由 gatewayStatusSyncer 在锁外完成。
+func (c *chatInteractionCoordinator) enqueueGatewayStatusSyncLocked() {
+	if c == nil || c.shutdown || c.session == nil {
+		return
+	}
+	c.gatewayStatusLaneOnce.Do(func() {
+		c.gatewayStatusLane = make(chan gatewayStatusSyncMessage, 1)
+		if c.gatewayStatusLaneStop == nil {
+			c.gatewayStatusLaneStop = make(chan struct{})
+		}
+		go c.gatewayStatusSyncer()
+	})
+	msg := gatewayStatusSyncMessage{session: c.session}
+	select {
+	case c.gatewayStatusLane <- msg:
+	default:
+		// 已有在途帧：消费者会读取共享核心的最新状态，丢弃本帧仍是 latest-wins。
+	}
+}
+
+// gatewayStatusSyncer 是锁外消费者：把共享核心的最新投影推给网关。
+// Shutdown 关闭 gatewayStatusLaneStop 后退出。
+func (c *chatInteractionCoordinator) gatewayStatusSyncer() {
+	for {
+		select {
+		case msg := <-c.gatewayStatusLane:
+			syncChatGatewaySession(msg.session)
+		case <-c.gatewayStatusLaneStop:
+			return
+		}
+	}
+}
+
 func cloneChatStatusLineModel(model style.StatusLineModel) style.StatusLineModel {
 	model.Segments = append([]style.StatusSegment(nil), model.Segments...)
 	return model
@@ -1393,6 +1506,10 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 		return
 	}
 	now := time.Now()
+	// 1Hz tick doubles as the live-output tail sampler: the throttle turns
+	// "sampled every second" into "pushed at most once per second, only when
+	// the tail actually changed".
+	c.publishGatewayTailLocked(now)
 	// 用最近一次 updateSurfaceStatusLocked 的结构化状态重建，而不是重新派生：
 	// SetRetrying/SetNotice 写入的状态不反映在 agentStage/activity flags 上，
 	// 重新派生会让 retry 状态行在每秒钟的 tick 中闪回 idle/丢失计时。
@@ -5643,6 +5760,9 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	// 标志保证只关闭一次）。队列中未发布帧在收尾阶段丢弃。
 	if c.webStatusLaneStop != nil {
 		close(c.webStatusLaneStop)
+	}
+	if c.gatewayStatusLaneStop != nil {
+		close(c.gatewayStatusLaneStop)
 	}
 	// Stop the presenter before closing the actor. closeUIActor first detaches
 	// the effect consumer, then drains its worker, so no callback can emit after

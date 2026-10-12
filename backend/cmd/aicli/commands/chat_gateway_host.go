@@ -14,6 +14,39 @@ import (
 // not override it.
 var chatGatewayDefaultRoutes = []string{"/web", "/web/api", "/debug/endpoints"}
 
+// chatGatewayCoreCapabilities are the capability bits that stay truthful
+// without a local Web origin: they describe the registry / control-plane
+// projection of this process, not the reverse-proxied Web API.
+var chatGatewayCoreCapabilities = []string{"manifest", "status", "sessions"}
+
+// chatGatewayWebCapabilities are served through the local Web client's
+// /web/api/* endpoints. They must not be advertised while that client is off:
+// the console gates the reply form on "input", and the gateway would otherwise
+// accept proxy requests for services this process cannot serve.
+var chatGatewayWebCapabilities = []string{"screen", "events", "invoke", "input"}
+
+// chatGatewayEffectiveRegistration trims the REGISTER metadata to what this
+// process can actually serve. Without a recorded local Web origin (the loopback
+// Web client was never enabled, e.g. a chat started without --web) every
+// reverse-proxy route would be streamed to the agent only to fail there with
+// "no local base url" (502). Fail closed instead: the gateway rejects
+// /n/{node}/web/... up front with 403 route_not_allowed
+// (docs/gateway/04-security.md §3) and the console hides the open action.
+func chatGatewayEffectiveRegistration(routes []string, localBaseURL string) ([]string, []string) {
+	if len(routes) == 0 {
+		routes = chatGatewayDefaultRoutes
+	}
+	caps := make([]string, 0, len(chatGatewayCoreCapabilities)+len(chatGatewayWebCapabilities))
+	caps = append(caps, chatGatewayCoreCapabilities...)
+	caps = append(caps, chatGatewayWebCapabilities...)
+	if strings.TrimRight(strings.TrimSpace(localBaseURL), "/") == "" {
+		// No local service to forward to: no route is servable, and the
+		// Web-API capability bits would be a lie.
+		return nil, append([]string(nil), chatGatewayCoreCapabilities...)
+	}
+	return append([]string(nil), routes...), caps
+}
+
 // chatGatewayRegisterFunc supplies the REGISTER payload for this process. The
 // session list reflects the session bound at dial time. The node id is the
 // process identity (gatewayagent.ProcessNodeID): stable across reconnections
@@ -22,16 +55,18 @@ var chatGatewayDefaultRoutes = []string{"/web", "/web/api", "/debug/endpoints"}
 func chatGatewayRegisterFunc(cfg gatewayagent.Config, routes []string, session *ChatSession) gatewayagent.RegisterFunc {
 	nodeID := gatewayagent.ProcessNodeID()
 	return func() wire.Register {
-		if len(routes) == 0 {
-			routes = chatGatewayDefaultRoutes
-		}
+		// Evaluated per dial: the Web client may finish starting after the
+		// controller was built (SetChatGatewayLoopbackEndpoint then reconnects),
+		// so the advertised capability must reflect the current target.
+		effectiveRoutes, effectiveCapabilities := chatGatewayEffectiveRegistration(
+			routes, chatGatewayForwardConfig().LocalBaseURL)
 		return wire.Register{
 			NodeID:       nodeID,
 			Kind:         "aicli",
 			Name:         cfg.Name,
 			DeviceName:   cfg.Name,
-			Capabilities: []string{"manifest", "screen", "status", "events", "invoke", "input", "sessions"},
-			Routes:       append([]string(nil), routes...),
+			Capabilities: effectiveCapabilities,
+			Routes:       effectiveRoutes,
 			Sessions:     chatGatewaySessions(session),
 		}
 	}
@@ -46,11 +81,6 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	if id == "" {
 		return nil
 	}
-	st := gatewaySessionStateFor(id)
-	state := "idle"
-	if st.Busy {
-		state = "running"
-	}
 	// Last-message summary for the gateway console session row (docs/gateway/
 	// 02-architecture.md §3.2 preview: truncated, provided at the local agent's
 	// discretion — it never leaves the machine un-truncated and contains no
@@ -61,17 +91,18 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	}
 	lastRole, lastMessage := chatGatewayLastMessage(session)
 	updatedAt := session.RuntimeSession.UpdatedAt
-	return []wire.SessionSummary{{
+	summary := wire.SessionSummary{
 		SessionID:       id,
 		Title:           chatMeshSessionTitle(session),
-		State:           state,
-		Attention:       st.Attention,
-		Busy:            st.Busy,
 		Preview:         preview,
 		LastMessageRole: lastRole,
 		LastMessage:     lastMessage,
 		UpdatedAt:       updatedAt,
-	}}
+	}
+	// Overlay the shared state projection (state/attention/busy/status text);
+	// the store defaults to idle/running so both hosts report the same baseline.
+	gatewaySessionStateFor(id).Apply(&summary)
+	return []wire.SessionSummary{summary}
 }
 
 // chatGatewayLastMessageLimit caps the inline "last message" payload sent to
