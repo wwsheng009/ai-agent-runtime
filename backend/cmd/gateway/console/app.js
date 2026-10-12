@@ -2176,7 +2176,11 @@
   var pushTest = el("push-test");
   if (pushTest) {
     pushTest.addEventListener("click", function () {
+      var idleText = pushTest.textContent;
       pushTest.disabled = true;
+      // The API waits for the push service round trip (usually 0.5–3s), so
+      // give immediate feedback instead of looking dead.
+      pushTest.textContent = "发送中…";
       apiJSON("/api/push/test", { method: "POST" }).then(function (r) {
         if (!r.res.ok) { throw new Error("HTTP " + r.res.status); }
         var delivered = (r.body && r.body.delivered) || 0;
@@ -2192,7 +2196,7 @@
         notify("已投递 " + delivered + "/" + total + " 个订阅。若本机未弹出：iOS 需从主屏幕图标打开；Android 请检查系统通知与电池优化。", delivered === total ? "ok" : "error");
       }).catch(function (err) {
         notify("测试通知失败：" + (err && err.message ? err.message : err), "error");
-      }).finally(function () { pushTest.disabled = false; });
+      }).finally(function () { pushTest.disabled = false; pushTest.textContent = idleText; });
     });
   }
 
@@ -2445,10 +2449,18 @@
   /* ─────────────────────── boot ──────────────────────────────── */
 
   if ("serviceWorker" in navigator) {
+    // The worker posts this after showing a system notification, which proves
+    // the push reached this browser (vs. the OS suppressing the toast).
+    navigator.serviceWorker.addEventListener("message", function (event) {
+      var data = event.data || {};
+      if (data.type === "push-received") {
+        notify("已收到推送：" + (data.title || "通知") + (data.body ? " · " + data.body : ""), "ok");
+      }
+    });
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=32").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=33").catch(function () {});
     });
   }
 

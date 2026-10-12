@@ -4,12 +4,12 @@
 // Cache-busting version: bump together with the ?v= query in index.html and
 // the register() URL in app.js on every release (Cloudflare edge-caches
 // *.js/*.css for 4h, so a new URL is what makes the update land immediately).
-const CACHE = "aicli-gateway-shell-v32";
+const CACHE = "aicli-gateway-shell-v33";
 const SHELL = [
   "./",
   "./index.html",
-  "./app.js?v=32",
-  "./style.css?v=32",
+  "./app.js?v=33",
+  "./style.css?v=33",
   "./manifest.webmanifest",
   "./icon.svg",
   "./icon-192.png",
@@ -84,6 +84,15 @@ self.addEventListener("push", (event) => {
       // icons (the notification still shows, but with a blank/missing icon).
       icon: "./icon-192.png",
       badge: "./badge-96.png",
+    }).then(() => {
+      // Tell open console pages that the push actually reached this browser.
+      // This separates "push never arrived" from "the OS suppressed the toast"
+      // when debugging notification delivery.
+      return self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    }).then((clients) => {
+      for (const client of clients) {
+        client.postMessage({ type: "push-received", title: data.title, body: data.body });
+      }
     }),
   );
 });
