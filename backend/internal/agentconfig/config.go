@@ -962,6 +962,11 @@ type SkillsRuntimeConfig struct {
 	// MentionInjectTotalChars 是单回合注入正文总量的字符上限（按序保留）；
 	// 默认 65536，0/负数回退默认。
 	MentionInjectTotalChars int `yaml:"mention_inject_total_chars" mapstructure:"mention_inject_total_chars" env:"SKILLS_RUNTIME_MENTION_INJECT_TOTAL_CHARS"`
+	// SkillOutputWindowBytes 是 skill 函数结果的模型可见字节窗口（默认 32768）。
+	// 技能正文（尤其文本类技能：全部载荷就是正文本身）按此窗口进入模型历史；
+	// 超出部分由渲染层折叠，并通过 raw output 指针（artifact_read）按字节续读。
+	// 渲染层会把该值夹在 [通用工具结果层预算, 64 KiB] 区间内；0/负数回退默认。
+	SkillOutputWindowBytes int `yaml:"skill_output_window_bytes" mapstructure:"skill_output_window_bytes" env:"SKILLS_RUNTIME_SKILL_OUTPUT_WINDOW_BYTES"`
 	// MentionHideTextSkillFunctions 控制 P3 函数面收敛：开启后，交互式请求面
 	// 不再向模型暴露文本类（无 handler/workflow）技能的 `skill__<name>` 函数，
 	// 避免与 `$name` 正文注入形成双路径。显式函数路径不受影响：
@@ -1068,6 +1073,10 @@ const (
 	DefaultSkillMentionMultiLimit       = 4
 	DefaultSkillMentionInjectMaxChars   = 32768
 	DefaultSkillMentionInjectTotalChars = 65536
+
+	// DefaultSkillOutputWindowBytes 是 skill 结果模型可见窗口的默认值，与
+	// shell/view/grep 的自有窗口同档；渲染层上限（64 KiB）仍会兜底夹取。
+	DefaultSkillOutputWindowBytes = 32 * 1024
 )
 
 // MentionInjectionMode 返回规范化的提及注入模式：off|auto|on。
@@ -1123,6 +1132,15 @@ func (c *SkillsRuntimeConfig) MentionInjectTotalCharsValue() int {
 		return DefaultSkillMentionInjectTotalChars
 	}
 	return c.MentionInjectTotalChars
+}
+
+// SkillOutputWindowBytesValue 返回技能结果的模型可见窗口字节数；0/负数回退
+// 默认 32768。渲染层最终会把返回值夹在 [层预算, 64 KiB] 区间内。
+func (c *SkillsRuntimeConfig) SkillOutputWindowBytesValue() int {
+	if c == nil || c.SkillOutputWindowBytes <= 0 {
+		return DefaultSkillOutputWindowBytes
+	}
+	return c.SkillOutputWindowBytes
 }
 
 // MentionHideTextSkillFunctionsEnabled 报告交互式请求面是否隐藏文本类

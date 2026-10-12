@@ -168,6 +168,42 @@ func SkipsRenderTruncation(metadata map[string]interface{}) bool {
 // "tool_metadata".
 const MetadataModelVisibleBudgetKey = "model_visible_budget_bytes"
 
+// MetadataFoldRecoveryKey lets a tool declare how the model should recover the
+// tail the render layer omits when it folds the result.
+//
+// Paged tool families (view/grep/shell) can be re-issued with a narrower
+// window, which is the render layer's default hint. Static payloads — skill
+// instruction bodies are the first user — cannot be paged that way: a
+// re-issue returns the same document, so the raw-output pointer
+// (artifact_read) is the only way back to the omitted tail. Declaring
+// FoldRecoveryArtifactRead switches the fold notice's "next step" text
+// accordingly.
+//
+// The key may be set flat on the result metadata or nested inside
+// "tool_metadata".
+const MetadataFoldRecoveryKey = "fold_recovery"
+
+// FoldRecoveryArtifactRead is the MetadataFoldRecoveryKey value for static
+// payloads whose omitted tail can only be read back via artifact_read.
+const FoldRecoveryArtifactRead = "artifact_read"
+
+// FoldRecovery returns the declared fold-recovery mode ("" when undeclared).
+// Both a flat key and the nested tool_metadata map are honored.
+func FoldRecovery(metadata map[string]interface{}) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	if value, ok := metadata[MetadataFoldRecoveryKey].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if value, ok := nested[MetadataFoldRecoveryKey].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 // MetadataMatchCountScopeKey annotates the semantics of a tool's "match_count"
 // when the result is incomplete: the number is only what the tool observed
 // before it stopped reading/collecting, not the query's total.

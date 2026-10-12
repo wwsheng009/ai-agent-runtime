@@ -173,7 +173,7 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 	// header against the declared window let a batch lose a section whose
 	// ledger/dedup entries were already committed (2026-09-27 review H9).
 	declaredBudget := toolresult.ModelVisibleBudgetBytes(metadata)
-	return renderToolResultContract(body, diagnostic, effectiveModelToolTextBudget(metadata), declaredBudget > 0)
+	return renderToolResultContract(body, diagnostic, effectiveModelToolTextBudget(metadata), declaredBudget > 0, foldRecoveryFromMetadata(metadata))
 }
 
 func renderToolResultBodyForModel(content interface{}, toolErr string, envelope *Envelope) string {
@@ -236,7 +236,7 @@ func envelopeToolCallID(envelope *Envelope) string {
 	return envelope.ToolCallID
 }
 
-func renderToolResultContract(body string, diagnostic toolresult.Diagnostic, budget int, bodyOwnsBudget bool) string {
+func renderToolResultContract(body string, diagnostic toolresult.Diagnostic, budget int, bodyOwnsBudget bool, recovery foldRecovery) string {
 	if budget <= 0 {
 		budget = modelToolTextByteBudget
 	}
@@ -353,12 +353,12 @@ func renderToolResultContract(body string, diagnostic toolresult.Diagnostic, bud
 		}
 		bodyBudget := remaining - noticeBudget
 		if len(bodyCore) > bodyBudget {
-			bodyCore = formatTruncatedToolTextForModel(bodyCore, bodyBudget)
+			bodyCore = formatTruncatedToolTextForModelWithRecovery(bodyCore, bodyBudget, recovery)
 		}
 		return header + separator + appendToolArtifactNotice(bodyCore, artifactNotice)
 	}
 	if len(body) > remaining {
-		body = formatTruncatedToolTextForModel(body, remaining)
+		body = formatTruncatedToolTextForModelWithRecovery(body, remaining, recovery)
 	}
 	return header + separator + body
 }
@@ -655,6 +655,9 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 	// fold budget below then follows the tool's contract instead of the
 	// one-size-fits-all backstop.
 	budget := effectiveModelToolTextBudget(envelopeMetadata(envelope))
+	// 折叠恢复方式同样由工具声明：静态载荷（技能正文）只能从 raw output
+	// 指针按字节续读，而分页类工具可以缩小窗口重发。
+	recovery := foldRecoveryFromMetadata(envelopeMetadata(envelope))
 	// Controlled tool that already truncated its own output owns the final shape
 	// of its payload: it folded to its own limit, published continuation metadata
 	// (offset/limit/eof/artifact) and told the model how to page through the rest.
@@ -722,7 +725,7 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 	// next step" contract, so no artifact id is threaded through this path. The
 	// artifact notice (when one exists) is still appended below.
 	if notice == "" {
-		return foldToolTextForModel(full, budget, split)
+		return foldToolTextForModelWithRecovery(full, budget, split, recovery)
 	}
 	bodyBudget := budget - len(notice) - len("\n\n")
 	if split >= 0 {
@@ -735,13 +738,13 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 			// the leftover budget instead of the dropped head.
 			tailBytes := len(full) - split
 			return appendToolArtifactNotice(
-				foldToolTextForModel(full, tailBytes, split),
+				foldToolTextForModelWithRecovery(full, tailBytes, split, recovery),
 				safePrefixByBytes(notice, budget-tailBytes),
 			)
 		}
 		return safePrefixByBytes(notice, budget)
 	}
-	return appendToolArtifactNotice(foldToolTextForModel(full, bodyBudget, split), notice)
+	return appendToolArtifactNotice(foldToolTextForModelWithRecovery(full, bodyBudget, split, recovery), notice)
 }
 
 // reservedTailTrimSlack is how far the declared size may differ from the block
@@ -846,8 +849,14 @@ func blockClosesTail(tail string) bool {
 // block is re-attached verbatim - never folded, never summarized, never traded
 // for a recovery hint.
 func foldToolTextForModel(full string, budget int, split int) string {
+	return foldToolTextForModelWithRecovery(full, budget, split, foldRecoveryNarrower)
+}
+
+// foldToolTextForModelWithRecovery is foldToolTextForModel with an explicit
+// tail-recovery mode threaded into the emitted fold notice.
+func foldToolTextForModelWithRecovery(full string, budget int, split int, recovery foldRecovery) string {
 	if split < 0 {
-		return formatTruncatedToolTextForModel(full, budget)
+		return formatTruncatedToolTextForModelWithRecovery(full, budget, recovery)
 	}
 	body, tail := full[:split], full[split:]
 	bodyBudget := budget - len(tail)
@@ -857,7 +866,7 @@ func foldToolTextForModel(full string, budget int, split int) string {
 		}
 		return preservedTailNotice(len(body)) + tail
 	}
-	folded := formatTruncatedToolTextPreservingTail(body, bodyBudget)
+	folded := formatTruncatedToolTextPreservingTailWithRecovery(body, bodyBudget, recovery)
 	if folded == "" {
 		return tail
 	}
@@ -1064,12 +1073,66 @@ func appendToolArtifactNotice(body string, notice string) string {
 	}
 }
 
-// truncationMarker renders the head-only fold notice appended after the shown
-// lines. It names how many lines are visible, how many were dropped from the
-// end, and what the model should do next, so a folded result is never a dead
-// end. Both the emitted notice and the budget reserve go through this helper so
-// the charged bytes can never drift from the rendered bytes.
+// foldRecovery selects the "next step" line inside a head-only fold notice.
+// Paged tool families (view/grep/shell) can be re-issued with a narrower
+// window; static payloads (skill instruction bodies) can only be read back
+// through the raw-output pointer.
+type foldRecovery int
+
+const (
+	foldRecoveryNarrower foldRecovery = iota
+	foldRecoveryArtifactRead
+)
+
+// foldRecoveryFromMetadata maps a tool-declared fold-recovery declaration onto
+// the render-layer mode. Absent/unknown declarations keep the generic
+// narrower-window hint, so untouched tool families stay byte-identical.
+func foldRecoveryFromMetadata(metadata map[string]interface{}) foldRecovery {
+	if toolresult.FoldRecovery(metadata) == toolresult.FoldRecoveryArtifactRead {
+		return foldRecoveryArtifactRead
+	}
+	return foldRecoveryNarrower
+}
+
+// foldRecoveryNextStep is the concrete recovery instruction for a head-only
+// fold whose tail was dropped.
+func foldRecoveryNextStep(recovery foldRecovery) string {
+	if recovery == foldRecoveryArtifactRead {
+		return "\n[next step: this payload is a static document — a narrower re-issue cannot page it; " +
+			"read the omitted tail from the raw output pointer below via artifact_read(artifact_id=<id>, offset=<bytes>, limit=<bytes>); " +
+			"never pass that id to task_output]"
+	}
+	// Next-step guidance: the omitted tail is not reachable by re-issuing the
+	// identical call (it would fold the same way), so name the cheapest
+	// narrower-window recovery per tool family instead of leaving the model to
+	// guess or abandon the read.
+	return "\n[next step: re-issue the same call with a narrower window to read the omitted tail — " +
+		"view: offset=<next line, 0-based> plus a smaller limit; " +
+		"grep/shell: narrow the pattern, path or command output instead of repeating the identical call]"
+}
+
+// foldRecoveryPartialNextStep is the same guidance for a window that stops in
+// the middle of a line (a line offset cannot resume that cut).
+func foldRecoveryPartialNextStep(recovery foldRecovery) string {
+	if recovery == foldRecoveryArtifactRead {
+		return "\n[next step: this window stops mid-line — read the omitted bytes from the raw output pointer below " +
+			"via artifact_read(offset=<byte offset>) instead of repeating the identical call]"
+	}
+	return "\n[next step: this window stops mid-line, so a line offset cannot resume it — " +
+		"read the raw output pointer below by byte range (artifact_read with offset=<byte offset>) " +
+		"or re-issue a narrower call instead of repeating the identical one]"
+}
+
 func truncationMarker(shownLines, totalLines, omittedBytes int) string {
+	return truncationMarkerWithRecovery(shownLines, totalLines, omittedBytes, foldRecoveryNarrower)
+}
+
+// truncationMarkerWithRecovery renders the head-only fold notice appended after
+// the shown lines. It names how many lines are visible, how many were dropped
+// from the end, and what the model should do next, so a folded result is never
+// a dead end. Both the emitted notice and the budget reserve go through this
+// helper so the charged bytes can never drift from the rendered bytes.
+func truncationMarkerWithRecovery(shownLines, totalLines, omittedBytes int, recovery foldRecovery) string {
 	if shownLines < 0 {
 		shownLines = 0
 	}
@@ -1081,13 +1144,7 @@ func truncationMarker(shownLines, totalLines, omittedBytes int) string {
 		"\n\n[output truncated for history safety: showing the first %d of %d lines; omitted %d lines (%d bytes) from the end]",
 		shownLines, totalLines, omittedLines, omittedBytes,
 	)
-	// Next-step guidance: the omitted tail is not reachable by re-issuing the
-	// identical call (it would fold the same way), so name the cheapest
-	// narrower-window recovery per tool family instead of leaving the model to
-	// guess or abandon the read.
-	marker += "\n[next step: re-issue the same call with a narrower window to read the omitted tail — " +
-		"view: offset=<next line, 0-based> plus a smaller limit; " +
-		"grep/shell: narrow the pattern, path or command output instead of repeating the identical call]"
+	marker += foldRecoveryNextStep(recovery)
 	return marker + "\n\n"
 }
 
@@ -1097,14 +1154,20 @@ func truncationMarker(shownLines, totalLines, omittedBytes int) string {
 // totals, so digit-counting on the upper bound makes the reserve an exact
 // ceiling rather than a guess.
 func truncationMarkerReserve(totalLines, totalBytes int) int {
+	return truncationMarkerReserveWithRecovery(totalLines, totalBytes, foldRecoveryNarrower)
+}
+
+// truncationMarkerReserveWithRecovery is truncationMarkerReserve for a given
+// recovery mode so the reserved bytes never drift from the rendered notice.
+func truncationMarkerReserveWithRecovery(totalLines, totalBytes int, recovery foldRecovery) int {
 	if totalLines < 0 {
 		totalLines = 0
 	}
 	if totalBytes < 0 {
 		totalBytes = 0
 	}
-	reserve := len(truncationMarker(totalLines, totalLines, totalBytes))
-	if partial := len(truncationMarkerPartial(totalLines, totalBytes, totalBytes)); partial > reserve {
+	reserve := len(truncationMarkerWithRecovery(totalLines, totalLines, totalBytes, recovery))
+	if partial := len(truncationMarkerPartialWithRecovery(totalLines, totalBytes, totalBytes, recovery)); partial > reserve {
 		reserve = partial
 	}
 	return reserve
@@ -1118,6 +1181,12 @@ func truncationMarkerReserve(totalLines, totalBytes int) int {
 // the shown lines, the shown bytes of the cut line, and points at byte-range
 // recovery instead.
 func truncationMarkerPartial(completeLines, partialBytes, omittedBytes int) string {
+	return truncationMarkerPartialWithRecovery(completeLines, partialBytes, omittedBytes, foldRecoveryNarrower)
+}
+
+// truncationMarkerPartialWithRecovery is truncationMarkerPartial for a given
+// recovery mode.
+func truncationMarkerPartialWithRecovery(completeLines, partialBytes, omittedBytes int, recovery foldRecovery) string {
 	if completeLines < 0 {
 		completeLines = 0
 	}
@@ -1131,9 +1200,7 @@ func truncationMarkerPartial(completeLines, partialBytes, omittedBytes int) stri
 		"\n\n[output truncated for history safety: showing %d complete lines plus the first %d bytes of line %d; omitted %d bytes from the end]",
 		completeLines, partialBytes, completeLines+1, omittedBytes,
 	)
-	marker += "\n[next step: this window stops mid-line, so a line offset cannot resume it — " +
-		"read the raw output pointer below by byte range (artifact_read with offset=<byte offset>) " +
-		"or re-issue a narrower call instead of repeating the identical one]"
+	marker += foldRecoveryPartialNextStep(recovery)
 	return marker + "\n\n"
 }
 
@@ -1158,15 +1225,33 @@ const (
 // middle of the text cannot be paged by the model, while a "first N lines +
 // next step" contract can.
 func formatTruncatedToolTextForModel(content string, budget int) string {
-	return foldToolTextWindow(content, budget, tailDropped)
+	return formatTruncatedToolTextForModelWithRecovery(content, budget, foldRecoveryNarrower)
+}
+
+// formatTruncatedToolTextForModelWithRecovery is
+// formatTruncatedToolTextForModel with an explicit recovery mode.
+func formatTruncatedToolTextForModelWithRecovery(content string, budget int, recovery foldRecovery) string {
+	return foldToolTextWindowWithRecovery(content, budget, tailDropped, recovery)
 }
 
 // formatTruncatedToolTextPreservingTail is the same window under tailPreserved.
 func formatTruncatedToolTextPreservingTail(content string, budget int) string {
-	return foldToolTextWindow(content, budget, tailPreserved)
+	return formatTruncatedToolTextPreservingTailWithRecovery(content, budget, foldRecoveryNarrower)
+}
+
+// formatTruncatedToolTextPreservingTailWithRecovery is
+// formatTruncatedToolTextPreservingTail with an explicit recovery mode.
+func formatTruncatedToolTextPreservingTailWithRecovery(content string, budget int, recovery foldRecovery) string {
+	return foldToolTextWindowWithRecovery(content, budget, tailPreserved, recovery)
 }
 
 func foldToolTextWindow(content string, budget int, policy tailPolicy) string {
+	return foldToolTextWindowWithRecovery(content, budget, policy, foldRecoveryNarrower)
+}
+
+// foldToolTextWindowWithRecovery is foldToolTextWindow with an explicit fold
+// notice recovery mode.
+func foldToolTextWindowWithRecovery(content string, budget int, policy tailPolicy, recovery foldRecovery) string {
 	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
 	if content == "" || budget <= 0 || len(content) <= budget {
 		return content
@@ -1187,7 +1272,7 @@ func foldToolTextWindow(content string, budget int, policy tailPolicy) string {
 	// The budget is a hard ceiling: header + shown head + notice must never
 	// exceed it. Reserve the header and the (exact, upper-bound) notice first,
 	// then spend whatever remains on the head.
-	bodyBudget := budget - len(header) - foldNoticeReserve(policy, totalLines, totalBytes)
+	bodyBudget := budget - len(header) - foldNoticeReserveWithRecovery(policy, totalLines, totalBytes, recovery)
 	if bodyBudget <= 0 {
 		return safePrefixByBytes(content, budget)
 	}
@@ -1205,7 +1290,7 @@ func foldToolTextWindow(content string, budget int, policy tailPolicy) string {
 		if policy == tailPreserved {
 			return header + head + preservedTailWindowNotice(countShownLines(head)-1, totalLines, omittedBytes, partialBytes)
 		}
-		return header + head + truncationMarkerPartial(countShownLines(head)-1, partialBytes, omittedBytes)
+		return header + head + truncationMarkerPartialWithRecovery(countShownLines(head)-1, partialBytes, omittedBytes, recovery)
 	}
 	shownLines := countShownLines(head)
 	if shownLines > totalLines {
@@ -1214,17 +1299,22 @@ func foldToolTextWindow(content string, budget int, policy tailPolicy) string {
 	if policy == tailPreserved {
 		return header + head + preservedTailWindowNotice(shownLines, totalLines, omittedBytes, 0)
 	}
-	return header + head + truncationMarker(shownLines, totalLines, omittedBytes)
+	return header + head + truncationMarkerWithRecovery(shownLines, totalLines, omittedBytes, recovery)
 }
 
 // foldNoticeReserve is the exact byte ceiling the fold notice for this policy
 // can occupy. It is reserved before the head is cut so the rendered notice can
 // never push the window past the budget.
 func foldNoticeReserve(policy tailPolicy, totalLines, totalBytes int) int {
+	return foldNoticeReserveWithRecovery(policy, totalLines, totalBytes, foldRecoveryNarrower)
+}
+
+// foldNoticeReserveWithRecovery is foldNoticeReserve for a given recovery mode.
+func foldNoticeReserveWithRecovery(policy tailPolicy, totalLines, totalBytes int, recovery foldRecovery) int {
 	if policy == tailPreserved {
 		return preservedTailWindowNoticeReserve(totalLines, totalBytes)
 	}
-	return truncationMarkerReserve(totalLines, totalBytes)
+	return truncationMarkerReserveWithRecovery(totalLines, totalBytes, recovery)
 }
 
 // headLinesWithinBudget keeps the longest prefix of content that fits maxBytes,

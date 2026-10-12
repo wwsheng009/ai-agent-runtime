@@ -21,6 +21,7 @@ import (
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -35,6 +36,12 @@ const (
 	skillExposureOnly     = "only"
 	aicliExecToolName     = "aicli_exec"
 	directBridgeTimeout   = "2m"
+	// skillModelVisibleBudgetBytes 是 skill 函数结果的默认模型可见窗口。技能
+	// 正文（尤其文本类技能：全部载荷就是正文本身）不应被工具结果通用回退预算
+	// （12 KiB 层预算）折叠；该默认值可由 skills_runtime.skill_output_window_bytes
+	// 覆盖。渲染层会把声明值夹在 [层预算, 64 KiB 上限] 区间内；超过窗口的部分
+	// 由渲染层折叠，并按 fold_recovery=artifact_read 提示用 artifact_read 续读。
+	skillModelVisibleBudgetBytes = config.DefaultSkillOutputWindowBytes
 	// skillsRuntimeRefreshDebounce 合并连续热加载事件（一次安装通常产生
 	// mkdir + 多个文件事件），避免函数面被重复重建。
 	skillsRuntimeRefreshDebounce = 300 * time.Millisecond
@@ -439,6 +446,9 @@ type SkillFunction struct {
 	historyProvider  func() []runtimetypes.Message
 	contextProvider  func() map[string]interface{}
 	metadataProvider func() runtimetypes.Metadata
+	// skillOutputWindow 解析本会话 skills_runtime.skill_output_window_bytes；
+	// 未接线或返回 0 时 ExecuteWithMeta 回退 skillModelVisibleBudgetBytes。
+	skillOutputWindow func() int
 	schema           map[string]interface{}
 	// invocationPublisher 把技能调用发布到本地 runtime 总线（SK-3 观测）；
 	// nil 时退化为结构化日志（宿主尚未建立 EventBus 的场景）。
@@ -773,6 +783,30 @@ func (f *SkillFunction) Execute(ctx context.Context, args map[string]interface{}
 	}
 
 	return result.Output, nil
+}
+
+// ExecuteWithMeta 实现 functions.FunctionWithMetadata：技能函数在返回正文的
+// 同时声明模型可见窗口与折叠恢复方式，让超出通用预算的文本类技能正文按
+// skills_runtime.skill_output_window_bytes 完整进入历史；真正超出窗口的部分
+// 由渲染层折叠，并按 fold_recovery=artifact_read 提示用 artifact_read 续读。
+func (f *SkillFunction) ExecuteWithMeta(ctx context.Context, args map[string]interface{}) (string, map[string]interface{}, error) {
+	output, err := f.Execute(ctx, args)
+	window := skillModelVisibleBudgetBytes
+	if f.skillOutputWindow != nil {
+		if configured := f.skillOutputWindow(); configured > 0 {
+			window = configured
+		}
+	}
+	return output, map[string]interface{}{
+		toolresult.MetadataModelVisibleBudgetKey: window,
+		toolresult.MetadataFoldRecoveryKey:       toolresult.FoldRecoveryArtifactRead,
+	}, err
+}
+
+// skillOutputWindowBytesForConfig 解析 skills_runtime.skill_output_window_bytes；
+// 未配置回退默认（32 KiB）。渲染层最终会把声明值夹在 [层预算, 64 KiB] 区间内。
+func skillOutputWindowBytesForConfig(cfg *config.Config) int {
+	return skillRuntimeConfig(cfg).SkillOutputWindowBytesValue()
 }
 
 // skillUsesDefaultExecution reports whether the skill is executed by the LLM
@@ -1352,6 +1386,7 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 			metadataProvider: func() runtimetypes.Metadata {
 				return buildSkillMetadata(session, skillName, functionName, sourcePath)
 			},
+			skillOutputWindow:   func() int { return skillOutputWindowBytesForConfig(session.Config) },
 			invocationPublisher: newSkillInvocationPublisher(session),
 		}
 		fn.schema = map[string]interface{}{

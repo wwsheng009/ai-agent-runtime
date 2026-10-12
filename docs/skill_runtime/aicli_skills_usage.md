@@ -316,6 +316,9 @@ go run ./cmd/aicli chat --provider nvidia --no-interactive --skills-top-k 1 --sk
 - 跨回合：注入是 prompt-only 上下文，不写入会话持久历史；下一回合不会自动携带，需要再次提及。
 - 与 `/skill` 的关系：`/skill <name>`（回合 pin + 技能函数/程序）保持现状；`$name` 只注入文本类技能正文，
   不扩权、不改变工具面；handler/workflow 技能被 `$` 提及会被忽略并记录诊断（仍可用 `/skill` 或 `/call`）。
+- `/skill` 正文加载窗口：`skill__<name>` 函数结果按 `skills_runtime.skill_output_window_bytes`（默认 32 KiB）进入
+  模型历史；超出窗口的尾部由渲染层折叠，并提示用 `artifact_read` 从 raw output 指针续读。渲染层最终把该值
+  夹在 [通用工具结果层预算 12 KiB, 64 KiB] 区间内。
 - 失败与预算：单技能正文超过 32K 字符截断；整回合注入总量 64K 字符封顶；读取失败跳过并提示，不阻断回合。
 - 协议稳定性：注入内容先进入**抽象指令层**（scope=session/turn），由协议适配器统一转换到
   OpenAI/Anthropic/Gemini/Codex 的等价形态（见方案 §4.12）。
@@ -328,6 +331,7 @@ skills_runtime:
   mention_multi_limit: 4            # 单回合最多注入的文本技能数
   mention_inject_max_chars: 32768   # 单技能正文上限
   mention_inject_total_chars: 65536 # 回合注入总量上限
+  skill_output_window_bytes: 32768  # /skill 技能正文（工具结果）模型可见窗口；默认 32768，渲染层夹在 [12 KiB, 64 KiB]
   mention_hide_text_skill_functions: true # P3 默认 on：交互请求面隐藏文本类 skill__ 函数；显式 false 回退
   catalog_resident: true            # 常驻技能目录（2026-10-03 起默认 on；显式 false 关闭）
 ```
