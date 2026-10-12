@@ -26,6 +26,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/audit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/device"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ntfy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ratelimit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
@@ -219,6 +220,9 @@ func run() int {
 		banTTL         = flag.Duration("ban-ttl", 10*time.Minute, "auto-ban duration")
 		metricsToken   = flag.String("metrics-token", "", "bearer token for /metrics; empty allows loopback only")
 		pushEnabled    = flag.Bool("push-enabled", true, "enable Web Push notifications (VAPID + RFC 8291)")
+		ntfyURL        = flag.String("ntfy-url", "", "ntfy server base URL for the secondary notification channel (empty disables), e.g. https://ntfy.sh")
+		ntfyTopic      = flag.String("ntfy-topic", "", "ntfy topic to publish notifications to (required with --ntfy-url)")
+		ntfyToken      = flag.String("ntfy-token", "", "ntfy access token (Bearer) for protected topics; prefer the --config flagfile for secrets")
 		vapidSubject   = flag.String("vapid-subject", "mailto:gateway@localhost", "VAPID JWT subject (mailto: or https:)")
 		presenceTTL    = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
 		coalesceWindow = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
@@ -341,6 +345,15 @@ func run() int {
 	}
 	presence := newPresenceRegistry(*presenceTTL)
 	notifier := newPushNotifier(pushManager, *publicBaseURL, presence)
+	ntfySender := ntfy.NewSender(*ntfyURL, *ntfyTopic, *ntfyToken)
+	if *ntfyURL != "" && !ntfySender.Enabled() {
+		fmt.Fprintln(os.Stderr, "gateway: --ntfy-url requires --ntfy-topic (and a valid base URL)")
+		return 1
+	}
+	notifier.ntfy = ntfySender
+	if ntfySender.Enabled() {
+		fmt.Fprintf(os.Stderr, "gateway: ntfy channel enabled: %s topic=%s\n", strings.TrimRight(*ntfyURL, "/"), ntfySender.Topic())
+	}
 	quietRanges, quietErr := parseQuietHours(*quietHours)
 	if quietErr != nil {
 		fmt.Fprintf(os.Stderr, "gateway: invalid --notify-quiet-hours: %v\n", quietErr)
@@ -666,10 +679,11 @@ func run() int {
 		writeJSON(w, http.StatusOK, map[string]any{"unbanned": ip})
 	})))
 	// Web Push (owner-protected): VAPID config, subscription management, test send.
-	router.Handle("/api/push/config", owner.RequireSession(handlePushConfig(pushManager))).Methods(http.MethodGet)
+	// ntfy rides along as the secondary channel on the same endpoints.
+	router.Handle("/api/push/config", owner.RequireSession(handlePushConfig(pushManager, ntfySender))).Methods(http.MethodGet)
 	router.Handle("/api/push/subscriptions", owner.RequireSession(handlePushSubscriptions(pushManager)))
 	router.Handle("/api/push/unsubscribe", owner.RequireSession(handlePushUnsubscribe(pushManager)))
-	router.Handle("/api/push/test", owner.RequireSession(handlePushTest(pushManager)))
+	router.Handle("/api/push/test", owner.RequireSession(handlePushTest(pushManager, ntfySender)))
 	// Presence: the console reports the session it is viewing so the gateway can
 	// suppress push notifications for it (docs/gateway/08-notifications.md §5.4).
 	router.Handle("/api/presence", owner.RequireSession(handlePresence(presence))).Methods(http.MethodPost)

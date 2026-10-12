@@ -342,8 +342,21 @@ ACME（Let's Encrypt，http-01）与按 Host 路由都在 Edge 侧完成；控�
 网关侧：`aicli-gateway.service` 需带 `--public-base-url https://aicli.ttai.online`
 （Web Push 点击深链由此生成），改后 `systemctl daemon-reload && systemctl restart aicli-gateway`。
 
+**通知通道（Web Push + ntfy）**：Web Push 之外可选第二通道 ntfy：
+`--ntfy-url https://ntfy.sh --ntfy-topic <topic> [--ntfy-token tk_…]`（token 建议放 `--config` flagfile）。
+高优先（approval/question/error）→ `priority=5` + `warning` 标签，其余 `priority=3`；点击打开对应会话。
+`POST /api/push/test` 返回 `channels.webpush / channels.ntfy` 明细；控制台"发送测试通知"会展示各通道结果。
+自建 ntfy（如 `ntfy.wwsheng.online`）需保证网关服务器可解析/访问，否则用 `ntfy.sh` + 随机 topic。
+
+**edge 配置变更纪律**（2026-10-12 事故教训）：
+1. 改完先 `cd /opt/ai-gateway-edge && ./bin/gateway-edge configtest -c configs/config.yaml` 再重启；
+   YAML 缩进错误（如 `acme:` 子键被拉到 `tls:` 同级）会导致重复键 → 崩溃循环、全站 521；
+2. `configs/.env` 必须保持 `root:ai-gateway-edge` + `0640`：
+   改成 `0600` 后服务用户读不到 `GATEWAY_EDGE_UPLOAD_TOKEN`，启动即 "resumable_upload.token is required"；
+3. ACME 生产域名不要切到 staging CA / `acme-wildcard-staging` 存储，除非确认 CF 回源为 Full（非 strict）。
+
 **发布（含缓存）**：Cloudflare 会按扩展名缓存 `*.js`/`*.css` 4 小时（HTML/manifest 默认不缓存）。
-因此每次发布必须同步 bump 控制台资源版本（当前 `v=31`）：
+因此每次发布必须同步 bump 控制台资源版本（当前 `v=34`）：
 `console/index.html` 的 `app.js?v=`/`style.css?v=`、`console/sw.js` 的 `CACHE` 与 `SHELL`、
 `console/app.js` 里 `serviceWorker.register("./sw.js?v=")`；否则手机端会继续拿到旧 JS，
 直到 CF TTL（4h）过期或手动 purge。发布步骤：`GOOS=linux GOARCH=amd64 go build -trimpath -o gateway ./cmd/gateway`

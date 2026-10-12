@@ -4,12 +4,14 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ntfy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
@@ -80,7 +82,7 @@ func TestPushNotifierObserve(t *testing.T) {
 
 func TestPushConfigHandler(t *testing.T) {
 	rr := httptest.NewRecorder()
-	handlePushConfig(nil)(rr, httptest.NewRequest(http.MethodGet, "/api/push/config", nil))
+	handlePushConfig(nil, nil)(rr, httptest.NewRequest(http.MethodGet, "/api/push/config", nil))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"enabled":false`) {
 		t.Fatalf("disabled config = %d %s", rr.Code, rr.Body.String())
 	}
@@ -89,7 +91,7 @@ func TestPushConfigHandler(t *testing.T) {
 	store, _ := push.OpenStore("")
 	manager := push.NewManager(store, vapid, "mailto:a@b.c")
 	rr2 := httptest.NewRecorder()
-	handlePushConfig(manager)(rr2, httptest.NewRequest(http.MethodGet, "/api/push/config", nil))
+	handlePushConfig(manager, nil)(rr2, httptest.NewRequest(http.MethodGet, "/api/push/config", nil))
 	if rr2.Code != http.StatusOK || !strings.Contains(rr2.Body.String(), `"public_key":"`) {
 		t.Fatalf("enabled config = %d %s", rr2.Code, rr2.Body.String())
 	}
@@ -154,5 +156,99 @@ func waitHit(ch chan struct{}, d time.Duration) bool {
 		return true
 	case <-time.After(d):
 		return false
+	}
+}
+
+func TestNtfyMessagePriorityMapping(t *testing.T) {
+	high := ntfyMessage(push.Notification{Title: "t", Body: "b", Urgency: "high", URL: "https://gw/x"})
+	if high.Priority != ntfy.PriorityMax || len(high.Tags) != 1 || high.Tags[0] != "warning" {
+		t.Fatalf("high priority mapping = %+v", high)
+	}
+	normal := ntfyMessage(push.Notification{Title: "t", Body: "b", Urgency: "normal"})
+	if normal.Priority != ntfy.PriorityDefault {
+		t.Fatalf("normal priority mapping = %+v", normal)
+	}
+}
+
+// ntfy works even when Web Push is disabled: the notifier must still observe
+// attention changes and publish to the secondary channel.
+func TestPushNotifierFansOutToNtfyWithoutWebPush(t *testing.T) {
+	deliveries := make(chan map[string]any, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		deliveries <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := newPushNotifier(nil, "https://gw.example.com", nil)
+	n.ntfy = ntfy.NewSender(srv.URL, "aicli-gateway", "")
+	if !n.ntfyEnabled() {
+		t.Fatal("ntfy should be enabled")
+	}
+	n.observe([]*tunnel.Node{{
+		NodeID:   "n1",
+		Name:     "laptop",
+		Sessions: []wire.SessionSummary{{SessionID: "s1", Title: "A", Attention: "approval"}},
+	}})
+	select {
+	case got := <-deliveries:
+		if got["topic"] != "aicli-gateway" || got["priority"] != float64(5) {
+			t.Fatalf("ntfy payload = %v", got)
+		}
+		if got["click"] != "https://gw.example.com/n/n1/?session=s1" {
+			t.Fatalf("click = %v", got["click"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected an ntfy delivery")
+	}
+}
+
+func TestPushTestHandlerReportsChannels(t *testing.T) {
+	deliveries := make(chan map[string]any, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		deliveries <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	rr := httptest.NewRecorder()
+	handlePushTest(nil, ntfy.NewSender(srv.URL, "topic-a", ""))(rr, httptest.NewRequest(http.MethodPost, "/api/push/test", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Delivered int `json:"delivered"`
+		Channels  struct {
+			Webpush map[string]any `json:"webpush"`
+			Ntfy    map[string]any `json:"ntfy"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Channels.Webpush["enabled"] != false {
+		t.Fatalf("webpush should be disabled: %v", body.Channels.Webpush)
+	}
+	if body.Channels.Ntfy["delivered"] != float64(1) || body.Channels.Ntfy["topic"] != "topic-a" {
+		t.Fatalf("ntfy result = %v", body.Channels.Ntfy)
+	}
+	select {
+	case got := <-deliveries:
+		if got["title"] != "aicli-gateway" || got["priority"] != float64(5) {
+			t.Fatalf("test payload = %v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the test notification on ntfy")
+	}
+
+	// Fully disabled: still 503 for backwards compatibility.
+	rr2 := httptest.NewRecorder()
+	handlePushTest(nil, nil)(rr2, httptest.NewRequest(http.MethodPost, "/api/push/test", nil))
+	if rr2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled status = %d", rr2.Code)
 	}
 }

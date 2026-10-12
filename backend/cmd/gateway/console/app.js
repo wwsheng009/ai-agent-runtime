@@ -2183,6 +2183,26 @@
       pushTest.textContent = "发送中…";
       apiJSON("/api/push/test", { method: "POST" }).then(function (r) {
         if (!r.res.ok) { throw new Error("HTTP " + r.res.status); }
+        var ch = r.body && r.body.channels;
+        if (ch) {
+          var parts = [];
+          var ok = true;
+          var wp = ch.webpush || {};
+          if (wp.enabled) {
+            var wd = wp.delivered || 0, wm = wp.subscriptions || 0;
+            parts.push("Web Push " + wd + "/" + wm);
+            if (wd === 0) { ok = false; }
+          } else {
+            parts.push("Web Push 未启用");
+          }
+          var nf = ch.ntfy || {};
+          if (nf.enabled) {
+            if (nf.delivered) { parts.push("ntfy 已投递" + (nf.topic ? "（" + nf.topic + "）" : "")); }
+            else { parts.push("ntfy 失败" + (nf.error ? "：" + nf.error : "")); ok = false; }
+          }
+          notify("测试通知：" + parts.join("；") + (ok ? "" : "。请检查对应通道配置。"), ok ? "ok" : "error");
+          return;
+        }
         var delivered = (r.body && r.body.delivered) || 0;
         var total = (r.body && r.body.subscriptions) || 0;
         if (total === 0) {
@@ -2460,7 +2480,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=33").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=34").catch(function () {});
     });
   }
 

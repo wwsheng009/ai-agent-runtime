@@ -4,12 +4,12 @@
 // Cache-busting version: bump together with the ?v= query in index.html and
 // the register() URL in app.js on every release (Cloudflare edge-caches
 // *.js/*.css for 4h, so a new URL is what makes the update land immediately).
-const CACHE = "aicli-gateway-shell-v33";
+const CACHE = "aicli-gateway-shell-v34";
 const SHELL = [
   "./",
   "./index.html",
-  "./app.js?v=33",
-  "./style.css?v=33",
+  "./app.js?v=34",
+  "./style.css?v=34",
   "./manifest.webmanifest",
   "./icon.svg",
   "./icon-192.png",
@@ -46,6 +46,21 @@ self.addEventListener("fetch", (event) => {
     url.pathname.indexOf("/gw/") !== -1 ||
     url.pathname.indexOf("/n/") !== -1
   ) {
+    return;
+  }
+  // Navigations are network-first: the HTML decides which versioned ?v= assets
+  // load, so pinning a cached copy would freeze releases behind the CDN cache
+  // (the previous cache-first policy needed a manual CF purge after each deploy).
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => {});
+          return response;
+        })
+        .catch(() => caches.match(request).then((cached) => cached || caches.match("./"))),
+    );
     return;
   }
   event.respondWith(

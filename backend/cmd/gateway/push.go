@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ntfy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 )
@@ -24,6 +25,9 @@ type pushNotifier struct {
 	mu      sync.Mutex
 	seen    map[string]string // "nodeID|sessionID" -> last attention value
 	manager *push.Manager
+	// ntfy is the secondary channel (nil when disabled). Web Push and ntfy are
+	// independent: ntfy still fires when no browser has subscribed.
+	ntfy    *ntfy.Sender
 	baseURL string
 	// presence suppresses pushes for sessions a console client is watching.
 	presence *presenceRegistry
@@ -82,7 +86,7 @@ type pendingNotification struct {
 // observe diffs the current attention states against the previous snapshot and
 // notifies for each newly-attentive session.
 func (p *pushNotifier) observe(nodes []*tunnel.Node) {
-	if p == nil || p.manager == nil {
+	if p == nil || (p.manager == nil && !p.ntfyEnabled()) {
 		return
 	}
 	p.mu.Lock()
@@ -167,14 +171,34 @@ func (p *pushNotifier) flush() {
 	p.dispatch(out)
 }
 
+// ntfyEnabled reports whether the secondary channel is configured.
+func (p *pushNotifier) ntfyEnabled() bool {
+	return p != nil && p.ntfy != nil && p.ntfy.Enabled()
+}
+
+// ntfyMessage maps a push notification onto the ntfy channel: high-priority
+// attention becomes max-priority ("urgent") with a warning tag, everything
+// else keeps the default priority.
+func ntfyMessage(n push.Notification) ntfy.Message {
+	priority := ntfy.PriorityDefault
+	tags := []string{"white_check_mark"}
+	if n.Urgency == "high" {
+		priority = ntfy.PriorityMax
+		tags = []string{"warning"}
+	}
+	return ntfy.Message{Title: n.Title, Body: n.Body, URL: n.URL, Priority: priority, Tags: tags}
+}
+
 // dispatch delivers notifications asynchronously so the registry callback never
-// blocks on the push services.
+// blocks on the push services. Every configured channel gets the notification;
+// one failing channel does not suppress the others.
 func (p *pushNotifier) dispatch(notes []push.Notification) {
 	if len(notes) == 0 {
 		return
 	}
 	manager := p.manager
-	if manager.Store().Count() == 0 {
+	ntfySender := p.ntfy
+	if manager != nil && manager.Store().Count() == 0 && !(ntfySender != nil && ntfySender.Enabled()) {
 		// Without subscribers the loop below silently delivers nothing, which
 		// looks like "notifications never fire". Make that state visible.
 		log.Printf("push: %d notification(s) ready but no device is subscribed; open %s and enable notifications", len(notes), p.baseURL)
@@ -183,7 +207,14 @@ func (p *pushNotifier) dispatch(notes []push.Notification) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		for _, n := range notes {
-			manager.Broadcast(ctx, n)
+			if manager != nil {
+				manager.Broadcast(ctx, n)
+			}
+			if ntfySender != nil && ntfySender.Enabled() {
+				if err := ntfySender.Send(ctx, ntfyMessage(n)); err != nil {
+					log.Printf("ntfy: delivery failed (topic %s): %v", ntfySender.Topic(), err)
+				}
+			}
 		}
 	}()
 }
@@ -230,16 +261,21 @@ func applyDeliveryPolicy(note *push.Notification, attention string) {
 }
 
 // handlePushConfig returns the VAPID public key so the service worker can
-// subscribe.
-func handlePushConfig(manager *push.Manager) http.HandlerFunc {
+// subscribe, plus which secondary channels are available.
+func handlePushConfig(manager *push.Manager, ntfySender *ntfy.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ntfyEnabled := ntfySender != nil && ntfySender.Enabled()
 		if manager == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+			writeJSON(w, http.StatusOK, map[string]any{
+				"enabled": false,
+				"ntfy":    map[string]any{"enabled": ntfyEnabled, "topic": ntfySender.Topic()},
+			})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"enabled":    true,
 			"public_key": manager.PublicKey(),
+			"ntfy":       map[string]any{"enabled": ntfyEnabled, "topic": ntfySender.Topic()},
 		})
 	}
 }
@@ -314,10 +350,13 @@ func handlePushUnsubscribe(manager *push.Manager) http.HandlerFunc {
 	}
 }
 
-// handlePushTest sends a test notification to every subscription.
-func handlePushTest(manager *push.Manager) http.HandlerFunc {
+// handlePushTest sends a test notification through every configured channel.
+// The legacy top-level delivered/subscriptions fields still describe Web Push;
+// the channels map reports each channel separately.
+func handlePushTest(manager *push.Manager, ntfySender *ntfy.Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if manager == nil {
+		ntfyEnabled := ntfySender != nil && ntfySender.Enabled()
+		if manager == nil && !ntfyEnabled {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "push disabled"})
 			return
 		}
@@ -327,11 +366,34 @@ func handlePushTest(manager *push.Manager) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		delivered := manager.Broadcast(ctx, push.Notification{
-			Title: "aicli-gateway",
-			Body:  "Test notification",
-			Tag:   "test",
+
+		note := push.Notification{
+			Title:   "aicli-gateway",
+			Body:    "Test notification",
+			Tag:     "test",
+			Urgency: "high",
+			TTL:     10 * time.Minute,
+		}
+		webpush := map[string]any{"enabled": manager != nil}
+		delivered := 0
+		if manager != nil {
+			delivered = manager.Broadcast(ctx, note)
+			webpush["delivered"] = delivered
+			webpush["subscriptions"] = manager.Store().Count()
+		}
+		ntfyResult := map[string]any{"enabled": ntfyEnabled, "topic": ntfySender.Topic()}
+		if ntfyEnabled {
+			if err := ntfySender.Send(ctx, ntfyMessage(note)); err != nil {
+				ntfyResult["delivered"] = 0
+				ntfyResult["error"] = err.Error()
+			} else {
+				ntfyResult["delivered"] = 1
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"delivered":     delivered,
+			"subscriptions": pushSubscriptionCount(manager),
+			"channels":      map[string]any{"webpush": webpush, "ntfy": ntfyResult},
 		})
-		writeJSON(w, http.StatusOK, map[string]any{"delivered": delivered, "subscriptions": manager.Store().Count()})
 	}
 }
