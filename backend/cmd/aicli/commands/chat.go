@@ -1012,23 +1012,54 @@ func selectProvider(cfg *config.Config) string {
 	return selectProviderWithReader(cfg, newTrackedStdinReader())
 }
 
+// chatStartupProviderCreateRowTitle is the leading row of the startup
+// provider picker: it routes into the interactive login flow (template-based
+// or fully-custom) instead of selecting an existing provider.
+const chatStartupProviderCreateRowTitle = "＋ 新建 provider（登录/创建，可使用 preset 模板）"
+
+// chatStartupProviderCreateName is the sentinel returned by the picker when
+// the create row is confirmed. It must never collide with a real provider
+// name (provider names cannot contain this control prefix).
+const chatStartupProviderCreateName = "\x00__create__"
+
 func selectProviderWithReader(cfg *config.Config, reader *bufio.Reader) string {
 	// Prefer the /provider-style searchable full-screen picker (fuzzy search,
 	// arrow navigation) when the terminal supports it; fall back to the
 	// numbered list for pipes/redirects where the alternate-screen UI is
 	// unavailable.
-	if selected, ok := selectProviderFullScreen(cfg); ok {
-		return selected
+	selected, choseCreate := selectProviderStartup(cfg, reader)
+	if choseCreate {
+		loggedIn, err := runStartupProviderLogin(cfg, reader, "")
+		if err != nil {
+			if isChatLoginCancelError(err) {
+				return ""
+			}
+			printChatSelectionWarning("provider 登录失败: %s", err.Error())
+			return ""
+		}
+		return loggedIn
 	}
-	return selectProviderWithReaderNumeric(cfg, reader)
+	return selected
 }
 
-// selectProviderFullScreen runs the searchable full-screen provider picker —
-// the same interaction the typed /provider command offers. It returns
-// (provider, true) after the user confirms a row, and (_, false) when the
-// full-screen UI is unavailable, no provider is enabled, or the user cancels,
-// so the caller can fall back to the numbered prompt.
-func selectProviderFullScreen(cfg *config.Config) (string, bool) {
+// selectProviderStartup runs the startup picker with the leading create row
+// and pending-login routing. It returns (providerName, choseCreate): when
+// choseCreate is true the caller must run the login flow; otherwise the
+// returned name is an existing provider (or empty on cancel). Pending-login
+// rows route into the login flow too (choseCreate=true, but the login flow
+// targets that provider).
+func selectProviderStartup(cfg *config.Config, reader *bufio.Reader) (string, bool) {
+	name, choseCreate := selectProviderStartupFullScreen(cfg)
+	if choseCreate {
+		return name, true
+	}
+	if name != "" {
+		return name, false
+	}
+	return selectProviderStartupNumeric(cfg, reader)
+}
+
+func selectProviderStartupFullScreen(cfg *config.Config) (string, bool) {
 	if cfg == nil {
 		return "", false
 	}
@@ -1055,15 +1086,35 @@ func selectProviderFullScreen(cfg *config.Config) (string, bool) {
 	if err != nil || result.Cancelled || result.Index < 0 || result.Index >= len(items) {
 		return "", false
 	}
-	return strings.TrimSpace(items[result.Index].Title), true
+	selected := strings.TrimSpace(items[result.Index].Title)
+	if selected == chatStartupProviderCreateRowTitle {
+		return chatStartupProviderCreateName, true
+	}
+	if provider, ok := cfg.Providers.Items[selected]; ok && providerNeedsLogin(provider) {
+		// Pending-login provider: run the login flow for it, then confirm.
+		loggedIn, err := runStartupProviderLogin(cfg, nil, selected)
+		if err != nil {
+			printChatSelectionWarning("provider 登录失败: %s", err.Error())
+			return "", false
+		}
+		return loggedIn, false
+	}
+	return selected, false
 }
 
 // buildStartupProviderPickerItems projects the enabled providers into
 // searchable full-screen rows, mirroring the numbered list's descriptions so
-// search matches names, protocols, hosts and default models.
+// search matches names, protocols, hosts and default models. A leading
+// create row always exists (even with zero providers) so the first-startup
+// empty state routes into the login flow instead of dead-ending.
 func buildStartupProviderPickerItems(cfg *config.Config) []ui.FullScreenListItem {
+	createItem := ui.FullScreenListItem{
+		Title:      chatStartupProviderCreateRowTitle,
+		Detail:     "进入登录/创建流程：preset 模板或完全自定义",
+		SearchText: "create new provider 新建 登录 login 模板 template",
+	}
 	if cfg == nil {
-		return nil
+		return []ui.FullScreenListItem{createItem}
 	}
 	var providers []string
 	for name, p := range cfg.Providers.Items {
@@ -1072,11 +1123,18 @@ func buildStartupProviderPickerItems(cfg *config.Config) []ui.FullScreenListItem
 		}
 	}
 	sort.Strings(providers)
-	items := make([]ui.FullScreenListItem, 0, len(providers))
+	items := make([]ui.FullScreenListItem, 0, len(providers)+1)
+	items = append(items, createItem)
 	for _, name := range providers {
 		summary := ""
 		if provider, ok := cfg.Providers.Items[name]; ok {
 			summary = describeProviderSelection(provider)
+			if hint := providerLoginHintLine(provider); hint != "" {
+				if summary != "" {
+					summary += " | "
+				}
+				summary += hint
+			}
 		}
 		searchText := name
 		if summary != "" {
@@ -1091,7 +1149,10 @@ func buildStartupProviderPickerItems(cfg *config.Config) []ui.FullScreenListItem
 	return items
 }
 
-func selectProviderWithReaderNumeric(cfg *config.Config, reader *bufio.Reader) string {
+// selectProviderStartupNumeric is the numbered-list fallback of the startup
+// provider picker (pipes / non-ANSI terminals). Row [1] is always the
+// create/login entry; the provider rows follow.
+func selectProviderStartupNumeric(cfg *config.Config, reader *bufio.Reader) (string, bool) {
 	printChatSelectionSection("选择 Provider")
 
 	// 列出可用的 providers
@@ -1103,25 +1164,16 @@ func selectProviderWithReaderNumeric(cfg *config.Config, reader *bufio.Reader) s
 	}
 	sort.Strings(providers)
 
-	if len(providers) == 0 {
-		ui.PrintErrorTo(os.Stderr, "没有可用的 providers")
-		return ""
-	}
-
-	maxNameLen := 0
-	for _, p := range providers {
-		if width := ui.DisplayWidth(p); width > maxNameLen {
-			maxNameLen = width
-		}
-	}
-
+	printChatSelectionMutedSuffix(fmt.Sprintf("  [%d] %s", 1, chatStartupProviderCreateRowTitle))
 	for i, p := range providers {
 		summary := ""
 		if provider, ok := cfg.Providers.Items[p]; ok {
 			summary = describeProviderSelection(provider)
+			if hint := providerLoginHintLine(provider); hint != "" {
+				summary += " | " + hint
+			}
 		}
-		padding := strings.Repeat(" ", maxNameLen-ui.DisplayWidth(p))
-		primary := fmt.Sprintf("  [%d] %s%s", i+1, p, padding)
+		primary := fmt.Sprintf("  [%d] %s", i+2, p)
 		var muted []string
 		if summary != "" {
 			muted = append(muted, "  "+summary)
@@ -1139,12 +1191,19 @@ func selectProviderWithReaderNumeric(cfg *config.Config, reader *bufio.Reader) s
 		input = strings.TrimSpace(input)
 
 		if input == "" {
-			return cfg.Providers.DefaultProvider
+			if cfg.Providers.DefaultProvider == "" {
+				printChatSelectionWarning("当前没有默认 provider；请选择一个选项或输入 provider 名称")
+				continue
+			}
+			return cfg.Providers.DefaultProvider, false
 		}
 
 		if num, err := strconv.Atoi(input); err == nil {
-			if num >= 1 && num <= len(providers) {
-				return providers[num-1]
+			if num == 1 {
+				return chatStartupProviderCreateName, true
+			}
+			if num >= 2 && num <= len(providers)+1 {
+				return providers[num-2], false
 			}
 			printChatSelectionWarning("无效的选择，请重新输入")
 			continue
@@ -1152,7 +1211,7 @@ func selectProviderWithReaderNumeric(cfg *config.Config, reader *bufio.Reader) s
 
 		for _, p := range providers {
 			if strings.EqualFold(p, input) {
-				return p
+				return p, false
 			}
 		}
 

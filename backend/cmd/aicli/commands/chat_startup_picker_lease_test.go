@@ -18,8 +18,8 @@ func TestStartupPickersFailClosedWithoutTTY(t *testing.T) {
 	cfg := &config.Config{Providers: config.ProvidersConfig{Items: map[string]config.Provider{
 		"alpha": {Enabled: true, SupportedModels: []string{"m1"}},
 	}}}
-	if name, ok := selectProviderFullScreen(cfg); ok || name != "" {
-		t.Fatalf("selectProviderFullScreen must fall back without a TTY, got (%q, %v)", name, ok)
+	if name, choseCreate := selectProviderStartupFullScreen(cfg); choseCreate || name != "" {
+		t.Fatalf("selectProviderStartupFullScreen must fall back without a TTY, got (%q, %v)", name, choseCreate)
 	}
 	if model, ok := selectModelFullScreen(config.Provider{SupportedModels: []string{"m1"}}); ok || model != "" {
 		t.Fatalf("selectModelFullScreen must fall back without a TTY, got (%q, %v)", model, ok)

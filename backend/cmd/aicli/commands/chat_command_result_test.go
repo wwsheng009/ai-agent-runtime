@@ -1217,7 +1217,9 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		//   (d) 非 TUI 通道（保留）：pipe/PTY、子进程 stdio、exec、测试注入缝、物理 sink 白名单。
 		// 条目删除随 P1/P2 迁移推进；不得新增。
 		{File: "chat.go", Func: "printChatSessionMetaRow", Kind: "os.Std*", Count: 1},
-		{File: "chat.go", Func: "selectProviderWithReaderNumeric", Kind: "os.Std*", Count: 1},
+		// selectProviderWithReaderNumeric → selectProviderStartupNumeric（startup
+		// provider picker）：创建行改走 printChatSelectionMutedSuffix、登录失败走
+		// printChatSelectionWarning，函数内已无裸写，按 P1/P2 迁移删除该条目（不新增）。
 		{File: "chat_cache_local.go", Func: "var usageAttachWarn", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_command_text_writer.go", Func: "NewStdoutCommandTextWriter", Kind: "os.Std*", Count: 1},
 		{File: "chat_interaction.go", Func: "newChatInteractionCoordinator", Kind: "os.Std*", Count: 1},

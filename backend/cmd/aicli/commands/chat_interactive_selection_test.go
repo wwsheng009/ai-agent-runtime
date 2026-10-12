@@ -94,20 +94,23 @@ func TestBuildStartupProviderPickerItems_FilterSortAndSearchText(t *testing.T) {
 	}
 
 	items := buildStartupProviderPickerItems(cfg)
-	if len(items) != 2 {
-		t.Fatalf("expected 2 enabled providers, got %d: %#v", len(items), items)
+	if len(items) != 3 {
+		t.Fatalf("expected create row + 2 enabled providers, got %d: %#v", len(items), items)
 	}
-	if got := items[0].Title; got != "alpha" {
-		t.Fatalf("expected first row alpha (sorted), got %q", got)
+	if got := items[0].Title; got != chatStartupProviderCreateRowTitle {
+		t.Fatalf("expected first row to be the create/login entry, got %q", got)
 	}
-	if got := items[1].Title; got != "beta" {
-		t.Fatalf("expected second row beta (sorted), got %q", got)
+	if got := items[1].Title; got != "alpha" {
+		t.Fatalf("expected second row alpha (sorted), got %q", got)
 	}
-	if !strings.Contains(items[0].Detail, "protocol=openai") || !strings.Contains(items[0].Detail, "model=gpt-4.1") {
-		t.Fatalf("expected alpha detail with protocol/model, got %q", items[0].Detail)
+	if got := items[2].Title; got != "beta" {
+		t.Fatalf("expected third row beta (sorted), got %q", got)
 	}
-	if !strings.Contains(items[0].SearchText, "alpha") || !strings.Contains(items[0].SearchText, "gpt-4.1") {
-		t.Fatalf("expected alpha search text to cover name and model, got %q", items[0].SearchText)
+	if !strings.Contains(items[1].Detail, "protocol=openai") || !strings.Contains(items[1].Detail, "model=gpt-4.1") {
+		t.Fatalf("expected alpha detail with protocol/model, got %q", items[1].Detail)
+	}
+	if !strings.Contains(items[1].SearchText, "alpha") || !strings.Contains(items[1].SearchText, "gpt-4.1") {
+		t.Fatalf("expected alpha search text to cover name and model, got %q", items[1].SearchText)
 	}
 	for _, item := range items {
 		if item.Title == "zeta" {
