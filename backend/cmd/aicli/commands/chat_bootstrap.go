@@ -116,7 +116,11 @@ func loadChatPersistenceRuntimeConfig(cfg *config.Config, profileState *chatProf
 	if profileState != nil && profileState.Active() {
 		runtimePath = strings.TrimSpace(profileState.RuntimeConfigPath())
 	}
-	if runtimePath == "" && cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
+	// 无条件走解析器：resolveGlobalRuntimeConfigPath 内部处理「无 config_file →
+	// .aicli 层自动发现」，此处以 ConfigFile != "" 作为前置门会把删除了
+	// config_file 指针的配置变成「整个运行时层不加载」（与 chat.go
+	// resolveRuntimeToolConfigPath 修过的假开关同一模式）。
+	if runtimePath == "" {
 		runtimePath = resolveGlobalRuntimeConfigPath(cfg)
 	}
 	if runtimePath == "" {

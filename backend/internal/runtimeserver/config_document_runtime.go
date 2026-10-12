@@ -2,7 +2,6 @@ package runtimeserver
 
 import (
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -662,12 +661,15 @@ func resolvedExtraSkillDirsForHotReload(cfg *agentconfig.SkillsRuntimeConfig) []
 	for _, dir := range cfg.ExtraSkillDirs {
 		addDir(dir)
 	}
-	if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
-		if resolvedConfigFile := ResolveUpwardPath(configFile); strings.TrimSpace(resolvedConfigFile) != "" {
-			for _, dir := range skill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
-				addDir(dir)
-			}
-		}
+	// 与启动路径（cmd/runtime-server resolvedExtraSkillDirs）同口径：Codex 兼容
+	// 发现无条件参与，用户级标准安装位不依赖 skills_runtime.config_file——该键
+	// 只是显式覆盖指针，不是发现开关。否则热重载后的技能面会把启动时装载的
+	// 用户级目录悄悄丢掉。解析与锚点统一走 aiclipaths 共享入口。
+	resolvedConfigFile := ResolveUpwardPath(
+		aiclipaths.ResolveRuntimeConfigFilePath(cfg.ConfigFile))
+	anchorDir := aiclipaths.ResolveRuntimeConfigAnchorPath(resolvedConfigFile)
+	for _, dir := range skill.DiscoverCodexCompatibleSkillDirs(anchorDir, resolvedConfigFile) {
+		addDir(dir)
 	}
 	return dirs
 }

@@ -690,6 +690,11 @@ func TestInitSkillFunctionsRegistersSkills(t *testing.T) {
 	// 固定工作区：本包目录位于仓库内，工作区锚点会（按设计）发现仓库根的
 	// .agents/skills；这里只验证显式 skill_dir 的注册行为。
 	chdirTest(t, tempDir)
+	// 隔离用户级目录：Codex 兼容发现无条件包含用户级标准位，真实 HOME 下的
+	// 技能会进入 binding.Count()，破坏精确计数断言。
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	skillDir := filepath.Join(tempDir, "abap_search")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -854,6 +859,12 @@ func TestResolveConfiguredSkillDirs_AppendsCLIAndConfigDirs(t *testing.T) {
 	// 由 TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig
 	// 单独覆盖。
 	chdirTest(t, t.TempDir())
+	// 隔离用户级目录：Codex 兼容发现无条件包含 ~/.aicli/.agents/skills 等
+	// 用户级标准位（见 resolveConfiguredSkillDirs），真实 HOME 的技能目录
+	// 会破坏这里的精确计数断言。
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	systemDir := t.TempDir()
 	extraDir := t.TempDir()
 	cliDir := t.TempDir()
@@ -872,6 +883,11 @@ func TestResolveConfiguredSkillDirs_AppendsCLIAndConfigDirs(t *testing.T) {
 }
 
 func TestResolveConfiguredSkillDirs_ResolvesUpwardRelativePaths(t *testing.T) {
+	// 隔离用户级目录：Codex 兼容发现无条件包含用户级标准位，真实 HOME 下的
+	// 技能目录会破坏精确计数断言（见 resolveConfiguredSkillDirs）。
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	root := t.TempDir()
 	skillDir := filepath.Join(root, ".agents", "skills")
 	extraDir := filepath.Join(root, "extra-skills")
@@ -1696,11 +1712,46 @@ func TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig(t
 	t.Fatalf("workspace .agents/skills not discovered: got %#v, want %q", got, want)
 }
 
+// TestResolveConfiguredSkillDirs_IncludesUserStandardRootsWithoutConfigFile 锁定
+// 「用户级标准安装位不依赖 skills_runtime.config_file 显式配置」这条契约：
+// 用户配置的常态是只写 skills_runtime.enabled: true（不写 config_file），此前
+// Codex 兼容发现整个分支被 `if cfg.ConfigFile != ""` 门住，~/.aicli/.agents/skills
+// 等 4 个用户级标准位永远不会进入 chat 的加载面；而 `aicli skills list` 无条件
+// 调用同一套发现，两条链路口径分叉（页面/命令行看得到、chat 里看不到）。
+func TestResolveConfiguredSkillDirs_IncludesUserStandardRootsWithoutConfigFile(t *testing.T) {
+	workspace := t.TempDir()
+	chdirTest(t, workspace)
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+
+	userRoot := filepath.Join(home, ".aicli", ".agents", "skills")
+	writeTestFile(t, filepath.Join(userRoot, "user-skill", "skill.yaml"), "name: user-skill\ndescription: user skill\n")
+	// config_file 为空：模拟未写 skills_runtime.config_file 的用户配置。
+	got := resolveConfiguredSkillDirs(&config.SkillsRuntimeConfig{Enabled: true}, nil, true)
+
+	want := userRoot
+	if resolved, err := filepath.EvalSymlinks(userRoot); err == nil && strings.TrimSpace(resolved) != "" {
+		want = resolved
+	}
+	for _, dir := range got {
+		if dir == want || dir == userRoot {
+			return
+		}
+	}
+	t.Fatalf("user-level standard root not discovered without config_file: got %#v, want %q", got, want)
+}
+
 // profile 的 runtime.overrides 只写会话生效配置（session.Config），不写回全局 cfg：
 // skills 加载面（enabled 门 / 目录 / runtime 配置路径）必须以会话生效配置为准，否则
 // 白名单里的 skills_runtime.* 覆盖是假开关（D13/D14）。
 func TestInitSkillFunctionsUsesSessionEffectiveConfig(t *testing.T) {
 	chdirTest(t, t.TempDir()) // 固定工作区：避免仓库 .agents/skills 干扰计数
+	// 隔离用户级目录：Codex 兼容发现无条件包含用户级标准位，真实 HOME 下的
+	// 技能会进入 binding.Count()，破坏精确计数断言。
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	skillRoot := t.TempDir()
 	skillDir := filepath.Join(skillRoot, "abap_search")
 	skillYAML := `name: abap_search

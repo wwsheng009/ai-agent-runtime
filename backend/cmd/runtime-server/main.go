@@ -1850,12 +1850,18 @@ func resolvedExtraSkillDirs(cfg *config.SkillsRuntimeConfig) []string {
 	for _, dir := range cfg.ExtraSkillDirs {
 		addDir(dir)
 	}
-	if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
-		if resolvedConfigFile := runtimeserver.ResolveUpwardPath(configFile); strings.TrimSpace(resolvedConfigFile) != "" {
-			for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
-				addDir(dir)
-			}
-		}
+	// Codex 兼容发现无条件参与（与 chat 的 resolveConfiguredSkillDirs 同口径）：
+	// 用户级标准安装位（~/.aicli/.agents/skills 等 4 处）由 DiscoverCodexCompatible
+	// SkillDirs 内部固定补充，不依赖 skills_runtime.config_file 显式配置——该键
+	// 只是「显式覆盖指针」，把它当门会让未写 config_file 的部署静默丢失整个
+	// 用户级技能面。锚点与解析统一走 aiclipaths 共享入口，杜绝调用方再拿原始
+	// 字符串非空性当门；config_file 为空时 Discover 内部仍补齐用户级根，仅少
+	// `<config目录>/skills` 一层。
+	resolvedConfigFile := runtimeserver.ResolveUpwardPath(
+		aiclipaths.ResolveRuntimeConfigFilePath(cfg.ConfigFile))
+	anchorDir := aiclipaths.ResolveRuntimeConfigAnchorPath(resolvedConfigFile)
+	for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(anchorDir, resolvedConfigFile) {
+		addDir(dir)
 	}
 	return dirs
 }

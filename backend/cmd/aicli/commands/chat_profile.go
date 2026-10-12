@@ -414,11 +414,15 @@ func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProf
 // It returns "" when no layer exists, so callers fall back to the built-in
 // defaults without warning.
 func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
+	// 统一经 aiclipaths.ResolveRuntimeConfigFilePath：显式覆盖优先（文件缺失
+	// 仍保留路径供调用方报告），否则走 .aicli 层自动发现。「是否显式覆盖」
+	// 的判定也统一走 IsExplicitRuntimeConfigOverride，调用方不得再拿原始
+	// 字符串非空性当门（该模式已三次把发现/加载分支误关）。
 	configured := ""
-	if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
-		configured = strings.TrimSpace(cfg.SkillsRuntime.ConfigFile)
+	if cfg != nil && cfg.SkillsRuntime != nil {
+		configured = cfg.SkillsRuntime.ConfigFile
 	}
-	resolved := aiclipaths.ResolveRuntimeConfigBootstrapPath(configured)
+	resolved := aiclipaths.ResolveRuntimeConfigFilePath(configured)
 	if resolved == "" {
 		return ""
 	}
@@ -428,7 +432,7 @@ func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
 	// Nothing on disk. A real override keeps its path so the caller can still
 	// surface the misconfiguration; a convention value (or no value at all)
 	// means "no runtime config", which is not an error.
-	if configured != "" && !aiclipaths.IsRuntimeConfigConventionPath(configured) {
+	if aiclipaths.IsExplicitRuntimeConfigOverride(configured) {
 		return resolved
 	}
 	return ""

@@ -204,6 +204,11 @@ func TestHandleChatWebAPISkills_EmptyCatalog(t *testing.T) {
 func TestHandleChatWebAPISkills_ToggleWritesConfigAndRefreshesList(t *testing.T) {
 	tempDir := t.TempDir()
 	chdirTest(t, tempDir)
+	// 隔离用户级目录：Codex 兼容发现无条件包含 ~/.aicli/.agents/skills 等
+	// 用户级标准位，真实 HOME 的技能会进入列表，破坏 Len==1 断言。
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	writeToggleTestSkill(t, tempDir, "imagegen_web")
 
 	configPath := filepath.Join(tempDir, "config.yaml")

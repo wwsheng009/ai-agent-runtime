@@ -43,6 +43,11 @@ func handleSkillsMenuCommand(session *ChatSession, command string) bool {
 		return false
 	}
 
+	// 与结构化 /skills 入口一致：legacy 路径（--no-interactive / JSON 输出）也可能
+	// 在异步能力面装载完成前到达。不在渲染前补齐挂载的话，清单会把「正在装载」
+	// 渲染成 total=0 + binding=nil 的诊断，把时序半成品伪装成加载结果。
+	_ = awaitChatCapabilitiesForTurn(context.Background(), session)
+
 	query, jsonOutput := extractCommandArgumentOptions(command)
 	query = strings.TrimSpace(query)
 	useJSON := jsonOutput || session.JSONOutput

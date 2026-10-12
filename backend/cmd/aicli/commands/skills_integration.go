@@ -13,6 +13,7 @@ import (
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -1546,22 +1547,24 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 	for _, dir := range cliSkillDirs {
 		addDir(dir)
 	}
+	// Codex 兼容发现无条件参与：用户级标准安装位（~/.agents/skills、
+	// ~/.aicli/skills、~/.aicli/agents/skills、~/.aicli/.agents/skills）不能依赖
+	// skills_runtime.config_file 显式配置——用户配置的常态是不写 config_file
+	//（只写 enabled: true），此前发现分支被整体跳过，用户目录技能永远进不了
+	// chat 会话，而 `aicli skills list` 无条件调用同一套发现，两条链路口径分叉。
+	// 锚点统一走 aiclipaths.ResolveRuntimeConfigAnchorPath（cwd 优先；显式覆盖
+	// 时才用配置文件目录——注意 resolveExistingPathValue 的「可执行文件目录向上
+	// 回溯」可能命中另一个工作区的配置，因此只有解析出真实存在的覆盖文件才
+	// 用它的目录）。config_file 仅作为 `<config 目录>/skills` 管理层的补充来源。
+	resolvedConfigFile := ""
 	if cfg != nil {
 		if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
-			if resolvedConfigFile := resolveExistingPathValue(configFile, false); resolvedConfigFile != "" {
-				// config_file 可能经「可执行文件目录向上回溯」命中另一个工作区的
-				// 配置（例如从 E:\temp 启动却命中二进制所在仓库的
-				// backend/configs/runtime.yaml）。Codex 兼容发现的锚点必须是当前
-				// 工作区 cwd，否则会把那个仓库的 .agents/skills 误带进当前工作区。
-				anchorDir := filepath.Dir(resolvedConfigFile)
-				if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-					anchorDir = filepath.Clean(cwd)
-				}
-				for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(anchorDir, resolvedConfigFile) {
-					addDir(dir)
-				}
-			}
+			resolvedConfigFile = resolveExistingPathValue(configFile, false)
 		}
+	}
+	anchorDir := aiclipaths.ResolveRuntimeConfigAnchorPath(resolvedConfigFile)
+	for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(anchorDir, resolvedConfigFile) {
+		addDir(dir)
 	}
 
 	// 工作区锚点：进程 cwd（及项目根以内的祖先目录）下的 .agents/skills 必须
