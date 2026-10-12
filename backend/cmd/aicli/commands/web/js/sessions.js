@@ -219,9 +219,16 @@ function setSidebarCollapsed(collapsed) {
 }
 
 // 恢复折叠状态（localStorage 记忆）
+// 初次打开的默认态：桌面展开；移动端收起（小屏首屏不与会话列表争宽度，
+// 要看列表点 ☰ 展开）。用户显式切换过（localStorage 有记忆）则一律尊重记忆——
+// 手机上主动展开过的用户刷新后仍是展开，不会被默认值反复顶回去。
 try {
-  setSidebarCollapsed(localStorage.getItem("webSidebarCollapsed") === "1");
-} catch (e) { /* ignore */ }
+  var storedSidebar = localStorage.getItem("webSidebarCollapsed");
+  var sidebarMobileDefault =
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      && window.matchMedia("(max-width: 767px)").matches;
+  setSidebarCollapsed(storedSidebar !== null ? storedSidebar === "1" : sidebarMobileDefault);
+} catch (e) { setSidebarCollapsed(false); }
 
 function fmtSessionTime(iso) {
   if (!iso) { return ""; }
