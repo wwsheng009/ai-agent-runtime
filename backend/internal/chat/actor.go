@@ -37,6 +37,14 @@ import (
 
 const aicliRuntimeContextTokenCountKey = "aicli_context_token_count"
 
+// aicliRuntimeContextCanonicalTokenCountKey is the canonical twin of the
+// observed token-count key. Loop observations write both so canonical-first
+// readers (sessionmeta.CandidateKeys order) cannot resolve a stale canonical
+// value left by an earlier CLI sync (2026-10-12 status-bar "Context 0%" bug).
+// It must stay equal to sessionmeta.ContextTokenCount; internal/chat cannot
+// import sessionmeta (sessionmeta/patch.go imports internal/chat — cycle).
+const aicliRuntimeContextCanonicalTokenCountKey = "context_token_count"
+
 // Structured context-ledger anchor keys. The plain token-count key above is
 // kept for backward compatibility (older sessions and the CLI restore path);
 // the structured keys carry the prompt identity that makes the anchor
@@ -2185,9 +2193,11 @@ func setRuntimeSessionObservedTokenUsage(session *Session, value int) {
 		session.Metadata.Context = make(map[string]interface{})
 	}
 	if value > 0 {
+		session.Metadata.Context[aicliRuntimeContextCanonicalTokenCountKey] = value
 		session.Metadata.Context[aicliRuntimeContextTokenCountKey] = value
 		return
 	}
+	delete(session.Metadata.Context, aicliRuntimeContextCanonicalTokenCountKey)
 	delete(session.Metadata.Context, aicliRuntimeContextTokenCountKey)
 }
 

@@ -314,3 +314,19 @@ func runtimeSessionContextInt(session *runtimechat.Session, key string) (int, bo
 	}
 	return sessionmeta.Int(session.Metadata.Context, key)
 }
+
+// runtimeSessionContextRawInt 逐字读取单个 context 键，不做 canonical/legacy
+// 别名解析：sessionmeta.Int 按 CandidateKeys 以 canonical 优先返回值，当
+// canonical 残留陈旧小值而 legacy 是实时锚点时会把锚点遮蔽掉（2026-10-12
+// 状态栏 “Context 0%” 事件）。需要读取锚点原值的调用方使用本函数。
+func runtimeSessionContextRawInt(session *runtimechat.Session, key string) (int, bool) {
+	if session == nil || session.Metadata.Context == nil {
+		return 0, false
+	}
+	value, ok := session.Metadata.Context[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+	// 单键包装后走 sessionmeta.Int 的数值转换，避免复制其类型分支。
+	return sessionmeta.Int(map[string]interface{}{key: value}, key)
+}

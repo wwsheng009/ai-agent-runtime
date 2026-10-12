@@ -812,6 +812,59 @@ func TestSyncRuntimeSessionFromChatPreservesLoopContextAnchor(t *testing.T) {
 	}
 }
 
+// TestSyncRuntimeSessionFromChatAlignsStaleCanonicalContextCount pins the
+// 2026-10-12 fix: when a structured anchor exists, a stale canonical twin
+// (written before the anchor appeared) must be aligned with the loop anchor
+// during sync — canonical-first readers (status bar / restore) otherwise
+// resolve the stale value (observed: status bar stuck at "Context 0%").
+func TestSyncRuntimeSessionFromChatAlignsStaleCanonicalContextCount(t *testing.T) {
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	runtimeSession, err := manager.Create(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	if runtimeSession.Metadata.Context == nil {
+		runtimeSession.Metadata.Context = make(map[string]interface{})
+	}
+	// Live loop anchor (legacy key) + stale canonical twin (pre-anchor value).
+	runtimeSession.Metadata.Context["aicli_context_token_fingerprint"] = "fp-loop-anchor"
+	runtimeSession.Metadata.Context[chatRuntimeContextContextTokenCount] = 358568
+	runtimeSession.Metadata.Context[sessionmeta.ContextTokenCount] = 2395
+
+	session := &ChatSession{
+		ProviderName:      "codex_ee",
+		Provider:          config.Provider{Protocol: "codex"},
+		Config:            &config.Config{ConfigFilePath: filepath.Join(t.TempDir(), "config.yaml")},
+		Model:             "gpt-5.2-code",
+		SessionManager:    manager,
+		RuntimeSession:    runtimeSession,
+		ContextTokenCount: 301548, // display total; must NOT overwrite the anchor
+		Messages: []runtimetypes.Message{
+			*runtimetypes.NewUserMessage("hello"),
+			*runtimetypes.NewAssistantMessage("world"),
+		},
+	}
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		t.Fatalf("syncRuntimeSessionFromChat: %v", err)
+	}
+	cloned, err := manager.Get(context.Background(), runtimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	// Canonical-first resolution must now return the live anchor, not 2395.
+	if got, ok := runtimeSessionContextInt(cloned, chatRuntimeContextContextTokenCount); !ok || got != 358568 {
+		t.Fatalf("canonical-first read must resolve to the live anchor, got ok=%v value=%d", ok, got)
+	}
+	if got := resolveChatStatusContextUsedTokens(&ChatSession{RuntimeSession: cloned}); got != 358568 {
+		t.Fatalf("status read must use the live anchor, got %d", got)
+	}
+}
+
 func TestRestoreChatStateFromRuntimeSessionClearsMissingTokenCount(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	runtimeSession.AddMessage(*runtimetypes.NewUserMessage("hello"))

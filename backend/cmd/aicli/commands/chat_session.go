@@ -1545,6 +1545,12 @@ func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt, pla
 		} else {
 			sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, chatRuntimeContextContextTokenCount)
 		}
+	} else if anchor, ok := runtimeSessionContextRawInt(runtimeSession, chatRuntimeContextContextTokenCount); ok && anchor > 0 {
+		// 2026-10-12 修复：结构化锚点存在时不能只跳过——canonical 侧可能残留
+		// 锚点出现前的旧展示值；读取端按 canonical 优先解析时会把实时锚点遮蔽
+		// 成陈旧小值（状态栏显示 0%）。用 loop 锚点对齐 canonical 双键，保证
+		// 任何解析顺序都得到同一真值。
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextTokenCount, anchor, chatRuntimeContextContextTokenCount)
 	}
 	if session.ContextWindowTokenCount > 0 {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.ContextWindowCount, session.ContextWindowTokenCount, chatRuntimeContextContextWindowTokenCount)

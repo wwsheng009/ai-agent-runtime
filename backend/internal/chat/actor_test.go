@@ -3087,6 +3087,29 @@ func TestRuntimeSessionActiveContextTokensUsesStructuredAnchor(t *testing.T) {
 	require.Less(t, tokens, 9000)
 }
 
+// TestStoreRuntimeSessionContextObservationWritesCanonicalTwin pins the
+// 2026-10-12 fix: the loop-written anchor must occupy both the legacy and the
+// canonical token-count keys so canonical-first readers cannot resolve a stale
+// canonical value left by an earlier CLI sync.
+func TestStoreRuntimeSessionContextObservationWritesCanonicalTwin(t *testing.T) {
+	session := NewSession("actor-context-canonical-twin")
+	storeRuntimeSessionContextObservation(session, contextledger.Observation{
+		PromptTokens:    33000,
+		MessageEstimate: 1000,
+		Fingerprint:     "fp",
+		MessageCount:    2,
+		Source:          contextledger.SourceProviderReported,
+	})
+	require.Equal(t, 33000, session.Metadata.Context[aicliRuntimeContextCanonicalTokenCountKey])
+	require.Equal(t, 33000, session.Metadata.Context[aicliRuntimeContextTokenCountKey])
+
+	setRuntimeSessionObservedTokenUsage(session, 0)
+	_, hasCanonical := session.Metadata.Context[aicliRuntimeContextCanonicalTokenCountKey]
+	_, hasLegacy := session.Metadata.Context[aicliRuntimeContextTokenCountKey]
+	require.False(t, hasCanonical, "canonical twin must be dropped with the anchor")
+	require.False(t, hasLegacy, "legacy anchor must be dropped")
+}
+
 func TestSessionActorMaybeAutoCompactSessionSkipsWhenContextBelowLimit(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

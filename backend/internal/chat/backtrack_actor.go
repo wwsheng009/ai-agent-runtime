@@ -262,6 +262,7 @@ func (a *SessionActor) applyBacktrackHistory(ctx context.Context, session *Sessi
 	if session.Metadata.Context != nil {
 		for _, key := range []string{
 			aicliRuntimeContextTokenCountKey,
+			aicliRuntimeContextCanonicalTokenCountKey,
 			aicliRuntimeContextTokenFingerprintKey,
 			aicliRuntimeContextTokenMessageCountKey,
 			aicliRuntimeContextTokenMessageEstimateKey,
