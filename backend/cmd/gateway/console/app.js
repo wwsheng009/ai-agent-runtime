@@ -1759,6 +1759,10 @@
       return;
     }
     sendPresence();
+    // Returning to the tab: re-sync the notification toggle with the browser's
+    // actual permission/subscription (a prompt may have been answered while
+    // the page was hidden).
+    if (authedState) { refreshPushState(); }
     // Coming back from a suspended tab: if the SSE feed has been quiet for
     // a long stretch, pull a fresh snapshot instead of trusting the cache.
     if (eventsSubscribed && lastEventAt && Date.now() - lastEventAt > 60000) { loadNodes(); }
@@ -1912,19 +1916,43 @@
     return err instanceof Error ? err : new Error(String(err));
   }
 
-  // requestPushPermission must be called inside the click gesture. The race
-  // guards against a never-settling promise (seen in Chromium without user
-  // activation) so the toggle cannot hang on "开启中…" forever.
+  // requestPushPermission must be called inside the click gesture. Chromium can
+  // keep the returned promise pending (quiet UI, a prompt that was missed, or a
+  // previously dismissed dialog), so we also poll Notification.permission and
+  // give the user a full minute before failing with actionable guidance.
   function requestPushPermission() {
+    if (Notification.permission === "granted" || Notification.permission === "denied") {
+      return Promise.resolve(Notification.permission);
+    }
     var req = Notification.requestPermission();
-    return Promise.race([
-      req,
-      new Promise(function (_, reject) {
-        setTimeout(function () {
-          reject(new Error("通知权限请求超时未响应：请在浏览器/系统弹出的权限提示中做出选择后重试。"));
-        }, 15000);
-      }),
-    ]);
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var poll = setInterval(function () {
+        var p = Notification.permission;
+        if (p === "granted" || p === "denied") { finish(p); }
+      }, 500);
+      var timer = setTimeout(function () {
+        fail(new Error("通知权限仍未确认（已等待 60 秒）。请点击地址栏的站点设置（🔒/⚙ 图标 → 通知 → 允许），或检查系统通知设置，然后刷新页面重试。"));
+      }, 60000);
+      function finish(value) {
+        if (settled) { return; }
+        settled = true;
+        clearInterval(poll);
+        clearTimeout(timer);
+        resolve(value);
+      }
+      function fail(err) {
+        if (settled) { return; }
+        settled = true;
+        clearInterval(poll);
+        clearTimeout(timer);
+        reject(err);
+      }
+      req.then(finish, function (err) {
+        var p = Notification.permission;
+        if (p === "granted" || p === "denied") { finish(p); } else { fail(mapPushError(err)); }
+      });
+    });
   }
 
   // enablePush must run inside the user gesture: iOS/Safari only shows the
@@ -2420,7 +2448,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=31").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=32").catch(function () {});
     });
   }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -173,6 +174,11 @@ func (p *pushNotifier) dispatch(notes []push.Notification) {
 		return
 	}
 	manager := p.manager
+	if manager.Store().Count() == 0 {
+		// Without subscribers the loop below silently delivers nothing, which
+		// looks like "notifications never fire". Make that state visible.
+		log.Printf("push: %d notification(s) ready but no device is subscribed; open %s and enable notifications", len(notes), p.baseURL)
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
