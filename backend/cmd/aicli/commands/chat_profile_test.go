@@ -17,6 +17,12 @@ func TestResolveChatProfileState_AppliesDefaultsPromptAndPolicy(t *testing.T) {
 	// 固定工作区：profile 的 skill 目录会追加 cwd 祖先的 .agents/skills，
 	// 仓库自带的 .agents/skills 会让下面的目录计数随检出内容变化，必须隔离。
 	chdirTest(t, t.TempDir())
+	// 隔离用户级目录：Codex 兼容发现无条件包含 ~/.aicli/.agents/skills 等
+	// 用户级标准位，真实 HOME 下已安装的技能会多出一个目录，破坏 Len==3 断言
+	// （与 skills_integration_test 的隔离写法一致）。
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
 	profilesRoot := t.TempDir()
 	globalSkills := t.TempDir()
 	profileRoot := filepath.Join(profilesRoot, "dev")
