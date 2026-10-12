@@ -97,7 +97,7 @@
         <section class="view" data-view="dashboard">
           <div class="stats">
             <a class="stat" href="#sessions"><span class="stat-num" id="stat-online">0</span><span class="stat-label">在线节点</span></a>
-            <div class="stat"><span class="stat-num" id="stat-offline">0</span><span class="stat-label">离线快照</span></div>
+            <a class="stat" href="#nodes"><span class="stat-num" id="stat-offline">0</span><span class="stat-label">离线快照</span></a>
             <a class="stat" href="#sessions"><span class="stat-num" id="stat-sessions">0</span><span class="stat-label">活跃会话</span></a>
             <a class="stat attention" href="#sessions?attention=1"><span class="stat-num" id="stat-attention">0</span><span class="stat-label">待处理</span></a>
           </div>
@@ -164,7 +164,10 @@
               <div id="node-live-list" class="list"></div>
             </section>
             <section class="panel">
-              <div class="panel-head"><h2>离线快照</h2></div>
+              <div class="panel-head">
+                <h2>离线快照</h2>
+                <button id="clear-stale" type="button" class="btn danger sm" hidden>清除全部</button>
+              </div>
               <div id="node-offline-list" class="list"></div>
             </section>
           </div>

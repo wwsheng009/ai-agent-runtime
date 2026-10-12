@@ -248,6 +248,7 @@ aicli-gateway security policy rollback --reason "P1 回滚误伤策略" --json
 | 设备令牌 | `aicli-gateway device list|create|revoke ... --json` |
 | 健康 | `GET /api/health` |
 | 审计 | `GET /api/audit?limit=100` |
+| 清除离线快照 | `DELETE /api/nodes?stale=1`（或控制台「节点 → 离线快照 → 清除全部」） |
 
 > 说明：命令/端点名称以 [02-architecture.md](./02-architecture.md) §4.1 与实现为准；
 > 本文给出的是设计约定的目标形态，落地时若命名调整需同步更新。
@@ -307,4 +308,5 @@ B registry: node=node-<id> LIVE   # 同 ID 替换 stale，而非新增第二个�
 **身份前提**：aicli / runtime-server 的 REGISTER 携带机器稳定 node id
 （`~/.aicli/gateway-node-id`，`gatewayagent.LoadOrCreateNodeID`）。若该文件缺失
 （极端环境无法写 home），agent 退化为每次进程随机 id——failover 仍工作，
-但 standby 上会短暂并存一条 stale 条目直到 TTL/人工清理，不影响可用性。
+但 standby 上会短暂并存一条 stale 条目直到 TTL/人工清理（控制台「节点 → 离线快照 → 清除全部」一键批量
+清除，等价 `DELETE /api/nodes?stale=1`；仅删 stale，不影响 live 节点），不影响可用性。

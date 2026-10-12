@@ -410,10 +410,12 @@ func run() int {
 		auditLog.Record(audit.Event{Type: audit.TypeDeviceRevoked, Detail: id, IP: resolver.ClientIP(r)})
 		writeJSON(w, http.StatusOK, map[string]any{"revoked": id})
 	})))
-	// Owner-protected node list.
-	router.Handle("/api/nodes", owner.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"nodes": registry.List()})
-	}))).Methods(http.MethodGet)
+	// Owner-protected node list + bulk cleanup of offline snapshots
+	// (DELETE /api/nodes?stale=1 — the console's one-click clear action).
+	router.Handle("/api/nodes", owner.RequireSession(handleNodes(registry, auditLog, resolver.ClientIP, func() {
+		hub.notify()
+		notifier.observe(registry.List())
+	}))).Methods(http.MethodGet, http.MethodDelete)
 	// Owner-protected registry cleanup: remove a stale node or a dead session
 	// entry (docs/gateway/10-runbook.md — orphan snapshot rows never resolve on
 	// their own). Live agents simply re-register on their next sync, so the

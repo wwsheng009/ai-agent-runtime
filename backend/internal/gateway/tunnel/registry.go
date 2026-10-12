@@ -68,6 +68,27 @@ func (r *Registry) Remove(nodeID string) {
 	delete(r.nodes, nodeID)
 }
 
+// RemoveStale deletes every offline (stale snapshot) node in one pass and
+// returns the removed node IDs in stable (sorted) order. Live entries are
+// never touched: removing them would race the next heartbeat sync and only
+// re-add the entry. Backs the console's one-click "clear offline snapshots".
+func (r *Registry) RemoveStale() []string {
+	removed := make([]string, 0)
+	if r == nil {
+		return removed
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, node := range r.nodes {
+		if node.Stale {
+			removed = append(removed, id)
+			delete(r.nodes, id)
+		}
+	}
+	sort.Strings(removed)
+	return removed
+}
+
 // RemoveSession deletes one session entry from a node, reporting whether the
 // node and session existed. Used by the console "remove" action to clear dead
 // entries (typically stale snapshot sessions that will never resolve).

@@ -33,6 +33,7 @@
 | 协议/宿主 | `NOTIFY` 帧（事件元数据 + `dedup_key`） | `internal/gateway/wire/messages.go`、`internal/gateway/tunnel/notify.go`、`internal/gateway/agent/controller.go` |
 | 控制台 | 聚合收件箱（按优先级 + 已读联动） | `cmd/gateway/console/{index.html,app.js,style.css}` |
 | 服务端 | 注册表持久化（防抖快照 + 重启恢复 stale） | `internal/gateway/tunnel/{registry,persist}.go`、`cmd/gateway/main.go` |
+| 控制台 | 一键清除离线快照节点（批量 stale 清理 + 单节点移除） | `cmd/gateway/nodes_api.go`、`internal/gateway/tunnel/registry.go`、`cmd/gateway/console/{index.html,app.js}` |
 | 服务端 | 主备切换原语（GOAWAY 下线广播 + 优雅退出 + live/stable 计数） | `internal/gateway/tunnel/server.go`（`CloseAll`）、`cmd/gateway/main.go`（SIGINT/SIGTERM） |
 | agent | 断线自动重连（GOAWAY 触发，2/5/10/30s 退避） | `internal/gateway/agent/{control,wsconn}.go` |
 | 宿主 | 机器稳定 node id（failover 后同 ID 替换 stale 条目） | `internal/gateway/agent/nodeid.go`、`cmd/aicli/commands/chat_gateway_host.go`、`cmd/runtime-server/gateway_bootstrap.go` |
@@ -161,7 +162,7 @@ runtime-server serve          # 同样自动注册
 | GET | `/api/health` | 无 | 存活探针 |
 | POST | `/api/auth/login` | 无 | owner 登录（Cookie） |
 | POST | `/api/auth/logout` | Cookie | 退出 |
-| GET | `/api/nodes` | Cookie | 节点/会话列表 |
+| GET / DELETE | `/api/nodes` | Cookie | 节点/会话列表；`DELETE ?stale=1` 一键清除全部离线快照节点（仅 stale，逐个记审计） |
 | GET | `/api/devices` / POST / DELETE | Cookie | 设备令牌管理 |
 | GET | `/api/metrics` | Cookie | 计数（JSON） |
 | GET | `/api/audit` | Cookie | 审计事件 |
@@ -237,3 +238,7 @@ cd frontend && npx tsc -b && npm run lint:i18n
 > `question_*`、`session_end/interrupted`）映射为 `attention`。**推送链路已端到端打通**：
 > agent 上报 → 网关注册表 → `pushNotifier` 去重触发 → VAPID 加密投递 → Service Worker 展示。
 > 剩余待办集中在控制台展示与 presence 抑制，见 [08-notifications.md](./08-notifications.md) §10.2。
+>
+> 2026-10-12 补记：控制台新增**一键清除离线快照节点**——`DELETE /api/nodes?stale=1` 单次批量删除所有
+> stale（重启恢复/下线遗留）条目（`Registry.RemoveStale`，逐节点记 `node_removed` 审计并广播 SSE），
+> 控制台「节点 → 离线快照」面板一键触发（单节点「移除」保留）；仅清理 stale，live 节点不受影响。

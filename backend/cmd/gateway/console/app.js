@@ -510,6 +510,13 @@
     var liveHost = el("node-live-list");
     var offHost = el("node-offline-list");
     var dashHost = el("dash-node-list");
+    var staleNodes = nodes.filter(function (n) { return n.stale; });
+    var clearBtn = el("clear-stale");
+    if (clearBtn) {
+      // The one-click cleanup is offered only while offline snapshots exist.
+      clearBtn.hidden = !staleNodes.length;
+      clearBtn.textContent = staleNodes.length ? "清除全部（" + staleNodes.length + "）" : "清除全部";
+    }
     if (liveHost) {
       liveHost.innerHTML = "";
       nodes.filter(function (n) { return !n.stale; }).forEach(function (n) {
@@ -521,7 +528,7 @@
     }
     if (offHost) {
       offHost.innerHTML = "";
-      nodes.filter(function (n) { return n.stale; }).forEach(function (n) {
+      staleNodes.forEach(function (n) {
         offHost.appendChild(nodeCard(n));
       });
       if (!offHost.children.length) {
@@ -920,6 +927,28 @@
   // Keep the standalone nodes-panel refresh working too (same data source).
   var refreshNodes = el("refresh-nodes");
   if (refreshNodes) { refreshNodes.addEventListener("click", function () { loadNodes(); }); }
+
+  // One-click cleanup of offline snapshots (stale entries restored from
+  // registry.json). One bulk call removes every stale node at once; the
+  // per-node "移除" buttons stay available for selective cleanup.
+  var clearStale = el("clear-stale");
+  if (clearStale) {
+    clearStale.addEventListener("click", function () {
+      var staleCount = lastNodes.filter(function (n) { return n.stale; }).length;
+      if (!staleCount) { return; }
+      if (!window.confirm("清除全部 " + staleCount + " 个离线快照节点？\n这些节点的所有会话条目会一并删除（agent 重新上线会自动重新注册）。")) { return; }
+      clearStale.disabled = true;
+      api("/api/nodes?stale=1", { method: "DELETE" })
+        .then(function (res) {
+          if (res.status === 401) { setAuthed(false); return; }
+          if (!res.ok) { notify("清除失败：HTTP " + res.status, "error"); return; }
+          notify("已清除 " + staleCount + " 个离线快照节点", "ok");
+          loadNodes();
+        })
+        .catch(function (err) { notify("清除失败：" + err, "error"); })
+        .finally(function () { clearStale.disabled = false; });
+    });
+  }
 
   var pushBusy = false;
   el("push-toggle").addEventListener("click", function () {
