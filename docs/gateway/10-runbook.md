@@ -342,11 +342,18 @@ ACME（Let's Encrypt，http-01）与按 Host 路由都在 Edge 侧完成；控�
 网关侧：`aicli-gateway.service` 需带 `--public-base-url https://aicli.ttai.online`
 （Web Push 点击深链由此生成），改后 `systemctl daemon-reload && systemctl restart aicli-gateway`。
 
-**通知通道（Web Push + ntfy）**：Web Push 之外可选第二通道 ntfy：
-`--ntfy-url https://ntfy.sh --ntfy-topic <topic> [--ntfy-token tk_…]`（token 建议放 `--config` flagfile）。
+**通知通道（Web Push + ntfy）**：Web Push 之外的第二通道 ntfy 已自建在网关服务器上：
+
+| 项 | 值 |
+|----|----|
+| 服务 | `ntfy`（deb 安装，systemd），配置 `/etc/ntfy/server.yml`：`listen-http: 127.0.0.1:2586`、`base-url: https://ntfy.ttai.online`、`cache-file: /var/lib/ntfy/cache.db`、`behind-proxy: true` |
+| 入口 | `ntfy.ttai.online`（CF 代理）→ edge 路由组 `ntfy` → `127.0.0.1:2586`；组内 `health.ready_path: "/v1/health"`（默认 `/health/ready` 会 404 导致组不 ready） |
+| 网关发布 | `--ntfy-url http://127.0.0.1:2586 --ntfy-topic aicli-gateway-0bf5wo3tkd`（走本机回环，不依赖 CF） |
+| 客户端订阅 | 服务器 `https://ntfy.ttai.online` + topic `aicli-gateway-0bf5wo3tkd`（Android 需开 Instant delivery） |
+
 高优先（approval/question/error）→ `priority=5` + `warning` 标签，其余 `priority=3`；点击打开对应会话。
 `POST /api/push/test` 返回 `channels.webpush / channels.ntfy` 明细；控制台"发送测试通知"会展示各通道结果。
-自建 ntfy（如 `ntfy.wwsheng.online`）需保证网关服务器可解析/访问，否则用 `ntfy.sh` + 随机 topic。
+当前 ntfy 未启用鉴权（topic 名即口令）；如需访问控制再启用 `auth-*` 并用 `--ntfy-token`。
 
 **edge 配置变更纪律**（2026-10-12 事故教训）：
 1. 改完先 `cd /opt/ai-gateway-edge && ./bin/gateway-edge configtest -c configs/config.yaml` 再重启；
