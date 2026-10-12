@@ -271,6 +271,11 @@ func TestClassifyWebSearchFailureCode(t *testing.T) {
 			err:  errors.New("unexpected parse failure"),
 			want: "",
 		},
+		{
+			name: "bing blocked page",
+			err:  errors.New("Bing 搜索返回验证/反爬页面，无法解析结果"),
+			want: string(runtimeerrors.ErrAPIServerError),
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -376,7 +381,7 @@ func TestWebSearchTool_DefaultChainFallsBackToDDG(t *testing.T) {
 			case strings.Contains(req.URL.Host, "api.duckduckgo.com"):
 				return &http.Response{
 					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(`{"AbstractText":"DDG 备份摘要","Heading":"DDG 备份标题","AbstractURL":"https://ddg.example/"}`)),
+					Body:       io.NopCloser(strings.NewReader(`{"AbstractText":"Anthropic Claude models family 2026 DDG 备份摘要","Heading":"Anthropic Claude DDG 备份标题","AbstractURL":"https://ddg.example/"}`)),
 					Header:     make(http.Header),
 					Request:    req,
 				}, nil
@@ -404,6 +409,294 @@ func TestWebSearchTool_DefaultChainFallsBackToDDG(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "DDG 备份") {
 		t.Fatalf("expected ddg content, got %q", result.Content)
+	}
+}
+
+func TestWebSearchTool_LowQualityFirstProviderFallsBack(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{
+		{
+			name: "first",
+			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+				return "first", []DuckDuckGoResult{
+					{Title: "完全无关的结果", URL: "https://noise.example/", Snippet: "noise"},
+				}, nil
+			},
+		},
+		{
+			name: "second",
+			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+				return "second", []DuckDuckGoResult{
+					{Title: "GitHub trending weekly AI repositories", URL: "https://github.com/trending", Snippet: "weekly AI repositories"},
+				}, nil
+			},
+		},
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"query": "GitHub trending weekly AI repositories",
+		"count": float64(3),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected fallback success, got %v", result.Error)
+	}
+	if result.Metadata["source"] != "second" {
+		t.Fatalf("expected second provider to win, got %#v", result.Metadata["source"])
+	}
+	if result.Metadata["quality"] != "ok" {
+		t.Fatalf("expected quality=ok, got %#v", result.Metadata["quality"])
+	}
+	attempted, _ := result.Metadata["providers_attempted"].([]string)
+	if len(attempted) != 2 || attempted[0] != "first" || attempted[1] != "second" {
+		t.Fatalf("expected both providers attempted, got %#v", attempted)
+	}
+}
+
+func TestWebSearchTool_EmptyFirstProviderFallsBack(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{
+		{
+			name: "empty",
+			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+				return "empty", nil, nil
+			},
+		},
+		{
+			name: "hit",
+			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+				return "hit", []DuckDuckGoResult{
+					{Title: "AI trending project", URL: "https://example.com/ai", Snippet: "AI project"},
+				}, nil
+			},
+		},
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "AI trending project"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success || result.Metadata["source"] != "hit" {
+		t.Fatalf("expected empty provider to fall through, got %#v", result.Metadata)
+	}
+	if result.Metadata["quality"] != "ok" {
+		t.Fatalf("expected quality=ok, got %#v", result.Metadata["quality"])
+	}
+}
+
+func TestWebSearchTool_DuckDuckGoInstantZeroTriesHTML(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{{name: "duckduckgo", search: tool.searchDuckDuckGoProvider}}
+	tool.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Host, "api.duckduckgo.com") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"AbstractText":"","Heading":"","RelatedTopics":[]}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}
+			body := `<a class="result__a" href="https://example.com/ai-project">AI trending project</a>` +
+				`<a class="result__snippet">Weekly AI repositories</a>`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "AI trending project"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success || result.Metadata["source"] != "duckduckgo_html" {
+		t.Fatalf("expected HTML fallback after empty instant answer, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "AI trending project") {
+		t.Fatalf("expected HTML result content, got %q", result.Content)
+	}
+}
+
+func TestWebSearchTool_TimeRangeAndLanguageMapToBing(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	var gotQuery url.Values
+	var gotAcceptLanguage string
+	tool.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotQuery = req.URL.Query()
+			gotAcceptLanguage = req.Header.Get("Accept-Language")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`<li class="b_algo"><h2><a href="https://example.com/">AI weekly</a></h2><p>weekly AI repositories</p></li>`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"query":      "GitHub trending weekly AI repositories",
+		"time_range": "week",
+		"language":   "en",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+	if gotQuery.Get("filters") != `ex1:"ez2"` {
+		t.Fatalf("expected week filter, got %q", gotQuery.Get("filters"))
+	}
+	if gotQuery.Get("mkt") != "en-US" || !strings.HasPrefix(gotAcceptLanguage, "en-US") {
+		t.Fatalf("expected English market, got mkt=%q accept=%q", gotQuery.Get("mkt"), gotAcceptLanguage)
+	}
+	if result.Metadata["time_range"] != "week" || result.Metadata["time_range_supported"] != true {
+		t.Fatalf("expected time range metadata, got %#v", result.Metadata)
+	}
+	if result.Metadata["language"] != "en" || result.Metadata["language_supported"] != true {
+		t.Fatalf("expected language metadata, got %#v", result.Metadata)
+	}
+	if result.Metadata["final_host"] != "www.bing.com" {
+		t.Fatalf("expected final_host metadata, got %#v", result.Metadata["final_host"])
+	}
+}
+
+func TestWebSearchTool_InvalidOptionalSearchOptionIsStructured(t *testing.T) {
+	tool := NewWebSearchTool()
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"query":      "test",
+		"time_range": "fortnight",
+	})
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected invalid option failure, got %#v", result.Metadata)
+	}
+	code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string)
+	if code != string(runtimeerrors.ErrToolInvalidArgs) {
+		t.Fatalf("error_code=%q want TOOL_INVALID_ARGS", code)
+	}
+}
+
+func TestWebSearchOptionalHelpers(t *testing.T) {
+	if got := bingTimeRangeFilter("week"); got != `ex1:"ez2"` {
+		t.Fatalf("bingTimeRangeFilter(week) = %q", got)
+	}
+	if got := duckDuckGoTimeRangeParam("week"); got != "w" {
+		t.Fatalf("duckDuckGoTimeRangeParam(week) = %q", got)
+	}
+	if got := bingTimeRangeFilter("year"); !strings.HasPrefix(got, `ex1:"ez5_`) || !strings.HasSuffix(got, `"`) {
+		t.Fatalf("bingTimeRangeFilter(year) = %q", got)
+	}
+	locale := resolveWebSearchBingLocale(bingSearchLocale{setLang: "en", mkt: "en-US"}, "最近一周 GitHub 项目", webSearchOptions{language: "auto"})
+	if locale.setLang != "zh-hans" || locale.mkt != "zh-CN" {
+		t.Fatalf("expected CJK auto locale, got %#v", locale)
+	}
+}
+
+func TestWebSearchTool_BingFallsBackToRSSWhenHTMLHasNoResults(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	requests := 0
+	tool.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			body := `<html><body><ol id="b_results"></ol></body></html>`
+			if req.URL.Query().Get("format") == "rss" {
+				body = `<?xml version="1.0"?><rss version="2.0"><channel>` +
+					`<item><title>AI weekly repositories</title><link>https://example.com/ai</link>` +
+					`<description>Weekly AI repositories</description></item>` +
+					`</channel></rss>`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "AI weekly repositories"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success || !strings.Contains(result.Content, "AI weekly repositories") {
+		t.Fatalf("expected RSS fallback result, got %#v %q", result.Metadata, result.Content)
+	}
+	if requests != 2 {
+		t.Fatalf("expected HTML then RSS requests, got %d", requests)
+	}
+}
+
+func TestWebSearchTool_BingSkipsRSSForPlainEmptyPage(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	requests := 0
+	tool.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`<html><body></body></html>`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "unlikely_token_xyz"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected empty success, got %v", result.Error)
+	}
+	if requests != 1 {
+		t.Fatalf("plain empty page must not trigger RSS, requests=%d", requests)
+	}
+}
+
+func TestWebSearchTool_BingBlockedPageIsStructured(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	tool.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Query().Get("format") == "rss" {
+				return &http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Body:       io.NopCloser(strings.NewReader("rss unavailable")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`<html><body>unusual traffic captcha verify you are human</body></html>`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "blocked query"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected blocked-page failure, got %#v", result.Metadata)
+	}
+	code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string)
+	if code != string(runtimeerrors.ErrAPIServerError) {
+		t.Fatalf("error_code=%q want API_SERVER_ERROR meta=%#v", code, result.Metadata)
 	}
 }
 
