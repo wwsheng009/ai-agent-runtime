@@ -248,8 +248,9 @@
             ⑥ 无障碍：role=region + 头部把手（可聚焦，方向键微调、Home 复位）+
                折叠按钮 aria-expanded；快捷键 Ctrl+J（与「视图」菜单同一入口）。
             ⑦ 首行合并（2026-09，用户要求）：动态状态条进入标题行，原「输入」标题与
-               #composer-summary 配置摘要（provider · model · reasoning）已移除——配置文案
-               只在窄屏 ⚙ 触发按钮上出现，桌面由三个选择框直接呈现。 -->
+               #composer-summary 配置摘要（provider · model · reasoning）已移除——配置经
+               输入行左侧 ⚙ 图标向上弹出（全端同一交互），当前生效配置由 JS 写进触发器
+               title 与可访问名（#cfg-toggle-value），弹出面板内三行「标签 + 控件」。 -->
       <div id="composer-panel" class="composer-panel" role="region" aria-label="输入与模型配置（停靠 / 可拖动面板）">
         <!-- 任务列表浮动面板（todo）：底边与 composer 面板上沿衔接——style.css 用
               bottom:calc(100% + 1px) 把它贴在 #composer-panel 顶部（左/右各外扩 1px 对齐
@@ -276,7 +277,7 @@
          <!-- 首行（2026-09 两行合一，用户要求）：拖动把手 + 动态状态条 + 复位 / 折叠按钮同行。
               动态状态条（与 aicli chat 底部活动状态行同步）即原第二行：无状态时由 sse.js 置
               display:none，该行只剩把手与右侧按钮；原「输入」标题与 provider · model ·
-              reasoning 摘要（#composer-summary）已移除，配置文案只在窄屏 ⚙ 按钮上出现。 -->
+              reasoning 摘要（#composer-summary）已移除，配置经输入行 ⚙ 图标弹出。 -->
          <div id="composer-header" class="composer-header">
           <button id="composer-grip" class="composer-grip" type="button"
             title="拖动移动面板（方向键微调，Home 复位）" aria-label="移动浮动输入面板">⠿</button>
@@ -293,24 +294,33 @@
                轨道只呈现服务端回执里的本地路径元信息（文件名 / 尺寸 / 字节数），**不放缩略图**：
                浏览器读不到本地绝对路径，<img src="..."> 只会得到坏图，等于伪造。 -->
           <div id="attachment-track" class="attachment-track" aria-live="polite" hidden></div>
+          <!-- 输入区（2026-10 二次重排）：文本框独占一行拉满宽度；⚙ 配置 / 📎 附件 /
+               发送全部下沉到 #composer-toolbar（输入框底部的工具条）。
+               ⚙ 是配置面板（provider / model / reasoning）的弹出触发器：面板 position:absolute
+               向上展开覆盖在正文之上；当前生效配置由 runtime.js 写进 #cfg-toggle-value
+               （视觉隐藏，仅作触发器的可访问名）。发送键是图标按钮（↑），文案状态由
+               chat.js 写进 aria-label / title（发送 / 发送中 / 停止 / 正在停止）。 -->
           <div id="input-row">
+            <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
+          </div>
+          <div id="composer-toolbar" class="composer-toolbar">
+            <button id="cfg-toggle" type="button" aria-expanded="false" aria-haspopup="true"
+              title="模型配置" aria-label="模型配置（provider / model / reasoning）">
+              <span class="cfg-toggle-icon" aria-hidden="true">⚙</span>
+              <span id="cfg-toggle-value" class="cfg-toggle-value">配置</span>
+            </button>
             <!-- 图片附件三入口之一：📎 按钮 + 隐藏 file input（另两条是 #prompt 粘贴与
                  面板内拖放；三条入口共用 js/attachments.js 里的同一条上传路径）。 -->
             <button id="attach-btn" class="attach-btn" type="button"
               title="添加图片附件（也可直接粘贴 / 拖入图片）" aria-label="添加图片附件">📎</button>
             <input id="attach-file" class="attach-file" type="file" accept="image/*" multiple tabindex="-1">
-            <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
-            <button id="send-btn">发送</button>
+            <span class="composer-toolbar-spacer"></span>
+            <button id="send-btn" type="button" aria-label="发送" title="发送（回车）">↑</button>
           </div>
+          <!-- 配置面板（2026-10 改版）：#input-row 的兄弟节点、锚定在输入行上方弹出的浮层。
+               不再是常驻一行——三行「标签 + 控件」由 .cfg-controls 纵向排布，#cfg-status 的
+               提示仍占面板底部一行；显隐由 #cfg-bar 上的 .cfg-open 驱动（runtime.js 切换）。 -->
           <div id="cfg-bar">
-            <!-- 窄屏折叠触发器（桌面 display:none）：小屏不把三个选择器平铺占三行，
-                 改为单行按钮 + 向上弹出的面板；当前生效配置也由本按钮承载。 -->
-            <button id="cfg-toggle" type="button" aria-expanded="false" title="展开 provider / model / reasoning 选择器">
-              <span class="cfg-toggle-icon" aria-hidden="true">⚙</span>
-              <span id="cfg-toggle-value" class="cfg-toggle-value">配置</span>
-              <span class="cfg-toggle-caret" aria-hidden="true">▾</span>
-            </button>
-            <!-- 桌面 display:contents：包裹层不生成盒子，三个选择器仍是 #cfg-bar 的平铺 flex 子项 -->
             <div class="cfg-controls">
               <label class="cfg-item">
                 <span class="cfg-label">Provider</span>
@@ -329,7 +339,6 @@
                   <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出可搜索列表" autocomplete="off">
                   <datalist id="cfg-model-options" hidden></datalist>
                   <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
-                  <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
                   <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
                 </span>
               </label>

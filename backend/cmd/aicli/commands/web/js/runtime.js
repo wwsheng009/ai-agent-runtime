@@ -21,8 +21,8 @@ function cfgEls() {
     modelOpts: document.getElementById("cfg-model-options"),
     modelToggle: document.getElementById("cfg-model-toggle"),
     modelPopup: document.getElementById("cfg-model-popup"),
-    modelCount: document.getElementById("cfg-model-count"),
     reasoning: document.getElementById("cfg-reasoning"),
+    toggle: document.getElementById("cfg-toggle"),
     toggleValue: document.getElementById("cfg-toggle-value"),
     status: document.getElementById("cfg-status")
   };
@@ -198,10 +198,8 @@ function renderModelDatalist(els, provider) {
       return '<option value="' + esc(m) + '"></option>';
     }).join("");
   }
-  if (els.modelCount) {
-    els.modelCount.textContent = models.length > 0 ? ("共 " + models.length + " 个") : "";
-    els.modelCount.title = models.length > 0 ? ("可选模型: " + models.join(", ")) : "该 provider 暂无预置模型，可直接输入";
-  }
+  // 可选模型数不再常驻显示（原 #cfg-model-count 已移除）：数量与清单
+  // 收进输入框 title，hover 即得，不占配置行宽度。
   if (els.model) {
     els.model.title = "切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出可搜索列表" +
       (models.length > 0 ? "（共 " + models.length + " 个： " + models.slice(0, 8).join(", ") + (models.length > 8 ? "…" : "") + "）" : "");
@@ -456,10 +454,15 @@ export function loadRuntimeMeta() {
         els.reasoning.value = keepReasoning;
       }
       var currentText = (cfg.provider || "?") + " · " + (cfg.model || "?") + (cfg.reasoning ? " · " + cfg.reasoning : "");
-      // 这份配置文案只出现在窄屏的 ⚙ 触发按钮上（选择框收进弹出面板）：桌面由三个
-      // 选择框直接呈现；面板首行原有的 #composer-summary 摘要已随「两行合一」删除
-      // （用户要求取消「输入 provider/model/reasoning」文案）。
+      // 当前生效配置写进输入行 ⚙ 触发器：可访问名（#cfg-toggle-value，视觉隐藏）+
+      // title（悬停可见）。面板本体（provider/model/reasoning 选择器）只在弹出时可见。
       if (els.toggleValue) { els.toggleValue.textContent = currentText; }
+      if (els.toggle) {
+        var toggle = els.toggle;
+        toggle.title = "模型配置：" + currentText;
+        var label = toggle.getAttribute("aria-label") || "模型配置";
+        if (label.indexOf("：") < 0) { toggle.setAttribute("aria-label", label + "：" + currentText); }
+      }
     })
     .catch(function (err) { console.error("runtime meta fetch failed:", err); });
 }
@@ -722,7 +725,8 @@ export function initRuntimeBar() {
       });
     });
   }
-  // 窄屏折叠面板：触发按钮切换 .cfg-open（桌面该按钮 display:none，这段逻辑空转）。
+  // 窄屏折叠面板 → 2026-10 起全端统一的 ⚙ 弹出面板：触发按钮在 #input-row 里
+  // （#cfg-bar 的兄弟节点），点击切换 .cfg-open。桌面 / 移动端同一交互。
   var cfgToggleEl = document.getElementById("cfg-toggle");
   function closeCfgPanel() {
     if (!cfgBarEl) { return; }
@@ -732,6 +736,7 @@ export function initRuntimeBar() {
   if (cfgToggleEl && cfgBarEl) {
     cfgToggleEl.addEventListener("click", function (e) {
       e.preventDefault();
+      e.stopPropagation(); // 不冒泡到 document 的外点关闭（面板已开时点按钮应保持开合切换）
       var open = cfgBarEl.classList.toggle("cfg-open");
       cfgToggleEl.setAttribute("aria-expanded", open ? "true" : "false");
       if (!open) { closeModelPopup(); closeProviderPopup(); }
@@ -740,6 +745,7 @@ export function initRuntimeBar() {
     document.addEventListener("click", function (e) {
       if (!cfgBarEl.classList.contains("cfg-open")) { return; }
       if (cfgBarEl.contains(e.target)) { return; }
+      if (cfgToggleEl && (e.target === cfgToggleEl || (cfgToggleEl.contains && cfgToggleEl.contains(e.target)))) { return; }
       closeCfgPanel();
     });
     document.addEventListener("keydown", function (e) {

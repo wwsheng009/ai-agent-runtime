@@ -70,28 +70,39 @@ export function setUI(state, statusText) {
 }
 
 export function renderButton() {
+  // 2026-10 起发送键是 ↑ 图标按钮：textContent 固定为图标（停止态 ■），状态文案写进
+  // aria-label / title（读屏与悬停可见），颜色语义由 className 驱动（CSS 状态机）。
   switch (uiState) {
     case "posting":
-      sendBtn.textContent = "发送中…";
+      sendBtn.textContent = "↑";
       sendBtn.className = "sending-btn";
       sendBtn.disabled = true;
+      setSendBtnLabel("发送中…");
       break;
     case "busy":
-      sendBtn.textContent = "停止";
+      sendBtn.textContent = "■";
       sendBtn.className = "stop-btn";
       sendBtn.disabled = false;
+      setSendBtnLabel("停止");
       break;
     case "interrupting":
-      sendBtn.textContent = "正在停止…";
+      sendBtn.textContent = "■";
       sendBtn.className = "stop-btn sending-btn";
       sendBtn.disabled = true;
+      setSendBtnLabel("正在停止…");
       break;
     default: // idle
-      sendBtn.textContent = "发送";
+      sendBtn.textContent = "↑";
       sendBtn.className = "";
       sendBtn.disabled = !promptEl.value.trim();
+      setSendBtnLabel("发送");
       break;
   }
+}
+// 图标按钮的可访问名 + 悬停提示：状态机每次重绘同步刷新（sendBtn 常驻，不判空）。
+function setSendBtnLabel(text) {
+  sendBtn.setAttribute("aria-label", text);
+  sendBtn.title = text + (text === "发送" ? "（回车）" : "");
 }
 // ---- 结构化对话渲染（role-based 气泡） ----
 var MSG_LABELS = {

@@ -859,22 +859,26 @@ body.msgfilter-dragging * { cursor: grabbing !important; user-select: none !impo
   border: 1px solid transparent; border-radius: 4px;
 }
 .attach-remove:hover { background: var(--hoverBg2); color: var(--fg); }
-/* 📎 按钮与 #send-btn 同排：常态就是普通按钮外观（与 composer 里其它控件一致） */
+/* 📎 附件钮：工具条左列第二位，与 ⚙ 同规格的方形图标钮 */
 #composer-panel .attach-btn {
-  flex: 0 0 auto; padding: 8px 10px;
-  background: var(--bg3); color: var(--fg2);
-  border: 1px solid var(--border2); border-radius: 6px;
+  flex: 0 0 auto;
+  height: 30px; width: 34px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--fg3);
+  border: 1px solid transparent; border-radius: 6px;
   font-size: 14px; line-height: 1;
 }
-#composer-panel .attach-btn:hover { background: var(--hoverBg2); color: var(--fg); }
+#composer-panel .attach-btn:hover { background: var(--hoverBg2); color: var(--fg); border-color: var(--border); }
 /* 隐藏的文件选择器：以 id 级特异性压掉 #input-row 的 flex 子项占位，且不进 Tab 序 */
 #composer-panel .attach-file { display: none; }
 /* 拖入高亮：面板接过拖放（dragover 已阻止默认）时给整块面板一个虚线轮廓 */
 #composer-panel.attach-dragover { outline: 2px dashed var(--accent); outline-offset: -2px; }
 
+/* 输入区（2026-10 二次重排）：#prompt 独占一行拉满宽度；⚙ / 📎 / ➤ 下沉到
+   #composer-toolbar（输入框底部工具条）。#input-row 只是文本框的包裹层。 */
 #input-row { display: flex; gap: 8px; }
 #prompt {
-  flex: 1; padding: 8px 10px;
+  flex: 1; width: 100%; padding: 8px 10px;
   background: var(--bg2); color: var(--fg);
   border: 1px solid var(--border); border-radius: 6px;
   font-family: inherit; font-size: 13px; line-height: 1.4;
@@ -892,27 +896,68 @@ button:hover { background: var(--hoverBg2); }
    空态（无提示文案）整体隐藏：窄屏状态簇宽度有限，不让空元素继续占一份 flex gap。 */
 #send-status { font-size: 12px; color: var(--fg3); max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #send-status:empty { display: none; }
-/* ---- provider / model / reasoning 配置选择器 ---- */
+/* ---- provider / model / reasoning 配置选择器 ----
+   2026-10 改版（用户要求「配置」不单独占一行）：#cfg-bar 是锚定在 #input-row 上方
+   弹出的浮层面板，触发器是输入行左侧的 ⚙ 图标（#cfg-toggle，全端可见，交互统一）。
+   面板覆盖在正文之上（absolute，不参与布局流，不影响面板自身高度与信息流锚点），
+   显隐只由 .cfg-open 驱动（runtime.js 切换；初始态三行控件随面板一起隐藏）。 */
 #cfg-bar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
-  margin: 6px 0 2px 0; padding: 6px 8px;
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  position: absolute; left: 0; right: 0;
+  bottom: calc(100% + 6px); z-index: 40;
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding: 8px; background: var(--bg2);
+  border: 1px solid var(--border2); border-radius: 8px;
+  box-shadow: 0 10px 28px var(--shadow);
   font-size: 12px;
+  visibility: hidden; opacity: 0;
+  transform: translateY(4px);
+  transition: opacity .12s ease, transform .12s ease, visibility 0s linear .12s;
 }
-#cfg-bar .cfg-item { display: flex; align-items: center; gap: 5px; }
-/* 桌面：包裹层不生成盒子（display:contents），三个选择器仍平铺在 #cfg-bar 里；
-   窄屏则改为弹出面板（见移动端媒体查询）。触发按钮桌面不出现。 */
-#cfg-bar .cfg-controls { display: contents; }
-#cfg-toggle { display: none; }
-#cfg-bar .cfg-label { color: var(--fg3); font-size: 11px; }
+#cfg-bar.cfg-open {
+  visibility: visible; opacity: 1;
+  transform: none;
+  transition: opacity .12s ease, transform .12s ease;
+}
+/* 触发器：composer 底部工具条最左侧的 ⚙ 图标按钮。打开时高亮（边框强调 + 图标转色），
+   #cfg-toggle-value 是 JS 写入的当前配置摘要——视觉隐藏，只作触发器可访问名。 */
+#composer-toolbar #cfg-toggle {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  gap: 0; height: 30px; width: 34px;
+  padding: 0;
+  background: transparent; color: var(--fg3);
+  border: 1px solid transparent; border-radius: 6px;
+  font-size: 15px;
+}
+#composer-toolbar #cfg-toggle:hover { background: var(--hoverBg2); color: var(--fg); border-color: var(--border); }
+#composer-toolbar #cfg-toggle .cfg-toggle-icon { line-height: 1; transition: transform .2s ease; }
+#composer-toolbar #cfg-toggle:hover .cfg-toggle-icon { transform: rotate(45deg); }
+#composer-toolbar #cfg-toggle[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+#composer-toolbar #cfg-toggle[aria-expanded="true"] .cfg-toggle-icon { transform: rotate(90deg); }
+#cfg-toggle .cfg-toggle-value {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; border: 0;
+  clip: rect(0 0 0 0); clip-path: inset(50%);
+  overflow: hidden; white-space: nowrap;
+}
+/* 弹出面板内：三行「标签 + 控件」纵向排布。标签恢复可见（此前桌面走 sr-only
+   是因为三个选择器平铺一行、控件自带 placeholder 已足够；现在控件纵向堆叠、
+   宽度拉满，标签列在左侧能显著降低误触成本）。 */
+#cfg-bar .cfg-controls { display: flex; flex-direction: column; gap: 6px; }
+#cfg-bar .cfg-item {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+}
+#cfg-bar .cfg-label {
+  flex: 0 0 auto; width: 58px; text-align: right;
+  font-size: 11px; color: var(--fg4); white-space: nowrap;
+}
 #cfg-bar select, #cfg-bar input {
-  padding: 3px 6px; font-family: inherit; font-size: 12px;
+  flex: 1 1 auto; min-width: 0; padding: 5px 8px; font-family: inherit; font-size: 12px;
   background: var(--bg3); color: var(--fg);
   border: 1px solid var(--border2); border-radius: 5px;
-  max-width: 150px;
+  max-width: none;
 }
-#cfg-bar .cfg-model input { min-width: 120px; }
-#cfg-bar .cfg-model-wrap { position: relative; display: inline-flex; align-items: center; gap: 0; }
+#cfg-bar .cfg-model input { min-width: 0; }
+#cfg-bar .cfg-model-wrap { position: relative; display: flex; align-items: center; gap: 0; flex: 1 1 auto; min-width: 0; }
 #cfg-bar .cfg-model-wrap input { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none; }
 /* provider 组合框的输入框只读：职责是显示当前值 + 打开列表，不允许手输半截值。 */
 #cfg-bar .cfg-model-wrap input[readonly] { cursor: pointer; }
@@ -922,7 +967,13 @@ button:hover { background: var(--hoverBg2); }
   border: 1px solid var(--border2); border-radius: 0 5px 5px 0;
 }
 #cfg-model-toggle:hover, #cfg-provider-toggle:hover { color: var(--fg); background: var(--hoverBg2); }
-#cfg-bar .cfg-model-count { font-size: 10px; color: var(--fg4); margin-left: 4px; white-space: nowrap; }
+/* composer 底部工具条（2026-10 新增）：⚙ 配置 + 📎 附件靠左，➤ 发送靠右，
+   位于 #input-row（文本框）底部。行距由 .composer-body 的 gap 统一控制。 */
+.composer-toolbar {
+  display: flex; align-items: center; gap: 4px;
+}
+.composer-toolbar-spacer { flex: 1 1 auto; }
+
 /* 弹出列表公共外观：底部 model（.cfg-model-popup，向上展开）与
    Provider 编辑弹窗协议（.cfg-combo-popup，向下展开）共用。 */
 .cfg-model-popup, .cfg-combo-popup {
@@ -972,9 +1023,11 @@ button:hover { background: var(--hoverBg2); }
   border: 1px solid var(--border); border-radius: 0 4px 4px 0;
 }
 #cfg-provider-protocol-toggle:hover { color: var(--fg); background: var(--hoverBg2); }
-/* 配置文案（provider · model · reasoning）不再在底部重复一份：三个选择框已经把它显示全了，
-   这里只留状态提示（切换中… / 提交失败…），并靠 margin-left:auto 保持右对齐。 */
-#cfg-bar .cfg-status { margin-left: auto; font-size: 11px; color: var(--fg4); }
+/* 配置文案（provider · model · reasoning）不再在底部重复一份：当前生效配置写进 ⚙ 触发器
+   的可访问名（#cfg-toggle-value），面板里只留状态提示（切换中… / 提交失败…），
+   空态不占位（:empty 隐藏，面板高度随之收紧）。 */
+#cfg-bar .cfg-status { font-size: 11px; color: var(--fg4); min-height: 0; }
+#cfg-bar .cfg-status:empty { display: none; }
 #cfg-bar .cfg-status.busy { color: var(--accent); }
 #cfg-bar .cfg-status.ok { color: var(--green); }
 #cfg-bar .cfg-status.err { color: var(--red, #e5534b); }
@@ -998,6 +1051,23 @@ button:hover { background: var(--hoverBg2); }
 .stream-reasoning { color: var(--reasoningFg); font-style: italic; }
 .stream-tool { color: var(--toolFg); }
 /* ---- 按钮状态机 ---- */
+/* 发送键（2026-10 改版）：↑ 图标按钮，居 composer 工具条最右。
+   主色圆形强调，与配置页签 .primary-btn 同一套配色变量。
+   #send-btn 的 className 会被 chat.js 整个重写（"" / stop-btn / sending-btn），
+   所以强调样式必须挂在 id 上，不能依赖任何 class；状态文案由 chat.js 写进
+   aria-label / title（按钮本体始终只显示 ↑ / ■ 图标）。 */
+#send-btn {
+  flex: 0 0 auto; width: 30px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+  background: var(--accent); color: var(--userMsgFg, #fff);
+  border-color: var(--accent);
+  border-radius: 50%;
+}
+#send-btn:hover { background: var(--accent2); border-color: var(--accent2); }
+#send-btn:disabled { opacity: .55; cursor: not-allowed; }
+/* 停止态：红色圆形，与图标按钮尺寸一致 */
+button.stop-btn#send-btn,
 button.stop-btn {
   background: var(--redBtn); color: var(--red);
   border-color: var(--redBorder);
@@ -1574,63 +1644,27 @@ body.sidebar-collapsed #sidebar {
   body.sidebar-collapsed #sidebar { width: 0; }
   /* ---- 浮动 composer 面板内的输入区 + cfg-bar（面板几何见前面的 #composer-panel）----
      触屏三条硬规则：① 输入控件字号 ≥16px（低于 16px 时 iOS 聚焦会自动放大整页）；
-     ② 可点按控件高度 ≥44px；③ 输入区与发送键同排右对齐，别让 composer 吃掉正文高度。 */
+     ② 可点按控件高度 ≥44px；③ 输入区与发送键同排右对齐，别让 composer 吃掉正文高度。
+     2026-10 起 cfg-bar 全端都是弹出面板（见桌面基础规则），窄屏只调尺寸：图标钮
+     放大到 44px 点按区，面板控件字号拉到 16px。 */
   #input-row { flex-wrap: nowrap; gap: 6px; }
   #prompt {
     min-width: 0; min-height: 44px; padding: 10px 12px;
     font-size: 16px; line-height: 1.45;
     max-height: min(160px, 38vh);
   }
-  #send-btn {
-    flex: 0 0 auto; align-self: flex-end;
-    min-width: 76px; min-height: 44px; max-width: 42%;
-    padding: 9px 14px; font-size: 15px;
-  }
-  /* 📎 附件按钮同样要够 44px 点按区（与发送键同排，靠底对齐） */
-  #composer-panel .attach-btn {
-    align-self: flex-end; min-width: 44px; min-height: 44px;
-    padding: 10px; font-size: 16px;
-  }
-  /* ---- 配置栏：小屏折叠成弹出面板 ----
-     三个选择器平铺在窄屏要占 3 行 99px；改为单行触发按钮 + 向上弹出的面板。
-     面板绝对定位覆盖在正文之上（不挤压正文，也不触发 ResizeObserver 重排），
-     配置文案（provider · model · reasoning）小屏由触发按钮承载，桌面也不在底部重复。 */
-  #cfg-bar {
-    position: relative; display: flex; align-items: center; gap: 8px;
-    margin: 4px 0 0; padding: 4px 6px;
-  }
-  #cfg-toggle {
-    display: flex; align-items: center; gap: 6px;
-    flex: 1 1 auto; min-width: 0; min-height: 36px; padding: 6px 10px;
-    font-size: 13px; text-align: left;
-  }
-  #cfg-toggle .cfg-toggle-value {
-    flex: 1 1 auto; min-width: 0; color: var(--fg3);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  #cfg-toggle .cfg-toggle-caret { flex: 0 0 auto; color: var(--fg3); transition: transform .15s ease; }
-  #cfg-bar.cfg-open #cfg-toggle { border-color: var(--accent); }
-  #cfg-bar.cfg-open .cfg-toggle-caret { transform: rotate(180deg); }
-  #cfg-bar .cfg-controls { display: none; }
-  #cfg-bar.cfg-open .cfg-controls {
-    display: flex; flex-direction: column; gap: 6px;
-    position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 40;
-    padding: 8px; background: var(--bg2); border: 1px solid var(--border2);
-    border-radius: 8px; box-shadow: 0 10px 28px var(--shadow);
-  }
-  /* 输入框受 iOS 字号规则约束（<16px 聚焦会放大整页）；选择器在面板内各占一行 */
-  #cfg-bar .cfg-item { min-width: 0; }
-  #cfg-bar .cfg-label { font-size: 11px; }
-  #cfg-bar select, #cfg-bar input { font-size: 16px; padding: 5px 8px; }
-  #cfg-bar select { max-width: none; width: 100%; }
-  #cfg-bar .cfg-model-wrap { flex: 1 1 auto; min-width: 0; }
-  /* 面板里模型名最需要宽度：解除桌面 150px 上限，输入框吃满该行剩余空间 */
-  #cfg-bar .cfg-model input { flex: 1 1 auto; min-width: 0; width: auto; max-width: none; }
-  /* provider 只读输入框同理：窄屏面板里占满该行剩余空间（解除桌面 150px 上限） */
-  #cfg-bar input[readonly] { flex: 1 1 auto; min-width: 0; width: auto; max-width: none; }
-  #cfg-bar .cfg-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #cfg-bar .cfg-status:empty { display: none; }
-  #cfg-model-toggle, #cfg-provider-toggle { padding: 8px 12px; font-size: 13px; }
+  /* ⚙ / 📎 / ↑ 工具条保持紧凑高度（30px，与桌面一致）：工具条不是主要输入目标，
+     放大到 44px 只会无谓抬高 composer、挤压正文——点按容差由整行高度承担。 */
+  #composer-panel .attach-btn { font-size: 15px; }
+  #composer-toolbar #cfg-toggle { font-size: 16px; }
+  /* ---- 配置弹出面板（窄屏只调尺寸，几何与显隐沿用桌面基础规则） ----
+     面板覆盖在正文之上（不挤压正文，也不触发 ResizeObserver 重排）。
+     2026-10：面板内控件与桌面同一紧凑尺寸，不再整体放大——唯一例外是可编辑
+     文本框（#cfg-model 与 popup 检索框）保留 16px 字号：iOS 对字号 <16px 的
+     可编辑框聚焦时会放大整页；readonly provider 框 / select / ▼ 按钮不弹键盘，
+     不触发该行为，跟随桌面 12px 紧凑规格（几何尺寸沿用基础规则，不再覆写）。 */
+  #cfg-bar .cfg-model input { font-size: 16px; }
+  #cfg-bar .cfg-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* 面板里向上展开的模型列表：矮视口限高，避免顶部越出视口 */
   #cfg-bar.cfg-open .cfg-model-popup { max-height: min(240px, 40vh); }
   /* 检索框会被程序聚焦：字号必须 ≥16px，否则 iOS 聚焦时放大整页 */

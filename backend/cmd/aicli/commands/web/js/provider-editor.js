@@ -655,25 +655,10 @@ function rebuildModelEditors(models, provider, metadata, metadataAuthoritative) 
 // 左侧模型列表：可点击行 + 摘要 chip + 过滤。
 function renderModelList(models) {
   var listEl = configEl("cfg-model-list");
-  var countEl = configEl("cfg-model-count");
   if (!listEl) { return; }
   var visible = models.filter(function (m) {
     return !cfgModelFilter || m.toLowerCase().indexOf(cfgModelFilter) >= 0;
   });
-  if (countEl) {
-    var base = models.length
-      ? (visible.length === models.length
-        ? models.length + " 个模型"
-        : visible.length + " / " + models.length + " 个模型")
-      : "";
-    // 已配置计数：扫列表时先知道「有多少模型真的配了东西」，不用逐行看 chip。
-    var configuredCount = models.filter(function (m) {
-      return !modelDraftIsEmpty(cfgModelDraft[m] || emptyModelDraft());
-    }).length;
-    countEl.textContent = base && configuredCount > 0
-      ? base + " · 已配置 " + configuredCount + " / " + models.length
-      : base;
-  }
   if (models.length === 0) {
     listEl.innerHTML = '<div class="config-empty">在上方填写支持模型后在此逐模型编辑</div>';
     return;
