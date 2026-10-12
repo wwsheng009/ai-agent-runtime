@@ -535,8 +535,15 @@ func clampChatStatusPercent(percent int) int {
 }
 
 func resolveChatStatusContextUsedTokens(session *ChatSession) int {
+	usedTokens, _ := resolveChatStatusContextUsedTokensWithSource(session)
+	return usedTokens
+}
+
+// resolveChatStatusContextUsedTokensWithSource 是 used 值的带来源解析（来源枚举见
+// chatContextUsedSource* 常量），供 web 状态栏 used_tokens_source 字段与调试归因使用。
+func resolveChatStatusContextUsedTokensWithSource(session *ChatSession) (int, string) {
 	if session == nil {
-		return 0
+		return 0, chatContextUsedSourceEstimate
 	}
 	// The provider-observed anchor on the runtime session is the authoritative
 	// "last confirmed" active context size (docs/compact/README.md). Prefer it
@@ -544,16 +551,16 @@ func resolveChatStatusContextUsedTokens(session *ChatSession) int {
 	// provider counts the wire payload (~1.18x on the 2026-10-11 incident),
 	// and the provider-usage event bridge did not always deliver (status bar
 	// read 171K — a content-only layout metric — while the real prompt was
-	// 262K).
-	if session.RuntimeSession != nil {
-		if anchor, ok := runtimeSessionContextInt(session.RuntimeSession, chatRuntimeContextContextTokenCount); ok && anchor > 0 {
-			return anchor
-		}
+	// 262K). Structured anchors are read verbatim (legacy key) so a stale
+	// canonical twin cannot shadow the live anchor (2026-10-12 reader-side
+	// defense, §5.2-C of docs/analysis/context-usage-status-value-chain-analysis-20261012.md).
+	if value, source, ok := runtimeSessionAnchoredContextInt(session.RuntimeSession); ok {
+		return value, source
 	}
 	if session.ContextTokenCount > 0 {
-		return session.ContextTokenCount
+		return session.ContextTokenCount, chatContextUsedSourceSnapshot
 	}
-	return resolveChatContextSnapshotTokens(session, nil)
+	return resolveChatContextSnapshotTokens(session, nil), chatContextUsedSourceEstimate
 }
 
 func buildChatStatusTokenUsageValue(session *ChatSession) string {

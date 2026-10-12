@@ -18,6 +18,7 @@ package commands
 //	  "context_used": "Context 0% used",
 //	  "context_percent": 0,
 //	  "used_tokens": 0,
+//	  "used_tokens_source": "estimate",
 //	  "window_tokens": 256000,
 //	  "directory": "E:\\projects\\ai\\ai-agent-runtime",
 //	  "project": "ai-agent-runtime",
@@ -63,23 +64,24 @@ type chatWebStatusBarSegment struct {
 
 // chatWebStatusBarSnapshot 是 GET /web/api/statusbar 的 JSON 响应体。
 type chatWebStatusBarSnapshot struct {
-	Available      bool                      `json:"available"`
-	Reason         string                    `json:"reason,omitempty"`
-	SessionID      string                    `json:"session_id,omitempty"`
-	Balance        string                    `json:"balance,omitempty"`
-	Routing        string                    `json:"routing,omitempty"`
-	ContextUsed    string                    `json:"context_used,omitempty"`
-	ContextPercent int                       `json:"context_percent,omitempty"`
-	UsedTokens     int                       `json:"used_tokens,omitempty"`
-	WindowTokens   int                       `json:"window_tokens,omitempty"`
-	Directory      string                    `json:"directory,omitempty"`
-	Project        string                    `json:"project,omitempty"`
-	GitBranch      string                    `json:"git_branch,omitempty"`
-	Window         string                    `json:"window,omitempty"`
-	InputTokens    string                    `json:"input_tokens,omitempty"`
-	OutputTokens   string                    `json:"output_tokens,omitempty"`
-	Segments       []chatWebStatusBarSegment `json:"segments"`
-	FullLine       string                    `json:"full_line"`
+	Available        bool                      `json:"available"`
+	Reason           string                    `json:"reason,omitempty"`
+	SessionID        string                    `json:"session_id,omitempty"`
+	Balance          string                    `json:"balance,omitempty"`
+	Routing          string                    `json:"routing,omitempty"`
+	ContextUsed      string                    `json:"context_used,omitempty"`
+	ContextPercent   int                       `json:"context_percent,omitempty"`
+	UsedTokens       int                       `json:"used_tokens,omitempty"`
+	UsedTokensSource string                    `json:"used_tokens_source,omitempty"`
+	WindowTokens     int                       `json:"window_tokens,omitempty"`
+	Directory        string                    `json:"directory,omitempty"`
+	Project          string                    `json:"project,omitempty"`
+	GitBranch        string                    `json:"git_branch,omitempty"`
+	Window           string                    `json:"window,omitempty"`
+	InputTokens      string                    `json:"input_tokens,omitempty"`
+	OutputTokens     string                    `json:"output_tokens,omitempty"`
+	Segments         []chatWebStatusBarSegment `json:"segments"`
+	FullLine         string                    `json:"full_line"`
 }
 
 // HandleChatWebAPIStatusLine 返回当前会话的底部状态栏快照（§4.2.6）。
@@ -144,7 +146,9 @@ func buildChatWebStatusBarSnapshotForSession(session *ChatSession) *chatWebStatu
 		snap.ContextUsed = seg.full
 		snap.ContextPercent, _ = parseContextUsedPercent(seg.full)
 		// also resolve raw token counts for finer-grained display
-		snap.UsedTokens = resolveChatStatusContextUsedTokens(session)
+		usedTokens, usedSource := resolveChatStatusContextUsedTokensWithSource(session)
+		snap.UsedTokens = usedTokens
+		snap.UsedTokensSource = usedSource
 		snap.WindowTokens = resolveChatStatusContextWindowTokens(session)
 		snap.Segments = append(snap.Segments, chatWebStatusBarSegment{
 			Kind: string(chatWebStatusBarSegContextUsed),

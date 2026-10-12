@@ -297,7 +297,7 @@ func restoreChatContextTokenUsage(session *ChatSession, runtimeSession *runtimec
 		return
 	}
 	resetChatContextTokenUsage(session)
-	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextContextTokenCount); ok {
+	if count, _, ok := runtimeSessionAnchoredContextInt(runtimeSession); ok {
 		session.ContextTokenCount = count
 	}
 	if count, ok := runtimeSessionContextInt(runtimeSession, chatRuntimeContextContextWindowTokenCount); ok {
@@ -329,4 +329,35 @@ func runtimeSessionContextRawInt(session *runtimechat.Session, key string) (int,
 	}
 	// 单键包装后走 sessionmeta.Int 的数值转换，避免复制其类型分支。
 	return sessionmeta.Int(map[string]interface{}{key: value}, key)
+}
+
+// 上下文 used 值（状态栏/恢复路径）的解析来源，用于调试归因与 web 快照暴露。
+const (
+	chatContextUsedSourceAnchorCanonical = "anchor_canonical"
+	chatContextUsedSourceAnchorLegacy    = "anchor_legacy"
+	chatContextUsedSourceSnapshot        = "snapshot"
+	chatContextUsedSourceEstimate        = "estimate"
+)
+
+// runtimeSessionAnchoredContextInt 解析 runtime session 上的活跃上下文锚点并返回来源：
+//  1. 结构化锚点（prompt 身份 fingerprint 存在）→ 逐字读取 legacy 锚点键，绕开
+//     canonical 优先顺序，防止陈旧 canonical 遮蔽实时锚点（2026-10-12 修复的读取端
+//     纵深防御）；
+//  2. 无结构化锚点时保持历史顺序：canonical → legacy。
+func runtimeSessionAnchoredContextInt(session *runtimechat.Session) (int, string, bool) {
+	if session == nil || session.Metadata.Context == nil {
+		return 0, "", false
+	}
+	if _, structured := session.Metadata.Context[runtimechat.RuntimeContextAnchorFingerprintKey]; structured {
+		if anchor, ok := runtimeSessionContextRawInt(session, chatRuntimeContextContextTokenCount); ok && anchor > 0 {
+			return anchor, chatContextUsedSourceAnchorLegacy, true
+		}
+	}
+	if value, ok := runtimeSessionContextRawInt(session, sessionmeta.ContextTokenCount); ok && value > 0 {
+		return value, chatContextUsedSourceAnchorCanonical, true
+	}
+	if value, ok := runtimeSessionContextRawInt(session, chatRuntimeContextContextTokenCount); ok && value > 0 {
+		return value, chatContextUsedSourceAnchorLegacy, true
+	}
+	return 0, "", false
 }

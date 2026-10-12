@@ -11,6 +11,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 )
 
 func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *testing.T) {
@@ -385,5 +386,72 @@ func TestChatStatusContextUsedPercent_MatchesCodexBaselineClamp(t *testing.T) {
 	}
 	if got := chatStatusContextUsedPercent(200000, 128000); got != 100 {
 		t.Fatalf("expected over-window usage to clamp at 100%%, got %d", got)
+	}
+}
+
+// TestResolveChatStatusContextUsedTokensWithSource pins the 2026-10-12
+// reader-side defense (analysis §5.2-C): when a structured loop anchor exists,
+// the legacy anchor is read verbatim so a stale canonical twin cannot shadow
+// it; without a structured anchor the historical canonical-first order stays.
+// The resolved source is exposed for status/debug attribution (web
+// used_tokens_source field).
+func TestResolveChatStatusContextUsedTokensWithSource(t *testing.T) {
+	anchored := runtimechat.NewSession("status-anchor-source")
+	anchored.Metadata.Context = map[string]interface{}{
+		runtimechat.RuntimeContextAnchorFingerprintKey: "fp-loop-anchor",
+		chatRuntimeContextContextTokenCount:            358568,
+		sessionmeta.ContextTokenCount:                  2395,
+	}
+	got, source := resolveChatStatusContextUsedTokensWithSource(&ChatSession{RuntimeSession: anchored})
+	if got != 358568 || source != chatContextUsedSourceAnchorLegacy {
+		t.Fatalf("structured anchor must win verbatim, got value=%d source=%q", got, source)
+	}
+
+	// Web 状态栏快照同步暴露来源字段（可观测性增强）。
+	snap := buildChatWebStatusBarSnapshotForSession(&ChatSession{
+		RuntimeSession:          anchored,
+		ContextWindowTokenCount: 1048576,
+	})
+	if snap.UsedTokens != 358568 || snap.UsedTokensSource != chatContextUsedSourceAnchorLegacy {
+		t.Fatalf("web statusbar must expose anchor source, got used=%d source=%q", snap.UsedTokens, snap.UsedTokensSource)
+	}
+
+	// 无结构化锚点：保持历史 canonical-first 顺序。
+	canonicalOnly := runtimechat.NewSession("status-canonical-source")
+	canonicalOnly.Metadata.Context = map[string]interface{}{
+		chatRuntimeContextContextTokenCount: 111,
+		sessionmeta.ContextTokenCount:       2395,
+	}
+	got, source = resolveChatStatusContextUsedTokensWithSource(&ChatSession{RuntimeSession: canonicalOnly})
+	if got != 2395 || source != chatContextUsedSourceAnchorCanonical {
+		t.Fatalf("canonical-first order must be preserved without a structured anchor, got value=%d source=%q", got, source)
+	}
+
+	// 无锚点：快照回退。
+	got, source = resolveChatStatusContextUsedTokensWithSource(&ChatSession{ContextTokenCount: 50000})
+	if got != 50000 || source != chatContextUsedSourceSnapshot {
+		t.Fatalf("snapshot fallback expected, got value=%d source=%q", got, source)
+	}
+
+	// 全空：估算回退（空会话估算为 0）。
+	got, source = resolveChatStatusContextUsedTokensWithSource(&ChatSession{})
+	if got != 0 || source != chatContextUsedSourceEstimate {
+		t.Fatalf("estimate fallback expected, got value=%d source=%q", got, source)
+	}
+}
+
+// TestRestoreChatContextTokenUsagePrefersStructuredAnchor pins that the resume
+// path reads the structured anchor verbatim instead of a stale canonical twin.
+func TestRestoreChatContextTokenUsagePrefersStructuredAnchor(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("restore-anchor-source")
+	runtimeSession.Metadata.Context = map[string]interface{}{
+		runtimechat.RuntimeContextAnchorFingerprintKey: "fp-loop-anchor",
+		chatRuntimeContextContextTokenCount:            358568,
+		sessionmeta.ContextTokenCount:                  2395,
+	}
+	session := &ChatSession{}
+	restoreChatContextTokenUsage(session, runtimeSession)
+	if session.ContextTokenCount != 358568 {
+		t.Fatalf("restore must prefer the structured anchor, got %d", session.ContextTokenCount)
 	}
 }

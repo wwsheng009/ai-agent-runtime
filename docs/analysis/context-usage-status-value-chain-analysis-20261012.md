@@ -14,7 +14,7 @@
 1. **状态栏 `Context X% used` 的读数链路是三级取值**：runtime session 上的 provider 锚点 → CLI 会话快照 `ContextTokenCount` → 本地估算；百分比 = `round(max(used-12000,0)/(window-12000)*100)`（baseline 12000，clamp 0–100）。
 2. **新建会话**从零起步；**加载/恢复**时从 runtime store 读回 `context_token_count / context_window_token_count / turn_context_token_count`（canonical + legacy 双键兼容）；**每次 LLM 请求完成后**由事件桥 `llm.request.finished` 把 provider usage 写成 `ContextTokenCount`（last-turn 覆盖语义），同时 ReAct loop 每次调用把 provider `InputTotal` 写成持久化锚点（legacy 键 + 7 个结构化身份键）。
 3. **实机逐步验证通过**：137 次请求、268 次 `anchored` 投影、0 次 `context.usage_over_budget`；锚点持续刷新（357,742 → 358,568 → 386,751）；`used_tokens=301,548` 与事件流里的 `usage_total_tokens=301548` 精确对应，`(301548-12000)/(1048576-12000) = 27.93% → 28%`，与用户观察一致。
-4. **验证中发现一个真实缺陷（P0 候选）**：canonical 键 `context_token_count` 会停留在“锚点出现之前”的旧值（本会话为 `2395`），与 loop 实时维护的 legacy 锚点 `aicli_context_token_count`（`358,568+`）分歧；而读取端 `sessionmeta` 按 **canonical 优先**解析，导致状态栏/恢复读到陈旧小值。用探针测试复现：同一份 store 形态下 `resolveChatStatusContextUsedTokens` 返回 `2395 → 0%`；这正是“Context 0% used”这一类误读的确定性解释。修复建议见 §5；**修复已落地（§5.6）**。
+4. **验证中发现一个真实缺陷（P0 候选）**：canonical 键 `context_token_count` 会停留在“锚点出现之前”的旧值（本会话为 `2395`），与 loop 实时维护的 legacy 锚点 `aicli_context_token_count`（`358,568+`）分歧；而读取端 `sessionmeta` 按 **canonical 优先**解析，导致状态栏/恢复读到陈旧小值。用探针测试复现：同一份 store 形态下 `resolveChatStatusContextUsedTokens` 返回 `2395 → 0%`；这正是“Context 0% used”这一类误读的确定性解释。修复建议见 §5；**修复已落地（§5.6、§5.7）**。
 5. `0%` 与 `28%` 两个读数的归属：`0%` ⇔ 上述 canonical 影子（探针确定性复现；另一种成因是首请求前无数据，属正常形态，见 §5.4）；`28%/used=301548` ⇔ 事件桥按 provider `total_tokens` 写入的内存快照路径（事件流实证）。两者之间的翻转时刻无法从留存的工件中完全还原（无状态栏快照），但两个写入路径的分歧本身就是需要修复的根因。
 
 ## 1. 背景
@@ -245,9 +245,9 @@ restoreChatContextTokenUsage => ContextTokenCount=2395
 **修复建议（按推荐度）**：
 - **A（推荐）**：让 loop 观测写入时保持双键一致，例如 `setRuntimeSessionObservedTokenUsage` 改用 `sessionmeta.Set(ctx, sessionmeta.ContextTokenCount, value, chatRuntimeContextContextTokenCount)`；CLI sync 的“锚点存在即跳过”保持不变。这样任何读取顺序都得到同一真值。
 - **B（备选，兼容历史）**：sync 跳过回写时，若发现 canonical 与 legacy 不一致则删除 canonical（读取自然回落到 legacy 锚点）；或把 legacy 锚点值复制到 canonical。
-- **C（纵深防御）**：读取端对“结构化锚点”提供显式解析（优先 legacy 锚点/结构化键），绕开 canonical-first 顺序。
+- **C（纵深防御）**：读取端对“结构化锚点”提供显式解析（优先 legacy 锚点/结构化键），绕开 canonical-first 顺序（**已实施：见 §5.7**）。
 - **回归测试**：固化本次探针形态（canonical 陈旧 + legacy 锚点 + fingerprint 并存），断言 `resolveChatStatusContextUsedTokens` 与 `restoreChatContextTokenUsage` 返回锚点值（现有 `TestSyncRuntimeSessionFromChatPreservesLoopContextAnchor` 未覆盖双键并存场景）。
-- **可观测性增强**：状态栏调试输出记录 used 的解析来源（anchor-canonical / anchor-legacy / snapshot / estimate），使“0% vs 28%”一类读数争议可直接归因。
+- **可观测性增强**：状态栏调试输出记录 used 的解析来源（anchor-canonical / anchor-legacy / snapshot / estimate），使“0% vs 28%”一类读数争议可直接归因（**已实施：`/web/api/statusbar` 新增 `used_tokens_source` 字段，见 §5.7**）。
 
 **修复状态（2026-10-12）**：已按 A + B′ 组合落地并新增回归测试，见 §5.6。
 
@@ -298,8 +298,35 @@ go test ./cmd/aicli/commands/ -run 'Context|Token|Status|Compact' -count=1      
 生效范围与未做项：
 
 - 新观测双键恒一致；历史双键分歧会话在下一次 sync 时对齐（已打开旧进程的内存快照需 resume/重启后生效）。
-- 未实施 §5.2-C 的读取端纵深防御（保持最小改动；如需可作后续加固）。
+- 读取端纵深防御（§5.2-C）与 used 解析来源可观测性已在续作中实施，见 §5.7。
 - 本次改动以独立提交入库（6 个代码/测试文件 + 本文档），与工作区里的其它并发工作流改动隔离。
+
+### 5.7 读取端纵深防御与来源可观测（2026-10-12 续作）
+
+对应 §5.2-C 与“可观测性增强”两项后续：
+
+| 文件 | 改动 |
+|---|---|
+| `backend/cmd/aicli/commands/chat_token_usage.go` | 新增 `runtimeSessionAnchoredContextInt`（带来源解析）：结构化锚点存在时**逐字读取 legacy 锚点**（`anchor_legacy`），绕开 canonical 优先顺序；无结构化锚点保持 canonical → legacy 历史顺序。`restoreChatContextTokenUsage` 的上下文键改用该解析（恢复路径同样获得纵深防御） |
+| `backend/cmd/aicli/commands/chat_status.go` | `resolveChatStatusContextUsedTokens` 拆出 `resolveChatStatusContextUsedTokensWithSource`（返回 used + 来源），原函数保持向后兼容签名 |
+| `backend/cmd/aicli/commands/web_statusbar.go` | `GET /web/api/statusbar` 响应新增 `used_tokens_source` 字段（`anchor_canonical` / `anchor_legacy` / `snapshot` / `estimate`），状态栏读数来源可直接归因 |
+
+新增测试（commands）：
+
+- `TestResolveChatStatusContextUsedTokensWithSource`：结构化锚点 + 陈旧 canonical → `(358568, anchor_legacy)`；web 快照 `used_tokens` / `used_tokens_source` 同步断言；无结构化锚点保持 `(2395, anchor_canonical)`；快照回退 `snapshot`；全空回退 `estimate`。
+- `TestRestoreChatContextTokenUsagePrefersStructuredAnchor`：恢复路径读取结构化锚点（358568）而非陈旧 canonical（2395）。
+
+验证（2026-10-12）：
+
+```bash
+gofmt -l <4 个改动文件>                            # ✅ 无输出
+go build ./cmd/aicli/                              # ✅
+go test ./cmd/aicli/commands/ -run 'TestResolveChatStatusContextUsedTokensWithSource|TestRestoreChatContextTokenUsagePrefersStructuredAnchor|TestSyncRuntimeSessionFromChatAlignsStaleCanonicalContextCount|TestRestoreChatPersistenceState_LoadedSessionRestoresExplicitContextUsage|TestSyncRuntimeSessionFromChatPreservesLoopContextAnchor' -count=1 -v
+# ✅ 5/5 PASS（含两条新增）
+go test ./cmd/aicli/commands/ -run 'Context|Token|Status|Compact' -count=1   # ✅ ok 11.677s
+```
+
+效果：即使某会话 canonical 与 legacy 双键分歧（sync 尚未对齐），状态栏与恢复路径也会优先使用结构化锚点真值；web 状态栏可一眼确认 used 的解析来源。
 
 ## 6. 附录：验证命令与证据
 
