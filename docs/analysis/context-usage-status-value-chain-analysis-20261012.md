@@ -350,6 +350,12 @@ go test ./cmd/aicli/commands/ -run 'TestResolveChatStatusContextUsedTokensWithSo
 
 （说明：WSL 网络无法访问 `proxy.golang.org`，依赖下载使用 `GOPROXY=https://goproxy.cn,direct GOSUMDB=off`。）
 
+**部署（2026-10-12）**：修复版已在 Windows 交叉编译并部署到 WSL Ubuntu 24.04：
+
+- 编译：`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags "-s -w -X main.version=dev -X main.buildTime=<UTC>"`（产物 `backend/dist/aicli-linux-amd64`，ELF 64-bit 静态链接，sha256 `fac93916…fff5`）；
+- 部署：`install -m 0755` 到 `~/.local/bin/aicli`，旧版备份 `~/.local/bin/aicli.bak-20261012-132858`；
+- 校验：源/目标 sha256 一致；`aicli version` → `dev` / `2026-10-12T05:28:28Z`；二进制含修复标记 `anchor_legacy`、`used_tokens_source`（`grep -a`）；`go version -m` 显示 Go 1.27.1 静态构建。
+
 ## 6. 附录：验证命令与证据
 
 ### 6.1 命令清单（工作目录 `backend/`）
