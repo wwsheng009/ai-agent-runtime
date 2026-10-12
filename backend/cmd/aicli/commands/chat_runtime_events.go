@@ -8944,7 +8944,15 @@ func (b *chatRuntimeEventBridge) approvalStillPending(sessionID, requestID strin
 		return true
 	}
 	state := actor.StateForInspection()
-	return state == nil || state.PendingApproval == nil || state.PendingApproval.ID == requestID
+	if state == nil {
+		// 状态快照不可用：无法确认，保持询问行为，避免误跳过导致死锁。
+		return true
+	}
+	// 只有 actor 里仍挂着同一个审批才算 pending。PendingApproval==nil 表示
+	// 已被其它入口（如 web client）解决；挂着别的审批表示本事件已陈旧——
+	// 两者都必须返回 false，否则哨兵重试循环会在答案已经送达后重新挂起
+	// 读取（TUI 永久堵塞，2026-10-12 现场）。
+	return state.PendingApproval != nil && state.PendingApproval.ID == requestID
 }
 
 // questionStillPending 报告指定问题是否仍在 actor 中等待回答。当无法确认时
@@ -8958,7 +8966,13 @@ func (b *chatRuntimeEventBridge) questionStillPending(sessionID, questionID stri
 		return true
 	}
 	state := actor.StateForInspection()
-	return state == nil || state.PendingQuestion == nil || state.PendingQuestion.ID == questionID
+	if state == nil {
+		// 状态快照不可用：无法确认，保持询问行为，避免误跳过导致死锁。
+		return true
+	}
+	// 与 approvalStillPending 同口径：PendingQuestion==nil（已被其它入口回答）
+	// 或挂着别的提问（事件陈旧）都必须返回 false。
+	return state.PendingQuestion != nil && state.PendingQuestion.ID == questionID
 }
 
 // resolveApproval routes an approval decision (plus the optional §4.8
