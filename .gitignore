@@ -17,6 +17,10 @@ backend/*.test
 backend/*.out
 backend/vendor/
 
+# Python
+__pycache__/
+*.pyc
+
 # Local aicli runtime / agent worktrees
 .aicli/
 _baseline-check/
