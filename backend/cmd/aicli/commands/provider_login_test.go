@@ -279,8 +279,24 @@ func TestRunProviderLogin_OpenAICompatibleCodexModelsUseCodexTemplate(t *testing
 	if strings.Join(result.SupportedModels, ",") != strings.Join(codexModels, ",") {
 		t.Fatalf("unexpected supported models: %+v", result.SupportedModels)
 	}
-	if len(result.ModelCardsApplied) != len(codexModels) {
-		t.Fatalf("expected one codex model card per model, got %+v", result.ModelCardsApplied)
+	// The builtin catalog may contribute more than one card per model: the
+	// gateway family cards (added later) sit next to the pre-existing
+	// codex-specific cards, and modelcard.Resolve returns every match sorted by
+	// priority (its own tests assert the leading card, not the count). The
+	// invariant that matters for login is: every codex model resolves its codex
+	// card first, and no model falls back to the plain openai chat card.
+	appliedByModel := make(map[string][]providerLoginModelCardAppliedInfo, len(codexModels))
+	for _, applied := range result.ModelCardsApplied {
+		appliedByModel[applied.Model] = append(appliedByModel[applied.Model], applied)
+	}
+	if len(appliedByModel) != len(codexModels) {
+		t.Fatalf("expected card entries for %d models, got %d: %+v", len(codexModels), len(appliedByModel), result.ModelCardsApplied)
+	}
+	for _, model := range codexModels {
+		cards := appliedByModel[model]
+		if len(cards) == 0 || !strings.Contains(cards[0].CardID, "codex") {
+			t.Fatalf("expected %q to resolve its codex card first, got %+v", model, cards)
+		}
 	}
 	for _, applied := range result.ModelCardsApplied {
 		if applied.CardID == "fallback.openai.chat" {
