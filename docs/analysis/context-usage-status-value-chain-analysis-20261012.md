@@ -328,6 +328,28 @@ go test ./cmd/aicli/commands/ -run 'Context|Token|Status|Compact' -count=1   # �
 
 效果：即使某会话 canonical 与 legacy 双键分歧（sync 尚未对齐），状态栏与恢复路径也会优先使用结构化锚点真值；web 状态栏可一眼确认 used 的解析来源。
 
+**WSL 实机数据验证（2026-10-12，真实 store）**：在 WSL（go1.26 linux/amd64）用真实会话 `session_20261012111114_8DyOk3e2` 的 store 快照（当时 canonical=2395 / legacy 锚点=528,380 / fingerprint 存在）跑修复后的代码路径（临时验证测试，验证后已删除）：
+
+```text
+real store: canonical=2395(present=true) legacyAnchor=528380(present=true) fingerprint=true
+resolveChatStatusContextUsedTokensWithSource => used=528380 source=anchor_legacy
+restoreChatContextTokenUsage => ContextTokenCount=528380
+after sync: canonical=528380, resolver=528380
+--- PASS: TestZZWSLRealStoreContextShape (0.10s)
+```
+
+WSL 侧其余验证（全部通过）：
+
+```bash
+go build -o /tmp/aicli-wsl-verify ./cmd/aicli/                                                 # ✅ BUILD=0（Linux 构建）
+go test ./internal/contextledger/ -count=1                                                     # ✅ ok
+go test ./internal/agent/ -run TestReActLoop_MidTurnCompactionAnchorsOnProviderUsage -count=1  # ✅ ok
+go test ./cmd/aicli/commands/ -run 'Context|Token|Status|Compact' -count=1                      # ✅ ok 6.720s
+go test ./cmd/aicli/commands/ -run 'TestResolveChatStatusContextUsedTokensWithSource|TestRestoreChatContextTokenUsagePrefersStructuredAnchor|TestSyncRuntimeSessionFromChatAlignsStaleCanonicalContextCount|TestSyncRuntimeSessionFromChatPreservesLoopContextAnchor' -count=1 -v   # ✅ 4/4 PASS
+```
+
+（说明：WSL 网络无法访问 `proxy.golang.org`，依赖下载使用 `GOPROXY=https://goproxy.cn,direct GOSUMDB=off`。）
+
 ## 6. 附录：验证命令与证据
 
 ### 6.1 命令清单（工作目录 `backend/`）
