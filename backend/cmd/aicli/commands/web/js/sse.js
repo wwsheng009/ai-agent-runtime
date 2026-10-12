@@ -408,6 +408,8 @@ function openEventSource() {
    "compact_start", "compact_end", "compact_skipped", "compact_failed",
    "rewind_start", "rewind_end", "backtrack_start", "backtrack_end",
    "job_started", "job_output", "job_finished", "job_cancelled",
+   "job_terminal_opened", "job_terminal_closed", "job_terminal_resized",
+   "job_interactive_not_recoverable",
    "mailbox_received", "context_reconciled",
    "dynamic_status", "model_changed", "cache_request_finished"].forEach(function (name) {
     es.addEventListener(name, function (e) {
