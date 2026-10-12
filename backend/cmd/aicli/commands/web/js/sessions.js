@@ -51,6 +51,30 @@ var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆�
 var sessionsReqSeq = 0;          // loadSessions 请求序号（丢弃过期响应）
 var sessionsSort = "created_at"; // 会话排序：created_at（默认）| updated_at
 
+// ---- 启动加载次序：当前会话信息优先，会话列表其次 ----
+// app.js 启动序列在发出首屏屏幕快照（/web/api/screen）前先 holdSessionsLoad()：
+// 门闩期内所有 loadSessions 调用（含 SSE connected / 深链等早触发路径）一律不发
+// 请求、合并为解除后的一次加载；会话信息落地（或兜底超时）后
+// releaseSessionsLoad() 再放行。
+// 这样列表请求（scope=all，可能跨节点聚合）不会抢在首屏关键请求之前。
+var sessionsLoadHeld = false;
+
+export function holdSessionsLoad() {
+  sessionsLoadHeld = true;
+}
+
+export function releaseSessionsLoad() {
+  if (!sessionsLoadHeld) { return; }
+  sessionsLoadHeld = false;
+  // 门闩期内的所有请求（可能为零）合并为这一次加载；在途合并继续兜住并发。
+  loadSessions();
+}
+
+// 在途合并：同一时刻至多一个列表请求在途；在途期间到达的刷新请求合并为落地后的
+// 一次补拉（既反映最新状态，又不产生并发重复请求）。
+var sessionsInFlight = null;
+var sessionsPending = false;
+
 // ---- 网格便捷视图（S11 / Web 子方案 §5.1、§5.3、§5.7）----
 // 打开方式开关（§5.1 / Q13）：默认 new_window（P1 起）；只有用户显式设置过
 // localStorage 才尊重用户值，未设置时不迁移。
@@ -1026,10 +1050,14 @@ function handleMeshFrame(name, data) {
 // scope=all（§5.3 / Q5 硬契约）：跨工作区节点默认就在侧栏里，分组只是呈现方式；
 // 网格关闭时该参数无副作用（后端不并 peer，口径与现状逐字一致）。
 export function loadSessions() {
+  // 首屏门闩：会话信息（屏幕快照）落地前不发列表请求（见本文件顶部说明）。
+  if (sessionsLoadHeld) { return; }
+  // 在途合并：并发触发只保留一次待办，待当前请求落地后补拉一次。
+  if (sessionsInFlight) { sessionsPending = true; return sessionsInFlight; }
   var seq = ++sessionsReqSeq;
   // 带超时（util.js::apiFetch）：连接池被常驻流占满时，这里的请求会永久排队，
   // 侧栏就一直是空的且没有任何提示——超时后计入降级状态（sse.js 显示横幅并轮询重试）。
-  apiFetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
+  sessionsInFlight = apiFetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (!data) { return; }
@@ -1051,7 +1079,15 @@ export function loadSessions() {
       // §7.3 深链：列表就绪后再对齐 ?session=（见 applyDeepLinkSession）
       applyDeepLinkSession();
     })
-    .catch(function (err) { console.error("sessions fetch failed:", err); });
+    .catch(function (err) { console.error("sessions fetch failed:", err); })
+    .then(function () {
+      sessionsInFlight = null;
+      if (sessionsPending) {
+        sessionsPending = false;
+        loadSessions();
+      }
+    });
+  return sessionsInFlight;
 }
 
 // 切换会话入口：点击非当前会话时先弹确认框（防误切丢上下文），

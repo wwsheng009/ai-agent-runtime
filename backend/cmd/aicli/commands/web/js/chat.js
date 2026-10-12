@@ -1091,6 +1091,8 @@ export function dropPendingUserPrompt(text) {
 // refreshScreen 以服务端权威快照重建对话区。options.keepStream=true 用于
 // 流式进行中的节流刷新（见 sse.js 的 tool_end）：只更新对话区，不隐藏
 // 正在显示的流式气泡（hideStreamMessage 会终止实时渲染视图）。
+// 返回本次快照请求的 Promise：启动序列据此把「会话列表」排在当前会话信息之后
+// 再异步拉起（见 app.js 的启动加载次序与 sessions.js 的 hold/releaseSessionsLoad）。
 export function refreshScreen(forceClear, options) {
   var keepStream = !!(options && options.keepStream);
   // 活跃回合：窗口落地后把最后一块推理/工具展开、被更新的自动展开块折回
@@ -1107,7 +1109,7 @@ export function refreshScreen(forceClear, options) {
   // 带超时（util.js::apiFetch）：这是页面最高频的请求（秒级刷新 + 每个事件触发的
   // 节流刷新）。连接池被占满时它会永久排队，页面就停在旧快照上且没有任何提示；
   // 超时后计入降级状态，sse.js 显示横幅并转入轮询重试（§4.7）。
-  apiFetch("/web/api/screen?format=json&msg_limit=" + MSG_WINDOW_LIMIT + filterQueryString(), { cache: "no-store" })
+  return apiFetch("/web/api/screen?format=json&msg_limit=" + MSG_WINDOW_LIMIT + filterQueryString(), { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (seq !== screenReqSeq) { return; } // 过期响应（会话已切换/已有更新请求）丢弃

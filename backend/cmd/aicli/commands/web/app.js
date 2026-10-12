@@ -12,7 +12,7 @@ import { initProviderEditor } from "./js/provider-editor.js";
 import { initProviderImport } from "./js/provider-import.js";
 import { initApprovals } from "./js/approvals.js";
 import { initRuntimeBar, loadRuntimeMeta } from "./js/runtime.js";
-import { initSessions, loadSessions } from "./js/sessions.js";
+import { holdSessionsLoad, initSessions, releaseSessionsLoad } from "./js/sessions.js";
 import { initSchedule } from "./js/schedule.js";
 import { initSkills } from "./js/skills.js";
 import { initFiles } from "./js/files.js";
@@ -24,7 +24,7 @@ import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
 import { initTodoPanel } from "./js/todos.js";
 import { initAboutSessionCopy, initAboutToken, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
-import { initStatusBar, loadStatusBar } from "./js/statusbar.js";
+import { initStatusBar } from "./js/statusbar.js";
 
 // ---- 事件绑定(原 IIFE 尾部,按组件归属拆分到各模块) ----
 initTabs();
@@ -58,9 +58,29 @@ initAnalysis();
 initLSP();
 
 // ---- 启动序列(原文件尾部) ----
+// 数据加载次序（性能约定）：
+//   ① 当前会话信息优先——屏幕快照（refreshScreen → /web/api/screen）先发起；
+//   ② 会话列表其次——首屏请求落地前由 holdSessionsLoad() 挂起，落地（或 1.5s
+//      兜底超时，防快照异常缓慢时侧栏无限空等）后 releaseSessionsLoad() 异步放行；
+//   ③ 其它页签的数据源不在启动期预热——ui.js::activateTab 在用户点击页签时才加载。
+var SESSION_LIST_FALLBACK_DELAY_MS = 1500;
+
+function releaseSessionsAfterScreen(screenPromise) {
+  var released = false;
+  function release() {
+    if (released) { return; }
+    released = true;
+    releaseSessionsLoad();
+  }
+  if (screenPromise && typeof screenPromise.then === "function") {
+    screenPromise.then(release, release);
+  }
+  setTimeout(release, SESSION_LIST_FALLBACK_DELAY_MS);
+}
+
 loadRuntimeMeta(); // 权威 provider/model/reasoning 值同步到底部选择器
-loadStatusBar();    // 底部状态栏: balance / context / directory / git branch / window
 initSSE();         // EventSource 连接 + 动态状态栏时钟
-refreshScreen();
-loadSessions();
+holdSessionsLoad(); // ① 会话列表先挂起，确保屏幕快照先落地
+releaseSessionsAfterScreen(refreshScreen()); // ② 首屏落地后异步放行列表
 renderButton(); // 初始按钮状态(idle:输入为空时禁用)
+// 底部状态栏的首次拉取已由 initStatusBar()（上方绑定区）完成，此处不再重复调用。
