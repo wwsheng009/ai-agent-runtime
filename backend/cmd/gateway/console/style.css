@@ -10,15 +10,24 @@
   --border-strong: #333c52;
   --fg: #e8ebf1;
   --fg-muted: #94a0b4;
-  --fg-faint: #5d6a80;
+  /* fg-faint must clear 4.5:1 on the lightest dark surface (--panel-2). */
+  --fg-faint: #7f8b9e;
   --accent: #5b8cff;
   --accent-soft: rgba(91, 140, 255, 0.14);
+  /* Filled accents carry white text, so they need their own (darker) token:
+     #5b8cff is a good text/ring colour but only 3.2:1 against white. */
+  --accent-solid: #2f6bf0;
   --ok: #3fb27f;
   --ok-soft: rgba(63, 178, 127, 0.15);
+  --ok-ink: #3fb27f;
   --warn: #e0a13c;
   --warn-soft: rgba(224, 161, 60, 0.16);
-  --danger: #e5534b;
+  --warn-ink: #e0a13c;
+  /* --*-ink = text drawn on the matching *-soft tint; --danger also fills
+     buttons, so it must stay dark enough for white text. */
+  --danger: #c9413c;
   --danger-soft: rgba(229, 83, 75, 0.15);
+  --danger-ink: #f4776f;
   --radius: 12px;
   --radius-sm: 8px;
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
@@ -40,16 +49,20 @@
   --border: #e2e7ef;
   --border-strong: #cbd4e1;
   --fg: #1b2230;
-  --fg-muted: #5b6880;
-  --fg-faint: #8b97ab;
-  --accent: #2f6bf0;
+  --fg-muted: #4a5568;
+  --fg-faint: #5f6c82;
+  --accent: #2559d6;
   --accent-soft: rgba(47, 107, 240, 0.1);
+  --accent-solid: #2559d6;
   --ok: #1f9d6c;
   --ok-soft: rgba(31, 157, 108, 0.12);
+  --ok-ink: #12724f;
   --warn: #b97f14;
   --warn-soft: rgba(185, 127, 20, 0.13);
-  --danger: #d64540;
+  --warn-ink: #8a5c07;
+  --danger: #c23a35;
   --danger-soft: rgba(214, 69, 64, 0.1);
+  --danger-ink: #b5332e;
   --shadow: 0 6px 24px rgba(24, 39, 75, 0.08);
 }
 
@@ -63,16 +76,20 @@
     --border: #e2e7ef;
     --border-strong: #cbd4e1;
     --fg: #1b2230;
-    --fg-muted: #5b6880;
-    --fg-faint: #8b97ab;
-    --accent: #2f6bf0;
+    --fg-muted: #4a5568;
+    --fg-faint: #5f6c82;
+    --accent: #2559d6;
     --accent-soft: rgba(47, 107, 240, 0.1);
+    --accent-solid: #2559d6;
     --ok: #1f9d6c;
     --ok-soft: rgba(31, 157, 108, 0.12);
+    --ok-ink: #12724f;
     --warn: #b97f14;
     --warn-soft: rgba(185, 127, 20, 0.13);
-    --danger: #d64540;
+    --warn-ink: #8a5c07;
+    --danger: #c23a35;
     --danger-soft: rgba(214, 69, 64, 0.1);
+    --danger-ink: #b5332e;
     --shadow: 0 6px 24px rgba(24, 39, 75, 0.08);
   }
 }
@@ -87,6 +104,16 @@ body {
   color: var(--fg);
   -webkit-font-smoothing: antialiased;
 }
+
+/* Keyboard users land here first; the link stays off-screen until focused. */
+.skip-link {
+  position: absolute; left: 8px; top: -60px; z-index: 100;
+  padding: 10px 16px; border-radius: var(--radius-sm);
+  background: var(--accent-solid); color: #fff;
+  font-size: 13.5px; text-decoration: none;
+  transition: top 0.15s ease;
+}
+.skip-link:focus { top: 8px; }
 
 /* Slim scrollbars that follow the theme instead of the OS default. */
 * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
@@ -195,7 +222,7 @@ body.login-mode [data-auth] { display: none !important; }
   min-width: 19px; text-align: center;
   font-size: 11px; font-weight: 600;
   padding: 1px 6px; border-radius: 999px;
-  background: var(--warn-soft); color: var(--warn);
+  background: var(--warn-soft); color: var(--warn-ink);
 }
 
 .sidebar-foot {
@@ -287,7 +314,7 @@ a.stat:hover {
 .stat-label { font-size: 12px; color: var(--fg-muted); }
 
 .stat.attention { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
-.stat.attention .stat-num { color: var(--warn); }
+.stat.attention .stat-num { color: var(--warn-ink); }
 
 /* ── Panels & grids ──────────────────────────────────────────── */
 
@@ -309,7 +336,7 @@ a.stat:hover {
 .dash-grid > .panel { margin-bottom: 0; }
 
 .panel.inbox { border-color: color-mix(in srgb, var(--warn) 35%, var(--border)); }
-.panel.inbox .panel-head h2 { color: var(--warn); }
+.panel.inbox .panel-head h2 { color: var(--warn-ink); }
 
 /* ── Cards & lists ───────────────────────────────────────────── */
 
@@ -323,19 +350,32 @@ a.stat:hover {
   transition: border-color 0.15s ease;
 }
 
+/* Inbox cards and activity rows are real <button>s so keyboard users can reach
+   them; this resets the UA button chrome while keeping the card/row look. */
+.card-action {
+  width: 100%; text-align: left;
+  font: inherit; color: inherit;
+  cursor: pointer;
+}
+.card.card-action { display: block; }
+
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .card-title {
   font-weight: 600; font-size: 13.5px;
   display: flex; align-items: center; gap: 8px;
   min-width: 0;
 }
-.card-meta { color: var(--fg-faint); font-size: 12px; margin-top: 5px; word-break: break-all; }
+.card-meta { display: block; color: var(--fg-faint); font-size: 12px; margin-top: 5px; word-break: break-all; }
 .card-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; justify-content: flex-end; }
 
-.card.offline { opacity: 0.6; }
+/* Dimming the whole card with opacity destroyed text contrast (and dragged the
+   danger button below 4.5:1), so "offline" is marked with a dashed rail plus a
+   muted title instead of a blanket opacity. */
+.card.offline { border-style: dashed; }
+.card.offline .card-title { color: var(--fg-muted); }
 .card.offline .card-title::after {
   content: "· 离线";
-  font-size: 11px; font-weight: 500; color: var(--fg-faint); margin-left: 2px;
+  font-size: 11.5px; font-weight: 500; color: var(--fg-muted); margin-left: 2px;
 }
 
 /* Clickable inbox cards: warn rail (inset, so corners stay round) plus a
@@ -402,7 +442,7 @@ a.stat:hover {
 /* Device groups: a full-width section with a collapsible header; the body
    keeps the same two-column board as the flat list. */
 .session-group { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
-.session-group.offline { opacity: 0.6; }
+.session-group.offline .group-head { border-style: dashed; color: var(--fg-muted); }
 .group-head {
   display: flex; align-items: center; gap: 8px;
   width: 100%; text-align: left;
@@ -442,21 +482,21 @@ a.stat:hover {
 /* Live activity chip: state (运行中/思考中/回答中/等待中/审查中/已中断). */
 .session-card .s-state {
   flex-shrink: 0;
-  font-size: 10.5px; font-weight: 600;
+  font-size: 11px; font-weight: 600;
   padding: 1px 7px; border-radius: 999px;
   border: 1px solid transparent;
   background: var(--accent-soft); color: var(--accent);
 }
 .session-card .s-state.st-thinking { background: var(--bg); color: var(--fg-muted); border-color: var(--border-strong); }
-.session-card .s-state.st-answering { background: rgba(80, 160, 110, 0.16); color: var(--ok); }
+.session-card .s-state.st-answering { background: rgba(80, 160, 110, 0.16); color: var(--ok-ink); }
 .session-card .s-state.st-waiting,
 .session-card .s-state.st-review {
   background: color-mix(in srgb, var(--warn) 16%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .session-card .s-state.st-interrupted {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
+  color: var(--danger-ink);
 }
 /* Live activity band (dynamic state): state chip + host activity text +
    locally advanced elapsed clock. This is the card's "now" zone and stays
@@ -519,7 +559,7 @@ a.stat:hover {
   border: 1px solid var(--border);
 }
 .s-last-role.role-user { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
-.s-last-role.role-assistant { background: rgba(80, 160, 110, 0.16); color: var(--ok); border-color: transparent; }
+.s-last-role.role-assistant { background: rgba(80, 160, 110, 0.16); color: var(--ok-ink); border-color: transparent; }
 
 /* Inline reply form (one per live session card with the "input" capability):
    a single row — growing textarea + 发送 button, which never takes a row of
@@ -542,7 +582,7 @@ a.stat:hover {
   border-radius: var(--radius-sm);
 }
 .session-card .s-reply .s-reply-input:focus {
-  outline: none; border-color: var(--accent);
+  border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 .session-card .s-reply .s-reply-send { flex-shrink: 0; }
@@ -582,16 +622,16 @@ a.stat:hover {
   white-space: nowrap; flex-shrink: 0;
   background: var(--accent-soft); color: var(--accent);
 }
-.att-badge.att-completed { background: var(--ok-soft); color: var(--ok); }
-.att-badge.att-approval, .att-badge.att-question { background: var(--warn-soft); color: var(--warn); }
-.att-badge.att-error { background: var(--danger-soft); color: var(--danger); }
+.att-badge.att-completed { background: var(--ok-soft); color: var(--ok-ink); }
+.att-badge.att-approval, .att-badge.att-question { background: var(--warn-soft); color: var(--warn-ink); }
+.att-badge.att-error { background: var(--danger-soft); color: var(--danger-ink); }
 
 .pill {
   font-size: 11.5px; font-weight: 500;
   padding: 3px 10px; border-radius: 999px;
   background: var(--panel-2); border: 1px solid var(--border);
 }
-.attention-pill { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.attention-pill { background: var(--warn-soft); color: var(--warn-ink); border-color: transparent; }
 
 .dot {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
@@ -654,8 +694,8 @@ a.stat:hover {
 .btn:active { transform: translateY(1px); }
 .btn[disabled] { opacity: 0.55; cursor: default; pointer-events: none; }
 
-.btn.primary { background: var(--accent); color: #fff; font-weight: 600; }
-.btn.primary:hover { background: color-mix(in srgb, var(--accent) 86%, #000); }
+.btn.primary { background: var(--accent-solid); color: #fff; font-weight: 600; }
+.btn.primary:hover { background: color-mix(in srgb, var(--accent-solid) 86%, #000); }
 
 .btn.ghost { background: transparent; color: var(--fg); border-color: var(--border-strong); }
 .btn.ghost:hover {
@@ -679,8 +719,10 @@ input, .select {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 input::placeholder { color: var(--fg-faint); }
+/* Deliberately no `outline: none` here: the global :focus-visible ring below
+   supplies the 2px/3:1 indicator WCAG 2.2 Focus Appearance asks for, while the
+   soft glow stays as the mouse-focus affordance. */
 input:focus, .select:focus {
-  outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
@@ -771,7 +813,7 @@ form { display: flex; gap: 8px; margin-top: 12px; }
 
 /* ── Misc ────────────────────────────────────────────────────── */
 
-.error { color: var(--danger); font-size: 13.5px; margin: 10px 0 0; }
+.error { color: var(--danger-ink); font-size: 13.5px; margin: 10px 0 0; }
 
 .empty {
   text-align: center; color: var(--fg-faint);
@@ -819,22 +861,44 @@ form { display: flex; gap: 8px; margin-top: 12px; }
   color: var(--fg-faint);
 }
 
-.toast {
+/* Toasts share one fixed host so several stack instead of landing on the exact
+   same coordinates. The host is layout-only (pointer-events: none); each toast
+   re-enables pointer events and carries its own live-region role. */
+.toast-host {
   position: fixed;
   left: 50%; transform: translateX(-50%);
   bottom: calc(18px + env(safe-area-inset-bottom));
-  max-width: min(90vw, 520px);
+  width: min(92vw, 520px);
+  display: flex; flex-direction: column; gap: 8px;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex; align-items: flex-start; gap: 10px;
+  pointer-events: auto;
   background: var(--panel); color: var(--fg);
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
-  padding: 11px 15px; font-size: 13.5px;
-  cursor: pointer; box-shadow: var(--shadow); z-index: 60;
+  padding: 11px 12px 11px 15px; font-size: 13.5px;
+  box-shadow: var(--shadow);
   animation: toast-in 0.18s ease;
 }
+.toast-text { flex: 1 1 auto; min-width: 0; }
+.toast-actions { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+.toast-close {
+  flex-shrink: 0;
+  width: 26px; height: 26px; margin: -3px -2px 0 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 0; border-radius: 6px;
+  color: var(--fg-muted); font: inherit; font-size: 15px; line-height: 1;
+  cursor: pointer;
+}
+.toast-close:hover { background: var(--panel-2); color: var(--fg); }
 
 @keyframes toast-in {
-  from { opacity: 0; transform: translate(-50%, 8px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .inbox .card {
@@ -859,9 +923,9 @@ form { display: flex; gap: 8px; margin-top: 12px; }
   transition: filter 0.15s ease, border-color 0.15s ease;
 }
 .attn-chip b { font-variant-numeric: tabular-nums; }
-.attn-chip.att-approval, .attn-chip.att-question { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
-.attn-chip.att-error { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
-.attn-chip.att-completed { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.attn-chip.att-approval, .attn-chip.att-question { background: var(--warn-soft); color: var(--warn-ink); border-color: transparent; }
+.attn-chip.att-error { background: var(--danger-soft); color: var(--danger-ink); border-color: transparent; }
+.attn-chip.att-completed { background: var(--ok-soft); color: var(--ok-ink); border-color: transparent; }
 .attn-chip:hover { filter: brightness(1.08); }
 
 /* ── Recent activity feed ────────────────────────────────────── */
@@ -901,8 +965,8 @@ form { display: flex; gap: 8px; margin-top: 12px; }
   white-space: nowrap;
   flex-shrink: 0;
 }
-.status-chip.chip-active { background: var(--ok-soft); color: var(--ok); }
-.status-chip.chip-revoked { background: var(--danger-soft); color: var(--danger); }
+.status-chip.chip-active { background: var(--ok-soft); color: var(--ok-ink); }
+.status-chip.chip-revoked { background: var(--danger-soft); color: var(--danger-ink); }
 
 .device-token-row {
   display: flex; align-items: center; gap: 8px;
@@ -978,8 +1042,15 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   .stats { grid-template-columns: repeat(2, 1fr); }
   .dash-grid { grid-template-columns: 1fr; }
   .topbar { padding: 8px 12px; gap: 8px; }
-  /* Tight bar: the dashboard stats already carry node status. */
-  .conn-chip { display: none; }
+  /* Keep the connection state on phones. The label would crowd the tight bar,
+     so it is visually hidden rather than display:none — the chip is a live
+     region and still needs text in the accessibility tree. */
+  .conn-chip { display: inline-flex; padding: 0 9px; }
+  .conn-chip .conn-text {
+    position: absolute; width: 1px; height: 1px;
+    margin: -1px; padding: 0; border: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
   .view-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .views { padding: 14px 14px 40px; }
   .session-card { grid-template-columns: minmax(0, 1fr) auto; }
@@ -1006,6 +1077,34 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   * { transition: none !important; animation: none !important; }
 }
 
+/* ── Coarse pointers (touch) ────────────────────────────────────
+   WCAG 2.2 Target Size (Minimum) is 24 CSS px, but 24px is a floor, not a
+   comfortable touch target — the small controls here were 26-34px. Raise them
+   on touch devices only, so the dense desktop layout is unchanged. */
+@media (pointer: coarse) {
+  .btn { min-height: 44px; }
+  .btn.sm { min-height: 40px; }
+  .nav-item { padding: 12px; min-height: 44px; }
+  body.sb-collapsed .nav-item { min-height: 44px; }
+  .seg { height: auto; }
+  .seg-btn { min-height: 38px; padding: 0 14px; }
+  .attn-chip { min-height: 40px; }
+  .modal-close { min-width: 44px; min-height: 44px; }
+  .toast-close { width: 32px; height: 32px; }
+  .session-card .s-id { min-height: 32px; }
+}
+
+/* First paint: panels stay empty until /api/nodes answers. Show a quiet note
+   instead of blank panels; the client toggles aria-busy around the fetch. */
+.views[aria-busy="true"] .list:empty::after,
+.views[aria-busy="true"] .session-table:empty::after {
+  content: "加载中…";
+  display: block;
+  padding: 12px 2px;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+}
+
 /* ── Freshness + connection state (P0) ─────────────────────────── */
 
 /* Persistent banner while the console SSE feed is down. */
@@ -1013,14 +1112,14 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   position: sticky; top: 0; z-index: 40;
   padding: 8px 16px;
   font-size: 12.5px; font-weight: 500;
-  color: var(--danger);
+  color: var(--danger-ink);
   background: color-mix(in srgb, var(--danger) 16%, var(--panel));
   border-bottom: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
 }
-.conn-chip.conn-lost { border-color: var(--danger); color: var(--danger); }
+.conn-chip.conn-lost { border-color: var(--danger); color: var(--danger-ink); }
 
 /* Relative-time labels (内容/同步/心跳) past their freshness threshold. */
-.age-stale { color: color-mix(in srgb, var(--warn) 75%, var(--fg-faint)) !important; }
+.age-stale { color: var(--warn-ink) !important; }
 
 /* Session meta line (static / low-frequency attributes folded into one row):
    node text · ID (click to copy) · right-aligned "同步 x 前". */

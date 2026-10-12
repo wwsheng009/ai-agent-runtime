@@ -46,13 +46,81 @@
     });
   }
 
+  /* ─────────────────────────── toasts ────────────────────────── */
+
+  function toastHost() {
+    var host = el("toast-host");
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "toast-host";
+      host.className = "toast-host";
+      document.body.appendChild(host);
+    }
+    return host;
+  }
+
+  // Toasts are announced (role=status / role=alert), stack inside one host
+  // instead of overlapping on the same fixed coordinates, and hold their
+  // dismissal timer while hovered or focused so they can actually be read.
+  function pushToast(text, kind, action) {
+    var host = toastHost();
+    var toast = document.createElement("div");
+    toast.className = "toast" + (kind ? " toast-" + kind : "");
+    toast.setAttribute("role", kind === "error" ? "alert" : "status");
+
+    var msg = document.createElement("span");
+    msg.className = "toast-text";
+    msg.textContent = text;
+    toast.appendChild(msg);
+
+    var actions = document.createElement("div");
+    actions.className = "toast-actions";
+    if (action) {
+      var actionBtn = document.createElement("button");
+      actionBtn.type = "button";
+      actionBtn.className = "btn ghost sm";
+      actionBtn.textContent = action.label;
+      actionBtn.addEventListener("click", function () { dismiss(); action.run(); });
+      actions.appendChild(actionBtn);
+    }
+    var close = document.createElement("button");
+    close.type = "button";
+    close.className = "toast-close";
+    close.setAttribute("aria-label", "关闭通知");
+    close.textContent = "\u00d7";
+    close.addEventListener("click", dismiss);
+    actions.appendChild(close);
+    toast.appendChild(actions);
+
+    var timer = null;
+    var done = false;
+    function dismiss() {
+      if (done) { return; }
+      done = true;
+      if (timer) { clearTimeout(timer); }
+      toast.remove();
+    }
+    function schedule(ms) {
+      if (timer) { clearTimeout(timer); }
+      timer = setTimeout(dismiss, ms);
+    }
+    function hold() { if (timer) { clearTimeout(timer); timer = null; } }
+    toast.addEventListener("mouseenter", hold);
+    toast.addEventListener("focusin", hold);
+    toast.addEventListener("mouseleave", function () { if (!done) { schedule(2500); } });
+    toast.addEventListener("focusout", function () {
+      if (!done && !toast.contains(document.activeElement)) { schedule(2500); }
+    });
+
+    host.appendChild(toast);
+    // Cap the stack so a burst of events cannot fill the viewport.
+    while (host.children.length > 4) { host.removeChild(host.firstChild); }
+    schedule(kind === "error" ? 6000 : 4000);
+    return toast;
+  }
+
   function notify(text, kind) {
-    var n = document.createElement("div");
-    n.className = "toast" + (kind ? " toast-" + kind : "");
-    n.textContent = text;
-    n.addEventListener("click", function () { n.remove(); });
-    document.body.appendChild(n);
-    setTimeout(function () { n.remove(); }, 3500);
+    pushToast(text, kind);
   }
 
   function setAuthed(authed) {
@@ -67,6 +135,7 @@
     document.body.classList.toggle("login-mode", !authed);
     if (!authed) {
       closeSidebar();
+      el("password").setAttribute("aria-invalid", "false");
       el("password").focus();
     }
   }
@@ -117,12 +186,17 @@
   /* ─────────────────────── data loading ──────────────────────── */
 
   function loadNodes() {
+    // Mark the panels busy so first paint shows "加载中…" instead of blanks.
+    var views = document.querySelector(".views");
+    if (views) { views.setAttribute("aria-busy", "true"); }
     return apiJSON("/api/nodes").then(function (r) {
       if (r.res.status === 401) { setAuthed(false); return; }
       setAuthed(true);
       lastNodes = (r.body && r.body.nodes) || [];
       renderAll(lastNodes);
       subscribeEvents();
+    }).finally(function () {
+      if (views) { views.removeAttribute("aria-busy"); }
     });
   }
 
@@ -389,8 +463,10 @@
     }
     var chip = el("conn-chip");
     if (chip) {
+      var chipText = live ? live + " 个节点在线" : "无节点在线";
       chip.innerHTML = '<span class="dot ' + (live ? "live" : "offline") + '"></span>' +
-        (live ? live + " 个节点在线" : "无节点在线");
+        '<span class="conn-text"></span>';
+      chip.querySelector(".conn-text").textContent = chipText;
     }
   }
 
@@ -548,7 +624,11 @@
   // deep links and programmatic changes share one path).
   function syncFilterControls() {
     document.querySelectorAll(".seg-btn").forEach(function (b) {
-      b.classList.toggle("active", b.getAttribute("data-sfilter") === sessionFilterKind);
+      var on = b.getAttribute("data-sfilter") === sessionFilterKind;
+      b.classList.toggle("active", on);
+      // These are toggle buttons in a group, not tabs: aria-pressed (not
+      // aria-selected) is what conveys the current filter.
+      b.setAttribute("aria-pressed", on ? "true" : "false");
     });
     var sortSel = el("session-sort");
     if (sortSel) { sortSel.value = sessionSort; }
@@ -765,6 +845,9 @@
       card.className = "session-card" + (node.stale ? " offline" : "") +
         (s.attention ? " att-" + s.attention : "") + (expanded ? " expanded" : "");
       card.setAttribute("data-draft-key", cardKey);
+      // Put the card itself in the tab order (arrow-key nav already focuses it,
+      // but Tab could not reach it) and give it a spoken name.
+      card.setAttribute("tabindex", "0");
       // Pulse when this session visibly moved since the previous render.
       var fingerprint = sessionFingerprint(s);
       if (sessionLastSeen[cardKey] !== undefined && sessionLastSeen[cardKey] !== fingerprint) {
@@ -804,6 +887,9 @@
         '<button class="btn ghost sm" type="button" data-tail-follow>跟随中</button></div>' +
         '<pre class="s-tail-body"></pre></div>';
       card.querySelector(".s-name").textContent = sessionLabelOf(s);
+      card.setAttribute("aria-label",
+        sessionLabelOf(s) + "，" + (node.name || node.node_id) + "，" + stateLabelOf(s) +
+        (s.attention ? "，" + attentionLabel(s.attention) : ""));
       card.querySelector(".s-node-text").textContent =
         (node.name || node.node_id) + " · " + (node.kind || "agent");
       var syncEl = card.querySelector(".s-sync");
@@ -818,7 +904,6 @@
       idEl.textContent = s.session_id;
       var copyID = function () {
         copyText(s.session_id, null);
-        notify("已复制会话 ID", "ok");
       };
       idRow.addEventListener("click", copyID);
       idRow.addEventListener("keydown", function (e) {
@@ -1000,11 +1085,16 @@
     if (panel) { panel.hidden = !items.length; }
     list.innerHTML = "";
     items.forEach(function (item) {
-      var row = document.createElement("div");
-      row.className = "card";
+      // A real <button>: the whole card is the action, so it must be reachable
+      // by keyboard (a clickable <div> is not).
+      var row = document.createElement("button");
+      row.type = "button";
+      row.className = "card card-action";
+      // <button> only allows phrasing content, so the card body uses spans
+      // (styled as blocks) rather than divs.
       row.innerHTML =
-        '<div class="card-head"><span class="card-title"></span><span class="att-badge" hidden></span></div>' +
-        '<div class="card-meta"></div>';
+        '<span class="card-head"><span class="card-title"></span><span class="att-badge" hidden></span></span>' +
+        '<span class="card-meta"></span>';
       row.querySelector(".card-title").textContent =
         (item.node.name || item.node.node_id) + " · " + sessionLabelOf(item.session);
       var b = row.querySelector(".att-badge");
@@ -1194,19 +1284,23 @@
     }
     items.forEach(function (item) {
       var s = item.session;
-      var row = document.createElement("div");
-      row.className = "activity-row";
+      // Real <button> (keyboard reachable); the offline state is spelled out
+      // instead of being conveyed by the dot colour alone.
+      var row = document.createElement("button");
+      row.type = "button";
+      row.className = "activity-row card-action";
       var when = new Date(s.updated_at);
       var fresh = (Date.now() - when.getTime()) < 5 * 60 * 1000;
       row.innerHTML =
         '<span class="dot ' + (item.node.stale ? "offline" : "live") + '"></span>' +
-        '<div class="activity-main">' +
+        '<span class="activity-main">' +
         '<span class="activity-title"></span>' +
         '<span class="activity-when"></span>' +
-        '</div>';
+        '</span>';
       row.querySelector(".activity-title").textContent =
         (item.node.name || item.node.node_id) + " · " + sessionLabelOf(s) +
-        (s.attention ? "（" + attentionLabel(s.attention) + "）" : "");
+        (s.attention ? "（" + attentionLabel(s.attention) + "）" : "") +
+        (item.node.stale ? "（离线快照）" : "");
       row.querySelector(".activity-when").textContent =
         when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
         (fresh ? " · 刚刚" : "");
@@ -1405,32 +1499,101 @@
     return session.busy && !isActiveSessionState(session.state) ? label + " · 处理中" : label;
   }
 
-  // Clipboard write with a legacy fallback; the button briefly confirms.
+  // Clipboard write with a legacy fallback. The button briefly confirms, but a
+  // label swap alone is invisible to screen readers (and absent when the caller
+  // passes no button), so the outcome is also announced as a toast.
   function copyText(text, btn) {
     var done = function () {
-      if (!btn) { return; }
-      var prev = btn.getAttribute("data-label") || btn.textContent;
-      btn.setAttribute("data-label", prev);
-      btn.textContent = "已复制 ✓";
-      setTimeout(function () { btn.textContent = prev; }, 1500);
+      if (btn) {
+        var prev = btn.getAttribute("data-label") || btn.textContent;
+        btn.setAttribute("data-label", prev);
+        btn.textContent = "已复制 ✓";
+        setTimeout(function () { btn.textContent = prev; }, 1500);
+      }
+      notify("已复制到剪贴板", "ok");
     };
+    var failed = function () { notify("复制失败，请手动选择文本", "error"); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done, done);
+      navigator.clipboard.writeText(text).then(done, failed);
     } else {
       var ta = document.createElement("textarea");
       ta.value = text;
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand("copy"); } catch (err) { /* legacy */ }
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
       ta.remove();
-      done();
+      if (ok) { done(); } else { failed(); }
+    }
+  }
+
+  /* ─────────────────── modal focus management ────────────────── */
+
+  var FOCUSABLE_SEL =
+    'a[href],button:not([disabled]),input:not([disabled]),' +
+    'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+  var modalReturnFocus = {};
+
+  function openModal(id) {
+    var modal = el(id);
+    if (!modal) { return; }
+    modalReturnFocus[id] = document.activeElement;
+    modal.hidden = false;
+    // aria-modal alone does not stop the browser from tabbing into the page
+    // behind the dialog; inert does (the focus trap below is the fallback).
+    var workspace = document.querySelector(".workspace");
+    if (workspace) { workspace.inert = true; }
+    document.addEventListener("keydown", trapModalTab, true);
+    var first = modal.querySelector(FOCUSABLE_SEL);
+    (first || modal).focus();
+  }
+
+  function closeModal(id) {
+    var modal = el(id);
+    if (!modal) { return; }
+    modal.hidden = true;
+    if (el("token-modal").hidden && el("session-modal").hidden) {
+      var workspace = document.querySelector(".workspace");
+      if (workspace) { workspace.inert = false; }
+      document.removeEventListener("keydown", trapModalTab, true);
+    }
+    // Hand focus back to whatever opened the dialog instead of dropping it on
+    // <body> (which resets the keyboard user's position in the page).
+    var back = modalReturnFocus[id];
+    modalReturnFocus[id] = null;
+    if (back && typeof back.focus === "function" && document.contains(back)) {
+      back.focus();
+    }
+  }
+
+  function openModalEl() {
+    return !el("session-modal").hidden ? el("session-modal")
+      : (!el("token-modal").hidden ? el("token-modal") : null);
+  }
+
+  function trapModalTab(e) {
+    if (e.key !== "Tab") { return; }
+    var modal = openModalEl();
+    if (!modal) { return; }
+    var items = Array.prototype.filter.call(
+      modal.querySelectorAll(FOCUSABLE_SEL),
+      function (n) { return n.offsetWidth > 0 || n.offsetHeight > 0 || n === document.activeElement; }
+    );
+    if (!items.length) { e.preventDefault(); modal.focus(); return; }
+    var first = items[0];
+    var last = items[items.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === modal)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
     }
   }
 
   function closeSessionDetail() {
     detailTarget = null;
-    var modal = el("session-modal");
-    if (modal) { modal.hidden = true; }
+    closeModal("session-modal");
   }
 
   function openSessionDetail(node, session) {
@@ -1492,7 +1655,7 @@
     } else {
       tailWrap.hidden = true;
     }
-    modal.hidden = false;
+    openModal("session-modal");
   }
 
   /* ─────────────────────── attention tracking ────────────────── */
@@ -1524,22 +1687,23 @@
   }
 
   function showAttentionToast(node, session) {
-    var toast = document.createElement("div");
-    toast.className = "toast";
-    toast.textContent =
+    // The "open" affordance is a real button, so the toast is usable without a
+    // mouse; clicking anywhere on the toast is no longer the only entry point.
+    pushToast(
       (node.name || node.node_id) + " · " + sessionLabelOf(session) + "：" +
-      attentionLabel(session.attention);
-    toast.addEventListener("click", function () {
-      if (!nodeHasWebUI(node)) {
-        notify(webUnavailableText(node), "error");
-        toast.remove();
-        return;
+        attentionLabel(session.attention),
+      null,
+      {
+        label: "打开",
+        run: function () {
+          if (!nodeHasWebUI(node)) {
+            notify(webUnavailableText(node), "error");
+            return;
+          }
+          window.open(sessionOpenTarget(node, session.session_id), "_blank");
+        },
       }
-      window.open(sessionOpenTarget(node, session.session_id), "_blank");
-      toast.remove();
-    });
-    document.body.appendChild(toast);
-    setTimeout(function () { toast.remove(); }, 8000);
+    );
   }
 
   /* ─────────────────────── presence ──────────────────────────── */
@@ -1700,23 +1864,48 @@
 
   /* ─────────────────────── wiring ────────────────────────────── */
 
+  // Skip link: move focus into <main> without touching the hash, otherwise the
+  // router would read "#main" as an unknown view and snap back to the dashboard.
+  var skipLink = document.querySelector(".skip-link");
+  if (skipLink) {
+    skipLink.addEventListener("click", function (e) {
+      e.preventDefault();
+      var main = el("main");
+      if (main) { main.focus(); }
+    });
+  }
+
   el("login-form").addEventListener("submit", function (e) {
     e.preventDefault();
-    el("login-error").hidden = true;
+    var passwordEl = el("password");
+    var errorEl = el("login-error");
+    errorEl.hidden = true;
+    passwordEl.setAttribute("aria-invalid", "false");
+    function fail(message) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+      passwordEl.setAttribute("aria-invalid", "true");
+      passwordEl.focus();
+    }
     apiJSON("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: el("password").value }),
+      body: JSON.stringify({ password: passwordEl.value }),
     }).then(function (r) {
       if (!r.res.ok) {
-        el("login-error").textContent = "登录失败：密码错误";
-        el("login-error").hidden = false;
+        // Distinguish a bad password from a gateway/transport failure instead
+        // of reporting every failure as "wrong password".
+        fail(r.res.status === 401
+          ? "登录失败：密码错误"
+          : "登录失败：网关返回 " + r.res.status);
         return;
       }
-      el("password").value = "";
+      passwordEl.value = "";
       applyRoute();
       loadNodes();
       loadDevices();
+    }).catch(function () {
+      fail("登录失败：无法连接网关，请确认服务正在运行");
     });
   });
 
@@ -1802,9 +1991,8 @@
   });
   document.querySelectorAll(".seg-btn").forEach(function (btn) {
     btn.addEventListener("click", function () {
-      document.querySelectorAll(".seg-btn").forEach(function (b) { b.classList.remove("active"); });
-      btn.classList.add("active");
       sessionFilterKind = btn.getAttribute("data-sfilter");
+      syncFilterControls();
       saveSessionPrefs();
       renderSessionTable(lastNodes);
     });
@@ -1881,17 +2069,17 @@
 
   // Token modal
   el("issue-token").addEventListener("click", function () {
-    el("token-modal").hidden = false;
+    openModal("token-modal");
     el("device-name").focus();
   });
   el("token-modal-close").addEventListener("click", function () {
-    el("token-modal").hidden = true;
+    closeModal("token-modal");
   });
   el("token-modal").addEventListener("click", function (e) {
-    if (e.target === el("token-modal")) { el("token-modal").hidden = true; }
+    if (e.target === el("token-modal")) { closeModal("token-modal"); }
   });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && !el("token-modal").hidden) { el("token-modal").hidden = true; }
+    if (e.key === "Escape" && !el("token-modal").hidden) { closeModal("token-modal"); }
   });
 
   // Session detail modal
