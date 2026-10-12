@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
 // persistPath is the default registry snapshot filename.
@@ -62,7 +64,23 @@ func (p *persister) flush() {
 	if p == nil || p.listFunc == nil {
 		return
 	}
-	data, err := json.MarshalIndent(p.listFunc(), "", "  ")
+	nodes := p.listFunc()
+	// D3: the live-output tail is ephemeral display data. Trim it from the
+	// snapshot so registry.json stays small under 1Hz streaming, without
+	// clearing the live registry (List returns shallow copies whose Sessions
+	// slice is shared, so the slice is copied before trimming).
+	for _, node := range nodes {
+		if node == nil || len(node.Sessions) == 0 {
+			continue
+		}
+		sessions := make([]wire.SessionSummary, len(node.Sessions))
+		copy(sessions, node.Sessions)
+		node.Sessions = sessions
+		for i := range node.Sessions {
+			node.Sessions[i].StatusTail = ""
+		}
+	}
+	data, err := json.MarshalIndent(nodes, "", "  ")
 	if err != nil {
 		return
 	}

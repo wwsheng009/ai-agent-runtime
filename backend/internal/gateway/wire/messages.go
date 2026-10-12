@@ -47,22 +47,76 @@ type WorkspaceInfo struct {
 
 // SessionSummary is one session reported during REGISTER / SESSION_UPDATE.
 type SessionSummary struct {
-	SessionID string         `json:"session_id"`
-	Title     string         `json:"title,omitempty"`
-	State     string         `json:"state,omitempty"`
-	Attention string         `json:"attention,omitempty"`
-	Busy      bool           `json:"busy,omitempty"`
-	TurnID    string         `json:"turn_id,omitempty"`
-	UpdatedAt time.Time      `json:"updated_at,omitempty"`
-	Preview   string         `json:"preview,omitempty"`
+	SessionID string    `json:"session_id"`
+	Title     string    `json:"title,omitempty"`
+	State     string    `json:"state,omitempty"`
+	Attention string    `json:"attention,omitempty"`
+	Busy      bool      `json:"busy,omitempty"`
+	TurnID    string    `json:"turn_id,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Preview   string    `json:"preview,omitempty"`
 	// LastMessage / LastMessageRole expose the latest transcript message (role
 	// "user"|"assistant"|"tool"|...) so the gateway console can render the full
 	// last turn inline. The agent truncates the content (2000 runes) before
 	// sending; the gateway treats both fields as opaque display strings.
 	LastMessageRole string `json:"last_message_role,omitempty"`
 	LastMessage     string `json:"last_message,omitempty"`
-	Workspace *WorkspaceInfo `json:"workspace,omitempty"`
+	// StatusText is the compact one-line mirror of the host's live activity
+	// line ("Running shell", "Generating response", "Waiting for approval", …).
+	// It deliberately carries no clock: StatusStartedAt anchors an elapsed
+	// timer that the console advances locally, so a running turn does not need
+	// a stream of near-identical updates.
+	StatusText string `json:"status_text,omitempty"`
+	// StatusStartedAt is when the current activity/state began (zero when the
+	// session is idle or the host does not track it).
+	StatusStartedAt time.Time `json:"status_started_at,omitempty"`
+	// StatusTail is the display-only tail (≤512 runes, truncated by the shared
+	// client core) of the host's in-progress content while a turn is active.
+	// Gateway and console treat it as an opaque string; it never replaces the
+	// full transcript (docs/gateway/07-console.md §6).
+	StatusTail string `json:"status_tail,omitempty"`
+	// SyncedAt is stamped by the GATEWAY when it last accepted any frame
+	// (SESSION_UPDATE or heartbeat digest) for this session. Agents never set
+	// it; the gateway overwrites any inbound value so it is always server
+	// time. The console shows it as "同步 x 前" (freshness of the upload path,
+	// distinct from UpdatedAt = content time).
+	SyncedAt time.Time `json:"synced_at,omitempty"`
+	// StateChangedAt / AttentionChangedAt are stamped by the GATEWAY when the
+	// respective field transitions to a new value (either source: session
+	// update or heartbeat digest). Agents never set them; the console renders
+	// "运行中 2m 前 / 等待审批 30s 前" ages from them.
+	StateChangedAt     time.Time      `json:"state_changed_at,omitempty"`
+	AttentionChangedAt time.Time      `json:"attention_changed_at,omitempty"`
+	Workspace          *WorkspaceInfo `json:"workspace,omitempty"`
 }
+
+// Canonical session state values (SessionSummary.State).
+//
+// The vocabulary is intentionally small and shared by every host so the
+// gateway console (and any other consumer) can label states without guessing
+// host-specific strings. Attention remains a separate axis: State describes
+// what the session is doing, Attention describes what the operator must do.
+const (
+	// SessionStateIdle: no turn in flight, nothing pending.
+	SessionStateIdle = "idle"
+	// SessionStateRunning: tools/processing executing.
+	SessionStateRunning = "running"
+	// SessionStateThinking: model reasoning/planning.
+	SessionStateThinking = "thinking"
+	// SessionStateAnswering: assistant response streaming.
+	SessionStateAnswering = "answering"
+	// SessionStateWaiting: waiting for the user (question, confirmation) or
+	// for background obligations/subagents.
+	SessionStateWaiting = "waiting"
+	// SessionStateReview: waiting for an approval decision.
+	SessionStateReview = "review"
+	// SessionStateCompleted: the last turn finished successfully.
+	SessionStateCompleted = "completed"
+	// SessionStateInterrupted: the last turn was cancelled by the user.
+	SessionStateInterrupted = "interrupted"
+	// SessionStateError: the last turn failed.
+	SessionStateError = "error"
+)
 
 // Register is the node self-description sent after WELCOME (A→G, stream 0).
 type Register struct {
@@ -95,10 +149,11 @@ type LoadInfo struct {
 
 // SessionDigest is the lightweight per-session heartbeat entry.
 type SessionDigest struct {
-	SessionID string    `json:"session_id"`
-	State     string    `json:"state,omitempty"`
-	Attention string    `json:"attention,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	SessionID  string    `json:"session_id"`
+	State      string    `json:"state,omitempty"`
+	Attention  string    `json:"attention,omitempty"`
+	StatusText string    `json:"status_text,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
 }
 
 // Heartbeat is the periodic liveness + session-digest frame (A→G, stream 0).

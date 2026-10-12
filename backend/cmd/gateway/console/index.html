@@ -67,6 +67,8 @@
   <!-- ── 主区 ─────────────────────────────────────────────── -->
   <div class="workspace-main">
 
+    <div class="conn-banner" id="conn-banner" hidden>与网关连接中断，正在重连…</div>
+
     <header class="topbar" data-auth>
       <button id="sidebar-expand" type="button" class="btn ghost sm" hidden aria-label="展开侧边栏">
         <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
@@ -88,6 +90,8 @@
         <button id="logout-top" type="button" class="btn ghost sm" hidden>退出</button>
       </div>
     </header>
+
+    <div class="event-strip" id="event-strip" hidden aria-live="polite"></div>
 
     <main class="views">
 
@@ -141,16 +145,18 @@
           <div class="toolbar">
             <input id="session-filter" class="filter-input" type="search" placeholder="按标题 / 摘要 / 会话 ID 过滤…">
             <div class="seg" role="tablist" aria-label="会话筛选">
-              <button class="seg-btn active" data-sfilter="all">全部</button>
+              <button class="seg-btn active" data-sfilter="online">在线</button>
+              <button class="seg-btn" data-sfilter="all">全部</button>
               <button class="seg-btn" data-sfilter="attention">需处理</button>
-              <button class="seg-btn" data-sfilter="running">运行中</button>
-              <button class="seg-btn" data-sfilter="offline">离线快照</button>
+              <button class="seg-btn" data-sfilter="running">进行中</button>
+              <button class="seg-btn" data-sfilter="offline">离线</button>
             </div>
             <select id="session-sort" class="select" aria-label="排序">
               <option value="activity">按最近活动</option>
               <option value="title">按标题</option>
               <option value="node">按节点</option>
             </select>
+            <button id="tail-toggle" type="button" class="btn ghost sm">实时输出：开</button>
           </div>
           <div id="session-table" class="session-table"></div>
           <p id="session-empty" class="empty" hidden>没有匹配的会话。</p>
@@ -231,6 +237,80 @@
       </div>
     </form>
     <div id="device-token" class="token" hidden></div>
+  </div>
+</div>
+
+<!-- 会话详情模态 -->
+<div class="modal-scrim" id="session-modal" hidden>
+  <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="session-modal-title">
+    <div class="modal-head">
+      <h3 id="session-modal-title">会话详情</h3>
+      <button class="btn ghost sm modal-close" id="session-modal-close" aria-label="关闭">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="session-detail">
+      <div class="detail-row">
+        <span class="detail-label">标题</span>
+        <span class="detail-value" id="sd-title"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">会话 ID</span>
+        <span class="detail-value detail-id"><code id="sd-id"></code><button class="btn ghost sm" id="sd-copy" type="button">复制</button></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">节点</span>
+        <span class="detail-value" id="sd-node"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">状态</span>
+        <span class="detail-value" id="sd-state"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">动态状态</span>
+        <span class="detail-value" id="sd-status"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">注意力</span>
+        <span class="detail-value" id="sd-attention"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">最近更新</span>
+        <span class="detail-value" id="sd-updated"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">同步</span>
+        <span class="detail-value" id="sd-sync"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">状态变更</span>
+        <span class="detail-value" id="sd-state-at"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">注意力变更</span>
+        <span class="detail-value" id="sd-attention-at"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">节点心跳</span>
+        <span class="detail-value" id="sd-heartbeat"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">最近回复</span>
+        <span class="detail-value" id="sd-preview"></span>
+      </div>
+      <div class="detail-block" id="sd-last-wrap" hidden>
+        <span class="s-last-role" id="sd-last-role"></span>
+        <div class="detail-last" id="sd-last"></div>
+      </div>
+      <div class="detail-block" id="sd-tail-wrap" hidden>
+        <div class="detail-live-title">实时输出（进行中）</div>
+        <pre class="detail-last" id="sd-tail"></pre>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost sm" id="session-modal-done" type="button">关闭</button>
+      <button class="btn primary sm" id="session-modal-open" type="button">打开会话</button>
+    </div>
   </div>
 </div>
 

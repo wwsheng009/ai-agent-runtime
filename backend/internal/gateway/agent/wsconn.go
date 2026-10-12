@@ -49,6 +49,14 @@ type WSConnector struct {
 	// controller constructor wires it to MarkHeartbeat so Status.LastHeartbeat
 	// reflects acknowledged heartbeats.
 	OnHeartbeatAck func()
+	// OnPendingActions, when set, receives HeartbeatAck pending control
+	// actions (tail watch gating). The controller constructor wires it to
+	// ApplyPending.
+	OnPendingActions func([]string)
+	// DigestProvider, when set, supplies the compact per-session state carried
+	// inside each HEARTBEAT frame. Called on the heartbeat goroutine; it must
+	// not block (the controller's SessionDigests only snapshots memory).
+	DigestProvider func() []wire.SessionDigest
 }
 
 // Dial establishes the tunnel: connect, HELLO/WELCOME, REGISTER/REGISTER_ACK,
@@ -94,6 +102,8 @@ func (c *WSConnector) Dial(ctx context.Context, cfg Config) (Conn, error) {
 		logf:              c.Logf,
 		forward:           forward,
 		onHeartbeatAck:    c.OnHeartbeatAck,
+		onPendingActions:  c.OnPendingActions,
+		digestProvider:    c.DigestProvider,
 		done:              make(chan struct{}),
 		sendCredit:        make(map[uint32]int64),
 		flowSignal:        make(chan struct{}, 1),
@@ -185,6 +195,11 @@ type wsConn struct {
 	// onHeartbeatAck, when set, fires on every HEARTBEAT_ACK (the controller
 	// uses it to refresh Status.LastHeartbeat for /gateway status).
 	onHeartbeatAck func()
+	// onPendingActions receives Pending entries from HEARTBEAT_ACK frames.
+	onPendingActions func([]string)
+	// digestProvider fills the session digest section of HEARTBEAT frames
+	// (nil disables the section, keeping the frame liveness-only).
+	digestProvider func() []wire.SessionDigest
 
 	mu      sync.Mutex
 	streams map[uint32]*inboundStream
@@ -366,7 +381,11 @@ func (c *wsConn) heartbeatLoop() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if err := c.writeControl(wire.TypeHeartbeat, wire.Heartbeat{TS: time.Now().UTC()}); err != nil {
+			hb := wire.Heartbeat{TS: time.Now().UTC()}
+			if c.digestProvider != nil {
+				hb.Sessions = c.digestProvider()
+			}
+			if err := c.writeControl(wire.TypeHeartbeat, hb); err != nil {
 				c.logf0("gateway agent: heartbeat write failed: %v", err)
 				return
 			}
@@ -481,9 +500,16 @@ func (c *wsConn) readLoop() {
 		switch frame.Type {
 		case wire.TypePing:
 			_ = c.writeControl(wire.TypePong, map[string]any{})
-		case wire.TypeHeartbeatAck, wire.TypePong:
+		case wire.TypeHeartbeatAck:
 			// Gateway liveness: refresh the watchdog deadline and the host's
 			// LastHeartbeat (Status) so /gateway status stays accurate.
+			c.recordGatewayLiveness()
+			if c.onPendingActions != nil {
+				if ack, decodeErr := wire.DecodePayload[wire.HeartbeatAck](frame); decodeErr == nil && len(ack.Pending) > 0 {
+					c.onPendingActions(ack.Pending)
+				}
+			}
+		case wire.TypePong:
 			c.recordGatewayLiveness()
 		case wire.TypeWelcome:
 			// no-op

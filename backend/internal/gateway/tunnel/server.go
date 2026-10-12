@@ -36,6 +36,25 @@ type Config struct {
 	// OnRegistryChanged is called when the node registry changes (register,
 	// unregister or session update); used to push live console updates. Optional.
 	OnRegistryChanged func()
+	// OnSessionChanged, when set, receives single-session deltas so the host
+	// can broadcast a lightweight `event: session` instead of the full node
+	// snapshot. When nil, session updates fall back to OnRegistryChanged.
+	// Optional.
+	OnSessionChanged func(nodeID, sessionID string)
+	// OnRegistryTouch runs for every accepted session change (including
+	// delta-only ones) so hosts can feed consumers that need the full list
+	// but not a console broadcast (e.g. the push notifier). Optional.
+	OnRegistryTouch func()
+	// OnSessionTransition, when set, fires when the gateway observes a
+	// State/Attention transition (from either source: SESSION_UPDATE or a
+	// heartbeat digest). Hosts push a lightweight console `event: session-event`.
+	// Optional.
+	OnSessionTransition func(nodeID, sessionID, state, attention string)
+	// TailWatchTargets, when set, returns the sessions whose live-output tail
+	// a console is currently watching for this node. The gateway diff-sends
+	// watch/unwatch control actions on HEARTBEAT_ACK (P1-b presence gating);
+	// nil disables gating entirely (agents keep pushing tails as in P1-a).
+	TailWatchTargets func(nodeID string) []string
 	// DataDir enables registry persistence (registry.json under DataDir,
 	// debounced). Empty disables persistence. Optional.
 	DataDir string
@@ -257,6 +276,7 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		RegisteredAt:  nowUTC(),
 		LastHeartbeat: nowUTC(),
 	}
+	stampAllSessionsSynced(node, node.RegisteredAt)
 	s.registry.Upsert(node)
 	s.notifyRegistryChangedAndPersist()
 	defer func() {
@@ -291,6 +311,8 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	}
 
 	// Control loop.
+	watchSent := map[string]bool{}
+	watchGatingSent := false
 	for {
 		frame, err := readFrame(ws)
 		if err != nil {
@@ -298,11 +320,53 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		}
 		switch frame.Type {
 		case wire.TypeHeartbeat:
+			hb, decodeErr := wire.DecodePayload[wire.Heartbeat](frame)
 			if updated, ok := s.registry.Get(nodeID); ok {
+				// Heartbeats may carry compact session digests; merge them so a
+				// missed SESSION_UPDATE cannot leave the registry stale. Only a
+				// real change pays for a broadcast + persist.
+				changed := false
+				var transitions []sessionTransition
+				if decodeErr == nil {
+					changed, transitions = applyHeartbeatDigests(updated, hb.Sessions, nowUTC())
+					// SyncedAt is stamped outside the change detection: a
+					// heartbeat refresh must not broadcast or persist.
+					stampDigestSessions(updated, hb.Sessions, nowUTC())
+				}
 				updated.LastHeartbeat = nowUTC()
 				s.registry.Upsert(updated)
+				s.emitTransitions(nodeID, transitions)
+				if changed {
+					s.notifyRegistryChangedAndPersist()
+				}
 			}
-			if err := writeJSON(ws, wire.TypeHeartbeatAck, wire.HeartbeatAck{ServerTime: nowUTC()}); err != nil {
+			// P1-b presence gating: tell the agent which sessions' live tails a
+			// console is watching (diff from what this connection was last
+			// told). The first ack advertises participation so agents can keep
+			// the ungated P1-a behavior against gateways that never do.
+			ack := wire.HeartbeatAck{ServerTime: nowUTC()}
+			if s.cfg.TailWatchTargets != nil {
+				if !watchGatingSent {
+					ack.Pending = append(ack.Pending, "tail-gating:on")
+					watchGatingSent = true
+				}
+				desired := map[string]bool{}
+				if cur, ok := s.registry.Get(nodeID); ok {
+					live := make(map[string]bool, len(cur.Sessions))
+					for _, sess := range cur.Sessions {
+						live[sess.SessionID] = true
+					}
+					for _, sid := range s.cfg.TailWatchTargets(nodeID) {
+						if live[sid] {
+							desired[sid] = true
+						}
+					}
+				}
+				actions, next := watchActions(desired, watchSent)
+				watchSent = next
+				ack.Pending = append(ack.Pending, actions...)
+			}
+			if err := writeJSON(ws, wire.TypeHeartbeatAck, ack); err != nil {
 				return err
 			}
 		case wire.TypePing:

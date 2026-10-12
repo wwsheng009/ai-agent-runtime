@@ -125,14 +125,24 @@ Phase 3 再评估，本文其余部分以单实例为主。
 | `session_id` | string | 会话 ID（沿用本地 `session_*` 命名） |
 | `node_id` | string | 归属节点 |
 | `title` | string | 标题 |
-| `state` | enum | `idle` / `running` / `busy` / `error` / `unknown` |
-| `attention` | enum | `none` / `approval` / `question` / `completed` / `error` |
+| `state` | enum | `idle` / `running`（执行工具）/ `thinking`（推理/规划）/ `answering`（生成回答）/ `waiting`（等用户/子代理）/ `review`（等审批）/ `completed` / `interrupted` / `error`；由共享核心 `SessionStateStore` 维护 |
+| `attention` | enum | `""`（无）/ `approval` / `question` / `completed` / `waiting` / `error`；与 state 的耦合（approval→review、question→waiting、解除后回 running）由共享核心统一处理 |
 | `busy` | bool | 是否正在跑一轮（单飞） |
+| `status_text` | string | 宿主单行动态状态文本（如 `Running shell` / `Generating response` / `Waiting for approval`），不含时钟 |
+| `status_started_at` | time | 当前活动开始时刻；控制台本地推进 `已持续` 计时，避免逐秒刷网关 |
+| `synced_at` | time | **网关盖章**：最后收到该会话任何帧（SESSION_UPDATE / 心跳 digest）的服务器时间；控制台显示"同步 x 前"（上传链路新鲜度，区别于 `updated_at` 内容时间） |
+| `state_changed_at` / `attention_changed_at` | time | **网关盖章**：State/Attention 最近一次迁移时间（任一来源：会话更新或心跳 digest）；详情弹窗显示"状态变更/注意力变更 x 前" |
 | `turn_id` | string | 当前轮次（可选） |
 | `preview` | string | 最后一条消息预览（截断，**不含敏感正文**，由本地决定是否提供） |
 | `provider` / `model` | string | 当前 provider/model（可选，用于展示） |
 | `workspace` | {path,name} | 会话工作目录 |
 | `updated_at` | time | 最后活跃 |
+
+> **单一实现**：会话状态投影（state/attention/status_text 的词表、迁移与变更检测）
+> 只有一份实现——`internal/gateway/agent.SessionStateStore`。aicli TUI 与
+> runtime-server 各自只做「本地事件 → 核心调用」的映射（aicli：surface 状态机 /
+> turn 生命周期；runtime-server：运行时事件总线），内容字段（title/preview/
+> 最后一条消息）仍由各自宿主填充，**不做全量数据同步**。
 
 ### 3.3 能力位（capabilities）
 

@@ -68,6 +68,41 @@ func TestPersisterRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPersisterTrimsStatusTail pins D3: the ephemeral live-output tail never
+// reaches registry.json, and trimming the snapshot copy does not clear the
+// live registry (the SSE `event: session` stream keeps its tail).
+func TestPersisterTrimsStatusTail(t *testing.T) {
+	dir := t.TempDir()
+	reg := NewRegistry()
+	reg.Upsert(&Node{NodeID: "node-a", Sessions: []wire.SessionSummary{{
+		SessionID:  "s1",
+		StatusTail: "live-tail-must-not-persist",
+	}}})
+
+	p := NewPersister(reg, dir, 20*time.Millisecond)
+	defer p.Close()
+	p.Schedule()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(dir, persistPath)); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	snap := LoadSnapshot(dir)
+	if len(snap) != 1 || len(snap[0].Sessions) != 1 {
+		t.Fatalf("snapshot = %+v", snap)
+	}
+	if got := snap[0].Sessions[0].StatusTail; got != "" {
+		t.Fatalf("snapshot must trim StatusTail, got %q", got)
+	}
+	if live, _ := reg.Get("node-a"); live.Sessions[0].StatusTail != "live-tail-must-not-persist" {
+		t.Fatalf("live registry must keep the tail, got %q", live.Sessions[0].StatusTail)
+	}
+}
+
 func TestLoadSnapshotMissingOrCorrupt(t *testing.T) {
 	if got := LoadSnapshot(t.TempDir()); got != nil {
 		t.Fatalf("missing snapshot = %+v", got)

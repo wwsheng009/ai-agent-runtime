@@ -39,37 +39,75 @@ type gatewayMetrics struct {
 	banned      atomic.Int64
 }
 
-// nodeHub broadcasts registry changes to console SSE subscribers.
+// hubEvent is one signal for a console SSE subscriber: either "full" (reload
+// the whole node snapshot) or "session" (patch one session row).
+type hubEvent struct {
+	kind      string // "full" | "session"
+	nodeID    string
+	sessionID string
+	state     string
+	attention string
+}
+
+// nodeHub broadcasts registry changes to console SSE subscribers. The channel
+// is small and drop-oldest: a lost "session" delta is reconciled by the next
+// full snapshot (meta tick), which keeps a slow subscriber from stalling the
+// tunnel.
 type nodeHub struct {
 	mu   sync.Mutex
-	subs map[chan struct{}]struct{}
+	subs map[chan hubEvent]struct{}
 }
 
 func newNodeHub() *nodeHub {
-	return &nodeHub{subs: make(map[chan struct{}]struct{})}
+	return &nodeHub{subs: make(map[chan hubEvent]struct{})}
 }
 
-func (h *nodeHub) subscribe() chan struct{} {
-	ch := make(chan struct{}, 1)
+func (h *nodeHub) subscribe() chan hubEvent {
+	ch := make(chan hubEvent, 8)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 	return ch
 }
 
-func (h *nodeHub) unsubscribe(ch chan struct{}) {
+func (h *nodeHub) unsubscribe(ch chan hubEvent) {
 	h.mu.Lock()
 	delete(h.subs, ch)
 	h.mu.Unlock()
 }
 
+// notify asks every subscriber for a full snapshot refresh.
 func (h *nodeHub) notify() {
+	h.publish(hubEvent{kind: "full"})
+}
+
+// publishSession asks subscribers to patch a single session row.
+func (h *nodeHub) publishSession(nodeID, sessionID string) {
+	h.publish(hubEvent{kind: "session", nodeID: nodeID, sessionID: sessionID})
+}
+
+// publishTransition asks subscribers to emit a lightweight session-event
+// (state/attention migration) without touching the snapshot.
+func (h *nodeHub) publishTransition(nodeID, sessionID, state, attention string) {
+	h.publish(hubEvent{kind: "transition", nodeID: nodeID, sessionID: sessionID, state: state, attention: attention})
+}
+
+func (h *nodeHub) publish(ev hubEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.subs {
 		select {
-		case ch <- struct{}{}:
+		case ch <- ev:
 		default:
+			// Drop the oldest pending signal, then retry once (latest-wins).
+			select {
+			case <-ch:
+			default:
+			}
+			select {
+			case ch <- ev:
+			default:
+			}
 		}
 	}
 }
@@ -185,6 +223,7 @@ func run() int {
 		presenceTTL    = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
 		coalesceWindow = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
 		quietHours     = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
+		eventTick      = flag.Duration("event-tick", 30*time.Second, "periodic SSE meta tick: re-broadcast the full node snapshot so idle consoles keep fresh last_heartbeat/synced_at values; 0 disables (SSE-only, no push fan-out)")
 		// allowUnprotected lifts the fail-fast guard for "non-loopback listen
 		// without owner password and without any device token" — the combination
 		// that publishes an unauthenticated console AND an open agent tunnel to
@@ -232,6 +271,18 @@ func run() int {
 	}
 	auditLog := audit.New(2000, filepath.Join(*dataDir, "audit.log"))
 	hub := newNodeHub()
+	// Meta tick: refreshes the console's snapshot on an otherwise idle
+	// registry so last_heartbeat/synced_at values stay fresh. It only wakes
+	// the SSE hub — it must not feed the push notifier (no periodic noise).
+	if *eventTick > 0 {
+		go func() {
+			ticker := time.NewTicker(*eventTick)
+			defer ticker.Stop()
+			for range ticker.C {
+				hub.notify()
+			}
+		}()
+	}
 	var metrics gatewayMetrics
 	limiter := ratelimit.New(*rateLimit, time.Minute)
 	resolver := ratelimit.NewResolver(strings.Split(*trustedProxies, ","))
@@ -317,6 +368,20 @@ func run() int {
 		},
 		OnRegistryChanged: func() {
 			hub.notify()
+			notifier.observe(registry.List())
+		},
+		OnSessionChanged: func(nodeID, sessionID string) {
+			hub.publishSession(nodeID, sessionID)
+		},
+		OnSessionTransition: func(nodeID, sessionID, state, attention string) {
+			hub.publishTransition(nodeID, sessionID, state, attention)
+		},
+		// P1-b: presence with tail=true gates which sessions' live output the
+		// agent pushes (diffed onto HEARTBEAT_ACK pending actions).
+		TailWatchTargets: func(nodeID string) []string {
+			return presence.TailWatched(nodeID)
+		},
+		OnRegistryTouch: func() {
 			notifier.observe(registry.List())
 		},
 		Logf: func(format string, args ...any) {
@@ -487,6 +552,48 @@ func run() int {
 		if !send() {
 			return
 		}
+		// Single-session delta: the console patches one row instead of
+		// re-marshalling the whole node list (P1 live tail path).
+		sendSession := func(nodeID, sessionID string) bool {
+			node, ok := registry.Get(nodeID)
+			if !ok {
+				return true // structural change follows via the full snapshot
+			}
+			for _, s := range node.Sessions {
+				if s.SessionID != sessionID {
+					continue
+				}
+				payload, err := json.Marshal(map[string]any{"node_id": nodeID, "session": s})
+				if err != nil {
+					return false
+				}
+				if _, err := fmt.Fprintf(w, "event: session\ndata: %s\n\n", payload); err != nil {
+					return false
+				}
+				flusher.Flush()
+				return true
+			}
+			return true
+		}
+		// State/attention migration: a tiny event the console renders in the
+		// "刚刚" strip (no snapshot payload).
+		sendTransition := func(ev hubEvent) bool {
+			payload, err := json.Marshal(map[string]any{
+				"node_id":    ev.nodeID,
+				"session_id": ev.sessionID,
+				"state":      ev.state,
+				"attention":  ev.attention,
+				"ts":         time.Now().UTC(),
+			})
+			if err != nil {
+				return false
+			}
+			if _, err := fmt.Fprintf(w, "event: session-event\ndata: %s\n\n", payload); err != nil {
+				return false
+			}
+			flusher.Flush()
+			return true
+		}
 		ch := hub.subscribe()
 		defer hub.unsubscribe(ch)
 		heartbeat := time.NewTicker(20 * time.Second)
@@ -495,9 +602,20 @@ func run() int {
 			select {
 			case <-r.Context().Done():
 				return
-			case <-ch:
-				if !send() {
-					return
+			case ev := <-ch:
+				switch ev.kind {
+				case "session":
+					if !sendSession(ev.nodeID, ev.sessionID) {
+						return
+					}
+				case "transition":
+					if !sendTransition(ev) {
+						return
+					}
+				default:
+					if !send() {
+						return
+					}
 				}
 			case <-heartbeat.C:
 				if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {

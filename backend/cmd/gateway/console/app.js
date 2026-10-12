@@ -12,8 +12,10 @@
   var readAttention = {};
   var presenceTargets = {};
   var sessionFilterText = "";
-  var sessionFilterKind = "all";
+  // 默认只显示在线会话：离线快照收进「离线」筛选，避免主列表被旧数据占满。
+  var sessionFilterKind = "online";
   var sessionSort = "activity";
+  var authedState = false;
 
   var attentionPriority = { approval: 0, question: 1, error: 2, completed: 3, waiting: 4 };
 
@@ -54,6 +56,7 @@
   }
 
   function setAuthed(authed) {
+    authedState = !!authed;
     el("login").hidden = authed;
     el("app").hidden = !authed;
     el("push-toggle").hidden = !authed;
@@ -132,18 +135,171 @@
   }
 
   var eventsSubscribed = false;
+  var lastEventAt = 0;
+  var sseDropped = false;
+
+  // Visible connection state: a banner + the topbar chip tint. EventSource
+  // reconnects on its own; we only surface it and re-sync on reopen.
+  function setConnBanner(lost) {
+    var banner = el("conn-banner");
+    if (banner) { banner.hidden = !lost; }
+    var chip = el("conn-chip");
+    if (chip) { chip.classList.toggle("conn-lost", lost); }
+  }
+
   function subscribeEvents() {
     if (eventsSubscribed || typeof EventSource !== "function") { return; }
     eventsSubscribed = true;
     var source = new EventSource("/api/events");
+    source.addEventListener("open", function () {
+      lastEventAt = Date.now();
+      setConnBanner(false);
+      // A reopen after a drop can hide missed registry changes; re-align once.
+      if (sseDropped) { sseDropped = false; loadNodes(); }
+    });
     source.addEventListener("nodes", function (event) {
+      lastEventAt = Date.now();
       try {
         var payload = JSON.parse(event.data);
         lastNodes = (payload && payload.nodes) || [];
         renderAll(lastNodes);
       } catch (err) { /* ignore malformed frame */ }
     });
-    source.addEventListener("error", function () {});
+    source.addEventListener("session", function (event) {
+      lastEventAt = Date.now();
+      try {
+        var payload = JSON.parse(event.data);
+        if (payload) { patchSession(payload.node_id, payload.session); }
+      } catch (err) { /* ignore malformed frame */ }
+    });
+    source.addEventListener("session-event", function (event) {
+      lastEventAt = Date.now();
+      try { pushStripEvent(JSON.parse(event.data)); } catch (err) { /* ignore */ }
+    });
+    source.addEventListener("error", function () {
+      sseDropped = true;
+      setConnBanner(true);
+    });
+  }
+
+  /* ── Migration event strip (state/attention changes) ─────────── */
+
+  var STRIP_LIMIT = 10;
+  var STRIP_TTL_MS = 10 * 60 * 1000;
+  var stripEvents = [];
+
+  function pushStripEvent(ev) {
+    if (!ev || !ev.session_id) { return; }
+    // One chip per session: a session that keeps transitioning (运行中→回答中→
+    // 已完成) refreshes its existing chip in place instead of stacking a new
+    // duplicate on every transition, and moves to the front with the latest
+    // label. Distinct sessions stay apart.
+    var key = (ev.node_id || "") + "|" + ev.session_id;
+    stripEvents = stripEvents.filter(function (item) {
+      return item.nodeID + "|" + item.sessionID !== key;
+    });
+    stripEvents.unshift({
+      nodeID: ev.node_id || "",
+      sessionID: ev.session_id,
+      state: ev.state || "",
+      attention: ev.attention || "",
+      ts: Date.parse(ev.ts || "") || Date.now(),
+    });
+    stripEvents = stripEvents.slice(0, STRIP_LIMIT);
+    renderEventStrip();
+  }
+
+  function stripTitleOf(ev) {
+    var items = allSessions(lastNodes);
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].session.session_id === ev.sessionID) { return sessionLabelOf(items[i].session); }
+    }
+    return ev.sessionID;
+  }
+
+  function renderEventStrip() {
+    var host = el("event-strip");
+    if (!host) { return; }
+    var now = Date.now();
+    stripEvents = stripEvents.filter(function (ev) { return now - ev.ts < STRIP_TTL_MS; });
+    if (!stripEvents.length) { host.hidden = true; host.innerHTML = ""; return; }
+    host.hidden = false;
+    host.innerHTML = "";
+    var title = document.createElement("span");
+    title.className = "event-strip-title";
+    title.textContent = "刚刚";
+    host.appendChild(title);
+    stripEvents.forEach(function (ev) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "event-chip" + (ev.attention ? " ev-att-" + ev.attention : "");
+      var label = ev.attention ? attentionLabel(ev.attention) : (STATE_LABELS[ev.state] || ev.state || "状态变化");
+      chip.textContent = stripTitleOf(ev) + " · " + label + " ";
+      var when = document.createElement("span");
+      when.className = "event-chip-when";
+      setRelTime(when, ev.ts, "", 0, absoluteTime(ev.ts));
+      chip.appendChild(when);
+      chip.addEventListener("click", function () { locateSession(ev.nodeID, ev.sessionID); });
+      host.appendChild(chip);
+    });
+    var clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "btn ghost sm event-strip-clear";
+    clear.textContent = "清空";
+    clear.addEventListener("click", function () { stripEvents = []; renderEventStrip(); });
+    host.appendChild(clear);
+  }
+
+  // Click-through: reveal the session row (switching to 全部 when the current
+  // filter hides it) and pulse it so the operator lands on the right card.
+  function locateSession(nodeID, sessionID) {
+    var selector = '.session-card[data-draft-key="' + nodeID + "|" + sessionID + '"]';
+    var card = document.querySelector(selector);
+    if (!card) {
+      sessionFilterKind = "all";
+      syncFilterControls();
+      saveSessionPrefs();
+      renderSessionTable(lastNodes);
+      card = document.querySelector(selector);
+      if (!card) { notify("未在列表中找到该会话（可能已过期或已移除）", "error"); return; }
+    }
+    if (card.scrollIntoView) { card.scrollIntoView({ block: "center" }); }
+    card.classList.remove("card-updated");
+    void card.offsetWidth; // restart the pulse animation
+    card.classList.add("card-updated");
+  }
+
+  // Expired chips are pruned by the 5s tick (labels advance via setRelTime).
+  function pruneStripEvents() {
+    if (!stripEvents.length) { return; }
+    var now = Date.now();
+    var next = stripEvents.filter(function (ev) { return now - ev.ts < STRIP_TTL_MS; });
+    if (next.length !== stripEvents.length) {
+      stripEvents = next;
+      renderEventStrip();
+    }
+  }
+
+  // Patch one session from an `event: session` delta (the live-tail path):
+  // without this the 1Hz tail would force a full-snapshot re-render per frame.
+  // Unknown nodes fall back to a full reload; structural removals never come
+  // through this channel (the server broadcasts a full snapshot for those).
+  function patchSession(nodeID, session) {
+    if (!session || !session.session_id) { return; }
+    var found = false;
+    (lastNodes || []).forEach(function (node) {
+      if (node.node_id !== nodeID) { return; }
+      found = true;
+      var list = node.sessions || (node.sessions = []);
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].session_id === session.session_id) { list[i] = session; return; }
+      }
+      list.push(session);
+    });
+    if (!found) { loadNodes(); return; }
+    updateStats(lastNodes);
+    renderInbox(lastNodes);
+    renderSessionTable(lastNodes);
   }
 
   /* ─────────────────────── derived helpers ───────────────────── */
@@ -160,10 +316,37 @@
     return session.title || session.session_id;
   }
 
-  function timeOf(session) {
-    if (!session.updated_at) { return ""; }
-    var d = new Date(session.updated_at);
-    return isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // Relative time labels: "刚刚 / 12s 前 / 3 分钟前 / 2 小时前 / 09-12 14:33".
+  function timeAgo(value) {
+    var ms = typeof value === "number" ? value : new Date(value || 0).getTime();
+    if (!ms || isNaN(ms)) { return ""; }
+    var diff = Math.max(0, Date.now() - ms);
+    var seconds = Math.floor(diff / 1000);
+    if (seconds < 10) { return "刚刚"; }
+    if (seconds < 60) { return seconds + "s 前"; }
+    var minutes = Math.floor(seconds / 60);
+    if (minutes < 60) { return minutes + " 分钟前"; }
+    var hours = Math.floor(minutes / 60);
+    if (hours < 24) { return hours + " 小时前"; }
+    var d = new Date(ms);
+    return d.toLocaleDateString([], { month: "2-digit", day: "2-digit" }) + " " +
+      d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function absoluteTime(value) {
+    var d = new Date(typeof value === "number" ? value : value || 0);
+    return isNaN(d.getTime()) ? "" : d.toLocaleString();
+  }
+
+  // setRelTime wires an element for local relative-time refresh: the 5s tick
+  // re-renders the label and toggles .age-stale past the given threshold.
+  function setRelTime(el2, ms, prefix, staleMs, title) {
+    el2.textContent = prefix + timeAgo(ms);
+    if (title) { el2.title = title; }
+    el2.setAttribute("data-rel-ts", String(ms));
+    el2.setAttribute("data-rel-prefix", prefix || "");
+    if (staleMs) { el2.setAttribute("data-rel-stale-ms", String(staleMs)); }
+    el2.classList.toggle("age-stale", !!(staleMs && Date.now() - ms > staleMs));
   }
 
   function allSessions(nodes) {
@@ -215,12 +398,14 @@
 
   function sessionMatches(item) {
     var s = item.session;
+    if (sessionFilterKind === "online" && item.node.stale) { return false; }
     if (sessionFilterKind === "attention" && !s.attention) { return false; }
-    if (sessionFilterKind === "running" && !(s.busy || s.state === "running")) { return false; }
+    if (sessionFilterKind === "running" && (item.node.stale || !(s.busy || isActiveSessionState(s.state)))) { return false; }
     if (sessionFilterKind === "offline" && !item.node.stale) { return false; }
     if (sessionFilterText) {
       var q = sessionFilterText.toLowerCase();
-      var hay = ((s.title || "") + " " + (s.preview || "") + " " + (s.last_message || "") + " " + s.session_id).toLowerCase();
+      var hay = ((s.title || "") + " " + (s.preview || "") + " " + (s.last_message || "") + " " +
+        (s.status_text || "") + " " + s.session_id).toLowerCase();
       if (hay.indexOf(q) === -1) { return false; }
     }
     return true;
@@ -241,14 +426,25 @@
     var form = document.createElement("form");
     form.className = "s-reply";
     form.innerHTML =
-      '<textarea class="s-reply-input" rows="2" placeholder="回复该会话…（Enter 发送，Shift+Enter 换行）"></textarea>' +
-      '<div class="s-reply-row"><span class="s-reply-hint" hidden></span>' +
-      '<button class="btn sm" type="submit">发送</button></div>';
+      '<div class="s-reply-main">' +
+      '<textarea class="s-reply-input" rows="1" placeholder="回复该会话…（Enter 发送，Shift+Enter 换行）"></textarea>' +
+      '<button class="btn primary sm s-reply-send" type="submit">发送</button>' +
+      '</div>' +
+      '<span class="s-reply-hint" hidden></span>';
     var input = form.querySelector(".s-reply-input");
+    var sendBtn = form.querySelector(".s-reply-send");
     var hint = form.querySelector(".s-reply-hint");
     var busy = false;
-    // Keep clicks inside the reply box from triggering the card's "open
-    // session" navigation handler.
+    // The input and 发送 share one row — the button never takes a line of its
+    // own — and the textarea grows with the draft up to the CSS max-height.
+    // (jsdom has no layout engine: scrollHeight === 0, so the sync is skipped.)
+    var autoGrow = function () {
+      if (!input.scrollHeight) { return; }
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    };
+    input.addEventListener("input", autoGrow);
+    // Keep clicks inside the reply box from bubbling out to the card.
     form.addEventListener("click", function (e) { e.stopPropagation(); });
     form.addEventListener("submit", function (e) {
       e.preventDefault();
@@ -259,6 +455,7 @@
         return;
       }
       busy = true;
+      sendBtn.disabled = true;
       hint.textContent = "发送中…";
       hint.hidden = false;
       api("/n/" + encodeURIComponent(node.node_id) + "/web/api/input", {
@@ -273,6 +470,7 @@
           if (body && body.status === "queued") {
             notify("已发送到会话：" + sessionLabelOf(session), "ok");
             input.value = "";
+            autoGrow();
             hint.hidden = true;
             hint.textContent = "";
           } else {
@@ -284,6 +482,7 @@
         hint.textContent = "发送失败，可重试";
       }).finally(function () {
         busy = false;
+        sendBtn.disabled = false;
       });
     });
     // Enter submits; Shift+Enter inserts a newline (textarea default).
@@ -304,6 +503,10 @@
       var na = a.node.name || a.node.node_id, nb = b.node.name || b.node.node_id;
       return na < nb ? -1 : na > nb ? 1 : 0;
     }
+    // Default sort: sessions that need the operator first (approval/question/
+    // error), then running ones, then everything else by recency.
+    var ra = attentionSortRank(a.session), rb = attentionSortRank(b.session);
+    if (ra !== rb) { return ra - rb; }
     var ba = a.session.busy ? 0 : 1, bb = b.session.busy ? 0 : 1;
     if (ba !== bb) { return ba - bb; }
     var ta = new Date(a.session.updated_at || 0).getTime();
@@ -311,29 +514,347 @@
     return tb - ta;
   }
 
+  function attentionSortRank(session) {
+    switch (session.attention) {
+      case "approval": return 0;
+      case "question": return 1;
+      case "error": return 2;
+    }
+    return isActiveSessionState(session.state) || session.busy ? 3 : 4;
+  }
+
+  /* ── Session view preferences (filter kind + sort, persisted) ── */
+
+  var SESSION_PREFS_KEY = "aicli-gw-session-prefs";
+  var SESSIONS_SCROLL_KEY = "aicli-gw-sessions-scroll";
+
+  function loadSessionPrefs() {
+    try {
+      var p = JSON.parse(localStorage.getItem(SESSION_PREFS_KEY) || "null");
+      if (!p) { return; }
+      if (typeof p.kind === "string" && p.kind) { sessionFilterKind = p.kind; }
+      if (typeof p.sort === "string" && p.sort) { sessionSort = p.sort; }
+      if (p.tail === false) { tailEnabled = false; }
+    } catch (err) { /* storage unavailable */ }
+  }
+
+  function saveSessionPrefs() {
+    try {
+      localStorage.setItem(SESSION_PREFS_KEY, JSON.stringify({ kind: sessionFilterKind, sort: sessionSort, tail: tailEnabled }));
+    } catch (err) { /* storage unavailable */ }
+  }
+
+  // Reflect the current filter/sort on the static controls (boot restore,
+  // deep links and programmatic changes share one path).
+  function syncFilterControls() {
+    document.querySelectorAll(".seg-btn").forEach(function (b) {
+      b.classList.toggle("active", b.getAttribute("data-sfilter") === sessionFilterKind);
+    });
+    var sortSel = el("session-sort");
+    if (sortSel) { sortSel.value = sessionSort; }
+  }
+
+  function findSessionByKey(key) {
+    if (!key) { return null; }
+    var items = allSessions(lastNodes);
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].node.node_id + "|" + items[i].session.session_id === key) { return items[i]; }
+    }
+    return null;
+  }
+
+  // ── Session reply drafts: keep user input across list updates ──
+  // renderSessionTable rebuilds the card DOM on every update; a reply the user
+  // is typing must survive that (and identical SSE frames must not steal focus
+  // or caret). Drafts are keyed by node+session and restored in place.
+  var sessionDrafts = {};
+  var lastSessionTableSignature = "";
+  // Per-session UI state: which cards are expanded (kept across re-renders),
+  // and the last rendered fingerprint (drives the "changed" pulse).
+  var expandedSessions = {};
+  var sessionLastSeen = {};
+  // Device groups the operator folded; scroll restore runs once per page load.
+  var collapsedGroups = {};
+  var sessionsScrollRestored = false;
+  // Live-output tail: global on/off (persisted) + per-card follow state.
+  var tailEnabled = true;
+  var tailFollow = {};
+
+  // Fingerprint of the visible session fields; a change pulses the card so a
+  // busy list still tells the operator where something moved.
+  function sessionFingerprint(s) {
+    return [
+      s.state || "", s.attention || "", s.busy ? 1 : 0, s.status_text || "",
+      s.updated_at || "", (s.last_message || "").length, s.last_message_role || "",
+    ].join("|");
+  }
+
+  function sessionTableSignature(items) {
+    var parts = items.map(function (item) {
+      var s = item.session;
+      return [
+        item.node.node_id, item.node.stale ? 1 : 0, (item.node.capabilities || []).join(","),
+        s.session_id, s.title || "", s.state || "", s.attention || "", s.busy ? 1 : 0,
+        s.status_text || "", s.status_started_at || "", s.status_tail || "", s.updated_at || "",
+        s.preview || "", s.last_message_role || "", s.last_message || "",
+      ].join("\u0001");
+    });
+    // tailEnabled participates: toggling the live-output switch must rebuild
+    // the cards even when the session data itself is unchanged.
+    return sessionFilterKind + "\u0002" + sessionFilterText + "\u0002" + sessionSort +
+      "\u0002" + (tailEnabled ? "1" : "0") + "\u0002" + parts.join("\u0003");
+  }
+
+  function captureSessionDrafts() {
+    document.querySelectorAll(".session-card[data-draft-key]").forEach(function (card) {
+      var input = card.querySelector(".s-reply-input");
+      if (!input) { return; }
+      var key = card.getAttribute("data-draft-key");
+      var focused = document.activeElement === input;
+      var text = input.value || "";
+      if (!text && !focused) { delete sessionDrafts[key]; return; }
+      sessionDrafts[key] = {
+        text: text,
+        focused: focused,
+        start: focused ? input.selectionStart : null,
+        end: focused ? input.selectionEnd : null,
+      };
+    });
+  }
+
+  function restoreSessionDrafts(host) {
+    host.querySelectorAll(".session-card[data-draft-key]").forEach(function (card) {
+      var d = sessionDrafts[card.getAttribute("data-draft-key")];
+      var input = card.querySelector(".s-reply-input");
+      if (!d || !input) { return; }
+      if (d.text) { input.value = d.text; }
+      if (d.focused) {
+        d.focused = false; // focus is restored once; later re-renders keep it
+        input.focus();
+        if (d.start !== null && d.start !== undefined) {
+          try { input.setSelectionRange(d.start, d.end); } catch (err) { /* detached */ }
+        }
+      }
+    });
+  }
+
+  // ── Active session states (shared by cards / filters / detail dialog) ──
+  var ACTIVE_SESSION_STATES = { running: true, thinking: true, answering: true, waiting: true, review: true };
+
+  function isActiveSessionState(state) {
+    return !!ACTIVE_SESSION_STATES[state];
+  }
+
+  function formatStatusElapsed(ms) {
+    var seconds = Math.max(0, Math.floor(ms / 1000));
+    if (seconds < 60) { return seconds + "s"; }
+    var minutes = Math.floor(seconds / 60);
+    var rem = seconds % 60;
+    if (minutes < 60) { return minutes + "m " + (rem < 10 ? "0" : "") + rem + "s"; }
+    return Math.floor(minutes / 60) + "h " + (minutes % 60) + "m";
+  }
+
+  // The agent sends the activity anchor once; the console advances the clock
+  // locally so a running turn never streams near-identical updates.
+  function refreshStatusElapsed() {
+    var now = Date.now();
+    document.querySelectorAll(".s-status-elapsed[data-started]").forEach(function (node) {
+      var started = Date.parse(node.getAttribute("data-started"));
+      if (isNaN(started)) { return; }
+      node.textContent = "· " + formatStatusElapsed(now - started);
+    });
+  }
+  // Local 5s tick: elapsed clocks + relative labels (内容/同步/心跳) keep
+  // advancing even when no SSE frame arrives.
+  function refreshRelativeTimes() {
+    document.querySelectorAll("[data-rel-ts]").forEach(function (node) {
+      var ms = parseInt(node.getAttribute("data-rel-ts"), 10);
+      if (!ms) { return; }
+      var prefix = node.getAttribute("data-rel-prefix") || "";
+      node.textContent = prefix + timeAgo(ms);
+      var staleMs = parseInt(node.getAttribute("data-rel-stale-ms") || "0", 10);
+      node.classList.toggle("age-stale", !!(staleMs && Date.now() - ms > staleMs));
+    });
+  }
+  setInterval(function () {
+    refreshStatusElapsed();
+    refreshRelativeTimes();
+    pruneStripEvents();
+  }, 5000);
+
   function renderSessionTable(nodes) {
     var host = el("session-table");
     if (!host) { return; }
     var items = allSessions(nodes).filter(sessionMatches).sort(sessionSorter);
     var empty = el("session-empty");
     if (empty) { empty.hidden = items.length > 0; }
+    // Skip redundant rebuilds (identical SSE frames): typing, focus and
+    // selection stay untouched unless something visible actually changed.
+    var signature = sessionTableSignature(items);
+    if (signature === lastSessionTableSignature) { return; }
+    lastSessionTableSignature = signature;
+    captureSessionDrafts();
     host.innerHTML = "";
+    // Nodes with several visible sessions collapse into a group (session list
+    // grouped by device); single-session nodes stay flat so the two-column
+    // board keeps its density.
+    var nodeCounts = {};
     items.forEach(function (item) {
+      var k = item.node.node_id;
+      nodeCounts[k] = (nodeCounts[k] || 0) + 1;
+    });
+    var renderedNodes = {};
+    items.forEach(function (item) {
+      var nodeID = item.node.node_id;
+      if (renderedNodes[nodeID]) { return; }
+      renderedNodes[nodeID] = true;
+      if (nodeCounts[nodeID] > 1) {
+        host.appendChild(buildSessionGroup(item.node, items.filter(function (it) {
+          return it.node.node_id === nodeID;
+        })));
+        return;
+      }
+      host.appendChild(buildSessionCard(item));
+    });
+    restoreSessionDrafts(host);
+    if (!sessionsScrollRestored) {
+      sessionsScrollRestored = true;
+      setTimeout(restoreSessionsScroll, 0);
+    }
+  }
+
+  // buildSessionGroup wraps several sessions of one node in a collapsible
+  // header (device grouping): live/offline dot + name + kind/count/last seen.
+  function buildSessionGroup(node, groupItems) {
+    var group = document.createElement("section");
+    group.className = "session-group" + (node.stale ? " offline" : "");
+    var collapsed = !!collapsedGroups[node.node_id];
+    group.innerHTML =
+      '<button type="button" class="group-head" aria-expanded="' + String(!collapsed) + '">' +
+      '<span class="dot ' + (node.stale ? "offline" : "live") + '"></span>' +
+      '<span class="group-name"></span><span class="group-meta"></span>' +
+      '<span class="group-caret" aria-hidden="true">' + (collapsed ? "▸" : "▾") + '</span></button>' +
+      '<div class="group-body"></div>';
+    group.querySelector(".group-name").textContent = node.name || node.node_id;
+    var latest = 0;
+    groupItems.forEach(function (item) {
+      var t = new Date(item.session.updated_at || 0).getTime();
+      if (t > latest) { latest = t; }
+    });
+    group.querySelector(".group-meta").textContent =
+      (node.kind || "agent") + " · 会话 " + groupItems.length +
+      (latest ? " · 最近 " + new Date(latest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+    var body = group.querySelector(".group-body");
+    groupItems.forEach(function (item) { body.appendChild(buildSessionCard(item)); });
+    if (collapsed) { body.hidden = true; }
+    group.querySelector(".group-head").addEventListener("click", function () {
+      var next = !collapsedGroups[node.node_id];
+      if (next) { collapsedGroups[node.node_id] = true; } else { delete collapsedGroups[node.node_id]; }
+      body.hidden = next;
+      group.querySelector(".group-caret").textContent = next ? "▸" : "▾";
+      this.setAttribute("aria-expanded", String(!next));
+    });
+    return group;
+  }
+
+  function buildSessionCard(item) {
       var s = item.session, node = item.node;
+      var cardKey = node.node_id + "|" + s.session_id;
+      var expanded = !!expandedSessions[cardKey];
       var card = document.createElement("div");
-      card.className = "session-card" + (node.stale ? " offline" : "") + (s.attention ? " att-" + s.attention : "");
+      card.className = "session-card" + (node.stale ? " offline" : "") +
+        (s.attention ? " att-" + s.attention : "") + (expanded ? " expanded" : "");
+      card.setAttribute("data-draft-key", cardKey);
+      // Pulse when this session visibly moved since the previous render.
+      var fingerprint = sessionFingerprint(s);
+      if (sessionLastSeen[cardKey] !== undefined && sessionLastSeen[cardKey] !== fingerprint) {
+        card.classList.add("card-updated");
+      }
+      sessionLastSeen[cardKey] = fingerprint;
+      var hasReply = nodeHasWebUI(node) && (node.capabilities || []).indexOf("input") !== -1;
+      var hasExtras = !!(s.last_message || "") || hasReply || !!(s.status_tail || "");
+      // Information is layered by business attribute, top → bottom: identity
+      // (title/badge/time) → live activity band (state chip + host activity
+      // text + elapsed clock) → content (preview / last message) → meta line
+      // (node · ID · sync) → actions → reply → live tail (pinned footer).
       card.innerHTML =
         '<div class="s-title"><span class="dot ' + (node.stale ? "offline" : "live") + '"></span><span class="s-name"></span></div>' +
         '<span class="att-badge s-badge" hidden></span><span class="s-time"></span>' +
-        '<div class="s-node"></div>' +
+        '<div class="s-activity" hidden><span class="s-state" hidden></span>' +
+        '<span class="s-status-text"></span><span class="s-status-elapsed" hidden></span></div>' +
         (s.preview ? '<div class="s-preview"></div>' : "") +
         '<div class="s-last" hidden></div>' +
-        '<div class="s-actions"><button class="btn ghost sm" data-open>打开</button>' +
-        (node.stale ? '<button class="btn danger sm" data-remove>移除</button>' : '') +
-        '</div>';
+        '<div class="s-meta"><span class="s-node-text"></span>' +
+        '<span class="s-id" role="button" tabindex="0" title="点击复制会话 ID">' +
+        '<span class="s-id-label">ID</span><code class="s-id-code"></code></span>' +
+        '<span class="s-sync" hidden></span></div>' +
+        '<div class="s-actions">' +
+        (hasExtras ? '<button class="btn ghost sm" type="button" data-expand>' + (expanded ? "收起" : "展开") + '</button>' : '') +
+        '<button class="btn ghost sm" type="button" data-detail>详情</button>' +
+        (nodeHasWebUI(node)
+          ? '<button class="btn ghost sm" type="button" data-open>打开</button>'
+          : '<button class="btn ghost sm" type="button" disabled title="' +
+            (node.stale ? "节点离线，无法打开" : "节点未提供本地 Web 服务（aicli 需以 --web 启动），无法打开") +
+            '">打开</button>') +
+        (node.stale ? '<button class="btn danger sm" type="button" data-remove>移除</button>' : '') +
+        '</div>' +
+        '<div class="s-live" hidden title="实时输出（最后一行），点击展开完整尾流"></div>' +
+        '<div class="s-tail" hidden>' +
+        '<div class="s-tail-head"><span class="s-tail-title">实时输出</span><span class="s-tail-meta"></span>' +
+        '<button class="btn ghost sm" type="button" data-tail-follow>跟随中</button></div>' +
+        '<pre class="s-tail-body"></pre></div>';
       card.querySelector(".s-name").textContent = sessionLabelOf(s);
-      card.querySelector(".s-node").textContent =
+      card.querySelector(".s-node-text").textContent =
         (node.name || node.node_id) + " · " + (node.kind || "agent");
+      var syncEl = card.querySelector(".s-sync");
+      var syncedMs = s.synced_at ? new Date(s.synced_at).getTime() : NaN;
+      if (!isNaN(syncedMs)) {
+        setRelTime(syncEl, syncedMs, "同步 ", 60000,
+          "网关最后收到该会话更新：" + absoluteTime(syncedMs) + "（服务器时间）");
+        syncEl.hidden = false;
+      }
+      var idRow = card.querySelector(".s-id");
+      var idEl = card.querySelector(".s-id-code");
+      idEl.textContent = s.session_id;
+      var copyID = function () {
+        copyText(s.session_id, null);
+        notify("已复制会话 ID", "ok");
+      };
+      idRow.addEventListener("click", copyID);
+      idRow.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); copyID(); }
+      });
+      // Live activity band (动态状态): state chip (运行中/思考中/回答中/等待中/
+      // 审查中/已中断) + the host's one-line activity text + a locally-advanced
+      // clock, kept apart from the metadata line so "what is happening now"
+      // reads as the card's most time-sensitive zone.
+      var stateChip = card.querySelector(".s-state");
+      var stateLabel = STATE_LABELS[s.state];
+      var chipShown = false;
+      if (stateLabel && (isActiveSessionState(s.state) || s.state === "interrupted")) {
+        stateChip.textContent = stateLabel;
+        stateChip.className = "s-state st-" + s.state;
+        stateChip.hidden = false;
+        chipShown = true;
+      }
+      var statusText = (s.status_text || "").trim();
+      var startedMs = Date.parse(s.status_started_at || "");
+      var showElapsed = isActiveSessionState(s.state) && !isNaN(startedMs);
+      if (chipShown || statusText || showElapsed) {
+        var activityLine = card.querySelector(".s-activity");
+        if (statusText) {
+          var statusTextEl = card.querySelector(".s-status-text");
+          statusTextEl.textContent = statusText;
+          statusTextEl.title = statusText;
+        }
+        if (showElapsed) {
+          var elapsedEl = card.querySelector(".s-status-elapsed");
+          elapsedEl.setAttribute("data-started", s.status_started_at);
+          elapsedEl.textContent = "· " + formatStatusElapsed(Date.now() - startedMs);
+          elapsedEl.hidden = false;
+        }
+        activityLine.hidden = false;
+      }
       if (s.attention) {
         var b = card.querySelector(".s-badge");
         b.textContent = attentionLabel(s.attention);
@@ -341,8 +862,10 @@
         b.hidden = false;
       }
       var t = card.querySelector(".s-time");
-      var time = timeOf(s);
-      if (time) { t.textContent = time; } else { t.hidden = true; }
+      var updatedMs = s.updated_at ? new Date(s.updated_at).getTime() : NaN;
+      if (!isNaN(updatedMs)) {
+        setRelTime(t, updatedMs, "", 0, "内容时间：" + absoluteTime(updatedMs));
+      } else { t.hidden = true; }
       if (s.preview) { card.querySelector(".s-preview").textContent = s.preview; }
       // Full last message (multi-line, unlike the one-line preview). Falls back
       // to the preview when the agent build predates the field.
@@ -360,11 +883,82 @@
         lastBlock.appendChild(body);
         lastBlock.hidden = false;
       }
-      card.addEventListener("click", function () { openSession(node, s); });
-      card.querySelector("[data-open]").addEventListener("click", function (e) {
-        e.stopPropagation();
-        openSession(node, s);
+      // Live-output tail (bounded by the shared core): rendered only while
+      // the global "实时输出" switch is on; the 跟随 button pins the viewport
+      // to the newest line and pauses automatically when the user scrolls up.
+      var tailText = tailEnabled ? (s.status_tail || "") : "";
+      var tailBlock = card.querySelector(".s-tail");
+      // Collapsed cards still surface the newest live line, so progress is
+      // visible without expanding; clicking it expands the full tail.
+      var liveLine = card.querySelector(".s-live");
+      if (tailText) {
+        var lastLine = (tailText.replace(/\s+$/, "").split("\n").pop() || "").replace(/\s+/g, " ").trim();
+        if (lastLine.length > 140) { lastLine = "…" + lastLine.slice(lastLine.length - 140); }
+        liveLine.textContent = lastLine || "…";
+        liveLine.hidden = false;
+        var previewEl = card.querySelector(".s-preview");
+        if (previewEl) { previewEl.hidden = true; } // live text wins while active
+        liveLine.addEventListener("click", function () {
+          if (!expandedSessions[cardKey]) {
+            expandedSessions[cardKey] = true;
+            card.classList.add("expanded");
+            var expandButton = card.querySelector("[data-expand]");
+            if (expandButton) { expandButton.textContent = "收起"; }
+            rememberPresence(node, s, { tail: true });
+          }
+          var body = card.querySelector(".s-tail-body");
+          if (body && body.scrollIntoView) { body.scrollIntoView({ block: "nearest" }); }
+        });
+        tailBlock.hidden = false;
+        var tailBody = card.querySelector(".s-tail-body");
+        tailBody.textContent = tailText;
+        card.querySelector(".s-tail-meta").textContent = tailText.length + " 字符";
+        var followBtn = card.querySelector("[data-tail-follow]");
+        var updateFollowBtn = function () {
+          followBtn.textContent = tailFollow[cardKey] === false ? "跳到底部" : "跟随中";
+        };
+        updateFollowBtn();
+        var stickToBottom = function () { tailBody.scrollTop = tailBody.scrollHeight; };
+        if (tailFollow[cardKey] !== false) { stickToBottom(); }
+        tailBody.addEventListener("scroll", function () {
+          var atBottom = tailBody.scrollHeight - tailBody.scrollTop - tailBody.clientHeight < 24;
+          tailFollow[cardKey] = atBottom;
+          updateFollowBtn();
+        });
+        followBtn.addEventListener("click", function () {
+          tailFollow[cardKey] = true;
+          updateFollowBtn();
+          stickToBottom();
+        });
+      }
+      // The card body is informational only: opening a session always goes
+      // through the explicit 打开 button, so text selection or a mis-tap on
+      // the row never navigates away.
+      card.querySelector("[data-detail]").addEventListener("click", function () {
+        openSessionDetail(node, s);
       });
+      // Offline snapshots render the 打开 button disabled (no tunnel); only a
+      // live node gets the open handler.
+      var openBtn = card.querySelector("[data-open]");
+      if (openBtn) {
+        openBtn.addEventListener("click", function () {
+          openSession(node, s);
+        });
+      }
+      // 展开/收起: the full last message and the reply form live in the
+      // expanded area; the choice is remembered per session across re-renders.
+      var expandBtn = card.querySelector("[data-expand]");
+      if (expandBtn) {
+        expandBtn.addEventListener("click", function () {
+          var next = !expandedSessions[cardKey];
+          if (next) { expandedSessions[cardKey] = true; } else { delete expandedSessions[cardKey]; }
+          card.classList.toggle("expanded", next);
+          expandBtn.textContent = next ? "收起" : "展开";
+          // Expansion is the "I'm watching this session" signal: it gates the
+          // live tail on the agent (P1-b) and suppresses pushes while open.
+          rememberPresence(node, s, { tail: next });
+        });
+      }
       // Inline reply: POST through the gateway reverse proxy to the agent's
       // own /web/api/input (the agent injects its local write token and the
       // route allowlist already covers /web). Gated on the agent advertising
@@ -372,6 +966,11 @@
       if (!node.stale && (node.capabilities || []).indexOf("input") !== -1) {
         card.appendChild(buildReplyForm(node, s));
       }
+      // Live output is pinned to the very bottom of the card: below the action
+      // row and the reply form. Collapsed cards show the newest streamed line,
+      // expanded cards swap it for the full rolling tail (never both).
+      card.appendChild(card.querySelector(".s-live"));
+      card.appendChild(card.querySelector(".s-tail"));
       var rmBtn = card.querySelector("[data-remove]");
       if (rmBtn) {
         rmBtn.addEventListener("click", function (e) {
@@ -383,8 +982,7 @@
             .catch(function (err) { notify("移除失败：" + err, "error"); });
         });
       }
-      host.appendChild(card);
-    });
+      return card;
   }
 
   /* ─────────────────────── rendering: inbox ──────────────────── */
@@ -435,7 +1033,18 @@
       (node.name || node.device_name || node.node_id);
     card.querySelector(".badge").textContent =
       (node.kind || "agent") + " · 会话 " + sessions.length;
-    card.querySelector(".card-meta").textContent = node.node_id;
+    var meta = card.querySelector(".card-meta");
+    meta.textContent = node.node_id;
+    var hbMs = node.last_heartbeat ? new Date(node.last_heartbeat).getTime() : NaN;
+    if (!isNaN(hbMs)) {
+      meta.appendChild(document.createTextNode(" · "));
+      var hb = document.createElement("span");
+      hb.className = "n-heartbeat";
+      setRelTime(hb, hbMs, node.stale ? "最后心跳 " : "心跳 ",
+        node.stale ? 0 : 60000,
+        "网关最后收到该节点心跳：" + absoluteTime(hbMs) + "（服务器时间）");
+      meta.appendChild(hb);
+    }
 
     // Session rows live in their own divider list; .card-actions stays
     // button-only so the two never share a flex row.
@@ -480,10 +1089,15 @@
       open.className = "btn ghost sm";
       open.type = "button";
       open.textContent = "打开节点";
-      open.addEventListener("click", function () {
-        rememberPresence(node, null);
-        window.open(nodeWebBase(node), "_blank");
-      });
+      if (nodeHasWebUI(node)) {
+        open.addEventListener("click", function () {
+          rememberPresence(node, null);
+          window.open(nodeWebBase(node), "_blank");
+        });
+      } else {
+        open.disabled = true;
+        open.title = webUnavailableText(node);
+      }
       actions.appendChild(open);
     }
     // Snapshot rows never resolve on their own; give the operator a cleanup
@@ -681,6 +1295,37 @@
     return "/n/" + encodeURIComponent(node.node_id) + webPath;
   }
 
+  // nodeWebRoute returns the leading route that serves a node's Web UI: an
+  // aicli micro client lives under /web, a runtime-server SPA at /.
+  function nodeWebRoute(node) {
+    return node && node.kind === "runtime-server" ? "/" : "/web";
+  }
+
+  // nodeHasWebUI reports whether the node advertised a reverse-proxy route for
+  // its Web UI. Agents without a local Web service register no such route
+  // (fail-closed), so the console must not offer an open action that could only
+  // end in a proxy error.
+  function nodeHasWebUI(node) {
+    if (!node || node.stale) { return false; }
+    var want = nodeWebRoute(node);
+    var routes = node.routes || [];
+    for (var i = 0; i < routes.length; i++) {
+      var route = routes[i];
+      if (route === "/" || route === want) { return true; }
+      if (route.indexOf(want + "/") === 0) { return true; }
+    }
+    return false;
+  }
+
+  // webUnavailableText explains why a node cannot be opened, per host kind.
+  function webUnavailableText(node) {
+    var name = "节点「" + ((node && (node.name || node.node_id)) || "") + "」";
+    if (node && node.kind === "runtime-server") {
+      return name + "的本地服务尚未就绪，请稍后重试。";
+    }
+    return name + "未提供本地 Web 服务（启动 aicli 时需带 --web），无法打开。";
+  }
+
   function sessionOpenTarget(node, sessionID) {
     var base = nodeWebBase(node);
     if (node.kind === "runtime-server") { return base; }
@@ -695,9 +1340,40 @@
       notify("节点「" + (node.name || node.node_id) + "」当前离线，无法打开 —— 等它重新上线后再试，或先在节点页移除该快照。", "error");
       return;
     }
+    // A live node without a Web route (agent started without its web client)
+    // would only fail inside the tunnel: refuse up front with the reason.
+    if (!nodeHasWebUI(node)) {
+      notify(webUnavailableText(node), "error");
+      return;
+    }
     if (session) { markRead(node, session); }
     rememberPresence(node, session);
-    window.open(sessionOpenTarget(node, session ? session.session_id : ""), "_blank");
+    var target = sessionOpenTarget(node, session ? session.session_id : "");
+    if (isMobileViewport()) {
+      // Phones get the same-tab flow so the browser back button returns to
+      // the list; prefs + scroll are persisted so it comes back as it was.
+      saveSessionPrefs();
+      saveSessionsScroll();
+      window.location.assign(target);
+      return;
+    }
+    window.open(target, "_blank");
+  }
+
+  function isMobileViewport() {
+    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 860px)").matches;
+  }
+
+  function saveSessionsScroll() {
+    try { localStorage.setItem(SESSIONS_SCROLL_KEY, String(Math.round(window.scrollY || 0))); } catch (err) { /* storage */ }
+  }
+
+  function restoreSessionsScroll() {
+    if (currentView() !== "sessions") { return; }
+    try {
+      var y = parseInt(localStorage.getItem(SESSIONS_SCROLL_KEY) || "0", 10);
+      if (y > 0) { window.scrollTo(0, y); }
+    } catch (err) { /* storage */ }
   }
 
   function markRead(node, session) {
@@ -706,6 +1382,117 @@
     renderInbox(lastNodes);
     updateStats(lastNodes);
     renderSessionTable(lastNodes);
+  }
+
+  /* ─────────────────────── session detail dialog ─────────────── */
+
+  var detailTarget = null;
+
+  var STATE_LABELS = {
+    idle: "闲置",
+    running: "运行中",
+    thinking: "思考中",
+    answering: "回答中",
+    waiting: "等待中",
+    review: "审查中",
+    completed: "已完成",
+    interrupted: "已中断",
+    error: "出错",
+  };
+
+  function stateLabelOf(session) {
+    var label = STATE_LABELS[session.state] || session.state || "未知";
+    return session.busy && !isActiveSessionState(session.state) ? label + " · 处理中" : label;
+  }
+
+  // Clipboard write with a legacy fallback; the button briefly confirms.
+  function copyText(text, btn) {
+    var done = function () {
+      if (!btn) { return; }
+      var prev = btn.getAttribute("data-label") || btn.textContent;
+      btn.setAttribute("data-label", prev);
+      btn.textContent = "已复制 ✓";
+      setTimeout(function () { btn.textContent = prev; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, done);
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch (err) { /* legacy */ }
+      ta.remove();
+      done();
+    }
+  }
+
+  function closeSessionDetail() {
+    detailTarget = null;
+    var modal = el("session-modal");
+    if (modal) { modal.hidden = true; }
+  }
+
+  function openSessionDetail(node, session) {
+    var modal = el("session-modal");
+    if (!modal || !node || !session) { return; }
+    detailTarget = { node: node, session: session };
+    el("sd-title").textContent = session.title || "（无标题）";
+    el("sd-id").textContent = session.session_id;
+    el("sd-node").textContent =
+      (node.name || node.node_id) + " · " + (node.kind || "agent") +
+      (node.stale ? " · 离线快照" : "");
+    el("sd-state").textContent = stateLabelOf(session);
+    el("sd-attention").textContent = session.attention ? attentionLabel(session.attention) : "无";
+    var statusBits = [];
+    var detailStatus = (session.status_text || "").trim();
+    if (detailStatus) { statusBits.push(detailStatus); }
+    var detailStarted = Date.parse(session.status_started_at || "");
+    if (isActiveSessionState(session.state) && !isNaN(detailStarted)) {
+      statusBits.push("已持续 " + formatStatusElapsed(Date.now() - detailStarted));
+    }
+    el("sd-status").textContent = statusBits.length ? statusBits.join(" · ") : "—";
+    var updated = session.updated_at ? new Date(session.updated_at) : null;
+    el("sd-updated").textContent =
+      updated && !isNaN(updated.getTime()) ? updated.toLocaleString() : "—";
+    var synced = session.synced_at ? new Date(session.synced_at) : null;
+    el("sd-sync").textContent =
+      synced && !isNaN(synced.getTime())
+        ? timeAgo(synced) + "（" + synced.toLocaleString() + "，网关时间）"
+        : "—";
+    var stateAt = session.state_changed_at ? new Date(session.state_changed_at) : null;
+    el("sd-state-at").textContent =
+      stateAt && !isNaN(stateAt.getTime())
+        ? timeAgo(stateAt) + "（" + stateAt.toLocaleString() + "，网关时间）"
+        : "—";
+    var attAt = session.attention_changed_at ? new Date(session.attention_changed_at) : null;
+    el("sd-attention-at").textContent =
+      attAt && !isNaN(attAt.getTime())
+        ? timeAgo(attAt) + "（" + attAt.toLocaleString() + "，网关时间）"
+        : "—";
+    var hbMs2 = node.last_heartbeat ? new Date(node.last_heartbeat).getTime() : NaN;
+    el("sd-heartbeat").textContent =
+      isNaN(hbMs2) ? "—" : timeAgo(hbMs2) + "（" + absoluteTime(hbMs2) + "，网关时间）";
+    el("sd-preview").textContent = session.preview || "—";
+    var lastWrap = el("sd-last-wrap");
+    if (session.last_message) {
+      var role = el("sd-last-role");
+      role.textContent = roleLabelOf(session.last_message_role || "");
+      role.className = "s-last-role" + (session.last_message_role ? " role-" + session.last_message_role : "");
+      el("sd-last").textContent = session.last_message;
+      lastWrap.hidden = false;
+    } else {
+      lastWrap.hidden = true;
+    }
+    var tailText = (session.status_tail || "").trim();
+    var tailWrap = el("sd-tail-wrap");
+    if (tailText) {
+      el("sd-tail").textContent = tailText;
+      tailWrap.hidden = false;
+    } else {
+      tailWrap.hidden = true;
+    }
+    modal.hidden = false;
   }
 
   /* ─────────────────────── attention tracking ────────────────── */
@@ -743,6 +1530,11 @@
       (node.name || node.node_id) + " · " + sessionLabelOf(session) + "：" +
       attentionLabel(session.attention);
     toast.addEventListener("click", function () {
+      if (!nodeHasWebUI(node)) {
+        notify(webUnavailableText(node), "error");
+        toast.remove();
+        return;
+      }
       window.open(sessionOpenTarget(node, session.session_id), "_blank");
       toast.remove();
     });
@@ -752,9 +1544,15 @@
 
   /* ─────────────────────── presence ──────────────────────────── */
 
-  function rememberPresence(node, session) {
+  function rememberPresence(node, session, opts) {
     if (!node || !node.node_id) { return; }
-    var target = { node_id: node.node_id, session_id: session ? session.session_id : "" };
+    var target = {
+      node_id: node.node_id,
+      session_id: session ? session.session_id : "",
+      // tail=true asks the gateway to keep the live-output stream on for this
+      // session (P1-b watch gating); false releases it.
+      tail: !!(opts && opts.tail),
+    };
     presenceTargets[target.node_id + "|" + target.session_id] = target;
     sendPresence();
   }
@@ -772,7 +1570,12 @@
 
   setInterval(sendPresence, 30000);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) { sendPresence(); }
+    if (!document.hidden) {
+      sendPresence();
+      // Coming back from a suspended tab: if the SSE feed has been quiet for
+      // a long stretch, pull a fresh snapshot instead of trusting the cache.
+      if (eventsSubscribed && lastEventAt && Date.now() - lastEventAt > 60000) { loadNodes(); }
+    }
   });
 
   /* ─────────────────────── Web Push ──────────────────────────── */
@@ -1002,12 +1805,78 @@
       document.querySelectorAll(".seg-btn").forEach(function (b) { b.classList.remove("active"); });
       btn.classList.add("active");
       sessionFilterKind = btn.getAttribute("data-sfilter");
+      saveSessionPrefs();
       renderSessionTable(lastNodes);
     });
   });
   el("session-sort").addEventListener("change", function (e) {
     sessionSort = e.target.value;
+    saveSessionPrefs();
     renderSessionTable(lastNodes);
+  });
+
+  // Live-output tail on/off (persisted): expanded cards render the bounded
+  // tail only while this switch is on.
+  function syncTailToggle() {
+    var btn = el("tail-toggle");
+    if (btn) { btn.textContent = "实时输出：" + (tailEnabled ? "开" : "关"); }
+  }
+  el("tail-toggle").addEventListener("click", function () {
+    tailEnabled = !tailEnabled;
+    if (!tailEnabled) {
+      // Turning live output off releases every tail watch (agents stop
+      // streaming; presence TTL no longer needs to hold tail targets).
+      Object.keys(presenceTargets).forEach(function (k) { presenceTargets[k].tail = false; });
+      sendPresence();
+    }
+    saveSessionPrefs();
+    syncTailToggle();
+    renderSessionTable(lastNodes);
+  });
+
+  // Keyboard model: "/" focuses the search, ↑/↓ (or j/k) walks the session
+  // cards, Enter opens the focused card's detail dialog, Space toggles 展开.
+  document.addEventListener("keydown", function (e) {
+    if (!el("session-modal").hidden || !el("token-modal").hidden) { return; }
+    var target = e.target;
+    var tag = (target && target.tagName) || "";
+    var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+      !!(target && target.isContentEditable);
+    if (e.key === "/" && !typing) {
+      e.preventDefault();
+      var filterEl = el("session-filter");
+      if (filterEl) { filterEl.focus(); }
+      return;
+    }
+    if (typing) { return; }
+    var cards = Array.prototype.slice.call(document.querySelectorAll(".session-card"));
+    if (!cards.length) { return; }
+    var current = target && target.closest ? target.closest(".session-card") : null;
+    var idx = current ? cards.indexOf(current) : -1;
+    var next = null;
+    if (e.key === "ArrowDown" || e.key === "j") {
+      next = idx === -1 ? cards[0] : cards[Math.min(idx + 1, cards.length - 1)];
+    } else if (e.key === "ArrowUp" || e.key === "k") {
+      next = idx === -1 ? cards[cards.length - 1] : cards[Math.max(idx - 1, 0)];
+    }
+    if (next) {
+      e.preventDefault();
+      if (next.getAttribute("tabindex") === null) { next.setAttribute("tabindex", "-1"); }
+      next.focus();
+      next.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (current && target === current && (e.key === "Enter" || e.key === " ")) {
+      var found = findSessionByKey(current.getAttribute("data-draft-key"));
+      if (!found) { return; }
+      e.preventDefault();
+      if (e.key === " ") {
+        var expandButton = current.querySelector("[data-expand]");
+        if (expandButton) { expandButton.click(); }
+      } else {
+        openSessionDetail(found.node, found.session);
+      }
+    }
   });
 
   // Token modal
@@ -1023,6 +1892,24 @@
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && !el("token-modal").hidden) { el("token-modal").hidden = true; }
+  });
+
+  // Session detail modal
+  el("session-modal-close").addEventListener("click", closeSessionDetail);
+  el("session-modal-done").addEventListener("click", closeSessionDetail);
+  el("session-modal-open").addEventListener("click", function () {
+    if (!detailTarget) { return; }
+    openSession(detailTarget.node, detailTarget.session);
+    closeSessionDetail();
+  });
+  el("sd-copy").addEventListener("click", function (e) {
+    if (detailTarget) { copyText(detailTarget.session.session_id, e.currentTarget); }
+  });
+  el("session-modal").addEventListener("click", function (e) {
+    if (e.target === el("session-modal")) { closeSessionDetail(); }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !el("session-modal").hidden) { closeSessionDetail(); }
   });
 
   el("device-form").addEventListener("submit", function (e) {
@@ -1084,9 +1971,7 @@
     var params = new URLSearchParams(h.slice(q + 1));
     if (params.get("attention")) {
       sessionFilterKind = "attention";
-      document.querySelectorAll(".seg-btn").forEach(function (b) {
-        b.classList.toggle("active", b.getAttribute("data-sfilter") === "attention");
-      });
+      syncFilterControls();
     }
   }
 
@@ -1098,9 +1983,16 @@
     });
   }
 
+  loadSessionPrefs();
+  syncFilterControls();
+  syncTailToggle();
   applyHashParams();
   applyRoute();
-  loadNodes();
-  loadDevices();
+  // Probe once for an existing owner session; only fetch the device list when
+  // the probe authenticated, so a fresh visitor emits a single 401 (the
+  // probe itself) in the console instead of two.
+  loadNodes().then(function () {
+    if (authedState) { loadDevices(); }
+  });
   initPush();
 })();

@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+import (
+	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+)
 
 // SessionReporter is implemented by connections that can push SESSION_UPDATE
 // frames (the WebSocket tunnel does).
@@ -26,8 +30,10 @@ type NotifyReporter interface {
 func NewController(cfg Config, register RegisterFunc, opts ...Option) *Controller {
 	controller := New(cfg, nil, opts...)
 	connector := &WSConnector{
-		Register:       register,
-		OnHeartbeatAck: controller.MarkHeartbeat,
+		Register:         register,
+		OnHeartbeatAck:   controller.MarkHeartbeat,
+		DigestProvider:   controller.SessionDigests,
+		OnPendingActions: controller.ApplyPending,
 	}
 	controller.dial = connector.Dial
 	connector.ForwardProvider = controller.ForwardConfig
@@ -52,9 +58,10 @@ func (c *Controller) ForwardConfig() ForwardConfig {
 // UpdateSessions pushes the current session list to the gateway as a
 // reconcile SESSION_UPDATE. It is a no-op when not connected. Hosts call it on
 // session create/switch/resume so the gateway registry stays fresh without a
-// reconnect.
+// reconnect. The list is retained for heartbeat digests (SessionDigests).
 func (c *Controller) UpdateSessions(sessions []wire.SessionSummary) {
 	c.mu.Lock()
+	c.sessions = append([]wire.SessionSummary(nil), sessions...)
 	conn := c.conn
 	c.mu.Unlock()
 	reporter, ok := conn.(SessionReporter)
@@ -65,6 +72,32 @@ func (c *Controller) UpdateSessions(sessions []wire.SessionSummary) {
 		Op:       wire.SessionOpReconcile,
 		Sessions: sessions,
 	})
+}
+
+// SessionDigests returns the compact per-session state carried in HEARTBEAT
+// frames (docs/gateway/03-protocol.md). The gateway merges them into the
+// registry only when they differ, so a periodic heartbeat is a cheap
+// correctness net for state that changed while no SESSION_UPDATE was sent.
+func (c *Controller) SessionDigests() []wire.SessionDigest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.sessions) == 0 {
+		return nil
+	}
+	out := make([]wire.SessionDigest, 0, len(c.sessions))
+	for _, s := range c.sessions {
+		if strings.TrimSpace(s.SessionID) == "" {
+			continue
+		}
+		out = append(out, wire.SessionDigest{
+			SessionID:  s.SessionID,
+			State:      s.State,
+			Attention:  s.Attention,
+			StatusText: s.StatusText,
+			UpdatedAt:  s.UpdatedAt,
+		})
+	}
+	return out
 }
 
 // SendNotify pushes an instantaneous attention event to the gateway. It is a

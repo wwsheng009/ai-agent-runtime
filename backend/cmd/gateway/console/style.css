@@ -339,7 +339,7 @@ a.stat:hover {
 }
 
 /* Clickable inbox cards: warn rail (inset, so corners stay round) plus a
-   hover affordance matching the session cards. */
+   hover affordance. */
 .inbox .card { cursor: pointer; box-shadow: inset 3px 0 0 0 var(--warn); }
 .inbox .card:hover {
   border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
@@ -372,7 +372,14 @@ a.stat:hover {
 
 /* ── Session table ───────────────────────────────────────────── */
 
-.session-table { display: flex; flex-direction: column; gap: 8px; }
+.session-table {
+  display: grid; grid-template-columns: minmax(0, 1fr);
+  gap: 8px; align-items: start;
+}
+/* Wide screens: two cards per row so the list scans like a board, not a reel. */
+@media (min-width: 1120px) {
+  .session-table { grid-template-columns: repeat(auto-fill, minmax(470px, 1fr)); }
+}
 
 .session-card {
   background: var(--panel);
@@ -383,10 +390,46 @@ a.stat:hover {
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 5px 12px;
   align-items: center;
-  cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
-.session-card:hover { border-color: var(--accent); background: var(--panel-2); }
+/* The row body is not clickable (打开/详情 are explicit buttons), so keep the
+   hover cue subtle and highlight only when a control inside is focused. */
+.session-card:hover { border-color: var(--border-strong); }
+.session-card:focus-within { border-color: var(--accent); background: var(--panel-2); }
+/* Keyboard focus (arrow-key navigation focuses the card itself). */
+.session-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-color: var(--accent); }
+
+/* Device groups: a full-width section with a collapsible header; the body
+   keeps the same two-column board as the flat list. */
+.session-group { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; }
+.session-group.offline { opacity: 0.6; }
+.group-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left;
+  padding: 8px 12px;
+  background: var(--panel-2); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-family: inherit; font-size: 12.5px; cursor: pointer;
+}
+.group-head:hover { border-color: var(--border-strong); }
+.group-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-meta { color: var(--fg-faint); font-size: 11.5px; margin-left: auto; white-space: nowrap; }
+.group-caret { color: var(--fg-faint); font-size: 12px; }
+.group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; }
+@media (min-width: 1120px) {
+  .group-body { grid-template-columns: repeat(auto-fill, minmax(470px, 1fr)); }
+}
+/* Compact by default: the full last message and the inline reply form live in
+   the expanded area (展开), so a long list stays scannable at ~half height. */
+.session-card:not(.expanded) .s-last,
+.session-card:not(.expanded) .s-reply { display: none; }
+
+/* A brief pulse tells the operator which row moved between updates. */
+@keyframes card-update-flash {
+  0% { border-color: var(--accent); background: var(--panel-2); }
+  100% { border-color: var(--border); background: var(--panel); }
+}
+.session-card.card-updated { animation: card-update-flash 1.6s ease-out; }
 
 .session-card .s-title {
   font-size: 13.5px; font-weight: 600;
@@ -396,7 +439,58 @@ a.stat:hover {
 .session-card .s-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
-.session-card .s-node { font-size: 11.5px; color: var(--fg-faint); grid-column: 1; }
+/* Live activity chip: state (运行中/思考中/回答中/等待中/审查中/已中断). */
+.session-card .s-state {
+  flex-shrink: 0;
+  font-size: 10.5px; font-weight: 600;
+  padding: 1px 7px; border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--accent-soft); color: var(--accent);
+}
+.session-card .s-state.st-thinking { background: var(--bg); color: var(--fg-muted); border-color: var(--border-strong); }
+.session-card .s-state.st-answering { background: rgba(80, 160, 110, 0.16); color: var(--ok); }
+.session-card .s-state.st-waiting,
+.session-card .s-state.st-review {
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  color: var(--warn);
+}
+.session-card .s-state.st-interrupted {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+/* Live activity band (dynamic state): state chip + host activity text +
+   locally advanced elapsed clock. This is the card's "now" zone and stays
+   visually apart from the static metadata line below. */
+.session-card .s-activity {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 5px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px; color: var(--fg-muted);
+}
+.session-card .s-activity .s-status-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.session-card .s-activity .s-status-text:empty { display: none; }
+.session-card .s-activity .s-status-elapsed {
+  flex-shrink: 0; color: var(--fg-faint); font-variant-numeric: tabular-nums;
+}
+.session-card .s-id {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 11.5px; color: var(--fg-faint);
+  cursor: pointer;
+}
+.session-card .s-id-label { flex-shrink: 0; }
+.session-card .s-id-code {
+  font-family: var(--font-mono); font-size: 11px;
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  user-select: all;
+}
+.session-card .s-id:hover .s-id-code { color: var(--accent); text-decoration: underline dotted; }
+.session-card .s-id:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .session-card .s-preview {
   grid-column: 1;
   font-size: 12px; color: var(--fg-muted);
@@ -416,7 +510,7 @@ a.stat:hover {
   white-space: pre-wrap; word-break: break-word;
   max-height: 9.5em; overflow-y: auto;
 }
-.session-card .s-last-role {
+.s-last-role {
   display: inline-block;
   font-size: 10.5px; font-weight: 600;
   padding: 1px 7px; border-radius: 999px;
@@ -424,20 +518,25 @@ a.stat:hover {
   background: var(--bg); color: var(--fg-faint);
   border: 1px solid var(--border);
 }
-.session-card .s-last-role.role-user { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
-.session-card .s-last-role.role-assistant { background: rgba(80, 160, 110, 0.16); color: var(--ok); border-color: transparent; }
+.s-last-role.role-user { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.s-last-role.role-assistant { background: rgba(80, 160, 110, 0.16); color: var(--ok); border-color: transparent; }
 
-/* Inline reply form (one per live session card with the "input" capability). */
+/* Inline reply form (one per live session card with the "input" capability):
+   a single row — growing textarea + 发送 button, which never takes a row of
+   its own; the transient status hint sits underneath. */
 .session-card .s-reply {
   grid-column: 1 / -1;
   margin-top: 3px;
-  display: flex; flex-direction: column; gap: 5px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.session-card .s-reply .s-reply-main {
+  display: flex; align-items: flex-end; gap: 8px;
 }
 .session-card .s-reply .s-reply-input {
-  width: 100%;
-  resize: vertical; min-height: 44px; max-height: 180px;
-  font: inherit; font-size: 12.5px;
-  padding: 7px 9px;
+  flex: 1 1 auto; min-width: 0;
+  resize: none; min-height: var(--ctl-h); max-height: 160px; overflow-y: auto;
+  font: inherit; font-size: 12.5px; line-height: 1.45;
+  padding: 6px 9px;
   background: var(--bg); color: var(--fg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -446,10 +545,8 @@ a.stat:hover {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
-.session-card .s-reply .s-reply-row {
-  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
-}
-.session-card .s-reply .s-reply-hint { font-size: 11.5px; color: var(--fg-faint); margin-right: auto; }
+.session-card .s-reply .s-reply-send { flex-shrink: 0; }
+.session-card .s-reply .s-reply-hint { font-size: 11.5px; color: var(--fg-faint); }
 .session-card .s-badge { grid-column: 2; justify-self: end; }
 .session-card .s-time {
   grid-column: 3;
@@ -509,7 +606,7 @@ a.stat:hover {
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
 }
 
-.filter-input { max-width: 320px; }
+.filter-input { flex: 0 1 260px; min-width: 200px; max-width: 320px; }
 
 .seg {
   display: inline-flex; align-items: center;
@@ -625,6 +722,34 @@ form { display: flex; gap: 8px; margin-top: 12px; }
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field-label { font-size: 12.5px; font-weight: 500; color: var(--fg-muted); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Session detail dialog: label/value rows + an optional last-message block. */
+.modal.modal-lg { max-width: 540px; }
+#session-modal .modal-actions { margin-top: 16px; }
+.session-detail { display: flex; flex-direction: column; gap: 9px; margin-top: 14px; }
+.detail-row {
+  display: grid; grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px; align-items: baseline;
+}
+.detail-label { font-size: 12px; color: var(--fg-faint); }
+.detail-value { font-size: 12.5px; color: var(--fg); word-break: break-word; min-width: 0; }
+.detail-value code {
+  font-family: var(--font-mono); font-size: 12px;
+  word-break: break-all; user-select: all;
+}
+.detail-id { display: flex; align-items: center; gap: 8px; }
+.detail-id code { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.detail-id .btn { flex-shrink: 0; }
+.detail-block {
+  margin-top: 12px; padding: 9px 11px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 12px; line-height: 1.55; color: var(--fg);
+}
+.detail-last {
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 180px; overflow-y: auto; margin-top: 6px;
+}
 
 @keyframes modal-in {
   from { opacity: 0; transform: translateY(-8px) scale(0.98); }
@@ -801,6 +926,10 @@ form { display: flex; gap: 8px; margin-top: 12px; }
 /* ── Session row actions ─────────────────────────────────────── */
 
 .s-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+/* Touch/click targets: the default 28px small-button height is too tight for
+   row actions, especially on touch screens. */
+.s-actions .btn,
+.session-card .s-reply .btn { min-height: 34px; }
 
 /* ── Toast variants ──────────────────────────────────────────── */
 
@@ -855,11 +984,145 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   .views { padding: 14px 14px 40px; }
   .session-card { grid-template-columns: minmax(0, 1fr) auto; }
   .session-card .s-time { display: none; }
-  .toolbar { gap: 8px; }
-  .filter-input { max-width: none; flex: 1 1 100%; }
+  /* Keep the toolbar to two tight rows: search on top, filters scrolling in
+     one line next to the sort select. */
+  .toolbar { gap: 6px; }
+  .filter-input { max-width: none; flex: 1 1 100%; min-width: 0; }
+  /* Share row 2 with the sort select: the segment strip scrolls internally
+     instead of pushing the select onto a third row. */
+  /* A small flex-basis lets the strip share row 2 with the sort select and
+     scroll its buttons internally (auto basis would wrap on content width). */
+  .seg { flex: 1 1 160px; min-width: 0; flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
+  #session-sort { flex: 0 0 auto; }
+  .seg-btn { padding: 0 10px; }
+  .s-actions { gap: 6px; }
+  .s-actions .btn,
+  .session-card .s-reply .btn { min-height: 40px; }
+  .session-card .s-reply .s-reply-input { min-height: 40px; }
   .panel { padding: 13px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+
+/* ── Freshness + connection state (P0) ─────────────────────────── */
+
+/* Persistent banner while the console SSE feed is down. */
+.conn-banner {
+  position: sticky; top: 0; z-index: 40;
+  padding: 8px 16px;
+  font-size: 12.5px; font-weight: 500;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, var(--panel));
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+}
+.conn-chip.conn-lost { border-color: var(--danger); color: var(--danger); }
+
+/* Relative-time labels (内容/同步/心跳) past their freshness threshold. */
+.age-stale { color: color-mix(in srgb, var(--warn) 75%, var(--fg-faint)) !important; }
+
+/* Session meta line (static / low-frequency attributes folded into one row):
+   node text · ID (click to copy) · right-aligned "同步 x 前". */
+.session-card .s-meta {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+  font-size: 11.5px; color: var(--fg-faint);
+}
+.session-card .s-meta .s-node-text {
+  flex-shrink: 0; max-width: 46%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-card .s-meta .s-sync {
+  margin-left: auto; flex-shrink: 0; white-space: nowrap;
+}
+
+/* ── Live-output tail (P1) ─────────────────────────────────────── */
+
+/* Only expanded cards render the tail; it shares the compact-card rule. */
+.session-card:not(.expanded) .s-tail { display: none; }
+.session-card .s-tail {
+  grid-column: 1 / -1;
+  margin-top: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+.session-card .s-tail-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px; color: var(--fg-faint);
+}
+.session-card .s-tail-title { font-weight: 600; color: var(--fg-muted); }
+.session-card .s-tail-meta { margin-left: auto; white-space: nowrap; }
+.session-card .s-tail-body {
+  margin: 0; padding: 8px 10px;
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 8em; overflow-y: auto; color: var(--fg);
+}
+
+/* ── Migration event strip (P2) ────────────────────────────────── */
+
+.event-strip {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 12px;
+}
+.event-strip-title { color: var(--fg-faint); flex-shrink: 0; }
+.event-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  max-width: 340px; min-width: 0;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--panel-2); color: var(--fg-muted);
+  font-family: inherit; font-size: 11.5px;
+  padding: 3px 10px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.event-chip:hover { border-color: var(--accent); color: var(--fg); }
+.event-chip-when { color: var(--fg-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.event-chip.ev-att-approval,
+.event-chip.ev-att-question {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border-strong));
+}
+.event-chip.ev-att-error {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+}
+.event-strip-clear { margin-left: auto; flex-shrink: 0; }
+
+/* ── Collapsed-card live line (folds live output into the list) ── */
+
+/* The newest line of the streaming tail stays visible without expanding;
+   clicking it expands the card and jumps to the full rolling tail. */
+.session-card .s-live {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: pointer;
+  margin-top: 4px;
+}
+.session-card .s-live::before {
+  content: ""; flex-shrink: 0;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ok);
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+.session-card .s-live:hover { color: var(--fg); }
+/* Expanded cards swap the one-line row for the full tail block (the card's
+   last element), so the two live representations never stack. */
+.session-card.expanded .s-live { display: none; }
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Detail dialog: live-output block title (the body reuses .detail-last). */
+.detail-live-title {
+  font-size: 11.5px; font-weight: 600; color: var(--fg-muted);
+  margin-bottom: 4px;
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
 // Conn is a live tunnel connection returned by a successful DialFunc. The real
@@ -99,6 +101,10 @@ type Controller struct {
 	state  State
 	conn   Conn
 	status Status
+	// sessions is the latest per-session projection pushed by the host
+	// (UpdateSessions). It feeds the heartbeat digests so a missed
+	// SESSION_UPDATE cannot leave the gateway with stale session state.
+	sessions []wire.SessionSummary
 
 	// reconnectGen invalidates a stale auto-reconnect watcher: any explicit
 	// Disconnect/Connect bumps the generation so only the latest watcher runs.
@@ -107,6 +113,60 @@ type Controller struct {
 
 	forwardMu sync.RWMutex
 	forward   ForwardConfig
+
+	// watchMu guards the gateway-advertised tail-watch gate (HeartbeatAck
+	// pending actions). watchGating stays false until the gateway advertises
+	// participation; until then TailWanted defaults to true (P1-a behavior).
+	watchMu     sync.Mutex
+	watchSet    map[string]struct{}
+	watchGating bool
+}
+
+// ApplyPending consumes control actions from a HEARTBEAT_ACK. Gating actions:
+//
+//	tail-gating:on     the gateway participates in watch gating
+//	watch:<sessionID>  enable live-tail pushes for the session
+//	unwatch:<sessionID> disable them
+//
+// Unknown actions are ignored (forward compatibility).
+func (c *Controller) ApplyPending(actions []string) {
+	if c == nil || len(actions) == 0 {
+		return
+	}
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	if c.watchSet == nil {
+		c.watchSet = make(map[string]struct{})
+	}
+	for _, action := range actions {
+		action = strings.TrimSpace(action)
+		switch {
+		case action == "tail-gating:on":
+			c.watchGating = true
+		case strings.HasPrefix(action, "watch:"):
+			if id := strings.TrimSpace(strings.TrimPrefix(action, "watch:")); id != "" {
+				c.watchSet[id] = struct{}{}
+			}
+		case strings.HasPrefix(action, "unwatch:"):
+			delete(c.watchSet, strings.TrimSpace(strings.TrimPrefix(action, "unwatch:")))
+		}
+	}
+}
+
+// TailWanted reports whether live-tail pushes for sessionID should be sent.
+// It returns true until the gateway advertises gating, so hosts keep the P1-a
+// behavior against gateways that do not implement watch control.
+func (c *Controller) TailWanted(sessionID string) bool {
+	if c == nil {
+		return true
+	}
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	if !c.watchGating {
+		return true
+	}
+	_, ok := c.watchSet[strings.TrimSpace(sessionID)]
+	return ok
 }
 
 // New creates a Controller. The initial state is StateDisabled when the config

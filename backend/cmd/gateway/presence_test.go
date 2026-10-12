@@ -18,7 +18,7 @@ func TestPresenceRegistry(t *testing.T) {
 	if p.Active("n1", "s1") {
 		t.Fatal("unknown session must not be active")
 	}
-	p.Touch("n1", "s1")
+	p.Touch("n1", "s1", false)
 	if !p.Active("n1", "s1") {
 		t.Fatal("touched session should be active")
 	}
@@ -61,7 +61,7 @@ func TestPushNotifierSuppressesWhileWatching(t *testing.T) {
 	}
 
 	// While the console is watching, no push is delivered.
-	presence.Touch("n1", "s1")
+	presence.Touch("n1", "s1", false)
 	n.observe([]*tunnel.Node{node})
 	if waitHit(hits, 300*time.Millisecond) {
 		t.Fatal("push must be suppressed while the session is being watched")

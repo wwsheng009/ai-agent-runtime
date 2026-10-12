@@ -143,7 +143,7 @@
 ```json
 // HEARTBEAT（周期；sessions_digest 是轻量摘要，不是全量）
 { "ts": "2026-10-11T10:00:30Z", "load": { "active_streams": 2 },
-  "sessions_digest": [ {"session_id":"…","state":"busy","attention":"none","updated_at":"…"} ] }
+  "sessions_digest": [ {"session_id":"…","state":"running","attention":"","status_text":"Running shell","updated_at":"…"} ] }
 
 // SESSION_UPDATE（事件驱动增量）
 { "op": "upsert", "session": { "session_id":"…", "state":"idle", "attention":"completed", "…":"…" } }
@@ -151,8 +151,32 @@
 { "op": "reconcile", "sessions": [ /* 全量 */ ] }
 ```
 
-**对账原则**（借鉴 mesh）：心跳是"我在"的证据，会话状态以 `SESSION_UPDATE` 增量为主，
-定期（默认每 10 个心跳）发一次 `reconcile` 全量，防止增量丢失导致长期漂移。
+**对账原则**（借鉴 mesh）：心跳是"我在"的证据；会话状态以 `SESSION_UPDATE` 增量为主
+（状态迁移即推，不做定时全量），心跳携带的 `sessions_digest` 只是**轻量对账网**：
+agent 侧每个心跳都会带上最新的 state/attention/status_text 摘要，网关仅在摘要与
+registry 实际不同时才合并、广播并持久化（无变化的心跳零副作用），这样即使某个
+`SESSION_UPDATE` 丢失，状态也会在下一次心跳内收敛，同时不产生全量数据同步。
+
+> 状态语义（state/attention/status_text 的取值与耦合规则）由共享核心
+> `internal/gateway/agent.SessionStateStore` 统一实现：aicli TUI 与 runtime-server
+> 只在各自侧做"本地事件 → 核心调用"的映射，保证两端词表与迁移规则不漂移。
+
+**时间戳语义**：`updated_at` 是宿主侧内容时间；`synced_at` 由**网关盖章**
+（网关最后收到该会话任何帧——SESSION_UPDATE 或心跳 digest——的服务器时间），
+agent 上报的同名字段会被覆盖，保证始终是服务器时钟。控制台用二者渲染
+"内容 x 前 / 同步 x 前"两条时间轴（`synced_at` 以心跳周期为常态上限，掉线后
+自然增大，是上传链路的活性信号）。
+
+**实时输出尾段（P1）**：`status_tail` 是活动期内容的展示尾段（≤512 runes，由共享核心
+`agent.TruncateSessionTail` 统一截断、保留最新），经 `SESSION_UPDATE` 以 ≤1Hz 节流上报
+（无变化不推）；网关以 **`event: session` 单会话增量**（`{node_id, session}`）下发给控制台，
+避免 1Hz × 全量快照的放大。turn 结束/中断时清空；完整正文仍只在会话页（07-console §6）。
+
+**尾流门控（P1-b）**：控制台对"展开的卡片"上报 `POST /api/presence {node_id, session_id, tail:true}`
+（收起/关闭开关即转为 `tail:false`）；网关把 `tail=true` 且会话活跃的集合按连接做差集，随
+`HEARTBEAT_ACK.pending` 下发 `tail-gating:on`（首次通告参与）、`watch:<session_id>` / `unwatch:<session_id>`。
+agent 在收到 `tail-gating:on` 之前保持 **P1-a 的无门控行为**（始终推尾流），之后仅推 watch 集合内的会话；
+旧 agent 不消费 pending ⇒ 始终推尾流（安全降级，无行为破坏）。
 
 ### 3.5 通知（NOTIFY）与注意力（attention）
 
