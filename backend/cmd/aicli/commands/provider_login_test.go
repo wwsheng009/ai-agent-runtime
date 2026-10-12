@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
 )
@@ -2060,7 +2062,105 @@ type testLoginPrompter struct {
 	text      map[string]string
 	textQueue map[string][]string
 	secrets   map[string]string
+	// selectRaw scripts the raw full-screen picker (PromptSelectRaw) by label;
+	// unscripted labels default to the trailing "fully custom" row so existing
+	// interactive tests keep their original provider-picker flow.
+	selectRaw map[string]int
 	lines     []string
+}
+
+// TestRunProviderLogin_PresetTemplatePrefillsNewProvider asserts the
+// template path: with ProviderTemplate set on a NEW provider, the interactive
+// prompts inherit the preset protocol/base URL/models path (the prompter
+// falls back to `current`), the user only supplies the API key, the models
+// list is fetched from the preset host, and the result is Created (not
+// Updated).
+func TestRunProviderLogin_PresetTemplatePrefillsNewProvider(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"tmpl-model-a"},{"id":"tmpl-model-b"}]}`))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	setTestUserProfileDir(t, dir)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("providers:\n  items: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := &config.Config{ConfigFilePath: path}
+
+	prompter := &testLoginPrompter{
+		textQueue: map[string][]string{
+			// The template path resolves the name from the template itself;
+			// supply this only in case the flow still reaches the generic
+			// name picker.
+			"Provider 名称/编号/搜索（/关键词, n下一页, p上一页）": {"tmpl.example"},
+		},
+		secrets: map[string]string{"API key": "sk-from-template"},
+	}
+	result, err := runProviderLogin(providerLoginRequest{
+		Config:      cfg,
+		Interactive: true,
+		Prompter:    prompter,
+		ProviderTemplate: &config.ProviderLoginTemplate{
+			PresetName: "test-gateway",
+			Name:       "tmpl.example",
+			Protocol:   "openai",
+			BaseURL:    server.URL,
+			ModelsPath: "/v1/models",
+		},
+	})
+	if err != nil {
+		t.Fatalf("runProviderLogin: %v", err)
+	}
+	if !result.Created || result.Updated {
+		t.Fatalf("template path must create (not update): %+v", result)
+	}
+	if result.ProviderName != "tmpl.example" {
+		t.Fatalf("expected provider name from template, got %q", result.ProviderName)
+	}
+	if result.BaseURL != server.URL {
+		t.Fatalf("expected template base URL, got %q", result.BaseURL)
+	}
+	if result.DefaultModel != "tmpl-model-a" {
+		t.Fatalf("expected first fetched model as default, got %q", result.DefaultModel)
+	}
+	joined := strings.Join(prompter.lines, "\n")
+	if !strings.Contains(joined, "test-gateway") {
+		t.Fatalf("expected template announcement line, got:\n%s", joined)
+	}
+	provider := cfg.Providers.Items["tmpl.example"]
+	if provider.Protocol != "openai" || provider.BaseURL != server.URL {
+		t.Fatalf("unexpected persisted provider: %+v", provider)
+	}
+	if provider.APIKey != "" || provider.APIKeyRef == "" {
+		t.Fatalf("api key must land in auth store, got: %+v", provider)
+	}
+}
+
+// TestResolveLoginProviderNameWithTemplates_SkipsChoiceOnExplicitName asserts
+// that an explicit --provider request bypasses the template/custom picker.
+func TestResolveLoginProviderNameWithTemplates_SkipsChoiceOnExplicitName(t *testing.T) {
+	req := providerLoginRequest{
+		ProviderName: "explicit",
+		Interactive:  true,
+		Prompter:     &testLoginPrompter{},
+	}
+	name, err := resolveLoginProviderNameWithTemplates(&req, &config.Config{})
+	if err != nil {
+		t.Fatalf("resolveLoginProviderNameWithTemplates: %v", err)
+	}
+	if name != "explicit" {
+		t.Fatalf("expected explicit name, got %q", name)
+	}
+	if req.ProviderTemplate != nil {
+		t.Fatalf("explicit name must not set a template: %+v", req.ProviderTemplate)
+	}
 }
 
 func (p *testLoginPrompter) PromptText(label, current string, required bool) (string, error) {
@@ -2075,6 +2175,13 @@ func (p *testLoginPrompter) PromptText(label, current string, required bool) (st
 		if value, ok := p.text[label]; ok {
 			return value, nil
 		}
+	}
+	// Fail fast instead of silently answering "": an unscripted required prompt
+	// with no default used to feed "" back to the caller, which turned a
+	// missing test script into an infinite caller loop (regression covered by
+	// TestChooseProviderLoginTemplateEmptyAnswerCancels).
+	if required && strings.TrimSpace(current) == "" {
+		return "", fmt.Errorf("test login prompter: no scripted answer for required prompt %q", label)
 	}
 	return current, nil
 }
@@ -2093,6 +2200,27 @@ func (p *testLoginPrompter) PrintLine(line string) {
 		return
 	}
 	p.lines = append(p.lines, line)
+}
+
+// PromptSelectRaw serves the new-provider template/custom picker through the
+// full-screen path. Unscripted labels default to the trailing "fully custom"
+// row, which keeps existing interactive tests on their original provider-name
+// picker flow; tests that want a preset template script selectRaw[label].
+func (p *testLoginPrompter) PromptSelectRaw(label, kind string, items []ui.FullScreenListItem) (int, bool, error) {
+	if len(items) == 0 {
+		return 0, false, fmt.Errorf("test login prompter: PromptSelectRaw %q has no items", label)
+	}
+	if p != nil && p.selectRaw != nil {
+		if index, ok := p.selectRaw[label]; ok {
+			if index < 0 || index >= len(items) {
+				return 0, false, fmt.Errorf(
+					"test login prompter: scripted PromptSelectRaw index %d out of range for %q (%d items)",
+					index, label, len(items))
+			}
+			return index, false, nil
+		}
+	}
+	return len(items) - 1, false, nil
 }
 
 // TestPrintLoginProviderPicker_EmitsSingleDenseBlock guards the chat /login
@@ -2277,5 +2405,134 @@ func TestMaskAPIKeyForDisplay(t *testing.T) {
 		if got := maskAPIKeyForDisplay(c.in); got != c.want {
 			t.Errorf("maskAPIKeyForDisplay(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// emptyAnswerPrompter answers every text prompt with "" and never errors: the
+// exact prompter shape that used to spin chooseProviderLoginTemplate forever
+// (each round appended another "无效的选择" line to an unbounded transcript).
+type emptyAnswerPrompter struct{ lines []string }
+
+func (p *emptyAnswerPrompter) PromptText(string, string, bool) (string, error) { return "", nil }
+func (p *emptyAnswerPrompter) PromptSecret(string, string, bool) (string, error) {
+	return "", nil
+}
+func (p *emptyAnswerPrompter) PrintLine(line string) { p.lines = append(p.lines, line) }
+
+// numberedAnswerPrompter exposes no raw picker (so the numbered fallback runs)
+// and replays scripted answers in order.
+type numberedAnswerPrompter struct {
+	lines []string
+	queue []string
+}
+
+func (p *numberedAnswerPrompter) PromptText(_ string, current string, _ bool) (string, error) {
+	if len(p.queue) > 0 {
+		value := p.queue[0]
+		p.queue = p.queue[1:]
+		return value, nil
+	}
+	return current, nil
+}
+func (p *numberedAnswerPrompter) PromptSecret(string, string, bool) (string, error) {
+	return "", nil
+}
+func (p *numberedAnswerPrompter) PrintLine(line string) { p.lines = append(p.lines, line) }
+
+func loadTestProviderLoginTemplates(t *testing.T) []config.ProviderLoginTemplate {
+	t.Helper()
+	templates := config.LoadPresetProviderTemplates(hostForLoginTemplates())
+	if len(templates) == 0 {
+		t.Skip("no preset provider templates loaded in this environment")
+	}
+	return templates
+}
+
+// Regression: a prompter that keeps answering "" must cancel instead of
+// spinning. Before the fix this looped forever and appended a line per round,
+// driving a single test process to multiple GB and, under `go test`, taking the
+// machine's commit limit down with it.
+func TestChooseProviderLoginTemplateEmptyAnswerCancels(t *testing.T) {
+	loadTestProviderLoginTemplates(t)
+
+	req := &providerLoginRequest{Interactive: true, Prompter: &emptyAnswerPrompter{}}
+	done := make(chan struct{})
+	var (
+		name     string
+		template *config.ProviderLoginTemplate
+		err      error
+	)
+	go func() {
+		name, template, err = chooseProviderLoginTemplate(req, &config.Config{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("chooseProviderLoginTemplate must not spin on an empty answer")
+	}
+	if !errors.Is(err, errChatLoginPickerCancelled) {
+		t.Fatalf("err = %v, want errChatLoginPickerCancelled", err)
+	}
+	if name != "" || template != nil {
+		t.Fatalf("cancel must not pick anything: name=%q template=%+v", name, template)
+	}
+}
+
+// The numbered fallback still resolves a valid row and prints the option list.
+func TestChooseProviderLoginTemplateNumberedSelection(t *testing.T) {
+	templates := loadTestProviderLoginTemplates(t)
+
+	prompter := &numberedAnswerPrompter{queue: []string{"1"}}
+	req := &providerLoginRequest{Interactive: true, Prompter: prompter}
+	name, template, err := chooseProviderLoginTemplate(req, &config.Config{})
+	if err != nil {
+		t.Fatalf("chooseProviderLoginTemplate: %v", err)
+	}
+	if template == nil || name != templates[0].Name {
+		t.Fatalf("expected the first preset template %q, got name=%q template=%+v", templates[0].Name, name, template)
+	}
+	joined := strings.Join(prompter.lines, "\n")
+	if !strings.Contains(joined, "选择新建方式") || !strings.Contains(joined, templates[0].Name) {
+		t.Fatalf("expected the numbered option list, got:\n%s", joined)
+	}
+}
+
+// A required prompt with no scripted answer must fail fast (not answer "") so a
+// future prompt added to the login flow cannot turn into an infinite loop in
+// tests.
+func TestTestLoginPrompterFailsFastOnUnscriptedRequiredPrompt(t *testing.T) {
+	prompter := &testLoginPrompter{}
+	if _, err := prompter.PromptText("新提示", "", true); err == nil {
+		t.Fatal("unscripted required prompt must return an error")
+	}
+	// An explicit empty script still wins: tests that probe empty input are
+	// unaffected by the guard.
+	prompter.text = map[string]string{"新提示": ""}
+	if got, err := prompter.PromptText("新提示", "", true); err != nil || got != "" {
+		t.Fatalf("explicit empty script must pass through, got %q err=%v", got, err)
+	}
+	// A default (current) value is an answer: the caller keeps accepting it.
+	if got, err := prompter.PromptText("另一个提示", "默认值", true); err != nil || got != "默认值" {
+		t.Fatalf("default must pass through, got %q err=%v", got, err)
+	}
+}
+
+// The raw picker defaults to the trailing "fully custom" row, keeping existing
+// interactive tests on their original provider-picker flow.
+func TestTestLoginPrompterSelectRawDefaultsToCustomRow(t *testing.T) {
+	items := []ui.FullScreenListItem{{Title: "模板A"}, {Title: chatLoginTemplateCustomRowTitle}}
+	prompter := &testLoginPrompter{}
+	index, cancelled, err := prompter.PromptSelectRaw("新建方式", "template", items)
+	if err != nil || cancelled {
+		t.Fatalf("PromptSelectRaw: index=%d cancelled=%v err=%v", index, cancelled, err)
+	}
+	if index != len(items)-1 {
+		t.Fatalf("index = %d, want the custom row %d", index, len(items)-1)
+	}
+	// A scripted index wins.
+	prompter.selectRaw = map[string]int{"新建方式": 0}
+	if index, _, err := prompter.PromptSelectRaw("新建方式", "template", items); err != nil || index != 0 {
+		t.Fatalf("scripted index: got %d err=%v", index, err)
 	}
 }

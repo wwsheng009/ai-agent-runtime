@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +57,15 @@ type providerLoginSelectPrompter interface {
 	PromptSelect(label, kind string, options []string, current string, allowCreate bool) (string, bool, error)
 }
 
+// providerLoginSelectRawPrompter is the optional extension for prompters that
+// can host a full-screen picker over a caller-built item list (used by the
+// template/custom choice, whose rows come from preset templates rather than
+// from an options slice). Prompters without it fall back to the numbered text
+// list rendered by the caller.
+type providerLoginSelectRawPrompter interface {
+	PromptSelectRaw(label, kind string, items []ui.FullScreenListItem) (index int, cancelled bool, err error)
+}
+
 // errChatLoginPickerCancelled reports that the user aborted a full-screen
 // login selection. It maps to a neutral "已取消" result instead of an error.
 var errChatLoginPickerCancelled = errors.New("login picker cancelled")
@@ -98,6 +108,13 @@ type providerLoginRequest struct {
 	// Token is never written to config.yaml; it is stored via account_auth_ref.
 	NewAPIAccessToken string
 	NewAPIUserID      string
+
+	// ProviderTemplate, when set on a NEW provider, pre-fills protocol /
+	// base URL / models path from a preset-extracted template before the
+	// interactive prompts run. The user then only confirms the pre-filled
+	// fields and supplies the API key. Ignored when the provider already
+	// exists (updating keeps the user's own configuration).
+	ProviderTemplate *config.ProviderLoginTemplate
 }
 
 type providerLoginResult struct {
@@ -191,11 +208,31 @@ func runProviderLogin(req providerLoginRequest) (*providerLoginResult, error) {
 		configPath = strings.TrimSpace(cfg.ConfigFilePath)
 	}
 
-	providerName, err := resolveLoginProviderName(req, cfg)
+	providerName, err := resolveLoginProviderNameWithTemplates(&req, cfg)
 	if err != nil {
 		return nil, err
 	}
 	existing, exists := cfg.Providers.Items[providerName]
+
+	// Preset template prefill (new providers only): the template supplies
+	// protocol / base URL / models path so the interactive prompts below act
+	// as confirmations with the preset values as defaults. Updating an
+	// existing provider keeps the user's own configuration untouched.
+	if !exists && req.ProviderTemplate != nil {
+		tmpl := req.ProviderTemplate
+		if strings.TrimSpace(req.LoginProtocol) == "" {
+			req.LoginProtocol = tmpl.Protocol
+		}
+		if strings.TrimSpace(req.BaseURL) == "" {
+			req.BaseURL = tmpl.BaseURL
+		}
+		if strings.TrimSpace(req.ModelsPath) == "" {
+			req.ModelsPath = tmpl.ModelsPath
+		}
+		if req.Interactive && req.Prompter != nil && strings.TrimSpace(tmpl.PresetName) != "" {
+			req.Prompter.PrintLine(fmt.Sprintf("使用 preset 模板 %s：protocol=%s base_url=%s", tmpl.PresetName, tmpl.Protocol, tmpl.BaseURL))
+		}
+	}
 
 	loginProtocol, authMode, err := resolveLoginProtocolAndMode(req, existing, exists)
 	if err != nil {
@@ -455,6 +492,151 @@ func firstNonNilProviderAccount(values ...*config.ProviderAccountSnapshot) *conf
 	}
 	return nil
 }
+
+// resolveLoginProviderNameWithTemplates wraps resolveLoginProviderName with
+// the preset-template choice: when the login is interactive, targets a NEW
+// provider, and no explicit template was requested, the user first picks
+// between "start from a preset template" (protocol/base URL prefilled) and
+// "fully custom" (plain flow). Explicit --provider requests skip the choice.
+func resolveLoginProviderNameWithTemplates(req *providerLoginRequest, cfg *config.Config) (string, error) {
+	if strings.TrimSpace(req.ProviderName) != "" || !req.Interactive || req.Prompter == nil || req.ProviderTemplate != nil {
+		return resolveLoginProviderName(*req, cfg)
+	}
+	name, template, err := chooseProviderLoginTemplate(req, cfg)
+	if err != nil {
+		return "", err
+	}
+	if template != nil {
+		req.ProviderTemplate = template
+	}
+	if strings.TrimSpace(name) != "" {
+		return name, nil
+	}
+	return resolveLoginProviderName(*req, cfg)
+}
+
+// chooseProviderLoginTemplate presents the template/custom choice for a
+// brand-new interactive login. It returns the provider name (the template
+// name when a template is chosen, empty when the generic name picker should
+// run for the fully-custom path), the chosen template (nil for the
+// fully-custom path), or an error. Cancellation maps to the neutral login
+// cancel error.
+func chooseProviderLoginTemplate(req *providerLoginRequest, cfg *config.Config) (string, *config.ProviderLoginTemplate, error) {
+	templates := config.LoadPresetProviderTemplates(hostForLoginTemplates())
+	if len(templates) == 0 {
+		return "", nil, nil
+	}
+
+	items := make([]ui.FullScreenListItem, 0, len(templates)+1)
+	for _, template := range templates {
+		detail := fmt.Sprintf("template | protocol=%s | host=%s", template.Protocol, loginTemplateHost(template.BaseURL))
+		if template.PresetName != "" {
+			detail += " | preset=" + template.PresetName
+		}
+		items = append(items, ui.FullScreenListItem{
+			Title:      template.Name,
+			Detail:     detail,
+			SearchText: template.Name + " template 模板 " + template.Protocol + " " + template.BaseURL + " " + template.PresetName,
+		})
+	}
+	customRow := ui.FullScreenListItem{
+		Title:      chatLoginTemplateCustomRowTitle,
+		Detail:     "custom | 完全自定义 protocol / base URL",
+		SearchText: "custom 完全自定义 新建 create manual",
+	}
+	items = append(items, customRow)
+
+	if rawPrompter, ok := req.Prompter.(providerLoginSelectRawPrompter); ok {
+		index, cancelled, err := rawPrompter.PromptSelectRaw("新建方式", "template", items)
+		switch {
+		case err == nil && cancelled:
+			return "", nil, errChatLoginPickerCancelled
+		case err == nil:
+			return templateChoiceFromIndex(items, templates, index)
+		case !errors.Is(err, ui.ErrFullScreenUnavailable):
+			return "", nil, err
+		}
+		// ErrFullScreenUnavailable → numbered text fallback below.
+	}
+
+	req.Prompter.PrintLine("选择新建方式：")
+	for i, item := range items {
+		req.Prompter.PrintLine(fmt.Sprintf("  [%d] %s  %s", i+1, item.Title, item.Detail))
+	}
+	// Bounded retry: this is a required prompt, so an empty answer means "no
+	// picker input" (EOF, a non-interactive stream, or a scripted prompter
+	// without an answer for this label) and cancels instead of spinning. An
+	// earlier revision retried here forever, so a prompter that kept answering
+	// "" drove the process heap to multiple GB: every round appended another
+	// "无效的选择" line to an unbounded transcript. Non-empty but invalid
+	// answers still retry — a few times, with a single hint line.
+	invalidNoticeShown := false
+	for attempts := 0; attempts < loginTemplateChoiceMaxAttempts; attempts++ {
+		value, err := req.Prompter.PromptText("请输入选项", "", true)
+		if err != nil {
+			return "", nil, err
+		}
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return "", nil, errChatLoginPickerCancelled
+		}
+		num, convErr := strconv.Atoi(trimmed)
+		if convErr != nil || num < 1 || num > len(items) {
+			if !invalidNoticeShown {
+				req.Prompter.PrintLine("无效的选择，请重新输入")
+				invalidNoticeShown = true
+			}
+			continue
+		}
+		return templateChoiceFromIndex(items, templates, num-1)
+	}
+	return "", nil, errChatLoginPickerCancelled
+}
+
+// loginTemplateChoiceMaxAttempts bounds the numbered fallback for the
+// template/custom choice (see chooseProviderLoginTemplate).
+const loginTemplateChoiceMaxAttempts = 5
+
+// templateChoiceFromIndex maps a confirmed row back to the template choice.
+// A template row returns the template's own provider name so the user goes
+// straight to credential entry; the custom row defers to the generic name
+// picker.
+func templateChoiceFromIndex(items []ui.FullScreenListItem, templates []config.ProviderLoginTemplate, index int) (string, *config.ProviderLoginTemplate, error) {
+	if index < 0 || index >= len(items) {
+		return "", nil, fmt.Errorf("invalid template selection %d", index)
+	}
+	selected := items[index]
+	if selected.Title == chatLoginTemplateCustomRowTitle {
+		return "", nil, nil
+	}
+	for i := range templates {
+		if templates[i].Name == selected.Title {
+			return templates[i].Name, &templates[i], nil
+		}
+	}
+	return "", nil, fmt.Errorf("invalid template selection %q", selected.Title)
+}
+
+func hostForLoginTemplates() string {
+	host, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+func loginTemplateHost(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return baseURL
+	}
+	if host := strings.TrimSpace(parsed.Host); host != "" {
+		return host
+	}
+	return baseURL
+}
+
+const chatLoginTemplateCustomRowTitle = "＋ 完全自定义（手动输入 protocol / base URL）"
 
 func resolveLoginProviderName(req providerLoginRequest, cfg *config.Config) (string, error) {
 	name := strings.TrimSpace(req.ProviderName)

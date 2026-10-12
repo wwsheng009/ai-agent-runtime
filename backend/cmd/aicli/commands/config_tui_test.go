@@ -203,6 +203,7 @@ func TestConfigTUI_LoginProviderUsesProviderLoginTemplates(t *testing.T) {
 		"2",        // providers
 		"a",        // login/new provider
 		"true",     // set default
+		"2",        // 新建方式：完全自定义（跳过 preset 模板）
 		"gamma",    // provider name
 		"2",        // protocol openai
 		server.URL, // base url

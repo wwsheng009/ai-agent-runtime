@@ -235,9 +235,28 @@ type cliLoginPrompter struct {
 // numbered text picker as its automatic non-TTY fallback.
 var _ providerLoginSelectPrompter = (*cliLoginPrompter)(nil)
 
+// Compile-time contract: the CLI prompter can also host raw item lists (the
+// template/custom choice during new-provider login).
+var _ providerLoginSelectRawPrompter = (*cliLoginPrompter)(nil)
+
 func newCLILoginPrompter(cfg *config.Config, authStorePath string, dryRun bool) *cliLoginPrompter {
 	return &cliLoginPrompter{
 		reader:        bufio.NewReader(os.Stdin),
+		cfg:           cfg,
+		authStorePath: authStorePath,
+		dryRun:        dryRun,
+	}
+}
+
+// newCLILoginPrompterWithReader builds a CLI prompter that reads from a
+// caller-provided reader (the startup chat flow shares one tracked reader
+// across every interactive prompt; tests inject scripted input).
+func newCLILoginPrompterWithReader(cfg *config.Config, authStorePath string, dryRun bool, reader *bufio.Reader) *cliLoginPrompter {
+	if reader == nil {
+		return newCLILoginPrompter(cfg, authStorePath, dryRun)
+	}
+	return &cliLoginPrompter{
+		reader:        reader,
 		cfg:           cfg,
 		authStorePath: authStorePath,
 		dryRun:        dryRun,
@@ -322,6 +341,33 @@ func (p *cliLoginPrompter) PromptSelect(label, kind string, options []string, cu
 		}
 		return options[optionIndex], false, nil
 	}
+}
+
+// PromptSelectRaw hosts the full-screen picker over a caller-built item list
+// (template/custom choice). It implements providerLoginSelectRawPrompter with
+// the same non-TTY fallback contract as PromptSelect.
+func (p *cliLoginPrompter) PromptSelectRaw(label, kind string, items []ui.FullScreenListItem) (int, bool, error) {
+	terminal := ui.NewTerminal()
+	if !ui.CanUseFullScreenList(terminal) {
+		return 0, false, ui.ErrFullScreenUnavailable
+	}
+	result, err := ui.RunStartupFullScreenList(context.Background(), terminal, ui.FullScreenListOptions{
+		Title:        "选择 " + label,
+		Subtitle:     "输入即搜索过滤，↑/↓ 选择，Enter 确认，Esc/q 取消",
+		EmptyMessage: fmt.Sprintf("没有匹配的 %s", kind),
+		ConfirmLabel: fmt.Sprintf("使用选中 %s", kind),
+		Items:        items,
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	if result.Cancelled {
+		return 0, true, nil
+	}
+	if result.Index < 0 || result.Index >= len(items) {
+		return 0, false, fmt.Errorf("invalid picker selection %d", result.Index)
+	}
+	return result.Index, false, nil
 }
 
 // confirmAndDeleteProvider asks for confirmation and persists the provider
