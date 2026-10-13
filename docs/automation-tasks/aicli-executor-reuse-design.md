@@ -89,7 +89,8 @@ localChatRuntimeHost.buildSessionActor(sessionID, session, sessionStore, runtime
 | 阶段 | 交付 | 验收 | 回滚 |
 |---|---|---|---|
 | **E3.4-0** ✅**已完成** | `runtimehost` 增加**租约模式**：`Deps.LeaseMode`（`LeaseModeRunScoped`（零值/现状）\| `LeaseModeActorScoped`）。`actorScoped` **同时**抑制两处释放——① 构造后释放（`actor_factory.go`）② `OnRunFinished` 释放，只保留 stalled/stop（`ReleasesAfterConstruction` / `ReleasesOnRunFinished`）。**仅加"RunFinished 开关"不够**（§11 G1） | ✅ 验证：`TestLeaseModePolicy`（策略）、`TestActorScopedKeepsLeaseAfterConstruction`（**G1 证明**：actor-scoped 构造后仍持锁）、`TestRunScopedReleasesLeaseAfterConstruction`（零值行为不变）；`runtimeapi` 全量回归 ✅（44.9s） | 删字段 |
-| **E3.4a** | aicli 侧新增 `aicliRuntimeDeps(baseSession, sessionStore, runtimeConfig, workspaceRoot, sessionID) runtimehost.Deps`——**按 sessionID 派生**（hub 工厂以基础会话闭包 + 变化的 sessionID 调用，见 §11 G2）；**只装配、不切换**；补契约测试断言各回调非空 | 编译 + 单测；行为零变化（未切换调用点） | 删函数 |
+| **E3.4a-1** ✅**已完成** | 把 aicli 的「runtime session → `SessionContext`」派生抽成命名函数 `deriveLocalSessionContext(sessionStore, sessionID, isBaseSession, workspaceRoot) (SessionContext, string)`（`chat_actor_executor_deps.go`）；`buildSessionActor` 改为调用它（引用改 `sessionCtx.*`）。**行为零变化** | ✅ 验证：`cmd/aicli/commands` **全量回归** ✅（197.7s）；`TestDeriveLocalSessionContext`（子会话读全量 / 基础会话只读 agent_type·completion / 存储缺失零值） | 还原内联块 |
+| **E3.4a-2** | aicli 侧新增 `aicliRuntimeDeps(baseSession, sessionStore, runtimeConfig, workspaceRoot, sessionID) runtimehost.Deps`——**按 sessionID 派生**（hub 工厂以基础会话闭包 + 变化的 sessionID 调用，见 §11 G2）；**只装配、不切换**；补契约测试断言各回调非空 | 编译 + 单测；行为零变化（未切换调用点） | 删函数 |
 | **E3.4b** | `buildSessionActor` 改为：前置不变量 → 构造 Deps → `runtimehost.BuildSessionActor` | aicli 全量测试绿；**关键**：用契约测试钉住 actor 配置（见 §6） | 恢复旧工厂（git） |
 | **E3.4c** | 删除 aicli 侧不再使用的装配代码；文档记录 | 无死代码；行为不变 | git |
 

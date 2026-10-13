@@ -1760,13 +1760,6 @@ func stopChatSessionActor(session *ChatSession, reason string) bool {
 }
 
 func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *ChatSession, sessionStore runtimechat.SessionStorage, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string) (*runtimechat.SessionActor, error) {
-	childAgentType := ""
-	requestedProvider := ""
-	requestedModel := ""
-	requestedReasoningEffort := ""
-	childCompletionRequirement := ""
-	childReadOnly := false
-	childDepth := 0
 	baseSessionID := ""
 	if session != nil && session.RuntimeSession != nil {
 		baseSessionID = strings.TrimSpace(session.RuntimeSession.ID)
@@ -1784,36 +1777,10 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 			return nil, err
 		}
 	}
-	if sessionStore != nil {
-		if runtimeSession, err := sessionStore.Load(context.Background(), sessionID); err == nil && runtimeSession != nil {
-			if value, ok := runtimeSession.GetContext(toolbroker.AgentSessionContextAgentType); ok {
-				if text, ok := value.(string); ok {
-					childAgentType = strings.TrimSpace(text)
-				}
-			}
-			childCompletionRequirement = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextCompletionRequirement)
-			if !isBaseSession {
-				// Prefer per-child worktree path so tools and system prompt cwd stay isolated.
-				if path := agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextWorktreePath); path != "" {
-					workspaceRoot = path
-				} else if path := agentcontrol.ContextString(runtimeSession, sessionmeta.WorkspacePath); path != "" {
-					workspaceRoot = path
-				}
-				requestedProvider = agentcontrol.ContextString(runtimeSession, sessionmeta.ProviderName)
-				requestedModel = agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextRequestedModel)
-				if requestedModel == "" {
-					requestedModel = agentcontrol.ContextString(runtimeSession, sessionmeta.Model)
-				}
-				requestedReasoningEffort = agentcontrol.ContextString(runtimeSession, sessionmeta.ReasoningEffort)
-				if value, ok := runtimeSessionContextBool(runtimeSession, toolbroker.AgentSessionContextReadOnly); ok {
-					childReadOnly = value
-				}
-				childDepth = localAgentSessionDepth(runtimeSession)
-			}
-		}
-	}
-	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, childAgentType, requestedModel, requestedProvider, requestedReasoningEffort)
-	if !isBaseSession && strings.TrimSpace(childAgentType) != "" {
+	// E3.4a-1：runtime session → SessionContext 派生抽成命名函数（行为零变化）。
+	sessionCtx, workspaceRoot := deriveLocalSessionContext(sessionStore, sessionID, isBaseSession, workspaceRoot)
+	apiAgent := buildLocalChatAgent(session, h, runtimeConfig, workspaceRoot, sessionCtx.ChildAgentType, sessionCtx.RequestedModel, sessionCtx.RequestedProvider, sessionCtx.RequestedReasoningEffort)
+	if !isBaseSession && strings.TrimSpace(sessionCtx.ChildAgentType) != "" {
 		toolkitBasePath := ""
 		switch {
 		case runtimeConfig != nil:
@@ -1821,15 +1788,15 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		case h != nil && h.RuntimeConfig != nil:
 			toolkitBasePath = h.RuntimeConfig.Workspace.Root
 		}
-		applyLocalChildAgentdefToolPolicy(apiAgent, childAgentType, session, workspaceRoot, toolkitBasePath)
+		applyLocalChildAgentdefToolPolicy(apiAgent, sessionCtx.ChildAgentType, session, workspaceRoot, toolkitBasePath)
 	}
-	applyLocalChildReadOnlyPolicy(apiAgent, childReadOnly)
-	applyLocalChildDepthPolicy(apiAgent, childDepth, localAgentDepthCeiling(runtimeConfig, h))
+	applyLocalChildReadOnlyPolicy(apiAgent, sessionCtx.ChildReadOnly)
+	applyLocalChildDepthPolicy(apiAgent, sessionCtx.ChildDepth, localAgentDepthCeiling(runtimeConfig, h))
 	leaseHandle, leaseErr := acquireLocalChatSessionLease(context.Background(), h.RuntimeStore, sessionID)
 	if leaseErr != nil {
 		return nil, leaseErr
 	}
-	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort)
+	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, sessionCtx.RequestedReasoningEffort)
 	// §6.12 扩展：轻量 spawn_agent 子代理以 agent_session: 义务写入挂起记录后，
 	// run 收尾的 settle 必须能判读子会话终态——接宿主自己的 durable 判读器
 	// （supervision 通知面；未接线时保持 batch-only 语义，已有挂起不受影响）。
@@ -1843,10 +1810,10 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	// Phase 1 交付 4：知识层 shadow 拦截（grep/view → exploration_attribution）。
 	// 知识层 off / 账本未启用时 hook 为 nil，行为与无知识层一致（ADR-0003 §4.4）。
 	// W6：来源门禁（只读子代理 / 只读会话零写入）与任务作用域随观察透传。
-	observationSubagent := !isBaseSession || strings.TrimSpace(childAgentType) != "" || childDepth > 0 || childReadOnly
+	observationSubagent := !isBaseSession || strings.TrimSpace(sessionCtx.ChildAgentType) != "" || sessionCtx.ChildDepth > 0 || sessionCtx.ChildReadOnly
 	applyLocalChatToolObservation(loopConfig, session, h,
-		knowledge.ObservationSourceFor(observationSubagent, childReadOnly), localChatObservationTaskID(session))
-	applyLocalChatCompletionRequirement(loopConfig, session, childAgentType, childCompletionRequirement, workspaceRoot)
+		knowledge.ObservationSourceFor(observationSubagent, sessionCtx.ChildReadOnly), localChatObservationTaskID(session))
+	applyLocalChatCompletionRequirement(loopConfig, session, sessionCtx.ChildAgentType, sessionCtx.ChildCompletionRequirement, workspaceRoot)
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
 		LLMRuntime:   h.Bootstrap.LLMRuntime(),
