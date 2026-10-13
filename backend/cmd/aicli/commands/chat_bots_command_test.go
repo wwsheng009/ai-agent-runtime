@@ -7,6 +7,7 @@ package commands
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -18,12 +19,76 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/api"
 )
 
 var botsIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// fakeBotsProvider 是 /bots 副屏链路回归测试的最小通道替身：Schema 声明一个
+// kind=qr 动作；RunAction 固定失败，便于断言「扫码流确实被触发」。
+type fakeBotsProvider struct{ actionErr error }
+
+func (fakeBotsProvider) Name() string { return "wechat" }
+
+func (fakeBotsProvider) Schema() api.ProviderSchema {
+	return api.ProviderSchema{
+		Provider: "wechat", Label: "微信", Modes: []string{"polling"},
+		Fields:  []api.FieldSchema{{Key: "bot_token", Label: "Bot Token", Type: api.FieldSecret}},
+		Actions: []api.ActionSpec{{Key: "start_login", Label: "扫码登录", Kind: "qr"}},
+	}
+}
+
+func (fakeBotsProvider) Activate(context.Context, connectors.Config) (connectors.Activation, error) {
+	return connectors.Activation{}, nil
+}
+
+func (fakeBotsProvider) Deactivate(context.Context, connectors.Config) error { return nil }
+
+func (fakeBotsProvider) Send(context.Context, connectors.Config, string, []connectors.OutboundMessage) error {
+	return nil
+}
+
+func (f fakeBotsProvider) RunAction(context.Context, connectors.Config, string, map[string]any) (map[string]any, error) {
+	return nil, f.actionErr
+}
+
+// TestChatBotsNestedScreenAppliesAfterClose 锁定嵌套副屏必须经
+// chatScreenOpenAndApply 打开（AfterClose 才会生效）：
+// 列表选中连接器 → 动作副屏选中「扫码登录」→ 扫码流必须被触发。
+// 回归背景：曾用裸 openChatScreen 打开嵌套副屏，回车关屏后什么都不发生。
+func TestChatBotsNestedScreenAppliesAfterClose(t *testing.T) {
+	chatScreenTestSeamsInstall(t, true)
+	session := newUnifiedChatScreenTestSession(t)
+
+	store := connectors.NewMemoryStore(connectors.Config{ID: "wx-1", Provider: "wechat", Name: "微信", Enabled: true})
+	service := connectors.New(connectors.Deps{Store: store, Logf: func(string, ...any) {}})
+	require.NoError(t, service.Register(fakeBotsProvider{actionErr: errors.New("network down")}))
+	host := &LocalConnectorHost{store: store, service: service}
+
+	var outputs []string
+	prevObserver := chatCommandOutputObserver
+	chatCommandOutputObserver = func(_ *ChatSession, text string) { outputs = append(outputs, text) }
+	t.Cleanup(func() { chatCommandOutputObserver = prevObserver })
+
+	picks := 0
+	chatScreenListRunner = func(_ *ChatSession, _ ui.ScreenLease, _ ui.FullScreenListOptions) (ui.FullScreenListResult, error) {
+		picks++
+		if picks == 1 {
+			return ui.FullScreenListResult{Index: 1}, nil // 列表行 1 = 第一个连接器
+		}
+		return ui.FullScreenListResult{Index: 0}, nil // 动作行 0 = 扫码登录
+	}
+
+	chatScreenOpenAndApply(session, chatScreenBotsListSpec(host))
+
+	require.Equal(t, 2, picks, "嵌套副屏必须被打开并接受选择")
+	require.Contains(t, strings.Join(outputs, "\n"), "获取二维码失败",
+		"选中扫码登录后必须触发扫码流（而不是静默关屏）")
+}
 
 func TestBotsGenerateConnectorID(t *testing.T) {
 	id := botsGenerateConnectorID("WeChat")

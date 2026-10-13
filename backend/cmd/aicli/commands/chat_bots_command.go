@@ -249,7 +249,7 @@ func chatBotsListAfterClose(host *LocalConnectorHost) func(*ChatSession, chatScr
 			return
 		}
 		if outcome.Index == 0 {
-			openChatScreen(session, chatScreenBotsProviderSpec(host))
+			chatScreenOpenAndApply(session, chatScreenBotsProviderSpec(host))
 			return
 		}
 		configs := botsSortedConfigs(host)
@@ -257,7 +257,7 @@ func chatBotsListAfterClose(host *LocalConnectorHost) func(*ChatSession, chatScr
 		if idx < 0 || idx >= len(configs) {
 			return
 		}
-		openChatScreen(session, chatScreenBotsActionSpec(host, configs[idx]))
+		chatScreenOpenAndApply(session, chatScreenBotsActionSpec(host, configs[idx]))
 	}
 }
 
@@ -361,11 +361,11 @@ func chatBotsActionAfterClose(host *LocalConnectorHost, cfg connectors.Config, k
 		case botsActionDisable:
 			botsSetConnectorEnabled(session, host, cfg, false)
 		case botsActionLogs:
-			openChatScreen(session, chatScreenBotsLogsSpec(host, cfg))
+			chatScreenOpenAndApply(session, chatScreenBotsLogsSpec(host, cfg))
 		case botsActionDelete:
-			openChatScreen(session, chatScreenBotsDeleteSpec(host, cfg))
+			chatScreenOpenAndApply(session, chatScreenBotsDeleteSpec(host, cfg))
 		case botsActionBack:
-			openChatScreen(session, chatScreenBotsListSpec(host))
+			chatScreenOpenAndApply(session, chatScreenBotsListSpec(host))
 		}
 	}
 }
