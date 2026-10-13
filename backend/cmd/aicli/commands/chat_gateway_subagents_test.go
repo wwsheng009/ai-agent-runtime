@@ -62,11 +62,7 @@ func TestChatGatewaySessionsAppendsLiveSubagentRows(t *testing.T) {
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: parentID}}
 	session.LocalRuntimeHost = &localChatRuntimeHost{SubagentBatches: store}
 
-	// 默认 off：只有父行（历史行为不变）。
-	t.Setenv(gatewayagent.EnvReportSubagents, "")
-	require.Len(t, chatGatewaySessions(session), 1)
-
-	t.Setenv(gatewayagent.EnvReportSubagents, "1")
+	// 默认开启：父行 + 一条活子行。
 	got := chatGatewaySessions(session)
 	require.Len(t, got, 2, "parent + one live child (terminal children are never listed)")
 	require.Equal(t, parentID, got[0].SessionID)
@@ -80,4 +76,8 @@ func TestChatGatewaySessionsAppendsLiveSubagentRows(t *testing.T) {
 	require.Equal(t, parentID, child.Parent.ParentSessionID)
 	require.Equal(t, "task-live", child.Parent.AgentID)
 	require.Equal(t, "implement", child.Parent.AgentType)
+
+	// 显式关闭：回到只有父行的历史行为。
+	t.Setenv(gatewayagent.EnvReportSubagents, "0")
+	require.Len(t, chatGatewaySessions(session), 1)
 }

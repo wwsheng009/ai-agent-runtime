@@ -104,8 +104,9 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	// the store defaults to idle/running so both hosts report the same baseline.
 	gatewaySessionStateFor(id).Apply(&summary)
 	summaries := []wire.SessionSummary{summary}
-	// 子代理行（display-only，默认 off）：把本进程仍在跑的 subagent 任务作为子会话
-	// 行追加在父会话之后，控制台据此展开/折叠（docs/gateway/07-console.md）。
+	// 子代理行（display-only，默认开启）：把本进程仍在跑的 subagent 任务作为子会话
+	// 行追加在父会话之后，控制台据此展开/折叠；AICLI_GATEWAY_REPORT_SUBAGENTS=0 可关闭
+	// （docs/gateway/07-console.md）。
 	if gatewayagent.ReportSubagentsEnabled(nil) {
 		summaries = append(summaries, chatGatewaySubagentSessions(session, id)...)
 	}

@@ -67,8 +67,9 @@ func (h *Handler) GatewaySessions() []wire.SessionSummary {
 		}
 		out = append(out, summary)
 	}
-	// 子代理行（display-only，默认 off）：把仍在跑的 subagent 任务作为子会话行
-	// 追加在各自父会话之后，控制台据此展开/折叠（docs/gateway/07-console.md）。
+	// 子代理行（display-only，默认开启）：把仍在跑的 subagent 任务作为子会话行
+	// 追加在各自父会话之后，控制台据此展开/折叠；AICLI_GATEWAY_REPORT_SUBAGENTS=0
+	// 可关闭（docs/gateway/07-console.md）。
 	if gatewayagent.ReportSubagentsEnabled(nil) {
 		out = h.appendGatewaySubagentSessions(ctx, out)
 	}
