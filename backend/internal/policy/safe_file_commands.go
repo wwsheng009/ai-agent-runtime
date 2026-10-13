@@ -114,20 +114,13 @@ func assessShellSafeFileSegment(segment, root string) ShellSafeFileAssessment {
 }
 
 // hasRecursiveRemoveFlag covers POSIX short/long flags (including combined
-// forms such as -rf/-fr), PowerShell's -Recurse, and cmd.exe's /s.
+// forms such as -rf/-fr), PowerShell's -Recurse, and cmd.exe's /s. It delegates
+// to shellrisk so the breaker and the accept-edits fast lane cannot drift: the
+// local copy scanned every single-dash token for 'r'/'R', which read
+// PowerShell's -Force/-ErrorAction/-LiteralPath as recursion and pushed plain
+// `Remove-Item -Force <file>` out of the fast lane.
 func hasRecursiveRemoveFlag(args []string) bool {
-	for _, arg := range args {
-		lower := strings.ToLower(strings.TrimSpace(arg))
-		switch {
-		case lower == "--recursive", lower == "-recurse", lower == "/s":
-			return true
-		case strings.HasPrefix(lower, "-") && !strings.HasPrefix(lower, "--"):
-			if strings.ContainsAny(lower[1:], "rR") {
-				return true
-			}
-		}
-	}
-	return false
+	return shellrisk.IsRecursiveRemove(args)
 }
 
 // hasFlagToken reports whether one of the tokens equals the flag exactly.

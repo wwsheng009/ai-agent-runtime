@@ -2,6 +2,7 @@ package shellrisk
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -121,6 +122,92 @@ func TestAssessBatch(t *testing.T) {
 	}
 	if clean := AssessCommands([]string{"git status", "ls"}); clean.Risky() {
 		t.Fatal("read-only batch must be clean")
+	}
+}
+
+// TestIsRecursiveRemoveFlagForms pins the shell-shape classifier that replaced
+// the old "any single-dash token containing r" scan. It deliberately runs on
+// every platform: PowerShell runs on Linux too and aliases rm/rd/rmdir/del to
+// Remove-Item, so the decision must not be gated on runtime.GOOS.
+func TestIsRecursiveRemoveFlagForms(t *testing.T) {
+	recursion := []string{
+		// POSIX short clusters.
+		"rm -rf x", "rm -fr x", "rm -R x", "rm -r -f x", "rm -rv x", "rm -fR x",
+		// GNU long form.
+		"rm --recursive x",
+		// PowerShell long form and its unambiguous prefixes.
+		"Remove-Item -Recurse x", "Remove-Item -recurse x",
+		"Remove-Item -Rec x", "Remove-Item -r x",
+		// PowerShell switch carrying an explicit value.
+		"Remove-Item -Recurse:$true x",
+		// cmd.exe recursive switches.
+		"del /s x", "rd /s x", "rmdir /S x",
+	}
+	for _, command := range recursion {
+		if !recursionFlag(t, command) {
+			t.Errorf("recursion not detected for %q", command)
+		}
+	}
+	nonRecursion := []string{
+		// PowerShell long parameters that merely contain 'r'.
+		"Remove-Item -Force x", "Remove-Item -ErrorAction SilentlyContinue x",
+		"Remove-Item -LiteralPath x", "Remove-Item -Verbose x",
+		"Remove-Item -Confirm x", "Remove-Item -Stream x",
+		// POSIX non-recursive flags.
+		"rm -f x", "rm -v x", "rm -i x", "rm -d x", "rm -p x",
+		// Plain forms.
+		"rm x", "Remove-Item x", "del x", "rd x", "rmdir x",
+	}
+	for _, command := range nonRecursion {
+		if recursionFlag(t, command) {
+			t.Errorf("false recursion for %q", command)
+		}
+	}
+}
+
+// recursionFlag tokenizes the first segment of command and asks the classifier.
+func recursionFlag(t *testing.T, command string) bool {
+	t.Helper()
+	segments, _ := Segments(command)
+	if len(segments) == 0 {
+		return false
+	}
+	fields := Fields(segments[0])
+	if len(fields) < 2 {
+		return false
+	}
+	return IsRecursiveRemove(fields[1:])
+}
+
+// TestAssessNonRecursiveDeleteUnderHomeIsClean pins the 2026-10-13 false
+// positive end-to-end (session_20261013175416_O9Ughlac): a non-recursive
+// removal under home is not a home removal, even though -Force/-ErrorAction/
+// -LiteralPath contain an 'r'. The recursive forms must still trip.
+func TestAssessNonRecursiveDeleteUnderHomeIsClean(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		t.Skip("no home directory")
+	}
+	target := filepath.Join(home, "sched-commit-msg.txt")
+	for _, command := range []string{
+		`Remove-Item -Force "` + target + `"`,
+		`Remove-Item -ErrorAction SilentlyContinue "` + target + `"`,
+		`Remove-Item -LiteralPath "` + target + `"`,
+		`rm -f "` + target + `"`,
+	} {
+		if assessment := Assess(command); assessment.Risky() {
+			finding, _ := assessment.First()
+			t.Fatalf("Assess(%q) = risky (%+v), want clean: a non-recursive delete is not home removal", command, finding)
+		}
+	}
+	for _, command := range []string{
+		`Remove-Item -Recurse -Force "` + target + `"`,
+		`rd /s "` + target + `"`,
+		`rm -rf "` + target + `"`,
+	} {
+		if assessment := Assess(command); !assessment.Risky() {
+			t.Fatalf("Assess(%q) = clean, want root/home removal", command)
+		}
 	}
 }
 

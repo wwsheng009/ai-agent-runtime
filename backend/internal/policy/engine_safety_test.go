@@ -2,6 +2,8 @@ package policy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,6 +108,53 @@ func TestEngineShellBreakerIgnoresCleanCommands(t *testing.T) {
 	require.Equal(t, 1, handler.calls, "ordinary rm must keep the normal mode ask")
 	assert.NotContains(t, handler.requests[0].Reason, "shell_breaker")
 	assert.Equal(t, DecisionAllow, decision.Type, "the user approved the ordinary ask")
+}
+
+// TestEngineShellBreakerIgnoresNonRecursivePowerShell pins the 2026-10-13
+// false positive end-to-end (session_20261013175416_O9Ughlac): under bypass a
+// plain non-recursive Remove-Item under home must execute without the breaker
+// hard ask, even though -ErrorAction/-Force contain an 'r'. Uses the real home
+// directory so the case is exercised on both Windows and Linux.
+func TestEngineShellBreakerIgnoresNonRecursivePowerShell(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		t.Skip("no home directory")
+	}
+	target := filepath.Join(home, "sched-commit-msg.txt")
+
+	handler := &recordingApprovalHandler{response: ApprovalResponse{Allowed: true}}
+	engine := &Engine{
+		Mode:       ModeBypassPermissions,
+		AskHandler: handler,
+		Policy:     NewToolExecutionPolicy(nil, false),
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "shell",
+		ToolInfo: shellToolInfo(),
+		Args:     map[string]interface{}{"command": `Remove-Item -ErrorAction SilentlyContinue "` + target + `"`},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, handler.calls, "a non-recursive remove must not raise the breaker ask")
+	assert.NotContains(t, decision.Reason, "shell_breaker")
+	assert.Equal(t, DecisionAllow, decision.Type)
+	assert.Equal(t, StageMode, decision.Stage)
+
+	// The recursive form must still be a hard ask under bypass.
+	handler2 := &recordingApprovalHandler{response: ApprovalResponse{Allowed: true}}
+	engine2 := &Engine{
+		Mode:       ModeBypassPermissions,
+		AskHandler: handler2,
+		Policy:     NewToolExecutionPolicy(nil, false),
+	}
+	decision2, err := engine2.Evaluate(context.Background(), EvalRequest{
+		ToolName: "shell",
+		ToolInfo: shellToolInfo(),
+		Args:     map[string]interface{}{"command": `Remove-Item -Recurse -Force "` + target + `"`},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, handler2.calls, "recursive remove under home must keep the hard ask")
+	assert.Contains(t, handler2.requests[0].Reason, "shell_breaker:root_home_removal")
+	assert.Equal(t, DecisionAllow, decision2.Type, "approved breaker request executes")
 }
 
 func TestEngineShellBreakerCallbackCannotWaive(t *testing.T) {

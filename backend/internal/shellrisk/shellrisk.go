@@ -23,12 +23,18 @@
 // it. False positives only ever cost one confirmation; false negatives are the
 // failure mode this package exists to prevent, so the matcher errs toward
 // detection.
+//
+// Recursion detection is deliberately shell-shape based rather than
+// platform-gated (see IsRecursiveRemove): PowerShell runs on Windows and Linux
+// alike, and rm/Remove-Item are aliases for each other there, so gating on
+// runtime.GOOS would misjudge exactly the cross-platform cases.
 package shellrisk
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // Risk identifies a catastrophic command class.
@@ -304,7 +310,7 @@ func analyzeSegment(segment string, depth int) Assessment {
 	args := fields[1:]
 
 	switch {
-	case isRemoveCommand(argv0) && isRecursiveRemove(argv0, args):
+	case isRemoveCommand(argv0) && IsRecursiveRemove(args):
 		for _, target := range targetArguments(fields[1:]) {
 			if isRootOrHomeTarget(target) {
 				assessment.Findings = append(assessment.Findings, Finding{
@@ -491,38 +497,93 @@ func interpreterPayload(argv0 string, args []string) (string, bool) {
 	return "", false
 }
 
-// isRemoveCommand reports POSIX and PowerShell deletion commands.
+// isRemoveCommand reports POSIX, cmd and PowerShell deletion commands.
+// rd/rmdir are included for Windows: `rd /s <home>\dir` recurses just like
+// `rm -rf`, and PowerShell aliases rd/rmdir to Remove-Item as well.
 func isRemoveCommand(argv0 string) bool {
 	switch argv0 {
-	case "rm", "del", "erase", "remove-item", "ri":
+	case "rm", "del", "erase", "remove-item", "ri", "rd", "rmdir":
 		return true
 	default:
 		return false
 	}
 }
 
-// isRecursiveRemove reports whether the deletion carries a recursive switch.
-func isRecursiveRemove(argv0 string, args []string) bool {
+// removalShortFlags are the single-letter flags that form POSIX-style short
+// clusters for removal commands (rm -rf, rm -fr, rm -R, rm -rv). A dash token
+// made up only of these letters is a short cluster; any other single-dash token
+// is a long parameter name.
+const removalShortFlags = "rfivdpw"
+
+// IsRecursiveRemove reports whether a removal command's arguments select
+// recursion.
+//
+// The decision is made on token shape, not on the OS or the command name,
+// because the same name means different things per shell: PowerShell runs on
+// Windows and Linux alike and aliases rm/rd/rmdir/del to Remove-Item, so
+// `rm -Force x` (PowerShell, non-recursive) and `rm -rf x` (POSIX, recursive)
+// must not be conflated.
+//
+//   - --recursive (GNU) and /s (cmd del/rd/rmdir) are recursion everywhere;
+//   - a single dash followed only by short-flag letters is a POSIX cluster
+//     (rm -rf / -fr / -R): any r/R means recursion;
+//   - any other single-dash token is a long parameter name (PowerShell
+//     -Recurse / -Force / -ErrorAction, GNU --foo): only an unambiguous prefix
+//     of "recurse" means recursion.
+//
+// The previous rule scanned every single-dash token for 'r'/'R', so PowerShell
+// long parameters -ErrorAction/-Force/-LiteralPath/-Verbose were read as
+// recursion; combined with "any path under home" that turned a plain
+// `Remove-Item <tempfile> -ErrorAction SilentlyContinue` into a
+// root_home_removal hard ask (2026-10-13, session_20261013175416_O9Ughlac).
+//
+// Exported so the policy engine's accept-edits fast lane shares one definition
+// instead of keeping its own substring blacklist.
+func IsRecursiveRemove(args []string) bool {
 	for _, arg := range args {
-		lower := strings.ToLower(arg)
-		if lower == "--recursive" || lower == "-recurse" || lower == "/s" {
+		trimmed := strings.TrimSpace(arg)
+		lower := strings.ToLower(trimmed)
+		if lower == "--recursive" || lower == "/s" {
 			return true
 		}
-		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+		if !strings.HasPrefix(trimmed, "-") || trimmed == "-" || strings.HasPrefix(trimmed, "--") {
 			continue
 		}
-		if strings.HasPrefix(arg, "--") {
+		name := trimmed[1:]
+		// PowerShell switch parameters may carry an explicit value
+		// (-Recurse:$true); judge the parameter name, not the value.
+		if idx := strings.IndexByte(name, ':'); idx >= 0 {
+			name = name[:idx]
+		}
+		if name == "" {
 			continue
 		}
-		// Short flag clusters: any 'r'/'R' in rm -rf, rm -fr, rm -R, and the
-		// PowerShell parameter prefix -r (=-Recurse) all mean recursion.
-		for _, r := range arg[1:] {
-			if r == 'r' || r == 'R' {
+		if isRemovalShortFlagCluster(name) {
+			if strings.ContainsAny(name, "rR") {
 				return true
 			}
+			continue
+		}
+		if strings.HasPrefix("recurse", strings.ToLower(name)) {
+			return true
 		}
 	}
 	return false
+}
+
+// isRemovalShortFlagCluster reports whether name is a POSIX-style short-flag
+// cluster (rf, fr, R, rv, f). A long parameter name such as Force, ErrorAction
+// or LiteralPath contains letters outside removalShortFlags and is rejected.
+func isRemovalShortFlagCluster(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !strings.ContainsRune(removalShortFlags, unicode.ToLower(r)) {
+			return false
+		}
+	}
+	return true
 }
 
 // escapesNext reports whether a backslash at runes[index] acts as an escape
