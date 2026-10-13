@@ -211,6 +211,46 @@ func TestAssessNonRecursiveDeleteUnderHomeIsClean(t *testing.T) {
 	}
 }
 
+// TestAssessTempRemovalExempt pins the temp-directory carve-out: a recursive
+// delete of a literal path inside os.TempDir() skips the root/home breaker,
+// while the temp root itself, traversals that climb back out of temp, and home
+// paths outside temp stay protected. Uses t.TempDir() so the case is exercised
+// on Windows and Linux alike.
+func TestAssessTempRemovalExempt(t *testing.T) {
+	temp := strings.TrimSpace(os.TempDir())
+	if temp == "" {
+		t.Skip("no temp directory")
+	}
+	dir := t.TempDir() // a direct child of os.TempDir()
+	for _, command := range []string{
+		`Remove-Item -Recurse -Force "` + dir + `"`,
+		`rm -rf "` + dir + `"`,
+	} {
+		if assessment := Assess(command); assessment.Risky() {
+			finding, _ := assessment.First()
+			t.Fatalf("Assess(%q) = risky (%+v), want clean: a temp subdirectory is disposable", command, finding)
+		}
+	}
+
+	if isExemptTempRemovalTarget(temp) {
+		t.Fatal("the temp root itself must never be exempt")
+	}
+	escaped := dir + "/../.."
+	if isExemptTempRemovalTarget(escaped) {
+		t.Fatalf("%q must not be exempt: it climbs out of temp", escaped)
+	}
+	if assessment := Assess(`Remove-Item -Recurse -Force "` + escaped + `"`); !assessment.Risky() {
+		t.Fatal("a recursive delete that climbs out of temp must stay risky")
+	}
+
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		outside := filepath.Join(home, "Documents", "keep")
+		if isExemptTempRemovalTarget(outside) {
+			t.Fatalf("%q must not be exempt: it is outside temp", outside)
+		}
+	}
+}
+
 func TestAssessUnparsed(t *testing.T) {
 	assessment := Assess(`rm -rf "unbalanced`)
 	if !assessment.Unparsed {

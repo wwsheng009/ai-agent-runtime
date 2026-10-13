@@ -660,7 +660,16 @@ func normalizeCommandName(field string) string {
 // shell-variable spellings, after quote removal. The over-coverage is
 // deliberate: deleting a subdirectory of home costs one confirmation, which
 // beats risking a silent wipe.
+//
+// The OS temp directory is carved out (isExemptTempRemovalTarget): on Windows
+// %TEMP% lives under home, so without the carve-out every recursive temp
+// cleanup — a routine dev action — was a hard ask. Only the literal absolute
+// spelling reaches this branch; `$env:TEMP\...` / `%TEMP%\...` never looked
+// like a home path to begin with.
 func isRootOrHomeTarget(target string) bool {
+	if isExemptTempRemovalTarget(target) {
+		return false
+	}
 	text := strings.TrimSpace(target)
 	if text == "" {
 		return false
@@ -709,6 +718,49 @@ func isRootOrHomeTarget(target string) bool {
 		}
 	}
 	return false
+}
+
+// isExemptTempRemovalTarget reports whether a removal target may skip the
+// root/home breaker because it lives inside the OS temp directory.
+//
+// The carve-out is deliberately narrow:
+//
+//   - the target must be a literal absolute path strictly inside os.TempDir()
+//     (the temp root itself stays protected);
+//   - its symlink/junction resolution must also stay inside the temp dir, so a
+//     link planted at %TEMP%\x cannot launder the delete somewhere important;
+//   - anything that does not resolve (missing path, unresolved link) keeps the
+//     breaker — a false positive costs one confirmation, a false negative does
+//     not.
+//
+// `..` traversal is neutralized by filepath.Clean before the containment check,
+// so `%TEMP%\x\..\..\<home>` stays protected.
+func isExemptTempRemovalTarget(target string) bool {
+	text := strings.TrimSpace(target)
+	if text == "" || !filepath.IsAbs(text) {
+		return false
+	}
+	temp := strings.TrimSpace(os.TempDir())
+	if temp == "" {
+		return false
+	}
+	temp = filepath.Clean(temp)
+	cleaned := filepath.Clean(text)
+	if strings.EqualFold(cleaned, temp) || !pathWithinBaseFold(cleaned, temp) {
+		return false
+	}
+	// Resolve the temp root too: on platforms where it is itself a link (macOS
+	// /var -> /private/var) the resolved child would otherwise look foreign.
+	resolvedTemp := temp
+	if resolved, err := filepath.EvalSymlinks(temp); err == nil {
+		resolvedTemp = filepath.Clean(resolved)
+	}
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return false
+	}
+	resolved = filepath.Clean(resolved)
+	return !strings.EqualFold(resolved, resolvedTemp) && pathWithinBaseFold(resolved, resolvedTemp)
 }
 
 func pathWithinBaseFold(path, base string) bool {
