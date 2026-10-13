@@ -996,7 +996,7 @@ runtimeCommandSpec{
 
 ---
 
-## 附录 G：实施记录（v1.3.2，2026-09-27/28）
+## 附录 G：实施记录（v1.3.3，2026-09-27/28 · 2026-10-13）
 
 ### G.1 P1-1 ~ P1-3（已完成；总闸默认启用（D14）；显式关闭 = 零行为差异）
 
@@ -1206,3 +1206,25 @@ runtimeCommandSpec{
 | 验证 | 聚焦：`go test ./cmd/aicli/commands -run 'ChatBusyCommand\|ChatBusyPolicy\|ChatInputQueuePolicyRouting\|ExecuteBusySlashCommand\|RuntimeCommandHost\|BusyScreen\|BusyPrompt' -count=1` ✅；整包：`go test ./cmd/aicli/... -count=1` 仅余 2 项既有 `TestRunChatLoop_*` 基线失败（见 G.11）。 |
 | 环境噪声 | `TestHandleImageAttachmentCommandValidatesAndRemovesAttachments` 在**单独 -run** 时复现 `command_test.go:77 expected validated attachment, got []string(nil)`，整包运行可通过；在会话前基线提交 `a9250339` 的干净工作树同样复现 → 既有测试隔离/时序问题，与 D14 无关，未修。 |
 | 遗留 | 真机 TTY 全链路（默认开关下 `/todos` 副屏、`/queue clear` 确认门、降级提示观感）仍需手工矩阵；T26 平台矩阵（winpty/SSH/非 TTY）待补。 |
+
+### G.17 P2-6 准入反转与收敛：screen 变体级声明 + prompt 结构化确认门（2026-10-13）
+
+> 背景：用户反馈「当前状态不是 Ready，暂不接受 slash 命令」过严——大量命令本可异步执行。本轮把忙时准入从「逐命令白名单」重构为「注册表变体级声明」，并扩容 prompt 确认门；同时补齐挂起态暂存队列的入队/可见/取消。本条记录**最终策略**。
+
+| 项 | 结论 |
+| --- | --- |
+| 触发 | 非 Ready（含托管挂起）时 D/R 命令被丢弃并报「暂不接受 slash 命令」。 |
+| screen 准入（P2-6） | 三张命令名级白名单（document/interactive/write）删除，改为注册表**变体 spec** 声明 + 混合规则：`busyScreenCommandAllowed = screen 档 && 已声明输出类别 && !BusyBlock && (Effect==read || BusyAllow)`。只读 screen 默认放行；写入/交互 screen **fail-closed**，必须显式 `rtBusyAllow()`；只读中的例外用 `rtBusyBlock()` 排除。 |
+| `BusyAllow`（写入放行） | `/model`、`/provider`、`/reasoning_effort`（bare/wildcard/select/choose/switch）——next-turn 安全，结果在 Phase B（租约释放后）应用。 |
+| `BusyBlock`（核验排除 9 变体） | `/theme select\|set`、`/profile pick`、`/mcp select`、`/routing panel`、`/agents pick\|panel`（Phase A 内改全局/会话选中态、戳 presenter、阻塞读 priority prompt 或与在途 turn 争锁）；`/export`、`/skills select`（只读，但 gate 在 run 活跃时硬拒绝后走副作用路径）。 |
+| 变体级意义 | 同名命令的只读/写入变体可分别处理：`/agents` bare 放行、`pick\|panel` 排除；`/theme status` 放行、`select\|set` 排除。 |
+| prompt 准入（P2-6） | 白名单由「裸字符串精确匹配」升级为结构化 `chatBusyPromptAllowed`（命令名 → 子命令 token 集合，`""` 为裸命令），用 `chatBusyCommandNameAndArgs` + `canonicalRuntimeCommandName` 匹配：支持带参命令（`/reasoning_effort set high`）且无裸前缀歧义（`/s` 不命中 `/status`）。 |
+| prompt 纳入 | 显示/外观：`/stream on\|off`、`/fast on\|off`、`/reasoning on\|off`、`/reasoning_effort set`、`/s`、`/normal`；组 D（next-turn 会话/目标/工作区写入，核验无二次追问输入）：`/debug on\|off`、`/hotkeys reload`、`/goal clear\|pause\|resume\|complete`、`/add-dir add\|remove`、`/memory add\|note\|flush`；以及 `/queue clear`。 |
+| prompt 排除 | next-call（`/plan enter\|exit\|approve`、`/attach add\|clear\|remove`）影响当前 turn 下一次调用；live（`/skills enable\|disable`）热刷新函数面；安全（`/permission-mode set`、`/yolo`、`/trust grant`、`/grants revoke`、`/approval-reuse set`）与控制面（`/supervision ack\|resolve\|control`、`/agents approve\|deny\|answer\|send\|followup\|cleanup`）；`/routing on\|off\|reset\|save`（会话层虽 next-turn 安全，但同一子命令可经 `--to workspace\|config` 指向持久层，token 匹配无法区分层，会误放行持久写入）；`/title`（需标题参数）。 |
+| 忙时副屏交互窗口 | 新增会话级 `busyInteractiveScreen` 计数：忙时 S 档/prompt 通道执行期间登记；`chatPickerSurfaceReady` 在该窗口内放行 run 活跃时的选择器开屏（结果仍在租约释放后应用，宿主刷新延迟到下一回合，不打断在途 turn）。 |
+| 挂起态暂存队列 | 非 Ready 时 D 档（queue/prompt/未登记）命令不再丢弃，改为暂存到会话级队列（上限 32），会话回到 Ready 后由主循环按 FIFO 取出执行；R 档（`/exit`）与非 slash 输入保持拒绝。`/queue status` 展示暂存命令，`/queue clear` 一并清空（取消入口）。 |
+| 代码 | `chat_runtime_command_registry.go`（`BusyAllow`/`BusyBlock` + `rtBusyAllow`/`rtBusyBlock`）、`chat_busy_screen_exec.go`（`busyScreenCommandAllowed` + 窗口）、`chat_busy_prompt_exec.go`（`chatBusyPromptAllowed`）、`chat_picker_common.go`（窗口例外）、`chat.go`/`chat_busy_input.go`/`chat_input_queue.go`（暂存队列）、`chat_command_result.go`/`command.go`（`/queue` 可见性/取消）。 |
+| 测试 | `TestRuntimeCommandRegistryBusyAdmissionAudit`（逐变体断言准入 == 规则推导值 + 9 排除项 + 写入放行项）、`TestChatBusyPolicyScreenFirstBatch`、`TestChatBusyPolicyPromptFirstBatch`、`TestRuntimeCommandHostRunsWritableInteractiveScreen`、`TestRuntimeCommandHostDegradesBlacklistedScreen`、`TestDeferBusySlashCommandFromMainLoop`、`TestDeferredSlashCommandDrainedWhenReady`、`TestDeferredSlashCommandCap`、`TestQueueStatusAndClearIncludeDeferredSlashCommands`。 |
+| 验证 | `go build ./...` ✅；`go test ./cmd/aicli/commands/ -count=1` 全绿（约 205s）✅；改动文件 `gofmt` 干净。 |
+| 提交 | `2c74f829`（忙时 slash 异步化 + 副屏交互窗口）、`b5ff597b`（挂起态暂存入队）、`b47f28f1`（默认放行+黑名单 + prompt 扩容）、`c71f809a`（收敛 fail-closed）、`06c6ea16`（prompt 组 D）、`1e27935a`（暂存可见性/取消）、`2c7548a8`（`/routing` 结论 + 测试）。 |
+| 遗留 | prompt 组 D 之外的控制面/安全类仍 Deferred（有意）；`/routing` 若要纳入需先让确认门支持「层感知」；真机 TTY 观感矩阵（G.14 口径）待补。 |
