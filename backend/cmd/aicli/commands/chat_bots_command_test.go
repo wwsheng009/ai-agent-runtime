@@ -10,12 +10,15 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/api"
 )
@@ -81,19 +84,48 @@ func TestChatBotsListSpecRowsOrder(t *testing.T) {
 	}
 }
 
+// TestStartLocalConnectorsOnDemandCreatesStarterConfig 锁定 /bots 的自举语义：
+// 配置文件不存在时按需创建 starter 配置并装配宿主（不再要求用户先手工写
+// config.yaml——/bots 本身即配置入口）。
+func TestStartLocalConnectorsOnDemandCreatesStarterConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	session := &ChatSession{
+		Config:           &config.Config{ConfigFilePath: configPath},
+		LocalRuntimeHost: &localChatRuntimeHost{},
+	}
+	host, err := startLocalConnectorsOnDemand(session)
+	if err != nil {
+		t.Fatalf("on-demand start: %v", err)
+	}
+	t.Cleanup(func() { host.Close() })
+	if host.Service() == nil || host.Store() == nil {
+		t.Fatal("on-demand host missing service/store")
+	}
+	if currentLocalConnectorHost() == nil {
+		t.Fatal("host ref not published after on-demand start")
+	}
+	if _, statErr := os.Stat(configPath); statErr != nil {
+		t.Fatalf("starter config not created: %v", statErr)
+	}
+	if note := localConnectorsInitNote(); note != "" {
+		t.Fatalf("init note should be cleared after success, got %q", note)
+	}
+}
+
 func TestBotsUnavailableTextSurfacesInitNote(t *testing.T) {
 	prev := localConnectorsInitNote()
 	t.Cleanup(func() { setLocalConnectorInitNote(prev) })
 
 	setLocalConnectorInitNote("未找到共享 config.yaml（解析路径：C:\\demo\\config.yaml）")
-	text := botsUnavailableText()
+	text := botsUnavailableText("")
 	if !strings.Contains(text, "config.yaml") || !strings.Contains(text, "C:\\demo\\config.yaml") {
 		t.Fatalf("unavailable text should surface the init note, got %q", text)
 	}
 
 	setLocalConnectorInitNote("")
-	fallback := botsUnavailableText()
-	if !strings.Contains(fallback, "连接器未在本会话装配") {
+	fallback := botsUnavailableText("会话缺少配置句柄")
+	if !strings.Contains(fallback, "会话缺少配置句柄") {
 		t.Fatalf("fallback text = %q", fallback)
 	}
 }

@@ -95,9 +95,9 @@ func handleChatBotsCommand(session *ChatSession, _ string) {
 		}
 		return
 	}
-	host := currentLocalConnectorHost()
-	if host == nil || host.Service() == nil || host.Store() == nil {
-		printChatCommandOutput(session, botsUnavailableText())
+	host, reason := botsResolveHost(session)
+	if host == nil {
+		printChatCommandOutput(session, botsUnavailableText(reason))
 		return
 	}
 	// legacy/plain/JSON 投影：内联文档，不进入副屏。
@@ -110,20 +110,76 @@ func executeStructuredBotsCommand(session *ChatSession) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
 	}
-	host := currentLocalConnectorHost()
-	if host == nil || host.Service() == nil || host.Store() == nil {
-		return commandTextResult(botsUnavailableText())
+	host, reason := botsResolveHost(session)
+	if host == nil {
+		return commandTextResult(botsUnavailableText(reason))
 	}
 	return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenBotsListSpec(host))}
 }
 
-// botsUnavailableText 组装不可用文案：优先给出启动期记录的具体原因
-// （config.yaml 缺失 / 装配失败 / 路径解析失败），否则退回通用说明。
-func botsUnavailableText() string {
-	if note := localConnectorsInitNote(); note != "" {
-		return "机器人管理不可用：" + note + "。"
+// botsResolveHost 解析连接器宿主：已装配（或已按需装配过）直接用；
+// 未装配时**按需自装配**——/bots 本身就是配置入口，不要求用户先手工写
+// config.yaml（缺文件时创建 starter 配置后启动连接器宿主）。
+func botsResolveHost(session *ChatSession) (*LocalConnectorHost, string) {
+	if host := currentLocalConnectorHost(); host != nil && host.Service() != nil && host.Store() != nil {
+		return host, ""
 	}
-	return "机器人管理不可用：连接器未在本会话装配（需要交互式 aicli chat，且共享 config.yaml 中配置了 connectors 节）。"
+	host, err := startLocalConnectorsOnDemand(session)
+	if err != nil {
+		if note := localConnectorsInitNote(); note != "" {
+			return nil, note
+		}
+		return nil, err.Error()
+	}
+	return host, ""
+}
+
+// startLocalConnectorsOnDemand 按需装配连接器宿主（/bots 首次使用）：
+//   - 只对交互式会话生效（与启动路径同口径）；
+//   - 通过 ensureWritableAICLIConfigPath 解析共享 config.yaml：文件缺失时
+//     创建 starter 配置（与其他写操作同口径），而不是继续“零配置跳过”；
+//   - 成功后发布路由与宿主引用（本会话的 /bots 与 loopback API 均可复用）。
+func startLocalConnectorsOnDemand(session *ChatSession) (*LocalConnectorHost, error) {
+	if session == nil || session.Config == nil {
+		return nil, fmt.Errorf("会话缺少配置句柄")
+	}
+	if !chatHostSessionInteractive(session) {
+		return nil, fmt.Errorf("需要交互式 aicli chat 会话")
+	}
+	runtimeHost := session.LocalRuntimeHost
+	if runtimeHost == nil {
+		return nil, fmt.Errorf("本机 runtime 未就绪")
+	}
+	configPath, err := ensureWritableAICLIConfigPath(session.Config, "")
+	if err != nil {
+		setLocalConnectorInitNote("准备共享 config.yaml 失败：" + err.Error())
+		return nil, err
+	}
+	ctx := context.Background()
+	if runtimeHost.lifecycleCtx != nil {
+		ctx = runtimeHost.lifecycleCtx
+	}
+	started, startErr := StartLocalConnectors(ctx, runtimeHost, configPath, logpkg.Infof)
+	if startErr != nil {
+		setLocalConnectorInitNote("连接器装配失败：" + startErr.Error())
+		return nil, startErr
+	}
+	setLocalConnectorInitNote("")
+	logpkg.Infof("aicli connectors: started on demand (config=%s)", configPath)
+	return started, nil
+}
+
+// botsUnavailableText 组装不可用文案：优先用本次解析出的原因，其次用
+// 启动期记录的原因（config.yaml 缺失 / 装配失败 / 路径解析失败）。
+func botsUnavailableText(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = localConnectorsInitNote()
+	}
+	if reason == "" {
+		reason = "连接器无法在本会话装配（需要交互式 aicli chat）"
+	}
+	return "机器人管理不可用：" + reason + "。"
 }
 
 // ── 机器人列表副屏 ─────────────────────────────────────────────────────────

@@ -660,6 +660,11 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 		if connectorHost != nil {
 			connectorHost.Close()
 		}
+		// /bots 的按需装配（首次使用）同样可能启动了本会话宿主：随会话退出
+		// 释放（Close 幂等；启动期宿主已在上面关闭并清空全局引用）。
+		if onDemand := currentLocalConnectorHost(); onDemand != nil {
+			onDemand.Close()
+		}
 		if session.LocalRuntimeHost != nil {
 			session.LocalRuntimeHost.Close()
 		}
