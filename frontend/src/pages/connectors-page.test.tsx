@@ -12,10 +12,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectorSchema, ConnectorView } from "@/types/runtime";
 
 vi.mock("@/api/runtime/connectors", () => ({
+  CONNECTOR_LOGS_DEFAULT_LIMIT: 50,
   createConnector: vi.fn(),
   deleteConnector: vi.fn(),
   getConnectorSchema: vi.fn(),
   listConnectors: vi.fn(),
+  readConnectorLogs: vi.fn(),
   readConnectorFieldErrors: vi.fn(() => []),
   reloadConnector: vi.fn(),
   runConnectorAction: vi.fn(),
@@ -26,6 +28,7 @@ vi.mock("@/api/runtime/connectors", () => ({
 import {
   getConnectorSchema,
   listConnectors,
+  readConnectorLogs,
   runConnectorAction,
   takeoverConnector,
   updateConnector,
@@ -86,6 +89,7 @@ describe("ConnectorsPage", () => {
     root = createRoot(container);
     vi.mocked(getConnectorSchema).mockReset();
     vi.mocked(listConnectors).mockReset();
+    vi.mocked(readConnectorLogs).mockReset();
     vi.mocked(runConnectorAction).mockReset();
     vi.mocked(takeoverConnector).mockReset();
     vi.mocked(updateConnector).mockReset();
@@ -272,5 +276,86 @@ describe("ConnectorsPage", () => {
       { adminToken: "" },
     );
     expect(document.body.textContent).toContain("status=confirmed");
+  });
+
+  it("列表行展示运行计数（errors>0 高亮）与 last_error 折叠提示；无 runtime 不展示计数", async () => {
+    vi.mocked(getConnectorSchema).mockResolvedValue(SCHEMA);
+    vi.mocked(listConnectors).mockResolvedValue([
+      {
+        ...CONNECTOR,
+        runtime: {
+          stats: {
+            inbound: 3,
+            outbound: 2,
+            errors: 1,
+            dedup_skipped: 0,
+            queue_full: 0,
+            last_error: "投递失败：timeout",
+            last_error_at: "2026-10-13T10:00:00Z",
+            last_activity_at: "2026-10-13T10:00:00Z",
+          },
+        },
+      },
+      { ...CONNECTOR, id: "plain", name: "无运行数据" },
+    ]);
+
+    await render(<ConnectorsPage />);
+
+    expect(document.body.textContent).toContain("入 3");
+    expect(document.body.textContent).toContain("出 2");
+    expect(document.body.textContent).toContain("错 1");
+    expect(document.body.textContent).toContain("最近错误");
+    expect(document.body.textContent).toContain("投递失败：timeout");
+
+    const errorChip = Array.from(document.querySelectorAll("span")).find(
+      (node) => node.textContent === "错 1",
+    );
+    expect(errorChip?.className).toContain("text-analytics-danger");
+    // 无 runtime 的行不渲染计数（避免把「无数据」误报成 0）。
+    expect(document.body.textContent).not.toContain("入 0");
+  });
+
+  it("点击行内「日志」打开日志抽屉并加载 entries", async () => {
+    const stats = {
+      inbound: 1,
+      outbound: 0,
+      errors: 0,
+      dedup_skipped: 0,
+      queue_full: 0,
+      last_error_at: "",
+      last_activity_at: "2026-10-13T10:00:01Z",
+    };
+    vi.mocked(getConnectorSchema).mockResolvedValue(SCHEMA);
+    vi.mocked(listConnectors).mockResolvedValue([
+      { ...CONNECTOR, runtime: { stats } },
+    ]);
+    vi.mocked(readConnectorLogs).mockResolvedValue({
+      entries: [
+        {
+          time: "2026-10-13T10:00:01Z",
+          level: "info",
+          direction: "in",
+          connector_id: "tg-main",
+          summary: "处理完成",
+        },
+      ],
+      stats,
+    });
+
+    await render(<ConnectorsPage />);
+
+    await act(async () => {
+      findButton("日志")?.click();
+    });
+    await act(async () => undefined);
+
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.getAttribute("aria-label")).toBe("连接器日志");
+    expect(vi.mocked(readConnectorLogs)).toHaveBeenCalledWith("tg-main", 50, {
+      adminToken: "",
+    });
+    expect(document.body.textContent).toContain("处理完成");
+    expect(document.body.textContent).toContain("入站");
   });
 });

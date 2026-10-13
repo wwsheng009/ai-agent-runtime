@@ -15,8 +15,11 @@ import {
   deleteConnector,
   listConnectors,
   normalizeConnectorList,
+  normalizeConnectorLogs,
+  normalizeConnectorLogsLimit,
   normalizeConnectorSchema,
   normalizeConnectorView,
+  readConnectorLogs,
   readConnectorFieldErrors,
   reloadConnector,
   runConnectorAction,
@@ -89,6 +92,99 @@ describe("连接器归一化", () => {
     });
     expect(view?.active_owner).toBe("host-a");
     expect(view?.owned_by_current_host).toBe(true);
+  });
+
+  it("runtime 是 additive 字段：缺失不报错；存在则归一化 stats（零值时间→空串）", () => {
+    const absent = normalizeConnectorView({ id: "a", provider: "telegram" });
+    expect(absent?.runtime).toBeUndefined();
+
+    const view = normalizeConnectorView({
+      ...CONNECTOR_PAYLOAD,
+      runtime: {
+        stats: {
+          inbound: 3,
+          outbound: 2,
+          errors: 1,
+          dedup_skipped: 0,
+          queue_full: 0,
+          last_error: " 投递失败 ",
+          last_error_at: "2026-10-13T10:00:00Z",
+          last_activity_at: "0001-01-01T00:00:00Z",
+        },
+      },
+    });
+
+    expect(view?.runtime?.stats).toEqual({
+      inbound: 3,
+      outbound: 2,
+      errors: 1,
+      dedup_skipped: 0,
+      queue_full: 0,
+      last_error: "投递失败",
+      last_error_at: "2026-10-13T10:00:00Z",
+      last_activity_at: "",
+    });
+
+    // 结构非法（runtime 无 stats）→ undefined：不把「无数据」当成零计数。
+    expect(
+      normalizeConnectorView({ ...CONNECTOR_PAYLOAD, runtime: {} })?.runtime,
+    ).toBeUndefined();
+    // 计数非法值按 0（安全降级），不阻塞视图渲染。
+    const degraded = normalizeConnectorView({
+      ...CONNECTOR_PAYLOAD,
+      runtime: { stats: { inbound: "3", errors: -1 } },
+    });
+    expect(degraded?.runtime?.stats.inbound).toBe(0);
+    expect(degraded?.runtime?.stats.errors).toBe(0);
+  });
+
+  it("日志载荷：entries 缺失抛错；单条缺时间只丢该条；stats 缺失降级为零值", () => {
+    expect(() => normalizeConnectorLogs({})).toThrow(/entries/);
+    expect(() => normalizeConnectorLogs(null)).toThrow(/not an object/);
+
+    const payload = normalizeConnectorLogs({
+      entries: [
+        {
+          time: "2026-10-13T10:00:01Z",
+          level: "info",
+          direction: "in",
+          connector_id: "tg-main",
+          chat: "42",
+          summary: "处理完成",
+        },
+        { level: "error", summary: "缺 time 的条目被丢弃" },
+        null,
+      ],
+    });
+
+    expect(payload.entries).toHaveLength(1);
+    expect(payload.entries[0]).toMatchObject({
+      time: "2026-10-13T10:00:01Z",
+      level: "info",
+      direction: "in",
+      connector_id: "tg-main",
+      chat: "42",
+      summary: "处理完成",
+    });
+    // stats 缺失 → 零值（安全降级），不阻塞日志展示。
+    expect(payload.stats).toMatchObject({
+      inbound: 0,
+      outbound: 0,
+      errors: 0,
+      dedup_skipped: 0,
+      queue_full: 0,
+      last_error_at: "",
+      last_activity_at: "",
+    });
+    expect(payload.stats.last_error).toBeUndefined();
+  });
+
+  it("日志 limit 收敛到 [50,200]：缺省/NaN/过小→50，过大→200，小数取整", () => {
+    expect(normalizeConnectorLogsLimit(undefined)).toBe(50);
+    expect(normalizeConnectorLogsLimit(Number.NaN)).toBe(50);
+    expect(normalizeConnectorLogsLimit(10)).toBe(50);
+    expect(normalizeConnectorLogsLimit(80.9)).toBe(80);
+    expect(normalizeConnectorLogsLimit(9999)).toBe(200);
   });
 
   it("schema 缺 `providers` 抛错；未知字段类型原样保留", () => {
@@ -224,6 +320,60 @@ describe("连接器 API 调用", () => {
       chat: "42",
       text: "hi",
     });
+  });
+
+  it("readConnectorLogs 命中 /logs?limit=…（超限收敛 200、缺省 50）并透传令牌头", async () => {
+    respondWith({
+      entries: [
+        {
+          time: "2026-10-13T10:00:01Z",
+          level: "info",
+          direction: "in",
+          connector_id: "tg-main",
+          summary: "处理完成",
+        },
+      ],
+      stats: {
+        inbound: 1,
+        outbound: 0,
+        errors: 0,
+        dedup_skipped: 0,
+        queue_full: 0,
+        last_error_at: "",
+        last_activity_at: "2026-10-13T10:00:01Z",
+      },
+    });
+
+    const payload = await readConnectorLogs("tg/main", 500, {
+      adminToken: " secret ",
+    });
+
+    expect(calls[0].url).toBe(`${CONNECTORS_PATH}/tg%2Fmain/logs?limit=200`);
+    expect(header(CONNECTORS_ADMIN_TOKEN_HEADER, calls[0].init)).toBe("secret");
+    expect(payload.entries).toHaveLength(1);
+    expect(payload.entries[0].summary).toBe("处理完成");
+    expect(payload.stats.last_activity_at).toBe("2026-10-13T10:00:01Z");
+
+    respondWith({ entries: [], stats: {} });
+    await readConnectorLogs("ghost");
+    expect(calls[1].url).toBe(`${CONNECTORS_PATH}/ghost/logs?limit=50`);
+  });
+
+  it("readConnectorLogs 404/400 保持 RuntimeApiError 状态码与后端文案", async () => {
+    respondWith({ error: "未知连接器" }, 404);
+    const notFound = await readConnectorLogs("ghost").catch(
+      (error: unknown) => error,
+    );
+    expect(notFound).toBeInstanceOf(RuntimeApiError);
+    expect((notFound as RuntimeApiError).status).toBe(404);
+    expect((notFound as RuntimeApiError).message).toContain("未知连接器");
+
+    respondWith({ error: "limit 必须是整数" }, 400);
+    const badRequest = await readConnectorLogs("tg-main", 50).catch(
+      (error: unknown) => error,
+    );
+    expect(badRequest).toBeInstanceOf(RuntimeApiError);
+    expect((badRequest as RuntimeApiError).status).toBe(400);
   });
 
   it("400 字段级校验错误可被 readConnectorFieldErrors 读出", async () => {

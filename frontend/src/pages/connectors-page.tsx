@@ -36,6 +36,7 @@ import type {
 import { summarizeActionPayload } from "./connectors/action-payload";
 import { ConnectorActionDialog } from "./connectors/action-dialog";
 import { ConnectorDialog } from "./connectors/connector-dialog";
+import { ConnectorLogsDialog } from "./connectors/logs-dialog";
 import { findProviderSchema } from "./connectors/shared";
 import { TestMessageDialog } from "./connectors/test-message-dialog";
 
@@ -69,6 +70,7 @@ export function ConnectorsPage() {
   const [dialogFieldErrors, setDialogFieldErrors] = useState<ConnectorFieldError[]>([]);
   const [testTarget, setTestTarget] = useState<ConnectorView | null>(null);
   const [actionTarget, setActionTarget] = useState<ConnectorActionTarget | null>(null);
+  const [logsTarget, setLogsTarget] = useState<ConnectorView | null>(null);
 
   const reloadData = useCallback(async () => {
     setLoading(true);
@@ -364,6 +366,47 @@ export function ConnectorsPage() {
                         </span>
                       </div>
                       <span className="truncate text-xs text-muted-foreground">{item.id}</span>
+                      {/* 运行计数（runtime additive 字段；缺失时不展示，日志按钮仍可用）。 */}
+                      {item.runtime ? (
+                        <span className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                          <span>
+                            {t("stats.inbound", {
+                              value: String(item.runtime.stats.inbound),
+                            })}
+                          </span>
+                          <span>·</span>
+                          <span>
+                            {t("stats.outbound", {
+                              value: String(item.runtime.stats.outbound),
+                            })}
+                          </span>
+                          <span>·</span>
+                          <span
+                            className={cn(
+                              item.runtime.stats.errors > 0
+                                ? "font-medium text-analytics-danger"
+                                : undefined,
+                            )}
+                          >
+                            {t("stats.errors", {
+                              value: String(item.runtime.stats.errors),
+                            })}
+                          </span>
+                        </span>
+                      ) : null}
+                      {item.runtime?.stats.last_error ? (
+                        <details className="text-xs text-muted-foreground">
+                          <summary className="cursor-pointer select-none">
+                            {t("page.lastError")}
+                          </summary>
+                          <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-analytics-danger">
+                            {item.runtime.stats.last_error}
+                            {item.runtime.stats.last_error_at
+                              ? ` · ${item.runtime.stats.last_error_at}`
+                              : ""}
+                          </p>
+                        </details>
+                      ) : null}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -388,6 +431,14 @@ export function ConnectorsPage() {
                           {t("page.takeover")}
                         </Button>
                       ) : null}
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={busyIds.has(item.id)}
+                        onClick={() => setLogsTarget(item)}
+                      >
+                        {t("page.logs")}
+                      </Button>
                       <Button
                         variant="secondary"
                         size="sm"
@@ -458,6 +509,11 @@ export function ConnectorsPage() {
         action={actionTarget?.action ?? null}
         onRefilled={handleRefilled}
         onClose={() => setActionTarget(null)}
+      />
+      <ConnectorLogsDialog
+        open={logsTarget !== null}
+        connector={logsTarget}
+        onClose={() => setLogsTarget(null)}
       />
     </div>
   );

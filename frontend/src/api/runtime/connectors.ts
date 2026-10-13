@@ -9,6 +9,7 @@
 //   DELETE /api/connectors/{id}        → 204
 //   POST   /api/connectors/{id}/reload → 202 {ok:true}
 //   POST   /api/connectors/{id}/test   → 200 {ok:true}（body {chat,text}）
+//   GET    /api/connectors/{id}/logs   → 200 {entries[], stats}（limit 收敛 [50,200]）
 //   POST   /api/connectors/{id}/takeover        → 200 ConnectorView（503 无 HostID / 404 / 409）
 //   POST   /api/connectors/{id}/actions/{action} → 200 Provider 载荷（body 可选 JSON object）
 //
@@ -25,6 +26,7 @@
 import type {
   ConnectorActionPayload,
   ConnectorFieldError,
+  ConnectorLogsPayload,
   ConnectorSchema,
   ConnectorSubmitPayload,
   ConnectorView,
@@ -33,12 +35,22 @@ import type {
 import { readAdminToken } from "@/lib/admin-token";
 
 import {
+  normalizeConnectorLogs,
+  normalizeConnectorLogsLimit,
+  normalizeConnectorRuntime,
+} from "./connector-logs";
+import {
   RuntimeApiError,
   RUNTIME_FETCH_TIMEOUT_MS,
   buildRuntimeUrl,
+  buildRuntimeUrlWithQuery,
   fetchRuntimeJson,
   parseErrorPayload,
 } from "./shared";
+
+// 日志查询边界与归一化实现见 ./connector-logs（P0-2 拆分）；对外重导出保持
+// `@/api/runtime/connectors` 单一导入口径。
+export * from "./connector-logs";
 
 export const CONNECTORS_PATH = "/api/connectors";
 export const CONNECTORS_SCHEMA_PATH = `${CONNECTORS_PATH}/schema`;
@@ -207,6 +219,27 @@ export async function sendConnectorTestMessage(
 }
 
 /**
+ * 读取连接器最近运行日志与累计计数（管理面「可观测」入口）。
+ *
+ * entries 倒序（最新在前）；limit 由前端收敛到 [50,200]（缺省 50），与后端
+ * Service.Logs 的缺省/上限一致——调用方不需要自己夹取。错误语义：未知连接器
+ * 404（停用仍可查）、limit 非整数 400。
+ */
+export async function readConnectorLogs(
+  id: string,
+  limit?: number,
+  options: ConnectorRequestOptions = {},
+): Promise<ConnectorLogsPayload> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrlWithQuery(`${connectorPath(id)}/logs`, {
+      limit: normalizeConnectorLogsLimit(limit),
+    }),
+    readOptionsInit(options),
+  );
+  return normalizeConnectorLogs(payload);
+}
+
+/**
  * 抢占连接器的运行归属（管理面「抢占」按钮，07 §5.6）：以本宿主身份覆盖旧归属
  * 并重启轮询。成功返回更新后的视图；错误语义：503 未配 HostID / 404 未知 /
  * 409 已停用或 policy.runtime_owner 指定其它宿主。
@@ -308,6 +341,7 @@ export function normalizeConnectorView(payload: unknown): ConnectorView | null {
     policy: readPolicy(record.policy),
     active_owner: readString(record.active_owner) || undefined,
     owned_by_current_host: record.owned_by_current_host === true,
+    runtime: normalizeConnectorRuntime(record.runtime),
   };
 }
 

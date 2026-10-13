@@ -60,6 +60,60 @@ export interface ConnectorPolicyView {
   runtime_owner?: string;
 }
 
+/** 连接器运行日志级别（后端 logs.go LogLevel*；未知值原样保留，渲染器降级）。 */
+export type ConnectorLogLevel = "debug" | "info" | "warn" | "error";
+
+/** 连接器运行日志方向：in=入站、out=出站、system=生命周期/归属。 */
+export type ConnectorLogDirection = "in" | "out" | "system";
+
+/**
+ * 每连接器的累计运行计数与最近错误（进程内，重启清零；与
+ * GET /api/connectors/{id}/logs 载荷中的 stats 同构）。
+ */
+export interface ConnectorStats {
+  /** 入站消息成功入队数（白名单拒绝/队列满不计）。 */
+  inbound: number;
+  /** 入站消息处理完成后成功投递的回复数。 */
+  outbound: number;
+  /** error 级事件数（后端失败、投递失败、队列满等）。 */
+  errors: number;
+  /** 重复投递被幂等账本跳过的次数。 */
+  dedup_skipped: number;
+  /** 会话队列满被拒绝的次数。 */
+  queue_full: number;
+  /** 最近一次 error 级事件摘要；空串/缺省 = 尚无错误。 */
+  last_error?: string;
+  /** RFC3339；后端零值（0001-01-01T00:00:00Z）在前端归一为空串。 */
+  last_error_at: string;
+  /** 最近一次入/出站事件时间（RFC3339，同上归一）。 */
+  last_activity_at: string;
+}
+
+/** GET /api/connectors/{id}/logs 的一条运行日志（summary 由后端拼装并脱敏）。 */
+export interface ConnectorLogEntry {
+  /** RFC3339；无有效时间的条目由归一化丢弃。 */
+  time: string;
+  /** 已知值见 ConnectorLogLevel；未知值原样保留。 */
+  level: string;
+  /** 已知值见 ConnectorLogDirection；未知值原样保留。 */
+  direction: string;
+  connector_id: string;
+  /** 平台会话标识（连接器级系统事件可为空）。 */
+  chat?: string;
+  summary: string;
+}
+
+/** GET /api/connectors/{id}/logs 的载荷（entries 倒序，最新在前）。 */
+export interface ConnectorLogsPayload {
+  entries: ConnectorLogEntry[];
+  stats: ConnectorStats;
+}
+
+/** 连接器运行可观测快照（ConnectorView.runtime，additive）。 */
+export interface ConnectorRuntimeView {
+  stats: ConnectorStats;
+}
+
 export interface ConnectorView {
   id: string;
   provider: string;
@@ -77,6 +131,11 @@ export interface ConnectorView {
   active_owner?: string;
   /** 归属是否属于本宿主（后端按 HostID 算好，前端只负责展示/高亮）。 */
   owned_by_current_host?: boolean;
+  /**
+   * 运行可观测快照（累计计数 + 最近错误）。additive 字段：旧后端可缺省，
+   * 缺失时页面不展示计数（日志明细走 GET /{id}/logs）。
+   */
+  runtime?: ConnectorRuntimeView;
 }
 
 export interface ConnectorFieldError {
