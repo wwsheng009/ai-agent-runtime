@@ -50,8 +50,10 @@ func TestResolveMCPConfigPathDetailedFromAnchorsProjectAtBase(t *testing.T) {
 			continue
 		}
 		foundLocal = true
-		if filepath.Clean(candidate.Path) != filepath.Clean(wantLocal) {
-			t.Fatalf("local candidate anchored wrong: got %s want %s", candidate.Path, wantLocal)
+		clean := filepath.Clean(candidate.Path)
+		wantJSON := filepath.Clean(filepath.Join(filepath.Dir(wantLocal), DefaultMCPConfigJSONFileName))
+		if clean != filepath.Clean(wantLocal) && clean != wantJSON {
+			t.Fatalf("local candidate anchored wrong: got %s want %s (或同目录 mcp.json)", candidate.Path, wantLocal)
 		}
 	}
 	if !foundLocal {
@@ -80,12 +82,14 @@ func TestResolveMCPConfigPathDetailedFromWalksUpFromBase(t *testing.T) {
 
 	// default 候选必须锚定在 base（显式基准目录时不允许相对进程 cwd）。
 	defaultPath := filepath.Join(base, DefaultMCPConfigRelativePath)
+	defaultJSONPath := filepath.Join(base, DefaultMCPConfigJSONRelativePath)
 	for _, candidate := range resolution.Candidates {
 		if candidate.Source != "default" {
 			continue
 		}
-		if filepath.Clean(candidate.Path) != filepath.Clean(defaultPath) {
-			t.Fatalf("default candidate anchored wrong: got %s want %s", candidate.Path, defaultPath)
+		clean := filepath.Clean(candidate.Path)
+		if clean != filepath.Clean(defaultPath) && clean != filepath.Clean(defaultJSONPath) {
+			t.Fatalf("default candidate anchored wrong: got %s want %s/%s", candidate.Path, defaultPath, defaultJSONPath)
 		}
 	}
 }
@@ -117,6 +121,124 @@ func TestResolveMCPConfigPathDetailedFromDoesNotFallBackIntoBaseWhenEmpty(t *tes
 		cleanPath := filepath.Clean(resolution.Path)
 		if strings.HasPrefix(strings.ToLower(cleanPath), strings.ToLower(filepath.Clean(base))) {
 			t.Fatalf("empty workspace must not resolve into base, got %q (%s)", resolution.Path, resolution.Source)
+		}
+	}
+}
+
+// 只有 mcp.json 时按同一发现链自动命中（project 层）。
+func TestResolveMCPConfigPathDetailedFromDiscoversJSONSibling(t *testing.T) {
+	isolateMCPHome(t)
+	base := t.TempDir()
+	jsonPath := filepath.Join(base, ".aicli", "mcp.json")
+	writeMCPFile(t, jsonPath, `{"mcpServers":{"example":{"command":"npx"}}}`)
+
+	resolution := ResolveMCPConfigPathDetailedFrom(base, "")
+
+	if resolution.Source != "project" || filepath.Clean(resolution.Path) != filepath.Clean(jsonPath) {
+		t.Fatalf("resolution = %+v, want project/%s", resolution, jsonPath)
+	}
+	// 候选清单同时枚举同层 yaml 与 json；候选按「高→低」，yaml 必须在前。
+	yamlIndex, jsonIndex := -1, -1
+	for index, candidate := range resolution.Candidates {
+		if candidate.Source != "project" {
+			continue
+		}
+		switch filepath.Base(candidate.Path) {
+		case DefaultMCPConfigFileName:
+			yamlIndex = index
+		case DefaultMCPConfigJSONFileName:
+			jsonIndex = index
+		}
+	}
+	if yamlIndex < 0 || jsonIndex < 0 || yamlIndex > jsonIndex {
+		t.Fatalf("project candidates 顺序错误: yaml=%d json=%d (%+v)", yamlIndex, jsonIndex, resolution.Candidates)
+	}
+}
+
+// 同目录 mcp.yaml 与 mcp.json 同时存在：生效路径取 mcp.yaml（yaml 优先）。
+func TestResolveMCPConfigPathDetailedFromPrefersYAMLWhenBothExist(t *testing.T) {
+	isolateMCPHome(t)
+	base := t.TempDir()
+	yamlPath := filepath.Join(base, ".aicli", "mcp.yaml")
+	jsonPath := filepath.Join(base, ".aicli", "mcp.json")
+	writeMCPFile(t, yamlPath, "mcpServers: {}\n")
+	writeMCPFile(t, jsonPath, `{"mcpServers":{}}`)
+
+	resolution := ResolveMCPConfigPathDetailedFrom(base, "")
+
+	if resolution.Source != "project" || filepath.Clean(resolution.Path) != filepath.Clean(yamlPath) {
+		t.Fatalf("resolution = %+v, want project/%s", resolution, yamlPath)
+	}
+}
+
+// 向上搜索同样发现 configs/mcp.json；命中 yaml 时同目录 json 一并作为候选。
+func TestResolveMCPConfigPathDetailedFromUpwardPair(t *testing.T) {
+	isolateMCPHome(t)
+	root := t.TempDir()
+	base := filepath.Join(root, "workspace", "nested")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatalf("mkdir base: %v", err)
+	}
+	upwardYAML := filepath.Join(root, "configs", "mcp.yaml")
+	upwardJSON := filepath.Join(root, "configs", "mcp.json")
+	writeMCPFile(t, upwardYAML, "mcpServers: {}\n")
+	writeMCPFile(t, upwardJSON, `{"mcpServers":{}}`)
+
+	resolution := ResolveMCPConfigPathDetailedFrom(base, "")
+
+	if resolution.Source != "upward" || filepath.Clean(resolution.Path) != filepath.Clean(upwardYAML) {
+		t.Fatalf("resolution = %+v, want upward/%s", resolution, upwardYAML)
+	}
+	upwardJSONFound := false
+	for _, candidate := range resolution.Candidates {
+		if candidate.Source == "upward" && filepath.Clean(candidate.Path) == filepath.Clean(upwardJSON) {
+			upwardJSONFound = true
+		}
+	}
+	if !upwardJSONFound {
+		t.Fatalf("命中 yaml 时同目录 mcp.json 也应进入候选: %+v", resolution.Candidates)
+	}
+
+	// 只有 json 时向上搜索同样命中。
+	if err := os.Remove(upwardYAML); err != nil {
+		t.Fatalf("remove yaml: %v", err)
+	}
+	jsonOnly := ResolveMCPConfigPathDetailedFrom(base, "")
+	if jsonOnly.Source != "upward" || filepath.Clean(jsonOnly.Path) != filepath.Clean(upwardJSON) {
+		t.Fatalf("json-only upward resolution = %+v, want upward/%s", jsonOnly, upwardJSON)
+	}
+}
+
+// local 层（~/.aicli/projects/<slug>/）的 mcp.json 同样被自动发现。
+func TestResolveMCPConfigPathDetailedFromDiscoversLocalJSON(t *testing.T) {
+	isolateMCPHome(t)
+	base := t.TempDir()
+	localYAML, err := LocalMCPConfigPath(base)
+	if err != nil {
+		t.Fatalf("LocalMCPConfigPath: %v", err)
+	}
+	localJSON := filepath.Join(filepath.Dir(localYAML), DefaultMCPConfigJSONFileName)
+	writeMCPFile(t, localJSON, `{"mcpServers":{}}`)
+
+	resolution := ResolveMCPConfigPathDetailedFrom(base, "")
+
+	if resolution.Source != "local" || filepath.Clean(resolution.Path) != filepath.Clean(localJSON) {
+		t.Fatalf("resolution = %+v, want local/%s", resolution, localJSON)
+	}
+}
+
+// mcp.json 一侧的约定写法（裸文件名 / configs/mcp.json）继续走发现链，
+// 不会被当成真实覆盖把分层合并降级成单文件加载。
+func TestResolveMCPConfigPathDetailedFromJSONConventionIsNotOverride(t *testing.T) {
+	isolateMCPHome(t)
+	base := t.TempDir()
+	projectJSON := filepath.Join(base, ".aicli", "mcp.json")
+	writeMCPFile(t, projectJSON, `{"mcpServers":{}}`)
+
+	for _, convention := range []string{"mcp.json", DefaultMCPConfigJSONRelativePath} {
+		resolution := ResolveMCPConfigPathDetailedFrom(base, convention)
+		if resolution.Source != "project" || filepath.Clean(resolution.Path) != filepath.Clean(projectJSON) {
+			t.Fatalf("convention %q resolution = %+v, want project/%s", convention, resolution, projectJSON)
 		}
 	}
 }

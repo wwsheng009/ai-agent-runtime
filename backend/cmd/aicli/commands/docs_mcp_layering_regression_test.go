@@ -68,6 +68,18 @@ func TestMCPDocsDeclareLayeredScopeOrder(t *testing.T) {
 		}
 	}
 
+	// mcp.json 自动发现属于分层契约的一部分：三处分层说明必须提到 JSON 形式，
+	// 避免代码支持了、文档却只字未提（或反之）。
+	for _, rel := range []string{"docs/aicli/install.md", "docs/mcp/quickstart.md", "docs/user-guide/aicli.md"} {
+		raw, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if !strings.Contains(string(raw), "mcp.json") {
+			t.Fatalf("%s 应说明 mcp.json 自动发现（与 mcp.yaml 同层，同名以 mcp.yaml 为准）", rel)
+		}
+	}
+
 	for _, rel := range []string{"docs/mcp/README.md", "docs/aicli/install.md"} {
 		raw, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(rel)))
 		if err != nil {

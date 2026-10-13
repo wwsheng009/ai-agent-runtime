@@ -246,13 +246,26 @@ func IsRuntimeConfigConventionPath(configPath string) bool {
 // DefaultMCPConfigFileName is the conventional global MCP config filename.
 const DefaultMCPConfigFileName = "mcp.yaml"
 
+// DefaultMCPConfigJSONFileName is the JSON sibling of the conventional MCP
+// config file. It is discovered alongside mcp.yaml in every layer; when both
+// files exist in the same directory they are merged, and mcp.yaml wins for
+// same-name servers (see ResolveMCPConfigPathDetailedFrom).
+const DefaultMCPConfigJSONFileName = "mcp.json"
+
 // DefaultMCPConfigRelativePath uses forward slashes so generated YAML stays
 // portable across platforms.
 const DefaultMCPConfigRelativePath = "configs/" + DefaultMCPConfigFileName
 
+// DefaultMCPConfigJSONRelativePath is the JSON counterpart of
+// DefaultMCPConfigRelativePath (upward-search / portable default layer).
+const DefaultMCPConfigJSONRelativePath = "configs/" + DefaultMCPConfigJSONFileName
+
 // ResolveMCPConfigPath resolves the effective global MCP config path:
 // ./.aicli/mcp.yaml > ~/.aicli/mcp.yaml > explicit override > upward search
 // (configs/mcp.yaml) > executable directory > configs/mcp.yaml.
+// Every layer also discovers the JSON sibling mcp.json; within the same
+// directory mcp.yaml wins (it is the higher-priority candidate), while the
+// returned Path is the highest-priority existing file.
 //
 // An empty (unset) explicit path is discovery mode: the documented workspace >
 // user > upward-search order runs on its own, so a project ./.aicli/mcp.yaml is
@@ -302,7 +315,9 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 func ResolveMCPConfigPathDetailedFrom(baseDir string, explicitPath string) MCPConfigResolution {
 	resolution := MCPConfigResolution{}
 	filename := DefaultMCPConfigFileName
+	jsonFilename := DefaultMCPConfigJSONFileName
 	portableDefault := DefaultMCPConfigRelativePath
+	portableDefaultJSON := DefaultMCPConfigJSONRelativePath
 	searchPaths := []string{DefaultMCPConfigRelativePath}
 
 	base := strings.TrimSpace(baseDir)
@@ -324,7 +339,7 @@ func ResolveMCPConfigPathDetailedFrom(baseDir string, explicitPath string) MCPCo
 	// the documented priority chain still runs, and the resolution stays empty
 	// when no candidate exists instead of inventing the portable default path.
 	discoverOnly := explicit == ""
-	realOverride := explicit != "" && !isConventionConfigPath(explicit, filename, portableDefault, searchPaths)
+	realOverride := explicit != "" && !isConventionMCPConfigPath(explicit, filename, jsonFilename, portableDefault, portableDefaultJSON, searchPaths)
 
 	seen := map[string]bool{}
 	addCandidate := func(path, source string) {
@@ -353,30 +368,42 @@ func ResolveMCPConfigPathDetailedFrom(baseDir string, explicitPath string) MCPCo
 	if base != "" {
 		if localPath, err := LocalMCPConfigPath(base); err == nil {
 			addCandidate(localPath, "local")
+			addCandidate(mcpJSONSiblingOf(localPath), "local")
 		}
 		addCandidate(filepath.Join(base, ".aicli", filename), "project")
+		addCandidate(filepath.Join(base, ".aicli", jsonFilename), "project")
 	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		addCandidate(filepath.Join(home, ".aicli", filename), "user")
+		addCandidate(filepath.Join(home, ".aicli", jsonFilename), "user")
 	}
 	if base != "" {
-		addCandidate(resolveDefaultConfigPathFromBase(base, filename, searchPaths), "upward")
+		// 向上搜索每层按 .aicli/mcp.yaml、.aicli/mcp.json、configs/mcp.yaml、
+		// configs/mcp.json 的顺序命中；命中 yaml 时同目录 mcp.json 作为更低
+		// 优先级候选一并参与合并（yaml 在前 = 同名以 yaml 为准）。
+		for _, path := range resolveDefaultMCPConfigPairFromBase(base, filename, jsonFilename, searchPaths) {
+			addCandidate(path, "upward")
+		}
 	}
 	if executable, err := os.Executable(); err == nil {
-		addCandidate(resolveDefaultConfigPathFromBase(filepath.Dir(executable), filename, searchPaths), "executable")
+		for _, path := range resolveDefaultMCPConfigPairFromBase(filepath.Dir(executable), filename, jsonFilename, searchPaths) {
+			addCandidate(path, "executable")
+		}
 	}
 	if baseProvided {
 		// 显式给出基准目录时，default 相对该目录解析（避免相对路径落到进程 cwd）。
 		addCandidate(filepath.Join(base, portableDefault), "default")
+		addCandidate(filepath.Join(base, portableDefaultJSON), "default")
 	} else {
 		addCandidate(portableDefault, "default")
+		addCandidate(portableDefaultJSON, "default")
 	}
 
 	switch {
 	case realOverride:
 		resolution.Path, resolution.Source = explicit, "explicit"
 	default:
-		if path, source := firstExistingMCPConfigCandidateFrom(base, filename, searchPaths); path != "" {
+		if path, source := firstExistingMCPConfigCandidateFrom(base, filename, jsonFilename, searchPaths); path != "" {
 			resolution.Path, resolution.Source = path, source
 		} else if !discoverOnly {
 			resolution.Path, resolution.Source = explicit, "explicit"
@@ -387,15 +414,22 @@ func ResolveMCPConfigPathDetailedFrom(baseDir string, explicitPath string) MCPCo
 
 // firstExistingMCPConfigCandidateFrom reports the first existing config among
 // the non-explicit priority layers for the given anchor, mirroring
-// ResolveConfigFilePath's ordering.
-func firstExistingMCPConfigCandidateFrom(base, filename string, searchPaths []string) (string, string) {
+// ResolveConfigFilePath's ordering. Within one layer the YAML file is checked
+// before its JSON sibling, so mcp.yaml is the effective path when both exist.
+func firstExistingMCPConfigCandidateFrom(base, filename, jsonFilename string, searchPaths []string) (string, string) {
 	if base != "" {
 		if localPath, err := LocalMCPConfigPath(base); err == nil {
 			if path := firstExistingConfigFile(localPath); path != "" {
 				return path, "local"
 			}
+			if path := firstExistingConfigFile(mcpJSONSiblingOf(localPath)); path != "" {
+				return path, "local"
+			}
 		}
 		if path := firstExistingConfigFile(filepath.Join(base, ".aicli", filename)); path != "" {
+			return path, "project"
+		}
+		if path := firstExistingConfigFile(filepath.Join(base, ".aicli", jsonFilename)); path != "" {
 			return path, "project"
 		}
 	}
@@ -403,18 +437,101 @@ func firstExistingMCPConfigCandidateFrom(base, filename string, searchPaths []st
 		if path := firstExistingConfigFile(filepath.Join(home, ".aicli", filename)); path != "" {
 			return path, "user"
 		}
+		if path := firstExistingConfigFile(filepath.Join(home, ".aicli", jsonFilename)); path != "" {
+			return path, "user"
+		}
 	}
 	if base != "" {
-		if path := resolveDefaultConfigPathFromBase(base, filename, searchPaths); path != "" {
+		// pair 按「高→低」返回（yaml 在前），第一个即该层级的生效文件。
+		for _, path := range resolveDefaultMCPConfigPairFromBase(base, filename, jsonFilename, searchPaths) {
 			return path, "upward"
 		}
 	}
 	if executable, err := os.Executable(); err == nil {
-		if path := resolveDefaultConfigPathFromBase(filepath.Dir(executable), filename, searchPaths); path != "" {
+		for _, path := range resolveDefaultMCPConfigPairFromBase(filepath.Dir(executable), filename, jsonFilename, searchPaths) {
 			return path, "executable"
 		}
 	}
 	return "", ""
+}
+
+// mcpJSONSiblingOf returns the mcp.json sibling of a conventional mcp.yaml
+// path (same directory). Paths already naming mcp.json are returned unchanged.
+func mcpJSONSiblingOf(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if strings.EqualFold(filepath.Base(path), DefaultMCPConfigJSONFileName) {
+		return path
+	}
+	return filepath.Join(filepath.Dir(path), DefaultMCPConfigJSONFileName)
+}
+
+// resolveDefaultMCPConfigPairFromBase 从 baseDir 向上搜索第一个包含 MCP 配置
+// 的目录层级，并返回该层级的候选（按「高→低」优先级）：
+//
+//   - 每层按 .aicli/mcp.yaml、.aicli/mcp.json、<searchPath>/mcp.yaml、
+//     <searchPath>/mcp.json 的顺序检查，第一个命中者胜出；
+//   - 命中 yaml 且同目录 mcp.json 也存在时，json 作为更低优先级候选一并返回，
+//     让同层两份配置按「yaml 覆盖同名」合并；
+//   - 命中 json 时不再回头找其它位置（该层已被 json 占据）。
+//
+// 返回空切片表示整条祖先链上没有任何候选。
+func resolveDefaultMCPConfigPairFromBase(baseDir, filename, jsonFilename string, searchPaths []string) []string {
+	baseDir = strings.TrimSpace(baseDir)
+	if baseDir == "" {
+		return nil
+	}
+	if absolute, err := filepath.Abs(baseDir); err == nil {
+		baseDir = absolute
+	}
+	baseDir = filepath.Clean(baseDir)
+
+	ordered := []string{
+		filepath.Join(".aicli", filename),
+		filepath.Join(".aicli", jsonFilename),
+	}
+	for _, relativePath := range searchPaths {
+		ordered = append(ordered, relativePath)
+		// searchPaths 里的 mcp.yaml 条目补上同目录的 mcp.json。
+		if strings.EqualFold(filepath.Base(relativePath), filename) {
+			ordered = append(ordered, filepath.Join(filepath.Dir(relativePath), jsonFilename))
+		}
+	}
+
+	for dir := baseDir; ; {
+		for _, relativePath := range ordered {
+			candidate := filepath.Join(dir, relativePath)
+			if info, err := os.Stat(candidate); err != nil || info.IsDir() {
+				continue
+			}
+			hit := filepath.Clean(candidate)
+			if strings.EqualFold(filepath.Base(hit), filename) {
+				sibling := mcpJSONSiblingOf(hit)
+				if info, err := os.Stat(sibling); err == nil && !info.IsDir() {
+					return []string{hit, filepath.Clean(sibling)}
+				}
+			}
+			return []string{hit}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return nil
+}
+
+// isConventionMCPConfigPath 与 isConventionConfigPath 同语义，但额外承认
+// mcp.json 一侧的约定写法（裸文件名、configs/mcp.json）：模板里遗留的约定值
+// 必须继续走发现链，而不是被当成真实覆盖把分层合并降级成单文件加载。
+func isConventionMCPConfigPath(candidate, filename, jsonFilename, portableDefault, portableDefaultJSON string, searchPaths []string) bool {
+	if isConventionConfigPath(candidate, filename, portableDefault, searchPaths) {
+		return true
+	}
+	return isConventionConfigPath(candidate, jsonFilename, portableDefaultJSON, nil)
 }
 
 func firstExistingConfigFile(path string) string {

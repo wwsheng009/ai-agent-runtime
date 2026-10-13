@@ -137,7 +137,8 @@ runtime-server serve --pprof
 与 `aicli mcp ...`、微型 Web 客户端共用 `internal/mcp/admin` 的同一套读写实现，
 编辑的始终是配置文件里的 `mcpServers` 段（写操作会落盘并触发热重载）。路径解析优先级：
 `./.aicli/mcp.yaml` > `~/.aicli/mcp.yaml` > 显式配置 > 向上搜索 > `configs/mcp.yaml`
-（都不存在时落到 `~/.aicli/mcp.yaml` 并自动创建）。服务启动即自动建连（后台并行，不再有
+（都不存在时落到 `~/.aicli/mcp.yaml` 并自动创建）。每层同时自动发现 JSON 形式的 `mcp.json`
+（同目录两者都存在时，同名 server 以 `mcp.yaml` 为准）。服务启动即自动建连（后台并行，不再有
 `auto_connect` 开关）；单个 server 是否参与连接由 `enabled` 字段控制，管理接口的写操作 /
 热重载会即时生效。
 

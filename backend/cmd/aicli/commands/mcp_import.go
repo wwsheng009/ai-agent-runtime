@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/importers"
@@ -60,6 +63,11 @@ func newMCPImportCommand() *cobra.Command {
   user 个人全局；local 项目私有（不进版本库）；project 项目配置（可提交共享）。
   project 会拒绝明文凭证，除非显式 --on-secrets keep。
 
+--on-conflict 的判定覆盖目标文件与运行时分层链：链上更高优先级的同名 server
+默认跳过（不写出不会生效的定义），rename 改为 <name>-imported；目标层更高时
+照常导入并提示将覆盖。源文件本身属于自动发现层（如 ./.aicli/mcp.json）时，
+会提示导入后移走/删除源文件，避免双份定义。
+
 示例:
   aicli mcp import --dry-run                          # 预览将导入什么
   aicli mcp import --from claude --scope user          # 从 Claude 导入到个人全局
@@ -71,7 +79,7 @@ func newMCPImportCommand() *cobra.Command {
 	cmd.Flags().StringVar(&importFrom, "from", importers.VendorAll, "来源: claude|cursor|gemini|opencode|codex|json|all")
 	cmd.Flags().StringVar(&importScope, "scope", mcpWriteScopeLocal, "写入层级: user|local|project")
 	cmd.Flags().BoolVar(&importDryRun, "dry-run", false, "只预览，不写配置")
-	cmd.Flags().StringVar(&importOnConflict, "on-conflict", mcpImportConflictSkip, "同名冲突策略: skip|overwrite|rename")
+	cmd.Flags().StringVar(&importOnConflict, "on-conflict", mcpImportConflictSkip, "同名冲突策略（含分层链上更高优先级的同名定义）: skip|overwrite|rename")
 	cmd.Flags().StringVar(&importOnSecrets, "on-secrets", mcpImportSecretsMask, "明文凭证处理（project 层生效）: mask|reject|keep")
 	cmd.Flags().StringArrayVar(&importOnly, "only", nil, "只导入指定 server（可重复）")
 	cmd.Flags().StringVar(&importFile, "file", "", "--from json 的 JSON 文件路径（同位置参数）")
@@ -228,6 +236,12 @@ func runMCPImportCommand(opts mcpImportOptions) (*mcpImportResult, error) {
 		return variants[i].Source < variants[j].Source
 	})
 
+	// 导入与运行时分层链的交互保护：识别「源文件本身就是自动发现层文件」
+	// 与「链上更高优先级的同名定义」，避免写出双份定义或不生效的「死配置」。
+	chain := loadMCPImportChainContext(targetPath)
+	plan.Warnings = append(plan.Warnings, chain.warnings(targetPath)...)
+	plan.Warnings = append(plan.Warnings, mcpImportSourceWarnings(variants, targetPath)...)
+
 	for _, server := range variants {
 		item := mcpImportPlanItem{
 			Name:         server.Name,
@@ -264,6 +278,33 @@ func runMCPImportCommand(opts mcpImportOptions) (*mcpImportResult, error) {
 				action = "overwritten"
 				overwriting = true
 				item.Reason = "同名冲突，已覆盖"
+			}
+		}
+
+		// 分层链上的同名定义：目标层更高 → 提示本次导入将覆盖；目标层更低
+		// （或被真实覆盖接管）→ 导入不会生效，按 --on-conflict 处理。
+		if origin, exists := chain.lookup(finalName); exists {
+			if chain.targetOverrides(origin) {
+				item.Warnings = append(item.Warnings, fmt.Sprintf(
+					"同名 server 已定义于 %s 层（%s）；本次导入写入 %s 将在其之上覆盖",
+					origin.Source, origin.Path, targetPath))
+			} else {
+				switch onConflict {
+				case mcpImportConflictSkip:
+					item.Action = "skipped"
+					item.Reason = fmt.Sprintf("已存在于更高优先级层（%s %s），导入后不会生效", origin.Source, origin.Path)
+					plan.Skipped++
+					plan.Items = append(plan.Items, item)
+					continue
+				case mcpImportConflictRename:
+					finalName = uniqueImportName(finalName, taken)
+					action = "renamed"
+					item.Reason = "同名冲突（更高优先级层），已改名"
+				default:
+					item.Warnings = append(item.Warnings, fmt.Sprintf(
+						"已存在于更高优先级层（%s %s），该定义仍会被遮蔽、不会生效（--on-conflict overwrite）",
+						origin.Source, origin.Path))
+				}
 			}
 		}
 
@@ -505,6 +546,132 @@ func uniqueImportName(name string, taken map[string]struct{}) string {
 	}
 }
 
+// ---- 导入与运行时分层链的交互保护 ----
+
+// mcpNormalizedPath 归一化用于比较的路径（绝对化 + Clean；失败时退化为 Clean）。
+func mcpNormalizedPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
+}
+
+// mcpPathKey 在 mcpNormalizedPath 之上生成用于相等比较的键：Windows 下
+// 文件系统大小写不敏感（与 runtimeapi.workspaceMCPKey 同口径）。
+func mcpPathKey(path string) string {
+	key := mcpNormalizedPath(path)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(key)
+	}
+	return key
+}
+
+// mcpImportChainContext 描述导入目标在运行时分层链中的位置（best-effort：
+// 链加载失败时退化为空上下文，导入仍按目标文件语义执行）。
+type mcpImportChainContext struct {
+	origins    map[string]config.ServerOrigin // key = 小写 server 名
+	ranks      map[string]int                 // 路径键 -> Files 下标（低→高）
+	target     string                         // 导入目标路径键
+	targetRank int                            // -1 = 目标不在链上（如被真实覆盖接管）
+	override   string                         // 真实覆盖文件路径（链退化为单文件时）
+}
+
+// loadMCPImportChainContext 按运行时同一套发现链构建导入上下文。
+func loadMCPImportChainContext(targetPath string) *mcpImportChainContext {
+	ctx := &mcpImportChainContext{target: mcpPathKey(targetPath), targetRank: -1}
+	result, err := loadMCPConfigLayered()
+	if err != nil || result == nil {
+		return ctx
+	}
+	ctx.origins = make(map[string]config.ServerOrigin, len(result.Origins))
+	for name, origin := range result.Origins {
+		ctx.origins[strings.ToLower(strings.TrimSpace(name))] = origin
+	}
+	ctx.ranks = make(map[string]int, len(result.Files))
+	for index, file := range result.Files {
+		key := mcpPathKey(file.Path)
+		ctx.ranks[key] = index
+		if key == ctx.target {
+			ctx.targetRank = index
+		}
+		if file.Source == "explicit" {
+			ctx.override = mcpNormalizedPath(file.Path)
+		}
+	}
+	return ctx
+}
+
+// lookup 返回链上定义该名字的来源（大小写不敏感）；目标文件自身的同名
+// 由目标冲突分支处理，这里显式排除，避免重复判定。
+func (c *mcpImportChainContext) lookup(name string) (config.ServerOrigin, bool) {
+	if c == nil || c.origins == nil {
+		return config.ServerOrigin{}, false
+	}
+	origin, ok := c.origins[strings.ToLower(strings.TrimSpace(name))]
+	if !ok || mcpPathKey(origin.Path) == c.target {
+		return config.ServerOrigin{}, false
+	}
+	return origin, true
+}
+
+// targetOverrides 判断目标层是否高于来源层（导入将覆盖该定义）。
+// 目标不在链上（被真实覆盖接管）时恒为 false。
+func (c *mcpImportChainContext) targetOverrides(origin config.ServerOrigin) bool {
+	if c == nil || c.targetRank < 0 || c.ranks == nil {
+		return false
+	}
+	originRank, ok := c.ranks[mcpPathKey(origin.Path)]
+	if !ok {
+		return false
+	}
+	return originRank < c.targetRank
+}
+
+// warnings 返回链级提示（真实覆盖接管分层链等）。
+func (c *mcpImportChainContext) warnings(targetPath string) []string {
+	if c == nil || c.override == "" || mcpPathKey(c.override) == c.target {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"检测到显式覆盖配置 %s（--config-file / MCP_CONFIG_FILE / aicli.mcp.config_file），运行时只加载该文件；导入到 %s 的定义不会生效",
+		c.override, targetPath)}
+}
+
+// mcpImportSourceWarnings 识别「源文件同时是运行时自动发现的配置层文件」：
+// 导入不会移动源文件，源文件会继续参与分层合并，形成双份定义。
+func mcpImportSourceWarnings(servers []importers.Server, targetPath string) []string {
+	if len(servers) == 0 {
+		return nil
+	}
+	resolution := aiclipaths.ResolveMCPConfigPathDetailedFrom("", mcpConfigOverride())
+	candidates := make(map[string]string, len(resolution.Candidates))
+	for _, candidate := range resolution.Candidates {
+		candidates[mcpPathKey(candidate.Path)] = candidate.Source
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, server := range servers {
+		key := mcpPathKey(server.Source)
+		source, ok := candidates[key]
+		if !ok || key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, fmt.Sprintf(
+			"源文件 %s 属于运行时自动发现的配置层（%s）：导入后源文件仍会被自动加载，与目标 %s 形成双份定义；建议导入后移走或删除源文件",
+			server.Source, source, targetPath))
+	}
+	sort.Strings(out)
+	return out
+}
+
 func normalizedImportVendor(vendor string) string {
 	normalized := strings.ToLower(strings.TrimSpace(vendor))
 	if normalized == "" {
@@ -583,6 +750,11 @@ func renderMCPImportResult(payload *mcpImportResult, options mcpCommandOptions) 
 		if len(item.MaskedVars) > 0 {
 			fmt.Printf("        - 已改为引用: %s\n", strings.Join(item.MaskedVars, ", "))
 		}
+	}
+	// 分层链级提示（源文件属于自动发现层、显式覆盖接管等）：与 item 无关，
+	// 但直接决定导入是否有效，必须在摘要里可见而不是只留在 JSON 里。
+	for _, warning := range payload.Warnings {
+		fmt.Printf("  ! %s\n", warning)
 	}
 	fmt.Printf("合计: 导入 %d、改名 %d、跳过 %d、拒绝 %d、失败 %d\n",
 		payload.Imported, payload.Renamed, payload.Skipped, payload.Rejected, payload.Failed)

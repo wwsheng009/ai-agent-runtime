@@ -193,6 +193,8 @@ mcpServers:
 写完用 `aicli mcp list` 复核来源，或 chat 内 `/mcp reload` 热重载。
 同级多个文件同名时按 `configs/mcp.yaml` < `~/.aicli/mcp.yaml`（user）< `./.aicli/mcp.yaml`（project）
 < `~/.aicli/projects/<项目>/mcp.yaml`（local）**整体覆盖**（不做字段级合并）。
+每层还会自动发现 JSON 形式的 `mcp.json`（如 `./.aicli/mcp.json`、`~/.aicli/mcp.json`、`configs/mcp.json`）：
+与同目录 `mcp.yaml` 一起合并，同名 server 以 `mcp.yaml` 为准（json 独有项也生效）。
 
 ---
 

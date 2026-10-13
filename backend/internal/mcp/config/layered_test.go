@@ -162,7 +162,9 @@ func TestDiscoverSourcesOrderAndExplicitOverride(t *testing.T) {
 	}
 	// 低→高：configs/mcp.yaml 最先，project 最后。
 	lowest := filepath.Clean(sources[0].Path)
-	if lowest != filepath.Clean(upwardPath) && lowest != filepath.Clean("configs/mcp.yaml") {
+	if lowest != filepath.Clean(upwardPath) &&
+		lowest != filepath.Clean("configs/mcp.yaml") &&
+		lowest != filepath.Clean("configs/mcp.json") {
 		t.Fatalf("首个来源应为 upward/default: %#v", sources)
 	}
 	if sources[0].Source != "upward" && sources[0].Source != "default" {

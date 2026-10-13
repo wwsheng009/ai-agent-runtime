@@ -48,18 +48,54 @@ func unmarshalConfig(data []byte, path string) (*Config, error) {
 		if err := json.Unmarshal(data, &config); err != nil {
 			return nil, fmt.Errorf("解析配置文件失败: %w", err)
 		}
+		if err := rejectExternalJSONContainers(data, path, &config); err != nil {
+			return nil, err
+		}
 	case ".yaml", ".yml":
 		if err := yaml.Unmarshal(data, &config); err != nil {
 			return nil, fmt.Errorf("解析配置文件失败: %w", err)
 		}
 	default:
-		if err := json.Unmarshal(data, &config); err != nil {
+		if err := json.Unmarshal(data, &config); err == nil {
+			if err := rejectExternalJSONContainers(data, path, &config); err != nil {
+				return nil, err
+			}
+		} else {
 			if err := yaml.Unmarshal(data, &config); err != nil {
 				return nil, fmt.Errorf("无法解析配置文件（尝试了 JSON 和 YAML）: %w", err)
 			}
 		}
 	}
 	return &config, nil
+}
+
+// rejectExternalJSONContainers 在 JSON 配置里检测到外部工具的容器键
+// （`servers` / `projects`）却没有 mcpServers 段时给出可行动错误。
+//
+// 背景：mcp.json 现在与 mcp.yaml 同层自动发现。其它工具（VS Code 的
+// `servers`、Claude ~/.claude.json 的 `projects`）使用不同的容器键，若直接
+// 按原生 schema 解析会静默得到 0 个 server——用户只会看到「配置没生效」。
+// 这里显式报错并指向导入命令，而不是让整份配置悄悄变空。
+func rejectExternalJSONContainers(data []byte, path string, cfg *Config) error {
+	if cfg != nil && len(cfg.MCPServers) > 0 {
+		return nil
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil // 文档已成功解析过一次；这里失败按无容器键处理。
+	}
+	if _, hasMCPServers := document["mcpServers"]; hasMCPServers {
+		return nil
+	}
+	for _, key := range []string{"servers", "projects"} {
+		if _, ok := document[key]; ok {
+			return fmt.Errorf(
+				"配置文件 %s 使用外部工具容器键 %q，按 aicli schema 解析会得到 0 个 server；"+
+					"请改用 mcpServers 结构，或执行 `aicli mcp import --from json %s` 导入",
+				path, key, path)
+		}
+	}
+	return nil
 }
 
 // GetConfig 获取已加载的配置

@@ -198,6 +198,7 @@ aicli mcp auth notion --no-browser    # 无桌面环境：打印链接，手动�
 
 配置分层：`configs/mcp.yaml`（默认）< `~/.aicli/mcp.yaml`（个人全局）< `./.aicli/mcp.yaml`（项目级）< `~/.aicli/projects/<项目>/mcp.yaml`（local，项目私有）
 会**按名合并**——低优先级提供基础 server，高优先级同名 server 整体覆盖。`mcp list` 会标注 `来源:` 与 `覆盖:`，避免「改了用户级却被项目级盖掉」的困惑。
+每层还会自动发现 JSON 形式的 `mcp.json`（如 `./.aicli/mcp.json`、`~/.aicli/mcp.json`）：与同目录 `mcp.yaml` 一起合并，同名 server 以 `mcp.yaml` 为准。
 
 ```bash
 aicli mcp add my-tools https://example.com/mcp            # 默认写用户级

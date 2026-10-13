@@ -575,6 +575,9 @@ MCP OAuth（`--auth oauth` + `aicli mcp auth`）：
 - **同名覆盖**：解析链上的所有已存在文件按「低 → 高」合并，低优先级提供基础项，高优先级**整体覆盖**同名 server（不做字段级合并）。
   层级顺序（低→高）：`configs/mcp.yaml`（向上搜索 / 默认） < `~/.aicli/mcp.yaml`（user） < `./.aicli/mcp.yaml`（project）
   < `~/.aicli/projects/<项目标识>/mcp.yaml`（local，项目私有，优先级最高）。
+  每层同时自动发现 JSON 形式的 `mcp.json`（`configs/mcp.json` / `~/.aicli/mcp.json` / `./.aicli/mcp.json` / local 层同目录）：
+  与同目录 `mcp.yaml` 一起参与合并，同名 server 以 `mcp.yaml` 为准（json 独有项照常生效）；
+  JSON 使用与 `mcp.yaml` 相同的 schema（`mcpServers` 容器；`type: http` 是 `streamable` 的别名，缺 `type` 时按 `command`/`url` 推断）。
   `--config-file` / `MCP_CONFIG_FILE` 指定**真实覆盖**路径时退化为「只加载该文件」，不合并。
 - 合并结果可见：`aicli mcp list` / `mcp status` 会打印 `来源: <层级> (<文件>)`；被覆盖的低优先级定义打印 `覆盖: <层级> (<文件>)`。
   `--output json` 的 `configSource` / `configPath` / `shadowedSources` 字段、chat `/mcp` 面板与微型 Web 面板同源展示。
@@ -610,7 +613,7 @@ aicli mcp import --on-conflict rename --only context7
 |---|---|
 | `--scope` | `user` / `local`（默认）/ `project`，语义见上文 |
 | `--dry-run` | 只输出计划，**不写任何文件**（也不会创建目标文件） |
-| `--on-conflict` | `skip`（默认）/ `overwrite` / `rename`（改名 `<name>-imported`） |
+| `--on-conflict` | `skip`（默认）/ `overwrite` / `rename`（改名 `<name>-imported`）；判定同时覆盖目标文件与运行时分层链——链上更高优先级的同名默认跳过（不写出不会生效的「死配置」），目标层更高时照常导入并提示将覆盖 |
 | `--on-secrets` | `mask`（默认，仅 `--scope project` 生效）/ `reject` / `keep` |
 | `--only` | 只导入指定 server（可重复） |
 
@@ -618,6 +621,10 @@ aicli mcp import --on-conflict rename --only context7
 `headers/http_headers` 映射到 `headers`，`env` 保留（`${VAR}` 引用原样保留）；`startup_timeout_ms` 换算为秒；
 `enabled: false` 保留为 aicli 的 `enabled: false`，`disabled: true` 保留 MCP 官方兼容形态；
 未映射的字段与不支持的 TOML 构造（数组表、嵌套子表）会出现在导入摘要的告警里，不会让整份导入失败。
+
+源文件本身属于自动发现层（如 `./.aicli/mcp.json`）时，导入会提示**双份定义**风险：导入不会移动源文件，
+源文件仍会被自动加载；建议导入后移走/删除源文件，或用 `aicli mcp list` 核对 `来源:`/`覆盖:`。
+存在显式覆盖（`--config-file` / `MCP_CONFIG_FILE`）时也会提示：运行时只加载覆盖文件，导入到普通层不会生效。
 
 单 server 导出与 JSON 直填（脚本/跨机复制）：
 
@@ -645,6 +652,8 @@ aicli mcp import --from json ./team-mcp.json --scope project --on-conflict renam
 单 server 对象（`{"name":"notion","url":"..."}`，也接受 `mcp get --json` 的 `{name, config}` 导出）、
 以及对象数组（每项自带 `name`）。路径可以写成位置参数或 `--file`（两者都给时必须一致）。
 只想加一个 server 时用 `add-json`；容器形态（`mcpServers`）交给 `import`，`add-json` 会拒绝并给出这条命令。
+放在配置层目录里的 `mcp.json`（如 `./.aicli/mcp.json`）会被**自动发现**并参与分层合并（同名以 `mcp.yaml` 为准），无需先 import；
+`import` 适合把其它工具分散在各处的配置一次性搬进 aicli 的 `mcp.yaml`。
 
 chat 里的交互菜单（TUI）：
 

@@ -232,9 +232,10 @@ func validateProjectScopeSecrets(req mcpadmin.UpsertRequest, targetPath string) 
 
 // emitMCPProjectScopeNotice 提示项目级配置的提交与 gitignore 注意事项。
 func emitMCPProjectScopeNotice(targetPath string) {
+	exemption := filepath.ToSlash(filepath.Join(".aicli", filepath.Base(strings.TrimSpace(targetPath))))
 	fmt.Fprintf(os.Stderr,
-		"提示: 已写入项目级配置 %s（可提交共享）。若仓库 .gitignore 忽略了 .aicli/，请追加豁免：!.aicli/mcp.yaml\n",
-		targetPath)
+		"提示: 已写入项目级配置 %s（可提交共享）。若仓库 .gitignore 忽略了 .aicli/，请追加豁免：!%s\n",
+		targetPath, exemption)
 }
 
 // emitMCPShadowNotice 提示同名 server 已存在于其它层级，避免静默覆盖。

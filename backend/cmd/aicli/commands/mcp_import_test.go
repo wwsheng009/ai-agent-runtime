@@ -536,3 +536,191 @@ func TestRunMCPImportCommandFromJSONFile(t *testing.T) {
 		t.Fatalf("落盘内容不符:\n%s", content)
 	}
 }
+
+// 源文件本身就是运行时自动发现层文件（如 ./.aicli/mcp.json）时，
+// 必须提示双份定义风险（导入不会移动源文件）。
+func TestRunMCPImportCommandWarnsWhenSourceIsAutoDiscovered(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	isolateMCPCommandHome(t, home)
+	project := t.TempDir()
+	chdirTest(t, project)
+
+	previousConfigFile := mcpConfigFile
+	mcpConfigFile = ""
+	t.Cleanup(func() { mcpConfigFile = previousConfigFile })
+
+	source := filepath.Join(project, ".aicli", "mcp.json")
+	writeMCPImportFile(t, source, `{"mcpServers":{"json-source-probe":{"command":"npx"}}}`)
+
+	plan, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeLocal, DryRun: true, File: source,
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	found := false
+	for _, warning := range plan.Warnings {
+		if strings.Contains(warning, "自动发现") && strings.Contains(warning, source) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("源文件属于自动发现层时应给出双份定义提示: %#v", plan.Warnings)
+	}
+}
+
+// 链上更高优先级层已有同名：默认跳过（不写出不会生效的定义）；
+// overwrite 强制写入但必须提示仍被遮蔽。
+func TestRunMCPImportCommandSkipsDefinitionShadowedByHigherLayer(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	isolateMCPCommandHome(t, home)
+	project := t.TempDir()
+	chdirTest(t, project)
+
+	previousConfigFile := mcpConfigFile
+	mcpConfigFile = ""
+	t.Cleanup(func() { mcpConfigFile = previousConfigFile })
+
+	// 项目层 mcp.json 已定义同名 server：比 user 目标层优先级更高。
+	writeMCPImportFile(t, filepath.Join(project, ".aicli", "mcp.json"),
+		`{"mcpServers":{"shadow-probe":{"command":"echo","enabled":false}}}`)
+	source := filepath.Join(project, "vendor", "claude.json")
+	writeMCPImportFile(t, source, `{"mcpServers":{"shadow-probe":{"command":"npx","args":["-y","shadow"]}}}`)
+
+	plan, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeUser, File: source,
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if plan.Skipped != 1 || plan.Imported != 0 {
+		t.Fatalf("被更高层遮蔽的同名定义应默认跳过: %#v", plan)
+	}
+	if len(plan.Items) != 1 || !strings.Contains(plan.Items[0].Reason, "更高优先级层") {
+		t.Fatalf("跳过原因应说明更高优先级层: %#v", plan.Items)
+	}
+	target := filepath.Join(home, ".aicli", "mcp.yaml")
+	if _, statErr := os.Stat(target); statErr == nil {
+		t.Fatalf("跳过的 server 不应写入目标文件: %s", target)
+	}
+
+	// overwrite 策略：强制写入，但明确提示仍会被遮蔽、不会生效。
+	forced, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeUser, File: source, OnConflict: mcpImportConflictOverwrite,
+	})
+	if err != nil {
+		t.Fatalf("import overwrite: %v", err)
+	}
+	if forced.Imported != 1 {
+		t.Fatalf("overwrite 应强制写入: %#v", forced)
+	}
+	if len(forced.Items) != 1 || !strings.Contains(strings.Join(forced.Items[0].Warnings, "\n"), "遮蔽") {
+		t.Fatalf("overwrite 应提示仍被遮蔽: %#v", forced.Items)
+	}
+}
+
+// 链上更高优先级层已有同名 + rename：改名为 <name>-imported 后正常生效。
+func TestRunMCPImportCommandRenamesDefinitionShadowedByHigherLayer(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	isolateMCPCommandHome(t, home)
+	project := t.TempDir()
+	chdirTest(t, project)
+
+	previousConfigFile := mcpConfigFile
+	mcpConfigFile = ""
+	t.Cleanup(func() { mcpConfigFile = previousConfigFile })
+
+	writeMCPImportFile(t, filepath.Join(project, ".aicli", "mcp.json"),
+		`{"mcpServers":{"shadow-probe":{"command":"echo","enabled":false}}}`)
+	source := filepath.Join(project, "vendor", "claude.json")
+	writeMCPImportFile(t, source, `{"mcpServers":{"shadow-probe":{"command":"npx","args":["-y","shadow"]}}}`)
+
+	plan, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeUser, File: source, OnConflict: mcpImportConflictRename,
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if plan.Renamed != 1 || plan.Skipped != 0 {
+		t.Fatalf("rename 应改名导入: %#v", plan)
+	}
+	if len(plan.Items) != 1 || plan.Items[0].FinalName != "shadow-probe-imported" {
+		t.Fatalf("改名结果错误: %#v", plan.Items)
+	}
+	content := readFileForTest(t, filepath.Join(home, ".aicli", "mcp.yaml"))
+	if !strings.Contains(content, "shadow-probe-imported") {
+		t.Fatalf("改名后的 server 应写入目标文件:\n%s", content)
+	}
+}
+
+// 目标层高于链上已有定义：照常导入，并提示本次写入将覆盖低优先级定义。
+func TestRunMCPImportCommandNoticesOverrideOfLowerLayer(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	isolateMCPCommandHome(t, home)
+	project := t.TempDir()
+	chdirTest(t, project)
+
+	previousConfigFile := mcpConfigFile
+	mcpConfigFile = ""
+	t.Cleanup(func() { mcpConfigFile = previousConfigFile })
+
+	// user 层已有同名：local 目标层更高，导入将覆盖它。
+	writeMCPImportFile(t, filepath.Join(home, ".aicli", "mcp.yaml"), `mcpServers:
+  over-probe:
+    type: stdio
+    command: old-cmd
+`)
+	source := filepath.Join(project, "vendor", "claude.json")
+	writeMCPImportFile(t, source, `{"mcpServers":{"over-probe":{"command":"npx","args":["-y","over"]}}}`)
+
+	plan, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeLocal, File: source,
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if plan.Imported != 1 || plan.Skipped != 0 {
+		t.Fatalf("目标层更高时应照常导入: %#v", plan)
+	}
+	if len(plan.Items) != 1 || !strings.Contains(strings.Join(plan.Items[0].Warnings, "\n"), "将在其之上覆盖") {
+		t.Fatalf("应提示将覆盖低优先级层定义: %#v", plan.Items)
+	}
+	localPath := filepath.Join(home, ".aicli", "projects", aiclipaths.ProjectScopeSlug(project), "mcp.yaml")
+	content := readFileForTest(t, localPath)
+	if !strings.Contains(content, "over-probe") {
+		t.Fatalf("local 层应写入导入结果:\n%s", content)
+	}
+}
+
+// 显式覆盖接管分层链时：导入到普通层文件不会生效，必须给出提示。
+func TestRunMCPImportCommandWarnsWhenExplicitOverrideActive(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	isolateMCPCommandHome(t, home)
+	project := t.TempDir()
+	chdirTest(t, project)
+
+	override := filepath.Join(t.TempDir(), "custom", "mcp.json")
+	writeMCPImportFile(t, override, `{"mcpServers":{}}`)
+	previousConfigFile := mcpConfigFile
+	mcpConfigFile = override
+	t.Cleanup(func() { mcpConfigFile = previousConfigFile })
+
+	source := filepath.Join(project, "vendor", "claude.json")
+	writeMCPImportFile(t, source, `{"mcpServers":{"override-probe":{"command":"npx"}}}`)
+
+	plan, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeLocal, File: source, DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	found := false
+	for _, warning := range plan.Warnings {
+		if strings.Contains(warning, "显式覆盖") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("显式覆盖接管时应提示导入不会生效: %#v", plan.Warnings)
+	}
+}

@@ -93,6 +93,42 @@ func TestApplyMCPUserFallbackRewritesConventionDefaultOnly(t *testing.T) {
 	}
 }
 
+// JSON 约定默认值（configs/mcp.json）与 YAML 一样改落用户级，避免
+// runtime-server 在任意工作目录下生成 configs/mcp.json。
+func TestApplyMCPUserFallbackRewritesJSONConventionDefault(t *testing.T) {
+	home := isolateMCPResolutionHome(t)
+	chdirTest(t, t.TempDir())
+	want := filepath.Join(home, ".aicli", "mcp.yaml")
+
+	got := applyMCPUserFallback(aiclipaths.MCPConfigResolution{
+		Path:   aiclipaths.DefaultMCPConfigJSONRelativePath,
+		Source: "explicit",
+	})
+	if got.Path != want || got.Source != "user-fallback" {
+		t.Fatalf("json convention default = %+v, want path=%q source=user-fallback", got, want)
+	}
+}
+
+// 项目层只有 mcp.json 时，runtime-server 的解析同样命中。
+func TestResolveRuntimeMCPConfigResolutionPrefersProjectJSON(t *testing.T) {
+	isolateMCPResolutionHome(t)
+	projectDir := t.TempDir()
+	projectJSON := filepath.Join(projectDir, ".aicli", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(projectJSON), 0o755); err != nil {
+		t.Fatalf("create project mcp dir: %v", err)
+	}
+	if err := os.WriteFile(projectJSON, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatalf("write project mcp json: %v", err)
+	}
+	chdirTest(t, projectDir)
+
+	cfg := &config.Config{AICLI: &config.AICLIConfig{MCP: &config.AICLIMCPConfig{ConfigFile: "configs/mcp.yaml"}}}
+	resolution := resolveRuntimeMCPConfigResolution(cfg)
+	if resolution.Path != projectJSON || resolution.Source != "project" {
+		t.Fatalf("resolution = %+v, want path=%q source=project", resolution, projectJSON)
+	}
+}
+
 func TestResolveRuntimeMCPConfigResolutionEmptyConfig(t *testing.T) {
 	if got := resolveRuntimeMCPConfigResolution(nil); got.Path != "" {
 		t.Fatalf("nil cfg resolution = %+v, want empty", got)

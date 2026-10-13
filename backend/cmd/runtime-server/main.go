@@ -1781,7 +1781,8 @@ func configuredMCPConfigPath(cfg *config.Config) string {
 		return ""
 	}
 	// Same priority as the runtime config and the CLI: ./.aicli/mcp.yaml >
-	// ~/.aicli/mcp.yaml > explicit override > upward search > configs/mcp.yaml.
+	// ~/.aicli/mcp.yaml > explicit override > upward search > configs/mcp.yaml;
+	// every layer also discovers its mcp.json sibling (mcp.yaml wins on conflicts).
 	// An unset aicli.mcp.config_file is discovery mode: the workspace layer wins
 	// without the key being written first (MCP_CONFIG_FILE 环境变量优先，见
 	// agentconfig.EffectiveAICLIMCPConfigFile)。
@@ -1820,9 +1821,10 @@ func resolveRuntimeMCPConfigResolution(cfg *config.Config) aiclipaths.MCPConfigR
 	return applyMCPUserFallback(aiclipaths.ResolveMCPConfigPathDetailed(config.EffectiveAICLIMCPConfigFile(cfg)))
 }
 
-// applyMCPUserFallback 在解析结果不存在时把模板约定默认值（相对 configs/mcp.yaml）
-// 改落用户级 ~/.aicli/mcp.yaml（由 admin 包自动创建），避免 runtime-server 在任意
-// 工作目录下生成 configs/mcp.yaml；其它非默认路径（含显式覆盖）按用户指定位置创建。
+// applyMCPUserFallback 在解析结果不存在时把模板约定默认值（相对 configs/mcp.yaml
+// 或 configs/mcp.json）改落用户级 ~/.aicli/mcp.yaml（由 admin 包自动创建），避免
+// runtime-server 在任意工作目录下生成 configs/mcp.yaml；其它非默认路径（含显式
+// 覆盖）按用户指定位置创建。
 //
 // 该规则不依赖文件系统层级，可脱离向上搜索单独验证。
 func applyMCPUserFallback(resolution aiclipaths.MCPConfigResolution) aiclipaths.MCPConfigResolution {
@@ -1832,10 +1834,13 @@ func applyMCPUserFallback(resolution aiclipaths.MCPConfigResolution) aiclipaths.
 	if _, err := os.Stat(resolution.Path); err == nil {
 		return resolution
 	}
-	if !filepath.IsAbs(resolution.Path) && filepath.ToSlash(resolution.Path) == aiclipaths.DefaultMCPConfigRelativePath {
-		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-			resolution.Path = filepath.Join(home, ".aicli", "mcp.yaml")
-			resolution.Source = "user-fallback"
+	if !filepath.IsAbs(resolution.Path) {
+		slash := filepath.ToSlash(resolution.Path)
+		if slash == aiclipaths.DefaultMCPConfigRelativePath || slash == aiclipaths.DefaultMCPConfigJSONRelativePath {
+			if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+				resolution.Path = filepath.Join(home, ".aicli", "mcp.yaml")
+				resolution.Source = "user-fallback"
+			}
 		}
 	}
 	return resolution

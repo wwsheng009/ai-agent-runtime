@@ -104,6 +104,11 @@ func EnsureFile(path string) error {
 			return fmt.Errorf("创建 MCP 配置目录失败: %w", err)
 		}
 	}
+	// JSON 配置文件（自动发现的 mcp.json / 显式 .json 覆盖）必须写成合法
+	// JSON，否则下一次加载会因 YAML 文本无法按 JSON 解析而直接失败。
+	if strings.HasSuffix(strings.ToLower(path), ".json") {
+		return atomicWriteFile(path, []byte("{\n  \"mcpServers\": {}\n}\n"))
+	}
 	return atomicWriteFile(path, []byte("mcpServers: {}\n"))
 }
 
