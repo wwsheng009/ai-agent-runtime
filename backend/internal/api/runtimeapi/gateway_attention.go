@@ -208,6 +208,36 @@ func (h *Handler) sessionHasParkedTurnRecord(sessionID string) bool {
 	return len(records) > 0
 }
 
+// markGatewaySubagentFailure projects a failed / timed-out / orphaned child
+// batch onto the parent session's attention axis and pushes the high-priority
+// error notification (docs/gateway/08-notifications.md §3 的失败行)。父会话稍后
+// 会被 wake 唤醒处理，但控制台在此之前就应看到 error 徽标；父会话下一轮
+// BeginTurn 会清除它。
+func (h *Handler) markGatewaySubagentFailure(parentSessionID string) bool {
+	if h == nil {
+		return false
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return false
+	}
+	store := h.gatewayStateStore()
+	if store == nil {
+		return false
+	}
+	changed := store.SetAttention(parentSessionID, gatewayagent.AttentionError)
+	if changed {
+		h.pushGatewaySessions()
+	}
+	h.notifyGateway(wire.Notify{
+		SessionID: parentSessionID,
+		Kind:      wire.NotifyKindError,
+		Priority:  wire.NotifyPriorityHigh,
+		TS:        time.Now().UTC(),
+	})
+	return changed
+}
+
 // gatewayTailBufferRunes bounds the accumulated delta window before the
 // shared 512-rune display truncation applies.
 const gatewayTailBufferRunes = 2048

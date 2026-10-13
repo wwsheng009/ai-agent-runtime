@@ -5,6 +5,7 @@ import (
 	"time"
 
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
+	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
 // 本文件是共享核心（internal/gateway/agent.SessionStateStore）在 aicli 侧的
@@ -29,11 +30,32 @@ const (
 	gatewayAttentionWaiting   = gatewayagent.AttentionWaiting
 )
 
+// NOTIFY 帧 kind/priority 别名（与 wire 常量同源，避免两处字面量漂移）。
+const (
+	gatewayNotifyKindError    = wire.NotifyKindError
+	gatewayNotifyPriorityHigh = wire.NotifyPriorityHigh
+)
+
 // setGatewayAttention records (or clears, when attention == "") the attention
 // state for sessionID, reporting whether the value actually changed (callers
 // use it to decide whether a SESSION_UPDATE push is needed).
 func setGatewayAttention(sessionID, attention string) bool {
 	return gatewayAttentionStore.SetAttention(strings.TrimSpace(sessionID), strings.TrimSpace(attention))
+}
+
+// markGatewaySubagentFailure projects a failed / timed-out / orphaned child
+// batch onto the parent session's attention axis and sends the high-priority
+// error notification (docs/gateway/08-notifications.md §3 的失败行)。父会话稍后
+// 会被 wake 唤醒处理，但控制台在此之前就应看到 error 徽标；父会话下一轮
+// BeginTurn 会清除它。
+func markGatewaySubagentFailure(session *ChatSession, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	setGatewayAttention(sessionID, gatewayAttentionError)
+	syncChatGatewaySession(session)
+	notifyChatGatewaySession(session, gatewayNotifyKindError, gatewayNotifyPriorityHigh)
 }
 
 // gatewaySessionStateFor returns the shared projection for sessionID.

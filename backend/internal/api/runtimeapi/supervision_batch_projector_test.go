@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
@@ -51,6 +52,10 @@ func TestAPIBatchLifecycleProjector_FailedBatchIsDurable(t *testing.T) {
 	require.Contains(t, notifications[0].Reason, "batch_api_failed")
 	require.Contains(t, notifications[0].Reason, "task task_2 failed")
 
+	// 子代理终态失败在网关侧立刻可见（docs/gateway/08-notifications.md §3 的失败
+	// 行）：error 徽标 + 高优先通知，不必等父会话恢复后的回合结果。
+	require.Equal(t, gatewayagent.AttentionError, handler.testGatewayState("sess_parent").Attention)
+
 	wakes, err := store.ListWakePending(ctx, supervision.WakeFilter{
 		RootScopeID:           "sess_parent",
 		TargetParentSessionID: "sess_parent",
@@ -88,6 +93,8 @@ func TestAPIBatchLifecycleProjector_CleanSuccessRecommendsClose(t *testing.T) {
 		CompletedCount:  3,
 	})
 	require.NoError(t, err)
+	// 干净成功不产生 error 徽标（成功批次由结算 wake 自动续跑，无需操作者）。
+	require.Equal(t, "", handler.testGatewayState("sess_parent").Attention)
 
 	notifications, err := store.ListNotifications(ctx, supervision.NotificationFilter{
 		RootScopeID:     "sess_parent",

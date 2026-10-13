@@ -619,6 +619,12 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		if err != nil {
 			return err
 		}
+		// 子代理终态失败/超时/孤儿的操作者可见性（docs/gateway/08-notifications.md
+		// §3 的失败行）：父会话稍后会被 wake 唤醒处理，但控制台在此之前就应看到
+		// error 徽标与高优先通知，而不是等父回合结束。
+		if severity == supervision.SeverityCritical {
+			markGatewaySubagentFailure(host.BaseSession, parentSessionID)
+		}
 		// P1-C 方案 C：batch 终态投影之后按策略收敛已完成的子会话（默认 off
 		// 时该调用不产生任何写入）。
 		localConvergeTerminalBatchChildren(ctx, host, terminal)

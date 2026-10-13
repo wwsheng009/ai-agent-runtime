@@ -104,6 +104,13 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 			return err
 		}
 
+		// 子代理终态失败/超时/孤儿的操作者可见性（与 CLI 宿主同口径，
+		// docs/gateway/08-notifications.md §3 的失败行）：父会话稍后会被 wake
+		// 唤醒处理，但控制台在此之前就应看到 error 徽标与高优先通知。
+		if severity == supervision.SeverityCritical {
+			h.markGatewaySubagentFailure(parentSessionID)
+		}
+
 		// §6.12 成功批次缺边修复（与 CLI localSubagentBatchLifecycleProjector
 		// 同口径）：成功/警告终态没有 lifecycle wake，父会话的挂起记录只会在
 		// run 边界结清——没有这笔结算 wake，父会话即使空闲也不会再起 run，

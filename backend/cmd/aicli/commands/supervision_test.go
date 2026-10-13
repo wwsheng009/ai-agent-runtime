@@ -70,6 +70,23 @@ func TestLocalSubagentBatchLifecycleProjectorPersistsAndDeduplicates(t *testing.
 	// 的行；否则 digest/矩阵会把失败读成"待决策卡住"，与 reason 自相矛盾）。
 	require.Equal(t, supervision.SupervisionTerminated, notifications[0].SupervisionState)
 	require.Equal(t, supervision.ResolutionUnresolved, notifications[0].ResolutionState)
+
+	// 子代理终态失败在网关侧立刻可见（docs/gateway/08-notifications.md §3 的失败
+	// 行）：error 徽标 + 高优先通知，不必等父会话恢复后的回合结果。
+	require.Equal(t, gatewayAttentionError, gatewaySessionStateFor("parent-session").Attention)
+
+	// 干净成功不得产生 error 徽标（成功批次由结算 wake 自动续跑，无需操作者）。
+	require.NoError(t, projector(context.Background(), agent.BatchTerminalLifecycle{
+		BatchID:         "batch-ok-1",
+		RootScopeID:     "parent-ok",
+		ParentSessionID: "parent-ok",
+		Status:          subagentbatch.BatchCompleted,
+		EventType:       "subagent.batch.completed",
+		SubjectVersion:  1,
+		TaskCount:       1,
+		CompletedCount:  1,
+	}))
+	require.Equal(t, "", gatewaySessionStateFor("parent-ok").Attention)
 }
 
 func TestLocalSubagentBatchRecoveryLifecycleProjectorDefersWakeDelivery(t *testing.T) {
