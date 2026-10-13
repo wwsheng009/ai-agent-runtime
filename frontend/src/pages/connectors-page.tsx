@@ -16,6 +16,8 @@ import {
   listConnectors,
   readConnectorFieldErrors,
   reloadConnector,
+  runConnectorAction,
+  takeoverConnector,
   updateConnector,
 } from "@/api/runtime/connectors";
 import { Badge } from "@/components/ui/badge";
@@ -24,17 +26,27 @@ import { buttonVariants } from "@/components/ui/button-variants";
 import { readAdminToken } from "@/lib/admin-token";
 import { cn } from "@/lib/utils";
 import type {
+  ConnectorActionSpec,
   ConnectorFieldError,
   ConnectorSchema,
   ConnectorSubmitPayload,
   ConnectorView,
 } from "@/types/runtime";
 
+import { summarizeActionPayload } from "./connectors/action-payload";
+import { ConnectorActionDialog } from "./connectors/action-dialog";
 import { ConnectorDialog } from "./connectors/connector-dialog";
+import { findProviderSchema } from "./connectors/shared";
 import { TestMessageDialog } from "./connectors/test-message-dialog";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 二维码类动作的目标：打开扫码登录弹窗。 */
+interface ConnectorActionTarget {
+  connector: ConnectorView;
+  action: ConnectorActionSpec;
 }
 
 export function ConnectorsPage() {
@@ -56,6 +68,7 @@ export function ConnectorsPage() {
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [dialogFieldErrors, setDialogFieldErrors] = useState<ConnectorFieldError[]>([]);
   const [testTarget, setTestTarget] = useState<ConnectorView | null>(null);
+  const [actionTarget, setActionTarget] = useState<ConnectorActionTarget | null>(null);
 
   const reloadData = useCallback(async () => {
     setLoading(true);
@@ -143,7 +156,7 @@ export function ConnectorsPage() {
   const runAction = async (
     item: ConnectorView,
     action: () => Promise<unknown>,
-    failureKey: "page.toggleFailed" | "page.reloadFailed" | "page.removeFailed",
+    describeFailure: (message: string) => string,
   ) => {
     markBusy(item.id);
     setNotice(null);
@@ -151,7 +164,7 @@ export function ConnectorsPage() {
       await action();
       await reloadData();
     } catch (caught) {
-      setNotice(t(failureKey, { message: errorText(caught) }));
+      setNotice(describeFailure(errorText(caught)));
     } finally {
       clearBusy(item.id);
     }
@@ -161,7 +174,7 @@ export function ConnectorsPage() {
     runAction(
       item,
       () => updateConnector(item.id, { enabled: !item.enabled }, { adminToken }),
-      "page.toggleFailed",
+      (message) => t("page.toggleFailed", { message }),
     );
 
   const handleReload = (item: ConnectorView) =>
@@ -171,7 +184,7 @@ export function ConnectorsPage() {
         await reloadConnector(item.id, { adminToken });
         setNotice(t("page.reloaded", { name: item.name }));
       },
-      "page.reloadFailed",
+      (message) => t("page.reloadFailed", { message }),
     );
 
   const handleDelete = (item: ConnectorView) => {
@@ -184,9 +197,55 @@ export function ConnectorsPage() {
         await deleteConnector(item.id, { adminToken });
         setNotice(t("page.removed", { name: item.name }));
       },
-      "page.removeFailed",
+      (message) => t("page.removeFailed", { message }),
     );
   };
+
+  /** 抢占运行归属：仅当启用且归属在别的宿主时展示（二次确认）。 */
+  const handleTakeover = (item: ConnectorView) => {
+    const owner = item.active_owner ?? "";
+    if (!owner || item.owned_by_current_host) {
+      return;
+    }
+    if (!window.confirm(t("page.confirmTakeover", { name: item.name, owner }))) {
+      return;
+    }
+    return runAction(
+      item,
+      async () => {
+        await takeoverConnector(item.id, { adminToken });
+        setNotice(t("page.takeoverDone", { name: item.name }));
+      },
+      (message) => t("page.takeoverFailed", { message }),
+    );
+  };
+
+  /** 通道动作：qr 类走扫码登录弹窗，其余（button）直接执行并展示返回/错误。 */
+  const handleRunAction = (item: ConnectorView, action: ConnectorActionSpec) => {
+    if (action.kind === "qr") {
+      setActionTarget({ connector: item, action });
+      return;
+    }
+    return runAction(
+      item,
+      async () => {
+        const payload = await runConnectorAction(item.id, action.key, undefined, {
+          adminToken,
+        });
+        const result = summarizeActionPayload(payload);
+        setNotice(
+          result
+            ? t("page.actionResult", { action: action.label, result })
+            : t("page.actionResultEmpty", { action: action.label }),
+        );
+      },
+      (message) => t("page.actionFailed", { action: action.label, message }),
+    );
+  };
+
+  const handleRefilled = useCallback(() => {
+    void reloadData();
+  }, [reloadData]);
 
   return (
     <div className="min-h-screen [background:var(--workspace-shell-bg)] text-foreground lg:h-dvh lg:overflow-hidden">
@@ -265,72 +324,114 @@ export function ConnectorsPage() {
             <p className="text-sm text-muted-foreground">{t("page.empty")}</p>
           ) : (
             <ul className="flex flex-col gap-2">
-              {items.map((item) => (
-                <li
-                  key={item.id}
-                  className="flex flex-col gap-2 rounded-card border border-border bg-surface-soft px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="truncate text-sm font-medium text-foreground">
-                        {item.name}
-                      </span>
-                      <Badge>{item.provider}</Badge>
-                      {item.mode ? <Badge>{item.mode}</Badge> : null}
-                      <Badge>{item.enabled ? t("page.enabled") : t("page.disabled")}</Badge>
-                      {item.policy.runtime_owner ? (
-                        <span className="text-xs text-muted-foreground">
-                          {t("page.owner", { owner: item.policy.runtime_owner })}
+              {items.map((item) => {
+                const providerActions =
+                  findProviderSchema(schema, item.provider)?.actions ?? [];
+                const takeoverVisible =
+                  item.enabled &&
+                  !item.owned_by_current_host &&
+                  Boolean(item.active_owner);
+                return (
+                  <li
+                    key={item.id}
+                    className="flex flex-col gap-2 rounded-card border border-border bg-surface-soft px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="truncate text-sm font-medium text-foreground">
+                          {item.name}
                         </span>
-                      ) : null}
+                        <Badge>{item.provider}</Badge>
+                        {item.mode ? <Badge>{item.mode}</Badge> : null}
+                        <Badge>{item.enabled ? t("page.enabled") : t("page.disabled")}</Badge>
+                        {item.policy.runtime_owner ? (
+                          <span className="text-xs text-muted-foreground">
+                            {t("page.owner", { owner: item.policy.runtime_owner })}
+                          </span>
+                        ) : null}
+                        {/* 运行归属（active_owner）：本宿主高亮，空=未运行。 */}
+                        <span
+                          className={cn(
+                            "text-xs",
+                            item.owned_by_current_host
+                              ? "font-medium text-accent-primary"
+                              : "text-muted-foreground",
+                          )}
+                        >
+                          {item.active_owner
+                            ? t("page.activeOwner", { owner: item.active_owner })
+                            : t("page.unclaimed")}
+                        </span>
+                      </div>
+                      <span className="truncate text-xs text-muted-foreground">{item.id}</span>
                     </div>
-                    <span className="truncate text-xs text-muted-foreground">{item.id}</span>
-                  </div>
 
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={busyIds.has(item.id)}
-                      onClick={() => void handleToggle(item)}
-                    >
-                      {item.enabled ? t("page.disable") : t("page.enable")}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={!schema || busyIds.has(item.id)}
-                      onClick={() => openEdit(item)}
-                    >
-                      {t("page.edit")}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={busyIds.has(item.id)}
-                      onClick={() => setTestTarget(item)}
-                    >
-                      {t("page.test")}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={busyIds.has(item.id)}
-                      onClick={() => void handleReload(item)}
-                    >
-                      {t("page.reload")}
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={busyIds.has(item.id)}
-                      onClick={() => void handleDelete(item)}
-                    >
-                      {t("page.remove")}
-                    </Button>
-                  </div>
-                </li>
-              ))}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {providerActions.map((action) => (
+                        <Button
+                          key={action.key}
+                          variant="secondary"
+                          size="sm"
+                          disabled={busyIds.has(item.id) || !item.enabled}
+                          onClick={() => void handleRunAction(item, action)}
+                        >
+                          {action.label}
+                        </Button>
+                      ))}
+                      {takeoverVisible ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={busyIds.has(item.id)}
+                          onClick={() => void handleTakeover(item)}
+                        >
+                          {t("page.takeover")}
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={busyIds.has(item.id)}
+                        onClick={() => void handleToggle(item)}
+                      >
+                        {item.enabled ? t("page.disable") : t("page.enable")}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={!schema || busyIds.has(item.id)}
+                        onClick={() => openEdit(item)}
+                      >
+                        {t("page.edit")}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={busyIds.has(item.id)}
+                        onClick={() => setTestTarget(item)}
+                      >
+                        {t("page.test")}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={busyIds.has(item.id)}
+                        onClick={() => void handleReload(item)}
+                      >
+                        {t("page.reload")}
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={busyIds.has(item.id)}
+                        onClick={() => void handleDelete(item)}
+                      >
+                        {t("page.remove")}
+                      </Button>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
@@ -350,6 +451,13 @@ export function ConnectorsPage() {
         open={testTarget !== null}
         connector={testTarget}
         onClose={() => setTestTarget(null)}
+      />
+      <ConnectorActionDialog
+        open={actionTarget !== null}
+        connector={actionTarget?.connector ?? null}
+        action={actionTarget?.action ?? null}
+        onRefilled={handleRefilled}
+        onClose={() => setActionTarget(null)}
       />
     </div>
   );

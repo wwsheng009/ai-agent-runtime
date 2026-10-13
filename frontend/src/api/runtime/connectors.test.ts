@@ -19,7 +19,9 @@ import {
   normalizeConnectorView,
   readConnectorFieldErrors,
   reloadConnector,
+  runConnectorAction,
   sendConnectorTestMessage,
+  takeoverConnector,
   updateConnector,
 } from "@/api/runtime/connectors";
 import { RuntimeApiError } from "@/api/runtime/shared";
@@ -73,6 +75,20 @@ describe("连接器归一化", () => {
     expect(view?.policy).toEqual({});
     expect(view?.settings).toBeUndefined();
     expect(view?.secret_keys).toBeUndefined();
+  });
+
+  it("active_owner/owned_by_current_host 是 additive 字段：缺失不报错，存在则透传", () => {
+    const absent = normalizeConnectorView({ id: "a", provider: "wechat" });
+    expect(absent?.active_owner).toBeUndefined();
+    expect(absent?.owned_by_current_host).toBe(false);
+
+    const view = normalizeConnectorView({
+      ...CONNECTOR_PAYLOAD,
+      active_owner: " host-a ",
+      owned_by_current_host: true,
+    });
+    expect(view?.active_owner).toBe("host-a");
+    expect(view?.owned_by_current_host).toBe(true);
   });
 
   it("schema 缺 `providers` 抛错；未知字段类型原样保留", () => {
@@ -227,5 +243,100 @@ describe("连接器 API 调用", () => {
     ]);
     // 非 RuntimeApiError / 非该形状 → 空数组（供 UI 兜底整体错误文案）。
     expect(readConnectorFieldErrors(new Error("boom"))).toEqual([]);
+  });
+
+  it("takeoverConnector POST /takeover 并返回更新后的视图（404/409 复用 RuntimeApiError）", async () => {
+    respondWith(
+      {
+        ...CONNECTOR_PAYLOAD,
+        active_owner: "host-a",
+        owned_by_current_host: true,
+      },
+      200,
+    );
+
+    const view = await takeoverConnector("wx/1", { adminToken: "admin-secret" });
+
+    expect(calls[0].url).toBe(`${CONNECTORS_PATH}/wx%2F1/takeover`);
+    expect(calls[0].init?.method).toBe("POST");
+    expect(header(CONNECTORS_ADMIN_TOKEN_HEADER, calls[0].init)).toBe("admin-secret");
+    expect(view).toMatchObject({
+      id: "tg-main",
+      active_owner: "host-a",
+      owned_by_current_host: true,
+    });
+
+    respondWith({ error: "接管失败：连接器已停用，请先启用" }, 409);
+    const caught = await takeoverConnector("wx-1").catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(RuntimeApiError);
+    expect((caught as RuntimeApiError).status).toBe(409);
+    expect((caught as RuntimeApiError).message).toContain("已停用");
+  });
+
+  it("runConnectorAction 命中 actions/{action}；空载荷不带 body 与 Content-Type", async () => {
+    respondWith({
+      login_id: "login-1",
+      status: "wait",
+      base_url: "https://ilink.example",
+      qr_code: "qr-1",
+      qr_code_content: "data:image/png;base64,QQ==",
+      expires_at: "2026-01-01T00:05:00Z",
+    });
+
+    const payload = await runConnectorAction("wx-1", " start_login ");
+
+    expect(calls[0].url).toBe(`${CONNECTORS_PATH}/wx-1/actions/start_login`);
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.body).toBeUndefined();
+    expect(header("Content-Type", calls[0].init)).toBeNull();
+    expect(payload).toMatchObject({
+      login_id: "login-1",
+      status: "wait",
+      qr_code_content: "data:image/png;base64,QQ==",
+    });
+  });
+
+  it("runConnectorAction 过滤 undefined 字段；confirmed 载荷归一化 settings/secrets", async () => {
+    respondWith({
+      login_id: "login-1",
+      status: "confirmed",
+      account_id: "acc-1",
+      user_id: "user-1",
+      credential_ready: true,
+      settings: {
+        base_url: "https://ilink.example",
+        account_id: "acc-1",
+        owner_user_id: "user-1",
+      },
+      secrets: { bot_token: "tok-1" },
+      future_field: 42,
+    });
+
+    const payload = await runConnectorAction(
+      "wx-1",
+      "login_status",
+      { login_id: "login-1", base_url: undefined },
+      { adminToken: "tok" },
+    );
+
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ login_id: "login-1" });
+    expect(payload.credential_ready).toBe(true);
+    expect(payload.settings).toEqual({
+      base_url: "https://ilink.example",
+      account_id: "acc-1",
+      owner_user_id: "user-1",
+    });
+    expect(payload.secrets).toEqual({ bot_token: "tok-1" });
+    // 未识别字段原样透传，供通用展示/排障。
+    expect(payload.raw).toMatchObject({ future_field: 42 });
+  });
+
+  it("runConnectorAction 空 action 直接拒绝；非对象载荷抛结构错误", async () => {
+    await expect(runConnectorAction("wx-1", "   ")).rejects.toThrow(/action/);
+
+    respondWith([1, 2, 3]);
+    await expect(runConnectorAction("wx-1", "start_login")).rejects.toThrow(
+      /not an object/,
+    );
   });
 });

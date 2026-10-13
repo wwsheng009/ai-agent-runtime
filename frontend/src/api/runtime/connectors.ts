@@ -9,9 +9,12 @@
 //   DELETE /api/connectors/{id}        → 204
 //   POST   /api/connectors/{id}/reload → 202 {ok:true}
 //   POST   /api/connectors/{id}/test   → 200 {ok:true}（body {chat,text}）
+//   POST   /api/connectors/{id}/takeover        → 200 ConnectorView（503 无 HostID / 404 / 409）
+//   POST   /api/connectors/{id}/actions/{action} → 200 Provider 载荷（body 可选 JSON object）
 //
 // 鉴权与 skills 管理面同口径（handler.go hasValidSearchAdminToken）：
 // `X-Skills-Admin-Token`、或 `Authorization: Bearer <token>`、或环回直连。
+// 调用方未显式传 adminToken 时回落到 readAdminToken()（与页面读取同一存储键）。
 //
 // 归一化纪律（与 skills 客户端一致）：
 //   * 核心结构缺失（`items` / `providers` 非数组）→ 抛错，不降级成「空列表」；
@@ -20,11 +23,14 @@
 //   * 密钥只透传 `secret_keys` 字段名，前端不臆造明文。
 
 import type {
+  ConnectorActionPayload,
   ConnectorFieldError,
   ConnectorSchema,
   ConnectorSubmitPayload,
   ConnectorView,
 } from "@/types/runtime";
+
+import { readAdminToken } from "@/lib/admin-token";
 
 import {
   RuntimeApiError,
@@ -57,7 +63,8 @@ function buildHeaders(
   json: boolean,
 ): Record<string, string> {
   const headers: Record<string, string> = {};
-  const token = options.adminToken?.trim();
+  // 显式传入优先；未传时与页面一致读 localStorage 的同一令牌键。
+  const token = options.adminToken?.trim() || readAdminToken();
   if (token) {
     headers[CONNECTORS_ADMIN_TOKEN_HEADER] = token;
   }
@@ -199,6 +206,51 @@ export async function sendConnectorTestMessage(
   );
 }
 
+/**
+ * 抢占连接器的运行归属（管理面「抢占」按钮，07 §5.6）：以本宿主身份覆盖旧归属
+ * 并重启轮询。成功返回更新后的视图；错误语义：503 未配 HostID / 404 未知 /
+ * 409 已停用或 policy.runtime_owner 指定其它宿主。
+ */
+export async function takeoverConnector(
+  id: string,
+  options: ConnectorRequestOptions = {},
+): Promise<ConnectorView> {
+  const response = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrl(`${connectorPath(id)}/takeover`),
+    requestInit(options, "POST"),
+  );
+  const view = normalizeConnectorView(response);
+  if (!view) {
+    throw new Error("runtime connector payload is missing `id`");
+  }
+  return view;
+}
+
+/**
+ * 执行通道动作（如微信 start_login / login_status）。
+ *
+ * 提交体可选：`payload` 为空（或过滤 undefined 后为空）时不带 body 与
+ * Content-Type；返回载荷归一化为 ConnectorActionPayload（未知字段进 `raw`）。
+ */
+export async function runConnectorAction(
+  id: string,
+  action: string,
+  payload?: Record<string, unknown> | null,
+  options: ConnectorRequestOptions = {},
+): Promise<ConnectorActionPayload> {
+  const actionKey = action.trim();
+  if (!actionKey) {
+    throw new Error("connector action requires an action key");
+  }
+  const response = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrl(
+      `${connectorPath(id)}/actions/${encodeURIComponent(actionKey)}`,
+    ),
+    requestInit(options, "POST", normalizeActionRequestBody(payload)),
+  );
+  return normalizeConnectorActionPayload(response);
+}
+
 /** 从 400 校验错误体读出字段级错误（非该形状时返回空数组）。 */
 export function readConnectorFieldErrors(error: unknown): ConnectorFieldError[] {
   if (!(error instanceof RuntimeApiError)) {
@@ -254,6 +306,56 @@ export function normalizeConnectorView(payload: unknown): ConnectorView | null {
     settings: readStringMap(record.settings),
     secret_keys: readStringArray(record.secret_keys),
     policy: readPolicy(record.policy),
+    active_owner: readString(record.active_owner) || undefined,
+    owned_by_current_host: record.owned_by_current_host === true,
+  };
+}
+
+/**
+ * 动作提交体归一化：丢弃 undefined 字段；结果为空对象时返回 undefined
+ * （后端 body 可选，空体即无参数）。
+ */
+export function normalizeActionRequestBody(
+  payload?: Record<string, unknown> | null,
+): Record<string, unknown> | undefined {
+  if (!payload) {
+    return undefined;
+  }
+  const entries = Object.entries(payload).filter(
+    ([, value]) => value !== undefined,
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/**
+ * 动作返回载荷归一化：已知字段按类型读出，未识别字段原样进 `raw`。
+ * 非对象（数组/标量）视为结构错误——Provider 契约是 JSON object。
+ */
+export function normalizeConnectorActionPayload(
+  payload: unknown,
+): ConnectorActionPayload {
+  const record = asRecord(payload);
+  if (!record) {
+    throw new Error("runtime connector action payload is not an object");
+  }
+  return {
+    login_id: readString(record.login_id) || undefined,
+    status: readString(record.status) || undefined,
+    base_url: readString(record.base_url) || undefined,
+    qr_code: readString(record.qr_code) || undefined,
+    qr_code_content: readString(record.qr_code_content) || undefined,
+    expires_at: readString(record.expires_at) || undefined,
+    refresh_count:
+      typeof record.refresh_count === "number" &&
+      Number.isFinite(record.refresh_count)
+        ? record.refresh_count
+        : undefined,
+    account_id: readString(record.account_id) || undefined,
+    user_id: readString(record.user_id) || undefined,
+    credential_ready: record.credential_ready === true,
+    settings: readStringMap(record.settings),
+    secrets: readStringMap(record.secrets),
+    raw: record,
   };
 }
 
