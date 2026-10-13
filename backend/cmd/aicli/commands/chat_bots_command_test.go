@@ -124,6 +124,9 @@ func TestBotsLocalHostUnavailableReasonRuntimeServerMode(t *testing.T) {
 	if got := botsLocalHostUnavailableReason(&ChatSession{}); !strings.Contains(got, "本机 runtime 未就绪") {
 		t.Fatalf("generic reason = %q", got)
 	}
+	if got := botsLocalHostUnavailableReason(&ChatSession{CapabilitiesInitError: "技能注册失败: boom"}); !strings.Contains(got, "技能注册失败: boom") {
+		t.Fatalf("init error reason = %q", got)
+	}
 }
 
 func TestBotsUnavailableTextSurfacesInitNote(t *testing.T) {

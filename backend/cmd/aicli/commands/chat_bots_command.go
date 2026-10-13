@@ -124,6 +124,16 @@ func botsResolveHost(session *ChatSession) (*LocalConnectorHost, string) {
 	if host := currentLocalConnectorHost(); host != nil && host.Service() != nil && host.Store() != nil {
 		return host, ""
 	}
+	// 斜杠命令不经过 turn 入口的 ensureChatExecutor：首帧后就敲 /bots 时，
+	// 能力面（含 LocalRuntimeHost 与连接器宿主）可能仍在后台装载。先 await
+	// 补齐——与 /skill、/call 同款；幂等，未安装门控的路径（runtime-server/
+	// 测试）是 no-op。
+	if session != nil && session.LocalRuntimeHost == nil {
+		if err := awaitChatCapabilitiesForTurn(context.Background(), session); err != nil {
+			setLocalConnectorInitNote("能力面装载失败：" + err.Error())
+			return nil, "能力面装载失败：" + err.Error()
+		}
+	}
 	host, err := startLocalConnectorsOnDemand(session)
 	if err != nil {
 		if note := localConnectorsInitNote(); note != "" {
@@ -179,6 +189,9 @@ func botsLocalHostUnavailableReason(session *ChatSession) string {
 				return "当前会话由 runtime-server 接管（" + url +
 					"）：本地连接器未挂载——请在该服务器的连接器页管理机器人，或用 --runtime-mode local 重开会话后使用 /bots"
 			}
+		}
+		if initErr := strings.TrimSpace(session.CapabilitiesInitError); initErr != "" {
+			return "会话能力面未挂载：" + initErr
 		}
 	}
 	return "本机 runtime 未就绪（会话能力面未挂载）"
