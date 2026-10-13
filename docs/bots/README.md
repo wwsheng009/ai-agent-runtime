@@ -13,6 +13,7 @@
 | [04-migration-roadmap.md](./04-migration-roadmap.md) | 从 codex-server 的移植映射、分阶段计划、测试策略与风险 |
 | [05-review-and-hardening.md](./05-review-and-hardening.md) | **方案审查与加固**：三个硬缺口（事件无隔离/通知无中台/多前端无契约护栏）、消息分发可靠性与性能、多通道治理、Bot 交互设计、现有架构优化项与决策清单 |
 | [06-target-architecture.md](./06-target-architecture.md) | **目标架构（定稿）与核实**：D1–D10 决策按最佳实践定稿、目标架构图（部署/组件/入站/通知/配置/数据）、组件现状映射、逐条代码级核实与待建清单 |
+| [07-config-ux.md](./07-config-ux.md) | **配置页面与交互设计**：四终端（gateway console / React / 微前端 / TUI）页面落点与线框、扫码与 webhook 流程、凭据+操作逻辑两层配置项、三处存储与密钥语义、便捷性与验收 |
 
 ## 结论摘要（TL;DR）
 
@@ -41,6 +42,9 @@
    多实例（双活）所需的防双写/共享协调/归属路由分级方案见
    [docs/gateway/15-multi-instance-architecture.md](../gateway/15-multi-instance-architecture.md)——
    **不需要自研实例间协议**。
+9. **配置体验**（[07-config-ux.md](./07-config-ux.md)）：gateway console 新增一级「机器人」专用配置域，
+   React/微前端各加同 Schema 页面，TUI 只做 `/bot` 最小操作；微信/QQ 扫码走 `actions`（自动刷新/回填/引导测试），
+   Telegram 一步粘贴 token；密钥三处本地 0600 存储、GET 永不回显。
 
 ## 与现有通知链路的关系
 
