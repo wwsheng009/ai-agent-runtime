@@ -81,6 +81,23 @@ func TestChatBotsListSpecRowsOrder(t *testing.T) {
 	}
 }
 
+func TestBotsUnavailableTextSurfacesInitNote(t *testing.T) {
+	prev := localConnectorsInitNote()
+	t.Cleanup(func() { setLocalConnectorInitNote(prev) })
+
+	setLocalConnectorInitNote("未找到共享 config.yaml（解析路径：C:\\demo\\config.yaml）")
+	text := botsUnavailableText()
+	if !strings.Contains(text, "config.yaml") || !strings.Contains(text, "C:\\demo\\config.yaml") {
+		t.Fatalf("unavailable text should surface the init note, got %q", text)
+	}
+
+	setLocalConnectorInitNote("")
+	fallback := botsUnavailableText()
+	if !strings.Contains(fallback, "连接器未在本会话装配") {
+		t.Fatalf("fallback text = %q", fallback)
+	}
+}
+
 func TestBotsApplyCredentialPatchMergesAndWhitelists(t *testing.T) {
 	store := connectors.NewMemoryStore(connectors.Config{
 		ID: "wx-1", Provider: "wechat", Name: "微信", Enabled: true,

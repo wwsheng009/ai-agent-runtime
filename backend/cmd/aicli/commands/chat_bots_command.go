@@ -97,7 +97,7 @@ func handleChatBotsCommand(session *ChatSession, _ string) {
 	}
 	host := currentLocalConnectorHost()
 	if host == nil || host.Service() == nil || host.Store() == nil {
-		printChatCommandOutput(session, "机器人管理不可用：连接器未在本会话装配（需要交互式 aicli chat 且初始化成功）。")
+		printChatCommandOutput(session, botsUnavailableText())
 		return
 	}
 	// legacy/plain/JSON 投影：内联文档，不进入副屏。
@@ -112,9 +112,18 @@ func executeStructuredBotsCommand(session *ChatSession) CommandResult {
 	}
 	host := currentLocalConnectorHost()
 	if host == nil || host.Service() == nil || host.Store() == nil {
-		return commandTextResult("机器人管理不可用：连接器未在本会话装配（需要交互式 aicli chat 且初始化成功）。")
+		return commandTextResult(botsUnavailableText())
 	}
 	return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenBotsListSpec(host))}
+}
+
+// botsUnavailableText 组装不可用文案：优先给出启动期记录的具体原因
+// （config.yaml 缺失 / 装配失败 / 路径解析失败），否则退回通用说明。
+func botsUnavailableText() string {
+	if note := localConnectorsInitNote(); note != "" {
+		return "机器人管理不可用：" + note + "。"
+	}
+	return "机器人管理不可用：连接器未在本会话装配（需要交互式 aicli chat，且共享 config.yaml 中配置了 connectors 节）。"
 }
 
 // ── 机器人列表副屏 ─────────────────────────────────────────────────────────

@@ -45,17 +45,23 @@ import (
 func startAICLIChatConnectors(cfg *config.Config, host *localChatRuntimeHost) (*LocalConnectorHost, error) {
 	configPath, _, err := resolveAICLIConfigWriteTarget(cfg, "")
 	if err != nil {
+		setLocalConnectorInitNote("解析共享 config.yaml 路径失败：" + err.Error())
 		return nil, err
 	}
 	if strings.TrimSpace(configPath) == "" {
+		setLocalConnectorInitNote("无法解析共享 config.yaml 路径（请检查 aicli 配置或使用 --config 指定）")
 		return nil, errors.New("aicli connectors: 无法解析共享 config.yaml 路径")
 	}
 	// 没有配置文件 = 没有连接器可装配：整段惰性（也避免测试/一次性运行
-	// 触发对共享配置的读取与轮询启动）。
+	// 触发对共享配置的读取与轮询启动）。跳过时记录原因，供 /bots 如实报出。
 	if _, statErr := os.Stat(configPath); statErr != nil {
 		if errors.Is(statErr, fs.ErrNotExist) {
+			note := "未找到共享 config.yaml（解析路径：" + configPath + "）；连接器配置存于该文件，创建它并在其中配置 connectors 后重启会话"
+			setLocalConnectorInitNote(note)
+			logpkg.Infof("aicli connectors: skipped (%s)", note)
 			return nil, nil
 		}
+		setLocalConnectorInitNote("读取共享 config.yaml 失败：" + statErr.Error())
 		return nil, statErr
 	}
 	ctx := context.Background()
@@ -63,7 +69,13 @@ func startAICLIChatConnectors(cfg *config.Config, host *localChatRuntimeHost) (*
 		// 随 chat 宿主生命周期停机（宿主 close 时 lifecycleCtx 取消）。
 		ctx = host.lifecycleCtx
 	}
-	return StartLocalConnectors(ctx, host, configPath, logpkg.Infof)
+	started, startErr := StartLocalConnectors(ctx, host, configPath, logpkg.Infof)
+	if startErr != nil {
+		setLocalConnectorInitNote("连接器装配失败：" + startErr.Error())
+		return nil, startErr
+	}
+	setLocalConnectorInitNote("")
+	return started, nil
 }
 
 // ── 路由挂载（cmd/aicli 的 loopback 服务器调用） ──────────────────────────
@@ -108,6 +120,9 @@ var (
 	// localConnectorHostRef 是本进程当前已装配的连接器宿主（TUI /bots 副屏
 	// 等本机管理面使用）；未装配时为 nil。与 handlers 同锁、同生命周期。
 	localConnectorHostRef *LocalConnectorHost
+	// localConnectorInitNote 记录连接器未装配/装配失败的具体原因（空 = 正常）：
+	// 供 /bots 报出「为什么不可用」，而不是笼统的「未在本会话装配」。
+	localConnectorInitNote string
 )
 
 func currentLocalConnectorHandler(api bool) http.Handler {
@@ -136,6 +151,20 @@ func setLocalConnectorHost(host *LocalConnectorHost) {
 	localConnectorsStateMu.Lock()
 	localConnectorHostRef = host
 	localConnectorsStateMu.Unlock()
+}
+
+// setLocalConnectorInitNote 记录连接器装配状态说明（空串 = 正常）。
+func setLocalConnectorInitNote(note string) {
+	localConnectorsStateMu.Lock()
+	localConnectorInitNote = strings.TrimSpace(note)
+	localConnectorsStateMu.Unlock()
+}
+
+// localConnectorsInitNote 返回连接器未装配/装配失败的原因（空 = 已装配或未尝试）。
+func localConnectorsInitNote() string {
+	localConnectorsStateMu.Lock()
+	defer localConnectorsStateMu.Unlock()
+	return localConnectorInitNote
 }
 
 // ── 生命周期 ───────────────────────────────────────────────────────────────
