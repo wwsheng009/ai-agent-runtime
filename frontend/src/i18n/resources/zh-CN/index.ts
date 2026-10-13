@@ -7,6 +7,7 @@ import { zhLogs } from "./logs";
 import { zhUsageAnalytics } from "./usage-analytics";
 import { zhRuntimeConfig } from "./runtime-config";
 import { zhSkills } from "./skills";
+import { zhConnectors } from "./connectors";
 
 export const zhCN = {
   common: zhCommon,
@@ -17,4 +18,5 @@ export const zhCN = {
   logs: zhLogs,
   usageAnalytics: zhUsageAnalytics,
   skills: zhSkills,
+  connectors: zhConnectors,
 } as const;

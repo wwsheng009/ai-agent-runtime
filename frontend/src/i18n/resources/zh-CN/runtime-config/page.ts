@@ -8,4 +8,5 @@ export const zhRuntimeConfigPage = {
     logs: "日志",
     usage: "用量",
     skills: "技能市场",
+    connectors: "连接器",
   } as const;

@@ -9,6 +9,7 @@ import { enLogs } from "./logs";
 import { enUsageAnalytics } from "./usage-analytics";
 import { enRuntimeConfig } from "./runtime-config";
 import { enSkills } from "./skills";
+import { enConnectors } from "./connectors";
 
 export const enUS = {
   common: enCommon,
@@ -19,4 +20,5 @@ export const enUS = {
   logs: enLogs,
   usageAnalytics: enUsageAnalytics,
   skills: enSkills,
+  connectors: enConnectors,
 } satisfies DeepStringShape<typeof zhCN>;

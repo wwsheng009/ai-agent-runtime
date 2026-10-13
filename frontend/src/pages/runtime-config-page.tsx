@@ -1,6 +1,7 @@
 import {
   ArrowLeftIcon,
   BarChart3Icon,
+  BotIcon,
   DatabaseIcon,
   SparklesIcon,
   TerminalSquareIcon,
@@ -65,6 +66,13 @@ export function RuntimeConfigPage() {
               >
                 <SparklesIcon size={14} />
                 {t("page.skills")}
+              </Link>
+              <Link
+                to="/runtime/connectors"
+                className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+              >
+                <BotIcon size={14} />
+                {t("page.connectors")}
               </Link>
             </nav>
           </div>

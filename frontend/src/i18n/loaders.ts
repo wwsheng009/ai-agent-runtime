@@ -17,7 +17,8 @@ export type NamespaceKey =
   | "settings"
   | "logs"
   | "usageAnalytics"
-  | "skills";
+  | "skills"
+  | "connectors";
 
 export type NamespaceBundle = Record<string, unknown>;
 export type NamespaceLoader = () => Promise<NamespaceBundle>;
@@ -41,6 +42,8 @@ export const namespaceLoaders: NamespaceLoaderTable = {
     usageAnalytics: async () =>
       (await import("./resources/zh-CN/usage-analytics")).zhUsageAnalytics,
     skills: async () => (await import("./resources/zh-CN/skills")).zhSkills,
+    connectors: async () =>
+      (await import("./resources/zh-CN/connectors")).zhConnectors,
   },
   "en-US": {
     common: async () => (await import("./resources/en-US/common")).enCommon,
@@ -53,6 +56,8 @@ export const namespaceLoaders: NamespaceLoaderTable = {
     usageAnalytics: async () =>
       (await import("./resources/en-US/usage-analytics")).enUsageAnalytics,
     skills: async () => (await import("./resources/en-US/skills")).enSkills,
+    connectors: async () =>
+      (await import("./resources/en-US/connectors")).enConnectors,
   },
 };
 

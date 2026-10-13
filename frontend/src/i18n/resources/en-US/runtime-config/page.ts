@@ -10,4 +10,5 @@ export const enRuntimeConfigPage = {
     logs: "Logs",
     usage: "Usage",
     skills: "Skill market",
+    connectors: "Connectors",
   } satisfies DeepStringShape<typeof zhRuntimeConfigPage>;

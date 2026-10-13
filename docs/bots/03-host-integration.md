@@ -98,6 +98,15 @@
 | aicli micro web | 原生 JS（`cmd/aicli/commands/web/js/`） | 新 `connectors.js` + tab | 样板：`provider-editor.js`、`config-admin.js` |
 | runtime-server | React/Vite（`frontend/`） | `pages/connectors-page.tsx` + i18n | 与 `runtime-config-page.tsx` 同级 |
 
+> **实现状态（2026-10-13）**：runtime-server 端最小 React 配置页已落地，路由 `/runtime/connectors`
+> （懒加载，入口在 `runtime-config-page.tsx` 导航）。构成：`pages/connectors-page.tsx`（列表 +
+> 启停/编辑/测试消息/重载/删除 + 新建）、`pages/connectors/{connector-dialog,test-message-dialog}.tsx`、
+> `pages/connectors/shared.ts`（纯逻辑：schema 取字段/表单构建/提交载荷/客户端预校验）、
+> `api/runtime/connectors.ts` + `types/runtime/connectors.ts`（契约客户端与类型，错误按字段级
+> `errors` 归一）。表单完全由 `GET /connectors/schema` 驱动（text/secret/bool/enum/url → 控件映射，
+> 新增通道零改动）；密钥语义 = 留空保持、显式清除 `__clear__`；i18n 走 `connectors` 命名空间
+> （zh-CN/en-US 成对）。gateway console / aicli micro web 两个原生 JS 页面按 P1 待续。
+
 ## 6. API 契约（三宿主统一语义）
 
 | 方法 | 路径 | 说明 | 鉴权 |
