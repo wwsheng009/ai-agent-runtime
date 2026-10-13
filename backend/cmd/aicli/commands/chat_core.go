@@ -309,7 +309,17 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 				if replaceErr := replaceRuntimeMessages(session, replacement); replaceErr != nil {
 					err = fmt.Errorf("%w: 应用 prompt preflight 恢复历史失败: %v", err, replaceErr)
 				} else {
-					warnIfChatSessionSyncFails(session, "shared chatcore preflight recovery sync", syncRuntimeSessionFromChat(session))
+					if session.RuntimeSession != nil {
+						// The recovery replacement has compaction semantics: persist
+						// it verbatim instead of letting the store rebuild the
+						// projection from the canonical transcript.
+						session.RuntimeSession.MarkHistoryReplaced()
+					}
+					if syncErr := syncRuntimeSessionFromChat(session); syncErr != nil {
+						warnIfChatSessionSyncFails(session, "shared chatcore preflight recovery sync", syncErr)
+					} else if session.RuntimeSession != nil {
+						session.RuntimeSession.ClearHistoryReplaced()
+					}
 					preflightErr.ReplacementHistoryApplied = true
 				}
 			}
@@ -328,7 +338,13 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 	if applied := applyChatContextTokensFromUsage(session, loopResult.Response.Usage, promptBudget.ModelCapabilityMaxContextTokens, true); applied <= 0 {
 		applyChatContextTokensFromMessages(session, resultHistory, promptBudget.ModelCapabilityMaxContextTokens, true)
 	}
-	warnIfChatSessionSyncFails(session, "shared chatcore sync", syncRuntimeSessionFromChat(session))
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		warnIfChatSessionSyncFails(session, "shared chatcore sync", err)
+	} else if session.RuntimeSession != nil {
+		// A mid-turn prompt-preflight compaction marked this history as a
+		// deliberate replacement; it has now been persisted verbatim.
+		session.RuntimeSession.ClearHistoryReplaced()
+	}
 	warnIfChatSessionSyncFails(session, "shared chatcore post-turn reconcile", runPostTurnReconcilersAndSync(session))
 
 	if session.Logger != nil && len(loopResult.Response.ToolExecutions) > 0 {
@@ -521,7 +537,18 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		session.RuntimeSession.ApplyCompactTitleLineage(parentSessionID, rootTitleHint)
 	}
 	applyChatCompactContextUsage(session, result, status, true)
-	warnIfChatSessionSyncFails(session, "shared chat auto compact sync", syncRuntimeSessionFromChat(session))
+	if session.RuntimeSession != nil {
+		// Persist the compacted replacement verbatim: without the flag the store
+		// treats it as a stale window and rebuilds the projection from the
+		// canonical transcript, resurrecting pre-compaction messages on the
+		// next Load (2026-10-13 incident).
+		session.RuntimeSession.MarkHistoryReplaced()
+	}
+	if err := syncRuntimeSessionFromChat(session); err != nil {
+		warnIfChatSessionSyncFails(session, "shared chat auto compact sync", err)
+	} else if session.RuntimeSession != nil {
+		session.RuntimeSession.ClearHistoryReplaced()
+	}
 	refreshChatTitleMetadata(session)
 	return cloneSharedChatRuntimeMessages(result.ReplacementHistory), report, nil
 }
@@ -668,6 +695,12 @@ func buildSharedChatPromptPreflightCompactor(session *ChatSession, renderer *aic
 		}
 		emitSharedChatAutoCompactEvent(renderer, report, nil)
 		writeSessionDebugInfo(session, formatSharedChatAutoCompactDebug(report, nil), true)
+		if session.RuntimeSession != nil {
+			// The compacted history replaces what this turn (and every later
+			// restore) sends. Flag it so the post-turn sync persists the
+			// replacement verbatim instead of a canonical rebuild.
+			session.RuntimeSession.MarkHistoryReplaced()
+		}
 		return cloneSharedChatRuntimeMessages(result.ReplacementHistory), true, nil
 	}
 }

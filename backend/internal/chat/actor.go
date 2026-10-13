@@ -2518,6 +2518,11 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	rootTitleHint := session.CompactRootTitleCandidate()
 	titleSnapshot := snapshotSessionTitleState(session)
 	previousPromptCacheEpoch := replaceSessionHistoryAndAdvancePromptCacheEpoch(session, result.ReplacementHistory)
+	// The replacement must land in the durable prompt projection verbatim:
+	// without the flag the store may treat it as a stale window and rebuild
+	// the projection from the append-only canonical transcript, resurrecting
+	// pre-compaction messages on the next Load (2026-10-13 incident).
+	session.MarkHistoryReplaced()
 	// Explicit session compaction rewrites an already-cacheable prefix outside
 	// ReActLoop. Advance the same durable generation that RunWithSession reads
 	// before the replacement history can be persisted.
@@ -2738,6 +2743,8 @@ func (a *SessionActor) runManualCompact(
 	rootTitleHint := session.CompactRootTitleCandidate()
 	titleSnapshot := snapshotSessionTitleState(session)
 	previousPromptCacheEpoch := replaceSessionHistoryAndAdvancePromptCacheEpoch(session, result.ReplacementHistory)
+	// See the auto-compaction path above: persist the replacement verbatim.
+	session.MarkHistoryReplaced()
 	// Keep explicit actor-side compaction on the same durable cache-generation
 	// lane as automatic ReAct session recovery.
 	// Compact rewrites history in place; record parent/root lineage + generation

@@ -910,29 +910,37 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 			// fallback for stale windows and for pre-v2 rows that have not been
 			// backfilled yet.
 			source := session.History
-			proven := false
-			if !s.forceLegacyProjectionRebuild {
-				proven, err = s.incomingHistoryReachesNewestFastTx(ctx, tx, session.ID, session.History)
-				if err != nil {
-					// 证据查询失败不改变语义：按未证明处理，回退全量路径。
-					proven = false
-				}
-			}
-			if proven {
-				s.canonicalFastProofs.Add(1)
+			if session.HistoryReplaced {
+				// 压缩替换是一等事实：调用者刚把历史重写成"摘要 + 保留尾巴"，
+				// canonical 转录对压缩只增不减（见 truncateCanonicalToHistoryTx
+				// 注释）。任何"从 canonical 重建"都会把压缩前的消息带回投影，
+				// 下一次 Load/恢复就重新发送全量历史。这里无条件信任调用者；
+				// 一次性标志在本次 Update 成功后清除。
 			} else {
-				canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
-				if loadErr != nil || len(canonical) == 0 {
-					canonical = session.History
+				proven := false
+				if !s.forceLegacyProjectionRebuild {
+					proven, err = s.incomingHistoryReachesNewestFastTx(ctx, tx, session.ID, session.History)
+					if err != nil {
+						// 证据查询失败不改变语义：按未证明处理，回退全量路径。
+						proven = false
+					}
 				}
-				source = canonical
-				if incomingHistoryReachesNewest(session.History, canonical) {
-					source = session.History
+				if proven {
+					s.canonicalFastProofs.Add(1)
+				} else {
+					canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
+					if loadErr != nil || len(canonical) == 0 {
+						canonical = session.History
+					}
+					source = canonical
+					if incomingHistoryReachesNewest(session.History, canonical) {
+						source = session.History
+					}
+					s.canonicalFullLoads.Add(1)
+					// 本次回退已经把整段 canonical 读进内存，顺手补齐 identity_hash：
+					// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
+					s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
 				}
-				s.canonicalFullLoads.Add(1)
-				// 本次回退已经把整段 canonical 读进内存，顺手补齐 identity_hash：
-				// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
-				s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
 			}
 			projection, err := s.buildPromptProjection(source)
 			if err != nil {
@@ -956,6 +964,10 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 	// the same in-memory session (e.g. an exit sync holding a stale window) can
 	// never truncate canonical rows again.
 	session.HistoryTruncated = false
+	// The compaction replacement (if any) has landed in the prompt projection:
+	// consume the one-shot flag so a later ordinary sync cannot keep
+	// re-asserting the replacement over newer persisted state.
+	session.HistoryReplaced = false
 	return nil
 }
 

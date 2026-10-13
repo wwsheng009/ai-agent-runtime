@@ -5837,6 +5837,12 @@ func addContextProjectionMetadata(payload map[string]interface{}, projection con
 	} else if projection.InvalidReason != "" {
 		payload["context_projection_invalid_reason"] = projection.InvalidReason
 	}
+	if projection.Source == contextledger.ProjectionEstimated && projection.Calibration > 1 {
+		// The estimated fallback was scaled by the observation's wire-bias
+		// ratio (see contextledger); expose it so the gate decision stays
+		// explainable offline.
+		payload["context_estimate_calibration"] = projection.Calibration
+	}
 }
 
 // copyContextProjectionFields lifts the E/A/P decision inputs from a metadata
@@ -5853,6 +5859,7 @@ func copyContextProjectionFields(target, source map[string]interface{}) {
 		"context_anchor_tokens",
 		"context_delta_tokens",
 		"context_projection_invalid_reason",
+		"context_estimate_calibration",
 	} {
 		if value, ok := source[key]; ok && value != nil {
 			target[key] = value

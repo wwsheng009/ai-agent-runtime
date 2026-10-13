@@ -84,6 +84,17 @@ type Session struct {
 	// the removed messages stay in session_messages — resurrecting on the next
 	// GET /history or Load. It only applies to the next successful Update.
 	HistoryTruncated bool `json:"-" yaml:"-"`
+
+	// HistoryReplaced is a transient flag (never persisted) declaring that the
+	// in-memory history is a deliberate compaction replacement (summary +
+	// retained tail) rather than a stale/shorter window of the canonical
+	// transcript. Storage replaces the prompt projection with the
+	// caller-supplied history verbatim and must not rebuild it from the
+	// canonical transcript: the canonical log is append-only for compactions
+	// (see truncateCanonicalToHistoryTx), so a canonical rebuild would
+	// resurrect pre-compaction messages and re-send them after the next
+	// restore. One-shot: cleared after the next successful Update.
+	HistoryReplaced bool `json:"-" yaml:"-"`
 }
 
 // SessionPreview 会话预览信息
@@ -229,6 +240,29 @@ func (s *Session) MarkHistoryTruncated() {
 		return
 	}
 	s.HistoryTruncated = true
+}
+
+// MarkHistoryReplaced declares that the current in-memory history is a
+// deliberate compaction replacement (summary + retained tail). Only
+// model-driven compaction paths (pre-turn / mid-turn auto compact, explicit
+// actor compaction) may call this; the storage layer then persists the
+// replacement verbatim instead of rebuilding the projection from the
+// append-only canonical transcript.
+func (s *Session) MarkHistoryReplaced() {
+	if s == nil {
+		return
+	}
+	s.HistoryReplaced = true
+}
+
+// ClearHistoryReplaced consumes the one-shot replacement flag after the
+// replacement has been persisted, so a later ordinary sync cannot keep
+// re-asserting a stale history as authoritative.
+func (s *Session) ClearHistoryReplaced() {
+	if s == nil {
+		return
+	}
+	s.HistoryReplaced = false
 }
 
 // EnsureMessageIdentities backfills stable message_id / turn_id on loaded history.
@@ -778,6 +812,7 @@ func (s *Session) CloneWithoutHistory() *Session {
 		ExpiresAt:             expiresAt,
 		PreserveUpdatedAt:     s.PreserveUpdatedAt,
 		HistoryTruncated:      s.HistoryTruncated,
+		HistoryReplaced:       s.HistoryReplaced,
 		HistoryLoaded:         false,
 	}
 

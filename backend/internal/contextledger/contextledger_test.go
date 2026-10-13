@@ -1,6 +1,7 @@
 package contextledger
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -52,7 +53,7 @@ func TestProjectWithoutAnchorFallsBackToEstimate(t *testing.T) {
 	projection := ledger.Project(ProjectInput{
 		Messages:        messages,
 		MessageEstimate: 120,
-		ToolTokens:     30,
+		ToolTokens:      30,
 		ToolFingerprint: "tools-v1",
 	})
 	if projection.Source != ProjectionEstimated {
@@ -63,6 +64,65 @@ func TestProjectWithoutAnchorFallsBackToEstimate(t *testing.T) {
 	}
 	if projection.Tokens != 150 {
 		t.Fatalf("expected estimate 150, got %d", projection.Tokens)
+	}
+}
+
+// TestProjectInvalidAnchorCalibratesEstimateByObservedWireBias pins the
+// 2026-10-13 incident shape: a restore rotated the prompt-cache epoch
+// (epoch_changed), the anchor was dropped, and the raw estimate (715K) passed
+// the 0.9×1M=900K auto-compact gate while the provider counted ~1.1M against
+// the 1M window. The surviving observation's wire-bias ratio must scale the
+// estimated fallback so the gate stays conservative.
+func TestProjectInvalidAnchorCalibratesEstimateByObservedWireBias(t *testing.T) {
+	ledger := New(testFingerprinter)
+	base := messagesOf("one", "two", "three")
+	// Wire bias 1.8x: estimate 1000 -> provider counted 1800.
+	ledger.Observe(validObservation(base, 1800, 1000))
+
+	projection := ledger.Project(ProjectInput{
+		Messages:        append(append([]types.Message{}, base...), types.Message{Role: "tool", Content: "x"}),
+		MessageEstimate: 500,
+		ToolTokens:      50,
+		ToolFingerprint: "tools-v1",
+		Provider:        "commandgo",
+		Model:           "ling-3.1-flash",
+		Epoch:           1, // epoch rotated: the anchor identity is invalid
+	})
+	if projection.Source != ProjectionEstimated || projection.InvalidReason != "epoch_changed" {
+		t.Fatalf("expected calibrated fallback, got %+v", projection)
+	}
+	if projection.EstimateTokens != 550 {
+		t.Fatalf("raw estimate must stay 550, got %d", projection.EstimateTokens)
+	}
+	if projection.Tokens != 990 { // ceil(550 * 1.8)
+		t.Fatalf("expected calibrated 990, got %d", projection.Tokens)
+	}
+	if projection.Calibration < 1.79 || projection.Calibration > 1.81 {
+		t.Fatalf("expected calibration ~1.8, got %v", projection.Calibration)
+	}
+}
+
+// TestProjectInvalidAnchorCalibrationClamp keeps corrupted observations from
+// inflating the estimated fallback without bound.
+func TestProjectInvalidAnchorCalibrationClamp(t *testing.T) {
+	ledger := New(testFingerprinter)
+	base := messagesOf("one", "two", "three")
+	ledger.Observe(validObservation(base, 10000, 100)) // ratio 100x
+
+	projection := ledger.Project(ProjectInput{
+		Messages:        append(append([]types.Message{}, base...), types.Message{Role: "tool", Content: "x"}),
+		MessageEstimate: 100,
+		ToolTokens:      10,
+		ToolFingerprint: "tools-v1",
+		Provider:        "commandgo",
+		Model:           "ling-3.1-flash",
+		Epoch:           1,
+	})
+	if projection.Calibration != estimateCalibrationMax {
+		t.Fatalf("expected clamp at %v, got %v", estimateCalibrationMax, projection.Calibration)
+	}
+	if want := int(math.Ceil(110 * estimateCalibrationMax)); projection.Tokens != want {
+		t.Fatalf("expected clamped %d, got %d", want, projection.Tokens)
 	}
 }
 
@@ -224,8 +284,17 @@ func TestProjectInvalidationMatrix(t *testing.T) {
 			if projection.InvalidReason != testCase.reason {
 				t.Fatalf("expected reason %q, got %q", testCase.reason, projection.InvalidReason)
 			}
-			if projection.Tokens != in.MessageEstimate+in.ToolTokens {
-				t.Fatalf("expected estimate fallback %d, got %d", in.MessageEstimate+in.ToolTokens, projection.Tokens)
+			estimate := in.MessageEstimate + in.ToolTokens
+			calibration := estimateCalibration(obs)
+			if calibration < 1 {
+				calibration = 1
+			}
+			want := int(math.Ceil(float64(estimate) * calibration))
+			if projection.Tokens != want {
+				t.Fatalf("expected calibrated estimate fallback %d, got %d", want, projection.Tokens)
+			}
+			if projection.EstimateTokens != estimate {
+				t.Fatalf("raw estimate must stay observable %d, got %d", estimate, projection.EstimateTokens)
 			}
 		})
 	}

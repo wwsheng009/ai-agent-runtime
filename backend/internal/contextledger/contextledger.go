@@ -14,11 +14,23 @@
 //	projection = max(observation.PromptTokens + delta,
 //	                 messageEstimateNow + toolTokensNow)
 //
+// When the anchor identity is invalidated (epoch change after a restart,
+// history rewrite, ...) but a provider observation still exists, the
+// estimated fallback is scaled by the observation's wire-bias ratio
+// (observation.PromptTokens / observation.MessageEstimate, clamped to
+// [1, estimateCalibrationMax]): the local estimator measures parsed message
+// content while the provider counts the serialized wire payload, a systematic
+// 1.2x-1.9x undercount. Without the scaling an invalidated anchor silently
+// re-opens the oversized-request failure class the anchor was introduced to
+// close (2026-10-11: 1.18x; 2026-10-13: 1.56x-1.85x, gate admitted a
+// ~1.1M-token prompt against a 1M window).
+//
 // The anchor is invalidated when the provider/model, prompt-cache epoch, tool
 // surface fingerprint or the message prefix it was observed on changes.
 package contextledger
 
 import (
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +59,12 @@ const (
 	// the guard effective against corruption without rejecting legitimate
 	// anchors.
 	anchorCeilingFactor = 16
+
+	// estimateCalibrationMax caps the wire-bias calibration applied to the
+	// estimated fallback. The observed samples sit at 1.18x (2026-10-11) and
+	// 1.56x-1.85x (2026-10-13); the cap only guards corrupted observations,
+	// implausible-anchor detection stays in invalidReason.
+	estimateCalibrationMax = 3.0
 )
 
 // Observation is a frozen record of one provider-reported request usage plus
@@ -112,8 +130,11 @@ type Projection struct {
 	EstimateTokens int
 	AnchorTokens   int
 	DeltaTokens    int
-	Source         string
-	InvalidReason  string
+	// Calibration is the wire-bias factor applied to the estimate when the
+	// projection fell back to estimated with a usable observation (0 = none).
+	Calibration   float64
+	Source        string
+	InvalidReason string
 }
 
 // Ledger stores the latest observation for one session/run. It is safe for
@@ -178,7 +199,7 @@ func (l *Ledger) Clear() {
 // Project returns the projected token size for in.
 func (l *Ledger) Project(in ProjectInput) Projection {
 	if l == nil {
-		return projectEstimate(in, "no_ledger")
+		return projectEstimate(in, "no_ledger", 0)
 	}
 	l.mu.Lock()
 	obs, ok, fp := l.obs, l.ok, l.fp
@@ -190,13 +211,13 @@ func (l *Ledger) Project(in ProjectInput) Projection {
 // their own observation storage, e.g. the chat actor pre-turn check).
 func Project(obs Observation, ok bool, fp Fingerprinter, in ProjectInput) Projection {
 	if !ok {
-		return projectEstimate(in, "no_anchor")
+		return projectEstimate(in, "no_anchor", 0)
 	}
 	if !obs.Valid() {
-		return projectEstimate(in, "anchor_invalid")
+		return projectEstimate(in, "anchor_invalid", 0)
 	}
 	if reason := invalidReason(obs, fp, in); reason != "" {
-		return projectEstimate(in, reason)
+		return projectEstimate(in, reason, estimateCalibration(obs))
 	}
 
 	delta := in.MessageEstimate - obs.MessageEstimate
@@ -217,11 +238,36 @@ func Project(obs Observation, ok bool, fp Fingerprinter, in ProjectInput) Projec
 	}
 }
 
-func projectEstimate(in ProjectInput, reason string) Projection {
+// estimateCalibration returns the observation's wire-bias ratio
+// (provider prompt tokens over the local message estimate at observation
+// time), clamped to [1, estimateCalibrationMax]. 0 means "unavailable": the
+// caller keeps the raw local estimate.
+func estimateCalibration(obs Observation) float64 {
+	if obs.PromptTokens <= 0 || obs.MessageEstimate <= 0 {
+		return 0
+	}
+	ratio := float64(obs.PromptTokens) / float64(obs.MessageEstimate)
+	if ratio < 1 {
+		return 1
+	}
+	if ratio > estimateCalibrationMax {
+		return estimateCalibrationMax
+	}
+	return ratio
+}
+
+func projectEstimate(in ProjectInput, reason string, calibration float64) Projection {
 	estimate := estimateTokens(in)
+	tokens := estimate
+	if calibration > 1 {
+		// Ceil so the gate never rounds a borderline payload down below the
+		// provider's expected count.
+		tokens = int(math.Ceil(float64(estimate) * calibration))
+	}
 	return Projection{
-		Tokens:         estimate,
+		Tokens:         tokens,
 		EstimateTokens: estimate,
+		Calibration:    calibration,
 		Source:         ProjectionEstimated,
 		InvalidReason:  reason,
 	}
