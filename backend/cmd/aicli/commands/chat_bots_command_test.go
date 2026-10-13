@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -54,6 +55,116 @@ func (fakeBotsProvider) Send(context.Context, connectors.Config, string, []conne
 
 func (f fakeBotsProvider) RunAction(context.Context, connectors.Config, string, map[string]any) (map[string]any, error) {
 	return nil, f.actionErr
+}
+
+// fakeBotsScanProvider 驱动扫码状态机：login_status 依次返回 wait → scanned →
+// confirmed(带凭据合并补丁)。
+type fakeBotsScanProvider struct {
+	mu          sync.Mutex
+	startCalls  int
+	statusCalls int
+}
+
+func (f *fakeBotsScanProvider) Name() string { return "wechat" }
+
+func (f *fakeBotsScanProvider) Schema() api.ProviderSchema {
+	return api.ProviderSchema{
+		Provider: "wechat", Label: "微信", Modes: []string{"polling"},
+		Actions: []api.ActionSpec{{Key: "start_login", Label: "扫码登录", Kind: "qr"}},
+	}
+}
+
+func (f *fakeBotsScanProvider) Activate(context.Context, connectors.Config) (connectors.Activation, error) {
+	return connectors.Activation{}, nil
+}
+
+func (f *fakeBotsScanProvider) Deactivate(context.Context, connectors.Config) error { return nil }
+
+func (f *fakeBotsScanProvider) Send(context.Context, connectors.Config, string, []connectors.OutboundMessage) error {
+	return nil
+}
+
+func (f *fakeBotsScanProvider) RunAction(_ context.Context, _ connectors.Config, action string, _ map[string]any) (map[string]any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if action == "start_login" {
+		f.startCalls++
+		return map[string]any{
+			"login_id":        fmt.Sprintf("login-%d", f.startCalls),
+			"qr_code_content": "https://ilink.example/login",
+		}, nil
+	}
+	f.statusCalls++
+	switch f.statusCalls {
+	case 1:
+		return map[string]any{"status": "wait"}, nil
+	case 2:
+		return map[string]any{"status": "scanned"}, nil
+	default:
+		return map[string]any{
+			"status":           "confirmed",
+			"credential_ready": true,
+			"settings": map[string]any{
+				"base_url":      "https://ilink.example",
+				"account_id":    "acct-1",
+				"owner_user_id": "owner-9",
+			},
+			"secrets": map[string]any{"bot_token": "tk-9"},
+		}, nil
+	}
+}
+
+// TestChatBotsScanScreenAutoClosesAndBackfills 锁定扫码实况副屏的状态机：
+// 副屏内轮询（wait → scanned → confirmed）→ 凭据回填 → ctx 取消自动关屏 →
+// AfterClose 在主屏只打印一行结果（而不是把二维码留在主屏）。
+func TestChatBotsScanScreenAutoClosesAndBackfills(t *testing.T) {
+	chatScreenTestSeamsInstall(t, true)
+	session := newUnifiedChatScreenTestSession(t)
+
+	store := connectors.NewMemoryStore(connectors.Config{ID: "wx-scan", Provider: "wechat", Name: "微信", Enabled: true})
+	service := connectors.New(connectors.Deps{Store: store, Logf: func(string, ...any) {}})
+	provider := &fakeBotsScanProvider{}
+	require.NoError(t, service.Register(provider))
+	host := &LocalConnectorHost{store: store, service: service}
+
+	prevInterval, prevDeadline := botsScanPollInterval, botsScanDeadline
+	botsScanPollInterval = time.Millisecond
+	botsScanDeadline = 2 * time.Second
+	defer func() { botsScanPollInterval, botsScanDeadline = prevInterval, prevDeadline }()
+
+	// 无 TTY 驱动桩：反复驱动 Refresh 直至 ctx 取消（成功自动关屏）。
+	prevRunner := botsScanScreenRunner
+	botsScanScreenRunner = func(_ *ChatSession, _ ui.ScreenLease, ctx context.Context, options ui.DebugOverlayOptions) error {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && ctx.Err() == nil {
+			options.Refresh(ui.DebugOverlayRefreshTick)
+			time.Sleep(time.Millisecond)
+		}
+		return ctx.Err()
+	}
+	t.Cleanup(func() { botsScanScreenRunner = prevRunner })
+
+	var outputs []string
+	prevObserver := chatCommandOutputObserver
+	chatCommandOutputObserver = func(_ *ChatSession, text string) { outputs = append(outputs, text) }
+	t.Cleanup(func() { chatCommandOutputObserver = prevObserver })
+
+	cfg, ok := store.GetConfig("wx-scan")
+	require.True(t, ok)
+	runner := botsActionProvider(host, "wechat")
+	require.NotNil(t, runner)
+	payload, err := runner.RunAction(context.Background(), cfg, "start_login", nil)
+	require.NoError(t, err)
+
+	state := newBotsScanScreenState(host, runner, cfg, provider.Schema(), "start_login", payload)
+	chatScreenOpenAndApply(session, chatScreenBotsScanSpec(state))
+
+	joined := strings.Join(outputs, "\n")
+	require.Contains(t, joined, "扫码登录成功")
+	require.NotContains(t, joined, "等待扫码", "主屏不应再出现二维码/等待文案（它在副屏里）")
+	got, _ := store.GetConfig("wx-scan")
+	require.Equal(t, "tk-9", got.Secrets["bot_token"])
+	require.Equal(t, []string{"owner-9"}, got.Policy.AllowedUsers)
 }
 
 // TestChatBotsNestedScreenAppliesAfterClose 锁定嵌套副屏必须经

@@ -27,10 +27,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
 
+	ui "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/api"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -42,6 +44,7 @@ const (
 	chatBotsScreenActionID   = "bots.action"
 	chatBotsScreenDeleteID   = "bots.delete"
 	chatBotsScreenLogsID     = "bots.logs"
+	chatBotsScreenScanID     = "bots.scan"
 
 	// botsQRActionKind 是 Schema 里扫码动作的 kind（与三端前端同一约定）。
 	botsQRActionKind = "qr"
@@ -471,8 +474,9 @@ func botsCreateAndScan(session *ChatSession, host *LocalConnectorHost, schema ap
 	botsStartScanFlow(session, host, cfg, schema)
 }
 
-// botsStartScanFlow 执行 start_login 并展示二维码/链接，然后在后台轮询
-// login_status（goroutine 不阻塞输入循环）。
+// botsStartScanFlow 执行 start_login 并打开「扫码登录」实况副屏：屏内展示
+// 二维码与实时状态（空闲 tick 自动刷新），confirmed 后自动回填并自动关屏，
+// Esc 取消。全屏能力不足时降级为主屏二维码 + 后台轮询（botsPollLogin）。
 func botsStartScanFlow(session *ChatSession, host *LocalConnectorHost, cfg connectors.Config, schema api.ProviderSchema) {
 	runner := botsActionProvider(host, cfg.Provider)
 	if runner == nil {
@@ -489,13 +493,265 @@ func botsStartScanFlow(session *ChatSession, host *LocalConnectorHost, cfg conne
 		printChatCommandOutput(session, "获取二维码失败："+err.Error())
 		return
 	}
-	loginID := botsPayloadString(payload, "login_id")
-	botsPrintQR(session, cfg, payload)
-	if loginID == "" {
+	if botsPayloadString(payload, "login_id") == "" {
 		printChatCommandOutput(session, "登录会话缺少 login_id，已停止轮询。")
 		return
 	}
-	go botsPollLogin(session, host, runner, cfg, schema, loginID)
+	state := newBotsScanScreenState(host, runner, cfg, schema, qrKey, payload)
+	chatScreenOpenAndApply(session, chatScreenBotsScanSpec(state))
+}
+
+// ── 扫码登录实况副屏（状态机 + debug overlay 渲染） ────────────────────────
+
+// botsScanScreenRunner 是扫码副屏的渲染入口（RunDocument）：默认跑 ui 的
+// debug overlay（空闲 tick 自动驱动 Refresh，~75ms；ctx 取消即退出）；
+// 测试替换为无 TTY 的驱动桩。
+var botsScanScreenRunner = func(session *ChatSession, lease ui.ScreenLease, ctx context.Context, options ui.DebugOverlayOptions) error {
+	return ui.RunDebugOverlayWithLease(ctx, resumeFullScreenTerminal(session), options, lease)
+}
+
+// botsScanScreenState 是扫码副屏的状态机：
+//   - Refresh 在 overlay 的空闲 tick 上被调用（必须非阻塞、非 actor goroutine）：
+//     这里只做节流调度（每 botsScanPollInterval 发起一次后台轮询）并返回当前快照，
+//     真正的网络轮询在 goroutine 里跑；
+//   - confirmed → 回填凭据 → cancel ctx（overlay 每帧检查 ctx.Err() → 自动关屏）；
+//   - Esc 由用户关闭 → AfterClose 调 abort() 停轮询并给出一行提示。
+type botsScanScreenState struct {
+	mu      sync.Mutex
+	host    *LocalConnectorHost
+	runner  botsActionRunner
+	cfg     connectors.Config
+	schema  api.ProviderSchema
+	qrKey   string
+	loginID string
+	payload map[string]any
+
+	ctx       context.Context
+	cancel    context.CancelFunc
+	polling   bool
+	lastPoll  time.Time
+	status    string
+	refreshes int
+	errors    int
+	done      bool
+	final     string
+
+	body    string
+	version int
+
+	// lastSeenVersion 只由 overlay 渲染 goroutine 读写（Refresh 的调用方）。
+	lastSeenVersion int
+}
+
+func newBotsScanScreenState(host *LocalConnectorHost, runner botsActionRunner, cfg connectors.Config, schema api.ProviderSchema, qrKey string, payload map[string]any) *botsScanScreenState {
+	ctx, cancel := context.WithCancel(context.Background())
+	state := &botsScanScreenState{
+		host: host, runner: runner, cfg: cfg, schema: schema, qrKey: qrKey,
+		loginID:         botsPayloadString(payload, "login_id"),
+		payload:         payload,
+		ctx:             ctx,
+		cancel:          cancel,
+		status:          "wait",
+		lastSeenVersion: -1,
+	}
+	state.renderBodyLocked()
+	return state
+}
+
+func (st *botsScanScreenState) title() string {
+	return "扫码登录：" + botsConnectorTitle(st.cfg)
+}
+
+func (st *botsScanScreenState) snapshot() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.body
+}
+
+func (st *botsScanScreenState) isDone() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.done
+}
+
+func (st *botsScanScreenState) finalMessage() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.final
+}
+
+// renderBodyLocked 依据当前状态重建屏幕正文（调用方持锁）。
+func (st *botsScanScreenState) renderBodyLocked() {
+	var builder strings.Builder
+	builder.WriteString("状态：" + botsScanStatusText(st.status) + "（每 2 秒自动刷新，Esc 取消）\n\n")
+	builder.WriteString(botsQRBody(st.cfg, st.payload))
+	if st.final != "" {
+		builder.WriteString("\n\n" + st.final)
+	}
+	st.body = builder.String()
+	st.version++
+}
+
+// refresh 是 overlay 的刷新回调（空闲 tick + r 键）：非阻塞，只做节流与快照。
+func (st *botsScanScreenState) refresh(_ ui.DebugOverlayRefreshTrigger) (string, string, bool) {
+	st.mu.Lock()
+	schedule := !st.done && !st.polling && time.Since(st.lastPoll) >= botsScanPollInterval
+	if schedule {
+		st.polling = true
+		st.lastPoll = time.Now()
+	}
+	body, version := st.body, st.version
+	st.mu.Unlock()
+	if schedule {
+		go st.pollOnce()
+	}
+	changed := version != st.lastSeenVersion
+	st.lastSeenVersion = version
+	return st.title(), body, changed
+}
+
+// pollOnce 在一次后台轮询里查询 login_status 并按结果推进状态机。
+func (st *botsScanScreenState) pollOnce() {
+	defer func() {
+		st.mu.Lock()
+		st.polling = false
+		st.mu.Unlock()
+	}()
+	payload, err := st.runner.RunAction(st.ctx, st.cfg, botsLoginStatusAction, map[string]any{"login_id": st.loginID})
+	if err != nil {
+		if st.ctx.Err() != nil { // 用户取消/成功自动关屏：静默退出。
+			return
+		}
+		st.mu.Lock()
+		st.errors++
+		fail := st.errors >= botsScanMaxErrors
+		attempts := st.errors
+		st.mu.Unlock()
+		if fail {
+			st.finish(fmt.Sprintf("扫码登录失败（连续 %d 次轮询错误）：%v", attempts, err))
+		}
+		return
+	}
+	status := botsPayloadString(payload, "status")
+	st.mu.Lock()
+	st.errors = 0
+	st.status = status
+	switch status {
+	case "confirmed":
+		credentialReady := botsPayloadBool(payload, "credential_ready")
+		st.mu.Unlock()
+		if !credentialReady {
+			st.finish("已确认登录，等待凭据就绪（可稍后重新运行 /bots）。")
+			return
+		}
+		if patchErr := botsApplyCredentialPatch(st.host, st.cfg, payload); patchErr != nil {
+			st.finish("凭据回填失败：" + patchErr.Error())
+			return
+		}
+		st.finish(fmt.Sprintf("扫码登录成功：%s 凭据已回填（owner 已加入 allowed_users）。", st.cfg.ID))
+		return
+	case "expired":
+		st.refreshes++
+		tooMany := st.refreshes > botsScanMaxRefresh
+		st.mu.Unlock()
+		if tooMany {
+			st.finish("二维码多次过期，已停止（可重新运行 /bots）。")
+			return
+		}
+		refreshed, refreshErr := st.runner.RunAction(st.ctx, st.cfg, st.qrKey, map[string]any{})
+		if refreshErr != nil {
+			return // 下一拍再试
+		}
+		st.mu.Lock()
+		if newID := botsPayloadString(refreshed, "login_id"); newID != "" {
+			st.loginID = newID
+		}
+		st.payload = refreshed
+		st.status = "wait"
+		st.renderBodyLocked()
+		st.mu.Unlock()
+	default:
+		st.renderBodyLocked()
+		st.mu.Unlock()
+	}
+}
+
+// finish 结束流程：写入终态、重绘并 cancel ctx（overlay 自动关屏）。
+func (st *botsScanScreenState) finish(message string) {
+	st.mu.Lock()
+	if st.done {
+		st.mu.Unlock()
+		return
+	}
+	st.done = true
+	st.final = strings.TrimSpace(message)
+	st.renderBodyLocked()
+	cancel := st.cancel
+	st.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// abort 停止后台轮询（用户 Esc 取消时调用）。
+func (st *botsScanScreenState) abort() {
+	if st.cancel != nil {
+		st.cancel()
+	}
+}
+
+func chatScreenBotsScanSpec(state *botsScanScreenState) chatScreenSpec {
+	const hint = "r 刷新状态 · Esc 取消"
+	initial := state.snapshot()
+	return chatScreenSpec{
+		ID:          chatBotsScreenScanID,
+		Title:       state.title(),
+		Kind:        chatScreenDocument,
+		Doc:         textLinesDocument(strings.Split(initial, "\n")),
+		RefreshHint: hint,
+		Trigger:     "command",
+		RunDocument: func(session *ChatSession, lease ui.ScreenLease, _ chatScreenSpec) error {
+			err := botsScanScreenRunner(session, lease, state.ctx, ui.DebugOverlayOptions{
+				Title:       state.title(),
+				Body:        initial,
+				Refresh:     state.refresh,
+				RefreshHint: hint,
+			})
+			if state.isDone() {
+				// 成功/失败/超时触发的自动关屏（ctx cancel）：不是渲染错误。
+				return nil
+			}
+			return err
+		},
+		AfterClose: func(session *ChatSession, outcome chatScreenOutcome) {
+			if outcome.Degraded {
+				// 全屏能力不足：降级为主屏二维码 + 后台轮询 + 补充行。
+				state.abort()
+				payload := state.payloadSnapshot()
+				botsPrintQR(session, state.cfg, payload)
+				go botsPollLogin(session, state.host, state.runner, state.cfg, state.schema, state.loginIDSnapshot())
+				return
+			}
+			if message := state.finalMessage(); message != "" {
+				printChatCommandOutput(session, message)
+				return
+			}
+			state.abort()
+			printChatCommandOutput(session, "已取消扫码（可重新运行 /bots）。")
+		},
+	}
+}
+
+func (st *botsScanScreenState) payloadSnapshot() map[string]any {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.payload
+}
+
+func (st *botsScanScreenState) loginIDSnapshot() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.loginID
 }
 
 // botsPollLogin 后台轮询 login_status：状态变化经 ephemeral 补充行写回主屏；
@@ -603,12 +859,17 @@ func botsApplyCredentialPatch(host *LocalConnectorHost, cfg connectors.Config, p
 	return nil
 }
 
-// botsPrintQR 把登录载荷渲染到主屏：data:image PNG 尽力渲染为终端块字符
-// （近似采样，识别困难时以 web 页兜底）；URL/文本直接给链接。
+// botsPrintQR 把登录载荷渲染到主屏（降级路径：全屏副屏不可用时使用）。
 func botsPrintQR(session *ChatSession, cfg connectors.Config, payload map[string]any) {
+	printChatCommandOutput(session, "机器人 "+cfg.ID+" 扫码登录：\n"+botsQRBody(cfg, payload))
+}
+
+// botsQRBody 渲染二维码正文（不含标题行）：data:image PNG 尽力渲染为终端块
+// 字符（近似采样，识别困难时以 web 页兜底）；URL/文本做本地 QR 编码渲染，
+// 失败才退回链接原文。
+func botsQRBody(cfg connectors.Config, payload map[string]any) string {
 	content := botsPayloadString(payload, "qr_code_content")
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "机器人 %s 扫码登录：\n", cfg.ID)
 	switch {
 	case content == "":
 		builder.WriteString("二维码内容为空；可稍后重新运行 /bots。")
@@ -633,7 +894,7 @@ func botsPrintQR(session *ChatSession, cfg connectors.Config, payload map[string
 	if expires := botsPayloadString(payload, "expires_at"); expires != "" {
 		fmt.Fprintf(&builder, "\n有效期至 %s；过期会自动换新码。", expires)
 	}
-	printChatCommandOutput(session, builder.String())
+	return builder.String()
 }
 
 // ── 终端二维码渲染（data:image/png;base64 → 半块字符） ─────────────────────
@@ -748,7 +1009,8 @@ func botsSupplement(session *ChatSession, line string) {
 	session.Interaction.RenderEphemeralSupplement(line)
 }
 
-func botsScanStatusLine(connectorID, status string) string {
+// botsScanStatusText 把通道状态归一化为界面文案（屏幕/补充行共用）。
+func botsScanStatusText(status string) string {
 	text := map[string]string{
 		"wait":      "等待扫码…",
 		"scanned":   "已扫码，请在手机上确认…",
@@ -758,7 +1020,11 @@ func botsScanStatusLine(connectorID, status string) string {
 	if text == "" {
 		text = status
 	}
-	return fmt.Sprintf("机器人 %s：%s", connectorID, text)
+	return text
+}
+
+func botsScanStatusLine(connectorID, status string) string {
+	return fmt.Sprintf("机器人 %s：%s", connectorID, botsScanStatusText(status))
 }
 
 func botsQRRefreshLine(cfg connectors.Config, payload map[string]any) string {
