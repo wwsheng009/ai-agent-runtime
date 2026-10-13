@@ -494,6 +494,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	case "/agents":
 		handleChatAgentsCommand(session, command)
 
+	case "/bots":
+		handleChatBotsCommand(session, command)
+
 	case "/agent":
 		handleChatAgentTranscriptCommand(session, command)
 

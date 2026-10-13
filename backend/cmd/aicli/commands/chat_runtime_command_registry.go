@@ -506,6 +506,13 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"cleanup":  rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
 		},
 	},
+	"/bots": {
+		// bare /bots 是机器人（IM 连接器）管理副屏：列表 / 新增（扫码接入）/
+		// 启停 / 日志 / 删除。写入在副屏租约释放后应用（Phase B）；扫码轮询在
+		// 后台 goroutine 运行，不触碰在途 turn。忙时默认 Deferred（未声明
+		// rtBusyAllow，fail-closed），核验后再放行。
+		Bare: rtBare(rtSpec("/bots", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenInteractive))),
+	},
 	"/timeline": {Bare: rtBare(rtSpec("/timeline", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/collab":   {Bare: rtBare(rtSpec("/collab", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/web": {

@@ -105,6 +105,9 @@ var (
 	localConnectorsStateMu sync.Mutex
 	localConnectorsAPI     http.Handler
 	localConnectorsHooks   http.Handler
+	// localConnectorHostRef 是本进程当前已装配的连接器宿主（TUI /bots 副屏
+	// 等本机管理面使用）；未装配时为 nil。与 handlers 同锁、同生命周期。
+	localConnectorHostRef *LocalConnectorHost
 )
 
 func currentLocalConnectorHandler(api bool) http.Handler {
@@ -122,13 +125,43 @@ func setLocalConnectorHandlers(api, hooks http.Handler) {
 	localConnectorsStateMu.Unlock()
 }
 
+// currentLocalConnectorHost 返回当前会话已装配的连接器宿主（未装配时 nil）。
+func currentLocalConnectorHost() *LocalConnectorHost {
+	localConnectorsStateMu.Lock()
+	defer localConnectorsStateMu.Unlock()
+	return localConnectorHostRef
+}
+
+func setLocalConnectorHost(host *LocalConnectorHost) {
+	localConnectorsStateMu.Lock()
+	localConnectorHostRef = host
+	localConnectorsStateMu.Unlock()
+}
+
 // ── 生命周期 ───────────────────────────────────────────────────────────────
 
 // LocalConnectorHost 是 aicli 侧已启动的连接器装配句柄。
 type LocalConnectorHost struct {
 	service   *connectors.Service
+	store     connectors.Store
 	cancel    context.CancelFunc
 	closeOnce sync.Once
+}
+
+// Service 返回本会话已启动的连接器服务（TUI /bots 等本机管理面使用）。
+func (h *LocalConnectorHost) Service() *connectors.Service {
+	if h == nil {
+		return nil
+	}
+	return h.service
+}
+
+// Store 返回连接器配置/状态存储（与 Service 同源，供 /bots 读写配置）。
+func (h *LocalConnectorHost) Store() connectors.Store {
+	if h == nil {
+		return nil
+	}
+	return h.store
 }
 
 // Close 停止全部轮询/队列并卸载管理面路由（幂等）。
@@ -146,6 +179,7 @@ func (h *LocalConnectorHost) Close() {
 			h.service.Stop(ctx)
 		}
 		setLocalConnectorHandlers(nil, nil)
+		setLocalConnectorHost(nil)
 	})
 }
 
@@ -225,8 +259,10 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		return nil, err
 	}
 	setLocalConnectorHandlers(restapi.NewRouter(deps), restapi.NewHooksRouter(deps))
+	connectorHost := &LocalConnectorHost{service: service, store: store, cancel: cancel}
+	setLocalConnectorHost(connectorHost)
 	logf("aicli connectors: started (config=%s, state=%s)", configPath, statePath)
-	return &LocalConnectorHost{service: service, cancel: cancel}, nil
+	return connectorHost, nil
 }
 
 // ── Backend：IM 消息 → 本机 chat 会话 ──────────────────────────────────────

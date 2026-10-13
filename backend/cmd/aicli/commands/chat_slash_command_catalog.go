@@ -276,6 +276,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/bots",
+			Usage:       "/bots",
+			Summary:     "机器人（IM 连接器）：查看 / 扫码新增 / 启停 / 日志（副屏交互）",
+			Group:       string(chatSlashCommandGroupWeb),
+			AcceptsArgs: false,
+		},
+		{
 			Name:        "/agent",
 			Usage:       "/agent [target] [limit=N]",
 			Summary:     "只读查看子 agent 的会话 transcript（/agents view 的等价入口）",
