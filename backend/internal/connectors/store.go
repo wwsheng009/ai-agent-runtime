@@ -1,6 +1,7 @@
 package connectors
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,10 @@ type Store interface {
 	ListConfigs() []Config
 	// GetConfig 按 id 读取配置。
 	GetConfig(id string) (Config, bool)
+	// PutConfig 新建或覆盖配置（密钥应由调用方经 api.MergeSubmit 处理后再落盘）。
+	PutConfig(cfg Config) error
+	// DeleteConfig 删除配置（实现可级联清理绑定与轮询游标）。
+	DeleteConfig(id string) error
 
 	// GetBinding 读取 IM 会话 → 宿主会话绑定。
 	GetBinding(connectorID, chat string) (Binding, bool)
@@ -51,10 +56,29 @@ func NewMemoryStore(configs ...Config) *MemoryStore {
 }
 
 // PutConfig 写入/覆盖配置（宿主保存配置时调用；内存实现直接替换）。
-func (s *MemoryStore) PutConfig(cfg Config) {
+func (s *MemoryStore) PutConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.ID) == "" {
+		return errors.New("connectors: config id is required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.configs[cfg.ID] = cfg
+	return nil
+}
+
+// DeleteConfig 删除配置并级联清理该连接器的绑定与轮询游标。
+func (s *MemoryStore) DeleteConfig(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.configs, id)
+	delete(s.states, id)
+	prefix := strings.TrimSpace(id) + "|"
+	for key := range s.bindings {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.bindings, key)
+		}
+	}
+	return nil
 }
 
 func (s *MemoryStore) ListConfigs() []Config {

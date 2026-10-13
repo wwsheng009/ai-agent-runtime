@@ -310,7 +310,9 @@ erDiagram
 | N2 `internal/notify` 策略内核 | ◐ 部分完成 | `backend/internal/notify/policy.go`（`PriorityOf`/`IsHighPriority`/`QuietRange`/`ParseQuietHours`/`InQuietHours`/`Coalesce`）；`cmd/gateway/notify_policy.go` 退化为薄适配层，行为由既有单测护栏；**待续**：`Channel`/`Dispatcher`/偏好与跨通道去重账本（P1） |
 | N6 `connectors/api` 契约骨架 | ◐ 部分完成 | `backend/internal/connectors/api/schema.go`（ProviderSchema/FieldSchema/ActionSpec + `Validate`/`SortedSecretKeys`/`MergeSubmit`/`ClearSecret`）与 JSON 契约快照测试；**待续**：HTTP handler（含 `Authorizer` 注入）与三宿主契约矩阵（P0 首宿主接线时） |
 | N4 `internal/connectors` 核心 + Telegram Provider | ◐ 核心与 polling 完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`（两层契约/内存 Store/串行有界队列/节流/命令/失败回执）+ `providers/telegram`（getMe/sendMessage/getUpdates 游标+退避/typing/editMessageText 流式）；`service_test.go` 12 例 + `telegram_test.go` 8 例假 Bot API，`go test -race` 全绿。**待续**：webhook 入口、runtime-server 宿主接线与真通道 e2e（04 文档 P0 第二切片） |
-| N3/N5/N7/N8 | ⏳ 未开始 | 见 04 文档 P0/P1 |
+| N5 `/hooks/connectors/{id}` | ◐ 入口就绪 | `internal/connectors/restapi`：`WebhookProvider` 能力探测 + `WebhookResult`（消息/直接应答）；签名失败 400、未知/停用 404、不支持 405、队列满 429；**待续**：飞书等具体通道的签名/challenge 实现（P1） |
+| N6 `connectors/api` HTTP 面 | ◐ 管理面完成 | `internal/connectors/restapi`（12 例）：CRUD/schema/测试消息/reload + 脱敏 `secret_keys` + 留空保持/`__clear__` 清除 + `Authorize` 未接线 403；**待续**：三宿主挂载（runtime-server/aicli/gateway）与契约矩阵（同一 golden ×3） |
+| N3/N7/N8 | ⏳ 未开始 | 见 04 文档 P0/P1 |
 
 ### 4.3 风险复核
 

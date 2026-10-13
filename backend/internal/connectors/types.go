@@ -12,6 +12,7 @@ package connectors
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"time"
 
@@ -176,6 +177,22 @@ type PollingProvider interface {
 	SupportsPolling(cfg Config) bool
 	// RunPolling 阻塞运行直至 ctx 取消；实现负责断线重连与游标续传。
 	RunPolling(ctx context.Context, cfg Config, handle InboundHandler, state PollingState) error
+}
+
+// WebhookResult 是 webhook 入口的处理结果（二选一）：
+//   - Message：解析出的入站消息，宿主交给 Service.HandleInbound；
+//   - Response：直接应答体（如飞书 challenge 回显），宿主按 Status 返回（默认 200）。
+type WebhookResult struct {
+	Message  *InboundMessage
+	Response any
+	Status   int
+}
+
+// WebhookProvider 支持 HTTP webhook 入口（飞书事件、Telegram/Discord 回调、QQ 回调）。
+type WebhookProvider interface {
+	Provider
+	// HandleWebhook 校验签名/挑战并解析请求；校验失败应返回 error（宿主转 4xx）。
+	HandleWebhook(ctx context.Context, cfg Config, r *http.Request) (WebhookResult, error)
 }
 
 // TypingSession 是一次"正在输入"保活。

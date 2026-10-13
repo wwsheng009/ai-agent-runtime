@@ -115,6 +115,24 @@
 
 > 管理面鉴权按宿主既有约定：gateway=owner session；runtime-server=admin/Bearer；aicli=本机会话。
 
+**实现状态（2026-10-13，P0 第二切片）**：上表子集已落地为宿主机无关的
+`backend/internal/connectors/restapi`（gorilla/mux，与 runtimeapi 同风格）：
+
+| 已实现路由 | 说明 |
+|------------|------|
+| `GET /connectors`、`GET /connectors/{id}` | 列表/详情；`secrets` 脱敏为 `secret_keys`（只回字段名） |
+| `GET /connectors/schema` | 三端渲染器输入（`api.Schema{version, providers}`） |
+| `POST /connectors` | 新建；`api.Validate` 必填/enum 校验，失败返回字段级错误 |
+| `PATCH`/`PUT /connectors/{id}` | 部分更新；密钥留空=保持、`__clear__`=清除（`api.MergeSubmit`）；provider 不可变更 |
+| `DELETE /connectors/{id}` | 删除并停止轮询 |
+| `POST /connectors/{id}/reload` | 应用配置变更（重启轮询/重连），更新接口内已自动调用 |
+| `POST /connectors/{id}/test` | 发送测试消息（控制台按钮），body `{chat,text}` |
+| `POST /hooks/connectors/{id}` | 公网入站；能力探测 `connectors.WebhookProvider`，签名失败 400、队列满 429、未知/停用 404 |
+
+- 挂载：`NewRouter` → `/api`；`NewHooksRouter` → 根（`/hooks/connectors/{id}`）。
+  `Authorize` 为 nil 时管理面整体 403（安全默认，避免宿主忘接线）。
+- 待续（P1/P2）：`/{id}/logs`、`/{id}/bindings`、`/{id}/actions/{action}`（扫码登录等）。
+
 ## 7. 配置存储与迁移
 
 | 宿主 | 配置文件 | 密钥文件 | 迁移性 |

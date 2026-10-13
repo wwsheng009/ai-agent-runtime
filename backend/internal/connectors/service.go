@@ -126,6 +126,28 @@ func (s *Service) StopConnector(id string) {
 	}
 }
 
+// Provider 按通道名返回适配器（管理面用于探测能力，如 WebhookProvider）。
+func (s *Service) Provider(name string) (Provider, bool) {
+	return s.provider(name)
+}
+
+// ReloadConnector 在配置保存/启停后应用变更：先停止旧实例；启用项重新激活并轮询。
+func (s *Service) ReloadConnector(ctx context.Context, id string) error {
+	if s == nil || s.deps.Store == nil {
+		return ErrServiceNotConfigured
+	}
+	cfg, ok := s.deps.Store.GetConfig(id)
+	if !ok {
+		return fmt.Errorf("connectors: unknown connector %q", id)
+	}
+	s.StopConnector(id)
+	if !cfg.Enabled {
+		return nil
+	}
+	s.startConnector(ctx, cfg)
+	return nil
+}
+
 // Stop 停止全部连接器与队列。
 func (s *Service) Stop(ctx context.Context) {
 	s.mu.Lock()
