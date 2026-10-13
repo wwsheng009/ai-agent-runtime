@@ -31,6 +31,7 @@ Main sections:
 - `mcp/` - MCP 服务器集成手册（quickstart：一分钟接入 / 命令参考 / recipes / 症状式排错；chrome-devtools：连接已打开浏览器、配置模板、使用与排查）
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
+- `bots/` - IM 通道接入专题（飞书/QQ/微信/Telegram）：需求分析、连接器核心方案、三宿主接入与前端 schema 配置、从 codex-server 的移植路线（入口见 `bots/README.md`）
 - `design/` - design baseline documents (checkpoint / restore-point design, planned architecture notes)
 - `working/` - point-in-time debugging notes and implementation snapshots
 - `performance/` - 性能专题：实测驱动的诊断与优化记录（现象口径、根因代码路径、改动前后同一口径的数字、以及被否决方案的留档），入口见 `performance/README.md`
