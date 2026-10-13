@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -67,3 +68,11 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 		t.Fatalf("missing session must yield zero context and keep workspace: %+v ws=%q", missing, missingWS)
 	}
 }
+
+// 编译期契约（E3.4a-2）：`aicliRuntimeDeps` 的签名必须与设计一致。
+//
+// 运行时契约（Deps 各回调非空、LeaseMode=actor-scoped）**不在此处断言**：
+// `aicliRuntimeDeps` 会走 `buildLocalChatAgent` → `host.Bootstrap.LLMRuntime()`，
+// 单测环境没有 bootstrap/LLM runtime（会 nil deref）。该断言在 **E3.4b** 切换后
+// 由真实调用路径 + 契约测试覆盖（见设计 §6）。
+var _ func(*localChatRuntimeHost, *ChatSession, runtimechat.SessionStorage, *runtimecfg.RuntimeConfig, string, string) runtimehost.Deps = (*localChatRuntimeHost).aicliRuntimeDeps
