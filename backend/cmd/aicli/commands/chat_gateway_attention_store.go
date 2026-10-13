@@ -30,9 +30,10 @@ const (
 )
 
 // setGatewayAttention records (or clears, when attention == "") the attention
-// state for sessionID.
-func setGatewayAttention(sessionID, attention string) {
-	gatewayAttentionStore.SetAttention(strings.TrimSpace(sessionID), strings.TrimSpace(attention))
+// state for sessionID, reporting whether the value actually changed (callers
+// use it to decide whether a SESSION_UPDATE push is needed).
+func setGatewayAttention(sessionID, attention string) bool {
+	return gatewayAttentionStore.SetAttention(strings.TrimSpace(sessionID), strings.TrimSpace(attention))
 }
 
 // gatewaySessionStateFor returns the shared projection for sessionID.

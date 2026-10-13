@@ -65,6 +65,12 @@ type SessionState struct {
 // drift on the bound or on which end is kept.
 const SessionTailMaxRunes = 512
 
+// StatusTextWaitingSubagents is the one-line activity mirror for a parked
+// managed turn (§6.12). Both hosts project it together with attention=waiting
+// per docs/gateway/08-notifications.md §3 ("等待子任务"), so the console can tell
+// "waiting for subagents" apart from a finished turn.
+const StatusTextWaitingSubagents = "Waiting for subagents"
+
 // TruncateSessionTail keeps the newest runes of s (the tail of the output).
 func TruncateSessionTail(s string) string {
 	if s == "" {

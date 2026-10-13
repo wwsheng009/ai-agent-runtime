@@ -1,6 +1,7 @@
 package runtimeapi
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -99,6 +100,15 @@ func (h *Handler) observeGatewayAttention(event runtimeevents.Event) {
 			"Retrying", event.Timestamp, time.Now())
 	case runtimeobserve.EventAgentTurnDone:
 		h.clearGatewayTail(sessionID)
+		if h.sessionHasParkedTurnRecord(sessionID) {
+			// §6.12 托管挂起：run 结束 ≠ 托管 turn 结束（与 CLI 宿主同口径）。
+			// 仍有 durable 挂起记录时投影 waiting 而不是 completed——否则控制台
+			// 显示"已完成/待处理"并推送"回合完成"，与仍在等待子代理的事实冲突
+			// （docs/gateway/08-notifications.md §3）。
+			changed = h.markGatewayParkedTurn(sessionID)
+			notifyKind = wire.NotifyKindWaiting
+			break
+		}
 		changed = store.EndTurn(sessionID, wire.SessionStateCompleted)
 		notifyKind = wire.NotifyKindTurnCompleted
 	case runtimechat.EventApprovalRequested:
@@ -109,6 +119,13 @@ func (h *Handler) observeGatewayAttention(event runtimeevents.Event) {
 		notifyKind = wire.NotifyKindQuestion
 	case runtimechat.EventApprovalResolved, runtimechat.EventQuestionAnswered:
 		changed = store.SetAttention(sessionID, "")
+	case runtimeevents.EventTurnSuspended:
+		// docs/gateway/08-notifications.md §3：托管挂起是持久注意力状态
+		// （attention=waiting + 等待子任务文案）。
+		changed = h.markGatewayParkedTurn(sessionID)
+	case runtimeevents.EventTurnResumed:
+		// 恢复清除挂起注意力；只清 waiting 自己，审批/提问徽标不受影响。
+		changed = h.clearGatewayParkedAttention(sessionID)
 	case runtimechat.EventSessionInterrupted:
 		// User cancel: keep the row visible with an interrupted state instead
 		// of silently clearing it (the operator can still see what happened).
@@ -129,6 +146,66 @@ func (h *Handler) observeGatewayAttention(event runtimeevents.Event) {
 			})
 		}
 	}
+}
+
+// markGatewayParkedTurn projects a parked managed turn onto the gateway axes
+// (docs/gateway/08-notifications.md §3: attention=waiting plus the shared
+// "Waiting for subagents" activity line). It reports whether anything changed.
+func (h *Handler) markGatewayParkedTurn(sessionID string) bool {
+	if h == nil {
+		return false
+	}
+	store := h.gatewayStateStore()
+	if store == nil {
+		return false
+	}
+	now := time.Now()
+	changed := store.SetAttention(sessionID, gatewayagent.AttentionWaiting)
+	if store.SetSurface(sessionID, wire.SessionStateRunning, gatewayagent.StatusTextWaitingSubagents, now, now) {
+		changed = true
+	}
+	return changed
+}
+
+// clearGatewayParkedAttention clears the waiting badge only when it is the one
+// currently set: approval/question badges own the attention axis.
+func (h *Handler) clearGatewayParkedAttention(sessionID string) bool {
+	if h == nil {
+		return false
+	}
+	store := h.gatewayStateStore()
+	if store == nil {
+		return false
+	}
+	if store.Get(sessionID).Attention != gatewayagent.AttentionWaiting {
+		return false
+	}
+	return store.SetAttention(sessionID, "")
+}
+
+// sessionHasParkedTurnRecord reports whether the durable batch control plane
+// still holds a parked turn for the session (§6.12) — the same source of truth
+// the CLI host uses for its completed-freeze decision. Fail-open: a missing
+// store or a read error answers false, degrading to the previous behavior.
+func (h *Handler) sessionHasParkedTurnRecord(sessionID string) bool {
+	if h == nil {
+		return false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	batches := h.peekSubagentBatchStore()
+	if batches == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	records, err := batches.ListTurnSuspensions(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	return len(records) > 0
 }
 
 // gatewayTailBufferRunes bounds the accumulated delta window before the

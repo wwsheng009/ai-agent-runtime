@@ -1,7 +1,10 @@
 package runtimeapi
 
 import (
+	"context"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -9,7 +12,61 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
+
+// TestGatewayAttentionTurnSuspendedProjectsWaiting pins the §6.12 parked edge
+// for the API host (docs/gateway/08-notifications.md §3): turn.suspended →
+// attention=waiting + the shared activity line; turn.resumed clears it.
+func TestGatewayAttentionTurnSuspendedProjectsWaiting(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.EnableGatewayAttention()
+	bus := handler.getRuntimeEventBus()
+
+	bus.Publish(runtimeevents.Event{Type: runtimeobserve.EventAgentTurnStarted, SessionID: "s5"})
+	bus.Publish(runtimeevents.Event{Type: runtimeevents.EventTurnSuspended, SessionID: "s5"})
+	if st := handler.testGatewayState("s5"); st.Attention != gatewayagent.AttentionWaiting ||
+		st.State != wire.SessionStateRunning || st.StatusText != gatewayagent.StatusTextWaitingSubagents {
+		t.Fatalf("suspended: %+v", st)
+	}
+	bus.Publish(runtimeevents.Event{Type: runtimeevents.EventTurnResumed, SessionID: "s5"})
+	if st := handler.testGatewayState("s5"); st.Attention != "" {
+		t.Fatalf("resumed: %+v", st)
+	}
+}
+
+// TestGatewayAttentionParkedTurnDoneKeepsWaiting pins the run-end carve-out:
+// agent.turn.finished must not project completed while the durable parked
+// record still exists, and must go back to completed once it is gone.
+func TestGatewayAttentionParkedTurnDoneKeepsWaiting(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.EnableGatewayAttention()
+	handler.SetSubagentBatchStore(newAPISupervisionBatchStore(t))
+	ctx := context.Background()
+	const sessionID = "s6-parked"
+	require.NoError(t, handler.getSubagentBatchStore().ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn-s6",
+		SessionID:     sessionID,
+		RootScopeID:   sessionID,
+		ObligationIDs: []string{"batch-1"},
+		ResumeQueue:   []string{"batch-1"},
+	}))
+
+	bus := handler.getRuntimeEventBus()
+	bus.Publish(runtimeevents.Event{Type: runtimeobserve.EventAgentTurnStarted, SessionID: sessionID})
+	bus.Publish(runtimeevents.Event{Type: runtimeobserve.EventAgentTurnDone, SessionID: sessionID})
+	st := handler.testGatewayState(sessionID)
+	require.Equal(t, gatewayagent.AttentionWaiting, st.Attention)
+	require.Equal(t, wire.SessionStateRunning, st.State)
+	require.Equal(t, gatewayagent.StatusTextWaitingSubagents, st.StatusText)
+	require.True(t, st.Busy, "a parked turn must not be projected as finished")
+
+	require.NoError(t, handler.getSubagentBatchStore().ClearTurnSuspension(ctx, sessionID, "turn-s6"))
+	bus.Publish(runtimeevents.Event{Type: runtimeobserve.EventAgentTurnDone, SessionID: sessionID})
+	st = handler.testGatewayState(sessionID)
+	require.Equal(t, gatewayagent.AttentionCompleted, st.Attention)
+	require.False(t, st.Busy)
+}
 
 // st returns the shared session-state projection maintained by the handler.
 func (h *Handler) testGatewayState(sessionID string) gatewayagent.SessionState {

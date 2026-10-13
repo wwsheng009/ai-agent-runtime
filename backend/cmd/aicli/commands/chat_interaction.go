@@ -1260,7 +1260,16 @@ func (c *chatInteractionCoordinator) publishGatewaySurfaceStatusLocked(s chatSur
 	if state == "" {
 		return
 	}
-	if gatewayAttentionStore.SetSurface(sessionID, state, text, c.dynamicStatusStarted, now) {
+	// §6.12 托管挂起的注意力轴（docs/gateway/08-notifications.md §3）：挂起 →
+	// attention=waiting（控制台徽标/收件箱），恢复 → 清除（只清 waiting 自己，
+	// 审批/提问徽标不受影响）。与活动状态同源触发，保证"等待子代理"在网关可见。
+	attentionChanged := false
+	if s.kind == chatSurfaceStatusParked {
+		attentionChanged = setGatewayAttention(sessionID, gatewayAttentionWaiting)
+	} else {
+		attentionChanged = clearGatewayWaitingAttention(sessionID)
+	}
+	if gatewayAttentionStore.SetSurface(sessionID, state, text, c.dynamicStatusStarted, now) || attentionChanged {
 		c.enqueueGatewayStatusSyncLocked()
 	}
 }

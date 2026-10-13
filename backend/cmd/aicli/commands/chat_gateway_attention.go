@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"strings"
 	"time"
 
+	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
 )
 
@@ -26,6 +28,13 @@ import (
 // activity to report" (idle/notice): callers must leave the lifecycle state
 // (completed/interrupted/error/idle) owned by the turn finisher untouched.
 func gatewaySurfaceStatusFor(s chatSurfaceStatus, inputMode chatInputMode) (string, string) {
+	// §6.12 托管挂起（Parked）不在 isRunning() 词表里（界面上的 "Worked for …"
+	// 冻结判据需要它保持"非运行"），但它恰恰是网关必须看到的等待态：
+	// docs/gateway/08-notifications.md §3 要求挂起投影为 attention=waiting +
+	// 等待子任务文案。因此在这里显式处理，避免挂起被当成"无活动"而丢失投影。
+	if s.kind == chatSurfaceStatusParked {
+		return wire.SessionStateRunning, gatewayParkedStatusText
+	}
 	switch normalizeChatInputMode(inputMode) {
 	case chatInputModeApproval:
 		return wire.SessionStateReview, "Waiting for approval"
@@ -53,10 +62,44 @@ func gatewaySurfaceStatusFor(s chatSurfaceStatus, inputMode chatInputMode) (stri
 		return wire.SessionStateThinking, action
 	case chatSurfaceStatusApproval:
 		return wire.SessionStateReview, action
-	case chatSurfaceStatusAnswer, chatSurfaceStatusWaiting, chatSurfaceStatusParked:
+	case chatSurfaceStatusAnswer, chatSurfaceStatusWaiting:
 		return wire.SessionStateWaiting, action
 	}
 	return "", ""
+}
+
+// gatewayParkedStatusText is the one-line activity mirror for a parked managed
+// turn; it is the shared constant so aicli and runtime-server cannot drift
+// (docs/gateway/08-notifications.md §3), and it matches the TUI dynamic status
+// line and the wire comment for SessionStateWaiting.
+const gatewayParkedStatusText = gatewayagent.StatusTextWaitingSubagents
+
+// markGatewayParkedTurn projects a parked turn onto the gateway axes per
+// docs/gateway/08-notifications.md §3: attention=waiting (persistent badge /
+// inbox) with the "Waiting for subagents" activity line. It is the run-end
+// finisher's parked branch as well as the live surface projection's edge.
+func markGatewayParkedTurn(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	now := time.Now()
+	setGatewayAttention(sessionID, gatewayAttentionWaiting)
+	gatewayAttentionStore.SetSurface(sessionID, wire.SessionStateRunning, gatewayParkedStatusText, now, now)
+}
+
+// clearGatewayWaitingAttention clears the parked attention only when it is the
+// one currently set: approval/question badges own the axis and must survive an
+// unrelated parked→running transition. It reports whether the value changed.
+func clearGatewayWaitingAttention(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	if gatewaySessionStateFor(sessionID).Attention == gatewayAttentionWaiting {
+		return setGatewayAttention(sessionID, "")
+	}
+	return false
 }
 
 // beginChatGatewayTurn marks the session busy and clears attention at turn start
@@ -72,6 +115,16 @@ func beginChatGatewayTurn(session *ChatSession) func(err error) {
 	gatewayAttentionStore.BeginTurn(sessionID, time.Now())
 	syncChatGatewaySession(session)
 	return func(err error) {
+		// §6.12 托管挂起：run 结束 ≠ 托管 turn 结束。仍有 durable 挂起记录时不能
+		// 投影成 completed——否则控制台显示"已完成/待处理"并推送"回合完成"，与
+		// 仍在等待子代理的事实冲突（docs/gateway/08-notifications.md §3 要求
+		// attention=waiting + 等待子任务）。恢复由下一轮 BeginTurn 复位。
+		if err == nil && chatSessionHasParkedTurnRecord(session) {
+			markGatewayParkedTurn(sessionID)
+			syncChatGatewaySession(session)
+			notifyChatGatewaySession(session, wire.NotifyKindWaiting, wire.NotifyPriorityNormal)
+			return
+		}
 		outcome := wire.SessionStateCompleted
 		kind := wire.NotifyKindTurnCompleted
 		priority := wire.NotifyPriorityNormal
