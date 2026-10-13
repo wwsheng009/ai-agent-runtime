@@ -11,6 +11,7 @@
 | [02-solution-design.md](./02-solution-design.md) | 解决方案：分层架构、核心抽象、数据模型、安全与可观测性 |
 | [03-host-integration.md](./03-host-integration.md) | 三宿主接入点与「前端配置不复杂」的 schema 驱动设计（含 API 契约） |
 | [04-migration-roadmap.md](./04-migration-roadmap.md) | 从 codex-server 的移植映射、分阶段计划、测试策略与风险 |
+| [05-review-and-hardening.md](./05-review-and-hardening.md) | **方案审查与加固**：三个硬缺口（事件无隔离/通知无中台/多前端无契约护栏）、消息分发可靠性与性能、多通道治理、Bot 交互设计、现有架构优化项与决策清单 |
 
 ## 结论摘要（TL;DR）
 
@@ -28,6 +29,9 @@
    新增通道不改前端。
 5. **首期建议**：P0 只做 **Telegram（webhook + 长轮询双模式）+ runtime-server** 端到端打通，
    再按 飞书 → QQ → 微信 扩展，并在 P1 把 gateway 变成「常驻 IM 前置」。
+6. **审查后新增前置阶段 P-1（基础加固，2–3 人日）**：给事件总线加异步订阅原语（有界队列 + panic 隔离）、
+   抽出 `internal/notify` 通知中台（把 gateway 的优先级/静默/合并/presence 策略变成共享内核）、
+   建立 `internal/connectors/api` 契约包与三宿主契约测试矩阵。详见 [05-review-and-hardening.md](./05-review-and-hardening.md)。
 
 ## 与现有通知链路的关系
 

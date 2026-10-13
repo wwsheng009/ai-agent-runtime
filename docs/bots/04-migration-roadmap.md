@@ -24,6 +24,13 @@
 
 ## 2. 分阶段实施
 
+### P-1 · 基础加固（≈2–3 天，详见 [05-review-and-hardening.md](./05-review-and-hardening.md) §8）
+
+- 交付：`internal/events` 异步订阅原语（有界队列 + panic 隔离 + 丢弃策略 + 指标）；
+  `internal/notify` 通知中台内核抽取（gateway push/ntfy 改造，行为由现有单测护栏）；
+  通知语义对照表；`internal/connectors/api` 契约包与三宿主契约测试矩阵骨架。
+- 理由：不先做这三项，连接器会把"慢通道阻塞 agent、通知多响、前端漂移"三个问题带进现有系统。
+
 ### P0 · 骨架 + Telegram + runtime-server（≈3–4 天）
 
 - 交付：`internal/connectors` 核心（Provider/Backend/Store/Queue/Ledger/Schema）+ Telegram 适配器（webhook 与长轮询双模式）
@@ -78,11 +85,12 @@
 
 | 阶段 | 人日 | 备注 |
 |------|------|------|
+| P-1 | 2–3 | 事件异步订阅 + notify 内核 + 契约包骨架（对现有系统亦有价值） |
 | P0 | 3–4 | 核心骨架可复用源实现结构，主要成本在 Store/Backend 接口化 |
 | P1 | 4–5 | 飞书 + gateway 入口是安全与联调重点 |
 | P2 | 3–4 | aicli 装配 + 配置分层 + QQ WS |
 | P3 | 4–5 | 微信登录 + 媒体链路最重 |
-| 合计 | **14–18 人日** | 不含产品化打磨（多语言、告警、文档站点） |
+| 合计 | **16–21 人日** | 不含产品化打磨（多语言、告警、文档站点） |
 
 ## 6. 验收清单（汇总）
 
