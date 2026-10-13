@@ -827,11 +827,16 @@ func handleQueueCommand(session *ChatSession, command string) bool {
 			state += " (draining)"
 		}
 		printfChatCommandOutput(session, "当前 queued input: %s", state)
+		if deferred := deferredSlashCommandSnapshot(session); len(deferred) > 0 {
+			printfChatCommandOutput(session, "暂存 slash 命令 (%d，Ready 后执行；/queue clear 取消): %s",
+				len(deferred), strings.Join(deferred, ", "))
+		}
 		return false
 	case "clear":
 		discarded := discardPendingInteractiveInput(session)
+		deferred := clearDeferredSlashCommands(session)
 		refreshChatComposerContext(session)
-		printfChatCommandOutput(session, "已清空 queued input: %d", discarded)
+		printfChatCommandOutput(session, "已清空 queued input: %d；已清空暂存命令: %d", discarded, deferred)
 		return false
 	default:
 		printChatCommandOutput(session, "错误: /queue 仅支持空参数或 clear\n用法: /queue 或 /queue clear")

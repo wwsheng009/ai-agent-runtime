@@ -122,6 +122,63 @@ func takeDeferredSlashCommand(session *ChatSession) (string, bool) {
 	return text, true
 }
 
+// deferredSlashCommandSnapshot 返回挂起期暂存命令的快照（FIFO 顺序）。
+func deferredSlashCommandSnapshot(session *ChatSession) []string {
+	if session == nil {
+		return nil
+	}
+	session.deferredSlashMu.Lock()
+	defer session.deferredSlashMu.Unlock()
+	if len(session.deferredSlashCommands) == 0 {
+		return nil
+	}
+	out := make([]string, len(session.deferredSlashCommands))
+	copy(out, session.deferredSlashCommands)
+	return out
+}
+
+// clearDeferredSlashCommands 清空暂存队列并返回被丢弃的条数（/queue clear 取消用）。
+func clearDeferredSlashCommands(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	session.deferredSlashMu.Lock()
+	defer session.deferredSlashMu.Unlock()
+	count := len(session.deferredSlashCommands)
+	session.deferredSlashCommands = nil
+	return count
+}
+
+// beginConsoleForegroundInputCapture 登记控制台前台回合对 stdin / prompt 行的
+// 归属：既置真 TUI busy capture（externalCaptureActive），又释放外部 Web/远程
+// 捕获（webCaptureActive）。
+//
+// webCaptureActive 的语义是"控制台没有读者"（见
+// chatInputQueue.webInputCaptureOwnsInput 与 externalInputCaptureOwnsInput）。
+// 一旦控制台前台回合接管了 stdin，控制台就重新有读者，这个前提不再成立，
+// 必须释放，否则该标志会永久 latch：Web 注入（/web/api/input、/web/api/invoke）
+// 只置真、全代码库没有任何复位路径，之后每个回合的审批/提问都会被
+// externalInputCaptureOwnsInput 静默跳过（只有 Web 回流能回答）。
+//
+// 2026-10-13 现场 session_20261013175416_O9Ughlac：shell_breaker 审批
+// (approval_requested, reason=shell_breaker:root_home_removal) 已发布且
+// state=waiting_approval，但控制台面板永不渲染——事件桥执行到
+// externalInputCaptureOwnsInput 分支即静默 return（标题未变为
+// "Approval Required"、无抑制日志），ReAct 循环阻塞在 RequestApproval 直到
+// 30 分钟审批超时。释放点与 TUI busy capture 生命周期对齐后，控制台回合内的
+// 审批/提问面板恢复渲染。
+//
+// 仅当 busy capture 真正启动（交互式 TUI）时才会调用；纯 Web/无控制台会话
+// 走不到这里，webCaptureActive 保持置真，仍由 Web 回流作答，避免 2026-09-24
+// 的"事件 worker 阻塞在 stdin"停摆回归。
+func beginConsoleForegroundInputCapture(queue *chatInputQueue) {
+	if queue == nil {
+		return
+	}
+	queue.setExternalInputCaptureActive(true)
+	queue.setWebInputCaptureActive(false)
+}
+
 func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return func() {}
@@ -141,7 +198,7 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if session.KeyHandler != nil && !enforced {
 		session.KeyHandler.Suspend()
 	}
-	queue.setExternalInputCaptureActive(true)
+	beginConsoleForegroundInputCapture(queue)
 	// 阶段 F P0：影子仲裁登记（capture 是 busy 期的独占 stdin 持有者）。
 	releaseShadowCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
 

@@ -944,11 +944,17 @@ func executeStructuredQueueCommand(session *ChatSession, command string) Command
 		if draining {
 			state += " (draining)"
 		}
-		return commandTextResult("当前 queued input: " + state)
+		lines := []string{"当前 queued input: " + state}
+		if deferred := deferredSlashCommandSnapshot(session); len(deferred) > 0 {
+			lines = append(lines, fmt.Sprintf("暂存 slash 命令 (%d，Ready 后执行；/queue clear 取消): %s",
+				len(deferred), strings.Join(deferred, ", ")))
+		}
+		return commandTextResult(strings.Join(lines, "\n"))
 	case "clear":
 		discarded := discardPendingInteractiveInput(session)
+		deferred := clearDeferredSlashCommands(session)
 		refreshChatComposerContext(session)
-		return commandTextResult(fmt.Sprintf("已清空 queued input: %d", discarded))
+		return commandTextResult(fmt.Sprintf("已清空 queued input: %d；已清空暂存命令: %d", discarded, deferred))
 	default:
 		return commandTextResult("错误: /queue 仅支持空参数或 clear\n用法: /queue 或 /queue clear")
 	}

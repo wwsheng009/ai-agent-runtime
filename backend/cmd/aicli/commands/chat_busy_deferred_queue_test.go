@@ -1,6 +1,11 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+)
 
 // 挂起态（非 Ready）下，deferred 档 slash 命令应被暂存而不是丢弃
 // （替代此前的「暂不接受 slash 命令」直接丢弃）。R 档（block）与非 slash 输入
@@ -64,5 +69,27 @@ func TestDeferredSlashCommandCap(t *testing.T) {
 	}
 	if session.enqueueDeferredSlashCommand("/clear") {
 		t.Fatal("超过上限应拒绝入队")
+	}
+}
+
+// /queue status 展示暂存命令；/queue clear 一并清空暂存队列（取消入口）。
+func TestQueueStatusAndClearIncludeDeferredSlashCommands(t *testing.T) {
+	session, _, _, _ := newRuntimeHostTestSession(t)
+	if !session.enqueueDeferredSlashCommand("/clear") || !session.enqueueDeferredSlashCommand("/status") {
+		t.Fatal("入队暂存命令失败")
+	}
+
+	status := ui.RenderDocumentPlain(executeStructuredQueueCommand(session, "/queue status").Document())
+	if !strings.Contains(status, "暂存 slash 命令 (2") ||
+		!strings.Contains(status, "/clear") || !strings.Contains(status, "/status") {
+		t.Fatalf("/queue status 未展示暂存命令：\n%s", status)
+	}
+
+	cleared := ui.RenderDocumentPlain(executeStructuredQueueCommand(session, "/queue clear").Document())
+	if !strings.Contains(cleared, "已清空暂存命令: 2") {
+		t.Fatalf("/queue clear 未清空暂存命令：\n%s", cleared)
+	}
+	if got := deferredSlashCommandSnapshot(session); len(got) != 0 {
+		t.Fatalf("clear 后暂存队列应为空，实际 %v", got)
 	}
 }
