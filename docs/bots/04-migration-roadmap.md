@@ -47,6 +47,15 @@
 - 验收：Telegram 发「你好」→ `runtime-server` 建会话跑 turn → 回复到 Telegram；流式编辑可用；重启进程后 offset 续传不重复。
 - 理由：Telegram 第 3 方依赖最简单，webhook/polling 双模式可一次性验证两种入口形态。
 
+**实现状态（2026-10-13 第一切片）**：
+
+| 交付物 | 状态 | 位置 |
+|--------|------|------|
+| 连接器核心 | ✅ 完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`：Provider/Backend 两层契约、内存 Store（配置/绑定/去重账本/轮询游标）、每会话串行有界队列（满则 `ErrQueueFull`，跨会话并行）、流式节流（≥800ms 且内容变化）、命令 `/help` `/new` `/status`、失败回执 |
+| Telegram 适配器 | ◐ polling 完整 | `internal/connectors/providers/telegram`：`getMe` 激活、`sendMessage`、`getUpdates` 长轮询（游标 `update_offset` 持久化 + 指数退避）、`sendChatAction` typing 保活、占位消息 + `editMessageText` 流式编辑；webhook 入口待宿主接线 |
+| 端到端（假后端） | ✅ 完成 | `service_test.go`（12 例：绑定/去重/白名单/命令/节流/队列/失败路径）+ `telegram_test.go`（8 例，`httptest` 假 Bot API：解析/游标/重试/typing/流式）；`go build ./...`、`go vet`、`go test -race` 全绿 |
+| 宿主接线 | ⬜ 未开始 | runtime-server `connector_bootstrap.go`（Backend=`submit_prompt` + `SubscribeAsync` 流式回推）、`GET/POST /api/connectors*`、最小 React 页面 → 下一轮 |
+
 ### P1 · 飞书 + gateway 前置 + 三端配置页（≈4–5 天）
 
 - 交付：飞书适配器（webhook challenge + 事件签名 + 长连接 WS 可选）+ gateway `Backend=gateway_node`
@@ -104,6 +113,7 @@
 ## 6. 验收清单（汇总）
 
 - [ ] P0：Telegram（webhook + polling）↔ runtime-server 端到端；重启续传不重复。
+  （◐ 通道核心与 polling 已就绪并通过假后端 e2e；真通道联通待宿主接线）
 - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环；完成提醒送达且与 Web Push/ntfy 去重。
 - [ ] P2：aicli 本地 Telegram/QQ 端到端；配置在三宿主间可迁移；未配置连接器时回归全绿。
 - [ ] P3：微信扫码登录 + 文本/图片/语音；IM 通道可开关/静音。

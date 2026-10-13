@@ -309,7 +309,8 @@ erDiagram
 | N1 `events.SubscribeAsync` | ✅ 已完成 | `backend/internal/events/async.go`（队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例）；`bus.go` 仅做字段改名与 `subscribeDispatch` 抽取，既有测试全绿 |
 | N2 `internal/notify` 策略内核 | ◐ 部分完成 | `backend/internal/notify/policy.go`（`PriorityOf`/`IsHighPriority`/`QuietRange`/`ParseQuietHours`/`InQuietHours`/`Coalesce`）；`cmd/gateway/notify_policy.go` 退化为薄适配层，行为由既有单测护栏；**待续**：`Channel`/`Dispatcher`/偏好与跨通道去重账本（P1） |
 | N6 `connectors/api` 契约骨架 | ◐ 部分完成 | `backend/internal/connectors/api/schema.go`（ProviderSchema/FieldSchema/ActionSpec + `Validate`/`SortedSecretKeys`/`MergeSubmit`/`ClearSecret`）与 JSON 契约快照测试；**待续**：HTTP handler（含 `Authorizer` 注入）与三宿主契约矩阵（P0 首宿主接线时） |
-| N3/N4/N5/N7/N8 | ⏳ 未开始 | 见 04 文档 P0/P1 |
+| N4 `internal/connectors` 核心 + Telegram Provider | ◐ 核心与 polling 完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`（两层契约/内存 Store/串行有界队列/节流/命令/失败回执）+ `providers/telegram`（getMe/sendMessage/getUpdates 游标+退避/typing/editMessageText 流式）；`service_test.go` 12 例 + `telegram_test.go` 8 例假 Bot API，`go test -race` 全绿。**待续**：webhook 入口、runtime-server 宿主接线与真通道 e2e（04 文档 P0 第二切片） |
+| N3/N5/N7/N8 | ⏳ 未开始 | 见 04 文档 P0/P1 |
 
 ### 4.3 风险复核
 
