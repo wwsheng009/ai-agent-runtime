@@ -73,6 +73,8 @@ type CreateFormState = {
   cron: string;
   /** J0/J4：作业目标（非 session 目标必填）。 */
   goal: string;
+  /** J0：执行步骤（每行一步，可选）。 */
+  plan: string;
   /** J1：执行上下文（session 投递进会话；headless/workspace 不绑会话）。 */
   targetKind: RuntimeScheduleTargetKind;
 };
@@ -89,6 +91,7 @@ function emptyCreateForm(): CreateFormState {
     weekdays: [],
     cron: "",
     goal: "",
+    plan: "",
     targetKind: "session",
   };
 }
@@ -110,11 +113,16 @@ function createRequestFrom(
   if (form.targetKind !== "session" && !form.goal.trim()) {
     return null;
   }
+  const plan = form.plan
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
   const base = {
     sessionId,
     title,
     prompt,
     ...(form.goal.trim() ? { goal: form.goal.trim() } : {}),
+    ...(plan.length > 0 ? { plan } : {}),
     ...(form.targetKind !== "session" ? { target_kind: form.targetKind } : {}),
   };
   switch (form.kind) {
@@ -348,7 +356,13 @@ export function SchedulePanel({
     }
     const request = createRequestFrom(createForm);
     if (!request) {
-      setNotice(t("panels.schedule.createIncomplete"));
+      setNotice(
+        t(
+          createForm.targetKind === "session"
+            ? "panels.schedule.createIncomplete"
+            : "panels.schedule.createIncompleteJob",
+        ),
+      );
       return;
     }
     const outcome = await createTask(request);
@@ -684,6 +698,16 @@ export function SchedulePanel({
                 className="rounded border border-border bg-transparent px-2 py-1"
                 onChange={(event) => setCreateForm({ ...createForm, goal: event.target.value })}
                 value={createForm.goal}
+              />
+            </label>
+            <label className="grid gap-1 text-xs">
+              <span className="text-muted-foreground">{t("panels.schedule.planLabel")}</span>
+              <textarea
+                className="rounded border border-border bg-transparent px-2 py-1"
+                onChange={(event) => setCreateForm({ ...createForm, plan: event.target.value })}
+                placeholder={t("panels.schedule.planPlaceholder")}
+                rows={3}
+                value={createForm.plan}
               />
             </label>
             <label className="grid gap-1 text-xs">

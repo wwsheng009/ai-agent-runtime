@@ -42,6 +42,7 @@ export const zhWorkspacePanelsSchedule = {
   createTitle: "人工创建（投递到指定会话）",
   createSubmit: "创建",
   createIncomplete: "请补全必填项（会话 ID、名称、内容与时间规则）",
+  createIncompleteJob: "请补全必填项（名称、内容、时间规则；无人值守/工作区作业还需目标）",
   created: "任务已创建（来源：人工）",
   createFailed: "创建失败：{{message}}",
   sessionLabel: "目标会话 ID",
@@ -55,6 +56,7 @@ export const zhWorkspacePanelsSchedule = {
   // J0/J1：作业目标、计划与执行上下文。
   goalLabel: "目标",
   planLabel: "执行步骤",
+  planPlaceholder: "每行一步（可选）",
   targetLabel: "执行上下文",
   target: {
     session: "原会话",

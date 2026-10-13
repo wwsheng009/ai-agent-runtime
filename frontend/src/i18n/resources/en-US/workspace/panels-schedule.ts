@@ -44,6 +44,7 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   createTitle: "Manual creation (delivers to the target session)",
   createSubmit: "Create",
   createIncomplete: "Complete the required fields (session ID, title, instruction, and timing rule)",
+  createIncompleteJob: "Complete the required fields (title, instruction, and timing rule; unattended/workspace jobs also need a goal)",
   created: "Task created (origin: manual)",
   createFailed: "Create failed: {{message}}",
   sessionLabel: "Target session ID",
@@ -57,6 +58,7 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   // J0/J1: job goal, plan and execution context.
   goalLabel: "Goal",
   planLabel: "Plan",
+  planPlaceholder: "One step per line (optional)",
   targetLabel: "Execution target",
   target: {
     session: "Original session",
