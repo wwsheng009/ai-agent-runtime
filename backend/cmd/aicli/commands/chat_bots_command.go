@@ -148,7 +148,7 @@ func startLocalConnectorsOnDemand(session *ChatSession) (*LocalConnectorHost, er
 	}
 	runtimeHost := session.LocalRuntimeHost
 	if runtimeHost == nil {
-		return nil, fmt.Errorf("本机 runtime 未就绪")
+		return nil, fmt.Errorf("%s", botsLocalHostUnavailableReason(session))
 	}
 	configPath, err := ensureWritableAICLIConfigPath(session.Config, "")
 	if err != nil {
@@ -167,6 +167,21 @@ func startLocalConnectorsOnDemand(session *ChatSession) (*LocalConnectorHost, er
 	setLocalConnectorInitNote("")
 	logpkg.Infof("aicli connectors: started on demand (config=%s)", configPath)
 	return started, nil
+}
+
+// botsLocalHostUnavailableReason 解释「本地连接器宿主无法装配」的具体原因：
+// runtime-server 模式的会话会刻意把 LocalRuntimeHost 置空（本地能力面整段
+// 不挂载），此时必须报出接管方与替代路径，而不是笼统的"未就绪"。
+func botsLocalHostUnavailableReason(session *ChatSession) string {
+	if session != nil {
+		if provider, ok := session.ChatExecutor.(runtimeServerURLProvider); ok {
+			if url := strings.TrimSpace(provider.RuntimeServerURL()); url != "" {
+				return "当前会话由 runtime-server 接管（" + url +
+					"）：本地连接器未挂载——请在该服务器的连接器页管理机器人，或用 --runtime-mode local 重开会话后使用 /bots"
+			}
+		}
+	}
+	return "本机 runtime 未就绪（会话能力面未挂载）"
 }
 
 // botsUnavailableText 组装不可用文案：优先用本次解析出的原因，其次用

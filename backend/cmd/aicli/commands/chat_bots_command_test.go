@@ -113,6 +113,19 @@ func TestStartLocalConnectorsOnDemandCreatesStarterConfig(t *testing.T) {
 	}
 }
 
+func TestBotsLocalHostUnavailableReasonRuntimeServerMode(t *testing.T) {
+	session := &ChatSession{ChatExecutor: newAICLIRuntimeServerChatExecutor("http://127.0.0.1:8101")}
+	reason := botsLocalHostUnavailableReason(session)
+	for _, want := range []string{"runtime-server", "127.0.0.1:8101", "--runtime-mode local"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason %q missing %q", reason, want)
+		}
+	}
+	if got := botsLocalHostUnavailableReason(&ChatSession{}); !strings.Contains(got, "本机 runtime 未就绪") {
+		t.Fatalf("generic reason = %q", got)
+	}
+}
+
 func TestBotsUnavailableTextSurfacesInitNote(t *testing.T) {
 	prev := localConnectorsInitNote()
 	t.Cleanup(func() { setLocalConnectorInitNote(prev) })
