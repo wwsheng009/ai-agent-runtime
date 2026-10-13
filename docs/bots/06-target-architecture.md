@@ -302,6 +302,15 @@ erDiagram
 | N7 | 三前端 Schema 渲染器 | Schema JSON 快照测试一致；未知字段降级不报错 |
 | N8 | 可观测性（`connectors_*`/`notify_*`） | 指标暴露 + 两端 UI 展示（队列深度/失败率/最近错误） |
 
+**实现状态（2026-10-13，P-1 首轮）**：
+
+| 项 | 状态 | 证据 |
+|----|------|------|
+| N1 `events.SubscribeAsync` | ✅ 已完成 | `backend/internal/events/async.go`（队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例）；`bus.go` 仅做字段改名与 `subscribeDispatch` 抽取，既有测试全绿 |
+| N2 `internal/notify` 策略内核 | ◐ 部分完成 | `backend/internal/notify/policy.go`（`PriorityOf`/`IsHighPriority`/`QuietRange`/`ParseQuietHours`/`InQuietHours`/`Coalesce`）；`cmd/gateway/notify_policy.go` 退化为薄适配层，行为由既有单测护栏；**待续**：`Channel`/`Dispatcher`/偏好与跨通道去重账本（P1） |
+| N6 `connectors/api` 契约骨架 | ◐ 部分完成 | `backend/internal/connectors/api/schema.go`（ProviderSchema/FieldSchema/ActionSpec + `Validate`/`SortedSecretKeys`/`MergeSubmit`/`ClearSecret`）与 JSON 契约快照测试；**待续**：HTTP handler（含 `Authorizer` 注入）与三宿主契约矩阵（P0 首宿主接线时） |
+| N3/N4/N5/N7/N8 | ⏳ 未开始 | 见 04 文档 P0/P1 |
+
 ### 4.3 风险复核
 
 | 风险 | 复核结论 |

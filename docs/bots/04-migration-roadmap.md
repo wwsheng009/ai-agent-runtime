@@ -31,6 +31,15 @@
   通知语义对照表；`internal/connectors/api` 契约包与三宿主契约测试矩阵骨架。
 - 理由：不先做这三项，连接器会把"慢通道阻塞 agent、通知多响、前端漂移"三个问题带进现有系统。
 
+**实现状态（2026-10-13 首轮）**：
+
+| 交付物 | 状态 | 位置 |
+|--------|------|------|
+| 事件异步订阅原语 | ✅ 完成 | `backend/internal/events/async.go`（`SubscribeAsync` + 队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例） |
+| notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；Channel/Dispatcher 留待 P1 |
+| 契约包骨架 | ◐ 部分 | `backend/internal/connectors/api/schema.go`（Schema 契约 + 校验/脱敏/合并提交）+ 快照测试；HTTP handler 与矩阵随 P0 首宿主接线 |
+| 通知语义对照表 | ◐ 部分 | `internal/notify` 的 `PriorityOf` 即落点（approval/question/error→high，completed/waiting→normal）；与 supervision/IM 文案的映射在 P1 随通道落地补齐 |
+
 ### P0 · 骨架 + Telegram + runtime-server（≈3–4 天）
 
 - 交付：`internal/connectors` 核心（Provider/Backend/Store/Queue/Ledger/Schema）+ Telegram 适配器（webhook 与长轮询双模式）

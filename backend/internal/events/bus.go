@@ -232,8 +232,8 @@ type Bus struct {
 }
 
 type subscription struct {
-	id      int64
-	handler Handler
+	id       int64
+	dispatch func(Event)
 }
 
 // NewBus 创建一个新的 runtime event bus。
@@ -274,10 +274,18 @@ func (b *Bus) SubscribeCancelable(eventType string, handler Handler) Unsubscribe
 	if b == nil || handler == nil {
 		return func() {}
 	}
+	_, unsubscribe := b.subscribeDispatch(eventType, handler)
+	return unsubscribe
+}
+
+// subscribeDispatch registers a raw dispatch function and returns its id and
+// unsubscribe handle. SubscribeAsync uses it to install a queueing dispatcher;
+// SubscribeCancelable wraps a plain Handler.
+func (b *Bus) subscribeDispatch(eventType string, dispatch func(Event)) (int64, Unsubscribe) {
 	b.mu.Lock()
 	b.nextID++
 	id := b.nextID
-	item := subscription{id: id, handler: handler}
+	item := subscription{id: id, dispatch: dispatch}
 	if eventType == "" {
 		b.all = appendSubscription(b.all, item)
 	} else {
@@ -286,7 +294,7 @@ func (b *Bus) SubscribeCancelable(eventType string, handler Handler) Unsubscribe
 	b.mu.Unlock()
 
 	var once sync.Once
-	return func() {
+	unsubscribe := func() {
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
@@ -302,6 +310,7 @@ func (b *Bus) SubscribeCancelable(eventType string, handler Handler) Unsubscribe
 			b.subscribers[eventType] = items
 		})
 	}
+	return id, unsubscribe
 }
 
 // Publish 同步发布事件。
@@ -336,10 +345,10 @@ func (b *Bus) Publish(event Event) {
 	b.mu.Unlock()
 
 	for _, sub := range all {
-		sub.handler(event)
+		sub.dispatch(event)
 	}
 	for _, sub := range typed {
-		sub.handler(event)
+		sub.dispatch(event)
 	}
 }
 

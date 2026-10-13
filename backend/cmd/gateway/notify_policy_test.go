@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+	"github.com/wwsheng009/ai-agent-runtime/internal/notify"
 )
 
 // testNotifier builds a notifier with one subscription pointing at endpoint.
@@ -33,10 +34,10 @@ func TestParseQuietHours(t *testing.T) {
 	if len(ranges) != 2 {
 		t.Fatalf("want 2 windows, got %d", len(ranges))
 	}
-	if ranges[0].start != 22*60 || ranges[0].end != 8*60 {
+	if ranges[0].Start != 22*60 || ranges[0].End != 8*60 {
 		t.Fatalf("first window = %+v", ranges[0])
 	}
-	if ranges[1].start != 12*60+30 || ranges[1].end != 13*60 {
+	if ranges[1].Start != 12*60+30 || ranges[1].End != 13*60 {
 		t.Fatalf("second window = %+v", ranges[1])
 	}
 
@@ -54,7 +55,7 @@ func TestQuietRangeContains(t *testing.T) {
 	at := func(h, m int) time.Time {
 		return time.Date(2026, 1, 1, h, m, 0, 0, time.Local)
 	}
-	overnight := quietRange{start: 22 * 60, end: 8 * 60}
+	overnight := notify.QuietRange{Start: 22 * 60, End: 8 * 60}
 	for _, tc := range []struct {
 		t    time.Time
 		want bool
@@ -66,15 +67,15 @@ func TestQuietRangeContains(t *testing.T) {
 		{at(12, 0), false},
 		{at(21, 59), false},
 	} {
-		if got := overnight.contains(tc.t); got != tc.want {
+		if got := overnight.Contains(tc.t); got != tc.want {
 			t.Fatalf("overnight.contains(%s) = %v, want %v", tc.t, got, tc.want)
 		}
 	}
-	daytime := quietRange{start: 12 * 60, end: 13 * 60}
-	if !daytime.contains(at(12, 30)) || daytime.contains(at(13, 0)) || daytime.contains(at(11, 59)) {
+	daytime := notify.QuietRange{Start: 12 * 60, End: 13 * 60}
+	if !daytime.Contains(at(12, 30)) || daytime.Contains(at(13, 0)) || daytime.Contains(at(11, 59)) {
 		t.Fatal("daytime window bounds are not half-open")
 	}
-	if (quietRange{start: 0, end: 0}).contains(at(0, 0)) {
+	if (notify.QuietRange{Start: 0, End: 0}).Contains(at(0, 0)) {
 		t.Fatal("zero-width window must not contain any time")
 	}
 }
@@ -187,7 +188,7 @@ func TestPushNotifierQuietHours(t *testing.T) {
 
 	n := testNotifier(t, srv.URL+"/sub")
 	n.coalesceWindow = 30 * time.Millisecond
-	n.quietHours = []quietRange{{start: 0, end: 24 * 60}} // all day
+	n.quietHours = []notify.QuietRange{{Start: 0, End: 24 * 60}} // all day
 	n.now = func() time.Time { return time.Date(2026, 10, 11, 23, 0, 0, 0, time.Local) }
 
 	low := &tunnel.Node{NodeID: "n1", Sessions: []wire.SessionSummary{{SessionID: "s1", Attention: "completed"}}}

@@ -106,6 +106,13 @@ aicli:          chat actor → 终端标题/声音                              
 - 连接器统一通过该原语订阅（不自建裸订阅）；这样**现有宿主也受益**（当前任何订阅者 panic 都会打到发布者调用栈）。
 - 队列指标：`notify_sub_queue_depth{sub}`、`notify_sub_dropped_total{sub}`。
 
+> **实现状态（2026-10-13，P-1/N1 已完成）**：`backend/internal/events/async.go` 已落地
+> `b.SubscribeAsync(eventType, handler, AsyncOptions{Name, QueueSize, DropPolicy, BlockTimeout, OnDrop, OnPanic})`，
+> 返回 `*AsyncSubscription`（`Stats()` 计数快照 / `WaitDrained(ctx)` / `Unsubscribe()`）；
+> `DropPolicy` 提供 `DropOldest`（默认，delta）/`DropNewest`（告警）/`DropBlock`（终态，带超时）；
+> 处理器 panic 被隔离计数，绝不传播到发布者。现有 `Subscribe/SubscribeCancelable` 语义与性能**不变**
+> （`internal/events` 既有测试全绿，另有 9 个异步订阅单测覆盖顺序/隔离/背压/丢弃策略/退订）。
+
 ### 2.4 死信与重放
 
 - 入站：`/api/connectors/{id}/inbound?status=failed` 列出并支持重放。
