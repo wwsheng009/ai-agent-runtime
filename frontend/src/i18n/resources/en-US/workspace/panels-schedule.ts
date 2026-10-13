@@ -54,6 +54,24 @@ export const enWorkspacePanelsSchedule: DeepStringShape<typeof zhWorkspacePanels
   atLabel: "Absolute time",
   cronLabel: "Cron expression",
   originManual: "Manual",
+  // J0/J1: job goal, plan and execution context.
+  goalLabel: "Goal",
+  planLabel: "Plan",
+  targetLabel: "Execution target",
+  target: {
+    session: "Original session",
+    workspace: "Workspace",
+    headless: "Unattended",
+  },
+  // J3: run history.
+  runHistory: "Run history",
+  runStatus: {
+    done: "Succeeded",
+    failed: "Failed",
+  },
+  runEmpty: "No runs yet",
+  runOutput: "Output",
+  runError: "Error",
   weekday: {
     1: "Mon",
     2: "Tue",

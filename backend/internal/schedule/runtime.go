@@ -17,6 +17,32 @@ const maxTimerDelay = time.Hour
 // embeddedTurnTimeout 是一次内嵌 turn 的上限（方案 E2：maxTurnDuration 默认 10m）。
 const embeddedTurnTimeout = 10 * time.Minute
 
+// headlessDeferInterval 是「无 headless 执行能力」时对非 session 目标的延后间隔
+// （J2：不空转、不计死信，等具备能力的宿主接管）。
+const headlessDeferInterval = 5 * time.Minute
+
+// 执行模式取值（与 config.ScheduleMode* 对齐；本包不 import config，避免反向依赖）。
+const (
+	// ModeDelegate 只经 HTTP 委派宿主执行，永不内嵌。
+	ModeDelegate = "delegate"
+	// ModeEmbedded 允许 daemon 内嵌执行。
+	ModeEmbedded = "embedded"
+	// ModeAuto 先 delegate，不可用则内嵌。
+	ModeAuto = "auto"
+)
+
+// ModeAllowsEmbedded 报告该执行模式是否允许内嵌执行。
+// delegate 与未知值都返回 false（fail-closed，绝不误内嵌）；空值按允许处理
+// （仅为兼容既有测试/程序化构造；生产由配置显式给值）。
+func ModeAllowsEmbedded(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", ModeEmbedded, ModeAuto:
+		return true
+	default:
+		return false
+	}
+}
+
 // Deliverer 把到期提醒文本投递到原会话。
 type Deliverer interface {
 	Deliver(ctx context.Context, sessionID, text string) error
@@ -75,6 +101,9 @@ type RuntimeOptions struct {
 	// （活跃会话绝不抢占），拿不到退回持久 mailbox。nil = 不启用内嵌。
 	Executor SessionExecutor
 	Arbiter  LeaseArbiter
+	// Mode 选择执行模式（delegate | embedded | auto）。delegate 永不内嵌；
+	// embedded/auto 才允许 delegate 失败后内嵌。空值按允许处理。
+	Mode string
 	// FallbackToMailbox 落持久兜底消息（宿主恢复后消费）；默认 true。
 	FallbackToMailbox bool
 	Logf              func(format string, args ...any)
@@ -218,6 +247,11 @@ func (r *Runtime) drive() {
 		if !r.admitted(task.Record.ID, now) {
 			continue
 		}
+		// J2：非 session 目标无既有会话可投递，走 headless 分支。
+		if task.TargetKind != TargetSession {
+			r.driveHeadless(group, task, now)
+			continue
+		}
 		text := r.renderGroup(group)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		deliverErr := r.opts.Deliverer.Deliver(ctx, task.SessionID, text)
@@ -257,9 +291,116 @@ func (r *Runtime) drive() {
 	r.scheduleNext(now)
 }
 
+// driveHeadless 执行不绑会话的作业（J2：workspace/headless 目标）。
+//
+// 无 headless 执行能力时**延后**（不空转、不计死信），等待具备能力的宿主接管。
+func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
+	exec, ok := r.opts.Executor.(HeadlessExecutor)
+	if !ok || exec == nil {
+		r.deferTask(task.Record.ID, now.Add(headlessDeferInterval))
+		r.opts.Logf("schedule: job %s (%s) deferred: no headless executor configured", task.Record.ID, task.TargetKind)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), embeddedTurnTimeout)
+	defer cancel()
+	result, err := exec.ExecuteHeadlessTurn(ctx, HeadlessTurnRequest{
+		JobID:      task.Record.ID,
+		Goal:       task.Record.Goal,
+		Plan:       task.Record.Plan,
+		Prompt:     task.Record.Prompt,
+		Profile:    task.TargetProfile,
+		Workspace:  task.TargetWorkspace,
+		TargetKind: task.TargetKind,
+	})
+	// J3：无论成败都落一条运行历史。
+	r.recordJobRun(task, now, result, err, now)
+	if err != nil {
+		r.mtr.deliveryFailedTotal.Add(int64(len(group)))
+		for _, member := range group {
+			r.markFailed(member.Record.ID, now)
+		}
+		r.opts.Logf("schedule: headless job %s failed: %v", task.Record.ID, err)
+		return
+	}
+	r.mtr.embeddedTotal.Add(int64(len(group)))
+	r.mtr.deliveredTotal.Add(int64(len(group)))
+	for _, member := range group {
+		r.commit(member, now)
+	}
+	// J3：结果回投必须在 commit **之后**——commit 会清理该作业的 pending（正常投递
+	// 成功的语义），若先回投则失败兜底的 pending 会被立刻抹掉。
+	r.deliverJobResult(task, result)
+}
+
+// recordJobRun 落一条作业运行历史（J3；best-effort，失败只记日志）。
+func (r *Runtime) recordJobRun(task Task, started time.Time, result HeadlessTurnResult, runErr error, now time.Time) {
+	sqlStore, ok := r.opts.Store.(*SQLiteStore)
+	if !ok {
+		return
+	}
+	run := JobRun{
+		ScheduleID: task.Record.ID,
+		SessionID:  result.SessionID,
+		StartedAt:  started.UTC(),
+		FinishedAt: now.UTC(),
+	}
+	if runErr != nil {
+		run.Status = JobRunFailed
+		run.Error = runErr.Error()
+	} else {
+		run.Status = JobRunDone
+		run.Output = result.Output
+	}
+	if err := sqlStore.AppendJobRun(run); err != nil {
+		r.opts.Logf("schedule: append job run for %s: %v", task.Record.ID, err)
+	}
+}
+
+// deliverJobResult 把 headless 作业结果回投给创建者会话（J3；best-effort）。
+func (r *Runtime) deliverJobResult(task Task, result HeadlessTurnResult) {
+	creator := strings.TrimSpace(task.CreatedBySessionID)
+	if creator == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := r.opts.Deliverer.Deliver(ctx, creator, RenderJobResultFraming(task, result)); err != nil {
+		r.opts.Logf("schedule: deliver job result for %s to creator %s failed: %v", task.Record.ID, creator, err)
+		// J3：回投失败落持久 pending，宿主恢复后消费（与提醒投递同一兜底通道）。
+		if r.opts.FallbackToMailbox {
+			if sqlStore, ok := r.opts.Store.(*SQLiteStore); ok {
+				if perr := sqlStore.AppendPendingMessage(task.Record.ID, creator,
+					RenderJobResultFraming(task, result),
+					"job result delivery failed: "+err.Error(), r.opts.Clock()); perr != nil {
+					r.opts.Logf("schedule: append job result pending for %s: %v", task.Record.ID, perr)
+				}
+			}
+		}
+	}
+}
+
+// RenderJobResultFraming 渲染一次 headless 作业的结果回投文本（J3）。
+func RenderJobResultFraming(task Task, result HeadlessTurnResult) string {
+	payload := map[string]string{
+		"schedule_id": task.Record.ID,
+		"status":      string(JobRunDone),
+		"output":      result.Output,
+	}
+	if goal := strings.TrimSpace(task.Record.Goal); goal != "" {
+		payload["goal"] = goal
+	}
+	encoded, _ := json.Marshal(payload)
+	return strings.Join([]string{
+		"[SCHEDULE JOB RESULT]",
+		"This is the result of a scheduled job you created",
+		"result_json: " + string(encoded),
+	}, "\n")
+}
+
 // groupFor 返回同一会话、同一批到期的周期任务（P0：every）；一次性任务各自成组。
+// 非会话目标（J2）不参与分组：它们没有共享会话，必须各自执行。
 func (r *Runtime) groupFor(task Task, due []Task) []Task {
-	if task.Record.Kind != KindEvery {
+	if task.Record.Kind != KindEvery || strings.TrimSpace(task.SessionID) == "" {
 		return []Task{task}
 	}
 	group := make([]Task, 0, 1)
@@ -298,6 +439,13 @@ func (r *Runtime) markFailed(id string, now time.Time) {
 	r.failedUntil[id] = now.Add(backoff)
 }
 
+// deferTask 延后某任务的下次尝试（不改 attempts，不产生死信）。
+func (r *Runtime) deferTask(id string, until time.Time) {
+	r.mu.Lock()
+	r.failedUntil[id] = until
+	r.mu.Unlock()
+}
+
 // appendPending 把一次失败的投递落成持久兜底消息（`schedule_pending_messages`）。
 func (r *Runtime) appendPending(task Task, deliverErr error, now time.Time) error {
 	sqlStore, ok := r.opts.Store.(*SQLiteStore)
@@ -312,6 +460,10 @@ func (r *Runtime) appendPending(task Task, deliverErr error, now time.Time) erro
 // 先取 session 租约（拿不到 = 会话被交互宿主持有，绝不抢占，返回 false），
 // 拿到后提交一次 turn 并释放租约。返回是否已内嵌执行成功。
 func (r *Runtime) tryEmbedded(sessionID, text string) bool {
+	// mode 门控：delegate（或未知值）永不内嵌，即使 Executor/Arbiter 已注入。
+	if !ModeAllowsEmbedded(r.opts.Mode) {
+		return false
+	}
 	if r.opts.Executor == nil || r.opts.Arbiter == nil {
 		return false
 	}
@@ -359,9 +511,30 @@ func (r *Runtime) DrainPendingMessages(ctx context.Context, sessionID string, li
 			r.opts.Logf("schedule: mark pending %d consumed: %v", message.ID, err)
 			continue
 		}
+		// 补投成功即推进其任务：否则 daemon 稍后仍会按原目标重投，同一提醒双投。
+		r.advanceTaskAfterDrain(message.ScheduleID, now)
 		consumed++
 	}
 	return consumed, nil
+}
+
+// advanceTaskAfterDrain 在兜底消息成功补投后推进其任务。
+//
+// 仅当任务仍 active 且目标已到点（尚未被任何路径提交）时推进：正常路径
+// 提交成功后 ScheduledAt 已移到未来（或转 inactive），此处会自然跳过，
+// 因此 drain 与 daemon 重试两条路径不会对同一提醒重复推进/重复投递。
+func (r *Runtime) advanceTaskAfterDrain(scheduleID string, now time.Time) {
+	if strings.TrimSpace(scheduleID) == "" {
+		return
+	}
+	task, ok, err := r.opts.Store.Get(scheduleID)
+	if err != nil || !ok {
+		return
+	}
+	if task.Status != StatusActive || now.Before(task.Record.ScheduledAt) {
+		return
+	}
+	r.commit(task, now)
 }
 
 func (r *Runtime) commit(task Task, now time.Time) {
@@ -399,6 +572,12 @@ func (r *Runtime) commit(task Task, now time.Time) {
 			Prompt:          task.Record.Prompt,
 		}); err != nil {
 			r.opts.Logf("schedule: append delivery history for %s: %v", task.Record.ID, err)
+		}
+	}
+	// 提醒已经送达：清理该任务历史失败留下的 pending 行，避免宿主 drain 重复投递。
+	if sqlStore, ok := r.opts.Store.(*SQLiteStore); ok {
+		if err := sqlStore.MarkPendingConsumedBySchedule(task.Record.ID, now); err != nil {
+			r.opts.Logf("schedule: clear pending for %s: %v", task.Record.ID, err)
 		}
 	}
 	r.mu.Lock()

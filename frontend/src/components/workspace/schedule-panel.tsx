@@ -7,6 +7,7 @@
 
 import {
   CalendarClockIcon,
+  HistoryIcon,
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
@@ -16,6 +17,7 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { fetchScheduleJobRuns } from "@/api/runtime/schedule";
 import {
   formatScheduleRelative,
   formatScheduleTimestamp,
@@ -26,8 +28,10 @@ import {
 import { useScheduleTasks } from "@/hooks/workspace/use-schedule-tasks";
 import type {
   RuntimeScheduleCreateRequest,
+  RuntimeScheduleJobRun,
   RuntimeScheduleKind,
   RuntimeScheduleTask,
+  RuntimeScheduleTargetKind,
   RuntimeScheduleTimingChange,
 } from "@/types/runtime";
 import { cn } from "@/lib/utils";
@@ -67,6 +71,10 @@ type CreateFormState = {
   timeZone: string;
   weekdays: number[];
   cron: string;
+  /** J0/J4：作业目标（非 session 目标必填）。 */
+  goal: string;
+  /** J1：执行上下文（session 投递进会话；headless/workspace 不绑会话）。 */
+  targetKind: RuntimeScheduleTargetKind;
 };
 
 function emptyCreateForm(): CreateFormState {
@@ -80,6 +88,8 @@ function emptyCreateForm(): CreateFormState {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     weekdays: [],
     cron: "",
+    goal: "",
+    targetKind: "session",
   };
 }
 
@@ -90,10 +100,23 @@ function createRequestFrom(
   const sessionId = form.sessionId.trim();
   const title = form.title.trim();
   const prompt = form.prompt.trim();
-  if (!sessionId || !title || !prompt) {
+  if (!title || !prompt) {
     return null;
   }
-  const base = { sessionId, title, prompt };
+  // J1：仅 session 目标要求 session_id；非 session 目标必须有 goal（后端同样校验）。
+  if (form.targetKind === "session" && !sessionId) {
+    return null;
+  }
+  if (form.targetKind !== "session" && !form.goal.trim()) {
+    return null;
+  }
+  const base = {
+    sessionId,
+    title,
+    prompt,
+    ...(form.goal.trim() ? { goal: form.goal.trim() } : {}),
+    ...(form.targetKind !== "session" ? { target_kind: form.targetKind } : {}),
+  };
   switch (form.kind) {
     case "after": {
       const minutes = Number(form.amount);
@@ -196,6 +219,7 @@ function timingChangeFrom(
 }
 
 export function SchedulePanel({
+  sessionId,
   lastRuntimeEventType,
   runtimeEventCount,
 }: SchedulePanelProps) {
@@ -222,6 +246,36 @@ export function SchedulePanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState("");
   const [createForm, setCreateForm] = useState<CreateFormState | null>(null);
+  // J3：运行历史（按需拉取；展开即取一次，折叠不丢缓存）。
+  const [expandedRunId, setExpandedRunId] = useState("");
+  const [runsByTask, setRunsByTask] = useState<Record<string, RuntimeScheduleJobRun[]>>({});
+  const [runsStatus, setRunsStatus] = useState<Record<string, "loading" | "error">>({});
+
+  const toggleRuns = useCallback(
+    async (taskId: string) => {
+      if (expandedRunId === taskId) {
+        setExpandedRunId("");
+        return;
+      }
+      setExpandedRunId(taskId);
+      if (runsByTask[taskId]) {
+        return;
+      }
+      setRunsStatus((prev) => ({ ...prev, [taskId]: "loading" }));
+      try {
+        const response = await fetchScheduleJobRuns(sessionId, taskId, 20);
+        setRunsByTask((prev) => ({ ...prev, [taskId]: response.runs }));
+        setRunsStatus((prev) => {
+          const next = { ...prev };
+          delete next[taskId];
+          return next;
+        });
+      } catch {
+        setRunsStatus((prev) => ({ ...prev, [taskId]: "error" }));
+      }
+    },
+    [expandedRunId, runsByTask, sessionId],
+  );
 
   const { active, inactive } = useMemo(
     () => splitScheduleTasks(tasks),
@@ -368,6 +422,92 @@ export function SchedulePanel({
                 {formatScheduleTimestamp(task.lastDelivery.deliveredAt)}
               </div>
             ) : null}
+            {/* J0/J1：作业目标、计划与执行上下文（仅在有值时展示）。 */}
+            {task.goal || (task.plan && task.plan.length > 0) || (task.targetKind && task.targetKind !== "session") ? (
+              <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                {task.goal ? (
+                  <div>
+                    {t("panels.schedule.goalLabel")}: {task.goal}
+                  </div>
+                ) : null}
+                {task.plan && task.plan.length > 0 ? (
+                  <div>
+                    {t("panels.schedule.planLabel")}:
+                    <ol className="ml-4 list-decimal">
+                      {task.plan.map((step, index) => (
+                        <li key={`${task.id}-plan-${index}`}>{step}</li>
+                      ))}
+                    </ol>
+                  </div>
+                ) : null}
+                {task.targetKind === "workspace" ? (
+                  <div>
+                    {t("panels.schedule.targetLabel")}: {t("panels.schedule.target.workspace")}
+                  </div>
+                ) : task.targetKind === "headless" ? (
+                  <div>
+                    {t("panels.schedule.targetLabel")}: {t("panels.schedule.target.headless")}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {/* J3：运行历史（按需展开）。 */}
+            <div className="mt-1">
+              <Button
+                className="h-6 px-2 text-xs"
+                onClick={() => void toggleRuns(task.id)}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                <HistoryIcon className="mr-1 h-3 w-3" />
+                {t("panels.schedule.runHistory")}
+              </Button>
+              {expandedRunId === task.id ? (
+                <div className="mt-1 space-y-1 text-xs">
+                  {runsStatus[task.id] === "loading" ? (
+                    <div className="text-muted-foreground">{t("panels.schedule.refresh")}…</div>
+                  ) : runsStatus[task.id] === "error" ? (
+                    <div className="text-destructive">{t("panels.schedule.runError")}</div>
+                  ) : (runsByTask[task.id] ?? []).length === 0 ? (
+                    <div className="text-muted-foreground">{t("panels.schedule.runEmpty")}</div>
+                  ) : (
+                    <ul className="space-y-1">
+                      {(runsByTask[task.id] ?? []).map((run) => (
+                        <li key={run.id} className="rounded border border-border px-2 py-1">
+                          <div className="flex items-center gap-2">
+                            <Badge
+                              className={
+                                run.status === "failed"
+                                  ? "border-destructive/40 text-destructive"
+                                  : "border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
+                              }
+                            >
+                              {run.status === "failed"
+                                ? t("panels.schedule.runStatus.failed")
+                                : t("panels.schedule.runStatus.done")}
+                            </Badge>
+                            <span className="text-muted-foreground">
+                              {formatScheduleTimestamp(run.finishedAt)}
+                            </span>
+                          </div>
+                          {run.output ? (
+                            <div className="mt-1 whitespace-pre-wrap">
+                              {t("panels.schedule.runOutput")}: {run.output}
+                            </div>
+                          ) : null}
+                          {run.error ? (
+                            <div className="mt-1 text-destructive">
+                              {t("panels.schedule.runError")}: {run.error}
+                            </div>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+            </div>
             {editing && draft ? (
               <div className="mt-2 space-y-2">
                 <textarea
@@ -519,6 +659,31 @@ export function SchedulePanel({
                 }
                 placeholder={t("panels.schedule.sessionPlaceholder")}
                 value={createForm.sessionId}
+              />
+            </label>
+            <label className="grid gap-1 text-xs">
+              <span className="text-muted-foreground">{t("panels.schedule.targetLabel")}</span>
+              <select
+                className="rounded border border-border bg-transparent px-2 py-1"
+                onChange={(event) =>
+                  setCreateForm({
+                    ...createForm,
+                    targetKind: event.target.value as RuntimeScheduleTargetKind,
+                  })
+                }
+                value={createForm.targetKind}
+              >
+                <option value="session">{t("panels.schedule.target.session")}</option>
+                <option value="headless">{t("panels.schedule.target.headless")}</option>
+                <option value="workspace">{t("panels.schedule.target.workspace")}</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs">
+              <span className="text-muted-foreground">{t("panels.schedule.goalLabel")}</span>
+              <input
+                className="rounded border border-border bg-transparent px-2 py-1"
+                onChange={(event) => setCreateForm({ ...createForm, goal: event.target.value })}
+                value={createForm.goal}
               />
             </label>
             <label className="grid gap-1 text-xs">

@@ -19,7 +19,11 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 			Name: ToolScheduleCreate,
 			Description: "Create a reminder in the current session that delivers prompt when it becomes due. " +
 				"Supply exactly one timing parameter: after_seconds, at, or every_seconds. " +
-				"This is not a background job: nothing runs now, and the session processes the message only when the reminder fires.",
+				"This is not a background job: nothing runs now, and the session processes the message only when the reminder fires. " +
+				"For an automation request phrased as a goal (e.g. \"run a system check tomorrow\"), do the planning at creation " +
+				"time yourself: derive a concrete goal and a short declarative plan and pass them via goal/plan. To have the job " +
+				"run unattended without depending on an open session, set target_kind=headless (or workspace, which also needs " +
+				"target_workspace). Non-session jobs require goal. When the job finishes, its result is delivered back to this session.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -30,6 +34,28 @@ func scheduleToolDefinitions() []types.ToolDefinition {
 					"title": map[string]interface{}{
 						"type":        "string",
 						"description": fmt.Sprintf("Task name of at most %d characters, shown on the task card and in task lists.", schedule.MaxTitleLength),
+					},
+					"goal": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional job goal in natural language (what to achieve, e.g. \"run a system check\"). Empty keeps the plain-reminder semantics.",
+					},
+					"plan": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional declarative execution steps decided at creation time. Empty means no plan.",
+					},
+					"target_kind": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"session", "workspace", "headless"},
+						"description": "Optional execution context: session (deliver into the bound session, default), workspace (bound to a workspace), headless (no session; results go to the inbox).",
+					},
+					"target_workspace": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional workspace path for target_kind=workspace.",
+					},
+					"target_profile": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional tool/profile restriction used when the job runs unattended.",
 					},
 					"after_seconds": map[string]interface{}{
 						"type":        "integer",
@@ -202,6 +228,12 @@ func (b *Broker) executeScheduleCreate(sessionID string, args map[string]interfa
 	prompt := stringArg(args, "prompt")
 	title := stringArg(args, "title")
 	req := schedule.CreateRequest{Prompt: prompt, Title: title}
+	// J0：作业通用化字段（全部可选；空则沿用现状语义）。
+	req.Goal = stringArg(args, "goal")
+	req.Plan = stringSliceArg(args, "plan")
+	req.TargetKind = schedule.NormalizeTargetKind(stringArg(args, "target_kind"))
+	req.TargetWorkspace = stringArg(args, "target_workspace")
+	req.TargetProfile = stringArg(args, "target_profile")
 	if value, ok, err := int64Arg(args, "after_seconds"); err != nil {
 		return scheduleError(schedule.CodeInvalidRule, err.Error()), nil, nil
 	} else if ok {
@@ -345,6 +377,24 @@ func stringArg(args map[string]interface{}, key string) string {
 		return value
 	}
 	return ""
+}
+
+// stringSliceArg 解析字符串数组参数（J0：plan）；非数组/含非字符串项一律忽略。
+func stringSliceArg(args map[string]interface{}, key string) []string {
+	raw, ok := args[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if text, ok := item.(string); ok {
+			out = append(out, text)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // dailyArg 解析 daily 对象参数（{time, time_zone}）。

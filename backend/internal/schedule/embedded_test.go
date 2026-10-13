@@ -72,7 +72,7 @@ func TestTryEmbeddedExecutesWhenLeaseGranted(t *testing.T) {
 	rt := NewRuntime(RuntimeOptions{
 		Store: store, Service: svc, Clock: clock, Deliverer: deliverer,
 		MaxAttempts: 3, FallbackToMailbox: true,
-		Executor: executor, Arbiter: arbiter,
+		Executor: executor, Arbiter: arbiter, Mode: ModeEmbedded,
 	})
 	defer rt.Stop()
 
@@ -121,7 +121,7 @@ func TestTryEmbeddedSkipsWhenLeaseHeld(t *testing.T) {
 	rt := NewRuntime(RuntimeOptions{
 		Store: store, Service: svc, Clock: clock, Deliverer: deliverer,
 		MaxAttempts: 3, FallbackToMailbox: true,
-		Executor: executor, Arbiter: arbiter,
+		Executor: executor, Arbiter: arbiter, Mode: ModeEmbedded,
 	})
 	defer rt.Stop()
 
@@ -171,5 +171,49 @@ func TestTryEmbeddedNoopWithoutExecutor(t *testing.T) {
 	pending, _ := store.ListPendingMessages("session-1", 10)
 	if len(pending) != 1 {
 		t.Fatalf("without executor the fallback path must run, got %d pending", len(pending))
+	}
+}
+
+// TestTryEmbeddedGatedByDelegateMode 验证 mode 门控：即使 Executor/Arbiter 都已注入，
+// delegate 模式下也绝不内嵌，必须走兜底（否则「默认 delegate」的设计意图失效）。
+func TestTryEmbeddedGatedByDelegateMode(t *testing.T) {
+	store, err := NewMemoryStore()
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	svc := NewService(store, clock)
+
+	delay := int64(60)
+	if _, err := svc.Create("session-1", CreateRequest{Prompt: "x", Title: "t", AfterSeconds: &delay}, OriginModel); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	deliverer := &flakyDeliverer{failFirst: 3}
+	executor := &embeddedExecutor{}
+	arbiter := newTestArbiter()
+	rt := NewRuntime(RuntimeOptions{
+		Store: store, Service: svc, Clock: clock, Deliverer: deliverer,
+		MaxAttempts: 3, FallbackToMailbox: true,
+		Executor: executor, Arbiter: arbiter, Mode: ModeDelegate,
+	})
+	defer rt.Stop()
+
+	now = now.Add(2 * time.Minute)
+	rt.RequestDrive()
+	time.Sleep(80 * time.Millisecond)
+
+	if executor.count() != 0 {
+		t.Fatalf("delegate mode must never embed, got %d embedded calls", executor.count())
+	}
+	if len(arbiter.acquired) != 0 {
+		t.Fatalf("delegate mode must not even consult the arbiter, got %v", arbiter.acquired)
+	}
+	pending, _ := store.ListPendingMessages("session-1", 10)
+	if len(pending) != 1 {
+		t.Fatalf("delegate mode must fall back to pending, got %d", len(pending))
 	}
 }

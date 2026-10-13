@@ -16,12 +16,22 @@ export type RuntimeScheduleStatus = "active" | "inactive";
 
 export type RuntimeScheduleState = "scheduled" | "overdue";
 
+/**
+ * 执行上下文（J0/J1）：session 投递进绑定会话（默认）；workspace 绑工作区；
+ * headless 不绑会话（结果回投创建者）。
+ */
+export type RuntimeScheduleTargetKind = "session" | "workspace" | "headless";
+
 /** 一条提醒的规则与已提交目标（`scheduledAt` 为 UTC RFC3339）。 */
 export type RuntimeScheduleRecord = {
   id: string;
   kind: RuntimeScheduleKind;
   title: string;
   prompt: string;
+  /** 作业目标（J0；空表示沿用 prompt 语义）。 */
+  goal?: string;
+  /** 声明式执行步骤（J0）。 */
+  plan?: string[];
   scheduledAt: string;
   /** kind=after */
   afterSeconds?: number;
@@ -43,6 +53,10 @@ export type RuntimeScheduleTask = {
   kind: RuntimeScheduleKind;
   title: string;
   prompt: string;
+  /** 作业目标（J0；空表示沿用 prompt 语义）。 */
+  goal?: string;
+  /** 声明式执行步骤（J0）。 */
+  plan?: string[];
   scheduledAt: string;
   afterSeconds?: number;
   everySeconds?: number;
@@ -54,6 +68,12 @@ export type RuntimeScheduleTask = {
   status: RuntimeScheduleStatus;
   /** 创建来源：model=模型工具；manual=人工管理端（旧数据回落 model）。 */
   origin?: RuntimeScheduleOrigin;
+  /** 执行上下文（J1；缺省回落 session）。 */
+  targetKind?: RuntimeScheduleTargetKind;
+  targetWorkspace?: string;
+  targetProfile?: string;
+  /** 创建者会话（J3；非 session 目标也保留，用于结果回投）。 */
+  createdBySessionId?: string;
   lastDelivery?: {
     scheduledAt: string;
     deliveredAt: string;
@@ -90,6 +110,28 @@ export type RuntimeScheduleHistoryResponse = {
   earlierRecordsPruned: boolean;
   retentionDays: number;
   retentionRecords: number;
+};
+
+/** 一次作业运行的结果状态（J3）。 */
+export type RuntimeScheduleJobRunStatus = "done" | "failed";
+
+/** 一次作业运行记录（J3：headless/workspace 作业的执行历史）。 */
+export type RuntimeScheduleJobRun = {
+  id: number;
+  scheduleId: string;
+  status: RuntimeScheduleJobRunStatus;
+  output?: string;
+  error?: string;
+  /** 本次运行所用的临时会话（headless/workspace；可空）。 */
+  sessionId?: string;
+  startedAt: string;
+  finishedAt: string;
+};
+
+export type RuntimeScheduleJobRunsResponse = {
+  id: string;
+  runs: RuntimeScheduleJobRun[];
+  count: number;
 };
 
 export type RuntimeScheduleDeleteResponse = {
@@ -136,6 +178,13 @@ export type RuntimeScheduleCreateRequest = {
   daily?: { time: string; time_zone: string };
   weekly?: { time: string; time_zone: string; weekdays: number[] };
   cron?: { expression: string; time_zone: string };
+  /** J0/J4：作业目标与计划（可选）。 */
+  goal?: string;
+  plan?: string[];
+  /** J1：执行上下文（可选；非 session 目标不绑会话且必须有 goal）。 */
+  target_kind?: RuntimeScheduleTargetKind;
+  target_workspace?: string;
+  target_profile?: string;
 };
 
 export type RuntimeScheduleCreateResponse = {

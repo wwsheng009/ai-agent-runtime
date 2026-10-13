@@ -44,6 +44,9 @@
 
 **推荐**：D3 用 A 落地 `embedded`，作为 B 的过渡与验证；B 在独立重构批次做。
 
+> 路径 B 的完整分析与分阶段方案见 [`runtimehost-executor-extraction-plan.md`](./runtimehost-executor-extraction-plan.md)
+> （E3.0–E3.4：接口/适配器 → 依赖收敛 → Handler 消费 Executor → daemon 注入 → aicli 复用）。
+
 ---
 
 ## 4. 组件与依赖

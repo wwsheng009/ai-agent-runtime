@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/config"
-	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 )
 
@@ -41,23 +41,22 @@ func run(args []string) error {
 		return err
 	}
 
-	// 服务管理子命令（需管理员）：install/uninstall/start/stop/status。
+	// 子命令路由：run = 显式前台（等价于无参数）；doctor = 自检；
+	// install/uninstall/start/stop/status = 服务管理（需管理员）。
 	if fs.NArg() > 0 {
-		return runServiceCommand(fs.Arg(0))
+		switch command := fs.Arg(0); command {
+		case "run":
+			// 显式前台：继续下面的前台装配。
+		case "doctor":
+			return runDoctorCommand(*configPath, *storePath, *dataDir, *runtimeServer)
+		default:
+			return runServiceCommand(command)
+		}
 	}
 
-	cfg := config.DefaultScheduleConfig()
-	if strings.TrimSpace(*configPath) != "" {
-		manager := config.NewRuntimeManager(*configPath)
-		if err := manager.Load(); err != nil {
-			return fmt.Errorf("load config: %w", err)
-		}
-		cfg = manager.Get().Schedule.WithDefaults()
-	} else {
-		cfg = cfg.WithDefaults()
-	}
-	if strings.TrimSpace(*runtimeServer) != "" {
-		cfg.Execution.RuntimeServerURL = strings.TrimSpace(*runtimeServer)
+	cfg, err := loadScheduleConfig(*configPath, *runtimeServer)
+	if err != nil {
+		return err
 	}
 
 	path, err := resolveStorePath(*storePath, *dataDir, cfg)
@@ -74,6 +73,40 @@ func run(args []string) error {
 	}
 	defer func() { _ = store.Close() }()
 
+	// E1：会话执行仲裁必须用**与宿主同一把** chat.SessionLeaseStore（共享
+	// session_runtime.sqlite），而不是 internal/mesh 文件租约（见 §2.5a）。
+	// 仅在允许内嵌时打开；未配置/打不开 → fail-closed（store=nil，不内嵌）。
+	var sessionLeaseStore chat.SessionLeaseStore
+	if schedule.ModeAllowsEmbedded(cfg.Execution.Mode) {
+		leaseStore, closeLeaseStore, leaseErr := openSharedSessionLeaseStore(*configPath)
+		if leaseErr != nil {
+			fmt.Fprintf(os.Stderr, "scheduled: warning: shared session lease store unavailable (%v); embedded execution stays fail-closed\n", leaseErr)
+		} else {
+			sessionLeaseStore = leaseStore
+			defer closeLeaseStore()
+		}
+	}
+
+	// E3.3：内嵌执行核（仅 embedded/auto 构建；delegate 保持零装配、零行为变化）。
+	// 任一步失败 → fail-closed（不内嵌，退回 delegate/mailbox）。
+	var embeddedExecutor schedule.SessionExecutor
+	if schedule.ModeAllowsEmbedded(cfg.Execution.Mode) {
+		runtimeConfig, cfgErr := loadRuntimeConfig(*configPath)
+		if cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "scheduled: warning: embedded executor unavailable (%v); embedded stays disabled\n", cfgErr)
+		} else if headless, headlessErr := buildHeadlessExecutor(runtimeConfig, *configPath); headlessErr != nil {
+			fmt.Fprintf(os.Stderr, "scheduled: warning: embedded executor unavailable (%v); embedded stays disabled\n", headlessErr)
+		} else {
+			embeddedExecutor = scheduleExecutorAdapter{
+				exec:           headless.executor,
+				profile:        cfg.Execution.Profile,
+				createSession:  headless.createSession,
+				archiveSession: headless.archiveSession,
+			}
+			defer headless.close()
+		}
+	}
+
 	service := schedule.NewService(store, schedule.SystemClock)
 	deliverer := &schedule.HTTPDeliverer{BaseURL: cfg.Execution.RuntimeServerURL}
 	runtime := schedule.NewRuntime(schedule.RuntimeOptions{
@@ -82,19 +115,20 @@ func run(args []string) error {
 		Deliverer:         deliverer,
 		MaxAttempts:       cfg.MaxDeliveryAttempts,
 		FallbackToMailbox: cfg.Execution.FallbackToMailbox,
-		// E1：session 租约仲裁（delegate 失败且会话空闲时允许 embedded 路径；
-		// Executor 尚未注入——E0 完整执行栈见 implementation-status §5）。
-		Executor: nil,
-		Arbiter:  newDaemonSessionArbiter(mesh.ResolvePaths()),
-		Logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+		// 执行模式：delegate 永不内嵌（即使未来注入 Executor）；embedded/auto 才内嵌。
+		Mode: cfg.Execution.Mode,
+		// E3.3：内嵌执行核（embedded/auto 时注入；delegate 为 nil）。
+		Executor: embeddedExecutor,
+		// E1：会话租约仲裁（与宿主同源，见 runtimehost-executor-extraction-plan.md §2.5a）。
+		Arbiter: newDaemonSessionArbiter(sessionLeaseStore),
+		Logf:    func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	})
-	// 注册宿主侧兜底消费运行时引用：宿主（aicli/runtime-server）的
-	// drainSchedulePending 经 service.Runtime() 触达同一 daemon Runtime 的
-	// DrainPendingMessages（共享 store，pending 表两端可读写）。
-	service.SetRuntime(runtime)
-
-	release := acquireSchedulerLease()
-	defer release()
+	// 单实例租约：续租 + 失租停止。另一实例在跑时本进程待命退出（不双投递）。
+	lease, ok := newSchedulerLease()
+	if !ok {
+		return nil
+	}
+	defer lease.release()
 
 	// D3：loopback 运维端点（127.0.0.1:8919）。
 	status := &statusServer{
@@ -111,14 +145,21 @@ func run(args []string) error {
 		defer stopStatus()
 	}
 
-	// Windows 服务模式：由 SCM 启动时改走服务循环（不装 signal handler）。
-	if err := runAsWindowsService(func(stop <-chan struct{}) {
+	// runUntil 启动运行时，直到外部 stop 或租约被接管。
+	runUntil := func(stop <-chan struct{}) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		runtime.Start(ctx)
-		<-stop
+		select {
+		case <-stop:
+		case <-lease.Lost():
+			fmt.Fprintln(os.Stderr, "scheduled: scheduler lease lost to another instance; stopping to avoid double delivery")
+		}
 		runtime.Stop()
-	}); err == nil {
+	}
+
+	// Windows 服务模式：由 SCM 启动时改走服务循环（不装 signal handler）。
+	if err := runAsWindowsService(runUntil); err == nil {
 		return nil
 	} else if err != errNotService {
 		return err
@@ -130,7 +171,11 @@ func run(args []string) error {
 	runtime.Start(ctx)
 	fmt.Fprintf(os.Stderr, "scheduled: running (store=%s, mode=%s, runtime-server=%s)\n",
 		path, cfg.Execution.Mode, cfg.Execution.RuntimeServerURL)
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-lease.Lost():
+		fmt.Fprintln(os.Stderr, "scheduled: scheduler lease lost to another instance; stopping to avoid double delivery")
+	}
 	runtime.Stop()
 	return nil
 }
@@ -152,7 +197,7 @@ func runServiceCommand(command string) error {
 		fmt.Fprintln(os.Stderr, status)
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (supported: install, uninstall, start, stop, status)", command)
+		return fmt.Errorf("unknown command %q (supported: run, doctor, install, uninstall, start, stop, status)", command)
 	}
 }
 
@@ -174,18 +219,33 @@ func resolveStorePath(flagStore, flagDataDir string, cfg config.ScheduleConfig) 
 	return filepath.Join(dir, "schedule.sqlite"), nil
 }
 
-// acquireSchedulerLease 获取 mesh 单实例租约；不可用时降级为无互斥运行（返回空释放函数）。
-func acquireSchedulerLease() func() {
-	paths := mesh.ResolvePaths()
-	if strings.TrimSpace(paths.Root) == "" {
-		fmt.Fprintln(os.Stderr, "scheduled: warning: mesh root unavailable; running without single-instance mutual exclusion")
-		return func() {}
+// loadScheduleConfig 读取 schedule.* 配置（缺省回落内置默认），并应用
+// --runtime-server 覆盖。
+func loadScheduleConfig(configPath, runtimeServer string) (config.ScheduleConfig, error) {
+	cfg := config.DefaultScheduleConfig()
+	if strings.TrimSpace(configPath) != "" {
+		manager := config.NewRuntimeManager(configPath)
+		if err := manager.Load(); err != nil {
+			return config.ScheduleConfig{}, fmt.Errorf("load config: %w", err)
+		}
+		cfg = manager.Get().Schedule.WithDefaults()
+	} else {
+		cfg = cfg.WithDefaults()
 	}
-	owner := mesh.LeaseOwner{NodeID: fmt.Sprintf("scheduled-%d", os.Getpid()), PID: os.Getpid()}
-	outcome := mesh.Acquire(paths, "schedule-scheduler", "global", owner, mesh.AcquireOptions{TTL: 30 * time.Second})
-	if outcome.Err != nil || !outcome.Acquired {
-		fmt.Fprintf(os.Stderr, "scheduled: warning: scheduler lease not acquired (%s); another instance may be active\n", outcome.Reason)
-		return func() {}
+	if strings.TrimSpace(runtimeServer) != "" {
+		cfg.Execution.RuntimeServerURL = strings.TrimSpace(runtimeServer)
 	}
-	return func() { mesh.Release(paths, "schedule-scheduler", "global", owner) }
+	return cfg, nil
+}
+
+// loadRuntimeConfig 加载完整 runtime 配置（E3.3 内嵌执行核装配用）。
+func loadRuntimeConfig(configPath string) (*config.RuntimeConfig, error) {
+	if strings.TrimSpace(configPath) == "" {
+		return nil, fmt.Errorf("no --config: runtime config is required for embedded execution")
+	}
+	manager := config.NewRuntimeManager(configPath)
+	if err := manager.Load(); err != nil {
+		return nil, fmt.Errorf("load runtime config: %w", err)
+	}
+	return manager.Get(), nil
 }

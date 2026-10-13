@@ -52,6 +52,24 @@ export const zhWorkspacePanelsSchedule = {
   atLabel: "具体时间",
   cronLabel: "Cron 表达式",
   originManual: "人工",
+  // J0/J1：作业目标、计划与执行上下文。
+  goalLabel: "目标",
+  planLabel: "执行步骤",
+  targetLabel: "执行上下文",
+  target: {
+    session: "原会话",
+    workspace: "工作区",
+    headless: "无人值守",
+  },
+  // J3：运行历史。
+  runHistory: "运行历史",
+  runStatus: {
+    done: "成功",
+    failed: "失败",
+  },
+  runEmpty: "还没有运行记录",
+  runOutput: "输出",
+  runError: "错误",
   weekday: {
     1: "一",
     2: "二",

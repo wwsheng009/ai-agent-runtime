@@ -45,6 +45,32 @@ const (
 	OriginManual Origin = "manual"
 )
 
+// TargetKind 是作业的**执行上下文**类型（J0：脱离会话绑定的第一步）。
+//
+// 旧数据与未知值一律回落到 TargetSession，保证零迁移语义。
+type TargetKind string
+
+const (
+	// TargetSession 投递/执行进指定会话（现状默认）。
+	TargetSession TargetKind = "session"
+	// TargetWorkspace 绑定工作区 + profile，运行时可创建临时会话。
+	TargetWorkspace TargetKind = "workspace"
+	// TargetHeadless 不绑会话，运行产物落结果收件箱。
+	TargetHeadless TargetKind = "headless"
+)
+
+// NormalizeTargetKind 归一化执行上下文类型（空/未知 → session）。
+func NormalizeTargetKind(raw string) TargetKind {
+	switch TargetKind(raw) {
+	case TargetWorkspace:
+		return TargetWorkspace
+	case TargetHeadless:
+		return TargetHeadless
+	default:
+		return TargetSession
+	}
+}
+
 // ScheduleState 是从记录与墙钟派生的时间态（与 Status 是两个概念）。
 type ScheduleState string
 
@@ -66,10 +92,14 @@ const (
 
 // Record 是一条提醒的规则与已提交目标；ScheduledAt 一律为 UTC。
 type Record struct {
-	ID           string    `json:"id"`
-	Kind         Kind      `json:"kind"`
-	Title        string    `json:"title"`
-	Prompt       string    `json:"prompt"`
+	ID     string `json:"id"`
+	Kind   Kind   `json:"kind"`
+	Title  string `json:"title"`
+	Prompt string `json:"prompt"`
+	// Goal 是作业目标（自然语言；空表示沿用 prompt 语义）。
+	Goal string `json:"goal,omitempty"`
+	// Plan 是创建时产出的执行步骤（声明式；空表示无计划）。
+	Plan         []string  `json:"plan,omitempty"`
 	ScheduledAt  time.Time `json:"scheduledAt"`
 	AfterSeconds int64     `json:"afterSeconds,omitempty"`
 	EverySeconds int64     `json:"everySeconds,omitempty"`
@@ -106,10 +136,42 @@ type Task struct {
 	Status    Status `json:"status"`
 	// Origin 是创建来源（model=模型工具；manual=人工管理端）。
 	// 旧库行缺省为空，scan 时回落 OriginModel。
-	Origin          Origin           `json:"origin,omitempty"`
-	LastDelivery    *DeliveryReceipt `json:"lastDelivery,omitempty"`
-	DeliveryHistory *DeliveryHistory `json:"deliveryHistory,omitempty"`
-	StateVersion    int64            `json:"stateVersion"`
+	Origin Origin `json:"origin,omitempty"`
+	// TargetKind 是执行上下文类型（空回落 session；J0）。
+	TargetKind TargetKind `json:"targetKind,omitempty"`
+	// TargetWorkspace / TargetProfile 是 workspace/headless 目标的绑定（J0）。
+	TargetWorkspace string `json:"targetWorkspace,omitempty"`
+	TargetProfile   string `json:"targetProfile,omitempty"`
+	// CreatedBySessionID 是创建该作业的会话（J3：结果回投目标；非 session 目标也保留）。
+	CreatedBySessionID string           `json:"createdBySessionId,omitempty"`
+	LastDelivery       *DeliveryReceipt `json:"lastDelivery,omitempty"`
+	DeliveryHistory    *DeliveryHistory `json:"deliveryHistory,omitempty"`
+	StateVersion       int64            `json:"stateVersion"`
+}
+
+// JobRunStatus 是一次作业运行的结果状态。
+type JobRunStatus string
+
+const (
+	// JobRunDone 表示该次运行成功结束。
+	JobRunDone JobRunStatus = "done"
+	// JobRunFailed 表示该次运行失败。
+	JobRunFailed JobRunStatus = "failed"
+)
+
+// JobRun 是一次作业运行记录（J3：运行历史）。
+type JobRun struct {
+	ID         int64        `json:"id"`
+	ScheduleID string       `json:"scheduleId"`
+	Status     JobRunStatus `json:"status"`
+	// Output 是运行产出的文本（成功时）。
+	Output string `json:"output,omitempty"`
+	// Error 是失败原因（失败时）。
+	Error string `json:"error,omitempty"`
+	// SessionID 是本次运行所用的临时会话（headless/workspace；可空）。
+	SessionID  string    `json:"sessionId,omitempty"`
+	StartedAt  time.Time `json:"startedAt"`
+	FinishedAt time.Time `json:"finishedAt"`
 }
 
 // View 是模型可见的提醒视图。
@@ -137,6 +199,12 @@ type CreateRequest struct {
 	Daily        *DailyInput
 	Weekly       *WeeklyInput
 	Cron         *CronInput
+	// J0：作业通用化字段（全部可选；空则沿用现状语义）。
+	Goal            string
+	Plan            []string
+	TargetKind      TargetKind
+	TargetWorkspace string
+	TargetProfile   string
 }
 
 // DailyInput 是每日本地钟表时间选择器。

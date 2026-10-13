@@ -57,6 +57,10 @@
 | `scheduled start` / `stop` / `status` | 服务控制 |
 | `scheduled doctor` | 自检（store 可达、租约、runtime-server 连通性、待触发数） |
 
+> 实现状态：`run` / `doctor` / `install` / `uninstall` / `start` / `stop` / `status` 已实现
+> （Windows Service；非 Windows 的服务安装显式提示 systemd，见 §3.2）。单实例租约已加**续租 +
+> 失租停止**（续租丢失即停止调度，避免双实例双投递）。`doctor` 只读，不取租约。
+
 ### 3.2 平台集成
 
 | 平台 | 机制 | 实现 |

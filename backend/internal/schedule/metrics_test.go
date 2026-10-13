@@ -46,7 +46,7 @@ func TestRuntimeMetricsReflectDrive(t *testing.T) {
 	rt := NewRuntime(RuntimeOptions{
 		Store: store, Service: svc, Clock: clock, Deliverer: deliverer,
 		MaxAttempts: 5, FallbackToMailbox: true,
-		Executor: &embeddedExecutor{}, Arbiter: arbiter,
+		Executor: &embeddedExecutor{}, Arbiter: arbiter, Mode: ModeEmbedded,
 	})
 	defer rt.Stop()
 

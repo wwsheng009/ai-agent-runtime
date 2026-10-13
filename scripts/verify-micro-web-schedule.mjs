@@ -91,6 +91,9 @@ for (const id of ["schedule-list", "schedule-refresh-btn"]) {
   elements[id] = makeElement(id);
 }
 globalThis.document = {
+  // ui.js 顶层 applyTheme() 需要 documentElement/body；缺它们会让整个脚本在导入期崩溃。
+  documentElement: makeElement("documentElement"),
+  body: makeElement("body"),
   getElementById: (id) => elements[id] ?? makeElement(id),
   createElement: (tag) => makeElement("created-" + tag),
   querySelector: () => null,
@@ -129,6 +132,9 @@ pendingResponses.push([
           sessionId: "session-1",
           time: "09:00:00.000",
           timeZone: "Asia/Shanghai",
+          goal: "做一次系统检查",
+          plan: ["检查磁盘", "检查内存"],
+          targetKind: "headless",
         },
         {
           id: "schedule-b",
@@ -156,6 +162,10 @@ check(rendered.includes("未运行"), "inactive 徽标");
 check(rendered.includes("每天"), "kind 文案");
 check(rendered.includes("09:00:00.000"), "daily 时间摘要");
 check(rendered.includes("Asia/Shanghai"), "时区展示");
+// J0/J1：作业目标、计划与执行上下文。
+check(rendered.includes("做一次系统检查"), "goal 展示");
+check(rendered.includes("检查磁盘") && rendered.includes("检查内存"), "plan 步骤展示");
+check(rendered.includes("无人值守"), "headless 执行上下文展示");
 
 // 首次加载后不再重复请求（loaded 标记）。
 schedule.loadSchedule(false);

@@ -41,6 +41,25 @@ function renderTasks(tasks) {
       next = '<div class="schedule-meta">最近投递: ' + esc(formatLocal(task.lastDelivery.deliveredAt)) + '</div>';
     }
     var deleting = listEl.getAttribute("data-deleting") === task.id;
+    // J0/J1：作业目标、计划与执行上下文（仅在有值时展示）。
+    var job = "";
+    var hasTarget = task.targetKind === "headless" || task.targetKind === "workspace";
+    if (task.goal || (task.plan && task.plan.length > 0) || hasTarget) {
+      if (task.goal) {
+        job += '<div class="schedule-meta">目标: ' + esc(task.goal) + '</div>';
+      }
+      if (task.plan && task.plan.length > 0) {
+        var steps = "";
+        for (var s = 0; s < task.plan.length; s++) {
+          steps += '<li>' + esc(task.plan[s]) + '</li>';
+        }
+        job += '<div class="schedule-meta">执行步骤:<ol class="schedule-plan">' + steps + '</ol></div>';
+      }
+      if (hasTarget) {
+        job += '<div class="schedule-meta">执行上下文: ' +
+          (task.targetKind === "headless" ? "无人值守" : "工作区") + '</div>';
+      }
+    }
     var action = deleting
       ? '<button class="schedule-del schedule-del-confirm" data-sid="' + esc(task.sessionId) +
         '" data-id="' + esc(task.id) + '" disabled>确认删除</button>'
@@ -53,6 +72,7 @@ function renderTasks(tasks) {
       (freq ? " · " + esc(freq) : "") +
       (task.timeZone ? " · " + esc(task.timeZone) : "") + '</div>' +
       next +
+      job +
       '<div class="schedule-prompt">' + esc(task.prompt) + '</div>' +
       '</li>';
   }

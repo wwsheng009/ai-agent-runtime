@@ -15,10 +15,14 @@ func SystemClock() time.Time { return time.Now() }
 // CatalogEntry 是跨会话目录条目：记录 + 原会话绑定 + 生命周期 + 最近回执。
 type CatalogEntry struct {
 	Record
-	SessionID    string           `json:"sessionId"`
-	Status       Status           `json:"status"`
-	Origin       Origin           `json:"origin,omitempty"`
-	LastDelivery *DeliveryReceipt `json:"lastDelivery,omitempty"`
+	SessionID string `json:"sessionId"`
+	Status    Status `json:"status"`
+	Origin    Origin `json:"origin,omitempty"`
+	// J1/J3：执行上下文与创建者（前端展示 / 归属）。
+	TargetKind      TargetKind       `json:"targetKind,omitempty"`
+	TargetWorkspace string           `json:"targetWorkspace,omitempty"`
+	TargetProfile   string           `json:"targetProfile,omitempty"`
+	LastDelivery    *DeliveryReceipt `json:"lastDelivery,omitempty"`
 }
 
 // DeleteResult 是删除结果（含非变更的未找到）。
@@ -179,14 +183,35 @@ func (s *Service) Create(sessionID string, req CreateRequest, origin Origin) (Re
 	if err != nil {
 		return Record{}, err
 	}
+	// J0：作业通用化字段（全部可选；空则保持现状语义）。
+	record.Goal = strings.TrimSpace(req.Goal)
+	record.Plan = normalizePlan(req.Plan)
+	// J1：执行上下文决定会话绑定——非 session 目标不绑定会话（创建者回投属 J3）。
+	targetKind := NormalizeTargetKind(string(req.TargetKind))
+	if targetKind == TargetWorkspace && strings.TrimSpace(req.TargetWorkspace) == "" {
+		return Record{}, inputError(CodeInvalidRule, "target_workspace is required when target_kind=workspace.")
+	}
+	// J4：非会话作业没有既有会话承载语义，必须有目标（goal）才成立。
+	if targetKind != TargetSession && strings.TrimSpace(req.Goal) == "" {
+		return Record{}, inputError(CodeInvalidRule, "goal is required when target_kind is workspace or headless.")
+	}
+	boundSession := strings.TrimSpace(sessionID)
+	if targetKind != TargetSession {
+		boundSession = ""
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task := Task{
-		SessionID:       sessionID,
+		SessionID:       boundSession,
 		Record:          record,
 		Status:          StatusActive,
 		Origin:          origin,
-		DeliveryHistory: &DeliveryHistory{Records: []DeliveryRecord{}},
+		TargetKind:      targetKind,
+		TargetWorkspace: strings.TrimSpace(req.TargetWorkspace),
+		TargetProfile:   strings.TrimSpace(req.TargetProfile),
+		// J3：保留创建者会话（非 session 目标也记，用于结果回投）。
+		CreatedBySessionID: strings.TrimSpace(sessionID),
+		DeliveryHistory:    &DeliveryHistory{Records: []DeliveryRecord{}},
 	}
 	if err := s.store.Put(task); err != nil {
 		return Record{}, err
@@ -217,7 +242,9 @@ func (s *Service) Catalog() ([]CatalogEntry, error) {
 	entries := make([]CatalogEntry, 0, len(tasks))
 	for _, task := range tasks {
 		entries = append(entries, CatalogEntry{
-			Record: task.Record, SessionID: task.SessionID, Status: task.Status, Origin: task.Origin, LastDelivery: task.LastDelivery,
+			Record: task.Record, SessionID: task.SessionID, Status: task.Status, Origin: task.Origin,
+			TargetKind: task.TargetKind, TargetWorkspace: task.TargetWorkspace, TargetProfile: task.TargetProfile,
+			LastDelivery: task.LastDelivery,
 		})
 	}
 	return entries, nil
@@ -286,6 +313,31 @@ func (s *Service) History(request HistoryRequest) (HistoryResult, error) {
 		result.NextBefore = oldest.MessageID
 	}
 	return result, nil
+}
+
+// JobRuns 返回某作业的运行历史（J3；新到旧，limit 有界）。
+//
+// 归属校验：绑定会话或创建者会话匹配即可（headless 作业无绑定会话，但有创建者）。
+func (s *Service) JobRuns(sessionID, id string, limit int) ([]JobRun, error) {
+	task, ok, err := s.store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, inputError(CodeNotFound, "schedule_not_found")
+	}
+	owner := strings.TrimSpace(sessionID)
+	if owner != "" && task.SessionID != owner && task.CreatedBySessionID != owner {
+		return nil, inputError(CodeNotFound, "schedule_not_found")
+	}
+	sqlStore, isSQL := s.store.(*SQLiteStore)
+	if !isSQL {
+		return []JobRun{}, nil
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	return sqlStore.ListJobRuns(id, limit)
 }
 
 // Delete 删除一条属于 sessionID 的任务（硬删除，含历史）。
@@ -465,8 +517,22 @@ func mustParseAtOrZero(raw string) time.Time {
 	return parsed.UTC()
 }
 
+// normalizePlan 清洗执行步骤：去首尾空白、丢弃空项；全空返回 nil。
+func normalizePlan(plan []string) []string {
+	out := make([]string, 0, len(plan))
+	for _, step := range plan {
+		if trimmed := strings.TrimSpace(step); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func recordsEqual(a, b Record) bool {
-	if a.ID != b.ID || a.Kind != b.Kind || a.Title != b.Title || a.Prompt != b.Prompt {
+	if a.ID != b.ID || a.Kind != b.Kind || a.Title != b.Title || a.Prompt != b.Prompt || a.Goal != b.Goal {
 		return false
 	}
 	if !a.ScheduledAt.UTC().Equal(b.ScheduledAt.UTC()) {
@@ -474,6 +540,14 @@ func recordsEqual(a, b Record) bool {
 	}
 	if a.AfterSeconds != b.AfterSeconds || a.EverySeconds != b.EverySeconds {
 		return false
+	}
+	if len(a.Plan) != len(b.Plan) {
+		return false
+	}
+	for i := range a.Plan {
+		if a.Plan[i] != b.Plan[i] {
+			return false
+		}
 	}
 	if a.Time != b.Time || a.TimeZone != b.TimeZone || a.Expression != b.Expression {
 		return false

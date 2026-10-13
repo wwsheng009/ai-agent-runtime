@@ -1057,6 +1057,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/schedule/catalog", h.GetScheduleCatalog).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/schedule/list", h.ListScheduleTasks).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/schedule/history", h.GetScheduleDeliveryHistory).Methods(http.MethodGet)
+	// J3：作业运行历史（headless/workspace 作业的执行记录）。
+	runtimeRouter.HandleFunc("/schedule/runs", h.GetScheduleJobRuns).Methods(http.MethodGet)
 	// Manual creation entry (origin=manual): the service-side validation is the
 	// same pipeline the model tool uses; see CreateScheduleTask.
 	runtimeRouter.HandleFunc("/schedule/create", h.CreateScheduleTask).Methods(http.MethodPost)
@@ -5848,6 +5850,8 @@ func (h *Handler) getScheduleService() *schedule.Service {
 			bus.Publish(runtimeevents.Event{Type: "schedule.changed"})
 		})
 	}
+	// 缺口 1：注册宿主侧兜底消费运行时，会话激活时 drain daemon 落库的 pending。
+	h.attachScheduleDrainRuntime(service, store)
 	h.scheduleService = service
 	return h.scheduleService
 }

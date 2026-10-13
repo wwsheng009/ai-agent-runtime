@@ -16,11 +16,15 @@ import type {
   RuntimeScheduleCreateResponse,
   RuntimeScheduleDeleteResponse,
   RuntimeScheduleHistoryResponse,
+  RuntimeScheduleJobRun,
+  RuntimeScheduleJobRunsResponse,
+  RuntimeScheduleJobRunStatus,
   RuntimeScheduleKind,
   RuntimeScheduleListResponse,
   RuntimeScheduleOrigin,
   RuntimeScheduleRecord,
   RuntimeScheduleTask,
+  RuntimeScheduleTargetKind,
   RuntimeScheduleUpdateRequest,
   RuntimeScheduleUpdateResponse,
 } from "@/types/runtime";
@@ -88,6 +92,23 @@ function normalizeWeekdays(value: unknown): number[] | undefined {
   return days.length > 0 ? Array.from(new Set(days)) : undefined;
 }
 
+/** 归一化字符串数组（J0：plan）；非数组/空数组回落 undefined。 */
+function normalizeStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items = value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter((entry) => entry.length > 0);
+  return items.length > 0 ? items : undefined;
+}
+
+/** 归一化执行上下文（J1）；未知值回落 session。 */
+function normalizeTargetKind(value: unknown): RuntimeScheduleTargetKind {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return raw === "workspace" || raw === "headless" ? raw : "session";
+}
+
 /** 归一化一条记录（`Record` 与 `CatalogEntry` 共用的规则字段部分）。 */
 export function normalizeScheduleRecord(raw: unknown): RuntimeScheduleRecord {
   const record = asRecord(raw) ?? {};
@@ -96,6 +117,8 @@ export function normalizeScheduleRecord(raw: unknown): RuntimeScheduleRecord {
     kind: normalizeScheduleKind(record.kind ?? record.Kind),
     title: pickString(record, "title", "Title"),
     prompt: pickString(record, "prompt", "Prompt"),
+    goal: pickString(record, "goal", "Goal") || undefined,
+    plan: normalizeStringList(record.plan ?? record.Plan),
     scheduledAt: pickString(record, "scheduledAt", "ScheduledAt"),
     afterSeconds: pickNumber(record, "afterSeconds", "AfterSeconds"),
     everySeconds: pickNumber(record, "everySeconds", "EverySeconds"),
@@ -118,6 +141,14 @@ export function normalizeScheduleTask(raw: unknown): RuntimeScheduleTask {
     sessionId: pickString(record, "sessionId", "SessionID", "session_id"),
     status: pickString(record, "status", "Status") === "inactive" ? "inactive" : "active",
     origin: (origin === "manual" ? "manual" : "model") as RuntimeScheduleOrigin,
+    targetKind: normalizeTargetKind(record.targetKind ?? record.TargetKind ?? record.target_kind),
+    targetWorkspace:
+      pickString(record, "targetWorkspace", "TargetWorkspace", "target_workspace") || undefined,
+    targetProfile:
+      pickString(record, "targetProfile", "TargetProfile", "target_profile") || undefined,
+    createdBySessionId:
+      pickString(record, "createdBySessionId", "CreatedBySessionID", "created_by_session_id") ||
+      undefined,
     lastDelivery: lastDeliveryRaw
       ? {
           scheduledAt: pickString(lastDeliveryRaw, "scheduledAt", "ScheduledAt"),
@@ -189,6 +220,46 @@ export async function fetchScheduleHistory(
     earlierRecordsPruned: record.earlierRecordsPruned === true,
     retentionDays: pickNumber(record, "retentionDays") ?? 0,
     retentionRecords: pickNumber(record, "retentionRecords") ?? 0,
+  };
+}
+
+/** 读取某作业的运行历史（J3；新到旧，limit 有界）。 */
+export async function fetchScheduleJobRuns(
+  sessionId: string,
+  id: string,
+  limit = 20,
+): Promise<RuntimeScheduleJobRunsResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrlWithQuery(`${SCHEDULE_PATH}/runs`, {
+      session_id: sessionId,
+      id,
+      limit,
+    }),
+    { headers: { Accept: "application/json" } },
+  );
+  const record = asRecord(payload) ?? {};
+  const runs = Array.isArray(record.runs)
+    ? record.runs.map((entry) => normalizeJobRun(entry))
+    : [];
+  return {
+    id: pickString(record, "id", "ID"),
+    runs,
+    count: pickNumber(record, "count") ?? runs.length,
+  };
+}
+
+function normalizeJobRun(raw: unknown): RuntimeScheduleJobRun {
+  const run = asRecord(raw) ?? {};
+  const status = pickString(run, "status", "Status");
+  return {
+    id: pickNumber(run, "id", "ID") ?? 0,
+    scheduleId: pickString(run, "scheduleId", "ScheduleID", "schedule_id"),
+    status: (status === "failed" ? "failed" : "done") as RuntimeScheduleJobRunStatus,
+    output: pickString(run, "output", "Output") || undefined,
+    error: pickString(run, "error", "Error") || undefined,
+    sessionId: pickString(run, "sessionId", "SessionID", "session_id") || undefined,
+    startedAt: pickString(run, "startedAt", "StartedAt"),
+    finishedAt: pickString(run, "finishedAt", "FinishedAt"),
   };
 }
 

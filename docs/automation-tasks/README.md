@@ -45,6 +45,9 @@
 | [`tool-surface-inventory-and-naming-review.md`](./tool-surface-inventory-and-naming-review.md) | **工具面梳理与命名规范（全局）**：全量工具清单（作业/计划任务/团队/子代理/文件/监督）、命名问题诊断（`task_*` 三重载）、`job_*`/`team_*`/`subagent_*` 映射表、分批迁移策略 |
 | [`scheduler-daemon-design.md`](./scheduler-daemon-design.md) | **调度守护进程设计**：三平面拆分、`cmd/scheduled`、Windows 服务 / systemd、`internal/mesh` 单实例租约、跨进程投递（HTTP + 持久 mailbox）、运维端点与分期 |
 | [`embedded-execution-design.md`](./embedded-execution-design.md) | **内嵌执行设计**：delegate/embedded/auto 三模式、复用 `runtimeapi.Handler` 作库（路径 A）vs 抽取 `internal/runtimehost.Executor`（路径 B）、session 租约仲裁、受限 profile、资源/审批约束与分期 |
+| [`runtimehost-executor-extraction-plan.md`](./runtimehost-executor-extraction-plan.md) | **执行核抽取分析与方案（路径 B）**：现状核验（Handler 拥有 hub/actor 工厂）、耦合点清单、`internal/runtimehost.Executor` 目标架构与接口草案、E3.0–E3.4 分阶段迁移、风险/测试/验收、开放问题；含两个阻塞缺陷（会话租约域不一致、`mode` 未接线） |
+| [`automation-job-generality-design.md`](./automation-job-generality-design.md) | **自动化作业通用化设计**：`target` 执行上下文（session/workspace/headless）脱离会话绑定、Job=trigger+goal+plan+context+policy+state、作业级执行租约、headless 执行与结果回投、自然语言→规划→执行、J0–J4 分期 |
+| [`aicli-executor-reuse-design.md`](./aicli-executor-reuse-design.md) | **aicli 复用执行核（E3.4）详细设计**：两处 actor 工厂逐项差异核验（D1–D8）、`Deps` 差异映射、E3.4-0/a–c 分阶段、契约测试、开放问题 O1–O3；**完整性审查 G1–G7（含阻断级租约模式修正）与架构变更影响面** |
 | [`consistency-review.md`](./consistency-review.md) | **文档一致性复核**：链接/编号/术语/分期四类检查、17 处不一致修复清单、各轨分期编号（P/D/E/J/B/G）对齐 |
 | [`implementation-status.md`](./implementation-status.md) | **实施状态（P0）**：已交付文件映射、与设计的差异、验证命令、后续阶段 |
 | 本文件 | 术语澄清、结论摘要、索引 |

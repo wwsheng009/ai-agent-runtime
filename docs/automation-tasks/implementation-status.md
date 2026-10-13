@@ -121,6 +121,8 @@ go vet（相关包）  ✅
   可行路径：路径 B 抽取 `internal/runtimehost.Executor`（独立重构批次），或
   daemon 在投递前确认 runtime-server 可达并仅依赖 delegate。**机制已全部就位**：
   注入 Executor 即启用，`mode=delegate` 默认行为不变。
+  路径 B 的分析与分阶段方案见
+  [`runtimehost-executor-extraction-plan.md`](./runtimehost-executor-extraction-plan.md)。
 
 ### P7（人工创建入口）
 - 参考调研：deepseek-harness 的"新建"按钮只开新会话让模型创建（其管理页

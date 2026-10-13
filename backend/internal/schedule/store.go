@@ -143,6 +143,36 @@ ON schedule_pending_messages(session_id, consumed_at);
 		UpSQL: `
 ALTER TABLE schedule_tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'model';
 `,
+	}, {
+		Version: 4,
+		Name:    "schedule_tasks_job_fields",
+		// J0：作业通用化字段（goal/plan + 执行上下文 target）。
+		// 全部带默认值，旧行零迁移（target_kind 默认 'session'）。
+		UpSQL: `
+ALTER TABLE schedule_tasks ADD COLUMN goal TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_tasks ADD COLUMN plan_json TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_tasks ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'session';
+ALTER TABLE schedule_tasks ADD COLUMN target_workspace TEXT NOT NULL DEFAULT '';
+ALTER TABLE schedule_tasks ADD COLUMN target_profile TEXT NOT NULL DEFAULT '';
+`,
+	}, {
+		Version: 5,
+		Name:    "schedule_job_runs",
+		// J3：创建者会话 + 运行历史。旧行零迁移（created_by_session_id 默认空）。
+		UpSQL: `
+ALTER TABLE schedule_tasks ADD COLUMN created_by_session_id TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS schedule_job_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id  TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    output       TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT '',
+    session_id   TEXT NOT NULL DEFAULT '',
+    started_at   TEXT NOT NULL,
+    finished_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_job_runs_task ON schedule_job_runs(schedule_id, id);
+`,
 	}}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -166,7 +196,8 @@ func (s *SQLiteStore) ExecRaw(query string, args ...any) error {
 
 const taskColumns = `id, session_id, kind, title, prompt, scheduled_at, after_seconds, every_seconds,
     local_time, time_zone, weekdays_json, expression, status,
-    last_scheduled_at, last_delivered_at, last_message_id, state_version, origin`
+    last_scheduled_at, last_delivered_at, last_message_id, state_version, origin,
+    goal, plan_json, target_kind, target_workspace, target_profile, created_by_session_id`
 
 func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	var (
@@ -186,10 +217,17 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 		lastMsgID   sql.NullString
 		version     int64
 		origin      string
+		goal        string
+		planJSON    string
+		targetKind  string
+		targetWS    string
+		targetProf  string
+		createdBy   string
 	)
 	if err := scanner.Scan(&id, &task.SessionID, &kind, &task.Record.Title, &task.Record.Prompt, &scheduledAt,
 		&afterRaw, &everyRaw, &localTime, &timeZone, &weekdaysRaw, &expression, &status,
-		&lastSched, &lastDeliv, &lastMsgID, &version, &origin); err != nil {
+		&lastSched, &lastDeliv, &lastMsgID, &version, &origin,
+		&goal, &planJSON, &targetKind, &targetWS, &targetProf, &createdBy); err != nil {
 		return Task{}, err
 	}
 	target, err := parseInstant(scheduledAt)
@@ -205,6 +243,13 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	task.Record.TimeZone = timeZone.String
 	task.Record.Expression = expression.String
 	task.Record.Weekdays = decodeWeekdays(weekdaysRaw)
+	// J0：作业字段（旧行默认空 → 回落 session / 无计划）。
+	task.Record.Goal = goal
+	task.Record.Plan = decodePlan(planJSON)
+	task.TargetKind = NormalizeTargetKind(targetKind)
+	task.TargetWorkspace = targetWS
+	task.TargetProfile = targetProf
+	task.CreatedBySessionID = createdBy
 	task.Status = Status(status)
 	task.StateVersion = version
 	// 未知/空来源回落 model：旧数据与外部写入零迁移语义。
@@ -259,6 +304,8 @@ func (s *SQLiteStore) ListActiveBySession(sessionID string) ([]Task, error) {
 
 // ListActiveDue 返回 status=active 且 scheduled_at <= now 的任务。
 func (s *SQLiteStore) ListActiveDue(now time.Time) ([]Task, error) {
+	// J2：到期选择包含全部目标；非 session 目标由 Runtime 走 headless 分支
+	// （无 headless 执行能力时延后，不空转）。
 	return s.queryTasks(context.Background(),
 		`SELECT `+taskColumns+` FROM schedule_tasks WHERE status = 'active' AND scheduled_at <= ? ORDER BY scheduled_at ASC, id ASC`,
 		formatInstant(now))
@@ -292,6 +339,31 @@ func originArg(task Task) string {
 		return string(OriginManual)
 	}
 	return string(OriginModel)
+}
+
+// encodePlan 把执行步骤编码为 JSON 文本（空计划存空串）。
+func encodePlan(plan []string) string {
+	if len(plan) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// decodePlan 解析 plan_json：空/非法一律回落为空计划（绝不因坏数据拒绝整行）。
+func decodePlan(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var plan []string
+	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+		return nil
+	}
+	return plan
 }
 
 // encodeWeekdays 把星期集合编码为 JSON 文本（空集合存 NULL）。
@@ -337,8 +409,11 @@ func (s *SQLiteStore) Put(task Task) error {
 	now := formatInstant(time.Now())
 	_, err := s.db.ExecContext(context.Background(), `
 INSERT INTO schedule_tasks (`+taskColumns+`, owner_instance_id, lease_expires_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL, ?, ?)`,
-		append(recordArgs(task), task.StateVersion, originArg(task), now, now)...)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?,
+        ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+		append(recordArgs(task), task.StateVersion, originArg(task),
+			task.Record.Goal, encodePlan(task.Record.Plan), string(NormalizeTargetKind(string(task.TargetKind))),
+			task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID, now, now)...)
 	if err != nil {
 		return fmt.Errorf("insert schedule task %s: %w", task.Record.ID, err)
 	}
@@ -352,12 +427,16 @@ func (s *SQLiteStore) UpdateCAS(task Task, expectedVersion int64) (bool, error) 
 UPDATE schedule_tasks SET
     session_id = ?, kind = ?, title = ?, prompt = ?, scheduled_at = ?,
     after_seconds = ?, every_seconds = ?, local_time = ?, time_zone = ?, weekdays_json = ?, expression = ?,
+    goal = ?, plan_json = ?, target_kind = ?, target_workspace = ?, target_profile = ?,
+    created_by_session_id = ?,
     status = ?, last_scheduled_at = ?, last_delivered_at = ?, last_message_id = ?,
     state_version = state_version + 1, updated_at = ?
 WHERE id = ? AND state_version = ?`,
 		task.SessionID, string(task.Record.Kind), task.Record.Title, task.Record.Prompt, formatInstant(task.Record.ScheduledAt),
 		nullableInt(task.Record.AfterSeconds), nullableInt(task.Record.EverySeconds), nullableString(task.Record.Time),
 		nullableString(task.Record.TimeZone), encodeWeekdays(task.Record.Weekdays), nullableString(task.Record.Expression),
+		task.Record.Goal, encodePlan(task.Record.Plan), string(NormalizeTargetKind(string(task.TargetKind))),
+		task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID,
 		string(task.Status), lastScheduled(task), lastDelivered(task), lastMessageID(task),
 		now, task.Record.ID, expectedVersion)
 	if err != nil {
@@ -571,4 +650,62 @@ func (s *SQLiteStore) MarkPendingMessageConsumed(id int64, now time.Time) error 
 		`UPDATE schedule_pending_messages SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL`,
 		formatInstant(now), id)
 	return err
+}
+
+// MarkPendingConsumedBySchedule 标记某任务的全部未消费兜底消息为已消费。
+// 任务经正常路径（delegate/内嵌）投递成功提交后调用：该提醒已经送达，其
+// 历史失败留下的 pending 行不应再被宿主 drain 一次（避免重复投递）。
+func (s *SQLiteStore) MarkPendingConsumedBySchedule(scheduleID string, now time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE schedule_pending_messages SET consumed_at = ? WHERE schedule_id = ? AND consumed_at IS NULL`,
+		formatInstant(now), scheduleID)
+	if err != nil {
+		return fmt.Errorf("mark pending consumed by schedule: %w", err)
+	}
+	return nil
+}
+
+// AppendJobRun 追加一条作业运行记录（J3：运行历史）。
+func (s *SQLiteStore) AppendJobRun(run JobRun) error {
+	_, err := s.db.Exec(`
+INSERT INTO schedule_job_runs (schedule_id, status, output, error, session_id, started_at, finished_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		run.ScheduleID, string(run.Status), run.Output, run.Error, run.SessionID,
+		formatInstant(run.StartedAt), formatInstant(run.FinishedAt))
+	if err != nil {
+		return fmt.Errorf("append job run: %w", err)
+	}
+	return nil
+}
+
+// ListJobRuns 返回某作业的运行历史（新到旧，最多 limit 条；limit<=0 取 20）。
+func (s *SQLiteStore) ListJobRuns(scheduleID string, limit int) ([]JobRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+SELECT id, schedule_id, status, output, error, session_id, started_at, finished_at
+FROM schedule_job_runs WHERE schedule_id = ? ORDER BY id DESC LIMIT ?`, scheduleID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []JobRun
+	for rows.Next() {
+		var (
+			run         JobRun
+			status      string
+			startedRaw  string
+			finishedRaw string
+		)
+		if err := rows.Scan(&run.ID, &run.ScheduleID, &status, &run.Output, &run.Error,
+			&run.SessionID, &startedRaw, &finishedRaw); err != nil {
+			return nil, err
+		}
+		run.Status = JobRunStatus(status)
+		run.StartedAt, _ = parseInstant(startedRaw)
+		run.FinishedAt, _ = parseInstant(finishedRaw)
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
 }

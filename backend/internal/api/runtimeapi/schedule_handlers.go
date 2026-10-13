@@ -87,6 +87,46 @@ func (h *Handler) GetScheduleDeliveryHistory(w http.ResponseWriter, r *http.Requ
 	h.writeJSON(w, http.StatusOK, result)
 }
 
+// GetScheduleJobRuns returns the run history (J3) of one job, newest-first.
+// `session_id` is optional when the caller addresses the job by id; when set it
+// must match the job's bound session or its creator session.
+func (h *Handler) GetScheduleJobRuns(w http.ResponseWriter, r *http.Request) {
+	service := h.getScheduleService()
+	if service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "schedule service not configured"))
+		return
+	}
+	query := r.URL.Query()
+	id := strings.TrimSpace(query.Get("id"))
+	if id == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "id is required"))
+		return
+	}
+	limit := 20
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "limit must be an integer from 1 through 100"))
+			return
+		}
+		limit = parsed
+	}
+	runs, err := service.JobRuns(strings.TrimSpace(query.Get("session_id")), id, limit)
+	if err != nil {
+		if input, ok := schedule.IsInputError(err); ok {
+			status := http.StatusBadRequest
+			if input.Code == schedule.CodeNotFound {
+				status = http.StatusNotFound
+			}
+			h.writeError(w, status, errors.New(errors.ErrValidationFailed, input.Message))
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"id": id, "runs": runs, "count": len(runs)})
+}
+
 type scheduleUpdateRequest struct {
 	SessionID string                `json:"session_id"`
 	ID        string                `json:"id"`
@@ -125,6 +165,12 @@ type scheduleCreateRequest struct {
 	Daily        *schedule.DailyInput  `json:"daily,omitempty"`
 	Weekly       *schedule.WeeklyInput `json:"weekly,omitempty"`
 	Cron         *schedule.CronInput   `json:"cron,omitempty"`
+	// J0：作业通用化字段（全部可选）。
+	Goal            string   `json:"goal,omitempty"`
+	Plan            []string `json:"plan,omitempty"`
+	TargetKind      string   `json:"target_kind,omitempty"`
+	TargetWorkspace string   `json:"target_workspace,omitempty"`
+	TargetProfile   string   `json:"target_profile,omitempty"`
 }
 
 // CreateScheduleTask creates one reminder bound to a Session through the
@@ -142,19 +188,25 @@ func (h *Handler) CreateScheduleTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid JSON body"))
 		return
 	}
-	if strings.TrimSpace(request.SessionID) == "" {
-		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id is required"))
+	// J1：只有 session 目标要求 session_id；workspace/headless 目标不绑会话。
+	if schedule.NormalizeTargetKind(request.TargetKind) == schedule.TargetSession && strings.TrimSpace(request.SessionID) == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "session_id is required for target_kind=session"))
 		return
 	}
 	req := schedule.CreateRequest{
-		Prompt:       request.Prompt,
-		Title:        request.Title,
-		AfterSeconds: request.AfterSeconds,
-		At:           request.At,
-		EverySeconds: request.EverySeconds,
-		Daily:        request.Daily,
-		Weekly:       request.Weekly,
-		Cron:         request.Cron,
+		Prompt:          request.Prompt,
+		Title:           request.Title,
+		AfterSeconds:    request.AfterSeconds,
+		At:              request.At,
+		EverySeconds:    request.EverySeconds,
+		Daily:           request.Daily,
+		Weekly:          request.Weekly,
+		Cron:            request.Cron,
+		Goal:            request.Goal,
+		Plan:            request.Plan,
+		TargetKind:      schedule.NormalizeTargetKind(request.TargetKind),
+		TargetWorkspace: request.TargetWorkspace,
+		TargetProfile:   request.TargetProfile,
 	}
 	record, err := service.Create(request.SessionID, req, schedule.OriginManual)
 	if err != nil {
