@@ -144,6 +144,14 @@
 > **配置共享 ≠ 运行共享**：同一轮询/WS 通道只能一个宿主实际运行，靠 `runtime_owner` + 启动抢占（见
 > [07-config-ux.md](./07-config-ux.md) §5.6）。
 
+**P0 实现状态（2026-10-13）**：aicli/runtime-server 共用实现已落地为
+`backend/internal/connectors/storefile`——配置写共享 `config.yaml` 的 `connectors:`
+节（yaml.v3 Node 往返保留注释/其它键，原子写），密钥单独写同目录
+`connectors.secrets.yaml`（0600，可 `WithSecretsPath` 覆盖），绑定/去重账本/轮询游标
+写宿主数据目录 `data/connectors/state.json`。runtime-server 已在
+`cmd/runtime-server/connector_bootstrap.go` 接线（管理面挂 `/api/connectors*`、
+webhook 挂 `/hooks/connectors/{id}`）。**待续**：跨进程锁与 aicli 宿主（P1）。
+
 ## 8. 宿主差异汇总（共享核心 vs 宿主专属）
 
 | 关注点 | 共享核心（`internal/connectors`） | 宿主专属 |

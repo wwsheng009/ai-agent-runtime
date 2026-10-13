@@ -1008,6 +1008,9 @@ type runtimeServerApp struct {
 	// gatewayController 是外网会话网关的连接控制面（docs/gateway/12-connection-control.md）。
 	// 未配置时为 nil；runServe 在监听地址确定后调用 setGatewayForward。
 	gatewayController *gatewayagent.Controller
+	// connectorService 是 IM 连接器服务（docs/bots/04-migration-roadmap.md P0 宿主接线）。
+	// 启动失败时为 nil（连接器是可降级能力，不影响 runtime-server 本体）。
+	connectorService io.Closer
 }
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
@@ -1327,6 +1330,18 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 			runtimeapi.RegisterGitBrowseRoutes(runtimeRouter, gitbrowse.NewService(gitbrowse.Deps{Roots: roots}))
 		}
 	}
+	// IM 连接器（Telegram 等）：配置来自共享 config.yaml 的 connectors: 节，
+	// 管理面 /api/connectors* 与 webhook /hooks/connectors/{id} 在此挂载。
+	// 失败只 warn（连接器可降级，不阻塞 runtime-server 启动）。
+	connectorLogf := func(format string, args ...any) {
+		logger.Warn(fmt.Sprintf(format, args...))
+	}
+	var connectorService io.Closer
+	if service, connectorErr := setupRuntimeConnectors(ctx, handler, router, configPath, connectorLogf); connectorErr != nil {
+		logger.Warn("Failed to start IM connectors", logger.Err(connectorErr))
+	} else {
+		connectorService = connectorServiceCloser{service: service}
+	}
 	if webui.Available() {
 		router.PathPrefix("/").Handler(webui.Handler())
 	} else {
@@ -1366,6 +1381,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		subagentBatches:   subagentBatches,
 		knowledge:         knowledgeActivation,
 		gatewayController: gatewayController,
+		connectorService:  connectorService,
 	}, nil
 }
 
@@ -1450,6 +1466,11 @@ func (a *runtimeServerApp) close() {
 	if a.supervision != nil {
 		if err := a.supervision.Close(); err != nil {
 			logger.Warn("Failed to close supervision control plane", logger.Err(err))
+		}
+	}
+	if a.connectorService != nil {
+		if err := a.connectorService.Close(); err != nil {
+			logger.Warn("Failed to close IM connectors", logger.Err(err))
 		}
 	}
 	// 知识层最后关：Close 会取消并等待后台首次索引退出（它持写事务），

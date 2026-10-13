@@ -37,7 +37,7 @@
 |--------|------|------|
 | 事件异步订阅原语 | ✅ 完成 | `backend/internal/events/async.go`（`SubscribeAsync` + 队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例） |
 | notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；Channel/Dispatcher 留待 P1 |
-| 契约包骨架 | ◐ 部分 | `backend/internal/connectors/api/schema.go`（Schema 契约 + 校验/脱敏/合并提交）+ 快照测试；HTTP handler 与矩阵随 P0 首宿主接线 |
+| 契约包骨架 | ✅ 完成 | `backend/internal/connectors/api/schema.go`（Schema 契约 + 校验/脱敏/合并提交）+ `internal/connectors/restapi`（管理面 CRUD/schema/test/reload + webhook 入口，12 例）；三宿主契约矩阵随各宿主接线补齐 |
 | 通知语义对照表 | ◐ 部分 | `internal/notify` 的 `PriorityOf` 即落点（approval/question/error→high，completed/waiting→normal）；与 supervision/IM 文案的映射在 P1 随通道落地补齐 |
 
 ### P0 · 骨架 + Telegram + runtime-server（≈3–4 天）
@@ -52,10 +52,10 @@
 | 交付物 | 状态 | 位置 |
 |--------|------|------|
 | 连接器核心 | ✅ 完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`：Provider/Backend 两层契约、内存 Store（配置/绑定/去重账本/轮询游标）、每会话串行有界队列（满则 `ErrQueueFull`，跨会话并行）、流式节流（≥800ms 且内容变化）、命令 `/help` `/new` `/status`、失败回执 |
-| Telegram 适配器 | ◐ polling 完整 | `internal/connectors/providers/telegram`：`getMe` 激活、`sendMessage`、`getUpdates` 长轮询（游标 `update_offset` 持久化 + 指数退避）、`sendChatAction` typing 保活、占位消息 + `editMessageText` 流式编辑；webhook 入口待宿主接线 |
+| Telegram 适配器 | ◐ polling 完整 | `internal/connectors/providers/telegram`：`getMe` 激活、`sendMessage`、`getUpdates` 长轮询（游标 `update_offset` 持久化 + 指数退避）、`sendChatAction` typing 保活、占位消息 + `editMessageText` 流式编辑；宿主 webhook 入口已就绪，Provider 侧 `HandleWebhook` 解析待 P1 |
 | 端到端（假后端） | ✅ 完成 | `service_test.go`（12 例：绑定/去重/白名单/命令/节流/队列/失败路径）+ `telegram_test.go`（8 例，`httptest` 假 Bot API：解析/游标/重试/typing/流式）；`go build ./...`、`go vet`、`go test -race` 全绿 |
 | 管理面 REST（三端共用） | ✅ 完成 | `internal/connectors/restapi`：`/connectors*` 增删改查 + schema + 测试消息 + reload；`/hooks/connectors/{id}` 公网入口（`WebhookProvider` 能力探测，签名失败 400/队列满 429/未知 404）；密钥只写不读、留空=保持、`__clear__`=清除；`Authorize` 未接线整体 403；restapi_test 12 例 |
-| 宿主接线 | ⬜ 未开始 | runtime-server `connector_bootstrap.go`（Backend=`submit_prompt` + `SubscribeAsync` 流式回推）、`GET/POST /api/connectors*`、最小 React 页面 → 下一轮 |
+| 宿主接线 | ◐ runtime-server 完成 | `cmd/runtime-server/connector_bootstrap.go`：配置读写共享 `config.yaml` 的 `connectors:` 节（`internal/connectors/storefile`：YAML Node 往返 + 原子写，密钥单独落 `connectors.secrets.yaml`(0600)）、绑定/游标/去重账本落 `data/connectors/state.json`；Backend 走进程内 `runtimeapi.SubmitConnectorPrompt`（`submit_prompt` 执行路径 + 事件总线 `assistant_delta` 增量回推）；管理面 `/api/connectors*`（复用 skills 管理面鉴权口径）与 webhook `/hooks/connectors/{id}` 已挂载并随宿主 `close()` 停机。**待续**：最小 React 页面、aicli 宿主、真通道 e2e |
 
 ### P1 · 飞书 + gateway 前置 + 三端配置页（≈4–5 天）
 
@@ -114,7 +114,7 @@
 ## 6. 验收清单（汇总）
 
 - [ ] P0：Telegram（webhook + polling）↔ runtime-server 端到端；重启续传不重复。
-  （◐ 通道核心与 polling 已就绪并通过假后端 e2e；真通道联通待宿主接线）
+  （◐ 通道核心 + polling + runtime-server 宿主接线已就绪，假后端 e2e 全绿；真通道联通、前端配置页与 aicli 宿主待续）
 - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环；完成提醒送达且与 Web Push/ntfy 去重。
 - [ ] P2：aicli 本地 Telegram/QQ 端到端；配置在三宿主间可迁移；未配置连接器时回归全绿。
 - [ ] P3：微信扫码登录 + 文本/图片/语音；IM 通道可开关/静音。
