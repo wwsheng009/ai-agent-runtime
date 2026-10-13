@@ -149,6 +149,7 @@
     sessions: "会话",
     nodes: "节点",
     tokens: "设备令牌",
+    connectors: "连接器",
   };
 
   function currentView() {
@@ -168,6 +169,9 @@
     });
     var titleEl = el("view-title");
     if (titleEl) { titleEl.textContent = VIEW_TITLES[view] || "aicli-gateway"; }
+    // Connectors are a lazy view: only hit /api/connectors when the tab is open
+    // (the management plane may legitimately be unwired → 403/503 page state).
+    if (view === "connectors") { loadConnectors(false); }
     closeSidebar();
   }
 
@@ -207,6 +211,84 @@
       if (r.res.status === 401) { setAuthed(false); return; }
       lastDevices = (r.body && r.body.devices) || [];
       renderDevices(lastDevices);
+    });
+  }
+
+  /* ─────────────────────── rendering: connectors ─────────────── */
+
+  var connectorsLoaded = false;
+
+  // loadConnectors 读取 GET /api/connectors（owner 会话鉴权）。force=true 时
+  // 跳过缓存；未接线（启动时 connectors disabled）或响应不是 JSON 契约时给出
+  // 明确的页面态，而不是空白列表。
+  function loadConnectors(force) {
+    if (connectorsLoaded && !force) { return Promise.resolve(); }
+    return apiJSON("/api/connectors").then(function (r) {
+      if (r.res.status === 401) { setAuthed(false); return; }
+      if (r.res.status === 403 || r.res.status === 503) {
+        renderConnectors(null, (r.body && r.body.error) || ("连接器管理面不可用（HTTP " + r.res.status + "）"));
+        return;
+      }
+      if (!r.res.ok || !r.body || !Array.isArray(r.body.items)) {
+        renderConnectors(null, "连接器管理面未接线（gateway 启动日志中查找 connectors disabled）");
+        return;
+      }
+      connectorsLoaded = true;
+      renderConnectors(r.body.items, "");
+    }).catch(function (err) {
+      renderConnectors(null, "读取连接器失败：" + (err && err.message ? err.message : err));
+    });
+  }
+
+  function renderConnectors(items, errorText) {
+    var list = el("connectors-list");
+    if (!list) { return; }
+    var countEl = el("connectors-count");
+    list.innerHTML = "";
+    if (errorText) {
+      if (countEl) { countEl.hidden = true; }
+      var errorEl = document.createElement("p");
+      errorEl.className = "empty";
+      errorEl.textContent = errorText;
+      list.appendChild(errorEl);
+      return;
+    }
+    if (countEl) {
+      countEl.textContent = items.length + " 个";
+      countEl.hidden = false;
+    }
+    if (!items.length) {
+      var emptyEl = document.createElement("p");
+      emptyEl.className = "empty";
+      emptyEl.textContent = "还没有连接器 —— 在支持连接器编辑的客户端（aicli 微前端 / runtime-server / 前端切片）创建通道后，这里会显示运行状态。";
+      list.appendChild(emptyEl);
+      return;
+    }
+    items.forEach(function (item) {
+      var card = document.createElement("div");
+      card.className = "card" + (item.enabled ? "" : " offline");
+      card.innerHTML =
+        '<div class="card-head"><span class="card-title"></span><span class="status-chip ' + (item.enabled ? "chip-active" : "chip-revoked") + '"></span></div>' +
+        '<div class="card-meta"></div>' +
+        '<div class="card-actions"></div>';
+      card.querySelector(".card-title").textContent = (item.name || item.id) + "（" + item.provider + "）";
+      card.querySelector(".status-chip").textContent = item.enabled ? "已启用" : "已停用";
+      var owner = item.active_owner
+        ? "运行宿主 " + item.active_owner + (item.owned_by_current_host ? "（本网关）" : "")
+        : "未认领运行（网关重启或宿主离线）";
+      var meta = card.querySelector(".card-meta");
+      meta.textContent = "id " + item.id + (item.mode ? " · " + item.mode : "") + " · " + owner +
+        (item.secret_keys && item.secret_keys.length ? " · 密钥字段 " + item.secret_keys.join("/") : "");
+      // 管理跳转：完整编辑器由前端切片提供，这里保留契约入口（单项 JSON +
+      // 全量 Schema），不做编辑，避免与前端 repo 耦合。
+      var detail = document.createElement("a");
+      detail.className = "btn ghost sm";
+      detail.href = "/api/connectors/" + encodeURIComponent(item.id);
+      detail.target = "_blank";
+      detail.rel = "noopener";
+      detail.textContent = "配置 JSON";
+      card.querySelector(".card-actions").appendChild(detail);
+      list.appendChild(card);
     });
   }
 
@@ -2105,7 +2187,12 @@
   el("logout").addEventListener("click", doLogout);
   el("logout-top").addEventListener("click", doLogout);
 
-  el("refresh").addEventListener("click", function () { loadNodes(); loadDevices(); });
+  el("refresh").addEventListener("click", function () { loadNodes(); loadDevices(); loadConnectors(true); });
+  // Connectors tab has its own refresh so a stale list is one click away.
+  var refreshConnectors = el("connectors-refresh");
+  if (refreshConnectors) {
+    refreshConnectors.addEventListener("click", function () { loadConnectors(true); });
+  }
   // Keep the standalone nodes-panel refresh working too (same data source).
   var refreshNodes = el("refresh-nodes");
   if (refreshNodes) { refreshNodes.addEventListener("click", function () { loadNodes(); }); }
@@ -2480,7 +2567,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=34").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=35").catch(function () {});
     });
   }
 

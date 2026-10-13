@@ -707,6 +707,18 @@ func run() int {
 		}
 		server.ServeProxy(w, r, nodeID, path)
 	}))))
+	// Connectors host wiring (docs/bots/03-host-integration.md §6/§7): JSON store
+	// under --data-dir, owner-session auth for the management API, public
+	// webhooks verified by each provider. Registered before the console "/"
+	// catch-all so /api/connectors* and /hooks/connectors/* are never swallowed
+	// by the static page. A wiring failure only warns: connectors must not take
+	// the tunnel/console down.
+	connectorCtx, cancelConnectors := context.WithCancel(context.Background())
+	defer cancelConnectors()
+	connectorService, connectorErr := setupGatewayConnectors(connectorCtx, router, owner, registry, server, *dataDir, nil)
+	if connectorErr != nil {
+		fmt.Fprintf(os.Stderr, "gateway: WARNING: connectors disabled: %v\n", connectorErr)
+	}
 	// Lightweight embedded console (registered last so specific routes win).
 	router.PathPrefix("/").Handler(consoleHandler())
 
@@ -745,6 +757,10 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "gateway: shutting down (signal received)")
 	}
 	server.CloseAll("gateway shutting down for failover")
+	// Connectors: cancel the host ctx and stop polling / release run ownership
+	// (bounded at 5s so a stuck provider cannot delay exit).
+	cancelConnectors()
+	stopGatewayConnectors(connectorService)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)

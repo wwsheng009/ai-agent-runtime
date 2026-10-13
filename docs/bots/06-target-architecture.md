@@ -160,6 +160,16 @@ graph LR
     U3 -->|/api/connectors*| REG
 ```
 
+> **gateway 宿主落地（2026-10-12）**：`Backend=gateway_node` 不在网关内执行 agent，
+> 而是经反向隧道把消息转发到目标节点的同步远程调用端点 `POST /web/api/invoke`
+> （`tunnel.Server.ServeProxy` → 节点侧 `internal/gateway/agent/forward.go` 注入本机
+> 写令牌），把最终 assistant 文本映射回 `BackendResult`；目标节点取
+> `settings["node_id"]`，未指定时要求「恰好一个非 stale 节点」，否则明确报错（不猜）。
+> gateway 存储用 `internal/connectors/storejson`（`<data-dir>/connectors.json` 配置+
+> 密钥、`connectors-state.json` 绑定/账本/游标/归属，均 0600，跨进程写锁复用
+> `storefile.AcquireDirLock`），与 aicli/runtime-server 的 `config.yaml` + `state.json`
+> 不共享文件、只共享 Schema 与语义。
+
 ### 2.3 入站消息流（IM → agent → 回复）
 
 ```mermaid
@@ -218,7 +228,7 @@ sequenceDiagram
 ```mermaid
 graph LR
     SCHEMA["internal/connectors/api\nSchema() + REST handlers + Authorizer 接口"]
-    GWC["gateway console\n(原生 JS 渲染器)"]
+    GWC["gateway console\n(原生 JS；P1：连接器列表页)"]
     MFC["aicli 微前端\n(原生 JS 渲染器)"]
     RSC["runtime-server React\n(Schema 渲染器 + i18n)"]
     STORE["宿主 Store\n(gateway JSON / aicli 分层配置 / runtime config)"]
@@ -232,6 +242,11 @@ graph LR
 ```
 
 > 护栏：三个渲染器共用同一 JSON Schema 快照；契约测试矩阵对三宿主跑同一组 golden 用例（CI 门禁）。
+>
+> **gateway console 页范围（P1 切片，2026-10-12）**：`#connectors` 已落地为**最小列表页**
+> ——`GET /api/connectors` 渲染 id/provider/启停/`active_owner`/`secret_keys`，提供
+> 管理接口 JSON 与 Schema 跳转；Schema 表单编辑、测试消息、日志查看与 aicli 微前端/
+> React 前端同批（P1 后续），三端渲染器代码各自维护、契约同源，不与前端 repo 耦合。
 
 ### 2.6 数据与账本关系
 
@@ -309,9 +324,10 @@ erDiagram
 | N1 `events.SubscribeAsync` | ✅ 已完成 | `backend/internal/events/async.go`（队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例）；`bus.go` 仅做字段改名与 `subscribeDispatch` 抽取，既有测试全绿 |
 | N2 `internal/notify` 策略内核 | ◐ 部分完成 | `backend/internal/notify/policy.go`（`PriorityOf`/`IsHighPriority`/`QuietRange`/`ParseQuietHours`/`InQuietHours`/`Coalesce`）；`cmd/gateway/notify_policy.go` 退化为薄适配层，行为由既有单测护栏；**待续**：`Channel`/`Dispatcher`/偏好与跨通道去重账本（P1） |
 | N6 `connectors/api` 契约骨架 | ◐ 部分完成 | `backend/internal/connectors/api/schema.go`（ProviderSchema/FieldSchema/ActionSpec + `Validate`/`SortedSecretKeys`/`MergeSubmit`/`ClearSecret`）与 JSON 契约快照测试；HTTP 层 `internal/connectors/restapi` 已落地（管理面 `/connectors*` + webhook `/hooks/connectors/{id}`，`Authorize` 由宿主注入，集成测试 12 例）；**待续**：三宿主契约矩阵（gateway/aicli/runtime-server 同一 golden） |
-| N4 `internal/connectors` 核心 + Telegram Provider | ◐ 核心/polling/双宿主接线/React 页完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`（两层契约/内存 Store/串行有界队列/节流/命令/失败回执）+ `providers/telegram`（getMe/sendMessage/getUpdates 游标+退避/typing/editMessageText 流式/`api_base` 可覆盖）+ `storefile`（共享 config.yaml `connectors:` 节 + `state.json`）+ runtime-server 宿主接线（`cmd/runtime-server/connector_bootstrap.go`、`runtimeapi.SubmitConnectorPrompt`/`AuthorizeConnectorAdmin`）+ aicli 宿主接线（`cmd/aicli/commands/connector_host.go`：`localActorRegistry.SubmitPrompt` + loopback mux 挂载 + `ChatWebAuthGuard` 鉴权）+ React 配置页（`frontend/src/pages/connectors-page.tsx`，路由 `/runtime/connectors`，schema 驱动 + 密钥留空/清除语义）+ 假 Bot API 端到端（`e2e_restart_test.go`：重启续传不重复）；**审查修复（2026-10-13）**：轮询/异步任务生命周期与请求 ctx 解耦、去重键含 chat、队列关闭竞态与轮询代际登记修复、白名单 fail-closed（aicli `RequireAllowedUsers`）、IM 轮次权限语义统一（显式 `bypass_permissions`）、Telegram token 脱敏与仅声明已实现模式、`X-Forwarded-For` 环回伪造修复；`go test -race` 全绿。**待续**：Telegram Provider webhook 解析、gateway 宿主、真实 token 联通验证；飞书 webhook Provider 已另起（见 N5 行） |
-| N5 `/hooks/connectors/{id}` | ◐ 入口 + 飞书 webhook 完成 | `internal/connectors/restapi`：`WebhookProvider` 能力探测 + `WebhookResult`（消息/直接应答）；签名失败 400、未知/停用 404、不支持 405、队列满 429。飞书 Provider（`providers/feishu`，切片 3）已实现首个真实通道的 challenge/`header.token` 校验（常量时间比较，未配 `verification_token` 时兼容放行并告警）、`encrypt_key` AES-256-CBC 事件解密（密钥 `sha256(encrypt_key)`，解密/验签失败 400）、`im.message.receive_v1` 文本入站（幂等键=header.event_id）、reply/chat 双路径发送（错误脱敏）；`httptest` 假飞书 API 测试 `-race` 全绿。**待续**：WS 长连接/卡片流式/媒体、Telegram secret token、gateway 宿主与多实例限流（P1） |
-| N6 `connectors/api` HTTP 面 | ◐ 管理面完成 | `internal/connectors/restapi`（12 例）：CRUD/schema/测试消息/reload + 脱敏 `secret_keys` + 留空保持/`__clear__` 清除 + `Authorize` 未接线 403；runtime-server/aicli 已挂载；**待续**：gateway 挂载与契约矩阵（同一 golden ×3） |
+| N4 `internal/connectors` 核心 + Telegram Provider | ◐ 核心/polling/三宿主接线/React 页完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`（两层契约/内存 Store/串行有界队列/节流/命令/失败回执）+ `providers/telegram`（getMe/sendMessage/getUpdates 游标+退避/typing/editMessageText 流式/`api_base` 可覆盖）+ `storefile`（共享 config.yaml `connectors:` 节 + `state.json`）+ runtime-server 宿主接线（`cmd/runtime-server/connector_bootstrap.go`、`runtimeapi.SubmitConnectorPrompt`/`AuthorizeConnectorAdmin`）+ aicli 宿主接线（`cmd/aicli/commands/connector_host.go`：`localActorRegistry.SubmitPrompt` + loopback mux 挂载 + `ChatWebAuthGuard` 鉴权）+ gateway 宿主接线（见下表"gateway 宿主接线"行）+ React 配置页（`frontend/src/pages/connectors-page.tsx`，路由 `/runtime/connectors`，schema 驱动 + 密钥留空/清除语义）+ 假 Bot API 端到端（`e2e_restart_test.go`：重启续传不重复）；**审查修复（2026-10-13）**：轮询/异步任务生命周期与请求 ctx 解耦、去重键含 chat、队列关闭竞态与轮询代际登记修复、白名单 fail-closed（aicli `RequireAllowedUsers`）、IM 轮次权限语义统一（显式 `bypass_permissions`）、Telegram token 脱敏与仅声明已实现模式、`X-Forwarded-For` 环回伪造修复；`go test -race` 全绿。**待续**：Telegram Provider webhook 解析、真实 token 联通验证；飞书 webhook Provider 已另起（见 N5 行） |
+| N5 `/hooks/connectors/{id}` | ◐ 入口 + 飞书 webhook 完成 | `internal/connectors/restapi`：`WebhookProvider` 能力探测 + `WebhookResult`（消息/直接应答）；签名失败 400、未知/停用 404、不支持 405、队列满 429。飞书 Provider（`providers/feishu`，切片 3）已实现首个真实通道的 challenge/`header.token` 校验（常量时间比较，未配 `verification_token` 时兼容放行并告警）、`encrypt_key` AES-256-CBC 事件解密（密钥 `sha256(encrypt_key)`，解密/验签失败 400）、`im.message.receive_v1` 文本入站（幂等键=header.event_id）、reply/chat 双路径发送（错误脱敏）；`httptest` 假飞书 API 测试 `-race` 全绿。**待续**：WS 长连接/卡片流式/媒体、Telegram secret token、多实例限流（P1）；gateway 宿主已落地（见下行） |
+| N6 `connectors/api` HTTP 面 | ◐ 三宿主挂载完成 | `internal/connectors/restapi`（12 例）：CRUD/schema/测试消息/reload + 脱敏 `secret_keys` + 留空保持/`__clear__` 清除 + `Authorize` 未接线 403；runtime-server/aicli/gateway 已挂载（gateway 由外层 `owner.RequireSession` 鉴权，`/hooks/connectors/*` 直挂）；**待续**：三宿主契约矩阵（同一 golden ×3） |
+| gateway 宿主接线（P1 切片） | ✅ 已完成 | `internal/connectors/storejson`（`connectors.json` 配置+密钥 0600、`connectors-state.json` 状态 0600，跨进程写锁复用 `storefile.AcquireDirLock`；单测：往返/级联删除/归属认领与陈旧接管/两实例同目录不丢更新）+ `cmd/gateway/connector_bootstrap.go`（四 Provider、`HostID="gateway"`、失败只 warn、退出 Stop）+ `cmd/gateway/connector_backend.go`（`Backend=gateway_node`：`settings["node_id"]` > 唯一非 stale 节点 > 报错；经 `ServeProxy` 调 `POST /web/api/invoke`，默认 180s/上限 300s；节点令牌由节点侧代理注入；单测：节点选择/成功回复/无节点/超时/错误传播/httptest 节点转发）+ console `#connectors` 最小列表页；`go test -race` 全绿。**待续**：console Schema 表单编辑与测试消息按钮、真实 token 联通验证 |
 | N3/N7/N8 | ⏳ 未开始 | 见 04 文档 P0/P1 |
 
 ### 4.3 风险复核

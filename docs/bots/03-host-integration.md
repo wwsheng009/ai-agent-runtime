@@ -44,13 +44,46 @@
 
 | 关注点 | 现状锚点 | 接入方式 |
 |--------|----------|----------|
-| 配置 | `--config` flagfile（键=flag 名，标量；`configfile.go:18-85`）+ `--data-dir` JSON 存储（`devices.json`/`push.json`/`registry.json`） | 连接器配置落 `data-dir/connectors.json`（0600）；flag 仅开总开关（如 `--connectors-enabled`） |
-| 路由与鉴权 | `main.go:405-711`；`/api/*`、`/n/` 全为 owner session（`:445-543,701`） | **新增独立命名空间** `POST /hooks/connectors/{id}`（按连接器签名校验，不走 owner session）；管理 API 仍在 `/api/connectors*`（owner） |
-| 会话执行 | 注册表 `nodeID|sessionID`（`push.go:102`）＋反代 `/n/{node_id}/`（`main.go:701`） | `Backend` 适配器 `gateway_node`：把 IM 消息转成对目标 node 的会话操作（经隧道转发 `submit_prompt`），输出经 SSE/事件回流后再发 IM |
+| 配置 | `--config` flagfile（键=flag 名，标量；`configfile.go:18-85`）+ `--data-dir` JSON 存储（`devices.json`/`push.json`/`registry.json`） | 已落地：配置+密钥落 `data-dir/connectors.json`（0600），绑定/账本/游标/归属落 `data-dir/connectors-state.json`（0600，`internal/connectors/storejson`）；无独立总开关 flag |
+| 路由与鉴权 | `main.go:405-711`；`/api/*`、`/n/` 全为 owner session（`:445-543,701`） | 已落地：管理 API `/api/connectors*`（`owner.RequireSession`）+ 独立命名空间 `POST /hooks/connectors/{id}`（按连接器签名校验，不走 owner session）；挂在 console 的 `/` 兜底之前 |
+| 会话执行 | 注册表 `nodeID|sessionID`（`push.go:102`）＋反代 `/n/{node_id}/`（`main.go:701`） | 已落地 `Backend=gateway_node`：把 IM 消息经隧道投递到目标 node 的 `POST /web/api/invoke`（同步注入 prompt、等待 turn 结束并回传最终 assistant 回复）；节点选择见下 |
 | 出站提醒 | `pushNotifier` + `notify_policy`（优先级/静音/合并）+ `internal/gateway/ntfy` | 把 IM 当**第三通道**：高优先即时、低优先合并；复用同一 attention 差分，不重复推送 |
-| 控制台（micro web） | `//go:embed console` + SPA（`console.go:11-64`）；无通用配置编辑器 | 新增 `#connectors` 视图：列表 + Schema 表单 + 测试按钮 + 日志（复用 `app.js` 现有 toast/表单样式） |
+| 控制台（micro web） | `//go:embed console` + SPA（`console.go:11-64`）；无通用配置编辑器 | ◐ 最小列表页已落地：`#connectors` 视图读取 `GET /api/connectors`（id/provider/启停/运行归属/secret_keys）并提供管理接口 JSON 与 Schema 跳转；Schema 表单/测试按钮/日志随 P1 前端切片补齐（不与前端 repo 耦合） |
 
 > 语义边界：gateway 不执行 agent，只做**入口 + 路由 + 提醒**；agent 始终跑在 node 上（与本项目现有架构一致）。
+
+**gateway 宿主接线落地（2026-10-12，P1 与前端切片并行）**：
+
+- **装配**：`cmd/gateway/connector_bootstrap.go`（`setupGatewayConnectors`）按 `--data-dir`
+  装配 `storejson` + `connectors.Service`（`HostID="gateway"`，
+  `RequireAllowedUsers=false` 与 runtime-server 同口径，仅对「启用且白名单为空」的
+  连接器发可见性告警）并注册 telegram/wechat/qqbot/feishu 四个 Provider；装配失败
+  只 `WARNING: connectors disabled`（与 runtime-server 周边接线同风格，不阻断隧道/
+  控制台主功能）；随进程退出 `Stop`（5s 上限，释放运行归属心跳）。
+- **路由**：`/api/connectors*` 包在 `owner.RequireSession` 外层（`restapi.Deps.Authorize`
+  传恒 nil 放行并注明鉴权在外层），`/hooks/connectors/*` 直挂（Provider 自验签）；
+  两者注册在 console 的 `PathPrefix("/")` 兜底之前。
+- **存储**：`<data-dir>/connectors.json`（配置+`secrets` 同文件，0600）+
+  `<data-dir>/connectors-state.json`（bindings/claimed/cursors/owners，0600）；写路径
+  复用 `storefile.AcquireDirLock` 的 `<data-dir>/connectors.lock`，锁内「重读 → 改 →
+  临时文件 + rename」，两个 gateway 实例指向同一 data-dir 也不丢更新。
+- **Backend=gateway_node 语义与限制**：
+  - 目标节点：`settings["node_id"]`（管理面提交的未知键会落入 settings，可透传）>
+    registry 中恰好 1 个非 stale 节点 > 报错（0 个：「无在线节点…」；多个：要求指定
+    `node_id`）；
+  - 调用：经 `tunnel.Server.ServeProxy` 向节点 `POST /web/api/invoke`，body
+    `{prompt, timeout_ms, session_id?}`；网关侧默认 180s、上限 300s（节点侧 invoke
+    最长 10 分钟，隧道转发 5 分钟）；节点返回 `status=completed|settled` 时取
+    `assistant.content` 作为终态回复，其余 status（timeout/interrupted/requires_*）
+    与非 200 响应都作为错误回给 `Service`（记日志/失败回执），不产生假回复；
+  - 绑定：`SessionRef{NodeID, SessionID}` 写入绑定账本；仅当绑定仍属于本次选中的
+    节点时才透传 `session_id`（跨节点切换不串会话）；
+  - **节点鉴权**：节点本机写令牌由节点侧隧道代理注入（`internal/gateway/agent/
+    forward.go` 的 `LocalToken` → `X-AICLI-Token`），不出本机；gateway 不持有节点
+    令牌，也不注入 owner 凭据；
+  - 流式：`gateway_node` 目前只回终态（`ReplySink` 未接流式增量），流式编辑由各
+    Provider 的 `StreamingProvider` 能力决定（Telegram editMessageText 等），
+    本切片不做 gateway 侧增量转发。
 
 ## 5. 前端配置：Schema 驱动（"不复杂"的关键）
 
@@ -300,8 +333,18 @@ typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重�
   manager 等）对 `config.yaml` 的写入路径。锁无租约续约，持锁进程挂起超过陈旧阈值后
   可被合法窃取；归属心跳（90s）才是跨宿主「谁在跑」的语义来源，两者不要混用。
 
-**待续**：gateway 宿主与 `runtime_owner: gateway` 的落地、aicli micro web 连接器页、
-真实 token 联通验证。
+**gateway 存储实现（P1，2026-10-12）**：`backend/internal/connectors/storejson`
+（`storejson.New(dataDir)`）——`connectors.json` 用 JSON 存
+`configs{id: {id,provider,name,enabled,mode,settings,secrets,policy}}`（密钥与配置同文件，
+0600），`connectors-state.json` 用与 storefile 对齐的 `bindings/claimed/cursors/owners`
+结构；实现完整 `connectors.Store`（含运行归属 5 方法），写路径复用
+`storefile.AcquireDirLock`（锁文件 `<data-dir>/connectors.lock`）在锁内重读→改→
+临时文件 + rename；单测覆盖往返/级联删除/归属认领与陈旧接管/两实例同目录不丢更新。
+`runtime_owner: gateway` 由 `cmd/gateway/connector_bootstrap.go` 的 `HostID="gateway"`
+实际参与认领/续约/释放。
+
+**待续**：gateway/gateway_node 的真实 token 联通验证、aicli micro web 连接器页、
+三端契约矩阵（同一 golden ×3）。
 
 ## 8. 宿主差异汇总（共享核心 vs 宿主专属）
 

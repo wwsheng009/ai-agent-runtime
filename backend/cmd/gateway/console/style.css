@@ -646,6 +646,9 @@ a.stat:hover {
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
 }
 
+/* 连接器页说明文案（最小列表页，见 index.html data-view="connectors"） */
+.connectors-hint { color: var(--fg-muted); font-size: 12.5px; line-height: 1.6; margin: 0 0 10px; }
+
 .filter-input { flex: 0 1 260px; min-width: 200px; max-width: 320px; }
 
 .seg {

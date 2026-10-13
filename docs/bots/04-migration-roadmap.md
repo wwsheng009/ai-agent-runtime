@@ -80,7 +80,20 @@
   与提前刷新、Send reply/create/降级/脱敏，`go test -race` 全绿；
   runtime-server 与 aicli 均已注册。
   **待续**：WS 长连接与重连、卡片式流式回复、typing 表情、媒体上传/下载、
-  审批事件路由、msg_id 记忆跨重启持久化、gateway 宿主。
+  审批事件路由、msg_id 记忆跨重启持久化。
+- 状态（2026-10-12，gateway 宿主接线切片，与前端切片并行）：**gateway 宿主 ◐ 完成**
+  ——`cmd/gateway/connector_bootstrap.go` 按 `--data-dir` 装配 `storejson`
+  （`connectors.json` 配置+密钥 0600、`connectors-state.json` 状态 0600，
+  跨进程写锁复用 `storefile.AcquireDirLock`）+ 四 Provider + `HostID="gateway"`；
+  `/api/connectors*` 包 `owner.RequireSession`、`/hooks/connectors/*` 直挂，均在
+  console `/` 兜底之前；失败只 warn、退出时 Stop。`Backend=gateway_node` 经
+  `tunnel.Server.ServeProxy` 调节点 `POST /web/api/invoke`：`settings["node_id"]` >
+  唯一非 stale 节点 > 明确报错；默认 180s/上限 300s；节点令牌由节点侧隧道代理注入
+  （gateway 不持令牌）。console 增 `#connectors` 最小列表页（读取 `/api/connectors`
+  + Schema/JSON 跳转，零构建）。单测：storejson（往返/级联/归属/双实例）+
+  gateway_node（节点选择/成功回复/无节点/超时/错误传播/httptest 节点转发）。
+  **待续**：三端前端编辑页对接（gateway console 表单 / aicli micro web /
+  runtime-server React）、真实 token 联通验证、飞书 WS/Telegram webhook。
 
 ### P2 · aicli 本地接入 + QQ（≈3–4 天）
 
@@ -160,6 +173,10 @@
   （假 Bot API 重投 + storefile 文件态，`internal/connectors/e2e_restart_test.go`）；aicli 宿主接线已落地
   （`cmd/aicli/commands/connector_host.go`）；真实 token 联通验证待续）
 - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环；完成提醒送达且与 Web Push/ntfy 去重。
+  （◐ gateway 宿主接线已落地：storejson 存储 + `Backend=gateway_node`（经隧道
+  `POST /web/api/invoke`）+ `/api/connectors*`（owner）/`/hooks/connectors/*`
+  （Provider 验签）+ console `#connectors` 最小列表页；「飞书 ↔ gateway → 节点会话」
+  与审批/提醒闭环的真实联通验证待续）
 - [ ] P2：aicli 本地 Telegram/QQ 端到端；配置在三宿主间可迁移；未配置连接器时回归全绿。
 - [ ] P3：微信扫码登录 + 文本/图片/语音；IM 通道可开关/静音。
 - [ ] 通用性：新增一个通道（假 provider）只需改核心，三端前端零改动。
