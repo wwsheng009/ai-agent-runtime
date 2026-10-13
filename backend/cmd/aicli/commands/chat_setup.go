@@ -616,6 +616,21 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 	startChatActorWarmup(session)
 	markChatStartup("capabilities_runtime_host")
 
+	// IM 连接器宿主（docs/bots/04-migration-roadmap.md P0「宿主接线」）：
+	// 配置/账本与 runtime-server 共用同一份 config.yaml + state.json，
+	// Backend 走本机 actor registry。长驻轮询只在交互式 chat 会话里装配
+	// （一次性/JSON 运行进程随时退出，起轮询只会造成平台侧反复上线抖动）；
+	// 失败只告警：连接器不可用不应挡住 chat 启动。
+	var connectorHost *LocalConnectorHost
+	if chatHostSessionInteractive(session) {
+		started, connectorErr := startAICLIChatConnectors(cfg, localRuntimeHost)
+		if connectorErr != nil {
+			logpkg.Warnf("AICLI connectors init failed: %v", connectorErr)
+		} else {
+			connectorHost = started
+		}
+	}
+
 	if !session.DisableTools {
 		var sharedBootstrap *runtimebootstrap.Manager
 		if localRuntimeHost != nil {
@@ -642,6 +657,9 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 	}
 
 	cleanup := func() {
+		if connectorHost != nil {
+			connectorHost.Close()
+		}
 		if session.LocalRuntimeHost != nil {
 			session.LocalRuntimeHost.Close()
 		}

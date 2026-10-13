@@ -521,6 +521,10 @@ func registerChatWebRoutes(mux *http.ServeMux) {
 	// 页面由本机 loopback 服务器直接提供；EventSource 事件流 / 屏幕快照 /
 	// 状态快照 / 输入注入全部复用 commands 包内现有会话与 EventBus。
 	mux.HandleFunc(commands.ChatWebPath, commands.HandleChatWebPage)
+	// IM 连接器管理面/webhook 入口（docs/bots/03-host-integration.md §6）：
+	// 与 /web/api/* 同一 mux、同一 ChatWebAuthGuard 鉴权；连接器服务由
+	// chat 能力挂载阶段启动（commands.StartLocalConnectors），未启动时 503。
+	commands.MountLocalConnectorRoutes(mux)
 	// /web/api/health 网格存活探针（架构 §5.2）：极轻量，无会话也返回 200，
 	// 供网格探活 / 外部脚本就绪等待 / aicli-mesh doctor 使用。
 	mux.HandleFunc(commands.ChatWebAPIHealthPath, commands.HandleChatWebAPIHealth)

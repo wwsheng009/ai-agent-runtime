@@ -163,7 +163,22 @@ webhook 挂 `/hooks/connectors/{id}`）。Telegram Provider 提供 `api_base` �
 （默认 `https://api.telegram.org`，可指向自建 Bot API 服务器/测试替身），
 `internal/connectors/e2e_restart_test.go` 以 httptest 假 Bot API + storefile 文件态
 覆盖「重启续传不重复」（游标续传 + 去重账本拦截重投，`go test -race` 全绿）。
-**待续**：跨进程锁、aicli 宿主（P0）与真实 token 联通验证。
+**aicli 宿主接线（2026-10-13 落地）**：`cmd/aicli/commands/connector_host.go`
+（`StartLocalConnectors` + `MountLocalConnectorRoutes`）——
+
+- 装配点：chat 能力挂载（`chat_setup.go`，交互式会话才启动；一次性/JSON 运行
+  不装配，避免平台侧反复上线抖动），随 chat cleanup 停机；
+- Backend：`localActorRegistry.SubmitPrompt`（IM 会话无绑定时按
+  `conn-<connector>-<chat>` 派生确定性 session id，`ensureSession` 自动建会话），
+  P0 只回终态，流式增量 P1 接 actor 事件；
+- 管理面：`/api/connectors*` 与 `/hooks/connectors/*` 挂在 aicli loopback
+  Web 服务器同一 mux（`cmd/aicli/pprof.go`），鉴权沿用 `ChatWebAuthGuard`
+  （回环/同源/写令牌）；服务未启动时 503；
+- 共享同一份 `config.yaml` 的 `connectors:` 节 + `data/connectors/state.json`，
+  与 runtime-server 配置互通（运行归属抢占见 §5.6，P1）。
+
+**待续**：跨进程锁与 `runtime_owner` 抢占、aicli micro web 连接器页（P1）、
+真实 token 联通验证。
 
 ## 8. 宿主差异汇总（共享核心 vs 宿主专属）
 
