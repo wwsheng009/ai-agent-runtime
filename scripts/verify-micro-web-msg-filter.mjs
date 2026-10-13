@@ -9,6 +9,8 @@
 //      条件变化整块重建并作废在途的更早消息分页请求（代次守卫）
 //   4. 计数与空态：message_window.total 是匹配数、unfiltered_total 是过滤前总数；
 //      0 命中显示「没有匹配的消息（已过滤）」而不是空白
+//   5. 收纳 / 展开：默认收纳成可拖动图标（#msg-filter-fab）、点图标展开、工具栏最右
+//      「⌃」再收纳、收纳态与位移同落一条记忆、收纳后过滤高亮 + 命中计数角标
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
@@ -521,6 +523,24 @@ assert.ok(/\.msg-filter-grip\s*\{[^}]*touch-action:\s*none/.test(STYLE_CSS),
   "把手应 touch-action:none（触屏拖把手不滚动消息区）");
 assert.ok(/body\.msgfilter-dragging/.test(STYLE_CSS), "拖动期间应锁定光标与选中（body.msgfilter-dragging）");
 
+// ---- 1.2c 收纳 / 展开（默认收纳成可拖动图标）----
+assert.ok(/id="msg-filter"[^>]*data-collapsed="true"/.test(INDEX_HTML.replace(/\n\s*/g, " ")),
+  "#msg-filter 默认收纳（data-collapsed=\"true\"）");
+assert.ok(/id="msg-filter-panel"/.test(INDEX_HTML), "index.html 应给工具栏本体加 id（aria-controls 目标）");
+assert.ok(/id="msg-filter-collapse"/.test(INDEX_HTML), "index.html 应存在收纳按钮 #msg-filter-collapse");
+assert.ok(/id="msg-filter-fab"[^>]*aria-controls="msg-filter-panel"/.test(INDEX_HTML.replace(/\n\s*/g, " ")),
+  "收纳图标应存在且 aria-controls 指向工具栏本体");
+assert.ok(/setFilterCollapsed/.test(FILTER_JS) && /isFilterCollapsed/.test(FILTER_JS),
+  "msg-filter.js 应导出收纳态读写接口（setFilterCollapsed / isFilterCollapsed）");
+assert.ok(/data-collapsed/.test(FILTER_JS), "收纳态应写进 #msg-filter 的 data-collapsed");
+assert.ok(/collapsed:\s*collapsed/.test(FILTER_JS), "收纳态应与位移一起落 localStorage（同一条记忆）");
+assert.ok(/\.msg-filter\[data-collapsed="true"\]\s*\.msg-filter-panel\s*\{\s*display:\s*none/.test(STYLE_CSS),
+  "收纳态应隐藏工具栏本体（CSS 按 data-collapsed 互斥显示）");
+assert.ok(/\.msg-filter\[data-collapsed="false"\]\s*\.msg-filter-fab\s*\{\s*display:\s*none/.test(STYLE_CSS),
+  "展开态应隐藏收纳图标");
+assert.ok(/\.msg-filter-fab\s*\{[^}]*touch-action:\s*none/.test(STYLE_CSS),
+  "收纳图标应可拖动（touch-action:none，与把手同款）");
+
 // ---- 1.3 app.js / chat.js / stream.js 接线 ----
 assert.ok(/import\s*\{[^}]*initMsgFilter[^}]*\}\s*from\s*"\.\/js\/msg-filter\.js"/.test(APP_JS),
   "app.js 应 import initMsgFilter");
@@ -801,4 +821,67 @@ assert.strictEqual(filterCountEl.textContent, "共 6 条", "未过滤时计数�
 assert.strictEqual(msgFilter.filterQueryString(), "", "清除后查询串为空");
 assert.deepStrictEqual(rowIndices(), [0, 1, 2, 3, 4, 5], "清除过滤后回到完整窗口渲染");
 
-console.log("verify-micro-web-msg-filter: 全部断言通过（面板结构 / 角色多选 / 搜索展开与去抖 / 服务端过滤 + 分页 / 空态与计数）");
+// ===========================================================================
+// 4. 收纳 / 展开：默认收纳成可拖动图标；点图标展开、工具栏最右「⌃」再收纳；
+//    收纳态与位移同落一条记忆（重新初始化按记忆恢复）；收纳后过滤仍高亮可辨。
+// ===========================================================================
+
+// ---- 4.1 初始为收纳态：默认只显示图标（面板隐藏），aria 同步 ----
+assert.strictEqual(msgFilter.isFilterCollapsed(), true, "初始化后默认收纳（平时只显示图标）");
+assert.strictEqual(filterRootEl.getAttribute("data-collapsed"), "true", "#msg-filter 应写 data-collapsed=true");
+assert.strictEqual(getElement("msg-filter-collapse").getAttribute("aria-expanded"), "false",
+  "收纳态下收纳按钮 aria-expanded=false");
+assert.strictEqual(getElement("msg-filter-fab").getAttribute("aria-expanded"), "false",
+  "收纳态下图标 aria-expanded=false");
+
+// ---- 4.2 点击图标 → 展开 ----
+getElement("msg-filter-fab").click();
+assert.strictEqual(msgFilter.isFilterCollapsed(), false, "点击图标应展开工具栏");
+assert.strictEqual(filterRootEl.getAttribute("data-collapsed"), "false", "展开后 data-collapsed=false");
+assert.strictEqual(getElement("msg-filter-fab").getAttribute("aria-expanded"), "true",
+  "展开后图标 aria-expanded=true");
+
+// ---- 4.3 点击工具栏最右「⌃」→ 再次收纳 ----
+getElement("msg-filter-collapse").click();
+assert.strictEqual(msgFilter.isFilterCollapsed(), true, "点击收纳按钮应再次收起");
+assert.strictEqual(filterRootEl.getAttribute("data-collapsed"), "true", "收纳后 data-collapsed=true");
+
+// ---- 4.4 收纳态与位移同落一条记忆 ----
+var stored = JSON.parse(globalThis.localStorage.getItem("aicli.web.msgfilter.v1"));
+assert.strictEqual(stored.collapsed, true, "收纳态应写进 localStorage（与位移同一条记忆）");
+getElement("msg-filter-fab").click(); // 展开并落盘
+stored = JSON.parse(globalThis.localStorage.getItem("aicli.web.msgfilter.v1"));
+assert.strictEqual(stored.collapsed, false, "展开态也应落盘（尊重用户选择）");
+msgFilter.setFilterCollapsed(true); // 回到收纳态，供后续用例
+
+// ---- 4.5 收纳后过滤仍生效：图标高亮 + 命中计数角标（避免误以为消息丢了）----
+msgFilter.setFilterCollapsed(true);
+queuePayload(filteredPayload([{ role: "tool", content: "x" }], 9));
+clickChip("tool");
+await flush();
+assert.ok(getElement("msg-filter-fab").classList.contains("active"), "过滤生效时收纳图标应高亮");
+assert.strictEqual(getElement("msg-filter-fab-count").textContent, "1",
+  "收纳图标应显示命中计数角标（过滤仍在生效）");
+assert.ok(/过滤生效/.test(getElement("msg-filter-fab").getAttribute("aria-label")),
+  "收纳图标可访问名应说明过滤仍在生效");
+
+// ---- 4.6 清除过滤后图标回到素色、角标清空 ----
+queuePayload(screenPayload(0, 6, 6));
+msgFilter.clearFilter();
+await flush();
+assert.ok(!getElement("msg-filter-fab").classList.contains("active"), "清除过滤后图标应回到素色");
+assert.strictEqual(getElement("msg-filter-fab-count").textContent, "", "清除过滤后角标应清空");
+
+// ---- 4.7 重新初始化按记忆恢复收纳态（放最后：initMsgFilter 会重复绑定监听器）----
+msgFilter.setFilterCollapsed(false); // 展开并落盘
+assert.strictEqual(JSON.parse(globalThis.localStorage.getItem("aicli.web.msgfilter.v1")).collapsed, false,
+  "展开态应落盘");
+msgFilter.initMsgFilter();
+assert.strictEqual(msgFilter.isFilterCollapsed(), false, "重新初始化应按记忆恢复展开态");
+msgFilter.setFilterCollapsed(true); // 收纳并落盘
+assert.strictEqual(JSON.parse(globalThis.localStorage.getItem("aicli.web.msgfilter.v1")).collapsed, true,
+  "收纳态应落盘");
+msgFilter.initMsgFilter();
+assert.strictEqual(msgFilter.isFilterCollapsed(), true, "重新初始化应按记忆恢复收纳态");
+
+console.log("verify-micro-web-msg-filter: 全部断言通过（面板结构 / 角色多选 / 搜索展开与去抖 / 服务端过滤 + 分页 / 空态与计数 / 收纳与展开）");

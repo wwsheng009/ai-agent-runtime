@@ -201,9 +201,13 @@
       <div id="conversation">
         <!-- 消息过滤面板：角色多选 + 正文搜索；sticky 吸附在消息区顶部居中。
              最左的 ⠿ 是拖动把手（js/msg-filter.js）：拖动换位 / 方向键微调 /
-             Home·双击复位，位移相对吸附点落 localStorage。 -->
-        <div id="msg-filter" class="msg-filter">
-          <div class="msg-filter-panel" role="group" aria-label="消息过滤">
+             Home·双击复位，位移相对吸附点落 localStorage。
+             收纳（2026-10）：工具栏可收起成一个可拖动的浮动图标（#msg-filter-fab）——
+             默认收纳（平时只显示图标），点图标展开回工具栏，工具栏最右「⌃」再收纳。
+             收纳态与位移同落 localStorage（aicli.web.msgfilter.v1）；有过滤生效时
+             图标高亮并带命中计数角标，避免「收纳后看不见过滤还在生效」。 -->
+        <div id="msg-filter" class="msg-filter" data-collapsed="true">
+          <div id="msg-filter-panel" class="msg-filter-panel" role="group" aria-label="消息过滤">
             <button id="msg-filter-grip" class="msg-filter-grip" type="button"
               title="拖动移动工具栏（方向键微调，Home 复位）" aria-label="拖动移动过滤工具栏">⠿</button>
             <div id="msg-filter-roles" class="msg-filter-roles" role="group" aria-label="按角色过滤"></div>
@@ -215,7 +219,19 @@
             <span id="msg-filter-count" class="msg-filter-count" aria-live="polite"></span>
             <button id="msg-filter-clear" class="msg-filter-clear" type="button"
               title="清除过滤" aria-label="清除过滤" disabled>✕</button>
+            <!-- 收纳按钮（工具栏最右）：把整条工具栏收起成 #msg-filter-fab 图标。 -->
+            <button id="msg-filter-collapse" class="msg-filter-icon-btn" type="button"
+              aria-expanded="true" aria-controls="msg-filter-panel"
+              title="收纳过滤工具栏" aria-label="收纳过滤工具栏">⌃</button>
           </div>
+          <!-- 收纳态图标：工具栏收起后显示的浮动图标（可拖动 / 方向键微调 / Home·双击复位，
+               与面板共用同一份位移记忆）；点击展开回工具栏。有过滤生效时高亮 + 计数角标。 -->
+          <button id="msg-filter-fab" class="msg-filter-fab" type="button"
+            aria-expanded="false" aria-controls="msg-filter-panel"
+            title="展开过滤工具栏" aria-label="展开过滤工具栏">
+            <span class="msg-filter-fab-icon" aria-hidden="true">🔍</span>
+            <span id="msg-filter-fab-count" class="msg-filter-fab-count" aria-hidden="true"></span>
+          </button>
         </div>
         <!-- 托管挂起/恢复横幅：turn.suspended / turn.resumed 驱动（等待子任务 ≠ 卡死） -->
         <div id="parked-banner" class="parked-banner" style="display:none" role="status" aria-live="polite"></div>

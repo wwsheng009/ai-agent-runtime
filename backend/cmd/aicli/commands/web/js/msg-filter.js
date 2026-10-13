@@ -42,14 +42,21 @@ var lastMatched = -1;         // 服务端最近一次返回的匹配条数（-1
 var lastUnfiltered = -1;      // 过滤前的总条数（服务端 unfiltered_total）
 
 var rootEl = null;
+var panelEl = null;     // 工具栏本体（展开态）
+var collapseEl = null;  // 收纳按钮（工具栏最右 ⌃）
+var fabEl = null;       // 收纳态浮动图标
+var fabCountEl = null;  // 图标右上角命中计数角标
 var rolesEl = null;
 var searchBtn = null;
 var searchEl = null;
 var countEl = null;
 var clearEl = null;
 var gripEl = null;
-var offset = { dx: 0, dy: 0 }; // 面板相对吸附点（sticky 顶部居中）的 translate 位移
-var dragState = null;          // { startX, startY, baseDx, baseDy }；非拖动中为 null
+var offset = { dx: 0, dy: 0 }; // 相对吸附点（sticky 顶部居中）的 translate 位移（面板 / 图标共用）
+var dragState = null;          // { startX, startY, baseDx, baseDy, moved, fromFab }；非拖动中为 null
+var collapsed = true;          // 收纳态：默认收纳（平时只显示图标；无记忆时即此值）
+var suppressFabClick = false;  // 图标拖动结束后抑制紧随的 click（避免拖完又展开）
+var DRAG_THRESHOLD = 4;        // 位移超过该阈值才算「拖动」（否则按点击处理）
 
 // 已选角色列表：按 FILTER_ROLES 顺序输出（查询串稳定，便于日志/缓存比对）。
 function selectedRoleList() {
@@ -102,13 +109,38 @@ export function updateFilterMatchInfo(matched, unfiltered) {
 }
 
 function renderCount() {
-  if (!countEl) { return; }
-  if (countPending) { countEl.textContent = "查询中…"; return; }
-  if (lastMatched < 0) { countEl.textContent = ""; return; }
-  if (!isFilterActive()) { countEl.textContent = "共 " + lastMatched + " 条"; return; }
-  countEl.textContent = (lastUnfiltered > lastMatched)
-    ? "匹配 " + lastMatched + " / 共 " + lastUnfiltered + " 条"
-    : "匹配 " + lastMatched + " 条";
+  if (countEl) {
+    if (countPending) { countEl.textContent = "查询中…"; }
+    else if (lastMatched < 0) { countEl.textContent = ""; }
+    else if (!isFilterActive()) { countEl.textContent = "共 " + lastMatched + " 条"; }
+    else {
+      countEl.textContent = (lastUnfiltered > lastMatched)
+        ? "匹配 " + lastMatched + " / 共 " + lastUnfiltered + " 条"
+        : "匹配 " + lastMatched + " 条";
+    }
+  }
+  renderFabBadge();
+}
+
+// 收纳态图标外观：过滤生效时高亮 + 命中计数角标（收纳后看不到工具栏本体，靠这里
+// 让「过滤还在生效」可见，避免用户误以为消息丢了）；未生效时素色、无角标。
+function renderFabBadge() {
+  if (!fabEl) { return; }
+  var active = isFilterActive();
+  if (fabEl.classList) { fabEl.classList.toggle("active", active); }
+  if (fabCountEl) {
+    fabCountEl.textContent = (active && lastMatched >= 0) ? String(lastMatched) : "";
+  }
+  var label = "展开过滤工具栏";
+  if (active) {
+    label = (lastMatched >= 0)
+      ? "展开过滤工具栏（过滤生效：" + lastMatched + " 条）"
+      : "展开过滤工具栏（过滤生效）";
+  }
+  if (fabEl.setAttribute) {
+    fabEl.setAttribute("title", label);
+    fabEl.setAttribute("aria-label", label);
+  }
 }
 
 function renderChips() {
@@ -197,7 +229,7 @@ export function clearFilter() {
 // 记忆读写：localStorage 异常（隐私模式等）静默忽略。
 function storeOffset() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ dx: offset.dx, dy: offset.dy }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ dx: offset.dx, dy: offset.dy, collapsed: collapsed }));
   } catch (e) { /* ignore */ }
 }
 
@@ -209,22 +241,35 @@ function restoreOffset() {
     if (v && typeof v === "object") {
       offset.dx = Number(v.dx) || 0;
       offset.dy = Number(v.dy) || 0;
+      if (typeof v.collapsed === "boolean") { collapsed = v.collapsed; }
     }
   } catch (e) { /* ignore */ }
 }
 
 function filterPanelEl() {
+  if (panelEl) { return panelEl; }
   return (rootEl && rootEl.querySelector) ? rootEl.querySelector(".msg-filter-panel") : null;
 }
 
-// clampOffset 把位移夹回 #conversation 可视范围：横向以面板布局位（flex 居中的
+// activeDragEl 取当前可见、承载位移的元素：收纳态是图标，展开态是面板本体。
+// 两者共用同一份 offset，切换时由 setCollapsed 重新夹取。
+function activeDragEl() {
+  if (collapsed && fabEl) { return fabEl; }
+  return filterPanelEl();
+}
+
+// clampOffset 把位移夹回 #conversation 可视范围：横向以元素布局位（flex 居中的
 // 左缘）为基准换算可视边界；纵向 0 = 吸附顶边（不允许拖到消息区上方）。
 function clampOffset(dx, dy) {
   var conv = document.getElementById("conversation");
-  var panel = filterPanelEl();
+  var panel = activeDragEl();
   if (!conv || !panel) { return { dx: 0, dy: 0 }; }
   var cw = conv.clientWidth, ch = conv.clientHeight;
   var pw = panel.offsetWidth, ph = panel.offsetHeight;
+  // 尺寸不可测（元素未布局 / 无布局引擎的测试沙盒）：不夹取，归零以免 NaN 污染记忆。
+  if (![cw, ch, pw, ph].every(function (n) { return typeof n === "number" && isFinite(n); })) {
+    return { dx: 0, dy: 0 };
+  }
   var layoutLeft = (cw - pw) / 2;
   var lo = EDGE - layoutLeft, hi = cw - EDGE - pw - layoutLeft;
   if (lo > hi) { dx = (lo + hi) / 2; } // 面板比容器还宽：横移无意义，居中兜底
@@ -236,11 +281,14 @@ function clampOffset(dx, dy) {
 
 function applyOffset() {
   var panel = filterPanelEl();
-  if (!panel) { return; }
+  var target = collapsed ? fabEl : panel; // 位移只落在当前可见的那个元素上
+  var other = collapsed ? panel : fabEl;
+  if (other && other.style && other.style.transform) { other.style.transform = ""; }
+  if (!target || !target.style) { return; }
   if (offset.dx || offset.dy) {
-    panel.style.transform = "translate(" + offset.dx + "px, " + offset.dy + "px)";
-  } else if (panel.style.transform) {
-    panel.style.transform = ""; // 默认位置不留内联样式，DOM 保持干净
+    target.style.transform = "translate(" + offset.dx + "px, " + offset.dy + "px)";
+  } else if (target.style.transform) {
+    target.style.transform = ""; // 默认位置不留内联样式，DOM 保持干净
   }
 }
 
@@ -260,32 +308,53 @@ function coord(ev, axis) {
   return 0;
 }
 
-function onGripPointerDown(ev) {
+// 通用拖动起点：把手（展开态）与收纳图标（收纳态）共用。preventDefault 只在
+// 把手路径开启——图标既是拖动把手又是展开入口，按下时不能吞掉随后的 click，
+// 否则点一下就只拖动、展不开；是否真拖动由移动阈值（DRAG_THRESHOLD）判定。
+function beginDrag(ev, preventDefault, fromFab) {
   if (ev && typeof ev.button === "number" && ev.button !== 0) { return; } // 只响应主键
-  if (ev && typeof ev.preventDefault === "function") { ev.preventDefault(); } // 拖动期间不要选中文字
-  dragState = { startX: coord(ev, "x"), startY: coord(ev, "y"), baseDx: offset.dx, baseDy: offset.dy };
+  if (preventDefault && ev && typeof ev.preventDefault === "function") { ev.preventDefault(); }
+  dragState = {
+    startX: coord(ev, "x"), startY: coord(ev, "y"),
+    baseDx: offset.dx, baseDy: offset.dy,
+    moved: false, fromFab: !!fromFab,
+  };
   if (document.body && document.body.classList) { document.body.classList.add("msgfilter-dragging"); }
   // 指针捕获：指针移出把手/窗口仍能继续拖动（失败也不影响基本拖动）。
-  if (ev && typeof ev.pointerId === "number" && gripEl && typeof gripEl.setPointerCapture === "function") {
-    try { gripEl.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+  var handle = (ev && ev.currentTarget) || (fromFab ? fabEl : gripEl);
+  if (ev && typeof ev.pointerId === "number" && handle && typeof handle.setPointerCapture === "function") {
+    try { handle.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
   }
 }
+
+function onGripPointerDown(ev) { beginDrag(ev, true, false); }
+function onFabPointerDown(ev) { beginDrag(ev, false, true); }
 
 function onDragPointerMove(ev) {
   if (!dragState) { return; }
   if (ev && typeof ev.preventDefault === "function") { ev.preventDefault(); }
-  offset = clampOffset(
-    dragState.baseDx + coord(ev, "x") - dragState.startX,
-    dragState.baseDy + coord(ev, "y") - dragState.startY
-  );
+  var dx = dragState.baseDx + coord(ev, "x") - dragState.startX;
+  var dy = dragState.baseDy + coord(ev, "y") - dragState.startY;
+  if (Math.abs(dx - dragState.baseDx) > DRAG_THRESHOLD || Math.abs(dy - dragState.baseDy) > DRAG_THRESHOLD) {
+    dragState.moved = true;
+  }
+  offset = clampOffset(dx, dy);
   applyOffset();
 }
 
 function onDragPointerUp() {
   if (!dragState) { return; }
+  var moved = dragState.moved;
+  var fromFab = dragState.fromFab;
   dragState = null;
   if (document.body && document.body.classList) { document.body.classList.remove("msgfilter-dragging"); }
+  if (!moved) { return; } // 没超过阈值：视为点击，不落盘、不抑制（图标点击走展开）
   storeOffset(); // 只在落点确定时落盘，拖动过程中不反复写 localStorage
+  if (fromFab) {
+    // 图标拖动结束后抑制紧随的 click，否则松手即被当成点击而展开。
+    suppressFabClick = true;
+    setTimeout(function () { suppressFabClick = false; }, 0);
+  }
 }
 
 // 把手键盘微调：方向键 8px、Shift+方向键 1px、Home 复位（与 composer 把手一致）。
@@ -306,21 +375,30 @@ function onGripKey(ev) {
   storeOffset();
 }
 
-function bindFilterDrag() {
-  if (!gripEl || typeof gripEl.addEventListener !== "function" || !document.addEventListener) { return; }
+// 单个拖动把手的绑定：按下（Pointer 优先，回退鼠标）+ 键盘微调（方向键 / Home）。
+// resetOnDblClick 只给展开态把手（⠿）开——收纳图标双击会与「点击展开」冲突。
+function bindDragHandle(handle, fromFab, resetOnDblClick) {
+  if (!handle || typeof handle.addEventListener !== "function") { return; }
   var hasPointer = typeof window !== "undefined" && typeof window.PointerEvent === "function";
+  handle.addEventListener(hasPointer ? "pointerdown" : "mousedown", fromFab ? onFabPointerDown : onGripPointerDown);
+  if (resetOnDblClick) { handle.addEventListener("dblclick", resetFilterPos); }
+  handle.addEventListener("keydown", onGripKey);
+}
+
+function bindFilterDrag() {
+  if (!document.addEventListener) { return; }
+  var hasPointer = typeof window !== "undefined" && typeof window.PointerEvent === "function";
+  // document 级移动 / 抬起只绑一次，两个把手共用（落点由 dragState 决定）。
   if (hasPointer) {
-    gripEl.addEventListener("pointerdown", onGripPointerDown);
     document.addEventListener("pointermove", onDragPointerMove);
     document.addEventListener("pointerup", onDragPointerUp);
     document.addEventListener("pointercancel", onDragPointerUp);
   } else {
-    gripEl.addEventListener("mousedown", onGripPointerDown);
     document.addEventListener("mousemove", onDragPointerMove);
     document.addEventListener("mouseup", onDragPointerUp);
   }
-  gripEl.addEventListener("dblclick", resetFilterPos);
-  gripEl.addEventListener("keydown", onGripKey);
+  bindDragHandle(gripEl, false, true);  // 展开态把手（面板最左 ⠿）：双击复位
+  bindDragHandle(fabEl, true, false);   // 收纳态图标：本身即可拖动（双击留给展开）
   // 窗口缩放后落点可能越界：重夹一次（clamp 对任意入参幂等，无位移时是空操作）。
   if (typeof window.addEventListener === "function") {
     window.addEventListener("resize", function () {
@@ -330,8 +408,35 @@ function bindFilterDrag() {
   }
 }
 
+// 收纳 / 展开：切换 #msg-filter 的 data-collapsed（CSS 按此互斥显示面板与图标），
+// 同步收纳按钮与图标的 aria-expanded；切换后按当前可见元素重新夹取位移再落盘。
+function setCollapsed(next) {
+  collapsed = !!next;
+  if (rootEl && rootEl.setAttribute) {
+    rootEl.setAttribute("data-collapsed", collapsed ? "true" : "false");
+  }
+  if (collapseEl && collapseEl.setAttribute) {
+    collapseEl.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+  if (fabEl && fabEl.setAttribute) {
+    fabEl.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+  offset = clampOffset(offset.dx, offset.dy);
+  applyOffset();
+  renderFabBadge();
+  storeOffset();
+}
+
+// 供外部（测试 / 其他模块）读取与设置收纳态。
+export function setFilterCollapsed(v) { setCollapsed(v); }
+export function isFilterCollapsed() { return collapsed; }
+
 export function initMsgFilter() {
   rootEl = document.getElementById("msg-filter");
+  panelEl = document.getElementById("msg-filter-panel");
+  collapseEl = document.getElementById("msg-filter-collapse");
+  fabEl = document.getElementById("msg-filter-fab");
+  fabCountEl = document.getElementById("msg-filter-fab-count");
   rolesEl = document.getElementById("msg-filter-roles");
   searchBtn = document.getElementById("msg-filter-search-btn");
   searchEl = document.getElementById("msg-filter-search");
@@ -383,16 +488,25 @@ export function initMsgFilter() {
     }
   });
 
+  // 收纳 / 展开入口：工具栏最右「⌃」收起；收纳态图标点击展开（拖动结束后由
+  // suppressFabClick 抑制紧随的 click，避免「拖完又展开」）。
+  if (collapseEl) { collapseEl.addEventListener("click", function () { setCollapsed(true); }); }
+  if (fabEl) {
+    fabEl.addEventListener("click", function () {
+      if (suppressFabClick) { suppressFabClick = false; return; }
+      setCollapsed(false);
+    });
+  }
+
   if (clearEl) { clearEl.addEventListener("click", function () { clearFilter(); }); }
   // 面板内的点击不冒泡到对话区（否则会命中消息行的复制/折叠委托）。
   if (rootEl && rootEl.addEventListener) {
     rootEl.addEventListener("click", function (e) { if (e.stopPropagation) { e.stopPropagation(); } });
   }
 
-  // 拖动把手：绑定事件 + 恢复上次位置（夹回当前容器尺寸内再应用）。
+  // 拖动把手 + 收纳图标：绑定事件 → 恢复上次位移与收纳态 → 应用（无记忆时默认收纳）。
   gripEl = document.getElementById("msg-filter-grip");
   bindFilterDrag();
   restoreOffset();
-  offset = clampOffset(offset.dx, offset.dy);
-  applyOffset();
+  setCollapsed(collapsed);
 }

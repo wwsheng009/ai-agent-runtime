@@ -278,6 +278,37 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 body.msgfilter-dragging { cursor: grabbing; user-select: none; }
 body.msgfilter-dragging * { cursor: grabbing !important; user-select: none !important; }
 
+/* 收纳 / 展开（2026-10）：工具栏本体与收纳态浮动图标互斥显示，由 #msg-filter 的
+   data-collapsed 驱动（默认收纳 = 只显示图标）。图标与面板共用同一份位移记忆：
+   transform 由 js/msg-filter.js 落在当前可见的那个元素上，切换时重新夹取落点。 */
+#conversation .msg-filter[data-collapsed="true"] .msg-filter-panel { display: none; }
+#conversation .msg-filter[data-collapsed="false"] .msg-filter-fab { display: none; }
+
+/* 收纳态浮动图标：圆形小按钮，可拖动（cursor:grab + touch-action:none 与把手同款），
+   有过滤生效时高亮并显示右上角命中计数角标（收纳后仍能看出过滤在生效）。 */
+#conversation .msg-filter-fab {
+  pointer-events: auto;
+  position: relative;
+  width: 30px; height: 30px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg2); color: var(--fg3);
+  border: 1px solid var(--border); border-radius: 999px;
+  box-shadow: 0 2px 8px var(--shadow);
+  font-size: 13px; line-height: 1;
+  cursor: grab; touch-action: none;
+}
+#conversation .msg-filter-fab:hover { color: var(--fg); background: var(--hoverBg); }
+#conversation .msg-filter-fab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#conversation .msg-filter-fab.active { color: var(--accent); border-color: var(--accent); }
+#conversation .msg-filter-fab-count {
+  position: absolute; top: -6px; right: -6px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  border-radius: 999px;
+  background: var(--accent); color: var(--bg);
+  font-size: 9px; line-height: 14px; text-align: center;
+}
+#conversation .msg-filter-fab-count:empty { display: none; }
+
 /* ---- 托管挂起/恢复横幅（turn.suspended / turn.resumed，方案 §6.8） ----
    与消息过滤面板同层吸附在消息区顶部；挂起态常驻（等待子任务 ≠ 卡死），
    恢复态 8s 后由 js/parked.js 自动隐藏。 */
