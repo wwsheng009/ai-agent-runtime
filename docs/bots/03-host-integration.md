@@ -130,7 +130,7 @@
 | POST | `/api/connectors/{id}/test` | 发送测试消息 | 管理面 |
 | GET | `/api/connectors/{id}/logs` | 最近日志（分页） | 管理面 |
 | GET/PUT | `/api/connectors/{id}/bindings` | 查看/调整 IM↔会话绑定 | 管理面 |
-| POST | `/api/connectors/{id}/actions/{action}` | 特殊动作（微信扫码等） | 管理面 |
+| POST | `/api/connectors/{id}/actions/{action}` | 特殊动作（微信扫码等）；执行面已实现（`connectors.ActionProvider`） | 管理面 |
 | POST | `/hooks/connectors/{id}` | **入站 webhook**（通道签名校验） | 每连接器密钥 |
 
 > 管理面鉴权按宿主既有约定：gateway=owner session；runtime-server=admin/Bearer；aicli=本机会话。
@@ -147,11 +147,12 @@
 | `DELETE /connectors/{id}` | 删除并停止轮询 |
 | `POST /connectors/{id}/reload` | 应用配置变更（重启轮询/重连），更新接口内已自动调用 |
 | `POST /connectors/{id}/test` | 发送测试消息（控制台按钮），body `{chat,text}` |
+| `POST /connectors/{id}/actions/{action}` | 通道特有动作执行面（`connectors.ActionProvider.RunAction`）；body 可选 JSON object；未知/停用 404、未实现能力 405、provider 失败 400 |
 | `POST /hooks/connectors/{id}` | 公网入站；能力探测 `connectors.WebhookProvider`，签名失败 400、队列满 429、未知/停用 404 |
 
 - 挂载：`NewRouter` → `/api`；`NewHooksRouter` → 根（`/hooks/connectors/{id}`）。
   `Authorize` 为 nil 时管理面整体 403（安全默认，避免宿主忘接线）。
-- 待续（P1/P2）：`/{id}/logs`、`/{id}/bindings`、`/{id}/actions/{action}`（扫码登录等）。
+- 待续（P1/P2）：`/{id}/logs`、`/{id}/bindings`；三端前端的 action 按钮控件（微信扫码登录等，Schema.Actions 驱动）仍待续。
 - **安全与生命周期（2026-10-13 审查修复）**：管理面/入站不再把请求 ctx 当生命周期
   ——`Service` 持有宿主基 ctx（`Start` 建立/`Stop` 取消），轮询与异步任务基于它派生，
   REST handler 返回（`r.Context()` 取消）不会让新建/Reload 的连接器静默停摆；
@@ -189,6 +190,28 @@ runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
 指数退避重连、群@/C2C 文本入站、被动回复 `msg_id`+`msg_seq` 已实现，游标
 `gateway_session_id`/`gateway_seq` 与 Telegram `update_offset` 共用
 `state.json` 的 cursors 视图（重启后 Resume）；媒体与主动消息待续。
+微信 Provider（`internal/connectors/providers/wechat`，P3 切片 2b：文本收发 +
+扫码登录 + typing）已在 runtime-server 与 aicli 两端注册：`modes=["polling"]`，
+字段 `bot_token`(secret)/`base_url`/`api_base`/`account_id`/`owner_user_id`/
+`route_tag`/`mode`；`getupdates` 长轮询（游标 `sync_buf` 持久化 + 指数退避重连）、
+`sendmessage` 文本与 markdown 清洗、`sendtyping` typing ticket、入站
+文本/引用/语音转写解析（图片/文件/视频降级为文本占位）已实现；真实媒体待续。
+**扫码登录 action 与返回约定（三端统一）**：
+
+- `POST /api/connectors/{id}/actions/start_login`（Schema.Actions kind=qr）：
+  body 可选 `{"base_url":"https://…"}`（未配置 `base_url`/`api_base` 时必需）；
+  返回 `{login_id,status:"wait",qr_code_content,expires_at,…}`，其中
+  `qr_code_content` 是二维码图片（data URI/base64）或链接，前端直接渲染。
+- `POST /api/connectors/{id}/actions/login_status`（kind=button）：body 可选
+  `{"login_id":"…"}`（缺省取该连接器最近一次会话）；`status` 取
+  `wait|scanned|confirmed|expired`，二维码过期自动刷新（≤3 次，返回
+  `refresh_count` 与新 `qr_code_content`）。
+- **回填约定**：`status=confirmed` 时响应额外携带 `settings`/`secrets` 两个合并
+  补丁（`{"settings":{"base_url","account_id","owner_user_id"},
+  "secrets":{"bot_token"}}`）。前端（gateway console / aicli micro web /
+  runtime-server React）应把这两个对象提交给现有
+  `PATCH/PUT /api/connectors/{id}`（secrets 留空=保持、`__clear__`=清除）完成回填；
+  回填前凭据已在 Provider 进程内缓存 24h，轮询/收发即时可用；回填后重启仍有效。
 **aicli 宿主接线（2026-10-13 落地）**：`cmd/aicli/commands/connector_host.go`
 （`StartLocalConnectors` + `MountLocalConnectorRoutes`）——
 

@@ -74,7 +74,7 @@
 - 验收：本机 aicli 不联网关也能用 Telegram/QQ 对话；配置在 aicli 与 gateway 间可迁移。
 - 状态（2026-10-13）：aicli 宿主接线已提前在 P0 落地（`cmd/aicli/commands/connector_host.go`，
   Backend 即 `localActorRegistry.SubmitPrompt`，共享 `connectors:` 配置节）；
-  剩余为微前端连接器页与热应用细节、QQ 适配器。
+  剩余为微前端连接器页与热应用细节（QQ 适配器切片 1 见下条）。
 - 状态（2026-10-13，QQ 切片 1）：QQ 适配器 ◇ **gateway 完成**——`internal/connectors/providers/qqbot`
   （App Access Token 缓存/提前刷新、WS 状态机 op 10 hello → op 2 Identify / op 6 Resume →
   op 0 事件分发 → op 1 心跳/op 11 ack、断线指数退避重连；群@/C2C 文本入站与
@@ -89,6 +89,20 @@
 - 交付：微信长轮询适配器 + 扫码登录（actions 流程）+ 媒体转码（ffmpeg 降级）+
   IM 作为注意力通道的可选项（与 Web Push/ntfy 并列，支持每绑定开关/静音）。
 - 验收：微信扫码登录 → 收发文本/图片/语音（转码）；手机上收到「待审批/已完成」提醒，可关闭。
+- 状态（2026-10-13，微信切片 2b）：微信适配器 ◇ **文本 + 扫码登录完成**——
+  `internal/connectors/providers/wechat`：`getupdates` 长轮询（游标 `sync_buf` 经
+  `PollingState` 持久化、重启续传、断线指数退避重连、errcode -14 告警等待重登）、
+  `sendmessage` 文本收发（markdown 按上游策略清洗、bot_token 脱敏）、
+  `sendtyping` typing ticket（getconfig 缓存 24h）、入站文本/引用/语音转写解析，
+  图片/文件/视频降级为文本占位；扫码登录 `start_login` → `login_status`
+  （wait/scanned/confirmed/expired，二维码过期自动刷新 ≤3 次），confirmed 返回
+  `settings`/`secrets` 合并补丁回填 `base_url`/`account_id`/`owner_user_id`/`bot_token`
+  （约定见 03 文档 §6）。测试：`httptest` 假 iLink 服务 14 例（激活缓存/脱敏、
+  长轮询解析与游标续传、退避重连、Send 清洗、typing、登录态机与刷新、action 错误），
+  `go test -race` 全绿；runtime-server 与 aicli 均已注册。
+  **待续**：真媒体（CDN 上传/下载/转码，ffmpeg 降级）、errcode -2 失败重放、
+  context_token 跨重启持久化（当前进程内记忆，重启后需该会话下次入站才能回复）、
+  微信作为注意力通道的开关/静音。
 
 ## 3. 测试策略
 

@@ -71,6 +71,7 @@ func NewRouter(deps Deps) http.Handler {
 	router.HandleFunc("/connectors/{id}", handlers.remove).Methods(http.MethodDelete)
 	router.HandleFunc("/connectors/{id}/reload", handlers.reload).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}/test", handlers.test).Methods(http.MethodPost)
+	router.HandleFunc("/connectors/{id}/actions/{action}", handlers.action).Methods(http.MethodPost)
 	return router
 }
 

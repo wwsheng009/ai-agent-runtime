@@ -195,6 +195,17 @@ type WebhookProvider interface {
 	HandleWebhook(ctx context.Context, cfg Config, r *http.Request) (WebhookResult, error)
 }
 
+// ActionProvider 支持通道特有动作（由 ProviderSchema.Actions 声明，如微信/QQ 扫码登录）。
+// 管理面 POST /connectors/{id}/actions/{action} 按 action 调用：
+//   - action 来自 ProviderSchema.Actions 的 Key，宿主不额外解释；
+//   - payload 是调用方透传的可选 JSON object（可为 nil）；
+//   - 返回 JSON 可序列化载荷（如二维码图/链接/登录状态），宿主原样回 200；
+//   - 返回 error 由宿主转 4xx（参数/凭据/上游失败）。
+type ActionProvider interface {
+	Provider
+	RunAction(ctx context.Context, cfg Config, action string, payload map[string]any) (map[string]any, error)
+}
+
 // TypingSession 是一次"正在输入"保活。
 type TypingSession interface {
 	Stop(ctx context.Context) error

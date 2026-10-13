@@ -23,6 +23,13 @@ type fakeProvider struct {
 	webhookErr error
 	// webhookResponses 非空时按序返回直接应答（challenge 场景），否则返回消息。
 	webhookResponse any
+
+	// actionErr 非空时 RunAction 返回错误（错误路径用例）。
+	actionErr error
+	// actionResult 是 RunAction 的成功载荷；nil 时返回默认载荷。
+	actionResult map[string]any
+	// onAction 非空时在 RunAction 内做透传断言（成功路径用例）。
+	onAction func(cfg connectors.Config, action string, payload map[string]any)
 }
 
 func (p *fakeProvider) Name() string { return "fakeweb" }
@@ -37,6 +44,9 @@ func (p *fakeProvider) Schema() api.ProviderSchema {
 			{Key: "mode", Label: "模式", Type: api.FieldEnum, Default: "polling",
 				Options: []api.Option{{Value: "polling"}, {Value: "webhook"}}},
 			{Key: "label", Label: "备注", Type: api.FieldText},
+		},
+		Actions: []api.ActionSpec{
+			{Key: "start_login", Label: "扫码登录", Kind: "qr"},
 		},
 	}
 }
@@ -65,6 +75,19 @@ func (p *fakeProvider) HandleWebhook(_ context.Context, cfg connectors.Config, r
 		UserID:    "u1",
 		Text:      "来自 webhook",
 	}}, nil
+}
+
+func (p *fakeProvider) RunAction(_ context.Context, cfg connectors.Config, action string, payload map[string]any) (map[string]any, error) {
+	if p.onAction != nil {
+		p.onAction(cfg, action, payload)
+	}
+	if p.actionErr != nil {
+		return nil, p.actionErr
+	}
+	if p.actionResult != nil {
+		return p.actionResult, nil
+	}
+	return map[string]any{"status": "ok", "action": action}, nil
 }
 
 // plainProvider 不支持 webhook（用于 405 用例）；独立实现，避免嵌入隐式获得能力。
@@ -404,5 +427,85 @@ func TestViewsDoNotLeakPolicySecrets(t *testing.T) {
 	}
 	if fmt.Sprint(view.SecretKeys) != "[bot_token]" {
 		t.Fatalf("secret_keys = %v", view.SecretKeys)
+	}
+}
+
+func TestActionEndpointRunsProvider(t *testing.T) {
+	fx := newFixture(t, allowAll, baseConfig("c1", "fakeweb"))
+	fx.provider.actionResult = map[string]any{"qrcode": "https://example.com/qr.png", "status": "pending"}
+	fx.provider.onAction = func(cfg connectors.Config, action string, payload map[string]any) {
+		if cfg.ID != "c1" {
+			t.Errorf("配置透传错误：%q", cfg.ID)
+		}
+		if action != "start_login" {
+			t.Errorf("action 透传错误：%q", action)
+		}
+		if payload["account"] != "wx-1" {
+			t.Errorf("payload 透传错误：%+v", payload)
+		}
+	}
+	withBody := do(t, fx.router, http.MethodPost, "/connectors/c1/actions/start_login", `{"account":"wx-1"}`)
+	if withBody.Code != http.StatusOK {
+		t.Fatalf("动作应 200，got %d %s", withBody.Code, withBody.Body.String())
+	}
+	if !strings.Contains(withBody.Body.String(), `"qrcode":"https://example.com/qr.png"`) {
+		t.Fatalf("应原样返回 provider 载荷：%s", withBody.Body.String())
+	}
+
+	// 空体 = 无参数（payload 为 nil）
+	fx.provider.onAction = func(_ connectors.Config, _ string, payload map[string]any) {
+		if payload != nil {
+			t.Errorf("空体应透传 nil payload，got %+v", payload)
+		}
+	}
+	empty := do(t, fx.router, http.MethodPost, "/connectors/c1/actions/login_status", "")
+	if empty.Code != http.StatusOK {
+		t.Fatalf("空体动作应 200，got %d %s", empty.Code, empty.Body.String())
+	}
+}
+
+func TestActionUnsupportedUnknownAndDisabled(t *testing.T) {
+	disabled := baseConfig("c3", "fakeweb")
+	disabled.Enabled = false
+	fx := newFixture(t, allowAll, baseConfig("c1", "fakeweb"), baseConfig("c2", "plain"), disabled)
+
+	unsupported := do(t, fx.router, http.MethodPost, "/connectors/c2/actions/start_login", "{}")
+	if unsupported.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("未实现 ActionProvider 应 405，got %d %s", unsupported.Code, unsupported.Body.String())
+	}
+
+	missing := do(t, fx.router, http.MethodPost, "/connectors/none/actions/start_login", "{}")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("未知 id 应 404，got %d", missing.Code)
+	}
+
+	off := do(t, fx.router, http.MethodPost, "/connectors/c3/actions/start_login", "{}")
+	if off.Code != http.StatusNotFound {
+		t.Fatalf("停用连接器应 404，got %d", off.Code)
+	}
+}
+
+func TestActionErrorPaths(t *testing.T) {
+	fx := newFixture(t, allowAll, baseConfig("c1", "fakeweb"))
+
+	fx.provider.actionErr = errors.New("尚未扫码登录")
+	failed := do(t, fx.router, http.MethodPost, "/connectors/c1/actions/login_status", "{}")
+	if failed.Code != http.StatusBadRequest {
+		t.Fatalf("provider 失败应 400，got %d", failed.Code)
+	}
+	if !strings.Contains(failed.Body.String(), "尚未扫码登录") {
+		t.Fatalf("应回 provider 错误文案：%s", failed.Body.String())
+	}
+
+	bad := do(t, fx.router, http.MethodPost, "/connectors/c1/actions/start_login", "{not-json")
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("非法 JSON 应 400，got %d", bad.Code)
+	}
+}
+
+func TestActionRequiresAuthorizer(t *testing.T) {
+	anon := newFixture(t, nil, baseConfig("c1", "fakeweb"))
+	if recorder := do(t, anon.router, http.MethodPost, "/connectors/c1/actions/start_login", "{}"); recorder.Code != http.StatusForbidden {
+		t.Fatalf("无 Authorizer 应 403，got %d", recorder.Code)
 	}
 }
