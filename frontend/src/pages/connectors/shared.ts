@@ -17,6 +17,10 @@ export interface ConnectorFormState {
   id: string;
   provider: string;
   name: string;
+  /**
+   * 顶层「模式」下拉的当前值：仅当 provider schema 没有 `mode` 字段时渲染与提交。
+   * 有 `mode` 字段时（如 telegram），该字段是模式的唯一真源，本项不参与提交。
+   */
   mode: string;
   enabled: boolean;
   /** 每个 Schema 字段的当前输入；密钥字段为空串 = 保持原值。 */
@@ -44,6 +48,18 @@ export function findProviderSchema(
   return schema.providers.find((item) => item.provider === trimmed) ?? null;
 }
 
+/**
+ * provider schema 是否自带 `mode` 字段（telegram 的真实形状：
+ * 顶层 modes 与 key=mode 的 enum 字段并存）。
+ *
+ * 有该字段时字段值（settings.mode）是模式的唯一真源：对话框不渲染顶层
+ * 「模式」下拉，提交时 payload.mode 与 settings.mode 取同一值，避免后端
+ * `firstNonEmpty(request.Mode, ...)` 优先取顶层值导致「选 webhook 仍轮询」。
+ */
+export function hasModeField(providerSchema: ConnectorProviderSchema | null): boolean {
+  return (providerSchema?.fields ?? []).some((field) => field.key === "mode");
+}
+
 export function defaultValuesFor(
   providerSchema: ConnectorProviderSchema | null,
 ): Record<string, string> {
@@ -68,11 +84,22 @@ export function createEmptyForm(schema: ConnectorSchema | null): ConnectorFormSt
   };
 }
 
-/** 编辑既有连接器：settings 回填；密钥字段保持空串（留空=不改）。 */
-export function formFromConnector(view: ConnectorView): ConnectorFormState {
+/**
+ * 编辑既有连接器：settings 回填；密钥字段保持空串（留空=不改）。
+ *
+ * provider schema 自带 `mode` 字段且 settings 未存该值时，用视图的生效 mode
+ * 兜底回填，避免编辑保存时把模式清空（单一真源，见 hasModeField）。
+ */
+export function formFromConnector(
+  view: ConnectorView,
+  providerSchema: ConnectorProviderSchema | null = null,
+): ConnectorFormState {
   const values: Record<string, string> = {};
   for (const [key, value] of Object.entries(view.settings ?? {})) {
     values[key] = value;
+  }
+  if (hasModeField(providerSchema) && !values.mode) {
+    values.mode = view.mode;
   }
   return {
     id: view.id,
@@ -151,7 +178,9 @@ export function validateConnectorForm(
  * 构造提交体：
  *   * 非密钥字段全部提交（空串 = 清空，与后端 MergeSubmit 语义一致）；
  *   * 密钥字段：勾选清除 → `__clear__`；有输入 → 提交；留空 → 不提交（保持原值）；
- *   * 新建提交 id / provider / enabled；编辑不提交这两项（provider 不可变更）。
+ *   * 新建提交 id / provider / enabled；编辑不提交这两项（provider 不可变更）；
+ *   * mode 单一真源：provider schema 自带 `mode` 字段时提交该字段值，payload.mode
+ *     与 settings.mode 一致；否则提交顶层「模式」下拉值。
  */
 export function buildSubmitPayload(
   form: ConnectorFormState,
@@ -176,10 +205,11 @@ export function buildSubmitPayload(
     settings[field.key] = raw;
   }
 
+  const modeField = hasModeField(providerSchema);
   const payload: ConnectorSubmitPayload = {
     settings,
     secrets,
-    mode: form.mode,
+    mode: modeField ? (settings.mode ?? "") : form.mode,
   };
   if (options.isCreate) {
     payload.id = form.id.trim();

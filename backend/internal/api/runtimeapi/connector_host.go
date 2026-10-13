@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 // 本文件是 runtime-server 宿主接入 IM 连接器（docs/bots/06-target-architecture.md
@@ -89,7 +90,12 @@ func (h *Handler) SubmitConnectorPrompt(ctx context.Context, req ConnectorTurnRe
 	}
 
 	client := &sessionActorClient{hub: h.getSessionHub(), handler: h}
-	result, err := client.submitPrompt(ctx, sessionID, prompt, nil)
+	// IM 入站没有交互式审批通道：与 aicli 宿主同语义显式使用
+	// bypass_permissions。若沿用默认权限模式，无审批 responder 的回合会挂起/
+	// 失败。用户准入由连接器 Policy 白名单先行过滤；开启 fail-closed 闸的宿主
+	// （connectors.Deps.RequireAllowedUsers=true，如 aicli）还会在启动期拒绝
+	// 白名单为空的连接器。
+	result, err := client.submitPrompt(ctx, sessionID, prompt, &team.RunMeta{PermissionMode: "bypass_permissions"})
 	if result != nil {
 		turn.Reply = strings.TrimSpace(result.Output)
 		turn.Success = result.Success

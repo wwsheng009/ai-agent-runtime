@@ -141,6 +141,15 @@
 - 挂载：`NewRouter` → `/api`；`NewHooksRouter` → 根（`/hooks/connectors/{id}`）。
   `Authorize` 为 nil 时管理面整体 403（安全默认，避免宿主忘接线）。
 - 待续（P1/P2）：`/{id}/logs`、`/{id}/bindings`、`/{id}/actions/{action}`（扫码登录等）。
+- **安全与生命周期（2026-10-13 审查修复）**：管理面/入站不再把请求 ctx 当生命周期
+  ——`Service` 持有宿主基 ctx（`Start` 建立/`Stop` 取消），轮询与异步任务基于它派生，
+  REST handler 返回（`r.Context()` 取消）不会让新建/Reload 的连接器静默停摆；
+  去重键 = `connector+chat+messageID`（telegram `message_id` 仅 chat 内唯一，
+  多会话同 ID 不再互斥丢弃）；`Stop` 后队列拒绝新入队，`enqueue` 与 `closeAll`
+  无 send-on-closed-channel 竞态；轮询实例按代际登记，旧实例退出不误删新实例；
+  队列满（429）不再因「先认领后入队」被账本吞掉；Telegram 错误文本脱敏
+  `bot_token`（`client.Do` 的 URL 内嵌）；Schema 只声明已实现的能力
+  （Telegram 暂仅 `polling`，`HandleWebhook` 实现后再加回 `webhook`）。
 
 ## 7. 配置存储与迁移
 
@@ -176,6 +185,14 @@ webhook 挂 `/hooks/connectors/{id}`）。Telegram Provider 提供 `api_base` �
   （回环/同源/写令牌）；服务未启动时 503；
 - 共享同一份 `config.yaml` 的 `connectors:` 节 + `data/connectors/state.json`，
   与 runtime-server 配置互通（运行归属抢占见 §5.6，P1）。
+
+**安全闸与语义统一（2026-10-13 审查修复）**：aicli 对「启用但 `allowed_users`
+为空」的连接器 **fail-closed**（跳过启动并告警，`connectors.Deps.RequireAllowedUsers`，
+需在策略里配置白名单或显式关闸）；runtime-server 保持兼容（仅告警）；两端 IM
+轮次统一显式 `bypass_permissions`（IM 入站无交互审批通道，白名单先行过滤）；
+`state.json` 目录改为优先随 `configPath` 推导（与 aicli 同源，项目层/`--config`
+下两端账本共享）；`runtimeapi` 的环回判定不再无条件信任 `X-Forwarded-For`
+（仅直连对端本身是环回时才采纳转发头，远程伪造 `127.0.0.1` 不再绕过管理面鉴权）。
 
 **待续**：跨进程锁与 `runtime_owner` 抢占、aicli micro web 连接器页（P1）、
 真实 token 联通验证。

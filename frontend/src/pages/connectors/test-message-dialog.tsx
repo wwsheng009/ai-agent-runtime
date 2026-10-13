@@ -39,6 +39,23 @@ export function TestMessageDialog({ open, connector, onClose }: TestMessageDialo
     setError(null);
   }, [open, connector]);
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (sending) {
+        return; // 发送中与遮罩/取消按钮一致：拦截关闭
+      }
+      onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, sending, onClose]);
+
   if (!open || !connector) {
     return null;
   }

@@ -164,10 +164,23 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 
 	statePath := filepath.Join(filepath.Dir(configPath), "data", "connectors", "state.json")
 	store := storefile.NewConfigStore(configPath, statePath)
+	// 服务层日志：白名单 fail-closed 闸跳过启动是安全告警（消息含
+	// "fail-closed"，见 connectors.Service.startConnector），升级为 warn；
+	// 其余生命周期日志保持调用方给定的级别（默认 info）。
+	serviceLogf := func(format string, args ...any) {
+		if strings.Contains(format, "fail-closed") {
+			logpkg.Warnf(format, args...)
+			return
+		}
+		logf(format, args...)
+	}
 	service := connectors.New(connectors.Deps{
 		Store:   store,
 		Backend: localConnectorBackend{host: host, logf: logf},
-		Logf:    logf,
+		Logf:    serviceLogf,
+		// Fix-S2：aicli 侧 fail-closed——启用中的连接器若没有非空
+		// policy.allowed_users，跳过启动（不轮询），避免对任意平台用户开放。
+		RequireAllowedUsers: true,
 	})
 	if err := service.Register(telegram.New(telegram.WithLogger(logf))); err != nil {
 		return nil, err

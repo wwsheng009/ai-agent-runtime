@@ -110,7 +110,10 @@ func (p *Provider) Schema() api.ProviderSchema {
 	return api.ProviderSchema{
 		Provider: Name,
 		Label:    "Telegram",
-		Modes:    []string{"polling", "webhook"},
+		// 只声明已实现的能力：Provider 目前仅实现长轮询（PollingProvider）。
+		// HandleWebhook/setWebhook 实现后再加回 "webhook"；提前声明会让前端
+		// 放开 webhook 配置但运行时静默失效（既不轮询也无回调入口）。
+		Modes: []string{"polling"},
 		Fields: []api.FieldSchema{
 			{
 				Key: "bot_token", Label: "Bot Token", Type: api.FieldSecret, Required: true,
@@ -122,6 +125,8 @@ func (p *Provider) Schema() api.ProviderSchema {
 			},
 			{
 				Key: "mode", Label: "接入模式", Type: api.FieldEnum, Default: "polling",
+				// 保留 webhook 选项仅为兼容历史配置的回显与原样保存（api.Validate
+				// 会按 Options 校验），运行时对 mode=webhook 不报错、仅不轮询。
 				Options: []api.Option{{Value: "polling", Label: "长轮询（推荐）"}, {Value: "webhook", Label: "Webhook"}},
 			},
 			{Key: "proxy_url", Label: "代理地址", Type: api.FieldURL, Help: "可留空；仅此连接器生效"},
@@ -188,6 +193,8 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 }
 
 // SupportsPolling 报告是否应启动长轮询（webhook 模式由宿主入口接管）。
+// 历史兼容：mode=webhook 的旧配置不报错，仅不轮询；webhook 入口
+// （HandleWebhook/setWebhook）实现前，Schema.Modes 不再声明 webhook。
 func (p *Provider) SupportsPolling(cfg connectors.Config) bool {
 	if cfg.Secret("bot_token") == "" {
 		return false
@@ -447,14 +454,17 @@ func (p *Provider) call(ctx context.Context, base, token, method string, payload
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
-		return err
+		// 请求构造失败的错误文本带完整 URL（内嵌 bot_token），必须脱敏。
+		return fmt.Errorf("telegram: %s request build failed: %s", method, redactToken(err.Error(), token))
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return err
+		// *url.Error 的文本包含完整请求 URL（内嵌 bot_token）；这里不做 %w
+		// 包装，避免上层 errors.Unwrap 拿到含 token 的原始错误。
+		return fmt.Errorf("telegram: %s request failed: %s", method, redactToken(err.Error(), token))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -468,14 +478,14 @@ func (p *Provider) call(ctx context.Context, base, token, method string, payload
 		ErrorCode   int             `json:"error_code"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return fmt.Errorf("telegram: invalid response (HTTP %d): %s", resp.StatusCode, truncate(string(raw), 200))
+		return fmt.Errorf("telegram: invalid response (HTTP %d): %s", resp.StatusCode, truncate(redactToken(string(raw), token), 200))
 	}
 	if !envelope.OK {
 		description := strings.TrimSpace(envelope.Description)
 		if description == "" {
 			description = strings.TrimSpace(string(raw))
 		}
-		return fmt.Errorf("telegram: %s failed: %s", method, truncate(description, 200))
+		return fmt.Errorf("telegram: %s failed: %s", method, truncate(redactToken(description, token), 200))
 	}
 	if out != nil && len(envelope.Result) > 0 {
 		if err := json.Unmarshal(envelope.Result, out); err != nil {
@@ -490,4 +500,14 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return value[:limit] + "…"
+}
+
+// redactToken 从错误/响应文本中抹除 bot_token：client.Do 的 *url.Error 与
+// NewRequestWithContext 的解析错误都会带出内嵌 token 的完整 URL，上层日志与
+// restapi /test 响应直接转发这些错误文本。
+func redactToken(message, token string) string {
+	if token == "" {
+		return message
+	}
+	return strings.ReplaceAll(message, token, "***")
 }

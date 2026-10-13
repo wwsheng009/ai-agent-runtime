@@ -20,11 +20,34 @@ const SCHEMA: ConnectorSchema = {
     {
       provider: "telegram",
       label: "Telegram",
-      modes: ["polling", "webhook"],
+      // telegram 的真实形状：顶层 modes 与 key=mode 的 enum 字段并存。
+      modes: ["polling"],
       fields: [
         { key: "bot_token", label: "Bot Token", type: "secret", required: true },
+        {
+          key: "mode",
+          label: "接入模式",
+          type: "enum",
+          default: "polling",
+          options: [
+            { value: "polling", label: "长轮询（推荐）" },
+            { value: "webhook", label: "Webhook" },
+          ],
+        },
         { key: "proxy_url", label: "Proxy", type: "url" },
       ],
+    },
+  ],
+};
+
+const SCHEMA_NO_MODE_FIELD: ConnectorSchema = {
+  version: "1",
+  providers: [
+    {
+      provider: "qq",
+      label: "QQ",
+      modes: ["gateway", "other"],
+      fields: [{ key: "token", label: "Token", type: "text" }],
     },
   ],
 };
@@ -50,6 +73,10 @@ function findInput(ariaLabel: string) {
   return document.querySelector<HTMLInputElement>(`input[aria-label="${ariaLabel}"]`);
 }
 
+function findSelect(ariaLabel: string) {
+  return document.querySelector<HTMLSelectElement>(`select[aria-label="${ariaLabel}"]`);
+}
+
 function setInputValue(input: HTMLInputElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -59,6 +86,21 @@ function setInputValue(input: HTMLInputElement, value: string) {
     setter?.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
+}
+
+function setSelectValue(select: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLSelectElement.prototype,
+    "value",
+  )?.set;
+  act(() => {
+    setter?.call(select, value);
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+function dispatchEscape() {
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 }
 
 function toggleCheckbox(input: HTMLInputElement) {
@@ -166,6 +208,81 @@ describe("ConnectorDialog", () => {
 
     expect(props.onSubmit).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("请填写 ID");
+    expect(document.body.textContent).toContain("必填");
+  });
+
+  it("telegram 真实形状：只渲染一个模式控件，payload.mode 与 settings.mode 一致", async () => {
+    const onSubmit = vi.fn<(payload: ConnectorSubmitPayload) => void>();
+    await render(<ConnectorDialog {...dialogProps({ onSubmit })} />);
+
+    // 顶层「模式」下拉不再渲染；模式只由 schema 的 mode 字段承载。
+    expect(findSelect("模式")).toBeNull();
+    const modeSelect = findSelect("接入模式");
+    expect(modeSelect).not.toBeNull();
+    expect(document.querySelectorAll("select")).toHaveLength(1);
+
+    setSelectValue(modeSelect as HTMLSelectElement, "webhook");
+
+    act(() => {
+      findButton("保存")?.click();
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.settings?.mode).toBe("webhook");
+    expect(payload.mode).toBe("webhook");
+  });
+
+  it("无 mode 字段时保留顶层「模式」下拉，payload.mode 取顶层值", async () => {
+    const onSubmit = vi.fn<(payload: ConnectorSubmitPayload) => void>();
+    await render(
+      <ConnectorDialog
+        {...dialogProps({ schema: SCHEMA_NO_MODE_FIELD, existing: null, onSubmit })}
+      />,
+    );
+
+    const topMode = findSelect("模式");
+    expect(topMode).not.toBeNull();
+    expect(topMode?.value).toBe("gateway");
+    setSelectValue(topMode as HTMLSelectElement, "other");
+    setInputValue(findInput("ID") as HTMLInputElement, "qq-1");
+
+    act(() => {
+      findButton("保存")?.click();
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.mode).toBe("other");
+    expect(payload.settings?.mode).toBeUndefined();
+  });
+
+  it("Escape：saving=false 关闭；saving=true 拦截", async () => {
+    const onClose = vi.fn();
+    await render(<ConnectorDialog {...dialogProps({ saving: true, onClose })} />);
+
+    act(() => {
+      dispatchEscape();
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    await render(<ConnectorDialog {...dialogProps({ saving: false, onClose })} />);
+    act(() => {
+      dispatchEscape();
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("本地校验错误在字段变更时清除对应 key", async () => {
+    const props = dialogProps({ existing: null });
+    await render(<ConnectorDialog {...props} />);
+
+    act(() => {
+      findButton("保存")?.click();
+    });
+    expect(document.body.textContent).toContain("请填写 ID");
+
+    setInputValue(findInput("ID") as HTMLInputElement, "tg-1");
+
+    expect(document.body.textContent).not.toContain("请填写 ID");
     expect(document.body.textContent).toContain("必填");
   });
 });

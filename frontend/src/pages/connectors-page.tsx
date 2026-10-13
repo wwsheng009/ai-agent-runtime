@@ -44,9 +44,11 @@ export function ConnectorsPage() {
   const [schema, setSchema] = useState<ConnectorSchema | null>(null);
   const [items, setItems] = useState<ConnectorView[]>([]);
   const [loading, setLoading] = useState(true);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  /** 正在执行行内操作（启停/重载/删除）的连接器 id 集合；操作期间同时禁用该条全部按钮。 */
+  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectorView | null>(null);
@@ -57,6 +59,7 @@ export function ConnectorsPage() {
 
   const reloadData = useCallback(async () => {
     setLoading(true);
+    setSchemaError(null);
     setLoadError(null);
     const [schemaResult, listResult] = await Promise.allSettled([
       getConnectorSchema({ adminToken }),
@@ -64,13 +67,12 @@ export function ConnectorsPage() {
     ]);
     setSchema(schemaResult.status === "fulfilled" ? schemaResult.value : null);
     setItems(listResult.status === "fulfilled" ? listResult.value : []);
-    const failure =
-      schemaResult.status === "rejected"
-        ? schemaResult.reason
-        : listResult.status === "rejected"
-          ? listResult.reason
-          : null;
-    setLoadError(failure ? errorText(failure) : null);
+    setSchemaError(
+      schemaResult.status === "rejected" ? errorText(schemaResult.reason) : null,
+    );
+    setLoadError(
+      listResult.status === "rejected" ? errorText(listResult.reason) : null,
+    );
     setLoading(false);
   }, [adminToken]);
 
@@ -119,12 +121,31 @@ export function ConnectorsPage() {
     }
   };
 
+  const markBusy = (id: string) => {
+    setBusyIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  };
+
+  const clearBusy = (id: string) => {
+    setBusyIds((prev) => {
+      if (!prev.has(id)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  };
+
   const runAction = async (
     item: ConnectorView,
     action: () => Promise<unknown>,
     failureKey: "page.toggleFailed" | "page.reloadFailed" | "page.removeFailed",
   ) => {
-    setBusyId(item.id);
+    markBusy(item.id);
     setNotice(null);
     try {
       await action();
@@ -132,7 +153,7 @@ export function ConnectorsPage() {
     } catch (caught) {
       setNotice(t(failureKey, { message: errorText(caught) }));
     } finally {
-      setBusyId(null);
+      clearBusy(item.id);
     }
   };
 
@@ -232,6 +253,11 @@ export function ConnectorsPage() {
               {t("page.loadFailed", { message: loadError })}
             </div>
           ) : null}
+          {schemaError ? (
+            <div className="mb-3 rounded-card border border-accent-orange/25 bg-accent-orange/8 px-3 py-2 text-sm text-muted-foreground">
+              {t("page.schemaFailed", { message: schemaError })}
+            </div>
+          ) : null}
 
           {loading ? (
             <p className="text-sm text-muted-foreground">{t("page.loading")}</p>
@@ -265,21 +291,31 @@ export function ConnectorsPage() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      disabled={busyId === item.id}
+                      disabled={busyIds.has(item.id)}
                       onClick={() => void handleToggle(item)}
                     >
                       {item.enabled ? t("page.disable") : t("page.enable")}
                     </Button>
-                    <Button variant="secondary" size="sm" onClick={() => openEdit(item)}>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={!schema || busyIds.has(item.id)}
+                      onClick={() => openEdit(item)}
+                    >
                       {t("page.edit")}
                     </Button>
-                    <Button variant="secondary" size="sm" onClick={() => setTestTarget(item)}>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={busyIds.has(item.id)}
+                      onClick={() => setTestTarget(item)}
+                    >
                       {t("page.test")}
                     </Button>
                     <Button
                       variant="secondary"
                       size="sm"
-                      disabled={busyId === item.id}
+                      disabled={busyIds.has(item.id)}
                       onClick={() => void handleReload(item)}
                     >
                       {t("page.reload")}
@@ -287,7 +323,7 @@ export function ConnectorsPage() {
                     <Button
                       variant="destructive"
                       size="sm"
-                      disabled={busyId === item.id}
+                      disabled={busyIds.has(item.id)}
                       onClick={() => void handleDelete(item)}
                     >
                       {t("page.remove")}

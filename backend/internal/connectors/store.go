@@ -26,6 +26,11 @@ type Store interface {
 	PutBinding(binding Binding) error
 
 	// ClaimInbound 认领一条入站消息（幂等去重）：首次返回 true，重复返回 false。
+	//
+	// 键语义（Fix-2）：messageID 参数是调用方拼好的去重键，语义为
+	// connector + chat + messageID —— telegram 等平台的 message_id 仅在单个
+	// chat 内唯一，跨会话复用同一 ID 是常态，调用方必须把 chat 并入键；
+	// 实现只按 connectorID + messageID 原样存储/查询，不解析键内容。
 	ClaimInbound(connectorID, messageID string) (bool, error)
 
 	// PollingState 返回该连接器的轮询游标视图（持久化由宿主实现决定）。

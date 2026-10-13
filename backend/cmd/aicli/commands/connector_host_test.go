@@ -5,11 +5,15 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -110,4 +114,74 @@ func TestLocalConnectorHostCloseIsIdempotent(t *testing.T) {
 	host := &LocalConnectorHost{service: service}
 	host.Close()
 	host.Close()
+}
+
+// TestStartLocalConnectorsEnforcesAllowedUsersGate 覆盖 Fix-S2 的 aicli 接线：
+// StartLocalConnectors 必须设置 RequireAllowedUsers=true——启用中的连接器若
+// policy.allowed_users 为空，则不得 Activate（不向平台发 getMe/轮询）；同一份
+// 配置里白名单非空的连接器照常 Activate，既证明配置被正确解析，也证明闸只拦
+// 空白名单（避免 YAML 解析失败导致的假阳性）。
+func TestStartLocalConnectorsEnforcesAllowedUsersGate(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"username":"gate-test"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "connectors:\n" +
+		"  - id: tg-gate\n" +
+		"    provider: telegram\n" +
+		"    enabled: true\n" +
+		"    mode: polling\n" +
+		"    settings:\n" +
+		"      api_base: " + server.URL + "\n" +
+		"    secrets:\n" +
+		"      bot_token: \"111:gate\"\n" +
+		"  - id: tg-open\n" +
+		"    provider: telegram\n" +
+		"    enabled: true\n" +
+		"    mode: webhook\n" +
+		"    settings:\n" +
+		"      api_base: " + server.URL + "\n" +
+		"    secrets:\n" +
+		"      bot_token: \"222:open\"\n" +
+		"    policy:\n" +
+		"      allowed_users: [\"42\"]\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs []string
+	host, err := StartLocalConnectors(context.Background(), &localChatRuntimeHost{}, configPath, func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	})
+	require.NoError(t, err)
+	require.NotNil(t, host)
+	t.Cleanup(host.Close)
+
+	// tg-open 的 Activate 在 service.Start 内同步完成；轮询等 100ms 兜底。
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, path := range paths {
+			if strings.Contains(path, "222:open") {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 10*time.Millisecond, "白名单非空连接器应照常 Activate")
+
+	time.Sleep(100 * time.Millisecond) // 留出闸失效时空白名单连接器发请求的窗口
+	mu.Lock()
+	joined := strings.Join(paths, "\n")
+	mu.Unlock()
+	require.NotContains(t, joined, "111:gate", "空白名单连接器不得 Activate/轮询")
+	require.Contains(t, strings.Join(logs, "\n"), "aicli connectors: started")
 }

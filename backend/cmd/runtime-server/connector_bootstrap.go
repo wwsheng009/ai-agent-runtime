@@ -33,15 +33,26 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	if logf == nil {
 		logf = log.Printf
 	}
-	store := storefile.NewConfigStore(configPath, runtimeConnectorStatePath())
+	store := storefile.NewConfigStore(configPath, runtimeConnectorStatePath(configPath))
 
 	service := connectors.New(connectors.Deps{
 		Store:   store,
 		Backend: runtimeConnectorBackend{handler: handler, logf: logf},
 		Logf:    logf,
+		// Fix-S2：runtime-server 保持兼容（false，不 fail-closed），
+		// 空白名单的可见性告警在下面单独发。
+		RequireAllowedUsers: false,
 	})
 	if err := service.Register(telegram.New(telegram.WithLogger(logf))); err != nil {
 		return nil, err
+	}
+
+	// Fix-S2 可见性：runtime-server 不启用 fail-closed 闸（兼容既有部署），
+	// 但「启用且白名单为空」意味着该连接器接受任意平台用户，必须可见。
+	for _, cfg := range store.ListConfigs() {
+		if cfg.Enabled && len(cfg.Policy.AllowedUsers) == 0 {
+			logf("connector %s: enabled with empty policy.allowed_users; 该连接器不会限制平台用户（runtime-server 未启用 fail-closed 闸，仅告警）", cfg.ID)
+		}
 	}
 
 	deps := restapi.Deps{
@@ -77,8 +88,14 @@ func (c connectorServiceCloser) Close() error {
 }
 
 // runtimeConnectorStatePath 返回连接器运行时状态文件（绑定/游标/去重账本）。
-// 与 supervision / subagent-batches 同级，位于宿主数据目录下。
-func runtimeConnectorStatePath() string {
+// Fix-S4：优先用共享 config.yaml 所在目录推导（<configDir>/data/connectors/
+// state.json），与 aicli 宿主同源——项目层配置或 --config 指定路径时，两个
+// 宿主才能共享同一份账本。configPath 为空时回落到 DefaultAuthStorePath()
+// 所在目录的推导（与 supervision / subagent-batches 同级的宿主数据目录）。
+func runtimeConnectorStatePath(configPath string) string {
+	if dir := strings.TrimSpace(configPath); dir != "" {
+		return filepath.Join(filepath.Dir(dir), "data", "connectors", "state.json")
+	}
 	return filepath.Join(filepath.Dir(agentconfig.DefaultAuthStorePath()), "data", "connectors", "state.json")
 }
 

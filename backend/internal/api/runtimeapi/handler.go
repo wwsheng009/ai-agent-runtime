@@ -8382,39 +8382,63 @@ func isLoopbackRequest(r *http.Request) bool {
 	if r == nil {
 		return false
 	}
-
-	host := requestRemoteIP(r)
-	if host == "" {
-		return false
-	}
-
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return isLoopbackIP(requestRemoteIP(r))
 }
 
+// requestRemoteIP 返回请求来源 IP。安全口径（Fix-S1）：转发头
+// （X-Forwarded-For / X-Real-IP）仅在直连对端（r.RemoteAddr）本身是环回时
+// 才被采纳——本机反代（本进程只监听环回，前置代理同机）场景保留原有行为；
+// 远程直连伪造 "X-Forwarded-For: 127.0.0.1" 不再能把自己伪装成环回请求，
+// 从而无法绕过 isLoopbackRequest 背后的 skills/连接器管理面鉴权。
+// 取舍：远程反代部署将因此回落到 token / 可信角色鉴权（管理面仍可用，
+// 只是不再把远程反代的来源 IP 视为环回）。
 func requestRemoteIP(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
 
-	host := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if host != "" {
-		if idx := strings.Index(host, ","); idx >= 0 {
-			host = strings.TrimSpace(host[:idx])
-		}
-		return host
+	direct := remoteAddrHost(r.RemoteAddr)
+	if !isLoopbackIP(direct) {
+		// 直连对端不是环回：一律以 RemoteAddr 为准，忽略可伪造的转发头。
+		return direct
 	}
 
-	host = strings.TrimSpace(r.Header.Get("X-Real-IP"))
-	if host != "" {
+	// 直连对端是环回：视为本机反代/同机代理，采纳转发头（第一跳最接近客户端）。
+	if host := firstForwardedHost(r.Header.Get("X-Forwarded-For")); host != "" {
 		return host
 	}
+	if host := strings.TrimSpace(r.Header.Get("X-Real-IP")); host != "" {
+		return host
+	}
+	return direct
+}
 
-	host = strings.TrimSpace(r.RemoteAddr)
+// remoteAddrHost 提取 RemoteAddr 的 IP 部分（兼容 host:port 与裸 IP 两种写法）。
+func remoteAddrHost(remoteAddr string) string {
+	host := strings.TrimSpace(remoteAddr)
 	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		return parsedHost
+		return strings.TrimSpace(parsedHost)
 	}
 	return host
+}
+
+// firstForwardedHost 取 X-Forwarded-For 链的第一跳（最接近客户端的地址）。
+func firstForwardedHost(value string) string {
+	host := strings.TrimSpace(value)
+	if host == "" {
+		return ""
+	}
+	if idx := strings.Index(host, ","); idx >= 0 {
+		host = strings.TrimSpace(host[:idx])
+	}
+	return host
+}
+
+// isLoopbackIP 判断字符串是否为回环 IP（127.0.0.0/8 或 ::1）；空串/非法值
+// 一律返回 false（fail-closed）。
+func isLoopbackIP(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (h *Handler) reindexRetryAfter() (time.Duration, bool) {

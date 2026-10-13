@@ -10,6 +10,7 @@ import {
   createEmptyForm,
   findProviderSchema,
   formFromConnector,
+  hasModeField,
   switchProvider,
   validateConnectorForm,
 } from "./shared";
@@ -45,6 +46,14 @@ describe("连接器表单状态", () => {
     expect(form.clearedSecrets).toEqual({});
   });
 
+  it("schema 含 mode 字段且 settings 缺 mode：用视图生效 mode 回填（单一真源）", () => {
+    const form = formFromConnector(EXISTING, TELEGRAM_SCHEMA);
+
+    expect(form.values.mode).toBe("polling");
+    expect(hasModeField(TELEGRAM_SCHEMA)).toBe(true);
+    expect(hasModeField({ provider: "qq", label: "QQ", fields: [] })).toBe(false);
+  });
+
   it("新建表单用 provider 默认值；切换通道会重建字段区", () => {
     const schema = {
       version: "1",
@@ -67,7 +76,7 @@ describe("连接器表单状态", () => {
 
 describe("提交体构造（密钥语义）", () => {
   it("密钥留空不提交；填写则提交；勾选清除提交 __clear__", () => {
-    const form = formFromConnector(EXISTING);
+    const form = formFromConnector(EXISTING, TELEGRAM_SCHEMA);
     const payload = buildSubmitPayload(form, TELEGRAM_SCHEMA, { isCreate: false });
 
     expect(payload.secrets).toEqual({});
@@ -75,8 +84,10 @@ describe("提交体构造（密钥语义）", () => {
     expect(payload.id).toBeUndefined();
     expect(payload.settings).toEqual({
       proxy_url: "http://127.0.0.1:7890",
-      mode: "",
+      mode: "polling",
     });
+    // telegram 真实形状：payload.mode 与 settings.mode 取同一值。
+    expect(payload.mode).toBe("polling");
 
     const filled = buildSubmitPayload(
       { ...form, values: { ...form.values, bot_token: " 123:abc " } },
@@ -91,6 +102,33 @@ describe("提交体构造（密钥语义）", () => {
       { isCreate: false },
     );
     expect(cleared.secrets).toEqual({ bot_token: "__clear__" });
+  });
+
+  it("telegram 形状：mode 字段是唯一真源，顶层下拉不参与提交", () => {
+    const base = formFromConnector(EXISTING, TELEGRAM_SCHEMA);
+    const form = {
+      ...base,
+      // 顶层「模式」下拉即使残留旧值，也不得影响提交（对话框已不渲染它）。
+      mode: "polling",
+      values: { ...base.values, mode: "webhook" },
+    };
+    const payload = buildSubmitPayload(form, TELEGRAM_SCHEMA, { isCreate: false });
+
+    expect(payload.settings?.mode).toBe("webhook");
+    expect(payload.mode).toBe("webhook");
+    expect(payload.mode).toBe(payload.settings?.mode);
+  });
+
+  it("无 mode 字段：保持顶层「模式」下拉提交", () => {
+    const provider = { provider: "qq", label: "QQ", modes: ["gateway"], fields: [] };
+    const payload = buildSubmitPayload(
+      { ...createEmptyForm(null), mode: "gateway" },
+      provider,
+      { isCreate: true },
+    );
+
+    expect(payload.mode).toBe("gateway");
+    expect(payload.settings).toEqual({});
   });
 
   it("新建提交 id/provider/enabled；name 缺省回落到 id", () => {

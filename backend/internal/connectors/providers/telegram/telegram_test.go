@@ -185,6 +185,11 @@ func TestSchemaContract(t *testing.T) {
 	if schema.Provider != Name || len(schema.Fields) == 0 {
 		t.Fatalf("schema = %+v", schema)
 	}
+	// webhook 入口（HandleWebhook/setWebhook）未实现前只能声明 polling，
+	// 否则前端会放开 webhook 配置但运行时静默失效。
+	if len(schema.Modes) != 1 || schema.Modes[0] != "polling" {
+		t.Fatalf("modes = %v, want [polling]", schema.Modes)
+	}
 	var token, mode, base bool
 	for _, field := range schema.Fields {
 		switch field.Key {
@@ -411,9 +416,49 @@ func TestSupportsPollingRespectsMode(t *testing.T) {
 	if provider.SupportsPolling(cfg) {
 		t.Fatal("webhook mode must not start polling")
 	}
+	// 历史配置（前端表单写入 Settings["mode"]=webhook）：不报错、仅不轮询。
+	cfg.Mode = "polling"
+	cfg.Settings = map[string]string{"mode": "webhook"}
+	if provider.SupportsPolling(cfg) {
+		t.Fatal("settings mode=webhook must not start polling")
+	}
+	cfg.Settings = nil
 	cfg.Mode = "polling"
 	cfg.Secrets = map[string]string{}
 	if provider.SupportsPolling(cfg) {
 		t.Fatal("missing token must not start polling")
+	}
+}
+
+func TestCallErrorsDoNotLeakToken(t *testing.T) {
+	const token = "123456:AA-SECRET-TOKEN"
+
+	t.Run("transport error", func(t *testing.T) {
+		server := httptest.NewServer(http.NotFoundHandler())
+		base := server.URL
+		server.Close() // 关闭后连接被拒，client.Do 返回 *url.Error（文本含完整 URL + token）
+
+		_, err := New(WithAPIBase(base)).Activate(context.Background(), testConfig(token))
+		assertTokenRedacted(t, err, token, "getMe")
+	})
+
+	t.Run("request build error", func(t *testing.T) {
+		// 非法基址让 http.NewRequestWithContext 直接失败，解析错误同样会带出完整 URL。
+		_, err := New(WithAPIBase("http://[::1")).Activate(context.Background(), testConfig(token))
+		assertTokenRedacted(t, err, token, "getMe")
+	})
+}
+
+func assertTokenRedacted(t *testing.T, err error, token, method string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("request against unreachable/closed base must fail")
+	}
+	message := err.Error()
+	if strings.Contains(message, token) {
+		t.Fatalf("error leaks bot_token: %q", message)
+	}
+	if !strings.Contains(message, method) {
+		t.Fatalf("error should mention method %q: %q", method, message)
 	}
 }

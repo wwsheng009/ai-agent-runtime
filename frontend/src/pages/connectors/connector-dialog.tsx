@@ -25,6 +25,7 @@ import {
   createEmptyForm,
   findProviderSchema,
   formFromConnector,
+  hasModeField,
   switchProvider,
   validateConnectorForm,
   type ConnectorFormError,
@@ -59,7 +60,9 @@ export function ConnectorDialog({
   const { t } = useTranslation("connectors");
   const isCreate = existing === null;
   const [form, setForm] = useState<ConnectorFormState>(() =>
-    existing ? formFromConnector(existing) : createEmptyForm(schema),
+    existing
+      ? formFromConnector(existing, findProviderSchema(schema, existing.provider))
+      : createEmptyForm(schema),
   );
   const [errors, setErrors] = useState<ConnectorFormError[]>([]);
 
@@ -67,7 +70,11 @@ export function ConnectorDialog({
     if (!open) {
       return;
     }
-    setForm(existing ? formFromConnector(existing) : createEmptyForm(schema));
+    setForm(
+      existing
+        ? formFromConnector(existing, findProviderSchema(schema, existing.provider))
+        : createEmptyForm(schema),
+    );
     setErrors([]);
   }, [open, existing, schema]);
 
@@ -76,19 +83,24 @@ export function ConnectorDialog({
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
+      if (event.key !== "Escape") {
+        return;
       }
+      if (saving) {
+        return; // 保存中与遮罩/取消按钮一致：拦截关闭
+      }
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [open, saving, onClose]);
 
   if (!open) {
     return null;
   }
 
   const providerSchema = findProviderSchema(schema, form.provider);
+  const modeFieldPresent = hasModeField(providerSchema);
   const fieldError = (key: string) => {
     const local = errors.find((item) => item.key === key)?.code;
     if (local === "required") {
@@ -100,11 +112,22 @@ export function ConnectorDialog({
     return serverFieldErrors.find((item) => item.key === key)?.message ?? null;
   };
 
+  /** 字段变更时清除该 key 的本地校验错误（服务端错误由下次提交/父级重置覆盖）。 */
+  const clearFieldError = (key: string) => {
+    setErrors((prev) =>
+      prev.some((item) => item.key === key)
+        ? prev.filter((item) => item.key !== key)
+        : prev,
+    );
+  };
+
   const updateValue = (key: string, value: string) => {
+    clearFieldError(key);
     setForm((prev) => ({ ...prev, values: { ...prev.values, [key]: value } }));
   };
 
   const toggleClearSecret = (key: string, cleared: boolean) => {
+    clearFieldError(key);
     setForm((prev) => ({
       ...prev,
       values: cleared ? { ...prev.values, [key]: "" } : prev.values,
@@ -268,9 +291,10 @@ export function ConnectorDialog({
                 placeholder={t("dialog.idPlaceholder")}
                 value={form.id}
                 readOnly={!isCreate}
-                onChange={(event) =>
-                  setForm((prev) => ({ ...prev, id: event.target.value }))
-                }
+                onChange={(event) => {
+                  clearFieldError("id");
+                  setForm((prev) => ({ ...prev, id: event.target.value }));
+                }}
               />
               {fieldError("id") ? (
                 <span className="text-xs text-accent-orange">{fieldError("id")}</span>
@@ -291,7 +315,7 @@ export function ConnectorDialog({
               />
             </label>
 
-            {(providerSchema?.modes?.length ?? 0) > 0 ? (
+            {!modeFieldPresent && (providerSchema?.modes?.length ?? 0) > 0 ? (
               <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                 {t("dialog.mode")}
                 <select
