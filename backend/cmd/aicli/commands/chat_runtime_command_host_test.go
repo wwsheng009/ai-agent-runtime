@@ -213,7 +213,7 @@ func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 	cases := map[string]chatBusyCommandPolicy{
 		"/model status": chatBusyPolicyScreen, // 批次 3：read 变体迁副屏 + 白名单
 		"/debug status": chatBusyPolicyImmediate,
-		"/model":        chatBusyPolicyDeferred,
+		"/model":        chatBusyPolicyScreen, // P2-5：可写交互副屏白名单（运行中可切换）
 		// P2-4b：首批白名单 S 档（screen+read）转由副屏通道消费；
 		// 非首批 screen 命令仍 deferred。
 		"/todos":         chatBusyPolicyScreen,

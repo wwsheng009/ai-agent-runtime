@@ -48,16 +48,20 @@ func TestChatBusyCommandPolicyDefaultOnRegistryRouting(t *testing.T) {
 	unsetEnvForTest(t, runtimeInteractionEnv)
 
 	cases := map[string]chatBusyCommandPolicy{
-		"/todos":        chatBusyPolicyScreen,    // 首批 S 档（副屏）
-		"/history":      chatBusyPolicyScreen,    // 首批 S 档（副屏）
-		"/queue clear":  chatBusyPolicyScreen,    // 首批 prompt 档（确认门）
-		"/model status": chatBusyPolicyScreen,    // 批次 3：只读变体迁副屏并纳入忙时白名单
-		"/agents":       chatBusyPolicyScreen,    // 只读交互列表（A 族）纳入忙时 S 档
-		"/theme":        chatBusyPolicyImmediate, // bare 仍是短内联（inline + read）
-		"/model":        chatBusyPolicyDeferred,  // screen 非首批 → 回合后执行
-		"/clear":        chatBusyPolicyDeferred,  // queue + session
-		"/exit":         chatBusyPolicyReject,    // block 不可放宽
-		"/nope":         chatBusyPolicyDeferred,  // 未登记 → queue（INV-6）
+		"/todos":                   chatBusyPolicyScreen,    // 首批 S 档（副屏）
+		"/history":                 chatBusyPolicyScreen,    // 首批 S 档（副屏）
+		"/queue clear":             chatBusyPolicyScreen,    // 首批 prompt 档（确认门）
+		"/model status":            chatBusyPolicyScreen,    // 批次 3：只读变体迁副屏并纳入忙时白名单
+		"/agents":                  chatBusyPolicyScreen,    // 只读交互列表（A 族）纳入忙时 S 档
+		"/theme":                   chatBusyPolicyImmediate, // bare 仍是短内联（inline + read）
+		"/model":                   chatBusyPolicyScreen,    // P2-5：可写交互副屏白名单（运行中可切换）
+		"/provider":                chatBusyPolicyScreen,    // P2-5：可写交互副屏白名单
+		"/reasoning_effort":        chatBusyPolicyScreen,    // P2-5：bare=交互选择器
+		"/reasoning_effort select": chatBusyPolicyScreen,    // P2-5：显式 select 变体
+		"/theme select":            chatBusyPolicyDeferred,  // 核验：live 生效域，未列入白名单
+		"/clear":                   chatBusyPolicyDeferred,  // queue + session
+		"/exit":                    chatBusyPolicyReject,    // block 不可放宽
+		"/nope":                    chatBusyPolicyDeferred,  // 未登记 → queue（INV-6）
 	}
 	for line, want := range cases {
 		if got := chatSlashCommandBusyPolicyFor(line); got != want {
@@ -84,7 +88,7 @@ func TestChatBusyCommandPolicyFirstBatchImmediateWhenEnabled(t *testing.T) {
 		"/status":       chatBusyPolicyScreen,
 		"/queue clear":  chatBusyPolicyScreen,    // P2-4b-3：prompt 首批 → 确认门
 		"/status extra": chatBusyPolicyDeferred,  // 未登记子命令 → 排队（INV-6）
-		"/model":        chatBusyPolicyDeferred,  // screen 非首批 → 回合后执行
+		"/model":        chatBusyPolicyScreen,    // P2-5：可写交互副屏白名单
 		"/theme":        chatBusyPolicyImmediate, // 注册表 inline + read
 		"/nope":         chatBusyPolicyDeferred,  // 未登记 → 排队（INV-6）
 		"":              chatBusyPolicyInherit,

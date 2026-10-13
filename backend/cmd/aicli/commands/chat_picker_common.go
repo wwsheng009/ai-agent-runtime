@@ -39,6 +39,12 @@ var (
 // chatPickerSurfaceReady reports whether the session can host a full-screen
 // searchable picker: unified primary presenter idle, viewport owned, no
 // competing popup/lease, and an ANSI TTY tall enough for the list.
+//
+// 忙时例外（P2-5）：当调用发生在忙时副屏交互窗口内
+// （chatBusyInteractiveScreenActive）时，run 仍在途但副屏通道已独占 stdin 与
+// 租约，选择结果只在租约释放后应用（I3），且宿主侧运行时刷新永不打断在途 turn
+// （延迟到下一回合），因此允许开屏——这正是 /model、/provider、
+// /reasoning_effort 能在会话运行中切换的依据。
 func chatPickerSurfaceReady(session *ChatSession) bool {
 	if session == nil || session.NoInteractive || session.JSONOutput ||
 		session.Interaction == nil || session.Surface == nil {
@@ -47,8 +53,12 @@ func chatPickerSurfaceReady(session *ChatSession) bool {
 	if !chatSurfaceScreenGate(session) {
 		return false
 	}
-	if session.RuntimeEventBridge != nil && session.RuntimeEventBridge.isRunActive() {
-		return false
+	// 空闲路径：run 活跃时不得开屏（主循环正拥有 stdin）。忙时副屏交互窗口内
+	// 例外放行。
+	if !chatBusyInteractiveScreenActive(session) {
+		if session.RuntimeEventBridge != nil && session.RuntimeEventBridge.isRunActive() {
+			return false
+		}
 	}
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
 }

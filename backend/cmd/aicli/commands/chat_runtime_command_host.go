@@ -95,11 +95,12 @@ func (h *runtimeCommandHost) submit(line string) runtimeHostOutcome {
 		outcome.Occupied = true
 		return outcome
 	case runtimeModeScreen:
-		// 批次 4 + 只读交互列表：白名单覆盖全部只读 ScreenDocument 命令与
-		// 显式登记的只读 ScreenInteractive 列表（/agents）；其余 screen 档
-		// （picker/写入类）仍降级入队，待各自确认流在 P2-5/P3 落地。
-		// 降级必须显式提示（INV-10）。
-		if !busyScreenCommandReadOnly(effective) {
+		// 批次 4 + 只读交互列表 + 可写交互副屏（P2-5）：白名单覆盖全部只读
+		// ScreenDocument 命令、显式登记的只读 ScreenInteractive 列表（/agents）
+		// 与 next-turn 安全的可写 ScreenInteractive 选择器（/model、/provider、
+		// /reasoning_effort）；其余 screen 档（未开通的 picker/写入类）仍降级
+		// 入队。降级必须显式提示（INV-10）。
+		if !busyScreenCommandAllowed(effective) {
 			notifyBusyCommandDegraded(h.session, line, "该命令尚未开通忙时副屏通道")
 			outcome.Result = "degraded"
 			return outcome

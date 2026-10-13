@@ -36,9 +36,9 @@ func TestChatBusyPolicyScreenFirstBatch(t *testing.T) {
 		"/skills":        chatBusyPolicyScreen,    // 批次 4：只读文档变体纳入白名单
 		"/agents":        chatBusyPolicyScreen,    // 只读交互列表白名单（A 族）
 		"/agents status": chatBusyPolicyImmediate, // inline+read 快照
-		"/agents panel":  chatBusyPolicyDeferred,  // screen+live 写入类
-		"/theme on":      chatBusyPolicyDeferred,  // screen+live（写入类，非首批）
-		"/export":        chatBusyPolicyDeferred,
+		"/agents panel":  chatBusyPolicyDeferred,  // screen+live 写入类（核验：改会话选中态+戳 presenter）
+		"/theme on":      chatBusyPolicyDeferred,  // /theme 无 on 变体 → 未登记 → queue
+		"/export":        chatBusyPolicyDeferred,  // 核验：run 活跃时 gate 拒绝后立即导出在途会话
 	}
 	for line, want := range cases {
 		if got := chatSlashCommandBusyPolicyFor(line); got != want {
@@ -171,6 +171,55 @@ func TestRuntimeCommandHostRunsReadOnlyInteractiveScreen(t *testing.T) {
 	}
 }
 
+// P2-5：可写交互副屏（/model、/provider、/reasoning_effort）在回合运行中必须
+// 走副屏执行入口，而不是降级入队；执行窗口内 chatBusyInteractiveScreenActive
+// 必须为真（chatPickerSurfaceReady 据此在 run 活跃时放行选择器），窗口结束后
+// 必须复位（不得泄漏到下一次空闲选择）。
+func TestRuntimeCommandHostRunsWritableInteractiveScreen(t *testing.T) {
+	t.Setenv(chatBusyCommandEnv, "on")
+	t.Setenv(runtimeInteractionEnv, "auto")
+	session, _, _, store := newRuntimeHostTestSession(t)
+	surface := ui.NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	session.Surface = surface
+	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
+	defer releaseCapture()
+
+	var (
+		dispatched   []string
+		insideWindow bool
+	)
+	withChatBusyScreenTestHooks(t, true, func(s *ChatSession, line string) bool {
+		dispatched = append(dispatched, line)
+		insideWindow = chatBusyInteractiveScreenActive(s)
+		return true
+	})
+
+	for _, line := range []string{"/model", "/provider", "/reasoning_effort"} {
+		if !runtimeCommandHostFor(session).SubmitBusy(line) {
+			t.Fatalf("%s（可写交互副屏）应在宿主内执行", line)
+		}
+		if !insideWindow {
+			t.Fatalf("%s 执行窗口内 chatBusyInteractiveScreenActive 必须为真", line)
+		}
+		if chatBusyInteractiveScreenActive(session) {
+			t.Fatalf("%s 执行后忙时交互窗口必须复位", line)
+		}
+	}
+	if len(dispatched) != 3 {
+		t.Fatalf("三个可写交互副屏命令都应进入副屏执行入口：%v", dispatched)
+	}
+	events := store.runtimeInteractions()
+	if len(events) != 3 {
+		t.Fatalf("应产生 3 条审计事件，实际 %d", len(events))
+	}
+	for _, event := range events {
+		if event.Payload["result"] != "executed" || event.Payload["mode"] != "screen" {
+			t.Fatalf("审计内容不符：%+v", event.Payload)
+		}
+	}
+}
+
 func TestRuntimeCommandHostDegradesNonWhitelistedScreen(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 	t.Setenv(runtimeInteractionEnv, "auto")
@@ -183,8 +232,10 @@ func TestRuntimeCommandHostDegradesNonWhitelistedScreen(t *testing.T) {
 		dispatched = true
 		return true
 	})
-	if runtimeCommandHostFor(session).SubmitBusy("/model") {
-		t.Fatal("非白名单 screen 命令（/model 确认流）必须降级入队")
+	// /theme select 是 screen+live+screen-interactive 的写入类 picker，未列入
+	// 忙时白名单（核验结论见 chat_busy_screen_exec.go 文件头），必须降级入队。
+	if runtimeCommandHostFor(session).SubmitBusy("/theme select") {
+		t.Fatal("非白名单 screen 命令（/theme select）必须降级入队")
 	}
 	if dispatched {
 		t.Fatal("非白名单 screen 命令不得进入副屏执行入口")
@@ -351,6 +402,32 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 		}
 		if !matched {
 			t.Errorf("忙时交互白名单命令 %q 缺少 screen+read+screen-interactive 声明", command)
+		}
+	}
+
+	// 忙时可写交互副屏白名单（P2-5）必须指向真实注册项，且至少有一个
+	// screen+next-turn+screen-interactive 变体（策略映射据此判 S 档）。
+	for command := range chatBusyScreenInteractiveWriteCommands {
+		entry, ok := runtimeCommandRegistry[command]
+		if !ok {
+			t.Errorf("忙时可写交互白名单命令 %q 不在注册表中", command)
+			continue
+		}
+		matched := false
+		check := func(spec runtimeCommandSpec) {
+			if spec.Mode == runtimeModeScreen && spec.Effect == runtimeEffectNextTurn &&
+				spec.Output == chatOutputScreenInteractive {
+				matched = true
+			}
+		}
+		if entry.Bare != nil {
+			check(*entry.Bare)
+		}
+		for _, variant := range entry.Variants {
+			check(variant)
+		}
+		if !matched {
+			t.Errorf("忙时可写交互白名单命令 %q 缺少 screen+next-turn+screen-interactive 声明", command)
 		}
 	}
 }

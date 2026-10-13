@@ -45,21 +45,25 @@ func TestMainLoopDispatchBusySlashCommandWhileParked(t *testing.T) {
 	if !dispatchBusySlashCommandFromMainLoop(session, "/agents") {
 		t.Fatal("/agents（S 档只读交互副屏）在挂起态必须被忙时宿主占有")
 	}
-	if len(dispatched) != 1 || dispatched[0] != "/agents" {
+	// P2-5：/model 的 picker 变体已开通忙时可写交互副屏，挂起态同样经宿主占有。
+	if !dispatchBusySlashCommandFromMainLoop(session, "/model") {
+		t.Fatal("/model（可写交互副屏）在挂起态必须被忙时宿主占有")
+	}
+	if len(dispatched) != 2 || dispatched[0] != "/agents" || dispatched[1] != "/model" {
 		t.Fatalf("副屏分派未命中：%v", dispatched)
 	}
 
-	// D 档（/model 的 picker 变体）不属于主循环忙时通道，保持原拒绝路径。
-	if dispatchBusySlashCommandFromMainLoop(session, "/model") {
-		t.Fatal("/model（deferred）不得被主循环忙时通道消费")
+	// D 档（/theme select 的写入类 picker）不属于主循环忙时通道，保持原拒绝路径。
+	if dispatchBusySlashCommandFromMainLoop(session, "/theme select") {
+		t.Fatal("/theme select（deferred）不得被主循环忙时通道消费")
 	}
-	if len(dispatched) != 1 {
+	if len(dispatched) != 2 {
 		t.Fatalf("deferred 命令不得触发副屏分派：%v", dispatched)
 	}
 
 	events := store.runtimeInteractions()
-	if len(events) != 1 {
-		t.Fatalf("应产生 1 条审计事件，实际 %d", len(events))
+	if len(events) != 2 {
+		t.Fatalf("应产生 2 条审计事件，实际 %d", len(events))
 	}
 	if events[0].Payload["result"] != "executed" || events[0].Payload["mode"] != "screen" {
 		t.Fatalf("审计内容不符：%+v", events[0].Payload)

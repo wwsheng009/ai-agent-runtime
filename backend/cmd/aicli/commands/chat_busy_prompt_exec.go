@@ -135,6 +135,9 @@ func runBusyPromptCommand(session *ChatSession, line string) (occupied bool, exe
 		session.commandMu.Unlock()
 		return true, false
 	}
+	// 忙时副屏交互窗口：Phase A/B 期间允许交互选择器在 run 活跃时开屏。
+	releaseInteractive := markChatBusyInteractiveScreenActive(session)
+	defer releaseInteractive()
 	if !chatBusyScreenRunDispatch(session, line) {
 		return false, false
 	}

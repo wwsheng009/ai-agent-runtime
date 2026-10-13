@@ -469,8 +469,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		// bare /agents 在 unified 交互出口是 A 族列表副屏（可选 agent 查看输出）；
 		// 能力不足/忙/嵌套时按框架契约降级为主屏内联文档（DegradeDoc 为
 		// 既有 "Agent Graph:" 文本）。Output 为 screen-interactive：忙时经
-		// 只读交互列表白名单（chatBusyScreenInteractiveCommands）走 S 档，
-		// 不再被降级入队。
+		// 只读交互列表白名单（chatBusyScreenInteractiveCommands）走 S 档。
 		Bare: rtBare(rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenInteractive))),
 		Variants: map[string]runtimeCommandSpec{
 			"status":   rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
@@ -535,10 +534,16 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		},
 	},
 	"/reasoning_effort": {
-		Bare: rtBare(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead)),
+		// bare 与 select/choose/switch 都是交互式选择器
+		// （parseReasoningEffortCommandRequest 把空参数解析为 select）：声明为
+		// screen+next-turn+screen-interactive，与 /model、/provider 同族；忙时经
+		// 可写交互副屏白名单（chatBusyScreenInteractiveWriteCommands）开屏。
+		Bare: rtBare(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
 		Variants: map[string]runtimeCommandSpec{
 			"status": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead),
 			"select": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
+			"choose": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
+			"switch": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
 			"set":    rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 		},
 		Wildcard: ptrRuntimeSpec(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),

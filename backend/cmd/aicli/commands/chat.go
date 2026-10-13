@@ -166,6 +166,7 @@ type ChatSession struct {
 	escapeConsumer            *chatEscapeConsumerState             // 共享 ESC 消费者：按引用计数持有 Arm/goroutine
 	inputArbitrationMu        sync.Mutex                           // 保护阶段 F 影子仲裁器（§12.3 P0）
 	inputArbitration          *chatInputArbitrator                 // 统一输入仲裁器：P0 只观测不改变行为
+	busyInteractiveScreen     atomic.Int32                         // 忙时副屏交互窗口计数（>0 = 忙时 S 档副屏/prompt 通道内；语义见 chat_busy_screen_exec.go）
 	FunctionCatalog           *aicliFunctionCatalog                // 统一管理 builtin tools + skills + schema cache
 	FunctionRegistry          *functions.FunctionRegistry          // Function 注册表
 	FunctionBuilder           functions.FunctionCallBuilder        // 协议对应的 function/tool builder
