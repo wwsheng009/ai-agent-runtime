@@ -77,6 +77,13 @@
        {"key":"bot_token","label":"Bot Token","type":"secret","required":true,"placeholder":"123456:ABC..."},
        {"key":"proxy_url","label":"代理","type":"url","required":false}
      ],"actions":[]},
+    {"provider":"qqbot","label":"QQ 机器人","modes":["gateway"],
+     "fields":[
+       {"key":"app_id","label":"AppID","type":"text","required":true},
+       {"key":"app_secret","label":"AppSecret","type":"secret","required":true},
+       {"key":"sandbox","label":"沙箱环境","type":"bool","default":"false"},
+       {"key":"api_base","label":"API 基址","type":"url","required":false}
+     ],"actions":[]},
     {"provider":"wechat","label":"微信","modes":["polling"],
      "fields":[{"key":"account_id","label":"账号","type":"text","required":true}],
      "actions":[{"key":"start_login","label":"扫码登录","kind":"qr"}]}
@@ -97,6 +104,10 @@
 | gateway console | 原生 JS + CSS（`cmd/gateway/console/`） | `app.js` 新视图 `#connectors` | 复用现有 `.btn/.panel/.toast` 样式；无构建 |
 | aicli micro web | 原生 JS（`cmd/aicli/commands/web/js/`） | 新 `connectors.js` + tab | 样板：`provider-editor.js`、`config-admin.js` |
 | runtime-server | React/Vite（`frontend/`） | `pages/connectors-page.tsx` + i18n | 与 `runtime-config-page.tsx` 同级 |
+
+> 三端共用同一份 Schema：当前已注册 `telegram`（polling）与 `qqbot`（gateway，字段
+> `app_id`/`app_secret`/`sandbox`/`api_base`）两个通道；页面由 `GET /connectors/schema`
+> 驱动，新增通道三端零改动。
 
 > **实现状态（2026-10-13）**：runtime-server 端最小 React 配置页已落地，路由 `/runtime/connectors`
 > （懒加载，入口在 `runtime-config-page.tsx` 导航）。构成：`pages/connectors-page.tsx`（列表 +
@@ -172,6 +183,12 @@ webhook 挂 `/hooks/connectors/{id}`）。Telegram Provider 提供 `api_base` �
 （默认 `https://api.telegram.org`，可指向自建 Bot API 服务器/测试替身），
 `internal/connectors/e2e_restart_test.go` 以 httptest 假 Bot API + storefile 文件态
 覆盖「重启续传不重复」（游标续传 + 去重账本拦截重投，`go test -race` 全绿）。
+QQ 机器人 Provider（`internal/connectors/providers/qqbot`，P2 切片 1）已在
+runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
+`app_id`/`app_secret`(secret)/`sandbox`/`api_base`；WS Identify/Resume/心跳与
+指数退避重连、群@/C2C 文本入站、被动回复 `msg_id`+`msg_seq` 已实现，游标
+`gateway_session_id`/`gateway_seq` 与 Telegram `update_offset` 共用
+`state.json` 的 cursors 视图（重启后 Resume）；媒体与主动消息待续。
 **aicli 宿主接线（2026-10-13 落地）**：`cmd/aicli/commands/connector_host.go`
 （`StartLocalConnectors` + `MountLocalConnectorRoutes`）——
 

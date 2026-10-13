@@ -26,6 +26,7 @@ import (
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/qqbot"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/telegram"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
@@ -183,6 +184,10 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		RequireAllowedUsers: true,
 	})
 	if err := service.Register(telegram.New(telegram.WithLogger(logf))); err != nil {
+		return nil, err
+	}
+	// QQ 官方机器人（WS gateway，切片 1：群@/C2C 文本 + 被动回复）。
+	if err := service.Register(qqbot.New(qqbot.WithLogger(logf))); err != nil {
 		return nil, err
 	}
 

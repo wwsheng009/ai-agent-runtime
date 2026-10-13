@@ -75,6 +75,14 @@
 - 状态（2026-10-13）：aicli 宿主接线已提前在 P0 落地（`cmd/aicli/commands/connector_host.go`，
   Backend 即 `localActorRegistry.SubmitPrompt`，共享 `connectors:` 配置节）；
   剩余为微前端连接器页与热应用细节、QQ 适配器。
+- 状态（2026-10-13，QQ 切片 1）：QQ 适配器 ◇ **gateway 完成**——`internal/connectors/providers/qqbot`
+  （App Access Token 缓存/提前刷新、WS 状态机 op 10 hello → op 2 Identify / op 6 Resume →
+  op 0 事件分发 → op 1 心跳/op 11 ack、断线指数退避重连；群@/C2C 文本入站与
+  频道 @ 防御性解析；被动回复 msg_id + msg_seq 递增；游标 `gateway_session_id`/`gateway_seq`
+  经 `PollingState` 持久化，重启后 Resume）。范围：文本收发；测试：`httptest` + gorilla/websocket
+  假网关 15 例（令牌缓存/脱敏、握手、群/C2C 解析、seq 持久化、重启 Resume、心跳、断线重连、
+  Send 群/C2C/msg_seq/主动降级），`go test -race` 全绿；runtime-server 与 aicli 均已注册。
+  **待续**：媒体（上传/下载）与主动消息（无 msg_id 的配额/权限路径）。
 
 ### P3 · 微信 + 媒体/主动推送完善（≈4–5 天）
 
