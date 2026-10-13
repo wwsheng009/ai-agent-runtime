@@ -26,8 +26,11 @@ import (
 // /agents approve|deny|answer|send|followup|cleanup）保持 Deferred——不在运行中
 // 改安全策略/控制面。next-call 类（/plan enter|exit|approve、/attach add|clear|remove）
 // 会影响当前 turn 的下一次调用，live 类（/skills enable|disable）会热刷新函数面，
-// 均不纳入；/routing on|off|reset|save 按 §4.5 设计保持 Deferred；/title 需要标题
-// 参数（无参报错），不纳入。
+// 均不纳入。/routing on|off|reset|save 保持 Deferred：会话层写入虽复用
+// refreshLocalRuntimeAfterSelection（next-turn 安全），但同一子命令可经
+// `--to workspace|config` 指向持久层，而确认门按「命令名 + 首 token」匹配无法区分
+// 层（`/routing on` 与 `/routing on --to config` 同 token），会误放行持久写入，故
+// 整体保守拒绝（§4.5）。/title 需要标题参数（无参报错），不纳入。
 //
 // 结构化匹配（命令名 + 首个子命令 token）取代此前的裸字符串精确匹配：既支持
 // 带参命令（/reasoning_effort set high），又避免裸前缀歧义（/s 不会命中 /status）。

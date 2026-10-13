@@ -46,14 +46,15 @@ func TestChatBusyPolicyPromptFirstBatch(t *testing.T) {
 		"/add-dir add":    chatBusyPolicyScreen,
 		"/memory add":     chatBusyPolicyScreen,
 		// 不纳入：next-call / live / §4.5 路由写入 / 需参数
-		"/plan enter":          chatBusyPolicyDeferred,
-		"/attach add":          chatBusyPolicyDeferred,
-		"/skills enable":       chatBusyPolicyDeferred,
-		"/routing on":          chatBusyPolicyDeferred,
-		"/title":               chatBusyPolicyDeferred,
-		"/yolo":                chatBusyPolicyDeferred, // 安全类不纳入
-		"/permission-mode set": chatBusyPolicyDeferred, // 安全类不纳入
-		"/supervision ack":     chatBusyPolicyDeferred, // 控制面不纳入
+		"/plan enter":             chatBusyPolicyDeferred,
+		"/attach add":             chatBusyPolicyDeferred,
+		"/skills enable":          chatBusyPolicyDeferred,
+		"/routing on":             chatBusyPolicyDeferred,
+		"/routing on --to config": chatBusyPolicyDeferred, // 层不可区分 → 保守拒绝
+		"/title":                  chatBusyPolicyDeferred,
+		"/yolo":                   chatBusyPolicyDeferred, // 安全类不纳入
+		"/permission-mode set":    chatBusyPolicyDeferred, // 安全类不纳入
+		"/supervision ack":        chatBusyPolicyDeferred, // 控制面不纳入
 	}
 	for line, want := range cases {
 		if got := chatSlashCommandBusyPolicyFor(line); got != want {
