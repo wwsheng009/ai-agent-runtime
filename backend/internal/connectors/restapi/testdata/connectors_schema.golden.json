@@ -1,0 +1,81 @@
+{
+  "providers": [
+    {
+      "actions": [
+        {
+          "key": "start_login",
+          "kind": "qr",
+          "label": "扫码登录"
+        },
+        {
+          "key": "refresh",
+          "kind": "button",
+          "label": "刷新状态"
+        }
+      ],
+      "fields": [
+        {
+          "help": "从平台开发者后台获取",
+          "key": "bot_token",
+          "label": "Bot Token",
+          "placeholder": "123456:ABC-DEF",
+          "required": true,
+          "type": "secret"
+        },
+        {
+          "default": "polling",
+          "key": "mode",
+          "label": "接入模式",
+          "options": [
+            {
+              "label": "长轮询",
+              "value": "polling"
+            },
+            {
+              "label": "Webhook",
+              "value": "webhook"
+            },
+            {
+              "label": "长连接",
+              "value": "gateway"
+            }
+          ],
+          "required": true,
+          "type": "enum"
+        },
+        {
+          "key": "display_name",
+          "label": "显示名",
+          "placeholder": "工作群",
+          "type": "text"
+        },
+        {
+          "help": "公网可达的 HTTPS 地址",
+          "key": "callback_url",
+          "label": "回调地址",
+          "type": "url"
+        },
+        {
+          "default": "false",
+          "key": "allow_media",
+          "label": "允许媒体",
+          "type": "bool"
+        },
+        {
+          "default": "30",
+          "key": "timeout_seconds",
+          "label": "超时（秒）",
+          "type": "number"
+        }
+      ],
+      "label": "Golden Webhook",
+      "modes": [
+        "polling",
+        "webhook",
+        "gateway"
+      ],
+      "provider": "goldenweb"
+    }
+  ],
+  "version": "1"
+}

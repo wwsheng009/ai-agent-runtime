@@ -351,8 +351,15 @@ typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重�
 `runtime_owner: gateway` 由 `cmd/gateway/connector_bootstrap.go` 的 `HostID="gateway"`
 实际参与认领/续约/释放。
 
-**待续**：gateway/gateway_node 的真实 token 联通验证、aicli micro web 连接器页、
-三端契约矩阵（同一 golden ×3）。
+**三宿主同一契约（2026-10-12）**：三宿主共用 restapi 与契约矩阵（golden 快照 +
+挂载断言）——`backend/internal/connectors/restapi/testdata/connectors_schema.golden.json`
+锁定 `GET /connectors/schema` 的逐字节快照（全字段类型/actions/modes），同一包的
+`contract_golden_test.go` 另断言列表视图 key 集合与错误载荷形状；
+`backend/cmd/runtime-server/connector_mount_test.go` 用宿主真实的
+`mountConnectorRoutes` 断言 `/api/connectors`、`/api/connectors/schema`、
+`/hooks/connectors/*` 三条入口可达（aicli/gateway 已有同形状挂载测试）。
+
+**待续**：gateway/gateway_node 的真实 token 联通验证、aicli micro web 连接器页。
 
 ## 8. 宿主差异汇总（共享核心 vs 宿主专属）
 

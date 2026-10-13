@@ -82,14 +82,30 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		Logf:      logf,
 		HostID:    "runtime-server",
 	}
-	// 管理面：先注册的 /api/runtime* 路由优先命中，这里只兜住 /api/connectors*。
-	router.PathPrefix("/api/connectors").Handler(http.StripPrefix("/api", restapi.NewRouter(deps)))
-	router.PathPrefix("/hooks/connectors").Handler(restapi.NewHooksRouter(deps))
+	mountConnectorRoutes(router, deps)
 
 	if err := service.Start(ctx); err != nil {
 		return nil, err
 	}
 	return service, nil
+}
+
+// mountConnectorRoutes 把共享 restapi 契约挂到宿主 mux（三宿主同一挂载矩阵，
+// 行为与 aicli / gateway 宿主一致）：
+//
+//   - 管理面 /api/connectors*：剥离 /api 前缀后交给 restapi.NewRouter；鉴权在
+//     外层完成（runtime-server 在 Deps.Authorize 内注入
+//     runtimeapi.Handler.AuthorizeConnectorAdmin，与 skills 管理面同一口径；
+//     gateway 由 owner.RequireSession 包在外层）。先注册的 /api/runtime* 路由
+//     优先命中，这里只兜住 /api/connectors*。
+//   - 公网 webhook /hooks/connectors/*：直挂 NewHooksRouter，不走管理面鉴权，
+//     由各 Provider 自行验签/挑战校验。
+//
+// 独立成函数是为了让挂载本身可测（connector_mount_test.go 用裸 mux 断言三条
+// 入口可达），后续宿主接线改动不得偏离该形状。
+func mountConnectorRoutes(router *mux.Router, deps restapi.Deps) {
+	router.PathPrefix("/api/connectors").Handler(http.StripPrefix("/api", restapi.NewRouter(deps)))
+	router.PathPrefix("/hooks/connectors").Handler(restapi.NewHooksRouter(deps))
 }
 
 // connectorServiceCloser 让 connectors.Service 满足 io.Closer（runtimeServerApp.close 用）。
