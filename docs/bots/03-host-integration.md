@@ -139,6 +139,7 @@
 | GET | `/api/connectors/{id}/logs` | 最近日志（分页） | 管理面 |
 | GET/PUT | `/api/connectors/{id}/bindings` | 查看/调整 IM↔会话绑定 | 管理面 |
 | POST | `/api/connectors/{id}/actions/{action}` | 特殊动作（微信扫码等）；执行面已实现（`connectors.ActionProvider`） | 管理面 |
+| POST | `/api/connectors/{id}/takeover` | **运行归属抢占**：强制覆盖旧归属并以本宿主身份重启轮询；未配置宿主身份 503、未知 404、停用/策略指定他人 409（07 §5.6） | 管理面 |
 | POST | `/hooks/connectors/{id}` | **入站 webhook**（通道签名校验） | 每连接器密钥 |
 
 > 管理面鉴权按宿主既有约定：gateway=owner session；runtime-server=admin/Bearer；aicli=本机会话。
@@ -156,10 +157,13 @@
 | `POST /connectors/{id}/reload` | 应用配置变更（重启轮询/重连），更新接口内已自动调用 |
 | `POST /connectors/{id}/test` | 发送测试消息（控制台按钮），body `{chat,text}` |
 | `POST /connectors/{id}/actions/{action}` | 通道特有动作执行面（`connectors.ActionProvider.RunAction`）；body 可选 JSON object；未知/停用 404、未实现能力 405、provider 失败 400 |
+| `POST /connectors/{id}/takeover` | 运行归属抢占（07 §5.6）：强制覆盖旧归属 → 重启本宿主轮询；未配置宿主身份 503、未知 404、停用/策略指定他人 409 |
 | `POST /hooks/connectors/{id}` | 公网入站；能力探测 `connectors.WebhookProvider`，签名失败 400、队列满 429、未知/停用 404 |
 
 - 挂载：`NewRouter` → `/api`；`NewHooksRouter` → 根（`/hooks/connectors/{id}`）。
   `Authorize` 为 nil 时管理面整体 403（安全默认，避免宿主忘接线）。
+- 视图字段（additive，旧客户端不受影响）：列表/详情新增 `active_owner`（当前归属宿主，
+  未认领时省略）与 `owned_by_current_host`（是否为 `restapi.Deps.HostID`）。
 - 待续（P1/P2）：`/{id}/logs`、`/{id}/bindings`；三端前端的 action 按钮控件（微信扫码登录等，Schema.Actions 驱动）仍待续。
 - **安全与生命周期（2026-10-13 审查修复）**：管理面/入站不再把请求 ctx 当生命周期
   ——`Service` 持有宿主基 ctx（`Start` 建立/`Stop` 取消），轮询与异步任务基于它派生，
@@ -270,7 +274,33 @@ typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重�
 下两端账本共享）；`runtimeapi` 的环回判定不再无条件信任 `X-Forwarded-For`
 （仅直连对端本身是环回时才采纳转发头，远程伪造 `127.0.0.1` 不再绕过管理面鉴权）。
 
-**待续**：跨进程锁与 `runtime_owner` 抢占、aicli micro web 连接器页（P1）、
+**运行归属与数据目录锁（P1 实现，2026-10-12）**：`runtime_owner` 抢占与跨进程
+数据目录锁已落地——
+
+- **归属账本**：`state.json` 新增 `owners: {connectorID: {owner, heartbeat_at, pid}}`
+  （旧文件缺该键视为空表，向后兼容）。`connectors.Store` 提供
+  `ClaimConnectorOwner` / `ForceClaimConnectorOwner` / `HeartbeatConnectorOwner` /
+  `ReleaseConnectorOwner` / `OwnerOf`；storefile 的认领在数据目录锁内完成
+  「读旧值 → 判存活 → 写新值」，跨进程互斥（`MemoryStore` 同语义，进程内锁）。
+- **启动闸**（`Service.startConnector`，位于 fail-closed 白名单闸之后）：
+  `Deps.HostID` 为空时跳过（兼容旧宿主/测试）；`policy.runtime_owner` 为空/`auto`
+  先到先得，显式值只允许身份匹配的宿主认领；认领失败只读配置、不 Activate、不轮询，
+  日志为「connector X: 未运行（由 Y 持有）」。`Deps.OwnerStaleAfter` 默认 90s，
+  持锁宿主心跳超时后后来者可接管；`Deps.OwnerHeartbeatInterval` 默认 30s，
+  续约发现 `held=false`（被抢占）即取消本宿主轮询（尽力围栏）。
+- **停机释放**：`Service.Stop` / `StopConnector` 以及轮询自然退出都会尽力释放本宿主
+  认领（`ReleaseConnectorOwner` 仅持有者可释放、幂等）。
+- **管理面**：列表/详情视图 additive 字段 `active_owner` / `owned_by_current_host`；
+  `POST /api/connectors/{id}/takeover` 强制抢占（策略优先：`runtime_owner` 指定他人
+  时 409；停用 409；未配置 `HostID` 503），成功后重启本宿主轮询。
+- **锁边界（刻意不做分布式强保证）**：锁是 `<stateDir>/connectors.lock` 目录
+  （`os.Mkdir` 原子获取 + owner 文件 + 超时 rename 窃取，默认 25ms 重试/30s 陈旧/
+  10s 等待，`storefile.LockOptions` 可调），只约束 storefile 对 `state.json` /
+  `config.yaml` / `connectors.secrets.yaml` 的写入；不覆盖其它组件（aicli config
+  manager 等）对 `config.yaml` 的写入路径。锁无租约续约，持锁进程挂起超过陈旧阈值后
+  可被合法窃取；归属心跳（90s）才是跨宿主「谁在跑」的语义来源，两者不要混用。
+
+**待续**：gateway 宿主与 `runtime_owner: gateway` 的落地、aicli micro web 连接器页、
 真实 token 联通验证。
 
 ## 8. 宿主差异汇总（共享核心 vs 宿主专属）

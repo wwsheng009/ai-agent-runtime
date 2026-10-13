@@ -185,3 +185,80 @@ func TestStartLocalConnectorsEnforcesAllowedUsersGate(t *testing.T) {
 	require.NotContains(t, joined, "111:gate", "空白名单连接器不得 Activate/轮询")
 	require.Contains(t, strings.Join(logs, "\n"), "aicli connectors: started")
 }
+
+// TestStartLocalConnectorsHonorsRuntimeOwnerGate 覆盖归属闸接线（07 §5.6）：
+// aicli 宿主身份为 "aicli"——policy.runtime_owner 指定 runtime-server 的连接器
+// 不得 Activate/轮询（只读配置），指定 aicli 的照常启动。
+func TestStartLocalConnectorsHonorsRuntimeOwnerGate(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"username":"owner-test"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := "connectors:\n" +
+		"  - id: tg-owned\n" +
+		"    provider: telegram\n" +
+		"    enabled: true\n" +
+		"    mode: polling\n" +
+		"    settings:\n" +
+		"      api_base: " + server.URL + "\n" +
+		"    secrets:\n" +
+		"      bot_token: \"333:owned\"\n" +
+		"    policy:\n" +
+		"      allowed_users: [\"42\"]\n" +
+		"      runtime_owner: runtime-server\n" +
+		"  - id: tg-aicli\n" +
+		"    provider: telegram\n" +
+		"    enabled: true\n" +
+		"    mode: polling\n" +
+		"    settings:\n" +
+		"      api_base: " + server.URL + "\n" +
+		"    secrets:\n" +
+		"      bot_token: \"444:aicli\"\n" +
+		"    policy:\n" +
+		"      allowed_users: [\"42\"]\n" +
+		"      runtime_owner: aicli\n"
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logsMu sync.Mutex
+	var logs []string
+	host, err := StartLocalConnectors(context.Background(), &localChatRuntimeHost{}, configPath, func(format string, args ...any) {
+		logsMu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		logsMu.Unlock()
+	})
+	require.NoError(t, err)
+	require.NotNil(t, host)
+	t.Cleanup(host.Close)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, path := range paths {
+			if strings.Contains(path, "444:aicli") {
+				return true
+			}
+		}
+		return false
+	}, 3*time.Second, 10*time.Millisecond, "runtime_owner=aicli 的连接器应照常 Activate")
+
+	time.Sleep(100 * time.Millisecond) // 留出闸失效时误启动的窗口
+	mu.Lock()
+	joined := strings.Join(paths, "\n")
+	mu.Unlock()
+	require.NotContains(t, joined, "333:owned", "runtime_owner=runtime-server 的连接器不得由 aicli Activate/轮询")
+	logsMu.Lock()
+	joinedLogs := strings.Join(logs, "\n")
+	logsMu.Unlock()
+	require.Contains(t, joinedLogs, "未运行（由 runtime-server 持有")
+}

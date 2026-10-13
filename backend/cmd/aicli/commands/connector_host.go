@@ -181,6 +181,9 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		Store:   store,
 		Backend: localConnectorBackend{host: host, logf: logf},
 		Logf:    serviceLogf,
+		// 运行归属（07 §5.6）：本宿主身份用于认领/续约/释放；与 runtime-server
+		// 共用 config.yaml 时，同一通道的轮询只允许一处运行。
+		HostID: "aicli",
 		// Fix-S2：aicli 侧 fail-closed——启用中的连接器若没有非空
 		// policy.allowed_users，跳过启动（不轮询），避免对任意平台用户开放。
 		RequireAllowedUsers: true,
@@ -210,6 +213,7 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		// 回环/同源/写令牌）；这里的路由只挂在同一 mux 上，不额外暴露面。
 		Authorize: func(*http.Request) error { return nil },
 		Logf:      logf,
+		HostID:    "aicli",
 	}
 
 	ctx, cancel := context.WithCancel(parent)

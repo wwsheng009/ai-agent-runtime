@@ -1,6 +1,7 @@
 package restapi
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -22,6 +23,11 @@ type ConnectorView struct {
 	Settings   map[string]string `json:"settings,omitempty"`
 	SecretKeys []string          `json:"secret_keys,omitempty"`
 	Policy     PolicyView        `json:"policy"`
+	// ActiveOwner 是当前运行归属的宿主（空 = 未认领；含已陈旧记录，重启/接管
+	// 后由下一次认领刷新）。字段 additive：旧客户端忽略即可（07 §5.6「冲突可见」）。
+	ActiveOwner string `json:"active_owner,omitempty"`
+	// OwnedByCurrentHost 报告归属是否属于本宿主（Deps.HostID）。
+	OwnedByCurrentHost bool `json:"owned_by_current_host"`
 }
 
 // PolicyView 是"用户操作逻辑"配置的对外视图。
@@ -225,6 +231,46 @@ func (h *handlers) reload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
 }
 
+// takeover 强制抢占运行归属（管理面「抢占」按钮，07 §5.6）：以本宿主身份覆盖
+// 旧归属并重启轮询；对端宿主的心跳观察到归属丢失后自行停止（尽力围栏）。
+// 错误语义：未配置 HostID → 503；未知连接器 → 404；停用或策略指定其它宿主 → 409；
+// 其余存储失败 → 500。成功后返回更新后的连接器视图。
+func (h *handlers) takeover(w http.ResponseWriter, r *http.Request) {
+	if !h.ready(w) {
+		return
+	}
+	id := mux.Vars(r)["id"]
+	hostID := strings.TrimSpace(h.deps.HostID)
+	if hostID == "" {
+		writeError(w, http.StatusServiceUnavailable, "本宿主未配置运行归属身份（HostID），无法接管")
+		return
+	}
+	if _, ok := h.deps.Store.GetConfig(id); !ok {
+		writeError(w, http.StatusNotFound, "未知连接器")
+		return
+	}
+	err := h.deps.Service.TakeoverConnector(r.Context(), id)
+	switch {
+	case err == nil:
+		updated, ok := h.deps.Store.GetConfig(id)
+		if !ok {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "active_owner": hostID, "owned_by_current_host": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, h.view(updated))
+	case errors.Is(err, connectors.ErrHostIDRequired):
+		writeError(w, http.StatusServiceUnavailable, "本宿主未配置运行归属身份（HostID），无法接管")
+	case errors.Is(err, connectors.ErrConnectorDisabled):
+		writeError(w, http.StatusConflict, "接管失败：连接器已停用，请先启用")
+	case errors.Is(err, connectors.ErrOwnerPolicyMismatch):
+		writeError(w, http.StatusConflict, "接管失败：policy.runtime_owner 指定了其它宿主，请先修改策略")
+	case errors.Is(err, connectors.ErrServiceNotConfigured):
+		writeError(w, http.StatusServiceUnavailable, "连接器服务未接线")
+	default:
+		writeError(w, http.StatusInternalServerError, "接管失败："+err.Error())
+	}
+}
+
 // test 向指定 IM 会话发送测试消息（控制台「发送测试消息」按钮）。
 func (h *handlers) test(w http.ResponseWriter, r *http.Request) {
 	if !h.ready(w) {
@@ -278,6 +324,11 @@ func (h *handlers) view(cfg connectors.Config) ConnectorView {
 		if view.Mode == "" {
 			view.Mode = firstNonEmpty(cfg.Setting("mode", ""), schemaDefault(schema, "mode"))
 		}
+	}
+	if owner, ok := h.deps.Store.OwnerOf(cfg.ID); ok {
+		view.ActiveOwner = strings.TrimSpace(owner.Owner)
+		hostID := strings.TrimSpace(h.deps.HostID)
+		view.OwnedByCurrentHost = hostID != "" && strings.EqualFold(view.ActiveOwner, hostID)
 	}
 	return view
 }

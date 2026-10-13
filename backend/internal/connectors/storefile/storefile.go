@@ -32,9 +32,11 @@ type ConfigStore struct {
 	secretsPath string
 	statePath   string
 
-	mu     sync.Mutex
-	state  stateFile
-	loaded bool
+	mu    sync.Mutex
+	state stateFile
+	// lockOptions 是数据目录锁参数（写 state.json/config.yaml/secrets 前先抢锁）；
+	// 零值由 LockOptions.withDefaults 补齐。
+	lockOptions LockOptions
 }
 
 // NewConfigStore 构造文件存储；configPath 为共享 config.yaml，statePath 为宿主
@@ -64,6 +66,16 @@ type stateFile struct {
 	Bindings map[string]bindingRecord     `json:"bindings"`
 	Claimed  map[string]time.Time         `json:"claimed"`
 	Cursors  map[string]map[string]string `json:"cursors"`
+	// Owners 是连接器运行归属账本（owner/heartbeat_at/pid）；旧文件缺该键时
+	// 视为空表（向后兼容）。
+	Owners map[string]ownerRecord `json:"owners,omitempty"`
+}
+
+// ownerRecord 是运行归属在 state.json 中的形状（docs/bots/07-config-ux.md §5.6）。
+type ownerRecord struct {
+	Owner       string    `json:"owner"`
+	HeartbeatAt time.Time `json:"heartbeat_at"`
+	PID         int       `json:"pid,omitempty"`
 }
 
 type bindingRecord struct {
@@ -134,6 +146,14 @@ func (s *ConfigStore) PutConfig(cfg connectors.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// 写 config.yaml/secrets 与 state.json 共用同一把数据目录锁：
+	// 「读旧文档 → 改 → 写回」必须整体互斥，否则两个宿主并发保存会丢更新。
+	unlockDir, err := s.lockDir()
+	if err != nil {
+		return err
+	}
+	defer unlockDir()
+
 	doc, err := s.loadDocument()
 	if err != nil {
 		return err
@@ -183,6 +203,12 @@ func (s *ConfigStore) DeleteConfig(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	unlockDir, err := s.lockDir()
+	if err != nil {
+		return err
+	}
+	defer unlockDir()
+
 	doc, err := s.loadDocument()
 	if err != nil {
 		return err
@@ -219,6 +245,7 @@ func (s *ConfigStore) DeleteConfig(id string) error {
 			}
 		}
 		delete(state.Cursors, id)
+		delete(state.Owners, id)
 		prefix := id + "\x00"
 		for key := range state.Claimed {
 			if strings.HasPrefix(key, prefix) {
@@ -238,7 +265,7 @@ func (s *ConfigStore) GetBinding(connectorID, chat string) (connectors.Binding, 
 		record bindingRecord
 		found  bool
 	)
-	_ = s.mutateState(func(state *stateFile) {
+	_ = s.observeState(func(state *stateFile) {
 		record, found = state.Bindings[key]
 	})
 	if !found {
@@ -308,7 +335,7 @@ func (p *pollingState) Get(key string) (string, bool) {
 	}
 	var value string
 	var found bool
-	_ = p.store.mutateState(func(state *stateFile) {
+	_ = p.store.observeState(func(state *stateFile) {
 		cursors, exists := state.Cursors[p.connectorID]
 		if !exists {
 			return
@@ -334,6 +361,116 @@ func (p *pollingState) Set(key, value string) error {
 		}
 		cursors[key] = value
 	})
+}
+
+// ---------------------------------------------------------------------------
+// 运行归属（state.json 的 owners 表；docs/bots/07-config-ux.md §5.6）
+
+// ClaimConnectorOwner 原子认领运行归属：在数据目录锁内「读旧值 → 判存活 → 写新值」。
+func (s *ConfigStore) ClaimConnectorOwner(connectorID, hostID string, now time.Time, staleAfter time.Duration) (bool, string, error) {
+	connectorID = strings.TrimSpace(connectorID)
+	hostID = strings.TrimSpace(hostID)
+	if connectorID == "" || hostID == "" {
+		return false, "", errors.New("storefile: connector id and host id are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	claimed := false
+	owner := ""
+	err := s.mutateState(func(state *stateFile) {
+		if record, exists := state.Owners[connectorID]; exists && record.Owner != hostID {
+			if !record.expired(now, staleAfter) {
+				owner = record.Owner
+				return
+			}
+			// 记录陈旧（持有宿主已退出/挂起）：接管并改写。
+		}
+		state.Owners[connectorID] = ownerRecord{Owner: hostID, HeartbeatAt: now, PID: os.Getpid()}
+		claimed, owner = true, hostID
+	})
+	return claimed, owner, err
+}
+
+// ForceClaimConnectorOwner 强制覆盖旧归属（管理面「抢占」；不判存活）。
+func (s *ConfigStore) ForceClaimConnectorOwner(connectorID, hostID string, now time.Time) error {
+	connectorID = strings.TrimSpace(connectorID)
+	hostID = strings.TrimSpace(hostID)
+	if connectorID == "" || hostID == "" {
+		return errors.New("storefile: connector id and host id are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return s.mutateState(func(state *stateFile) {
+		state.Owners[connectorID] = ownerRecord{Owner: hostID, HeartbeatAt: now, PID: os.Getpid()}
+	})
+}
+
+// HeartbeatConnectorOwner 续约：仅当记录仍属于 hostID 时刷新心跳。
+func (s *ConfigStore) HeartbeatConnectorOwner(connectorID, hostID string, now time.Time) (bool, error) {
+	connectorID = strings.TrimSpace(connectorID)
+	hostID = strings.TrimSpace(hostID)
+	if connectorID == "" || hostID == "" {
+		return false, errors.New("storefile: connector id and host id are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	held := false
+	err := s.mutateState(func(state *stateFile) {
+		record, exists := state.Owners[connectorID]
+		if !exists || record.Owner != hostID {
+			return
+		}
+		record.HeartbeatAt = now
+		record.PID = os.Getpid()
+		state.Owners[connectorID] = record
+		held = true
+	})
+	return held, err
+}
+
+// ReleaseConnectorOwner 尽力释放归属（仅当前持有者可释放，幂等）。
+func (s *ConfigStore) ReleaseConnectorOwner(connectorID, hostID string) error {
+	connectorID = strings.TrimSpace(connectorID)
+	hostID = strings.TrimSpace(hostID)
+	if connectorID == "" || hostID == "" {
+		return nil
+	}
+	// 先只读判断：非本宿主持有时不写文件。
+	if record, ok := s.OwnerOf(connectorID); !ok || record.Owner != hostID {
+		return nil
+	}
+	return s.mutateState(func(state *stateFile) {
+		if record, exists := state.Owners[connectorID]; exists && record.Owner == hostID {
+			delete(state.Owners, connectorID)
+		}
+	})
+}
+
+// OwnerOf 返回当前归属记录（只读；含已陈旧记录）。
+func (s *ConfigStore) OwnerOf(connectorID string) (connectors.OwnerRecord, bool) {
+	connectorID = strings.TrimSpace(connectorID)
+	if connectorID == "" {
+		return connectors.OwnerRecord{}, false
+	}
+	record := connectors.OwnerRecord{}
+	found := false
+	_ = s.observeState(func(state *stateFile) {
+		raw, ok := state.Owners[connectorID]
+		if !ok {
+			return
+		}
+		record = connectors.OwnerRecord{Owner: raw.Owner, HeartbeatAt: raw.HeartbeatAt, PID: raw.PID}
+		found = true
+	})
+	return record, found
+}
+
+// expired 把 ownerRecord 交给 connectors.OwnerRecord 做统一的陈旧判断。
+func (r ownerRecord) expired(now time.Time, staleAfter time.Duration) bool {
+	return connectors.OwnerRecord{Owner: r.Owner, HeartbeatAt: r.HeartbeatAt, PID: r.PID}.Expired(now, staleAfter)
 }
 
 const connectorsSectionKey = "connectors"
@@ -653,35 +790,51 @@ func anyToStringSlice(value interface{}) []string {
 func (s *ConfigStore) mutateState(mutate func(state *stateFile)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlockDir, err := s.lockDir()
+	if err != nil {
+		return err
+	}
+	defer unlockDir()
 	return s.mutateStateLocked(mutate)
 }
 
-// mutateStateLocked 要求调用方已持有 s.mu。
+// mutateStateLocked 要求调用方已持有 s.mu 与数据目录锁；写前重新读盘，
+// 使「读旧值 → 判存活 → 写新值」在跨进程锁内原子完成（另一实例的写入不会被覆盖）。
 func (s *ConfigStore) mutateStateLocked(mutate func(state *stateFile)) error {
-	if err := s.ensureStateLocked(); err != nil {
+	if err := s.reloadStateLocked(); err != nil {
 		return err
 	}
 	mutate(&s.state)
 	return s.writeStateLocked()
 }
 
-func (s *ConfigStore) ensureStateLocked() error {
-	if s.loaded {
-		return nil
+// observeState 是只读路径：重新读盘但不写回、不抢目录锁（写侧用临时文件 +
+// rename 原子替换，读到的要么是旧值要么是新值，不会是半截文件）。
+func (s *ConfigStore) observeState(observe func(state *stateFile)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reloadStateLocked(); err != nil {
+		return err
 	}
+	observe(&s.state)
+	return nil
+}
+
+// reloadStateLocked 从磁盘重读 state.json（要求调用方已持有 s.mu）；文件缺失或
+// 为空时视为空表，旧文件缺 owners 键时补空表（向后兼容）。
+func (s *ConfigStore) reloadStateLocked() error {
 	s.state = stateFile{
 		Bindings: make(map[string]bindingRecord),
 		Claimed:  make(map[string]time.Time),
 		Cursors:  make(map[string]map[string]string),
+		Owners:   make(map[string]ownerRecord),
 	}
 	if s.statePath == "" {
-		s.loaded = true
 		return nil
 	}
 	data, err := os.ReadFile(s.statePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			s.loaded = true
 			return nil
 		}
 		return fmt.Errorf("storefile: read state: %w", err)
@@ -700,7 +853,9 @@ func (s *ConfigStore) ensureStateLocked() error {
 	if s.state.Cursors == nil {
 		s.state.Cursors = make(map[string]map[string]string)
 	}
-	s.loaded = true
+	if s.state.Owners == nil {
+		s.state.Owners = make(map[string]ownerRecord)
+	}
 	return nil
 }
 

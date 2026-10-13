@@ -60,7 +60,8 @@ type Policy struct {
 	SessionMode string
 	// ReplyMode：stream（默认，尽量流式编辑）| final（只发终态）。
 	ReplyMode string
-	// RuntimeOwner：运行归属（auto|aicli|runtime-server|gateway），P1 启用抢占。
+	// RuntimeOwner：运行归属（auto|aicli|runtime-server|gateway）：空/auto = 先到先得，
+	// 显式值仅身份匹配的宿主可认领（心跳超时可接管，见 docs/bots/07-config-ux.md §5.6）。
 	RuntimeOwner string
 }
 

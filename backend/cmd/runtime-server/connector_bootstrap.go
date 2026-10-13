@@ -42,6 +42,9 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		Store:   store,
 		Backend: runtimeConnectorBackend{handler: handler, logf: logf},
 		Logf:    logf,
+		// 运行归属（07 §5.6）：本宿主身份用于认领/续约/释放；与 aicli 共用
+		// config.yaml 时，同一通道的轮询只允许一处运行。
+		HostID: "runtime-server",
 		// Fix-S2：runtime-server 保持兼容（false，不 fail-closed），
 		// 空白名单的可见性告警在下面单独发。
 		RequireAllowedUsers: false,
@@ -77,6 +80,7 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		Store:     store,
 		Authorize: func(r *http.Request) error { return handler.AuthorizeConnectorAdmin(r) },
 		Logf:      logf,
+		HostID:    "runtime-server",
 	}
 	// 管理面：先注册的 /api/runtime* 路由优先命中，这里只兜住 /api/connectors*。
 	router.PathPrefix("/api/connectors").Handler(http.StripPrefix("/api", restapi.NewRouter(deps)))

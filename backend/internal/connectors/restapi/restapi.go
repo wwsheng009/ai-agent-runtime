@@ -36,6 +36,10 @@ type Deps struct {
 	Store connectors.Store
 	// Authorize 校验管理面请求；nil = 全部拒绝（安全默认）。
 	Authorize func(r *http.Request) error
+	// HostID 是本宿主的运行归属身份（与 connectors.Deps.HostID 一致）：
+	// 视图用它计算 owned_by_current_host，「抢占」端点用它认领归属；
+	// 为空时 takeover 返回 503（其余端点不受影响）。
+	HostID string
 	// Logf 可注入日志；默认 log.Printf。
 	Logf func(format string, args ...any)
 	// MaxBodyBytes 请求体上限，<=0 用默认 1MiB。
@@ -70,6 +74,7 @@ func NewRouter(deps Deps) http.Handler {
 	router.HandleFunc("/connectors/{id}", handlers.update).Methods(http.MethodPatch, http.MethodPut)
 	router.HandleFunc("/connectors/{id}", handlers.remove).Methods(http.MethodDelete)
 	router.HandleFunc("/connectors/{id}/reload", handlers.reload).Methods(http.MethodPost)
+	router.HandleFunc("/connectors/{id}/takeover", handlers.takeover).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}/test", handlers.test).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}/actions/{action}", handlers.action).Methods(http.MethodPost)
 	return router

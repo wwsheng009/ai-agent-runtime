@@ -206,6 +206,26 @@ sequenceDiagram
 | **运行归属** | 同一通道的轮询/WS **只能一处运行**：连接器配置增加 `runtime_owner: auto|aicli|runtime-server|gateway`，启动时按宿主身份 + 数据目录锁抢占；`auto` 语义为"先到先得并公开所有权"，后启动者只读该配置、不启动轮询 |
 | 冲突可见 | 三端列表页显示 `运行于：aicli` / `未运行（由 runtime-server 持有）`，并提供"抢占"按钮（停止对方后接管） |
 
+**实现说明（2026-10-12，P1 后端切片）**：
+
+- **归属账本**：`state.json` 增 `owners: {connectorID: {owner, heartbeat_at, pid}}`
+  （旧文件缺键视为空表）。`ClaimConnectorOwner` 在数据目录锁内「读旧值 → 判存活 →
+  写新值」，先到先得；`owner` 为空/`auto` 时任意宿主可认领，显式值只允许身份匹配
+  的宿主（`Deps.HostID`：runtime-server/aicli 已接线）；`ForceClaimConnectorOwner`
+  供管理面抢占。
+- **心跳与陈旧接管**：轮询生命周期内按 `Deps.OwnerHeartbeatInterval`（默认 30s）续约；
+  持锁宿主停止续约超过 `Deps.OwnerStaleAfter`（默认 90s）后，后来者可接管。续约
+  发现 `held=false`（被抢占）时本宿主自行取消轮询（尽力围栏，不做分布式强保证）。
+- **停机**：`Service.Stop` / `StopConnector` 与轮询自然退出都尽力释放本宿主认领。
+- **数据目录锁**：`<stateDir>/connectors.lock` 目录锁（`os.Mkdir` 原子获取 + owner
+  文件 + 超时 rename 窃取，`storefile.LockOptions` 可调）统一约束
+  `state.json` / `config.yaml` / `connectors.secrets.yaml` 的写；锁只覆盖 storefile
+  的写路径，无租约续约，与归属心跳是两套机制（前者防并发写丢更新，后者决定"谁在跑"）。
+- **管理面**：`GET /connectors*` 视图 additive 字段 `active_owner` /
+  `owned_by_current_host`；`POST /api/connectors/{id}/takeover` 抢占（策略
+  `runtime_owner` 指定他人 → 409，停用 → 409，未配置 HostID → 503）。三端前端
+  按 P1 后续切片接入按钮与状态文案。
+
 ## 6. 便捷性设计（"应该很方便"的落点）
 
 | 场景 | 设计 |

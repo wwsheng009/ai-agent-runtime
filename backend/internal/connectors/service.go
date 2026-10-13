@@ -12,6 +12,18 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/api"
 )
 
+// DefaultOwnerHeartbeatInterval 是运行归属心跳的默认刷新间隔（Deps 可覆盖）。
+const DefaultOwnerHeartbeatInterval = 30 * time.Second
+
+var (
+	// ErrHostIDRequired：宿主未配置 Deps.HostID，无法认领/接管运行归属。
+	ErrHostIDRequired = errors.New("connectors: host id is not configured")
+	// ErrConnectorDisabled：对停用连接器执行运行归属操作（如抢占）。
+	ErrConnectorDisabled = errors.New("connectors: connector is disabled")
+	// ErrOwnerPolicyMismatch：policy.runtime_owner 指定了其它宿主，本宿主不能接管。
+	ErrOwnerPolicyMismatch = errors.New("connectors: runtime_owner belongs to another host")
+)
+
 // Deps 是 Service 的依赖注入点（宿主提供存储与 agent 后端）。
 type Deps struct {
 	Store   Store
@@ -27,6 +39,16 @@ type Deps struct {
 	// aicli 宿主设为 true；runtime-server 保持 false 以兼容既有部署（仅在
 	// 宿主侧对「启用且白名单为空」的连接器记 warn）。
 	RequireAllowedUsers bool
+	// HostID 是本宿主的运行归属身份（"runtime-server" / "aicli" / "gateway"，
+	// docs/bots/07-config-ux.md §5.6）：启动时据此认领、轮询期间续约、停机释放。
+	// 为空时跳过归属闸（兼容旧宿主与测试），REST takeover 会明确返回错误。
+	HostID string
+	// OwnerStaleAfter 是运行归属心跳超时：持锁宿主超过该时长未续约即视为陈旧，
+	// 后来者可接管；<=0 用 DefaultOwnerStaleAfter（90s）。测试可缩短。
+	OwnerStaleAfter time.Duration
+	// OwnerHeartbeatInterval 是归属心跳刷新间隔；<=0 用
+	// DefaultOwnerHeartbeatInterval（30s）。测试可缩短。
+	OwnerHeartbeatInterval time.Duration
 }
 
 // Service 编排连接器：注册 Provider、按配置启动轮询、处理入站消息并投递回复。
@@ -146,6 +168,8 @@ func (s *Service) StopConnector(id string) {
 	if ok && run != nil && run.cancel != nil {
 		run.cancel()
 	}
+	// 停机尽力释放本宿主认领（非本宿主持有时是 no-op；见 07 §5.6）。
+	s.releaseOwner(id)
 }
 
 // Provider 按通道名返回适配器（管理面用于探测能力，如 WebhookProvider）。
@@ -170,14 +194,48 @@ func (s *Service) ReloadConnector(ctx context.Context, id string) error {
 	return nil
 }
 
+// TakeoverConnector 强制接管指定连接器的运行归属（管理面「抢占」，07 §5.6）：
+// 停掉本宿主旧实例 → 无视心跳强制认领 → 启用项重新启动轮询（ReloadConnector）。
+// 策略优先：policy.runtime_owner 显式指定其它宿主时拒绝接管（先改策略再抢占）；
+// 停用连接器拒绝接管（无轮询可跑）。
+// 注意边界：抢占只改写归属账本，不会直接杀死对端进程——对端的归属心跳会观察到
+// held=false 并自行停止轮询（尽力围栏，不做分布式强保证）。
+func (s *Service) TakeoverConnector(ctx context.Context, id string) error {
+	if s == nil || s.deps.Store == nil {
+		return ErrServiceNotConfigured
+	}
+	hostID := s.hostID()
+	if hostID == "" {
+		return ErrHostIDRequired
+	}
+	id = strings.TrimSpace(id)
+	cfg, ok := s.deps.Store.GetConfig(id)
+	if !ok {
+		return fmt.Errorf("connectors: unknown connector %q", id)
+	}
+	if !cfg.Enabled {
+		return fmt.Errorf("%w: %q", ErrConnectorDisabled, id)
+	}
+	if policyOwner := strings.TrimSpace(cfg.Policy.RuntimeOwner); policyOwner != "" && !strings.EqualFold(policyOwner, "auto") && !strings.EqualFold(policyOwner, hostID) {
+		return fmt.Errorf("%w: policy.runtime_owner=%s", ErrOwnerPolicyMismatch, policyOwner)
+	}
+	s.StopConnector(id)
+	if err := s.deps.Store.ForceClaimConnectorOwner(id, hostID, time.Now().UTC()); err != nil {
+		return err
+	}
+	return s.ReloadConnector(ctx, id)
+}
+
 // Stop 停止全部连接器与队列（取消 Service 生命周期 ctx）。
 func (s *Service) Stop(ctx context.Context) {
 	s.mu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(s.running))
+	ids := make([]string, 0, len(s.running))
 	for id, run := range s.running {
 		if run != nil && run.cancel != nil {
 			cancels = append(cancels, run.cancel)
 		}
+		ids = append(ids, id)
 		delete(s.running, id)
 	}
 	if s.baseCancel != nil {
@@ -189,6 +247,9 @@ func (s *Service) Stop(ctx context.Context) {
 		if cancel != nil {
 			cancel()
 		}
+	}
+	for _, id := range ids {
+		s.releaseOwner(id)
 	}
 	s.queue.closeAll()
 }
@@ -205,6 +266,19 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 		s.logf("connector %s: policy.allowed_users 为空，fail-closed 安全闸已跳过启动；需在策略中配置 allowed_users，或显式关闭该闸（RequireAllowedUsers=false）", cfg.ID)
 		return
 	}
+	// 运行归属闸（07 §5.6）：同一通道的轮询/WS 只能一处运行。只有策略允许且
+	// 存储认领成功（先到先得，或持有者心跳已陈旧）才继续；否则只读配置、不轮询。
+	if !s.acquireOwnership(cfg) {
+		return
+	}
+	// 认领后到轮询登记之间的任何提前返回都要释放归属；登记成功后由轮询
+	// goroutine 接管释放职责（代际校验避免误放新实例的认领）。
+	releaseOnExit := true
+	defer func() {
+		if releaseOnExit {
+			s.releaseOwner(cfg.ID)
+		}
+	}()
 	provider, ok := s.provider(cfg.Provider)
 	if !ok {
 		s.logf("connector %s: provider %q not registered; skipped", cfg.ID, cfg.Provider)
@@ -234,19 +308,28 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 	run := &connectorRun{gen: s.gen, cancel: cancel}
 	s.running[cfg.ID] = run
 	s.mu.Unlock()
+	releaseOnExit = false
 
+	go s.heartbeatOwner(runCtx, cfg.ID, cancel)
 	go func() {
 		s.logf("connector %s: polling started (provider=%s)", cfg.ID, cfg.Provider)
 		err := poller.RunPolling(runCtx, cfg, s.HandleInbound, s.deps.Store.PollingState(cfg.ID))
 		if err != nil && runCtx.Err() == nil {
 			s.logf("connector %s: polling stopped: %v", cfg.ID, err)
 		}
+		ours := false
 		s.mu.Lock()
 		// 仅在登记项仍属于本代际时清理；否则会误删 Reload/重启后的新登记。
 		if current, ok := s.running[cfg.ID]; ok && current != nil && current.gen == run.gen {
 			delete(s.running, cfg.ID)
+			ours = true
 		}
 		s.mu.Unlock()
+		if ours {
+			// 轮询自然退出（非 Stop）：立即释放归属，让其它宿主可接管，
+			// 不必等心跳超时。
+			s.releaseOwner(cfg.ID)
+		}
 	}()
 }
 
@@ -259,6 +342,94 @@ func (s *Service) baseContext() context.Context {
 		return s.baseCtx
 	}
 	return context.Background()
+}
+
+// acquireOwnership 是启动时的运行归属闸（07 §5.6），在 fail-closed 白名单闸之后：
+//   - 未配置 HostID：跳过（兼容旧宿主/测试）；
+//   - policy.runtime_owner 显式指定其它宿主：不认领（策略优先）；
+//   - 其它情况尝试原子认领：已被存活宿主持有则返回 false，调用方只读配置、不轮询。
+func (s *Service) acquireOwnership(cfg Config) bool {
+	hostID := s.hostID()
+	if hostID == "" || s.deps.Store == nil {
+		return true
+	}
+	if policyOwner := strings.TrimSpace(cfg.Policy.RuntimeOwner); policyOwner != "" && !strings.EqualFold(policyOwner, "auto") && !strings.EqualFold(policyOwner, hostID) {
+		s.logf("connector %s: 未运行（由 %s 持有；policy.runtime_owner=%s）", cfg.ID, policyOwner, policyOwner)
+		return false
+	}
+	claimed, owner, err := s.deps.Store.ClaimConnectorOwner(cfg.ID, hostID, time.Now().UTC(), s.ownerStaleAfter())
+	if err != nil {
+		// 归属账本不可读写时宁可跳过启动：双宿主同时轮询的破坏性大于停跑。
+		s.logf("connector %s: 认领运行归属失败，跳过启动: %v", cfg.ID, err)
+		return false
+	}
+	if !claimed {
+		if strings.TrimSpace(owner) == "" {
+			owner = "其它宿主"
+		}
+		s.logf("connector %s: 未运行（由 %s 持有）", cfg.ID, owner)
+		return false
+	}
+	return true
+}
+
+// releaseOwner 尽力释放本宿主对连接器的运行归属（幂等；非本宿主持有时 no-op）。
+func (s *Service) releaseOwner(connectorID string) {
+	hostID := s.hostID()
+	if hostID == "" || s.deps.Store == nil {
+		return
+	}
+	if err := s.deps.Store.ReleaseConnectorOwner(connectorID, hostID); err != nil {
+		s.logf("connector %s: 释放运行归属失败: %v", connectorID, err)
+	}
+}
+
+// heartbeatOwner 在轮询生命周期内周期性续约运行归属；一旦发现归属已被他人
+// 接管/释放（例如管理面「抢占」或陈旧接管），立即取消本实例轮询（尽力围栏）。
+func (s *Service) heartbeatOwner(ctx context.Context, connectorID string, cancel context.CancelFunc) {
+	hostID := s.hostID()
+	if hostID == "" || s.deps.Store == nil {
+		return
+	}
+	ticker := time.NewTicker(s.ownerHeartbeatInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			held, err := s.deps.Store.HeartbeatConnectorOwner(connectorID, hostID, time.Now().UTC())
+			if err != nil {
+				s.logf("connector %s: 刷新运行归属心跳失败: %v", connectorID, err)
+				continue
+			}
+			if !held {
+				s.logf("connector %s: 运行归属已被接管，停止本宿主轮询", connectorID)
+				if cancel != nil {
+					cancel()
+				}
+				return
+			}
+		}
+	}
+}
+
+func (s *Service) hostID() string {
+	return strings.TrimSpace(s.deps.HostID)
+}
+
+func (s *Service) ownerStaleAfter() time.Duration {
+	if s.deps.OwnerStaleAfter > 0 {
+		return s.deps.OwnerStaleAfter
+	}
+	return DefaultOwnerStaleAfter
+}
+
+func (s *Service) ownerHeartbeatInterval() time.Duration {
+	if s.deps.OwnerHeartbeatInterval > 0 {
+		return s.deps.OwnerHeartbeatInterval
+	}
+	return DefaultOwnerHeartbeatInterval
 }
 
 // HandleInbound 是 webhook 与轮询共用的入站入口：
