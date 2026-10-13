@@ -107,6 +107,24 @@
   （runtime-server `approve_tool`/`answer_question`、aicli actor 响应通道、gateway
   隧道节点命令）并把 approval_requested/question_asked/completion/error 事件接
   `NotifyAttention`；与 Web Push/ntfy 的跨通道去重（notify.Dispatcher）。
+- 状态（2026-10-14，宿主接线切片，FR-7/FR-8）：runtime-server + aicli 命令闭环
+  ✅、runtime-server 注意力出站 ✅、gateway 待接。
+  - runtime-server（`cmd/runtime-server/connector_bootstrap.go` +
+    `internal/api/runtimeapi/connector_host.go`）：`/approve [request_id]`、`/deny
+    [request_id]` 从 durable runtime state 解析当前挂起审批（缺省=当前挂起项，
+    不匹配不触碰 actor），经 hub → `actor.ApproveToolWithDecision`（与 REST
+    `approve_tool` 同路径）；`/answer <1|question_id> <内容>` → `actor.AnswerQuestion`
+    （与 REST `answer_question` 同路径，回答保留原文内部空白）；无绑定/无挂起项/
+    目标不匹配 → `Handled=false` + 文案。注意力出站订阅 `approval_requested`/
+    `question_asked`/`agent.turn.finished`（与 `gateway_attention.go` 同源），映射
+    `AttentionNotice` → `Service.NotifyAttention`，进程内事件级去重 + 有界异步
+    队列（不阻塞事件总线），订阅随宿主 close 退订；无 IM 绑定的 session 不出站
+    （`NotifySession` 反查为空即 no-op）。
+  - aicli（`cmd/aicli/commands/connector_host.go`）：同一参数解释；审批走
+    `localActorRegistry.ResolveApproval`，回答走 `ConnectorAnswerQuestion`
+    （同源解析目标会话后 `actor.AnswerQuestion`，与 TUI/Web 同一入口）。
+  - **待续**：aicli 注意力出站订阅、gateway 命令隧道 + pushNotifier 共用去重键、
+    跨通道统一去重（notify.Dispatcher）。
 
 ### P2 · aicli 本地接入 + QQ（≈3–4 天）
 
@@ -185,7 +203,7 @@
   （◐ 通道核心 + polling + runtime-server 宿主接线 + React 配置页已就绪；「重启续传不重复」已有自动化 e2e
   （假 Bot API 重投 + storefile 文件态，`internal/connectors/e2e_restart_test.go`）；aicli 宿主接线已落地
   （`cmd/aicli/commands/connector_host.go`）；真实 token 联通验证待续）
-  - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环（核心命令路由与出站助手已就绪，宿主 `CommandBackend` 接线待续）；完成提醒送达且与 Web Push/ntfy 去重。
+  - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环（runtime-server/aicli 已接，gateway 待接）；完成提醒送达且与 Web Push/ntfy 去重（runtime-server IM 出站已接、进程内事件级去重，跨通道去重待 notify.Dispatcher）。
   （◐ gateway 宿主接线已落地：storejson 存储 + `Backend=gateway_node`（经隧道
   `POST /web/api/invoke`）+ `/api/connectors*`（owner）/`/hooks/connectors/*`
   （Provider 验签）+ console `#connectors` 最小列表页；「飞书 ↔ gateway → 节点会话」

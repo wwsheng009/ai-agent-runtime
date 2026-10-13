@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"strings"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // 本文件是 runtime-server 宿主接入 IM 连接器（docs/bots/06-target-architecture.md
@@ -132,6 +135,173 @@ func (h *Handler) subscribeConnectorDeltas(sessionID string, onDelta func(text s
 			}
 		})
 		if unsub != nil {
+			unsubscribes = append(unsubscribes, unsub)
+		}
+	}
+	if len(unsubscribes) == 0 {
+		return nil
+	}
+	return func() {
+		for _, unsub := range unsubscribes {
+			unsub()
+		}
+	}
+}
+
+// ── 审批/提问命令执行面（FR-7）：IM /approve /deny /answer 的宿主侧入口 ──────
+//
+// 与 REST `/sessions/{id}/runtime/commands` 的 approve_tool / answer_question
+// 同一语义：hub.GetOrCreate → actor.ApproveToolWithDecision / actor.AnswerQuestion。
+// 挂起项解析统一读 durable runtime state（与 GET /sessions/{id}/runtime 同源），
+// 保证 IM 命令看到与 Web 控制台一致的事实。
+
+// ConnectorCommandOutcome 是一次 IM 审批命令在会话 actor 上的执行结果。
+type ConnectorCommandOutcome struct {
+	SessionID  string
+	RequestID  string
+	Allowed    bool
+	Resumed    bool
+	Resolution string
+}
+
+// ConnectorPendingApprovalID 返回会话当前挂起的审批 request_id（无则空串）。
+func (h *Handler) ConnectorPendingApprovalID(ctx context.Context, sessionID string) (string, error) {
+	state, err := h.connectorRuntimeState(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if state == nil || state.PendingApproval == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(state.PendingApproval.ID), nil
+}
+
+// ConnectorPendingQuestionID 返回会话当前挂起的提问 question_id（无则空串）。
+func (h *Handler) ConnectorPendingQuestionID(ctx context.Context, sessionID string) (string, error) {
+	state, err := h.connectorRuntimeState(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if state == nil || state.PendingQuestion == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(state.PendingQuestion.ID), nil
+}
+
+// ConnectorSessionParked 报告会话是否持有 durable 挂起 turn（§6.12）：此时
+// agent.turn.finished 只代表当前 run 收尾，不代表托管 turn 完成（与
+// gateway_attention.go 的 completed/waiting 判定同源）。
+func (h *Handler) ConnectorSessionParked(sessionID string) bool {
+	return h.sessionHasParkedTurnRecord(sessionID)
+}
+
+// connectorRuntimeState 读取会话 durable 运行态；runtime store 未装配时回落到
+// 进程内 actor 状态（与 ResolveApproval 的会话解析口径一致）。
+func (h *Handler) connectorRuntimeState(ctx context.Context, sessionID string) (*runtimechat.RuntimeState, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	if store := h.getSessionRuntimeStore(); store != nil {
+		return store.LoadState(ctx, sessionID)
+	}
+	hub := h.getSessionHub()
+	if hub == nil {
+		return nil, fmt.Errorf("session hub not configured")
+	}
+	actor, err := hub.GetOrCreate(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return actor.StateForInspection(), nil
+}
+
+// ConnectorDecideApproval 批准/拒绝一个已确认挂起的审批（requestID 必填）：
+// 与 REST approve_tool 同一调用路径（hub → actor.ApproveToolWithDecision）。
+func (h *Handler) ConnectorDecideApproval(ctx context.Context, sessionID, requestID string, allow bool) (ConnectorCommandOutcome, error) {
+	outcome := ConnectorCommandOutcome{
+		SessionID: strings.TrimSpace(sessionID),
+		RequestID: strings.TrimSpace(requestID),
+		Allowed:   allow,
+	}
+	if h == nil {
+		return outcome, fmt.Errorf("handler is nil")
+	}
+	if outcome.SessionID == "" {
+		return outcome, fmt.Errorf("session id is required")
+	}
+	if outcome.RequestID == "" {
+		return outcome, fmt.Errorf("request id is required")
+	}
+	hub := h.getSessionHub()
+	if hub == nil {
+		return outcome, fmt.Errorf("session hub not configured")
+	}
+	actor, err := hub.GetOrCreate(outcome.SessionID)
+	if err != nil {
+		return outcome, err
+	}
+	if err := actor.ApproveToolWithDecision(ctx, outcome.RequestID, runtimechat.ApproveToolDecision{Allow: allow}); err != nil {
+		return outcome, err
+	}
+	resolution, resumed := actor.ApprovalOutcome(outcome.RequestID)
+	outcome.Resolution = resolution
+	outcome.Resumed = resumed
+	if toolbroker.ApprovalResolutionNotApplied(resolution) {
+		// 决定已记录但未生效（原 run 已终态）：按事实报告未批准，不谎报已生效。
+		outcome.Allowed = false
+	}
+	return outcome, nil
+}
+
+// ConnectorAnswerQuestion 回答一个已确认挂起的提问（questionID 必填）：
+// 与 REST answer_question 同一调用路径（hub → actor.AnswerQuestion）。
+func (h *Handler) ConnectorAnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error {
+	if h == nil {
+		return fmt.Errorf("handler is nil")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	questionID = strings.TrimSpace(questionID)
+	if questionID == "" {
+		return fmt.Errorf("question id is required")
+	}
+	hub := h.getSessionHub()
+	if hub == nil {
+		return fmt.Errorf("session hub not configured")
+	}
+	actor, err := hub.GetOrCreate(sessionID)
+	if err != nil {
+		return err
+	}
+	return actor.AnswerQuestion(ctx, questionID, answer)
+}
+
+// connectorAttentionEventTypes 是连接器注意力出站（FR-7/FR-8）订阅的事件类型：
+// 审批请求、提问请求与回合结束（completion）。事件名与 gateway_attention.go
+// 的状态投影同源，避免两套 attention 语义漂移。
+var connectorAttentionEventTypes = []string{
+	runtimechat.EventApprovalRequested,
+	runtimechat.EventQuestionAsked,
+	runtimeobserve.EventAgentTurnDone,
+}
+
+// SubscribeConnectorAttentionEvents 订阅连接器注意力出站所需的事件，返回退订
+// 函数；事件总线不可用时返回 nil（连接器退化为仅命令/回复闭环）。订阅方负责
+// 退订（宿主 close / ctx 取消时调用返回的函数）。
+func (h *Handler) SubscribeConnectorAttentionEvents(handler func(runtimeevents.Event)) func() {
+	if h == nil || handler == nil {
+		return nil
+	}
+	bus := h.getRuntimeEventBus()
+	if bus == nil {
+		return nil
+	}
+	unsubscribes := make([]func(), 0, len(connectorAttentionEventTypes))
+	for _, eventType := range connectorAttentionEventTypes {
+		if unsub := bus.SubscribeCancelable(eventType, handler); unsub != nil {
 			unsubscribes = append(unsubscribes, unsub)
 		}
 	}

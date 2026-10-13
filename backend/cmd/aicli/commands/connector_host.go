@@ -15,6 +15,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/feishu"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/qqbot"
@@ -34,6 +36,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // startAICLIChatConnectors 解析共享 config.yaml 的写入路径并装配连接器宿主。
@@ -231,6 +234,40 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 type localConnectorBackend struct {
 	host *localChatRuntimeHost
 	logf func(format string, args ...any)
+	// commands 是测试注入的命令面替身；nil 时由 host.ActorRegistry 适配。
+	commands localConnectorCommandPlane
+}
+
+// localConnectorCommandPlane 是 IM 审批/提问命令依赖的 actor 响应入口：
+// 生产实现是 localConnectorActorCommands（包装 localActorRegistry），
+// 测试可注入替身验证命令转发（无需真实 actor 运行）。
+type localConnectorCommandPlane interface {
+	ResolveApproval(ctx context.Context, args toolbroker.ResolveAgentApprovalArgs) (*toolbroker.AgentApprovalResult, error)
+	AnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error
+}
+
+// localConnectorActorCommands 把 localActorRegistry 适配为命令面（与 TUI 同一入口）。
+type localConnectorActorCommands struct {
+	registry *localActorRegistry
+}
+
+func (c localConnectorActorCommands) ResolveApproval(ctx context.Context, args toolbroker.ResolveAgentApprovalArgs) (*toolbroker.AgentApprovalResult, error) {
+	return c.registry.ResolveApproval(ctx, args)
+}
+
+func (c localConnectorActorCommands) AnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error {
+	return c.registry.ConnectorAnswerQuestion(ctx, sessionID, questionID, answer)
+}
+
+// commandPlane 解析实际使用的命令面（注入替身优先，其次 host.ActorRegistry）。
+func (b localConnectorBackend) commandPlane() localConnectorCommandPlane {
+	if b.commands != nil {
+		return b.commands
+	}
+	if b.host == nil || b.host.ActorRegistry == nil {
+		return nil
+	}
+	return localConnectorActorCommands{registry: b.host.ActorRegistry}
 }
 
 func (b localConnectorBackend) Name() string { return "aicli" }
@@ -301,4 +338,198 @@ func localConnectorSessionID(connectorID, chat string) string {
 		id = id[:80]
 	}
 	return id
+}
+
+// ── 审批/提问命令（FR-7）：/approve /deny /answer 的 IM 闭环 ────────────────
+
+// DecideApproval 处理 /approve 与 /deny：解析可选 request_id → 校验它确实是
+// 当前挂起项 → 走 localActorRegistry.ResolveApproval（与 Web/TUI 同一 actor 入口）。
+// 无挂起项/目标不匹配返回 Handled=false + 明确文案（不报错、不落 turn）。
+func (b localConnectorBackend) DecideApproval(ctx context.Context, req connectors.CommandRequest) (connectors.CommandResult, error) {
+	sessionID := b.commandSessionID(req)
+	commands := b.commandPlane()
+	if commands == nil {
+		return connectors.CommandResult{}, errors.New("aicli: 本机 chat 运行时未就绪（连接器需要运行在 aicli chat 会话内）")
+	}
+	allow := !strings.EqualFold(strings.TrimSpace(req.Command), "deny")
+	requested := ""
+	if len(req.Args) > 0 {
+		requested = strings.TrimSpace(req.Args[0])
+	}
+	pendingID, err := b.connectorPendingApprovalID(ctx, sessionID)
+	if err != nil {
+		return connectors.CommandResult{}, fmt.Errorf("resolve pending approval: %w", err)
+	}
+	if pendingID == "" {
+		return localConnectorCommandNotice("当前没有待审批项（可能已由其它入口处理）。"), nil
+	}
+	if requested != "" && requested != pendingID {
+		return localConnectorCommandNotice(fmt.Sprintf("request_id 与当前待审批项不匹配：当前待审批项为 %s。", pendingID)), nil
+	}
+	outcome, err := commands.ResolveApproval(ctx, toolbroker.ResolveAgentApprovalArgs{
+		ID:        sessionID,
+		RequestID: pendingID,
+		Allow:     allow,
+	})
+	if err != nil {
+		return connectors.CommandResult{}, fmt.Errorf("resolve approval %s: %w", pendingID, err)
+	}
+	if outcome == nil {
+		return connectors.CommandResult{}, errors.New("aicli: empty approval result")
+	}
+	text := "已拒绝：" + pendingID
+	if outcome.Allowed {
+		text = "已批准：" + pendingID
+		if outcome.Resumed {
+			text += "（已恢复运行）"
+		}
+	} else if allow {
+		// 批准决定已记录但未生效（原 run 已终态）：按事实报告，不谎报已批准。
+		text = "审批未生效（原回合已终止）：" + pendingID
+	}
+	return connectors.CommandResult{Handled: true, Reply: []connectors.OutboundMessage{{Text: text}}}, nil
+}
+
+// AnswerQuestion 处理 /answer：Args[0] 为序号（1 = 当前挂起提问）或 question_id，
+// 其余为回答内容（保留内部空白）。无挂起项/目标不匹配返回 Handled=false + 文案。
+func (b localConnectorBackend) AnswerQuestion(ctx context.Context, req connectors.CommandRequest) (connectors.CommandResult, error) {
+	sessionID := b.commandSessionID(req)
+	commands := b.commandPlane()
+	if commands == nil {
+		return connectors.CommandResult{}, errors.New("aicli: 本机 chat 运行时未就绪（连接器需要运行在 aicli chat 会话内）")
+	}
+	pendingID, err := b.connectorPendingQuestionID(ctx, sessionID)
+	if err != nil {
+		return connectors.CommandResult{}, fmt.Errorf("resolve pending question: %w", err)
+	}
+	if pendingID == "" {
+		return localConnectorCommandNotice("当前没有待回答的问题（可能已回答或已过期）。"), nil
+	}
+	ref := ""
+	if len(req.Args) > 0 {
+		ref = strings.TrimSpace(req.Args[0])
+	}
+	switch {
+	case ref == "", ref == "1", ref == pendingID:
+		// 单挂起提问模型：序号 1 与 question_id 都指向当前挂起项。
+	default:
+		return localConnectorCommandNotice(fmt.Sprintf("序号/问题 id 与当前待回答的问题不匹配（当前问题：%s；可用 /answer 1 <内容>）。", pendingID)), nil
+	}
+	answer := localConnectorAnswerText(req.Text, ref)
+	if err := commands.AnswerQuestion(ctx, sessionID, pendingID, answer); err != nil {
+		return connectors.CommandResult{}, fmt.Errorf("answer question %s: %w", pendingID, err)
+	}
+	text := "已提交回答：" + pendingID
+	if strings.TrimSpace(answer) == "" {
+		text += "（空回答）"
+	}
+	return connectors.CommandResult{Handled: true, Reply: []connectors.OutboundMessage{{Text: text}}}, nil
+}
+
+// commandSessionID 解析命令目标会话：优先绑定会话，未绑定时回落确定性派生 id
+// （与 Handle 的自动建会话同源；查无挂起项时自然返回 Handled=false）。
+func (b localConnectorBackend) commandSessionID(req connectors.CommandRequest) string {
+	if sessionID := strings.TrimSpace(req.Session.SessionID); sessionID != "" {
+		return sessionID
+	}
+	return localConnectorSessionID(req.ConnectorID, req.Chat)
+}
+
+// connectorPendingApprovalID / connectorPendingQuestionID 读本机会话 durable
+// 运行态（与 runtime-server 同源口径）；RuntimeStore 未装配时回落到 actor 内存态。
+func (b localConnectorBackend) connectorPendingApprovalID(ctx context.Context, sessionID string) (string, error) {
+	state, err := b.connectorRuntimeState(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if state == nil || state.PendingApproval == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(state.PendingApproval.ID), nil
+}
+
+func (b localConnectorBackend) connectorPendingQuestionID(ctx context.Context, sessionID string) (string, error) {
+	state, err := b.connectorRuntimeState(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if state == nil || state.PendingQuestion == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(state.PendingQuestion.ID), nil
+}
+
+func (b localConnectorBackend) connectorRuntimeState(ctx context.Context, sessionID string) (*runtimechat.RuntimeState, error) {
+	if b.host == nil {
+		return nil, errors.New("aicli: 本机 chat 运行时未就绪")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, errors.New("session id is required")
+	}
+	if store := b.host.RuntimeStore; store != nil {
+		return runtimechat.LoadRuntimeStateForInspection(ctx, store, sessionID)
+	}
+	if b.host.SessionHub == nil {
+		return nil, errors.New("aicli: session hub not configured")
+	}
+	actor, err := b.host.SessionHub.GetOrCreate(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return actor.StateForInspection(), nil
+}
+
+// localConnectorCommandNotice 构造 Handled=false 的明确文案（核心会原样回给 IM）。
+func localConnectorCommandNotice(text string) connectors.CommandResult {
+	return connectors.CommandResult{Handled: false, Reply: []connectors.OutboundMessage{{Text: text}}}
+}
+
+// localConnectorAnswerText 从命令原文剥离首个参数（序号/问题 id），保留回答内容
+// 的内部空白（Args 分词会丢空格，不能直接 join）。
+func localConnectorAnswerText(text, first string) string {
+	text = strings.TrimSpace(text)
+	if first == "" {
+		return text
+	}
+	if strings.HasPrefix(text, first) {
+		rest := text[len(first):]
+		if rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r' {
+			return strings.TrimSpace(rest)
+		}
+	}
+	fields := strings.Fields(text)
+	if len(fields) <= 1 {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
+}
+
+// ConnectorAnswerQuestion 是 IM /answer 命令的 actor 入口：与 ResolveApproval
+// 同源地解析目标会话后调用 actor.AnswerQuestion（与 TUI/Web 同一入口）。
+func (r *localActorRegistry) ConnectorAnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error {
+	if r == nil || r.Host == nil || r.Host.SessionHub == nil {
+		return errors.New("session hub not configured")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return errors.New("session id is required")
+	}
+	questionID = strings.TrimSpace(questionID)
+	if questionID == "" {
+		return errors.New("question id is required")
+	}
+	resolvedSessionID, err := r.resolveLocalAgentTargetSessionID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	sessionID = resolvedSessionID
+	if err := r.ensureSession(ctx, sessionID); err != nil {
+		return err
+	}
+	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
+	if err != nil {
+		return err
+	}
+	return actor.AnswerQuestion(ctx, questionID, answer)
 }

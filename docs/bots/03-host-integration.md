@@ -216,8 +216,9 @@
   `bot_token`（`client.Do` 的 URL 内嵌）；Schema 只声明已实现的能力
   （Telegram 暂仅 `polling`，`HandleWebhook` 实现后再加回 `webhook`）。
 
-**审批/提问命令闭环 + 注意力出站（2026-10-13，FR-7/FR-8 基础切片）**：核心侧已提供
-命令路由、宿主能力接口与出站助手（`backend/internal/connectors`），宿主接线待续。
+**审批/提问命令闭环 + 注意力出站（2026-10-13 核心 / 2026-10-14 宿主接线，FR-7/FR-8）**：
+核心侧提供命令路由、宿主能力接口与出站助手（`backend/internal/connectors`）；
+runtime-server 与 aicli 已完成命令闭环，runtime-server 另完成注意力出站，gateway 待接。
 
 - 命令语义（IM 文本命令：核心解析、宿主执行；命令路径不计入普通 turn 计数）：
 
@@ -242,13 +243,17 @@
 - 反向查询：`Store.ListBindings(connectorID)`（只读；空 = 全部）已落地三实现
   （MemoryStore / storefile / storejson），输出按 connector+chat 排序；绑定数通常
   几十~几百，实现为全表扫描（storefile/storejson 整体读 state 文件），勿在热路径高频调用。
-- **三宿主待接清单（命令闭环 + 出站接线）**：
+- **三宿主接线状态（命令闭环 + 出站接线）**：
 
-  | 宿主 | 待接内容 |
-  |------|----------|
-  | runtime-server | ① Backend 实现 `CommandBackend`：`DecideApproval` 复用 session runtime 命令 `approve_tool`、`AnswerQuestion` 复用 `answer_question`（`session_runtime_handlers.go`）；② 把 `approval_requested`/`question_asked`/完成/错误事件接到 `NotifyAttention`（与收件箱/Web Push 同一事件源，注意跨通道去重） |
-  | aicli | ① Backend 实现 `CommandBackend`：走 actor 的审批/提问响应通道（与 TUI 同一入口）；② 把 chat 的 approval/question/completion 通知接到 `NotifyAttention` |
-  | gateway | ① `gateway_node` Backend 实现 `CommandBackend`：经隧道把命令转给节点会话（与入站 `submit_prompt` 同链路，节点侧需新增命令转发）；② 把 gateway 现有 attention 差分（`push.go`）接 `NotifyAttention`，与 pushNotifier 共用去重键 |
+  | 宿主 | 命令闭环（FR-7） | 注意力出站（FR-8） |
+  |------|------------------|--------------------|
+  | runtime-server | ✅ `cmd/runtime-server/connector_bootstrap.go` + `internal/api/runtimeapi/connector_host.go`：`/approve [request_id]`、`/deny [request_id]` 先读 durable runtime state（与 `GET /sessions/{id}/runtime` 同源）解析当前挂起审批，再经 hub → `actor.ApproveToolWithDecision`（与 REST `approve_tool` 同一路径，`request_id` 缺省=当前挂起项、不匹配=不触碰 actor）；`/answer <1\|question_id> <内容>` → `actor.AnswerQuestion`（与 REST `answer_question` 同一路径，序号 1=当前挂起提问）；无绑定会话/无挂起项/目标不匹配 → `Handled=false` + 明确文案（不报错、不落普通 turn） | ✅ 订阅 `approval_requested`/`question_asked`/`agent.turn.finished`（与 `gateway_attention.go` 同一事件源），映射 `AttentionNotice` → `Service.NotifyAttention`；进程内事件级去重（request/question/turn id，缺失回落事件时间戳）+ 有界异步队列（不阻塞事件总线发布方，队列满丢弃记日志）；订阅随宿主 ctx（close）退订；§6.12 托管挂起的 turn.finished 按 waiting 文案出站（与 gateway 状态投影同口径） |
+  | aicli | ✅ `cmd/aicli/commands/connector_host.go`：同一参数解释；审批走 `localActorRegistry.ResolveApproval`（`toolbroker.ResolveAgentApprovalArgs`，与 Web/TUI 同一 actor 入口），回答走新增 `ConnectorAnswerQuestion`（与 ResolveApproval 同源解析目标会话后 `actor.AnswerQuestion`）；无挂起项/目标不匹配 → `Handled=false` + 文案 | ◻ 待接：chat 事件 → `NotifyAttention`（可复用 runtime-server 的映射/去重样板） |
+  | gateway | ◻ 待接：`gateway_node` Backend 经隧道把命令转给节点会话（与入站 `submit_prompt` 同链路，节点侧需新增命令转发） | ◻ 待接：把 gateway 现有 attention 差分（`push.go`）接 `NotifyAttention`，与 pushNotifier 共用去重键 |
+
+  > 去重边界：runtime-server 的出站去重是**进程内、事件级**的（保证同一 event 不推两次）；
+  > 与 Web Push/ntfy/收件箱的跨通道统一去重不在本切片（runtime-server 未装配 push/ntfy，
+  > gateway 的 notify 差分在 gateway 宿主），留给 `internal/notify` 的 Dispatcher 切片。
 
 ## 7. 配置存储与迁移
 

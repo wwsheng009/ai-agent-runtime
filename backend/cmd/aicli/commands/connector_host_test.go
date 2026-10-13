@@ -17,9 +17,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 // ── 测试替身 ───────────────────────────────────────────────────────────────
@@ -261,4 +263,182 @@ func TestStartLocalConnectorsHonorsRuntimeOwnerGate(t *testing.T) {
 	joinedLogs := strings.Join(logs, "\n")
 	logsMu.Unlock()
 	require.Contains(t, joinedLogs, "未运行（由 runtime-server 持有")
+}
+
+// ── 审批/提问命令闭环（FR-7）────────────────────────────────────────────────
+
+type stubLocalAnswerCall struct {
+	sessionID  string
+	questionID string
+	answer     string
+}
+
+// stubLocalConnectorCommands 是 localConnectorCommandPlane 的测试替身：
+// 记录转发参数，不发真实 actor 调用（真入口由 registry 的既有用例覆盖）。
+type stubLocalConnectorCommands struct {
+	approvalArgs   []toolbroker.ResolveAgentApprovalArgs
+	approvalResult *toolbroker.AgentApprovalResult
+	approvalErr    error
+	answerCalls    []stubLocalAnswerCall
+	answerErr      error
+}
+
+func (s *stubLocalConnectorCommands) ResolveApproval(_ context.Context, args toolbroker.ResolveAgentApprovalArgs) (*toolbroker.AgentApprovalResult, error) {
+	s.approvalArgs = append(s.approvalArgs, args)
+	if s.approvalErr != nil {
+		return nil, s.approvalErr
+	}
+	if s.approvalResult != nil {
+		return s.approvalResult, nil
+	}
+	return &toolbroker.AgentApprovalResult{SessionID: args.ID, RequestID: args.RequestID, Allowed: args.Allow}, nil
+}
+
+func (s *stubLocalConnectorCommands) AnswerQuestion(_ context.Context, sessionID, questionID, answer string) error {
+	s.answerCalls = append(s.answerCalls, stubLocalAnswerCall{sessionID: sessionID, questionID: questionID, answer: answer})
+	return s.answerErr
+}
+
+func newConnectorCommandTestHost(t *testing.T, approvalID, questionID string) *localChatRuntimeHost {
+	t.Helper()
+	store := runtimechat.NewInMemoryRuntimeStore(64)
+	state := &runtimechat.RuntimeState{SessionID: "sess-1"}
+	if approvalID != "" {
+		state.PendingApproval = &runtimechat.ApprovalRequest{ID: approvalID, ToolName: "shell_exec"}
+	}
+	if questionID != "" {
+		state.PendingQuestion = &runtimechat.UserQuestionRequest{ID: questionID, Prompt: "which env?"}
+	}
+	require.NoError(t, store.SaveState(context.Background(), state))
+	return &localChatRuntimeHost{RuntimeStore: store}
+}
+
+func TestLocalConnectorDecideApprovalForwardsToResolveApproval(t *testing.T) {
+	host := newConnectorCommandTestHost(t, "apr-1", "")
+	stub := &stubLocalConnectorCommands{approvalResult: &toolbroker.AgentApprovalResult{
+		SessionID: "sess-1", RequestID: "apr-1", Allowed: true, Resumed: true,
+	}}
+	backend := localConnectorBackend{host: host, commands: stub, logf: func(string, ...any) {}}
+
+	// 无参 = 当前挂起项。
+	result, err := backend.DecideApproval(context.Background(), connectors.CommandRequest{
+		Command: "approve",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+	})
+	require.NoError(t, err)
+	require.True(t, result.Handled)
+	require.Len(t, result.Reply, 1)
+	require.Contains(t, result.Reply[0].Text, "已批准：apr-1")
+	require.Contains(t, result.Reply[0].Text, "已恢复运行")
+	require.Equal(t, []toolbroker.ResolveAgentApprovalArgs{{
+		ID: "sess-1", RequestID: "apr-1", Allow: true,
+	}}, stub.approvalArgs)
+
+	// 带 request_id 且与当前挂起项一致：同样命中。
+	result, err = backend.DecideApproval(context.Background(), connectors.CommandRequest{
+		Command: "approve",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+		Args:    []string{"apr-1"},
+	})
+	require.NoError(t, err)
+	require.True(t, result.Handled)
+	require.Len(t, stub.approvalArgs, 2)
+}
+
+func TestLocalConnectorDecideApprovalDenyAndNoPending(t *testing.T) {
+	host := newConnectorCommandTestHost(t, "apr-1", "")
+	stub := &stubLocalConnectorCommands{}
+	backend := localConnectorBackend{host: host, commands: stub, logf: func(string, ...any) {}}
+
+	result, err := backend.DecideApproval(context.Background(), connectors.CommandRequest{
+		Command: "deny",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+	})
+	require.NoError(t, err)
+	require.True(t, result.Handled)
+	require.Contains(t, result.Reply[0].Text, "已拒绝：apr-1")
+	require.Len(t, stub.approvalArgs, 1)
+	require.False(t, stub.approvalArgs[0].Allow)
+
+	// 无挂起项：Handled=false + 文案，不得调用 ResolveApproval。
+	emptyHost := newConnectorCommandTestHost(t, "", "")
+	emptyBackend := localConnectorBackend{host: emptyHost, commands: stub, logf: func(string, ...any) {}}
+	result, err = emptyBackend.DecideApproval(context.Background(), connectors.CommandRequest{
+		Command: "approve",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+	})
+	require.NoError(t, err)
+	require.False(t, result.Handled)
+	require.Contains(t, result.Reply[0].Text, "没有待审批项")
+	require.Len(t, stub.approvalArgs, 1, "无挂起项不得转发")
+}
+
+func TestLocalConnectorDecideApprovalMismatchedRequestID(t *testing.T) {
+	host := newConnectorCommandTestHost(t, "apr-1", "")
+	stub := &stubLocalConnectorCommands{}
+	backend := localConnectorBackend{host: host, commands: stub, logf: func(string, ...any) {}}
+
+	result, err := backend.DecideApproval(context.Background(), connectors.CommandRequest{
+		Command: "approve",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+		Args:    []string{"apr-2"},
+	})
+	require.NoError(t, err)
+	require.False(t, result.Handled)
+	require.Contains(t, result.Reply[0].Text, "不匹配")
+	require.Empty(t, stub.approvalArgs)
+}
+
+func TestLocalConnectorAnswerQuestionSequenceAndText(t *testing.T) {
+	host := newConnectorCommandTestHost(t, "", "q-1")
+	stub := &stubLocalConnectorCommands{}
+	backend := localConnectorBackend{host: host, commands: stub, logf: func(string, ...any) {}}
+
+	result, err := backend.AnswerQuestion(context.Background(), connectors.CommandRequest{
+		Command: "answer",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+		Args:    []string{"1", "hello", "world"},
+		Text:    "1 hello world",
+	})
+	require.NoError(t, err)
+	require.True(t, result.Handled)
+	require.Contains(t, result.Reply[0].Text, "已提交回答：q-1")
+	require.Equal(t, []stubLocalAnswerCall{{sessionID: "sess-1", questionID: "q-1", answer: "hello world"}}, stub.answerCalls)
+
+	// question_id 直指 + 内部空白保留。
+	result, err = backend.AnswerQuestion(context.Background(), connectors.CommandRequest{
+		Command: "answer",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+		Args:    []string{"q-1", "多", "空格"},
+		Text:    "q-1 多  空格",
+	})
+	require.NoError(t, err)
+	require.True(t, result.Handled)
+	require.Len(t, stub.answerCalls, 2)
+	require.Equal(t, "多  空格", stub.answerCalls[1].answer)
+
+	// 无挂起提问：Handled=false，不转发。
+	emptyHost := newConnectorCommandTestHost(t, "", "")
+	emptyBackend := localConnectorBackend{host: emptyHost, commands: stub, logf: func(string, ...any) {}}
+	result, err = emptyBackend.AnswerQuestion(context.Background(), connectors.CommandRequest{
+		Command: "answer",
+		Session: connectors.SessionRef{SessionID: "sess-1"},
+		Args:    []string{"1", "x"},
+		Text:    "1 x",
+	})
+	require.NoError(t, err)
+	require.False(t, result.Handled)
+	require.Contains(t, result.Reply[0].Text, "没有待回答的问题")
+	require.Len(t, stub.answerCalls, 2)
+}
+
+func TestLocalConnectorCommandBackendWithoutRuntimeFailsSoftly(t *testing.T) {
+	backend := localConnectorBackend{}
+	_, err := backend.DecideApproval(context.Background(), connectors.CommandRequest{Command: "approve"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "本机 chat 运行时未就绪")
+
+	_, err = backend.AnswerQuestion(context.Background(), connectors.CommandRequest{Command: "answer"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "本机 chat 运行时未就绪")
 }
