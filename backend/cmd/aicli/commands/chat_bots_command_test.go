@@ -304,6 +304,22 @@ func TestBotsPollLoginConfirmedBackfills(t *testing.T) {
 	}
 }
 
+func TestBotsRenderQRText(t *testing.T) {
+	blocks, ok := botsRenderQRText("https://ilink.example/login?token=abc123")
+	if !ok {
+		t.Fatal("expected QR render for login link")
+	}
+	if !strings.ContainsAny(blocks, "█▀▄") {
+		t.Fatalf("no block chars in QR:\n%s", blocks)
+	}
+	if lines := strings.Count(blocks, "\n"); lines < 12 {
+		t.Fatalf("QR too small: %d lines", lines)
+	}
+	if _, ok := botsRenderQRText(""); ok {
+		t.Fatal("empty content must not render as QR")
+	}
+}
+
 func TestBotsRenderQRBlocks(t *testing.T) {
 	// 构造 21x21 黑白棋盘 PNG（模拟二维码），转 data URI 后应能渲染出块字符。
 	img := image.NewRGBA(image.Rect(0, 0, 42, 42))

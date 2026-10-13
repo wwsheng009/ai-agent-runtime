@@ -29,6 +29,8 @@ import (
 	"strings"
 	"time"
 
+	qrcode "github.com/skip2/go-qrcode"
+
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/api"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -618,8 +620,15 @@ func botsPrintQR(session *ChatSession, cfg connectors.Config, payload map[string
 			builder.WriteString("二维码为图片格式，终端无法渲染：请在 aicli chat --web 的「机器人」页扫码，或使用 runtime-server 连接器页。")
 		}
 	default:
-		builder.WriteString(content)
-		builder.WriteString("\n用手机打开链接完成登录。")
+		// 平台通常返回登录链接/短码文本：本地做 QR 编码并在终端渲染
+		// （不依赖平台给图）。渲染失败才退回纯链接。
+		if blocks, ok := botsRenderQRText(content); ok {
+			builder.WriteString(blocks)
+			builder.WriteString("\n用手机扫码完成登录；也可打开链接：" + content)
+		} else {
+			builder.WriteString(content)
+			builder.WriteString("\n用手机打开链接完成登录。")
+		}
 	}
 	if expires := botsPayloadString(payload, "expires_at"); expires != "" {
 		fmt.Fprintf(&builder, "\n有效期至 %s；过期会自动换新码。", expires)
@@ -668,6 +677,26 @@ func botsRenderQRBlocks(content string) (string, bool) {
 		return "", false
 	}
 	return out, true
+}
+
+// botsRenderQRText 把任意文本（登录链接/短码）编码为 QR 并在终端渲染。
+// 使用 skip2/go-qrcode（MIT）的 ToSmallString：半块字符（█▀▄ 空格）、无
+// ANSI 码；深色终端下 inverseColor=false 即正确极性（暗模块=终端背景色）。
+// 内容过长/编码失败时返回 ok=false，由调用方回退为打印原文链接。
+func botsRenderQRText(content string) (string, bool) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", false
+	}
+	code, err := qrcode.New(content, qrcode.Medium)
+	if err != nil {
+		return "", false
+	}
+	blocks := code.ToSmallString(false)
+	if strings.TrimSpace(blocks) == "" {
+		return "", false
+	}
+	return blocks, true
 }
 
 // botsSampleDark 判断采样块是否为「暗」（二维码模块）。块内均匀取最多 16 个
