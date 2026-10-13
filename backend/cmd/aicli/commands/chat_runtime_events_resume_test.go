@@ -233,6 +233,34 @@ func TestChatRuntimeEventBridge_ExternalInputCaptureSkipsConsolePrompt(t *testin
 	}
 }
 
+// TestChatRuntimeEventBridge_ConsoleForegroundReleasesWebCapture pins the
+// 2026-10-13 latch fix (session_20261013175416_O9Ughlac). A web injection set
+// webCaptureActive and nothing in the codebase ever cleared it, so the console
+// approval panel was silently skipped for every later turn: approval_requested
+// was published (reason=shell_breaker:root_home_removal) and the session sat in
+// waiting_approval, but only the out-of-band web path could answer and the
+// ReAct loop blocked in RequestApproval until the 30-minute timeout. A console
+// foreground capture must release the web capture so the panel renders again.
+func TestChatRuntimeEventBridge_ConsoleForegroundReleasesWebCapture(t *testing.T) {
+	session := &ChatSession{}
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.writeLine = func(string) {}
+
+	// A web injection latched the capture and no turn has reclaimed stdin yet.
+	session.InputQueue.setWebInputCaptureActive(true)
+	require.True(t, bridge.externalInputCaptureOwnsInput(),
+		"a web injection owns the input face until a console turn reclaims it")
+
+	// A console foreground turn takes over stdin / the prompt row.
+	beginConsoleForegroundInputCapture(session.InputQueue)
+
+	require.False(t, bridge.externalInputCaptureOwnsInput(),
+		"a console foreground turn must release the web capture so approval/question panels render")
+	require.True(t, session.InputQueue.hasExternalInputCaptureActive(),
+		"the console reader still owns the answer path (merged prompt row)")
+}
+
 // TestChatRuntimeEventBridge_BusyCaptureStillPromptsConsole pins the 2026-09-25
 // regression: the TUI's own busy queued-input capture stores the same "capture
 // active" state during every foreground turn (chat_send.go ->

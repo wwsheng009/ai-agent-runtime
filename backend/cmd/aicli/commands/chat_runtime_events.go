@@ -6026,6 +6026,12 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			// 并把事件处理 worker 钉死（见 externalInputCaptureOwnsInput 注释）。
 			// 审批已由 actor 状态投影到 Web 的 pending_approval，决议经
 			// /web/api/input 回流，这里不阻塞、也不代替 Web 决策。
+			//
+			// 保留一条诊断行：这条静默 return 是 2026-10-13 卡死现场
+			// (session_20261013175416_O9Ughlac) 唯一缺失的证据——审批已发布、
+			// 面板却永不渲染，只有日志能区分"面板被跳过"与"事件被丢弃"。
+			b.writeLateRuntimeDebugThrottled(event, fmt.Sprintf("[runtime-event] interactive prompt deferred to web input capture type=%q session_id=%q request_id=%q",
+				event.Type, event.SessionID, requestID))
 			return
 		}
 		if !b.approvalStillPending(event.SessionID, requestID) {
