@@ -65,6 +65,63 @@ func dispatchBusySlashCommandFromMainLoop(session *ChatSession, text string) boo
 	}
 }
 
+// maxDeferredSlashCommands 限制挂起期暂存的 slash 命令数量，防止队列无限增长。
+const maxDeferredSlashCommands = 32
+
+// deferBusySlashCommandFromMainLoop 在挂起态把「deferred 档」slash 命令暂存到
+// 会话级队列，待会话回到 Ready 后由主循环（chatInteractiveReadLine →
+// takeDeferredSlashCommand）取出执行——与运行中 capture 通道的 D 档「入队」语义
+// 一致（不丢输入），替代此前的「直接丢弃 + 暂不接受 slash 命令」。
+//
+// 返回 true 表示已暂存（输入已被本通道占有）。R 档（block，如 /exit）与非 slash
+// 输入返回 false，调用方保持原有拒绝提示路径（fail-closed）。
+func deferBusySlashCommandFromMainLoop(session *ChatSession, text string) bool {
+	if session == nil || session.Interaction == nil || !isSlashCommandInput(text) {
+		return false
+	}
+	if chatInputCommandBusyPolicy(session, text) != chatBusyPolicyDeferred {
+		return false
+	}
+	if !session.enqueueDeferredSlashCommand(text) {
+		return false
+	}
+	session.Interaction.RenderLocalSupplement("[input] 命令已暂存，将在会话回到 Ready 后执行：" + strings.TrimSpace(text))
+	return true
+}
+
+func (c *ChatSession) enqueueDeferredSlashCommand(text string) bool {
+	if c == nil {
+		return false
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	c.deferredSlashMu.Lock()
+	defer c.deferredSlashMu.Unlock()
+	if len(c.deferredSlashCommands) >= maxDeferredSlashCommands {
+		return false
+	}
+	c.deferredSlashCommands = append(c.deferredSlashCommands, text)
+	return true
+}
+
+// takeDeferredSlashCommand 在会话 Ready 时按 FIFO 取出队首暂存命令。非 Ready 时
+// 返回 false（不消费），保证挂起态不会自旋重取同一条命令。
+func takeDeferredSlashCommand(session *ChatSession) (string, bool) {
+	if session == nil || session.Interaction == nil || !session.Interaction.IsReady() {
+		return "", false
+	}
+	session.deferredSlashMu.Lock()
+	defer session.deferredSlashMu.Unlock()
+	if len(session.deferredSlashCommands) == 0 {
+		return "", false
+	}
+	text := session.deferredSlashCommands[0]
+	session.deferredSlashCommands = session.deferredSlashCommands[1:]
+	return text, true
+}
+
 func startBusyQueuedInputCapture(session *ChatSession) func() {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return func() {}

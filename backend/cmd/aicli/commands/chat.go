@@ -167,6 +167,8 @@ type ChatSession struct {
 	inputArbitrationMu        sync.Mutex                           // 保护阶段 F 影子仲裁器（§12.3 P0）
 	inputArbitration          *chatInputArbitrator                 // 统一输入仲裁器：P0 只观测不改变行为
 	busyInteractiveScreen     atomic.Int32                         // 忙时副屏交互窗口计数（>0 = 忙时 S 档副屏/prompt 通道内；语义见 chat_busy_screen_exec.go）
+	deferredSlashMu           sync.Mutex                           // 保护挂起态暂存的 slash 命令队列
+	deferredSlashCommands     []string                             // 挂起态 deferred 档 slash 命令，会话回到 Ready 后由主循环取出执行
 	FunctionCatalog           *aicliFunctionCatalog                // 统一管理 builtin tools + skills + schema cache
 	FunctionRegistry          *functions.FunctionRegistry          // Function 注册表
 	FunctionBuilder           functions.FunctionCallBuilder        // 协议对应的 function/tool builder
@@ -2076,6 +2078,12 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				// 必须在此把 I/S 档命令接回忙时宿主，否则 /agents、/todos、
 				// /help 等设计上允许忙时打开副屏的命令会被整体拒绝（功能隔断）。
 				if dispatchBusySlashCommandFromMainLoop(session, input) {
+					continue
+				}
+				// D 档（queue/prompt/未登记）：与运行中 capture 通道一致地「暂存
+				// 入队」，会话回到 Ready 后执行，而不是直接丢弃并报「暂不接受
+				// slash 命令」（过严：很多命令只是需要延后）。
+				if deferBusySlashCommandFromMainLoop(session, input) {
 					continue
 				}
 				if session != nil && session.Interaction != nil {

@@ -1216,6 +1216,13 @@ func (l chatInputReadLifecycle) resetPromptState() {
 func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string, error) {
 	lifecycle := newChatInputReadLifecycle(session)
 	lifecycle.beginReadyRead()
+	// 挂起期暂存的 deferred 档命令：会话 Ready 后优先取出执行（见
+	// deferBusySlashCommandFromMainLoop）。非 Ready 时 takeDeferredSlashCommand
+	// 不消费，避免自旋重取。
+	if line, ok := takeDeferredSlashCommand(session); ok {
+		lifecycle.markReadyLineQueued(line)
+		return line, nil
+	}
 	if session != nil && session.InputQueue != nil {
 		if line, ok := session.InputQueue.readAvailableLine(); ok {
 			lifecycle.markReadyLineQueued(line)
