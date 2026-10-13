@@ -13,20 +13,29 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 )
 
+// 编译期断言：Provider 同时满足轮询与 webhook 双模式契约。
+var (
+	_ connectors.PollingProvider = (*Provider)(nil)
+	_ connectors.WebhookProvider = (*Provider)(nil)
+)
+
 // ── 假 Telegram Bot API ─────────────────────────────────────────────────────
 
 type fakeAPI struct {
 	mu sync.Mutex
 
-	token        string
-	updates      []map[string]any
-	servedOffset []int64
-	sent         []map[string]any
-	edits        []map[string]any
-	actions      []string
-	failFirst    int // 前 N 次 getUpdates 返回 HTTP 500
-	getMeCalls   int
-	nextID       int64
+	token             string
+	updates           []map[string]any
+	servedOffset      []int64
+	sent              []map[string]any
+	edits             []map[string]any
+	actions           []string
+	failFirst         int // 前 N 次 getUpdates 返回 HTTP 500
+	setWebhooks       []map[string]any
+	deleteWebhooks    int
+	failDeleteWebhook bool
+	getMeCalls        int
+	nextID            int64
 }
 
 func newFakeAPI(token string) *fakeAPI {
@@ -88,6 +97,16 @@ func (f *fakeAPI) handler() http.Handler {
 			action, _ := body["action"].(string)
 			f.actions = append(f.actions, action)
 			writeJSON(w, map[string]any{"ok": true, "result": true})
+		case "setWebhook":
+			f.setWebhooks = append(f.setWebhooks, body)
+			writeJSON(w, map[string]any{"ok": true, "result": true})
+		case "deleteWebhook":
+			f.deleteWebhooks++
+			if f.failDeleteWebhook {
+				writeJSON(w, map[string]any{"ok": false, "error_code": 500, "description": "deleteWebhook boom"})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "result": true})
 		default:
 			writeJSON(w, map[string]any{"ok": false, "error_code": 404, "description": "Not Found"})
 		}
@@ -141,6 +160,18 @@ func (f *fakeAPI) getMeCallsCount() int {
 	return f.getMeCalls
 }
 
+func (f *fakeAPI) setWebhookPayloads() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.setWebhooks...)
+}
+
+func (f *fakeAPI) deleteWebhookCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deleteWebhooks
+}
+
 func writeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
@@ -185,12 +216,11 @@ func TestSchemaContract(t *testing.T) {
 	if schema.Provider != Name || len(schema.Fields) == 0 {
 		t.Fatalf("schema = %+v", schema)
 	}
-	// webhook 入口（HandleWebhook/setWebhook）未实现前只能声明 polling，
-	// 否则前端会放开 webhook 配置但运行时静默失效。
-	if len(schema.Modes) != 1 || schema.Modes[0] != "polling" {
-		t.Fatalf("modes = %v, want [polling]", schema.Modes)
+	// webhook 已实现（HandleWebhook + setWebhook/deleteWebhook），恢复双模式声明。
+	if len(schema.Modes) != 2 || schema.Modes[0] != "polling" || schema.Modes[1] != modeWebhook {
+		t.Fatalf("modes = %v, want [polling webhook]", schema.Modes)
 	}
-	var token, mode, base bool
+	var token, mode, base, webhookURL, webhookSecret bool
 	for _, field := range schema.Fields {
 		switch field.Key {
 		case "bot_token":
@@ -199,9 +229,13 @@ func TestSchemaContract(t *testing.T) {
 			mode = field.Type == "enum" && field.Default == "polling"
 		case "api_base":
 			base = field.Type == "url" && !field.Required
+		case settingWebhookURL:
+			webhookURL = field.Type == "url" && !field.Required
+		case secretWebhookSecret:
+			webhookSecret = field.Type == "secret" && !field.Required
 		}
 	}
-	if !token || !mode || !base {
+	if !token || !mode || !base || !webhookURL || !webhookSecret {
 		t.Fatalf("schema fields = %+v", schema.Fields)
 	}
 }
@@ -460,5 +494,261 @@ func assertTokenRedacted(t *testing.T, err error, token, method string) {
 	}
 	if !strings.Contains(message, method) {
 		t.Fatalf("error should mention method %q: %q", method, message)
+	}
+}
+
+// ── Webhook 模式：入站解析 ──────────────────────────────────────────────────
+
+func webhookRequest(t *testing.T, body, secret string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/connectors/tg-1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if secret != "" {
+		req.Header.Set(webhookSecretHeader, secret)
+	}
+	return req
+}
+
+func webhookUpdateJSON(t *testing.T, updateID, messageID, chatID, userID int64, text string) string {
+	t.Helper()
+	encoded, err := json.Marshal(map[string]any{
+		"update_id": updateID,
+		"message": map[string]any{
+			"message_id": messageID,
+			"from":       map[string]any{"id": userID, "username": "alice", "first_name": "Alice"},
+			"chat":       map[string]any{"id": chatID, "type": "private", "title": "私聊"},
+			"text":       text,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal update: %v", err)
+	}
+	return string(encoded)
+}
+
+func webhookConfig(token, secret string) connectors.Config {
+	cfg := testConfig(token)
+	cfg.Mode = modeWebhook
+	if secret != "" {
+		cfg.Secrets[secretWebhookSecret] = secret
+	}
+	return cfg
+}
+
+func TestHandleWebhookParsesMessageWithSecret(t *testing.T) {
+	provider := New()
+	cfg := webhookConfig("tok", "top-secret")
+	result, err := provider.HandleWebhook(context.Background(), cfg,
+		webhookRequest(t, webhookUpdateJSON(t, 7, 42, 100, 9, "  hello webhook  "), "top-secret"))
+	if err != nil {
+		t.Fatalf("HandleWebhook() error = %v", err)
+	}
+	if result.Message == nil {
+		t.Fatal("expected inbound message")
+	}
+	msg := *result.Message
+	if msg.Chat != "100" || msg.MessageID != "42" || msg.UserID != "9" {
+		t.Fatalf("message = %+v", msg)
+	}
+	if msg.Text != "hello webhook" {
+		t.Fatalf("text = %q, want trimmed", msg.Text)
+	}
+	if msg.Provider != Name {
+		t.Fatalf("provider = %q, want %q", msg.Provider, Name)
+	}
+	if msg.UserName != "alice" || msg.ChatTitle != "私聊" {
+		t.Fatalf("user/chat = %+v", msg)
+	}
+	if msg.ReceivedAt.IsZero() {
+		t.Fatal("received_at should be set")
+	}
+}
+
+func TestHandleWebhookSecretTokenValidation(t *testing.T) {
+	provider := New()
+	cfg := webhookConfig("tok", "top-secret")
+	body := webhookUpdateJSON(t, 7, 42, 100, 9, "hi")
+
+	t.Run("wrong secret", func(t *testing.T) {
+		if _, err := provider.HandleWebhook(context.Background(), cfg, webhookRequest(t, body, "wrong")); err == nil {
+			t.Fatal("mismatched secret token must return error")
+		}
+	})
+	t.Run("missing header", func(t *testing.T) {
+		if _, err := provider.HandleWebhook(context.Background(), cfg, webhookRequest(t, body, "")); err == nil {
+			t.Fatal("missing secret token must return error")
+		}
+	})
+	t.Run("not configured skips validation", func(t *testing.T) {
+		open := webhookConfig("tok", "")
+		result, err := provider.HandleWebhook(context.Background(), open, webhookRequest(t, body, ""))
+		if err != nil {
+			t.Fatalf("unconfigured secret must skip validation: %v", err)
+		}
+		if result.Message == nil || result.Message.Text != "hi" {
+			t.Fatalf("result = %+v", result)
+		}
+	})
+}
+
+func TestHandleWebhookIgnoresNonTextUpdates(t *testing.T) {
+	provider := New()
+	cfg := webhookConfig("tok", "")
+	cases := map[string]string{
+		"no message":  `{"update_id":1}`,
+		"empty text":  `{"update_id":2,"message":{"message_id":3,"chat":{"id":1},"text":"   "}}`,
+		"edited only": `{"update_id":3,"edited_message":{"message_id":4}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			result, err := provider.HandleWebhook(context.Background(), cfg, webhookRequest(t, body, ""))
+			if err != nil {
+				t.Fatalf("HandleWebhook() error = %v", err)
+			}
+			if result.Message != nil || result.Response != nil {
+				t.Fatalf("expected empty result, got %+v", result)
+			}
+		})
+	}
+}
+
+func TestHandleWebhookRejectsBadRequests(t *testing.T) {
+	provider := New()
+	cfg := webhookConfig("tok", "")
+
+	t.Run("invalid json", func(t *testing.T) {
+		if _, err := provider.HandleWebhook(context.Background(), cfg, webhookRequest(t, `{"update_id":`, "")); err == nil {
+			t.Fatal("invalid JSON must return error")
+		}
+	})
+	t.Run("oversized body", func(t *testing.T) {
+		// 合法 JSON + 超限空白：若无尺寸门限，json.Unmarshal 会容忍尾部空白而静默通过。
+		body := `{"update_id":1}` + strings.Repeat(" ", maxWebhookBodyBytes)
+		if _, err := provider.HandleWebhook(context.Background(), cfg, webhookRequest(t, body, "")); err == nil {
+			t.Fatal("oversized body must return error")
+		}
+	})
+	t.Run("nil body", func(t *testing.T) {
+		if _, err := provider.HandleWebhook(context.Background(), cfg, &http.Request{}); err == nil {
+			t.Fatal("nil body must return error")
+		}
+	})
+}
+
+// ── Webhook 模式：注册/注销 ─────────────────────────────────────────────────
+
+func TestActivateWebhookRegistersSetWebhook(t *testing.T) {
+	api := newFakeAPI("tok")
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	provider := New(WithAPIBase(server.URL))
+
+	cfg := webhookConfig("tok", "hook-secret")
+	cfg.Settings = map[string]string{
+		settingWebhookURL: "https://public.example.com/hooks/connectors/tg-1",
+	}
+	activation, err := provider.Activate(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("activate webhook: %v", err)
+	}
+	if activation.Info != "@test_bot" {
+		t.Fatalf("activation info = %q", activation.Info)
+	}
+	if api.getMeCallsCount() == 0 {
+		t.Fatal("webhook activation must still validate token via getMe")
+	}
+	calls := api.setWebhookPayloads()
+	if len(calls) != 1 {
+		t.Fatalf("setWebhook calls = %d, want 1", len(calls))
+	}
+	if got := calls[0]["url"]; got != "https://public.example.com/hooks/connectors/tg-1" {
+		t.Fatalf("setWebhook url = %v", got)
+	}
+	if got := calls[0]["secret_token"]; got != "hook-secret" {
+		t.Fatalf("setWebhook secret_token = %v", got)
+	}
+	allowed, ok := calls[0]["allowed_updates"].([]any)
+	if !ok || len(allowed) != 1 || allowed[0] != "message" {
+		t.Fatalf("setWebhook allowed_updates = %#v", calls[0]["allowed_updates"])
+	}
+}
+
+func TestActivateWebhookRequiresURL(t *testing.T) {
+	api := newFakeAPI("tok")
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	provider := New(WithAPIBase(server.URL))
+
+	t.Run("webhook mode without url", func(t *testing.T) {
+		cfg := webhookConfig("tok", "hook-secret")
+		if _, err := provider.Activate(context.Background(), cfg); err != nil {
+			t.Fatalf("activate without url: %v", err)
+		}
+	})
+	t.Run("polling mode with url", func(t *testing.T) {
+		cfg := testConfig("tok")
+		cfg.Settings = map[string]string{
+			settingWebhookURL: "https://public.example.com/hooks/connectors/tg-1",
+		}
+		if _, err := provider.Activate(context.Background(), cfg); err != nil {
+			t.Fatalf("activate polling with url: %v", err)
+		}
+	})
+	t.Run("settings mode webhook", func(t *testing.T) {
+		cfg := testConfig("tok")
+		cfg.Settings = map[string]string{
+			"mode":            modeWebhook,
+			settingWebhookURL: "https://settings.example.com/hooks/connectors/tg-1",
+		}
+		if _, err := provider.Activate(context.Background(), cfg); err != nil {
+			t.Fatalf("activate settings webhook: %v", err)
+		}
+	})
+	calls := api.setWebhookPayloads()
+	if len(calls) != 1 {
+		t.Fatalf("setWebhook calls = %d, want only 1 (settings mode)", len(calls))
+	}
+	if got := calls[0]["url"]; got != "https://settings.example.com/hooks/connectors/tg-1" {
+		t.Fatalf("setWebhook url = %v", got)
+	}
+	if _, ok := calls[0]["secret_token"]; ok {
+		t.Fatalf("secret_token must be omitted when not configured: %#v", calls[0])
+	}
+}
+
+func TestDeactivateWebhookDeletesWebhook(t *testing.T) {
+	api := newFakeAPI("tok")
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	provider := New(WithAPIBase(server.URL), WithLogger(func(string, ...any) {}))
+
+	if err := provider.Deactivate(context.Background(), webhookConfig("tok", "hook-secret")); err != nil {
+		t.Fatalf("deactivate webhook: %v", err)
+	}
+	if got := api.deleteWebhookCount(); got != 1 {
+		t.Fatalf("deleteWebhook calls = %d, want 1", got)
+	}
+
+	// 轮询模式不触碰远端 webhook。
+	if err := provider.Deactivate(context.Background(), testConfig("tok")); err != nil {
+		t.Fatalf("deactivate polling: %v", err)
+	}
+	if got := api.deleteWebhookCount(); got != 1 {
+		t.Fatalf("polling deactivate must not call deleteWebhook, calls = %d", got)
+	}
+}
+
+func TestDeactivateIgnoresDeleteWebhookFailure(t *testing.T) {
+	api := newFakeAPI("tok")
+	api.failDeleteWebhook = true
+	server := httptest.NewServer(api.handler())
+	defer server.Close()
+	provider := New(WithAPIBase(server.URL), WithLogger(func(string, ...any) {}))
+
+	if err := provider.Deactivate(context.Background(), webhookConfig("tok", "hook-secret")); err != nil {
+		t.Fatalf("deleteWebhook failure must not block deactivation: %v", err)
+	}
+	if got := api.deleteWebhookCount(); got != 1 {
+		t.Fatalf("deleteWebhook calls = %d, want 1", got)
 	}
 }

@@ -86,7 +86,15 @@
      ],"actions":[]},
     {"provider":"wechat","label":"微信","modes":["polling"],
      "fields":[{"key":"account_id","label":"账号","type":"text","required":true}],
-     "actions":[{"key":"start_login","label":"扫码登录","kind":"qr"}]}
+      "actions":[{"key":"start_login","label":"扫码登录","kind":"qr"}]},
+    {"provider":"feishu","label":"飞书","modes":["webhook"],
+     "fields":[
+       {"key":"app_id","label":"App ID","type":"text","required":true},
+       {"key":"app_secret","label":"App Secret","type":"secret","required":true},
+       {"key":"verification_token","label":"Verification Token","type":"secret","required":false},
+       {"key":"encrypt_key","label":"Encrypt Key","type":"secret","required":false},
+       {"key":"api_base","label":"API 基址","type":"url","required":false}
+     ],"actions":[]}
   ]
 }
 ```
@@ -105,9 +113,9 @@
 | aicli micro web | 原生 JS（`cmd/aicli/commands/web/js/`） | 新 `connectors.js` + tab | 样板：`provider-editor.js`、`config-admin.js` |
 | runtime-server | React/Vite（`frontend/`） | `pages/connectors-page.tsx` + i18n | 与 `runtime-config-page.tsx` 同级 |
 
-> 三端共用同一份 Schema：当前已注册 `telegram`（polling）与 `qqbot`（gateway，字段
-> `app_id`/`app_secret`/`sandbox`/`api_base`）两个通道；页面由 `GET /connectors/schema`
-> 驱动，新增通道三端零改动。
+> 三端共用同一份 Schema：当前已注册 `telegram`（polling）、`qqbot`（gateway，字段
+> `app_id`/`app_secret`/`sandbox`/`api_base`）、`wechat`（polling + 扫码登录 action）与
+> `feishu`（webhook，见 §6）四个通道；页面由 `GET /connectors/schema` 驱动，新增通道三端零改动。
 
 > **实现状态（2026-10-13）**：runtime-server 端最小 React 配置页已落地，路由 `/runtime/connectors`
 > （懒加载，入口在 `runtime-config-page.tsx` 导航）。构成：`pages/connectors-page.tsx`（列表 +
@@ -196,6 +204,34 @@ runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
 `route_tag`/`mode`；`getupdates` 长轮询（游标 `sync_buf` 持久化 + 指数退避重连）、
 `sendmessage` 文本与 markdown 清洗、`sendtyping` typing ticket、入站
 文本/引用/语音转写解析（图片/文件/视频降级为文本占位）已实现；真实媒体待续。
+飞书 Provider（`internal/connectors/providers/feishu`，P1 切片 3：**webhook 文本收发**）
+已在 runtime-server 与 aicli 两端注册：`modes=["webhook"]`（WS 长连接未实现前不声明），
+字段 `app_id`(text,required)/`app_secret`(secret,required)/`verification_token`(secret)/
+`encrypt_key`(secret)/`api_base`(url，默认 `https://open.feishu.cn`)，无 actions；
+`tenant_access_token` 按 connectorID 缓存并提前 5 分钟刷新（Activate 调用 token 接口
+验凭据，bot info 轻量探测失败仅告警；错误文本脱敏 `app_secret`/token）。
+**签名/解密口径与 webhook 入口约定**：
+
+- 入口为宿主公网路由 `POST /hooks/connectors/{id}`（`restapi/webhooks.go`）：
+  未知/停用 404、队列满 429、Provider 返回 error → 400、`WebhookResult.Response`
+  非空时按 `Status`（默认 200）直应答、解析出 Message → 202 并异步投递。
+- `url_verification` challenge：配置了 `verification_token` 时校验 `token`（常量时间
+  比较，不匹配 400），随后直应答 `{"challenge":"..."}`；**未配置时兼容放行并告警**
+  （无法验签，建议控制台开启事件订阅时至少保留其一凭据）。
+- 事件 v2：校验 `header.token`（同 verification_token）；配置 `encrypt_key` 时按
+  飞书口径 AES-256-CBC 解密（密钥 `sha256(encrypt_key)`，载荷
+  `base64(iv[16]||ciphertext)`、PKCS#7），解密/验签失败一律 400；收到密文但未配置
+  `encrypt_key` 也返回 400。
+- 仅处理 `im.message.receive_v1`：`Chat=chat_id`、`UserID=sender open_id`、
+  **幂等键 `MessageID=header.event_id`**（平台重试同 id，交宿主去重账本）、文本取
+  `message.content` 的 `text`（剔除 @占位符、HTML 反转义）；非文本降级为「[图片]/[语音]/
+  [文件]/[视频]」等文本占位并附带 `image_key/file_key` 元数据；其它事件类型静默 202。
+- 回复优先 `POST /open-apis/im/v1/messages/{message_id}/reply`（quote 原消息，msg_id
+  按 connector+chat 进程内记忆，失败按上游口径降级 chat 直发），否则
+  `POST /open-apis/im/v1/messages?receive_id_type=chat_id`；`msg_type=text`、
+  `content=json({"text":...})`，错误脱敏。
+**待续（P1 后续切片）**：WS 长连接与重连、卡片式流式回复（StreamingProvider）、
+typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重启持久化。
 **扫码登录 action 与返回约定（三端统一）**：
 
 - `POST /api/connectors/{id}/actions/start_login`（Schema.Actions kind=qr）：

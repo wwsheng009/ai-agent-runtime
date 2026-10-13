@@ -66,6 +66,21 @@
 - 验收：飞书 @bot → 经 gateway 路由到本机 node 的会话；审批/提问在飞书内以命令闭环；
   完成提醒经 IM 送达（与 Web Push/ntfy 同源不重复）。
 - 依赖：gateway webhook 命名空间与每连接器签名校验（安全评审点）。
+- 状态（2026-10-12，飞书切片 3）：飞书适配器 ◇ **webhook 完成**——
+  `internal/connectors/providers/feishu`：`modes=["webhook"]`（WS 未实现前不声明），
+  字段 `app_id`/`app_secret`(secret)/`verification_token`(secret)/`encrypt_key`(secret)/
+  `api_base`（默认 `https://open.feishu.cn`），无 actions；`tenant_access_token`
+  按 connectorID 缓存 + 提前 5 分钟刷新（Activate 验凭据、bot info 轻量探测）、
+  `url_verification` challenge（token 常量时间比较，未配置 verification_token 时
+  兼容放行并告警）、事件 v2 `header.token` 校验与 `encrypt_key` AES-256-CBC 解密
+  （密钥 `sha256(encrypt_key)`，失败 400）、`im.message.receive_v1` 文本入站
+  （幂等键=header.event_id、非文本占位）、回复优先 reply 原消息（msg_id 进程内记忆，
+  失败降级 chat 直发）、错误脱敏 app_secret/token。测试：`httptest` 假飞书 API
+  覆盖 challenge（正确/错配/未配 token）、明文/密文事件解析与解密失败、token 缓存
+  与提前刷新、Send reply/create/降级/脱敏，`go test -race` 全绿；
+  runtime-server 与 aicli 均已注册。
+  **待续**：WS 长连接与重连、卡片式流式回复、typing 表情、媒体上传/下载、
+  审批事件路由、msg_id 记忆跨重启持久化、gateway 宿主。
 
 ### P2 · aicli 本地接入 + QQ（≈3–4 天）
 

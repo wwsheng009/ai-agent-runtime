@@ -1,12 +1,14 @@
-// Package telegram 实现 Telegram Bot 通道适配器（长轮询为主，webhook 由宿主入口接入）。
+// Package telegram 实现 Telegram Bot 通道适配器（长轮询 + webhook 双模式）。
 //
 // 设计见 docs/bots/04-migration-roadmap.md P0：长轮询 + 文本收发 + typing +
-// 编辑式流式回复；媒体、命令全集、webhook 注册在后续阶段增量补齐。
+// 编辑式流式回复；webhook（setWebhook 注册 + secret_token 校验 + HandleWebhook
+// 入站解析）已实现；媒体、命令全集在后续阶段增量补齐。
 package telegram
 
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +32,15 @@ const (
 	defaultRetryDelay  = time.Second
 	cursorKey          = "update_offset"
 	typingInterval     = 4 * time.Second
+
+	modeWebhook         = "webhook"
+	settingWebhookURL   = "webhook_url"
+	secretWebhookSecret = "webhook_secret"
+	// webhookSecretHeader 是 setWebhook 配置 secret_token 后 Telegram 随每次
+	// 回调下发的校验头（固定名称，见 Bot API 文档）。
+	webhookSecretHeader = "X-Telegram-Bot-Api-Secret-Token"
+	// maxWebhookBodyBytes 是 webhook body 读取上限（与飞书一致，防御超大请求）。
+	maxWebhookBodyBytes = 1 << 20
 )
 
 // Provider 是 Telegram 通道适配器；HTTP 细节可注入（测试用 httptest）。
@@ -110,10 +121,9 @@ func (p *Provider) Schema() api.ProviderSchema {
 	return api.ProviderSchema{
 		Provider: Name,
 		Label:    "Telegram",
-		// 只声明已实现的能力：Provider 目前仅实现长轮询（PollingProvider）。
-		// HandleWebhook/setWebhook 实现后再加回 "webhook"；提前声明会让前端
-		// 放开 webhook 配置但运行时静默失效（既不轮询也无回调入口）。
-		Modes: []string{"polling"},
+		// 双模式均已实现：polling（RunPolling）与 webhook（Activate 按配置调用
+		// setWebhook 注册 + HandleWebhook 入站解析），宿主按 mode 择一。
+		Modes: []string{"polling", modeWebhook},
 		Fields: []api.FieldSchema{
 			{
 				Key: "bot_token", Label: "Bot Token", Type: api.FieldSecret, Required: true,
@@ -125,12 +135,18 @@ func (p *Provider) Schema() api.ProviderSchema {
 			},
 			{
 				Key: "mode", Label: "接入模式", Type: api.FieldEnum, Default: "polling",
-				// 保留 webhook 选项仅为兼容历史配置的回显与原样保存（api.Validate
-				// 会按 Options 校验），运行时对 mode=webhook 不报错、仅不轮询。
 				Options: []api.Option{{Value: "polling", Label: "长轮询（推荐）"}, {Value: "webhook", Label: "Webhook"}},
 			},
 			{Key: "proxy_url", Label: "代理地址", Type: api.FieldURL, Help: "可留空；仅此连接器生效"},
 			{Key: "poll_timeout_seconds", Label: "长轮询超时（秒）", Type: api.FieldNumber, Default: "25"},
+			{
+				Key: settingWebhookURL, Label: "Webhook 地址", Type: api.FieldURL,
+				Help: "公网可达的 https 地址（如 https://<public-base-url>/hooks/connectors/<id>）；填写后 Activate 会自动调用 setWebhook 注册",
+			},
+			{
+				Key: secretWebhookSecret, Label: "Webhook Secret Token", Type: api.FieldSecret,
+				Help: "Telegram setWebhook 的 secret_token，用于校验入站请求头 X-Telegram-Bot-Api-Secret-Token；留空则不校验（不安全，生产环境务必配置）",
+			},
 		},
 	}
 }
@@ -146,19 +162,38 @@ func (p *Provider) Activation(ctx context.Context, cfg connectors.Config) (conne
 	return p.Activate(ctx, cfg)
 }
 
-// Activate 调用 getMe 校验 bot_token。
+// Activate 调用 getMe 校验 bot_token；webhook 模式下若配置了 webhook_url，
+// 再调用 setWebhook 注册回调（allowed_updates 仅 message，与轮询对齐）。
 func (p *Provider) Activate(ctx context.Context, cfg connectors.Config) (connectors.Activation, error) {
 	token := cfg.Secret("bot_token")
 	if token == "" {
 		return connectors.Activation{}, errors.New("telegram: bot_token is required")
 	}
+	base := p.baseFor(cfg)
 	var result struct {
 		ID        int64  `json:"id"`
 		Username  string `json:"username"`
 		FirstName string `json:"first_name"`
 	}
-	if err := p.call(ctx, p.baseFor(cfg), token, "getMe", nil, &result); err != nil {
+	if err := p.call(ctx, base, token, "getMe", nil, &result); err != nil {
 		return connectors.Activation{}, err
+	}
+	// 仅 webhook 模式且配置了公网 URL 才注册：轮询/未填 URL 时保持原有
+	// getMe 行为不变；注册失败返回 error（宿主提示改回 polling 或修正 URL）。
+	if modeOf(cfg) == modeWebhook {
+		if webhookURL := cfg.Setting(settingWebhookURL, ""); webhookURL != "" {
+			params := map[string]any{
+				"url":             webhookURL,
+				"allowed_updates": []string{"message"},
+			}
+			// secret_token 仅在配置时下发：Telegram 要求 1–256 字符，空串会被拒。
+			if secret := cfg.Secret(secretWebhookSecret); secret != "" {
+				params["secret_token"] = secret
+			}
+			if err := p.call(ctx, base, token, "setWebhook", params, nil); err != nil {
+				return connectors.Activation{}, err
+			}
+		}
 	}
 	info := strings.TrimSpace(result.Username)
 	if info != "" {
@@ -167,8 +202,21 @@ func (p *Provider) Activate(ctx context.Context, cfg connectors.Config) (connect
 	return connectors.Activation{Info: info}, nil
 }
 
-// Deactivate 无远端状态需要清理。
-func (p *Provider) Deactivate(context.Context, connectors.Config) error { return nil }
+// Deactivate 尽力注销 webhook：仅 webhook 模式且配置了 token 时调
+// deleteWebhook；失败只记日志、不阻断本地停用（远端错误不应卡住宿主）。
+func (p *Provider) Deactivate(ctx context.Context, cfg connectors.Config) error {
+	if modeOf(cfg) != modeWebhook {
+		return nil
+	}
+	token := cfg.Secret("bot_token")
+	if token == "" {
+		return nil
+	}
+	if err := p.call(ctx, p.baseFor(cfg), token, "deleteWebhook", nil, nil); err != nil {
+		p.logf("telegram: deleteWebhook failed: %v", err)
+	}
+	return nil
+}
 
 // Send 逐条发送文本消息。
 func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string, msgs []connectors.OutboundMessage) error {
@@ -192,19 +240,65 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 	return nil
 }
 
-// SupportsPolling 报告是否应启动长轮询（webhook 模式由宿主入口接管）。
-// 历史兼容：mode=webhook 的旧配置不报错，仅不轮询；webhook 入口
-// （HandleWebhook/setWebhook）实现前，Schema.Modes 不再声明 webhook。
+// ── Webhook 入口 ────────────────────────────────────────────────────────────
+
+// HandleWebhook 实现 connectors.WebhookProvider：
+//   - 配置了 webhook_secret 时校验 X-Telegram-Bot-Api-Secret-Token（常量时间
+//     比较），不符返回 error（宿主转 400）；
+//   - 读取 body（上限 1MB）解析 update；非消息/无文本返回空结果（宿主回 202，
+//     不产生回复）。
+//
+// ConnectorID/Provider 留空由宿主按路由回填（restapi 会补 cfg.ID/Provider）。
+func (p *Provider) HandleWebhook(_ context.Context, cfg connectors.Config, r *http.Request) (connectors.WebhookResult, error) {
+	if r == nil || r.Body == nil {
+		return connectors.WebhookResult{}, errors.New("telegram: webhook request body is required")
+	}
+	defer r.Body.Close()
+
+	// secret_token 校验：未配置 webhook_secret 时跳过——此时任何人只要知道
+	// 回调 URL 就能伪造 update，生产环境务必在连接器配置中补上（保存后
+	// Activate 会通过 setWebhook 把 secret_token 同步给 Telegram）。
+	if expected := cfg.Secret(secretWebhookSecret); expected != "" {
+		got := strings.TrimSpace(r.Header.Get(webhookSecretHeader))
+		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+			return connectors.WebhookResult{}, errors.New("telegram: webhook secret token mismatch")
+		}
+	}
+
+	// 多读 1 字节用于判定超限：只截断不报错可能让超大 body 的合法前缀被静默接受。
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
+	if err != nil {
+		return connectors.WebhookResult{}, fmt.Errorf("read telegram webhook body: %s", err.Error())
+	}
+	if len(raw) > maxWebhookBodyBytes {
+		return connectors.WebhookResult{}, errors.New("telegram: webhook body too large")
+	}
+	var upd update
+	if err := json.Unmarshal(raw, &upd); err != nil {
+		return connectors.WebhookResult{}, fmt.Errorf("decode telegram webhook: %s", err.Error())
+	}
+	msg, ok := parseUpdate("", upd)
+	if !ok {
+		return connectors.WebhookResult{}, nil // 非消息/无文本：静默 202
+	}
+	return connectors.WebhookResult{Message: &msg}, nil
+}
+
+// SupportsPolling 报告是否应启动长轮询（webhook 模式下由 HandleWebhook 入口接管）。
 func (p *Provider) SupportsPolling(cfg connectors.Config) bool {
 	if cfg.Secret("bot_token") == "" {
 		return false
 	}
-	// 模式读取优先级：Settings["mode"]（前端表单）> Config.Mode（结构化字段）。
-	mode := cfg.Setting("mode", "")
-	if mode == "" {
-		mode = cfg.Mode
+	return modeOf(cfg) != modeWebhook
+}
+
+// modeOf 解析接入模式：Settings["mode"]（前端表单）> Config.Mode（结构化字段）；
+// 未配置视为 polling。
+func modeOf(cfg connectors.Config) string {
+	if mode := cfg.Setting("mode", ""); mode != "" {
+		return strings.ToLower(mode)
 	}
-	return !strings.EqualFold(strings.TrimSpace(mode), "webhook")
+	return strings.ToLower(strings.TrimSpace(cfg.Mode))
 }
 
 // RunPolling 长轮询 getUpdates：游标持久化（state），断线退避重连。

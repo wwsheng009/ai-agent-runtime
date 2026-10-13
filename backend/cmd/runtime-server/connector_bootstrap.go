@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/feishu"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/qqbot"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/telegram"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/wechat"
@@ -55,6 +56,11 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	// 微信（iLink bot，切片 2b：长轮询文本收发 + 扫码登录 action + typing；
 	// 媒体降级为文本占位）。
 	if err := service.Register(wechat.New(wechat.WithLogger(logf))); err != nil {
+		return nil, err
+	}
+	// 飞书（切片 3：webhook 文本收发——challenge/事件验签/AES 解密/文本回复；
+	// WS 长连接、卡片流式、媒体留待 P1 后续切片）。
+	if err := service.Register(feishu.New(feishu.WithLogger(logf))); err != nil {
 		return nil, err
 	}
 
