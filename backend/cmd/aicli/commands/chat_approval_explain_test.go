@@ -2,7 +2,10 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -129,6 +132,41 @@ func TestApprovalExplanationSurvivesBrokenArgs(t *testing.T) {
 	if strings.Contains(strings.Join(lines, "\n"), "目标") {
 		t.Fatalf("参数不可解析时不应编造目标：%v", lines)
 	}
+}
+
+func TestApprovalExplanationBatchShellCommands(t *testing.T) {
+	approval := approvalWithArgs("shell", `{"commands":[{"command":"gofmt -l a.go"},{"command":"Remove-Item -Recurse -Force 'build'"}]}`)
+	lines := approvalExplanationLines(approval)
+	joined := strings.Join(lines, "\n")
+	require.NotContains(t, joined, "参数无法解析", "批量形态可解析，不能退化成缺参文案")
+	require.Contains(t, joined, "[说明] 动作：删除文件或目录（递归）")
+	require.Contains(t, joined, "[说明] 目标：")
+}
+
+func TestApprovalExplanationBatchBreakerTargetsTriggeringCommand(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	require.NotEmpty(t, home)
+	target := filepath.Join(home, "AppData", "Local", "Temp", "aicli-mcp-json-smoke")
+	argsJSON, err := json.Marshal(map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "gofmt -l backend/a.go"},
+			map[string]interface{}{"command": "go vet ./..."},
+			map[string]interface{}{"command": "Remove-Item -Recurse -Force '" + target + "' -ErrorAction SilentlyContinue"},
+		},
+	})
+	require.NoError(t, err)
+
+	approval := approvalWithArgs("shell", string(argsJSON))
+	approval.Reason = "shell_breaker:root_home_removal"
+	lines := approvalExplanationLines(approval)
+	joined := strings.Join(lines, "\n")
+
+	require.NotContains(t, joined, "参数无法解析")
+	require.Contains(t, joined, "[说明] 动作：删除文件或目录（递归）")
+	require.Contains(t, joined, "[说明] 目标：Remove-Item -Recurse -Force",
+		"断路器审批的目标必须是命中的命令段，而不是批处理第一条命令:\n%s", joined)
+	require.Contains(t, joined, "根/主目录断路器")
 }
 
 func TestApprovalExplanationTruncatesLongTargets(t *testing.T) {

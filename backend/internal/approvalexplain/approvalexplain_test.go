@@ -89,6 +89,40 @@ func TestArgumentDigestFlattensNestedValues(t *testing.T) {
 	require.Equal(t, "- paths: a, b\n- url: u", digest)
 }
 
+func TestShellCommandsFlattensBatchForms(t *testing.T) {
+	got := ShellCommands([]interface{}{
+		map[string]interface{}{"command": "gofmt -l a.go"},
+		map[string]interface{}{"cmd": "go vet ./..."},
+		"rm -rf build",
+		map[string]interface{}{"other": "x"},
+		"   ",
+	})
+	require.Equal(t, []string{"gofmt -l a.go", "go vet ./...", "rm -rf build"}, got)
+	require.Equal(t, []string{"a", "b"}, ShellCommands([]string{"a", "b"}))
+	require.Nil(t, ShellCommands(nil))
+	require.Nil(t, ShellCommands("rm -rf /"))
+}
+
+func TestArgumentDigestShellBatch(t *testing.T) {
+	digest := ArgumentDigest(json.RawMessage(`{"commands":[{"command":"gofmt -l a.go"},{"command":"go vet ./..."},{"command":"Remove-Item -Recurse -Force C:\\Temp\\x"}]}`))
+	require.Equal(t, strings.Join([]string{
+		"- commands[1]: gofmt -l a.go",
+		"- commands[2]: go vet ./...",
+		"- commands[3]: Remove-Item -Recurse -Force C:\\Temp\\x",
+	}, "\n"), digest)
+
+	// 行数受共享上限约束：超长批处理只取前 DigestLineLimit 条。
+	many := make([]interface{}, 0, DigestLineLimit+2)
+	for index := 0; index < DigestLineLimit+2; index++ {
+		many = append(many, map[string]interface{}{"command": fmt.Sprintf("echo %d", index)})
+	}
+	payload, err := json.Marshal(map[string]interface{}{"commands": many})
+	require.NoError(t, err)
+	lines := strings.Split(ArgumentDigest(payload), "\n")
+	require.Len(t, lines, DigestLineLimit)
+	require.Equal(t, "- commands[1]: echo 0", lines[0])
+}
+
 func TestRuleBasedContract(t *testing.T) {
 	require.Equal(t, "", RuleBased(nil))
 

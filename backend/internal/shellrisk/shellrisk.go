@@ -19,9 +19,10 @@
 //
 // The only risk classified today is root/home removal: recursive rm (POSIX or
 // PowerShell) or find -delete aimed at /, ~, $HOME, %USERPROFILE%, a shell
-// variable spelling of those, or the literal home directory. False positives
-// only ever cost one confirmation; false negatives are the failure mode this
-// package exists to prevent, so the matcher errs toward detection.
+// variable spelling of those, or the home directory itself / any path inside
+// it. False positives only ever cost one confirmation; false negatives are the
+// failure mode this package exists to prevent, so the matcher errs toward
+// detection.
 package shellrisk
 
 import (
@@ -594,7 +595,10 @@ func normalizeCommandName(field string) string {
 }
 
 // isRootOrHomeTarget matches filesystem roots and the current user's home
-// directory, including shell-variable spellings, after quote removal.
+// directory — the directory itself or any path beneath it — including
+// shell-variable spellings, after quote removal. The over-coverage is
+// deliberate: deleting a subdirectory of home costs one confirmation, which
+// beats risking a silent wipe.
 func isRootOrHomeTarget(target string) bool {
 	text := strings.TrimSpace(target)
 	if text == "" {

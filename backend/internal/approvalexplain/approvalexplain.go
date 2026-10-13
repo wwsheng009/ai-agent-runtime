@@ -108,7 +108,7 @@ func ArgumentDigest(argsJSON json.RawMessage) string {
 		return Truncate(raw, ArgumentLimit)
 	}
 	priority := []string{
-		"command", "command_line", "cmd", "script",
+		"command", "command_line", "cmd", "commands", "script",
 		"file_path", "path", "paths", "target_file",
 		"url", "query", "pattern", "glob",
 		"patch", "diff", "content", "prompt",
@@ -118,6 +118,18 @@ func ArgumentDigest(argsJSON json.RawMessage) string {
 	for _, key := range priority {
 		value, ok := decoded[key]
 		if !ok || value == nil {
+			continue
+		}
+		if key == "commands" {
+			// Shell 批量形态：逐条命令各占一行，避免摘要（以及据此生成的解释）
+			// 只暴露批处理里的第一条命令。
+			for index, command := range ShellCommands(value) {
+				if len(lines) >= DigestLineLimit {
+					break
+				}
+				lines = append(lines, fmt.Sprintf("- commands[%d]: %s", index+1, Truncate(command, ArgumentLimit)))
+			}
+			seen[key] = true
 			continue
 		}
 		text := strings.TrimSpace(ArgumentValue(value))
@@ -134,6 +146,43 @@ func ArgumentDigest(argsJSON json.RawMessage) string {
 		return Truncate(raw, ArgumentLimit)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ShellCommands 把 shell 工具的 commands 参数展平为命令列表：既接受 []string，
+// 也接受 provider 形态的 [{command:...}] / [{"cmd":...}] 与字符串混合数组；
+// 空值与不含命令字段的条目被丢弃。审批摘要、解释器与审批卡片共用它，保证批量
+// 形态不再退化成「参数无法解析」或只看得到第一条命令。
+func ShellCommands(raw interface{}) []string {
+	switch typed := raw.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			switch value := item.(type) {
+			case string:
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					out = append(out, trimmed)
+				}
+			case map[string]interface{}:
+				for _, key := range []string{"command", "cmd"} {
+					if text, ok := value[key].(string); ok && strings.TrimSpace(text) != "" {
+						out = append(out, strings.TrimSpace(text))
+						break
+					}
+				}
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // ArgumentValue 把参数值展平成单行文本：数组用 ", " 连接，其余类型走高保真

@@ -3396,6 +3396,81 @@ func TestApprovalRequestPreviewLines_FallbackArgs(t *testing.T) {
 	require.Equal(t, []string{"args={\"message\":\"hello\"}"}, lines)
 }
 
+func TestApprovalRequestPreviewLines_ShellBatchShowsTriggeringCommand(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	require.NotEmpty(t, home)
+	target := filepath.Join(home, "AppData", "Local", "Temp", "aicli-mcp-json-smoke")
+	argsJSON, err := json.Marshal(map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "gofmt -l backend/internal/aiclipaths/paths.go"},
+			map[string]interface{}{"command": "go vet ./..."},
+			map[string]interface{}{"command": "Remove-Item -Recurse -Force '" + target + "'"},
+		},
+	})
+	require.NoError(t, err)
+
+	lines := approvalRequestPreviewLines(&runtimechat.ApprovalRequest{
+		ToolName: "shell",
+		Reason:   "shell_breaker:root_home_removal",
+		ArgsJSON: argsJSON,
+	})
+
+	require.NotEmpty(t, lines)
+	require.True(t, strings.HasPrefix(lines[0], "risky_command=Remove-Item -Recurse -Force"),
+		"触发命令必须置顶展示: %v", lines)
+	joined := strings.Join(lines, "\n")
+	require.Contains(t, joined, "command=gofmt -l backend/internal/aiclipaths/paths.go")
+	require.Contains(t, joined, "command=go vet ./...")
+	require.Contains(t, localizeApprovalPreviewLine(lines[0]), "[审批] 触发命令：")
+}
+
+func TestApprovalRequestPreviewLines_ShellBatchCapsListedCommands(t *testing.T) {
+	commands := make([]interface{}, 0, 9)
+	for index := 0; index < 9; index++ {
+		commands = append(commands, map[string]interface{}{"command": fmt.Sprintf("echo %d", index)})
+	}
+	argsJSON, err := json.Marshal(map[string]interface{}{"commands": commands})
+	require.NoError(t, err)
+
+	lines := approvalRequestPreviewLines(&runtimechat.ApprovalRequest{ToolName: "shell", ArgsJSON: argsJSON})
+	listed := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "command=") {
+			listed++
+		}
+	}
+	require.Equal(t, approvalPreviewCommandLimit, listed, "批量命令必须受卡片上限约束: %v", lines)
+	require.Contains(t, strings.Join(lines, "\n"), "notes=其余 3 条命令请用 [3] 查看")
+}
+
+func TestApprovalPriorityPromptLines_ShellBreakerShowsTriggerAndReason(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	require.NotEmpty(t, home)
+	target := filepath.Join(home, "AppData", "Local", "Temp", "aicli-mcp-json-smoke")
+	argsJSON, err := json.Marshal(map[string]interface{}{
+		"commands": []interface{}{
+			map[string]interface{}{"command": "gofmt -l backend/internal/aiclipaths/paths.go"},
+			map[string]interface{}{"command": "Remove-Item -Recurse -Force '" + target + "'"},
+		},
+	})
+	require.NoError(t, err)
+
+	lines := approvalPriorityPromptLines(&runtimechat.ApprovalRequest{
+		ToolName:  "shell",
+		Reason:    "shell_breaker:root_home_removal",
+		RiskLevel: "high",
+		ArgsJSON:  argsJSON,
+	}, nil)
+	rendered := strings.Join(lines, "\n")
+
+	require.Contains(t, rendered, "[审批] 触发命令：Remove-Item -Recurse -Force")
+	require.Contains(t, rendered, "根/主目录")
+	require.Contains(t, rendered, "[审批] 命令：gofmt -l backend/internal/aiclipaths/paths.go")
+	require.NotContains(t, rendered, `"commands":[`, "摘要不应再退化成截断的原始 JSON")
+}
+
 func TestApprovalPriorityPromptLines_ShowActionContextAndOptions(t *testing.T) {
 	lines := approvalPriorityPromptLines(&runtimechat.ApprovalRequest{
 		ToolName:  "execute_shell_command",

@@ -26,6 +26,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/approvalexplain"
 	"github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
@@ -33,6 +34,7 @@ import (
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shellrisk"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
@@ -6981,7 +6983,11 @@ func approvalPriorityPromptLines(approval *runtimechat.ApprovalRequest, contextL
 }
 
 func humanApprovalReason(reason string) string {
-	switch strings.ToLower(strings.TrimSpace(reason)) {
+	trimmed := strings.TrimSpace(reason)
+	if strings.HasPrefix(strings.ToLower(trimmed), "shell_breaker") {
+		return "检测到根/主目录（含其下路径）的递归删除：bypass 等模式也必须人工确认，plan/dont-ask 直接拒绝（" + trimmed + "）"
+	}
+	switch strings.ToLower(trimmed) {
 	case "permission_mode_requires_approval":
 		return "当前权限模式要求在执行前获得确认（permission_mode_requires_approval）"
 	case "external_dir:admit":
@@ -6997,7 +7003,7 @@ func humanApprovalReason(reason string) string {
 	case "approval_required":
 		return "当前操作需要审批"
 	default:
-		return strings.TrimSpace(reason)
+		return trimmed
 	}
 }
 
@@ -7023,6 +7029,7 @@ func localizeApprovalPreviewLine(line string) string {
 		label  string
 	}{
 		{"command=", "命令"},
+		{"risky_command=", "触发命令"},
 		{"workdir=", "工作目录"},
 		{"cwd=", "工作目录"},
 		{"url=", "网址"},
@@ -10714,10 +10721,11 @@ func approvalRequestPreviewLines(approval *runtimechat.ApprovalRequest) []string
 		}
 		return []string{"args=" + args}
 	}
-	lines := make([]string, 0, 3)
+	lines := make([]string, 0, 4)
 	if command := truncateChatRuntimeText(payloadStringValue(payload["command"]), 200); command != "" {
 		lines = append(lines, "command="+command)
 	}
+	lines = append(lines, approvalBatchCommandPreviewLines(approval, payload)...)
 	if workdir := truncateChatRuntimeText(payloadStringValue(payload["workdir"]), 120); workdir != "" {
 		lines = append(lines, "workdir="+workdir)
 	}
@@ -10751,6 +10759,48 @@ func approvalRequestPreviewLines(approval *runtimechat.ApprovalRequest) []string
 	args := truncateChatRuntimeText(strings.TrimSpace(string(approval.ArgsJSON)), 200)
 	if args != "" {
 		lines = append(lines, "args="+args)
+	}
+	return lines
+}
+
+// approvalPreviewCommandLimit 是审批卡片最多逐条列出的批量命令数：其余命令
+// 交给 [3]「查看完整参数」，避免长批处理把卡片挤爆。
+const approvalPreviewCommandLimit = 6
+
+// approvalBatchCommandPreviewLines 渲染 shell 批量形态（commands[]）：断路器
+// 触发时把命中的命令段置顶为「触发命令」，随后逐条列出各命令。旧实现直接截断
+// 原始 JSON，用户只能看到批处理里的第一条命令，这正是「gofmt 触发
+// root_home_removal」这类误读的根源。
+func approvalBatchCommandPreviewLines(approval *runtimechat.ApprovalRequest, payload map[string]interface{}) []string {
+	commands := approvalexplain.ShellCommands(payload["commands"])
+	if len(commands) == 0 {
+		return nil
+	}
+	risky := ""
+	if approval != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(approval.Reason)), "shell_breaker") {
+		if finding, ok := shellrisk.AssessCommands(commands).First(); ok {
+			risky = strings.TrimSpace(finding.Segment)
+		}
+	}
+	lines := make([]string, 0, len(commands)+2)
+	if risky != "" {
+		lines = append(lines, "risky_command="+truncateChatRuntimeText(risky, 200))
+	}
+	listed, skipped, skipDone := 0, 0, false
+	for _, command := range commands {
+		if !skipDone && risky != "" && strings.Contains(command, risky) {
+			skipDone = true
+			skipped++
+			continue
+		}
+		if listed >= approvalPreviewCommandLimit {
+			break
+		}
+		lines = append(lines, "command="+truncateChatRuntimeText(command, 200))
+		listed++
+	}
+	if remaining := len(commands) - listed - skipped; remaining > 0 {
+		lines = append(lines, "notes=其余 "+strconv.Itoa(remaining)+" 条命令请用 [3] 查看")
 	}
 	return lines
 }

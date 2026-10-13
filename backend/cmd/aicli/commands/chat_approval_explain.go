@@ -13,6 +13,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shellrisk"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -39,7 +40,7 @@ func approvalExplanation(approval *runtimechat.ApprovalRequest) chatApprovalExpl
 
 	switch {
 	case isShellApprovalTool(tool):
-		return explainShellApproval(approvalRequestArg(args, "command", "cmd", "script", "shell"), args)
+		return explainShellApprovalRequest(approval, args)
 	case strings.HasPrefix(tool, "mcp__") || tool == "mcp" || strings.HasSuffix(tool, "__mcp"):
 		explanation := chatApprovalExplanation{
 			Action: "调用 MCP 工具（由外部 MCP Server 执行）",
@@ -218,6 +219,30 @@ func isShellApprovalTool(tool string) bool {
 	default:
 		return false
 	}
+}
+
+// explainShellApprovalRequest 在单命令与批量（commands[]）两种参数形态上给出
+// 解释：批量形态先把命令展平为一行文本（否则会被当成「参数无法解析」），
+// 断路器触发时再把目标修正为真正命中的命令段，避免出现「动作=递归删除、
+// 目标=批处理里第一条无关命令」的错位说明。
+func explainShellApprovalRequest(approval *runtimechat.ApprovalRequest, args map[string]interface{}) chatApprovalExplanation {
+	command := approvalRequestArg(args, "command", "cmd", "script", "shell")
+	if command == "" {
+		command = strings.Join(approvalexplain.ShellCommands(args["commands"]), " ; ")
+	}
+	explanation := explainShellApproval(command, args)
+	if approval == nil || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(approval.Reason)), "shell_breaker") {
+		return explanation
+	}
+	if commands := approvalexplain.ShellCommands(args["commands"]); len(commands) > 0 {
+		if finding, ok := shellrisk.AssessCommands(commands).First(); ok {
+			if segment := strings.TrimSpace(finding.Segment); segment != "" {
+				explanation.Target = truncateChatRuntimeText(segment, 120)
+			}
+		}
+	}
+	explanation.Impact = append(explanation.Impact, "根/主目录断路器：bypass 等模式也必须人工确认，plan/dont-ask 直接拒绝")
+	return explanation
 }
 
 func explainShellApproval(command string, args map[string]interface{}) chatApprovalExplanation {

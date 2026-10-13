@@ -264,7 +264,7 @@ aicli exec --deny-tool download --enable-tools --prompt "..."
 
 ### 3.2 规则管不到的三件事
 
-1. **根/主目录断路器**：`rm -rf /`、`rm -rf ~`、`$HOME` 变体、env/包装器伪装等（reason `shell_breaker:root_home_removal`）——任何模式、任何 `allow` 规则都不能放行，只能拒绝或人工确认（按模式）。
+1. **根/主目录断路器**：`rm -rf /`、`rm -rf ~`、`$HOME` 变体、env/包装器伪装等（reason `shell_breaker:root_home_removal`）——任何模式、任何 `allow` 规则都不能放行，只能拒绝或人工确认（按模式）。判定刻意保守：目标为**主目录本身或其下任意子路径**（`~/subdir`、`$HOME/work`、`C:\Users\<me>\...` 含临时/构建目录）同样命中；多问一次好过静默误删。审批卡片会置顶展示命中命令段（`[审批] 触发命令：…`）。
 2. **敏感写保护**：向密钥/凭据类路径（`.env`、`.env.*`、`.envrc`、`id_rsa*`、`credentials(.json)`、`.git-credentials`、`.ssh/**` 等，见 `sensitive_paths.go`）写入（reason `sensitive_write:secret`）——不可 remember、不能被 allow 规则放开；但 **`bypass_permissions` 会跳过它**（`TestEngineSensitiveWriteBypassSkipsGate` 固化了这条），要硬保证请写 `deny` 规则或别开 yolo。
 3. **外部目录门**：路径参数（含 shell 的 `cwd`/`workdir`）与补丁文本落在会话工作区之外时，先要一次准入（`external_dir:admit`）。工作区内 / 已准入目录 / OS 临时目录不触发；`bypass_permissions` 静默准入；`dont_ask` 直接拒绝。
 
