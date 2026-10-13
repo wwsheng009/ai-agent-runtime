@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/api"
 )
@@ -34,6 +35,9 @@ type Deps struct {
 	DeltaInterval time.Duration
 	// QueueSize 每个 IM 会话的处理队列长度，<=0 用默认 32。
 	QueueSize int
+	// LogBufferSize 是每连接器运行日志环容量（Service.Logs / 视图 runtime 读它），
+	// <=0 用 DefaultLogBufferSize（200）。日志环仅存于进程内，重启清零。
+	LogBufferSize int
 	// RequireAllowedUsers 为 true 时启用 fail-closed 安全闸：启用中的连接器若
 	// 未配置非空的 Policy.AllowedUsers，则跳过启动（不 Activate、不轮询）。
 	// aicli 宿主设为 true；runtime-server 保持 false 以兼容既有部署（仅在
@@ -68,6 +72,10 @@ type Service struct {
 	baseCtx    context.Context
 	baseCancel context.CancelFunc
 	started    bool
+	// logMu/logBuffers 是每连接器运行日志环的注册表（专用锁；取环后立即释放，
+	// 环内数据由 connectorLog.mu 保护，绝不与 mu 形成锁序）。
+	logMu      sync.Mutex
+	logBuffers map[string]*connectorLog
 }
 
 // connectorRun 是一次轮询实例的登记项。
@@ -82,10 +90,11 @@ func New(deps Deps) *Service {
 		deps.Logf = log.Printf
 	}
 	return &Service{
-		deps:      deps,
-		providers: make(map[string]Provider),
-		queue:     newChatQueue(deps.QueueSize, defaultWorkerIdleTime),
-		running:   make(map[string]*connectorRun),
+		deps:       deps,
+		providers:  make(map[string]Provider),
+		queue:      newChatQueue(deps.QueueSize, defaultWorkerIdleTime),
+		running:    make(map[string]*connectorRun),
+		logBuffers: make(map[string]*connectorLog),
 	}
 }
 
@@ -167,6 +176,14 @@ func (s *Service) StopConnector(id string) {
 	s.mu.Unlock()
 	if ok && run != nil && run.cancel != nil {
 		run.cancel()
+	}
+	if ok {
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: id,
+			Summary:     "连接器已停止",
+		}, logCounters{})
 	}
 	// 停机尽力释放本宿主认领（非本宿主持有时是 no-op；见 07 §5.6）。
 	s.releaseOwner(id)
@@ -250,6 +267,12 @@ func (s *Service) Stop(ctx context.Context) {
 	}
 	for _, id := range ids {
 		s.releaseOwner(id)
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: id,
+			Summary:     "服务停机，轮询已停止",
+		}, logCounters{})
 	}
 	s.queue.closeAll()
 }
@@ -264,6 +287,12 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 	// 「对所有人开放」的语义默默上线。
 	if s.deps.RequireAllowedUsers && len(cfg.Policy.AllowedUsers) == 0 {
 		s.logf("connector %s: policy.allowed_users 为空，fail-closed 安全闸已跳过启动；需在策略中配置 allowed_users，或显式关闭该闸（RequireAllowedUsers=false）", cfg.ID)
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     "启动跳过：policy.allowed_users 为空（fail-closed 安全闸）",
+		}, logCounters{})
 		return
 	}
 	// 运行归属闸（07 §5.6）：同一通道的轮询/WS 只能一处运行。只有策略允许且
@@ -282,12 +311,24 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 	provider, ok := s.provider(cfg.Provider)
 	if !ok {
 		s.logf("connector %s: provider %q not registered; skipped", cfg.ID, cfg.Provider)
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     fmt.Sprintf("启动跳过：provider %q 未注册", cfg.Provider),
+		}, logCounters{})
 		return
 	}
 	runCtx, cancel := context.WithCancel(s.baseContext())
 	if _, err := provider.Activate(runCtx, cfg); err != nil {
 		cancel()
 		s.logf("connector %s: activation failed: %v", cfg.ID, err)
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     "启动失败：激活出错：" + err.Error(),
+		}, logCounters{})
 		return
 	}
 	poller, ok := provider.(PollingProvider)
@@ -296,6 +337,12 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 		if s.deps.Backend != nil {
 			s.logf("connector %s: provider %q has no active polling transport in this host", cfg.ID, cfg.Provider)
 		}
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     "启动跳过：当前配置无轮询传输（等待 webhook 入站）",
+		}, logCounters{})
 		return
 	}
 	s.mu.Lock()
@@ -310,12 +357,31 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 	s.mu.Unlock()
 	releaseOnExit = false
 
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionSystem,
+		ConnectorID: cfg.ID,
+		Summary:     fmt.Sprintf("已启动轮询（provider=%s）", cfg.Provider),
+	}, logCounters{})
 	go s.heartbeatOwner(runCtx, cfg.ID, cancel)
 	go func() {
 		s.logf("connector %s: polling started (provider=%s)", cfg.ID, cfg.Provider)
 		err := poller.RunPolling(runCtx, cfg, s.HandleInbound, s.deps.Store.PollingState(cfg.ID))
 		if err != nil && runCtx.Err() == nil {
 			s.logf("connector %s: polling stopped: %v", cfg.ID, err)
+			s.recordLog(LogEntry{
+				Level:       LogLevelWarn,
+				Direction:   LogDirectionSystem,
+				ConnectorID: cfg.ID,
+				Summary:     "轮询异常停止：" + err.Error(),
+			}, logCounters{})
+		} else if err == nil && runCtx.Err() == nil {
+			s.recordLog(LogEntry{
+				Level:       LogLevelWarn,
+				Direction:   LogDirectionSystem,
+				ConnectorID: cfg.ID,
+				Summary:     "轮询已退出（未收到停止信号）",
+			}, logCounters{})
 		}
 		ours := false
 		s.mu.Lock()
@@ -355,12 +421,24 @@ func (s *Service) acquireOwnership(cfg Config) bool {
 	}
 	if policyOwner := strings.TrimSpace(cfg.Policy.RuntimeOwner); policyOwner != "" && !strings.EqualFold(policyOwner, "auto") && !strings.EqualFold(policyOwner, hostID) {
 		s.logf("connector %s: 未运行（由 %s 持有；policy.runtime_owner=%s）", cfg.ID, policyOwner, policyOwner)
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     fmt.Sprintf("未运行（由 %s 持有；policy.runtime_owner=%s）", policyOwner, policyOwner),
+		}, logCounters{})
 		return false
 	}
 	claimed, owner, err := s.deps.Store.ClaimConnectorOwner(cfg.ID, hostID, time.Now().UTC(), s.ownerStaleAfter())
 	if err != nil {
 		// 归属账本不可读写时宁可跳过启动：双宿主同时轮询的破坏性大于停跑。
 		s.logf("connector %s: 认领运行归属失败，跳过启动: %v", cfg.ID, err)
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     "未运行：认领运行归属失败：" + err.Error(),
+		}, logCounters{})
 		return false
 	}
 	if !claimed {
@@ -368,6 +446,12 @@ func (s *Service) acquireOwnership(cfg Config) bool {
 			owner = "其它宿主"
 		}
 		s.logf("connector %s: 未运行（由 %s 持有）", cfg.ID, owner)
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Summary:     fmt.Sprintf("未运行（由 %s 持有）", owner),
+		}, logCounters{})
 		return false
 	}
 	return true
@@ -401,10 +485,22 @@ func (s *Service) heartbeatOwner(ctx context.Context, connectorID string, cancel
 			held, err := s.deps.Store.HeartbeatConnectorOwner(connectorID, hostID, time.Now().UTC())
 			if err != nil {
 				s.logf("connector %s: 刷新运行归属心跳失败: %v", connectorID, err)
+				s.recordLog(LogEntry{
+					Level:       LogLevelWarn,
+					Direction:   LogDirectionSystem,
+					ConnectorID: connectorID,
+					Summary:     "刷新运行归属心跳失败：" + err.Error(),
+				}, logCounters{})
 				continue
 			}
 			if !held {
 				s.logf("connector %s: 运行归属已被接管，停止本宿主轮询", connectorID)
+				s.recordLog(LogEntry{
+					Level:       LogLevelWarn,
+					Direction:   LogDirectionSystem,
+					ConnectorID: connectorID,
+					Summary:     "运行归属已被接管，本宿主轮询停止",
+				}, logCounters{})
 				if cancel != nil {
 					cancel()
 				}
@@ -457,12 +553,19 @@ func (s *Service) HandleInbound(_ context.Context, msg InboundMessage) error {
 	}
 	if !cfg.Policy.AllowsUser(msg.UserID) {
 		s.logf("connector %s: rejected message from unauthorized user %q", cfg.ID, msg.UserID)
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "已拒绝非授权用户 " + msg.UserID + " 的消息（白名单未命中）",
+		}, logCounters{})
 		return nil
 	}
 	taskCtx := s.baseContext()
 	dedupeKey := inboundDedupeKey(msg)
 	key := cfg.ID + "|" + msg.Chat
-	return s.queue.enqueue(key, func() {
+	err := s.queue.enqueue(key, func() {
 		if dedupeKey != "" {
 			claimed, err := s.deps.Store.ClaimInbound(cfg.ID, dedupeKey)
 			if err != nil {
@@ -472,11 +575,38 @@ func (s *Service) HandleInbound(_ context.Context, msg InboundMessage) error {
 				s.logf("connector %s: claim inbound %q failed: %v (claimed=%v)", cfg.ID, dedupeKey, err, claimed)
 			}
 			if !claimed {
-				return // 平台重试/重复投递：幂等忽略
+				// 平台重试/重复投递：幂等忽略（可观测计数与日志）。
+				s.recordLog(LogEntry{
+					Level:       LogLevelInfo,
+					Direction:   LogDirectionIn,
+					ConnectorID: cfg.ID,
+					Chat:        msg.Chat,
+					Summary:     "重复投递已跳过（去重键 " + dedupeKey + "）",
+				}, logCounters{dedupSkipped: true})
+				return
 			}
 		}
 		s.process(taskCtx, cfg, provider, msg)
 	})
+	switch {
+	case err == nil:
+		s.recordLog(LogEntry{
+			Level:       LogLevelDebug,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "入站消息已入队",
+		}, logCounters{inbound: true})
+	case errors.Is(err, ErrQueueFull):
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "会话队列已满，入站消息被拒绝（宿主应让平台重试）",
+		}, logCounters{queueFull: true})
+	}
+	return err
 }
 
 // inboundDedupeKey 构造幂等去重键：connector + chat + messageID。
@@ -507,7 +637,17 @@ func (s *Service) SendOutbound(ctx context.Context, connectorID, chat string, ms
 	if !ok {
 		return fmt.Errorf("connectors: provider %q not registered", cfg.Provider)
 	}
-	return provider.Send(ctx, cfg, chat, msgs)
+	if err := provider.Send(ctx, cfg, chat, msgs); err != nil {
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionOut,
+			ConnectorID: connectorID,
+			Chat:        chat,
+			Summary:     "主动发送失败：" + err.Error(),
+		}, logCounters{})
+		return err
+	}
+	return nil
 }
 
 func (s *Service) process(ctx context.Context, cfg Config, provider Provider, msg InboundMessage) {
@@ -517,6 +657,14 @@ func (s *Service) process(ctx context.Context, cfg Config, provider Provider, ms
 }
 
 func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provider, msg InboundMessage) error {
+	s.recordLog(LogEntry{
+		Level:       LogLevelDebug,
+		Direction:   LogDirectionIn,
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Summary:     "开始处理入站消息",
+	}, logCounters{})
+
 	prefix := cfg.Policy.commandPrefix()
 	if cmd, ok := parseCommand(prefix, msg.Text); ok {
 		handled, err := s.handleCommand(ctx, cfg, provider, msg, cmd)
@@ -552,9 +700,23 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		MessageID:   msg.MessageID,
 	}, sink)
 	if err != nil {
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "后端处理失败：" + err.Error(),
+		}, logCounters{})
 		if streamer != nil {
-			_ = streamer.Fail(ctx, failureText(err))
-			return err
+			if failErr := streamer.Fail(ctx, failureText(err)); failErr != nil {
+				s.recordLog(LogEntry{
+					Level:       LogLevelError,
+					Direction:   LogDirectionOut,
+					ConnectorID: cfg.ID,
+					Chat:        msg.Chat,
+					Summary:     "失败回执发送失败：" + failErr.Error(),
+				}, logCounters{})
+			}
 		}
 		return err
 	}
@@ -566,14 +728,64 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 	}
 	if len(result.Reply) == 0 {
 		if streamer != nil {
-			return streamer.Final(ctx, nil)
+			if err := streamer.Final(ctx, nil); err != nil {
+				s.recordLog(LogEntry{
+					Level:       LogLevelError,
+					Direction:   LogDirectionOut,
+					ConnectorID: cfg.ID,
+					Chat:        msg.Chat,
+					Summary:     "回复投递失败：" + err.Error(),
+				}, logCounters{})
+				return err
+			}
 		}
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionOut,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "处理完成（无回复）",
+		}, logCounters{})
 		return nil
 	}
 	if streamer != nil {
-		return streamer.Final(ctx, result.Reply)
+		if err := streamer.Final(ctx, result.Reply); err != nil {
+			s.recordLog(LogEntry{
+				Level:       LogLevelError,
+				Direction:   LogDirectionOut,
+				ConnectorID: cfg.ID,
+				Chat:        msg.Chat,
+				Summary:     "回复投递失败：" + err.Error(),
+			}, logCounters{})
+			return err
+		}
+	} else if err := provider.Send(ctx, cfg, msg.Chat, result.Reply); err != nil {
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionOut,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "回复投递失败：" + err.Error(),
+		}, logCounters{})
+		return err
 	}
-	return provider.Send(ctx, cfg, msg.Chat, result.Reply)
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Summary:     fmt.Sprintf("处理完成（回复 %d 字符）", replyTextLength(result.Reply)),
+	}, logCounters{outbound: true})
+	return nil
+}
+
+// replyTextLength 统计出站回复的字符数（rune），用于成功日志摘要。
+func replyTextLength(msgs []OutboundMessage) int {
+	total := 0
+	for _, msg := range msgs {
+		total += utf8.RuneCountInString(msg.Text)
+	}
+	return total
 }
 
 func (s *Service) startStreaming(ctx context.Context, cfg Config, provider Provider, chat string) (StreamingSession, error) {
@@ -616,6 +828,63 @@ func (s *Service) deltaInterval() time.Duration {
 		return s.deps.DeltaInterval
 	}
 	return 800 * time.Millisecond
+}
+
+// Logs 返回连接器最近的运行日志（倒序，最新在前）：
+//   - limit<=0 用 DefaultLogQueryLimit（50），>MaxLogQueryLimit 收敛到 200；
+//   - 未知连接器返回 (nil, false)；已知但尚无日志返回空切片（非 nil）。
+//
+// 日志环仅存于进程内（见 logs.go），删除连接器配置不会清理已有日志环。
+func (s *Service) Logs(connectorID string, limit int) ([]LogEntry, bool) {
+	if s == nil {
+		return nil, false
+	}
+	id := strings.TrimSpace(connectorID)
+	if id == "" || !s.connectorKnown(id) {
+		return nil, false
+	}
+	if limit <= 0 {
+		limit = DefaultLogQueryLimit
+	}
+	if limit > MaxLogQueryLimit {
+		limit = MaxLogQueryLimit
+	}
+	ring := s.connectorLogRing(id)
+	if ring == nil {
+		return []LogEntry{}, true
+	}
+	return ring.snapshot(limit), true
+}
+
+// Stats 返回连接器的累计运行计数与最近错误；未知连接器返回 (零值, false)。
+func (s *Service) Stats(connectorID string) (ConnectorStats, bool) {
+	if s == nil {
+		return ConnectorStats{}, false
+	}
+	id := strings.TrimSpace(connectorID)
+	if id == "" || !s.connectorKnown(id) {
+		return ConnectorStats{}, false
+	}
+	ring := s.connectorLogRing(id)
+	if ring == nil {
+		return ConnectorStats{}, true
+	}
+	return ring.statsSnapshot(), true
+}
+
+// connectorKnown 报告连接器 id 是否已配置（Store 未接线时退化为「日志环已注册」）。
+func (s *Service) connectorKnown(id string) bool {
+	if s.deps.Store != nil {
+		_, ok := s.deps.Store.GetConfig(id)
+		return ok
+	}
+	return s.connectorLogRing(id) != nil
+}
+
+func (s *Service) connectorLogRing(id string) *connectorLog {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	return s.logBuffers[id]
 }
 
 func (s *Service) logf(format string, args ...any) {

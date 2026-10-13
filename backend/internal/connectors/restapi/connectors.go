@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -28,6 +29,14 @@ type ConnectorView struct {
 	ActiveOwner string `json:"active_owner,omitempty"`
 	// OwnedByCurrentHost 报告归属是否属于本宿主（Deps.HostID）。
 	OwnedByCurrentHost bool `json:"owned_by_current_host"`
+	// Runtime 是运行可观测快照（additive，旧客户端忽略）：每连接器累计计数与
+	// 最近错误；日志明细走 GET /connectors/{id}/logs。
+	Runtime *RuntimeView `json:"runtime,omitempty"`
+}
+
+// RuntimeView 是连接器运行可观测视图（stats 与 GET /{id}/logs 载荷中的 stats 同构）。
+type RuntimeView struct {
+	Stats connectors.ConnectorStats `json:"stats"`
 }
 
 // PolicyView 是"用户操作逻辑"配置的对外视图。
@@ -42,6 +51,12 @@ type PolicyView struct {
 // listResponse 是 GET /connectors 的载荷。
 type listResponse struct {
 	Items []ConnectorView `json:"items"`
+}
+
+// logsResponse 是 GET /connectors/{id}/logs 的载荷（entries 倒序，最新在前）。
+type logsResponse struct {
+	Entries []connectors.LogEntry     `json:"entries"`
+	Stats   connectors.ConnectorStats `json:"stats"`
 }
 
 // submitRequest 是新建/更新的提交体：
@@ -80,6 +95,40 @@ func (h *handlers) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, h.view(cfg))
+}
+
+// logs 返回连接器最近日志与累计计数（管理面「可观测」入口，04 FR-12）。
+//
+// 语义：未知连接器 404（停用仍可查——日志恰是排查停用原因的入口）；limit 缺省 50、
+// 数值越界收敛（<=0→50、>200→200）、非整数 400；entries 倒序（最新在前）。
+func (h *handlers) logs(w http.ResponseWriter, r *http.Request) {
+	if !h.ready(w) {
+		return
+	}
+	id := mux.Vars(r)["id"]
+	if _, ok := h.deps.Store.GetConfig(id); !ok {
+		writeError(w, http.StatusNotFound, "未知连接器")
+		return
+	}
+	limit := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "limit 必须是整数")
+			return
+		}
+		limit = parsed
+	}
+	entries, ok := h.deps.Service.Logs(id, limit)
+	if !ok {
+		writeError(w, http.StatusNotFound, "未知连接器")
+		return
+	}
+	stats, _ := h.deps.Service.Stats(id)
+	if entries == nil {
+		entries = []connectors.LogEntry{}
+	}
+	writeJSON(w, http.StatusOK, logsResponse{Entries: entries, Stats: stats})
 }
 
 // schemaDocument 返回全部已注册通道的 Schema（三端渲染器的唯一输入）。
@@ -329,6 +378,11 @@ func (h *handlers) view(cfg connectors.Config) ConnectorView {
 		view.ActiveOwner = strings.TrimSpace(owner.Owner)
 		hostID := strings.TrimSpace(h.deps.HostID)
 		view.OwnedByCurrentHost = hostID != "" && strings.EqualFold(view.ActiveOwner, hostID)
+	}
+	if h.deps.Service != nil {
+		if stats, ok := h.deps.Service.Stats(cfg.ID); ok {
+			view.Runtime = &RuntimeView{Stats: stats}
+		}
 	}
 	return view
 }

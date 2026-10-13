@@ -169,7 +169,7 @@
 | PATCH | `/api/connectors/{id}` | 更新（secrets 为空表示不改） | 管理面 |
 | DELETE | `/api/connectors/{id}` | 删除（同时停轮询/WS） | 管理面 |
 | POST | `/api/connectors/{id}/test` | 发送测试消息 | 管理面 |
-| GET | `/api/connectors/{id}/logs` | 最近日志（分页） | 管理面 |
+| GET | `/api/connectors/{id}/logs?limit=50` | **最近日志 + 累计计数**（`{entries,stats}`；entries 倒序最新在前；limit≤0→50、>200→200、非整数 400；未知 404、停用仍可查） | 管理面 |
 | GET/PUT | `/api/connectors/{id}/bindings` | 查看/调整 IM↔会话绑定 | 管理面 |
 | POST | `/api/connectors/{id}/actions/{action}` | 特殊动作（微信扫码等）；执行面已实现（`connectors.ActionProvider`） | 管理面 |
 | POST | `/api/connectors/{id}/takeover` | **运行归属抢占**：强制覆盖旧归属并以本宿主身份重启轮询；未配置宿主身份 503、未知 404、停用/策略指定他人 409（07 §5.6） | 管理面 |
@@ -189,6 +189,7 @@
 | `DELETE /connectors/{id}` | 删除并停止轮询 |
 | `POST /connectors/{id}/reload` | 应用配置变更（重启轮询/重连），更新接口内已自动调用 |
 | `POST /connectors/{id}/test` | 发送测试消息（控制台按钮），body `{chat,text}` |
+| `GET /connectors/{id}/logs` | 每连接器运行日志（进程内环形缓冲，默认 200 条、重启清零，`connectors.Deps.LogBufferSize` 可覆盖）+ 累计计数；载荷 `{entries:[{time,level,direction,connector_id,chat,summary}],stats:{inbound,outbound,errors,dedup_skipped,queue_full,last_error,last_error_at,last_activity_at}}`；`limit` 缺省 50、数值越界收敛、非整数 400；未知 404、停用仍可查 |
 | `POST /connectors/{id}/actions/{action}` | 通道特有动作执行面（`connectors.ActionProvider.RunAction`）；body 可选 JSON object；未知/停用 404、未实现能力 405、provider 失败 400 |
 | `POST /connectors/{id}/takeover` | 运行归属抢占（07 §5.6）：强制覆盖旧归属 → 重启本宿主轮询；未配置宿主身份 503、未知 404、停用/策略指定他人 409 |
 | `POST /hooks/connectors/{id}` | 公网入站；能力探测 `connectors.WebhookProvider`，签名失败 400、队列满 429、未知/停用 404 |
@@ -196,8 +197,15 @@
 - 挂载：`NewRouter` → `/api`；`NewHooksRouter` → 根（`/hooks/connectors/{id}`）。
   `Authorize` 为 nil 时管理面整体 403（安全默认，避免宿主忘接线）。
 - 视图字段（additive，旧客户端不受影响）：列表/详情新增 `active_owner`（当前归属宿主，
-  未认领时省略）与 `owned_by_current_host`（是否为 `restapi.Deps.HostID`）。
-- 待续（P1/P2）：`/{id}/logs`、`/{id}/bindings`；三端前端的 action 按钮控件（微信扫码登录等，Schema.Actions 驱动）仍待续。
+  未认领时省略）、`owned_by_current_host`（是否为 `restapi.Deps.HostID`）与 `runtime`
+  （`{stats}` 与 `/{id}/logs` 载荷中的 stats 同构：inbound/outbound/errors/
+  dedup_skipped/queue_full/last_error/last_error_at/last_activity_at；日志明细走 `/{id}/logs`）。
+- **每连接器运行日志（FR-12 可观测闭环）**：核心在进程内为每个连接器维护环形缓冲
+  （默认 200 条，`connectors.Deps.LogBufferSize` 可覆盖；重启清零）+ 累计计数；
+  写入点覆盖白名单拒绝、重复投递跳过、入队成功、队列满、处理开始/成功（含回复长度）、
+  后端错误、投递失败（`Send`/`streamer.Fail`）、归属闸跳过与服务启停；删除连接器不清理
+  内存环（进程内可容忍，重启清零）。
+- 待续（P1/P2）：`/{id}/bindings`；三端前端的 action 按钮控件（微信扫码登录等，Schema.Actions 驱动）仍待续。
 - **安全与生命周期（2026-10-13 审查修复）**：管理面/入站不再把请求 ctx 当生命周期
   ——`Service` 持有宿主基 ctx（`Start` 建立/`Stop` 取消），轮询与异步任务基于它派生，
   REST handler 返回（`r.Context()` 取消）不会让新建/Reload 的连接器静默停摆；

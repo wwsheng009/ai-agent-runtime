@@ -73,6 +73,7 @@ func NewRouter(deps Deps) http.Handler {
 	// PATCH 是契约首选（部分更新语义：缺省字段保持不变）；PUT 作为别名兼容。
 	router.HandleFunc("/connectors/{id}", handlers.update).Methods(http.MethodPatch, http.MethodPut)
 	router.HandleFunc("/connectors/{id}", handlers.remove).Methods(http.MethodDelete)
+	router.HandleFunc("/connectors/{id}/logs", handlers.logs).Methods(http.MethodGet)
 	router.HandleFunc("/connectors/{id}/reload", handlers.reload).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}/takeover", handlers.takeover).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}/test", handlers.test).Methods(http.MethodPost)

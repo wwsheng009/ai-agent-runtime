@@ -25,6 +25,8 @@ type fakeProvider struct {
 	typingStart int
 	typingStop  int
 	sendErr     error
+	// streamFailErr 让 streamer.Fail 失败（失败回执发送失败的可观测用例）。
+	streamFailErr error
 
 	polling bool
 	// pollExitDelay 让 RunPolling 在 ctx 取消后延迟返回，放大
@@ -146,6 +148,9 @@ func (s *fakeStreaming) Final(_ context.Context, msgs []OutboundMessage) error {
 }
 
 func (s *fakeStreaming) Fail(_ context.Context, text string) error {
+	if s.provider.streamFailErr != nil {
+		return s.provider.streamFailErr
+	}
 	s.provider.mu.Lock()
 	defer s.provider.mu.Unlock()
 	s.provider.updates = append(s.provider.updates, "FAIL:"+text)
