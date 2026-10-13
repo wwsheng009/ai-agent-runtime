@@ -92,6 +92,7 @@ ssh-client [options] [user@]host [command]
 | `LogLevel` | `-o LogLevel=DEBUG` | 日志级别 |
 | `Compression` | `-o Compression=yes` | 启用压缩 |
 | `ProxyCommand` | `-o ProxyCommand="connect.exe -H 127.0.0.1:10810 %h %p"` | 通过外部命令建立连接（支持 %h/%n/%k/%p/%r/%% 令牌） |
+| `ProxyCommand`（Windows 无 `connect.exe`/`nc`） | `-o ProxyCommand="python scripts/ssh-connect-proxy.py %h %p"` | 仓库自带 HTTP CONNECT 桥：stdio ↔ 本地代理（默认 `127.0.0.1:10810`，可用第 3 个参数覆盖） |
 | `ProxyJump` | — | 仅解析，未实现（忽略并警告） |
 
 ### 2.4 示例
@@ -116,6 +117,23 @@ ssh-client -p 2222 user@host "df -h && free -m"
 ```bash
 ssh-client --password 'secret' user@host "uptime"
 ```
+
+**经 HTTP 代理连接（Windows 无 `nc` / `connect.exe`）：**
+
+```bash
+# ssh-client：远程执行（桥脚本默认代理 127.0.0.1:10810）
+ssh-client -o ProxyCommand="python scripts/ssh-connect-proxy.py %h %p" \
+  --password 'secret' -o StrictHostKeyChecking=no root@192.210.174.189 "uptime"
+
+# sftp-client：直传上传（远端给完整文件路径；--force 覆盖已存在文件）
+sftp-client -o ProxyCommand="python scripts/ssh-connect-proxy.py %h %p" \
+  --password 'secret' -o StrictHostKeyChecking=no --force \
+  root@192.210.174.189 ./dist/gateway.new /opt/aicli-gateway/gateway.new
+```
+
+> 桥脚本只做两件事：连本地代理发出 `CONNECT <host>:<port>`，再把 stdin/stdout 与隧道对接；
+> `%h` / `%p` 由客户端展开为目标主机与端口。PowerShell 下引号写法与上面一致
+> （`-o ProxyCommand="python scripts/ssh-connect-proxy.py %h %p"`）。
 
 **端口转发：**
 
