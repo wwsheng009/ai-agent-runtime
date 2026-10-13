@@ -5,6 +5,8 @@
 //   * 点「清除」= 提交 __clear__（api.CONNECTOR_CLEAR_SECRET）。
 
 import type {
+  ConnectorActionSpec,
+  ConnectorFieldSchema,
   ConnectorProviderSchema,
   ConnectorSchema,
   ConnectorSubmitPayload,
@@ -58,6 +60,46 @@ export function findProviderSchema(
  */
 export function hasModeField(providerSchema: ConnectorProviderSchema | null): boolean {
   return (providerSchema?.fields ?? []).some((field) => field.key === "mode");
+}
+
+/**
+ * 「扫码接入」适用的通道：Schema 声明了 kind=qr 动作的通道（当前=微信；
+ * 未来 QQ 等复用同一约定，前端零硬编码通道名）。
+ */
+export function scanProviders(schema: ConnectorSchema | null): ConnectorProviderSchema[] {
+  return (schema?.providers ?? []).filter((provider) =>
+    (provider.actions ?? []).some((action) => action.kind === "qr"),
+  );
+}
+
+/** 取通道的扫码动作（kind=qr 的第一个）；无则 null。 */
+export function findQRAction(
+  providerSchema: ConnectorProviderSchema | null,
+): ConnectorActionSpec | null {
+  return (providerSchema?.actions ?? []).find((action) => action.kind === "qr") ?? null;
+}
+
+/**
+ * 扫码接入只需「扫描基址」这一个字段（微信=`base_url` iLink 基址）；其余凭据
+ * 全部由扫码成功后回填。约定 key 与 hasModeField 的 `mode` 同类（前端已知的
+ * 少数 well-known 字段键）。
+ */
+export function scanBaseField(
+  providerSchema: ConnectorProviderSchema | null,
+): ConnectorFieldSchema | null {
+  return (providerSchema?.fields ?? []).find((field) => field.key === "base_url") ?? null;
+}
+
+/**
+ * 生成扫码接入用的连接器 ID（用户零输入）：`<provider>-<时间戳36进制><随机后缀>`。
+ * 满足 restapi 的 id 约束（字母数字开头、仅 [A-Za-z0-9._-]、≤64）。
+ */
+export function generateConnectorId(provider: string): string {
+  const prefix =
+    provider.trim().toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) || "conn";
+  const time = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `${prefix}-${time}${rand}`;
 }
 
 export function defaultValuesFor(

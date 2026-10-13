@@ -3,14 +3,22 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { ConnectorProviderSchema, ConnectorView } from "@/types/runtime";
+import type {
+  ConnectorProviderSchema,
+  ConnectorSchema,
+  ConnectorView,
+} from "@/types/runtime";
 
 import {
   buildSubmitPayload,
   createEmptyForm,
   findProviderSchema,
+  findQRAction,
   formFromConnector,
+  generateConnectorId,
   hasModeField,
+  scanBaseField,
+  scanProviders,
   switchProvider,
   validateConnectorForm,
 } from "./shared";
@@ -178,5 +186,50 @@ describe("表单预校验", () => {
     expect(
       validateConnectorForm(form, TELEGRAM_SCHEMA, { requireID: true, existing: null }),
     ).toEqual([{ key: "id", code: "invalid_id" }]);
+  });
+});
+
+describe("扫码接入助手", () => {
+  const WECHAT_SCHEMA: ConnectorProviderSchema = {
+    provider: "wechat",
+    label: "微信",
+    modes: ["polling"],
+    fields: [
+      { key: "base_url", label: "iLink 基址", type: "url", placeholder: "https://…" },
+      { key: "account_id", label: "账号 ID", type: "text" },
+    ],
+    actions: [
+      { key: "start_login", label: "扫码登录", kind: "qr" },
+      { key: "login_status", label: "登录状态", kind: "button" },
+    ],
+  };
+  const SCHEMA: ConnectorSchema = {
+    version: "1",
+    providers: [TELEGRAM_SCHEMA, WECHAT_SCHEMA],
+  };
+
+  it("只挑出声明 kind=qr 动作的通道，并定位其扫码动作", () => {
+    expect(scanProviders(SCHEMA).map((item) => item.provider)).toEqual(["wechat"]);
+    expect(scanProviders(null)).toEqual([]);
+    expect(findQRAction(WECHAT_SCHEMA)).toEqual({
+      key: "start_login",
+      label: "扫码登录",
+      kind: "qr",
+    });
+    expect(findQRAction(TELEGRAM_SCHEMA)).toBeNull();
+  });
+
+  it("扫描基址取 base_url 字段；无该字段时返回 null", () => {
+    expect(scanBaseField(WECHAT_SCHEMA)?.key).toBe("base_url");
+    expect(scanBaseField(TELEGRAM_SCHEMA)).toBeNull();
+  });
+
+  it("自动生成的 ID 满足 restapi 约束（字母数字开头、仅 [A-Za-z0-9._-]、≤64）", () => {
+    const id = generateConnectorId("wechat");
+    expect(id.startsWith("wechat-")).toBe(true);
+    expect(id).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+
+    const fallback = generateConnectorId("");
+    expect(fallback).toMatch(/^conn-[a-z0-9]+$/);
   });
 });

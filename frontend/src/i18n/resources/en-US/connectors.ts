@@ -11,6 +11,7 @@ export const enConnectors = {
     runtimeConfig: "Backend config",
     refresh: "Refresh",
     create: "Add connector",
+    scan: "Scan to connect",
     loading: "Loading…",
     empty:
       "No connectors yet. Use \u201cAdd connector\u201d to hook up Telegram or another IM channel.",
@@ -73,6 +74,20 @@ export const enConnectors = {
     secretConfigured: "Configured (leave blank = keep)",
     secretClear: "Clear",
     saveFailed: "Save failed: {{message}}",
+  },
+  scan: {
+    title: "Scan to connect",
+    hint: "No need to type tokens or account fields: a QR code appears right after creation and credentials are filled in automatically once you confirm the scan.",
+    provider: "Provider",
+    providerValue: "Provider: {{label}}",
+    name: "Name",
+    namePlaceholder: "Leave blank to auto-name",
+    baseRequired: "Enter {{label}}",
+    idNote: "The connector ID is generated automatically — nothing to type.",
+    start: "Start scanning",
+    creating: "Creating…",
+    failed: "Create failed: {{message}}",
+    cancel: "Cancel",
   },
   test: {
     title: "Send a test message",
