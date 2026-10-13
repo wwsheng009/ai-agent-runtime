@@ -18,8 +18,10 @@ import (
 type fakeProvider struct {
 	mu sync.Mutex
 
-	sent        []OutboundMessage
-	sentChat    string
+	sent     []OutboundMessage
+	sentChat string
+	// sentByChat 记录每个 chat 收到的消息（多绑定扇出用例用）。
+	sentByChat  map[string][]OutboundMessage
 	streamFinal []OutboundMessage
 	updates     []string
 	typingStart int
@@ -57,6 +59,10 @@ func (p *fakeProvider) Send(_ context.Context, _ Config, chat string, msgs []Out
 	}
 	p.sent = append(p.sent, msgs...)
 	p.sentChat = chat
+	if p.sentByChat == nil {
+		p.sentByChat = make(map[string][]OutboundMessage)
+	}
+	p.sentByChat[chat] = append(p.sentByChat[chat], msgs...)
 	return nil
 }
 
@@ -95,6 +101,13 @@ func (p *fakeProvider) sentTexts() []string {
 		out = append(out, msg.Text)
 	}
 	return out
+}
+
+// sentFor 返回指定 chat 收到的消息副本。
+func (p *fakeProvider) sentFor(chat string) []OutboundMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]OutboundMessage(nil), p.sentByChat[chat]...)
 }
 
 func (p *fakeProvider) streamUpdates() []string {

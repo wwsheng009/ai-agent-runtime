@@ -264,3 +264,76 @@ type Backend interface {
 	Name() string
 	Handle(ctx context.Context, req BackendRequest, sink ReplySink) (BackendResult, error)
 }
+
+// CommandRequest 是一条 IM 命令交给宿主的执行请求（可选能力，见 CommandBackend）。
+//
+// 职责边界：核心只负责解析命令名/参数、补齐当前绑定会话，并把请求转给宿主；
+// request_id / 序号等参数的格式与含义完全由宿主解释（核心不校验、不解释）。
+type CommandRequest struct {
+	ConnectorID string
+	Chat        string
+	// Session 是当前 IM 会话绑定的宿主会话（未绑定时为零值）。
+	Session   SessionRef
+	UserID    string
+	UserName  string
+	MessageID string
+	// Command 是规范化命令名（不含前缀）：approve | deny | answer。
+	Command string
+	// Args 是命令参数的空白分词，可能为空：
+	//   - approve/deny：Args[0] 是可选 request_id；空 = “当前挂起项”语义；
+	//   - answer：Args[0] 是序号或 request_id，其余是回答内容分词。
+	Args []string
+	// Text 是命令名之后的原始参数文本（保留内部空格，Args 的分词源）。
+	Text string
+}
+
+// CommandResult 是宿主对一条命令的处理结果。
+type CommandResult struct {
+	// Handled 表示宿主已处理该命令；false = 没有可处理的挂起项或参数无法识别，
+	// 核心会回一条明确提示（不静默、不落入普通 agent turn）。
+	Handled bool
+	// Reply 是回给 IM 的消息（可选；Handled 且为空时核心不回复）。
+	Reply []OutboundMessage
+}
+
+// CommandBackend 是 Backend 的可选能力扩展：宿主实现后 /approve /deny /answer
+// 才能在 IM 内闭环（docs/bots/01-requirements.md FR-7、03-host-integration.md §6）。
+//
+// 未实现时核心对这三条命令回明确提示，且不会把命令文本当作普通消息交给
+// Backend.Handle。命令路径不计入普通 turn 计数（inbound/outbound stats）。
+//
+// 三宿主待接清单（03 §6）：
+//   - runtime-server：映射到 session runtime 命令 approve_tool / answer_question；
+//   - aicli：走 actor 的审批/提问响应通道（与 TUI 同一入口）；
+//   - gateway：经隧道把命令转给节点会话（与入站 submit_prompt 同链路）。
+type CommandBackend interface {
+	Backend
+	// DecideApproval 处理 /approve 与 /deny（Command 区分两者）。
+	DecideApproval(ctx context.Context, req CommandRequest) (CommandResult, error)
+	// AnswerQuestion 处理 /answer（Args[0] 为序号或 request_id，其余为回答内容）。
+	AnswerQuestion(ctx context.Context, req CommandRequest) (CommandResult, error)
+}
+
+// 注意力通知类型（AttentionNotice.Kind）。
+const (
+	AttentionKindApproval   = "approval"
+	AttentionKindQuestion   = "question"
+	AttentionKindCompletion = "completion"
+	AttentionKindError      = "error"
+)
+
+// AttentionNotice 是一条“注意力出站”事件（轻量结构，宿主构造后交给
+// Service.NotifyAttention）。
+//
+// 职责边界：核心只做「按 Session 反查绑定 → 出站到各 IM」，不做优先级/免打扰/
+// 合并/去重——同一事件是否已投递、是否与 Web Push/ntfy/收件箱重复，由调用方
+// （或后续 notify 切片）负责（docs/bots/01-requirements.md FR-8）。
+type AttentionNotice struct {
+	// Kind 是通知类型：approval | question | completion | error
+	// （仅用于日志与文案归属，核心不按类型分支）。
+	Kind string
+	// Session 是目标宿主会话（必填；核心按它反查全部 IM 绑定）。
+	Session SessionRef
+	// Text 是推送给 IM 的文本（必填）。
+	Text string
+}

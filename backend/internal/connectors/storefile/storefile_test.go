@@ -170,3 +170,48 @@ func TestConfigStoreEmptyAndMissingFiles(t *testing.T) {
 		t.Fatal("config should exist after PutConfig")
 	}
 }
+
+func TestConfigStoreListBindingsFiltersAndPersists(t *testing.T) {
+	store, configPath, statePath := newTestStore(t)
+	seed := []connectors.Binding{
+		{ConnectorID: "tg-2", Chat: "chat-b", Session: connectors.SessionRef{SessionID: "s2"}},
+		{ConnectorID: "tg-1", Chat: "chat-b", Session: connectors.SessionRef{NodeID: "n1", SessionID: "s1"}},
+		{ConnectorID: "tg-1", Chat: "chat-a", Session: connectors.SessionRef{SessionID: "s1"}},
+	}
+	for _, binding := range seed {
+		if err := store.PutBinding(binding); err != nil {
+			t.Fatalf("PutBinding: %v", err)
+		}
+	}
+
+	all := store.ListBindings("")
+	if len(all) != 3 {
+		t.Fatalf("ListBindings(全部) = %d 条, want 3", len(all))
+	}
+	// 输出按 connector+chat 排序（state.json 的 map 无序，排序保证确定性）。
+	want := []struct{ connector, chat string }{{"tg-1", "chat-a"}, {"tg-1", "chat-b"}, {"tg-2", "chat-b"}}
+	for i, expect := range want {
+		if all[i].ConnectorID != expect.connector || all[i].Chat != expect.chat {
+			t.Fatalf("all[%d] = %s/%s, want %s/%s", i, all[i].ConnectorID, all[i].Chat, expect.connector, expect.chat)
+		}
+	}
+	if all[1].Session != (connectors.SessionRef{NodeID: "n1", SessionID: "s1"}) {
+		t.Fatalf("session = %+v, want n1/s1", all[1].Session)
+	}
+	if filtered := store.ListBindings("tg-1"); len(filtered) != 2 {
+		t.Fatalf("ListBindings(tg-1) = %d 条, want 2", len(filtered))
+	}
+	if missing := store.ListBindings("nope"); len(missing) != 0 {
+		t.Fatalf("未知连接器应返回空列表: %+v", missing)
+	}
+
+	// 重建实例 = 进程内重启：绑定从 state.json 读回。
+	reopened := NewConfigStore(configPath, statePath)
+	again := reopened.ListBindings("tg-1")
+	if len(again) != 2 {
+		t.Fatalf("重启后 ListBindings(tg-1) = %d 条, want 2", len(again))
+	}
+	if again[1].Session.NodeID != "n1" || again[1].Session.SessionID != "s1" {
+		t.Fatalf("重启后 session = %+v, want n1/s1", again[1].Session)
+	}
+}

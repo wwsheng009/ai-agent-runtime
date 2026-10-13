@@ -3,6 +3,7 @@ package connectors
 import (
 	"errors"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,13 @@ type Store interface {
 	GetBinding(connectorID, chat string) (Binding, bool)
 	// PutBinding 写入/覆盖绑定。
 	PutBinding(binding Binding) error
+	// ListBindings 返回绑定（只读；connectorID 为空 = 全部连接器，否则仅该连接器）。
+	//
+	// 用途：注意力出站的反向查询（宿主会话 → 全部 IM 绑定，FR-8）。
+	// 规模上限/使用场景：绑定数 = 已建立对话的 IM 会话数（通常几十~几百），
+	// 实现按全表扫描即可；storefile/storejson 会整体读取 state 文件，不做分页，
+	// 不要在热路径上高频调用。
+	ListBindings(connectorID string) []Binding
 
 	// ClaimInbound 认领一条入站消息（幂等去重）：首次返回 true，重复返回 false。
 	//
@@ -168,6 +176,33 @@ func (s *MemoryStore) PutBinding(binding Binding) error {
 	}
 	s.bindings[bindingKey(binding.ConnectorID, binding.Chat)] = binding
 	return nil
+}
+
+// ListBindings 返回绑定（内存实现；connectorID 为空 = 全部）。
+func (s *MemoryStore) ListBindings(connectorID string) []Binding {
+	connectorID = strings.TrimSpace(connectorID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Binding, 0, len(s.bindings))
+	for _, binding := range s.bindings {
+		if connectorID != "" && binding.ConnectorID != connectorID {
+			continue
+		}
+		out = append(out, binding)
+	}
+	SortBindings(out)
+	return out
+}
+
+// SortBindings 按 ConnectorID + Chat 排序绑定列表：map 存储无序，排序保证
+// ListBindings 输出确定（测试断言、UI 展示与多绑定扇出顺序稳定）。
+func SortBindings(bindings []Binding) {
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].ConnectorID != bindings[j].ConnectorID {
+			return bindings[i].ConnectorID < bindings[j].ConnectorID
+		}
+		return bindings[i].Chat < bindings[j].Chat
+	})
 }
 
 func (s *MemoryStore) ClaimInbound(connectorID, messageID string) (bool, error) {

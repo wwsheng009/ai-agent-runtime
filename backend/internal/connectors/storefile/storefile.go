@@ -300,6 +300,32 @@ func (s *ConfigStore) PutBinding(binding connectors.Binding) error {
 	})
 }
 
+// ListBindings 返回绑定（只读；connectorID 为空 = 全部）。
+//
+// 规模上限/使用场景见 connectors.Store 接口：绑定数通常几十~几百，本实现
+// 整体重读 state.json 后全表扫描，用于注意力出站的反向查询（FR-8），
+// 不要在热路径上高频调用。
+func (s *ConfigStore) ListBindings(connectorID string) []connectors.Binding {
+	connectorID = strings.TrimSpace(connectorID)
+	out := make([]connectors.Binding, 0)
+	_ = s.observeState(func(state *stateFile) {
+		out = make([]connectors.Binding, 0, len(state.Bindings))
+		for _, record := range state.Bindings {
+			if connectorID != "" && record.ConnectorID != connectorID {
+				continue
+			}
+			out = append(out, connectors.Binding{
+				ConnectorID: record.ConnectorID,
+				Chat:        record.Chat,
+				Session:     connectors.SessionRef{NodeID: record.NodeID, SessionID: record.SessionID},
+				UpdatedAt:   record.UpdatedAt,
+			})
+		}
+	})
+	connectors.SortBindings(out)
+	return out
+}
+
 // ClaimInbound 认领一条入站消息（幂等去重）：首次返回 true。
 func (s *ConfigStore) ClaimInbound(connectorID, messageID string) (bool, error) {
 	connectorID = strings.TrimSpace(connectorID)

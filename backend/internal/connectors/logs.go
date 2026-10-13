@@ -55,9 +55,10 @@ type LogEntry struct {
 
 // ConnectorStats 是每连接器的累计运行计数与最近错误（进程内，重启清零）。
 type ConnectorStats struct {
-	// Inbound 是入站消息成功入队数（白名单拒绝/队列满不计）。
+	// Inbound 是入站消息成功入队数（白名单拒绝/队列满不计；核心本地命令
+	// /help /new /status /approve /deny /answer 不计入——它们不进入 agent turn）。
 	Inbound int `json:"inbound"`
-	// Outbound 是入站消息处理完成后成功投递的回复数。
+	// Outbound 是入站消息处理完成后成功投递的回复数（本地命令的回复不计入）。
 	Outbound int `json:"outbound"`
 	// Errors 是 error 级事件数（后端失败、投递失败、队列满等）。
 	Errors int `json:"errors"`

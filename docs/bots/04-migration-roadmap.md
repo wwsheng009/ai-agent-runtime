@@ -94,6 +94,19 @@
   gateway_node（节点选择/成功回复/无节点/超时/错误传播/httptest 节点转发）。
   **待续**：三端前端编辑页对接（gateway console 表单 / aicli micro web /
   runtime-server React）、真实 token 联通验证、飞书 WS/Telegram webhook。
+- 状态（2026-10-13，审批/提问命令闭环 + 注意力出站基础，FR-7/FR-8）：核心侧
+  ◐ **基础完成**——`CommandBackend` 可选能力接口（`DecideApproval`/`AnswerQuestion`；
+  宿主未实现时命令回明确提示、不落入普通 turn）+ 命令路由 `/approve [request_id]`、
+  `/deny [request_id]`、`/answer <序号|request_id> <内容>`（参数原样透传，request_id
+  格式由宿主解释；命令路径不计入 `stats.inbound/outbound`）；`Store.ListBindings`
+  反向查询（Memory/storefile/storejson 三实现，只读、输出排序）+ `Service.NotifySession`/
+  `NotifyAttention`（session → 全部 IM 绑定扇出、无绑定 `(0,nil)`、单点失败
+  `errors.Join` 聚合；去重/降级由调用方/notify 切片负责）；单测覆盖命令路由
+  （实现/未实现/参数透传/未处理/错误）、三实现 ListBindings、NotifySession
+  多绑定/无绑定/部分失败，`go test -race` 全绿。**待续**：三宿主实现 `CommandBackend`
+  （runtime-server `approve_tool`/`answer_question`、aicli actor 响应通道、gateway
+  隧道节点命令）并把 approval_requested/question_asked/completion/error 事件接
+  `NotifyAttention`；与 Web Push/ntfy 的跨通道去重（notify.Dispatcher）。
 
 ### P2 · aicli 本地接入 + QQ（≈3–4 天）
 
@@ -172,7 +185,7 @@
   （◐ 通道核心 + polling + runtime-server 宿主接线 + React 配置页已就绪；「重启续传不重复」已有自动化 e2e
   （假 Bot API 重投 + storefile 文件态，`internal/connectors/e2e_restart_test.go`）；aicli 宿主接线已落地
   （`cmd/aicli/commands/connector_host.go`）；真实 token 联通验证待续）
-- [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环；完成提醒送达且与 Web Push/ntfy 去重。
+  - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环（核心命令路由与出站助手已就绪，宿主 `CommandBackend` 接线待续）；完成提醒送达且与 Web Push/ntfy 去重。
   （◐ gateway 宿主接线已落地：storejson 存储 + `Backend=gateway_node`（经隧道
   `POST /web/api/invoke`）+ `/api/connectors*`（owner）/`/hooks/connectors/*`
   （Provider 验签）+ console `#connectors` 最小列表页；「飞书 ↔ gateway → 节点会话」

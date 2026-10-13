@@ -216,6 +216,40 @@
   `bot_token`（`client.Do` 的 URL 内嵌）；Schema 只声明已实现的能力
   （Telegram 暂仅 `polling`，`HandleWebhook` 实现后再加回 `webhook`）。
 
+**审批/提问命令闭环 + 注意力出站（2026-10-13，FR-7/FR-8 基础切片）**：核心侧已提供
+命令路由、宿主能力接口与出站助手（`backend/internal/connectors`），宿主接线待续。
+
+- 命令语义（IM 文本命令：核心解析、宿主执行；命令路径不计入普通 turn 计数）：
+
+  | 命令 | 语义 | 核心行为 |
+  |------|------|----------|
+  | `/approve [request_id]` | 批准挂起的审批 | 转 `CommandBackend.DecideApproval`（`Command=approve`）；无参数 = “当前挂起项”，由宿主解释 |
+  | `/deny [request_id]` | 拒绝挂起的审批 | 同上（`Command=deny`） |
+  | `/answer <序号\|request_id> <内容>` | 回答挂起的提问 | 转 `CommandBackend.AnswerQuestion`；`Args[0]` 为目标、其余为内容分词，`Text` 保留原文；无参数 = 当前挂起的提问 |
+
+- `CommandBackend`（`types.go`）是 `Backend` 的**可选能力接口**：宿主实现后上述命令才
+  闭环。核心只解析命令名/参数、补齐当前绑定会话（`CommandRequest.Session`），
+  request_id 格式核心不解释（原样透传）；宿主未实现时回“当前宿主未接入审批命令…”
+  明确提示（不静默、不落入普通 agent turn）；宿主返回 `Handled=false`（无挂起项/
+  参数无法识别）时同样回明确提示。命令处理写运行日志，但不递增 `stats.inbound/outbound`。
+- 注意力出站（FR-8）：`Service.NotifySession(ctx, session, msgs) (delivered, error)`
+  按 `Store.ListBindings("")` 反查该宿主会话的全部 IM 绑定（可跨多个连接器），逐个
+  `SendOutbound`；无绑定返回 `(0, nil)`；单连接器失败不阻断其它（`errors.Join`
+  聚合），`delivered` 为成功投递的绑定数。`Service.NotifyAttention(ctx,
+  AttentionNotice{Kind, Session, Text})` 是其轻量封装（kind=approval|question|
+  completion|error，仅用于日志）。优先级/免打扰/合并/跨通道去重**不在核心**：
+  由调用方或后续 `internal/notify` 切片负责，避免与 Web Push/ntfy/收件箱重复打扰。
+- 反向查询：`Store.ListBindings(connectorID)`（只读；空 = 全部）已落地三实现
+  （MemoryStore / storefile / storejson），输出按 connector+chat 排序；绑定数通常
+  几十~几百，实现为全表扫描（storefile/storejson 整体读 state 文件），勿在热路径高频调用。
+- **三宿主待接清单（命令闭环 + 出站接线）**：
+
+  | 宿主 | 待接内容 |
+  |------|----------|
+  | runtime-server | ① Backend 实现 `CommandBackend`：`DecideApproval` 复用 session runtime 命令 `approve_tool`、`AnswerQuestion` 复用 `answer_question`（`session_runtime_handlers.go`）；② 把 `approval_requested`/`question_asked`/完成/错误事件接到 `NotifyAttention`（与收件箱/Web Push 同一事件源，注意跨通道去重） |
+  | aicli | ① Backend 实现 `CommandBackend`：走 actor 的审批/提问响应通道（与 TUI 同一入口）；② 把 chat 的 approval/question/completion 通知接到 `NotifyAttention` |
+  | gateway | ① `gateway_node` Backend 实现 `CommandBackend`：经隧道把命令转给节点会话（与入站 `submit_prompt` 同链路，节点侧需新增命令转发）；② 把 gateway 现有 attention 差分（`push.go`）接 `NotifyAttention`，与 pushNotifier 共用去重键 |
+
 ## 7. 配置存储与迁移
 
 | 宿主 | 配置文件 | 密钥文件 | 迁移性 |
@@ -367,8 +401,8 @@ typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重�
 |--------|-----------------------------------|----------|
 | 通道协议/签名/媒体/重连 | ✅ 全部 | — |
 | 入站归一/去重/队列/节流/重试 | ✅ 全部 | — |
-| 命令解析（通用命令） | ✅ 全部 | 命令的**执行**（审批/提问/建会话） |
+| 命令解析与路由（通用 + `/approve` `/deny` `/answer`） | ✅ 全部（审批/提问命令经 `CommandBackend` 转宿主） | 命令的**执行**（审批/提问/建会话）：宿主实现 `CommandBackend` |
 | 会话绑定路由 | ✅ 策略与存储接口 | 会话的创建与查询实现 |
 | Agent 执行 | ❌ | ✅ `Backend` 适配（runtime-server / aicli / gateway_node） |
 | 配置存储与 UI | ✅ Schema 与模型 | ✅ 各自的存储/页面/鉴权 |
-| 出站提醒（attention） | ❌ | ✅ 复用各宿主已有事件源（gateway 直接复用 pushNotifier） |
+| 出站提醒（attention） | ◐ `Service.NotifySession`/`NotifyAttention`（找绑定→多连接器出站；不做去重） | ✅ 事件源、优先级与跨通道去重（复用各宿主已有事件源；gateway 直接复用 pushNotifier） |

@@ -590,13 +590,19 @@ func (s *Service) HandleInbound(_ context.Context, msg InboundMessage) error {
 	})
 	switch {
 	case err == nil:
+		counters := logCounters{inbound: true}
+		if isCoreCommand(cfg.Policy.commandPrefix(), msg.Text) {
+			// 核心本地命令（含审批/提问）不计入普通 turn 计数（FR-7）；
+			// 命令处理路径自身会写 info/warn 日志。
+			counters = logCounters{}
+		}
 		s.recordLog(LogEntry{
 			Level:       LogLevelDebug,
 			Direction:   LogDirectionIn,
 			ConnectorID: cfg.ID,
 			Chat:        msg.Chat,
 			Summary:     "入站消息已入队",
-		}, logCounters{inbound: true})
+		}, counters)
 	case errors.Is(err, ErrQueueFull):
 		s.recordLog(LogEntry{
 			Level:       LogLevelError,
@@ -648,6 +654,60 @@ func (s *Service) SendOutbound(ctx context.Context, connectorID, chat string, ms
 		return err
 	}
 	return nil
+}
+
+// NotifySession 把消息推送给该宿主会话绑定的全部 IM 会话（注意力出站助手，
+// docs/bots/01-requirements.md FR-8）。宿主在自己的注意力/监督事件里调用。
+//
+// 语义：
+//   - 通过 Store.ListBindings 反查 session 的全部绑定（可跨多个连接器）；
+//   - 逐个 SendOutbound；无绑定或 session 为零值时返回 (0, nil)；
+//   - 单个连接器失败不阻断其它绑定，错误用 errors.Join 聚合返回；
+//   - delivered 是成功投递的绑定数（不是消息条数）。
+//
+// 去重/降级不在本方法：同一事件是否已投递、是否与 Web Push/ntfy/收件箱重复，
+// 由调用方（或后续 notify 切片）负责，核心只做「找绑定 → 出站」。
+func (s *Service) NotifySession(ctx context.Context, session SessionRef, msgs []OutboundMessage) (int, error) {
+	if s == nil || s.deps.Store == nil {
+		return 0, ErrServiceNotConfigured
+	}
+	if session.IsZero() || len(msgs) == 0 {
+		return 0, nil
+	}
+	delivered := 0
+	var errs []error
+	for _, binding := range s.deps.Store.ListBindings("") {
+		if binding.Session != session {
+			continue
+		}
+		if err := s.SendOutbound(ctx, binding.ConnectorID, binding.Chat, msgs); err != nil {
+			errs = append(errs, fmt.Errorf("connector %s chat %s: %w", binding.ConnectorID, binding.Chat, err))
+			continue
+		}
+		delivered++
+	}
+	return delivered, errors.Join(errs...)
+}
+
+// NotifyAttention 是 NotifySession 的轻量封装：把一条注意力通知
+// （approval/question/completion/error）推给目标会话的全部 IM 绑定。
+//
+// 仅做「找绑定 → 出站」：优先级/免打扰/合并/跨通道去重由调用方（或后续 notify
+// 切片）负责，本方法不记录投递账本；Kind 只用于日志（docs/bots/01-requirements.md
+// FR-8）。
+func (s *Service) NotifyAttention(ctx context.Context, notice AttentionNotice) error {
+	if notice.Session.IsZero() {
+		return errors.New("connectors: attention notice requires a session")
+	}
+	text := strings.TrimSpace(notice.Text)
+	if text == "" {
+		return errors.New("connectors: attention notice text is required")
+	}
+	delivered, err := s.NotifySession(ctx, notice.Session, []OutboundMessage{{Text: text}})
+	if err == nil {
+		s.logf("connector attention %s: delivered to %d binding(s)", strings.TrimSpace(notice.Kind), delivered)
+	}
+	return err
 }
 
 func (s *Service) process(ctx context.Context, cfg Config, provider Provider, msg InboundMessage) {
@@ -915,6 +975,23 @@ func parseCommand(prefix, text string) (command, bool) {
 	return cmd, true
 }
 
+// isCoreCommand 报告文本是否为核心本地命令：这些命令在 handleCommand 内闭环
+// （help/new/status/approve/deny/answer），不进入 agent turn，因此不计入
+// 普通 turn 计数（stats 的 inbound/outbound）。未知 slash 命令仍交还给
+// Backend.Handle（可能是 agent 自己的命令），按普通消息计数。
+func isCoreCommand(prefix, text string) bool {
+	cmd, ok := parseCommand(prefix, text)
+	if !ok {
+		return false
+	}
+	switch cmd.name {
+	case "help", "start", "new", "status", "approve", "deny", "answer":
+		return true
+	default:
+		return false
+	}
+}
+
 // handleCommand 处理核心通用命令；返回 handled=false 时交还给 Backend
 // （可能是 agent 自己的 slash 命令）。
 func (s *Service) handleCommand(ctx context.Context, cfg Config, provider Provider, msg InboundMessage, cmd command) (bool, error) {
@@ -936,9 +1013,131 @@ func (s *Service) handleCommand(ctx context.Context, cfg Config, provider Provid
 			}
 		}
 		return true, provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: text}})
+	case "approve", "deny", "answer":
+		// 审批/提问命令（FR-7）：转给宿主 CommandBackend 闭环。
+		// 命令路径不计入普通 turn 计数（stats 的 inbound/outbound 不递增）。
+		return true, s.dispatchHostCommand(ctx, cfg, provider, msg, cmd)
 	default:
 		return false, nil
 	}
+}
+
+// dispatchHostCommand 把 /approve、/deny、/answer 转给宿主（CommandBackend）。
+//
+// 语义（docs/bots/01-requirements.md FR-7 / 03-host-integration.md §6）：
+//   - 核心只解析命令名与参数、补齐当前绑定会话；request_id/序号格式由宿主解释；
+//   - 无参数 = “当前挂起项”语义，原样（空 Args）透传给宿主；
+//   - 宿主未实现 CommandBackend 时回明确提示（不静默），命令不会落入普通 turn；
+//   - 宿主返回 Handled=false 时也回明确提示，而不是让用户以为已处理。
+func (s *Service) dispatchHostCommand(ctx context.Context, cfg Config, provider Provider, msg InboundMessage, cmd command) error {
+	backend, ok := s.deps.Backend.(CommandBackend)
+	if !ok {
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "审批/提问命令未闭环：宿主 Backend 未实现 CommandBackend（/" + cmd.name + "）",
+		}, logCounters{})
+		return provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: commandUnavailableText(cmd.name)}})
+	}
+	binding, _ := s.deps.Store.GetBinding(cfg.ID, msg.Chat)
+	req := CommandRequest{
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Session:     binding.Session,
+		UserID:      msg.UserID,
+		UserName:    msg.UserName,
+		MessageID:   msg.MessageID,
+		Command:     cmd.name,
+		Args:        splitCommandArgs(cmd.args),
+		Text:        strings.TrimSpace(cmd.args),
+	}
+	var (
+		result CommandResult
+		err    error
+	)
+	if cmd.name == "answer" {
+		result, err = backend.AnswerQuestion(ctx, req)
+	} else {
+		result, err = backend.DecideApproval(ctx, req)
+	}
+	if err != nil {
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "审批/提问命令处理失败（/" + cmd.name + "）：" + err.Error(),
+		}, logCounters{})
+		return provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: failureText(err)}})
+	}
+	if !result.Handled {
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "宿主未处理审批/提问命令（/" + cmd.name + "）：无挂起项或参数无法识别",
+		}, logCounters{})
+		if len(result.Reply) == 0 {
+			result.Reply = []OutboundMessage{{Text: commandNotHandledText(cmd.name)}}
+		}
+	}
+	if len(result.Reply) == 0 {
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionOut,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "审批/提问命令已由宿主处理（/" + cmd.name + "，无回复）",
+		}, logCounters{})
+		return nil
+	}
+	if err := provider.Send(ctx, cfg, msg.Chat, result.Reply); err != nil {
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionOut,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "审批/提问命令回复投递失败：" + err.Error(),
+		}, logCounters{})
+		return err
+	}
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Summary:     "审批/提问命令已闭环（/" + cmd.name + "）",
+	}, logCounters{})
+	return nil
+}
+
+// splitCommandArgs 把命令参数切成空白分词；Text 保留原文，供宿主还原带空格的
+// 回答内容（/answer 的 Args[0] 是目标，其余分词拼回即是内容）。
+func splitCommandArgs(args string) []string {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return nil
+	}
+	return strings.Fields(args)
+}
+
+// commandUnavailableText 是宿主未实现 CommandBackend 时的明确提示（不静默）。
+func commandUnavailableText(name string) string {
+	if name == "answer" {
+		return "当前宿主未接入提问回答命令（/answer）：请在 Web 控制台回答，或升级宿主后重试。"
+	}
+	return "当前宿主未接入审批命令（/" + name + "）：请在 Web 控制台处理，或升级宿主后重试。"
+}
+
+// commandNotHandledText 是宿主明确未处理（无挂起项/参数无法识别）时的提示。
+func commandNotHandledText(name string) string {
+	if name == "answer" {
+		return "没有待回答的提问（或该序号/request_id 已失效）。"
+	}
+	return "没有待处理的审批（或该 request_id 已失效）。"
 }
 
 func describeSession(ref SessionRef) string {
@@ -955,6 +1154,9 @@ func helpText(cfg Config) string {
 		prefix + "help 显示本帮助",
 		prefix + "new 开启新会话",
 		prefix + "status 查看当前绑定会话",
+		prefix + "approve [request_id] 批准挂起的审批（缺省 = 当前挂起项）",
+		prefix + "deny [request_id] 拒绝挂起的审批（缺省 = 当前挂起项）",
+		prefix + "answer <序号|request_id> <内容> 回答挂起的提问",
 		"",
 		"直接发送文本即可与 agent 对话。",
 	}, "\n")
