@@ -7583,7 +7583,10 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 	// §6.8 / 审计 G3：挂起是**边沿**状态——只在记录从"不存在"变成"存在"时发一次
 	// turn.suspended（同一 turn 内派发第二个批次不重复发）。读失败时不发：宁可少
 	// 一次状态跃迁信号，也不能把"无法判定是否首次挂起"猜成首次而重复播报。
-	_, alreadyParked, readErr := store.GetTurnSuspension(ctx, sessionID, record.TurnID)
+	existing, alreadyParked, readErr := store.GetTurnSuspension(ctx, sessionID, record.TurnID)
+	if readErr == nil {
+		record = loop.joinParkedTurnRecord(ctx, store, existing, record)
+	}
 	if err := store.ParkTurnSuspension(ctx, record); err != nil {
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "parked-state write failed: "+err.Error())
 		return
@@ -7599,6 +7602,91 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 		"resume_queue_count": len(record.ResumeQueue),
 		"parked_at":          record.ParkedAt.Format(time.RFC3339Nano),
 	})
+}
+
+// joinParkedTurnRecord folds a candidate park record into the turn's durable
+// record for the same (session, turn).
+//
+// Same park episode — the existing record still owes at least one running
+// obligation — MERGES the candidate's obligations and resume-queue entries into
+// the existing epoch (ParkedAt kept). ResumeQueue is the authoritative batch
+// list of the settle verdict (TurnSuspension.ObligationBatchIDs reads it
+// first), so the previous overwrite behavior let a later dispatch hide an
+// earlier still-running batch from the settlement check (premature resume) and
+// then lose that batch's terminal edge entirely (2026-10-13 field session: two
+// batches dispatched in one turn).
+//
+// Previous episode already settled — every obligation terminal — starts a FRESH
+// epoch: fresh ParkedAt and only the new obligations. Reusing a settled epoch
+// would derive the already-delivered settlement notify key and be suppressed as
+// an event replay, wedging the session on "Waiting for subagents".
+func (loop *ReActLoop) joinParkedTurnRecord(ctx context.Context, store subagentbatch.BatchStore, existing, candidate *subagentbatch.TurnSuspension) *subagentbatch.TurnSuspension {
+	if candidate == nil {
+		return existing
+	}
+	if existing == nil {
+		return candidate
+	}
+	// The root scope is the wake-targeting identity: keep the durable one when
+	// the existing record carries it, whichever branch wins below.
+	if root := strings.TrimSpace(existing.RootScopeID); root != "" {
+		candidate.RootScopeID = root
+	}
+	if loop.parkedTurnObligationsSettled(ctx, store, existing) {
+		return candidate
+	}
+	candidate.ObligationIDs = mergeParkedTurnIDs(existing.ObligationIDs, candidate.ObligationIDs)
+	candidate.ResumeQueue = mergeParkedTurnIDs(existing.ResumeQueue, candidate.ResumeQueue)
+	if !existing.ParkedAt.IsZero() {
+		candidate.ParkedAt = existing.ParkedAt
+	}
+	return candidate
+}
+
+// parkedTurnObligationsSettled reports whether the existing record's obligations
+// all reached a terminal state, using the same strict verdict as the settlement
+// wake. An unreadable ledger deliberately answers "settled": starting a fresh
+// epoch can at worst deliver one redundant wake (recoverable, budget-bounded),
+// while keeping a stale epoch can suppress the real settlement and wedge the
+// session.
+func (loop *ReActLoop) parkedTurnObligationsSettled(ctx context.Context, store subagentbatch.BatchStore, record *subagentbatch.TurnSuspension) bool {
+	if record == nil {
+		return true
+	}
+	var agentResolver subagentbatch.AgentSessionObligationResolver
+	var teamResolver subagentbatch.TeamObligationResolver
+	if loop != nil && loop.config != nil {
+		agentResolver = loop.config.AgentSessionObligations
+		teamResolver = loop.config.TeamObligations
+	}
+	settled, err := subagentbatch.TurnObligationsAllTerminalWithTeams(ctx, store, record, agentResolver, teamResolver)
+	if err != nil {
+		return true
+	}
+	return settled
+}
+
+// mergeParkedTurnIDs appends the ids that are not already present, keeping the
+// existing order: the resume queue is an ordered FIFO and the settle verdict
+// walks it in order.
+func mergeParkedTurnIDs(existing, added []string) []string {
+	if len(added) == 0 {
+		return append([]string(nil), existing...)
+	}
+	merged := append([]string(nil), existing...)
+	seen := make(map[string]bool, len(existing)+len(added))
+	for _, id := range existing {
+		seen[strings.TrimSpace(id)] = true
+	}
+	for _, id := range added {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		merged = append(merged, trimmed)
+	}
+	return merged
 }
 
 // parkTeamObligation records a team run dispatched by spawn_team as a
@@ -7632,26 +7720,26 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 		// record that the resume path could never match.
 		return
 	}
-	record, alreadyParked, err := store.GetTurnSuspension(ctx, sessionID, turnID)
+	existing, alreadyParked, err := store.GetTurnSuspension(ctx, sessionID, turnID)
 	if err != nil {
 		return
 	}
-	if record == nil {
-		record = &subagentbatch.TurnSuspension{TurnID: turnID, SessionID: sessionID}
-	}
-	if strings.TrimSpace(record.RootScopeID) == "" {
-		record.RootScopeID = sessionID
-	}
 	obligationID := subagentbatch.TeamObligationID(teamID)
-	for _, existing := range record.ObligationIDs {
-		if existing == obligationID {
-			return
+	if existing != nil {
+		for _, id := range existing.ObligationIDs {
+			if id == obligationID {
+				return
+			}
 		}
 	}
-	record.ObligationIDs = append(record.ObligationIDs, obligationID)
-	if record.ParkedAt.IsZero() {
-		record.ParkedAt = time.Now().UTC()
+	record := &subagentbatch.TurnSuspension{
+		TurnID:        turnID,
+		SessionID:     sessionID,
+		RootScopeID:   sessionID,
+		ObligationIDs: []string{obligationID},
+		ParkedAt:      time.Now().UTC(),
 	}
+	record = loop.joinParkedTurnRecord(ctx, store, existing, record)
 	if err := store.ParkTurnSuspension(ctx, record); err != nil {
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "team parked-state write failed: "+err.Error())
 		return
