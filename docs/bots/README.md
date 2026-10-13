@@ -36,6 +36,11 @@
 7. **决策已定稿**（[06 §1](./06-target-architecture.md)）：notify 中台引入（绞杀者迁移）、总线新增
    `SubscribeAsync`（不改现有语义）、webhook 仅经公网宿主、IM↔会话默认 1:1、偏好三级 + 高优先多通道去重扇出；
    目标架构图与 10 条代码级核实见该文档 §2/§4。
+8. **部署约束（与多实例网关的关系）**：连接器首期只在**单个 gateway 实例（active）**运行；主备切换下
+   webhook 由 LB 粘性路由到 active，轮询类通道靠单实例约束避免双消费者。
+   多实例（双活）所需的防双写/共享协调/归属路由分级方案见
+   [docs/gateway/15-multi-instance-architecture.md](../gateway/15-multi-instance-architecture.md)——
+   **不需要自研实例间协议**。
 
 ## 与现有通知链路的关系
 

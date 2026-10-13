@@ -261,6 +261,11 @@ aicli-gateway security policy rollback --reason "P1 回滚误伤策略" --json
 （2/5/10/30s 封顶退避），网关具备优雅下线广播（`CloseAll` → GOAWAY + 注册表条目转 stale）与
 注册表快照恢复（standby 启动时还原为 stale 条目）。
 
+> **边界（2026-10-13 复核）**：主备是"共享数据目录 + 单写者"约定，**代码未强制**——无实例身份、
+> 无数据目录写租约，快照写入非原子（`tunnel/persist.go:90`）。双实例同时活跃会互相覆盖快照、
+> 重复推送；对 IM 连接器还会造成轮询双消费者抢消息。改进分级（P0 防双写 / P1 共享协调抽象 /
+> P2 归属路由，且**不需要实例间协议**）见 [15-multi-instance-architecture.md](./15-multi-instance-architecture.md)。
+
 ### 13.1 部署形态
 
 ```text
