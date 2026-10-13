@@ -491,6 +491,108 @@ func (s *sqliteBatchStore) ListBatches(ctx context.Context, filter BatchFilter) 
 	return out, rows.Err()
 }
 
+// CountLiveTasks implements LiveTaskCounter: it counts non-terminal task rows
+// across every batch of the filtered scope. Terminal rows free their slot the
+// moment they settle, so the count is the batch path's live-subagent footprint.
+func (s *sqliteBatchStore) CountLiveTasks(ctx context.Context, filter LiveTaskFilter) (int, error) {
+	db, err := s.dbc(ctx)
+	if err != nil {
+		return 0, err
+	}
+	placeholders, args := LiveTaskStatusPlaceholders()
+	query := `
+		SELECT COUNT(*)
+		FROM subagent_tasks t
+		JOIN subagent_batches b ON b.batch_id = t.batch_id
+		WHERE t.status IN (` + placeholders + `)`
+	if scope := strings.TrimSpace(filter.RootScopeID); scope != "" {
+		query += " AND b.root_scope_id = ?"
+		args = append(args, scope)
+	}
+	if parent := strings.TrimSpace(filter.ParentSessionID); parent != "" {
+		query += " AND b.parent_session_id = ?"
+		args = append(args, parent)
+	}
+	var count int
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("subagentbatch: count live tasks: %w", err)
+	}
+	return count, nil
+}
+
+// PruneTerminalBatches implements TerminalBatchPruner: it deletes terminal
+// batches whose finished_at predates the cutoff, together with their task rows.
+// Only terminal batches are eligible, so a live child can never be pruned.
+func (s *sqliteBatchStore) PruneTerminalBatches(ctx context.Context, olderThan time.Time, limit int) (int64, error) {
+	if olderThan.IsZero() {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = DefaultTerminalBatchPruneLimit
+	}
+	db, err := s.dbc(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	statuses := TerminalBatchStatuses()
+	placeholders := make([]string, 0, len(statuses))
+	args := make([]interface{}, 0, len(statuses)+2)
+	args = append(args, olderThan.UTC().Format(time.RFC3339Nano))
+	for _, status := range statuses {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(status))
+	}
+	args = append(args, limit)
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT batch_id FROM subagent_batches
+		WHERE finished_at IS NOT NULL AND finished_at < ?
+		  AND status IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY finished_at ASC
+		LIMIT ?`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("subagentbatch: select prunable batches: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("subagentbatch: scan prunable batch: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	tx, err := db.BeginTx(ctx, sqliteutil.WriteTxOptions)
+	if err != nil {
+		return 0, fmt.Errorf("subagentbatch: begin terminal prune: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var deleted int64
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM subagent_tasks WHERE batch_id = ?`, id); err != nil {
+			return deleted, fmt.Errorf("subagentbatch: prune batch tasks %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM subagent_batches WHERE batch_id = ?`, id); err != nil {
+			return deleted, fmt.Errorf("subagentbatch: prune batch %s: %w", id, err)
+		}
+		deleted++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("subagentbatch: commit terminal prune: %w", err)
+	}
+	return deleted, nil
+}
+
 func (s *sqliteBatchStore) Recoverable(ctx context.Context, limit int) ([]SubagentBatch, error) {
 	return s.ListBatches(ctx, BatchFilter{
 		Status: []BatchStatus{BatchQueued, BatchRunning, BatchPartiallyCompleted},

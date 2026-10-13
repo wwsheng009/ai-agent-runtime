@@ -38,6 +38,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentquota"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -2411,6 +2412,16 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			// P0-1a/M1: task-level progress write-back is an explicit opt-in
 			// (supervision.task_progress_interval, default 0 = no writes).
 			TaskProgressInterval: host.supervisionConfig.WithDefaults().TaskProgressInterval,
+			// Live-slot ceiling (agents.maxThreads) across spawn_agent and
+			// spawn_subagents: the batch path previously had only a concurrency
+			// window, so it could accumulate unbounded idle children. The gate
+			// counts registry children + non-terminal batch tasks.
+			LiveSlotGate: subagentquota.New(
+				host.AgentRegistryStore,
+				host.SubagentBatches,
+				agentsConfig.MaxThreads,
+				runtimecfg.DefaultRuntimeConfig().Agents.MaxThreads,
+			),
 		})
 		if release, active := host.beginSubagentOperation(); active {
 			if host.registerSubagentCoordinator(coordinator) {

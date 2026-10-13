@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
 // P2-9 生命周期回收与一致性对账（API 宿主）。
@@ -96,6 +97,19 @@ func (h *Handler) ensureAgentRegistryReconciler() *agentcontrol.Reconciler {
 			}
 			if outcome.FirstError == "" {
 				outcome.FirstError = wakeOutcome.FirstError
+			}
+			// Batch-ledger retention rides the same window as the CLI host: the
+			// registry purge above bounds terminal identity rows, but the durable
+			// batch ledger (and the /agents rows projected from it) had no
+			// retention, so a long-lived session accumulated terminal subagent
+			// rows without bound. Only terminal batches older than the window are
+			// deleted.
+			if retention := h.agentRegistryTerminalRetention(); retention > 0 {
+				if pruner, ok := h.getSubagentBatchStore().(subagentbatch.TerminalBatchPruner); ok && pruner != nil {
+					if _, pruneErr := pruner.PruneTerminalBatches(ctx, now.Add(-retention), subagentbatch.DefaultTerminalBatchPruneLimit); pruneErr != nil && outcome.FirstError == "" {
+						outcome.FirstError = pruneErr.Error()
+					}
+				}
 			}
 			return outcome, nil
 		},

@@ -113,6 +113,22 @@ type SubagentBatchCoordinatorConfig struct {
 	// entirely, preserving the pre-M1 behavior of never touching
 	// LastProgressAt. Hosts wire this from supervision.Config.TaskProgressInterval.
 	TaskProgressInterval time.Duration
+	// LiveSlotGate is the optional live-subagent admission gate shared by both
+	// spawn paths. When set, StartBackground checks it before persisting a new
+	// batch: a batch that would push the scope over agents.maxThreads is
+	// rejected with an actionable error and no batch/task rows are written.
+	// nil disables the check (pre-change behavior). Hosts wire this from
+	// internal/subagentquota.
+	LiveSlotGate SubagentLiveSlotGate
+}
+
+// SubagentLiveSlotGate admits (or rejects) a batch before it is persisted,
+// based on how many live subagent identities the scope already holds across the
+// agent registry and the batch ledger. It is implemented by the host
+// (internal/subagentquota.Gate) and injected so the agent package stays
+// host-neutral.
+type SubagentLiveSlotGate interface {
+	AdmitSubagentBatch(ctx context.Context, parentSessionID, rootScopeID string, requested int) error
 }
 
 // subagentExecutor is the kernel abstraction the coordinator drives. It is a
@@ -135,6 +151,7 @@ type SubagentBatchCoordinator struct {
 	deliveryRetryBase  time.Duration
 	heartbeatEvery     time.Duration
 	taskProgressEvery  time.Duration
+	liveSlotGate       SubagentLiveSlotGate
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -230,6 +247,7 @@ func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBa
 		deliveryRetryBase:  cfg.TerminalDeliveryRetryDelay,
 		heartbeatEvery:     cfg.HeartbeatInterval,
 		taskProgressEvery:  cfg.TaskProgressInterval,
+		liveSlotGate:       cfg.LiveSlotGate,
 		cancels:            make(map[string]context.CancelFunc),
 		owned:              make(map[string]struct{}),
 		abandoned:          make(map[string]struct{}),
@@ -292,6 +310,29 @@ func (c *SubagentBatchCoordinator) SetScheduler(scheduler *SubagentScheduler) {
 	c.mu.Lock()
 	c.executor = scheduler
 	c.mu.Unlock()
+}
+
+// SetLiveSlotGate installs or replaces the live-subagent admission gate. Hosts
+// that inject a shared coordinator use it to attach the same ceiling the
+// coordinator was not constructed with; a nil gate disables the check.
+func (c *SubagentBatchCoordinator) SetLiveSlotGate(gate SubagentLiveSlotGate) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.liveSlotGate = gate
+	c.mu.Unlock()
+}
+
+// liveSlotGateSnapshot reads the gate without holding the lock while calling it
+// (the gate performs store I/O and must not run under c.mu).
+func (c *SubagentBatchCoordinator) liveSlotGateSnapshot() SubagentLiveSlotGate {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.liveSlotGate
 }
 
 // SetTerminalSinkAndReplay is safe to call repeatedly. The durable mailbox
@@ -439,6 +480,17 @@ func (c *SubagentBatchCoordinator) StartBackground(parentCtx context.Context, op
 	}
 	if parentCtx == nil {
 		parentCtx = context.Background()
+	}
+
+	// Live-slot admission (agents.maxThreads across both spawn paths). It runs
+	// before any durable row is written so a rejected batch leaves no phantom
+	// batch/task record behind. A caller-supplied idempotency key skips the
+	// check: a replay must return the existing batch and must never be rejected
+	// a second time by a ceiling the existing batch already counts against.
+	if gate := c.liveSlotGateSnapshot(); gate != nil && strings.TrimSpace(opts.IdempotencyKey) == "" {
+		if err := gate.AdmitSubagentBatch(parentCtx, opts.ParentSessionID, opts.RootScopeID, len(tasks)); err != nil {
+			return nil, err
+		}
 	}
 
 	mode := opts.ExecutionMode

@@ -128,6 +128,18 @@ func (h *localChatRuntimeHost) buildLocalRegistryReconciler() *agentcontrol.Reco
 			if outcome.FirstError == "" {
 				outcome.FirstError = wakeOutcome.FirstError
 			}
+			// Batch-ledger retention rides the same window: the registry purge
+			// above bounds terminal identity rows, but the durable batch ledger
+			// (and the /agents rows projected from it) had no retention at all,
+			// so a long-lived session accumulated terminal subagent rows without
+			// bound. Only terminal batches older than the window are deleted.
+			if retention := h.localRegistryTerminalRetention(); retention > 0 {
+				if pruner, ok := h.SubagentBatches.(subagentbatch.TerminalBatchPruner); ok && pruner != nil {
+					if _, pruneErr := pruner.PruneTerminalBatches(ctx, now.Add(-retention), subagentbatch.DefaultTerminalBatchPruneLimit); pruneErr != nil && outcome.FirstError == "" {
+						outcome.FirstError = pruneErr.Error()
+					}
+				}
+			}
 			return outcome, nil
 		},
 		// P1-3 (H11/H15): the worktree base dir drifts independently of the

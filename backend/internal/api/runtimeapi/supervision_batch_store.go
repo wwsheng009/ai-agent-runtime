@@ -2,7 +2,9 @@ package runtimeapi
 
 import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentquota"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -82,6 +84,16 @@ func (h *Handler) subagentBatchCoordinator(scheduler *agent.SubagentScheduler) *
 		// (supervision.task_progress_interval, default 0 = no writes), wired
 		// from the same host tuning the CLI reads so the two hosts cannot drift.
 		TaskProgressInterval: h.supervisionTuning().TaskProgressInterval,
+		// Live-slot ceiling (agents.maxThreads) across spawn_agent and
+		// spawn_subagents: without this the batch path only had a concurrency
+		// window and could accumulate unbounded idle children. Mirrors the CLI
+		// host wiring in chat_actor_host.go.
+		LiveSlotGate: subagentquota.New(
+			h.getAgentControlAgentStore(),
+			store,
+			(&sessionAgentController{handler: h}).agentsConfig().MaxThreads,
+			runtimecfg.DefaultRuntimeConfig().Agents.MaxThreads,
+		),
 	})
 }
 
