@@ -52,11 +52,12 @@
 | 交付物 | 状态 | 位置 |
 |--------|------|------|
 | 连接器核心 | ✅ 完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`：Provider/Backend 两层契约、内存 Store（配置/绑定/去重账本/轮询游标）、每会话串行有界队列（满则 `ErrQueueFull`，跨会话并行）、流式节流（≥800ms 且内容变化）、命令 `/help` `/new` `/status`、失败回执 |
-| Telegram 适配器 | ◐ polling 完整 | `internal/connectors/providers/telegram`：`getMe` 激活、`sendMessage`、`getUpdates` 长轮询（游标 `update_offset` 持久化 + 指数退避）、`sendChatAction` typing 保活、占位消息 + `editMessageText` 流式编辑；宿主 webhook 入口已就绪，Provider 侧 `HandleWebhook` 解析待 P1 |
+| Telegram 适配器 | ◐ polling 完整 | `internal/connectors/providers/telegram`：`getMe` 激活、`sendMessage`、`getUpdates` 长轮询（游标 `update_offset` 持久化 + 指数退避）、`sendChatAction` typing 保活、占位消息 + `editMessageText` 流式编辑；`api_base` 配置项（默认 `https://api.telegram.org`，可指向自建 Bot API 服务器/测试替身，按连接器生效）；宿主 webhook 入口已就绪，Provider 侧 `HandleWebhook` 解析待 P1 |
 | 端到端（假后端） | ✅ 完成 | `service_test.go`（12 例：绑定/去重/白名单/命令/节流/队列/失败路径）+ `telegram_test.go`（8 例，`httptest` 假 Bot API：解析/游标/重试/typing/流式）；`go build ./...`、`go vet`、`go test -race` 全绿 |
 | 管理面 REST（三端共用） | ✅ 完成 | `internal/connectors/restapi`：`/connectors*` 增删改查 + schema + 测试消息 + reload；`/hooks/connectors/{id}` 公网入口（`WebhookProvider` 能力探测，签名失败 400/队列满 429/未知 404）；密钥只写不读、留空=保持、`__clear__`=清除；`Authorize` 未接线整体 403；restapi_test 12 例 |
 | 宿主接线 | ◐ runtime-server 完成 | `cmd/runtime-server/connector_bootstrap.go`：配置读写共享 `config.yaml` 的 `connectors:` 节（`internal/connectors/storefile`：YAML Node 往返 + 原子写，密钥单独落 `connectors.secrets.yaml`(0600)）、绑定/游标/去重账本落 `data/connectors/state.json`；Backend 走进程内 `runtimeapi.SubmitConnectorPrompt`（`submit_prompt` 执行路径 + 事件总线 `assistant_delta` 增量回推）；管理面 `/api/connectors*`（复用 skills 管理面鉴权口径）与 webhook `/hooks/connectors/{id}` 已挂载并随宿主 `close()` 停机。**待续**：aicli 宿主、真通道 e2e |
 | React 配置页（runtime-server） | ✅ 完成 | `frontend/src/pages/connectors-page.tsx`（路由 `/runtime/connectors`，懒加载）：列表 + 启停/编辑/测试消息/重载/删除 + 新建；`pages/connectors/{connector-dialog,test-message-dialog}.tsx` + `shared.ts`（纯逻辑），表单由 `GET /connectors/schema` 驱动（text/secret/bool/enum/url），密钥留空=保持、`__clear__`=清除，客户端预校验与字段级错误回填；`api/runtime/connectors.ts` + `types/runtime/connectors.ts`；i18n `connectors` 命名空间（zh-CN/en-US）；api/shared/dialog 单测 15 例 |
+| 端到端（假 Bot API，重启续传） | ✅ 完成 | `internal/connectors/e2e_restart_test.go`：httptest 假 Bot API（**总是重投同一 update**，模拟 at-least-once）+ Service + storefile 文件态；首轮处理 → 占位 + `editMessageText` 回执，游标 `update_offset` 落盘；重建 Store/Service/Provider = 进程内重启，首次 getUpdates 续传 offset，重投消息被持久化去重账本拦截（不二次处理/不二次回复）；`go test -race` 全绿。真实 token 联通为手动步骤（`api_base` 可指向任意 Bot API 端点） |
 
 ### P1 · 飞书 + gateway 前置 + 三端配置页（≈4–5 天）
 
@@ -115,7 +116,8 @@
 ## 6. 验收清单（汇总）
 
 - [ ] P0：Telegram（webhook + polling）↔ runtime-server 端到端；重启续传不重复。
-  （◐ 通道核心 + polling + runtime-server 宿主接线 + React 配置页已就绪，假后端 e2e 全绿；真通道联通与 aicli 宿主待续）
+  （◐ 通道核心 + polling + runtime-server 宿主接线 + React 配置页已就绪；「重启续传不重复」已有自动化 e2e
+  （假 Bot API 重投 + storefile 文件态，`internal/connectors/e2e_restart_test.go`）；真实 token 联通验证与 aicli 宿主待续）
 - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环；完成提醒送达且与 Web Push/ntfy 去重。
 - [ ] P2：aicli 本地 Telegram/QQ 端到端；配置在三宿主间可迁移；未配置连接器时回归全绿。
 - [ ] P3：微信扫码登录 + 文本/图片/语音；IM 通道可开关/静音。

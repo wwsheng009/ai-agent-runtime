@@ -135,6 +135,12 @@ func (f *fakeAPI) firstServedOffset() (int64, bool) {
 	return f.servedOffset[0], true
 }
 
+func (f *fakeAPI) getMeCallsCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getMeCalls
+}
+
 func writeJSON(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
@@ -179,17 +185,42 @@ func TestSchemaContract(t *testing.T) {
 	if schema.Provider != Name || len(schema.Fields) == 0 {
 		t.Fatalf("schema = %+v", schema)
 	}
-	var token, mode bool
+	var token, mode, base bool
 	for _, field := range schema.Fields {
 		switch field.Key {
 		case "bot_token":
 			token = field.Type == "secret" && field.Required
 		case "mode":
 			mode = field.Type == "enum" && field.Default == "polling"
+		case "api_base":
+			base = field.Type == "url" && !field.Required
 		}
 	}
-	if !token || !mode {
+	if !token || !mode || !base {
 		t.Fatalf("schema fields = %+v", schema.Fields)
+	}
+}
+
+func TestConfigAPIBaseOverridesProviderOption(t *testing.T) {
+	optionAPI := newFakeAPI("tok") // 构造参数基址：被 Settings 覆盖后不应命中
+	optionServer := httptest.NewServer(optionAPI.handler())
+	defer optionServer.Close()
+	settingsAPI := newFakeAPI("tok")
+	settingsServer := httptest.NewServer(settingsAPI.handler())
+	defer settingsServer.Close()
+
+	provider := New(WithAPIBase(optionServer.URL))
+	cfg := testConfig("tok")
+	cfg.Settings = map[string]string{"api_base": settingsServer.URL + "/"} // 尾斜杠应被归一
+
+	if _, err := provider.Activate(context.Background(), cfg); err != nil {
+		t.Fatalf("activate via settings api_base: %v", err)
+	}
+	if settingsAPI.getMeCallsCount() == 0 {
+		t.Fatal("settings api_base should be used")
+	}
+	if optionAPI.getMeCallsCount() != 0 {
+		t.Fatal("provider option base should be bypassed when settings api_base is set")
 	}
 }
 

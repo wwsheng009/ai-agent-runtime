@@ -117,6 +117,10 @@ func (p *Provider) Schema() api.ProviderSchema {
 				Placeholder: "123456:ABC-DEF…", Help: "在 @BotFather 创建 bot 后获取",
 			},
 			{
+				Key: "api_base", Label: "API 基址", Type: api.FieldURL,
+				Help: "可留空（默认 https://api.telegram.org）；可指向自建 Bot API 服务器或测试替身",
+			},
+			{
 				Key: "mode", Label: "接入模式", Type: api.FieldEnum, Default: "polling",
 				Options: []api.Option{{Value: "polling", Label: "长轮询（推荐）"}, {Value: "webhook", Label: "Webhook"}},
 			},
@@ -124,6 +128,12 @@ func (p *Provider) Schema() api.ProviderSchema {
 			{Key: "poll_timeout_seconds", Label: "长轮询超时（秒）", Type: api.FieldNumber, Default: "25"},
 		},
 	}
+}
+
+// baseFor 解析连接器的 API 基址（Settings["api_base"] > 构造参数 > 默认），
+// 空值/尾斜杠已归一，供 call/getUpdates 拼接 /bot<token>/<method>。
+func (p *Provider) baseFor(cfg connectors.Config) string {
+	return strings.TrimRight(cfg.Setting("api_base", p.apiBase), "/")
 }
 
 // Activation 校验 token 并返回 bot 信息。
@@ -142,7 +152,7 @@ func (p *Provider) Activate(ctx context.Context, cfg connectors.Config) (connect
 		Username  string `json:"username"`
 		FirstName string `json:"first_name"`
 	}
-	if err := p.call(ctx, token, "getMe", nil, &result); err != nil {
+	if err := p.call(ctx, p.baseFor(cfg), token, "getMe", nil, &result); err != nil {
 		return connectors.Activation{}, err
 	}
 	info := strings.TrimSpace(result.Username)
@@ -170,7 +180,7 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 		var sent struct {
 			MessageID int64 `json:"message_id"`
 		}
-		if err := p.call(ctx, token, "sendMessage", payload, &sent); err != nil {
+		if err := p.call(ctx, p.baseFor(cfg), token, "sendMessage", payload, &sent); err != nil {
 			return err
 		}
 	}
@@ -210,11 +220,12 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 	}
 
 	backoff := p.retryDelay
+	base := p.baseFor(cfg)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
-		updates, err := p.getUpdates(ctx, token, offset, timeout)
+		updates, err := p.getUpdates(ctx, base, token, offset, timeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -261,9 +272,10 @@ func (p *Provider) StartTyping(ctx context.Context, cfg connectors.Config, chat 
 	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 	session := &typingSession{cancel: cancel, done: make(chan struct{})}
+	base := p.baseFor(cfg)
 	go func() {
 		defer close(session.done)
-		p.sendChatAction(sessionCtx, token, chat)
+		p.sendChatAction(sessionCtx, base, token, chat)
 		ticker := time.NewTicker(typingInterval)
 		defer ticker.Stop()
 		for {
@@ -271,16 +283,16 @@ func (p *Provider) StartTyping(ctx context.Context, cfg connectors.Config, chat 
 			case <-sessionCtx.Done():
 				return
 			case <-ticker.C:
-				p.sendChatAction(sessionCtx, token, chat)
+				p.sendChatAction(sessionCtx, base, token, chat)
 			}
 		}
 	}()
 	return session, nil
 }
 
-func (p *Provider) sendChatAction(ctx context.Context, token, chat string) {
+func (p *Provider) sendChatAction(ctx context.Context, base, token, chat string) {
 	payload := map[string]any{"chat_id": chat, "action": "typing"}
-	if err := p.call(ctx, token, "sendChatAction", payload, nil); err != nil && ctx.Err() == nil {
+	if err := p.call(ctx, base, token, "sendChatAction", payload, nil); err != nil && ctx.Err() == nil {
 		p.logf("telegram: sendChatAction failed: %v", err)
 	}
 }
@@ -295,10 +307,11 @@ func (p *Provider) StartStreaming(ctx context.Context, cfg connectors.Config, ch
 	var sent struct {
 		MessageID int64 `json:"message_id"`
 	}
-	if err := p.call(ctx, token, "sendMessage", payload, &sent); err != nil {
+	base := p.baseFor(cfg)
+	if err := p.call(ctx, base, token, "sendMessage", payload, &sent); err != nil {
 		return nil, err
 	}
-	return &streamingSession{provider: p, token: token, chat: chat, messageID: sent.MessageID, last: "思考中…"}, nil
+	return &streamingSession{provider: p, base: base, token: token, chat: chat, messageID: sent.MessageID, last: "思考中…"}, nil
 }
 
 type typingSession struct {
@@ -317,6 +330,7 @@ func (s *typingSession) Stop(context.Context) error {
 
 type streamingSession struct {
 	provider  *Provider
+	base      string
 	token     string
 	chat      string
 	messageID int64
@@ -329,7 +343,7 @@ func (s *streamingSession) Update(ctx context.Context, text string) error {
 		return nil
 	}
 	payload := map[string]any{"chat_id": s.chat, "message_id": s.messageID, "text": text}
-	if err := s.provider.call(ctx, s.token, "editMessageText", payload, nil); err != nil {
+	if err := s.provider.call(ctx, s.base, s.token, "editMessageText", payload, nil); err != nil {
 		return err
 	}
 	s.last = text
@@ -407,22 +421,22 @@ func parseUpdate(connectorID string, upd update) (connectors.InboundMessage, boo
 	return msg, true
 }
 
-func (p *Provider) getUpdates(ctx context.Context, token string, offset int64, timeout time.Duration) ([]update, error) {
+func (p *Provider) getUpdates(ctx context.Context, base, token string, offset int64, timeout time.Duration) ([]update, error) {
 	params := map[string]any{
 		"offset":          offset,
 		"timeout":         int(timeout.Seconds()),
 		"allowed_updates": []string{"message"},
 	}
 	var updates []update
-	if err := p.call(ctx, token, "getUpdates", params, &updates); err != nil {
+	if err := p.call(ctx, base, token, "getUpdates", params, &updates); err != nil {
 		return nil, err
 	}
 	return updates, nil
 }
 
 // call 调用 Bot API：{"ok":bool,"result":…,"description":…} 统一解包。
-func (p *Provider) call(ctx context.Context, token, method string, payload any, out any) error {
-	endpoint := p.apiBase + "/bot" + token + "/" + method
+func (p *Provider) call(ctx context.Context, base, token, method string, payload any, out any) error {
+	endpoint := base + "/bot" + token + "/" + method
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)

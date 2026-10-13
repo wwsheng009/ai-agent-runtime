@@ -159,7 +159,11 @@
 `connectors.secrets.yaml`（0600，可 `WithSecretsPath` 覆盖），绑定/去重账本/轮询游标
 写宿主数据目录 `data/connectors/state.json`。runtime-server 已在
 `cmd/runtime-server/connector_bootstrap.go` 接线（管理面挂 `/api/connectors*`、
-webhook 挂 `/hooks/connectors/{id}`）。**待续**：跨进程锁与 aicli 宿主（P1）。
+webhook 挂 `/hooks/connectors/{id}`）。Telegram Provider 提供 `api_base` 配置项
+（默认 `https://api.telegram.org`，可指向自建 Bot API 服务器/测试替身），
+`internal/connectors/e2e_restart_test.go` 以 httptest 假 Bot API + storefile 文件态
+覆盖「重启续传不重复」（游标续传 + 去重账本拦截重投，`go test -race` 全绿）。
+**待续**：跨进程锁、aicli 宿主（P0）与真实 token 联通验证。
 
 ## 8. 宿主差异汇总（共享核心 vs 宿主专属）
 
