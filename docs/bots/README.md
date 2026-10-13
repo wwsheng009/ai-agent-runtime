@@ -12,6 +12,7 @@
 | [03-host-integration.md](./03-host-integration.md) | 三宿主接入点与「前端配置不复杂」的 schema 驱动设计（含 API 契约） |
 | [04-migration-roadmap.md](./04-migration-roadmap.md) | 从 codex-server 的移植映射、分阶段计划、测试策略与风险 |
 | [05-review-and-hardening.md](./05-review-and-hardening.md) | **方案审查与加固**：三个硬缺口（事件无隔离/通知无中台/多前端无契约护栏）、消息分发可靠性与性能、多通道治理、Bot 交互设计、现有架构优化项与决策清单 |
+| [06-target-architecture.md](./06-target-architecture.md) | **目标架构（定稿）与核实**：D1–D10 决策按最佳实践定稿、目标架构图（部署/组件/入站/通知/配置/数据）、组件现状映射、逐条代码级核实与待建清单 |
 
 ## 结论摘要（TL;DR）
 
@@ -32,6 +33,9 @@
 6. **审查后新增前置阶段 P-1（基础加固，2–3 人日）**：给事件总线加异步订阅原语（有界队列 + panic 隔离）、
    抽出 `internal/notify` 通知中台（把 gateway 的优先级/静默/合并/presence 策略变成共享内核）、
    建立 `internal/connectors/api` 契约包与三宿主契约测试矩阵。详见 [05-review-and-hardening.md](./05-review-and-hardening.md)。
+7. **决策已定稿**（[06 §1](./06-target-architecture.md)）：notify 中台引入（绞杀者迁移）、总线新增
+   `SubscribeAsync`（不改现有语义）、webhook 仅经公网宿主、IM↔会话默认 1:1、偏好三级 + 高优先多通道去重扇出；
+   目标架构图与 10 条代码级核实见该文档 §2/§4。
 
 ## 与现有通知链路的关系
 

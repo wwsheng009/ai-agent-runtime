@@ -306,6 +306,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev Event) error
 
 ## 7. 决策清单（请拍板）
 
+> **状态：已定稿**——按最佳实践确认的最终结论、依据与影响见
+> [06-target-architecture.md](./06-target-architecture.md) §1（D1–D10）。下表保留原始选项与本轮建议，作为决策记录。
+
 | 编号 | 决策 | 选项 | 建议 |
 |------|------|------|------|
 | D1 | 通知去重/在场的**权威源** | gateway presence / 各前端 visibility / 新 `notify` 中台 | 新中台，宿主只上报"是否在场" |
