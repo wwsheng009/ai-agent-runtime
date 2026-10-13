@@ -125,8 +125,10 @@ func TestChatBusyCommandPolicySubcommandQueueClear(t *testing.T) {
 	if got := chatSlashCommandBusyPolicyFor("/queue clear"); got != chatBusyPolicyScreen {
 		t.Fatalf("/queue clear 应走 prompt 确认门（screen 路由），实际 %s", got)
 	}
-	if got := chatSlashCommandBusyPolicyFor("/QUEUE CLEAR now"); got != chatBusyPolicyDeferred {
-		t.Fatalf("/queue clear 附带额外参数不在首批白名单，应为 deferred，实际 %s", got)
+	// 结构化匹配按「命令名 + 首个子命令 token」，额外参数不再使匹配失败
+	// （/reasoning_effort set high 需要带值）；执行仍由确认门拦截。
+	if got := chatSlashCommandBusyPolicyFor("/QUEUE CLEAR now"); got != chatBusyPolicyScreen {
+		t.Fatalf("/QUEUE CLEAR now 应按 token 命中确认门，实际 %s", got)
 	}
 	if got := chatSlashCommandBusyPolicyFor("/queue status"); got != chatBusyPolicyImmediate {
 		t.Fatalf("/queue status 应为 immediate，实际 %s", got)

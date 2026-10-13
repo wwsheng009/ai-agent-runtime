@@ -11,24 +11,49 @@ import (
 // 忙时收到 prompt 档命令 → 先经该通道请用户确认 → 确认则 Phase A 执行，
 // 拒绝则消费该行并给出拒绝提示，通道不可用/被中断则未占有（调用方回退入队）。
 
-// chatBusyPromptFirstBatchCommands 是首批 prompt 档白名单（命令名前缀，已归一）。
-// 首批只放行 `/queue clear`：用户排队过多时最需要它，且语义完全落在 InputQueue
-// 自身，不触碰 actor/终端所有权。
-var chatBusyPromptFirstBatchCommands = []string{"/queue clear"}
+// chatBusyPromptAllowed 是忙时 prompt 档（确认门）允许清单：命令名 → 允许的
+// 子命令 token 集合（"" 表示裸命令）。仅收录「确认后无二次交互、且生效域不触碰
+// 安全/控制面」的命令：
+//   - /queue clear：用户排队过多时最需要它，语义完全落在 InputQueue 自身；
+//   - /stream|/fast|/reasoning on|off、/s、/normal：纯显示/外观开关（live）；
+//   - /reasoning_effort set：显示档位写入（next-turn），值随命令给出、不再追问。
+//
+// 权限/安全类（/permission-mode set、/yolo、/trust grant、/grants revoke、
+// /approval-reuse set）与控制面类（/supervision ack|resolve|control、
+// /agents approve|deny|answer|send|followup|cleanup）保持 Deferred——不在运行中
+// 改安全策略/控制面；会二次追问输入的命令（/title bare、/memory add 无参等）同样
+// 不纳入（确认门后再读输入会与忙时 capture 竞争）。
+//
+// 结构化匹配（命令名 + 首个子命令 token）取代此前的裸字符串精确匹配：既支持
+// 带参命令（/reasoning_effort set high），又避免裸前缀歧义（/s 不会命中 /status）。
+var chatBusyPromptAllowed = map[string]map[string]struct{}{
+	"/queue":            {"clear": {}},
+	"/stream":           {"on": {}, "off": {}},
+	"/fast":             {"on": {}, "off": {}},
+	"/reasoning":        {"on": {}, "off": {}},
+	"/reasoning_effort": {"set": {}},
+	"/s":                {"": {}},
+	"/normal":           {"": {}},
+}
 
-// busyPromptCommandWhitelisted 判定输入是否属于首批 prompt 档白名单。
+// busyPromptCommandWhitelisted 判定输入是否属于忙时 prompt 确认门允许清单。
+// 调用方（chatBusyPolicyFromRuntimeSpec / runtimeCommandHost.submit）在解析出
+// prompt 档 spec 之后调用，因此本函数只需做「命令名 + 子命令 token」匹配。
 func busyPromptCommandWhitelisted(text string) bool {
-	// 折叠内部空白：`/queue   clear` 与 `/queue clear` 是同一个命令。
-	normalized := strings.ToLower(strings.Join(strings.Fields(normalizeQueuedInputLine(text)), " "))
-	if normalized == "" {
+	name, args, ok := chatBusyCommandNameAndArgs(normalizeQueuedInputLine(text))
+	if !ok {
 		return false
 	}
-	for _, prefix := range chatBusyPromptFirstBatchCommands {
-		if normalized == prefix {
-			return true
-		}
+	subs, ok := chatBusyPromptAllowed[canonicalRuntimeCommandName(name)]
+	if !ok {
+		return false
 	}
-	return false
+	token := ""
+	if len(args) > 0 {
+		token = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	_, ok = subs[token]
+	return ok
 }
 
 // chatBusyPromptConfirmOverride 仅测试注入（nil = 走真实 priority prompt 通道）。

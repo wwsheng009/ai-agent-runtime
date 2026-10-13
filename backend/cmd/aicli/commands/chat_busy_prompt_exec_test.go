@@ -25,10 +25,21 @@ func TestChatBusyPolicyPromptFirstBatch(t *testing.T) {
 	t.Setenv(runtimeInteractionEnv, "auto")
 
 	cases := map[string]chatBusyCommandPolicy{
-		"/queue clear":   chatBusyPolicyScreen,    // 首批 prompt → 宿主确认门
-		"/queue   clear": chatBusyPolicyScreen,    // 空白归一后同一条
-		"/queue":         chatBusyPolicyImmediate, // P1 catalog 首批（状态查询）
-		"/normal":        chatBusyPolicyDeferred,
+		"/queue clear":          chatBusyPolicyScreen,    // prompt 确认门
+		"/queue   clear":        chatBusyPolicyScreen,    // 空白归一后同一条
+		"/queue":                chatBusyPolicyImmediate, // bare：inline+read（状态查询）
+		"/stream on":            chatBusyPolicyScreen,    // 纯显示开关纳入确认门
+		"/stream off":           chatBusyPolicyScreen,
+		"/fast on":              chatBusyPolicyScreen,
+		"/reasoning off":        chatBusyPolicyScreen,
+		"/reasoning_effort set": chatBusyPolicyScreen, // 值随命令给出，不再追问
+		"/s":                    chatBusyPolicyScreen, // bare 显示开关
+		"/normal":               chatBusyPolicyScreen,
+		"/n":                    chatBusyPolicyScreen,    // 别名归并 → /normal
+		"/stream":               chatBusyPolicyImmediate, // bare：inline+read
+		"/yolo":                 chatBusyPolicyDeferred,  // 安全类不纳入
+		"/permission-mode set":  chatBusyPolicyDeferred,  // 安全类不纳入
+		"/supervision ack":      chatBusyPolicyDeferred,  // 控制面不纳入
 	}
 	for line, want := range cases {
 		if got := chatSlashCommandBusyPolicyFor(line); got != want {
@@ -139,8 +150,8 @@ func TestRuntimeCommandHostDegradesNonWhitelistedPrompt(t *testing.T) {
 		t.Fatal("非首批 prompt 命令不得进入确认门")
 		return false, false
 	})
-	if runtimeCommandHostFor(session).SubmitBusy("/normal") {
-		t.Fatal("非首批 prompt 命令必须降级")
+	if runtimeCommandHostFor(session).SubmitBusy("/yolo") {
+		t.Fatal("非白名单 prompt 命令（安全类）必须降级")
 	}
 	events := store.runtimeInteractions()
 	if len(events) != 1 || events[0].Payload["result"] != "degraded" {

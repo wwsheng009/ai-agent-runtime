@@ -7,139 +7,48 @@ import (
 
 // 忙时副屏（S 档）准入与副屏执行原语。
 //
-// 准入保持**显式白名单**（fail-closed），不做「screen 档默认放行」的反转：
-// 2026-10-13 对候选命令逐一核验（handler 是否在 Phase A 内阻塞/写全局态、
-// 是否在租约释放后应用、是否持有与在途 turn 争用的锁）发现——`/theme select|set`、
-// `/profile pick`、`/mcp select`、`/routing panel`、`/agents pick|panel`、
-// `/export`、`/skills select` 全部**不能**与在途 turn 并发：
-//   - `/theme set`、`/agents pick|panel` 是 live 生效域，会在 Phase A 内改全局/
-//     会话选中态并戳 presenter（假设 actor 空闲）；
-//   - `/profile pick`、`/agents pick` 在 Phase A（持 commandMu）内阻塞读 priority
-//     prompt；`/routing panel` 在 handler 内同步开全屏并取 LockSessionWrite，
-//     可能与在途 turn 争锁；
-//   - `/export`、`/skills select`、`/mcp select` 的 gate 在 run 活跃时硬拒绝，
-//     随后回退到「立即导出在途会话 / 改配置热刷新函数面」等副作用路径。
+// 准入策略（P2-6）：**默认放行 + 黑名单**。screen 档默认允许在忙时开屏，只有
+// 注册表 spec 上显式声明 BusyBlock 的变体被排除（见 chat_runtime_command_registry.go
+// 的 rtBusyBlock）。黑名单声明在**变体 spec** 上（而非命令名级），因此能区分同命令
+// 的只读/写入变体（/agents bare 放行、pick|panel 排除；/theme status 放行、
+// select|set 排除）。
 //
-// 因此只放行经核验的命令：只读文档 + 只读交互列表（/agents）+ next-turn 安全且
-// 在 Phase B（租约释放后）应用的三个写入选择器（/model、/provider、
-// /reasoning_effort）。新增 screen 命令必须先过同样的核验再进白名单。
+// 默认放行的依据（§3.8.1 注册表不变式，T28 静态断言 + runtimeHostEffectReachable
+// 宿主守卫）：screen 档的生效域只能是 read/live/next-turn/next-call——session/process
+// 只允许声明为 queue/block；且执行链路自带三重安全网：
+//  1. 选择/写入只在副屏租约释放后应用（I3）；
+//  2. 宿主侧运行时刷新永不打断在途 turn（refreshLocalRuntimeAfterSelection
+//     把 actor 重建登记为延迟重建，下一回合生效）；
+//  3. 能力不足/租约忙/嵌套时框架 fail-closed 降级为主屏内联（D-F/I6/I9）。
+//
+// 黑名单（BusyBlock）收录经逐命令核验确认「不能与在途 turn 并发」的变体
+// （2026-10-13 核验：handler 在 Phase A 内阻塞/写全局态、在租约释放后仍走副作用
+// 路径、或与在途 turn 争锁）：
+//   - /theme select|set、/agents pick|panel：live 生效域，Phase A 内改全局/会话
+//     选中态并戳 presenter（假设 actor 空闲）；
+//   - /profile pick、/agents pick：Phase A（持 commandMu）内阻塞读 priority prompt；
+//   - /routing panel：handler 内同步开全屏并取 LockSessionWrite，可能与在途 turn 争锁；
+//   - /export、/skills select、/mcp select：gate 在 run 活跃时硬拒绝，随后回退到
+//     「立即导出在途会话 / 改配置热刷新函数面」等副作用路径。
+//
+// 注意：默认由「白名单 fail-closed」改为「默认放行」，因此**新增 screen 变体默认
+// 进入忙时通道**；核验发现不能并发时，必须在注册表该变体上加 rtBusyBlock() 排除。
 
 // chatBusyScreenWaitBudget 是进入副屏前的租约等待预算（§3.7.1：≤2s）。
 const chatBusyScreenWaitBudget = 2 * time.Second
 
-// chatBusyScreenDocumentCommands 是忙时 S 档白名单（批次 4：从首批 5 条扩展
-// 到全部「只读 + 副屏文档」命令，方案 §6 批次 4 / T10）。
-//
-// 判据（三重，全部 fail-closed）：注册表声明 screen 档 + read 生效域 +
-// 显式声明 `screen-document` 输出类别。命令名进白名单只表示「其只读变体
-// 允许忙时开屏」：picker/确认流变体（/theme select、/skills select、/mcp select、
-// /routing panel、/profile pick）因 Effect≠read 或输出类别为 screen-interactive
-// 被判据本身排除。
-var chatBusyScreenDocumentCommands = map[string]struct{}{
-	"/todos":     {},
-	"/history":   {},
-	"/usage":     {},
-	"/debug":     {}, // 仅 "display" 变体是 screen（其余变体走 inline 路径）
-	"/web":       {}, // 仅 "endpoints" 变体是 screen
-	"/account":   {},
-	"/accounts":  {},
-	"/help":      {},
-	"/status":    {},
-	"/sessions":  {},
-	"/functions": {},
-	"/plans":     {}, // 仅 "detail" 变体是 screen（列表/对比仍是短内联）
-	"/timeline":  {},
-	"/collab":    {},
-	"/hotkeys":   {},
-	// 批次 3 尾批：只读 list/status 变体迁入副屏后同批纳入忙时通道
-	// （/model status、/provider status、/theme status|list|preview、
-	// /skills list、/mcp list|status、/profile status|list|show|diff）。
-	"/model":    {},
-	"/provider": {},
-	"/theme":    {},
-	"/skills":   {},
-	"/mcp":      {},
-	"/profile":  {},
-	// 批次 3 尾批扩展：/lsp 只读长文档（status/list/servers/diagnostics）
-	// 迁入副屏后同批纳入忙时通道；restart/start 与 help 不在此列。
-	"/lsp": {},
-}
-
-// busyScreenCommandReadOnlyDocument 判定命令是否可走忙时副屏通道（S 档）：
-// 必须同时满足 screen 档 + 只读生效域 + 显式声明只读文档输出类别 + 属于
-// 白名单。输出类别判据保证同名命令的交互变体（如 /skills select）不会
-// 因命令名命中白名单而被误放行。
-func busyScreenCommandReadOnlyDocument(spec runtimeCommandSpec) bool {
-	if spec.Mode != runtimeModeScreen || spec.Effect != runtimeEffectRead {
-		return false
-	}
-	if spec.Output != chatOutputScreenDocument {
-		return false
-	}
-	_, ok := chatBusyScreenDocumentCommands[spec.Command]
-	return ok
-}
-
-// chatBusyScreenInteractiveCommands 是忙时 S 档的「只读交互副屏」白名单
-// （A 族列表）：声明 screen+read+screen-interactive，交互只做只读快照与
-// 选择后打开只读视图，不写会话/配置状态、不发消息、不跨回合。
-//
-// /agents（bare）是本表当前唯一成员：列表数据是 durable registry 快照，
-// 选中后仅打开只读 transcript。写变体（panel/pick/approve/deny/send/followup/
-// cleanup）因 Effect≠read 或未列入本表继续排队；/agents status|list 保持
-// inline+read（I 档）。
-var chatBusyScreenInteractiveCommands = map[string]struct{}{
-	"/agents": {},
-}
-
-// busyScreenCommandReadOnlyInteractive 判定只读交互副屏（列表）是否可以
-// 走忙时通道：screen 档 + 只读生效域 + screen-interactive 输出类别 + 白名单。
-func busyScreenCommandReadOnlyInteractive(spec runtimeCommandSpec) bool {
-	if spec.Mode != runtimeModeScreen || spec.Effect != runtimeEffectRead {
-		return false
-	}
-	if spec.Output != chatOutputScreenInteractive {
-		return false
-	}
-	_, ok := chatBusyScreenInteractiveCommands[spec.Command]
-	return ok
-}
-
-// chatBusyScreenInteractiveWriteCommands 是忙时 S 档「可写交互副屏」白名单
-// （P2-5 生效域适配）：选择器自身在副屏内完成选择，会话/配置写入只在租约释放后
-// 应用（I3），且宿主侧运行时刷新永不打断在途 turn（refreshLocalRuntimeAfterSelection
-// 把 actor 重建登记为延迟重建，下一回合生效），因此与 next-turn 生效域一致、
-// 可安全地在回合运行中执行。
-//
-// 与只读白名单同样 fail-closed：未列入本表的 screen-interactive 写入类命令
-// 继续按 Deferred 入队（逐命令核验结论见文件头）。
-var chatBusyScreenInteractiveWriteCommands = map[string]struct{}{
-	"/model":            {},
-	"/provider":         {},
-	"/reasoning_effort": {},
-}
-
-// busyScreenCommandInteractiveWrite 判定「可写交互副屏」是否可以走忙时通道：
-// screen 档 + next-turn 生效域 + screen-interactive 输出类别 + 白名单。
-func busyScreenCommandInteractiveWrite(spec runtimeCommandSpec) bool {
-	if spec.Mode != runtimeModeScreen || spec.Effect != runtimeEffectNextTurn {
-		return false
-	}
-	if spec.Output != chatOutputScreenInteractive {
-		return false
-	}
-	_, ok := chatBusyScreenInteractiveWriteCommands[spec.Command]
-	return ok
-}
-
-// busyScreenCommandAllowed 是忙时副屏的统一判据（I7 单一实现）：只读文档白名单
-// 或只读交互列表白名单或可写交互副屏白名单。策略映射
-// （chatBusyPolicyFromRuntimeSpec）与宿主准入（runtimeCommandHost.submit）都必须
-// 经本函数，不得各自维护一份。
+// busyScreenCommandAllowed 是忙时副屏的统一判据（I7 单一实现）：screen 档 +
+// 显式声明输出类别 + 未声明 BusyBlock。策略映射（chatBusyPolicyFromRuntimeSpec）
+// 与宿主准入（runtimeCommandHost.submit）都必须经本函数，不得各自维护一份。
 func busyScreenCommandAllowed(spec runtimeCommandSpec) bool {
-	return busyScreenCommandReadOnlyDocument(spec) ||
-		busyScreenCommandReadOnlyInteractive(spec) ||
-		busyScreenCommandInteractiveWrite(spec)
+	if spec.Mode != runtimeModeScreen {
+		return false
+	}
+	// screen 档必须显式声明输出类别（T11 守卫）；未声明视为非法声明，fail-closed。
+	if !spec.Output.declared() {
+		return false
+	}
+	return !spec.BusyBlock
 }
 
 // markChatBusyInteractiveScreenActive 登记一个忙时副屏交互窗口，返回幂等释放函数。
@@ -196,8 +105,8 @@ func chatBusyScreenRunDispatch(session *ChatSession, line string) bool {
 		// 未命中结构化命令或结果单元未提交：不认领输入，调用方回退入队。
 		return false
 	}
-	// Phase B 效应必须在锁外应用。白名单内的只读 screen 命令不可能请求
-	// 退出会话，quit 返回值仅服务于主分派器契约，此处忽略。
+	// Phase B 效应必须在锁外应用。screen 命令不可能请求退出会话，quit 返回值
+	// 仅服务于主分派器契约，此处忽略。
 	_ = chatCommandPhaseB(session, result, renderErr, false)
 	return true
 }

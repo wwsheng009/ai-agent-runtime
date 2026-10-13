@@ -103,6 +103,10 @@ type runtimeCommandSpec struct {
 	// Output 是输出类别（批次 5 单一事实源，方案 §5.2(4)）。零值表示未显式
 	// 声明，按 Mode/Confirm 派生；screen 档必须显式声明（T11 守卫）。
 	Output chatCommandOutputCategory
+	// BusyBlock 显式把该变体排除出忙时副屏通道（P2-6 黑名单，默认放行）。
+	// 只用于「核查确认不能与在途 turn 并发」的 screen 变体；命中后该变体在忙时
+	// 按 Deferred 入队，不再开屏。
+	BusyBlock bool
 }
 
 type runtimeCommandEntry struct {
@@ -124,6 +128,11 @@ func rtNotice(notice string) runtimeSpecOption {
 // rtOutput 显式声明输出类别（批次 5：与 Mode/Effect 同源，见 chat_command_output_category.go）。
 func rtOutput(category chatCommandOutputCategory) runtimeSpecOption {
 	return func(spec *runtimeCommandSpec) { spec.Output = category }
+}
+
+// rtBusyBlock 把该变体加入忙时副屏黑名单（P2-6，见 chat_busy_screen_exec.go）。
+func rtBusyBlock() runtimeSpecOption {
+	return func(spec *runtimeCommandSpec) { spec.BusyBlock = true }
 }
 
 func rtSpec(command string, category commandCategory, mode runtimeInteractionMode, effect runtimeEffectScope, opts ...runtimeSpecOption) runtimeCommandSpec {
@@ -263,7 +272,9 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Bare:     rtBare(rtSpec("/title", categorySessionMeta, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
 		Wildcard: ptrRuntimeSpec(rtSpec("/title", categorySessionMeta, runtimeModeInline, runtimeEffectNextTurn, rtNotice("下一回合生效"))),
 	},
-	"/export": {Bare: rtBare(rtSpec("/export", categorySessionMeta, runtimeModeScreen, runtimeEffectRead, rtConfirm(), rtNotice("确认后写外部文件，不写会话"), rtOutput(chatOutputScreenInteractive)))},
+	// /export 忙时排除（核验）：run 活跃时 gate 拒绝后会立即导出在途会话，
+	// 导出内容不稳定，故即使 Effect=read 也不放行副屏。
+	"/export": {Bare: rtBare(rtSpec("/export", categorySessionMeta, runtimeModeScreen, runtimeEffectRead, rtConfirm(), rtNotice("确认后写外部文件，不写会话"), rtOutput(chatOutputScreenInteractive), rtBusyBlock()))},
 	"/agent":  {Bare: rtBare(rtSpec("/agent", categoryDiagnostics, runtimeModeInline, runtimeEffectRead))},
 
 	// C4 模型与路由
@@ -282,7 +293,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Variants: map[string]runtimeCommandSpec{
 			"show":   rtSpec("/routing", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
 			"doctor": rtSpec("/routing", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
-			"panel":  rtSpec("/routing", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("面板内写动作逐项确认"), rtOutput(chatOutputScreenInteractive)),
+			"panel":  rtSpec("/routing", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("面板内写动作逐项确认"), rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
 			"on":     rtSpec("/routing", categoryModelRouting, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 			"off":    rtSpec("/routing", categoryModelRouting, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 			"reset":  rtSpec("/routing", categoryModelRouting, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
@@ -296,7 +307,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"list":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"show":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"diff":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
-			"pick":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
+			"pick":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
 			"reload": rtSpec("/profile", categoryModelRouting, runtimeModeQueue, runtimeEffectNextTurn, rtNotice("已排队，回合结束后执行")),
 			"save":   rtSpec("/profile", categoryModelRouting, runtimeModeQueue, runtimeEffectNextTurn, rtNotice("已排队，回合结束后执行")),
 			"import": rtSpec("/profile", categoryModelRouting, runtimeModeQueue, runtimeEffectNextTurn, rtNotice("已排队，回合结束后执行")),
@@ -387,7 +398,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Bare: rtBare(rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument))),
 		Variants: map[string]runtimeCommandSpec{
 			"list":    rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument)),
-			"select":  rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtOutput(chatOutputScreenInteractive)),
+			"select":  rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
 			"enable":  rtSpec("/skills", categorySkillsTools, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("热刷新，对后续请求生效")),
 			"disable": rtSpec("/skills", categorySkillsTools, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("热刷新，对后续请求生效")),
 			// 重载会重建 registry 与函数面：忙时排队到回合结束后执行，
@@ -401,7 +412,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Variants: map[string]runtimeCommandSpec{
 			"list":    rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument)),
 			"status":  rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument)),
-			"select":  rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectNextCall, rtConfirm(), rtOutput(chatOutputScreenInteractive)),
+			"select":  rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectNextCall, rtConfirm(), rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
 			"add":     rtSpec("/mcp", categorySkillsTools, runtimeModeQueue, runtimeEffectNextCall, rtNotice("已排队，回合结束后执行")),
 			"remove":  rtSpec("/mcp", categorySkillsTools, runtimeModeQueue, runtimeEffectNextCall, rtNotice("已排队，回合结束后执行")),
 			"enable":  rtSpec("/mcp", categorySkillsTools, runtimeModeQueue, runtimeEffectNextCall, rtNotice("已排队，回合结束后执行")),
@@ -469,13 +480,15 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		// bare /agents 在 unified 交互出口是 A 族列表副屏（可选 agent 查看输出）；
 		// 能力不足/忙/嵌套时按框架契约降级为主屏内联文档（DegradeDoc 为
 		// 既有 "Agent Graph:" 文本）。Output 为 screen-interactive：忙时经
-		// 只读交互列表白名单（chatBusyScreenInteractiveCommands）走 S 档。
+		// P2-6 黑名单模型：screen 档默认走 S 档（bare /agents 未被 BusyBlock）。
 		Bare: rtBare(rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenInteractive))),
 		Variants: map[string]runtimeCommandSpec{
-			"status":   rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
-			"list":     rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
-			"pick":     rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtOutput(chatOutputScreenInteractive)),
-			"panel":    rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtOutput(chatOutputScreenInteractive)),
+			"status": rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
+			"list":   rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
+			// pick/panel 忙时排除（核验）：改会话选中态并戳 presenter，不能与在途
+			// turn 并发；bare /agents（只读列表）仍放行。
+			"pick":     rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
+			"panel":    rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
 			"approve":  rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
 			"deny":     rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
 			"answer":   rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
@@ -537,7 +550,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		// bare 与 select/choose/switch 都是交互式选择器
 		// （parseReasoningEffortCommandRequest 把空参数解析为 select）：声明为
 		// screen+next-turn+screen-interactive，与 /model、/provider 同族；忙时经
-		// 可写交互副屏白名单（chatBusyScreenInteractiveWriteCommands）开屏。
+		// P2-6 黑名单模型：screen 档默认放行，走 S 档开屏。
 		Bare: rtBare(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
 		Variants: map[string]runtimeCommandSpec{
 			"status": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead),
@@ -554,8 +567,8 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"status":  rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"list":    rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"preview": rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
-			"select":  rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效"), rtOutput(chatOutputScreenInteractive)),
-			"set":     rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效"), rtOutput(chatOutputScreenInteractive)),
+			"select":  rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效"), rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
+			"set":     rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效"), rtOutput(chatOutputScreenInteractive), rtBusyBlock()),
 		},
 	},
 	"/s":      {Bare: rtBare(rtSpec("/s", categoryOutputAppearance, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("显示面立即生效")))},

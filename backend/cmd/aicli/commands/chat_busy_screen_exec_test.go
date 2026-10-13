@@ -347,87 +347,55 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 		}
 	}
 
-	// 首批 screen 白名单必须指向真实注册项，且至少有一个 screen+read 变体。
-	for command := range chatBusyScreenDocumentCommands {
-		entry, ok := runtimeCommandRegistry[command]
-		if !ok {
-			t.Errorf("首批白名单命令 %q 不在注册表中", command)
-			continue
-		}
-		matched := false
-		check := func(spec runtimeCommandSpec) {
-			if spec.Mode == runtimeModeScreen && spec.Effect == runtimeEffectRead {
-				matched = true
+	// 忙时 prompt 允许清单必须解析为 prompt 档（否则确认门不会被触发），且
+	// matcher 必须命中（防结构化匹配与清单漂移）。
+	for name, subs := range chatBusyPromptAllowed {
+		for token := range subs {
+			line := name
+			if token != "" {
+				line = name + " " + token
 			}
-		}
-		if entry.Bare != nil {
-			check(*entry.Bare)
-		}
-		for _, variant := range entry.Variants {
-			check(variant)
-		}
-		if !matched {
-			t.Errorf("首批白名单命令 %q 缺少 screen+read 声明", command)
+			spec, ok := resolveRuntimeCommandSpec(line)
+			if !ok || spec.Mode != runtimeModePrompt {
+				t.Errorf("忙时 prompt 白名单 %q 未解析为 prompt 档：ok=%v mode=%s", line, ok, spec.Mode)
+			}
+			if !busyPromptCommandWhitelisted(line) {
+				t.Errorf("忙时 prompt 白名单 %q 未被 matcher 命中", line)
+			}
 		}
 	}
 
-	// 首批 prompt 白名单必须解析为 prompt 档（否则确认门不会被触发）。
-	for _, line := range chatBusyPromptFirstBatchCommands {
-		spec, ok := resolveRuntimeCommandSpec(line)
-		if !ok || spec.Mode != runtimeModePrompt {
-			t.Errorf("首批 prompt 白名单 %q 未解析为 prompt 档：ok=%v mode=%s", line, ok, spec.Mode)
-		}
-	}
-
-	// 忙时只读交互副屏白名单（A 族列表）必须指向真实注册项，且至少有一个
-	// screen+read+screen-interactive 变体（策略映射据此判 S 档）。
-	for command := range chatBusyScreenInteractiveCommands {
-		entry, ok := runtimeCommandRegistry[command]
-		if !ok {
-			t.Errorf("忙时交互白名单命令 %q 不在注册表中", command)
-			continue
-		}
-		matched := false
-		check := func(spec runtimeCommandSpec) {
-			if spec.Mode == runtimeModeScreen && spec.Effect == runtimeEffectRead &&
-				spec.Output == chatOutputScreenInteractive {
-				matched = true
-			}
-		}
+	// P2-6 黑名单模型：screen 档默认放行，只有声明 BusyBlock 的变体被排除。
+	// 断言：每个 screen 变体都显式声明输出类别（T11），且忙时准入 == !BusyBlock。
+	blockedSeen := map[string]bool{}
+	for name, entry := range runtimeCommandRegistry {
+		specs := make([]runtimeCommandSpec, 0, 1+len(entry.Variants))
 		if entry.Bare != nil {
-			check(*entry.Bare)
+			specs = append(specs, *entry.Bare)
 		}
 		for _, variant := range entry.Variants {
-			check(variant)
+			specs = append(specs, variant)
 		}
-		if !matched {
-			t.Errorf("忙时交互白名单命令 %q 缺少 screen+read+screen-interactive 声明", command)
-		}
-	}
-
-	// 忙时可写交互副屏白名单（P2-5）必须指向真实注册项，且至少有一个
-	// screen+next-turn+screen-interactive 变体（策略映射据此判 S 档）。
-	for command := range chatBusyScreenInteractiveWriteCommands {
-		entry, ok := runtimeCommandRegistry[command]
-		if !ok {
-			t.Errorf("忙时可写交互白名单命令 %q 不在注册表中", command)
-			continue
-		}
-		matched := false
-		check := func(spec runtimeCommandSpec) {
-			if spec.Mode == runtimeModeScreen && spec.Effect == runtimeEffectNextTurn &&
-				spec.Output == chatOutputScreenInteractive {
-				matched = true
+		for _, spec := range specs {
+			if spec.Mode != runtimeModeScreen {
+				continue
+			}
+			if !spec.Output.declared() {
+				t.Errorf("screen 档命令 %q（注册键 %q）未显式声明输出类别", spec.Command, name)
+				continue
+			}
+			if got, want := busyScreenCommandAllowed(spec), !spec.BusyBlock; got != want {
+				t.Errorf("screen 命令 %q（注册键 %q）忙时准入=%v，期望 %v", spec.Command, name, got, want)
+			}
+			if spec.BusyBlock {
+				blockedSeen[spec.Command] = true
 			}
 		}
-		if entry.Bare != nil {
-			check(*entry.Bare)
-		}
-		for _, variant := range entry.Variants {
-			check(variant)
-		}
-		if !matched {
-			t.Errorf("忙时可写交互白名单命令 %q 缺少 screen+next-turn+screen-interactive 声明", command)
+	}
+	// 核验结论必须真实落地：这些命令的写入变体已在注册表上 BusyBlock。
+	for _, command := range []string{"/export", "/agents", "/theme", "/profile", "/mcp", "/routing", "/skills"} {
+		if !blockedSeen[command] {
+			t.Errorf("核验为忙时不安全的命令 %q 未在注册表声明 BusyBlock", command)
 		}
 	}
 }
