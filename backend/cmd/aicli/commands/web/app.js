@@ -8,6 +8,7 @@ import { initComposerAttachments } from "./js/attachments.js";
 import { initAnalysis } from "./js/analysis.js";
 import { initLSP } from "./js/lsp.js";
 import { initConfigAdmin } from "./js/config-admin.js";
+import { initConnectors } from "./js/connectors.js";
 import { initProviderEditor } from "./js/provider-editor.js";
 import { initProviderImport } from "./js/provider-import.js";
 import { initApprovals } from "./js/approvals.js";
@@ -47,6 +48,7 @@ initRuntimeBar();
 initSessions();
 initApprovals();
 initConfigAdmin();
+initConnectors(); // 「机器人」页签：IM 连接器（列表/表单/扫码登录/日志，数据源 /api/connectors）
 initProviderEditor();
 initProviderImport();
 initSkills();

@@ -3,6 +3,7 @@
 
 import { refreshScreen } from "./chat.js";
 import { loadConfigAdmin } from "./config-admin.js";
+import { loadConnectors } from "./connectors.js";
 import { loadAnalysis, stopAnalysisAuto } from "./analysis.js";
 import { loadLSP, stopLSPAuto } from "./lsp.js";
 import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
@@ -85,6 +86,8 @@ applyLowBandwidth();
 
 var tabConfigBtn = document.getElementById("tab-config-btn");
 var tabConfigEl = document.getElementById("tab-config");
+var tabConnectorsBtn = document.getElementById("tab-connectors-btn");
+var tabConnectorsEl = document.getElementById("tab-connectors");
 var tabCacheBtn = document.getElementById("tab-cache-btn");
 var tabCacheEl = document.getElementById("tab-cache");
 var tabAnalysisBtn = document.getElementById("tab-analysis-btn");
@@ -110,6 +113,7 @@ function activateTab(tabName) {
   var isSchedule = tabName === "schedule";
   var isLog = tabName === "log";
   var isConfig = tabName === "config";
+  var isConnectors = tabName === "connectors";
   var isCache = tabName === "cache";
   var isAnalysis = tabName === "analysis";
   var isLSP = tabName === "lsp";
@@ -123,6 +127,7 @@ function activateTab(tabName) {
   if (tabScheduleBtn) { tabScheduleBtn.classList.toggle("active", isSchedule); }
   tabLogBtn.classList.toggle("active", isLog);
   if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
+  if (tabConnectorsBtn) { tabConnectorsBtn.classList.toggle("active", isConnectors); }
   if (tabCacheBtn) { tabCacheBtn.classList.toggle("active", isCache); }
   if (tabAnalysisBtn) { tabAnalysisBtn.classList.toggle("active", isAnalysis); }
   if (tabLSPBtn) { tabLSPBtn.classList.toggle("active", isLSP); }
@@ -136,6 +141,7 @@ function activateTab(tabName) {
   if (tabScheduleEl) { tabScheduleEl.classList.toggle("active", isSchedule); }
   tabLogEl.classList.toggle("active", isLog);
   if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
+  if (tabConnectorsEl) { tabConnectorsEl.classList.toggle("active", isConnectors); }
   if (tabCacheEl) { tabCacheEl.classList.toggle("active", isCache); }
   if (tabAnalysisEl) { tabAnalysisEl.classList.toggle("active", isAnalysis); }
   if (tabLSPEl) { tabLSPEl.classList.toggle("active", isLSP); }
@@ -158,6 +164,9 @@ function activateTab(tabName) {
   // 两段式删除确认后重拉一次。
   if (isSchedule) { loadSchedule(); }
   if (isConfig) { loadConfigAdmin(); }
+  // 机器人页签：连接器列表与运行状态随时被宿主/其它端改变，进入即重拉
+  //（Schema 只拉一次，见 js/connectors.js::loadConnectors）。
+  if (isConnectors) { loadConnectors(); }
   // 会话感知按需拉取：cache.js 内部对比已渲染数据与当前会话 id，仅在首次进入、
   // 会话变化时重拉；同会话重复切页签不重复发请求（页内更新由 SSE 增量刷新兜底）。
   if (isCache) { loadCacheAnalytics(); }
@@ -425,6 +434,7 @@ export function initTabs() {
   if (tabScheduleBtn) { tabScheduleBtn.addEventListener("click", function () { activateTab("schedule"); }); }
   tabLogBtn.addEventListener("click", function () { activateTab("log"); });
   if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }
+  if (tabConnectorsBtn) { tabConnectorsBtn.addEventListener("click", function () { activateTab("connectors"); }); }
   if (tabCacheBtn) { tabCacheBtn.addEventListener("click", function () { activateTab("cache"); }); }
   if (tabAnalysisBtn) { tabAnalysisBtn.addEventListener("click", function () { activateTab("analysis"); }); }
   if (tabLSPBtn) { tabLSPBtn.addEventListener("click", function () { activateTab("lsp"); }); }

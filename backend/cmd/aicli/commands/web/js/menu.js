@@ -148,6 +148,7 @@ function handleAction(action) {
     case "tab-schedule":
     case "tab-log":
     case "tab-config":
+    case "tab-connectors":
     case "tab-cache":
     case "tab-analysis":
     case "tab-lsp":

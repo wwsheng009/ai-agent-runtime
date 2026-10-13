@@ -3247,3 +3247,98 @@ body.low-bandwidth img {
   #schedule-form-overlay { padding: 8px; }
   #schedule-form-modal { width: calc(100vw - 16px); max-height: 92vh; }
 }
+
+/* ---- 机器人页签：IM 连接器（列表 / 表单 / 扫码登录 / 运行日志） ----
+   工具条与标题复用 config-*；这里补按钮基样式、列表行、表单网格与弹层，
+   与 #tab-config / #tab-mcp 保持同一视觉。弹层样式对齐 #skill-detail-overlay。 */
+#tab-connectors { padding-top: 8px; overflow: auto; }
+#tab-connectors button, #connectors-modal button {
+  cursor: pointer; font-family: inherit; font-size: 12px; padding: 4px 10px;
+  background: var(--bg3); color: var(--fg2); border: 1px solid var(--border2); border-radius: 6px;
+}
+#tab-connectors button:hover, #connectors-modal button:hover { color: var(--fg); border-color: var(--accent); }
+#tab-connectors button:focus-visible, #connectors-modal button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#tab-connectors button.primary-btn { background: var(--accent); color: var(--userMsgFg, #fff); border-color: var(--accent); }
+#tab-connectors button.danger-btn, #connectors-modal button.danger-btn { border-color: var(--redBg); color: var(--red, #e5534b); }
+#tab-connectors button.danger-btn:hover, #connectors-modal button.danger-btn:hover { background: var(--redBg); color: var(--red, #e5534b); }
+
+.connectors-list { display: flex; flex-direction: column; gap: 8px; }
+.connectors-empty { color: var(--fg3); font-size: 12px; padding: 14px 4px; }
+.connector-row {
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  background: var(--bg2); display: flex; flex-direction: column; gap: 8px;
+}
+.connector-row-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.connector-name { font-size: 13px; color: var(--fg); font-weight: 600; }
+.connector-id { font-size: 11px; color: var(--fg3); }
+.connector-badge { font-size: 11px; color: var(--fg2); border: 1px solid var(--border2); border-radius: 999px; padding: 1px 8px; }
+.connector-badge.connector-on { color: var(--green, #3fb950); border-color: var(--green, #3fb950); }
+.connector-badge.connector-off { color: var(--fg3); }
+.connector-owner { font-size: 11px; color: var(--fg3); }
+.connector-stat { font-size: 11px; color: var(--fg3); }
+.connector-stat-err { color: var(--red, #e5534b); }
+.connector-row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.connector-last-error { font-size: 11px; color: var(--red, #e5534b); word-break: break-all; }
+
+#connectors-overlay {
+  display: none; position: fixed; z-index: 1100;
+  inset: 0; background: var(--overlayBg); padding: 16px;
+  justify-content: center; align-items: center;
+}
+#connectors-overlay.active { display: flex; }
+#connectors-modal {
+  position: relative; width: min(640px, calc(100vw - 32px));
+  max-height: min(86vh, 760px); overflow: hidden;
+  background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 12px; display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px var(--shadow);
+}
+#connectors-modal-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 16px; border-bottom: 1px solid var(--border);
+  background: var(--bg3);
+}
+#connectors-modal-title { font-size: 13px; color: var(--fg); font-weight: 600; flex: 1; }
+#connectors-modal-body { padding: 12px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+#connectors-modal-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 10px 16px; border-top: 1px solid var(--border);
+}
+
+.connector-form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.connector-form-section { font-size: 12px; color: var(--fg2); margin-top: 6px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.connector-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.connector-field-label { color: var(--fg2); }
+.connector-field input[type="text"], .connector-field input[type="password"],
+.connector-field input[type="number"], .connector-field select, .connector-field textarea {
+  font-family: inherit; font-size: 12px; padding: 5px 8px; width: 100%; box-sizing: border-box;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--border2); border-radius: 6px;
+}
+.connector-field textarea { resize: vertical; }
+.connector-field-help { color: var(--fg3); font-size: 11px; }
+.connector-form-note { color: var(--fg3); font-size: 11px; margin: 2px 0 0; }
+
+.connector-qr-status { font-size: 13px; color: var(--fg); }
+.connector-qr-status[data-status="expired"] { color: var(--red, #e5534b); }
+.connector-qr-image-wrap { display: flex; justify-content: center; padding: 8px; }
+.connector-qr-img { width: min(260px, 70vw); height: auto; border-radius: 8px; background: #fff; padding: 6px; }
+.connector-qr-link {
+  font-size: 11.5px; word-break: break-all; padding: 8px;
+  background: var(--codeBg); color: var(--codeFg); border: 1px solid var(--border); border-radius: 6px;
+}
+.connector-qr-meta { font-size: 11px; color: var(--fg3); }
+
+.connector-logs-stats { font-size: 12px; color: var(--fg2); }
+.connector-logs-list { display: flex; flex-direction: column; gap: 2px; max-height: 46vh; overflow: auto; }
+.connector-log-line { display: flex; gap: 8px; font-size: 11.5px; padding: 2px 4px; border-radius: 4px; }
+.connector-log-line:nth-child(odd) { background: var(--bg2); }
+.connector-log-time { color: var(--fg3); flex: none; }
+.connector-log-level { flex: none; width: 44px; color: var(--fg2); }
+.connector-log-error .connector-log-level { color: var(--red, #e5534b); }
+.connector-log-warn .connector-log-level { color: var(--yellow, #d29922); }
+.connector-log-dir { flex: none; width: 52px; color: var(--fg3); }
+.connector-log-summary { word-break: break-all; color: var(--fg2); }
+@media (max-width: 560px) {
+  #connectors-overlay { padding: 8px; }
+  #connectors-modal { width: calc(100vw - 16px); max-height: 92vh; }
+}

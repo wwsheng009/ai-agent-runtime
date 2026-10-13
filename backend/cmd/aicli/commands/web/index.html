@@ -50,6 +50,7 @@
         <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-schedule">任务页签</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-log">日志页签</button>
         <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-config">配置页签</button>
+        <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-connectors">机器人页签</button>
         <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-cache">缓存分析页签</button>
         <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-analysis">用量分析页签</button>
         <button class="menu-item mobile-only" type="button" role="menuitem" data-menu-action="tab-lsp">LSP 观测页签</button>
@@ -190,6 +191,7 @@
       <button class="tab-btn" id="tab-schedule-btn" type="button" title="自动化任务：跨会话定时提醒目录（/api/runtime/schedule/*，与 frontend 面板、TUI /schedule 同源）">任务</button>
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
       <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
+      <button class="tab-btn" id="tab-connectors-btn" type="button" title="IM 连接器（飞书 / QQ / 微信 / Telegram）：配置 / 启停 / 扫码登录 / 日志（与 /api/connectors 同源）">机器人</button>
       <button class="tab-btn" id="tab-cache-btn" type="button" title="LLM 请求与缓存分析（cache.analytics.v1）">缓存</button>
       <button class="tab-btn" id="tab-analysis-btn" type="button" title="工具 / 子代理 / 失败模式聚合（runtime.analytics.v1，与 TUI /usage tools|subagents|errors 同源）">分析</button>
       <button class="tab-btn" id="tab-lsp-btn" type="button" title="LSP 池状态与使用读数（lsp.observe.v1，与 TUI /lsp status 同源；事件埋点落地后自动点亮）">LSP</button>
@@ -396,6 +398,19 @@
           </div>
           <div id="skill-detail-tabs" class="skill-tabs" role="tablist" aria-label="技能详情分组"></div>
           <div id="skill-detail-body"></div>
+        </div>
+      </div>
+
+      <!-- 机器人页签对话框（新建/编辑、扫码登录、运行日志共用一套 overlay + modal；
+           正文与页脚由 js/connectors.js 动态渲染）。 -->
+      <div id="connectors-overlay">
+        <div id="connectors-modal" role="dialog" aria-modal="true" aria-labelledby="connectors-modal-title">
+          <div id="connectors-modal-header">
+            <span id="connectors-modal-title">连接器</span>
+            <button id="connectors-modal-close" class="modal-close" type="button" title="关闭">✕</button>
+          </div>
+          <div id="connectors-modal-body"></div>
+          <div id="connectors-modal-footer"></div>
         </div>
       </div>
     </div>
@@ -1013,6 +1028,19 @@
           </div>
         </div>
       </div>
+    </div>
+    <div id="tab-connectors" class="tab-panel">
+      <div class="config-toolbar">
+        <h2 class="config-title">机器人</h2>
+        <span class="config-path" id="connectors-status" title="连接器数量"></span>
+        <span class="config-toolbar-spacer"></span>
+        <button id="connectors-refresh-btn" type="button" title="重新拉取连接器列表（运行状态随时被宿主/其它端改变）">⟳ 刷新</button>
+        <button id="connectors-add-btn" type="button" class="primary-btn" title="新增连接器（飞书 / QQ / 微信 / Telegram）">＋ 新增连接器</button>
+      </div>
+      <!-- 列表由 js/connectors.js 按 GET /api/connectors 渲染：行内操作含启停/编辑/
+           Schema 动作（微信扫码登录等）/发送测试/日志/抢占/删除。管理面只在
+           aicli chat --web 且连接器装配成功的会话里可用（未装配时 503 文案）。 -->
+      <div id="connectors-list" class="connectors-list"></div>
     </div>
     <div id="tab-cache" class="tab-panel">
       <div class="cache-toolbar">

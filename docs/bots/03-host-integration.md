@@ -157,7 +157,16 @@
 > `api/runtime/connectors.ts` + `types/runtime/connectors.ts`（契约客户端与类型，错误按字段级
 > `errors` 归一）。表单完全由 `GET /connectors/schema` 驱动（text/secret/bool/enum/url → 控件映射，
 > 新增通道零改动）；密钥语义 = 留空保持、显式清除 `__clear__`；i18n 走 `connectors` 命名空间
-> （zh-CN/en-US 成对）。gateway console / aicli micro web 两个原生 JS 页面按 P1 待续。
+> （zh-CN/en-US 成对）。
+
+> **实现状态（2026-10-13，aicli micro web）**：`cmd/aicli/commands/web/js/connectors.js`
+> + 页签 `tab-connectors`（「机器人」）已落地：列表（启停/编辑/发送测试/日志/抢占/删除，
+> 含运行归属与 in/out/errors 计数）、新建/编辑表单（Schema 驱动 text/secret/bool/enum/
+> url/number，密钥留空=保持、`__clear__`=清除）、Schema `actions` 按钮（kind=qr 走扫码
+> 对话框：`start_login` → `qr_code_content` 渲染（`data:image` → `<img>`，否则文本+复制
+> 链接）→ 2s 轮询 `login_status` → confirmed 且 credential_ready 时合并 PATCH 回填
+> settings/secrets）。管理面走 loopback 同源 `/api/connectors*`（本会话未装配时 503
+> 文案）。gateway console 仍为只读列表（P1 待续）。
 
 ## 6. API 契约（三宿主统一语义）
 
@@ -205,7 +214,7 @@
   写入点覆盖白名单拒绝、重复投递跳过、入队成功、队列满、处理开始/成功（含回复长度）、
   后端错误、投递失败（`Send`/`streamer.Fail`）、归属闸跳过与服务启停；删除连接器不清理
   内存环（进程内可容忍，重启清零）。
-- 待续（P1/P2）：`/{id}/bindings`；三端前端的 action 按钮控件（微信扫码登录等，Schema.Actions 驱动）仍待续。
+- 待续（P1/P2）：`/{id}/bindings`；gateway console 的原生 JS 配置页（当前只读列表）。
 - **安全与生命周期（2026-10-13 审查修复）**：管理面/入站不再把请求 ctx 当生命周期
   ——`Service` 持有宿主基 ctx（`Start` 建立/`Stop` 取消），轮询与异步任务基于它派生，
   REST handler 返回（`r.Context()` 取消）不会让新建/Reload 的连接器静默停摆；
