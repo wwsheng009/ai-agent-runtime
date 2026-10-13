@@ -37,9 +37,13 @@ func LifecycleWakeScheduled(notification Notification) bool {
 //
 // Best-effort and read-only: an unwired batch store, a missing resolver or an
 // unreadable row simply leaves the turn parked (the previous behavior). The
-// notify key is derived from the parked turn id, so repeated calls for the same
-// turn collapse into one delivered wake even when several children finish in
-// sequence.
+// notify key is scoped to the park episode (turn id + parked_at), so repeated
+// calls for the same episode collapse into one delivered wake even when several
+// children finish in sequence, while a later park episode of the same managed
+// turn keeps its own deliverable identity (2026-10-13 field regression: a
+// shared per-turn key made the second settlement look like a replay of the
+// already-delivered first one, so the parent never resumed and the session
+// stayed on "Waiting for subagents" until a manual prompt).
 func ScheduleSettledTurnWake(
 	ctx context.Context,
 	batches subagentbatch.BatchStore,
@@ -94,12 +98,25 @@ func ScheduleSettledTurnWakeWithTeams(
 		if !settled {
 			continue
 		}
+		// The settlement identity is scoped to the park episode, not just the
+		// turn: a resumed episode may spawn new obligations and park the same
+		// turn again under the same turn id. Without the epoch, the delivered
+		// identity of the first episode suppresses the second settlement as an
+		// event replay (IsWakeDelivered) and no wake row is even persisted for
+		// the fallback sweep to drain. ParkedAt is refreshed on every (re-)park
+		// and stable within one episode, so same-episode replays stay
+		// idempotent while a new episode stays deliverable.
+		var parkEpoch int64
+		if !record.ParkedAt.IsZero() {
+			parkEpoch = record.ParkedAt.UTC().UnixNano()
+		}
 		if _, err := scheduler.ScheduleWake(ctx, WakeRequest{
 			RootScopeID:           rootScopeID,
 			TargetParentSessionID: parentSessionID,
 			WakeReason:            WakeReasonObligationSettled,
 			TurnID:                record.TurnID,
 			EventKind:             WakeEventLifecycle,
+			EventSeq:              parkEpoch,
 		}); err != nil {
 			return false, err
 		}
