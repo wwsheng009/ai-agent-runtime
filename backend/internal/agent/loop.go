@@ -7580,12 +7580,17 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 		// record that the resume path could never match.
 		return
 	}
-	// §6.8 / 审计 G3：挂起是**边沿**状态——只在记录从"不存在"变成"存在"时发一次
-	// turn.suspended（同一 turn 内派发第二个批次不重复发）。读失败时不发：宁可少
-	// 一次状态跃迁信号，也不能把"无法判定是否首次挂起"猜成首次而重复播报。
-	existing, alreadyParked, readErr := store.GetTurnSuspension(ctx, sessionID, record.TurnID)
+	// §6.8 / 审计 G3：turn.suspended 是**纪元边沿**——每次开始一个新的 park 纪元
+	// （无记录，或上一纪元义务已全终态）播报一次；同一纪元内的追加派发（仍在运行
+	// 的批次之后又派发）与崩溃重试重挂只合并记录、不重复播报。这样每个 park 纪元
+	// 都有配对的挂起边，`agent.turn.finished`（本次 run 结束，不是托管 turn 结束）
+	// 不会出现"没有挂起边的 finished"，前端挂起横幅也能随新纪元重新建立。
+	// 读失败时不发：宁可少一次状态跃迁信号，也不能把"无法判定是否首次挂起"猜成
+	// 首次而重复播报。
+	existing, _, readErr := store.GetTurnSuspension(ctx, sessionID, record.TurnID)
+	freshEpoch := false
 	if readErr == nil {
-		record = loop.joinParkedTurnRecord(ctx, store, existing, record)
+		record, freshEpoch = loop.joinParkedTurnRecord(ctx, store, existing, record)
 	}
 	if err := store.ParkTurnSuspension(ctx, record); err != nil {
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "parked-state write failed: "+err.Error())
@@ -7593,12 +7598,12 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 	}
 	// 发射严格晚于 durable 写入成功：降级宿主与写失败路径都不会出现"已挂起"的假
 	// 信号（AC-C0-1d：两条降级路径均不出现 turn.suspended）。
-	if readErr != nil || alreadyParked {
+	if readErr != nil || !freshEpoch {
 		return
 	}
 	loop.emitRuntimeEvent(events.EventTurnSuspended, sessionID, "", map[string]interface{}{
 		"batch_id":           batch.BatchID,
-		"obligation_count":   len(obligations),
+		"obligation_count":   len(record.ObligationIDs),
 		"resume_queue_count": len(record.ResumeQueue),
 		"parked_at":          record.ParkedAt.Format(time.RFC3339Nano),
 	})
@@ -7620,12 +7625,17 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 // epoch: fresh ParkedAt and only the new obligations. Reusing a settled epoch
 // would derive the already-delivered settlement notify key and be suppressed as
 // an event replay, wedging the session on "Waiting for subagents".
-func (loop *ReActLoop) joinParkedTurnRecord(ctx context.Context, store subagentbatch.BatchStore, existing, candidate *subagentbatch.TurnSuspension) *subagentbatch.TurnSuspension {
+//
+// The returned bool reports whether the write starts a fresh park epoch: the
+// callers use it for the turn.suspended edge, so every episode announces its own
+// suspension (and a run-end agent.turn.finished always has a matching edge)
+// while same-episode merges and crash retries stay silent.
+func (loop *ReActLoop) joinParkedTurnRecord(ctx context.Context, store subagentbatch.BatchStore, existing, candidate *subagentbatch.TurnSuspension) (*subagentbatch.TurnSuspension, bool) {
 	if candidate == nil {
-		return existing
+		return existing, false
 	}
 	if existing == nil {
-		return candidate
+		return candidate, true
 	}
 	// The root scope is the wake-targeting identity: keep the durable one when
 	// the existing record carries it, whichever branch wins below.
@@ -7633,14 +7643,14 @@ func (loop *ReActLoop) joinParkedTurnRecord(ctx context.Context, store subagentb
 		candidate.RootScopeID = root
 	}
 	if loop.parkedTurnObligationsSettled(ctx, store, existing) {
-		return candidate
+		return candidate, true
 	}
 	candidate.ObligationIDs = mergeParkedTurnIDs(existing.ObligationIDs, candidate.ObligationIDs)
 	candidate.ResumeQueue = mergeParkedTurnIDs(existing.ResumeQueue, candidate.ResumeQueue)
 	if !existing.ParkedAt.IsZero() {
 		candidate.ParkedAt = existing.ParkedAt
 	}
-	return candidate
+	return candidate, false
 }
 
 // parkedTurnObligationsSettled reports whether the existing record's obligations
@@ -7720,7 +7730,7 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 		// record that the resume path could never match.
 		return
 	}
-	existing, alreadyParked, err := store.GetTurnSuspension(ctx, sessionID, turnID)
+	existing, _, err := store.GetTurnSuspension(ctx, sessionID, turnID)
 	if err != nil {
 		return
 	}
@@ -7739,15 +7749,16 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 		ObligationIDs: []string{obligationID},
 		ParkedAt:      time.Now().UTC(),
 	}
-	record = loop.joinParkedTurnRecord(ctx, store, existing, record)
+	record, freshEpoch := loop.joinParkedTurnRecord(ctx, store, existing, record)
 	if err := store.ParkTurnSuspension(ctx, record); err != nil {
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "team parked-state write failed: "+err.Error())
 		return
 	}
-	// §6.8 / G3 edge semantics: announce the suspension only on the transition
-	// from "no record" to "record". A read failure stays silent: better to miss
-	// one edge signal than to risk a duplicate.
-	if alreadyParked {
+	// §6.8 / G3 edge semantics: announce every FRESH park epoch (no record, or
+	// the previous episode already settled) so each wait has its own
+	// turn.suspended edge; same-episode appends stay silent. A read failure
+	// stays silent: better to miss one edge signal than to risk a duplicate.
+	if !freshEpoch {
 		return
 	}
 	loop.emitRuntimeEvent(events.EventTurnSuspended, sessionID, "", map[string]interface{}{

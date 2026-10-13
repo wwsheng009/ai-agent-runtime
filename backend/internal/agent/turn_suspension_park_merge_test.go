@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
@@ -19,6 +21,26 @@ type parkMergeTeamResolver map[string]bool
 func (s parkMergeTeamResolver) TeamTerminal(_ context.Context, teamID string) (bool, bool, error) {
 	terminal, found := s[teamID]
 	return terminal, found, nil
+}
+
+// parkMergeEventBus wires an event bus and returns a snapshot accessor for the
+// recorded turn.suspended events.
+func parkMergeEventBus(t *testing.T, ag *Agent) func() []runtimeevents.Event {
+	t.Helper()
+	bus := runtimeevents.NewBus()
+	var mu sync.Mutex
+	var suspended []runtimeevents.Event
+	bus.Subscribe(runtimeevents.EventTurnSuspended, func(event runtimeevents.Event) {
+		mu.Lock()
+		suspended = append(suspended, event)
+		mu.Unlock()
+	})
+	ag.SetEventBus(bus)
+	return func() []runtimeevents.Event {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]runtimeevents.Event(nil), suspended...)
+	}
 }
 
 func newParkMergeHarness(t *testing.T) (context.Context, subagentbatch.BatchStore, *ReActLoop) {
@@ -165,4 +187,58 @@ func TestParkTeamObligationEpochAndMerge(t *testing.T) {
 	require.Equal(t, []string{subagentbatch.TeamObligationID("team-2")}, fresh.ObligationIDs)
 	require.True(t, fresh.ParkedAt.After(first.ParkedAt),
 		"a settled episode must not keep its epoch for the next team dispatch")
+}
+
+// TestDurableParkAnnouncesFreshEpochAfterSettle pins the pairing contract behind
+// the "agent.turn.finished while still waiting for subagents" conflict: every
+// FRESH park epoch announces turn.suspended, so a run-end finished event always
+// has a matching suspension edge. Within one live episode the edge stays single
+// (merges are silent); a settled episode's successor announces again.
+func TestDurableParkAnnouncesFreshEpochAfterSettle(t *testing.T) {
+	ctx, store, loop := newParkMergeHarness(t)
+	suspended := parkMergeEventBus(t, loop.agent)
+
+	b1 := seedParkBatch(t, store, "sess-1", "batch-1", "task-1", subagentbatch.BatchRunning)
+	loop.parkBackgroundTurn(ctx, b1, "sess-1")
+	// Same episode: an idempotent re-park must not announce a second edge.
+	loop.parkBackgroundTurn(ctx, b1, "sess-1")
+	require.Len(t, suspended(), 1, "同一纪元的追加/重挂不重复播报")
+
+	_, err := store.UpdateBatch(ctx, "batch-1", -1, func(batch *subagentbatch.SubagentBatch) {
+		batch.Status = subagentbatch.BatchCompleted
+	})
+	require.NoError(t, err)
+
+	b2 := seedParkBatch(t, store, "sess-1", "batch-2", "task-2", subagentbatch.BatchRunning)
+	loop.parkBackgroundTurn(ctx, b2, "sess-1")
+	events := suspended()
+	require.Len(t, events, 2, "新纪元必须重新播报挂起边（agent.turn.finished 才有配对）")
+	require.Equal(t, "batch-2", events[1].Payload["batch_id"])
+	require.Equal(t, 2, events[1].Payload["obligation_count"])
+	require.Equal(t, "turn-merge", events[1].Payload["turn_id"])
+	require.Equal(t, "sess-1", events[1].SessionID)
+}
+
+// TestParkTeamObligationAnnouncesFreshEpochAfterSettle is the team half of the
+// same pairing contract.
+func TestParkTeamObligationAnnouncesFreshEpochAfterSettle(t *testing.T) {
+	ctx, store, loop := newParkMergeHarness(t)
+	loop.config = &LoopReActConfig{TeamObligations: parkMergeTeamResolver{"team-1": true}}
+	suspended := parkMergeEventBus(t, loop.agent)
+
+	b1 := seedParkBatch(t, store, "sess-1", "batch-1", "task-1", subagentbatch.BatchRunning)
+	loop.parkBackgroundTurn(ctx, b1, "sess-1")
+	loop.parkTeamObligation(ctx, "sess-1", "team-1")
+	require.Len(t, suspended(), 1, "同一纪元的 team 追加不重复播报")
+
+	_, err := store.UpdateBatch(ctx, "batch-1", -1, func(batch *subagentbatch.SubagentBatch) {
+		batch.Status = subagentbatch.BatchCompleted
+	})
+	require.NoError(t, err)
+
+	loop.parkTeamObligation(ctx, "sess-1", "team-2")
+	events := suspended()
+	require.Len(t, events, 2, "新纪元必须重新播报挂起边")
+	require.Equal(t, "team-2", events[1].Payload["team_id"])
+	require.Equal(t, "turn-merge", events[1].Payload["turn_id"])
 }
