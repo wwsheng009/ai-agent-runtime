@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
@@ -165,4 +166,18 @@ func aicliHostLLMRuntime(h *localChatRuntimeHost) *llm.LLMRuntime {
 		return nil
 	}
 	return h.Bootstrap.LLMRuntime()
+}
+
+// aicliExecutorReuseEnabled 报告是否启用统一执行核（E3.4b 灰度开关，默认关闭）。
+//
+// 启用（AICLI_EXECUTOR_REUSE=1|true|on|yes）时 buildSessionActor 走
+// runtimehost.BuildSessionActor + aicliRuntimeDeps；默认走旧装配路径（行为不变）。
+// E3.4c 删除旧路径后本开关随之移除（见 aicli-executor-reuse-design.md §11 G6）。
+func aicliExecutorReuseEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_EXECUTOR_REUSE"))) {
+	case "1", "true", "on", "yes":
+		return true
+	default:
+		return false
+	}
 }

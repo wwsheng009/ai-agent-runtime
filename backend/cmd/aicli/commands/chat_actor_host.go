@@ -31,6 +31,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
@@ -1776,6 +1777,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		if err := ensureSessionRowLoadable(context.Background(), sessionStore, sessionID, session); err != nil {
 			return nil, err
 		}
+	}
+	// E3.4b：灰度开关——启用时走统一执行核（runtimehost.BuildSessionActor + aicliRuntimeDeps）。
+	// 默认关闭（走下方旧装配路径，行为不变）；见 aicli-executor-reuse-design.md §11 G6。
+	if aicliExecutorReuseEnabled() {
+		return runtimehost.BuildSessionActor(sessionID, h.aicliRuntimeDeps(session, sessionStore, runtimeConfig, workspaceRoot, sessionID))
 	}
 	// E3.4a-1：runtime session → SessionContext 派生抽成命名函数（行为零变化）。
 	sessionCtx, workspaceRoot := deriveLocalSessionContext(sessionStore, sessionID, isBaseSession, workspaceRoot)

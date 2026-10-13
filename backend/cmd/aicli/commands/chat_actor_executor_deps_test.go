@@ -76,3 +76,29 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 // 单测环境没有 bootstrap/LLM runtime（会 nil deref）。该断言在 **E3.4b** 切换后
 // 由真实调用路径 + 契约测试覆盖（见设计 §6）。
 var _ func(*localChatRuntimeHost, *ChatSession, runtimechat.SessionStorage, *runtimecfg.RuntimeConfig, string, string) runtimehost.Deps = (*localChatRuntimeHost).aicliRuntimeDeps
+
+// TestAicliExecutorReuseEnabled 验证 E3.4b 灰度开关的解析（**默认关闭** → 生产行为不变）。
+func TestAicliExecutorReuseEnabled(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"0", false},
+		{"off", false},
+		{"no", false},
+		{"maybe", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"on", true},
+		{"yes", true},
+		{" yes ", true},
+	}
+	for _, tc := range cases {
+		t.Setenv("AICLI_EXECUTOR_REUSE", tc.value)
+		if got := aicliExecutorReuseEnabled(); got != tc.want {
+			t.Fatalf("AICLI_EXECUTOR_REUSE=%q: got %v want %v", tc.value, got, tc.want)
+		}
+	}
+}
