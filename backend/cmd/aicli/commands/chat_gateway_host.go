@@ -8,6 +8,7 @@ import (
 
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
 // chatGatewayDefaultRoutes is the reverse-proxy allowlist when the config does
@@ -102,7 +103,72 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 	// Overlay the shared state projection (state/attention/busy/status text);
 	// the store defaults to idle/running so both hosts report the same baseline.
 	gatewaySessionStateFor(id).Apply(&summary)
-	return []wire.SessionSummary{summary}
+	summaries := []wire.SessionSummary{summary}
+	// 子代理行（display-only，默认 off）：把本进程仍在跑的 subagent 任务作为子会话
+	// 行追加在父会话之后，控制台据此展开/折叠（docs/gateway/07-console.md）。
+	if gatewayagent.ReportSubagentsEnabled(nil) {
+		summaries = append(summaries, chatGatewaySubagentSessions(session, id)...)
+	}
+	return summaries
+}
+
+// chatGatewaySubagentSessions appends the live subagent rows for one parent
+// session. Bounded by gatewayagent.SubagentSessionMax and best-effort: a missing
+// store or a read error yields no child rows (the parent row is unaffected).
+// Terminal tasks are never listed — a finished child is reported by the parent
+// turn (docs/gateway/07-console.md).
+func chatGatewaySubagentSessions(session *ChatSession, parentSessionID string) []wire.SessionSummary {
+	if session == nil || session.LocalRuntimeHost == nil {
+		return nil
+	}
+	store := session.LocalRuntimeHost.SubagentBatches
+	if store == nil || strings.TrimSpace(parentSessionID) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	batches, err := store.ListBatches(ctx, subagentbatch.BatchFilter{
+		ParentSessionID: parentSessionID,
+		Status: []subagentbatch.BatchStatus{
+			subagentbatch.BatchQueued,
+			subagentbatch.BatchRunning,
+			subagentbatch.BatchPartiallyCompleted,
+		},
+		Limit: gatewayagent.SubagentSessionMax,
+	})
+	if err != nil {
+		return nil
+	}
+	out := make([]wire.SessionSummary, 0, gatewayagent.SubagentSessionMax)
+	for _, batch := range batches {
+		tasks, err := store.ListTasks(ctx, batch.BatchID)
+		if err != nil {
+			continue
+		}
+		for _, task := range tasks {
+			if task.Status.Terminal() {
+				continue
+			}
+			childID := strings.TrimSpace(task.ChildSessionID)
+			if childID == "" {
+				continue
+			}
+			title := strings.TrimSpace(task.TaskSubject)
+			if title == "" {
+				title = strings.TrimSpace(task.TaskID)
+			}
+			var started time.Time
+			if task.StartedAt != nil {
+				started = *task.StartedAt
+			}
+			out = append(out, gatewayagent.SubagentSessionSummary(
+				parentSessionID, childID, task.TaskID, task.TaskType, title, started))
+			if len(out) >= gatewayagent.SubagentSessionMax {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 // chatGatewayLastMessageLimit caps the inline "last message" payload sent to

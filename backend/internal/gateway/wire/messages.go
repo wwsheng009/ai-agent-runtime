@@ -45,6 +45,17 @@ type WorkspaceInfo struct {
 	Name string `json:"name,omitempty"`
 }
 
+// SessionParent marks a session row as a child of another session: a host that
+// enables live subagent rows (AICLI_GATEWAY_REPORT_SUBAGENTS) appends one row per
+// in-flight child task under its parent session. It is display-only metadata:
+// attention/state of the managed turn still belong to the parent row, and the
+// gateway treats the field as opaque.
+type SessionParent struct {
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	AgentID         string `json:"agent_id,omitempty"`
+	AgentType       string `json:"agent_type,omitempty"`
+}
+
 // SessionSummary is one session reported during REGISTER / SESSION_UPDATE.
 type SessionSummary struct {
 	SessionID string    `json:"session_id"`
@@ -88,6 +99,9 @@ type SessionSummary struct {
 	StateChangedAt     time.Time      `json:"state_changed_at,omitempty"`
 	AttentionChangedAt time.Time      `json:"attention_changed_at,omitempty"`
 	Workspace          *WorkspaceInfo `json:"workspace,omitempty"`
+	// Parent links a child (subagent) row to its parent session. Absent for
+	// top-level sessions, so older consoles keep rendering them unchanged.
+	Parent *SessionParent `json:"parent,omitempty"`
 }
 
 // Canonical session state values (SessionSummary.State).

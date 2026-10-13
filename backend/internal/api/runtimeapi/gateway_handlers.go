@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	gatewayagent "github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/wire"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
 // GatewayController is the runtime-server's view of the gateway connection
@@ -66,7 +67,79 @@ func (h *Handler) GatewaySessions() []wire.SessionSummary {
 		}
 		out = append(out, summary)
 	}
+	// 子代理行（display-only，默认 off）：把仍在跑的 subagent 任务作为子会话行
+	// 追加在各自父会话之后，控制台据此展开/折叠（docs/gateway/07-console.md）。
+	if gatewayagent.ReportSubagentsEnabled(nil) {
+		out = h.appendGatewaySubagentSessions(ctx, out)
+	}
 	return out
+}
+
+// appendGatewaySubagentSessions appends the live subagent rows for the parent
+// sessions in the list. Bounded by gatewayagent.SubagentSessionMax across the
+// whole list and best-effort: a missing store or a read error leaves the parent
+// rows untouched. Terminal tasks are never listed (the parent turn reports them).
+func (h *Handler) appendGatewaySubagentSessions(ctx context.Context, sessions []wire.SessionSummary) []wire.SessionSummary {
+	if h == nil || len(sessions) == 0 {
+		return sessions
+	}
+	store := h.peekSubagentBatchStore()
+	if store == nil {
+		return sessions
+	}
+	parents := append([]wire.SessionSummary(nil), sessions...)
+	added := 0
+	for _, parent := range parents {
+		if added >= gatewayagent.SubagentSessionMax {
+			break
+		}
+		parentID := strings.TrimSpace(parent.SessionID)
+		if parentID == "" {
+			continue
+		}
+		batches, err := store.ListBatches(ctx, subagentbatch.BatchFilter{
+			ParentSessionID: parentID,
+			Status: []subagentbatch.BatchStatus{
+				subagentbatch.BatchQueued,
+				subagentbatch.BatchRunning,
+				subagentbatch.BatchPartiallyCompleted,
+			},
+			Limit: gatewayagent.SubagentSessionMax,
+		})
+		if err != nil {
+			continue
+		}
+		for _, batch := range batches {
+			tasks, err := store.ListTasks(ctx, batch.BatchID)
+			if err != nil {
+				continue
+			}
+			for _, task := range tasks {
+				if added >= gatewayagent.SubagentSessionMax {
+					break
+				}
+				if task.Status.Terminal() {
+					continue
+				}
+				childID := strings.TrimSpace(task.ChildSessionID)
+				if childID == "" {
+					continue
+				}
+				title := strings.TrimSpace(task.TaskSubject)
+				if title == "" {
+					title = strings.TrimSpace(task.TaskID)
+				}
+				var started time.Time
+				if task.StartedAt != nil {
+					started = *task.StartedAt
+				}
+				sessions = append(sessions, gatewayagent.SubagentSessionSummary(
+					parentID, childID, task.TaskID, task.TaskType, title, started))
+				added++
+			}
+		}
+	}
+	return sessions
 }
 
 // pushGatewaySessions pushes the current session list to the gateway. It is a

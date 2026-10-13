@@ -172,6 +172,12 @@ agent 上报的同名字段会被覆盖，保证始终是服务器时钟。控�
 （无变化不推）；网关以 **`event: session` 单会话增量**（`{node_id, session}`）下发给控制台，
 避免 1Hz × 全量快照的放大。turn 结束/中断时清空；完整正文仍只在会话页（07-console §6）。
 
+**子代理行（可选，display-only）**：宿主可把"仍在运行的子代理任务"作为**子会话行**追加在父会话
+之后（`AICLI_GATEWAY_REPORT_SUBAGENTS=1` 开启，默认 off；单次列表上限 8 行，终态子任务不入列）。
+子行带可选字段 `parent { parent_session_id, agent_id, agent_type }`，`state` 为 `running` 且
+**不携带自己的 attention**——托管/失败状态仍归父行（08-notifications §3）；控制台据此把子行
+缩进挂在父卡片下（07-console §4.1）。旧控制台忽略该字段，渲染行为不变。
+
 **尾流门控（P1-b）**：控制台对"展开的卡片"上报 `POST /api/presence {node_id, session_id, tail:true}`
 （收起/关闭开关即转为 `tail:false`）；网关把 `tail=true` 且会话活跃的集合按连接做差集，随
 `HEARTBEAT_ACK.pending` 下发 `tail-gating:on`（首次通告参与）、`watch:<session_id>` / `unwatch:<session_id>`。

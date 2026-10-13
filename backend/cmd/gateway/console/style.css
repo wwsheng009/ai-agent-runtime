@@ -1240,3 +1240,39 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   font-size: 11.5px; font-weight: 600; color: var(--fg-muted);
   margin-bottom: 4px;
 }
+
+/* ── Subagent rows (display-only children of a session) ──────────────
+   Hosts append one row per live child task when
+   AICLI_GATEWAY_REPORT_SUBAGENTS is enabled; the console groups them
+   directly under their parent card and the 子代理 toggle folds them. */
+.session-card.s-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 4px 28px;
+  padding: 6px 10px;
+  border-style: dashed;
+  opacity: 0.92;
+}
+.session-card.s-child .s-child-arrow {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.session-card.s-child .s-child-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.session-card.s-child .s-child-agent {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.session-card.s-child .s-child-state {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}

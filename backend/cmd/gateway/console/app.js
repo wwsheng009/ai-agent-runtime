@@ -556,8 +556,65 @@
 
   /* ─────────────────────── rendering: sessions ───────────────── */
 
+  // 子代理行（wire.SessionSummary.parent）是 display-only 的从属会话：没有自己的
+  // 注意力轴，只跟随父会话展示与筛选（docs/gateway/07-console.md）。
+  function isSubagentSession(s) {
+    return !!(s && s.parent && s.parent.parent_session_id);
+  }
+
+  // orderSessionsWithChildren 把列表重排成「父会话紧跟其子代理行」，并丢弃父会话
+  // 不可见的孤儿子行（父被过滤或子代理行被隐藏时，子行不应单独出现）。
+  function orderSessionsWithChildren(items) {
+    var visibleParents = {};
+    var childrenByParent = {};
+    items.forEach(function (item) {
+      if (!isSubagentSession(item.session)) { visibleParents[item.session.session_id] = true; }
+    });
+    items.forEach(function (item) {
+      if (!isSubagentSession(item.session)) { return; }
+      var pid = item.session.parent.parent_session_id;
+      if (!visibleParents[pid]) { return; }
+      (childrenByParent[pid] = childrenByParent[pid] || []).push(item);
+    });
+    var out = [];
+    items.forEach(function (item) {
+      if (isSubagentSession(item.session)) { return; }
+      out.push(item);
+      var kids = childrenByParent[item.session.session_id];
+      if (kids && kids.length) { out = out.concat(kids); }
+    });
+    return out;
+  }
+
+  // sessionItemElement 按行类型分派渲染：子代理行用紧凑行，顶层会话沿用完整卡片。
+  function sessionItemElement(item) {
+    return isSubagentSession(item.session) ? buildSubagentRow(item) : buildSessionCard(item);
+  }
+
+  // buildSubagentRow renders one live child task: indent + agent identity + the
+  // coarse state. Clicking opens the same session detail dialog as any row.
+  function buildSubagentRow(item) {
+    var s = item.session, node = item.node;
+    var row = document.createElement("div");
+    row.className = "session-card s-child" + (node.stale ? " offline" : "");
+    row.setAttribute("tabindex", "0");
+    row.innerHTML =
+      '<span class="s-child-arrow" aria-hidden="true">↳</span>' +
+      '<span class="s-child-title"></span>' +
+      '<span class="s-child-agent chip"></span>' +
+      '<span class="s-child-state"></span>';
+    row.querySelector(".s-child-title").textContent = sessionLabelOf(s);
+    var agent = s.parent.agent_id || "";
+    if (s.parent.agent_type) { agent += (agent ? " · " : "") + s.parent.agent_type; }
+    row.querySelector(".s-child-agent").textContent = agent;
+    row.querySelector(".s-child-state").textContent = stateLabelOf(s);
+    row.addEventListener("click", function () { openSession(node, s); });
+    return row;
+  }
+
   function sessionMatches(item) {
     var s = item.session;
+    if (!showSubagents && isSubagentSession(s)) { return false; }
     if (sessionFilterKind === "online" && item.node.stale) { return false; }
     if (sessionFilterKind === "attention" && !s.attention) { return false; }
     if (sessionFilterKind === "running" && (item.node.stale || !(s.busy || isActiveSessionState(s.state)))) { return false; }
@@ -695,12 +752,13 @@
       if (typeof p.kind === "string" && p.kind) { sessionFilterKind = p.kind; }
       if (typeof p.sort === "string" && p.sort) { sessionSort = p.sort; }
       if (p.tail === false) { tailEnabled = false; }
+      if (p.subagents === false) { showSubagents = false; }
     } catch (err) { /* storage unavailable */ }
   }
 
   function saveSessionPrefs() {
     try {
-      localStorage.setItem(SESSION_PREFS_KEY, JSON.stringify({ kind: sessionFilterKind, sort: sessionSort, tail: tailEnabled }));
+      localStorage.setItem(SESSION_PREFS_KEY, JSON.stringify({ kind: sessionFilterKind, sort: sessionSort, tail: tailEnabled, subagents: showSubagents }));
     } catch (err) { /* storage unavailable */ }
   }
 
@@ -742,6 +800,9 @@
   var sessionsScrollRestored = false;
   // Live-output tail: global on/off (persisted) + per-card follow state.
   var tailEnabled = true;
+  // 子代理行开关（持久化）：宿主按 AICLI_GATEWAY_REPORT_SUBAGENTS 上报子会话行，
+  // 控制台默认显示，可折叠成"只看顶层会话"（docs/gateway/07-console.md）。
+  var showSubagents = true;
   var tailFollow = {};
 
   // Fingerprint of the visible session fields; a change pulses the card so a
@@ -761,12 +822,14 @@
         s.session_id, s.title || "", s.state || "", s.attention || "", s.busy ? 1 : 0,
         s.status_text || "", s.status_started_at || "", s.status_tail || "", s.updated_at || "",
         s.preview || "", s.last_message_role || "", s.last_message || "",
+        s.parent ? (s.parent.agent_id || "") : "",
       ].join("\u0001");
     });
     // tailEnabled participates: toggling the live-output switch must rebuild
     // the cards even when the session data itself is unchanged.
     return sessionFilterKind + "\u0002" + sessionFilterText + "\u0002" + sessionSort +
-      "\u0002" + (tailEnabled ? "1" : "0") + "\u0002" + parts.join("\u0003");
+      "\u0002" + (tailEnabled ? "1" : "0") + "\u0002" + (showSubagents ? "1" : "0") +
+      "\u0002" + parts.join("\u0003");
   }
 
   function captureSessionDrafts() {
@@ -862,8 +925,12 @@
     // Nodes with several visible sessions collapse into a group (session list
     // grouped by device); single-session nodes stay flat so the two-column
     // board keeps its density.
+    // 子代理行跟随父会话：先按可见父行重排（孤儿子行直接丢弃），节点分组只按
+    // 顶层会话计数，避免"1 个父 + N 个子"把节点误判成多会话分组。
+    items = orderSessionsWithChildren(items);
     var nodeCounts = {};
     items.forEach(function (item) {
+      if (isSubagentSession(item.session)) { return; }
       var k = item.node.node_id;
       nodeCounts[k] = (nodeCounts[k] || 0) + 1;
     });
@@ -878,7 +945,8 @@
         })));
         return;
       }
-      host.appendChild(buildSessionCard(item));
+      items.filter(function (it) { return it.node.node_id === nodeID; })
+        .forEach(function (it) { host.appendChild(sessionItemElement(it)); });
     });
     restoreSessionDrafts(host);
     if (!sessionsScrollRestored) {
@@ -909,7 +977,7 @@
       (node.kind || "agent") + " · 会话 " + groupItems.length +
       (latest ? " · 最近 " + new Date(latest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
     var body = group.querySelector(".group-body");
-    groupItems.forEach(function (item) { body.appendChild(buildSessionCard(item)); });
+    groupItems.forEach(function (item) { body.appendChild(sessionItemElement(item)); });
     if (collapsed) { body.hidden = true; }
     group.querySelector(".group-head").addEventListener("click", function () {
       var next = !collapsedGroups[node.node_id];
@@ -2364,6 +2432,23 @@
     syncTailToggle();
     renderSessionTable(lastNodes);
   });
+
+  // 子代理行显示/隐藏（持久化）：宿主未上报子会话行时按钮无副作用。元素缺失时
+  // 静默跳过（PWA 可能缓存了旧版 index.html）。
+  function syncSubagentToggle() {
+    var btn = el("subagent-toggle");
+    if (btn) { btn.textContent = "子代理：" + (showSubagents ? "显示" : "隐藏"); }
+  }
+  var subagentToggleBtn = el("subagent-toggle");
+  if (subagentToggleBtn) {
+    subagentToggleBtn.addEventListener("click", function () {
+      showSubagents = !showSubagents;
+      saveSessionPrefs();
+      syncSubagentToggle();
+      renderSessionTable(lastNodes);
+    });
+  }
+  syncSubagentToggle();
 
   // Keyboard model: "/" focuses the search, ↑/↓ (or j/k) walks the session
   // cards, Enter opens the focused card's detail dialog, Space toggles 展开.
