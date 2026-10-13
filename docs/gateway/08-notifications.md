@@ -118,12 +118,16 @@ agent 侧订阅本地事件总线，按下表更新会话状态并（可选）�
 1. **注册表**：`Session.attention`（持久）+ 最近 `notify` 摘要（短 TTL，不入长期审计正文）。
 2. **控制台 SSE**：`/api/events` 推送 `session.updated` / `notify`，驱动徽标、收件箱、toast（[07](./07-console.md) §5.4）。
 3. **Web Push**（移动端后台）：仅在**无活跃控制台会话**或**页面不可见**时推送；点击直达 `/s/{session_id}/web/`。
-4. **抑制（presence）**：若某控制台客户端**正打开该会话**（心跳/SSE 订阅标记），则不 toast、不推送（用户已在看）。
-5. **去重与合并**：
+4. **ntfy 第二通道**（可选，`--ntfy-url`/`--ntfy-topic`，见 [10-runbook.md](./10-runbook.md) §14）：
+   与 Web Push **并行扇出**，互不阻塞；高优先 → `priority=5` + `warning`，低优先 → `priority=3`，
+   点击打开对应会话。用于 Web Push 不可达的场景（国内 Android 的 FCM、WNS 通道异常等），
+   或在手机端直接以 ntfy 作为主要提醒方式。
+5. **抑制（presence）**：若某控制台客户端**正打开该会话**（心跳/SSE 订阅标记），则不 toast、不推送（用户已在看）。
+6. **去重与合并**：
    - 按 `dedup_key` 去重；
    - 时间窗合并同类（如连续多次 `completed` 合并为"N 个会话已完成"）；
    - 与 [05-wan-and-mobile.md](./05-wan-and-mobile.md) §2.5 一致。
-6. **优先级与免打扰**：`approval`/`question` 高优先（可穿透免打扰）；`completed` 可静音/批量。
+7. **优先级与免打扰**：`approval`/`question` 高优先（可穿透免打扰）；`completed` 可静音/批量。
 
 ---
 
@@ -193,6 +197,7 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 - [ ] 会话重连/网关重连后，收件箱可由 `SESSION_UPDATE` 对账重建（不依赖瞬时 `NOTIFY`）。
 - [ ] 用户正打开该会话时不重复 toast/推送（presence 抑制）。
 - [ ] 移动端后台可收到 Web Push，点击直达 `/s/{session_id}/web/`。
+- [ ] Web Push 不可达（FCM/WNS 受限）时，同一通知仍经 ntfy 通道送达手机（高优先 `priority=5`）。
 - [ ] 未配置网关时，本地通知（终端标题/声音）与 hooks 行为**逐字不变**。
 - [ ] 点会话卡片可在控制台 iframe 内打开本机 aicli 微前端 / runtime-server SPA 并正常交互。
 - [ ] 通知与预览均**不含正文**（除非显式开启 `report_preview`，且通知仍不含正文）。
@@ -226,8 +231,9 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 | presence 主动释放 | `cmd/gateway/presence.go`、`console/app.js` | 新增 `POST /api/presence/release`（`{all:true}` 或 `{node_id,session_id}`）；页面 `visibilitychange(hidden)` / `pagehide` 时用 keepalive 释放，切后台后不再被 presence 抑制最长 90s |
 | 订阅自愈 | `console/sw.js` | 处理 `pushsubscriptionchange`：浏览器轮换/失效 endpoint 后自动重新订阅并回传网关（upsert），不再静默失联 |
 | 移动端可发现性与权限 | `console/app.js`、`console/index.html`、`console/manifest.webmanifest`、`console/*.png` | 点击手势内先 `Notification.requestPermission()`（iOS 要求）；HTTP 非安全上下文 / iOS 未安装 / 权限被拒绝均给出显性原因；A2HS 与 `beforeinstallprompt` 安装引导；`/api/push/test` 测试通知按钮；PNG 图标（192/512/180/apple-touch-icon + 通知 badge），修复 SVG 图标在系统通知中不显示的问题 |
+| **ntfy 第二通道** | `internal/gateway/ntfy/`、`cmd/gateway/{push.go,main.go}` | 新增 `ntfy.Sender`（JSON 发布 API、`Bearer` token、priority 1–5）与 `--ntfy-url/--ntfy-topic/--ntfy-token`；`pushNotifier` 向 Web Push 与 ntfy **并行扇出**（一个通道失败不影响另一个，Web Push 关闭时 ntfy 仍独立投递）；高优先 → `priority=5`+`warning`，其余 → `priority=3`，`click` 指向会话深链；`/api/push/config` 返回 ntfy 状态，`/api/push/test` 返回 `channels.webpush`/`channels.ntfy` 明细；线上自建实例见 [10-runbook.md](./10-runbook.md) §14 |
 
-**通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时广播一次 Web Push。因此：
+**通知触发语义（当前实现）**：网关在 `OnRegistryChanged` 时扫描注册表，对每个 `attention != ""` 的会话记录 `nodeID|sessionID → attention`；仅当该值**首次出现或发生变化**时，向所有已配置通道（Web Push + ntfy）各投递一次。因此：
 
 - 同一注意力状态**重复上报不会重复推送**（等价 `dedup_key` 的粗粒度实现）；
 - 状态被清除（`attention` 变空）后再进入注意力，会**再次**通知。
@@ -253,15 +259,20 @@ agent：剥离 /s/{session_id} 前缀 → 转发 127.0.0.1:<port> → 注入本�
 2. **iOS 必须安装为 PWA**：iOS 16.4+ 仅对"添加到主屏幕"的 PWA 投递 Web Push。用 Safari 打开 →
    分享 → 添加到主屏幕 → 从桌面图标打开；未安装时控制台按钮显示"先安装到主屏幕"并出现安装引导横幅。
    另需在 *设置 → 通知* 中允许该 PWA。
-3. **权限在手势内请求**：点击"开启通知"时控制台先调用 `Notification.requestPermission()`
-   （15s 超时保护）。若显示"通知被禁用"，在浏览器/系统设置中允许后刷新页面。
-4. **Android 网络环境**：Chrome/Edge 的 Web Push 依赖 Google FCM，国内无 GMS / FCM 不可达时会订阅
-   失败（AbortError，提示文案已说明）或订阅成功但收不到。此时改用桌面端控制台，或规划替代通道
-   （ntfy / Bark / IM webhook 等，见 §10.2 之外的多通道立项）。
+3. **权限在手势内请求**：点击"开启通知"时控制台先调用 `Notification.requestPermission()`；
+   权限已是 `granted/denied` 时直接返回，否则 promise 与 `Notification.permission` 轮询并行等待
+   （60s 超时，失败提示会给出"地址栏 → 站点设置 → 通知"的操作路径）。切回前台会自动重新同步按钮状态。
+4. **Web Push 收不到时用 ntfy**：Chrome/Edge 的 Web Push 依赖 FCM（国内无 GMS）／WNS（通道可能僵死），
+   典型表现为 `POST /api/push/test` 返回 `webpush.delivered=1` 但设备没有任何提示（消息被推送服务接收、
+   却没有到达浏览器）。**已实现 ntfy 第二通道**（见 §5、[10-runbook.md](./10-runbook.md) §14）：
+   手机安装 ntfy 客户端 → 服务器 `https://ntfy.ttai.online` → 订阅主题 → Android 打开
+   *Instant delivery*（绕过 FCM）。高优先通知会以 `priority=5` 立即送达。
 5. **系统层限制**：Android 需允许 Chrome/Edge 通知、关闭对浏览器的电池优化；检查是否处于静音渠道。
-6. **订阅存活**：点击侧栏"发送测试通知"（`POST /api/push/test`）查看投递结果：
-   - `0/N`：多为 VAPID 不匹配（`data/vapid.key` 被重建 / 主备实例不一致）——设备关闭再开启通知可重建订阅；
-   - 桌面收到、手机未收：设备侧问题（第 2/4/5 条）；
+6. **订阅存活**：点击侧栏"发送测试通知"（`POST /api/push/test`）查看**分通道**投递结果
+   （响应中的 `channels.webpush` / `channels.ntfy`）：
+   - `webpush.delivered=0`：多为 VAPID 不匹配（`data/vapid.key` 被重建 / 主备实例不一致）——设备关闭再开启通知可重建订阅；
+   - `webpush.delivered=1` 但设备没提示：推送服务接收但未达浏览器 → 用 ntfy 通道（第 4 条），并重启浏览器以重建推送通道；
+   - `ntfy.delivered=0`：查看 `ntfy.error`（topic 保留字 / 服务端不可达 / token 失效）；
    - 全部收到但延迟：高优先 `approval/question/error` 已用 `Urgency: high`，低优先合并/免打扰属预期行为。
 7. **数据目录稳定**：`data/vapid.key` 与 `data/push.json` 必须持久（含主备一致），否则订阅会在无声中失效；
    401/403 现在会在网关日志中以 `push: ... rejected (VAPID mismatch?)` 记录。

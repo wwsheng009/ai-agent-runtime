@@ -355,6 +355,25 @@ ACME（Let's Encrypt，http-01）与按 Host 路由都在 Edge 侧完成；控�
 `POST /api/push/test` 返回 `channels.webpush / channels.ntfy` 明细；控制台"发送测试通知"会展示各通道结果。
 当前 ntfy 未启用鉴权（topic 名即口令）；如需访问控制再启用 `auth-*` 并用 `--ntfy-token`。
 
+**ntfy 运维速查**：
+
+```bash
+systemctl status ntfy                          # 服务状态
+journalctl -u ntfy -n 50 --no-pager            # 服务日志
+curl -s http://127.0.0.1:2586/v1/health        # 本机健康
+curl -s https://ntfy.ttai.online/v1/health     # 公网健康（CF → edge → ntfy）
+curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最近消息
+```
+
+- **换 topic**：改 `/etc/systemd/system/aicli-gateway.service` 的 `--ntfy-topic` →
+  `systemctl daemon-reload && systemctl restart aicli-gateway`，手机端改订阅新主题；
+- **换服务器**：网关发布建议始终走本机 `http://127.0.0.1:2586`（不依赖 CF），客户端用公网地址；
+- **开启鉴权**：`/etc/ntfy/server.yml` 配 `auth-file` + `auth-default-access: deny-all`，
+  用 `ntfy user add/access` 建发布 token，网关加 `--ntfy-token`（建议经 `--config` flagfile 传入）；
+- **备份**：`/etc/ntfy/server.yml`（`/var/lib/ntfy/cache.db` 是消息缓存，可丢）；
+- **故障**：`NO_READY_BACKEND_GROUP` → 检查 edge 中该组的 `health.ready_path: "/v1/health"`；
+  收不到消息 → 先 `curl 127.0.0.1:2586/v1/health`，再排 edge 路由与 CF 代理。
+
 **edge 配置变更纪律**（2026-10-12 事故教训）：
 1. 改完先 `cd /opt/ai-gateway-edge && ./bin/gateway-edge configtest -c configs/config.yaml` 再重启；
    YAML 缩进错误（如 `acme:` 子键被拉到 `tls:` 同级）会导致重复键 → 崩溃循环、全站 521；

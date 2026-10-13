@@ -159,7 +159,8 @@
 ### 5.4 注意力与通知
 
 - 徽标实时更新（订阅网关 `/api/events` SSE 的会话状态事件）。
-- 可选 Web Push（见 05 §2.5）：点击通知直达对应会话视图。
+- 可选 Web Push / ntfy 双通道（见 [05 §2.5](./05-wan-and-mobile.md)、[08 §10](./08-notifications.md)）：
+  点击通知直达对应会话视图；侧栏「发送测试通知」按通道显示投递结果（`channels.webpush` / `channels.ntfy`）。
 - 去重：同一会话同一注意力状态在时间窗内只提醒一次。
 - 完整的**通知/注意力模型**（事件→`attention` 映射、`NOTIFY` 帧、presence 抑制、免打扰）见
   [08-notifications.md](./08-notifications.md)；控制台只消费网关聚合结果，不直接解析本地事件。

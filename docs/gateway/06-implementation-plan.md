@@ -25,7 +25,7 @@ internal/gateway/wire/            # 帧定义 + 控制消息（golden 测试）
 internal/gateway/tunnel/          # 服务端：握手、REGISTER、多路复用、流调度、fencing
 internal/gateway/agent/           # 客户端：连接、心跳、转发到本机回环
 internal/gateway/console/         # 轻量独立控制台（//go:embed console/，零构建，见 07 文档）
-internal/gateway/notify/          # 通知聚合：attention + NOTIFY + Web Push（见 08 文档）
+internal/gateway/notify/          # 通知聚合：attention + NOTIFY + Web Push（见 08 文档）；ntfy 第二通道在 cmd/gateway 与 internal/gateway/ntfy
 internal/gateway/edge/            # 公网边缘防护：静态 deny/IP 限流/惩罚封禁/过载/可信代理（见 09 文档）
 cmd/gateway/                      # 二进制：--listen/--data-dir/--tls-*/init
 cmd/aicli/                        # --gateway/--gateway-token；启动 agent
@@ -134,6 +134,7 @@ cmd/aicli/                        # --gateway/--gateway-token；启动 agent
 ### 4.3b 通知与推送（P2）
 
 - 控制台 Web Push 订阅与投递（仅"某会话需要处理"，**不含正文**；[08](./08-notifications.md) §5）。
+- **ntfy 第二通道**：与 Web Push 并行扇出（`--ntfy-url/--ntfy-topic`），用于 FCM/WNS 不可达时的兜底；高优先 `priority=5`。
 - presence 抑制（用户正打开该会话时不 toast/推送）、免打扰与优先级（`approval`/`question` 可穿透）。
 
 ### 4.4 验收（P2）

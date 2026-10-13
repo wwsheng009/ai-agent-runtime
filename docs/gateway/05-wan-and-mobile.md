@@ -120,6 +120,10 @@
 - **Web Push（可选）**：会话进入 `attention=approval|question|completed` 时，网关发 Web Push
   （需 service worker + 订阅端点；网关持有订阅并转发 agent 的注意力事件）。
   - 隐私：推送内容只含"某会话需要处理"级别，不含正文；点击打开对应会话。
+- **ntfy 第二通道（可选，已实现）**：网关在 Web Push 之外**并行**发布到 ntfy 主题
+  （`--ntfy-url`/`--ntfy-topic`，见 [08-notifications.md](./08-notifications.md) §5）。用于
+  FCM（国内 Android）/WNS 通道不可达时的兜底：高优先 `priority=5` + `warning`，低优先 `priority=3`，
+  点击打开对应会话。移动端在 ntfy 客户端里配置服务器地址 + 主题即可（Android 建议开启 Instant delivery）。
 - **通知去重**：同一会话同一注意力状态在时间窗内只推一次。
 
 ### 2.6 低带宽模式

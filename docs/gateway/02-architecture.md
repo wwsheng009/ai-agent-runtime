@@ -19,7 +19,7 @@ backend/
 │       ├── auth/                    #   owner 登录、设备令牌、会话 Cookie
 │       ├── console/                 #   轻量独立控制台（//go:embed console/，零构建，见 07 文档）
 │       ├── edge/                    #   公网边缘防护：静态 deny/IP 限流/惩罚封禁/过载（见 09 文档）
-│       ├── notify/                  #   通知聚合：attention 状态 + NOTIFY 事件 + Web Push（见 08 文档）
+│       ├── notify/                  #   通知聚合：attention 状态 + NOTIFY 事件 + Web Push / ntfy 双通道（见 08 文档）
 │       └── audit/                   #   审计事件
 ├── internal/gateway/agent/          # 新增：客户端接入器（被 aicli / runtime-server 复用）
 │   ├── client.go                    #   出站连接、握手、心跳、重连

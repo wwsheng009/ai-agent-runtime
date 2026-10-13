@@ -141,7 +141,7 @@
 
 | 编号 | 需求 | 验收要点 |
 |------|------|----------|
-| FR-26 | **事件驱动通知**：turn 完成 / 待审批 / 待回答 / 出错时通知用户 | agent 订阅**本地运行时事件总线**（`agent.turn.finished`/`approval_requested`/`question_asked`/`turn.suspended`/失败）派生 `attention` + 瞬时 `NOTIFY`；控制台徽标/收件箱/toast/Web Push；**通知不含正文**；presence 抑制与去重 |
+| FR-26 | **事件驱动通知**：turn 完成 / 待审批 / 待回答 / 出错时通知用户 | agent 订阅**本地运行时事件总线**（`agent.turn.finished`/`approval_requested`/`question_asked`/`turn.suspended`/失败）派生 `attention` + 瞬时 `NOTIFY`；控制台徽标/收件箱/toast + **Web Push / ntfy 双通道**；**通知不含正文**；presence 抑制与去重 |
 | FR-27 | 用户切换会话即反向代理打开本机 Web UI | 控制台 iframe 载入 `/s/{id}/web/`（aicli 微前端）或 `/s/{id}/`（runtime-server SPA），网关反向代理到本机回环；base-path 感知、同源 Cookie、本机令牌由 agent 注入 |
 | FR-28 | 复用而非新增 hook | 通知**不新增 hook**、不侵入 turn 路径；现有 `internal/hooks`（`stop`/`stop_failure` + shell/http）保留为用户自定义外呼扩展点 |
 
@@ -176,7 +176,7 @@
 | 移动 | NFR-15 | 触控与视口 | 触控目标 ≥ 44px；软键盘不遮挡；`visualViewport` 适配 |
 | 移动 | NFR-16 | 可安装 | 提供 manifest + service worker，可"添加到主屏幕" |
 | 移动 | NFR-17 | 低带宽 | 提供显式低带宽开关与自动探测；纯文本模式可用 |
-| 移动 | NFR-18 | 后台通知 | 会话需注意力时可按需推送（Web Push） |
+| 移动 | NFR-18 | 后台通知 | 会话需注意力时可按需推送（Web Push；FCM/WNS 不可达时可经自建 ntfy 兜底） |
 
 ---
 
