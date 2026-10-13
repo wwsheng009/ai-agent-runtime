@@ -119,11 +119,12 @@
 
 | 宿主 | 配置文件 | 密钥文件 | 迁移性 |
 |------|----------|----------|--------|
-| gateway | `<data-dir>/connectors.json` | 同文件内 `secrets`（0600） | 可整文件复制到另一实例 |
-| aicli | `~/.aicli/config.yaml` 的 `connectors:` 节（分层合并 + 写锁） | `~/.aicli/connectors.secrets.yaml`（0600） | 与现有 config 分层/热刷新一致 |
-| runtime-server | 现有 config document（`/api/runtime/config/document`）扩展 `connectors` 节 | 同目录 `connectors.secrets.yaml`（0600） | 与 runtime 配置一起备份 |
+| gateway | `<data-dir>/connectors.json`（gateway 不读 agentconfig） | 同文件内 `secrets`（0600） | 可整文件复制到另一实例 |
+| **aicli + runtime-server（共用同一份）** | 同一个 **agent 配置 `config.yaml`** 的 `connectors:` 节；两端共用 `agentconfig.ConfigLayerStack()` 的分层与优先级（runtime-server 经 `/api/runtime/config/document` 读写，aicli 直接读写，原子写 + 跨进程锁） | `~/.aicli/connectors.secrets.yaml`（0600） | 写一次两端可见；另有独立 `runtime.yaml` 栈保留原样 |
 
 > 三处结构一致（同 schema、同 key 名），因此"把 aicli 的 Telegram 配置搬到 gateway"只需复制字段值。
+> **配置共享 ≠ 运行共享**：同一轮询/WS 通道只能一个宿主实际运行，靠 `runtime_owner` + 启动抢占（见
+> [07-config-ux.md](./07-config-ux.md) §5.6）。
 
 ## 8. 宿主差异汇总（共享核心 vs 宿主专属）
 

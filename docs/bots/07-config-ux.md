@@ -154,9 +154,16 @@ sequenceDiagram
 
 | 宿主 | 配置 | 密钥 | 权限 |
 |------|------|------|------|
-| gateway | `<data-dir>/connectors.json` | 同文件 `secrets` 字段 | 0600 |
-| aicli | `~/.aicli/config.yaml` 的 `connectors:` 节（分层合并 + 写锁） | `~/.aicli/connectors.secrets.yaml` | 0600 |
-| runtime-server | config document（`/api/runtime/config/document`）扩展 `connectors` 节 | 同目录 `connectors.secrets.yaml` | 0600 |
+| gateway | `<data-dir>/connectors.json`（gateway 不读 agentconfig，独立存储） | 同文件 `secrets` 字段 | 0600 |
+| **aicli 与 runtime-server（共用一份）** | **同一个 agent 配置文件 `config.yaml`** 的 `connectors:` 节——两者使用**同一套分层搜索与优先级**（`./configs/config.yaml` → `./config.yaml` → `./aicli.yaml` → `~/.aicli/config.yaml` → `./.aicli/config.yaml`，后者覆盖前者）；runtime-server 经 `GET/PUT /api/runtime/config/document` 读写，aicli 直接读写（原子写 + 跨进程锁） | `~/.aicli/connectors.secrets.yaml` | 0600 |
+
+> 事实依据（2026-10-13 核实）：`cmd/runtime-server/main.go:48` 的默认配置名 = `aiclipaths.DefaultConfigFileName`
+> = `config.yaml`；两端候选列表都来自 `agentconfig.ConfigLayerStack()`（`internal/agentconfig/config_layers.go:163-183`，
+> 注释明确要求 CLI 与 server 共用以免优先级分歧）；写入路径 `atomicWriteConfigFile`（`internal/config/manager.go:842-847`）
+> 与磁盘上的 `config.yaml.lock` 证明存在跨进程锁。**因此"在 runtime-server 设置里改的东西，aicli 打开就能看到"，反之亦然。**
+
+> 注：另有独立的一份**运行时行为配置 `runtime.yaml`**（`configs/runtime.yaml` 只读 → `~/.aicli/runtime.yaml` →
+> `./.aicli/runtime.yaml`），由 runtime-server 设置页展示层栈与写回层，与 `config.yaml` 不是同一文件。
 
 ### 5.2 密钥编辑语义（统一，参照已有 `gateway-settings-page` 模式）
 
@@ -187,6 +194,17 @@ sequenceDiagram
 
 - 配置新增/修改/删除、扫码登录、启停、测试消息均写 `ConnectorLog`（含操作者与来源 IP）；
 - gateway 侧同时写审计（`internal/gateway/audit`，与设备令牌同级）。
+
+### 5.6 共用文件的并发与"运行归属"（重要）
+
+`connectors:` 节写在共享的 `config.yaml` 上时，**配置共享 ≠ 运行共享**：
+
+| 关注点 | 设计 |
+|--------|------|
+| 写入并发 | 复用现有原子写 + 跨进程锁；runtime-server 保存经 config document service（含热重载与快照告警），aicli 保存走自身写路由 |
+| 读取热刷新 | runtime-server：`ConfigDocumentHotReloader` 重建运行时；aicli：`chat_config_refresh` 会话内热应用；连接器 `Reload()` 增量启停 |
+| **运行归属** | 同一通道的轮询/WS **只能一处运行**：连接器配置增加 `runtime_owner: auto|aicli|runtime-server|gateway`，启动时按宿主身份 + 数据目录锁抢占；`auto` 语义为"先到先得并公开所有权"，后启动者只读该配置、不启动轮询 |
+| 冲突可见 | 三端列表页显示 `运行于：aicli` / `未运行（由 runtime-server 持有）`，并提供"抢占"按钮（停止对方后接管） |
 
 ## 6. 便捷性设计（"应该很方便"的落点）
 
