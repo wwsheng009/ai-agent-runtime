@@ -37,9 +37,23 @@ func TestChatBusyPolicyPromptFirstBatch(t *testing.T) {
 		"/normal":               chatBusyPolicyScreen,
 		"/n":                    chatBusyPolicyScreen,    // 别名归并 → /normal
 		"/stream":               chatBusyPolicyImmediate, // bare：inline+read
-		"/yolo":                 chatBusyPolicyDeferred,  // 安全类不纳入
-		"/permission-mode set":  chatBusyPolicyDeferred,  // 安全类不纳入
-		"/supervision ack":      chatBusyPolicyDeferred,  // 控制面不纳入
+		// 组 D：next-turn 会话/目标/工作区写入纳入确认门
+		"/debug on":       chatBusyPolicyScreen,
+		"/debug off":      chatBusyPolicyScreen,
+		"/hotkeys reload": chatBusyPolicyScreen,
+		"/goal pause":     chatBusyPolicyScreen,
+		"/goal complete":  chatBusyPolicyScreen,
+		"/add-dir add":    chatBusyPolicyScreen,
+		"/memory add":     chatBusyPolicyScreen,
+		// 不纳入：next-call / live / §4.5 路由写入 / 需参数
+		"/plan enter":          chatBusyPolicyDeferred,
+		"/attach add":          chatBusyPolicyDeferred,
+		"/skills enable":       chatBusyPolicyDeferred,
+		"/routing on":          chatBusyPolicyDeferred,
+		"/title":               chatBusyPolicyDeferred,
+		"/yolo":                chatBusyPolicyDeferred, // 安全类不纳入
+		"/permission-mode set": chatBusyPolicyDeferred, // 安全类不纳入
+		"/supervision ack":     chatBusyPolicyDeferred, // 控制面不纳入
 	}
 	for line, want := range cases {
 		if got := chatSlashCommandBusyPolicyFor(line); got != want {

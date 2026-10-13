@@ -17,12 +17,17 @@ import (
 //   - /queue clear：用户排队过多时最需要它，语义完全落在 InputQueue 自身；
 //   - /stream|/fast|/reasoning on|off、/s、/normal：纯显示/外观开关（live）；
 //   - /reasoning_effort set：显示档位写入（next-turn），值随命令给出、不再追问。
+//   - 组 D（next-turn 会话/目标/工作区写入，核验确认无二次追问输入）：
+//     /debug on|off、/hotkeys reload、/goal clear|pause|resume|complete、
+//     /add-dir add|remove、/memory add|note|flush。
 //
 // 权限/安全类（/permission-mode set、/yolo、/trust grant、/grants revoke、
 // /approval-reuse set）与控制面类（/supervision ack|resolve|control、
 // /agents approve|deny|answer|send|followup|cleanup）保持 Deferred——不在运行中
-// 改安全策略/控制面；会二次追问输入的命令（/title bare、/memory add 无参等）同样
-// 不纳入（确认门后再读输入会与忙时 capture 竞争）。
+// 改安全策略/控制面。next-call 类（/plan enter|exit|approve、/attach add|clear|remove）
+// 会影响当前 turn 的下一次调用，live 类（/skills enable|disable）会热刷新函数面，
+// 均不纳入；/routing on|off|reset|save 按 §4.5 设计保持 Deferred；/title 需要标题
+// 参数（无参报错），不纳入。
 //
 // 结构化匹配（命令名 + 首个子命令 token）取代此前的裸字符串精确匹配：既支持
 // 带参命令（/reasoning_effort set high），又避免裸前缀歧义（/s 不会命中 /status）。
@@ -34,6 +39,12 @@ var chatBusyPromptAllowed = map[string]map[string]struct{}{
 	"/reasoning_effort": {"set": {}},
 	"/s":                {"": {}},
 	"/normal":           {"": {}},
+	// 组 D（next-turn，无二次追问输入）
+	"/debug":   {"on": {}, "off": {}},
+	"/hotkeys": {"reload": {}},
+	"/goal":    {"clear": {}, "pause": {}, "resume": {}, "complete": {}},
+	"/add-dir": {"add": {}, "remove": {}},
+	"/memory":  {"add": {}, "note": {}, "flush": {}},
 }
 
 // busyPromptCommandWhitelisted 判定输入是否属于忙时 prompt 确认门允许清单。
