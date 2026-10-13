@@ -130,7 +130,7 @@ type ProviderSchema struct {
 | 模型 | 字段（要点） | 说明 |
 |------|--------------|------|
 | `Connector` | `id, provider, name, enabled, mode, settings(map), secrets(map), status, last_error, counters` | 通道实例；`secrets` 只写不读（API 返回 `secret_keys`） |
-| `Binding` | `connector_id, chat_key, session_ref, node_id?, policy(command_prefix, allowed_users, auto_session), created_at` | IM 会话 → 本机会话；默认自动建会话 |
+| `Binding` | `connector_id, chat_key, session_ref, node_id?, policy, runtime_owner, created_at` | IM 会话 → 本机会话；默认自动建会话。`policy` 全集（白名单/会话模式/命令前缀/回复模式/通知偏好/限速等）见 [07-config-ux.md](./07-config-ux.md) §4.2；运行归属见 §5.6 |
 | `Conversation` | `connector_id, chat_key, session_id, cursor(map), state(map)` | 游标（Telegram offset / 微信 get_updates_buf / QQ session_id+seq）与状态（typing ticket 等） |
 | `InboundLedger` | `connector_id, message_id, status, claimed_at` | 入站去重（至少一次投递） |
 | `OutboundLedger` | `connector_id, chat_key, idempotency_key, status, attempts, next_retry_at` | 出站幂等 + 有界重试 |
