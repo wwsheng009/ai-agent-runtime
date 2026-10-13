@@ -365,9 +365,8 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 		}
 	}
 
-	// P2-6 黑名单模型：screen 档默认放行，只有声明 BusyBlock 的变体被排除。
-	// 断言：每个 screen 变体都显式声明输出类别（T11），且忙时准入 == !BusyBlock。
-	blockedSeen := map[string]bool{}
+	// P2-6 准入规则：只读 screen 默认放行；写入/交互必须显式 BusyAllow；BusyBlock
+	// 一律排除。逐变体断言准入结果 == 规则推导值（防声明漂移）。
 	for name, entry := range runtimeCommandRegistry {
 		specs := make([]runtimeCommandSpec, 0, 1+len(entry.Variants))
 		if entry.Bare != nil {
@@ -384,18 +383,29 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 				t.Errorf("screen 档命令 %q（注册键 %q）未显式声明输出类别", spec.Command, name)
 				continue
 			}
-			if got, want := busyScreenCommandAllowed(spec), !spec.BusyBlock; got != want {
-				t.Errorf("screen 命令 %q（注册键 %q）忙时准入=%v，期望 %v", spec.Command, name, got, want)
-			}
-			if spec.BusyBlock {
-				blockedSeen[spec.Command] = true
+			want := !spec.BusyBlock && (spec.Effect == runtimeEffectRead || spec.BusyAllow)
+			if got := busyScreenCommandAllowed(spec); got != want {
+				t.Errorf("screen 命令 %q（注册键 %q）忙时准入=%v，期望 %v（effect=%s block=%v allow=%v）",
+					spec.Command, name, got, want, spec.Effect, spec.BusyBlock, spec.BusyAllow)
 			}
 		}
 	}
-	// 核验结论必须真实落地：这些命令的写入变体已在注册表上 BusyBlock。
-	for _, command := range []string{"/export", "/agents", "/theme", "/profile", "/mcp", "/routing", "/skills"} {
-		if !blockedSeen[command] {
-			t.Errorf("核验为忙时不安全的命令 %q 未在注册表声明 BusyBlock", command)
+	// 核验结论必须真实落地：这些「不能与在途 turn 并发」的变体在忙时必须被排除。
+	for _, line := range []string{"/export", "/agents panel", "/agents pick", "/theme select", "/theme set", "/profile pick", "/mcp select", "/routing panel", "/skills select"} {
+		spec, ok := resolveRuntimeCommandSpec(line)
+		if !ok {
+			t.Errorf("核验排除项 %q 未在注册表登记", line)
+			continue
+		}
+		if busyScreenCommandAllowed(spec) {
+			t.Errorf("核验排除项 %q 不应放行忙时副屏", line)
+		}
+	}
+	// 写入类放行项必须真实生效。
+	for _, line := range []string{"/model", "/model gpt-x", "/provider", "/reasoning_effort", "/reasoning_effort select"} {
+		spec, ok := resolveRuntimeCommandSpec(line)
+		if !ok || !busyScreenCommandAllowed(spec) {
+			t.Errorf("写入类放行项 %q 未放行忙时副屏：ok=%v", line, ok)
 		}
 	}
 }

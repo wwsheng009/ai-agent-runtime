@@ -7,11 +7,13 @@ import (
 
 // 忙时副屏（S 档）准入与副屏执行原语。
 //
-// 准入策略（P2-6）：**默认放行 + 黑名单**。screen 档默认允许在忙时开屏，只有
-// 注册表 spec 上显式声明 BusyBlock 的变体被排除（见 chat_runtime_command_registry.go
-// 的 rtBusyBlock）。黑名单声明在**变体 spec** 上（而非命令名级），因此能区分同命令
-// 的只读/写入变体（/agents bare 放行、pick|panel 排除；/theme status 放行、
-// select|set 排除）。
+// 准入策略（P2-6）：**只读默认放行 + 写入显式放行 + 例外黑名单**，声明收敛到
+// 注册表变体 spec（chat_runtime_command_registry.go 的 rtBusyAllow / rtBusyBlock）：
+//   - 只读 screen（Effect=read）：默认放行；
+//   - 写入/交互 screen（Effect≠read）：fail-closed，必须显式 rtBusyAllow() 才放行；
+//   - 只读中的例外：用 rtBusyBlock() 排除（核验确认不能与在途 turn 并发者）。
+// 声明在**变体 spec** 上（而非命令名级），因此能区分同命令的只读/写入变体
+// （/agents bare 放行、pick|panel 排除；/theme status 放行、select|set 排除）。
 //
 // 默认放行的依据（§3.8.1 注册表不变式，T28 静态断言 + runtimeHostEffectReachable
 // 宿主守卫）：screen 档的生效域只能是 read/live/next-turn/next-call——session/process
@@ -31,8 +33,9 @@ import (
 //   - /export、/skills select、/mcp select：gate 在 run 活跃时硬拒绝，随后回退到
 //     「立即导出在途会话 / 改配置热刷新函数面」等副作用路径。
 //
-// 注意：默认由「白名单 fail-closed」改为「默认放行」，因此**新增 screen 变体默认
-// 进入忙时通道**；核验发现不能并发时，必须在注册表该变体上加 rtBusyBlock() 排除。
+// 写入类放行（rtBusyAllow）：/model、/provider、/reasoning_effort——next-turn 安全
+// 且结果在 Phase B（租约释放后）应用。新增写入 screen 变体默认拒绝（fail-closed），
+// 核验通过后再在注册表加 rtBusyAllow()。
 
 // chatBusyScreenWaitBudget 是进入副屏前的租约等待预算（§3.7.1：≤2s）。
 const chatBusyScreenWaitBudget = 2 * time.Second
@@ -48,7 +51,16 @@ func busyScreenCommandAllowed(spec runtimeCommandSpec) bool {
 	if !spec.Output.declared() {
 		return false
 	}
-	return !spec.BusyBlock
+	if spec.BusyBlock {
+		return false
+	}
+	// fail-closed：只读 screen 默认放行（只读中的例外用 BusyBlock 排除，如
+	// /export、/skills select）；写入/交互类（Effect≠read）必须显式声明 BusyAllow
+	// 才放行——新增写入 screen 变体默认拒绝，须先核验再声明。
+	if spec.Effect == runtimeEffectRead {
+		return true
+	}
+	return spec.BusyAllow
 }
 
 // markChatBusyInteractiveScreenActive 登记一个忙时副屏交互窗口，返回幂等释放函数。

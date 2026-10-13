@@ -107,6 +107,10 @@ type runtimeCommandSpec struct {
 	// 只用于「核查确认不能与在途 turn 并发」的 screen 变体；命中后该变体在忙时
 	// 按 Deferred 入队，不再开屏。
 	BusyBlock bool
+	// BusyAllow 显式把非只读的 screen 变体放行到忙时副屏通道（P2-6 fail-closed
+	// 白名单）：写入/交互类 screen 变体默认拒绝，必须显式声明 BusyAllow 才放行。
+	// 只读 screen 变体不需要（默认放行，例外用 BusyBlock）。
+	BusyAllow bool
 }
 
 type runtimeCommandEntry struct {
@@ -133,6 +137,11 @@ func rtOutput(category chatCommandOutputCategory) runtimeSpecOption {
 // rtBusyBlock 把该变体加入忙时副屏黑名单（P2-6，见 chat_busy_screen_exec.go）。
 func rtBusyBlock() runtimeSpecOption {
 	return func(spec *runtimeCommandSpec) { spec.BusyBlock = true }
+}
+
+// rtBusyAllow 显式放行非只读 screen 变体到忙时副屏通道（P2-6 fail-closed）。
+func rtBusyAllow() runtimeSpecOption {
+	return func(spec *runtimeCommandSpec) { spec.BusyAllow = true }
 }
 
 func rtSpec(command string, category commandCategory, mode runtimeInteractionMode, effect runtimeEffectScope, opts ...runtimeSpecOption) runtimeCommandSpec {
@@ -279,14 +288,14 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 
 	// C4 模型与路由
 	"/model": {
-		Bare:     rtBare(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
+		Bare:     rtBare(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
 		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))},
-		Wildcard: ptrRuntimeSpec(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
+		Wildcard: ptrRuntimeSpec(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
 	},
 	"/provider": {
-		Bare:     rtBare(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
+		Bare:     rtBare(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
 		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))},
-		Wildcard: ptrRuntimeSpec(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
+		Wildcard: ptrRuntimeSpec(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
 	},
 	"/routing": {
 		Bare: rtBare(rtSpec("/routing", categoryModelRouting, runtimeModeInline, runtimeEffectRead)),
@@ -551,12 +560,12 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		// （parseReasoningEffortCommandRequest 把空参数解析为 select）：声明为
 		// screen+next-turn+screen-interactive，与 /model、/provider 同族；忙时经
 		// P2-6 黑名单模型：screen 档默认放行，走 S 档开屏。
-		Bare: rtBare(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
+		Bare: rtBare(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
 		Variants: map[string]runtimeCommandSpec{
 			"status": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead),
-			"select": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
-			"choose": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
-			"switch": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
+			"select": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow()),
+			"choose": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow()),
+			"switch": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow()),
 			"set":    rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 		},
 		Wildcard: ptrRuntimeSpec(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
