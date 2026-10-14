@@ -17,6 +17,11 @@
 // 复制链接)→ 每 2s 轮询 login_status → confirmed 且 credential_ready 时把返回的
 // settings/secrets 合并 PATCH 回连接器(与 React 页 action-dialog.tsx 同语义)。
 import { apiFetch, esc, showToast } from "./util.js";
+import {
+  modelsFor as catalogModelsFor,
+  providerNames as catalogProviderNames,
+  reasoningFor as catalogReasoningFor
+} from "./model-catalog.js";
 
 function connEl(id) { return document.getElementById(id); }
 
@@ -399,6 +404,10 @@ function pickProviderAndStart() {
 // 编辑时 provider 锁定(后端禁止变更通道)。
 function renderEditor() {
   if (!editorState) { return; }
+  loadRouteCatalog().then(function () {
+    // 目录晚于表单就绪时刷新 datalist 候选(输入值不受影响)。
+    refreshRouteDatalists();
+  });
   var item = editorState.isEdit ? findItem(editorState.id) : null;
   var meta = providerMeta(editorState.provider);
   if (!meta) {
@@ -468,12 +477,288 @@ function renderEditor() {
     fieldHTML("运行归属", runtimeOwnerSelectHTML(policy.runtime_owner || ""), "auto=先到先得;指定宿主后仅该宿主可认领。") +
     "</div>";
 
+  // 模型路由(route,D6):配置后覆盖全局默认 provider/model/reasoning effort;
+  // 三项均可独立留空(空=回落全局默认)。默认值从 runtime 模型目录带出,
+  // 方便对照填写;直接输入也可(与 composer 同一份目录)。
+  var route = (policy.route || {});
+  // 模型路由联动口径:候选来自 runtime 模型目录,model 候选=已选 provider
+  // (空=目录默认 provider),reasoning 候选=provider+model 声明的档位;
+  // 输入变更只刷候选,不改写用户已填的值。
+  // 三字段用 combo(输入框+▼+自定义弹层)而非原生 datalist 下拉:input 有值时
+  // 浏览器会把 datalist 候选按当前值过滤(打开恒显示 0~1 项,且打开中的下拉
+  // 不随 input 事件刷新)——「模型/档位下拉只有一个选项」即此 UX 限制,并非
+  // 候选数据未更新。弹层与配置编辑器协议字段同方案,点开即显示全量候选。
+  html += '<div class="connector-form-section">模型路由(可选,覆盖全局默认)</div>' +
+    '<div class="connector-form-grid">' +
+    connectorRouteComboHTML("connector-form-route-provider",
+      "(全局默认)", route.provider || "", "留空=用全局默认 provider。点 ▼ 从模型目录选择。", "Provider") +
+    connectorRouteComboHTML("connector-form-route-model",
+      "(provider 默认模型)", route.model || "", "留空=用该 provider 的默认模型。点 ▼ 查看该 provider 的模型。", "Model") +
+    connectorRouteComboHTML("connector-form-route-reasoning",
+      "(会话/全局默认)", route.reasoning_effort || "", "如 low/medium/high;留空用默认。点 ▼ 查看该模型声明的档位。", "推理档位") +
+    '<datalist id="connector-route-provider-list" hidden>' + routeProviderOptions() + "</datalist>" +
+    '<datalist id="connector-route-model-list" hidden>' + routeModelOptions() + "</datalist>" +
+    '<datalist id="connector-route-reasoning-list" hidden>' + routeReasoningOptions() + "</datalist>" +
+    "</div>";
+
   html += '<p class="connector-form-note">留空=保持原值;输入 <code>__clear__</code> 可清除既有非密钥字段。密钥只写不读(GET 仅回字段名)。</p>';
   setModalBody(html);
   setModalFooter(
     '<button type="button" data-editor="cancel">取消</button>' +
     '<button type="button" class="primary-btn" data-editor="save">保存</button>'
   );
+  bindRouteCascade();
+}
+
+// 路由表单联动:provider/model 输入变化只重刷下游候选(约束模型/档位列表),
+// 不改写用户已填的值——这里是覆盖性配置(与 composer 的 previewProviderChange
+// 「跟随新默认模型」不同),静默改值会让回填的存量配置失真。
+// renderEditor 重建正文时旧节点连同监听一起销毁,不存在重复绑定。
+//
+// combo 契约(与配置编辑器协议字段/provider-editor.js 同款):
+//   - ▼ 点击切换弹层,弹层每次打开都按当前输入值重渲染(当前值高亮);
+//   - 弹层内置检索行:子串过滤 + 命中计数 + 无命中提示;检索框 Enter=选中首个
+//     可见项,↑/↓ 在可见项间移动焦点,Esc 先收弹层(不关对话框);
+//   - 点选项=写回 input 并关闭,可另手输自定义值;输入变化只刷候选不改值;
+//   - hidden datalist 仍按联动口径维护,作为弹层候选项的单一数据源;
+//   - 结构不能包在 <label> 里:label 会把点击/激活转发给内部第一个表单控件
+//     (input),点弹层检索框会被转发成点 combo 输入框,检索框永远无法聚焦。
+//     因此不复用 fieldHTML(label 包裹),改用同视觉的 div.connector-field。
+function connectorRouteComboHTML(id, placeholder, value, help, label) {
+  return '<div class="connector-field">' +
+    '<span class="connector-field-label">' + esc(label) + "</span>" +
+    '<span class="cfg-combo-wrap connector-combo">' +
+    '<input id="' + id + '" type="text" autocomplete="off" placeholder="' + esc(placeholder) + '" value="' +
+    esc(value) + '">' +
+    '<button type="button" class="connector-combo-toggle" data-route-combo-toggle="' + esc(id) + '" ' +
+    'title="弹出候选列表" aria-label="' + esc(label) + ' 候选列表">▼</button>' +
+    '<div class="cfg-combo-popup connector-combo-popup" id="' + id + '-popup" data-route-combo-for="' + esc(id) + '" style="display:none"></div>' +
+    "</span>" +
+    (help ? '<span class="connector-field-help">' + esc(help) + "</span>" : "") +
+    "</div>";
+}
+
+// 弹层候选项:datalist 仍是单一数据源(联动刷新只写 datalist),弹层只负责呈现。
+// 顶部检索行(与 composer 检索一致):子串过滤 + 命中计数 + 无命中提示;
+// 当前值不在候选中时附加到尾部,保证自定义值可见且可重复选中。
+function renderRouteComboPopup(id) {
+  var input = connEl(id);
+  var popup = connEl(id + "-popup");
+  if (!input || !popup) { return; }
+  var curVal = (input.value || "").trim();
+  var values = [];
+  var sourceList = document.getElementById(routeComboListId(id));
+  if (sourceList) {
+    var opts = sourceList.querySelectorAll("option[value]");
+    for (var i = 0; i < opts.length; i++) {
+      var v = (opts[i].getAttribute("value") || "").trim();
+      if (v && values.indexOf(v) < 0) { values.push(v); }
+    }
+  }
+  if (curVal && values.indexOf(curVal) < 0) { values.push(curVal); }
+  if (values.length === 0) {
+    popup.innerHTML = '<div class="cfg-combo-empty">暂无候选(目录未就绪?),可直接输入</div>';
+    popup.style.display = "block";
+    return;
+  }
+  var html = '<div class="cfg-popup-filter">' +
+    '<input type="text" data-popup-filter placeholder="筛选…" autocomplete="off" ' +
+    'title="按名称子串筛选(不区分大小写)" aria-label="筛选候选">' +
+    '<span class="cfg-popup-count" data-popup-count></span>' +
+    "</div>" +
+    '<div class="cfg-popup-list">';
+  for (var j = 0; j < values.length; j++) {
+    var isCurrent = values[j] === curVal;
+    html += '<button type="button" class="cfg-combo-item' + (isCurrent ? " current" : "") +
+      '" data-route-combo-value="' + esc(values[j]) + '" title="' + esc(values[j]) + '">' +
+      esc(values[j]) + (isCurrent ? '<span class="tag">当前</span>' : "") + "</button>";
+  }
+  html += "</div>" +
+    '<div class="cfg-popup-no-match" style="display:none">没有匹配的候选,可直接输入</div>';
+  popup.innerHTML = html;
+  popup.style.display = "block";
+  applyRoutePopupFilter(popup);
+  var filter = popup.querySelector("[data-popup-filter]");
+  if (filter) { filter.focus(); }
+  refreshRoutePopupCount(popup);
+}
+
+// 弹层检索:子串过滤(不区分大小写),只切显隐不重渲染;同步计数与无命中提示。
+function applyRoutePopupFilter(popup) {
+  var filter = popup.querySelector("[data-popup-filter]");
+  var keyword = filter ? String(filter.value || "").trim().toLowerCase() : "";
+  var items = popup.querySelectorAll("[data-route-combo-value]");
+  var visible = 0;
+  for (var i = 0; i < items.length; i++) {
+    var value = String(items[i].getAttribute("data-route-combo-value") || "").toLowerCase();
+    var hit = !keyword || value.indexOf(keyword) >= 0;
+    items[i].style.display = hit ? "" : "none";
+    if (hit) { visible++; }
+  }
+  var noMatch = popup.querySelector(".cfg-popup-no-match");
+  if (noMatch) { noMatch.style.display = keyword && visible === 0 ? "block" : "none"; }
+  return visible;
+}
+
+// 计数:无检索词=总数,有检索词=命中/总数(与 composer 口径一致)。
+function refreshRoutePopupCount(popup) {
+  var count = popup.querySelector("[data-popup-count]");
+  if (!count) { return; }
+  var filter = popup.querySelector("[data-popup-filter]");
+  var keyword = filter ? String(filter.value || "").trim().toLowerCase() : "";
+  var items = popup.querySelectorAll("[data-route-combo-value]");
+  var visible = 0;
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].style.display !== "none") { visible++; }
+  }
+  count.textContent = items.length === 0 ? "" :
+    (keyword ? visible + " / " + items.length : items.length + " 项");
+}
+
+// 可见项间移动焦点(过滤后跳过隐藏项),供检索框 ↑/↓ 使用。
+function moveRoutePopupFocus(popup, step) {
+  var items = popup.querySelectorAll("[data-route-combo-value]");
+  var visible = [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].style.display !== "none") { visible.push(items[i]); }
+  }
+  if (visible.length === 0) { return; }
+  var current = visible.indexOf(document.activeElement);
+  var next = current < 0
+    ? (step > 0 ? 0 : visible.length - 1)
+    : (current + step + visible.length) % visible.length;
+  visible[next].focus();
+}
+
+function closeRouteComboPopups() {
+  document.querySelectorAll(".connector-combo-popup").forEach(function (popup) {
+    popup.style.display = "none";
+  });
+}
+
+// 点击弹层/▼/输入框以外区域时关闭所有路由弹层;对话框关闭时也统一收起。
+// 不在 input 上挂 focus 即关(否则 label 转发激活点击会瞬间关掉刚打开的弹层,
+// 见 connectorRouteComboHTML 的 combo 结构说明)。
+// 去重标记用模块级变量而非 document.dataset:document 没有 dataset(dataset
+// 只存在于 HTMLElement),用错会在 openEditor 链路上直接 TypeError。
+var routeComboOutsideBound = false;
+
+function bindRouteComboOutsideDismiss() {
+  if (routeComboOutsideBound) { return; }
+  routeComboOutsideBound = true;
+  document.addEventListener("click", function (event) {
+    if (event.target.closest && event.target.closest(".connector-combo")) { return; }
+    closeRouteComboPopups();
+  });
+}
+
+// input id → datalist id 契约:connector-form-route-{x} → connector-route-{x}-list。
+// 必须整段替换 "connector-form-route-" 前缀:只剥 "connector-form-" 会残留
+// "route-",得出 connector-route-route-model-list 这样的错误 id(getElementById
+// 永远 null,弹层渲染抛 TypeError,▼ 点击无反应)。
+function routeComboListId(id) {
+  return id.replace("connector-form-route-", "connector-route-") + "-list";
+}
+
+function bindRouteCascade() {
+  var providerInput = document.getElementById("connector-form-route-provider");
+  var modelInput = document.getElementById("connector-form-route-model");
+  var toggleContainer = providerInput && providerInput.closest(".connector-form-grid")
+    ? providerInput.closest(".connector-form-grid")
+    : document.getElementById("connectors-modal-body");
+  if (providerInput && providerInput.dataset.routeCascade !== "1") {
+    providerInput.dataset.routeCascade = "1";
+    providerInput.addEventListener("input", refreshRouteDatalists);
+  }
+  if (modelInput && modelInput.dataset.routeCascade !== "1") {
+    modelInput.dataset.routeCascade = "1";
+    modelInput.addEventListener("input", refreshRouteDatalists);
+  }
+  // ▼ 弹层开关 + 弹层内交互(点选/检索/键盘)事件委托:委托容器随对话框正文
+  // 重建整体销毁,无泄漏。弹层命中判定用 [data-route-combo-for](target 可能因
+  // 浏览器激活转发指向 input,而非真实点击点)。
+  if (toggleContainer && toggleContainer.dataset.routeComboBound !== "1") {
+    toggleContainer.dataset.routeComboBound = "1";
+    toggleContainer.addEventListener("click", function (event) {
+      var target = event.target;
+      var toggle = target && target.closest ? target.closest("[data-route-combo-toggle]") : null;
+      if (toggle) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleRouteComboPopup(toggle.getAttribute("data-route-combo-toggle"));
+        return;
+      }
+      var popupEl = target && target.closest ? target.closest("[data-route-combo-for]") : null;
+      var item = target && target.closest ? target.closest("[data-route-combo-value]") : null;
+      if (item && popupEl) {
+        event.preventDefault();
+        event.stopPropagation();
+        var inputEl = connEl(popupEl.getAttribute("data-route-combo-for"));
+        selectRouteComboValue(inputEl ? inputEl.id : "", item.getAttribute("data-route-combo-value"));
+      }
+    });
+    toggleContainer.addEventListener("input", function (event) {
+      var target = event.target;
+      var popupEl = target && target.closest ? target.closest("[data-route-combo-for]") : null;
+      if (popupEl) { applyRoutePopupFilter(popupEl); refreshRoutePopupCount(popupEl); }
+    });
+    toggleContainer.addEventListener("keydown", function (event) {
+      var target = event.target;
+      if (!target || !target.closest) { return; }
+      var popupEl = target.closest("[data-route-combo-for]");
+      if (!popupEl) { return; }
+      var comboId = popupEl.getAttribute("data-route-combo-for");
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeRouteComboPopups();
+        var comboInput = connEl(comboId);
+        if (comboInput) { comboInput.focus(); }
+        return;
+      }
+      if (event.key === "Enter") {
+        var filter = target.closest("[data-popup-filter]");
+        if (!filter) { return; }
+        event.preventDefault();
+        var items = popupEl.querySelectorAll("[data-route-combo-value]");
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].style.display !== "none") {
+            selectRouteComboValue(comboId, items[i].getAttribute("data-route-combo-value"));
+            return;
+          }
+        }
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!target.closest("[data-popup-filter]")) { return; }
+        event.preventDefault();
+        moveRoutePopupFocus(popupEl, event.key === "ArrowDown" ? 1 : -1);
+      }
+    });
+  }
+  bindRouteComboOutsideDismiss();
+}
+
+function toggleRouteComboPopup(id) {
+  var popup = connEl(id + "-popup");
+  if (!popup) { return; }
+  if (popup.style.display !== "none" && popup.innerHTML) {
+    closeRouteComboPopups();
+    return;
+  }
+  closeRouteComboPopups();
+  renderRouteComboPopup(id);
+}
+
+// 点选项:写回 input + 关弹层;JS 赋值不触发 input/change 事件,级联下游候选
+// (model/reasoning datalist)在这里显式补刷一次。
+function selectRouteComboValue(id, value) {
+  var input = connEl(id);
+  if (!input || !value) { return; }
+  input.value = value;
+  closeRouteComboPopups();
+  refreshRouteDatalists();
+  input.focus();
 }
 
 function modeLabel(mode) {
@@ -490,6 +775,84 @@ function runtimeOwnerSelectHTML(current) {
     html += '<option value="' + esc(opts[i][0]) + '"' + (opts[i][0] === current ? " selected" : "") + ">" + esc(opts[i][1]) + "</option>";
   }
   return html + "</select>";
+}
+
+// 模型路由联动(与聊天区 composer 选择器共用 js/model-catalog.js 纯逻辑):
+// 候选来自 runtime 模型目录(GET /api/runtime/models,一次会话拉一次缓存),
+// model 候选按已选 provider 过滤,reasoning 候选按 provider+model 解析。
+var routeCatalog = null; // 模块级缓存:一次会话拉一次,编辑器重开不重复请求。
+
+function loadRouteCatalog() {
+  if (routeCatalog) { return Promise.resolve(routeCatalog); }
+  // 主源:runtime-server 的模型目录(A 形态,default_provider/default_reasoning_effort);
+  // 独立 aicli web 没有 /api/runtime/models → 回退 /web/api/runtime(B 形态,
+  // 与 composer 同源,providers[].model_details 携带能力面)。两种形态都由
+  // js/model-catalog.js 归一化,调用方无感。
+  return apiJSON("/api/runtime/models").catch(function () {
+    return apiJSON("/web/api/runtime", { cache: "no-store" });
+  }).then(function (data) {
+    routeCatalog = data || {};
+    return routeCatalog;
+  }).catch(function () {
+    routeCatalog = {};
+    return routeCatalog;
+  });
+}
+
+// routeProviderOptions:provider datalist 候选(全目录)。
+function routeProviderOptions() {
+  if (!routeCatalog) { return ""; }
+  var names = catalogProviderNames(routeCatalog);
+  var html = "";
+  for (var i = 0; i < names.length; i++) {
+    html += '<option value="' + esc(names[i]) + '">';
+  }
+  return html;
+}
+
+// routeModelOptions:按当前 provider(空=目录默认 provider)取模型候选——
+// 联动的核心:选了 provider 就只显示该 provider 的模型,不再全目录混排。
+// provider 未收录时返回空串(字段仍可手输自定义模型名)。
+function routeModelOptions() {
+  if (!routeCatalog) { return ""; }
+  var provider = routeProviderValue();
+  var models = catalogModelsFor(routeCatalog, provider);
+  var html = "";
+  for (var i = 0; i < models.length; i++) {
+    html += '<option value="' + esc(models[i]) + '">';
+  }
+  return html;
+}
+
+// routeReasoningOptions:按当前 provider+model 取 reasoning 候选datalist;
+// 目录未声明档位时用通用兜底列表(仍允许手输其它值)。
+function routeReasoningOptions() {
+  if (!routeCatalog) { return ""; }
+  var r = catalogReasoningFor(routeCatalog, routeProviderValue(), routeModelValue());
+  var html = "";
+  for (var i = 0; i < r.options.length; i++) {
+    html += '<option value="' + esc(r.options[i]) + '">';
+  }
+  return html;
+}
+
+// 当前路由表单值(空串安全:目录查询会回落到默认 provider)。
+function routeProviderValue() {
+  return ((connEl("connector-form-route-provider") || {}).value || "").trim();
+}
+
+function routeModelValue() {
+  return ((connEl("connector-form-route-model") || {}).value || "").trim();
+}
+
+// 目录刷新后同步一次 datalist(输入值不受影响,只换候选)。
+function refreshRouteDatalists() {
+  var providerList = document.getElementById("connector-route-provider-list");
+  var modelList = document.getElementById("connector-route-model-list");
+  var reasoningList = document.getElementById("connector-route-reasoning-list");
+  if (providerList) { providerList.innerHTML = routeProviderOptions(); }
+  if (modelList) { modelList.innerHTML = routeModelOptions(); }
+  if (reasoningList) { reasoningList.innerHTML = routeReasoningOptions(); }
 }
 
 function fieldHTML(label, control, help) {
@@ -577,7 +940,12 @@ function collectEditor() {
       command_prefix: ((connEl("connector-form-command-prefix") || {}).value || "").trim(),
       session_mode: ((connEl("connector-form-session-mode") || {}).value || "").trim(),
       reply_mode: ((connEl("connector-form-reply-mode") || {}).value || "").trim(),
-      runtime_owner: (connEl("connector-form-runtime-owner") || {}).value || ""
+      runtime_owner: (connEl("connector-form-runtime-owner") || {}).value || "",
+      route: {
+        provider: ((connEl("connector-form-route-provider") || {}).value || "").trim(),
+        model: ((connEl("connector-form-route-model") || {}).value || "").trim(),
+        reasoning_effort: ((connEl("connector-form-route-reasoning") || {}).value || "").trim()
+      }
     }
   };
   if (!editorState.isEdit) {
@@ -855,6 +1223,7 @@ function closeModal() {
   editorState = null;
   stopQRPoll();
   qrState = null;
+  closeRouteComboPopups();
   return true;
 }
 
@@ -942,6 +1311,16 @@ export function initConnectors() {
   if (footerEl) { footerEl.addEventListener("click", onModalFooterClick); }
   document.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") { return; }
+    // 弹层打开时 Esc 先收弹层(焦点已还 combo 输入框,见 keydown 委托),不关对话框。
+    var comboPopups = document.querySelectorAll(".connector-combo-popup");
+    for (var i = 0; i < comboPopups.length; i++) {
+      if (comboPopups[i].style.display !== "none") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeRouteComboPopups();
+        return;
+      }
+    }
     // 弹窗打开时 Esc 只关闭弹窗:捕获阶段短路,避免同时触发会话中断。
     if (closeModal()) {
       event.preventDefault();

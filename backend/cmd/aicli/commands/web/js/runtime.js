@@ -3,6 +3,7 @@
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
 import { apiFetch, esc } from "./util.js";
+import { findProvider, modelCapability } from "./model-catalog.js";
 
 // ---- provider / model / reasoning_effort 配置选择器 ----
 // 权威值来自 GET /web/api/runtime；切换动作构造 /model 命令注入
@@ -134,34 +135,17 @@ function handlePopupKeydown(event, valueAttr, onSelect, onDismiss) {
   }
 }
 
-function findRuntimeProvider(meta, name) {
-  var providers = (meta && meta.providers) || [];
-  for (var i = 0; i < providers.length; i++) {
-    if (providers[i].name === name) { return providers[i]; }
-  }
-  return null;
-}
-
-function findModelDetail(provider, model) {
-  if (!provider || !model) { return null; }
-  var details = provider.model_details || [];
-  for (var i = 0; i < details.length; i++) {
-    if (details[i].name === model) { return details[i]; }
-  }
-  return null;
-}
-
 // 解析指定 provider/model 的 reasoning 可选项：优先 model_details，
 // 其次 current.reasoning_options（当前生效模型），最后回退通用列表。
 // 返回 { options, def, supported }，options 为空表示用通用列表。
+// capability 解析统一走 js/model-catalog.js（与连接器路由表单同一份逻辑）。
 function resolveReasoningOptions(meta, providerName, modelName) {
-  var p = findRuntimeProvider(meta, providerName);
-  var detail = p ? findModelDetail(p, modelName) : null;
-  if (detail && detail.reasoning_efforts && detail.reasoning_efforts.length > 0) {
-    return { options: detail.reasoning_efforts.slice(), def: detail.default_reasoning_effort || "", supported: true };
+  var cap = modelCapability(meta, providerName, modelName);
+  if (cap && cap.reasoning_efforts && cap.reasoning_efforts.length > 0) {
+    return { options: cap.reasoning_efforts.slice(), def: cap.default_reasoning_effort || "", supported: true };
   }
-  if (detail && (detail.default_reasoning_effort || detail.reasoning_model)) {
-    return { options: [], def: detail.default_reasoning_effort || "", supported: true };
+  if (cap && (cap.default_reasoning_effort || cap.reasoning_model)) {
+    return { options: [], def: cap.default_reasoning_effort || "", supported: true };
   }
   var cur = (meta && meta.current) || {};
   if (providerName && modelName && cur.provider === providerName && cur.model === modelName &&
@@ -258,7 +242,7 @@ function toggleModelPopup() {
   // 以当前选中 provider 重新渲染，保证打开时即最新列表。
   if (runtimeMetaCache) {
     var selProvider = els.provider ? (els.provider.value || cfg.provider) : cfg.provider;
-    renderModelDatalist(els, findRuntimeProvider(runtimeMetaCache, selProvider));
+    renderModelDatalist(els, findProvider(runtimeMetaCache, selProvider));
   } else if (!els.modelPopup.innerHTML) {
     els.modelPopup.innerHTML = '<div class="cfg-model-empty">加载中…</div>';
   }
@@ -369,7 +353,7 @@ function selectProviderFromPopup(providerName) {
 function previewProviderChange(providerName) {
   if (!runtimeMetaCache) { return; }
   var els = cfgEls();
-  var p = findRuntimeProvider(runtimeMetaCache, providerName);
+  var p = findProvider(runtimeMetaCache, providerName);
   var models = renderModelDatalist(els, p);
   var curModel = (els.model.value || "").trim();
   var nextModel = curModel;
@@ -420,7 +404,7 @@ export function loadRuntimeMeta() {
         cfg.model = cur.model || "";
         cfg.reasoning = cur.reasoning_effort || "";
         renderProviderCombo(els, providers, cfg.provider);
-        var curProvider = findRuntimeProvider(meta, cfg.provider);
+        var curProvider = findProvider(meta, cfg.provider);
         renderModelDatalist(els, curProvider);
         els.model.value = cfg.model;
         els.model.placeholder = cfg.model || (curProvider && curProvider.default_model) || "输入模型名";
@@ -442,7 +426,7 @@ export function loadRuntimeMeta() {
         var keepReasoning = els.reasoning.value || "";
         renderProviderCombo(els, providers, selProvider);
         els.provider.value = selProvider;
-        var selP = findRuntimeProvider(meta, selProvider);
+        var selP = findProvider(meta, selProvider);
         renderModelDatalist(els, selP);
         els.model.value = selModelVal;
         var selModel = selModelVal || cfg.model;

@@ -202,6 +202,7 @@ check("每个菜单动作都指向真实存在的目标控件", () => {
     "tab-files": "#tab-files-btn",
     "tab-git": "#tab-git-btn",
     "tab-mcp": "#tab-mcp-btn",
+    "tab-connectors": "#tab-connectors-btn",
     "tab-schedule": "#tab-schedule-btn",
     "tab-config": "#tab-config-btn",
     "tab-log": "#tab-log-btn",
