@@ -489,7 +489,13 @@ func (p *Provider) Activate(ctx context.Context, cfg connectors.Config) (connect
 	}
 	if owner := strings.TrimSpace(cfg.Setting("owner_user_id", "")); owner != "" {
 		if _, err := p.typingTicket(ctx, cfg, owner); err != nil {
-			return connectors.Activation{}, err
+			// 探测失败不作为激活失败：getconfig 依赖「owner 已与该 bot 建立过
+			// 会话」——新扫码的 bot 在 owner 发出首条消息前必然 ret=-4，若视为
+			// 致命会让轮询永远起不来（收不到首条消息 → 永远无法建立关系），
+			// 形成引导死锁。typing ticket 在真实回复路径仍会校验，激活只降级
+			// 为告警并照常启动轮询（docs/bots/09 真机测试 2026-10-14 复盘）。
+			info += fmt.Sprintf("（getconfig 探测失败，已降级为告警：%v）", err)
+			return connectors.Activation{Info: info}, nil
 		}
 		info += "（getconfig 校验通过）"
 	} else {
