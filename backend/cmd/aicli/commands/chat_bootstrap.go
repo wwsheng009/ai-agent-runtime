@@ -24,6 +24,9 @@ type chatPersistenceState struct {
 	// 0 = 不限制（对齐 Codex 的 continue_if_idle）；正整数为自动续跑安全阀。
 	// 见 docs/plan/aicli-goal-continuation-codex-alignment-plan-20261014.md。
 	goalMaxContinuations int
+	// goalDefaultTokenBudget 来自 runtime.yaml 的 goal.defaultTokenBudget：
+	// 新建 goal 的默认 token 预算（0=无预算）。
+	goalDefaultTokenBudget int
 }
 
 type chatRuntimeState struct {
@@ -56,6 +59,9 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 	runtimeConfig, runtimeConfigPath := loadChatPersistenceRuntimeConfig(cfg, profileState)
 	if runtimeConfig != nil && runtimeConfig.Goal.MaxConsecutiveContinuations > 0 {
 		state.goalMaxContinuations = runtimeConfig.Goal.MaxConsecutiveContinuations
+	}
+	if runtimeConfig != nil && runtimeConfig.Goal.DefaultTokenBudget > 0 {
+		state.goalDefaultTokenBudget = runtimeConfig.Goal.DefaultTokenBudget
 	}
 	markChatStartup("persistence_config")
 	if manager, userID, sessionDir, configured, err := prepareRuntimeServerChatPersistence(runtimeConfig, opts); err != nil {

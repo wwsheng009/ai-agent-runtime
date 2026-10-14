@@ -47,6 +47,9 @@ goal:
   # 不限制（对齐 Codex：goal active 时持续续跑，直到完成/暂停/中断或容忍阈值）。
   # 正整数 = 成本安全阀：到达上限的可见提示出现后，发送任意消息可继续。
   # maxConsecutiveContinuations: 0
+  # defaultTokenBudget 是新建 goal 的默认 token 预算（0=无预算）；耗尽后目标
+  # 置 budget_limited，可用 /goal budget <n> 提高预算后 resume。
+  # defaultTokenBudget: 0
 
 context:
   # Used only when neither provider/model capability nor context.maxPromptTokens

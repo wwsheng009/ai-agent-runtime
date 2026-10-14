@@ -466,6 +466,10 @@ type GoalConfig struct {
 	// 上限，到达后给用户可见提示且 goal 保持 active（发送任意消息可继续）。
 	// 负值按 0 处理。
 	MaxConsecutiveContinuations int `yaml:"maxConsecutiveContinuations" json:"maxConsecutiveContinuations"`
+	// DefaultTokenBudget 是新建 goal 的默认 token 预算（0=无预算）；仅在新
+	// goal 创建时应用（对齐 Codex max_goal_token_budget 的缺省注入）。耗尽后
+	// 目标置 budget_limited，可用 /goal budget <n> 提高预算后 resume。
+	DefaultTokenBudget int `yaml:"defaultTokenBudget" json:"defaultTokenBudget"`
 }
 
 // BackgroundConfig controls background task persistence.

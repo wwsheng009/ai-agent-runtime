@@ -459,7 +459,7 @@ func TestBuildSkillMentionTurnMessagesBudgetDegrade(t *testing.T) {
 	if len(messages) != 0 || len(diag.Skipped) != 1 || diag.Skipped[0].Reason != skillMentionSkipLimit {
 		t.Fatalf("entry budget all-drop = messages=%d diag=%+v", len(messages), diag)
 	}
-	if !chatSkillMentionSystemGeneratedPrompt("") || !chatSkillMentionSystemGeneratedPrompt(goalAutoContinuationPrompt) {
+	if !chatSkillMentionSystemGeneratedPrompt("") || !chatSkillMentionSystemGeneratedPrompt(goalAutoContinuationPrompt) || !chatSkillMentionSystemGeneratedPrompt(goalBudgetWrapUpPrompt) {
 		t.Fatal("empty/goal prompts must be treated as system-generated")
 	}
 }

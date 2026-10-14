@@ -375,6 +375,67 @@ func TestGoalStatusSegmentShowsBlocked(t *testing.T) {
 	}
 }
 
+func TestGoalBudgetCommandSetsReactivatesAndClears(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+	captureStdout(t, func() { handleCommand(session, "/goal finish the review", false) })
+
+	if _, err := applyGoalBudgetCommand(session, "5000"); err != nil {
+		t.Fatalf("set budget: %v", err)
+	}
+	goal, ok, err := runtimegoal.NewMetadataStore().Get(session.RuntimeSession)
+	if err != nil || !ok || goal == nil || goal.TokenBudget != 5000 {
+		t.Fatalf("expected budget 5000, got %+v err=%v", goal, err)
+	}
+
+	// 耗尽后的 budget_limited：预算未提高时 resume 不复活（merge 守卫）；
+	// 提高预算后恢复为 active。
+	goal.Status = runtimegoal.StatusBudgetLimited
+	goal.TokensUsed = 6000
+	updated, err := runtimegoal.NewMetadataStore().PutPersistent(
+		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
+	if err != nil {
+		t.Fatalf("persist budget_limited: %v", err)
+	}
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	captureStdout(t, func() { handleCommand(session, "/goal resume", false) })
+	assertGoalStatus(t, session, runtimegoal.StatusBudgetLimited)
+
+	message, err := applyGoalBudgetCommand(session, "10000")
+	if err != nil {
+		t.Fatalf("raise budget: %v", err)
+	}
+	if !strings.Contains(message, "恢复") {
+		t.Fatalf("expected reactivation message, got %q", message)
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusActive)
+
+	if _, err := applyGoalBudgetCommand(session, "0"); err != nil {
+		t.Fatalf("clear budget: %v", err)
+	}
+	goal, _, _ = runtimegoal.NewMetadataStore().Get(session.RuntimeSession)
+	if goal == nil || goal.TokenBudget != 0 {
+		t.Fatalf("expected cleared budget, got %+v", goal)
+	}
+}
+
+func TestApplyGoalBudgetCommandRejectsInvalidOrMissingGoal(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+	if _, err := applyGoalBudgetCommand(session, "10"); err == nil {
+		t.Fatal("expected missing-goal error before /goal is set")
+	}
+	captureStdout(t, func() { handleCommand(session, "/goal finish the review", false) })
+	if _, err := applyGoalBudgetCommand(session, "abc"); err == nil {
+		t.Fatal("expected invalid budget error")
+	}
+	if _, err := applyGoalBudgetCommand(session, "-5"); err == nil {
+		t.Fatal("expected negative budget rejection")
+	}
+}
+
 func TestGoalFunctionUpdateCompleteDoesNotRewriteDurableHistory(t *testing.T) {
 	session, cleanup := newGoalCommandTestSession(t)
 	defer cleanup()

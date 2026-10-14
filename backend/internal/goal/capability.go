@@ -233,7 +233,7 @@ func ValidateStatusTransition(from Status, to Status) error {
 	}
 	switch from {
 	case StatusActive:
-		if to == StatusPaused || to == StatusComplete || to == StatusBlocked {
+		if to == StatusPaused || to == StatusComplete || to == StatusBlocked || to == StatusBudgetLimited {
 			return nil
 		}
 	case StatusPaused:

@@ -14,10 +14,13 @@ import (
 func TestGoalMaxConsecutiveContinuationsPassthrough(t *testing.T) {
 	require.Zero(t, DefaultRuntimeConfig().Goal.MaxConsecutiveContinuations,
 		"absent config must stay 0 = unlimited (Codex-aligned)")
+	require.Zero(t, DefaultRuntimeConfig().Goal.DefaultTokenBudget,
+		"absent config must stay 0 = no default budget")
 
 	cfg := DefaultRuntimeConfig()
-	require.NoError(t, yaml.Unmarshal([]byte("goal:\n  maxConsecutiveContinuations: 12\n"), cfg))
+	require.NoError(t, yaml.Unmarshal([]byte("goal:\n  maxConsecutiveContinuations: 12\n  defaultTokenBudget: 50000\n"), cfg))
 	require.Equal(t, 12, cfg.Goal.MaxConsecutiveContinuations)
+	require.Equal(t, 50000, cfg.Goal.DefaultTokenBudget)
 
 	// Partial block tolerance: an empty goal section must not disturb the default.
 	partial := DefaultRuntimeConfig()

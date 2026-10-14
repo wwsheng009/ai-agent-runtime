@@ -207,6 +207,11 @@ func (p GoalMergePolicy) MergeContextValue(key string, oldValue, newValue interf
 		return oldGoal, nil
 	}
 	if oldGoal.Status == StatusBudgetLimited && newGoal.Status == StatusActive {
+		// 仅当预算已提高到超过已用（重新可推进）时才允许恢复为 active；否则
+		// 维持 budget_limited（对齐 Codex：激活已超预算的 goal 不自动复活）。
+		if newGoal.TokenBudget > newGoal.TokensUsed {
+			return newGoal, nil
+		}
 		return oldGoal, nil
 	}
 	if oldGoal.Status == StatusPaused && newGoal.Status == StatusComplete && p.Actor == MutationModel {

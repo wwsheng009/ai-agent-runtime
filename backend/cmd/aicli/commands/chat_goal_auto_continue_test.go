@@ -361,6 +361,56 @@ func TestSendMessage_NoProgressStrikesResetOnToolActivity(t *testing.T) {
 	assertGoalStatus(t, session, runtimegoal.StatusActive)
 }
 
+func TestSendMessage_AccountsGoalUsageAndStopsAtBudget(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	// 预算 250：初始 turn 计 100，续跑每轮计 100 → 第 2 轮后 300 触发收尾。
+	goal, ok, err := runtimegoal.NewMetadataStore().Get(session.RuntimeSession)
+	if err != nil || !ok || goal == nil {
+		t.Fatalf("expected goal metadata, ok=%v err=%v", ok, err)
+	}
+	goal.TokenBudget = 250
+	if err := runtimegoal.NewMetadataStore().Put(session.RuntimeSession, *goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+	resetGoalAccountingBaseline(session)
+
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onCall: func(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+			session.TokenCount += 100
+			return "initial response", nil
+		},
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			session.TokenCount += 100
+			return "working", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	if _, err := sendMessage(session, "start"); err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
+	}
+
+	updated, ok, err := runtimegoal.NewMetadataStore().Get(session.RuntimeSession)
+	if err != nil || !ok || updated == nil {
+		t.Fatalf("expected updated goal, ok=%v err=%v", ok, err)
+	}
+	if updated.Status != runtimegoal.StatusBudgetLimited {
+		t.Fatalf("expected budget_limited, got %s (used=%d budget=%d)", updated.Status, updated.TokensUsed, updated.TokenBudget)
+	}
+	if updated.TokensUsed < 250 {
+		t.Fatalf("expected accounted usage >= budget, got %d", updated.TokensUsed)
+	}
+	if executor.lastContinuationPrompt != goalBudgetWrapUpPrompt {
+		t.Fatalf("expected the wrap-up prompt as the last continuation, got %q", executor.lastContinuationPrompt)
+	}
+	// 2 轮正常续跑 + 1 轮预算收尾。
+	if executor.continuations != 3 {
+		t.Fatalf("expected 3 continuation calls (2 + wrap-up), got %d", executor.continuations)
+	}
+}
+
 func TestRequestAndConsumeGoalKickRunsContinuation(t *testing.T) {
 	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
 	defer cleanup()

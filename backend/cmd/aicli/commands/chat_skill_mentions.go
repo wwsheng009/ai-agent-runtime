@@ -937,7 +937,7 @@ func chatSkillMentionInteractiveTurn(session *ChatSession) bool {
 // Execute。这里做防御性识别，确保这些形态永不解析 mention。
 func chatSkillMentionSystemGeneratedPrompt(prompt string) bool {
 	trimmed := strings.TrimSpace(prompt)
-	return trimmed == "" || trimmed == goalAutoContinuationPrompt
+	return trimmed == "" || trimmed == goalAutoContinuationPrompt || trimmed == goalBudgetWrapUpPrompt
 }
 
 // skillMentionTurnEligible 是注入调用点的廉价短路：off/auto 非交互/提示中

@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,34 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 		return updateGoalStatusCommand(session, runtimegoal.StatusComplete, "Goal 已标记完成", "user", "")
 	}
 
+	if fields := strings.Fields(arg); len(fields) > 0 && strings.EqualFold(fields[0], "budget") {
+		rest := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
+		rest, jsonOutput := stripJSONOption(rest)
+		message, err := applyGoalBudgetCommand(session, rest)
+		if err != nil {
+			if jsonOutput {
+				fmt.Println(formatCommandError("错误: "+err.Error(), true))
+				return false
+			}
+			fmt.Printf("错误: %v\n", err)
+			return false
+		}
+		if jsonOutput {
+			goal, ok, goalErr := currentSessionGoal(session)
+			if goalErr != nil || !ok || goal == nil {
+				fmt.Println("当前会话未设置 goal")
+				return false
+			}
+			fmt.Println(marshalIndentedJSON(map[string]interface{}{"goal": goal}))
+			return false
+		}
+		fmt.Println(message)
+		if goal, ok, goalErr := currentSessionGoal(session); goalErr == nil && ok && goal != nil {
+			fmt.Println(formatGoalSummary(*goal))
+		}
+		return false
+	}
+
 	objective, jsonOutput := stripJSONOption(arg)
 	if jsonOutput {
 		fmt.Println(formatCommandError("错误: /goal --json 仅支持查看当前 goal", true))
@@ -59,6 +88,9 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
+	}
+	if goal.TokenBudget <= 0 && session.goalDefaultTokenBudget > 0 {
+		goal.TokenBudget = session.goalDefaultTokenBudget
 	}
 	store := runtimegoal.NewMetadataStore()
 	replaced := ""
@@ -77,6 +109,7 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
+	resetGoalAccountingBaseline(session)
 	fmt.Printf("Goal 已设置%s\n", replaced)
 	fmt.Println(formatGoalSummary(goal))
 	if err := sendGoalObjectiveRequest(session, objective); err != nil {
@@ -198,6 +231,57 @@ func updateGoalStatusCommand(session *ChatSession, status runtimegoal.Status, me
 
 func validateGoalStatusTransition(from runtimegoal.Status, to runtimegoal.Status) error {
 	return runtimegoal.ValidateStatusTransition(from, to)
+}
+
+// applyGoalBudgetCommand 处理 `/goal budget [n]`：查看 / 设置 / 清除当前 goal 的
+// token 预算（n=0 清除；正整数设置）。预算已耗尽（budget_limited）时把预算提高
+// 到超过已用会自动恢复为 active 并请求续跑（对齐 Codex 的"必须提高预算"语义）。
+func applyGoalBudgetCommand(session *ChatSession, arg string) (string, error) {
+	arg = strings.TrimSpace(arg)
+	if err := prepareGoalMutationPersist(session); err != nil {
+		return "", err
+	}
+	store := runtimegoal.NewMetadataStore()
+	goal, ok, err := store.Get(session.RuntimeSession)
+	if err != nil {
+		return "", err
+	}
+	if !ok || goal == nil {
+		return "", fmt.Errorf("当前会话未设置 goal")
+	}
+	if arg == "" {
+		if goal.TokenBudget > 0 {
+			return fmt.Sprintf("Token 预算: %d / %d（已用/预算）", goal.TokensUsed, goal.TokenBudget), nil
+		}
+		return "当前 goal 未设置 token 预算", nil
+	}
+	n, err := strconv.Atoi(arg)
+	if err != nil || n < 0 {
+		return "", fmt.Errorf("预算需要非负整数（0 表示清除），得到 %q", arg)
+	}
+	goal.TokenBudget = n
+	goal.UpdatedAt = time.Now()
+	message := fmt.Sprintf("Token 预算已设置: %d", n)
+	if n == 0 {
+		message = "Token 预算已清除"
+	}
+	reactivated := false
+	if n > 0 && goal.Status == runtimegoal.StatusBudgetLimited && n > goal.TokensUsed {
+		goal.Status = runtimegoal.StatusActive
+		message += "；预算已高于已用，目标已恢复为 active"
+		reactivated = true
+	}
+	updated, err := store.PutPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
+	if err != nil {
+		return "", err
+	}
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		return "", err
+	}
+	if reactivated {
+		requestGoalContinuationKick(session)
+	}
+	return message, nil
 }
 
 func currentSessionGoal(session *ChatSession) (*runtimegoal.SessionGoal, bool, error) {

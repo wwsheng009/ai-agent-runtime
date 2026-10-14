@@ -740,6 +740,30 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		case "pause", "resume", "complete":
 			return executeStructuredGoalStatusChange(session, strings.ToLower(arg))
 		}
+		if fields := strings.Fields(arg); len(fields) > 0 && strings.EqualFold(fields[0], "budget") {
+			rest := strings.TrimSpace(strings.TrimPrefix(arg, fields[0]))
+			if _, jsonOutput := stripJSONOption(rest); jsonOutput {
+				if unifiedDirectInteractiveOutput(session) {
+					return commandTextResult("提示: /goal --json 仅在非交互/脚本投影可用"), true, nil
+				}
+				return CommandResult{}, false, nil
+			}
+			message, err := applyGoalBudgetCommand(session, rest)
+			if err != nil {
+				return CommandResult{}, true, err
+			}
+			goal, ok, err := currentSessionGoal(session)
+			if err != nil {
+				return CommandResult{}, true, err
+			}
+			if !ok || goal == nil {
+				return CommandResult{}, true, fmt.Errorf("当前会话未设置 goal")
+			}
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: buildChatGoalMutationDocument(message, *goal)}},
+				Action: CommandContinue,
+			}, true, nil
+		}
 		objective, jsonOutput := stripJSONOption(arg)
 		if jsonOutput {
 			if unifiedDirectInteractiveOutput(session) {
@@ -1442,6 +1466,9 @@ func executeStructuredGoalSet(session *ChatSession, objective string) (CommandRe
 	if err != nil {
 		return CommandResult{}, true, err
 	}
+	if goal.TokenBudget <= 0 && session.goalDefaultTokenBudget > 0 {
+		goal.TokenBudget = session.goalDefaultTokenBudget
+	}
 	store := runtimegoal.NewMetadataStore()
 	replaced := ""
 	if existing, ok, err := store.Get(session.RuntimeSession); err != nil {
@@ -1457,6 +1484,7 @@ func executeStructuredGoalSet(session *ChatSession, objective string) (CommandRe
 	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
 		return CommandResult{}, true, err
 	}
+	resetGoalAccountingBaseline(session)
 	return CommandResult{
 		Blocks:        []RenderBlock{{Document: buildChatGoalSetDocument(replaced, &goal)}},
 		Action:        CommandContinue,

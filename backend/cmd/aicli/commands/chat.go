@@ -81,6 +81,12 @@ type ChatSession struct {
 	goalKickPending                   atomic.Bool
 	goalKickWatchActive               atomic.Bool
 	goalContinuationUnavailableWarned atomic.Bool
+	// goalDefaultTokenBudget 是新建 goal 的默认 token 预算（0=无预算），来自
+	// runtime.yaml 的 goal.defaultTokenBudget；goalAccountingGoalID/…Tokens 是
+	// 自动续跑的记账基线（同一 goal 的会话累计 token 增量，见 M3 方案 §5.5）。
+	goalDefaultTokenBudget int
+	goalAccountingGoalID   string
+	goalAccountedTokens    int
 
 	RequestedProvider        string
 	EffectiveProvider        string

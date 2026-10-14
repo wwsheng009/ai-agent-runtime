@@ -532,6 +532,15 @@ func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *C
 }
 
 func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (execOut string, execErr error) {
+	return e.continueGoalWithPrompt(ctx, session, goalAutoContinuationPrompt)
+}
+
+// ContinueGoalWithPrompt 用显式提示词执行一次隐藏续跑（预算耗尽后的收尾轮）。
+func (e *aicliRuntimeServerChatExecutor) ContinueGoalWithPrompt(ctx context.Context, session *ChatSession, prompt string) (execOut string, execErr error) {
+	return e.continueGoalWithPrompt(ctx, session, prompt)
+}
+
+func (e *aicliRuntimeServerChatExecutor) continueGoalWithPrompt(ctx context.Context, session *ChatSession, prompt string) (execOut string, execErr error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
@@ -545,7 +554,7 @@ func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, sessi
 	// gateway：同一处边界驱动 attention（completed/error）。
 	releaseMeshTurn := beginChatMeshTurn(session)
 	defer func() { releaseMeshTurn(execErr) }()
-	output, result, err := e.executeRuntimeContinuation(ctx, session)
+	output, result, err := e.executeRuntimeContinuation(ctx, session, prompt)
 	if err != nil {
 		return "", err
 	}
@@ -764,7 +773,7 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 	return output, commandResp.Result, nil
 }
 
-func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.Context, session *ChatSession) (string, map[string]interface{}, error) {
+func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.Context, session *ChatSession, prompt string) (string, map[string]interface{}, error) {
 	sessionID, err := ensureRuntimeServerSessionID(session)
 	if err != nil {
 		return "", nil, err
@@ -802,7 +811,7 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.
 		defer bridge.EndRun()
 	}
 
-	commandResp, statusCode, err := e.submitRuntimeServerContinue(ctx, session, sessionID)
+	commandResp, statusCode, err := e.submitRuntimeServerContinue(ctx, session, sessionID, prompt)
 	if err != nil {
 		return "", nil, err
 	}
@@ -965,10 +974,10 @@ func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerPrompt(ctx context.C
 	return &decoded, statusCode, nil
 }
 
-func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerContinue(ctx context.Context, session *ChatSession, sessionID string) (*runtimeServerRuntimeCommandResponse, int, error) {
+func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerContinue(ctx context.Context, session *ChatSession, sessionID, prompt string) (*runtimeServerRuntimeCommandResponse, int, error) {
 	payload := map[string]interface{}{
 		"type":                  "continue",
-		"prompt":                goalAutoContinuationPrompt,
+		"prompt":                prompt,
 		"continuation_metadata": map[string]interface{}{goalContinuationMetadataKey: true},
 		"strip_metadata_keys":   []string{goalContinuationMetadataKey},
 	}

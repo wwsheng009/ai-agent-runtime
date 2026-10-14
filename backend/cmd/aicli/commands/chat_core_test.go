@@ -47,6 +47,8 @@ type fakeChatExecutor struct {
 	err           error
 	onCall        func(ctx context.Context, session *ChatSession, prompt string) (string, error)
 	onContinue    func(ctx context.Context, session *ChatSession) (string, error)
+	// lastContinuationPrompt 记录最近一次续跑使用的提示词（含预算收尾轮）。
+	lastContinuationPrompt string
 }
 
 type recordingProtocolAdapter struct {
@@ -75,9 +77,14 @@ func (f *fakeChatExecutor) ToolAvailable(session *ChatSession, toolName string) 
 }
 
 func (f *fakeChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
+	return f.ContinueGoalWithPrompt(ctx, session, goalAutoContinuationPrompt)
+}
+
+func (f *fakeChatExecutor) ContinueGoalWithPrompt(ctx context.Context, session *ChatSession, prompt string) (string, error) {
 	f.continued = true
 	f.continuations++
 	f.session = session
+	f.lastContinuationPrompt = prompt
 	if f.onContinue != nil {
 		return f.onContinue(ctx, session)
 	}

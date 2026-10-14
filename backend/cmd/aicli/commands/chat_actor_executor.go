@@ -362,6 +362,15 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 }
 
 func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (execOut string, execErr error) {
+	return e.continueGoalWithPrompt(ctx, session, goalAutoContinuationPrompt)
+}
+
+// ContinueGoalWithPrompt 用显式提示词执行一次隐藏续跑（预算耗尽后的收尾轮）。
+func (e *aicliActorChatExecutor) ContinueGoalWithPrompt(ctx context.Context, session *ChatSession, prompt string) (execOut string, execErr error) {
+	return e.continueGoalWithPrompt(ctx, session, prompt)
+}
+
+func (e *aicliActorChatExecutor) continueGoalWithPrompt(ctx context.Context, session *ChatSession, prompt string) (execOut string, execErr error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
@@ -412,7 +421,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 		ctx = runtimellm.WithHTTPDebugReporter(ctx, reporter)
 	}
 	result, err := continueAICLIActorWhenReady(withLivePermissionModeSource(ctx, session), actor, currentRunMetaForSession(session), runtimechat.ContinueOption{
-		ContinuationPrompt: goalAutoContinuationPrompt,
+		ContinuationPrompt: prompt,
 		ContinuationMetadata: map[string]interface{}{
 			goalContinuationMetadataKey: true,
 		},

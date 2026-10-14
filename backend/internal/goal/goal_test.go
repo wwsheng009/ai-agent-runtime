@@ -44,6 +44,7 @@ func TestValidateStatusTransitionBlocked(t *testing.T) {
 		ok   bool
 	}{
 		{StatusActive, StatusBlocked, true},
+		{StatusActive, StatusBudgetLimited, true},
 		{StatusBlocked, StatusActive, true},
 		{StatusBlocked, StatusComplete, true},
 		{StatusBlocked, StatusBlocked, true},
@@ -83,6 +84,41 @@ func TestGoalMergePolicyModelCannotCompleteBlockedGoal(t *testing.T) {
 	got, err := decode(merged)
 	if err != nil || got.Status != StatusComplete {
 		t.Fatalf("expected merged complete status, got %+v err=%v", got, err)
+	}
+}
+
+func TestGoalMergePolicyBudgetLimitedReactivationOnlyWithRaisedBudget(t *testing.T) {
+	t.Parallel()
+
+	limited := SessionGoal{
+		GoalID:      "goal-1",
+		SessionID:   "session-1",
+		Objective:   "budgeted objective",
+		Status:      StatusBudgetLimited,
+		TokenBudget: 100,
+		TokensUsed:  150,
+	}
+	reactivate := limited
+	reactivate.Status = StatusActive
+
+	policy := GoalMergePolicy{Actor: MutationUser}
+	merged, err := policy.MergeContextValue(MetadataKey, limited, reactivate)
+	if err != nil {
+		t.Fatalf("merge without raised budget should not error, got %v", err)
+	}
+	got, err := decode(merged)
+	if err != nil || got.Status != StatusBudgetLimited {
+		t.Fatalf("without raised budget the goal must stay budget_limited, got %+v err=%v", got, err)
+	}
+
+	reactivate.TokenBudget = 200
+	merged, err = policy.MergeContextValue(MetadataKey, limited, reactivate)
+	if err != nil {
+		t.Fatalf("merge with raised budget failed: %v", err)
+	}
+	got, err = decode(merged)
+	if err != nil || got.Status != StatusActive {
+		t.Fatalf("raised budget must allow reactivation, got %+v err=%v", got, err)
 	}
 }
 

@@ -321,6 +321,16 @@ goal:
 - **受控偏差（保留并记录）**：真实错误采用 **3 连 → blocked**（Codex main 为立即 blocked）——保留瞬态故障容忍；后续可评估收紧。
 - **测试**：commands 13 项定向全绿（含 `BlocksAfterThreeNoProgressRounds`、`NoProgressStrikesResetOnToolActivity`、`GoalStatusSegmentShowsBlocked`，错误 3 连用例改断言 blocked）；`internal/goal` 全绿（转换矩阵 + merge 守卫 + update_goal 拒绝 blocked）；全量命令包仅外部 `/tools` catalog 用例失败（预先存在）；`run-conpty-goal-e2e.ps1` **10/10**。
 
+### M3（P2，2026-10-15 完成，待提交）
+
+- **token 记账**：`accountActiveGoalTurnUsage` 按 goal id 维护会话 token 增量基线（restore 覆写后重锚，避免负增量丢记账），增量经 `MutationSystem` 落 `TokensUsed`；仅在 active / budget_limited 窗口累计。
+- **预算来源**：`goal.defaultTokenBudget` 配置（新建 goal 缺省注入）+ 新增 `/goal budget [n]` 命令（查看 / 设置 / 清除，`n=0` 清除）；legacy 与结构化两条路径 + `--json` 兼容。
+- **`budget_limited` 与收尾轮**：预算耗尽 → `markActiveGoalBudgetLimited`（系统写）+ `ContinueGoalWithPrompt(goalBudgetWrapUpPrompt)`（对齐 `budget_limit.md`：不再开新工作，只收尾给出下一步）+ 可见提示；`aicliGoalContinuationExecutor` 扩展 `ContinueGoalWithPrompt`（actor / shared / runtime-server 三实现 + fake）。
+- **停止语义**：入口记账与每轮记账后均检查；恢复已超预算的目标立即收敛（不再空跑一轮）。
+- **merge 守卫**：`budget_limited → active` 仅在预算已提高到超过已用时允许（对齐 Codex"必须提高预算"）；`/goal resume` 未提高预算时不复活。
+- **测试**：`TestSendMessage_AccountsGoalUsageAndStopsAtBudget`（每轮 100 / 预算 250 → 2 轮正常 + 1 轮收尾、断言 wrap-up 提示词与 budget_limited）、预算命令三态（设置 / 未提高预算 resume 不复活 / 提高后恢复 / 清除）、非法与缺 goal、goal 包 merge 守卫矩阵；`run-conpty-goal-e2e.ps1` 扩展预算命令场景 → **11/11**。
+- **回归**：`internal/goal`、`internal/config`、全量命令包（仅外部 `/tools` catalog 用例失败，预先存在）。
+
 ---
 
 ## 附录 A：Codex main 关键证据索引

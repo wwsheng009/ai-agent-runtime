@@ -56,11 +56,12 @@ $roundsFile = Join-Path $runRoot 'rounds.txt'
 $stdoutLog = Join-Path $runRoot 'stdout.log'
 $stderrLog = Join-Path $runRoot 'stderr.log'
 
-# 多轮脚本：设置目标（要求模型完成后调用 update_goal）→ 状态 → 终态下 pause
-# （应被状态机拒绝并给出精确原因）→ clear → 状态（应为空）。
+# 多轮脚本：设置目标（要求模型完成后调用 update_goal）→ 状态 → 预算命令 →
+# 终态下 pause（应被状态机拒绝并给出精确原因）→ clear → 状态（应为空）。
 $rounds = @(
   '/goal 只读核验：读取仓库根目录 VERSION 文件内容；核实后必须调用 update_goal 标记完成，summary 给出内容。',
   '/goal status',
+  '/goal budget 50000',
   '/goal pause',
   '/goal clear',
   '/goal status'
@@ -139,6 +140,7 @@ Assert-That 'events 含 goal 命令文档 (>=4 条)' ($commands.Count -ge 4) "co
 Assert-That '目标已设置且为 active' ($setCommand.Contains('Goal 已设置') -and $setCommand.Contains('Goal: active')) ($setCommand -replace "`n", ' | ')
 Assert-That '状态查询确认 complete' ((Test-RunContains 'Goal: complete') -or (Test-RunContains '"completed_by": "model"')) '期望模型在首轮完成并调用 update_goal'
 Assert-That 'complete 终态 pause 被拒绝（精确原因）' (Test-RunContains 'goal 已完成') '状态机守卫 + typed error 回归'
+Assert-That 'token 预算命令生效' (Test-RunContains 'Token 预算已设置: 50000') '/goal budget <n>（M3：预算设置/清除命令）'
 Assert-That '目标已清除' (Test-RunContains 'Goal 已清除') ''
 Assert-That '清除后状态为空' (Test-RunContains '当前会话未设置 goal') ''
 Assert-That '自动续跑有决策日志' ($debugText.Contains('[goal] auto continuation') -or $debugText.Contains('[goal] error recovery')) 'debug.log 的 [goal] 行（成功收尾=auto continuation；EOF 类收尾=error recovery，两者都会带 reason=goal_complete）'

@@ -82,6 +82,9 @@ func (d aicliRuntimeExecutorDescriptor) unifiedActorRuntime() bool {
 
 type aicliGoalContinuationExecutor interface {
 	ContinueGoal(ctx context.Context, session *ChatSession) (string, error)
+	// ContinueGoalWithPrompt 与 ContinueGoal 相同，但用显式提示词覆盖默认续跑
+	// 提示（预算耗尽后的收尾轮使用，对齐 Codex budget_limit steering）。
+	ContinueGoalWithPrompt(ctx context.Context, session *ChatSession, prompt string) (string, error)
 }
 
 // aicliRuntimeInterruptExecutor 是 aicliChatExecutor 的可选扩展接口：
@@ -172,7 +175,11 @@ func (e *aicliSharedChatExecutor) Execute(ctx context.Context, session *ChatSess
 }
 
 func (e *aicliSharedChatExecutor) ContinueGoal(ctx context.Context, session *ChatSession) (string, error) {
-	return e.execute(ctx, session, "", sharedChatExecuteOptions{ContinuationPrompt: goalAutoContinuationPrompt})
+	return e.ContinueGoalWithPrompt(ctx, session, goalAutoContinuationPrompt)
+}
+
+func (e *aicliSharedChatExecutor) ContinueGoalWithPrompt(ctx context.Context, session *ChatSession, prompt string) (string, error) {
+	return e.execute(ctx, session, "", sharedChatExecuteOptions{ContinuationPrompt: prompt})
 }
 
 func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSession, prompt string, opts sharedChatExecuteOptions) (execOut string, execErr error) {
