@@ -52,10 +52,10 @@
 | 交付物 | 状态 | 位置 |
 |--------|------|------|
 | 连接器核心 | ✅ 完成 | `backend/internal/connectors/{types,store,queue,throttle,service}.go`：Provider/Backend 两层契约、内存 Store（配置/绑定/去重账本/轮询游标）、每会话串行有界队列（满则 `ErrQueueFull`，跨会话并行）、流式节流（≥800ms 且内容变化）、命令 `/help` `/new` `/status`、失败回执 |
-| Telegram 适配器 | ◐ polling 完整 | `internal/connectors/providers/telegram`：`getMe` 激活、`sendMessage`、`getUpdates` 长轮询（游标 `update_offset` 持久化 + 指数退避）、`sendChatAction` typing 保活、占位消息 + `editMessageText` 流式编辑；`api_base` 配置项（默认 `https://api.telegram.org`，可指向自建 Bot API 服务器/测试替身，按连接器生效）；错误文本脱敏 `bot_token`（`client.Do` 的 URL 内嵌）；Schema 仅声明已实现的 `polling`（webhook 待 `HandleWebhook`/`setWebhook` 实现后加回，旧 `mode=webhook` 配置不报错、仅不轮询）；宿主 webhook 入口已就绪，Provider 侧 `HandleWebhook` 解析待 P1 |
+| Telegram 适配器 | ✅ 双模式完整 | `internal/connectors/providers/telegram`：`getMe` 激活、`sendMessage`、`getUpdates` 长轮询（游标 `update_offset` 持久化 + 指数退避）、`sendChatAction` typing 保活、占位消息 + `editMessageText` 流式编辑；**webhook 双模式 ✅（2026-10-14 核实补记）**：`setWebhook`（secret_token 仅在配置时下发）+ `deleteWebhook` + `HandleWebhook`（`X-Telegram-Bot-Api-Secret-Token` 常量时间校验、update 解析、非文本忽略、坏请求 400），Schema 恢复双模式声明；`api_base` 配置项（默认 `https://api.telegram.org`，可指向自建 Bot API 服务器/测试替身，按连接器生效）；错误文本脱敏 `bot_token`；测试覆盖 webhook 五例 |
 | 端到端（假后端） | ✅ 完成 | `service_test.go`（12 例：绑定/去重/白名单/命令/节流/队列/失败路径）+ `telegram_test.go`（8 例，`httptest` 假 Bot API：解析/游标/重试/typing/流式）；`go build ./...`、`go vet`、`go test -race` 全绿 |
 | 管理面 REST（三端共用） | ✅ 完成 | `internal/connectors/restapi`：`/connectors*` 增删改查 + schema + 测试消息 + reload；`/hooks/connectors/{id}` 公网入口（`WebhookProvider` 能力探测，签名失败 400/队列满 429/未知 404）；密钥只写不读、留空=保持、`__clear__`=清除；`Authorize` 未接线整体 403；restapi_test 12 例 |
-| 宿主接线 | ◐ runtime-server + aicli 完成 | runtime-server：`cmd/runtime-server/connector_bootstrap.go`（Backend 走进程内 `runtimeapi.SubmitConnectorPrompt`，管理面复用 skills 鉴权口径，随宿主 `close()` 停机）。aicli：`cmd/aicli/commands/connector_host.go`（`StartLocalConnectors`/`MountLocalConnectorRoutes`，交互式会话装配、随 chat cleanup 停机；Backend 走 `localActorRegistry.SubmitPrompt`，无绑定按 `conn-<connector>-<chat>` 自动建会话；路由挂在 loopback 同一 mux，沿用 `ChatWebAuthGuard`）。两端共享 `config.yaml` 的 `connectors:` 节（storefile：YAML Node 往返 + 原子写，密钥 `connectors.secrets.yaml`(0600)）与 `state.json`（目录随 `configPath` 同源推导）。**审查修复（2026-10-13）**：轮询/异步任务与请求 ctx 解耦（`Service` 持宿主基 ctx）、去重键含 chat、队列关闭竞态与轮询代际登记修复、白名单 fail-closed（aicli `RequireAllowedUsers` 强制 / runtime-server 仅告警）、IM 轮次统一显式 `bypass_permissions`、环回判定不再无条件信任 `X-Forwarded-For`。**待续**：gateway 宿主。**运行归属（2026-10-12，P1 切片）**：`runtime_owner` 抢占 + 跨进程数据目录锁完成——`state.json` 增 `owners: {owner, heartbeat_at, pid}`（旧文件兼容），storefile 认领在 `<stateDir>/connectors.lock` 目录锁内完成「读旧值 → 判存活 → 写新值」；`Service` 归属闸（`Deps.HostID`、90s 陈旧接管、30s 心跳，aicli/runtime-server 已接线）、停机与轮询退出释放；REST 视图 `active_owner`/`owned_by_current_host` + `POST /connectors/{id}/takeover`（见 03 §7 / 07 §5.6） |
+| 宿主接线 | ✅ 三宿主完成 | runtime-server：`cmd/runtime-server/connector_bootstrap.go`（Backend 走进程内 `runtimeapi.SubmitConnectorPrompt`，管理面复用 skills 鉴权口径，随宿主 `close()` 停机）。aicli：`cmd/aicli/commands/connector_host.go`（`StartLocalConnectors`/`MountLocalConnectorRoutes`，交互式会话装配、随 chat cleanup 停机；Backend 走 `localActorRegistry.SubmitPrompt`，无绑定按 `conn-<connector>-<chat>` 自动建会话；路由挂在 loopback 同一 mux，沿用 `ChatWebAuthGuard`）。gateway：`cmd/gateway/connector_{bootstrap,backend}.go`（Backend=gateway_node 经隧道转发节点 `/web/api/invoke`；D5 注意力投影 hook；命令闭环 2026-10-14 补齐）。两端共享 `config.yaml` 的 `connectors:` 节（storefile：YAML Node 往返 + 原子写，密钥 `connectors.secrets.yaml`(0600)）与 `state.json`（D1 CanonicalStatePath 统一锚定）。**审查修复（2026-10-13）**：轮询/异步任务与请求 ctx 解耦（`Service` 持宿主基 ctx）、去重键含 chat、队列关闭竞态与轮询代际登记修复、白名单 fail-closed（aicli `RequireAllowedUsers` 强制 / runtime-server 仅告警）、IM 轮次统一显式 `bypass_permissions`、环回判定不再无条件信任 `X-Forwarded-For`。**运行归属（2026-10-12，P1 切片）**：`runtime_owner` 抢占 + 跨进程数据目录锁完成——`state.json` 增 `owners: {owner, heartbeat_at, pid}`（旧文件兼容），storefile 认领在 `<stateDir>/connectors.lock` 目录锁内完成「读旧值 → 判存活 → 写新值」；`Service` 归属闸（`Deps.HostID`、90s 陈旧接管、30s 心跳，三宿主接线）、停机与轮询退出释放；REST 视图 `active_owner`/`owned_by_current_host` + `POST /connectors/{id}/takeover`（见 03 §7 / 07 §5.6）。**P2 切片 A（2026-10-14）**：宿主身份实例唯一化（`aicli:<mesh-node-id>`）+ policy 匹配按 HostKind |
 | React 配置页（runtime-server） | ✅ 完成 | `frontend/src/pages/connectors-page.tsx`（路由 `/runtime/connectors`，懒加载）：列表 + 启停/编辑/测试消息/重载/删除 + 新建；`pages/connectors/{connector-dialog,test-message-dialog}.tsx` + `shared.ts`（纯逻辑），表单由 `GET /connectors/schema` 驱动（text/secret/bool/enum/url），密钥留空=保持、`__clear__`=清除，客户端预校验与字段级错误回填；`api/runtime/connectors.ts` + `types/runtime/connectors.ts`；i18n `connectors` 命名空间（zh-CN/en-US）；api/shared/dialog 单测 15 例 |
 | 端到端（假 Bot API，重启续传） | ✅ 完成 | `internal/connectors/e2e_restart_test.go`：httptest 假 Bot API（**总是重投同一 update**，模拟 at-least-once）+ Service + storefile 文件态；首轮处理 → 占位 + `editMessageText` 回执，游标 `update_offset` 落盘；重建 Store/Service/Provider = 进程内重启，首次 getUpdates 续传 offset，重投消息被持久化去重账本拦截（不二次处理/不二次回复）；`go test -race` 全绿。真实 token 联通为手动步骤（`api_base` 可指向任意 Bot API 端点） |
 
@@ -205,16 +205,20 @@
 ## 6. 验收清单（汇总）
 
 - [ ] P0：Telegram（webhook + polling）↔ runtime-server 端到端；重启续传不重复。
-  （◐ 通道核心 + polling + runtime-server 宿主接线 + React 配置页已就绪；「重启续传不重复」已有自动化 e2e
+  （◐ 通道核心 + **双模式（polling + webhook，2026-10-14 核实）** + runtime-server 宿主接线 + React 配置页已就绪；「重启续传不重复」已有自动化 e2e
   （假 Bot API 重投 + storefile 文件态，`internal/connectors/e2e_restart_test.go`）；aicli 宿主接线已落地
   （`cmd/aicli/commands/connector_host.go`）；真实 token 联通验证待续）
-  - [ ] P1：飞书 ↔ gateway → 节点会话端到端；审批/提问命令闭环（runtime-server/aicli 已接，gateway 待接）；完成提醒送达且与 Web Push/ntfy 去重（runtime-server IM 出站已接、进程内事件级去重，跨通道去重待 notify.Dispatcher）。
-  （◐ gateway 宿主接线已落地：storejson 存储 + `Backend=gateway_node`（经隧道
+  - [x] P1（2026-10-14 补记）：飞书 webhook ↔ gateway ✓；审批/提问命令闭环**三宿主已接**（runtime-server/aicli ✓，gateway 2026-10-14 补齐——`DecideApproval`/`AnswerQuestion` 经隧道转发）；完成提醒送达 IM ✓（runtime-server/aicli/gateway 三宿主注意力出站；进程内事件级去重 ✓，跨通道去重待 notify.Dispatcher）。
+  （gateway 宿主接线已落地：storejson 存储 + `Backend=gateway_node`（经隧道
   `POST /web/api/invoke`）+ `/api/connectors*`（owner）/`/hooks/connectors/*`
   （Provider 验签）+ console `#connectors` 最小列表页；「飞书 ↔ gateway → 节点会话」
   与审批/提醒闭环的真实联通验证待续）
-- [ ] P2：aicli 本地 Telegram/QQ 端到端；配置在三宿主间可迁移；未配置连接器时回归全绿。
+- [x] P2（2026-10-14 补记）：aicli 本地接入 ✓（提前至 P0）；**mesh 派发四切片完成**——
+  宿主身份实例唯一化（A）+ turn 派发端点/R1-R3 路由决策（B）+ R2a 接管语义（C）+
+  scope=all 跨宿主注意力扇出（D）；`runner_preference` 配置键 + 选举器；实现地图 #8/#9/#10 全收口
+  （N6/N7/N8 测试覆盖；见 09 §9 实施地图逐行状态）。配置在三宿主间可迁移（共享 config.yaml + D1 统一 state）；未配置连接器时回归全绿。
 - [ ] P3：微信扫码登录 + 文本/图片/语音；IM 通道可开关/静音。
+  （◐ 扫码登录 + 文本收发已落地（切片 2b）；图片/语音媒体链路待续）
 - [ ] 通用性：新增一个通道（假 provider）只需改核心，三端前端零改动。
 - [ ] 安全：签名校验、白名单、密钥不回流三项有单测/端到端证据。
 - [ ] 可观测：每连接器状态/计数/最近错误/测试消息在两端 UI 可见。
