@@ -58,6 +58,8 @@ export interface ConnectorPolicyView {
   session_mode?: string;
   reply_mode?: string;
   runtime_owner?: string;
+  /** D5 事件通知接收；缺省（未配置）= 不收跨会话事件（additive）。 */
+  notify?: ConnectorNotifyPolicyView;
 }
 
 /** 连接器运行日志级别（后端 logs.go LogLevel*；未知值原样保留，渲染器降级）。 */
@@ -136,6 +138,32 @@ export interface ConnectorView {
    * 缺失时页面不展示计数（日志明细走 GET /{id}/logs）。
    */
   runtime?: ConnectorRuntimeView;
+}
+
+/**
+ * 连接器 ↔ 会话绑定（docs/bots/09-multi-instance-binding.md §5.2）。
+ * connector 摘要供 UI 直接渲染；additive：旧后端可缺省。
+ */
+export interface ConnectorBindingView {
+  connector_id: string;
+  chat: string;
+  session_id: string;
+  node_id?: string;
+  updated_at?: string;
+  connector?: {
+    id: string;
+    name: string;
+    provider: string;
+    enabled: boolean;
+    active_owner?: string;
+  };
+}
+
+/** 连接器策略里的事件通知接收配置（docs/bots/09 §7.4.1 D5）。 */
+export interface ConnectorNotifyPolicyView {
+  enabled: boolean;
+  kinds?: string[];
+  scope?: string;
 }
 
 export interface ConnectorFieldError {

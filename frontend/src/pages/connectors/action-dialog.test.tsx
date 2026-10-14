@@ -288,7 +288,7 @@ describe("ConnectorActionDialog", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("qr_code_content 非图片时展示文本并提供「复制链接」", async () => {
+  it("qr_code_content 是链接时本地编码成二维码，并展示原文与「复制链接」", async () => {
     startResponse = statusPayload("wait", {
       qr_code_content: "https://ilink.example/login/abc123",
     });
@@ -307,7 +307,10 @@ describe("ConnectorActionDialog", () => {
       />,
     );
 
-    expect(document.querySelector("img")).toBeNull();
+    // 链接不是图片源：本地编码成二维码（SVG data URI），而不是把链接塞进 <img>。
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")?.startsWith("data:image/svg+xml")).toBe(true);
+    // 原文仍可查看/复制。
     expect(document.body.textContent).toContain("https://ilink.example/login/abc123");
 
     await act(async () => {

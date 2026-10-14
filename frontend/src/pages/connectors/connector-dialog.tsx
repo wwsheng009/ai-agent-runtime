@@ -4,9 +4,10 @@
 // bool→复选框、enum→下拉、number→数字框；未知类型降级为文本框并展示原始 key。
 // 表单状态与提交体构造在 ./shared.ts（含密钥「留空=不改 / __clear__=清除」单测）。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { createConnector, deleteConnector } from "@/api/runtime/connectors";
 import type {
   ConnectorFieldError,
   ConnectorFieldSchema,
@@ -16,21 +17,27 @@ import type {
 } from "@/types/runtime";
 
 import { Button } from "@/components/ui/button";
-import { CheckboxInput } from "@/components/ui/checkbox";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
+import { readAdminToken } from "@/lib/admin-token";
 import { cn } from "@/lib/utils";
 
+import { FieldControl } from "./field-control";
+import { RescanSection } from "./rescan-section";
 import {
   buildSubmitPayload,
   createEmptyForm,
+  ensureCreateId,
   findProviderSchema,
+  findQRAction,
   formFromConnector,
+  generateConnectorId,
   hasModeField,
   switchProvider,
   validateConnectorForm,
   type ConnectorFormError,
   type ConnectorFormState,
 } from "./shared";
+import { ConnectorLoginPanel } from "./login-panel";
 
 const inputClassName =
   "h-9 w-full rounded-control border border-border bg-surface-soft px-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-accent-primary disabled:opacity-60";
@@ -44,6 +51,8 @@ interface ConnectorDialogProps {
   serverError: string | null;
   serverFieldErrors: ConnectorFieldError[];
   onSubmit: (payload: ConnectorSubmitPayload) => void;
+  /** 扫码新建/凭据回填后回调（父页刷新列表）。 */
+  onChanged?: () => void;
   onClose: () => void;
 }
 
@@ -55,45 +64,80 @@ export function ConnectorDialog({
   serverError,
   serverFieldErrors,
   onSubmit,
+  onChanged,
   onClose,
 }: ConnectorDialogProps) {
   const { t } = useTranslation("connectors");
+  const adminToken = readAdminToken();
   const isCreate = existing === null;
   const [form, setForm] = useState<ConnectorFormState>(() =>
     existing
       ? formFromConnector(existing, findProviderSchema(schema, existing.provider))
-      : createEmptyForm(schema),
+      : ensureCreateId(createEmptyForm(schema), schema),
   );
   const [errors, setErrors] = useState<ConnectorFormError[]>([]);
+  /** 扫码新建：连接器已就绪后内嵌登录面板；null=尚未开始扫码。 */
+  const [qrConnector, setQrConnector] = useState<ConnectorView | null>(null);
+  const [qrCreating, setQrCreating] = useState(false);
+  const [qrError, setQrError] = useState<string | null>(null);
+  const [qrBusy, setQrBusy] = useState(false);
+  /** 扫码是否已确认并回填（未确认时关闭对话框要清理草稿连接器）。 */
+  const [qrConfirmed, setQrConfirmed] = useState(false);
+  /**
+   * D4 两层模型（docs/bots/09 §6）：编辑态「重新扫码=替换凭据」的面板开关。
+   * 打开后对话框切换到内嵌登录面板，扫码确认只回填 secrets/settings，
+   * 实体 id/name/policy 与绑定**不变**。
+   */
+  const [rescanOpen, setRescanOpen] = useState(false);
 
+  /**
+   * 已初始化的 (open, existing) 组合。列表刷新会重建 schema 对象，仅凭 schema
+   * 身份变化不得重置表单/扫码态（否则扫码过程中会被打断）。
+   */
+  const resetKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (!open) {
+      resetKeyRef.current = null;
       return;
     }
+    const key = existing ? `edit:${existing.id}` : "create";
+    if (resetKeyRef.current === key) {
+      return;
+    }
+    resetKeyRef.current = key;
     setForm(
       existing
         ? formFromConnector(existing, findProviderSchema(schema, existing.provider))
-        : createEmptyForm(schema),
+        : ensureCreateId(createEmptyForm(schema), schema),
     );
     setErrors([]);
+    setQrConnector(null);
+    setQrCreating(false);
+    setQrError(null);
+    setQrBusy(false);
+    setQrConfirmed(false);
+    setRescanOpen(false);
   }, [open, existing, schema]);
 
   useEffect(() => {
     if (!open) {
       return;
     }
+    if (qrConnector || rescanOpen) {
+      return; // 内嵌登录面板自行处理 Escape（回填中拦截）
+    }
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") {
         return;
       }
-      if (saving) {
+      if (saving || qrBusy) {
         return; // 保存中与遮罩/取消按钮一致：拦截关闭
       }
       onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, saving, onClose]);
+  }, [open, saving, qrBusy, qrConnector, rescanOpen, onClose]);
 
   if (!open) {
     return null;
@@ -101,6 +145,11 @@ export function ConnectorDialog({
 
   const providerSchema = findProviderSchema(schema, form.provider);
   const modeFieldPresent = hasModeField(providerSchema);
+  const qrAction = findQRAction(providerSchema);
+  /** 新建 + 通道支持扫码：走「扫码即得凭据」的简单路径。 */
+  const scanMode = isCreate && qrAction !== null;
+  /** 编辑 + 通道支持扫码：提供「重新扫码=替换凭据」（D4 两层模型）。 */
+  const rescanAvailable = !isCreate && qrAction !== null && existing !== null;
   const fieldError = (key: string) => {
     const local = errors.find((item) => item.key === key)?.code;
     if (local === "required") {
@@ -150,100 +199,126 @@ export function ConnectorDialog({
     onSubmit(buildSubmitPayload(form, providerSchema, { isCreate }));
   };
 
-  const renderControl = (field: ConnectorFieldSchema) => {
-    const value = form.values[field.key] ?? "";
-    if (field.type === "secret") {
-      const cleared = form.clearedSecrets[field.key] === true;
-      const configured = (existing?.secret_keys ?? []).includes(field.key);
-      return (
-        <div className="flex flex-col gap-1.5">
-          <input
-            type="password"
-            autoComplete="new-password"
-            aria-label={field.label}
-            className={inputClassName}
-            placeholder={
-              field.placeholder ??
-              (configured ? t("dialog.secretConfigured") : undefined)
-            }
-            value={cleared ? "" : value}
-            disabled={cleared}
-            onChange={(event) => updateValue(field.key, event.target.value)}
-          />
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            {configured && !cleared ? (
-              <span>{t("dialog.secretConfigured")}</span>
-            ) : null}
-            <label className="inline-flex items-center gap-1.5">
-              <CheckboxInput
-                checked={cleared}
-                aria-label={t("dialog.secretClear")}
-                onChange={(event) =>
-                  toggleClearSecret(field.key, event.target.checked)
-                }
-              />
-              {t("dialog.secretClear")}
-            </label>
-          </div>
-        </div>
-      );
+  /**
+   * 扫码登录：先按当前表单创建连接器（ID 缺失时自动生成、基址用 Schema 默认值），
+   * 随后在对话框内嵌 ConnectorLoginPanel 展示二维码并轮询，扫码确认后凭据自动回填。
+   */
+  const handleStartScan = async () => {
+    if (!providerSchema || !qrAction) {
+      return;
     }
-    if (field.type === "bool") {
-      return (
-        <label className="inline-flex items-center gap-2 text-sm text-foreground">
-          <CheckboxInput
-            checked={value === "true"}
-            aria-label={field.label}
-            onChange={(event) =>
-              updateValue(field.key, event.target.checked ? "true" : "false")
-            }
-          />
-          {field.help ?? field.label}
-        </label>
-      );
-    }
-    if (field.type === "enum") {
-      return (
-        <select
-          aria-label={field.label}
-          className={inputClassName}
-          value={value}
-          onChange={(event) => updateValue(field.key, event.target.value)}
-        >
-          <option value="">{t("dialog.optionUnset")}</option>
-          {(field.options ?? []).map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      );
-    }
-    return (
-      <div className="flex flex-col gap-1">
-        <input
-          type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
-          aria-label={field.label}
-          className={inputClassName}
-          placeholder={field.placeholder}
-          value={value}
-          onChange={(event) => updateValue(field.key, event.target.value)}
-        />
-        {field.type !== "text" && field.type !== "url" && field.type !== "number" ? (
-          <span className="text-xs text-muted-foreground">{field.type}</span>
-        ) : null}
-      </div>
+    const id = form.id.trim() || generateConnectorId(providerSchema.provider);
+    const payload = buildSubmitPayload(
+      { ...form, id },
+      providerSchema,
+      { isCreate: true },
     );
+    setQrCreating(true);
+    setQrError(null);
+    try {
+      const view = await createConnector(payload, { adminToken });
+      setQrConnector(view);
+    } catch (caught) {
+      setQrError(caught instanceof Error ? caught.message : String(caught));
+      setQrCreating(false);
+    }
   };
 
+  /** 扫码确认并回填：标记已确认（关闭时不再清理）并刷新列表。 */
+  const handleQrRefilled = () => {
+    setQrConfirmed(true);
+    onChanged?.();
+  };
+
+  /** 关闭对话框：未确认的扫码草稿连接器先清理，避免留下不可用的空连接器。 */
+  const handleClose = () => {
+    if (qrConnector && !qrConfirmed) {
+      void deleteConnector(qrConnector.id, { adminToken })
+        .then(() => onChanged?.())
+        .catch(() => undefined);
+    }
+    onClose();
+  };
+
+  /** D4：重新扫码回填凭据（实体不变）→ 回编辑表单；关闭同理，无草稿清理。 */
+  const handleRescanRefilled = () => {
+    setQrConfirmed(true);
+    setRescanOpen(false);
+    onChanged?.();
+  };
+  const handleRescanClose = () => {
+    setRescanOpen(false);
+    setQrBusy(false);
+    onChanged?.();
+  };
+
+  /** Schema 字段 → 控件（映射实现见 ./field-control.tsx）。 */
+  const renderControl = (field: ConnectorFieldSchema) => (
+    <FieldControl
+      field={field}
+      value={form.values[field.key] ?? ""}
+      cleared={form.clearedSecrets[field.key] === true}
+      configured={(existing?.secret_keys ?? []).includes(field.key)}
+      onValueChange={updateValue}
+      onClearToggle={toggleClearSecret}
+    />
+  );
+
+  /** Schema 字段列表（凭据区 / 扫码高级设置两处共用）。 */
+  const renderFieldList = () =>
+    (providerSchema?.fields ?? []).map((field) => (
+      <div key={field.key} className="flex flex-col gap-1">
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          <span>
+            {field.label}
+            {field.required ? <span className="text-accent-orange"> *</span> : null}
+          </span>
+          {renderControl(field)}
+        </label>
+        {field.help && field.type !== "bool" ? (
+          <span className="text-xs text-muted-foreground">{field.help}</span>
+        ) : null}
+        {fieldError(field.key) ? (
+          <span className="text-xs text-accent-orange">{fieldError(field.key)}</span>
+        ) : null}
+      </div>
+    ));
+
+  const activeQRAction = scanMode ? qrAction : null;
+  const qrActiveConnector = activeQRAction ? qrConnector : null;
+
   return (
-    <DialogOverlay onDismiss={saving ? () => undefined : onClose}>
+    <DialogOverlay onDismiss={saving || qrBusy ? () => undefined : handleClose}>
       <DialogPanel
         role="dialog"
         aria-modal="true"
         aria-label={isCreate ? t("dialog.createTitle") : t("dialog.editTitle", { name: existing.name })}
-        className="max-w-xl"
+        className={qrActiveConnector || rescanOpen ? "max-w-md" : "max-w-xl"}
       >
+        {activeQRAction && qrActiveConnector ? (
+          <ConnectorLoginPanel
+            connectorId={qrActiveConnector.id}
+            connectorName={qrActiveConnector.name}
+            action={activeQRAction}
+            onRefilled={handleQrRefilled}
+            onClose={handleClose}
+            onBusyChange={setQrBusy}
+            showHeader
+          />
+        ) : rescanOpen && rescanAvailable && existing ? (
+          // D4：重新扫码=替换凭据。实体 id/name/policy 与绑定不变；
+          // 扫码成功回填 secrets/settings 后由 handleRescanRefilled 收尾。
+          <ConnectorLoginPanel
+            connectorId={existing.id}
+            connectorName={existing.name}
+            action={qrAction}
+            onRefilled={handleRescanRefilled}
+            onClose={handleRescanClose}
+            onBusyChange={setQrBusy}
+            showHeader
+          />
+        ) : (
+          <>
         <header className="border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold text-foreground">
             {isCreate ? t("dialog.createTitle") : t("dialog.editTitle", { name: existing.name })}
@@ -266,7 +341,9 @@ export function ConnectorDialog({
                   className={inputClassName}
                   value={form.provider}
                   onChange={(event) =>
-                    setForm((prev) => switchProvider(prev, schema, event.target.value))
+                    setForm((prev) =>
+                      ensureCreateId(switchProvider(prev, schema, event.target.value), schema),
+                    )
                   }
                 >
                   {(schema?.providers ?? []).map((provider) => (
@@ -340,28 +417,44 @@ export function ConnectorDialog({
             <p className="text-xs text-muted-foreground">{t("dialog.providerLocked")}</p>
           ) : null}
 
-          <fieldset className="flex flex-col gap-3">
-            <legend className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
-              {t("dialog.credentials")}
-            </legend>
-            {(providerSchema?.fields ?? []).map((field) => (
-              <div key={field.key} className="flex flex-col gap-1">
-                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  <span>
-                    {field.label}
-                    {field.required ? <span className="text-accent-orange"> *</span> : null}
-                  </span>
-                  {renderControl(field)}
-                </label>
-                {field.help && field.type !== "bool" ? (
-                  <span className="text-xs text-muted-foreground">{field.help}</span>
-                ) : null}
-                {fieldError(field.key) ? (
-                  <span className="text-xs text-accent-orange">{fieldError(field.key)}</span>
-                ) : null}
-              </div>
-            ))}
-          </fieldset>
+          <RescanSection
+            available={rescanAvailable}
+            done={qrConfirmed}
+            onStart={() => setRescanOpen(true)}
+          />
+
+          {scanMode ? (
+            <section className="flex flex-col gap-2.5 rounded-card border border-accent-primary-border bg-accent-primary-soft/40 px-3 py-3">
+              <p className="text-xs text-muted-foreground">{t("dialog.scanHint")}</p>
+              <Button
+                variant="primary"
+                size="sm"
+                className="self-start"
+                onClick={() => void handleStartScan()}
+                disabled={qrCreating}
+              >
+                {qrCreating ? t("dialog.scanStarting") : t("dialog.scanLogin")}
+              </Button>
+              {qrError ? (
+                <p className="text-xs text-accent-orange">
+                  {t("dialog.scanFailed", { message: qrError })}
+                </p>
+              ) : null}
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer select-none">
+                  {t("dialog.advanced")}
+                </summary>
+                <div className="mt-2.5 flex flex-col gap-3">{renderFieldList()}</div>
+              </details>
+            </section>
+          ) : (
+            <fieldset className="flex flex-col gap-3">
+              <legend className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                {t("dialog.credentials")}
+              </legend>
+              {renderFieldList()}
+            </fieldset>
+          )}
         </div>
 
         <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
@@ -372,6 +465,8 @@ export function ConnectorDialog({
             {saving ? t("dialog.saving") : t("dialog.save")}
           </Button>
         </footer>
+          </>
+        )}
       </DialogPanel>
     </DialogOverlay>
   );

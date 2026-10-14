@@ -20,8 +20,15 @@ import {
   indexHistoryToolCalls,
   readHistoryMessageIdentity,
 } from "./history-mapping";
-import { mergeUniqueStrings } from "./shared";
 import { getHistoryMessageAuthor, getPrimaryTextContent } from "./text-utils";
+
+// 段落合并/匹配辅助（P0-2 拆分）：实现与语义见 ./history-merge，尾部孤儿吸收
+// 只在历史投影入口（history-artifacts）调用，这里只取匹配所需的最小面。
+import {
+  getFinalTextContent,
+  isCloserTurnCandidate,
+  mergeHistoryIntoLiveMessage,
+} from "./history-merge";
 
 export type HistoryMessageMapping = {
   artifacts: Artifact[];
@@ -239,171 +246,6 @@ function buildHistoryUnitMessage(
   };
 
   return { artifacts, stableId, message };
-}
-
-/**
- * 段落的稳定去重键：工具按 toolCallId（无 id 回退名称+入参）、图片按
- * imageId/artifactId、文本类按内容。带内容键的段落保证「重复同步幂等」：
- * 同一段正文/推理/代码在实时段里已经渲染过时，历史侧不再追加第二份。
- */
-function segmentDedupeKey(segment: MessageSegment): string {
-  if (segment.type === "tool") {
-    return segment.toolCallId
-      ? `tool:${segment.toolCallId}`
-      : `tool:${segment.name}:${segment.argsSummary ?? ""}`;
-  }
-  if (segment.type === "text") {
-    return `text:${segment.content}`;
-  }
-  if (segment.type === "reasoning") {
-    return `reasoning:${segment.content}`;
-  }
-  if (segment.type === "code") {
-    return `code:${segment.language}:${segment.code}`;
-  }
-  if (segment.type === "image") {
-    if (segment.artifactId) {
-      return `image:${segment.artifactId}`;
-    }
-    return segment.imageId ? `image:${segment.imageId}` : "";
-  }
-  if (segment.type === "image-placeholder") {
-    return segment.imageId ? `image:${segment.imageId}` : "";
-  }
-  return "";
-}
-
-function getMessageSegmentKeys(message: ChatMessage): Set<string> {
-  const keys = new Set<string>();
-  message.segments.forEach((segment) => {
-    const key = segmentDedupeKey(segment);
-    if (key) {
-      keys.add(key);
-    }
-  });
-  return keys;
-}
-
-/** 终答文本：最后一段 text 的内容（匹配时与 primary text 双口径比对）。 */
-function getFinalTextContent(message: ChatMessage): string {
-  for (let index = message.segments.length - 1; index >= 0; index -= 1) {
-    const segment = message.segments[index];
-    if (segment.type === "text") {
-      return segment.content.trim();
-    }
-  }
-  return "";
-}
-
-/** 回合接近度：数字型 turn_id 按数值、其余按字典序；仅用于在候选间消歧。 */
-function getHistoryTurnIdRecency(turnId: string): number | string | null {
-  const trimmed = turnId.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
-}
-
-function isCloserTurnCandidate(candidate: ChatMessage, best: ChatMessage): boolean {
-  const candidateTurnId = candidate.runtimeTurnId?.trim() ?? "";
-  const bestTurnId = best.runtimeTurnId?.trim() ?? "";
-  if (!candidateTurnId || !bestTurnId) {
-    return false;
-  }
-  const candidateKey = getHistoryTurnIdRecency(candidateTurnId);
-  const bestKey = getHistoryTurnIdRecency(bestTurnId);
-  if (candidateKey === null || bestKey === null) {
-    return candidateKey !== null;
-  }
-  if (typeof candidateKey === "number" && typeof bestKey === "number") {
-    return candidateKey > bestKey;
-  }
-  if (typeof candidateKey === "string" && typeof bestKey === "string") {
-    return candidateKey > bestKey;
-  }
-  return typeof candidateKey === "number";
-}
-
-/**
- * 历史聚合消息 → 既有实时消息的合并。
- *
- * 原则：身份（message_id / turn）决定「是不是同一条消息」，段落内容只决定
- * 「这一段有没有表达过」。
- * - 实时过程区（推理分块 / 工具行位置 / 代码段 / 正在增长的 running 标记）整体
- *   透传：历史只保存「合并后的一块推理 + 最终正文」，没有逐帧顺序信息，用它覆盖
- *   会把「推理 → 工具 → 推理」压成一段；
- * - 实时侧已有推理块时，历史推理是同一段思考的降级表达，丢弃；
- * - 历史里的工具行按 toolCallId（无 id 时按名称+入参）去重后才追加：同一调用
- *   在实时段里已经渲染过，重复追加就是「一轮对话两份工具结果」；
- * - 正文/代码/图片同理按内容键去重，保证重复同步（挂载、回合结束、降级对账）
- *   是幂等的。
- */
-function mergeHistoryIntoLiveMessage(
-  matched: ChatMessage,
-  fallback: ChatMessage,
-  stableId: string,
-): ChatMessage {
-  const matchedKeys = getMessageSegmentKeys(matched);
-  const liveHasReasoning = matched.segments.some(
-    (segment) => segment.type === "reasoning",
-  );
-  const liveTextSegments = matched.segments.filter(
-    (segment) => segment.type === "text",
-  );
-  const durableTextSegments = fallback.segments.filter(
-    (segment) => segment.type === "text",
-  );
-  const liveTextContent = liveTextSegments
-    .map((segment) => segment.content.trim())
-    .join("\n");
-  const durableTextContent = durableTextSegments
-    .map((segment) => segment.content.trim())
-    .join("\n");
-  const textInSync =
-    liveTextSegments.length > 0 && liveTextContent === durableTextContent;
-  // 过程区以实时为准：推理分块 / 工具行位置 / 代码段 / 图片整体透传（历史没有
-  // 逐帧顺序信息，覆盖会把「推理 → 工具 → 推理」压成一段）。正文与历史一致时
-  // 也原样保留，避免「丢弃后重排」把既有段序打乱；不一致时由历史正文收口。
-  const liveProcessSegments = matched.segments.filter(
-    (segment) => segment.type !== "text" || textInSync,
-  );
-  // 实时侧没有推理块时，历史推理是唯一表达：插到正文之前（思考在上、回答在下）。
-  const leadingReasoning = liveHasReasoning
-    ? []
-    : fallback.segments.filter((segment) => segment.type === "reasoning");
-  // 正文以历史为准：与实时不一致（含历史为空）时实时正文被取代——实时正文停在
-  // 半截时由持久化正文收口；历史为空则不补任何文本。
-  const resolvedTextSegments = textInSync ? [] : durableTextSegments;
-  const durableExtraSegments = fallback.segments.filter(
-    (segment) => segment.type !== "text" && segment.type !== "reasoning",
-  );
-  const durableAdditions = durableExtraSegments.filter((segment) => {
-    const key = segmentDedupeKey(segment);
-    return !key || !matchedKeys.has(key);
-  });
-  const relatedArtifactIds = mergeUniqueStrings(
-    ...(matched.relatedArtifactIds ?? []),
-    ...(fallback.relatedArtifactIds ?? []),
-  );
-
-  return {
-    ...matched,
-    // Prefer durable runtime message_id once history exposes it.
-    id: stableId || matched.id || fallback.id,
-    role: fallback.role,
-    author: matched.author || fallback.author,
-    label: matched.label || fallback.label,
-    runtimeTurnId: matched.runtimeTurnId || fallback.runtimeTurnId,
-    relatedArtifactIds:
-      relatedArtifactIds.length > 0 ? relatedArtifactIds : undefined,
-    // 过程区在前、历史正文在后（与流式渲染的「思考在上、回答在下」一致）。
-    segments: [
-      ...leadingReasoning,
-      ...liveProcessSegments,
-      ...durableAdditions,
-      ...resolvedTextSegments,
-    ],
-  };
 }
 
 export function mapSessionHistoryToMessages(

@@ -9,6 +9,8 @@ import {
   createLazyJsonArtifact,
   mapSessionHistoryToMessages,
 } from "./history-mapping";
+// 回合收尾后的尾部孤儿占位吸收（见 absorbTrailingOrphanTurnTailIntoHistory）。
+import { absorbTrailingOrphanTurnTailIntoHistory } from "./history-merge";
 import { getRuntimeEventSeq } from "./sessions";
 import { upsertArtifacts } from "./shared";
 import {
@@ -80,7 +82,15 @@ export function applySessionHistoryToThread(
   //   这个形态（后端返回 `{"count":0,"history":[]}`）。若沿用「保留本地消息」，
   //   消息列表会停留在回滚前的内容，用户看到的就是「点了确认没反应」。
   const resolvedMessages = Array.isArray(response.history)
-    ? [...olderResidentMessages, ...mappedMessages, ...liveOnlyMessages]
+    ? // 回合收尾后的尾部孤儿吸收（2026-10-14）：迟到桥接帧补建的占位
+      // （turn-<本地chat UUID>-assistant）与服务端投影（turn_… 空间）无法按
+      // turn_id 匹配，会作为 live-only 消息垫在结论正文后面——「工具渲染落在
+      // 结论正文后面」的根因。守卫见 findTrailingTurnTailAbsorption：只吸收
+      // 「权威投影之后紧贴的无正文已收尾占位」，活跃回合与带正文占位不受影响。
+      absorbTrailingOrphanTurnTailIntoHistory(
+        [...olderResidentMessages, ...mappedMessages, ...liveOnlyMessages],
+        mappedMessages,
+      )
     : thread.messages;
   // 任务面板冷启动兜底（方案 §5.2 通道 B1）：会话历史逐字保留在
   // `session-history-{id}` 产物里，工具消息 metadata 亦在其中。这里只做

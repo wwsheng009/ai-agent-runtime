@@ -6,7 +6,6 @@
 
 import type {
   ConnectorActionSpec,
-  ConnectorFieldSchema,
   ConnectorProviderSchema,
   ConnectorSchema,
   ConnectorSubmitPayload,
@@ -62,32 +61,11 @@ export function hasModeField(providerSchema: ConnectorProviderSchema | null): bo
   return (providerSchema?.fields ?? []).some((field) => field.key === "mode");
 }
 
-/**
- * 「扫码接入」适用的通道：Schema 声明了 kind=qr 动作的通道（当前=微信；
- * 未来 QQ 等复用同一约定，前端零硬编码通道名）。
- */
-export function scanProviders(schema: ConnectorSchema | null): ConnectorProviderSchema[] {
-  return (schema?.providers ?? []).filter((provider) =>
-    (provider.actions ?? []).some((action) => action.kind === "qr"),
-  );
-}
-
-/** 取通道的扫码动作（kind=qr 的第一个）；无则 null。 */
+/** 取通道的扫码动作（kind=qr 的第一个）；无则 null（新增面板据此决定是否走扫码）。 */
 export function findQRAction(
   providerSchema: ConnectorProviderSchema | null,
 ): ConnectorActionSpec | null {
   return (providerSchema?.actions ?? []).find((action) => action.kind === "qr") ?? null;
-}
-
-/**
- * 扫码接入只需「扫描基址」这一个字段（微信=`base_url` iLink 基址）；其余凭据
- * 全部由扫码成功后回填。约定 key 与 hasModeField 的 `mode` 同类（前端已知的
- * 少数 well-known 字段键）。
- */
-export function scanBaseField(
-  providerSchema: ConnectorProviderSchema | null,
-): ConnectorFieldSchema | null {
-  return (providerSchema?.fields ?? []).find((field) => field.key === "base_url") ?? null;
 }
 
 /**
@@ -100,6 +78,24 @@ export function generateConnectorId(provider: string): string {
   const time = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 6);
   return `${prefix}-${time}${rand}`;
+}
+
+/**
+ * 新建表单的 ID 兜底：扫码类通道（有 kind=qr 动作）允许零填表，ID 为空时自动
+ * 生成；其它通道保持原样（仍要求用户填写）。切换通道/打开弹窗时调用。
+ */
+export function ensureCreateId(
+  form: ConnectorFormState,
+  schema: ConnectorSchema | null,
+): ConnectorFormState {
+  if (form.id.trim()) {
+    return form;
+  }
+  const providerSchema = findProviderSchema(schema, form.provider);
+  if (!findQRAction(providerSchema)) {
+    return form;
+  }
+  return { ...form, id: generateConnectorId(form.provider) };
 }
 
 export function defaultValuesFor(

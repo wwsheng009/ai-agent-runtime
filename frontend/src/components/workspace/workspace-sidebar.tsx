@@ -424,6 +424,7 @@ export function WorkspaceSidebar({
           <WorkspaceSidebarRuntimeSection
               onCloseMobile={onCloseMobile}
               openSections={openSections}
+              selectedSessionId={selectedThreadId}
               runtimeSessionsError={runtimeSessionsError}
               runtimeSessionsLoading={runtimeSessionsLoading}
               runtimeSessionsRefreshing={runtimeSessionsRefreshing}

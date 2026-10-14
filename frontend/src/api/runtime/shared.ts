@@ -196,14 +196,16 @@ function appendRequestId(message: string, requestId: string | undefined) {
   return requestId ? `${message} (request_id: ${requestId})` : message;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
+// 导出供同目录的子模块（connector-bindings 等）复用归一化助手；
+// 语义极窄（对象判定 / trim 字符串），导出不构成抽象负担。
+export function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
 
-function readString(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
+export function readString(value: unknown) {
+	return typeof value === "string" ? value.trim() : "";
 }
 
 function readNumber(value: unknown) {

@@ -1,16 +1,21 @@
 // 通道动作载荷的展示助手（纯函数，不依赖 React，便于单测）。
 //
 // 两类职责：
-//   * qr_code_content 是图片源（data:image/ 或「看起来像图片」的 URL）还是文本；
+//   * qr_code_content 是否**本身**就是可直接 <img> 的图片源；
 //   * kind=button 的动作结果压成一行可读摘要（常见字段优先，其余退化为 raw JSON）。
 
 import type { ConnectorActionPayload } from "@/types/runtime";
 
 const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|bmp|svg)(?:[?#]|$)/i;
-const IMAGE_HINT = /(qrcode|qr[_-]?code|qrcode_img)/i;
 
-/** 是否可用 <img> 直接展示：data:image/ 前缀，或带图片特征（后缀/命名）的 http(s) URL。 */
-export function isImageSource(value: string): boolean {
+/**
+ * 内容本身是否可直接用作 <img> 源：`data:image/` 前缀，或带图片后缀的 http(s) URL。
+ *
+ * 注意：不能按「含 qrcode 字样」判定——微信扫码返回的 `qr_code_content` 是
+ * `https://liteapp.weixin.qq.com/q/…?qrcode=…` 这类**待编码的链接**，含 qrcode
+ * 关键字但不是图片；把它当图片会渲染成坏图（正确做法是用二维码库本地编码）。
+ */
+export function isDirectImageSource(value: string): boolean {
   const text = value.trim();
   if (!text) {
     return false;
@@ -18,10 +23,7 @@ export function isImageSource(value: string): boolean {
   if (/^data:image\//i.test(text)) {
     return true;
   }
-  if (!/^https?:\/\//i.test(text)) {
-    return false;
-  }
-  return IMAGE_EXTENSION.test(text) || IMAGE_HINT.test(text);
+  return /^https?:\/\//i.test(text) && IMAGE_EXTENSION.test(text);
 }
 
 /** 动作返回的单行摘要；无可用信息时返回空串（调用方改用「无返回内容」文案）。 */

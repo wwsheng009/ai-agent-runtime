@@ -8,6 +8,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ConnectorSchema, ConnectorSubmitPayload, ConnectorView } from "@/types/runtime";
 
+vi.mock("@/api/runtime/connectors", () => ({
+  CONNECTOR_CLEAR_SECRET: "__clear__",
+  createConnector: vi.fn(),
+  deleteConnector: vi.fn(),
+  runConnectorAction: vi.fn(),
+  updateConnector: vi.fn(),
+}));
+
+import {
+  createConnector,
+  deleteConnector,
+  runConnectorAction,
+} from "@/api/runtime/connectors";
+
 import { ConnectorDialog } from "./connector-dialog";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
@@ -50,6 +64,38 @@ const SCHEMA_NO_MODE_FIELD: ConnectorSchema = {
       fields: [{ key: "token", label: "Token", type: "text" }],
     },
   ],
+};
+
+const WECHAT_SCHEMA: ConnectorSchema = {
+  version: "1",
+  providers: [
+    {
+      provider: "wechat",
+      label: "微信",
+      modes: ["polling"],
+      fields: [
+        {
+          key: "base_url",
+          label: "iLink 基址",
+          type: "url",
+          default: "https://ilinkai.weixin.qq.com",
+        },
+        { key: "account_id", label: "账号 ID", type: "text" },
+      ],
+      actions: [{ key: "start_login", label: "扫码登录", kind: "qr" }],
+    },
+  ],
+};
+
+const WECHAT_CREATED: ConnectorView = {
+  id: "wechat-abc",
+  provider: "wechat",
+  name: "微信",
+  enabled: true,
+  mode: "polling",
+  settings: { base_url: "https://ilinkai.weixin.qq.com" },
+  secret_keys: [],
+  policy: {},
 };
 
 const EXISTING: ConnectorView = {
@@ -119,6 +165,9 @@ describe("ConnectorDialog", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    vi.mocked(createConnector).mockReset();
+    vi.mocked(deleteConnector).mockReset();
+    vi.mocked(runConnectorAction).mockReset();
   });
 
   afterEach(() => {
@@ -284,5 +333,73 @@ describe("ConnectorDialog", () => {
 
     expect(document.body.textContent).not.toContain("请填写 ID");
     expect(document.body.textContent).toContain("必填");
+  });
+
+  it("扫码通道：新增面板用扫码入口替代凭据字段，ID 自动生成", async () => {
+    await render(
+      <ConnectorDialog {...dialogProps({ schema: WECHAT_SCHEMA, existing: null })} />,
+    );
+
+    expect(findButton("扫码登录")).not.toBeNull();
+    // 凭据字段区被扫码入口替代（细节收进「高级设置」）。
+    expect(document.body.textContent).not.toContain("凭据与设置");
+    // ID 自动生成，用户无需手填。
+    expect(findInput("ID")?.value).toMatch(/^wechat-/);
+  });
+
+  it("点击扫码登录：按自动 ID 创建连接器（基址取 Schema 默认值）", async () => {
+    vi.mocked(createConnector).mockResolvedValue(WECHAT_CREATED);
+    vi.mocked(runConnectorAction).mockResolvedValue({
+      login_id: "login-1",
+      status: "wait",
+      qr_code_content: "data:image/png;base64,QQ==",
+      raw: {},
+    });
+
+    await render(
+      <ConnectorDialog {...dialogProps({ schema: WECHAT_SCHEMA, existing: null })} />,
+    );
+
+    await act(async () => {
+      findButton("扫码登录")?.click();
+    });
+    await act(async () => undefined);
+
+    expect(createConnector).toHaveBeenCalledTimes(1);
+    const [payload] = vi.mocked(createConnector).mock.calls[0];
+    expect(payload.provider).toBe("wechat");
+    expect(payload.id).toMatch(/^wechat-/);
+    expect(payload.settings?.base_url).toBe("https://ilinkai.weixin.qq.com");
+  });
+
+  it("扫码未确认即关闭：清理草稿连接器，避免留下空连接器", async () => {
+    vi.mocked(createConnector).mockResolvedValue(WECHAT_CREATED);
+    vi.mocked(deleteConnector).mockResolvedValue(undefined);
+    vi.mocked(runConnectorAction).mockResolvedValue({
+      login_id: "login-1",
+      status: "wait",
+      qr_code_content: "data:image/png;base64,QQ==",
+      raw: {},
+    });
+    const onClose = vi.fn();
+
+    await render(
+      <ConnectorDialog
+        {...dialogProps({ schema: WECHAT_SCHEMA, existing: null, onClose })}
+      />,
+    );
+    await act(async () => {
+      findButton("扫码登录")?.click();
+    });
+    await act(async () => undefined);
+
+    // 扫码面板已就绪，未扫码确认直接关闭。
+    await act(async () => {
+      findButton("关闭")?.click();
+    });
+    await act(async () => undefined);
+
+    expect(deleteConnector).toHaveBeenCalledWith("wechat-abc", expect.anything());
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

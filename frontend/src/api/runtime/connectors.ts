@@ -1,27 +1,11 @@
 // IM 连接器管理面客户端（docs/bots/03-host-integration.md §6 路由表）。
-//
 // 端点由 backend/internal/connectors/restapi 提供，runtime-server 挂载为 /api/connectors*：
-//   GET    /api/connectors             → {items: ConnectorView[]}
-//   POST   /api/connectors             → 201 ConnectorView（校验失败 400 {error, fields[]}）
-//   GET    /api/connectors/schema      → {version, providers[]}
-//   GET    /api/connectors/{id}        → ConnectorView
-//   PATCH  /api/connectors/{id}        → 200 ConnectorView
-//   DELETE /api/connectors/{id}        → 204
-//   POST   /api/connectors/{id}/reload → 202 {ok:true}
-//   POST   /api/connectors/{id}/test   → 200 {ok:true}（body {chat,text}）
-//   GET    /api/connectors/{id}/logs   → 200 {entries[], stats}（limit 收敛 [50,200]）
-//   POST   /api/connectors/{id}/takeover        → 200 ConnectorView（503 无 HostID / 404 / 409）
-//   POST   /api/connectors/{id}/actions/{action} → 200 Provider 载荷（body 可选 JSON object）
-//
-// 鉴权与 skills 管理面同口径（handler.go hasValidSearchAdminToken）：
-// `X-Skills-Admin-Token`、或 `Authorization: Bearer <token>`、或环回直连。
-// 调用方未显式传 adminToken 时回落到 readAdminToken()（与页面读取同一存储键）。
-//
-// 归一化纪律（与 skills 客户端一致）：
-//   * 核心结构缺失（`items` / `providers` 非数组）→ 抛错，不降级成「空列表」；
-//   * 单条缺 id / provider → 只丢该条，其余照常呈现；
-//   * `enabled` 缺失按 false（安全默认），`policy` 缺失按空对象；
-//   * 密钥只透传 `secret_keys` 字段名，前端不臆造明文。
+// GET/POST /connectors、GET /schema、GET/PATCH/DELETE /connectors/{id}、
+// POST /{id}/reload|test|takeover|actions/{action}、GET /{id}/logs、GET /bindings。
+// 鉴权：X-Skills-Admin-Token / Bearer / 环回直连；未显式传 adminToken 时回落
+// readAdminToken()（与页面读取同一存储键）。
+// 归一化纪律：核心结构缺失抛错不降级；单条缺 id/provider 只丢该条；
+// enabled 缺省 false（安全默认）；密钥只透传 secret_keys 字段名，不臆造明文。
 
 import type {
   ConnectorActionPayload,
@@ -52,12 +36,27 @@ import {
 // `@/api/runtime/connectors` 单一导入口径。
 export * from "./connector-logs";
 
+// 绑定管理（docs/bots/09 §5.2）实现见 ./connector-bindings（P0-2 拆分）；
+// 重导出保持 `@/api/runtime/connectors` 单一导入口径。
+export {
+  bindConnectorSession,
+  listConnectorBindings,
+  normalizeConnectorBindings,
+  unbindConnectorSession,
+} from "./connector-bindings";
+
 export const CONNECTORS_PATH = "/api/connectors";
 export const CONNECTORS_SCHEMA_PATH = `${CONNECTORS_PATH}/schema`;
 /** 与 skills 管理面共用的写操作鉴权头。 */
 export const CONNECTORS_ADMIN_TOKEN_HEADER = "X-Skills-Admin-Token";
 /** 显式清除某个密钥的提交值（UI 的「清除」按钮产生）。 */
 export const CONNECTOR_CLEAR_SECRET = "__clear__";
+
+/**
+ * 通道动作请求超时：微信 `login_status` 是后端长轮询（上游 40s），远超通用的
+ * 10s 运行时超时，必须留足余量，否则扫码后前端会先以「signal timed out」中断。
+ */
+export const CONNECTOR_ACTION_TIMEOUT_MS = 60_000;
 
 export interface ConnectorRequestOptions {
   adminToken?: string;
@@ -275,11 +274,16 @@ export async function runConnectorAction(
   if (!actionKey) {
     throw new Error("connector action requires an action key");
   }
+  const init = requestInit(options, "POST", normalizeActionRequestBody(payload));
+  // 调用方未指定 signal 时，用长轮询友好的超时（覆盖 fetchRuntimeJson 的 10s 默认）。
+  if (!init.signal) {
+    init.signal = AbortSignal.timeout(CONNECTOR_ACTION_TIMEOUT_MS);
+  }
   const response = await fetchRuntimeJson<unknown>(
     buildRuntimeUrl(
       `${connectorPath(id)}/actions/${encodeURIComponent(actionKey)}`,
     ),
-    requestInit(options, "POST", normalizeActionRequestBody(payload)),
+    init,
   );
   return normalizeConnectorActionPayload(response);
 }

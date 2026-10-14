@@ -37,7 +37,6 @@ import { summarizeActionPayload } from "./connectors/action-payload";
 import { ConnectorActionDialog } from "./connectors/action-dialog";
 import { ConnectorDialog } from "./connectors/connector-dialog";
 import { ConnectorLogsDialog } from "./connectors/logs-dialog";
-import { ConnectorScanEntry } from "./connectors/scan-entry";
 import { findProviderSchema } from "./connectors/shared";
 import { TestMessageDialog } from "./connectors/test-message-dialog";
 
@@ -291,11 +290,6 @@ export function ConnectorsPage() {
                 <RefreshCwIcon size={14} />
                 {t("page.refresh")}
               </Button>
-              <ConnectorScanEntry
-                schema={schema}
-                existingConnectors={items}
-                onChanged={handleRefilled}
-              />
               <Button
                 variant="primary"
                 size="sm"
@@ -502,6 +496,7 @@ export function ConnectorsPage() {
         serverError={dialogError}
         serverFieldErrors={dialogFieldErrors}
         onSubmit={(payload) => void handleSave(payload)}
+        onChanged={handleRefilled}
         onClose={closeDialog}
       />
       <TestMessageDialog

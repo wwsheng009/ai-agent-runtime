@@ -12,6 +12,7 @@ import { type TFunction } from "i18next";
 import { summarizeSidebarSessions } from "@/components/workspace/workspace-sidebar-shared";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import { type RuntimeTeamRecord } from "@/lib/runtime-api";
+import { WorkspaceBotPanel } from "./bot-panel";
 
 import { SidebarSection } from "./section-shell";
 import {
@@ -23,6 +24,8 @@ import {
 type WorkspaceSidebarRuntimeSectionProps = {
   onCloseMobile?: () => void;
   openSections: SidebarSectionState;
+  /** 当前选中会话（bot 绑定面板的目标会话）。 */
+  selectedSessionId: string;
   runtimeSessionsError: string | null;
   runtimeSessionsLoading: boolean;
   runtimeSessionsRefreshing?: boolean;
@@ -37,6 +40,7 @@ type WorkspaceSidebarRuntimeSectionProps = {
 export function WorkspaceSidebarRuntimeSection({
   onCloseMobile,
   openSections,
+  selectedSessionId,
   runtimeSessionsError,
   runtimeSessionsLoading,
   runtimeSessionsRefreshing,
@@ -166,6 +170,8 @@ export function WorkspaceSidebarRuntimeSection({
         >
           {t("sidebar.skillsPage")}
         </Link>
+
+        <WorkspaceBotPanel selectedSessionId={selectedSessionId} />
       </section>
     </SidebarSection>
   );

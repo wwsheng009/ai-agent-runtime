@@ -3,11 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type {
-  ConnectorProviderSchema,
-  ConnectorSchema,
-  ConnectorView,
-} from "@/types/runtime";
+import type { ConnectorProviderSchema, ConnectorView } from "@/types/runtime";
 
 import {
   buildSubmitPayload,
@@ -17,8 +13,6 @@ import {
   formFromConnector,
   generateConnectorId,
   hasModeField,
-  scanBaseField,
-  scanProviders,
   switchProvider,
   validateConnectorForm,
 } from "./shared";
@@ -203,25 +197,13 @@ describe("扫码接入助手", () => {
       { key: "login_status", label: "登录状态", kind: "button" },
     ],
   };
-  const SCHEMA: ConnectorSchema = {
-    version: "1",
-    providers: [TELEGRAM_SCHEMA, WECHAT_SCHEMA],
-  };
-
-  it("只挑出声明 kind=qr 动作的通道，并定位其扫码动作", () => {
-    expect(scanProviders(SCHEMA).map((item) => item.provider)).toEqual(["wechat"]);
-    expect(scanProviders(null)).toEqual([]);
+  it("定位通道的扫码动作（kind=qr），无则 null", () => {
     expect(findQRAction(WECHAT_SCHEMA)).toEqual({
       key: "start_login",
       label: "扫码登录",
       kind: "qr",
     });
     expect(findQRAction(TELEGRAM_SCHEMA)).toBeNull();
-  });
-
-  it("扫描基址取 base_url 字段；无该字段时返回 null", () => {
-    expect(scanBaseField(WECHAT_SCHEMA)?.key).toBe("base_url");
-    expect(scanBaseField(TELEGRAM_SCHEMA)).toBeNull();
   });
 
   it("自动生成的 ID 满足 restapi 约束（字母数字开头、仅 [A-Za-z0-9._-]、≤64）", () => {
