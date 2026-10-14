@@ -129,16 +129,6 @@ func botsResolveHost(session *ChatSession) (*LocalConnectorHost, string) {
 	if host := currentLocalConnectorHost(); host != nil && host.Service() != nil && host.Store() != nil {
 		return host, ""
 	}
-	// 斜杠命令不经过 turn 入口的 ensureChatExecutor：首帧后就敲 /bots 时，
-	// 能力面（含 LocalRuntimeHost 与连接器宿主）可能仍在后台装载。先 await
-	// 补齐——与 /skill、/call 同款；幂等，未安装门控的路径（runtime-server/
-	// 测试）是 no-op。
-	if session != nil && session.LocalRuntimeHost == nil {
-		if err := awaitChatCapabilitiesForTurn(context.Background(), session); err != nil {
-			setLocalConnectorInitNote("能力面装载失败：" + err.Error())
-			return nil, "能力面装载失败：" + err.Error()
-		}
-	}
 	host, err := startLocalConnectorsOnDemand(session)
 	if err != nil {
 		if note := localConnectorsInitNote(); note != "" {
@@ -156,14 +146,32 @@ func botsResolveHost(session *ChatSession) (*LocalConnectorHost, string) {
 //   - 成功后发布路由与宿主引用（本会话的 /bots 与 loopback API 均可复用）。
 func startLocalConnectorsOnDemand(session *ChatSession) (*LocalConnectorHost, error) {
 	if session == nil || session.Config == nil {
+		setLocalConnectorInitNote("会话缺少配置句柄")
 		return nil, fmt.Errorf("会话缺少配置句柄")
 	}
 	if !chatHostSessionInteractive(session) {
+		setLocalConnectorInitNote("需要交互式 aicli chat 会话（/bots 与机器人页均不可用于非交互运行）")
 		return nil, fmt.Errorf("需要交互式 aicli chat 会话")
+	}
+	// 斜杠命令与 web 路由都不经过 turn 入口的 ensureChatExecutor：首帧后立即
+	// 使用时，能力面（含 LocalRuntimeHost 与连接器宿主）可能仍在后台装载。
+	// 在这里统一 await（/bots 与 web 按需自举共享本函数）——与 /skill、/call
+	// 同款；幂等，未安装门控的路径（runtime-server/测试）是 no-op。等待带上
+	// 显式上限：web 请求不能无限期挂起，超时按能力面装载超时同款口径报错。
+	if session.LocalRuntimeHost == nil {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), chatCapabilitiesWaitLimit)
+		waitErr := awaitChatCapabilitiesForTurn(waitCtx, session)
+		cancelWait()
+		if waitErr != nil {
+			setLocalConnectorInitNote("能力面装载失败：" + waitErr.Error())
+			return nil, fmt.Errorf("能力面装载失败：%w", waitErr)
+		}
 	}
 	runtimeHost := session.LocalRuntimeHost
 	if runtimeHost == nil {
-		return nil, fmt.Errorf("%s", botsLocalHostUnavailableReason(session))
+		reason := botsLocalHostUnavailableReason(session)
+		setLocalConnectorInitNote(reason)
+		return nil, fmt.Errorf("%s", reason)
 	}
 	configPath, err := ensureWritableAICLIConfigPath(session.Config, "")
 	if err != nil {

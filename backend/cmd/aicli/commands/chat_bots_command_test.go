@@ -305,6 +305,45 @@ func TestBotsLocalHostUnavailableReasonRuntimeServerMode(t *testing.T) {
 	}
 }
 
+// TestStartLocalConnectorsOnDemandWaitsForCapabilities 锁定 web/斜杠命令路径
+// 的自愈语义：能力面（LocalRuntimeHost）仍在后台装载时按需自举必须**等待**
+// 装载完成再装配，而不是立即失败——「配置为空/装载未完成」不是用户可见错误。
+func TestStartLocalConnectorsOnDemandWaitsForCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	session := &ChatSession{
+		Config: &config.Config{ConfigFilePath: configPath},
+	}
+	// 安装门控但延迟 200ms 才启动装载：模拟「web 请求先于装载到达」。
+	// attach 闭包负责挂载 LocalRuntimeHost（与生产 attachChatCapabilities 同责）。
+	installed := make(chan struct{})
+	installChatCapabilitiesGate(session,
+		func() (*chatCapabilityDiscovery, error) {
+			<-installed
+			return &chatCapabilityDiscovery{}, nil
+		},
+		func(*chatCapabilityDiscovery) (func(), error) {
+			session.LocalRuntimeHost = &localChatRuntimeHost{}
+			return func() {}, nil
+		},
+	)
+	require.Nil(t, session.LocalRuntimeHost, "前置：装载未完成前 LocalRuntimeHost 必须为 nil")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		close(installed)
+		if load := currentChatCapabilityLoad(session); load != nil && load.discover != nil {
+			discovery, discErr := load.discover()
+			load.completeDiscovery(discovery, discErr)
+		}
+	}()
+
+	host, err := startLocalConnectorsOnDemand(session)
+	require.NoError(t, err, "自举应等待能力面装载完成，而不是立即失败")
+	t.Cleanup(func() { host.Close() })
+	require.NotNil(t, session.LocalRuntimeHost, "await 后 LocalRuntimeHost 必须已挂载")
+	require.NotNil(t, host.Service())
+}
+
 func TestBotsUnavailableTextSurfacesInitNote(t *testing.T) {
 	prev := localConnectorsInitNote()
 	t.Cleanup(func() { setLocalConnectorInitNote(prev) })

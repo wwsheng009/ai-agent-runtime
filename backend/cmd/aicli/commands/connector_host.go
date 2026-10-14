@@ -170,6 +170,8 @@ func setLocalConnectorInitNote(note string) {
 
 // bootstrapLocalConnectorsForWeb 尝试为当前 web 会话按需装配连接器宿主。
 // 无活动会话 / 非交互会话 / 装配失败均返回 false（沿用兜底 503 + 原因）。
+// 尝试前先清空全局 note：503 原因必须反映**本次**尝试的结果，而不是更早
+// 尝试（如 /bots 目录守卫测试的探测）留下的陈旧状态。
 func bootstrapLocalConnectorsForWeb() bool {
 	if currentLocalConnectorHost() != nil {
 		return true
@@ -178,6 +180,7 @@ func bootstrapLocalConnectorsForWeb() bool {
 	if session == nil {
 		return false
 	}
+	setLocalConnectorInitNote("")
 	host, err := startLocalConnectorsOnDemand(session)
 	if err != nil || host == nil {
 		return false
@@ -185,10 +188,11 @@ func bootstrapLocalConnectorsForWeb() bool {
 	return true
 }
 
-// localConnectorsUnavailableReason 组装 503 兜底原因（带具体装配状态说明）。
+// localConnectorsUnavailableReason 组装 503 兜底原因：始终以「连接器未在本
+// 会话装配」为契约短语开头（页面文案与测试都锚定它），note 只作补充细节。
 func localConnectorsUnavailableReason() string {
 	if note := localConnectorsInitNote(); note != "" {
-		return "连接器不可用：" + note
+		return "连接器未在本会话装配：" + note
 	}
 	if chatWebSession() == nil {
 		return "连接器未在本会话装配（当前没有活动的 aicli chat 会话）"
