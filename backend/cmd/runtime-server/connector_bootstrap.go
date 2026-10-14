@@ -102,7 +102,7 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		Runner: runtimeConnectorRunner{handler: handler},
 		// 注意力接收面（P2 切片 D）：POST /connectors/attention 本地 D5 过滤
 		// + 出站（InletAttention 共享实现）。
-		AttentionInlet: connectors.InletAttention(store, service.NotifyAttention),
+		AttentionInlet: connectors.InletAttention(store, service.NotifyAttentionScoped),
 	}
 	mountConnectorRoutes(router, deps)
 

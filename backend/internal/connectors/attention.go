@@ -122,15 +122,20 @@ type AttentionDeps struct {
 // P2 切片 D）：对其它节点转发来的广播做**本地 D5 过滤**（逐 bot
 // AcceptsNotice：绑定会话始终收，其它会话需 enabled+kinds+scope 命中——
 // 发起侧只按"对端想收广播"意愿过滤，scope/kinds 的本地裁决在这里），
-// 命中者经 NotifyAttention 出站到该 bot 绑定。出站用 Service 基 ctx（与
-// HandleInbound 的 Fix-1 语义一致：不绑 HTTP 请求 ctx）。返回 nil 表示
-// 本宿主无 bot 接收（调用方按静默成功处理——广播本质是尽力而为）。
-func InletAttention(store Store, notify func(ctx context.Context, notice AttentionNotice) error) func(AttentionNotice) error {
-	if store == nil || notify == nil {
+// 收集**全部**接受连接器后经 notifyScoped 出站（2026-10-14 修复补全：
+// 与本地订阅链路同走 Service.NotifyAttentionScoped——先按事件会话精确投递
+// （绑定场景），未命中（跨宿主未绑定会话）回退广播到接受连接器的绑定 chats；
+// 修复前按事件会话反查绑定恒 0 投递，且首个命中即返回）。
+// 出站用 Service 基 ctx（与 HandleInbound 的 Fix-1 语义一致：不绑 HTTP
+// 请求 ctx）。返回 nil 表示本宿主无 bot 接收（调用方按静默成功处理——广播
+// 本质是尽力而为）。
+func InletAttention(store Store, notifyScoped func(ctx context.Context, connectorIDs []string, notice AttentionNotice) error) func(AttentionNotice) error {
+	if store == nil || notifyScoped == nil {
 		return nil
 	}
 	return func(notice AttentionNotice) error {
 		ctx := context.Background()
+		accepted := make([]string, 0, 2)
 		for _, cfg := range store.ListConfigs() {
 			if !cfg.Enabled {
 				continue
@@ -145,13 +150,12 @@ func InletAttention(store Store, notify func(ctx context.Context, notice Attenti
 			}) {
 				continue
 			}
-			if err := notify(ctx, notice); err != nil {
-				return err
-			}
-			return nil // 同一通知本宿主出站一次即可（多 bot 命中不去重——
-			// 不同 bot 绑定不同 chat，NotifySession 内部按各自绑定扇出）
+			accepted = append(accepted, cfg.ID)
 		}
-		return nil
+		if len(accepted) == 0 {
+			return nil
+		}
+		return notifyScoped(ctx, accepted, notice)
 	}
 }
 

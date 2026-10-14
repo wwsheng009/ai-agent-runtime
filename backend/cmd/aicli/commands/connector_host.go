@@ -342,7 +342,7 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		Runner: localConnectorRunner{backend: localConnectorBackend{host: host, logf: logf}},
 		// 注意力接收面（P2 切片 D）：POST /connectors/attention 本地 D5 过滤
 		// + 出站（InletAttention 共享实现）。
-		AttentionInlet: connectors.InletAttention(store, service.NotifyAttention),
+		AttentionInlet: connectors.InletAttention(store, service.NotifyAttentionScoped),
 	}
 
 	ctx, cancel := context.WithCancel(parent)
