@@ -15,8 +15,8 @@ type notifyTestChannel struct {
 
 func (c *notifyTestChannel) Name() string { return c.name }
 
-func (c *notifyTestChannel) Deliver(_ context.Context, n Notification) error {
-	c.calls = append(c.calls, n)
+func (c *notifyTestChannel) Deliver(_ context.Context, ev Event) error {
+	c.calls = append(c.calls, ev.Notification)
 	return c.err
 }
 

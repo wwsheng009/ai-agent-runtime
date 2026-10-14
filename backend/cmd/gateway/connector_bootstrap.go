@@ -21,6 +21,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storejson"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
+	"github.com/wwsheng009/ai-agent-runtime/internal/notify"
+	"github.com/wwsheng009/ai-agent-runtime/internal/notify/channels"
 )
 
 // 本文件是 gateway 宿主侧的连接器接线（docs/bots/03-host-integration.md §6/§7、
@@ -126,10 +128,12 @@ func newGatewayAttentionHook(ctx context.Context, store connectors.Store, servic
 
 // newGatewayAttentionHookNotify 是 hook 的可注入形态（测试用替身 notify；
 // 签名带接受连接器集合——scope=all 未绑定事件回退广播定位投递目标）。
+// 投递核心收敛到 channels.IM 适配器（notify 切片二共用同一实现）。
 func newGatewayAttentionHookNotify(ctx context.Context, store connectors.Store, notifyScoped func(context.Context, []string, connectors.AttentionNotice) error, logf func(format string, args ...any)) gatewayAttentionHook {
 	if notifyScoped == nil {
 		return func(string, string, string, string) {}
 	}
+	im := &channels.IM{Store: store, NotifyScoped: notifyScoped}
 	var mu sync.Mutex
 	notified := map[string]string{} // sessionID -> last notified attention kind
 	return func(_ string, sessionID, _, attention string) {
@@ -152,40 +156,9 @@ func newGatewayAttentionHookNotify(ctx context.Context, store connectors.Store, 
 		}
 		notified[sessionID] = kind
 		mu.Unlock()
-		notice, _, ok := connectors.AttentionNoticeForProjection(sessionID, kind)
-		if !ok {
-			return
-		}
-		// D5 过滤与出站共用 connectors 的口径：这里手动走一遍 AcceptsNotice
-		// （共享 SubscribeAttention 以 LLM 事件为输入，gateway 是投影输入）
-		// 并收集接受连接器集合——scope=all 未绑定事件的广播投递需要它。
-		acceptedConnectors := make([]string, 0, 2)
-		if store != nil {
-			for _, cfg := range store.ListConfigs() {
-				if !cfg.Enabled {
-					continue
-				}
-				if cfg.Policy.AcceptsNotice(notice, func(session connectors.SessionRef) bool {
-					for _, binding := range store.ListBindings(cfg.ID) {
-						if binding.Session == session {
-							return true
-						}
-					}
-					return false
-				}) {
-					acceptedConnectors = append(acceptedConnectors, cfg.ID)
-				}
-			}
-			if len(acceptedConnectors) == 0 {
-				return
-			}
-		} else {
-			// 无 store（纯测试口径）：全量投递。
-			acceptedConnectors = nil
-		}
 		go func() {
-			if err := notifyScoped(ctx, acceptedConnectors, notice); err != nil && logf != nil {
-				logf("connector attention projection %s delivery failed (session=%s): %v", notice.Kind, sessionID, err)
+			if err := im.Deliver(ctx, notify.Event{Kind: kind, Target: sessionID}); err != nil && logf != nil {
+				logf("connector attention projection %s delivery failed (session=%s): %v", kind, sessionID, err)
 			}
 		}()
 	}

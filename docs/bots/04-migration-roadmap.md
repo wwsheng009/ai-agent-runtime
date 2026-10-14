@@ -36,7 +36,7 @@
 | 交付物 | 状态 | 位置 |
 |--------|------|------|
 | 事件异步订阅原语 | ✅ 完成 | `backend/internal/events/async.go`（`SubscribeAsync` + 队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例） |
-| notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；**2026-10-14：Dispatcher/DeliveryLedger 内核切片落地**（`internal/notify/{kinds,ledger,dispatcher}.go`：跨通道 DedupKey 原子认领 + 优先级路由——high 扇出/normal 主通道/low 收件箱；测试 9 例）；通道适配、宿主切流与偏好/在场待续 |
+| notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；**2026-10-14：Dispatcher/DeliveryLedger 内核切片落地**（`internal/notify/{kinds,ledger,dispatcher}.go`：跨通道 DedupKey 原子认领 + 优先级路由——high 扇出/normal 主通道/low 收件箱；测试 9 例）；**切片二（2026-10-14）**：通道适配落地（`internal/notify/channels/{webpush,ntfy,im}.go`）+ gateway push 路径切流（D6 路由：high 扇出/normal 主通道；新增 TestPushNotifierRoutingD6）；跨路径统一账本与偏好/在场待续 |
 | 契约包骨架 | ✅ 完成 | `backend/internal/connectors/api/schema.go`（Schema 契约 + 校验/脱敏/合并提交）+ `internal/connectors/restapi`（管理面 CRUD/schema/test/reload + webhook 入口，12 例）；三宿主契约矩阵随各宿主接线补齐 |
 | 通知语义对照表 | ◐ 部分 | `internal/notify` 的 `PriorityOf` 即落点（approval/question/error→high，completed/waiting→normal）；与 supervision/IM 文案的映射在 P1 随通道落地补齐 |
 

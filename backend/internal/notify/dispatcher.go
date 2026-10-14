@@ -13,18 +13,23 @@ import (
 )
 
 // Channel 是通知通道（WebPush/ntfy/IM/SSE/收件箱/终端…，由宿主适配）。
+// Deliver 接收完整 Event：除信封外还带 Kind/去重键/寻址提示（如 IM 通道用
+// Target 定位会话），通道实现忽略自身不需要的字段。
 type Channel interface {
 	Name() string
-	Deliver(ctx context.Context, n Notification) error
+	Deliver(ctx context.Context, ev Event) error
 }
 
 // Event 是一次通知投递请求。Priority 由调用方解析（EventFor 按登记表/PriorityOf
 // 推导）；零值 = PriorityLow = 不主动投递（与 Priority 枚举语义一致）。
 type Event struct {
-	Kind         string
-	Priority     Priority
-	DedupKey     string
-	Audience     string
+	Kind     string
+	Priority Priority
+	DedupKey string
+	Audience string
+	// Target 是通道专用寻址提示（可选）：IM 通道用它定位会话
+	// （SessionRef.SessionID）；WebPush/ntfy 忽略。
+	Target       string
 	Notification Notification
 }
 
@@ -94,7 +99,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev Event) (Receipt, error) {
 	receipt := Receipt{Key: key, At: d.now()}
 	var errs []error
 	for _, ch := range d.targetsFor(ev.Priority) {
-		err := ch.Deliver(ctx, ev.Notification)
+		err := ch.Deliver(ctx, ev)
 		out := ChannelOutcome{Channel: ch.Name(), OK: err == nil}
 		if err != nil {
 			out.Err = err.Error()

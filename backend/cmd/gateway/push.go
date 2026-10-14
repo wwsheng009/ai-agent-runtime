@@ -13,6 +13,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ntfy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
+	"github.com/wwsheng009/ai-agent-runtime/internal/notify"
+	"github.com/wwsheng009/ai-agent-runtime/internal/notify/channels"
 )
 
 // pushNotifier watches the registry and delivers a Web Push notification when a
@@ -91,7 +93,7 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 	}
 	p.mu.Lock()
 	next := make(map[string]string)
-	var immediate []push.Notification
+	var immediate []pendingNotification
 	var batched []pendingNotification
 	for _, node := range nodes {
 		for _, sess := range node.Sessions {
@@ -117,7 +119,7 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 			}
 			applyDeliveryPolicy(&note, attention)
 			if isHighPriorityAttention(attention) {
-				immediate = append(immediate, note)
+				immediate = append(immediate, pendingNotification{attention: attention, note: note})
 			} else {
 				batched = append(batched, pendingNotification{attention: attention, note: note})
 			}
@@ -135,9 +137,7 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 			p.timer = time.AfterFunc(p.coalesceWindow, p.flush)
 		}
 	} else {
-		for _, item := range batched {
-			immediate = append(immediate, item.note)
-		}
+		immediate = append(immediate, batched...)
 	}
 	p.mu.Unlock()
 
@@ -160,13 +160,13 @@ func (p *pushNotifier) flush() {
 	if len(batch) == 0 || quiet {
 		return
 	}
-	out := make([]push.Notification, 0, len(batch))
+	out := make([]pendingNotification, 0, len(batch))
 	for attention, items := range batch {
 		note := coalesceNotifications(attention, items)
 		if len(items) > 1 && p.baseURL != "" {
 			note.URL = p.baseURL + "/"
 		}
-		out = append(out, note)
+		out = append(out, pendingNotification{attention: attention, note: note})
 	}
 	p.dispatch(out)
 }
@@ -176,44 +176,43 @@ func (p *pushNotifier) ntfyEnabled() bool {
 	return p != nil && p.ntfy != nil && p.ntfy.Enabled()
 }
 
-// ntfyMessage maps a push notification onto the ntfy channel: high-priority
-// attention becomes max-priority ("urgent") with a warning tag, everything
-// else keeps the default priority.
+// ntfyMessage 保留为通道适配器映射的薄包装（cmd/gateway 既有测试引用；
+// 实现已收敛到 channels.NtfyMessage）。
 func ntfyMessage(n push.Notification) ntfy.Message {
-	priority := ntfy.PriorityDefault
-	tags := []string{"white_check_mark"}
-	if n.Urgency == "high" {
-		priority = ntfy.PriorityMax
-		tags = []string{"warning"}
-	}
-	return ntfy.Message{Title: n.Title, Body: n.Body, URL: n.URL, Priority: priority, Tags: tags}
+	return channels.NtfyMessage(n)
 }
 
-// dispatch delivers notifications asynchronously so the registry callback never
-// blocks on the push services. Every configured channel gets the notification;
-// one failing channel does not suppress the others.
-func (p *pushNotifier) dispatch(notes []push.Notification) {
-	if len(notes) == 0 {
+// dispatch 经 notify.Dispatcher 异步投递（docs/bots/06 §2.4 切流）：按 D6
+// 路由——high=已配置通道全扇出、normal=主通道（webpush，缺省回落首个已配置
+// 通道）、low=跳过。消息形态/合并/静默/在场语义沿用本文件既有链路不变；
+// 跨路径去重账本留待切片三接线（此处 nil ledger，回放语义仍由 seen 快照保证）。
+func (p *pushNotifier) dispatch(items []pendingNotification) {
+	if len(items) == 0 {
 		return
 	}
-	manager := p.manager
-	ntfySender := p.ntfy
-	if manager != nil && manager.Store().Count() == 0 && !(ntfySender != nil && ntfySender.Enabled()) {
-		// Without subscribers the loop below silently delivers nothing, which
+	chans := make([]notify.Channel, 0, 2)
+	if p.manager != nil {
+		chans = append(chans, &channels.WebPush{Manager: p.manager})
+	}
+	if p.ntfy != nil {
+		chans = append(chans, &channels.Ntfy{Sender: p.ntfy})
+	}
+	if len(chans) == 0 {
+		return
+	}
+	dispatcher := notify.NewDispatcher(nil, chans...)
+	dispatcher.SetPrimary("webpush")
+	if p.manager != nil && p.manager.Store().Count() == 0 && !(p.ntfy != nil && p.ntfy.Enabled()) {
+		// Without subscribers the dispatch below silently delivers nothing, which
 		// looks like "notifications never fire". Make that state visible.
-		log.Printf("push: %d notification(s) ready but no device is subscribed; open %s and enable notifications", len(notes), p.baseURL)
+		log.Printf("push: %d notification(s) ready but no device is subscribed; open %s and enable notifications", len(items), p.baseURL)
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		for _, n := range notes {
-			if manager != nil {
-				manager.Broadcast(ctx, n)
-			}
-			if ntfySender != nil && ntfySender.Enabled() {
-				if err := ntfySender.Send(ctx, ntfyMessage(n)); err != nil {
-					log.Printf("ntfy: delivery failed (topic %s): %v", ntfySender.Topic(), err)
-				}
+		for _, item := range items {
+			if _, err := dispatcher.Dispatch(ctx, notify.EventFor(item.attention, item.note.Tag, item.note)); err != nil {
+				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)
 			}
 		}
 	}()
