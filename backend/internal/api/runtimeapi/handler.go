@@ -2791,6 +2791,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			Prompt:          lastMessage,
 			PreparedHistory: prependContextMessages(historyForAgent, contextMessages),
 			EnableReAct:     true,
+			TurnID:          turnID,
 			ReActConfig: &agent.LoopReActConfig{
 				MaxSteps:             agentConfig.MaxSteps,
 				MaxToolCalls:         agentConfig.MaxToolCalls,
@@ -2877,6 +2878,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	execResult, orchErr := runtimechatcore.ExecuteNonStream(ctx, runtimechatcore.ExecuteRequest{
 		Agent:  a,
 		Prompt: lastMessage,
+		TurnID: turnID,
 		OrchestrationRequest: &agent.OrchestrationRequest{
 			Prompt:                     lastMessage,
 			History:                    historyForAgent,

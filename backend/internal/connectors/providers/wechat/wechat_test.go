@@ -306,6 +306,29 @@ func TestActivateRedactsTokenFromErrors(t *testing.T) {
 	}
 }
 
+// TestActivateProbeFailureAllowsPollingBoot 锁定引导死锁修复（2026-10-14）：
+// 新扫码的 bot 在 owner 发出首条消息前 getconfig 必然 ret=-4，激活不得因此
+// 失败——否则轮询永远起不来，收不到首条消息（收不到 → 永远建不了关系）。
+func TestActivateProbeFailureAllowsPollingBoot(t *testing.T) {
+	fake := newFakeILink(t)
+	fake.on("/ilink/bot/getconfig", func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		writeJSON(t, w, map[string]any{"ret": -4, "errmsg": "GetTypingTicket rpc failed"})
+	})
+
+	provider := New(WithAPIBase(fake.URL()), WithLogger(discardLogger))
+	cfg := testConfig("c1", fake.URL(), map[string]string{"owner_user_id": "owner-1"})
+	activation, err := provider.Activate(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("probe failure must not fail activation (bootstrap deadlock): %v", err)
+	}
+	if !provider.SupportsPolling(cfg) {
+		t.Fatal("polling must be bootable after degraded probe")
+	}
+	if !strings.Contains(activation.Info, "ret=-4") {
+		t.Fatalf("expected probe error detail in info: %q", activation.Info)
+	}
+}
+
 // ── 长轮询 ──────────────────────────────────────────────────────────────────
 
 const sampleGetUpdatesBatch = `{
