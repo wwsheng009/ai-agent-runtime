@@ -193,6 +193,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/tools",
+			Usage:       "/tools",
+			Summary:     "查看当前会话工具面目录与来源账本（只读）",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: false,
+		},
+		{
 			Name:        "/routing",
 			Usage:       "/routing [show|doctor [main|sub] [--json]|on|off|main|sub|reset|save] [--to session|workspace|config] [--yes]",
 			Summary:     "查看与调整会话级难度路由（provider / model / reasoning_effort）",

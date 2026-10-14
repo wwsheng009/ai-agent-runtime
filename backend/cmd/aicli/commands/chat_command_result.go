@@ -393,7 +393,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/plan") && !commandMatches(cmdLower, "/plans") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
 		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") &&
-		!commandMatches(cmdLower, "/lsp") && !commandMatches(cmdLower, "/profile") {
+		!commandMatches(cmdLower, "/lsp") && !commandMatches(cmdLower, "/profile") && !commandMatches(cmdLower, "/tools") {
 		return CommandResult{}, false, nil
 	}
 
