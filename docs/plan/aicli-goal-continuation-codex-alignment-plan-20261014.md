@@ -341,6 +341,12 @@ goal:
 - **测试**：`internal/goal` 新增 blocked 写入成功（状态+BlockedReason 落库）与非 active 拒绝；commands 新增 env 回退用例（显式配置优先 / 非法值回落不限制）；补全断言纳入 `budget`。
 - **回归**：`internal/goal`、commands 定向全绿；全量命令包仅外部 `/tools` catalog 用例失败（预先存在）。
 
+### 验收补强：ConPTY 交互式实测（2026-10-15，完成待提交）
+
+- 新增驱动工具 `backend/cmd/goal-conpty-driver`：真实 ConPTY（Win32 `CreatePseudoConsole`，复用 `conpty-probe` 管线）驱动 `aicli chat` **交互式 TUI**，按步骤注入真实控制字符（CR）并等待输出标记（PTY 滚动窗口 + `debug.log` + transcript 多源）；支持"忙时命令确认门"自动应答。补齐 `run-conpty-goal-e2e.ps1`（script/headless 路径）之外的**行编辑器路径**（含 resume kick 的 `wakeComposerRead` watcher）。
+- 实测（`AICLI_GOAL_MAX_CONTINUATIONS=2`，等待型目标）：启动 1s → 设置目标 → **首轮 2 次续跑 + 上限提示** → pause（摘要展示 `Tokens: 78457`，M3 记账实测生效）→ resume → **kick 触发第二轮 2 次续跑 + 上限提示**（debug：attempt 行=4、cap 行=2）→ clear → `/exit` 干净退出（exit=0）。驱动 **9/9 步骤 PASS**。
+- 实测备注：① 交互式 TUI 空闲时**不重绘**属正常（此前"加载静止"疑点排除）；② 忙时输入 slash 命令会进入既有"Phase A 确认门（y/N）"，非缺陷；驱动已按此适配。
+
 ---
 
 ## 附录 A：Codex main 关键证据索引
