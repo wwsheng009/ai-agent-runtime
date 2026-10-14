@@ -1278,6 +1278,7 @@ func TestSendIsolatedGroupChatUsesGroupEndpoint(t *testing.T) {
 		t.Fatalf("payload = %+v", sent[0].payload)
 	}
 }
+
 // ── Gateway intents 覆盖（对齐 codex-server 的 qqbot_intents） ─────────────
 
 func TestGatewayIdentifyIntentsOverrideAndFallback(t *testing.T) {
@@ -1305,5 +1306,70 @@ func TestGatewayIdentifyIntentsOverrideAndFallback(t *testing.T) {
 	waitFor(t, "fallback identify", func() bool { return len(fallback.identifyPayloads()) == 1 })
 	if got := fallback.identifyPayloads()[0].d["intents"]; got != float64(gatewayIntents) {
 		t.Fatalf("fallback intents = %v, want %d", got, gatewayIntents)
+	}
+} // ── 入站富媒体 / 语音 ASR / 昵称（2026-10-15，对齐官方 attachments 字段） ────
+
+func TestParseGroupImageOnlyMessageNotDropped(t *testing.T) {
+	data := `{"id":"e-img","group_openid":"g1","content":"","author":{"member_openid":"m1","username":"小明"},` +
+		`"attachments":[{"content_type":"image/jpeg","filename":"photo.jpg",` +
+		`"url":"https://multimedia.nt.qq.com.cn/download?appid=x&fileid=y","width":1920,"height":1080,"size":256000}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok {
+		t.Fatal("image-only message must not be dropped")
+	}
+	if msg.Text != "[图片: photo.jpg]" {
+		t.Fatalf("text = %q", msg.Text)
+	}
+	if msg.UserName != "小明" || msg.UserID != "m1" {
+		t.Fatalf("user = %q/%q, want 小明/m1", msg.UserID, msg.UserName)
+	}
+	if len(msg.Media) != 1 {
+		t.Fatalf("media = %+v", msg.Media)
+	}
+	media := msg.Media[0]
+	if media.Kind != "image" || media.FileName != "photo.jpg" || media.URL == "" || media.Size != 256000 {
+		t.Fatalf("media = %+v", media)
+	}
+}
+
+func TestParseC2CVoicePrefersASRText(t *testing.T) {
+	data := `{"id":"e-voice","content":"","author":{"user_openid":"u1"},` +
+		`"attachments":[{"content_type":"voice","filename":"a.silk","url":"https://x/voice",` +
+		`"voice_wav_url":"https://x/voice.wav","asr_refer_text":"今天天气不错"}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "C2C_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok {
+		t.Fatal("voice-only message must not be dropped")
+	}
+	if msg.Text != "今天天气不错" {
+		t.Fatalf("text = %q, want ASR transcription", msg.Text)
+	}
+	if len(msg.Media) != 1 || msg.Media[0].Kind != "voice" {
+		t.Fatalf("media = %+v", msg.Media)
+	}
+}
+
+func TestParseC2CVoiceWithoutASRPlaceholder(t *testing.T) {
+	data := `{"id":"e-voice2","content":"","author":{"user_openid":"u1"},` +
+		`"attachments":[{"content_type":"voice","filename":"a.silk","url":"https://x/voice"}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "C2C_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok || msg.Text != "[语音: a.silk]" {
+		t.Fatalf("text = %q (ok=%v), want [语音: a.silk]", msg.Text, ok)
+	}
+}
+
+func TestParseTextWithAttachmentsAppendsPlaceholder(t *testing.T) {
+	data := `{"id":"e-mix","group_openid":"g1","content":"<@!bot> 看看这个",` +
+		`"author":{"member_openid":"m1"},` +
+		`"attachments":[{"content_type":"image/png","filename":"a.png","url":"https://x/a.png"},` +
+		`{"content_type":"file","filename":"doc.pdf","url":"https://x/doc.pdf"}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok {
+		t.Fatal("mixed message must parse")
+	}
+	if msg.Text != "看看这个\n[图片: a.png] [文件: doc.pdf]" {
+		t.Fatalf("text = %q", msg.Text)
+	}
+	if len(msg.Media) != 2 {
+		t.Fatalf("media = %+v", msg.Media)
 	}
 }

@@ -171,6 +171,38 @@
   （回复 432/3396 字符）、D6 路由（provider=baidu/model=deepseek-v4.1-flash/effort=max）
   全链路实测通过；期间定位并修复「本机绑定被误判掉线」的假 R2a（回归见
   [09 §7.2](./09-multi-instance-binding.md)）。
+- 状态（2026-10-15，QQ 切片 3：入站富媒体元数据 + 官方能力审计）：解析
+  `attachments`（图片/视频/语音/文件）→ `InboundMessage.Media` 元数据，**媒体-only
+  消息不再被静默丢弃**；语音优先取 `asr_refer_text` 转写，无转写时 `[语音: 名称]`
+  占位；纯文本带附件追加 `[图片/文件: 名称]` 行；`UserName` 优先 `author.username`
+  昵称。测试新增 4 例（图片-only/语音 ASR/无 ASR 占位/混合附件）。
+
+  **QQ 官方能力对照与缺口（2026-10-15 审计：bot.q.qq.com 官方文档 + tencent-connect/botgo）**：
+
+  | 能力（官方） | 本仓现状 | 处置 |
+  |--------------|----------|------|
+  | 文本 / Markdown 发送（msg_type 0/2） | ✅ 文本 + `markdown_support`（原生 content） | — |
+  | 富媒体发送（msg_type=7：图片/视频/语音/文件） | ✅ 整文件上传（file_data base64，URL 先下载）+ 单聊/群聊端点隔离 | 官方 URL 直传（`{"url":…}`）与**分片上传**（大文件）未实现 → P1 |
+  | 富媒体接收（`attachments`） | ◐ 元数据入 `Media` + 占位文本；语音优先 ASR | 下载/转存管线未接（对齐微信 `local_path` 模式）→ P1 |
+  | 语音 `voice_wav_url` | ◐ 未消费（优先 ASR；无 ASR 用占位） | P2 |
+  | 引用消息（`message_reference` / `message_type=103`+`msg_elements`） | ◐ 旧 `message_reference` 摘要；103 嵌套元素未解析 | P2 |
+  | `GROUP_MESSAGE_CREATE`（全量群消息，平台开启后推送） | ❌ 未解析（开启后消息将被忽略） | P1（需触发策略：仅@/全量，产品决策） |
+  | 流式消息（`/v2/users/{openid}/stream_messages`，单聊） | ❌ 未实现 | P2（可接 `StreamingProvider`；群聊不支持） |
+  | 输入状态（msg_type=6 `input_notify`） | ❌ 未实现 | P2（可接 `TypingProvider`） |
+  | 消息撤回（发送后 2 分钟内） | ❌ 未实现 | P3 |
+  | 频道（子频道/私信/Embed/表情表态） | ◐ 仅 `AT_MESSAGE_CREATE` 防御性解析，发送未实现；表情仅频道 | 设计范围外（QQ=群/C2C）；按需扩展 |
+  | 键盘/按钮交互（`keyboard`/`INTERACTION_CREATE`）、Ark/Embed 发送 | ❌ | NG（按需；接收侧卡片 data 可透出） |
+  | 主动消息频控（10/qps、1000/日/用户；用户可关闭） | ◐ 平台错误透传，无本地频控账本 | P2（可选） |
+  | 被动回复窗口（单聊 60min/4 次、群 5min/5 次） | ✅ `msg_id`+`msg_seq` 递增、失败降级主动 | 回复次数上限未本地计数（平台兜底） |
+  | Webhook 事件订阅（官方支持 HTTP 回调） | ❌ 仅 WebSocket | P2（gateway 公网宿主可选） |
+  | WS 错误码语义（4006/4007/4009/4914/4915…） | ◐ op9/session 清理 + 退避重连；4914/4915 未特判 | P2 |
+  | 接口域名（官方 2026-08 统一 `api.bot.qq.com`） | ◐ 默认 `api.sgroup.qq.com`（实测可用），`api_base` 可覆盖 | P2（默认值切换评估） |
+  | Shard 分片（`/gateway/bot` 建议数、`session_start_limit`） | ◐ 固定 `[0,1]`；`intents` 可覆盖 | 大规模再议 |
+
+  > 审计结论：**对话主链路（群@/C2C 文本 + Markdown + 富媒体发送 + 被动/主动回复 +
+  > 引用/会话策略/授权校验/多入口）已完整**；缺口集中在 **入站媒体下载/转存**、
+  > **`GROUP_MESSAGE_CREATE` 全量事件**、**流式/输入状态**三类官方能力，以及运维向的
+  > 频控/域名/回调方式；均按 P1→P3 列出，不与既有 D7/NG 决策冲突。
 
 ### P3 · 微信 + 媒体/主动推送完善（≈4–5 天）
 

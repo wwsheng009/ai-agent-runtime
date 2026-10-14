@@ -469,20 +469,25 @@ type quotedMessage struct {
 //     频道 "channel:<channel_id>"；
 //   - MessageID 用事件 id（同时是 QQ 被动回复的 msg_id）；
 //   - UserID 用 author.member_openid / author.user_openid / author.id；
+//   - UserName 优先 author.username 昵称，缺省回退 openid/id；
 //   - Text 去空白（群/频道消息额外剥掉开头的 @机器人 标记；引用消息拼接
-//     "Quoted: …" 前缀），无文本则跳过。
+//     "Quoted: …" 前缀）；媒体-only 消息不丢弃——语音优先取 asr_refer_text
+//     转写，其余按附件生成 "[图片/语音/视频/文件: 名称]" 占位；
+//   - Media 携带 attachments 元数据（url/文件名/类型/大小，下载留待媒体管线）。
 func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawMessage) (connectors.InboundMessage, bool) {
 	connectorID := cfg.ID
 	switch strings.TrimSpace(eventType) {
 	case "GROUP_AT_MESSAGE_CREATE":
 		var event struct {
-			ID               string            `json:"id"`
-			MsgID            string            `json:"msg_id"`
-			GroupOpenID      string            `json:"group_openid"`
-			Content          string            `json:"content"`
-			MessageReference *messageReference `json:"message_reference"`
+			ID               string              `json:"id"`
+			MsgID            string              `json:"msg_id"`
+			GroupOpenID      string              `json:"group_openid"`
+			Content          string              `json:"content"`
+			MessageReference *messageReference   `json:"message_reference"`
+			Attachments      []gatewayAttachment `json:"attachments"`
 			Author           struct {
 				MemberOpenID string `json:"member_openid"`
+				Username     string `json:"username"`
 			} `json:"author"`
 		}
 		if err := json.Unmarshal(data, &event); err != nil {
@@ -494,7 +499,7 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if messageID == "" || groupOpenID == "" || memberOpenID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, true, event.MessageReference)
+		text := normalizeInboundText(event.Content, true, event.MessageReference, event.Attachments)
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
@@ -509,8 +514,9 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			ChatTitle:   groupOpenID,
 			MessageID:   messageID,
 			UserID:      memberOpenID,
-			UserName:    memberOpenID,
+			UserName:    firstNonEmpty(event.Author.Username, memberOpenID),
 			Text:        text,
+			Media:       attachmentsToMedia(event.Attachments),
 			ProviderData: map[string]any{
 				"qqbot_message_type":  chatKindGroup,
 				"qqbot_group_openid":  groupOpenID,
@@ -521,12 +527,14 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		}, true
 	case "C2C_MESSAGE_CREATE":
 		var event struct {
-			ID               string            `json:"id"`
-			MsgID            string            `json:"msg_id"`
-			Content          string            `json:"content"`
-			MessageReference *messageReference `json:"message_reference"`
+			ID               string              `json:"id"`
+			MsgID            string              `json:"msg_id"`
+			Content          string              `json:"content"`
+			MessageReference *messageReference   `json:"message_reference"`
+			Attachments      []gatewayAttachment `json:"attachments"`
 			Author           struct {
 				UserOpenID string `json:"user_openid"`
+				Username   string `json:"username"`
 			} `json:"author"`
 		}
 		if err := json.Unmarshal(data, &event); err != nil {
@@ -537,7 +545,7 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if messageID == "" || userOpenID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, false, event.MessageReference)
+		text := normalizeInboundText(event.Content, false, event.MessageReference, event.Attachments)
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
@@ -547,8 +555,9 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			Chat:        chatKindUser + ":" + userOpenID,
 			MessageID:   messageID,
 			UserID:      userOpenID,
-			UserName:    userOpenID,
+			UserName:    firstNonEmpty(event.Author.Username, userOpenID),
 			Text:        text,
+			Media:       attachmentsToMedia(event.Attachments),
 			ProviderData: map[string]any{
 				"qqbot_message_type": chatKindUser,
 				"qqbot_user_openid":  userOpenID,
@@ -560,13 +569,15 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		// 频道（guild）@机器人消息：防御性解析（默认 intents 未订阅频道事件，
 		// 后续切片放开 intents 后即可用）；发送路径未实现，见 Send。
 		var event struct {
-			ID               string            `json:"id"`
-			Content          string            `json:"content"`
-			ChannelID        string            `json:"channel_id"`
-			GuildID          string            `json:"guild_id"`
-			MessageReference *messageReference `json:"message_reference"`
+			ID               string              `json:"id"`
+			Content          string              `json:"content"`
+			ChannelID        string              `json:"channel_id"`
+			GuildID          string              `json:"guild_id"`
+			MessageReference *messageReference   `json:"message_reference"`
+			Attachments      []gatewayAttachment `json:"attachments"`
 			Author           struct {
-				ID string `json:"id"`
+				ID       string `json:"id"`
+				Username string `json:"username"`
 			} `json:"author"`
 		}
 		if err := json.Unmarshal(data, &event); err != nil {
@@ -578,7 +589,7 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if messageID == "" || channelID == "" || userID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, true, event.MessageReference)
+		text := normalizeInboundText(event.Content, true, event.MessageReference, event.Attachments)
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
@@ -589,8 +600,9 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			ChatTitle:   channelID,
 			MessageID:   messageID,
 			UserID:      userID,
-			UserName:    userID,
+			UserName:    firstNonEmpty(event.Author.Username, userID),
 			Text:        text,
+			Media:       attachmentsToMedia(event.Attachments),
 			ProviderData: map[string]any{
 				"qqbot_message_type": chatKindChannel,
 				"qqbot_channel_id":   channelID,
@@ -604,10 +616,104 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 	}
 }
 
+// gatewayAttachment 是入站消息附件（官方 attachments 字段：图片/视频/语音/文件）。
+// 语音另带 voice_wav_url（SILK 转换后 WAV）与 asr_refer_text（ASR 参考转写）。
+type gatewayAttachment struct {
+	URL          string `json:"url"`
+	FileName     string `json:"filename"`
+	ContentType  string `json:"content_type"`
+	Size         int64  `json:"size"`
+	VoiceWavURL  string `json:"voice_wav_url"`
+	ASRReferText string `json:"asr_refer_text"`
+}
+
+// attachmentsToMedia 把官方 attachments 映射为核心 Media 元数据（additive）：
+// 下载/转存留给后续媒体管线；本层保证元数据（含带签名的 url）不丢。
+func attachmentsToMedia(attachments []gatewayAttachment) []connectors.Media {
+	if len(attachments) == 0 {
+		return nil
+	}
+	medias := make([]connectors.Media, 0, len(attachments))
+	for _, item := range attachments {
+		url := strings.TrimSpace(item.URL)
+		fileName := strings.TrimSpace(item.FileName)
+		if url == "" && fileName == "" {
+			continue
+		}
+		medias = append(medias, connectors.Media{
+			Kind:        attachmentKind(item.ContentType),
+			FileName:    fileName,
+			ContentType: strings.TrimSpace(item.ContentType),
+			Size:        item.Size,
+			URL:         url,
+		})
+	}
+	if len(medias) == 0 {
+		return nil
+	}
+	return medias
+}
+
+// attachmentKind 映射 content_type → 核心媒体类别（image|voice|video|file）。
+func attachmentKind(contentType string) string {
+	lower := strings.ToLower(strings.TrimSpace(contentType))
+	switch {
+	case lower == "voice":
+		return "voice"
+	case strings.HasPrefix(lower, "image/"):
+		return "image"
+	case strings.HasPrefix(lower, "video/"):
+		return "video"
+	default:
+		return "file"
+	}
+}
+
+// voiceASRText 返回首个语音附件的 ASR 参考转写（无则空串）。
+func voiceASRText(attachments []gatewayAttachment) string {
+	for _, item := range attachments {
+		if strings.ToLower(strings.TrimSpace(item.ContentType)) != "voice" {
+			continue
+		}
+		if asr := strings.TrimSpace(item.ASRReferText); asr != "" {
+			return asr
+		}
+	}
+	return ""
+}
+
+// attachmentPlaceholderText 按附件生成可读占位（"[图片: photo.jpg] [语音: a.silk]"），
+// 保证媒体-only 消息不被静默丢弃、agent 至少能感知附件存在与种类。
+func attachmentPlaceholderText(attachments []gatewayAttachment) string {
+	parts := make([]string, 0, len(attachments))
+	for _, item := range attachments {
+		var label string
+		switch attachmentKind(item.ContentType) {
+		case "image":
+			label = "图片"
+		case "voice":
+			label = "语音"
+		case "video":
+			label = "视频"
+		default:
+			label = "文件"
+		}
+		name := strings.TrimSpace(item.FileName)
+		if name == "" {
+			parts = append(parts, "["+label+"]")
+			continue
+		}
+		parts = append(parts, "["+label+": "+name+"]")
+	}
+	return strings.Join(parts, " ")
+}
+
 // normalizeInboundText 归一化入站文本：去掉首尾空白；stripMention 为 true 时
 // 剥掉 QQ 群/频道消息内容开头的 @机器人 标记（<@!bot_id> / <@bot_id>）；
 // 带引用消息时拼接 "Quoted: <摘要>" 前缀（对齐上游 codex-server 语义）。
-func normalizeInboundText(content string, stripMention bool, ref *messageReference) string {
+// 媒体-only 消息的降级顺序：语音 ASR 转写（无包装，直接作为文本）→ 附件
+// 占位（"[图片/语音/视频/文件: 名称]"）；纯文本消息带附件时追加占位行。
+func normalizeInboundText(content string, stripMention bool, ref *messageReference, attachments []gatewayAttachment) string {
 	trimmed := strings.TrimSpace(content)
 	if stripMention {
 		for strings.HasPrefix(trimmed, "<@") {
@@ -616,6 +722,18 @@ func normalizeInboundText(content string, stripMention bool, ref *messageReferen
 				break
 			}
 			trimmed = strings.TrimSpace(trimmed[index+1:])
+		}
+	}
+	switch {
+	case trimmed == "":
+		if asr := voiceASRText(attachments); asr != "" {
+			trimmed = asr
+		} else {
+			trimmed = attachmentPlaceholderText(attachments)
+		}
+	case len(attachments) > 0:
+		if placeholder := attachmentPlaceholderText(attachments); placeholder != "" {
+			trimmed += "\n" + placeholder
 		}
 	}
 	quoted := extractQuotedText(ref)
