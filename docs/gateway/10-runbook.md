@@ -387,12 +387,20 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 3. ACME 生产域名不要切到 staging CA / `acme-wildcard-staging` 存储，除非确认 CF 回源为 Full（非 strict）。
 
 **发布（含缓存）**：Cloudflare 会按扩展名缓存 `*.js`/`*.css` 4 小时（HTML/manifest 默认不缓存）。
-因此每次发布必须同步 bump 控制台资源版本（当前 `v=34`）：
+因此每次发布必须同步 bump 控制台资源版本（当前 `v=35`）：
 `console/index.html` 的 `app.js?v=`/`style.css?v=`、`console/sw.js` 的 `CACHE` 与 `SHELL`、
 `console/app.js` 里 `serviceWorker.register("./sw.js?v=")`；否则手机端会继续拿到旧 JS，
 直到 CF TTL（4h）过期或手动 purge。发布步骤：`GOOS=linux GOARCH=amd64 go build -trimpath -o gateway ./cmd/gateway`
 → 上传替换 `/opt/aicli-gateway/gateway`（保留 `gateway.bak-*`）→ `systemctl restart aicli-gateway`
 → 校验 `curl -s 'https://aicli.ttai.online/app.js?v=<新版本>' | grep -c 'push-test'`。
+
+> **部署记录（2026-10-14，notify 切片二 + D5 累积修复）**：从 `HEAD=116dc5de` 交叉编译
+> （`-trimpath`，linux/amd64），sha256 `cbe561e5…cf6aa177`；因代理通道对持续大流量不稳，
+> 采用 1MB 分块 + 逐块重试上传 → 服务端 `cat` 拼装（sha 复核）→ 备份
+> `gateway.bak-20261014-154826` → 替换重启。验证：`/proc/<pid>/exe` sha 一致、
+> registry 恢复 70 条 / 7 live 节点秒回连、console 200（`sw.js?v=35`）、
+> `POST /api/push/test` 双通道 `delivered=1`、线上路由抽验（normal `completed` 不再进
+> ntfy；high `error` 以 priority=5 照常到达）。
 
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

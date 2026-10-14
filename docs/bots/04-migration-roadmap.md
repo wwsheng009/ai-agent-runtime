@@ -36,7 +36,7 @@
 | 交付物 | 状态 | 位置 |
 |--------|------|------|
 | 事件异步订阅原语 | ✅ 完成 | `backend/internal/events/async.go`（`SubscribeAsync` + 队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例） |
-| notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；**2026-10-14：Dispatcher/DeliveryLedger 内核切片落地**（`internal/notify/{kinds,ledger,dispatcher}.go`：跨通道 DedupKey 原子认领 + 优先级路由——high 扇出/normal 主通道/low 收件箱；测试 9 例）；**切片二（2026-10-14）**：通道适配落地（`internal/notify/channels/{webpush,ntfy,im}.go`）+ gateway push 路径切流（D6 路由：high 扇出/normal 主通道；新增 TestPushNotifierRoutingD6）；跨路径统一账本与偏好/在场待续 |
+| notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；**2026-10-14：Dispatcher/DeliveryLedger 内核切片落地**（`internal/notify/{kinds,ledger,dispatcher}.go`：跨通道 DedupKey 原子认领 + 优先级路由——high 扇出/normal 主通道/low 收件箱；测试 9 例）；**切片二（2026-10-14）**：通道适配落地（`internal/notify/channels/{webpush,ntfy,im}.go`）+ gateway push 路径切流（D6 路由：high 扇出/normal 主通道；新增 TestPushNotifierRoutingD6）；**生产部署（2026-10-14）**：公网 gateway 上线新构建并抽验（normal 停发 ntfy / high priority=5 / push-test 双通道 OK）；跨路径统一账本与偏好/在场待续 |
 | 契约包骨架 | ✅ 完成 | `backend/internal/connectors/api/schema.go`（Schema 契约 + 校验/脱敏/合并提交）+ `internal/connectors/restapi`（管理面 CRUD/schema/test/reload + webhook 入口，12 例）；三宿主契约矩阵随各宿主接线补齐 |
 | 通知语义对照表 | ◐ 部分 | `internal/notify` 的 `PriorityOf` 即落点（approval/question/error→high，completed/waiting→normal）；与 supervision/IM 文案的映射在 P1 随通道落地补齐 |
 
@@ -147,6 +147,23 @@
   假网关 15 例（令牌缓存/脱敏、握手、群/C2C 解析、seq 持久化、重启 Resume、心跳、断线重连、
   Send 群/C2C/msg_seq/主动降级），`go test -race` 全绿；runtime-server 与 aicli 均已注册。
   **待续**：媒体（上传/下载）与主动消息（无 msg_id 的配额/权限路径）。
+- 状态（2026-10-14，QQ 切片 2）：QQ 适配器 ◇ **功能补齐（对齐 codex-server）+ 授权校验动作**——
+  ①「授权校验」ActionProvider（`qqbot/auth.go`，Schema `actions` kind=button）：
+  `check_credentials` = App Access Token 校验 + `GET /users/@me` 回读机器人信息，
+  返回 `{ok, app_id, sandbox, api_base, bot, message}` 展示载荷（不含密钥，错误脱敏）；
+  三端配置入口零改动支持（React/微前端 kind=button 直接执行并展示结果；TUI `/bots`
+  动作屏新增通用动作行并渲染返回；移动/桌面同一 Schema）。
+  ②出站补齐：文本按 2000 rune 分片（`msg_seq` 递增去重）、`markdown_support=true`
+  时 `msg_type=2` markdown 发送、被动回复失败（4xx，排除 401/429）自动降级为主动发送、
+  rich media 出站（`/v2/{groups|users}/{id}/files` 上传取 `file_info` → `msg_type=7`；
+  URL 下载/本地绝对路径两类来源，file_type 按 Kind/Content-Type 推导）。
+  ③入站补齐：`message_reference` 引用摘要拼接 `Quoted:` 前缀；`share_session_in_channel`
+  群会话策略（缺省 true=群共享，false=群内按成员隔离 `group:<gid>:user:<member>`）。
+  测试新增 12 例（授权校验成功/失败/脱敏、markdown、分片、降级、媒体上传+发送、
+  本地文件、引用解析、隔离键解析与发送），`go test -race` 全绿。
+  **说明**：QQ 官方开放平台**没有扫码登录协议**（凭据来自 bot.q.qq.com 后台），
+  因此「扫码」以等价便捷流落地：保存凭据后一键授权校验 + Activate 自动校验；
+  不引入第三方个人号协议（D7：官方优先）。
 
 ### P3 · 微信 + 媒体/主动推送完善（≈4–5 天）
 
@@ -164,9 +181,35 @@
   （约定见 03 文档 §6）。测试：`httptest` 假 iLink 服务 14 例（激活缓存/脱敏、
   长轮询解析与游标续传、退避重连、Send 清洗、typing、登录态机与刷新、action 错误），
   `go test -race` 全绿；runtime-server 与 aicli 均已注册。
-  **待续**：真媒体（CDN 上传/下载/转码，ffmpeg 降级）、errcode -2 失败重放、
-  context_token 跨重启持久化（当前进程内记忆，重启后需该会话下次入站才能回复）、
-  微信作为注意力通道的开关/静音。
+  **待续**：errcode -2 失败重放、context_token 跨重启持久化（当前进程内记忆，
+  重启后需该会话下次入站才能回复）、微信作为注意力通道的开关/静音。
+- 状态（2026-10-14，微信切片 2c：媒体）：微信适配器 ◇ **真媒体收发落地**——
+  `media.go`/`attachments.go`：入站 CDN 引用下载（`full_url` 或
+  `/download?encrypted_query_param=`）+ AES-ECB（PKCS#7）解密 + 临时目录落盘
+  （0600），语音 silk→wav 转码（`AICLI_WECHAT_SILK_DECODER`/
+  `AICLI_WECHAT_VOICE_DECODER` > `silk_v3_decoder` > `ffmpeg`，工具缺失保留
+  silk 原件），并把 `[Image/Voice/File/Video attachment]` 摘要块
+  （`file_name`/`content_type`/`local_path`/`source_url`）与
+  `wechat-attachments` 回发提示并入给 agent 的文本；出站支持
+  `OutboundMessage.Media`（Path/`file://`/URL 先下载）与回复文本里的
+  attachment 协议（围栏块/标题块/`MEDIA:` 指令行/裸 `image <路径>` 行，
+  voice 降级为 file），经 `getuploadurl`（明文 md5 + 随机 aeskey）→ AES-ECB
+  密文上传（`upload_full_url` 或 CDN `/upload`，取 `x-encrypted-param`，
+  网络/5xx 重试 ≤3、4xx 立即失败）→ `sendmessage` image/video/file item
+  （aes_key 线上格式 `base64(hex(aeskey))`）；单条媒体失败降级为
+  `[附件发送失败: …]` 文本提示，不失败整条回复。Schema 新增 `cdn_base_url`
+  （默认 `https://novac2c.cdn.weixin.qq.com/c2c`）。测试：新增 11 例
+  （AES 往返/校验、入站图片下载解密、语音转码成功/失败保留 silk、下载失败保留
+  元数据、协议解析 6 形态、出站图片/文件/远端 URL 上传与 item 字段、上传失败
+  降级、Schema/默认值），`go test -race ./internal/connectors/...` 全绿。
+  **待续**：errcode -2 失败重放、context_token 跨重启持久化、远端视频转码
+  （非 mp4 远端视频直接上传，可能不被接收端接受）、媒体大小上限改为策略可配
+  （当前下载/上传硬上限 100MB）、临时媒体目录清理策略（入站文件当前保留供
+  agent 读取）、出站远端 URL 的 SSRF 防护（与 [08 §7.3](./08-operations-and-acceptance.md)
+  安全用例对齐）、远端媒体页面解析/类型校验未移植（上游
+  `wechat_outbound_media_resolver.go`：结构化页面候选提取与 m3u8/mpd 拒绝；
+  本切片对远端 URL 直连下载后上传，声明 image/video 却给页面型 URL 时会原样
+  处理）、微信作为注意力通道开关/静音。
 
 ## 3. 测试策略
 
@@ -218,7 +261,9 @@
   scope=all 跨宿主注意力扇出（D）；`runner_preference` 配置键 + 选举器；实现地图 #8/#9/#10 全收口
   （N6/N7/N8 测试覆盖；见 09 §9 实施地图逐行状态）。配置在三宿主间可迁移（共享 config.yaml + D1 统一 state）；未配置连接器时回归全绿。
 - [ ] P3：微信扫码登录 + 文本/图片/语音；IM 通道可开关/静音。
-  （◐ 扫码登录 + 文本收发已落地（切片 2b）；图片/语音媒体链路待续）
+  （◐ 扫码登录 + 文本收发已落地（切片 2b）；媒体链路已落地（切片 2c 2026-10-14：
+  入站 CDN 下载/解密/语音 silk→wav 转码 + 出站 CDN 上传与 attachment 协议，
+  见本文件 §2 P3 状态）；IM 通道开关/静音待续）
 - [ ] 通用性：新增一个通道（假 provider）只需改核心，三端前端零改动。
 - [ ] 安全：签名校验、白名单、密钥不回流三项有单测/端到端证据。
 - [ ] 可观测：每连接器状态/计数/最近错误/测试消息在两端 UI 可见。
