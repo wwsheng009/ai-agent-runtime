@@ -15,6 +15,8 @@ type ChannelOutcome struct {
 	Channel string
 	OK      bool
 	Err     string
+	// Skipped 表示该通道被偏好（静音/优先级门槛）跳过，未尝试投递。
+	Skipped bool
 }
 
 // Receipt 是一次投递的回执（按 DedupKey 记账）。

@@ -351,6 +351,12 @@ func run() int {
 		return 1
 	}
 	notifier.ntfy = ntfySender
+	// 通知偏好（可选文件；06 §1 D6 三级键）：缺失/无偏好 = 行为不变。
+	if prefs, prefsErr := loadNotifyPreferences(filepath.Join(*dataDir, "notify-prefs.json")); prefsErr != nil {
+		fmt.Fprintf(os.Stderr, "gateway: WARNING: notify preferences ignored: %v\n", prefsErr)
+	} else {
+		notifier.preferences = prefs
+	}
 	// connectorAttentionHook 在下方 setupGatewayConnectors 装配后赋值（var 预声明：
 	// tunnel OnSessionTransition 闭包先于 connectors setup 构造，靠闭包捕获变量
 	// 实现构造期后接线；装配失败时保持 nil，transition 回调 nil 检查兜底）。

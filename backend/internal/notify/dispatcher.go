@@ -29,7 +29,10 @@ type Event struct {
 	Audience string
 	// Target 是通道专用寻址提示（可选）：IM 通道用它定位会话
 	// （SessionRef.SessionID）；WebPush/ntfy 忽略。
-	Target       string
+	Target string
+	// Session 是事件归属会话（可选）：偏好解析（session:<id>）用；IM 通道的
+	// 投递寻址仍用 Target（两者通常相同，但语义分层）。
+	Session      string
 	Notification Notification
 }
 
@@ -55,6 +58,7 @@ type Dispatcher struct {
 	primary  string
 	clock    func() time.Time
 	logf     func(string, ...any)
+	prefs    PreferenceStore
 }
 
 // NewDispatcher 注册通道（顺序 = 确定性扇出顺序）；ledger 可为 nil（不去重）。
@@ -75,6 +79,9 @@ func (d *Dispatcher) SetPrimary(name string) { d.primary = strings.TrimSpace(nam
 
 // SetLogger 注入短路/失败日志（可 nil）。
 func (d *Dispatcher) SetLogger(logf func(string, ...any)) { d.logf = logf }
+
+// SetPreferences 注入偏好存储（nil = 无偏好，行为不变）。
+func (d *Dispatcher) SetPreferences(prefs PreferenceStore) { d.prefs = prefs }
 
 // SetClock 注入时钟（测试用；缺省 time.Now）。
 func (d *Dispatcher) SetClock(clock func() time.Time) {
@@ -99,6 +106,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev Event) (Receipt, error) {
 	receipt := Receipt{Key: key, At: d.now()}
 	var errs []error
 	for _, ch := range d.targetsFor(ev.Priority) {
+		if d.prefs != nil && !d.prefs.Resolve(ev.Session, ch.Name()).Allows(ev.Priority) {
+			receipt.Outcomes = append(receipt.Outcomes, ChannelOutcome{Channel: ch.Name(), Skipped: true})
+			continue
+		}
 		err := ch.Deliver(ctx, ev)
 		out := ChannelOutcome{Channel: ch.Name(), OK: err == nil}
 		if err != nil {

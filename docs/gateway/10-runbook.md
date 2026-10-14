@@ -379,6 +379,13 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 - **故障**：`NO_READY_BACKEND_GROUP` → 检查 edge 中该组的 `health.ready_path: "/v1/health"`；
   收不到消息 → 先 `curl 127.0.0.1:2586/v1/health`，再排 edge 路由与 CF 代理。
 
+**通知偏好（可选）**：`<data-dir>/notify-prefs.json`（gateway 启动时装载；改动需重启）——
+三级键 `global` / `session:<id>` / `channel:<name>`，字段 `muted`、`min_priority`
+（high|normal|low），更具体层级**字段级**覆盖（如全局静音 + `channel:webpush` 显式
+解除）。示例：`{"scopes":[{"scope":"channel:ntfy","muted":true}]}`（关闭 ntfy 外发）；
+全局维护窗口：`{"scopes":[{"scope":"global","muted":true}]}`。非法 scope/值 → 启动
+告警并整体忽略（行为不变）。
+
 **edge 配置变更纪律**（2026-10-12 事故教训）：
 1. 改完先 `cd /opt/ai-gateway-edge && ./bin/gateway-edge configtest -c configs/config.yaml` 再重启；
    YAML 缩进错误（如 `acme:` 子键被拉到 `tls:` 同级）会导致重复键 → 崩溃循环、全站 521；

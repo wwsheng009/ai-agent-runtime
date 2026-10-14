@@ -37,6 +37,9 @@ type pushNotifier struct {
 	// 则 IM，否则 Web Push；nil = 一律走 push 侧）。由 connectors 装配供给
 	// （newIMMainChannelPredicate），与该宿主的投影 hook 投递口径逐字同源。
 	imMainChannel func(nodeID, sessionID, kind string) bool
+	// preferences 是三级通知偏好（global/session/channel；nil = 无偏好）。
+	// 由 main.go 从 <data-dir>/notify-prefs.json 装载（缺失 = 行为不变）。
+	preferences notify.PreferenceStore
 
 	// coalesceWindow merges low-priority notifications arriving close together
 	// (0 disables coalescing). quietHours mutes low-priority notifications.
@@ -222,6 +225,7 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 	}
 	dispatcher := notify.NewDispatcher(nil, chans...)
 	dispatcher.SetPrimary("webpush")
+	dispatcher.SetPreferences(p.preferences)
 	if p.manager != nil && p.manager.Store().Count() == 0 && !(p.ntfy != nil && p.ntfy.Enabled()) {
 		// Without subscribers the dispatch below silently delivers nothing, which
 		// looks like "notifications never fire". Make that state visible.
@@ -236,7 +240,9 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 				log.Printf("push: %s routed to IM main channel, push suppressed (%s)", item.attention, item.note.Tag)
 				continue
 			}
-			if _, err := dispatcher.Dispatch(ctx, notify.EventFor(item.attention, item.note.Tag, item.note)); err != nil {
+			ev := notify.EventFor(item.attention, item.note.Tag, item.note)
+			ev.Session = item.sessionID
+			if _, err := dispatcher.Dispatch(ctx, ev); err != nil {
 				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)
 			}
 		}
