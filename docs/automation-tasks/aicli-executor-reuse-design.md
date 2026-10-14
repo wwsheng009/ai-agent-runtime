@@ -97,7 +97,18 @@ localChatRuntimeHost.buildSessionActor(sessionID, session, sessionStore, runtime
 | **E3.4b-余项②** ✅**已完成（契约测试）** | §6 的**新旧路径对比契约测试**（内嵌冻结期望值，G5；需能构造完整 host 的集成测试） | ✅ `cmd/aicli/commands/chat_actor_executor_reuse_contract_test.go`（真实 `bootstrap.Manager` 集成夹具，两路径各建独立夹具）：<br>· `TestAicliExecutorReuseContractFrozenInvariants`——基础会话「建 actor → 跑一轮 → 停 actor」的**冻结字面量**断言：output=`contract ok`、request provider/model、**构造后即持锁**（actor-scoped）、`Stop()` 后**释放**；并做新旧路径逐字段等价对比；<br>· `TestAicliExecutorReuseContractChildRouteInvariants`——子会话（hub 工厂口径「基础会话闭包 + 子 sessionID」）必须按 runtime session 路由上下文落到子 provider/model/reasoning（§11 G2 / §12 风险 #4）；<br>· **租约探针自检**：未持锁会话必须可获取，防止「探针恒冲突」导致假绿；<br>· **判别力验证（falsification）**：把冻结期望翻为 `LeaseHeldAfterBuild:false` → 测试 FAIL（实测观测值为 `true`），证明断言非空转；<br>· G5 合规：断言只引用 `buildSessionActor`（E3.4c 之后仍然存在），E3.4c 删除旧装配码后本测试**仍可运行**（对比段退化为自比）；<br>· 验证：`go vet` ✅、`gofmt` ✅、两用例 PASS（1.9s）、`cmd/aicli/commands` 全量回归 ✅（198.7s） | — |
 | **E3.4c** | 删除 aicli 侧不再使用的装配代码；文档记录 | 无死代码；行为不变 | git |
 
-**建议**：E3.4b 与 E3.4c 之间**观察一个发布周期**（TUI 回归面大），确认无行为差异再删旧码。
+**灰度第 3 步（✅ 已完成）**：`aicliExecutorReuseEnabled` 翻转为**默认开启**——
+`buildSessionActor` 默认走统一执行核；`AICLI_EXECUTOR_REUSE=0|false|off|no` 为**逃生门**
+（显式回退旧装配路径，无需改码）。依据与验证：
+- opt-in 灰度已通过 ConPTY A/B 实测（余项①/复测）与新旧路径对比契约测试（余项②）；
+- **大规模验证**：开关默认开启后 `cmd/aicli/commands` **全量回归 ✅（206.1s）**——
+  既有全部 aicli 测试（actor/租约/路由/interrupt/resume/子代理等套件）经统一执行核运行；
+- `TestAicliExecutorReuseEnabled` 更新为默认开启语义（含 `anything-else` → true、
+  显式回退值表）；
+- **逃生门实测**（ConPTY，`AICLI_EXECUTOR_REUSE=0`）：会话创建、turn 启动、退避重试
+  正常运转（期间遇上游 5xx 自动重试 attempt=1/10，为外部限流非本地缺陷）；实测后取消以
+  节省配额，决定性证据以全量回归为准；
+- 旧路径（E3.4c 目标）仍保留待观察期后删除。
 
 ---
 

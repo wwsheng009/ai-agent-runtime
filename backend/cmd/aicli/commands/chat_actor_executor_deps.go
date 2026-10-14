@@ -168,16 +168,17 @@ func aicliHostLLMRuntime(h *localChatRuntimeHost) *llm.LLMRuntime {
 	return h.Bootstrap.LLMRuntime()
 }
 
-// aicliExecutorReuseEnabled 报告是否启用统一执行核（E3.4b 灰度开关，默认关闭）。
+// aicliExecutorReuseEnabled 报告是否启用统一执行核（灰度第 3 步：**默认开启**）。
 //
-// 启用（AICLI_EXECUTOR_REUSE=1|true|on|yes）时 buildSessionActor 走
-// runtimehost.BuildSessionActor + aicliRuntimeDeps；默认走旧装配路径（行为不变）。
-// E3.4c 删除旧路径后本开关随之移除（见 aicli-executor-reuse-design.md §11 G6）。
+// buildSessionActor 默认走 runtimehost.BuildSessionActor + aicliRuntimeDeps；
+// AICLI_EXECUTOR_REUSE=0|false|off|no 显式回退旧装配路径（逃生门，无需改码）。
+// 依据：opt-in 灰度已通过 ConPTY A/B 实测（余项①/复测）与新旧路径对比契约测试
+// （余项②）；旧路径的最终删除（E3.4c）仍待观察期后执行。
 func aicliExecutorReuseEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_EXECUTOR_REUSE"))) {
-	case "1", "true", "on", "yes":
-		return true
-	default:
+	case "0", "false", "off", "no":
 		return false
+	default:
+		return true
 	}
 }

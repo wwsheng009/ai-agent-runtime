@@ -77,23 +77,28 @@ func TestDeriveLocalSessionContext(t *testing.T) {
 // 由真实调用路径 + 契约测试覆盖（见设计 §6）。
 var _ func(*localChatRuntimeHost, *ChatSession, runtimechat.SessionStorage, *runtimecfg.RuntimeConfig, string, string) runtimehost.Deps = (*localChatRuntimeHost).aicliRuntimeDeps
 
-// TestAicliExecutorReuseEnabled 验证 E3.4b 灰度开关的解析（**默认关闭** → 生产行为不变）。
+// TestAicliExecutorReuseEnabled 验证灰度开关语义（第 3 步：**默认开启**）：
+// 未设置/空串/任意未识别值 → 启用；显式回退值（0/false/off/no）→ 旧路径。
+// 这样整套既有 aicli 测试都会经统一执行核运行（大规模验证），回滚只需设 env。
 func TestAicliExecutorReuseEnabled(t *testing.T) {
 	cases := []struct {
 		value string
 		want  bool
 	}{
-		{"", false},
-		{"0", false},
-		{"off", false},
-		{"no", false},
-		{"maybe", false},
+		{"", true},
 		{"1", true},
 		{"true", true},
 		{"TRUE", true},
 		{"on", true},
 		{"yes", true},
 		{" yes ", true},
+		{"anything-else", true},
+		{"0", false},
+		{"false", false},
+		{"FALSE", false},
+		{"off", false},
+		{"no", false},
+		{" off ", false},
 	}
 	for _, tc := range cases {
 		t.Setenv("AICLI_EXECUTOR_REUSE", tc.value)
