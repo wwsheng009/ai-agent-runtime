@@ -618,16 +618,23 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/tools") {
 		// /tools（只读）：当前会话工具面目录 + 来源账本——与 web
 		// /api/runtime/tools 同一 toolsurface 实现点（§14/§17 收官）。
-		if body, ok := buildToolsScreenBody(session); ok {
+		// unified TTY：Screen 副屏（chatToolsScreenSpec，能力不足由框架降级
+		// 主屏内联文档）；plain/no-interactive：RenderBlock Document 单元格
+		//（与 /status 的非 unified 分支同形）。
+		body, ok := buildToolsScreenBody(session)
+		if !ok {
 			if unifiedDirectInteractiveOutput(session) {
-				return chatScreenDocResult(chatToolsScreenSpec(body)), true, nil
+				return commandTextResult("当前会话没有可枚举的工具面（未附着 runtime 或未冻结）"), true, nil
 			}
-			return commandTextResult(body), true, nil
+			return CommandResult{}, false, nil
 		}
 		if unifiedDirectInteractiveOutput(session) {
-			return commandTextResult("当前会话没有可枚举的工具面（未附着 runtime 或未冻结）"), true, nil
+			return chatScreenDocResult(chatToolsScreenSpec(body)), true, nil
 		}
-		return CommandResult{}, false, nil
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: textLinesDocument(strings.Split(body, "\n"))}},
+			Action: CommandContinue,
+		}, true, nil
 	}
 
 	if commandMatches(cmdLower, "/account") || commandMatches(cmdLower, "/accounts") {
