@@ -289,15 +289,20 @@ func TestActivateRedactsTokenFromErrors(t *testing.T) {
 
 	provider := New(WithAPIBase(fake.URL()), WithLogger(discardLogger))
 	cfg := testConfig("c1", fake.URL(), map[string]string{"owner_user_id": "owner-1"})
-	_, err := provider.Activate(context.Background(), cfg)
-	if err == nil {
-		t.Fatalf("expected activation failure")
+	// getconfig 探测失败已降级为告警（2026-10-14：避免新 bot 的引导死锁），
+	// 激活成功但 Info 中必须携带脱敏后的错误文本（token 不可泄漏）。
+	activation, err := provider.Activate(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("probe failure should degrade, not fail activation: %v", err)
 	}
-	if strings.Contains(err.Error(), "tok") {
-		t.Fatalf("token leaked in error: %v", err)
+	if !strings.Contains(activation.Info, "已降级为告警") {
+		t.Fatalf("expected degraded-probe marker in info: %q", activation.Info)
 	}
-	if !strings.Contains(err.Error(), "***") {
-		t.Fatalf("expected redacted marker in error: %v", err)
+	if strings.Contains(activation.Info, "tok") {
+		t.Fatalf("token leaked in info: %v", activation.Info)
+	}
+	if !strings.Contains(activation.Info, "***") {
+		t.Fatalf("expected redacted marker in info: %v", activation.Info)
 	}
 }
 
