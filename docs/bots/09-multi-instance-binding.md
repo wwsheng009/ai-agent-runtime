@@ -463,7 +463,7 @@ P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在�
 - [ ] N3：bind 切换目标会话后，旧会话历史完好；unbind 后新消息走 auto-create；
 - [ ] N4：左栏面板可完成 绑定/解绑/切换，白名单外 chat 被拒绝并提示；
 - [ ] N5：`/bots bind|unbind|status` 与 REST 行为一致（同一套校验）；
-- [x] N6：三条路由用例（R1/R2/R3）各有集成测试；杀 poller/runner 均可自愈（R1/R3：service_dispatch_test 四例；R2a：TestServiceR2aFailoverTakeover + DecideRoute Failover 双形态）；
+- [x] N6：三条路由用例（R1/R2/R3）各有集成测试；杀 poller/runner 均可自愈（R1/R3：service_dispatch_test 四例；R2a：TestServiceR2aFailoverTakeover + DecideRoute Failover 双形态）；peers 互见契约有真实 node record 双 Host 端到端测试（mesh TestTwoHostsSeeEachOther）；
 - [x] N7：非 poller 节点产生的 approval 事件能送达 IM（切片 D：scope 意愿转发 + 对端 InletAttention 本地 D5 过滤 + NotifyAttention 出站）；
 - [x] N8：aicli fail-closed 白名单在远程 runner 上同样生效（测试覆盖）——runner 接收面经 restapi 管理面鉴权 + RequireAllowedUsers 闸在认领期强制；
 - [ ] D4：编辑对话框扫码后 connector id/bindings 不变；新增流程取消即清理；
