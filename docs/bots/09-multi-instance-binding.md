@@ -45,7 +45,7 @@
 | **D2** | 无绑定时的 runner 选举 | 引入 `connectors.runner_preference: runtime-server(default) | aicli | round-robin`；无绑定的入站默认交给任一 runtime-server 节点执行 |
 | **D3** | 接管语义 | 接管时**先核对"当前运行会话 == 绑定会话"**：一致→接管该绑定会话（亲和转移，绑定不动）；无绑定→**不迁移任何绑定**，接管处理器按共享绑定表现状处理（未绑定的 chat 走 auto-create） |
 | **D4** | 实体与凭据两层 | **重新扫码=替换登录凭据**（作用于既有 bot 实体）；**创建新 bot=显式动作**（独立入口/确认）。任何 provider（微信/QQ/…）的扫码流程都必须服从该两层模型，杜绝"扫码即新建连接器" |
-| **D5** | 通知接收开关 | 连接器级 `policy.notify{enabled,kinds,scope}`：bot 是否接收事件类通知（含**其它会话**的 turn 结束/审批/提问等 hook）。默认关闭；kinds 白名单对齐 `AttentionKind*`；scope 二值（绑定会话/宿主全部）。详见 §7.4.1。**2026-10-14 投递修复**：scope=all 的"其它会话"事件此前过滤通过但投递 0 目标（NotifySession 按事件会话反查绑定，未绑定恒空）——新增 `NotifyAttentionScoped`：先按会话精确投递（绑定场景不变），未命中回退广播到**接受连接器的全部绑定 chats**；三宿主接线切换；红/绿+防回归测试见 `service_scope_all_test.go` |
+| **D5** | 通知接收开关 | 连接器级 `policy.notify{enabled,kinds,scope}`：bot 是否接收事件类通知（含**其它会话**的 turn 结束/审批/提问等 hook）。默认关闭；kinds 白名单对齐 `AttentionKind*`；scope 二值（绑定会话/宿主全部）。详见 §7.4.1。**2026-10-14 投递修复**：scope=all 的"其它会话"事件此前过滤通过但投递 0 目标（NotifySession 按事件会话反查绑定，未绑定恒空）——新增 `NotifyAttentionScoped`：先按会话精确投递（绑定场景不变），未命中回退广播到**接受连接器的全部绑定 chats**；三宿主接线切换；红/绿+防回归测试见 `service_scope_all_test.go`；跨宿主接收面（InletAttention）同日对齐（收集全部接受连接器 + scoped 出站；见 `attention_inlet_test.go`）；**真机验证（2026-10-14）**：非绑定会话事件回退广播投递成功（§10.0d） |
 | **D6** | 连接器级模型路由 | `policy.route{provider,model,reasoning_effort}`：bot 配置了路由即覆盖全局默认（**仅对新回合生效**；已绑定会话不迁移，上下文保持）。零值回落宿主默认；实现为回合级 `RunRouteOverride`（与 team 任务路由同通道，复用 `chat.SubmitPromptOption.RouteOverride`） |
 
 ## 3. 架构总览：三个平面
@@ -441,7 +441,7 @@ D1/绑定 API（P1）不依赖该改造。
 | 7 | `policy.notify{enabled,kinds,scope}`（D5）+ 宿主过滤点 | `internal/connectors/types.go`（Policy）、Schema 导出、`internal/connectors/attention.go`（共享订阅/过滤/出站，三宿主单一实现点）；runtime-server ✅ / aicli ✅（connector_host 经 host.EventBus 接入）/ gateway ✅（OnSessionTransition 投影 hook，AttentionNoticeForProjection 映射） | P1 |
 | 8 | mesh peer kind 扩展 + runtime-server 入网 | **✅ 2026-10-14（切片 A + B 后半全量）**：runtime-server 启动期 `mesh_bootstrap.go` 写 node record（`mesh.NewHost` Kind=runtime-server + Capabilities=["mesh","runner","poller"]，listener 就绪后 SetEndpoint/BaseURL，进程退出 Stop 移档）；peers 视图自此双向可见（aicli ↔ runtime-server 互为派发/扇出目标） | P2 |
 | 9 | turn 派发端点 + `service.go` 路由决策（R1/R2/R3） | **✅ 2026-10-14（切片 B 全量）**：决策层 `internal/connectors/dispatch.go`（DecideRoute + RunnerPlane 能力接口）；接收面 restapi `POST /connectors/dispatch`（Runner 未装配 501/缺必填 400/失败 502）；执行面 runtime-server `runtimeConnectorRunner`（SubmitConnectorPrompt + 命令回环走 ConnectorDecideApproval/AnswerQuestion）、aicli `localConnectorRunner`（Handle 复用 + DecideApproval/AnswerQuestion）；发起面 `Deps.Peers`（mesh 档案 BuildView 装配，kind/state/endpoint 过滤）+ `Deps.RemoteDispatch`（POST 对端 BaseURL，X-AICLI-Token 档案令牌，DispatchCallTimeout 180s）；runtime-server 入网（读档案 + self 写档）就绪 | P2 |
-| 10 | 注意力发送收口 poller + `scope=all` 跨宿主扇出 | **✅ 2026-10-14（切片 D）**：发起侧 SubscribeAttention `Forward`（任一 bot notify.enabled=true 即向活 peers fire-and-forget 转发）；接收面 restapi `POST /connectors/attention`（AttentionInlet = InletAttention 共享实现：本地 D5 逐 bot 过滤 + NotifyAttention 出站）；两宿主接线（runtime-server forwardAttentionToPeers / aicli 同构）；发送收口不变（仍由 poller 出站） | P2 |
+| 10 | 注意力发送收口 poller + `scope=all` 跨宿主扇出 | **✅ 2026-10-14（切片 D）**：发起侧 SubscribeAttention `Forward`（任一 bot notify.enabled=true 即向活 peers fire-and-forget 转发）；接收面 restapi `POST /connectors/attention`（AttentionInlet = InletAttention 共享实现：本地 D5 逐 bot 过滤 + scoped 出站（收集全部接受连接器；2026-10-14 修复补全））；两宿主接线（runtime-server forwardAttentionToPeers / aicli 同构）；发送收口不变（仍由 poller 出站） | P2 |
 
 P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在哪台就在哪台跑"成为事实。
 
@@ -455,10 +455,21 @@ P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在�
    待定方案：a) 写也收敛到共享路径（改变分层写语义）；b) REST 层转发到 owner 宿主；c) 接受分叉并在
    UI 标注"本清单属于 X 宿主"。**未定**，P2 后续切片决策。
 0b. **连字符 id 的单查瞬态 404（2026-10-14 真机观察）**：runtime-server 上
-   `GET /api/connectors/wechat-mvlod8ozf9` 偶发 404"未知连接器"，URL 编码连字符（`%2D`）恒 200；
+   `GET /api/connectors/wechat-mv7lod8ozf9` 偶发 404"未知连接器"，URL 编码连字符（`%2D`）恒 200；
    静置后未转义也恢复 200。窗口伴随配置 PATCH 写（storefile 原子 rename）出现，怀疑宿主热读窗口与
    mux 路径解码的组合瞬态；restapi 内部单测（含连字符 id）恒绿，宿主同构挂载单测也绿。观察项，
    不阻塞；若复现频率上升需在 restapi 层加"单查 404 时回退 ListConfigs 精确比对"的自愈。
+0c. **微信主动出站依赖「最近一次入站」窗口（2026-10-14 真机验证）**：wechat ilink 平台要求
+   主动发送携带该会话**最近一次入站消息**提供的 context_token——宿主重启后（内存态丢失）或长期
+   无入站时，D5 等主动类出站会被平台拒绝（`缺少 context_token`）；一条入站消息即恢复。候选：
+   token 随绑定持久化（重启无感），或启动时标注「待入站窗口」；当前运营约定：重启后/久无消息时
+   先发一条入站，再期待主动通知。
+0d. **D5 真机验证记录（2026-10-14，微信通道）**：非绑定会话完成事件 → scope=all 过滤通过 → 回退
+   广播**投递成功**（serve 日志 `broadcast to 1 chat(s) of 1 connector(s)`）；同场验证绑定链路
+   `delivered to 1 binding(s) (session-bound)`、in=1/out=1 回环与 R2a 接管（原节点掉线 → 回写
+   NodeID），并复现了 0c 的失败形态（首触发 token 空窗 → 入站刷新后重放成功）。
+0e. **注意力投递观测面缺口**：成功投递只进宿主结构化日志（Logf），连接器 logs/stats 仅记失败
+   （error 条目/errors 计数）；候选：成功也落 info 条目与计数（与回复同面，管理面可见）。
 1. **跨机器共享 state**：v1 限定同机（文件锁安全域）。跨机走 P2 mesh 派发时，
    state 仍按机一份 + bindings 经 API 同步，还是共享网络盘？（倾向前者：以
    poller 节点的 state 为该 connector 的权威副本）
@@ -476,7 +487,7 @@ P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在�
 - [ ] N4：左栏面板可完成 绑定/解绑/切换，白名单外 chat 被拒绝并提示；
 - [ ] N5：`/bots bind|unbind|status` 与 REST 行为一致（同一套校验）；
 - [x] N6：三条路由用例（R1/R2/R3）各有集成测试；杀 poller/runner 均可自愈（R1/R3：service_dispatch_test 四例；R2a：TestServiceR2aFailoverTakeover + DecideRoute Failover 双形态）；peers 互见契约有真实 node record 双 Host 端到端测试（mesh TestTwoHostsSeeEachOther）；
-- [x] N7：非 poller 节点产生的 approval 事件能送达 IM（切片 D：scope 意愿转发 + 对端 InletAttention 本地 D5 过滤 + NotifyAttention 出站）；
+- [x] N7：非 poller 节点产生的 approval 事件能送达 IM（切片 D：scope 意愿转发 + 对端 InletAttention 本地 D5 过滤 + scoped 出站（2026-10-14 修复，attention_inlet_test.go））；
 - [x] N8：aicli fail-closed 白名单在远程 runner 上同样生效（测试覆盖）——runner 接收面经 restapi 管理面鉴权 + RequireAllowedUsers 闸在认领期强制；
 - [ ] D4：编辑对话框扫码后 connector id/bindings 不变；新增流程取消即清理；
 - [ ] D5：`notify.enabled` 缺省（未配置）时行为与现状一致（不收任何事件通知）；
