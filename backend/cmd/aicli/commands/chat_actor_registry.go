@@ -61,6 +61,13 @@ func (r *localActorRegistry) SubmitPrompt(ctx context.Context, sessionID, prompt
 	return r.submitPrompt(ctx, sessionID, prompt, runMeta, nil)
 }
 
+// SubmitPromptWithRoute 是 SubmitPrompt 的回合级路由覆盖变体（D6 连接器级
+// 模型路由，docs/bots/09 §7.4.2）：routeOverride 非空时仅本回合生效（与
+// team 任务路由同一 RunRouteOverride 通道），nil 与 SubmitPrompt 等价。
+func (r *localActorRegistry) SubmitPromptWithRoute(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta, routeOverride *runtimechat.RunRouteOverride) (*team.SessionResult, error) {
+	return r.submitPrompt(ctx, sessionID, prompt, runMeta, routeOverride)
+}
+
 func (r *localActorRegistry) submitPrompt(ctx context.Context, sessionID, prompt string, runMeta *team.RunMeta, routeOverride *runtimechat.RunRouteOverride) (*team.SessionResult, error) {
 	if r == nil || r.Host == nil {
 		return nil, fmt.Errorf("session hub not configured")

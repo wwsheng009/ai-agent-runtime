@@ -35,6 +35,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -336,6 +337,39 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 	setLocalConnectorHandlers(restapi.NewRouter(deps), restapi.NewHooksRouter(deps))
 	connectorHost := &LocalConnectorHost{service: service, store: store, cancel: cancel}
 	setLocalConnectorHost(connectorHost)
+	// 注意力出站（FR-8，docs/bots/09 §7.4.1）：与 runtime-server 同一共享实现
+	// （internal/connectors.SubscribeAttention，三宿主单一实现点）——订阅
+	// approval/question/turn.done，按 policy.notify（D5）过滤后出站到绑定 IM。
+	// aicli 无 runtimeapi.Handler，订阅面直连本会话事件总线；托管挂起探测
+	// （Parked）aicli 宿主暂无对应面，传 nil（按未挂起处理，completion 文案
+	// 与无子任务场景一致）。
+	if host.EventBus != nil {
+		// aicli 事件总线按类型订阅（SubscribeCancelable(eventType, handler)），
+		// 共享层的订阅面是单函数——按 AttentionEventTypes() 清单展开（单一来源：
+		// 与共享层聚合订阅同一份清单，runtimeapi.Handler 同款三元组）。
+		eventTypes := connectors.AttentionEventTypes()
+		connectors.SubscribeAttention(ctx, connectors.AttentionDeps{
+			Subscribe: func(handler func(runtimeevents.Event)) func() {
+				unsubs := make([]func(), 0, len(eventTypes))
+				for _, eventType := range eventTypes {
+					if unsub := host.EventBus.SubscribeCancelable(eventType, handler); unsub != nil {
+						unsubs = append(unsubs, unsub)
+					}
+				}
+				if len(unsubs) == 0 {
+					return nil
+				}
+				return func() {
+					for _, unsub := range unsubs {
+						unsub()
+					}
+				}
+			},
+			Store:  store,
+			Notify: service.NotifyAttention,
+			Logf:   logf,
+		})
+	}
 	logf("aicli connectors: started (config=%s, state=%s)", configPath, statePath)
 	return connectorHost, nil
 }
@@ -401,7 +435,19 @@ func (b localConnectorBackend) Handle(ctx context.Context, req connectors.Backen
 
 	// IM 入站没有交互式审批通道：与内部轮次一致使用 bypass_permissions。
 	// （白名单/开关由连接器 Policy 在入站时先行过滤。）
-	result, err := b.host.ActorRegistry.SubmitPrompt(ctx, sessionID, text, &team.RunMeta{PermissionMode: "bypass_permissions"})
+	// D6（docs/bots/09 §7.4.2）：连接器策略路由非空时按回合覆盖 provider/
+	// model/reasoning effort（与 team 任务路由同一 RunRouteOverride 通道，
+	// 与 runtime-server bootstrap 同口径，归一化共用 RouteOverrideFromPolicy）；
+	// 空策略走原路径不改变行为。
+	runMeta := &team.RunMeta{PermissionMode: "bypass_permissions"}
+	routeOverride := connectors.RouteOverrideFromPolicy(req.Policy.Route)
+	var result *team.SessionResult
+	var err error
+	if routeOverride != nil {
+		result, err = b.host.ActorRegistry.SubmitPromptWithRoute(ctx, sessionID, text, runMeta, routeOverride)
+	} else {
+		result, err = b.host.ActorRegistry.SubmitPrompt(ctx, sessionID, text, runMeta)
+	}
 	if result == nil {
 		if err == nil {
 			err = errors.New("aicli: empty session result")

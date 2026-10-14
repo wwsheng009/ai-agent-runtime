@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/api"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 )
 
 // ── 测试替身 ───────────────────────────────────────────────────────────────
@@ -340,58 +338,11 @@ func TestRuntimeHandlerConnectorPendingLookupsReadDurableState(t *testing.T) {
 }
 
 func TestConnectorAttentionNoticeForEventMapping(t *testing.T) {
-	approval := runtimeevents.Event{
-		Type:      runtimechat.EventApprovalRequested,
-		SessionID: "sess-1",
-		Payload:   map[string]any{"request_id": "apr-1", "tool_name": "shell_exec", "reason": "writes outside workspace"},
-	}
-	notice, key, ok := connectorAttentionNoticeForEvent(approval, nil)
-	require.True(t, ok)
-	require.Equal(t, connectors.AttentionKindApproval, notice.Kind)
-	require.Equal(t, connectors.SessionRef{SessionID: "sess-1"}, notice.Session)
-	require.Contains(t, notice.Text, "shell_exec")
-	require.Contains(t, notice.Text, "writes outside workspace")
-	require.Contains(t, notice.Text, "/approve apr-1")
-	require.Equal(t, "approval|sess-1|apr-1", key)
-
-	question := runtimeevents.Event{
-		Type:      runtimechat.EventQuestionAsked,
-		SessionID: "sess-1",
-		Payload:   map[string]any{"question_id": "q-1", "prompt": "which env?"},
-	}
-	notice, key, ok = connectorAttentionNoticeForEvent(question, nil)
-	require.True(t, ok)
-	require.Equal(t, connectors.AttentionKindQuestion, notice.Kind)
-	require.Contains(t, notice.Text, "which env?")
-	require.Contains(t, notice.Text, "/answer 1")
-	require.Equal(t, "question|sess-1|q-1", key)
-
-	done := runtimeevents.Event{Type: runtimeobserve.EventAgentTurnDone, SessionID: "sess-1", Timestamp: time.Now()}
-	notice, key, ok = connectorAttentionNoticeForEvent(done, func(string) bool { return false })
-	require.True(t, ok)
-	require.Equal(t, connectors.AttentionKindCompletion, notice.Kind)
-	require.Contains(t, notice.Text, "已完成")
-	require.True(t, strings.HasPrefix(key, "completion|sess-1|"))
-
-	// 托管挂起：run 收尾不等于 turn 完成（与 gateway_attention 同口径）。
-	notice, _, ok = connectorAttentionNoticeForEvent(done, func(string) bool { return true })
-	require.True(t, ok)
-	require.Contains(t, notice.Text, "等待子任务")
-
-	// 空 session / 未订阅类型：不产生通知。
-	_, _, ok = connectorAttentionNoticeForEvent(runtimeevents.Event{Type: runtimechat.EventApprovalRequested}, nil)
-	require.False(t, ok)
-	_, _, ok = connectorAttentionNoticeForEvent(runtimeevents.Event{Type: "assistant_delta", SessionID: "sess-1"}, nil)
-	require.False(t, ok)
+	t.Skip("映射/去重断言已迁至 internal/connectors/attention_test.go（三宿主单一实现点）；本文件保留端到端链路测试")
 }
 
 func TestConnectorAttentionDeduperEvictsOldest(t *testing.T) {
-	dedupe := newConnectorAttentionDeduper(2)
-	require.True(t, dedupe.first("a"))
-	require.False(t, dedupe.first("a"))
-	require.True(t, dedupe.first("b"))
-	require.True(t, dedupe.first("c")) // 淘汰 a
-	require.True(t, dedupe.first("a"))
+	t.Skip("同上：去重窗口测试已迁至 internal/connectors/attention_test.go")
 }
 
 // ── 注意力出站端到端（真实总线 + 真实 Service） ─────────────────────────────
@@ -408,7 +359,12 @@ func TestSubscribeRuntimeConnectorAttentionDeliversToBoundChatOnce(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	unsubscribe := subscribeRuntimeConnectorAttention(ctx, handler, store, service.NotifyAttention, func(string, ...any) {})
+	unsubscribe := connectors.SubscribeAttention(ctx, connectors.AttentionDeps{
+		Subscribe: handler.SubscribeConnectorAttentionEvents,
+		Parked:    handler.ConnectorSessionParked,
+		Store:     store,
+		Notify:    service.NotifyAttention,
+	})
 	require.NotNil(t, unsubscribe)
 	defer unsubscribe()
 

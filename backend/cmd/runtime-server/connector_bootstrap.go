@@ -8,14 +8,12 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
-	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/feishu"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/qqbot"
@@ -24,8 +22,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
-	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
-	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 )
 
 // 本文件是 runtime-server 宿主侧的连接器接线（docs/bots/04-migration-roadmap.md P0
@@ -97,9 +93,18 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	// agent.turn.finished，映射为 AttentionNotice 异步出站到该会话的全部 IM 绑定
 	// （NotifySession 内部反查绑定，无绑定即 no-op）。订阅随宿主 ctx
 	// （进程生命周期 / close 时取消）退订。
-	subscribeRuntimeConnectorAttention(ctx, handler, store, func(notifyCtx context.Context, notice connectors.AttentionNotice) error {
-		return service.NotifyAttention(notifyCtx, notice)
-	}, logf)
+	// 实现在 internal/connectors.SubscribeAttention（三宿主单一实现点，
+	// docs/bots/09 §7.4.1；runtime-server 借 runtimeapi.Handler 的订阅面与
+	// §6.12 托管挂起探测接入）。
+	connectors.SubscribeAttention(ctx, connectors.AttentionDeps{
+		Subscribe: handler.SubscribeConnectorAttentionEvents,
+		Parked:    handler.ConnectorSessionParked,
+		Store:     store,
+		Notify: func(notifyCtx context.Context, notice connectors.AttentionNotice) error {
+			return service.NotifyAttention(notifyCtx, notice)
+		},
+		Logf: logf,
+	})
 	return service, nil
 }
 
@@ -188,16 +193,23 @@ func (b runtimeConnectorBackend) Handle(ctx context.Context, req connectors.Back
 			}
 		}
 	}
+	// D6：连接器策略路由按回合覆盖（与 aicli 同口径，归一化共用
+	// connectors.RouteOverrideFromPolicy——零策略为 nil，此处零值结构体等价）。
+	routeOverride := connectors.RouteOverrideFromPolicy(req.Policy.Route)
+	routeReq := runtimeapi.ConnectorRouteOverride{}
+	if routeOverride != nil {
+		routeReq = runtimeapi.ConnectorRouteOverride{
+			Provider:        routeOverride.Provider,
+			Model:           routeOverride.Model,
+			ReasoningEffort: routeOverride.ReasoningEffort,
+		}
+	}
 	turn, err := b.handler.SubmitConnectorPrompt(ctx, runtimeapi.ConnectorTurnRequest{
 		SessionID: req.Session.SessionID,
 		UserID:    req.UserID,
 		Prompt:    text,
 		OnDelta:   onDelta,
-		Route: runtimeapi.ConnectorRouteOverride{
-			Provider:        req.Policy.Route.Provider,
-			Model:           req.Policy.Route.Model,
-			ReasoningEffort: req.Policy.Route.ReasoningEffort,
-		},
+		Route:     routeReq,
 	})
 	if turn == nil {
 		return connectors.BackendResult{}, err
@@ -331,212 +343,3 @@ func connectorCommandAnswerText(text, first string) string {
 
 // ── 注意力出站（FR-8）：运行时事件 → AttentionNotice → IM ────────────────────
 
-const (
-	// connectorAttentionQueueSize 是注意力出站缓冲：事件回调不阻塞事件总线
-	// 发布方，队列满时丢弃并记日志（IM 出站非可靠队列，后续事件仍会到达）。
-	connectorAttentionQueueSize = 64
-	// connectorAttentionDedupeCap 是事件级去重窗口（进程内）。
-	connectorAttentionDedupeCap = 1024
-)
-
-// subscribeRuntimeConnectorAttention 订阅审批/提问/回合结束事件并异步出站到 IM。
-// store 非空时按各连接器的 policy.notify（D5）过滤：enabled=false 的连接器不收
-// 任何事件通知；scope=sessions（默认）只收绑定到该 bot 的会话，scope=all 收
-// 宿主全部会话事件（docs/bots/09-multi-instance-binding.md §7.4.1）。
-//
-// 去重说明：同一事件（approval/question 的 request id、回合结束的 turn id/时间戳）
-// 只出站一次——进程内窗口去重，保证重复订阅/重复投递不会推两条。与 Web Push/ntfy
-// 的跨通道统一去重不在本切片（runtime-server 未装配 push/ntfy；gateway 的 notify
-// 差分在 gateway 宿主），留给 notify.Dispatcher 切片；此处的键与 gateway_attention
-// 使用的事件身份同源，后续可迁移到共享去重账本。
-//
-// 返回退订函数；ctx 取消（宿主 close）时自动退订并停止 worker。
-func subscribeRuntimeConnectorAttention(ctx context.Context, handler *runtimeapi.Handler, store connectors.Store, notify func(context.Context, connectors.AttentionNotice) error, logf func(string, ...any)) func() {
-	if handler == nil || notify == nil {
-		return func() {}
-	}
-	dedupe := newConnectorAttentionDeduper(connectorAttentionDedupeCap)
-	queue := make(chan connectors.AttentionNotice, connectorAttentionQueueSize)
-	stop := make(chan struct{})
-	var stopOnce sync.Once
-	stopWorker := func() { stopOnce.Do(func() { close(stop) }) }
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-stop:
-				return
-			case notice := <-queue:
-				if err := notify(ctx, notice); err != nil && logf != nil {
-					logf("connector attention %s delivery failed (session=%s): %v", notice.Kind, notice.Session.SessionID, err)
-				}
-			}
-		}
-	}()
-	unsubscribe := handler.SubscribeConnectorAttentionEvents(func(event runtimeevents.Event) {
-		notice, key, ok := connectorAttentionNoticeForEvent(event, handler.ConnectorSessionParked)
-		if !ok || !dedupe.first(key) {
-			return
-		}
-		// D5 过滤：逐连接器判定（一个事件可能命中多个 bot 的通知开关）。
-		if store != nil {
-			accepted := false
-			for _, cfg := range store.ListConfigs() {
-				if !cfg.Enabled {
-					continue
-				}
-				if cfg.Policy.AcceptsNotice(notice, func(session connectors.SessionRef) bool {
-					// scope=sessions 的语义：事件会话已绑定到本 bot（按 SessionRef
-					// 反查绑定表；绑定数几十~几百，全表扫描可行，见 Store 契约）。
-					for _, binding := range store.ListBindings(cfg.ID) {
-						if binding.Session == session {
-							return true
-						}
-					}
-					return false
-				}) {
-					accepted = true
-					break
-				}
-			}
-			if !accepted {
-				return
-			}
-		}
-		select {
-		case queue <- notice:
-		default:
-			if logf != nil {
-				logf("connector attention queue full, dropping %s notice (session=%s)", notice.Kind, notice.Session.SessionID)
-			}
-		}
-	})
-	if unsubscribe == nil {
-		// 事件总线不可用：无订阅，worker 由 ctx/stop 回收。
-		return func() { stopWorker() }
-	}
-	var unsubOnce sync.Once
-	unsub := func() {
-		unsubOnce.Do(func() {
-			unsubscribe()
-			stopWorker()
-		})
-	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			unsub()
-		case <-stop:
-		}
-	}()
-	return unsub
-}
-
-// connectorAttentionNoticeForEvent 把运行时事件映射为 IM 注意力通知；第二个
-// 返回值是事件级去重键，ok=false 表示该事件不产生通知。
-func connectorAttentionNoticeForEvent(event runtimeevents.Event, parked func(sessionID string) bool) (connectors.AttentionNotice, string, bool) {
-	sessionID := strings.TrimSpace(event.SessionID)
-	if sessionID == "" {
-		return connectors.AttentionNotice{}, "", false
-	}
-	session := connectors.SessionRef{SessionID: sessionID}
-	switch event.Type {
-	case runtimechat.EventApprovalRequested:
-		requestID := connectorEventPayloadString(event, "request_id")
-		text := "⏳ 有待审批的工具调用"
-		if tool := connectorEventPayloadString(event, "tool_name"); tool != "" {
-			text += "：" + tool
-		}
-		if reason := connectorEventPayloadString(event, "reason"); reason != "" {
-			text += "（" + reason + "）"
-		}
-		if requestID != "" {
-			text += "\n回复 /approve " + requestID + " 或 /deny " + requestID
-		} else {
-			text += "\n回复 /approve 或 /deny"
-		}
-		return connectors.AttentionNotice{Kind: connectors.AttentionKindApproval, Session: session, Text: text},
-			"approval|" + sessionID + "|" + connectorAttentionIdentity(requestID, event), true
-	case runtimechat.EventQuestionAsked:
-		questionID := connectorEventPayloadString(event, "question_id")
-		text := "❓ 有待回答的提问"
-		if prompt := connectorEventPayloadString(event, "prompt"); prompt != "" {
-			text += "：" + prompt
-		}
-		text += "\n回复 /answer 1 <内容>"
-		return connectors.AttentionNotice{Kind: connectors.AttentionKindQuestion, Session: session, Text: text},
-			"question|" + sessionID + "|" + connectorAttentionIdentity(questionID, event), true
-	case runtimeobserve.EventAgentTurnDone:
-		text := "✅ 会话回合已完成"
-		if parked != nil && parked(sessionID) {
-			// §6.12 托管挂起：run 结束 ≠ 托管 turn 结束（与 gateway_attention 同口径）。
-			text = "⏳ 回合已收尾，仍在等待子任务（完成后会继续推进）"
-		}
-		return connectors.AttentionNotice{Kind: connectors.AttentionKindCompletion, Session: session, Text: text},
-			"completion|" + sessionID + "|" + connectorAttentionIdentity(connectorEventPayloadString(event, "turn_id"), event), true
-	default:
-		return connectors.AttentionNotice{}, "", false
-	}
-}
-
-// connectorAttentionIdentity 返回事件级去重身份：优先业务 id（request/question/
-// turn id），缺失时回落到事件时间戳（同一 Event 重复投递仍能被拦截）。
-func connectorAttentionIdentity(id string, event runtimeevents.Event) string {
-	if id = strings.TrimSpace(id); id != "" {
-		return id
-	}
-	if !event.Timestamp.IsZero() {
-		return event.Timestamp.UTC().Format(time.RFC3339Nano)
-	}
-	return event.Type
-}
-
-// connectorEventPayloadString 读取事件载荷中的字符串字段（容忍非字符串值）。
-func connectorEventPayloadString(event runtimeevents.Event, key string) string {
-	if event.Payload == nil {
-		return ""
-	}
-	value, ok := event.Payload[key]
-	if !ok {
-		return ""
-	}
-	text, _ := value.(string)
-	return strings.TrimSpace(text)
-}
-
-// connectorAttentionDeduper 是进程内事件级去重窗口（FIFO 淘汰）。
-type connectorAttentionDeduper struct {
-	mu    sync.Mutex
-	seen  map[string]struct{}
-	order []string
-	limit int
-}
-
-func newConnectorAttentionDeduper(limit int) *connectorAttentionDeduper {
-	if limit <= 0 {
-		limit = connectorAttentionDedupeCap
-	}
-	return &connectorAttentionDeduper{seen: make(map[string]struct{}, limit), limit: limit}
-}
-
-// first 报告 key 是否首次出现；非首次返回 false（空 key 视为首次，调用方
-// 由映射层保证 key 非空）。
-func (d *connectorAttentionDeduper) first(key string) bool {
-	if d == nil || key == "" {
-		return true
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if _, ok := d.seen[key]; ok {
-		return false
-	}
-	d.seen[key] = struct{}{}
-	d.order = append(d.order, key)
-	if len(d.order) > d.limit {
-		oldest := d.order[0]
-		d.order = d.order[1:]
-		delete(d.seen, oldest)
-	}
-	return true
-}
