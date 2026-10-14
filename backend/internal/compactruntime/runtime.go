@@ -19,7 +19,13 @@ const (
 	PhasePreTurn = "pre_turn"
 	PhaseMidTurn = "mid_turn"
 
-	defaultAutoCompactRatio         = 0.9
+	// defaultAutoCompactRatio is the fallback trigger/budget ratio when a model
+	// capability does not pin auto_compact_ratio/auto_compact_token_limit.
+	// Lowered 0.9 -> 0.8 (2026-10-14 overflow postmortem): 0.9 only left
+	// headroom for ~1.11x provider-vs-local counting divergence, while
+	// wire-format escaping measured 1.18-1.25x; 0.8 covers up to 1.25x.
+	// Higher-divergence providers still need per-model ratios/limits.
+	defaultAutoCompactRatio         = 0.8
 	defaultAutoCompactContextWindow = llm.DefaultContextWindowTokens
 	defaultKeepRecentMessages       = 8
 )

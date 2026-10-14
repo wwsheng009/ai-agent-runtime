@@ -21,8 +21,8 @@ const chatcoreReasoningMetadataKey = "chatcore_reasoning_content"
 
 // sharedChatDefaultAutoCompactRatio is the single CLI fallback ratio used when a
 // model capability does not declare AutoCompactTokenLimit / AutoCompactRatio.
-// Keep aligned with agent preflight and compactruntime defaults (0.9).
-const sharedChatDefaultAutoCompactRatio = 0.9
+// Keep aligned with agent preflight and compactruntime defaults (0.8).
+const sharedChatDefaultAutoCompactRatio = 0.8
 const sharedChatDefaultContextWindowTokens = 256000
 
 // chatSessionImageArtifactDir returns the session-local directory for

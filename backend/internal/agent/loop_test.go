@@ -3235,7 +3235,7 @@ func TestResolvePromptPreflightBudget_FallsBackToProviderContextLimitWhenCapabil
 	}
 
 	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
-	require.Equal(t, 7200, budget.PromptBudget)
+	require.Equal(t, 6400, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 8000, budget.ProviderContextLimit)
 	require.Equal(t, 2048, budget.ProviderOutputLimit)
@@ -3276,7 +3276,7 @@ func TestResolvePromptPreflightBudget_UsesProviderContextLimitWhenWildcardCapabi
 	}
 
 	budget := resolvePromptPreflightBudget(llmRuntime, agent, nil, 0)
-	require.Equal(t, 115200, budget.PromptBudget)
+	require.Equal(t, 102400, budget.PromptBudget)
 	require.Equal(t, "provider_context_limit_default_ratio", budget.BudgetSource)
 	require.Equal(t, 128000, budget.ProviderContextLimit)
 	require.Equal(t, 4096, budget.ProviderOutputLimit)
