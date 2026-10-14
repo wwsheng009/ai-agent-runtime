@@ -1491,6 +1491,13 @@ func decorateBackgroundTaskResult(job background.Job) BackgroundTaskResult {
 		result.StartupProbe = value
 	}
 	result.StartupGraceMs = int64(brokerIntArg(job.Metadata["startup_grace_ms"]))
+	if alreadyOpen, _ := job.Metadata["already_open"].(bool); alreadyOpen {
+		// 幂等复用要显式可见：调用方据此确认"新进程未启动、这是既有会话"。
+		result.AlreadyOpen = true
+		if strings.TrimSpace(result.Message) == "" {
+			result.Message = "reused the live interactive session for this command; the job_id above is the running session"
+		}
+	}
 	return result
 }
 
@@ -1730,6 +1737,37 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			job, submitErr = b.Background.SubmitShell(ctx, sessionID, req)
 		}
 		if submitErr != nil {
+			if stderrors.Is(submitErr, background.ErrInteractiveBusy) {
+				// 单槽显式 busy（2026-10-14）：交互槽被占用且请求的是不同命令时
+				// 不再静默返回正在运行的会话，而是给出可行动的 busy 内容结果，
+				// 避免调用方误以为新会话已启动。
+				busyResult := map[string]interface{}{
+					"busy":    true,
+					"message": submitErr.Error(),
+				}
+				busyMetadata := map[string]interface{}{
+					toolresult.MetadataKey: toolresult.KindStructured,
+					"busy":                 true,
+				}
+				var busyErr *background.InteractiveBusyError
+				if stderrors.As(submitErr, &busyErr) && busyErr != nil {
+					displayJobID := strings.TrimSpace(busyErr.ExistingJobID)
+					if handleAliases != nil && displayJobID != "" {
+						if alias := strings.TrimSpace(handleAliases.Jobs.aliasFor(displayJobID)); alias != "" {
+							displayJobID = alias
+						}
+					}
+					busyResult["job_id"] = displayJobID
+					busyResult["occupying_job_id"] = busyErr.ExistingJobID
+					busyResult["occupying_command"] = busyErr.ExistingCommand
+					busyResult["next_action"] = fmt.Sprintf(
+						"Cancel the occupying interactive job with job_cancel (job_id=%s), or wait for it to finish, then retry job_start.",
+						displayJobID)
+					busyMetadata["occupying_job_id"] = busyErr.ExistingJobID
+					busyMetadata["occupying_command"] = busyErr.ExistingCommand
+				}
+				return busyResult, busyMetadata, nil
+			}
 			return nil, nil, submitErr
 		}
 		jobAlias := strings.TrimSpace(job.ID)
@@ -1749,6 +1787,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		for _, key := range []string{
 			"timeout_requested_ms", "timeout_effective_ms", "timeout_ms", "timeout_source",
 			"launch_state", "healthcheck_state", "startup_probe", "startup_grace_ms",
+			"already_open",
 		} {
 			if value, ok := job.Metadata[key]; ok {
 				resultMetadata[key] = value

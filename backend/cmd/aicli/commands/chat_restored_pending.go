@@ -373,10 +373,30 @@ func repaintRestoredPendingPrompt(session *ChatSession, pending *chatRestoredPen
 	session.Interaction.PrintPrompt()
 }
 
+// restoredPendingSlashCommand 报告一行输入是否是 slash 命令目录内的已知命令。
+// 只认目录内的命令名：普通回答（如以 / 开头的路径）不会被误判为命令。
+func restoredPendingSlashCommand(text string) bool {
+	name := unifiedChatCommandName(text)
+	if name == "" || !strings.HasPrefix(name, "/") {
+		return false
+	}
+	_, known := chatSlashCommandCatalogMap()[name]
+	return known
+}
+
 // handleRestoredPendingAnswerLine 把一行输入当作恢复态提问/审批的作答。
 // handled=true 表示该行已被消费，主循环必须 continue（不得再作为普通 prompt 提交）。
 // handled=false 表示当前没有恢复态作答（或请求已被其它入口解决），调用方按常规输入处理。
 func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
+	text := strings.TrimSpace(normalizeQueuedInputLine(input))
+	// 斜杠命令优先：恢复态作答期间，目录内的已知命令不得被吞成答案。
+	// 实测（2026-10-14 ConPTY 多轮）：pending question 会把 `/goal pause`
+	// 当回答消费，命令静默丢失。命令照常执行，卡片由主循环下一轮
+	// ensureRestoredPendingInteractivePrompt 重绘；普通回答（含以 / 开头
+	// 的非命令文本，如路径）仍走原作答路由。
+	if restoredPendingSlashCommand(text) {
+		return false
+	}
 	pending := currentRestoredPendingPrompt(session)
 	if pending == nil || session == nil {
 		return false
@@ -386,7 +406,6 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 		clearRestoredPendingPrompt(session)
 		return false
 	}
-	text := strings.TrimSpace(normalizeQueuedInputLine(input))
 	switch pending.kind {
 	case chatRestoredPendingQuestion:
 		if !bridge.questionStillPending(pending.sessionID, pending.questionID) {

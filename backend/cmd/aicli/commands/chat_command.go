@@ -96,6 +96,8 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().String("output", "", "非交互模式输出格式（text|json）")
 	cmd.Flags().BoolP("json", "j", false, "兼容选项：等价于 --output json")
 	cmd.Flags().String("render-output-file", "", "将交互会话的终端输出镜像写入指定文件（wire ANSI 字节；console 渲染不变）")
+	cmd.Flags().String("script", "", "从文件按行读取并依次提交输入（每条在上一轮结束后提交，读完自动退出；空行跳过；不能与 --no-interactive 同用）")
+	cmd.Flags().String("transcript-file", "", "把已提交的语义条目（用户输入/回复/命令输出/错误/工具行）写成无 ANSI 纯文本 transcript，供脚本与 E2E 断言")
 	cmd.Flags().String("prompt", "", "启动后自动提交的消息（交互模式提交后继续留在界面）")
 	cmd.Flags().StringP("message", "M", "", "兼容选项：等价于 --prompt")
 	cmd.Flags().StringP("log-dir", "", defaultChatLogDir, fmt.Sprintf("保存会话日志到指定目录（默认: %s）", defaultChatLogDir))

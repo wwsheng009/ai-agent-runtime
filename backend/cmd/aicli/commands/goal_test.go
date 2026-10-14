@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -253,6 +254,103 @@ func TestGoalFunctionsGetAndUpdateComplete(t *testing.T) {
 	}
 	if goal.Status != runtimegoal.StatusComplete || goal.CompletedBy != "model" || goal.CompletionSummary == "" {
 		t.Fatalf("unexpected completed goal: %+v", goal)
+	}
+}
+
+func TestFormatGoalSummaryIncludesCompletionEvidence(t *testing.T) {
+	goal := runtimegoal.SessionGoal{
+		GoalID:            "goal_test",
+		SessionID:         "session-test",
+		Objective:         "ship the fix",
+		Status:            runtimegoal.StatusComplete,
+		CompletedBy:       "model",
+		CompletionSummary: "verified with evidence",
+	}
+	summary := formatGoalSummary(goal)
+	if !strings.Contains(summary, "Completed by: model") {
+		t.Fatalf("summary missing completed_by: %q", summary)
+	}
+	if !strings.Contains(summary, "Summary: verified with evidence") {
+		t.Fatalf("summary missing completion summary: %q", summary)
+	}
+}
+
+func TestStructuredGoalPauseOnCompleteSurfacesTypedError(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+
+	if _, handled, err := tryExecuteStructuredChatCommand(session, "/goal finish the work"); !handled || err != nil {
+		t.Fatalf("set: handled=%v err=%v", handled, err)
+	}
+	if _, handled, err := tryExecuteStructuredChatCommand(session, "/goal complete"); !handled || err != nil {
+		t.Fatalf("complete: handled=%v err=%v", handled, err)
+	}
+	if _, handled, err := tryExecuteStructuredChatCommand(session, "/goal pause"); !handled {
+		t.Fatal("complete→pause must be claimed by the structured path")
+	} else if err == nil || !strings.Contains(err.Error(), "goal 已完成") {
+		t.Fatalf("expected typed transition error, got %v", err)
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusComplete)
+}
+
+func TestStructuredGoalSetFlushesUnpersistedSessionFirst(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+
+	// 模拟 deferred storage 的新会话：首个输入就是 /goal 命令，durable row 尚未创建。
+	session.runtimeSessionUnpersisted = true
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/goal durable first")
+	if !handled || err != nil {
+		t.Fatalf("set: handled=%v err=%v", handled, err)
+	}
+	if result.SendObjective != "durable first" {
+		t.Fatalf("SendObjective=%q", result.SendObjective)
+	}
+	if session.runtimeSessionUnpersisted {
+		t.Fatal("goal mutation must flush the session into durable storage first")
+	}
+	loaded, err := session.SessionManager.Get(context.Background(), currentRuntimeSessionID(session))
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	goal, ok, err := runtimegoal.NewMetadataStore().Get(loaded)
+	if err != nil || !ok || goal == nil {
+		t.Fatalf("stored goal missing: ok=%v err=%v", ok, err)
+	}
+	if goal.Objective != "durable first" {
+		t.Fatalf("stored objective=%q", goal.Objective)
+	}
+}
+
+func TestStructuredGoalClearOnUnpersistedSessionIsNoopSuccess(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+	session.runtimeSessionUnpersisted = true
+
+	result, handled, err := tryExecuteStructuredChatCommand(session, "/goal clear")
+	if !handled || err != nil {
+		t.Fatalf("clear: handled=%v err=%v", handled, err)
+	}
+	text := ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(text, "Goal 已清除") {
+		t.Fatalf("clear document=%q", text)
+	}
+}
+
+func TestGoalStatusSegmentShowsContinuationAttempt(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+	captureStdout(t, func() {
+		handleCommand(session, "/goal keep going", false)
+	})
+	if seg := chatSurfaceGoalStatusSegment(session); strings.Contains(seg.full, "attempt") {
+		t.Fatalf("idle goal must not show a continuation attempt: %q", seg.full)
+	}
+	session.goalContinuationAttempt.Store(2)
+	defer session.goalContinuationAttempt.Store(0)
+	seg := chatSurfaceGoalStatusSegment(session)
+	if !strings.Contains(seg.full, "attempt 2/5") {
+		t.Fatalf("expected continuation attempt in status segment, got %q", seg.full)
 	}
 }
 

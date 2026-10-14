@@ -65,6 +65,36 @@ func newRestoredPendingHarness(t *testing.T, state *runtimechat.RuntimeState) (*
 	return session, bridge, coord
 }
 
+func TestRestoredPendingSlashCommandTakesPrecedenceOverAnswerRouting(t *testing.T) {
+	session, _, _ := newRestoredPendingHarness(t, nil)
+	setRestoredPendingPrompt(session, &chatRestoredPendingPrompt{
+		kind:       chatRestoredPendingQuestion,
+		sessionID:  restoredPendingTestSessionID,
+		questionID: "q-precedence",
+		required:   true,
+	})
+
+	if handleRestoredPendingAnswerLine(session, "/goal pause") {
+		t.Fatal("known slash command must not be consumed as a pending answer")
+	}
+	if currentRestoredPendingPrompt(session) == nil {
+		t.Fatal("pending prompt must survive a slash command")
+	}
+
+	cases := map[string]bool{
+		"/goal pause": true,
+		"/goal":       true,
+		"/tmp/answer": false,
+		"plain text":  false,
+		"":            false,
+	}
+	for input, want := range cases {
+		if got := restoredPendingSlashCommand(input); got != want {
+			t.Fatalf("restoredPendingSlashCommand(%q)=%v want %v", input, got, want)
+		}
+	}
+}
+
 // restoredPendingPopupText 汇总底部 popup 行（问题/审批卡片正文）。
 func restoredPendingPopupText(state ui.AppState) string {
 	frame := ui.ComposeAppTextLayout(state)

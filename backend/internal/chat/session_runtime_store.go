@@ -2626,7 +2626,11 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
-	payloadJSON, err := json.Marshal(event.Payload)
+	// P1-4：流式增量正文三键同串（content/delta/text）在持久化前折叠为规范键，
+	// 行字节从 ×3 降到 ×1；读侧（runtimeapi 合帧器 / CLI streamEventText）已按
+	// 规范键优先回退。折叠发生在 marshal 层：在途事件（总线订阅者）不被改写。
+	compact := runtimeevents.CompactDurableEventPayload(event)
+	payloadJSON, err := json.Marshal(compact.Payload)
 	if err != nil {
 		return 0, fmt.Errorf("marshal event payload: %w", err)
 	}

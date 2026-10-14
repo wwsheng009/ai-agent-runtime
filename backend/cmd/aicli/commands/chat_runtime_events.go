@@ -283,6 +283,25 @@ type chatRuntimeEventBridge struct {
 	// 周期 flush；崩溃丢失窗口 ≤ flush 周期。
 	eventLogResolvedPath string
 	eventLogDropped      uint64 // 队列满时的丢弃计数（journal 为重放缓存，可丢）
+	// eventLogSinkOverride 是测试注入缝：非 nil 时同步/异步两条落盘路径都把
+	// 行交给它（不再进入进程级 journal）。并行测试共享 journal 写者，文件级
+	// 断言会被其它测试干扰；P4 合并契约用本缝在进程内截获行流断言。
+	eventLogSinkOverride func(line []byte)
+	// transcriptFile / transcriptSinkOverride 是 --transcript-file 的语义
+	// transcript：非空路径时把可读条目（用户输入/回复/命令输出/错误/工具行）
+	// best-effort 写入该文件；测试经 sink 缝在进程内截获（不共享 journal）。
+	transcriptFile         string
+	transcriptSinkOverride func(text string)
+	// P4（2026-10-14 实测：reasoning 逐增量事件占 runtime-events.jsonl 体积
+	// ~86%，2937 条/2.1MB，单条 payload 里五组重复 ID 约占六成）：journal 落盘
+	// 侧的 delta 合并缓冲。按流身份（type+stream_id）累积 append 文本，达到
+	// chatEventLogDeltaMergeBytes 后把多条增量合成一行（文本拼接、保留末条
+	// envelope/sequence，additive `merged_chunks`）；未达阈值的流在 flush 时
+	// 按原始行逐条落盘，小流行为与逐条落盘逐字节一致（live 渲染路径不受影响，
+	// 只作用于 journal 重放缓存）。
+	eventLogDeltaMu         sync.Mutex
+	eventLogDeltaPending    map[string]*chatEventLogPendingDelta
+	eventLogDeltaMergedRows uint64
 
 	// 渲染层双跑文本对照（切片 9）：coordinator 每个完整块提交后调用
 	// checkTextParity，把旧路径实际写出的行序列与 Scene 快照 RenderText
@@ -802,6 +821,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	var bridge *chatRuntimeEventBridge
 	bridge = &chatRuntimeEventBridge{
 		session:             session,
+		transcriptFile:      chatSessionTranscriptFile(session),
 		primarySessionID:    currentRuntimeSessionID(session),
 		eventQueue:          make(chan chatRuntimeQueuedEvent, chatRuntimeEventQueueNormalCapacity+chatRuntimeEventQueueCriticalReserve),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
@@ -3706,18 +3726,285 @@ func (b *chatRuntimeEventBridge) appendEventLog(event runtimeevents.Event) {
 	if b == nil {
 		return
 	}
-	line, err := json.Marshal(event)
+	if runtimeevents.IsPersistStreamDeltaEventType(event.Type) {
+		if chatStreamDeltaAppendMode(event) && b.bufferStreamDeltaLog(event) {
+			// P4：append 增量先入合并缓冲（达到阈值时才物化一行）。
+			return
+		}
+		// 快照（mode=replace）/无文本增量：先按原序落盘已缓冲增量，再写本行。
+		b.flushStreamDeltaLog()
+		line, err := json.Marshal(runtimeevents.CompactDurableEventPayload(event))
+		if err != nil {
+			b.eventLogMu.Lock()
+			b.eventLogFailures++
+			b.eventLogMu.Unlock()
+			return
+		}
+		b.appendEventLogLineAsync(line)
+		return
+	}
+	b.flushStreamDeltaLog()
+	b.appendEventTranscript(event)
+	line, err := json.Marshal(runtimeevents.CompactDurableEventPayload(event))
 	if err != nil {
 		b.eventLogMu.Lock()
 		b.eventLogFailures++
 		b.eventLogMu.Unlock()
 		return
 	}
-	if runtimeevents.IsPersistStreamDeltaEventType(event.Type) {
-		b.appendEventLogLineAsync(line)
+	b.appendEventLogLine(line)
+}
+
+// chatEventLogDeltaMergeBytes 是 journal 落盘合并阈值（单流 append 文本累计
+// 字节数）。实测 reasoning 平均 chunk ≈7B、单事件 payload ≈369B（其中五组
+// 重复 ID ≈220B），逐条落盘时固定开销把体积放大数十倍；256B 合并把行数降
+// 约一个数量级以上，同时保留完整可回放文本（拼接无损）。
+const chatEventLogDeltaMergeBytes = 256
+
+// chatEventLogDeltaMergeFloor 是 flush 时仍合并的最小缓冲文本量：达到阈值
+// 的流早已物化；收尾 flush 的尾段（<256B）只要 >1 条且 ≥32B 也合成一行，
+// 避免尾段退化为接近阈值的多条落盘。更小的流（含 1~3 条极短增量）保持
+// 逐条原样落盘，小流行为与旧实现逐字节一致。
+const chatEventLogDeltaMergeFloor = 32
+
+// chatEventLogPendingDelta 是一条流上尚未物化的 append 增量：text 为待拼接
+// 文本，raw 为逐条原样行（未达阈值 flush 时按原序落盘），last 保存末条
+// envelope 供合成行复用。
+type chatEventLogPendingDelta struct {
+	key        string
+	payloadKey string
+	chunks     int
+	text       strings.Builder
+	raw        [][]byte
+	last       runtimeevents.Event
+}
+
+// chatStreamDeltaAppendMode 报告流式增量是否是 append 语义（mode 缺省视为
+// append；mode=replace 的终态快照必须逐行保留，参与全序但不进合并缓冲）。
+func chatStreamDeltaAppendMode(event runtimeevents.Event) bool {
+	mode := ""
+	if value, ok := event.Payload["mode"].(string); ok {
+		mode = strings.ToLower(strings.TrimSpace(value))
+	}
+	return mode == "" || mode == "append"
+}
+
+// chatStreamDeltaLogKey 构造同流身份：同类型 + 同 stream_id（缺省回退
+// llm_request_id）；无身份的事件不参与合并（维持逐条落盘）。
+func chatStreamDeltaLogKey(event runtimeevents.Event) string {
+	streamID := strings.TrimSpace(payloadStringValue(event.Payload["stream_id"]))
+	if streamID == "" {
+		streamID = strings.TrimSpace(payloadStringValue(event.Payload["llm_request_id"]))
+	}
+	if streamID == "" {
+		return ""
+	}
+	return assistantStreamAliasType(event.Type) + "\x00" + streamID
+}
+
+// chatEventLogMergedDeltaLine 把缓冲合成一行：复用末条 envelope/sequence，
+// 既有的 text/content/delta 别名统一写拼接文本（读侧任取一键都无损），并
+// 附加 merged_chunks 计数（additive，旧读侧忽略未知字段）。
+func chatEventLogMergedDeltaLine(p *chatEventLogPendingDelta) []byte {
+	if p == nil || p.chunks <= 1 || p.text.Len() == 0 {
+		return nil
+	}
+	text := p.text.String()
+	event := p.last
+	payload := make(map[string]interface{}, len(event.Payload)+2)
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	// P1-4：合并行只保留规范文本键（read 侧首选），不再把拼接文本写三遍。
+	for _, key := range []string{"text", "content", "delta"} {
+		delete(payload, key)
+	}
+	payload[p.payloadKey] = text
+	payload["merged_chunks"] = p.chunks
+	event.Payload = payload
+	line, err := json.Marshal(event)
+	if err != nil {
+		return nil
+	}
+	return line
+}
+
+// bufferStreamDeltaLog 把一条 append 增量放入合并缓冲；达到阈值时物化一行
+// 并返回 true（已入 journal 队列）。无文本/无流身份/编码失败返回 false，
+// 由调用方走原有逐条路径（失败计数语义不变）。
+func (b *chatRuntimeEventBridge) bufferStreamDeltaLog(event runtimeevents.Event) bool {
+	text := streamEventText(event)
+	if text == "" {
+		return false
+	}
+	key := chatStreamDeltaLogKey(event)
+	if key == "" {
+		return false
+	}
+	line, err := json.Marshal(runtimeevents.CompactDurableEventPayload(event))
+	if err != nil {
+		return false
+	}
+	b.eventLogDeltaMu.Lock()
+	if b.eventLogDeltaPending == nil {
+		b.eventLogDeltaPending = make(map[string]*chatEventLogPendingDelta, 2)
+	}
+	pending := b.eventLogDeltaPending[key]
+	if pending == nil {
+		pending = &chatEventLogPendingDelta{key: key, payloadKey: chatStreamMergePayloadKey(event.Type)}
+		b.eventLogDeltaPending[key] = pending
+	}
+	pending.chunks++
+	pending.text.WriteString(text)
+	pending.raw = append(pending.raw, line)
+	pending.last = event
+	var merged []byte
+	if pending.text.Len() >= chatEventLogDeltaMergeBytes {
+		merged = chatEventLogMergedDeltaLine(pending)
+		delete(b.eventLogDeltaPending, key)
+		if merged != nil {
+			b.eventLogDeltaMergedRows += uint64(pending.chunks - 1)
+		}
+	}
+	b.eventLogDeltaMu.Unlock()
+	if merged != nil {
+		b.appendEventLogLineAsync(merged)
+	}
+	return true
+}
+
+// flushStreamDeltaLog 把未达阈值的缓冲按原始行逐条落盘（小流与逐条落盘
+// 逐字节一致），并清空缓冲。非 delta 事件、注入记录与快照写入前调用，
+// 保证 journal 内全序。
+func (b *chatRuntimeEventBridge) flushStreamDeltaLog() {
+	if b == nil {
 		return
 	}
-	b.appendEventLogLine(line)
+	b.eventLogDeltaMu.Lock()
+	pending := b.eventLogDeltaPending
+	b.eventLogDeltaPending = nil
+	b.eventLogDeltaMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	for _, item := range pending {
+		if item.chunks > 1 && item.text.Len() >= chatEventLogDeltaMergeFloor {
+			if merged := chatEventLogMergedDeltaLine(item); merged != nil {
+				b.noteMergedDeltaRows(item.chunks - 1)
+				b.appendEventLogLineAsync(merged)
+				continue
+			}
+		}
+		for _, line := range item.raw {
+			b.appendEventLogLineAsync(line)
+		}
+	}
+}
+
+// noteMergedDeltaRows 记录被合并掉的增量条数（观测用）。
+func (b *chatRuntimeEventBridge) noteMergedDeltaRows(n int) {
+	if b == nil || n <= 0 {
+		return
+	}
+	b.eventLogDeltaMu.Lock()
+	b.eventLogDeltaMergedRows += uint64(n)
+	b.eventLogDeltaMu.Unlock()
+}
+
+// eventLogDeltaMergeStats 返回合并观测值（已合并掉的增量条数、当前缓冲流数）。
+func (b *chatRuntimeEventBridge) eventLogDeltaMergeStats() (merged uint64, pending int) {
+	if b == nil {
+		return 0, 0
+	}
+	b.eventLogDeltaMu.Lock()
+	defer b.eventLogDeltaMu.Unlock()
+	return b.eventLogDeltaMergedRows, len(b.eventLogDeltaPending)
+}
+
+// chatSessionTranscriptFile 读取会话的 --transcript-file 目标（可空）。
+func chatSessionTranscriptFile(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.transcriptFile)
+}
+
+// appendTranscriptLine 把一条语义条目写入 transcript（best-effort）：
+//   - 测试注入缝优先（并行测试不共享进程级 journal）；
+//   - 否则复用进程级 journal writer 写目标文件（与事件日志同一队列与生命周期，
+//     仅路径不同；队列满时丢弃——transcript 是断言辅助工件，权威数据在会话库）。
+func (b *chatRuntimeEventBridge) appendTranscriptLine(text string) {
+	if b == nil || strings.TrimSpace(b.transcriptFile) == "" {
+		return
+	}
+	text = strings.TrimRight(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if b.transcriptSinkOverride != nil {
+		b.transcriptSinkOverride(text)
+		return
+	}
+	chatEventLogAppendExternalLine(b.transcriptFile, []byte(text+"\n"))
+}
+
+// appendInjectionTranscript 把注入记录投影为语义 transcript 行。历史重置
+// （backtrack 边界）只影响重放模型，不作为可读条目输出。
+func (b *chatRuntimeEventBridge) appendInjectionTranscript(rec eventLogInjection) {
+	switch {
+	case strings.TrimSpace(rec.UserInput) != "":
+		for _, line := range strings.Split(strings.TrimRight(rec.UserInput, "\n"), "\n") {
+			b.appendTranscriptLine("> " + line)
+		}
+	case strings.TrimSpace(rec.Assistant) != "":
+		b.appendTranscriptLine(rec.Assistant)
+	case strings.TrimSpace(rec.Command) != "":
+		b.appendTranscriptLine(rec.Command)
+	case strings.TrimSpace(rec.Error) != "":
+		b.appendTranscriptLine(rec.Error)
+	case strings.TrimSpace(rec.Supplement) != "":
+		b.appendTranscriptLine(rec.Supplement)
+	case strings.TrimSpace(rec.PriorityTranscript) != "":
+		b.appendTranscriptLine(rec.PriorityTranscript)
+	case strings.TrimSpace(rec.Interaction) != "":
+		b.appendTranscriptLine(rec.Interaction)
+	}
+}
+
+// appendEventTranscript 把主链事件里"人可读的语义条目"投影为 transcript 行：
+// 终态回复与工具起止。delta/推理/上下文类事件不入 transcript（噪音或可重建）。
+func (b *chatRuntimeEventBridge) appendEventTranscript(event runtimeevents.Event) {
+	if assistantStreamAliasType(event.Type) == runtimechat.EventAssistantMessage {
+		if text := payloadStringValue(event.Payload["content"]); strings.TrimSpace(text) != "" {
+			b.appendTranscriptLine(text)
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(event.Type)) {
+	case "tool.requested", "tool_started":
+		name := strings.TrimSpace(event.ToolName)
+		if name == "" {
+			name = payloadStringValue(event.Payload["tool_name"])
+		}
+		line := "[tool] " + name + " requested"
+		if preview := payloadStringValue(event.Payload["arg_preview"]); preview != "" {
+			line += ": " + preview
+		}
+		b.appendTranscriptLine(line)
+	case "tool.completed", "tool_completed":
+		name := strings.TrimSpace(event.ToolName)
+		if name == "" {
+			name = payloadStringValue(event.Payload["tool_name"])
+		}
+		status := payloadStringValue(event.Payload["outcome"])
+		if status == "" {
+			if ok, _ := event.Payload["ok"].(bool); ok {
+				status = "ok"
+			} else {
+				status = "error"
+			}
+		}
+		b.appendTranscriptLine("[tool] " + name + " -> " + status)
+	}
 }
 
 // eventLogInjection 是事件日志中"直连注入记录"的落盘格式。注入内容没有
@@ -3775,6 +4062,7 @@ func (b *chatRuntimeEventBridge) appendInjectionLog(rec eventLogInjection) {
 	if b == nil {
 		return
 	}
+	b.appendInjectionTranscript(rec)
 	line, err := json.Marshal(rec)
 	if err != nil {
 		b.eventLogMu.Lock()
@@ -3879,6 +4167,16 @@ func (b *chatRuntimeEventBridge) appendEventLogLine(line []byte) {
 	if b == nil {
 		return
 	}
+	// P4：同步行（注入记录/低频事件）必须先于自身落盘已缓冲的 delta 文本，
+	// 保证 journal 全序（重放按行序重建渲染模型）。
+	b.flushStreamDeltaLog()
+	if b.eventLogSinkOverride != nil {
+		b.eventLogSinkOverride(append([]byte(nil), line...))
+		b.eventLogMu.Lock()
+		b.eventLogCount++
+		b.eventLogMu.Unlock()
+		return
+	}
 	chatEventLogFlush()
 	path := b.eventLogFilePath()
 	if path == "" {
@@ -3922,6 +4220,13 @@ func (b *chatRuntimeEventBridge) appendEventLogLineAsync(line []byte) {
 	if b == nil {
 		return
 	}
+	if b.eventLogSinkOverride != nil {
+		b.eventLogSinkOverride(append([]byte(nil), line...))
+		b.eventLogMu.Lock()
+		b.eventLogCount++
+		b.eventLogMu.Unlock()
+		return
+	}
 	if b.eventLogResolvedPath == "" {
 		path := b.eventLogFilePath()
 		if path == "" {
@@ -3941,6 +4246,22 @@ func (b *chatRuntimeEventBridge) appendEventLogLineAsync(line []byte) {
 		b.eventLogMu.Lock()
 		b.eventLogDropped++
 		b.eventLogMu.Unlock()
+	}
+}
+
+// chatEventLogAppendExternalLine 把任意行投递到进程级 journal writer（按
+// 路径切换文件，见 P3）：transcript 复用同一有界队列与空闲关句柄策略；队列
+// 满时 best-effort 丢弃。调用方自行保证末尾换行。
+func chatEventLogAppendExternalLine(path string, line []byte) {
+	if strings.TrimSpace(path) == "" || len(line) == 0 {
+		return
+	}
+	if !chatEventLogStartWriter() {
+		return
+	}
+	select {
+	case chatEventLogJournal.queue <- eventLogWriteItem{path: path, line: string(line)}:
+	default:
 	}
 }
 

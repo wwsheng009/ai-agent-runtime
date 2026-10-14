@@ -67,20 +67,24 @@ type ChatSession struct {
 	goalReconcileScanned       int
 	goalReconcileFingerprint   chatGoalReconcileFingerprint
 	goalReconcileLastCompleted *runtimegoal.SessionGoal
-	RequestedProvider          string
-	EffectiveProvider          string
-	RequestedModel             string
-	EffectiveModel             string
-	RequestedReasoningEffort   string
-	EffectiveReasoningEffort   string
-	RequestedPermissionMode    string
-	EffectivePermissionMode    string
-	RouteWarnings              []string
-	FallbackUsed               bool
-	FallbackReason             string
-	SuppressReasoningOutput    bool
-	DisableTools               bool
-	DebugMode                  bool
+	// goalContinuationAttempt 是当前进程内 goal 自动续跑的进行中尝试序号
+	// （0=不在续跑）；状态栏据此显示 attempt N/5。主 goroutine（自动续跑循环）
+	// 写入，状态栏刷新 ticker 并发读取，故用 atomic。
+	goalContinuationAttempt  atomic.Int32
+	RequestedProvider        string
+	EffectiveProvider        string
+	RequestedModel           string
+	EffectiveModel           string
+	RequestedReasoningEffort string
+	EffectiveReasoningEffort string
+	RequestedPermissionMode  string
+	EffectivePermissionMode  string
+	RouteWarnings            []string
+	FallbackUsed             bool
+	FallbackReason           string
+	SuppressReasoningOutput  bool
+	DisableTools             bool
+	DebugMode                bool
 	// permissionModeCLIChanged 表示权限模式由命令行显式指定
 	// （--yolo / --permission-mode）。恢复或切换持久化会话时，
 	// 不得用会话中存储的权限模式覆盖 CLI 显式指定值。
@@ -256,7 +260,13 @@ type ChatSession struct {
 	OutputFormat      string          // 输出格式（interactive|text|json）
 	InputReader       *bufio.Reader   // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
 	InputQueue        *chatInputQueue // interactive line queue fed by stdin pump
-	ProfileReference  string          // 用户指定或配置解析出的 profile 引用
+	// ScriptedInput 是 --script 提供的按行输入源（chat_scripted_input.go）：
+	// 非 nil 时主循环逐行提交并在耗尽后正常退出，替代 stdin/TUI 读入。
+	ScriptedInput *chatScriptedInput
+	// transcriptFile 是 --transcript-file：无 ANSI 的语义 transcript 落盘路径
+	// （chat_runtime_events.go 的 appendTranscriptLine，best-effort）。
+	transcriptFile   string
+	ProfileReference string // 用户指定或配置解析出的 profile 引用
 	// ProfileAutoRoutedFrom 记录该绑定由哪个保留引用路由而来（FR-11：目前仅 "auto"；
 	// 空 = 非自动路由）。ProfileReference 始终是已解析的具体 profile，本字段只用于
 	// 归因展示（启动摘要 / /profile status），不参与任何解析。
@@ -1916,10 +1926,18 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 
 		// CLI 启动消息在 TUI 初始化和历史恢复完成后优先提交一次。
 		// 交互模式提交完成后继续下一轮输入；非交互模式在本轮结束后退出。
+		// --script 行源在启动消息之后逐行接管输入：每条在上一轮结束后提交，
+		// 耗尽后走正常退出路径（终端还原/会话落盘，chat_scripted_input.go）。
 		if initialMessage != "" {
 			input = initialMessage
 			// 使用后清空，避免循环发送
 			initialMessage = ""
+		} else if scripted := session.ScriptedInput; scripted != nil && scripted.exhausted() {
+			writeEphemeralDirectInteractiveOutput(session, "脚本输入已处理完，正在退出...\n")
+			flushEphemeralDirectInteractiveOutput(session)
+			break
+		} else if scripted := session.ScriptedInput; scripted != nil {
+			input = scripted.next()
 		} else {
 			if !noInteractive {
 				showPrompt, notice, err := prepareInteractiveRead(session)

@@ -29,6 +29,9 @@ background:
   heartbeatTimeout: 30s
   launchMaxAttempts: 3
   retryBackoff: 500ms
+  # maxInteractiveSessions 限制存活的交互式（write_stdin/PTY）会话数；默认 64。
+  # 交互会话不占用一次性命令的并发调度槽（maxConcurrentJobs）。
+  # maxInteractiveSessions: 64
   # -1 keeps explicitly rerunnable jobs recovering until they are cancelled.
   recoveryMaxAttempts: -1
   recoveryBackoffSchedule: [30s, 1m, 2m, 3m, 5m]

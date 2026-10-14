@@ -59,6 +59,7 @@ type ConPty struct {
 	hpc                          _HPCON
 	pi                           *windows.ProcessInformation
 	ptyIn, ptyOut, cmdIn, cmdOut *handleIO
+	closed                       bool
 }
 
 func win32ClosePseudoConsole(hPc _HPCON) {
@@ -187,6 +188,10 @@ func closeHandles(handles ...windows.Handle) error {
 }
 
 func (cpty *ConPty) Close() error {
+	if cpty.closed {
+		return nil
+	}
+	cpty.closed = true
 	win32ClosePseudoConsole(cpty.hpc)
 	return closeHandles(
 		cpty.pi.Process, cpty.pi.Thread,
@@ -295,6 +300,10 @@ func main() {
 	defer cancel()
 	code, err := cpty.Wait(ctx)
 	fmt.Printf("wait code=%d err=%v output=%q\n", code, err, string(output))
+	// 进程已退出：先关闭 PTY 句柄让读取端收到 EOF，reader goroutine 才能结束；
+	// 否则 <-done 会永久阻塞（2026-10-14 实测：go run 挂到外部超时）。
+	// Close 幂等，defer 的重复调用无副作用。
+	_ = cpty.Close()
 	<-done
 	fmt.Printf("done, total output=%q\n", string(output))
 	if string(output) == "" {

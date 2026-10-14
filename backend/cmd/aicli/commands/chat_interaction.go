@@ -3286,6 +3286,16 @@ func chatSurfaceGoalStatusSegment(session *ChatSession) chatStatusSegment {
 	usage := chatSurfaceGoalUsage(goal, chatGoalStatusActiveTurnStartedAt(session), time.Now())
 	switch goal.Status {
 	case runtimegoal.StatusActive:
+		if attempt := goalContinuationAttemptLabel(session); attempt != "" {
+			// 自动续跑进行中：把进度带进状态栏（此前只有 debug 日志可见）。
+			if usage != "" {
+				return chatStatusSegment{
+					full:    fmt.Sprintf("Pursuing goal (%s%s)", usage, attempt),
+					compact: "Goal",
+				}
+			}
+			return chatStatusSegment{full: "Pursuing goal" + attempt, compact: "Goal"}
+		}
 		if usage != "" {
 			return chatStatusSegment{
 				full:    fmt.Sprintf("Pursuing goal (%s)", usage),
@@ -3317,6 +3327,19 @@ func chatSurfaceGoalStatusSegment(session *ChatSession) chatStatusSegment {
 	default:
 		return chatStatusSegment{}
 	}
+}
+
+// goalContinuationAttemptLabel 渲染自动续跑进行中的 " · attempt N/5" 后缀；
+// 不在续跑时返回空串（计数由 maybeAutoContinueActiveGoal 维护）。
+func goalContinuationAttemptLabel(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	attempt := int(session.goalContinuationAttempt.Load())
+	if attempt <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" · attempt %d/%d", attempt, defaultGoalAutoContinuationLimit)
 }
 
 // chatSurfaceGoalUsage mirrors Codex active_goal_usage / completed_goal_usage.

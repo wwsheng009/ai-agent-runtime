@@ -196,6 +196,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		RequestTimeout:           runtimeState.requestTimeout,
 		OutputFormat:             opts.OutputFormat,
 		InputReader:              chatOptionInputReader(opts),
+		ScriptedInput:            newChatScriptedInput(opts.ScriptLines),
 		PermissionMode:           opts.PermissionMode,
 		permissionModeCLIChanged: opts.PermissionModeChanged,
 		AllowedRoots:             dedupeChatPaths(opts.AllowedDirs),
@@ -211,6 +212,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	// /gateway 命令给出明确提示）。自动连接为 best-effort，不影响 chat 启动。
 	attachChatGateway(session)
 	session.Interaction.renderOutputFile = opts.RenderOutputFile
+	session.transcriptFile = strings.TrimSpace(opts.TranscriptFile)
 	// The compatibility facade is already physically fenced above, so it is
 	// safe to mount its geometry and semantic bottom-pane inputs before the
 	// primary presenter attaches. Doing so makes the first TerminalSession frame

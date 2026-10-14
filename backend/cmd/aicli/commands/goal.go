@@ -22,6 +22,11 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
+		// deferred storage：新会话尚未落盘时没有可清除的持久化行，按已清除返回。
+		if session.runtimeSessionUnpersisted {
+			fmt.Println("Goal 已清除")
+			return false
+		}
 		updated, err := runtimegoal.NewMetadataStore().ClearPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session))
 		if err != nil {
 			fmt.Printf("错误: %v\n", err)
@@ -46,7 +51,7 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 		fmt.Println(formatCommandError("错误: /goal --json 仅支持查看当前 goal", true))
 		return false
 	}
-	if err := requireGoalPersistence(session); err != nil {
+	if err := prepareGoalMutationPersist(session); err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
@@ -142,7 +147,7 @@ func printGoalStatus(session *ChatSession, jsonOutput bool) {
 }
 
 func updateGoalStatusCommand(session *ChatSession, status runtimegoal.Status, message string, completedBy string, completionSummary string) bool {
-	if err := requireGoalPersistence(session); err != nil {
+	if err := prepareGoalMutationPersist(session); err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
@@ -204,6 +209,17 @@ func requireGoalPersistence(session *ChatSession) error {
 	return nil
 }
 
+// prepareGoalMutationPersist 保证目标写入前会话已落盘。Deferred 存储下，新会话
+// 的首个输入若是 /goal 命令（没有普通消息先触发 ensureChatRuntimeSessionPersisted），
+// PutPersistent 会因 session row 不存在而失败——实测（ConPTY，2026-10-14）表现为
+// "错误: /goal 的当前参数或状态形式不受支持"。
+func prepareGoalMutationPersist(session *ChatSession) error {
+	if err := requireGoalPersistence(session); err != nil {
+		return err
+	}
+	return ensureChatRuntimeSessionPersisted(session)
+}
+
 func formatGoalSummary(goal runtimegoal.SessionGoal) string {
 	lines := []string{
 		fmt.Sprintf("Goal: %s", goal.Status),
@@ -215,6 +231,12 @@ func formatGoalSummary(goal runtimegoal.SessionGoal) string {
 		} else {
 			lines = append(lines, fmt.Sprintf("Tokens: %d", goal.TokensUsed))
 		}
+	}
+	if goal.CompletedBy != "" {
+		lines = append(lines, "Completed by: "+goal.CompletedBy)
+	}
+	if goal.CompletionSummary != "" {
+		lines = append(lines, "Summary: "+goal.CompletionSummary)
 	}
 	if !goal.UpdatedAt.IsZero() {
 		lines = append(lines, "Updated: "+goal.UpdatedAt.Format("2006-01-02 15:04:05"))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -146,6 +147,32 @@ func TestOpenTerminalReusesLiveSession(t *testing.T) {
 
 	_, err = manager.CloseTerminal(ctx, first.ID)
 	require.NoError(t, err)
+}
+
+func TestOpenTerminalDifferentCommandReturnsBusy(t *testing.T) {
+	if !interactiveEchoSupported() {
+		t.Skip("interactive stdin echo is not portable under cmd.exe")
+	}
+	ctx := context.Background()
+	manager := NewManager(Config{LogDir: t.TempDir()})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	first, err := manager.OpenTerminal(ctx, "session-busy", TerminalOpenArgs{Command: interactiveEchoCommand()})
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	// 同槽位、不同命令：必须显式 busy，而不是静默返回正在运行的会话
+	// （2026-10-14：静默复用让调用方以为新会话已启动）。
+	_, err = manager.OpenTerminal(ctx, "session-busy", TerminalOpenArgs{Command: "another-command --flag"})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInteractiveBusy)
+
+	var busy *InteractiveBusyError
+	require.ErrorAs(t, err, &busy)
+	require.Equal(t, first.ID, busy.ExistingJobID)
+	require.Equal(t, strings.TrimSpace(interactiveEchoCommand()), busy.ExistingCommand)
+	require.Equal(t, "another-command --flag", busy.RequestedCommand)
+	require.Contains(t, err.Error(), first.ID)
 }
 
 func TestWriteStdinSentinelErrors(t *testing.T) {

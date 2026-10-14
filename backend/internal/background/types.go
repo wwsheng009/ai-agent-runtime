@@ -85,6 +85,11 @@ type BackgroundTaskResult struct {
 	HealthcheckState string        `json:"healthcheck_state,omitempty"`
 	StartupProbe     string        `json:"startup_probe,omitempty"`
 	StartupGraceMs   int64         `json:"startup_grace_ms,omitempty"`
+	// AlreadyOpen reports that an interactive job_start with the same command
+	// returned the live session instead of starting a new process (explicit
+	// reuse marker, 2026-10-14). A different command while the slot is occupied
+	// is rejected with an explicit busy result instead.
+	AlreadyOpen bool `json:"already_open,omitempty"`
 }
 
 // TaskOutputArgs reads task output from an offset.

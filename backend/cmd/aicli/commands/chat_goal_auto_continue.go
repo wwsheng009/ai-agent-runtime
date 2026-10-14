@@ -26,6 +26,8 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	if session == nil || executor == nil {
 		return nil
 	}
+	// 状态栏 attempt 计数只在续跑循环存活期间有效：所有退出路径都归零。
+	defer session.goalContinuationAttempt.Store(0)
 	// A canceled turn context must not be answered with a fresh continuation
 	// run: remote cancels may not have set the session's interrupted flag
 	// (plan doc P3-9).
@@ -56,6 +58,7 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			return nil
 		}
 		writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation attempt=%d limit=%d status=%s", i+1, defaultGoalAutoContinuationLimit, decision.GoalStatus), false)
+		session.goalContinuationAttempt.Store(int32(i + 1))
 		attemptCtx, cancel := goalAutoContinuationAttemptContext(ctx, session)
 		_, continueErr := continuer.ContinueGoal(attemptCtx, session)
 		cancel()

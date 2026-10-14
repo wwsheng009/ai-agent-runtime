@@ -340,8 +340,16 @@ func TestTryExecuteStructuredChatCommandGoal(t *testing.T) {
 	}
 
 	for _, command := range []string{"/goal clear", "/goal pause", "/goal resume", "/goal complete", "/goal ship it"} {
-		if _, handled, err := tryExecuteStructuredChatCommand(session, command); err != nil || handled {
-			t.Fatalf("%s without persistence structured match=(%t, %v), want legacy", command, handled, err)
+		// 2026-10-14：无持久化时结构化分支仍认领命令并返回 typed error。
+		// 统一交互分派下 legacy handler 已被门禁关闭，退回 handled=false
+		// 只会渲染通用"参数或状态形式不受支持"，丢失"未启用持久化"这一
+		// 精确原因；错误由框架统一渲染，legacy/JSON 投影不受影响。
+		_, handled, err := tryExecuteStructuredChatCommand(session, command)
+		if !handled || err == nil {
+			t.Fatalf("%s without persistence structured match=(%t, %v), want handled typed error", command, handled, err)
+		}
+		if !strings.Contains(err.Error(), goalPersistenceRequiredMessage) {
+			t.Fatalf("%s without persistence error=%v, want containing %q", command, err, goalPersistenceRequiredMessage)
 		}
 	}
 
@@ -375,8 +383,12 @@ func TestTryExecuteStructuredChatCommandGoal(t *testing.T) {
 	}
 	assertGoalStatus(t, persistent, runtimegoal.StatusComplete)
 
-	if _, handled, err := tryExecuteStructuredChatCommand(persistent, "/goal resume"); err != nil || handled {
-		t.Fatalf("/goal resume after complete structured match=(%t, %v), want legacy rejection", handled, err)
+	// 同前：complete 终态的转换拒绝也由结构化分支认领并返回 typed error
+	// （2026-10-14），保证交互模式展示精确原因而不是通用 fallback。
+	if _, handled, err := tryExecuteStructuredChatCommand(persistent, "/goal resume"); !handled || err == nil {
+		t.Fatalf("/goal resume after complete structured match=(%t, %v), want handled rejection", handled, err)
+	} else if !strings.Contains(err.Error(), "goal 已完成") {
+		t.Fatalf("/goal resume after complete error=%v, want transition rejection", err)
 	}
 
 	result, handled, err = tryExecuteStructuredChatCommand(persistent, "/goal")

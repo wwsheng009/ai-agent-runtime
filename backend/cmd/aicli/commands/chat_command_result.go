@@ -703,10 +703,13 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/goal") {
 		// 成功路径结构化：状态视图与 clear/pause/resume/complete/设置目标。
-		// --json 变体、持久化错误与校验错误保持 legacy（错误消息需在所有
-		// 模式可见，JSON 投影不在文档契约内）。设置目标成功后经
-		// SendObjective 在确认 cell 提交后触发 AI 目标请求（与 ReplayHistory
-		// 同款 post-commit 声明）。
+		// 失败路径同样在本分支收敛为 typed error（统一分派经
+		// commandErrorResult 渲染 "错误: ..." 文档）：交互统一分派下 legacy
+		// handler 已被门禁关闭，若退回 handled=false 只会得到通用"参数或状态
+		// 形式不受支持"，实测丢失"goal 已完成；请使用 /goal clear…"等精确
+		// 原因（2026-10-14 ConPTY 实测）。--json 变体保持 legacy（JSON 投影
+		// 不在文档契约内）。设置目标成功后经 SendObjective 在确认 cell 提交后
+		// 触发 AI 目标请求（与 ReplayHistory 同款 post-commit 声明）。
 		if session == nil {
 			return CommandResult{}, false, nil
 		}
@@ -715,7 +718,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		case "", "status":
 			goal, ok, err := currentSessionGoal(session)
 			if err != nil {
-				return CommandResult{}, false, nil
+				return CommandResult{}, true, err
 			}
 			var goalPtr *runtimegoal.SessionGoal
 			if ok {
@@ -726,11 +729,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 				Action: CommandContinue,
 			}, true, nil
 		case "clear":
-			result, handled := executeStructuredGoalClear(session)
-			return result, handled, nil
+			return executeStructuredGoalClear(session)
 		case "pause", "resume", "complete":
-			result, handled := executeStructuredGoalStatusChange(session, strings.ToLower(arg))
-			return result, handled, nil
+			return executeStructuredGoalStatusChange(session, strings.ToLower(arg))
 		}
 		objective, jsonOutput := stripJSONOption(arg)
 		if jsonOutput {
@@ -739,8 +740,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			}
 			return CommandResult{}, false, nil
 		}
-		result, handled := executeStructuredGoalSet(session, objective)
-		return result, handled, nil
+		return executeStructuredGoalSet(session, objective)
 	}
 
 	if commandMatches(cmdLower, "/memory") {
@@ -1340,25 +1340,33 @@ func commandResultWithWarnings(doc render.Document, warnings ...error) CommandRe
 	return CommandResult{Blocks: blocks, Action: CommandContinue}
 }
 
-func executeStructuredGoalClear(session *ChatSession) (CommandResult, bool) {
+func executeStructuredGoalClear(session *ChatSession) (CommandResult, bool, error) {
 	if err := requireGoalPersistence(session); err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
+	}
+	// deferred storage：新会话尚未落盘时没有可清除的持久化行，直接按已清除
+	// 返回，避免为一条 clear 命令创建空会话行。
+	if session.runtimeSessionUnpersisted {
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatGoalClearDocument()}},
+			Action: CommandContinue,
+		}, true, nil
 	}
 	updated, err := runtimegoal.NewMetadataStore().ClearPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session))
 	if err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	return CommandResult{
 		Blocks: []RenderBlock{{Document: buildChatGoalClearDocument()}},
 		Action: CommandContinue,
-	}, true
+	}, true, nil
 }
 
-func executeStructuredGoalStatusChange(session *ChatSession, verb string) (CommandResult, bool) {
+func executeStructuredGoalStatusChange(session *ChatSession, verb string) (CommandResult, bool, error) {
 	var status runtimegoal.Status
 	var message string
 	switch verb {
@@ -1369,24 +1377,24 @@ func executeStructuredGoalStatusChange(session *ChatSession, verb string) (Comma
 	case "complete":
 		status, message = runtimegoal.StatusComplete, "Goal 已标记完成"
 	default:
-		return CommandResult{}, false
+		return CommandResult{}, false, nil
 	}
-	if err := requireGoalPersistence(session); err != nil {
-		return CommandResult{}, false
+	if err := prepareGoalMutationPersist(session); err != nil {
+		return CommandResult{}, true, err
 	}
 	store := runtimegoal.NewMetadataStore()
 	goal, ok, err := store.Get(session.RuntimeSession)
 	if err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	if !ok || goal == nil {
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: buildChatGoalNoneDocument()}},
 			Action: CommandContinue,
-		}, true
+		}, true, nil
 	}
 	if err := validateGoalStatusTransition(goal.Status, status); err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	now := time.Now()
 	goal.Status = status
@@ -1403,45 +1411,45 @@ func executeStructuredGoalStatusChange(session *ChatSession, verb string) (Comma
 	updated, err := store.PutPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
 	if err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	return CommandResult{
 		Blocks: []RenderBlock{{Document: buildChatGoalMutationDocument(message, *goal)}},
 		Action: CommandContinue,
-	}, true
+	}, true, nil
 }
 
-func executeStructuredGoalSet(session *ChatSession, objective string) (CommandResult, bool) {
-	if err := requireGoalPersistence(session); err != nil {
-		return CommandResult{}, false
+func executeStructuredGoalSet(session *ChatSession, objective string) (CommandResult, bool, error) {
+	if err := prepareGoalMutationPersist(session); err != nil {
+		return CommandResult{}, true, err
 	}
 	goal, err := runtimegoal.NewSessionGoal(currentRuntimeSessionID(session), objective, time.Now())
 	if err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	store := runtimegoal.NewMetadataStore()
 	replaced := ""
 	if existing, ok, err := store.Get(session.RuntimeSession); err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	} else if ok && existing != nil {
 		replaced = fmt.Sprintf("（已替换原 %s goal）", existing.Status)
 	}
 	updated, err := store.PutPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), goal, runtimegoal.MutationUser)
 	if err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
-		return CommandResult{}, false
+		return CommandResult{}, true, err
 	}
 	return CommandResult{
 		Blocks:        []RenderBlock{{Document: buildChatGoalSetDocument(replaced, &goal)}},
 		Action:        CommandContinue,
 		SendObjective: objective,
-	}, true
+	}, true, nil
 }
 
 func commandErrorResult(err error) CommandResult {

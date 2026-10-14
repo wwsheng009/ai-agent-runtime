@@ -87,6 +87,13 @@ type chatCommandOptions struct {
 	SessionFilter            ChatSessionListFilter
 	SessionFeaturesRequested bool
 	RenderOutputFile         string // --render-output-file：交互聊天终端镜像落盘路径
+	// ScriptFile / ScriptLines 是 --script 的多轮输入源：文件路径 + 解析期
+	// 已拆分的非空行（见 chat_scripted_input.go）。
+	ScriptFile  string
+	ScriptLines []string
+	// TranscriptFile 是 --transcript-file：无 ANSI 的语义 transcript 落盘路径
+	// （见 chat_runtime_events.go 的 appendTranscriptLine）。
+	TranscriptFile string
 	// BudgetTokens 是 --budget-tokens 的单轮 token 预算（PR-4 §6.4）；0 表示不限制。
 	BudgetTokens int
 	// ACPMCPMode / ACPMCPClientPlan / ACPMCPCapabilities 是 ACP 宿主专用的
@@ -228,6 +235,12 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	runtimeServerFlag, _ := cmd.Flags().GetString("runtime-server")
 	runtimeModeFlag, _ := cmd.Flags().GetString("runtime-mode")
 	renderOutputFile, _ := cmd.Flags().GetString("render-output-file")
+	scriptFile, _ := cmd.Flags().GetString("script")
+	scriptLines, err := loadChatScriptLines(scriptFile, noInteractive)
+	if err != nil {
+		return nil, err
+	}
+	transcriptFile, _ := cmd.Flags().GetString("transcript-file")
 
 	outputFormat, err := resolveChatOutputFormat(noInteractive, outputFlag, jsonOutput)
 	if err != nil {
@@ -328,6 +341,9 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		RuntimeMode:            runtimeMode,
 		RuntimeServerURL:       runtimeServerURL,
 		RenderOutputFile:       renderOutputFile,
+		ScriptFile:             strings.TrimSpace(scriptFile),
+		ScriptLines:            scriptLines,
+		TranscriptFile:         strings.TrimSpace(transcriptFile),
 		ProviderChanged:        cmd.Flags().Changed("provider"),
 		ModelChanged:           cmd.Flags().Changed("model"),
 		OutputFormat:           outputFormat,

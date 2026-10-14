@@ -3344,6 +3344,7 @@ func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig, on
 		StoreDSN:                strings.TrimSpace(cfg.StoreDSN),
 		LogDir:                  strings.TrimSpace(cfg.LogDir),
 		MaxConcurrentJobs:       cfg.MaxConcurrentJobs,
+		MaxInteractiveSessions:  cfg.MaxInteractiveSessions,
 		InstanceID:              strings.TrimSpace(cfg.InstanceID),
 		LeaseTTL:                cfg.LeaseTTL,
 		HeartbeatInterval:       cfg.HeartbeatInterval,

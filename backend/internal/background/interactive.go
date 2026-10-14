@@ -33,7 +33,33 @@ var (
 	ErrSessionNotLocal = errors.New("interactive session is owned by another runtime instance")
 	// ErrTTYUnsupported marks a resize on a session without a PTY.
 	ErrTTYUnsupported = errors.New("PTY is not supported for this session")
+	// ErrInteractiveBusy marks a second OpenTerminal for the same caller session
+	// that would start a DIFFERENT command while a live interactive session is
+	// still running. The previous behavior silently returned the running job, so
+	// callers believed a new session had been opened (E2E 2026-10-14).
+	ErrInteractiveBusy = errors.New("interactive session is busy")
 )
+
+// InteractiveBusyError carries the occupying job so callers (tool broker, REST
+// layer) can render an actionable busy result — cancel the occupant or wait —
+// instead of silently reusing it.
+type InteractiveBusyError struct {
+	SessionID        string
+	ExistingJobID    string
+	ExistingCommand  string
+	RequestedCommand string
+}
+
+func (e *InteractiveBusyError) Error() string {
+	if e == nil {
+		return ErrInteractiveBusy.Error()
+	}
+	return fmt.Sprintf(
+		"interactive session is busy: job %s is still running command %q (session %s); cancel it or wait for it to finish before starting %q",
+		e.ExistingJobID, e.ExistingCommand, e.SessionID, e.RequestedCommand)
+}
+
+func (e *InteractiveBusyError) Unwrap() error { return ErrInteractiveBusy }
 
 // Interactive session yield bounds mirror Codex unified_exec
 // (MIN_YIELD_TIME_MS / MAX_YIELD_TIME_MS / MIN_EMPTY_YIELD_TIME_MS). They bound
@@ -214,22 +240,40 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID string, args Termi
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if existing := m.interactiveSessionBySession(sessionID); existing != nil && !existing.hasExited() {
-		// Reuse an already-open live session for this session id (2026-10-11):
-		// a second OpenTerminal returns the running session instead of starting
-		// a second process.
-		job := existing.job.snapshot()
-		if job != nil {
-			if job.Metadata == nil {
-				job.Metadata = map[string]interface{}{}
-			}
-			job.Metadata["already_open"] = true
-		}
-		return job, nil
-	}
 	command := strings.TrimSpace(args.Command)
 	if command == "" {
 		return nil, fmt.Errorf("command is required")
+	}
+	if existing := m.interactiveSessionBySession(sessionID); existing != nil && !existing.hasExited() {
+		existingCommand := strings.TrimSpace(existing.job.request.Command)
+		if existingCommand == command {
+			// Idempotent retry of the same open (2026-10-11): a second
+			// OpenTerminal with the same command returns the running session
+			// instead of starting a second process. already_open keeps the
+			// reuse explicit for callers that project metadata.
+			job := existing.job.snapshot()
+			if job != nil {
+				if job.Metadata == nil {
+					job.Metadata = map[string]interface{}{}
+				}
+				job.Metadata["already_open"] = true
+			}
+			return job, nil
+		}
+		// Different command: the single interactive slot is occupied. Fail
+		// explicitly instead of silently returning the running job
+		// (E2E 2026-10-14): otherwise the caller believes the new session was
+		// opened while its command never started.
+		existingJobID := ""
+		if snapshot := existing.job.snapshot(); snapshot != nil {
+			existingJobID = strings.TrimSpace(snapshot.ID)
+		}
+		return nil, &InteractiveBusyError{
+			SessionID:        strings.TrimSpace(sessionID),
+			ExistingJobID:    existingJobID,
+			ExistingCommand:  existingCommand,
+			RequestedCommand: command,
+		}
 	}
 
 	m.mu.RLock()

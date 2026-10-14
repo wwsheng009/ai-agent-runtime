@@ -455,11 +455,16 @@ func (c ScheduleConfig) WithDefaults() ScheduleConfig {
 
 // BackgroundConfig controls background task persistence.
 type BackgroundConfig struct {
-	StorePath               string          `yaml:"storePath" json:"storePath"`
-	StoreDSN                string          `yaml:"storeDSN" json:"storeDSN"`
-	LogDir                  string          `yaml:"logDir" json:"logDir"`
-	MaxOutputBytes          int             `yaml:"maxOutputBytes" json:"maxOutputBytes"`
-	MaxConcurrentJobs       int             `yaml:"maxConcurrentJobs" json:"maxConcurrentJobs"`
+	StorePath         string `yaml:"storePath" json:"storePath"`
+	StoreDSN          string `yaml:"storeDSN" json:"storeDSN"`
+	LogDir            string `yaml:"logDir" json:"logDir"`
+	MaxOutputBytes    int    `yaml:"maxOutputBytes" json:"maxOutputBytes"`
+	MaxConcurrentJobs int    `yaml:"maxConcurrentJobs" json:"maxConcurrentJobs"`
+	// MaxInteractiveSessions bounds live interactive (write_stdin/PTY) sessions.
+	// They do not consume maxConcurrentJobs scheduling slots. Default 64 when
+	// unset (non-positive falls back to the background manager default,
+	// 2026-10-14).
+	MaxInteractiveSessions  int             `yaml:"maxInteractiveSessions" json:"maxInteractiveSessions"`
 	DefaultTimeout          time.Duration   `yaml:"defaultTimeout" json:"defaultTimeout"`
 	MonitorInterval         time.Duration   `yaml:"monitorInterval" json:"monitorInterval"`
 	HeartbeatTimeout        time.Duration   `yaml:"heartbeatTimeout" json:"heartbeatTimeout"`
