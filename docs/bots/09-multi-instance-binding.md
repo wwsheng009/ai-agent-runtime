@@ -279,7 +279,7 @@ flowchart TD
 | 分支 | 条件 | 行为 |
 |------|------|------|
 | **R1** | 绑定存在且 `NodeID` 在 mesh peers 中活跃 | turn 派发到该节点执行（远程 submit，v1 仅终态回传；本机节点直接本地执行） |
-| **R2a**（D3 前半） | 绑定存在但 NodeID 掉线 | **先核对"当前运行会话==绑定会话"**：一致 → 由接管节点继续服务该绑定会话（绑定记录不变，仅执行体转移）；成功后更新 `NodeID` 并在 IM 提示一次 |
+| **R2a**（D3 前半） | 绑定存在但 NodeID 掉线 | **先核对"当前运行会话==绑定会话"**：一致 → 由接管节点继续服务该绑定会话（绑定记录不变，仅执行体转移）；成功后更新 `NodeID` 并在 IM 提示一次。**✅ 2026-10-14（切片 C）**：`DecideRoute` R2 分支置 `Failover`（有活 runner 在场时），`processMessage` 本机执行成功后回写 `binding.Session.NodeID = 本宿主 HostID` 并经 poller Send 提示一次；纯单机模式（无 peers 视图）保持静默（历史行为） |
 | **R2b**（D3 后半） | 无绑定 | **不迁移/不新增任何绑定**；接管处理器按共享绑定表现状处理：该 chat 之后的消息走 auto-create（在新节点建会话并按 §5.1 正常落绑定） |
 | **R3**（D2） | 无绑定 | 按 `connectors.runner_preference` 选举：默认优先任一活着的 runtime-server；没有则 aicli；`round-robin` 轮转 |
 

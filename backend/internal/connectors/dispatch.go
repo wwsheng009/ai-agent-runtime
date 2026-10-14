@@ -94,6 +94,10 @@ type routeDecision struct {
 	Affinity bool
 	// Unbound 报告无绑定（R3）：runner 侧执行后由调用方落 auto-create 绑定。
 	Unbound bool
+	// Failover 报告 R2a（绑定 NodeID 掉线，本机接管继续服务该绑定会话）：
+	// 执行体转移，绑定记录不变；调用方执行成功后更新绑定的 NodeID 并在 IM
+	// 提示一次（D3 前半，docs/bots/09 §7.2）。
+	Failover bool
 }
 
 // DecideRoute 按 09 §7.2 做路由决策（纯逻辑）：
@@ -134,9 +138,11 @@ func DecideRoute(preference string, peers []RunnerPeer, localHostID string, bind
 				}
 			}
 		}
-		// R2 最小实现：绑定目标不可达（掉线/为空）→ 本机执行。
-		// 切片 C 在此升级：核对会话 → 接管 → IM 提示。
-		return routeDecision{Remote: false, Affinity: false}, rrCursor
+		// R2a（D3 前半）：绑定目标不可达（掉线/为空）→ 本机接管继续服务该
+		// 绑定会话（执行体转移，绑定记录不变）。mesh 在场（有其它活 runner）
+		// 时置 Failover：调用方执行成功后回写 NodeID 并 IM 提示一次；纯单机
+		// 模式（无 peers 视图）不提示——历史行为保持静默。
+		return routeDecision{Remote: false, Affinity: true, Failover: len(alive) > 0}, rrCursor
 	}
 
 	// R3：无绑定。本机总是可用兜底；先按偏好选举（含本机候选）。

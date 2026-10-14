@@ -3,6 +3,7 @@ package connectors
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -178,5 +179,42 @@ func TestServiceNoPeersMeansLocalAlways(t *testing.T) {
 	waitFor(t, "reply", func() bool { return len(provider.finalMessages()) > 0 })
 	if requests := backend.requests(); len(requests) != 1 {
 		t.Fatalf("standalone mode must stay local, requests = %d", len(requests))
+	}
+}
+
+// TestServiceR2aFailoverTakeover：绑定 NodeID 掉线 → 本机接管（切片 C）：
+// 本机执行、回写 NodeID 为本宿主身份、IM 提示一次。
+func TestServiceR2aFailoverTakeover(t *testing.T) {
+	provider, backend, store, service := newDispatchTestSetup(t, func(context.Context, DispatchRequest) (DispatchResult, error) {
+		t.Fatal("R2a must not remote-dispatch")
+		return DispatchResult{}, nil
+	})
+	// 绑定指向已掉线节点。
+	if err := store.PutBinding(Binding{ConnectorID: "c1", Chat: "chat-1",
+		Session: SessionRef{NodeID: "aicli:node-stale", SessionID: "sess-kept"}}); err != nil {
+		t.Fatal(err)
+	}
+	// backend 续用绑定会话（接管语义：同一 session_id 在本机继续）。
+	backend.session = SessionRef{NodeID: "aicli:node-stale", SessionID: "sess-kept"}
+
+	if err := service.HandleInbound(context.Background(), inbound("c1", "chat-1", "m1", "hi")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "reply", func() bool { return len(provider.sentTexts()) > 0 })
+	// NodeID 回写为本宿主。
+	binding, ok := store.GetBinding("c1", "chat-1")
+	if !ok || binding.Session.NodeID != "runtime-server" || binding.Session.SessionID != "sess-kept" {
+		t.Fatalf("binding after failover = %+v", binding.Session)
+	}
+	// IM 提示一次（接管文案）。
+	notified := false
+	for _, text := range provider.sentTexts() {
+		if strings.Contains(text, "接管") {
+			notified = true
+			break
+		}
+	}
+	if !notified {
+		t.Fatalf("failover notice missing, sent = %v", provider.sentTexts())
 	}
 }

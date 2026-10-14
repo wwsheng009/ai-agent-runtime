@@ -748,10 +748,11 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 
 	binding, _ := s.deps.Store.GetBinding(cfg.ID, msg.Chat)
 
-	// P2 切片 B（docs/bots/09 §7.2）：按绑定状态决定执行位置（R1 亲和派发 /
-	// R2 本机回退 / R3 选举）。Peers/RemoteDispatch 未装配 = 单机模式，
+	// P2 切片 B/C（docs/bots/09 §7.2）：按绑定状态决定执行位置（R1 亲和派发 /
+	// R2a 接管 / R3 选举）。Peers/RemoteDispatch 未装配 = 单机模式，
 	// 决策恒本机，行为与历史完全一致。
-	if decision, rrNext := s.decideRoute(cfg, binding.Session); decision.Remote {
+	decision, rrNext := s.decideRoute(cfg, binding.Session)
+	if decision.Remote {
 		if s.deps.RemoteDispatch != nil {
 			return s.dispatchRemote(ctx, cfg, provider, msg, binding.Session, decision, rrNext)
 		}
@@ -761,6 +762,9 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		s.runnerRoundRobin = rrNext
 		s.mu.Unlock()
 	}
+	// R2a 接管语义（D3 前半，切片 C）：本机接管继续服务该绑定会话；执行成功
+	// 后回写 NodeID 并 IM 提示一次（failoverNotice 置位后只发一次）。
+	failoverNotice := decision.Failover && !decision.Remote
 
 	streamer, err := s.startStreaming(ctx, cfg, provider, msg.Chat)
 	if err != nil {
@@ -813,6 +817,33 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: result.Session}); err != nil {
 			s.logf("connector %s: persist binding failed: %v", cfg.ID, err)
 		}
+	}
+	// R2a 接管完成（D3 前半，切片 C）：执行体已转移到本机——回写绑定 NodeID
+	// 为本宿主身份（亲和转移，绑定记录不变）并在 IM 提示一次。回写只在
+	// backend 未自行改 Session（改了则上面的常规回写已带新值）且原绑定确实
+	// 指向别节点时进行。
+	if failoverNotice && result.Session.NodeID != s.deps.HostID {
+		updated := result.Session
+		if updated.IsZero() {
+			updated = binding.Session
+		}
+		updated.NodeID = s.deps.HostID
+		if updated != binding.Session {
+			if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: updated}); err != nil {
+				s.logf("connector %s: persist failover binding failed: %v", cfg.ID, err)
+			}
+		}
+		notice := "ℹ️ 原执行节点已下线，本节点接管继续服务该会话。"
+		if err := provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: notice}}); err != nil {
+			s.logf("connector %s: failover notice failed: %v", cfg.ID, err)
+		}
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "R2a 接管：原节点 " + strings.TrimSpace(binding.Session.NodeID) + " 掉线，本机继续服务（已回写 NodeID）",
+		}, logCounters{})
 	}
 	if len(result.Reply) == 0 {
 		if streamer != nil {

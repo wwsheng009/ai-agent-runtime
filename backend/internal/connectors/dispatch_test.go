@@ -32,8 +32,13 @@ func TestDecideRouteLocalAffinity(t *testing.T) {
 func TestDecideRouteR2Fallback(t *testing.T) {
 	binding := SessionRef{NodeID: "aicli:node-stale", SessionID: "sess-2"}
 	d, _ := DecideRoute("", testPeers(), "runtime-server", binding, 0)
-	if d.Remote || d.Affinity {
-		t.Fatalf("R2 decision = %+v", d)
+	if d.Remote || !d.Affinity || !d.Failover {
+		t.Fatalf("R2a decision = %+v, want local failover with affinity", d)
+	}
+	// 纯单机（无 peers 视图）：Failover 不置位（历史行为静默）。
+	d, _ = DecideRoute("", nil, "runtime-server", binding, 0)
+	if d.Remote || d.Failover {
+		t.Fatalf("standalone R2 must not set Failover, got %+v", d)
 	}
 }
 
