@@ -26,9 +26,14 @@ type Config struct {
 	Name     string
 	Enabled  bool
 	Mode     string // polling | webhook（由 Schema.Modes 定义）
-	Settings map[string]string
-	Secrets  map[string]string
-	Policy   Policy
+	// CreatedAt/UpdatedAt 是配置生命周期时间戳（UTC；零值 = 旧数据未打戳，
+	// 视图/落盘均省略，读取方需容忍缺省）。additive：宿主创建时打戳，
+	// 更新路径只动 UpdatedAt，不改写 CreatedAt。
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Settings  map[string]string
+	Secrets   map[string]string
+	Policy    Policy
 }
 
 // Secret 读取密钥（大小写不敏感的空值处理）。
@@ -63,6 +68,61 @@ type Policy struct {
 	// RuntimeOwner：运行归属（auto|aicli|runtime-server|gateway）：空/auto = 先到先得，
 	// 显式值仅身份匹配的宿主可认领（心跳超时可接管，见 docs/bots/07-config-ux.md §5.6）。
 	RuntimeOwner string
+	// Notify 是事件通知接收配置（docs/bots/09-multi-instance-binding.md §7.4.1 D5）。
+	// 零值 = 不接收任何事件通知（与历史行为一致；零配置零打扰）。
+	Notify NotifyPolicy
+}
+
+// NotifyPolicy 描述 bot 的事件通知接收（D5）。
+type NotifyPolicy struct {
+	// Enabled 总开关；false（含缺省）时本 bot 不接收任何事件通知。
+	Enabled bool
+	// Kinds 是接收的事件类型白名单（approval|question|completion|error，
+	// 与 AttentionKind* 同名）；空 = 全部类型。
+	Kinds []string
+	// Scope 限定通知来源会话：sessions（默认，仅已绑定到本 bot 的会话）|
+	// all（宿主内全部会话，广播模式）。
+	Scope string
+}
+
+const (
+	// NotifyScopeSessions 是 D5 的默认 scope：只收绑定到本 bot 的会话事件。
+	NotifyScopeSessions = "sessions"
+	// NotifyScopeAll 是广播 scope：收宿主内全部会话事件（显式开启）。
+	NotifyScopeAll = "all"
+)
+
+// AcceptsNotice 报告本连接器是否接收该条注意力通知（D5 过滤点，宿主在事件
+// 映射后、入队前调用）。
+//
+// 语义分层（docs/bots/09 §7.4.1）：
+//   - 事件会话**已绑定**到本连接器 → 始终接收（历史行为：bot 服务自己的绑定
+//     会话，approval/question/completion 提示与命令回环是既有能力，不新增开关）；
+//   - 事件会话**未绑定**（即"其它会话"的事件）→ 需要 notify.enabled=true 且
+//     kinds 命中且 scope=all（scope=sessions 天然排除未绑定会话）。
+//
+// boundHere 报告事件会话是否绑定到本连接器；为 nil 时按"未绑定"处理。
+func (p Policy) AcceptsNotice(notice AttentionNotice, boundHere func(session SessionRef) bool) bool {
+	if boundHere != nil && boundHere(notice.Session) {
+		return true // 绑定会话：现状行为，不受 notify 开关影响
+	}
+	// 其它会话的事件：D5 显式开启才接收。
+	if !p.Notify.Enabled {
+		return false
+	}
+	if len(p.Notify.Kinds) > 0 {
+		allowed := false
+		for _, kind := range p.Notify.Kinds {
+			if strings.EqualFold(strings.TrimSpace(kind), strings.TrimSpace(notice.Kind)) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(p.Notify.Scope), NotifyScopeAll)
 }
 
 func (p Policy) commandPrefix() string {

@@ -34,6 +34,17 @@ type Store interface {
 	// 不要在热路径上高频调用。
 	ListBindings(connectorID string) []Binding
 
+	// CompareAndSwapBinding 在锁内执行「读旧绑定 → 比对 expected → 写新值」：
+	//   - expected 为零值 time.Time 时等价于「必须不存在」的创建语义；
+	//   - 命中：写入 next（UpdatedAt 由实现刷新为当前时间）并返回 (新值, true, nil)；
+	//   - 未命中（现有 UpdatedAt != expected，或 expected 为零但绑定已存在）：
+	//     返回 (现有绑定, false, nil)，不写入；
+	//   - 存储错误返回 (zero, false, err)。
+	//
+	// 用途：bindings REST 的乐观锁（docs/bots/09-multi-instance-binding.md §5.2），
+	// 防止双宿主并发改绑互相覆盖。
+	CompareAndSwapBinding(connectorID, chat string, expected time.Time, next Binding) (Binding, bool, error)
+
 	// ClaimInbound 认领一条入站消息（幂等去重）：首次返回 true，重复返回 false。
 	//
 	// 键语义（Fix-2）：messageID 参数是调用方拼好的去重键，语义为
@@ -100,6 +111,44 @@ type MemoryStore struct {
 	claimed  map[string]time.Time
 	states   map[string]map[string]string
 	owners   map[string]OwnerRecord
+}
+
+// botIdentitySettingKey 是扫码通道的平台侧稳定机器人标识 setting 键
+// （微信=ilink_bot_id，扫码 confirmed 后由平台回填）。同一机器人重扫码
+// 得到相同值，因此可作为「重复扫码 → 替换既有机器人」的判定键。
+const botIdentitySettingKey = "account_id"
+
+// BotIdentity 返回该连接器的平台侧机器人标识（非扫码通道/未回填为空）。
+func (c Config) BotIdentity() string {
+	return strings.TrimSpace(c.Setting(botIdentitySettingKey, ""))
+}
+
+// FindSameBotConfig 在 configs 中查找与 candidate 同 provider 且持同一
+// 平台机器人标识（BotIdentity 相同且非空）的**另一个**连接器。
+//
+// 用途：扫码通道「重复扫码识别」——同一台机器人重新扫码取新凭据时，
+// 凭据应合并进既有连接器（替换语义），而不是创建第二个重复机器人。
+// 三宿主共用（restapi PATCH 收敛、aicli TUI/web 扫码回填），判定键与
+// 语义只有这一份实现。
+//
+// 返回 (Config{}, false) 表示没有重复（candidate 应作为新机器人转正）。
+func FindSameBotConfig(configs []Config, candidate Config) (Config, bool) {
+	identity := candidate.BotIdentity()
+	if identity == "" || strings.TrimSpace(candidate.Provider) == "" {
+		return Config{}, false
+	}
+	for _, cfg := range configs {
+		if strings.TrimSpace(cfg.ID) == strings.TrimSpace(candidate.ID) {
+			continue
+		}
+		if strings.TrimSpace(cfg.Provider) != strings.TrimSpace(candidate.Provider) {
+			continue
+		}
+		if strings.TrimSpace(cfg.BotIdentity()) == identity {
+			return cfg, true
+		}
+	}
+	return Config{}, false
 }
 
 // NewMemoryStore 构造内存存储，可预置配置。
@@ -177,6 +226,44 @@ func (s *MemoryStore) PutBinding(binding Binding) error {
 	s.bindings[bindingKey(binding.ConnectorID, binding.Chat)] = binding
 	return nil
 }
+
+// CompareAndSwapBinding 实现 Store 接口（内存实现；进程内锁即互斥域）。
+func (s *MemoryStore) CompareAndSwapBinding(connectorID, chat string, expected time.Time, next Binding) (Binding, bool, error) {
+	key := bindingKey(connectorID, chat)
+	if key == "" {
+		return Binding{}, false, errors.New("memory store: binding key is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.bindings[key]
+	if expected.IsZero() {
+		// 创建语义：必须不存在。
+		if exists {
+			return current, false, nil
+		}
+	} else if !exists || !current.UpdatedAt.Equal(expected) {
+		// 乐观锁未命中。
+		return current, false, nil
+	}
+	// 时间戳严格递增：同 tick 内连续 CAS 也要能区分新旧（否则"陈旧 expected"
+	// 可能与当前值同刻碰撞，乐观锁失效）。对齐到 UTC，存储口径与既有一致。
+	next.UpdatedAt = nowAtLeast(current.UpdatedAt)
+	s.bindings[key] = next
+	return next, true, nil
+}
+
+// nowAtLeast 返回当前时间；若不晚于 floor 则推进到 floor+1ns（单调保证）。
+func nowAtLeast(floor time.Time) time.Time {
+	now := time.Now().UTC()
+	if !now.After(floor) {
+		return floor.Add(time.Nanosecond)
+	}
+	return now
+}
+
+// NextStampAtLeast 是 nowAtLeast 的导出形态：供 storefile/storejson 的
+// CompareAndSwapBinding 复用（时间戳严格递增是乐观锁正确性的前提）。
+func NextStampAtLeast(floor time.Time) time.Time { return nowAtLeast(floor) }
 
 // ListBindings 返回绑定（内存实现；connectorID 为空 = 全部）。
 func (s *MemoryStore) ListBindings(connectorID string) []Binding {

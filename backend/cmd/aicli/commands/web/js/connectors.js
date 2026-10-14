@@ -171,6 +171,14 @@ function rowHTML(item) {
   var lastError = runtime && runtime.last_error
     ? '<div class="connector-last-error" title="最近一次错误">' + esc(runtime.last_error) + "</div>"
     : "";
+  // 创建时间/更新时间（旧数据无戳时省略）；bot_identity 是扫码通道的平台
+  // 稳定标识（如微信 ilink_bot_id）——同一机器人重扫码会得到相同值。
+  var createdText = item.created_at ? formatTimestamp(item.created_at) : "";
+  var updatedText = item.updated_at ? formatTimestamp(item.updated_at) : "";
+  var stampText = createdText ? ("建于 " + createdText + (updatedText ? " · 更新 " + updatedText : "")) : "";
+  var identityHTML = item.bot_identity
+    ? '<span class="connector-owner" title="平台侧机器人标识（同一机器人重扫码值不变）">标识: ' + esc(item.bot_identity) + "</span>"
+    : "";
   return '<div class="connector-row" data-id="' + esc(item.id) + '">' +
     '<div class="connector-row-main">' +
       '<span class="connector-name">' + esc(item.name || item.id) + "</span>" +
@@ -180,8 +188,10 @@ function rowHTML(item) {
       '<span class="connector-badge ' + (item.enabled ? "connector-on" : "connector-off") + '">' +
         (item.enabled ? "已启用" : "已停用") + "</span>" +
       '<span class="connector-owner" title="运行归属(同一通道只允许一处运行)">归属: ' + ownerText + "</span>" +
+      identityHTML +
       statsHTML +
     "</div>" +
+    (stampText ? '<div class="connector-owner">' + esc(stampText) + "</div>" : "") +
     '<div class="connector-row-actions">' +
       '<button type="button" data-act="toggle">' + (item.enabled ? "停用" : "启用") + "</button>" +
       '<button type="button" data-act="edit">编辑</button>' +
@@ -198,6 +208,16 @@ function rowHTML(item) {
 }
 
 function num(v) { return (typeof v === "number" && isFinite(v)) ? v : 0; }
+
+// formatTimestamp 把 RFC3339 UTC 时间戳转本地可读形式（非法/缺省返回空）。
+function formatTimestamp(value) {
+  if (!value) { return ""; }
+  var d = new Date(value);
+  if (isNaN(d.getTime())) { return ""; }
+  var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
 
 // ---- 列表行操作(事件委托) ----
 
@@ -703,8 +723,14 @@ function finishQRLogin(st, data) {
     settings: data.settings || {},
     secrets: data.secrets || {}
   }))
-    .then(function () {
-      showToast("扫码登录成功,凭据已回填:" + st.connectorID, "ok", 4000);
+    .then(function (result) {
+      // 服务端重复扫码收敛：adopted=true 表示凭据合并进了既有机器人
+      // （removed_id 是已删除的壳）。提示语区分「新建」与「更新既有」。
+      if (result && result.adopted && result.removed_id) {
+        showToast("扫码登录成功:识别为既有机器人 " + result.id + ",凭据已更新(临时 " + result.removed_id + " 已清理)", "ok", 5000);
+      } else {
+        showToast("扫码登录成功,凭据已回填:" + st.connectorID, "ok", 4000);
+      }
       closeModal();
       loadConnectors();
     })

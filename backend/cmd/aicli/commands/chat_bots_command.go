@@ -457,21 +457,23 @@ func chatScreenBotsLogsSpec(host *LocalConnectorHost, cfg connectors.Config) cha
 	return chatScreenDocumentSpec(chatBotsScreenLogsID, "运行日志："+cfg.ID, textLinesDocument(lines))
 }
 
-// ── 扫码接入（极简流：零输入） ─────────────────────────────────────────────
+// ── 扫码接入（极简流：零输入 + 重复扫码识别） ─────────────────────────────
 
 // botsCreateAndScan 为扫码通道创建连接器（自动 ID/默认基址/默认模式），
 // 随后立即进入扫码登录。创建后 Reload 失败属预期（尚未取得 bot_token），
 // 只记不报——扫码成功后回填并再次 Reload。
 func botsCreateAndScan(session *ChatSession, host *LocalConnectorHost, schema api.ProviderSchema) {
 	cfg := connectors.Config{
-		ID:       botsGenerateConnectorID(schema.Provider),
-		Provider: schema.Provider,
-		Name:     firstNonEmptyChatValue(schema.Label, schema.Provider),
-		Enabled:  true,
-		Mode:     botsDefaultMode(schema),
-		Settings: map[string]string{},
-		Secrets:  map[string]string{},
-		Policy:   connectors.Policy{CommandPrefix: "/"},
+		ID:        botsGenerateConnectorID(schema.Provider),
+		Provider:  schema.Provider,
+		Name:      firstNonEmptyChatValue(schema.Label, schema.Provider),
+		Enabled:   true,
+		Mode:      botsDefaultMode(schema),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Settings:  map[string]string{},
+		Secrets:   map[string]string{},
+		Policy:    connectors.Policy{CommandPrefix: "/"},
 	}
 	if err := host.Store().PutConfig(cfg); err != nil {
 		printChatCommandOutput(session, "创建机器人失败："+err.Error())
@@ -652,8 +654,13 @@ func (st *botsScanScreenState) pollOnce() {
 			st.finish("已确认登录，等待凭据就绪（可稍后重新运行 /bots）。")
 			return
 		}
-		if patchErr := botsApplyCredentialPatch(st.host, st.cfg, payload); patchErr != nil {
+		adopted, patchErr := botsApplyCredentialPatch(st.host, st.cfg, payload)
+		if patchErr != nil {
 			st.finish("凭据回填失败：" + patchErr.Error())
+			return
+		}
+		if adopted != st.cfg.ID {
+			st.finish(fmt.Sprintf("扫码登录成功：识别为既有机器人 %s，凭据已更新（临时连接器 %s 已清理）。", adopted, st.cfg.ID))
 			return
 		}
 		st.finish(fmt.Sprintf("扫码登录成功：%s 凭据已回填（owner 已加入 allowed_users）。", st.cfg.ID))
@@ -794,8 +801,13 @@ func botsPollLogin(session *ChatSession, host *LocalConnectorHost, runner botsAc
 				botsSupplement(session, fmt.Sprintf("机器人 %s 已确认登录，等待凭据就绪（可稍后重新运行 /bots）。", cfg.ID))
 				return
 			}
-			if err := botsApplyCredentialPatch(host, cfg, payload); err != nil {
+			adopted, err := botsApplyCredentialPatch(host, cfg, payload)
+			if err != nil {
 				botsSupplement(session, fmt.Sprintf("机器人 %s 凭据回填失败：%v（请在 web 页手动填写）。", cfg.ID, err))
+				return
+			}
+			if adopted != cfg.ID {
+				botsSupplement(session, fmt.Sprintf("扫码登录成功：识别为既有机器人 %s，凭据已更新（临时连接器 %s 已清理）。", adopted, cfg.ID))
 				return
 			}
 			botsSupplement(session, fmt.Sprintf("机器人 %s 扫码登录成功：凭据已回填，owner 用户已加入 allowed_users。", cfg.ID))
@@ -827,7 +839,13 @@ func botsPollLogin(session *ChatSession, host *LocalConnectorHost, runner botsAc
 // botsApplyCredentialPatch 把 login_status 返回的 settings/secrets 合并进
 // 连接器配置并重载；白名单为空时自动加入 owner 用户（极简且安全：默认只
 // 允许扫码者本人与机器人对话）。
-func botsApplyCredentialPatch(host *LocalConnectorHost, cfg connectors.Config, payload map[string]any) error {
+//
+// 重复扫码识别：confirmed 后 payload.settings.account_id（微信 ilink_bot_id，
+// 平台侧稳定机器人标识）若与**另一个既有连接器**（同 provider）的 account_id
+// 相同 → 本次扫码是在为一台已接入的机器人取新凭据：凭据合并进既有连接器、
+// 自动壳连接器被删除，返回替换后的实际连接器 id。壳转正时补打 CreatedAt。
+// 返回值 adoptedID 是凭据最终所在的连接器 id（= cfg.ID 或既有 id）。
+func botsApplyCredentialPatch(host *LocalConnectorHost, cfg connectors.Config, payload map[string]any) (string, error) {
 	if cfg.Settings == nil {
 		cfg.Settings = map[string]string{}
 	}
@@ -858,13 +876,43 @@ func botsApplyCredentialPatch(host *LocalConnectorHost, cfg connectors.Config, p
 		cfg.Policy.AllowedUsers = []string{owner}
 	}
 	cfg.Enabled = true
+	// 重复扫码收敛（共用 connectors.FindSameBotConfig，与 restapi 同语义）：
+	// payload.settings.account_id（平台稳定标识）命中另一个既有连接器
+	// = 同一台机器人重新扫码取凭据 → 合并进既有、删除壳。
+	adoptedID := cfg.ID
+	if cfg.BotIdentity() != "" {
+		if existing, found := connectors.FindSameBotConfig(host.Store().ListConfigs(), cfg); found {
+			existing.Settings = cfg.Settings
+			existing.Secrets = cfg.Secrets
+			existing.Enabled = true
+			if owner != "" && len(existing.Policy.AllowedUsers) == 0 {
+				existing.Policy.AllowedUsers = []string{owner}
+			}
+			existing.UpdatedAt = time.Now().UTC()
+			if err := host.Store().PutConfig(existing); err != nil {
+				return "", err
+			}
+			if service := host.Service(); service != nil {
+				_ = service.ReloadConnector(context.Background(), existing.ID)
+				service.StopConnector(cfg.ID)
+			}
+			if err := host.Store().DeleteConfig(cfg.ID); err != nil {
+				return "", fmt.Errorf("清理壳连接器 %s 失败: %w", cfg.ID, err)
+			}
+			return existing.ID, nil
+		}
+	}
+	if cfg.CreatedAt.IsZero() {
+		cfg.CreatedAt = time.Now().UTC() // 壳转正补戳（旧调用方未打戳时）
+	}
+	cfg.UpdatedAt = time.Now().UTC()
 	if err := host.Store().PutConfig(cfg); err != nil {
-		return err
+		return "", err
 	}
 	if service := host.Service(); service != nil {
 		_ = service.ReloadConnector(context.Background(), cfg.ID)
 	}
-	return nil
+	return adoptedID, nil
 }
 
 // botsPrintQR 把登录载荷渲染到主屏（降级路径：全屏副屏不可用时使用）。
@@ -1125,6 +1173,9 @@ func botsConnectorDetail(host *LocalConnectorHost, cfg connectors.Config) string
 		if stats, ok := service.Stats(cfg.ID); ok {
 			parts = append(parts, fmt.Sprintf("入%d/出%d/错%d", stats.Inbound, stats.Outbound, stats.Errors))
 		}
+	}
+	if !cfg.CreatedAt.IsZero() {
+		parts = append(parts, "建于 "+cfg.CreatedAt.Local().Format("01-02 15:04"))
 	}
 	return strings.Join(parts, " · ")
 }

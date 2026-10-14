@@ -382,8 +382,12 @@ func TestBotsApplyCredentialPatchMergesAndWhitelists(t *testing.T) {
 		},
 		"secrets": map[string]any{"bot_token": "tk-9"},
 	}
-	if err := botsApplyCredentialPatch(host, cfg, payload); err != nil {
+	adopted, err := botsApplyCredentialPatch(host, cfg, payload)
+	if err != nil {
 		t.Fatalf("patch: %v", err)
+	}
+	if adopted != "wx-1" {
+		t.Fatalf("adopted = %q, want wx-1 (no duplicate account)", adopted)
 	}
 	got, _ := store.GetConfig("wx-1")
 	if got.Settings["base_url"] != "https://ilink.example" || got.Settings["route_tag"] != "keep-me" {
@@ -397,6 +401,52 @@ func TestBotsApplyCredentialPatchMergesAndWhitelists(t *testing.T) {
 	}
 	if !got.Enabled {
 		t.Fatal("connector should stay enabled after credential patch")
+	}
+}
+
+// TestBotsApplyCredentialPatchAdoptsExistingConnector 锁定重复扫码识别：
+// 同一机器人（同 provider + 同 account_id）重扫码时，凭据合并进既有连接器、
+// 自动壳连接器被删除——而不是新建第二个机器人。
+func TestBotsApplyCredentialPatchAdoptsExistingConnector(t *testing.T) {
+	store := connectors.NewMemoryStore(
+		connectors.Config{
+			ID: "wx-existing", Provider: "wechat", Name: "我的微信", Enabled: true,
+			Settings: map[string]string{"account_id": "acct-1"},
+			Policy:   connectors.Policy{AllowedUsers: []string{"vip-user"}},
+		},
+	)
+	host := &LocalConnectorHost{store: store}
+	shell := connectors.Config{ID: "wx-shell", Provider: "wechat", Name: "微信", Enabled: true}
+	payload := map[string]any{
+		"status":           "confirmed",
+		"credential_ready": true,
+		"settings": map[string]any{
+			"base_url":      "https://ilink.example",
+			"account_id":    "acct-1",
+			"owner_user_id": "owner-9",
+		},
+		"secrets": map[string]any{"bot_token": "tk-new"},
+	}
+	adopted, err := botsApplyCredentialPatch(host, shell, payload)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if adopted != "wx-existing" {
+		t.Fatalf("adopted = %q, want wx-existing", adopted)
+	}
+	if _, exists := store.GetConfig("wx-shell"); exists {
+		t.Fatal("shell connector should be deleted after adoption")
+	}
+	got, _ := store.GetConfig("wx-existing")
+	if got.Secrets["bot_token"] != "tk-new" {
+		t.Fatalf("existing connector not updated: %+v", got.Secrets)
+	}
+	// 既有连接器保留自己的白名单（不被壳的自动 owner 覆盖——它已有白名单）。
+	if len(got.Policy.AllowedUsers) != 1 || got.Policy.AllowedUsers[0] != "vip-user" {
+		t.Fatalf("allowed_users = %+v, want kept [vip-user]", got.Policy.AllowedUsers)
+	}
+	if got.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt should be stamped on adoption")
 	}
 }
 

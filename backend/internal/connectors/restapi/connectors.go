@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
@@ -29,6 +30,13 @@ type ConnectorView struct {
 	ActiveOwner string `json:"active_owner,omitempty"`
 	// OwnedByCurrentHost 报告归属是否属于本宿主（Deps.HostID）。
 	OwnedByCurrentHost bool `json:"owned_by_current_host"`
+	// CreatedAt/UpdatedAt 是配置生命周期时间戳（RFC3339 UTC；零值省略 = 旧数据
+	// 未打戳）。additive：旧客户端忽略即可；列表/详情/创建响应统一携带。
+	CreatedAt string `json:"created_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	// BotIdentity 是扫码通道的稳定机器人标识（如微信 ilink_bot_id），供前端/
+	// TUI 做「重复扫码 → 替换既有机器人」判定；非扫码或未回填时省略。
+	BotIdentity string `json:"bot_identity,omitempty"`
 	// Runtime 是运行可观测快照（additive，旧客户端忽略）：每连接器累计计数与
 	// 最近错误；日志明细走 GET /connectors/{id}/logs。
 	Runtime *RuntimeView `json:"runtime,omitempty"`
@@ -41,11 +49,19 @@ type RuntimeView struct {
 
 // PolicyView 是"用户操作逻辑"配置的对外视图。
 type PolicyView struct {
-	CommandPrefix string   `json:"command_prefix,omitempty"`
-	AllowedUsers  []string `json:"allowed_users,omitempty"`
-	SessionMode   string   `json:"session_mode,omitempty"`
-	ReplyMode     string   `json:"reply_mode,omitempty"`
-	RuntimeOwner  string   `json:"runtime_owner,omitempty"`
+	CommandPrefix string            `json:"command_prefix,omitempty"`
+	AllowedUsers  []string          `json:"allowed_users,omitempty"`
+	SessionMode   string            `json:"session_mode,omitempty"`
+	ReplyMode     string            `json:"reply_mode,omitempty"`
+	RuntimeOwner  string            `json:"runtime_owner,omitempty"`
+	Notify        *NotifyPolicyView `json:"notify,omitempty"`
+}
+
+// NotifyPolicyView 是 D5 事件通知接收配置的对外形状（docs/bots/09 §7.4.1）。
+type NotifyPolicyView struct {
+	Enabled bool     `json:"enabled"`
+	Kinds   []string `json:"kinds,omitempty"`
+	Scope   string   `json:"scope,omitempty"`
 }
 
 // listResponse 是 GET /connectors 的载荷。
@@ -175,14 +191,16 @@ func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 		enabled = *request.Enabled
 	}
 	cfg := connectors.Config{
-		ID:       id,
-		Provider: schema.Provider,
-		Name:     firstNonEmpty(request.Name, id),
-		Enabled:  enabled,
-		Mode:     firstNonEmpty(request.Mode, merged["mode"], schemaDefault(schema, "mode")),
-		Settings: settings,
-		Secrets:  secrets,
-		Policy:   policyFrom(request.Policy),
+		ID:        id,
+		Provider:  schema.Provider,
+		Name:      firstNonEmpty(request.Name, id),
+		Enabled:   enabled,
+		Mode:      firstNonEmpty(request.Mode, merged["mode"], schemaDefault(schema, "mode")),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+		Settings:  settings,
+		Secrets:   secrets,
+		Policy:    policyFrom(request.Policy),
 	}
 	if err := h.deps.Store.PutConfig(cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存失败："+err.Error())
@@ -234,11 +252,47 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 	updated.Mode = firstNonEmpty(request.Mode, existing.Mode, merged["mode"], schemaDefault(schema, "mode"))
 	updated.Settings = settings
 	updated.Secrets = secrets
+	// 时间戳：CreatedAt 保持创建值不动；UpdatedAt 每次更新刷新（幂等补戳：
+	// 旧数据首次 PATCH 时会同时补上 CreatedAt）。空更新也刷新 UpdatedAt——
+	// 语义即「配置被触碰过」，与文件 mtime 一致。
+	if existing.CreatedAt.IsZero() {
+		updated.CreatedAt = time.Now().UTC()
+	}
+	updated.UpdatedAt = time.Now().UTC()
 	if request.Enabled != nil {
 		updated.Enabled = *request.Enabled
 	}
 	if request.Policy != nil {
 		updated.Policy = policyFrom(request.Policy)
+	}
+	// 重复扫码收敛（三宿主共用语义，docs/bots/03 §6）：本次 PATCH 带入了
+	// account_id 且与另一个既有连接器（同 provider）的 account_id 相同
+	// = 同一台机器人重新扫码取新凭据 → 凭据/设置合并进既有连接器，
+	// 本次 PATCH 的目标（通常是自动创建的壳）被删除；响应回既有连接器
+	// 视图并带 adopted=true（前端据此刷新列表并提示「更新了 xx」）。
+	if strings.TrimSpace(updated.BotIdentity()) != "" {
+		if existingSame, found := connectors.FindSameBotConfig(h.deps.Store.ListConfigs(), updated); found {
+			merged := existingSame
+			merged.Settings = updated.Settings
+			merged.Secrets = updated.Secrets
+			merged.Enabled = updated.Enabled
+			merged.UpdatedAt = time.Now().UTC()
+			if err := h.deps.Store.PutConfig(merged); err != nil {
+				writeError(w, http.StatusInternalServerError, "保存失败："+err.Error())
+				return
+			}
+			h.deps.Service.StopConnector(updated.ID)
+			if err := h.deps.Store.DeleteConfig(updated.ID); err != nil {
+				writeError(w, http.StatusInternalServerError, "清理重复连接器失败："+err.Error())
+				return
+			}
+			if err := h.deps.Service.ReloadConnector(r.Context(), merged.ID); err != nil {
+				h.deps.logf("connectors: reload %s failed: %v", merged.ID, err)
+			}
+			view := h.view(merged)
+			writeJSON(w, http.StatusOK, adoptResponse{ConnectorView: view, Adopted: true, RemovedID: updated.ID})
+			return
+		}
 	}
 	if err := h.deps.Store.PutConfig(updated); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存失败："+err.Error())
@@ -248,6 +302,15 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 		h.deps.logf("connectors: reload %s failed: %v", updated.ID, err)
 	}
 	writeJSON(w, http.StatusOK, h.view(updated))
+}
+
+// adoptResponse 是 PATCH 命中「重复扫码 → 替换既有机器人」时的响应：
+// ConnectorView 是收敛后的既有连接器；Adopted=true 告知客户端发生了替换；
+// RemovedID 是被清理的壳连接器 id（客户端据此从本地列表移除）。
+type adoptResponse struct {
+	ConnectorView
+	Adopted   bool   `json:"adopted"`
+	RemovedID string `json:"removed_id"`
 }
 
 func (h *handlers) remove(w http.ResponseWriter, r *http.Request) {
@@ -354,12 +417,15 @@ func (h *handlers) test(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) view(cfg connectors.Config) ConnectorView {
 	view := ConnectorView{
-		ID:       cfg.ID,
-		Provider: cfg.Provider,
-		Name:     cfg.Name,
-		Enabled:  cfg.Enabled,
-		Mode:     cfg.Mode,
-		Policy:   policyViewFrom(cfg.Policy),
+		ID:          cfg.ID,
+		Provider:    cfg.Provider,
+		Name:        cfg.Name,
+		Enabled:     cfg.Enabled,
+		Mode:        cfg.Mode,
+		Policy:      policyViewFrom(cfg.Policy),
+		CreatedAt:   formatViewTime(cfg.CreatedAt),
+		UpdatedAt:   formatViewTime(cfg.UpdatedAt),
+		BotIdentity: botIdentityFrom(cfg),
 	}
 	if len(cfg.Settings) > 0 {
 		view.Settings = make(map[string]string, len(cfg.Settings))
@@ -387,27 +453,58 @@ func (h *handlers) view(cfg connectors.Config) ConnectorView {
 	return view
 }
 
+// formatViewTime 把零值省略、非零转 RFC3339 UTC。
+func formatViewTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// botIdentityFrom 提取扫码通道的稳定机器人标识：account_id 是扫码登录后
+// 由平台回填的 ilink_bot_id（微信），同一机器人重扫码得到相同值，因此可
+// 作为「替换 vs 新建」的判定键。非扫码通道/未回填返回空。
+func botIdentityFrom(cfg connectors.Config) string {
+	return strings.TrimSpace(cfg.Setting("account_id", ""))
+}
+
 func policyViewFrom(policy connectors.Policy) PolicyView {
-	return PolicyView{
+	view := PolicyView{
 		CommandPrefix: policy.CommandPrefix,
 		AllowedUsers:  append([]string(nil), policy.AllowedUsers...),
 		SessionMode:   policy.SessionMode,
 		ReplyMode:     policy.ReplyMode,
 		RuntimeOwner:  policy.RuntimeOwner,
 	}
+	if policy.Notify.Enabled {
+		view.Notify = &NotifyPolicyView{
+			Enabled: true,
+			Kinds:   append([]string(nil), policy.Notify.Kinds...),
+			Scope:   policy.Notify.Scope,
+		}
+	}
+	return view
 }
 
 func policyFrom(view *PolicyView) connectors.Policy {
 	if view == nil {
 		return connectors.Policy{}
 	}
-	return connectors.Policy{
+	policy := connectors.Policy{
 		CommandPrefix: view.CommandPrefix,
 		AllowedUsers:  append([]string(nil), view.AllowedUsers...),
 		SessionMode:   view.SessionMode,
 		ReplyMode:     view.ReplyMode,
 		RuntimeOwner:  view.RuntimeOwner,
 	}
+	if view.Notify != nil && view.Notify.Enabled {
+		policy.Notify = connectors.NotifyPolicy{
+			Enabled: true,
+			Kinds:   append([]string(nil), view.Notify.Kinds...),
+			Scope:   strings.TrimSpace(view.Notify.Scope),
+		}
+	}
+	return policy
 }
 
 // combined 把 settings 与 secrets 合成 Schema 的单一命名空间（MergeSubmit 的输入）。

@@ -139,7 +139,8 @@ func TestConnectorsSchemaGolden(t *testing.T) {
 // （docs/bots/06-target-architecture.md §2.5 与 03-host-integration.md）。
 var connectorViewKeys = []string{
 	"id", "provider", "name", "enabled", "mode", "settings", "secret_keys",
-	"policy", "active_owner", "owned_by_current_host", "runtime",
+	"policy", "created_at", "updated_at", "bot_identity",
+	"active_owner", "owned_by_current_host", "runtime",
 }
 
 // TestConnectorsListKeySetContract 用一条全字段数据断言列表视图 key 集合：
@@ -226,15 +227,18 @@ func TestErrorPayloadShapeContract(t *testing.T) {
 // fullContractConfig 是覆盖列表视图全部字段的一条完整数据。
 func fullContractConfig() connectors.Config {
 	return connectors.Config{
-		ID:       "golden-1",
-		Provider: "goldenweb",
-		Name:     "Golden 工作群",
-		Enabled:  true,
-		Mode:     "webhook",
+		ID:        "golden-1",
+		Provider:  "goldenweb",
+		Name:      "Golden 工作群",
+		Enabled:   true,
+		Mode:      "webhook",
+		CreatedAt: time.Date(2026, 10, 14, 8, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC),
 		Settings: map[string]string{
 			"display_name":    "工作群",
 			"callback_url":    "https://example.com/hooks/connectors/golden-1",
 			"allow_media":     "true",
+			"account_id":      "ilink-bot-golden",
 			"timeout_seconds": "30",
 		},
 		Secrets: map[string]string{"bot_token": "tok-secret"},
