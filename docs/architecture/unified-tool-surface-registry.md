@@ -658,3 +658,108 @@ surface_source 同源同值**。单一装配实现点（T1）与可解释性（T
    `ToolExecutionPolicy` 投影）；
 3. 后置：`plan_*` / `ask_user_question` 交互通道对接（pending_approval/question
    唤醒链 e2e）。
+
+---
+
+## 16. 阶段 3 实施结论（2026-10-14）
+
+### 16.1 MCP 清单共享：**已存在，无需新建**（裁决）
+
+`aiclipaths.ResolveMCPConfigPathDetailedFrom`（注释明确 "runtime-server sessions,
+aicli chat" 共用）已实现项目级 `.aicli/mcp.yaml` → 用户级 → 向上搜索的分层解析；
+runtime-server 的 `WorkspaceMCPSupport` 按会话 workspace 重锚并异步建连。
+
+**决定性实测**：probe 会话（workspace=`E:\projects\ai\ai-agent-runtime`）→
+`count=83`（53 + chrome-devtools 30，`mcp:chrome-devtools` 账本出现）；
+workspace=`E:\temp` → 53。此前 sezoj(83)/lb(53) 的差异**就是该机制的正确输出**
+——两入口的 MCP 面差异由 workspace 归属决定，同一清单来源，无配置分裂。
+probe 会话已清理。
+
+### 16.2 Profile 裁剪双落点：一致性护栏落地
+
+两宿主消费链确认同源（`profile.Resolve` → `MergeToolPolicies` →
+`profileinput.BuildToolExecutionPolicy`）：
+
+- runtime-server：`profileStateToolPolicy` → `applyAgentExecutionPolicy`（装配期 allowlist）；
+- aicli TUI：`applyProfileStateToChatSession` → `session.ToolPolicy` →
+  `buildLocalChatToolPolicy`（actor 构建期固化）。
+
+新增 `profile_tool_policy_guard_test.go`（T4 护栏）：
+`TestProfileToolPolicyDualSinkEquivalence`——同一 ResolvedToolPolicy 在两落点
+产出的 ReadOnly / AllowlistEnabled / allowlist 名单 / deny 名单逐字段相等 +
+deny 恒优先抽检；`TestProfileToolPolicyReadOnlyPropagation`——宿主基线只读 +
+profile 未声明 = 保持只读（只收不放宽）。
+
+### 16.3 请求级账本上线（§15.4 修订）
+
+**关键教训**：每定义 metadata 账本（初版 §15.2）会把 json.Marshal 体积推高，
+被 `estimateToolDefinitionTokens` 计入，把贴边预算的压缩/preflight 时序推偏
+——`TestReActLoop_RunWithSession_AutoCompaction…` 实测 flaky（stash 二分确认
+与账本改动直接相关）。修订：
+
+- 定义保持原样（token 估算零增量）；
+- 账本改为**请求级汇总**：`toolsurface.SummarizeSources`（与 Build 共用
+  Classify；冻结面已带账本优先）→ `req.Metadata["tool_surface_sources"]`（map）
+  + `tool_surface_sources_flat`（k=v 空格分隔串——与已验证透出的
+  `tool_surface_projected` 同型，规避嵌套 map 在日志链路的类型保真问题）；
+- 日志白名单登记 `tool_surface_sources`（flat 串）。
+
+**端到端实测**（inspect 长句，非投影）：`tools=51` + 51 项逐工具
+`surface_source` 完整输出（core=20 / orchestration=31 分布正确，
+`spawn_subagents=core` 亦正确——它来自 scheduler 注入而非 broker）。
+
+### 16.4 测试修正记录
+
+- `TestComputeAvailableToolsRecordsSimpleGoalProjectionLedger` 的账本断言从
+  "定义级 metadata" 改为 `SummarizeSources`（与 think() 装配同一函数）；
+- 回归：agent 19.1s / runtimeapi 46.8s / toolsurface 1.6s 全绿；vet 干净；
+  新二进制已部署。
+
+### 16.5 阶段 3 收口状态
+
+| 项 | 结论 |
+| --- | --- |
+| MCP 清单共享 | ✅ 已存在（aiclipaths 分层解析 + workspace 重锚），实测验证 |
+| profile 裁剪双落点 | ✅ 双宿主同源 + T4 护栏测试落地 |
+| 请求级账本 | ✅ 上线（flat 串 + map 双形态），逐工具可审计 |
+
+**主线全部收口**。剩余均为可选增强：TUI 展示层读账本 metadata、
+`plan_*`/`ask_user_question` 交互通道对接、future capability 直配面。
+
+---
+
+## 17. 后置项第一步：plan_review 的 web 适配（2026-10-14 已实施）
+
+### 17.1 交互通道三工具的适配矩阵（定稿）
+
+| 工具 | 跨请求挂起？ | 适配 |
+| --- | --- | --- |
+| `plan_review`（只读） | 否 | ✅ 本节：web inline broker 接入 `planReviewController` |
+| `plan_enter` / `plan_exit`（写状态 + 权限切换） | 是（turn 边界生效） | 归 actor 路径（web 会话经 durable actor 使用） |
+| `ask_user_question` | 是（waiter + `answer_question` 唤醒） | 归 actor 路径；`SessionActor.AskUserQuestion`（actor.go:5210）已完整实现挂起/事件/waiter/resume |
+
+### 17.2 实现（`plan_review_controller.go`）
+
+- `PlanReviewController` 接口实现：PlanID → planstore 归档读取（version=0 最新，
+  CompareVersion 走 `planmode.DiffArchivedVersions` 同引擎）；session plan →
+  durable 会话 planmode 状态 + workspace 锚定文件读取；
+- 相对路径锚定 workspace，越出 workspace 拒绝（只读工具不放大读取面）；
+- 64KB 截断、VerdictOptions / Hint 与 `SessionActor.ReviewPlan` 同串同形——
+  两个表面的输出契约逐字节同源；
+- 接线点：`applyAgentRuntimeServices` 的 hub 分支补
+  `broker.PlanReview = h.planReviewControllerForSession()`（nil 保持即插即用）。
+
+### 17.3 验证
+
+新增 4 用例（`plan_review_controller_test.go`）：session plan 读工作区文件、
+相对路径越界拒绝、归档两轮快照 + `DiffArchivedVersions` 跨轮 diff
+（FromVersion/ToVersion/Text 断言）、托管会话 planmode 默认非活跃。
+`runtimeapi` 全包 48.3s + `toolsurface` + `agent` 回归全绿；vet 干净；
+新二进制已部署。
+
+### 17.4 主线终态
+
+工具面统一（T1）+ 可解释（T3）+ profile 双落点护栏（T4）+ 交互通道第一步
+（plan_review web 可用）全部落地。剩余：`plan_enter/exit` 与
+`ask_user_question` 的 web 适配需先落跨请求挂起协议（建议经 durable actor
+承接，作为独立设计项），不在本方案范围。

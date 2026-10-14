@@ -2311,8 +2311,16 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	// 来源账本汇总（§15.4 修订）：按目录名册给每个工具打 surface_source，落
 	// 请求级 metadata（不写进定义，避免推高 token 估算——见 computeAvailableTools
 	// 尾注）。与 toolsurface.Build 同一分类实现点。
+	// 同时序列化一份 flat 串（k=v 空格分隔）——http debug 的 metadata 克隆对嵌套
+	// map 的类型保真在最外层日志读取处不稳，string 与已验证的 projected 同型。
 	if sources := toolsurface.SummarizeSources(availableTools, loop.toolSurfaceLedger()); len(sources) > 0 {
 		req.Metadata["tool_surface_sources"] = sources
+		flat := make([]string, 0, len(sources))
+		for name, label := range sources {
+			flat = append(flat, name+"="+label)
+		}
+		sort.Strings(flat)
+		req.Metadata["tool_surface_sources_flat"] = strings.Join(flat, " ")
 	}
 	if loop.agent != nil && loop.agent.config != nil {
 		if route := optionMap(loop.agent.config.Options, "route"); len(route) > 0 {

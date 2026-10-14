@@ -33,6 +33,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 

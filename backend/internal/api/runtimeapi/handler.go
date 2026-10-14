@@ -5681,6 +5681,12 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		}
 		broker.AgentSessions = &sessionAgentController{handler: h}
 		broker.ExecutionSupervisor = h.getExecutionSupervisor()
+		// plan_review（只读）的 web 适配（§16.5 第一步）：无跨请求挂起，inline
+		// 请求内即可完成。PlanMode/PlanReview 的写侧与 ask_user_question 仍归
+		// actor 路径（跨请求挂起/恢复语义）。
+		if broker.PlanReview == nil {
+			broker.PlanReview = h.planReviewControllerForSession()
+		}
 	}
 
 	if store := h.getTeamStore(); store != nil {
@@ -10385,11 +10391,15 @@ func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
 			if value := strings.TrimSpace(stringMapValueAny(debug, "prompt_cache_key")); value != "" {
 				fields = append(fields, logger.String("prompt_cache_key", value))
 			}
-			// 工具面账本（docs/architecture/unified-tool-surface-registry.md §12.4）：
-			// simple-goal 投影命中时随请求日志暴露，让"这次请求为什么只有一两个
+			// 工具面账本（docs/architecture/unified-tool-surface-registry.md §12.4）：simple-goal 投影命中时随请求日志暴露，让"这次请求为什么只有一两个
 			// 工具"可从日志直接回答。键在 RequestMetadata 顶层（不在 diagnostics 子 map）。
 			if value := strings.TrimSpace(stringMapValueAny(event.RequestMetadata, "tool_surface_projected")); value != "" {
 				fields = append(fields, logger.String("tool_surface_projected", value))
+			}
+			// 来源账本汇总（§15.4）：flat 串（k=v 空格分隔）随请求日志暴露——
+			// 与已验证透出的 tool_surface_projected 同型（顶层 string）。
+			if value := strings.TrimSpace(stringMapValueAny(event.RequestMetadata, "tool_surface_sources_flat")); value != "" {
+				fields = append(fields, logger.String("tool_surface_sources", value))
 			}
 		}
 		if event.ResponseStatusCode > 0 {
