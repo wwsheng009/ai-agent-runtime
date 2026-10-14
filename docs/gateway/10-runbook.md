@@ -409,5 +409,11 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 > `POST /api/push/test` 双通道 `delivered=1`、线上路由抽验（normal `completed` 不再进
 > ntfy；high `error` 以 priority=5 照常到达）。
 
+> **部署记录（2026-10-14 第二笔，notify 切片三a+3b）**：HEAD `dc066235`（含 QQ 切片 2
+> `7f8de4b1` 等），sha256 `d399c309…6cf82f`；分块上传（1MB×9、1 次重试）→ 拼装双
+> sha 门禁 → 备份 `gateway.bak-20261014-164422` → 重启；验证：72 档案 / 7 live 节点
+> 12s 内回连、`/proc exe` sha 一致、console 200、日志干净。新增能力：
+> `notify-prefs.json` 偏好装载（缺失 = no-op）。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。
