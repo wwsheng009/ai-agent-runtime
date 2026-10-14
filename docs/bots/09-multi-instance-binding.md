@@ -46,6 +46,7 @@
 | **D3** | 接管语义 | 接管时**先核对"当前运行会话 == 绑定会话"**：一致→接管该绑定会话（亲和转移，绑定不动）；无绑定→**不迁移任何绑定**，接管处理器按共享绑定表现状处理（未绑定的 chat 走 auto-create） |
 | **D4** | 实体与凭据两层 | **重新扫码=替换登录凭据**（作用于既有 bot 实体）；**创建新 bot=显式动作**（独立入口/确认）。任何 provider（微信/QQ/…）的扫码流程都必须服从该两层模型，杜绝"扫码即新建连接器" |
 | **D5** | 通知接收开关 | 连接器级 `policy.notify{enabled,kinds,scope}`：bot 是否接收事件类通知（含**其它会话**的 turn 结束/审批/提问等 hook）。默认关闭；kinds 白名单对齐 `AttentionKind*`；scope 二值（绑定会话/宿主全部）。详见 §7.4.1 |
+| **D6** | 连接器级模型路由 | `policy.route{provider,model,reasoning_effort}`：bot 配置了路由即覆盖全局默认（**仅对新回合生效**；已绑定会话不迁移，上下文保持）。零值回落宿主默认；实现为回合级 `RunRouteOverride`（与 team 任务路由同通道，复用 `chat.SubmitPromptOption.RouteOverride`） |
 
 ## 3. 架构总览：三个平面
 
@@ -347,6 +348,39 @@ connectors:
 **P1 实现范围**：`Policy` 增 `Notify` 子结构（enabled/kinds/scope）+ Schema 字段 +
 宿主过滤点（runtime-server `subscribeRuntimeConnectorAttention`、aicli 同口径）；跨节点事件
 的广播依赖 D1 共享 state，无新增机制。`scope=all` 的跨宿主事件扇出在 P2 随 mesh 派发一起做。
+
+#### 7.4.2 连接器级模型路由（D6，2026-10-14 补充定案）
+
+**需求**：bot 与一般通知渠道不同，是长驻的对话入口——每个 bot 应能配置自己的
+默认 provider/model/reasoning effort；配置后覆盖全局默认，让不同的 bot 走不同的
+模型（如客服 bot 用便宜模型、私人 bot 用旗舰模型）。
+
+**配置**（连接器 Policy，随 config.yaml 分层生效）：
+
+```yaml
+connectors:
+  - id: wechat-main
+    policy:
+      route:
+        provider: workbuddy                    # 空 = 全局默认 provider
+        model: global:deepseek-v4.1-flash      # 空 = （覆盖后 provider 的）默认模型
+        reasoning_effort: medium               # 空 = 会话/全局默认档位
+```
+
+**语义与边界**：
+
+| 项 | 定案 |
+|----|------|
+| 默认值 | 零值（三项全空）= 不覆盖，回落 `runtimeConfig.Agent.Default*`（与 D1 之前的宿主默认同源） |
+| 作用范围 | **仅对新回合生效**（回合级 `chat.RunRouteOverride`，与 team 任务路由同一机制）；已绑定会话不迁移——上下文历史保持，仅执行参数变化 |
+| 优先级 | 连接器 route > 宿主全局默认；IM 命令 / 会话级显式选择 > 连接器 route（用户在会话内 /model 选择的优先） |
+| 落库 | storefile（flow map）/storejson（struct）/restapi `PolicyView.route` 三处持久化；零值不落盘 |
+| UI | `/runtime/connectors` 编辑对话框 + 侧栏机器人面板后续接入 route 三字段（P1 前端余项）；config 文档编辑器立即可编辑 |
+| 落点 | runtime-server：`BackendRequest.Policy` 携带策略快照 → `ConnectorTurnRequest.Route` → `SubmitConnectorPrompt` 组装 `chat.SubmitPromptOption.RouteOverride`；aicli 宿主同构接线（P2 mesh 派发时对齐） |
+
+**验证（2026-10-14 真机）**：真实微信连接器配置 `route{workbuddy, global:deepseek-v4.1-flash, medium}`
+→ config 保存热生效 → `GET /connectors` 视图回显 route → 轮询重载后归属照常（runtime-server）。
+模型调用端到端以 workbuddy 上游可用为前提（上游无响应属 provider 服务问题，与路由机制无关）。
 
 ### 7.5 mesh 集成点
 

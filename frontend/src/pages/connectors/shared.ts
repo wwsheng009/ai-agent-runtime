@@ -8,6 +8,7 @@ import type {
   ConnectorActionSpec,
   ConnectorProviderSchema,
   ConnectorSchema,
+  ConnectorRoutePolicyView,
   ConnectorSubmitPayload,
   ConnectorView,
 } from "@/types/runtime";
@@ -258,4 +259,23 @@ export function buildSubmitPayload(
     payload.name = form.name.trim();
   }
   return payload;
+}
+
+/**
+ * D6 连接器级模型路由（docs/bots/09 §7.4.2）：把路由编辑值合并进提交体的
+ * policy 段（编辑态 PATCH；保留既有 policy 的其它键）。新建态不合并——路由
+ * 属于策略，创建后可在编辑里配置。
+ */
+export function mergeRouteIntoPayload(
+  payload: ConnectorSubmitPayload,
+  route: { provider: string; model: string; reasoningEffort: string },
+  existing: ConnectorView | null,
+): ConnectorSubmitPayload {
+  const policy = { ...(existing?.policy ?? {}) };
+  policy.route = {
+    provider: route.provider.trim(),
+    model: route.model.trim(),
+    reasoning_effort: route.reasoningEffort.trim(),
+  } satisfies ConnectorRoutePolicyView;
+  return { ...payload, policy };
 }

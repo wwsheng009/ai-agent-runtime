@@ -777,6 +777,20 @@ func configToMap(cfg connectors.Config) map[string]interface{} {
 	if v := strings.TrimSpace(cfg.Policy.RuntimeOwner); v != "" {
 		policy["runtime_owner"] = v
 	}
+	// D6 连接器级模型路由：零值不落盘。
+	if cfg.Policy.Route.HasOverride() {
+		route := map[string]interface{}{}
+		if v := strings.TrimSpace(cfg.Policy.Route.Provider); v != "" {
+			route["provider"] = v
+		}
+		if v := strings.TrimSpace(cfg.Policy.Route.Model); v != "" {
+			route["model"] = v
+		}
+		if v := strings.TrimSpace(cfg.Policy.Route.ReasoningEffort); v != "" {
+			route["reasoning_effort"] = v
+		}
+		policy["route"] = route
+	}
 	// D5（docs/bots/09 §7.4.1）：notify 缺省零值不落盘（保持文件最小噪音）。
 	if cfg.Policy.Notify.Enabled {
 		notify := map[string]interface{}{"enabled": true}
@@ -809,6 +823,11 @@ func configFromMap(raw map[string]interface{}) connectors.Config {
 		policy.SessionMode = anyToString(policyRaw["session_mode"])
 		policy.ReplyMode = anyToString(policyRaw["reply_mode"])
 		policy.RuntimeOwner = anyToString(policyRaw["runtime_owner"])
+		if routeRaw, ok := policyRaw["route"].(map[string]interface{}); ok {
+			policy.Route.Provider = anyToString(routeRaw["provider"])
+			policy.Route.Model = anyToString(routeRaw["model"])
+			policy.Route.ReasoningEffort = anyToString(routeRaw["reasoning_effort"])
+		}
 		if notifyRaw, ok := policyRaw["notify"].(map[string]interface{}); ok {
 			policy.Notify.Enabled = anyToBool(notifyRaw["enabled"])
 			policy.Notify.Kinds = anyToStringSlice(notifyRaw["kinds"])

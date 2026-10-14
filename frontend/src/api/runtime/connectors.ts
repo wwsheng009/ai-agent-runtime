@@ -1,11 +1,9 @@
 // IM 连接器管理面客户端（docs/bots/03-host-integration.md §6 路由表）。
 // 端点由 backend/internal/connectors/restapi 提供，runtime-server 挂载为 /api/connectors*：
-// GET/POST /connectors、GET /schema、GET/PATCH/DELETE /connectors/{id}、
-// POST /{id}/reload|test|takeover|actions/{action}、GET /{id}/logs、GET /bindings。
-// 鉴权：X-Skills-Admin-Token / Bearer / 环回直连；未显式传 adminToken 时回落
-// readAdminToken()（与页面读取同一存储键）。
-// 归一化纪律：核心结构缺失抛错不降级；单条缺 id/provider 只丢该条；
-// enabled 缺省 false（安全默认）；密钥只透传 secret_keys 字段名，不臆造明文。
+// GET/POST /connectors、GET /schema、GET/PATCH/DELETE /{id}、
+// POST /{id}/reload|test|takeover|actions、GET /{id}/logs、GET /bindings。
+// 鉴权：X-Skills-Admin-Token / Bearer / 环回直连；归一化纪律：核心结构缺失
+// 抛错不降级；enabled 缺省 false；密钥只透传 secret_keys 字段名。
 
 import type {
   ConnectorActionPayload,
@@ -44,6 +42,16 @@ export {
   normalizeConnectorBindings,
   unbindConnectorSession,
 } from "./connector-bindings";
+import {
+  normalizeActionRequestBody,
+  normalizeConnectorActionPayload,
+} from "./connector-actions";
+
+// 通道动作（docs/bots/03 §6 actions）实现见 ./connector-actions（P0-2 拆分）。
+export {
+  normalizeActionRequestBody,
+  normalizeConnectorActionPayload,
+} from "./connector-actions";
 
 export const CONNECTORS_PATH = "/api/connectors";
 export const CONNECTORS_SCHEMA_PATH = `${CONNECTORS_PATH}/schema`;
@@ -353,50 +361,6 @@ export function normalizeConnectorView(payload: unknown): ConnectorView | null {
  * 动作提交体归一化：丢弃 undefined 字段；结果为空对象时返回 undefined
  * （后端 body 可选，空体即无参数）。
  */
-export function normalizeActionRequestBody(
-  payload?: Record<string, unknown> | null,
-): Record<string, unknown> | undefined {
-  if (!payload) {
-    return undefined;
-  }
-  const entries = Object.entries(payload).filter(
-    ([, value]) => value !== undefined,
-  );
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-/**
- * 动作返回载荷归一化：已知字段按类型读出，未识别字段原样进 `raw`。
- * 非对象（数组/标量）视为结构错误——Provider 契约是 JSON object。
- */
-export function normalizeConnectorActionPayload(
-  payload: unknown,
-): ConnectorActionPayload {
-  const record = asRecord(payload);
-  if (!record) {
-    throw new Error("runtime connector action payload is not an object");
-  }
-  return {
-    login_id: readString(record.login_id) || undefined,
-    status: readString(record.status) || undefined,
-    base_url: readString(record.base_url) || undefined,
-    qr_code: readString(record.qr_code) || undefined,
-    qr_code_content: readString(record.qr_code_content) || undefined,
-    expires_at: readString(record.expires_at) || undefined,
-    refresh_count:
-      typeof record.refresh_count === "number" &&
-      Number.isFinite(record.refresh_count)
-        ? record.refresh_count
-        : undefined,
-    account_id: readString(record.account_id) || undefined,
-    user_id: readString(record.user_id) || undefined,
-    credential_ready: record.credential_ready === true,
-    settings: readStringMap(record.settings),
-    secrets: readStringMap(record.secrets),
-    raw: record,
-  };
-}
-
 export function normalizeConnectorSchema(payload: unknown): ConnectorSchema {
   const record = asRecord(payload);
   if (!record) {
@@ -490,6 +454,8 @@ function readPolicy(value: unknown): ConnectorView["policy"] {
     return {};
   }
   const allowedUsers = readStringArray(record.allowed_users);
+  const routeRecord = asRecord(record.route);
+  const notifyRecord = asRecord(record.notify);
   return {
     command_prefix: readString(record.command_prefix) || undefined,
     allowed_users:
@@ -497,6 +463,20 @@ function readPolicy(value: unknown): ConnectorView["policy"] {
     session_mode: readString(record.session_mode) || undefined,
     reply_mode: readString(record.reply_mode) || undefined,
     runtime_owner: readString(record.runtime_owner) || undefined,
+    route: routeRecord
+      ? {
+          provider: readString(routeRecord.provider) || undefined,
+          model: readString(routeRecord.model) || undefined,
+          reasoning_effort: readString(routeRecord.reasoning_effort) || undefined,
+        }
+      : undefined,
+    notify: notifyRecord
+      ? {
+          enabled: notifyRecord.enabled === true,
+          kinds: readStringArray(notifyRecord.kinds),
+          scope: readString(notifyRecord.scope) || undefined,
+        }
+      : undefined,
   };
 }
 

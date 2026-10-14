@@ -362,6 +362,50 @@ func TestListSessionRuntimeTools_IncludesGoalToolsForManagedSession(t *testing.T
 	require.True(t, runtimeToolDefinitionsContain(decoded.Tools, runtimegoal.UpdateToolName))
 }
 
+// 口径统一 + 账本（docs/architecture/unified-tool-surface-registry.md §11）：
+// 托管会话（state=null，从未进 actor）的 /runtime/tools 必须反映真实请求面候选
+// （live 目录），且每个工具携带 surface_source 来源标注。
+func TestListSessionRuntimeTools_LiveSurfaceCarriesSourceLedger(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	// live 口径需要 runtimeConfig 才走 buildSessionAgentForContext（与真实请求同路径）。
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime/tools", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+	handler.ListSessionRuntimeTools(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var decoded struct {
+		Count int                    `json:"count"`
+		Tools []types.ToolDefinition `json:"tools"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&decoded))
+	// 测试 handler 无 tools.Manager（NewHandler 第三参为 nil），live 目录由
+	// goal capability（经 runtimeServerToolSurfaceForSession 包装）+ broker 组成；
+	// 核心工具标注由真实服务器的 AgentAdapter 提供（见 main.go Wrap）。
+	// 这里验证账本标注逻辑在可得源上的正确性。
+	require.True(t, decoded.Count >= 3, "expected the live request surface, got %d tools", decoded.Count)
+	require.True(t, runtimeToolDefinitionsContain(decoded.Tools, "job_start"))
+
+	byName := make(map[string]types.ToolDefinition, len(decoded.Tools))
+	for _, tool := range decoded.Tools {
+		byName[tool.Name] = tool
+	}
+	job, ok := byName["job_start"]
+	require.True(t, ok)
+	require.Equal(t, "orchestration", job.Metadata["surface_source"], "job_start must be labelled orchestration")
+
+	goal, ok := byName[runtimegoal.GetToolName]
+	require.True(t, ok)
+	// goal capability 经 aicli_goal MCP 包装暴露（session_goal_tools.go），
+	// mcp_name 优先 → 标为 mcp:aicli_goal（语义正确：来源即该包装层）。
+	require.Equal(t, "mcp:aicli_goal", goal.Metadata["surface_source"], "get_goal arrives through the aicli_goal capability MCP wrap")
+}
 func TestListSessionRuntimeTools_DisabledToolsReturnsEmptySurface(t *testing.T) {
 	mcpManager := &runtimeToolSurfaceMCPManager{}
 	handler := NewHandler(skill.NewRegistry(mcpManager), nil, mcpManager)

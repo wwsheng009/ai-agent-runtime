@@ -71,6 +71,29 @@ type Policy struct {
 	// Notify 是事件通知接收配置（docs/bots/09-multi-instance-binding.md §7.4.1 D5）。
 	// 零值 = 不接收任何事件通知（与历史行为一致；零配置零打扰）。
 	Notify NotifyPolicy
+	// Route 是连接器级模型路由（docs/bots/09 §5.5 补充定案 D6）：配置后覆盖
+	// 全局默认 provider/model/reasoning effort，作用于本 bot 的**新回合**；
+	// 已绑定的既有会话不迁移（上下文保持，仅执行参数变化）。
+	// 零值 = 未配置，回落宿主默认（runtimeConfig.Agent.Default*）。
+	Route RoutePolicy
+}
+
+// RoutePolicy 是连接器级模型路由（D6）。三项均可独立省略：省略项回落
+// 宿主全局默认，非空项覆盖。
+type RoutePolicy struct {
+	// Provider 为空 = 用全局默认 provider。
+	Provider string
+	// Model 为空 = 用（覆盖后 provider 的）默认模型。
+	Model string
+	// ReasoningEffort 为空 = 用会话/全局默认推理档位。
+	ReasoningEffort string
+}
+
+// HasOverride 报告该路由策略是否包含任一覆盖项。
+func (r RoutePolicy) HasOverride() bool {
+	return strings.TrimSpace(r.Provider) != "" ||
+		strings.TrimSpace(r.Model) != "" ||
+		strings.TrimSpace(r.ReasoningEffort) != ""
 }
 
 // NotifyPolicy 描述 bot 的事件通知接收（D5）。
@@ -304,6 +327,9 @@ type BackendRequest struct {
 	UserID      string
 	UserName    string
 	MessageID   string
+	// Policy 是本请求所属连接器的操作逻辑快照（宿主据此执行策略相关行为，
+	// 如 D6 连接器级模型路由）。零值安全：宿主按空路由回落全局默认。
+	Policy Policy
 }
 
 // BackendResult 是一次交互的结果。

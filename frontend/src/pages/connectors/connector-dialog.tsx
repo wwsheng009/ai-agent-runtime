@@ -7,7 +7,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { createConnector, deleteConnector } from "@/api/runtime/connectors";
+import {
+  createConnector,
+  deleteConnector,
+} from "@/api/runtime/connectors";
+import { listRuntimeModels } from "@/lib/runtime-api";
 import type {
   ConnectorFieldError,
   ConnectorFieldSchema,
@@ -22,6 +26,7 @@ import { readAdminToken } from "@/lib/admin-token";
 import { cn } from "@/lib/utils";
 
 import { FieldControl } from "./field-control";
+import { ModelRoutePicker } from "./model-route-picker";
 import { RescanSection } from "./rescan-section";
 import {
   buildSubmitPayload,
@@ -32,6 +37,7 @@ import {
   formFromConnector,
   generateConnectorId,
   hasModeField,
+  mergeRouteIntoPayload,
   switchProvider,
   validateConnectorForm,
   type ConnectorFormError,
@@ -84,15 +90,21 @@ export function ConnectorDialog({
   /** 扫码是否已确认并回填（未确认时关闭对话框要清理草稿连接器）。 */
   const [qrConfirmed, setQrConfirmed] = useState(false);
   /**
-   * D4 两层模型（docs/bots/09 §6）：编辑态「重新扫码=替换凭据」的面板开关。
-   * 打开后对话框切换到内嵌登录面板，扫码确认只回填 secrets/settings，
-   * 实体 id/name/policy 与绑定**不变**。
+   * D4 两层模型（docs/bots/09 §6）：编辑态「重新扫码=替换凭据」的面板开关；
+   * 实体 id/name/policy 与绑定不变，只回填 secrets/settings。
    */
   const [rescanOpen, setRescanOpen] = useState(false);
+  /** D6 路由候选（runtime 模型目录：provider + 模型清单）；打开时拉一次。 */
+  const [catalog, setCatalog] = useState<{
+    providers: readonly { name: string; models: readonly string[] }[];
+    defaultReasoningEffort?: string;
+  }>({ providers: [] });
+  /** D6 路由编辑值（编辑态从 existing.policy.route 回填）。 */
+  const [routeValue, setRouteValue] = useState({ provider: "", model: "", reasoningEffort: "" });
 
   /**
-   * 已初始化的 (open, existing) 组合。列表刷新会重建 schema 对象，仅凭 schema
-   * 身份变化不得重置表单/扫码态（否则扫码过程中会被打断）。
+   * 已初始化的 (open, existing) 组合。列表刷新重建 schema 对象不得重置
+   * 表单/扫码态（否则扫码过程中会被打断）。
    */
   const resetKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -117,7 +129,32 @@ export function ConnectorDialog({
     setQrBusy(false);
     setQrConfirmed(false);
     setRescanOpen(false);
+    const route = existing?.policy.route;
+    setRouteValue({
+      provider: route?.provider ?? "",
+      model: route?.model ?? "",
+      reasoningEffort: route?.reasoning_effort ?? "",
+    });
   }, [open, existing, schema]);
+
+  // D6 路由候选：打开对话框时拉 runtime 模型目录（失败静默——字段仍可手输）。
+  useEffect(() => {
+    if (!open) { return; }
+    let cancelled = false;
+    void listRuntimeModels()
+      .then((models) => {
+        if (cancelled) { return; }
+        setCatalog({
+          providers: (models.providers ?? []).map((p) => ({
+            name: p.name,
+            models: p.models ?? [],
+          })),
+          defaultReasoningEffort: models.default_reasoning_effort || undefined,
+        });
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [open]);
 
   useEffect(() => {
     if (!open) {
@@ -196,7 +233,9 @@ export function ConnectorDialog({
     if (next.length > 0) {
       return;
     }
-    onSubmit(buildSubmitPayload(form, providerSchema, { isCreate }));
+    const payload = buildSubmitPayload(form, providerSchema, { isCreate });
+    // D6 路由：编辑态随本 payload 一起 PATCH（restapi policyFrom 合并进 policy）。
+    onSubmit(isCreate ? payload : mergeRouteIntoPayload(payload, routeValue, existing));
   };
 
   /**
@@ -415,6 +454,24 @@ export function ConnectorDialog({
 
           {!isCreate ? (
             <p className="text-xs text-muted-foreground">{t("dialog.providerLocked")}</p>
+          ) : null}
+
+          {!isCreate ? (
+            <ModelRoutePicker
+              value={{
+                provider: routeValue.provider,
+                model: routeValue.model,
+                reasoning_effort: routeValue.reasoningEffort,
+              }}
+              catalog={catalog}
+              onChange={(next) =>
+                setRouteValue({
+                  provider: next.provider ?? "",
+                  model: next.model ?? "",
+                  reasoningEffort: next.reasoning_effort ?? "",
+                })
+              }
+            />
           ) : null}
 
           <RescanSection

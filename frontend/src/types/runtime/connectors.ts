@@ -58,6 +58,8 @@ export interface ConnectorPolicyView {
   session_mode?: string;
   reply_mode?: string;
   runtime_owner?: string;
+  /** D6 连接器级模型路由；缺省（未配置）= 回落宿主全局默认（additive）。 */
+  route?: ConnectorRoutePolicyView;
   /** D5 事件通知接收；缺省（未配置）= 不收跨会话事件（additive）。 */
   notify?: ConnectorNotifyPolicyView;
 }
@@ -164,6 +166,13 @@ export interface ConnectorNotifyPolicyView {
   enabled: boolean;
   kinds?: string[];
   scope?: string;
+}
+
+/** 连接器策略里的模型路由配置（docs/bots/09 §7.4.2 D6）。 */
+export interface ConnectorRoutePolicyView {
+  provider?: string;
+  model?: string;
+  reasoning_effort?: string;
 }
 
 export interface ConnectorFieldError {

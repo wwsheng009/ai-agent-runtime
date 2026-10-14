@@ -143,12 +143,20 @@ type connectorRecord struct {
 }
 
 type policyRecord struct {
-	CommandPrefix string        `json:"command_prefix,omitempty"`
-	AllowedUsers  []string      `json:"allowed_users,omitempty"`
-	SessionMode   string        `json:"session_mode,omitempty"`
-	ReplyMode     string        `json:"reply_mode,omitempty"`
-	RuntimeOwner  string        `json:"runtime_owner,omitempty"`
+	CommandPrefix string   `json:"command_prefix,omitempty"`
+	AllowedUsers  []string `json:"allowed_users,omitempty"`
+	SessionMode   string   `json:"session_mode,omitempty"`
+	ReplyMode     string   `json:"reply_mode,omitempty"`
+	RuntimeOwner  string   `json:"runtime_owner,omitempty"`
+	Route         *routeRecord `json:"route,omitempty"`
 	Notify        *notifyRecord `json:"notify,omitempty"`
+}
+
+// routeRecord 是 D6 连接器级模型路由（docs/bots/09 §5.5）。
+type routeRecord struct {
+	Provider        string `json:"provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // notifyRecord 是 D5 事件通知接收配置（docs/bots/09 §7.4.1）。
@@ -177,6 +185,13 @@ func recordFromConfig(cfg connectors.Config) connectorRecord {
 	record.Policy.SessionMode = strings.TrimSpace(cfg.Policy.SessionMode)
 	record.Policy.ReplyMode = strings.TrimSpace(cfg.Policy.ReplyMode)
 	record.Policy.RuntimeOwner = strings.TrimSpace(cfg.Policy.RuntimeOwner)
+	if cfg.Policy.Route.HasOverride() {
+		record.Policy.Route = &routeRecord{
+			Provider:        strings.TrimSpace(cfg.Policy.Route.Provider),
+			Model:           strings.TrimSpace(cfg.Policy.Route.Model),
+			ReasoningEffort: strings.TrimSpace(cfg.Policy.Route.ReasoningEffort),
+		}
+	}
 	if cfg.Policy.Notify.Enabled {
 		record.Policy.Notify = &notifyRecord{
 			Enabled: true,
@@ -205,6 +220,13 @@ func (r connectorRecord) toConfig() connectors.Config {
 			ReplyMode:     strings.TrimSpace(r.Policy.ReplyMode),
 			RuntimeOwner:  strings.TrimSpace(r.Policy.RuntimeOwner),
 		},
+	}
+	if r.Policy.Route != nil {
+		config.Policy.Route = connectors.RoutePolicy{
+			Provider:        strings.TrimSpace(r.Policy.Route.Provider),
+			Model:           strings.TrimSpace(r.Policy.Route.Model),
+			ReasoningEffort: strings.TrimSpace(r.Policy.Route.ReasoningEffort),
+		}
 	}
 	if r.Policy.Notify != nil {
 		config.Policy.Notify = connectors.NotifyPolicy{

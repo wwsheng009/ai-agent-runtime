@@ -56,8 +56,17 @@ type PolicyView struct {
 	AllowedUsers  []string          `json:"allowed_users,omitempty"`
 	SessionMode   string            `json:"session_mode,omitempty"`
 	ReplyMode     string            `json:"reply_mode,omitempty"`
-	RuntimeOwner  string            `json:"runtime_owner,omitempty"`
+	RuntimeOwner  string   `json:"runtime_owner,omitempty"`
+	Route         *RoutePolicyView  `json:"route,omitempty"`
 	Notify        *NotifyPolicyView `json:"notify,omitempty"`
+}
+
+// RoutePolicyView 是 D6 连接器级模型路由的对外形状（docs/bots/09 §5.5）。
+// 三项均可省略：省略项回落宿主全局默认。
+type RoutePolicyView struct {
+	Provider        string `json:"provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // NotifyPolicyView 是 D5 事件通知接收配置的对外形状（docs/bots/09 §7.4.1）。
@@ -500,6 +509,13 @@ func policyViewFrom(policy connectors.Policy) PolicyView {
 			Scope:   policy.Notify.Scope,
 		}
 	}
+	if policy.Route.HasOverride() {
+		view.Route = &RoutePolicyView{
+			Provider:        strings.TrimSpace(policy.Route.Provider),
+			Model:           strings.TrimSpace(policy.Route.Model),
+			ReasoningEffort: strings.TrimSpace(policy.Route.ReasoningEffort),
+		}
+	}
 	return view
 }
 
@@ -519,6 +535,13 @@ func policyFrom(view *PolicyView) connectors.Policy {
 			Enabled: true,
 			Kinds:   append([]string(nil), view.Notify.Kinds...),
 			Scope:   strings.TrimSpace(view.Notify.Scope),
+		}
+	}
+	if view.Route != nil {
+		policy.Route = connectors.RoutePolicy{
+			Provider:        strings.TrimSpace(view.Route.Provider),
+			Model:           strings.TrimSpace(view.Route.Model),
+			ReasoningEffort: strings.TrimSpace(view.Route.ReasoningEffort),
 		}
 	}
 	return policy

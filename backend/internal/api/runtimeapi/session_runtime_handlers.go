@@ -17,9 +17,11 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimehost "github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -521,6 +523,18 @@ func (h *Handler) ListSessionRuntimeTools(w http.ResponseWriter, r *http.Request
 	h.writeJSON(w, http.StatusOK, payload)
 }
 
+// sessionRuntimeToolDefinitions 返回会话的工具面观测。
+//
+// 口径统一（docs/architecture/unified-tool-surface-registry.md §9.3/§10）：
+//  1. actor 冻结面（StableToolSurface）——actor 路径的真实请求前缀，最优先；
+//  2. 真实请求面候选——按 buildSessionAgentForContext 装配同一个 agent
+//     （与 inline web turn 同一实现点），取 CollectToolCatalogDefinitions
+//     （冻结面前的完整候选目录：内置核心 + MCP + scheduler + broker）；
+//  3. 兜底：装配不可行（无 runtime config）时退回 MCP+goal 旧口径。
+//
+// 此前只有 1/3 两条路，web 直连会话（state=null，从未进 actor）显示的
+// 25 工具是 MCP+goal 回退面，与 LLM 实际携带的 ~51 工具不符（2026-10-14
+// 阶段 0 裁决，诊断实测 final=51 broker_defs=31）。
 func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID string) []runtimetypes.ToolDefinition {
 	if h == nil {
 		return []runtimetypes.ToolDefinition{}
@@ -529,6 +543,9 @@ func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID s
 		if state, err := store.LoadState(ctx, strings.TrimSpace(sessionID)); err == nil && state != nil && state.StableToolSurfaceSet {
 			return cloneSessionRuntimeToolDefinitions(state.StableToolSurface)
 		}
+	}
+	if tools, ok := h.sessionLiveRequestSurface(ctx, sessionID); ok {
+		return tools
 	}
 	surface := h.runtimeServerToolSurfaceForSession(ctx, sessionID, h.sessionBaseMCPManagerByID(ctx, sessionID), true)
 	if surface == nil {
@@ -554,6 +571,32 @@ func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID s
 		return strings.TrimSpace(tools[i].Name) < strings.TrimSpace(tools[j].Name)
 	})
 	return tools
+}
+
+// sessionLiveRequestSurface 用与 inline web turn 相同的装配路径取真实请求面候选
+// （agent.CollectToolCatalogDefinitions：冻结面前的完整目录，含内置/MCP/scheduler/
+// broker 四源），经 internal/toolsurface.Build 装配成带来源账本的 Surface——
+// "端点显示"与"请求携带"同源，且分类逻辑双宿主共用（单一实现点，§4.1/§4.2）。
+//
+// 装配需要会话行（workspace 绑定）与 runtime config；任一不可得返回 ok=false，
+// 调用方回退旧口径。这里刻意不走 profile 解析（profile 只影响 provider/model/
+// 提示词与裁剪策略，基线目录不含 profile 裁剪——与冻结面 eligibility 口径一致）。
+func (h *Handler) sessionLiveRequestSurface(ctx context.Context, sessionID string) ([]runtimetypes.ToolDefinition, bool) {
+	if h == nil || h.runtimeConfig == nil {
+		return nil, false
+	}
+	session := h.sessionByID(ctx, sessionID)
+	if session == nil {
+		return nil, false
+	}
+	workspacePath := strings.TrimSpace(sessionWorkspaceDir(session))
+	sessionCtx := runtimehost.SessionContext{WorkspacePath: workspacePath}
+	apiAgent, _ := h.buildSessionAgentForContext(strings.TrimSpace(sessionID), sessionCtx, nil, h.runtimeConfig)
+	if apiAgent == nil {
+		return nil, false
+	}
+	catalog := apiAgent.CollectToolCatalogDefinitions(ctx)
+	return toolsurface.Build(catalog, toolsurface.Ledger{Broker: apiAgent.GetToolBroker()})
 }
 
 func cloneSessionRuntimeToolDefinitions(input []runtimetypes.ToolDefinition) []runtimetypes.ToolDefinition {

@@ -758,6 +758,7 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		UserID:      msg.UserID,
 		UserName:    msg.UserName,
 		MessageID:   msg.MessageID,
+		Policy:      cfg.Policy,
 	}, sink)
 	if err != nil {
 		s.recordLog(LogEntry{

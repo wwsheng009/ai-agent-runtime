@@ -193,6 +193,11 @@ func (b runtimeConnectorBackend) Handle(ctx context.Context, req connectors.Back
 		UserID:    req.UserID,
 		Prompt:    text,
 		OnDelta:   onDelta,
+		Route: runtimeapi.ConnectorRouteOverride{
+			Provider:        req.Policy.Route.Provider,
+			Model:           req.Policy.Route.Model,
+			ReasoningEffort: req.Policy.Route.ReasoningEffort,
+		},
 	})
 	if turn == nil {
 		return connectors.BackendResult{}, err

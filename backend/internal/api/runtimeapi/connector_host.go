@@ -35,6 +35,16 @@ type ConnectorTurnRequest struct {
 	Prompt string
 	// OnDelta 可空；收到 assistant 增量文本时回调（同一 goroutine 串行）。
 	OnDelta func(text string)
+	// Route 是连接器级模型路由（D6）：配置后覆盖全局默认 provider/model/
+	// reasoning effort，仅作用于本回合。零值 = 回落宿主全局默认。
+	Route ConnectorRouteOverride
+}
+
+// ConnectorRouteOverride 是连接器策略中的模型路由（docs/bots/09 §5.5 D6）。
+type ConnectorRouteOverride struct {
+	Provider        string
+	Model           string
+	ReasoningEffort string
 }
 
 // ConnectorTurnResult 是一轮对话的终态。
@@ -98,7 +108,21 @@ func (h *Handler) SubmitConnectorPrompt(ctx context.Context, req ConnectorTurnRe
 	// 失败。用户准入由连接器 Policy 白名单先行过滤；开启 fail-closed 闸的宿主
 	// （connectors.Deps.RequireAllowedUsers=true，如 aicli）还会在启动期拒绝
 	// 白名单为空的连接器。
-	result, err := client.submitPrompt(ctx, sessionID, prompt, &team.RunMeta{PermissionMode: "bypass_permissions"})
+	// D6：连接器策略路由非空时按回合覆盖（RunRouteOverride 是既有机制，
+	// team 任务的 TaskExecutionRoute 走同一通道；空值项由宿主默认回落）。
+	var submitOpts []runtimechat.SubmitPromptOption
+	if route := req.Route; strings.TrimSpace(route.Provider) != "" ||
+		strings.TrimSpace(route.Model) != "" ||
+		strings.TrimSpace(route.ReasoningEffort) != "" {
+		submitOpts = append(submitOpts, runtimechat.SubmitPromptOption{
+			RouteOverride: &runtimechat.RunRouteOverride{
+				Provider:        strings.TrimSpace(route.Provider),
+				Model:           strings.TrimSpace(route.Model),
+				ReasoningEffort: strings.TrimSpace(route.ReasoningEffort),
+			},
+		})
+	}
+	result, err := client.submitPrompt(ctx, sessionID, prompt, &team.RunMeta{PermissionMode: "bypass_permissions"}, submitOpts...)
 	if result != nil {
 		turn.Reply = strings.TrimSpace(result.Output)
 		turn.Success = result.Success
