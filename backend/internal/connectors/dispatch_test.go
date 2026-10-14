@@ -87,3 +87,32 @@ func TestDecideRouteNoPeers(t *testing.T) {
 		t.Fatalf("no peers unbound = %+v", d)
 	}
 }
+
+// TestDecideRouteLocalBindingNoFalseFailover 锁定 2026-10-15 真机（qq-bot1）
+// 修复：绑定 NodeID 指向本机（实例唯一 HostID / 裸 kind）时，即使 peers
+// 快照不含 self（或使用不同格式），也必须是本机亲和执行——不得触发假
+// R2a（重复回写 NodeID + 向用户发送「原节点已下线」提示）。
+func TestDecideRouteLocalBindingNoFalseFailover(t *testing.T) {
+	// 快照只含其它活 runner（不含 self）——老代码会判「原节点掉线」。
+	peers := []RunnerPeer{
+		{HostKind: HostKindRuntimeServer, NodeID: "runtime-server", Alive: true},
+	}
+
+	// 实例唯一 HostID 自绑定（R2a 回写后的格式）。
+	d, _ := DecideRoute("", peers, "aicli:node-self", SessionRef{NodeID: "aicli:node-self", SessionID: "sess-1"}, 0)
+	if d.Remote || !d.Affinity || d.Failover {
+		t.Fatalf("self HostID binding = %+v, want local affinity without failover", d)
+	}
+
+	// 裸 kind 自绑定（runtime-server 单实例 / 历史回写格式）。
+	d, _ = DecideRoute("", peers, "runtime-server", SessionRef{NodeID: "runtime-server", SessionID: "sess-2"}, 0)
+	if d.Remote || !d.Affinity || d.Failover {
+		t.Fatalf("bare-kind local binding = %+v, want local affinity without failover", d)
+	}
+
+	// 其它实例的陈旧绑定不受短路影响：仍走 R2a 接管。
+	d, _ = DecideRoute("", peers, "aicli:node-self", SessionRef{NodeID: "aicli:node-gone", SessionID: "sess-3"}, 0)
+	if d.Remote || !d.Failover {
+		t.Fatalf("foreign stale binding = %+v, want failover", d)
+	}
+}

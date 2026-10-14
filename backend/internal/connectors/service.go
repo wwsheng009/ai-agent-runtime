@@ -1003,8 +1003,16 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 		return s.processMessageLocal(ctx, cfg, provider, msg, Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: binding})
 	}
 	// 回写绑定（runner 侧 auto-create 后 Session 会更新；R1 亲和时通常不变）。
-	if !result.Session.IsZero() && binding != result.Session {
-		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: result.Session}); err != nil {
+	// NodeID 归一化为**路由目标 peer 的 NodeID**：runner 回传的是宿主身份
+	// （如裸 kind "aicli"/"runtime-server"），与 peers 视图的 NodeID 格式
+	// 不一致会导致下次路由匹配失败 → 假 R2a（2026-10-15 真机 qq-bot1 观测）。
+	dispatched := result.Session
+	if dispatched.SessionID == "" {
+		dispatched.SessionID = binding.SessionID
+	}
+	dispatched.NodeID = decision.Peer.NodeID
+	if !dispatched.IsZero() && binding != dispatched {
+		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: dispatched}); err != nil {
 			s.logf("connector %s: persist dispatched binding failed: %v", cfg.ID, err)
 		}
 	}

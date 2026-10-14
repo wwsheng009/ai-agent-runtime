@@ -160,12 +160,17 @@
   ③入站补齐：`message_reference` 引用摘要拼接 `Quoted:` 前缀；`share_session_in_channel`
   群会话策略（缺省 true=群共享，false=群内按成员隔离 `group:<gid>:user:<member>`）；
   ④`intents` 覆盖（高级，对齐上游 `qqbot_intents`：缺省/非法值回落 `1<<25`，
-  Identify 与心跳按配置生效）。
+  仅 Identify 按配置下发，心跳协议不变）。
   测试新增 12 例（授权校验成功/失败/脱敏、markdown、分片、降级、媒体上传+发送、
   本地文件、引用解析、隔离键解析与发送、intents 覆盖与回落），`go test -race` 全绿。
   **说明**：QQ 官方开放平台**没有扫码登录协议**（凭据来自 bot.q.qq.com 后台），
   因此「扫码」以等价便捷流落地：保存凭据后一键授权校验 + Activate 自动校验；
   不引入第三方个人号协议（D7：官方优先）。
+  **真机验证（2026-10-15）**：真实 AppID 授权校验通过（`GET /users/@me` 回读机器人
+  信息）；gateway 连接/Resume、白名单准入（fail-closed 生效后放行）、被动回复
+  （回复 432/3396 字符）、D6 路由（provider=baidu/model=deepseek-v4.1-flash/effort=max）
+  全链路实测通过；期间定位并修复「本机绑定被误判掉线」的假 R2a（回归见
+  [09 §7.2](./09-multi-instance-binding.md)）。
 
 ### P3 · 微信 + 媒体/主动推送完善（≈4–5 天）
 

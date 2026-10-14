@@ -127,7 +127,18 @@ func DecideRoute(preference string, peers []RunnerPeer, localHostID string, bind
 
 	// 有绑定：R1 / R2。
 	if !binding.IsZero() {
-		if strings.TrimSpace(binding.NodeID) != "" {
+		bindingNodeID := strings.TrimSpace(binding.NodeID)
+		if bindingNodeID != "" {
+			// 本机绑定快捷路径（先于 peers 查找）：绑定 NodeID 就是本机——
+			// 实例唯一 HostID（aicli:node-x / runtime-server）或本机裸 kind
+			// （runner 回传/单实例宿主格式）→ 直接本机亲和执行。
+			// 背景（2026-10-15 真机 qq-bot1）：peers 快照可能不含 self 或使用
+			// mesh 原始 node id，若不短路会把「绑定在本机」误判为「原节点
+			// 掉线」，触发假 R2a（反复回写 NodeID + 向用户发接管提示）。
+			if strings.EqualFold(bindingNodeID, strings.TrimSpace(localHostID)) ||
+				(localKind != "" && strings.EqualFold(bindingNodeID, localKind)) {
+				return routeDecision{Remote: false, Affinity: true}, rrCursor
+			}
 			for _, p := range alive {
 				if strings.EqualFold(strings.TrimSpace(p.NodeID), strings.TrimSpace(binding.NodeID)) {
 					if isLocal(p) {
@@ -168,6 +179,6 @@ func DecideRoute(preference string, peers []RunnerPeer, localHostID string, bind
 	}
 	return routeDecision{
 		Remote: true, Unbound: true,
-		Peer:   RunnerPeer{HostKind: picked.HostKind, NodeID: picked.NodeID, Alive: true},
+		Peer: RunnerPeer{HostKind: picked.HostKind, NodeID: picked.NodeID, Alive: true},
 	}, rrNext
 }
