@@ -189,6 +189,13 @@ describe("isUsageRelevantRuntimeEvent", () => {
     expect(isUsageRelevantRuntimeEvent("turn_completed")).toBe(true);
     expect(isUsageRelevantRuntimeEvent(" Assistant_Message ")).toBe(true);
 
+    // web chat 直连通道（/api/agent/chat）的回合终态帧（2026-10-14 实测：
+    // 该通道事件分布只有 assistant_delta + chat.sse.*，无任何 *turn* 事件；
+    // 缺了这三帧，短回合结束后 composer 上下文环永远停在打开页面时的空态）。
+    expect(isUsageRelevantRuntimeEvent("chat.sse.result")).toBe(true);
+    expect(isUsageRelevantRuntimeEvent("chat.sse.done")).toBe(true);
+    expect(isUsageRelevantRuntimeEvent("chat.sse.error")).toBe(true);
+
     // 与用量无关（或尚未落库）的事件不应触发重取。
     expect(isUsageRelevantRuntimeEvent("checkpoint_created")).toBe(false);
     expect(isUsageRelevantRuntimeEvent("assistant_delta")).toBe(false);
@@ -205,6 +212,7 @@ describe("isUsageRelevantRuntimeEvent", () => {
     expect(buildSessionUsageReloadKey("tool_finished", 5)).toBe("tool_finished:5");
     expect(isUsageRelevantRuntimeEvent("turn_completed")).toBe(true);
     expect(buildSessionUsageReloadKey("turn_completed", 4)).toBe("turn_completed:4");
+    expect(buildSessionUsageReloadKey("chat.sse.done", 70)).toBe("chat.sse.done:70");
     expect(buildSessionUsageReloadKey("checkpoint_created", 4)).toBe("");
     expect(buildSessionUsageReloadKey(undefined, 4)).toBe("");
   });

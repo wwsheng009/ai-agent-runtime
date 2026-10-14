@@ -44,6 +44,7 @@ export type RuntimeEventType =
   | "context.profile.injected"
   | "context.tool_schema.compacted"
   | "context.tool_schema.frozen"
+  | "context.usage_over_budget"
   | "context_reconciled"
   | "hooks.stop_blocked"
   | "job_cancelled"
@@ -87,6 +88,7 @@ export type RuntimeEventType =
   | "recall.performed"
   | "rewind_finished"
   | "rewind_started"
+  | "schedule.changed"
   | "session.checkpoint_persist_error"
   | "session.routing_changed"
   | "session_compact_completed"
@@ -156,6 +158,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "context.profile.injected": ["session_store"],
   "context.tool_schema.compacted": [],
   "context.tool_schema.frozen": [],
+  "context.usage_over_budget": [],
   "context_reconciled": ["session_store"],
   "hooks.stop_blocked": [],
   "job_cancelled": [],
@@ -199,6 +202,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "recall.performed": ["session_store"],
   "rewind_finished": [],
   "rewind_started": [],
+  "schedule.changed": ["live_only"],
   "session.checkpoint_persist_error": [],
   "session.routing_changed": ["session_store"],
   "session_compact_completed": ["session_store"],
@@ -288,6 +292,7 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
 export const RUNTIME_EVENT_LIVE_ONLY_TYPES: readonly RuntimeEventType[] = [
   "lsp.diagnostics.updated",
   "lsp.server.state",
+  "schedule.changed",
   "subagent.batch.progress",
   "subagent.progress",
   "tool.progress",

@@ -6254,6 +6254,62 @@ func TestComputeAvailableToolsRespectsExplicitEmptyAllowlist(t *testing.T) {
 	assert.Empty(t, tools)
 }
 
+// projectionLedgerMCPManager 提供能被 simple-goal 词表命中的目录（ls/glob/view/shell/bash），
+// 供账本用例验证"投影实际收缩才置位"。
+type projectionLedgerMCPManager struct{}
+
+func (m *projectionLedgerMCPManager) ListTools() []skill.ToolInfo {
+	return []skill.ToolInfo{
+		{Name: "ls", Description: "list", Enabled: true},
+		{Name: "glob", Description: "glob", Enabled: true},
+		{Name: "view", Description: "view", Enabled: true},
+		{Name: "shell", Description: "shell", Enabled: true},
+		{Name: "bash", Description: "bash", Enabled: true},
+	}
+}
+
+func (m *projectionLedgerMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
+	return skill.ToolInfo{Name: toolName, Enabled: true}, nil
+}
+
+func (m *projectionLedgerMCPManager) CallTool(toolCtx interface{}, name, args string, extra map[string]interface{}) (interface{}, error) {
+	return "ok", nil
+}
+
+// 账本（docs/architecture/unified-tool-surface-registry.md §12.4）：simple-goal
+// 投影命中必须在 loop 上留痕（lastToolSurfaceProjection），请求装配据此把
+// `tool_surface_projected` 写进 provider 请求 metadata——投影从"不可见"变为可审计。
+func TestComputeAvailableToolsRecordsSimpleGoalProjectionLedger(t *testing.T) {
+	toolAgent := &Agent{
+		config:     &Config{Name: "projection-ledger", Model: "test-provider"},
+		mcpManager: &projectionLedgerMCPManager{},
+	}
+	loop := NewReActLoop(toolAgent, nil, &LoopReActConfig{})
+
+	// 未投影：标记保持空（"inspect the repository …" 不在 simple-goal 词表，
+	// 与既有 TestSimpleGoalProjection* 的非投影用例同源）。白名单传 nil
+	// （与真实请求一致；[]string{} 是"显式空 allowlist"，会清空整个目录）。
+	_, _, err := loop.computeAvailableTools(context.Background(), "inspect the repository and fix the failing tests", nil, true)
+	require.NoError(t, err)
+	require.Equal(t, "", loop.lastToolSurfaceProjection.Load())
+
+	// 命中投影且目录实际收缩（"ls file" → ls/glob）：标记置位。
+	tools, _, err := loop.computeAvailableTools(context.Background(), "ls file", nil, true)
+	require.NoError(t, err)
+	require.Equal(t, "simple_goal", loop.lastToolSurfaceProjection.Load())
+	require.ElementsMatch(t, []string{"ls", "glob"}, toolDefinitionNames(tools))
+	// 来源账本（§15.4 修订）：账本在请求级 metadata（tool_surface_sources），
+	// 不写进定义——避免推高 token 估算（compaction recovery 时序依赖此语义）。
+	// 用 SummarizeSources（与 think() 装配同一函数）验证分类。
+	sources := toolsurface.SummarizeSources(tools, loop.toolSurfaceLedger())
+	require.Equal(t, map[string]string{"ls": "core", "glob": "core"}, sources)
+
+	// 显式禁用投影（actor 稳定面路径）时不误标。
+	_, _, err = loop.computeAvailableTools(context.Background(), "ls file", nil, false)
+	require.NoError(t, err)
+	require.Equal(t, "", loop.lastToolSurfaceProjection.Load())
+}
+
 // MockMCPManager 实现 skill.MCPManager 接口
 type MockMCPManager struct{}
 

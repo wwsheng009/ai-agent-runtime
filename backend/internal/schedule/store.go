@@ -452,7 +452,9 @@ WHERE id = ? AND state_version = ?`,
 // AppendDeliveryRecord 追加一条投递历史（seq 单调递增）。
 func (s *SQLiteStore) AppendDeliveryRecord(scheduleID string, record DeliveryRecord) error {
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
+	// 读后写（MAX(seq) → INSERT）：必须 IMMEDIATE，否则 WAL 下并发写者会顶成
+	// SQLITE_BUSY_SNAPSHOT 且重试永不成功（P0.5b 写事务门禁，2026-10-14）。
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return err
 	}
@@ -505,7 +507,8 @@ func lastMessageID(task Task) any {
 // Delete 硬删除任务及其历史；返回是否存在。
 func (s *SQLiteStore) Delete(id string) (bool, error) {
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
+	// 读后写（存在性检查 → DELETE）：与 AppendDeliveryRecord 同一口径。
+	tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 	if err != nil {
 		return false, err
 	}

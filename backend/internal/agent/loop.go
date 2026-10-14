@@ -43,6 +43,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -174,6 +175,11 @@ type ReActLoop struct {
 	reasoningEffortUnsupported   atomic.Bool
 	thinkingUnsupported          atomic.Bool
 	temperatureUnsupported       atomic.Bool
+	// lastToolSurfaceProjection 记录本 turn 最近一次 computeAvailableTools 是否
+	// 命中了 simple-goal 投影（含命中原因），随请求 metadata 暴露为
+	// `tool_surface_projected`（账本：docs/architecture/unified-tool-surface-registry.md
+	// §10.2/§12.4——投影此前完全不可见，造成 web 会话 25 工具的观测错觉）。
+	lastToolSurfaceProjection atomic.Value // store string（"" = 未投影）
 	// mainAgentRoute 是本 run 的动态 route 状态（§5.2）。生命周期严格等于一次
 	// run()：入口重置、defer 写回基线，任何退出路径都不允许把 route 泄漏到
 	// 下一个 turn（MG3）。
@@ -2296,6 +2302,18 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		// what was withheld (and feeds effective_tool_surface.blocked below).
 		req.Metadata["surface_filtered_tools"] = append([]string(nil), surfaceFilteredTools...)
 	}
+	// 账本（§12.4）：simple-goal 投影命中时把投影事实随请求 metadata 暴露——
+	// llm.request.started / http 捕获自动携带，观测面可解释"这次请求为什么只有
+	// 两三个工具"。与 surface_filtered_tools 同一套审计口径。
+	if projected, ok := loop.lastToolSurfaceProjection.Load().(string); ok && projected != "" {
+		req.Metadata["tool_surface_projected"] = projected
+	}
+	// 来源账本汇总（§15.4 修订）：按目录名册给每个工具打 surface_source，落
+	// 请求级 metadata（不写进定义，避免推高 token 估算——见 computeAvailableTools
+	// 尾注）。与 toolsurface.Build 同一分类实现点。
+	if sources := toolsurface.SummarizeSources(availableTools, loop.toolSurfaceLedger()); len(sources) > 0 {
+		req.Metadata["tool_surface_sources"] = sources
+	}
 	if loop.agent != nil && loop.agent.config != nil {
 		if route := optionMap(loop.agent.config.Options, "route"); len(route) > 0 {
 			req.Metadata["route"] = cloneInterfaceMap(route)
@@ -4284,12 +4302,37 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	// No automatic directory-size projection: every authorized tool (including
 	// enabled MCP tools) is listed directly. Tool volume is controlled explicitly
 	// via per-tool enable/disable configuration instead of a hidden threshold.
-	if allowSimpleGoalProjection && len(allowed) == 0 && len(simpleGoalToolNames(goal)) > 0 {
-		tools = projectSimpleGoalToolSurface(goal, tools)
+	if allowSimpleGoalProjection && len(allowed) == 0 {
+		projected := projectSimpleGoalToolSurface(goal, tools)
+		// 账本仅在投影**实际收缩**目录时置位：词表命中但目录里没有对应工具
+		// （projectSimpleGoalToolSurface 原样返回）不算投影，避免误标。
+		if len(projected) < len(tools) {
+			tools = projected
+			loop.lastToolSurfaceProjection.Store("simple_goal")
+		} else {
+			loop.lastToolSurfaceProjection.Store("")
+		}
+	} else {
+		// 显式禁用投影（actor 稳定面路径）同样清账本：loop 复用跨 turn，
+		// 残留的上一次标记会让请求 metadata 误报。
+		loop.lastToolSurfaceProjection.Store("")
 	}
+	// 来源账本（docs/architecture/unified-tool-surface-registry.md §15.4 修订）：
+	// 账本**不写入每定义 metadata**——那会增大 json.Marshal 体积，被
+	// estimateToolDefinitionTokens 计入，把贴边预算的压缩/preflight 时序推偏
+	// （2026-10-14 compaction recovery 测试实测 flaky）。改为请求级汇总：
+	// think() 装配处按目录名册写 req.Metadata["tool_surface_sources"]，
+	// 定义保持原样（T1/T3 语义不变，账本随请求 metadata 可审计）。
 	tools = loop.compactToolSurfaceToBudget(tools)
 	sortToolDefinitionsByName(tools)
 	return tools, surfaceFilteredTools, nil
+}
+
+// toolSurfaceLedger 组装来源账本分类输入：broker 编排面 + goal capability 直配名单
+// （当前 goal 经 aicli_goal MCP 包装到达，CapabilityTools 留空 → 按包装层归类；
+// 名单入口保留给未来非包装面）。
+func (loop *ReActLoop) toolSurfaceLedger() toolsurface.Ledger {
+	return toolsurface.Ledger{Broker: loop.agent.GetToolBroker()}
 }
 
 func projectSimpleGoalToolSurface(goal string, tools []types.ToolDefinition) []types.ToolDefinition {

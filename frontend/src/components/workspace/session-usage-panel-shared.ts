@@ -196,6 +196,13 @@ export function sessionUsageHref(sessionId: string): string {
 //   - tool_started/tool_finished（含 tool.requested/tool.completed 别名）：
 //     工具开始/结束必然发生在上一轮 LLM 请求完成之后
 //   - session_end/session_interrupted：会话终态，汇总行落库
+//   - chat.sse.result / chat.sse.done / chat.sse.error：web chat 直连通道
+//     （/api/agent/chat）的回合终态帧。2026-10-14 实测 session_…iHEEaCav：
+//     该通道的事件分布只有 assistant_delta + chat.sse.*，**没有任何名字带
+//     turn 的事件**——结果帧（result）与终态帧（done/error）到达时本次
+//     LLM 请求的用量必然已落库（甚至 hook 还有 1s 防抖兜着）。缺了这三帧，
+//     短回合（< 10s 轮询间隔）结束后 composer 环永远停在打开页面那一刻的
+//     空态/旧值。result 优先于 done：前者携带完整 result payload。
 // 同时保留 turn* 前缀匹配，兼容 chat SSE 面（/api/agent/chat 的
 // turn_start/turn_end）与未来若把 llm_request_* 纳入事件流的情形。
 const usageRelevantRuntimeEventTypes = new Set([
@@ -206,6 +213,9 @@ const usageRelevantRuntimeEventTypes = new Set([
   "tool.completed",
   "session_end",
   "session_interrupted",
+  "chat.sse.result",
+  "chat.sse.done",
+  "chat.sse.error",
 ]);
 
 export function isUsageRelevantRuntimeEvent(type?: string | null): boolean {

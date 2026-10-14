@@ -54,6 +54,17 @@ var guardWriteExemptions = map[string]string{
 	"internal/mesh::SaveBinding":     "会话绑定是提示性文件（sticky 端口 / 上次服务者），每次由服务进程整体重写、不读旧值；并发写即「最后写入者胜出」的既定语义",
 	"internal/mesh::WriteNodeRecord": "节点记录按 node_id 归属唯一写者（进程只写自己的记录，见函数注释的所有权约束），读者只读；不存在并发读-改-写",
 	"internal/mesh::writeLeaseFile":  "lease 的跨进程互斥由 lease 层自身协议承担（O_EXCL 独占创建 + rename 回收，§3.3，同一时刻只有一个 owner）；写前读取必须匹配自身 owner，另加配置锁既不覆盖回收方也与该协议重复",
+	// connectors 两个文件存储的 5 个写点都受**专属跨进程数据目录锁**保护
+	// （storefile/dirlock.go 的 connectors.lock：Mkdir 原子性 + 陈旧窃取），
+	// 该锁明确覆盖 state.json / config.yaml / secrets 三类写入
+	// （docs/bots/07-config-ux.md §5.6「写入并发」），与 agentconfig 的
+	// LockConfigFileWrite 是两套机制、互不重复；所有调用方（SaveConfig /
+	// DeleteConfig / mutateState 等）都在 lockDir() 内完成「重读 → 改 → 写回」。
+	"internal/connectors/storefile::writeStateLocked":   "state.json 写入在 connectors.lock 数据目录锁内（调用方 mutateState/SaveConfig 均先 lockDir）；专属跨进程锁已覆盖，见 dirlock.go",
+	"internal/connectors/storefile::writeDocument":      "共享 config.yaml connectors 节写入在 connectors.lock 内（SaveConfig/DeleteConfig 先 lockDir 再读改写），见 dirlock.go §5.6",
+	"internal/connectors/storefile::writeSecretsLocked": "secrets 写入在 connectors.lock 内（SaveConfig 持锁后 loadSecretsLocked→改→写回），见 dirlock.go",
+	"internal/connectors/storejson::writeConfigLocked":  "connectors.json 写入在 connectors.lock 数据目录锁内（SaveConfig/DeleteConfig 先 lockDir 再重读改写），复用 storefile.AcquireDirLock",
+	"internal/connectors/storejson::writeStateLocked":   "connectors-state.json 写入在 connectors.lock 内（mutateState 先 lockDir 再 loadStateLocked→改→写回），见 storejson.go lockDir",
 }
 
 // guardFuncInfo 是一个函数（或同目录同名函数集合）的守卫信息。

@@ -118,6 +118,14 @@ func assertSummaryMatchesEntryWalk(t *testing.T, state UIControllerState) {
 	want.PlanScreenMs = state.HistoryEffects.MaxPlanPhases.screenMs
 	want.PlanMintMs = state.HistoryEffects.MaxPlanPhases.mintMs
 	want.PlanApplyMs = state.HistoryEffects.MaxPlanPhases.applyMs
+	// P16 后续细分的 screen 内相位与布局缓存计数同样是 pass 级标量（2026-10-14
+	// 补齐：9f764254 只搬了 screen/mint/apply，漏掉这五个导致断言间歇性失败
+	// ——多数运行布局缓存未热 hits=0 恰好相等，偶发命中才暴露）。
+	want.PlanSnapshotMs = state.HistoryEffects.MaxPlanPhases.snapshotMs
+	want.PlanLayoutHits = state.HistoryEffects.MaxPlanPhases.layoutHits
+	want.PlanLayoutMisses = state.HistoryEffects.MaxPlanPhases.layoutMisses
+	want.PlanWarmCells = state.HistoryEffects.transcriptLayoutWarmCells
+	want.PlanWarmRows = state.HistoryEffects.transcriptLayoutWarmRows
 	// claim-refusal counters（观测）与规划耗时一样不是 ledger 遍历结果，按原值搬运。
 	want.ClaimSkipsStaleAction = state.HistoryEffects.claimSkipsStaleAction
 	want.ClaimRejectsOutOfOrder = state.HistoryEffects.claimRejectsOutOfOrder

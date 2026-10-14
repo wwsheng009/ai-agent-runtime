@@ -10385,6 +10385,12 @@ func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
 			if value := strings.TrimSpace(stringMapValueAny(debug, "prompt_cache_key")); value != "" {
 				fields = append(fields, logger.String("prompt_cache_key", value))
 			}
+			// 工具面账本（docs/architecture/unified-tool-surface-registry.md §12.4）：
+			// simple-goal 投影命中时随请求日志暴露，让"这次请求为什么只有一两个
+			// 工具"可从日志直接回答。键在 RequestMetadata 顶层（不在 diagnostics 子 map）。
+			if value := strings.TrimSpace(stringMapValueAny(event.RequestMetadata, "tool_surface_projected")); value != "" {
+				fields = append(fields, logger.String("tool_surface_projected", value))
+			}
 		}
 		if event.ResponseStatusCode > 0 {
 			fields = append(fields, logger.Int("response_status_code", event.ResponseStatusCode))
