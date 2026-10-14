@@ -62,6 +62,7 @@ func (s *Server) applySessionUpdate(nodeID string, update wire.SessionUpdate) {
 		}
 	}
 	s.registry.Upsert(node)
+	s.emitPresence(nodeID, node.Sessions)
 	// State/attention transitions are published as lightweight console events
 	// (the strip) independently of the row-patch broadcast below.
 	s.emitTransitions(nodeID, transitions)
@@ -156,6 +157,23 @@ func (s *Server) emitTransitions(nodeID string, transitions []sessionTransition)
 			continue
 		}
 		s.cfg.OnSessionTransition(nodeID, tr.SessionID, tr.State, tr.Attention)
+	}
+}
+
+// emitPresence renews host-source presence for sessions whose host reports a
+// local foreground viewer (docs/bots/10-presence-signals-design.md §3.2).
+// Viewing=false 不显式清除：host 源由 TTL（心跳停止）自然失效。
+func (s *Server) emitPresence(nodeID string, sessions []wire.SessionSummary) {
+	if s.cfg.OnSessionPresence == nil {
+		return
+	}
+	for _, sess := range sessions {
+		if !sess.Viewing {
+			continue
+		}
+		if id := strings.TrimSpace(sess.SessionID); id != "" {
+			s.cfg.OnSessionPresence(nodeID, id)
+		}
 	}
 }
 
@@ -297,6 +315,12 @@ func applyHeartbeatDigests(node *Node, digests []wire.SessionDigest, now time.Ti
 			if !d.UpdatedAt.IsZero() && s.UpdatedAt.Before(d.UpdatedAt) {
 				s.UpdatedAt = d.UpdatedAt
 				changed = true
+			}
+			// Viewing 是宿主机在场位（docs/bots/10 §3.1）：心跳高频刷新、直接
+			// 跟随最新摘要；不参与 changed（在场翻转不触发广播/持久化），乱序
+			// 造成的短暂翻转由 host TTL 兜底。
+			if s.Viewing != d.Viewing {
+				s.Viewing = d.Viewing
 			}
 		}
 	}

@@ -50,6 +50,11 @@ type Config struct {
 	// heartbeat digest). Hosts push a lightweight console `event: session-event`.
 	// Optional.
 	OnSessionTransition func(nodeID, sessionID, state, attention string)
+	// OnSessionPresence, when set, fires for sessions whose host reports a
+	// local foreground viewer (wire.SessionSummary/SessionDigest .Viewing).
+	// Hosts renew on every frame; the gateway treats it as a TTL signal
+	// (docs/bots/10-presence-signals-design.md §3.2). Optional.
+	OnSessionPresence func(nodeID, sessionID string)
 	// TailWatchTargets, when set, returns the sessions whose live-output tail
 	// a console is currently watching for this node. The gateway diff-sends
 	// watch/unwatch control actions on HEARTBEAT_ACK (P1-b presence gating);
@@ -278,6 +283,7 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	}
 	stampAllSessionsSynced(node, node.RegisteredAt)
 	s.registry.Upsert(node)
+	s.emitPresence(nodeID, node.Sessions)
 	s.notifyRegistryChangedAndPersist()
 	defer func() {
 		// Only downgrade our own registration: identify the entry by the
@@ -335,6 +341,7 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 				}
 				updated.LastHeartbeat = nowUTC()
 				s.registry.Upsert(updated)
+				s.emitPresence(nodeID, updated.Sessions)
 				s.emitTransitions(nodeID, transitions)
 				if changed {
 					s.notifyRegistryChangedAndPersist()

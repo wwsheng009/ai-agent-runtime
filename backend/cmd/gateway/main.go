@@ -202,32 +202,33 @@ is refused at startup; pass --allow-unprotected to accept that risk explicitly.
 func run() int {
 	flag.Usage = usage
 	var (
-		configPath     = flag.String("config", "", "optional YAML flagfile whose keys mirror flag names; command-line flags win over file entries")
-		listen         = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
-		publicBaseURL  = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
-		serverVersion  = flag.String("server-version", "0.1.0", "server version reported in WELCOME")
-		deviceToken    = flag.String("device-token", "", "shared device token (Authorization: Bearer); empty accepts all (dev only)")
-		heartbeatSec   = flag.Int("heartbeat-interval", 0, "heartbeat interval (seconds) advertised in WELCOME; 0 uses the agent default")
-		tlsCert        = flag.String("tls-cert", "", "TLS certificate file (requires --tls-key)")
-		tlsKey         = flag.String("tls-key", "", "TLS key file (requires --tls-cert)")
-		ownerPassword  = flag.String("owner-password", "", "owner login password (empty disables auth — dev only)")
-		sessionTTL     = flag.Duration("session-ttl", auth.DefaultTTL, "owner session lifetime")
-		rateLimit      = flag.Int("rate-limit", 0, "per-IP requests per minute for the proxy and tunnel upgrade; 0 disables")
-		dataDir        = flag.String("data-dir", "./data", "directory for persisted gateway state (device tokens)")
-		trustedProxies = flag.String("trusted-proxies", "127.0.0.1/32,::1/128", "comma-separated trusted proxy CIDRs/IPs; X-Forwarded-For is honored only from these")
-		banThreshold   = flag.Int("ban-threshold", 0, "penalty count within --ban-window before an IP is auto-banned; 0 disables")
-		banWindow      = flag.Duration("ban-window", time.Minute, "penalty window")
-		banTTL         = flag.Duration("ban-ttl", 10*time.Minute, "auto-ban duration")
-		metricsToken   = flag.String("metrics-token", "", "bearer token for /metrics; empty allows loopback only")
-		pushEnabled    = flag.Bool("push-enabled", true, "enable Web Push notifications (VAPID + RFC 8291)")
-		ntfyURL        = flag.String("ntfy-url", "", "ntfy server base URL for the secondary notification channel (empty disables), e.g. https://ntfy.sh")
-		ntfyTopic      = flag.String("ntfy-topic", "", "ntfy topic to publish notifications to (required with --ntfy-url)")
-		ntfyToken      = flag.String("ntfy-token", "", "ntfy access token (Bearer) for protected topics; prefer the --config flagfile for secrets")
-		vapidSubject   = flag.String("vapid-subject", "mailto:gateway@localhost", "VAPID JWT subject (mailto: or https:)")
-		presenceTTL    = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
-		coalesceWindow = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
-		quietHours     = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
-		eventTick      = flag.Duration("event-tick", 30*time.Second, "periodic SSE meta tick: re-broadcast the full node snapshot so idle consoles keep fresh last_heartbeat/synced_at values; 0 disables (SSE-only, no push fan-out)")
+		configPath      = flag.String("config", "", "optional YAML flagfile whose keys mirror flag names; command-line flags win over file entries")
+		listen          = flag.String("listen", "127.0.0.1:8090", "listen address (host:port)")
+		publicBaseURL   = flag.String("public-base-url", "", "externally reachable base URL used to build console URLs")
+		serverVersion   = flag.String("server-version", "0.1.0", "server version reported in WELCOME")
+		deviceToken     = flag.String("device-token", "", "shared device token (Authorization: Bearer); empty accepts all (dev only)")
+		heartbeatSec    = flag.Int("heartbeat-interval", 0, "heartbeat interval (seconds) advertised in WELCOME; 0 uses the agent default")
+		tlsCert         = flag.String("tls-cert", "", "TLS certificate file (requires --tls-key)")
+		tlsKey          = flag.String("tls-key", "", "TLS key file (requires --tls-cert)")
+		ownerPassword   = flag.String("owner-password", "", "owner login password (empty disables auth — dev only)")
+		sessionTTL      = flag.Duration("session-ttl", auth.DefaultTTL, "owner session lifetime")
+		rateLimit       = flag.Int("rate-limit", 0, "per-IP requests per minute for the proxy and tunnel upgrade; 0 disables")
+		dataDir         = flag.String("data-dir", "./data", "directory for persisted gateway state (device tokens)")
+		trustedProxies  = flag.String("trusted-proxies", "127.0.0.1/32,::1/128", "comma-separated trusted proxy CIDRs/IPs; X-Forwarded-For is honored only from these")
+		banThreshold    = flag.Int("ban-threshold", 0, "penalty count within --ban-window before an IP is auto-banned; 0 disables")
+		banWindow       = flag.Duration("ban-window", time.Minute, "penalty window")
+		banTTL          = flag.Duration("ban-ttl", 10*time.Minute, "auto-ban duration")
+		metricsToken    = flag.String("metrics-token", "", "bearer token for /metrics; empty allows loopback only")
+		pushEnabled     = flag.Bool("push-enabled", true, "enable Web Push notifications (VAPID + RFC 8291)")
+		ntfyURL         = flag.String("ntfy-url", "", "ntfy server base URL for the secondary notification channel (empty disables), e.g. https://ntfy.sh")
+		ntfyTopic       = flag.String("ntfy-topic", "", "ntfy topic to publish notifications to (required with --ntfy-url)")
+		ntfyToken       = flag.String("ntfy-token", "", "ntfy access token (Bearer) for protected topics; prefer the --config flagfile for secrets")
+		vapidSubject    = flag.String("vapid-subject", "mailto:gateway@localhost", "VAPID JWT subject (mailto: or https:)")
+		presenceTTL     = flag.Duration("presence-ttl", 90*time.Second, "how long a console view suppresses push notifications")
+		presenceSources = flag.String("presence-sources", "console,host", "enabled presence sources: console,host (comma separated; host = agent-reported foreground viewer, docs/bots/10)")
+		coalesceWindow  = flag.Duration("notify-coalesce-window", 30*time.Second, "merge low-priority notifications (completed/waiting) arriving within this window; 0 disables coalescing")
+		quietHours      = flag.String("notify-quiet-hours", "", "comma-separated local quiet hours (HH:MM-HH:MM) muting low-priority notifications; approval/question/error still fire")
+		eventTick       = flag.Duration("event-tick", 30*time.Second, "periodic SSE meta tick: re-broadcast the full node snapshot so idle consoles keep fresh last_heartbeat/synced_at values; 0 disables (SSE-only, no push fan-out)")
 		// allowUnprotected lifts the fail-fast guard for "non-loopback listen
 		// without owner password and without any device token" — the combination
 		// that publishes an unauthenticated console AND an open agent tunnel to
@@ -344,6 +345,12 @@ func run() int {
 		pushManager = push.NewManager(pushStore, vapid, *vapidSubject)
 	}
 	presence := newPresenceRegistry(*presenceTTL)
+	// host 源 TTL 与心跳周期绑定（2×，下限 90s）：心跳停止即自动失效。
+	if *heartbeatSec > 0 {
+		if hostTTL := 2 * time.Duration(*heartbeatSec) * time.Second; hostTTL > presence.hostTTL {
+			presence.hostTTL = hostTTL
+		}
+	}
 	notifier := newPushNotifier(pushManager, *publicBaseURL, presence)
 	ntfySender := ntfy.NewSender(*ntfyURL, *ntfyTopic, *ntfyToken)
 	if *ntfyURL != "" && !ntfySender.Enabled() {
@@ -382,6 +389,14 @@ func run() int {
 		notifier.Seed(registry.List())
 		fmt.Fprintf(os.Stderr, "gateway: restored %d node(s) from %s\n", restored, filepath.Join(*dataDir, "registry.json"))
 	}
+	// 在场（host 源，docs/bots/10）：agent 心跳携带 Viewing → presence 续期；
+	// --presence-sources 不含 host 时不接线（回退 console 单源现状）。
+	var onSessionPresence func(nodeID, sessionID string)
+	if presenceSourceEnabled(*presenceSources, presenceSourceHost) {
+		onSessionPresence = func(nodeID, sessionID string) {
+			presence.TouchSource(presenceSourceHost, nodeID, sessionID, false)
+		}
+	}
 	server := tunnel.NewServer(tunnel.Config{
 		ServerVersion:        *serverVersion,
 		HeartbeatIntervalSec: *heartbeatSec,
@@ -409,6 +424,7 @@ func run() int {
 				connectorAttentionHook(nodeID, sessionID, state, attention)
 			}
 		},
+		OnSessionPresence: onSessionPresence,
 		// P1-b: presence with tail=true gates which sessions' live output the
 		// agent pushes (diffed onto HEARTBEAT_ACK pending actions).
 		TailWatchTargets: func(nodeID string) []string {

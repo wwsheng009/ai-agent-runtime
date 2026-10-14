@@ -86,6 +86,12 @@ type SessionSummary struct {
 	// Gateway and console treat it as an opaque string; it never replaces the
 	// full transcript (docs/gateway/07-console.md §6).
 	StatusTail string `json:"status_tail,omitempty"`
+	// Viewing indicates a local foreground viewer on the reporting host
+	// (aicli TUI-attached session / runtime web session page with SSE
+	// subscribers > 0). Host-scoped and best-effort; the gateway renews the
+	// host presence source from it (docs/bots/10-presence-signals-design.md
+	// §3.1). Absent from older agents → no behavior change.
+	Viewing bool `json:"viewing,omitempty"`
 	// SyncedAt is stamped by the GATEWAY when it last accepted any frame
 	// (SESSION_UPDATE or heartbeat digest) for this session. Agents never set
 	// it; the gateway overwrites any inbound value so it is always server
@@ -163,11 +169,14 @@ type LoadInfo struct {
 
 // SessionDigest is the lightweight per-session heartbeat entry.
 type SessionDigest struct {
-	SessionID  string    `json:"session_id"`
-	State      string    `json:"state,omitempty"`
-	Attention  string    `json:"attention,omitempty"`
-	StatusText string    `json:"status_text,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	SessionID  string `json:"session_id"`
+	State      string `json:"state,omitempty"`
+	Attention  string `json:"attention,omitempty"`
+	StatusText string `json:"status_text,omitempty"`
+	// Viewing mirrors SessionSummary.Viewing: the high-frequency heartbeat is
+	// the presence renewal channel (docs/bots/10 §3.1).
+	Viewing   bool      `json:"viewing,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 // Heartbeat is the periodic liveness + session-digest frame (A→G, stream 0).

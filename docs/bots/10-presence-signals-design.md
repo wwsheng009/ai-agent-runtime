@@ -2,7 +2,7 @@
 
 > 上游：[06-target-architecture.md](./06-target-architecture.md) §1 D1（在场信号唯一权威 = notify 中台）、
 > §2.4 策略链（静默/合并/在场/偏好）；gateway 现状见 [../gateway/08-notifications.md](../gateway/08-notifications.md) §5.4。
-> 状态：**2026-10-14 设计稿（未实施）**；实施切片见 §5。
+> 状态：**2026-10-14 S1（网关侧）已实施**（wire 字段 + 多源登记表 + tunnel 接线 + 门禁 flag）；S2/S3 生产端待续；实施切片见 §5。
 
 ## 1. 背景与现状（代码核实）
 
@@ -92,6 +92,8 @@ type presenceEntry struct {
 
 - **S1（网关侧）**：wire 字段 + registry 源位模型 + tunnel `OnSessionPresence` 接线 +
   单测（多源合并/TTL 独立/tail 隔离/旧字段兼容）。本切片行为无变化（暂无生产端）。
+  ✅ 2026-10-14 落地：`--presence-sources=console,host` 缺省两源（置 `console` 即
+  回退现状）；host 源以心跳 TTL（2×周期，下限 90s）续期。
 - **S2（aicli TUI）**：前台会话检测 + 心跳携带 `viewing` + 单测（切换/聚焦边界）。
 - **S3（runtime-server web）**：SSE 订阅计数 → `Summary.Viewing` + 单测。
 - **S4（收敛）**：notify 内核 `Presence` 接口 + Dispatcher gate（此刻才从 gateway 私有
