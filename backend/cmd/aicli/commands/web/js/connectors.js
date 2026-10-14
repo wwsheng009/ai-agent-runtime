@@ -261,12 +261,111 @@ function runDelete(item) {
 
 // ---- 新建 / 编辑对话框(完全由 Schema 渲染) ----
 
+// openEditor 是「新增/编辑」入口。新增时若通道带 kind=qr 动作（微信等），
+// **不展示表单**：直接自动创建连接器（自动 ID/默认值）→ 立即打开扫码对话框，
+// 凭据由扫码成功后回填（与 TUI /bots、React「扫码接入」同一零输入体验）。
+// 完整字段表单只服务于编辑（以及没有扫码动作的通道）。
 function openEditor(id) {
   var item = id ? findItem(id) : null;
   var providerName = item ? item.provider : (schemaProviders[0] ? schemaProviders[0].provider : "");
+  if (!item) {
+    var meta = providerMeta(providerName);
+    if (meta && hasQRAction(meta)) {
+      quickCreateWithScan(meta);
+      return;
+    }
+    // 多通道时先选通道：带扫码动作的通道点「开始」直接走零输入扫码流。
+    if (schemaProviders.length > 1) {
+      openProviderPicker();
+      return;
+    }
+  }
   editorState = { id: id || "", isEdit: !!item, provider: providerName };
   renderEditor();
   openModal(item ? "编辑连接器:" + (item.name || item.id) : "新增连接器");
+}
+
+function hasQRAction(meta) {
+  var actions = (meta && meta.actions) ? meta.actions : [];
+  for (var i = 0; i < actions.length; i++) {
+    if (actions[i] && actions[i].kind === "qr") { return true; }
+  }
+  return false;
+}
+
+function firstQRAction(meta) {
+  var actions = (meta && meta.actions) ? meta.actions : [];
+  for (var i = 0; i < actions.length; i++) {
+    if (actions[i] && actions[i].kind === "qr") { return actions[i]; }
+  }
+  return null;
+}
+
+// quickCreateWithScan 零输入创建：自动生成 ID（provider-<base36 时间戳>），
+// enabled/mode/policy 按默认（allowed_users 由扫码回填时自动写入 owner）。
+function quickCreateWithScan(meta) {
+  var action = firstQRAction(meta);
+  if (!action) { return; }
+  var id = meta.provider + "-" + Date.now().toString(36) + Math.floor(Math.random() * 0xffff).toString(36);
+  apiJSON("/api/connectors", jsonInit("POST", {
+    id: id,
+    provider: meta.provider,
+    name: meta.label || meta.provider,
+    mode: (meta.modes && meta.modes[0]) || "polling"
+  }))
+    .then(function (created) {
+      showToast("已创建:" + id + ",正在获取二维码…", "ok", 2500);
+      loadConnectors();
+      openQRDialog(created || { id: id, name: meta.label || meta.provider }, action.key);
+    })
+    .catch(function (err) {
+      showToast("创建失败:" + err.message, "err", 5000);
+      // 创建失败（如 id 撞车）退回表单兜底，不让用户卡死。
+      editorState = { id: "", isEdit: false, provider: meta.provider };
+      renderEditor();
+      openModal("新增连接器");
+    });
+}
+
+// openProviderPicker 是多通道下的「先选类型」轻对话框：带扫码动作的通道
+// 确认后直接进入零输入扫码流；其余通道进入常规表单。
+function openProviderPicker() {
+  editorState = null;
+  var options = "";
+  for (var p = 0; p < schemaProviders.length; p++) {
+    var prov = schemaProviders[p];
+    var mark = hasQRAction(prov) ? "（扫码接入）" : "（手动配置）";
+    options += '<option value="' + esc(prov.provider) + '">' +
+      esc((prov.label || prov.provider) + mark) + "</option>";
+  }
+  setModalBody(
+    '<div class="connector-form-section">选择通道类型</div>' +
+    '<div class="connector-form-grid">' +
+    fieldHTML("通道", '<select id="connector-pick-provider">' + options + "</select>",
+      "微信等扫码通道：点「开始」自动创建并出二维码，无需填表。") +
+    "</div>"
+  );
+  setModalFooter(
+    '<button type="button" data-editor="cancel">取消</button>' +
+    '<button type="button" class="primary-btn" data-editor="pick">开始</button>'
+  );
+  openModal("新增连接器");
+}
+
+function pickProviderAndStart() {
+  var select = connEl("connector-pick-provider");
+  if (!select) { return; }
+  var provider = select.value;
+  var meta = providerMeta(provider);
+  closeModal();
+  if (!meta) { return; }
+  if (hasQRAction(meta)) {
+    quickCreateWithScan(meta);
+    return;
+  }
+  editorState = { id: "", isEdit: false, provider: provider };
+  renderEditor();
+  openModal("新增连接器");
 }
 
 // renderEditor 重建对话框正文。新建时 provider 可选(切换即换字段集),
@@ -768,6 +867,7 @@ function onModalFooterClick(event) {
     var act = btn.getAttribute("data-editor");
     if (act === "cancel") { closeModal(); }
     if (act === "save") { saveEditor(); }
+    if (act === "pick") { pickProviderAndStart(); }
     return;
   }
   if (btn.hasAttribute("data-qr")) { onQRButton(btn.getAttribute("data-qr")); return; }
