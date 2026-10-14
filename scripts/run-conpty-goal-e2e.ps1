@@ -142,6 +142,7 @@ Assert-That 'complete 终态 pause 被拒绝（精确原因）' (Test-RunContain
 Assert-That '目标已清除' (Test-RunContains 'Goal 已清除') ''
 Assert-That '清除后状态为空' (Test-RunContains '当前会话未设置 goal') ''
 Assert-That '自动续跑有决策日志' ($debugText.Contains('[goal] auto continuation') -or $debugText.Contains('[goal] error recovery')) 'debug.log 的 [goal] 行（成功收尾=auto continuation；EOF 类收尾=error recovery，两者都会带 reason=goal_complete）'
+Assert-That '默认不限制：无安全阀上限提示' (-not $debugText.Contains('已达配置上限')) 'goal.maxConsecutiveContinuations 缺省 0=不限制（对齐 Codex）；出现上限提示说明默认被意外设小'
 Assert-That 'transcript 已生成且含目标设置' ((Test-Path -LiteralPath $transcriptLog) -and ($transcriptText.Contains('Goal 已设置'))) '--transcript-file 产物'
 
 $failed = @($results | Where-Object { -not $_.Pass })

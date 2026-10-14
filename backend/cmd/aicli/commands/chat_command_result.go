@@ -1423,6 +1423,11 @@ func executeStructuredGoalStatusChange(session *ChatSession, verb string) (Comma
 	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
 		return CommandResult{}, true, err
 	}
+	if status == runtimegoal.StatusActive {
+		// /goal resume：请求一次隐藏续跑（主循环下一轮迭代消费；对齐 Codex
+		// 的"置 active 立即续跑"语义）。
+		requestGoalContinuationKick(session)
+	}
 	return CommandResult{
 		Blocks: []RenderBlock{{Document: buildChatGoalMutationDocument(message, *goal)}},
 		Action: CommandContinue,

@@ -68,9 +68,20 @@ type ChatSession struct {
 	goalReconcileFingerprint   chatGoalReconcileFingerprint
 	goalReconcileLastCompleted *runtimegoal.SessionGoal
 	// goalContinuationAttempt 是当前进程内 goal 自动续跑的进行中尝试序号
-	// （0=不在续跑）；状态栏据此显示 attempt N/5。主 goroutine（自动续跑循环）
-	// 写入，状态栏刷新 ticker 并发读取，故用 atomic。
-	goalContinuationAttempt  atomic.Int32
+	// （0=不在续跑）；状态栏据此显示 attempt N（配置安全阀时 N/M）。主
+	// goroutine（自动续跑循环）写入，状态栏刷新 ticker 并发读取，故用 atomic。
+	goalContinuationAttempt atomic.Int32
+	// goalMaxContinuations 是自动续跑安全阀（0=不限制，对齐 Codex 的
+	// continue_if_idle）；来自 runtime.yaml 的 goal.maxConsecutiveContinuations。
+	// 见 docs/plan/aicli-goal-continuation-codex-alignment-plan-20261014.md。
+	goalMaxContinuations int
+	// goalKickPending 表示 resume/恢复态作答后请求的一次性续跑尚未消费；
+	// goalKickWatchActive 保证同一时刻只有一个就绪 watcher；
+	// goalContinuationUnavailableWarned 让"update_goal 不可用"提示只出现一次。
+	goalKickPending                   atomic.Bool
+	goalKickWatchActive               atomic.Bool
+	goalContinuationUnavailableWarned atomic.Bool
+
 	RequestedProvider        string
 	EffectiveProvider        string
 	RequestedModel           string
@@ -1919,6 +1930,13 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		// （历史重放/切换会话会重置底部面板，弹层需要重新铺一次）。
 		if !noInteractive {
 			ensureRestoredPendingInteractivePrompt(session)
+		}
+
+		// goal 续跑 kick：/goal resume 或恢复态提问/审批作答后请求的一次性
+		// 续跑在本轮循环开头消费；actor 未就绪时保留 flag，由就绪 watcher
+		// 唤醒后再次尝试（见 chat_goal_auto_continue.go）。
+		if !noInteractive {
+			maybeConsumeDeferredGoalKick(session)
 		}
 
 		var input string

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -11,11 +12,28 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-func TestSendMessage_AutoContinuesActiveGoalUntilLimit(t *testing.T) {
+func TestSendMessage_AutoContinuationUnlimitedByDefault(t *testing.T) {
 	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
 	defer cleanup()
 
-	executor := &fakeChatExecutor{output: "initial response"}
+	// 默认 0 = 不限制（对齐 Codex 的 continue_if_idle）：由模型在若干轮后完成
+	// goal 才停止，而不是被固定次数截断。
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			fake := session.ChatExecutor.(*fakeChatExecutor)
+			if fake.continuations < 8 {
+				return "working", nil
+			}
+			if _, err := executeUpdateGoalFunction(session, map[string]interface{}{
+				"status":  string(runtimegoal.StatusComplete),
+				"summary": "completed after eight unlimited continuations",
+			}); err != nil {
+				return "", err
+			}
+			return "done", nil
+		},
+	}
 	session.ChatExecutor = executor
 
 	response, err := sendMessage(session, "start")
@@ -25,15 +43,30 @@ func TestSendMessage_AutoContinuesActiveGoalUntilLimit(t *testing.T) {
 	if response != "initial response" {
 		t.Fatalf("unexpected response: %q", response)
 	}
-	if len(executor.prompts) != 1 {
-		t.Fatalf("expected only the initial prompt to be executed as a user prompt, got %#v", executor.prompts)
+	if len(executor.prompts) != 1 || executor.prompts[0] != "start" {
+		t.Fatalf("expected only the initial prompt as user prompt, got %#v", executor.prompts)
 	}
-	if executor.prompts[0] != "start" {
-		t.Fatalf("unexpected initial prompt: %q", executor.prompts[0])
+	if executor.continuations != 8 {
+		t.Fatalf("expected 8 hidden continuations until completion, got %d", executor.continuations)
 	}
-	if executor.continuations != defaultGoalAutoContinuationLimit {
-		t.Fatalf("expected hidden goal continuation to run until limit, got %d", executor.continuations)
+	assertGoalStatus(t, session, runtimegoal.StatusComplete)
+}
+
+func TestSendMessage_AutoContinuationRespectsConfiguredLimit(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	session.goalMaxContinuations = 8
+
+	executor := &fakeChatExecutor{output: "initial response"}
+	session.ChatExecutor = executor
+
+	if _, err := sendMessage(session, "start"); err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
 	}
+	if executor.continuations != 8 {
+		t.Fatalf("expected configured safety cap of 8 continuations, got %d", executor.continuations)
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusActive)
 }
 
 func TestSendMessage_AutoContinuationStopsAfterModelMarksGoalComplete(t *testing.T) {
@@ -107,7 +140,7 @@ func TestSendMessage_AutoContinuationRetriesErrorsUntilGoalComplete(t *testing.T
 				t.Fatal("expected continuation context")
 			}
 			if session.ChatExecutor.(*fakeChatExecutor).continuations < 3 {
-				return "", context.Canceled
+				return "", errors.New("transient continuation failure")
 			}
 			if _, err := executeUpdateGoalFunction(session, map[string]interface{}{
 				"status":  string(runtimegoal.StatusComplete),
@@ -240,6 +273,74 @@ func TestSendMessage_AutoContinuationErrorDoesNotFailInitialResponse(t *testing.
 	}
 	if response != "initial response" {
 		t.Fatalf("unexpected response: %q", response)
+	}
+	// 真实取消（context.Canceled）立即停止续跑，不计入错误容忍。
+	if executor.continuations != 1 {
+		t.Fatalf("expected canceled continuation to stop after one attempt, got %d", executor.continuations)
+	}
+}
+
+func TestSendMessage_AutoContinuationStopsAfterThreeConsecutiveErrors(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			return "", errors.New("persistent continuation failure")
+		},
+	}
+	session.ChatExecutor = executor
+
+	response, err := sendMessage(session, "start")
+	if err != nil {
+		t.Fatalf("expected initial response to remain successful, got error: %v", err)
+	}
+	if response != "initial response" {
+		t.Fatalf("unexpected response: %q", response)
+	}
+	if executor.continuations != goalAutoContinuationErrorStrikeLimit {
+		t.Fatalf("expected continuation to stop at %d consecutive errors, got %d",
+			goalAutoContinuationErrorStrikeLimit, executor.continuations)
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusActive)
+}
+
+func TestRequestAndConsumeGoalKickRunsContinuation(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	session.goalMaxContinuations = 2
+
+	executor := &fakeChatExecutor{output: "kick response"}
+	session.ChatExecutor = executor
+
+	if !requestGoalContinuationKick(session) {
+		t.Fatal("expected kick request to be accepted for interactive active goal")
+	}
+	if !session.goalKickPending.Load() {
+		t.Fatal("expected kick flag to be set")
+	}
+	maybeConsumeDeferredGoalKick(session)
+	if session.goalKickPending.Load() {
+		t.Fatal("expected kick flag to be consumed")
+	}
+	if executor.continuations != 2 {
+		t.Fatalf("expected kick to run the continuation loop (2 capped rounds), got %d", executor.continuations)
+	}
+}
+
+func TestRequestGoalKickRejectedForPausedOrNonInteractive(t *testing.T) {
+	paused, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusPaused)
+	defer cleanup()
+	if requestGoalContinuationKick(paused) {
+		t.Fatal("paused goal must not accept a kick")
+	}
+
+	active, cleanupActive := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanupActive()
+	active.NoInteractive = true
+	if requestGoalContinuationKick(active) {
+		t.Fatal("non-interactive session must not accept a kick")
 	}
 }
 

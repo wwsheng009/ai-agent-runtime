@@ -3329,8 +3329,9 @@ func chatSurfaceGoalStatusSegment(session *ChatSession) chatStatusSegment {
 	}
 }
 
-// goalContinuationAttemptLabel 渲染自动续跑进行中的 " · attempt N/5" 后缀；
-// 不在续跑时返回空串（计数由 maybeAutoContinueActiveGoal 维护）。
+// goalContinuationAttemptLabel 渲染自动续跑进行中的 " · attempt N"（配置
+// 安全阀时为 N/M）后缀；不在续跑时返回空串（计数由 maybeAutoContinueActiveGoal
+// 维护）。
 func goalContinuationAttemptLabel(session *ChatSession) string {
 	if session == nil {
 		return ""
@@ -3339,7 +3340,10 @@ func goalContinuationAttemptLabel(session *ChatSession) string {
 	if attempt <= 0 {
 		return ""
 	}
-	return fmt.Sprintf(" · attempt %d/%d", attempt, defaultGoalAutoContinuationLimit)
+	if limit := goalAutoContinuationLimit(session); limit > 0 {
+		return fmt.Sprintf(" · attempt %d/%d", attempt, limit)
+	}
+	return fmt.Sprintf(" · attempt %d", attempt)
 }
 
 // chatSurfaceGoalUsage mirrors Codex active_goal_usage / completed_goal_usage.

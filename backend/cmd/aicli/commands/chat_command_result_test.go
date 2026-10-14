@@ -1114,7 +1114,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_fast_command.go", Func: "printFastCommandStatus", Kind: "fmt.Print", Count: 6},
 		{File: "chat_folder_trust.go", Func: "handleTrustCommand", Kind: "fmt.Print", Count: 5},
 		{File: "chat_folder_trust.go", Func: "printFolderTrustStatus", Kind: "fmt.Print", Count: 1},
-		{File: "chat_goal_auto_continue.go", Func: "reportGoalAutoContinuationLimitReached", Kind: "fmt.Print", Count: 1},
+		{File: "chat_goal_auto_continue.go", Func: "reportGoalAutoContinuationSupplement", Kind: "fmt.Print", Count: 1},
 		{File: "chat_goal_auto_continue.go", Func: "reportGoalAutoContinuationWarning", Kind: "fmt.Print", Count: 1},
 		{File: "chat_http.go", Func: "emitRetryNotice", Kind: "fmt.Print", Count: 1},
 		{File: "chat_http_debug.go", Func: "newRuntimeHTTPDebugReporter", Kind: "fmt.Fprint(os.Std*)", Count: 2},

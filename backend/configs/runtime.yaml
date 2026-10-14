@@ -40,6 +40,12 @@ background:
   # 目录；日志目录默认取 store 同级的 background_logs（与 CLI 保持一致）。
   storePath: ~/.aicli/sessions/runtime/background.sqlite
 
+goal:
+  # maxConsecutiveContinuations 限制每条用户消息触发的自动续跑轮数；默认 0 =
+  # 不限制（对齐 Codex：goal active 时持续续跑，直到完成/暂停/中断或容忍阈值）。
+  # 正整数 = 成本安全阀：到达上限的可见提示出现后，发送任意消息可继续。
+  # maxConsecutiveContinuations: 0
+
 context:
   # Used only when neither provider/model capability nor context.maxPromptTokens
   # can provide an effective prompt budget.

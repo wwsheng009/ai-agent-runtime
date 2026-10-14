@@ -426,6 +426,9 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 		// 与 live 作答同源：回答提交后该 turn 会继续执行，bridge 需要预期它的复活。
 		bridge.expectResumedTurnAfterAnswer(pending.questionID)
 		clearRestoredPendingPrompt(session)
+		// goal：作答复活挂起轮后请求一次续跑，等该轮结束后由就绪 watcher 唤醒
+		// 主循环执行（对齐 Codex：提问/审批解决后目标继续推进）。
+		requestGoalContinuationKickAfterResumedAnswer(session)
 		return true
 	case chatRestoredPendingApproval:
 		if !bridge.approvalStillPending(pending.sessionID, pending.requestID) {
@@ -488,6 +491,7 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 				bridge.renderApprovalDecision(pending.approval, false)
 			}
 			clearRestoredPendingPrompt(session)
+			requestGoalContinuationKickAfterResumedAnswer(session)
 			return true
 		}
 		allowed := decision == approvalPromptAllowOnce || decision == approvalPromptAllowReuse
@@ -502,6 +506,7 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 			bridge.rememberApprovalGrant(bridge.autoApprovalGrantKey(pending.sessionID, pending.approval))
 		}
 		clearRestoredPendingPrompt(session)
+		requestGoalContinuationKickAfterResumedAnswer(session)
 		return true
 	}
 	return false
@@ -539,6 +544,9 @@ func resolveRestoredPendingApprovalWithoutPrompt(
 	if session.Interaction != nil && strings.TrimSpace(reason) != "" {
 		session.Interaction.RenderLocalSupplement("[approval] " + strings.TrimSpace(reason))
 	}
+	// 审批经策略自动解决同样会复活挂起轮：请求一次 goal 续跑由就绪 watcher
+	// 接入（无 active goal 时为 no-op）。
+	requestGoalContinuationKickAfterResumedAnswer(session)
 	writeSessionDebugInfo(session,
 		"[restored-pending] resolved pending approval without prompt request_id="+
 			strings.TrimSpace(approval.ID)+" allow="+boolText(allow), false)

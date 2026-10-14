@@ -349,8 +349,14 @@ func TestGoalStatusSegmentShowsContinuationAttempt(t *testing.T) {
 	session.goalContinuationAttempt.Store(2)
 	defer session.goalContinuationAttempt.Store(0)
 	seg := chatSurfaceGoalStatusSegment(session)
-	if !strings.Contains(seg.full, "attempt 2/5") {
+	if !strings.Contains(seg.full, "attempt 2") {
 		t.Fatalf("expected continuation attempt in status segment, got %q", seg.full)
+	}
+	// 配置安全阀时显示 N/M（默认 0=不限制只显示 N）。
+	session.goalMaxContinuations = 5
+	seg = chatSurfaceGoalStatusSegment(session)
+	if !strings.Contains(seg.full, "attempt 2/5") {
+		t.Fatalf("expected capped continuation attempt in status segment, got %q", seg.full)
 	}
 }
 

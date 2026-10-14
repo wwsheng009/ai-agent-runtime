@@ -45,6 +45,10 @@ type RuntimeConfig struct {
 	Images         ImagesConfig              `yaml:"images" json:"images"`
 	Schedule       ScheduleConfig            `yaml:"schedule" json:"schedule"`
 
+	// Goal 控制 /goal 自动续跑（对齐 Codex 语义；2026-10-14 方案：
+	// docs/plan/aicli-goal-continuation-codex-alignment-plan-20261014.md）。
+	Goal GoalConfig `yaml:"goal" json:"goal"`
+
 	// 性能配置
 	Performance PerformanceConfig `yaml:"performance" json:"performance"`
 
@@ -451,6 +455,17 @@ func (c ScheduleConfig) WithDefaults() ScheduleConfig {
 		out.Execution.MaxTurnDuration = def.Execution.MaxTurnDuration
 	}
 	return out
+}
+
+// GoalConfig 控制 /goal 自动续跑与停止策略（对齐 Codex main 的确定语义，见
+// docs/plan/aicli-goal-continuation-codex-alignment-plan-20261014.md）。
+type GoalConfig struct {
+	// MaxConsecutiveContinuations 是每条用户消息触发的自动续跑轮数安全阀。
+	// 0（缺省）= 不限制：goal 为 active 时持续续跑，直到完成/暂停/中断/连续
+	// 错误或空转达到容忍阈值（对齐 Codex 的 continue_if_idle 语义）；正整数 =
+	// 上限，到达后给用户可见提示且 goal 保持 active（发送任意消息可继续）。
+	// 负值按 0 处理。
+	MaxConsecutiveContinuations int `yaml:"maxConsecutiveContinuations" json:"maxConsecutiveContinuations"`
 }
 
 // BackgroundConfig controls background task persistence.

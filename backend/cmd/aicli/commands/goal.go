@@ -188,6 +188,11 @@ func updateGoalStatusCommand(session *ChatSession, status runtimegoal.Status, me
 	}
 	fmt.Println(message)
 	fmt.Println(formatGoalSummary(*goal))
+	if status == runtimegoal.StatusActive {
+		// /goal resume：请求一次隐藏续跑（主循环下一轮迭代消费；对齐 Codex
+		// 的"置 active 立即续跑"语义）。
+		requestGoalContinuationKick(session)
+	}
 	return false
 }
 
