@@ -802,3 +802,44 @@ profile 未声明 = 保持只读（只收不放宽）。
 不变量 T1（单一装配实现点，双宿主观测+请求同源）、T2（同 workspace+profile
 跨宿主名单一致）、T3（工具可解释）、T4（profile 先于宿主硬边界）全部有代码
 与测试锚定。T5（turn 边界生效）沿用既有冻结语义未改动。
+
+---
+
+## 19. ConPTY 实测验证（2026-10-14，真实环境）
+
+### 19.1 实测环境
+
+- `aicli-e2e-test.exe`（HEAD `3a1b12ae`+修复，chat 命令）经 ConPTY 作业运行于 `E:\temp`；
+- runtime-server（8101，同 HEAD 重编译部署）；
+- 会话：`session_20261014203629_b9GGqTTl` 等（server 持久化，无 actor 冻结面）。
+
+### 19.2 实测发现并修复的两个缺口
+
+| # | 现象 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | `--headless --prompt "/tools"` → 「未知命令: /tools」 | legacy/plain 出口（`handleCommand`）没有 /tools 分支——统一 TTY 分支已接，no-interactive/兼容终端路径漏了 | `command.go` handleCommand 增加 `/tools` case（printChatCommandOutput） |
+| 2 | 分支接上后 → 「当前会话没有可枚举的工具面」 | headless 首帧路径 `session.ChatExecutor` 由后台装载 goroutine **异步建立**，slash 分支直接读时为 nil → 三分支全 miss | `/tools` 作为只读命令像 turn 一样先 `ensureChatExecutor` await，再断言 runtime-server executor |
+
+（诊断过程：先用一行诊断 return 定位「server 分支根本没进」，再修 await——两次重编译重测收敛。）
+
+### 19.3 实测结果（端到端账本闭环）
+
+`aicli chat --headless --runtime-server http://127.0.0.1:8101 --prompt "/tools"`：
+
+```
+当前会话工具面：54 个工具（与 /api/runtime/tools 同源）
+[core] ×20               （aicli_exec … write）
+[mcp:aicli_goal] ×2      （get_goal / update_goal）
+[orchestration] ×32      （job_*×8 + subagent_*×17 + team_*×2 + schedule_*×4
+                           + plan_review + ask_user_question）
+```
+
+**与 web `/api/runtime/tools` 同一会话同值**（54；plan_review 为本轮新增工具）。
+T1 观测闭环在真实 ConPTY 环境下达成：TUI、web 端点、LLM 请求三面同源同值。
+
+### 19.4 提交
+
+- `d39e8d78` fix(aicli)：await ChatExecutor + legacy 出口分支（本节两缺口）；
+- `29910263` / `8d77c794` / `2752d273` / `ccdbc2ff`：方案主体（见 §18 清单）。
+
+回归：`cmd/aicli/commands` 全包（284s，含他人 connectors WIP）+ 渲染 3 用例 + vet 全绿。
