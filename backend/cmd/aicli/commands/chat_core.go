@@ -84,6 +84,21 @@ type aicliGoalContinuationExecutor interface {
 	ContinueGoal(ctx context.Context, session *ChatSession) (string, error)
 }
 
+// aicliRuntimeInterruptExecutor 是 aicliChatExecutor 的可选扩展接口：
+// server 模式（本地 runtime host 未挂载）把用户中断（Esc/Ctrl+C）转发给
+// 远端宿主的 interrupt 命令通道；本地 actor 模式不实现该接口，仍由
+// localChatRuntimeHost.interruptActiveRuns 处理。
+type aicliRuntimeInterruptExecutor interface {
+	InterruptTurn(ctx context.Context, session *ChatSession) error
+}
+
+// aicliRuntimeCompactExecutor 同样是可选扩展接口：server 模式下 /compact
+// 走远端 compact 命令（本地没有可压缩的 actor）。返回的报告字段与本地路径
+// 共用 chatCompactReport。
+type aicliRuntimeCompactExecutor interface {
+	CompactSession(ctx context.Context, session *ChatSession, requestedMode string) (*chatCompactReport, error)
+}
+
 type aicliSharedChatExecutor struct{}
 
 type sharedChatExecuteOptions struct {

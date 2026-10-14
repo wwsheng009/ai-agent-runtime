@@ -856,6 +856,24 @@ background:
   - 目录节点下再展示会话列表；无目录信息的会话归入“未绑定目录 / Unscoped sessions”。
 - 这次前端用户选择优化解决了“配置 `sessions.defaultUserId` 比较死板”的主要体验问题：runtime-server 可以默认继续保守使用 `anonymous`，但前端用户可以直接看到 `aicli` 写入的 OS 用户、Web Console 用户等实际会话命名空间，并手动切换。
 
+### server 模式 CLI 交互补齐（2026-10-14）
+
+- **中断**：`runInterruptCleanup` 在 `LocalRuntimeHost==nil`（server 模式）时把
+  Esc/Ctrl+C 转发为统一命令通道的 `interrupt`（`InterruptTurn`，空 turn_id =
+  「取消当前在途回合」）；`no_active_turn` 等正常语义不报错，只有转发失败才把
+  清理结果标记为 `stopped=false`（UI 不再谎报「已停止」）。
+- **/compact**：本地无 actor 时改走统一命令通道的 `compact`（`CompactSession`），
+  服务端 payload 增补 `result.replacement_history_len` 与 `result.reconciliation`
+  （附加字段、向后兼容），CLI 据此保真 `history_messages` / `context_drift` /
+  `correction` 展示，并复用 `refreshChatSessionFromRuntimeServer` +
+  `applyChatCompactContextUsage` 收尾。
+- **图片附件**：server 模式先把 `session.ImagePaths` 上传到
+  `POST /api/runtime/uploads`（按服务端 8 张/批限制分批），服务端接受的路径随
+  `submit_prompt.images` 一起提交；全部被拒时报错（不静默降级成纯文本），
+  部分被拒以补充提示回显。
+- 仍待补：`/backtrack`（user-turn rewind）没有对应的服务端命令通道，server
+  模式仍走本地 actor 路径；无统一命令接口的 legacy 服务端仍直接报升级提示。
+
 当前仍保留的工程缺口：
 
 - server 模式 CLI 已能消费 `/runtime/stream` SSE；后续可以继续补更细粒度的断线续读指标和用户可见诊断，例如显示 stream fallback 原因与最后 event seq。

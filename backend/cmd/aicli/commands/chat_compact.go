@@ -18,6 +18,9 @@ type chatCompactReport struct {
 	Generation int
 	Title      string
 	RootTitle  string
+	// HistoryMessages 是服务端 compact 结果里替换历史的条数（server 模式）。
+	// CLI 不重建消息体，仅保真展示；本地路径保持 0，展示以 Result 为准。
+	HistoryMessages int
 }
 
 const compactTokenSourceObservedUsage = "observed_usage"
@@ -31,13 +34,19 @@ func executeManualChatCompact(session *ChatSession, requestedMode string) (*chat
 	if session.RuntimeSession == nil {
 		return nil, fmt.Errorf("当前没有可压缩的持久化会话")
 	}
-	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
-		return nil, fmt.Errorf("当前会话未初始化本地 runtime host，无法执行 /compact")
-	}
 
 	ctx := session.cancelCtx
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
+		// runtime-server 模式：本地没有 actor，/compact 走远端 compact 命令
+		//（与 interrupt 同一命令通道）。服务端返回的 status/result 会映射回
+		// 本地报告结构，供 /compact 渲染与 token 统计复用。
+		if exec, ok := session.ChatExecutor.(aicliRuntimeCompactExecutor); ok {
+			return exec.CompactSession(ctx, session, requestedMode)
+		}
+		return nil, fmt.Errorf("当前会话未初始化本地 runtime host，无法执行 /compact")
 	}
 	actor, err := chatActorForSession(ctx, session)
 	if err != nil {
@@ -155,12 +164,16 @@ func formatChatCompactReport(report *chatCompactReport) string {
 	if report.Result.ResolvedModel != "" {
 		parts = append(parts, "model="+report.Result.ResolvedModel)
 	}
+	historyMessages := len(report.Result.ReplacementHistory)
+	if historyMessages == 0 && report.HistoryMessages > 0 {
+		historyMessages = report.HistoryMessages
+	}
 	parts = append(parts,
 		fmt.Sprintf("token_before=%d", report.Result.TokenBefore),
 		fmt.Sprintf("token_after=%d", report.Result.TokenAfter),
 		"token_source="+compactTokenSourceObservedUsage,
 		fmt.Sprintf("compacted_messages=%d", report.Result.CompactedMessages),
-		fmt.Sprintf("history_messages=%d", len(report.Result.ReplacementHistory)),
+		fmt.Sprintf("history_messages=%d", historyMessages),
 	)
 	if len(report.Result.CheckpointIDs) > 0 {
 		parts = append(parts, "checkpoint_id="+report.Result.CheckpointIDs[len(report.Result.CheckpointIDs)-1])

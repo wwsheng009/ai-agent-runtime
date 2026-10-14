@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +20,9 @@ import (
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -516,9 +520,6 @@ func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *C
 	// gateway：同一处边界驱动 attention（completed/error）。
 	releaseMeshTurn := beginChatMeshTurn(session)
 	defer func() { releaseMeshTurn(execErr) }()
-	if len(session.ImagePaths) > 0 {
-		return "", fmt.Errorf("aicli runtime-server 模式暂不支持本地图片附件，请改用本地模式或移除 --image")
-	}
 	output, result, err := e.executeRuntimeCommand(ctx, session, prompt)
 	if err != nil {
 		if isRuntimeServerCommandUnavailable(err) {
@@ -552,6 +553,145 @@ func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, sessi
 	return output, nil
 }
 
+// InterruptTurn 把用户中断（Esc/Ctrl+C）转发到 runtime-server 的统一命令通道
+// （type=interrupt）。空 turn_id 表示「取消当前在途回合」（服务端契约，
+// 见 runtimeapi.sessionRuntimeCommandRequest.TurnID）。
+//
+// 无在途回合时服务端返回 cancelled=false + reason=no_active_turn —— 这是正常
+// 语义（例如回合刚结束、或中断打到已完成的回合），不视为错误。只有 HTTP 层
+// 失败（含旧服务端不支持命令接口）才返回错误。
+func (e *aicliRuntimeServerChatExecutor) InterruptTurn(ctx context.Context, session *ChatSession) error {
+	if e == nil {
+		return fmt.Errorf("runtime-server executor is nil")
+	}
+	sessionID := currentRuntimeSessionID(session)
+	if strings.TrimSpace(sessionID) == "" {
+		// 还没有远端会话行（未提交过 turn），自然没有可中断的在途回合。
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload := map[string]interface{}{"type": "interrupt"}
+	var decoded struct {
+		OK        bool   `json:"ok"`
+		Cancelled bool   `json:"cancelled"`
+		Reason    string `json:"reason"`
+	}
+	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerCommandPath(sessionID), "", payload, &decoded)
+	return err
+}
+
+// runtimeServerCompact*View 对齐 runtimeapi.compactCommandPayload 的 snake_case
+// 契约（status/result 两层）。这里用独立结构体而非 compactruntime.Status/Result：
+// 后者没有 json tag，且 payload 有意只暴露展示所需的字段。
+type runtimeServerCompactStatusView struct {
+	Mode              string `json:"mode"`
+	Phase             string `json:"phase"`
+	Reason            string `json:"reason"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	TriggerTokenLimit int    `json:"trigger_token_limit"`
+	MaxContextTokens  int    `json:"max_context_tokens"`
+	TokenBefore       int    `json:"token_before"`
+}
+
+type runtimeServerCompactResultView struct {
+	Mode                  string                      `json:"mode"`
+	Phase                 string                      `json:"phase"`
+	Provider              string                      `json:"provider"`
+	Model                 string                      `json:"model"`
+	TriggerTokenLimit     int                         `json:"trigger_token_limit"`
+	MaxContextTokens      int                         `json:"max_context_tokens"`
+	TokenBefore           int                         `json:"token_before"`
+	TokenAfter            int                         `json:"token_after"`
+	CompactedMessages     int                         `json:"compacted_messages"`
+	CheckpointIDs         []string                    `json:"checkpoint_ids"`
+	UsageSource           string                      `json:"usage_source"`
+	Usage                 *runtimetypes.TokenUsage    `json:"usage"`
+	ReplacementHistoryLen int                         `json:"replacement_history_len"`
+	Reconciliation        *runtimeServerReconcileView `json:"reconciliation"`
+}
+
+type runtimeServerReconcileView struct {
+	DriftCount     int  `json:"drift_count"`
+	CorrectionMade bool `json:"correction_made"`
+}
+
+// CompactSession 通过统一命令通道触发 runtime-server 侧的手动 compact
+// （type=compact）。服务端返回的 status/result 会映射回本地 chatCompactReport：
+// server 模式 CLI 不重建替换历史的消息体，只保真条数（HistoryMessages）。
+func (e *aicliRuntimeServerChatExecutor) CompactSession(ctx context.Context, session *ChatSession, requestedMode string) (*chatCompactReport, error) {
+	if e == nil {
+		return nil, fmt.Errorf("runtime-server executor is nil")
+	}
+	if session == nil || session.RuntimeSession == nil {
+		return nil, fmt.Errorf("当前没有可压缩的持久化会话")
+	}
+	sessionID := currentRuntimeSessionID(session)
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("runtime-server 会话 ID 为空")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var decoded struct {
+		Status runtimeServerCompactStatusView  `json:"status"`
+		Result *runtimeServerCompactResultView `json:"result"`
+	}
+	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerCommandPath(sessionID), "", map[string]interface{}{
+		"type": "compact",
+		"mode": requestedMode,
+	}, &decoded)
+	if err != nil {
+		return nil, err
+	}
+	status := compactruntime.Status{
+		Mode:              decoded.Status.Mode,
+		Phase:             decoded.Status.Phase,
+		Reason:            decoded.Status.Reason,
+		ResolvedProvider:  decoded.Status.Provider,
+		ResolvedModel:     decoded.Status.Model,
+		TriggerTokenLimit: decoded.Status.TriggerTokenLimit,
+		MaxContextTokens:  decoded.Status.MaxContextTokens,
+		TokenBefore:       decoded.Status.TokenBefore,
+	}
+	report := &chatCompactReport{RequestedMode: requestedMode, Status: status}
+	if decoded.Result != nil {
+		var reconciliation *contextreconcile.Report
+		if decoded.Result.Reconciliation != nil {
+			reconciliation = &contextreconcile.Report{
+				DriftCount:     decoded.Result.Reconciliation.DriftCount,
+				CorrectionMade: decoded.Result.Reconciliation.CorrectionMade,
+			}
+		}
+		report.Result = &compactruntime.Result{
+			Mode:              decoded.Result.Mode,
+			Phase:             decoded.Result.Phase,
+			ResolvedProvider:  decoded.Result.Provider,
+			ResolvedModel:     decoded.Result.Model,
+			TriggerTokenLimit: decoded.Result.TriggerTokenLimit,
+			MaxContextTokens:  decoded.Result.MaxContextTokens,
+			TokenBefore:       decoded.Result.TokenBefore,
+			TokenAfter:        decoded.Result.TokenAfter,
+			CompactedMessages: decoded.Result.CompactedMessages,
+			CheckpointIDs:     decoded.Result.CheckpointIDs,
+			Usage:             decoded.Result.Usage,
+			UsageSource:       decoded.Result.UsageSource,
+			Reconciliation:    reconciliation,
+		}
+		report.HistoryMessages = decoded.Result.ReplacementHistoryLen
+	}
+	// server 侧已完成 history 重写：先把权威会话拉回本地，再刷新 token 统计
+	// 与谱系（generation / root title），与本地 compact 路径的收尾语义对齐。
+	if err := refreshChatSessionFromRuntimeServer(session, sessionID); err != nil {
+		return report, err
+	}
+	applyChatCompactContextUsage(session, report.Result, report.Status, true)
+	attachChatCompactLineage(report, session)
+	return report, nil
+}
+
 func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Context, session *ChatSession, prompt string) (string, map[string]interface{}, error) {
 	sessionID, err := ensureRuntimeServerSessionID(session)
 	if err != nil {
@@ -560,6 +700,13 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		return "", nil, fmt.Errorf("同步 runtime-server 会话上下文失败: %w", err)
 	}
+	// 本地图片附件：先上传到 runtime-server 的附件目录，再把服务端接受的
+	// 路径随 submit_prompt.images 一起提交（服务端会做路径边界与格式二次校验）。
+	imagePaths, imageNotes, err := e.uploadRuntimeServerImages(ctx, session)
+	if err != nil {
+		return "", nil, err
+	}
+	reportRuntimeServerImageNotes(session, imageNotes)
 	afterSeq, err := e.currentRuntimeServerEventSeq(ctx, session, sessionID)
 	if err != nil {
 		return "", nil, err
@@ -590,7 +737,7 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 		defer bridge.EndRun()
 	}
 
-	commandResp, statusCode, err := e.submitRuntimeServerPrompt(ctx, session, sessionID, prompt)
+	commandResp, statusCode, err := e.submitRuntimeServerPrompt(ctx, session, sessionID, prompt, imagePaths)
 	if err != nil {
 		return "", nil, err
 	}
@@ -799,10 +946,13 @@ func cloneRuntimeServerToolNameSet(input map[string]bool) map[string]bool {
 	return cloned
 }
 
-func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerPrompt(ctx context.Context, session *ChatSession, sessionID, prompt string) (*runtimeServerRuntimeCommandResponse, int, error) {
+func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerPrompt(ctx context.Context, session *ChatSession, sessionID, prompt string, images []string) (*runtimeServerRuntimeCommandResponse, int, error) {
 	payload := map[string]interface{}{
 		"type":   "submit_prompt",
 		"prompt": prompt,
+	}
+	if len(images) > 0 {
+		payload["images"] = append([]string(nil), images...)
 	}
 	if runMeta := currentRunMetaForSession(session); runMeta != nil {
 		payload["run_meta"] = runMeta
@@ -1348,6 +1498,175 @@ func (e *aicliRuntimeServerChatExecutor) doRuntimeServerJSON(ctx context.Context
 		return resp.StatusCode, fmt.Errorf("解析 runtime-server 响应失败: %w", err)
 	}
 	return resp.StatusCode, nil
+}
+
+// runtimeServerUpload*View 对齐 POST /api/runtime/uploads 的响应契约
+// （runtimeapi.attachment_upload_handlers.go：{ok,accepted,attachments:[...]}）。
+type runtimeServerUploadEntryView struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Note    string `json:"note"`
+	Skipped bool   `json:"skipped"`
+}
+
+type runtimeServerUploadResponseView struct {
+	OK          bool                           `json:"ok"`
+	Accepted    int                            `json:"accepted"`
+	Attachments []runtimeServerUploadEntryView `json:"attachments"`
+	Error       string                         `json:"error"`
+	Reason      string                         `json:"reason"`
+}
+
+// runtimeServerUploadBatchSize 与 runtimeapi.maxRuntimeUploadFiles 对齐：
+// 服务端单次请求最多 8 张，超过时按批上传后合并路径。
+const runtimeServerUploadBatchSize = 8
+
+// uploadRuntimeServerImages 把会话当前的本地图片附件上传到 runtime-server，
+// 返回服务端接受的文件路径（供 submit_prompt.images 使用）与被拒附件的说明。
+// 全部被拒时返回错误（不静默降级成纯文本发送，语义与 Web 端一致）。
+func (e *aicliRuntimeServerChatExecutor) uploadRuntimeServerImages(ctx context.Context, session *ChatSession) ([]string, []string, error) {
+	if e == nil {
+		return nil, nil, fmt.Errorf("runtime-server executor is nil")
+	}
+	if session == nil || len(session.ImagePaths) == 0 {
+		return nil, nil, nil
+	}
+	paths := make([]string, 0, len(session.ImagePaths))
+	for _, raw := range session.ImagePaths {
+		if path := strings.TrimSpace(raw); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, nil, nil
+	}
+	accepted := make([]string, 0, len(paths))
+	notes := make([]string, 0)
+	for start := 0; start < len(paths); start += runtimeServerUploadBatchSize {
+		end := start + runtimeServerUploadBatchSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		batchAccepted, batchNotes, err := e.uploadRuntimeServerImageBatch(ctx, session, paths[start:end])
+		if err != nil {
+			return nil, notes, err
+		}
+		accepted = append(accepted, batchAccepted...)
+		notes = append(notes, batchNotes...)
+	}
+	if len(accepted) == 0 {
+		if len(notes) == 0 {
+			notes = append(notes, "没有可用附件")
+		}
+		return nil, notes, fmt.Errorf("runtime-server 拒绝了全部图片附件: %s", strings.Join(notes, "; "))
+	}
+	return accepted, notes, nil
+}
+
+func (e *aicliRuntimeServerChatExecutor) uploadRuntimeServerImageBatch(ctx context.Context, session *ChatSession, paths []string) ([]string, []string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("读取图片附件失败 (%s): %w", path, err)
+		}
+		part, err := writer.CreateFormFile("file", filepath.Base(path))
+		if err != nil {
+			file.Close()
+			return nil, nil, fmt.Errorf("构建附件上传表单失败: %w", err)
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			file.Close()
+			return nil, nil, fmt.Errorf("读取图片附件失败 (%s): %w", path, err)
+		}
+		file.Close()
+	}
+	if err := writer.Close(); err != nil {
+		return nil, nil, fmt.Errorf("构建附件上传表单失败: %w", err)
+	}
+	var decoded runtimeServerUploadResponseView
+	if err := e.doRuntimeServerMultipart(ctx, session, "/api/runtime/uploads", &body, writer.FormDataContentType(), &decoded); err != nil {
+		return nil, nil, err
+	}
+	accepted := make([]string, 0, len(decoded.Attachments))
+	notes := make([]string, 0, len(decoded.Attachments))
+	for _, entry := range decoded.Attachments {
+		if path := strings.TrimSpace(entry.Path); path != "" {
+			accepted = append(accepted, path)
+			continue
+		}
+		note := strings.TrimSpace(entry.Note)
+		if note == "" {
+			note = "附件被服务端拒绝"
+		}
+		notes = append(notes, entry.Name+": "+note)
+	}
+	if len(accepted) == 0 && len(notes) == 0 {
+		notes = append(notes, "服务端未接受任何附件")
+	}
+	return accepted, notes, nil
+}
+
+// reportRuntimeServerImageNotes 把被拒附件说明回显给用户：交互式会话走
+// 统一 surface（RenderLocalSupplement），其它路径复用命令输出兼容边界
+// printChatCommandOutput（禁止新增终端直写点，见 direct-writer inventory）。
+func reportRuntimeServerImageNotes(session *ChatSession, notes []string) {
+	if session == nil || len(notes) == 0 {
+		return
+	}
+	notice := "图片附件提示: " + strings.Join(notes, "; ")
+	if session.Interaction != nil {
+		session.Interaction.RenderLocalSupplement(notice)
+		return
+	}
+	printChatCommandOutput(session, notice)
+}
+
+// doRuntimeServerMultipart 发送 multipart/form-data 请求（附件上传用）。
+// 错误语义与 doRuntimeServerJSON 对齐：非 2xx 统一返回 runtimeServerHTTPError。
+func (e *aicliRuntimeServerChatExecutor) doRuntimeServerMultipart(ctx context.Context, session *ChatSession, path string, body io.Reader, contentType string, target interface{}) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(e.serverURL) == "" {
+		return fmt.Errorf("runtime-server 地址未配置")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.serverURL+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", contentType)
+	client := http.DefaultClient
+	if session != nil && session.HTTPClient != nil {
+		client = session.HTTPClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("runtime-server 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &runtimeServerHTTPError{
+			Method:     http.MethodPost,
+			Path:       path,
+			Status:     resp.Status,
+			StatusCode: resp.StatusCode,
+			Body:       string(data),
+		}
+	}
+	if target == nil || len(data) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("解析 runtime-server 响应失败: %w", err)
+	}
+	return nil
 }
 
 func isRuntimeServerCommandUnavailable(err error) bool {

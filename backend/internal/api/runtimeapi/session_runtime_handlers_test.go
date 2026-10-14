@@ -22,6 +22,7 @@ import (
 	runtimecheckpoint "github.com/wwsheng009/ai-agent-runtime/internal/checkpoint"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -706,6 +707,11 @@ func TestCompactCommandPayloadMapsFullResult(t *testing.T) {
 		UsageSource:       "provider",
 		CompactedMessages: 12,
 		CheckpointIDs:     []string{"ckpt-1", "ckpt-2"},
+		ReplacementHistory: []types.Message{
+			*types.NewUserMessage("u"),
+			*types.NewAssistantMessage("a"),
+		},
+		Reconciliation: &contextreconcile.Report{DriftCount: 2, CorrectionMade: true},
 	}, compactruntime.Status{
 		Mode:              "local",
 		Phase:             compactruntime.PhasePreTurn,
@@ -736,6 +742,11 @@ func TestCompactCommandPayloadMapsFullResult(t *testing.T) {
 	assert.Equal(t, []string{"ckpt-1", "ckpt-2"}, result["checkpoint_ids"])
 	assert.Equal(t, "provider", result["usage_source"])
 	assert.Equal(t, usage, result["usage"], "usage 原样透传")
+	assert.Equal(t, 2, result["replacement_history_len"], "CLI 据此保真 history_messages")
+	reconciliation, ok := result["reconciliation"].(map[string]interface{})
+	require.True(t, ok, "reconciliation payload must be a map")
+	assert.Equal(t, 2, reconciliation["drift_count"])
+	assert.Equal(t, true, reconciliation["correction_made"])
 }
 
 func TestCompactCommandPayloadNilResultKeepsStableKeys(t *testing.T) {
@@ -765,6 +776,8 @@ func TestCompactCommandPayloadNormalizesNilCheckpointIDs(t *testing.T) {
 	require.True(t, ok, "result payload must be a map")
 	assert.Equal(t, []string{}, result["checkpoint_ids"], "nil 的 checkpoint_ids 归一成空数组")
 	assert.Nil(t, result["usage"], "无 usage 时回 null")
+	assert.Equal(t, 0, result["replacement_history_len"])
+	assert.Nil(t, result["reconciliation"], "无漂移报告时回 null")
 }
 
 func TestNormalizeSessionCompactMode(t *testing.T) {

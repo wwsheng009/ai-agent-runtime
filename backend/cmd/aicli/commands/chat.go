@@ -622,6 +622,20 @@ func (s *ChatSession) runInterruptCleanup(done chan struct{}) {
 	outcome := chatInterruptCleanupOutcome{stopped: true}
 	defer func() { s.finishInterruptCleanupUIAfter(outcome) }()
 	if s.LocalRuntimeHost == nil {
+		// runtime-server 模式：本地没有 actor 可停，把中断转发到远端宿主
+		//（type=interrupt）。无在途回合时服务端返回 cancelled=false + reason，
+		// 属正常语义；只有转发失败（超时/不可达）才如实标记 stopped=false，
+		// 避免 UI 谎报「已停止」。
+		exec, ok := s.ChatExecutor.(aicliRuntimeInterruptExecutor)
+		if !ok {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
+		defer cancel()
+		if err := exec.InterruptTurn(ctx, s); err != nil {
+			writeSessionDebugInfo(s, "[interrupt] runtime-server interrupt 转发失败: "+err.Error(), false)
+			outcome = chatInterruptCleanupOutcome{stopped: false}
+		}
 		return
 	}
 	host := s.LocalRuntimeHost

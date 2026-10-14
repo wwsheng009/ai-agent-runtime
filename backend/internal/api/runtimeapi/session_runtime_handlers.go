@@ -15,6 +15,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehost "github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
@@ -1230,8 +1231,25 @@ func compactCommandPayload(result *compactruntime.Result, status compactruntime.
 		"checkpoint_ids":      checkpointIDs,
 		"usage_source":        result.UsageSource,
 		"usage":               usage,
+		// 2026-10-14：CLI（aicli chat --runtime-server）在 server 模式执行
+		// /compact 时用这两个字段还原展示信息（替换历史条数 / 漂移与修正），
+		// 附加字段向后兼容，Web 端不消费。
+		"replacement_history_len": len(result.ReplacementHistory),
+		"reconciliation":          compactReconciliationView(result.Reconciliation),
 	}
 	return payload
+}
+
+// compactReconciliationView 投影 reconcile.Report 的展示字段：CLI/Web 只需要
+// 漂移计数与是否修正；完整 Corrections 列表体积大且无消费方。nil 显式回 null。
+func compactReconciliationView(report *contextreconcile.Report) interface{} {
+	if report == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"drift_count":     report.DriftCount,
+		"correction_made": report.CorrectionMade,
+	}
 }
 
 // sessionTurnInterruptChannel* 标明 interrupt 命令实际作用在哪条执行通道上，

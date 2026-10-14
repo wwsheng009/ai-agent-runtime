@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1000,5 +1001,256 @@ func TestPrepareChatPersistence_ServerModeUsesRuntimeServerSessionManager(t *tes
 	}
 	if remoteSessions[0].Metadata.Title != "server title" {
 		t.Fatalf("expected remote title to be patched, got %q", remoteSessions[0].Metadata.Title)
+	}
+}
+
+func TestAICLIRuntimeServerInterruptTurnPostsInterruptCommand(t *testing.T) {
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), runtimechat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+	runtimeSession, err := manager.Create(context.Background(), "cli-user")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var got map[string]interface{}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/commands" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		requests++
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok": true, "cancelled": false, "reason": "no_active_turn",
+		})
+	}))
+	defer server.Close()
+
+	session := &ChatSession{RuntimeSession: runtimeSession, HTTPClient: server.Client()}
+	exec := newAICLIRuntimeServerChatExecutor(server.URL)
+	interruptExec, ok := exec.(aicliRuntimeInterruptExecutor)
+	if !ok {
+		t.Fatal("runtime server executor must implement aicliRuntimeInterruptExecutor")
+	}
+	if err := interruptExec.InterruptTurn(context.Background(), session); err != nil {
+		t.Fatalf("interrupt turn: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected exactly one interrupt request, got %d", requests)
+	}
+	if got["type"] != "interrupt" {
+		t.Fatalf("expected interrupt command payload, got %#v", got)
+	}
+}
+
+func TestAICLIRuntimeServerInterruptTurnWithoutSessionIsNoop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request %s %s for session-less interrupt", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	exec := newAICLIRuntimeServerChatExecutor(server.URL).(aicliRuntimeInterruptExecutor)
+	if err := exec.InterruptTurn(context.Background(), &ChatSession{}); err != nil {
+		t.Fatalf("session-less interrupt must be a no-op, got %v", err)
+	}
+}
+
+// runtimeServerInterruptFakeExecutor 覆盖 runInterruptCleanup 的 server 分支：
+// 本地 host 缺失时必须把中断转发给实现 aicliRuntimeInterruptExecutor 的 executor。
+type runtimeServerInterruptFakeExecutor struct {
+	called int
+	err    error
+}
+
+func (f *runtimeServerInterruptFakeExecutor) Execute(context.Context, *ChatSession, string) (string, error) {
+	return "", nil
+}
+
+func (f *runtimeServerInterruptFakeExecutor) RuntimeDescriptor() aicliRuntimeExecutorDescriptor {
+	return newAICLIActorRuntimeDescriptor(aicliRuntimeTransportHTTP)
+}
+
+func (f *runtimeServerInterruptFakeExecutor) ToolAvailable(*ChatSession, string) bool { return false }
+
+func (f *runtimeServerInterruptFakeExecutor) InterruptTurn(context.Context, *ChatSession) error {
+	f.called++
+	return f.err
+}
+
+func TestRunInterruptCleanupForwardsToRuntimeServerExecutor(t *testing.T) {
+	fake := &runtimeServerInterruptFakeExecutor{}
+	session := &ChatSession{ChatExecutor: fake}
+	done := make(chan struct{})
+	session.runInterruptCleanup(done)
+	if fake.called != 1 {
+		t.Fatalf("expected remote interrupt forwarded once, got %d", fake.called)
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("expected interrupt cleanup signal to close")
+	}
+}
+
+func TestExecuteManualChatCompactRoutesToRuntimeServer(t *testing.T) {
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), runtimechat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+	runtimeSession, err := manager.Create(context.Background(), "cli-user")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var got map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/commands":
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok": true,
+				"status": map[string]interface{}{
+					"mode": "local", "phase": "pre_turn", "reason": "",
+					"provider": "openai", "model": "gpt-test",
+					"trigger_token_limit": 6800, "max_context_tokens": 8000, "token_before": 7000,
+				},
+				"result": map[string]interface{}{
+					"mode": "local", "phase": "pre_turn",
+					"provider": "openai", "model": "gpt-test",
+					"trigger_token_limit": 6800, "max_context_tokens": 8000,
+					"token_before": 7000, "token_after": 2100,
+					"compacted_messages": 12,
+					"checkpoint_ids":     []string{"ckpt-1"},
+					"usage_source":       "provider", "usage": nil,
+					"replacement_history_len": 4,
+					"reconciliation":          map[string]interface{}{"drift_count": 2, "correction_made": true},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID:
+			loaded, err := manager.Get(r.Context(), runtimeSession.ID)
+			if err != nil {
+				t.Fatalf("load session: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"session": loaded})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		HTTPClient:     server.Client(),
+		ChatExecutor:   newAICLIRuntimeServerChatExecutor(server.URL),
+	}
+	report, err := executeManualChatCompact(session, "local")
+	if err != nil {
+		t.Fatalf("server-mode compact failed: %v", err)
+	}
+	if got["type"] != "compact" || got["mode"] != "local" {
+		t.Fatalf("expected compact command payload, got %#v", got)
+	}
+	if report == nil || report.Result == nil {
+		t.Fatalf("expected compact result, got %#v", report)
+	}
+	if report.Result.TokenAfter != 2100 || report.Result.CompactedMessages != 12 || report.HistoryMessages != 4 {
+		t.Fatalf("unexpected result mapping: %#v", report.Result)
+	}
+	if report.Result.Reconciliation == nil ||
+		report.Result.Reconciliation.DriftCount != 2 ||
+		!report.Result.Reconciliation.CorrectionMade {
+		t.Fatalf("unexpected reconciliation mapping: %#v", report.Result.Reconciliation)
+	}
+	if report.Status.Mode != "local" || report.Status.MaxContextTokens != 8000 {
+		t.Fatalf("unexpected status mapping: %#v", report.Status)
+	}
+	text := formatChatCompactReport(report)
+	for _, want := range []string{"压缩完成", "token_after=2100", "history_messages=4", "context_drift=2", "correction=applied"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("formatted report %q missing %q", text, want)
+		}
+	}
+}
+
+func TestAICLIRuntimeServerChatExecutorUploadsImagesBeforeSubmit(t *testing.T) {
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), runtimechat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+	runtimeSession, err := manager.Create(context.Background(), "cli-user")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	imagePath := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(imagePath, []byte("fake-png-bytes"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	uploadedFiles := 0
+	var submit map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/uploads":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("parse multipart: %v", err)
+			}
+			uploadedFiles = len(r.MultipartForm.File["file"])
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok": true, "accepted": 1,
+				"attachments": []map[string]interface{}{
+					{"name": "shot.png", "path": "/srv/uploads/shot.png", "bytes": 14},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/commands":
+			if err := json.NewDecoder(r.Body).Decode(&submit); err != nil {
+				t.Fatalf("decode submit: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "pending": true})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/stream":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/runtime/events":
+			events := []map[string]interface{}{
+				runtimeServerTestEvent(runtimeSession.ID, "assistant_message", 1, map[string]interface{}{"content": "image output"}),
+				runtimeServerTestEvent(runtimeSession.ID, "session_end", 2, map[string]interface{}{"success": true}),
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"events": events, "count": len(events)})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID:
+			loaded, err := manager.Get(r.Context(), runtimeSession.ID)
+			if err != nil {
+				t.Fatalf("load session: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"session": loaded})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		SessionUserID:  "cli-user",
+		HTTPClient:     server.Client(),
+		ImagePaths:     []string{imagePath},
+	}
+	output, err := newAICLIRuntimeServerChatExecutor(server.URL).Execute(context.Background(), session, "describe this image")
+	if err != nil {
+		t.Fatalf("execute failed: %v", err)
+	}
+	if output != "image output" {
+		t.Fatalf("unexpected output: %q", output)
+	}
+	if uploadedFiles != 1 {
+		t.Fatalf("expected exactly one uploaded file, got %d", uploadedFiles)
+	}
+	images, ok := submit["images"].([]interface{})
+	if !ok || len(images) != 1 || images[0] != "/srv/uploads/shot.png" {
+		t.Fatalf("submit payload missing uploaded image: %#v", submit)
+	}
+	if submit["type"] != "submit_prompt" || submit["prompt"] != "describe this image" {
+		t.Fatalf("unexpected submit payload: %#v", submit)
 	}
 }
