@@ -723,6 +723,53 @@ func (s *Service) NotifyAttention(ctx context.Context, notice AttentionNotice) e
 	return err
 }
 
+// NotifyAttentionScoped 是 D5 scope=all 的完整投递（2026-10-14 修复，docs/bots/09
+// §7.4.1）：先按事件会话精确投递（绑定场景——该会话的绑定 chats，旧语义不变）；
+// 未命中任何绑定（"其它会话"的广播事件）时，回退把通知广播给各接受连接器
+// （connectorIDs）的全部绑定 chats——修复前该场景过滤通过但投递 0 目标（静默丢失）。
+// 接受连接器集合由 SubscribeAttention 的过滤循环给出（与入站准入同一次判定）。
+func (s *Service) NotifyAttentionScoped(ctx context.Context, connectorIDs []string, notice AttentionNotice) error {
+	if notice.Session.IsZero() {
+		return errors.New("connectors: attention notice requires a session")
+	}
+	text := strings.TrimSpace(notice.Text)
+	if text == "" {
+		return errors.New("connectors: attention notice text is required")
+	}
+	msgs := []OutboundMessage{{Text: text}}
+	if delivered, err := s.NotifySession(ctx, notice.Session, msgs); err != nil || delivered > 0 {
+		if err == nil {
+			s.logf("connector attention %s: delivered to %d binding(s) (session-bound)", strings.TrimSpace(notice.Kind), delivered)
+		}
+		return err
+	}
+	// 未绑定（scope=all 广播）：投给接受连接器的全部绑定 chats（去重防同 chat 双发）。
+	if s == nil || s.deps.Store == nil {
+		return ErrServiceNotConfigured
+	}
+	seen := make(map[string]struct{})
+	delivered := 0
+	var errs []error
+	for _, connectorID := range connectorIDs {
+		for _, binding := range s.deps.Store.ListBindings(connectorID) {
+			key := binding.ConnectorID + "\x00" + binding.Chat
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			if err := s.SendOutbound(ctx, binding.ConnectorID, binding.Chat, msgs); err != nil {
+				errs = append(errs, fmt.Errorf("connector %s chat %s: %w", binding.ConnectorID, binding.Chat, err))
+				continue
+			}
+			delivered++
+		}
+	}
+	if len(errs) == 0 {
+		s.logf("connector attention %s: broadcast to %d chat(s) of %d connector(s)", strings.TrimSpace(notice.Kind), delivered, len(connectorIDs))
+	}
+	return errors.Join(errs...)
+}
+
 func (s *Service) process(ctx context.Context, cfg Config, provider Provider, msg InboundMessage) {
 	if err := s.processMessage(ctx, cfg, provider, msg); err != nil {
 		s.logf("connector %s: message %s failed: %v", cfg.ID, msg.MessageID, err)

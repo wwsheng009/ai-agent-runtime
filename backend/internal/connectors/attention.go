@@ -104,6 +104,12 @@ type AttentionDeps struct {
 	Store Store
 	// Notify 把通知出站到 IM（生产实现 Service.NotifyAttention）。
 	Notify func(ctx context.Context, notice AttentionNotice) error
+	// NotifyScoped 是带「接受连接器」上下文的出站（P2 修复：scope=all 跨会话
+	// 投递，docs/bots/09 §7.4.1）：绑定会话事件按会话精确投递（旧语义），
+	// 未绑定会话（scope=all 才可能通过过滤）回退广播到各接受连接器的绑定
+	// chats——旧 Notify 对未绑定会话恒投递 0 目标（静默丢失）。
+	// 生产实现 Service.NotifyAttentionScoped；nil 时回落 Notify（仅兼容测试）。
+	NotifyScoped func(ctx context.Context, connectorIDs []string, notice AttentionNotice) error
 	// Forward 把事件转发给其它 mesh 节点（P2 切片 D，scope=all 跨宿主扇出，
 	// docs/bots/09 §7.4.1）：非 nil 时任一 bot 的 notify.enabled=true 即转发
 	//（对端按自己的 policy 过滤）；fire-and-forget，失败只记日志。
@@ -157,10 +163,22 @@ const (
 	attentionDedupeCap = 1024
 )
 
+// delivery 是出站队列元素：通知 + 本宿主接受该通知的连接器集合
+// （scope=all 的跨会话投递需要它定位「投给谁的绑定 chats」）。
+type delivery struct {
+	notice       AttentionNotice
+	connectorIDs []string
+}
+
 // SubscribeAttention 订阅审批/提问/回合结束事件并异步出站到 IM。
 // store 非空时按各连接器的 policy.notify（D5）过滤：enabled=false 的连接器不收
 // 任何事件通知；scope=sessions（默认）只收绑定到该 bot 的会话，scope=all 收
 // 宿主全部会话事件（docs/bots/09-multi-instance-binding.md §7.4.1）。
+//
+// 投递语义（2026-10-14 修复）：接受后优先按事件会话精确投递（绑定场景，
+// Service.NotifyAttentionScoped 内部先走 NotifySession）；未命中绑定
+// （scope=all 的"其它会话"事件）回退广播到接受连接器的全部绑定 chats——
+// 修复前该场景过滤通过但投递 0 目标（静默丢失）。
 //
 // 去重说明：同一事件（approval/question 的 request id、回合结束的 turn id/时间戳）
 // 只出站一次——进程内窗口去重，保证重复订阅/重复投递不会推两条。与 Web Push/ntfy
@@ -170,11 +188,11 @@ const (
 //
 // 返回退订函数；ctx 取消（宿主 close）时自动退订并停止 worker。
 func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
-	if deps.Subscribe == nil || deps.Notify == nil {
+	if deps.Subscribe == nil || (deps.Notify == nil && deps.NotifyScoped == nil) {
 		return func() {}
 	}
 	dedupe := newAttentionDeduper(attentionDedupeCap)
-	queue := make(chan AttentionNotice, attentionQueueSize)
+	queue := make(chan delivery, attentionQueueSize)
 	stop := make(chan struct{})
 	var stopOnce sync.Once
 	stopWorker := func() { stopOnce.Do(func() { close(stop) }) }
@@ -185,9 +203,15 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 				return
 			case <-stop:
 				return
-			case notice := <-queue:
-				if err := deps.Notify(ctx, notice); err != nil && deps.Logf != nil {
-					deps.Logf("connector attention %s delivery failed (session=%s): %v", notice.Kind, notice.Session.SessionID, err)
+			case item := <-queue:
+				var err error
+				if deps.NotifyScoped != nil {
+					err = deps.NotifyScoped(ctx, item.connectorIDs, item.notice)
+				} else if deps.Notify != nil {
+					err = deps.Notify(ctx, item.notice)
+				}
+				if err != nil && deps.Logf != nil {
+					deps.Logf("connector attention %s delivery failed (session=%s): %v", item.notice.Kind, item.notice.Session.SessionID, err)
 				}
 			}
 		}
@@ -201,6 +225,7 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 		// 同时判定跨宿主转发（切片 D）：任一 bot notify.enabled=true 即转发
 		// 给 peers（对端再按自己的 policy 过滤，两条链互不替代）。
 		accepted := false
+		acceptedConnectors := make([]string, 0, 2)
 		forwardWanted := deps.Forward != nil
 		if deps.Store != nil {
 			for _, cfg := range deps.Store.ListConfigs() {
@@ -219,6 +244,7 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 				})
 				if accepts {
 					accepted = true
+					acceptedConnectors = append(acceptedConnectors, cfg.ID)
 				}
 				// 转发意愿：任一 bot 的 notify.enabled（无论 scope/kinds 命中与否
 				// ——kinds/scope 是本宿主出站粒度，对端有自己的词表；enabled 是
@@ -226,10 +252,10 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 				if cfg.Policy.Notify.Enabled {
 					forwardWanted = true
 				}
-				if accepted && (!forwardWanted || deps.Forward == nil) {
-					break
-				}
 			}
+		} else {
+			// 无 store（纯测试口径）：全量接收。
+			accepted = true
 		}
 		if forwardWanted && deps.Forward != nil {
 			// fire-and-forget：转发失败不重试（对端 absence 语义 = 收不到），
@@ -240,7 +266,7 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 			return
 		}
 		select {
-		case queue <- notice:
+		case queue <- delivery{notice: notice, connectorIDs: acceptedConnectors}:
 		default:
 			if deps.Logf != nil {
 				deps.Logf("connector attention queue full, dropping %s notice (session=%s)", notice.Kind, notice.Session.SessionID)

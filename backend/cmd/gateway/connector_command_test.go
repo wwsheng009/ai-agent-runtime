@@ -61,7 +61,9 @@ func TestGatewayAttentionHookDedupesAndClearsOnClear(t *testing.T) {
 		t.Fatal(err)
 	}
 	// hook 的可注入形态直接接 recordingNotifier（不依赖 Provider.Send 真实链路）。
-	hook := newGatewayAttentionHookNotify(context.Background(), store, notifier.NotifyAttention, func(string, ...any) {})
+	hook := newGatewayAttentionHookNotify(context.Background(), store, func(_ context.Context, _ []string, notice connectors.AttentionNotice) error {
+		return notifier.NotifyAttention(context.Background(), notice)
+	}, func(string, ...any) {})
 
 	// 同一 kind 重复投影只推一次。
 	hook("node-a", "sess-1", "running", "approval")
@@ -86,7 +88,9 @@ func TestGatewayAttentionHookRespectsNotifyPolicy(t *testing.T) {
 	if err := store.PutBinding(connectors.Binding{ConnectorID: "c1", Chat: "chat-1", Session: connectors.SessionRef{SessionID: "sess-1"}}); err != nil {
 		t.Fatal(err)
 	}
-	hook := newGatewayAttentionHookNotify(context.Background(), store, notifier.NotifyAttention, func(string, ...any) {})
+	hook := newGatewayAttentionHookNotify(context.Background(), store, func(_ context.Context, _ []string, notice connectors.AttentionNotice) error {
+		return notifier.NotifyAttention(context.Background(), notice)
+	}, func(string, ...any) {})
 	// 未绑定会话 sess-other：notify.enabled=false → 不推。
 	hook("node-a", "sess-other", "running", "approval")
 	time.Sleep(150 * time.Millisecond)

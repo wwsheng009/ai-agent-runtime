@@ -45,7 +45,7 @@
 | **D2** | 无绑定时的 runner 选举 | 引入 `connectors.runner_preference: runtime-server(default) | aicli | round-robin`；无绑定的入站默认交给任一 runtime-server 节点执行 |
 | **D3** | 接管语义 | 接管时**先核对"当前运行会话 == 绑定会话"**：一致→接管该绑定会话（亲和转移，绑定不动）；无绑定→**不迁移任何绑定**，接管处理器按共享绑定表现状处理（未绑定的 chat 走 auto-create） |
 | **D4** | 实体与凭据两层 | **重新扫码=替换登录凭据**（作用于既有 bot 实体）；**创建新 bot=显式动作**（独立入口/确认）。任何 provider（微信/QQ/…）的扫码流程都必须服从该两层模型，杜绝"扫码即新建连接器" |
-| **D5** | 通知接收开关 | 连接器级 `policy.notify{enabled,kinds,scope}`：bot 是否接收事件类通知（含**其它会话**的 turn 结束/审批/提问等 hook）。默认关闭；kinds 白名单对齐 `AttentionKind*`；scope 二值（绑定会话/宿主全部）。详见 §7.4.1 |
+| **D5** | 通知接收开关 | 连接器级 `policy.notify{enabled,kinds,scope}`：bot 是否接收事件类通知（含**其它会话**的 turn 结束/审批/提问等 hook）。默认关闭；kinds 白名单对齐 `AttentionKind*`；scope 二值（绑定会话/宿主全部）。详见 §7.4.1。**2026-10-14 投递修复**：scope=all 的"其它会话"事件此前过滤通过但投递 0 目标（NotifySession 按事件会话反查绑定，未绑定恒空）——新增 `NotifyAttentionScoped`：先按会话精确投递（绑定场景不变），未命中回退广播到**接受连接器的全部绑定 chats**；三宿主接线切换；红/绿+防回归测试见 `service_scope_all_test.go` |
 | **D6** | 连接器级模型路由 | `policy.route{provider,model,reasoning_effort}`：bot 配置了路由即覆盖全局默认（**仅对新回合生效**；已绑定会话不迁移，上下文保持）。零值回落宿主默认；实现为回合级 `RunRouteOverride`（与 team 任务路由同通道，复用 `chat.SubmitPromptOption.RouteOverride`） |
 
 ## 3. 架构总览：三个平面

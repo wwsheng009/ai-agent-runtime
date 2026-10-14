@@ -120,8 +120,8 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		Subscribe: handler.SubscribeConnectorAttentionEvents,
 		Parked:    handler.ConnectorSessionParked,
 		Store:     store,
-		Notify: func(notifyCtx context.Context, notice connectors.AttentionNotice) error {
-			return service.NotifyAttention(notifyCtx, notice)
+		NotifyScoped: func(notifyCtx context.Context, connectorIDs []string, notice connectors.AttentionNotice) error {
+			return service.NotifyAttentionScoped(notifyCtx, connectorIDs, notice)
 		},
 		Logf: logf,
 	})

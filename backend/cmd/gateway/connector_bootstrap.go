@@ -121,12 +121,13 @@ func newGatewayAttentionHook(ctx context.Context, store connectors.Store, servic
 	if service == nil {
 		return func(string, string, string, string) {}
 	}
-	return newGatewayAttentionHookNotify(ctx, store, service.NotifyAttention, logf)
+	return newGatewayAttentionHookNotify(ctx, store, service.NotifyAttentionScoped, logf)
 }
 
-// newGatewayAttentionHookNotify 是 hook 的可注入形态（测试用替身 notify）。
-func newGatewayAttentionHookNotify(ctx context.Context, store connectors.Store, notify func(context.Context, connectors.AttentionNotice) error, logf func(format string, args ...any)) gatewayAttentionHook {
-	if notify == nil {
+// newGatewayAttentionHookNotify 是 hook 的可注入形态（测试用替身 notify；
+// 签名带接受连接器集合——scope=all 未绑定事件回退广播定位投递目标）。
+func newGatewayAttentionHookNotify(ctx context.Context, store connectors.Store, notifyScoped func(context.Context, []string, connectors.AttentionNotice) error, logf func(format string, args ...any)) gatewayAttentionHook {
+	if notifyScoped == nil {
 		return func(string, string, string, string) {}
 	}
 	var mu sync.Mutex
@@ -156,9 +157,10 @@ func newGatewayAttentionHookNotify(ctx context.Context, store connectors.Store, 
 			return
 		}
 		// D5 过滤与出站共用 connectors 的口径：这里手动走一遍 AcceptsNotice
-		// （共享 SubscribeAttention 以 LLM 事件为输入，gateway 是投影输入）。
+		// （共享 SubscribeAttention 以 LLM 事件为输入，gateway 是投影输入）
+		// 并收集接受连接器集合——scope=all 未绑定事件的广播投递需要它。
+		acceptedConnectors := make([]string, 0, 2)
 		if store != nil {
-			accepted := false
 			for _, cfg := range store.ListConfigs() {
 				if !cfg.Enabled {
 					continue
@@ -171,16 +173,18 @@ func newGatewayAttentionHookNotify(ctx context.Context, store connectors.Store, 
 					}
 					return false
 				}) {
-					accepted = true
-					break
+					acceptedConnectors = append(acceptedConnectors, cfg.ID)
 				}
 			}
-			if !accepted {
+			if len(acceptedConnectors) == 0 {
 				return
 			}
+		} else {
+			// 无 store（纯测试口径）：全量投递。
+			acceptedConnectors = nil
 		}
 		go func() {
-			if err := notify(ctx, notice); err != nil && logf != nil {
+			if err := notifyScoped(ctx, acceptedConnectors, notice); err != nil && logf != nil {
 				logf("connector attention projection %s delivery failed (session=%s): %v", notice.Kind, sessionID, err)
 			}
 		}()

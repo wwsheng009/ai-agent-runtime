@@ -382,7 +382,9 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 				}
 			},
 			Store:  store,
-			Notify: service.NotifyAttention,
+			// D5 完整投递（2026-10-14 修复）：绑定会话精确投递，scope=all 未绑定
+			// 事件回退广播到接受连接器的绑定 chats。
+			NotifyScoped: service.NotifyAttentionScoped,
 			// 跨宿主扇出（P2 切片 D）：scope 意愿命中的事件转发给活 peers。
 			Forward: aicliForwardAttentionToPeers(logf),
 			Logf:    logf,
