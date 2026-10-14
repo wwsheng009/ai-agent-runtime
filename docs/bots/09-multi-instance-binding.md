@@ -45,7 +45,7 @@
 | **D2** | 无绑定时的 runner 选举 | 引入 `connectors.runner_preference: runtime-server(default) | aicli | round-robin`；无绑定的入站默认交给任一 runtime-server 节点执行 |
 | **D3** | 接管语义 | 接管时**先核对"当前运行会话 == 绑定会话"**：一致→接管该绑定会话（亲和转移，绑定不动）；无绑定→**不迁移任何绑定**，接管处理器按共享绑定表现状处理（未绑定的 chat 走 auto-create） |
 | **D4** | 实体与凭据两层 | **重新扫码=替换登录凭据**（作用于既有 bot 实体）；**创建新 bot=显式动作**（独立入口/确认）。任何 provider（微信/QQ/…）的扫码流程都必须服从该两层模型，杜绝"扫码即新建连接器" |
-| **D5** | 通知接收开关 | 连接器级 `policy.notify{enabled,kinds,scope}`：bot 是否接收事件类通知（含**其它会话**的 turn 结束/审批/提问等 hook）。默认关闭；kinds 白名单对齐 `AttentionKind*`；scope 二值（绑定会话/宿主全部）。详见 §7.4.1。**2026-10-14 投递修复**：scope=all 的"其它会话"事件此前过滤通过但投递 0 目标（NotifySession 按事件会话反查绑定，未绑定恒空）——新增 `NotifyAttentionScoped`：先按会话精确投递（绑定场景不变），未命中回退广播到**接受连接器的全部绑定 chats**；三宿主接线切换；红/绿+防回归测试见 `service_scope_all_test.go`；跨宿主接收面（InletAttention）同日对齐（收集全部接受连接器 + scoped 出站；见 `attention_inlet_test.go`）；**真机验证（2026-10-14）**：非绑定会话事件回退广播投递成功（§10.0d） |
+| **D5** | 通知接收开关 | 连接器级 `policy.notify{enabled,kinds,scope}`：bot 是否接收事件类通知（含**其它会话**的 turn 结束/审批/提问等 hook）。默认关闭；kinds 白名单对齐 `AttentionKind*`；scope 二值（绑定会话/宿主全部）。详见 §7.4.1。**2026-10-14 投递修复**：scope=all 的"其它会话"事件此前过滤通过但投递 0 目标（NotifySession 按事件会话反查绑定，未绑定恒空）——新增 `NotifyAttentionScoped`：先按会话精确投递（绑定场景不变），未命中回退广播到**接受连接器的全部绑定 chats**；三宿主接线切换；红/绿+防回归测试见 `service_scope_all_test.go`；跨宿主接收面（InletAttention）同日对齐（收集全部接受连接器 + scoped 出站；见 `attention_inlet_test.go`）；**真机验证（2026-10-14）**：非绑定会话事件回退广播投递成功（§10.0d）；**静音口径（2026-10-14 真机反馈）**：绑定会话的 completion 提示并入 notify 总开关（默认关 = 零配置零打扰；approval/question 命令回环不变） |
 | **D6** | 连接器级模型路由 | `policy.route{provider,model,reasoning_effort}`：bot 配置了路由即覆盖全局默认（**仅对新回合生效**；已绑定会话不迁移，上下文保持）。零值回落宿主默认；实现为回合级 `RunRouteOverride`（与 team 任务路由同通道，复用 `chat.SubmitPromptOption.RouteOverride`） |
 
 ## 3. 架构总览：三个平面
@@ -306,9 +306,10 @@ resp {reply:[{text}], session{node_id, session_id}, success, error}
 
 **需求**：bot 与其绑定会话是两回事——同一个 bot 实体还应能接收**其它会话**的事件类
 hook/通知（如另一个会话的 turn 结束、审批请求）。是否接收、接收哪些类型，是连接器级
-配置，默认**关闭**。**语义分层**：绑定会话的事件通知是既有能力（approval/question
-提示与命令回环），不受开关影响；D5 开关只裁决**其它会话**的事件是否也送达——
-未配置 = 不收任何跨会话通知（与 2026-10-14 之前的行为一致）。
+配置，默认**关闭**。**语义分层**：绑定会话的 approval/question（命令回环）不受开关
+影响、始终送达；completion 类回执提示随开关（2026-10-14 静音收口——默认关不再
+尾随「✅ 回合已完成」）。D5 开关裁决**其它会话**事件是否送达——未配置 = 不收任何
+跨会话通知（与 2026-10-14 之前的行为一致）。
 
 **配置**（连接器 Policy，随现有 Schema 驱动 UI 渲染，`internal/connectors/types.go Policy`）：
 
@@ -318,7 +319,7 @@ connectors:
     policy:
       # 事件通知开关与类型白名单；缺省（未配置）= 不接收任何事件通知（现状）。
       notify:
-        enabled: false            # 总开关：只裁决"其它会话"的事件；绑定会话始终通知
+        enabled: false            # 总开关：其它会话事件 + 绑定会话 completion（approval/question 命令回环不受影响）
         kinds:                    # 接收的事件类型（AttentionKind 同名值）
           - approval              # 审批请求（可 /approve）
           - question              # 提问（可 /answer）
@@ -336,9 +337,9 @@ connectors:
 
 | 项 | 定案 |
 |----|------|
-| 默认值 | `notify.enabled=false`：绑定会话照常通知（现状），跨会话不收 |
+| 默认值 | `notify.enabled=false`：跨会话不收；绑定会话仅保留 approval/question 命令回环（completion 静音，2026-10-14 收口） |
 | 现状对齐 | 宿主当前订阅三类事件（approval/question/turn-done，`connector_bootstrap.go:405-437`）+ `AttentionKindError`；kinds 枚举与 `AttentionKind*` 常量同名 |
-| 过滤点 | 宿主事件回调映射出 `AttentionNotice{Kind,Session}` 后、入队前逐连接器判定（`Policy.AcceptsNotice`）：**已绑定会话 → 始终收**；未绑定（其它会话）→ `enabled=true` 且 `kinds` 命中且 `scope=all` 才收。任一连接器接收即出站（一个事件可同时命中多个 bot） |
+| 过滤点 | 宿主事件回调映射出 `AttentionNotice{Kind,Session}` 后、入队前逐连接器判定（`Policy.AcceptsNotice`）：已绑定 approval/question → 始终收；已绑定 completion 与未绑定（其它会话）事件 → 需 `enabled=true`（跨会话另需 `kinds` 命中且 `scope=all`）才收。任一连接器接收即出站（一个事件可同时命中多个 bot） |
 | 命令回环 | approval/question 类通知天然带 `/approve`、`/answer` 提示；**回环回复会路由回该 bot 的绑定会话**（runner 亲和见 §7.2），被通知会话≠绑定会话时命令仍可执行（CommandBackend 按消息里的 request/question id 定位） |
 | 发送收口 | 不变：仍由该 connector 的 poller 节点发送（凭据/context_token 在 poller 侧，§7.4） |
 | 去重 | 沿用宿主现有事件级去重窗口（`connectorAttentionDeduper`），不按 bot 重复建账 |

@@ -120,7 +120,7 @@ type AttentionDeps struct {
 
 // InletAttention 是跨宿主注意力接收面的宿主实现（restapi Deps.AttentionInlet，
 // P2 切片 D）：对其它节点转发来的广播做**本地 D5 过滤**（逐 bot
-// AcceptsNotice：绑定会话始终收，其它会话需 enabled+kinds+scope 命中——
+// AcceptsNotice：绑定会话的 approval/question 始终收、completion 随开关；其它会话需 enabled+kinds+scope 命中——
 // 发起侧只按"对端想收广播"意愿过滤，scope/kinds 的本地裁决在这里），
 // 收集**全部**接受连接器后经 notifyScoped 出站（2026-10-14 修复补全：
 // 与本地订阅链路同走 Service.NotifyAttentionScoped——先按事件会话精确投递

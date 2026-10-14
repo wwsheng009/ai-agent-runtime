@@ -8,14 +8,26 @@ func notice(kind string, session SessionRef) AttentionNotice {
 	return AttentionNotice{Kind: kind, Session: session, Text: "x"}
 }
 
-// TestAcceptsNoticeBoundSessionAlwaysDelivered：绑定会话的事件不受 notify 开关影响
-// （历史行为；D5 只新增"其它会话"的通知能力）。
-func TestAcceptsNoticeBoundSessionAlwaysDelivered(t *testing.T) {
+// TestAcceptsNoticeBoundSessionCommandLoopAlwaysDelivered：绑定会话的
+// approval/question（命令回环）不受 notify 开关影响；completion 属回执类
+// 提示，2026-10-14 起与 notify 总开关联动（默认静音，零配置零打扰——
+// 消除每条回复尾随「✅ 回合已完成」的真机噪音反馈）。
+func TestAcceptsNoticeBoundSessionCommandLoopAlwaysDelivered(t *testing.T) {
 	policy := Policy{} // notify 零值（未配置）
 	bound := func(session SessionRef) bool { return true }
 
-	if !policy.AcceptsNotice(notice(AttentionKindCompletion, SessionRef{SessionID: "s1"}), bound) {
-		t.Fatal("绑定会话的事件应始终接收（notify 未配置也一样）")
+	if !policy.AcceptsNotice(notice(AttentionKindApproval, SessionRef{SessionID: "s1"}), bound) {
+		t.Fatal("绑定会话的 approval 提示应始终接收（命令回环，不受开关影响）")
+	}
+	if !policy.AcceptsNotice(notice(AttentionKindQuestion, SessionRef{SessionID: "s1"}), bound) {
+		t.Fatal("绑定会话的 question 提示应始终接收（命令回环，不受开关影响）")
+	}
+	if policy.AcceptsNotice(notice(AttentionKindCompletion, SessionRef{SessionID: "s1"}), bound) {
+		t.Fatal("notify 未配置时绑定会话的 completion 不应发送（零配置零打扰）")
+	}
+	enabled := Policy{Notify: NotifyPolicy{Enabled: true}}
+	if !enabled.AcceptsNotice(notice(AttentionKindCompletion, SessionRef{SessionID: "s1"}), bound) {
+		t.Fatal("notify.enabled=true 时绑定会话的 completion 应接收")
 	}
 }
 

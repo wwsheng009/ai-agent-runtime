@@ -119,15 +119,21 @@ const (
 // 映射后、入队前调用）。
 //
 // 语义分层（docs/bots/09 §7.4.1）：
-//   - 事件会话**已绑定**到本连接器 → 始终接收（历史行为：bot 服务自己的绑定
-//     会话，approval/question/completion 提示与命令回环是既有能力，不新增开关）；
+//   - 事件会话**已绑定**到本连接器：approval/question（命令回环）始终接收；
+//     completion（回执类提示）与 notify 总开关联动——2026-10-14 真机反馈
+//     「每条回复尾随 ✅ 回合已完成」噪音后收口为默认静音（零配置零打扰）；
 //   - 事件会话**未绑定**（即"其它会话"的事件）→ 需要 notify.enabled=true 且
 //     kinds 命中且 scope=all（scope=sessions 天然排除未绑定会话）。
 //
 // boundHere 报告事件会话是否绑定到本连接器；为 nil 时按"未绑定"处理。
 func (p Policy) AcceptsNotice(notice AttentionNotice, boundHere func(session SessionRef) bool) bool {
 	if boundHere != nil && boundHere(notice.Session) {
-		return true // 绑定会话：现状行为，不受 notify 开关影响
+		// 绑定会话：approval/question（命令回环）不受开关影响；completion 属
+		// 回执类提示，与 notify 总开关联动（默认关闭 = 零配置零打扰）。
+		if notice.Kind == AttentionKindCompletion {
+			return p.Notify.Enabled
+		}
+		return true
 	}
 	// 其它会话的事件：D5 显式开启才接收。
 	if !p.Notify.Enabled {

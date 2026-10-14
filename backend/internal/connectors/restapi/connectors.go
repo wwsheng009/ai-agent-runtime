@@ -296,8 +296,9 @@ func (h *handlers) dispatch(w http.ResponseWriter, r *http.Request) {
 // attentionInlet 处理 POST /connectors/attention（P2 切片 D，D5 跨宿主扇出
 // 接收面，docs/bots/09 §7.4.1）：其它节点的注意力广播经此进入本宿主。
 // 发起侧已按「对端有 bot 想收广播」过滤；这里再做**本地 D5 过滤**
-//（逐 bot AcceptsNotice：绑定会话始终收，其它会话需 enabled+kinds+scope
-// 命中），命中者经 NotifyAttention 出站到该 bot 绑定。AttentionInlet 未
+//（逐 bot AcceptsNotice：绑定会话的 approval/question 始终收、completion 随开关；
+// 其它会话需 enabled+kinds+scope 命中），命中者经 scoped 出站到该 bot 绑定
+//（NotifyAttentionScoped，2026-10-14 起与本地链路同语义）。AttentionInlet 未
 // 装配（gateway 纯 poller 无出站 bot）→ 501。
 func (h *handlers) attentionInlet(w http.ResponseWriter, r *http.Request) {
 	if !h.ready(w) {

@@ -56,7 +56,10 @@ func newHookTestService(store connectors.Store) *connectors.Service {
 }
 func TestGatewayAttentionHookDedupesAndClearsOnClear(t *testing.T) {
 	notifier := &recordingNotifier{}
-	store := connectors.NewMemoryStore(connectors.Config{ID: "c1", Provider: "fake", Enabled: true})
+	// notify.enabled=true：completed 投影（completion）随开关（2026-10-14 静音
+	// 口径）；本用例要覆盖 completed 的重投影去重，故显式开启。
+	store := connectors.NewMemoryStore(connectors.Config{ID: "c1", Provider: "fake", Enabled: true,
+		Policy: connectors.Policy{Notify: connectors.NotifyPolicy{Enabled: true}}})
 	if err := store.PutBinding(connectors.Binding{ConnectorID: "c1", Chat: "chat-1", Session: connectors.SessionRef{SessionID: "sess-1"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +86,7 @@ func TestGatewayAttentionHookDedupesAndClearsOnClear(t *testing.T) {
 func TestGatewayAttentionHookRespectsNotifyPolicy(t *testing.T) {
 	notifier := &recordingNotifier{}
 	// D5：notify 未启用（零值）时，「未绑定的其它会话」事件必须被抑制
-	//（绑定会话始终接收——AcceptsNotice 分层语义：绑定=现状行为不受开关影响）。
+	//（绑定会话的 approval 命令回环始终接收；completion 随开关）。
 	store := connectors.NewMemoryStore(connectors.Config{ID: "c1", Provider: "fake", Enabled: true})
 	if err := store.PutBinding(connectors.Binding{ConnectorID: "c1", Chat: "chat-1", Session: connectors.SessionRef{SessionID: "sess-1"}}); err != nil {
 		t.Fatal(err)
@@ -97,7 +100,7 @@ func TestGatewayAttentionHookRespectsNotifyPolicy(t *testing.T) {
 	if got := notifierSnapshot(notifier); len(got) != 0 {
 		t.Fatalf("notify disabled must suppress unbound-session delivery, got %d", len(got))
 	}
-	// 绑定会话 sess-1：即使 notify 未开启也送达（现状行为）。
+	// 绑定会话 sess-1 的 approval：即使 notify 未开启也送达（命令回环）。
 	hook("node-a", "sess-1", "running", "approval")
 	waitForNotifier(t, notifier, 1)
 }
