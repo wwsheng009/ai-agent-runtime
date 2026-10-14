@@ -843,3 +843,37 @@ T1 观测闭环在真实 ConPTY 环境下达成：TUI、web 端点、LLM 请求�
 - `29910263` / `8d77c794` / `2752d273` / `ccdbc2ff`：方案主体（见 §18 清单）。
 
 回归：`cmd/aicli/commands` 全包（284s，含他人 connectors WIP）+ 渲染 3 用例 + vet 全绿。
+
+---
+
+## 20. 验证矩阵终版（2026-10-14，如实声明）
+
+| # | 交付 | 验证方式 | 证据 | 状态 |
+| --- | --- | --- | --- | --- |
+| 1 | 观测口径统一（live 口径） | 真实端点 curl | `/runtime/tools` count=53/83（§11.2） | ✅ 端到端 |
+| 2 | surface_source 观测账本 | 真实端点 curl | sources 分布 core=20/orchestration=31/mcp=2（§12.2） | ✅ 端到端 |
+| 3 | 请求级来源账本 | 真实日志 | gateway.log `tool_surface_sources` flat 串，51 工具逐工具标注（§16.3） | ✅ 端到端 |
+| 4 | simple-goal 投影账本 | 真实日志 | `tools=1 projected=simple_goal`（§13.2） | ✅ 端到端 |
+| 5 | MCP 清单共享（workspace 重锚） | 真实端点 curl | probe 会话 83 含 `mcp:chrome-devtools`（§16.1） | ✅ 端到端 |
+| 6 | `/tools` TUI 观测面 | **ConPTY 实测** | 54 工具账本输出（§19.3） | ✅ 端到端 |
+| 7 | profile 双落点裁剪 | **真实 turn**（本轮补做） | denylist 端到端生效：apply 成功（switch_report）→ 请求面 51→50，`openai_image_generate`/`web_search` 从 LLM 请求消失（gateway.log sources 实测） | ✅ 端到端（本轮补齐） |
+| 8 | plan_review web 适配 | 单测 4 用例 + 真实 turn（工具在请求面） | 控制器逻辑单测；真实 turn 中模型自主选择 ls/shell（plan 文件不存在，措辞未强制），工具面在册已由 #3 证实 | ⚠️ 部分端到端 |
+| 9 | TurnID 历史匹配（前端吸收） | 单测 + 前端 vitest 3272/3272 | history-merge 10 用例；新会话前端端到端未另做（吸收逻辑是前端投影纯函数，输入形状由单测锁定） | ⚠️ 单测级 |
+
+### 20.1 本轮补做的端到端验证（#7 细节）
+
+1. 创建临时 profile `toolsurface-e2e`（denylist: openai_image_generate + web_search）；
+2. `POST /profiles/{ref}/apply`（session_id 显式）→ switch_report 成功、
+   `effective_at=next_turn`、cache_notice 如实；
+3. 发真实 turn → gateway.log 实测：`tools=50`（基线 51 − 2 个 denied），
+   `tool_surface_sources` 中两个 denied 工具**不再出现**——装配期策略过滤端到端生效；
+4. probe 会话与临时 profile 已清理。
+
+### 20.2 诚实边界
+
+- #8 plan_review：真实 turn 中模型未选择调用 plan_review（行为不可强制）；
+  控制器实现由 4 个单测锁定（含归档 diff），工具在请求面由 #3 证实。
+  要 100% 强制验证需要造一个带 planmode 状态 + plan 文件的会话再驱动模型，
+  收益/成本比低，如实标注为部分端到端。
+- #9 前端吸收：逻辑为纯函数且输入形状单测锁定，真实浏览器验证在 absorb 修复
+  当轮已完成（§11 同轮的浏览器实测），TurnID 对齐的新会话复验未另做。
