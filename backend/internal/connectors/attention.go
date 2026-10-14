@@ -36,6 +36,46 @@ func AttentionEventTypes() []string {
 	return append([]string(nil), attentionEventTypes...)
 }
 
+// AttentionNoticeForProjection 把 gateway 注意力状态投影（节点心跳上报的
+// sess.Attention 字符串：approval/question/error/completed/waiting，与
+// internal/notify PriorityOf 同一词表）映射为 IM 注意力通知。gateway 宿主
+// 没有 LLM 事件总线——这是它的接入面（OnSessionTransition 回调调用）。
+// 返回去重键（projection|session|kind；gateway 侧由调用方做 kind 变更判重，
+// 状态投影本身已幂等）与 ok=false（空 kind/空会话不产生通知）。
+func AttentionNoticeForProjection(sessionID, attention string) (AttentionNotice, string, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	kind := strings.TrimSpace(attention)
+	if sessionID == "" || kind == "" {
+		return AttentionNotice{}, "", false
+	}
+	session := SessionRef{SessionID: sessionID}
+	var text string
+	switch kind {
+	case AttentionKindApproval:
+		text = "⏳ 会话有待审批的工具调用\n回复 /approve 或 /deny"
+	case AttentionKindQuestion:
+		text = "❓ 会话有待回答的提问\n回复 /answer 1 <内容>"
+	case "error":
+		text = "⚠️ 会话回合出错（详情见控制台）"
+	case "completed":
+		// gateway 投影词表用 "completed"（notify.PriorityOf 同源）；Notice.Kind
+		// 用 connectors 统一常量 "completion"，保持与 LLM 事件出站同键。
+		text = "✅ 会话回合已完成"
+		return AttentionNotice{Kind: AttentionKindCompletion, Session: session, Text: text},
+			"projection|" + sessionID + "|" + kind, true
+	case "waiting":
+		// waiting 是托管挂起/等待子任务：不算完成，IM 只收高层事件，这里跳过
+		//（避免与后续 completed 双推）。
+		return AttentionNotice{}, "", false
+	default:
+		// 未知 kind 保守跳过（notify.PriorityOf 按 normal 处理的旁路形态；
+		// IM 出站宁缺毋滥，未知状态留给控制台）。
+		return AttentionNotice{}, "", false
+	}
+	return AttentionNotice{Kind: kind, Session: session, Text: text},
+		"projection|" + sessionID + "|" + kind, true
+}
+
 // RouteOverrideFromPolicy 把连接器策略路由（D6，docs/bots/09 §7.4.2）归一化为
 // chat 回合级路由覆盖：零策略/全空白返回 nil（宿主走原路径，行为不变），
 // 非空策略按项裁剪空白。runtime-server bootstrap 与 aicli connector_host 共用

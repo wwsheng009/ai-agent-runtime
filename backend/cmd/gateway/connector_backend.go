@@ -139,6 +139,97 @@ func (b *gatewayNodeBackend) Handle(ctx context.Context, req connectors.BackendR
 	}
 }
 
+// commandNode 解析命令目标节点（与 Handle 同一套 pickNode 语义）。
+func (b *gatewayNodeBackend) commandNode(connectorID string) (string, error) {
+	return b.pickNode(connectorID)
+}
+
+// commandSession 目标会话：绑定会话仅在仍归属本节点时透传（与 Handle 同语义）。
+func commandSession(req connectors.CommandRequest, nodeID string) string {
+	if req.Session.SessionID != "" && (req.Session.NodeID == "" || req.Session.NodeID == nodeID) {
+		return req.Session.SessionID
+	}
+	return ""
+}
+
+// invokePrompt 同步调用节点 invoke 并返回响应（Handle 与命令面共用）。
+func (b *gatewayNodeBackend) invokePrompt(ctx context.Context, nodeID, sessionID, text string) (*gatewayNodeInvokeResponse, error) {
+	timeout := b.invokeTimeout()
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return b.invoke(callCtx, nodeID, sessionID, text, timeout)
+}
+
+// commandReply 把 invoke 响应映射为 CommandResult：completed/settled 视为
+// 命令已受理（Handled=true，回复取 assistant 文案或给定默认）；其余状态
+// Handled=false + 明确原因（核心会原样回给 IM，不落 agent turn）。
+func (b *gatewayNodeBackend) commandReply(nodeID string, resp *gatewayNodeInvokeResponse, okText string) (connectors.CommandResult, error) {
+	if resp == nil {
+		return connectors.CommandResult{}, errors.New("gateway_node: empty invoke response")
+	}
+	switch resp.Status {
+	case "completed", "settled":
+		text := okText
+		if resp.Assistant != nil {
+			if reply := strings.TrimSpace(resp.Assistant.Content); reply != "" {
+				text = reply
+			}
+		}
+		return connectors.CommandResult{Handled: true, Reply: []connectors.OutboundMessage{{Text: text}}}, nil
+	default:
+		reason := strings.TrimSpace(resp.Reason)
+		if reason == "" {
+			reason = "无原因说明"
+		}
+		return connectors.CommandResult{Handled: false, Reply: []connectors.OutboundMessage{
+			{Text: fmt.Sprintf("节点 %s 命令未完成：status=%s reason=%s", nodeID, orUnknown(resp.Status), reason)},
+		}}, nil
+	}
+}
+
+// DecideApproval 实现 connectors.CommandBackend（FR-7）：/approve /deny 经隧道
+// 转发为节点 invoke prompt（节点侧 aicli/runtime-server 由命令解析走各自审批
+// 通道——runtimeapi connector 命令契约与 IM 命令同形：/approve [request_id]）。
+// 无 request_id 时转发原样参数（节点侧解析当前挂起项）。
+func (b *gatewayNodeBackend) DecideApproval(ctx context.Context, req connectors.CommandRequest) (connectors.CommandResult, error) {
+	nodeID, err := b.commandNode(req.ConnectorID)
+	if err != nil {
+		return connectors.CommandResult{}, err
+	}
+	prompt := "/" + strings.TrimSpace(strings.ToLower(req.Command))
+	for _, arg := range req.Args {
+		prompt += " " + strings.TrimSpace(arg)
+	}
+	resp, err := b.invokePrompt(ctx, nodeID, commandSession(req, nodeID), prompt)
+	if err != nil {
+		return connectors.CommandResult{}, err
+	}
+	allow := !strings.EqualFold(strings.TrimSpace(req.Command), "deny")
+	okText := "已拒绝。"
+	if allow {
+		okText = "已批准。"
+	}
+	return b.commandReply(nodeID, resp, okText)
+}
+
+// AnswerQuestion 实现 connectors.CommandBackend（FR-7）：/answer <序号|id> <内容>
+// 经隧道转发为节点 invoke prompt（与 runtimeapi connector 命令契约同形）。
+func (b *gatewayNodeBackend) AnswerQuestion(ctx context.Context, req connectors.CommandRequest) (connectors.CommandResult, error) {
+	nodeID, err := b.commandNode(req.ConnectorID)
+	if err != nil {
+		return connectors.CommandResult{}, err
+	}
+	prompt := "/answer"
+	for _, arg := range req.Args {
+		prompt += " " + strings.TrimSpace(arg)
+	}
+	resp, err := b.invokePrompt(ctx, nodeID, commandSession(req, nodeID), prompt)
+	if err != nil {
+		return connectors.CommandResult{}, err
+	}
+	return b.commandReply(nodeID, resp, "已回答。")
+}
+
 // pickNode 解析目标节点（语义见文件头注释）。
 func (b *gatewayNodeBackend) pickNode(connectorID string) (string, error) {
 	if b == nil || b.registry == nil || b.proxy == nil {

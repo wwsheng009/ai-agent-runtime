@@ -108,7 +108,12 @@
   隧道节点命令）并把 approval_requested/question_asked/completion/error 事件接
   `NotifyAttention`；与 Web Push/ntfy 的跨通道去重（notify.Dispatcher）。
 - 状态（2026-10-14，宿主接线切片，FR-7/FR-8）：runtime-server + aicli 命令闭环
-  ✅、runtime-server 注意力出站 ✅、gateway 待接。
+  ✅、runtime-server/aicli/gateway 注意力出站 ✅（共享
+  `internal/connectors/attention.go`：LLM 事件出站两宿主 + gateway 投影出站）、
+  gateway 命令闭环 ✅（`cmd/gateway/connector_backend.go`：
+  `DecideApproval`/`AnswerQuestion` 经隧道转发节点 `/web/api/invoke`，命令
+  prompt 与 runtimeapi connector 契约同形）。**待续**：与 Web Push/ntfy 的
+  跨通道去重（notify.Dispatcher）。
   - runtime-server（`cmd/runtime-server/connector_bootstrap.go` +
     `internal/api/runtimeapi/connector_host.go`）：`/approve [request_id]`、`/deny
     [request_id]` 从 durable runtime state 解析当前挂起审批（缺省=当前挂起项，

@@ -351,6 +351,10 @@ func run() int {
 		return 1
 	}
 	notifier.ntfy = ntfySender
+	// connectorAttentionHook 在下方 setupGatewayConnectors 装配后赋值（var 预声明：
+	// tunnel OnSessionTransition 闭包先于 connectors setup 构造，靠闭包捕获变量
+	// 实现构造期后接线；装配失败时保持 nil，transition 回调 nil 检查兜底）。
+	var connectorAttentionHook gatewayAttentionHook
 	if ntfySender.Enabled() {
 		fmt.Fprintf(os.Stderr, "gateway: ntfy channel enabled: %s topic=%s\n", strings.TrimRight(*ntfyURL, "/"), ntfySender.Topic())
 	}
@@ -388,6 +392,13 @@ func run() int {
 		},
 		OnSessionTransition: func(nodeID, sessionID, state, attention string) {
 			hub.publishTransition(nodeID, sessionID, state, attention)
+			// 连接器注意力出站（FR-8）：connectorAttentionHook 在下方
+			// setupGatewayConnectors 装配后赋值；装配失败时为零值闭包 no-op
+			//（tunnel 回调先于 connectors setup 到达的可能性仅限启动竞态，
+			// nil 检查兜底）。闭包捕获变量而非值，实现构造期后接线。
+			if connectorAttentionHook != nil {
+				connectorAttentionHook(nodeID, sessionID, state, attention)
+			}
 		},
 		// P1-b: presence with tail=true gates which sessions' live output the
 		// agent pushes (diffed onto HEARTBEAT_ACK pending actions).
@@ -715,7 +726,7 @@ func run() int {
 	// the tunnel/console down.
 	connectorCtx, cancelConnectors := context.WithCancel(context.Background())
 	defer cancelConnectors()
-	connectorService, connectorErr := setupGatewayConnectors(connectorCtx, router, owner, registry, server, *dataDir, nil)
+	connectorService, connectorAttentionHook, connectorErr := setupGatewayConnectors(connectorCtx, router, owner, registry, server, *dataDir, nil)
 	if connectorErr != nil {
 		fmt.Fprintf(os.Stderr, "gateway: WARNING: connectors disabled: %v\n", connectorErr)
 	}

@@ -100,6 +100,47 @@ func TestAttentionDeduperEvictsOldest(t *testing.T) {
 	}
 }
 
+// TestAttentionNoticeForProjection 锁定 gateway 投影入口（节点心跳 attention
+// 词表）的映射与跳过规则：known kind 出通知，waiting/未知 kind 跳过。
+func TestAttentionNoticeForProjection(t *testing.T) {
+	cases := []struct {
+		attention string
+		wantOK    bool
+		wantKind  string
+	}{
+		{"approval", true, AttentionKindApproval},
+		{"question", true, AttentionKindQuestion},
+		{"error", true, "error"},
+		{"completed", true, AttentionKindCompletion},
+		{"waiting", false, ""},   // 托管挂起不推（避免与 completed 双推）
+		{"unknown", false, ""},   // 未知 kind 保守跳过
+		{"", false, ""},          // 空 kind 不推
+		{"  approval  ", true, AttentionKindApproval},
+	}
+	for _, tc := range cases {
+		notice, key, ok := AttentionNoticeForProjection("sess-1", tc.attention)
+		if ok != tc.wantOK {
+			t.Fatalf("attention=%q ok=%v want %v", tc.attention, ok, tc.wantOK)
+		}
+		if !ok {
+			continue
+		}
+		if notice.Kind != tc.wantKind {
+			t.Fatalf("attention=%q kind=%s want %s", tc.attention, notice.Kind, tc.wantKind)
+		}
+		if notice.Session.SessionID != "sess-1" {
+			t.Fatalf("session = %+v", notice.Session)
+		}
+		if !strings.HasPrefix(key, "projection|sess-1|") {
+			t.Fatalf("key = %s", key)
+		}
+	}
+	// 空会话不推。
+	if _, _, ok := AttentionNoticeForProjection("", "approval"); ok {
+		t.Fatal("empty session should not notify")
+	}
+}
+
 // TestRouteOverrideFromPolicy 锁定 D6 路由归一化（两宿主共用）：零策略/全空白
 // 返回 nil（宿主走原路径），非空策略按项裁剪空白。
 func TestRouteOverrideFromPolicy(t *testing.T) {
