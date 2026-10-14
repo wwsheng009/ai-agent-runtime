@@ -461,6 +461,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Variants: map[string]runtimeCommandSpec{"reload": rtSpec("/hotkeys", categoryDiagnostics, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("写 keymap 配置，下一回合生效"))},
 	},
 	"/status": {Bare: rtBare(rtSpec("/status", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
+	"/tools":  {Bare: rtBare(rtSpec("/tools", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/usage":  {Bare: rtBare(rtSpec("/usage", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/debug": {
 		Bare: rtBare(rtSpec("/debug", categoryDiagnostics, runtimeModeInline, runtimeEffectRead)),

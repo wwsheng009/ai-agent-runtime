@@ -615,6 +615,21 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		return executeStructuredUsageCommand(session, command), true, nil
 	}
 
+	if commandMatches(cmdLower, "/tools") {
+		// /tools（只读）：当前会话工具面目录 + 来源账本——与 web
+		// /api/runtime/tools 同一 toolsurface 实现点（§14/§17 收官）。
+		if body, ok := buildToolsScreenBody(session); ok {
+			if unifiedDirectInteractiveOutput(session) {
+				return chatScreenDocResult(chatToolsScreenSpec(body)), true, nil
+			}
+			return commandTextResult(body), true, nil
+		}
+		if unifiedDirectInteractiveOutput(session) {
+			return commandTextResult("当前会话没有可枚举的工具面（未附着 runtime 或未冻结）"), true, nil
+		}
+		return CommandResult{}, false, nil
+	}
+
 	if commandMatches(cmdLower, "/account") || commandMatches(cmdLower, "/accounts") {
 		// /account (one provider) and /accounts (all providers) share the
 		// account/balance implementation with `aicli balance` — the former also
