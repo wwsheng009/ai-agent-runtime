@@ -386,8 +386,8 @@ connectors:
 
 | 项 | 说明 |
 |----|------|
-| peer 记录扩展 | `kind: "aicli" | "runtime-server"` + `capabilities:["runner","poller"]`；心跳/发现复用现有 mesh 机制 |
-| runtime-server 入网 | P2 让 runtime-server 以 peer 身份注册（当前 mesh 只有 aicli 节点） |
+| peer 记录扩展 | `kind: "aicli" \| "runtime-server"` + `capabilities:["runner","poller"]`；心跳/发现复用现有 mesh 机制。**切片 A ✅（2026-10-14）**：词表常量落 `internal/connectors/hostid.go`（MeshPeerKind*/MeshCapability*）；aicli 网关注册（chat_gateway_host.go REGISTER）与 mesh 档案（mesh_bootstrap.go HostConfig.Capabilities）已带 `runner` 位 |
+| runtime-server 入网 | P2 让 runtime-server 以 peer 身份注册（当前 mesh 只有 aicli 节点）。**切片 A 未含**：runtime-server 仍是常量 HostID、未写 node record——入网写档与 endpoint 补写随切片 B（dispatch 端点需要其可达地址）一起做 |
 | 节点身份 | `NodeID` = mesh node_id；runtime-server 单机默认 `runtime-server`（与 HostID 同源） |
 | 活性判定 | 复用 `GET /web/api/mesh/peers` 的 `session_state/heartbeat`；stale 阈值与 owners 心跳对齐（90s） |
 
@@ -397,6 +397,19 @@ connectors:
 **这在纯 poller 归属下是安全的**（归属=pid+心跳），但 P2 的 NodeID 亲和要求实例唯一，
 因此目标形态是 `aicli:<mesh-node-id>`（启动期从 mesh 档案取，未入网时退回 `aicli:<pid>`）。
 D1/绑定 API（P1）不依赖该改造。
+
+**切片 A 落地（2026-10-14）**：
+- **宿主身份双字段**：`internal/connectors/hostid.go` —— `HostID = <kind>[:<instance>]`
+  实例唯一 + `HostKindOf`/`HostMatchesPolicy`（policy.runtime_owner 准入**按
+  HostKind 匹配**：裸词与 `kind:instance` 都命中，存量 `runtime_owner: aicli`
+  配置零改动兼容——这是 HostID 实例化不炸归属闸的关键）。
+  service.go 认领/接管两处改用 HostMatchesPolicy。
+- **aicli HostID 实例化**：`aicli:<mesh-node-id>`（mesh.Current 取，跨重连稳定、
+  同机多 TUI 唯一），mesh 不可用退回 `aicli:pid-<pid>`（进程唯一，重启换新，
+  与归属陈旧接管语义一致）。
+- **runtime-server / gateway**：单进程部署即唯一实例，裸 kind HostID 已满足
+  目标形态（不改值，仅注释标注）。
+- 归属账本 owners 的 Owner 值自此为实例唯一 id（P2 NodeID 亲和的判定键就绪）。
 
 ### 7.6 故障矩阵
 

@@ -52,6 +52,10 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 		Exe:           meshExecutablePath(),
 		WorkspacePath: meshWorkspacePath(),
 		WorkspaceName: meshWorkspaceName(),
+		// runner 能力位（docs/bots/09 §7.5 切片 A）：aicli chat 节点可作
+		// connector turn 执行体（与 ChatNodeCapabilities 并存；P2 派发的
+		// 候选过滤按该位 + 存活判定）。
+		Capabilities: []string{"mesh", "runner"},
 		// 治理开关（§5.7）：--mesh-allow-stop=true 时档案声明 CapabilityStop，
 		// 让不经本进程 HTTP 层的调用方（aicli-mesh stop 本地编排）也能 fail
 		// closed 地判定「谁能停我」。main.go 在 startMeshHost 之前已 apply 过

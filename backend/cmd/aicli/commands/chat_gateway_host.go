@@ -62,11 +62,14 @@ func chatGatewayRegisterFunc(cfg gatewayagent.Config, routes []string, session *
 		effectiveRoutes, effectiveCapabilities := chatGatewayEffectiveRegistration(
 			routes, chatGatewayForwardConfig().LocalBaseURL)
 		return wire.Register{
-			NodeID:       nodeID,
-			Kind:         "aicli",
-			Name:         cfg.Name,
-			DeviceName:   cfg.Name,
-			Capabilities: effectiveCapabilities,
+			NodeID: nodeID,
+			Kind:   "aicli",
+			Name:   cfg.Name,
+			DeviceName: cfg.Name,
+			// runner 能力位（docs/bots/09 §7.5 切片 A）：aicli 节点可作 connector
+			// turn 执行体（runner_preference 选举/R1 派发的候选过滤位；与 gateway
+			// console 能力位并存——mesh 与 connectors 各自读同一 REGISTER）。
+			Capabilities: append([]string{"runner"}, effectiveCapabilities...),
 			Routes:       effectiveRoutes,
 			Sessions:     chatGatewaySessions(session),
 		}

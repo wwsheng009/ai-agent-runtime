@@ -233,8 +233,8 @@ func (s *Service) TakeoverConnector(ctx context.Context, id string) error {
 	if !cfg.Enabled {
 		return fmt.Errorf("%w: %q", ErrConnectorDisabled, id)
 	}
-	if policyOwner := strings.TrimSpace(cfg.Policy.RuntimeOwner); policyOwner != "" && !strings.EqualFold(policyOwner, "auto") && !strings.EqualFold(policyOwner, hostID) {
-		return fmt.Errorf("%w: policy.runtime_owner=%s", ErrOwnerPolicyMismatch, policyOwner)
+	if !HostMatchesPolicy(hostID, cfg.Policy.RuntimeOwner) {
+		return fmt.Errorf("%w: policy.runtime_owner=%s", ErrOwnerPolicyMismatch, strings.TrimSpace(cfg.Policy.RuntimeOwner))
 	}
 	s.StopConnector(id)
 	if err := s.deps.Store.ForceClaimConnectorOwner(id, hostID, time.Now().UTC()); err != nil {
@@ -419,13 +419,13 @@ func (s *Service) acquireOwnership(cfg Config) bool {
 	if hostID == "" || s.deps.Store == nil {
 		return true
 	}
-	if policyOwner := strings.TrimSpace(cfg.Policy.RuntimeOwner); policyOwner != "" && !strings.EqualFold(policyOwner, "auto") && !strings.EqualFold(policyOwner, hostID) {
-		s.logf("connector %s: 未运行（由 %s 持有；policy.runtime_owner=%s）", cfg.ID, policyOwner, policyOwner)
+	if !HostMatchesPolicy(hostID, cfg.Policy.RuntimeOwner) {
+		s.logf("connector %s: 未运行（由 %s 持有；policy.runtime_owner=%s）", cfg.ID, strings.TrimSpace(cfg.Policy.RuntimeOwner), strings.TrimSpace(cfg.Policy.RuntimeOwner))
 		s.recordLog(LogEntry{
 			Level:       LogLevelWarn,
 			Direction:   LogDirectionSystem,
 			ConnectorID: cfg.ID,
-			Summary:     fmt.Sprintf("未运行（由 %s 持有；policy.runtime_owner=%s）", policyOwner, policyOwner),
+			Summary:     fmt.Sprintf("未运行（由 %s 持有；policy.runtime_owner=%s）", strings.TrimSpace(cfg.Policy.RuntimeOwner), strings.TrimSpace(cfg.Policy.RuntimeOwner)),
 		}, logCounters{})
 		return false
 	}

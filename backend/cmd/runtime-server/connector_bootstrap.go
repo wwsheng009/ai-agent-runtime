@@ -46,6 +46,9 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		Logf:    logf,
 		// 运行归属（07 §5.6）：本宿主身份用于认领/续约/释放；与 aicli 共用
 		// config.yaml 时，同一通道的轮询只允许一处运行。
+		// 宿主身份（docs/bots/09 §7.5 切片 A）：runtime-server 单进程部署即唯一
+		// 实例，裸 kind HostID 已满足实例唯一（D2 NodeID 亲和的目标形态）；
+		// policy.runtime_owner 准入按 HostKind（HostMatchesPolicy）匹配。
 		HostID: "runtime-server",
 		// Fix-S2：runtime-server 保持兼容（false，不 fail-closed），
 		// 空白名单的可见性告警在下面单独发。

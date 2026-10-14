@@ -36,6 +36,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -294,9 +295,11 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		Store:   store,
 		Backend: localConnectorBackend{host: host, logf: logf},
 		Logf:    serviceLogf,
-		// 运行归属（07 §5.6）：本宿主身份用于认领/续约/释放；与 runtime-server
-		// 共用 config.yaml 时，同一通道的轮询只允许一处运行。
-		HostID: "aicli",
+		// 宿主身份（docs/bots/09 §7.5 切片 A）：实例唯一 HostID =
+		// `aicli:<mesh-node-id>`（同机多 TUI 各自唯一，P2 NodeID 亲和的判定键）；
+		// mesh 不可用/未入网时退回 `aicli:<pid>`。policy.runtime_owner 准入按
+		// HostKind（connectors.HostMatchesPolicy）匹配，存量裸词配置不受影响。
+		HostID: connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID()),
 		// Fix-S2：aicli 侧 fail-closed——启用中的连接器若没有非空
 		// policy.allowed_users，跳过启动（不轮询），避免对任意平台用户开放。
 		RequireAllowedUsers: true,
@@ -326,7 +329,7 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		// 回环/同源/写令牌）；这里的路由只挂在同一 mux 上，不额外暴露面。
 		Authorize: func(*http.Request) error { return nil },
 		Logf:      logf,
-		HostID:    "aicli",
+		HostID:    connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID()),
 	}
 
 	ctx, cancel := context.WithCancel(parent)
@@ -372,6 +375,20 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 	}
 	logf("aicli connectors: started (config=%s, state=%s)", configPath, statePath)
 	return connectorHost, nil
+}
+
+// aicliHostInstanceID 返回本进程的实例段（HostID = aicli:<instance>）：
+// mesh 已入网（main 包 startMeshHost 在进程早期执行）取 mesh node-id——它
+// 跨重连稳定且同机多 TUI 唯一；mesh 不可用（--mesh=false / 无网格根目录）
+// 退回 "pid-<pid>"（进程唯一，重启换新——与 ProcessNodeID 的不持久化语义一致，
+// 正好匹配"重启后旧实例陈旧、新实例接管"的归属模型）。
+func aicliHostInstanceID() string {
+	if host := mesh.Current(); host != nil {
+		if nodeID := strings.TrimSpace(host.NodeID()); nodeID != "" {
+			return nodeID
+		}
+	}
+	return fmt.Sprintf("pid-%d", os.Getpid())
 }
 
 // ── Backend：IM 消息 → 本机 chat 会话 ──────────────────────────────────────
