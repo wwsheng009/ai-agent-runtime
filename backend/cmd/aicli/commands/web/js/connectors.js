@@ -981,8 +981,12 @@ function runAction(item, actionKey, kind) {
   if (kind === "qr") { openQRDialog(item, actionKey); return; }
   apiJSON(actionPath(item.id, actionKey), jsonInit("POST"))
     .then(function (data) {
-      var suffix = (data && data.status) ? "(" + data.status + ")" : "";
-      showToast("动作完成:" + actionKey + suffix, "ok", 3000);
+      // 通用语义:kind=button 返回优先展示 message(如 QQ「授权校验」);
+      // 回退 status(微信 login_status)或仅动作名。
+      var detail = (data && typeof data.message === "string" && data.message.trim())
+        ? data.message.trim()
+        : ((data && data.status) ? actionKey + "(" + data.status + ")" : actionKey);
+      showToast("动作完成:" + detail, "ok", 4000);
       loadConnectors();
     })
     .catch(function (err) { showToast("动作失败:" + err.message, "err", 5000); });

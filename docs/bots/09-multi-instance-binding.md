@@ -376,7 +376,7 @@ connectors:
 | 作用范围 | **仅对新回合生效**（回合级 `chat.RunRouteOverride`，与 team 任务路由同一机制）；已绑定会话不迁移——上下文历史保持，仅执行参数变化 |
 | 优先级 | 连接器 route > 宿主全局默认；IM 命令 / 会话级显式选择 > 连接器 route（用户在会话内 /model 选择的优先） |
 | 落库 | storefile（flow map）/storejson（struct）/restapi `PolicyView.route` 三处持久化；零值不落盘 |
-| UI | `/runtime/connectors` 编辑对话框 + 侧栏机器人面板后续接入 route 三字段（P1 前端余项）；config 文档编辑器立即可编辑 |
+| UI | `/runtime/connectors` 对话框（React `model-route-picker` ✓）、aicli 微前端 route 组合框 ✓、TUI `/bots` 列表**只读展示**路由摘要 ✓（2026-10-14，编辑仍在 web）；侧栏机器人面板 route 三字段待接；config 文档编辑器立即可编辑 |
 | 落点 | runtime-server：`BackendRequest.Policy` 携带策略快照 → `ConnectorTurnRequest.Route` → `SubmitConnectorPrompt` 组装 `chat.SubmitPromptOption.RouteOverride`；aicli 宿主同构接线 ✅（2026-10-14：`localConnectorBackend.Handle` 经 `SubmitPromptWithRoute` 传入同一 RunRouteOverride，归一化两宿主共用 `connectors.RouteOverrideFromPolicy`；P2 mesh 派发时对齐 gateway） |
 
 **验证（2026-10-14 真机）**：真实微信连接器配置 `route{workbuddy, global:deepseek-v4.1-flash, medium}`

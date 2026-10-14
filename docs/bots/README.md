@@ -45,8 +45,9 @@
    [docs/gateway/15-multi-instance-architecture.md](../gateway/15-multi-instance-architecture.md)——
    **不需要自研实例间协议**。
 9. **配置体验**（[07-config-ux.md](./07-config-ux.md)）：gateway console 新增一级「机器人」专用配置域，
-   React/微前端各加同 Schema 页面，TUI 只做 `/bot` 最小操作；微信/QQ 扫码走 `actions`（自动刷新/回填/引导测试），
-   Telegram 一步粘贴 token；密钥三处本地 0600 存储、GET 永不回显。
+   React/微前端各加同 Schema 页面，TUI 只做 `/bot` 最小操作；微信扫码走 `actions`
+   （自动刷新/回填/引导测试），QQ 官方无扫码协议、走「授权校验」动作（校验凭据 + 回读
+   机器人信息，2026-10-14 落地），Telegram 一步粘贴 token；密钥三处本地 0600 存储、GET 永不回显。
 
 ## 与现有通知链路的关系
 

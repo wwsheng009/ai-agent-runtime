@@ -218,6 +218,29 @@
 
   var connectorsLoaded = false;
 
+  // connectorSchemaProviders 是三端共用的 GET /api/connectors/schema 缓存
+  // （providers 数组）；连接器卡片据此渲染通用动作按钮（kind=button，
+  // 如 QQ「授权校验」）。拉取失败/未接线时静默降级（卡片仍可用）。
+  var connectorSchemaProviders = null;
+
+  function loadConnectorSchema() {
+    if (connectorSchemaProviders) { return Promise.resolve(connectorSchemaProviders); }
+    return apiJSON("/api/connectors/schema").then(function (r) {
+      if (r.res.ok && r.body && Array.isArray(r.body.providers)) {
+        connectorSchemaProviders = r.body.providers;
+      }
+      return connectorSchemaProviders;
+    }).catch(function () { return null; });
+  }
+
+  function connectorSchemaFor(provider) {
+    if (!connectorSchemaProviders) { return null; }
+    for (var i = 0; i < connectorSchemaProviders.length; i++) {
+      if (connectorSchemaProviders[i].provider === provider) { return connectorSchemaProviders[i]; }
+    }
+    return null;
+  }
+
   // loadConnectors 读取 GET /api/connectors（owner 会话鉴权）。force=true 时
   // 跳过缓存；未接线（启动时 connectors disabled）或响应不是 JSON 契约时给出
   // 明确的页面态，而不是空白列表。
@@ -235,6 +258,12 @@
       }
       connectorsLoaded = true;
       renderConnectors(r.body.items, "");
+      // Schema 加载完成后补渲染动作按钮（首帧不被 schema 请求阻塞）。
+      loadConnectorSchema().then(function (providers) {
+        if (providers && window.location.hash.replace(/^#\/?/, "").split("?")[0] === "connectors") {
+          renderConnectors(r.body.items, "");
+        }
+      });
     }).catch(function (err) {
       renderConnectors(null, "读取连接器失败：" + (err && err.message ? err.message : err));
     });
@@ -279,6 +308,21 @@
       var meta = card.querySelector(".card-meta");
       meta.textContent = "id " + item.id + (item.mode ? " · " + item.mode : "") + " · " + owner +
         (item.secret_keys && item.secret_keys.length ? " · 密钥字段 " + item.secret_keys.join("/") : "");
+      // 通用动作（Schema kind=button，如 QQ「授权校验」）：直接执行并把返回
+      // 摘要（message 优先）以 toast 展示；二维码类 action 仍由 web 端承载。
+      var schema = connectorSchemaFor(item.provider);
+      var actions = (schema && schema.actions) || [];
+      actions.forEach(function (action) {
+        if (!action || action.kind !== "button" || !action.key) { return; }
+        var actionBtn = document.createElement("button");
+        actionBtn.type = "button";
+        actionBtn.className = "btn ghost sm";
+        actionBtn.textContent = action.label || action.key;
+        actionBtn.addEventListener("click", function () {
+          runConnectorActionButton(item, action, actionBtn);
+        });
+        card.querySelector(".card-actions").appendChild(actionBtn);
+      });
       // 管理跳转：完整编辑器由前端切片提供，这里保留契约入口（单项 JSON +
       // 全量 Schema），不做编辑，避免与前端 repo 耦合。
       var detail = document.createElement("a");
@@ -290,6 +334,37 @@
       card.querySelector(".card-actions").appendChild(detail);
       list.appendChild(card);
     });
+  }
+
+  // runConnectorActionButton 执行一次通道动作（POST /api/connectors/{id}/actions/{action}，
+  // 空体=无参数）；执行期间禁用按钮防连点，失败给出可读错误。
+  function runConnectorActionButton(item, action, btn) {
+    var label = action.label || action.key;
+    var path = "/api/connectors/" + encodeURIComponent(item.id) + "/actions/" + encodeURIComponent(action.key);
+    btn.disabled = true;
+    apiJSON(path, { method: "POST" }).then(function (r) {
+      btn.disabled = false;
+      if (!r.res.ok) {
+        notify(label + "失败：" + ((r.body && r.body.error) || ("HTTP " + r.res.status)), "error");
+        return;
+      }
+      var summary = connectorActionSummary(r.body);
+      notify("动作完成：" + (summary || label));
+    }).catch(function (err) {
+      btn.disabled = false;
+      notify(label + "失败：" + (err && err.message ? err.message : err), "error");
+    });
+  }
+
+  // connectorActionSummary 压一行摘要：message 优先（QQ 授权校验），
+  // 回退 status（微信 login_status），再回退整个载荷 JSON。
+  function connectorActionSummary(body) {
+    if (!body) { return ""; }
+    if (typeof body.message === "string" && body.message.trim()) { return body.message.trim(); }
+    if (typeof body.status === "string" && body.status.trim()) { return body.status.trim(); }
+    var keys = Object.keys(body);
+    if (!keys.length) { return ""; }
+    try { return JSON.stringify(body); } catch (err) { return ""; }
   }
 
   var eventsSubscribed = false;

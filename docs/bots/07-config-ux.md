@@ -59,7 +59,7 @@
 ```
 - 通道卡片只显示该通道需要的字段（来自 Schema）。
 - `[测试连接]` 就地验证凭据（Telegram `getMe`、飞书 `tenant_access_token`、微信登录态、QQ token）。
-- 微信/QQ 的凭据步骤替换为**扫码**（§3.4）。
+- 微信的凭据步骤替换为**扫码**（§3.4）；QQ 官方无扫码协议，以「授权校验」动作等价落地（见 §3.4 备注）。
 
 ### 3.3 详情页（Tab）
 
@@ -100,6 +100,13 @@ sequenceDiagram
 - **无前端场景（TUI）**：`/bot qr wechat` 输出登录链接（或短码），用户用手机打开浏览器完成；完成后
   TUI 轮询到 `confirmed` 并提示。
 - **移动端**：二维码按视口放大（≥ 60% 宽度），长按保存/分享；同时给 `qr_url` 便于在另一台设备扫。
+
+> **QQ 授权校验（2026-10-14 落地，替代扫码）**：QQ 官方机器人开放平台**没有扫码登录协议**
+> （凭据来自 bot.q.qq.com 后台的 `app_id`/`app_secret`）。QQ 的等价便捷流 = 保存凭据后执行
+> Schema 动作「授权校验」（`check_credentials`：校验 App Access Token + `GET /users/@me`
+> 回读机器人信息，返回人读摘要 `message` 与 `bot` 明细）。三端渲染器对 kind=button 动作
+> 直接执行并展示结果（React 提示条 / 微前端 toast / TUI `/bots` 动作屏），**前端零改动**；
+> 不引入第三方个人号扫码协议（D7：官方优先）。
 
 ### 3.5 webhook 通道（飞书 / Telegram-webhook）
 
@@ -274,13 +281,14 @@ sequenceDiagram
 | React 连接器分区/页面 | 有 settings 体系 | 新增 settings section + `ConnectorDialog`（复用 provider-dialog 模式） | P0/P1 |
 | 微前端「机器人」tab | 有 config tab 范式 | 新增 `connectors.js` + tab | P1 |
 | TUI `/bot` 最小操作 | 无 | 新增命令（list/status/enable/qr-link） | P1 |
-| 扫码 actions（微信/QQ） | 无 | 后端 action 端点 + 三端扫码面板 | P3（微信）/P2（QQ） |
+| 通道动作：微信扫码 / QQ 授权校验 | 微信三端扫码 ✓（提前于 P3）；QQ 授权校验动作 ✓（2026-10-14） | 微信媒体与主动推送完善 | P3（微信媒体） |
 | 全局默认策略页 | 无 | 三端 Settings 子页（同 Schema） | P1 |
 
 ## 9. 验收清单
 
 - [ ] Telegram 从「+ 新增」到收到测试消息 ≤ 3 步、≤ 60 秒（三端任一）。
-- [ ] 微信/QQ 扫码：过期自动刷新；成功自动回填并引导测试；TUI 可经链接完成。
+- [x] 微信扫码：过期自动刷新；成功自动回填并引导测试；TUI 可经链接完成（三端已落地）。
+- [x] QQ 授权校验（2026-10-14，官方无扫码协议）：保存凭据后在任一端执行「授权校验」并展示机器人信息；TUI `/bots` 动作屏可用。
 - [ ] 飞书：保存后自动注册 webhook；详情页可复制 URL 与查看最近回调状态；自动注册失败有手动指引。
 - [ ] GET 响应与前端存储中**无明文密钥**（自动化断言）。
 - [ ] 策略项全部有默认值；未改任何策略即可完成一次对话。

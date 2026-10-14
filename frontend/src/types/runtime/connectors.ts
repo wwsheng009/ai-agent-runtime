@@ -203,6 +203,11 @@ export interface ConnectorActionPayload {
   user_id?: string;
   /** confirmed 且凭据齐备时为 true（此时才有 settings/secrets）。 */
   credential_ready?: boolean;
+  /**
+   * 人读摘要（通用字段：kind=button 的动作结果优先按它展示，
+   * 如 QQ「授权校验」返回「校验通过：Bot 名（AppID …）」）。
+   */
+  message?: string;
   /** 回填补丁：合并进连接器 settings（PATCH）。 */
   settings?: Record<string, string>;
   /** 回填补丁：合并进连接器 secrets（留空=保持、__clear__=清除）。 */

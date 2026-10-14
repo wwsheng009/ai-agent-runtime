@@ -29,6 +29,10 @@ export function isDirectImageSource(value: string): boolean {
 /** 动作返回的单行摘要；无可用信息时返回空串（调用方改用「无返回内容」文案）。 */
 export function summarizeActionPayload(payload: ConnectorActionPayload): string {
   const parts: string[] = [];
+  if (payload.message) {
+    // 通用人读摘要优先（QQ「授权校验」等 kind=button 动作的主要展示）。
+    parts.push(payload.message);
+  }
   if (payload.status) {
     parts.push(`status=${payload.status}`);
   }

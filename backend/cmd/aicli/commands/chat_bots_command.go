@@ -76,6 +76,9 @@ type botsActionRunner interface {
 
 const (
 	botsActionScan botsActionKind = iota
+	// botsActionSchemaAction 是 Schema 声明的通用动作（kind=button，如 QQ
+	// 「授权校验」）：TUI 直接执行并把返回载荷渲染到主屏。
+	botsActionSchemaAction
 	botsActionEnable
 	botsActionDisable
 	botsActionLogs
@@ -283,6 +286,10 @@ func chatScreenBotsProviderSpec(host *LocalConnectorHost) chatScreenSpec {
 		detail := "字段配置（请在 web 页填写）"
 		if botsQRActionKey(schema) != "" {
 			detail = "扫码接入（零输入）"
+		} else if botsHasButtonAction(schema) {
+			// 非扫码通道但有可用动作（如 QQ「授权校验」）：创建仍在 web 页
+			// 填字段，保存后本屏动作菜单即可执行校验。
+			detail = "字段配置（web 页）→ 保存后可执行通道动作"
 		}
 		rows = append(rows, chatScreenRow{
 			Title:      firstNonEmptyChatValue(schema.Label, schema.Provider),
@@ -330,14 +337,31 @@ func chatBotsProviderAfterClose(host *LocalConnectorHost) func(*ChatSession, cha
 
 func chatScreenBotsActionSpec(host *LocalConnectorHost, cfg connectors.Config) chatScreenSpec {
 	schema, _ := botsProviderSchema(host, cfg.Provider)
-	rows := make([]chatScreenRow, 0, 6)
-	kinds := make([]botsActionKind, 0, 6)
-	add := func(kind botsActionKind, title, detail, search string) {
+	rows := make([]chatScreenRow, 0, 8)
+	kinds := make([]botsActionKind, 0, 8)
+	// specs 与 kinds 按下标一一对应：通用动作行携带其 Schema 动作定义，
+	// 其余行为零值（kind 决定读不读）。
+	specs := make([]api.ActionSpec, 0, 8)
+	addWithSpec := func(kind botsActionKind, spec api.ActionSpec, title, detail, search string) {
 		kinds = append(kinds, kind)
+		specs = append(specs, spec)
 		rows = append(rows, chatScreenRow{Title: title, Detail: detail, SearchText: strings.ToLower(search)})
+	}
+	add := func(kind botsActionKind, title, detail, search string) {
+		addWithSpec(kind, api.ActionSpec{}, title, detail, search)
 	}
 	if botsQRActionKey(schema) != "" {
 		add(botsActionScan, "扫码登录", "重新获取二维码（凭据过期 / 换账号时使用）", "scan qr login 扫码 登录")
+	}
+	// Schema 声明的其它动作（kind != qr，如 QQ「授权校验」）：与 React/微前端
+	// 的 kind=button 语义一致——直接执行并展示返回载荷。
+	for _, action := range schema.Actions {
+		if action.Kind == botsQRActionKind || strings.TrimSpace(action.Key) == "" {
+			continue
+		}
+		label := firstNonEmptyChatValue(action.Label, action.Key)
+		addWithSpec(botsActionSchemaAction, action, label,
+			"执行通道动作并展示返回（授权校验等）", "action "+action.Key+" "+label)
 	}
 	if cfg.Enabled {
 		add(botsActionDisable, "停用", "停止轮询/长连接（保留配置与凭据）", "disable stop 停用")
@@ -355,12 +379,12 @@ func chatScreenBotsActionSpec(host *LocalConnectorHost, cfg connectors.Config) c
 		ConfirmLabel: "执行",
 		Rows:         rows,
 		Trigger:      "command",
-		AfterClose:   chatBotsActionAfterClose(host, cfg, kinds),
+		AfterClose:   chatBotsActionAfterClose(host, cfg, kinds, specs),
 		DegradeDoc:   chatScreenTextDoc(botsActionInlineDoc(host, cfg)),
 	}
 }
 
-func chatBotsActionAfterClose(host *LocalConnectorHost, cfg connectors.Config, kinds []botsActionKind) func(*ChatSession, chatScreenOutcome) {
+func chatBotsActionAfterClose(host *LocalConnectorHost, cfg connectors.Config, kinds []botsActionKind, specs []api.ActionSpec) func(*ChatSession, chatScreenOutcome) {
 	return func(session *ChatSession, outcome chatScreenOutcome) {
 		if outcome.Degraded || outcome.Result != chatScreenClosedConfirm || outcome.Index < 0 || outcome.Index >= len(kinds) {
 			return
@@ -369,6 +393,10 @@ func chatBotsActionAfterClose(host *LocalConnectorHost, cfg connectors.Config, k
 		case botsActionScan:
 			schema, _ := botsProviderSchema(host, cfg.Provider)
 			botsStartScanFlow(session, host, cfg, schema)
+		case botsActionSchemaAction:
+			if outcome.Index < len(specs) {
+				botsRunSchemaAction(session, host, cfg, specs[outcome.Index])
+			}
 		case botsActionEnable:
 			botsSetConnectorEnabled(session, host, cfg, true)
 		case botsActionDisable:
@@ -400,6 +428,74 @@ func botsSetConnectorEnabled(session *ChatSession, host *LocalConnectorHost, cfg
 	}
 	host.Service().StopConnector(cfg.ID)
 	printChatCommandOutput(session, "已停用："+cfg.ID)
+}
+
+// botsRunSchemaAction 执行 Schema 声明的非扫码动作（kind=button，如 QQ
+// 「授权校验」）并把返回载荷渲染到主屏——与 React/微前端 kind=button 的
+// 「直接执行并展示结果」同一契约。
+func botsRunSchemaAction(session *ChatSession, host *LocalConnectorHost, cfg connectors.Config, action api.ActionSpec) {
+	label := firstNonEmptyChatValue(action.Label, action.Key)
+	runner := botsActionProvider(host, cfg.Provider)
+	if runner == nil {
+		printChatCommandOutput(session, "该通道不支持动作执行，无法"+label+"。")
+		return
+	}
+	result, err := runner.RunAction(context.Background(), cfg, action.Key, nil)
+	if err != nil {
+		printChatCommandOutput(session, label+"失败："+err.Error())
+		return
+	}
+	printChatCommandOutput(session, label+"完成："+botsFormatActionResult(result))
+}
+
+// botsFormatActionResult 把动作返回载荷压成单行摘要（message 优先，其余
+// 标量按 key 排序展示；嵌套对象取一层 key: value 内联）。
+func botsFormatActionResult(payload map[string]any) string {
+	if len(payload) == 0 {
+		return "（无返回内容）"
+	}
+	lines := make([]string, 0, len(payload))
+	if message, ok := payload["message"].(string); ok && strings.TrimSpace(message) != "" {
+		lines = append(lines, strings.TrimSpace(message))
+	}
+	keys := make([]string, 0, len(payload))
+	for key := range payload {
+		switch key {
+		case "ok", "action", "message":
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		switch value := payload[key].(type) {
+		case string:
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				lines = append(lines, key+": "+trimmed)
+			}
+		case bool:
+			lines = append(lines, fmt.Sprintf("%s: %t", key, value))
+		case float64:
+			lines = append(lines, fmt.Sprintf("%s: %v", key, value))
+		case map[string]any:
+			subKeys := make([]string, 0, len(value))
+			for subKey := range value {
+				subKeys = append(subKeys, subKey)
+			}
+			sort.Strings(subKeys)
+			subParts := make([]string, 0, len(subKeys))
+			for _, subKey := range subKeys {
+				subParts = append(subParts, fmt.Sprintf("%s=%v", subKey, value[subKey]))
+			}
+			if len(subParts) > 0 {
+				lines = append(lines, key+": {"+strings.Join(subParts, ", ")+"}")
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return "（动作完成，无展示字段）"
+	}
+	return strings.Join(lines, " · ")
 }
 
 // ── 删除确认副屏（默认选「取消」） ─────────────────────────────────────────
@@ -1121,6 +1217,17 @@ func botsQRActionKey(schema api.ProviderSchema) string {
 	return ""
 }
 
+// botsHasButtonAction 报告 Schema 是否声明了非扫码动作（kind != qr）；
+// 供通道选择屏提示「保存后可执行通道动作」（如 QQ 授权校验）。
+func botsHasButtonAction(schema api.ProviderSchema) bool {
+	for _, action := range schema.Actions {
+		if action.Kind != botsQRActionKind && strings.TrimSpace(action.Key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func botsProviderSchema(host *LocalConnectorHost, provider string) (api.ProviderSchema, bool) {
 	for _, schema := range host.Service().Providers() {
 		if schema.Provider == provider {
@@ -1173,6 +1280,17 @@ func botsConnectorDetail(host *LocalConnectorHost, cfg connectors.Config) string
 		if stats, ok := service.Stats(cfg.ID); ok {
 			parts = append(parts, fmt.Sprintf("入%d/出%d/错%d", stats.Inbound, stats.Outbound, stats.Errors))
 		}
+	}
+	// D6 连接器级模型路由（docs/bots/09 §7.4.2）：有覆盖时展示只读摘要；
+	// 编辑入口在 web 页（TUI 不做完整表单）。
+	if route := cfg.Policy.Route; route.HasOverride() {
+		routeParts := make([]string, 0, 3)
+		for _, item := range []string{route.Provider, route.Model, route.ReasoningEffort} {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				routeParts = append(routeParts, trimmed)
+			}
+		}
+		parts = append(parts, "路由 "+strings.Join(routeParts, "/"))
 	}
 	if !cfg.CreatedAt.IsZero() {
 		parts = append(parts, "建于 "+cfg.CreatedAt.Local().Format("01-02 15:04"))

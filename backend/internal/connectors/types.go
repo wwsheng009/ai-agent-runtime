@@ -187,6 +187,10 @@ type Media struct {
 	FileName    string
 	ContentType string
 	Size        int64
+	// URL 是远端媒体地址（provider 发送时按需下载）；与 Path 二选一。
+	URL string
+	// Path 是本地媒体绝对路径（file:// 前缀会被 provider 解析为本地路径）。
+	Path string
 }
 
 // InboundMessage 是通道无关的入站消息。

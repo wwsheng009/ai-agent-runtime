@@ -171,7 +171,7 @@ func (p *Provider) runGatewaySession(ctx context.Context, cfg connectors.Config,
 			"op": gatewayOpIdentify,
 			"d": map[string]any{
 				"token":   "QQBot " + token,
-				"intents": gatewayIntents,
+				"intents": p.intentsFor(cfg),
 				"shard":   [2]int{0, 1},
 			},
 		}); err != nil {
@@ -262,7 +262,7 @@ func (p *Provider) handleDispatch(ctx context.Context, cfg connectors.Config, pa
 	case "RESUMED":
 		p.persistGatewayState(state, current)
 	default:
-		msg, ok := parseGatewayMessage(cfg.ID, payload.T, payload.D)
+		msg, ok := parseGatewayMessage(cfg, payload.T, payload.D)
 		// 游标先落盘：消息一旦认领（进入 handle），重启后不应重复消费。
 		p.persistGatewayState(state, current)
 		if !ok {
@@ -447,21 +447,41 @@ func (p *Provider) clearGatewayState(state connectors.PollingState) {
 
 // ── 事件解析 ────────────────────────────────────────────────────────────────
 
+// messageReference 是入站消息的引用上下文（被引用消息摘要，事件可选字段）。
+type messageReference struct {
+	MessageID         string         `json:"message_id"`
+	Content           string         `json:"content"`
+	Title             string         `json:"title"`
+	Message           *quotedMessage `json:"message"`
+	ReferencedMessage *quotedMessage `json:"referenced_message"`
+	SourceMessage     *quotedMessage `json:"source_message"`
+}
+
+// quotedMessage 是引用消息的文本载体（content/title 二选一）。
+type quotedMessage struct {
+	Content string `json:"content"`
+	Title   string `json:"title"`
+}
+
 // parseGatewayMessage 把 gateway 事件解析为 InboundMessage：
-//   - Chat 用稳定键：群 "group:<group_openid>"、C2C "user:<openid>"、
+//   - Chat 用稳定键：群 "group:<group_openid>"（share_session_in_channel=false
+//     时追加 ":user:<member_openid>" 按人隔离）、C2C "user:<openid>"、
 //     频道 "channel:<channel_id>"；
 //   - MessageID 用事件 id（同时是 QQ 被动回复的 msg_id）；
 //   - UserID 用 author.member_openid / author.user_openid / author.id；
-//   - Text 去空白（群/频道消息额外剥掉开头的 @机器人 标记），无文本则跳过。
-func parseGatewayMessage(connectorID, eventType string, data json.RawMessage) (connectors.InboundMessage, bool) {
+//   - Text 去空白（群/频道消息额外剥掉开头的 @机器人 标记；引用消息拼接
+//     "Quoted: …" 前缀），无文本则跳过。
+func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawMessage) (connectors.InboundMessage, bool) {
+	connectorID := cfg.ID
 	switch strings.TrimSpace(eventType) {
 	case "GROUP_AT_MESSAGE_CREATE":
 		var event struct {
-			ID          string `json:"id"`
-			MsgID       string `json:"msg_id"`
-			GroupOpenID string `json:"group_openid"`
-			Content     string `json:"content"`
-			Author      struct {
+			ID               string            `json:"id"`
+			MsgID            string            `json:"msg_id"`
+			GroupOpenID      string            `json:"group_openid"`
+			Content          string            `json:"content"`
+			MessageReference *messageReference `json:"message_reference"`
+			Author           struct {
 				MemberOpenID string `json:"member_openid"`
 			} `json:"author"`
 		}
@@ -474,14 +494,18 @@ func parseGatewayMessage(connectorID, eventType string, data json.RawMessage) (c
 		if messageID == "" || groupOpenID == "" || memberOpenID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, true)
+		text := normalizeInboundText(event.Content, true, event.MessageReference)
 		if text == "" {
 			return connectors.InboundMessage{}, false
+		}
+		chat := chatKindGroup + ":" + groupOpenID
+		if !shareSessionInChannelSetting(cfg) {
+			chat += ":user:" + memberOpenID
 		}
 		return connectors.InboundMessage{
 			ConnectorID: connectorID,
 			Provider:    Name,
-			Chat:        chatKindGroup + ":" + groupOpenID,
+			Chat:        chat,
 			ChatTitle:   groupOpenID,
 			MessageID:   messageID,
 			UserID:      memberOpenID,
@@ -497,10 +521,11 @@ func parseGatewayMessage(connectorID, eventType string, data json.RawMessage) (c
 		}, true
 	case "C2C_MESSAGE_CREATE":
 		var event struct {
-			ID      string `json:"id"`
-			MsgID   string `json:"msg_id"`
-			Content string `json:"content"`
-			Author  struct {
+			ID               string            `json:"id"`
+			MsgID            string            `json:"msg_id"`
+			Content          string            `json:"content"`
+			MessageReference *messageReference `json:"message_reference"`
+			Author           struct {
 				UserOpenID string `json:"user_openid"`
 			} `json:"author"`
 		}
@@ -512,7 +537,7 @@ func parseGatewayMessage(connectorID, eventType string, data json.RawMessage) (c
 		if messageID == "" || userOpenID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, false)
+		text := normalizeInboundText(event.Content, false, event.MessageReference)
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
@@ -535,11 +560,12 @@ func parseGatewayMessage(connectorID, eventType string, data json.RawMessage) (c
 		// 频道（guild）@机器人消息：防御性解析（默认 intents 未订阅频道事件，
 		// 后续切片放开 intents 后即可用）；发送路径未实现，见 Send。
 		var event struct {
-			ID        string `json:"id"`
-			Content   string `json:"content"`
-			ChannelID string `json:"channel_id"`
-			GuildID   string `json:"guild_id"`
-			Author    struct {
+			ID               string            `json:"id"`
+			Content          string            `json:"content"`
+			ChannelID        string            `json:"channel_id"`
+			GuildID          string            `json:"guild_id"`
+			MessageReference *messageReference `json:"message_reference"`
+			Author           struct {
 				ID string `json:"id"`
 			} `json:"author"`
 		}
@@ -552,7 +578,7 @@ func parseGatewayMessage(connectorID, eventType string, data json.RawMessage) (c
 		if messageID == "" || channelID == "" || userID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, true)
+		text := normalizeInboundText(event.Content, true, event.MessageReference)
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
@@ -579,20 +605,57 @@ func parseGatewayMessage(connectorID, eventType string, data json.RawMessage) (c
 }
 
 // normalizeInboundText 归一化入站文本：去掉首尾空白；stripMention 为 true 时
-// 剥掉 QQ 群/频道消息内容开头的 @机器人 标记（<@!bot_id> / <@bot_id>）。
-func normalizeInboundText(content string, stripMention bool) string {
+// 剥掉 QQ 群/频道消息内容开头的 @机器人 标记（<@!bot_id> / <@bot_id>）；
+// 带引用消息时拼接 "Quoted: <摘要>" 前缀（对齐上游 codex-server 语义）。
+func normalizeInboundText(content string, stripMention bool, ref *messageReference) string {
 	trimmed := strings.TrimSpace(content)
-	if !stripMention {
+	if stripMention {
+		for strings.HasPrefix(trimmed, "<@") {
+			index := strings.Index(trimmed, ">")
+			if index < 0 {
+				break
+			}
+			trimmed = strings.TrimSpace(trimmed[index+1:])
+		}
+	}
+	quoted := extractQuotedText(ref)
+	if quoted == "" {
 		return trimmed
 	}
-	for strings.HasPrefix(trimmed, "<@") {
-		index := strings.Index(trimmed, ">")
-		if index < 0 {
-			break
-		}
-		trimmed = strings.TrimSpace(trimmed[index+1:])
+	if trimmed == "" {
+		return "Quoted: " + quoted
 	}
-	return trimmed
+	return "Quoted: " + quoted + "\n" + trimmed
+}
+
+// extractQuotedText 从 message_reference 提取被引用消息摘要：
+// content/title 与三种嵌套形态（message/referenced_message/source_message）依次探测。
+func extractQuotedText(ref *messageReference) string {
+	if ref == nil {
+		return ""
+	}
+	for _, value := range []string{
+		strings.TrimSpace(ref.Content),
+		quotedText(ref.Message),
+		quotedText(ref.ReferencedMessage),
+		quotedText(ref.SourceMessage),
+		strings.TrimSpace(ref.Title),
+	} {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func quotedText(message *quotedMessage) string {
+	if message == nil {
+		return ""
+	}
+	if content := strings.TrimSpace(message.Content); content != "" {
+		return content
+	}
+	return strings.TrimSpace(message.Title)
 }
 
 func firstNonEmpty(values ...string) string {

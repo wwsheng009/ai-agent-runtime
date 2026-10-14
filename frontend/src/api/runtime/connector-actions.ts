@@ -44,6 +44,7 @@ export function normalizeConnectorActionPayload(
     account_id: readString(record.account_id) || undefined,
     user_id: readString(record.user_id) || undefined,
     credential_ready: record.credential_ready === true,
+    message: readString(record.message) || undefined,
     settings: asRecord(record.settings)
       ? Object.fromEntries(
           Object.entries(record.settings as Record<string, unknown>).filter(

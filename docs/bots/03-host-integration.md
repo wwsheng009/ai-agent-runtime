@@ -48,7 +48,7 @@
 | 路由与鉴权 | `main.go:405-711`；`/api/*`、`/n/` 全为 owner session（`:445-543,701`） | 已落地：管理 API `/api/connectors*`（`owner.RequireSession`）+ 独立命名空间 `POST /hooks/connectors/{id}`（按连接器签名校验，不走 owner session）；挂在 console 的 `/` 兜底之前 |
 | 会话执行 | 注册表 `nodeID|sessionID`（`push.go:102`）＋反代 `/n/{node_id}/`（`main.go:701`） | 已落地 `Backend=gateway_node`：把 IM 消息经隧道投递到目标 node 的 `POST /web/api/invoke`（同步注入 prompt、等待 turn 结束并回传最终 assistant 回复）；节点选择见下 |
 | 出站提醒 | `pushNotifier` + `notify_policy`（优先级/静音/合并）+ `internal/gateway/ntfy` | 把 IM 当**第三通道**：高优先即时、低优先合并；复用同一 attention 差分，不重复推送 |
-| 控制台（micro web） | `//go:embed console` + SPA（`console.go:11-64`）；无通用配置编辑器 | ◐ 最小列表页已落地：`#connectors` 视图读取 `GET /api/connectors`（id/provider/启停/运行归属/secret_keys）并提供管理接口 JSON 与 Schema 跳转；Schema 表单/测试按钮/日志随 P1 前端切片补齐（不与前端 repo 耦合） |
+| 控制台（micro web） | `//go:embed console` + SPA（`console.go:11-64`）；无通用配置编辑器 | ◐ 最小列表页 + **通用动作执行**已落地：`#connectors` 视图读取 `GET /api/connectors`（id/provider/启停/运行归属/secret_keys），按 `GET /api/connectors/schema` 渲染 `kind=button` 动作按钮（如 QQ「授权校验」，2026-10-14 补记；`qr` 类动作仍在 web 端）；保留管理接口 JSON 与 Schema 跳转；Schema 表单/测试按钮/日志随 P1 前端切片补齐（不与前端 repo 耦合） |
 
 > 语义边界：gateway 不执行 agent，只做**入口 + 路由 + 提醒**；agent 始终跑在 node 上（与本项目现有架构一致）。
 
@@ -115,8 +115,10 @@
        {"key":"app_id","label":"AppID","type":"text","required":true},
        {"key":"app_secret","label":"AppSecret","type":"secret","required":true},
        {"key":"sandbox","label":"沙箱环境","type":"bool","default":"false"},
-       {"key":"api_base","label":"API 基址","type":"url","required":false}
-     ],"actions":[]},
+       {"key":"api_base","label":"API 基址","type":"url","required":false},
+       {"key":"markdown_support","label":"Markdown 消息","type":"bool","default":"false"},
+       {"key":"share_session_in_channel","label":"群聊共享会话","type":"bool","default":"true"}
+     ],"actions":[{"key":"check_credentials","label":"授权校验","kind":"button"}]},
     {"provider":"wechat","label":"微信","modes":["polling"],
      "fields":[{"key":"account_id","label":"账号","type":"text","required":true}],
       "actions":[{"key":"start_login","label":"扫码登录","kind":"qr"}]},
@@ -146,9 +148,10 @@
 | aicli micro web | 原生 JS（`cmd/aicli/commands/web/js/`） | 新 `connectors.js` + tab | 样板：`provider-editor.js`、`config-admin.js` |
 | runtime-server | React/Vite（`frontend/`） | `pages/connectors-page.tsx` + i18n | 与 `runtime-config-page.tsx` 同级 |
 
-> 三端共用同一份 Schema：当前已注册 `telegram`（polling）、`qqbot`（gateway，字段
-> `app_id`/`app_secret`/`sandbox`/`api_base`）、`wechat`（polling + 扫码登录 action）与
-> `feishu`（webhook，见 §6）四个通道；页面由 `GET /connectors/schema` 驱动，新增通道三端零改动。
+> 三端共用同一份 Schema：当前已注册 `telegram`（polling/webhook）、`qqbot`（gateway，字段
+> `app_id`/`app_secret`/`sandbox`/`api_base`/`markdown_support`/`share_session_in_channel`
+> + 「授权校验」button action）、`wechat`（polling + 扫码登录 action）与
+> `feishu`（webhook，见 §6）四个通道；页面由 `GET /connectors/schema` 驱动，新增通道/字段/动作三端零改动。
 
 > **实现状态（2026-10-13）**：runtime-server 端最小 React 配置页已落地，路由 `/runtime/connectors`
 > （懒加载，入口在 `runtime-config-page.tsx` 导航）。构成：`pages/connectors-page.tsx`（列表 +
@@ -214,7 +217,7 @@
   写入点覆盖白名单拒绝、重复投递跳过、入队成功、队列满、处理开始/成功（含回复长度）、
   后端错误、投递失败（`Send`/`streamer.Fail`）、归属闸跳过与服务启停；删除连接器不清理
   内存环（进程内可容忍，重启清零）。
-- 待续（P1/P2）：`/{id}/bindings`；gateway console 的原生 JS 配置页（当前只读列表）。
+- 待续（P1/P2）：`/{id}/bindings`；gateway console 的原生 JS 配置页（列表 + `kind=button` 动作按钮已落地，Schema 表单编辑待续）。
 - **安全与生命周期（2026-10-13 审查修复）**：管理面/入站不再把请求 ctx 当生命周期
   ——`Service` 持有宿主基 ctx（`Start` 建立/`Stop` 取消），轮询与异步任务基于它派生，
   REST handler 返回（`r.Context()` 取消）不会让新建/Reload 的连接器静默停摆；

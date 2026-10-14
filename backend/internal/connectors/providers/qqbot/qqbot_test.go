@@ -1,10 +1,14 @@
 package qqbot
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -48,8 +52,14 @@ type fakeQQ struct {
 	tokenBody    string
 	msgStatus    int
 	msgBody      string
-	script       wsScript
-	wsURL        string
+	meStatus     int
+	meBody       string
+	// passiveStatus/passiveBody 仅对带 msg_id 的被动回复生效（模拟窗口过期
+	// 400/404 等可降级错误）；主动路径（无 msg_id）仍按 msgStatus 响应。
+	passiveStatus int
+	passiveBody   string
+	script        wsScript
+	wsURL         string
 }
 
 func newFakeQQ(appSecret, token string) *fakeQQ {
@@ -57,6 +67,10 @@ func newFakeQQ(appSecret, token string) *fakeQQ {
 }
 
 var wsUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+// fakePNG 是媒体上传/下载测试用的最小 PNG 字节（8 字节签名即可被
+// http.DetectContentType 识别为 image/png）。
+var fakePNG = []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03}
 
 func (f *fakeQQ) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +93,24 @@ func (f *fakeQQ) handler() http.Handler {
 			wsURL := f.wsURL
 			f.mu.Unlock()
 			writeJSON(w, map[string]any{"url": wsURL})
+		case r.URL.Path == "/users/@me":
+			f.mu.Lock()
+			status, body := f.meStatus, f.meBody
+			f.authHeaders = append(f.authHeaders, r.Header.Get("Authorization"))
+			f.mu.Unlock()
+			if status != 0 {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(body))
+				return
+			}
+			writeJSON(w, map[string]any{
+				"id":       "bot-openid-1",
+				"username": "测试机器人",
+				"avatar":   "https://example.com/avatar.png",
+			})
+		case strings.HasPrefix(r.URL.Path, "/media/"):
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(fakePNG)
 		case r.URL.Path == "/ws":
 			f.mu.Lock()
 			f.connects++
@@ -100,6 +132,19 @@ func (f *fakeQQ) handler() http.Handler {
 			_ = json.NewDecoder(r.Body).Decode(&payload)
 			f.mu.Lock()
 			f.authHeaders = append(f.authHeaders, r.Header.Get("Authorization"))
+			if _, hasMsgID := payload["msg_id"]; hasMsgID && f.passiveStatus != 0 {
+				status, body := f.passiveStatus, f.passiveBody
+				f.mu.Unlock()
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(body))
+				return
+			}
+			if strings.HasSuffix(r.URL.Path, "/files") {
+				f.sent = append(f.sent, sentMessage{path: r.URL.Path, payload: payload})
+				f.mu.Unlock()
+				writeJSON(w, map[string]any{"file_info": "file-info-1"})
+				return
+			}
 			status, body := f.msgStatus, f.msgBody
 			if status == 0 {
 				f.sent = append(f.sent, sentMessage{path: r.URL.Path, payload: payload})
@@ -388,7 +433,7 @@ func TestSchemaContract(t *testing.T) {
 	if len(schema.Modes) != 1 || schema.Modes[0] != "gateway" {
 		t.Fatalf("modes = %v, want [gateway]", schema.Modes)
 	}
-	var appID, appSecret, sandbox, apiBase bool
+	var appID, appSecret, sandbox, apiBase, markdown, shareSession, intents bool
 	for _, field := range schema.Fields {
 		switch field.Key {
 		case "app_id":
@@ -399,10 +444,20 @@ func TestSchemaContract(t *testing.T) {
 			sandbox = field.Type == "bool" && field.Default == "false"
 		case "api_base":
 			apiBase = field.Type == "url" && !field.Required
+		case "markdown_support":
+			markdown = field.Type == "bool" && field.Default == "false"
+		case "share_session_in_channel":
+			shareSession = field.Type == "bool" && field.Default == "true"
+		case "intents":
+			intents = field.Type == "number" && !field.Required
 		}
 	}
-	if !appID || !appSecret || !sandbox || !apiBase {
+	if !appID || !appSecret || !sandbox || !apiBase || !markdown || !shareSession || !intents {
 		t.Fatalf("schema fields = %+v", schema.Fields)
+	}
+	if len(schema.Actions) != 1 || schema.Actions[0].Key != actionCheckCredentials ||
+		schema.Actions[0].Kind != "button" {
+		t.Fatalf("schema actions = %+v, want check_credentials(button)", schema.Actions)
 	}
 }
 
@@ -942,7 +997,7 @@ func TestParseGatewayMessageEdgeCases(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			msg, ok := parseGatewayMessage("qq-1", tc.eventType, json.RawMessage(tc.data))
+			msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, tc.eventType, json.RawMessage(tc.data))
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v (msg=%+v)", ok, tc.wantOK, msg)
 			}
@@ -953,5 +1008,302 @@ func TestParseGatewayMessageEdgeCases(t *testing.T) {
 				t.Fatalf("message = %+v", msg)
 			}
 		})
+	}
+}
+
+// ── 授权校验动作（check_credentials） ───────────────────────────────────────
+
+func TestRunActionCheckCredentials(t *testing.T) {
+	fake := newFakeQQ("secret-value-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+	cfg := testConfig("qq-1", "app-1", "secret-value-1")
+
+	result, err := provider.RunAction(context.Background(), cfg, actionCheckCredentials, nil)
+	if err != nil {
+		t.Fatalf("check credentials: %v", err)
+	}
+	if result["ok"] != true || result["action"] != actionCheckCredentials || result["app_id"] != "app-1" {
+		t.Fatalf("result = %+v", result)
+	}
+	if result["api_base"] != server.URL {
+		t.Fatalf("api_base = %v", result["api_base"])
+	}
+	bot, ok := result["bot"].(map[string]any)
+	if !ok || bot["username"] != "测试机器人" || bot["id"] != "bot-openid-1" {
+		t.Fatalf("bot = %+v", result["bot"])
+	}
+	message, _ := result["message"].(string)
+	if !strings.Contains(message, "测试机器人") || !strings.Contains(message, "app-1") {
+		t.Fatalf("message = %q", message)
+	}
+	raw, _ := json.Marshal(result)
+	if strings.Contains(string(raw), "secret-value-1") {
+		t.Fatalf("secret leaked in action result: %s", raw)
+	}
+}
+
+func TestRunActionCheckCredentialsErrors(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+
+	// 未知动作。
+	if _, err := provider.RunAction(context.Background(), testConfig("qq-1", "app-1", "secret-1"), "nope", nil); err == nil {
+		t.Fatal("unknown action must fail")
+	}
+	// 缺密钥：不发请求。
+	if _, err := provider.RunAction(context.Background(), testConfig("qq-2", "app-2", ""), actionCheckCredentials, nil); err == nil {
+		t.Fatal("missing app_secret must fail")
+	}
+	// /users/@me 失败（上游 500）：错误透传且脱敏。
+	fake.meStatus = http.StatusInternalServerError
+	fake.meBody = `{"message":"internal: secret-1"}`
+	_, err := provider.RunAction(context.Background(), testConfig("qq-3", "app-3", "secret-1"), actionCheckCredentials, nil)
+	if err == nil {
+		t.Fatal("me failure must propagate")
+	}
+	if strings.Contains(err.Error(), "secret-1") {
+		t.Fatalf("app_secret leaked: %v", err)
+	}
+}
+
+// ── 出站：markdown / 分片 / 降级 / 媒体 ─────────────────────────────────────
+
+func TestSendMarkdownWhenEnabled(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+	cfg.Settings["markdown_support"] = "true"
+
+	if err := provider.Send(context.Background(), cfg, "user:user-openid-1",
+		[]connectors.OutboundMessage{{Text: "**加粗**"}}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	sent := fake.sentMessages()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v", sent)
+	}
+	markdown, ok := sent[0].payload["markdown"].(map[string]any)
+	if !ok || markdown["content"] != "**加粗**" || sent[0].payload["msg_type"] != float64(2) {
+		t.Fatalf("markdown payload = %+v", sent[0].payload)
+	}
+	if _, ok := sent[0].payload["content"]; ok {
+		t.Fatalf("markdown send must not carry plain content: %+v", sent[0].payload)
+	}
+}
+
+func TestSendChunksLongTextByRunes(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+
+	long := strings.Repeat("汉", maxMessageRunes+500)
+	if err := provider.Send(context.Background(), cfg, "user:user-openid-1",
+		[]connectors.OutboundMessage{{Text: long}}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	sent := fake.sentMessages()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %d messages, want 2", len(sent))
+	}
+	first, _ := sent[0].payload["content"].(string)
+	second, _ := sent[1].payload["content"].(string)
+	if len([]rune(first)) != maxMessageRunes || len([]rune(second)) != 500 {
+		t.Fatalf("chunk runes = %d/%d, want %d/500",
+			len([]rune(first)), len([]rune(second)), maxMessageRunes)
+	}
+	if first+second != long {
+		t.Fatal("chunks must reassemble to the original text")
+	}
+}
+
+func TestSendPassiveFallsBackToProactive(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	fake.script = scriptIdentifyReady("session-1", 60000,
+		groupMessageEvent("evt-passive-1", "group-openid-1", "member-openid-1", "你好", 2))
+	fake.passiveStatus = http.StatusBadRequest
+	fake.passiveBody = `{"code":22009,"message":"reply message expired"}`
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL), WithRetryDelay(10*time.Millisecond))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+
+	received := make(chan connectors.InboundMessage, 1)
+	startPolling(t, provider, cfg, func(_ context.Context, msg connectors.InboundMessage) error {
+		received <- msg
+		return nil
+	}, newMemState())
+	waitForMessage(t, received)
+
+	if err := provider.Send(context.Background(), cfg, "group:group-openid-1",
+		[]connectors.OutboundMessage{{Text: "回复"}}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	sent := fake.sentMessages()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %+v, want 1（被动失败后仅主动重试落盘）", sent)
+	}
+	if _, ok := sent[0].payload["msg_id"]; ok {
+		t.Fatalf("fallback send must be proactive: %+v", sent[0].payload)
+	}
+	if sent[0].payload["content"] != "回复" {
+		t.Fatalf("payload = %+v", sent[0].payload)
+	}
+}
+
+func TestSendMediaUploadsAndSendsRichMedia(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+
+	err := provider.Send(context.Background(), cfg, "group:group-openid-1",
+		[]connectors.OutboundMessage{{
+			Media: []connectors.Media{{Kind: "image", URL: server.URL + "/media/img.png"}},
+		}})
+	if err != nil {
+		t.Fatalf("send media: %v", err)
+	}
+	sent := fake.sentMessages()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %+v, want upload + message", sent)
+	}
+	upload := sent[0]
+	if upload.path != "/v2/groups/group-openid-1/files" || upload.payload["file_type"] != float64(1) ||
+		upload.payload["srv_send_msg"] != false {
+		t.Fatalf("upload = %+v", upload)
+	}
+	encoded, _ := upload.payload["file_data"].(string)
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || !bytes.Equal(decoded, fakePNG) {
+		t.Fatalf("file_data mismatch: %v", err)
+	}
+	msg := sent[1]
+	if msg.path != "/v2/groups/group-openid-1/messages" || msg.payload["msg_type"] != float64(7) {
+		t.Fatalf("media message = %+v", msg)
+	}
+	media, ok := msg.payload["media"].(map[string]any)
+	if !ok || media["file_info"] != "file-info-1" {
+		t.Fatalf("media payload = %+v", msg.payload)
+	}
+}
+
+func TestSendMediaFromLocalFile(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+
+	path := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(path, []byte("hello media"), 0o600); err != nil {
+		t.Fatalf("write temp media: %v", err)
+	}
+	err := provider.Send(context.Background(), cfg, "user:user-openid-1",
+		[]connectors.OutboundMessage{{Media: []connectors.Media{{Path: path}}}})
+	if err != nil {
+		t.Fatalf("send local media: %v", err)
+	}
+	sent := fake.sentMessages()
+	if len(sent) != 2 || sent[0].path != "/v2/users/user-openid-1/files" ||
+		sent[0].payload["file_type"] != float64(4) {
+		t.Fatalf("sent = %+v", sent)
+	}
+}
+
+// ── 引用消息与群会话隔离键 ──────────────────────────────────────────────────
+
+func TestParseGroupQuotedAndIsolation(t *testing.T) {
+	quoted := `{"id":"e9","group_openid":"g1","content":"<@!bot> 继续","author":{"member_openid":"m1"},"message_reference":{"content":"上一句"}}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(quoted))
+	if !ok || msg.Text != "Quoted: 上一句\n继续" {
+		t.Fatalf("quoted message = %+v (ok=%v)", msg, ok)
+	}
+	if msg.Chat != "group:g1" {
+		t.Fatalf("default chat = %s, want group:g1", msg.Chat)
+	}
+
+	nested := `{"id":"e10","group_openid":"g1","content":"继续","author":{"member_openid":"m1"},"message_reference":{"message":{"content":"嵌套引用"}}}`
+	msg, ok = parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(nested))
+	if !ok || msg.Text != "Quoted: 嵌套引用\n继续" {
+		t.Fatalf("nested quoted message = %+v (ok=%v)", msg, ok)
+	}
+
+	isolated := connectors.Config{ID: "qq-1", Settings: map[string]string{"share_session_in_channel": "false"}}
+	msg, ok = parseGatewayMessage(isolated, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(quoted))
+	if !ok || msg.Chat != "group:g1:user:m1" {
+		t.Fatalf("isolated chat = %s (ok=%v), want group:g1:user:m1", msg.Chat, ok)
+	}
+}
+
+func TestParseChatIsolatedGroupKey(t *testing.T) {
+	target, err := parseChat("group:group-openid-1:user:member-openid-1")
+	if err != nil {
+		t.Fatalf("parse chat: %v", err)
+	}
+	if target.kind != chatKindGroup || target.openID != "group-openid-1" ||
+		target.chat != "group:group-openid-1:user:member-openid-1" {
+		t.Fatalf("target = %+v", target)
+	}
+}
+
+func TestSendIsolatedGroupChatUsesGroupEndpoint(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	fake.script = scriptIdentifyReady("session-1", 60000,
+		groupMessageEvent("evt-iso-1", "group-openid-1", "member-openid-1", "你好", 2))
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL), WithRetryDelay(10*time.Millisecond))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+	cfg.Settings["share_session_in_channel"] = "false"
+
+	received := make(chan connectors.InboundMessage, 1)
+	startPolling(t, provider, cfg, func(_ context.Context, msg connectors.InboundMessage) error {
+		received <- msg
+		return nil
+	}, newMemState())
+	msg := waitForMessage(t, received)
+	if msg.Chat != "group:group-openid-1:user:member-openid-1" {
+		t.Fatalf("inbound chat = %s", msg.Chat)
+	}
+	if err := provider.Send(context.Background(), cfg, msg.Chat,
+		[]connectors.OutboundMessage{{Text: "回复"}}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	sent := fake.sentMessages()
+	if len(sent) != 1 || sent[0].path != "/v2/groups/group-openid-1/messages" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	if sent[0].payload["msg_id"] != "evt-iso-1" || sent[0].payload["msg_seq"] != float64(1) {
+		t.Fatalf("payload = %+v", sent[0].payload)
+	}
+}
+// ── Gateway intents 覆盖（对齐 codex-server 的 qqbot_intents） ─────────────
+
+func TestGatewayIdentifyIntentsOverrideAndFallback(t *testing.T) {
+	// 覆盖：settings.intents 按原值下发 Identify。
+	custom := newFakeQQ("secret-1", "token-1")
+	custom.script = scriptIdentifyReady("session-custom", 60000)
+	customServer := newFakeQQServer(t, custom)
+	customProvider := New(WithAPIBase(customServer.URL), WithRetryDelay(10*time.Millisecond))
+	customCfg := testConfig("qq-1", "app-1", "secret-1")
+	customCfg.Settings["intents"] = "1073741824" // 1<<30
+	startPolling(t, customProvider, customCfg, func(_ context.Context, _ connectors.InboundMessage) error { return nil }, newMemState())
+	waitFor(t, "custom identify", func() bool { return len(custom.identifyPayloads()) == 1 })
+	if got := custom.identifyPayloads()[0].d["intents"]; got != float64(1<<30) {
+		t.Fatalf("custom intents = %v, want %d", got, 1<<30)
+	}
+
+	// 非法值：回退默认（网关仍可连接）。
+	fallback := newFakeQQ("secret-2", "token-2")
+	fallback.script = scriptIdentifyReady("session-default", 60000)
+	fallbackServer := newFakeQQServer(t, fallback)
+	fallbackProvider := New(WithAPIBase(fallbackServer.URL), WithRetryDelay(10*time.Millisecond))
+	fallbackCfg := testConfig("qq-2", "app-2", "secret-2")
+	fallbackCfg.Settings["intents"] = "not-a-number"
+	startPolling(t, fallbackProvider, fallbackCfg, func(_ context.Context, _ connectors.InboundMessage) error { return nil }, newMemState())
+	waitFor(t, "fallback identify", func() bool { return len(fallback.identifyPayloads()) == 1 })
+	if got := fallback.identifyPayloads()[0].d["intents"]; got != float64(gatewayIntents) {
+		t.Fatalf("fallback intents = %v, want %d", got, gatewayIntents)
 	}
 }

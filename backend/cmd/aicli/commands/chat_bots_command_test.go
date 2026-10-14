@@ -562,3 +562,113 @@ func TestBotsRenderQRBlocks(t *testing.T) {
 type bufWriter struct{ b *strings.Builder }
 
 func (w *bufWriter) Write(p []byte) (int, error) { return w.b.Write(p) }
+
+// ── 通用动作（kind=button）与结果渲染 ──────────────────────────────────────
+
+// staticSchemaProvider 返回固定 Schema 的最小通道替身（通用动作行测试用）。
+type staticSchemaProvider struct{ schema api.ProviderSchema }
+
+func (p staticSchemaProvider) Name() string { return p.schema.Provider }
+
+func (p staticSchemaProvider) Schema() api.ProviderSchema { return p.schema }
+
+func (p staticSchemaProvider) Activate(context.Context, connectors.Config) (connectors.Activation, error) {
+	return connectors.Activation{}, nil
+}
+
+func (p staticSchemaProvider) Deactivate(context.Context, connectors.Config) error { return nil }
+
+func (p staticSchemaProvider) Send(context.Context, connectors.Config, string, []connectors.OutboundMessage) error {
+	return nil
+}
+
+// chatScreenBotsActionSpecForSchema 用给定 Schema 装配最小 host 并返回动作副屏。
+func chatScreenBotsActionSpecForSchema(t *testing.T, schema api.ProviderSchema) chatScreenSpec {
+	t.Helper()
+	store := connectors.NewMemoryStore(connectors.Config{
+		ID: "qq-1", Provider: schema.Provider, Name: schema.Label, Enabled: true,
+	})
+	service := connectors.New(connectors.Deps{Store: store, Logf: func(string, ...any) {}})
+	require.NoError(t, service.Register(staticSchemaProvider{schema: schema}))
+	host := &LocalConnectorHost{store: store, service: service}
+	cfg, ok := store.GetConfig("qq-1")
+	if !ok {
+		t.Fatal("seed config missing")
+	}
+	return chatScreenBotsActionSpec(host, cfg)
+}
+
+func TestBotsHasButtonAction(t *testing.T) {
+	qrOnly := api.ProviderSchema{
+		Provider: "wechat",
+		Actions:  []api.ActionSpec{{Key: "start_login", Kind: "qr"}},
+	}
+	if botsHasButtonAction(qrOnly) {
+		t.Fatal("qr-only schema must not report button action")
+	}
+	withButton := api.ProviderSchema{
+		Provider: "qqbot",
+		Actions: []api.ActionSpec{
+			{Key: "check_credentials", Label: "授权校验", Kind: "button"},
+		},
+	}
+	if !botsHasButtonAction(withButton) {
+		t.Fatal("button action must be detected")
+	}
+	emptyKey := api.ProviderSchema{Provider: "x", Actions: []api.ActionSpec{{Key: "  ", Kind: "button"}}}
+	if botsHasButtonAction(emptyKey) {
+		t.Fatal("blank key must not count as an action")
+	}
+}
+
+func TestBotsFormatActionResult(t *testing.T) {
+	payload := map[string]any{
+		"ok":      true,
+		"action":  "check_credentials",
+		"message": "校验通过：测试机器人（AppID app-1）",
+		"app_id":  "app-1",
+		"sandbox": false,
+		"bot":     map[string]any{"username": "测试机器人", "id": "bot-1"},
+	}
+	got := botsFormatActionResult(payload)
+	for _, want := range []string{"校验通过：测试机器人（AppID app-1）", "app_id: app-1", "sandbox: false", "bot: {id=bot-1, username=测试机器人}"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("formatted = %q, want contains %q", got, want)
+		}
+	}
+	if strings.Contains(got, "ok:") || strings.Contains(got, "action:") {
+		t.Fatalf("ok/action must be omitted from display: %q", got)
+	}
+
+	if got := botsFormatActionResult(nil); got != "（无返回内容）" {
+		t.Fatalf("empty payload = %q", got)
+	}
+	if got := botsFormatActionResult(map[string]any{"ok": true, "action": "x"}); got != "（动作完成，无展示字段）" {
+		t.Fatalf("display-empty payload = %q", got)
+	}
+}
+
+func TestChatScreenBotsActionSpecIncludesButtonActions(t *testing.T) {
+	spec := chatScreenBotsActionSpecForSchema(t, api.ProviderSchema{
+		Provider: "qqbot",
+		Label:    "QQ 机器人",
+		Actions: []api.ActionSpec{
+			{Key: "check_credentials", Label: "授权校验", Kind: "button"},
+		},
+	})
+	if len(spec.Rows) == 0 {
+		t.Fatal("action spec must have rows")
+	}
+	found := false
+	for _, row := range spec.Rows {
+		if row.Title == "授权校验" {
+			found = true
+			if !strings.Contains(row.Detail, "通道动作") {
+				t.Fatalf("row detail = %q", row.Detail)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("button action row missing: %+v", spec.Rows)
+	}
+}

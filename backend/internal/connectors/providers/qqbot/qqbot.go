@@ -12,6 +12,7 @@ package qqbot
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,6 +60,11 @@ const (
 
 	// maxTrackedChats 是进程内被动回复状态（最近 msg_id / msg_seq）的防御上限。
 	maxTrackedChats = 4096
+
+	// maxMessageRunes 是单条文本消息的分片上限：QQ 文本内容上限 2000 字符，
+	// 按 rune 切分（与上游 codex-server 的 qqbotMessageTextLimitRunes 一致），
+	// 被动回复的多个分片按 msg_seq 递增去重。
+	maxMessageRunes = 2000
 )
 
 // 聊天键前缀（InboundMessage.Chat 的稳定格式；Send 据此选择回复端点）。
@@ -180,6 +188,23 @@ func (p *Provider) Schema() api.ProviderSchema {
 				Key: "api_base", Label: "API 基址", Type: api.FieldURL,
 				Help: "可留空（默认 https://api.sgroup.qq.com）；可指向测试替身或反向代理",
 			},
+			{
+				Key: "markdown_support", Label: "Markdown 消息", Type: api.FieldBool, Default: "false",
+				Help: "开启后回复以 markdown（msg_type=2）发送；默认纯文本（msg_type=0）",
+			},
+			{
+				Key: "share_session_in_channel", Label: "群聊共享会话", Type: api.FieldBool, Default: "true",
+				Help: "开启时同一群共用一个 agent 会话；关闭后群内按成员隔离上下文（每人独立会话）",
+			},
+			{
+				Key: "intents", Label: "Gateway Intents", Type: api.FieldNumber,
+				Help: "高级：网关事件订阅位掩码；留空=默认（仅群@与 C2C 事件）",
+			},
+		},
+		// QQ 官方开放平台没有扫码登录协议（凭据来自 bot.q.qq.com 后台），
+		// 「授权校验」= 等价便捷流：校验 app_id/app_secret 并拉取机器人信息。
+		Actions: []api.ActionSpec{
+			{Key: actionCheckCredentials, Label: "授权校验", Kind: "button"},
 		},
 	}
 }
@@ -211,12 +236,15 @@ func (p *Provider) SupportsPolling(cfg connectors.Config) bool {
 	return p.appID(cfg) != "" && p.appSecret(cfg) != ""
 }
 
-// Send 发送文本消息（QQ 官方 v2 消息接口）。
+// Send 发送消息（QQ 官方 v2 消息接口：文本 + rich media）。
 //
-// 被动回复：若该 chat 最近收到过入站消息，带上其事件 id 作为 msg_id，并按 chat
-// 递增 msg_seq（QQ 对同一 msg_id 的回复按 msg_seq 去重，必须唯一且递增）。
-// 没有可用 msg_id 时走主动消息路径（与上游实现一致：不带 msg_id/msg_seq 直接
-// POST），配额/权限由平台裁决，失败错误文本已脱敏。
+// 出站策略（对齐上游 codex-server）：
+//   - 文本按 maxMessageRunes 分片（多段被动回复 msg_seq 递增去重）；
+//   - markdown_support=true 时以 msg_type=2 + markdown.content 发送；
+//   - 被动回复（带最近入站的 msg_id）失败且属可降级错误时，自动退化为主动发送；
+//   - Media 先 POST /files 上传取 file_info，再以 msg_type=7 发送。
+//
+// 没有可用 msg_id 时直接走主动消息路径：配额/权限由平台裁决，错误文本已脱敏。
 func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string, msgs []connectors.OutboundMessage) error {
 	if p.appID(cfg) == "" || p.appSecret(cfg) == "" {
 		return errors.New("qqbot: app_id and app_secret are required")
@@ -226,19 +254,53 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 		return err
 	}
 	if target.kind == chatKindChannel {
-		return fmt.Errorf("qqbot: 频道（guild）消息发送未实现（切片 1 仅支持群/C2C）：%s", target.chat)
+		return fmt.Errorf("qqbot: 频道（guild）消息发送未实现（仅支持群/C2C）：%s", target.chat)
 	}
-	msgID := p.lastInboundMsgID(target.chat)
+	// usePassive 在首个被动回复被平台拒绝（可降级错误）后翻转为 false，
+	// 后续消息与媒体直接走主动路径（与上游一致，避免重复失败）。
+	usePassive := strings.TrimSpace(p.lastInboundMsgID(target.chat)) != ""
 	for _, msg := range msgs {
 		text := strings.TrimSpace(msg.Text)
-		if text == "" {
-			continue
+		if text != "" {
+			for _, chunk := range splitMessageText(text, maxMessageRunes) {
+				if err := p.sendTextWithFallback(ctx, cfg, target, chunk, &usePassive); err != nil {
+					return err
+				}
+			}
 		}
-		if err := p.sendText(ctx, cfg, target, text, msgID); err != nil {
-			return err
+		for _, media := range msg.Media {
+			if err := p.sendMediaWithFallback(ctx, cfg, target, media, &usePassive); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// sendTextWithFallback 发送一段文本；被动失败且可降级时翻转为主动重试。
+func (p *Provider) sendTextWithFallback(ctx context.Context, cfg connectors.Config, target chatTarget, text string, usePassive *bool) error {
+	passive := usePassive != nil && *usePassive
+	err := p.sendText(ctx, cfg, target, text, passive)
+	if err != nil && passive && shouldFallbackToProactive(err) {
+		if usePassive != nil {
+			*usePassive = false
+		}
+		err = p.sendText(ctx, cfg, target, text, false)
+	}
+	return err
+}
+
+// sendMediaWithFallback 发送一条媒体；语义同 sendTextWithFallback。
+func (p *Provider) sendMediaWithFallback(ctx context.Context, cfg connectors.Config, target chatTarget, media connectors.Media, usePassive *bool) error {
+	passive := usePassive != nil && *usePassive
+	err := p.sendMedia(ctx, cfg, target, media, passive)
+	if err != nil && passive && shouldFallbackToProactive(err) {
+		if usePassive != nil {
+			*usePassive = false
+		}
+		err = p.sendMedia(ctx, cfg, target, media, false)
+	}
+	return err
 }
 
 // chatTarget 是 Send 的解析结果（聊天键 → 回复端点）。
@@ -250,8 +312,10 @@ type chatTarget struct {
 	openID string
 }
 
-// parseChat 解析稳定聊天键：group:<group_openid> / user:<openid> /
-// channel:<channel_id>；无前缀时按 C2C openid 处理（与上游默认一致）。
+// parseChat 解析稳定聊天键：group:<group_openid>[:user:<member_openid>] /
+// user:<openid> / channel:<channel_id>；无前缀时按 C2C openid 处理。
+// 群键的 :user: 后缀（share_session_in_channel=false 的按人隔离会话）只影响
+// 会话身份，回复端点始终用群 openid——此处剥离后缀得到 target.openID。
 func parseChat(chat string) (chatTarget, error) {
 	trimmed := strings.TrimSpace(chat)
 	if trimmed == "" {
@@ -262,6 +326,11 @@ func parseChat(chat string) (chatTarget, error) {
 			continue
 		}
 		openID := strings.TrimSpace(strings.TrimPrefix(trimmed, kind+":"))
+		if kind == chatKindGroup {
+			if index := strings.Index(openID, ":user:"); index > 0 {
+				openID = strings.TrimSpace(openID[:index])
+			}
+		}
 		if openID == "" {
 			return chatTarget{}, fmt.Errorf("qqbot: chat key %q is missing openid", trimmed)
 		}
@@ -279,16 +348,207 @@ func messagesEndpoint(base string, target chatTarget) string {
 	return base + "/v2/users/" + url.PathEscape(target.openID) + "/messages"
 }
 
-func (p *Provider) sendText(ctx context.Context, cfg connectors.Config, target chatTarget, text, msgID string) error {
+func (p *Provider) sendText(ctx context.Context, cfg connectors.Config, target chatTarget, text string, passive bool) error {
 	payload := map[string]any{
 		"content":  text,
 		"msg_type": 0,
 	}
-	if trimmed := strings.TrimSpace(msgID); trimmed != "" {
-		payload["msg_id"] = trimmed
-		payload["msg_seq"] = p.nextMsgSeq(target.chat)
+	if p.markdownSupport(cfg) {
+		payload = map[string]any{
+			"markdown": map[string]any{"content": text},
+			"msg_type": 2,
+		}
 	}
+	p.applyPassiveReply(payload, target, passive)
 	return p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil)
+}
+
+// sendMedia 发送一条 rich media（msg_type=7）：先上传取 file_info 再发消息。
+func (p *Provider) sendMedia(ctx context.Context, cfg connectors.Config, target chatTarget, media connectors.Media, passive bool) error {
+	fileInfo, err := p.uploadRichMedia(ctx, cfg, target, media)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"msg_type": 7,
+		"media":    map[string]any{"file_info": fileInfo},
+	}
+	p.applyPassiveReply(payload, target, passive)
+	return p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil)
+}
+
+// uploadRichMedia 上传媒体并返回 file_info（POST /v2/{groups|users}/{id}/files，
+// srv_send_msg=false 表示只上传、不自动发送）。
+func (p *Provider) uploadRichMedia(ctx context.Context, cfg connectors.Config, target chatTarget, media connectors.Media) (string, error) {
+	data, contentType, err := p.resolveOutboundMedia(ctx, media)
+	if err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"file_type":    mediaFileType(media, contentType),
+		"file_data":    base64.StdEncoding.EncodeToString(data),
+		"srv_send_msg": false,
+	}
+	var response struct {
+		FileInfo string `json:"file_info"`
+	}
+	if err := p.apiJSON(ctx, cfg, http.MethodPost, filesEndpoint(p.baseFor(cfg), target), payload, &response); err != nil {
+		return "", err
+	}
+	fileInfo := strings.TrimSpace(response.FileInfo)
+	if fileInfo == "" {
+		return "", errors.New("qqbot: upload rich media returned empty file_info")
+	}
+	return fileInfo, nil
+}
+
+// resolveOutboundMedia 解析出站媒体字节（URL 下载 / 本地绝对路径；
+// file:// 前缀按本地路径处理），返回内容与推导出的 Content-Type。
+func (p *Provider) resolveOutboundMedia(ctx context.Context, media connectors.Media) ([]byte, string, error) {
+	if mediaURL := strings.TrimSpace(media.URL); mediaURL != "" {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL, nil)
+		if err != nil {
+			return nil, "", fmt.Errorf("qqbot: invalid media url %q", mediaURL)
+		}
+		response, err := p.client.Do(request)
+		if err != nil {
+			return nil, "", fmt.Errorf("qqbot: download media url %q failed: %w", mediaURL, err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return nil, "", fmt.Errorf("qqbot: media url %q returned %s", mediaURL, response.Status)
+		}
+		data, err := io.ReadAll(response.Body)
+		if err != nil {
+			return nil, "", fmt.Errorf("qqbot: read media url %q failed: %w", mediaURL, err)
+		}
+		contentType := strings.TrimSpace(media.ContentType)
+		if contentType == "" {
+			contentType = strings.TrimSpace(response.Header.Get("Content-Type"))
+		}
+		if contentType == "" && len(data) > 0 {
+			contentType = http.DetectContentType(data)
+		}
+		return data, contentType, nil
+	}
+
+	mediaPath := strings.TrimSpace(media.Path)
+	if mediaPath == "" {
+		return nil, "", errors.New("qqbot: media requires a local path or remote url")
+	}
+	if strings.HasPrefix(strings.ToLower(mediaPath), "file://") {
+		parsed, err := url.Parse(mediaPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("qqbot: invalid media file url %q", mediaPath)
+		}
+		mediaPath = filepath.FromSlash(parsed.Path)
+	}
+	if !filepath.IsAbs(mediaPath) {
+		return nil, "", fmt.Errorf("qqbot: media file path must be absolute: %s", mediaPath)
+	}
+	info, err := os.Stat(mediaPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("qqbot: stat media file %q failed: %w", mediaPath, err)
+	}
+	if info.IsDir() {
+		return nil, "", fmt.Errorf("qqbot: media file path must be a file: %s", mediaPath)
+	}
+	data, err := os.ReadFile(mediaPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("qqbot: read media file %q failed: %w", mediaPath, err)
+	}
+	contentType := strings.TrimSpace(media.ContentType)
+	if contentType == "" && len(data) > 0 {
+		contentType = http.DetectContentType(data)
+	}
+	return data, contentType, nil
+}
+
+// mediaFileType 解析上传 file_type：1 图片 / 2 视频 / 3 语音 / 4 文件；
+// Kind 缺省时按 Content-Type 前缀推导（与上游一致）。
+func mediaFileType(media connectors.Media, contentType string) int {
+	switch strings.ToLower(strings.TrimSpace(media.Kind)) {
+	case "image":
+		return 1
+	case "video":
+		return 2
+	case "audio", "voice":
+		return 3
+	case "", "file":
+		lower := strings.ToLower(strings.TrimSpace(contentType))
+		switch {
+		case strings.HasPrefix(lower, "image/"):
+			return 1
+		case strings.HasPrefix(lower, "video/"):
+			return 2
+		case strings.HasPrefix(lower, "audio/"):
+			return 3
+		default:
+			return 4
+		}
+	default:
+		return 4
+	}
+}
+
+// filesEndpoint 返回媒体上传端点（群 /v2/groups/{id}/files，
+// C2C /v2/users/{id}/files）。
+func filesEndpoint(base string, target chatTarget) string {
+	if target.kind == chatKindGroup {
+		return base + "/v2/groups/" + url.PathEscape(target.openID) + "/files"
+	}
+	return base + "/v2/users/" + url.PathEscape(target.openID) + "/files"
+}
+
+// applyPassiveReply 给被动回复补齐 msg_id/msg_seq；无最近入站 msg_id 时保持
+// 主动消息语义（不带两字段直发，由平台裁决配额/权限）。
+func (p *Provider) applyPassiveReply(payload map[string]any, target chatTarget, passive bool) {
+	if !passive {
+		return
+	}
+	msgID := strings.TrimSpace(p.lastInboundMsgID(target.chat))
+	if msgID == "" {
+		return
+	}
+	payload["msg_id"] = msgID
+	payload["msg_seq"] = p.nextMsgSeq(target.chat)
+}
+
+// shouldFallbackToProactive 报告被动回复失败是否可降级为主动发送：
+// 4xx 中排除 401（令牌问题，需刷新而非降级）与 429（限频，降级也会失败）。
+func shouldFallbackToProactive(err error) bool {
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.statusCode == http.StatusUnauthorized || apiErr.statusCode == http.StatusTooManyRequests {
+		return false
+	}
+	return apiErr.statusCode >= http.StatusBadRequest && apiErr.statusCode < http.StatusInternalServerError
+}
+
+// splitMessageText 按 rune 数把文本切成不超过 maxRunes 的分片；空串返回 nil。
+func splitMessageText(value string, maxRunes int) []string {
+	if value == "" {
+		return nil
+	}
+	if maxRunes <= 0 {
+		return []string{value}
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return []string{value}
+	}
+	chunks := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
+	for len(runes) > 0 {
+		size := maxRunes
+		if size > len(runes) {
+			size = len(runes)
+		}
+		chunks = append(chunks, string(runes[:size]))
+		runes = runes[size:]
+	}
+	return chunks
 }
 
 // nextMsgSeq 按 chat 递增 msg_seq：同一入站 msg_id 的多段被动回复必须携带
@@ -344,6 +604,42 @@ func (p *Provider) appSecret(cfg connectors.Config) string {
 func (p *Provider) sandbox(cfg connectors.Config) bool {
 	parsed, err := strconv.ParseBool(strings.TrimSpace(cfg.Setting("sandbox", "")))
 	return err == nil && parsed
+}
+
+// markdownSupport 报告是否以 markdown 消息发送回复（缺省 false=纯文本）。
+func (p *Provider) markdownSupport(cfg connectors.Config) bool {
+	parsed, err := strconv.ParseBool(strings.TrimSpace(cfg.Setting("markdown_support", "")))
+	return err == nil && parsed
+}
+
+// intentsFor 解析 Gateway 事件订阅位掩码：缺省/非法值回退缩小可用集
+// （gatewayIntents=群@与 C2C）；settings["intents"] 可覆盖（对齐上游
+// codex-server 的 qqbot_intents），用于订阅更多事件类型。
+func (p *Provider) intentsFor(cfg connectors.Config) int {
+	value := strings.TrimSpace(cfg.Setting("intents", ""))
+	if value == "" {
+		return gatewayIntents
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return gatewayIntents
+	}
+	return parsed
+}
+
+// shareSessionInChannelSetting 报告群聊是否共享会话：缺省 true=同一群共用一个
+// agent 会话（保持历史行为）；false=群内按成员隔离（每人独立上下文）。
+// 包级函数供事件解析使用（与 Send 的 chat 键解析同口径）。
+func shareSessionInChannelSetting(cfg connectors.Config) bool {
+	value := strings.TrimSpace(cfg.Setting("share_session_in_channel", ""))
+	if value == "" {
+		return true
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return true
+	}
+	return parsed
 }
 
 // baseFor 解析连接器的 API 基址：Settings["api_base"] > 构造参数覆盖 > sandbox
