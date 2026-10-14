@@ -2593,6 +2593,29 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 	if scopeSessionID == "" {
 		return &toolbroker.AgentListResult{}, nil
 	}
+	agents, err := r.listLocalAgentStatusItems(ctx, scopeSessionID, args)
+	if err != nil {
+		return nil, err
+	}
+	// 统一观测面（2026-10-14）：spawn_subagents 的子代理只写批任务账本、不落
+	// SessionStore/注册表，subagent_list 此前对该派发方式恒为空；与 /agents
+	// 选择器、wait_agent 快照（batchTaskSnapshot）同一作用域纪律，把本会话的
+	// 批任务行并入列表。path_prefix 收窄到子树时批任务行（无 agent 路径）不
+	// 参与过滤命中，避免用合成路径误导 target 解析；终态行遵循 include_closed。
+	if toolbroker.PathPrefixCoversWholeAgentTree(args.PathPrefix) {
+		batchAgents, err := listLocalBatchAgentItems(ctx, r.Host, scopeSessionID, args.IncludeClosed)
+		if err != nil {
+			return nil, err
+		}
+		agents = toolbroker.MergeAgentStatusResults(agents, batchAgents)
+	}
+	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
+}
+
+// listLocalAgentStatusItems 读取会话/注册表来源的子代理行（spawn_agent 派发的
+// 轻量会话）。spawn_subagents 的账本来源由 List 统一合并，两种派发方式共用同一
+// 去重与排序口径。
+func (r *localActorRegistry) listLocalAgentStatusItems(ctx context.Context, scopeSessionID string, args toolbroker.ListAgentsArgs) ([]toolbroker.AgentStatusResult, error) {
 	if store := r.localAgentRegistryStore(); store != nil {
 		if err := r.materializeLocalAgentRegistry(ctx); err != nil {
 			return nil, err
@@ -2602,7 +2625,7 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 			return nil, err
 		}
 		if result != nil {
-			return result, nil
+			return result.Agents, nil
 		}
 	}
 	sessions, err := r.listLocalAgentSessions(ctx)
@@ -2632,7 +2655,7 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 		rootSessionID = localAgentRootSessionID(parent, scopeSessionID)
 	}
 	if rootSessionID == "" {
-		return &toolbroker.AgentListResult{}, nil
+		return nil, nil
 	}
 	pathPrefix := strings.TrimSpace(args.PathPrefix)
 	agents := make([]toolbroker.AgentStatusResult, 0)
@@ -2647,7 +2670,9 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 			continue
 		}
 		path := localAgentSessionPath(session)
-		if pathPrefix != "" && !strings.HasPrefix(path, pathPrefix) {
+		// 边界语义与 API 宿主（agentcontrol.AgentPathMatchesPrefix）一致：
+		// /root/alpha 不匹配兄弟路径 /root/alpha2。
+		if pathPrefix != "" && !agentcontrol.AgentPathMatchesPrefix(path, pathPrefix) {
 			continue
 		}
 		snapshot, err := r.agentSnapshot(ctx, strings.TrimSpace(session.ID))
@@ -2663,7 +2688,7 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 		right := firstNonEmptyChatValue(agents[j].Path, agents[j].SessionID, agents[j].ID)
 		return left < right
 	})
-	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
+	return agents, nil
 }
 
 func (r *localActorRegistry) SendMessage(ctx context.Context, fromSessionID string, args toolbroker.AgentMessageArgs) (*toolbroker.AgentMessageResult, error) {
@@ -2696,6 +2721,9 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 	toolName := toolbroker.ToolSubagentSend
 	if trigger {
 		toolName = toolbroker.ToolSubagentFollowup
+	}
+	if err := r.rejectLocalBatchTaskMessageTarget(ctx, toolName, sessionID); err != nil {
+		return nil, err
 	}
 	if v2 && r.localAgentSessionTerminal(ctx, sessionID) {
 		closedErr := toolbroker.AgentSessionClosedError(toolName, sessionID)
@@ -2994,6 +3022,9 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 	message := strings.TrimSpace(args.Message)
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
+	}
+	if err := r.rejectLocalBatchTaskMessageTarget(ctx, toolbroker.ToolSubagentInput, sessionID); err != nil {
+		return nil, err
 	}
 	// P0-3a/M5: v2 语义（默认关）。关闭时保持灰度前的 busy 报错与立即提交行为。
 	v2 := r.Host.supervisionConfig.MessageSemanticsV2Enabled()
@@ -4431,6 +4462,29 @@ func (r *localActorRegistry) expandLocalBatchWaitTargets(ctx context.Context, id
 		}
 	}
 	return out, nil
+}
+
+// rejectLocalBatchTaskMessageTarget 拒绝把 send 类工具（send_message /
+// followup_task / send_input）对准 durable 批任务子会话：批任务 worker 没有
+// mailbox/输入通道，放行只会让 ensureSession 伪造会话行、或为 followup 起一次
+// 重复运行。作用域与 batchTaskSnapshot 一致：只扫本会话自己的批次，不跨会话取身份。
+func (r *localActorRegistry) rejectLocalBatchTaskMessageTarget(ctx context.Context, toolName, target string) error {
+	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil {
+		return nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+	parentSessionID := strings.TrimSpace(r.Host.baseRuntimeSessionID())
+	if parentSessionID == "" {
+		return nil
+	}
+	task, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, target)
+	if err != nil || !ok {
+		return err
+	}
+	return toolbroker.AgentBatchTaskNotMessageableError(toolName, target, batchID, task.TaskID)
 }
 
 // batchTaskSnapshot 把「子代理会话 id」或「批任务 id」投影成可等待 / 可读的状态行

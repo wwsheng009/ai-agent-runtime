@@ -680,11 +680,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentList,
-				Description: "List lightweight subagent_spawn child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from team_spawn task progress.",
+				Description: "List subagent_spawn child sessions plus durable spawn_subagents batch-task rows for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). Running batch tasks are always listed; terminal tasks require include_closed=true. This is separate from team_spawn task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"path_prefix":    map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter inside the caller's tree, for example /root."},
+						"path_prefix":    map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter inside the caller's tree, for example /root. Batch-task rows carry no agent path and are only included when this filter is absent or covers the whole tree."},
 						"include_closed": map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
 					},
 				},
@@ -872,11 +872,11 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentList,
-				Description: "List lightweight subagent_spawn child sessions for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). This is separate from team_spawn task progress.",
+				Description: "List subagent_spawn child sessions plus durable spawn_subagents batch-task rows for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). Running batch tasks are always listed; terminal tasks require include_closed=true. This is separate from team_spawn task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"path_prefix":    map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter inside the caller's tree, for example /root."},
+						"path_prefix":    map[string]interface{}{"type": "string", "description": "Optional agent path prefix filter inside the caller's tree, for example /root. Batch-task rows carry no agent path and are only included when this filter is absent or covers the whole tree."},
 						"include_closed": map[string]interface{}{"type": "boolean", "description": "Whether to include closed/archived child sessions."},
 					},
 				},

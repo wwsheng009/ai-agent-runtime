@@ -1117,29 +1117,32 @@ func chatAgentItemsFromSessionStore(session *ChatSession, parentSessionID string
 }
 
 // chatAgentBatchItems 列出调用方父会话自己的批任务账本行（spawn_subagents 派发
-// 的子代理）。作用域纪律与 batchTaskSnapshot 一致：只扫本会话的批次，不跨会话
-// 取身份。includeClosed=false 时过滤终态任务（与注册表来源的 closed 过滤同口径）。
+// 的子代理）。/agents 选择器与 subagent_list（ActorRegistry.List）共用
+// listLocalBatchAgentItems，保证两种派发方式在同一观测口径下可见。
 func chatAgentBatchItems(session *ChatSession, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
 	host, parentSessionID := chatAgentBatchScope(session)
-	if host == nil || host.SubagentBatches == nil || parentSessionID == "" {
+	return listLocalBatchAgentItems(context.Background(), host, parentSessionID, includeClosed)
+}
+
+// listLocalBatchAgentItems 是批任务账本行的共同读取面：/agents 列表按会话自身
+// 作用域调用，subagent_list 按其宿主派生的树根作用域调用。作用域纪律与
+// batchTaskSnapshot 一致：只扫该父会话的批次，不跨会话取身份。
+// includeClosed=false 时过滤终态任务（与注册表来源的 closed 过滤同口径）。
+func listLocalBatchAgentItems(ctx context.Context, host *localChatRuntimeHost, parentSessionID string, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
+	if host == nil || host.SubagentBatches == nil {
 		return nil, nil
 	}
-	batches, err := host.SubagentBatches.ListBatches(context.Background(), subagentbatch.BatchFilter{ParentSessionID: parentSessionID})
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return nil, nil
+	}
+	rows, err := subagentbatch.ListTaskRowsForParent(ctx, host.SubagentBatches, parentSessionID, includeClosed)
 	if err != nil {
 		return nil, err
 	}
-	items := make([]toolbroker.AgentStatusResult, 0)
-	for _, batch := range batches {
-		tasks, err := host.SubagentBatches.ListTasks(context.Background(), batch.BatchID)
-		if err != nil {
-			return nil, err
-		}
-		for _, task := range tasks {
-			if !includeClosed && task.Status.Terminal() {
-				continue
-			}
-			items = append(items, chatAgentBatchItem(parentSessionID, batch.BatchID, task))
-		}
+	items := make([]toolbroker.AgentStatusResult, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, chatAgentBatchItem(parentSessionID, row.BatchID, row.Task))
 	}
 	return items, nil
 }
@@ -1201,36 +1204,10 @@ func chatAgentBatchItem(parentSessionID, batchID string, task subagentbatch.Suba
 
 // chatAgentMergeItems 合并两个来源并按身份去重（子会话 id / agent id / 路径任一
 // 命中即视为同一行，注册表来源优先），最后按既有的路径/会话 id 排序口径稳定排序。
+// 实现与 subagent_list 共用 toolbroker.MergeAgentStatusResults，避免 UI 与工具面
+// 的合并口径漂移。
 func chatAgentMergeItems(primary, extra []toolbroker.AgentStatusResult) []toolbroker.AgentStatusResult {
-	if len(extra) == 0 {
-		return primary
-	}
-	key := func(agent toolbroker.AgentStatusResult) string {
-		return strings.ToLower(firstNonEmptyChatValue(agent.SessionID, agent.ID, agent.Path))
-	}
-	seen := make(map[string]struct{}, len(primary)+len(extra))
-	merged := make([]toolbroker.AgentStatusResult, 0, len(primary)+len(extra))
-	for _, agent := range primary {
-		if k := key(agent); k != "" {
-			seen[k] = struct{}{}
-		}
-		merged = append(merged, agent)
-	}
-	for _, agent := range extra {
-		if k := key(agent); k != "" {
-			if _, exists := seen[k]; exists {
-				continue
-			}
-			seen[k] = struct{}{}
-		}
-		merged = append(merged, agent)
-	}
-	sort.SliceStable(merged, func(i, j int) bool {
-		left := firstNonEmptyChatValue(merged[i].Path, merged[i].SessionID, merged[i].ID)
-		right := firstNonEmptyChatValue(merged[j].Path, merged[j].SessionID, merged[j].ID)
-		return left < right
-	})
-	return merged
+	return toolbroker.MergeAgentStatusResults(primary, extra)
 }
 
 func chatAgentPickerStatusFromRecord(host *localChatRuntimeHost, record agentcontrol.AgentRecord) toolbroker.AgentStatusResult {

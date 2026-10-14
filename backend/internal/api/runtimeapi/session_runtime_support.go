@@ -1761,13 +1761,36 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 	if scopeSessionID == "" {
 		return &toolbroker.AgentListResult{}, nil
 	}
+	agents, err := c.listAgentStatusItems(ctx, scopeSessionID, args)
+	if err != nil {
+		return nil, err
+	}
+	// 统一观测面（2026-10-14）：spawn_subagents 的子代理只写批任务账本、不落
+	// SessionStore/注册表，subagent_list 此前对该派发方式恒为空；与 wait 快照
+	// （batchTaskSnapshot）同一作用域纪律，把本会话的批任务行并入列表。
+	// path_prefix 收窄到子树时批任务行（无 agent 路径）不参与过滤命中；终态行
+	// 遵循 include_closed。
+	if toolbroker.PathPrefixCoversWholeAgentTree(args.PathPrefix) {
+		batchAgents, err := c.apiAgentBatchItems(ctx, scopeSessionID, args.IncludeClosed)
+		if err != nil {
+			return nil, err
+		}
+		agents = toolbroker.MergeAgentStatusResults(agents, batchAgents)
+	}
+	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
+}
+
+// listAgentStatusItems 读取会话/注册表来源的子代理行（spawn_agent 派发的轻量
+// 会话）。spawn_subagents 的账本来源由 List 统一合并，两种派发方式共用同一去重
+// 与排序口径。
+func (c *sessionAgentController) listAgentStatusItems(ctx context.Context, scopeSessionID string, args toolbroker.ListAgentsArgs) ([]toolbroker.AgentStatusResult, error) {
 	if store := c.handler.getAgentControlAgentStore(); store != nil {
 		result, err := c.listAgentsFromRegistry(ctx, scopeSessionID, args, store)
 		if err != nil {
 			return nil, err
 		}
 		if result != nil {
-			return result, nil
+			return result.Agents, nil
 		}
 	}
 	sessions, err := c.listSessions(ctx, scopeSessionID)
@@ -1785,7 +1808,7 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 		rootSessionID = apiAgentRootSessionID(parent, scopeSessionID)
 	}
 	if rootSessionID == "" {
-		return &toolbroker.AgentListResult{}, nil
+		return nil, nil
 	}
 	pathPrefix := strings.TrimSpace(args.PathPrefix)
 	agents := make([]toolbroker.AgentStatusResult, 0)
@@ -1816,7 +1839,7 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 		right := firstNonEmptyString(agents[j].Path, agents[j].SessionID, agents[j].ID)
 		return left < right
 	})
-	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
+	return agents, nil
 }
 
 func (c *sessionAgentController) SendMessage(ctx context.Context, fromSessionID string, args toolbroker.AgentMessageArgs) (*toolbroker.AgentMessageResult, error) {
@@ -1849,6 +1872,9 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 	toolName := toolbroker.ToolSubagentSend
 	if trigger {
 		toolName = toolbroker.ToolSubagentFollowup
+	}
+	if err := c.rejectAPIBatchTaskMessageTarget(ctx, toolName, sessionID); err != nil {
+		return nil, err
 	}
 	if v2 && c.apiAgentSessionTerminal(ctx, sessionID) {
 		closedErr := toolbroker.AgentSessionClosedError(toolName, sessionID)
@@ -2059,6 +2085,9 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 	message := strings.TrimSpace(args.Message)
 	if message == "" {
 		return nil, fmt.Errorf("message is required")
+	}
+	if err := c.rejectAPIBatchTaskMessageTarget(ctx, toolbroker.ToolSubagentInput, sessionID); err != nil {
+		return nil, err
 	}
 	// P0-3a/M5: v2 语义（默认关）。关闭时保持灰度前的 busy 报错行为。
 	v2 := c.handler.supervisionConfig.MessageSemanticsV2Enabled()
@@ -3562,6 +3591,65 @@ func apiBatchTaskStatusResult(childSessionID, batchID string, task subagentbatch
 		result.Error = strings.Join(parts, ": ")
 	}
 	return result
+}
+
+// apiAgentBatchItems 列出某个父会话自己的批任务账本行（spawn_subagents 派发的
+// 子代理），与 batchTaskSnapshot 同一作用域纪律：只扫该父会话的批次，不跨会话
+// 取身份。它是 HTTP 宿主 subagent_list（sessionAgentController.List）的账本读取
+// 面，保证 spawn_agent 与 spawn_subagents 的观测口径一致；未绑定的任务回退用
+// 任务 id 呈现（派发前失败也要可见），终态行遵循 include_closed。
+func (c *sessionAgentController) apiAgentBatchItems(ctx context.Context, parentSessionID string, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
+	if c == nil || c.handler == nil {
+		return nil, nil
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return nil, nil
+	}
+	// peek：列表是读路径，不触发默认批库的惰性创建。
+	store := c.handler.peekSubagentBatchStore()
+	if store == nil {
+		return nil, nil
+	}
+	rows, err := subagentbatch.ListTaskRowsForParent(ctx, store, parentSessionID, includeClosed)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]toolbroker.AgentStatusResult, 0, len(rows))
+	for _, row := range rows {
+		id := firstNonEmptyString(strings.TrimSpace(row.Task.ChildSessionID), strings.TrimSpace(row.Task.TaskID))
+		item := apiBatchTaskStatusResult(id, row.BatchID, row.Task)
+		item.ParentSessionID = parentSessionID
+		items = append(items, *item)
+	}
+	return items, nil
+}
+
+// rejectAPIBatchTaskMessageTarget 拒绝把 send 类工具（send_message /
+// followup_task / send_input）对准 durable 批任务子会话：批任务 worker 没有
+// mailbox/输入通道，放行只会为 followup/input 起一次重复运行。作用域与
+// batchTaskSnapshot 一致：只扫调用方自己的批次（toolctx 注入，模型不可指定）。
+func (c *sessionAgentController) rejectAPIBatchTaskMessageTarget(ctx context.Context, toolName, target string) error {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+	store := c.handler.peekSubagentBatchStore()
+	if store == nil {
+		return nil
+	}
+	parentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if parentSessionID == "" {
+		return nil
+	}
+	task, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, store, parentSessionID, target)
+	if err != nil || !ok {
+		return err
+	}
+	return toolbroker.AgentBatchTaskNotMessageableError(toolName, target, batchID, task.TaskID)
 }
 
 func (c *sessionAgentController) Resume(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {

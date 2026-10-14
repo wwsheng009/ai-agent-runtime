@@ -19,6 +19,12 @@ import (
 // instruction is never silently dropped (P0-3a, plan §3.3).
 var ErrAgentSessionClosed = errors.New("agent session is closed")
 
+// ErrAgentBatchTaskNotMessageable marks an instruction aimed at a durable
+// spawn_subagents batch worker: batch tasks run as in-process workers without a
+// mailbox or input channel, so send_message / followup_task / send_input can
+// never be delivered to them.
+var ErrAgentBatchTaskNotMessageable = errors.New("target is a durable spawn_subagents batch worker and is not messageable")
+
 // AgentSessionClosedError builds the terminal-target rejection shared by both
 // hosts. It keeps the P0-3a contract (the wrapped ErrAgentSessionClosed stays
 // errors.Is-visible, so the instruction is never silently dropped) and carries
@@ -28,6 +34,21 @@ func AgentSessionClosedError(toolName, sessionID string) error {
 	return fmt.Errorf(
 		"%s target %s: %w; next_action=inspect|finalize — the target is terminal so this instruction was not delivered; read its durable result (subagent_inspect_task) or converge the parent instead of retrying",
 		strings.TrimSpace(toolName), strings.TrimSpace(sessionID), ErrAgentSessionClosed,
+	)
+}
+
+// AgentBatchTaskNotMessageableError builds the rejection shared by both hosts.
+// It keeps errors.Is(ErrAgentBatchTaskNotMessageable) visible and names the
+// convergence path instead of letting the send fabricate a session row (or
+// start a duplicate run) for an id that is not a steerable session.
+func AgentBatchTaskNotMessageableError(toolName, target, batchID, taskID string) error {
+	detail := strings.TrimSpace(target)
+	if tid := strings.TrimSpace(taskID); tid != "" {
+		detail = fmt.Sprintf("%s (batch %s task %s)", detail, strings.TrimSpace(batchID), tid)
+	}
+	return fmt.Errorf(
+		"%s target %s: %w; next_action=read|wait — batch workers have no mailbox or input channel, so this instruction was not delivered and no session was created; collect it with wait_agent / subagent_status / subagent_inspect_task, or use spawn_agent when you need a child you can steer mid-run",
+		strings.TrimSpace(toolName), detail, ErrAgentBatchTaskNotMessageable,
 	)
 }
 
