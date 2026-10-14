@@ -447,6 +447,18 @@ P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在�
 
 ## 10. 遗留开放问题
 
+0. **配置写入源分叉（2026-10-14 真机发现）**：D1 统一了 `state.json`（owners/bindings 双宿主互见），
+   但 **config 的写入路径仍随各宿主解析**——真机同机双宿主（aicli 写用户级 `~/.aicli/config.yaml`、
+   runtime-server 写项目层 `backend/.aicli/config.yaml`）各自维护了**不同的连接器清单**（两个微信 bot
+   各挂在一个宿主上）。分层合并"读"是合并的、"写"是单文件的，因此 PATCH 走 A 宿主不会出现在 B 宿主。
+   影响：管理面跨宿主编辑连接器会打到不同清单（本轮白名单就补了两次）；归属互斥不受影响（state 共享）。
+   待定方案：a) 写也收敛到共享路径（改变分层写语义）；b) REST 层转发到 owner 宿主；c) 接受分叉并在
+   UI 标注"本清单属于 X 宿主"。**未定**，P2 后续切片决策。
+0b. **连字符 id 的单查瞬态 404（2026-10-14 真机观察）**：runtime-server 上
+   `GET /api/connectors/wechat-mvlod8ozf9` 偶发 404"未知连接器"，URL 编码连字符（`%2D`）恒 200；
+   静置后未转义也恢复 200。窗口伴随配置 PATCH 写（storefile 原子 rename）出现，怀疑宿主热读窗口与
+   mux 路径解码的组合瞬态；restapi 内部单测（含连字符 id）恒绿，宿主同构挂载单测也绿。观察项，
+   不阻塞；若复现频率上升需在 restapi 层加"单查 404 时回退 ListConfigs 精确比对"的自愈。
 1. **跨机器共享 state**：v1 限定同机（文件锁安全域）。跨机走 P2 mesh 派发时，
    state 仍按机一份 + bindings 经 API 同步，还是共享网络盘？（倾向前者：以
    poller 节点的 state 为该 connector 的权威副本）
