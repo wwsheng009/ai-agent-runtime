@@ -145,6 +145,9 @@ func executeUpdateGoalCapability(ctx context.Context, toolSession aiclitools.Too
 	if goal.Status == StatusPaused {
 		return aiclitools.ToolResult{}, fmt.Errorf("update_goal cannot complete a paused goal; resume the goal before model completion")
 	}
+	if goal.Status == StatusBlocked {
+		return aiclitools.ToolResult{}, fmt.Errorf("update_goal cannot complete a blocked goal; resume the goal before model completion")
+	}
 	if err := ValidateStatusTransition(goal.Status, StatusComplete); err != nil {
 		return aiclitools.ToolResult{}, err
 	}
@@ -230,10 +233,14 @@ func ValidateStatusTransition(from Status, to Status) error {
 	}
 	switch from {
 	case StatusActive:
-		if to == StatusPaused || to == StatusComplete {
+		if to == StatusPaused || to == StatusComplete || to == StatusBlocked {
 			return nil
 		}
 	case StatusPaused:
+		if to == StatusActive || to == StatusComplete {
+			return nil
+		}
+	case StatusBlocked:
 		if to == StatusActive || to == StatusComplete {
 			return nil
 		}

@@ -360,6 +360,21 @@ func TestGoalStatusSegmentShowsContinuationAttempt(t *testing.T) {
 	}
 }
 
+func TestGoalStatusSegmentShowsBlocked(t *testing.T) {
+	session, cleanup := newGoalCommandTestSession(t)
+	defer cleanup()
+	captureStdout(t, func() {
+		handleCommand(session, "/goal blocked status case", false)
+	})
+	if !markActiveGoalBlocked(session, "test") {
+		t.Fatal("expected markActiveGoalBlocked to succeed for an active goal")
+	}
+	seg := chatSurfaceGoalStatusSegment(session)
+	if !strings.Contains(seg.full, "blocked") || seg.compact != "Blocked" {
+		t.Fatalf("expected blocked status segment, got %+v", seg)
+	}
+}
+
 func TestGoalFunctionUpdateCompleteDoesNotRewriteDurableHistory(t *testing.T) {
 	session, cleanup := newGoalCommandTestSession(t)
 	defer cleanup()

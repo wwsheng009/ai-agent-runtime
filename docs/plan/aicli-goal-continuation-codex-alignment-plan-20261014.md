@@ -311,9 +311,15 @@ goal:
 - **回归**：`cmd/aicli/commands` 仅外部 `/tools` catalog 用例失败（预先存在，外部工作流）；`internal/config`、`internal/goal` 全绿。
 - **偏差说明**：脚本化 e2e 下的 resume-kick / 连续多轮续跑场景推迟到 M2——M1 尚无"无进展"容忍，脚本模式下残留 active goal 可能长时间不收敛；该场景当前由单测覆盖（`TestRequestAndConsumeGoalKickRunsContinuation` 等）。
 
-### M2（P1，待实施）
+### M2（P1，2026-10-14 完成，待提交）
 
-见 §2.1（目标 6-10）与 §5.3/§5.4：空响应/无进展 3 连、`blocked` 状态、非取消错误→blocked、提示词多段化。
+- **`blocked` 状态**：`internal/goal` 新增 `StatusBlocked` 与转换（active→blocked 系统写；blocked→active 用户 resume；blocked→paused 拒绝；blocked→complete 允许用户、模型被 merge 守卫与 update_goal 工具双重拒绝，须先 resume）。
+- **停止即置 blocked**：连续错误 3 连、连续空响应/无进展 3 连 → `markActiveGoalBlocked`（`MutationSystem` 持久化 + 会话状态恢复）+ 可见提示（`/goal resume` 解除）；置 blocked 失败时退化为"保持 active"的可见提示。
+- **空响应/无进展判定**：`chatTurnToolExecutions` 前/后快照差值；本轮无文本产出且无工具执行才记 strike；成功轮/有工具执行重置；覆盖 CLI/shared 执行路径，计数不可得时按"有文本即非空转"保守处理。
+- **提示词多段化**：`goalAutoContinuationPrompt` 对齐 `continuation.md` 语义子集（持久性/不缩目标/证据优先/verified-wait 判定/完成审计/update_goal 纪律）；`renderActiveGoalGuidance` 增补"不缩目标 / 阻塞复述"两行。
+- **状态展示**：状态栏新增 `Goal blocked (/goal resume)`（compact=`Blocked`）。
+- **受控偏差（保留并记录）**：真实错误采用 **3 连 → blocked**（Codex main 为立即 blocked）——保留瞬态故障容忍；后续可评估收紧。
+- **测试**：commands 13 项定向全绿（含 `BlocksAfterThreeNoProgressRounds`、`NoProgressStrikesResetOnToolActivity`、`GoalStatusSegmentShowsBlocked`，错误 3 连用例改断言 blocked）；`internal/goal` 全绿（转换矩阵 + merge 守卫 + update_goal 拒绝 blocked）；全量命令包仅外部 `/tools` catalog 用例失败（预先存在）；`run-conpty-goal-e2e.ps1` **10/10**。
 
 ---
 

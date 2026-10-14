@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclitools"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -42,6 +43,30 @@ func (s *goalCapabilityTestSession) RefreshRuntimeSession(context.Context, *runt
 
 func (s *goalCapabilityTestSession) ExecutorPath() aiclitools.ExposurePath {
 	return aiclitools.ExposureShared
+}
+
+func TestExecuteUpdateGoalRejectsBlockedGoal(t *testing.T) {
+	session := runtimechat.NewSession("tester")
+	toolSession := &goalCapabilityTestSession{
+		session: session,
+		storage: runtimechat.NewInMemoryStorage(),
+	}
+	goal, err := NewSessionGoal(session.ID, "blocked objective", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	goal.Status = StatusBlocked
+	if err := NewMetadataStore().Put(session, goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+
+	_, err = executeUpdateGoalCapability(context.Background(), toolSession, map[string]interface{}{
+		"status":  string(StatusComplete),
+		"summary": "attempted completion",
+	})
+	if err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked-goal rejection, got err=%v", err)
+	}
 }
 
 func TestUpdateGoalDescriptionRequiresConfirmedActiveGoal(t *testing.T) {

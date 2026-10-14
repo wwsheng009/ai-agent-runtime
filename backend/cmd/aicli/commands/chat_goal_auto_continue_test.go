@@ -303,6 +303,61 @@ func TestSendMessage_AutoContinuationStopsAfterThreeConsecutiveErrors(t *testing
 		t.Fatalf("expected continuation to stop at %d consecutive errors, got %d",
 			goalAutoContinuationErrorStrikeLimit, executor.continuations)
 	}
+	// 对齐 Codex：连续失败停止并把目标置为 blocked（/goal resume 解除）。
+	assertGoalStatus(t, session, runtimegoal.StatusBlocked)
+}
+
+func TestSendMessage_AutoContinuationBlocksAfterThreeNoProgressRounds(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			return "", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	response, err := sendMessage(session, "start")
+	if err != nil {
+		t.Fatalf("expected initial response to remain successful, got error: %v", err)
+	}
+	if response != "initial response" {
+		t.Fatalf("unexpected response: %q", response)
+	}
+	if executor.continuations != goalAutoContinuationNoProgressStrikeLimit {
+		t.Fatalf("expected continuation to stop at %d no-progress rounds, got %d",
+			goalAutoContinuationNoProgressStrikeLimit, executor.continuations)
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusBlocked)
+}
+
+func TestSendMessage_NoProgressStrikesResetOnToolActivity(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	session.goalMaxContinuations = 5
+
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			fake := session.ChatExecutor.(*fakeChatExecutor)
+			if fake.continuations == 3 {
+				// 第 3 轮有工具执行（计数增长）→ 空输出也不算空转，计数清零。
+				recordChatTurnToolExecution(session)
+			}
+			return "", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	if _, err := sendMessage(session, "start"); err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
+	}
+	// 轮次：1/2 空转各记 1 strike；3 有工具执行清零；4/5 再各记 1；到 cap=5 停下。
+	if executor.continuations != 5 {
+		t.Fatalf("expected tool activity to reset no-progress strikes (cap 5), got %d", executor.continuations)
+	}
 	assertGoalStatus(t, session, runtimegoal.StatusActive)
 }
 

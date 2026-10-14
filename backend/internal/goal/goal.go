@@ -21,8 +21,11 @@ const (
 type Status string
 
 const (
-	StatusActive        Status = "active"
-	StatusPaused        Status = "paused"
+	StatusActive Status = "active"
+	StatusPaused Status = "paused"
+	// StatusBlocked 由系统在自动续跑连续失败/无进展时写入（对齐 Codex 的
+	// blocked）；用户 /goal resume 解除；模型不可完成 blocked 目标（须先 resume）。
+	StatusBlocked       Status = "blocked"
 	StatusBudgetLimited Status = "budget_limited"
 	StatusComplete      Status = "complete"
 )
@@ -91,7 +94,7 @@ func NormalizeObjective(objective string) (string, error) {
 
 func ValidateStatus(status Status) error {
 	switch status {
-	case StatusActive, StatusPaused, StatusBudgetLimited, StatusComplete:
+	case StatusActive, StatusPaused, StatusBlocked, StatusBudgetLimited, StatusComplete:
 		return nil
 	default:
 		return fmt.Errorf("invalid goal status %q", status)
@@ -208,6 +211,9 @@ func (p GoalMergePolicy) MergeContextValue(key string, oldValue, newValue interf
 	}
 	if oldGoal.Status == StatusPaused && newGoal.Status == StatusComplete && p.Actor == MutationModel {
 		return nil, fmt.Errorf("model cannot complete a paused goal")
+	}
+	if oldGoal.Status == StatusBlocked && newGoal.Status == StatusComplete && p.Actor == MutationModel {
+		return nil, fmt.Errorf("model cannot complete a blocked goal; resume the goal first")
 	}
 	return newGoal, nil
 }

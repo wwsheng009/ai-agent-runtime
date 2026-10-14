@@ -3308,6 +3308,11 @@ func chatSurfaceGoalStatusSegment(session *ChatSession) chatStatusSegment {
 			full:    "Goal paused (/goal resume)",
 			compact: "Paused",
 		}
+	case runtimegoal.StatusBlocked:
+		return chatStatusSegment{
+			full:    "Goal blocked (/goal resume)",
+			compact: "Blocked",
+		}
 	case runtimegoal.StatusBudgetLimited:
 		if usage != "" {
 			return chatStatusSegment{

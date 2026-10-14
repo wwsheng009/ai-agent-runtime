@@ -35,6 +35,57 @@ func TestNewSessionGoalValidatesObjective(t *testing.T) {
 	}
 }
 
+func TestValidateStatusTransitionBlocked(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		from Status
+		to   Status
+		ok   bool
+	}{
+		{StatusActive, StatusBlocked, true},
+		{StatusBlocked, StatusActive, true},
+		{StatusBlocked, StatusComplete, true},
+		{StatusBlocked, StatusBlocked, true},
+		{StatusBlocked, StatusPaused, false},
+		{StatusComplete, StatusBlocked, false},
+	}
+	for _, tc := range cases {
+		err := ValidateStatusTransition(tc.from, tc.to)
+		if tc.ok && err != nil {
+			t.Fatalf("%s -> %s should be allowed, got %v", tc.from, tc.to, err)
+		}
+		if !tc.ok && err == nil {
+			t.Fatalf("%s -> %s should be rejected", tc.from, tc.to)
+		}
+	}
+}
+
+func TestGoalMergePolicyModelCannotCompleteBlockedGoal(t *testing.T) {
+	t.Parallel()
+
+	blocked := SessionGoal{
+		GoalID:    "goal-1",
+		SessionID: "session-1",
+		Objective: "blocked objective",
+		Status:    StatusBlocked,
+	}
+	completed := blocked
+	completed.Status = StatusComplete
+
+	if _, err := (GoalMergePolicy{Actor: MutationModel}).MergeContextValue(MetadataKey, blocked, completed); err == nil {
+		t.Fatal("model must not complete a blocked goal")
+	}
+	merged, err := (GoalMergePolicy{Actor: MutationUser}).MergeContextValue(MetadataKey, blocked, completed)
+	if err != nil {
+		t.Fatalf("user completion of a blocked goal should merge, got %v", err)
+	}
+	got, err := decode(merged)
+	if err != nil || got.Status != StatusComplete {
+		t.Fatalf("expected merged complete status, got %+v err=%v", got, err)
+	}
+}
+
 func TestMetadataStoreRoundTripAndClear(t *testing.T) {
 	t.Parallel()
 

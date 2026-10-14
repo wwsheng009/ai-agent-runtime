@@ -2756,6 +2756,8 @@ func renderActiveGoalGuidance(session *ChatSession) string {
 		"- Map every explicit requirement, file, command, test, gate, and deliverable to concrete evidence.",
 		"- Inspect the relevant files, command output, test results, or other real evidence.",
 		"- Treat uncertainty as not complete; continue verifying or working.",
+		"- Keep the full objective intact; do not redefine success around a smaller or easier subset.",
+		"- If the same genuine blocker repeats across goal turns, state it concisely and leave the goal active instead of silently stopping.",
 	}
 	if canCurrentChatPathUpdateGoal(session) {
 		lines = append(lines, "Only when the audit shows that no required work remains, call update_goal with status \"complete\" and a concise summary.")
