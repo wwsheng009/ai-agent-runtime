@@ -82,6 +82,11 @@ var (
 		"providers.items",
 		"retry",
 	}
+	// 默认 provider 也要热生效：否则保存后内存 LLMRuntime 仍用旧默认，表现为
+	// 「配置页改了 provider，会话页不生效」。
+	hotReloadProviderDefaultPrefixes = []string{
+		"providers.default_provider",
+	}
 	hotReloadAgentRoutingPrefixes = []string{
 		"aicli.subagents.routing",
 		"aicli.teams.routing",
@@ -112,6 +117,10 @@ type RuntimeConfigHotReloader struct {
 	target     RuntimeConfigApplyTarget
 	bootstrap  *runtimebootstrap.Manager
 	currentCfg *agentconfig.Config
+	// postApply 在每次 Apply 后以新配置回调（可为 nil）。宿主用它把 config.yaml
+	// 的默认 provider/model 同步进 runtimeManager 快照（actor 回合解析读那里），
+	// 否则热重载只更新了 LLMRuntime 展示层、回合层仍用内置 claude-3-5-sonnet。
+	postApply func(nextCfg *agentconfig.Config)
 }
 
 func NewRuntimeConfigHotReloader(
@@ -141,11 +150,17 @@ func (r *RuntimeConfigHotReloader) Apply(
 	hotPaths = uniqueSortedPaths(hotPaths)
 	if len(hotPaths) == 0 {
 		r.updateCurrentConfig(nextCfg)
+		if r.postApply != nil {
+			r.postApply(nextCfg)
+		}
 		return result
 	}
 
 	if r.target == nil && r.bootstrap == nil {
 		r.updateCurrentConfig(nextCfg)
+		if r.postApply != nil {
+			r.postApply(nextCfg)
+		}
 		result.Warnings = append(result.Warnings,
 			"runtime 配置已写入磁盘，但当前进程未接入热重载目标；可热重载变更尚未自动应用。")
 		return result
@@ -209,6 +224,28 @@ func (r *RuntimeConfigHotReloader) Apply(
 		}
 	}
 
+	// 默认 provider 热生效，并跟随该 provider 的 default_model，让「换 provider」
+	// 在会话页立刻可用（无需重启 runtime-server）。
+	if hasAnyPrefixInSet(hotPaths, hotReloadProviderDefaultPrefixes) {
+		if r.bootstrap == nil {
+			result.Warnings = append(result.Warnings,
+				"providers.default_provider 已保存，但当前进程未接入 provider 热替换目标。")
+		} else {
+			defaultProvider := strings.TrimSpace(nextCfg.Providers.DefaultProvider)
+			if err := r.bootstrap.SetDefaultProvider(defaultProvider); err != nil {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("providers.default_provider 热重载失败: %v", err))
+			} else {
+				if provider, ok := nextCfg.Providers.Items[defaultProvider]; ok {
+					if model := strings.TrimSpace(provider.DefaultModel); model != "" {
+						_ = r.bootstrap.SetDefaultModel(model)
+					}
+				}
+				addMatchingPathsForPrefixes(appliedSet, hotPaths, hotReloadProviderDefaultPrefixes)
+			}
+		}
+	}
+
 	if hasAnyPrefixInSet(hotPaths, hotReloadAgentRoutingPrefixes) {
 		if r.target == nil {
 			result.Warnings = append(result.Warnings,
@@ -225,7 +262,19 @@ func (r *RuntimeConfigHotReloader) Apply(
 
 	r.updateCurrentConfig(nextCfg)
 	result.AppliedPaths = mapKeysSorted(appliedSet)
+	if r.postApply != nil {
+		r.postApply(nextCfg)
+	}
 	return result
+}
+
+// SetPostApplyCallback 注册 Apply 之后的同步回调（热重载器同时服务 config
+// document API 保存与外部文件轮询两条路径，回调只挂一次即全覆盖）。
+func (r *RuntimeConfigHotReloader) SetPostApplyCallback(callback func(*agentconfig.Config)) {
+	if r == nil {
+		return
+	}
+	r.postApply = callback
 }
 
 func (r *RuntimeConfigHotReloader) updateCurrentConfig(nextCfg *agentconfig.Config) {
@@ -330,6 +379,9 @@ func classifyConfigDocumentPath(path string) runtimeConfigPathDisposition {
 		return runtimeConfigPathHotReload
 	}
 	if hasAnyPrefixInSet([]string{path}, hotReloadProviderPrefixes) {
+		return runtimeConfigPathHotReload
+	}
+	if hasAnyPrefixInSet([]string{path}, hotReloadProviderDefaultPrefixes) {
 		return runtimeConfigPathHotReload
 	}
 	if hasAnyPrefixInSet([]string{path}, hotReloadAgentRoutingPrefixes) {

@@ -207,6 +207,32 @@ func TestManager_NewManager_WiresDefaultProvider(t *testing.T) {
 	assert.Equal(t, "real-model", manager.LLMRuntime().DefaultModel())
 }
 
+func TestManager_SetRuntimeDefaultsHotSwapsLiveRuntime(t *testing.T) {
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = false
+
+	manager, err := NewManager(&Options{
+		Config: cfg,
+		ProviderConfigs: map[string]*llm.ProviderConfig{
+			"alpha": {
+				Type:            "openai",
+				BaseURL:         "http://127.0.0.1",
+				DefaultModel:    "alpha-model",
+				SupportedModels: []string{"alpha-model"},
+				Timeout:         2 * time.Second,
+			},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	// 热重载 providers.default_provider 后，live runtime 的默认值立即变化（无需重启）。
+	require.NoError(t, manager.SetDefaultProvider("alpha"))
+	require.NoError(t, manager.SetDefaultModel("alpha-model"))
+	assert.Equal(t, "alpha", manager.LLMRuntime().DefaultProvider())
+	assert.Equal(t, "alpha-model", manager.LLMRuntime().DefaultModel())
+}
+
 func TestManager_NewManager_WiresRuntimeRetryConfigFromProviderConfig(t *testing.T) {
 	cfg := runtimecfg.DefaultRuntimeConfig()
 	cfg.Agent.DefaultProvider = "openai-test"

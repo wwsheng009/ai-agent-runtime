@@ -925,6 +925,33 @@ func (rm *RuntimeManager) Update(config *RuntimeConfig) error {
 	return nil
 }
 
+// ApplyAgentRuntimeDefaults 把 config.yaml 的默认 provider/model 覆盖进当前
+// runtime 配置的 Agent 段（原地修改）。
+//
+// 背景：actor/回合解析（runtimeapi resolveAgentProvider/resolveAgentModel）读
+// Agent.DefaultProvider/DefaultModel，而 DefaultRuntimeConfig 携带内置缺省
+// claude-3-5-sonnet——若不在这里覆盖，配置页改的 providers.default_provider
+// 永远压不过这个内置值（正是「配了默认 provider 仍报 model_unavailable」的根因）。
+// provider 缺省时不改（保持 runtime.yaml 既有语义）；model 跟随 provider 的
+// default_model，让「换 provider」端到端生效。
+func (rm *RuntimeManager) ApplyAgentRuntimeDefaults(defaultProvider, defaultModel string) {
+	if rm == nil {
+		return
+	}
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if rm.config == nil {
+		return
+	}
+	provider := strings.TrimSpace(defaultProvider)
+	if provider != "" {
+		rm.config.Agent.DefaultProvider = provider
+		if model := strings.TrimSpace(defaultModel); model != "" {
+			rm.config.Agent.DefaultModel = model
+		}
+	}
+}
+
 // AddWatcher 添加配置变更监听器
 func (rm *RuntimeManager) AddWatcher(watcher RuntimeWatcher) {
 	rm.mu.Lock()

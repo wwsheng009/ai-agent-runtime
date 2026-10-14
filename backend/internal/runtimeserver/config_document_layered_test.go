@@ -129,6 +129,9 @@ aicli:
 
 // Without layered merging the server keeps its previous single-file behaviour.
 func TestConfigDocumentSingleFileBehaviourWithoutLayering(t *testing.T) {
+	// 该用例专门验证「关闭分层」时的单文件行为：显式关掉合并模式，
+	// 否则默认 MergeModeOn 会走分层合并（见 ParseMergeMode）。
+	t.Setenv(agentconfig.MergeConfigEnvVar, string(agentconfig.MergeModeOff))
 	home := t.TempDir()
 	previousHome := agentconfig.UserHomeDirForTest()
 	agentconfig.SetUserHomeDirForTest(func() (string, error) { return home, nil })

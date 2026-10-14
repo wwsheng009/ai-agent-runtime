@@ -1046,6 +1046,60 @@ func loadRuntimeServerManager(runtimeManager *runtimecfg.RuntimeManager) error {
 	return nil
 }
 
+// agentRuntimeDefaultFor 解析 config.yaml 的运行时默认 provider 与跟随模型
+//（providers.default_provider 为空时返回空串，表示不覆盖既有语义）。
+func agentRuntimeDefaultFor(cfg *config.Config) (string, string) {
+	if cfg == nil {
+		return "", ""
+	}
+	defaultProvider := strings.TrimSpace(cfg.Providers.DefaultProvider)
+	if defaultProvider == "" {
+		return "", ""
+	}
+	defaultModel := ""
+	if provider, ok := cfg.Providers.Items[defaultProvider]; ok {
+		defaultModel = strings.TrimSpace(provider.DefaultModel)
+	}
+	return defaultProvider, defaultModel
+}
+
+// syncAgentRuntimeDefaults 把 config.yaml 的默认 provider/model 写进 runtimeManager
+//（resolveRuntimeConfig 的快照来源——actor 回合的 provider/model 最终从这里读）。
+func syncAgentRuntimeDefaults(runtimeManager *runtimecfg.RuntimeManager, cfg *config.Config) {
+	if runtimeManager == nil {
+		return
+	}
+	defaultProvider, defaultModel := agentRuntimeDefaultFor(cfg)
+	runtimeManager.ApplyAgentRuntimeDefaults(defaultProvider, defaultModel)
+}
+
+// syncLLMRuntimeDefaults 把 config.yaml 的默认 provider/model 推到 live LLMRuntime
+//（/api/runtime/models 与 composer 目录的展示层）。
+func syncLLMRuntimeDefaults(bootstrapManager *runtimebootstrap.Manager, cfg *config.Config) {
+	if bootstrapManager == nil {
+		return
+	}
+	defaultProvider, defaultModel := agentRuntimeDefaultFor(cfg)
+	_ = bootstrapManager.SetDefaultProvider(defaultProvider)
+	_ = bootstrapManager.SetDefaultModel(defaultModel)
+}
+
+// runtimeDefaultSyncHooks 让 provider 默认值在「配置页保存」与「外部改文件」两条
+// 热重载路径上都同步进 runtimeManager 与 LLMRuntime（缺一就会出现展示层与回合
+// 层各用各的默认值）。
+type runtimeDefaultSyncHooks struct {
+	runtimeManager   *runtimecfg.RuntimeManager
+	bootstrapManager *runtimebootstrap.Manager
+}
+
+func (h *runtimeDefaultSyncHooks) apply(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	syncAgentRuntimeDefaults(h.runtimeManager, cfg)
+	syncLLMRuntimeDefaults(h.bootstrapManager, cfg)
+}
+
 func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath string) (*runtimeServerApp, error) {
 	skillsCfg := normalizeSkillsRuntimeConfig(cfg)
 	runtimeManager := runtimecfg.NewRuntimeManager(skillsCfg.ConfigFile)
@@ -1059,6 +1113,12 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		ConfigFile: runtimeManager.GetFilePath(),
 		Mode:       sessionruntime.ModeServer,
 	})
+
+	// config.yaml（与 aicli 共享的同一份配置）的 providers.default_provider 是
+	// 运行时默认 provider 的权威来源：写进 runtimeConfig.Agent（actor/回合解析
+	// resolveAgentProvider/resolveAgentModel 读这里，而不是 LLMRuntime），否则
+	// DefaultRuntimeConfig 的内置 claude-3-5-sonnet 会一直压过配置页的修改。
+	syncAgentRuntimeDefaults(runtimeManager, cfg)
 
 	// 工作区锚定 MCP 解析所需的两个值必须在 buildSkillsMCPManager 之前捕获：
 	// 该函数会把 cfg.AICLI.MCP.ConfigFile 钉成解析结果，之后就区分不出原始覆盖。
@@ -1129,6 +1189,8 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		}
 	}
 	bootstrapManager.ApplyToSkillsHandler(handler)
+	// config.yaml 的默认 provider 同步到 live LLMRuntime（/api/runtime/models 展示层）。
+	syncLLMRuntimeDefaults(bootstrapManager, cfg)
 	handler.SetAICLIConfig(cfg)
 	handler.SetFileTransferService(filetransport.NewLocalService())
 	siteAccountService := runtimeserver.NewLocalSiteAccountService(configPath, config.DefaultAuthStorePath())
@@ -1184,6 +1246,14 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	})
 	configDocumentService := runtimeserver.NewLocalConfigDocumentService(configPath)
 	configHotReloader := runtimeserver.NewRuntimeConfigHotReloader(handler, cfg, bootstrapManager)
+	// 默认 provider 的两条热重载路径（配置页保存 / 外部改文件）共用这一回调：
+	// 把 config.yaml 的 providers.default_provider（及其 default_model）同步进
+	// runtimeManager 快照 + live LLMRuntime，保存即生效，无需重启。
+	defaultSync := &runtimeDefaultSyncHooks{
+		runtimeManager:   runtimeManager,
+		bootstrapManager: bootstrapManager,
+	}
+	configHotReloader.SetPostApplyCallback(defaultSync.apply)
 	if configDocumentService != nil {
 		configDocumentService.SetHotReloader(configHotReloader)
 	}

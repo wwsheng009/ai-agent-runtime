@@ -22,6 +22,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/telegram"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/wechat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
@@ -41,7 +42,7 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	if logf == nil {
 		logf = log.Printf
 	}
-	store := storefile.NewConfigStore(configPath, runtimeConnectorStatePath(configPath))
+	store := storefile.NewConfigStore(configPath, runtimeConnectorStatePath(logf))
 
 	service := connectors.New(connectors.Deps{
 		Store:   store,
@@ -96,7 +97,7 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	// agent.turn.finished，映射为 AttentionNotice 异步出站到该会话的全部 IM 绑定
 	// （NotifySession 内部反查绑定，无绑定即 no-op）。订阅随宿主 ctx
 	// （进程生命周期 / close 时取消）退订。
-	subscribeRuntimeConnectorAttention(ctx, handler, func(notifyCtx context.Context, notice connectors.AttentionNotice) error {
+	subscribeRuntimeConnectorAttention(ctx, handler, store, func(notifyCtx context.Context, notice connectors.AttentionNotice) error {
 		return service.NotifyAttention(notifyCtx, notice)
 	}, logf)
 	return service, nil
@@ -137,15 +138,21 @@ func (c connectorServiceCloser) Close() error {
 }
 
 // runtimeConnectorStatePath 返回连接器运行时状态文件（绑定/游标/去重账本）。
-// Fix-S4：优先用共享 config.yaml 所在目录推导（<configDir>/data/connectors/
-// state.json），与 aicli 宿主同源——项目层配置或 --config 指定路径时，两个
-// 宿主才能共享同一份账本。configPath 为空时回落到 DefaultAuthStorePath()
-// 所在目录的推导（与 supervision / subagent-batches 同级的宿主数据目录）。
-func runtimeConnectorStatePath(configPath string) string {
-	if dir := strings.TrimSpace(configPath); dir != "" {
-		return filepath.Join(filepath.Dir(dir), "data", "connectors", "state.json")
+// runtimeConnectorStatePath 返回 connectors 共享状态路径（docs/bots/
+// 09-multi-instance-binding.md D1）：由 statepath.CanonicalStatePath 统一锚定
+// 用户级 ~/.aicli/data/connectors/state.json，禁止按 configPath 推导（分层合并
+// 下两宿主解析到不同分层，推导必然分叉；Fix-S4 方案已废止，见 03 §安全闸注记）。
+// 解析失败时退回 DefaultAuthStorePath() 目录推导（可诊断的兜底，不静默换文件）。
+func runtimeConnectorStatePath(logf func(format string, args ...any)) string {
+	statePath, err := statepath.CanonicalStatePath()
+	if err == nil {
+		return statePath
 	}
-	return filepath.Join(filepath.Dir(agentconfig.DefaultAuthStorePath()), "data", "connectors", "state.json")
+	fallback := filepath.Join(filepath.Dir(agentconfig.DefaultAuthStorePath()), "data", "connectors", "state.json")
+	if logf != nil {
+		logf("connectors: canonical state path unavailable (%v), falling back to %s", err, fallback)
+	}
+	return fallback
 }
 
 // runtimeConnectorBackend 把 IM 消息投递到本进程的会话执行路径
@@ -328,6 +335,9 @@ const (
 )
 
 // subscribeRuntimeConnectorAttention 订阅审批/提问/回合结束事件并异步出站到 IM。
+// store 非空时按各连接器的 policy.notify（D5）过滤：enabled=false 的连接器不收
+// 任何事件通知；scope=sessions（默认）只收绑定到该 bot 的会话，scope=all 收
+// 宿主全部会话事件（docs/bots/09-multi-instance-binding.md §7.4.1）。
 //
 // 去重说明：同一事件（approval/question 的 request id、回合结束的 turn id/时间戳）
 // 只出站一次——进程内窗口去重，保证重复订阅/重复投递不会推两条。与 Web Push/ntfy
@@ -336,7 +346,7 @@ const (
 // 使用的事件身份同源，后续可迁移到共享去重账本。
 //
 // 返回退订函数；ctx 取消（宿主 close）时自动退订并停止 worker。
-func subscribeRuntimeConnectorAttention(ctx context.Context, handler *runtimeapi.Handler, notify func(context.Context, connectors.AttentionNotice) error, logf func(string, ...any)) func() {
+func subscribeRuntimeConnectorAttention(ctx context.Context, handler *runtimeapi.Handler, store connectors.Store, notify func(context.Context, connectors.AttentionNotice) error, logf func(string, ...any)) func() {
 	if handler == nil || notify == nil {
 		return func() {}
 	}
@@ -363,6 +373,31 @@ func subscribeRuntimeConnectorAttention(ctx context.Context, handler *runtimeapi
 		notice, key, ok := connectorAttentionNoticeForEvent(event, handler.ConnectorSessionParked)
 		if !ok || !dedupe.first(key) {
 			return
+		}
+		// D5 过滤：逐连接器判定（一个事件可能命中多个 bot 的通知开关）。
+		if store != nil {
+			accepted := false
+			for _, cfg := range store.ListConfigs() {
+				if !cfg.Enabled {
+					continue
+				}
+				if cfg.Policy.AcceptsNotice(notice, func(session connectors.SessionRef) bool {
+					// scope=sessions 的语义：事件会话已绑定到本 bot（按 SessionRef
+					// 反查绑定表；绑定数几十~几百，全表扫描可行，见 Store 契约）。
+					for _, binding := range store.ListBindings(cfg.ID) {
+						if binding.Session == session {
+							return true
+						}
+					}
+					return false
+				}) {
+					accepted = true
+					break
+				}
+			}
+			if !accepted {
+				return
+			}
 		}
 		select {
 		case queue <- notice:

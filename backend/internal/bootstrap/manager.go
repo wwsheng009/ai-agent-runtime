@@ -395,6 +395,25 @@ func (m *Manager) ReloadProviderConfigs(providerConfigs map[string]*llm.Provider
 	return nil
 }
 
+// SetDefaultProvider 把默认 provider 推送到 live LLMRuntime（配置热重载
+// providers.default_provider，避免必须重启 runtime-server 才生效）。
+func (m *Manager) SetDefaultProvider(name string) error {
+	if m == nil || m.llmRuntime == nil {
+		return fmt.Errorf("llm runtime is nil")
+	}
+	m.llmRuntime.SetDefaultProvider(name)
+	return nil
+}
+
+// SetDefaultModel 把默认模型推送到 live LLMRuntime（配置热重载）。
+func (m *Manager) SetDefaultModel(model string) error {
+	if m == nil || m.llmRuntime == nil {
+		return fmt.Errorf("llm runtime is nil")
+	}
+	m.llmRuntime.SetDefaultModel(model)
+	return nil
+}
+
 func runtimeRetryConfigFromProviderConfigs(providerConfigs map[string]*llm.ProviderConfig) (int, llm.RetryTuning, []llm.RetryRule) {
 	if len(providerConfigs) == 0 {
 		return -1, llm.RetryTuning{}, nil

@@ -180,6 +180,36 @@ func TestClassifyConfigDocumentPathTreatsAgentRoutingAsHotReload(t *testing.T) {
 	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("aicli.teams.routing.levels.expert.provider"))
 }
 
+func TestClassifyConfigDocumentPathTreatsProviderDefaultAsHotReload(t *testing.T) {
+	// 默认 provider 必须热生效，否则「配置页改了 provider，会话页不生效」。
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("providers.default_provider"))
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("providers.items"))
+	require.Equal(t, runtimeConfigPathHotReload, classifyConfigDocumentPath("providers.items.alpha.default_model"))
+}
+
+func TestRuntimeConfigHotReloaderRunsPostApplyCallback(t *testing.T) {
+	// postApply 是宿主把 providers.default_provider 同步进 runtimeManager 快照的
+	// 挂点（actor 回合解析读快照而非 LLMRuntime）；无论 hotPaths 是否命中都必须
+	// 拿到最新配置。
+	currentCfg := &agentconfig.Config{}
+	reloader := NewRuntimeConfigHotReloader(&fakeRuntimeConfigApplyTarget{}, currentCfg, nil)
+	require.NotNil(t, reloader)
+
+	var seen []*agentconfig.Config
+	reloader.SetPostApplyCallback(func(nextCfg *agentconfig.Config) {
+		seen = append(seen, nextCfg)
+	})
+
+	nextCfg := &agentconfig.Config{
+		Providers: agentconfig.ProvidersConfig{DefaultProvider: "workbuddy"},
+	}
+	reloader.Apply(nextCfg, nil)
+	reloader.Apply(nextCfg, []string{"providers.default_provider"})
+
+	require.Len(t, seen, 2)
+	require.Equal(t, "workbuddy", seen[1].Providers.DefaultProvider)
+}
+
 func TestRuntimeConfigHotReloaderAppliesAgentRouting(t *testing.T) {
 	enabled := true
 	currentCfg := &agentconfig.Config{}

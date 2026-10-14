@@ -408,7 +408,7 @@ func TestSubscribeRuntimeConnectorAttentionDeliversToBoundChatOnce(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	unsubscribe := subscribeRuntimeConnectorAttention(ctx, handler, service.NotifyAttention, func(string, ...any) {})
+	unsubscribe := subscribeRuntimeConnectorAttention(ctx, handler, store, service.NotifyAttention, func(string, ...any) {})
 	require.NotNil(t, unsubscribe)
 	defer unsubscribe()
 

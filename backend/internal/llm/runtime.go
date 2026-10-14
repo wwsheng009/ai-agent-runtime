@@ -536,7 +536,12 @@ func (r *LLMRuntime) ProviderAliases(providerName string) []string {
 
 // DefaultModel 返回 Runtime 配置的默认模型/Provider 名称
 func (r *LLMRuntime) DefaultModel() string {
-	if r == nil || r.config == nil {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.config == nil {
 		return ""
 	}
 	return r.config.DefaultModel
@@ -544,10 +549,42 @@ func (r *LLMRuntime) DefaultModel() string {
 
 // DefaultProvider returns the configured default provider name.
 func (r *LLMRuntime) DefaultProvider() string {
-	if r == nil || r.config == nil {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.config == nil {
 		return ""
 	}
 	return r.config.DefaultProvider
+}
+
+// SetDefaultProvider 热更新默认 provider（配置热重载 providers.default_provider）。
+// 空串是合法值（清除默认），因此不做非空过滤，由调用方决定是否调用。
+func (r *LLMRuntime) SetDefaultProvider(name string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.config == nil {
+		r.config = &RuntimeConfig{}
+	}
+	r.config.DefaultProvider = strings.TrimSpace(name)
+}
+
+// SetDefaultModel 热更新默认模型（配置热重载 / 跟随默认 provider）。
+func (r *LLMRuntime) SetDefaultModel(model string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.config == nil {
+		r.config = &RuntimeConfig{}
+	}
+	r.config.DefaultModel = strings.TrimSpace(model)
 }
 
 // RetryConfigSnapshot returns a copy of the runtime retry settings.
