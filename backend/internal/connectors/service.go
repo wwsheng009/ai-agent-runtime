@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,15 @@ type Deps struct {
 	// OwnerHeartbeatInterval 是归属心跳刷新间隔；<=0 用
 	// DefaultOwnerHeartbeatInterval（30s）。测试可缩短。
 	OwnerHeartbeatInterval time.Duration
+	// Peers 返回当前 mesh peers 视图（P2 切片 B，docs/bots/09 §7.2）：nil/
+	// 返回空 = 单机模式，全部本机执行（存量行为）。宿主从 mesh 档案装配，
+	// Local/Alive 由宿主标注（connectors 只认字段语义，不摸 mesh 包）。
+	Peers func() []RunnerPeer
+	// RemoteDispatch 把 turn 派发到目标节点（R1 亲和 / R3 远端选举）：
+	// v1 只回终态（docs/bots/09 §7.3）；nil 时即使路由选了远端也回落本机执行
+	//（能力未装配不拒收消息）。返回的 Session 是 runner 侧实际会话
+	//（auto-create 后含新 SessionID，调用方负责回写绑定）。
+	RemoteDispatch func(ctx context.Context, req DispatchRequest) (DispatchResult, error)
 }
 
 // Service 编排连接器：注册 Provider、按配置启动轮询、处理入站消息并投递回复。
@@ -76,6 +86,9 @@ type Service struct {
 	// 环内数据由 connectorLog.mu 保护，绝不与 mu 形成锁序）。
 	logMu      sync.Mutex
 	logBuffers map[string]*connectorLog
+	// runnerRoundRobin 是 round-robin 选举游标（P2 切片 B；受 mu 保护，
+	// 进程内递增——重启清零可接受，轮转语义不依赖持久化）。
+	runnerRoundRobin int
 }
 
 // connectorRun 是一次轮询实例的登记项。
@@ -735,6 +748,20 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 
 	binding, _ := s.deps.Store.GetBinding(cfg.ID, msg.Chat)
 
+	// P2 切片 B（docs/bots/09 §7.2）：按绑定状态决定执行位置（R1 亲和派发 /
+	// R2 本机回退 / R3 选举）。Peers/RemoteDispatch 未装配 = 单机模式，
+	// 决策恒本机，行为与历史完全一致。
+	if decision, rrNext := s.decideRoute(cfg, binding.Session); decision.Remote {
+		if s.deps.RemoteDispatch != nil {
+			return s.dispatchRemote(ctx, cfg, provider, msg, binding.Session, decision, rrNext)
+		}
+		// RemoteDispatch 未装配：回落本机执行（能力未装配不拒收）。
+	} else {
+		s.mu.Lock()
+		s.runnerRoundRobin = rrNext
+		s.mu.Unlock()
+	}
+
 	streamer, err := s.startStreaming(ctx, cfg, provider, msg.Chat)
 	if err != nil {
 		return err
@@ -847,6 +874,158 @@ func replyTextLength(msgs []OutboundMessage) int {
 		total += utf8.RuneCountInString(msg.Text)
 	}
 	return total
+}
+
+// decideRoute 包装 DecideRoute：取当前 mesh peers 视图与偏好配置，回写
+// round-robin 游标。Peers 未装配 = 单机模式（peers 为空 → 决策恒本机）。
+func (s *Service) decideRoute(cfg Config, binding SessionRef) (routeDecision, int) {
+	var peers []RunnerPeer
+	if s.deps.Peers != nil {
+		peers = s.deps.Peers()
+	}
+	s.mu.Lock()
+	cursor := s.runnerRoundRobin
+	s.mu.Unlock()
+	decision, rrNext := DecideRoute(cfg.Setting(RunnerPreferenceSettingKey, RunnerPreferenceDefault), peers, s.deps.HostID, binding, cursor)
+	if !decision.Remote {
+		s.mu.Lock()
+		s.runnerRoundRobin = rrNext
+		s.mu.Unlock()
+	}
+	return decision, rrNext
+}
+
+// dispatchRemote 执行远程派发（R1 亲和 / R3 远端）：v1 只回终态——
+// 不走本地 streaming/typing（那两条只在 runner 侧存在）；回复与绑定回写
+// 在本函数内完成，语义与本地路径一致。
+func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provider, msg InboundMessage, binding SessionRef, decision routeDecision, rrNext int) error {
+	s.mu.Lock()
+	s.runnerRoundRobin = rrNext
+	s.mu.Unlock()
+
+	result, err := s.deps.RemoteDispatch(ctx, DispatchRequest{
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Text:        msg.Text,
+		UserID:      msg.UserID,
+		UserName:    msg.UserName,
+		MessageID:   msg.MessageID,
+		Target:      decision.Peer,
+	})
+	if err != nil {
+		// 派发失败不静默吞消息：记日志后回落本机执行（可用性优先——远程
+		// 节点瞬时故障不应让 IM 停摆；failover 语义与 gateway_node 一致）。
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionSystem,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "远程派发失败，回落本机执行：" + err.Error(),
+		}, logCounters{})
+		return s.processMessageLocal(ctx, cfg, provider, msg, Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: binding})
+	}
+	// 回写绑定（runner 侧 auto-create 后 Session 会更新；R1 亲和时通常不变）。
+	if !result.Session.IsZero() && binding != result.Session {
+		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: result.Session}); err != nil {
+			s.logf("connector %s: persist dispatched binding failed: %v", cfg.ID, err)
+		}
+	}
+	if len(result.Reply) > 0 {
+		if err := provider.Send(ctx, cfg, msg.Chat, result.Reply); err != nil {
+			s.recordLog(LogEntry{
+				Level:       LogLevelError,
+				Direction:   LogDirectionOut,
+				ConnectorID: cfg.ID,
+				Chat:        msg.Chat,
+				Summary:     "回复投递失败：" + err.Error(),
+			}, logCounters{})
+			return err
+		}
+	}
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Summary:     "远程派发完成（runner=" + decision.Peer.NodeID + "，回复 " + strconv.Itoa(len(result.Reply)) + " 条）",
+	}, logCounters{})
+	return nil
+}
+
+// processMessageLocal 是原本地执行路径（远程派发失败回落用）；与
+// processMessage 相同但跳过路由决策（防递归派发）。
+func (s *Service) processMessageLocal(ctx context.Context, cfg Config, provider Provider, msg InboundMessage, binding Binding) error {
+	prefix := cfg.Policy.commandPrefix()
+	if cmd, ok := parseCommand(prefix, msg.Text); ok {
+		handled, err := s.handleCommand(ctx, cfg, provider, msg, cmd)
+		if err != nil || handled {
+			return err
+		}
+	}
+	streamer, err := s.startStreaming(ctx, cfg, provider, msg.Chat)
+	if err != nil {
+		return err
+	}
+	typing := s.startTyping(ctx, cfg, provider, msg.Chat)
+	defer func() {
+		if typing != nil {
+			_ = typing.Stop(ctx)
+		}
+	}()
+
+	sink := &replySink{provider: provider, cfg: cfg, chat: msg.Chat, session: streamer,
+		throttle: newDeltaThrottle(s.deltaInterval())}
+
+	result, err := s.deps.Backend.Handle(ctx, BackendRequest{
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Session:     binding.Session,
+		SessionMode: cfg.Policy.SessionMode,
+		Text:        msg.Text,
+		UserID:      msg.UserID,
+		UserName:    msg.UserName,
+		MessageID:   msg.MessageID,
+		Policy:      cfg.Policy,
+	}, sink)
+	if err != nil {
+		s.recordLog(LogEntry{
+			Level:       LogLevelError,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "后端处理失败：" + err.Error(),
+		}, logCounters{})
+		if streamer != nil {
+			if failErr := streamer.Fail(ctx, failureText(err)); failErr != nil {
+				s.recordLog(LogEntry{
+					Level:       LogLevelError,
+					Direction:   LogDirectionOut,
+					ConnectorID: cfg.ID,
+					Chat:        msg.Chat,
+					Summary:     "失败回执发送失败：" + failErr.Error(),
+				}, logCounters{})
+			}
+		}
+		return err
+	}
+
+	if !result.Session.IsZero() && binding.Session != result.Session {
+		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: result.Session}); err != nil {
+			s.logf("connector %s: persist binding failed: %v", cfg.ID, err)
+		}
+	}
+	if len(result.Reply) == 0 {
+		if streamer != nil {
+			if err := streamer.Final(ctx, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if streamer != nil {
+		return streamer.Final(ctx, result.Reply)
+	}
+	return provider.Send(ctx, cfg, msg.Chat, result.Reply)
 }
 
 func (s *Service) startStreaming(ctx context.Context, cfg Config, provider Provider, chat string) (StreamingSession, error) {

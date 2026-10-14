@@ -25,6 +25,11 @@ const (
 // RunnerPreferenceDefault 是配置缺省值（未配置 = runtime-server 优先）。
 const RunnerPreferenceDefault = RunnerPreferenceRuntimeServer
 
+// RunnerPreferenceSettingKey 是 per-connector settings 里的覆盖键（09 §10.4
+// 预留的 policy 覆盖位）：空 = 用宿主全局键（storefile/storejson 的
+// runner_preference）；Service.decideRoute 先读 per-connector 再落全局默认。
+const RunnerPreferenceSettingKey = "runner_preference"
+
 // NormalizeRunnerPreference 归一化配置值：大小写不敏感、未知/空白回落默认；
 // 返回归一化后的规范词（恒非空）。
 func NormalizeRunnerPreference(value string) string {

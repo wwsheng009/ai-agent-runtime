@@ -440,7 +440,7 @@ D1/绑定 API（P1）不依赖该改造。
 | 6 | `runner_preference` 配置键 + 解析 | `internal/connectors/runner_preference.go`（词表/归一化/R3 选举纯逻辑 PickRunnerForUnbound）、storefile `connectors.runner_preference` / storejson `runner_preference` 读写、restapi `GET/PUT /connectors/runner-preference`（能力接口 RunnerPreferenceStore，未实现存储 501）；✅ 2026-10-14（选举器在 P2 mesh turn 派发接线时真正消费） | P1 |
 | 7 | `policy.notify{enabled,kinds,scope}`（D5）+ 宿主过滤点 | `internal/connectors/types.go`（Policy）、Schema 导出、`internal/connectors/attention.go`（共享订阅/过滤/出站，三宿主单一实现点）；runtime-server ✅ / aicli ✅（connector_host 经 host.EventBus 接入）/ gateway ✅（OnSessionTransition 投影 hook，AttentionNoticeForProjection 映射） | P1 |
 | 8 | mesh peer kind 扩展 + runtime-server 入网 | mesh 包、`cmd/runtime-server` | P2 |
-| 9 | turn 派发端点 + `service.go` 路由决策（R1/R2/R3） | `internal/connectors/service.go`、`runtimeapi` | P2 |
+| 9 | turn 派发端点 + `service.go` 路由决策（R1/R2/R3） | `internal/connectors/dispatch.go`（DecideRoute 纯逻辑 + DispatchRequest/RunnerPeer 契约）、`service.go`（Deps.Peers/RemoteDispatch + processMessage 路由接入 + 派发失败回落本机）；**决策层 ✅ 2026-10-14（切片 B）**——Peers/RemoteDispatch 未装配 = 单机模式行为不变；宿主 HTTP 派发端点与 runner 侧接收面随切片 B 后半（runtime-server 入网时一并接线） | P2 |
 | 10 | 注意力发送收口 poller + `scope=all` 跨宿主扇出 | `cmd/runtime-server/connector_bootstrap.go`、mesh 派发 | P2 |
 
 P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在哪台就在哪台跑"成为事实。
