@@ -506,6 +506,16 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	case "/collab":
 		printChatCollab(session, command)
 
+	case "/tools":
+		// /tools（只读）：工具面目录 + 来源账本（§14/§17 收官，legacy/plain 出口）。
+		// unified TTY 的屏命令分支见 chat_command_result.go 的 /tools（screen doc）。
+		if body, ok := buildToolsScreenBody(session); ok {
+			printChatCommandOutput(session, body)
+		} else {
+			printChatCommandOutput(session, "当前会话没有可枚举的工具面（未附着 runtime 或未冻结）")
+		}
+		return false
+
 	case "/compact":
 		return handleCompactCommand(session, command)
 

@@ -11,6 +11,7 @@ package commands
 // 输出：按 surface_source 分组 + 计数行，标注数据与 web 端点一致。
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,12 +22,36 @@ import (
 
 // buildToolsScreenBody 渲染当前会话工具面目录（账本分组）。
 // ok=false：会话没有可枚举的工具面（未附着 runtime / 无 actor / 无本地目录）。
+// 数据源三优先级：actor 冻结面 → runtime-server 端点（server 模式）→ 本地目录。
 func buildToolsScreenBody(session *ChatSession) (string, bool) {
 	if session == nil {
 		return "", false
 	}
 	if tools, ok := frozenSurfaceForScreen(session); ok {
 		return renderToolsScreenBody(tools), true
+	}
+	// runtime-server 模式：LocalRuntimeHost 为 nil（server 模式不挂载本地能力面），
+	// 走 runtime-server 的 /runtime/tools（live 口径，含账本）。
+	// headless/首帧路径：ChatExecutor 由后台装载 goroutine 异步建立，/tools 作为
+	// 只读命令必须像 turn 一样 ensureChatExecutor await（否则异步未完成时
+	// ChatExecutor==nil，三分支全 miss——2026-10-14 ConPTY 实测）。
+	if executor, execErr := ensureChatExecutor(session); execErr == nil {
+		if serverExecutor, ok := executor.(*aicliRuntimeServerChatExecutor); ok && serverExecutor != nil {
+			if session.RuntimeSession == nil {
+				return "", false
+			}
+			tools, listErr := serverExecutor.listRuntimeServerTools(context.Background(), session, session.RuntimeSession.ID)
+			if listErr != nil {
+				return fmt.Sprintf("工具面查询失败（runtime-server）: %v", listErr), true
+			}
+			if len(tools) == 0 {
+				return "", false
+			}
+			if stamped, ok := toolsurface.Build(tools, toolsurface.Ledger{}); ok {
+				return renderToolsScreenBody(stamped), true
+			}
+			return renderToolsScreenBody(tools), true
+		}
 	}
 	if host := session.LocalRuntimeHost; host != nil && host.ToolSurface != nil {
 		infos := host.ToolSurface.ListTools()
