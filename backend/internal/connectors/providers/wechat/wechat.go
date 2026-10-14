@@ -51,6 +51,10 @@ const (
 	defaultHTTPTimeout = 15 * time.Second
 	configHTTPTimeout  = 10 * time.Second
 
+	// defaultBaseURL 是 iLink 官方默认基址：用户无需知道/填写，扫码登录直接可用
+	// （上游 codex-server 的二维码登录同样默认此地址）；登录成功后按上游返回值回填。
+	defaultBaseURL = "https://ilinkai.weixin.qq.com"
+
 	defaultRetryDelay = time.Second
 	maxRetryDelay     = 30 * time.Second
 
@@ -384,8 +388,9 @@ func (p *Provider) Schema() api.ProviderSchema {
 			},
 			{
 				Key: "base_url", Label: "iLink 基址", Type: api.FieldURL,
-				Placeholder: "https://…",
-				Help:        "扫码登录成功后自动回填；未配置时也可在 start_login 的 payload.base_url 指定",
+				Placeholder: defaultBaseURL,
+				Default:     defaultBaseURL,
+				Help:        "留空即用官方默认地址；扫码登录成功后按上游返回值回填",
 			},
 			{
 				Key: "api_base", Label: "API 基址覆盖", Type: api.FieldURL,
@@ -430,7 +435,8 @@ func (p *Provider) tokenFor(cfg connectors.Config) string {
 }
 
 // baseFor 解析 iLink 基址：Settings["api_base"] > 构造参数覆盖 > Settings["base_url"]
-// > 已确认登录的 baseurl。均未配置时返回空串（调用方报错）。
+// > 已确认登录的 baseurl > 官方默认地址（defaultBaseURL）。因此用户无需填写基址，
+// 扫码登录开箱即用；测试替身仍可用 api_base/构造参数覆盖。
 func (p *Provider) baseFor(cfg connectors.Config) string {
 	if base := strings.TrimSpace(cfg.Setting("api_base", "")); base != "" {
 		return strings.TrimRight(base, "/")
@@ -444,7 +450,7 @@ func (p *Provider) baseFor(cfg connectors.Config) string {
 	if session := p.confirmedSession(cfg.ID); session != nil {
 		return strings.TrimRight(session.baseURL, "/")
 	}
-	return ""
+	return defaultBaseURL
 }
 
 // routeTag 读取路由标签（SKRouteTag）。

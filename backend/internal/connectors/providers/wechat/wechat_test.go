@@ -186,6 +186,16 @@ func TestSchemaDeclaresPollingAndLoginActions(t *testing.T) {
 		schema.Actions[1].Key != loginActionStatus {
 		t.Fatalf("actions = %+v, want start_login(qr)+login_status", schema.Actions)
 	}
+	// 基址有官方默认值：用户无需知道/填写 iLink 地址即可扫码接入。
+	var baseDefault string
+	for _, field := range schema.Fields {
+		if field.Key == "base_url" {
+			baseDefault = field.Default
+		}
+	}
+	if baseDefault != defaultBaseURL {
+		t.Fatalf("base_url default = %q, want %q", baseDefault, defaultBaseURL)
+	}
 	if provider.Name() != Name {
 		t.Fatalf("Name() = %q", provider.Name())
 	}
@@ -259,10 +269,14 @@ func TestActivateSkipsProbeWithoutOwnerAndRejectsMissingConfig(t *testing.T) {
 		t.Fatalf("missing token error = %v", err)
 	}
 
+	// 未配置基址时回落到官方默认地址（用户无需填写），不再报 base_url 缺失。
 	plain := New(WithLogger(discardLogger))
 	missingBase := connectors.Config{ID: "c3", Provider: Name, Secrets: map[string]string{"bot_token": "tok"}}
-	if _, err := plain.Activate(context.Background(), missingBase); err == nil || !strings.Contains(err.Error(), "base_url") {
-		t.Fatalf("missing base error = %v", err)
+	if got := plain.baseFor(missingBase); got != defaultBaseURL {
+		t.Fatalf("default base = %q, want %q", got, defaultBaseURL)
+	}
+	if _, err := plain.Activate(context.Background(), missingBase); err != nil {
+		t.Fatalf("Activate with default base: %v", err)
 	}
 }
 
@@ -788,6 +802,48 @@ func TestRunActionLoginFlowConfirmsAndBackfills(t *testing.T) {
 	}
 	if redirectTarget.callCount("/ilink/bot/get_qrcode_status") != 1 {
 		t.Fatalf("redirect target status calls = %d, want 1", redirectTarget.callCount("/ilink/bot/get_qrcode_status"))
+	}
+}
+
+func TestStartLoginIsIdempotentAndStatusFallsBack(t *testing.T) {
+	fake := newFakeILink(t)
+	fake.on("/ilink/bot/get_bot_qrcode", func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		writeJSON(t, w, map[string]any{
+			"ret": 0, "errcode": 0,
+			"qrcode":             "qr-1",
+			"qrcode_img_content": "data:image/png;base64,QQ==",
+		})
+	})
+	fake.on("/ilink/bot/get_qrcode_status", func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		writeJSON(t, w, map[string]any{"ret": 0, "status": "wait"})
+	})
+
+	provider := New(WithAPIBase(fake.URL()), WithLogger(discardLogger))
+	cfg := testConfig("c1", fake.URL(), nil)
+
+	// 幂等：重复 start_login 复用同一会话（前端 StrictMode 双调用/重复点击不再让旧 login_id 失效）。
+	first, err := provider.RunAction(context.Background(), cfg, loginActionStart, nil)
+	if err != nil {
+		t.Fatalf("start_login #1: %v", err)
+	}
+	second, err := provider.RunAction(context.Background(), cfg, loginActionStart, nil)
+	if err != nil {
+		t.Fatalf("start_login #2: %v", err)
+	}
+	if first["login_id"] != second["login_id"] {
+		t.Fatalf("start_login 非幂等：%v vs %v", first["login_id"], second["login_id"])
+	}
+	if got := fake.callCount("/ilink/bot/get_bot_qrcode"); got != 1 {
+		t.Fatalf("qrcode calls = %d, want 1（幂等复用不重复出码）", got)
+	}
+
+	// 容错：未知 login_id 回落到该连接器最近一次会话，而不是报 not found。
+	status, err := provider.RunAction(context.Background(), cfg, loginActionStatus, map[string]any{"login_id": "wechat_login_stale"})
+	if err != nil {
+		t.Fatalf("login_status(过期 login_id) 应回落而非报错：%v", err)
+	}
+	if status["status"] != loginStatusWait {
+		t.Fatalf("fallback status = %v", status["status"])
 	}
 }
 

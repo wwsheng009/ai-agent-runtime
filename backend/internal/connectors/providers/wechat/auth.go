@@ -109,6 +109,13 @@ func (p *Provider) RunAction(ctx context.Context, cfg connectors.Config, action 
 // startLogin 拉取二维码并创建登录会话。
 // payload.base_url 可覆盖 iLink 基址（未配置 base_url/api_base 时必需）。
 func (p *Provider) startLogin(ctx context.Context, cfg connectors.Config, payload map[string]any) (map[string]any, error) {
+	// 幂等：同一连接器已有活跃扫码会话时直接复用，避免重复出码/重复建会话——
+	// 前端 StrictMode 双调用或用户重复点击都会走到这里，重复建会话会让先前的
+	// login_id 失效（login_status 报「login session was not found」）。
+	if existing := p.activeLogin(connectorKey(cfg)); existing != nil {
+		return existing.view(), nil
+	}
+
 	base := firstNonEmpty(payloadString(payload, "base_url", "baseUrl"), p.baseFor(cfg))
 	base = strings.TrimRight(base, "/")
 	if err := validateBaseURL(base); err != nil {
@@ -139,7 +146,14 @@ func (p *Provider) startLogin(ctx context.Context, cfg connectors.Config, payloa
 
 // loginStatus 查询登录状态；payload.login_id 缺省时取该连接器最近一次会话。
 func (p *Provider) loginStatus(ctx context.Context, cfg connectors.Config, payload map[string]any) (map[string]any, error) {
-	session, ok := p.loginSessionFor(connectorKey(cfg), payloadString(payload, "login_id", "loginId"))
+	key := connectorKey(cfg)
+	loginID := payloadString(payload, "login_id", "loginId")
+	session, ok := p.loginSessionFor(key, loginID)
+	if !ok && strings.TrimSpace(loginID) != "" {
+		// 容错：前端持有的 login_id 因重复出码/进程重启而失效时，回落到该连接器
+		// 最近一次会话（同一连接器至多一个活跃会话，语义等价）。
+		session, ok = p.loginSessionFor(key, "")
+	}
 	if !ok {
 		return nil, errLoginNotFound
 	}
@@ -279,6 +293,38 @@ func (p *Provider) confirmedSession(connectorID string) *loginSession {
 	}
 	clone := *session
 	return &clone
+}
+
+// activeLogin 返回该连接器仍在有效期内的扫码会话（wait/scanned/confirmed），
+// 供 start_login 幂等复用；无或已过期则返回 nil（调用方新建会话）。
+func (p *Provider) activeLogin(connectorID string) *loginSession {
+	connectorID = strings.TrimSpace(connectorID)
+	if connectorID == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	session, ok := p.logins[connectorID]
+	if !ok || session == nil {
+		return nil
+	}
+	now := p.now().UTC()
+	switch session.status {
+	case loginStatusConfirmed:
+		if strings.TrimSpace(session.botToken) != "" && now.Before(session.credentialExpiresAt) {
+			clone := *session
+			return &clone
+		}
+		return nil
+	case loginStatusExpired:
+		return nil
+	default:
+		if now.Before(session.expiresAt) {
+			clone := *session
+			return &clone
+		}
+		return nil
+	}
 }
 
 // loginSessionFor 查会话：loginID 为空时取该连接器最近更新的会话。
