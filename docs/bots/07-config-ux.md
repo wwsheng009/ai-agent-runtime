@@ -140,6 +140,13 @@ sequenceDiagram
 | 限到什么程度 | `user_rate_limit`、`max_concurrent_turns` | 10 msg/min、1 | 超限提示一次后静默 5min |
 | 其它 | `auto_title`（新会话标题模板）、`locale` | 首条消息截断、`zh-CN` | — |
 
+> **事件通知落点（2026-10-14 定案）**：连接器级的事件通知接收开关已定案为
+> `policy.notify{enabled,kinds,scope}`（默认关闭、kinds 白名单对齐 `AttentionKind*`、
+> scope 二值=绑定会话/宿主全部），见
+> [09-multi-instance-binding.md §7.4.1](./09-multi-instance-binding.md)（D5）。
+> 本行 `notify_kinds` 保留为**会话级**展示偏好的历史占位，两者是相邻但不同的维度；
+> P1 实现以 09 的连接器级配置为准，避免两套开关并存。
+
 ### 4.3 继承与覆盖
 
 ```
@@ -225,6 +232,13 @@ sequenceDiagram
   `owned_by_current_host`；`POST /api/connectors/{id}/takeover` 抢占（策略
   `runtime_owner` 指定他人 → 409，停用 → 409，未配置 HostID → 503）。三端前端
   按 P1 后续切片接入按钮与状态文案。
+
+> **演进（2026-10-14 定案）**：本节"运行归属"只裁决 **poller**（收发体唯一）；
+> **Runner**（会话执行体）按绑定亲和路由、接管不迁移绑定、无绑定按
+> `connectors.runner_preference`（默认 runtime-server）选举——完整定案见
+> [09-multi-instance-binding.md](./09-multi-instance-binding.md)（D1–D4：状态真源统一、
+> 绑定 REST/UI/TUI、实体与凭据两层模型）。该文同时废止 Fix-S4 的
+> "state 目录随 configPath 推导"方案。
 
 ## 6. 便捷性设计（"应该很方便"的落点）
 

@@ -328,7 +328,8 @@ typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重�
 **扫码登录 action 与返回约定（三端统一）**：
 
 - `POST /api/connectors/{id}/actions/start_login`（Schema.Actions kind=qr）：
-  body 可选 `{"base_url":"https://…"}`（未配置 `base_url`/`api_base` 时必需）；
+  body 可选 `{"base_url":"https://…"}`（覆盖基址）；未配置时回落到官方默认
+  `https://ilinkai.weixin.qq.com`（与上游 codex-server 一致，用户无需填写）；
   返回 `{login_id,status:"wait",qr_code_content,expires_at,…}`，其中
   `qr_code_content` 是二维码图片（data URI/base64）或链接，前端直接渲染。
 - `POST /api/connectors/{id}/actions/login_status`（kind=button）：body 可选
@@ -362,6 +363,13 @@ typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重�
 `state.json` 目录改为优先随 `configPath` 推导（与 aicli 同源，项目层/`--config`
 下两端账本共享）；`runtimeapi` 的环回判定不再无条件信任 `X-Forwarded-For`
 （仅直连对端本身是环回时才采纳转发头，远程伪造 `127.0.0.1` 不再绕过管理面鉴权）。
+
+> **⚠ Fix-S4 状态路径推导已被 2026-10-14 复盘推翻**：`configPath` 推导依赖"两端解析到
+> 同一个文件"，而分层合并下 runtime-server 与 aicli 各自解析到**不同分层**的 configPath
+> （项目层 vs 用户层），推导结果必然分叉（实测两份 state.json 并存、绑定互不可见）。
+> 定案见 [09-multi-instance-binding.md](./09-multi-instance-binding.md) **D1**：state 路径由
+> 共享函数 `CanonicalStatePath()` 锚定用户级 `~/.aicli/data/connectors/state.json`，
+> 两宿主禁止 configPath 推导；迁移与验收口径见该文 §4/§11。
 
 **运行归属与数据目录锁（P1 实现，2026-10-12）**：`runtime_owner` 抢占与跨进程
 数据目录锁已落地——
