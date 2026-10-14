@@ -72,6 +72,9 @@ func NewRouter(deps Deps) http.Handler {
 	// 绑定管理（docs/bots/09 §5.2）：字面量 /bindings 必须先于 /{id} 注册，
 	// 否则会被当作 id 吞掉。
 	router.HandleFunc("/connectors/bindings", handlers.listBindings).Methods(http.MethodGet)
+	// 全局 runner 选举偏好（D2，docs/bots/09 §7.2 R3）：字面量路径同样先于 /{id}。
+	router.HandleFunc("/connectors/runner-preference", handlers.getRunnerPreference).Methods(http.MethodGet)
+	router.HandleFunc("/connectors/runner-preference", handlers.putRunnerPreference).Methods(http.MethodPut)
 	router.HandleFunc("/connectors/{id}", handlers.get).Methods(http.MethodGet)
 	// PATCH 是契约首选（部分更新语义：缺省字段保持不变）；PUT 作为别名兼容。
 	router.HandleFunc("/connectors/{id}", handlers.update).Methods(http.MethodPatch, http.MethodPut)

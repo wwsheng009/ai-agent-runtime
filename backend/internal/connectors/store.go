@@ -111,6 +111,35 @@ type MemoryStore struct {
 	claimed  map[string]time.Time
 	states   map[string]map[string]string
 	owners   map[string]OwnerRecord
+	// runnerPreference 是全局 runner 选举偏好（D2；空 = 默认）。实现可选能力
+	// 接口 RunnerPreferenceStore，供 restapi /connectors/runner-preference 使用。
+	runnerPreference string
+}
+
+// RunnerPreference 实现 connectors.RunnerPreferenceStore（恒返回规范词）。
+func (m *MemoryStore) RunnerPreference() string {
+	if m == nil {
+		return NormalizeRunnerPreference("")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return NormalizeRunnerPreference(m.runnerPreference)
+}
+
+// SetRunnerPreference 实现 connectors.RunnerPreferenceStore（空串/默认=清除）。
+func (m *MemoryStore) SetRunnerPreference(preference string) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	normalized := NormalizeRunnerPreference(preference)
+	if strings.TrimSpace(preference) == "" || normalized == RunnerPreferenceDefault {
+		m.runnerPreference = ""
+		return nil
+	}
+	m.runnerPreference = normalized
+	return nil
 }
 
 // ownerIdentitySettingKey 是扫码通道的所有者稳定标识 setting 键

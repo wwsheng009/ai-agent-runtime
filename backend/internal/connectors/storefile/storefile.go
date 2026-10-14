@@ -552,6 +552,74 @@ func (r ownerRecord) expired(now time.Time, staleAfter time.Duration) bool {
 
 const connectorsSectionKey = "connectors"
 
+// runnerPreferenceKey 是 connectors 节内的全局 runner 选举键（D2，docs/bots/09
+// §2/§7.2 R3）：`connectors.runner_preference: runtime-server|aicli|round-robin`。
+// 与连接器列表同级（不是 per-connector 字段；policy 覆盖位 §10.4 预留）。
+const runnerPreferenceKey = "runner_preference"
+
+// RunnerPreference 读取全局 runner 选举偏好（storefile 实现；未配置/未知值
+// 归一化到默认，恒返回规范词）。
+func (s *ConfigStore) RunnerPreference() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc, err := s.loadDocument()
+	if err != nil {
+		return connectors.NormalizeRunnerPreference("")
+	}
+	section, _ := mappingEntry(documentRoot(doc), connectorsSectionKey)
+	if section == nil || section.Kind != yaml.MappingNode {
+		return connectors.NormalizeRunnerPreference("")
+	}
+	value, _ := mappingEntry(section, runnerPreferenceKey)
+	if value == nil || value.Kind != yaml.ScalarNode {
+		return connectors.NormalizeRunnerPreference("")
+	}
+	return connectors.NormalizeRunnerPreference(value.Value)
+}
+
+// SetRunnerPreference 写入全局 runner 选举偏好（空串 = 删除该键，回落默认）。
+// 原子写与 PutConfig 同一把数据目录锁，不与连接器列表写入互踩。
+func (s *ConfigStore) SetRunnerPreference(preference string) error {
+	if s == nil || s.configPath == "" {
+		return errors.New("storefile: config path is not configured")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	unlockDir, err := s.lockDir()
+	if err != nil {
+		return err
+	}
+	defer unlockDir()
+
+	doc, err := s.loadDocument()
+	if err != nil {
+		return err
+	}
+	root := documentRoot(doc)
+	section, _ := mappingEntry(root, connectorsSectionKey)
+	if section == nil || section.Kind != yaml.MappingNode {
+		// 没有连接器节：偏好无消费者，空串/默认值直接返回不造节；显式非默认值
+		// 先造节再写（配置先于连接器存在是合法顺序）。
+		if strings.TrimSpace(preference) == "" {
+			return nil
+		}
+		section = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		setMappingEntry(root, connectorsSectionKey, section)
+	}
+	normalized := connectors.NormalizeRunnerPreference(preference)
+	if strings.TrimSpace(preference) == "" || normalized == connectors.RunnerPreferenceDefault {
+		// 空串/默认值 = 删除键（零值不落盘纪律，与 policy.route 同口径）。
+		if _, idx := mappingEntry(section, runnerPreferenceKey); idx >= 0 {
+			section.Content = append(section.Content[:idx], section.Content[idx+2:]...)
+		}
+	} else {
+		setMappingEntry(section, runnerPreferenceKey,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: normalized})
+	}
+	return s.writeDocument(doc)
+}
+
 func bindingKey(connectorID, chat string) string {
 	connectorID = strings.TrimSpace(connectorID)
 	chat = strings.TrimSpace(chat)

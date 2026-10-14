@@ -424,7 +424,7 @@ D1/绑定 API（P1）不依赖该改造。
 | 3 | UI 左栏 bot 面板 | `frontend/src/components/workspace/*`、`api/runtime/connectors.ts` | P1 |
 | 4 | TUI `/bots` | `cmd/aicli/commands/chat_bots_*.go`（新） | P1 |
 | 5 | 「重新扫码=替换凭据」入口 + 文案 + 防呆 | `connector-dialog.tsx`/`login-panel.tsx`、i18n | P1 |
-| 6 | `runner_preference` 配置键 + 解析 | `internal/agentconfig`、配置页 Schema | P1 |
+| 6 | `runner_preference` 配置键 + 解析 | `internal/connectors/runner_preference.go`（词表/归一化/R3 选举纯逻辑 PickRunnerForUnbound）、storefile `connectors.runner_preference` / storejson `runner_preference` 读写、restapi `GET/PUT /connectors/runner-preference`（能力接口 RunnerPreferenceStore，未实现存储 501）；✅ 2026-10-14（选举器在 P2 mesh turn 派发接线时真正消费） | P1 |
 | 7 | `policy.notify{enabled,kinds,scope}`（D5）+ 宿主过滤点 | `internal/connectors/types.go`（Policy）、Schema 导出、`internal/connectors/attention.go`（共享订阅/过滤/出站，三宿主单一实现点）；runtime-server ✅ / aicli ✅（connector_host 经 host.EventBus 接入）/ gateway ✅（OnSessionTransition 投影 hook，AttentionNoticeForProjection 映射） | P1 |
 | 8 | mesh peer kind 扩展 + runtime-server 入网 | mesh 包、`cmd/runtime-server` | P2 |
 | 9 | turn 派发端点 + `service.go` 路由决策（R1/R2/R3） | `internal/connectors/service.go`、`runtimeapi` | P2 |

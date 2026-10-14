@@ -167,6 +167,63 @@ func (h *handlers) schemaDocument(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, api.Schema{Version: SchemaVersion, Providers: h.deps.Service.Providers()})
 }
 
+// runnerPreferenceStore 断言宿主存储实现了全局 runner 偏好能力（D2）。
+func (h *handlers) runnerPreferenceStore() connectors.RunnerPreferenceStore {
+	if h == nil || h.deps.Store == nil {
+		return nil
+	}
+	store, ok := h.deps.Store.(connectors.RunnerPreferenceStore)
+	if !ok {
+		return nil
+	}
+	return store
+}
+
+// getRunnerPreference 处理 GET /connectors/runner-preference：
+// 返回 {runner_preference: "<规范词>"}；存储未实现能力接口 → 501。
+func (h *handlers) getRunnerPreference(w http.ResponseWriter, _ *http.Request) {
+	store := h.runnerPreferenceStore()
+	if store == nil {
+		writeError(w, http.StatusNotImplemented, "宿主存储未实现 runner 偏好能力")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"runner_preference": store.RunnerPreference()})
+}
+
+// putRunnerPreference 处理 PUT /connectors/runner-preference：
+// body {runner_preference: "runtime-server|aicli|round-robin|"}；空串=清除。
+func (h *handlers) putRunnerPreference(w http.ResponseWriter, r *http.Request) {
+	store := h.runnerPreferenceStore()
+	if store == nil {
+		writeError(w, http.StatusNotImplemented, "宿主存储未实现 runner 偏好能力")
+		return
+	}
+	var body struct {
+		RunnerPreference string `json:"runner_preference"`
+	}
+	if !decodeBody(h.deps, w, r, &body) {
+		return
+	}
+	// 显式写入 fail-fast：只接受规范词（大小写不敏感）或空串（清除）。
+	// NormalizeRunnerPreference 的"未知值回落默认"是读取路径的配置容错，
+	// 不适用于显式写入口（静默纠正拼写会掩盖用户意图）。
+	trimmed := strings.ToLower(strings.TrimSpace(body.RunnerPreference))
+	switch trimmed {
+	case "":
+		// 清除（回落默认）。
+	case connectors.RunnerPreferenceRuntimeServer, connectors.RunnerPreferenceAICLI, connectors.RunnerPreferenceRoundRobin:
+		// 合法。
+	default:
+		writeError(w, http.StatusBadRequest, "runner_preference 仅支持 runtime-server | aicli | round-robin（空串=清除）")
+		return
+	}
+	if err := store.SetRunnerPreference(body.RunnerPreference); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存失败："+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"runner_preference": store.RunnerPreference()})
+}
+
 func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 	if !h.ready(w) {
 		return

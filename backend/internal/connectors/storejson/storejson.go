@@ -123,6 +123,11 @@ func (s *Store) WithLegacyConfigHints(configPaths ...string) *Store {
 
 type configFile struct {
 	Configs map[string]connectorRecord `json:"configs"`
+	// RunnerPreference 是全局 runner 选举偏好（D2，docs/bots/09 §7.2 R3）：
+	// runtime-server|aicli|round-robin；零值省略 = 默认（runtime-server 优先）。
+	// 与 storefile 的 `connectors.runner_preference` 同语义（宿主各自存储，
+	// D1 状态统一只覆盖 state.json，配置仍按宿主文件落）。
+	RunnerPreference string `json:"runner_preference,omitempty"`
 }
 
 // connectorRecord 是配置文件中的一条通道记录（字段与 docs/bots/07-config-ux.md
@@ -714,6 +719,41 @@ func (s *Store) lockDir() (func(), error) {
 	return storefile.AcquireDirLock(path, s.lockOptions)
 }
 
+// RunnerPreference 读取全局 runner 选举偏好（gateway 实现；未配置/未知值
+// 归一化到默认，恒返回规范词）。
+func (s *Store) RunnerPreference() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	file, err := s.loadConfigLocked()
+	if err != nil {
+		return connectors.NormalizeRunnerPreference("")
+	}
+	return connectors.NormalizeRunnerPreference(file.RunnerPreference)
+}
+
+// SetRunnerPreference 写入全局 runner 选举偏好（空串/默认 = 清除键，回落默认）。
+// 原子写与 PutConfig 同一把数据目录锁。
+func (s *Store) SetRunnerPreference(preference string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlockDir, err := s.lockDir()
+	if err != nil {
+		return err
+	}
+	defer unlockDir()
+	file, err := s.loadConfigLocked()
+	if err != nil {
+		return err
+	}
+	normalized := connectors.NormalizeRunnerPreference(preference)
+	if strings.TrimSpace(preference) == "" || normalized == connectors.RunnerPreferenceDefault {
+		file.RunnerPreference = ""
+	} else {
+		file.RunnerPreference = normalized
+	}
+	return s.writeConfigLocked(file)
+}
+
 // loadConfigLocked 读取 connectors.json（要求调用方已持有 s.mu）；缺失/空文件视为空表。
 func (s *Store) loadConfigLocked() (*configFile, error) {
 	file := &configFile{Configs: make(map[string]connectorRecord)}
@@ -748,6 +788,10 @@ func (s *Store) writeConfigLocked(file *configFile) error {
 	}
 	if file.Configs == nil {
 		file.Configs = make(map[string]connectorRecord)
+	}
+	// 零值纪律：默认偏好不落盘（与 storefile 删除键同口径）。
+	if connectors.NormalizeRunnerPreference(file.RunnerPreference) == connectors.RunnerPreferenceDefault {
+		file.RunnerPreference = ""
 	}
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {

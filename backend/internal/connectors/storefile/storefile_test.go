@@ -17,6 +17,66 @@ func newTestStore(t *testing.T) (*ConfigStore, string, string) {
 	return NewConfigStore(configPath, statePath), configPath, statePath
 }
 
+// TestConfigStoreRunnerPreferenceRoundTrip 锁定全局 runner 偏好（D2）的读写语义：
+// 非默认值落盘、默认值/空串删键、未知值读取侧归一默认、同级其它键保留。
+func TestConfigStoreRunnerPreferenceRoundTrip(t *testing.T) {
+	store, configPath, _ := newTestStore(t)
+	if err := os.WriteFile(configPath, []byte("model: demo\n"), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	// 未配置 = 默认。
+	if got := store.RunnerPreference(); got != connectors.RunnerPreferenceDefault {
+		t.Fatalf("initial = %q, want %q", got, connectors.RunnerPreferenceDefault)
+	}
+
+	// 写 aicli：落盘且同级键保留。
+	if err := store.SetRunnerPreference("aicli"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if got := store.RunnerPreference(); got != connectors.RunnerPreferenceAICLI {
+		t.Fatalf("after set = %q", got)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"runner_preference: aicli", "model: demo"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("config.yaml missing %q:\n%s", want, raw)
+		}
+	}
+
+	// 默认值 = 删键（零值不落盘）。
+	if err := store.SetRunnerPreference("runtime-server"); err != nil {
+		t.Fatalf("Set default: %v", err)
+	}
+	raw, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "runner_preference") {
+		t.Fatalf("default value must not persist:\n%s", raw)
+	}
+	if got := store.RunnerPreference(); got != connectors.RunnerPreferenceDefault {
+		t.Fatalf("after clear = %q", got)
+	}
+
+	// 空串 = 清除；未知值读取侧归一默认。
+	if err := store.SetRunnerPreference("round-robin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRunnerPreference(""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("connectors:\n  runner_preference: typo-value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.RunnerPreference(); got != connectors.RunnerPreferenceDefault {
+		t.Fatalf("unknown value must normalize, got %q", got)
+	}
+}
+
 func sampleConfig() connectors.Config {
 	return connectors.Config{
 		ID:       "telegram-main",

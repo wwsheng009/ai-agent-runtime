@@ -509,3 +509,39 @@ func TestActionRequiresAuthorizer(t *testing.T) {
 		t.Fatalf("无 Authorizer 应 403，got %d", recorder.Code)
 	}
 }
+
+// TestRunnerPreferenceEndpoints 锁定全局 runner 偏好端点（D2）：
+// GET 缺省=默认、PUT 写入/清除、非法值 400、字面量路径不被 /{id} 吞掉。
+func TestRunnerPreferenceEndpoints(t *testing.T) {
+	fx := newFixture(t, allowAll, baseConfig("c1", "fakeweb"))
+
+	// 未配置 = 默认（runtime-server）。
+	recorder := do(t, fx.router, http.MethodGet, "/connectors/runner-preference", "")
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "runtime-server") {
+		t.Fatalf("GET initial = %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	// 写 aicli。
+	recorder = do(t, fx.router, http.MethodPut, "/connectors/runner-preference", `{"runner_preference":"aicli"}`)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "aicli") {
+		t.Fatalf("PUT aicli = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if got := fx.store.RunnerPreference(); got != connectors.RunnerPreferenceAICLI {
+		t.Fatalf("store after put = %q", got)
+	}
+
+	// 非法值 400（fail-fast，与读取容错不同）。
+	recorder = do(t, fx.router, http.MethodPut, "/connectors/runner-preference", `{"runner_preference":"typo"}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("PUT typo = %d", recorder.Code)
+	}
+
+	// 空串 = 清除（回落默认）。
+	recorder = do(t, fx.router, http.MethodPut, "/connectors/runner-preference", `{"runner_preference":""}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("PUT clear = %d", recorder.Code)
+	}
+	if got := fx.store.RunnerPreference(); got != connectors.RunnerPreferenceDefault {
+		t.Fatalf("store after clear = %q", got)
+	}
+}
