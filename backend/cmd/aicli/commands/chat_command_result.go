@@ -1439,6 +1439,9 @@ func executeStructuredGoalStatusChange(session *ChatSession, verb string) (Comma
 		goal.CompletedBy = ""
 		goal.CompletionSummary = ""
 	}
+	if status != runtimegoal.StatusBlocked {
+		goal.BlockedReason = ""
+	}
 	updated, err := store.PutPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
 	if err != nil {

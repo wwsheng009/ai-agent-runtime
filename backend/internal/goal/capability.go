@@ -74,12 +74,12 @@ func UpdateParameters() map[string]interface{} {
 		"properties": map[string]interface{}{
 			"status": map[string]interface{}{
 				"type":        "string",
-				"enum":        []string{string(StatusComplete)},
-				"description": "Required. Must be complete. Pause, resume, and clear are controlled by the user.",
+				"enum":        []string{string(StatusComplete), string(StatusBlocked)},
+				"description": "Required. complete: mark the goal complete after the completion audit passes. blocked: only when the same blocking condition has repeated for at least three consecutive goal turns and no safe next action exists. Pause, resume, and clear are controlled by the user.",
 			},
 			"summary": map[string]interface{}{
 				"type":        "string",
-				"description": "Required. Concise evidence-based summary explaining why the goal is complete.",
+				"description": "Required. For complete: concise evidence-based summary. For blocked: the blocking condition and what is needed to unblock.",
 			},
 		},
 		"required":             []string{"status", "summary"},
@@ -110,12 +110,12 @@ func executeUpdateGoalCapability(ctx context.Context, toolSession aiclitools.Too
 		return aiclitools.ToolResult{}, err
 	}
 	status := strings.TrimSpace(stringArg(args, "status"))
-	if status != string(StatusComplete) {
-		return aiclitools.ToolResult{}, fmt.Errorf("update_goal can only mark the existing goal complete; pause, resume, and clear are controlled by the user")
+	if status != string(StatusComplete) && status != string(StatusBlocked) {
+		return aiclitools.ToolResult{}, fmt.Errorf("update_goal status must be complete or blocked; pause, resume, and clear are controlled by the user")
 	}
 	summary := strings.TrimSpace(stringArg(args, "summary"))
 	if summary == "" {
-		return aiclitools.ToolResult{}, fmt.Errorf("update_goal requires a completion summary")
+		return aiclitools.ToolResult{}, fmt.Errorf("update_goal requires a summary (completion evidence or blocking reason)")
 	}
 
 	runtimeSession := runtimeSessionFromToolContext(toolSession)
@@ -141,6 +141,29 @@ func executeUpdateGoalCapability(ctx context.Context, toolSession aiclitools.Too
 				"reason": "goal_missing",
 			},
 		}, nil
+	}
+	if status == string(StatusBlocked) {
+		// 对齐 Codex：状态变更只允许从 active 发起；blocked 只记录“确实卡死”
+		// 的判定（≥3 连同一阻塞由提示词约束，模型须自律遵守）。
+		if goal.Status != StatusActive {
+			return aiclitools.ToolResult{}, fmt.Errorf("update_goal can only mark an active goal blocked; current status is %s", goal.Status)
+		}
+		if err := ValidateStatusTransition(goal.Status, StatusBlocked); err != nil {
+			return aiclitools.ToolResult{}, err
+		}
+		goal.Status = StatusBlocked
+		goal.UpdatedAt = time.Now()
+		goal.BlockedReason = summary
+		updated, err := store.PutPersistent(ctx, toolSession.SessionStorage(), toolSession.SessionID(), *goal, MutationModel)
+		if err != nil {
+			return aiclitools.ToolResult{}, err
+		}
+		refreshToolSession(ctx, toolSession, updated)
+		return aiclitools.ToolResult{Output: marshalIndentedJSON(map[string]interface{}{
+			"goal":             goal,
+			"remaining_tokens": RemainingTokens(*goal),
+			"message":          "goal marked blocked; /goal resume 可解除并继续。",
+		})}, nil
 	}
 	if goal.Status == StatusPaused {
 		return aiclitools.ToolResult{}, fmt.Errorf("update_goal cannot complete a paused goal; resume the goal before model completion")

@@ -411,6 +411,23 @@ func TestSendMessage_AccountsGoalUsageAndStopsAtBudget(t *testing.T) {
 	}
 }
 
+func TestGoalAutoContinuationLimitEnvFallback(t *testing.T) {
+	t.Setenv(goalMaxContinuationsEnv, "2")
+	if got := goalAutoContinuationLimit(nil); got != 2 {
+		t.Fatalf("expected env fallback 2, got %d", got)
+	}
+	if got := goalAutoContinuationLimit(&ChatSession{}); got != 2 {
+		t.Fatalf("expected env fallback for unset session, got %d", got)
+	}
+	if got := goalAutoContinuationLimit(&ChatSession{goalMaxContinuations: 5}); got != 5 {
+		t.Fatalf("explicit session config must win over env, got %d", got)
+	}
+	t.Setenv(goalMaxContinuationsEnv, "-3")
+	if got := goalAutoContinuationLimit(&ChatSession{}); got != 0 {
+		t.Fatalf("invalid env must fall back to unlimited, got %d", got)
+	}
+}
+
 func TestRequestAndConsumeGoalKickRunsContinuation(t *testing.T) {
 	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
 	defer cleanup()

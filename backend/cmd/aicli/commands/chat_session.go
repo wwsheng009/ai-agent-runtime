@@ -2759,9 +2759,19 @@ func renderActiveGoalGuidance(session *ChatSession) string {
 		"- Keep the full objective intact; do not redefine success around a smaller or easier subset.",
 		"- If the same genuine blocker repeats across goal turns, state it concisely and leave the goal active instead of silently stopping.",
 	}
+	if goal.TokenBudget > 0 {
+		remaining := goal.TokenBudget - goal.TokensUsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		lines = append(lines, "", fmt.Sprintf(
+			"Token budget: used %d / %d (remaining %d). Budget exhaustion marks the goal budget_limited; wrap up instead of starting new work.",
+			goal.TokensUsed, goal.TokenBudget, remaining))
+	}
 	if canCurrentChatPathUpdateGoal(session) {
 		lines = append(lines, "Only when the audit shows that no required work remains, call update_goal with status \"complete\" and a concise summary.")
 		lines = append(lines, "Do not call update_goal merely because you are stopping work, have made partial progress, or believe the remaining work is small.")
+		lines = append(lines, "Use update_goal with status \"blocked\" only when the same blocker has repeated across at least three consecutive goal turns and no safe next action exists.")
 	} else {
 		lines = append(lines, "If the audit shows that no required work remains, report that conclusion to the user. Do not claim to have updated goal state unless the update_goal tool is available and has succeeded.")
 	}

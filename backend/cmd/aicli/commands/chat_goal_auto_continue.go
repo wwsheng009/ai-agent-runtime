@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +24,10 @@ const (
 	goalAutoContinuationNoProgressStrikeLimit = 3
 	// goalKickWatchInterval 是恢复态作答后就绪 watcher 的轮询间隔。
 	goalKickWatchInterval = 3 * time.Second
+	// goalMaxContinuationsEnv 是 runtime.yaml goal.maxConsecutiveContinuations
+	// 未显式配置（0/缺省）时的环境变量覆盖；正整数生效、非法或非正值忽略
+	// （对齐 turnAutoRetryLimitEnv 的既有先例，供 E2E/运维把"不限制"收敛有界）。
+	goalMaxContinuationsEnv = "AICLI_GOAL_MAX_CONTINUATIONS"
 
 	// goalAutoContinuationPrompt 对齐 Codex ext/goal/templates/goals/continuation.md
 	// 的语义子集（持久性/不缩目标/证据优先/进度分类/完成审计/update_goal 纪律），
@@ -42,6 +48,7 @@ const (
 		"- Classify the previous goal turn as progress, a verified wait, or no progress. Status restatements and unexecuted plans are no progress.\n" +
 		"- A verified wait polls a specific process, session, job, or tool handle confirmed live now; conversation or prior output alone is insufficient. An observation timeout is not terminal: re-poll the same handle or inspect other authoritative state; never restart work solely because an observation expired.\n" +
 		"- If no safe next action exists because the same genuine blocker remains, state it concretely and leave the goal active.\n" +
+		"- Only use update_goal with status \"blocked\" when the same blocking condition has repeated for at least three consecutive goal turns (counting the original turn and automatic continuations) and no safe next action exists; never use blocked merely because work is hard, slow, uncertain, or incomplete.\n" +
 		"\n" +
 		"Completion audit:\n" +
 		"- Before deciding the goal is achieved, treat completion as unproven and verify it against the actual current state.\n" +
@@ -189,10 +196,15 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 // goalAutoContinuationLimit 返回生效的自动续跑安全阀：0（缺省）与负值都表示
 // 不限制（对齐 Codex 的"active 即续"）；正整数为每条用户消息的轮数上限。
 func goalAutoContinuationLimit(session *ChatSession) int {
-	if session == nil || session.goalMaxContinuations < 0 {
-		return 0
+	if session != nil && session.goalMaxContinuations > 0 {
+		return session.goalMaxContinuations
 	}
-	return session.goalMaxContinuations
+	if raw := strings.TrimSpace(os.Getenv(goalMaxContinuationsEnv)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 // accountGoalTurnUsageBestEffort 记账并只记 debug 日志（入口等无返回值场景）。
@@ -475,6 +487,7 @@ func markActiveGoalBlocked(session *ChatSession, reason string) bool {
 		return false
 	}
 	goal.Status = runtimegoal.StatusBlocked
+	goal.BlockedReason = goalBlockedReasonText(reason)
 	goal.UpdatedAt = time.Now()
 	updated, err := runtimegoal.NewMetadataStore().PutPersistent(
 		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
@@ -488,6 +501,18 @@ func markActiveGoalBlocked(session *ChatSession, reason string) bool {
 	}
 	writeSessionDebugInfo(session, "[goal] goal marked blocked reason="+reason, false)
 	return true
+}
+
+// goalBlockedReasonText 把内部停止原因翻译成用户可读的 blocked 说明。
+func goalBlockedReasonText(reason string) string {
+	switch reason {
+	case "consecutive_errors":
+		return "连续续跑失败（系统判定）"
+	case "no_progress":
+		return "连续无实质进展（系统判定）"
+	default:
+		return reason
+	}
 }
 
 // reportGoalAutoContinuationUnavailableOnce 让"当前模式无法调用 update_goal，

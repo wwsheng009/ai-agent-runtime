@@ -210,6 +210,9 @@ func updateGoalStatusCommand(session *ChatSession, status runtimegoal.Status, me
 		goal.CompletedBy = ""
 		goal.CompletionSummary = ""
 	}
+	if status != runtimegoal.StatusBlocked {
+		goal.BlockedReason = ""
+	}
 	updated, err := store.PutPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
@@ -268,6 +271,7 @@ func applyGoalBudgetCommand(session *ChatSession, arg string) (string, error) {
 	reactivated := false
 	if n > 0 && goal.Status == runtimegoal.StatusBudgetLimited && n > goal.TokensUsed {
 		goal.Status = runtimegoal.StatusActive
+		goal.BlockedReason = ""
 		message += "；预算已高于已用，目标已恢复为 active"
 		reactivated = true
 	}
@@ -320,6 +324,9 @@ func formatGoalSummary(goal runtimegoal.SessionGoal) string {
 		} else {
 			lines = append(lines, fmt.Sprintf("Tokens: %d", goal.TokensUsed))
 		}
+	}
+	if goal.BlockedReason != "" {
+		lines = append(lines, "Blocked reason: "+goal.BlockedReason)
 	}
 	if goal.CompletedBy != "" {
 		lines = append(lines, "Completed by: "+goal.CompletedBy)

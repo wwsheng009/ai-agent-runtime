@@ -392,7 +392,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/goal",
-			Usage:       "/goal [status|clear|pause|resume|complete|<objective>]",
+			Usage:       "/goal [status|clear|pause|resume|complete|budget|<objective>]",
 			Summary:     "查看或管理当前会话长期目标",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
@@ -402,6 +402,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "pause", Summary: "暂停当前 goal"},
 				{Token: "resume", Summary: "恢复当前 goal"},
 				{Token: "complete", Summary: "标记当前 goal 完成"},
+				{Token: "budget", Summary: "查看或设置 token 预算"},
 				{Token: "--json", Summary: "以 JSON 输出当前 goal"},
 				{Token: "<objective>", Summary: "设置或替换当前 goal"},
 			},

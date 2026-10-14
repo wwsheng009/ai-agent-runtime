@@ -31,18 +31,21 @@ const (
 )
 
 type SessionGoal struct {
-	GoalID            string     `json:"goal_id" yaml:"goal_id"`
-	SessionID         string     `json:"session_id" yaml:"session_id"`
-	Objective         string     `json:"objective" yaml:"objective"`
-	Status            Status     `json:"status" yaml:"status"`
-	TokenBudget       int        `json:"token_budget,omitempty" yaml:"token_budget,omitempty"`
-	TokensUsed        int        `json:"tokens_used,omitempty" yaml:"tokens_used,omitempty"`
-	TimeUsedSeconds   int64      `json:"time_used_seconds,omitempty" yaml:"time_used_seconds,omitempty"`
-	CompletedBy       string     `json:"completed_by,omitempty" yaml:"completed_by,omitempty"`
-	CompletionSummary string     `json:"completion_summary,omitempty" yaml:"completion_summary,omitempty"`
-	CreatedAt         time.Time  `json:"created_at" yaml:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at" yaml:"updated_at"`
-	CompletedAt       *time.Time `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
+	GoalID            string `json:"goal_id" yaml:"goal_id"`
+	SessionID         string `json:"session_id" yaml:"session_id"`
+	Objective         string `json:"objective" yaml:"objective"`
+	Status            Status `json:"status" yaml:"status"`
+	TokenBudget       int    `json:"token_budget,omitempty" yaml:"token_budget,omitempty"`
+	TokensUsed        int    `json:"tokens_used,omitempty" yaml:"tokens_used,omitempty"`
+	TimeUsedSeconds   int64  `json:"time_used_seconds,omitempty" yaml:"time_used_seconds,omitempty"`
+	CompletedBy       string `json:"completed_by,omitempty" yaml:"completed_by,omitempty"`
+	CompletionSummary string `json:"completion_summary,omitempty" yaml:"completion_summary,omitempty"`
+	// BlockedReason 记录 blocked 的触发原因（系统判定文案或模型申报的阻塞
+	// 说明）；resume / 其它状态变更时清空。
+	BlockedReason string     `json:"blocked_reason,omitempty" yaml:"blocked_reason,omitempty"`
+	CreatedAt     time.Time  `json:"created_at" yaml:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at" yaml:"updated_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty" yaml:"completed_at,omitempty"`
 }
 
 type MetadataStore struct{}

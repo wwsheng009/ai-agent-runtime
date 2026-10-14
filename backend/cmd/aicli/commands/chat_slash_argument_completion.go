@@ -255,6 +255,7 @@ func completeGoalSlashArgs(argsText string, cursor int) []chatSlashCompletionCan
 		{Command: "pause", Summary: "暂停当前 goal", Group: string(chatSlashCommandGroupSession)},
 		{Command: "resume", Summary: "恢复当前 goal", Group: string(chatSlashCommandGroupSession)},
 		{Command: "complete", Summary: "标记当前 goal 完成", Group: string(chatSlashCommandGroupSession)},
+		{Command: "budget", Summary: "查看或设置 token 预算", Group: string(chatSlashCommandGroupSession)},
 		{Command: "--json", Summary: "以 JSON 输出当前 goal", Group: string(chatSlashCommandGroupSession)},
 	}, query)
 	return append(candidates, chatSlashCompletionCandidate{

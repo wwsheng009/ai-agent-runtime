@@ -69,6 +69,71 @@ func TestExecuteUpdateGoalRejectsBlockedGoal(t *testing.T) {
 	}
 }
 
+func TestExecuteUpdateGoalMarksActiveGoalBlocked(t *testing.T) {
+	storage := runtimechat.NewInMemoryStorage()
+	manager := runtimechat.NewSessionManager(storage, nil)
+	session, err := manager.Create(context.Background(), "tester")
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	defer manager.Stop()
+	toolSession := &goalCapabilityTestSession{
+		session: session,
+		storage: storage,
+	}
+	goal, err := NewSessionGoal(session.ID, "active objective", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	if err := NewMetadataStore().Put(session, goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+
+	result, err := executeUpdateGoalCapability(context.Background(), toolSession, map[string]interface{}{
+		"status":  string(StatusBlocked),
+		"summary": "same blocker repeated for three consecutive turns",
+	})
+	if err != nil {
+		t.Fatalf("blocked write failed: %v", err)
+	}
+	output, _ := result.Output.(string)
+	if !strings.Contains(output, "blocked") {
+		t.Fatalf("expected blocked confirmation, got %q", result.Output)
+	}
+	persisted, err := manager.Get(context.Background(), session.ID)
+	if err != nil || persisted == nil {
+		t.Fatalf("manager.Load: %v", err)
+	}
+	stored, ok, err := NewMetadataStore().Get(persisted)
+	if err != nil || !ok || stored == nil {
+		t.Fatalf("expected stored goal, ok=%v err=%v", ok, err)
+	}
+	if stored.Status != StatusBlocked || stored.BlockedReason != "same blocker repeated for three consecutive turns" {
+		t.Fatalf("unexpected stored goal: %+v", stored)
+	}
+}
+
+func TestExecuteUpdateGoalRejectsBlockedOnNonActiveGoal(t *testing.T) {
+	session := runtimechat.NewSession("tester")
+	toolSession := &goalCapabilityTestSession{session: session, storage: runtimechat.NewInMemoryStorage()}
+	goal, err := NewSessionGoal(session.ID, "paused objective", time.Now())
+	if err != nil {
+		t.Fatalf("NewSessionGoal: %v", err)
+	}
+	goal.Status = StatusPaused
+	if err := NewMetadataStore().Put(session, goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+
+	_, err = executeUpdateGoalCapability(context.Background(), toolSession, map[string]interface{}{
+		"status":  string(StatusBlocked),
+		"summary": "attempted block while paused",
+	})
+	if err == nil || !strings.Contains(err.Error(), "active") {
+		t.Fatalf("expected active-only rejection, got err=%v", err)
+	}
+}
+
 func TestUpdateGoalDescriptionRequiresConfirmedActiveGoal(t *testing.T) {
 	capabilities := Capabilities()
 	for _, capability := range capabilities {

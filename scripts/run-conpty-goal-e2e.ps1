@@ -147,6 +147,69 @@ Assert-That '自动续跑有决策日志' ($debugText.Contains('[goal] auto cont
 Assert-That '默认不限制：无安全阀上限提示' (-not $debugText.Contains('已达配置上限')) 'goal.maxConsecutiveContinuations 缺省 0=不限制（对齐 Codex）；出现上限提示说明默认被意外设小'
 Assert-That 'transcript 已生成且含目标设置' ((Test-Path -LiteralPath $transcriptLog) -and ($transcriptText.Contains('Goal 已设置'))) '--transcript-file 产物'
 
+# ---- 场景二：等待型目标的多轮续跑有界 + resume kick（env 安全阀=2）----
+$roundsB = @(
+  '/goal 等待型目标：只回复一句“等待中”即可；不要调用 update_goal，也不要调用任何工具。目标保持 active 等待用户指令。',
+  '/goal pause',
+  '/goal resume',
+  '/goal clear'
+)
+$roundsFileB = Join-Path $runRoot 'rounds-resume.txt'
+Set-Content -LiteralPath $roundsFileB -Value $roundsB -Encoding UTF8
+$sessionDirB = Join-Path $runRoot 'sessions-resume'
+$chatLogDirB = Join-Path $runRoot 'chat-logs-resume'
+$renderLogB = Join-Path $runRoot 'render-resume.log'
+$transcriptLogB = Join-Path $runRoot 'transcript-resume.txt'
+$stdoutLogB = Join-Path $runRoot 'stdout-resume.log'
+$stderrLogB = Join-Path $runRoot 'stderr-resume.log'
+
+$argvB = @('chat', '--headless', '--script', $roundsFileB, '--render-output-file', $renderLogB, '--transcript-file', $transcriptLogB,
+  '--session-dir', $sessionDirB, '--log-dir', $chatLogDirB, '--title', 'goal-e2e-resume')
+if (-not [string]::IsNullOrWhiteSpace($Provider)) { $argvB += @('--provider', $Provider) }
+if (-not [string]::IsNullOrWhiteSpace($Model)) { $argvB += @('--model', $Model) }
+if (-not [string]::IsNullOrWhiteSpace($ReasoningEffort)) { $argvB += @('--reasoning-effort', $ReasoningEffort) }
+
+$env:AICLI_GOAL_MAX_CONTINUATIONS = '2'
+Write-Host '[goal-e2e] 场景二（等待型目标/resume，安全阀=2）开始'
+$procArgsB = ($argvB | ForEach-Object { Quote-Arg $_ }) -join ' '
+$procB = Start-Process -FilePath $ExePath -ArgumentList $procArgsB -WorkingDirectory $WorkDir -PassThru -NoNewWindow `
+  -RedirectStandardOutput $stdoutLogB -RedirectStandardError $stderrLogB
+$timedOutB = -not $procB.WaitForExit($TimeoutSec * 1000)
+if ($timedOutB) { try { $procB.Kill($true) } catch {} }
+$exitCodeB = if ($timedOutB) { -1 } else { $procB.ExitCode }
+Write-Host ("[goal-e2e] 场景二 exit={0}" -f $exitCodeB)
+
+$eventsFileB = Get-ChildItem -Path $chatLogDirB -Recurse -Filter 'runtime-events.jsonl' -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$debugFileB = Get-ChildItem -Path $chatLogDirB -Recurse -Filter 'debug.log' -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$commandsB = New-Object System.Collections.Generic.List[string]
+if ($eventsFileB) {
+  foreach ($e in (Read-Jsonl $eventsFileB.FullName)) {
+    if ($e.PSObject.Properties.Name -contains 'command' -and $e.command) { $commandsB.Add([string]$e.command) }
+  }
+}
+$debugTextB = if ($debugFileB) { Get-Content -LiteralPath $debugFileB.FullName -Raw -Encoding UTF8 } else { '' }
+$renderTextB = if (Test-Path -LiteralPath $renderLogB) { Get-Content -LiteralPath $renderLogB -Raw -Encoding UTF8 } else { '' }
+$transcriptTextB = if (Test-Path -LiteralPath $transcriptLogB) { Get-Content -LiteralPath $transcriptLogB -Raw -Encoding UTF8 } else { '' }
+
+function Test-RunBContains([string]$needle) {
+  if ($renderTextB -and $renderTextB.Contains($needle)) { return $true }
+  if ($transcriptTextB -and $transcriptTextB.Contains($needle)) { return $true }
+  foreach ($c in $commandsB) { if ($c.Contains($needle)) { return $true } }
+  return $false
+}
+
+$setCommandB = if ($commandsB.Count -gt 0) { $commandsB[0] } else { '' }
+$attemptCountB = ([regex]::Matches($debugTextB, 'auto continuation attempt=')).Count
+$boundedB = $debugTextB.Contains('已达配置上限(2)') -or $debugTextB.Contains('goal marked blocked') -or $debugTextB.Contains('reason=goal_blocked')
+Assert-That '续跑场景：进程正常退出' ($exitCodeB -eq 0) "exit=$exitCodeB timed_out=$timedOutB"
+Assert-That '续跑场景：等待型目标已设置且 active' ($setCommandB.Contains('Goal 已设置') -and $setCommandB.Contains('Goal: active')) ($setCommandB -replace "`n", ' | ')
+Assert-That '续跑场景：多轮续跑有界（安全阀/blocked）' $boundedB "attempts=$attemptCountB bounded=$boundedB"
+Assert-That '续跑场景：resume 触发新一轮续跑' ($attemptCountB -ge 3) "安全阀=2：首轮≤2 次 + resume 后 ≥1 次 = ≥3；实际 $attemptCountB"
+Assert-That '续跑场景：清除生效' (Test-RunBContains 'Goal 已清除') ''
+$env:AICLI_GOAL_MAX_CONTINUATIONS = $null
+
 $failed = @($results | Where-Object { -not $_.Pass })
 Write-Host ''
 Write-Host '==== goal-e2e 断言结果 ===='

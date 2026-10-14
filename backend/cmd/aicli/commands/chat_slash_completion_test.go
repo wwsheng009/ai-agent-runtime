@@ -831,7 +831,7 @@ func TestChatSlashArgumentCompletionGoal(t *testing.T) {
 	if !controller.state.Active || !controller.state.Context.InArguments {
 		t.Fatalf("expected /goal args popup to be active, got %#v", controller.state)
 	}
-	for _, command := range []string{"status", "clear", "pause", "resume", "complete", "--json", "<objective>"} {
+	for _, command := range []string{"status", "clear", "pause", "resume", "complete", "budget", "--json", "<objective>"} {
 		if !containsSlashCandidate(controller.state.Candidates, command) {
 			t.Fatalf("expected /goal candidates to include %q, got %#v", command, controller.state.Candidates)
 		}

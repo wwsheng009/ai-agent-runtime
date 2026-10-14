@@ -331,6 +331,16 @@ goal:
 - **测试**：`TestSendMessage_AccountsGoalUsageAndStopsAtBudget`（每轮 100 / 预算 250 → 2 轮正常 + 1 轮收尾、断言 wrap-up 提示词与 budget_limited）、预算命令三态（设置 / 未提高预算 resume 不复活 / 提高后恢复 / 清除）、非法与缺 goal、goal 包 merge 守卫矩阵；`run-conpty-goal-e2e.ps1` 扩展预算命令场景 → **11/11**。
 - **回归**：`internal/goal`、`internal/config`、全量命令包（仅外部 `/tools` catalog 用例失败，预先存在）。
 
+### M4（打磨批次，2026-10-15 完成，待提交）
+
+- **模型写 blocked（对齐 Codex）**：`update_goal` 新增 `status=blocked`（仅允许从 active 发起；`summary` 作为阻塞说明落新字段 `BlockedReason`）；continuation 提示词与 `renderActiveGoalGuidance` 增加"同一阻塞 ≥3 连才可申报 blocked"审计条款；`/goal status` 展示 `Blocked reason`，resume / 其它状态变更 / 预算复活时清空。
+- **预算可见性**：`renderActiveGoalGuidance` 在配置预算时逐轮注入 `Token budget: used / budget (remaining)`；耗尽语义提示"wrap up instead of starting new work"。
+- **帮助与补全**：`/goal` catalog Usage 与参数表、参数补全候选新增 `budget`（`/goal [status|clear|pause|resume|complete|budget|<objective>]`）。
+- **环境变量安全阀**：`AICLI_GOAL_MAX_CONTINUATIONS`（runtime.yaml 未显式配置时的覆盖；正整数生效，对齐 `AICLI_TURN_AUTO_RETRY_LIMIT` 先例）——支撑 e2e 把"不限制"收敛为有界多轮场景。
+- **e2e 场景二**：等待型目标（不完成、不工具）多轮续跑有界（安全阀=2）→ 上限提示；`/goal resume` 后 kick 触发新一轮 → 断言"首轮 ≤2 次 + resume 后 ≥1 次 = ≥3 次 attempt"；实测 attempt 行=4（2+2），达到上限提示两次，**16/16 断言全绿**。
+- **测试**：`internal/goal` 新增 blocked 写入成功（状态+BlockedReason 落库）与非 active 拒绝；commands 新增 env 回退用例（显式配置优先 / 非法值回落不限制）；补全断言纳入 `budget`。
+- **回归**：`internal/goal`、commands 定向全绿；全量命令包仅外部 `/tools` catalog 用例失败（预先存在）。
+
 ---
 
 ## 附录 A：Codex main 关键证据索引
