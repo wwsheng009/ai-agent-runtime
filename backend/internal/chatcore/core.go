@@ -29,6 +29,10 @@ type ExecuteRequest struct {
 	EnableReAct          bool
 	ReActConfig          *agent.LoopReActConfig
 	OrchestrationRequest *agent.OrchestrationRequest
+	// TurnID 是调用方已知的回合身份（可选）。盖章后 user 消息落库不再由
+	// EnsureMessageIdentity 自造新 id，durable 历史与 runtime 事件流共用同一
+	// turn 空间（2026-10-14 回合身份对齐；空值保持旧行为）。
+	TurnID string
 }
 
 // ExecuteResult returns the raw runtime outcome plus any updated session state.
@@ -58,9 +62,12 @@ func ExecuteNonStream(ctx context.Context, req ExecuteRequest) (*ExecuteResult, 
 			return nil, fmt.Errorf("resolving image attachments: %w", err)
 		}
 		if preparedPrompt != nil {
+			chat.StampMessageTurnID(preparedPrompt, req.TurnID)
 			execSession.AddMessage(*preparedPrompt)
 		} else if req.Prompt != "" {
-			execSession.AddMessage(*llm.NewUserPromptMessage(req.Prompt))
+			userMessage := llm.NewUserPromptMessage(req.Prompt)
+			chat.StampMessageTurnID(userMessage, req.TurnID)
+			execSession.AddMessage(*userMessage)
 		}
 
 		reactResult, err := req.Agent.RunReActWithSession(ctx, req.LLMRuntime, req.Prompt, execSession, req.ReActConfig)
