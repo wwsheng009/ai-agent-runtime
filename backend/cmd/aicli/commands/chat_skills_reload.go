@@ -117,6 +117,12 @@ func runSkillReloadCommand(session *ChatSession) (*skillReloadReport, error) {
 
 	usedHotReload := false
 	if hotReload := manager.HotReload(); hotReload != nil && len(hotReload.SkillDirs()) > 0 {
+		// 启动后新增、尚未被事件链接管的扫描根（典型：启动时不存在的
+		// <cwd>/.agents/skills）不在热重载的启动快照里。先按当前解析结果
+		// 补挂监听并接管（已存在目录 watch+adopt，幂等），保证"报告显示的
+		// 扫描根"与实际重扫集合一致；否则 Reload() 只重扫旧集合，出现
+		// "报告里有根、重扫没它"的假成功（2026-10-14 itsm 实例）。
+		hotReload.WatchRoots(report.Roots)
 		err := hotReload.Reload()
 		switch {
 		case err == nil:

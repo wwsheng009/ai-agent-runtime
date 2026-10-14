@@ -575,6 +575,15 @@ func (h *HotReload) reloadSkillsUnderDir(dir string) {
 	h.reloadMu.Lock()
 	defer h.reloadMu.Unlock()
 
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		// 目录已不存在（补齐扫描是异步调度的，执行时目录可能已被删除）。
+		return
+	}
+	// 事件时序兜底：批量 mkdir 时中间目录的创建事件可能在 watcher 生效前
+	// 被丢弃，pending 候选根会卡住不被接管。这里按当前磁盘现状补一次接管，
+	// 让"第一次安装"不依赖事件时序（2026-10-14 itsm 实例首装竞态）。
+	h.advancePendingRoots(dir)
+
 	seen := make(map[string]struct{})
 	_, err := walkSkillTree(dir, !isCodexSystemSkillRoot(dir), func(entry skillTreeEntry) error {
 		if entry.Info == nil || entry.Info.IsDir() || !shouldParseSkillManifest(entry.Path) {
@@ -596,6 +605,12 @@ func (h *HotReload) reloadSkillsUnderDir(dir string) {
 			Timestamp: time.Now(),
 		})
 	}
+	// 补齐扫描之后为子树补挂目录监听：目录创建事件与 watcher 注册存在竞态
+	//（批量 mkdir 的事件先于监听生效，可能整批丢失），晚到的清单文件写入会
+	// 没有事件可依。勾住扫描过的现状子树，让后续写入直接走文件事件路径，
+	// 消除"目录在但永远不生效"的死角（2026-10-14 itsm 实例：目录先建、
+	// SKILL.md 数分钟后才写）。
+	_ = h.addSubdirectories(dir)
 }
 
 // removeSkillsUnderDir 注销目录下已登记的 skill（目录被删除/重命名时）。
@@ -891,6 +906,13 @@ func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 	loaded := make([]fileSkill, 0)
 	seenSkillPaths := make(map[string]struct{})
 	for _, skillDir := range normalized {
+		if info, err := os.Stat(skillDir); err != nil || !info.IsDir() {
+			// 死路径（根目录已被删除，例如动态接管的目录事后被清理）不能中断
+			// 整表重载：其余仍存在的根必须照常重扫，否则 /skills reload 直接
+			// 失败（2026-10-14 itsm 实例：删除技能根后 reload 报
+			// "cannot find the path specified"）。
+			continue
+		}
 		_, err := walkSkillTree(skillDir, !isCodexSystemSkillRoot(skillDir), func(entry skillTreeEntry) error {
 			if entry.Info == nil || entry.Info.IsDir() {
 				return nil

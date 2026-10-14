@@ -187,3 +187,40 @@ func TestProjectAgentsSkillDirs_EmptyMarkersDisablesRootDetection(t *testing.T) 
 
 	require.Equal(t, []string{anchorSkills}, projectAgentsSkillDirs(workspace, nil))
 }
+
+// 回归（2026-10-14 itsm 实例）：热加载候选监听必须包含尚不存在的
+// `<cwd>/.agents/skills` —— 启动时目录不存在就没有 pending 根，目录创建后
+// 无法被接管，晚到的 SKILL.md 写入永远热加载不了；加载（发现）语义保持
+// "仅实际存在的目录"不变。
+func TestDiscoverCodexCompatibleSkillWatchDirs_KeepsMissingProjectAgentsSkills(t *testing.T) {
+	baseRoot := isolatedSkillTestRoot(t)
+	homeRoot := filepath.Join(baseRoot, "home")
+	workspace := filepath.Join(baseRoot, "workspace")
+	require.NoError(t, os.MkdirAll(homeRoot, 0o755))
+	require.NoError(t, os.MkdirAll(workspace, 0o755))
+	t.Setenv("USERPROFILE", homeRoot)
+	t.Setenv("HOME", homeRoot)
+
+	missing := filepath.Join(workspace, ".agents", "skills")
+	containsDir := func(dirs []string, want string) bool {
+		for _, dir := range dirs {
+			if filepath.Clean(dir) == filepath.Clean(want) {
+				return true
+			}
+		}
+		return false
+	}
+
+	watchDirs := DiscoverCodexCompatibleSkillWatchDirs(workspace, "")
+	require.True(t, containsDir(watchDirs, missing),
+		"watch 候选必须保留尚不存在的项目标准安装位: %v", watchDirs)
+
+	loadDirs := DiscoverCodexCompatibleSkillDirs(workspace, "")
+	require.False(t, containsDir(loadDirs, missing),
+		"发现（加载）语义仍只收实际存在的目录: %v", loadDirs)
+
+	require.NoError(t, os.MkdirAll(missing, 0o755))
+	loadDirs = DiscoverCodexCompatibleSkillDirs(workspace, "")
+	require.True(t, containsDir(loadDirs, missing),
+		"目录创建后必须随发现语义纳入: %v", loadDirs)
+}

@@ -168,3 +168,62 @@ func TestSkillsReloadCommandEmptyWorkspaceReportsZero(t *testing.T) {
 	require.Contains(t, report.Text(), "total=0")
 	require.Equal(t, 0, env.session.FunctionCatalog.Stats().SkillFunctions)
 }
+
+// 回归（2026-10-14 itsm 实例）：/skills reload 的热重载路径必须覆盖"启动后
+// 新增、尚未被事件链接管"的扫描根。修复前 Reload() 只重扫启动快照
+// （hotReload.SkillDirs()），报告里显示根、实际没扫 → total 不变。
+// 本用例刻意不注册候选监听位（模拟事件全部丢失的最坏情况）：种子根是独立
+// 目录，<cwd>/.agents/skills 完全在监听面之外，只能靠 reload 自身补挂。
+func TestSkillsReloadCommandAdoptsRootsAppearedAfterStartup(t *testing.T) {
+	tempDir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	previousMCP := MCPManagerInstance
+	MCPManagerInstance = nil
+	t.Cleanup(func() { MCPManagerInstance = previousMCP })
+	chdirTest(t, tempDir)
+
+	seedRoot := filepath.Join(tempDir, "seed-skills")
+	require.NoError(t, os.MkdirAll(seedRoot, 0o755))
+	writeHotReloadChatTestSkill(t, seedRoot, "seed-skill", "seed")
+
+	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true, SkillDir: seedRoot}}
+	session := &ChatSession{
+		ProviderName:     "nvidia",
+		Model:            "test-model",
+		FunctionRegistry: functions.NewFunctionRegistry(),
+		FunctionCatalog:  newAICLIFunctionCatalog("openai", nil),
+		Config:           cfg,
+	}
+
+	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
+	runtimeConfig.HotReload.Enabled = true
+	shared, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
+		Config:          runtimeConfig,
+		SkillDir:        seedRoot,
+		DiscoverOnly:    true,
+		EnableHotReload: true,
+		// 不传 WatchSkillDirs：让 <cwd>/.agents/skills 完全在监听面之外，
+		// 单独验证 reload 的"补挂扫描根"职责。
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shared.Stop() })
+	binding, err := initSkillFunctionsWithManager(cfg, session, nil, shared, nil, 0, "")
+	require.NoError(t, err)
+	require.NotNil(t, binding)
+	require.Equal(t, 1, session.FunctionCatalog.Stats().SkillFunctions)
+
+	// 启动后才出现的新根 + 清单（不在任何监听面内）。
+	lateRoot := filepath.Join(tempDir, ".agents", "skills")
+	writeHotReloadChatTestSkill(t, lateRoot, "late-skill", "appeared after startup")
+
+	report, err := runSkillReloadCommand(session)
+	require.NoError(t, err)
+	require.Contains(t, report.Roots, lateRoot)
+	require.Equal(t, 1, report.Before, "启动快照里只有种子技能")
+	require.True(t, report.HotReload, "有可用热重载时 reload 应走热重载路径")
+	require.Contains(t, report.Added, "late-skill")
+	require.Equal(t, report.Before+1, report.After)
+	require.Equal(t, 2, session.FunctionCatalog.Stats().SkillFunctions)
+}

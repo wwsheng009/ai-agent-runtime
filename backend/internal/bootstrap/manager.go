@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -676,16 +677,37 @@ func (m *Manager) Loader() *skill.Loader { return m.loader }
 // 过滤器在每次注册路径上生效，但已注册的技能不会自动回滚，因此这里显式
 // 清空注册表并按新过滤器重新全量发现：禁用与解禁都能立即生效（无假开关）。
 // 传入 nil 恢复未过滤行为（与启动路径一致）。
+//
+// 重扫面取"当前真实扫描面"：热加载接管的目录（启动后动态创建的
+// `<cwd>/.agents/skills` 等）只登记在 HotReload 自己的扫描面里，不在启动
+// 快照 m.skillDirs 中；若这里仍按启动快照重扫，每次启停过滤/热刷新都会把
+// 动态接管目录的技能静默清掉（2026-10-14 itsm 实例：/skills reload 与热
+// 事件刷新都会丢技能）。
 func (m *Manager) ApplySkillNameFilter(filter func(string) bool) error {
 	if m == nil || m.loader == nil || m.registry == nil {
 		return nil
 	}
 	m.loader.SetNameFilter(filter)
-	if len(m.skillDirs) == 0 {
+	dirs := m.skillDirs
+	if m.hotReload != nil {
+		if live := m.hotReload.SkillDirs(); len(live) > 0 {
+			dirs = live
+		}
+	}
+	// 过滤已删除的目录：动态根被删除后，重扫不能因死路径整体失败
+	//（否则删除技能不会从列表消失、禁用/解禁也会被一个死目录卡死，
+	// 2026-10-14 itsm 实例）。
+	existing := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			existing = append(existing, dir)
+		}
+	}
+	if len(existing) == 0 {
 		return nil
 	}
 	m.registry.Clear()
-	return m.loader.DiscoverAllWithRegistry(m.skillDirs, m.registry)
+	return m.loader.DiscoverAllWithRegistry(existing, m.registry)
 }
 
 // SessionManager 返回 Session Manager

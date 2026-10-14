@@ -643,6 +643,88 @@ tools: ["echo_tool"]
 	assert.True(t, registryHas(manager, "alpha-skill"), "clearing the filter must restore the skill")
 }
 
+// 回归（2026-10-14 itsm 实例）：热加载接管的目录（启动后动态出现、经
+// WatchRoots 接管）必须参与 ApplySkillNameFilter 的重扫面；修复前按启动
+// 快照 m.skillDirs 重扫，每次过滤/热刷新都会把动态目录的技能静默清掉
+//（/skills reload 与热事件刷新都表现为"技能不生效"）。
+func TestManager_ApplySkillNameFilter_RescansAdoptedHotReloadRoots(t *testing.T) {
+	mcpManager := &bootstrapMCPManager{}
+	seedDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(seedDir, "seed-skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(seedDir, "seed-skill", "SKILL.md"),
+		[]byte("---\nname: seed-skill\ndescription: seed\n---\n\nbody\n"), 0o644))
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = true
+	manager, err := NewManager(&Options{
+		Config:     cfg,
+		SkillDir:   seedDir,
+		MCPManager: mcpManager,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+	require.True(t, registryHas(manager, "seed-skill"))
+
+	// 启动后才出现的第二个根，由热加载接管（不进启动快照 m.skillDirs）。
+	lateDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(lateDir, "late-skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(lateDir, "late-skill", "SKILL.md"),
+		[]byte("---\nname: late-skill\ndescription: late\n---\n\nbody\n"), 0o644))
+	require.NotNil(t, manager.HotReload())
+	manager.HotReload().WatchRoots([]string{lateDir})
+	require.Contains(t, manager.HotReload().SkillDirs(), lateDir)
+
+	// 应用（无限制的）过滤器会触发整表重扫：动态接管的根不能被丢掉。
+	require.NoError(t, manager.ApplySkillNameFilter(nil))
+	assert.True(t, registryHas(manager, "seed-skill"), "启动快照根必须保留")
+	assert.True(t, registryHas(manager, "late-skill"), "热加载接管的根不得在重扫时被丢弃")
+
+	// 过滤器语义保持：禁用名单对两个根都生效。
+	require.NoError(t, manager.ApplySkillNameFilter(
+		profileinput.WithDisabledSkills(nil, []string{"late-skill"}),
+	))
+	assert.False(t, registryHas(manager, "late-skill"), "disabled skill must be unregistered")
+	assert.True(t, registryHas(manager, "seed-skill"), "other skills must stay registered")
+}
+
+// 回归（2026-10-14 itsm 实例，删除链路）：动态接管的根被删除后，过滤器重扫
+// 必须跳过死路径而不是整体失败——否则删除技能不会从列表消失、刷新链路被
+// 一个死目录卡死（live：删除后目录面板 count 停留在旧值）。
+func TestManager_ApplySkillNameFilter_SkipsMissingAdoptedRoots(t *testing.T) {
+	mcpManager := &bootstrapMCPManager{}
+	seedDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(seedDir, "seed-skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(seedDir, "seed-skill", "SKILL.md"),
+		[]byte("---\nname: seed-skill\ndescription: seed\n---\n\nbody\n"), 0o644))
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = true
+	manager, err := NewManager(&Options{
+		Config:     cfg,
+		SkillDir:   seedDir,
+		MCPManager: mcpManager,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	lateDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(lateDir, "late-skill"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(lateDir, "late-skill", "SKILL.md"),
+		[]byte("---\nname: late-skill\ndescription: late\n---\n\nbody\n"), 0o644))
+	require.NotNil(t, manager.HotReload())
+	manager.HotReload().WatchRoots([]string{lateDir})
+	require.NoError(t, manager.HotReload().Reload())
+	require.True(t, registryHas(manager, "late-skill"))
+
+	// 删除动态目录后再触发过滤重扫：死路径不得让整体失败，
+	// 其余根的技能保持注册，被删目录的技能不得复活。
+	require.NoError(t, os.RemoveAll(lateDir))
+	require.NoError(t, manager.ApplySkillNameFilter(nil),
+		"a deleted adopted root must not abort the filter rescan")
+	require.True(t, registryHas(manager, "seed-skill"), "seed root must stay registered")
+	require.False(t, registryHas(manager, "late-skill"), "skill under the deleted root must be gone")
+}
+
 func registryHas(manager *Manager, name string) bool {
 	if manager == nil || manager.Registry() == nil {
 		return false

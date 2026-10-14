@@ -120,7 +120,18 @@ func discoverCodexCompatibleSkillRootSpecsInternal(anchor string, configFile str
 		// 优先级，同名遮蔽诊断也据此判定）。扫描范围以项目根为界：没有
 		// marker（缺省 .git）时项目根就是 anchor 自身，不再把仓库外的父目录
 		// .agents/skills 当成当前项目的技能（对齐 codex host_roots.rs）。
-		for _, dir := range projectAgentsSkillDirs(base, projectMarkers) {
+		//
+		// requireExisting=false（热加载候选监听）时保留尚不存在的标准安装位：
+		// `<cwd>/.agents/skills` 这类目录在启动时可能还没创建，只有登记成
+		// pending 根，目录创建后才能被接管进扫描面；否则"第一次安装"的创建
+		// 事件全部错过，晚到的清单写入也永远等不到监听（2026-10-14 itsm 实例）。
+		var ancestors []string
+		if requireExisting {
+			ancestors = projectAgentsSkillDirs(base, projectMarkers)
+		} else {
+			ancestors = projectAgentsSkillDirCandidates(base, projectMarkers)
+		}
+		for _, dir := range ancestors {
 			if userAgentsSkillsDir != "" && strings.EqualFold(filepath.Clean(dir), userAgentsSkillsDir) {
 				continue
 			}
@@ -177,6 +188,17 @@ func codexProjectRoot(anchor string, markers []string) string {
 // 由近及远（base → project root，含两端）。项目根由 projectMarkers 界定；
 // projectMarkers 为空或未命中时只包含 base 自身。
 func projectAgentsSkillDirs(base string, projectMarkers []string) []string {
+	return projectAgentsSkillDirsFiltered(base, projectMarkers, true)
+}
+
+// projectAgentsSkillDirCandidates 与 projectAgentsSkillDirs 同遍历，但保留
+// 尚不存在的标准安装位（requireExisting=false）：供热加载登记 pending 监听，
+// 目录创建后由 watchPendingRoot/advancePendingRoots 自动接管并补齐扫描。
+func projectAgentsSkillDirCandidates(base string, projectMarkers []string) []string {
+	return projectAgentsSkillDirsFiltered(base, projectMarkers, false)
+}
+
+func projectAgentsSkillDirsFiltered(base string, projectMarkers []string, requireExisting bool) []string {
 	base = canonicalizeSkillTreePath(strings.TrimSpace(base), true)
 	if base == "" {
 		return nil
@@ -191,7 +213,11 @@ func projectAgentsSkillDirs(base string, projectMarkers []string) []string {
 	for dir := base; dir != ""; {
 		candidate := canonicalizeSkillTreePath(filepath.Join(dir, ".agents", "skills"), true)
 		if candidate != "" {
+			present := false
 			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				present = true
+			}
+			if !requireExisting || present {
 				if _, exists := seen[candidate]; !exists {
 					seen[candidate] = struct{}{}
 					dirs = append(dirs, candidate)
