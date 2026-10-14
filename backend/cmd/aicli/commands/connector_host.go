@@ -20,7 +20,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +33,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/telegram"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/wechat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -101,10 +102,17 @@ type localConnectorRouteHandler struct {
 func (h localConnectorRouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler := currentLocalConnectorHandler(h.api)
 	if handler == nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"status":"error","reason":"连接器未在本会话装配（需要运行 aicli chat 且连接器初始化成功）"}`))
-		return
+		// web 页也可能先于宿主装配到达（页面打开时该会话尚未跑过 /bots、
+		// 或启动期装配被跳过）：与 /bots 同款按需自举一次，成功即转发。
+		if bootstrapped := bootstrapLocalConnectorsForWeb(); bootstrapped {
+			handler = currentLocalConnectorHandler(h.api)
+		}
+		if handler == nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"error","reason":` + strconv.Quote(localConnectorsUnavailableReason()) + `}`))
+			return
+		}
 	}
 	if h.api {
 		http.StripPrefix("/api", handler).ServeHTTP(w, r)
@@ -158,6 +166,34 @@ func setLocalConnectorInitNote(note string) {
 	localConnectorsStateMu.Lock()
 	localConnectorInitNote = strings.TrimSpace(note)
 	localConnectorsStateMu.Unlock()
+}
+
+// bootstrapLocalConnectorsForWeb 尝试为当前 web 会话按需装配连接器宿主。
+// 无活动会话 / 非交互会话 / 装配失败均返回 false（沿用兜底 503 + 原因）。
+func bootstrapLocalConnectorsForWeb() bool {
+	if currentLocalConnectorHost() != nil {
+		return true
+	}
+	session := chatWebSession()
+	if session == nil {
+		return false
+	}
+	host, err := startLocalConnectorsOnDemand(session)
+	if err != nil || host == nil {
+		return false
+	}
+	return true
+}
+
+// localConnectorsUnavailableReason 组装 503 兜底原因（带具体装配状态说明）。
+func localConnectorsUnavailableReason() string {
+	if note := localConnectorsInitNote(); note != "" {
+		return "连接器不可用：" + note
+	}
+	if chatWebSession() == nil {
+		return "连接器未在本会话装配（当前没有活动的 aicli chat 会话）"
+	}
+	return "连接器未在本会话装配（需要交互式 aicli chat，且本会话具备装配条件）"
 }
 
 // localConnectorsInitNote 返回连接器未装配/装配失败的原因（空 = 已装配或未尝试）。
@@ -231,7 +267,13 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		parent = context.Background()
 	}
 
-	statePath := filepath.Join(filepath.Dir(configPath), "data", "connectors", "state.json")
+	// 状态真源（docs/bots/09-multi-instance-binding.md D1）：经 statepath 统一
+	// 锚定用户级 ~/.aicli/data/connectors/state.json；禁止按 configPath 推导
+	// （分层合并下 runtime-server/aicli 解析到不同分层，推导必然分叉）。
+	statePath, statePathErr := statepath.CanonicalStatePath()
+	if statePathErr != nil {
+		return nil, fmt.Errorf("aicli connectors: resolve canonical state path: %w", statePathErr)
+	}
 	store := storefile.NewConfigStore(configPath, statePath)
 	// 服务层日志：白名单 fail-closed 闸跳过启动是安全告警（消息含
 	// "fail-closed"，见 connectors.Service.startConnector），升级为 warn；

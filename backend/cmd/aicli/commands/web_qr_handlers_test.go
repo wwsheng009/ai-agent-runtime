@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -45,7 +46,7 @@ func TestHandleChatWebAPIQRRejects(t *testing.T) {
 	}{
 		{name: "missing text", query: "", want: http.StatusBadRequest},
 		{name: "empty text", query: "?text=", want: http.StatusBadRequest},
-		{name: "text too long", query: "?text=" + string(make([]byte, 3000)), want: http.StatusBadRequest},
+		{name: "text too long", query: "?text=" + url.QueryEscape(strings.Repeat("a", 3000)), want: http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
