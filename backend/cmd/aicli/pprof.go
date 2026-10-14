@@ -560,6 +560,9 @@ func registerChatWebRoutes(mux *http.ServeMux) {
 	// 图片/粘贴的位图/拖入的文件传到这里，拿到受校验与上限约束的本地路径后，
 	// 再随 /web/api/input 的 image_paths 一起发送。
 	mux.HandleFunc(commands.ChatWebAPIAttachmentsPath, commands.HandleChatWebAPIAttachments)
+	// /web/api/qr 二维码图片：把任意文本（扫码登录链接等）编码为 PNG，
+	// 机器人页扫码登录用 <img> 直接展示（与 TUI /bots 同一 go-qrcode 依赖）。
+	mux.HandleFunc(commands.ChatWebAPIQRPath, commands.HandleChatWebAPIQR)
 	// /web/api/invoke 同步远程调用：一次请求内完成"注入 prompt → 等待 turn
 	// 结束 → 返回最终状态与 TUI 渲染"，供脚本/外部 Agent 远程控制会话。
 	mux.HandleFunc(commands.ChatWebAPIInvokePath, commands.HandleChatWebAPIInvoke)

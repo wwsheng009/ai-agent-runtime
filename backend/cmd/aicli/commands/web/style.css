@@ -3322,6 +3322,7 @@ body.low-bandwidth img {
 .connector-qr-status[data-status="expired"] { color: var(--red, #e5534b); }
 .connector-qr-image-wrap { display: flex; justify-content: center; padding: 8px; }
 .connector-qr-img { width: min(260px, 70vw); height: auto; border-radius: 8px; background: #fff; padding: 6px; }
+.connector-qr-image-wrap.connector-qr-fallback { display: none; }
 .connector-qr-link {
   font-size: 11.5px; word-break: break-all; padding: 8px;
   background: var(--codeBg); color: var(--codeFg); border: 1px solid var(--border); border-radius: 6px;

@@ -540,6 +540,11 @@ function renderQR(data) {
     // data:image 前缀 = 直接可渲染的二维码图片(与 React 页同判定)。
     html += '<div class="connector-qr-image-wrap"><img class="connector-qr-img" alt="登录二维码" src="' + esc(content) + '"></div>';
   } else if (content) {
+    // 链接/短码文本:交给本机 QR 端点编码为 PNG(与 TUI /bots 同一 go-qrcode),
+    // 链接兜底展示在图片下方;端点失败时 <img> onerror 自动退回纯文本链接。
+    var qrSrc = "/web/api/qr?text=" + encodeURIComponent(content);
+    html += '<div class="connector-qr-image-wrap"><img class="connector-qr-img" alt="登录二维码" src="' + esc(qrSrc) + '"' +
+      ' onerror="this.closest(\'.connector-qr-image-wrap\').classList.add(\'connector-qr-fallback\');this.remove();"></div>';
     html += '<code class="connector-qr-link">' + esc(content) + "</code>";
   }
   var meta = [];
