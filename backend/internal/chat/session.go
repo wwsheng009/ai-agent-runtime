@@ -162,6 +162,36 @@ func (s *Session) AddMessage(msg types.Message) {
 	s.refreshDerivedMetadata()
 }
 
+// StampMessageTurnID 把调用方已知的回合身份盖到消息上。
+//
+// 背景（2026-10-14）：会话历史与 runtime 事件流的 turn 身份曾长期分裂——
+// runtime 事件用 handler 采纳的客户端 turn id，而 user 消息落库时无人盖章，
+// EnsureMessageIdentity 只好自造 turn_<uuid>，后续 assistant/tool 行按
+// 「继承最近前驱」跟进自造 id。前端 mapSessionHistoryToMessages 按
+// runtimeTurnId === anchorTurnId 匹配实时占位与历史投影，两个 id 空间不同时
+// 匹配必然落空（现场表现为迟到工具行整块垫在结论正文后面）。
+//
+// 语义与 EnsureMessageIdentity 一致：消息已带 turn_id 时不覆盖（caller 盖章
+// 是「补缺」而不是「改写」）；空 turnID 是 no-op，调用方无需预判。
+// 返回是否写入了 metadata（与 EnsureMessageIdentity 的 changed 口径一致）。
+func StampMessageTurnID(msg *types.Message, turnID string) bool {
+	if msg == nil {
+		return false
+	}
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return false
+	}
+	if existing := types.TurnID(*msg); existing != "" {
+		return false
+	}
+	if msg.Metadata == nil {
+		msg.Metadata = types.NewMetadata()
+	}
+	msg.Metadata.Set(types.MetadataKeyTurnID, turnID)
+	return true
+}
+
 // GetRecentMessages 获取最近的 n 条消息
 func (s *Session) GetRecentMessages(n int) []types.Message {
 	if n <= 0 {

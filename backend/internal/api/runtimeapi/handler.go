@@ -1613,7 +1613,7 @@ func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if session != nil {
-		_ = h.persistChatTurn(ctx, session, executeReq.Prompt, result.Output, nil)
+		_ = h.persistChatTurn(ctx, session, executeReq.Prompt, result.Output, nil, agent.TurnIDFromContext(ctx))
 	}
 	h.recordUsage(usageScope, "execute", skillItem.Name, result.Success, estimatedPromptTokens, result.Usage, result.Output)
 	h.publishSkillInvokedEvents(r, sessionID(session), result.ImplicitInvocations)
@@ -2290,7 +2290,13 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			}
 			contextMessages = append(contextMessages, skillMessages...)
 			execSession.ReplaceHistory(prependContextMessages(historyForAgent, contextMessages))
-			execSession.AddMessage(*types.NewUserMessage(lastMessage))
+			// 回合身份对齐（2026-10-14）：user 消息盖上请求采纳的 turnID（与
+			// agent.WithTurnID / chat.sse meta / active_turn 同一空间）。此前由
+			// EnsureMessageIdentity 落库时自造 turn_<uuid>，历史与事件流身份分裂，
+			// 前端按 turn 匹配实时占位与历史投影必然落空。
+			userMessage := types.NewUserMessage(lastMessage)
+			chat.StampMessageTurnID(userMessage, turnID)
+			execSession.AddMessage(*userMessage)
 
 			// Open the request SSE before entering the ReAct loop.  The loop's
 			// provider reporter observes every upstream text/reasoning/image
@@ -2649,6 +2655,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 						lastMessage,
 						orchResult.AgentResult.Output,
 						buildWorkspaceEvidenceMetadata(resultPayload),
+						turnID,
 					)
 				}
 			default:
@@ -2659,6 +2666,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 						lastMessage,
 						orchResult.LLMResponse.Content,
 						buildWorkspaceEvidenceMetadata(resultPayload),
+						turnID,
 					)
 				}
 			}
@@ -2733,6 +2741,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 						lastMessage,
 						result.Output,
 						buildWorkspaceEvidenceMetadata(payload),
+						turnID,
 					)
 				}
 				h.streamStaticResult(w, session, a.GetConfig().Name, payload, turnID)
@@ -2961,6 +2970,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				lastMessage,
 				orchResult.AgentResult.Output,
 				buildWorkspaceEvidenceMetadata(responseResult.(map[string]interface{})),
+				turnID,
 			)
 		}
 	default:
@@ -2971,6 +2981,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				lastMessage,
 				orchResult.LLMResponse.Content,
 				buildWorkspaceEvidenceMetadata(responseResult.(map[string]interface{})),
+				turnID,
 			)
 		}
 	}
@@ -4166,12 +4177,19 @@ func sanitizeLeaseOwnerPart(value string) string {
 	return value
 }
 
-func (h *Handler) persistChatTurn(ctx context.Context, session *chat.Session, userPrompt, assistantReply string, assistantMetadata types.Metadata) error {
+func (h *Handler) persistChatTurn(ctx context.Context, session *chat.Session, userPrompt, assistantReply string, assistantMetadata types.Metadata, turnID ...string) error {
 	if h.sessionManager == nil || session == nil {
 		return nil
 	}
 	if userPrompt != "" {
-		if err := h.sessionManager.AddMessage(ctx, session.ID, *types.NewUserMessage(userPrompt)); err != nil {
+		// 回合身份对齐（2026-10-14）：turnID 可变参兼容既有调用方；调用方带上
+		// 请求采纳的回合身份时，user 消息落库不再由 EnsureMessageIdentity 自造
+		// 新 id，durable 历史与 runtime 事件流共用同一 turn 空间。
+		userMessage := types.NewUserMessage(userPrompt)
+		if len(turnID) > 0 {
+			chat.StampMessageTurnID(userMessage, turnID[0])
+		}
+		if err := h.sessionManager.AddMessage(ctx, session.ID, *userMessage); err != nil {
 			return err
 		}
 	}
@@ -9084,6 +9102,7 @@ func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, sess
 			userPrompt,
 			fullContent,
 			buildWorkspaceEvidenceMetadata(resultPayload),
+			turnID,
 		)
 	}
 	h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{

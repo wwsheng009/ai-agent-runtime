@@ -1123,6 +1123,11 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 	}
 	appendedPrompt := false
 	if shouldAppendUserPromptMessage(session.LastMessage(), preparedPrompt) {
+		// 回合身份对齐（2026-10-14）：user 消息落库前盖上本回合 turn_id，
+		// 让 durable 历史与 runtime 事件流共用同一身份空间（后续 assistant/tool
+		// 行经 EnsureMessageIdentity 继承它）。此前落库自造 turn_<uuid>，
+		// 与事件流的 id 空间分裂，前端按 turn 匹配实时占位与历史投影必然落空。
+		StampMessageTurnID(preparedPrompt, turnID)
 		session.AddMessage(*preparedPrompt)
 		if err := a.persistSession(runCtx, session); err != nil {
 			a.releaseSessionRun(run)
