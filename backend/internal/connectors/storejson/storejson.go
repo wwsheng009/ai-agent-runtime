@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
 )
 
@@ -43,6 +44,9 @@ const (
 type Store struct {
 	configPath string
 	statePath  string
+	// legacyConfigHints 是历史 config.yaml 路径（迁移扫描用；D1 迁移据此枚举
+	// 旧 state 候选）。宿主经 WithLegacyConfigHints 注入，缺省只扫 cwd 候选。
+	legacyConfigHints []string
 
 	mu sync.Mutex
 	// lockOptions 是数据目录锁参数；零值由 storefile 的默认值补齐。
@@ -55,6 +59,21 @@ func New(dataDir string) *Store {
 	return &Store{
 		configPath: filepath.Join(dataDir, DefaultConfigFileName),
 		statePath:  filepath.Join(dataDir, DefaultStateFileName),
+	}
+}
+
+// NewWithStatePath 构造存储并显式指定 state 路径（runtime-server / aicli 宿主用：
+// state 经 statepath.CanonicalStatePath 锚定用户级目录，与配置文件不同位）。
+// 空 statePath 退回 New(dataDir) 的同目录布局。
+func NewWithStatePath(dataDir, statePath string) *Store {
+	statePath = strings.TrimSpace(statePath)
+	if statePath == "" {
+		return New(dataDir)
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	return &Store{
+		configPath: filepath.Join(dataDir, DefaultConfigFileName),
+		statePath:  filepath.Clean(statePath),
 	}
 }
 
@@ -90,6 +109,15 @@ func (s *Store) WithLockOptions(opts storefile.LockOptions) *Store {
 	return s
 }
 
+// WithLegacyConfigHints 注入历史 config.yaml 路径（链式；D1 迁移据此枚举
+// "configPath 同级 data/connectors" 候选）。
+func (s *Store) WithLegacyConfigHints(configPaths ...string) *Store {
+	if s != nil {
+		s.legacyConfigHints = append(s.legacyConfigHints, configPaths...)
+	}
+	return s
+}
+
 // ---------------------------------------------------------------------------
 // 配置（connectors.json：配置 + 密钥同文件，0600）
 
@@ -100,34 +128,47 @@ type configFile struct {
 // connectorRecord 是配置文件中的一条通道记录（字段与 docs/bots/07-config-ux.md
 // §5.1 的 snake_case 形状一致）。
 type connectorRecord struct {
-	ID       string            `json:"id"`
-	Provider string            `json:"provider"`
-	Name     string            `json:"name,omitempty"`
-	Enabled  bool              `json:"enabled"`
-	Mode     string            `json:"mode,omitempty"`
-	Settings map[string]string `json:"settings,omitempty"`
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Name     string `json:"name,omitempty"`
+	Enabled  bool   `json:"enabled"`
+	Mode     string `json:"mode,omitempty"`
+	// 生命周期时间戳（RFC3339 UTC；零值省略 = 旧数据未打戳）。
+	CreatedAt time.Time         `json:"created_at,omitempty"`
+	UpdatedAt time.Time         `json:"updated_at,omitempty"`
+	Settings  map[string]string `json:"settings,omitempty"`
 	// Secrets 与配置同文件（0600）：gateway 无独立密钥文件，注释见包文档。
 	Secrets map[string]string `json:"secrets,omitempty"`
 	Policy  policyRecord      `json:"policy,omitempty"`
 }
 
 type policyRecord struct {
-	CommandPrefix string   `json:"command_prefix,omitempty"`
-	AllowedUsers  []string `json:"allowed_users,omitempty"`
-	SessionMode   string   `json:"session_mode,omitempty"`
-	ReplyMode     string   `json:"reply_mode,omitempty"`
-	RuntimeOwner  string   `json:"runtime_owner,omitempty"`
+	CommandPrefix string        `json:"command_prefix,omitempty"`
+	AllowedUsers  []string      `json:"allowed_users,omitempty"`
+	SessionMode   string        `json:"session_mode,omitempty"`
+	ReplyMode     string        `json:"reply_mode,omitempty"`
+	RuntimeOwner  string        `json:"runtime_owner,omitempty"`
+	Notify        *notifyRecord `json:"notify,omitempty"`
+}
+
+// notifyRecord 是 D5 事件通知接收配置（docs/bots/09 §7.4.1）。
+type notifyRecord struct {
+	Enabled bool     `json:"enabled"`
+	Kinds   []string `json:"kinds,omitempty"`
+	Scope   string   `json:"scope,omitempty"`
 }
 
 func recordFromConfig(cfg connectors.Config) connectorRecord {
 	record := connectorRecord{
-		ID:       strings.TrimSpace(cfg.ID),
-		Provider: strings.TrimSpace(cfg.Provider),
-		Name:     strings.TrimSpace(cfg.Name),
-		Enabled:  cfg.Enabled,
-		Mode:     strings.TrimSpace(cfg.Mode),
-		Settings: cfg.Settings,
-		Secrets:  cfg.Secrets,
+		ID:        strings.TrimSpace(cfg.ID),
+		Provider:  strings.TrimSpace(cfg.Provider),
+		Name:      strings.TrimSpace(cfg.Name),
+		Enabled:   cfg.Enabled,
+		Mode:      strings.TrimSpace(cfg.Mode),
+		CreatedAt: cfg.CreatedAt,
+		UpdatedAt: cfg.UpdatedAt,
+		Settings:  cfg.Settings,
+		Secrets:   cfg.Secrets,
 	}
 	if len(cfg.Policy.AllowedUsers) > 0 {
 		record.Policy.AllowedUsers = append([]string(nil), cfg.Policy.AllowedUsers...)
@@ -136,18 +177,27 @@ func recordFromConfig(cfg connectors.Config) connectorRecord {
 	record.Policy.SessionMode = strings.TrimSpace(cfg.Policy.SessionMode)
 	record.Policy.ReplyMode = strings.TrimSpace(cfg.Policy.ReplyMode)
 	record.Policy.RuntimeOwner = strings.TrimSpace(cfg.Policy.RuntimeOwner)
+	if cfg.Policy.Notify.Enabled {
+		record.Policy.Notify = &notifyRecord{
+			Enabled: true,
+			Kinds:   append([]string(nil), cfg.Policy.Notify.Kinds...),
+			Scope:   strings.TrimSpace(cfg.Policy.Notify.Scope),
+		}
+	}
 	return record
 }
 
 func (r connectorRecord) toConfig() connectors.Config {
-	return connectors.Config{
-		ID:       strings.TrimSpace(r.ID),
-		Provider: strings.TrimSpace(r.Provider),
-		Name:     strings.TrimSpace(r.Name),
-		Enabled:  r.Enabled,
-		Mode:     strings.TrimSpace(r.Mode),
-		Settings: r.Settings,
-		Secrets:  r.Secrets,
+	config := connectors.Config{
+		ID:        strings.TrimSpace(r.ID),
+		Provider:  strings.TrimSpace(r.Provider),
+		Name:      strings.TrimSpace(r.Name),
+		Enabled:   r.Enabled,
+		Mode:      strings.TrimSpace(r.Mode),
+		CreatedAt: r.CreatedAt,
+		UpdatedAt: r.UpdatedAt,
+		Settings:  r.Settings,
+		Secrets:   r.Secrets,
 		Policy: connectors.Policy{
 			CommandPrefix: strings.TrimSpace(r.Policy.CommandPrefix),
 			AllowedUsers:  r.Policy.AllowedUsers,
@@ -156,6 +206,14 @@ func (r connectorRecord) toConfig() connectors.Config {
 			RuntimeOwner:  strings.TrimSpace(r.Policy.RuntimeOwner),
 		},
 	}
+	if r.Policy.Notify != nil {
+		config.Policy.Notify = connectors.NotifyPolicy{
+			Enabled: r.Policy.Notify.Enabled,
+			Kinds:   r.Policy.Notify.Kinds,
+			Scope:   strings.TrimSpace(r.Policy.Notify.Scope),
+		}
+	}
+	return config
 }
 
 // ListConfigs 返回全部通道配置（含停用项；密钥按存储原样返回）。
@@ -333,6 +391,59 @@ func (s *Store) PutBinding(binding connectors.Binding) error {
 			UpdatedAt:   updated,
 		}
 	})
+}
+
+// CompareAndSwapBinding 实现 connectors.Store（mutateState 已在数据目录锁内
+// 「重读→改→原子写」，天然满足 CAS 语义）。
+func (s *Store) CompareAndSwapBinding(connectorID, chat string, expected time.Time, next connectors.Binding) (connectors.Binding, bool, error) {
+	key := bindingKey(connectorID, chat)
+	if key == "" {
+		return connectors.Binding{}, false, errors.New("storejson: binding key is required")
+	}
+	if next.UpdatedAt.IsZero() {
+		next.UpdatedAt = time.Now().UTC()
+	}
+	var (
+		current   connectors.Binding
+		swapped   bool
+		mutateErr error
+	)
+	mutateErr = s.mutateState(func(state *stateFile) {
+		record, exists := state.Bindings[key]
+		current = connectors.Binding{
+			ConnectorID: record.ConnectorID,
+			Chat:        record.Chat,
+			Session:     connectors.SessionRef{NodeID: record.NodeID, SessionID: record.SessionID},
+			UpdatedAt:   record.UpdatedAt,
+		}
+		if expected.IsZero() {
+			if exists {
+				return // 创建语义：已存在 → 未命中
+			}
+		} else if !exists || !record.UpdatedAt.Equal(expected) {
+			return // 乐观锁未命中
+		}
+		// 时间戳严格递增（同 tick 内连续 CAS 可区分，见 memory 实现同注）。
+		stamp := connectors.NextStampAtLeast(record.UpdatedAt)
+		state.Bindings[key] = bindingRecord{
+			ConnectorID: strings.TrimSpace(next.ConnectorID),
+			Chat:        strings.TrimSpace(next.Chat),
+			NodeID:      strings.TrimSpace(next.Session.NodeID),
+			SessionID:   strings.TrimSpace(next.Session.SessionID),
+			UpdatedAt:   stamp,
+		}
+		swapped = true
+		current = connectors.Binding{
+			ConnectorID: strings.TrimSpace(next.ConnectorID),
+			Chat:        strings.TrimSpace(next.Chat),
+			Session:     connectors.SessionRef{NodeID: strings.TrimSpace(next.Session.NodeID), SessionID: strings.TrimSpace(next.Session.SessionID)},
+			UpdatedAt:   stamp,
+		}
+	})
+	if mutateErr != nil {
+		return connectors.Binding{}, false, mutateErr
+	}
+	return current, swapped, nil
 }
 
 // ListBindings 返回绑定（只读；connectorID 为空 = 全部）。
@@ -634,6 +745,11 @@ func (s *Store) loadStateLocked() (*stateFile, error) {
 	data, err := os.ReadFile(s.statePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			// 规范文件缺失：先做一次旧位置并集迁移（D1，docs/bots/09 §4.2），
+			// 失败仅静默按空表处理，不阻塞读路径；下次打开重试。
+			if migrated, migrateErr := s.migrateLegacyStateLocked(); migrateErr == nil && migrated != nil {
+				return migrated, nil
+			}
 			return state, nil
 		}
 		return nil, fmt.Errorf("storejson: read state: %w", err)
@@ -657,6 +773,61 @@ func (s *Store) loadStateLocked() (*stateFile, error) {
 		state.Owners = make(map[string]ownerRecord)
 	}
 	return state, nil
+}
+
+// migrateLegacyStateLocked 把旧位置（statepath.LegacyCandidates）的 state 并集
+// 迁移到规范 statePath（要求调用方已持有 s.mu）。规范文件已有内容时不会走到
+// 这里（调用方仅在文件缺失时触发，天然幂等）。
+//
+// 合并规则（docs/bots/09 §4.2）：bindings 按 updated_at 新者胜；claimed 取时间戳
+// 较大者（幂等账本只在乎"已处理"）；cursors/owners 整键并入，冲突保留首个非空
+// 候选。迁移成功后旧文件改名 .bak-<unix>（best-effort）。
+func (s *Store) migrateLegacyStateLocked() (*stateFile, error) {
+	candidates := statepath.LegacyCandidates(s.legacyConfigHints...)
+	merged := emptyState()
+	changed := false
+	for _, candidate := range candidates {
+		raw, err := os.ReadFile(candidate.Path)
+		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+			continue // 缺失/空/不可读的候选静默跳过
+		}
+		var legacy stateFile
+		if err := json.Unmarshal(raw, &legacy); err != nil {
+			continue // 半写入/非法 JSON：跳过（与外部改动容错口径一致）
+		}
+		changed = true
+		for key, record := range legacy.Bindings {
+			if existing, ok := merged.Bindings[key]; !ok || record.UpdatedAt.After(existing.UpdatedAt) {
+				merged.Bindings[key] = record
+			}
+		}
+		for key, claimedAt := range legacy.Claimed {
+			if existing, ok := merged.Claimed[key]; !ok || claimedAt.After(existing) {
+				merged.Claimed[key] = claimedAt
+			}
+		}
+		for connectorID, cursors := range legacy.Cursors {
+			if _, ok := merged.Cursors[connectorID]; !ok {
+				merged.Cursors[connectorID] = cursors
+			}
+		}
+		for connectorID, owner := range legacy.Owners {
+			if _, ok := merged.Owners[connectorID]; !ok {
+				merged.Owners[connectorID] = owner
+			}
+		}
+	}
+	if !changed {
+		return nil, nil
+	}
+	if err := s.writeStateLocked(merged); err != nil {
+		return nil, fmt.Errorf("storejson: migrate legacy state: %w", err)
+	}
+	stamp := time.Now().Unix()
+	for _, candidate := range candidates {
+		_ = os.Rename(candidate.Path, candidate.Path+fmt.Sprintf(".bak-%d", stamp))
+	}
+	return merged, nil
 }
 
 func (s *Store) writeStateLocked(state *stateFile) error {

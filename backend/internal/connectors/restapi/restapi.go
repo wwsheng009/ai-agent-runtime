@@ -69,6 +69,9 @@ func NewRouter(deps Deps) http.Handler {
 	router.HandleFunc("/connectors", handlers.list).Methods(http.MethodGet)
 	router.HandleFunc("/connectors", handlers.create).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/schema", handlers.schemaDocument).Methods(http.MethodGet)
+	// 绑定管理（docs/bots/09 §5.2）：字面量 /bindings 必须先于 /{id} 注册，
+	// 否则会被当作 id 吞掉。
+	router.HandleFunc("/connectors/bindings", handlers.listBindings).Methods(http.MethodGet)
 	router.HandleFunc("/connectors/{id}", handlers.get).Methods(http.MethodGet)
 	// PATCH 是契约首选（部分更新语义：缺省字段保持不变）；PUT 作为别名兼容。
 	router.HandleFunc("/connectors/{id}", handlers.update).Methods(http.MethodPatch, http.MethodPut)
@@ -78,6 +81,8 @@ func NewRouter(deps Deps) http.Handler {
 	router.HandleFunc("/connectors/{id}/takeover", handlers.takeover).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}/test", handlers.test).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}/actions/{action}", handlers.action).Methods(http.MethodPost)
+	router.HandleFunc("/connectors/{id}/bindings/{chat}", handlers.putBinding).Methods(http.MethodPut)
+	router.HandleFunc("/connectors/{id}/bindings/{chat}", handlers.deleteBinding).Methods(http.MethodDelete)
 	return router
 }
 

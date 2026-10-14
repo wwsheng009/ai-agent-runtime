@@ -23,6 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 )
 
 // ConfigStore 把 connectors.Store 落到三个文件：config.yaml 的 connectors: 节
@@ -298,6 +299,56 @@ func (s *ConfigStore) PutBinding(binding connectors.Binding) error {
 			UpdatedAt:   updated,
 		}
 	})
+}
+
+// CompareAndSwapBinding 实现 connectors.Store（锁内读改写；mutateState 已在
+// 数据目录锁内执行「重读→改→原子写」，天然满足 CAS 语义）。
+func (s *ConfigStore) CompareAndSwapBinding(connectorID, chat string, expected time.Time, next connectors.Binding) (connectors.Binding, bool, error) {
+	key := bindingKey(connectorID, chat)
+	if key == "" {
+		return connectors.Binding{}, false, errors.New("storefile: binding key is required")
+	}
+	var (
+		current   connectors.Binding
+		swapped   bool
+		mutateErr error
+	)
+	mutateErr = s.mutateState(func(state *stateFile) {
+		record, exists := state.Bindings[key]
+		current = connectors.Binding{
+			ConnectorID: record.ConnectorID,
+			Chat:        record.Chat,
+			Session:     connectors.SessionRef{NodeID: record.NodeID, SessionID: record.SessionID},
+			UpdatedAt:   record.UpdatedAt,
+		}
+		if expected.IsZero() {
+			if exists {
+				return // 创建语义：已存在 → 未命中
+			}
+		} else if !exists || !record.UpdatedAt.Equal(expected) {
+			return // 乐观锁未命中
+		}
+		// 时间戳严格递增（同 tick 内连续 CAS 可区分，见 memory 实现同注）。
+		stamp := connectors.NextStampAtLeast(record.UpdatedAt)
+		state.Bindings[key] = bindingRecord{
+			ConnectorID: strings.TrimSpace(next.ConnectorID),
+			Chat:        strings.TrimSpace(next.Chat),
+			NodeID:      strings.TrimSpace(next.Session.NodeID),
+			SessionID:   strings.TrimSpace(next.Session.SessionID),
+			UpdatedAt:   stamp,
+		}
+		swapped = true
+		current = connectors.Binding{
+			ConnectorID: strings.TrimSpace(next.ConnectorID),
+			Chat:        strings.TrimSpace(next.Chat),
+			Session:     connectors.SessionRef{NodeID: strings.TrimSpace(next.Session.NodeID), SessionID: strings.TrimSpace(next.Session.SessionID)},
+			UpdatedAt:   stamp,
+		}
+	})
+	if mutateErr != nil {
+		return connectors.Binding{}, false, mutateErr
+	}
+	return current, swapped, nil
 }
 
 // ListBindings 返回绑定（只读；connectorID 为空 = 全部）。
@@ -694,6 +745,13 @@ func configToMap(cfg connectors.Config) map[string]interface{} {
 	if mode := strings.TrimSpace(cfg.Mode); mode != "" {
 		out["mode"] = mode
 	}
+	// 时间戳：旧数据零值省略（读取方容忍缺省）；RFC3339 UTC 保持文件可读。
+	if !cfg.CreatedAt.IsZero() {
+		out["created_at"] = cfg.CreatedAt.UTC().Format(time.RFC3339)
+	}
+	if !cfg.UpdatedAt.IsZero() {
+		out["updated_at"] = cfg.UpdatedAt.UTC().Format(time.RFC3339)
+	}
 	if len(cfg.Settings) > 0 {
 		out["settings"] = stringMapToAny(cfg.Settings)
 	}
@@ -719,6 +777,21 @@ func configToMap(cfg connectors.Config) map[string]interface{} {
 	if v := strings.TrimSpace(cfg.Policy.RuntimeOwner); v != "" {
 		policy["runtime_owner"] = v
 	}
+	// D5（docs/bots/09 §7.4.1）：notify 缺省零值不落盘（保持文件最小噪音）。
+	if cfg.Policy.Notify.Enabled {
+		notify := map[string]interface{}{"enabled": true}
+		if len(cfg.Policy.Notify.Kinds) > 0 {
+			kinds := make([]interface{}, 0, len(cfg.Policy.Notify.Kinds))
+			for _, kind := range cfg.Policy.Notify.Kinds {
+				kinds = append(kinds, kind)
+			}
+			notify["kinds"] = kinds
+		}
+		if scope := strings.TrimSpace(cfg.Policy.Notify.Scope); scope != "" {
+			notify["scope"] = scope
+		}
+		policy["notify"] = notify
+	}
 	if len(policy) > 0 {
 		out["policy"] = policy
 	}
@@ -736,17 +809,37 @@ func configFromMap(raw map[string]interface{}) connectors.Config {
 		policy.SessionMode = anyToString(policyRaw["session_mode"])
 		policy.ReplyMode = anyToString(policyRaw["reply_mode"])
 		policy.RuntimeOwner = anyToString(policyRaw["runtime_owner"])
+		if notifyRaw, ok := policyRaw["notify"].(map[string]interface{}); ok {
+			policy.Notify.Enabled = anyToBool(notifyRaw["enabled"])
+			policy.Notify.Kinds = anyToStringSlice(notifyRaw["kinds"])
+			policy.Notify.Scope = anyToString(notifyRaw["scope"])
+		}
 	}
 	return connectors.Config{
-		ID:       anyToString(raw["id"]),
-		Provider: anyToString(raw["provider"]),
-		Name:     anyToString(raw["name"]),
-		Enabled:  anyToBool(raw["enabled"]),
-		Mode:     anyToString(raw["mode"]),
-		Settings: anyToStringMap(raw["settings"]),
-		Secrets:  anyToStringMap(raw["secrets"]),
-		Policy:   policy,
+		ID:        anyToString(raw["id"]),
+		Provider:  anyToString(raw["provider"]),
+		Name:      anyToString(raw["name"]),
+		Enabled:   anyToBool(raw["enabled"]),
+		Mode:      anyToString(raw["mode"]),
+		CreatedAt: anyToTime(raw["created_at"]),
+		UpdatedAt: anyToTime(raw["updated_at"]),
+		Settings:  anyToStringMap(raw["settings"]),
+		Secrets:   anyToStringMap(raw["secrets"]),
+		Policy:    policy,
 	}
+}
+
+// anyToTime 解析 RFC3339 时间戳（空串/非法格式返回零值——旧数据容忍缺省）。
+func anyToTime(raw interface{}) time.Time {
+	text := strings.TrimSpace(anyToString(raw))
+	if text == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, text)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func stringMapToAny(in map[string]string) map[string]interface{} {
@@ -861,6 +954,16 @@ func (s *ConfigStore) reloadStateLocked() error {
 	data, err := os.ReadFile(s.statePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
+			// 规范文件缺失：做一次旧位置并集迁移（docs/bots/09 §4.2 D1），
+			// 迁移后重读本文件；失败静默按空表处理（下次打开重试）。
+			if migrated, migrateErr := s.migrateLegacyStateLocked(); migrateErr == nil && migrated {
+				return s.reloadStateLocked()
+			} else if migrateErr != nil {
+				// 迁移失败可见（诊断用）：写路径失败多为权限/磁盘，静默会变成
+				// "迁移永远不发生"。宿主日志走调用方 logf；这里返回错误太重，
+				// 保持空表但下次打开重试。
+				_ = migrateErr
+			}
 			return nil
 		}
 		return fmt.Errorf("storefile: read state: %w", err)
@@ -881,6 +984,148 @@ func (s *ConfigStore) reloadStateLocked() error {
 	}
 	if s.state.Owners == nil {
 		s.state.Owners = make(map[string]ownerRecord)
+	}
+	// 持续并集迁移（docs/bots/09 §4.2 D1）：规范文件可能先由另一宿主创建，
+	// 本宿主的旧位置数据仍需并入——所以迁移不只在"文件缺失"时跑一次，而是
+	// 每次重载都扫描旧候选；仅在带来**规范文件没有的键**时才写回（幂等，
+	// 无新键零写放大）。全部旧文件成功并入后按 .bak 归档。
+	return s.mergeLegacyCandidatesLocked()
+}
+
+// migrateLegacyStateLocked 把旧位置（statepath.LegacyCandidates + 宿主注入的
+// configPath 提示）的 state 并集迁移到规范 statePath（要求调用方已持有 s.mu
+// 与数据目录锁）。返回是否发生了迁移。
+//
+// 合并规则（docs/bots/09 §4.2）：bindings 按 updated_at 新者胜；claimed 取
+// 较大时间戳；cursors/owners 首个非空候选并入。迁移成功后旧文件改名
+// .bak-<unix>（best-effort）。
+func (s *ConfigStore) migrateLegacyStateLocked() (bool, error) {
+	hints := make([]string, 0, 1)
+	if s.configPath != "" {
+		hints = append(hints, s.configPath)
+	}
+	merged := stateFile{
+		Bindings: make(map[string]bindingRecord),
+		Claimed:  make(map[string]time.Time),
+		Cursors:  make(map[string]map[string]string),
+		Owners:   make(map[string]ownerRecord),
+	}
+	changed := false
+	for _, candidate := range statepath.LegacyCandidates(hints...) {
+		raw, err := os.ReadFile(candidate.Path)
+		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var legacy stateFile
+		if err := json.Unmarshal(raw, &legacy); err != nil {
+			continue // 半写入/非法 JSON：跳过
+		}
+		changed = true
+		for key, record := range legacy.Bindings {
+			if existing, ok := merged.Bindings[key]; !ok || record.UpdatedAt.After(existing.UpdatedAt) {
+				merged.Bindings[key] = record
+			}
+		}
+		for key, claimedAt := range legacy.Claimed {
+			if existing, ok := merged.Claimed[key]; !ok || claimedAt.After(existing) {
+				merged.Claimed[key] = claimedAt
+			}
+		}
+		for connectorID, cursors := range legacy.Cursors {
+			if _, ok := merged.Cursors[connectorID]; !ok {
+				merged.Cursors[connectorID] = cursors
+			}
+		}
+		for connectorID, owner := range legacy.Owners {
+			if _, ok := merged.Owners[connectorID]; !ok {
+				merged.Owners[connectorID] = owner
+			}
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	s.state = merged
+	if err := s.writeStateLocked(); err != nil {
+		return false, fmt.Errorf("storefile: migrate legacy state: %w", err)
+	}
+	stamp := time.Now().Unix()
+	for _, candidate := range statepath.LegacyCandidates(hints...) {
+		_ = os.Rename(candidate.Path, candidate.Path+fmt.Sprintf(".bak-%d", stamp))
+	}
+	return true, nil
+}
+
+// mergeLegacyCandidatesLocked 是持续形态的迁移：每次 state 重载后扫描旧候选，
+// 只并入规范文件缺失的键（bindings/claimed/cursors/owners 任一维度），带新键的
+// 候选全部成功并入后才归档该候选；无新键零写放大。要求已持有 s.mu + 目录锁
+// （reloadStateLocked 的调用语境）。
+func (s *ConfigStore) mergeLegacyCandidatesLocked() error {
+	hints := make([]string, 0, 1)
+	if s.configPath != "" {
+		hints = append(hints, s.configPath)
+	}
+	candidates := statepath.LegacyCandidates(hints...)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	type candidateResult struct {
+		path       string
+		broughtNew bool
+	}
+	results := make([]candidateResult, 0, len(candidates))
+	changed := false
+	for _, candidate := range candidates {
+		raw, err := os.ReadFile(candidate.Path)
+		if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var legacy stateFile
+		if err := json.Unmarshal(raw, &legacy); err != nil {
+			continue // 半写入/非法 JSON：跳过
+		}
+		result := candidateResult{path: candidate.Path}
+		for key, record := range legacy.Bindings {
+			if _, ok := s.state.Bindings[key]; !ok {
+				s.state.Bindings[key] = record
+				result.broughtNew = true
+			}
+		}
+		for key, claimedAt := range legacy.Claimed {
+			if _, ok := s.state.Claimed[key]; !ok {
+				s.state.Claimed[key] = claimedAt
+				result.broughtNew = true
+			}
+		}
+		for connectorID, cursors := range legacy.Cursors {
+			if _, ok := s.state.Cursors[connectorID]; !ok {
+				s.state.Cursors[connectorID] = cursors
+				result.broughtNew = true
+			}
+		}
+		for connectorID, owner := range legacy.Owners {
+			if _, ok := s.state.Owners[connectorID]; !ok {
+				s.state.Owners[connectorID] = owner
+				result.broughtNew = true
+			}
+		}
+		if result.broughtNew {
+			changed = true
+		}
+		results = append(results, result)
+	}
+	if !changed {
+		return nil
+	}
+	if err := s.writeStateLocked(); err != nil {
+		return fmt.Errorf("storefile: merge legacy state: %w", err)
+	}
+	stamp := time.Now().Unix()
+	for _, result := range results {
+		if result.broughtNew {
+			_ = os.Rename(result.path, result.path+fmt.Sprintf(".bak-%d", stamp))
+		}
 	}
 	return nil
 }
