@@ -293,6 +293,47 @@ func (h *handlers) dispatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// attentionInlet 处理 POST /connectors/attention（P2 切片 D，D5 跨宿主扇出
+// 接收面，docs/bots/09 §7.4.1）：其它节点的注意力广播经此进入本宿主。
+// 发起侧已按「对端有 bot 想收广播」过滤；这里再做**本地 D5 过滤**
+//（逐 bot AcceptsNotice：绑定会话始终收，其它会话需 enabled+kinds+scope
+// 命中），命中者经 NotifyAttention 出站到该 bot 绑定。AttentionInlet 未
+// 装配（gateway 纯 poller 无出站 bot）→ 501。
+func (h *handlers) attentionInlet(w http.ResponseWriter, r *http.Request) {
+	if !h.ready(w) {
+		return
+	}
+	if h.deps.AttentionInlet == nil {
+		writeError(w, http.StatusNotImplemented, "本宿主未启用注意力接收")
+		return
+	}
+	var body struct {
+		Kind    string `json:"kind"`
+		Session struct {
+			NodeID    string `json:"node_id,omitempty"`
+			SessionID string `json:"session_id"`
+		} `json:"session"`
+		Text string `json:"text"`
+	}
+	if !decodeBody(h.deps, w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.Session.SessionID) == "" || strings.TrimSpace(body.Text) == "" {
+		writeError(w, http.StatusBadRequest, "session_ref.session_id 与 text 必填")
+		return
+	}
+	notice := connectors.AttentionNotice{
+		Kind:    strings.TrimSpace(body.Kind),
+		Session: connectors.SessionRef{NodeID: body.Session.NodeID, SessionID: body.Session.SessionID},
+		Text:    body.Text,
+	}
+	if err := h.deps.AttentionInlet(notice); err != nil {
+		writeError(w, http.StatusBadGateway, "注意力接收失败："+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 	if !h.ready(w) {
 		return

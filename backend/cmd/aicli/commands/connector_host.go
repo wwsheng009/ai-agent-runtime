@@ -340,6 +340,9 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		// runner 接收面（P2 切片 B 后半）：POST /connectors/dispatch 执行后端
 		// （prompt 注入走 ActorRegistry、命令回环走 commandPlane）。
 		Runner: localConnectorRunner{backend: localConnectorBackend{host: host, logf: logf}},
+		// 注意力接收面（P2 切片 D）：POST /connectors/attention 本地 D5 过滤
+		// + 出站（InletAttention 共享实现）。
+		AttentionInlet: connectors.InletAttention(store, service.NotifyAttention),
 	}
 
 	ctx, cancel := context.WithCancel(parent)
@@ -380,7 +383,9 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 			},
 			Store:  store,
 			Notify: service.NotifyAttention,
-			Logf:   logf,
+			// 跨宿主扇出（P2 切片 D）：scope 意愿命中的事件转发给活 peers。
+			Forward: aicliForwardAttentionToPeers(logf),
+			Logf:    logf,
 		})
 	}
 	logf("aicli connectors: started (config=%s, state=%s)", configPath, statePath)
@@ -940,4 +945,63 @@ func aicliDispatchErrorLine(body string) string {
 		body = body[:200] + "…"
 	}
 	return body
+}
+
+// aicliForwardAttentionToPeers 把注意力广播转发给全部活 peers 的
+// /api/connectors/attention（P2 切片 D，scope=all 跨宿主扇出的发起侧；
+// 与 runtime-server forwardAttentionToPeers 同构——单一语义两宿主落点）。
+func aicliForwardAttentionToPeers(logf func(format string, args ...any)) func(connectors.AttentionNotice) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	return func(notice connectors.AttentionNotice) {
+		paths := mesh.ResolvePaths()
+		if !paths.Enabled() {
+			return
+		}
+		view := mesh.BuildView(paths, mesh.ViewOptions{})
+		payload, err := json.Marshal(map[string]any{
+			"kind":    notice.Kind,
+			"session": map[string]string{"node_id": notice.Session.NodeID, "session_id": notice.Session.SessionID},
+			"text":    notice.Text,
+		})
+		if err != nil {
+			return
+		}
+		for _, node := range view.Nodes {
+			if node.State != mesh.NodeStateLive || node.Endpoint == nil || strings.TrimSpace(node.Endpoint.BaseURL) == "" {
+				continue
+			}
+			kind := strings.ToLower(strings.TrimSpace(node.Kind))
+			if kind != connectors.MeshPeerKindAICLI && kind != connectors.MeshPeerKindRuntimeServer {
+				continue
+			}
+			go func(baseURL, token, nodeID string) {
+				httpReq, err := http.NewRequest(http.MethodPost,
+					strings.TrimRight(baseURL, "/")+"/api/connectors/attention", bytes.NewReader(payload))
+				if err != nil {
+					return
+				}
+				httpReq.Header.Set("Content-Type", "application/json")
+				if token != "" {
+					httpReq.Header.Set("X-AICLI-Token", token)
+				}
+				resp, err := client.Do(httpReq)
+				if err != nil {
+					if logf != nil {
+						logf("connector attention forward to %s failed: %v", nodeID, err)
+					}
+					return
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusOK && logf != nil {
+					logf("connector attention forward to %s: HTTP %d", nodeID, resp.StatusCode)
+				}
+			}(node.Endpoint.BaseURL, aicliMeshPeerToken(node.NodeID), node.NodeID)
+		}
+	}
+}
+
+func aicliMeshPeerToken(nodeID string) string {
+	_, token := aicliMeshPeerLookup(nodeID)
+	return token
 }

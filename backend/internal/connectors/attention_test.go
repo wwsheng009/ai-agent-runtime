@@ -1,6 +1,7 @@
 package connectors
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,60 @@ func TestAttentionNoticeForProjection(t *testing.T) {
 	// 空会话不推。
 	if _, _, ok := AttentionNoticeForProjection("", "approval"); ok {
 		t.Fatal("empty session should not notify")
+	}
+}
+
+// TestSubscribeAttentionForwardWanted 锁定跨宿主扇出意愿判定（切片 D）：
+// 任一 bot notify.enabled=true → Forward 被调（即使本宿主 scope/kinds 不命中
+// ——本地出站判定与转发判定是两条链）；全部 disabled → Forward 不被调。
+func TestSubscribeAttentionForwardWanted(t *testing.T) {
+	notifyCalls := make(chan AttentionNotice, 4)
+	forwardCalls := make(chan AttentionNotice, 4)
+	bus := runtimeevents.NewBusWithRetention(16)
+	unsubscribe := bus.SubscribeCancelable(runtimechat.EventApprovalRequested, func(e runtimeevents.Event) {})
+	unsubscribe() // 仅确认 bus 可用
+
+	// bot1：notify disabled（本宿主不出站也不转发意愿）；bot2：enabled（转发意愿）。
+	store := NewMemoryStore(
+		Config{ID: "c1", Provider: "fake", Enabled: true},
+		Config{ID: "c2", Provider: "fake", Enabled: true, Policy: Policy{Notify: NotifyPolicy{Enabled: true}}},
+	)
+	sub := SubscribeAttention(context.Background(), AttentionDeps{
+		Subscribe: func(handler func(runtimeevents.Event)) func() {
+			return bus.SubscribeCancelable(runtimechat.EventApprovalRequested, handler)
+		},
+		Store: store,
+		Notify: func(_ context.Context, notice AttentionNotice) error {
+			notifyCalls <- notice
+			return nil
+		},
+		Forward: func(notice AttentionNotice) {
+			forwardCalls <- notice
+		},
+	})
+	defer sub()
+
+	bus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventApprovalRequested,
+		SessionID: "sess-elsewhere",
+		Timestamp: time.Now(),
+		Payload:   map[string]any{"request_id": "apr-fwd"},
+	})
+
+	select {
+	case n := <-forwardCalls:
+		if n.Session.SessionID != "sess-elsewhere" {
+			t.Fatalf("forwarded notice = %+v", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("enabled bot must trigger forward")
+	}
+	// 本宿主出站：bot1 绑定空 + notify disabled；bot2 enabled 但默认 scope=sessions
+	// 且 sess-elsewhere 未绑定到 c2 → 本地不出站。
+	select {
+	case n := <-notifyCalls:
+		t.Fatalf("local notify must be suppressed for unbound+sessions scope, got %+v", n)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
 

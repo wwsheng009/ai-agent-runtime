@@ -608,3 +608,57 @@ func TestDispatchEndpoint(t *testing.T) {
 		t.Fatalf("runner error = %d, want 502", recorder.Code)
 	}
 }
+
+// TestAttentionInletEndpoint 锁定跨宿主注意力接收面（P2 切片 D）：
+// Inlet 未装配 501；正常接收 200（inlet 被调）；缺必填 400；inlet 错误 502。
+func TestAttentionInletEndpoint(t *testing.T) {
+	// 1) 未装配 → 501。
+	noInlet := newFixture(t, allowAll, baseConfig("c1", "fakeweb"))
+	if recorder := do(t, noInlet.router, http.MethodPost, "/connectors/attention",
+		`{"kind":"approval","session":{"session_id":"sess-1"},"text":"hi"}`); recorder.Code != http.StatusNotImplemented {
+		t.Fatalf("no inlet = %d, want 501", recorder.Code)
+	}
+
+	// 2) 正常接收。
+	var mu sync.Mutex
+	var got []connectors.AttentionNotice
+	inletErr := error(nil)
+	store := connectors.NewMemoryStore(baseConfig("c1", "fakeweb"))
+	backend := &fakeBackend{}
+	service := connectors.New(connectors.Deps{Store: store, Backend: backend, Logf: func(string, ...any) {}})
+	_ = service.Register(&fakeProvider{})
+	deps := Deps{Service: service, Store: store, Authorize: allowAll, Logf: func(string, ...any) {},
+		AttentionInlet: func(notice connectors.AttentionNotice) error {
+			mu.Lock()
+			got = append(got, notice)
+			e := inletErr
+			mu.Unlock()
+			return e
+		}}
+	router := NewRouter(deps)
+
+	recorder := do(t, router, http.MethodPost, "/connectors/attention",
+		`{"kind":"approval","session":{"node_id":"aicli:node-x","session_id":"sess-9"},"text":"⏳ 有待审批"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("inlet = %d %s", recorder.Code, recorder.Body.String())
+	}
+	mu.Lock()
+	if len(got) != 1 || got[0].Kind != "approval" || got[0].Session.SessionID != "sess-9" {
+		mu.Unlock()
+		t.Fatalf("inlet got = %+v", got)
+	}
+	mu.Unlock()
+
+	// 3) 缺必填 400。
+	if recorder := do(t, router, http.MethodPost, "/connectors/attention",
+		`{"kind":"approval"}`); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("missing fields = %d", recorder.Code)
+	}
+
+	// 4) inlet 错误 502。
+	inletErr = errors.New("no binding")
+	if recorder := do(t, router, http.MethodPost, "/connectors/attention",
+		`{"kind":"approval","session":{"session_id":"sess-1"},"text":"x"}`); recorder.Code != http.StatusBadGateway {
+		t.Fatalf("inlet error = %d, want 502", recorder.Code)
+	}
+}

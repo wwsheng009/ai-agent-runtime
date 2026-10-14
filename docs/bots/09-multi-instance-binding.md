@@ -441,7 +441,7 @@ D1/绑定 API（P1）不依赖该改造。
 | 7 | `policy.notify{enabled,kinds,scope}`（D5）+ 宿主过滤点 | `internal/connectors/types.go`（Policy）、Schema 导出、`internal/connectors/attention.go`（共享订阅/过滤/出站，三宿主单一实现点）；runtime-server ✅ / aicli ✅（connector_host 经 host.EventBus 接入）/ gateway ✅（OnSessionTransition 投影 hook，AttentionNoticeForProjection 映射） | P1 |
 | 8 | mesh peer kind 扩展 + runtime-server 入网 | mesh 包、`cmd/runtime-server` | P2 |
 | 9 | turn 派发端点 + `service.go` 路由决策（R1/R2/R3） | **✅ 2026-10-14（切片 B 全量）**：决策层 `internal/connectors/dispatch.go`（DecideRoute + RunnerPlane 能力接口）；接收面 restapi `POST /connectors/dispatch`（Runner 未装配 501/缺必填 400/失败 502）；执行面 runtime-server `runtimeConnectorRunner`（SubmitConnectorPrompt + 命令回环走 ConnectorDecideApproval/AnswerQuestion）、aicli `localConnectorRunner`（Handle 复用 + DecideApproval/AnswerQuestion）；发起面 `Deps.Peers`（mesh 档案 BuildView 装配，kind/state/endpoint 过滤）+ `Deps.RemoteDispatch`（POST 对端 BaseURL，X-AICLI-Token 档案令牌，DispatchCallTimeout 180s）；runtime-server 入网（读档案视角）就绪，self 档案写入待补（当前以 readers 身份可见 aicli peers） | P2 |
-| 10 | 注意力发送收口 poller + `scope=all` 跨宿主扇出 | `cmd/runtime-server/connector_bootstrap.go`、mesh 派发 | P2 |
+| 10 | 注意力发送收口 poller + `scope=all` 跨宿主扇出 | **✅ 2026-10-14（切片 D）**：发起侧 SubscribeAttention `Forward`（任一 bot notify.enabled=true 即向活 peers fire-and-forget 转发）；接收面 restapi `POST /connectors/attention`（AttentionInlet = InletAttention 共享实现：本地 D5 逐 bot 过滤 + NotifyAttention 出站）；两宿主接线（runtime-server forwardAttentionToPeers / aicli 同构）；发送收口不变（仍由 poller 出站） | P2 |
 
 P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在哪台就在哪台跑"成为事实。
 
@@ -463,9 +463,9 @@ P1 交付后即可解决 §0 的全部四类事故；P2 让"绑定的会话在�
 - [ ] N3：bind 切换目标会话后，旧会话历史完好；unbind 后新消息走 auto-create；
 - [ ] N4：左栏面板可完成 绑定/解绑/切换，白名单外 chat 被拒绝并提示；
 - [ ] N5：`/bots bind|unbind|status` 与 REST 行为一致（同一套校验）；
-- [ ] N6：三条路由用例（R1/R2/R3）各有集成测试；杀 poller/runner 均可自愈；
-- [ ] N7：非 poller 节点产生的 approval 事件能送达 IM；
-- [ ] N8：aicli fail-closed 白名单在远程 runner 上同样生效（测试覆盖）；
+- [x] N6：三条路由用例（R1/R2/R3）各有集成测试；杀 poller/runner 均可自愈（R1/R3：service_dispatch_test 四例；R2a：TestServiceR2aFailoverTakeover + DecideRoute Failover 双形态）；
+- [x] N7：非 poller 节点产生的 approval 事件能送达 IM（切片 D：scope 意愿转发 + 对端 InletAttention 本地 D5 过滤 + NotifyAttention 出站）；
+- [x] N8：aicli fail-closed 白名单在远程 runner 上同样生效（测试覆盖）——runner 接收面经 restapi 管理面鉴权 + RequireAllowedUsers 闸在认领期强制；
 - [ ] D4：编辑对话框扫码后 connector id/bindings 不变；新增流程取消即清理；
 - [ ] D5：`notify.enabled` 缺省（未配置）时行为与现状一致（不收任何事件通知）；
       kinds 白名单逐类过滤有测试；`scope=sessions` 只收绑定到本 bot 的会话事件，

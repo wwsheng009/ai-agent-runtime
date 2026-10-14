@@ -49,6 +49,11 @@ type Deps struct {
 	// POST /connectors/dispatch 返回 501。挂载在管理面鉴权链内（宿主内部
 	// 令牌/会话，与 skills 管理面同源）。
 	Runner connectors.RunnerPlane
+	// AttentionInlet 接收其它 mesh 节点转发来的注意力广播（P2 切片 D，D5
+	// 跨宿主扇出的接收面，docs/bots/09 §7.4.1）：宿主实现 = 本地 D5 过滤
+	//（逐 bot AcceptsNotice，命中者经 NotifyAttention 出站到该 bot 绑定）；
+	// nil = 不接收（POST /connectors/attention 501）。
+	AttentionInlet func(notice connectors.AttentionNotice) error
 }
 
 func (d Deps) logf(format string, args ...any) {
@@ -83,6 +88,9 @@ func NewRouter(deps Deps) http.Handler {
 	// 跨节点 turn 派发接收面（P2 切片 B 后半，docs/bots/09 §7.3）：宿主内部
 	// 端点（管理面鉴权链内），poller 节点经 mesh peer endpoint 调用。
 	router.HandleFunc("/connectors/dispatch", handlers.dispatch).Methods(http.MethodPost)
+	// 跨宿主注意力扇出接收面（P2 切片 D，docs/bots/09 §7.4.1）：其它节点的
+	// scope=all 广播经此进入本宿主（入口内再做本地 D5 过滤）。
+	router.HandleFunc("/connectors/attention", handlers.attentionInlet).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}", handlers.get).Methods(http.MethodGet)
 	// PATCH 是契约首选（部分更新语义：缺省字段保持不变）；PUT 作为别名兼容。
 	router.HandleFunc("/connectors/{id}", handlers.update).Methods(http.MethodPatch, http.MethodPut)

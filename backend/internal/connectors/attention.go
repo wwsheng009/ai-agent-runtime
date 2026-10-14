@@ -104,8 +104,49 @@ type AttentionDeps struct {
 	Store Store
 	// Notify 把通知出站到 IM（生产实现 Service.NotifyAttention）。
 	Notify func(ctx context.Context, notice AttentionNotice) error
+	// Forward 把事件转发给其它 mesh 节点（P2 切片 D，scope=all 跨宿主扇出，
+	// docs/bots/09 §7.4.1）：非 nil 时任一 bot 的 notify.enabled=true 即转发
+	//（对端按自己的 policy 过滤）；fire-and-forget，失败只记日志。
+	Forward func(notice AttentionNotice)
 	// Logf 出站失败/队列满日志；可 nil。
 	Logf func(format string, args ...any)
+}
+
+// InletAttention 是跨宿主注意力接收面的宿主实现（restapi Deps.AttentionInlet，
+// P2 切片 D）：对其它节点转发来的广播做**本地 D5 过滤**（逐 bot
+// AcceptsNotice：绑定会话始终收，其它会话需 enabled+kinds+scope 命中——
+// 发起侧只按"对端想收广播"意愿过滤，scope/kinds 的本地裁决在这里），
+// 命中者经 NotifyAttention 出站到该 bot 绑定。出站用 Service 基 ctx（与
+// HandleInbound 的 Fix-1 语义一致：不绑 HTTP 请求 ctx）。返回 nil 表示
+// 本宿主无 bot 接收（调用方按静默成功处理——广播本质是尽力而为）。
+func InletAttention(store Store, notify func(ctx context.Context, notice AttentionNotice) error) func(AttentionNotice) error {
+	if store == nil || notify == nil {
+		return nil
+	}
+	return func(notice AttentionNotice) error {
+		ctx := context.Background()
+		for _, cfg := range store.ListConfigs() {
+			if !cfg.Enabled {
+				continue
+			}
+			if !cfg.Policy.AcceptsNotice(notice, func(session SessionRef) bool {
+				for _, binding := range store.ListBindings(cfg.ID) {
+					if binding.Session == session {
+						return true
+					}
+				}
+				return false
+			}) {
+				continue
+			}
+			if err := notify(ctx, notice); err != nil {
+				return err
+			}
+			return nil // 同一通知本宿主出站一次即可（多 bot 命中不去重——
+			// 不同 bot 绑定不同 chat，NotifySession 内部按各自绑定扇出）
+		}
+		return nil
+	}
 }
 
 const (
@@ -156,14 +197,17 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 		if !ok || !dedupe.first(key) {
 			return
 		}
-		// D5 过滤：逐连接器判定（一个事件可能命中多个 bot 的通知开关）。
+		// D5 过滤：逐连接器判定（一个事件可能命中多个 bot 的通知开关）；
+		// 同时判定跨宿主转发（切片 D）：任一 bot notify.enabled=true 即转发
+		// 给 peers（对端再按自己的 policy 过滤，两条链互不替代）。
+		accepted := false
+		forwardWanted := deps.Forward != nil
 		if deps.Store != nil {
-			accepted := false
 			for _, cfg := range deps.Store.ListConfigs() {
 				if !cfg.Enabled {
 					continue
 				}
-				if cfg.Policy.AcceptsNotice(notice, func(session SessionRef) bool {
+				accepts := cfg.Policy.AcceptsNotice(notice, func(session SessionRef) bool {
 					// scope=sessions 的语义：事件会话已绑定到本 bot（按 SessionRef
 					// 反查绑定表；绑定数几十~几百，全表扫描可行，见 Store 契约）。
 					for _, binding := range deps.Store.ListBindings(cfg.ID) {
@@ -172,14 +216,28 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 						}
 					}
 					return false
-				}) {
+				})
+				if accepts {
 					accepted = true
+				}
+				// 转发意愿：任一 bot 的 notify.enabled（无论 scope/kinds 命中与否
+				// ——kinds/scope 是本宿主出站粒度，对端有自己的词表；enabled 是
+				// 「这个 bot 想收广播」的意愿位，转发以它为门槛控制噪音）。
+				if cfg.Policy.Notify.Enabled {
+					forwardWanted = true
+				}
+				if accepted && (!forwardWanted || deps.Forward == nil) {
 					break
 				}
 			}
-			if !accepted {
-				return
-			}
+		}
+		if forwardWanted && deps.Forward != nil {
+			// fire-and-forget：转发失败不重试（对端 absence 语义 = 收不到），
+			// 不阻塞本地出站队列。
+			go deps.Forward(notice)
+		}
+		if !accepted {
+			return
 		}
 		select {
 		case queue <- notice:
