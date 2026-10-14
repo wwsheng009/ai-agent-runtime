@@ -405,13 +405,15 @@ func TestBotsApplyCredentialPatchMergesAndWhitelists(t *testing.T) {
 }
 
 // TestBotsApplyCredentialPatchAdoptsExistingConnector 锁定重复扫码识别：
-// 同一机器人（同 provider + 同 account_id）重扫码时，凭据合并进既有连接器、
-// 自动壳连接器被删除——而不是新建第二个机器人。
+// 同一用户（同 provider + 同 owner_user_id=ilink_user_id，平台唯一）重扫码
+// 时（微信会新建 bot：新 account_id，并解除旧连接），凭据合并进既有连接器、
+// 自动壳连接器被删除——而不是新建第二个机器人配置。
 func TestBotsApplyCredentialPatchAdoptsExistingConnector(t *testing.T) {
 	store := connectors.NewMemoryStore(
 		connectors.Config{
 			ID: "wx-existing", Provider: "wechat", Name: "我的微信", Enabled: true,
-			Settings: map[string]string{"account_id": "acct-1"},
+			// 旧连接：旧 bot 实例 acct-old（每次扫码都会变）+ 稳定 owner。
+			Settings: map[string]string{"account_id": "acct-old", "owner_user_id": "owner-9"},
 			Policy:   connectors.Policy{AllowedUsers: []string{"vip-user"}},
 		},
 	)
@@ -422,7 +424,7 @@ func TestBotsApplyCredentialPatchAdoptsExistingConnector(t *testing.T) {
 		"credential_ready": true,
 		"settings": map[string]any{
 			"base_url":      "https://ilink.example",
-			"account_id":    "acct-1",
+			"account_id":    "acct-new",
 			"owner_user_id": "owner-9",
 		},
 		"secrets": map[string]any{"bot_token": "tk-new"},
@@ -438,8 +440,15 @@ func TestBotsApplyCredentialPatchAdoptsExistingConnector(t *testing.T) {
 		t.Fatal("shell connector should be deleted after adoption")
 	}
 	got, _ := store.GetConfig("wx-existing")
+	// 新 bot 实例标识（account_id）与凭据都已更新；owner 不变。
+	if got.Settings["account_id"] != "acct-new" {
+		t.Fatalf("account_id = %q, want acct-new (superseded acct-old)", got.Settings["account_id"])
+	}
 	if got.Secrets["bot_token"] != "tk-new" {
 		t.Fatalf("existing connector not updated: %+v", got.Secrets)
+	}
+	if got.Settings["owner_user_id"] != "owner-9" {
+		t.Fatalf("owner_user_id = %q, want unchanged owner-9", got.Settings["owner_user_id"])
 	}
 	// 既有连接器保留自己的白名单（不被壳的自动 owner 覆盖——它已有白名单）。
 	if len(got.Policy.AllowedUsers) != 1 || got.Policy.AllowedUsers[0] != "vip-user" {

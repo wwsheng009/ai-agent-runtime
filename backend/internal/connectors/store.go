@@ -113,23 +113,32 @@ type MemoryStore struct {
 	owners   map[string]OwnerRecord
 }
 
-// botIdentitySettingKey 是扫码通道的平台侧稳定机器人标识 setting 键
-// （微信=ilink_bot_id，扫码 confirmed 后由平台回填）。同一机器人重扫码
-// 得到相同值，因此可作为「重复扫码 → 替换既有机器人」的判定键。
-const botIdentitySettingKey = "account_id"
+// ownerIdentitySettingKey 是扫码通道的所有者稳定标识 setting 键
+// （微信=ilink_user_id，扫码 confirmed 后由平台回填）。领域事实：
+// ilink_bot_id（account_id）每次扫码都会生成新的 bot 并提示解除旧连接，
+// **不稳定**；ilink_user_id 才唯一。因此「重复扫码识别」以 owner_user_id
+// 为判定键：同一用户重新扫码 = 为自己的机器人换新凭据。
+const ownerIdentitySettingKey = "owner_user_id"
 
-// BotIdentity 返回该连接器的平台侧机器人标识（非扫码通道/未回填为空）。
+// BotIdentity 返回该连接器的所有者稳定标识（微信 ilink_user_id；非扫码
+// 通道/未回填为空）。UI 与重复扫码判定统一使用本方法取值。
 func (c Config) BotIdentity() string {
-	return strings.TrimSpace(c.Setting(botIdentitySettingKey, ""))
+	return strings.TrimSpace(c.Setting(ownerIdentitySettingKey, ""))
+}
+
+// BotAccount 返回该连接器当前持有的平台 bot 实例标识（微信 ilink_bot_id）。
+// 每次重新扫码都会变化：采纳新凭据时，旧值即「被解除的旧连接」。
+func (c Config) BotAccount() string {
+	return strings.TrimSpace(c.Setting("account_id", ""))
 }
 
 // FindSameBotConfig 在 configs 中查找与 candidate 同 provider 且持同一
-// 平台机器人标识（BotIdentity 相同且非空）的**另一个**连接器。
+// 所有者稳定标识（BotIdentity 相同且非空）的**另一个**连接器。
 //
-// 用途：扫码通道「重复扫码识别」——同一台机器人重新扫码取新凭据时，
-// 凭据应合并进既有连接器（替换语义），而不是创建第二个重复机器人。
-// 三宿主共用（restapi PATCH 收敛、aicli TUI/web 扫码回填），判定键与
-// 语义只有这一份实现。
+// 用途：扫码通道「重复扫码识别」——同一用户（微信 ilink_user_id 唯一）
+// 重新扫码时，微信会创建新的 bot（新 ilink_bot_id）并解除旧连接；此时
+// 凭据应合并进既有连接器（替换语义），而不是创建第二个重复配置。
+// 三宿主共用（restapi PATCH 收敛、aicli TUI/web 扫码回填）。
 //
 // 返回 (Config{}, false) 表示没有重复（candidate 应作为新机器人转正）。
 func FindSameBotConfig(configs []Config, candidate Config) (Config, bool) {

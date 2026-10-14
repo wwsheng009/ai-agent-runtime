@@ -171,13 +171,11 @@ function rowHTML(item) {
   var lastError = runtime && runtime.last_error
     ? '<div class="connector-last-error" title="最近一次错误">' + esc(runtime.last_error) + "</div>"
     : "";
-  // 创建时间/更新时间（旧数据无戳时省略）；bot_identity 是扫码通道的平台
-  // 稳定标识（如微信 ilink_bot_id）——同一机器人重扫码会得到相同值。
-  var createdText = item.created_at ? formatTimestamp(item.created_at) : "";
-  var updatedText = item.updated_at ? formatTimestamp(item.updated_at) : "";
-  var stampText = createdText ? ("建于 " + createdText + (updatedText ? " · 更新 " + updatedText : "")) : "";
+  // 标识：bot_identity=owner_user_id（微信 ilink_user_id，平台唯一稳定，
+  // 同一用户重扫码值不变）；bot_account=ilink_bot_id（每次扫码新建 bot 都
+  // 会变，仅作参考展示）。
   var identityHTML = item.bot_identity
-    ? '<span class="connector-owner" title="平台侧机器人标识（同一机器人重扫码值不变）">标识: ' + esc(item.bot_identity) + "</span>"
+    ? '<span class="connector-owner" title="所有者标识 ilink_user_id（平台唯一；重复扫码判定键）">owner: ' + esc(item.bot_identity) + "</span>"
     : "";
   return '<div class="connector-row" data-id="' + esc(item.id) + '">' +
     '<div class="connector-row-main">' +
@@ -191,7 +189,16 @@ function rowHTML(item) {
       identityHTML +
       statsHTML +
     "</div>" +
-    (stampText ? '<div class="connector-owner">' + esc(stampText) + "</div>" : "") +
+    (function () {
+      var createdText = item.created_at ? formatTimestamp(item.created_at) : "";
+      var updatedText = item.updated_at ? formatTimestamp(item.updated_at) : "";
+      var stampText = createdText ? ("建于 " + createdText + (updatedText ? " · 更新 " + updatedText : "")) : "";
+      var accountText = item.bot_account ? ("bot " + item.bot_account) : "";
+      var parts = [];
+      if (stampText) { parts.push(stampText); }
+      if (accountText) { parts.push(accountText); }
+      return parts.length ? '<div class="connector-owner">' + esc(parts.join(" · ")) + "</div>" : "";
+    })() +
     '<div class="connector-row-actions">' +
       '<button type="button" data-act="toggle">' + (item.enabled ? "停用" : "启用") + "</button>" +
       '<button type="button" data-act="edit">编辑</button>' +
@@ -725,9 +732,14 @@ function finishQRLogin(st, data) {
   }))
     .then(function (result) {
       // 服务端重复扫码收敛：adopted=true 表示凭据合并进了既有机器人
-      // （removed_id 是已删除的壳）。提示语区分「新建」与「更新既有」。
+      // （removed_id 是已删除的壳）。微信每次扫码都会新建 bot 并解除旧
+      // 连接：superseded_account 是被解除的旧 ilink_bot_id。提示语区分
+      // 「新建」与「更新既有（旧连接已失效）」。
       if (result && result.adopted && result.removed_id) {
-        showToast("扫码登录成功:识别为既有机器人 " + result.id + ",凭据已更新(临时 " + result.removed_id + " 已清理)", "ok", 5000);
+        var superseded = result.superseded_account
+          ? "，原连接 " + result.superseded_account + " 已由微信解除"
+          : "";
+        showToast("扫码登录成功:识别为既有机器人 " + result.id + "（同一 owner）,已更新其连接为新 bot" + superseded + "；临时 " + result.removed_id + " 已清理", "ok", 6000);
       } else {
         showToast("扫码登录成功,凭据已回填:" + st.connectorID, "ok", 4000);
       }

@@ -139,7 +139,7 @@ func TestConnectorsSchemaGolden(t *testing.T) {
 // （docs/bots/06-target-architecture.md §2.5 与 03-host-integration.md）。
 var connectorViewKeys = []string{
 	"id", "provider", "name", "enabled", "mode", "settings", "secret_keys",
-	"policy", "created_at", "updated_at", "bot_identity",
+	"policy", "created_at", "updated_at", "bot_identity", "bot_account",
 	"active_owner", "owned_by_current_host", "runtime",
 }
 
@@ -239,6 +239,7 @@ func fullContractConfig() connectors.Config {
 			"callback_url":    "https://example.com/hooks/connectors/golden-1",
 			"allow_media":     "true",
 			"account_id":      "ilink-bot-golden",
+			"owner_user_id":   "ilink-user-golden",
 			"timeout_seconds": "30",
 		},
 		Secrets: map[string]string{"bot_token": "tok-secret"},

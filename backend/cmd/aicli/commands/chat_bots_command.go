@@ -660,7 +660,7 @@ func (st *botsScanScreenState) pollOnce() {
 			return
 		}
 		if adopted != st.cfg.ID {
-			st.finish(fmt.Sprintf("扫码登录成功：识别为既有机器人 %s，凭据已更新（临时连接器 %s 已清理）。", adopted, st.cfg.ID))
+			st.finish(fmt.Sprintf("扫码登录成功：识别为既有机器人 %s（同一 owner），已更新其连接为新 bot；原连接由微信解除，临时连接器 %s 已清理。", adopted, st.cfg.ID))
 			return
 		}
 		st.finish(fmt.Sprintf("扫码登录成功：%s 凭据已回填（owner 已加入 allowed_users）。", st.cfg.ID))
@@ -807,7 +807,7 @@ func botsPollLogin(session *ChatSession, host *LocalConnectorHost, runner botsAc
 				return
 			}
 			if adopted != cfg.ID {
-				botsSupplement(session, fmt.Sprintf("扫码登录成功：识别为既有机器人 %s，凭据已更新（临时连接器 %s 已清理）。", adopted, cfg.ID))
+				botsSupplement(session, fmt.Sprintf("扫码登录成功：识别为既有机器人 %s（同一 owner），已更新其连接为新 bot；原连接由微信解除，临时连接器 %s 已清理。", adopted, cfg.ID))
 				return
 			}
 			botsSupplement(session, fmt.Sprintf("机器人 %s 扫码登录成功：凭据已回填，owner 用户已加入 allowed_users。", cfg.ID))

@@ -34,9 +34,12 @@ type ConnectorView struct {
 	// 未打戳）。additive：旧客户端忽略即可；列表/详情/创建响应统一携带。
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
-	// BotIdentity 是扫码通道的稳定机器人标识（如微信 ilink_bot_id），供前端/
-	// TUI 做「重复扫码 → 替换既有机器人」判定；非扫码或未回填时省略。
+	// BotIdentity 是扫码通道的所有者稳定标识（微信 ilink_user_id，平台唯一
+	// 注意：ilink_bot_id/account_id 每次扫码都会新建 bot 并解除旧连接，不稳
+	// 定）。UI 唯一标记与重复扫码判定统一用它；未回填时省略。
 	BotIdentity string `json:"bot_identity,omitempty"`
+	// BotAccount 是当前持有的平台 bot 实例标识（微信 ilink_bot_id，随扫码变化）。
+	BotAccount string `json:"bot_account,omitempty"`
 	// Runtime 是运行可观测快照（additive，旧客户端忽略）：每连接器累计计数与
 	// 最近错误；日志明细走 GET /connectors/{id}/logs。
 	Runtime *RuntimeView `json:"runtime,omitempty"`
@@ -266,12 +269,14 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 		updated.Policy = policyFrom(request.Policy)
 	}
 	// 重复扫码收敛（三宿主共用语义，docs/bots/03 §6）：本次 PATCH 带入了
-	// account_id 且与另一个既有连接器（同 provider）的 account_id 相同
-	// = 同一台机器人重新扫码取新凭据 → 凭据/设置合并进既有连接器，
-	// 本次 PATCH 的目标（通常是自动创建的壳）被删除；响应回既有连接器
-	// 视图并带 adopted=true（前端据此刷新列表并提示「更新了 xx」）。
+	// owner_user_id（微信 ilink_user_id，平台唯一）且与另一个既有连接器
+	// （同 provider）的 owner_user_id 相同 = 同一用户重新扫码（微信会新建
+	// bot 并解除旧连接）→ 凭据/设置合并进既有连接器，本次 PATCH 的目标
+	// （通常是自动创建的壳）被删除；响应回既有连接器视图并带 adopted=true
+	// 与 superseded_account（被解除的旧 ilink_bot_id）。
 	if strings.TrimSpace(updated.BotIdentity()) != "" {
 		if existingSame, found := connectors.FindSameBotConfig(h.deps.Store.ListConfigs(), updated); found {
+			superseded := existingSame.BotAccount()
 			merged := existingSame
 			merged.Settings = updated.Settings
 			merged.Secrets = updated.Secrets
@@ -290,7 +295,12 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 				h.deps.logf("connectors: reload %s failed: %v", merged.ID, err)
 			}
 			view := h.view(merged)
-			writeJSON(w, http.StatusOK, adoptResponse{ConnectorView: view, Adopted: true, RemovedID: updated.ID})
+			writeJSON(w, http.StatusOK, adoptResponse{
+				ConnectorView:     view,
+				Adopted:           true,
+				RemovedID:         updated.ID,
+				SupersededAccount: superseded,
+			})
 			return
 		}
 	}
@@ -306,11 +316,14 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 
 // adoptResponse 是 PATCH 命中「重复扫码 → 替换既有机器人」时的响应：
 // ConnectorView 是收敛后的既有连接器；Adopted=true 告知客户端发生了替换；
-// RemovedID 是被清理的壳连接器 id（客户端据此从本地列表移除）。
+// RemovedID 是被清理的壳连接器 id（客户端据此从本地列表移除）；
+// SupersededAccount 是被新扫码**解除**的旧平台连接（微信旧 ilink_bot_id——
+// 微信在扫码时会提示解除原连接，旧凭据已随覆写失效）。
 type adoptResponse struct {
 	ConnectorView
-	Adopted   bool   `json:"adopted"`
-	RemovedID string `json:"removed_id"`
+	Adopted           bool   `json:"adopted"`
+	RemovedID         string `json:"removed_id"`
+	SupersededAccount string `json:"superseded_account,omitempty"`
 }
 
 func (h *handlers) remove(w http.ResponseWriter, r *http.Request) {
@@ -426,6 +439,7 @@ func (h *handlers) view(cfg connectors.Config) ConnectorView {
 		CreatedAt:   formatViewTime(cfg.CreatedAt),
 		UpdatedAt:   formatViewTime(cfg.UpdatedAt),
 		BotIdentity: botIdentityFrom(cfg),
+		BotAccount:  botAccountFrom(cfg),
 	}
 	if len(cfg.Settings) > 0 {
 		view.Settings = make(map[string]string, len(cfg.Settings))
@@ -461,11 +475,14 @@ func formatViewTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// botIdentityFrom 提取扫码通道的稳定机器人标识：account_id 是扫码登录后
-// 由平台回填的 ilink_bot_id（微信），同一机器人重扫码得到相同值，因此可
-// 作为「替换 vs 新建」的判定键。非扫码通道/未回填返回空。
+// botIdentityFrom / botAccountFrom 直接读 Config 的稳定标识助手（判定键
+// 与取值统一在 connectors 包，这里只是视图映射）。
 func botIdentityFrom(cfg connectors.Config) string {
-	return strings.TrimSpace(cfg.Setting("account_id", ""))
+	return cfg.BotIdentity()
+}
+
+func botAccountFrom(cfg connectors.Config) string {
+	return cfg.BotAccount()
 }
 
 func policyViewFrom(policy connectors.Policy) PolicyView {
