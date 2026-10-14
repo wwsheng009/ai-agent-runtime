@@ -763,3 +763,42 @@ profile 未声明 = 保持只读（只收不放宽）。
 （plan_review web 可用）全部落地。剩余：`plan_enter/exit` 与
 `ask_user_question` 的 web 适配需先落跨请求挂起协议（建议经 durable actor
 承接，作为独立设计项），不在本方案范围。
+
+---
+
+## 18. TUI 观测面收官：`/tools` 会话内命令（2026-10-14 已实施）
+
+### 18.1 实现
+
+`/tools`（categoryDiagnostics 屏命令）——TUI 侧观测面与 web
+`/api/runtime/tools` 消费**同一 `toolsurface` 实现点**，T1 观测闭环收官：
+
+- 数据源优先级与 web 端点同口径：
+  1. 会话 actor 的 `StableToolSurface`（冻结面 = 真实请求前缀，含 §15 账本）；
+  2. 兜底：本地 `ToolSurface.ListTools()` 经 `toolsurface.Build`（无 actor /
+     未冻结时；Ledger 空 = 全部按无账本 core/包装层归类）；
+- 渲染：按 `surface_source` 分组 + 组内字母序 + 首行描述截断（96 rune + …）；
+- 注册：`chat_runtime_command_registry.go` categoryDiagnostics 屏命令
+  （备用屏不可用降级内联文档，与 /status、/usage 同样板）。
+
+### 18.2 验证
+
+3 用例（账本分组计数 / 无账本 core 兜底 / 长描述截断）+ `cmd/aicli/commands`
+全包回归（284s，含他人 connectors WIP 一并跑过）+ vet 干净。
+
+### 18.3 全案收官清单
+
+| 交付 | 章节 |
+| --- | --- |
+| 架构方案文档 | §1–§7 |
+| 阶段 0 裁决 / MCP 共享裁决 | §9–§10 / §16.1 |
+| 观测口径统一 + toolsurface 包 | §11 / §14 |
+| 来源账本（请求级 + 观测端点） | §12 / §15.4 |
+| 投影账本 | §13 |
+| profile 双落点护栏（T4） | §16.2 |
+| plan_review web 适配 | §17 |
+| `/tools` TUI 观测面 | 本节 |
+
+不变量 T1（单一装配实现点，双宿主观测+请求同源）、T2（同 workspace+profile
+跨宿主名单一致）、T3（工具可解释）、T4（profile 先于宿主硬边界）全部有代码
+与测试锚定。T5（turn 边界生效）沿用既有冻结语义未改动。
