@@ -224,6 +224,75 @@ func (h *handlers) putRunnerPreference(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"runner_preference": store.RunnerPreference()})
 }
 
+// dispatchJSONRequest 是 POST /connectors/dispatch 的请求体（docs/bots/09
+// §7.3 契约的 JSON 形状；字段名 snake_case 与管理面其余端点一致）。
+type dispatchJSONRequest struct {
+	ConnectorID string           `json:"connector_id"`
+	Chat        string           `json:"chat"`
+	Text        string           `json:"text"`
+	UserID      string           `json:"user_id"`
+	UserName    string           `json:"user_name"`
+	MessageID   string           `json:"message_id"`
+	Session     dispatchJSONSess `json:"session_ref"`
+	Command     bool             `json:"is_command"`
+}
+
+type dispatchJSONSess struct {
+	NodeID    string `json:"node_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// dispatch 处理 POST /connectors/dispatch（runner 侧接收面）：校验必填 →
+// Runner 执行（prompt 注入或命令回环）→ 回终态 JSON。
+// 幂等（message_id 二次校验）由 runner 侧的连接器 Service 处理（claim 在
+// poller 已写，runner 侧重放由平台层兜底）；鉴权在管理面中间件（宿主内部
+// 令牌/owner 会话）。
+func (h *handlers) dispatch(w http.ResponseWriter, r *http.Request) {
+	if !h.ready(w) {
+		return
+	}
+	if h.deps.Runner == nil {
+		writeError(w, http.StatusNotImplemented, "本宿主未启用 connector runner 能力")
+		return
+	}
+	var body dispatchJSONRequest
+	if !decodeBody(h.deps, w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.ConnectorID) == "" || strings.TrimSpace(body.Chat) == "" || strings.TrimSpace(body.Text) == "" {
+		writeError(w, http.StatusBadRequest, "connector_id / chat / text 必填")
+		return
+	}
+	result, err := h.deps.Runner.DispatchTurn(r.Context(), connectors.DispatchRequest{
+		ConnectorID: body.ConnectorID,
+		Chat:        body.Chat,
+		Text:        body.Text,
+		UserID:      body.UserID,
+		UserName:    body.UserName,
+		MessageID:   body.MessageID,
+		// Target.NodeID 由宿主 HTTP 层路由保证（请求只会打到被选中的节点），
+		// 这里不重复校验；会话亲和由 Session 携带。
+		Target:  connectors.RunnerPeer{NodeID: body.Session.NodeID},
+		Session: connectors.SessionRef{NodeID: body.Session.NodeID, SessionID: body.Session.SessionID},
+		Command: body.Command,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "派发执行失败："+err.Error())
+		return
+	}
+	resp := struct {
+		Reply   []connectors.OutboundMessage `json:"reply"`
+		Session dispatchJSONSess             `json:"session"`
+		Success bool                         `json:"success"`
+		Error   string                       `json:"error,omitempty"`
+	}{
+		Reply:   result.Reply,
+		Success: true,
+		Session: dispatchJSONSess{NodeID: result.Session.NodeID, SessionID: result.Session.SessionID},
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 	if !h.ready(w) {
 		return

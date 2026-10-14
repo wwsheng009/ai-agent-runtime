@@ -44,6 +44,11 @@ type Deps struct {
 	Logf func(format string, args ...any)
 	// MaxBodyBytes 请求体上限，<=0 用默认 1MiB。
 	MaxBodyBytes int64
+	// Runner 是本宿主作为 runner 接收跨节点派发的执行面（P2 切片 B 后半，
+	// docs/bots/09 §7.3）；nil = 本宿主不是 runner（gateway 纯 poller），
+	// POST /connectors/dispatch 返回 501。挂载在管理面鉴权链内（宿主内部
+	// 令牌/会话，与 skills 管理面同源）。
+	Runner connectors.RunnerPlane
 }
 
 func (d Deps) logf(format string, args ...any) {
@@ -75,6 +80,9 @@ func NewRouter(deps Deps) http.Handler {
 	// 全局 runner 选举偏好（D2，docs/bots/09 §7.2 R3）：字面量路径同样先于 /{id}。
 	router.HandleFunc("/connectors/runner-preference", handlers.getRunnerPreference).Methods(http.MethodGet)
 	router.HandleFunc("/connectors/runner-preference", handlers.putRunnerPreference).Methods(http.MethodPut)
+	// 跨节点 turn 派发接收面（P2 切片 B 后半，docs/bots/09 §7.3）：宿主内部
+	// 端点（管理面鉴权链内），poller 节点经 mesh peer endpoint 调用。
+	router.HandleFunc("/connectors/dispatch", handlers.dispatch).Methods(http.MethodPost)
 	router.HandleFunc("/connectors/{id}", handlers.get).Methods(http.MethodGet)
 	// PATCH 是契约首选（部分更新语义：缺省字段保持不变）；PUT 作为别名兼容。
 	router.HandleFunc("/connectors/{id}", handlers.update).Methods(http.MethodPatch, http.MethodPut)

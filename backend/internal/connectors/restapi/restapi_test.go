@@ -545,3 +545,66 @@ func TestRunnerPreferenceEndpoints(t *testing.T) {
 		t.Fatalf("store after clear = %q", got)
 	}
 }
+
+// stubRunnerPlane 是 RunnerPlane 的记录型替身（dispatch 端点测试）。
+type stubRunnerPlane struct {
+	mu   sync.Mutex
+	got  []connectors.DispatchRequest
+	resp connectors.DispatchResult
+	err  error
+}
+
+func (s *stubRunnerPlane) DispatchTurn(_ context.Context, req connectors.DispatchRequest) (connectors.DispatchResult, error) {
+	s.mu.Lock()
+	s.got = append(s.got, req)
+	resp, err := s.resp, s.err
+	s.mu.Unlock()
+	return resp, err
+}
+
+// TestDispatchEndpoint 锁定 runner 接收面（P2 切片 B 后半，09 §7.3）：
+// Runner 未装配 501；正常派发回终态 JSON；缺必填 400；执行失败 502。
+func TestDispatchEndpoint(t *testing.T) {
+	// 1) Runner 未装配（纯 poller 宿主形态）→ 501。
+	noRunner := newFixture(t, allowAll, baseConfig("c1", "fakeweb"))
+	if recorder := do(t, noRunner.router, http.MethodPost, "/connectors/dispatch",
+		`{"connector_id":"c1","chat":"chat-1","text":"hi"}`); recorder.Code != http.StatusNotImplemented {
+		t.Fatalf("no runner = %d, want 501", recorder.Code)
+	}
+
+	// 2) 正常派发。
+	runner := &stubRunnerPlane{resp: connectors.DispatchResult{
+		Reply:   []connectors.OutboundMessage{{Text: "remote done"}},
+		Session: connectors.SessionRef{NodeID: "aicli:node-1", SessionID: "sess-auto"},
+	}}
+	store := connectors.NewMemoryStore(baseConfig("c1", "fakeweb"))
+	backend := &fakeBackend{}
+	service := connectors.New(connectors.Deps{Store: store, Backend: backend, Logf: func(string, ...any) {}})
+	_ = service.Register(&fakeProvider{})
+	deps := Deps{Service: service, Store: store, Authorize: allowAll, Logf: func(string, ...any) {}, Runner: runner}
+	router := NewRouter(deps)
+
+	recorder := do(t, router, http.MethodPost, "/connectors/dispatch",
+		`{"connector_id":"c1","chat":"chat-1","text":"hi","user_id":"u1","message_id":"m1","session_ref":{"node_id":"aicli:node-1","session_id":"sess-9"}}`)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "remote done") {
+		t.Fatalf("dispatch = %d %s", recorder.Code, recorder.Body.String())
+	}
+	runner.mu.Lock()
+	if len(runner.got) != 1 || runner.got[0].Session.SessionID != "sess-9" || runner.got[0].Target.NodeID != "aicli:node-1" {
+		runner.mu.Unlock()
+		t.Fatalf("runner got = %+v", runner.got)
+	}
+	runner.mu.Unlock()
+
+	// 3) 缺必填 400。
+	if recorder := do(t, router, http.MethodPost, "/connectors/dispatch", `{"connector_id":"c1"}`); recorder.Code != http.StatusBadRequest {
+		t.Fatalf("missing fields = %d", recorder.Code)
+	}
+
+	// 4) 执行失败 502。
+	runner.err = errors.New("boom")
+	if recorder := do(t, router, http.MethodPost, "/connectors/dispatch",
+		`{"connector_id":"c1","chat":"chat-1","text":"hi"}`); recorder.Code != http.StatusBadGateway {
+		t.Fatalf("runner error = %d, want 502", recorder.Code)
+	}
+}

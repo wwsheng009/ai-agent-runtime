@@ -13,7 +13,16 @@
 // 全部本地执行——存量行为零变化。
 package connectors
 
-import "strings"
+import (
+	"context"
+	"strings"
+	"time"
+)
+
+// DispatchCallTimeout 是单次跨节点派发的默认上限（v1 终态等待；runner 侧
+// 一个 turn 可能跑数分钟——与 gateway_node invoke 的 180s 网关默认同量级，
+// 宿主可按 provider 特性覆盖）。
+const DispatchCallTimeout = 180 * time.Second
 
 // DispatchRequest 是跨节点 turn 派发体（docs/bots/09 §7.3 契约，宿主内部
 // 令牌鉴权；JSON 形状由宿主 HTTP 层编码，这里承载语义字段）。
@@ -24,9 +33,11 @@ type DispatchRequest struct {
 	UserID      string
 	UserName    string
 	MessageID   string
-	// Target 是派发目标（runner 节点）；SessionID 非空 = 绑定会话亲和（R1），
-	// 空 = runner 侧 auto-create（R3）。
+	// Target 是派发目标（runner 节点寻址）。
 	Target RunnerPeer
+	// Session 是会话亲和引用：SessionID 非空 = runner 续用该会话（R1）；
+	// 空 = runner 侧 auto-create（R3）。
+	Session SessionRef
 	// Command 标记命令回环：runner 走既有 CommandBackend 而非注入 prompt。
 	Command bool
 }
@@ -35,6 +46,17 @@ type DispatchRequest struct {
 type DispatchResult struct {
 	Reply   []OutboundMessage
 	Session SessionRef
+}
+
+// RunnerPlane 是本宿主作为 runner 接收派发的能力面（restapi
+// POST /connectors/dispatch 的执行后端）：runtime-server 用 runtimeapi
+// SubmitConnectorPrompt / CommandBackend 实现，aicli 用 localActorRegistry
+// 同构实现；gateway 是纯 poller 不实现。
+type RunnerPlane interface {
+	// DispatchTurn 执行一轮派发：Command=false 注入 prompt（session 非空续用，
+	// 空 auto-create）；Command=true 走命令回环（Text 形如 "/approve ..."）。
+	// 返回 runner 侧实际会话（调用方回写绑定）与终态回复。
+	DispatchTurn(ctx context.Context, req DispatchRequest) (DispatchResult, error)
 }
 
 // RunnerPeer 是一次选举的候选执行体（与 runner_preference.go 的

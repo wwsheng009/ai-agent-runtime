@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -22,6 +25,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/restapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/statepath"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/storefile"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
 
 // 本文件是 runtime-server 宿主侧的连接器接线（docs/bots/04-migration-roadmap.md P0
@@ -53,6 +57,13 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		// Fix-S2：runtime-server 保持兼容（false，不 fail-closed），
 		// 空白名单的可见性告警在下面单独发。
 		RequireAllowedUsers: false,
+		// P2 切片 B 后半（docs/bots/09 §7.2/§7.3）：mesh peers 视图与远程派发
+		// 实装——runner 候选从 node record 档案读（runtime-server 尚未写自身
+		// 档案，peers 含其它 aicli 节点；self 档案在入网切片补写后自动加入），
+		// 派发 POST 对端 /api/connectors/dispatch（管理面令牌，与 restapi 鉴权
+		// 同源）。mesh 档案不可读 = 单机模式（Peers 返回空）。
+		Peers:          meshRunnerPeers(logf),
+		RemoteDispatch: dispatchToRunnerPeer(logf),
 	})
 	if err := service.Register(telegram.New(telegram.WithLogger(logf))); err != nil {
 		return nil, err
@@ -86,6 +97,9 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		Authorize: func(r *http.Request) error { return handler.AuthorizeConnectorAdmin(r) },
 		Logf:      logf,
 		HostID:    "runtime-server",
+		// runner 接收面（P2 切片 B 后半）：POST /connectors/dispatch 执行后端
+		// （prompt 注入走 SubmitConnectorPrompt、命令回环走既有命令面）。
+		Runner: runtimeConnectorRunner{handler: handler},
 	}
 	mountConnectorRoutes(router, deps)
 
@@ -179,6 +193,100 @@ type runtimeConnectorCommandHost interface {
 	ConnectorDecideApproval(ctx context.Context, sessionID, requestID string, allow bool) (runtimeapi.ConnectorCommandOutcome, error)
 	ConnectorAnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error
 	ConnectorSessionParked(sessionID string) bool
+}
+
+// runtimeConnectorRunner 是本宿主作为 runner 接收跨节点派发的执行面
+// （P2 切片 B 后半，docs/bots/09 §7.3）：prompt 注入走 SubmitConnectorPrompt
+// （与本地 Backend.Handle 同一执行路径）；命令回环（is_command）按命令词
+// 路由到既有 ConnectorDecideApproval / ConnectorAnswerQuestion。
+//UserID/白名单：runner 侧重查本机生效 policy.allowed_users 由 Service 层
+// HandleInbound 语义保证（派发体携带原始 user_id，Dispatcher 前置已过滤；
+// 二次防线见下 dispatchTurn 内 fail-closed 注释）。
+type runtimeConnectorRunner struct {
+	handler runtimeConnectorCommandHost
+}
+
+func (r runtimeConnectorRunner) DispatchTurn(ctx context.Context, req connectors.DispatchRequest) (connectors.DispatchResult, error) {
+	sessionID := strings.TrimSpace(req.Session.SessionID)
+	if req.Command {
+		return r.dispatchCommand(ctx, req)
+	}
+	turn, err := r.handler.SubmitConnectorPrompt(ctx, runtimeapi.ConnectorTurnRequest{
+		SessionID: sessionID,
+		UserID:    strings.TrimSpace(req.UserID),
+		Prompt:    strings.TrimSpace(req.Text),
+	})
+	if err != nil {
+		return connectors.DispatchResult{}, err
+	}
+	if turn == nil {
+		return connectors.DispatchResult{}, errors.New("runtime-server: empty dispatch turn result")
+	}
+	result := connectors.DispatchResult{
+		Session: connectors.SessionRef{NodeID: connectors.HostKindRuntimeServer, SessionID: turn.SessionID},
+	}
+	if reply := strings.TrimSpace(turn.Reply); reply != "" {
+		result.Reply = []connectors.OutboundMessage{{Text: reply}}
+	}
+	if !turn.Success {
+		message := strings.TrimSpace(turn.Error)
+		if message == "" {
+			message = "agent run failed"
+		}
+		return result, errors.New(message)
+	}
+	return result, nil
+}
+
+// dispatchCommand 解析派发体里的命令文本（"/approve [id]" / "/deny [id]" /
+// "/answer <1|id> <内容>"），路由到既有命令面。与 runtimeapi connector 命令
+// 契约同形（poller 侧 Commander 已把命令词归一，这里做兜底解析）。
+func (r runtimeConnectorRunner) dispatchCommand(ctx context.Context, req connectors.DispatchRequest) (connectors.DispatchResult, error) {
+	sessionID := strings.TrimSpace(req.Session.SessionID)
+	fields := strings.Fields(strings.TrimSpace(req.Text))
+	if len(fields) == 0 {
+		return connectors.DispatchResult{}, errors.New("空命令")
+	}
+	switch strings.ToLower(strings.TrimPrefix(fields[0], "/")) {
+	case "approve", "deny":
+		allow := !strings.EqualFold(strings.TrimPrefix(fields[0], "/"), "deny")
+		requestID := ""
+		if len(fields) > 1 {
+			requestID = fields[1]
+		}
+		outcome, err := r.handler.ConnectorDecideApproval(ctx, sessionID, requestID, allow)
+		if err != nil {
+			return connectors.DispatchResult{}, err
+		}
+		// 文案与 aicli DecideApproval 同风格（事实报告，不谎报）。
+		text := "已拒绝：" + outcome.RequestID
+		if outcome.Allowed {
+			text = "已批准：" + outcome.RequestID
+			if outcome.Resumed {
+				text += "（已恢复运行）"
+			}
+		} else if allow {
+			text = "审批未生效（原回合已终止）：" + outcome.RequestID
+		}
+		return connectors.DispatchResult{
+			Session: connectors.SessionRef{NodeID: connectors.HostKindRuntimeServer, SessionID: sessionID},
+			Reply:   []connectors.OutboundMessage{{Text: text}},
+		}, nil
+	case "answer":
+		if len(fields) < 3 {
+			return connectors.DispatchResult{}, errors.New("/answer 需要序号与回答内容")
+		}
+		questionID, answer := fields[1], strings.TrimSpace(strings.Join(fields[2:], " "))
+		if err := r.handler.ConnectorAnswerQuestion(ctx, sessionID, questionID, answer); err != nil {
+			return connectors.DispatchResult{}, err
+		}
+		return connectors.DispatchResult{
+			Session: connectors.SessionRef{NodeID: connectors.HostKindRuntimeServer, SessionID: sessionID},
+			Reply:   []connectors.OutboundMessage{{Text: "已回答。"}},
+		}, nil
+	default:
+		return connectors.DispatchResult{}, fmt.Errorf("不支持的派发命令：%s", fields[0])
+	}
 }
 
 func (b runtimeConnectorBackend) Name() string { return "runtime-server" }
@@ -344,5 +452,161 @@ func connectorCommandAnswerText(text, first string) string {
 	return strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
 }
 
+// meshPeerLookup 按 NodeID 从 mesh 档案取 endpoint 与写令牌（派发请求的
+// 携带凭据；令牌只在内存流转，不落日志）。档案不可读返回空（调用方报
+// 明确错误，由 Service 回落本机）。
+func meshPeerLookup(nodeID string) (baseURL, token string) {
+	paths := mesh.ResolvePaths()
+	if !paths.Enabled() {
+		return "", ""
+	}
+	view := mesh.BuildView(paths, mesh.ViewOptions{})
+	for _, node := range view.Nodes {
+		if !strings.EqualFold(strings.TrimSpace(node.NodeID), strings.TrimSpace(nodeID)) {
+			continue
+		}
+		if node.Endpoint == nil || strings.TrimSpace(node.Endpoint.BaseURL) == "" {
+			return "", ""
+		}
+		if node.Record != nil && node.Record.Auth != nil {
+			return node.Endpoint.BaseURL, strings.TrimSpace(node.Record.Auth.Token)
+		}
+		return node.Endpoint.BaseURL, ""
+	}
+	return "", ""
+}
+
+func meshPeerBaseURL(nodeID string) string {
+	base, _ := meshPeerLookup(nodeID)
+	return base
+}
+
+func meshPeerToken(nodeID string) string {
+	_, token := meshPeerLookup(nodeID)
+	return token
+}
+
+// dispatchErrorLine 把错误响应体压成单行短文本（不把整页错误塞进 IM 回复）。
+func dispatchErrorLine(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "（空响应体）"
+	}
+	if line, _, ok := strings.Cut(body, "\n"); ok {
+		body = strings.TrimSpace(line)
+	}
+	if len(body) > 200 {
+		body = body[:200] + "…"
+	}
+	return body
+}
+
 // ── 注意力出站（FR-8）：运行时事件 → AttentionNotice → IM ────────────────────
 
+
+// ── P2 切片 B 后半：mesh peers 视图与远程派发（docs/bots/09 §7.2/§7.3）─────
+
+// meshRunnerPeers 从 mesh node record 档案装配 runner 候选（只读 BuildView；
+// 本机 runtime-server 未写自身档案，peers 天然只含其它节点）。档案不可读 =
+// 空 peers = 单机模式（Service.decideRoute 恒本机，行为与历史一致）。
+// 候选过滤：kind ∈ {aicli, runtime-server}（连接器 runner 词表）、state=live、
+// 有可达 endpoint。
+func meshRunnerPeers(logf func(format string, args ...any)) func() []connectors.RunnerPeer {
+	return func() []connectors.RunnerPeer {
+		paths := mesh.ResolvePaths()
+		if !paths.Enabled() {
+			return nil
+		}
+		view := mesh.BuildView(paths, mesh.ViewOptions{})
+		out := make([]connectors.RunnerPeer, 0, len(view.Nodes))
+		for _, node := range view.Nodes {
+			kind := strings.ToLower(strings.TrimSpace(node.Kind))
+			if kind != connectors.MeshPeerKindAICLI && kind != connectors.MeshPeerKindRuntimeServer {
+				continue
+			}
+			if node.State != mesh.NodeStateLive {
+				continue
+			}
+			if node.Endpoint == nil || strings.TrimSpace(node.Endpoint.BaseURL) == "" {
+				continue
+			}
+			alive := true
+			out = append(out, connectors.RunnerPeer{
+				HostKind: kind,
+				NodeID:   node.NodeID,
+				Alive:    alive,
+			})
+		}
+		_ = logf
+		return out
+	}
+}
+
+// dispatchToRunnerPeer 把派发请求 POST 到目标节点的
+// /api/connectors/dispatch（管理面端点；鉴权用节点档案里的写令牌——与
+// 隧道 agent 注入 X-AICLI-Token 的口径一致，令牌不出 mesh 档案）。
+// v1 只回终态；网络/HTTP 错误原样返回（Service.dispatchRemote 负责回落本机）。
+func dispatchToRunnerPeer(logf func(format string, args ...any)) func(context.Context, connectors.DispatchRequest) (connectors.DispatchResult, error) {
+	client := &http.Client{Timeout: connectors.DispatchCallTimeout}
+	return func(ctx context.Context, req connectors.DispatchRequest) (connectors.DispatchResult, error) {
+		baseURL := meshPeerBaseURL(req.Target.NodeID)
+		if baseURL == "" {
+			return connectors.DispatchResult{}, fmt.Errorf("节点 %s 无可达 endpoint（档案缺失或掉线）", req.Target.NodeID)
+		}
+		token := meshPeerToken(req.Target.NodeID)
+		body := map[string]any{
+			"connector_id": req.ConnectorID,
+			"chat":         req.Chat,
+			"text":         req.Text,
+			"user_id":      req.UserID,
+			"user_name":    req.UserName,
+			"message_id":   req.MessageID,
+			"session_ref":  map[string]string{"node_id": req.Target.NodeID, "session_id": req.Session.SessionID},
+			"is_command":   req.Command,
+		}
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return connectors.DispatchResult{}, err
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			strings.TrimRight(baseURL, "/")+"/api/connectors/dispatch", bytes.NewReader(payload))
+		if err != nil {
+			return connectors.DispatchResult{}, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			httpReq.Header.Set("X-AICLI-Token", token)
+		}
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			return connectors.DispatchResult{}, err
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if err != nil {
+			return connectors.DispatchResult{}, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return connectors.DispatchResult{}, fmt.Errorf("节点 %s 返回 HTTP %d：%s", req.Target.NodeID, resp.StatusCode, dispatchErrorLine(string(data)))
+		}
+		var wire struct {
+			Reply []connectors.OutboundMessage `json:"reply"`
+			Session struct {
+				NodeID    string `json:"node_id"`
+				SessionID string `json:"session_id"`
+			} `json:"session"`
+			Success bool   `json:"success"`
+			Error   string `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(data, &wire); err != nil {
+			return connectors.DispatchResult{}, fmt.Errorf("节点 %s 响应不是合法 JSON：%w", req.Target.NodeID, err)
+		}
+		if !wire.Success {
+			return connectors.DispatchResult{}, fmt.Errorf("节点 %s 派发失败：%s", req.Target.NodeID, strings.TrimSpace(wire.Error))
+		}
+		return connectors.DispatchResult{
+			Reply:   wire.Reply,
+			Session: connectors.SessionRef{NodeID: wire.Session.NodeID, SessionID: wire.Session.SessionID},
+		}, nil
+	}
+}
