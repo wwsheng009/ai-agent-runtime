@@ -466,6 +466,15 @@ func runServe(args []string) int {
 	}()
 	app.configureServiceControl(pidFile, addr, opts.ConfigPath, cwd)
 
+	// mesh 入网（P2 #8 后半，docs/bots/09 §7.5）：listener 就绪后写节点档案
+	//（kind=runtime-server + runner/poller 能力位，其它节点的派发/扇出视角
+	//自此可见本节点）；降级纪律与 aicli 一致——mesh 不可用只 warn，不影响
+	//主功能。defer 停机移档（尽力）。
+	meshHost := startRuntimeServerMeshHost("http://"+addr, func(format string, args ...any) {
+		logger.Warn("mesh: " + fmt.Sprintf(format, args...))
+	})
+	defer stopRuntimeServerMeshHost(meshHost)
+
 	server := &http.Server{
 		Handler:           app.router,
 		ReadHeaderTimeout: 10 * time.Second,
