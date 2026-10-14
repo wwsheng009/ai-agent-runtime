@@ -1087,6 +1087,17 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "question_id is required"))
 			return
 		}
+		// §21 交互通道：inline web 的挂起问题优先（waiter 注册表命中即唤醒
+		// ask_user_question 的等待者）；未命中回退 durable actor 路径。
+		if h.AnswerInlineQuestion(questionID, req.Answer) {
+			h.writeJSON(w, http.StatusOK, map[string]interface{}{
+				"session_id":  sessionID,
+				"question_id": questionID,
+				"answered":    true,
+				"channel":     "inline_web",
+			})
+			return
+		}
 		if err := actor.AnswerQuestion(r.Context(), questionID, req.Answer); err != nil {
 			h.writeError(w, http.StatusInternalServerError, err)
 			return

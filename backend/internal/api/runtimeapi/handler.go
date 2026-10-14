@@ -174,15 +174,19 @@ type Handler struct {
 	runtimeEventPersistMu     sync.Mutex
 	runtimeEventPersistBuffer *chat.EventPersistBuffer
 	// P4-刷新续传：会话在途回合注册表（懒初始化，见 session_active_turn.go）。
-	activeTurnsOnce       sync.Once
-	activeTurns           *activeTurnRegistry
-	observeMu             sync.RWMutex
-	observeService        *runtimeobserve.Service
-	scopeResolverMu       sync.RWMutex
-	scopeResolverConfig   ScopeResolverConfig
-	runtimeConfig         *runtimecfg.RuntimeConfig
-	runtimeConfigFile     string
-	runtimeConfigResolver func(UsageScope) *runtimecfg.RuntimeConfig
+	activeTurnsOnce sync.Once
+	activeTurns     *activeTurnRegistry
+	// §21 交互通道：web inline 的 ask_user_question 应答注册表（懒初始化，
+	// 见 interactive_controllers.go）。
+	inlineQuestionWaitersMu sync.Mutex
+	inlineQuestionWaiters   *inlineQuestionWaiters
+	observeMu               sync.RWMutex
+	observeService          *runtimeobserve.Service
+	scopeResolverMu         sync.RWMutex
+	scopeResolverConfig     ScopeResolverConfig
+	runtimeConfig           *runtimecfg.RuntimeConfig
+	runtimeConfigFile       string
+	runtimeConfigResolver   func(UsageScope) *runtimecfg.RuntimeConfig
 	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
 	//（P1-4/H12）：与 CLI 宿主同口径——agents.maxThreads > 0 时本进程构建的
 	// 全部 scheduler 共用同一 limiter；≤0（含 -1 显式不限）时为 nil，只保留
@@ -5687,6 +5691,18 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 		if broker.PlanReview == nil {
 			broker.PlanReview = h.planReviewControllerForSession()
 		}
+		// §21 交互通道补齐：ask_user_question（waiter 挂起 + answer_question
+		// 唤醒）与 plan_enter/exit（durable 会话 planmode 状态 + 权限模式元
+		// 数据，下一 turn 生效）。三个控制器的会话状态全部落 durable 存储，
+		// Web 面经 /runtime 快照与 /runtime/commands 统一承接。
+		if interactive := h.interactiveControllers(); interactive != nil {
+			if broker.UserInput == nil {
+				broker.UserInput = interactive
+			}
+			if broker.PlanMode == nil {
+				broker.PlanMode = interactive
+			}
+		}
 	}
 
 	if store := h.getTeamStore(); store != nil {
@@ -5930,7 +5946,7 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 	storePath := resolveRuntimeBackgroundStorePath(h.runtimeConfigFile, bgCfg.StorePath)
 	storeDSN := strings.TrimSpace(bgCfg.StoreDSN)
 	logDir := resolveRuntimeBackgroundLogDir(h.runtimeConfigFile, bgCfg.LogDir)
-	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%d|%v|%v|%s|%s|%s|%s|%s", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule, bgCfg.RecoverPendingOnStart, bgCfg.InstanceID, bgCfg.LeaseTTL, bgCfg.HeartbeatInterval, bgCfg.QueueTimeout, bgCfg.OrphanReaperInterval)
+	key := fmt.Sprintf("%s|%s|%s|%d|%d|%d|%s|%s|%s|%d|%s|%d|%v|%v|%s|%s|%s|%s|%s", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.MaxInteractiveSessions, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule, bgCfg.RecoverPendingOnStart, bgCfg.InstanceID, bgCfg.LeaseTTL, bgCfg.HeartbeatInterval, bgCfg.QueueTimeout, bgCfg.OrphanReaperInterval)
 
 	h.backgroundMu.Lock()
 	defer h.backgroundMu.Unlock()
@@ -5950,6 +5966,7 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 		StoreDSN:                storeDSN,
 		LogDir:                  logDir,
 		MaxConcurrentJobs:       bgCfg.MaxConcurrentJobs,
+		MaxInteractiveSessions:  bgCfg.MaxInteractiveSessions,
 		InstanceID:              strings.TrimSpace(bgCfg.InstanceID),
 		LeaseTTL:                bgCfg.LeaseTTL,
 		HeartbeatInterval:       bgCfg.HeartbeatInterval,
