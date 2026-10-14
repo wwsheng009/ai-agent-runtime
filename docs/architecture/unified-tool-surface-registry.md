@@ -877,3 +877,61 @@ T1 观测闭环在真实 ConPTY 环境下达成：TUI、web 端点、LLM 请求�
   收益/成本比低，如实标注为部分端到端。
 - #9 前端吸收：逻辑为纯函数且输入形状单测锁定，真实浏览器验证在 absorb 修复
   当轮已完成（§11 同轮的浏览器实测），TurnID 对齐的新会话复验未另做。
+
+---
+
+## 21. 交互通道三工具 web 承接（2026-10-14 已实施 + 端到端验证）
+
+### 21.1 实现（`interactive_controllers.go`，+657 行）
+
+web inline 路径补齐交互通道——三个控制器的会话状态全部落 durable 存储，
+与 `SessionActor` 同名实现语义逐项对齐：
+
+- **ask_user_question**（`UserInputHandler`）：`pending_question` +
+  `PendingTool` 落 runtime state（`/runtime` 快照可见）→ `question_asked`
+  事件 → handler 级 waiter 注册表挂起 → `/runtime/commands answer_question`
+  唤醒（inline 分支优先命中 waiter，未命中回退 durable actor 路径）；
+  请求 ctx `resume_on_disconnect` 时等待与回合生命周期解耦；退出路径
+  无条件清挂起（answer/取消/异常幂等——首轮实现有唤醒后残留缺陷，
+  测试锁定后修正）。
+- **plan_enter/exit**（`PlanModeController`）：planmode 状态落 durable 会话
+  上下文 + 权限模式落会话元数据（`inlinePlanPermissionModeKey`，下一 turn 的
+  `applyAgentExecutionPolicy` 从会话状态读取生效）；`request_changes` 保持
+  active 并记轮次/笔记；模型来源的 approve/quit 须用户确认（web approval
+  卡片，`planmode.ModelMayDecideExit` 门控与 actor 一致）。
+- 接线：`applyAgentRuntimeServices` hub 分支 `broker.UserInput` /
+  `broker.PlanMode`（nil 保持即插即用）；`answer_question` 命令分发加
+  inline waiter 分支（优先命中，未命中回退 actor）。
+
+### 21.2 测试（5 组）
+
+ask 挂起可见（runtime state）→ answer 唤醒返回答案 → 挂起清除；
+ctx 取消清挂起；plan enter → request_changes（保持 active + 轮次/笔记）→
+approve（还原）往返的 durable 断言；未进入 plan 的 exit 拒绝；模型裁决
+确认门控。
+
+### 21.3 端到端 ConPTY 实测（决定性）
+
+```
+1. aicli chat --headless --runtime-server … --prompt "Use ask_user_question…"
+2. turn 挂起：/runtime → status=waiting_input,
+   pending_question.prompt="Which database would you like to use?"
+   （含 suggestions: PostgreSQL/MySQL/SQLite/MongoDB）
+3. /runtime/commands answer_question(postgres)
+   → {"answered":true,"channel":"inline_web"}
+4. turn 恢复 → aicli 输出 "You answered: **postgres** (PostgreSQL)."
+   会话回 idle。
+```
+
+完整交互闭环在真实 ConPTY aicli chat + runtime-server 环境下验证通过。
+至此三工具（ask_user_question / plan_enter|exit / plan_review）在
+runtime-server 上全部承接（请求面 + 执行 + 用户回答/裁决通道）。
+
+### 21.4 与 actor 路径的差异（如实登记）
+
+- actor 版通过 engine 直接切换运行中 agent 的权限模式；inline 路径的
+  agent 每 turn 现建，权限从会话状态读取——因此控制器只写会话状态，
+  不触碰引擎（下一 turn 生效，`effective_at=next_turn` 语义）。
+- inline 的 ask_user_question 依赖请求 ctx（非 resume 时客户端断开即清
+  挂起）；actor 版 waiter 跨请求存活。两者都由 answer_question 命令
+  唤醒，Web 前端统一走该通道。
