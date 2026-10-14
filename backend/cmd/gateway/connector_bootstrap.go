@@ -45,9 +45,9 @@ func setupGatewayConnectors(
 	server *tunnel.Server,
 	dataDir string,
 	logf func(format string, args ...any),
-) (*connectors.Service, gatewayAttentionHook, error) {
+) (*connectors.Service, gatewayAttentionHook, func(nodeID, sessionID, kind string) bool, error) {
 	if router == nil || registry == nil || server == nil || owner == nil {
-		return nil, nil, errors.New("connectors: gateway router/registry/server/owner is not ready")
+		return nil, nil, nil, errors.New("connectors: gateway router/registry/server/owner is not ready")
 	}
 	if logf == nil {
 		logf = func(format string, args ...any) {
@@ -68,16 +68,16 @@ func setupGatewayConnectors(
 		RequireAllowedUsers: false,
 	})
 	if err := service.Register(telegram.New(telegram.WithLogger(logf))); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := service.Register(qqbot.New(qqbot.WithLogger(logf))); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := service.Register(wechat.New(wechat.WithLogger(logf))); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := service.Register(feishu.New(feishu.WithLogger(logf))); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	for _, cfg := range store.ListConfigs() {
@@ -102,7 +102,7 @@ func setupGatewayConnectors(
 	if err := service.Start(ctx); err != nil {
 		// 半途启动的轮询实例随宿主一起停掉，避免调用方只记 warn 时泄漏。
 		stopGatewayConnectors(service)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// 注意力出站（FR-8，docs/bots/09 §7.4.1）：gateway 无 LLM 事件总线——
 	// 节点心跳上报的 sess.Attention 投影是接入面。返回的 hook 供 main.go 在
@@ -110,7 +110,40 @@ func setupGatewayConnectors(
 	// 把 attention 变化映射为 AttentionNotice，按 policy.notify（D5）过滤后
 	// 出站到绑定 IM。交互闭环由 /approve /answer 命令经隧道回到 owner 节点。
 	hook := newGatewayAttentionHook(ctx, store, service, logf)
-	return service, hook, nil
+	return service, hook, newIMMainChannelPredicate(store), nil
+}
+
+// newIMMainChannelPredicate 报告「normal 类通知的主通道是否为 IM」（06 §1 D6：
+// 已绑定 IM 则 IM，否则 Web Push）。判定口径与投影 hook 的投递逐字同源：
+// AttentionNoticeForProjection（waiting/未知 kind 不投）+ 逐连接器
+// AcceptsNotice（含 completion 随 notify 开关语义）。store 为 nil 时返回 nil
+// （调用方一律走 push 通道）。
+func newIMMainChannelPredicate(store connectors.Store) func(nodeID, sessionID, kind string) bool {
+	if store == nil {
+		return nil
+	}
+	return func(_, sessionID, kind string) bool {
+		notice, _, ok := connectors.AttentionNoticeForProjection(strings.TrimSpace(sessionID), strings.TrimSpace(kind))
+		if !ok {
+			return false
+		}
+		for _, cfg := range store.ListConfigs() {
+			if !cfg.Enabled {
+				continue
+			}
+			if cfg.Policy.AcceptsNotice(notice, func(session connectors.SessionRef) bool {
+				for _, binding := range store.ListBindings(cfg.ID) {
+					if binding.Session == session {
+						return true
+					}
+				}
+				return false
+			}) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // gatewayAttentionHook 是 OnSessionTransition 的连接器侧处理器：把节点上报的

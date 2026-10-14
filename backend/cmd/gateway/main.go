@@ -355,6 +355,9 @@ func run() int {
 	// tunnel OnSessionTransition 闭包先于 connectors setup 构造，靠闭包捕获变量
 	// 实现构造期后接线；装配失败时保持 nil，transition 回调 nil 检查兜底）。
 	var connectorAttentionHook gatewayAttentionHook
+	// connectorIMMainChannel 同上，connectors 装配后赋值：normal 类通知的
+	// IM 主通道判定（06 §1 D6），nil 时 push 侧一律自行投递。
+	var connectorIMMainChannel func(nodeID, sessionID, kind string) bool
 	if ntfySender.Enabled() {
 		fmt.Fprintf(os.Stderr, "gateway: ntfy channel enabled: %s topic=%s\n", strings.TrimRight(*ntfyURL, "/"), ntfySender.Topic())
 	}
@@ -726,9 +729,12 @@ func run() int {
 	// the tunnel/console down.
 	connectorCtx, cancelConnectors := context.WithCancel(context.Background())
 	defer cancelConnectors()
-	connectorService, connectorAttentionHook, connectorErr := setupGatewayConnectors(connectorCtx, router, owner, registry, server, *dataDir, nil)
+	connectorService, connectorAttentionHook, connectorIMMainChannel, connectorErr := setupGatewayConnectors(connectorCtx, router, owner, registry, server, *dataDir, nil)
 	if connectorErr != nil {
 		fmt.Fprintf(os.Stderr, "gateway: WARNING: connectors disabled: %v\n", connectorErr)
+	} else {
+		// D6 主通道接线：pushNotifier 的 normal 类通知据此让位给 IM（已绑定场景）。
+		notifier.imMainChannel = connectorIMMainChannel
 	}
 	// Lightweight embedded console (registered last so specific routes win).
 	router.PathPrefix("/").Handler(consoleHandler())

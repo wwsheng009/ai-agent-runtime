@@ -33,6 +33,10 @@ type pushNotifier struct {
 	baseURL string
 	// presence suppresses pushes for sessions a console client is watching.
 	presence *presenceRegistry
+	// imMainChannel 判定 normal 类通知是否以 IM 为主通道（06 §1 D6：已绑定 IM
+	// 则 IM，否则 Web Push；nil = 一律走 push 侧）。由 connectors 装配供给
+	// （newIMMainChannelPredicate），与该宿主的投影 hook 投递口径逐字同源。
+	imMainChannel func(nodeID, sessionID, kind string) bool
 
 	// coalesceWindow merges low-priority notifications arriving close together
 	// (0 disables coalescing). quietHours mutes low-priority notifications.
@@ -40,7 +44,7 @@ type pushNotifier struct {
 	quietHours     []quietRange
 	now            func() time.Time
 
-	batch map[string][]push.Notification
+	batch map[string][]pendingNotification
 	timer *time.Timer
 }
 
@@ -79,9 +83,13 @@ func (p *pushNotifier) Seed(nodes []*tunnel.Node) {
 }
 
 // pendingNotification pairs a notification with the attention kind that
-// produced it so coalescing can group by kind.
+// produced it so coalescing can group by kind. nodeID/sessionID 供 D6 主通道
+// 判定；imMain 表示该事件以 IM 为主通道（normal 类时 push 侧静默）。
 type pendingNotification struct {
 	attention string
+	nodeID    string
+	sessionID string
+	imMain    bool
 	note      push.Notification
 }
 
@@ -118,10 +126,14 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 				URL:   p.sessionURL(node.NodeID, sess.SessionID),
 			}
 			applyDeliveryPolicy(&note, attention)
+			item := pendingNotification{attention: attention, nodeID: node.NodeID, sessionID: sess.SessionID, note: note}
+			if p.imMainChannel != nil && p.imMainChannel(node.NodeID, sess.SessionID, attention) {
+				item.imMain = true
+			}
 			if isHighPriorityAttention(attention) {
-				immediate = append(immediate, pendingNotification{attention: attention, note: note})
+				immediate = append(immediate, item)
 			} else {
-				batched = append(batched, pendingNotification{attention: attention, note: note})
+				batched = append(batched, item)
 			}
 		}
 	}
@@ -129,9 +141,9 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 	if p.coalesceWindow > 0 {
 		for _, item := range batched {
 			if p.batch == nil {
-				p.batch = make(map[string][]push.Notification)
+				p.batch = make(map[string][]pendingNotification)
 			}
-			p.batch[item.attention] = append(p.batch[item.attention], item.note)
+			p.batch[item.attention] = append(p.batch[item.attention], item)
 		}
 		if len(batched) > 0 && p.timer == nil {
 			p.timer = time.AfterFunc(p.coalesceWindow, p.flush)
@@ -162,11 +174,19 @@ func (p *pushNotifier) flush() {
 	}
 	out := make([]pendingNotification, 0, len(batch))
 	for attention, items := range batch {
-		note := coalesceNotifications(attention, items)
+		notes := make([]push.Notification, 0, len(items))
+		allIM := len(items) > 0
+		for _, it := range items {
+			notes = append(notes, it.note)
+			if !it.imMain {
+				allIM = false
+			}
+		}
+		note := coalesceNotifications(attention, notes)
 		if len(items) > 1 && p.baseURL != "" {
 			note.URL = p.baseURL + "/"
 		}
-		out = append(out, pendingNotification{attention: attention, note: note})
+		out = append(out, pendingNotification{attention: attention, imMain: allIM, note: note})
 	}
 	p.dispatch(out)
 }
@@ -211,6 +231,11 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		for _, item := range items {
+			// D6 主通道：normal 类已路由 IM 时 push 侧静默；high 类仍扇出。
+			if item.imMain && notify.PriorityOf(item.attention) == notify.PriorityNormal {
+				log.Printf("push: %s routed to IM main channel, push suppressed (%s)", item.attention, item.note.Tag)
+				continue
+			}
 			if _, err := dispatcher.Dispatch(ctx, notify.EventFor(item.attention, item.note.Tag, item.note)); err != nil {
 				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)
 			}

@@ -36,7 +36,7 @@
 | 交付物 | 状态 | 位置 |
 |--------|------|------|
 | 事件异步订阅原语 | ✅ 完成 | `backend/internal/events/async.go`（`SubscribeAsync` + 队列/丢弃策略/panic 隔离/计数）+ `async_test.go`（9 例） |
-| notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；**2026-10-14：Dispatcher/DeliveryLedger 内核切片落地**（`internal/notify/{kinds,ledger,dispatcher}.go`：跨通道 DedupKey 原子认领 + 优先级路由——high 扇出/normal 主通道/low 收件箱；测试 9 例）；**切片二（2026-10-14）**：通道适配落地（`internal/notify/channels/{webpush,ntfy,im}.go`）+ gateway push 路径切流（D6 路由：high 扇出/normal 主通道；新增 TestPushNotifierRoutingD6）；**生产部署（2026-10-14）**：公网 gateway 上线新构建并抽验（normal 停发 ntfy / high priority=5 / push-test 双通道 OK）；跨路径统一账本与偏好/在场待续 |
+| notify 策略内核 | ◐ 部分 | `backend/internal/notify/policy.go`（优先级/免打扰/合并）+ 薄适配 `cmd/gateway/notify_policy.go`；**2026-10-14：Dispatcher/DeliveryLedger 内核切片落地**（`internal/notify/{kinds,ledger,dispatcher}.go`：跨通道 DedupKey 原子认领 + 优先级路由——high 扇出/normal 主通道/low 收件箱；测试 9 例）；**切片二（2026-10-14）**：通道适配落地（`internal/notify/channels/{webpush,ntfy,im}.go`）+ gateway push 路径切流（D6 路由：high 扇出/normal 主通道；新增 TestPushNotifierRoutingD6）；**生产部署（2026-10-14）**：公网 gateway 上线新构建并抽验（normal 停发 ntfy / high priority=5 / push-test 双通道 OK）；**切片三（2026-10-14）**：normal 主通道选择落地（已绑定 IM 则 IM、否则 Web Push；gateway 静态判定与 hook 同口径 + 测试）；偏好三级/在场/账本持久化待续 |
 | 契约包骨架 | ✅ 完成 | `backend/internal/connectors/api/schema.go`（Schema 契约 + 校验/脱敏/合并提交）+ `internal/connectors/restapi`（管理面 CRUD/schema/test/reload + webhook 入口，12 例）；三宿主契约矩阵随各宿主接线补齐 |
 | 通知语义对照表 | ◐ 部分 | `internal/notify` 的 `PriorityOf` 即落点（approval/question/error→high，completed/waiting→normal）；与 supervision/IM 文案的映射在 P1 随通道落地补齐 |
 
@@ -158,9 +158,11 @@
   rich media 出站（`/v2/{groups|users}/{id}/files` 上传取 `file_info` → `msg_type=7`；
   URL 下载/本地绝对路径两类来源，file_type 按 Kind/Content-Type 推导）。
   ③入站补齐：`message_reference` 引用摘要拼接 `Quoted:` 前缀；`share_session_in_channel`
-  群会话策略（缺省 true=群共享，false=群内按成员隔离 `group:<gid>:user:<member>`）。
+  群会话策略（缺省 true=群共享，false=群内按成员隔离 `group:<gid>:user:<member>`）；
+  ④`intents` 覆盖（高级，对齐上游 `qqbot_intents`：缺省/非法值回落 `1<<25`，
+  Identify 与心跳按配置生效）。
   测试新增 12 例（授权校验成功/失败/脱敏、markdown、分片、降级、媒体上传+发送、
-  本地文件、引用解析、隔离键解析与发送），`go test -race` 全绿。
+  本地文件、引用解析、隔离键解析与发送、intents 覆盖与回落），`go test -race` 全绿。
   **说明**：QQ 官方开放平台**没有扫码登录协议**（凭据来自 bot.q.qq.com 后台），
   因此「扫码」以等价便捷流落地：保存凭据后一键授权校验 + Activate 自动校验；
   不引入第三方个人号协议（D7：官方优先）。
