@@ -108,6 +108,23 @@ type presenceEntry struct {
   （`0601323e…69343f`，旧件 `aicli.exe.bak-20261015-081108`）。
 - **验收（S1–S3 后，真机）**：TUI 前台看 A 会话时其 attention 不推送手机；切走补推
   一次；console 行为不回归；旧 agent/旧 gateway 双向兼容。
+  ✅ **2026-10-15 真机通过**（受控 TUI × 生产网关，token 用后即吊销）：
+  1. **上报**：TUI 一注册即在 `/api/nodes` 呈现 `viewing=true`（两轮独立复现；
+     同批 8 个非 TUI 节点均为 `false`/缺省）；
+  2. **不误报**：脚本化（`--script`）会话 `viewing` 缺省——按 S2 门禁（TUI 且
+     `ScriptedInput==nil`）刻意不报；
+  3. **抑制（负例）**：`viewing=true` 时把该会话打到 `attention=error`（高优先、
+     全通道扇出）→ ntfy **零消息**、网关日志**零 push** 行；
+  4. **补推**：宿主进程退出、host 源 TTL(90s) 失效后，同一 attention 补投**一次**
+     （ntfy `priority=5` + `warning`，click 指向该会话）——证明被抑制的通知确实
+     未被记入 `seen`；
+  5. **不绕门**：NOTIFY 帧经 `applyNotifyToSessions` 只改 attention，仍走
+     `observe` 的在场检查（`presence_emit_test.go` + 负例实机同证）。
+  **运维提示**：① normal 类（含 `completed`）按 D6 走 WebPush 主通道，ntfy 静默
+  ——观测抑制/补推须用高优先 attention（approval/question/error）；② 直连
+  `ws://192.210.174.189:8080` 在办公网不可达，宿主须配
+  `wss://aicli.ttai.online/gw/agent`（runtime-server 配置里仍是直连 IP，其隧道
+  因此长期 `error`——与本切片无关的既有配置问题）。
 
 ## 6. 风险与回退
 
