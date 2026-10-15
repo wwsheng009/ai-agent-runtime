@@ -423,15 +423,15 @@ describe("ConnectorDialog", () => {
       findButton("添加订阅")?.click();
     });
 
-    // 类型改为「按投递形态分组多选」：assistant_message 唯一形态 content（自动推导），
-    // 叠加 turn.* 后跨形态冲突可见（告警 + 一键拆分）。
+    // 类型面板按当前投递形态（默认 notice）过滤：先切换形态，再勾选 content 专属类型。
+    expect(findInput("assistant_message")).toBeNull();
+    setSelectValue(findSelect("投递形态") as HTMLSelectElement, "content");
+    expect(findInput("assistant_message")).not.toBeNull();
     toggleTypeCheckbox("assistant_message");
-    toggleTypeCheckbox("turn.*");
 
     expect((findInput("启用事件订阅（policy.events）") as HTMLInputElement).checked).toBe(true);
-    expect((findSelect("投递形态") as HTMLSelectElement).value).toBe("content");
-    expect(document.body.textContent).toContain("turn.* 需要 deliver=notice/digest");
-    expect(findButton("一键拆分为多条订阅")).not.toBeNull();
+    // 唯一形态：下拉锁定到推导结果（由所选类型推导）。
+    expect((findSelect("投递形态") as HTMLSelectElement).disabled).toBe(true);
 
     act(() => {
       findButton("保存")?.click();
@@ -444,7 +444,7 @@ describe("ConnectorDialog", () => {
         {
           id: "",
           sessions: { mode: "bound" },
-          types: ["assistant_message", "turn.*"],
+          types: ["assistant_message"],
           deliver: "content",
         },
       ],

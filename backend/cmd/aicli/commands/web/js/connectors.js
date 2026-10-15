@@ -921,16 +921,54 @@ function schemaFieldHTML(field, settings, secretKeys, item) {
 // ---- 事件订阅编辑(docs/bots/13 §6.1;与 React 对话框同口径) ----
 
 // renderEventSubRows 用既有订阅回填行列表(renderEditor 于 setModalBody 后调用)。
-function renderEventSubRows(subs) {
+// openFlags 可选:按行保留「类型面板展开态」(形态过滤触发重渲染时不收起用户面板)。
+function renderEventSubRows(subs, openFlags) {
   var host = connEl("connector-event-subs");
   if (!host) { return; }
   var html = "";
-  for (var i = 0; i < subs.length; i++) { html += eventSubRowHTML(subs[i]); }
+  for (var i = 0; i < subs.length; i++) {
+    html += eventSubRowHTML(subs[i], !!(openFlags && openFlags[i]));
+  }
   host.innerHTML = html;
   var rows = host.querySelectorAll("[data-event-sub]");
   for (var r = 0; r < rows.length; r++) {
     syncEventSubRowMode(rows[r]);
     refreshEventSubRow(rows[r]);
+  }
+}
+
+// isTypesPickerOpen 读取行内类型面板展开态(非完整 DOM 环境安全降级 false)。
+function isTypesPickerOpen(row) {
+  var picker = row ? row.querySelector(".connector-types-picker") : null;
+  return !!(picker && picker.open);
+}
+
+// rerenderEventSubRows 收集当前行为模型后整表重建:形态过滤变化(切换投递形态、
+// 自定义输入导致形态收敛)时使用;展开态按行保留。
+function rerenderEventSubRows() {
+  var host = connEl("connector-event-subs");
+  if (!host) { return; }
+  var rows = host.querySelectorAll("[data-event-sub]");
+  var models = [];
+  var openFlags = [];
+  for (var i = 0; i < rows.length; i++) {
+    models.push(collectEventSubRow(rows[i]));
+    openFlags.push(isTypesPickerOpen(rows[i]));
+  }
+  renderEventSubRows(models, openFlags);
+}
+
+// refreshRowAndFilter 统一刷新行;若面板渲染时的过滤形态与收敛后的形态不一致,
+// 整表重建让类型面板按新形态过滤(否则会出现「下拉已是 content、面板仍是 notice」)。
+function refreshRowAndFilter(row) {
+  if (!row) { return; }
+  var renderedFilter = row._deliverFilter || "";
+  var renderedKeep = row._keepVisible || "";
+  refreshEventSubRow(row);
+  var want = subFieldValue(row, "deliver") || "notice";
+  var keep = keepVisibleKey(eventSubRowTypes(row), want);
+  if ((renderedFilter && renderedFilter !== want) || renderedKeep !== keep) {
+    rerenderEventSubRows();
   }
 }
 
@@ -1017,7 +1055,7 @@ var DELIVER_LABELS = {
 // eventSubRowHTML 渲染一条订阅行:字段以 data-sub-field 标记,collectEventSubs 按行收集。
 // 布局(2026-10-15 UI 收口):id/会话模式/投递形态 同排,会话列表+启用 次排;
 // 事件类型用 chips 多选(替代文本输入框),勾选类控件行内显示(不单独占行)。
-function eventSubRowHTML(sub) {
+function eventSubRowHTML(sub, openPicker) {
   sub = sub || {};
   var sessions = sub.sessions || {};
   var mode = sessions.mode || "bound";
@@ -1042,10 +1080,10 @@ function eventSubRowHTML(sub) {
     "</div>" +
     '<div class="connector-field connector-event-types">' +
     '<span class="connector-field-label">事件类型 *</span>' +
-    eventTypeCheckboxesHTML(sub.types || []) +
+    eventTypeCheckboxesHTML(sub.types || [], resolvedSubDeliver(sub), openPicker) +
     '<input type="text" data-sub-field="types-extra" autocomplete="off" placeholder="自定义/别名(逗号分隔,可留空)" value="">' +
     '<span class="connector-types-warning" data-types-warning hidden></span>' +
-    '<span class="connector-field-help">按投递形态分组勾选;形态由所选类型自动推导(无需手配)。</span>' +
+    '<span class="connector-field-help">面板按当前投递形态过滤(其余类型切换「投递形态」后可选);形态由所选类型自动推导,无需手配。</span>' +
     "</div>" +
     '<button type="button" class="connector-event-sub-split" data-editor="split-event-sub" hidden>一键拆分为多条订阅</button>' +
     '<button type="button" data-editor="remove-event-sub">删除此订阅</button>' +
@@ -1075,9 +1113,36 @@ function eventTypeSections() {
   return sections;
 }
 
+// visibleEventTypeSections 按「当前投递形态」过滤面板分组(2026-10-15 UI 反馈:
+// 类型列表要按形态提前过滤,而不是全量列出再靠告警兜底):
+//   * 允许形态包含当前 deliver 的组 → 可选;
+//   * 含已勾选类型的组 → 保留(既有/跨形态存量值不被隐藏,可就地取消);
+//   * 未接线组(forms 为空)仅在其含勾选项时显示。
+function visibleEventTypeSections(deliver, selected) {
+  var chosen = {};
+  var list = selected || [];
+  for (var i = 0; i < list.length; i++) {
+    var name = String(list[i]).trim();
+    if (name) { chosen[name] = true; }
+  }
+  var all = eventTypeSections();
+  var out = [];
+  for (var s = 0; s < all.length; s++) {
+    var section = all[s];
+    var compatible = section.form !== "" && section.form.split("/").indexOf(deliver) >= 0;
+    var hasChosen = false;
+    for (var t = 0; t < section.types.length; t++) {
+      if (chosen[section.types[t]]) { hasChosen = true; break; }
+    }
+    if (compatible || hasChosen) { out.push(section); }
+  }
+  return out;
+}
+
 // eventTypeCheckboxesHTML 渲染事件类型多选:折叠面板(<details>)+ 原生 checkbox,
-// 汇总行显示已选数量与名称;选项按投递形态分组(types↔deliver 关联可见)。
-function eventTypeCheckboxesHTML(selected) {
+// 汇总行显示已选数量与名称;选项按投递形态分组并**按当前形态过滤**(2026-10-15:
+// 类型列表按投递形态提前过滤,而不是全量列出再靠告警兜底)。
+function eventTypeCheckboxesHTML(selected, deliver, openPicker) {
   var chosen = [];
   var seen = {};
   var list = selected || [];
@@ -1085,10 +1150,12 @@ function eventTypeCheckboxesHTML(selected) {
     var item = String(list[i]).trim();
     if (item && !seen[item]) { seen[item] = true; chosen.push(item); }
   }
+  var current = deliver || "notice";
   var unknown = [];
-  var html = '<details class="connector-types-picker"><summary><span data-types-summary>' +
+  var html = '<details class="connector-types-picker"' + (openPicker ? " open" : "") +
+    ' data-deliver-filter="' + esc(current) + '"><summary><span data-types-summary>' +
     esc(eventTypesSummaryText(chosen)) + "</span></summary><div class=\"connector-types-panel\">";
-  var sections = eventTypeSections();
+  var sections = visibleEventTypeSections(current, chosen);
   for (var g = 0; g < sections.length; g++) {
     var section = sections[g];
     html += '<div class="connector-types-group-title">' + esc(section.label) + "</div>";
@@ -1153,26 +1220,20 @@ function deliverOptionsHTML(list, current) {
   return html;
 }
 
-// scanEventSubTypes 扫描所选类型(勾选 + 自定义输入),推导:
+// scanTypesModel 纯模型版扫描(types 数组 × 投递形态),推导:
 //   allowed  —— 允许的投递形态并集(空 = 无可判定类型);
 //   conflicts—— 与当前 deliver 不兼容的类型提示(需切形态或拆分);
 //   unwired  —— 未接出站映射的类型(勾选也不会投递)。
 // 「细项 → 粗项」由本函数落地:唯一形态锁定、多形态收敛、跨形态提示拆分。
-function scanEventSubTypes(row, deliver) {
+function scanTypesModel(types, deliver) {
   var allowedSet = {};
   var allowed = [];
   var conflicts = [];
   var unwired = [];
   var seen = {};
-  var types = [];
-  var boxes = row ? row.querySelectorAll("[data-sub-type]") : [];
-  for (var i = 0; i < boxes.length; i++) {
-    if (boxes[i].checked) { types.push(boxes[i].getAttribute("data-sub-type")); }
-  }
-  var extra = splitSubList(subFieldValue(row, "types-extra"));
-  for (var e = 0; e < extra.length; e++) { types.push(extra[e]); }
-  for (var t = 0; t < types.length; t++) {
-    var type = types[t];
+  var list = types || [];
+  for (var t = 0; t < list.length; t++) {
+    var type = String(list[t]).trim();
     if (!type || seen[type]) { continue; }
     seen[type] = true;
     var forms = EVENT_TYPE_FORMS[type];
@@ -1184,6 +1245,49 @@ function scanEventSubTypes(row, deliver) {
     if (forms.indexOf(deliver) < 0) { conflicts.push(type + " 需要 deliver=" + forms.join("/")); }
   }
   return { allowed: allowed, conflicts: conflicts, unwired: unwired };
+}
+
+// eventSubRowTypes 读行内所选类型(勾选 + 自定义输入,DOM 顺序)。
+function eventSubRowTypes(row) {
+  var types = [];
+  var boxes = row ? row.querySelectorAll("[data-sub-type]") : [];
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].checked) { types.push(boxes[i].getAttribute("data-sub-type")); }
+  }
+  var extra = splitSubList(subFieldValue(row, "types-extra"));
+  for (var e = 0; e < extra.length; e++) { types.push(extra[e]); }
+  return types;
+}
+
+// scanEventSubTypes 扫描行内所选类型(勾选 + 自定义输入)。
+function scanEventSubTypes(row, deliver) {
+  return scanTypesModel(eventSubRowTypes(row), deliver);
+}
+
+// keepVisibleKey 面板因「保留已勾选」而额外可见的类型集合(与当前形态不符/未接线):
+// 供 refreshRowAndFilter 判断可见集合是否变化(取消最后一个跨形态勾选需整表重建)。
+function keepVisibleKey(types, deliver) {
+  var out = [];
+  var seen = {};
+  var list = types || [];
+  for (var i = 0; i < list.length; i++) {
+    var name = String(list[i]).trim();
+    if (!name || seen[name]) { continue; }
+    seen[name] = true;
+    var forms = EVENT_TYPE_FORMS[name];
+    if (!forms) { continue; } // 词表外:归「自定义(既有)」组,始终显示,不参与。
+    if (forms.length === 0 || forms.indexOf(deliver) < 0) { out.push(name); }
+  }
+  return out.join(",");
+}
+
+// resolvedSubDeliver 与 refreshDeliverSelect 同一收敛规则的模型版:回填时面板按
+// 收敛后的形态过滤,保证与「投递形态」下拉的显示值一致。
+function resolvedSubDeliver(sub) {
+  var current = (sub && sub.deliver) || "notice";
+  var allowed = scanTypesModel((sub && sub.types) || [], current).allowed;
+  if (!allowed.length) { return current; }
+  return allowed.indexOf(current) >= 0 ? current : allowed[0];
 }
 
 // eventSubRowIssues 汇集「类型 × 投递形态」相容性问题(仅提示,不阻断保存)。
@@ -1292,12 +1396,17 @@ function updateTypesWarning(row) {
   warning.hidden = false;
 }
 
-// refreshEventSubRow 统一刷新:推导形态 → 汇总行 → 告警 → 拆分按钮。
+// refreshEventSubRow 统一刷新:推导形态 → 汇总行 → 告警 → 拆分按钮;并记录面板
+// 当前渲染的过滤形态(_deliverFilter),供 refreshRowAndFilter 判断是否整表重建。
 function refreshEventSubRow(row) {
+  if (!row) { return; }
   refreshDeliverSelect(row);
   updateTypesSummary(row);
   updateTypesWarning(row);
   updateSplitButton(row);
+  var deliverNow = subFieldValue(row, "deliver") || "notice";
+  row._deliverFilter = deliverNow;
+  row._keepVisible = keepVisibleKey(eventSubRowTypes(row), deliverNow);
 }
 
 // syncEventSubRowMode 按会话模式启用/禁用「会话列表」输入(非 ids 模式置灰提示)。
@@ -1798,12 +1907,12 @@ function onModalBodyChange(event) {
     // 勾选任一项即视为「要收事件」:总开关未开时自动打开(避免保存成 enabled:false 的无效订阅)。
     var master = connEl("connector-form-events-enabled");
     if (master && !master.checked && target.checked) { master.checked = true; }
-    refreshEventSubRow(row);
+    refreshRowAndFilter(row);
     return;
   }
-  // 投递形态变更:类型相容性告警需要即时刷新(assistant_message 配 notice 等)。
+  // 投递形态变更:类型面板按新形态过滤 + 相容性告警即时刷新(assistant_message 配 notice 等)。
   if (target && target.getAttribute && target.getAttribute("data-sub-field") === "deliver") {
-    refreshEventSubRow(target.closest("[data-event-sub]"));
+    refreshRowAndFilter(target.closest("[data-event-sub]"));
   }
 }
 
@@ -1811,7 +1920,7 @@ function onModalBodyChange(event) {
 function onModalBodyInput(event) {
   var target = event.target;
   if (target && target.getAttribute && target.getAttribute("data-sub-field") === "types-extra") {
-    refreshEventSubRow(target.closest("[data-event-sub]"));
+    refreshRowAndFilter(target.closest("[data-event-sub]"));
   }
 }
 

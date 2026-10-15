@@ -192,7 +192,8 @@ export const enConnectors = {
     eventsConflictNeeds: "{{type}} requires deliver={{forms}}",
     eventsUnwired: "{{type}} has no outbound mapping yet (won't be delivered)",
     eventsSplit: "Split into multiple subscriptions",
-    eventsTypesPickHint: "Check by delivery form; the form is derived from the selected types automatically.",
+    eventsTypesPickHint:
+      "The panel is filtered by the current delivery form (switch the form to see other types); the form is derived from the selected types automatically.",
     eventsCustomLabel: "Custom / alias",
     eventsCustomPlaceholder: "Comma separated; aliases or types outside the vocabulary (optional).",
     eventsIdsPlaceholder: "session_a, session_b",

@@ -185,7 +185,7 @@ export const zhConnectors = {
     eventsConflictNeeds: "{{type}} 需要 deliver={{forms}}",
     eventsUnwired: "{{type}} 暂未接出站映射(不会投递)",
     eventsSplit: "一键拆分为多条订阅",
-    eventsTypesPickHint: "按投递形态分组勾选;形态由所选类型自动推导(无需手配)。",
+    eventsTypesPickHint: "面板按当前投递形态过滤(其余类型切换「投递形态」后可选);形态由所选类型自动推导,无需手配。",
     eventsCustomLabel: "自定义/别名",
     eventsCustomPlaceholder: "逗号分隔;词表外/别名,可留空",
     eventsIdsPlaceholder: "session_a, session_b",

@@ -15,6 +15,7 @@ import {
   splitSubscriptionModel,
   toggleType,
   typesSummary,
+  visibleEventTypeSections,
   withResolvedDeliver,
 } from "./subscription-forms";
 
@@ -45,6 +46,42 @@ describe("eventTypeSections", () => {
     expect(unwired?.types).toContain("user_message");
     expect(unwired?.types).toContain("error");
     expect(unwired?.types).not.toContain("assistant_message");
+  });
+});
+
+describe("visibleEventTypeSections", () => {
+  it("按当前投递形态过滤：仅保留允许形态包含该形态的组", () => {
+    expect(visibleEventTypeSections("notice", []).map((section) => section.form)).toEqual([
+      "notice",
+      "notice/digest",
+    ]);
+    expect(visibleEventTypeSections("content", []).map((section) => section.form)).toEqual(["content"]);
+    expect(visibleEventTypeSections("digest", []).map((section) => section.form)).toEqual([
+      "notice/digest",
+      "digest",
+    ]);
+    expect(visibleEventTypeSections("stream", []).map((section) => section.form)).toEqual(["stream"]);
+  });
+
+  it("已勾选类型所在组保留可见（跨形态存量值可就地取消）", () => {
+    expect(visibleEventTypeSections("notice", ["assistant_message"]).map((section) => section.form)).toEqual([
+      "content",
+      "notice",
+      "notice/digest",
+    ]);
+    expect(visibleEventTypeSections("notice", ["my.custom"]).map((section) => section.form)).toEqual([
+      "notice",
+      "notice/digest",
+    ]);
+  });
+
+  it("未接线组仅在其含勾选项时显示", () => {
+    expect(visibleEventTypeSections("notice", []).map((section) => section.form)).not.toContain("");
+    expect(visibleEventTypeSections("notice", ["user_message"]).map((section) => section.form)).toEqual([
+      "notice",
+      "notice/digest",
+      "",
+    ]);
   });
 });
 

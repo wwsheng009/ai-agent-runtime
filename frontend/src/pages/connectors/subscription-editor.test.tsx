@@ -105,35 +105,37 @@ describe("SubscriptionEditor", () => {
     });
   }
 
-  it("按投递形态分组（含未接线与自定义(既有)组），汇总行显示已选", async () => {
+  it("面板按当前投递形态过滤（已勾选跨形态项保留、自定义(既有)组常显）", async () => {
     await render(
       <Harness
         initial={{ enabled: true, subscriptions: [sub({ types: ["turn.*", "my.custom"] })] }}
       />,
     );
 
-    const text = document.body.textContent ?? "";
-    expect(text).toContain("content(正文副本)");
-    expect(text).toContain("notice / digest(即时或聚合)");
-    expect(text).toContain("未接线(勾选不会投递)");
-    expect(text).toContain("自定义(既有)");
-    expect(text).toContain("词表外");
-    expect(text).toContain("已选 2 项:turn.*、my.custom");
-
+    // notice 过滤：notice / notice·digest 组可见；content / stream / 未接线组隐藏。
     expect(checkbox("turn.*")?.checked).toBe(true);
     expect(checkbox("my.custom")?.checked).toBe(true);
-    expect(checkbox("assistant_message")?.checked).toBe(false);
+    expect(checkbox("assistant_message")).toBeNull();
+    expect(checkbox("assistant_delta")).toBeNull();
+    expect(checkbox("user_message")).toBeNull();
+    expect(document.body.textContent).toContain("已选 2 项:turn.*、my.custom");
+    expect(document.body.textContent).toContain("面板按当前投递形态过滤");
     expect(readModel()).toEqual({
       enabled: true,
       subscriptions: [sub({ types: ["turn.*", "my.custom"] })],
     });
   });
 
-  it("勾选唯一形态类型：形态锁定为推导值并自动打开总开关", async () => {
+  it("切换投递形态后对应分组出现；勾选唯一形态类型锁定形态并自动打开总开关", async () => {
     await render(<Harness initial={{ enabled: false, subscriptions: [sub()] }} />);
     expect((findInput("启用事件订阅（policy.events）") as HTMLInputElement).checked).toBe(false);
+    // 默认 notice 过滤：content 组不可见，切换形态后出现。
+    expect(checkbox("assistant_message")).toBeNull();
+    setSelectValue(findSelect("投递形态") as HTMLSelectElement, "content");
+    const typeBox = checkbox("assistant_message");
+    expect(typeBox).not.toBeNull();
 
-    toggleCheckbox(checkbox("assistant_message") as HTMLInputElement);
+    toggleCheckbox(typeBox as HTMLInputElement);
 
     const deliver = findSelect("投递形态") as HTMLSelectElement;
     expect(deliver.value).toBe("content");
@@ -185,6 +187,26 @@ describe("SubscriptionEditor", () => {
       ],
     });
     expect(findButton("一键拆分为多条订阅")).toBeUndefined();
+  });
+
+  it("既有跨形态勾选保留可见并可取消：取消后分组随过滤消失", async () => {
+    await render(
+      <Harness
+        initial={{
+          enabled: true,
+          subscriptions: [sub({ types: ["assistant_message", "agent.turn.finished"] })],
+        }}
+      />,
+    );
+
+    // deliver=notice 收敛不了（turn 类允许 notice）：冲突项保持可见 + 告警。
+    expect(checkbox("assistant_message")?.checked).toBe(true);
+    expect(document.body.textContent).toContain("assistant_message 需要 deliver=content");
+
+    toggleCheckbox(checkbox("assistant_message") as HTMLInputElement);
+
+    expect(checkbox("assistant_message")).toBeNull();
+    expect(readModel().subscriptions[0].types).toEqual(["agent.turn.finished"]);
   });
 
   it("未接线类型告警（勾选不会投递），且保留形态自由选择", async () => {

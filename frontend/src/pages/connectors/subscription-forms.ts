@@ -151,6 +151,30 @@ export function eventTypeSections(): EventTypeSection[] {
   return sections;
 }
 
+/**
+ * 按「当前投递形态」过滤面板分组（2026-10-15 UI 反馈：类型列表按形态提前过滤，
+ * 而不是全量列出再靠告警兜底）：
+ *   * 允许形态包含当前 deliver 的组 → 可选；
+ *   * 含已勾选类型的组 → 保留（既有/跨形态存量值不被隐藏，可就地取消）；
+ *   * 未接线组（forms 为空）仅在其含勾选项时显示。
+ */
+export function visibleEventTypeSections(
+  deliver: SubscriptionDeliver,
+  selected: readonly string[] | undefined,
+): EventTypeSection[] {
+  const chosen = new Set<string>();
+  for (const raw of selected ?? []) {
+    const name = String(raw).trim();
+    if (name) {
+      chosen.add(name);
+    }
+  }
+  return eventTypeSections().filter((section) => {
+    const compatible = section.form !== "" && section.form.split("/").includes(deliver);
+    return compatible || section.types.some((type) => chosen.has(type));
+  });
+}
+
 /** 词表外（不在面板中的）既有值：追加为「自定义(既有)」勾选项，往返不丢。 */
 export function customPanelTypes(types: readonly string[] | undefined): string[] {
   const panel = new Set(EVENT_TYPE_ORDER);

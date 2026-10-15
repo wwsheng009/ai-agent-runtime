@@ -23,13 +23,13 @@ import {
   EVENT_TYPE_FAMILY,
   WILDCARD_FAMILY,
   customPanelTypes,
-  eventTypeSections,
   mergeCustomTokens,
   resolveSubscriptionDeliver,
   scanSubscriptionTypes,
   splitSubscriptionModel,
   toggleType,
   typesSummary,
+  visibleEventTypeSections,
   withResolvedDeliver,
   type SubscriptionDeliver,
 } from "./subscription-forms";
@@ -105,7 +105,6 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
   // 输入草稿（按行索引）：解析后的数组不丢失用户正在输入的分隔符。
   const [idsDraft, setIdsDraft] = useState<Record<number, string>>({});
   const [customDraft, setCustomDraft] = useState<Record<number, string>>({});
-  const sections = eventTypeSections();
 
   // 回填/外部变更时把「当前形态不被所选类型允许」的既有值收敛到推导结果
   // （与微前端 renderEventSubRows 的 refreshDeliverSelect 同语义）；无变化不回写。
@@ -207,6 +206,7 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
       {value.subscriptions.map((sub, index) => {
         const deliver = sub.deliver ?? "notice";
         const resolved = resolveSubscriptionDeliver(sub.types, deliver);
+        const visibleSections = visibleEventTypeSections(resolved.deliver, sub.types);
         const scan = scanSubscriptionTypes(sub.types, deliver);
         const issues = [
           ...scan.conflicts.map((item) =>
@@ -341,7 +341,7 @@ export function SubscriptionEditor({ value, onChange }: SubscriptionEditorProps)
                   {summaryText}
                 </summary>
                 <div className="mt-2 flex max-h-56 flex-col gap-1.5 overflow-y-auto">
-                  {sections.map((section) => (
+                  {visibleSections.map((section) => (
                     <div key={section.form} className="flex flex-col gap-1">
                       <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
                         {t(SECTION_LABEL_KEYS[section.form] ?? "connectorDialog.eventsGroupUnwired")}

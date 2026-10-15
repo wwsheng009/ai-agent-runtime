@@ -22,6 +22,8 @@ const ok = (cond, name, detail) => {
   else { failures++; console.error("  FAIL - " + name + (detail !== undefined ? " :: " + JSON.stringify(detail) : "")); }
 };
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// 分组标题的标记串(避免与投递形态下拉里的同名选项标签混淆)。
+const groupTitleMark = (label) => 'class="connector-types-group-title">' + label + "<";
 
 // ---- 静态守卫 ----
 ok(/function collectEventSubs\(/.test(src), "源码包含 collectEventSubs");
@@ -33,6 +35,8 @@ ok(!/eventTypeChipsHTML/.test(src), "旧的平铺 chips 实现已移除");
 ok(/EVENT_TYPE_FORMS/.test(src) && /data-types-warning/.test(src), "类型×投递形态相容性告警已接入");
 ok(/refreshDeliverSelect/.test(src) && /splitEventSubRow/.test(src), "细项→粗项推导与一键拆分已接入");
 ok(/eventTypeSections/.test(src) && /EVENT_TYPE_SECTION_ORDER/.test(src), "类型面板按投递形态分组(types↔deliver 关联显示)");
+ok(/visibleEventTypeSections/.test(src) && /data-deliver-filter/.test(src) && /refreshRowAndFilter/.test(src),
+  "类型面板按当前投递形态过滤(切换形态整表重渲染)");
 
 // ---- 最小 DOM mock ----
 function matchesSelector(node, sel) {
@@ -283,14 +287,17 @@ modalBody.appendChild(subsHost);
   ok(/data-sub-field="deliver">[\s\S]*<option value="content" selected>/.test(html), "deliver 选中 content");
   ok(html.includes('class="connector-field connector-field-check"><input type="checkbox" data-sub-field="enabled" checked><span class="connector-field-label">启用</span>'),
     "启用勾选为行内布局(勾选框在文字前,不单独占行)");
-  ok(/<details class="connector-types-picker">/.test(html), "事件类型为折叠多选面板(details),不平铺按钮");
+  ok(/<details class="connector-types-picker"[^>]*data-deliver-filter="content">/.test(html),
+    "事件类型为折叠多选面板(details)且记录过滤形态,不平铺按钮");
   ok(!/connector-type-chip/.test(html), "不再渲染平铺 chips 按钮");
   const boxCount = (html.match(/data-sub-type="/g) || []).length;
-  ok(boxCount === 20, "面板含 20 个多选项(词表全量)", boxCount);
+  ok(boxCount === 3, "面板按 content 过滤:content 组 + 已勾选的 notice/digest 组", boxCount);
   ok(/content\(正文副本\)[\s\S]*data-sub-type="assistant_message"/.test(html), "分组:content 组含 assistant_message");
-  ok(/stream\(流式编辑\)[\s\S]*data-sub-type="assistant_delta"/.test(html), "分组:stream 组含 assistant_delta");
-  ok(/digest\(聚合\)[\s\S]*data-sub-type="tool\.completed"/.test(html), "分组:digest 组含 tool.completed");
-  ok(/未接线\(勾选不会投递\)[\s\S]*data-sub-type="user_message"/.test(html), "分组:未接线组含 user_message");
+  ok(/notice \/ digest\(即时或聚合\)[\s\S]*data-sub-type="turn\.\*"/.test(html), "已勾选的跨形态组保留可见(turn.*)");
+  ok(!html.includes(groupTitleMark("stream(流式编辑)"))
+    && !html.includes(groupTitleMark("digest(聚合)"))
+    && !html.includes(groupTitleMark("未接线(勾选不会投递)")),
+    "其余形态分组被过滤隐藏(未勾选)");
   ok(html.includes('connector-type-hint">conversation'), "条目提示为族名(conversation)");
   ok(/data-sub-type="assistant_message" checked/.test(html)
     && /data-sub-type="turn\.\*" checked/.test(html)
@@ -306,6 +313,7 @@ modalBody.appendChild(subsHost);
   ok(/data-sub-field="sessions-mode">[\s\S]*<option value="bound" selected>/.test(htmlOff), "空订阅默认 bound");
   ok(/data-sub-field="deliver">[\s\S]*<option value="notice" selected>/.test(htmlOff), "空订阅默认 notice");
   ok(/data-sub-field="sessions-ids"[^>]*disabled/.test(htmlOff), "bound 模式会话列表置灰");
+  ok(/data-deliver-filter="notice"/.test(htmlOff), "空订阅默认按 notice 过滤面板");
 }
 
 // ===== 2. renderEventSubRows → collectEventSubs 往返 =====
@@ -401,16 +409,17 @@ modalBody.appendChild(subsHost);
   ok(!!customBox && customBox.checked === true, "词表外类型追加为已勾选项(往返不丢)");
   const turnBox = row.querySelector('[data-sub-type="turn.*"]');
   ok(turnBox.checked === true, "词表内选中项已勾选");
+  ok(row.querySelector('[data-sub-type="assistant_message"]') === null, "未选中的其他形态类型被过滤隐藏");
   const first = api.collectEventSubs().subscriptions[0];
   ok(eq(first.types, ["turn.*", "completion", "custom.type"]), "收集保留词表内/外全部类型", first.types);
   const summary = row.querySelector("[data-types-summary]");
   ok(/^已选 3 项:/.test(summary.textContent), "汇总行计数=3", summary.textContent);
-  const box = row.querySelector('[data-sub-type="assistant_message"]');
+  const box = row.querySelector('[data-sub-type="agent.turn.finished"]');
   box.checked = true;
   api.onModalBodyChange({ target: box });
   ok(/^已选 4 项:/.test(summary.textContent), "勾选后汇总行计数更新", summary.textContent);
   const after = api.collectEventSubs().subscriptions[0];
-  ok(after.types.indexOf("assistant_message") >= 0, "勾选后的类型进入收集结果");
+  ok(after.types.indexOf("agent.turn.finished") >= 0, "勾选后的类型进入收集结果");
   box.checked = false;
   api.onModalBodyChange({ target: box });
   ok(/^已选 3 项:/.test(summary.textContent), "取消勾选后汇总行回退", summary.textContent);
@@ -441,22 +450,32 @@ modalBody.appendChild(subsHost);
 {
   eventsEnabled.checked = true;
   api.renderEventSubRows([{ id: "misconfig", deliver: "notice", types: ["assistant_message", "user_message", "agent.turn.finished"] }]);
-  const row = subsHost.children[0];
-  const warning = row.querySelector("[data-types-warning]");
+  let row = subsHost.children[0];
+  let warning = row.querySelector("[data-types-warning]");
   ok(warning.hidden === false, "类型×形态不匹配时告警可见");
   ok(/assistant_message 需要 deliver=content/.test(warning.textContent), "提示 assistant_message 需要 content", warning.textContent);
   ok(/user_message 暂未接出站映射/.test(warning.textContent), "提示 user_message 未接线", warning.textContent);
   ok(!/agent\.turn\.finished/.test(warning.textContent), "notice 可用的 completion 不告警", warning.textContent);
+  ok(row.querySelector('[data-sub-type="assistant_message"]') !== null, "已勾选的跨形态类型保留可见(可就地取消)");
+  // 切换投递形态:类型过滤变化触发整表重渲染(行节点被替换,需重新取)。
   const deliverSel = row.querySelector('[data-sub-field="deliver"]');
   deliverSel.value = "content";
   api.onModalBodyChange({ target: deliverSel });
+  row = subsHost.children[0];
+  warning = row.querySelector("[data-types-warning]");
   ok(!/assistant_message/.test(warning.textContent), "切到 content 后 assistant_message 不再告警", warning.textContent);
   ok(/agent\.turn\.finished 需要 deliver=notice\/digest/.test(warning.textContent), "切到 content 后 completion 转为告警", warning.textContent);
+  // 自动打开总开关:取消勾选不触发,勾选触发(独立行:content 锚定,不受上面收敛影响)。
+  api.renderEventSubRows([{ id: "toggle", deliver: "content", types: ["assistant_message"] }]);
+  row = subsHost.children[0];
   eventsEnabled.checked = false;
-  const box = row.querySelector('[data-sub-type="assistant_message"]');
+  let box = row.querySelector('[data-sub-type="assistant_message"]');
   box.checked = false;
   api.onModalBodyChange({ target: box });
   ok(eventsEnabled.checked === false, "取消勾选不会打开总开关");
+  row = subsHost.children[0];
+  box = row.querySelector('[data-sub-type="assistant_message"]');
+  ok(box !== null, "取消勾选后 content 组仍按当前形态可见");
   box.checked = true;
   api.onModalBodyChange({ target: box });
   ok(eventsEnabled.checked === true, "勾选类型自动打开总开关(避免保存成 enabled:false 的无效订阅)");
@@ -493,6 +512,49 @@ modalBody.appendChild(subsHost);
   ok(models[1].deliver === "notice" && eq(models[1].types, ["agent.turn.finished"]), "第 2 条 notice", models[1]);
   ok(models[1].id === "mix-2", "续行 id 追加序号", models[1].id);
   ok(subsHost.children[1].querySelector("[data-types-warning]").hidden === true, "拆分后无残留告警");
+}
+
+// ===== 12. 类型面板按投递形态过滤 + 切换形态整表重渲染(2026-10-15) =====
+{
+  eventsEnabled.checked = true;
+  api.renderEventSubRows([{ id: "f1", deliver: "notice", types: [] }]);
+  let html = subsHost.innerHTML;
+  let row = subsHost.children[0];
+  ok(/data-deliver-filter="notice"/.test(html), "面板记录当前过滤形态(notice)");
+  ok(html.includes(groupTitleMark("notice(通知)")) && html.includes(groupTitleMark("notice / digest(即时或聚合)")),
+    "notice 过滤下保留 notice 相关分组");
+  ok(!html.includes(groupTitleMark("content(正文副本)")) && !html.includes(groupTitleMark("stream(流式编辑)"))
+    && !html.includes(groupTitleMark("digest(聚合)")) && !html.includes(groupTitleMark("未接线(勾选不会投递)")),
+    "其余形态分组被过滤隐藏");
+  ok(row.querySelector('[data-sub-type="assistant_message"]') === null, "content 专属类型不可见/不可选");
+  // 切换投递形态 → 整表重渲染为 content 过滤
+  const deliverSel = row.querySelector('[data-sub-field="deliver"]');
+  deliverSel.value = "content";
+  api.onModalBodyChange({ target: deliverSel });
+  html = subsHost.innerHTML;
+  row = subsHost.children[0];
+  ok(/data-deliver-filter="content"/.test(html), "切换形态后过滤形态更新");
+  ok(html.includes(groupTitleMark("content(正文副本)")) && row.querySelector('[data-sub-type="assistant_message"]') !== null,
+    "content 组出现且可选");
+  ok(!html.includes(groupTitleMark("notice / digest(即时或聚合)")), "notice 相关分组被过滤隐藏");
+  // 已勾选的跨形态类型保留可见(可就地取消);取消最后一个 → 面板重建
+  api.renderEventSubRows([{ id: "f2", deliver: "notice", types: ["assistant_message", "agent.turn.finished"] }]);
+  row = subsHost.children[0];
+  ok(row.querySelector('[data-sub-type="assistant_message"]') !== null
+    && row.querySelector('[data-sub-type="assistant_message"]').checked === true, "已勾选的跨形态类型保留可见");
+  ok(row.querySelector("[data-types-warning]").hidden === false, "保留可见的冲突项仍告警");
+  const crossBox = row.querySelector('[data-sub-type="assistant_message"]');
+  crossBox.checked = false;
+  api.onModalBodyChange({ target: crossBox });
+  html = subsHost.innerHTML;
+  ok(/data-deliver-filter="notice"/.test(html) && !html.includes(groupTitleMark("content(正文副本)")),
+    "取消最后一个跨形态勾选后面板重建为 notice 过滤");
+  // 未接线组:默认隐藏;已勾选时保留(可取消)
+  api.renderEventSubRows([{ id: "f3", deliver: "notice", types: [] }]);
+  ok(!subsHost.innerHTML.includes(groupTitleMark("未接线(勾选不会投递)")), "未接线组默认隐藏");
+  api.renderEventSubRows([{ id: "f4", deliver: "notice", types: ["user_message"] }]);
+  ok(subsHost.innerHTML.includes(groupTitleMark("未接线(勾选不会投递)"))
+    && subsHost.innerHTML.includes('data-sub-type="user_message"'), "已勾选的未接线类型保留可见(可取消)");
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n存在失败项: " + failures);
