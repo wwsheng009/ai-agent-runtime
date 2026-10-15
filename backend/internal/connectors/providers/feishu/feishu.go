@@ -243,11 +243,19 @@ type Provider struct {
 	client  *http.Client
 	logf    func(format string, args ...any)
 	now     func() time.Time
+	// mediaLimitBytes 覆盖媒体下载/上传上限（0 = 默认 defaultMediaLimitBytes）。
+	mediaLimitBytes int64
+	// mediaHostPolicy 是出站远端媒体 URL 的宿主校验策略（见 feishu_ssrf.go）；
+	// nil 时用默认 validatePublicMediaHost（拒绝回环/私网/链路本地/CGNAT 等）。
+	mediaHostPolicy func(host string) error
 
 	// mu 保护 tenant_access_token 缓存与「会话 → 最近入站 msg_id」记忆。
 	mu           sync.Mutex
 	tokens       map[string]tokenEntry
 	replyTargets map[string]string
+	// states 是按 connectorID 附着的持久化状态视图（StateAwareProvider，
+	// 见 feishu_state.go：回复目标跨重启持久化）。
+	states map[string]connectors.PollingState
 }
 
 // Option 配置 Provider。
@@ -272,6 +280,25 @@ func WithLogger(logf func(format string, args ...any)) Option {
 	return func(p *Provider) {
 		if logf != nil {
 			p.logf = logf
+		}
+	}
+}
+
+// WithInboundMediaLimit 覆盖媒体下载/上传上限（字节；测试/高级用，<=0 忽略）。
+func WithInboundMediaLimit(limit int64) Option {
+	return func(p *Provider) {
+		if limit > 0 {
+			p.mediaLimitBytes = limit
+		}
+	}
+}
+
+// WithMediaHostPolicy 覆盖出站远端媒体 URL 的宿主校验策略（测试/高级用；
+// 生产请保留默认公网校验，见 feishu_ssrf.go）。
+func WithMediaHostPolicy(policy func(host string) error) Option {
+	return func(p *Provider) {
+		if policy != nil {
+			p.mediaHostPolicy = policy
 		}
 	}
 }
@@ -491,16 +518,34 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 
 	replyTo := p.replyTarget(connectorKey(cfg), chatID)
 	for _, msg := range msgs {
-		text := strings.TrimSpace(msg.Text)
-		if text == "" {
-			// P3：OutboundMessage.Media（图片/文件上传）暂不支持。
-			continue
+		visibleText, attachments := connectors.ParseOutboundMediaDirectives(msg.Text, feishuAttachmentFenceNames...)
+		text := strings.TrimSpace(visibleText)
+		if text != "" {
+			if err := p.sendText(ctx, cfg, base, token, chatID, replyTo, text); err != nil {
+				return err
+			}
 		}
-		if err := p.sendText(ctx, cfg, base, token, chatID, replyTo, text); err != nil {
-			return err
+		outboundMedia := make([]connectors.Media, 0, len(msg.Media)+len(attachments))
+		outboundMedia = append(outboundMedia, msg.Media...)
+		outboundMedia = append(outboundMedia, attachments...)
+		for _, media := range outboundMedia {
+			if err := p.sendOutboundMedia(ctx, cfg, base, token, chatID, replyTo, media); err != nil {
+				p.logf("feishu: 发送媒体失败（%s %s）：%v；降级为文本提示",
+					media.Kind, feishuMediaLabel(media), err)
+				notice := "[附件发送失败: " + feishuMediaLabel(media) + "]"
+				if noticeErr := p.sendText(ctx, cfg, base, token, chatID, replyTo, notice); noticeErr != nil {
+					return noticeErr
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// OutboundMediaNote 实现 connectors.OutboundMediaNoteProvider：把出站媒体指令
+// 协议提示注入入站文本，agent 据此在回复里声明要回发的图片/视频/文件。
+func (p *Provider) OutboundMediaNote() string {
+	return connectors.MediaDirectiveNote(feishuAttachmentFence)
 }
 
 func (p *Provider) sendText(ctx context.Context, cfg connectors.Config, base, token, chatID, replyTo, text string) error {
@@ -569,19 +614,22 @@ func (p *Provider) rememberReplyTarget(connectorID, chat, messageID string) {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.replyTargets == nil {
 		p.replyTargets = make(map[string]string)
 	}
+	key := connectorID + "|" + chat
+	if existing, ok := p.replyTargets[key]; ok && existing == messageID {
+		p.mu.Unlock()
+		return // 未变化不落盘
+	}
 	if len(p.replyTargets) >= maxTrackedChats {
-		for key := range p.replyTargets {
-			delete(p.replyTargets, key)
-			if len(p.replyTargets) < maxTrackedChats {
-				break
-			}
+		if _, exists := p.replyTargets[key]; !exists {
+			p.replyTargets = make(map[string]string) // 防御性清空重记（快照非关键数据）
 		}
 	}
-	p.replyTargets[connectorID+"|"+chat] = messageID
+	p.replyTargets[key] = messageID
+	p.mu.Unlock()
+	p.persistReplyTargets(connectorID)
 }
 
 func (p *Provider) replyTarget(connectorID, chat string) string {
@@ -719,7 +767,7 @@ func (p *Provider) inboundMessage(cfg connectors.Config, header eventHeader, raw
 		return connectors.InboundMessage{}, false, nil
 	}
 
-	text, media, err := extractContent(message)
+	text, media, err := extractContent(message, strings.TrimSpace(message.MessageID))
 	if err != nil {
 		return connectors.InboundMessage{}, false, err
 	}
@@ -750,9 +798,9 @@ func (p *Provider) inboundMessage(cfg connectors.Config, header eventHeader, raw
 
 // extractContent 解析 message.content（JSON 字符串）：
 //   - text：取 text 字段，剔除 @提及占位符（@_user_N）后做 HTML 反转义；
-//   - 非文本：降级为文本占位（[图片]/[语音]/…），并尽量附带媒体元数据
-//     （FileID/FileName），真正的下载/转码留待 P3 媒体切片。
-func extractContent(message messageBody) (string, []connectors.Media, error) {
+//   - 非文本：降级为文本占位（[图片]/[语音]/…），并附带媒体元数据
+//     （FileID 为「messageID|fileKey|type」复合引用，供 MediaFetcher 下载资源）。
+func extractContent(message messageBody, messageID string) (string, []connectors.Media, error) {
 	messageType := strings.TrimSpace(message.MessageType)
 	if messageType == "text" {
 		var payload struct {
@@ -763,12 +811,12 @@ func extractContent(message messageBody) (string, []connectors.Media, error) {
 		}
 		return strings.TrimSpace(html.UnescapeString(stripMentions(payload.Text, message.Mentions))), nil, nil
 	}
-	placeholder, media := placeholderFor(messageType, message.Content)
+	placeholder, media := placeholderFor(messageType, message.Content, messageID)
 	return placeholder, media, nil
 }
 
 // placeholderFor 为非文本消息生成占位文本与媒体元数据。
-func placeholderFor(messageType, content string) (string, []connectors.Media) {
+func placeholderFor(messageType, content, messageID string) (string, []connectors.Media) {
 	var fields map[string]any
 	if strings.TrimSpace(content) != "" {
 		_ = json.Unmarshal([]byte(content), &fields)
@@ -781,13 +829,13 @@ func placeholderFor(messageType, content string) (string, []connectors.Media) {
 	}
 	switch strings.TrimSpace(messageType) {
 	case "image":
-		return "[图片]", mediaEntry("image", field("image_key"), "")
+		return "[图片]", mediaEntry("image", field("image_key"), "", messageID, "image")
 	case "audio":
-		return "[语音]", mediaEntry("voice", field("file_key"), "")
+		return "[语音]", mediaEntry("voice", field("file_key"), "", messageID, "file")
 	case "file":
-		return "[文件]", mediaEntry("file", field("file_key"), field("file_name"))
+		return "[文件]", mediaEntry("file", field("file_key"), field("file_name"), messageID, "file")
 	case "video", "media":
-		return "[视频]", mediaEntry("video", field("file_key"), "")
+		return "[视频]", mediaEntry("video", field("file_key"), "", messageID, "file")
 	case "sticker":
 		return "[表情包]", nil
 	case "post":
@@ -801,11 +849,18 @@ func placeholderFor(messageType, content string) (string, []connectors.Media) {
 	}
 }
 
-func mediaEntry(kind, fileID, fileName string) []connectors.Media {
-	if strings.TrimSpace(fileID) == "" && strings.TrimSpace(fileName) == "" {
+// mediaEntry 构造媒体条目：FileID 为「messageID|fileKey|resourceType」复合引用
+// （飞书下载消息资源需要 message_id + file_key + type，三者缺一不可）。
+func mediaEntry(kind, fileKey, fileName, messageID, resourceType string) []connectors.Media {
+	fileKey = strings.TrimSpace(fileKey)
+	if fileKey == "" && strings.TrimSpace(fileName) == "" {
 		return nil
 	}
-	return []connectors.Media{{Kind: kind, FileID: strings.TrimSpace(fileID), FileName: strings.TrimSpace(fileName)}}
+	fileID := ""
+	if fileKey != "" {
+		fileID = strings.TrimSpace(messageID) + "|" + fileKey + "|" + resourceType
+	}
+	return []connectors.Media{{Kind: kind, FileID: fileID, FileName: strings.TrimSpace(fileName)}}
 }
 
 // stripMentions 移除群聊文本里的 @提及占位符（@_user_1 形式）。
@@ -852,7 +907,14 @@ func (p *Provider) doJSON(ctx context.Context, method, base, path, bearer string
 	if strings.TrimSpace(bearer) != "" {
 		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearer))
 	}
+	return p.doRequest(request, path, bearer, out, secrets...)
+}
 
+// doRequest 执行请求并解包响应（JSON 与 multipart 上传共用）；错误文本统一脱敏。
+func (p *Provider) doRequest(request *http.Request, path, bearer string, out any, secrets ...string) error {
+	redactAll := func(message string) string {
+		return redact(message, append(append([]string{}, secrets...), bearer)...)
+	}
 	response, err := p.client.Do(request)
 	if err != nil {
 		// *url.Error 文本可能带出请求 URL/头：不 %w 包装，脱敏后作为 cause。

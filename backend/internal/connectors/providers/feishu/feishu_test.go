@@ -27,6 +27,8 @@ type recordedRequest struct {
 	query   url.Values
 	headers http.Header
 	body    map[string]any
+	// raw 是原始请求体（multipart 上传用；JSON 请求亦可读）。
+	raw []byte
 }
 
 type fakeFeishu struct {
@@ -67,10 +69,12 @@ func (f *fakeFeishu) onJSON(path string, status int, payload any) {
 
 func (f *fakeFeishu) serve(w http.ResponseWriter, r *http.Request) {
 	body := map[string]any{}
+	var rawBody []byte
 	if r.Body != nil {
-		raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-		if len(bytes.TrimSpace(raw)) > 0 {
-			_ = json.Unmarshal(raw, &body)
+		rawBody, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if len(bytes.TrimSpace(rawBody)) > 0 &&
+			!strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			_ = json.Unmarshal(rawBody, &body)
 		}
 	}
 	f.mu.Lock()
@@ -80,6 +84,7 @@ func (f *fakeFeishu) serve(w http.ResponseWriter, r *http.Request) {
 		query:   r.URL.Query(),
 		headers: r.Header.Clone(),
 		body:    body,
+		raw:     rawBody,
 	})
 	handler := f.handlers[r.URL.Path]
 	f.mu.Unlock()
@@ -436,7 +441,10 @@ func TestHandleWebhookNonTextMessageFallsBackToPlaceholder(t *testing.T) {
 	if result.Message.Text != "[图片]" {
 		t.Fatalf("expected [图片] placeholder, got %q", result.Message.Text)
 	}
-	if len(result.Message.Media) != 1 || result.Message.Media[0].FileID != "img_1" || result.Message.Media[0].Kind != "image" {
+	// FileID 为「messageID|fileKey|type」复合引用（MediaFetcher 下载资源需要）。
+	if len(result.Message.Media) != 1 ||
+		result.Message.Media[0].FileID != "om_msg_1|img_1|image" ||
+		result.Message.Media[0].Kind != "image" {
 		t.Fatalf("unexpected media metadata: %+v", result.Message.Media)
 	}
 }

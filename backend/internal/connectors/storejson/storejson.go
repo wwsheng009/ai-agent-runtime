@@ -148,12 +148,12 @@ type connectorRecord struct {
 }
 
 type policyRecord struct {
-	CommandPrefix string   `json:"command_prefix,omitempty"`
-	AllowedUsers  []string `json:"allowed_users,omitempty"`
-	SessionMode   string   `json:"session_mode,omitempty"`
-	ReplyMode     string   `json:"reply_mode,omitempty"`
-	RuntimeOwner  string   `json:"runtime_owner,omitempty"`
-	Route         *routeRecord `json:"route,omitempty"`
+	CommandPrefix string        `json:"command_prefix,omitempty"`
+	AllowedUsers  []string      `json:"allowed_users,omitempty"`
+	SessionMode   string        `json:"session_mode,omitempty"`
+	ReplyMode     string        `json:"reply_mode,omitempty"`
+	RuntimeOwner  string        `json:"runtime_owner,omitempty"`
+	Route         *routeRecord  `json:"route,omitempty"`
 	Notify        *notifyRecord `json:"notify,omitempty"`
 }
 
@@ -342,6 +342,11 @@ func (s *Store) DeleteConfig(id string) error {
 			delete(state.Claimed, key)
 		}
 	}
+	for key := range state.FailedReplies {
+		if strings.HasPrefix(key, prefix) {
+			delete(state.FailedReplies, key)
+		}
+	}
 	return s.writeStateLocked(state)
 }
 
@@ -353,6 +358,18 @@ type stateFile struct {
 	Claimed  map[string]time.Time         `json:"claimed"`
 	Cursors  map[string]map[string]string `json:"cursors"`
 	Owners   map[string]ownerRecord       `json:"owners,omitempty"`
+	// FailedReplies 是失败回复快照账本（切片 2f；键 = connectorID\x00chat）。
+	FailedReplies map[string]failedReplyRecord `json:"failed_replies,omitempty"`
+}
+
+// failedReplyRecord 是失败回复快照在 connectors-state.json 中的形状（切片 2f）。
+type failedReplyRecord struct {
+	ConnectorID string                       `json:"connector_id"`
+	Chat        string                       `json:"chat"`
+	MessageID   string                       `json:"message_id,omitempty"`
+	Reply       []connectors.OutboundMessage `json:"reply,omitempty"`
+	Error       string                       `json:"error,omitempty"`
+	FailedAt    time.Time                    `json:"failed_at"`
 }
 
 type bindingRecord struct {
@@ -566,6 +583,81 @@ func (p *pollingState) Set(key, value string) error {
 	})
 }
 
+// ── 失败回复快照（切片 2f：失败回复重放） ──────────────────────────────────
+
+func failedReplyKey(connectorID, chat string) string {
+	return strings.TrimSpace(connectorID) + "\x00" + strings.TrimSpace(chat)
+}
+
+// PutFailedReply 记录/覆盖一条失败回复快照（同 connector+chat 只保留最新）。
+func (s *Store) PutFailedReply(reply connectors.FailedReply) error {
+	if s == nil {
+		return errors.New("storejson: store is not configured")
+	}
+	reply.ConnectorID = strings.TrimSpace(reply.ConnectorID)
+	reply.Chat = strings.TrimSpace(reply.Chat)
+	if reply.ConnectorID == "" || reply.Chat == "" {
+		return errors.New("storejson: failed reply requires connector id and chat")
+	}
+	if reply.FailedAt.IsZero() {
+		reply.FailedAt = time.Now().UTC()
+	}
+	key := failedReplyKey(reply.ConnectorID, reply.Chat)
+	return s.mutateState(func(state *stateFile) {
+		if state.FailedReplies == nil {
+			state.FailedReplies = make(map[string]failedReplyRecord)
+		}
+		state.FailedReplies[key] = failedReplyRecord{
+			ConnectorID: reply.ConnectorID,
+			Chat:        reply.Chat,
+			MessageID:   reply.MessageID,
+			Reply:       append([]connectors.OutboundMessage(nil), reply.Reply...),
+			Error:       reply.Error,
+			FailedAt:    reply.FailedAt,
+		}
+	})
+}
+
+// GetFailedReply 读取失败回复快照（返回副本；无记录返回 false）。
+func (s *Store) GetFailedReply(connectorID, chat string) (connectors.FailedReply, bool) {
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if s == nil || connectorID == "" || chat == "" {
+		return connectors.FailedReply{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.loadStateLocked()
+	if err != nil {
+		return connectors.FailedReply{}, false
+	}
+	record, ok := state.FailedReplies[failedReplyKey(connectorID, chat)]
+	if !ok {
+		return connectors.FailedReply{}, false
+	}
+	return connectors.FailedReply{
+		ConnectorID: record.ConnectorID,
+		Chat:        record.Chat,
+		MessageID:   record.MessageID,
+		Reply:       append([]connectors.OutboundMessage(nil), record.Reply...),
+		Error:       record.Error,
+		FailedAt:    record.FailedAt,
+	}, true
+}
+
+// ClearFailedReply 删除失败回复快照（幂等）。
+func (s *Store) ClearFailedReply(connectorID, chat string) error {
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if connectorID == "" || chat == "" {
+		return nil
+	}
+	key := failedReplyKey(connectorID, chat)
+	return s.mutateState(func(state *stateFile) {
+		delete(state.FailedReplies, key)
+	})
+}
+
 // ---------------------------------------------------------------------------
 // 运行归属（状态文件的 owners 表；语义见 connectors.Store 与 07 §5.6）
 
@@ -685,10 +777,11 @@ func bindingKey(connectorID, chat string) string {
 
 func emptyState() *stateFile {
 	return &stateFile{
-		Bindings: make(map[string]bindingRecord),
-		Claimed:  make(map[string]time.Time),
-		Cursors:  make(map[string]map[string]string),
-		Owners:   make(map[string]ownerRecord),
+		Bindings:      make(map[string]bindingRecord),
+		Claimed:       make(map[string]time.Time),
+		Cursors:       make(map[string]map[string]string),
+		Owners:        make(map[string]ownerRecord),
+		FailedReplies: make(map[string]failedReplyRecord),
 	}
 }
 
@@ -837,6 +930,9 @@ func (s *Store) loadStateLocked() (*stateFile, error) {
 	}
 	if state.Owners == nil {
 		state.Owners = make(map[string]ownerRecord)
+	}
+	if state.FailedReplies == nil {
+		state.FailedReplies = make(map[string]failedReplyRecord)
 	}
 	return state, nil
 }

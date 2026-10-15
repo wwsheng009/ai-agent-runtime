@@ -406,6 +406,25 @@ func TestServiceRejectsUnauthorizedUser(t *testing.T) {
 	}
 }
 
+// TestServiceEmptyWhitelistAllowsAll 覆盖 2026-10-15 语义调整：allowed_users
+// 为空 = 不限制（放行任意平台用户），不再静默拒收——平台侧用户标识（如 QQ 的
+// user_openid）对用户不可预知，空白名单全拒会把新连接器变成运维死锁。
+func TestServiceEmptyWhitelistAllowsAll(t *testing.T) {
+	provider := &fakeProvider{}
+	backend := &fakeBackend{session: SessionRef{SessionID: "s1"}}
+	store := NewMemoryStore(testConfig("c1", "fake")) // AllowedUsers 为空
+	service := newTestService(t, store, backend, provider)
+
+	msg := inbound("c1", "chat-1", "m1", "hi")
+	msg.UserID = "stranger-openid"
+	if err := service.HandleInbound(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "empty whitelist passes the user through", func() bool {
+		return len(backend.requests()) == 1
+	})
+}
+
 func TestServiceHelpCommandHandledLocally(t *testing.T) {
 	provider := &fakeProvider{}
 	backend := &fakeBackend{}
@@ -760,7 +779,7 @@ func TestServiceStalePollerCleanupKeepsNewerRegistration(t *testing.T) {
 	})
 }
 
-// ── Fix-S2：白名单 fail-closed 安全闸 ──────────────────────────────────────
+// ── Fix-S2 白名单 fail-closed 安全闸（2026-10-15 起默认停用，开关保留作兼容）──
 
 // TestServiceRequireAllowedUsersSkipsEmptyWhitelist 覆盖 Fix-S2：宿主开启
 // fail-closed 闸时，启用但白名单为空的连接器不得 Activate/轮询，并留下含

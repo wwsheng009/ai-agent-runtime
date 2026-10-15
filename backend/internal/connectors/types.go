@@ -166,7 +166,12 @@ func (p Policy) streamingEnabled() bool {
 	return !strings.EqualFold(strings.TrimSpace(p.ReplyMode), "final")
 }
 
-// AllowsUser 报告该平台用户是否允许使用（白名单为空 = 不限制）。
+// AllowsUser 报告该平台用户是否允许使用。
+//
+// 语义（2026-10-15 调整）：allowed_users 为空 = 不限制（放行任意平台用户）；
+// 非空时仅命中清单的平台用户可对话。此前「空 = 全拒绝」的语义会把新启用的
+// 连接器变成对所有人静默拒收（且平台用户标识对用户不可预知，如 QQ 的
+// user_openid），运维成本高于风险，故收敛为「空 = 放行」。
 func (p Policy) AllowsUser(userID string) bool {
 	if len(p.AllowedUsers) == 0 {
 		return true
@@ -271,6 +276,55 @@ type PollingProvider interface {
 	SupportsPolling(cfg Config) bool
 	// RunPolling 阻塞运行直至 ctx 取消；实现负责断线重连与游标续传。
 	RunPolling(ctx context.Context, cfg Config, handle InboundHandler, state PollingState) error
+}
+
+// StateAwareProvider 是 Provider 的可选能力：宿主在启动轮询/出站发送前，把该
+// 连接器的持久化状态视图（与 PollingState 同一 KV 命名空间）交给 provider，
+// 用于跨重启记忆（如微信 context_token：重启后无需等会话下一条入站即可回复）。
+//
+// 实现约定：
+//   - 同一 provider 实例可能服务多个连接器（按 connectorID 隔离）；
+//   - 同一连接器可能被重复附着（宿主每次使用前调用）：实现应幂等覆盖；
+//   - 不支持该能力的 Provider 不受影响（宿主探测后跳过）。
+type StateAwareProvider interface {
+	Provider
+	AttachState(connectorID string, state PollingState)
+}
+
+// FailedReply 是一次「回复投递失败」的快照（切片 2f：失败回复重放，微信
+// errcode -2 的恢复路径）。宿主在实现 ReplyReplayProvider 的通道上记录快照；
+// 用户随后发来重发意图时由 Service 用新一条入站带来的上下文重放。
+type FailedReply struct {
+	ConnectorID string
+	Chat        string
+	// MessageID 是触发该回复的入站消息 id（审计/日志用，可空）。
+	MessageID string
+	// Reply 是未能投递的回复快照（深拷贝语义由 Store 实现保证）。
+	Reply []OutboundMessage
+	// Error 是最近一次失败原因（截断，审计用）。
+	Error string
+	// FailedAt 是最近一次失败时间（UTC）。
+	FailedAt time.Time
+}
+
+// ReplyReplayProvider 是 Provider 的可选能力（切片 2f）：声明该通道支持
+// 「失败回复重放」——宿主在回复投递失败时记录快照（见 FailedReply），用户
+// 随后发来重发意图时重放。Provider 只负责判定用户意图，账本与投递编排由
+// Service 负责（实现参考微信：「重发/继续/retry」等短文本，排除带媒体消息）。
+type ReplyReplayProvider interface {
+	Provider
+	// IsReplyReplayIntent 报告入站消息是否为「重发上次失败回复」意图。
+	// 仅在该连接器存在失败快照且渠道匹配时被调用。
+	IsReplyReplayIntent(msg InboundMessage) bool
+}
+
+// OutboundMediaNoteProvider 是 Provider 的可选能力：返回追加到入站文本尾部的
+// 「如何回发媒体」通道提示（宿主在入站媒体物化后注入；空串 = 不注入）。
+// 与 ParseOutboundMediaDirectives 配套：提示里的围栏块名必须是该通道接受的
+// 名字（见 MediaDirectiveNote）。
+type OutboundMediaNoteProvider interface {
+	Provider
+	OutboundMediaNote() string
 }
 
 // WebhookResult 是 webhook 入口的处理结果（二选一）：

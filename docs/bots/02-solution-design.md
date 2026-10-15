@@ -73,6 +73,18 @@ type PollingProvider interface {                     // 长轮询 / WS
     SupportsPolling(cfg ConnectorConfig) bool
     RunPolling(ctx context.Context, cfg ConnectorConfig, h InboundHandler, state StateStore) error
 }
+type StateAwareProvider interface {                  // 宿主注入持久化 KV（跨重启记忆，如微信 context_token）
+    Provider
+    AttachState(connectorID string, state StateStore) // 与轮询游标同一命名空间；宿主在轮询/入站/出站前调用
+}
+type ReplyReplayProvider interface {                 // 失败回复重放（微信 errcode -2；切片 2f）
+    Provider
+    IsReplyReplayIntent(msg InboundMessage) bool     // 判定用户"重发/继续"意图；快照账本与重放编排在宿主 Service
+}
+type OutboundMediaNoteProvider interface {           // 出站媒体提示（宿主在入站文本尾部注入"如何回发媒体"）
+    Provider
+    OutboundMediaNote() string                       // 与 ParseOutboundMediaDirectives 配套（围栏块名一致）
+}
 type WebhookResultProvider interface {               // 自定义 HTTP 响应（飞书 challenge）
     Provider
     ParseWebhookResult(r *http.Request, cfg ConnectorConfig) (WebhookReply, []InboundMessage, error)

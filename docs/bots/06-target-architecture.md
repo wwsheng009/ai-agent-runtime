@@ -245,7 +245,9 @@ graph LR
 >
 > **gateway console 页范围（P1 切片，2026-10-12）**：`#connectors` 已落地为**最小列表页**
 > ——`GET /api/connectors` 渲染 id/provider/启停/`active_owner`/`secret_keys`，提供
-> 管理接口 JSON 与 Schema 跳转；Schema 表单编辑、测试消息、日志查看与 aicli 微前端/
+> 管理接口 JSON 与 Schema 跳转；**2026-10-14 补记**：按 `GET /api/connectors/schema`
+> 增加 `kind=button` 通用动作按钮（如 QQ「授权校验」，`qr` 类动作仍由 web 端承载）；
+> Schema 表单编辑、测试消息、日志查看与 aicli 微前端/
 > React 前端同批（P1 后续），三端渲染器代码各自维护、契约同源，不与前端 repo 耦合。
 
 ### 2.6 数据与账本关系
@@ -310,7 +312,7 @@ erDiagram
 |---|--------|--------------------|
 | N1 | `events.SubscribeAsync`（队列+recover+丢弃策略+指标） | 单测：慢订阅不阻塞发布（延迟注入）；panic 不传播；队列满按策略丢弃并计数 |
 | N2 | `internal/notify` 策略内核 + gateway 适配（行为不变） | 现有 `cmd/gateway` 全部单测通过；新增跨通道去重用例（同 DedupKey 只投一次） |
-| N3 | IM 作为 notify Channel | 契约测试：绑定后 `normal` 只走主通道；`high` 扇出且去重。连接器侧出站助手已就绪（`Service.NotifySession`/`NotifyAttention`，2026-10-13，见 03 §6），IM Channel 适配已落地（`internal/notify/channels/im.go`，2026-10-14）；**切片三（2026-10-14）**：normal 主通道选择（已绑定 IM 则 IM、否则 Web Push）在 gateway 落地（`newIMMainChannelPredicate` + push 侧让位，测试 `im_main_channel_test.go` / `TestPushNotifierNormalRoutedToIMWhenBound`）；剩余为在场（D1） |
+| N3 | IM 作为 notify Channel | 契约测试：绑定后 `normal` 只走主通道；`high` 扇出且去重。连接器侧出站助手已就绪（`Service.NotifySession`/`NotifyAttention`，2026-10-13，见 03 §6），IM Channel 适配已落地（`internal/notify/channels/im.go`，2026-10-14）；**切片三（2026-10-14）**：normal 主通道选择（已绑定 IM 则 IM、否则 Web Push）在 gateway 落地（`newIMMainChannelPredicate` + push 侧让位，测试 `im_main_channel_test.go` / `TestPushNotifierNormalRoutedToIMWhenBound`）；剩余为偏好三级与在场（D1/D6） |
 | N4 | `internal/connectors` 核心 + Telegram Provider | 端到端：Telegram→runtime-server→回复；断线续传不重复 |
 | N5 | `/hooks/connectors/{id}`（签名/挑战校验） | 未签名请求 401/403；重放/错误 secret 用例 |
 | N6 | `connectors/api` 契约包 + 三宿主矩阵 | CI：同一 golden 用例 × 3 宿主全绿 |

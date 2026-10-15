@@ -161,6 +161,9 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 		if reconnect.clearSession {
 			p.clearGatewayState(state)
 		}
+		if reconnect.fatal {
+			return reconnect
+		}
 		p.logf("qqbot: gateway disconnected: %v (retry in %s)", err, backoff)
 		select {
 		case <-ctx.Done():

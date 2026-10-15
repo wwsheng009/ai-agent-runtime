@@ -132,7 +132,7 @@ sequenceDiagram
 | Telegram | `bot_token`；可选 `proxy_url` | polling / webhook | 测试=`getMe`；webhook 自动注册 |
 | 飞书 | `app_id`、`app_secret`；可选 `verification_token` | webhook（可选 WS） | 自动注册 webhook；challenge 自检 |
 | QQ | `app_id`、`app_secret`（+ sandbox 开关） | gateway WS | 扫码/授权（可选） |
-| 微信 | 由扫码登录产生（`account_id` 等自动回填） | polling | **扫码登录**（§3.4） |
+| 微信 | 由扫码登录产生（`account_id` 等自动回填）；可选 `cdn_base_url`（媒体 CDN，默认官方地址） | polling | **扫码登录**（§3.4） |
 
 ### 4.2 操作逻辑层（策略）
 

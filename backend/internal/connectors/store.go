@@ -56,6 +56,15 @@ type Store interface {
 	// PollingState 返回该连接器的轮询游标视图（持久化由宿主实现决定）。
 	PollingState(connectorID string) PollingState
 
+	// PutFailedReply 记录/覆盖一条失败回复快照（同 connector+chat 只保留最新；
+	// 切片 2f：失败回复重放）。Reply 切片需深拷贝存储，与调用方解耦。
+	PutFailedReply(reply FailedReply) error
+	// GetFailedReply 读取该会话最新的失败回复快照（无记录返回 false）。
+	// 返回的 Reply 是副本，调用方可安全修改。
+	GetFailedReply(connectorID, chat string) (FailedReply, bool)
+	// ClearFailedReply 删除该会话的失败回复快照（重放成功/后续投递成功后调用；幂等）。
+	ClearFailedReply(connectorID, chat string) error
+
 	// ClaimConnectorOwner 原子认领连接器运行归属（docs/bots/07-config-ux.md §5.6）：
 	// 「读旧值 → 判存活 → 写新值」在单次存储事务内完成（storefile 在数据目录锁内，
 	// 可跨进程互斥）。
@@ -111,6 +120,8 @@ type MemoryStore struct {
 	claimed  map[string]time.Time
 	states   map[string]map[string]string
 	owners   map[string]OwnerRecord
+	// failedReplies 是失败回复快照账本（切片 2f；键 = connectorID|chat）。
+	failedReplies map[string]FailedReply
 	// runnerPreference 是全局 runner 选举偏好（D2；空 = 默认）。实现可选能力
 	// 接口 RunnerPreferenceStore，供 restapi /connectors/runner-preference 使用。
 	runnerPreference string
@@ -192,11 +203,12 @@ func FindSameBotConfig(configs []Config, candidate Config) (Config, bool) {
 // NewMemoryStore 构造内存存储，可预置配置。
 func NewMemoryStore(configs ...Config) *MemoryStore {
 	store := &MemoryStore{
-		configs:  make(map[string]Config, len(configs)),
-		bindings: make(map[string]Binding),
-		claimed:  make(map[string]time.Time),
-		states:   make(map[string]map[string]string),
-		owners:   make(map[string]OwnerRecord),
+		configs:       make(map[string]Config, len(configs)),
+		bindings:      make(map[string]Binding),
+		claimed:       make(map[string]time.Time),
+		states:        make(map[string]map[string]string),
+		owners:        make(map[string]OwnerRecord),
+		failedReplies: make(map[string]FailedReply),
 	}
 	for _, cfg := range configs {
 		store.configs[cfg.ID] = cfg
@@ -226,6 +238,11 @@ func (s *MemoryStore) DeleteConfig(id string) error {
 	for key := range s.bindings {
 		if strings.HasPrefix(key, prefix) {
 			delete(s.bindings, key)
+		}
+	}
+	for key := range s.failedReplies {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.failedReplies, key)
 		}
 	}
 	return nil
@@ -350,6 +367,71 @@ func (s *MemoryStore) PollingState(connectorID string) PollingState {
 		s.states[connectorID] = values
 	}
 	return &memoryPollingState{store: s, connectorID: connectorID}
+}
+
+// PutFailedReply 记录/覆盖一条失败回复快照（内存实现；深拷贝与调用方解耦）。
+func (s *MemoryStore) PutFailedReply(reply FailedReply) error {
+	reply.ConnectorID = strings.TrimSpace(reply.ConnectorID)
+	reply.Chat = strings.TrimSpace(reply.Chat)
+	if reply.ConnectorID == "" || reply.Chat == "" {
+		return errors.New("memory store: failed reply requires connector id and chat")
+	}
+	if reply.FailedAt.IsZero() {
+		reply.FailedAt = time.Now().UTC()
+	}
+	reply.Reply = cloneOutboundMessages(reply.Reply)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failedReplies == nil {
+		s.failedReplies = make(map[string]FailedReply)
+	}
+	s.failedReplies[bindingKey(reply.ConnectorID, reply.Chat)] = reply
+	return nil
+}
+
+// GetFailedReply 读取失败回复快照（内存实现；返回副本）。
+func (s *MemoryStore) GetFailedReply(connectorID, chat string) (FailedReply, bool) {
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if connectorID == "" || chat == "" {
+		return FailedReply{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.failedReplies[bindingKey(connectorID, chat)]
+	if !ok {
+		return FailedReply{}, false
+	}
+	record.Reply = cloneOutboundMessages(record.Reply)
+	return record, true
+}
+
+// ClearFailedReply 删除失败回复快照（内存实现；幂等）。
+func (s *MemoryStore) ClearFailedReply(connectorID, chat string) error {
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if connectorID == "" || chat == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.failedReplies, bindingKey(connectorID, chat))
+	return nil
+}
+
+// cloneOutboundMessages 深拷贝出站消息（Reply 快照与调用方解耦；Media 同样复制）。
+func cloneOutboundMessages(msgs []OutboundMessage) []OutboundMessage {
+	if len(msgs) == 0 {
+		return nil
+	}
+	out := make([]OutboundMessage, len(msgs))
+	for index, msg := range msgs {
+		out[index] = msg
+		if len(msg.Media) > 0 {
+			out[index].Media = append([]Media(nil), msg.Media...)
+		}
+	}
+	return out
 }
 
 // ClaimConnectorOwner 原子认领运行归属（内存实现；语义见 Store 接口）。

@@ -70,6 +70,18 @@ type stateFile struct {
 	// Owners 是连接器运行归属账本（owner/heartbeat_at/pid）；旧文件缺该键时
 	// 视为空表（向后兼容）。
 	Owners map[string]ownerRecord `json:"owners,omitempty"`
+	// FailedReplies 是失败回复快照账本（切片 2f；键 = connectorID\x00chat）。
+	FailedReplies map[string]failedReplyRecord `json:"failed_replies,omitempty"`
+}
+
+// failedReplyRecord 是失败回复快照在 state.json 中的形状（切片 2f）。
+type failedReplyRecord struct {
+	ConnectorID string                       `json:"connector_id"`
+	Chat        string                       `json:"chat"`
+	MessageID   string                       `json:"message_id,omitempty"`
+	Reply       []connectors.OutboundMessage `json:"reply,omitempty"`
+	Error       string                       `json:"error,omitempty"`
+	FailedAt    time.Time                    `json:"failed_at"`
 }
 
 // ownerRecord 是运行归属在 state.json 中的形状（docs/bots/07-config-ux.md §5.6）。
@@ -251,6 +263,11 @@ func (s *ConfigStore) DeleteConfig(id string) error {
 		for key := range state.Claimed {
 			if strings.HasPrefix(key, prefix) {
 				delete(state.Claimed, key)
+			}
+		}
+		for key := range state.FailedReplies {
+			if strings.HasPrefix(key, prefix) {
+				delete(state.FailedReplies, key)
 			}
 		}
 	})
@@ -437,6 +454,81 @@ func (p *pollingState) Set(key, value string) error {
 			state.Cursors[p.connectorID] = cursors
 		}
 		cursors[key] = value
+	})
+}
+
+// ── 失败回复快照（切片 2f：失败回复重放） ──────────────────────────────────
+
+func failedReplyKey(connectorID, chat string) string {
+	return strings.TrimSpace(connectorID) + "\x00" + strings.TrimSpace(chat)
+}
+
+// PutFailedReply 记录/覆盖一条失败回复快照（同 connector+chat 只保留最新）。
+func (s *ConfigStore) PutFailedReply(reply connectors.FailedReply) error {
+	if s == nil {
+		return errors.New("storefile: store is not configured")
+	}
+	reply.ConnectorID = strings.TrimSpace(reply.ConnectorID)
+	reply.Chat = strings.TrimSpace(reply.Chat)
+	if reply.ConnectorID == "" || reply.Chat == "" {
+		return errors.New("storefile: failed reply requires connector id and chat")
+	}
+	if reply.FailedAt.IsZero() {
+		reply.FailedAt = time.Now().UTC()
+	}
+	key := failedReplyKey(reply.ConnectorID, reply.Chat)
+	return s.mutateState(func(state *stateFile) {
+		if state.FailedReplies == nil {
+			state.FailedReplies = make(map[string]failedReplyRecord)
+		}
+		state.FailedReplies[key] = failedReplyRecord{
+			ConnectorID: reply.ConnectorID,
+			Chat:        reply.Chat,
+			MessageID:   reply.MessageID,
+			Reply:       append([]connectors.OutboundMessage(nil), reply.Reply...),
+			Error:       reply.Error,
+			FailedAt:    reply.FailedAt,
+		}
+	})
+}
+
+// GetFailedReply 读取失败回复快照（返回副本；无记录返回 false）。
+func (s *ConfigStore) GetFailedReply(connectorID, chat string) (connectors.FailedReply, bool) {
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if connectorID == "" || chat == "" {
+		return connectors.FailedReply{}, false
+	}
+	var out connectors.FailedReply
+	found := false
+	_ = s.observeState(func(state *stateFile) {
+		record, ok := state.FailedReplies[failedReplyKey(connectorID, chat)]
+		if !ok {
+			return
+		}
+		found = true
+		out = connectors.FailedReply{
+			ConnectorID: record.ConnectorID,
+			Chat:        record.Chat,
+			MessageID:   record.MessageID,
+			Reply:       append([]connectors.OutboundMessage(nil), record.Reply...),
+			Error:       record.Error,
+			FailedAt:    record.FailedAt,
+		}
+	})
+	return out, found
+}
+
+// ClearFailedReply 删除失败回复快照（幂等）。
+func (s *ConfigStore) ClearFailedReply(connectorID, chat string) error {
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if connectorID == "" || chat == "" {
+		return nil
+	}
+	key := failedReplyKey(connectorID, chat)
+	return s.mutateState(func(state *stateFile) {
+		delete(state.FailedReplies, key)
 	})
 }
 
@@ -1071,6 +1163,9 @@ func (s *ConfigStore) reloadStateLocked() error {
 	}
 	if s.state.Owners == nil {
 		s.state.Owners = make(map[string]ownerRecord)
+	}
+	if s.state.FailedReplies == nil {
+		s.state.FailedReplies = make(map[string]failedReplyRecord)
 	}
 	// 持续并集迁移（docs/bots/09 §4.2 D1）：规范文件可能先由另一宿主创建，
 	// 本宿主的旧位置数据仍需并入——所以迁移不只在"文件缺失"时跑一次，而是

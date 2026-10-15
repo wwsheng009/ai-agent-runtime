@@ -3,7 +3,9 @@
 // 设计见 docs/bots/04-migration-roadmap.md P2「QQ 适配器（WS gateway、断线 resume）」。
 // 切片 1 范围：App Access Token 缓存、gateway 握手（Identify/Resume/心跳）、
 // 群@/C2C（含频道 @ 的防御性解析）文本入站、被动回复（msg_id + msg_seq）与
-// 游标持久化（gateway_session_id / gateway_seq）；媒体与主动消息能力待续。
+// 游标持久化（gateway_session_id / gateway_seq）；媒体能力已补齐（入站附件
+// 元数据 + MediaFetcher 下载、出站富媒体上传发送 + 文本媒体指令协议）；主动
+// 消息配额/频控账本待续。
 //
 // 协议细节镜像上游 codex-server/backend/internal/bots/qqbot.go，契约适配为
 // connectors.Provider / PollingProvider（无新增接口）。
@@ -69,7 +71,13 @@ const (
 	// 按 rune 切分（与上游 codex-server 的 qqbotMessageTextLimitRunes 一致），
 	// 被动回复的多个分片按 msg_seq 递增去重。
 	maxMessageRunes = 2000
+
+	// qqAttachmentFence 是出站媒体指令的围栏块名（仅通道专属名：通用
+	// `attachments` 会与普通代码块冲突，不采用；见 connectors.ParseOutboundMediaDirectives）。
+	qqAttachmentFence = "qq-attachments"
 )
+
+var qqAttachmentFenceNames = []string{qqAttachmentFence}
 
 // 聊天键前缀（InboundMessage.Chat 的稳定格式；Send 据此选择回复端点）。
 const (
@@ -104,6 +112,15 @@ type Provider struct {
 	mediaLimitBytes int64
 	// chunkedThreshold 覆盖分片上传阈值（0 = 默认 chunkedUploadThreshold）。
 	chunkedThreshold int64
+
+	// proactive 是主动消息（无 msg_id）的本机频控账本（见 ratelimit.go）。
+	proactive proactiveLedger
+
+	// passiveReplies 是被动回复次数账本（见 passive_reply.go）；
+	// passiveLimitUser/Group 覆盖官方次数上限（0 = 用默认，测试/高级用）。
+	passiveReplies    passiveReplyLedger
+	passiveLimitUser  int
+	passiveLimitGroup int
 }
 
 type tokenCacheEntry struct {
@@ -185,6 +202,18 @@ func WithChunkedUploadThreshold(limit int64) Option {
 	}
 }
 
+// WithPassiveReplyLimits 覆盖被动回复次数上限（单聊/群；测试/高级用，<=0 忽略）。
+func WithPassiveReplyLimits(userLimit, groupLimit int) Option {
+	return func(p *Provider) {
+		if userLimit > 0 {
+			p.passiveLimitUser = userLimit
+		}
+		if groupLimit > 0 {
+			p.passiveLimitGroup = groupLimit
+		}
+	}
+}
+
 // New 构造 QQ 机器人 Provider。
 func New(opts ...Option) *Provider {
 	provider := &Provider{
@@ -248,6 +277,14 @@ func (p *Provider) Schema() api.ProviderSchema {
 				},
 				Help: "平台开启「接收所有消息」后生效：mention=仅响应@机器人的消息；all=每条群消息都交给 agent",
 			},
+			{
+				Key: "proactive_qps", Label: "主动消息 QPS 上限", Type: api.FieldNumber, Default: "10",
+				Help: "本机预检：主动消息（无 msg_id）每秒上限；留空=默认 10，填 0=不限制（平台仍兜底）",
+			},
+			{
+				Key: "proactive_daily_limit", Label: "主动消息日上限", Type: api.FieldNumber, Default: "1000",
+				Help: "本机预检：每会话每日主动消息上限；留空=默认 1000，填 0=不限制（平台仍兜底）",
+			},
 		},
 		// QQ 官方开放平台没有扫码登录协议（凭据来自 bot.q.qq.com 后台），
 		// 「授权校验」= 等价便捷流：校验 app_id/app_secret 并拉取机器人信息。
@@ -290,7 +327,10 @@ func (p *Provider) SupportsPolling(cfg connectors.Config) bool {
 //   - 文本按 maxMessageRunes 分片（多段被动回复 msg_seq 递增去重）；
 //   - markdown_support=true 时以 msg_type=2 + markdown.content 发送；
 //   - 被动回复（带最近入站的 msg_id）失败且属可降级错误时，自动退化为主动发送；
-//   - Media 先 POST /files 上传取 file_info，再以 msg_type=7 发送。
+//   - Media 先 POST /files 上传取 file_info，再以 msg_type=7 发送；
+//   - 出站媒体来源两类：OutboundMessage.Media，以及回复文本里的媒体指令
+//     （```qq-attachments``` 围栏块、`IMAGE:/VIDEO:/FILE:` 指令行，见
+//     connectors.ParseOutboundMediaDirectives），指令行会从可见文本剥离。
 //
 // 没有可用 msg_id 时直接走主动消息路径：配额/权限由平台裁决，错误文本已脱敏。
 func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string, msgs []connectors.OutboundMessage) error {
@@ -308,7 +348,8 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 	// 后续消息与媒体直接走主动路径（与上游一致，避免重复失败）。
 	usePassive := strings.TrimSpace(p.lastInboundMsgID(target.chat)) != ""
 	for _, msg := range msgs {
-		text := strings.TrimSpace(msg.Text)
+		visibleText, attachments := connectors.ParseOutboundMediaDirectives(msg.Text, qqAttachmentFenceNames...)
+		text := strings.TrimSpace(visibleText)
 		if text != "" {
 			for _, chunk := range splitMessageText(text, maxMessageRunes) {
 				if err := p.sendTextWithFallback(ctx, cfg, target, chunk, &usePassive); err != nil {
@@ -316,18 +357,51 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 				}
 			}
 		}
-		for _, media := range msg.Media {
+		outboundMedia := make([]connectors.Media, 0, len(msg.Media)+len(attachments))
+		outboundMedia = append(outboundMedia, msg.Media...)
+		outboundMedia = append(outboundMedia, attachments...)
+		for _, media := range outboundMedia {
 			if err := p.sendMediaWithFallback(ctx, cfg, target, media, &usePassive); err != nil {
-				return err
+				// 单条媒体失败降级为文本提示（与微信同口径），不失败整条回复。
+				p.logf("qqbot: 发送媒体失败（%s %s）：%v；降级为文本提示",
+					media.Kind, qqMediaLabel(media), err)
+				notice := "[附件发送失败: " + qqMediaLabel(media) + "]"
+				if noticeErr := p.sendTextWithFallback(ctx, cfg, target, notice, &usePassive); noticeErr != nil {
+					return noticeErr
+				}
 			}
 		}
 	}
 	return nil
 }
 
+// qqMediaLabel 是媒体在日志/降级文案中的短标签。
+func qqMediaLabel(media connectors.Media) string {
+	label := firstNonEmpty(media.FileName, media.Path, media.URL, media.Kind)
+	runes := []rune(label)
+	if len(runes) > 60 {
+		return string(runes[:60]) + "…"
+	}
+	return label
+}
+
+// OutboundMediaNote 实现 connectors.OutboundMediaNoteProvider：把出站媒体指令
+// 协议提示注入入站文本，agent 据此在回复里声明要回发的文件/图片/视频。
+func (p *Provider) OutboundMediaNote() string {
+	return connectors.MediaDirectiveNote(qqAttachmentFence)
+}
+
 // sendTextWithFallback 发送一段文本；被动失败且可降级时翻转为主动重试。
 func (p *Provider) sendTextWithFallback(ctx context.Context, cfg connectors.Config, target chatTarget, text string, usePassive *bool) error {
 	passive := usePassive != nil && *usePassive
+	if passive && !p.passiveReplyAllowed(target) {
+		p.logf("qqbot: 会话 %s 被动回复已达本机计数上限（%d 次/条消息），改走主动消息",
+			target.chat, p.passiveReplyLimit(target.kind))
+		passive = false
+		if usePassive != nil {
+			*usePassive = false
+		}
+	}
 	err := p.sendText(ctx, cfg, target, text, passive)
 	if err != nil && passive && shouldFallbackToProactive(err) {
 		if usePassive != nil {
@@ -341,6 +415,14 @@ func (p *Provider) sendTextWithFallback(ctx context.Context, cfg connectors.Conf
 // sendMediaWithFallback 发送一条媒体；语义同 sendTextWithFallback。
 func (p *Provider) sendMediaWithFallback(ctx context.Context, cfg connectors.Config, target chatTarget, media connectors.Media, usePassive *bool) error {
 	passive := usePassive != nil && *usePassive
+	if passive && !p.passiveReplyAllowed(target) {
+		p.logf("qqbot: 会话 %s 被动回复已达本机计数上限（%d 次/条消息），改走主动消息",
+			target.chat, p.passiveReplyLimit(target.kind))
+		passive = false
+		if usePassive != nil {
+			*usePassive = false
+		}
+	}
 	err := p.sendMedia(ctx, cfg, target, media, passive)
 	if err != nil && passive && shouldFallbackToProactive(err) {
 		if usePassive != nil {
@@ -397,6 +479,11 @@ func messagesEndpoint(base string, target chatTarget) string {
 }
 
 func (p *Provider) sendText(ctx context.Context, cfg connectors.Config, target chatTarget, text string, passive bool) error {
+	if !passive {
+		if err := p.guardProactive(cfg, target.chat); err != nil {
+			return err
+		}
+	}
 	payload := map[string]any{
 		"content":  text,
 		"msg_type": 0,
@@ -407,12 +494,23 @@ func (p *Provider) sendText(ctx context.Context, cfg connectors.Config, target c
 			"msg_type": 2,
 		}
 	}
-	p.applyPassiveReply(payload, target, passive)
-	return p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil)
+	msgID := p.applyPassiveReply(payload, target, passive)
+	if err := p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil); err != nil {
+		return err
+	}
+	if msgID != "" {
+		p.passiveReplies.record(target.chat, msgID)
+	}
+	return nil
 }
 
 // sendMedia 发送一条 rich media（msg_type=7）：先上传取 file_info 再发消息。
 func (p *Provider) sendMedia(ctx context.Context, cfg connectors.Config, target chatTarget, media connectors.Media, passive bool) error {
+	if !passive {
+		if err := p.guardProactive(cfg, target.chat); err != nil {
+			return err
+		}
+	}
 	fileInfo, err := p.uploadRichMedia(ctx, cfg, target, media)
 	if err != nil {
 		return err
@@ -421,8 +519,14 @@ func (p *Provider) sendMedia(ctx context.Context, cfg connectors.Config, target 
 		"msg_type": 7,
 		"media":    map[string]any{"file_info": fileInfo},
 	}
-	p.applyPassiveReply(payload, target, passive)
-	return p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil)
+	msgID := p.applyPassiveReply(payload, target, passive)
+	if err := p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil); err != nil {
+		return err
+	}
+	if msgID != "" {
+		p.passiveReplies.record(target.chat, msgID)
+	}
+	return nil
 }
 
 // uploadRichMedia 上传媒体并返回 file_info（POST /v2/{groups|users}/{id}/files，
@@ -631,17 +735,19 @@ func filesEndpoint(base string, target chatTarget) string {
 }
 
 // applyPassiveReply 给被动回复补齐 msg_id/msg_seq；无最近入站 msg_id 时保持
-// 主动消息语义（不带两字段直发，由平台裁决配额/权限）。
-func (p *Provider) applyPassiveReply(payload map[string]any, target chatTarget, passive bool) {
+// 主动消息语义（不带两字段直发，由平台裁决配额/权限）。返回实际使用的 msg_id
+// （未走被动回复时为空串），供调用方在成功后记账。
+func (p *Provider) applyPassiveReply(payload map[string]any, target chatTarget, passive bool) string {
 	if !passive {
-		return
+		return ""
 	}
 	msgID := strings.TrimSpace(p.lastInboundMsgID(target.chat))
 	if msgID == "" {
-		return
+		return ""
 	}
 	payload["msg_id"] = msgID
 	payload["msg_seq"] = p.nextMsgSeq(target.chat)
+	return msgID
 }
 
 // shouldFallbackToProactive 报告被动回复失败是否可降级为主动发送：

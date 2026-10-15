@@ -1,16 +1,21 @@
 // Package wechat 实现微信（iLink bot）通道适配器：长轮询 getupdates + 文本收发 +
-// 扫码登录（ActionProvider）+ typing ticket。
+// 扫码登录（ActionProvider）+ typing ticket + 媒体收发（P3 真媒体切片）。
 //
 // 设计见 docs/bots/04-migration-roadmap.md P3「微信 + 媒体/主动推送完善」。
-// 切片 2b 范围：文本收发（getupdates 长轮询、sync_buf 游标持久化、sendmessage）、
+// 已落地：文本收发（getupdates 长轮询、sync_buf 游标持久化、sendmessage）、
 // 扫码登录（start_login / login_status 两个 action，成功后以 settings/secrets
-// 合并补丁回填）、typing（TypingProvider）、入站媒体降级为文本占位；
-// 真媒体（CDN 上传/下载/转码）与 errcode -2 的失败重放留待 P3 后续切片。
+// 合并补丁回填）、typing（TypingProvider）、媒体链路（入站 CDN 下载/AES 解密/
+// 语音 silk→wav 转码 + 出站 getuploadurl 上传与媒体消息；见 media.go /
+// attachments.go；远端页面解析与流媒体清单转码见 resolver.go / remote_video.go；
+// errcode -2 失败回复重放的重发意图判定见 replay.go）。
 //
-// 协议细节镜像上游 codex-server/backend/internal/bots/wechat.go 与
-// wechat_auth.go（getupdates/getconfig/sendmessage/sendtyping、get_bot_qrcode/
-// get_qrcode_status、markdown 清洗），契约适配为 connectors.Provider /
-// PollingProvider / ActionProvider / TypingProvider（无新增接口）。
+// 待续：微信作为注意力通道的开关/静音（docs/bots/04 P3）。
+//
+// 协议细节镜像上游 codex-server/backend/internal/bots/wechat*.go
+// （getupdates/getconfig/sendmessage/sendtyping/getuploadurl/CDN 上传下载、
+// get_bot_qrcode/get_qrcode_status、markdown 清洗、attachment 协议），契约
+// 适配为 connectors.Provider / PollingProvider / ActionProvider /
+// TypingProvider（无新增接口）。
 package wechat
 
 import (
@@ -299,13 +304,22 @@ type Provider struct {
 	retryDelay time.Duration
 	logf       func(format string, args ...any)
 	now        func() time.Time
+	// mediaHostPolicy 是出站远端媒体 URL 的宿主校验策略（见
+	// WithMediaHostPolicy）；nil = 默认拒绝回环/私网/链路本地等地址
+	// （SSRF 防护，docs/bots/08 §7.3）。
+	mediaHostPolicy func(host string) error
+	// mediaLimitBytes 覆盖媒体下载/上传体量上限（字节；0 = 默认
+	// maxMediaTransferBytes）。Schema `media_limit_mb`（MB）为运行时配置。
+	mediaLimitBytes int64
 
-	// mu 保护三类进程内状态：扫码登录态（按 connectorID）、最近 context_token
-	// （按 connectorID+chat，回复必需）、typing ticket 缓存。
+	// mu 保护四类进程内状态：扫码登录态（按 connectorID）、最近 context_token
+	// （按 connectorID+chat，回复必需）、typing ticket 缓存、宿主附着的持久化
+	// 状态视图（按 connectorID，StateAwareProvider）。
 	mu       sync.Mutex
 	logins   map[string]*loginSession
 	contexts map[string]string
 	typing   map[string]typingCacheEntry
+	states   map[string]connectors.PollingState
 }
 
 type typingCacheEntry struct {
@@ -348,6 +362,23 @@ func WithLogger(logf func(format string, args ...any)) Option {
 	}
 }
 
+// WithMediaHostPolicy 覆盖出站远端媒体 URL 的宿主校验策略（测试/内网部署
+// 逃生口）：policy 返回 error 表示拒绝访问该宿主；传 nil 恢复默认策略
+// （拒绝回环/私网/链路本地/CGNAT/未指定地址）。
+func WithMediaHostPolicy(policy func(host string) error) Option {
+	return func(p *Provider) { p.mediaHostPolicy = policy }
+}
+
+// WithInboundMediaLimit 覆盖媒体下载/上传体量上限（字节；构造级覆盖，测试/
+// 高级用；<=0 忽略。运行时配置见 Schema `media_limit_mb`）。
+func WithInboundMediaLimit(limit int64) Option {
+	return func(p *Provider) {
+		if limit > 0 {
+			p.mediaLimitBytes = limit
+		}
+	}
+}
+
 // New 构造微信 Provider。
 func New(opts ...Option) *Provider {
 	provider := &Provider{
@@ -358,6 +389,7 @@ func New(opts ...Option) *Provider {
 		logins:     make(map[string]*loginSession),
 		contexts:   make(map[string]string),
 		typing:     make(map[string]typingCacheEntry),
+		states:     make(map[string]connectors.PollingState),
 	}
 	for _, opt := range opts {
 		opt(provider)
@@ -397,6 +429,12 @@ func (p *Provider) Schema() api.ProviderSchema {
 				Help: "可留空；用于测试替身/反向代理，优先于 base_url",
 			},
 			{
+				Key: cdnBaseURLKey, Label: "媒体 CDN 基址", Type: api.FieldURL,
+				Placeholder: defaultCDNBaseURL,
+				Default:     defaultCDNBaseURL,
+				Help:        "图片/语音/文件上传下载走 iLink 媒体 CDN；留空即用官方默认地址",
+			},
+			{
 				Key: "account_id", Label: "账号 ID", Type: api.FieldText,
 				Help: "扫码登录成功后自动回填（ilink_bot_id）",
 			},
@@ -407,6 +445,12 @@ func (p *Provider) Schema() api.ProviderSchema {
 			{
 				Key: "route_tag", Label: "路由标签", Type: api.FieldText,
 				Help: "可留空；透传 SKRouteTag",
+			},
+			{
+				Key: mediaLimitSetting, Label: "媒体大小上限 (MB)", Type: api.FieldNumber,
+				Default:     "100",
+				Placeholder: "100",
+				Help:        "单文件下载/上传上限（MB，默认 100）；超出即拒绝并降级为文本提示",
 			},
 			{
 				Key: "mode", Label: "接入模式", Type: api.FieldEnum, Default: "polling",
@@ -466,6 +510,29 @@ func connectorKey(cfg connectors.Config) string {
 	return "base:" + strings.TrimRight(strings.TrimSpace(cfg.Setting("base_url", "")), "/")
 }
 
+// AttachState 实现 connectors.StateAwareProvider：附着本连接器的持久化 KV
+// 视图（与轮询游标同一命名空间），用于 context_token 快照落盘/回填——重启后
+// Send 内存未命中时可从状态视图恢复，无需等该会话下一条入站。重复附着幂等。
+func (p *Provider) AttachState(connectorID string, state connectors.PollingState) {
+	connectorID = strings.TrimSpace(connectorID)
+	if connectorID == "" || state == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.states == nil {
+		p.states = make(map[string]connectors.PollingState)
+	}
+	p.states[connectorID] = state
+}
+
+// stateFor 返回该连接器已附着的持久化状态视图（未附着返回 nil）。
+func (p *Provider) stateFor(connectorID string) connectors.PollingState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.states[strings.TrimSpace(connectorID)]
+}
+
 // ── Provider 接口 ───────────────────────────────────────────────────────────
 
 // Activate 校验凭据并预热登录态缓存：
@@ -515,13 +582,17 @@ func (p *Provider) SupportsPolling(cfg connectors.Config) bool {
 
 // ── 发送 ────────────────────────────────────────────────────────────────────
 
-// Send 逐条发送文本消息（POST /ilink/bot/sendmessage）。
+// Send 逐条发送消息（文本 + 媒体，POST /ilink/bot/sendmessage）。
+//
+// 文本先按上游策略清洗 markdown；媒体来源两类：OutboundMessage.Media
+// （Path/URL）与回复文本里的 attachment 协议指令（wechat-attachments 围栏块/
+// MEDIA: 指令行，见 attachments.go），文本中的指令行会被剥离后再发送。
+// 单条媒体失败降级为文本提示（不失败整条回复）。
 //
 // 回复必须携带该会话最近一次入站消息的 context_token：轮询解析入站时按
-// connector+chat 记忆（进程内，防御上限 maxTrackedChats），重启后需等该会话
-// 下一次入站才能回复——上游把 token 存进会话 ProviderState 持久化，本仓
-// ProviderData 暂未落库，标注为 P3 改进点（随真媒体切片一起处理）。
-// OutboundMessage.Media 本期忽略（P3 做 CDN 上传），markdown 按上游策略清洗。
+// connector+chat 记忆（进程内，防御上限 maxTrackedChats），并（宿主附着
+// StateAwareProvider 时）写持久化快照——重启后 Send 未命中内存时回填，
+// 无需等该会话下一条入站即可回复。
 func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string, msgs []connectors.OutboundMessage) error {
 	token := p.tokenFor(cfg)
 	if token == "" {
@@ -539,18 +610,40 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 	if contextToken == "" {
 		return fmt.Errorf("wechat: chat %q 缺少 context_token（回复需要该会话最近一次入站消息）", toUserID)
 	}
+	routeTag := p.routeTag(cfg)
+	cdnBase := cdnBaseFor(cfg)
 
 	for _, msg := range msgs {
-		text := cleanMarkdown(msg.Text)
-		if text == "" {
-			// P3：OutboundMessage.Media（CDN 上传）与纯媒体消息暂不支持。
+		visibleText, attachments := parseAttachmentProtocol(msg.Text)
+		text := cleanMarkdown(visibleText)
+		outboundMedia := make([]connectors.Media, 0, len(msg.Media)+len(attachments))
+		outboundMedia = append(outboundMedia, msg.Media...)
+		outboundMedia = append(outboundMedia, attachments...)
+		if text == "" && len(outboundMedia) == 0 {
 			continue
 		}
-		if err := p.sendTextMessage(ctx, base, token, p.routeTag(cfg), toUserID, contextToken, text); err != nil {
-			return err
+		if text != "" {
+			if err := p.sendTextMessage(ctx, base, token, routeTag, toUserID, contextToken, text); err != nil {
+				return err
+			}
+		}
+		for _, media := range outboundMedia {
+			if err := p.sendOutboundMedia(ctx, cfg, base, cdnBase, token, routeTag, toUserID, contextToken, media); err != nil {
+				p.logf("wechat: 发送媒体失败（%s %s）：%v；降级为文本提示",
+					media.Kind, mediaLabel(media), err)
+				fallback := "[附件发送失败: " + mediaLabel(media) + "]"
+				if fallbackErr := p.sendTextMessage(ctx, base, token, routeTag, toUserID, contextToken, fallback); fallbackErr != nil {
+					return fallbackErr
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// mediaLabel 是媒体在日志/降级文案中的短标签。
+func mediaLabel(media connectors.Media) string {
+	return truncateRunes(firstNonEmpty(media.FileName, media.Path, media.URL, media.Kind), 60)
 }
 
 func (p *Provider) sendTextMessage(ctx context.Context, base, token, routeTag, toUserID, contextToken, text string) error {
@@ -664,12 +757,14 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 		}
 
 		for _, message := range response.Msgs {
-			inbound, ok := p.inboundMessage(cfg.ID, message)
+			inbound, ok := p.inboundMessage(ctx, cfg, message)
 			if !ok {
 				continue
 			}
 			if contextToken, _ := inbound.ProviderData[contextTokenKey].(string); strings.TrimSpace(contextToken) != "" {
-				p.rememberContextToken(connectorKey(cfg), inbound.Chat, contextToken)
+				if p.rememberContextToken(connectorKey(cfg), inbound.Chat, contextToken) {
+					p.persistContextTokens(cfg.ID)
+				}
 			}
 			if err := handle(ctx, inbound); err != nil {
 				if ctx.Err() != nil {
@@ -696,8 +791,9 @@ func (p *Provider) getUpdates(ctx context.Context, base, token, routeTag, syncBu
 }
 
 // inboundMessage 解析一条入站消息：仅用户消息（message_type=1）；文本/语音
-// 转写/引用文本拼成正文，媒体降级为文本占位并保留元数据（P3 下载）。
-func (p *Provider) inboundMessage(connectorID string, message wechatMessage) (connectors.InboundMessage, bool) {
+// 转写/引用文本拼成正文，媒体（图片/语音/文件/视频）下载解密后落盘并把
+// local_path 写进摘要块，下载失败保留元数据块（见 media.go / attachments.go）。
+func (p *Provider) inboundMessage(ctx context.Context, cfg connectors.Config, message wechatMessage) (connectors.InboundMessage, bool) {
 	if message.MessageType != messageTypeUser {
 		return connectors.InboundMessage{}, false
 	}
@@ -707,15 +803,15 @@ func (p *Provider) inboundMessage(connectorID string, message wechatMessage) (co
 	}
 
 	text := extractText(message.ItemList)
-	media := extractMedia(message.ItemList)
-	summary := summaryText(text, media)
+	media := p.resolveInboundMedia(ctx, cfg, extractInboundMediaRefs(message.ItemList))
+	summary := composeInboundText(text, media)
 	if strings.TrimSpace(summary) == "" {
 		return connectors.InboundMessage{}, false
 	}
 
 	title := firstNonEmpty(strings.TrimSpace(message.SessionID), fromUserID)
 	return connectors.InboundMessage{
-		ConnectorID: connectorID,
+		ConnectorID: cfg.ID,
 		Provider:    Name,
 		Chat:        fromUserID,
 		ChatTitle:   title,
@@ -784,110 +880,6 @@ func extractQuotedText(item wechatMessageItem) string {
 	return ""
 }
 
-// extractMedia 把媒体项转为元数据（P3 下载用）与文本占位行。
-func extractMedia(items []wechatMessageItem) []connectors.Media {
-	var media []connectors.Media
-	for _, item := range items {
-		switch item.Type {
-		case itemTypeImage:
-			entry := connectors.Media{Kind: "image"}
-			if item.ImageItem != nil {
-				entry.FileID = mediaFileID(item.ImageItem.Media)
-				entry.Size = item.ImageItem.MidSize
-			}
-			media = append(media, entry)
-		case itemTypeVoice:
-			// 有转写文本的语音已并入正文，不再产生「[语音]」占位；只有
-			// 无转写时才降级为占位（P3 真媒体/转码）。
-			if item.VoiceItem != nil && strings.TrimSpace(item.VoiceItem.Text) == "" {
-				media = append(media, connectors.Media{Kind: "voice", FileID: mediaFileID(item.VoiceItem.Media)})
-			}
-		case itemTypeFile:
-			entry := connectors.Media{Kind: "file"}
-			if item.FileItem != nil {
-				entry.FileID = mediaFileID(item.FileItem.Media)
-				entry.FileName = strings.TrimSpace(item.FileItem.FileName)
-				entry.Size = parseSize(item.FileItem.Len)
-			}
-			media = append(media, entry)
-		case itemTypeVideo:
-			entry := connectors.Media{Kind: "video"}
-			if item.VideoItem != nil {
-				entry.FileID = mediaFileID(item.VideoItem.Media)
-				entry.Size = item.VideoItem.VideoSize
-			}
-			media = append(media, entry)
-		}
-	}
-	return media
-}
-
-// mediaFileID 取媒体的可下载句柄（P3 真媒体用）：优先 full_url，退回加密查询参数。
-func mediaFileID(media *wechatCDNMedia) string {
-	if media == nil {
-		return ""
-	}
-	if fullURL := strings.TrimSpace(media.FullURL); fullURL != "" {
-		return fullURL
-	}
-	return strings.TrimSpace(media.EncryptQueryParam)
-}
-
-// summaryText 把正文与媒体占位行拼成给 agent 的文本（本轮媒体降级策略：
-// 图片「[图片]」、语音「[语音]」（有转写则用转写）、文件「[文件: name]」、
-// 视频「[视频]」；P3 再做真媒体下载/转码）。
-func summaryText(text string, media []connectors.Media) string {
-	text = strings.TrimSpace(text)
-	placeholder := mediaPlaceholders(media)
-	switch {
-	case text == "" && placeholder == "":
-		return ""
-	case placeholder == "":
-		return text
-	case text == "":
-		return placeholder
-	default:
-		return text + "\n" + placeholder
-	}
-}
-
-// mediaPlaceholders 按序生成占位行；图片/视频占位不重复出现（多图合并为一行）。
-func mediaPlaceholders(media []connectors.Media) string {
-	if len(media) == 0 {
-		return ""
-	}
-	lines := make([]string, 0, len(media))
-	for _, item := range media {
-		switch item.Kind {
-		case "image":
-			lines = append(lines, "[图片]")
-		case "voice":
-			lines = append(lines, "[语音]")
-		case "video":
-			lines = append(lines, "[视频]")
-		case "file":
-			if name := strings.TrimSpace(item.FileName); name != "" {
-				lines = append(lines, "[文件: "+name+"]")
-			} else {
-				lines = append(lines, "[文件]")
-			}
-		}
-	}
-	return strings.Join(dedupeLines(lines), "\n")
-}
-
-// dedupeLines 相邻重复占位合并（同一消息里多张图片只留一行「[图片]」）。
-func dedupeLines(lines []string) []string {
-	deduped := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if len(deduped) > 0 && deduped[len(deduped)-1] == line {
-			continue
-		}
-		deduped = append(deduped, line)
-	}
-	return deduped
-}
-
 func parseSize(raw string) int64 {
 	if parsed, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil && parsed > 0 {
 		return parsed
@@ -913,12 +905,18 @@ func stableMessageID(message wechatMessage) string {
 
 // ── context_token 记忆（回复必需） ──────────────────────────────────────────
 
-func (p *Provider) rememberContextToken(connectorID, chat, token string) {
+// contextTokensStateKey 是 context_token 快照在持久化状态里的键：
+// JSON map[chat]token（防御上限与内存一致 maxTrackedChats）。
+const contextTokensStateKey = "context_tokens"
+
+// rememberContextToken 记忆 context_token；返回是否发生变化（未变化时不触发
+// 落盘，避免同一 token 的重复消息带来冗余状态写入）。
+func (p *Provider) rememberContextToken(connectorID, chat, token string) bool {
 	connectorID = strings.TrimSpace(connectorID)
 	chat = strings.TrimSpace(chat)
 	token = strings.TrimSpace(token)
 	if connectorID == "" || chat == "" || token == "" {
-		return
+		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -926,18 +924,81 @@ func (p *Provider) rememberContextToken(connectorID, chat, token string) {
 		p.contexts = make(map[string]string)
 	}
 	key := connectorID + "\n" + chat
+	if existing, ok := p.contexts[key]; ok && existing == token {
+		return false
+	}
 	if len(p.contexts) >= maxTrackedChats {
 		if _, exists := p.contexts[key]; !exists {
 			p.contexts = make(map[string]string)
 		}
 	}
 	p.contexts[key] = token
+	return true
 }
 
-func (p *Provider) contextToken(connectorID, chat string) string {
+// persistContextTokens 把该连接器的内存 context_token 快照写入持久化状态
+// （JSON map[chat]token；键见 contextTokensStateKey）。未附着状态视图时静默跳过。
+func (p *Provider) persistContextTokens(connectorID string) {
+	connectorID = strings.TrimSpace(connectorID)
+	if connectorID == "" {
+		return
+	}
+	state := p.stateFor(connectorID)
+	if state == nil {
+		return
+	}
+	prefix := connectorID + "\n"
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.contexts[strings.TrimSpace(connectorID)+"\n"+strings.TrimSpace(chat)]
+	snapshot := make(map[string]string, len(p.contexts))
+	for key, token := range p.contexts {
+		if chat, ok := strings.CutPrefix(key, prefix); ok && chat != "" {
+			snapshot[chat] = token
+		}
+	}
+	p.mu.Unlock()
+	if len(snapshot) == 0 {
+		return
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		p.logf("wechat: encode context_token snapshot failed: %v", err)
+		return
+	}
+	if err := state.Set(contextTokensStateKey, string(raw)); err != nil {
+		p.logf("wechat: persist context_token failed: %v", err)
+	}
+}
+
+// contextToken 读取会话最近一次入站消息的 context_token：进程内优先；未命中
+// 时从持久化快照回填（跨重启：重启后无需等该会话下一条入站即可回复）。
+func (p *Provider) contextToken(connectorID, chat string) string {
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	p.mu.Lock()
+	token := p.contexts[connectorID+"\n"+chat]
+	p.mu.Unlock()
+	if token != "" {
+		return token
+	}
+
+	state := p.stateFor(connectorID)
+	if state == nil {
+		return ""
+	}
+	raw, ok := state.Get(contextTokensStateKey)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	snapshot := map[string]string{}
+	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		return ""
+	}
+	persisted := strings.TrimSpace(snapshot[chat])
+	if persisted == "" {
+		return ""
+	}
+	p.rememberContextToken(connectorID, chat, persisted)
+	return persisted
 }
 
 // ── typing（TypingProvider） ────────────────────────────────────────────────
@@ -1182,6 +1243,8 @@ func (p *Provider) doJSON(ctx context.Context, timeout time.Duration, base, toke
 	case *qrCodeResponse:
 		return apiError(path, typed.apiEnvelope)
 	case *qrCodeStatusResponse:
+		return apiError(path, typed.apiEnvelope)
+	case *wechatGetUploadURLResponse:
 		return apiError(path, typed.apiEnvelope)
 	}
 	return nil

@@ -7,8 +7,9 @@ package qqbot
 //     WithMediaHostGuard 覆盖；
 //   - 体量上限：maxInboundMediaBytes（默认 100MB，可用 WithInboundMediaLimit
 //     覆盖，测试用）；超限拒绝并保留元数据；
-//   - 落盘：系统临时目录（文件名净化 + kind 兜底扩展名），入站文件保留
-//     供 agent 读取（清理策略与微信媒体实现同口径：暂不做自动清理）。
+//   - 落盘：系统临时目录（文件名净化 + kind 兜底扩展名），入站文件保留供
+//     agent 读取；过期目录按 24h 窗口低频清扫（每 64 次下载触发一次，
+//     best-effort，与微信媒体实现同口径）。
 
 import (
 	"context"
@@ -22,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
@@ -35,7 +37,16 @@ const (
 	mediaDownloadTimeout = 60 * time.Second
 	// mediaRedirectLimit 是允许的最大重定向跳数。
 	mediaRedirectLimit = 5
+	// mediaTempDirPrefix 是入站媒体临时目录名前缀（os.MkdirTemp 使用）。
+	mediaTempDirPrefix = "qqbot-media-"
+	// mediaTempRetention 是入站媒体临时目录的清理窗口（与微信同口径）。
+	mediaTempRetention = 24 * time.Hour
+	// mediaSweepEvery 是「每 N 次下载触发一次清扫」的节流（避免每次下载都扫描）。
+	mediaSweepEvery = 64
 )
+
+// mediaSweepCounter 是临时目录清扫的节流计数（进程内，跨连接器共享）。
+var mediaSweepCounter atomic.Uint64
 
 // mediaHostGuardFunc 校验单个主机名是否允许作为媒体目标（nil = 默认公网守卫）。
 type mediaHostGuardFunc func(host string) error
@@ -83,7 +94,8 @@ func (p *Provider) FetchInboundMedia(ctx context.Context, cfg connectors.Config,
 		return "", fmt.Errorf("qqbot: media too large (> %d bytes)", limit)
 	}
 
-	dir, err := os.MkdirTemp("", "qqbot-media-*")
+	p.maybeSweepMediaTempDirs()
+	dir, err := os.MkdirTemp("", mediaTempDirPrefix+"*")
 	if err != nil {
 		return "", fmt.Errorf("qqbot: create media dir failed: %w", err)
 	}
@@ -92,6 +104,37 @@ func (p *Provider) FetchInboundMedia(ctx context.Context, cfg connectors.Config,
 		return "", fmt.Errorf("qqbot: write media file failed: %w", err)
 	}
 	return path, nil
+}
+
+// maybeSweepMediaTempDirs 低频清扫过期的入站媒体临时目录：每次下载落盘前按
+// 节流触发，删除超过 mediaTempRetention 未更新的 qqbot-media-* 目录；
+// best-effort（失败只跳过，不影响下载）。
+func (p *Provider) maybeSweepMediaTempDirs() {
+	if mediaSweepCounter.Add(1)%mediaSweepEvery != 1 {
+		return
+	}
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	cutoff := now().Add(-mediaTempRetention)
+	tempRoot := os.TempDir()
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), mediaTempDirPrefix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.RemoveAll(filepath.Join(tempRoot, entry.Name()))
+		}
+	}
 }
 
 // mediaTransferLimit 返回生效的单条媒体体量上限（入站下载 / 出站读取共用；

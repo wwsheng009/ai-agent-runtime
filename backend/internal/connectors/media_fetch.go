@@ -105,6 +105,28 @@ func mediaSummaryBlock(item Media) string {
 	return strings.Join(lines, "\n")
 }
 
+// injectOutboundMediaNote 在入站文本尾部追加「如何回发媒体」的通道提示
+// （OutboundMediaNoteProvider 能力；已包含则不重复）。调用点在入站媒体物化
+// 之后（本地执行与远程派发两条路径），保证提示是文本最后一段。
+func (s *Service) injectOutboundMediaNote(provider Provider, msg *InboundMessage) {
+	if msg == nil {
+		return
+	}
+	noted, ok := provider.(OutboundMediaNoteProvider)
+	if !ok {
+		return
+	}
+	note := strings.TrimSpace(noted.OutboundMediaNote())
+	if note == "" || strings.Contains(msg.Text, note) {
+		return
+	}
+	if strings.TrimSpace(msg.Text) == "" {
+		msg.Text = note
+		return
+	}
+	msg.Text = strings.TrimSpace(msg.Text) + "\n\n" + note
+}
+
 func humanizeMediaKind(kind string) string {
 	trimmed := strings.TrimSpace(kind)
 	if trimmed == "" {

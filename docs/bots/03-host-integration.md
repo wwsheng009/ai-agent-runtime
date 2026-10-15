@@ -288,18 +288,47 @@ webhook 挂 `/hooks/connectors/{id}`）。Telegram Provider 提供 `api_base` �
 （默认 `https://api.telegram.org`，可指向自建 Bot API 服务器/测试替身），
 `internal/connectors/e2e_restart_test.go` 以 httptest 假 Bot API + storefile 文件态
 覆盖「重启续传不重复」（游标续传 + 去重账本拦截重投，`go test -race` 全绿）。
+**媒体双向已打通**：入站解析 `photo/document/voice/audio/video` → `Media`，经
+`MediaFetcher`（`getFile` + `/file/bot<token>/<path>` 下载）物化注入 `local_path`；
+出站支持 `OutboundMessage.Media` 与文本媒体指令（```telegram-attachments``` 围栏块、
+`IMAGE:/VIDEO:/FILE:/VOICE:` 指令行）：本地路径 multipart 上传、远端 URL 交
+Telegram 拉取、`file_id` 复用；单文件默认 20MB，入站临时目录 24h 低频清扫。
 QQ 机器人 Provider（`internal/connectors/providers/qqbot`，P2 切片 1）已在
 runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
 `app_id`/`app_secret`(secret)/`sandbox`/`api_base`；WS Identify/Resume/心跳与
 指数退避重连、群@/C2C 文本入站、被动回复 `msg_id`+`msg_seq` 已实现，游标
 `gateway_session_id`/`gateway_seq` 与 Telegram `update_offset` 共用
-`state.json` 的 cursors 视图（重启后 Resume）；媒体与主动消息待续。
-微信 Provider（`internal/connectors/providers/wechat`，P3 切片 2b：文本收发 +
-扫码登录 + typing）已在 runtime-server 与 aicli 两端注册：`modes=["polling"]`，
-字段 `bot_token`(secret)/`base_url`/`api_base`/`account_id`/`owner_user_id`/
-`route_tag`/`mode`；`getupdates` 长轮询（游标 `sync_buf` 持久化 + 指数退避重连）、
-`sendmessage` 文本与 markdown 清洗、`sendtyping` typing ticket、入站
-文本/引用/语音转写解析（图片/文件/视频降级为文本占位）已实现；真实媒体待续。
+`state.json` 的 cursors 视图（重启后 Resume）。**媒体双向已打通**：入站
+`attachments`（图片/视频/语音/文件）经 `MediaFetcher` 在 Service 工作协程
+物化（SSRF 守卫/重定向逐跳/100MB）→ `local_path` 摘要注入文本；出站支持
+`OutboundMessage.Media` 与**文本媒体指令协议**（```qq-attachments``` 围栏块、
+`IMAGE:/VIDEO:/FILE:/VOICE:` 指令行，解析器在 core
+`connectors.ParseOutboundMediaDirectives`），经 `POST /files`（file_type
+1/2/3/4）上传后以 `msg_type=7` 发送（远端 URL 优先官方直传、失败回落整文件
+上传），单条失败降级 `[附件发送失败: …]`；入站文本尾部经
+`OutboundMediaNoteProvider` 注入回发提示；入站临时目录 24h 低频清扫
+（每 64 次下载触发，best-effort）；单聊支持**输入状态**（`TypingProvider` →
+`msg_type=6 input_notify`，主动消息语义，失败静默降级）。主动消息配额/频控
+改为**本机预检账本**（`proactive_qps`/`proactive_daily_limit`，被动回复与输入
+状态不计入，超限回可操作错误，平台仍兜底）；被动回复另有**次数预检**（单聊
+4 次 / 群 5 次·条消息，达上限自动改走主动）。
+微信 Provider（`internal/connectors/providers/wechat`，P3 切片 2b/2c：文本收发 +
+扫码登录 + typing + 媒体收发）已在 runtime-server 与 aicli 两端注册：
+`modes=["polling"]`，字段 `bot_token`(secret)/`base_url`/`api_base`/
+`cdn_base_url`（媒体 CDN，默认 `https://novac2c.cdn.weixin.qq.com/c2c`）/
+`account_id`/`owner_user_id`/`route_tag`/`mode`；`getupdates` 长轮询（游标
+`sync_buf` 持久化 + 指数退避重连）、`sendmessage` 文本与 markdown 清洗、
+`sendtyping` typing ticket、入站文本/引用/语音转写解析；媒体（图片/语音/文件/
+视频）经 CDN 下载/AES 解密落盘（语音 silk→wav 转码，工具缺失降级）并把
+`local_path` 写入摘要块，出站支持 `OutboundMessage.Media`（Path/URL）与
+`wechat-attachments` attachment 协议（CDN 上传 image/video/file）；
+`context_token` 快照经核心 `StateAwareProvider` 附着接口落盘（重启后可续答，
+切片 2d），出站远端 URL 默认 SSRF 校验（回环/私网/CGNAT 拒绝、重定向逐跳
+校验）与声明类型校验（HTML/JSON/流媒体拒绝）；页面型 URL 由 resolver 提取
+候选媒体（og:image/og:video/内嵌 JSON/裸直链，递归 ≤3 + 防环），流媒体清单
+（m3u8/mpd）经转码器落成 mp4（切片 2e）；单文件媒体上限三层策略（切片 2g）：
+构造级 `WithInboundMediaLimit` > `media_limit_mb`（Schema，默认 100）> 默认
+100MB，覆盖入站下载/出站上传/远端 URL 下载。
 飞书 Provider（`internal/connectors/providers/feishu`，P1 切片 3：**webhook 文本收发**）
 已在 runtime-server 与 aicli 两端注册：`modes=["webhook"]`（WS 长连接未实现前不声明），
 字段 `app_id`(text,required)/`app_secret`(secret,required)/`verification_token`(secret)/
@@ -326,8 +355,28 @@ runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
   按 connector+chat 进程内记忆，失败按上游口径降级 chat 直发），否则
   `POST /open-apis/im/v1/messages?receive_id_type=chat_id`；`msg_type=text`、
   `content=json({"text":...})`，错误脱敏。
-**待续（P1 后续切片）**：WS 长连接与重连、卡片式流式回复（StreamingProvider）、
-typing 表情、媒体上传/下载、审批事件路由、msg_id 记忆跨重启持久化。
+- 媒体双向（2026-10-15）：入站 `image`/`file`/`audio`/`media` → `Media`（复合引用
+  `messageID|fileKey|type`，交 `MediaFetcher` 下载资源；媒体-only 消息给占位文本）；
+  出站读 `OutboundMessage.Media`，本地路径/远端 URL/`file_id` 经
+  `POST /open-apis/im/v1/files`（multipart）上传取 `file_key`，再发
+  `msg_type=image/file/audio/media`（图片 image_key、语音 audio、视频 media），
+  临时目录 24h 清扫，上传/发送失败降级文本；出站远端 URL 下载走 SSRF 宿主守卫
+  （`validatePublicMediaHost` + 重定向逐跳校验，`WithMediaHostPolicy` 可注入测试
+  逃生口；拒绝时降级 `[附件发送失败]` 且零上传）。
+- 流式编辑（2026-10-15）：`StartStreaming` 发可更新卡片（schema 2.0 +
+  `update_multi`）占位；`Update`/`Final` 用 `PATCH /im/v1/messages/{id}`
+  以累积文本整体替换卡片正文（同文本去重）；媒体拆分走普通富媒体发送
+  （先媒体后终态卡片）；`Fail` PATCH 失败文案（自身失败不抛错）。开关双层：
+  Service `Policy.streamingEnabled()` + Provider `Settings["streaming"]="true"`
+  （默认关闭，需真机验证）；创建/PATCH 失败由 Service 回退普通发送。
+- msg_id 记忆跨重启持久化（2026-10-15）：实现 `StateAwareProvider`——
+  入站记忆「chat → 最近入站 msg_id」（quote 目标）时同步快照到持久化 KV
+  （键 `reply_targets`，未变化不落盘），附着状态视图时回填（内存值优先）；
+  重启后回复直接带引用，无需等该会话下一条入站（对齐微信 context_token 模式）。
+- typing 表情（2026-10-15）：`TypingProvider`——回合开始给该会话最近入站消息
+  加 `Typing` 表情（POST `/reactions`），回合收尾 Stop 摘除（DELETE，幂等 +
+  WithoutCancel；失败只记日志）；无回复目标/失败 → nil 静默降级（体验项）。
+**待续（P1 后续切片）**：WS 长连接与重连、审批事件路由。
 **扫码登录 action 与返回约定（三端统一）**：
 
 - `POST /api/connectors/{id}/actions/start_login`（Schema.Actions kind=qr）：

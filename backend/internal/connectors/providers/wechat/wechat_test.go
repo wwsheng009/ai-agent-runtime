@@ -347,7 +347,7 @@ const sampleGetUpdatesBatch = `{
       "create_time_ms": "1730000000000",
       "item_list": [
         {"type": 1, "text_item": {"text": "你好", "ref_msg": {"text": "被引用的消息"}}},
-        {"type": 2, "image_item": {"mid_size": 2048, "media": {"full_url": "https://cdn.example/img-1"}}},
+        {"type": 2, "image_item": {"mid_size": 2048}},
         {"type": 3, "voice_item": {"text": "语音转写", "encode_type": 1}},
         {"type": 1, "text_item": {"text": "第二段"}},
         {"type": 4, "file_item": {"file_name": "报告.pdf", "len": "321"}},
@@ -364,7 +364,7 @@ const sampleGetUpdatesBatch = `{
   ]
 }`
 
-func TestRunPollingParsesTextQuoteAndDegradesMedia(t *testing.T) {
+func TestRunPollingParsesTextQuoteAndSummarizesMedia(t *testing.T) {
 	fake := newFakeILink(t)
 	var callMu sync.Mutex
 	calls := 0
@@ -404,7 +404,29 @@ func TestRunPollingParsesTextQuoteAndDegradesMedia(t *testing.T) {
 		t.Fatalf("timed out waiting for inbound message")
 	}
 
-	wantText := "Quoted: 被引用的消息\n你好\n语音转写\n第二段\n[图片]\n[文件: 报告.pdf]\n[视频]\n[语音]"
+	wantText := strings.Join([]string{
+		"Quoted: 被引用的消息",
+		"你好",
+		"语音转写",
+		"第二段",
+		"",
+		"[Image attachment]",
+		"content_type: image/*",
+		"",
+		"[Voice attachment]",
+		"content_type: audio/silk",
+		"",
+		"[File attachment]",
+		"file_name: 报告.pdf",
+		"",
+		"[Video attachment]",
+		"content_type: video/mp4",
+		"",
+		"[Voice attachment]",
+		"content_type: audio/silk",
+		"",
+		outboundMediaNote,
+	}, "\n")
 	if msg.Text != wantText {
 		t.Fatalf("inbound text mismatch:\n got %q\nwant %q", msg.Text, wantText)
 	}
@@ -420,20 +442,23 @@ func TestRunPollingParsesTextQuoteAndDegradesMedia(t *testing.T) {
 	if got := provider.contextToken("c1", "u1"); got != "ctx-1" {
 		t.Fatalf("remembered context token = %q", got)
 	}
-	if len(msg.Media) != 4 {
-		t.Fatalf("media = %+v, want 4 entries", msg.Media)
+	if len(msg.Media) != 5 {
+		t.Fatalf("media = %+v, want 5 entries", msg.Media)
 	}
-	if msg.Media[0].Kind != "image" || msg.Media[0].Size != 2048 || msg.Media[0].FileID != "https://cdn.example/img-1" {
+	if msg.Media[0].Kind != "image" || msg.Media[0].Size != 2048 {
 		t.Fatalf("image media = %+v", msg.Media[0])
 	}
-	if msg.Media[1].Kind != "file" || msg.Media[1].FileName != "报告.pdf" || msg.Media[1].Size != 321 {
-		t.Fatalf("file media = %+v", msg.Media[1])
+	if msg.Media[1].Kind != "voice" {
+		t.Fatalf("transcribed voice media = %+v", msg.Media[1])
 	}
-	if msg.Media[2].Kind != "video" || msg.Media[2].Size != 999 {
-		t.Fatalf("video media = %+v", msg.Media[2])
+	if msg.Media[2].Kind != "file" || msg.Media[2].FileName != "报告.pdf" || msg.Media[2].Size != 321 {
+		t.Fatalf("file media = %+v", msg.Media[2])
 	}
-	if msg.Media[3].Kind != "voice" {
-		t.Fatalf("voice media = %+v", msg.Media[3])
+	if msg.Media[3].Kind != "video" || msg.Media[3].Size != 999 {
+		t.Fatalf("video media = %+v", msg.Media[3])
+	}
+	if msg.Media[4].Kind != "voice" {
+		t.Fatalf("voice media = %+v", msg.Media[4])
 	}
 
 	// 只处理用户消息（message_type=2 的 bot 回显被忽略）。
@@ -557,7 +582,7 @@ func TestRunPollingRetriesAndReportsSessionExpired(t *testing.T) {
 
 	select {
 	case msg := <-received:
-		if msg.Text != "恢复" {
+		if msg.Text != "恢复\n\n"+outboundMediaNote {
 			t.Fatalf("recovered message text = %q", msg.Text)
 		}
 	case <-time.After(3 * time.Second):

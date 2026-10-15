@@ -51,6 +51,8 @@ type Provider struct {
 	retryDelay  time.Duration
 	logf        func(format string, args ...any)
 	now         func() time.Time
+	// mediaLimitBytes 覆盖入站媒体下载上限（0 = 默认 defaultMediaLimitBytes）。
+	mediaLimitBytes int64
 }
 
 // Option 配置 Provider。
@@ -93,6 +95,15 @@ func WithLogger(logf func(format string, args ...any)) Option {
 	return func(p *Provider) {
 		if logf != nil {
 			p.logf = logf
+		}
+	}
+}
+
+// WithInboundMediaLimit 覆盖入站媒体下载上限（字节；测试/高级用，<=0 忽略）。
+func WithInboundMediaLimit(limit int64) Option {
+	return func(p *Provider) {
+		if limit > 0 {
+			p.mediaLimitBytes = limit
 		}
 	}
 }
@@ -218,26 +229,52 @@ func (p *Provider) Deactivate(ctx context.Context, cfg connectors.Config) error 
 	return nil
 }
 
-// Send 逐条发送文本消息。
+// Send 逐条发送文本 + 媒体消息。
+//
+// 媒体来源两类：OutboundMessage.Media，以及回复文本里的媒体指令
+// （```telegram-attachments``` 围栏块、`IMAGE:/VIDEO:/FILE:/VOICE:` 指令行，
+// 见 connectors.ParseOutboundMediaDirectives）；指令行从可见文本剥离。可见文本
+// 先作为普通消息发出，随后逐条发送媒体（本地路径走 multipart 上传；URL 交给
+// Telegram 拉取；已有 file_id 直接复用）。单条媒体失败降级为文本提示。
 func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string, msgs []connectors.OutboundMessage) error {
 	token := cfg.Secret("bot_token")
 	if token == "" {
 		return errors.New("telegram: bot_token is required")
 	}
+	base := p.baseFor(cfg)
 	for _, msg := range msgs {
-		text := strings.TrimSpace(msg.Text)
-		if text == "" {
-			continue
+		visibleText, attachments := connectors.ParseOutboundMediaDirectives(msg.Text, telegramAttachmentFenceNames...)
+		text := strings.TrimSpace(visibleText)
+		if text != "" {
+			payload := map[string]any{"chat_id": chat, "text": text, "disable_web_page_preview": true}
+			var sent struct {
+				MessageID int64 `json:"message_id"`
+			}
+			if err := p.call(ctx, base, token, "sendMessage", payload, &sent); err != nil {
+				return err
+			}
 		}
-		payload := map[string]any{"chat_id": chat, "text": text, "disable_web_page_preview": true}
-		var sent struct {
-			MessageID int64 `json:"message_id"`
-		}
-		if err := p.call(ctx, p.baseFor(cfg), token, "sendMessage", payload, &sent); err != nil {
-			return err
+		outboundMedia := make([]connectors.Media, 0, len(msg.Media)+len(attachments))
+		outboundMedia = append(outboundMedia, msg.Media...)
+		outboundMedia = append(outboundMedia, attachments...)
+		for _, media := range outboundMedia {
+			if err := p.sendOutboundMedia(ctx, base, token, chat, media); err != nil {
+				p.logf("telegram: 发送媒体失败（%s %s）：%v；降级为文本提示",
+					media.Kind, telegramMediaLabel(media), err)
+				notice := "[附件发送失败: " + telegramMediaLabel(media) + "]"
+				if noticeErr := p.call(ctx, base, token, "sendMessage", map[string]any{"chat_id": chat, "text": notice}, nil); noticeErr != nil {
+					return noticeErr
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// OutboundMediaNote 实现 connectors.OutboundMediaNoteProvider：把出站媒体指令
+// 协议提示注入入站文本，agent 据此在回复里声明要回发的图片/视频/文件。
+func (p *Provider) OutboundMediaNote() string {
+	return connectors.MediaDirectiveNote(telegramAttachmentFence)
 }
 
 // ── Webhook 入口 ────────────────────────────────────────────────────────────
@@ -478,21 +515,47 @@ func joinText(msgs []connectors.OutboundMessage) string {
 }
 
 type update struct {
-	UpdateID int64 `json:"update_id"`
-	Message  *struct {
-		MessageID int64 `json:"message_id"`
-		From      *struct {
-			ID        int64  `json:"id"`
-			Username  string `json:"username"`
-			FirstName string `json:"first_name"`
-		} `json:"from"`
-		Chat struct {
-			ID    int64  `json:"id"`
-			Type  string `json:"type"`
-			Title string `json:"title"`
-		} `json:"chat"`
-		Text string `json:"text"`
-	} `json:"message"`
+	UpdateID int64            `json:"update_id"`
+	Message  *telegramMessage `json:"message"`
+}
+
+// telegramMessage 是 Bot API message 的最小子集（文本 + 媒体 + 说明文字）。
+type telegramMessage struct {
+	MessageID int64 `json:"message_id"`
+	From      *struct {
+		ID        int64  `json:"id"`
+		Username  string `json:"username"`
+		FirstName string `json:"first_name"`
+	} `json:"from"`
+	Chat struct {
+		ID    int64  `json:"id"`
+		Type  string `json:"type"`
+		Title string `json:"title"`
+	} `json:"chat"`
+	Text    string `json:"text"`
+	Caption string `json:"caption"`
+	// Photo 是同一张图的多档尺寸（末档最大）；取末档。
+	Photo    []telegramPhotoSize `json:"photo"`
+	Document *telegramFileRef    `json:"document"`
+	Voice    *telegramFileRef    `json:"voice"`
+	Audio    *telegramFileRef    `json:"audio"`
+	Video    *telegramFileRef    `json:"video"`
+}
+
+// telegramPhotoSize 是 photo 数组中的一档尺寸。
+type telegramPhotoSize struct {
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+}
+
+// telegramFileRef 是 document/voice/audio/video 的公共文件引用。
+type telegramFileRef struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name"`
+	MimeType string `json:"mime_type"`
+	FileSize int64  `json:"file_size"`
 }
 
 func parseUpdate(connectorID string, upd update) (connectors.InboundMessage, bool) {
@@ -500,8 +563,15 @@ func parseUpdate(connectorID string, upd update) (connectors.InboundMessage, boo
 		return connectors.InboundMessage{}, false
 	}
 	text := strings.TrimSpace(upd.Message.Text)
+	media, placeholders := extractInboundMedia(upd.Message)
 	if text == "" {
-		return connectors.InboundMessage{}, false // P0 仅文本
+		text = strings.TrimSpace(upd.Message.Caption)
+	}
+	if text == "" && len(placeholders) > 0 {
+		text = strings.Join(placeholders, "\n")
+	}
+	if text == "" && len(media) == 0 {
+		return connectors.InboundMessage{}, false // 非文本/媒体消息（如编辑、回调查询）
 	}
 	msg := connectors.InboundMessage{
 		ConnectorID: connectorID,
@@ -510,6 +580,7 @@ func parseUpdate(connectorID string, upd update) (connectors.InboundMessage, boo
 		ChatTitle:   strings.TrimSpace(upd.Message.Chat.Title),
 		MessageID:   strconv.FormatInt(upd.Message.MessageID, 10),
 		Text:        text,
+		Media:       media,
 		ReceivedAt:  time.Now().UTC(),
 	}
 	if upd.Message.From != nil {
@@ -554,6 +625,12 @@ func (p *Provider) call(ctx context.Context, base, token, method string, payload
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	return p.doAPIRequest(req, token, method, out)
+}
+
+// doAPIRequest 执行请求并解包 {"ok":…,"result":…} 信封（JSON 调用与 multipart
+// 上传共用）；错误文本统一脱敏 bot_token。
+func (p *Provider) doAPIRequest(req *http.Request, token, method string, out any) error {
 	resp, err := p.client.Do(req)
 	if err != nil {
 		// *url.Error 的文本包含完整请求 URL（内嵌 bot_token）；这里不做 %w

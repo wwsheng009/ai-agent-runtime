@@ -11,7 +11,7 @@
 | 单连接器启停 | UI 开关 / `PATCH /api/connectors/{id}` `{"enabled":false}` | 只影响该通道；保留配置与历史 |
 | 运行归属 | `runtime_owner: auto|aicli|runtime-server|gateway` | 同一轮询/WS 通道只允许一处运行；`auto` 先到先得，后启动者只读 |
 | 抢占 | UI「抢占」/ `POST /api/connectors/{id}/takeover` | 要求对方停机确认；用于切换宿主 |
-| 宿主重启恢复 | 自动 | 轮询游标（Telegram offset / 微信 buf / QQ session+seq）持久化；入站账本未完成项重放；出站死信继续重试 |
+| 宿主重启恢复 | 自动 | 轮询游标（Telegram offset / 微信 buf / QQ session+seq）持久化；入站账本未完成项重放；微信 context_token 快照随状态存储保留（重启后无需等下一条入站即可回复，切片 2d）；出站死信继续重试 |
 
 ## 2. 日常巡检
 
@@ -61,8 +61,12 @@ curl -s $BASE/api/connectors/$ID/diagnostics | jq
 | 飞书 | challenge 校验失败 | verification token 或回调 URL 不匹配 | 对照开放平台配置；重新保存触发注册 |
 | 飞书 | 事件重复触发 | 平台重试 + 账本缺失 | 入站账本去重；确认账本持久化 |
 | QQ | WS 频繁重连 / InvalidSession | 网络抖动 / intents 或沙箱配置错误 | 查看 session_id+seq 游标与重连日志 |
+| QQ | 图片/文件收不到（仅 `[图片: 名称]` 占位、无 `local_path`） | 入站下载失败（出口守卫拦截/超限/附件签名 URL 过期） | 查看连接器日志「入站媒体下载失败」；附件 URL 带签名且短期有效，需及时下载 |
+| QQ | 回复里的图片/文件没发出去 | 指令块名或路径不对（需绝对路径或 https URL） | 查看日志「发送媒体失败」与降级提示 `[附件发送失败: …]`；确认 ```qq-attachments``` 围栏或 `IMAGE:/FILE:` 指令行 |
 | 微信 | `errcode -14`（会话失效） | 登录态过期 | 详情页「重新扫码」 |
-| 微信 | `errcode -2`（上下文失效） | 会话上下文过期 | 自动 `/new` 提示或重发 |
+| 微信 | `errcode -2`（上下文失效） | 会话上下文过期 | 回复投递失败时自动保存快照（切片 2f）；用户在 IM 内发「重发/继续/retry」即用新会话上下文重放；仍失败会提示「重发失败，请稍后重试」 |
+| 微信 | 图片/语音收不到（仅 `[Image/Voice attachment]` 块、无 `local_path`） | 媒体下载失败（CDN 不可达/密钥不符/未配置 `cdn_base_url`） | 查看连接器日志 `inbound media download failed`；检查 CDN 基址与网络 |
+| 微信 | 语音落盘为 `.silk` 无法播放 | 未安装 silk 解码器/ffmpeg | 安装 ffmpeg 或设置 `AICLI_WECHAT_SILK_DECODER`；转码失败会保留原件 |
 | 出站 | 429/Retry-After 频现 | 触发平台限速 | 降低连接器/用户限速；确认退避生效 |
 | 流式 | 消息被频繁编辑/乱序 | 编辑节流未生效 | 检查 ≥1s 且内容变化才编辑的策略 |
 
@@ -104,7 +108,10 @@ curl -s $BASE/api/connectors/$ID/diagnostics | jq
 | 每用户限速 | 10 msg/min | 连接器策略 |
 | 单会话并发 turn | 1 | 全局（不可配） |
 | 入站账本保留 | 24h | 全局默认 |
-| 媒体大小上限 | 20MB（按通道再收紧） | 连接器策略 |
+| 媒体大小上限 | 100MB（下载/上传硬上限；连接器级策略可配待续） | 全局（媒体切片 2c 现状） |
+| QQ 主动消息预检 | 10 qps / 1000 条·日·会话（0 = 不限制） | 连接器设置 `proactive_qps` / `proactive_daily_limit` |
+| QQ 被动回复次数预检 | 单聊 4 次 / 群 5 次·条消息（本机计数，达上限改主动） | 内置（官方上限；`WithPassiveReplyLimits` 可覆盖） |
+| Telegram 媒体上限 | 20MB（官方 `getFile` 限制） | 内置（`WithInboundMediaLimit` 可覆盖） |
 
 ## 7. 验收矩阵
 
@@ -127,10 +134,10 @@ curl -s $BASE/api/connectors/$ID/diagnostics | jq
 | 能力 | Telegram | 飞书 | QQ | 微信 |
 |------|----------|------|----|------|
 | 文本收/回 | ✅ | ✅ | ✅ | ✅ |
-| 流式编辑 | ✅ | ✅（卡片策略三选） | 追加式 | 追加式（前缀提交） |
-| typing | 表情/typing | 表情回复 | — | typing ticket |
+| 流式编辑 | ✅ | ✅（可更新卡片 PATCH；Provider 开关 `streaming=true`，默认关闭需真机验证） | 追加式 | 追加式（前缀提交） |
+| typing | 表情/typing | 表情回复 | 输入状态（仅单聊） | typing ticket |
 | 审批/提问命令 | ✅ | ✅（含卡片事件） | ✅ | ✅ |
-| 媒体（图文/语音/文件） | ✅ | ✅ | ✅（含分片） | ✅（CDN 解密/转码） |
+| 媒体（图文/语音/文件） | ✅（图片/视频/语音/音频/文件；入站 `getFile` 下载、出站 multipart/URL/`file_id`） | ✅（图片/文件/语音/视频；入站资源下载、出站 multipart 上传 + 对应 `msg_type`） | ✅（图片/视频/语音/文件；入站 `local_path`、出站指令协议、远端 URL 直传、大文件分片上传、临时目录 24h 清扫） | ✅（入站下载/解密/语音转码；出站 CDN 上传、远端页面解析/清单转码） |
 | 二维码/授权登录 | — | — | 可选 | **扫码登录** |
 | webhook 模式 | ✅ | ✅（+WS 可选） | — | — |
 | 长轮询/WS 模式 | ✅ | ✅(WS) | ✅ | ✅ |
@@ -142,7 +149,7 @@ curl -s $BASE/api/connectors/$ID/diagnostics | jq
 - [ ] 重放同一平台事件（相同 message_id）→ 只处理一次（账本命中）。
 - [ ] 白名单外用户 → 首次提示后静默，且不进入 agent。
 - [ ] `GET /api/connectors*` 与前端 store 无明文密钥（自动化断言）。
-- [ ] 媒体 URL 指向内网/本机 → 被 SSRF 防护拒绝并记日志。
+- [x] 媒体 URL 指向内网/本机 → 被 SSRF 防护拒绝并记日志（2026-10-14 微信出站远端媒体；2026-10-15 飞书出站远端媒体同口径：仅 http(s)，默认拒绝回环/私网/链路本地/未指定/组播/CGNAT，重定向逐跳校验，拒绝时降级文本提示且零上传；用例 `TestRemoteMediaFetchBlocksPrivateHostByDefault` / `TestSendMediaByURLBlocksPrivateHost`）。QQ 的 URL 直传与下载路径已有宿主守卫；Telegram 远端 URL 由平台拉取（runtime 不下载，无 SSRF 面）。
 - [ ] 非法命令（`/approve` 非本人请求）→ 拒绝并提示。
 - [ ] 限速超限 → 提示一次 + 静默 5min，不产生 turn。
 

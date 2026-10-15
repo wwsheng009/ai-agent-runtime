@@ -157,9 +157,12 @@ func (b *countingBackend) Handle(_ context.Context, req connectors.BackendReques
 	b.mu.Lock()
 	b.texts = append(b.texts, req.Text)
 	b.mu.Unlock()
+	// 只回显首行：宿主会在入站文本尾部注入「如何回发媒体」的通道提示
+	// （OutboundMediaNoteProvider），断言只关心用户可见内容。
+	firstLine := strings.SplitN(strings.TrimSpace(req.Text), "\n", 2)[0]
 	return connectors.BackendResult{
 		Session: connectors.SessionRef{SessionID: "sess-e2e"},
-		Reply:   []connectors.OutboundMessage{{Text: "回复:" + req.Text}},
+		Reply:   []connectors.OutboundMessage{{Text: "回复:" + firstLine}},
 	}, nil
 }
 

@@ -39,10 +39,12 @@ type Deps struct {
 	// LogBufferSize 是每连接器运行日志环容量（Service.Logs / 视图 runtime 读它），
 	// <=0 用 DefaultLogBufferSize（200）。日志环仅存于进程内，重启清零。
 	LogBufferSize int
-	// RequireAllowedUsers 为 true 时启用 fail-closed 安全闸：启用中的连接器若
-	// 未配置非空的 Policy.AllowedUsers，则跳过启动（不 Activate、不轮询）。
-	// aicli 宿主设为 true；runtime-server 保持 false 以兼容既有部署（仅在
-	// 宿主侧对「启用且白名单为空」的连接器记 warn）。
+	// RequireAllowedUsers 保留作兼容开关：为 true 时沿用旧 fail-closed 语义
+	//（启用中的连接器若未配置非空的 Policy.AllowedUsers 则跳过启动）。2026-10-15
+	// 起默认策略为「空白名单 = 不限制用户」：白名单是可选收窄项，不再是启动前提
+	//（入站侧 Policy.AllowsUser 同语义放行）。aicli 宿主已停用该闸（见
+	// cmd/aicli/commands/connector_host.go）；runtime-server/gateway 历史上
+	// 就是 false，行为不变。
 	RequireAllowedUsers bool
 	// HostID 是本宿主的运行归属身份（"runtime-server" / "aicli" / "gateway"，
 	// docs/bots/07-config-ux.md §5.6）：启动时据此认领、轮询期间续约、停机释放。
@@ -332,6 +334,7 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 		}, logCounters{})
 		return
 	}
+	s.attachProviderState(provider, cfg.ID)
 	runCtx, cancel := context.WithCancel(s.baseContext())
 	if _, err := provider.Activate(runCtx, cfg); err != nil {
 		cancel()
@@ -564,6 +567,7 @@ func (s *Service) HandleInbound(_ context.Context, msg InboundMessage) error {
 	if !ok {
 		return fmt.Errorf("connectors: provider %q not registered", cfg.Provider)
 	}
+	s.attachProviderState(provider, cfg.ID)
 	if !cfg.Policy.AllowsUser(msg.UserID) {
 		s.logf("connector %s: rejected message from unauthorized user %q", cfg.ID, msg.UserID)
 		s.recordLog(LogEntry{
@@ -656,6 +660,7 @@ func (s *Service) SendOutbound(ctx context.Context, connectorID, chat string, ms
 	if !ok {
 		return fmt.Errorf("connectors: provider %q not registered", cfg.Provider)
 	}
+	s.attachProviderState(provider, cfg.ID)
 	if err := provider.Send(ctx, cfg, chat, msgs); err != nil {
 		s.recordLog(LogEntry{
 			Level:       LogLevelError,
@@ -785,6 +790,11 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		Summary:     "开始处理入站消息",
 	}, logCounters{})
 
+	// 失败回复重放（切片 2f）：命中重发意图时消费本条入站，不进入 agent。
+	if handled := s.tryReplayFailedReply(ctx, cfg, provider, msg); handled {
+		return nil
+	}
+
 	prefix := cfg.Policy.commandPrefix()
 	if cmd, ok := parseCommand(prefix, msg.Text); ok {
 		handled, err := s.handleCommand(ctx, cfg, provider, msg, cmd)
@@ -817,6 +827,7 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 	// 文本；未实现该能力的通道零变化（docs/bots/04 QQ P1）。远程派发路径
 	// 不物化（本地路径对远端 runner 不可达）。
 	s.materializeInboundMedia(ctx, cfg, provider, &msg)
+	s.injectOutboundMediaNote(provider, &msg)
 
 	streamer, err := s.startStreaming(ctx, cfg, provider, msg.Chat)
 	if err != nil {
@@ -921,6 +932,7 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 	}
 	if streamer != nil {
 		if err := streamer.Final(ctx, result.Reply); err != nil {
+			s.recordFailedReply(cfg, provider, msg, result.Reply, err)
 			s.recordLog(LogEntry{
 				Level:       LogLevelError,
 				Direction:   LogDirectionOut,
@@ -931,6 +943,7 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 			return err
 		}
 	} else if err := provider.Send(ctx, cfg, msg.Chat, result.Reply); err != nil {
+		s.recordFailedReply(cfg, provider, msg, result.Reply, err)
 		s.recordLog(LogEntry{
 			Level:       LogLevelError,
 			Direction:   LogDirectionOut,
@@ -940,6 +953,7 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		}, logCounters{})
 		return err
 	}
+	s.clearFailedReply(cfg, provider, msg.Chat)
 	s.recordLog(LogEntry{
 		Level:       LogLevelInfo,
 		Direction:   LogDirectionOut,
@@ -986,10 +1000,15 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 	s.runnerRoundRobin = rrNext
 	s.mu.Unlock()
 
+	// 出站媒体提示同样注入远程派发文本：远端 runner 的回复最终经本机 provider
+	// 回发，媒体指令由本机解析（本地路径对远端 runner 不可达，远端应回 URL）。
+	dispatchMsg := msg
+	s.injectOutboundMediaNote(provider, &dispatchMsg)
+
 	result, err := s.deps.RemoteDispatch(ctx, DispatchRequest{
 		ConnectorID: cfg.ID,
 		Chat:        msg.Chat,
-		Text:        msg.Text,
+		Text:        dispatchMsg.Text,
 		UserID:      msg.UserID,
 		UserName:    msg.UserName,
 		MessageID:   msg.MessageID,
@@ -1023,6 +1042,7 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 	}
 	if len(result.Reply) > 0 {
 		if err := provider.Send(ctx, cfg, msg.Chat, result.Reply); err != nil {
+			s.recordFailedReply(cfg, provider, msg, result.Reply, err)
 			s.recordLog(LogEntry{
 				Level:       LogLevelError,
 				Direction:   LogDirectionOut,
@@ -1032,6 +1052,7 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 			}, logCounters{})
 			return err
 		}
+		s.clearFailedReply(cfg, provider, msg.Chat)
 	}
 	s.recordLog(LogEntry{
 		Level:       LogLevelInfo,
@@ -1055,6 +1076,7 @@ func (s *Service) processMessageLocal(ctx context.Context, cfg Config, provider 
 	}
 	// 入站媒体物化：与 processMessage 同口径（回落本机执行路径同样物化）。
 	s.materializeInboundMedia(ctx, cfg, provider, &msg)
+	s.injectOutboundMediaNote(provider, &msg)
 	streamer, err := s.startStreaming(ctx, cfg, provider, msg.Chat)
 	if err != nil {
 		return err
@@ -1154,6 +1176,114 @@ func (s *Service) provider(name string) (Provider, bool) {
 	defer s.mu.Unlock()
 	provider, ok := s.providers[name]
 	return provider, ok
+}
+
+// attachProviderState 把该连接器的持久化状态视图交给支持 StateAwareProvider
+// 的 provider（跨重启记忆，如微信 context_token）。Store 缺失/能力不支持/
+// connectorID 为空时静默跳过（零配置行为不变）。
+func (s *Service) attachProviderState(provider Provider, connectorID string) {
+	if provider == nil || s.deps.Store == nil || strings.TrimSpace(connectorID) == "" {
+		return
+	}
+	if aware, ok := provider.(StateAwareProvider); ok {
+		aware.AttachState(connectorID, s.deps.Store.PollingState(connectorID))
+	}
+}
+
+// ── 失败回复重放（切片 2f，微信 errcode -2 的恢复路径） ──────────────────────
+
+// tryReplayFailedReply 在存在失败快照、provider 声明重放能力、且本条入站命中
+// 重发意图时，用本条入站带来的新上下文重放原回复；命中即消费该条入站（不再
+// 进入 agent）。重放失败时刷新快照并尽力提示用户；返回是否已消费。
+func (s *Service) tryReplayFailedReply(ctx context.Context, cfg Config, provider Provider, msg InboundMessage) bool {
+	replayer, ok := provider.(ReplyReplayProvider)
+	if !ok {
+		return false
+	}
+	failed, ok := s.deps.Store.GetFailedReply(cfg.ID, msg.Chat)
+	if !ok || len(failed.Reply) == 0 {
+		return false
+	}
+	if !replayer.IsReplyReplayIntent(msg) {
+		return false
+	}
+
+	if err := provider.Send(ctx, cfg, msg.Chat, failed.Reply); err != nil {
+		failed.Error = truncateErrorText(err)
+		failed.FailedAt = time.Now().UTC()
+		if putErr := s.deps.Store.PutFailedReply(failed); putErr != nil {
+			s.logf("connector %s: persist failed reply after replay failure: %v", cfg.ID, putErr)
+		}
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionOut,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "失败回复重放失败：" + truncateErrorText(err),
+		}, logCounters{})
+		// 尽力提示用户（提示本身失败不再处理）。
+		_ = provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: "重发失败，请稍后重试。"}})
+		return true
+	}
+
+	if err := s.deps.Store.ClearFailedReply(cfg.ID, msg.Chat); err != nil {
+		s.logf("connector %s: clear replayed failed reply: %v", cfg.ID, err)
+	}
+	originalMessageID := strings.TrimSpace(failed.MessageID)
+	if originalMessageID == "" {
+		originalMessageID = "unknown"
+	}
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Summary:     fmt.Sprintf("已重放上次失败的回复（%d 条；原始消息 %s）", len(failed.Reply), originalMessageID),
+	}, logCounters{outbound: true})
+	return true
+}
+
+// recordFailedReply 在支持重放的通道上记录失败回复快照（其他通道零行为变化）。
+func (s *Service) recordFailedReply(cfg Config, provider Provider, msg InboundMessage, reply []OutboundMessage, cause error) {
+	if _, ok := provider.(ReplyReplayProvider); !ok || len(reply) == 0 || cause == nil {
+		return
+	}
+	record := FailedReply{
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		MessageID:   msg.MessageID,
+		Reply:       cloneOutboundMessages(reply),
+		Error:       truncateErrorText(cause),
+		FailedAt:    time.Now().UTC(),
+	}
+	if err := s.deps.Store.PutFailedReply(record); err != nil {
+		s.logf("connector %s: persist failed reply: %v", cfg.ID, err)
+	}
+}
+
+// clearFailedReply 在成功投递后清理可能残留的失败快照（无快照零写入）。
+func (s *Service) clearFailedReply(cfg Config, provider Provider, chat string) {
+	if _, ok := provider.(ReplyReplayProvider); !ok {
+		return
+	}
+	if _, ok := s.deps.Store.GetFailedReply(cfg.ID, chat); !ok {
+		return
+	}
+	if err := s.deps.Store.ClearFailedReply(cfg.ID, chat); err != nil {
+		s.logf("connector %s: clear failed reply: %v", cfg.ID, err)
+	}
+}
+
+// truncateErrorText 截断错误文本（账本/日志留痕用，避免超长错误撑大状态文件）。
+func truncateErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(err.Error()))
+	if len(runes) > 200 {
+		return string(runes[:200])
+	}
+	return string(runes)
 }
 
 func (s *Service) deltaInterval() time.Duration {

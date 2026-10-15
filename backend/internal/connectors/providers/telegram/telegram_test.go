@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,15 +37,76 @@ type fakeAPI struct {
 	failDeleteWebhook bool
 	getMeCalls        int
 	nextID            int64
+	// 媒体：JSON 媒体调用（file_id/url 复用）、multipart 上传、文件下载。
+	mediaSends   []map[string]any
+	mediaUploads []mediaUpload
+	filePaths    map[string]string
+	fileData     map[string][]byte
+	// mediaError 为 true 时所有媒体方法返回 ok:false（用于降级用例）。
+	mediaError bool
+}
+
+type mediaUpload struct {
+	method   string
+	fields   map[string]any
+	fileName string
+	data     []byte
 }
 
 func newFakeAPI(token string) *fakeAPI {
-	return &fakeAPI{token: token, nextID: 100}
+	return &fakeAPI{
+		token:     token,
+		nextID:    100,
+		filePaths: make(map[string]string),
+		fileData:  make(map[string][]byte),
+	}
+}
+
+// queueFile 注册一个可下载文件：file_id → file_path → 内容。
+func (f *fakeAPI) queueFile(fileID, filePath string, data []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.filePaths[fileID] = filePath
+	f.fileData[filePath] = data
+}
+
+// mediaUploadList / mediaSendList 返回媒体调用的副本（并发安全）。
+func (f *fakeAPI) mediaUploadList() []mediaUpload {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]mediaUpload, len(f.mediaUploads))
+	copy(out, f.mediaUploads)
+	return out
+}
+
+func (f *fakeAPI) mediaSendList() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]map[string]any, len(f.mediaSends))
+	copy(out, f.mediaSends)
+	return out
 }
 
 func (f *fakeAPI) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		// 文件下载：/file/bot<token>/<file_path...>
+		if len(parts) >= 3 && parts[0] == "file" && strings.HasPrefix(parts[1], "bot") {
+			if strings.TrimPrefix(parts[1], "bot") != f.token {
+				writeJSON(w, map[string]any{"ok": false, "error_code": 401, "description": "Unauthorized"})
+				return
+			}
+			filePath := strings.Join(parts[2:], "/")
+			f.mu.Lock()
+			data, ok := f.fileData[filePath]
+			f.mu.Unlock()
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(data)
+			return
+		}
 		if len(parts) != 2 || !strings.HasPrefix(parts[0], "bot") {
 			http.NotFound(w, r)
 			return
@@ -55,12 +117,65 @@ func (f *fakeAPI) handler() http.Handler {
 		}
 		method := parts[1]
 		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		var upload *mediaUpload
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			if err := r.ParseMultipartForm(32 << 20); err == nil && r.MultipartForm != nil {
+				body = make(map[string]any, len(r.MultipartForm.Value))
+				for key, values := range r.MultipartForm.Value {
+					if len(values) > 0 {
+						body[key] = values[0]
+					}
+				}
+				for field, headers := range r.MultipartForm.File {
+					if len(headers) == 0 {
+						continue
+					}
+					file, err := headers[0].Open()
+					if err != nil {
+						continue
+					}
+					data, _ := io.ReadAll(io.LimitReader(file, 32<<20))
+					file.Close()
+					upload = &mediaUpload{method: method, fields: body, fileName: headers[0].Filename, data: data}
+					_ = field
+					break
+				}
+			}
+		} else {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+		}
 
 		f.mu.Lock()
 		defer f.mu.Unlock()
 
 		switch method {
+		case "getFile":
+			fileID, _ := body["file_id"].(string)
+			filePath, ok := f.filePaths[fileID]
+			if !ok {
+				writeJSON(w, map[string]any{"ok": false, "error_code": 400, "description": "file not found"})
+				return
+			}
+			size := len(f.fileData[filePath])
+			writeJSON(w, map[string]any{"ok": true, "result": map[string]any{
+				"file_id": fileID, "file_path": filePath, "file_size": size,
+			}})
+		case "sendPhoto", "sendVideo", "sendVoice", "sendAudio", "sendDocument":
+			if f.mediaError {
+				writeJSON(w, map[string]any{"ok": false, "error_code": 400, "description": "media rejected"})
+				return
+			}
+			if upload != nil {
+				f.mediaUploads = append(f.mediaUploads, *upload)
+			} else {
+				entry := map[string]any{"_method": method}
+				for key, value := range body {
+					entry[key] = value
+				}
+				f.mediaSends = append(f.mediaSends, entry)
+			}
+			f.nextID++
+			writeJSON(w, map[string]any{"ok": true, "result": map[string]any{"message_id": f.nextID}})
 		case "getMe":
 			f.getMeCalls++
 			writeJSON(w, map[string]any{"ok": true, "result": map[string]any{
