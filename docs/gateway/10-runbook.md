@@ -425,5 +425,14 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 > 即回退现状）；host 源按心跳 TTL 续期。本切片 no-op 直到 agent 上报 `viewing`
 > （S2 aicli / S3 runtime-server 同批落地）。
 
+> **部署记录（2026-10-15 第四笔，notify 收敛 G1–G3）**：HEAD `49c7a72c`，raw sha256
+> `58b47697…28ba490`（gz `e35f2a67…f09e72`）；分块上传（1MB×10；part-00 首传握手
+> EOF 失败，重传成功——双 sha 门禁正确拦截损坏拼装）→ 备份
+> `gateway.bak-20261015-063810` → 替换重启。验证：`/proc/<pid>/exe` sha 逐位一致、
+> 26 节点恢复、console 200、日志零 error；受控 TUI 回归 `viewing=true` 上报正常。
+> 新增能力：notify 内核策略链全量接管网关通知（在场门 Suppressed 回滚 seen / 跨路径
+> 账本键 tag|attention 生命周期镜像 seen / 静默门 Muted / 合并门内核自持批处理），
+> `notify_policy.go` 薄适配层退役（docs/bots/12 §4）。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。
