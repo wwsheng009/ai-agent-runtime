@@ -31,6 +31,7 @@ ok(/connector-field-check/.test(src), "fieldHTML 勾选控件走行内布局(不
 ok(/eventTypeCheckboxesHTML/.test(src) && /connector-types-picker/.test(src), "事件类型为折叠多选面板组件(非平铺按钮)");
 ok(!/eventTypeChipsHTML/.test(src), "旧的平铺 chips 实现已移除");
 ok(/EVENT_TYPE_FORMS/.test(src) && /data-types-warning/.test(src), "类型×投递形态相容性告警已接入");
+ok(/refreshDeliverSelect/.test(src) && /splitEventSubRow/.test(src), "细项→粗项推导与一键拆分已接入");
 
 // ---- 最小 DOM mock ----
 function matchesSelector(node, sel) {
@@ -157,8 +158,18 @@ function parseEventSubRow(chunk) {
   addField("sessions-ids", "input", { value: idsAttrs.value || "", disabled: "disabled" in idsAttrs });
   const deliver = selectHtml("deliver");
   addField("deliver", "select", {}, true, deliver ? deliver.options : "");
+  if (/data-deliver-hint/.test(chunk)) {
+    const hint = makeNode("span", { attr: { "data-deliver-hint": "" } });
+    hint.textContent = "";
+    row.appendChild(hint);
+  }
   const enabledAttrs = inputTag("enabled") || {};
   addField("enabled", "input", { checked: "checked" in enabledAttrs });
+  if (/data-editor="split-event-sub"/.test(chunk)) {
+    const splitBtn = makeNode("button", { attr: { "data-editor": "split-event-sub" } });
+    splitBtn.hidden = true;
+    row.appendChild(splitBtn);
+  }
   // 事件类型多选:折叠面板(汇总行 + 原生 checkbox;词表外值追加在末尾) + 自定义兜底输入。
   const summaryMatch = chunk.match(/<summary><span data-types-summary>([\s\S]*?)<\/span><\/summary>/);
   const summary = makeNode("span", { attr: { "data-types-summary": "" } });
@@ -281,6 +292,8 @@ modalBody.appendChild(subsHost);
   ok(html.includes("已选 2 项:assistant_message、turn.*"), "汇总行显示已选数量与名称");
   ok(html.includes('data-sub-field="types-extra"'), "保留自定义类型输入(兜底)");
   ok(!/data-sub-field="types"/.test(html), "事件类型不再使用文本输入框");
+  ok(html.includes("data-deliver-hint"), "投递形态含推导提示位");
+  ok(html.includes('data-editor="split-event-sub"'), "行内含一键拆分按钮(默认隐藏)");
   ok(html.includes('data-editor="remove-event-sub"'), "行内含删除按钮");
   const htmlOff = api.eventSubRowHTML({ id: "x", enabled: false });
   ok(!/data-sub-field="enabled" checked>/.test(htmlOff), "enabled:false 不勾选");
@@ -441,6 +454,39 @@ modalBody.appendChild(subsHost);
   box.checked = true;
   api.onModalBodyChange({ target: box });
   ok(eventsEnabled.checked === true, "勾选类型自动打开总开关(避免保存成 enabled:false 的无效订阅)");
+}
+
+// ===== 11. 细项→粗项推导:唯一形态锁定 / 多形态收敛 / 跨形态一键拆分 =====
+{
+  eventsEnabled.checked = true;
+  // a) 唯一形态:assistant_message → content 锁定
+  api.renderEventSubRows([{ id: "d1", types: ["assistant_message"] }]);
+  let row = subsHost.children[0];
+  let deliver = row.querySelector('[data-sub-field="deliver"]');
+  ok(deliver.value === "content", "assistant_message 推导 deliver=content", deliver.value);
+  ok(deliver.disabled === true, "唯一形态锁定(无需用户配置)");
+  ok(/由所选类型推导/.test(row.querySelector("[data-deliver-hint]").textContent), "提示由类型推导");
+  // b) 多形态类型:completion 仅可选 notice/digest
+  api.renderEventSubRows([{ id: "d2", types: ["agent.turn.finished"] }]);
+  row = subsHost.children[0];
+  deliver = row.querySelector('[data-sub-field="deliver"]');
+  ok(deliver.disabled === false, "completion 保持可选(notice/digest)");
+  ok(deliver.innerHTML.includes('value="notice"') && deliver.innerHTML.includes('value="digest"')
+    && !deliver.innerHTML.includes('value="content"'), "选项收敛到 notice/digest");
+  // c) 跨形态混合 → 冲突告警 + 拆分按钮
+  api.renderEventSubRows([{ id: "mix", deliver: "notice", types: ["assistant_message", "agent.turn.finished"] }]);
+  row = subsHost.children[0];
+  ok(/assistant_message 需要 deliver=content/.test(row.querySelector("[data-types-warning]").textContent), "混合时提示冲突");
+  const splitBtn = row.querySelector('[data-editor="split-event-sub"]');
+  ok(splitBtn.hidden === false, "跨形态冲突时显示拆分按钮");
+  // d) 点击拆分 → 两条单一形态订阅
+  api.onModalBodyClick({ target: splitBtn });
+  const models = api.collectEventSubs().subscriptions;
+  ok(models.length === 2, "拆分为 2 条订阅", models.length);
+  ok(models[0].deliver === "content" && eq(models[0].types, ["assistant_message"]), "第 1 条 content", models[0]);
+  ok(models[1].deliver === "notice" && eq(models[1].types, ["agent.turn.finished"]), "第 2 条 notice", models[1]);
+  ok(models[1].id === "mix-2", "续行 id 追加序号", models[1].id);
+  ok(subsHost.children[1].querySelector("[data-types-warning]").hidden === true, "拆分后无残留告警");
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n存在失败项: " + failures);

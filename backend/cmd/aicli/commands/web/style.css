@@ -3348,6 +3348,8 @@ body.low-bandwidth img {
 .connector-type-hint { margin-left: auto; font-size: 10.5px; color: var(--fg3); }
 .connector-types-warning { color: var(--red, #e5534b); font-size: 11px; line-height: 1.5; }
 .connector-types-warning[hidden] { display: none; }
+.connector-event-sub-split { margin-top: 6px; margin-right: 6px; font-size: 12px; }
+.connector-event-sub-split[hidden] { display: none; }
 .connector-event-types [data-sub-field="types-extra"] { margin-top: 2px; font-size: 12px; }
 .connector-event-sub [data-sub-field="sessions-ids"]:disabled { opacity: .55; }
 

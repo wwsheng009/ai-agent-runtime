@@ -119,7 +119,8 @@ policy:
 - **L2（同目标合并）**：同一 chat 命中多条订阅、形态相同时合并为一次投递；形态不同（如 `content` + `notice`）视为两种信息，**各发一条**——同一目标不要同时配 `content` 和 `stream`（会得到两条：全文 + 打字机）。
 - **一条订阅只有一种形态**：`deliver` 是订阅级属性——`assistant_message`（content）、`assistant_delta`（stream）、
   工作类（digest）、completion/审批（notice）分属不同形态时，必须**拆成多条订阅**；形态不匹配的类型会被
-  后端**静默忽略**（微前端编辑器已对勾选组合做相容性告警，2026-10-15）。
+  后端**静默忽略**。微前端编辑器已把这一步自动化：**形态由所选类型推导**（唯一解锁定；completion 等
+  多形态类型只在 notice/digest 间选；跨形态勾选提供「一键拆分为多条订阅」），无需手工配对（2026-10-15）。
 - **默认安静**：`content`/`stream`/`digest` 全默认关，必须显式订阅；绑定会话的 approval/question 恒开。
 - `stream` 形态**不受** `policy.reply_mode` 影响（那条开关只描述回复通道）。
 
@@ -184,7 +185,7 @@ policy:
 | 配了 `user_message`/`session_end` 等没有投递 | 这些类型尚未接出站映射（§4 标注 ⚠️），当前为预留 |
 | `digest` 迟迟不来 | 默认 30s 窗口（无配置项）；approval/question 恒即时、不进窗口 |
 | `stream` 没有打字机、只收到一条完整文本 | provider 不支持流式（如微信）或占位启动失败 → 自动退化为一次性 content；日志含 `degraded=content`。另：后端该回合无增量事件时也不会有流 |
-| 勾选了 `assistant_message` 但 IM 没有收到正文 | 该订阅的 `deliver` 必须是 `content`（`assistant_delta`→`stream`；工作类→`digest`）。**一条订阅只有一种形态**，混合类型请拆成多条订阅；编辑器会显示相容性告警。另注意 L3：IM 触发的回合不镜像 |
+| 勾选了 `assistant_message` 但 IM 没有收到正文 | 该订阅的 `deliver` 必须是 `content`（`assistant_delta`→`stream`；工作类→`digest`）。**一条订阅只有一种形态**：编辑器现按类型**自动推导**形态，混合勾选点「一键拆分」即可。另注意 L3：IM 触发的回合不镜像 |
 | 同一段内容收到两条 | 检查是否同时配了 `content` 与 `stream`（形态不同、各发一条）；或同一 bot 多订阅命中同一 chat 且形态不同属显式行为 |
 | 想给「非绑定 chat」发 | 当前 target 固定为「会话的绑定 chats」（多绑定=多 chat 都收）；显式 target 列表为设计预留（13 §3.4），未落地 |
 

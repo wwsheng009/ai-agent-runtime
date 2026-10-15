@@ -968,7 +968,28 @@ var EVENT_TYPE_FORMS = {
   "tool.completed": ["digest"],
   "tool.denied": ["digest"],
   "subagent.completed": ["digest"],
-  "subagent.batch.completed": ["digest"]
+  "subagent.batch.completed": ["digest"],
+  // 别名(与词表同源):让存量配置/自定义输入也能参与推导。
+  "completion": ["notice", "digest"],
+  "approval": ["notice"],
+  "question": ["notice"],
+  "assistant.message": ["content"],
+  "assistant.delta": ["stream"],
+  "tool.started": ["digest"],
+  "tool.finished": ["digest"],
+  "tool_finished": ["digest"],
+  // 族通配:按族内可用形态的并集收敛。
+  "turn.*": ["notice", "digest"],
+  "work.*": ["digest"]
+};
+
+// DELIVER_ALL / DELIVER_LABELS:未选择可判定类型时的自由选择集合与展示名。
+var DELIVER_ALL = ["notice", "content", "digest", "stream"];
+var DELIVER_LABELS = {
+  "notice": "notice(通知)",
+  "content": "content(正文副本)",
+  "digest": "digest(聚合)",
+  "stream": "stream(流式编辑)"
 };
 
 // eventSubRowHTML 渲染一条订阅行:字段以 data-sub-field 标记,collectEventSubs 按行收集。
@@ -981,10 +1002,7 @@ function eventSubRowHTML(sub) {
   var modeOptions = subSelectOptions(
     [["bound", "bound(绑定会话)"], ["ids", "ids(指定会话)"], ["all", "all(全部会话)"]],
     mode);
-  var deliverOptions = subSelectOptions(
-    [["notice", "notice(通知)"], ["content", "content(正文副本)"],
-     ["digest", "digest(聚合)"], ["stream", "stream(流式编辑)"]],
-    sub.deliver || "notice");
+  var deliverOptions = deliverOptionsHTML(DELIVER_ALL, sub.deliver || "notice");
   var enabled = sub.enabled !== false; // 缺省启用(与后端 IsEnabled 同口径)
   var idsDisabled = mode !== "ids";
   return '<div class="connector-event-sub" data-event-sub>' +
@@ -993,8 +1011,8 @@ function eventSubRowHTML(sub) {
       "留空=后端按序号生成;落审计日志。") +
     fieldHTML("会话模式", '<select data-sub-field="sessions-mode">' + modeOptions + "</select>",
       "bound=绑定会话;ids=指定列表;all=全部。") +
-    fieldHTML("投递形态", '<select data-sub-field="deliver">' + deliverOptions + "</select>",
-      "工作类仅 digest;stream 仅增量。") +
+    fieldHTML("投递形态", '<select data-sub-field="deliver">' + deliverOptions + "</select>" +
+      '<span class="connector-field-help" data-deliver-hint></span>', "") +
     fieldHTML("会话列表", '<input type="text" data-sub-field="sessions-ids" autocomplete="off" placeholder="' +
       (idsDisabled ? "(mode=ids 时生效)" : "session_a, session_b") + '" value="' + esc((sessions.ids || []).join(", ")) + '"' +
       (idsDisabled ? " disabled" : "") + ">", "") +
@@ -1007,6 +1025,7 @@ function eventSubRowHTML(sub) {
     '<span class="connector-types-warning" data-types-warning hidden></span>' +
     '<span class="connector-field-help">展开面板勾选(按族分组);work.*(工具/子代理)仅 digest 生效。</span>' +
     "</div>" +
+    '<button type="button" class="connector-event-sub-split" data-editor="split-event-sub" hidden>一键拆分为多条订阅</button>' +
     '<button type="button" data-editor="remove-event-sub">删除此订阅</button>' +
     "</div>";
 }
@@ -1078,36 +1097,138 @@ function updateTypesSummary(row) {
   summary.textContent = eventTypesSummaryText(checked);
 }
 
-// eventSubRowIssues 汇集「类型 × 投递形态」相容性问题(仅提示,不阻断保存):
-// 形态不匹配的类型会被后端静默忽略,勾选前必须让用户看见。
-function eventSubRowIssues(row) {
-  var deliver = subFieldValue(row, "deliver") || "notice";
-  var issues = [];
+// deliverOptionsHTML 渲染投递形态选项(仅列出允许集合,选中 current)。
+function deliverOptionsHTML(list, current) {
+  var html = "";
+  for (var i = 0; i < list.length; i++) {
+    html += '<option value="' + esc(list[i]) + '"' + (list[i] === current ? " selected" : "") + ">" +
+      esc(DELIVER_LABELS[list[i]] || list[i]) + "</option>";
+  }
+  return html;
+}
+
+// scanEventSubTypes 扫描所选类型(勾选 + 自定义输入),推导:
+//   allowed  —— 允许的投递形态并集(空 = 无可判定类型);
+//   conflicts—— 与当前 deliver 不兼容的类型提示(需切形态或拆分);
+//   unwired  —— 未接出站映射的类型(勾选也不会投递)。
+// 「细项 → 粗项」由本函数落地:唯一形态锁定、多形态收敛、跨形态提示拆分。
+function scanEventSubTypes(row, deliver) {
+  var allowedSet = {};
+  var allowed = [];
+  var conflicts = [];
+  var unwired = [];
   var seen = {};
-  var boxes = row.querySelectorAll("[data-sub-type]");
+  var types = [];
+  var boxes = row ? row.querySelectorAll("[data-sub-type]") : [];
   for (var i = 0; i < boxes.length; i++) {
-    if (!boxes[i].checked) { continue; }
-    pushTypeIssue(issues, seen, boxes[i].getAttribute("data-sub-type"), deliver);
+    if (boxes[i].checked) { types.push(boxes[i].getAttribute("data-sub-type")); }
   }
   var extra = splitSubList(subFieldValue(row, "types-extra"));
-  for (var e = 0; e < extra.length; e++) {
-    pushTypeIssue(issues, seen, extra[e], deliver);
+  for (var e = 0; e < extra.length; e++) { types.push(extra[e]); }
+  for (var t = 0; t < types.length; t++) {
+    var type = types[t];
+    if (!type || seen[type]) { continue; }
+    seen[type] = true;
+    var forms = EVENT_TYPE_FORMS[type];
+    if (!forms) { continue; } // 词表外:不做静态判定。
+    if (forms.length === 0) { unwired.push(type); continue; }
+    for (var f = 0; f < forms.length; f++) {
+      if (!allowedSet[forms[f]]) { allowedSet[forms[f]] = true; allowed.push(forms[f]); }
+    }
+    if (forms.indexOf(deliver) < 0) { conflicts.push(type + " 需要 deliver=" + forms.join("/")); }
+  }
+  return { allowed: allowed, conflicts: conflicts, unwired: unwired };
+}
+
+// eventSubRowIssues 汇集「类型 × 投递形态」相容性问题(仅提示,不阻断保存)。
+function eventSubRowIssues(row) {
+  var info = scanEventSubTypes(row, subFieldValue(row, "deliver") || "notice");
+  var issues = info.conflicts.slice();
+  for (var i = 0; i < info.unwired.length; i++) {
+    issues.push(info.unwired[i] + " 暂未接出站映射(不会投递)");
   }
   return issues;
 }
 
-function pushTypeIssue(issues, seen, type, deliver) {
-  if (!type || seen[type]) { return; }
-  seen[type] = true;
-  var forms = EVENT_TYPE_FORMS[type];
-  if (!forms) { return; } // 通配/词表外:不做静态判定。
-  if (forms.length === 0) {
-    issues.push(type + " 暂未接出站映射(不会投递)");
-    return;
+// refreshDeliverSelect 由所选类型推导投递形态:
+//   - 唯一形态 → 锁定(disabled),用户无需感知;
+//   - 多形态类型(如 completion)→ 选项收敛到允许集合,只在必要时选择;
+//   - 跨形态勾选 → 保留当前选择,由告警 +「一键拆分」引导。
+function refreshDeliverSelect(row) {
+  var select = row ? row.querySelector('[data-sub-field="deliver"]') : null;
+  if (!select) { return; }
+  var current = select.value || "notice";
+  var allowed = scanEventSubTypes(row, current).allowed;
+  var free = allowed.length === 0;
+  var options = free ? DELIVER_ALL.slice() : allowed.slice();
+  if (options.indexOf(current) < 0) { current = options[0]; }
+  select.innerHTML = deliverOptionsHTML(options, current);
+  select.value = current;
+  select.disabled = !free && options.length === 1;
+  var hint = row.querySelector("[data-deliver-hint]");
+  if (hint) {
+    hint.textContent = select.disabled ? "由所选类型推导" : (free ? "" : "可选:" + options.join("/"));
   }
-  if (forms.indexOf(deliver) < 0) {
-    issues.push(type + " 需要 deliver=" + forms.join("/"));
+}
+
+// updateSplitButton 跨形态冲突时显示「一键拆分」。
+function updateSplitButton(row) {
+  if (!row) { return; }
+  var button = row.querySelector('[data-editor="split-event-sub"]');
+  if (!button) { return; }
+  button.hidden = !eventSubRowCanSplit(row);
+}
+
+function eventSubRowCanSplit(row) {
+  return scanEventSubTypes(row, subFieldValue(row, "deliver") || "notice").conflicts.length > 0;
+}
+
+// splitEventSubRow 按形态把当前行拆成多条订阅(词表外/未接线类型留在首条):
+// 一条订阅一种形态——这是「细项推导粗项」的收尾方式,用户无需手工配置形态。
+function splitEventSubRow(row) {
+  var host = connEl("connector-event-subs");
+  if (!host || !row) { return; }
+  var rows = host.querySelectorAll("[data-event-sub]");
+  var models = [];
+  var targetIndex = -1;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i] === row) { targetIndex = i; }
+    models.push(collectEventSubRow(rows[i]));
   }
+  if (targetIndex < 0) { return; }
+  var split = splitEventSubModel(models[targetIndex]);
+  if (split.length <= 1) { return; }
+  models.splice.apply(models, [targetIndex, 1].concat(split));
+  renderEventSubRows(models);
+}
+
+// splitEventSubModel 按解析形态分组(多形态类型按当前 deliver,不适用则取首选形态)。
+function splitEventSubModel(model) {
+  var keep = [];
+  var groups = {};
+  var order = [];
+  var types = model.types || [];
+  for (var i = 0; i < types.length; i++) {
+    var type = types[i];
+    var forms = EVENT_TYPE_FORMS[type];
+    if (!forms || forms.length === 0) { keep.push(type); continue; }
+    var form = forms.indexOf(model.deliver) >= 0 ? model.deliver : forms[0];
+    if (!groups[form]) { groups[form] = []; order.push(form); }
+    groups[form].push(type);
+  }
+  if (order.length <= 1) { return [model]; }
+  var out = [];
+  for (var g = 0; g < order.length; g++) {
+    var item = {};
+    for (var key in model) {
+      if (Object.prototype.hasOwnProperty.call(model, key)) { item[key] = model[key]; }
+    }
+    item.deliver = order[g];
+    item.types = g === 0 ? keep.concat(groups[order[g]]) : groups[order[g]].slice();
+    if (g > 0 && item.id) { item.id = item.id + "-" + (g + 1); }
+    out.push(item);
+  }
+  return out;
 }
 
 // updateTypesWarning 渲染相容性告警(无问题则隐藏)。
@@ -1125,10 +1246,12 @@ function updateTypesWarning(row) {
   warning.hidden = false;
 }
 
-// refreshEventSubRow 统一刷新汇总行与相容性告警(勾选/形态/自定义输入变更后调用)。
+// refreshEventSubRow 统一刷新:推导形态 → 汇总行 → 告警 → 拆分按钮。
 function refreshEventSubRow(row) {
+  refreshDeliverSelect(row);
   updateTypesSummary(row);
   updateTypesWarning(row);
+  updateSplitButton(row);
 }
 
 // syncEventSubRowMode 按会话模式启用/禁用「会话列表」输入(非 ids 模式置灰提示)。
@@ -1607,6 +1730,7 @@ function onModalBodyClick(event) {
   var act = editorBtn.getAttribute("data-editor");
   if (act === "add-event-sub") { appendEventSubRow(); }
   if (act === "remove-event-sub") { removeEventSubRow(editorBtn); }
+  if (act === "split-event-sub") { splitEventSubRow(editorBtn.closest("[data-event-sub]")); }
 }
 
 // 新建时切换通道 → 按新 Schema 重渲染字段集(编辑时 provider 锁定,选择器不存在)。
