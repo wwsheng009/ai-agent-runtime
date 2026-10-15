@@ -86,17 +86,29 @@ const (
 	botsActionBack
 )
 
-// handleChatBotsCommand 是 /bots 命令入口：未装配连接器时给出明确文案，
-// 否则打开机器人列表副屏（能力不足/嵌套时由框架降级为主屏内联文档）。
-func handleChatBotsCommand(session *ChatSession, _ string) {
+// handleChatBotsCommand 是 /bots 命令入口：无参（或 list/help）按既有路径
+// 走副屏/内联；bind/unbind/status 走绑定管理子命令（docs/bots/09 §5.4）。
+func handleChatBotsCommand(session *ChatSession, command string) {
 	if session == nil {
 		// 新功能不得新增终端直写（direct-writer 迁移债基线）；无会话时只记日志。
 		logpkg.Warnf("bots: /bots 需要活动会话，已忽略")
 		return
 	}
+	if sub := botsParseSubcommand(command); sub != "" {
+		if unifiedDirectInteractiveOutput(session) {
+			result := executeBotsSubcommand(session, command)
+			renderErr := renderChatCommandResult(session, result, false)
+			if renderErr == nil {
+				dispatchChatScreenEffects(session, result)
+			}
+			return
+		}
+		printChatCommandOutput(session, renderBotsSubcommandText(session, command))
+		return
+	}
 	if unifiedDirectInteractiveOutput(session) {
 		// 与 /agents 同款：Screen 效应必须统一派发（含降级内联）。
-		result := executeStructuredBotsCommand(session)
+		result := executeStructuredBotsCommand(session, command)
 		renderErr := renderChatCommandResult(session, result, false)
 		if renderErr == nil {
 			dispatchChatScreenEffects(session, result)
@@ -112,17 +124,50 @@ func handleChatBotsCommand(session *ChatSession, _ string) {
 	printChatCommandOutput(session, botsInlineDoc(host))
 }
 
-// executeStructuredBotsCommand 把 /bots 暴露给统一命令管线：未装配连接器时
-// 返回明确文案；否则请求机器人列表副屏（能力不足时由 DegradeDoc 内联）。
-func executeStructuredBotsCommand(session *ChatSession) CommandResult {
+// executeStructuredBotsCommand 把 /bots 暴露给统一命令管线：带子命令时转交
+// 绑定管理；未装配连接器时返回明确文案；否则请求机器人列表副屏（能力不足时
+// 由 DegradeDoc 内联）。
+func executeStructuredBotsCommand(session *ChatSession, command string) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	if sub := botsParseSubcommand(command); sub != "" {
+		return executeBotsSubcommand(session, command)
 	}
 	host, reason := botsResolveHost(session)
 	if host == nil {
 		return commandTextResult(botsUnavailableText(reason))
 	}
 	return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenBotsListSpec(host))}
+}
+
+// botsParseSubcommand 从 /bots 命令行提取规范化子命令名（空 = 无子命令）。
+// 仅识别首个 token；bind/unbind/status 等的其余参数由子命令执行体解析。
+func botsParseSubcommand(command string) string {
+	argument := strings.TrimSpace(extractCommandArgument(command))
+	if argument == "" {
+		return ""
+	}
+	fields := strings.Fields(argument)
+	if len(fields) == 0 {
+		return ""
+	}
+	switch strings.ToLower(fields[0]) {
+	case "bind":
+		return "bind"
+	case "unbind":
+		return "unbind"
+	case "status":
+		return "status"
+	case "list", "ls":
+		return "list"
+	case "help":
+		return "help"
+	default:
+		// 未知 token：保持「打开副屏」的既有语义（副屏是能力更全的入口），
+		// 不静默吞掉——executeBotsSubcommand 不接；由外层副屏路径兜底。
+		return ""
+	}
 }
 
 // botsResolveHost 解析连接器宿主：已装配（或已按需装配过）直接用；

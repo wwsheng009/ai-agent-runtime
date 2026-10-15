@@ -284,10 +284,17 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/bots",
-			Usage:       "/bots",
-			Summary:     "机器人（IM 连接器）：查看 / 扫码新增 / 启停 / 日志（副屏交互）",
+			Usage:       "/bots [list|status|bind|unbind|help]",
+			Summary:     "机器人（IM 连接器）：无参打开副屏；bind/unbind/status 管理会话绑定（docs/bots/09 §5.4）",
 			Group:       string(chatSlashCommandGroupWeb),
-			AcceptsArgs: false,
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "list", Summary: "列出全部机器人（内联，不进副屏）"},
+				{Token: "status", Summary: "连接器详情：运行归属 / 心跳 / 绑定 / 最近错误"},
+				{Token: "bind", Summary: "绑定当前（或指定）会话到连接器；chat 取最近活跃 IM 会话"},
+				{Token: "unbind", Summary: "解绑（写零值墓碑，等价 IM /new）"},
+				{Token: "help", Summary: "显示 /bots 子命令用法"},
+			},
 		},
 		{
 			Name:        "/agent",

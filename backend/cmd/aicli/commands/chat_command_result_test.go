@@ -1166,6 +1166,10 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		// 因此两处各有一条，不是新增的直写点。
 		{File: "chat_runtime_server.go", Func: "runtimeServerChatExecutorConfigured", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_runtime_server.go", Func: "prepareRuntimeServerChatPersistence", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		// 联盟式调度 driver（15ff3150，S0–S5a）的启动/故障诊断与 logf 兜底：
+		// opt-in 未启用时不输出，属启动期 stderr 兜底而非交互功能写入者，
+		// 按基线契约补登存量（迁移收口时删除条目）。
+		{File: "chat_schedule_driver.go", Func: "startChatScheduleDriver", Kind: "fmt.Fprint(os.Std*)", Count: 5},
 		{File: "chat_selection_output.go", Func: "printChatSelectionBlankLine", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_selection_output.go", Func: "printChatSelectionLine", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_selection_output.go", Func: "writeChatParts", Kind: "ui.WriteTerminal*", Count: 2},

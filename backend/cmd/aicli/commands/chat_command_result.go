@@ -328,7 +328,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		return executeStructuredAgentsCommand(session, command), true, nil
 	}
 	if commandMatches(cmdLower, "/bots") && unifiedDirectInteractiveOutput(session) {
-		return executeStructuredBotsCommand(session), true, nil
+		return executeStructuredBotsCommand(session, command), true, nil
 	}
 	if commandMatches(cmdLower, "/agent") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredAgentTranscriptCommand(session, command), true, nil

@@ -6,6 +6,7 @@
 package commands
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -164,14 +165,63 @@ func TestBotsBindSubcommandBindsCurrentSession(t *testing.T) {
 	require.Contains(t, out, "已绑定")
 	require.Contains(t, out, "chat-b")
 	require.Contains(t, out, "session-current")
+	require.Contains(t, out, "排它性")
+	require.Contains(t, out, "chat-a")
 
-	// Store 内部生效：chat-b 指向当前会话（覆盖式切换，旧 session-b 保留在 chat-a）。
+	// Store 内部生效：chat-b 指向当前会话；排它性（2026-10-15）：该连接器
+	// 其余活跃绑定（chat-a → session-a）被解除为墓碑，旧会话上下文原样保留。
 	binding, ok := host.Store().GetBinding("tg-1", "chat-b")
 	require.True(t, ok)
 	require.Equal(t, "session-current", binding.Session.SessionID)
 	other, ok := host.Store().GetBinding("tg-1", "chat-a")
-	require.True(t, ok)
-	require.Equal(t, "session-a", other.Session.SessionID)
+	require.True(t, ok, "解除 = 写墓碑，记录保留")
+	require.True(t, other.Session.IsZero(), "排它性：指向其它会话的绑定必须被解除")
+}
+
+// TestBotsBindSubcommandExclusiveReleasesSameSessionBindings 锁定排它性口径
+// （2026-10-15 定案）：一个 bot 同时只保留一条活跃绑定——其余活跃绑定即使已
+// 指向同一会话，也按字面语义一并解除（"解除这个bot的其它绑定"）；历史墓碑
+// 不受影响，目标绑定保持完整。
+func TestBotsBindSubcommandExclusiveReleasesSameSessionBindings(t *testing.T) {
+
+	store := connectors.NewMemoryStore(
+		connectors.Config{ID: "tg-x", Provider: "telegram", Enabled: true},
+	)
+	service := connectors.New(connectors.Deps{Store: store, Logf: func(string, ...any) {}})
+	host := &LocalConnectorHost{store: store, service: service}
+	require.NoError(t, store.PutBinding(connectors.Binding{
+		ConnectorID: "tg-x", Chat: "chat-same",
+		Session:   connectors.SessionRef{SessionID: "session-current"}, // 已指向同一会话
+		UpdatedAt: time.Now().Add(-2 * time.Hour),
+	}))
+	require.NoError(t, store.PutBinding(connectors.Binding{
+		ConnectorID: "tg-x", Chat: "chat-tomb", // 历史墓碑
+		UpdatedAt: time.Now().Add(-time.Hour),
+	}))
+	require.NoError(t, store.PutBinding(connectors.Binding{
+		ConnectorID: "tg-x", Chat: "chat-new",
+		Session:   connectors.SessionRef{SessionID: "session-b"},
+		UpdatedAt: time.Now(),
+	}))
+
+	session := &ChatSession{RuntimeSession: newBotsTestRuntimeSession("session-current")}
+	previous := currentLocalConnectorHost()
+	setLocalConnectorHost(host)
+	defer setLocalConnectorHost(previous)
+
+	// 目标 = 最近活跃 chat-new；chat-same / chat-b 均被解除。
+	out := renderBotsSubcommandText(session, "/bots bind tg-x")
+	require.Contains(t, out, "已绑定")
+	require.Contains(t, out, "chat-new")
+	require.Contains(t, out, "排它性")
+	require.Contains(t, out, "chat-same")
+
+	same, _ := store.GetBinding("tg-x", "chat-same")
+	require.True(t, same.Session.IsZero(), "同一会话的其它绑定也按字面解除")
+	tomb, _ := store.GetBinding("tg-x", "chat-tomb")
+	require.True(t, tomb.Session.IsZero())
+	target, _ := store.GetBinding("tg-x", "chat-new")
+	require.Equal(t, "session-current", target.Session.SessionID, "目标绑定保持完整")
 }
 
 func TestBotsBindSubcommandGuards(t *testing.T) {
@@ -319,4 +369,58 @@ func TestBotsFormatBindingText(t *testing.T) {
 	}))
 	require.Contains(t, botsFormatBindingText(connectors.Binding{Chat: "chat"}), "未绑定")
 	require.True(t, strings.Contains(botsSubcommandHelpText(), "unbind"))
+}
+
+// 租约冲突文案：IM 侧必须给出可行动提示（占用者 + 出路），而不是原始
+// "already owned by ..."（真实故障复盘：bot 消息派发撞上另一实例持有的
+// 会话租约，用户只看到不可读的失败文本）。
+func TestLocalConnectorLeaseConflictText(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	live := &runtimechat.SessionLease{
+		SessionID: "session-1",
+		OwnerID:   "aicli-actor:host-a:100:session-1",
+		OwnerKind: "aicli-actor",
+		ExpiresAt: now.Add(time.Minute),
+	}
+	text := localConnectorLeaseConflictText("session-1", live)
+	require.Contains(t, text, "session-1")
+	require.Contains(t, text, "aicli-actor:host-a:100:session-1")
+	require.Contains(t, text, "另一个 aicli 实例")
+	require.Contains(t, text, "/bots bind")
+
+	// 无租约详情时仍有兜底文案。
+	fallback := localConnectorLeaseConflictText("session-2", nil)
+	require.Contains(t, fallback, "session-2")
+
+	// 死持有者：提示稍后重试即可接管（不发 /bots 改绑建议）。
+	// 用一个必然不存在的 PID（2^30，沿用 chat_actor_host_test 的取法）；
+	// 若环境无法判定进程死活则跳过该断言（与既有测试同口径）。
+	deadPID := 1 << 30
+	if running, known := localChatProcessRunning(deadPID); !known || running {
+		t.Skipf("cannot establish a stopped test PID: running=%v known=%v", running, known)
+	}
+	dead := &runtimechat.SessionLease{
+		SessionID: "session-3",
+		OwnerID:   localChatSessionLeaseOwnerID("aicli-actor", "session-3"),
+		OwnerKind: localChatSessionActorLeaseOwnerKind,
+		PID:       deadPID,
+		Hostname:  localChatHostname(),
+		ExpiresAt: now.Add(time.Minute),
+	}
+	deadText := localConnectorLeaseConflictText("session-3", dead)
+	require.Contains(t, deadText, "已退出的进程")
+	require.Contains(t, deadText, "稍后重试")
+
+	alive := &runtimechat.SessionLease{
+		SessionID: "session-4",
+		OwnerID:   localChatSessionLeaseOwnerID("aicli-actor", "session-4"),
+		OwnerKind: localChatSessionActorLeaseOwnerKind,
+		PID:       os.Getpid(),
+		Hostname:  localChatHostname(),
+		ExpiresAt: now.Add(time.Minute),
+	}
+	aliveText := localConnectorLeaseConflictText("session-4", alive)
+	require.Contains(t, aliveText, "另一个 aicli 实例")
 }

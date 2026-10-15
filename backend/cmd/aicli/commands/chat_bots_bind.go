@@ -15,6 +15,10 @@ package commands
 //
 // 语义约束：
 //   - bind 是覆盖式指针切换：旧会话上下文原样保留，仅 bot 换指向；
+//   - bind 具排它性（2026-10-15）：一个 bot 同时只服务一个会话——目标 chat
+//     绑定成功后，该连接器其余活跃绑定全部写墓碑解除（与 unbind 同款语义；
+//     旧会话上下文原样保留）。运行时归属（NodeID）迁移不影响该关系：绑定
+//     会话的进程退出后由 R2a 接管，SessionID 不变、仅回写 NodeID；
 //   - 会话存在性校验（v1 REST 未做，见 restapi/bindings.go 注释）在 TUI 侧
 //     加固：session id 非当前会话时要求出现在 SessionManager 列表内；
 //   - 白名单：bind 目标 chat 必须命中 cfg.Policy.AllowedUsers（与入站同源）。
@@ -25,8 +29,8 @@ import (
 	"strings"
 	"time"
 
-	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
 // botsSubcommands 是二级命令候选（与 botsParseSubcommand / catalog Args 同源）。
@@ -214,7 +218,7 @@ func botsSubcommandHelpText() string {
 		"  /bots                     打开机器人管理副屏（新增/扫码/启停/日志）",
 		"  /bots list                内联列出全部机器人",
 		"  /bots status [id]         连接器详情：运行归属 / 心跳 / 绑定 / 最近错误；缺省列全部",
-		"  /bots bind <id> [session] 绑定当前（或指定）会话到连接器；chat 取最近活跃 IM 会话",
+		"  /bots bind <id> [session] 绑定当前（或指定）会话到连接器（排它：解除该连接器其它绑定）；chat 取最近活跃 IM 会话",
 		"  /bots unbind <id> [chat]  解绑（缺省 chat = 该连接器最近活跃绑定）",
 	}, "\n")
 }
@@ -440,8 +444,15 @@ func renderBotsBindSubcommand(session *ChatSession, rest []string) string {
 	}
 
 	expected := binding.UpdatedAt
+	// 绑定即登记执行体亲和（R1，docs/bots/09 §7.2）：NodeID = 本 TUI 进程的
+	// HostID。poller（可能在另一进程）据此把 IM 消息 R1 亲和派发回本进程执行，
+	// turn 才会真正流入当前会话；缺省（空 NodeID）会被路由判为「待接管」，
+	// 在 poller 进程本地执行——跨进程时撞上会话租约冲突，消息根本进不了会话。
 	next := connectors.Binding{ConnectorID: connectorID, Chat: chat}
-	next.Session = connectors.SessionRef{SessionID: sessionID}
+	next.Session = connectors.SessionRef{
+		NodeID:    connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID()),
+		SessionID: sessionID,
+	}
 	swapped, err := botsCASBinding(store, connectorID, chat, expected, next, !binding.Session.IsZero())
 	if err != nil {
 		return "绑定写入失败：" + err.Error()
@@ -449,9 +460,47 @@ func renderBotsBindSubcommand(session *ChatSession, rest []string) string {
 	if !swapped {
 		return fmt.Sprintf("绑定已被其它操作更新（乐观锁未命中），请重试：/bots bind %s", connectorID)
 	}
-	logpkg.Infof("connectors: bind %s chat=%s session=%q (via tui /bots bind)", connectorID, chat, sessionID)
-	return fmt.Sprintf("已绑定：连接器 %s 的 chat %q → 会话 %s\n（覆盖式指针切换：旧会话上下文原样保留）",
+	// 排它性收尾（2026-10-15）：一个 bot 同时只服务一个会话——目标 chat 绑定
+	// 成功后，该连接器其余活跃绑定全部写墓碑解除（旧会话上下文原样保留）。
+	released, releaseSkipped := botsReleaseOtherBindings(store, connectorID, chat)
+	logpkg.Infof("connectors: bind %s chat=%s session=%q (via tui /bots bind; released=%d skipped=%d)",
+		connectorID, chat, sessionID, len(released), len(releaseSkipped))
+	message := fmt.Sprintf("已绑定：连接器 %s 的 chat %q → 会话 %s\n（覆盖式指针切换：旧会话上下文原样保留）",
 		connectorID, chat, sessionID)
+	if len(released) > 0 {
+		message += fmt.Sprintf("\n（排它性：已解除该连接器其它 %d 条绑定：%s）",
+			len(released), strings.Join(released, "、"))
+	}
+	if len(releaseSkipped) > 0 {
+		message += fmt.Sprintf("\n（排它性：%s 因并发更新暂未解除，可稍后重试 /bots bind %s）",
+			strings.Join(releaseSkipped, "、"), connectorID)
+	}
+	return message
+}
+
+// botsReleaseOtherBindings 执行 /bots bind 的排它性收尾（一个 bot 同时只服务
+// 一个会话）：目标 chat 绑定成功后，将该连接器其余活跃绑定全部写零值墓碑解除
+// （与 /bots unbind 同款语义；旧会话上下文原样保留，可随时再 bind 回来）。
+// best-effort：并发竞争（CAS 未命中）不阻断已完成的 bind，未解除项由调用方提示。
+func botsReleaseOtherBindings(store connectors.Store, connectorID, keepChat string) (released, skipped []string) {
+	if store == nil {
+		return nil, nil
+	}
+	for _, binding := range store.ListBindings(connectorID) {
+		if binding.Chat == keepChat || binding.Session.IsZero() {
+			continue
+		}
+		swapped, err := botsCASBinding(store, connectorID, binding.Chat, binding.UpdatedAt,
+			connectors.Binding{ConnectorID: connectorID, Chat: binding.Chat}, true)
+		if err != nil || !swapped {
+			skipped = append(skipped, binding.Chat)
+			continue
+		}
+		logpkg.Infof("connectors: bind %s released other binding chat=%s (exclusive; was session=%s)",
+			connectorID, binding.Chat, strings.TrimSpace(binding.Session.SessionID))
+		released = append(released, binding.Chat)
+	}
+	return released, skipped
 }
 
 // renderBotsUnbindSubcommand 处理 /bots unbind <id> [chat]：

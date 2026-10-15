@@ -223,6 +223,10 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		// 逐位补全：二级子命令 → config <key> → key 取值（on|off 枚举），
 		// 见 chat_gateway_completion.go。
 		return completeGatewaySlashArgs(session, argsText, cursor)
+	case "/bots":
+		// 逐位补全：二级子命令 → 连接器 id（bind 仅 enabled）→ unbind 的 chat
+		// 位（现有绑定）；见 chat_bots_bind.go（docs/bots/09 §5.4）。
+		return completeBotsSlashArgs(session, argsText, cursor)
 	case "/web":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "status", Summary: "显示 Web 服务器状态", Group: string(chatSlashCommandGroupWeb)},
