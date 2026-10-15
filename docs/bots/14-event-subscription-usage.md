@@ -215,7 +215,76 @@ policy:
 
 ---
 
-## 11. 相关文档
+## 11. 前端入口与编辑路径
+
+订阅模型有三个前端入口，能力与风险不同，按需选择。
+
+### 11.1 React（runtime-server 托管）——推荐，完整编辑面
+
+- 入口：runtime-server 启动且前端构建产物就位（`webui.Available()`）时，打开
+  `http://<runtime-server>:<port>/runtime/connectors`（运行管理 → 连接器）。
+- 路径：连接器列表 → 打开某连接器 → 对话框中「事件订阅」区：
+  - 总开关（`events.enabled`）；
+  - 「添加订阅」逐条编辑：`id` / 会话选择器（bound | ids + 列表 | all）/ 事件类型
+    （`types`，逗号或空格分隔，支持别名与 `turn.*` 通配）/ 投递形态
+    （notice | content | digest | stream）/ 单条启停；
+- 保存 = `PATCH /api/connectors/{id}`：前端把「路由 + 事件订阅」合并进该连接器**现有 policy**
+  （保留未展示的键）；关闭订阅时显式写 `enabled:false`。
+- 鉴权：runtime-server 管理面 token（与 skills 管理面同口径）。
+
+### 11.2 aicli 微前端（micro web，`/web/`）——⚠️ 不含订阅编辑面
+
+- 入口：`aicli --web` 后打开 `http://127.0.0.1:<port>/web/`，切到「连接器」页签。
+- 能力：连接器列表 / 新建 / 编辑 / 测试 / 日志 / 绑定管理；策略表单仅含
+  `allowed_users`、`command_prefix`、`session_mode`、`reply_mode`、`runtime_owner`、`route`。
+- **⚠️ 现状（2026-10-15）**：微前端保存走 `PATCH /api/connectors/{id}`，而后端对
+  `policy` 是**整体替换**（`policyFrom(view)`）；其表单未携带的 `events`、`notify`、
+  `content_mirror` 会被一并清空。**该连接器一旦配置了订阅，避免再用微前端保存它的策略**——
+  否则订阅、通知开关、内容镜像开关都会丢失。要在页面上改订阅：用 11.1 的 React 对话框，
+  或走 11.3 的 REST（携带全量 policy）。
+- TUI `/bots`：只读（状态 / 日志 / 绑定查看）。
+
+### 11.3 REST 直连（脚本 / 自动化）
+
+管理面契约（三宿主一致，鉴权按宿主：runtime-server=Bearer、aicli=本机会话守卫、gateway=owner cookie）：
+
+```text
+GET|POST      /api/connectors               列表 / 新建
+GET|PATCH|PUT|DELETE /api/connectors/{id}   查看 / 更新 / 删除（policy 整体替换）
+GET           /api/connectors/{id}/logs     运行日志（entries + stats）
+POST          /api/connectors/{id}/reload|takeover|test
+PUT|DELETE    /api/connectors/{id}/bindings/{chat}   绑定 / 解绑
+```
+
+⚠️ **`policy` 是整体替换**（`settings`/`secrets` 则以现有值为底合并）：PATCH 必须携带要保留的
+全部 policy 键（含 `notify`/`content_mirror`/`route`），缺省的键会被清空。示例（保留既有键、仅更新订阅）：
+
+```bash
+curl -X PATCH http://127.0.0.1:PORT/api/connectors/qq-bot1 \
+  -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \
+  -d '{
+    "policy": {
+      "command_prefix": "/",
+      "allowed_users": [],
+      "session_mode": "chat",
+      "reply_mode": "stream",
+      "runtime_owner": "",
+      "content_mirror": true,
+      "notify": { "enabled": false },
+      "events": {
+        "enabled": true,
+        "subscriptions": [
+          { "id": "main-chat", "sessions": { "mode": "bound" },
+            "types": ["assistant_message"], "deliver": "content" },
+          { "id": "ops-watch", "sessions": { "mode": "ids", "ids": ["session_a", "session_b"] },
+            "types": ["turn.*", "approval", "question"], "deliver": "notice" }
+        ]
+      }
+    }
+  }'
+```
+
+## 12. 相关文档
 
 | 主题 | 文档 |
 |---|---|
