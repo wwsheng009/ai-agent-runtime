@@ -44,6 +44,10 @@ export const enConnectors = {
     actionResultEmpty: "\u201c{{action}}\u201d finished (no payload)",
     logs: "Logs",
     lastError: "Last error",
+    bindings: "Bound sessions",
+    bindingSession: "session {{session}}",
+    bindingNode: "node {{node}}",
+    bindingUnbound: "no session bound",
   },
   stats: {
     inbound: "in {{value}}",

@@ -122,6 +122,7 @@ describe("WorkspaceBotPanel", () => {
           connector_id: "wx-1",
           chat: "o9cq-owner@im.wechat",
           session_id: "sess-other",
+          node_id: "node-26752-20261015T145521Z",
           updated_at: "2026-10-14T01:00:00Z",
           connector: { id: "wx-1", name: "微信机器人", provider: "wechat", enabled: true },
         },
@@ -136,6 +137,9 @@ describe("WorkspaceBotPanel", () => {
     // 绑定行 + chat
     expect(document.body.textContent).toContain("o9cq-owner@im.wechat");
     expect(document.body.textContent).toContain("切换到当前会话");
+    // 所在会话与节点（docs/bots/09 §5.3）
+    expect(document.body.textContent).toContain("会话 sess-other");
+    expect(document.body.textContent).toContain("节点 node-26752-20261015T145521Z");
   });
 
   it("切换到当前会话：PUT 带 expected 乐观锁（按 updated_at）", async () => {

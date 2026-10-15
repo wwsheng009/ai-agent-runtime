@@ -206,6 +206,11 @@ DELETE /api/connectors/{id}/bindings/{chat}
 - 数据源：`GET /api/connectors/bindings` + `GET /api/connectors`；
 - 操作即 PUT/DELETE；成功后失效本页与 connectors 页缓存；
 - 「扫码换凭据」见 §6（两层模型）。
+- **所在会话与节点可见（2026-10-15）**：绑定行新增一行次要信息，直接展示该 chat
+  绑定的 agent 会话（`session_id`）与所在 mesh 节点（`node_id`）；connectors 配置页
+  同样按连接器列出 `chat → 会话 · 节点`。§0 第 4 点「没有任何入口能看到 bot 绑定了
+  哪个会话、由哪个实例在跑」就此闭环（运行归属 `active_owner` 仍是 poller 宿主，
+  两者互补：绑定行回答"会话在哪"，badge 回答"谁在收发"）。
 
 ### 5.4 aicli TUI（N5）
 

@@ -13,6 +13,7 @@ import {
   createConnector,
   deleteConnector,
   getConnectorSchema,
+  listConnectorBindings,
   listConnectors,
   readConnectorFieldErrors,
   reloadConnector,
@@ -27,6 +28,7 @@ import { readAdminToken } from "@/lib/admin-token";
 import { cn } from "@/lib/utils";
 import type {
   ConnectorActionSpec,
+  ConnectorBindingView,
   ConnectorFieldError,
   ConnectorSchema,
   ConnectorSubmitPayload,
@@ -35,8 +37,10 @@ import type {
 
 import { summarizeActionPayload } from "./connectors/action-payload";
 import { ConnectorActionDialog } from "./connectors/action-dialog";
+import { ConnectorBindingsList } from "./connectors/bindings-list";
 import { ConnectorDialog } from "./connectors/connector-dialog";
 import { ConnectorLogsDialog } from "./connectors/logs-dialog";
+import { ConnectorRuntimeSummary } from "./connectors/runtime-summary";
 import { findProviderSchema } from "./connectors/shared";
 import { TestMessageDialog } from "./connectors/test-message-dialog";
 
@@ -56,6 +60,7 @@ export function ConnectorsPage() {
 
   const [schema, setSchema] = useState<ConnectorSchema | null>(null);
   const [items, setItems] = useState<ConnectorView[]>([]);
+  const [bindings, setBindings] = useState<ConnectorBindingView[]>([]);
   const [loading, setLoading] = useState(true);
   const [schemaError, setSchemaError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -76,12 +81,18 @@ export function ConnectorsPage() {
     setLoading(true);
     setSchemaError(null);
     setLoadError(null);
-    const [schemaResult, listResult] = await Promise.allSettled([
+    const [schemaResult, listResult, bindingsResult] = await Promise.allSettled([
       getConnectorSchema({ adminToken }),
       listConnectors({ adminToken }),
+      listConnectorBindings({ adminToken }),
     ]);
     setSchema(schemaResult.status === "fulfilled" ? schemaResult.value : null);
     setItems(listResult.status === "fulfilled" ? listResult.value : []);
+    // 绑定是「所在会话与节点」展示的 additive 数据面：加载失败静默降级为不展示
+    // （不阻塞连接器主列表与编辑），下次刷新自动恢复。
+    setBindings(
+      bindingsResult.status === "fulfilled" ? bindingsResult.value ?? [] : [],
+    );
     setSchemaError(
       schemaResult.status === "rejected" ? errorText(schemaResult.reason) : null,
     );
@@ -94,6 +105,10 @@ export function ConnectorsPage() {
   useEffect(() => {
     void reloadData();
   }, [reloadData]);
+
+  /** 该连接器的绑定列表（chat → 会话 + 节点，docs/bots/09 §5.3）。 */
+  const bindingsOf = (connectorId: string) =>
+    bindings.filter((binding) => binding.connector_id === connectorId);
 
   const openCreate = () => {
     setEditing(null);
@@ -366,47 +381,10 @@ export function ConnectorsPage() {
                         </span>
                       </div>
                       <span className="truncate text-xs text-muted-foreground">{item.id}</span>
-                      {/* 运行计数（runtime additive 字段；缺失时不展示，日志按钮仍可用）。 */}
-                      {item.runtime ? (
-                        <span className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                          <span>
-                            {t("stats.inbound", {
-                              value: String(item.runtime.stats.inbound),
-                            })}
-                          </span>
-                          <span>·</span>
-                          <span>
-                            {t("stats.outbound", {
-                              value: String(item.runtime.stats.outbound),
-                            })}
-                          </span>
-                          <span>·</span>
-                          <span
-                            className={cn(
-                              item.runtime.stats.errors > 0
-                                ? "font-medium text-analytics-danger"
-                                : undefined,
-                            )}
-                          >
-                            {t("stats.errors", {
-                              value: String(item.runtime.stats.errors),
-                            })}
-                          </span>
-                        </span>
-                      ) : null}
-                      {item.runtime?.stats.last_error ? (
-                        <details className="text-xs text-muted-foreground">
-                          <summary className="cursor-pointer select-none">
-                            {t("page.lastError")}
-                          </summary>
-                          <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-analytics-danger">
-                            {item.runtime.stats.last_error}
-                            {item.runtime.stats.last_error_at
-                              ? ` · ${item.runtime.stats.last_error_at}`
-                              : ""}
-                          </p>
-                        </details>
-                      ) : null}
+                      {/* 运行计数与最近错误（runtime additive；缺失时不展示）。 */}
+                      <ConnectorRuntimeSummary runtime={item.runtime} />
+                      {/* 所在会话与节点（docs/bots/09 §5.3）。 */}
+                      <ConnectorBindingsList bindings={bindingsOf(item.id)} />
                     </div>
 
                     <div className="flex flex-wrap items-center gap-1.5">

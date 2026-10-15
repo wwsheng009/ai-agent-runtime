@@ -16,6 +16,7 @@ vi.mock("@/api/runtime/connectors", () => ({
   createConnector: vi.fn(),
   deleteConnector: vi.fn(),
   getConnectorSchema: vi.fn(),
+  listConnectorBindings: vi.fn(),
   listConnectors: vi.fn(),
   readConnectorLogs: vi.fn(),
   readConnectorFieldErrors: vi.fn(() => []),
@@ -27,6 +28,7 @@ vi.mock("@/api/runtime/connectors", () => ({
 
 import {
   getConnectorSchema,
+  listConnectorBindings,
   listConnectors,
   readConnectorLogs,
   runConnectorAction,
@@ -88,6 +90,8 @@ describe("ConnectorsPage", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     vi.mocked(getConnectorSchema).mockReset();
+    vi.mocked(listConnectorBindings).mockReset();
+    vi.mocked(listConnectorBindings).mockResolvedValue([]);
     vi.mocked(listConnectors).mockReset();
     vi.mocked(readConnectorLogs).mockReset();
     vi.mocked(runConnectorAction).mockReset();
@@ -174,6 +178,38 @@ describe("ConnectorsPage", () => {
     expect(document.body.textContent).toContain("运行于 host-a");
     expect(document.body.textContent).toContain("未运行");
     expect(findButton("抢占")).toBeUndefined();
+  });
+
+  it("展示绑定会话与节点：bot 的每个 IM 会话绑定可见所在会话与节点", async () => {
+    vi.mocked(getConnectorSchema).mockResolvedValue(SCHEMA);
+    vi.mocked(listConnectors).mockResolvedValue([
+      {
+        ...CONNECTOR,
+        active_owner: "aicli:node-17448-20261015T145451Z",
+        owned_by_current_host: false,
+      },
+    ]);
+    vi.mocked(listConnectorBindings).mockResolvedValue([
+      {
+        connector_id: "tg-main",
+        chat: "chat-1",
+        session_id: "session_20261015_abc",
+        node_id: "node-26752-20261015T145521Z",
+      },
+      {
+        connector_id: "other-connector",
+        chat: "chat-x",
+        session_id: "session-should-not-render",
+      },
+    ]);
+
+    await render(<ConnectorsPage />);
+
+    expect(document.body.textContent).toContain("绑定会话");
+    expect(document.body.textContent).toContain("会话 session_20261015_abc");
+    expect(document.body.textContent).toContain("节点 node-26752-20261015T145521Z");
+    // 其它连接器的绑定不串台。
+    expect(document.body.textContent).not.toContain("session-should-not-render");
   });
 
   it("非本宿主持有且启用：二次确认后抢占成功、反馈并刷新", async () => {

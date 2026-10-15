@@ -38,6 +38,10 @@ export const zhConnectors = {
     actionResultEmpty: "「{{action}}」执行完成（无返回内容）",
     logs: "日志",
     lastError: "最近错误",
+    bindings: "绑定会话",
+    bindingSession: "会话 {{session}}",
+    bindingNode: "节点 {{node}}",
+    bindingUnbound: "未绑定会话",
   },
   stats: {
     inbound: "入 {{value}}",

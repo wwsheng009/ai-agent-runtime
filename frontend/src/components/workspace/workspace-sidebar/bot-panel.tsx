@@ -107,45 +107,66 @@ export function WorkspaceBotPanel({ selectedSessionId }: WorkspaceBotPanelProps)
                       selectedSessionId.trim() !== "" &&
                       binding.session_id === selectedSessionId.trim();
                     return (
-                      <li
-                        key={binding.chat}
-                        className="flex items-center justify-between gap-1.5"
-                      >
-                        <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-                          <MessageSquareIcon size={11} />
-                          <span className="truncate">{binding.chat}</span>
-                          {boundToCurrent ? (
-                            <span className="text-accent-primary">
-                              {t("sidebar.bots.boundToCurrent")}
-                            </span>
-                          ) : null}
-                        </span>
-                        <span className="flex shrink-0 items-center gap-1">
-                          {!boundToCurrent && canBind ? (
+                      <li key={binding.chat} className="flex flex-col gap-0.5">
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+                            <MessageSquareIcon size={11} />
+                            <span className="truncate">{binding.chat}</span>
+                            {boundToCurrent ? (
+                              <span className="text-accent-primary">
+                                {t("sidebar.bots.boundToCurrent")}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="flex shrink-0 items-center gap-1">
+                            {!boundToCurrent && canBind ? (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-1.5 text-xs"
+                                disabled={panel.actionBusy !== null}
+                                onClick={() =>
+                                  void handleBindExisting(connector.id, binding.chat)
+                                }
+                              >
+                                {t("sidebar.bots.switchToCurrent")}
+                              </Button>
+                            ) : null}
                             <Button
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5 text-xs"
                               disabled={panel.actionBusy !== null}
                               onClick={() =>
-                                void handleBindExisting(connector.id, binding.chat)
+                                void panel.unbind(connector.id, binding.chat)
                               }
+                              aria-label={t("sidebar.bots.unbind")}
                             >
-                              {t("sidebar.bots.switchToCurrent")}
+                              <UnlinkIcon size={11} />
                             </Button>
-                          ) : null}
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 px-1.5 text-xs"
-                            disabled={panel.actionBusy !== null}
-                            onClick={() =>
-                              void panel.unbind(connector.id, binding.chat)
-                            }
-                            aria-label={t("sidebar.bots.unbind")}
-                          >
-                            <UnlinkIcon size={11} />
-                          </Button>
+                          </span>
+                        </div>
+                        {/* 所在会话与节点（docs/bots/09 §5.3）：bot 的每个 IM 会话绑定
+                            指向哪个 agent 会话、由哪个 mesh 节点在服务，一眼可见。 */}
+                        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10px] text-muted-foreground">
+                          {binding.session_id ? (
+                            <>
+                              <span className="truncate" title={binding.session_id}>
+                                {t("sidebar.bots.bindingSession", {
+                                  session: binding.session_id,
+                                })}
+                              </span>
+                              {binding.node_id ? (
+                                <span className="truncate" title={binding.node_id}>
+                                  {t("sidebar.bots.bindingNode", {
+                                    node: binding.node_id,
+                                  })}
+                                </span>
+                              ) : null}
+                            </>
+                          ) : (
+                            <span>{t("sidebar.bots.bindingUnbound")}</span>
+                          )}
                         </span>
                       </li>
                     );
