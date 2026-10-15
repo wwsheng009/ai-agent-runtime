@@ -78,6 +78,81 @@ func MediaDirectiveNote(fenceName string) string {
 			"or `file <absolute-path-or-https-url>`. Use absolute local paths only.]", name)
 }
 
+// TruncateOpenAttachmentBlocks 截断流式文本中「尚未闭合」的媒体指令块：
+//   - 未闭合的 ```<fence> 围栏（含其后全部内容）；
+//   - 「<fence>:」标题行及其后的裸规格行块（其后只剩空行/注释/规格行）。
+//
+// 流式分片按前缀累积推送，闭合前的围栏内容属于出站协议而非用户正文，直接
+// 下发会把指令原文泄漏给用户；完整文本仍以 Final 的 ParseOutboundMediaDirectives
+// 解析为准（本函数只影响流式中间态）。
+func TruncateOpenAttachmentBlocks(text string, fenceNames ...string) string {
+	nameSet := attachmentFenceNameSet(fenceNames)
+	if len(nameSet) == 0 || strings.TrimSpace(text) == "" {
+		return text
+	}
+	text = truncateOpenAttachmentFence(text, fenceNames)
+	return truncateOpenAttachmentHeading(text, nameSet)
+}
+
+// truncateOpenAttachmentFence 截断最后一个未闭合的 ```<fence> 开栏（含其后全部内容）。
+func truncateOpenAttachmentFence(text string, fenceNames []string) string {
+	if text == "" {
+		return text
+	}
+	lower := strings.ToLower(text)
+	cut := -1
+	for _, name := range fenceNames {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		needle := "```" + name
+		for from := 0; from <= len(lower); {
+			index := strings.Index(lower[from:], needle)
+			if index < 0 {
+				break
+			}
+			open := from + index
+			closing := strings.Index(lower[open+len(needle):], "```")
+			if closing < 0 {
+				if cut < 0 || open < cut {
+					cut = open
+				}
+				break
+			}
+			from = open + len(needle) + closing + len("```")
+		}
+	}
+	if cut >= 0 {
+		text = strings.TrimRight(text[:cut], " \t\r\n")
+	}
+	return text
+}
+
+// truncateOpenAttachmentHeading 截断「<fence>:」标题行及其后未闭合的裸规格行块。
+func truncateOpenAttachmentHeading(text string, nameSet map[string]struct{}) string {
+	lines := strings.Split(text, "\n")
+	for index, line := range lines {
+		if !isAttachmentHeadingLine(line, nameSet) {
+			continue
+		}
+		// 标题行之后只剩空行/注释/裸规格行直到文本结束 = 块未闭合 → 截断。
+		open := true
+		for next := index + 1; next < len(lines); next++ {
+			trimmed := strings.TrimSpace(lines[next])
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") || isAttachmentBareSpecLine(trimmed) {
+				continue
+			}
+			open = false
+			break
+		}
+		if open {
+			return strings.TrimRight(strings.Join(lines[:index], "\n"), " \t\r\n")
+		}
+	}
+	return text
+}
+
 // InferMediaKindFromLocation 按扩展名推断媒体类别（image|video|file；voice 不推断）。
 func InferMediaKindFromLocation(location string) string {
 	lower := strings.ToLower(strings.TrimSpace(location))

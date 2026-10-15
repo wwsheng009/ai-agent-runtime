@@ -13,6 +13,11 @@ package qqbot
 // Final/Fail 走普通发送）——行为与未实现 StreamingProvider 一致，且不会在
 // 每回合触发 Service 的「start streaming failed」告警。无被动上下文（无最近
 // 入站 msg_id）的单聊同样退化为委托会话（避免主动消息语义下流式失败）。
+//
+// 出站媒体指令（```qq-attachments``` 围栏 / IMAGE: 等指令行，见
+// connectors.ParseOutboundMediaDirectives）：Update 的流式中间态剥离已闭合块
+// 并截断未闭合块（防止指令原文泄漏给用户）；Final 解析后可见文本收尾、媒体
+// 走富媒体上传（file_info → msg_type=7）——否则单聊回复里的图片永远不会发出。
 
 import (
 	"context"
@@ -68,7 +73,12 @@ func (s *streamSession) Update(ctx context.Context, text string) error {
 	if !s.streaming || s.closed {
 		return nil
 	}
-	trimmed := strings.TrimSpace(text)
+	// 出站媒体指令（```qq-attachments``` 围栏 / 指令行）是协议而非用户正文：
+	// 流式中间态先剥离已闭合块，并截断尚未闭合的块（前缀按流式只增约束，
+	// 闭合后下一次 Update 会自然续上），避免把指令原文流式泄漏给用户。
+	visible := connectors.TruncateOpenAttachmentBlocks(text, qqAttachmentFenceNames...)
+	visible, _ = connectors.ParseOutboundMediaDirectives(visible, qqAttachmentFenceNames...)
+	trimmed := strings.TrimSpace(visible)
 	if trimmed == "" || trimmed == s.lastText {
 		return nil
 	}
@@ -83,13 +93,28 @@ func (s *streamSession) Update(ctx context.Context, text string) error {
 	return nil
 }
 
-// Final 结束流式并投递媒体（文本已由流式承载，媒体走普通富媒体发送）。
+// Final 结束流式并投递媒体。终态文本先解析出站媒体指令：可见文本用于流式
+// 收尾（须以上游已下发前缀开头），媒体（含指令解析出的附件）与委托会话一样
+// 走普通富媒体发送（先上传 file_info 再 msg_type=7）。
 func (s *streamSession) Final(ctx context.Context, msgs []connectors.OutboundMessage) error {
 	if !s.streaming {
 		return s.provider.Send(ctx, s.cfg, s.chat, msgs)
 	}
+	// 媒体指令统一解析：可见文本与附件拆分（与普通 Send 同口径）。
+	mediaMsgs := make([]connectors.OutboundMessage, 0, len(msgs))
+	visibleParts := make([]string, 0, len(msgs))
+	for _, msg := range msgs {
+		text, attachments := connectors.ParseOutboundMediaDirectives(msg.Text, qqAttachmentFenceNames...)
+		media := append(append([]connectors.Media{}, msg.Media...), attachments...)
+		if len(media) > 0 {
+			mediaMsgs = append(mediaMsgs, connectors.OutboundMessage{Media: media})
+		}
+		if t := strings.TrimSpace(text); t != "" {
+			visibleParts = append(visibleParts, t)
+		}
+	}
 	if !s.closed {
-		final := outboundText(msgs)
+		final := strings.TrimSpace(strings.Join(visibleParts, "\n\n"))
 		switch {
 		case final == "":
 			final = s.lastText
@@ -98,9 +123,10 @@ func (s *streamSession) Final(ctx context.Context, msgs []connectors.OutboundMes
 			final = s.lastText
 		}
 		if final == "" {
-			// 全程无文本（如仅媒体）：无法用流式收尾，退化为普通发送。
+			// 全程无可见文本（如仅媒体）：无法用流式收尾，退化为普通发送
+			//（mediaMsgs 已含 msg.Media 与指令解析出的附件，不会重复指令文本）。
 			s.closed = true
-			return s.provider.Send(ctx, s.cfg, s.chat, msgs)
+			return s.provider.Send(ctx, s.cfg, s.chat, mediaMsgs)
 		}
 		if err := s.sendStreamFragment(ctx, final, streamInputStateFinished); err != nil {
 			return err
@@ -108,11 +134,8 @@ func (s *streamSession) Final(ctx context.Context, msgs []connectors.OutboundMes
 		s.lastText = final
 		s.closed = true
 	}
-	for _, msg := range msgs {
-		if len(msg.Media) == 0 {
-			continue
-		}
-		if err := s.provider.Send(ctx, s.cfg, s.chat, []connectors.OutboundMessage{{Media: msg.Media}}); err != nil {
+	for _, msg := range mediaMsgs {
+		if err := s.provider.Send(ctx, s.cfg, s.chat, []connectors.OutboundMessage{msg}); err != nil {
 			return err
 		}
 	}
