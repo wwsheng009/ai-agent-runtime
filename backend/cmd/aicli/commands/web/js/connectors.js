@@ -930,7 +930,7 @@ function renderEventSubRows(subs) {
   var rows = host.querySelectorAll("[data-event-sub]");
   for (var r = 0; r < rows.length; r++) {
     syncEventSubRowMode(rows[r]);
-    updateTypesSummary(rows[r]);
+    refreshEventSubRow(rows[r]);
   }
 }
 
@@ -945,6 +945,31 @@ var EVENT_TYPE_GROUPS = [
   { label: "system", types: [["error", ""]] },
   { label: "通配", types: [["turn.*", "族"], ["work.*", "族"]] }
 ];
+
+// EVENT_TYPE_FORMS 记录每种类型的可用投递形态(docs/bots/13 §3.1/§4):用于「类型 ×
+// 投递形态」相容性告警——形态不匹配的类型会被后端静默忽略(2026-10-15 实测:
+// assistant_message 配 notice 不投递),必须在保存前显式提示。
+// 空数组 = 词表已登记但出站映射未接(勾了也不会投递);通配/词表外值不做静态判定。
+var EVENT_TYPE_FORMS = {
+  "assistant_message": ["content"],
+  "user_message": [],
+  "assistant_delta": ["stream"],
+  "agent.turn.started": [],
+  "agent.turn.finished": ["notice", "digest"],
+  "turn.suspended": [],
+  "turn.resumed": [],
+  "session_start": [],
+  "session_end": [],
+  "session.interrupted": [],
+  "approval_requested": ["notice"],
+  "question_asked": ["notice"],
+  "error": [],
+  "tool.requested": ["digest"],
+  "tool.completed": ["digest"],
+  "tool.denied": ["digest"],
+  "subagent.completed": ["digest"],
+  "subagent.batch.completed": ["digest"]
+};
 
 // eventSubRowHTML 渲染一条订阅行:字段以 data-sub-field 标记,collectEventSubs 按行收集。
 // 布局(2026-10-15 UI 收口):id/会话模式/投递形态 同排,会话列表+启用 次排;
@@ -979,6 +1004,7 @@ function eventSubRowHTML(sub) {
     '<span class="connector-field-label">事件类型 *</span>' +
     eventTypeCheckboxesHTML(sub.types || []) +
     '<input type="text" data-sub-field="types-extra" autocomplete="off" placeholder="自定义/别名(逗号分隔,可留空)" value="">' +
+    '<span class="connector-types-warning" data-types-warning hidden></span>' +
     '<span class="connector-field-help">展开面板勾选(按族分组);work.*(工具/子代理)仅 digest 生效。</span>' +
     "</div>" +
     '<button type="button" data-editor="remove-event-sub">删除此订阅</button>' +
@@ -1052,6 +1078,59 @@ function updateTypesSummary(row) {
   summary.textContent = eventTypesSummaryText(checked);
 }
 
+// eventSubRowIssues 汇集「类型 × 投递形态」相容性问题(仅提示,不阻断保存):
+// 形态不匹配的类型会被后端静默忽略,勾选前必须让用户看见。
+function eventSubRowIssues(row) {
+  var deliver = subFieldValue(row, "deliver") || "notice";
+  var issues = [];
+  var seen = {};
+  var boxes = row.querySelectorAll("[data-sub-type]");
+  for (var i = 0; i < boxes.length; i++) {
+    if (!boxes[i].checked) { continue; }
+    pushTypeIssue(issues, seen, boxes[i].getAttribute("data-sub-type"), deliver);
+  }
+  var extra = splitSubList(subFieldValue(row, "types-extra"));
+  for (var e = 0; e < extra.length; e++) {
+    pushTypeIssue(issues, seen, extra[e], deliver);
+  }
+  return issues;
+}
+
+function pushTypeIssue(issues, seen, type, deliver) {
+  if (!type || seen[type]) { return; }
+  seen[type] = true;
+  var forms = EVENT_TYPE_FORMS[type];
+  if (!forms) { return; } // 通配/词表外:不做静态判定。
+  if (forms.length === 0) {
+    issues.push(type + " 暂未接出站映射(不会投递)");
+    return;
+  }
+  if (forms.indexOf(deliver) < 0) {
+    issues.push(type + " 需要 deliver=" + forms.join("/"));
+  }
+}
+
+// updateTypesWarning 渲染相容性告警(无问题则隐藏)。
+function updateTypesWarning(row) {
+  if (!row) { return; }
+  var warning = row.querySelector("[data-types-warning]");
+  if (!warning) { return; }
+  var issues = eventSubRowIssues(row);
+  if (!issues.length) {
+    warning.textContent = "";
+    warning.hidden = true;
+    return;
+  }
+  warning.textContent = "⚠ " + issues.join(";");
+  warning.hidden = false;
+}
+
+// refreshEventSubRow 统一刷新汇总行与相容性告警(勾选/形态/自定义输入变更后调用)。
+function refreshEventSubRow(row) {
+  updateTypesSummary(row);
+  updateTypesWarning(row);
+}
+
 // syncEventSubRowMode 按会话模式启用/禁用「会话列表」输入(非 ids 模式置灰提示)。
 function syncEventSubRowMode(row) {
   if (!row) { return; }
@@ -1080,7 +1159,7 @@ function appendEventSubRow() {
   host.insertAdjacentHTML("beforeend", eventSubRowHTML({}));
   var rows = host.querySelectorAll("[data-event-sub]");
   syncEventSubRowMode(rows[rows.length - 1]);
-  updateTypesSummary(rows[rows.length - 1]);
+  refreshEventSubRow(rows[rows.length - 1]);
 }
 
 // removeEventSubRow 删除按钮所在行。
@@ -1545,7 +1624,16 @@ function onModalBodyChange(event) {
   }
   // 事件类型勾选:刷新汇总行(折叠面板收起后的可见信息)。
   if (target && target.getAttribute && target.getAttribute("data-sub-type")) {
-    updateTypesSummary(target.closest("[data-event-sub]"));
+    var row = target.closest("[data-event-sub]");
+    // 勾选任一项即视为「要收事件」:总开关未开时自动打开(避免保存成 enabled:false 的无效订阅)。
+    var master = connEl("connector-form-events-enabled");
+    if (master && !master.checked && target.checked) { master.checked = true; }
+    refreshEventSubRow(row);
+    return;
+  }
+  // 投递形态变更:类型相容性告警需要即时刷新(assistant_message 配 notice 等)。
+  if (target && target.getAttribute && target.getAttribute("data-sub-field") === "deliver") {
+    refreshEventSubRow(target.closest("[data-event-sub]"));
   }
 }
 
@@ -1553,7 +1641,7 @@ function onModalBodyChange(event) {
 function onModalBodyInput(event) {
   var target = event.target;
   if (target && target.getAttribute && target.getAttribute("data-sub-field") === "types-extra") {
-    updateTypesSummary(target.closest("[data-event-sub]"));
+    refreshEventSubRow(target.closest("[data-event-sub]"));
   }
 }
 

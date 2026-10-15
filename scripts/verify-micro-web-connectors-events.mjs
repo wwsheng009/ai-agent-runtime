@@ -30,6 +30,7 @@ ok(/Object\.assign\(\{\}, current\.policy\)/.test(src), "collectEditor 编辑态
 ok(/connector-field-check/.test(src), "fieldHTML 勾选控件走行内布局(不单独占行)");
 ok(/eventTypeCheckboxesHTML/.test(src) && /connector-types-picker/.test(src), "事件类型为折叠多选面板组件(非平铺按钮)");
 ok(!/eventTypeChipsHTML/.test(src), "旧的平铺 chips 实现已移除");
+ok(/EVENT_TYPE_FORMS/.test(src) && /data-types-warning/.test(src), "类型×投递形态相容性告警已接入");
 
 // ---- 最小 DOM mock ----
 function matchesSelector(node, sel) {
@@ -163,6 +164,12 @@ function parseEventSubRow(chunk) {
   const summary = makeNode("span", { attr: { "data-types-summary": "" } });
   summary.textContent = summaryMatch ? decodeEntities(summaryMatch[1]) : "";
   row.appendChild(summary);
+  if (/data-types-warning/.test(chunk)) {
+    const warning = makeNode("span", { attr: { "data-types-warning": "" } });
+    warning.textContent = "";
+    warning.hidden = true;
+    row.appendChild(warning);
+  }
   const boxRe = /<input[^>]*data-sub-type="([^"]*)"[^>]*>/g;
   let boxMatch;
   while ((boxMatch = boxRe.exec(chunk)) !== null) {
@@ -409,6 +416,31 @@ modalBody.appendChild(subsHost);
   modeSel.value = "all";
   api.onModalBodyChange({ target: modeSel });
   ok(ids.disabled === true, "切到 all:会话列表再次置灰");
+}
+
+// ===== 10. 类型 × 形态相容性告警 + 总开关自动打开(2026-10-15 现场问题回归) =====
+{
+  eventsEnabled.checked = true;
+  api.renderEventSubRows([{ id: "misconfig", deliver: "notice", types: ["assistant_message", "user_message", "agent.turn.finished"] }]);
+  const row = subsHost.children[0];
+  const warning = row.querySelector("[data-types-warning]");
+  ok(warning.hidden === false, "类型×形态不匹配时告警可见");
+  ok(/assistant_message 需要 deliver=content/.test(warning.textContent), "提示 assistant_message 需要 content", warning.textContent);
+  ok(/user_message 暂未接出站映射/.test(warning.textContent), "提示 user_message 未接线", warning.textContent);
+  ok(!/agent\.turn\.finished/.test(warning.textContent), "notice 可用的 completion 不告警", warning.textContent);
+  const deliverSel = row.querySelector('[data-sub-field="deliver"]');
+  deliverSel.value = "content";
+  api.onModalBodyChange({ target: deliverSel });
+  ok(!/assistant_message/.test(warning.textContent), "切到 content 后 assistant_message 不再告警", warning.textContent);
+  ok(/agent\.turn\.finished 需要 deliver=notice\/digest/.test(warning.textContent), "切到 content 后 completion 转为告警", warning.textContent);
+  eventsEnabled.checked = false;
+  const box = row.querySelector('[data-sub-type="assistant_message"]');
+  box.checked = false;
+  api.onModalBodyChange({ target: box });
+  ok(eventsEnabled.checked === false, "取消勾选不会打开总开关");
+  box.checked = true;
+  api.onModalBodyChange({ target: box });
+  ok(eventsEnabled.checked === true, "勾选类型自动打开总开关(避免保存成 enabled:false 的无效订阅)");
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n存在失败项: " + failures);
