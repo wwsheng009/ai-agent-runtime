@@ -12,7 +12,11 @@
  *   如实清空（该观测表示「此刻没有目标」）。
  *
  * 进程内内存态：页面刷新后为空 → 指示条不渲染（不回落成猜测值、不补零）。
- * 权威快照（REST）就绪后由后端字段替换本路径，届时不做双写。
+ *
+ * 权威快照（2026-10-15 起 REST 已就绪：GET/POST /api/runtime/sessions/{id}/goal）：
+ * `setAuthoritativeSessionGoal` 写入后端快照。两条路径**不双写**，按写入时刻取新：
+ * SSE 派生观测晚于快照时以观测为准（turn 内即时刷新），否则以快照为准（权威），
+ * 由 `isSessionGoalAuthoritative` 告诉 UI 当前展示的是否为权威数据。
  */
 import { useCallback, useSyncExternalStore } from "react";
 
@@ -24,7 +28,10 @@ import {
   type SessionGoal,
 } from "./derive";
 
-const observations = new Map<string, GoalObservation>();
+type GoalEntry = { observation: GoalObservation; at: number };
+
+const observations = new Map<string, GoalEntry>();
+const authoritative = new Map<string, GoalEntry>();
 const projected = new Map<string, SessionGoal | null>();
 const listeners = new Set<() => void>();
 
@@ -86,9 +93,38 @@ export function recordGoalToolEnd(
   if (observation.kind === "unknown") {
     return;
   }
-  observations.set(sessionId, observation);
+  observations.set(sessionId, { observation, at: Date.now() });
   projected.delete(sessionId);
   notify();
+}
+
+/**
+ * REST 权威快照落点（`fetchSessionGoal` / `updateSessionGoal` 的结果）。
+ * `unknown` 不改动既有结论；`absent` 明确清空（后端说此刻没有目标）。
+ */
+export function setAuthoritativeSessionGoal(
+  sessionId: string | undefined,
+  observation: GoalObservation,
+): void {
+  if (!sessionId || observation.kind === "unknown") {
+    return;
+  }
+  authoritative.set(sessionId, { observation, at: Date.now() });
+  projected.delete(sessionId);
+  notify();
+}
+
+/** 当前展示的数据是否来自后端权威快照（false = SSE 派生投影，UI 需如实标注）。 */
+export function isSessionGoalAuthoritative(sessionId: string | undefined): boolean {
+  if (!sessionId) {
+    return false;
+  }
+  const snapshot = authoritative.get(sessionId);
+  if (!snapshot) {
+    return false;
+  }
+  const observed = observations.get(sessionId);
+  return !observed || snapshot.at >= observed.at;
 }
 
 /** 读取当前投影（无数据 → null；引用稳定，可安全用于 useSyncExternalStore）。 */
@@ -99,10 +135,27 @@ export function getSessionGoal(sessionId: string | undefined): SessionGoal | nul
   if (projected.has(sessionId)) {
     return projected.get(sessionId) ?? null;
   }
-  const observation = observations.get(sessionId);
-  const goal = observation ? deriveSessionGoal([observation]) : null;
+  // 两条路径按写入时刻取新：快照权威，但 turn 内的 SSE 观测可能更晚。
+  const entry = newerGoalEntry(
+    authoritative.get(sessionId),
+    observations.get(sessionId),
+  );
+  const goal = entry ? deriveSessionGoal([entry.observation]) : null;
   projected.set(sessionId, goal);
   return goal;
+}
+
+function newerGoalEntry(
+  snapshot: GoalEntry | undefined,
+  observed: GoalEntry | undefined,
+): GoalEntry | undefined {
+  if (!snapshot) {
+    return observed;
+  }
+  if (!observed) {
+    return snapshot;
+  }
+  return observed.at > snapshot.at ? observed : snapshot;
 }
 
 export function subscribeSessionGoal(listener: () => void): () => void {
@@ -115,8 +168,21 @@ export function subscribeSessionGoal(listener: () => void): () => void {
 /** 测试用：清空全部会话投影与订阅（生产代码不调用）。 */
 export function resetSessionGoalStore(): void {
   observations.clear();
+  authoritative.clear();
   projected.clear();
   listeners.clear();
+}
+
+export function useSessionGoalAuthoritative(sessionId: string | undefined): boolean {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeSessionGoal(listener),
+    [],
+  );
+  const getSnapshot = useCallback(
+    () => isSessionGoalAuthoritative(sessionId),
+    [sessionId],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 export function useSessionGoal(sessionId: string | undefined): SessionGoal | null {

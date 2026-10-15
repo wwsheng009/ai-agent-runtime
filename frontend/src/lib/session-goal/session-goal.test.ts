@@ -2,7 +2,7 @@
 //
 // 断言只依赖结构与后端原始字段：解析失败不猜、缺字段不补零、goal_missing 如实清空。
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { type TrajectoryItem } from "@/lib/trajectory/types";
 
@@ -14,8 +14,10 @@ import {
 } from "./derive";
 import {
   getSessionGoal,
+  isSessionGoalAuthoritative,
   recordGoalToolEnd,
   resetSessionGoalStore,
+  setAuthoritativeSessionGoal,
   subscribeSessionGoal,
 } from "./store";
 
@@ -268,5 +270,86 @@ describe("goal live 捕获 store", () => {
       tool: { name: "get_goal", content: JSON.stringify({ goal: activeGoal }) },
     });
     expect(getSessionGoal("session-1")).toBe(getSessionGoal("session-1"));
+  });
+});
+
+describe("权威快照（REST）路径", () => {
+  beforeEach(() => {
+    resetSessionGoalStore();
+    vi.useRealTimers();
+  });
+
+  it("快照优先于既有 SSE 派生投影，并标记为权威", () => {
+    recordGoalToolEnd("session-1", {
+      tool: {
+        name: "get_goal",
+        content: JSON.stringify({
+          goal: { ...activeGoal, objective: "派生目标" },
+        }),
+      },
+    });
+    expect(getSessionGoal("session-1")?.objective).toBe("派生目标");
+    expect(isSessionGoalAuthoritative("session-1")).toBe(false);
+
+    setAuthoritativeSessionGoal("session-1", {
+      kind: "goal",
+      goal: { phase: "paused", statusRaw: "paused", objective: "权威目标" },
+    });
+
+    expect(getSessionGoal("session-1")?.objective).toBe("权威目标");
+    expect(isSessionGoalAuthoritative("session-1")).toBe(true);
+  });
+
+  it("更晚的 SSE 观测覆盖快照（turn 内即时刷新）并如实降级为非权威", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-15T10:00:00Z"));
+    setAuthoritativeSessionGoal("session-1", {
+      kind: "goal",
+      goal: { phase: "active", statusRaw: "active", objective: "快照目标" },
+    });
+
+    vi.setSystemTime(new Date("2026-10-15T10:00:05Z"));
+    recordGoalToolEnd("session-1", {
+      tool: {
+        name: "update_goal",
+        content: JSON.stringify({
+          updated: true,
+          goal: { ...activeGoal, objective: "turn 内新目标" },
+        }),
+      },
+    });
+
+    expect(getSessionGoal("session-1")?.objective).toBe("turn 内新目标");
+    expect(isSessionGoalAuthoritative("session-1")).toBe(false);
+  });
+
+  it("unknown 不改动既有结论；absent 明确清空且仍属权威", () => {
+    setAuthoritativeSessionGoal("session-1", {
+      kind: "goal",
+      goal: { phase: "active", statusRaw: "active", objective: "保持" },
+    });
+
+    setAuthoritativeSessionGoal("session-1", { kind: "unknown" });
+    expect(getSessionGoal("session-1")?.objective).toBe("保持");
+
+    setAuthoritativeSessionGoal("session-1", { kind: "absent" });
+    expect(getSessionGoal("session-1")).toBeNull();
+    expect(isSessionGoalAuthoritative("session-1")).toBe(true);
+  });
+
+  it("空 sessionId 不写入（hook 未绑定会话时安全）", () => {
+    setAuthoritativeSessionGoal(undefined, {
+      kind: "goal",
+      goal: { phase: "active", statusRaw: "active", objective: "x" },
+    });
+    expect(getSessionGoal(undefined)).toBeNull();
+    expect(isSessionGoalAuthoritative(undefined)).toBe(false);
+  });
+
+  it("reset 同时清空权威层", () => {
+    setAuthoritativeSessionGoal("session-1", { kind: "absent" });
+    expect(isSessionGoalAuthoritative("session-1")).toBe(true);
+    resetSessionGoalStore();
+    expect(isSessionGoalAuthoritative("session-1")).toBe(false);
   });
 });

@@ -136,6 +136,19 @@ export function parseGoalToolResult(text: string): GoalObservation {
   } catch {
     return { kind: "unknown" };
   }
+  return parseSessionGoalEnvelope(parsed);
+}
+
+/**
+ * 解析 goal 载荷信封（工具结果与 REST 快照**同一形状**，2026-10-15 起共用本函数）：
+ * - `{"goal": {...} | null, "remaining_tokens": n}`（get_goal / GET /sessions/{id}/goal）
+ * - `{"updated": true, "goal": {...}}`（update_goal / POST 动作响应）
+ * - `{"updated": false, "goal": null, "reason": "goal_missing"}` → absent
+ * - 裸 goal 对象（回放/降级路径）
+ *
+ * 非对象、无 goal 字段的对象一律 unknown：调用方保持既有结论（不猜、不清空）。
+ */
+export function parseSessionGoalEnvelope(parsed: unknown): GoalObservation {
   if (!isRecord(parsed)) {
     return { kind: "unknown" };
   }

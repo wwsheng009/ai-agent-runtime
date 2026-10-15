@@ -70,7 +70,12 @@ export const zhWorkspaceBase = {
       completionSummary: "完成说明：{{summary}}",
       updatedAt: "更新于 {{time}}",
       derivedNote:
-        "只读投影：由本会话 get_goal / update_goal 工具结果派生；后端快照就绪前不代表权威状态。",
+        "只读投影：由本会话 get_goal / update_goal 工具结果派生（后端快照不可用时的降级，不代表权威状态）。",
+      authoritativeNote: "来自后端快照（权威）。",
+      actionPause: "暂停目标",
+      actionResume: "恢复目标",
+      actionComplete: "标记完成",
+      actionClear: "清除目标",
       phase: {
         active: "进行中",
         paused: "已暂停",
