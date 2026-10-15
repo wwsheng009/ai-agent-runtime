@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -159,4 +160,13 @@ func TestSessionActor_InjectsActiveGoalGuidancePerTurn(t *testing.T) {
 	second := provider.requests[1]
 	require.True(t, messageListContainsText(second.Messages, "finish gap two"),
 		"second server turn must carry the refreshed goal objective")
+}
+
+// TestIsBaseSessionContextMirrorsCLIBaseSessionGate：子代理会话（agent_type /
+// depth / read_only 任一）不注入逐轮 goal 指引，与 CLI 本地路径同口径。
+func TestIsBaseSessionContextMirrorsCLIBaseSessionGate(t *testing.T) {
+	require.True(t, isBaseSessionContext(runtimehost.SessionContext{}))
+	require.False(t, isBaseSessionContext(runtimehost.SessionContext{ChildAgentType: "explore"}))
+	require.False(t, isBaseSessionContext(runtimehost.SessionContext{ChildDepth: 1}))
+	require.False(t, isBaseSessionContext(runtimehost.SessionContext{ChildReadOnly: true}))
 }

@@ -2,6 +2,7 @@ package runtimeapi
 
 import (
 	"context"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -39,7 +40,11 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 	// preparedAgent 供 run 前钩子（OnRunPrepare）刷新 turn 级 goal 指引：
 	// PrepareAgent 只在 actor 构建期调用一次，run 级刷新必须走 OnRunPrepare。
 	var preparedAgent *agent.Agent
+	// baseSession 与 CLI 本地路径的 isBaseSession 同口径：只有基础会话才注入逐轮
+	// goal 指引，子代理会话不得被父会话的持久目标驱动。
+	var baseSession bool
 	deps.PrepareAgent = func(ctx context.Context, sid string, sessionCtx runtimehost.SessionContext) (*agent.Agent, *runtimecfg.RuntimeConfig, any) {
+		baseSession = isBaseSessionContext(sessionCtx)
 		profileState := h.resolveProfileStateForSessionContext(sessionCtx)
 		apiAgent, selectedConfig := h.buildSessionAgentForContext(sid, sessionCtx, profileState, h.resolveRuntimeConfig(UsageScope{}))
 		preparedAgent = apiAgent
@@ -66,6 +71,9 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 	// active_goal_guidance。租约仍由 runtimehost 默认 PrepareRun 负责，本钩子只做
 	// agent 刷新（见 runtimehost.Deps.OnRunPrepare 的顺序契约）。
 	deps.OnRunPrepare = func(_ context.Context, session *chat.Session, _ bool) error {
+		if !baseSession {
+			return nil
+		}
 		h.applyRuntimeServerGoalGuidance(preparedAgent, session)
 		return nil
 	}
@@ -79,4 +87,16 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 		deps.SessionContext = runtimehost.ExtractSessionContext(session)
 	}
 	return deps
+}
+
+// isBaseSessionContext 判定会话是否为「基础会话」（非子代理会话）。
+//
+// 与 CLI 本地路径的 isBaseSession 同口径，与 buildSessionLoopConfigFor 的主
+// Agent 路由判定一致（child 标记 = agent_type / depth / read_only 任一存在）。
+// 子代理会话不注入父会话的逐轮 goal 指引：子 Agent 不应被父目标驱动，也不应
+// 尝试完成父会话的 goal。
+func isBaseSessionContext(sessionCtx runtimehost.SessionContext) bool {
+	return strings.TrimSpace(sessionCtx.ChildAgentType) == "" &&
+		sessionCtx.ChildDepth == 0 &&
+		!sessionCtx.ChildReadOnly
 }
