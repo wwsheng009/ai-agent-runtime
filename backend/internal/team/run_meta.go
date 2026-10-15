@@ -23,6 +23,11 @@ type TeamRunMeta struct {
 
 // RunMeta captures the execution context for a session run.
 type RunMeta struct {
+	// Source 是发起方标识（可选）：runtime-server 驱动器用 "driver:goal" 提交
+	// 续跑轮，CLI 远程模式经 currentRunMetaForSession 自带 "cli"——观测与门控
+	// 据此区分 turn 来源（goal 驱动器让位、analytics 归因）。
+	Source string `json:"source,omitempty"`
+	// PermissionMode 是本次 run 的权限模式（可空）。
 	PermissionMode string `json:"permission_mode,omitempty"`
 	// CompletionRequirement is none|complete_task for worker harness loops.
 	// Team task runs default to complete_task when unset at the runner boundary.
