@@ -155,6 +155,10 @@ function toggleCheckbox(input: HTMLInputElement) {
   });
 }
 
+function toggleTypeCheckbox(name: string) {
+  toggleCheckbox(findInput(name) as HTMLInputElement);
+}
+
 describe("ConnectorDialog", () => {
   const reactActEnvironment = globalThis as ReactActEnvironmentGlobal;
   let container: HTMLDivElement;
@@ -411,19 +415,23 @@ describe("ConnectorDialog", () => {
     };
     await render(<ConnectorDialog {...dialogProps({ existing, onSubmit })} />);
 
-    // 默认未启用：不渲染订阅行；勾选后出现「添加订阅」。
+    // 订阅行常显；勾选事件类型会自动打开总开关（避免保存成 enabled:false 的无效订阅）。
     const enabled = findInput("启用事件订阅（policy.events）") as HTMLInputElement;
     expect(enabled.checked).toBe(false);
-    toggleCheckbox(enabled);
 
     act(() => {
       findButton("添加订阅")?.click();
     });
 
-    // 逗号/空格分隔解析（分两步输入：草稿保留分隔符，第二次输入覆盖解析结果）。
-    const types = findInput("事件类型") as HTMLInputElement;
-    setInputValue(types, "assistant_message,");
-    setInputValue(types, "assistant_message, turn.*");
+    // 类型改为「按投递形态分组多选」：assistant_message 唯一形态 content（自动推导），
+    // 叠加 turn.* 后跨形态冲突可见（告警 + 一键拆分）。
+    toggleTypeCheckbox("assistant_message");
+    toggleTypeCheckbox("turn.*");
+
+    expect((findInput("启用事件订阅（policy.events）") as HTMLInputElement).checked).toBe(true);
+    expect((findSelect("投递形态") as HTMLSelectElement).value).toBe("content");
+    expect(document.body.textContent).toContain("turn.* 需要 deliver=notice/digest");
+    expect(findButton("一键拆分为多条订阅")).not.toBeNull();
 
     act(() => {
       findButton("保存")?.click();
@@ -437,7 +445,7 @@ describe("ConnectorDialog", () => {
           id: "",
           sessions: { mode: "bound" },
           types: ["assistant_message", "turn.*"],
-          deliver: "notice",
+          deliver: "content",
         },
       ],
     });
@@ -463,7 +471,8 @@ describe("ConnectorDialog", () => {
 
     const enabled = findInput("启用事件订阅（policy.events）") as HTMLInputElement;
     expect(enabled.checked).toBe(true);
-    expect(findInput("事件类型")).not.toBeNull();
+    // 既有订阅回填为分组多选面板（汇总行可见）。
+    expect(findInput("turn.*")?.checked).toBe(true);
 
     toggleCheckbox(enabled);
     act(() => {

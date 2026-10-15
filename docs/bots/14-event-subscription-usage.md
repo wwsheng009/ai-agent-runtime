@@ -119,8 +119,9 @@ policy:
 - **L2（同目标合并）**：同一 chat 命中多条订阅、形态相同时合并为一次投递；形态不同（如 `content` + `notice`）视为两种信息，**各发一条**——同一目标不要同时配 `content` 和 `stream`（会得到两条：全文 + 打字机）。
 - **一条订阅只有一种形态**：`deliver` 是订阅级属性——`assistant_message`（content）、`assistant_delta`（stream）、
   工作类（digest）、completion/审批（notice）分属不同形态时，必须**拆成多条订阅**；形态不匹配的类型会被
-  后端**静默忽略**。微前端编辑器已把这一步自动化：**形态由所选类型推导**（唯一解锁定；completion 等
-  多形态类型只在 notice/digest 间选；跨形态勾选提供「一键拆分为多条订阅」），无需手工配对（2026-10-15）。
+  后端**静默忽略**。两端编辑器（React 与 aicli 微前端）均已把这一步自动化：**事件类型按投递形态分组多选、
+  形态由所选类型推导**（唯一解锁定；completion 等多形态类型只在 notice/digest 间选；跨形态勾选给出告警并
+  提供「一键拆分为多条订阅」），无需手工配对（2026-10-15）。
 - **默认安静**：`content`/`stream`/`digest` 全默认关，必须显式订阅；绑定会话的 approval/question 恒开。
 - `stream` 形态**不受** `policy.reply_mode` 影响（那条开关只描述回复通道）。
 
@@ -229,10 +230,15 @@ policy:
 - 入口：runtime-server 启动且前端构建产物就位（`webui.Available()`）时，打开
   `http://<runtime-server>:<port>/runtime/connectors`（运行管理 → 连接器）。
 - 路径：连接器列表 → 打开某连接器 → 对话框中「事件订阅」区：
-  - 总开关（`events.enabled`）；
-  - 「添加订阅」逐条编辑：`id` / 会话选择器（bound | ids + 列表 | all）/ 事件类型
-    （`types`，逗号或空格分隔，支持别名与 `turn.*` 通配）/ 投递形态
-    （notice | content | digest | stream）/ 单条启停；
+  - 总开关（`events.enabled`）；勾选任一事件类型会自动打开总开关；
+  - 「添加订阅」逐条编辑：`id` / 会话选择器（bound | ids + 列表 | all）/
+    **事件类型 = 按投递形态分组的多选面板**（折叠汇总「已选 N 项」；词表外既有值
+    追加为「自定义(既有)」勾选项，另有自定义/别名输入框，往返不丢）/
+    **投递形态由所选类型自动推导**（唯一形态锁定；completion 等多形态只在
+    notice/digest 间选）/ 单条启停；
+  - 跨形态勾选 → 相容性告警（「X 需要 deliver=…」/「X 暂未接出站映射」）+
+    「一键拆分为多条订阅」（按形态分组，续行 id 追加 -2/-3）；会话列表在
+    `mode≠ids` 时禁用并按提示补录（2026-10-15 与微前端同口径）；
 - 保存 = `PATCH /api/connectors/{id}`：前端把「路由 + 事件订阅」合并进该连接器**现有 policy**
   （保留未展示的键）；关闭订阅时显式写 `enabled:false`。
 - 鉴权：runtime-server 管理面 token（与 skills 管理面同口径）。
