@@ -330,7 +330,8 @@ func (p *Provider) Schema() api.ProviderSchema {
 	return api.ProviderSchema{
 		Provider: Name,
 		Label:    "飞书",
-		Modes:    []string{"webhook"},
+		// polling = WS 长连接（RunPolling）；webhook = 公网回调（默认）。
+		Modes: []string{"webhook", "polling"},
 		Fields: []api.FieldSchema{
 			{
 				Key: settingAppID, Label: "App ID", Type: api.FieldText, Required: true,
@@ -353,6 +354,11 @@ func (p *Provider) Schema() api.ProviderSchema {
 				Key: settingAPIBase, Label: "API 基址", Type: api.FieldURL,
 				Default: defaultAPIBase,
 				Help:    "可选；默认 https://open.feishu.cn（Lark 国际版改为 https://open.larksuite.com）",
+			},
+			{
+				Key: "mode", Label: "接入模式", Type: api.FieldEnum, Default: "webhook",
+				Options: []api.Option{{Value: "webhook", Label: "Webhook 回调"}, {Value: "polling", Label: "长连接 (WS)"}},
+				Help:    "WS 长连接无需公网入口；webhook 需宿主公网可达",
 			},
 		},
 	}

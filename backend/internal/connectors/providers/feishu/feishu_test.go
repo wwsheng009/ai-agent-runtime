@@ -212,8 +212,21 @@ func TestSchemaDeclaresWebhookOnlyAndRequiredFields(t *testing.T) {
 	if schema.Provider != Name || schema.Label != "飞书" {
 		t.Fatalf("unexpected provider/label: %+v", schema)
 	}
-	if len(schema.Modes) != 1 || schema.Modes[0] != "webhook" {
-		t.Fatalf("expected modes=[webhook]（WS 未实现前不声明）, got %v", schema.Modes)
+	// polling = WS 长连接（切片 3g 已实现）；webhook 保持默认模式。
+	if len(schema.Modes) != 2 || schema.Modes[0] != "webhook" || schema.Modes[1] != "polling" {
+		t.Fatalf("expected modes=[webhook polling], got %v", schema.Modes)
+	}
+	modeField := ""
+	for _, field := range schema.Fields {
+		if field.Key == "mode" {
+			modeField = string(field.Type)
+			if field.Default != "webhook" || len(field.Options) != 2 {
+				t.Fatalf("mode field default/options = %q/%v", field.Default, field.Options)
+			}
+		}
+	}
+	if modeField != "enum" {
+		t.Fatalf("mode field type = %q, want enum", modeField)
 	}
 	if len(schema.Actions) != 0 {
 		t.Fatalf("expected no actions, got %v", schema.Actions)

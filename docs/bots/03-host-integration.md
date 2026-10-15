@@ -380,7 +380,12 @@ runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
   （复用 token/encrypt_key 校验）——按钮 `action.value.command` 命令文本转
   普通入站消息（UserID=operator、Chat=context.open_chat_id、幂等键=event_id），
   复用 `/approve`/`/deny`/`/answer` 命令闭环；非命令按钮/信息不全静默 202。
-**待续（P1 后续切片）**：WS 长连接与重连。
+- WS 长连接（2026-10-15，切片 3g）：`PollingProvider`——`/callback/ws/endpoint`
+  换 URL + 私有 protobuf 二进制帧（自研编解码）；ping→pong、event→复用 webhook
+  入站解析（消息/卡片按钮）+ ack（biz_rt 刷新 + `{"code":200}`）；读超时 90s、
+  断线指数退避重连（1s→15s）。Schema `Modes=[webhook,polling]` + `mode` enum
+  （默认 webhook 不变）；本机无公网入口可用 WS 收消息。
+**飞书 Provider 能力切片全部完成。**
 **扫码登录 action 与返回约定（三端统一）**：
 
 - `POST /api/connectors/{id}/actions/start_login`（Schema.Actions kind=qr）：

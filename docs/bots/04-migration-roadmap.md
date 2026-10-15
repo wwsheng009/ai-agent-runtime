@@ -130,7 +130,18 @@
   非命令按钮/缺 operator/缺会话锚点/无 event_id 静默 202。agent 发卡时把命令
   放进按钮 value.command 即获得原生按钮审批。测试：命令路由/四类静默/
   token 错配拒绝/加密信封解密路由，`-race` 全绿。
-  **待续**：WS 长连接与重连。
+  **WS 长连接（2026-10-15，飞书切片 3g）**：实现 `PollingProvider`
+  （`feishu_ws.go`）——`POST /callback/ws/endpoint`（AppID/AppSecret 明文体）
+  换 WS URL → gorilla 二进制帧 = 飞书私有 protobuf（seq_id/log_id/service/
+  method/headers{key,value}/payload_encoding/payload_type/payload/log_id_new
+  自研编解码）；ping → pong（control 帧），event → 复用 webhook 入站解析
+  （消息 + 卡片按钮同构）+ ack（原 headers 刷 biz_rt + `{"code":200}`）；
+  读超时 90s、断线指数退避重取 endpoint 重连（1s→15s，与 QQ gateway 同口径）。
+  Schema 增加 `polling` 模式与 `mode` enum（默认 webhook 不变）；无公网入口
+  的本机部署可用 WS 长连接收消息（回复仍走 REST 发送端点）。测试：帧编解码
+  往返/pong/ack（biz_rt 刷新 + code 200）/端到端（假 endpoint + 假 WS 下发
+  消息事件 → handler 收到入站）/SupportsPolling 门控，`-race` 全绿。
+  **飞书能力切片全部完成**（文本/媒体/流式/持久化/typing/按钮审批/WS）。
 - 状态（2026-10-12，gateway 宿主接线切片，与前端切片并行）：**gateway 宿主 ◐ 完成**
   ——`cmd/gateway/connector_bootstrap.go` 按 `--data-dir` 装配 `storejson`
   （`connectors.json` 配置+密钥 0600、`connectors-state.json` 状态 0600，
