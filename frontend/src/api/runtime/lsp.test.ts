@@ -169,7 +169,6 @@ describe("fetchLspObserveFeed", () => {
       if (url.pathname.endsWith("/observe/v1/capabilities")) {
         return jsonResponse({ ok: true, data: {} });
       }
-      const eventType = url.searchParams.get("event_type") ?? "";
       return jsonResponse({ ok: true, data: queryResult([], 0) });
     });
     vi.stubGlobal("fetch", fetchMock);

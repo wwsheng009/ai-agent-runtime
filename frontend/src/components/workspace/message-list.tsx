@@ -150,7 +150,7 @@ export function MessageList({
     }
     if (!renderedMessages.some((message) => message.id === editingMessageId)) {
       // P0-2 机械搬迁：保留原「编辑目标不在列表时同步复位编辑态」语义。
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+       
       setEditingMessageId(null);
       setInlineEditDraft("");
     }
@@ -159,7 +159,7 @@ export function MessageList({
   useEffect(() => {
     if ((isResponding || backtrackNavigationActive) && editingMessageId) {
       // P0-2 机械搬迁：保留原「流式响应/回溯导航期间同步退出内联编辑」语义。
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+       
       setEditingMessageId(null);
       setInlineEditDraft("");
     }

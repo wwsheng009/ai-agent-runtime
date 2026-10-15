@@ -45,7 +45,7 @@ export function ArtifactDetailDialog({
     }
 
     // P0-2 机械搬迁：保留原「artifact 切换时同步 reading mode」语义。
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setPreferredView(artifact.previewHtml ? "preview" : "source");
   }, [artifact?.id, artifact?.previewHtml]);
 

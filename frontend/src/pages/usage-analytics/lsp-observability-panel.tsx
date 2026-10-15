@@ -144,8 +144,8 @@ export function LspObservabilityPanel({ adminToken }: { adminToken?: string }) {
               <>
                 {" · "}
                 {t("lspPanel.baselineCached", {
-                  age: baseline.cache.age_seconds ?? 0,
-                  ttl: baseline.cache.ttl_seconds ?? 0,
+                  age: String(baseline.cache.age_seconds ?? 0),
+                  ttl: String(baseline.cache.ttl_seconds ?? 0),
                 })}
               </>
             ) : null}

@@ -57,6 +57,9 @@ function modelsFor(
 
 export function ModelRoutePicker({ value, catalog, onChange }: ModelRoutePickerProps) {
   const { t } = useTranslation("connectors");
+  // 返回/关闭两个无障碍标签取自 workspace 命名空间（与工作区模型面板同文案）；
+  // connectors 命名空间下没有这两条词条，直接用 t() 会在运行时把键名当文案渲染。
+  const { t: tWorkspace } = useTranslation("workspace");
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<ComposerModelPanelView>({ level: "root" });
   const [pending, setPending] = useState<ComposerModelPanelPending>({
@@ -300,7 +303,7 @@ export function ModelRoutePicker({ value, catalog, onChange }: ModelRoutePickerP
             {activeSection ? (
               <button
                 type="button"
-                aria-label={t("composer.modelPanel.back")}
+                aria-label={tWorkspace("composer.modelPanel.back")}
                 onClick={goBackToRoot}
                 className="inline-flex size-5 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
               >
@@ -316,7 +319,7 @@ export function ModelRoutePicker({ value, catalog, onChange }: ModelRoutePickerP
             </span>
             <button
               type="button"
-              aria-label={t("composer.modelPanel.close")}
+              aria-label={tWorkspace("composer.modelPanel.close")}
               onClick={() => closePanel(true)}
               className="ml-auto inline-flex size-5 shrink-0 items-center justify-center rounded-control text-muted-foreground transition hover:bg-surface-soft hover:text-foreground"
             >

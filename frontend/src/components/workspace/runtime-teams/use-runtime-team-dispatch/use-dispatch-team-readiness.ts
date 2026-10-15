@@ -17,7 +17,7 @@ export function useDispatchTeamReadiness(teams: RuntimeTeamRecord[]) {
   useEffect(() => {
     if (teams.length === 0) {
       // P0-2 机械搬迁：保留原「teams 清空即同步复位 readiness 与 loading」语义。
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+       
       setDispatchTeamReadiness({});
       setIsDispatchReadinessLoading(false);
       return;

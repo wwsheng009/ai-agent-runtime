@@ -275,7 +275,7 @@ export function WorkspaceShell({
 
   useEffect(() => {
     // P0-2 机械搬迁：保留原「autoOpenArtifacts 变化即同步刷新右侧栏开合」语义。
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setRightRailManualOpen(settings.workspace.autoOpenArtifacts);
   }, [settings.workspace.autoOpenArtifacts]);
 

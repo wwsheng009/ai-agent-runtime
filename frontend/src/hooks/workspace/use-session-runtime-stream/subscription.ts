@@ -1,0 +1,437 @@
+import { type ConnectionStatus } from "@/lib/connection-status";
+import { applyLiveStreamDelta } from "@/lib/live-stream-text";
+import {
+  streamSessionRuntime,
+  type SessionRuntimeEvent,
+} from "@/lib/runtime-api";
+import { matchesActiveTurn } from "@/lib/thread-state/deltas";
+import {
+  getRuntimeDeltaKeyFromEvent,
+  getRuntimeDeltaKind,
+  getRuntimeEventTurnId,
+} from "@/lib/workspace-thread-state";
+import { createStreamingFrameScheduler } from "../agent-chat-turn/streaming-frame";
+import { admitRuntimeFrame } from "../frame-intake";
+import {
+  clearFinalizedLiveStreamText,
+  collectFinalizedLiveMessageIds,
+  isFinalizedTurnFrame,
+  trimPendingRuntimeCommits,
+} from "../runtime-stream-retention";
+import { createStallGuard, RUNTIME_STREAM_IDLE_TIMEOUT_MS } from "../session-stream-stall";
+import {
+  STREAM_FAILURE_THRESHOLD,
+  type RuntimeStreamSubscriptionParams,
+} from "./types";
+
+/**
+ * 运行时流订阅主体：由原 use-session-runtime-stream.ts 的 effect 体逐段搬迁，
+ * 负责 SSE 建连/续传重连、事件归并与去重 claim、合帧提交与收尾；返回 effect cleanup。
+ */
+export function runSessionRuntimeSubscription({
+  sessionId,
+  sessionKey,
+  setStatusState,
+  runtimeEventsRef,
+  runtimeSeqRef,
+  activeTurnIdRef,
+  deltaCoordinatorRef,
+  onTrajectoryEventRef,
+  onRuntimeEventRef,
+  renderLiveDeltasRef,
+  applyRuntimeEventToThreadRef,
+  applyRuntimeDeltaToThreadRef,
+  getErrorMessageRef,
+  getRuntimeEventSeqRef,
+  mergeRuntimeEventRef,
+  setThreadsRef,
+  setThreadsLiveRef,
+  getPublicationLevelRef,
+  selectedThreadRef,
+  getReplayCursorRef,
+  threadIdRef,
+}: RuntimeStreamSubscriptionParams): () => void {
+    // 事件缓冲表是稳定引用（只增删键、不整体替换）；在 effect 体内取一次，
+    // cleanup 里用这个局部引用，避免 react-hooks/exhaustive-deps 对
+    // `ref.current` 在 cleanup 中被替换的误报。
+    const runtimeEventsBySession = runtimeEventsRef.current;
+    const controller = new AbortController();
+
+    // 运行时通道的**提交合帧**（2026-09-15）。chat 通道早已按最小间隔提交
+    // （agent-chat-turn/streaming-frame.ts 的 MIN_COMMIT_INTERVAL_MS = 120），
+    // 但本通道此前是「每条 SSE 事件一次 setThreads」：实测 e2e/zz-mount-audit.mjs
+    // 单次流式回合（507 帧 / 16s）把页面级提交打到 59 次/秒（≈每帧一次），
+    // MutationObserver 940 次回调、LayoutCount +945、ScriptDuration 7.3s——每次
+    // 提交都要重跑消息列的 markdown 渲染，这就是「输出过程中整页卡住」的主因。
+    // 这里复用同一个调度器：事件先入队，按最小间隔 + rAF 合并成一次提交。
+    //
+    // 关键约束：归属判定与去重 claim（deltaCoordinator.claim）**必须仍在事件
+    // 到达时执行**——见 onEvent 内注释：updater 可能被 StrictMode / 并发渲染
+    // 重放，claim 放进 updater 会吞掉去重键。因此入队的是已判定好的条目。
+    const pendingRuntimeCommits: Array<{
+      activeTurn: string;
+      event: SessionRuntimeEvent;
+      nextEvents: SessionRuntimeEvent[];
+      shouldApplyLiveDelta: boolean;
+    }> = [];
+
+    const applyPendingRuntimeCommits = () => {
+      if (pendingRuntimeCommits.length === 0) {
+        return;
+      }
+      // 按到达顺序在同一次 reducer 里兑现：逐条 apply 的结果与「一条一次提交」
+      // 完全一致（都是对最新 state 顺序应用），只是合并成一次页面级提交。
+      const batch = pendingRuntimeCommits.splice(0, pendingRuntimeCommits.length);
+      // P1-1 内容提交结构门：整批都是「已判定可渲染的打字机增量」且线程不在
+      // 降级态时，走 live 通道（按会话订阅者）——文本生成期的高频批（实测
+      // 59 次/秒）不再推进页面级结构快照；含任一持久事件（工具生命周期 /
+      // 回合终态 / 回滚信号，写 runtimeEventCount / transport / 消息骨架）的
+      // 批仍走结构通道，页面级判定（topbar / 侧栏 / 历史重写同步）不丢信号。
+      // 降级态下即使只剩增量也走结构通道：恢复分支（transport error → live）
+      // 是页面级状态，不能只落 live 视图。
+      const isContentOnlyBatch =
+        batch.every((item) => item.shouldApplyLiveDelta) &&
+        selectedThreadRef.current?.transport !== "error";
+      const commitThreads =
+        isContentOnlyBatch && setThreadsLiveRef.current
+          ? setThreadsLiveRef.current
+          : setThreadsRef.current;
+      commitThreads((current) => {
+        // P0-2：整批都没有落点（重复帧 / 非当前线程 / 已定稿）时不产生新引用——
+        // setState 收到相同引用直接旁路，React 不再重渲染整棵工作区树。
+        let changed = false;
+        const nextThreads = batch.reduce(
+          (threads, item) =>
+            threads.map((thread) => {
+              if (thread.id !== threadIdRef.current) {
+                return thread;
+              }
+              // 通道恢复：收到 stream 事件说明连接已恢复，清除由
+              // stream 自身产生的降级标记（recovery 等其他来源的
+              // lastError 保持，不被误清）。
+              const recovered =
+                thread.transport === "error" &&
+                thread.lastError?.startsWith("Runtime stream failed")
+                  ? { ...thread, transport: "live" as const, lastError: null }
+                  : thread;
+              if (recovered !== thread) {
+                changed = true;
+              }
+              // 方案B：请求进行中，打字机增量事件直接渲染到消息；
+              // 否则只进事件快照（历史回放/reload 不误渲染），在途回合身份透传给桥接帧。
+              // A durable event from another turn never mutates the
+              // currently streaming assistant message.  The claim above
+              // is intentionally shared by both transport paths.
+              const applied = item.shouldApplyLiveDelta
+                ? applyRuntimeDeltaToThreadRef.current(
+                    recovered,
+                    item.event,
+                    item.activeTurn || undefined,
+                  )
+                : applyRuntimeEventToThreadRef.current(
+                    recovered, sessionId, item.nextEvents, item.event, item.activeTurn || undefined,
+                  );
+              if (applied !== recovered) {
+                changed = true;
+              }
+              return applied;
+            }),
+          current,
+        );
+        return changed ? nextThreads : current;
+      });
+    };
+
+    const runtimeCommitScheduler = createStreamingFrameScheduler(
+      applyPendingRuntimeCommits,
+    );
+    runtimeCommitScheduler.attachVisibilityListener();
+
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        controller.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+
+    void (async () => {
+      // 方案B：常驻长轮询循环——单次连接结束（空流/断开/会话切换）后
+      // 以 after 游标续传重连，保证请求进行中的增量事件始终可达。
+      // 防抖：连续失败达到阈值才标记 thread error，偶发瞬断（循环重连
+      // 场景的常见噪音）不会把 thread 粘滞在降级状态。
+      let consecutiveFailures = 0;
+      // 状态写入收敛到一处：同 key 同 status 保持原引用，避免无意义重渲染。
+      const setStreamStatus = (status: ConnectionStatus) =>
+        setStatusState((current) =>
+          current?.key === sessionKey && current.status === status
+            ? current
+            : { key: sessionKey, status },
+        );
+      const stallGuard = createStallGuard();
+      while (!controller.signal.aborted) {
+        let streamFailed = false;
+        try {
+          await streamSessionRuntime(sessionId, {
+            // 重试前以本地 last seq 拉齐：游标即本地已消费的最大 seq，
+            // 手动重试与自动重连共用同一 after 语义（不重复消费 delta）。
+            // 尾部优先：首个连接取 max(本 hook 已消费 seq, 轨迹已回放 seq)。
+            // 窗口回放已把轨迹推进到 latest_seq，故这里通常直接跳过历史 dump，
+            // 只订阅窗口之后的新事件；重连时 runtimeSeqRef 已经前进，max 保持
+            // 「不重复消费」的既有语义。
+            after: Math.max(
+              runtimeSeqRef.current[sessionId] ?? 0,
+              getReplayCursorRef.current?.() ?? 0,
+            ),
+            idleTimeoutMs: RUNTIME_STREAM_IDLE_TIMEOUT_MS,
+            // P1-5 方案 2：父流订阅 live-only 事件——子会话 `subagent.progress`
+            // 节流镜像与父会话自身 `tool.progress` 只在 `live=1` 时随 SSE 投递
+            // （不落库、无持久化 seq，`trajectoryEventAction` 按 seq=0 即时应用）。
+            live: true,
+            pollMs: 500,
+            signal: controller.signal,
+            // P1-8：SSE 建连（响应头到达）即视为在线——后端该流是常驻长连接，
+            // 空闲会话不产生任何事件；若只按「收到事件」判定，徽标会永久停在
+            // 「连接中… 重试」，把健康连接误报成假故障。与日志流 onOpen→open
+            // 同口径；成功建连同时打断「连续失败」计数（瞬断抖动不粘滞降级）。
+            onOpen: () => {
+              // 静默超时后的重连：建连成功 ≠ 有数据，保持 reconnecting 等 onEvent。
+              if (stallGuard.holdReconnecting) {
+                setStreamStatus("reconnecting");
+                return;
+              }
+              consecutiveFailures = 0;
+              setStreamStatus("online");
+            },
+            onEvent: (event) => {
+              // 收到事件 = 通道已恢复；重置连续失败计数与静默标记。
+              stallGuard.markAlive();
+              consecutiveFailures = 0;
+              setStreamStatus("online");
+
+              const nextSeq = getRuntimeEventSeqRef.current(event);
+              const deltaKind = getRuntimeDeltaKind(event.type);
+              // L3 帧闸门（见 frame-intake）：重复 seq 的内容帧整帧丢弃，且不消费
+              // delta key。作用域取与下方 claim 同一个协调器实例（ref 读取，与
+              // 依赖隔离口径一致）：chat 流入口传入同一实例，两路共享单写者水位。
+              if (
+                !admitRuntimeFrame({
+                  sessionId,
+                  event,
+                  seq: nextSeq,
+                  scope: deltaCoordinatorRef.current ?? null,
+                })
+              ) {
+                return;
+              }
+
+              onTrajectoryEventRef.current?.(event);
+              onRuntimeEventRef.current?.(event);
+
+              const runtimeSeq = runtimeSeqRef.current[sessionId] ?? 0;
+              if (nextSeq > 0 && nextSeq > runtimeSeq) {
+                runtimeSeqRef.current[sessionId] = nextSeq;
+              }
+
+              const nextEvents = mergeRuntimeEventRef.current(
+                runtimeEventsRef.current[sessionId] ?? [],
+                event,
+              );
+              runtimeEventsRef.current[sessionId] = nextEvents;
+
+              // Claim the shared provider identity outside the React state
+              // updater. Functional updaters may be replayed by StrictMode or
+              // concurrent rendering; making the claim there would consume a
+              // dedupe key even when React discards the update.
+              const activeTurn = activeTurnIdRef.current?.trim() ?? "";
+              const eventTurn = getRuntimeEventTurnId(event);
+              // 归属判定与 applyRuntimeDeltaToThread 共用同一语义（「未知」≠
+              // 「其他 turn」）。严格相等会让缺 turn_id 的增量在 hook 层被整条
+              // 丢弃——真后端 loop.go 仅在 turnID != "" 时注入 turn_id。
+              const turnMatches = matchesActiveTurn(activeTurn, eventTurn);
+              // 直连 /api/agent/chat 流持有本会话占位时，runtime 通道只消费
+              // 不应用（也不消费 claim，交给直连流独占）：每帧 claim 只保证
+              // 增量应用一次，不保证同一推理块的增量落到同一个累加器
+              // （chat 写 turnState / runtime 写 message.segments），混合作者
+              // 会因提交合并「更长副本获胜」互相覆盖出丢词与重复
+              // （见 lib/thread-state/deltas.ts holdDirectStream）。
+              const directStreamHeld =
+                deltaCoordinatorRef.current?.isDirectStreamActive(sessionId) ===
+                true;
+              let shouldApplyLiveDelta = false;
+              if (
+                renderLiveDeltasRef.current &&
+                deltaKind &&
+                turnMatches &&
+                !directStreamHeld
+              ) {
+                // 先判定「这条增量到底能不能落到消息上」，再决定是否消费去重 key。
+                // applyRuntimeDeltaToThread 在目标消息不是「当前正在 streaming 的
+                // 那条」时会原样返回 thread（turn 身份不足/已定稿/没有可写目标）。
+                // 此时若照旧 claim，key 就被吞掉：/api/agent/chat 通道随后拿到同一
+                // key 会直接 return，两条通道互相让路，整段回复只能等 turn 结束由
+                // 最终快照一次性定型（实测真后端两路各 ~1000 帧、DOM 全程不动，
+                // 24s 时整块蹦出）。判定是纯函数调用，不产生副作用。
+                const currentThread = selectedThreadRef.current;
+                const willApply = Boolean(
+                  currentThread &&
+                    applyRuntimeDeltaToThreadRef.current(
+                      currentThread,
+                      event,
+                      activeTurn || undefined,
+                    ) !== currentThread,
+                );
+                const deltaKey = getRuntimeDeltaKeyFromEvent(event);
+                const coordinator = deltaCoordinatorRef.current;
+                shouldApplyLiveDelta =
+                  Boolean(deltaKey) && coordinator
+                    ? willApply && coordinator.claim(deltaKey)
+                    : Boolean(deltaKey) || !coordinator;
+
+                // live 通道（lib/live-stream-text.ts）：已 claim 的增量在事件到达时同步
+                // 追加；此处只取副作用，写 store 仍由 applyPendingRuntimeCommits 兑现。
+                if (shouldApplyLiveDelta && currentThread) {
+                  applyRuntimeDeltaToThreadRef.current(
+                    currentThread,
+                    event,
+                    activeTurn || undefined,
+                    // live 通道副作用集中在 lib/live-stream-text.ts 的
+                    // applyLiveStreamDelta（正文追加 / 推理追加 / 新推理块覆盖）。
+                    (delta) => applyLiveStreamDelta(delta),
+                  );
+                }
+              }
+
+              // 终态帧在事件到达时收集 live 消息 id，提交兑现后清 live 记录
+              // （见 runtime-stream-retention：runtime 通道的 finalize 收尾）。
+              const finalizedLiveMessageIds = isFinalizedTurnFrame(event)
+                ? collectFinalizedLiveMessageIds(selectedThreadRef.current, event)
+                : [];
+
+              // 入队 + 合帧提交（见上方 pendingRuntimeCommits 注释）。判定结果
+              // （shouldApplyLiveDelta / activeTurn）在事件到达时固化，既保证
+              // 「先判定后 claim」的既有语义，又避免把 claim 放进 updater 被重放。
+              // 实际 apply 在 applyPendingRuntimeCommits 里按到达顺序兑现。
+              pendingRuntimeCommits.push({
+                activeTurn,
+                event,
+                nextEvents,
+                shouldApplyLiveDelta,
+              });
+              // 超限（隐藏期间积压）时按 helper 口径淘汰：优先最旧纯增量条目。
+              trimPendingRuntimeCommits(pendingRuntimeCommits);
+              // P1-2 发布分级（lib/thread-state/publication.ts）决定提交节奏：
+              // - immediate（结算/工具生命周期/回滚等持久事件）：取消挂起帧
+              //   立即提交（对齐参考 notifier.notifyNow / assembly.cancelFrame）；
+              // - animation-frame（正文/推理/图片增量）：三帧门节奏
+              //   （≈20Hz 上限，对齐参考 assembly.ts 三帧门）；
+              // - none（live-only 节流镜像：tool/subagent.progress）：入队但
+              //   不主动调度，随下一次合帧批顺带兑现（状态不丢、不为此开提交）。
+              const publicationLevel = getPublicationLevelRef.current(event);
+              if (publicationLevel === "immediate") {
+                runtimeCommitScheduler.flush();
+              } else if (publicationLevel === "animation-frame") {
+                runtimeCommitScheduler.schedule({ pace: "animation-frame" });
+              }
+              if (finalizedLiveMessageIds.length > 0) {
+                // 与 finalize-turn 同口径：先兑现挂起提交，再清 live 记录。
+                runtimeCommitScheduler.flush();
+                clearFinalizedLiveStreamText(finalizedLiveMessageIds);
+              }
+            },
+            onErrorEvent: (payload) => {
+              streamFailed = true;
+              // 服务端显式 error 帧属于「有信号」的结束，不算静默超时。
+              stallGuard.markAlive();
+              // 方案B 防抖：SSE error 事件同样计入连续失败，达到阈值才标记降级。
+              consecutiveFailures += 1;
+              const nextStatus: ConnectionStatus =
+                consecutiveFailures >= STREAM_FAILURE_THRESHOLD
+                  ? "offline"
+                  : "reconnecting";
+              setStreamStatus(nextStatus);
+              const message =
+                typeof payload.error === "string" && payload.error.trim()
+                  ? payload.error.trim()
+                  : "runtime stream reported an error";
+              if (consecutiveFailures >= STREAM_FAILURE_THRESHOLD) {
+                // 先兑现挂起的增量，保证降级标记写在最后（顺序与「一条一次提交」一致）。
+                runtimeCommitScheduler.flush();
+                setThreadsRef.current((current) =>
+                  current.map((thread) =>
+                    thread.id === threadIdRef.current
+                      ? {
+                          ...thread,
+                          updatedAt: new Date().toISOString(),
+                          transport: "error",
+                          lastError: `Runtime stream failed: ${message}`,
+                        }
+                      : thread,
+                  ),
+                );
+              }
+            },
+          });
+        } catch (error) {
+          if (controller.signal.aborted) {
+            return;
+          }
+          streamFailed = true;
+          const message = stallGuard.noteFailure(
+            error,
+            getErrorMessageRef.current,
+          );
+          consecutiveFailures += 1;
+          const nextStatus: ConnectionStatus =
+            consecutiveFailures >= STREAM_FAILURE_THRESHOLD
+              ? "offline"
+              : "reconnecting";
+          setStreamStatus(nextStatus);
+          if (consecutiveFailures >= STREAM_FAILURE_THRESHOLD) {
+            // 同上：先冲刷挂起的增量，再写降级标记。
+            runtimeCommitScheduler.flush();
+            setThreadsRef.current((current) =>
+              current.map((thread) =>
+                thread.id === threadIdRef.current
+                  ? {
+                      ...thread,
+                      updatedAt: new Date().toISOString(),
+                      transport: "error",
+                      lastError: `Runtime stream failed: ${message}`,
+                    }
+                  : thread,
+              ),
+            );
+          }
+        }
+        if (controller.signal.aborted) {
+          return;
+        }
+        // 退避重连：错误 1s；正常空流 2s（长轮询后端无空流——事件到达即返回；
+        // mock/空后端下降低轮询频率，避免共享测试服务被高频请求拖慢）。
+        // 状态不在这里回落：正常收流（服务端/代理按空闲超时关闭长连接）只说明
+        // 本轮结束，连接是否仍然可用由下一轮 onOpen 继续验证；按「本轮有没有
+        // 事件」回落 connecting 会让已在线会话在每次重连窗口闪回「连接中… 重试」
+        // （代理超时拓扑下周期性假故障）。真正的断连在失败分支收敛为
+        // reconnecting/offline。
+        await sleep(streamFailed ? 1000 : 2000);
+      }
+    })();
+
+    return () => {
+      // 先冲刷再停表：已 claim 的 delta 若被丢弃，另一条通道会因为去重键已被
+      // 消费而永久跳过这段文本（两条通道共享 deltaCoordinator 的 key）。
+      runtimeCommitScheduler.flush();
+      runtimeCommitScheduler.cancel();
+      runtimeCommitScheduler.detachVisibilityListener();
+      controller.abort();
+      // 切走会话时释放该会话的事件缓冲（≤100 条事件、payload 可达百 KB 级）；
+      // seq 游标是标量，保留以便切回时不重复消费历史 dump。
+      delete runtimeEventsBySession[sessionId];
+    };
+}

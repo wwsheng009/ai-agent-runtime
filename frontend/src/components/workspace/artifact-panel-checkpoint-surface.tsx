@@ -46,7 +46,7 @@ export function ArtifactPanelCheckpointSurface({
 
   useEffect(() => {
     // P0-2 机械搬迁：保留原「审计条目变化即同步校正当前选中项」语义。
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     setSelectedAuditId((current) =>
       pickInitialBacktrackAuditId(backtrackAuditEntries, current),
     );

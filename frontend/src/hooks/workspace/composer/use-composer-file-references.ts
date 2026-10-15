@@ -192,7 +192,7 @@ export function useComposerFileReferences({
   useEffect(() => {
     listSeqRef.current += 1;
     listingLoadedScopeRef.current = null;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- 会话切换必须同步清空上一会话的结果并回到 loading 态（否则新会话会沿用旧会话候选/旧作用域根）；一次性收敛，不产生循环。
+     
     setList(IDLE_LIST_STATE);
     setRoots({ status: "loading", scope: null, error: null });
   }, [sessionKey]);
@@ -204,7 +204,7 @@ export function useComposerFileReferences({
     }
     const cached = readCachedRoot(sessionKey);
     if (cached) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- 命中缓存时同步回填作用域，避免重开菜单闪 loading；一次性赋值。
+       
       setRoots({
         status: cached.unavailable ? "unavailable" : "ready",
         scope: cached.root?.scope ?? null,
@@ -267,7 +267,7 @@ export function useComposerFileReferences({
 
   useEffect(() => {
     if (search.unavailable) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- 端点能力是部署级属性：一次探测到不可用即粘住，属于一次性收敛（同 use-reasoning-effort 的写法）。
+       
       setSearchEndpointUnavailable(true);
     }
   }, [search.unavailable]);
@@ -286,7 +286,7 @@ export function useComposerFileReferences({
     listSeqRef.current = seq;
     const controller = new AbortController();
 
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- 发请求前打 loading 标记（保留上次结果），成功/失败在 .then/.catch 收敛，不会级联。
+     
     setList((previous) => ({ ...previous, status: "loading", error: null }));
 
     fetchFsListing(
