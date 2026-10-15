@@ -179,6 +179,10 @@ type Handler struct {
 	// P4-刷新续传：会话在途回合注册表（懒初始化，见 session_active_turn.go）。
 	activeTurnsOnce sync.Once
 	activeTurns     *activeTurnRegistry
+	// gap 3 goal 驱动器（serverAutoContinuation）：CLI 在场标记与 strike 计数
+	//（懒初始化，见 session_goal_driver.go；订阅在 runtimeEventBridgeOnce 内）。
+	goalDriverOnce sync.Once
+	goalDriver     *goalDriverState
 	// §21 交互通道：web inline 的 ask_user_question 应答注册表（懒初始化，
 	// 见 interactive_controllers.go）。
 	inlineQuestionWaitersMu sync.Mutex
@@ -2542,6 +2546,17 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			)
 			h.recordUsage(usageScope, "agent_chat", reactResult.Skill, reactResult.Success, estimatedPromptTokens, reactResult.Usage, reactResult.Output)
 
+			// gap 3 goal 驱动器：web 直连 turn 的 SSE 终态不进总线，成功终态
+			// 在此显式上报（usage 记账 + active goal 续跑决策）；失败/中断由
+			// error 分支上报。全链路在驱动器内门控，开关关闭时零行为。
+			h.observeWebTerminal(goalDriverTurnOutcome{
+				SessionID:   sessionID(session),
+				Success:     reactResult.Success,
+				Output:      reactResult.Output,
+				Steps:       reactResult.Steps,
+				UsageTokens: usageTotalTokens(reactResult.Usage),
+			})
+
 			// Emit the post-run evidence tail without replaying a full-output
 			// chunk.  Replaying that chunk after the live deltas would append the
 			// answer a second time in the workspace.
@@ -2872,6 +2887,15 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			"",
 		)
 		h.recordUsage(usageScope, "agent_chat", reactResult.Skill, reactResult.Success, estimatedPromptTokens, reactResult.Usage, reactResult.Output)
+
+		// gap 3 goal 驱动器：非流式 web 直连 turn 的成功终态上报（同流式分支）。
+		h.observeWebTerminal(goalDriverTurnOutcome{
+			SessionID:   sessionID(session),
+			Success:     reactResult.Success,
+			Output:      reactResult.Output,
+			Steps:       reactResult.Steps,
+			UsageTokens: usageTotalTokens(reactResult.Usage),
+		})
 
 		response := map[string]interface{}{
 			"session_id": sessionID(session),
@@ -4741,6 +4765,9 @@ func (h *Handler) attachRuntimeEventBridge() {
 		if bus == nil {
 			return
 		}
+		// gap 3：goal 驱动器订阅 actor 终态（session_end）。订阅在事件桥的
+		// Once 内，与落盘桥同生命周期；驱动器自身有配置开关门控，缺省关闭。
+		h.subscribeGoalDriver()
 		// P1.5：批量开关关闭时 buffer 为 nil，下面的回调保持原逐条同步路径。
 		buffer := h.newRuntimeEventPersistBuffer()
 		bus.Subscribe("", func(event runtimeevents.Event) {
@@ -5594,6 +5621,17 @@ func (h *Handler) applyAgentExecutionPolicy(a *agent.Agent, workspacePath string
 				toolPolicy.DeniedTools[name] = true
 			}
 		}
+	}
+	if profilePolicy != nil && profilePolicy.CapabilityScopeEnabled {
+		// Profile-declared capability domains must survive host assembly:
+		// dropping the scope would silently re-enable every domain the
+		// profile withdrew (the dual-sink guard pins this equivalence).
+		names := profilePolicy.AllowedCapabilityNames()
+		capabilities := make([]runtimepolicy.Capability, 0, len(names))
+		for _, name := range names {
+			capabilities = append(capabilities, runtimepolicy.Capability(name))
+		}
+		toolPolicy.SetCapabilityScope(capabilities)
 	}
 	sandboxCfg := executor.SandboxConfig{}
 	if runtimeConfig != nil {

@@ -1,4 +1,4 @@
-// session_goal_handlers.go — 会话 goal 管理 HTTP 面（gap 2）。
+// session_goal_handlers.go — 会话 goal 管理 HTTP 面（gap 2 / gap 3）。
 //
 // 与 CLI `/goal` 命令一一对应（set / pause / resume / complete / clear / budget），
 // 让 web 控制台在不依赖 CLI 的前提下管理持久目标：
@@ -11,10 +11,11 @@
 // 与 CLI 完全同口径：complete 是终态（除非换新 goal）、budget_limited→active 仅在
 // 预算提高到超过已用时成立、模型不可完成 paused/blocked 目标（用户可）。
 //
-// 边界说明：本端点只管理**状态**，不触发续跑。goal 的自动续跑循环当前由 CLI
-// 驱动（aicliGoalContinuationExecutor），纯 web 会话不会自行续跑；控制台可在
-// resume 后按需投递一条消息。模型侧工具面与 run 级指引注入见
-// session_goal_tools.go / session_goal_guidance.go。
+// 续跑边界（2026-10-15 gap 3 起）：set / resume / budget-raise **applied=true**
+// 时调用 goalDriverKick 立即触发服务端续跑（对齐 Codex 的 set/resume 触发语义；
+// 受 goal.serverAutoContinuation 开关与 CLI 冷却窗门控）。开关关闭或 CLI 在场时
+// 维持 gap-2 原边界：只管理状态，续跑由 CLI 循环驱动。模型侧工具面与 run 级
+// 指引注入见 session_goal_tools.go / session_goal_guidance.go。
 package runtimeapi
 
 import (
@@ -190,6 +191,12 @@ func (h *Handler) UpdateSessionGoal(w http.ResponseWriter, r *http.Request) {
 	if !applied {
 		// 合并策略保留了原状态（例如 complete 终态、budget_limited 未提高预算）。
 		resp.Message = "未应用：" + sessionGoalNotAppliedReason(*expected, persisted)
+	}
+	// gap 3：状态变更生效且目标处于 active 时立即触发服务端续跑（set 产出新
+	// active goal；resume/budget-raise 把目标恢复 active）。开关关闭或 CLI 在场
+	// 时 kick 内部直接让位，行为同 gap-2。
+	if applied && persisted != nil && persisted.Status == runtimegoal.StatusActive {
+		h.goalDriverKick(sessionID)
 	}
 	h.writeJSON(w, http.StatusOK, resp)
 }

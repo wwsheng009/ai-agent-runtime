@@ -985,6 +985,14 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// gap 3 goal 驱动器：命令通道入口是 CLI 远程模式在场的直接证据
+	//（submit_prompt/continue 每轮必经）。观测到 CLI 在场即刷新让位窗口并清
+	// strike——goal 推进、记账与容忍计数全部让给 CLI 决策循环，避免双驱动。
+	// 无论开关状态都上报（开关关闭时只是无害簿记）。
+	if commandType == "submit_prompt" || commandType == "submit" || commandType == "continue" || commandType == "continue_session" {
+		h.goalDriverNoteCLI(sessionID)
+	}
+
 	actor, err := hub.GetOrCreate(sessionID)
 	if err != nil {
 		if h.writeSessionLeaseConflict(w, err) {
