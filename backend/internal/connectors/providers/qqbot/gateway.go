@@ -467,6 +467,8 @@ type quotedMessage struct {
 //   - Chat 用稳定键：群 "group:<group_openid>"（share_session_in_channel=false
 //     时追加 ":user:<member_openid>" 按人隔离）、C2C "user:<openid>"、
 //     频道 "channel:<channel_id>"；
+//   - GROUP_AT_MESSAGE_CREATE（群@）与 GROUP_MESSAGE_CREATE（全量群消息，
+//     按 group_message_mode 过滤）都走同一组装；
 //   - MessageID 用事件 id（同时是 QQ 被动回复的 msg_id）；
 //   - UserID 用 author.member_openid / author.user_openid / author.id；
 //   - UserName 优先 author.username 昵称，缺省回退 openid/id；
@@ -493,38 +495,42 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if err := json.Unmarshal(data, &event); err != nil {
 			return connectors.InboundMessage{}, false
 		}
-		messageID := firstNonEmpty(event.ID, event.MsgID)
-		groupOpenID := strings.TrimSpace(event.GroupOpenID)
-		memberOpenID := strings.TrimSpace(event.Author.MemberOpenID)
-		if messageID == "" || groupOpenID == "" || memberOpenID == "" {
+		return buildGroupInboundMessage(cfg, connectorID,
+			firstNonEmpty(event.ID, event.MsgID),
+			strings.TrimSpace(event.GroupOpenID),
+			strings.TrimSpace(event.Author.MemberOpenID),
+			event.Author.Username,
+			event.Content, event.MessageReference, event.Attachments)
+	case "GROUP_MESSAGE_CREATE":
+		// 全量群消息（平台开启「接收所有消息」后推送；intent 同为 1<<25）。
+		// 触发策略（group_message_mode，缺省 mention）：mention=仅@机器人的
+		// 消息进入 agent（mentions 含 bot:true 或原始 content 带 <@ 标记）；
+		// all=每条群消息都参与（需运维显式开启，避免刷屏）。
+		var event struct {
+			ID               string              `json:"id"`
+			MsgID            string              `json:"msg_id"`
+			GroupOpenID      string              `json:"group_openid"`
+			Content          string              `json:"content"`
+			MessageReference *messageReference   `json:"message_reference"`
+			Attachments      []gatewayAttachment `json:"attachments"`
+			Mentions         []gatewayMention    `json:"mentions"`
+			Author           struct {
+				MemberOpenID string `json:"member_openid"`
+				Username     string `json:"username"`
+			} `json:"author"`
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, true, event.MessageReference, event.Attachments)
-		if text == "" {
+		if groupMessageModeSetting(cfg) != "all" && !groupMentionsBot(event.Mentions, event.Content) {
 			return connectors.InboundMessage{}, false
 		}
-		chat := chatKindGroup + ":" + groupOpenID
-		if !shareSessionInChannelSetting(cfg) {
-			chat += ":user:" + memberOpenID
-		}
-		return connectors.InboundMessage{
-			ConnectorID: connectorID,
-			Provider:    Name,
-			Chat:        chat,
-			ChatTitle:   groupOpenID,
-			MessageID:   messageID,
-			UserID:      memberOpenID,
-			UserName:    firstNonEmpty(event.Author.Username, memberOpenID),
-			Text:        text,
-			Media:       attachmentsToMedia(event.Attachments),
-			ProviderData: map[string]any{
-				"qqbot_message_type":  chatKindGroup,
-				"qqbot_group_openid":  groupOpenID,
-				"qqbot_member_openid": memberOpenID,
-				"qqbot_event_msg_id":  messageID,
-			},
-			ReceivedAt: time.Now().UTC(),
-		}, true
+		return buildGroupInboundMessage(cfg, connectorID,
+			firstNonEmpty(event.ID, event.MsgID),
+			strings.TrimSpace(event.GroupOpenID),
+			strings.TrimSpace(event.Author.MemberOpenID),
+			event.Author.Username,
+			event.Content, event.MessageReference, event.Attachments)
 	case "C2C_MESSAGE_CREATE":
 		var event struct {
 			ID               string              `json:"id"`
@@ -616,6 +622,66 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 	}
 }
 
+// gatewayMention 是群消息 @ 列表项（官方 mentions 字段子集）。
+type gatewayMention struct {
+	ID  string `json:"id"`
+	Bot bool   `json:"bot"`
+}
+
+// groupMentionsBot 判断全量群消息是否@了机器人：mentions 含 bot:true 的
+// 用户，或原始 content 保留 <@ 标记（防御：不同版本清洗时机不一）。
+func groupMentionsBot(mentions []gatewayMention, content string) bool {
+	for _, mention := range mentions {
+		if mention.Bot {
+			return true
+		}
+	}
+	return strings.Contains(content, "<@")
+}
+
+// groupMessageModeSetting 读取群消息接收模式（group_message_mode）：
+// mention（缺省）= 仅@机器人的消息；all = 全部群消息。非法值回落 mention。
+func groupMessageModeSetting(cfg connectors.Config) string {
+	if strings.EqualFold(strings.TrimSpace(cfg.Setting("group_message_mode", "")), "all") {
+		return "all"
+	}
+	return "mention"
+}
+
+// buildGroupInboundMessage 组装群聊入站消息（GROUP_AT / GROUP_MESSAGE 共用）：
+// chat 键含按人隔离后缀（share_session_in_channel=false），昵称回退 openid。
+func buildGroupInboundMessage(cfg connectors.Config, connectorID, messageID, groupOpenID, memberOpenID, username, content string, ref *messageReference, attachments []gatewayAttachment) (connectors.InboundMessage, bool) {
+	if messageID == "" || groupOpenID == "" || memberOpenID == "" {
+		return connectors.InboundMessage{}, false
+	}
+	text := normalizeInboundText(content, true, ref, attachments)
+	if text == "" {
+		return connectors.InboundMessage{}, false
+	}
+	chat := chatKindGroup + ":" + groupOpenID
+	if !shareSessionInChannelSetting(cfg) {
+		chat += ":user:" + memberOpenID
+	}
+	return connectors.InboundMessage{
+		ConnectorID: connectorID,
+		Provider:    Name,
+		Chat:        chat,
+		ChatTitle:   groupOpenID,
+		MessageID:   messageID,
+		UserID:      memberOpenID,
+		UserName:    firstNonEmpty(username, memberOpenID),
+		Text:        text,
+		Media:       attachmentsToMedia(attachments),
+		ProviderData: map[string]any{
+			"qqbot_message_type":  chatKindGroup,
+			"qqbot_group_openid":  groupOpenID,
+			"qqbot_member_openid": memberOpenID,
+			"qqbot_event_msg_id":  messageID,
+		},
+		ReceivedAt: time.Now().UTC(),
+	}, true
+}
+
 // gatewayAttachment 是入站消息附件（官方 attachments 字段：图片/视频/语音/文件）。
 // 语音另带 voice_wav_url（SILK 转换后 WAV）与 asr_refer_text（ASR 参考转写）。
 type gatewayAttachment struct {
@@ -640,8 +706,16 @@ func attachmentsToMedia(attachments []gatewayAttachment) []connectors.Media {
 		if url == "" && fileName == "" {
 			continue
 		}
+		kind := attachmentKind(item.ContentType)
+		if kind == "voice" {
+			// 语音优先用官方转换后的 WAV（agent 可直接读取；SILK 需专用解码），
+			// 无转换结果时回退原始地址。
+			if wav := strings.TrimSpace(item.VoiceWavURL); wav != "" {
+				url = wav
+			}
+		}
 		medias = append(medias, connectors.Media{
-			Kind:        attachmentKind(item.ContentType),
+			Kind:        kind,
 			FileName:    fileName,
 			ContentType: strings.TrimSpace(item.ContentType),
 			Size:        item.Size,

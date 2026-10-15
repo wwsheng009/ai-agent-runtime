@@ -92,6 +92,12 @@ type Provider struct {
 	msgMu     sync.Mutex
 	lastMsgID map[string]string
 	msgSeq    map[string]int
+
+	// mediaHostGuard 是入站/出站远端媒体的出口守卫（nil = 默认公网守卫，
+	// 见 media.go）；测试/内网部署可覆盖。
+	mediaHostGuard mediaHostGuardFunc
+	// mediaLimitBytes 覆盖入站媒体下载上限（0 = 默认 maxInboundMediaBytes）。
+	mediaLimitBytes int64
 }
 
 type tokenCacheEntry struct {
@@ -141,6 +147,25 @@ func WithLogger(logf func(format string, args ...any)) Option {
 	return func(p *Provider) {
 		if logf != nil {
 			p.logf = logf
+		}
+	}
+}
+
+// WithMediaHostGuard 覆盖远端媒体的主机安全守卫（测试/内网部署用；
+// nil 保持默认公网守卫：拒绝回环/私网/链路本地/组播/CGNAT）。
+func WithMediaHostGuard(guard func(host string) error) Option {
+	return func(p *Provider) {
+		if guard != nil {
+			p.mediaHostGuard = mediaHostGuardFunc(guard)
+		}
+	}
+}
+
+// WithInboundMediaLimit 覆盖入站媒体下载上限（字节；测试用，<=0 忽略）。
+func WithInboundMediaLimit(limit int64) Option {
+	return func(p *Provider) {
+		if limit > 0 {
+			p.mediaLimitBytes = limit
 		}
 	}
 }
@@ -199,6 +224,14 @@ func (p *Provider) Schema() api.ProviderSchema {
 			{
 				Key: "intents", Label: "Gateway Intents", Type: api.FieldNumber,
 				Help: "高级：网关事件订阅位掩码；留空=默认（仅群@与 C2C 事件）",
+			},
+			{
+				Key: "group_message_mode", Label: "群消息接收模式", Type: api.FieldEnum, Default: "mention",
+				Options: []api.Option{
+					{Value: "mention", Label: "仅@机器人（默认）"},
+					{Value: "all", Label: "全部群消息"},
+				},
+				Help: "平台开启「接收所有消息」后生效：mention=仅响应@机器人的消息；all=每条群消息都交给 agent",
 			},
 		},
 		// QQ 官方开放平台没有扫码登录协议（凭据来自 bot.q.qq.com 后台），
@@ -379,7 +412,25 @@ func (p *Provider) sendMedia(ctx context.Context, cfg connectors.Config, target 
 
 // uploadRichMedia 上传媒体并返回 file_info（POST /v2/{groups|users}/{id}/files，
 // srv_send_msg=false 表示只上传、不自动发送）。
+//
+// 上传策略（对齐官方文档「URL 上传 / 整文件上传」）：
+//   - 有远端 URL 且能声明 file_type：优先官方 URL 直传（平台代下转存，省一次
+//     本机下载与 base64 膨胀）；直传失败回落下载 + file_data；
+//   - 仅有本地路径（或无类型信息）：读取字节走 file_data（整文件上传）。
+//     大文件分片上传为后续切片（docs/bots/04 缺口矩阵）。
 func (p *Provider) uploadRichMedia(ctx context.Context, cfg connectors.Config, target chatTarget, media connectors.Media) (string, error) {
+	endpoint := filesEndpoint(p.baseFor(cfg), target)
+	if mediaURL := strings.TrimSpace(media.URL); mediaURL != "" {
+		if fileType, ok := declaredMediaFileType(media); ok {
+			fileInfo, err := p.uploadMediaByURL(ctx, cfg, endpoint, mediaURL, fileType)
+			if err == nil && fileInfo != "" {
+				return fileInfo, nil
+			}
+			if err != nil {
+				p.logf("qqbot: URL 直传失败，回落下载上传：%v", err)
+			}
+		}
+	}
 	data, contentType, err := p.resolveOutboundMedia(ctx, media)
 	if err != nil {
 		return "", err
@@ -402,6 +453,44 @@ func (p *Provider) uploadRichMedia(ctx context.Context, cfg connectors.Config, t
 	return fileInfo, nil
 }
 
+// declaredMediaFileType 在发送方已声明类型信息时给出 file_type（URL 直传
+// 前置条件）：Kind 或 Content-Type 至少一个非空即可声明；都为空时返回 false
+// （走下载嗅探）。
+func declaredMediaFileType(media connectors.Media) (int, bool) {
+	if strings.TrimSpace(media.Kind) == "" && strings.TrimSpace(media.ContentType) == "" {
+		return 0, false
+	}
+	return mediaFileType(media, media.ContentType), true
+}
+
+// uploadMediaByURL 走官方 URL 直传（平台下载转存），返回 file_info。
+// URL 先过出口守卫（公网校验），避免把内网地址交给平台触发不可预期失败。
+func (p *Provider) uploadMediaByURL(ctx context.Context, cfg connectors.Config, endpoint, mediaURL string, fileType int) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(mediaURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || strings.TrimSpace(parsed.Host) == "" {
+		return "", fmt.Errorf("qqbot: invalid media url %q", mediaURL)
+	}
+	guard := p.mediaHostGuard
+	if guard == nil {
+		guard = defaultMediaHostGuard
+	}
+	if err := guard(parsed.Hostname()); err != nil {
+		return "", err
+	}
+	payload := map[string]any{
+		"file_type":    fileType,
+		"url":          strings.TrimSpace(mediaURL),
+		"srv_send_msg": false,
+	}
+	var response struct {
+		FileInfo string `json:"file_info"`
+	}
+	if err := p.apiJSON(ctx, cfg, http.MethodPost, endpoint, payload, &response); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(response.FileInfo), nil
+}
+
 // resolveOutboundMedia 解析出站媒体字节（URL 下载 / 本地绝对路径；
 // file:// 前缀按本地路径处理），返回内容与推导出的 Content-Type。
 func (p *Provider) resolveOutboundMedia(ctx context.Context, media connectors.Media) ([]byte, string, error) {
@@ -410,7 +499,11 @@ func (p *Provider) resolveOutboundMedia(ctx context.Context, media connectors.Me
 		if err != nil {
 			return nil, "", fmt.Errorf("qqbot: invalid media url %q", mediaURL)
 		}
-		response, err := p.client.Do(request)
+		guard := p.mediaHostGuard
+		if guard == nil {
+			guard = defaultMediaHostGuard
+		}
+		response, err := p.mediaDownloadClient(guard).Do(request)
 		if err != nil {
 			return nil, "", fmt.Errorf("qqbot: download media url %q failed: %w", mediaURL, err)
 		}
@@ -418,9 +511,16 @@ func (p *Provider) resolveOutboundMedia(ctx context.Context, media connectors.Me
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			return nil, "", fmt.Errorf("qqbot: media url %q returned %s", mediaURL, response.Status)
 		}
-		data, err := io.ReadAll(response.Body)
+		limit := p.mediaTransferLimit()
+		if response.ContentLength > limit {
+			return nil, "", fmt.Errorf("qqbot: media too large (%d bytes > %d)", response.ContentLength, limit)
+		}
+		data, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 		if err != nil {
 			return nil, "", fmt.Errorf("qqbot: read media url %q failed: %w", mediaURL, err)
+		}
+		if int64(len(data)) > limit {
+			return nil, "", fmt.Errorf("qqbot: media too large (> %d bytes)", limit)
 		}
 		contentType := strings.TrimSpace(media.ContentType)
 		if contentType == "" {
@@ -452,6 +552,9 @@ func (p *Provider) resolveOutboundMedia(ctx context.Context, media connectors.Me
 	}
 	if info.IsDir() {
 		return nil, "", fmt.Errorf("qqbot: media file path must be a file: %s", mediaPath)
+	}
+	if limit := p.mediaTransferLimit(); info.Size() > limit {
+		return nil, "", fmt.Errorf("qqbot: media too large (%d bytes > %d)", info.Size(), limit)
 	}
 	data, err := os.ReadFile(mediaPath)
 	if err != nil {

@@ -54,6 +54,10 @@ type fakeQQ struct {
 	msgBody      string
 	meStatus     int
 	meBody       string
+	// urlUploadStatus/urlUploadBody 让 /files 的 URL 直传请求失败（回落后
+	// 走 file_data 下载上传路径）。
+	urlUploadStatus int
+	urlUploadBody   string
 	// passiveStatus/passiveBody 仅对带 msg_id 的被动回复生效（模拟窗口过期
 	// 400/404 等可降级错误）；主动路径（无 msg_id）仍按 msgStatus 响应。
 	passiveStatus int
@@ -134,6 +138,13 @@ func (f *fakeQQ) handler() http.Handler {
 			f.authHeaders = append(f.authHeaders, r.Header.Get("Authorization"))
 			if _, hasMsgID := payload["msg_id"]; hasMsgID && f.passiveStatus != 0 {
 				status, body := f.passiveStatus, f.passiveBody
+				f.mu.Unlock()
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(body))
+				return
+			}
+			if _, hasURL := payload["url"]; hasURL && f.urlUploadStatus != 0 {
+				status, body := f.urlUploadStatus, f.urlUploadBody
 				f.mu.Unlock()
 				w.WriteHeader(status)
 				_, _ = w.Write([]byte(body))
@@ -433,7 +444,7 @@ func TestSchemaContract(t *testing.T) {
 	if len(schema.Modes) != 1 || schema.Modes[0] != "gateway" {
 		t.Fatalf("modes = %v, want [gateway]", schema.Modes)
 	}
-	var appID, appSecret, sandbox, apiBase, markdown, shareSession, intents bool
+	var appID, appSecret, sandbox, apiBase, markdown, shareSession, intents, groupMessageMode bool
 	for _, field := range schema.Fields {
 		switch field.Key {
 		case "app_id":
@@ -450,9 +461,11 @@ func TestSchemaContract(t *testing.T) {
 			shareSession = field.Type == "bool" && field.Default == "true"
 		case "intents":
 			intents = field.Type == "number" && !field.Required
+		case "group_message_mode":
+			groupMessageMode = field.Type == "enum" && field.Default == "mention" && len(field.Options) == 2
 		}
 	}
-	if !appID || !appSecret || !sandbox || !apiBase || !markdown || !shareSession || !intents {
+	if !appID || !appSecret || !sandbox || !apiBase || !markdown || !shareSession || !intents || !groupMessageMode {
 		t.Fatalf("schema fields = %+v", schema.Fields)
 	}
 	if len(schema.Actions) != 1 || schema.Actions[0].Key != actionCheckCredentials ||
@@ -1156,7 +1169,7 @@ func TestSendPassiveFallsBackToProactive(t *testing.T) {
 func TestSendMediaUploadsAndSendsRichMedia(t *testing.T) {
 	fake := newFakeQQ("secret-1", "token-1")
 	server := newFakeQQServer(t, fake)
-	provider := New(WithAPIBase(server.URL))
+	provider := New(WithAPIBase(server.URL), WithMediaHostGuard(allowAllMediaHosts))
 	cfg := testConfig("qq-1", "app-1", "secret-1")
 
 	err := provider.Send(context.Background(), cfg, "group:group-openid-1",
@@ -1171,14 +1184,15 @@ func TestSendMediaUploadsAndSendsRichMedia(t *testing.T) {
 		t.Fatalf("sent = %+v, want upload + message", sent)
 	}
 	upload := sent[0]
-	if upload.path != "/v2/groups/group-openid-1/files" || upload.payload["file_type"] != float64(1) ||
-		upload.payload["srv_send_msg"] != false {
+	if upload.path != "/v2/groups/group-openid-1/files" || upload.payload["file_type"] != float64(1) {
 		t.Fatalf("upload = %+v", upload)
 	}
-	encoded, _ := upload.payload["file_data"].(string)
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || !bytes.Equal(decoded, fakePNG) {
-		t.Fatalf("file_data mismatch: %v", err)
+	// URL 来源优先走官方 URL 直传（平台代下），不再本机下载 + file_data。
+	if upload.payload["url"] != server.URL+"/media/img.png" {
+		t.Fatalf("URL 直传 payload = %+v", upload.payload)
+	}
+	if _, ok := upload.payload["file_data"]; ok {
+		t.Fatalf("URL 直传不应携带 file_data: %+v", upload.payload)
 	}
 	msg := sent[1]
 	if msg.path != "/v2/groups/group-openid-1/messages" || msg.payload["msg_type"] != float64(7) {
@@ -1371,5 +1385,135 @@ func TestParseTextWithAttachmentsAppendsPlaceholder(t *testing.T) {
 	}
 	if len(msg.Media) != 2 {
 		t.Fatalf("media = %+v", msg.Media)
+	}
+}
+
+// allowAllMediaHosts 是媒体单测的出口守卫放行替身（httptest 在回环地址）。
+func allowAllMediaHosts(string) error { return nil }
+
+// ── 出站：URL 直传与回落（2026-10-15，对齐官方 URL 上传） ───────────────────
+
+func TestSendMediaURLDirectFallsBackToDownload(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	fake.urlUploadStatus = http.StatusBadRequest
+	fake.urlUploadBody = `{"message":"url not allowed"}`
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL), WithMediaHostGuard(allowAllMediaHosts))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+
+	err := provider.Send(context.Background(), cfg, "user:user-openid-1",
+		[]connectors.OutboundMessage{{
+			Media: []connectors.Media{{Kind: "image", URL: server.URL + "/media/img.png"}},
+		}})
+	if err != nil {
+		t.Fatalf("send media: %v", err)
+	}
+	sent := fake.sentMessages()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %+v, want upload + message", sent)
+	}
+	upload := sent[0]
+	encoded, _ := upload.payload["file_data"].(string)
+	if encoded == "" {
+		t.Fatalf("URL 直传失败后应回落到 file_data: %+v", upload.payload)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || !bytes.Equal(decoded, fakePNG) {
+		t.Fatalf("回落 file_data mismatch: %v", err)
+	}
+}
+
+// ── 入站媒体下载（MediaFetcher） ────────────────────────────────────────────
+
+func TestFetchInboundMediaDownloadsAndSanitizes(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL), WithMediaHostGuard(allowAllMediaHosts))
+
+	path, err := provider.FetchInboundMedia(context.Background(), testConfig("qq-1", "app-1", "secret-1"),
+		connectors.Media{
+			Kind:     "image",
+			FileName: `..\危险 dir/photo?.png`,
+			URL:      server.URL + "/media/img.png",
+		})
+	if err != nil {
+		t.Fatalf("fetch inbound media: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(path)) })
+
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, fakePNG) {
+		t.Fatalf("downloaded content mismatch: %v", err)
+	}
+	base := filepath.Base(path)
+	if strings.ContainsAny(base, `?\/`) || strings.Contains(base, "危险") {
+		t.Fatalf("filename not sanitized: %q", base)
+	}
+	if !strings.Contains(base, "photo") {
+		t.Fatalf("filename lost base name: %q", base)
+	}
+}
+
+func TestFetchInboundMediaRejectsNonPublicHost(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL)) // 默认公网守卫
+
+	_, err := provider.FetchInboundMedia(context.Background(), testConfig("qq-1", "app-1", "secret-1"),
+		connectors.Media{Kind: "image", URL: server.URL + "/media/img.png"})
+	if err == nil || !strings.Contains(err.Error(), "non-public") {
+		t.Fatalf("err = %v, want non-public rejection", err)
+	}
+}
+
+func TestFetchInboundMediaEnforcesLimit(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL), WithMediaHostGuard(allowAllMediaHosts), WithInboundMediaLimit(4))
+
+	_, err := provider.FetchInboundMedia(context.Background(), testConfig("qq-1", "app-1", "secret-1"),
+		connectors.Media{Kind: "image", URL: server.URL + "/media/img.png"})
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err = %v, want size limit rejection", err)
+	}
+}
+
+// ── 全量群消息（GROUP_MESSAGE_CREATE）触发策略 ──────────────────────────────
+
+func TestParseGroupMessageCreateMentionPolicy(t *testing.T) {
+	unmentioned := `{"id":"e-all","group_openid":"g1","content":"大家早","author":{"member_openid":"m1","username":"小明"}}`
+	// 默认 mention：未@机器人 → 忽略（防刷屏）。
+	if _, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_MESSAGE_CREATE", json.RawMessage(unmentioned)); ok {
+		t.Fatal("unmentioned group message must be ignored in mention mode")
+	}
+	// mentions 含 bot:true → 处理。
+	mentioned := `{"id":"e-all","group_openid":"g1","content":"你好","author":{"member_openid":"m1","username":"小明"},` +
+		`"mentions":[{"id":"bot-1","bot":true}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_MESSAGE_CREATE", json.RawMessage(mentioned))
+	if !ok || msg.Chat != "group:g1" || msg.Text != "你好" || msg.UserName != "小明" {
+		t.Fatalf("mentioned message = %+v (ok=%v)", msg, ok)
+	}
+	// 原始 content 保留 <@ 标记的兜底判定。
+	legacy := `{"id":"e-all","group_openid":"g1","content":"<@!bot-1> 你好","author":{"member_openid":"m1"}}`
+	if _, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_MESSAGE_CREATE", json.RawMessage(legacy)); !ok {
+		t.Fatal("<@ fallback must be treated as mentioned")
+	}
+	// all 模式：未@也进入 agent（运维显式开启）。
+	allMode := connectors.Config{ID: "qq-1", Settings: map[string]string{"group_message_mode": "all"}}
+	if _, ok := parseGatewayMessage(allMode, "GROUP_MESSAGE_CREATE", json.RawMessage(unmentioned)); !ok {
+		t.Fatal("all mode must accept unmentioned messages")
+	}
+}
+
+func TestParseVoiceMediaPrefersWavURL(t *testing.T) {
+	data := `{"id":"e-v","content":"","author":{"user_openid":"u1"},` +
+		`"attachments":[{"content_type":"voice","filename":"a.silk",` +
+		`"url":"https://x/a.silk","voice_wav_url":"https://x/a.wav"}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "C2C_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok || len(msg.Media) != 1 {
+		t.Fatalf("media = %+v (ok=%v)", msg.Media, ok)
+	}
+	if msg.Media[0].URL != "https://x/a.wav" {
+		t.Fatalf("voice url = %q, want WAV 优先", msg.Media[0].URL)
 	}
 }

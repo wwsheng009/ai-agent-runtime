@@ -813,6 +813,11 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 	// 后回写 NodeID 并 IM 提示一次（failoverNotice 置位后只发一次）。
 	failoverNotice := decision.Failover && !decision.Remote
 
+	// 入站媒体物化（MediaFetcher 能力）：下载到本地并把 local_path 摘要注入
+	// 文本；未实现该能力的通道零变化（docs/bots/04 QQ P1）。远程派发路径
+	// 不物化（本地路径对远端 runner 不可达）。
+	s.materializeInboundMedia(ctx, cfg, provider, &msg)
+
 	streamer, err := s.startStreaming(ctx, cfg, provider, msg.Chat)
 	if err != nil {
 		return err
@@ -1048,6 +1053,8 @@ func (s *Service) processMessageLocal(ctx context.Context, cfg Config, provider 
 			return err
 		}
 	}
+	// 入站媒体物化：与 processMessage 同口径（回落本机执行路径同样物化）。
+	s.materializeInboundMedia(ctx, cfg, provider, &msg)
 	streamer, err := s.startStreaming(ctx, cfg, provider, msg.Chat)
 	if err != nil {
 		return err

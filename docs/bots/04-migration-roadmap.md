@@ -177,14 +177,27 @@
   占位；纯文本带附件追加 `[图片/文件: 名称]` 行；`UserName` 优先 `author.username`
   昵称。测试新增 4 例（图片-only/语音 ASR/无 ASR 占位/混合附件）。
 
+- 状态（2026-10-15，QQ 切片 4：媒体双向打通 + 出站指令协议）：核心新增
+  **共享出站媒体指令协议** `connectors.ParseOutboundMediaDirectives`（围栏块/标题块/
+  `MEDIA:/IMAGE:/VIDEO:/FILE:/VOICE:` 指令行；`MediaDirectiveNote` 生成通道提示）与
+  `OutboundMediaNoteProvider` 能力（宿主在入站媒体物化后注入提示，落点
+  `internal/connectors/media_fetch.go`；本地执行/回落/远程派发三条路径一致）。
+  QQ 侧：入站 `attachments` 经 `MediaFetcher` 物化（SSRF 守卫/重定向逐跳/100MB，
+  Service 工作协程）→ `local_path` 摘要；`Send` 解析 `qq-attachments` 围栏块与
+  指令行（仅通道专属围栏名，避免与普通代码块冲突；可见文本剥离），与
+  `OutboundMessage.Media` 合并后走既有富媒体
+  上传（`POST /files`，file_type 1/2/3/4）+ `msg_type=7` 发送，单条失败降级
+  `[附件发送失败: …]`（与微信同口径）。测试新增 6 例（core 协议解析表 8 形态/
+  提示文本/Service 注入去重；QQ 端到端围栏块、`FILE:` 指令行、提示声明）。
+
   **QQ 官方能力对照与缺口（2026-10-15 审计：bot.q.qq.com 官方文档 + tencent-connect/botgo）**：
 
   | 能力（官方） | 本仓现状 | 处置 |
   |--------------|----------|------|
   | 文本 / Markdown 发送（msg_type 0/2） | ✅ 文本 + `markdown_support`（原生 content） | — |
-  | 富媒体发送（msg_type=7：图片/视频/语音/文件） | ✅ 整文件上传（file_data base64，URL 先下载）+ 单聊/群聊端点隔离 | 官方 URL 直传（`{"url":…}`）与**分片上传**（大文件）未实现 → P1 |
-  | 富媒体接收（`attachments`） | ◐ 元数据入 `Media` + 占位文本；语音优先 ASR | 下载/转存管线未接（对齐微信 `local_path` 模式）→ P1 |
-  | 语音 `voice_wav_url` | ◐ 未消费（优先 ASR；无 ASR 用占位） | P2 |
+  | 富媒体发送（msg_type=7：图片/视频/语音/文件） | ✅ 整文件上传（file_data base64，URL 先下载）+ 单聊/群聊端点隔离 + **文本媒体指令协议**（```qq-attachments``` 围栏块、`IMAGE:/VIDEO:/FILE:/VOICE:` 指令行；单条失败降级文本提示） | 官方 URL 直传（`{"url":…}`）与**分片上传**（大文件）未实现 → P1 |
+  | 富媒体接收（`attachments`） | ✅ 元数据入 `Media` + `MediaFetcher` 下载（Service 工作协程；SSRF 守卫/重定向逐跳/100MB）→ `local_path` 摘要；语音优先 `voice_wav_url`/ASR | 转存/清理策略与微信同口径（暂不自动清理） |
+  | 语音 `voice_wav_url` | ✅ 语音附件优先取 `voice_wav_url`（官方转 WAV，agent 可直接读；无则回退原始地址/ASR 转写） | — |
   | 引用消息（`message_reference` / `message_type=103`+`msg_elements`） | ◐ 旧 `message_reference` 摘要；103 嵌套元素未解析 | P2 |
   | `GROUP_MESSAGE_CREATE`（全量群消息，平台开启后推送） | ❌ 未解析（开启后消息将被忽略） | P1（需触发策略：仅@/全量，产品决策） |
   | 流式消息（`/v2/users/{openid}/stream_messages`，单聊） | ❌ 未实现 | P2（可接 `StreamingProvider`；群聊不支持） |
@@ -199,10 +212,32 @@
   | 接口域名（官方 2026-08 统一 `api.bot.qq.com`） | ◐ 默认 `api.sgroup.qq.com`（实测可用），`api_base` 可覆盖 | P2（默认值切换评估） |
   | Shard 分片（`/gateway/bot` 建议数、`session_start_limit`） | ◐ 固定 `[0,1]`；`intents` 可覆盖 | 大规模再议 |
 
-  > 审计结论：**对话主链路（群@/C2C 文本 + Markdown + 富媒体发送 + 被动/主动回复 +
-  > 引用/会话策略/授权校验/多入口）已完整**；缺口集中在 **入站媒体下载/转存**、
-  > **`GROUP_MESSAGE_CREATE` 全量事件**、**流式/输入状态**三类官方能力，以及运维向的
-  > 频控/域名/回调方式；均按 P1→P3 列出，不与既有 D7/NG 决策冲突。
+  > 审计结论（2026-10-15 更新）：**对话主链路 + 媒体双向**（入站 `MediaFetcher`
+  > 物化注入 `local_path`、出站富媒体 + 文本媒体指令协议）已完整；缺口集中在
+  > **`GROUP_MESSAGE_CREATE` 全量事件**、**流式/输入状态**、**大文件分片上传** 三类
+  > 官方能力，以及运维向的频控/域名/回调方式；均按 P1→P3 列出，不与既有 D7/NG 决策冲突。
+
+- 状态（2026-10-15，QQ 切片 4：入站媒体物化 + 全量群消息 + URL 直传）：
+  ①**入站媒体物化**（core `MediaFetcher` 能力 + Service 工作协程编排，
+  `internal/connectors/media_fetch.go`）：Provider 解析出的媒体 URL 由 Service 在
+  工作协程下载落盘（**不阻塞 QQ WS 心跳/长轮询循环**），并把
+  `[Image/File/Voice attachment] + file_name/content_type/local_path/source_url`
+  摘要块注入文本（字段名与微信媒体实现对齐）；下载失败保留元数据摘要（无
+  `local_path`）并记日志，媒体不静默消失。QQ 实现（`qqbot/media.go`）：出口守卫
+  （默认拒绝回环/私网/链路本地/组播/CGNAT，重定向逐跳校验；`WithMediaHostGuard`
+  可覆盖）、体量上限 100MB（`WithInboundMediaLimit` 可覆盖）、文件名净化 +
+  临时目录落盘；语音优先下载官方转换后的 `voice_wav_url`。
+  ②**`GROUP_MESSAGE_CREATE`（全量群消息）**：新增设置 `group_message_mode`
+  （enum，默认 `mention`=仅@机器人的消息进入 agent——`mentions` 含 `bot:true`
+  或 content 带 `<@` 标记；`all`=每条群消息都参与，运维显式开启），与
+  `GROUP_AT_MESSAGE_CREATE` 共用同一组装（chat 键/按人隔离/昵称/附件一致）。
+  ③**出站 URL 直传**（官方「URL 上传」）：远端 URL 且可声明 `file_type` 时优先
+  `{file_type,url}` 交平台代下转存，失败回落本机下载 + `file_data`；本地路径仍走
+  `file_data`；出站远端下载同样过出口守卫与体量上限。分片上传（大文件）仍在
+  P1 缺口清单。
+  测试新增 8 例（URL 直传/直传回落、入站下载+净化、非公网拒绝、体量上限、
+  全量群消息 mention/all/<@ 兜底、语音 WAV 优先）+ core 2 例（物化注入文本/
+  失败保留摘要），`go test ./internal/connectors/...` 全绿。
 
 ### P3 · 微信 + 媒体/主动推送完善（≈4–5 天）
 
