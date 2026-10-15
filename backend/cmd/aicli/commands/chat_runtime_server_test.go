@@ -1254,3 +1254,114 @@ func TestAICLIRuntimeServerChatExecutorUploadsImagesBeforeSubmit(t *testing.T) {
 		t.Fatalf("unexpected submit payload: %#v", submit)
 	}
 }
+
+func TestChatBacktrackRoutesToRuntimeServer(t *testing.T) {
+	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), runtimechat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+	runtimeSession, err := manager.Create(context.Background(), "cli-user")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var previewReq, applyReq map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/turns":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"session_id": runtimeSession.ID,
+				"count":      1,
+				"turns": []map[string]interface{}{
+					{
+						"index": 0, "message_index": 0, "end_message_index": 2,
+						"preview": "first", "base_checkpoint_id": "ckpt-1",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/backtrack/audit":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"session_id": runtimeSession.ID,
+				"count":      1,
+				"entries": []map[string]interface{}{
+					{
+						"id": "bt-1", "mode": "conversation",
+						"user_turn_index": 0, "message_index": 0,
+						"removed_message_count": 2, "removed_user_turns": 1,
+						"truncated_to_message_count": 0,
+					},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/backtrack/preview":
+			if err := json.NewDecoder(r.Body).Decode(&previewReq); err != nil {
+				t.Fatalf("decode preview request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok": true,
+				"result": map[string]interface{}{
+					"session_id": runtimeSession.ID, "mode": "conversation",
+					"user_turn_index": 0, "message_index": 0,
+					"removed_message_count": 3, "removed_user_turns": 1,
+					"truncated_to_message_count": 0, "anchor_preview": "first",
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID+"/backtrack":
+			if err := json.NewDecoder(r.Body).Decode(&applyReq); err != nil {
+				t.Fatalf("decode apply request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"ok": true,
+				"result": map[string]interface{}{
+					"session_id": runtimeSession.ID, "mode": "conversation",
+					"user_turn_index": 0, "message_index": 0,
+					"removed_message_count": 2, "removed_user_turns": 1,
+					"truncated_to_message_count": 0,
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/runtime/sessions/"+runtimeSession.ID:
+			loaded, err := manager.Get(r.Context(), runtimeSession.ID)
+			if err != nil {
+				t.Fatalf("load session: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"session": loaded})
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		SessionManager: manager,
+		RuntimeSession: runtimeSession,
+		HTTPClient:     server.Client(),
+		ChatExecutor:   newAICLIRuntimeServerChatExecutor(server.URL),
+	}
+	if !chatBacktrackBackendAvailable(session) {
+		t.Fatal("expected runtime-server backtrack backend to be available")
+	}
+
+	turns, err := chatBacktrackTurns(session)
+	if err != nil || len(turns) != 1 || turns[0].BaseCheckpointID != "ckpt-1" {
+		t.Fatalf("turns = (%#v, %v), want one annotated turn", turns, err)
+	}
+	entries, err := chatBacktrackAudit(session)
+	if err != nil || len(entries) != 1 || entries[0].ID != "bt-1" {
+		t.Fatalf("audit = (%#v, %v), want one tombstone", entries, err)
+	}
+	preview, err := chatBacktrackPreview(session, runtimechat.BacktrackRequest{UserTurnIndex: runtimechat.IntPtr(0)})
+	if err != nil || preview == nil || preview.RemovedMessageCount != 3 {
+		t.Fatalf("preview = (%#v, %v), want server preview result", preview, err)
+	}
+	if previewReq["preview_only"] != true {
+		t.Fatalf("preview request must force preview_only, got %#v", previewReq)
+	}
+
+	outcome, err := applyChatBacktrack(session, runtimechat.BacktrackRequest{
+		UserTurnIndex: runtimechat.IntPtr(0),
+		Mode:          runtimechat.BacktrackModeConversation,
+	})
+	if err != nil || outcome.SyncErr != nil || outcome.Result == nil {
+		t.Fatalf("apply outcome = (%#v, %v), want synced server result", outcome, err)
+	}
+	if outcome.Result.UserTurnIndex != 0 || applyReq["mode"] != "conversation" {
+		t.Fatalf("unexpected apply result/request: %#v / %#v", outcome.Result, applyReq)
+	}
+}

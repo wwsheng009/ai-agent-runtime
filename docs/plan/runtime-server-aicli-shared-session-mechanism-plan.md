@@ -871,8 +871,12 @@ background:
   `POST /api/runtime/uploads`（按服务端 8 张/批限制分批），服务端接受的路径随
   `submit_prompt.images` 一起提交；全部被拒时报错（不静默降级成纯文本），
   部分被拒以补充提示回显。
-- 仍待补：`/backtrack`（user-turn rewind）没有对应的服务端命令通道，server
-  模式仍走本地 actor 路径；无统一命令接口的 legacy 服务端仍直接报升级提示。
+- `/backtrack`：统一渲染路径（turns/audit/preview/apply 与 Esc 选择器）在
+  server 模式下改走 runtime-server 的 `/turns`、`/backtrack/audit`、
+  `/backtrack/preview`、`/backtrack` API（请求/响应与 `runtimechat.Backtrack*`
+  同构）；`--submit` 仍经正常 sendMessage 管线。非统一输出（legacy 打印
+  路径，如 headless bare 命令）仍为本地-only。
+- 仍待补：无统一命令接口的 legacy 服务端仍直接报升级提示。
 
 当前仍保留的工程缺口：
 

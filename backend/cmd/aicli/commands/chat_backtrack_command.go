@@ -267,11 +267,7 @@ func newBacktrackPickerCommandResult() CommandResult {
 }
 
 func executeStructuredBacktrackTurnsQuery(session *ChatSession) CommandResult {
-	actor, err := backtrackQueryActor(session)
-	if err != nil {
-		return commandErrorResult(err)
-	}
-	turns, err := actor.ListTurns(backtrackQueryContext(session))
+	turns, err := chatBacktrackTurns(session)
 	if err != nil {
 		return commandErrorResult(err)
 	}
@@ -282,11 +278,7 @@ func executeStructuredBacktrackTurnsQuery(session *ChatSession) CommandResult {
 }
 
 func executeStructuredBacktrackAuditQuery(session *ChatSession) CommandResult {
-	actor, err := backtrackQueryActor(session)
-	if err != nil {
-		return commandErrorResult(err)
-	}
-	entries, err := actor.ListBacktrackAudit(backtrackQueryContext(session))
+	entries, err := chatBacktrackAudit(session)
 	if err != nil {
 		return commandErrorResult(err)
 	}
@@ -297,11 +289,7 @@ func executeStructuredBacktrackAuditQuery(session *ChatSession) CommandResult {
 }
 
 func executeStructuredBacktrackPreviewQuery(session *ChatSession, req runtimechat.BacktrackRequest) CommandResult {
-	actor, err := backtrackQueryActor(session)
-	if err != nil {
-		return commandErrorResult(err)
-	}
-	result, err := actor.PreviewBacktrack(backtrackQueryContext(session), req)
+	result, err := chatBacktrackPreview(session, req)
 	if err != nil {
 		return commandErrorResult(err)
 	}
@@ -329,6 +317,101 @@ func backtrackQueryActor(session *ChatSession) (*runtimechat.SessionActor, error
 		return nil, fmt.Errorf("当前会话未初始化本地 runtime host，无法读取 backtrack 信息")
 	}
 	return chatActorForSession(backtrackQueryContext(session), session)
+}
+
+// chatBacktrackServerExecutor 返回 server 模式下的 backtrack 通道实现。
+// 本地 runtime host 可用时恒为 false：本地 actor 优先，保持既有语义。
+func chatBacktrackServerExecutor(session *ChatSession) (aicliRuntimeBacktrackExecutor, bool) {
+	if session == nil || session.LocalRuntimeHost != nil {
+		return nil, false
+	}
+	exec, ok := session.ChatExecutor.(aicliRuntimeBacktrackExecutor)
+	return exec, ok
+}
+
+// chatBacktrackBackendAvailable 判定当前会话是否有可用的 backtrack 后端
+// （本地 actor 或 runtime-server 通道），供 picker 与入口门控复用。
+func chatBacktrackBackendAvailable(session *ChatSession) bool {
+	if session == nil || session.RuntimeSession == nil {
+		return false
+	}
+	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.SessionHub != nil {
+		return true
+	}
+	_, ok := chatBacktrackServerExecutor(session)
+	return ok
+}
+
+// chatBacktrack* 四个读取/执行入口统一本地 actor 与 runtime-server 两个后端：
+// 本地 host 可用时走 actor（失败的错误原样返回，不回退 server），否则回退到
+// 实现 aicliRuntimeBacktrackExecutor 的 server 通道。
+func chatBacktrackTurns(session *ChatSession) ([]runtimechat.UserTurn, error) {
+	actor, actorErr := backtrackQueryActor(session)
+	if actorErr == nil {
+		return actor.ListTurns(backtrackQueryContext(session))
+	}
+	if exec, ok := chatBacktrackServerExecutor(session); ok {
+		return exec.ListBacktrackTurns(backtrackQueryContext(session), session)
+	}
+	return nil, actorErr
+}
+
+func chatBacktrackAudit(session *ChatSession) ([]runtimechat.BacktrackTombstone, error) {
+	actor, actorErr := backtrackQueryActor(session)
+	if actorErr == nil {
+		return actor.ListBacktrackAudit(backtrackQueryContext(session))
+	}
+	if exec, ok := chatBacktrackServerExecutor(session); ok {
+		return exec.ListBacktrackAudit(backtrackQueryContext(session), session)
+	}
+	return nil, actorErr
+}
+
+func chatBacktrackPreview(session *ChatSession, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error) {
+	actor, actorErr := backtrackQueryActor(session)
+	if actorErr == nil {
+		return actor.PreviewBacktrack(backtrackQueryContext(session), req)
+	}
+	if exec, ok := chatBacktrackServerExecutor(session); ok {
+		return exec.PreviewBacktrack(backtrackQueryContext(session), session, req)
+	}
+	return nil, actorErr
+}
+
+// chatBacktrackApplyOutcome 承载一次破坏性回退：Result 是回退摘要（失败时也
+// 可能非空，供错误渲染），SyncErr 是回退已成功、但把权威会话同步回 CLI 失败
+// （warning 级别，不改变回退成功的事实）。
+type chatBacktrackApplyOutcome struct {
+	Result  *runtimechat.BacktrackResult
+	SyncErr error
+}
+
+func applyChatBacktrack(session *ChatSession, req runtimechat.BacktrackRequest) (chatBacktrackApplyOutcome, error) {
+	actor, actorErr := backtrackQueryActor(session)
+	if actorErr == nil {
+		result, _, err := actor.Backtrack(backtrackQueryContext(session), req)
+		outcome := chatBacktrackApplyOutcome{Result: result}
+		if err != nil {
+			return outcome, err
+		}
+		if syncErr := syncRuntimeSessionBackIntoCLI(session); syncErr != nil {
+			outcome.SyncErr = syncErr
+		}
+		return outcome, nil
+	}
+	if exec, ok := chatBacktrackServerExecutor(session); ok {
+		result, err := exec.ApplyBacktrack(backtrackQueryContext(session), session, req)
+		outcome := chatBacktrackApplyOutcome{Result: result}
+		if err != nil {
+			return outcome, err
+		}
+		// server 侧已重写 history 与（可选）恢复文件，把权威会话拉回本地。
+		if syncErr := refreshChatSessionFromRuntimeServer(session, currentRuntimeSessionID(session)); syncErr != nil {
+			outcome.SyncErr = syncErr
+		}
+		return outcome, nil
+	}
+	return chatBacktrackApplyOutcome{}, actorErr
 }
 
 func buildChatBacktrackTurnsDocument(turns []runtimechat.UserTurn) render.Document {
@@ -382,15 +465,7 @@ func listChatBacktrackTurns(session *ChatSession) error {
 		_ = renderChatCommandResult(session, executeStructuredBacktrackTurnsQuery(session), false)
 		return nil
 	}
-	ctx := session.cancelCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	actor, err := chatActorForSession(ctx, session)
-	if err != nil {
-		return err
-	}
-	turns, err := actor.ListTurns(ctx)
+	turns, err := chatBacktrackTurns(session)
 	if err != nil {
 		return err
 	}

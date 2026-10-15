@@ -701,6 +701,96 @@ func (e *aicliRuntimeServerChatExecutor) CompactSession(ctx context.Context, ses
 	return report, nil
 }
 
+// ── backtrack（user-turn rewind）───────────────────────────────────────────
+//
+// 统一命令通道之外，runtime-server 还提供会话级 backtrack API：
+//
+//	GET  /api/runtime/sessions/{id}/turns             （user turn 锚点）
+//	GET  /api/runtime/sessions/{id}/backtrack/audit   （tombstone 审计）
+//	POST /api/runtime/sessions/{id}/backtrack/preview （预览，只读）
+//	POST /api/runtime/sessions/{id}/backtrack         （应用截断，可含代码恢复）
+//
+// 请求/响应体与 CLI 共用的 runtimechat.Backtrack* 类型 JSON 同构。
+
+func (e *aicliRuntimeServerChatExecutor) backtrackSessionID(session *ChatSession) (string, error) {
+	if e == nil {
+		return "", fmt.Errorf("runtime-server executor is nil")
+	}
+	if session == nil || session.RuntimeSession == nil {
+		return "", fmt.Errorf("当前没有可回退的持久化会话")
+	}
+	sessionID := strings.TrimSpace(currentRuntimeSessionID(session))
+	if sessionID == "" {
+		return "", fmt.Errorf("runtime-server 会话 ID 为空")
+	}
+	return sessionID, nil
+}
+
+func runtimeServerSessionAPIPath(sessionID, suffix string) string {
+	return "/api/runtime/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/" + suffix
+}
+
+func (e *aicliRuntimeServerChatExecutor) ListBacktrackTurns(ctx context.Context, session *ChatSession) ([]runtimechat.UserTurn, error) {
+	sessionID, err := e.backtrackSessionID(session)
+	if err != nil {
+		return nil, err
+	}
+	var decoded struct {
+		Turns []runtimechat.UserTurn `json:"turns"`
+	}
+	if _, err := e.doRuntimeServerJSON(ctx, session, http.MethodGet, runtimeServerSessionAPIPath(sessionID, "turns"), "", nil, &decoded); err != nil {
+		return nil, err
+	}
+	if decoded.Turns == nil {
+		return []runtimechat.UserTurn{}, nil
+	}
+	return decoded.Turns, nil
+}
+
+func (e *aicliRuntimeServerChatExecutor) ListBacktrackAudit(ctx context.Context, session *ChatSession) ([]runtimechat.BacktrackTombstone, error) {
+	sessionID, err := e.backtrackSessionID(session)
+	if err != nil {
+		return nil, err
+	}
+	var decoded struct {
+		Entries []runtimechat.BacktrackTombstone `json:"entries"`
+	}
+	if _, err := e.doRuntimeServerJSON(ctx, session, http.MethodGet, runtimeServerSessionAPIPath(sessionID, "backtrack/audit"), "", nil, &decoded); err != nil {
+		return nil, err
+	}
+	if decoded.Entries == nil {
+		return []runtimechat.BacktrackTombstone{}, nil
+	}
+	return decoded.Entries, nil
+}
+
+func (e *aicliRuntimeServerChatExecutor) PreviewBacktrack(ctx context.Context, session *ChatSession, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error) {
+	// 服务端 preview 端点会强制 PreviewOnly/AutoSubmit=false；这里显式对齐，
+	// 保证请求语义不依赖服务端版本。
+	req.PreviewOnly = true
+	req.AutoSubmit = false
+	return e.runRuntimeServerBacktrack(ctx, session, req, "backtrack/preview")
+}
+
+func (e *aicliRuntimeServerChatExecutor) ApplyBacktrack(ctx context.Context, session *ChatSession, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error) {
+	req.PreviewOnly = false
+	return e.runRuntimeServerBacktrack(ctx, session, req, "backtrack")
+}
+
+func (e *aicliRuntimeServerChatExecutor) runRuntimeServerBacktrack(ctx context.Context, session *ChatSession, req runtimechat.BacktrackRequest, suffix string) (*runtimechat.BacktrackResult, error) {
+	sessionID, err := e.backtrackSessionID(session)
+	if err != nil {
+		return nil, err
+	}
+	var decoded struct {
+		Result *runtimechat.BacktrackResult `json:"result"`
+	}
+	if _, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerSessionAPIPath(sessionID, suffix), "", req, &decoded); err != nil {
+		return decoded.Result, err
+	}
+	return decoded.Result, nil
+}
+
 func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Context, session *ChatSession, prompt string) (string, map[string]interface{}, error) {
 	sessionID, err := ensureRuntimeServerSessionID(session)
 	if err != nil {

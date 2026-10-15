@@ -148,8 +148,8 @@ func handleInteractiveBacktrackSelect(session *ChatSession) bool {
 // and no competing popup or alternate screen owns input.
 func canOpenChatBacktrackPicker(session *ChatSession) bool {
 	if session == nil || session.NoInteractive || session.JSONOutput ||
-		session.Interaction == nil || session.Surface == nil || session.RuntimeSession == nil ||
-		session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
+		session.Interaction == nil || session.Surface == nil ||
+		!chatBacktrackBackendAvailable(session) {
 		return false
 	}
 	if !chatSurfaceScreenGate(session) {
@@ -177,13 +177,8 @@ func openChatBacktrackPicker(session *ChatSession, _ BacktrackPickerRequest) {
 	if !canOpenChatBacktrackPicker(session) {
 		return
 	}
-	actor, err := backtrackQueryActor(session)
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(err), false)
-		return
-	}
 	ctx := backtrackQueryContext(session)
-	turns, err := actor.ListTurns(ctx)
+	turns, err := chatBacktrackTurns(session)
 	if err != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(err), false)
 		return
@@ -239,7 +234,7 @@ func openChatBacktrackPicker(session *ChatSession, _ BacktrackPickerRequest) {
 		return
 	}
 
-	applySelectedBacktrack(session, actor, ctx, *selected, mode)
+	applySelectedBacktrack(session, nil, ctx, *selected, mode)
 }
 
 // selectBacktrackModeWithLease preserves the legacy choice between a
@@ -279,8 +274,8 @@ func selectBacktrackModeWithLease(ctx context.Context, terminal *ui.Terminal, le
 // after alternate-screen ownership has ended. It shares the direct apply
 // transaction, while preserving the picker item's preview as a last-resort
 // composer fallback.
-func applySelectedBacktrack(session *ChatSession, actor *runtimechat.SessionActor, ctx context.Context, selected runtimechat.UserTurn, mode string) {
-	if session == nil || actor == nil {
+func applySelectedBacktrack(session *ChatSession, _ *runtimechat.SessionActor, _ context.Context, selected runtimechat.UserTurn, mode string) {
+	if session == nil {
 		return
 	}
 	req := runtimechat.BacktrackRequest{
@@ -296,7 +291,7 @@ func applySelectedBacktrack(session *ChatSession, actor *runtimechat.SessionActo
 	if req.MessageID != "" {
 		req.UserTurnIndex = nil
 	}
-	applyUnifiedBacktrackWithActor(session, actor, ctx, req, selected.Preview)
+	applyChatBacktrackRequest(session, req, selected.Preview)
 }
 
 // applyUnifiedBacktrackRequest is the typed command-effect executor for a
@@ -304,30 +299,25 @@ func applySelectedBacktrack(session *ChatSession, actor *runtimechat.SessionActo
 // it cannot emit raw terminal output: the destructive mutation, replacement
 // and follow-up composer/submit behavior all remain in the unified pipeline.
 func applyUnifiedBacktrackRequest(session *ChatSession, request runtimechat.BacktrackRequest) {
-	actor, err := backtrackQueryActor(session)
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(err), false)
-		return
-	}
-	applyUnifiedBacktrackWithActor(session, actor, backtrackQueryContext(session), request, "")
+	applyChatBacktrackRequest(session, request, "")
 }
 
-// applyUnifiedBacktrackWithActor owns every post-parse destructive backtrack
-// path. The caller must already have released any ScreenLease. Its fixed order
-// is actor mutation -> CLI sync -> canonical Scene replacement -> one command
-// cell -> composer restoration or normal send pipeline.
-func applyUnifiedBacktrackWithActor(session *ChatSession, actor *runtimechat.SessionActor, ctx context.Context, request runtimechat.BacktrackRequest, fallbackPrompt string) {
-	if session == nil || actor == nil {
+// applyChatBacktrackRequest owns every post-parse destructive backtrack path,
+// local actor or runtime-server backend. The caller must already have released
+// any ScreenLease. Its fixed order is mutation -> CLI sync -> canonical Scene
+// replacement -> one command cell -> composer restoration or send pipeline.
+func applyChatBacktrackRequest(session *ChatSession, request runtimechat.BacktrackRequest, fallbackPrompt string) {
+	if session == nil {
 		return
 	}
 	autoSubmit := request.AutoSubmit
 	request.AutoSubmit = false
 	request.PreviewOnly = false
 
-	result, _, err := actor.Backtrack(ctx, request)
+	outcome, err := applyChatBacktrack(session, request)
 	if err != nil {
 		lines := []string{"错误: " + err.Error()}
-		lines = append(lines, formatChatBacktrackResultLines(result, false)...)
+		lines = append(lines, formatChatBacktrackResultLines(outcome.Result, false)...)
 		_ = renderChatCommandResult(session, CommandResult{
 			Blocks: []RenderBlock{{Document: textLinesDocument(lines)}},
 			Action: CommandContinue,
@@ -336,8 +326,18 @@ func applyUnifiedBacktrackWithActor(session *ChatSession, actor *runtimechat.Ses
 	}
 
 	var warnings []string
-	if err := syncRuntimeSessionBackIntoCLI(session); err != nil {
-		warnings = append(warnings, "回退后同步 CLI 会话失败: "+err.Error())
+	if outcome.SyncErr != nil {
+		warnings = append(warnings, "回退后同步 CLI 会话失败: "+outcome.SyncErr.Error())
+	}
+	finishUnifiedBacktrackApply(session, outcome.Result, request, fallbackPrompt, autoSubmit, warnings)
+}
+
+// finishUnifiedBacktrackApply carries the shared tail of a successful
+// destructive backtrack for both backends: canonical Scene replacement, one
+// retained command cell, composer prefill and the --submit send pipeline.
+func finishUnifiedBacktrackApply(session *ChatSession, result *runtimechat.BacktrackResult, request runtimechat.BacktrackRequest, fallbackPrompt string, autoSubmit bool, warnings []string) {
+	if session == nil {
+		return
 	}
 	if result == nil {
 		warnings = append(warnings, "回退操作未返回摘要；已按当前 canonical history 重建转录")

@@ -102,6 +102,16 @@ type aicliRuntimeCompactExecutor interface {
 	CompactSession(ctx context.Context, session *ChatSession, requestedMode string) (*chatCompactReport, error)
 }
 
+// aicliRuntimeBacktrackExecutor 是 aicliChatExecutor 的可选扩展接口：
+// server 模式（本地 runtime host 未挂载）把 /backtrack 的读取与回退转发给
+// runtime-server 的会话 backtrack API（turns/audit/preview/apply）。
+type aicliRuntimeBacktrackExecutor interface {
+	ListBacktrackTurns(ctx context.Context, session *ChatSession) ([]runtimechat.UserTurn, error)
+	ListBacktrackAudit(ctx context.Context, session *ChatSession) ([]runtimechat.BacktrackTombstone, error)
+	PreviewBacktrack(ctx context.Context, session *ChatSession, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error)
+	ApplyBacktrack(ctx context.Context, session *ChatSession, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error)
+}
+
 type aicliSharedChatExecutor struct{}
 
 type sharedChatExecuteOptions struct {
