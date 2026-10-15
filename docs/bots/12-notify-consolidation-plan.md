@@ -3,8 +3,9 @@
 > 上游：[06-target-architecture.md](./06-target-architecture.md) §1 D1（notify 中台 = 唯一权威/SSOT）、
 > D4（绞杀者模式：先抽内核保行为，再迁三宿主）、§4.2 N2/N3/N8；策略链语义见
 > [10-presence-signals-design.md](./10-presence-signals-design.md) §3.2/§3.3（在场线已落地）。
-> 状态：**方案设计（待评审）** ｜ 日期：2026-10-15 ｜ 前置：S4a 已落地（`aabb4777`，
-> `notify.Presence` + Dispatcher 门禁）。
+> 状态：**实施完成（G1–G3+/R1/R2 全部落地）** ｜ 日期：2026-10-15 ｜ 前置：S4a 已落地
+> （`aabb4777`，`notify.Presence` + Dispatcher 门禁）。剩余：真机验收（网关构建含
+> G1–G3 部署 + 跨路径去重实机验证）。
 > 维护约定：本文是 S4b **切片细节的唯一权威**；04 状态行/06 决策不动，切片完成时回写一行。
 
 ## 1. 背景与目标
@@ -79,7 +80,7 @@ Dispatcher，替换自定路由。绑定反查仍是宿主职责（内核不知�
 | **G3** 静默/合并下沉 | ✅ 2026-10-15 落地：内核 Dispatcher 新增静默门（`SetQuietHours`/`Muted`，low/normal 丢弃、high 穿透，回执 `Receipt.Muted`——与 Suppressed 的回滚补推相反，静默是永久性丢弃）与合并门（`SetCoalesceWindow` + 内核自持批处理 `coalesce/flushCoalesced`，normal 按 kind 攒批）；`deliver` 内部投递段拆分（flush 产物只过账本+偏好，不二次过三门——防递归攒批）。pushNotifier 剪枝：batch/timer 字段与 flush() 退役，窗口/时钟经 Set* 注入；顺带修复角落缺陷——原实现 `coalesceWindow=0` 时静默检查被跳过。notify_policy.go 别名保留（parseQuietHours 被 main.go 使用；isHighPriorityAttention/inQuietHours/coalesceNotifications 已无生产引用，随下片退役）。验证：内核三用例 ×2（静默 Muted 不认领键/high 穿透/合并恰一条+计数标题）、gateway 全包（QuietHours/Coalesce 既有契约不变）、notify+gateway 全包、`-race` 干净 | `internal/notify/{dispatcher,ledger}.go`、`cmd/gateway/push.go` | 内核门经 Set* 归零即回到旧行为；别名文件恢复 |
 | **G3+** 适配层退役 | ✅ 2026-10-15 落地：`notify_policy.go`/`notify_policy_test.go` 删除——main.go 直调 `notify.ParseQuietHours`，push.go 直调 `notify.IsHighPriority`，`quietRange` 别名移除（改 `[]notify.QuietRange`）；宿主级行为护栏（合并/免打扰/投递提示/种子去重五测）迁移为 `push_notifier_policy_test.go` 保留，别名单元测试由内核 `policy_test.go` 同名测试接管（覆盖面不减）。验证：gateway 全包通过 | `cmd/gateway/{main,push}.go`、`push_notifier_policy_test.go`（新） | 恢复删除的两文件 + revert push.go/main.go 直调 |
 | **R1** runtime-server 接入 | ✅ 2026-10-15 落地（**范围修正**）：侦查发现 IM 出站已经由 `connectors.SubscribeAttention` 三宿主单一实现点收敛（D5 过滤/去重/队列/转发全在其中）——再包内核 Channel 会双路由，**不做**；runtime-server 无自有 WebPush 面，无消费方可接。落地为：`sessionViewers` 增加 `notify.Presence` 适配（`Handler.SessionPresence()` 导出面，单宿主忽略 nodeID），契约测试四断言（无订阅者不在场/订阅在看/nodeID 无关/断开回落）；生产消费方随 runtime-server 自有推送面切片接入。验证：契约测试两次独立通过（runtimeapi 包 chat-hub 偶发超时为既有 flaky，与本片无关） | `internal/api/runtimeapi/session_viewers.go` | 单文件 revert | 恢复原 hook（无） |
-| **R2** aicli 接入 | 连接器出站走内核；InteractiveUI 信号复用为 Presence（本地面用） | `internal/connectors/service.go`、`cmd/aicli/commands/chat_gateway_host.go` | 既有 NotifySession/NotifyAttention 单测 | 同上 |
+| **R2** aicli 接入 | ✅ 2026-10-15 落地（**范围修正**，同 R1）：连接器出站走 `SubscribeAttention` 单一实现点——不重复包装；本地无 Dispatcher 消费方（声音提示有独立 gate）。落地为：内联 Viewing 判定提为具名 `chatSessionViewing`（nil/headless/脚本 → false、TUI 前台 → true，与 notify.Presence 语义逐字对齐）+ 契约测试四断言。验证：R2 契约 + 既有 S2 门禁/摘要测试全绿 | `cmd/aicli/commands/chat_gateway_host.go` | 单文件 revert |
 | **验收** | 真机：三宿主各触发同一会话 attention → 恰一次推送（跨路径去重生效）；在场抑制/补推回归 10 号文档 §5 六条 | — | 生产网关 + 本地双宿主 | — |
 
 **排序与错峰**：G1→G2→G3（gateway 自洽，可先行）；R1 压在另一条线的活跃编辑区
