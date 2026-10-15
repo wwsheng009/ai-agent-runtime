@@ -69,8 +69,10 @@ type fakeQQ struct {
 	prepareCalls     int
 	presignedParts   []presignedPart
 	partFinishes     []map[string]any
-	script           wsScript
-	wsURL            string
+	// 流式消息（stream_messages）分片记录。
+	streamFragments []map[string]any
+	script          wsScript
+	wsURL           string
 }
 
 // presignedPart 记录一次预签名 URL 的 PUT 内容（分片字节）。
@@ -169,6 +171,15 @@ func (f *fakeQQ) handler() http.Handler {
 			f.partFinishes = append(f.partFinishes, payload)
 			f.mu.Unlock()
 			writeJSON(w, map[string]any{})
+		case strings.HasSuffix(r.URL.Path, "/stream_messages"):
+			var payload map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			f.mu.Lock()
+			f.streamFragments = append(f.streamFragments, payload)
+			f.mu.Unlock()
+			writeJSON(w, map[string]any{
+				"id": "stream-1", "timestamp": "2026-07-21T10:00:00+08:00",
+			})
 		case strings.HasPrefix(r.URL.Path, "/presigned/"):
 			body, _ := io.ReadAll(r.Body)
 			f.mu.Lock()
