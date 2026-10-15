@@ -98,6 +98,8 @@ type Provider struct {
 	mediaHostGuard mediaHostGuardFunc
 	// mediaLimitBytes 覆盖入站媒体下载上限（0 = 默认 maxInboundMediaBytes）。
 	mediaLimitBytes int64
+	// chunkedThreshold 覆盖分片上传阈值（0 = 默认 chunkedUploadThreshold）。
+	chunkedThreshold int64
 }
 
 type tokenCacheEntry struct {
@@ -166,6 +168,15 @@ func WithInboundMediaLimit(limit int64) Option {
 	return func(p *Provider) {
 		if limit > 0 {
 			p.mediaLimitBytes = limit
+		}
+	}
+}
+
+// WithChunkedUploadThreshold 覆盖分片上传阈值（字节；测试用，<=0 忽略）。
+func WithChunkedUploadThreshold(limit int64) Option {
+	return func(p *Provider) {
+		if limit > 0 {
+			p.chunkedThreshold = limit
 		}
 	}
 }
@@ -435,15 +446,27 @@ func (p *Provider) uploadRichMedia(ctx context.Context, cfg connectors.Config, t
 	if err != nil {
 		return "", err
 	}
+	fileType := mediaFileType(media, contentType)
+	// 大文件走官方分片上传（避免 base64 膨胀与单请求体量限制）；失败回落
+	// 整文件上传（file_data）。
+	if int64(len(data)) > p.chunkedUploadThresholdFor() {
+		fileInfo, chunkErr := p.uploadMediaChunked(ctx, cfg, target, media, fileType, data)
+		if chunkErr == nil && fileInfo != "" {
+			return fileInfo, nil
+		}
+		if chunkErr != nil {
+			p.logf("qqbot: 分片上传失败，回落整文件上传：%v", chunkErr)
+		}
+	}
 	payload := map[string]any{
-		"file_type":    mediaFileType(media, contentType),
+		"file_type":    fileType,
 		"file_data":    base64.StdEncoding.EncodeToString(data),
 		"srv_send_msg": false,
 	}
 	var response struct {
 		FileInfo string `json:"file_info"`
 	}
-	if err := p.apiJSON(ctx, cfg, http.MethodPost, filesEndpoint(p.baseFor(cfg), target), payload, &response); err != nil {
+	if err := p.apiJSON(ctx, cfg, http.MethodPost, endpoint, payload, &response); err != nil {
 		return "", err
 	}
 	fileInfo := strings.TrimSpace(response.FileInfo)

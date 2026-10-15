@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -62,8 +64,19 @@ type fakeQQ struct {
 	// 400/404 等可降级错误）；主动路径（无 msg_id）仍按 msgStatus 响应。
 	passiveStatus int
 	passiveBody   string
-	script        wsScript
-	wsURL         string
+	// 分片上传（upload_prepare/part_finish/presigned PUT）观测与脚本。
+	prepareBlockSize int
+	prepareCalls     int
+	presignedParts   []presignedPart
+	partFinishes     []map[string]any
+	script           wsScript
+	wsURL            string
+}
+
+// presignedPart 记录一次预签名 URL 的 PUT 内容（分片字节）。
+type presignedPart struct {
+	path string
+	body []byte
 }
 
 func newFakeQQ(appSecret, token string) *fakeQQ {
@@ -115,6 +128,53 @@ func (f *fakeQQ) handler() http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/media/"):
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(fakePNG)
+		case strings.HasSuffix(r.URL.Path, "/upload_prepare"):
+			var payload map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			block := f.prepareBlockSize
+			if block <= 0 {
+				block = 8
+			}
+			total := 0
+			if size, ok := payload["file_size"].(string); ok {
+				total, _ = strconv.Atoi(size)
+			}
+			if total <= 0 {
+				total = block
+			}
+			count := (total + block - 1) / block
+			parts := make([]map[string]any, 0, count)
+			for i := 0; i < count; i++ {
+				parts = append(parts, map[string]any{
+					"index":         i,
+					"presigned_url": "http://" + r.Host + "/presigned/" + strconv.Itoa(i),
+					"block_size":    strconv.Itoa(block),
+				})
+			}
+			f.mu.Lock()
+			f.prepareCalls++
+			f.mu.Unlock()
+			writeJSON(w, map[string]any{
+				"upload_id":  "upload-1",
+				"block_size": strconv.Itoa(block),
+				"parts":      parts,
+				"upload_config": map[string]any{
+					"concurrency": 1, "retry_timeout": 300, "retry_delay": 1,
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/upload_part_finish"):
+			var payload map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			f.mu.Lock()
+			f.partFinishes = append(f.partFinishes, payload)
+			f.mu.Unlock()
+			writeJSON(w, map[string]any{})
+		case strings.HasPrefix(r.URL.Path, "/presigned/"):
+			body, _ := io.ReadAll(r.Body)
+			f.mu.Lock()
+			f.presignedParts = append(f.presignedParts, presignedPart{path: r.URL.Path, body: body})
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/ws":
 			f.mu.Lock()
 			f.connects++
@@ -1515,5 +1575,94 @@ func TestParseVoiceMediaPrefersWavURL(t *testing.T) {
 	}
 	if msg.Media[0].URL != "https://x/a.wav" {
 		t.Fatalf("voice url = %q, want WAV 优先", msg.Media[0].URL)
+	}
+}
+
+// ── 分片上传（upload_prepare → 分片 PUT → part_finish → files 合并） ─────────
+
+func (f *fakeQQ) prepareCallsCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.prepareCalls
+}
+
+func (f *fakeQQ) presignedBodies() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]byte, 0, len(f.presignedParts))
+	for _, part := range f.presignedParts {
+		out = append(out, append([]byte(nil), part.body...))
+	}
+	return out
+}
+
+func (f *fakeQQ) partFinishPayloads() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]map[string]any, 0, len(f.partFinishes))
+	for _, payload := range f.partFinishes {
+		cloned := make(map[string]any, len(payload))
+		for key, value := range payload {
+			cloned[key] = value
+		}
+		out = append(out, cloned)
+	}
+	return out
+}
+
+func TestSendLargeLocalFileUsesChunkedUpload(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	fake.prepareBlockSize = 8
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL), WithMediaHostGuard(allowAllMediaHosts), WithChunkedUploadThreshold(4))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+
+	payload := []byte("0123456789ABCDEFGHIJ") // 20 字节 → 8/8/4 三个分片
+	path := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write temp media: %v", err)
+	}
+	err := provider.Send(context.Background(), cfg, "user:user-openid-1",
+		[]connectors.OutboundMessage{{Media: []connectors.Media{{Kind: "file", Path: path}}}})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	if got := fake.prepareCallsCount(); got != 1 {
+		t.Fatalf("prepare calls = %d, want 1", got)
+	}
+	parts := fake.presignedBodies()
+	if len(parts) != 3 {
+		t.Fatalf("presigned parts = %d, want 3", len(parts))
+	}
+	if !bytes.Equal(bytes.Join(parts, nil), payload) {
+		t.Fatalf("parts reassemble mismatch: %q", bytes.Join(parts, nil))
+	}
+	finishes := fake.partFinishPayloads()
+	if len(finishes) != 3 {
+		t.Fatalf("part finishes = %d, want 3", len(finishes))
+	}
+	for i, finish := range finishes {
+		if finish["upload_id"] != "upload-1" || finish["part_index"] != float64(i) {
+			t.Fatalf("finish[%d] = %+v", i, finish)
+		}
+		if _, ok := finish["md5"].(string); !ok {
+			t.Fatalf("finish[%d] missing md5: %+v", i, finish)
+		}
+	}
+
+	sent := fake.sentMessages()
+	if len(sent) != 2 {
+		t.Fatalf("sent = %+v, want merge + message", sent)
+	}
+	merge := sent[0]
+	if merge.path != "/v2/users/user-openid-1/files" || merge.payload["upload_id"] != "upload-1" {
+		t.Fatalf("merge payload = %+v", merge.payload)
+	}
+	if _, ok := merge.payload["file_data"]; ok {
+		t.Fatalf("chunked merge must not carry file_data: %+v", merge.payload)
+	}
+	if sent[1].payload["msg_type"] != float64(7) {
+		t.Fatalf("media message = %+v", sent[1].payload)
 	}
 }
