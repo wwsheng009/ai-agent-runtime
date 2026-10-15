@@ -415,5 +415,15 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 > 12s 内回连、`/proc exe` sha 一致、console 200、日志干净。新增能力：
 > `notify-prefs.json` 偏好装载（缺失 = no-op）。
 
+> **部署记录（2026-10-15 第三笔，在场收敛 S1）**：HEAD `7cea47e1`（含 QQ 切片 3
+> `926986bb`、/tools 收编 `09497b5d`、goal M4 `58402988` 等），`-trimpath` linux/amd64，
+> raw sha256 `fca03ac0…a9961d84`（gz `908c1c15…927b490`）；分块上传（1MB×9、逐块重试；
+> 远端路径须给**显式文件名**——目录形式会被 sftp-client 拒绝）→ 服务端 `cat` 拼装双 sha
+> 门禁 → 备份 `gateway.bak-20261015-002152` → 替换重启。验证：`/proc/<pid>/exe` sha 与
+> 本地构建逐位一致、`/api/health` `{"live_nodes":7,"nodes":8,"status":"ok"}`、console 200、
+> 日志零 error/panic。新增能力：`--presence-sources`（缺省 `console,host`，置 `console`
+> 即回退现状）；host 源按心跳 TTL 续期。本切片 no-op 直到 agent 上报 `viewing`
+> （S2 aicli / S3 runtime-server 同批落地）。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

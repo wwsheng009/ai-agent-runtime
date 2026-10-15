@@ -102,6 +102,10 @@ type presenceEntry struct {
   增/减 + 0↔1 跃迁刷新网关怀摘要）；`GatewaySessions` 摘要携带 `Viewing`。
 - **S4（收敛）**：notify 内核 `Presence` 接口 + Dispatcher gate（此刻才从 gateway 私有
   登记表抽象），三宿主迁移随 D4 余下切片。
+- **部署（2026-10-15）**：gateway S1 上生产（`fca03ac0…a9961d84`，落在
+  `/opt/aicli-gateway/gateway`，备份 `gateway.bak-20261015-002152`）；本地 runtime-server
+  已含 S3（`sessionViewers` 符号在位、进程即该构建）；本地 aicli 换为 `presence-s2`
+  （`0601323e…69343f`，旧件 `aicli.exe.bak-20261015-081108`）。
 - **验收（S1–S3 后，真机）**：TUI 前台看 A 会话时其 attention 不推送手机；切走补推
   一次；console 行为不回归；旧 agent/旧 gateway 双向兼容。
 
