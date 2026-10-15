@@ -9,6 +9,7 @@ package schedulehost
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +77,95 @@ func HigherPrioritySchedulerOnline(paths mesh.Paths, myKind, myNodeID string) (b
 		}
 	}
 	return false, ""
+}
+
+// creatorAffinityOnline 报告"最近创建活动任务的创建者会话"是否宿主在
+// 另一个存活且具调度能力位的节点上（S6 创建者亲和）：返回该节点 kind（空串 =
+// 不存在亲和对象）。供多 aicli 并存时决定"谁该持调度租约"——创建作业的
+// aicli 优先于旁观者 aicli。
+//
+// 语义与 HigherPrioritySchedulerOnline 相同：只回答观测问题，不参与控制
+// 决策；读取竞态只影响让位时机（早让/晚让一个轮询周期），唯一性仍由
+// 租约 + claim 兜底。
+func creatorAffinityOnline(paths mesh.Paths, myNodeID string, sessionIDs []string) (bool, string) {
+	if !paths.Enabled() || len(sessionIDs) == 0 {
+		return false, ""
+	}
+	view := mesh.BuildView(paths, mesh.ViewOptions{})
+	for i := range view.Nodes {
+		node := &view.Nodes[i]
+		if node.NodeID == myNodeID || node.State != mesh.NodeStateLive {
+			continue
+		}
+		if node.Session == nil || strings.TrimSpace(node.Session.ID) == "" {
+			continue
+		}
+		sessionID := strings.TrimSpace(node.Session.ID)
+		for _, wanted := range sessionIDs {
+			if wanted != "" && wanted == sessionID {
+				return true, node.Kind
+			}
+		}
+	}
+	return false, ""
+}
+
+// CreatorAffinitySource 是创建者亲和的输入接缝：返回当前**活动任务**里最近
+// 创建的 N 个任务的创建者会话 id（新到旧；空切片/nil = 无活动任务，不亲和）。
+// 由持有 Store 的调用方实现（通常直接包 store.List），Leader 只在让位检查时
+// 调用——读失败按"无亲和"处理（fail-open：亲和是体验优化，不挡调度）。
+type CreatorAffinitySource interface {
+	ActiveCreatorSessions(limit int) []string
+}
+
+// StoreCreatorAffinity 用 schedule.Store 实现创建者亲和源：按到期时点升序
+// 返回活动任务的创建者会话（最快到期在前，去重）。
+type StoreCreatorAffinity struct {
+	Store schedule.Store
+}
+
+// ActiveCreatorSessions 返回活动任务的创建者会话 id，最快到期在前。
+// 排序不依赖 Store.List 的 SQL 次序（TEXT 时点列的字典序在毫秒精度下跨机器
+// 不可靠），显式按 ScheduledAt 升序排——最快到期的任务马上要投递，其创建者
+// 节点应优先持租，投递走 L1 就近直达；亲和对象随任务临近稳定收敛。
+func (s StoreCreatorAffinity) ActiveCreatorSessions(limit int) []string {
+	if s.Store == nil || limit <= 0 {
+		return nil
+	}
+	tasks, err := s.Store.List()
+	if err != nil {
+		return nil
+	}
+	active := make([]schedule.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Status == schedule.StatusActive && strings.TrimSpace(task.CreatedBySessionID) != "" {
+			active = append(active, task)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	// 升序 = 最快到期的任务在前（它马上要投递，创建者节点应优先持租走 L1）。
+	sort.SliceStable(active, func(i, j int) bool {
+		return active[i].Record.ScheduledAt.Before(active[j].Record.ScheduledAt)
+	})
+	seen := make(map[string]struct{}, limit)
+	out := make([]string, 0, limit)
+	for _, task := range active {
+		if len(out) >= limit {
+			break
+		}
+		creator := strings.TrimSpace(task.CreatedBySessionID)
+		if _, dup := seen[creator]; dup {
+			continue
+		}
+		seen[creator] = struct{}{}
+		out = append(out, creator)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // StoreCompatCheck 用"读取当前 store schema 版本"的函数构造领导权自检

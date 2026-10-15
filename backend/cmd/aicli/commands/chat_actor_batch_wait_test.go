@@ -74,6 +74,7 @@ func TestWaitAgentOnDispatchBatchIDExpandsToTaskChildren(t *testing.T) {
 // 绑定则超时返回 pending（保留任务 id），而不是抛错。
 func TestWaitAgentOnUnboundBatchTaskStaysPending(t *testing.T) {
 	host, _ := newLocalWaitLedgerHost(t, subagentbatch.BatchRunning, "turn-batch-unbound")
+	applyFastAgentWaitWindows(host)
 	ctx := context.Background()
 	host.SessionStore = runtimechat.NewInMemoryStorage()
 	now := subagentbatch.Now()

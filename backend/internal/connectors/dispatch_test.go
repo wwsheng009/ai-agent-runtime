@@ -10,6 +10,60 @@ func testPeers() []RunnerPeer {
 	}
 }
 
+// 真机形态（2026-10-15 qq-bot1）：TUI bind 写入 HostID 全形
+//（`aicli:node-…`），mesh peers 视图是裸 node id（`node-…`）——两种形态
+// 必须能匹配，否则活节点亲和被误判为掉线退化 R2a，IM 消息进不了会话。
+func TestDecideRouteR1AffinityHostIDFormMismatch(t *testing.T) {
+	peers := []RunnerPeer{
+		{HostKind: HostKindAICLI, NodeID: "node-31256-20261015T060602Z", Alive: true},
+	}
+	binding := SessionRef{NodeID: "aicli:node-31256-20261015T060602Z", SessionID: "sess-1"}
+	d, _ := DecideRoute("", peers, "aicli:node-21156-20261015T034424Z", binding, 0)
+	if !d.Remote || !d.Affinity || d.Peer.NodeID != "node-31256-20261015T060602Z" {
+		t.Fatalf("R1 affinity across id forms = %+v", d)
+	}
+
+	// 反向：绑定存裸 node id、peers 带全形 → 同样亲和。
+	binding = SessionRef{NodeID: "node-31256-20261015T060602Z", SessionID: "sess-1"}
+	peers = []RunnerPeer{
+		{HostKind: HostKindAICLI, NodeID: "aicli:node-31256-20261015T060602Z", Alive: true},
+	}
+	d, _ = DecideRoute("", peers, "aicli:node-21156-20261015T034424Z", binding, 0)
+	if !d.Remote || !d.Affinity {
+		t.Fatalf("R1 affinity reverse-form = %+v", d)
+	}
+}
+
+// TestDecideRouteEmptyBindingNodeIDIsFailover：NodeID 为空（旧数据/bind 前）
+// 仍走 R2a 接管——修复只针对形态匹配，不改变空值语义。
+func TestDecideRouteEmptyBindingNodeIDIsFailover(t *testing.T) {
+	peers := []RunnerPeer{
+		{HostKind: HostKindAICLI, NodeID: "node-31256", Alive: true},
+	}
+	binding := SessionRef{SessionID: "sess-1"}
+	d, _ := DecideRoute("", peers, "aicli:node-21156", binding, 0)
+	if d.Remote || !d.Failover {
+		t.Fatalf("empty node id binding = %+v, want local failover", d)
+	}
+}
+
+// TestHostIDInstance：kind 前缀剥离与裸词透传（裸词 = 无 kind 前缀，按
+// HostKindOf 的对偶语义原样返回；单实例宿主形态 instance 段 = 自身）。
+func TestHostIDInstance(t *testing.T) {
+	cases := map[string]string{
+		"aicli:node-1":   "node-1",
+		"gateway:gw-1":   "gw-1",
+		"runtime-server": "runtime-server",
+		"node-1":         "node-1",
+		"":               "",
+	}
+	for in, want := range cases {
+		if got := HostIDInstance(in); got != want {
+			t.Fatalf("HostIDInstance(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // TestDecideRouteR1Affinity：绑定指向远端活节点 → 亲和派发（带会话）。
 func TestDecideRouteR1Affinity(t *testing.T) {
 	binding := SessionRef{NodeID: "aicli:node-remote", SessionID: "sess-9"}

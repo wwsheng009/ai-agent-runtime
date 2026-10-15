@@ -31,6 +31,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/configaudit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/feishu"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/qqbot"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/telegram"
@@ -58,6 +59,12 @@ func startAICLIChatConnectors(cfg *config.Config, host *localChatRuntimeHost) (*
 		setLocalConnectorInitNote("无法解析共享 config.yaml 路径（请检查 aicli 配置或使用 --config 指定）")
 		return nil, errors.New("aicli connectors: 无法解析共享 config.yaml 路径")
 	}
+	// 进程单例（2026-10-15 重复投递复盘）：已有宿主（例如 web 懒自举或按需
+	// 装配先于 chat 启动完成）直接复用，绝不再装配第二套事件订阅。
+	if existing := currentLocalConnectorHost(); existing != nil && existing.Service() != nil {
+		setLocalConnectorInitNote("")
+		return existing, nil
+	}
 	// 没有配置文件 = 没有连接器可装配：整段惰性（也避免测试/一次性运行
 	// 触发对共享配置的读取与轮询启动）。跳过时记录原因，供 /bots 如实报出。
 	if _, statErr := os.Stat(configPath); statErr != nil {
@@ -70,12 +77,15 @@ func startAICLIChatConnectors(cfg *config.Config, host *localChatRuntimeHost) (*
 		setLocalConnectorInitNote("读取共享 config.yaml 失败：" + statErr.Error())
 		return nil, statErr
 	}
+	// 启动审计（2026-10-15 真机 qq-bot1）：候选配置层之间出现同 id 密钥分叉时
+	// 告警——层选择随启动目录变化，分叉会让「重启后错误复现」难以自查。
+	configaudit.WarnSecretsDivergence(config.ConfigLayerSearchPaths(), logpkg.Warnf)
 	ctx := context.Background()
 	if host != nil && host.lifecycleCtx != nil {
 		// 随 chat 宿主生命周期停机（宿主 close 时 lifecycleCtx 取消）。
 		ctx = host.lifecycleCtx
 	}
-	started, startErr := StartLocalConnectors(ctx, host, configPath, logpkg.Infof)
+	started, _, startErr := ensureLocalConnectorHost(ctx, host, configPath, logpkg.Infof)
 	if startErr != nil {
 		setLocalConnectorInitNote("连接器装配失败：" + startErr.Error())
 		return nil, startErr
@@ -138,6 +148,18 @@ var (
 	localConnectorInitNote string
 )
 
+// localConnectorStartMu 序列化连接器宿主的装配（进程单例闸）：
+// chat 启动路径（startAICLIChatConnectors）、TUI /bots 按需路径
+// （startLocalConnectorsOnDemand）与 web 懒自举（bootstrapLocalConnectorsForWeb）
+// 可能在启动窗口内并发到达；check-then-act 竞态会装配出两套宿主，两套事件订阅
+// 随后对同一事件各投递一次（2026-10-15 qq-bot1 content/notice 双份复盘）。
+var localConnectorStartMu sync.Mutex
+
+// aicliConnectorTurnActivity 是进程级「IM 来源回合进行中」登记器（L3 判据，
+// docs/bots/13 §4.2）：由本进程装配的全部宿主实例共享——即使宿主被意外重复
+// 装配，任一实例的镜像都能看到进行中的 IM 回合，避免回复路径与镜像双发。
+var aicliConnectorTurnActivity = connectors.NewTurnActivityTracker()
+
 func currentLocalConnectorHandler(api bool) http.Handler {
 	localConnectorsStateMu.Lock()
 	defer localConnectorsStateMu.Unlock()
@@ -171,6 +193,22 @@ func setLocalConnectorInitNote(note string) {
 	localConnectorsStateMu.Lock()
 	localConnectorInitNote = strings.TrimSpace(note)
 	localConnectorsStateMu.Unlock()
+}
+
+// ensureLocalConnectorHost 是连接器宿主的进程单例装配闸：持锁后复查全局引用，
+// 已有宿主直接复用（reused=true，不重复装配/不重复注册事件订阅），否则串行
+// 装配一套新宿主。返回 (host, reused, err)。
+func ensureLocalConnectorHost(ctx context.Context, host *localChatRuntimeHost, configPath string, logf func(format string, args ...any)) (*LocalConnectorHost, bool, error) {
+	localConnectorStartMu.Lock()
+	defer localConnectorStartMu.Unlock()
+	if existing := currentLocalConnectorHost(); existing != nil && existing.Service() != nil && existing.Store() != nil {
+		return existing, true, nil
+	}
+	started, err := StartLocalConnectors(ctx, host, configPath, logf)
+	if err != nil {
+		return nil, false, err
+	}
+	return started, false, nil
 }
 
 // bootstrapLocalConnectorsForWeb 尝试为当前 web 会话按需装配连接器宿主。
@@ -297,8 +335,9 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		logf(format, args...)
 	}
 	// S1a 内容镜像：IM 来源回合登记器（L3）与后端共享（docs/bots/13 §4.2；
-	// 共享实现随 S1b 提为 connectors.TurnActivityTracker）。
-	turns := connectors.NewTurnActivityTracker()
+	// 共享实现随 S1b 提为 connectors.TurnActivityTracker）。进程级单例：
+	// 即便宿主被意外重复装配，任一实例的镜像都能看到进行中的 IM 回合。
+	turns := aicliConnectorTurnActivity
 	backend := localConnectorBackend{host: host, logf: logf, turns: turns}
 	service := connectors.New(connectors.Deps{
 		Store:   store,

@@ -365,6 +365,10 @@ connectors:
 宿主过滤点（runtime-server `subscribeRuntimeConnectorAttention`、aicli 同口径）；跨节点事件
 的广播依赖 D1 共享 state，无新增机制。`scope=all` 的跨宿主事件扇出在 P2 随 mesh 派发一起做。
 
+> 通用事件订阅模型（多会话选择器 / 按 bot 订阅任意事件类型 / 正文副本 `content`）见
+> [13-event-subscription-routing-design.md](./13-event-subscription-routing-design.md)——
+> 本条 D5 开关是该模型的兼容特例（13 §4.1 给出映射）。
+
 #### 7.4.2 连接器级模型路由（D6，2026-10-14 补充定案）
 
 **需求**：bot 与一般通知渠道不同，是长驻的对话入口——每个 bot 应能配置自己的

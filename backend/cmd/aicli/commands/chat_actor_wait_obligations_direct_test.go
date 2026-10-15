@@ -56,6 +56,7 @@ func newLocalDirectObligationsRegistry(t *testing.T) (*localActorRegistry, strin
 // （行形状与挂起路径同源），待办行保持 I1 语义（不给 finalize）。
 func TestLocalWaitAgentObligationsDirectFromTargetsWithoutParkedRecord(t *testing.T) {
 	registry, batchID, childSessionID := newLocalDirectObligationsRegistry(t)
+	applyFastAgentWaitWindows(registry.Host)
 
 	result, err := registry.Wait(context.Background(), toolbroker.WaitAgentArgs{ID: childSessionID, TimeoutMs: 50})
 	require.NoError(t, err)

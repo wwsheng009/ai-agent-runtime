@@ -114,6 +114,12 @@ type LeaderOptions struct {
 	// 持租约期间发现更高优先级者上线即主动释放。交互宿主（aicli）opt-in 时置
 	// true，避免与常驻调度者争抢。
 	DeferToHigherPriority bool
+	// CreatorAffinity 开启"创建者亲和让位"（S6）：活动任务集合由调用方按最新
+	// 快照注入（nil = 关闭）。开启后，当最近创建的活动任务的创建者会话宿主在
+	// 另一个存活调度者节点上时，本进程让位——多 aicli 并存时创建作业的 aicli
+	// 优先持租（投递就近 L1 直达），旁观者 aicli 回到 standby。
+	// 只对 DeferToHigherPriority=true 的角色生效（daemon/runtime-server 永不让位）。
+	CreatorAffinity CreatorAffinitySource
 	// Logf 接收状态迁移与降级日志（nil → 丢弃）。
 	Logf func(format string, args ...any)
 }
@@ -330,6 +336,17 @@ func (l *Leader) supervise(ctx context.Context) {
 			}
 			continue
 		}
+		// S6：创建者亲和——活动任务创建者的会话宿主在另一存活调度者上时让位
+		// （仅 DeferToHigherPriority 角色生效；daemon/runtime-server 不受影响）。
+		if l.creatorAffinityBlocked() {
+			l.stopDriving("creator-affinity scheduler online")
+			l.releaseLease()
+			l.setState(StateStandby, "creator session hosted by another scheduler; deferring")
+			if !l.sleep(ctx) {
+				return
+			}
+			continue
+		}
 		foreignBefore := l.foreignLeaseHeld()
 		outcome := mesh.Acquire(l.paths, LeasePurpose, LeaseKey, l.owner, mesh.AcquireOptions{TTL: l.ttl})
 		switch {
@@ -477,6 +494,12 @@ func (l *Leader) startRenewal(ctx context.Context) <-chan struct{} {
 					signalLost()
 					return
 				}
+				// S6：持租约期间活动任务创建者会话被另一存活调度者宿主 → 让位。
+				if l.creatorAffinityBlocked() {
+					l.logf("schedulehost: creator session hosted by another scheduler; releasing lease")
+					signalLost()
+					return
+				}
 				res := mesh.Renew(l.paths, LeasePurpose, LeaseKey, l.owner, mesh.NowUTC(), l.ttl)
 				if res.Lost {
 					signalLost()
@@ -544,6 +567,28 @@ func (l *Leader) deferToHigherPriorityBlocked() bool {
 	}
 	return higher
 }
+
+// creatorAffinityBlocked 报告本进程是否应因"活动任务创建者会话宿主在另一存活
+// 调度者节点"而让位（S6 创建者亲和；未开启或非让位角色时恒 false）。
+// 只对 DeferToHigherPriority=true 的交互宿主生效：daemon/runtime-server 是
+// 正统调度者，绝不因亲和让位。检查本身 fail-open：读失败/无任务 = 不亲和。
+func (l *Leader) creatorAffinityBlocked() bool {
+	if !l.opts.DeferToHigherPriority || l.opts.CreatorAffinity == nil {
+		return false
+	}
+	sessions := l.opts.CreatorAffinity.ActiveCreatorSessions(creatorAffinityScanLimit)
+	if len(sessions) == 0 {
+		return false
+	}
+	online, kind := creatorAffinityOnline(l.paths, l.owner.NodeID, sessions)
+	if online {
+		l.logf("schedulehost: deferring to creator-affinity scheduler (%s)", kind)
+	}
+	return online
+}
+
+// creatorAffinityScanLimit 限制每次亲和检查扫描的创建者会话数（最新优先）。
+const creatorAffinityScanLimit = 8
 
 func (l *Leader) degradedPolicy() DegradedPolicy {
 	if l.opts.Degraded == DegradedStandalone {

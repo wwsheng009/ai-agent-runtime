@@ -4767,7 +4767,9 @@ func (h *Handler) attachRuntimeEventBridge() {
 		}
 		// gap 3：goal 驱动器订阅 actor 终态（session_end）。订阅在事件桥的
 		// Once 内，与落盘桥同生命周期；驱动器自身有配置开关门控，缺省关闭。
-		h.subscribeGoalDriver()
+		// 总线经参数注入（subscribeGoalDriver(bus)）：Once 内再次 getRuntimeEventBus()
+		// 会重入本 Once 自锁，必须先取好再传（2026-10-15 回归）。
+		h.subscribeGoalDriver(bus)
 		// P1.5：批量开关关闭时 buffer 为 nil，下面的回调保持原逐条同步路径。
 		buffer := h.newRuntimeEventPersistBuffer()
 		bus.Subscribe("", func(event runtimeevents.Event) {

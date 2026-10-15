@@ -64,7 +64,7 @@ curl -s $BASE/api/connectors/$ID/diagnostics | jq
 | QQ | 图片/文件收不到（仅 `[图片: 名称]` 占位、无 `local_path`） | 入站下载失败（出口守卫拦截/超限/附件签名 URL 过期） | 查看连接器日志「入站媒体下载失败」；附件 URL 带签名且短期有效，需及时下载 |
 | QQ | 回复里的图片/文件没发出去 | 指令块名或路径不对（需绝对路径或 https URL） | 查看日志「发送媒体失败」与降级提示 `[附件发送失败: …]`；确认 ```qq-attachments``` 围栏或 `IMAGE:/FILE:` 指令行 |
 | 微信 | `errcode -14`（会话失效） | 登录态过期 | 详情页「重新扫码」 |
-| 微信 | `errcode -2`（上下文失效） | 会话上下文过期 | 回复投递失败时自动保存快照（切片 2f）；用户在 IM 内发「重发/继续/retry」即用新会话上下文重放；仍失败会提示「重发失败，请稍后重试」 |
+| 微信 | `errcode -2`（上下文失效） | 会话上下文过期（真机形态：`ret=-2 errcode=0 errmsg="prepare failed"`，常见于重新扫码/登录态更换后） | 发送被拒时自动清除该会话已失效的 context_token（内存 + 持久化快照，避免后续出站反复撞墙），并自动保存失败快照（切片 2f）；等下一条入站重新记忆后恢复；用户在 IM 内发「重发/继续/retry」即用新会话上下文重放；仍失败会提示「重发失败，请稍后重试」 |
 | 微信 | 图片/语音收不到（仅 `[Image/Voice attachment]` 块、无 `local_path`） | 媒体下载失败（CDN 不可达/密钥不符/未配置 `cdn_base_url`） | 查看连接器日志 `inbound media download failed`；检查 CDN 基址与网络 |
 | 微信 | 语音落盘为 `.silk` 无法播放 | 未安装 silk 解码器/ffmpeg | 安装 ffmpeg 或设置 `AICLI_WECHAT_SILK_DECODER`；转码失败会保留原件 |
 | 出站 | 429/Retry-After 频现 | 触发平台限速 | 降低连接器/用户限速；确认退避生效 |

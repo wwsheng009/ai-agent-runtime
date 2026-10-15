@@ -64,8 +64,14 @@ func buildRuntimeServerPolicy(profilePolicy *runtimepolicy.ToolExecutionPolicy, 
 		}
 	}
 	if profilePolicy != nil && profilePolicy.CapabilityScopeEnabled {
-		// Mirrors the fixed applyAgentExecutionPolicy capability propagation.
-		toolPolicy.SetCapabilityScope(profilePolicy.AllowedCapabilityNames())
+		// Mirrors the fixed applyAgentExecutionPolicy capability propagation
+		// （handler.go:5627-5637：names → []policy.Capability 的域转换）。
+		names := profilePolicy.AllowedCapabilityNames()
+		capabilities := make([]runtimepolicy.Capability, 0, len(names))
+		for _, name := range names {
+			capabilities = append(capabilities, runtimepolicy.Capability(name))
+		}
+		toolPolicy.SetCapabilityScope(capabilities)
 	}
 	return toolPolicy
 }

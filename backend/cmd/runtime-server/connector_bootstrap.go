@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/configaudit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/feishu"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/qqbot"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/telegram"
@@ -42,6 +43,9 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	if logf == nil {
 		logf = log.Printf
 	}
+	// 启动审计（2026-10-15 真机 qq-bot1 复盘）：候选配置层之间出现同 id 密钥
+	// 分叉时告警——层选择随启动目录变化，修改一层不会影响另一层。
+	configaudit.WarnSecretsDivergence(agentconfig.ConfigLayerSearchPaths(), logf)
 	store := storefile.NewConfigStore(configPath, runtimeConnectorStatePath(logf))
 
 	// S1b 内容镜像：IM 来源回合登记器（L3，docs/bots/13 §4.2）与后端/runner 共享。

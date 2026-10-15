@@ -290,3 +290,83 @@ func TestServiceTakeoverConnector(t *testing.T) {
 		t.Fatalf("unknown takeover err = %v", err)
 	}
 }
+
+// TestServiceReclaimsOwnershipAfterHolderCrash 覆盖 2026-10-15 真机故障：
+// 宿主 B 启动时宿主 A 心跳仍新鲜 → 认领被拒（登记待接管）；A 随后崩溃
+// （不再续约，未走停机释放）→ 复查循环必须在 stale 阈值过后自动接管并启动
+// 轮询——否则连接器永久无人轮询，IM 消息无法进入绑定会话。
+func TestServiceReclaimsOwnershipAfterHolderCrash(t *testing.T) {
+	store := NewMemoryStore(testConfig("c1", "fake"))
+	// A 认领后"崩溃"：心跳停留在认领时刻，此后不再刷新。
+	if _, _, err := store.ClaimConnectorOwner("c1", "runtime-server", time.Now().UTC(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &fakeProvider{polling: true}
+	service, logs := newOwnerTestService(t, store, provider, "aicli", 20*time.Millisecond, 60*time.Millisecond)
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { service.Stop(context.Background()) })
+
+	// 启动时 A 心跳新鲜：认领被拒、登记待接管，不得立即轮询。
+	if starts, _ := provider.pollCounts(); starts != 0 {
+		t.Fatalf("must not steal fresh ownership at startup (starts=%d)", starts)
+	}
+	if !strings.Contains(logs.joined(), "未运行（由 runtime-server 持有）") {
+		t.Fatalf("expected ownership conflict log:\n%s", logs.joined())
+	}
+
+	// A 不再续约 → stale 阈值过后复查循环自动接管并启动轮询。
+	waitFor(t, "reclaim stale ownership", func() bool {
+		starts, _ := provider.pollCounts()
+		return starts == 1
+	})
+	if record, _ := store.OwnerOf("c1"); record.Owner != "aicli" {
+		t.Fatalf("owner after reclaim = %+v, want aicli", record)
+	}
+}
+
+// TestServiceReclaimDoesNotStealLiveOwnership 覆盖复查循环的活体保护与
+// 兜底：持有者持续续约期间不得抢占；续约停止（等同死亡）后仍会接管。
+func TestServiceReclaimDoesNotStealLiveOwnership(t *testing.T) {
+	store := NewMemoryStore(testConfig("c1", "fake"))
+	if _, _, err := store.ClaimConnectorOwner("c1", "runtime-server", time.Now().UTC(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	provider := &fakeProvider{polling: true}
+	service, _ := newOwnerTestService(t, store, provider, "aicli", 20*time.Millisecond, 60*time.Millisecond)
+	if err := service.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { service.Stop(context.Background()) })
+
+	// A "存活"：持续续约 200ms（跨越多个 stale 窗口与复查周期）→ B 不得抢占。
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				_, _ = store.HeartbeatConnectorOwner("c1", "runtime-server", time.Now().UTC())
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	<-done
+	if starts, _ := provider.pollCounts(); starts != 0 {
+		t.Fatalf("must not steal live ownership (starts=%d)", starts)
+	}
+
+	// A 停止续约 → 复查循环兜底接管，避免永久失联。
+	waitFor(t, "reclaim after holder stops renewing", func() bool {
+		starts, _ := provider.pollCounts()
+		return starts == 1
+	})
+}

@@ -606,7 +606,8 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 	if toUserID == "" {
 		return errors.New("wechat: chat is required")
 	}
-	contextToken := p.contextToken(connectorKey(cfg), toUserID)
+	connectorID := connectorKey(cfg)
+	contextToken := p.contextToken(connectorID, toUserID)
 	if contextToken == "" {
 		return fmt.Errorf("wechat: chat %q 缺少 context_token（回复需要该会话最近一次入站消息）", toUserID)
 	}
@@ -624,6 +625,7 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 		}
 		if text != "" {
 			if err := p.sendTextMessage(ctx, base, token, routeTag, toUserID, contextToken, text); err != nil {
+				p.invalidateReplyContextIfNeeded(connectorID, toUserID, contextToken, err)
 				return err
 			}
 		}
@@ -631,8 +633,10 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 			if err := p.sendOutboundMedia(ctx, cfg, base, cdnBase, token, routeTag, toUserID, contextToken, media); err != nil {
 				p.logf("wechat: 发送媒体失败（%s %s）：%v；降级为文本提示",
 					media.Kind, mediaLabel(media), err)
+				p.invalidateReplyContextIfNeeded(connectorID, toUserID, contextToken, err)
 				fallback := "[附件发送失败: " + mediaLabel(media) + "]"
 				if fallbackErr := p.sendTextMessage(ctx, base, token, routeTag, toUserID, contextToken, fallback); fallbackErr != nil {
+					p.invalidateReplyContextIfNeeded(connectorID, toUserID, contextToken, fallbackErr)
 					return fallbackErr
 				}
 			}
@@ -1008,6 +1012,58 @@ func (p *Provider) contextToken(connectorID, chat string) string {
 	return persisted
 }
 
+// invalidateReplyContextIfNeeded 在发送被上游以 ret=-2（"prepare failed"，
+// 回复上下文失效）拒绝时，清掉该会话缓存的 context_token（内存 + 持久化快照），
+// 镜像上游 invalidateWeChatReplyContextOnDeliveryFailure：不清会让后续每条出站
+// （回复/通知）都拿着已死的 token 反复撞墙；清除后 Send 快速失败并等待该会话
+// 新入站重新记忆（2026-10-15 真机：重新扫码后旧会话 token 全程 ret=-2）。
+//
+// 竞态防护：只在「当前缓存仍等于本次发送所用 token」时才清，避免误删轮询侧
+// 刚记下的更新 token。
+func (p *Provider) invalidateReplyContextIfNeeded(connectorID, chat, usedToken string, err error) {
+	if !isReplyContextInvalidError(err) {
+		return
+	}
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	usedToken = strings.TrimSpace(usedToken)
+	if connectorID == "" || chat == "" || usedToken == "" {
+		return
+	}
+	dropped := false
+
+	key := connectorID + "\n" + chat
+	p.mu.Lock()
+	if current, ok := p.contexts[key]; ok && strings.TrimSpace(current) == usedToken {
+		delete(p.contexts, key)
+		dropped = true
+	}
+	p.mu.Unlock()
+
+	// 持久化快照同样清理（否则下一次 Send 未命中内存时会把死 token 回填）。
+	if state := p.stateFor(connectorID); state != nil {
+		if raw, ok := state.Get(contextTokensStateKey); ok && strings.TrimSpace(raw) != "" {
+			snapshot := map[string]string{}
+			if jsonErr := json.Unmarshal([]byte(raw), &snapshot); jsonErr == nil {
+				if strings.TrimSpace(snapshot[chat]) == usedToken {
+					delete(snapshot, chat)
+					if encoded, encodeErr := json.Marshal(snapshot); encodeErr == nil {
+						if setErr := state.Set(contextTokensStateKey, string(encoded)); setErr != nil {
+							p.logf("wechat: 清除 context_token 快照失败: %v", setErr)
+						} else {
+							dropped = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if dropped {
+		p.logf("wechat: 回复上下文失效（ret=-2），已清除 chat %s 的 context_token；等待该会话新入站后自动恢复", chat)
+	}
+}
+
 // ── typing（TypingProvider） ────────────────────────────────────────────────
 
 // StartTyping 通过 typing ticket 发送「正在输入」并每 5s 保活，Stop 时发送取消。
@@ -1291,6 +1347,18 @@ func isSessionExpiredError(err error) bool {
 		return false
 	}
 	return requestErr.apiRet == sessionExpiredErrCode || requestErr.statusCode == sessionExpiredErrCode
+}
+
+// isReplyContextInvalidError 报告上游是否返回 ret=-2（回复上下文失效）。
+// 真机形态：sendmessage 返回 `ret=-2 errcode=0 errmsg="prepare failed"`——
+// 缓存/快照里的 context_token 对不上最新会话（常见于重新扫码、登录态更换后）。
+// 判定面与上游 isWeChatReplyContextUnavailableError 一致，不看 errmsg。
+func isReplyContextInvalidError(err error) bool {
+	var requestErr *requestError
+	if !errors.As(err, &requestErr) || requestErr == nil {
+		return false
+	}
+	return requestErr.apiRet == replyContextInvalidRet || requestErr.statusCode == replyContextInvalidRet
 }
 
 // isTransientError 分类可重试错误：网络/超时/408/429/5xx（供未来重试策略使用）。

@@ -243,6 +243,14 @@ func subscriptionNoticeDelivery(policy Policy, ev subscriptionEvent, kind, sessi
 		}
 		return "", EventSubscription{}
 	}
+	// legacy 回退（events 未配置）：旧 D5 词表只有 4 类注意力 kind（13 §4.1），
+	// 工作类（tool/subagent）是新模型概念且仅有 digest 形态——legacy 无聚合
+	// 通道，逐条 notice 直投违反「不放大：禁止逐 tool 事件直投」（13 §3.7#2）。
+	// 2026-10-15 真机：未配 events 的微信 bot 对每个工具事件收到
+	// `subscription=legacy-notify` 投递（绑定会话非 completion 恒开所致）。
+	if ev.Family == "work" {
+		return "", EventSubscription{}
+	}
 	notice := AttentionNotice{Kind: strings.TrimSpace(kind), Session: SessionRef{SessionID: strings.TrimSpace(sessionID)}}
 	if policy.AcceptsNotice(notice, boundHere) {
 		return "notice", EventSubscription{ID: "legacy-notify"}

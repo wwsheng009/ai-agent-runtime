@@ -1153,6 +1153,33 @@ func TestRunActionCheckCredentialsErrors(t *testing.T) {
 	}
 }
 
+// TestVerifyCredentials 锁定保存路径的落盘前校验（connectors.CredentialVerifier）：
+// 有效凭据通过；缺密钥/被平台拒绝时报错且不泄漏 app_secret。
+func TestVerifyCredentials(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+
+	// 有效凭据 → nil（真实换取 token + /users/@me）。
+	if err := provider.VerifyCredentials(context.Background(), testConfig("qq-1", "app-1", "secret-1")); err != nil {
+		t.Fatalf("valid credentials must verify: %v", err)
+	}
+	// 缺 app_secret → 错误（不发请求）。
+	if err := provider.VerifyCredentials(context.Background(), testConfig("qq-2", "app-2", "")); err == nil {
+		t.Fatal("missing app_secret must fail verification")
+	}
+	// token 端点拒绝（无效凭据）→ 错误透传且脱敏。
+	fake.tokenStatus = http.StatusBadRequest
+	fake.tokenBody = `{"code":100007,"message":"appid or secret is invalid"}`
+	err := provider.VerifyCredentials(context.Background(), testConfig("qq-3", "app-3", "secret-bad"))
+	if err == nil {
+		t.Fatal("rejected credentials must fail verification")
+	}
+	if strings.Contains(err.Error(), "secret-bad") {
+		t.Fatalf("app_secret leaked: %v", err)
+	}
+}
+
 // ── 出站：markdown / 分片 / 降级 / 媒体 ─────────────────────────────────────
 
 func TestSendMarkdownWhenEnabled(t *testing.T) {

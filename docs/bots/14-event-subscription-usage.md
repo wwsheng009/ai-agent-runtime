@@ -189,6 +189,7 @@ policy:
 | `stream` 没有打字机、只收到一条完整文本 | provider 不支持流式（如微信）或占位启动失败 → 自动退化为一次性 content；日志含 `degraded=content`。另：后端该回合无增量事件时也不会有流 |
 | 勾选了 `assistant_message` 但 IM 没有收到正文 | 该订阅的 `deliver` 必须是 `content`（`assistant_delta`→`stream`；工作类→`digest`）。**一条订阅只有一种形态**：编辑器现按类型**自动推导**形态，混合勾选点「一键拆分」即可。另注意 L3：IM 触发的回合不镜像 |
 | 同一段内容收到两条 | 检查是否同时配了 `content` 与 `stream`（形态不同、各发一条）；或同一 bot 多订阅命中同一 chat 且形态不同属显式行为 |
+| 每条事件都收到两份（content/notice 均 ×2，日志可见两次 `订阅投递`/`通知投递`） | 同进程**重复装配连接器宿主**（2026-10-15 修复前：chat 启动路径与 web/`/bots` 懒自举竞态，两套订阅各投递一次；陈旧实例的 L3 还看不到 IM 回合，可能再叠加回复双发）。检查启动日志是否出现两次 `aicli connectors: started`；修复后装配为进程单例（`ensureLocalConnectorHost`），重启该 aicli 进程即可清掉存量重复实例 |
 | 想给「非绑定 chat」发 | 当前 target 固定为「会话的绑定 chats」（多绑定=多 chat 都收）；显式 target 列表为设计预留（13 §3.4），未落地 |
 
 ---
@@ -212,6 +213,9 @@ policy:
 - **legacy 回退**（`events` 未配置时逐字生效，保留一个发布周期）：
   - `policy.notify.{enabled,kinds,scope}` ↔ 注意力通知（旧 D5 语义）；
   - `policy.content_mirror: true` ↔ 正文副本开关。
+  - 工作类（`tool.*` / `subagent.*`）**不投递**：仅新模型 `digest` 订阅可消费
+    （legacy 无聚合通道，逐条直投违反「不放大：禁止逐 tool 事件直投」，13 §3.7#2；
+    2026-10-15 修复：未配 `events` 的 bot 不再因绑定会话收到逐条工具通知）。
 - 迁移建议：新配置一律写 `events`；旧字段在同 bot 上不要与新字段混用（`events` 一旦配置，legacy 判定整体让位）。
 
 ---

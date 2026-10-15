@@ -51,6 +51,21 @@ func HostKindOf(hostID string) string {
 	return hostID
 }
 
+// HostIDInstance 从 HostID 提取实例段：`aicli:node-x` → `node-x`；裸词
+// （无 kind 前缀）原样返回；空值返回空串。与 HostKindOf 对偶，供路由层
+// 在「绑定 NodeID（HostID 全形）」与「peers 视图 NodeID（裸 node id）」
+// 两种形态之间互配。
+func HostIDInstance(hostID string) string {
+	hostID = strings.TrimSpace(hostID)
+	if hostID == "" {
+		return ""
+	}
+	if idx := strings.Index(hostID, hostIDKindSeparator); idx > 0 {
+		return strings.TrimSpace(hostID[idx+len(hostIDKindSeparator):])
+	}
+	return hostID
+}
+
 // HostMatchesPolicy 报告宿主是否满足 policy.runtime_owner 准入（service.go
 // 的认领/接管两处共用；语义 docs/bots/07-config-ux.md §5.6 + 09 §7.5）：
 //   - 空/auto = 任何宿主；

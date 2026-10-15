@@ -78,11 +78,41 @@ type RunnerPeer struct {
 func aliveRunnerPeers(peers []RunnerPeer) []RunnerPeer {
 	out := make([]RunnerPeer, 0, len(peers))
 	for _, p := range peers {
-		if p.Alive && (p.HostKind == HostKindAICLI || p.HostKind == HostKindRuntimeServer) {
+		// "chat" 是 mesh 档案对 aicli 节点的 Kind（host.go 缺省），与
+		// HostKindAICLI 同指一类 runner；不认它会把全部 aicli 候选剔空
+		//（2026-10-15 真机 qq-bot1 第二轮复盘）。
+		if p.Alive && (p.HostKind == HostKindAICLI || p.HostKind == HostKindRuntimeServer || strings.EqualFold(p.HostKind, MeshPeerChatKind)) {
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// MeshPeerChatKind 是 mesh 档案中 aicli chat 节点的 Kind 值（与 cmd/aicli
+// 侧 aicliMeshRunnerPeers 的接受词表一致；HostKind=chat 等价 aicli runner）。
+const MeshPeerChatKind = "chat"
+
+// runnerPeerMatchesNodeID 报告候选节点是否等于给定节点标识。绑定账本存的
+// NodeID 可能是 HostID 全形（`aicli:node-x`，TUI bind / 回写路径）或 mesh
+// 裸 node id（`node-x`，peers 视图 / 远端回传）——两种形态都必须能匹配，
+// 否则本机活节点的亲和绑定被误判为「掉线」退化成 R2a 接管（2026-10-15
+// 真机 qq-bot1：bind 后 IM 消息不流入会话的根因之一）。
+func runnerPeerMatchesNodeID(p RunnerPeer, nodeID string) bool {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return false
+	}
+	peerNodeID := strings.TrimSpace(p.NodeID)
+	if strings.EqualFold(peerNodeID, nodeID) {
+		return true
+	}
+	// 形态互配（两个方向）：`aicli:node-x` vs `node-x`。
+	// peer 全形 / 绑定裸词：剥 peer 的 kind 前缀再比。
+	if strings.EqualFold(HostIDInstance(peerNodeID), nodeID) {
+		return true
+	}
+	// peer 裸词 / 绑定全形：剥绑定的 kind 前缀再比。
+	return strings.EqualFold(peerNodeID, HostIDInstance(nodeID))
 }
 
 // routeDecision 是 DecideRoute 的输出。
@@ -118,11 +148,23 @@ func DecideRoute(preference string, peers []RunnerPeer, localHostID string, bind
 		if p.Local {
 			return true
 		}
-		if strings.EqualFold(strings.TrimSpace(p.NodeID), strings.TrimSpace(localHostID)) {
+		peerNodeID := strings.TrimSpace(p.NodeID)
+		localID := strings.TrimSpace(localHostID)
+		if strings.EqualFold(peerNodeID, localID) {
 			return true
 		}
-		return localKind != "" && HostKindOf(p.NodeID) == localKind &&
-			strings.Contains(strings.ToLower(p.NodeID), strings.ToLower(localKind))
+		// 形态互配（HostID 全形 vs 裸 node id）：instance 段相等即本机。
+		// mesh node id 进程唯一，instance 相等不会误伤别的实例。
+		if instance := HostIDInstance(localID); instance != "" {
+			if strings.EqualFold(peerNodeID, instance) || strings.EqualFold(HostIDInstance(peerNodeID), instance) {
+				return true
+			}
+		}
+		// 裸 kind 形态（runner 回传/单实例宿主格式）：peer NodeID 无 kind 前缀
+		// 且等于本机 kind 才算本机。不能Contain(kind)——任何 `aicli:node-…`
+		// 全形节点都含 "aicli" 子串，会把别的 aicli 实例误判成本机（2026-10-15
+		// 真机回归：R1 亲和被 isLocal 吞掉，消息从不派发给目标节点）。
+		return localKind != "" && strings.EqualFold(peerNodeID, localKind)
 	}
 
 	// 有绑定：R1 / R2。
@@ -140,7 +182,7 @@ func DecideRoute(preference string, peers []RunnerPeer, localHostID string, bind
 				return routeDecision{Remote: false, Affinity: true}, rrCursor
 			}
 			for _, p := range alive {
-				if strings.EqualFold(strings.TrimSpace(p.NodeID), strings.TrimSpace(binding.NodeID)) {
+				if runnerPeerMatchesNodeID(p, binding.NodeID) {
 					if isLocal(p) {
 						return routeDecision{Remote: false, Affinity: true}, rrCursor
 					}

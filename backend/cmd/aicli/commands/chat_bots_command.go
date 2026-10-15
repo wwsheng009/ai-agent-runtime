@@ -230,12 +230,18 @@ func startLocalConnectorsOnDemand(session *ChatSession) (*LocalConnectorHost, er
 	if runtimeHost.lifecycleCtx != nil {
 		ctx = runtimeHost.lifecycleCtx
 	}
-	started, startErr := StartLocalConnectors(ctx, runtimeHost, configPath, logpkg.Infof)
+	started, reused, startErr := ensureLocalConnectorHost(ctx, runtimeHost, configPath, logpkg.Infof)
 	if startErr != nil {
 		setLocalConnectorInitNote("连接器装配失败：" + startErr.Error())
 		return nil, startErr
 	}
 	setLocalConnectorInitNote("")
+	if reused {
+		// 2026-10-15 重复投递复盘：并发/重复到达的按需装配复用既有宿主，
+		// 不再装配第二套订阅（否则同一事件会被两套订阅各投递一次）。
+		logpkg.Infof("aicli connectors: reused existing host (config=%s)", configPath)
+		return started, nil
+	}
 	logpkg.Infof("aicli connectors: started on demand (config=%s)", configPath)
 	return started, nil
 }

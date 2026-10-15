@@ -107,12 +107,20 @@ func TestServiceR1AffinityDispatch(t *testing.T) {
 		mu.Unlock()
 		t.Fatalf("dispatch request = %+v", got)
 	}
+	// 回归（2026-10-15 真机）：R1 必须携带绑定会话——runner 据此续用原会话，
+	// 空 SessionID 会触发 runner 侧 auto-create（conn-<bot>-<chat>）并覆盖绑定。
+	if got.Session.SessionID != "sess-9" || got.Session.NodeID != "aicli:node-remote" {
+		mu.Unlock()
+		t.Fatalf("dispatch must carry bound session, got %+v", got.Session)
+	}
 	mu.Unlock()
 	if requests := backend.requests(); len(requests) != 0 {
 		t.Fatalf("local backend must not be called on remote success, got %d", len(requests))
 	}
-	// 绑定回写（runner 侧返回的 Session）。
-	if binding, ok := store.GetBinding("c1", "chat-1"); !ok || binding.Session.SessionID != "sess-remote" {
+	// 绑定回写：runner 返回的分叉 SessionID 不得覆盖已绑定会话（守卫），
+	// NodeID 归一化为路由目标 peer（R3 无绑定场景才采纳 runner 的 auto-create）。
+	if binding, ok := store.GetBinding("c1", "chat-1"); !ok ||
+		binding.Session.SessionID != "sess-9" || binding.Session.NodeID != "aicli:node-remote" {
 		t.Fatalf("binding after dispatch = %+v ok=%v", binding, ok)
 	}
 

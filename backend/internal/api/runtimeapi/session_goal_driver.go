@@ -146,12 +146,11 @@ func (h *Handler) goalDriverNoteCLI(sessionID string) {
 }
 
 // subscribeGoalDriver 把 actor 终态事件绑定到驱动器（幂等，Once 内调用）。
-func (h *Handler) subscribeGoalDriver() {
-	if h == nil {
-		return
-	}
-	bus := h.getRuntimeEventBus()
-	if bus == nil {
+// bus 由调用方注入：本函数在 attachRuntimeEventBridge 的 Once 内运行，若再经
+// getRuntimeEventBus() 反拉总线会重入同一 sync.Once 自锁——首次取总线即永久
+// 挂死（2026-10-15 回归：整个测试包只能等 10 分钟超时），故总线一律由外部传入。
+func (h *Handler) subscribeGoalDriver(bus *runtimeevents.Bus) {
+	if h == nil || bus == nil {
 		return
 	}
 	bus.Subscribe(chat.EventSessionEnd, func(event runtimeevents.Event) {

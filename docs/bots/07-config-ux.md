@@ -107,6 +107,15 @@ sequenceDiagram
 > 回读机器人信息，返回人读摘要 `message` 与 `bot` 明细）。三端渲染器对 kind=button 动作
 > 直接执行并展示结果（React 提示条 / 微前端 toast / TUI `/bots` 动作屏），**前端零改动**；
 > 不引入第三方个人号扫码协议（D7：官方优先）。
+>
+> **保存前凭据校验（2026-10-15 加固）**：对实现 `CredentialVerifier` 的通道（当前为 QQ），
+> 管理面保存路径（`POST/PATCH /api/connectors*`，三端编辑器共用同一入口）在落盘前先做一次
+> 真实校验：新建总是校验；更新仅在「secret 字段或 required 字段变为非空新值」时校验——
+> 普通配置微调不被平台可用性阻断，显式清空（`__clear__`）= 有意失效不校验。校验失败返回
+> 400「凭据校验失败：…」且**不落盘**；离线/平台不可达需强制保存时附 `skip_credential_check=true`。
+> 同批加固：宿主启动时审计候选配置层（`./.aicli/config.yaml` 项目层、
+> `$HOME/.aicli/config.yaml` 用户层等）——同一连接器 id 密钥分叉时输出告警（只含 id 与层
+> 路径、绝不含密钥值），避免「改了一层、另一层重启后照旧报错」难以自查（qq-bot1 真机复盘）。
 
 ### 3.5 webhook 通道（飞书 / Telegram-webhook）
 

@@ -410,7 +410,8 @@ runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
   不装配，避免平台侧反复上线抖动），随 chat cleanup 停机；
 - Backend：`localActorRegistry.SubmitPrompt`（IM 会话无绑定时按
   `conn-<connector>-<chat>` 派生确定性 session id，`ensureSession` 自动建会话），
-  P0 只回终态，流式增量 P1 接 actor 事件；
+  流式增量已接 actor 事件（`connectors.SubscribeAssistantDeltas`，2026-10-15，
+  P1 落地；P0 时期仅终态）；
 - 管理面：`/api/connectors*` 与 `/hooks/connectors/*` 挂在 aicli loopback
   Web 服务器同一 mux（`cmd/aicli/pprof.go`），鉴权沿用 `ChatWebAuthGuard`
   （回环/同源/写令牌）；服务未启动时 503；

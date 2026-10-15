@@ -83,3 +83,14 @@ func (p *Provider) checkCredentials(ctx context.Context, cfg connectors.Config) 
 	}
 	return view, nil
 }
+
+// VerifyCredentials 实现 connectors.CredentialVerifier：保存路径在落盘前调用，
+// 用真实请求验证 app_id/app_secret（复用「授权校验」的 token + GET /users/@me
+// 检查，失败文本已脱敏）。校验成功会预热访问令牌缓存（缓存命中条件含
+// appID/appSecret 一致，凭据变更后不复用旧令牌——见 accessToken）。
+func (p *Provider) VerifyCredentials(ctx context.Context, cfg connectors.Config) error {
+	_, err := p.checkCredentials(ctx, cfg)
+	return err
+}
+
+var _ connectors.CredentialVerifier = (*Provider)(nil)

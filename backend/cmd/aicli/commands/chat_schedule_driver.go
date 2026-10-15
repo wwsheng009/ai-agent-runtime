@@ -61,6 +61,27 @@ func (aicliLocalSessionDeliverer) Deliver(_ context.Context, sessionID, text str
 	return nil
 }
 
+// chatScheduleDriverWarnf 是 aicli 调度驱动诊断的统一出口（§8.5 stderr/stdout
+// 契约，与 mesh_bootstrap.go 的 meshWarn 同一范式）：
+//
+//   - 交互式会话存活时投递 TUI 动态栏：单行、临时、整行覆盖活动行、到期自动
+//     清除、不进 transcript、不产生裸终端字节。直接写 stderr 会落在
+//     FixedBottomSurface 的底部保留区（状态栏/输入行）上，把状态栏覆盖成
+//     半截文本——驱动监督循环运行在后台 goroutine 上，candidate→standby
+//     抖动时每轮 standby retry 都会触发输出，裸字节会持续踩踏交互面。
+//   - 未登记交互出口（启动早期 / 非交互 / JSON 模式）时回退 stderr，保持
+//     原有可观测性（NotifyChatDiagnostic 契约明文规定的兜底路径）。
+//
+// 可被后台 goroutine 安全调用：NotifyChatDiagnostic/ShowDiagnosticNotice
+// 内部自行加锁，只更新状态行缓存并投递 surface action。
+func chatScheduleDriverWarnf(format string, args ...any) {
+	line := "schedule-driver: " + fmt.Sprintf(format, args...)
+	if NotifyChatDiagnostic(line) {
+		return
+	}
+	fmt.Fprintln(os.Stderr, line)
+}
+
 // startChatScheduleDriver 在会话宿主挂载点尝试启动 aicli 调度者（幂等）。
 // localService 为本地宿主的调度服务（远端 runtime-server 执行器模式下为 nil，
 // 此时驱动自带 store/service）。未启用 / 未 opt-in / 缺 mesh 身份 / 已在运行时
@@ -76,17 +97,17 @@ func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *sch
 	sc := runtimeCfg.Schedule.WithDefaults()
 	if !sc.DriverAllows(config.ScheduleRoleAICLI) {
 		// opt-in：participants 未包含 aicli（默认如此）→ 不参战。
-		fmt.Fprintln(os.Stderr, "schedule-driver: not opted in (schedule.driver.participants excludes \"aicli\"); aicli stays out of scheduling")
+		chatScheduleDriverWarnf(`not opted in (schedule.driver.participants excludes "aicli"); aicli stays out of scheduling`)
 		return
 	}
 	host := mesh.Current()
 	if host == nil {
-		fmt.Fprintln(os.Stderr, "schedule-driver: mesh unavailable (--mesh=false?); aicli driver stays off")
+		chatScheduleDriverWarnf("mesh unavailable (--mesh=false?); aicli driver stays off")
 		return
 	}
 	nodeID := strings.TrimSpace(host.NodeID())
 	if nodeID == "" {
-		fmt.Fprintln(os.Stderr, "schedule-driver: mesh node id unavailable; aicli driver stays off")
+		chatScheduleDriverWarnf("mesh node id unavailable; aicli driver stays off")
 		return
 	}
 	service := localService
@@ -98,7 +119,7 @@ func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *sch
 		owned = service
 	}
 	if service == nil {
-		fmt.Fprintln(os.Stderr, "schedule-driver: schedule service unavailable; aicli driver stays off")
+		chatScheduleDriverWarnf("schedule service unavailable; aicli driver stays off")
 		return
 	}
 	store := service.Store()
@@ -118,9 +139,7 @@ func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *sch
 		return // 已在运行（宿主重挂载时幂等）
 	}
 
-	logf := func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "schedule-driver: "+format+"\n", args...)
-	}
+	logf := chatScheduleDriverWarnf
 	// L1：当前会话注入 + 交付账本守卫（driver 侧 occurrence 去重）。
 	local := schedule.Deliverer(aicliLocalSessionDeliverer{})
 	if ledger, ok := store.(schedule.OccurrenceLedger); ok {
@@ -169,9 +188,12 @@ func startChatScheduleDriver(runtimeCfg *config.RuntimeConfig, localService *sch
 		LeaseTTL:     sc.Driver.LeaseTTL,
 		StandbyRetry: sc.Driver.StandbyRetry,
 		// 交互宿主 fail-closed：mesh 不可用时待命，不自跑。
-		Degraded:              schedulehost.DegradedStandby,
-		StoreCompatCheck:      compatCheck,
+		Degraded:         schedulehost.DegradedStandby,
+		StoreCompatCheck: compatCheck,
+		// S5：daemon/runtime-server 在岗时让位；S6：多 aicli 并存时把租约让给
+		// 活动任务创建者所在的 aicli（投递走 L1 就近直达）。
 		DeferToHigherPriority: true,
+		CreatorAffinity:       schedulehost.StoreCreatorAffinity{Store: store},
 		Logf:                  logf,
 	})
 	if err != nil {

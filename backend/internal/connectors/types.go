@@ -345,6 +345,21 @@ type StateAwareProvider interface {
 	AttachState(connectorID string, state PollingState)
 }
 
+// CredentialVerifier 是 Provider 的可选能力：宿主在**保存配置落盘前**用真实
+// 请求校验凭据可用性（如 QQ 换取一次 App Access Token），把「保存成功但凭据
+// 无效、重启后才发现」的静默失败前移到保存路径（调用方据此返回明确错误并
+// 拒绝落盘）。
+//
+// 实现约定：
+//   - 可能有网络调用；调用方负责超时（建议 ≤15s）；
+//   - 返回 nil = 凭据可用；错误文本必须脱敏（app_secret 绝不回流到日志/API）；
+//   - 只做「可用性校验」，不替代 Activate（后者负责注册回调/预热缓存/启动轮询）。
+type CredentialVerifier interface {
+	Provider
+	// VerifyCredentials 校验 cfg 中凭据的可用性。
+	VerifyCredentials(ctx context.Context, cfg Config) error
+}
+
 // FailedReply 是一次「回复投递失败」的快照（切片 2f：失败回复重放，微信
 // errcode -2 的恢复路径）。宿主在实现 ReplyReplayProvider 的通道上记录快照；
 // 用户随后发来重发意图时由 Service 用新一条入站带来的上下文重放。

@@ -148,6 +148,52 @@ func TestSubscriptionNoticeAcceptedSemantics(t *testing.T) {
 	}
 }
 
+// TestSubscriptionNoticeLegacySkipsWorkFamily 锁定 2026-10-15 真机修复：
+// legacy 回退不得逐条直投工作类（tool/subagent）——legacy 无 digest 聚合通道，
+// 逐条 notice 违反「不放大：禁止逐 tool 事件直投」（docs/bots/13 §3.7#2）。
+// 修复前：未配 events 的 bot 因「绑定会话非 completion 恒开」收到每个工具事件的
+// `subscription=legacy-notify` 投递（微信 bot 实例）。
+func TestSubscriptionNoticeLegacySkipsWorkFamily(t *testing.T) {
+	boundHere := sessionBoundLookup([]Binding{{ConnectorID: "c1", Chat: "chat-1", Session: SessionRef{SessionID: "sess-1"}}})
+	toolDone, _ := subscriptionEventFor("tool.completed")
+	toolStarted, _ := subscriptionEventFor("tool.requested")
+	subagentDone, _ := subscriptionEventFor("subagent.completed")
+	approval, _ := subscriptionEventFor("approval_requested")
+
+	// 零配置 legacy：工作类三类事件（tool/subagent）均不投递。
+	legacy := Policy{}
+	for name, tc := range map[string]struct {
+		ev   subscriptionEvent
+		kind string
+	}{
+		"tool.completed":     {toolDone, AttentionKindTool},
+		"tool.requested":     {toolStarted, AttentionKindTool},
+		"subagent.completed": {subagentDone, AttentionKindSubagent},
+	} {
+		if delivery, sub := subscriptionNoticeDelivery(legacy, tc.ev, tc.kind, "sess-1", boundHere); delivery != "" {
+			t.Fatalf("legacy %s delivery = %q sub=%+v, want none", name, delivery, sub)
+		}
+	}
+	// 非工作类不受影响：绑定 approval 恒开（命令回环）。
+	if delivery, _ := subscriptionNoticeDelivery(legacy, approval, AttentionKindApproval, "sess-1", boundHere); delivery != "notice" {
+		t.Fatalf("legacy bound approval delivery = %q, want notice", delivery)
+	}
+	// 新模型不受影响：工作类仅 digest 订阅命中时投递。
+	digest := Policy{Events: EventsPolicy{Enabled: true, Subscriptions: []EventSubscription{
+		{ID: "work", Sessions: SessionSelector{Mode: "bound"}, Types: []string{"work.*"}, Deliver: "digest"},
+	}}}
+	if delivery, sub := subscriptionNoticeDelivery(digest, toolDone, AttentionKindTool, "sess-1", boundHere); delivery != "digest" || sub.ID != "work" {
+		t.Fatalf("events digest work delivery = %q sub=%+v", delivery, sub)
+	}
+	// 回归保护：新模型 notice 订阅对工作类不生效（已有语义）。
+	noticeOnly := Policy{Events: EventsPolicy{Enabled: true, Subscriptions: []EventSubscription{
+		{ID: "n", Sessions: SessionSelector{Mode: "bound"}, Types: []string{"work.*"}, Deliver: "notice"},
+	}}}
+	if delivery, _ := subscriptionNoticeDelivery(noticeOnly, toolDone, AttentionKindTool, "sess-1", boundHere); delivery != "" {
+		t.Fatalf("work family via notice subscription delivery = %q, want none", delivery)
+	}
+}
+
 func TestSubscriptionContentAllowedSemantics(t *testing.T) {
 	boundHere := sessionBoundLookup([]Binding{{ConnectorID: "c1", Chat: "chat-1", Session: SessionRef{SessionID: "sess-1"}}})
 	assistant, _ := subscriptionEventFor("assistant_message")

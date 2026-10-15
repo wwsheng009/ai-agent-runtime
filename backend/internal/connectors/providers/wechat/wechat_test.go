@@ -713,6 +713,55 @@ func TestSendRequiresContextTokenAndRedactsErrors(t *testing.T) {
 	}
 }
 
+// TestSendReplyContextInvalidDropsCachedToken 覆盖 2026-10-15 微信真机：
+// sendmessage 被上游以 ret=-2 "prepare failed"（回复上下文失效）拒绝时，必须
+// 清除该会话缓存（内存 + 持久化快照），否则后续每条出站（回复/通知）都会拿
+// 已死的 token 反复失败；清除后 Send 快速失败，等该会话新入站重新记忆后恢复。
+func TestSendReplyContextInvalidDropsCachedToken(t *testing.T) {
+	fake := newFakeILink(t)
+	fake.on("/ilink/bot/sendmessage", func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		writeJSON(t, w, map[string]any{"ret": -2, "errcode": 0, "errmsg": "prepare failed"})
+	})
+
+	provider := New(WithAPIBase(fake.URL()), WithLogger(discardLogger))
+	cfg := testConfig("c1", fake.URL(), nil)
+	state := newFakeState(nil)
+	provider.AttachState("c1", state)
+	provider.rememberContextToken("c1", "u1", "ctx-dead")
+	provider.persistContextTokens("c1")
+	if raw := state.value(contextTokensStateKey); !strings.Contains(raw, "ctx-dead") {
+		t.Fatalf("precondition: persisted snapshot = %q", raw)
+	}
+
+	err := provider.Send(context.Background(), cfg, "u1", []connectors.OutboundMessage{{Text: "hi"}})
+	if err == nil || !strings.Contains(err.Error(), "prepare failed") {
+		t.Fatalf("send error = %v, want prepare failed", err)
+	}
+	if got := provider.contextToken("c1", "u1"); got != "" {
+		t.Fatalf("context token after rejection = %q, want empty（内存应清除）", got)
+	}
+	if raw := state.value(contextTokensStateKey); strings.Contains(raw, "ctx-dead") {
+		t.Fatalf("persisted snapshot still holds dead token: %q", raw)
+	}
+
+	// 死 token 清掉后：再发应快速失败（不再打上游），直到该会话新入站重新记忆。
+	if err := provider.Send(context.Background(), cfg, "u1", []connectors.OutboundMessage{{Text: "again"}}); err == nil ||
+		!strings.Contains(err.Error(), "context_token") {
+		t.Fatalf("send without token error = %v", err)
+	}
+	if got := fake.callCount("/ilink/bot/sendmessage"); got != 1 {
+		t.Fatalf("sendmessage calls = %d, want 1（清 token 后不得再打上游）", got)
+	}
+
+	provider.rememberContextToken("c1", "u1", "ctx-new")
+	fake.on("/ilink/bot/sendmessage", func(w http.ResponseWriter, _ *http.Request, _ map[string]any) {
+		writeRet0(w)
+	})
+	if err := provider.Send(context.Background(), cfg, "u1", []connectors.OutboundMessage{{Text: "recovered"}}); err != nil {
+		t.Fatalf("Send after re-arm: %v", err)
+	}
+}
+
 // ── typing ──────────────────────────────────────────────────────────────────
 
 func TestTypingLifecycleUsesTicketAndCancelStatus(t *testing.T) {

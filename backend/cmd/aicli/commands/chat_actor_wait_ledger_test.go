@@ -56,6 +56,21 @@ func newLocalWaitLedgerHost(t *testing.T, batchStatus subagentbatch.BatchStatus,
 	return host, batch.BatchID
 }
 
+// applyFastAgentWaitWindows 把宿主的 wait_agent 观测窗口压到测试尺度：默认
+// 边界是 [10s, 120s]（agentcontrol.MinWaitTimeoutMs），毫秒级 TimeoutMs 会被
+// 钳到 10 秒——单个用例白等 10 秒，时序意图（窗口是否真的开合）也被掩盖。
+// 需要更细的窗口（如 [30ms, 60ms]）时，在用例内直接覆写字段。
+func applyFastAgentWaitWindows(host *localChatRuntimeHost) {
+	if host == nil {
+		return
+	}
+	host.RuntimeConfig = &runtimecfg.RuntimeConfig{Agents: runtimecfg.AgentsConfig{
+		DefaultWaitTimeoutMs: 50,
+		MinWaitTimeoutMs:     20,
+		MaxWaitTimeoutMs:     2000,
+	}}
+}
+
 // TestWaitAgentReturnsFinalizeWithoutBlockingOnTerminalLedger 钉住 AC-P2-4e：
 // 账本非空且 obligation 全部终态 ⇒ 立即返回 finalize，不空等整个观测窗口。
 func TestWaitAgentReturnsFinalizeWithoutBlockingOnTerminalLedger(t *testing.T) {
@@ -137,6 +152,7 @@ func TestLocalAgentSnapshotFallsBackToBatchTaskRow(t *testing.T) {
 // obligation 时等待照旧进行（不提前返回），且结果必须带账本、绝不给 finalize。
 func TestWaitAgentKeepsPendingLedgerAndNeverFinalizes(t *testing.T) {
 	host, batchID := newLocalWaitLedgerHost(t, subagentbatch.BatchRunning, "turn-parked")
+	applyFastAgentWaitWindows(host)
 	registry := newLocalActorRegistry(host)
 
 	result, err := registry.Wait(context.Background(), toolbroker.WaitAgentArgs{MailboxOnly: true, TimeoutMs: 40})
@@ -155,6 +171,7 @@ func TestWaitAgentKeepsPendingLedgerAndNeverFinalizes(t *testing.T) {
 // 时账本为空，等待结果不新增账本字段（plan §13.8：按"未挂起"处理）。
 func TestWaitAgentWithoutParkedTurnKeepsLegacySemantics(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)
+	applyFastAgentWaitWindows(host)
 	host.BaseSession = &ChatSession{RuntimeSession: &runtimechat.Session{ID: localWaitLedgerTestSession}}
 	host.SubagentBatches = newTestSubagentBatchStore(t)
 	host.RuntimeStore = runtimechat.NewInMemoryRuntimeStore(16)

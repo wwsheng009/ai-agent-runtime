@@ -62,6 +62,30 @@ func TestResolveRuntimeServerLogPathExpandsTilde(t *testing.T) {
 	isolateRuntimeServerHome(t, root)
 
 	configPath := filepath.Join(root, "config.yaml")
+	// 非模板默认（basename 不是 gateway.log）：显式路径原样保留，只做 ~ 展开
+	// （gateway.log 的专属文件归一另见 NormalizesTemplateGatewayDefault）。
+	if err := os.WriteFile(configPath, []byte("log:\n  file_path: ~/.aicli/logs/custom-app.log\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := resolveRuntimeServerLogPath(configPath, filepath.Join(root, "work"))
+	if err != nil {
+		t.Fatalf("resolve log path: %v", err)
+	}
+	expected := filepath.Join(root, "home", ".aicli", "logs", "custom-app.log")
+	if got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
+// runtimeServerLogFilePath 的 S0 收尾契约：配置沿用模板默认（gateway.log）时
+// 归一为专属 runtime-server.log（与 gateway 进程分文件，避免共享落盘）；
+// 用户显式指定其它 basename 时原样保留。
+func TestResolveRuntimeServerLogPathNormalizesTemplateGatewayDefault(t *testing.T) {
+	root := t.TempDir()
+	isolateRuntimeServerHome(t, root)
+
+	configPath := filepath.Join(root, "config.yaml")
 	if err := os.WriteFile(configPath, []byte("log:\n  file_path: ~/.aicli/logs/gateway.log\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -70,7 +94,7 @@ func TestResolveRuntimeServerLogPathExpandsTilde(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve log path: %v", err)
 	}
-	expected := filepath.Join(root, "home", ".aicli", "logs", "gateway.log")
+	expected := filepath.Join(root, "home", ".aicli", "logs", "runtime-server.log")
 	if got != expected {
 		t.Fatalf("expected %q, got %q", expected, got)
 	}

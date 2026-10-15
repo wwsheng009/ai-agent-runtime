@@ -127,6 +127,9 @@ type submitRequest struct {
 	Settings map[string]string `json:"settings"`
 	Secrets  map[string]string `json:"secrets"`
 	Policy   *PolicyView       `json:"policy"`
+	// SkipCredentialCheck 跳过保存前的在线凭据校验（默认 false）。仅用于
+	// 离线配置/平台暂不可达等必须强制落盘的场景（见 verifyCredentials）。
+	SkipCredentialCheck bool `json:"skip_credential_check,omitempty"`
 }
 
 func (h *handlers) list(w http.ResponseWriter, _ *http.Request) {
@@ -410,6 +413,14 @@ func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 		Secrets:   secrets,
 		Policy:    policyFrom(request.Policy),
 	}
+	// 保存前凭据校验（2026-10-15 加固）：实现 CredentialVerifier 的通道在
+	// 落盘前做真实校验，拒绝「保存成功但凭据无效」的静默失败（qqbot 真机复盘）。
+	if !request.SkipCredentialCheck {
+		if verifyErr := h.verifyCredentials(r.Context(), provider, cfg); verifyErr != nil {
+			writeError(w, http.StatusBadRequest, credentialCheckFailedMessage(verifyErr))
+			return
+		}
+	}
 	if err := h.deps.Store.PutConfig(cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存失败："+err.Error())
 		return
@@ -473,9 +484,17 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 	if request.Policy != nil {
 		updated.Policy = policyFrom(request.Policy)
 	}
-	// credentialsReplaced 决定保存后的应用路径：凭据替换走"立即生效"
-	//（必要时自动接管），普通微调走 ReloadConnector。
+	// 保存前凭据校验：仅在凭据相关字段变化时发起在线校验（普通配置微调不
+	// 依赖平台可用性）；失败不落盘（见 verifyCredentials/credentialsChanged）。
+	// credentialsReplaced 同时决定保存后的应用路径：凭据替换走"立即生效"
+	//（必要时自动接管），普通微调走重载。
 	credentialsReplaced := credentialsChanged(schema, current, merged)
+	if !request.SkipCredentialCheck && credentialsReplaced {
+		if verifyErr := h.verifyCredentials(r.Context(), provider, updated); verifyErr != nil {
+			writeError(w, http.StatusBadRequest, credentialCheckFailedMessage(verifyErr))
+			return
+		}
+	}
 	// 重复扫码收敛（三宿主共用语义，docs/bots/03 §6）：本次 PATCH 带入了
 	// owner_user_id（微信 ilink_user_id，平台唯一）且与另一个既有连接器
 	// （同 provider）的 owner_user_id 相同 = 同一用户重新扫码（微信会新建
@@ -836,9 +855,33 @@ func splitValues(schema api.ProviderSchema, merged map[string]string) (map[strin
 	return settings, secrets
 }
 
-// credentialsChanged 报告本次提交是否替换了凭据（secret/required 字段变为非空
-// 新值）——保存后的应用路径据此选择「立即生效」（必要时自动接管）还是普通重载。
-// 显式清空（`__clear__`/去掉键）视为有意失效，不算替换。
+// credentialCheckTimeout 是保存前在线校验的超时上限（平台调用 + 网络抖动留裕量）。
+const credentialCheckTimeout = 15 * time.Second
+
+// verifyCredentials 对实现了 CredentialVerifier 的 Provider 做保存前的在线
+// 凭据校验（2026-10-15 真机加固：qqbot 曾把无效 app_secret 静默落盘，重启后
+// 才以「订阅投递失败」暴露）。未实现该能力的通道直接通过。
+func (h *handlers) verifyCredentials(ctx context.Context, provider connectors.Provider, cfg connectors.Config) error {
+	verifier, ok := provider.(connectors.CredentialVerifier)
+	if !ok {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, credentialCheckTimeout)
+	defer cancel()
+	return verifier.VerifyCredentials(ctx, cfg)
+}
+
+// credentialCheckFailedMessage 组合保存前校验失败的响应文案（含显式跳过开关
+// 提示：平台不可达/离线配置场景允许强制保存，避免把可用性问题升级为无法落盘）。
+func credentialCheckFailedMessage(err error) string {
+	return "凭据校验失败：" + err.Error() + "（如需跳过在线校验强制保存，可附加 skip_credential_check=true 重试）"
+}
+
+// credentialsChanged 报告本次提交是否需要做保存前的在线凭据校验：任一 secret
+// 字段或 required 字段（如 QQ 的 app_id——非 secret 但属于凭据对的一部分）
+// 变为非空新值。普通配置微调（名称/策略/主动消息配额等）不校验；显式清空
+// （`__clear__`/去掉键）视为有意失效也不校验（与既有「更新允许清空 required
+// 密钥」语义一致），避免把平台可用性问题升级为无法保存。
 func credentialsChanged(schema api.ProviderSchema, before, after map[string]string) bool {
 	changed := make(map[string]struct{})
 	for key, value := range after {
@@ -868,6 +911,7 @@ func credentialsChanged(schema api.ProviderSchema, before, after map[string]stri
 	}
 	return false
 }
+
 func schemaDefault(schema api.ProviderSchema, key string) string {
 	for _, field := range schema.Fields {
 		if field.Key == key {

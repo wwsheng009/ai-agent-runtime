@@ -3191,6 +3191,18 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 		b.logLateRuntimeEvent(queued.event, "stale local run epoch")
 		return
 	}
+	// 结构化日志（append-only 观测面）在 worker 线程执行，绝不进入 UI actor
+	// 的 reducer：actor 是 mailbox 的唯一消费者，一旦在 bridge 日志锁（logMu）
+	// 上阻塞，整个渲染投影停摆且关键事件陷入无限重试（2026-10-15 真机：
+	// session_20261015162537_MMZm63Qi — actor 阻塞在 ensureRequestLogState 的
+	// logMu.Lock 达 15 分钟，pending=256、屏幕冻结在 8 个单元格）。
+	// 事后取证：当时的锁持有者并不存在 —— tool 事件日志对 nil map 写入触发
+	// panic（adopted run 没有 BeginRun，map 从未创建），UIController.apply
+	// recover 后跳过了手工 Unlock，logMu 泄漏为永久锁定。该 panic 已修复
+	// （惰性建 map + defer 解锁，见 markToolCallLogged）；把日志整体移出
+	// reducer 是第二道防线：日志路径上的任何新阻塞都不该再冻住 UI actor。
+	// worker 顺序消费保证日志顺序不变；被 actor 拒绝/降级的事件同样已记账。
+	b.handleStructuredLogEvent(queued.event)
 	// Keep the bridge queue as the bounded runtime ingress, but let the UI actor
 	// serialize ordinary runtime-driven UI mutations with timer and surface
 	// actions. Approval/question events still have to execute on this worker
@@ -5849,13 +5861,9 @@ func (b *chatRuntimeEventBridge) logToolRequested(event runtimeevents.Event) {
 	if toolCallID == "" {
 		return
 	}
-	b.logMu.Lock()
-	if _, exists := b.loggedToolCalls[toolCallID]; exists {
-		b.logMu.Unlock()
+	if !b.markToolCallLogged(toolCallID) {
 		return
 	}
-	b.loggedToolCalls[toolCallID] = struct{}{}
-	b.logMu.Unlock()
 	b.session.Logger.LogToolCall(scope, toolCallID, runtimeEventToolName(event), cloneRuntimeEventLogPayload(event.Payload))
 }
 
@@ -5874,15 +5882,49 @@ func (b *chatRuntimeEventBridge) logToolCompleted(event runtimeevents.Event) {
 	if callSummary.RawOutputArtifactPath != "" {
 		recordLocalShellArtifactPath(b.session, callSummary.RawOutputArtifactPath)
 	}
-	b.logMu.Lock()
-	if _, exists := b.loggedToolResults[toolCallID]; exists {
-		b.logMu.Unlock()
+	if !b.markToolResultLogged(toolCallID, callSummary) {
 		return
 	}
-	b.loggedToolResults[toolCallID] = struct{}{}
-	b.toolExecutionCalls = append(b.toolExecutionCalls, callSummary)
-	b.logMu.Unlock()
 	b.session.Logger.LogToolResult(scope, toolCallID, runtimeEventToolName(event), resultPayload, err)
+}
+
+// markToolCallLogged 在 logMu 下登记一次工具调用；返回 false 表示重复登记。
+//
+// 2026-10-15 真机回归（session_20261015162537_MMZm63Qi，qq-bot1 绑定会话）：
+// sidecar/IM 提交的轮没有 CLI BeginRun，runActive 由 adoptPrimaryRunTurnLocked
+// 打开，而日志用的 map 只在 BeginRun 里创建 —— 首次 tool 事件在 nil map 上写入
+// 触发 panic "assignment to entry in nil map"；panic 被 UIController.apply 恢复
+// 后，原先手写的 b.logMu.Unlock() 被跳过，logMu 永久泄漏为已锁定：actor 随后在
+// ensureRequestLogState 的 logMu.Lock 上永久阻塞（现场 goroutine 74 卡死 23 分钟、
+// mailbox 积满 256），IM 输入的渲染投影与回合结算全部停摆。这里必须惰性建 map
+// （沿用 ensureRequestLogState 的守卫），并用 defer 解锁保证任何 panic 都不泄漏锁。
+func (b *chatRuntimeEventBridge) markToolCallLogged(toolCallID string) bool {
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	if b.loggedToolCalls == nil {
+		b.loggedToolCalls = make(map[string]struct{})
+	}
+	if _, exists := b.loggedToolCalls[toolCallID]; exists {
+		return false
+	}
+	b.loggedToolCalls[toolCallID] = struct{}{}
+	return true
+}
+
+// markToolResultLogged 与 markToolCallLogged 同构；登记成功时在同一临界区内追加
+// 一条执行摘要（供 logSessionEnd 汇总）。返回 false 表示重复登记。
+func (b *chatRuntimeEventBridge) markToolResultLogged(toolCallID string, summary aicliToolExecutionCallSummary) bool {
+	b.logMu.Lock()
+	defer b.logMu.Unlock()
+	if b.loggedToolResults == nil {
+		b.loggedToolResults = make(map[string]struct{})
+	}
+	if _, exists := b.loggedToolResults[toolCallID]; exists {
+		return false
+	}
+	b.loggedToolResults[toolCallID] = struct{}{}
+	b.toolExecutionCalls = append(b.toolExecutionCalls, summary)
+	return true
 }
 
 func (b *chatRuntimeEventBridge) logAssistantMessage(event runtimeevents.Event) {
@@ -6315,9 +6357,8 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldEndClosingTail(event) {
 		defer b.clearClosingTail(event)
 	}
-	// Logging is append-only observability and may retain stale events. All
-	// mutable UI/transcript paths below remain guarded by turn ownership.
-	b.handleStructuredLogEvent(event)
+	// 结构化日志已由 worker 线程在消费入队时执行（handleQueuedEvent）：
+	// UI actor 的 reducer 不得触碰 bridge 日志锁（见 handleQueuedEvent 注释）。
 	b.updateComposerAgentStageForAmbientPrimaryRunEvent(event)
 	// Context accounting is session-scoped observability, not viewport
 	// mutation: apply provider usage / compaction accounting before the
@@ -6862,22 +6903,41 @@ func (b *chatRuntimeEventBridge) shouldEndAdoptedRun(event runtimeevents.Event) 
 // active run keeps its submitter-owned lifecycle.
 func (b *chatRuntimeEventBridge) endAdoptedRun(event runtimeevents.Event) {
 	b.renderMu.Lock()
-	defer b.renderMu.Unlock()
 	if b.adoptedTurnID == "" {
+		b.renderMu.Unlock()
 		return
 	}
 	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
 	if turnID != b.adoptedTurnID {
+		b.renderMu.Unlock()
 		return
 	}
+	closed := false
 	if b.runEpoch == b.adoptedRunEpoch && b.activeTurnID == turnID {
 		b.activeTurnID = ""
 		b.retireTurnLocked(turnID)
 		b.runActive = false
 		b.markRunClosed()
+		closed = true
 	}
 	b.adoptedTurnID = ""
 	b.adoptedRunEpoch = 0
+	b.renderMu.Unlock()
+	if !closed || b.session == nil || b.session.Interaction == nil {
+		return
+	}
+	// 收养轮（connector/sidecar 直接 SubmitPrompt，没有 CLI 的 BeginRun /
+	// CompleteWaiting）关闭后必须显式把 UI 置回 idle：否则 Planning 阶段与
+	// 运行时钟（dynamicStatusStarted）残留，状态行变成永不推进的
+	// "幽灵 Analyzing"（2026-10-15 真机：IM 回合已 agent.turn.finished，
+	// 状态栏仍显示 Analyzing (1m 45s • ctrl+c to stop)）。与 ambient 路径
+	// （updateComposerAgentStageForAmbientPrimaryRunEvent）同款收口。
+	// 必须在 renderMu 之外调用 coordinator：SetAgentStage 取 c.mu，而
+	// coordinator 侧存在持 c.mu 回调桥的路径，持 renderMu 调回会倒挂锁序。
+	b.session.Interaction.ClearRuntimeToolAgentStages()
+	if interactiveSessionActorReady(b.session) {
+		b.session.Interaction.SetAgentStage(chatAgentStageIdle)
+	}
 }
 
 func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event runtimeevents.Event) bool {

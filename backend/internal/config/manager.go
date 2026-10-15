@@ -446,7 +446,8 @@ const DefaultScheduleDriverLeaseTTL = 30 * time.Second
 
 // ScheduleDriverConfig 控制调度领导权的参与与降级（联盟式调度 v1.1）。
 type ScheduleDriverConfig struct {
-	// Participants 是有资格竞争调度租约的角色，按序即优先级；默认 [daemon, runtime-server]。
+	// Participants 是有资格竞争调度租约的角色，按序即优先级；默认
+	// [daemon, runtime-server, aicli]（S6：aicli 兜底在岗，最低优先级）。
 	Participants []string `yaml:"participants" json:"participants"`
 	// LeaseTTL 是 driver 租约寿命（默认 30s；小于 1s 会被 schedulehost 抬到 1s——
 	// mesh 租约以秒为存储粒度）。
@@ -461,7 +462,11 @@ type ScheduleDriverConfig struct {
 // DefaultScheduleDriverConfig returns the shipped driver defaults.
 func DefaultScheduleDriverConfig() ScheduleDriverConfig {
 	return ScheduleDriverConfig{
-		Participants: []string{ScheduleRoleDaemon, ScheduleRoleRuntimeServer},
+		// S6：aicli 兜底在岗——交互宿主以最低优先级参与，daemon/runtime-server
+		// 在线时自动让位（DeferToHigherPriority），保证「只要有 aicli 开着就有
+		// 调度者」。显式配置 participants 时完全覆盖默认值（想把 aicli 排除在
+		// 调度外，显式列出 [daemon, runtime-server]）。
+		Participants: []string{ScheduleRoleDaemon, ScheduleRoleRuntimeServer, ScheduleRoleAICLI},
 		LeaseTTL:     DefaultScheduleDriverLeaseTTL,
 	}
 }
