@@ -46,12 +46,13 @@ type pushNotifier struct {
 
 	// coalesceWindow merges low-priority notifications arriving close together
 	// (0 disables coalescing). quietHours mutes low-priority notifications.
+	// S4b G3：两者均已下沉内核（SetCoalesceWindow/SetQuietHours），字段仅为
+	// 装配输入保留；批处理由内核持有（batch/timer 退役），now 为装配时钟
+	// （经 SetCoalesceClock 注入内核，生产恒 time.Now）。
 	coalesceWindow time.Duration
 	quietHours     []quietRange
 	now            func() time.Time
 
-	batch map[string][]pendingNotification
-	timer *time.Timer
 	// dispatcher 是惰性缓存的内核分发器（S4b G1：构造上提，避免每次 dispatch
 	// 重建；G2 账本接线后单实例语义才完整）。由 ensureDispatcher 按 mu 加锁
 	// 构建/失效，锁外仅读引用。
@@ -70,6 +71,15 @@ func newPushNotifier(manager *push.Manager, baseURL string, presence notify.Pres
 		presence: presence,
 		now:      time.Now,
 	}
+}
+
+// SetCoalesceClockForTest 注入静默/合并判定时钟并失效 Dispatcher 缓存
+// （测试用；生产时钟恒为 time.Now）。
+func (p *pushNotifier) SetCoalesceClockForTest(now func() time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.now = now
+	p.dispatcher = nil
 }
 
 // Seed pre-populates the dedup snapshot from persisted/last-known registry
@@ -166,57 +176,13 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 		}
 	}
 	p.seen = next
-	if p.coalesceWindow > 0 {
-		for _, item := range batched {
-			if p.batch == nil {
-				p.batch = make(map[string][]pendingNotification)
-			}
-			p.batch[item.attention] = append(p.batch[item.attention], item)
-		}
-		if len(batched) > 0 && p.timer == nil {
-			p.timer = time.AfterFunc(p.coalesceWindow, p.flush)
-		}
-	} else {
-		immediate = append(immediate, batched...)
-	}
+	// 合并/静默策略下沉内核（docs/bots/12 §3 D3）：batched 事件原样进
+	// dispatch，由 Dispatcher 的 coalesce/quiet 门接管攒批与免打扰；宿主
+	// 不再自持批处理（batch/timer 字段退役）。
+	immediate = append(immediate, batched...)
 	p.mu.Unlock()
 
 	p.dispatch(immediate)
-}
-
-// flush emits the coalesced low-priority batch unless quiet hours are active.
-func (p *pushNotifier) flush() {
-	p.mu.Lock()
-	batch := p.batch
-	p.batch = nil
-	p.timer = nil
-	now := time.Now
-	if p.now != nil {
-		now = p.now
-	}
-	quiet := inQuietHours(p.quietHours, now())
-	p.mu.Unlock()
-
-	if len(batch) == 0 || quiet {
-		return
-	}
-	out := make([]pendingNotification, 0, len(batch))
-	for attention, items := range batch {
-		notes := make([]push.Notification, 0, len(items))
-		allIM := len(items) > 0
-		for _, it := range items {
-			notes = append(notes, it.note)
-			if !it.imMain {
-				allIM = false
-			}
-		}
-		note := coalesceNotifications(attention, notes)
-		if len(items) > 1 && p.baseURL != "" {
-			note.URL = p.baseURL + "/"
-		}
-		out = append(out, pendingNotification{attention: attention, imMain: allIM, note: note})
-	}
-	p.dispatch(out)
 }
 
 // ntfyEnabled reports whether the secondary channel is configured.
@@ -265,6 +231,13 @@ func (p *pushNotifier) ensureDispatcher() *notify.Dispatcher {
 	// 这里兜住未自行前置检查的生产者（内核门同样不认领去重键）。
 	if p.presence != nil {
 		d.SetPresence(p.presence)
+	}
+	// 静默/合并下沉内核（docs/bots/12 §3 D3）：窗口与判定时钟注入 Dispatcher；
+	// 宿主自持的批处理已退役（observe 直投，攒批在内核）。
+	d.SetQuietHours(p.quietHours)
+	d.SetCoalesceWindow(p.coalesceWindow)
+	if p.now != nil {
+		d.SetCoalesceClock(p.now)
 	}
 	p.dispatcher = d
 	return d

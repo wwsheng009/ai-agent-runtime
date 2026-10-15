@@ -4,20 +4,31 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 )
 
 type notifyTestChannel struct {
 	name  string
 	err   error
+	mu    sync.Mutex
 	calls []Notification
 }
 
 func (c *notifyTestChannel) Name() string { return c.name }
 
 func (c *notifyTestChannel) Deliver(_ context.Context, ev Event) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.calls = append(c.calls, ev.Notification)
 	return c.err
+}
+
+// callCount 并发安全读口（异步 flush 定时器与测试主线程并发）。
+func (c *notifyTestChannel) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.calls)
 }
 
 func notifyTestNote(title string) Notification { return Notification{Title: title, Body: "b"} }

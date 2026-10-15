@@ -189,7 +189,9 @@ func TestPushNotifierQuietHours(t *testing.T) {
 	n := testNotifier(t, srv.URL+"/sub")
 	n.coalesceWindow = 30 * time.Millisecond
 	n.quietHours = []notify.QuietRange{{Start: 0, End: 24 * 60}} // all day
-	n.now = func() time.Time { return time.Date(2026, 10, 11, 23, 0, 0, 0, time.Local) }
+	// G3：静默判定时钟随策略下沉内核（SetCoalesceClock）；改完装配字段后
+	// 置空 dispatcher 缓存使其在下一次 dispatch 重建时生效。
+	n.SetCoalesceClockForTest(func() time.Time { return time.Date(2026, 10, 11, 23, 0, 0, 0, time.Local) })
 
 	low := &tunnel.Node{NodeID: "n1", Sessions: []wire.SessionSummary{{SessionID: "s1", Attention: "completed"}}}
 	n.observe([]*tunnel.Node{low})

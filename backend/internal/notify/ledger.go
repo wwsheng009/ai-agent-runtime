@@ -28,6 +28,11 @@ type Receipt struct {
 	// DedupKey **未被认领**，查看者离开后同一事件可再次投递（补推语义，
 	// docs/bots/10 §3.3）。
 	Suppressed bool
+	// Muted 表示该事件因静默时段（免打扰窗口，仅 low/normal）被丢弃。与
+	// Suppressed 的语义差异：静默是**永久性**丢弃——宿主的去重快照已记，
+	// 静默期结束后同一事件**不**补推（现网 flush 行为，docs/bots/12 §3 D3）；
+	// DedupKey 同样未被认领（静默是时刻性判定，不是投递记账）。
+	Muted bool
 }
 
 // Ledger 是投递账本契约。
