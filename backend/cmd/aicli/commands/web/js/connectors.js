@@ -934,17 +934,39 @@ function renderEventSubRows(subs) {
   }
 }
 
-// EVENT_TYPE_GROUPS 是事件类型多选词表(docs/bots/13 §3.1),按族分组;第二项是
-// 投递形态提示。既有配置里词表外的值(别名/自定义)会在面板尾部追加为「自定义(既有)」
-// 勾选项,保证往返不丢配置。
-var EVENT_TYPE_GROUPS = [
-  { label: "conversation", types: [["assistant_message", "content"], ["user_message", ""], ["assistant_delta", "仅 stream"]] },
-  { label: "turn", types: [["agent.turn.started", ""], ["agent.turn.finished", "notice/digest"], ["turn.suspended", ""], ["turn.resumed", ""], ["session_start", ""], ["session_end", ""], ["session.interrupted", ""]] },
-  { label: "interaction", types: [["approval_requested", "notice"], ["question_asked", "notice"]] },
-  { label: "work", types: [["tool.requested", "仅 digest"], ["tool.completed", "仅 digest"], ["tool.denied", "仅 digest"], ["subagent.completed", "仅 digest"], ["subagent.batch.completed", "仅 digest"]] },
-  { label: "system", types: [["error", ""]] },
-  { label: "通配", types: [["turn.*", "族"], ["work.*", "族"]] }
+// EVENT_TYPE_ORDER 是面板展示顺序(规范名;别名仅参与推导/自定义输入,不单独出选项)。
+// 面板**按投递形态分组**(见 EVENT_TYPE_SECTION_*):types↔deliver 的关联由结构表达,
+// 而不是让用户自己对照(2026-10-15 UI 反馈:平铺+族分组反直觉)。
+var EVENT_TYPE_ORDER = [
+  "assistant_message", "assistant_delta",
+  "approval_requested", "question_asked", "agent.turn.finished", "turn.*",
+  "tool.requested", "tool.completed", "tool.denied", "subagent.completed", "subagent.batch.completed", "work.*",
+  "user_message", "agent.turn.started", "turn.suspended", "turn.resumed",
+  "session_start", "session_end", "session.interrupted", "error"
 ];
+
+// EVENT_TYPE_FAMILY 是条目辅助信息(族名;分组已按形态表达,族作为右侧小字)。
+var EVENT_TYPE_FAMILY = {
+  "assistant_message": "conversation", "user_message": "conversation", "assistant_delta": "conversation",
+  "agent.turn.started": "turn", "agent.turn.finished": "turn", "turn.suspended": "turn", "turn.resumed": "turn",
+  "session_start": "turn", "session_end": "turn", "session.interrupted": "turn",
+  "approval_requested": "interaction", "question_asked": "interaction",
+  "error": "system",
+  "tool.requested": "work", "tool.completed": "work", "tool.denied": "work",
+  "subagent.completed": "work", "subagent.batch.completed": "work",
+  "turn.*": "通配", "work.*": "通配"
+};
+
+// 形态分组标题与顺序(键 = EVENT_TYPE_FORMS 的值 join("/"))。
+var EVENT_TYPE_SECTION_LABELS = {
+  "content": "content(正文副本)",
+  "stream": "stream(流式编辑)",
+  "notice": "notice(通知)",
+  "notice/digest": "notice / digest(即时或聚合)",
+  "digest": "digest(聚合)",
+  "": "未接线(勾选不会投递)"
+};
+var EVENT_TYPE_SECTION_ORDER = ["content", "stream", "notice", "notice/digest", "digest", ""];
 
 // EVENT_TYPE_FORMS 记录每种类型的可用投递形态(docs/bots/13 §3.1/§4):用于「类型 ×
 // 投递形态」相容性告警——形态不匹配的类型会被后端静默忽略(2026-10-15 实测:
@@ -1023,15 +1045,38 @@ function eventSubRowHTML(sub) {
     eventTypeCheckboxesHTML(sub.types || []) +
     '<input type="text" data-sub-field="types-extra" autocomplete="off" placeholder="自定义/别名(逗号分隔,可留空)" value="">' +
     '<span class="connector-types-warning" data-types-warning hidden></span>' +
-    '<span class="connector-field-help">展开面板勾选(按族分组);work.*(工具/子代理)仅 digest 生效。</span>' +
+    '<span class="connector-field-help">按投递形态分组勾选;形态由所选类型自动推导(无需手配)。</span>' +
     "</div>" +
     '<button type="button" class="connector-event-sub-split" data-editor="split-event-sub" hidden>一键拆分为多条订阅</button>' +
     '<button type="button" data-editor="remove-event-sub">删除此订阅</button>' +
     "</div>";
 }
 
+// eventTypeSections 由 EVENT_TYPE_FORMS 生成「按形态分组」的面板结构:
+// 分组键 = 允许形态的 join("/"),顺序见 EVENT_TYPE_SECTION_ORDER。
+// 与推导/告警共用同一份映射——面板结构不会和校验口径漂移。
+function eventTypeSections() {
+  var byForm = {};
+  for (var i = 0; i < EVENT_TYPE_ORDER.length; i++) {
+    var name = EVENT_TYPE_ORDER[i];
+    var forms = EVENT_TYPE_FORMS[name];
+    if (!forms) { continue; }
+    var key = forms.length ? forms.join("/") : "";
+    if (!byForm[key]) { byForm[key] = []; }
+    byForm[key].push(name);
+  }
+  var sections = [];
+  for (var s = 0; s < EVENT_TYPE_SECTION_ORDER.length; s++) {
+    var form = EVENT_TYPE_SECTION_ORDER[s];
+    if (byForm[form] && byForm[form].length) {
+      sections.push({ form: form, label: EVENT_TYPE_SECTION_LABELS[form] || form, types: byForm[form] });
+    }
+  }
+  return sections;
+}
+
 // eventTypeCheckboxesHTML 渲染事件类型多选:折叠面板(<details>)+ 原生 checkbox,
-// 汇总行显示已选数量与名称;不再把选项平铺成按钮(2026-10-15 UI 反馈)。
+// 汇总行显示已选数量与名称;选项按投递形态分组(types↔deliver 关联可见)。
 function eventTypeCheckboxesHTML(selected) {
   var chosen = [];
   var seen = {};
@@ -1043,14 +1088,15 @@ function eventTypeCheckboxesHTML(selected) {
   var unknown = [];
   var html = '<details class="connector-types-picker"><summary><span data-types-summary>' +
     esc(eventTypesSummaryText(chosen)) + "</span></summary><div class=\"connector-types-panel\">";
-  for (var g = 0; g < EVENT_TYPE_GROUPS.length; g++) {
-    var group = EVENT_TYPE_GROUPS[g];
-    html += '<div class="connector-types-group-title">' + esc(group.label) + "</div>";
-    for (var t = 0; t < group.types.length; t++) {
-      var name = group.types[t][0];
+  var sections = eventTypeSections();
+  for (var g = 0; g < sections.length; g++) {
+    var section = sections[g];
+    html += '<div class="connector-types-group-title">' + esc(section.label) + "</div>";
+    for (var t = 0; t < section.types.length; t++) {
+      var name = section.types[t];
       var on = !!seen[name];
       if (on) { seen[name] = false; }
-      html += eventTypeOptionHTML(name, group.types[t][1], on);
+      html += eventTypeOptionHTML(name, EVENT_TYPE_FAMILY[name] || "", on);
     }
   }
   for (var k = 0; k < chosen.length; k++) {

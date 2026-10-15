@@ -32,6 +32,7 @@ ok(/eventTypeCheckboxesHTML/.test(src) && /connector-types-picker/.test(src), "�
 ok(!/eventTypeChipsHTML/.test(src), "旧的平铺 chips 实现已移除");
 ok(/EVENT_TYPE_FORMS/.test(src) && /data-types-warning/.test(src), "类型×投递形态相容性告警已接入");
 ok(/refreshDeliverSelect/.test(src) && /splitEventSubRow/.test(src), "细项→粗项推导与一键拆分已接入");
+ok(/eventTypeSections/.test(src) && /EVENT_TYPE_SECTION_ORDER/.test(src), "类型面板按投递形态分组(types↔deliver 关联显示)");
 
 // ---- 最小 DOM mock ----
 function matchesSelector(node, sel) {
@@ -286,6 +287,11 @@ modalBody.appendChild(subsHost);
   ok(!/connector-type-chip/.test(html), "不再渲染平铺 chips 按钮");
   const boxCount = (html.match(/data-sub-type="/g) || []).length;
   ok(boxCount === 20, "面板含 20 个多选项(词表全量)", boxCount);
+  ok(/content\(正文副本\)[\s\S]*data-sub-type="assistant_message"/.test(html), "分组:content 组含 assistant_message");
+  ok(/stream\(流式编辑\)[\s\S]*data-sub-type="assistant_delta"/.test(html), "分组:stream 组含 assistant_delta");
+  ok(/digest\(聚合\)[\s\S]*data-sub-type="tool\.completed"/.test(html), "分组:digest 组含 tool.completed");
+  ok(/未接线\(勾选不会投递\)[\s\S]*data-sub-type="user_message"/.test(html), "分组:未接线组含 user_message");
+  ok(html.includes('connector-type-hint">conversation'), "条目提示为族名(conversation)");
   ok(/data-sub-type="assistant_message" checked/.test(html)
     && /data-sub-type="turn\.\*" checked/.test(html)
     && !/data-sub-type="error" checked/.test(html), "选中项勾选,未选项不勾选");

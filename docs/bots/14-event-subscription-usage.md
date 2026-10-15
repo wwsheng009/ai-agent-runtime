@@ -243,7 +243,8 @@ policy:
 - 能力：连接器列表 / 新建 / 编辑 / 测试 / 日志 / 绑定管理；策略表单含
   `allowed_users`、`command_prefix`、`session_mode`、`reply_mode`、`runtime_owner`、`route`，
   以及**事件订阅编辑器**（总开关 + 逐条 id / 会话选择器（bound|ids|all + 列表）/
-  事件类型 / 投递形态（notice|content|digest|stream）/ 单条启停；2026-10-15 补齐）。
+  事件类型（**按投递形态分组的多选面板**）/ 投递形态（**由所选类型自动推导**，跨形态
+  一键拆分）/ 单条启停；2026-10-15 补齐）。
 - 保存语义（与 React 对话框对齐）：保存走 `PATCH /api/connectors/{id}`，前端先**原样带回
   既有 policy** 再覆盖表单字段与 `route`/`events`——未展示键（`notify`、`content_mirror` 等）
   不再丢失（2026-10-15 修复此前「保存策略会清空订阅/开关」的问题）。
