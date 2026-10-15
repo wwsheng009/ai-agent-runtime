@@ -36,9 +36,13 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 	}
 	// agent 装配与 loop 接线：把 profile 相关逻辑封装在宿主侧，profile 状态经
 	// 不透明 handle 在两次回调间传递（不二次解析）。
+	// preparedAgent 供 run 前钩子（OnRunPrepare）刷新 turn 级 goal 指引：
+	// PrepareAgent 只在 actor 构建期调用一次，run 级刷新必须走 OnRunPrepare。
+	var preparedAgent *agent.Agent
 	deps.PrepareAgent = func(ctx context.Context, sid string, sessionCtx runtimehost.SessionContext) (*agent.Agent, *runtimecfg.RuntimeConfig, any) {
 		profileState := h.resolveProfileStateForSessionContext(sessionCtx)
 		apiAgent, selectedConfig := h.buildSessionAgentForContext(sid, sessionCtx, profileState, h.resolveRuntimeConfig(UsageScope{}))
+		preparedAgent = apiAgent
 		return apiAgent, selectedConfig, profileState
 	}
 	deps.BuildLoopConfig = func(sid string, sessionCtx runtimehost.SessionContext, selectedConfig *runtimecfg.RuntimeConfig, profileHandle any) *agent.LoopReActConfig {
@@ -58,6 +62,13 @@ func (h *Handler) SessionDeps(sessionID string) runtimehost.Deps {
 		CancelTeam:         h.cancelSuspendedTurnTeam,
 	}
 	deps.PersistHook = h.runtimeServerGoalPersistHook
+	// run 级 goal 指引（gap 修复）：runtime-server 的每次 turn 之前按实时会话刷新
+	// active_goal_guidance。租约仍由 runtimehost 默认 PrepareRun 负责，本钩子只做
+	// agent 刷新（见 runtimehost.Deps.OnRunPrepare 的顺序契约）。
+	deps.OnRunPrepare = func(_ context.Context, session *chat.Session, _ bool) error {
+		h.applyRuntimeServerGoalGuidance(preparedAgent, session)
+		return nil
+	}
 	if h.sessionManager == nil {
 		return deps
 	}

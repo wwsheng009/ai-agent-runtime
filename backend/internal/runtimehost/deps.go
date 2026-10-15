@@ -85,6 +85,15 @@ type Deps struct {
 	// PrepareRun 覆盖默认的 run 前钩子（默认 = 取会话租约）。
 	// 宿主注入自定义实现时，需自行保证会话租约已就绪（aicli 走本地 hook）。
 	PrepareRun func(ctx context.Context, session *chat.Session, resume bool) error
+	// OnRunPrepare 是 run 级前置钩子（可空），在 PrepareRun（或默认的取租约）
+	// 成功之后、turn 执行之前调用。
+	//
+	// 与 PrepareRun 的区别：PrepareRun **替换**默认的「取会话租约」实现，宿主
+	// 需自行管理租约；OnRunPrepare 只**追加**执行，租约仍由默认路径负责，宿主
+	// 无需感知。runtimeapi 用它做 run 级 agent 刷新（逐轮 goal 指引，读取 run
+	// 时的实时会话，因此 /goal 变更无需重建 actor 即可在下一轮生效）。
+	// 钩子返回错误时 run 直接失败（fail-closed），与 PrepareRun 同口径。
+	OnRunPrepare func(ctx context.Context, session *chat.Session, resume bool) error
 	// EnsureSession 是 actor 自愈钩子（可空；仅基础会话启用）。
 	EnsureSession func(ctx context.Context, sessionID string) error
 	// CheckpointInterval 是长 turn 增量落库间隔（0 = chat 默认）。

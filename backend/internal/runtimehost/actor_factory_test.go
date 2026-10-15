@@ -2,6 +2,7 @@ package runtimehost
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -135,5 +136,77 @@ func TestRunScopedReleasesLeaseAfterConstruction(t *testing.T) {
 	}
 	if lease != nil {
 		t.Fatal("run-scoped must release the construction lease (idle actor must not block)")
+	}
+}
+
+// TestComposePrepareRunRunsLeaseBeforeHostHook 验证顺序契约：OnRunPrepare 只在
+// 默认租约获取（或宿主 PrepareRun）成功之后执行，宿主因此无需自行管理租约。
+func TestComposePrepareRunRunsLeaseBeforeHostHook(t *testing.T) {
+	var order []string
+	deps := Deps{
+		OnRunPrepare: func(context.Context, *chat.Session, bool) error {
+			order = append(order, "hook")
+			return nil
+		},
+	}
+	ensureLease := func(context.Context) error {
+		order = append(order, "lease")
+		return nil
+	}
+	prepare := composePrepareRun(deps, ensureLease)
+	if err := prepare(context.Background(), nil, false); err != nil {
+		t.Fatalf("prepareRun: %v", err)
+	}
+	if len(order) != 2 || order[0] != "lease" || order[1] != "hook" {
+		t.Fatalf("expected lease before host hook, got %v", order)
+	}
+}
+
+// TestComposePrepareRunSkipsHookWhenLeaseFails 验证租约失败时不执行宿主刷新
+// （fail-closed，且不产生半准备状态）。
+func TestComposePrepareRunSkipsHookWhenLeaseFails(t *testing.T) {
+	hookCalled := false
+	deps := Deps{
+		OnRunPrepare: func(context.Context, *chat.Session, bool) error {
+			hookCalled = true
+			return nil
+		},
+	}
+	ensureLease := func(context.Context) error { return errors.New("lease denied") }
+	prepare := composePrepareRun(deps, ensureLease)
+	if err := prepare(context.Background(), nil, false); err == nil {
+		t.Fatal("expected lease failure to propagate")
+	}
+	if hookCalled {
+		t.Fatal("host hook must not run when the lease is not held")
+	}
+}
+
+// TestComposePrepareRunHostOverrideWinsAndNilHookIsPassthrough 验证：
+// PrepareRun 覆盖存在时不再调用默认 ensureLease；OnRunPrepare 为空时直接复用
+// 基础实现（零开销，行为与改动前一致）。
+func TestComposePrepareRunHostOverrideWinsAndNilHookIsPassthrough(t *testing.T) {
+	var order []string
+	deps := Deps{
+		PrepareRun: func(context.Context, *chat.Session, bool) error {
+			order = append(order, "host")
+			return nil
+		},
+	}
+	ensureLease := func(context.Context) error {
+		order = append(order, "lease")
+		return nil
+	}
+	prepare := composePrepareRun(deps, ensureLease)
+	if err := prepare(context.Background(), nil, true); err != nil {
+		t.Fatalf("prepareRun: %v", err)
+	}
+	if len(order) != 1 || order[0] != "host" {
+		t.Fatalf("expected host PrepareRun only, got %v", order)
+	}
+
+	noop := composePrepareRun(Deps{}, ensureLease)
+	if err := noop(context.Background(), nil, false); err != nil {
+		t.Fatalf("nil hook passthrough: %v", err)
 	}
 }

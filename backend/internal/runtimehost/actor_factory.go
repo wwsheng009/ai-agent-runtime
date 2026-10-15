@@ -70,13 +70,9 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 			leaseHandle = nil
 		}
 	}
-	// PrepareRun 默认取会话租约；宿主可注入自定义实现（aicli 走本地 hook）。
-	prepareRun := deps.PrepareRun
-	if prepareRun == nil {
-		prepareRun = func(ctx context.Context, _ *chat.Session, _ bool) error {
-			return ensureLease(ctx)
-		}
-	}
+	// PrepareRun 默认取会话租约；宿主可注入自定义实现（aicli 走本地 hook），
+	// OnRunPrepare 在租约就绪之后追加执行（runtimeapi 的 run 级 agent 刷新）。
+	prepareRun := composePrepareRun(deps, ensureLease)
 	// E3.4-0：租约持有期由 LeaseMode 决定（零值 = run-scoped，行为不变）。
 	onRunFinished := func() {}
 	if deps.LeaseMode.ReleasesOnRunFinished() {
@@ -122,4 +118,28 @@ func BuildSessionActor(sessionID string, deps Deps) (*chat.SessionActor, error) 
 		releaseLease()
 	}
 	return actor, nil
+}
+
+// composePrepareRun 组装 run 前钩子。
+//
+// 顺序契约：先执行 deps.PrepareRun（缺省 = 取会话租约），成功后追加执行
+// deps.OnRunPrepare。因此 OnRunPrepare 可以假定会话租约已就绪，且宿主刷新失败
+// （返回错误）会与租约失败同口径地终止本次 run。
+func composePrepareRun(deps Deps, ensureLease func(context.Context) error) func(context.Context, *chat.Session, bool) error {
+	base := deps.PrepareRun
+	if base == nil {
+		base = func(ctx context.Context, _ *chat.Session, _ bool) error {
+			return ensureLease(ctx)
+		}
+	}
+	hook := deps.OnRunPrepare
+	if hook == nil {
+		return base
+	}
+	return func(ctx context.Context, session *chat.Session, resume bool) error {
+		if err := base(ctx, session, resume); err != nil {
+			return err
+		}
+		return hook(ctx, session, resume)
+	}
 }
