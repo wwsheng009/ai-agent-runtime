@@ -12,6 +12,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/notify"
 )
 
+// 本文件是宿主级行为护栏（docs/bots/12 §4 G3 退役 notify_policy.go 时保留）：
+// 合并/免打扰/投递提示/种子去重的端到端语义锁定。别名单元测试（解析/窗口/
+// 合并原语）已由内核 policy_test.go 同名测试接管。
+
 // testNotifier builds a notifier with one subscription pointing at endpoint.
 func testNotifier(t *testing.T, endpoint string) *pushNotifier {
 	t.Helper()
@@ -25,86 +29,6 @@ func testNotifier(t *testing.T, endpoint string) *pushNotifier {
 	}
 	return newPushNotifier(push.NewManager(store, vapid, "mailto:a@b.c"), "https://gw.example.com", nil)
 }
-
-func TestParseQuietHours(t *testing.T) {
-	ranges, err := parseQuietHours("22:00-08:00, 12:30-13:00")
-	if err != nil {
-		t.Fatalf("parseQuietHours: %v", err)
-	}
-	if len(ranges) != 2 {
-		t.Fatalf("want 2 windows, got %d", len(ranges))
-	}
-	if ranges[0].Start != 22*60 || ranges[0].End != 8*60 {
-		t.Fatalf("first window = %+v", ranges[0])
-	}
-	if ranges[1].Start != 12*60+30 || ranges[1].End != 13*60 {
-		t.Fatalf("second window = %+v", ranges[1])
-	}
-
-	if got, err := parseQuietHours(""); err != nil || got != nil {
-		t.Fatalf("empty spec = %v, %v", got, err)
-	}
-	for _, bad := range []string{"25:00-08:00", "nope", "10:00", "10:70-11:00"} {
-		if _, err := parseQuietHours(bad); err == nil {
-			t.Fatalf("parseQuietHours(%q) = nil error, want error", bad)
-		}
-	}
-}
-
-func TestQuietRangeContains(t *testing.T) {
-	at := func(h, m int) time.Time {
-		return time.Date(2026, 1, 1, h, m, 0, 0, time.Local)
-	}
-	overnight := notify.QuietRange{Start: 22 * 60, End: 8 * 60}
-	for _, tc := range []struct {
-		t    time.Time
-		want bool
-	}{
-		{at(23, 0), true},
-		{at(2, 30), true},
-		{at(7, 59), true},
-		{at(8, 0), false},
-		{at(12, 0), false},
-		{at(21, 59), false},
-	} {
-		if got := overnight.Contains(tc.t); got != tc.want {
-			t.Fatalf("overnight.contains(%s) = %v, want %v", tc.t, got, tc.want)
-		}
-	}
-	daytime := notify.QuietRange{Start: 12 * 60, End: 13 * 60}
-	if !daytime.Contains(at(12, 30)) || daytime.Contains(at(13, 0)) || daytime.Contains(at(11, 59)) {
-		t.Fatal("daytime window bounds are not half-open")
-	}
-	if (notify.QuietRange{Start: 0, End: 0}).Contains(at(0, 0)) {
-		t.Fatal("zero-width window must not contain any time")
-	}
-}
-
-func TestCoalesceNotifications(t *testing.T) {
-	single := coalesceNotifications("completed", []push.Notification{{Title: "A"}})
-	if single.Title != "A" {
-		t.Fatalf("single item should pass through, got %+v", single)
-	}
-
-	merged := coalesceNotifications("completed", []push.Notification{
-		{Title: "A", Urgency: "normal", TTL: time.Hour},
-		{Title: "B", Urgency: "normal", TTL: time.Hour},
-		{Title: "A", Urgency: "normal", TTL: time.Hour},
-	})
-	if merged.Title != "3 sessions completed" {
-		t.Fatalf("merged title = %q", merged.Title)
-	}
-	if merged.Body != "A, B" {
-		t.Fatalf("merged body = %q (want deduped titles)", merged.Body)
-	}
-	if merged.Tag != "batch|completed" {
-		t.Fatalf("merged tag = %q", merged.Tag)
-	}
-	if merged.Urgency != "normal" || merged.TTL != time.Hour {
-		t.Fatalf("merged delivery hints = %q/%v, want normal/1h", merged.Urgency, merged.TTL)
-	}
-}
-
 func TestPushNotifierCoalescesLowPriority(t *testing.T) {
 	hits := make(chan struct{}, 8)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

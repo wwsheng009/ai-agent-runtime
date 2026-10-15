@@ -30,6 +30,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/push"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/ratelimit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
+	"github.com/wwsheng009/ai-agent-runtime/internal/notify"
 )
 
 // gatewayMetrics holds simple process counters exposed at /api/metrics.
@@ -374,7 +375,7 @@ func run() int {
 	if ntfySender.Enabled() {
 		fmt.Fprintf(os.Stderr, "gateway: ntfy channel enabled: %s topic=%s\n", strings.TrimRight(*ntfyURL, "/"), ntfySender.Topic())
 	}
-	quietRanges, quietErr := parseQuietHours(*quietHours)
+	quietRanges, quietErr := notify.ParseQuietHours(*quietHours)
 	if quietErr != nil {
 		fmt.Fprintf(os.Stderr, "gateway: invalid --notify-quiet-hours: %v\n", quietErr)
 		return 1

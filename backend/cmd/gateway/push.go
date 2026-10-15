@@ -50,7 +50,7 @@ type pushNotifier struct {
 	// 装配输入保留；批处理由内核持有（batch/timer 退役），now 为装配时钟
 	// （经 SetCoalesceClock 注入内核，生产恒 time.Now）。
 	coalesceWindow time.Duration
-	quietHours     []quietRange
+	quietHours     []notify.QuietRange
 	now            func() time.Time
 
 	// dispatcher 是惰性缓存的内核分发器（S4b G1：构造上提，避免每次 dispatch
@@ -160,7 +160,7 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 			if p.imMainChannel != nil && p.imMainChannel(node.NodeID, sess.SessionID, attention) {
 				item.imMain = true
 			}
-			if isHighPriorityAttention(attention) {
+			if notify.IsHighPriority(attention) {
 				immediate = append(immediate, item)
 			} else {
 				batched = append(batched, item)
@@ -330,7 +330,7 @@ func attentionBody(node *tunnel.Node, attention string) string {
 // and with a short TTL so a stale alert does not pop long after it matters.
 // Low-priority attention keeps normal urgency and may be retained for later.
 func applyDeliveryPolicy(note *push.Notification, attention string) {
-	if isHighPriorityAttention(attention) {
+	if notify.IsHighPriority(attention) {
 		note.Urgency = "high"
 		note.TTL = 10 * time.Minute
 		return
