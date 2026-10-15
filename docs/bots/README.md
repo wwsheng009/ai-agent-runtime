@@ -16,6 +16,7 @@
 | [07-config-ux.md](./07-config-ux.md) | **配置页面与交互设计**：四终端（gateway console / React / 微前端 / TUI）页面落点与线框、扫码与 webhook 流程、凭据+操作逻辑两层配置项、三处存储与密钥语义、便捷性与验收 |
 | [08-operations-and-acceptance.md](./08-operations-and-acceptance.md) | **运维手册与验收矩阵**：启停/运行归属/回滚、指标与巡检命令、分通道故障处置与密钥轮换、重放与迁移、容量参数、阶段×能力/通道×能力/安全/多前端/回归五张验收矩阵、文档维护约定 |
 | [09-multi-instance-binding.md](./09-multi-instance-binding.md) | **共享状态、会话绑定与多实例协同（定案）**：D1 状态真源统一（`CanonicalStatePath`）、Poller/Runner 两角色、绑定 REST/UI/TUI 三端入口、R1/R2/R3 路由与接管语义、Bot 实体与凭据两层模型（重新扫码=替换凭据）、实施地图与验收清单 |
+| [11-qq-webhook-design.md](./11-qq-webhook-design.md) | **QQ Webhook 事件订阅（方案设计·待评审）**：官方 Ed25519 验签/op13 挑战契约、双通道关系（mode 二选一）、八条决策清单（D1–D8）、W1–W3 实施切片；P2 缺口矩阵最后一项的设计文档 |
 
 ## 结论摘要（TL;DR）
 
