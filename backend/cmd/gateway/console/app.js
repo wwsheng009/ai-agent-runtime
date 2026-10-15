@@ -661,30 +661,36 @@
     return out;
   }
 
-  // sessionItemElement 按行类型分派渲染：子代理行用紧凑行，顶层会话沿用完整卡片。
-  function sessionItemElement(item) {
-    return isSubagentSession(item.session) ? buildSubagentRow(item) : buildSessionCard(item);
-  }
-
-  // buildSubagentRow renders one live child task: indent + agent identity + the
-  // coarse state. Clicking opens the same session detail dialog as any row.
-  function buildSubagentRow(item) {
-    var s = item.session, node = item.node;
+  // 建/更分离约定（本文件所有行组件共用）：create 只组一次骨架与事件，事件
+  // 处理器读 row.__item 取最新数据；update 做原位补丁。数据刷新不重建 DOM，
+  // 滚动位置、选中文本与焦点得以保全——这是繁忙看板保持可读的关键。
+  function createSubagentRow() {
     var row = document.createElement("div");
-    row.className = "session-card s-child" + (node.stale ? " offline" : "");
+    row.className = "session-card s-child";
     row.setAttribute("tabindex", "0");
     row.innerHTML =
       '<span class="s-child-arrow" aria-hidden="true">↳</span>' +
       '<span class="s-child-title"></span>' +
       '<span class="s-child-agent chip"></span>' +
       '<span class="s-child-state"></span>';
-    row.querySelector(".s-child-title").textContent = sessionLabelOf(s);
+    row.addEventListener("click", function () {
+      var it = row.__item;
+      if (it) { openSession(it.node, it.session); }
+    });
+    return row;
+  }
+
+  // updateSubagentRow renders one live child task: indent + agent identity + the
+  // coarse state. Clicking opens the same session detail dialog as any row.
+  function updateSubagentRow(row, item) {
+    var s = item.session, node = item.node;
+    row.__item = item;
+    row.classList.toggle("offline", !!node.stale);
+    setText(row.querySelector(".s-child-title"), sessionLabelOf(s));
     var agent = s.parent.agent_id || "";
     if (s.parent.agent_type) { agent += (agent ? " · " : "") + s.parent.agent_type; }
-    row.querySelector(".s-child-agent").textContent = agent;
-    row.querySelector(".s-child-state").textContent = stateLabelOf(s);
-    row.addEventListener("click", function () { openSession(node, s); });
-    return row;
+    setText(row.querySelector(".s-child-agent"), agent);
+    setText(row.querySelector(".s-child-state"), stateLabelOf(s));
   }
 
   function sessionMatches(item) {
@@ -861,11 +867,16 @@
   }
 
   // ── Session reply drafts: keep user input across list updates ──
-  // renderSessionTable rebuilds the card DOM on every update; a reply the user
-  // is typing must survive that (and identical SSE frames must not steal focus
-  // or caret). Drafts are keyed by node+session and restored in place.
+  // renderSessionTable patches keyed card DOM in place (see below); a card is
+  // only re-created when it is new, re-parented or switched row kind. Drafts
+  // are keyed by node+session so even that rebuild keeps the text (and
+  // identical SSE frames must not steal focus or caret).
   var sessionDrafts = {};
   var lastSessionTableSignature = "";
+  // Keyed DOM registry for the incremental board: key → element. Rows and
+  // groups are patched in place so scroll positions, text selection, focus and
+  // the live tail survive a data update instead of being wiped by a rebuild.
+  var sessionRowEls = {};
   // Per-session UI state: which cards are expanded (kept across re-renders),
   // and the last rendered fingerprint (drives the "changed" pulse).
   var expandedSessions = {};
@@ -984,6 +995,70 @@
     pruneStripEvents();
   }, 5000);
 
+  // ── Incremental board: keyed reconcile instead of a full rebuild ──
+  // setText writes only when the value actually changed: untouched nodes keep
+  // text selection and avoid needless layout invalidation on every data tick.
+  function setText(node, text) {
+    if (node && node.textContent !== text) { node.textContent = text; }
+  }
+
+  // reconcileChildren reorders host's direct children to exactly match
+  // `desired` (an ordered element array): unwanted nodes are removed, desired
+  // nodes are moved (never re-created) into place. Element identity — and with
+  // it scroll position, text selection, focus and listeners — is preserved.
+  function reconcileChildren(host, desired) {
+    Array.prototype.slice.call(host.children).forEach(function (child) {
+      if (desired.indexOf(child) === -1) { child.remove(); }
+    });
+    var refNode = host.firstChild;
+    desired.forEach(function (child) {
+      if (child === refNode) {
+        refNode = refNode.nextSibling;
+        return;
+      }
+      host.insertBefore(child, refNode);
+    });
+  }
+
+  // pruneSessionRowEls forgets registry entries whose elements left the board
+  // (filtered out, removed snapshot, …) so the next render starts clean.
+  function pruneSessionRowEls() {
+    Object.keys(sessionRowEls).forEach(function (key) {
+      if (!sessionRowEls[key].isConnected) { delete sessionRowEls[key]; }
+    });
+  }
+
+  // ensureSessionRow returns the keyed element for one item, patching it in
+  // place; only new rows (or rows that switched kind) allocate DOM.
+  function ensureSessionRow(item) {
+    var key = "c:" + item.node.node_id + "|" + item.session.session_id;
+    var kind = isSubagentSession(item.session) ? "child" : "card";
+    var rowEl = sessionRowEls[key];
+    if (rowEl && rowEl.__kind === kind) {
+      if (kind === "card") { updateSessionCard(rowEl, item); }
+      else { updateSubagentRow(rowEl, item); }
+      return rowEl;
+    }
+    var created = kind === "child" ? createSubagentRow() : createSessionCard();
+    created.setAttribute("data-rkey", key);
+    created.__kind = kind;
+    sessionRowEls[key] = created;
+    if (kind === "card") { updateSessionCard(created, item); }
+    else { updateSubagentRow(created, item); }
+    return created;
+  }
+
+  function ensureSessionGroup(node) {
+    var key = "g:" + node.node_id;
+    var group = sessionRowEls[key];
+    if (group && group.__kind === "group") { return group; }
+    group = createSessionGroup(node);
+    group.setAttribute("data-rkey", key);
+    group.__kind = "group";
+    sessionRowEls[key] = group;
+    return group;
+  }
+
   function renderSessionTable(nodes) {
     var host = el("session-table");
     if (!host) { return; }
@@ -996,7 +1071,6 @@
     if (signature === lastSessionTableSignature) { return; }
     lastSessionTableSignature = signature;
     captureSessionDrafts();
-    host.innerHTML = "";
     // Nodes with several visible sessions collapse into a group (session list
     // grouped by device); single-session nodes stay flat so the two-column
     // board keeps its density.
@@ -1010,19 +1084,26 @@
       nodeCounts[k] = (nodeCounts[k] || 0) + 1;
     });
     var renderedNodes = {};
+    var desired = [];
     items.forEach(function (item) {
       var nodeID = item.node.node_id;
       if (renderedNodes[nodeID]) { return; }
       renderedNodes[nodeID] = true;
+      var nodeItems = items.filter(function (it) { return it.node.node_id === nodeID; });
       if (nodeCounts[nodeID] > 1) {
-        host.appendChild(buildSessionGroup(item.node, items.filter(function (it) {
-          return it.node.node_id === nodeID;
-        })));
+        // Grouped nodes: reconcile the rows inside the group body first, then
+        // the group itself at board level — a row that flips between flat and
+        // grouped moves parent without losing DOM identity.
+        var group = ensureSessionGroup(item.node);
+        reconcileChildren(group.querySelector(".group-body"), nodeItems.map(ensureSessionRow));
+        updateSessionGroup(group, item.node, nodeItems);
+        desired.push(group);
         return;
       }
-      items.filter(function (it) { return it.node.node_id === nodeID; })
-        .forEach(function (it) { host.appendChild(sessionItemElement(it)); });
+      nodeItems.forEach(function (it) { desired.push(ensureSessionRow(it)); });
     });
+    reconcileChildren(host, desired);
+    pruneSessionRowEls();
     restoreSessionDrafts(host);
     if (!sessionsScrollRestored) {
       sessionsScrollRestored = true;
@@ -1030,271 +1111,337 @@
     }
   }
 
-  // buildSessionGroup wraps several sessions of one node in a collapsible
+  // createSessionGroup wraps several sessions of one node in a collapsible
   // header (device grouping): live/offline dot + name + kind/count/last seen.
-  function buildSessionGroup(node, groupItems) {
+  function createSessionGroup(node) {
     var group = document.createElement("section");
-    group.className = "session-group" + (node.stale ? " offline" : "");
-    var collapsed = !!collapsedGroups[node.node_id];
+    group.className = "session-group";
     group.innerHTML =
-      '<button type="button" class="group-head" aria-expanded="' + String(!collapsed) + '">' +
-      '<span class="dot ' + (node.stale ? "offline" : "live") + '"></span>' +
+      '<button type="button" class="group-head" aria-expanded="true">' +
+      '<span class="dot live"></span>' +
       '<span class="group-name"></span><span class="group-meta"></span>' +
-      '<span class="group-caret" aria-hidden="true">' + (collapsed ? "▸" : "▾") + '</span></button>' +
+      '<span class="group-caret" aria-hidden="true">▾</span></button>' +
       '<div class="group-body"></div>';
-    group.querySelector(".group-name").textContent = node.name || node.node_id;
-    var latest = 0;
-    groupItems.forEach(function (item) {
-      var t = new Date(item.session.updated_at || 0).getTime();
-      if (t > latest) { latest = t; }
-    });
-    group.querySelector(".group-meta").textContent =
-      (node.kind || "agent") + " · 会话 " + groupItems.length +
-      (latest ? " · 最近 " + new Date(latest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
-    var body = group.querySelector(".group-body");
-    groupItems.forEach(function (item) { body.appendChild(sessionItemElement(item)); });
-    if (collapsed) { body.hidden = true; }
     group.querySelector(".group-head").addEventListener("click", function () {
       var next = !collapsedGroups[node.node_id];
       if (next) { collapsedGroups[node.node_id] = true; } else { delete collapsedGroups[node.node_id]; }
-      body.hidden = next;
+      group.querySelector(".group-body").hidden = next;
       group.querySelector(".group-caret").textContent = next ? "▸" : "▾";
       this.setAttribute("aria-expanded", String(!next));
     });
     return group;
   }
 
-  function buildSessionCard(item) {
-      var s = item.session, node = item.node;
-      var cardKey = node.node_id + "|" + s.session_id;
-      var expanded = !!expandedSessions[cardKey];
-      var card = document.createElement("div");
-      card.className = "session-card" + (node.stale ? " offline" : "") +
-        (s.attention ? " att-" + s.attention : "") + (expanded ? " expanded" : "");
-      card.setAttribute("data-draft-key", cardKey);
-      // Put the card itself in the tab order (arrow-key nav already focuses it,
-      // but Tab could not reach it) and give it a spoken name.
-      card.setAttribute("tabindex", "0");
-      // Pulse when this session visibly moved since the previous render.
-      var fingerprint = sessionFingerprint(s);
-      if (sessionLastSeen[cardKey] !== undefined && sessionLastSeen[cardKey] !== fingerprint) {
-        card.classList.add("card-updated");
+  function updateSessionGroup(group, node, groupItems) {
+    group.classList.toggle("offline", !!node.stale);
+    group.querySelector(".group-head .dot").className = "dot " + (node.stale ? "offline" : "live");
+    setText(group.querySelector(".group-name"), node.name || node.node_id);
+    var latest = 0;
+    groupItems.forEach(function (item) {
+      var t = new Date(item.session.updated_at || 0).getTime();
+      if (t > latest) { latest = t; }
+    });
+    setText(group.querySelector(".group-meta"),
+      (node.kind || "agent") + " · 会话 " + groupItems.length +
+      (latest ? " · 最近 " + new Date(latest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""));
+    var collapsed = !!collapsedGroups[node.node_id];
+    group.querySelector(".group-body").hidden = collapsed;
+    group.querySelector(".group-caret").textContent = collapsed ? "▸" : "▾";
+    group.querySelector(".group-head").setAttribute("aria-expanded", String(!collapsed));
+  }
+
+  // createSessionCard builds the full card skeleton once; every conditional
+  // block stays in the DOM (toggled via `hidden`) so updateSessionCard only
+  // patches text/visibility and never re-creates nodes — scroll positions,
+  // text selection, focus and the live tail therefore survive data updates.
+  function createSessionCard() {
+    var card = document.createElement("div");
+    card.className = "session-card";
+    // Put the card itself in the tab order (arrow-key nav already focuses it,
+    // but Tab could not reach it); updateSessionCard sets its spoken name.
+    card.setAttribute("tabindex", "0");
+    // Information is layered by business attribute, top → bottom: identity
+    // (title/badge/time) → live activity band (state chip + host activity
+    // text + elapsed clock) → content (preview / last message) → meta line
+    // (node · ID · sync) → actions → reply → live tail (pinned footer).
+    card.innerHTML =
+      '<div class="s-title"><span class="dot live"></span><span class="s-name"></span></div>' +
+      '<span class="att-badge s-badge" hidden></span><span class="s-time"></span>' +
+      '<div class="s-activity" hidden><span class="s-state" hidden></span>' +
+      '<span class="s-status-text"></span><span class="s-status-elapsed" hidden></span></div>' +
+      '<div class="s-preview" hidden></div>' +
+      '<div class="s-last" hidden><span class="s-last-role"></span><span class="s-last-text"></span></div>' +
+      '<div class="s-meta"><span class="s-node-text"></span>' +
+      '<span class="s-id" role="button" tabindex="0" title="点击复制会话 ID">' +
+      '<span class="s-id-label">ID</span><code class="s-id-code"></code></span>' +
+      '<span class="s-sync" hidden></span></div>' +
+      '<div class="s-actions">' +
+      '<button class="btn ghost sm" type="button" data-expand hidden></button>' +
+      '<button class="btn ghost sm" type="button" data-detail>详情</button>' +
+      '<button class="btn ghost sm" type="button" data-open>打开</button>' +
+      '<button class="btn danger sm" type="button" data-remove hidden>移除</button>' +
+      '</div>' +
+      '<div class="s-live" hidden title="实时输出（最后一行），点击展开完整尾流"></div>' +
+      '<div class="s-tail" hidden>' +
+      '<div class="s-tail-head"><span class="s-tail-title">实时输出</span><span class="s-tail-meta"></span>' +
+      '<button class="btn ghost sm" type="button" data-tail-follow>跟随中</button></div>' +
+      '<pre class="s-tail-body"></pre></div>';
+    // One-time listeners; they read card.__item for the newest snapshot so a
+    // data patch never needs to re-bind handlers.
+    var idRow = card.querySelector(".s-id");
+    var copyID = function () {
+      if (card.__item) { copyText(card.__item.session.session_id, null); }
+    };
+    idRow.addEventListener("click", copyID);
+    idRow.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); copyID(); }
+    });
+    // The card body is informational only: opening a session always goes
+    // through the explicit 打开 button, so text selection or a mis-tap on
+    // the row never navigates away.
+    card.querySelector("[data-detail]").addEventListener("click", function () {
+      var it = card.__item;
+      if (it) { openSessionDetail(it.node, it.session); }
+    });
+    // Offline snapshots render the 打开 button disabled (no tunnel); only a
+    // live node with a Web route passes the handler's re-check.
+    var openBtn = card.querySelector("[data-open]");
+    openBtn.addEventListener("click", function () {
+      var it = card.__item;
+      if (!it || openBtn.disabled) { return; }
+      openSession(it.node, it.session);
+    });
+    // 展开/收起: the full last message and the reply form live in the
+    // expanded area; the choice is remembered per session across updates.
+    var expandBtn = card.querySelector("[data-expand]");
+    expandBtn.addEventListener("click", function () {
+      var it = card.__item;
+      if (!it || expandBtn.hidden) { return; }
+      var key = card.getAttribute("data-draft-key");
+      var next = !expandedSessions[key];
+      if (next) { expandedSessions[key] = true; } else { delete expandedSessions[key]; }
+      card.classList.toggle("expanded", next);
+      expandBtn.textContent = next ? "收起" : "展开";
+      // Expansion is the "I'm watching this session" signal: it gates the
+      // live tail on the agent (P1-b) and suppresses pushes while open.
+      rememberPresence(it.node, it.session, { tail: next });
+    });
+    // Collapsed cards still surface the newest live line, so progress is
+    // visible without expanding; clicking it expands the full tail.
+    var liveLine = card.querySelector(".s-live");
+    liveLine.addEventListener("click", function () {
+      var it = card.__item;
+      if (!it) { return; }
+      var key = card.getAttribute("data-draft-key");
+      if (!expandedSessions[key]) {
+        expandedSessions[key] = true;
+        card.classList.add("expanded");
+        var expandButton = card.querySelector("[data-expand]");
+        if (expandButton) { expandButton.textContent = "收起"; }
+        rememberPresence(it.node, it.session, { tail: true });
       }
-      sessionLastSeen[cardKey] = fingerprint;
-      var hasReply = nodeHasWebUI(node) && (node.capabilities || []).indexOf("input") !== -1;
-      var hasExtras = !!(s.last_message || "") || hasReply || !!(s.status_tail || "");
-      // Information is layered by business attribute, top → bottom: identity
-      // (title/badge/time) → live activity band (state chip + host activity
-      // text + elapsed clock) → content (preview / last message) → meta line
-      // (node · ID · sync) → actions → reply → live tail (pinned footer).
-      card.innerHTML =
-        '<div class="s-title"><span class="dot ' + (node.stale ? "offline" : "live") + '"></span><span class="s-name"></span></div>' +
-        '<span class="att-badge s-badge" hidden></span><span class="s-time"></span>' +
-        '<div class="s-activity" hidden><span class="s-state" hidden></span>' +
-        '<span class="s-status-text"></span><span class="s-status-elapsed" hidden></span></div>' +
-        (s.preview ? '<div class="s-preview"></div>' : "") +
-        '<div class="s-last" hidden></div>' +
-        '<div class="s-meta"><span class="s-node-text"></span>' +
-        '<span class="s-id" role="button" tabindex="0" title="点击复制会话 ID">' +
-        '<span class="s-id-label">ID</span><code class="s-id-code"></code></span>' +
-        '<span class="s-sync" hidden></span></div>' +
-        '<div class="s-actions">' +
-        (hasExtras ? '<button class="btn ghost sm" type="button" data-expand>' + (expanded ? "收起" : "展开") + '</button>' : '') +
-        '<button class="btn ghost sm" type="button" data-detail>详情</button>' +
-        (nodeHasWebUI(node)
-          ? '<button class="btn ghost sm" type="button" data-open>打开</button>'
-          : '<button class="btn ghost sm" type="button" disabled title="' +
-            (node.stale ? "节点离线，无法打开" : "节点未提供本地 Web 服务（aicli 需以 --web 启动），无法打开") +
-            '">打开</button>') +
-        (node.stale ? '<button class="btn danger sm" type="button" data-remove>移除</button>' : '') +
-        '</div>' +
-        '<div class="s-live" hidden title="实时输出（最后一行），点击展开完整尾流"></div>' +
-        '<div class="s-tail" hidden>' +
-        '<div class="s-tail-head"><span class="s-tail-title">实时输出</span><span class="s-tail-meta"></span>' +
-        '<button class="btn ghost sm" type="button" data-tail-follow>跟随中</button></div>' +
-        '<pre class="s-tail-body"></pre></div>';
-      card.querySelector(".s-name").textContent = sessionLabelOf(s);
-      card.setAttribute("aria-label",
-        sessionLabelOf(s) + "，" + (node.name || node.node_id) + "，" + stateLabelOf(s) +
-        (s.attention ? "，" + attentionLabel(s.attention) : ""));
-      card.querySelector(".s-node-text").textContent =
-        (node.name || node.node_id) + " · " + (node.kind || "agent");
-      var syncEl = card.querySelector(".s-sync");
-      var syncedMs = s.synced_at ? new Date(s.synced_at).getTime() : NaN;
-      if (!isNaN(syncedMs)) {
-        setRelTime(syncEl, syncedMs, "同步 ", 60000,
-          "网关最后收到该会话更新：" + absoluteTime(syncedMs) + "（服务器时间）");
-        syncEl.hidden = false;
+      var body = card.querySelector(".s-tail-body");
+      if (body && body.scrollIntoView) { body.scrollIntoView({ block: "nearest" }); }
+    });
+    // Live-output tail: the 跟随 button pins the viewport to the newest line
+    // and pauses automatically when the operator scrolls up（原位补丁只更新
+    // 文本、不回零 scrollTop——这正是滚动阅读不被刷新打断的原因）。
+    var tailBody = card.querySelector(".s-tail-body");
+    var followBtn = card.querySelector("[data-tail-follow]");
+    card.__syncFollowBtn = function () {
+      var key = card.getAttribute("data-draft-key");
+      followBtn.textContent = tailFollow[key] === false ? "跳到底部" : "跟随中";
+    };
+    followBtn.addEventListener("click", function () {
+      tailFollow[card.getAttribute("data-draft-key")] = true;
+      card.__syncFollowBtn();
+      tailBody.scrollTop = tailBody.scrollHeight;
+    });
+    tailBody.addEventListener("scroll", function () {
+      var atBottom = tailBody.scrollHeight - tailBody.scrollTop - tailBody.clientHeight < 24;
+      tailFollow[card.getAttribute("data-draft-key")] = atBottom;
+      card.__syncFollowBtn();
+    });
+    var rmBtn = card.querySelector("[data-remove]");
+    rmBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var it = card.__item;
+      if (!it) { return; }
+      if (!window.confirm("从注册表移除该会话条目？\n（仅清除网关侧快照，不影响 agent 上的会话数据。）")) { return; }
+      api("/api/nodes/" + encodeURIComponent(it.node.node_id) +
+          "/sessions/" + encodeURIComponent(it.session.session_id), { method: "DELETE" })
+        .then(function () { notify("会话条目已移除", "ok"); loadNodes(); })
+        .catch(function (err) { notify("移除失败：" + err, "error"); });
+    });
+    return card;
+  }
+  // updateSessionCard patches one card to match the latest snapshot: text is
+  // written only when it changed, visibility flips via `hidden`, and the live
+  // tail keeps its scrollTop unless 跟随中 pins it to the bottom — so an
+  // operator reading a scrolled-up detail is never thrown back by an update.
+  function updateSessionCard(card, item) {
+    var s = item.session, node = item.node;
+    var cardKey = node.node_id + "|" + s.session_id;
+    card.__item = item;
+    card.setAttribute("data-draft-key", cardKey);
+    var expanded = !!expandedSessions[cardKey];
+    card.classList.toggle("offline", !!node.stale);
+    card.classList.toggle("expanded", expanded);
+    var attClass = s.attention ? "att-" + s.attention : "";
+    if (card.__attClass !== attClass) {
+      if (card.__attClass) { card.classList.remove(card.__attClass); }
+      if (attClass) { card.classList.add(attClass); }
+      card.__attClass = attClass;
+    }
+    // Pulse when this session visibly moved since the previous render.
+    var fingerprint = sessionFingerprint(s);
+    if (sessionLastSeen[cardKey] !== undefined && sessionLastSeen[cardKey] !== fingerprint) {
+      card.classList.remove("card-updated");
+      void card.offsetWidth; // restart the pulse animation
+      card.classList.add("card-updated");
+    }
+    sessionLastSeen[cardKey] = fingerprint;
+    card.querySelector(".s-title .dot").className = "dot " + (node.stale ? "offline" : "live");
+    setText(card.querySelector(".s-name"), sessionLabelOf(s));
+    card.setAttribute("aria-label",
+      sessionLabelOf(s) + "，" + (node.name || node.node_id) + "，" + stateLabelOf(s) +
+      (s.attention ? "，" + attentionLabel(s.attention) : ""));
+    setText(card.querySelector(".s-node-text"),
+      (node.name || node.node_id) + " · " + (node.kind || "agent"));
+    var syncEl = card.querySelector(".s-sync");
+    var syncedMs = s.synced_at ? new Date(s.synced_at).getTime() : NaN;
+    if (!isNaN(syncedMs)) {
+      setRelTime(syncEl, syncedMs, "同步 ", 60000,
+        "网关最后收到该会话更新：" + absoluteTime(syncedMs) + "（服务器时间）");
+      syncEl.hidden = false;
+    } else {
+      syncEl.hidden = true;
+    }
+    setText(card.querySelector(".s-id-code"), s.session_id);
+    // Live activity band (动态状态): state chip (运行中/思考中/回答中/等待中/
+    // 审查中/已中断) + the host's one-line activity text + a locally-advanced
+    // clock, kept apart from the metadata line so "what is happening now"
+    // reads as the card's most time-sensitive zone.
+    var stateChip = card.querySelector(".s-state");
+    var stateLabel = STATE_LABELS[s.state];
+    var chipShown = false;
+    if (stateLabel && (isActiveSessionState(s.state) || s.state === "interrupted")) {
+      stateChip.textContent = stateLabel;
+      stateChip.className = "s-state st-" + s.state;
+      stateChip.hidden = false;
+      chipShown = true;
+    } else {
+      stateChip.hidden = true;
+    }
+    var statusText = (s.status_text || "").trim();
+    var startedMs = Date.parse(s.status_started_at || "");
+    var showElapsed = isActiveSessionState(s.state) && !isNaN(startedMs);
+    var activityLine = card.querySelector(".s-activity");
+    var statusTextEl = card.querySelector(".s-status-text");
+    setText(statusTextEl, statusText);
+    if (statusText) { statusTextEl.title = statusText; }
+    var elapsedEl = card.querySelector(".s-status-elapsed");
+    if (chipShown || statusText || showElapsed) {
+      if (showElapsed) {
+        elapsedEl.setAttribute("data-started", s.status_started_at);
+        setText(elapsedEl, "· " + formatStatusElapsed(Date.now() - startedMs));
+        elapsedEl.hidden = false;
+      } else {
+        elapsedEl.hidden = true;
+        elapsedEl.removeAttribute("data-started");
       }
-      var idRow = card.querySelector(".s-id");
-      var idEl = card.querySelector(".s-id-code");
-      idEl.textContent = s.session_id;
-      var copyID = function () {
-        copyText(s.session_id, null);
-      };
-      idRow.addEventListener("click", copyID);
-      idRow.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); copyID(); }
-      });
-      // Live activity band (动态状态): state chip (运行中/思考中/回答中/等待中/
-      // 审查中/已中断) + the host's one-line activity text + a locally-advanced
-      // clock, kept apart from the metadata line so "what is happening now"
-      // reads as the card's most time-sensitive zone.
-      var stateChip = card.querySelector(".s-state");
-      var stateLabel = STATE_LABELS[s.state];
-      var chipShown = false;
-      if (stateLabel && (isActiveSessionState(s.state) || s.state === "interrupted")) {
-        stateChip.textContent = stateLabel;
-        stateChip.className = "s-state st-" + s.state;
-        stateChip.hidden = false;
-        chipShown = true;
-      }
-      var statusText = (s.status_text || "").trim();
-      var startedMs = Date.parse(s.status_started_at || "");
-      var showElapsed = isActiveSessionState(s.state) && !isNaN(startedMs);
-      if (chipShown || statusText || showElapsed) {
-        var activityLine = card.querySelector(".s-activity");
-        if (statusText) {
-          var statusTextEl = card.querySelector(".s-status-text");
-          statusTextEl.textContent = statusText;
-          statusTextEl.title = statusText;
-        }
-        if (showElapsed) {
-          var elapsedEl = card.querySelector(".s-status-elapsed");
-          elapsedEl.setAttribute("data-started", s.status_started_at);
-          elapsedEl.textContent = "· " + formatStatusElapsed(Date.now() - startedMs);
-          elapsedEl.hidden = false;
-        }
-        activityLine.hidden = false;
-      }
-      if (s.attention) {
-        var b = card.querySelector(".s-badge");
-        b.textContent = attentionLabel(s.attention);
-        b.className = "att-badge s-badge att-" + s.attention;
-        b.hidden = false;
-      }
-      var t = card.querySelector(".s-time");
-      var updatedMs = s.updated_at ? new Date(s.updated_at).getTime() : NaN;
-      if (!isNaN(updatedMs)) {
-        setRelTime(t, updatedMs, "", 0, "内容时间：" + absoluteTime(updatedMs));
-      } else { t.hidden = true; }
-      if (s.preview) { card.querySelector(".s-preview").textContent = s.preview; }
-      // Full last message (multi-line, unlike the one-line preview). Falls back
-      // to the preview when the agent build predates the field.
-      var lastBlock = card.querySelector(".s-last");
-      var lastText = s.last_message || "";
-      if (lastText) {
-        var role = s.last_message_role || "";
-        var label = document.createElement("span");
-        label.className = "s-last-role" + (role ? " role-" + role : "");
-        label.textContent = roleLabelOf(role);
-        var body = document.createElement("span");
-        body.className = "s-last-text";
-        body.textContent = lastText;
-        lastBlock.appendChild(label);
-        lastBlock.appendChild(body);
-        lastBlock.hidden = false;
-      }
-      // Live-output tail (bounded by the shared core): rendered only while
-      // the global "实时输出" switch is on; the 跟随 button pins the viewport
-      // to the newest line and pauses automatically when the user scrolls up.
-      var tailText = tailEnabled ? (s.status_tail || "") : "";
-      var tailBlock = card.querySelector(".s-tail");
-      // Collapsed cards still surface the newest live line, so progress is
-      // visible without expanding; clicking it expands the full tail.
-      var liveLine = card.querySelector(".s-live");
-      if (tailText) {
-        var lastLine = (tailText.replace(/\s+$/, "").split("\n").pop() || "").replace(/\s+/g, " ").trim();
-        if (lastLine.length > 140) { lastLine = "…" + lastLine.slice(lastLine.length - 140); }
-        liveLine.textContent = lastLine || "…";
-        liveLine.hidden = false;
-        var previewEl = card.querySelector(".s-preview");
-        if (previewEl) { previewEl.hidden = true; } // live text wins while active
-        liveLine.addEventListener("click", function () {
-          if (!expandedSessions[cardKey]) {
-            expandedSessions[cardKey] = true;
-            card.classList.add("expanded");
-            var expandButton = card.querySelector("[data-expand]");
-            if (expandButton) { expandButton.textContent = "收起"; }
-            rememberPresence(node, s, { tail: true });
-          }
-          var body = card.querySelector(".s-tail-body");
-          if (body && body.scrollIntoView) { body.scrollIntoView({ block: "nearest" }); }
-        });
-        tailBlock.hidden = false;
-        var tailBody = card.querySelector(".s-tail-body");
-        tailBody.textContent = tailText;
-        card.querySelector(".s-tail-meta").textContent = tailText.length + " 字符";
-        var followBtn = card.querySelector("[data-tail-follow]");
-        var updateFollowBtn = function () {
-          followBtn.textContent = tailFollow[cardKey] === false ? "跳到底部" : "跟随中";
-        };
-        updateFollowBtn();
-        var stickToBottom = function () { tailBody.scrollTop = tailBody.scrollHeight; };
-        if (tailFollow[cardKey] !== false) { stickToBottom(); }
-        tailBody.addEventListener("scroll", function () {
-          var atBottom = tailBody.scrollHeight - tailBody.scrollTop - tailBody.clientHeight < 24;
-          tailFollow[cardKey] = atBottom;
-          updateFollowBtn();
-        });
-        followBtn.addEventListener("click", function () {
-          tailFollow[cardKey] = true;
-          updateFollowBtn();
-          stickToBottom();
-        });
-      }
-      // The card body is informational only: opening a session always goes
-      // through the explicit 打开 button, so text selection or a mis-tap on
-      // the row never navigates away.
-      card.querySelector("[data-detail]").addEventListener("click", function () {
-        openSessionDetail(node, s);
-      });
-      // Offline snapshots render the 打开 button disabled (no tunnel); only a
-      // live node gets the open handler.
-      var openBtn = card.querySelector("[data-open]");
-      if (openBtn) {
-        openBtn.addEventListener("click", function () {
-          openSession(node, s);
-        });
-      }
-      // 展开/收起: the full last message and the reply form live in the
-      // expanded area; the choice is remembered per session across re-renders.
-      var expandBtn = card.querySelector("[data-expand]");
-      if (expandBtn) {
-        expandBtn.addEventListener("click", function () {
-          var next = !expandedSessions[cardKey];
-          if (next) { expandedSessions[cardKey] = true; } else { delete expandedSessions[cardKey]; }
-          card.classList.toggle("expanded", next);
-          expandBtn.textContent = next ? "收起" : "展开";
-          // Expansion is the "I'm watching this session" signal: it gates the
-          // live tail on the agent (P1-b) and suppresses pushes while open.
-          rememberPresence(node, s, { tail: next });
-        });
-      }
-      // Inline reply: POST through the gateway reverse proxy to the agent's
-      // own /web/api/input (the agent injects its local write token and the
-      // route allowlist already covers /web). Gated on the agent advertising
-      // the "input" capability so stale agents just hide the form.
-      if (!node.stale && (node.capabilities || []).indexOf("input") !== -1) {
-        card.appendChild(buildReplyForm(node, s));
-      }
-      // Live output is pinned to the very bottom of the card: below the action
-      // row and the reply form. Collapsed cards show the newest streamed line,
-      // expanded cards swap it for the full rolling tail (never both).
-      card.appendChild(card.querySelector(".s-live"));
-      card.appendChild(card.querySelector(".s-tail"));
-      var rmBtn = card.querySelector("[data-remove]");
-      if (rmBtn) {
-        rmBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          if (!window.confirm("从注册表移除该会话条目？\n（仅清除网关侧快照，不影响 agent 上的会话数据。）")) { return; }
-          api("/api/nodes/" + encodeURIComponent(node.node_id) +
-              "/sessions/" + encodeURIComponent(s.session_id), { method: "DELETE" })
-            .then(function () { notify("会话条目已移除", "ok"); loadNodes(); })
-            .catch(function (err) { notify("移除失败：" + err, "error"); });
-        });
-      }
-      return card;
+      activityLine.hidden = false;
+    } else {
+      activityLine.hidden = true;
+      elapsedEl.hidden = true;
+      elapsedEl.removeAttribute("data-started");
+    }
+    if (s.attention) {
+      var b = card.querySelector(".s-badge");
+      b.textContent = attentionLabel(s.attention);
+      b.className = "att-badge s-badge att-" + s.attention;
+      b.hidden = false;
+    } else {
+      card.querySelector(".s-badge").hidden = true;
+    }
+    var t = card.querySelector(".s-time");
+    var updatedMs = s.updated_at ? new Date(s.updated_at).getTime() : NaN;
+    if (!isNaN(updatedMs)) {
+      setRelTime(t, updatedMs, "", 0, "内容时间：" + absoluteTime(updatedMs));
+      t.hidden = false;
+    } else { t.hidden = true; }
+    var previewEl = card.querySelector(".s-preview");
+    if (s.preview) { setText(previewEl, s.preview); }
+    // Full last message (multi-line, unlike the one-line preview). Falls back
+    // to the preview when the agent build predates the field.
+    var lastBlock = card.querySelector(".s-last");
+    var lastText = s.last_message || "";
+    if (lastText) {
+      var role = s.last_message_role || "";
+      var roleEl = card.querySelector(".s-last-role");
+      roleEl.className = "s-last-role" + (role ? " role-" + role : "");
+      setText(roleEl, roleLabelOf(role));
+      setText(card.querySelector(".s-last-text"), lastText);
+      lastBlock.hidden = false;
+    } else {
+      lastBlock.hidden = true;
+    }
+    // Live-output tail (bounded by the shared core): rendered only while
+    // the global "实时输出" switch is on; the 跟随 button pins the viewport
+    // to the newest line and pauses automatically when the user scrolls up.
+    var tailText = tailEnabled ? (s.status_tail || "") : "";
+    var tailBlock = card.querySelector(".s-tail");
+    var liveLine = card.querySelector(".s-live");
+    if (tailText) {
+      var lastLine = (tailText.replace(/\s+$/, "").split("\n").pop() || "").replace(/\s+/g, " ").trim();
+      if (lastLine.length > 140) { lastLine = "…" + lastLine.slice(lastLine.length - 140); }
+      setText(liveLine, lastLine || "…");
+      liveLine.hidden = false;
+      tailBlock.hidden = false;
+      var tailBody = card.querySelector(".s-tail-body");
+      if (tailBody.textContent !== tailText) { tailBody.textContent = tailText; }
+      setText(card.querySelector(".s-tail-meta"), tailText.length + " 字符");
+      card.__syncFollowBtn();
+      // Follow mode pins the viewport to the newest line. When the operator
+      // scrolled up (tailFollow false) scrollTop is left untouched — that is
+      // what keeps a scrolled-up detail readable while the session streams.
+      if (tailFollow[cardKey] !== false) { tailBody.scrollTop = tailBody.scrollHeight; }
+    } else {
+      liveLine.hidden = true;
+      tailBlock.hidden = true;
+    }
+    // preview 与实时行互斥：有流式输出时让尾部文本优先（与旧卡片一致）。
+    previewEl.hidden = !s.preview || !!tailText;
+    // 展开 button: only meaningful when there is more content than the
+    // collapsed card shows; the full last message and the reply form live in
+    // the expanded area.
+    var hasReply = nodeHasWebUI(node) && (node.capabilities || []).indexOf("input") !== -1;
+    var hasExtras = !!(s.last_message || "") || hasReply || !!(s.status_tail || "");
+    var expandBtn = card.querySelector("[data-expand]");
+    expandBtn.hidden = !hasExtras;
+    expandBtn.textContent = expanded ? "收起" : "展开";
+    // Offline snapshots render the 打开 button disabled (no tunnel); live nodes
+    // without a Web route keep it disabled with the reason in the tooltip.
+    var openBtn = card.querySelector("[data-open]");
+    var canOpen = nodeHasWebUI(node);
+    openBtn.disabled = !canOpen;
+    if (canOpen) {
+      openBtn.removeAttribute("title");
+    } else {
+      openBtn.title = node.stale ? "节点离线，无法打开" : "节点未提供本地 Web 服务（aicli 需以 --web 启动），无法打开";
+    }
+    card.querySelector("[data-remove]").hidden = !node.stale;
+    // Inline reply: POST through the gateway reverse proxy to the agent's
+    // own /web/api/input (the agent injects its local write token and the
+    // route allowlist already covers /web). Gated on the agent advertising
+    // the "input" capability so stale agents just hide the form.
+    var wantReply = !node.stale && (node.capabilities || []).indexOf("input") !== -1;
+    var replyForm = card.querySelector(".s-reply");
+    if (wantReply && !replyForm) {
+      card.insertBefore(buildReplyForm(node, s), card.querySelector(".s-live"));
+    } else if (!wantReply && replyForm) {
+      replyForm.remove();
+    }
   }
 
   /* ─────────────────────── rendering: inbox ──────────────────── */
@@ -2727,7 +2874,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=35").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=36").catch(function () {});
     });
   }
 

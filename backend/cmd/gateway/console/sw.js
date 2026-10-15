@@ -8,8 +8,8 @@ const CACHE = "aicli-gateway-shell-v35";
 const SHELL = [
   "./",
   "./index.html",
-  "./app.js?v=35",
-  "./style.css?v=35",
+  "./app.js?v=36",
+  "./style.css?v=36",
   "./manifest.webmanifest",
   "./icon.svg",
   "./icon-192.png",
