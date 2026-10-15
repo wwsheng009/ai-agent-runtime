@@ -8,6 +8,7 @@
 //     (settings/secrets 留空=保持,__clear__=清除);
 //   - POST /api/connectors/{id}/test|takeover|reload|actions/{action};
 //   - GET  /api/connectors/{id}/logs?limit=50(entries 倒序 + stats)。
+//   - GET  /api/connectors/bindings 绑定列表(chat → 会话/节点;「所在会话与节点」展示, docs/bots/09 §5.3)。
 //
 // 通道差异全部由 Schema 驱动:字段类型(text/secret/bool/enum/url/number)、
 // 模式(modes)、动作(actions: kind=qr 走扫码对话框,kind=button 直接执行)。
@@ -27,6 +28,7 @@ function connEl(id) { return document.getElementById(id); }
 
 var schemaProviders = [];   // GET /api/connectors/schema → providers
 var connectorItems = [];    // GET /api/connectors → items
+var connectorBindings = {}; // GET /api/connectors/bindings → {connector_id: [binding]}
 var connectorsLoadedOnce = false;
 var connectorsSeq = 0;      // 竞态守卫:列表请求序号(晚到旧响应不覆盖新渲染)
 var editorState = null;     // 编辑对话框状态 {id, isEdit, provider}
@@ -114,7 +116,24 @@ export function loadConnectors() {
       return apiJSON("/api/connectors", { cache: "no-store" });
     })
     .then(function (data) {
+      // 绑定是「所在会话与节点」展示的 additive 数据面(docs/bots/09 §5.3):
+      // 加载失败静默降级为空,不影响连接器主列表。
+      return apiJSON("/api/connectors/bindings", { cache: "no-store" })
+        .then(function (bindings) { return { list: data, bindings: bindings }; })
+        .catch(function () { return { list: data, bindings: null }; });
+    })
+    .then(function (payload) {
       if (seq !== connectorsSeq) { return; }
+      var data = payload.list;
+      var items = (payload.bindings && payload.bindings.items) ? payload.bindings.items : [];
+      var grouped = {};
+      for (var i = 0; i < items.length; i++) {
+        var binding = items[i];
+        if (!binding || !binding.connector_id) { continue; }
+        if (!grouped[binding.connector_id]) { grouped[binding.connector_id] = []; }
+        grouped[binding.connector_id].push(binding);
+      }
+      connectorBindings = grouped;
       connectorItems = (data && data.items) ? data.items : [];
       connectorsLoadedOnce = true;
       renderConnectors();
@@ -204,6 +223,7 @@ function rowHTML(item) {
       if (accountText) { parts.push(accountText); }
       return parts.length ? '<div class="connector-owner">' + esc(parts.join(" · ")) + "</div>" : "";
     })() +
+    bindingsLineHTML(item.id) +
     '<div class="connector-row-actions">' +
       '<button type="button" data-act="toggle">' + (item.enabled ? "停用" : "启用") + "</button>" +
       '<button type="button" data-act="edit">编辑</button>' +
@@ -217,6 +237,23 @@ function rowHTML(item) {
     "</div>" +
     lastError +
   "</div>";
+}
+
+// bindingsLineHTML 渲染「所在会话与节点」(docs/bots/09 §5.3):该 bot 的每个 IM
+// 会话绑定指向哪个 agent 会话、由哪个 mesh 节点在服务。无绑定返回空串。
+function bindingsLineHTML(connectorID) {
+  var bindings = connectorBindings[connectorID] || [];
+  if (!bindings.length) { return ""; }
+  var parts = [];
+  for (var i = 0; i < bindings.length; i++) {
+    var binding = bindings[i] || {};
+    var title = (binding.chat || "-") + " → " + (binding.session_id || "-") +
+      (binding.node_id ? (" @ " + binding.node_id) : "");
+    var session = binding.session_id ? ("会话 " + esc(binding.session_id)) : "未绑定会话";
+    var node = binding.node_id ? (" · 节点 " + esc(binding.node_id)) : "";
+    parts.push('<span title="' + esc(title) + '">' + esc(binding.chat || "-") + " → " + session + node + "</span>");
+  }
+  return '<div class="connector-owner connector-bindings">绑定: ' + parts.join(" &nbsp;|&nbsp; ") + "</div>";
 }
 
 function num(v) { return (typeof v === "number" && isFinite(v)) ? v : 0; }

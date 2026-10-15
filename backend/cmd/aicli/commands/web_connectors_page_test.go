@@ -51,6 +51,8 @@ func TestChatWebPage_ServesConnectorsAssets(t *testing.T) {
 		"export function initConnectors",
 		"export function loadConnectors",
 		"/api/connectors/schema",
+		"/api/connectors/bindings",
+		"connector-bindings",
 		"login_status",
 	} {
 		if !strings.Contains(scriptBody, want) {

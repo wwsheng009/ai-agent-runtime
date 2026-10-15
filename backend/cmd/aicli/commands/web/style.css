@@ -3275,6 +3275,7 @@ body.low-bandwidth img {
 .connector-badge.connector-on { color: var(--green, #3fb950); border-color: var(--green, #3fb950); }
 .connector-badge.connector-off { color: var(--fg3); }
 .connector-owner { font-size: 11px; color: var(--fg3); }
+.connector-bindings { word-break: break-all; }
 .connector-stat { font-size: 11px; color: var(--fg3); }
 .connector-stat-err { color: var(--red, #e5534b); }
 .connector-row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
