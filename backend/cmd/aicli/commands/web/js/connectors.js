@@ -928,19 +928,22 @@ function renderEventSubRows(subs) {
   for (var i = 0; i < subs.length; i++) { html += eventSubRowHTML(subs[i]); }
   host.innerHTML = html;
   var rows = host.querySelectorAll("[data-event-sub]");
-  for (var r = 0; r < rows.length; r++) { syncEventSubRowMode(rows[r]); }
+  for (var r = 0; r < rows.length; r++) {
+    syncEventSubRowMode(rows[r]);
+    updateTypesSummary(rows[r]);
+  }
 }
 
-// EVENT_TYPE_CHOICES 是事件类型多选词表(docs/bots/13 §3.1):规范名 + 族通配。
-// 既有配置里词表外的值(别名/自定义)会追加为已选 chip,保证往返不丢配置。
-var EVENT_TYPE_CHOICES = [
-  "assistant_message", "user_message", "assistant_delta",
-  "agent.turn.started", "agent.turn.finished", "turn.suspended", "turn.resumed",
-  "session_start", "session_end", "session.interrupted",
-  "approval_requested", "question_asked", "error",
-  "tool.requested", "tool.completed", "tool.denied",
-  "subagent.completed", "subagent.batch.completed",
-  "turn.*", "work.*"
+// EVENT_TYPE_GROUPS 是事件类型多选词表(docs/bots/13 §3.1),按族分组;第二项是
+// 投递形态提示。既有配置里词表外的值(别名/自定义)会在面板尾部追加为「自定义(既有)」
+// 勾选项,保证往返不丢配置。
+var EVENT_TYPE_GROUPS = [
+  { label: "conversation", types: [["assistant_message", "content"], ["user_message", ""], ["assistant_delta", "仅 stream"]] },
+  { label: "turn", types: [["agent.turn.started", ""], ["agent.turn.finished", "notice/digest"], ["turn.suspended", ""], ["turn.resumed", ""], ["session_start", ""], ["session_end", ""], ["session.interrupted", ""]] },
+  { label: "interaction", types: [["approval_requested", "notice"], ["question_asked", "notice"]] },
+  { label: "work", types: [["tool.requested", "仅 digest"], ["tool.completed", "仅 digest"], ["tool.denied", "仅 digest"], ["subagent.completed", "仅 digest"], ["subagent.batch.completed", "仅 digest"]] },
+  { label: "system", types: [["error", ""]] },
+  { label: "通配", types: [["turn.*", "族"], ["work.*", "族"]] }
 ];
 
 // eventSubRowHTML 渲染一条订阅行:字段以 data-sub-field 标记,collectEventSubs 按行收集。
@@ -974,17 +977,17 @@ function eventSubRowHTML(sub) {
     "</div>" +
     '<div class="connector-field connector-event-types">' +
     '<span class="connector-field-label">事件类型 *</span>' +
-    eventTypeChipsHTML(sub.types || []) +
+    eventTypeCheckboxesHTML(sub.types || []) +
     '<input type="text" data-sub-field="types-extra" autocomplete="off" placeholder="自定义/别名(逗号分隔,可留空)" value="">' +
-    '<span class="connector-field-help">点击多选;work.*(工具/子代理)仅 digest 生效。</span>' +
+    '<span class="connector-field-help">展开面板勾选(按族分组);work.*(工具/子代理)仅 digest 生效。</span>' +
     "</div>" +
     '<button type="button" data-editor="remove-event-sub">删除此订阅</button>' +
     "</div>";
 }
 
-// eventTypeChipsHTML 渲染事件类型多选 chips:词表选项全量呈现(aria-pressed 标记选中),
-// 词表外的既有值追加为已选 chip(往返不丢)。
-function eventTypeChipsHTML(selected) {
+// eventTypeCheckboxesHTML 渲染事件类型多选:折叠面板(<details>)+ 原生 checkbox,
+// 汇总行显示已选数量与名称;不再把选项平铺成按钮(2026-10-15 UI 反馈)。
+function eventTypeCheckboxesHTML(selected) {
   var chosen = [];
   var seen = {};
   var list = selected || [];
@@ -992,21 +995,61 @@ function eventTypeChipsHTML(selected) {
     var item = String(list[i]).trim();
     if (item && !seen[item]) { seen[item] = true; chosen.push(item); }
   }
-  var html = '<span class="connector-type-chips">';
-  for (var c = 0; c < EVENT_TYPE_CHOICES.length; c++) {
-    var name = EVENT_TYPE_CHOICES[c];
-    var on = !!seen[name];
-    if (on) { seen[name] = false; }
-    html += '<button type="button" class="connector-type-chip" data-sub-type="' + esc(name) + '" aria-pressed="' +
-      (on ? "true" : "false") + '">' + esc(name) + "</button>";
-  }
-  for (var k = 0; k < chosen.length; k++) {
-    if (seen[chosen[k]]) {
-      html += '<button type="button" class="connector-type-chip" data-sub-type="' + esc(chosen[k]) +
-        '" aria-pressed="true">' + esc(chosen[k]) + "</button>";
+  var unknown = [];
+  var html = '<details class="connector-types-picker"><summary><span data-types-summary>' +
+    esc(eventTypesSummaryText(chosen)) + "</span></summary><div class=\"connector-types-panel\">";
+  for (var g = 0; g < EVENT_TYPE_GROUPS.length; g++) {
+    var group = EVENT_TYPE_GROUPS[g];
+    html += '<div class="connector-types-group-title">' + esc(group.label) + "</div>";
+    for (var t = 0; t < group.types.length; t++) {
+      var name = group.types[t][0];
+      var on = !!seen[name];
+      if (on) { seen[name] = false; }
+      html += eventTypeOptionHTML(name, group.types[t][1], on);
     }
   }
-  return html + "</span>";
+  for (var k = 0; k < chosen.length; k++) {
+    if (seen[chosen[k]]) { unknown.push(chosen[k]); }
+  }
+  if (unknown.length) {
+    html += '<div class="connector-types-group-title">自定义(既有)</div>';
+    for (var u = 0; u < unknown.length; u++) {
+      html += eventTypeOptionHTML(unknown[u], "词表外", true);
+    }
+  }
+  return html + "</div></details>";
+}
+
+// eventTypeOptionHTML 单个多选项:原生 checkbox(带族/形态提示)。
+function eventTypeOptionHTML(name, hint, checked) {
+  return '<label class="connector-type-option"><input type="checkbox" data-sub-type="' + esc(name) + '"' +
+    (checked ? " checked" : "") + "><span>" + esc(name) + "</span>" +
+    (hint ? '<span class="connector-type-hint">' + esc(hint) + "</span>" : "") + "</label>";
+}
+
+// eventTypesSummaryText 汇总行文案(折叠面板收起时的唯一可见信息)。
+function eventTypesSummaryText(checked) {
+  if (!checked || !checked.length) { return "未选择(点击展开多选)"; }
+  var shown = checked.slice(0, 3).join("、");
+  if (checked.length > 3) { shown += " 等"; }
+  return "已选 " + checked.length + " 项:" + shown;
+}
+
+// updateTypesSummary 依据勾选态与自定义输入刷新汇总行。
+function updateTypesSummary(row) {
+  if (!row) { return; }
+  var summary = row.querySelector("[data-types-summary]");
+  if (!summary) { return; }
+  var checked = [];
+  var boxes = row.querySelectorAll("[data-sub-type]");
+  for (var i = 0; i < boxes.length; i++) {
+    if (boxes[i].checked) { checked.push(boxes[i].getAttribute("data-sub-type")); }
+  }
+  var extra = splitSubList(subFieldValue(row, "types-extra"));
+  for (var e = 0; e < extra.length; e++) {
+    if (checked.indexOf(extra[e]) < 0) { checked.push(extra[e]); }
+  }
+  summary.textContent = eventTypesSummaryText(checked);
 }
 
 // syncEventSubRowMode 按会话模式启用/禁用「会话列表」输入(非 ids 模式置灰提示)。
@@ -1037,6 +1080,7 @@ function appendEventSubRow() {
   host.insertAdjacentHTML("beforeend", eventSubRowHTML({}));
   var rows = host.querySelectorAll("[data-event-sub]");
   syncEventSubRowMode(rows[rows.length - 1]);
+  updateTypesSummary(rows[rows.length - 1]);
 }
 
 // removeEventSubRow 删除按钮所在行。
@@ -1059,10 +1103,10 @@ function collectEventSubs() {
 
 function collectEventSubRow(row) {
   var types = [];
-  var chips = row.querySelectorAll("[data-sub-type]");
-  for (var c = 0; c < chips.length; c++) {
-    if (chips[c].getAttribute("aria-pressed") === "true") {
-      types.push(chips[c].getAttribute("data-sub-type"));
+  var boxes = row.querySelectorAll("[data-sub-type]");
+  for (var c = 0; c < boxes.length; c++) {
+    if (boxes[c].checked) {
+      types.push(boxes[c].getAttribute("data-sub-type"));
     }
   }
   var extra = splitSubList(subFieldValue(row, "types-extra"));
@@ -1477,12 +1521,7 @@ function onModalBodyClick(event) {
   if (!target || !target.closest) { return; }
   var qrBtn = target.closest("[data-qr]");
   if (qrBtn) { onQRButton(qrBtn.getAttribute("data-qr")); return; }
-  // 事件类型 chips:点击切换选中(aria-pressed;按钮语义与样式一致)。
-  var chip = target.closest("[data-sub-type]");
-  if (chip) {
-    chip.setAttribute("aria-pressed", chip.getAttribute("aria-pressed") === "true" ? "false" : "true");
-    return;
-  }
+  // 事件类型多选为原生 checkbox(勾选即切换,无需点击委托)。
   // 事件订阅行操作(docs/bots/13):添加/删除(委托,行内按钮随行销毁)。
   var editorBtn = target.closest("[data-editor]");
   if (!editorBtn) { return; }
@@ -1502,6 +1541,19 @@ function onModalBodyChange(event) {
   // 订阅行会话模式切换:联动「会话列表」可用性。
   if (target && target.getAttribute && target.getAttribute("data-sub-field") === "sessions-mode") {
     syncEventSubRowMode(target.closest("[data-event-sub]"));
+    return;
+  }
+  // 事件类型勾选:刷新汇总行(折叠面板收起后的可见信息)。
+  if (target && target.getAttribute && target.getAttribute("data-sub-type")) {
+    updateTypesSummary(target.closest("[data-event-sub]"));
+  }
+}
+
+// onModalBodyInput 只处理需要即时反馈的输入(事件类型自定义框 → 汇总行)。
+function onModalBodyInput(event) {
+  var target = event.target;
+  if (target && target.getAttribute && target.getAttribute("data-sub-field") === "types-extra") {
+    updateTypesSummary(target.closest("[data-event-sub]"));
   }
 }
 
@@ -1544,6 +1596,7 @@ export function initConnectors() {
   if (bodyEl) {
     bodyEl.addEventListener("click", onModalBodyClick);
     bodyEl.addEventListener("change", onModalBodyChange);
+    bodyEl.addEventListener("input", onModalBodyInput);
   }
   var footerEl = connEl("connectors-modal-footer");
   if (footerEl) { footerEl.addEventListener("click", onModalFooterClick); }

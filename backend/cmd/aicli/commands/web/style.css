@@ -3325,15 +3325,27 @@ body.low-bandwidth img {
 /* 勾选类字段行内布局(2026-10-15 UI 收口):勾选框与文字同行,帮助文本换到下一行。 */
 .connector-field-check { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 6px; }
 .connector-field-check .connector-field-help { flex-basis: 100%; margin: 0; }
-/* 事件类型多选 chips(替代文本输入框;aria-pressed 即选中态)。 */
-.connector-event-types .connector-type-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.connector-type-chip {
-  font-size: 11px; line-height: 1.5; padding: 1px 8px; border-radius: 999px;
-  border: 1px solid var(--border2); background: transparent; color: var(--fg2); cursor: pointer;
+/* 事件类型多选:折叠面板(汇总行 + 按族分组 checkbox),替代平铺按钮(2026-10-15 UI 反馈)。 */
+.connector-types-picker { border: 1px solid var(--border2); border-radius: 6px; }
+.connector-types-picker > summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 3px 8px; font-size: 12px; color: var(--fg2); cursor: pointer; list-style: none;
 }
-.connector-type-chip:hover { background: var(--hoverBg2); }
-.connector-type-chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--userMsgFg, #fff); }
-.connector-type-chip[aria-pressed="true"]:hover { background: var(--accent2); }
+.connector-types-picker > summary::-webkit-details-marker { display: none; }
+.connector-types-picker > summary::after { content: "▾"; color: var(--fg3); flex: none; }
+.connector-types-picker[open] > summary { border-bottom: 1px solid var(--border); }
+.connector-types-panel { max-height: 240px; overflow: auto; padding: 4px 8px 8px; }
+.connector-types-group-title {
+  font-size: 10.5px; color: var(--fg3); text-transform: uppercase;
+  margin: 6px 0 2px; user-select: none;
+}
+.connector-type-option {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--fg2); cursor: pointer; padding: 1px 2px; border-radius: 4px;
+}
+.connector-type-option:hover { background: var(--hoverBg); }
+.connector-type-option input { flex: none; margin: 0; accent-color: var(--accent); }
+.connector-type-hint { margin-left: auto; font-size: 10.5px; color: var(--fg3); }
 .connector-event-types [data-sub-field="types-extra"] { margin-top: 2px; font-size: 12px; }
 .connector-event-sub [data-sub-field="sessions-ids"]:disabled { opacity: .55; }
 

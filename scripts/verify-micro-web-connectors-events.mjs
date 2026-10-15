@@ -28,7 +28,8 @@ ok(/function collectEventSubs\(/.test(src), "源码包含 collectEventSubs");
 ok(/function onModalBodyClick[\s\S]*add-event-sub/.test(src), "onModalBodyClick 委托包含 add-event-sub");
 ok(/Object\.assign\(\{\}, current\.policy\)/.test(src), "collectEditor 编辑态保留既有 policy(浅拷贝)");
 ok(/connector-field-check/.test(src), "fieldHTML 勾选控件走行内布局(不单独占行)");
-ok(/data-sub-type/.test(src) && /eventTypeChipsHTML/.test(src), "事件类型为 chips 多选组件");
+ok(/eventTypeCheckboxesHTML/.test(src) && /connector-types-picker/.test(src), "事件类型为折叠多选面板组件(非平铺按钮)");
+ok(!/eventTypeChipsHTML/.test(src), "旧的平铺 chips 实现已移除");
 
 // ---- 最小 DOM mock ----
 function matchesSelector(node, sel) {
@@ -157,11 +158,17 @@ function parseEventSubRow(chunk) {
   addField("deliver", "select", {}, true, deliver ? deliver.options : "");
   const enabledAttrs = inputTag("enabled") || {};
   addField("enabled", "input", { checked: "checked" in enabledAttrs });
-  // 事件类型 chips(aria-pressed 选中态;词表外值追加在末尾) + 自定义兜底输入。
-  const chipRe = /data-sub-type="([^"]*)" aria-pressed="(true|false)"/g;
-  let chipMatch;
-  while ((chipMatch = chipRe.exec(chunk)) !== null) {
-    row.appendChild(makeNode("button", { attr: { "data-sub-type": decodeEntities(chipMatch[1]), "aria-pressed": chipMatch[2] } }));
+  // 事件类型多选:折叠面板(汇总行 + 原生 checkbox;词表外值追加在末尾) + 自定义兜底输入。
+  const summaryMatch = chunk.match(/<summary><span data-types-summary>([\s\S]*?)<\/span><\/summary>/);
+  const summary = makeNode("span", { attr: { "data-types-summary": "" } });
+  summary.textContent = summaryMatch ? decodeEntities(summaryMatch[1]) : "";
+  row.appendChild(summary);
+  const boxRe = /<input[^>]*data-sub-type="([^"]*)"[^>]*>/g;
+  let boxMatch;
+  while ((boxMatch = boxRe.exec(chunk)) !== null) {
+    const node = makeNode("input", { attr: { "data-sub-type": decodeEntities(boxMatch[1]) } });
+    node.checked = /\bchecked\b/.test(boxMatch[0]);
+    row.appendChild(node);
   }
   addField("types-extra", "input", { value: (inputTag("types-extra") || {}).value || "" });
   if (/data-editor="remove-event-sub"/.test(chunk)) {
@@ -208,6 +215,7 @@ return {
   renderEventSubRows: renderEventSubRows,
   onModalBodyClick: onModalBodyClick,
   onModalBodyChange: onModalBodyChange,
+  onModalBodyInput: onModalBodyInput,
   splitSubList: splitSubList,
   setSchemaProviders: function(v){ schemaProviders = v; },
   setItems: function(v){ connectorItems = v; },
@@ -256,11 +264,14 @@ modalBody.appendChild(subsHost);
   ok(/data-sub-field="deliver">[\s\S]*<option value="content" selected>/.test(html), "deliver 选中 content");
   ok(html.includes('class="connector-field connector-field-check"><input type="checkbox" data-sub-field="enabled" checked><span class="connector-field-label">启用</span>'),
     "启用勾选为行内布局(勾选框在文字前,不单独占行)");
-  const chipCount = (html.match(/data-sub-type="/g) || []).length;
-  ok(chipCount === 20, "事件类型渲染为 20 个 chips(词表全量)", chipCount);
-  ok(html.includes('data-sub-type="assistant_message" aria-pressed="true"')
-    && html.includes('data-sub-type="turn.*" aria-pressed="true"')
-    && html.includes('data-sub-type="error" aria-pressed="false"'), "选中类型 aria-pressed=true,其余 false");
+  ok(/<details class="connector-types-picker">/.test(html), "事件类型为折叠多选面板(details),不平铺按钮");
+  ok(!/connector-type-chip/.test(html), "不再渲染平铺 chips 按钮");
+  const boxCount = (html.match(/data-sub-type="/g) || []).length;
+  ok(boxCount === 20, "面板含 20 个多选项(词表全量)", boxCount);
+  ok(/data-sub-type="assistant_message" checked/.test(html)
+    && /data-sub-type="turn\.\*" checked/.test(html)
+    && !/data-sub-type="error" checked/.test(html), "选中项勾选,未选项不勾选");
+  ok(html.includes("已选 2 项:assistant_message、turn.*"), "汇总行显示已选数量与名称");
   ok(html.includes('data-sub-field="types-extra"'), "保留自定义类型输入(兜底)");
   ok(!/data-sub-field="types"/.test(html), "事件类型不再使用文本输入框");
   ok(html.includes('data-editor="remove-event-sub"'), "行内含删除按钮");
@@ -355,21 +366,34 @@ modalBody.appendChild(subsHost);
   ok(eq(api.splitSubList(""), []), "空串 → 空数组");
 }
 
-// ===== 8. 词表外类型保留(追加 chip) + chips 点击切换 =====
+// ===== 8. 词表外类型保留(追加勾选项) + checkbox/汇总行联动 =====
 {
   eventsEnabled.checked = true;
   api.renderEventSubRows([{ id: "legacy", types: ["completion", "custom.type", "turn.*"] }]);
-  const first = api.collectEventSubs().subscriptions[0];
-  ok(eq(first.types, ["turn.*", "completion", "custom.type"]), "词表外类型追加为已选 chip 并保留(往返不丢)", first.types);
   const row = subsHost.children[0];
-  const chip = row.querySelector('[data-sub-type="assistant_message"]');
-  api.onModalBodyClick({ target: chip });
-  ok(chip.getAttribute("aria-pressed") === "true", "点击 chip 切换为选中");
+  const customBox = row.querySelector('[data-sub-type="custom.type"]');
+  ok(!!customBox && customBox.checked === true, "词表外类型追加为已勾选项(往返不丢)");
+  const turnBox = row.querySelector('[data-sub-type="turn.*"]');
+  ok(turnBox.checked === true, "词表内选中项已勾选");
+  const first = api.collectEventSubs().subscriptions[0];
+  ok(eq(first.types, ["turn.*", "completion", "custom.type"]), "收集保留词表内/外全部类型", first.types);
+  const summary = row.querySelector("[data-types-summary]");
+  ok(/^已选 3 项:/.test(summary.textContent), "汇总行计数=3", summary.textContent);
+  const box = row.querySelector('[data-sub-type="assistant_message"]');
+  box.checked = true;
+  api.onModalBodyChange({ target: box });
+  ok(/^已选 4 项:/.test(summary.textContent), "勾选后汇总行计数更新", summary.textContent);
   const after = api.collectEventSubs().subscriptions[0];
-  ok(after.types.indexOf("assistant_message") >= 0, "选中后的 chip 进入收集结果");
-  api.onModalBodyClick({ target: chip });
-  ok(chip.getAttribute("aria-pressed") === "false", "再次点击取消选中");
-  ok(after.types.indexOf("custom.type") >= 0, "自定义类型仍在收集结果中");
+  ok(after.types.indexOf("assistant_message") >= 0, "勾选后的类型进入收集结果");
+  box.checked = false;
+  api.onModalBodyChange({ target: box });
+  ok(/^已选 3 项:/.test(summary.textContent), "取消勾选后汇总行回退", summary.textContent);
+  const extra = row.querySelector('[data-sub-field="types-extra"]');
+  extra.value = "approval.alias";
+  api.onModalBodyInput({ target: extra });
+  ok(/^已选 4 项:/.test(summary.textContent), "自定义输入计入汇总");
+  const withExtra = api.collectEventSubs().subscriptions[0];
+  ok(withExtra.types.indexOf("approval.alias") >= 0, "自定义输入进入收集结果");
 }
 
 // ===== 9. 会话列表随模式联动(非 ids 置灰) =====
