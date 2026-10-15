@@ -62,6 +62,35 @@ export interface ConnectorPolicyView {
   route?: ConnectorRoutePolicyView;
   /** D5 事件通知接收；缺省（未配置）= 不收跨会话事件（additive）。 */
   notify?: ConnectorNotifyPolicyView;
+  /**
+   * S1a 内容镜像（docs/bots/13 §8）：本地来源回合（TUI/Web/API/系统）的终态
+   * 正文是否作为副本投递到该 bot 的绑定 chats；缺省关（additive）。
+   */
+  content_mirror?: boolean;
+  /**
+   * S2 声明式事件订阅（docs/bots/13 §6.1）：缺省（未配置）= 回退
+   * notify/content_mirror 旧语义（双读单写，additive）。
+   */
+  events?: ConnectorEventsPolicyView;
+}
+
+/** S2 声明式事件订阅容器（enabled 且有订阅时生效）。 */
+export interface ConnectorEventsPolicyView {
+  enabled: boolean;
+  subscriptions?: ConnectorEventSubscriptionView[];
+}
+
+/** 一条订阅：会话选择器 × 事件类型（支持 "turn.*" 族通配）× 投递形态。 */
+export interface ConnectorEventSubscriptionView {
+  id?: string;
+  /** S4：单条订阅启停；缺省（省略）= 启用，false 显式停用。 */
+  enabled?: boolean;
+  /** 会话范围：bound（缺省）| ids | all。 */
+  sessions?: { mode?: "bound" | "ids" | "all"; ids?: string[] };
+  /** 事件类型：规范名/别名/族通配（如 assistant_message、approval、"turn.*"）。 */
+  types?: string[];
+  /** 投递形态：notice（缺省）| content | digest（completion 聚合）| stream（assistant_delta 流式编辑）。 */
+  deliver?: "notice" | "content" | "digest" | "stream";
 }
 
 /** 连接器运行日志级别（后端 logs.go LogLevel*；未知值原样保留，渲染器降级）。 */

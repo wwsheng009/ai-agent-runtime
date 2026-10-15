@@ -155,6 +155,10 @@ type policyRecord struct {
 	RuntimeOwner  string        `json:"runtime_owner,omitempty"`
 	Route         *routeRecord  `json:"route,omitempty"`
 	Notify        *notifyRecord `json:"notify,omitempty"`
+	// ContentMirror 是 S1a 内容镜像开关（docs/bots/13 §8；零值省略）。
+	ContentMirror bool `json:"content_mirror,omitempty"`
+	// Events 是 S2 声明式事件订阅（docs/bots/13 §6.1；零值省略）。
+	Events *eventsRecord `json:"events,omitempty"`
 }
 
 // routeRecord 是 D6 连接器级模型路由（docs/bots/09 §5.5）。
@@ -169,6 +173,26 @@ type notifyRecord struct {
 	Enabled bool     `json:"enabled"`
 	Kinds   []string `json:"kinds,omitempty"`
 	Scope   string   `json:"scope,omitempty"`
+}
+
+// eventsRecord 是 S2 声明式事件订阅（docs/bots/13 §6.1）。
+type eventsRecord struct {
+	Enabled       bool                 `json:"enabled"`
+	Subscriptions []subscriptionRecord `json:"subscriptions,omitempty"`
+}
+
+type subscriptionRecord struct {
+	ID string `json:"id,omitempty"`
+	// Enabled 控制单条订阅启停（S4）：缺省（nil）= 启用；false 显式停用。
+	Enabled  *bool           `json:"enabled,omitempty"`
+	Sessions *sessionsRecord `json:"sessions,omitempty"`
+	Types    []string        `json:"types,omitempty"`
+	Deliver  string          `json:"deliver,omitempty"`
+}
+
+type sessionsRecord struct {
+	Mode string   `json:"mode,omitempty"`
+	IDs  []string `json:"ids,omitempty"`
 }
 
 func recordFromConfig(cfg connectors.Config) connectorRecord {
@@ -190,6 +214,7 @@ func recordFromConfig(cfg connectors.Config) connectorRecord {
 	record.Policy.SessionMode = strings.TrimSpace(cfg.Policy.SessionMode)
 	record.Policy.ReplyMode = strings.TrimSpace(cfg.Policy.ReplyMode)
 	record.Policy.RuntimeOwner = strings.TrimSpace(cfg.Policy.RuntimeOwner)
+	record.Policy.ContentMirror = cfg.Policy.ContentMirror
 	if cfg.Policy.Route.HasOverride() {
 		record.Policy.Route = &routeRecord{
 			Provider:        strings.TrimSpace(cfg.Policy.Route.Provider),
@@ -203,6 +228,22 @@ func recordFromConfig(cfg connectors.Config) connectorRecord {
 			Kinds:   append([]string(nil), cfg.Policy.Notify.Kinds...),
 			Scope:   strings.TrimSpace(cfg.Policy.Notify.Scope),
 		}
+	}
+	if cfg.Policy.Events.Enabled && len(cfg.Policy.Events.Subscriptions) > 0 {
+		events := &eventsRecord{Enabled: true}
+		for _, sub := range cfg.Policy.Events.Subscriptions {
+			item := subscriptionRecord{
+				ID:      strings.TrimSpace(sub.ID),
+				Enabled: sub.Enabled,
+				Types:   append([]string(nil), sub.Types...),
+				Deliver: strings.TrimSpace(sub.Deliver),
+			}
+			if mode := strings.TrimSpace(sub.Sessions.Mode); mode != "" || len(sub.Sessions.IDs) > 0 {
+				item.Sessions = &sessionsRecord{Mode: mode, IDs: append([]string(nil), sub.Sessions.IDs...)}
+			}
+			events.Subscriptions = append(events.Subscriptions, item)
+		}
+		record.Policy.Events = events
 	}
 	return record
 }
@@ -224,6 +265,7 @@ func (r connectorRecord) toConfig() connectors.Config {
 			SessionMode:   strings.TrimSpace(r.Policy.SessionMode),
 			ReplyMode:     strings.TrimSpace(r.Policy.ReplyMode),
 			RuntimeOwner:  strings.TrimSpace(r.Policy.RuntimeOwner),
+			ContentMirror: r.Policy.ContentMirror,
 		},
 	}
 	if r.Policy.Route != nil {
@@ -238,6 +280,21 @@ func (r connectorRecord) toConfig() connectors.Config {
 			Enabled: r.Policy.Notify.Enabled,
 			Kinds:   r.Policy.Notify.Kinds,
 			Scope:   strings.TrimSpace(r.Policy.Notify.Scope),
+		}
+	}
+	if r.Policy.Events != nil {
+		config.Policy.Events.Enabled = r.Policy.Events.Enabled
+		for _, sub := range r.Policy.Events.Subscriptions {
+			item := connectors.EventSubscription{
+				ID:      sub.ID,
+				Enabled: sub.Enabled,
+				Types:   append([]string(nil), sub.Types...),
+				Deliver: sub.Deliver,
+			}
+			if sub.Sessions != nil {
+				item.Sessions = connectors.SessionSelector{Mode: sub.Sessions.Mode, IDs: append([]string(nil), sub.Sessions.IDs...)}
+			}
+			config.Policy.Events.Subscriptions = append(config.Policy.Events.Subscriptions, item)
 		}
 	}
 	return config

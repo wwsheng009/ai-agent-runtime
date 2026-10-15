@@ -6,6 +6,8 @@
 
 import type {
   ConnectorActionSpec,
+  ConnectorEventSubscriptionView,
+  ConnectorPolicyView,
   ConnectorProviderSchema,
   ConnectorSchema,
   ConnectorRoutePolicyView,
@@ -277,5 +279,22 @@ export function mergeRouteIntoPayload(
     model: route.model.trim(),
     reasoning_effort: route.reasoningEffort.trim(),
   } satisfies ConnectorRoutePolicyView;
+  return { ...payload, policy };
+}
+
+/**
+ * S2 事件订阅（docs/bots/13 §6.1）：把订阅编辑值合并进提交体的 policy 段
+ * （编辑态 PATCH；在既有 policy（含 D6 路由合并结果）之上合并 events）。
+ * 关闭时显式写 `enabled:false`——后端 policyFrom 以整体替换语义落盘。
+ */
+export function mergeEventsIntoPayload(
+  payload: ConnectorSubmitPayload,
+  events: { enabled: boolean; subscriptions: ConnectorEventSubscriptionView[] },
+  existing: ConnectorView | null,
+): ConnectorSubmitPayload {
+  const policy: ConnectorPolicyView = { ...(payload.policy ?? existing?.policy ?? {}) };
+  policy.events = events.enabled
+    ? { enabled: true, subscriptions: events.subscriptions }
+    : { enabled: false };
   return { ...payload, policy };
 }

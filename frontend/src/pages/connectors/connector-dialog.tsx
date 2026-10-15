@@ -14,7 +14,6 @@ import {
 import { listRuntimeModels } from "@/lib/runtime-api";
 import type {
   ConnectorFieldError,
-  ConnectorFieldSchema,
   ConnectorSchema,
   ConnectorSubmitPayload,
   ConnectorView,
@@ -25,9 +24,10 @@ import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { readAdminToken } from "@/lib/admin-token";
 import { cn } from "@/lib/utils";
 
-import { FieldControl } from "./field-control";
+import { ConnectorFieldList } from "./connector-field-list";
 import { ModelRoutePicker } from "./model-route-picker";
 import { RescanSection } from "./rescan-section";
+import { SubscriptionEditor, type SubscriptionEditorValue } from "./subscription-editor";
 import {
   buildSubmitPayload,
   createEmptyForm,
@@ -37,6 +37,7 @@ import {
   formFromConnector,
   generateConnectorId,
   hasModeField,
+  mergeEventsIntoPayload,
   mergeRouteIntoPayload,
   switchProvider,
   validateConnectorForm,
@@ -101,6 +102,11 @@ export function ConnectorDialog({
   }>({ providers: [] });
   /** D6 路由编辑值（编辑态从 existing.policy.route 回填）。 */
   const [routeValue, setRouteValue] = useState({ provider: "", model: "", reasoningEffort: "" });
+  /** S2 事件订阅编辑值（编辑态从 existing.policy.events 回填）。 */
+  const [eventsValue, setEventsValue] = useState<SubscriptionEditorValue>({
+    enabled: false,
+    subscriptions: [],
+  });
 
   /**
    * 已初始化的 (open, existing) 组合。列表刷新重建 schema 对象不得重置
@@ -134,6 +140,17 @@ export function ConnectorDialog({
       provider: route?.provider ?? "",
       model: route?.model ?? "",
       reasoningEffort: route?.reasoning_effort ?? "",
+    });
+    const events = existing?.policy.events;
+    setEventsValue({
+      enabled: events?.enabled ?? false,
+      subscriptions: (events?.subscriptions ?? []).map((item) => ({
+        ...item,
+        sessions: item.sessions
+          ? { ...item.sessions, ids: [...(item.sessions.ids ?? [])] }
+          : undefined,
+        types: [...(item.types ?? [])],
+      })),
     });
   }, [open, existing, schema]);
 
@@ -234,8 +251,9 @@ export function ConnectorDialog({
       return;
     }
     const payload = buildSubmitPayload(form, providerSchema, { isCreate });
-    // D6 路由：编辑态随本 payload 一起 PATCH（restapi policyFrom 合并进 policy）。
-    onSubmit(isCreate ? payload : mergeRouteIntoPayload(payload, routeValue, existing));
+    // D6 路由 + S2 事件订阅：编辑态随本 payload 一起 PATCH（restapi policyFrom 合并进 policy）。
+    const merged = isCreate ? payload : mergeRouteIntoPayload(payload, routeValue, existing);
+    onSubmit(isCreate ? payload : mergeEventsIntoPayload(merged, eventsValue, existing));
   };
 
   /**
@@ -291,37 +309,8 @@ export function ConnectorDialog({
     onChanged?.();
   };
 
-  /** Schema 字段 → 控件（映射实现见 ./field-control.tsx）。 */
-  const renderControl = (field: ConnectorFieldSchema) => (
-    <FieldControl
-      field={field}
-      value={form.values[field.key] ?? ""}
-      cleared={form.clearedSecrets[field.key] === true}
-      configured={(existing?.secret_keys ?? []).includes(field.key)}
-      onValueChange={updateValue}
-      onClearToggle={toggleClearSecret}
-    />
-  );
-
-  /** Schema 字段列表（凭据区 / 扫码高级设置两处共用）。 */
-  const renderFieldList = () =>
-    (providerSchema?.fields ?? []).map((field) => (
-      <div key={field.key} className="flex flex-col gap-1">
-        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-          <span>
-            {field.label}
-            {field.required ? <span className="text-accent-orange"> *</span> : null}
-          </span>
-          {renderControl(field)}
-        </label>
-        {field.help && field.type !== "bool" ? (
-          <span className="text-xs text-muted-foreground">{field.help}</span>
-        ) : null}
-        {fieldError(field.key) ? (
-          <span className="text-xs text-accent-orange">{fieldError(field.key)}</span>
-        ) : null}
-      </div>
-    ));
+  /** 字段列表共用 props（两处复用；常量取值避免 JSX 分支收窄误伤 secret_keys）。 */
+  const fieldListProps = { fields: providerSchema?.fields ?? [], values: form.values, clearedSecrets: form.clearedSecrets, configuredSecretKeys: existing?.secret_keys ?? [], fieldError, onValueChange: updateValue, onClearToggle: toggleClearSecret };
 
   const activeQRAction = scanMode ? qrAction : null;
   const qrActiveConnector = activeQRAction ? qrConnector : null;
@@ -474,6 +463,10 @@ export function ConnectorDialog({
             />
           ) : null}
 
+          {!isCreate ? (
+            <SubscriptionEditor value={eventsValue} onChange={setEventsValue} />
+          ) : null}
+
           <RescanSection
             available={rescanAvailable}
             done={qrConfirmed}
@@ -501,7 +494,9 @@ export function ConnectorDialog({
                 <summary className="cursor-pointer select-none">
                   {t("dialog.advanced")}
                 </summary>
-                <div className="mt-2.5 flex flex-col gap-3">{renderFieldList()}</div>
+                <div className="mt-2.5 flex flex-col gap-3">
+                  <ConnectorFieldList {...fieldListProps} />
+                </div>
               </details>
             </section>
           ) : (
@@ -509,7 +504,7 @@ export function ConnectorDialog({
               <legend className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
                 {t("dialog.credentials")}
               </legend>
-              {renderFieldList()}
+              <ConnectorFieldList {...fieldListProps} />
             </fieldset>
           )}
         </div>

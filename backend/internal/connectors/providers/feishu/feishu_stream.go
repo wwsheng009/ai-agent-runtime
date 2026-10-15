@@ -151,8 +151,13 @@ func (s *streamSession) patchCard(ctx context.Context, content string) error {
 }
 
 // Update 以累积文本替换卡片正文（Service 已节流；与前次相同则跳过）。
+// 出站媒体指令（```feishu-attachments``` 围栏 / IMAGE: 等指令行）是协议而非
+// 用户正文：中间态先截断未闭合块、再剥离已闭合块与指令行（与 QQ/Telegram
+// 流式同口径，2026-10-15），终态由 Final 解析并补发附件。
 func (s *streamSession) Update(ctx context.Context, text string) error {
-	text = strings.TrimSpace(text)
+	visible := connectors.TruncateOpenAttachmentBlocks(text, feishuAttachmentFenceNames...)
+	visible, _ = connectors.ParseOutboundMediaDirectives(visible, feishuAttachmentFenceNames...)
+	text = strings.TrimSpace(visible)
 	if text == "" {
 		return nil
 	}

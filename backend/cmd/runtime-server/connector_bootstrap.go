@@ -44,9 +44,11 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 	}
 	store := storefile.NewConfigStore(configPath, runtimeConnectorStatePath(logf))
 
+	// S1b 内容镜像：IM 来源回合登记器（L3，docs/bots/13 §4.2）与后端/runner 共享。
+	turns := connectors.NewTurnActivityTracker()
 	service := connectors.New(connectors.Deps{
 		Store:   store,
-		Backend: runtimeConnectorBackend{handler: handler, logf: logf},
+		Backend: runtimeConnectorBackend{handler: handler, logf: logf, turns: turns},
 		Logf:    logf,
 		// 运行归属（07 §5.6）：本宿主身份用于认领/续约/释放；与 aicli 共用
 		// config.yaml 时，同一通道的轮询只允许一处运行。
@@ -99,7 +101,7 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		HostID:    "runtime-server",
 		// runner 接收面（P2 切片 B 后半）：POST /connectors/dispatch 执行后端
 		// （prompt 注入走 SubmitConnectorPrompt、命令回环走既有命令面）。
-		Runner: runtimeConnectorRunner{handler: handler},
+		Runner: runtimeConnectorRunner{handler: handler, turns: turns},
 		// 注意力接收面（P2 切片 D）：POST /connectors/attention 本地 D5 过滤
 		// + 出站（InletAttention 共享实现）。
 		AttentionInlet: connectors.InletAttention(store, service.NotifyAttentionScoped),
@@ -123,7 +125,42 @@ func setupRuntimeConnectors(ctx context.Context, handler *runtimeapi.Handler, ro
 		NotifyScoped: func(notifyCtx context.Context, connectorIDs []string, notice connectors.AttentionNotice) error {
 			return service.NotifyAttentionScoped(notifyCtx, connectorIDs, notice)
 		},
+		// digest 聚合投递口（S4，13 §7.1）：窗口内 completion 合并为一条广播。
+		NotifyBroadcast: service.NotifyAttentionBroadcast,
+		// 成功投递审计（S4，13 §7.4）：逐连接器落 ConnectorLog。
+		Audit: service.RecordAttentionDelivery,
+		// digest 聚合广播成功投递审计（S4 指标面切片）：批内会话数落 ConnectorLog。
+		AuditBroadcast: service.RecordAttentionDigestDelivery,
+		Logf:           logf,
+	})
+	// S1b 内容镜像（docs/bots/13 §8）：与 aicli 宿主同款接线——绑定会话的终态
+	// 正文作为副本投递到该 bot 的绑定 chats（订阅平面；content_mirror/events 控制）。
+	// L3 由 turns 登记跳过 IM 回合（正文已由回复路径投递）；投递经
+	// service.EnqueueOutbound（per-chat 队列，与 reply 同键保序，13 §3.7#3）。
+	connectors.SubscribeContentMirror(ctx, connectors.ContentMirrorDeps{
+		Subscribe:  handler.SubscribeConnectorSessionOutput,
+		Store:      store,
+		TurnActive: turns.Active,
+		Audit:      service.RecordSubscriptionDelivery,
+		Deliver: func(deliverCtx context.Context, connectorID, chat, text string) error {
+			return service.EnqueueOutbound(deliverCtx, connectorID, chat, []connectors.OutboundMessage{{Text: text}})
+		},
 		Logf: logf,
+	})
+	// S4 流式订阅（docs/bots/13 §7.1）：与 content 镜像共用会话输出订阅面
+	// （assistant_delta + assistant_message）；占位消息 + 节流编辑（≥1s）+ 终态
+	// 收尾，provider 不支持流式时退化为一次性 content 投递（经 per-chat 队列）。
+	// L3 与 content 镜像同（IM 回合整回合跳过）。
+	connectors.SubscribeStreamMirror(ctx, connectors.StreamMirrorDeps{
+		Subscribe:  handler.SubscribeConnectorSessionOutput,
+		Store:      store,
+		TurnActive: turns.Active,
+		Start:      service.NewSubscriptionStream,
+		Deliver: func(deliverCtx context.Context, connectorID, chat, text string) error {
+			return service.EnqueueOutbound(deliverCtx, connectorID, chat, []connectors.OutboundMessage{{Text: text}})
+		},
+		Audit: service.RecordStreamDelivery,
+		Logf:  logf,
 	})
 	return service, nil
 }
@@ -185,6 +222,17 @@ func runtimeConnectorStatePath(logf func(format string, args ...any)) string {
 type runtimeConnectorBackend struct {
 	handler runtimeConnectorCommandHost
 	logf    func(format string, args ...any)
+	// turns 是 IM 来源回合登记器（S1b 内容镜像的 L3 判据，docs/bots/13 §4.2）。
+	turns *connectors.TurnActivityTracker
+}
+
+// activityRegistrar 返回回合活动登记回调（L3，docs/bots/13 §4.2）：会话解析后
+// 登记、回合结束后注销；tracker 未装配时返回 nil（不登记，与 legacy 行为一致）。
+func (b runtimeConnectorBackend) activityRegistrar() func(string) func() {
+	if b.turns == nil {
+		return nil
+	}
+	return b.turns.Begin
 }
 
 // runtimeConnectorCommandHost 是 runtimeConnectorBackend 依赖的宿主命令面。
@@ -202,11 +250,20 @@ type runtimeConnectorCommandHost interface {
 // （P2 切片 B 后半，docs/bots/09 §7.3）：prompt 注入走 SubmitConnectorPrompt
 // （与本地 Backend.Handle 同一执行路径）；命令回环（is_command）按命令词
 // 路由到既有 ConnectorDecideApproval / ConnectorAnswerQuestion。
-//UserID/白名单：runner 侧重查本机生效 policy.allowed_users 由 Service 层
+// UserID/白名单：runner 侧重查本机生效 policy.allowed_users 由 Service 层
 // HandleInbound 语义保证（派发体携带原始 user_id，Dispatcher 前置已过滤；
 // 二次防线见下 dispatchTurn 内 fail-closed 注释）。
 type runtimeConnectorRunner struct {
 	handler runtimeConnectorCommandHost
+	// turns 与 Backend 共用（R1 远程派发也是 IM 来源回合，必须被 L3 覆盖）。
+	turns *connectors.TurnActivityTracker
+}
+
+func (r runtimeConnectorRunner) activityRegistrar() func(string) func() {
+	if r.turns == nil {
+		return nil
+	}
+	return r.turns.Begin
 }
 
 func (r runtimeConnectorRunner) DispatchTurn(ctx context.Context, req connectors.DispatchRequest) (connectors.DispatchResult, error) {
@@ -215,9 +272,10 @@ func (r runtimeConnectorRunner) DispatchTurn(ctx context.Context, req connectors
 		return r.dispatchCommand(ctx, req)
 	}
 	turn, err := r.handler.SubmitConnectorPrompt(ctx, runtimeapi.ConnectorTurnRequest{
-		SessionID: sessionID,
-		UserID:    strings.TrimSpace(req.UserID),
-		Prompt:    strings.TrimSpace(req.Text),
+		SessionID:        sessionID,
+		UserID:           strings.TrimSpace(req.UserID),
+		Prompt:           strings.TrimSpace(req.Text),
+		RegisterActivity: r.activityRegistrar(),
 	})
 	if err != nil {
 		return connectors.DispatchResult{}, err
@@ -319,11 +377,12 @@ func (b runtimeConnectorBackend) Handle(ctx context.Context, req connectors.Back
 		}
 	}
 	turn, err := b.handler.SubmitConnectorPrompt(ctx, runtimeapi.ConnectorTurnRequest{
-		SessionID: req.Session.SessionID,
-		UserID:    req.UserID,
-		Prompt:    text,
-		OnDelta:   onDelta,
-		Route:     routeReq,
+		SessionID:        req.Session.SessionID,
+		UserID:           req.UserID,
+		Prompt:           text,
+		OnDelta:          onDelta,
+		Route:            routeReq,
+		RegisterActivity: b.activityRegistrar(),
 	})
 	if turn == nil {
 		return connectors.BackendResult{}, err
@@ -561,7 +620,6 @@ func dispatchErrorLine(body string) string {
 
 // ── 注意力出站（FR-8）：运行时事件 → AttentionNotice → IM ────────────────────
 
-
 // ── P2 切片 B 后半：mesh peers 视图与远程派发（docs/bots/09 §7.2/§7.3）─────
 
 // meshRunnerPeers 从 mesh node record 档案装配 runner 候选（只读 BuildView；
@@ -648,7 +706,7 @@ func dispatchToRunnerPeer(logf func(format string, args ...any)) func(context.Co
 			return connectors.DispatchResult{}, fmt.Errorf("节点 %s 返回 HTTP %d：%s", req.Target.NodeID, resp.StatusCode, dispatchErrorLine(string(data)))
 		}
 		var wire struct {
-			Reply []connectors.OutboundMessage `json:"reply"`
+			Reply   []connectors.OutboundMessage `json:"reply"`
 			Session struct {
 				NodeID    string `json:"node_id"`
 				SessionID string `json:"session_id"`

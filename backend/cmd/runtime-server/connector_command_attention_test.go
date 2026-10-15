@@ -43,10 +43,40 @@ type fakeRuntimeConnectorHost struct {
 	decideCalls     []runtimeConnectorDecideCall
 	answerCalls     []runtimeConnectorAnswerCall
 	parked          bool
+	// S1b（docs/bots/13 §8）：SubmitConnectorPrompt 请求记录与回合结果注入。
+	lastSubmitRequest runtimeapi.ConnectorTurnRequest
+	resolvedSession   string
+	submitReply       string
+	// activityProbe/activeDuringSubmit：在登记窗口内探测「回合进行中」状态，
+	// 验证 L3 登记确实覆盖了提交阶段的会话（内容镜像据此跳过 IM 回合）。
+	activityProbe      func(sessionID string) bool
+	activeDuringSubmit bool
 }
 
-func (h *fakeRuntimeConnectorHost) SubmitConnectorPrompt(context.Context, runtimeapi.ConnectorTurnRequest) (*runtimeapi.ConnectorTurnResult, error) {
-	return &runtimeapi.ConnectorTurnResult{}, nil
+func (h *fakeRuntimeConnectorHost) SubmitConnectorPrompt(_ context.Context, req runtimeapi.ConnectorTurnRequest) (*runtimeapi.ConnectorTurnResult, error) {
+	h.mu.Lock()
+	h.lastSubmitRequest = req
+	resolved := h.resolvedSession
+	reply := h.submitReply
+	h.mu.Unlock()
+	// 模拟 runtimeapi 的会话解析后登记语义（RegisterActivity 在提交前回调）。
+	if req.RegisterActivity != nil {
+		if done := req.RegisterActivity(resolved); done != nil {
+			h.mu.Lock()
+			if h.activityProbe != nil {
+				h.activeDuringSubmit = h.activityProbe(resolved)
+			}
+			h.mu.Unlock()
+			done()
+		}
+	}
+	return &runtimeapi.ConnectorTurnResult{SessionID: resolved, Success: true, Reply: reply}, nil
+}
+
+func (h *fakeRuntimeConnectorHost) lastSubmitSnapshot() runtimeapi.ConnectorTurnRequest {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastSubmitRequest
 }
 
 func (h *fakeRuntimeConnectorHost) ConnectorPendingApprovalID(context.Context, string) (string, error) {

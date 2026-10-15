@@ -402,4 +402,101 @@ describe("ConnectorDialog", () => {
     expect(deleteConnector).toHaveBeenCalledWith("wechat-abc", expect.anything());
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("S2：编辑态事件订阅随提交体 PATCH，且保留 D6 路由", async () => {
+    const onSubmit = vi.fn<(payload: ConnectorSubmitPayload) => void>();
+    const existing: ConnectorView = {
+      ...EXISTING,
+      policy: { route: { provider: "workbuddy", model: "m1", reasoning_effort: "medium" } },
+    };
+    await render(<ConnectorDialog {...dialogProps({ existing, onSubmit })} />);
+
+    // 默认未启用：不渲染订阅行；勾选后出现「添加订阅」。
+    const enabled = findInput("启用事件订阅（policy.events）") as HTMLInputElement;
+    expect(enabled.checked).toBe(false);
+    toggleCheckbox(enabled);
+
+    act(() => {
+      findButton("添加订阅")?.click();
+    });
+
+    // 逗号/空格分隔解析（分两步输入：草稿保留分隔符，第二次输入覆盖解析结果）。
+    const types = findInput("事件类型") as HTMLInputElement;
+    setInputValue(types, "assistant_message,");
+    setInputValue(types, "assistant_message, turn.*");
+
+    act(() => {
+      findButton("保存")?.click();
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.policy?.events).toEqual({
+      enabled: true,
+      subscriptions: [
+        {
+          id: "",
+          sessions: { mode: "bound" },
+          types: ["assistant_message", "turn.*"],
+          deliver: "notice",
+        },
+      ],
+    });
+    expect(payload.policy?.route).toEqual({
+      provider: "workbuddy",
+      model: "m1",
+      reasoning_effort: "medium",
+    });
+  });
+
+  it("S2：关闭事件订阅时提交 enabled:false（清空订阅）", async () => {
+    const onSubmit = vi.fn<(payload: ConnectorSubmitPayload) => void>();
+    const existing: ConnectorView = {
+      ...EXISTING,
+      policy: {
+        events: {
+          enabled: true,
+          subscriptions: [{ id: "ops", types: ["turn.*"], deliver: "notice" }],
+        },
+      },
+    };
+    await render(<ConnectorDialog {...dialogProps({ existing, onSubmit })} />);
+
+    const enabled = findInput("启用事件订阅（policy.events）") as HTMLInputElement;
+    expect(enabled.checked).toBe(true);
+    expect(findInput("事件类型")).not.toBeNull();
+
+    toggleCheckbox(enabled);
+    act(() => {
+      findButton("保存")?.click();
+    });
+
+    expect(onSubmit.mock.calls[0][0].policy?.events).toEqual({ enabled: false });
+  });
+
+  it("S4：单条订阅可显式停用（enabled:false 随提交体提交）", async () => {
+    const onSubmit = vi.fn<(payload: ConnectorSubmitPayload) => void>();
+    const existing: ConnectorView = {
+      ...EXISTING,
+      policy: {
+        events: {
+          enabled: true,
+          subscriptions: [{ id: "ops", types: ["turn.*"], deliver: "notice" }],
+        },
+      },
+    };
+    await render(<ConnectorDialog {...dialogProps({ existing, onSubmit })} />);
+
+    const rowToggle = findInput("启用") as HTMLInputElement;
+    expect(rowToggle.checked).toBe(true);
+    toggleCheckbox(rowToggle);
+
+    act(() => {
+      findButton("保存")?.click();
+    });
+
+    expect(onSubmit.mock.calls[0][0].policy?.events).toEqual({
+      enabled: true,
+      subscriptions: [{ id: "ops", types: ["turn.*"], deliver: "notice", enabled: false }],
+    });
+  });
 });

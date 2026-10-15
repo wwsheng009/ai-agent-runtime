@@ -937,6 +937,10 @@ func configToMap(cfg connectors.Config) map[string]interface{} {
 	if v := strings.TrimSpace(cfg.Policy.RuntimeOwner); v != "" {
 		policy["runtime_owner"] = v
 	}
+	// S1a 内容镜像（docs/bots/13 §8）：零值不落盘（保持文件最小噪音）。
+	if cfg.Policy.ContentMirror {
+		policy["content_mirror"] = true
+	}
 	// D6 连接器级模型路由：零值不落盘。
 	if cfg.Policy.Route.HasOverride() {
 		route := map[string]interface{}{}
@@ -966,6 +970,48 @@ func configToMap(cfg connectors.Config) map[string]interface{} {
 		}
 		policy["notify"] = notify
 	}
+	// S2 声明式事件订阅（docs/bots/13 §6.1）：enabled=false 或空列表不落盘。
+	if cfg.Policy.Events.Enabled && len(cfg.Policy.Events.Subscriptions) > 0 {
+		events := map[string]interface{}{"enabled": true}
+		subscriptions := make([]interface{}, 0, len(cfg.Policy.Events.Subscriptions))
+		for _, sub := range cfg.Policy.Events.Subscriptions {
+			item := map[string]interface{}{}
+			if v := strings.TrimSpace(sub.ID); v != "" {
+				item["id"] = v
+			}
+			sessions := map[string]interface{}{}
+			if v := strings.TrimSpace(sub.Sessions.Mode); v != "" {
+				sessions["mode"] = v
+			}
+			if len(sub.Sessions.IDs) > 0 {
+				ids := make([]interface{}, 0, len(sub.Sessions.IDs))
+				for _, id := range sub.Sessions.IDs {
+					ids = append(ids, id)
+				}
+				sessions["ids"] = ids
+			}
+			if len(sessions) > 0 {
+				item["sessions"] = sessions
+			}
+			if len(sub.Types) > 0 {
+				types := make([]interface{}, 0, len(sub.Types))
+				for _, eventType := range sub.Types {
+					types = append(types, eventType)
+				}
+				item["types"] = types
+			}
+			if v := strings.TrimSpace(sub.Deliver); v != "" {
+				item["deliver"] = v
+			}
+			// S4：单条订阅显式停用才落盘（缺省启用不写噪音）。
+			if sub.Enabled != nil && !*sub.Enabled {
+				item["enabled"] = false
+			}
+			subscriptions = append(subscriptions, item)
+		}
+		events["subscriptions"] = subscriptions
+		policy["events"] = events
+	}
 	if len(policy) > 0 {
 		out["policy"] = policy
 	}
@@ -983,6 +1029,7 @@ func configFromMap(raw map[string]interface{}) connectors.Config {
 		policy.SessionMode = anyToString(policyRaw["session_mode"])
 		policy.ReplyMode = anyToString(policyRaw["reply_mode"])
 		policy.RuntimeOwner = anyToString(policyRaw["runtime_owner"])
+		policy.ContentMirror = anyToBool(policyRaw["content_mirror"])
 		if routeRaw, ok := policyRaw["route"].(map[string]interface{}); ok {
 			policy.Route.Provider = anyToString(routeRaw["provider"])
 			policy.Route.Model = anyToString(routeRaw["model"])
@@ -992,6 +1039,10 @@ func configFromMap(raw map[string]interface{}) connectors.Config {
 			policy.Notify.Enabled = anyToBool(notifyRaw["enabled"])
 			policy.Notify.Kinds = anyToStringSlice(notifyRaw["kinds"])
 			policy.Notify.Scope = anyToString(notifyRaw["scope"])
+		}
+		if eventsRaw, ok := policyRaw["events"].(map[string]interface{}); ok {
+			policy.Events.Enabled = anyToBool(eventsRaw["enabled"])
+			policy.Events.Subscriptions = eventSubscriptionsFromAny(eventsRaw["subscriptions"])
 		}
 	}
 	return connectors.Config{
@@ -1006,6 +1057,37 @@ func configFromMap(raw map[string]interface{}) connectors.Config {
 		Secrets:   anyToStringMap(raw["secrets"]),
 		Policy:    policy,
 	}
+}
+
+// eventSubscriptionsFromAny 解析 policy.events.subscriptions（S2，docs/bots/13
+// §6.1）：非表项/非 map 项跳过；空白裁剪与合法性在订阅求值时统一处理。
+func eventSubscriptionsFromAny(raw interface{}) []connectors.EventSubscription {
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]connectors.EventSubscription, 0, len(list))
+	for _, item := range list {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		sub := connectors.EventSubscription{
+			ID:      anyToString(entry["id"]),
+			Types:   anyToStringSlice(entry["types"]),
+			Deliver: anyToString(entry["deliver"]),
+		}
+		if rawEnabled, ok := entry["enabled"]; ok {
+			enabled := anyToBool(rawEnabled)
+			sub.Enabled = &enabled
+		}
+		if sessionsRaw, ok := entry["sessions"].(map[string]interface{}); ok {
+			sub.Sessions.Mode = anyToString(sessionsRaw["mode"])
+			sub.Sessions.IDs = anyToStringSlice(sessionsRaw["ids"])
+		}
+		out = append(out, sub)
+	}
+	return out
 }
 
 // anyToTime 解析 RFC3339 时间戳（空串/非法格式返回零值——旧数据容忍缺省）。

@@ -56,9 +56,14 @@ type PolicyView struct {
 	AllowedUsers  []string          `json:"allowed_users,omitempty"`
 	SessionMode   string            `json:"session_mode,omitempty"`
 	ReplyMode     string            `json:"reply_mode,omitempty"`
-	RuntimeOwner  string   `json:"runtime_owner,omitempty"`
+	RuntimeOwner  string            `json:"runtime_owner,omitempty"`
 	Route         *RoutePolicyView  `json:"route,omitempty"`
 	Notify        *NotifyPolicyView `json:"notify,omitempty"`
+	// ContentMirror 是 S1a 内容镜像开关（docs/bots/13 §8）：本地来源回合的
+	// 终态正文作为副本投递到该 bot 的绑定 chats（缺省关）。
+	ContentMirror bool `json:"content_mirror,omitempty"`
+	// Events 是 S2 声明式事件订阅（docs/bots/13 §6.1；缺省回退 notify/content_mirror）。
+	Events *EventsPolicyView `json:"events,omitempty"`
 }
 
 // RoutePolicyView 是 D6 连接器级模型路由的对外形状（docs/bots/09 §5.5）。
@@ -74,6 +79,28 @@ type NotifyPolicyView struct {
 	Enabled bool     `json:"enabled"`
 	Kinds   []string `json:"kinds,omitempty"`
 	Scope   string   `json:"scope,omitempty"`
+}
+
+// EventsPolicyView 是 S2 声明式事件订阅的对外形状（docs/bots/13 §6.1）。
+type EventsPolicyView struct {
+	Enabled       bool                    `json:"enabled"`
+	Subscriptions []EventSubscriptionView `json:"subscriptions,omitempty"`
+}
+
+// EventSubscriptionView 是一条订阅：会话选择器 × 事件类型 × 投递形态。
+type EventSubscriptionView struct {
+	ID string `json:"id,omitempty"`
+	// Enabled 控制单条订阅启停（S4）：缺省（nil，省略）= 启用；false 显式停用。
+	Enabled  *bool                `json:"enabled,omitempty"`
+	Sessions *SessionSelectorView `json:"sessions,omitempty"`
+	Types    []string             `json:"types,omitempty"`
+	Deliver  string               `json:"deliver,omitempty"`
+}
+
+// SessionSelectorView 是订阅的会话范围（bound 缺省 | ids | all）。
+type SessionSelectorView struct {
+	Mode string   `json:"mode,omitempty"`
+	IDs  []string `json:"ids,omitempty"`
 }
 
 // listResponse 是 GET /connectors 的载荷。
@@ -296,9 +323,9 @@ func (h *handlers) dispatch(w http.ResponseWriter, r *http.Request) {
 // attentionInlet 处理 POST /connectors/attention（P2 切片 D，D5 跨宿主扇出
 // 接收面，docs/bots/09 §7.4.1）：其它节点的注意力广播经此进入本宿主。
 // 发起侧已按「对端有 bot 想收广播」过滤；这里再做**本地 D5 过滤**
-//（逐 bot AcceptsNotice：绑定会话的 approval/question 始终收、completion 随开关；
+// （逐 bot AcceptsNotice：绑定会话的 approval/question 始终收、completion 随开关；
 // 其它会话需 enabled+kinds+scope 命中），命中者经 scoped 出站到该 bot 绑定
-//（NotifyAttentionScoped，2026-10-14 起与本地链路同语义）。AttentionInlet 未
+// （NotifyAttentionScoped，2026-10-14 起与本地链路同语义）。AttentionInlet 未
 // 装配（gateway 纯 poller 无出站 bot）→ 501。
 func (h *handlers) attentionInlet(w http.ResponseWriter, r *http.Request) {
 	if !h.ready(w) {
@@ -669,6 +696,7 @@ func policyViewFrom(policy connectors.Policy) PolicyView {
 		SessionMode:   policy.SessionMode,
 		ReplyMode:     policy.ReplyMode,
 		RuntimeOwner:  policy.RuntimeOwner,
+		ContentMirror: policy.ContentMirror,
 	}
 	if policy.Notify.Enabled {
 		view.Notify = &NotifyPolicyView{
@@ -684,6 +712,22 @@ func policyViewFrom(policy connectors.Policy) PolicyView {
 			ReasoningEffort: strings.TrimSpace(policy.Route.ReasoningEffort),
 		}
 	}
+	if policy.Events.Enabled && len(policy.Events.Subscriptions) > 0 {
+		events := &EventsPolicyView{Enabled: true, Subscriptions: make([]EventSubscriptionView, 0, len(policy.Events.Subscriptions))}
+		for _, sub := range policy.Events.Subscriptions {
+			item := EventSubscriptionView{
+				ID:      strings.TrimSpace(sub.ID),
+				Enabled: sub.Enabled,
+				Types:   append([]string(nil), sub.Types...),
+				Deliver: strings.TrimSpace(sub.Deliver),
+			}
+			if mode := strings.TrimSpace(sub.Sessions.Mode); mode != "" || len(sub.Sessions.IDs) > 0 {
+				item.Sessions = &SessionSelectorView{Mode: mode, IDs: append([]string(nil), sub.Sessions.IDs...)}
+			}
+			events.Subscriptions = append(events.Subscriptions, item)
+		}
+		view.Events = events
+	}
 	return view
 }
 
@@ -697,6 +741,7 @@ func policyFrom(view *PolicyView) connectors.Policy {
 		SessionMode:   view.SessionMode,
 		ReplyMode:     view.ReplyMode,
 		RuntimeOwner:  view.RuntimeOwner,
+		ContentMirror: view.ContentMirror,
 	}
 	if view.Notify != nil && view.Notify.Enabled {
 		policy.Notify = connectors.NotifyPolicy{
@@ -710,6 +755,24 @@ func policyFrom(view *PolicyView) connectors.Policy {
 			Provider:        strings.TrimSpace(view.Route.Provider),
 			Model:           strings.TrimSpace(view.Route.Model),
 			ReasoningEffort: strings.TrimSpace(view.Route.ReasoningEffort),
+		}
+	}
+	if view.Events != nil && view.Events.Enabled {
+		policy.Events.Enabled = true
+		for _, sub := range view.Events.Subscriptions {
+			item := connectors.EventSubscription{
+				ID:      strings.TrimSpace(sub.ID),
+				Enabled: sub.Enabled,
+				Types:   append([]string(nil), sub.Types...),
+				Deliver: strings.TrimSpace(sub.Deliver),
+			}
+			if sub.Sessions != nil {
+				item.Sessions = connectors.SessionSelector{
+					Mode: strings.TrimSpace(sub.Sessions.Mode),
+					IDs:  append([]string(nil), sub.Sessions.IDs...),
+				}
+			}
+			policy.Events.Subscriptions = append(policy.Events.Subscriptions, item)
 		}
 	}
 	return policy

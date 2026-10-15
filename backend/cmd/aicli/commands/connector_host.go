@@ -296,9 +296,13 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		}
 		logf(format, args...)
 	}
+	// S1a 内容镜像：IM 来源回合登记器（L3）与后端共享（docs/bots/13 §4.2；
+	// 共享实现随 S1b 提为 connectors.TurnActivityTracker）。
+	turns := connectors.NewTurnActivityTracker()
+	backend := localConnectorBackend{host: host, logf: logf, turns: turns}
 	service := connectors.New(connectors.Deps{
 		Store:   store,
-		Backend: localConnectorBackend{host: host, logf: logf},
+		Backend: backend,
 		Logf:    serviceLogf,
 		// 宿主身份（docs/bots/09 §7.5 切片 A）：实例唯一 HostID =
 		// `aicli:<mesh-node-id>`（同机多 TUI 各自唯一，P2 NodeID 亲和的判定键）；
@@ -345,7 +349,7 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		HostID:    connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID()),
 		// runner 接收面（P2 切片 B 后半）：POST /connectors/dispatch 执行后端
 		// （prompt 注入走 ActorRegistry、命令回环走 commandPlane）。
-		Runner: localConnectorRunner{backend: localConnectorBackend{host: host, logf: logf}},
+		Runner: localConnectorRunner{backend: backend},
 		// 注意力接收面（P2 切片 D）：POST /connectors/attention 本地 D5 过滤
 		// + 出站（InletAttention 共享实现）。
 		AttentionInlet: connectors.InletAttention(store, service.NotifyAttentionScoped),
@@ -368,7 +372,8 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 	if host.EventBus != nil {
 		// aicli 事件总线按类型订阅（SubscribeCancelable(eventType, handler)），
 		// 共享层的订阅面是单函数——按 AttentionEventTypes() 清单展开（单一来源：
-		// 与共享层聚合订阅同一份清单，runtimeapi.Handler 同款三元组）。
+		// 与共享层聚合订阅同一份清单，含 approval/question/completion 与工作类事件；
+		// runtimeapi.Handler 走同款清单 SubscribeConnectorAttentionEvents）。
 		eventTypes := connectors.AttentionEventTypes()
 		connectors.SubscribeAttention(ctx, connectors.AttentionDeps{
 			Subscribe: func(handler func(runtimeevents.Event)) func() {
@@ -391,9 +396,81 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 			// D5 完整投递（2026-10-14 修复）：绑定会话精确投递，scope=all 未绑定
 			// 事件回退广播到接受连接器的绑定 chats。
 			NotifyScoped: service.NotifyAttentionScoped,
+			// digest 聚合投递口（S4，13 §7.1）：窗口内 completion 合并为一条广播。
+			NotifyBroadcast: service.NotifyAttentionBroadcast,
+			// 成功投递审计（S4，13 §7.4）：逐连接器落 ConnectorLog。
+			Audit: service.RecordAttentionDelivery,
+			// digest 聚合广播成功投递审计（S4 指标面切片）：批内会话数落 ConnectorLog。
+			AuditBroadcast: service.RecordAttentionDigestDelivery,
 			// 跨宿主扇出（P2 切片 D）：scope 意愿命中的事件转发给活 peers。
 			Forward: aicliForwardAttentionToPeers(logf),
 			Logf:    logf,
+		})
+
+		// S1a 内容镜像（docs/bots/13 §8）：绑定会话的终态正文作为副本投递到
+		// 该 bot 的绑定 chats（订阅平面；policy.content_mirror 默认关）。
+		// L3：IM 来源回合由 turns 登记并被跳过（正文已由回复路径投递）；
+		// 投递经 service.EnqueueOutbound（per-chat 队列，与 reply 同键保序，
+		// 13 §3.7#3）。
+		mirrorEventTypes := []string{runtimechat.EventAssistantMessage, "assistant.message"}
+		connectors.SubscribeContentMirror(ctx, connectors.ContentMirrorDeps{
+			Subscribe: func(handler func(runtimeevents.Event)) func() {
+				unsubs := make([]func(), 0, len(mirrorEventTypes))
+				for _, eventType := range mirrorEventTypes {
+					if unsub := host.EventBus.SubscribeCancelable(eventType, handler); unsub != nil {
+						unsubs = append(unsubs, unsub)
+					}
+				}
+				if len(unsubs) == 0 {
+					return nil
+				}
+				return func() {
+					for _, unsub := range unsubs {
+						unsub()
+					}
+				}
+			},
+			Store:      store,
+			TurnActive: turns.Active,
+			Audit:      service.RecordSubscriptionDelivery,
+			Deliver: func(deliverCtx context.Context, connectorID, chat, text string) error {
+				return service.EnqueueOutbound(deliverCtx, connectorID, chat, []connectors.OutboundMessage{{Text: text}})
+			},
+			Logf: logf,
+		})
+
+		// S4 流式订阅（docs/bots/13 §7.1）：assistant 增量 → 占位消息 + 节流编辑
+		// （≥1s），终态正文做最终编辑；provider 不支持流式时退化为一次性 content
+		// 投递（经 per-chat 队列）。L3 与 content 镜像同（IM 回合整回合跳过）。
+		streamEventTypes := []string{
+			runtimechat.EventAssistantDelta, "assistant.delta",
+			runtimechat.EventAssistantMessage, "assistant.message",
+		}
+		connectors.SubscribeStreamMirror(ctx, connectors.StreamMirrorDeps{
+			Subscribe: func(handler func(runtimeevents.Event)) func() {
+				unsubs := make([]func(), 0, len(streamEventTypes))
+				for _, eventType := range streamEventTypes {
+					if unsub := host.EventBus.SubscribeCancelable(eventType, handler); unsub != nil {
+						unsubs = append(unsubs, unsub)
+					}
+				}
+				if len(unsubs) == 0 {
+					return nil
+				}
+				return func() {
+					for _, unsub := range unsubs {
+						unsub()
+					}
+				}
+			},
+			Store:      store,
+			TurnActive: turns.Active,
+			Start:      service.NewSubscriptionStream,
+			Deliver: func(deliverCtx context.Context, connectorID, chat, text string) error {
+				return service.EnqueueOutbound(deliverCtx, connectorID, chat, []connectors.OutboundMessage{{Text: text}})
+			},
+			Audit: service.RecordStreamDelivery,
+			Logf:  logf,
 		})
 	}
 	logf("aicli connectors: started (config=%s, state=%s)", configPath, statePath)
@@ -432,24 +509,28 @@ func (r localConnectorRunner) DispatchTurn(ctx context.Context, req connectors.D
 		// auto-create：按 (connector, chat) 派生确定性会话（与本地 Backend 同口径）。
 		sessionID = localConnectorSessionID(req.ConnectorID, req.Chat)
 	}
+	// 回执 Session.NodeID 必须是本 runner 的实例唯一 HostID（不是裸 "aicli"）：
+	// poller 侧 processMessage 用它回写绑定（service.go 回写路径），形态错乱会
+	// 污染绑定账本的下一次路由匹配（2026-10-15 qq-bot1 第三轮复盘）。
+	nodeID := connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID())
 	if req.Command {
 		return r.dispatchCommand(ctx, req, sessionID)
 	}
 	result, err := r.backend.Handle(ctx, connectors.BackendRequest{
 		ConnectorID: req.ConnectorID,
 		Chat:        req.Chat,
-		Session:     connectors.SessionRef{NodeID: connectors.HostKindAICLI, SessionID: sessionID},
+		Session:     connectors.SessionRef{NodeID: nodeID, SessionID: sessionID},
 		Text:        text,
 		UserID:      req.UserID,
 		UserName:    req.UserName,
 		MessageID:   req.MessageID,
 	}, nil)
 	if err != nil {
-		return connectors.DispatchResult{Session: connectors.SessionRef{NodeID: connectors.HostKindAICLI, SessionID: sessionID}}, err
+		return connectors.DispatchResult{Session: connectors.SessionRef{NodeID: nodeID, SessionID: sessionID}}, err
 	}
 	return connectors.DispatchResult{
 		Reply:   result.Reply,
-		Session: connectors.SessionRef{NodeID: connectors.HostKindAICLI, SessionID: sessionID},
+		Session: connectors.SessionRef{NodeID: nodeID, SessionID: sessionID},
 	}, nil
 }
 
@@ -508,6 +589,9 @@ type localConnectorBackend struct {
 	logf func(format string, args ...any)
 	// commands 是测试注入的命令面替身；nil 时由 host.ActorRegistry 适配。
 	commands localConnectorCommandPlane
+	// turns 是 IM 来源回合登记器（S1a/S1b 内容镜像的 L3 判据，docs/bots/13 §4.2；
+	// 共享实现 connectors.TurnActivityTracker）。
+	turns *connectors.TurnActivityTracker
 }
 
 // localConnectorCommandPlane 是 IM 审批/提问命令依赖的 actor 响应入口：
@@ -544,10 +628,10 @@ func (b localConnectorBackend) commandPlane() localConnectorCommandPlane {
 
 func (b localConnectorBackend) Name() string { return "aicli" }
 
-// Handle 把一条 IM 消息提交为一次本机 chat turn，并把终态回复回吐给连接器。
-// P0 只回终态（占位消息 + Final 编辑由 Service 负责）；流式增量（sink）在 P1
-// 接入 actor 事件后补齐。
-func (b localConnectorBackend) Handle(ctx context.Context, req connectors.BackendRequest, _ connectors.ReplySink) (connectors.BackendResult, error) {
+// Handle 把一条 IM 消息提交为一次本机 chat turn，并把流式增量与终态回复回吐给
+// 连接器：增量经会话事件总线（assistant_delta）转发给 ReplySink（P1，2026-10-15
+// 接入），占位消息 Final 与失败账本由 Service 负责收尾。
+func (b localConnectorBackend) Handle(ctx context.Context, req connectors.BackendRequest, sink connectors.ReplySink) (connectors.BackendResult, error) {
 	if b.host == nil || b.host.ActorRegistry == nil {
 		return connectors.BackendResult{}, errors.New("aicli: 本机 chat 运行时未就绪（连接器需要运行在 aicli chat 会话内）")
 	}
@@ -559,6 +643,27 @@ func (b localConnectorBackend) Handle(ctx context.Context, req connectors.Backen
 	if sessionID == "" {
 		sessionID = localConnectorSessionID(req.ConnectorID, req.Chat)
 	}
+	// L3（docs/bots/13 §4.2）：登记本会话的 IM 来源回合——内容镜像订阅据此
+	// 跳过该回合（正文已由回复路径投递）。本地入站与 mesh runner 派发共用
+	// 本函数，两条 IM 来源路径都被覆盖。
+	if b.turns != nil {
+		endTurn := b.turns.Begin(sessionID)
+		defer endTurn()
+	}
+	// P1 流式增量（2026-10-15）：本会话的 assistant 打字机增量回推连接器——
+	// ReplyMode=stream 且通道支持时由 Service 编辑占位消息；增量失败不阻断
+	// 回合（终稿投递仍会尝试）。总线不可用/无 sink 时零变化。
+	if sink != nil {
+		unsubscribeDeltas := connectors.SubscribeAssistantDeltas(b.host.EventBus, sessionID, func(text string) {
+			_ = sink.Delta(ctx, text)
+		})
+		defer unsubscribeDeltas()
+	}
+	// IM 输入投影（2026-10-15）：绑定会话恰为本进程当前展示的 TUI 会话时，
+	// 把用户输入写入 transcript（KindUser 块，与 TUI 直输/Web 注入同款渲染），
+	// 满足「TUI 显示 IM 用户的输入信息」；助手输出经同一事件管线显示，终态
+	// 回复仍由本函数返回、由连接器作为副本回传 bot（input 显示 + 输出副本）。
+	projectIMInputToDisplayedSession(sessionID, text)
 
 	// IM 入站没有交互式审批通道：与内部轮次一致使用 bypass_permissions。
 	// （白名单/开关由连接器 Policy 在入站时先行过滤。）
@@ -574,6 +679,14 @@ func (b localConnectorBackend) Handle(ctx context.Context, req connectors.Backen
 		result, err = b.host.ActorRegistry.SubmitPromptWithRoute(ctx, sessionID, text, runMeta, routeOverride)
 	} else {
 		result, err = b.host.ActorRegistry.SubmitPrompt(ctx, sessionID, text, runMeta)
+	}
+	// 会话执行租约冲突（docs/bots/09 §5.6 运行归属的会话级对偶）：目标绑定
+	// 会话正被另一个存活进程的 actor 持有（最常见 = 该会话在另一个 aicli
+	// 实例里打开着）。给 IM 可行动的提示，而不是原始 "already owned by ..."。
+	var leaseConflict *runtimechat.LeaseConflictError
+	if errors.As(err, &leaseConflict) {
+		return connectors.BackendResult{Session: connectors.SessionRef{SessionID: sessionID}},
+			errors.New(localConnectorLeaseConflictText(sessionID, leaseConflict.Lease))
 	}
 	if result == nil {
 		if err == nil {
@@ -596,6 +709,41 @@ func (b localConnectorBackend) Handle(ctx context.Context, req connectors.Backen
 		return out, errors.New(message)
 	}
 	return out, nil
+}
+
+// projectIMInputToDisplayedSession 把 IM 文本投影进「恰为本进程当前展示会话」的
+// transcript（2026-10-15，Handle 的可见性契约）：仅当目标会话 == 展示会话时才
+// 写入，避免把消息错投到用户眼前的其他会话；写入通道与 TUI 直输/Web 注入同款
+// （KindUser 块）——纯显示，不触发执行；回合仍由 Handle 提交且仅提交一次。
+func projectIMInputToDisplayedSession(sessionID, text string) {
+	displayed := chatWebSession()
+	if displayed == nil || strings.TrimSpace(currentRuntimeSessionID(displayed)) != strings.TrimSpace(sessionID) {
+		return
+	}
+	if bridge := displayed.RuntimeEventBridge; bridge != nil {
+		bridge.submitUserInput(text)
+	}
+}
+
+// localConnectorLeaseConflictText 把会话租约冲突翻译成 IM 可行动的提示：
+// 指明占用者进程与本进程的关系，给出「等 TTL 过期 / 关闭占用实例 / 改绑」
+// 三条出路。占用者存活判定复用 acquireLocalChatSessionLease 的同款口径。
+func localConnectorLeaseConflictText(sessionID string, lease *runtimechat.SessionLease) string {
+	holder := "未知持有者"
+	expires := ""
+	if lease != nil {
+		holder = strings.TrimSpace(lease.OwnerID)
+		if !lease.ExpiresAt.IsZero() {
+			expires = "，租约 " + lease.ExpiresAt.Local().Format("15:04:05") + " 过期"
+		}
+		if localChatSessionLeaseOwnerStopped(lease) {
+			// 同主机同类型持有者已死：TTL 过期后本进程即可接管，稍后重试即可。
+			return fmt.Sprintf("会话 %s 的执行租约由已退出的进程持有（%s）%s；稍后重试即可自动接管。",
+				sessionID, holder, expires)
+		}
+	}
+	return fmt.Sprintf("会话 %s 正被另一个 aicli 实例执行（%s%s）；请在该实例处理或关闭后重试，或用 /bots bind <连接器id> 把机器人改绑到其它会话。",
+		sessionID, holder, expires)
 }
 
 // localConnectorSessionID 由 IM 会话派生确定性本机会话 id：
@@ -823,6 +971,12 @@ func (r *localActorRegistry) ConnectorAnswerQuestion(ctx context.Context, sessio
 // 派发 POST 对端 /api/connectors/dispatch；本机自身档案由 mesh Host 写入，
 // 其 NodeID 即 aicliHostInstanceID 的 instance 段）。
 
+// meshChatNodeKind 是 mesh 档案中 aicli chat 节点的 Kind 值（internal/mesh
+// host.go NewHost 的缺省 Kind）。与 connectors.MeshPeerKindAICLI（"aicli"，
+// HostID 前缀词表）不同源——mesh 的 Kind 描述节点产品形态（chat），连接器
+// 的 HostKind 描述宿主种类。peers 装配必须同时接受两者。
+const meshChatNodeKind = "chat"
+
 func aicliMeshRunnerPeers(logf func(format string, args ...any)) func() []connectors.RunnerPeer {
 	return func() []connectors.RunnerPeer {
 		paths := mesh.ResolvePaths()
@@ -834,7 +988,12 @@ func aicliMeshRunnerPeers(logf func(format string, args ...any)) func() []connec
 		out := make([]connectors.RunnerPeer, 0, len(view.Nodes))
 		for _, node := range view.Nodes {
 			kind := strings.ToLower(strings.TrimSpace(node.Kind))
-			if kind != connectors.MeshPeerKindAICLI && kind != connectors.MeshPeerKindRuntimeServer {
+			// mesh 档案的 aicli chat 节点 Kind 是 "chat"（host.go NewHost 缺省
+			// Kind=chat；架构词表与 connectors.MeshPeerKindAICLI 的 "aicli" 不
+			// 同源）。不认 "chat" 会把全部 aicli 节点剔出 runner 候选——peers
+			// 恒空、R1 亲和派发无目标、永远退化为 R2a 本机接管（2026-10-15
+			// 真机 qq-bot1 第二轮复盘：bind 写了 NodeID 也不派发）。
+			if kind != connectors.MeshPeerKindAICLI && kind != connectors.MeshPeerKindRuntimeServer && kind != meshChatNodeKind {
 				continue
 			}
 			if node.State != mesh.NodeStateLive {

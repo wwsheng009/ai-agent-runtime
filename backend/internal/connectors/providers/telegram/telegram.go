@@ -257,14 +257,23 @@ func (p *Provider) Send(ctx context.Context, cfg connectors.Config, chat string,
 		outboundMedia := make([]connectors.Media, 0, len(msg.Media)+len(attachments))
 		outboundMedia = append(outboundMedia, msg.Media...)
 		outboundMedia = append(outboundMedia, attachments...)
-		for _, media := range outboundMedia {
-			if err := p.sendOutboundMedia(ctx, base, token, chat, media); err != nil {
-				p.logf("telegram: 发送媒体失败（%s %s）：%v；降级为文本提示",
-					media.Kind, telegramMediaLabel(media), err)
-				notice := "[附件发送失败: " + telegramMediaLabel(media) + "]"
-				if noticeErr := p.call(ctx, base, token, "sendMessage", map[string]any{"chat_id": chat, "text": notice}, nil); noticeErr != nil {
-					return noticeErr
-				}
+		if err := p.sendMediaMessages(ctx, base, token, chat, outboundMedia); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sendMediaMessages 逐条发送媒体；单条失败降级为文本提示（与 Send 同口径）。
+// 流式 Final 复用本函数，保证富媒体在流式/非流式两条路径行为一致（13 §7.1）。
+func (p *Provider) sendMediaMessages(ctx context.Context, base, token, chat string, media []connectors.Media) error {
+	for _, item := range media {
+		if err := p.sendOutboundMedia(ctx, base, token, chat, item); err != nil {
+			p.logf("telegram: 发送媒体失败（%s %s）：%v；降级为文本提示",
+				item.Kind, telegramMediaLabel(item), err)
+			notice := "[附件发送失败: " + telegramMediaLabel(item) + "]"
+			if noticeErr := p.call(ctx, base, token, "sendMessage", map[string]any{"chat_id": chat, "text": notice}, nil); noticeErr != nil {
+				return noticeErr
 			}
 		}
 	}
@@ -476,7 +485,13 @@ type streamingSession struct {
 }
 
 func (s *streamingSession) Update(ctx context.Context, text string) error {
-	text = strings.TrimSpace(text)
+	// 出站媒体指令（```telegram-attachments``` 围栏 / IMAGE: 等指令行）是协议
+	// 而非用户正文：流式中间态先截断未闭合块、再剥离已闭合块与指令行（与 QQ
+	// 流式同口径，2026-10-15），避免指令原文泄漏给用户；终态由 Final 解析并
+	// 补发附件。
+	visible := connectors.TruncateOpenAttachmentBlocks(text, telegramAttachmentFenceNames...)
+	visible, _ = connectors.ParseOutboundMediaDirectives(visible, telegramAttachmentFenceNames...)
+	text = strings.TrimSpace(visible)
 	if text == "" || text == s.last {
 		return nil
 	}
@@ -488,12 +503,25 @@ func (s *streamingSession) Update(ctx context.Context, text string) error {
 	return nil
 }
 
+// Final 用可见正文收尾并发送附件（msg.Media + 文本媒体指令，与普通 Send 同
+// 口径）。纯媒体回复（无可见正文）保留占位消息并直发媒体。
 func (s *streamingSession) Final(ctx context.Context, msgs []connectors.OutboundMessage) error {
-	text := joinText(msgs)
-	if text == "" {
-		return nil // 占位消息即最终内容（例如提示类回复）
+	visibleParts := make([]string, 0, len(msgs))
+	outboundMedia := make([]connectors.Media, 0, len(msgs))
+	for _, msg := range msgs {
+		visible, attachments := connectors.ParseOutboundMediaDirectives(msg.Text, telegramAttachmentFenceNames...)
+		if text := strings.TrimSpace(visible); text != "" {
+			visibleParts = append(visibleParts, text)
+		}
+		outboundMedia = append(outboundMedia, msg.Media...)
+		outboundMedia = append(outboundMedia, attachments...)
 	}
-	return s.Update(ctx, text)
+	if text := strings.TrimSpace(strings.Join(visibleParts, "\n\n")); text != "" {
+		if err := s.Update(ctx, text); err != nil {
+			return err
+		}
+	}
+	return s.provider.sendMediaMessages(ctx, s.base, s.token, s.chat, outboundMedia)
 }
 
 func (s *streamingSession) Fail(ctx context.Context, text string) error {
@@ -502,16 +530,6 @@ func (s *streamingSession) Fail(ctx context.Context, text string) error {
 		text = "处理失败，请稍后重试。"
 	}
 	return s.Update(ctx, text)
-}
-
-func joinText(msgs []connectors.OutboundMessage) string {
-	parts := make([]string, 0, len(msgs))
-	for _, msg := range msgs {
-		if text := strings.TrimSpace(msg.Text); text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.Join(parts, "\n\n")
 }
 
 type update struct {

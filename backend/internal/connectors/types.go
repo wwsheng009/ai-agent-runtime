@@ -76,6 +76,16 @@ type Policy struct {
 	// 已绑定的既有会话不迁移（上下文保持，仅执行参数变化）。
 	// 零值 = 未配置，回落宿主默认（runtimeConfig.Agent.Default*）。
 	Route RoutePolicy
+	// ContentMirror（S1a，docs/bots/13-event-subscription-routing-design.md §8）：
+	// 本地来源回合（TUI/Web/API/系统）的终态正文是否作为副本投递到该 bot 的
+	// 绑定 chats（订阅平面 content 形态；零值 = 关，与 Notify 注意力独立）。
+	// IM 来源回合的正文走回复路径，不在此镜像（13 §4.2 L3）。
+	ContentMirror bool
+	// Events 是声明式事件订阅（S2，docs/bots/13 §3.4/§6.1）：按
+	// 「事件类型 × 会话选择器 × 投递形态」描述本 bot 要接收什么。
+	// 未配置（或 enabled=false）时回退 legacy（Notify + ContentMirror），
+	// 双读单写（13 §4.1）。
+	Events EventsPolicy
 }
 
 // RoutePolicy 是连接器级模型路由（D6）。三项均可独立省略：省略项回落
@@ -87,6 +97,50 @@ type RoutePolicy struct {
 	Model string
 	// ReasoningEffort 为空 = 用会话/全局默认推理档位。
 	ReasoningEffort string
+}
+
+// EventsPolicy 是声明式事件订阅的容器（S2，docs/bots/13 §3.4/§6.1）。
+type EventsPolicy struct {
+	// Enabled 是总开关；与 Subscriptions 同时满足时才走新模型。
+	Enabled bool
+	// Subscriptions 是订阅列表；非法项（空 types/未知模式/ids 缺失）在求值时被忽略。
+	Subscriptions []EventSubscription
+}
+
+// Configured 报告是否启用声明式订阅模型（enabled 且有订阅）。
+// 未配置时调用方回退 legacy（Notify/ContentMirror）——双读单写（13 §4.1）。
+func (p EventsPolicy) Configured() bool {
+	return p.Enabled && len(p.Subscriptions) > 0
+}
+
+// EventSubscription 是一条声明式订阅（13 §3.4）。
+type EventSubscription struct {
+	// ID 是稳定标识（诊断/审计用；可空，空时按序号生成）。
+	ID string
+	// Enabled 控制单条订阅启停（S4）：nil/true = 启用（缺省），false = 显式停用。
+	Enabled *bool
+	// Sessions 是会话选择器：bound（默认）| ids | all。
+	Sessions SessionSelector
+	// Types 是事件类型集合，支持族通配（"turn.*"）；必填（空订阅被忽略）。
+	// 规范类型与别名见 subscriptions.go 的事件词表。
+	Types []string
+	// Deliver 是投递形态：notice（默认）| content | digest | stream。
+	// digest 仅 completion 走聚合（交互类按即时 notice 处理）；stream 仅
+	// assistant_delta 类事件（占位消息 + 节流编辑，13 §3.4/§7.1 S4）。
+	Deliver string
+}
+
+// IsEnabled 报告单条订阅是否启用（缺省启用；显式 false 停用）。
+func (s EventSubscription) IsEnabled() bool {
+	return s.Enabled == nil || *s.Enabled
+}
+
+// SessionSelector 是订阅的会话范围（13 §3.4）。
+type SessionSelector struct {
+	// Mode：bound（默认，绑定到本 bot 的会话）| ids | all。
+	Mode string
+	// IDs：mode=ids 时的显式会话列表（支持"多会话 → 1 个 bot"）。
+	IDs []string
 }
 
 // HasOverride 报告该路由策略是否包含任一覆盖项。
@@ -470,6 +524,10 @@ const (
 	AttentionKindQuestion   = "question"
 	AttentionKindCompletion = "completion"
 	AttentionKindError      = "error"
+	// 工作类聚合 kind（S4，13 §3.3）：工具/子代理事件只走 digest 形态投递
+	//（逐条 notice 会刷屏；notice 订阅对工作类不生效，见 subscriptions.go）。
+	AttentionKindTool     = "tool"
+	AttentionKindSubagent = "subagent"
 )
 
 // AttentionNotice 是一条“注意力出站”事件（轻量结构，宿主构造后交给

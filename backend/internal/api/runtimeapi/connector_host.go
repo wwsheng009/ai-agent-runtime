@@ -38,6 +38,12 @@ type ConnectorTurnRequest struct {
 	// Route 是连接器级模型路由（D6）：配置后覆盖全局默认 provider/model/
 	// reasoning effort，仅作用于本回合。零值 = 回落宿主全局默认。
 	Route ConnectorRouteOverride
+	// RegisterActivity（可选，S1b/L3，docs/bots/13 §4.2）：会话解析完成后、
+	// 提交回合**之前**回调（返回的 done 在回合结束后调用）。宿主用它登记
+	// 「IM 来源回合进行中」，内容镜像据此跳过 IM 回合（正文已由回复路径投递）。
+	// 注意 sessionID 是 GetOrCreate 解析后的最终 id（auto-create 场景与请求里的
+	// 空 SessionID 不同），登记必须用它。
+	RegisterActivity func(sessionID string) (done func())
 }
 
 // ConnectorRouteOverride 是连接器策略中的模型路由（docs/bots/09 §5.5 D6）。
@@ -95,6 +101,11 @@ func (h *Handler) SubmitConnectorPrompt(ctx context.Context, req ConnectorTurnRe
 	}
 	sessionID := session.ID
 	turn := &ConnectorTurnResult{SessionID: sessionID}
+	if req.RegisterActivity != nil {
+		if done := req.RegisterActivity(sessionID); done != nil {
+			defer done()
+		}
+	}
 
 	if req.OnDelta != nil {
 		if unsubscribe := h.subscribeConnectorDeltas(sessionID, req.OnDelta); unsubscribe != nil {
@@ -304,12 +315,19 @@ func (h *Handler) ConnectorAnswerQuestion(ctx context.Context, sessionID, questi
 }
 
 // connectorAttentionEventTypes 是连接器注意力出站（FR-7/FR-8）订阅的事件类型：
-// 审批请求、提问请求与回合结束（completion）。事件名与 gateway_attention.go
-// 的状态投影同源，避免两套 attention 语义漂移。
+// 审批请求、提问请求、回合结束（completion）与工作类（S4 聚合订阅：工具/子代理）。
+// 事件名与 gateway_attention.go 的状态投影、共享层 connectors.AttentionEventTypes()
+// 同源，避免两套 attention 语义漂移（改动需与 internal/connectors 同步）。
 var connectorAttentionEventTypes = []string{
 	runtimechat.EventApprovalRequested,
 	runtimechat.EventQuestionAsked,
 	runtimeobserve.EventAgentTurnDone,
+	// 工作类（docs/bots/13 §3.3）：仅 digest 形态投递（见 connectors 订阅求解）。
+	"tool.requested",
+	"tool.completed",
+	"tool.denied",
+	"subagent.completed",
+	"subagent.batch.completed",
 }
 
 // SubscribeConnectorAttentionEvents 订阅连接器注意力出站所需的事件，返回退订
@@ -325,6 +343,41 @@ func (h *Handler) SubscribeConnectorAttentionEvents(handler func(runtimeevents.E
 	}
 	unsubscribes := make([]func(), 0, len(connectorAttentionEventTypes))
 	for _, eventType := range connectorAttentionEventTypes {
+		if unsub := bus.SubscribeCancelable(eventType, handler); unsub != nil {
+			unsubscribes = append(unsubscribes, unsub)
+		}
+	}
+	if len(unsubscribes) == 0 {
+		return nil
+	}
+	return func() {
+		for _, unsub := range unsubscribes {
+			unsub()
+		}
+	}
+}
+
+// connectorSessionOutputEventTypes 是会话输出事件的订阅清单（含点分隔别名）：
+// 终态正文（assistant_message，S1b 内容镜像）+ assistant 增量（assistant_delta，
+// S4 流式订阅）——两个镜像共用同一订阅面，订阅方按事件类型自行过滤。
+var connectorSessionOutputEventTypes = []string{
+	runtimechat.EventAssistantMessage, "assistant.message",
+	runtimechat.EventAssistantDelta, "assistant.delta",
+}
+
+// SubscribeConnectorSessionOutput 订阅会话终态正文事件（docs/bots/13 §8 S1b），
+// 返回退订函数；事件总线不可用时返回 nil（连接器退化为仅回复/命令闭环）。
+// 订阅方负责退订（宿主 close / ctx 取消时调用返回的函数）。
+func (h *Handler) SubscribeConnectorSessionOutput(handler func(runtimeevents.Event)) func() {
+	if h == nil || handler == nil {
+		return nil
+	}
+	bus := h.getRuntimeEventBus()
+	if bus == nil {
+		return nil
+	}
+	unsubscribes := make([]func(), 0, len(connectorSessionOutputEventTypes))
+	for _, eventType := range connectorSessionOutputEventTypes {
 		if unsub := bus.SubscribeCancelable(eventType, handler); unsub != nil {
 			unsubscribes = append(unsubscribes, unsub)
 		}

@@ -11,6 +11,7 @@ package connectors
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,12 @@ var attentionEventTypes = []string{
 	runtimechat.EventApprovalRequested,
 	runtimechat.EventQuestionAsked,
 	runtimeobserve.EventAgentTurnDone,
+	// 工作类（S4 聚合订阅，13 §3.3）：仅 digest 形态投递（notice 订阅不生效）。
+	eventToolRequested,
+	eventToolCompleted,
+	eventToolDenied,
+	eventSubagentCompleted,
+	eventSubagentBatchCompleted,
 }
 
 // AttentionEventTypes 返回注意力出站订阅的事件类型清单（宿主按类型订阅事件
@@ -114,6 +121,19 @@ type AttentionDeps struct {
 	// docs/bots/09 §7.4.1）：非 nil 时任一 bot 的 notify.enabled=true 即转发
 	//（对端按自己的 policy 过滤）；fire-and-forget，失败只记日志。
 	Forward func(notice AttentionNotice)
+	// NotifyBroadcast 把聚合通知（digest 形态）广播到指定连接器的全部绑定 chats
+	//（生产实现 Service.NotifyAttentionBroadcast；docs/bots/13 §7.1/S4）。nil 时
+	// digest 订阅退化为即时 notice（可用性优先）。
+	NotifyBroadcast func(ctx context.Context, connectorIDs []string, notice AttentionNotice) error
+	// DigestWindow 是 digest 聚合窗口（<=0 用默认 30s；测试可缩短）。
+	DigestWindow time.Duration
+	// Audit 记录一次成功投递（connector/kind/session/命中订阅 id；宿主接
+	// Service.RecordAttentionDelivery → ConnectorLog，13 §7.4）。可 nil。
+	Audit func(connectorID, kind, sessionID, subscriptionID string)
+	// AuditBroadcast 记录一次 digest 聚合广播的成功投递（connector/命中订阅
+	// id/批内会话数；宿主接 Service.RecordAttentionDigestDelivery，13 §7.1/§7.4）。
+	// 聚合条目跨会话，无单一 session 维度，故与 Audit 分开。可 nil。
+	AuditBroadcast func(connectorID, subscriptionID string, count int)
 	// Logf 出站失败/队列满日志；可 nil。
 	Logf func(format string, args ...any)
 }
@@ -167,11 +187,176 @@ const (
 	attentionDedupeCap = 1024
 )
 
-// delivery 是出站队列元素：通知 + 本宿主接受该通知的连接器集合
+// attentionTarget 是一次通知投递的目标（连接器 + 命中订阅 id；恒开/legacy 路径
+// 给合成 id；审计用，docs/bots/13 §7.4）。
+type attentionTarget struct {
+	connectorID    string
+	subscriptionID string
+}
+
+// delivery 是出站队列元素：通知 + 本宿主接受该通知的目标集合
 // （scope=all 的跨会话投递需要它定位「投给谁的绑定 chats」）。
 type delivery struct {
-	notice       AttentionNotice
-	connectorIDs []string
+	notice  AttentionNotice
+	targets []attentionTarget
+}
+
+// digestHit 是一次 digest 命中（连接器 + 命中订阅 id）。
+type digestHit struct {
+	connectorID    string
+	subscriptionID string
+}
+
+// defaultAttentionDigestWindow 是 digest 聚合窗口默认值（13 §3.3）。
+const defaultAttentionDigestWindow = 30 * time.Second
+
+// attentionDigestSessionsCap 是聚合文案里最多列出的会话数（其余以「等」收口）。
+const attentionDigestSessionsCap = 5
+
+// attentionDigest 是 digest 形态的聚合缓冲（S4，docs/bots/13 §3.3/§7.1）：
+// 按 (connector, subscription) 在窗口内聚合 completion 与工作类事件，flush 时
+// 按批回调（宿主合并为一条广播）。批内按 kind 计数（completion/tool/subagent…）
+// 供文案分列；窗口内重复会话只计一次标签；停用/退订时丢弃待发批。
+type attentionDigest struct {
+	mu     sync.Mutex
+	window time.Duration
+	timer  *time.Timer
+	order  []string
+	items  map[string]*digestBatch
+	flush  func(connectorID, subscriptionID string, count int, sessions []string, kinds map[string]int)
+}
+
+type digestBatch struct {
+	connectorID    string
+	subscriptionID string
+	count          int
+	sessions       []string
+	kinds          map[string]int
+}
+
+func newAttentionDigest(window time.Duration, flush func(connectorID, subscriptionID string, count int, sessions []string, kinds map[string]int)) *attentionDigest {
+	if window <= 0 {
+		window = defaultAttentionDigestWindow
+	}
+	return &attentionDigest{window: window, items: make(map[string]*digestBatch), flush: flush}
+}
+
+// add 把一次事件计入批；首批事件起窗口计时器。
+func (d *attentionDigest) add(connectorID, subscriptionID, sessionID, kind string) {
+	if d == nil || d.flush == nil {
+		return
+	}
+	key := connectorID + "\x00" + subscriptionID
+	d.mu.Lock()
+	batch, ok := d.items[key]
+	if !ok {
+		batch = &digestBatch{connectorID: connectorID, subscriptionID: subscriptionID}
+		d.items[key] = batch
+		d.order = append(d.order, key)
+	}
+	batch.count++
+	if kind = strings.TrimSpace(kind); kind != "" {
+		if batch.kinds == nil {
+			batch.kinds = make(map[string]int)
+		}
+		batch.kinds[kind]++
+	}
+	if label := subscriptionSessionLabel(sessionID); label != "" && len(batch.sessions) < attentionDigestSessionsCap {
+		duplicate := false
+		for _, item := range batch.sessions {
+			if item == label {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			batch.sessions = append(batch.sessions, label)
+		}
+	}
+	if d.timer == nil {
+		d.timer = time.AfterFunc(d.window, d.flushAll)
+	}
+	d.mu.Unlock()
+	// 指标（13 §7.4）：每吸收一个事件计一次「聚合」读数（不放大证据）。
+	recordDigestMerge(connectorID)
+}
+
+// flushAll 投出窗口内全部批（仅 Dispatcher 内部定时器调用）。
+func (d *attentionDigest) flushAll() {
+	d.mu.Lock()
+	items := d.items
+	order := d.order
+	d.items = make(map[string]*digestBatch)
+	d.order = nil
+	d.timer = nil
+	d.mu.Unlock()
+	for _, key := range order {
+		batch, ok := items[key]
+		if !ok || batch.count == 0 {
+			continue
+		}
+		d.flush(batch.connectorID, batch.subscriptionID, batch.count, append([]string(nil), batch.sessions...), batch.kinds)
+	}
+}
+
+// stop 停表并丢弃待发批（宿主 close / 退订路径）。
+func (d *attentionDigest) stop() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	timer := d.timer
+	d.timer = nil
+	d.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+// digestBroadcastText 组装聚合广播文案（13 §7.1）：纯 completion 批保持既有
+// 「N 个会话回合已收尾」口径（存量行为不变）；混合/工作类批按 kind 分列。
+func digestBroadcastText(count int, sessions []string, kinds map[string]int) string {
+	var text string
+	if kinds[AttentionKindCompletion] == count {
+		text = fmt.Sprintf("✅ %d 个会话回合已收尾", count)
+	} else {
+		text = fmt.Sprintf("🔔 %d 个事件已收尾", count)
+		parts := make([]string, 0, 4)
+		for _, entry := range []struct {
+			kind  string
+			label string
+		}{
+			{AttentionKindCompletion, "回合"},
+			{AttentionKindTool, "工具"},
+			{AttentionKindSubagent, "子代理"},
+			{AttentionKindError, "错误"},
+		} {
+			if n := kinds[entry.kind]; n > 0 {
+				parts = append(parts, fmt.Sprintf("%s ×%d", entry.label, n))
+			}
+		}
+		if len(parts) > 0 {
+			text += "\n（" + strings.Join(parts, "，") + "）"
+		}
+	}
+	if len(sessions) == 0 {
+		return text
+	}
+	line := strings.Join(sessions, ", ")
+	if count > len(sessions) {
+		line += " 等"
+	}
+	return text + "\n（会话 " + line + "）"
+}
+
+// digestNoticeKind 取批内主导 kind（聚合广播的标签；空/未知批回落 completion）。
+func digestNoticeKind(kinds map[string]int) string {
+	for _, kind := range []string{AttentionKindCompletion, AttentionKindTool, AttentionKindSubagent, AttentionKindError} {
+		if kinds[kind] > 0 {
+			return kind
+		}
+	}
+	return AttentionKindCompletion
 }
 
 // SubscribeAttention 订阅审批/提问/回合结束事件并异步出站到 IM。
@@ -196,6 +381,27 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 		return func() {}
 	}
 	dedupe := newAttentionDeduper(attentionDedupeCap)
+	// digest 聚合缓冲（S4，13 §7.1）：按 (connector, subscription) 在窗口内聚合
+	// completion 与工作类事件，flush 时经 NotifyBroadcast 合并为一条
+	//（未装配广播口则退化即时）。
+	digest := newAttentionDigest(deps.DigestWindow, func(connectorID, subscriptionID string, count int, sessions []string, kinds map[string]int) {
+		if deps.NotifyBroadcast == nil {
+			return
+		}
+		text := digestBroadcastText(count, sessions, kinds)
+		if err := deps.NotifyBroadcast(ctx, []string{connectorID}, AttentionNotice{Kind: digestNoticeKind(kinds), Text: text}); err != nil {
+			recordConnectorDelivery(connectorID, DeliveryFormDigest, deliveryOutcomeFailed)
+			if deps.Logf != nil {
+				deps.Logf("connector attention digest delivery failed (connector=%s, subscription=%s): %v", connectorID, subscriptionID, err)
+			}
+		} else {
+			// 成功投递：指标 + 审计（13 §7.4；聚合条目此前无审计条目）。
+			recordConnectorDelivery(connectorID, DeliveryFormDigest, deliveryOutcomeSent)
+			if deps.AuditBroadcast != nil {
+				deps.AuditBroadcast(connectorID, subscriptionID, count)
+			}
+		}
+	})
 	queue := make(chan delivery, attentionQueueSize)
 	stop := make(chan struct{})
 	var stopOnce sync.Once
@@ -210,12 +416,27 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 			case item := <-queue:
 				var err error
 				if deps.NotifyScoped != nil {
-					err = deps.NotifyScoped(ctx, item.connectorIDs, item.notice)
+					connectorIDs := make([]string, 0, len(item.targets))
+					for _, target := range item.targets {
+						connectorIDs = append(connectorIDs, target.connectorID)
+					}
+					err = deps.NotifyScoped(ctx, connectorIDs, item.notice)
 				} else if deps.Notify != nil {
 					err = deps.Notify(ctx, item.notice)
 				}
-				if err != nil && deps.Logf != nil {
-					deps.Logf("connector attention %s delivery failed (session=%s): %v", item.notice.Kind, item.notice.Session.SessionID, err)
+				if err != nil {
+					// 指标（13 §7.4）：投递失败按目标逐连接器计数（审计只在成功路径）。
+					for _, target := range item.targets {
+						recordConnectorDelivery(target.connectorID, DeliveryFormNotice, deliveryOutcomeFailed)
+					}
+					if deps.Logf != nil {
+						deps.Logf("connector attention %s delivery failed (session=%s): %v", item.notice.Kind, item.notice.Session.SessionID, err)
+					}
+				} else if deps.Audit != nil && deps.NotifyScoped != nil {
+					// S4 审计（13 §7.4）：成功投递按目标逐连接器落 ConnectorLog。
+					for _, target := range item.targets {
+						deps.Audit(target.connectorID, item.notice.Kind, item.notice.Session.SessionID, target.subscriptionID)
+					}
 				}
 			}
 		}
@@ -225,41 +446,62 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 		if !ok || !dedupe.first(key) {
 			return
 		}
-		// D5 过滤：逐连接器判定（一个事件可能命中多个 bot 的通知开关）；
-		// 同时判定跨宿主转发（切片 D）：任一 bot notify.enabled=true 即转发
-		// 给 peers（对端再按自己的 policy 过滤，两条链互不替代）。
+		subEvent, _ := subscriptionEventFor(event.Type)
+		// 订阅求解（S2，docs/bots/13 §3.5）：逐连接器判定（一个事件可能命中
+		// 多个 bot）；events 已配置走声明式订阅，否则回退 D5 的 AcceptsNotice
+		//（双读单写，13 §4.1）。同时判定跨宿主转发（切片 D）：任一 bot
+		// notify.enabled 或 events.enabled 即转发给 peers（对端再按自己的
+		// 订阅过滤，两条链互不替代）。
 		accepted := false
-		acceptedConnectors := make([]string, 0, 2)
+		targets := make([]attentionTarget, 0, 2)
+		digestHits := make([]digestHit, 0, 2)
+		anyBoundAccepted := false
 		forwardWanted := deps.Forward != nil
 		if deps.Store != nil {
 			for _, cfg := range deps.Store.ListConfigs() {
 				if !cfg.Enabled {
 					continue
 				}
-				accepts := cfg.Policy.AcceptsNotice(notice, func(session SessionRef) bool {
-					// scope=sessions 的语义：事件会话已绑定到本 bot（按 SessionRef
-					// 反查绑定表；绑定数几十~几百，全表扫描可行，见 Store 契约）。
-					for _, binding := range deps.Store.ListBindings(cfg.ID) {
-						if binding.Session == session {
-							return true
+				// 绑定反查按 SessionID（与 13 的会话选择器口径一致；绑定数
+				// 几十~几百，全表扫描可行，见 Store 契约）。
+				boundHere := sessionBoundLookup(deps.Store.ListBindings(cfg.ID))
+				delivery, sub := subscriptionNoticeDelivery(cfg.Policy, subEvent, notice.Kind, notice.Session.SessionID, boundHere)
+				switch delivery {
+				case "notice":
+					accepted = true
+					targets = append(targets, attentionTarget{connectorID: cfg.ID, subscriptionID: sub.ID})
+					if boundHere(notice.Session) {
+						anyBoundAccepted = true
+					}
+				case "digest":
+					if deps.NotifyBroadcast != nil {
+						digestHits = append(digestHits, digestHit{connectorID: cfg.ID, subscriptionID: sub.ID})
+					} else {
+						// 未装配广播口：退化为即时 notice（可用性优先）。
+						accepted = true
+						targets = append(targets, attentionTarget{connectorID: cfg.ID, subscriptionID: sub.ID})
+						if boundHere(notice.Session) {
+							anyBoundAccepted = true
 						}
 					}
-					return false
-				})
-				if accepts {
-					accepted = true
-					acceptedConnectors = append(acceptedConnectors, cfg.ID)
 				}
-				// 转发意愿：任一 bot 的 notify.enabled（无论 scope/kinds 命中与否
-				// ——kinds/scope 是本宿主出站粒度，对端有自己的词表；enabled 是
-				// 「这个 bot 想收广播」的意愿位，转发以它为门槛控制噪音）。
-				if cfg.Policy.Notify.Enabled {
+				// 转发意愿：任一 bot 的 notify.enabled 或 events.enabled（无论
+				// scope/kinds 命中与否——过滤是本宿主出站粒度，对端有自己的
+				// 词表；enabled 是「这个 bot 想收广播」的意愿位）。
+				if cfg.Policy.Notify.Enabled || cfg.Policy.Events.Enabled {
 					forwardWanted = true
 				}
 			}
 		} else {
 			// 无 store（纯测试口径）：全量接收。
 			accepted = true
+		}
+		if accepted && len(targets) > 0 && !anyBoundAccepted {
+			// 跨会话订阅（13 §7.1）：纯跨会话投递时文案带会话标识，运维可区分来源。
+			notice.Text = notice.Text + "\n（会话 " + subscriptionSessionLabel(notice.Session.SessionID) + "）"
+		}
+		for _, hit := range digestHits {
+			digest.add(hit.connectorID, hit.subscriptionID, notice.Session.SessionID, notice.Kind)
 		}
 		if forwardWanted && deps.Forward != nil {
 			// fire-and-forget：转发失败不重试（对端 absence 语义 = 收不到），
@@ -270,7 +512,7 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 			return
 		}
 		select {
-		case queue <- delivery{notice: notice, connectorIDs: acceptedConnectors}:
+		case queue <- delivery{notice: notice, targets: targets}:
 		default:
 			if deps.Logf != nil {
 				deps.Logf("connector attention queue full, dropping %s notice (session=%s)", notice.Kind, notice.Session.SessionID)
@@ -286,6 +528,7 @@ func SubscribeAttention(ctx context.Context, deps AttentionDeps) func() {
 		unsubOnce.Do(func() {
 			unsubscribe()
 			stopWorker()
+			digest.stop()
 		})
 	}
 	go func() {
@@ -340,9 +583,44 @@ func AttentionNoticeForEvent(event runtimeevents.Event, parked func(sessionID st
 		}
 		return AttentionNotice{Kind: AttentionKindCompletion, Session: session, Text: text},
 			"completion|" + sessionID + "|" + attentionIdentity(attentionEventPayloadString(event, "turn_id"), event), true
+	case eventToolRequested, eventToolCompleted, eventToolDenied:
+		// 工作类（S4 聚合订阅，13 §3.3）：文案仅在「未装配广播口退化即时」时可见；
+		// 正常路径只贡献 kind 计数（digestBroadcastText 分列）。
+		text := "🔧 会话工具调用更新"
+		switch event.Type {
+		case eventToolRequested:
+			text = "🔧 会话开始执行工具调用"
+		case eventToolCompleted:
+			text = "🔧 会话工具调用已完成"
+		case eventToolDenied:
+			text = "⛔ 会话工具调用被拒绝"
+		}
+		if tool := attentionEventPayloadString(event, "tool_name"); tool != "" {
+			text += "：" + tool
+		}
+		return AttentionNotice{Kind: AttentionKindTool, Session: session, Text: text},
+			"tool|" + sessionID + "|" + attentionIdentity(firstPayloadString(event, "tool_call_id", "call_id", "tool_use_id"), event), true
+	case eventSubagentCompleted, eventSubagentBatchCompleted:
+		text := "🧩 子代理任务已收尾"
+		if event.Type == eventSubagentBatchCompleted {
+			text = "🧩 子代理批次已收尾"
+		}
+		return AttentionNotice{Kind: AttentionKindSubagent, Session: session, Text: text},
+			"subagent|" + sessionID + "|" + attentionIdentity(firstPayloadString(event, "subagent_id", "task_id", "batch_id"), event), true
 	default:
 		return AttentionNotice{}, "", false
 	}
+}
+
+// firstPayloadString 依次返回载荷中第一个命中的非空字符串（身份提取用；
+// 缺失时由 attentionIdentity 回落到事件时间戳）。
+func firstPayloadString(event runtimeevents.Event, keys ...string) string {
+	for _, key := range keys {
+		if value := attentionEventPayloadString(event, key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // attentionIdentity 返回事件级去重身份：优先业务 id（request/question/turn id），
@@ -404,4 +682,24 @@ func (d *attentionDeduper) first(key string) bool {
 		delete(d.seen, oldest)
 	}
 	return true
+}
+
+// release 撤销一次认领（订阅投递入队失败时调用，使同一事件后续重试仍可投递；
+// 罕见路径，O(n) 清理可接受）。key 不存在时为 no-op。
+func (d *attentionDeduper) release(key string) {
+	if d == nil || key == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.seen[key]; !ok {
+		return
+	}
+	delete(d.seen, key)
+	for i, item := range d.order {
+		if item == key {
+			d.order = append(d.order[:i], d.order[i+1:]...)
+			break
+		}
+	}
 }

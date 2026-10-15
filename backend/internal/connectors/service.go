@@ -91,6 +91,13 @@ type Service struct {
 	// runnerRoundRobin 是 round-robin 选举游标（P2 切片 B；受 mu 保护，
 	// 进程内递增——重启清零可接受，轮转语义不依赖持久化）。
 	runnerRoundRobin int
+	// pendingClaims 是「待接管」集合：启动/重载/抢占时因其它存活宿主持有
+	// 归属而跳过的连接器（认领被拒）登记于此，由 ownershipReclaimLoop 按
+	// 归属心跳节奏复查——持有者心跳过期（宿主退出/被杀/挂起）后自动接管并
+	// 启动轮询。2026-10-15 真机（qq-bot1）：旧宿主退出后新宿主启动，认领时
+	// 旧心跳尚未过期被拒且此后无人重试 → 无任何进程轮询，IM 消息无法输入
+	//（绑定正确但会话收不到任何内容）。受 mu 保护。
+	pendingClaims map[string]struct{}
 }
 
 // connectorRun 是一次轮询实例的登记项。
@@ -105,11 +112,12 @@ func New(deps Deps) *Service {
 		deps.Logf = log.Printf
 	}
 	return &Service{
-		deps:       deps,
-		providers:  make(map[string]Provider),
-		queue:      newChatQueue(deps.QueueSize, defaultWorkerIdleTime),
-		running:    make(map[string]*connectorRun),
-		logBuffers: make(map[string]*connectorLog),
+		deps:          deps,
+		providers:     make(map[string]Provider),
+		queue:         newChatQueue(deps.QueueSize, defaultWorkerIdleTime),
+		running:       make(map[string]*connectorRun),
+		logBuffers:    make(map[string]*connectorLog),
+		pendingClaims: make(map[string]struct{}),
 	}
 }
 
@@ -165,6 +173,10 @@ func (s *Service) Start(ctx context.Context) error {
 		}
 		s.startConnector(ctx, cfg)
 	}
+	// 归属复查循环（见 pendingClaims 注释）：仅在启用运行归属闸的宿主上启动。
+	if s.hostID() != "" {
+		go s.ownershipReclaimLoop(s.baseContext())
+	}
 	return nil
 }
 
@@ -200,6 +212,8 @@ func (s *Service) StopConnector(id string) {
 			Summary:     "连接器已停止",
 		}, logCounters{})
 	}
+	// 显式停止后不再复查接手（Reload 会在随后重新判定，必要时重新登记）。
+	s.clearPendingClaim(id)
 	// 停机尽力释放本宿主认领（非本宿主持有时是 no-op；见 07 §5.6）。
 	s.releaseOwner(id)
 }
@@ -436,6 +450,7 @@ func (s *Service) acquireOwnership(cfg Config) bool {
 		return true
 	}
 	if !HostMatchesPolicy(hostID, cfg.Policy.RuntimeOwner) {
+		s.clearPendingClaim(cfg.ID)
 		s.logf("connector %s: 未运行（由 %s 持有；policy.runtime_owner=%s）", cfg.ID, strings.TrimSpace(cfg.Policy.RuntimeOwner), strings.TrimSpace(cfg.Policy.RuntimeOwner))
 		s.recordLog(LogEntry{
 			Level:       LogLevelWarn,
@@ -461,6 +476,8 @@ func (s *Service) acquireOwnership(cfg Config) bool {
 		if strings.TrimSpace(owner) == "" {
 			owner = "其它宿主"
 		}
+		// 登记待接管：持有者心跳过期后由 ownershipReclaimLoop 自动接手。
+		s.markPendingClaim(cfg.ID)
 		s.logf("connector %s: 未运行（由 %s 持有）", cfg.ID, owner)
 		s.recordLog(LogEntry{
 			Level:       LogLevelWarn,
@@ -470,6 +487,7 @@ func (s *Service) acquireOwnership(cfg Config) bool {
 		}, logCounters{})
 		return false
 	}
+	s.clearPendingClaim(cfg.ID)
 	return true
 }
 
@@ -524,6 +542,88 @@ func (s *Service) heartbeatOwner(ctx context.Context, connectorID string, cancel
 			}
 		}
 	}
+}
+
+// ── 归属复查（待接管集合） ─────────────────────────────────────────────────
+
+// markPendingClaim 登记一个「认领被拒」的连接器（持有者心跳过期后由
+// ownershipReclaimLoop 复查接管）。幂等。
+func (s *Service) markPendingClaim(connectorID string) {
+	connectorID = strings.TrimSpace(connectorID)
+	if connectorID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.pendingClaims == nil {
+		s.pendingClaims = make(map[string]struct{})
+	}
+	s.pendingClaims[connectorID] = struct{}{}
+	s.mu.Unlock()
+}
+
+// clearPendingClaim 移除待接管登记（认领成功/策略不匹配/停用后不再复查）。幂等。
+func (s *Service) clearPendingClaim(connectorID string) {
+	s.mu.Lock()
+	delete(s.pendingClaims, strings.TrimSpace(connectorID))
+	s.mu.Unlock()
+}
+
+// pendingClaimIDs 返回待接管连接器 ID 快照（循环遍历用，避免持锁调用存储）。
+func (s *Service) pendingClaimIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.pendingClaims))
+	for id := range s.pendingClaims {
+		out = append(out, id)
+	}
+	return out
+}
+
+// ownershipReclaimLoop 周期性复查待接管集合：持有者心跳过期（宿主崩溃/被杀/
+// 挂起，未走停机释放路径）后自动认领并启动轮询——认领资格只在启动/重载时
+// 判定一次的话，「新宿主启动时旧心跳尚未过期、随后旧宿主死亡」会让连接器
+// 永久无人轮询（2026-10-15 真机 qq-bot1：绑定正确但会话收不到任何消息）。
+// 复查节奏与归属心跳一致；随 Service 生命周期停机。
+func (s *Service) ownershipReclaimLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.ownerHeartbeatInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, id := range s.pendingClaimIDs() {
+				s.reclaimConnector(ctx, id)
+			}
+		}
+	}
+}
+
+// reclaimConnector 复查单个待接管连接器：已停用/配置消失/已在本机运行 → 清除
+// 登记；持有者心跳仍新鲜 → 静默等待（不重试、不刷日志）；归属已陈旧（或已被
+// 释放）→ 重新走启动路径（原子认领 + 注册轮询）。
+func (s *Service) reclaimConnector(ctx context.Context, connectorID string) {
+	if s.deps.Store == nil {
+		return
+	}
+	cfg, ok := s.deps.Store.GetConfig(connectorID)
+	if !ok || !cfg.Enabled {
+		s.clearPendingClaim(connectorID)
+		return
+	}
+	s.mu.Lock()
+	_, running := s.running[connectorID]
+	s.mu.Unlock()
+	if running {
+		s.clearPendingClaim(connectorID)
+		return
+	}
+	if record, exists := s.deps.Store.OwnerOf(connectorID); exists &&
+		record.Owner != s.hostID() &&
+		!record.Expired(time.Now().UTC(), s.ownerStaleAfter()) {
+		return // 持有者仍在续约：等待其过期或释放
+	}
+	s.startConnector(ctx, cfg)
 }
 
 func (s *Service) hostID() string {
@@ -674,6 +774,107 @@ func (s *Service) SendOutbound(ctx context.Context, connectorID, chat string, ms
 	return nil
 }
 
+// EnqueueOutbound 把一条出站投递排入该 chat 的串行队列（键 = connector|chat，
+// 与入站/reply 同键）。订阅平面（docs/bots/13 §3.7#3）必须经此入口投递，
+// 保证 reply 与订阅投递在同一串行键下保序；任务内发送失败只记日志（异步语义）。
+// 队列满/已关闭返回对应错误，调用方记录并跳过（订阅投递非可靠队列，不重试轰炸）。
+func (s *Service) EnqueueOutbound(_ context.Context, connectorID, chat string, msgs []OutboundMessage) error {
+	if s == nil || s.deps.Store == nil {
+		return ErrServiceNotConfigured
+	}
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if connectorID == "" || chat == "" || len(msgs) == 0 {
+		return nil
+	}
+	taskCtx := s.baseContext()
+	key := connectorID + "|" + chat
+	return s.queue.enqueue(key, func() {
+		if err := s.SendOutbound(taskCtx, connectorID, chat, msgs); err != nil {
+			s.logf("connector %s: queued outbound delivery failed (chat=%s): %v", connectorID, chat, err)
+			s.recordLog(LogEntry{
+				Level:       LogLevelError,
+				Direction:   LogDirectionOut,
+				ConnectorID: connectorID,
+				Chat:        chat,
+				Summary:     "订阅投递失败：" + err.Error(),
+			}, logCounters{})
+		}
+	})
+}
+
+// RecordSubscriptionDelivery 记录一次订阅面投递（ConnectorLog，direction=out；
+// docs/bots/13 §7.4 审计：内容可见性 = 显式订阅 + 可追溯）。不计入 outbound
+// 统计（该计数只表达「入站消息的回复」语义）。
+func (s *Service) RecordSubscriptionDelivery(connectorID, chat, subscriptionID, dedupKey string) {
+	if s == nil {
+		return
+	}
+	recordConnectorDelivery(connectorID, DeliveryFormContent, deliveryOutcomeSent)
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: strings.TrimSpace(connectorID),
+		Chat:        strings.TrimSpace(chat),
+		Summary:     "订阅投递（subscription=" + strings.TrimSpace(subscriptionID) + "，dedup=" + strings.TrimSpace(dedupKey) + "）",
+	}, logCounters{})
+}
+
+// RecordAttentionDelivery 记录一次注意力通知的成功投递（ConnectorLog，
+// direction=out；docs/bots/13 §7.4 审计）。通知的投递目标由绑定反查决定，无单一
+// chat 维度，故 Summary 记 kind/session/subscription。
+func (s *Service) RecordAttentionDelivery(connectorID, kind, sessionID, subscriptionID string) {
+	if s == nil {
+		return
+	}
+	recordConnectorDelivery(connectorID, DeliveryFormNotice, deliveryOutcomeSent)
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: strings.TrimSpace(connectorID),
+		Summary:     "通知投递（kind=" + strings.TrimSpace(kind) + "，session=" + strings.TrimSpace(sessionID) + "，subscription=" + strings.TrimSpace(subscriptionID) + "）",
+	}, logCounters{})
+}
+
+// RecordAttentionDigestDelivery 记录一次 digest 聚合广播的成功投递（ConnectorLog，
+// direction=out；docs/bots/13 §7.1/§7.4）。聚合条目跨会话，无单一 session 维度：
+// Summary 记批内计数与订阅 id（高基数只进日志），指标记 connector/form/outcome。
+func (s *Service) RecordAttentionDigestDelivery(connectorID, subscriptionID string, count int) {
+	if s == nil {
+		return
+	}
+	recordConnectorDelivery(connectorID, DeliveryFormDigest, deliveryOutcomeSent)
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: strings.TrimSpace(connectorID),
+		Summary:     fmt.Sprintf("通知投递（kind=completion，digest=%d，subscription=%s）", count, strings.TrimSpace(subscriptionID)),
+	}, logCounters{})
+}
+
+// RecordStreamDelivery 记录一次流式订阅投递的收尾（占位消息 → 终态编辑；
+// ConnectorLog direction=out；docs/bots/13 §7.1/§7.4）。degraded=true 表示
+// provider 不支持流式（或占位启动失败），该订阅已退化为一次性 content 投递——
+// 仍按命中的 stream 订阅记账（订阅 id 是安全边界锚点），Summary 标注降级。
+func (s *Service) RecordStreamDelivery(connectorID, chat, subscriptionID, dedupKey string, degraded bool) {
+	if s == nil {
+		return
+	}
+	recordConnectorDelivery(connectorID, DeliveryFormStream, deliveryOutcomeSent)
+	summary := "流式投递（subscription=" + strings.TrimSpace(subscriptionID) +
+		"，dedup=" + strings.TrimSpace(dedupKey)
+	if degraded {
+		summary += "，degraded=content"
+	}
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionOut,
+		ConnectorID: strings.TrimSpace(connectorID),
+		Chat:        strings.TrimSpace(chat),
+		Summary:     summary + "）",
+	}, logCounters{})
+}
+
 // NotifySession 把消息推送给该宿主会话绑定的全部 IM 会话（注意力出站助手，
 // docs/bots/01-requirements.md FR-8）。宿主在自己的注意力/监督事件里调用。
 //
@@ -749,8 +950,22 @@ func (s *Service) NotifyAttentionScoped(ctx context.Context, connectorIDs []stri
 		return err
 	}
 	// 未绑定（scope=all 广播）：投给接受连接器的全部绑定 chats（去重防同 chat 双发）。
+	delivered, err := s.NotifyBroadcast(ctx, connectorIDs, msgs)
+	if err == nil {
+		s.logf("connector attention %s: broadcast to %d chat(s) of %d connector(s)", strings.TrimSpace(notice.Kind), delivered, len(connectorIDs))
+	}
+	return err
+}
+
+// NotifyBroadcast 把消息广播到指定连接器的全部绑定 chats（去重防同 chat 双发；
+// 单点失败 errors.Join 聚合）。它是 D5 scope=all 回退投递的公开面，也是 digest
+// 聚合的投递口（docs/bots/13 §7.1/S4）。connectorIDs/msgs 为空返回 (0, nil)。
+func (s *Service) NotifyBroadcast(ctx context.Context, connectorIDs []string, msgs []OutboundMessage) (int, error) {
 	if s == nil || s.deps.Store == nil {
-		return ErrServiceNotConfigured
+		return 0, ErrServiceNotConfigured
+	}
+	if len(connectorIDs) == 0 || len(msgs) == 0 {
+		return 0, nil
 	}
 	seen := make(map[string]struct{})
 	delivered := 0
@@ -769,10 +984,18 @@ func (s *Service) NotifyAttentionScoped(ctx context.Context, connectorIDs []stri
 			delivered++
 		}
 	}
-	if len(errs) == 0 {
-		s.logf("connector attention %s: broadcast to %d chat(s) of %d connector(s)", strings.TrimSpace(notice.Kind), delivered, len(connectorIDs))
+	return delivered, errors.Join(errs...)
+}
+
+// NotifyAttentionBroadcast 是 NotifyBroadcast 的注意力封装（digest 聚合投递口，
+// docs/bots/13 §7.1）：文本必填；不做会话反查（聚合条目天然跨会话）。
+func (s *Service) NotifyAttentionBroadcast(ctx context.Context, connectorIDs []string, notice AttentionNotice) error {
+	text := strings.TrimSpace(notice.Text)
+	if text == "" {
+		return errors.New("connectors: attention notice text is required")
 	}
-	return errors.Join(errs...)
+	_, err := s.NotifyBroadcast(ctx, connectorIDs, []OutboundMessage{{Text: text}})
+	return err
 }
 
 func (s *Service) process(ctx context.Context, cfg Config, provider Provider, msg InboundMessage) {
@@ -1013,6 +1236,10 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 		UserName:    msg.UserName,
 		MessageID:   msg.MessageID,
 		Target:      decision.Peer,
+		// R1 亲和派发必须携带绑定会话：runner 侧据此续用同一会话而不是
+		// auto-create 派生会话（2026-10-15 真机：漏传导致绑定被 conn- 覆盖，
+		// 用户会话"完全没有投递"）。
+		Session: binding,
 	})
 	if err != nil {
 		// 派发失败不静默吞消息：记日志后回落本机执行（可用性优先——远程
@@ -1031,7 +1258,10 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 	// （如裸 kind "aicli"/"runtime-server"），与 peers 视图的 NodeID 格式
 	// 不一致会导致下次路由匹配失败 → 假 R2a（2026-10-15 真机 qq-bot1 观测）。
 	dispatched := result.Session
-	if dispatched.SessionID == "" {
+	// 绑定会话不得被 runner 返回值意外改写：仅当绑定本身无会话（R3
+	// auto-create）时才采纳 runner 的 SessionID；R1 应续用绑定会话，旧版
+	// runner 丢会话回传派生 id 时保留原绑定（防止再次覆盖用户会话）。
+	if dispatched.SessionID == "" || (binding.SessionID != "" && dispatched.SessionID != binding.SessionID) {
 		dispatched.SessionID = binding.SessionID
 	}
 	dispatched.NodeID = decision.Peer.NodeID
@@ -1169,6 +1399,43 @@ func (s *Service) startTyping(ctx context.Context, cfg Config, provider Provider
 		return nil
 	}
 	return session
+}
+
+// NewSubscriptionStream 为订阅平面（deliver=stream，13 §7.1 S4）开始一条流式
+// 投递：发占位消息并返回可编辑会话（后续 Update/Final）。provider 未实现
+// StreamingProvider 或启动失败时返回错误，调用方退化为一次性 content 投递。
+// 注意：订阅流式不受 policy.reply_mode 约束——那条开关描述回复通道形态，
+// 订阅是否流式由 subscriptions[].deliver 显式声明（默认安静原则仍成立）。
+func (s *Service) NewSubscriptionStream(ctx context.Context, connectorID, chat string) (StreamingSession, error) {
+	if s == nil || s.deps.Store == nil {
+		return nil, ErrServiceNotConfigured
+	}
+	connectorID = strings.TrimSpace(connectorID)
+	chat = strings.TrimSpace(chat)
+	if connectorID == "" || chat == "" {
+		return nil, errors.New("connectors: connector id and chat are required")
+	}
+	cfg, ok := s.deps.Store.GetConfig(connectorID)
+	if !ok || !cfg.Enabled {
+		return nil, fmt.Errorf("connectors: connector %q is unavailable", connectorID)
+	}
+	provider, ok := s.provider(cfg.Provider)
+	if !ok {
+		return nil, fmt.Errorf("connectors: provider %q not registered", cfg.Provider)
+	}
+	streaming, ok := provider.(StreamingProvider)
+	if !ok {
+		return nil, fmt.Errorf("connectors: provider %q does not support streaming", cfg.Provider)
+	}
+	s.attachProviderState(provider, cfg.ID)
+	session, err := streaming.StartStreaming(ctx, cfg, chat)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, errors.New("connectors: streaming session unavailable")
+	}
+	return session, nil
 }
 
 func (s *Service) provider(name string) (Provider, bool) {

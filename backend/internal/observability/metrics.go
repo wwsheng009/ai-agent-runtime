@@ -64,6 +64,12 @@ const (
 	MetricToolDispositionReplayTotal = "tool_disposition_replay_total"
 	// Doom-loop product surface (C4a): warning vs hard-stop termination.
 	MetricDoomLoopTotal = "doom_loop_total"
+
+	// Connector 投递面（订阅/通知出站；docs/bots/13 §7.4 D10）：一次投递的
+	// 结果按 (connector, form, outcome) 计数；digest 吸收的事件单独成表
+	//（表达「不放大」，它不是一次投递）。
+	MetricConnectorsDeliveriesTotal   = "connectors_deliveries_total"
+	MetricConnectorsDigestMergedTotal = "connectors_digest_merged_total"
 )
 
 // MetricLabel 标签常量
@@ -95,6 +101,10 @@ const (
 	LabelRepeat       = "repeat"
 	// LabelPhase is used for multi-stage harness signals (e.g. doom-loop warning|terminated).
 	LabelPhase = "phase"
+	// LabelConnector/LabelForm：连接器投递面指标的低基数维度（连接器 id、
+	// 投递形态 content|notice|digest）。
+	LabelConnector = "connector"
+	LabelForm      = "form"
 )
 
 // MetricValue 指标值类型
