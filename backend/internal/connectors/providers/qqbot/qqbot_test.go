@@ -1677,3 +1677,70 @@ func TestSendLargeLocalFileUsesChunkedUpload(t *testing.T) {
 		t.Fatalf("media message = %+v", sent[1].payload)
 	}
 }
+
+// ── 引用/嵌套消息（message_type=103 + msg_elements）与卡片降级 ────────────────
+
+func TestParseMessageElementsQuotedAndForwarded(t *testing.T) {
+	// 引用消息（103）：content 为空、msg_elements 携带嵌套文本。
+	data := `{"id":"e-103","group_openid":"g1","content":"","message_type":103,` +
+		`"author":{"member_openid":"m1"},` +
+		`"msg_elements":[{"content":"=== 消息 1 ===\n今天的学习计划已完成"},` +
+		`{"content":"=== 消息 2 ===\n很棒！继续保持"}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok {
+		t.Fatal("element-only message must not be dropped")
+	}
+	if msg.Text != "=== 消息 1 ===\n今天的学习计划已完成\n\n=== 消息 2 ===\n很棒！继续保持" {
+		t.Fatalf("text = %q", msg.Text)
+	}
+}
+
+func TestParseNestedElementsRecursion(t *testing.T) {
+	// 嵌套：顶层无 content，子元素有文本；再嵌套一层卡片占位。
+	data := `{"id":"e-nest","content":"","author":{"user_openid":"u1"},` +
+		`"msg_elements":[{"msg_elements":[{"content":"转发内容A"},{"ark_data":{"prompt":"快手分享"}}]}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "C2C_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok {
+		t.Fatal("nested element message must not be dropped")
+	}
+	if msg.Text != "转发内容A\n\n[卡片消息: 快手分享]" {
+		t.Fatalf("text = %q", msg.Text)
+	}
+}
+
+func TestParseArkDataPlaceholder(t *testing.T) {
+	// 顶层卡片（message_type=3）：content 为空，ark_data 有 title。
+	data := `{"id":"e-ark","group_openid":"g1","content":"","message_type":3,` +
+		`"author":{"member_openid":"m1"},` +
+		`"ark_data":{"ark_type":"feed","ark_name":"图文卡片","fields":{"title":"群相册新照片"}}}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok {
+		t.Fatal("ark-only message must not be dropped")
+	}
+	if msg.Text != "[卡片消息: 群相册新照片]" {
+		t.Fatalf("text = %q", msg.Text)
+	}
+
+	// 无 title 时回退 ark_name；全空回退 [卡片消息]。
+	bare := `{"id":"e-ark2","content":"","author":{"user_openid":"u1"},` +
+		`"ark_data":{"ark_type":"miniapp"}}`
+	msg, ok = parseGatewayMessage(connectors.Config{ID: "qq-1"}, "C2C_MESSAGE_CREATE", json.RawMessage(bare))
+	if !ok || msg.Text != "[卡片消息: miniapp]" {
+		t.Fatalf("text = %q (ok=%v)", msg.Text, ok)
+	}
+}
+
+func TestParseLegacyQuotedStillWorks(t *testing.T) {
+	// legacy message_reference 与新 msg_elements 并存时两者都保留。
+	data := `{"id":"e-both","group_openid":"g1","content":"继续","author":{"member_openid":"m1"},` +
+		`"message_reference":{"content":"上一句"},` +
+		`"msg_elements":[{"content":"引用的嵌套内容"}]}`
+	msg, ok := parseGatewayMessage(connectors.Config{ID: "qq-1"}, "GROUP_AT_MESSAGE_CREATE", json.RawMessage(data))
+	if !ok {
+		t.Fatal("mixed message must parse")
+	}
+	want := "Quoted: 上一句\n继续\n\n引用的嵌套内容"
+	if msg.Text != want {
+		t.Fatalf("text = %q, want %q", msg.Text, want)
+	}
+}

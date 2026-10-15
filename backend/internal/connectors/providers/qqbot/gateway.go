@@ -463,6 +463,35 @@ type quotedMessage struct {
 	Title   string `json:"title"`
 }
 
+// gatewayMsgElement 是消息元素（官方 msg_elements：引用消息/合并转发/嵌套内容的
+// 载体；message_type 0=文本 3=卡片 101=并行 102=聊天记录 103=引用）。
+type gatewayMsgElement struct {
+	MsgIdx      string              `json:"msg_idx"`
+	MessageType int                 `json:"message_type"`
+	Content     string              `json:"content"`
+	Attachments []gatewayAttachment `json:"attachments"`
+	ArkData     *gatewayArkData     `json:"ark_data"`
+	MsgElements []gatewayMsgElement `json:"msg_elements"`
+}
+
+// gatewayArkData 是结构化卡片数据（message_type=3 的 ark_data 字段）。
+type gatewayArkData struct {
+	Prompt  string         `json:"prompt"`
+	ArkType string         `json:"ark_type"`
+	ArkName string         `json:"ark_name"`
+	Fields  map[string]any `json:"fields"`
+}
+
+// inboundTextInput 汇总文本降级所需的全部来源（内容/引用/附件/消息元素/卡片）。
+type inboundTextInput struct {
+	Content      string
+	StripMention bool
+	Reference    *messageReference
+	Attachments  []gatewayAttachment
+	Elements     []gatewayMsgElement
+	Ark          *gatewayArkData
+}
+
 // parseGatewayMessage 把 gateway 事件解析为 InboundMessage：
 //   - Chat 用稳定键：群 "group:<group_openid>"（share_session_in_channel=false
 //     时追加 ":user:<member_openid>" 按人隔离）、C2C "user:<openid>"、
@@ -487,6 +516,8 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			Content          string              `json:"content"`
 			MessageReference *messageReference   `json:"message_reference"`
 			Attachments      []gatewayAttachment `json:"attachments"`
+			MsgElements      []gatewayMsgElement `json:"msg_elements"`
+			ArkData          *gatewayArkData     `json:"ark_data"`
 			Author           struct {
 				MemberOpenID string `json:"member_openid"`
 				Username     string `json:"username"`
@@ -500,7 +531,13 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			strings.TrimSpace(event.GroupOpenID),
 			strings.TrimSpace(event.Author.MemberOpenID),
 			event.Author.Username,
-			event.Content, event.MessageReference, event.Attachments)
+			inboundTextInput{
+				Content:     event.Content,
+				Reference:   event.MessageReference,
+				Attachments: event.Attachments,
+				Elements:    event.MsgElements,
+				Ark:         event.ArkData,
+			})
 	case "GROUP_MESSAGE_CREATE":
 		// 全量群消息（平台开启「接收所有消息」后推送；intent 同为 1<<25）。
 		// 触发策略（group_message_mode，缺省 mention）：mention=仅@机器人的
@@ -514,6 +551,8 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			MessageReference *messageReference   `json:"message_reference"`
 			Attachments      []gatewayAttachment `json:"attachments"`
 			Mentions         []gatewayMention    `json:"mentions"`
+			MsgElements      []gatewayMsgElement `json:"msg_elements"`
+			ArkData          *gatewayArkData     `json:"ark_data"`
 			Author           struct {
 				MemberOpenID string `json:"member_openid"`
 				Username     string `json:"username"`
@@ -530,7 +569,13 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			strings.TrimSpace(event.GroupOpenID),
 			strings.TrimSpace(event.Author.MemberOpenID),
 			event.Author.Username,
-			event.Content, event.MessageReference, event.Attachments)
+			inboundTextInput{
+				Content:     event.Content,
+				Reference:   event.MessageReference,
+				Attachments: event.Attachments,
+				Elements:    event.MsgElements,
+				Ark:         event.ArkData,
+			})
 	case "C2C_MESSAGE_CREATE":
 		var event struct {
 			ID               string              `json:"id"`
@@ -538,6 +583,8 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			Content          string              `json:"content"`
 			MessageReference *messageReference   `json:"message_reference"`
 			Attachments      []gatewayAttachment `json:"attachments"`
+			MsgElements      []gatewayMsgElement `json:"msg_elements"`
+			ArkData          *gatewayArkData     `json:"ark_data"`
 			Author           struct {
 				UserOpenID string `json:"user_openid"`
 				Username   string `json:"username"`
@@ -551,7 +598,13 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if messageID == "" || userOpenID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, false, event.MessageReference, event.Attachments)
+		text := normalizeInboundText(inboundTextInput{
+			Content:     event.Content,
+			Reference:   event.MessageReference,
+			Attachments: event.Attachments,
+			Elements:    event.MsgElements,
+			Ark:         event.ArkData,
+		})
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
@@ -581,6 +634,8 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			GuildID          string              `json:"guild_id"`
 			MessageReference *messageReference   `json:"message_reference"`
 			Attachments      []gatewayAttachment `json:"attachments"`
+			MsgElements      []gatewayMsgElement `json:"msg_elements"`
+			ArkData          *gatewayArkData     `json:"ark_data"`
 			Author           struct {
 				ID       string `json:"id"`
 				Username string `json:"username"`
@@ -595,7 +650,14 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if messageID == "" || channelID == "" || userID == "" {
 			return connectors.InboundMessage{}, false
 		}
-		text := normalizeInboundText(event.Content, true, event.MessageReference, event.Attachments)
+		text := normalizeInboundText(inboundTextInput{
+			Content:      event.Content,
+			Reference:    event.MessageReference,
+			Attachments:  event.Attachments,
+			Elements:     event.MsgElements,
+			Ark:          event.ArkData,
+			StripMention: true,
+		})
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
@@ -650,11 +712,12 @@ func groupMessageModeSetting(cfg connectors.Config) string {
 
 // buildGroupInboundMessage 组装群聊入站消息（GROUP_AT / GROUP_MESSAGE 共用）：
 // chat 键含按人隔离后缀（share_session_in_channel=false），昵称回退 openid。
-func buildGroupInboundMessage(cfg connectors.Config, connectorID, messageID, groupOpenID, memberOpenID, username, content string, ref *messageReference, attachments []gatewayAttachment) (connectors.InboundMessage, bool) {
+func buildGroupInboundMessage(cfg connectors.Config, connectorID, messageID, groupOpenID, memberOpenID, username string, in inboundTextInput) (connectors.InboundMessage, bool) {
 	if messageID == "" || groupOpenID == "" || memberOpenID == "" {
 		return connectors.InboundMessage{}, false
 	}
-	text := normalizeInboundText(content, true, ref, attachments)
+	in.StripMention = true
+	text := normalizeInboundText(in)
 	if text == "" {
 		return connectors.InboundMessage{}, false
 	}
@@ -671,7 +734,7 @@ func buildGroupInboundMessage(cfg connectors.Config, connectorID, messageID, gro
 		UserID:      memberOpenID,
 		UserName:    firstNonEmpty(username, memberOpenID),
 		Text:        text,
-		Media:       attachmentsToMedia(attachments),
+		Media:       attachmentsToMedia(in.Attachments),
 		ProviderData: map[string]any{
 			"qqbot_message_type":  chatKindGroup,
 			"qqbot_group_openid":  groupOpenID,
@@ -782,14 +845,16 @@ func attachmentPlaceholderText(attachments []gatewayAttachment) string {
 	return strings.Join(parts, " ")
 }
 
-// normalizeInboundText 归一化入站文本：去掉首尾空白；stripMention 为 true 时
-// 剥掉 QQ 群/频道消息内容开头的 @机器人 标记（<@!bot_id> / <@bot_id>）；
-// 带引用消息时拼接 "Quoted: <摘要>" 前缀（对齐上游 codex-server 语义）。
-// 媒体-only 消息的降级顺序：语音 ASR 转写（无包装，直接作为文本）→ 附件
-// 占位（"[图片/语音/视频/文件: 名称]"）；纯文本消息带附件时追加占位行。
-func normalizeInboundText(content string, stripMention bool, ref *messageReference, attachments []gatewayAttachment) string {
-	trimmed := strings.TrimSpace(content)
-	if stripMention {
+// normalizeInboundText 归一化入站文本：去掉首尾空白；StripMention 时剥掉
+// QQ 群/频道消息内容开头的 @机器人 标记（<@!bot_id> / <@bot_id>）。
+//
+// 降级链（富内容/媒体-only 消息不丢弃）：正文 → msg_elements 展开（引用消息
+// message_type=103 / 合并转发 102 / 并行 101，递归含嵌套卡片）→ 卡片占位
+// （ark_data）→ 语音 ASR 转写 → 附件占位（"[图片/语音/视频/文件: 名称]"）；
+// 纯文本带附件时追加占位行。legacy message_reference 摘要仍拼 "Quoted: " 前缀。
+func normalizeInboundText(in inboundTextInput) string {
+	trimmed := strings.TrimSpace(in.Content)
+	if in.StripMention {
 		for strings.HasPrefix(trimmed, "<@") {
 			index := strings.Index(trimmed, ">")
 			if index < 0 {
@@ -798,19 +863,31 @@ func normalizeInboundText(content string, stripMention bool, ref *messageReferen
 			trimmed = strings.TrimSpace(trimmed[index+1:])
 		}
 	}
+	// msg_elements 是消息的**附加内容**（官方语义：引用/合并转发/并行消息
+	// 的载体）：有正文时作为独立段追加；无正文时作为替代正文。
+	if elements := flattenMsgElements(in.Elements, 0); elements != "" {
+		if trimmed == "" {
+			trimmed = elements
+		} else {
+			trimmed = trimmed + "\n\n" + elements
+		}
+	}
+	if trimmed == "" {
+		trimmed = arkPlaceholder(in.Ark)
+	}
 	switch {
 	case trimmed == "":
-		if asr := voiceASRText(attachments); asr != "" {
+		if asr := voiceASRText(in.Attachments); asr != "" {
 			trimmed = asr
 		} else {
-			trimmed = attachmentPlaceholderText(attachments)
+			trimmed = attachmentPlaceholderText(in.Attachments)
 		}
-	case len(attachments) > 0:
-		if placeholder := attachmentPlaceholderText(attachments); placeholder != "" {
+	case len(in.Attachments) > 0:
+		if placeholder := attachmentPlaceholderText(in.Attachments); placeholder != "" {
 			trimmed += "\n" + placeholder
 		}
 	}
-	quoted := extractQuotedText(ref)
+	quoted := extractQuotedText(in.Reference)
 	if quoted == "" {
 		return trimmed
 	}
@@ -818,6 +895,62 @@ func normalizeInboundText(content string, stripMention bool, ref *messageReferen
 		return "Quoted: " + quoted
 	}
 	return "Quoted: " + quoted + "\n" + trimmed
+}
+
+// flattenMsgElements 递归展开消息元素为可读文本（引用/合并转发/嵌套内容），
+// 深度上限 3 防御异常嵌套；元素无文本时降级为卡片占位。
+func flattenMsgElements(elements []gatewayMsgElement, depth int) string {
+	if len(elements) == 0 || depth > 3 {
+		return ""
+	}
+	parts := make([]string, 0, len(elements))
+	for _, element := range elements {
+		if content := strings.TrimSpace(element.Content); content != "" {
+			parts = append(parts, content)
+			continue
+		}
+		if nested := flattenMsgElements(element.MsgElements, depth+1); nested != "" {
+			parts = append(parts, nested)
+			continue
+		}
+		if placeholder := arkPlaceholder(element.ArkData); placeholder != "" {
+			parts = append(parts, placeholder)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// arkPlaceholder 把结构化卡片降级为一行占位（prompt > title > ark_name > ark_type）。
+func arkPlaceholder(ark *gatewayArkData) string {
+	if ark == nil {
+		return ""
+	}
+	label := firstNonEmpty(
+		strings.TrimSpace(ark.Prompt),
+		arkFieldString(ark.Fields, "title"),
+		strings.TrimSpace(ark.ArkName),
+		strings.TrimSpace(ark.ArkType),
+	)
+	if label == "" {
+		return "[卡片消息]"
+	}
+	return "[卡片消息: " + label + "]"
+}
+
+// arkFieldString 读取卡片 fields 中的字符串字段（非字符串返回空）。
+func arkFieldString(fields map[string]any, key string) string {
+	if fields == nil {
+		return ""
+	}
+	value, ok := fields[key]
+	if !ok {
+		return ""
+	}
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
 }
 
 // extractQuotedText 从 message_reference 提取被引用消息摘要：
