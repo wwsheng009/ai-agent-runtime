@@ -42,3 +42,36 @@ func TestGatewaySessionsCarryViewing(t *testing.T) {
 		t.Fatal("移除订阅者后不得再报 Viewing")
 	}
 }
+// —— R1：sessionViewers 作为 notify.Presence 权威（docs/bots/12 §4 R1）——
+
+// TestSessionPresenceSatisfiesKernelContract 锁定 R1 契约：SessionPresence()
+// 返回的实现在内核 Dispatcher 语义下可用——SSE 订阅者在看时报告在场（门抑制），
+// 无订阅者时放行；nodeID 维度按单宿主忽略（任意非空 nodeID 皆可）。
+func TestSessionPresenceSatisfiesKernelContract(t *testing.T) {
+	h := &Handler{}
+	v := h.SessionPresence()
+	if v == nil {
+		t.Fatal("SessionPresence 不应为 nil")
+	}
+
+	// 无订阅者：不在场。
+	if v.Active("node-x", "s1") {
+		t.Fatal("无订阅者不应报告在场")
+	}
+
+	// 挂一个订阅者：在场（内核门将抑制推送）。
+	h.sessionViewers.Add("s1")
+	if !v.Active("node-x", "s1") {
+		t.Fatal("SSE 订阅者在看应报告在场")
+	}
+	// nodeID 维度不参与判定（单宿主）。
+	if !v.Active("any-node", "s1") {
+		t.Fatal("单宿主应忽略 nodeID 维度")
+	}
+
+	// 断开后回落不在场。
+	h.sessionViewers.Remove("s1")
+	if v.Active("node-x", "s1") {
+		t.Fatal("订阅者断开后不应报告在场")
+	}
+}
