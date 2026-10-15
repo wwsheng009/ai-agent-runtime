@@ -871,7 +871,15 @@ function refreshRouteDatalists() {
   if (reasoningList) { reasoningList.innerHTML = routeReasoningOptions(); }
 }
 
+// fieldHTML 渲染字段:label + 控件(+帮助)。勾选类控件(type=checkbox)自动切换为
+// 行内布局(connector-field-check):勾选框与文字同行,不再单独占一行(2026-10-15
+// UI 收口;bool 字段/启用开关/订阅启用共用同一条路径)。
 function fieldHTML(label, control, help) {
+  if (/type="checkbox"/.test(control)) {
+    return '<label class="connector-field connector-field-check">' + control +
+      '<span class="connector-field-label">' + esc(label) + "</span>" +
+      (help ? '<span class="connector-field-help">' + esc(help) + "</span>" : "") + "</label>";
+  }
   return '<label class="connector-field"><span class="connector-field-label">' + esc(label) + "</span>" +
     control + (help ? '<span class="connector-field-help">' + esc(help) + "</span>" : "") + "</label>";
 }
@@ -919,37 +927,97 @@ function renderEventSubRows(subs) {
   var html = "";
   for (var i = 0; i < subs.length; i++) { html += eventSubRowHTML(subs[i]); }
   host.innerHTML = html;
+  var rows = host.querySelectorAll("[data-event-sub]");
+  for (var r = 0; r < rows.length; r++) { syncEventSubRowMode(rows[r]); }
 }
 
+// EVENT_TYPE_CHOICES 是事件类型多选词表(docs/bots/13 §3.1):规范名 + 族通配。
+// 既有配置里词表外的值(别名/自定义)会追加为已选 chip,保证往返不丢配置。
+var EVENT_TYPE_CHOICES = [
+  "assistant_message", "user_message", "assistant_delta",
+  "agent.turn.started", "agent.turn.finished", "turn.suspended", "turn.resumed",
+  "session_start", "session_end", "session.interrupted",
+  "approval_requested", "question_asked", "error",
+  "tool.requested", "tool.completed", "tool.denied",
+  "subagent.completed", "subagent.batch.completed",
+  "turn.*", "work.*"
+];
+
 // eventSubRowHTML 渲染一条订阅行:字段以 data-sub-field 标记,collectEventSubs 按行收集。
+// 布局(2026-10-15 UI 收口):id/会话模式/投递形态 同排,会话列表+启用 次排;
+// 事件类型用 chips 多选(替代文本输入框),勾选类控件行内显示(不单独占行)。
 function eventSubRowHTML(sub) {
   sub = sub || {};
   var sessions = sub.sessions || {};
+  var mode = sessions.mode || "bound";
   var modeOptions = subSelectOptions(
     [["bound", "bound(绑定会话)"], ["ids", "ids(指定会话)"], ["all", "all(全部会话)"]],
-    sessions.mode || "bound");
+    mode);
   var deliverOptions = subSelectOptions(
     [["notice", "notice(通知)"], ["content", "content(正文副本)"],
      ["digest", "digest(聚合)"], ["stream", "stream(流式编辑)"]],
     sub.deliver || "notice");
   var enabled = sub.enabled !== false; // 缺省启用(与后端 IsEnabled 同口径)
+  var idsDisabled = mode !== "ids";
   return '<div class="connector-event-sub" data-event-sub>' +
     '<div class="connector-form-grid">' +
     fieldHTML("订阅 ID", '<input type="text" data-sub-field="id" autocomplete="off" placeholder="如 main-chat" value="' + esc(sub.id || "") + '">',
-      "稳定标识,落审计日志;可留空(后端按序号生成)。") +
+      "留空=后端按序号生成;落审计日志。") +
     fieldHTML("会话模式", '<select data-sub-field="sessions-mode">' + modeOptions + "</select>",
-      "bound=绑定到本 bot 的会话;ids=显式列表;all=宿主全部会话。") +
-    fieldHTML("会话列表(mode=ids)", '<input type="text" data-sub-field="sessions-ids" autocomplete="off" placeholder="session_a, session_b" value="' + esc((sessions.ids || []).join(", ")) + '">',
-      "逗号/空格分隔;mode 非 ids 时忽略。") +
-    fieldHTML("事件类型 *", '<input type="text" data-sub-field="types" autocomplete="off" placeholder="assistant_message, turn.*, approval" value="' + esc((sub.types || []).join(", ")) + '">',
-      "支持规范名/别名/族通配(turn.*、work.*)。") +
+      "bound=绑定会话;ids=指定列表;all=全部。") +
     fieldHTML("投递形态", '<select data-sub-field="deliver">' + deliverOptions + "</select>",
-      "stream 仅 assistant_delta;工作类仅 digest。") +
-    fieldHTML("启用", '<input type="checkbox" data-sub-field="enabled"' + (enabled ? " checked" : "") + ">",
-      "单条启停(缺省启用)。") +
+      "工作类仅 digest;stream 仅增量。") +
+    fieldHTML("会话列表", '<input type="text" data-sub-field="sessions-ids" autocomplete="off" placeholder="' +
+      (idsDisabled ? "(mode=ids 时生效)" : "session_a, session_b") + '" value="' + esc((sessions.ids || []).join(", ")) + '"' +
+      (idsDisabled ? " disabled" : "") + ">", "") +
+    fieldHTML("启用", '<input type="checkbox" data-sub-field="enabled"' + (enabled ? " checked" : "") + ">", "") +
+    "</div>" +
+    '<div class="connector-field connector-event-types">' +
+    '<span class="connector-field-label">事件类型 *</span>' +
+    eventTypeChipsHTML(sub.types || []) +
+    '<input type="text" data-sub-field="types-extra" autocomplete="off" placeholder="自定义/别名(逗号分隔,可留空)" value="">' +
+    '<span class="connector-field-help">点击多选;work.*(工具/子代理)仅 digest 生效。</span>' +
     "</div>" +
     '<button type="button" data-editor="remove-event-sub">删除此订阅</button>' +
     "</div>";
+}
+
+// eventTypeChipsHTML 渲染事件类型多选 chips:词表选项全量呈现(aria-pressed 标记选中),
+// 词表外的既有值追加为已选 chip(往返不丢)。
+function eventTypeChipsHTML(selected) {
+  var chosen = [];
+  var seen = {};
+  var list = selected || [];
+  for (var i = 0; i < list.length; i++) {
+    var item = String(list[i]).trim();
+    if (item && !seen[item]) { seen[item] = true; chosen.push(item); }
+  }
+  var html = '<span class="connector-type-chips">';
+  for (var c = 0; c < EVENT_TYPE_CHOICES.length; c++) {
+    var name = EVENT_TYPE_CHOICES[c];
+    var on = !!seen[name];
+    if (on) { seen[name] = false; }
+    html += '<button type="button" class="connector-type-chip" data-sub-type="' + esc(name) + '" aria-pressed="' +
+      (on ? "true" : "false") + '">' + esc(name) + "</button>";
+  }
+  for (var k = 0; k < chosen.length; k++) {
+    if (seen[chosen[k]]) {
+      html += '<button type="button" class="connector-type-chip" data-sub-type="' + esc(chosen[k]) +
+        '" aria-pressed="true">' + esc(chosen[k]) + "</button>";
+    }
+  }
+  return html + "</span>";
+}
+
+// syncEventSubRowMode 按会话模式启用/禁用「会话列表」输入(非 ids 模式置灰提示)。
+function syncEventSubRowMode(row) {
+  if (!row) { return; }
+  var mode = subFieldValue(row, "sessions-mode");
+  var ids = row.querySelector('[data-sub-field="sessions-ids"]');
+  if (!ids) { return; }
+  var useIt = mode === "ids";
+  ids.disabled = !useIt;
+  ids.placeholder = useIt ? "session_a, session_b" : "(mode=ids 时生效)";
 }
 
 // subSelectOptions 生成 select 选项(选中项 = current)。
@@ -967,6 +1035,8 @@ function appendEventSubRow() {
   var host = connEl("connector-event-subs");
   if (!host) { return; }
   host.insertAdjacentHTML("beforeend", eventSubRowHTML({}));
+  var rows = host.querySelectorAll("[data-event-sub]");
+  syncEventSubRowMode(rows[rows.length - 1]);
 }
 
 // removeEventSubRow 删除按钮所在行。
@@ -988,13 +1058,24 @@ function collectEventSubs() {
 }
 
 function collectEventSubRow(row) {
+  var types = [];
+  var chips = row.querySelectorAll("[data-sub-type]");
+  for (var c = 0; c < chips.length; c++) {
+    if (chips[c].getAttribute("aria-pressed") === "true") {
+      types.push(chips[c].getAttribute("data-sub-type"));
+    }
+  }
+  var extra = splitSubList(subFieldValue(row, "types-extra"));
+  for (var e = 0; e < extra.length; e++) {
+    if (types.indexOf(extra[e]) < 0) { types.push(extra[e]); }
+  }
   var sub = {
     id: subFieldValue(row, "id").trim(),
     sessions: {
       mode: subFieldValue(row, "sessions-mode") || "bound",
       ids: splitSubList(subFieldValue(row, "sessions-ids"))
     },
-    types: splitSubList(subFieldValue(row, "types")),
+    types: types,
     deliver: subFieldValue(row, "deliver") || "notice"
   };
   var enabledField = row.querySelector('[data-sub-field="enabled"]');
@@ -1396,6 +1477,12 @@ function onModalBodyClick(event) {
   if (!target || !target.closest) { return; }
   var qrBtn = target.closest("[data-qr]");
   if (qrBtn) { onQRButton(qrBtn.getAttribute("data-qr")); return; }
+  // 事件类型 chips:点击切换选中(aria-pressed;按钮语义与样式一致)。
+  var chip = target.closest("[data-sub-type]");
+  if (chip) {
+    chip.setAttribute("aria-pressed", chip.getAttribute("aria-pressed") === "true" ? "false" : "true");
+    return;
+  }
   // 事件订阅行操作(docs/bots/13):添加/删除(委托,行内按钮随行销毁)。
   var editorBtn = target.closest("[data-editor]");
   if (!editorBtn) { return; }
@@ -1410,6 +1497,11 @@ function onModalBodyChange(event) {
   if (target && target.id === "connector-form-provider" && editorState) {
     editorState.provider = target.value;
     renderEditor();
+    return;
+  }
+  // 订阅行会话模式切换:联动「会话列表」可用性。
+  if (target && target.getAttribute && target.getAttribute("data-sub-field") === "sessions-mode") {
+    syncEventSubRowMode(target.closest("[data-event-sub]"));
   }
 }
 

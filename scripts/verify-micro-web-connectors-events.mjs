@@ -27,6 +27,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 ok(/function collectEventSubs\(/.test(src), "源码包含 collectEventSubs");
 ok(/function onModalBodyClick[\s\S]*add-event-sub/.test(src), "onModalBodyClick 委托包含 add-event-sub");
 ok(/Object\.assign\(\{\}, current\.policy\)/.test(src), "collectEditor 编辑态保留既有 policy(浅拷贝)");
+ok(/connector-field-check/.test(src), "fieldHTML 勾选控件走行内布局(不单独占行)");
+ok(/data-sub-type/.test(src) && /eventTypeChipsHTML/.test(src), "事件类型为 chips 多选组件");
 
 // ---- 最小 DOM mock ----
 function matchesSelector(node, sel) {
@@ -128,6 +130,7 @@ function parseEventSubRow(chunk) {
     node.attributes = node.attrs;
     node.value = attrs.value || "";
     node.checked = !!attrs.checked;
+    node.disabled = !!attrs.disabled;
     if (isSelect) {
       const m = String(optionsHtml || "").match(/<option value="([^"]*)" selected>/);
       node.value = m ? decodeEntities(m[1]) : "";
@@ -148,12 +151,19 @@ function parseEventSubRow(chunk) {
   addField("id", "input", { value: (inputTag("id") || {}).value || "" });
   const mode = selectHtml("sessions-mode");
   addField("sessions-mode", "select", {}, true, mode ? mode.options : "");
-  addField("sessions-ids", "input", { value: (inputTag("sessions-ids") || {}).value || "" });
-  addField("types", "input", { value: (inputTag("types") || {}).value || "" });
+  const idsAttrs = inputTag("sessions-ids") || {};
+  addField("sessions-ids", "input", { value: idsAttrs.value || "", disabled: "disabled" in idsAttrs });
   const deliver = selectHtml("deliver");
   addField("deliver", "select", {}, true, deliver ? deliver.options : "");
   const enabledAttrs = inputTag("enabled") || {};
   addField("enabled", "input", { checked: "checked" in enabledAttrs });
+  // 事件类型 chips(aria-pressed 选中态;词表外值追加在末尾) + 自定义兜底输入。
+  const chipRe = /data-sub-type="([^"]*)" aria-pressed="(true|false)"/g;
+  let chipMatch;
+  while ((chipMatch = chipRe.exec(chunk)) !== null) {
+    row.appendChild(makeNode("button", { attr: { "data-sub-type": decodeEntities(chipMatch[1]), "aria-pressed": chipMatch[2] } }));
+  }
+  addField("types-extra", "input", { value: (inputTag("types-extra") || {}).value || "" });
   if (/data-editor="remove-event-sub"/.test(chunk)) {
     row.appendChild(makeNode("button", { attr: { "data-editor": "remove-event-sub" } }));
   }
@@ -197,6 +207,7 @@ return {
   eventSubRowHTML: eventSubRowHTML,
   renderEventSubRows: renderEventSubRows,
   onModalBodyClick: onModalBodyClick,
+  onModalBodyChange: onModalBodyChange,
   splitSubList: splitSubList,
   setSchemaProviders: function(v){ schemaProviders = v; },
   setItems: function(v){ connectorItems = v; },
@@ -230,7 +241,7 @@ const eventsEnabled = input("connector-form-events-enabled", "", false);
 const subsHost = makeNode("div", { id: "connector-event-subs" });
 modalBody.appendChild(subsHost);
 
-// ===== 1. eventSubRowHTML 结构 =====
+// ===== 1. eventSubRowHTML 结构与组件化 =====
 {
   const html = api.eventSubRowHTML({
     id: "main-chat",
@@ -241,14 +252,23 @@ modalBody.appendChild(subsHost);
   ok(html.includes('data-sub-field="id"') && html.includes('value="main-chat"'), "行 HTML 含 id 字段与值");
   ok(/data-sub-field="sessions-mode">[\s\S]*<option value="ids" selected>/.test(html), "sessions-mode 选中 ids");
   ok(html.includes('data-sub-field="sessions-ids"') && html.includes('value="session_a, session_b"'), "ids 列表回填为逗号分隔");
-  ok(html.includes('data-sub-field="types"') && html.includes('value="assistant_message, turn.*"'), "types 回填(族通配保留)");
+  ok(!/data-sub-field="sessions-ids"[^>]*disabled/.test(html), "mode=ids 时会话列表可用");
   ok(/data-sub-field="deliver">[\s\S]*<option value="content" selected>/.test(html), "deliver 选中 content");
-  ok(/data-sub-field="enabled" checked>/.test(html), "enabled 缺省勾选(缺省启用)");
+  ok(html.includes('class="connector-field connector-field-check"><input type="checkbox" data-sub-field="enabled" checked><span class="connector-field-label">启用</span>'),
+    "启用勾选为行内布局(勾选框在文字前,不单独占行)");
+  const chipCount = (html.match(/data-sub-type="/g) || []).length;
+  ok(chipCount === 20, "事件类型渲染为 20 个 chips(词表全量)", chipCount);
+  ok(html.includes('data-sub-type="assistant_message" aria-pressed="true"')
+    && html.includes('data-sub-type="turn.*" aria-pressed="true"')
+    && html.includes('data-sub-type="error" aria-pressed="false"'), "选中类型 aria-pressed=true,其余 false");
+  ok(html.includes('data-sub-field="types-extra"'), "保留自定义类型输入(兜底)");
+  ok(!/data-sub-field="types"/.test(html), "事件类型不再使用文本输入框");
   ok(html.includes('data-editor="remove-event-sub"'), "行内含删除按钮");
   const htmlOff = api.eventSubRowHTML({ id: "x", enabled: false });
   ok(!/data-sub-field="enabled" checked>/.test(htmlOff), "enabled:false 不勾选");
   ok(/data-sub-field="sessions-mode">[\s\S]*<option value="bound" selected>/.test(htmlOff), "空订阅默认 bound");
   ok(/data-sub-field="deliver">[\s\S]*<option value="notice" selected>/.test(htmlOff), "空订阅默认 notice");
+  ok(/data-sub-field="sessions-ids"[^>]*disabled/.test(htmlOff), "bound 模式会话列表置灰");
 }
 
 // ===== 2. renderEventSubRows → collectEventSubs 往返 =====
@@ -333,6 +353,38 @@ modalBody.appendChild(subsHost);
 {
   ok(eq(api.splitSubList("a, b，c  d"), ["a", "b", "c", "d"]), "逗号/中文逗号/空白混排解析");
   ok(eq(api.splitSubList(""), []), "空串 → 空数组");
+}
+
+// ===== 8. 词表外类型保留(追加 chip) + chips 点击切换 =====
+{
+  eventsEnabled.checked = true;
+  api.renderEventSubRows([{ id: "legacy", types: ["completion", "custom.type", "turn.*"] }]);
+  const first = api.collectEventSubs().subscriptions[0];
+  ok(eq(first.types, ["turn.*", "completion", "custom.type"]), "词表外类型追加为已选 chip 并保留(往返不丢)", first.types);
+  const row = subsHost.children[0];
+  const chip = row.querySelector('[data-sub-type="assistant_message"]');
+  api.onModalBodyClick({ target: chip });
+  ok(chip.getAttribute("aria-pressed") === "true", "点击 chip 切换为选中");
+  const after = api.collectEventSubs().subscriptions[0];
+  ok(after.types.indexOf("assistant_message") >= 0, "选中后的 chip 进入收集结果");
+  api.onModalBodyClick({ target: chip });
+  ok(chip.getAttribute("aria-pressed") === "false", "再次点击取消选中");
+  ok(after.types.indexOf("custom.type") >= 0, "自定义类型仍在收集结果中");
+}
+
+// ===== 9. 会话列表随模式联动(非 ids 置灰) =====
+{
+  api.renderEventSubRows([{ id: "m1", sessions: { mode: "bound" } }]);
+  const row = subsHost.children[0];
+  const ids = row.querySelector('[data-sub-field="sessions-ids"]');
+  ok(ids.disabled === true, "bound 模式:会话列表置灰");
+  const modeSel = row.querySelector('[data-sub-field="sessions-mode"]');
+  modeSel.value = "ids";
+  api.onModalBodyChange({ target: modeSel });
+  ok(ids.disabled === false, "切到 ids:会话列表可用");
+  modeSel.value = "all";
+  api.onModalBodyChange({ target: modeSel });
+  ok(ids.disabled === true, "切到 all:会话列表再次置灰");
 }
 
 console.log(failures === 0 ? "\n全部通过" : "\n存在失败项: " + failures);

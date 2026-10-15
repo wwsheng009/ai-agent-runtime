@@ -3322,6 +3322,20 @@ body.low-bandwidth img {
 .connector-event-sub > button { margin-top: 6px; font-size: 12px; }
 .connector-events-actions { margin-top: 6px; }
 #connector-event-subs:empty { display: none; }
+/* 勾选类字段行内布局(2026-10-15 UI 收口):勾选框与文字同行,帮助文本换到下一行。 */
+.connector-field-check { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 6px; }
+.connector-field-check .connector-field-help { flex-basis: 100%; margin: 0; }
+/* 事件类型多选 chips(替代文本输入框;aria-pressed 即选中态)。 */
+.connector-event-types .connector-type-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.connector-type-chip {
+  font-size: 11px; line-height: 1.5; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border2); background: transparent; color: var(--fg2); cursor: pointer;
+}
+.connector-type-chip:hover { background: var(--hoverBg2); }
+.connector-type-chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--userMsgFg, #fff); }
+.connector-type-chip[aria-pressed="true"]:hover { background: var(--accent2); }
+.connector-event-types [data-sub-field="types-extra"] { margin-top: 2px; font-size: 12px; }
+.connector-event-sub [data-sub-field="sessions-ids"]:disabled { opacity: .55; }
 
 /* 连接器表单模型路由三字段:input + ▼ + 自定义弹层(同配置编辑器协议字段方案)。
    不用原生 datalist 下拉:input 有值时浏览器按当前值过滤候选,下拉恒显示 0~1 项,
