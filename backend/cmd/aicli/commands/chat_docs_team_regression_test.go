@@ -70,10 +70,13 @@ func TestAICLIChatActorExecutor_DocsPromptRegression_CoversWorkspaceToolPriority
 		RuntimeSession: runtimeSession,
 		SessionUserID:  userID,
 		SessionDir:     dir,
-		ProfileRoot:    workspaceRoot,
-		Stream:         true,
-		OutputFormat:   "interactive",
-		ChatExecutor:   newAICLIActorChatExecutor(),
+		// 2026-10-15：会话工作区由 WorkspaceAnchor 表达；ProfileRoot 保留为配置
+		// 来源语义（本 fixture 两者同值，但语义已分离）。
+		WorkspaceAnchor: workspaceRoot,
+		ProfileRoot:     workspaceRoot,
+		Stream:          true,
+		OutputFormat:    "interactive",
+		ChatExecutor:    newAICLIActorChatExecutor(),
 	}
 
 	host := newWorkspaceLocalOrchestrationTestHost(t, session, llmRuntime, teamStore, toolManager, workspaceRoot)
@@ -328,9 +331,12 @@ func TestAICLIChatActorExecutor_DocsListThenCreateTeamMembers_UsesObservedWorksp
 		RuntimeSession: runtimeSession,
 		SessionUserID:  userID,
 		SessionDir:     dir,
-		ProfileRoot:    workspaceRoot,
-		OutputFormat:   "interactive",
-		ChatExecutor:   newAICLIActorChatExecutor(),
+		// 2026-10-15：会话工作区由 WorkspaceAnchor 表达；ProfileRoot 保留为配置
+		// 来源语义（本 fixture 两者同值，但语义已分离）。
+		WorkspaceAnchor: workspaceRoot,
+		ProfileRoot:     workspaceRoot,
+		OutputFormat:    "interactive",
+		ChatExecutor:    newAICLIActorChatExecutor(),
 	}
 
 	host := newWorkspaceLocalOrchestrationTestHost(t, session, llmRuntime, teamStore, toolManager, workspaceRoot)

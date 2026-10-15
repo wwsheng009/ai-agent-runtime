@@ -405,7 +405,9 @@ func TestTryExecuteStructuredChatCommandMemory(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	root := t.TempDir()
 	session := &ChatSession{
-		ProfileRoot: root,
+		// 2026-10-15：项目根由 WorkspaceAnchor 表达（ProfileRoot 是配置来源，
+		// 不再参与工作区解析）。
+		WorkspaceAnchor: root,
 		RuntimeSession: &runtimechat.Session{
 			ID: "memory-cmd-test",
 		},
@@ -448,7 +450,9 @@ func TestTryExecuteStructuredChatCommandMemory(t *testing.T) {
 
 	emptyRoot := t.TempDir()
 	emptySession := &ChatSession{
-		ProfileRoot: emptyRoot,
+		// 2026-10-15：同上，项目根由 WorkspaceAnchor 表达；否则解析会回落
+		// git 根，读到开发机真实仓库的持久记忆而不是本测试的空目录。
+		WorkspaceAnchor: emptyRoot,
 		RuntimeSession: &runtimechat.Session{
 			ID: "memory-cmd-test-empty",
 		},
@@ -736,7 +740,9 @@ func TestDispatchChatCommandMemoryDoesNotWriteRawStdout(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	root := t.TempDir()
 	session := &ChatSession{
-		ProfileRoot: root,
+		// 2026-10-15：项目根由 WorkspaceAnchor 表达（ProfileRoot 是配置来源，
+		// 不再参与工作区解析）。
+		WorkspaceAnchor: root,
 		RuntimeSession: &runtimechat.Session{
 			ID: "memory-cmd-test",
 		},

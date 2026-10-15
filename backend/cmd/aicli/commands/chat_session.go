@@ -187,6 +187,11 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	session.TurnRequestCount = 0
 	session.turnPrimed = false
 	resetChatTurnTokenUsage(session)
+	// 方案 2（工作区权威锚点）：恢复会话时优先用持久化的 workspace_path 固化
+	// 会话工作区锚点（workspace 绑定属于会话身份，N9：不随 cwd 漂移）。必须在
+	// hydrateChatProfileIdentityFromResumedSession 改写 ProfileRoot 之前执行，
+	// 使锚点来自会话持久化状态而不是 profile 配置目录。
+	freezeChatWorkspaceAnchor(session, nil, runtimeSessionWorkspacePath(runtimeSession))
 	restoreChatRuntimeContext(session, session.RuntimeSession)
 	// A4 resume 半程（Batch 11a）：把持久化的 profile 身份读回会话，并按该引用
 	// 重新解析投影生效面（prompt/tools/skills/mcp 与身份一致；也避免下一次 sync
@@ -270,6 +275,9 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	session.turnPrimed = false
 	resetChatConversationTokenUsage(session)
 	session.RuntimeSession = runtimeSession
+	// 方案 2（工作区权威锚点）：新会话建立时解析一次当前工作区并固化。此后
+	// profile 热切换/配置覆盖不再改写它，/profile use 不会漂移工作目录。
+	freezeChatWorkspaceAnchor(session, loadRuntimeToolConfig(session.Config, session), "")
 	updateChatRuntimeEventBridgePrimarySession(session)
 	// --- 新会话持久化状态与落库策略 ---
 	//

@@ -1896,9 +1896,11 @@ func TestBuildChatSurfaceStatusLine_DedupesProjectWhenSameAsDirectory(t *testing
 		t.Fatalf("os.Mkdir .git: %v", err)
 	}
 	session := &ChatSession{
-		Model:       "gpt-5.4-code",
-		ProfileRoot: root,
-		ProfileName: "ai-agent-runtime",
+		Model: "gpt-5.4-code",
+		// 2026-10-15：会话工作目录由 WorkspaceAnchor 表达（ProfileRoot 是配置
+		// 来源，不再充当工作目录）。
+		WorkspaceAnchor: root,
+		ProfileName:     "ai-agent-runtime",
 	}
 	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 240)
 
@@ -1935,8 +1937,10 @@ func TestBuildChatSurfaceStatusLine_KeepsDistinctProjectWhenCwdNested(t *testing
 	}
 
 	session := &ChatSession{
-		Model:       "gpt-5.4-code",
-		ProfileRoot: nested,
+		Model: "gpt-5.4-code",
+		// 2026-10-15：会话工作目录由 WorkspaceAnchor 表达（ProfileRoot 是配置
+		// 来源，不再充当工作目录）。
+		WorkspaceAnchor: nested,
 		// ProfileName intentionally empty so project resolves from git root.
 	}
 	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 220)
@@ -2723,7 +2727,10 @@ func TestResolveChatStatusUsedTokens_ReturnsZeroWhenCountersMissing(t *testing.T
 	}
 }
 
-func TestResolveChatStatusCurrentDirectory_UsesProfileRootWhenPresent(t *testing.T) {
+// 2026-10-15 行为变更：status 的 Directory 不再锚定 ProfileRoot（profile 是
+// 配置来源，不是工作目录；/profile use 切换后 Directory 漂到 profile 目录是
+// 用户报告的缺陷）。权威顺序：WorkspaceAnchor > cwd。
+func TestResolveChatStatusCurrentDirectory_UsesWorkspaceAnchorOverProfileRoot(t *testing.T) {
 	previousWD, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("os.Getwd: %v", err)
@@ -2736,11 +2743,18 @@ func TestResolveChatStatusCurrentDirectory_UsesProfileRootWhenPresent(t *testing
 		_ = os.Chdir(previousWD)
 	}()
 
-	session := &ChatSession{ProfileRoot: filepath.Join("profiles", "demo")}
-	got := resolveChatStatusCurrentDirectory(session)
-	want := filepath.Clean(filepath.Join(baseDir, "profiles", "demo"))
-	if got != want {
-		t.Fatalf("expected current directory %q, got %q", want, got)
+	session := &ChatSession{
+		WorkspaceAnchor: filepath.Join(baseDir, "ws"),
+		ProfileRoot:     filepath.Join("profiles", "demo"),
+	}
+	if got := resolveChatStatusCurrentDirectory(session); got != filepath.Join(baseDir, "ws") {
+		t.Fatalf("expected current directory %q, got %q", filepath.Join(baseDir, "ws"), got)
+	}
+
+	// 无锚点：回退 cwd，ProfileRoot 不再参与。
+	plain := &ChatSession{ProfileRoot: filepath.Join("profiles", "demo")}
+	if got := resolveChatStatusCurrentDirectory(plain); got != baseDir {
+		t.Fatalf("expected cwd fallback %q, got %q", baseDir, got)
 	}
 }
 

@@ -3948,15 +3948,13 @@ func compactChatStatusDirectory(cwd string) string {
 }
 
 func resolveChatStatusCurrentDirectory(session *ChatSession) string {
+	// 会话工作目录走权威锚点（方案 2）：WorkspaceAnchor 由启动/恢复路径固化，
+	// profile 热切换不改写。此前这里回退到 ProfileRoot——profile 切换后 /status
+	// 的 Directory 会漂到 ~/.aicli/profiles/<name>，是"切换后工作目录被改"的
+	// 展示面之一。ProfileRoot 是配置来源目录，不再充当工作目录。
 	if session != nil {
-		if root := strings.TrimSpace(session.ProfileRoot); root != "" {
-			if filepath.IsAbs(root) {
-				return root
-			}
-			if cwd, err := os.Getwd(); err == nil {
-				return filepath.Clean(filepath.Join(cwd, root))
-			}
-			return root
+		if anchor := strings.TrimSpace(session.WorkspaceAnchor); anchor != "" {
+			return anchor
 		}
 	}
 	if cwd, err := os.Getwd(); err == nil {

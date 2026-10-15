@@ -49,7 +49,7 @@ func TestHandleCommand_StatusPrintsSessionSummaryAndDoesNotEnterChatFlow(t *test
 		ReasoningEffort:   "xhigh",
 		BaseURL:           "http://localhost:8080/v1",
 		PermissionMode:    runtimepolicy.ModeBypassPermissions,
-		ProfileRoot:       workspaceRoot,
+		WorkspaceAnchor:   workspaceRoot,
 		ProfileContext:    map[string]interface{}{"collaboration_mode": "default"},
 		RuntimeSession:    &runtimechat.Session{ID: "019de76b-2481-7130-b902-f6166e6d2b96", State: runtimechat.StateActive},
 		Logger:            logger,
@@ -223,13 +223,13 @@ func TestBuildChatStatusBoxLines_KeepsLongValuesWithinContentWidth(t *testing.T)
 	runtimeSession.Metadata.Title = "检查 aicli chat 中 /status 只渲染一半数据时的超长会话标题为什么会把边框撑破"
 
 	session := &ChatSession{
-		ProviderName:   "OpenAI-go-away",
-		Provider:       config.Provider{Enabled: true, Protocol: "openai", BaseURL: "http://localhost:8080"},
-		Model:          "gpt-5.4-mini",
-		BaseURL:        "http://localhost:8080/v1/with/a/very/long/provider/path/that/should-wrap",
-		PermissionMode: runtimepolicy.ModeBypassPermissions,
-		ProfileRoot:    longDir,
-		RuntimeSession: runtimeSession,
+		ProviderName:    "OpenAI-go-away",
+		Provider:        config.Provider{Enabled: true, Protocol: "openai", BaseURL: "http://localhost:8080"},
+		Model:           "gpt-5.4-mini",
+		BaseURL:         "http://localhost:8080/v1/with/a/very/long/provider/path/that/should-wrap",
+		PermissionMode:  runtimepolicy.ModeBypassPermissions,
+		WorkspaceAnchor: longDir,
+		RuntimeSession:  runtimeSession,
 	}
 
 	contentWidth := chatStatusMinimumContentWidth

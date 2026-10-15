@@ -291,6 +291,12 @@ type ChatSession struct {
 	ProfileName           string // 当前 profile 名称
 	ProfileAgent          string // 当前 profile agent
 	ProfileRoot           string // 当前 profile 根目录
+	// WorkspaceAnchor 是会话的**权威工作区锚点**：首次解析出工作区时固化，
+	// 之后 profile 热切换/配置覆盖不再改写它（profile 是配置来源，不是工作区）。
+	// resolveLocalWorkspacePath 优先返回本字段；启动/恢复路径负责写入
+	// （createNewRuntimeConversation / restoreChatStateFromRuntimeSession），
+	// 切换路径（applyProfileStateToChatSession）绝不触碰。
+	WorkspaceAnchor string
 	// AgentSourcePath is the winning agentdef/profile agent config path
 	// (or builtin:<name>) that produced the active role binding.
 	AgentSourcePath string

@@ -3713,22 +3713,33 @@ func resolveLocalChatGlobalAgentStorePath(session *ChatSession) string {
 	return filepath.Join(session.SessionDir, "runtime", "agent_control_agents.sqlite")
 }
 
+// resolveLocalWorkspacePath 返回会话的**工作区根**（不是 profile 根）。
+//
+// 解析顺序（2026-10-15 修复「/profile use 切换后工作目录漂移」）：
+//  1. session.WorkspaceAnchor：会话权威锚点，启动/恢复路径固化后切换绝不改写；
+//  2. runtime.yaml 的 workspace.root：绝对路径直接用；相对路径相对**当前
+//     进程 cwd** 解析（此前相对 profile 根解析，profile 切换后整个工具面/
+//     sync 的 workspace 会跟着漂到 ~/.aicli/profiles/<name>，等于静默换了
+//     工作目录）；
+//  3. cwd 的 git 根（无显式 root 时）；4. cwd。
+//
+// ProfileRoot 只代表配置来源（profile.yaml 所在目录），**不参与**工作区推导：
+// profile 是配置，工作区是用户在哪个项目里跑，两者不能混用同一个 fallback。
 func resolveLocalWorkspacePath(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession) string {
+	if session != nil {
+		if anchor := strings.TrimSpace(session.WorkspaceAnchor); anchor != "" {
+			return anchor
+		}
+	}
 	if runtimeConfig != nil && strings.TrimSpace(runtimeConfig.Workspace.Root) != "" {
 		root := strings.TrimSpace(runtimeConfig.Workspace.Root)
 		if filepath.IsAbs(root) {
 			return root
 		}
-		if session != nil && strings.TrimSpace(session.ProfileRoot) != "" {
-			return filepath.Clean(filepath.Join(strings.TrimSpace(session.ProfileRoot), root))
-		}
 		if cwd, err := os.Getwd(); err == nil {
 			return filepath.Clean(filepath.Join(cwd, root))
 		}
 		return root
-	}
-	if session != nil && strings.TrimSpace(session.ProfileRoot) != "" {
-		return strings.TrimSpace(session.ProfileRoot)
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		if gitRoot := findGitRoot(cwd); gitRoot != "" {
@@ -3737,6 +3748,29 @@ func resolveLocalWorkspacePath(runtimeConfig *runtimecfg.RuntimeConfig, session 
 		return cwd
 	}
 	return ""
+}
+
+// freezeChatWorkspaceAnchor 固化会话的权威工作区锚点。只在会话身份建立/恢复时调用
+// （createNewRuntimeConversation / restoreChatStateFromRuntimeSession）：
+//   - 恢复路径优先采用持久化的 sessionmeta.WorkspacePath（workspace 绑定是会话
+//     身份的一部分，N9：不随 cwd 漂移）；
+//   - 新会话解析一次当前工作区并固化。
+//
+// 之后 profile 热切换（applyProfileStateToChatSession）与配置覆盖都不得改写它——
+// 这是「/profile use 后工作目录漂移」修复（方案 2）的权威锚点。
+func freezeChatWorkspaceAnchor(session *ChatSession, runtimeConfig *runtimecfg.RuntimeConfig, persistedWorkspace string) string {
+	if session == nil {
+		return ""
+	}
+	if persisted := strings.TrimSpace(persistedWorkspace); persisted != "" {
+		session.WorkspaceAnchor = normalizeChatSessionWorkspace(persisted)
+		return session.WorkspaceAnchor
+	}
+	resolved := strings.TrimSpace(resolveLocalWorkspacePath(runtimeConfig, session))
+	if resolved != "" {
+		session.WorkspaceAnchor = resolved
+	}
+	return resolved
 }
 
 // findGitRoot walks upward from start looking for a .git directory or file

@@ -371,13 +371,15 @@ func TestProfileCommandSaveWorkspaceLayerWritesPrefs(t *testing.T) {
 		t.Fatalf("switch to coding: %v", err)
 	}
 
-	// 目标 = 会话解析出的 workspace（N9：不随 cwd 漂移）。基线语义
-	// （chat_actor_host.go:3134-3136 + chat_team_binding.go:323-324）：
-	// profile 生效且 runtime.yaml 未声明绝对 workspace.root 时，该值解析为
-	// profile 根目录，因此断言按"会话当前 workspace"推导而不是写死 cwd。
+	// 目标 = 会话解析出的 workspace（N9：不随 cwd 漂移）。恢复路径把持久化的
+	// workspace_path 固化为会话权威锚点（方案 2），profile 切换**不改写**它：
+	// workspace 是用户在哪个项目里跑，profile 是配置来源，两者不再混用。
 	effective := strings.TrimSpace(chatSessionRoutingWorkspacePath(session))
 	if effective == "" {
 		t.Fatal("切换后会话必须仍绑定 workspace")
+	}
+	if !sameChatSessionWorkspace(effective, workspace) {
+		t.Fatalf("profile 切换不得改写会话工作区：got %q, want %q", effective, workspace)
 	}
 	if cwd, err := os.Getwd(); err == nil && strings.EqualFold(filepath.Clean(effective), filepath.Clean(cwd)) {
 		t.Fatalf("workspace 层目标不得回落到 cwd（N9），got %q", effective)

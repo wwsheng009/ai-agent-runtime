@@ -13,7 +13,9 @@ import (
 func TestHandleMemoryCommand_AddListSearch(t *testing.T) {
 	root := t.TempDir()
 	session := &ChatSession{
-		ProfileRoot: root,
+		// 2026-10-15：项目根由 WorkspaceAnchor 表达（ProfileRoot 是配置来源，
+		// 不再参与工作区解析）。
+		WorkspaceAnchor: root,
 		RuntimeSession: &runtimechat.Session{
 			ID: "memory-cmd-test",
 		},

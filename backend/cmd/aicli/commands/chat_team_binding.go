@@ -326,7 +326,20 @@ func syncChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Se
 	} else {
 		sessionmeta.Delete(runtimeSession.Metadata.Context, sessionmeta.ProfileRef, sessionmeta.LegacyAPIProfileReference)
 	}
-	if workspacePath := strings.TrimSpace(resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, session), session)); workspacePath != "" {
+	// 工作区写入走会话权威锚点（方案 2）：启动/恢复时由 freezeChatWorkspaceAnchor
+	// 固化，profile 热切换不改写。workspace_path 属于会话身份（N9：不随 cwd 漂移），
+	// sync 的职责是**保持**而不是重算：
+	//   1. 锚点非空 → 以锚点为准；
+	//   2. 已持久化值非空 → 保持（2026-10-15 修复：此前 sync 每次重算并覆盖，
+	//      是 /profile use 切换后工作目录漂移的直接落盘点）；
+	//   3. 两者皆空（极早期 sync / 手工构造的会话）→ 按既有解析填充一次。
+	//   解析本身不得被 profile 根污染（resolveLocalWorkspacePath 已不再锚定
+	//   ProfileRoot）。
+	if workspacePath := strings.TrimSpace(session.WorkspaceAnchor); workspacePath != "" {
+		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
+	} else if existing := strings.TrimSpace(runtimeSessionContextString(runtimeSession, sessionmeta.WorkspacePath)); existing != "" {
+		// 保持已持久化的会话工作区。
+	} else if workspacePath := strings.TrimSpace(resolveLocalWorkspacePath(loadRuntimeToolConfig(session.Config, session), session)); workspacePath != "" {
 		sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
 	}
 	if session.Config != nil {
