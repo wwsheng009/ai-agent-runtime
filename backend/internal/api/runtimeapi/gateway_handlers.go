@@ -61,6 +61,8 @@ func (h *Handler) GatewaySessions() []wire.SessionSummary {
 			// Pre-set the host's own session state; the shared projection
 			// overrides it whenever it has tracked a richer state.
 			State: string(session.State),
+			// 在场（docs/bots/10 §4）：有 web SSE 订阅者即视为本地前台查看。
+			Viewing: h.sessionViewers.Active(session.ID),
 		}
 		if store != nil {
 			store.Get(session.ID).Apply(&summary)

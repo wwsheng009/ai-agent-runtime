@@ -137,6 +137,8 @@ type Handler struct {
 	approvalExplainCacheOnce sync.Once
 	approvalExplainCache     *approvalExplainCache
 	sessionManager           *chat.SessionManager
+	// sessionViewers 统计 web SSE 订阅者（在场 host 源；docs/bots/10 §4）。
+	sessionViewers sessionViewers
 	// plansStore overrides the process-wide plan artifact store (tests/hosts).
 	plansStore                     *planstore.Store
 	hotReload                      *skill.HotReload

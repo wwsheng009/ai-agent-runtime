@@ -98,6 +98,8 @@ type presenceEntry struct {
   ✅ 2026-10-14 落地：`ChatSession.InteractiveUI` 门禁（TUI 且非脚本化；headless/
   降级不报）+ `Controller.SessionDigests` 摘要携带 `Viewing`（高频续期）。
 - **S3（runtime-server web）**：SSE 订阅计数 → `Summary.Viewing` + 单测。
+  ✅ 2026-10-14 落地：`sessionViewers` 计数（`session_runtime_stream.go` 连接级
+  增/减 + 0↔1 跃迁刷新网关怀摘要）；`GatewaySessions` 摘要携带 `Viewing`。
 - **S4（收敛）**：notify 内核 `Presence` 接口 + Dispatcher gate（此刻才从 gateway 私有
   登记表抽象），三宿主迁移随 D4 余下切片。
 - **验收（S1–S3 后，真机）**：TUI 前台看 A 会话时其 attention 不推送手机；切走补推

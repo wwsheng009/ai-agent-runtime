@@ -114,6 +114,18 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 
 	h.prepareSSEHeaders(w)
 
+	// 在场（docs/bots/10 §4）：连接存活期间视为 web 端正在查看该会话；
+	// 0→1/1→0 跃迁时刷新网关摘要（pushGatewaySessions），使 Viewing 随
+	// 摘要与心跳续期。
+	if h.sessionViewers.Add(sessionID) {
+		h.pushGatewaySessions()
+	}
+	defer func() {
+		if h.sessionViewers.Remove(sessionID) {
+			h.pushGatewaySessions()
+		}
+	}()
+
 	// 16KB 缓冲：SSE 帧按批写出，实测大会话首连 dump 2.28MB/2288 帧时 syscall
 	// 从同量级降到 ~140 次。注意 bufio 只是「批写」优化，它和 socket 之间还隔着
 	// net/http 自己的 2048B 响应缓冲（server.go:bufferBeforeChunkingSize），
