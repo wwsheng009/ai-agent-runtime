@@ -37,3 +37,27 @@ func TestSessionDigestsCarryViewing(t *testing.T) {
 		t.Fatalf("digests = %+v", ds)
 	}
 }
+
+// —— R2：aicli 宿主信号即 Presence 权威（docs/bots/12-notify-consolidation-plan.md §4 R2）——
+
+// TestChatSessionViewingPresenceContract 锁定 R2 具名判定契约：nil 会话 /
+// headless / 脚本化 → false（内核门放行——宁可多推不误吞）；TUI 前台 → true
+// （门抑制）。与 notify.Presence 语义逐字对齐（false = 无从判定/不在场）。
+func TestChatSessionViewingPresenceContract(t *testing.T) {
+	if chatSessionViewing(nil) {
+		t.Fatal("nil 会话不得报在场")
+	}
+	headless := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "s1"}}
+	if chatSessionViewing(headless) {
+		t.Fatal("非 TUI（headless/降级）不得报在场")
+	}
+	scripted := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "s2"}, InteractiveUI: true,
+		ScriptedInput: newChatScriptedInput([]string{"x"})}
+	if chatSessionViewing(scripted) {
+		t.Fatal("脚本化 TUI 不得报在场")
+	}
+	tui := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "s3"}, InteractiveUI: true}
+	if !chatSessionViewing(tui) {
+		t.Fatal("TUI 前台应报在场")
+	}
+}

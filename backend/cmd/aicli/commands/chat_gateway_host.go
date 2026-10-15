@@ -102,11 +102,10 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 		LastMessageRole: lastRole,
 		LastMessage:     lastMessage,
 		UpdatedAt:       updatedAt,
-		// 在场（docs/bots/10 §4）：仅 TUI（未被降级/兼容模式）且非脚本化时报
-		// Viewing——“当前挂载会话”的保守近似（终端聚焦不可得）；headless/脚本
-		// 不报，避免误吞通知。切换会话后旧会话随 reconcile 移出列表，其 host
-		// 在场由 TTL 自然失效。
-		Viewing: session.InteractiveUI && session.ScriptedInput == nil,
+		// 在场（docs/bots/10 §4 / 12 §4 R2）：chatSessionViewing 具名判定
+		// （notify.Presence 契约测试锚点）；切换会话后旧会话随 reconcile 移出
+		// 列表，其 host 在场由 TTL 自然失效。
+		Viewing: chatSessionViewing(session),
 	}
 	// Overlay the shared state projection (state/attention/busy/status text);
 	// the store defaults to idle/running so both hosts report the same baseline.
@@ -119,6 +118,17 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 		summaries = append(summaries, chatGatewaySubagentSessions(session, id)...)
 	}
 	return summaries
+}
+
+// chatSessionViewing 是 aicli 宿主的本地前台查看者判定（S2 上报语义的具名
+// 锚点，docs/bots/12 §4 R2）：仅 TUI（未被降级/兼容模式）且非脚本化——
+// "当前挂载会话"的保守近似（终端聚焦不可得）；headless/脚本不报，避免误吞
+// 通知。与 notify.Presence 的契约一致：false = 无从判定/不在场（放行）。
+func chatSessionViewing(session *ChatSession) bool {
+	if session == nil {
+		return false
+	}
+	return session.InteractiveUI && session.ScriptedInput == nil
 }
 
 // chatGatewaySubagentSessions appends the live subagent rows for one parent
