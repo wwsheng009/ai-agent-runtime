@@ -1231,6 +1231,12 @@ func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 	resolveLocalChatSessionPendingWakes(session)
 	// 同一时刻停掉本会话的巡检计时器：会话没了，迟到的 check 无处投递。
 	disarmLocalChatSessionMonitors(session)
+	// bridge 的 worker goroutine 与 EventBus 全量订阅随会话一起终止：它是本
+	// 会话专属的资源，finalize 意味着会话生命周期结束（进程退出或 ACP
+	// session close/delete）。不关会把 goroutine 和每事件扇出留到进程结束。
+	if session.RuntimeEventBridge != nil {
+		session.RuntimeEventBridge.Shutdown()
+	}
 	// Skip durable flush for brand-new shells that never left memory. Writing
 	// an empty system-prompt-only session only pollutes history and forces a
 	// late session-history SQLite open during shutdown.

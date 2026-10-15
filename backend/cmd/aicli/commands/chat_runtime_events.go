@@ -52,6 +52,24 @@ type chatRuntimeEventBridge struct {
 	primarySessionMu sync.RWMutex
 	primarySessionID string
 	startOnce        sync.Once
+	// shutdownOnce / stopCh / eventBusUnsubscribe 构成 bridge 的显式生命周期
+	// 终点。此前 worker goroutine（for range eventQueue）与 EventBus 全量订阅
+	// 只进不出：生产代码从不 close eventQueue、Subscribe
+	// 的句柄被丢弃，会话被替换/丢弃（/new、/resume、ACP session/close、
+	// headless 一次性会话）后，旧 bridge 的 goroutine 仍活着，且共享总线上
+	// 的每一条事件（含最热的流式 delta）都会永远扇出给它 —— goroutine 泄漏
+	// 叠加每事件的无谓扇出。stopCh 用 close 广播、select 退出 run，避免
+	// send-on-closed panic；退订句柄由 start 记录、Shutdown 消费。
+	shutdownOnce sync.Once
+	stopCh       chan struct{}
+	// workerDone 在 run() 返回时关闭：测试（以及未来需要有界 join 的调用方）
+	// 用它确定性等待 worker goroutine 退出，而不是数 NumGoroutine。
+	workerDone chan struct{}
+	// eventBusMu 保护 eventBusUnsubscribe 的注册/消费窗口，防止 start 与
+	// Shutdown 并发时退订句柄丢失（start 完成 Subscribe 之前 Shutdown 读到
+	// nil 会漏退订）。
+	eventBusMu          sync.Mutex
+	eventBusUnsubscribe runtimeevents.Unsubscribe
 	// replayOnce 只保护会话加载的事件日志重放。它与 startOnce（EventBus 订阅 /
 	// 事件队列 worker）分开：重放不依赖 runtime host，而能力面在首帧之后才异步
 	// 挂载。绑在 host 守卫后面会让重放推迟到首个 turn（见 start 的说明）。
@@ -823,6 +841,8 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		session:             session,
 		transcriptFile:      chatSessionTranscriptFile(session),
 		primarySessionID:    currentRuntimeSessionID(session),
+		stopCh:              make(chan struct{}),
+		workerDone:          make(chan struct{}),
 		eventQueue:          make(chan chatRuntimeQueuedEvent, chatRuntimeEventQueueNormalCapacity+chatRuntimeEventQueueCriticalReserve),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
 		uiActionPostTimeout: uiActionPostBudget,
@@ -1114,7 +1134,23 @@ func (b *chatRuntimeEventBridge) start() {
 		// 两者共用 replayOnce，因此这里通常已是 no-op。
 		b.replaySessionLoadLogOnce()
 		b.startProcessor()
-		b.session.LocalRuntimeHost.EventBus.Subscribe("", b.Handle)
+		// 记录退订句柄：Shutdown 需要它把 bridge 从共享 EventBus 上摘下来，
+		// 否则废弃 bridge 的 Handle 会在每次 Publish 时被无谓调用（泄漏放大器）。
+		unsubscribe := b.session.LocalRuntimeHost.EventBus.SubscribeCancelable("", b.Handle)
+		b.eventBusMu.Lock()
+		b.eventBusUnsubscribe = unsubscribe
+		b.eventBusMu.Unlock()
+		// Shutdown 可能已并发执行（首帧能力面挂载晚于会话丢弃）。若已在停机
+		// 流程中，立即退订并让 worker 退出，保持"Shutdown 后无订阅"的最终一致。
+		select {
+		case <-b.stopCh:
+			b.eventBusMu.Lock()
+			b.eventBusUnsubscribe = nil
+			b.eventBusMu.Unlock()
+			unsubscribe()
+			b.stopProcessor()
+		default:
+		}
 	})
 }
 
@@ -1160,6 +1196,42 @@ func (b *chatRuntimeEventBridge) startProcessor() {
 	b.processorOnce.Do(func() {
 		go b.run()
 	})
+}
+
+// stopProcessor 尝试唤醒已启动的事件 worker。它只关闭 stopCh：worker 通过
+// select 感知后自行返回（never close eventQueue，避免 send-on-closed panic）。
+// startProcessor 尚未运行时为 no-op。
+func (b *chatRuntimeEventBridge) stopProcessor() {
+	if b == nil {
+		return
+	}
+	select {
+	case <-b.stopCh:
+	default:
+		close(b.stopCh)
+	}
+}
+
+// waitWorkerExit 有界等待事件 worker goroutine 退出（workerDone）。worker 从
+// 未启动或 bridge 由测试以 struct 字面量构造（无 workerDone）时立即返回。
+func (b *chatRuntimeEventBridge) waitWorkerExit(timeout time.Duration) bool {
+	if b == nil || b.workerDone == nil {
+		return true
+	}
+	if timeout <= 0 {
+		select {
+		case <-b.workerDone:
+			return true
+		default:
+			return false
+		}
+	}
+	select {
+	case <-b.workerDone:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func (b *chatRuntimeEventBridge) BeginRun() {
@@ -2979,29 +3051,96 @@ func mergeStreamText(existing, incoming string) string {
 }
 
 func (b *chatRuntimeEventBridge) run() {
-	for queued := range b.eventQueue {
-		streamWrite := isMergeableStreamEvent(queued.event.Type)
-		if streamWrite {
-			b.streamMu.Lock()
-			b.streamWriteInFlight = true
-			b.streamMu.Unlock()
+	// workerDone 只在 run() 退出时关闭；stopCh 尚未关闭（异常路径）也要保证
+	// 等待者被唤醒。
+	defer func() {
+		if b.workerDone != nil {
+			close(b.workerDone)
 		}
-		b.handleQueuedEvent(queued)
-		if streamWrite {
-			b.streamMu.Lock()
-			b.streamWriteInFlight = false
-			b.streamMu.Unlock()
+	}()
+	for {
+		// Shutdown 用 close(stopCh) 广播退出；事件为空且已停机时 worker 直接
+		// 返回，goroutine 不再驻留。排队中的事件在退出前不再处理：bridge 已被
+		// 判定为废弃，渲染面（UI actor / Scene）归属新会话，迟到的渲染只会
+		// 撕裂新会话的投影。
+		select {
+		case <-b.stopCh:
+			return
+		default:
 		}
-		b.progressMu.Lock()
-		b.processedEvents++
-		b.progressMu.Unlock()
-		queued.event = runtimeevents.Event{}
-		b.releaseEventQueueBytes(queued.size)
-		// The queue just freed a slot: drive the ordered backlog so a stall
-		// ends as soon as the consumer catches up, without waiting for the
-		// next Handle call.
-		b.pumpBacklog()
+		select {
+		case queued, ok := <-b.eventQueue:
+			if !ok {
+				// eventQueue 被显式 close（生产 Shutdown 路径不 close，只有测试
+				// harness 手动驱动 run() 时才用）：等价于 for-range 的退出语义。
+				return
+			}
+			streamWrite := isMergeableStreamEvent(queued.event.Type)
+			if streamWrite {
+				b.streamMu.Lock()
+				b.streamWriteInFlight = true
+				b.streamMu.Unlock()
+			}
+			b.handleQueuedEvent(queued)
+			if streamWrite {
+				b.streamMu.Lock()
+				b.streamWriteInFlight = false
+				b.streamMu.Unlock()
+			}
+			b.progressMu.Lock()
+			b.processedEvents++
+			b.progressMu.Unlock()
+			queued.event = runtimeevents.Event{}
+			b.releaseEventQueueBytes(queued.size)
+			// The queue just freed a slot: drive the ordered backlog so a stall
+			// ends as soon as the consumer catches up, without waiting for the
+			// next Handle call.
+			b.pumpBacklog()
+		case <-b.stopCh:
+			b.streamMu.Lock()
+			empty := len(b.backlog) == 0
+			b.streamMu.Unlock()
+			if empty {
+				return
+			}
+			// 停机前给 backlog 一个最后的非阻塞投递窗口：head 能进队就继续由
+			// 本循环消化（下轮 select 再检查 stopCh），进不了（队列满）则整段
+			// 丢弃退出。
+			if !b.tryDeliverBacklogHead() {
+				return
+			}
+		}
 	}
+}
+
+// Shutdown 终止 bridge 的事件流水线并解除 EventBus 订阅。幂等：重复调用与
+// start/Shutdown 竞态（包括 host 尚未挂载、start 尚未完成的场景）都是安全的。
+//
+// 背景（2026-10 审计）：此前 bridge 没有任何关闭路径 —— worker goroutine
+// for-range eventQueue 永不退出（生产代码从不 close 队列），EventBus 全量
+// 订阅的句柄被丢弃、永不退订。会话替换/丢弃（/new、/resume、/load、ACP
+// session/close、headless 一次性会话）后，旧 bridge 的 goroutine 驻留进程，
+// 共享总线上的每条事件（含最热的流式 delta）仍会扇出给全部废弃 bridge 并在
+// 其 backlog 中堆积 —— goroutine 泄漏叠加每事件 O(废弃 bridge 数) 的无谓扇出。
+func (b *chatRuntimeEventBridge) Shutdown() {
+	if b == nil {
+		return
+	}
+	b.shutdownOnce.Do(func() {
+		b.stopProcessor()
+		// 摘除 EventBus 订阅。start 与 Shutdown 并发时（能力面晚挂载），句柄
+		// 可能为 nil；start 内部的 stopCh 检查兜底完成同一次退订。
+		b.eventBusMu.Lock()
+		unsubscribe := b.eventBusUnsubscribe
+		b.eventBusUnsubscribe = nil
+		b.eventBusMu.Unlock()
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+		// 释放 §6.12 parked-window ESC watcher：它绑定本 bridge 的会话，
+		// bridge 废弃后不再有权消费按键。
+		b.releaseParkedEscapeWatcher()
+	})
 }
 
 // pumpBacklog opportunistically delivers the ordered backlog head and makes
