@@ -1,6 +1,7 @@
 package restapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"regexp"
@@ -472,6 +473,9 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 	if request.Policy != nil {
 		updated.Policy = policyFrom(request.Policy)
 	}
+	// credentialsReplaced 决定保存后的应用路径：凭据替换走"立即生效"
+	//（必要时自动接管），普通微调走 ReloadConnector。
+	credentialsReplaced := credentialsChanged(schema, current, merged)
 	// 重复扫码收敛（三宿主共用语义，docs/bots/03 §6）：本次 PATCH 带入了
 	// owner_user_id（微信 ilink_user_id，平台唯一）且与另一个既有连接器
 	// （同 provider）的 owner_user_id 相同 = 同一用户重新扫码（微信会新建
@@ -495,9 +499,7 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "清理重复连接器失败："+err.Error())
 				return
 			}
-			if err := h.deps.Service.ReloadConnector(r.Context(), merged.ID); err != nil {
-				h.deps.logf("connectors: reload %s failed: %v", merged.ID, err)
-			}
+			h.applySavedConnector(r.Context(), merged.ID, credentialsReplaced)
 			view := h.view(merged)
 			writeJSON(w, http.StatusOK, adoptResponse{
 				ConnectorView:     view,
@@ -512,10 +514,30 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存失败："+err.Error())
 		return
 	}
-	if err := h.deps.Service.ReloadConnector(r.Context(), updated.ID); err != nil {
-		h.deps.logf("connectors: reload %s failed: %v", updated.ID, err)
-	}
+	h.applySavedConnector(r.Context(), updated.ID, credentialsReplaced)
 	writeJSON(w, http.StatusOK, h.view(updated))
+}
+
+// applySavedConnector 在保存落盘后应用变更：
+//   - 凭据被替换（重新扫码 / 密钥轮换）→ Service.ApplyCredentialReplacement：
+//     本宿主非持有者时自动接管，保证「扫完码立即生效」，不再出现旧 poller
+//     抱着失效 token 空转、页面只留一条「未运行（由 X 持有）」的静默失联
+//     （2026-10-15 微信真机复盘）；
+//   - 普通配置微调 → ReloadConnector：非持有者保持只读，持有者会在心跳周期内
+//     自应用（Service.applyConfigChange）。
+func (h *handlers) applySavedConnector(ctx context.Context, id string, credentialsReplaced bool) {
+	if h.deps.Service == nil {
+		return
+	}
+	if credentialsReplaced {
+		if err := h.deps.Service.ApplyCredentialReplacement(ctx, id); err != nil {
+			h.deps.logf("connectors: apply credential replacement %s failed: %v", id, err)
+		}
+		return
+	}
+	if err := h.deps.Service.ReloadConnector(ctx, id); err != nil {
+		h.deps.logf("connectors: reload %s failed: %v", id, err)
+	}
 }
 
 // adoptResponse 是 PATCH 命中「重复扫码 → 替换既有机器人」时的响应：
@@ -814,6 +836,38 @@ func splitValues(schema api.ProviderSchema, merged map[string]string) (map[strin
 	return settings, secrets
 }
 
+// credentialsChanged 报告本次提交是否替换了凭据（secret/required 字段变为非空
+// 新值）——保存后的应用路径据此选择「立即生效」（必要时自动接管）还是普通重载。
+// 显式清空（`__clear__`/去掉键）视为有意失效，不算替换。
+func credentialsChanged(schema api.ProviderSchema, before, after map[string]string) bool {
+	changed := make(map[string]struct{})
+	for key, value := range after {
+		if before[key] != value {
+			changed[key] = struct{}{}
+		}
+	}
+	for key, value := range before {
+		if _, present := after[key]; !present && value != "" {
+			changed[key] = struct{}{}
+		}
+	}
+	if len(changed) == 0 {
+		return false
+	}
+	for _, field := range schema.Fields {
+		if _, ok := changed[field.Key]; !ok {
+			continue
+		}
+		if !field.IsSecret() && !field.Required {
+			continue
+		}
+		if strings.TrimSpace(after[field.Key]) == "" {
+			continue
+		}
+		return true
+	}
+	return false
+}
 func schemaDefault(schema api.ProviderSchema, key string) string {
 	for _, field := range schema.Fields {
 		if field.Key == key {

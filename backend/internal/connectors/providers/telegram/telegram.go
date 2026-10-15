@@ -378,6 +378,7 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 				return nil
 			}
 			p.logf("telegram: getUpdates failed: %v (retry in %s)", err, backoff)
+			connectors.PollingLogf(ctx, connectors.LogLevelWarn, "获取更新失败：%v（%s 后重试）", err, backoff)
 			select {
 			case <-ctx.Done():
 				return nil
@@ -401,11 +402,13 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 				// 队列满/瞬时失败：不回滚游标（消息已认领，平台不会重投），
 				// 记日志继续，避免阻塞整个轮询。
 				p.logf("telegram: handle message %s failed: %v", msg.MessageID, err)
+				connectors.PollingLogf(ctx, connectors.LogLevelWarn, "处理消息 %s 失败：%v", msg.MessageID, err)
 			}
 		}
 		if len(updates) > 0 {
 			if err := state.Set(cursorKey, strconv.FormatInt(offset, 10)); err != nil {
 				p.logf("telegram: persist cursor failed: %v", err)
+				connectors.PollingLogf(ctx, connectors.LogLevelWarn, "持久化轮询游标失败：%v", err)
 			}
 		}
 	}

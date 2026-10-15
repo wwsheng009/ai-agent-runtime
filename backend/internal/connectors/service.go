@@ -2,6 +2,9 @@ package connectors
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -104,6 +107,11 @@ type Service struct {
 type connectorRun struct {
 	gen    uint64
 	cancel context.CancelFunc
+	// fingerprint 是本实例启动时的配置指纹（configFingerprint）：心跳循环用它
+	// 感知「配置/凭据已被其它宿主或本机更新」，持有者自应用重载——否则「A 宿主
+	// 保存配置/扫码替换凭据、B 宿主持有归属」会静默失联（2026-10-15 微信真机复盘：
+	// 扫码后 20 分钟无人轮询新会话）。空指纹（计算失败）不做自应用。
+	fingerprint string
 }
 
 // New 构造 Service（须提供 Store 与 Backend）。
@@ -382,7 +390,7 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 		}
 	}
 	s.gen++
-	run := &connectorRun{gen: s.gen, cancel: cancel}
+	run := &connectorRun{gen: s.gen, cancel: cancel, fingerprint: configFingerprint(cfg)}
 	s.running[cfg.ID] = run
 	s.mu.Unlock()
 	releaseOnExit = false
@@ -393,10 +401,13 @@ func (s *Service) startConnector(_ context.Context, cfg Config) {
 		ConnectorID: cfg.ID,
 		Summary:     fmt.Sprintf("已启动轮询（provider=%s）", cfg.Provider),
 	}, logCounters{})
-	go s.heartbeatOwner(runCtx, cfg.ID, cancel)
+	go s.heartbeatOwner(runCtx, run, cfg.ID)
 	go func() {
 		s.logf("connector %s: polling started (provider=%s)", cfg.ID, cfg.Provider)
-		err := poller.RunPolling(runCtx, cfg, s.HandleInbound, s.deps.Store.PollingState(cfg.ID))
+		// provider 运行期错误经日志汇进连接器日志环（否则页面只见「已启动轮询」，
+		// 断线/会话过期完全不可见——见 poll_log.go）。
+		pollCtx := WithPollLogSink(runCtx, s.pollLogSink(cfg.ID))
+		err := poller.RunPolling(pollCtx, cfg, s.HandleInbound, s.deps.Store.PollingState(cfg.ID))
 		if err != nil && runCtx.Err() == nil {
 			s.logf("connector %s: polling stopped: %v", cfg.ID, err)
 			s.recordLog(LogEntry{
@@ -504,9 +515,13 @@ func (s *Service) releaseOwner(connectorID string) {
 
 // heartbeatOwner 在轮询生命周期内周期性续约运行归属；一旦发现归属已被他人
 // 接管/释放（例如管理面「抢占」或陈旧接管），立即取消本实例轮询（尽力围栏）。
-func (s *Service) heartbeatOwner(ctx context.Context, connectorID string, cancel context.CancelFunc) {
+//
+// 同时承担「持有者自应用」检查：每次心跳比对当前配置指纹与实例启动指纹，
+// 发现配置/凭据被其它宿主更新（管理面保存、扫码替换凭据）即自动重载，
+// 消灭「保存成功但轮询者不生效」的静默失联（2026-10-15 微信真机复盘）。
+func (s *Service) heartbeatOwner(ctx context.Context, run *connectorRun, connectorID string) {
 	hostID := s.hostID()
-	if hostID == "" || s.deps.Store == nil {
+	if hostID == "" || s.deps.Store == nil || run == nil {
 		return
 	}
 	ticker := time.NewTicker(s.ownerHeartbeatInterval())
@@ -535,12 +550,176 @@ func (s *Service) heartbeatOwner(ctx context.Context, connectorID string, cancel
 					ConnectorID: connectorID,
 					Summary:     "运行归属已被接管，本宿主轮询停止",
 				}, logCounters{})
-				if cancel != nil {
-					cancel()
+				if run.cancel != nil {
+					run.cancel()
 				}
 				return
 			}
+			// 持有者自应用：配置/凭据更新（任何宿主写入）→ 自动重载。
+			if cfg, ok := s.deps.Store.GetConfig(connectorID); ok {
+				if fingerprint := configFingerprint(cfg); fingerprint != "" && fingerprint != run.fingerprint {
+					s.applyConfigChange(run, connectorID, cfg)
+					return
+				}
+			}
 		}
+	}
+}
+
+// stopLocalRun 取消并注销本宿主当前轮询实例（不释放运行归属、不写日志）：
+// 用于「重载但保持归属」的内部路径（配置自应用 / 凭据替换），避免停止与
+// 重新启动的间隙被第三方宿主抢走归属。无登记时为 no-op。
+func (s *Service) stopLocalRun(connectorID string) {
+	s.mu.Lock()
+	run, ok := s.running[connectorID]
+	if ok {
+		delete(s.running, connectorID)
+	}
+	s.mu.Unlock()
+	if ok && run != nil && run.cancel != nil {
+		run.cancel()
+	}
+}
+
+// applyConfigChange 由持有者心跳循环调用：检测到运行相关配置（含凭据）变化且
+// 本实例仍是当前代际时，停下来并以最新配置快照重新启动；配置已停用则停止轮询
+// 并释放归属。与「运行归属被接管」一样由心跳节奏驱动（默认 30s 内生效）。
+func (s *Service) applyConfigChange(run *connectorRun, connectorID string, cfg Config) {
+	s.mu.Lock()
+	current, ok := s.running[connectorID]
+	ours := ok && current != nil && current.gen == run.gen
+	s.mu.Unlock()
+	if !ours {
+		// 实例已被 Reload/Stop 换代：新实例自会携带最新配置，无需重复动作。
+		return
+	}
+	s.stopLocalRun(connectorID)
+	if !cfg.Enabled {
+		s.releaseOwner(connectorID)
+		s.logf("connector %s: 检测到配置停用，轮询已停止", connectorID)
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: connectorID,
+			Summary:     "检测到配置停用，已停止轮询",
+		}, logCounters{})
+		return
+	}
+	s.logf("connector %s: 检测到配置/凭据更新，持有者自动重新加载", connectorID)
+	s.recordLog(LogEntry{
+		Level:       LogLevelInfo,
+		Direction:   LogDirectionSystem,
+		ConnectorID: connectorID,
+		Summary:     "检测到配置/凭据更新，已自动重新加载",
+	}, logCounters{})
+	s.startConnector(s.baseContext(), cfg)
+}
+
+// ApplyCredentialReplacement 在凭据被替换（重新扫码 / 密钥轮换）后立即让新凭据
+// 生效（2026-10-15 微信真机复盘：扫码发生在非持有宿主时，旧流程只记一条
+// 「未运行（由 X 持有）」warn，持有者继续拿旧 token 轮询，bot 静默失联）：
+//   - 停掉本宿主旧实例（不释放归属，避免停/起间隙被抢走）；
+//   - 认领归属：被其它存活宿主持有时**强制接管**——凭据已替换，旧会话按定义
+//     已失效、旧 poller 事实不可用（与「抢占」同语义，仍受 policy.runtime_owner
+//     约束；接管后旧宿主会在其心跳周期内自我围栏停止）；
+//   - 以最新配置重新启动轮询。
+//
+// 回落：宿主无归属身份（旧宿主/测试）或策略显式指向其它宿主时走普通
+// ReloadConnector；持有者会在下一次心跳自应用（applyConfigChange）。
+func (s *Service) ApplyCredentialReplacement(ctx context.Context, id string) error {
+	if s == nil || s.deps.Store == nil {
+		return ErrServiceNotConfigured
+	}
+	id = strings.TrimSpace(id)
+	cfg, ok := s.deps.Store.GetConfig(id)
+	if !ok {
+		return fmt.Errorf("connectors: unknown connector %q", id)
+	}
+	if !cfg.Enabled {
+		s.StopConnector(id)
+		return nil
+	}
+	hostID := s.hostID()
+	if hostID == "" || !HostMatchesPolicy(hostID, cfg.Policy.RuntimeOwner) {
+		return s.ReloadConnector(ctx, id)
+	}
+	s.stopLocalRun(id)
+	claimed, owner, err := s.deps.Store.ClaimConnectorOwner(id, hostID, time.Now().UTC(), s.ownerStaleAfter())
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		if err := s.deps.Store.ForceClaimConnectorOwner(id, hostID, time.Now().UTC()); err != nil {
+			return err
+		}
+		owner = strings.TrimSpace(owner)
+		if owner == "" {
+			owner = "其它宿主"
+		}
+		s.logf("connector %s: 凭据已替换，自动接管运行归属（原持有者 %s）", id, owner)
+		s.recordLog(LogEntry{
+			Level:       LogLevelInfo,
+			Direction:   LogDirectionSystem,
+			ConnectorID: id,
+			Summary:     fmt.Sprintf("凭据已替换，自动接管运行归属（原持有者 %s）", owner),
+		}, logCounters{})
+	}
+	s.startConnector(ctx, cfg)
+	return nil
+}
+
+// configFingerprint 计算运行相关配置的指纹（Enabled/Mode/Settings/Secrets/Policy）：
+// 心跳循环据此感知外部更新。刻意不含 UpdatedAt（空更新也会刷新它，会造成无谓
+// 重启）与 Name 等展示字段。计算失败返回空串（调用方按「无指纹」跳过自应用）。
+func configFingerprint(cfg Config) string {
+	payload, err := json.Marshal(struct {
+		Enabled  bool              `json:"enabled"`
+		Mode     string            `json:"mode"`
+		Settings map[string]string `json:"settings"`
+		Secrets  map[string]string `json:"secrets"`
+		Policy   Policy            `json:"policy"`
+	}{cfg.Enabled, cfg.Mode, cfg.Settings, cfg.Secrets, cfg.Policy})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+// pollLogDedupeWindow 是 provider 轮询日志进环的去重窗口：长轮询故障（如微信
+// errcode=-14 会话过期）每 30s 重报完全相同的文案，去重避免刷满日志环、挤掉
+// 业务日志；窗口外的再次出现仍会记录，持续故障依然可见。error 级事件即便被
+// 去重，LastError 已在首次记录时更新。
+const pollLogDedupeWindow = 5 * time.Minute
+
+// pollLogSink 构造 provider 轮询日志汇：写入该连接器日志环。每次启动轮询使用
+// 新闭包（去重状态随实例生命周期清零：重启后首条错误一定可见）。并发安全。
+func (s *Service) pollLogSink(connectorID string) PollLogSink {
+	var mu sync.Mutex
+	lastSummary := ""
+	var lastAt time.Time
+	return func(level, summary string) {
+		summary = strings.TrimSpace(summary)
+		if summary == "" {
+			return
+		}
+		if level == "" {
+			level = LogLevelInfo
+		}
+		now := time.Now()
+		mu.Lock()
+		if summary == lastSummary && now.Sub(lastAt) < pollLogDedupeWindow {
+			mu.Unlock()
+			return
+		}
+		lastSummary, lastAt = summary, now
+		mu.Unlock()
+		s.recordLog(LogEntry{
+			Level:       level,
+			Direction:   LogDirectionSystem,
+			ConnectorID: connectorID,
+			Summary:     summary,
+		}, logCounters{})
 	}
 }
 

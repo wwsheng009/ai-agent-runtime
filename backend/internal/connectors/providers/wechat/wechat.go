@@ -731,8 +731,13 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 				// 会话过期（errcode -14）：无法自动恢复，按指数退避重试
 				// （上限 maxRetryDelay），等待用户重新扫码登录后自动恢复。
 				p.logf("wechat: 会话已过期（errcode=%d），请重新扫码登录；%s 后重试", sessionExpiredErrCode, delay)
+				// 同一事件进连接器日志环（页面可见级）：会话过期是"必须人工扫码"的
+				// 终态故障，只写进程日志会让页面显示全绿而 bot 实际失联。
+				connectors.PollingLogf(ctx, connectors.LogLevelError,
+					"会话已过期（errcode=%d）：请重新扫码登录（%s 后自动重试）", sessionExpiredErrCode, delay)
 			} else {
 				p.logf("wechat: getupdates failed: %v (retry in %s)", err, delay)
+				connectors.PollingLogf(ctx, connectors.LogLevelWarn, "获取更新失败：%v（%s 后重试）", err, delay)
 			}
 			if err := sleepCtx(ctx, delay); err != nil {
 				return nil
@@ -751,6 +756,7 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 			if state != nil {
 				if err := state.Set(syncBufKey, next); err != nil {
 					p.logf("wechat: persist sync_buf failed: %v", err)
+					connectors.PollingLogf(ctx, connectors.LogLevelWarn, "持久化轮询游标失败：%v", err)
 				}
 			}
 			syncBuf = next
@@ -773,6 +779,7 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 				// 单条消息失败（队列满/后端错误）不阻塞轮询：消息已认领，
 				// 平台不会重投，记日志后继续。
 				p.logf("wechat: handle message %s failed: %v", inbound.MessageID, err)
+				connectors.PollingLogf(ctx, connectors.LogLevelWarn, "处理消息 %s 失败：%v", inbound.MessageID, err)
 			}
 		}
 	}

@@ -165,6 +165,7 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 			return reconnect
 		}
 		p.logf("qqbot: gateway disconnected: %v (retry in %s)", err, backoff)
+		connectors.PollingLogf(ctx, connectors.LogLevelWarn, "gateway 断开：%v（%s 后重连）", err, backoff)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -186,6 +187,7 @@ func (p *Provider) runGatewaySession(ctx context.Context, cfg connectors.Config,
 			return nil
 		}
 		p.logf("qqbot: access token unavailable: %v", err)
+		connectors.PollingLogf(ctx, connectors.LogLevelWarn, "获取 access token 失败：%v", err)
 		return &reconnectError{}
 	}
 	gatewayURL, err := p.gatewayURL(ctx, p.baseFor(cfg), token, p.appSecret(cfg))
@@ -194,6 +196,7 @@ func (p *Provider) runGatewaySession(ctx context.Context, cfg connectors.Config,
 			return nil
 		}
 		p.logf("qqbot: fetch gateway url failed: %v", err)
+		connectors.PollingLogf(ctx, connectors.LogLevelWarn, "获取 gateway 地址失败：%v", err)
 		return &reconnectError{}
 	}
 	conn, _, err := p.dialer.DialContext(ctx, gatewayURL, nil)
@@ -203,9 +206,11 @@ func (p *Provider) runGatewaySession(ctx context.Context, cfg connectors.Config,
 		}
 		if code, ok := websocketCloseError(err); ok && code > 0 {
 			p.logf("qqbot: gateway rejected with close code %d", code)
+			connectors.PollingLogf(ctx, connectors.LogLevelWarn, "gateway 拒绝连接（close code %d）", code)
 			return closeCodeToReconnect(code)
 		}
 		p.logf("qqbot: dial gateway failed: %s", redact(err.Error(), token))
+		connectors.PollingLogf(ctx, connectors.LogLevelWarn, "连接 gateway 失败：%s", redact(err.Error(), token))
 		return &reconnectError{}
 	}
 	defer conn.Close()
@@ -213,6 +218,7 @@ func (p *Provider) runGatewaySession(ctx context.Context, cfg connectors.Config,
 	hello, err := p.readHello(conn)
 	if err != nil {
 		p.logf("qqbot: read gateway hello failed: %s", redact(err.Error(), token))
+		connectors.PollingLogf(ctx, connectors.LogLevelWarn, "读取 gateway hello 失败：%s", redact(err.Error(), token))
 		return &reconnectError{}
 	}
 
@@ -339,6 +345,7 @@ func (p *Provider) handleDispatch(ctx context.Context, cfg connectors.Config, pa
 		p.rememberInboundMsgID(msg.Chat, msg.MessageID)
 		if err := handle(ctx, msg); err != nil {
 			p.logf("qqbot: handle message %s failed: %v", msg.MessageID, err)
+			connectors.PollingLogf(ctx, connectors.LogLevelWarn, "处理消息 %s 失败：%v", msg.MessageID, err)
 		}
 	}
 	return current, nil

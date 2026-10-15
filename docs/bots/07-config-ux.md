@@ -239,6 +239,17 @@ sequenceDiagram
   `owned_by_current_host`；`POST /api/connectors/{id}/takeover` 抢占（策略
   `runtime_owner` 指定他人 → 409，停用 → 409，未配置 HostID → 503）。三端前端
   按 P1 后续切片接入按钮与状态文案。
+- **变更自应用（2026-10-15 真机复盘）**：非持有宿主保存配置不再只留一条冲突
+  warn、由持有者长久空转旧配置。**凭据被替换**（重新扫码 / 密钥轮换）时保存宿主
+  立即接管运行归属并用新凭据重载（`Service.ApplyCredentialReplacement`，与"抢占"
+  同语义；`policy.runtime_owner` 显式指定他人时不抢，回落实时重载 + 持有者自应用）；
+  **普通配置微调**由持有者心跳比对配置指纹后自应用（默认 ≤30s；停用则停止轮询并
+  释放归属）。修复场景：扫码在 A 宿主完成、B 宿主持有归属 → 旧流程 B 拿失效 token
+  一直重试 errcode=-14，两端页面都没有有效信号。
+- **运行期错误可观测（同日复盘）**：provider 断线/会话过期等运行期日志经 ctx 日志汇
+  进连接器日志环（`WithPollLogSink` / `PollingLogf`，页面可见；相同文案 5 分钟内
+  去重防刷屏；error 级同步刷新 `runtime.stats.last_error`）。此前这类错误只写进程
+  日志，连接器页在"已启动轮询"后完全看不到异常。
 
 > **演进（2026-10-14 定案）**：本节"运行归属"只裁决 **poller**（收发体唯一）；
 > **Runner**（会话执行体）按绑定亲和路由、接管不迁移绑定、无绑定按

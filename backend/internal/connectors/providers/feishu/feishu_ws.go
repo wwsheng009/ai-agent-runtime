@@ -94,6 +94,7 @@ func (p *Provider) RunPolling(ctx context.Context, cfg connectors.Config, handle
 			return nil
 		}
 		p.logf("feishu: websocket disconnected: %v (retry in %s)", err, backoff)
+		connectors.PollingLogf(ctx, connectors.LogLevelWarn, "websocket 断开：%v（%s 后重连）", err, backoff)
 		select {
 		case <-ctx.Done():
 			return nil

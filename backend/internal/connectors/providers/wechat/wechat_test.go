@@ -569,7 +569,15 @@ func TestRunPollingRetriesAndReportsSessionExpired(t *testing.T) {
 	cfg := testConfig("c1", fake.URL(), nil)
 	state := newFakeState(nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// 注入轮询日志汇：会话过期等运行期错误必须进连接器日志环（页面可见），
+	// 不能只写进程日志（2026-10-15 微信真机复盘）。
+	var sinkMu sync.Mutex
+	var sinkLogs []string
+	ctx, cancel := context.WithCancel(connectors.WithPollLogSink(context.Background(), func(level, summary string) {
+		sinkMu.Lock()
+		defer sinkMu.Unlock()
+		sinkLogs = append(sinkLogs, level+" "+summary)
+	}))
 	defer cancel()
 	received := make(chan connectors.InboundMessage, 1)
 	done := make(chan error, 1)
@@ -593,6 +601,12 @@ func TestRunPollingRetriesAndReportsSessionExpired(t *testing.T) {
 	logMu.Unlock()
 	if !strings.Contains(logText, "会话已过期") {
 		t.Fatalf("expected session-expired log, got: %s", logText)
+	}
+	sinkMu.Lock()
+	sinkText := strings.Join(sinkLogs, "\n")
+	sinkMu.Unlock()
+	if !strings.Contains(sinkText, "会话已过期") || !strings.Contains(sinkText, connectors.LogLevelError) {
+		t.Fatalf("expected session-expired entry in polling log sink, got: %s", sinkText)
 	}
 	if fake.callCount("/ilink/bot/getupdates") < 3 {
 		t.Fatalf("getupdates calls = %d, want >= 3", fake.callCount("/ilink/bot/getupdates"))

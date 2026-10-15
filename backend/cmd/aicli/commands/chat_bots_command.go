@@ -1034,8 +1034,9 @@ func botsApplyCredentialPatch(host *LocalConnectorHost, cfg connectors.Config, p
 				return "", err
 			}
 			if service := host.Service(); service != nil {
-				_ = service.ReloadConnector(context.Background(), existing.ID)
 				service.StopConnector(cfg.ID)
+				// 凭据已替换 → 立即生效（必要时自动接管运行归属），与 restapi 同语义。
+				_ = service.ApplyCredentialReplacement(context.Background(), existing.ID)
 			}
 			if err := host.Store().DeleteConfig(cfg.ID); err != nil {
 				return "", fmt.Errorf("清理壳连接器 %s 失败: %w", cfg.ID, err)
@@ -1051,7 +1052,8 @@ func botsApplyCredentialPatch(host *LocalConnectorHost, cfg connectors.Config, p
 		return "", err
 	}
 	if service := host.Service(); service != nil {
-		_ = service.ReloadConnector(context.Background(), cfg.ID)
+		// 凭据已替换 → 立即生效（必要时自动接管运行归属），与 restapi 同语义。
+		_ = service.ApplyCredentialReplacement(context.Background(), cfg.ID)
 	}
 	return adoptedID, nil
 }
