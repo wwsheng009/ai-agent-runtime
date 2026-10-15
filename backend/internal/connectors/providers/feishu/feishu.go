@@ -71,6 +71,7 @@ const (
 	maxTrackedChats = 4096
 
 	eventMessageReceive = "im.message.receive_v1"
+	eventCardAction     = "card.action.trigger"
 
 	// ProviderData 键（逃生舱：回复目标与事件元数据）。
 	providerDataMessageID = "feishu_message_id"
@@ -701,6 +702,17 @@ func (p *Provider) HandleWebhook(ctx context.Context, cfg connectors.Config, r *
 		}
 		if replyTo, _ := message.ProviderData[providerDataMessageID].(string); strings.TrimSpace(replyTo) != "" {
 			p.rememberReplyTarget(connectorKey(cfg), message.Chat, replyTo)
+		}
+		return connectors.WebhookResult{Message: &message}, nil
+	case eventCardAction:
+		// 卡片按钮回调（切片 3f）：按钮 value.command 里的命令文本转普通入站
+		// 消息，复用既有命令闭环（/approve、/deny、/answer）；非命令按钮静默。
+		message, ok, err := cardActionMessage(cfg, envelope.Header, envelope.Event, p.now)
+		if err != nil {
+			return connectors.WebhookResult{}, err
+		}
+		if !ok {
+			return connectors.WebhookResult{}, nil
 		}
 		return connectors.WebhookResult{Message: &message}, nil
 	default:

@@ -122,7 +122,15 @@
   仍尽力摘除；摘除失败只记日志返回 nil）；无回复目标/加表情失败 → (nil, nil)
   静默降级（体验项不影响回合）。测试：创建/摘除序列与幂等/无目标零请求/
   加表情失败降级/摘除失败吞掉，`-race` 全绿。
-  **待续**：WS 长连接与重连、审批事件路由。
+  **卡片按钮审批路由（2026-10-15，飞书切片 3f）**：`card.action.trigger`
+  事件接入 webhook 主入口（复用 header.token/encrypt_key 校验）——按钮
+  `action.value.command` 里的命令文本（`/approve`、`/deny`、`/answer`）转
+  普通入站消息（UserID=operator.open_id 走白名单、Chat=event.context.open_chat_id、
+  MessageID=header.event_id 交宿主去重），复用既有命令闭环，零新增平台语义；
+  非命令按钮/缺 operator/缺会话锚点/无 event_id 静默 202。agent 发卡时把命令
+  放进按钮 value.command 即获得原生按钮审批。测试：命令路由/四类静默/
+  token 错配拒绝/加密信封解密路由，`-race` 全绿。
+  **待续**：WS 长连接与重连。
 - 状态（2026-10-12，gateway 宿主接线切片，与前端切片并行）：**gateway 宿主 ◐ 完成**
   ——`cmd/gateway/connector_bootstrap.go` 按 `--data-dir` 装配 `storejson`
   （`connectors.json` 配置+密钥 0600、`connectors-state.json` 状态 0600，

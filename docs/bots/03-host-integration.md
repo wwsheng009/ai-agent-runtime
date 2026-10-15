@@ -376,7 +376,11 @@ runtime-server 与 aicli 两端注册：`modes=["gateway"]`，字段
 - typing 表情（2026-10-15）：`TypingProvider`——回合开始给该会话最近入站消息
   加 `Typing` 表情（POST `/reactions`），回合收尾 Stop 摘除（DELETE，幂等 +
   WithoutCancel；失败只记日志）；无回复目标/失败 → nil 静默降级（体验项）。
-**待续（P1 后续切片）**：WS 长连接与重连、审批事件路由。
+- 卡片按钮审批路由（2026-10-15）：`card.action.trigger` 接入 webhook 主入口
+  （复用 token/encrypt_key 校验）——按钮 `action.value.command` 命令文本转
+  普通入站消息（UserID=operator、Chat=context.open_chat_id、幂等键=event_id），
+  复用 `/approve`/`/deny`/`/answer` 命令闭环；非命令按钮/信息不全静默 202。
+**待续（P1 后续切片）**：WS 长连接与重连。
 **扫码登录 action 与返回约定（三端统一）**：
 
 - `POST /api/connectors/{id}/actions/start_login`（Schema.Actions kind=qr）：
