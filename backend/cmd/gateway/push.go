@@ -32,7 +32,10 @@ type pushNotifier struct {
 	ntfy    *ntfy.Sender
 	baseURL string
 	// presence suppresses pushes for sessions a console client is watching.
-	presence *presenceRegistry
+	// 接口而非具体登记表（docs/bots/12 §4 G1）：测试可注入可翻转实现，
+	// 确定性复现"observe 之后在场恰好续期"的双门竞态；*presenceRegistry
+	// 天然满足该签名，生产装配不变。
+	presence notify.Presence
 	// imMainChannel 判定 normal 类通知是否以 IM 为主通道（06 §1 D6：已绑定 IM
 	// 则 IM，否则 Web Push；nil = 一律走 push 侧）。由 connectors 装配供给
 	// （newIMMainChannelPredicate），与该宿主的投影 hook 投递口径逐字同源。
@@ -49,9 +52,13 @@ type pushNotifier struct {
 
 	batch map[string][]pendingNotification
 	timer *time.Timer
+	// dispatcher 是惰性缓存的内核分发器（S4b G1：构造上提，避免每次 dispatch
+	// 重建；G2 账本接线后单实例语义才完整）。由 ensureDispatcher 按 mu 加锁
+	// 构建/失效，锁外仅读引用。
+	dispatcher *notify.Dispatcher
 }
 
-func newPushNotifier(manager *push.Manager, baseURL string, presence *presenceRegistry) *pushNotifier {
+func newPushNotifier(manager *push.Manager, baseURL string, presence notify.Presence) *pushNotifier {
 	return &pushNotifier{
 		seen:     make(map[string]string),
 		manager:  manager,
@@ -205,13 +212,15 @@ func ntfyMessage(n push.Notification) ntfy.Message {
 	return channels.NtfyMessage(n)
 }
 
-// dispatch 经 notify.Dispatcher 异步投递（docs/bots/06 §2.4 切流）：按 D6
-// 路由——high=已配置通道全扇出、normal=主通道（webpush，缺省回落首个已配置
-// 通道）、low=跳过。消息形态/合并/静默/在场语义沿用本文件既有链路不变；
-// 跨路径去重账本留待切片三接线（此处 nil ledger，回放语义仍由 seen 快照保证）。
-func (p *pushNotifier) dispatch(items []pendingNotification) {
-	if len(items) == 0 {
-		return
+// ensureDispatcher 返回缓存的内核分发器（S4b G1 构造上提）。并发安全：dispatch
+// 可能被多个触发点并发调用，构建/读取均在 p.mu 下（observe/flush 均在 Unlock
+// 后才调用 dispatch，无重入）。生产路径通道面启动后固定；测试改字段后置
+// p.dispatcher = nil 可重建。
+func (p *pushNotifier) ensureDispatcher() *notify.Dispatcher {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.dispatcher != nil {
+		return p.dispatcher
 	}
 	chans := make([]notify.Channel, 0, 2)
 	if p.manager != nil {
@@ -221,16 +230,32 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 		chans = append(chans, &channels.Ntfy{Sender: p.ntfy})
 	}
 	if len(chans) == 0 {
-		return
+		return nil
 	}
-	dispatcher := notify.NewDispatcher(nil, chans...)
-	dispatcher.SetPrimary("webpush")
-	dispatcher.SetPreferences(p.preferences)
-	// 在场门下沉到内核（docs/bots/10 §5 S4）：网关登记表即 Presence 权威。
+	d := notify.NewDispatcher(nil, chans...)
+	d.SetPrimary("webpush")
+	d.SetPreferences(p.preferences)
+	// 在场门下沉到内核（docs/bots/10 §5 S4a）：登记表即 Presence 权威。
 	// observe 的 seen 前置检查仍是"跳过且不记 seen → 补推一次"的语义门；
 	// 这里兜住未自行前置检查的生产者（内核门同样不认领去重键）。
 	if p.presence != nil {
-		dispatcher.SetPresence(p.presence)
+		d.SetPresence(p.presence)
+	}
+	p.dispatcher = d
+	return d
+}
+
+// dispatch 经 notify.Dispatcher 异步投递（docs/bots/06 §2.4 切流）：按 D6
+// 路由——high=已配置通道全扇出、normal=主通道（webpush，缺省回落首个已配置
+// 通道）、low=跳过。消息形态/合并/静默/在场语义沿用本文件既有链路不变；
+// 跨路径去重账本留待切片三接线（此处 nil ledger，回放语义仍由 seen 快照保证）。
+func (p *pushNotifier) dispatch(items []pendingNotification) {
+	if len(items) == 0 {
+		return
+	}
+	dispatcher := p.ensureDispatcher()
+	if dispatcher == nil {
+		return
 	}
 	if p.manager != nil && p.manager.Store().Count() == 0 && !(p.ntfy != nil && p.ntfy.Enabled()) {
 		// Without subscribers the dispatch below silently delivers nothing, which
@@ -249,8 +274,20 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 			ev := notify.EventFor(item.attention, item.note.Tag, item.note)
 			ev.Node = item.nodeID
 			ev.Session = item.sessionID
-			if _, err := dispatcher.Dispatch(ctx, ev); err != nil {
+			receipt, err := dispatcher.Dispatch(ctx, ev)
+			if err != nil {
 				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)
+			}
+			// 双门收敛（docs/bots/12 §3 D1）：内核在场门抑制（Suppressed）时
+			// 撤销 observe 已记的 seen——否则"observe 记 seen → 内核门抑制"
+			// 的毫秒级竞态会吞掉通知且永不补推。回滚后下一次 observe 把该
+			// 事件视作新事件重投，与"跳过且不记 seen"语义逐字等价。
+			if receipt.Suppressed {
+				p.mu.Lock()
+				if p.seen[item.note.Tag] == item.attention {
+					delete(p.seen, item.note.Tag)
+				}
+				p.mu.Unlock()
 			}
 		}
 	}()

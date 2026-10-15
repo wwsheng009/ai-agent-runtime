@@ -74,7 +74,7 @@ Dispatcher，替换自定路由。绑定反查仍是宿主职责（内核不知�
 
 | 切片 | 内容 | 主要落点 | 测试 | 回退 |
 |---|---|---|---|---|
-| **G1** 双门收敛 | Suppressed 回滚 seen（§3 D1）；Dispatcher 构造上提为 pushNotifier 字段 | `cmd/gateway/push.go` | 竞态用例（observe→续期→dispatch 不丢通知）；既有 push/presence 全包 | 单点 revert |
+| **G1** 双门收敛 | ✅ 2026-10-15 落地：`Receipt.Suppressed` 条件回滚 seen（值匹配才删，不覆盖并发更新）；`presence` 字段放宽为 `notify.Presence` 接口（`flipPresence` 测试注入确定性复现竞态窗口）；Dispatcher 构造上提（`ensureDispatcher` 惰性缓存，p.mu 下并发安全）。验证：竞态用例 ×3 全绿（回滚+条件删除）、gateway 全包、`-race` 通过 | `cmd/gateway/push.go` | 竞态用例（observe→续期→dispatch 不丢通知）；既有 push/presence 全包 | 单点 revert |
 | **G2** 账本接线 | 按 §3 D2 键语义接 `NewMemoryLedger`（或持久账本随宿主）；NOTIFY DedupKey 透传 | `cmd/gateway/push.go`、wire/tunnel | 跨路径同键只投一次；键冲突用例（approval→error 不得吞） | 传回 nil |
 | **G3** 静默/合并下沉 | 内核策略链新增 quietHours/coalesce 环节；pushNotifier 剪枝；notify_policy.go 退役 | `internal/notify/dispatcher.go`、`cmd/gateway/{push,notify_policy}.go` | 既有 gateway 全包（行为不变护栏）+ 内核新环节单测 | 保留别名文件恢复 |
 | **R1** runtime-server 接入 | IM 投影改走内核 Dispatcher（§3 D4）；sessionViewers 作为 Presence 注入 | `cmd/runtime-server/connector_bootstrap.go`、`internal/api/runtimeapi/session_viewers.go` | 既有 connector_command_attention_test 语义不变 | 绑定回原 hook |
