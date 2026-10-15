@@ -960,3 +960,27 @@ runtime-server 上全部承接（请求面 + 执行 + 用户回答/裁决通道�
 5. 观测口径：`/runtime/tools` 与请求 metadata 需能区分 `policy_denied` 与 `group_disabled`（披露方案 §4.1 解释词表）。
 
 **定稿**：组配置字段 = `tools.disabled_groups`（纯减法；protected = `read`/`edit`/`shell`；组注册表落 `internal/toolgroups`）——见阶段 3 前置草案 [docs/tools/profile-tool-groups-design.md](../tools/profile-tool-groups-design.md) v0.2（2026-10-15）；实现随阶段 3a。
+---
+
+## 23. `/tools` 兜底口径补丁：profile 策略过滤（2026-10-15）
+
+**背景**：`/profile use` 会失效稳定工具面（§16.2 / T5：下一 turn 生效）。在
+"已切换、尚未开始 turn"的窗口内，`/tools` 兜底分支（runtime-server live 目录 /
+本地 `ToolSurface.ListTools()`，§11.1 明确"基线不含 profile 裁剪"）展示未裁剪
+基线——收窄型 profile 切换后工具数反而变多，或与 Switch Report 的
+`changed.tools` 对不上，构成 T3（可解释）缺口。
+
+**修复**（`cmd/aicli/commands/chat_tools_screen.go`）：兜底分支以
+`session.ToolPolicy`（profile 裁剪经 `applyProfileStateToChatSession` →
+`buildLocalChatToolPolicy` 落到会话字段）按 `AllowsDefinition` 过滤基线候选，
+与 agent loop 的 `filterPolicyBlockedToolDefinitions` 同语义；输出显式标注
+"下一 turn 生效面：基线候选按当前 profile/会话策略过滤"，并列出被裁剪工具名
+（T3 可解释）。冻结面分支不变（真实请求前缀即事实）；`disable_tools` 沿用请求
+面例外（目录保持完整，不按策略裁剪）。
+
+**边界**：策略把候选收窄到 0 时渲染"0 个工具 + 裁剪明细"，不再退回"没有可枚举
+的工具面"；无策略会话保持原基线口径不变。
+
+**测试**：`chat_tools_screen_test.go` 新增 5 用例（策略过滤 / disable_tools
+例外 / 收窄到空 / 无策略保持原口径 / 名单截断）；`go test ./cmd/aicli/commands
+-run 'Tools|Profile'` 与 vet 通过。

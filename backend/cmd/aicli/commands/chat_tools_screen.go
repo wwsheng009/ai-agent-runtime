@@ -5,10 +5,14 @@ package commands
 // 与 web `/runtime/tools` 消费同一 toolsurface.Build 实现点，T1 的观测闭环）。
 //
 // 数据源优先级（与 web 端点同口径）：
-//  1. 会话 actor 的 StableToolSurface（冻结面 = 真实请求前缀）；
-//  2. 兜底：本地 ToolSurface 目录经 toolsurface.Build（无 actor / 未冻结时）。
+//  1. 会话 actor 的 StableToolSurface（冻结面 = 真实请求前缀，turn 装配时已按
+//     执行策略裁剪，天然含 profile 收窄）；
+//  2. 兜底：runtime-server live 目录 / 本地 ToolSurface 目录经 toolsurface.Build
+//     （无 actor / 未冻结时）。兜底分支按 session.ToolPolicy 过滤基线候选，显示
+//     "下一 turn 将请求的面"——否则 /profile use 清掉冻结面后，展示反而不含新
+//     profile 的裁剪（看起来像假开关或切完工具变多）。
 //
-// 输出：按 surface_source 分组 + 计数行，标注数据与 web 端点一致。
+// 输出：按 surface_source 分组 + 计数行；兜底分支附数据源说明与策略裁剪明细。
 
 import (
 	"context"
@@ -47,10 +51,7 @@ func buildToolsScreenBody(session *ChatSession) (string, bool) {
 			if len(tools) == 0 {
 				return "", false
 			}
-			if stamped, ok := toolsurface.Build(tools, toolsurface.Ledger{}); ok {
-				return renderToolsScreenBody(stamped), true
-			}
-			return renderToolsScreenBody(tools), true
+			return renderFallbackToolsScreenBody(session, tools, toolsurface.Ledger{}), true
 		}
 	}
 	if host := session.LocalRuntimeHost; host != nil && host.ToolSurface != nil {
@@ -67,11 +68,62 @@ func buildToolsScreenBody(session *ChatSession) (string, bool) {
 				Metadata:    cloneToolInfoMetadata(info.Metadata),
 			})
 		}
-		if tools, ok := toolsurface.Build(catalog, toolsurface.Ledger{}); ok {
-			return renderToolsScreenBody(tools), true
-		}
+		return renderFallbackToolsScreenBody(session, catalog, toolsurface.Ledger{}), true
 	}
 	return "", false
+}
+
+// renderFallbackToolsScreenBody 渲染"冻结面缺失"时的兜底目录：先按当前会话策略
+// 过滤（若有），再经 toolsurface.Build 标注来源账本。过滤后为空也要渲染
+// （0 个工具 + 裁剪明细）：一个把工具全部收窄掉的 profile 必须可见，不能退回
+// "没有可枚举的工具面"。
+func renderFallbackToolsScreenBody(session *ChatSession, catalog []runtimetypes.ToolDefinition, ledger toolsurface.Ledger) string {
+	filtered, blocked := filterToolsByChatPolicy(session, catalog)
+	tools, ok := toolsurface.Build(filtered, ledger)
+	if !ok {
+		// 空目录（含策略收窄到 0）时不虚构账本，直接渲染过滤后的目录。
+		tools = filtered
+	}
+	if !chatToolsPolicyFilterActive(session) {
+		return renderToolsScreenBody(tools)
+	}
+	return renderToolsScreenBodyPolicyFiltered(tools, blocked)
+}
+
+// filterToolsByChatPolicy 按会话执行策略过滤候选工具面，语义与 agent loop 的
+// filterPolicyBlockedToolDefinitions 一致（policy.AllowsDefinition：暴露前的
+// allowlist / denylist / read_only / delegation 判定）。profile 的工具裁剪最终
+// 投影到 session.ToolPolicy（applyProfileStateToChatSession → buildLocalChatToolPolicy），
+// 所以这一过滤让 /tools 在冻结面重建前就显示下一 turn 的真实请求面。
+//
+// disable_tools 例外与请求面一致：agent loop 对 disable_tools 保留完整目录
+// （只关执行与 tool_choice），展示口径同样不裁剪。
+func filterToolsByChatPolicy(session *ChatSession, tools []runtimetypes.ToolDefinition) ([]runtimetypes.ToolDefinition, []string) {
+	if !chatToolsPolicyFilterActive(session) {
+		return tools, nil
+	}
+	policy := session.ToolPolicy
+	filtered := make([]runtimetypes.ToolDefinition, 0, len(tools))
+	var blocked []string
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		if !policy.AllowsDefinition(name) {
+			blocked = append(blocked, name)
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	sort.Strings(blocked)
+	return filtered, blocked
+}
+
+// chatToolsPolicyFilterActive：会话有策略且未 disable_tools 时，兜底展示才应用
+// 策略过滤（无策略 = 基线即下一 turn 请求面，保持原渲染口径）。
+func chatToolsPolicyFilterActive(session *ChatSession) bool {
+	return session != nil && !session.DisableTools && session.ToolPolicy != nil
 }
 
 // frozenSurfaceForScreen 读会话 actor 的稳定工具面（durable、与请求前缀一致）。
@@ -109,6 +161,27 @@ func cloneToolInfoMetadata(input map[string]interface{}) map[string]interface{} 
 
 // renderToolsScreenBody 纯渲染：账本分组 → 组内字母序，便于与 web 端点对读。
 func renderToolsScreenBody(tools []runtimetypes.ToolDefinition) string {
+	return fmt.Sprintf("当前会话工具面：%d 个工具（与 /api/runtime/tools 同源）\n", len(tools)) +
+		renderToolsScreenGroups(tools)
+}
+
+// renderToolsScreenBodyPolicyFiltered 渲染"冻结面缺失、按会话策略过滤后"的下一
+// turn 请求面：显式标注数据源口径（避免与冻结面/基线口径混淆），并列出被策略
+// 裁剪掉的名字（T3 可解释：这个工具为什么不在下一轮请求里）。
+func renderToolsScreenBodyPolicyFiltered(tools []runtimetypes.ToolDefinition, blocked []string) string {
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf("当前会话工具面：%d 个工具（下一 turn 生效面：基线候选按当前 profile/会话策略过滤）\n", len(tools)))
+	body.WriteString("  说明: 稳定工具面尚未冻结（刚切换 profile 或尚未开始 turn）；基线候选与 /api/runtime/tools 同源\n")
+	if len(blocked) > 0 {
+		body.WriteString(fmt.Sprintf("  策略裁剪: %d 个工具不进入下一 turn 请求面: %s\n",
+			len(blocked), formatBlockedToolNames(blocked)))
+	}
+	body.WriteString(renderToolsScreenGroups(tools))
+	return body.String()
+}
+
+// renderToolsScreenGroups 渲染账本分组正文（不含计数首行）。
+func renderToolsScreenGroups(tools []runtimetypes.ToolDefinition) string {
 	groups := make(map[string][]string)
 	byName := make(map[string]string, len(tools))
 	for _, tool := range tools {
@@ -133,7 +206,6 @@ func renderToolsScreenBody(tools []runtimetypes.ToolDefinition) string {
 	sort.Strings(sourceOrder)
 
 	var body strings.Builder
-	body.WriteString(fmt.Sprintf("当前会话工具面：%d 个工具（与 /api/runtime/tools 同源）\n", len(tools)))
 	for _, source := range sourceOrder {
 		names := groups[source]
 		sort.Strings(names)
@@ -147,6 +219,17 @@ func renderToolsScreenBody(tools []runtimetypes.ToolDefinition) string {
 		}
 	}
 	return body.String()
+}
+
+// formatBlockedToolNames 折叠策略裁剪名单：超过上限截断并给出总数（明细不刷屏）。
+func formatBlockedToolNames(names []string) string {
+	const maxNames = 16
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	if len(sorted) > maxNames {
+		return strings.Join(sorted[:maxNames], ", ") + fmt.Sprintf(" …（共 %d 个）", len(sorted))
+	}
+	return strings.Join(sorted, ", ")
 }
 
 func firstLine(text string) string {
