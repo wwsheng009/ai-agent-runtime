@@ -50,6 +50,9 @@ goal:
   # defaultTokenBudget 是新建 goal 的默认 token 预算（0=无预算）；耗尽后目标
   # 置 budget_limited，可用 /goal budget <n> 提高预算后 resume。
   # defaultTokenBudget: 0
+  # serverAutoContinuation 启用 runtime-server 进程内的 goal 自动续跑驱动器
+  # （gap 3）：与 runtime.yaml 保持一致（Win7 覆盖档不是独立行为分叉）。
+  serverAutoContinuation: true
 
 context:
   # Used only when neither provider/model capability nor context.maxPromptTokens

@@ -48,6 +48,11 @@ goal:
   # defaultTokenBudget 是新建 goal 的默认 token 预算（0=无预算）；耗尽后目标
   # 置 budget_limited，可用 /goal budget <n> 提高预算后 resume。
   # defaultTokenBudget: 0
+  # serverAutoContinuation 启用 runtime-server 进程内的 goal 自动续跑驱动器
+  # （gap 3）：turn 终态后检查 active goal 并自动提交续跑轮，使纯 web 会话与
+  # CLI 同语义；CLI 远程会话在 CLI 在场（5 分钟冷却窗）内由服务端让位。
+  # 缺省 false = 行为零变化（续跑仅由 CLI 驱动）。
+  serverAutoContinuation: true
 
 context:
   # Used only when neither provider/model capability nor context.maxPromptTokens
