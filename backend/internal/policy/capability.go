@@ -18,6 +18,41 @@ const (
 	CapAgentManagement    Capability = "agent_management"
 )
 
+// AllUserDisablableCapabilities lists the capability domains a profile may
+// disable via tools.disabled_capabilities. read_only and exec_shell are
+// excluded on purpose: disabling them removes nearly every tool (read_only is
+// the floor every tool resolves to; exec_shell is the shell family itself) and
+// the existing read_only flag / allowlist express those intents precisely.
+func AllUserDisablableCapabilities() []Capability {
+	return []Capability{
+		CapWriteFS,
+		CapNetwork,
+		CapExternalSideEffect,
+		CapAskUser,
+		CapBackgroundTask,
+		CapAgentManagement,
+	}
+}
+
+// CapabilitiesComplementOf returns the disablable universe minus disabled.
+// Unknown names in disabled are ignored by the caller (validation reports
+// them); the result preserves the universe order for determinism.
+func CapabilitiesComplementOf(disabled []Capability) []Capability {
+	blocked := make(map[Capability]bool, len(disabled))
+	for _, capability := range disabled {
+		blocked[capability] = true
+	}
+	complement := make([]Capability, 0, 8)
+	for _, capability := range AllUserDisablableCapabilities() {
+		if !blocked[capability] {
+			complement = append(complement, capability)
+		}
+	}
+	// The floor domains always stay allowed so the scope never amputates the
+	// tool surface wholesale.
+	return append(complement, CapReadOnly, CapExecShell)
+}
+
 // CapabilityResolver determines required capabilities for a tool call.
 type CapabilityResolver interface {
 	Resolve(req EvalRequest) []Capability

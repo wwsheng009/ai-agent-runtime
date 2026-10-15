@@ -78,10 +78,14 @@ type WorkspaceSpec struct {
 
 // ToolPolicySpec is the raw YAML model for tool policy declarations.
 type ToolPolicySpec struct {
-	Allowlist []string               `yaml:"allowlist,omitempty" json:"allowlist,omitempty"`
-	Denylist  []string               `yaml:"denylist,omitempty" json:"denylist,omitempty"`
-	ReadOnly  *bool                  `yaml:"read_only,omitempty" json:"read_only,omitempty"`
-	Sandbox   map[string]interface{} `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	Allowlist []string `yaml:"allowlist,omitempty" json:"allowlist,omitempty"`
+	Denylist  []string `yaml:"denylist,omitempty" json:"denylist,omitempty"`
+	ReadOnly  *bool    `yaml:"read_only,omitempty" json:"read_only,omitempty"`
+	// DisabledCapabilities names whole capability domains to withdraw
+	// (pure subtraction; union across layers; deny-style precedence).
+	// Valid names: policy.AllUserDisablableCapabilities().
+	DisabledCapabilities []string               `yaml:"disabled_capabilities,omitempty" json:"disabled_capabilities,omitempty"`
+	Sandbox              map[string]interface{} `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 }
 
 // Agent returns the inline profile agent spec, if present.

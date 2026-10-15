@@ -35,8 +35,9 @@ func turnSystemMessagesFromContext(ctx context.Context) []types.Message {
 	return append([]types.Message(nil), messages...)
 }
 
-// WithTurnPinnedTools 为当前回合叠加额外工具定义（如 /skill 注入的 skill 函数与
-// 声明的程序）。pin 只在本次 run 的内存工具面上生效，不写回会话级稳定工具面。
+// WithTurnPinnedTools 为当前回合叠加额外工具定义（回合级注入通道；skill
+// tools-pin 已废除，/skill 不再填充）。pin 只在本次 run 的内存工具面上生效，
+// 不写回会话级稳定工具面。
 func WithTurnPinnedTools(ctx context.Context, tools []types.ToolDefinition) context.Context {
 	if len(tools) == 0 {
 		return ctx

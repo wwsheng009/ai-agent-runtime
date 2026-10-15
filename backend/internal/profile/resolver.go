@@ -199,7 +199,8 @@ func appendToolPolicySources(existing []string, values ...string) []string {
 }
 
 func layerHasPolicy(source string, policy ToolPolicySpec) string {
-	if len(policy.Allowlist) > 0 || len(policy.Denylist) > 0 || policy.ReadOnly != nil || len(policy.Sandbox) > 0 {
+	if len(policy.Allowlist) > 0 || len(policy.Denylist) > 0 || policy.ReadOnly != nil ||
+		len(policy.DisabledCapabilities) > 0 || len(policy.Sandbox) > 0 {
 		return source
 	}
 	return ""

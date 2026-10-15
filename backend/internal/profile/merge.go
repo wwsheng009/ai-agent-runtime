@@ -1,6 +1,9 @@
 package profile
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // WildcardAll matches every name in allow/deny (or use/exclude) declarations.
 const WildcardAll = "*"
@@ -155,6 +158,7 @@ func MergeToolPolicies(policies ...ToolPolicySpec) ResolvedToolPolicy {
 	for _, policy := range policies {
 		result.Allowlist = appendUniqueStrings(result.Allowlist, policy.Allowlist...)
 		result.Denylist = appendUniqueStrings(result.Denylist, policy.Denylist...)
+		result.DisabledCapabilities = mergeDisabledCapabilities(result.DisabledCapabilities, policy.DisabledCapabilities)
 		if policy.ReadOnly != nil {
 			value := *policy.ReadOnly
 			result.ReadOnly = &value
@@ -164,6 +168,21 @@ func MergeToolPolicies(policies ...ToolPolicySpec) ResolvedToolPolicy {
 		}
 	}
 	return result
+}
+
+// mergeDisabledCapabilities unions capability-domain names across layers and
+// normalizes them (trim, lowercase) so a later validation can report unknown
+// domains deterministically.
+func mergeDisabledCapabilities(base []string, incoming []string) []string {
+	for _, name := range incoming {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "" {
+			continue
+		}
+		base = appendUniqueStrings(base, normalized)
+	}
+	sort.Strings(base)
+	return base
 }
 
 func mergeSandboxPolicy(base map[string]interface{}, override map[string]interface{}) map[string]interface{} {

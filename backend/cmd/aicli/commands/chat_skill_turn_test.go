@@ -94,15 +94,15 @@ func TestConsumeSkillTurnPinIsOneShot(t *testing.T) {
 	if !strings.Contains(first.Guide, "Skill program guide") || !strings.Contains(first.Guide, "imagegen") {
 		t.Fatalf("guide must carry the ProgramGuide text, got %q", first.Guide)
 	}
-	if len(first.PinnedTools) == 0 || !strings.EqualFold(first.PinnedTools[0].Name, "skill__imagegen") {
-		t.Fatalf("pinned tools must include the skill function, got %#v", first.PinnedTools)
-	}
 	if second := consumeSkillTurnPin(session); second != nil {
 		t.Fatalf("pin must be one-shot, second consume got %#v", second)
 	}
 }
 
-func TestOverlayPinnedFunctionsKeepsStableSelectionIntact(t *testing.T) {
+// TestOverlayPinnedFunctionsOnlyNarrows pins the tools-pin abolition: the pin
+// no longer carries tool definitions, so overlaying must never add functions or
+// schemas to the stable selection — it only narrows via allowed/disallowed.
+func TestOverlayPinnedFunctionsOnlyNarrows(t *testing.T) {
 	stable := &aicliFunctionSelection{
 		FinalFunctionNames: []string{"read_file"},
 		BuiltinFunctions:   []string{"read_file"},
@@ -110,7 +110,7 @@ func TestOverlayPinnedFunctionsKeepsStableSelectionIntact(t *testing.T) {
 	}
 	pin := &skillTurnPin{
 		PinnedFunctions: []string{"skill__imagegen"},
-		PinnedTools:     []runtimetypes.ToolDefinition{{Name: "skill__imagegen", Description: "Generate images"}},
+		DisallowedFunctions: []string{"read_file"},
 	}
 
 	overlaid := overlayPinnedFunctions(stable, pin)
@@ -123,17 +123,18 @@ func TestOverlayPinnedFunctionsKeepsStableSelectionIntact(t *testing.T) {
 	if len(stable.Schemas) != 1 {
 		t.Fatalf("stable schemas were mutated: %v", stable.Schemas)
 	}
-	if !skillTurnTestContains(overlaid.FinalFunctionNames, "skill__imagegen") {
-		t.Fatalf("pinned function missing from overlay: %v", overlaid.FinalFunctionNames)
+	if skillTurnTestContains(overlaid.FinalFunctionNames, "skill__imagegen") {
+		t.Fatalf("tools-pin abolished: overlay must not add pinned functions: %v", overlaid.FinalFunctionNames)
 	}
-	if !skillTurnTestContains(overlaid.SkillFunctions, "skill__imagegen") {
-		t.Fatalf("pinned skill function must land in SkillFunctions: %v", overlaid.SkillFunctions)
+	if skillTurnTestContains(overlaid.FinalFunctionNames, "read_file") {
+		t.Fatalf("disallowed function must be removed by the narrow-only overlay: %v", overlaid.FinalFunctionNames)
 	}
-	if len(overlaid.Schemas) != 2 {
-		t.Fatalf("overlay schemas=%d, want 2", len(overlaid.Schemas))
+	if len(overlaid.Schemas) != 0 {
+		t.Fatalf("narrow must drop the denied schema, got %d", len(overlaid.Schemas))
 	}
-	if overlay := overlayPinnedFunctions(stable, nil); overlay != stable {
-		t.Fatal("nil pin must return the input selection unchanged")
+	noNarrow := overlayPinnedFunctions(stable, &skillTurnPin{PinnedFunctions: []string{"skill__imagegen"}})
+	if noNarrow != stable {
+		t.Fatal("pin without allow/disallow declarations must leave the selection unchanged")
 	}
 }
 

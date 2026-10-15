@@ -171,7 +171,8 @@ func BuildToolExecutionPolicy(resolved ResolvedToolPolicy) (*runtimepolicy.ToolE
 // BuildToolExecutionPolicyWithWorkspace converts a resolved profile tool policy
 // into a runtime policy, materializing named sandbox profiles against workspaceRoot.
 func BuildToolExecutionPolicyWithWorkspace(resolved ResolvedToolPolicy, workspaceRoot string) (*runtimepolicy.ToolExecutionPolicy, []string, error) {
-	hasPolicy := len(resolved.Allowlist) > 0 || len(resolved.Denylist) > 0 || resolved.ReadOnly != nil || len(resolved.Sandbox) > 0
+	hasPolicy := len(resolved.Allowlist) > 0 || len(resolved.Denylist) > 0 || resolved.ReadOnly != nil ||
+		len(resolved.DisabledCapabilities) > 0 || len(resolved.Sandbox) > 0
 	if !hasPolicy {
 		return nil, nil, nil
 	}
@@ -189,6 +190,26 @@ func BuildToolExecutionPolicyWithWorkspace(resolved ResolvedToolPolicy, workspac
 			if name != "" {
 				policy.DeniedTools[name] = true
 			}
+		}
+	}
+	if len(resolved.DisabledCapabilities) > 0 {
+		disabled := make([]runtimepolicy.Capability, 0, len(resolved.DisabledCapabilities))
+		valid := make(map[string]bool, 8)
+		for _, capability := range runtimepolicy.AllUserDisablableCapabilities() {
+			valid[string(capability)] = true
+		}
+		for _, name := range resolved.DisabledCapabilities {
+			normalized := strings.ToLower(strings.TrimSpace(name))
+			if normalized == "" {
+				continue
+			}
+			if !valid[normalized] {
+				return nil, nil, fmt.Errorf("profile tools.disabled_capabilities: unknown capability domain %q (valid: write_fs, network, external_side_effect, ask_user, background_task, agent_management)", name)
+			}
+			disabled = append(disabled, runtimepolicy.Capability(normalized))
+		}
+		if len(disabled) > 0 {
+			policy.SetCapabilityScope(runtimepolicy.CapabilitiesComplementOf(disabled))
 		}
 	}
 	var warnings []string

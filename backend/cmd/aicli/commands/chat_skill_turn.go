@@ -12,12 +12,14 @@ import (
 )
 
 // skillTurnPin 是一次 `/skill` 回合的物化叠加内容：ProgramGuide system 消息 +
-// 本回合函数面叠加（skill 函数本身 + skill 声明的、且在函数目录中命中的程序）。
-// 它只属于触发它的那一个回合，不得写回会话级稳定工具面缓存。
+// 本回合函数面收窄（allowed/disallowed-tools 折算）。skill 函数与 skill 声明的
+// 程序函数**不再 pin 进请求工具面**——skill 是知识指引而不是能力授权；需要新
+// 工具的场景走 MCP/常驻函数面（profile / disabled_capabilities 治理）。收窄
+// （只减不增）保留：它在稳定选区内过滤，不改变请求 tools 集合之外的东西。
+// pin 只属于触发它的那一个回合，不得写回会话级稳定工具面缓存。
 type skillTurnPin struct {
 	Guide             string
 	PinnedFunctions   []string
-	PinnedTools       []runtimetypes.ToolDefinition
 	UnmatchedPrograms []string
 	// Agent Skills 的 allowed-tools / disallowed-tools 折算出的本回合工具面收窄
 	// （见 chat_skill_tool_restriction.go）：AllowedFunctions 非空时只保留这些名字
@@ -143,9 +145,10 @@ func (f *SkillFunction) resolvedTurnSkill() *runtimeskill.Skill {
 	return f.skill
 }
 
-// resolveSkillTurnPin 为 `/skill` 回合构造 guide 与工具叠加。只有函数目录中真实
-// 存在的名字才会进入 pin（D1）：skill 函数本身恒 pin，ProgramTools 命中的才 pin，
-// 未命中的程序记录在 UnmatchedPrograms（不阻断回合）。
+// resolveSkillTurnPin 为 `/skill` 回合构造 guide 与函数面收窄。skill 函数与
+// ProgramTools 不再物化进请求工具面（tools-pin 已废除：skill=知识指引，能力面
+// 由稳定选区/治理管）；ProgramTools 里不在函数目录的名字仍记入 UnmatchedPrograms
+// 供 guide 提示，未命中的程序不阻断回合。
 func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*skillTurnPin, error) {
 	if session == nil || request == nil {
 		return nil, nil
@@ -235,22 +238,17 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 	}
 
 	schemas := catalogSchemaIndex(catalog)
-	if definition, ok := toolDefinitionForCatalogSchema(schemas, functionName); ok {
-		pin.PinnedTools = append(pin.PinnedTools, definition)
-	}
 	if skillItem != nil {
 		for _, program := range runtimeskill.ProgramTools(skillItem) {
 			name := strings.TrimSpace(program)
 			if name == "" || strings.EqualFold(name, functionName) {
 				continue
 			}
-			definition, ok := toolDefinitionForCatalogSchema(schemas, name)
-			if !ok {
+			if _, ok := toolDefinitionForCatalogSchema(schemas, name); !ok {
 				pin.UnmatchedPrograms = append(pin.UnmatchedPrograms, name)
 				continue
 			}
 			pin.PinnedFunctions = appendUniqueCaseInsensitive(pin.PinnedFunctions, name)
-			pin.PinnedTools = append(pin.PinnedTools, definition)
 		}
 	}
 	// SK-3: record the explicit /skill invocation at dispatch time, regardless of
@@ -362,64 +360,22 @@ func toolDefinitionForCatalogSchema(schemas map[string]map[string]interface{}, n
 
 // overlayPinnedFunctions 把 pin 叠加到本回合函数选择上，返回新副本；稳定快照
 // （session.stableSharedToolSelection）始终不被修改。
+//
+// tools-pin 废除后本函数只剩**收窄**职责：pin 不再携带工具定义（PinnedTools
+// 已删除），skill 函数与程序函数本就在稳定选区（SelectStableSessionFunctions
+// 暴露 skill 函数族），这里只按 allowed/disallowed-tools 在选区内做减法。
 func overlayPinnedFunctions(selection *aicliFunctionSelection, pin *skillTurnPin) *aicliFunctionSelection {
-	// 没有可叠加工具、也没有声明收窄时原样返回；只要声明了 allowed/disallowed，
-	// 即使本回合没有 pin 到任何工具（例如 skill 函数不在目录里）也要走收窄。
-	if pin == nil || (len(pin.PinnedTools) == 0 && len(pin.AllowedFunctions) == 0 && len(pin.DisallowedFunctions) == 0) {
+	// 没有声明收窄时原样返回。
+	if pin == nil || (len(pin.AllowedFunctions) == 0 && len(pin.DisallowedFunctions) == 0) {
 		return selection
 	}
 	overlaid := cloneFunctionSelection(selection)
 	if overlaid == nil {
 		overlaid = &aicliFunctionSelection{}
 	}
-	existing := make(map[string]int, len(overlaid.Schemas))
-	for index, schema := range overlaid.Schemas {
-		if key := schemaLookupKey(schema); key != "" {
-			existing[key] = index
-		}
-	}
-	for _, definition := range pin.PinnedTools {
-		schema, ok := toolDefinitionSchema(definition)
-		if !ok {
-			continue
-		}
-		key := schemaLookupKey(schema)
-		if index, exists := existing[key]; exists {
-			overlaid.Schemas[index] = schema
-			continue
-		}
-		existing[key] = len(overlaid.Schemas)
-		overlaid.Schemas = append(overlaid.Schemas, schema)
-	}
-	for _, name := range pin.PinnedFunctions {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		overlaid.FinalFunctionNames = appendUniqueCaseInsensitive(overlaid.FinalFunctionNames, name)
-		if strings.HasPrefix(name, skillFunctionPrefix) {
-			overlaid.SkillFunctions = appendUniqueCaseInsensitive(overlaid.SkillFunctions, name)
-		}
-	}
 	// 收窄必须在叠加之后：先让 pin 里的程序进入函数面，再按 skill 声明的
 	// allowed-tools / disallowed-tools 做减法（只减不增）。
 	return restrictFunctionSelection(overlaid, pin)
-}
-
-// toolDefinitionSchema 把单个工具定义还原为函数目录使用的 schema 结构。
-func toolDefinitionSchema(definition runtimetypes.ToolDefinition) (map[string]interface{}, bool) {
-	if strings.TrimSpace(definition.Name) == "" {
-		return nil, false
-	}
-	schema := map[string]interface{}{
-		"name":        definition.Name,
-		"description": definition.Description,
-		"parameters":  cloneToolParametersSchema(definition.Parameters),
-	}
-	if len(definition.Metadata) > 0 {
-		schema["metadata"] = cloneFunctionSchema(definition.Metadata)
-	}
-	return schema, true
 }
 
 // buildSkillCatalogText 构建 aicli /skill 回合的技能目录文本（SK-1/SK-2）。

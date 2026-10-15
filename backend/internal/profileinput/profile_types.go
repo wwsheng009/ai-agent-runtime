@@ -10,11 +10,14 @@ type ResolvedPromptFiles struct {
 
 // ResolvedToolPolicy contains merged tool policy data.
 type ResolvedToolPolicy struct {
-	Allowlist []string               `json:"allowlist,omitempty"`
-	Denylist  []string               `json:"denylist,omitempty"`
-	ReadOnly  *bool                  `json:"read_only,omitempty"`
-	Sandbox   map[string]interface{} `json:"sandbox,omitempty"`
-	Sources   []string               `json:"sources,omitempty"`
+	Allowlist []string `json:"allowlist,omitempty"`
+	Denylist  []string `json:"denylist,omitempty"`
+	ReadOnly  *bool    `json:"read_only,omitempty"`
+	// DisabledCapabilities mirrors profile.ResolvedToolPolicy: capability
+	// domains withdrawn by merged profile layers (sorted, deduplicated).
+	DisabledCapabilities []string               `json:"disabled_capabilities,omitempty"`
+	Sandbox              map[string]interface{} `json:"sandbox,omitempty"`
+	Sources              []string               `json:"sources,omitempty"`
 }
 
 // ResolvedSkillSelection contains merged skill allow/deny declarations.

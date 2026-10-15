@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 var (
@@ -106,6 +108,39 @@ func ValidateProfileSpec(spec *ProfileSpec) []ProfileSpecIssue {
 
 	// D14：覆盖键白名单与运行时解析共用同一校验器（双执行）。
 	issues = append(issues, ValidateOverrides(spec.Runtime.Overrides)...)
+
+	// tools.disabled_capabilities：域名合法性校验（解析期也会再拦一次——
+	// BuildToolExecutionPolicyWithWorkspace 对未知域名报错——这里提前到
+	// `profile validate` 给出可操作的提示；两处共用同一合法集）。
+	validateDisabledCapabilities := func(path string, names []string) {
+		valid := make(map[string]struct{}, 8)
+		validNames := make([]string, 0, 8)
+		for _, capability := range runtimepolicy.AllUserDisablableCapabilities() {
+			valid[string(capability)] = struct{}{}
+			validNames = append(validNames, string(capability))
+		}
+		sort.Strings(validNames)
+		seen := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			normalized := strings.ToLower(strings.TrimSpace(name))
+			if normalized == "" {
+				appendIssue(ProfileSpecIssueError, path, "blank capability domain is not allowed")
+				continue
+			}
+			if _, dup := seen[normalized]; dup {
+				appendIssue(ProfileSpecIssueWarning, path, "duplicate capability domain %q", normalized)
+			}
+			seen[normalized] = struct{}{}
+			if _, ok := valid[normalized]; !ok {
+				appendIssue(ProfileSpecIssueError, path,
+					"unknown capability domain %q (valid: %s)", name, strings.Join(validNames, ", "))
+			}
+		}
+	}
+	validateDisabledCapabilities("tools.disabled_capabilities", spec.Tools.DisabledCapabilities)
+	for agentID, agent := range spec.Agents {
+		validateDisabledCapabilities("agents."+agentID+".tools.disabled_capabilities", agent.Tools.DisabledCapabilities)
+	}
 
 	return issues
 }

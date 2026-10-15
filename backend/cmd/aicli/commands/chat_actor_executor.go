@@ -283,7 +283,8 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		if guide := strings.TrimSpace(skillPin.Guide); guide != "" {
 			turnMessages = append(turnMessages, *runtimetypes.NewSystemMessage(guide))
 		}
-		submitOption.TurnPinnedTools = skillPin.PinnedTools
+		// tools-pin 已废除（skill=知识指引，不做能力授权）：/skill 不再改变请求
+		// tools 数组；allowed/disallowed-tools 收窄在函数选区层生效（chat_core）。
 	}
 	// P0 mention 注入：仅用户发起回合；guide 在前、mention 片段在后（§4.4 注入点）。
 	// §4.11：本地预算裁决先于 preflight，超限只降级注入，不触发历史压缩。

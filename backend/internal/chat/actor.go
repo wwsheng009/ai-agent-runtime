@@ -514,7 +514,8 @@ type SubmitPromptOption struct {
 	// TurnSystemMessages 是本回合一次性 system 注入（如 /skill 的 ProgramGuide），
 	// 只进入本次 run 的请求历史，不写入会话持久历史。
 	TurnSystemMessages []runtimetypes.Message
-	// TurnPinnedTools 是本回合一次性工具叠加（如 /skill 注入的 skill 函数与程序），
+	// TurnPinnedTools 是本回合一次性工具叠加通道（skill tools-pin 已废除，
+	// /skill 不再填充；通道保留给未来经评审的回合级注入需求），
 	// 在稳定工具面冻结之后附加，不写回会话级稳定工具面。
 	TurnPinnedTools []runtimetypes.ToolDefinition
 	// TriggerTurnAuto marks a prompt submitted by the trigger_turn drain, so

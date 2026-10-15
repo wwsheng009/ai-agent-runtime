@@ -30,9 +30,10 @@ import (
 func toRuntimeExecutionPolicy(t *testing.T, resolved profile.ResolvedToolPolicy) *runtimepolicy.ToolExecutionPolicy {
 	t.Helper()
 	input := profileinput.ResolvedToolPolicy{
-		Allowlist: append([]string(nil), resolved.Allowlist...),
-		Denylist:  append([]string(nil), resolved.Denylist...),
-		ReadOnly:  resolved.ReadOnly,
+		Allowlist:            append([]string(nil), resolved.Allowlist...),
+		Denylist:             append([]string(nil), resolved.Denylist...),
+		ReadOnly:             resolved.ReadOnly,
+		DisabledCapabilities: append([]string(nil), resolved.DisabledCapabilities...),
 	}
 	policy, err := profileinput.BuildToolExecutionPolicy(input)
 	require.NoError(t, err)
@@ -61,6 +62,10 @@ func buildRuntimeServerPolicy(profilePolicy *runtimepolicy.ToolExecutionPolicy, 
 				toolPolicy.DeniedTools[name] = true
 			}
 		}
+	}
+	if profilePolicy != nil && profilePolicy.CapabilityScopeEnabled {
+		// Mirrors the fixed applyAgentExecutionPolicy capability propagation.
+		toolPolicy.SetCapabilityScope(profilePolicy.AllowedCapabilityNames())
 	}
 	return toolPolicy
 }
@@ -117,6 +122,26 @@ func TestProfileToolPolicyReadOnlyPropagation(t *testing.T) {
 	resolvedReadOnly := resolvedPolicyFromSpec(t, specReadOnly)
 	policyReadOnly := buildRuntimeServerPolicy(toRuntimeExecutionPolicy(t, resolvedReadOnly), false)
 	require.True(t, policyReadOnly.ReadOnly)
+}
+
+// TestProfileToolPolicyDisabledCapabilitiesEquivalence 扩展双落点护栏：
+// disabled_capabilities 在两落点必须产出同一能力域名单（且网络域被禁用时
+// web_search 在两落点都被拒）。
+func TestProfileToolPolicyDisabledCapabilitiesEquivalence(t *testing.T) {
+	spec := profile.ToolPolicySpec{DisabledCapabilities: []string{"network", "NETWORK"}}
+	resolved := resolvedPolicyFromSpec(t, spec)
+	require.Equal(t, []string{"network"}, resolved.DisabledCapabilities,
+		"merge must normalize case and dedupe")
+
+	runtimePolicy := buildRuntimeServerPolicy(toRuntimeExecutionPolicy(t, resolved), false)
+	tuiPolicy := buildTUIClientPolicy(toRuntimeExecutionPolicy(t, resolved))
+
+	require.Equal(t, runtimePolicy.AllowedCapabilityNames(), tuiPolicy.AllowedCapabilityNames(),
+		"capability-domain allowlist must be identical across both sinks")
+	require.NotContains(t, runtimePolicy.AllowedCapabilityNames(), "network")
+	require.True(t, runtimePolicy.CapabilityScopeEnabled)
+	require.False(t, runtimePolicy.AllowsDefinition("web_search"),
+		"network-domain tools must be refused once the domain is disabled")
 }
 
 func boolPtr(v bool) *bool { return &v }

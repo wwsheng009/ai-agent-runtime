@@ -27,8 +27,9 @@ type SubmitPrompt struct {
 	RouteOverride    *RunRouteOverride
 	// TurnSystemMessages 是本回合一次性 system 注入（如 /skill 的 ProgramGuide）。
 	TurnSystemMessages []runtimetypes.Message
-	// TurnPinnedTools 是本回合一次性工具叠加（如 /skill 的 skill 函数与程序），
-	// 只影响本次 run，不写回会话级稳定工具面。
+	// TurnPinnedTools 是本回合一次性工具叠加通道（skill tools-pin 已废除，
+	// /skill 不再填充；通道保留给未来经评审的回合级注入需求），只影响本次
+	// run，不写回会话级稳定工具面。
 	TurnPinnedTools []runtimetypes.ToolDefinition
 	// TriggerTurnAuto marks a prompt submitted by the P0-3b trigger_turn drain.
 	TriggerTurnAuto bool
