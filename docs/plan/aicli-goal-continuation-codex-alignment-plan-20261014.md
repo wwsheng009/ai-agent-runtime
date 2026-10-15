@@ -379,7 +379,19 @@ goal:
 - **store/derive**：`lib/session-goal/store.ts` 新增 `setAuthoritativeSessionGoal` / `isSessionGoalAuthoritative` / `useSessionGoalAuthoritative`（权威快照 vs SSE 观测按时间戳取新）；`lib/session-goal/derive.ts` 抽出 `parseSessionGoalEnvelope` 供 REST 复用。
 - **i18n**：zh-CN/en-US `workspace/base.ts`——derivedNote 措辞更新 + authoritativeNote（权威快照来源说明）+ 四动作标签；`verify-frontend-i18n` 1001 资源 0 违规。
 - **测试与验证**：`api/runtime/goal.test.ts` 7 例（路径编码 / 信封解析 / POST snake_case 请求体 / applied=false 透传 / clear→absent / 404→RuntimeApiError）；`session-goal.test.ts` 追加权威快照 5 例；组件测试 7 例——goal 相关 33/33 通过；全量 `npx vitest run` 392 文件 / 3287 例通过；`npx tsc -b` 无本特性错误；eslint（本特性 7 文件）0 错误；indicator 重写后约 190 行，`verify-max-lines` 达标（脚本现存 4 个超限文件均为其他工作流在途文件，非本特性引入）。
-- **边界（如实登记）**：控制台动作按钮只调用状态端点，与后端同边界——不触发续跑；resume 后仍需 CLI 续跑循环或消息投递驱动下一轮。组件级动作交互的端到端渲染测试为可选后续。
+- **边界（如实登记）**：控制台动作按钮只调用状态端点，与后端同边界——不触发续跑；resume 后仍需 CLI 续跑循环或消息投递驱动下一轮。组件级动作交互的端到端渲染测试为可选后续。**（gap 3 落地后此边界已被服务端驱动器覆盖：开关开启时 set/resume/budget-raise applied=true 即触发服务端续跑，见下节。）**
+
+### 服务端 auto-continuation（gap 3，2026-10-15 完成）
+
+- **动因**：gap 2 收尾时确认的结构性错位——turn 终态发生在 runtime-server 的 actor 里，而续跑决策循环整个住在 CLI 进程；纯 web/connector/schedule 会话没有"turn 结束后仍在场"的驱动者，goal 停留在状态管理（面板有 resume 按钮但没有下一轮）。Codex main 的循环住在宿主进程（`on_thread_idle`），对齐语义要求"runtime 在哪个进程，循环就在哪个进程"。
+- **共享策略层**：`internal/goal/continuation.go`——`ContinuationPrompt` / `BudgetWrapUpPrompt`（与 CLI 字面量**逐字节一致**：`chat_skill_mentions` 按整串相等识别系统生成的续跑提示）、`ContinuationErrorStrikeLimit` / `ContinuationNoProgressStrikeLimit`（×3）、`ContinuationCLICooldownWindow`（5 分钟）、`EvaluateGoalContinuation` / `BudgetExhausted` / `SystemBlockedReason`。CLI `chat_goal_auto_continue.go` 的常量改为引用共享层（包内别名，100+ 调用点零改动）。
+- **驱动器**：`runtimeapi/session_goal_driver.go`——订阅总线 `session_end`（actor 路径终态：connectors/schedule/CLI 远程/团队）+ web 直连成功终态显式上报（`/api/agent/chat` 的 SSE 终态不进总线，流式/非流式两个成功分支调用 `observeWebTerminal`）。链路：门控 → strike 记账 → 记账 → goal 态判定 → `SubmitPromptAsync(goal.ContinuationPrompt)` 提交续跑轮（run_meta.source=`driver:goal` 归因）。
+- **门控矩阵**：配置开关 `goal.serverAutoContinuation`（缺省 false = 行为零变化）；CLI 冷却窗让位——命令通道 submit_prompt/continue 入口是 CLI 远程模式在场的直接证据（每轮必经），观测到即刷新 5 分钟窗口并清 strike，**让位判定先于 strike 记账**（CLI 轮不污染服务端计数）；基础会话门控（`isBaseSessionContext`，与 gap-1 注入同口径）；挂起审批/工具/提问时不续跑。
+- **kick-on-set/resume**：goal 端点 set/resume/budget-raise **applied=true** 时调用 `goalDriverKick`（对齐 Codex `:226-241` 的 set/resume 触发语义）——空闲 web 会话没有任何终态事件，kick 是唯一唤醒路径。开关关闭或 CLI 在场时 kick 内部让位，行为同 gap-2。
+- **记账与容忍**：usage 按轮入 goal（`usageTotalTokens`：TotalTokens 优先，缺省退化 prompt+completion）；超预算置 budget_limited 并跑一次收尾轮（共享 `BudgetWrapUpPrompt`，对齐 CLI wrap-up）；连续错误 ×3 / 连续空转 ×3（近似：steps≤1 且无输出——服务端终态载荷无工具计数，与 CLI 的"无文本无工具"口径的偏差已登记）→ 置 blocked（`SystemBlockedReason` 文案与 CLI 同源）。
+- **提交**：`f3b96291`（共享层）/ `4a5073f7`（配置开关 + RunMeta.Source）/ `5d1fe3e0`（驱动器）/ `cebf95aa`（CLI 别名化）/ `44bdde8e`（runtime 配置启用，win7 覆盖档同步）。
+- **测试**：`internal/goal/continuation_test.go` 8 例（决策矩阵 / 预算判定 / prompt 锚点 / blocked 文案 / 冷却窗常量）；`session_goal_driver_test.go` 5 例（开关缺省关闭 / CLI 让位先于 strike / 阈值同源 / noteCLI 刷新 / usage 回退口径）。`go build ./internal/... ./cmd/aicli/...` 全绿；goal/config/team 包与 commands 子集（Goal/SkillMention）全绿。
+- **边界（如实登记）**：①真机端到端（开关开启后 web 会话 set→自动续跑）本轮未完成——runtime-server 在本机启动后卡在 MCP 初始化之后 4 分钟以上未监听（上次 gap2 验收同命令约 55s 就绪，环境差异非代码回归；`go build`/单测均绿），待环境恢复后补跑；②空转判定是近似（steps≤1），工具计数在服务端终态载荷中不可得；③CLI 本地模式的循环不变（那些会话没有 server）；④双驱动依赖命令通道入口作为 CLI 在场信号，CLI 直连 actor 模式（不经 runtime-server）的会话不受服务端驱动器影响（无 actor）。
 
 ---
 
