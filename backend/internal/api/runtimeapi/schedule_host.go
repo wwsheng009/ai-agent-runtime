@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
 )
@@ -21,9 +22,10 @@ func (d scheduleSessionDeliverer) Deliver(ctx context.Context, sessionID, text s
 		return fmt.Errorf("schedule: handler not configured")
 	}
 	// S2b（§3.3 L1 前置）：只服务本进程确实托管的会话——已有活 actor，或会话
-	// 在本进程会话库中可加载；否则返回错误让组合投递器降级到 L2。没有这道
-	// 闸门会为外部会话凭空建幽灵 actor：提醒被"接受"却投进错误进程、宿主完全
-	// 不可见（2026-10-15 实机 E2E 抓到：TUI 会话的提醒被 runtime-server 吞掉）。
+	// 可从本进程会话库加载且**绑定持有者就是本进程**；否则返回错误让组合投递器
+	// 降级到 L2。没有这道闸门会为外部会话凭空建幽灵 actor：提醒被"接受"却投进
+	// 错误进程、宿主完全不可见（2026-10-15 ConPTY E2E 实机抓到：aicli 托管的
+	// TUI 会话提醒被 runtime-server 吞掉，TUI 不可见）。
 	if !d.handler.scheduleLocalSessionHosted(ctx, sessionID) {
 		return fmt.Errorf("schedule: session %s is not hosted by this process", sessionID)
 	}
@@ -42,7 +44,9 @@ func (d scheduleSessionDeliverer) Deliver(ctx context.Context, sessionID, text s
 }
 
 // scheduleLocalSessionHosted 报告本进程是否托管该会话（S2b L1 前置）：
-// 已有活 actor，或会话能从本进程会话库加载。
+// ① 已有活 actor；或 ② 会话能从本进程会话库加载，且 mesh binding 的
+// last_node_id 就是本进程节点——会话库是**共享**的（所有宿主同库），
+// "可加载"只说明会话存在过，不代表本进程持有它。
 func (h *Handler) scheduleLocalSessionHosted(ctx context.Context, sessionID string) bool {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -51,6 +55,21 @@ func (h *Handler) scheduleLocalSessionHosted(ctx context.Context, sessionID stri
 	if hub := h.getSessionHub(); hub != nil {
 		if _, ok := hub.Get(sessionID); ok {
 			return true
+		}
+	}
+	// S2b 复验（2026-10-15 ConPTY E2E）：共享会话库让"可加载"恒真，共享库
+	// 分支曾把 aicli 托管的活跃会话判成"本进程托管"→ L1 幽灵 actor 把提醒
+	// 吞进 runtime-server（TUI 不可见）而 commit 照常。活跃会话的宿主在
+	// binding 里有权威记录（会话激活时 TouchBinding 写 last_node_id），
+	// 不一致 = 别人托管 → 降级 L2 就近投递。binding 缺失时保守沿用旧判定
+	// （老会话/未入网部署），不把 drain 主链堵死。
+	if host := mesh.Current(); host != nil {
+		if nodeID := strings.TrimSpace(host.NodeID()); nodeID != "" {
+			if binding, ok := mesh.LoadBinding(mesh.ResolvePaths(), sessionID); ok {
+				if owner := strings.TrimSpace(binding.LastNodeID); owner != "" && owner != nodeID {
+					return false
+				}
+			}
 		}
 	}
 	manager := h.sessionManager

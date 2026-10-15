@@ -461,7 +461,7 @@ mesh 侧改动：
 > S2b 实机（2026-10-15）新增两个由 E2E 抓出的关键修复：
 > ① **L1 宿主前置闸门**——driver 只能为"本进程确实托管"的会话走 L1（已有活 actor 或会话在本进程库可加载），否则降级 L2；没有这道闸门曾把外部 TUI 会话的提醒投进 runtime-server 的幽灵 actor（被"接受"但宿主不可见、账本/历史照常推进）。
 > ② **控制面变更唤醒**——`Service.SetDriverWaker`（创建/删除后唤醒 `RequestDrive`）+ Runtime 空闲兜底扫描（`idleSweepInterval`）：此前空闲期创建的任务要等下一次 drive 才可见（实机复现）。
-> 另：aicli 接收侧的账本解析经**进程级注册位**（`processScheduleService`）解耦"早期会话快照 LocalRuntimeHost 恒为 nil"问题（异步能力面装载前 web 处理器拿到的对象）。实机验收：TUI 会话经 `mesh.call.received op=schedule.deliver` 收到提醒并落账；host 死亡时 L2 连接拒绝 → 自动降级 L5 mailbox 不丢消息。组级 claim 仍留 S4。
+> 另：aicli 接收侧的账本解析经**进程级注册位**（`processScheduleService`）解耦"早期会话快照 LocalRuntimeHost 恒为 nil"问题。**2026-10-15 ConPTY 复测补丁**：共享会话库使 L1 闸门的"库内可加载"分支恒真，aicli 托管的活跃会话被 runtime-server 的幽灵 actor 吞掉（无 turn/无日志、TUI 不可见但 commit 照常）——`scheduleLocalSessionHosted` 共享库分支现要求 `mesh.binding.last_node_id` 为本节点，否则拒绝并降级 L2；修复后复测证据：leader 日志 `local(L1): session … is not hosted by this process | delivered via peer(L2)` + aicli journal `mesh.call.received op=schedule.deliver` + 会话出现注入帧并起 turn（五轮对照实验）。实机验收：TUI 会话经 `mesh.call.received op=schedule.deliver` 收到提醒并落账；host 死亡时 L2 连接拒绝 → 自动降级 L5 mailbox 不丢消息。组级 claim 仍留 S4。
 
 ### 12.2 多实例状态模型（五层状态表）
 
