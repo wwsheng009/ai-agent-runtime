@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -370,6 +372,93 @@ func TestResumeCompactViewReplacesReplayedScene(t *testing.T) {
 	}
 }
 
+// TestResumeCompactViewSkipsEventLogFullReplay 校验 P0 快路径：装载命中
+// compact 后视图时，事件日志不再全量重放（replayed=0、skip 标记置位），
+// 展示内容只含 compact 之后的消息；replayOnce 已被消费，首条消息边界的
+// start() 也不会补全量重放（2026-10-09 回归仍被挡住）。
+func TestResumeCompactViewSkipsEventLogFullReplay(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	chatIsInteractiveTerminal = func() bool { return true }
+	t.Cleanup(func() { chatIsInteractiveTerminal = oldInteractive })
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	// 事件日志 fixture：compact 前的完整历史（用户输入注入 + assistant 终态）。
+	logPath := filepath.Join(t.TempDir(), "runtime-events.jsonl")
+	fixture := newChatRuntimeEventBridge(&ChatSession{})
+	fixture.eventLogPathOverride = logPath
+	fixture.submitUserInput("OLD-USER-TURN")
+	fixture.encodeRenderModelEvent(runtimeevents.Event{
+		Type:      runtimechat.EventAssistantMessage,
+		SessionID: "session-1",
+		Payload: map[string]interface{}{
+			"turn_id": "turn-old",
+			"content": "OLD-ASSISTANT-TURN",
+		},
+	})
+	chatEventLogFlush()
+
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.eventLogPathOverride = logPath
+	session.RuntimeEventBridge = bridge
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(72, 20)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var terminal bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&terminal) {
+		t.Fatal("unified renderer did not attach")
+	}
+
+	// compact 后视图：只有 compact 之后的一条新消息。
+	if err := replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("NEW-USER-TURN"),
+	}); err != nil {
+		t.Fatalf("restore compact projection: %v", err)
+	}
+	applyResumeCompactView(session)
+	if got := printVisibleSessionLoadHistory(session, "已加载历史会话"); got != 1 {
+		t.Fatalf("visible history = %d, want 1", got)
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	if _, _, replayed, _ := bridge.eventLogStats(); replayed != 0 {
+		t.Fatalf("event log replayed = %d, want 0 (compact-view skip fast path)", replayed)
+	}
+	if !bridge.eventLogSkippedCompactView() {
+		t.Fatal("compact-view skip flag not recorded")
+	}
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil {
+		t.Fatal("scene snapshot missing after compact-view skip load")
+	}
+	joined := make([]string, 0, len(snapshot.Cells))
+	for _, cell := range snapshot.Cells {
+		joined = append(joined, cell.Source)
+		if strings.Contains(cell.Source, "OLD-") {
+			t.Fatalf("pre-compaction cell leaked despite skip: %+v", cell)
+		}
+	}
+	if text := strings.Join(joined, "\n"); !strings.Contains(text, "NEW-USER-TURN") {
+		t.Fatalf("compact view lost post-compaction cells: %v", joined)
+	}
+
+	// replayOnce 已被消费：模拟首条消息边界的 start()，不得补全量重放。
+	session.LocalRuntimeHost = &localChatRuntimeHost{EventBus: runtimeevents.NewBus()}
+	ensureChatRuntimeEventBridge(session)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if _, _, replayed, _ := bridge.eventLogStats(); replayed != 0 {
+		t.Fatalf("late start() replayed the event log (%d records), want 0", replayed)
+	}
+}
+
 // TestInChatResumeAndLoadFullFlagReplayCanonicalTranscript 覆盖 TUI 内
 // /resume、/load 的 --full 接线：默认保持 compact 后视图；带 --full 时作用域内
 // 强制 canonical 全量回放，命令结束后不把该取值泄漏进会话状态。
@@ -468,6 +557,86 @@ func TestResumeCompactViewEstimatesPostCountWithoutAnchor(t *testing.T) {
 		if got[index].Content != want[index] {
 			t.Fatalf("compact-after[%d] = %q, want %q", index, got[index].Content, want[index])
 		}
+	}
+}
+
+// TestResumeCompactViewFallbackUsesContextBoundary 覆盖消息级 checkpoint 扫描
+// miss（投影损坏 / legacy 重建丢标记）时的 canonical 兜底：存储层镜像的
+// ContextCompactBoundary 仍然给出 compact 后切片，视图不再退化为全量回放。
+func TestResumeCompactViewFallbackUsesContextBoundary(t *testing.T) {
+	build := func(role, content, stage string) runtimetypes.Message {
+		message := runtimetypes.Message{Role: role, Content: content, Metadata: runtimetypes.NewMetadata()}
+		message.Metadata["message_id"] = "msg-" + content
+		if stage != "" {
+			message.Metadata["context_stage"] = stage
+		}
+		return message
+	}
+	// 投影里 checkpoint 标记已丢失（context_stage 为空），只剩普通消息。
+	messages := []runtimetypes.Message{
+		build("system", "env", ""),
+		build("user", "summary", ""),
+		build("developer", "ledger-old", "fact_ledger"),
+		build("assistant", "ls-a", ""),
+		build("user", "pwd", ""),
+		build("tool", "pwd-t", ""),
+		build("user", "hello", ""),
+		build("developer", "ledger-new", "fact_ledger"),
+		build("assistant", "hello-reply", ""),
+	}
+
+	// 锚点兜底：boundary 带 replacement_tail_message_id，切片取其后继。
+	anchored := &ChatSession{
+		Messages:       messages,
+		RuntimeSession: &runtimechat.Session{CanonicalMessageCount: len(messages)},
+	}
+	anchored.RuntimeSession.SetContext(runtimechat.ContextCompactBoundary, map[string]interface{}{
+		"message_id":                  "checkpoint",
+		"replacement_tail_message_id": "msg-pwd-t",
+		"segment_start":               float64(0),
+		"segment_end":                 float64(5),
+	})
+	got := resumeCompactViewPostCheckpointMessages(anchored)
+	want := []string{"hello", "ledger-new", "hello-reply"}
+	if len(got) != len(want) {
+		t.Fatalf("anchored fallback = %d messages, want %d: %+v", len(got), len(want), got)
+	}
+	for index := range want {
+		if got[index].Content != want[index] {
+			t.Fatalf("anchored fallback[%d] = %q, want %q", index, got[index].Content, want[index])
+		}
+	}
+
+	// 计数兜底：无锚点时 post = canonical 非 system 数 - segment_end。
+	counted := &ChatSession{
+		Messages:       messages,
+		RuntimeSession: &runtimechat.Session{CanonicalMessageCount: len(messages)},
+	}
+	counted.RuntimeSession.SetContext(runtimechat.ContextCompactBoundary, map[string]interface{}{
+		"message_id":  "checkpoint",
+		"segment_end": float64(5),
+	})
+	got = resumeCompactViewPostCheckpointMessages(counted)
+	if len(got) != len(want) {
+		t.Fatalf("counted fallback = %d messages, want %d: %+v", len(got), len(want), got)
+	}
+	for index := range want {
+		if got[index].Content != want[index] {
+			t.Fatalf("counted fallback[%d] = %q, want %q", index, got[index].Content, want[index])
+		}
+	}
+
+	// 检测口径：checkpoint 标记丢失但 boundary 存在 → compact 视图仍生效；
+	// boundary 也不存在 → 保持 canonical 全量回放。
+	if !counted.resumeHistoryCompactViewPreferred() {
+		t.Fatal("boundary fallback should keep the compact view active")
+	}
+	boundaryless := &ChatSession{
+		Messages:       messages,
+		RuntimeSession: &runtimechat.Session{CanonicalMessageCount: len(messages)},
+	}
+	if boundaryless.resumeHistoryCompactViewPreferred() {
+		t.Fatal("no checkpoint and no boundary must keep the canonical full replay")
 	}
 }
 

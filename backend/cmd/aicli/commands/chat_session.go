@@ -613,6 +613,30 @@ func resumeHistoryHasCompactionCheckpoint(messages []runtimetypes.Message) bool 
 	return false
 }
 
+// resumeCompactBoundaryFromContext 读取存储层镜像的 compact 边界快照
+// （runtimechat.ContextCompactBoundary）。消息级 checkpoint 扫描 miss
+// （投影损坏 / legacy 重建丢标记）时，它是 canonical 层权威兜底。
+func resumeCompactBoundaryFromContext(session *ChatSession) (runtimechat.CompactBoundary, bool) {
+	if session == nil || session.RuntimeSession == nil {
+		return runtimechat.CompactBoundary{}, false
+	}
+	value, ok := session.RuntimeSession.GetContext(runtimechat.ContextCompactBoundary)
+	if !ok {
+		return runtimechat.CompactBoundary{}, false
+	}
+	return runtimechat.DecodeCompactBoundaryValue(value)
+}
+
+// resumeCompactBoundaryFallbackAvailable 报告会话是否携带 canonical 层权威
+// compact 边界（消息级 checkpoint 扫描 miss 时的回退判定）。
+func (s *ChatSession) resumeCompactBoundaryFallbackAvailable() bool {
+	if s == nil || s.ResumeFullHistory || s.NoInteractive || s.JSONOutput {
+		return false
+	}
+	_, ok := resumeCompactBoundaryFromContext(s)
+	return ok
+}
+
 // resumeHistoryCompactViewPreferred 报告本次恢复是否应停在「compact 后视图」：
 // 未显式请求 --full，且恢复出的热上下文带 compact 检查点。命中时直接展示
 // session.Messages（compact 摘要被可见性过滤隐藏），不再加载 canonical 全量
@@ -626,7 +650,11 @@ func (s *ChatSession) resumeHistoryCompactViewPreferred() bool {
 	if s.NoInteractive || s.JSONOutput {
 		return false
 	}
-	return resumeHistoryHasCompactionCheckpoint(s.Messages)
+	// 消息级 checkpoint 扫描 miss（投影损坏 / legacy 重建丢标记）时，回退到
+	// 存储层镜像的 canonical 权威边界（ContextCompactBoundary）：只要边界在
+	// canonical 层存在，compact 后视图就仍然成立，不再退化为 canonical 全量
+	// 回放。
+	return resumeHistoryHasCompactionCheckpoint(s.Messages) || s.resumeCompactBoundaryFallbackAvailable()
 }
 
 // markResumeHistoryCompactView 记录/复位「compact 后视图」状态（提示文案用）。
@@ -666,7 +694,10 @@ func applyResumeCompactView(session *ChatSession) {
 //     非 system 消息数）。首次 compact 时热上下文与 canonical 等价，对单次
 //     compact 的存量会话精确；多次 compact 的存量会话可能偏保守（多回放少量
 //     已覆盖消息），不会丢 compact 后内容；
-//  3. 两者都不可用时返回整个热投影（维持旧行为）。
+//  3. 消息级 checkpoint 缺失时的 canonical 兕底（resumeCompactBoundary）：
+//     投影损坏 / legacy 重建丢标记时用存储层镜像的边界快照切片，切片规则
+//     与消息级路径同构（锚点优先、segment_end 计数次之）；
+//  4. 两者都不可用时返回整个热投影（维持旧行为）。
 func resumeCompactViewPostCheckpointMessages(session *ChatSession) []runtimetypes.Message {
 	if session == nil || len(session.Messages) == 0 {
 		return nil
@@ -680,7 +711,7 @@ func resumeCompactViewPostCheckpointMessages(session *ChatSession) []runtimetype
 		}
 	}
 	if checkpointIndex < 0 {
-		return cloneResumeDisplayMessages(messages)
+		return resumeCompactViewFallbackMessages(session, messages)
 	}
 
 	checkpoint := messages[checkpointIndex]
@@ -721,6 +752,59 @@ func resumeCompactViewPostCheckpointMessages(session *ChatSession) []runtimetype
 	// 从尾部按非 system 计数收集：热投影被裁剪时结论同样成立。
 	collected := make([]runtimetypes.Message, 0, postCount)
 	for index := len(messages) - 1; index > checkpointIndex && len(collected) < postCount; index-- {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "system") {
+			continue
+		}
+		collected = append(collected, *messages[index].Clone())
+	}
+	for left, right := 0, len(collected)-1; left < right; left, right = left+1, right-1 {
+		collected[left], collected[right] = collected[right], collected[left]
+	}
+	return collected
+}
+
+// resumeCompactViewFallbackMessages 是消息级 checkpoint miss 时的 canonical
+// 兕底切片：优先用 boundary 快照里的替换尾部锚点在投影里定位后继；锚点不可
+// 用（缺失/不在投影里）时按 segment_end 计数从尾部收非 system 消息；两者都
+// 不可用才回退整份热投影（维持旧行为）。
+func resumeCompactViewFallbackMessages(session *ChatSession, messages []runtimetypes.Message) []runtimetypes.Message {
+	boundary, ok := resumeCompactBoundaryFromContext(session)
+	if !ok {
+		return cloneResumeDisplayMessages(messages)
+	}
+	if anchor := boundary.ReplacementTailMessageID; anchor != "" {
+		for index := len(messages) - 1; index >= 0; index-- {
+			if strings.TrimSpace(messages[index].Metadata.GetString("message_id", "")) != anchor {
+				continue
+			}
+			// 兕底路径没有消息级 checkpoint 可比对锚点位置：锚点本身就是
+			// 被摘要覆盖区的尾部，其后继就是 compact 后新增消息。
+			return cloneResumeDisplayMessages(messages[index+1:])
+		}
+	}
+	covered := boundary.SegmentEnd
+	canonicalTotal := 0
+	if session.RuntimeSession != nil {
+		canonicalTotal = session.RuntimeSession.CanonicalMessageCount
+	}
+	if covered <= 0 || canonicalTotal <= 0 {
+		return cloneResumeDisplayMessages(messages)
+	}
+	// 与消息级路径同构：segment_end 覆盖的是替换前的完整 history（含 system），
+	// canonical 总数同样含 system，先对消投影里的 system 前缀再求差。
+	systemCount := 0
+	for index := range messages {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "system") {
+			systemCount++
+		}
+	}
+	postCount := canonicalTotal - systemCount - covered
+	if postCount <= 0 {
+		// compact 后尚无新增消息：默认视图为空。
+		return nil
+	}
+	collected := make([]runtimetypes.Message, 0, postCount)
+	for index := len(messages) - 1; index >= 0 && len(collected) < postCount; index-- {
 		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "system") {
 			continue
 		}

@@ -211,7 +211,15 @@ func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDeb
 			builder.meta("Summary:", preview.Summary)
 		}
 		if preview.MessageCount > 0 {
-			builder.meta("History:", fmt.Sprintf("%d messages", preview.MessageCount))
+			// 三个口径分开呈现：canonical 转录 / 模型上下文投影 / 恢复展示历史。
+			// 大会话上 canonical 计数不代表模型上下文，更不代表 UI 已装载条数。
+			builder.meta("History (canonical):", fmt.Sprintf("%d messages", preview.MessageCount))
+			if len(session.Messages) != preview.MessageCount {
+				builder.meta("History (prompt):", fmt.Sprintf("%d messages", len(session.Messages)))
+			}
+			if displayed := len(session.resumeHistorySnapshot()); displayed != preview.MessageCount {
+				builder.meta("History (displayed):", fmt.Sprintf("%d messages", displayed))
+			}
 		}
 	}
 
@@ -632,6 +640,9 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 	if path, count, replayed, failures := bridge.eventLogStats(); path != "" {
 		builder.meta("Event Log:", fmt.Sprintf("%s (recorded=%d replayed=%d failures=%d)",
 			chatDebugValueOrNone(path), count, replayed, failures))
+		if bridge.eventLogSkippedCompactView() {
+			builder.meta("Event Log Skip:", "compact-view fast path (full replay skipped; --full reloads canonical history)")
+		}
 		// L1.1 恢复重放便宜路径（设计见 chat_eventlog_trim.go）：trimmed =
 		// Tier A 跳解析行数，cheap_progress = tool.progress 便宜解码行数，
 		// cheap_started = llm.request.started 便宜解码行数（L1.2），

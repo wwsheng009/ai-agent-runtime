@@ -37,6 +37,13 @@ const (
 	ContextCompactRootSessionID   = "compact_root_session_id"
 	ContextCompactGeneration      = "compact_generation"
 	ContextCompactSourceSessionID = "compact_source_session_id"
+	// ContextCompactBoundary 是最近一次 compaction checkpoint 的权威边界快照
+	// （metadata context 持久化，无需 schema 迁移）。checkpoint 摘要只可靠地
+	// 存在于 prompt 投影（session_prompt_messages）；投影损坏/legacy 重建时
+	// 标记会丢，恢复端（CLI resume / runtime-server）需要 canonical 层权威
+	// 边界兜底。由 SQLite 存储在每次写入时从装载的 history 镜像（见
+	// sqlite_storage.go syncCompactBoundaryContext）。
+	ContextCompactBoundary = "compact_boundary"
 )
 
 // SessionMetadata 会话元数据

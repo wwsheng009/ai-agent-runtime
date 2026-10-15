@@ -286,6 +286,10 @@ type chatRuntimeEventBridge struct {
 	eventLogCount            uint64 // 已写入事件数
 	eventLogReplayed         uint64 // 启动时重放事件数
 	eventLogFailures         uint64 // 写入/重放失败次数
+	// eventLogCompactViewSkipped 记录本次装载是否因 compact 后视图跳过了
+	// 事件日志全量重放（replaySessionLoadLogOnce 的 P0 快路径）。仅供
+	// /debug 归因展示；不影响 Failures / Replayed 的语义。
+	eventLogCompactViewSkipped bool
 	// L1.1 恢复重放便宜路径的观测计数（设计/不变量见 chat_eventlog_trim.go）：
 	// 跳过 ≠ 失败，eventLogFailures 语义不变，这几项只用于归因与 A/B 对照。
 	eventLogTrimmed       uint64 // Tier A 白名单：跳过解析的行数（Encode 仍逐条调用）
@@ -1174,6 +1178,16 @@ func (b *chatRuntimeEventBridge) start() {
 // 前者等下一次装载/start 在路径可用后重放（不把"未知路径"当成"空会话"发布空
 // Scene），后者等 run 结束后的装载路径重放（绝不在流式渲染中重置 Scene）。
 // 重放失败不阻塞启动：计入 failures 供 /debug 审计，进程静默降级为无重放。
+//
+// P0（compact 后视图快路径）：装载命中 compact 后视图时跳过全量重放。旧序是
+// 「全量重放重建 Scene → replaceResumeCompactHistoryProjection 整体替换为
+// compact 之后的切片」，重放的读文件/逐行解析/逐事件 Encode 成本全部被替换
+// 丢弃；大会话（数万行日志、数千条 canonical 消息）上这是启动关键路径最贵的
+// 一段。跳过后展示内容仍由 compact 视图（热上下文切片）提供，canonical 转录
+// 与 --full 恢复不受影响；Once 被消费，首个 turn 的 start() 不会再全量重放
+// （2026-10-09 真机回归仍被挡住）。与空日志路径相同，跳过时显式 reset +
+// 发布空 Scene 装载替换：/resume 切换会话时清掉上一会话的投影，随后的
+// compact 视图替换 / seed 从干净状态开始。
 func (b *chatRuntimeEventBridge) replaySessionLoadLogOnce() {
 	if b == nil || b.session == nil || b.eventLogFilePath() == "" {
 		return
@@ -1182,6 +1196,19 @@ func (b *chatRuntimeEventBridge) replaySessionLoadLogOnce() {
 	runActive := b.runActive
 	b.renderMu.Unlock()
 	if runActive {
+		return
+	}
+	if b.session.resumeHistoryCompactViewActive() {
+		b.replayOnce.Do(func() {
+			b.renderMu.Lock()
+			b.resetCanonicalHistoryProjectionLocked()
+			b.renderMu.Unlock()
+			b.eventLogMu.Lock()
+			b.eventLogCompactViewSkipped = true
+			b.eventLogMu.Unlock()
+			markChatStartup("eventlog_skip_compact_view")
+			b.publishReplayedScene(true)
+		})
 		return
 	}
 	b.replayOnce.Do(func() {
@@ -4888,6 +4915,17 @@ func (b *chatRuntimeEventBridge) eventLogTrimStats() (trimmed, cheapProgress, ch
 	b.eventLogMu.Lock()
 	defer b.eventLogMu.Unlock()
 	return b.eventLogTrimmed, b.eventLogCheapProgress, b.eventLogCheapStarted, b.eventLogCheapFallback
+}
+
+// eventLogSkippedCompactView 报告本次装载是否走了 compact 后视图的跳过快路径
+// （/debug 归因用）。
+func (b *chatRuntimeEventBridge) eventLogSkippedCompactView() bool {
+	if b == nil {
+		return false
+	}
+	b.eventLogMu.Lock()
+	defer b.eventLogMu.Unlock()
+	return b.eventLogCompactViewSkipped
 }
 
 // renderModelSnapshot 返回编码器当前渲染模型快照（/debug 诊断用）。

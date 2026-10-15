@@ -1457,6 +1457,10 @@ func (s *SQLiteSessionStorage) upsertSessionMetadataTx(ctx context.Context, tx *
 	if err := s.preserveActorOwnedSessionContextTx(ctx, tx, session); err != nil {
 		return err
 	}
+	// compact 边界镜像：装载了 history 的写入同步刷新 ContextCompactBoundary，
+	// 使 checkpoint 边界在 canonical 层（metadata context）持久存在；元数据壳
+	// 写入（HistoryLoaded=false）不动该键，避免壳快照覆盖/误删最新边界。
+	syncCompactBoundaryContext(session)
 	metadataJSON, err := json.Marshal(session.Metadata)
 	if err != nil {
 		return fmt.Errorf("encode session metadata: %w", err)

@@ -42,7 +42,12 @@ type chatDebugDisplayFilesInfo struct {
 	LastShellOut     string `json:"last_shell_out,omitempty"`
 	Title            string `json:"title,omitempty"`
 	Summary          string `json:"summary,omitempty"`
-	HistoryMessages  int    `json:"history_messages,omitempty"`
+	// HistoryMessages 是 canonical 转录计数（兼容旧字段名）。大会话上它与
+	// 模型上下文、UI 展示条数差异巨大，新消费方请用下面三个口径字段。
+	HistoryMessages   int `json:"history_messages,omitempty"`
+	CanonicalMessages int `json:"canonical_messages,omitempty"`
+	PromptMessages    int `json:"prompt_messages,omitempty"`
+	DisplayedMessages int `json:"displayed_messages,omitempty"`
 }
 
 // chatDebugDisplayRuntimeInfo 对应面板"运行时调试:"区块。
@@ -215,6 +220,14 @@ func buildChatDebugDisplayFilesInfo(session *ChatSession) *chatDebugDisplayFiles
 		info.Title = preview.Title
 		info.Summary = preview.Summary
 		info.HistoryMessages = preview.MessageCount
+		info.CanonicalMessages = preview.MessageCount
+	}
+	// PromptMessages 是模型上下文投影条数（compact 会改写它）；DisplayedMessages
+	// 是恢复展示历史的条数（compact 后视图只含最近一次 compact 之后的新增消息，
+	// canonical 全量装载时与 CanonicalMessages 对齐；两者都可能远小于 canonical）。
+	if session != nil {
+		info.PromptMessages = len(session.Messages)
+		info.DisplayedMessages = len(session.resumeHistorySnapshot())
 	}
 	return info
 }

@@ -137,6 +137,10 @@ type chatDebugDisplayEventLogInfo struct {
 	CheapProgress uint64 `json:"cheap_progress,omitempty"`
 	CheapStarted  uint64 `json:"cheap_started,omitempty"`
 	CheapFallback uint64 `json:"cheap_fallback,omitempty"`
+	// SkippedCompactView 为真表示本次装载因 compact 后视图跳过了事件日志
+	// 全量重放（P0 快路径；展示内容由恢复投影直接 seed，canonical 全量仍可
+	// 通过 --full 重放）。
+	SkippedCompactView bool `json:"skipped_compact_view,omitempty"`
 }
 
 type chatDebugDisplayModelItemInfo struct {
@@ -599,14 +603,15 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 		if path, count, replayed, failures := bridge.eventLogStats(); path != "" {
 			trimmed, cheapProgress, cheapStarted, cheapFallback := bridge.eventLogTrimStats()
 			enc.EventLog = &chatDebugDisplayEventLogInfo{
-				Path:          path,
-				Recorded:      count,
-				Replayed:      replayed,
-				Failures:      failures,
-				Trimmed:       trimmed,
-				CheapProgress: cheapProgress,
-				CheapStarted:  cheapStarted,
-				CheapFallback: cheapFallback,
+				Path:               path,
+				Recorded:           count,
+				Replayed:           replayed,
+				Failures:           failures,
+				Trimmed:            trimmed,
+				CheapProgress:      cheapProgress,
+				CheapStarted:       cheapStarted,
+				CheapFallback:      cheapFallback,
+				SkippedCompactView: bridge.eventLogSkippedCompactView(),
 			}
 		}
 		model := bridge.renderModelSnapshot()
