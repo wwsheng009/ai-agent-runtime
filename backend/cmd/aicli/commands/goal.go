@@ -199,20 +199,9 @@ func updateGoalStatusCommand(session *ChatSession, status runtimegoal.Status, me
 		return false
 	}
 	now := time.Now()
-	goal.Status = status
-	goal.UpdatedAt = now
-	if status == runtimegoal.StatusComplete {
-		goal.CompletedAt = &now
-		goal.CompletedBy = strings.TrimSpace(completedBy)
-		goal.CompletionSummary = strings.TrimSpace(completionSummary)
-	} else {
-		goal.CompletedAt = nil
-		goal.CompletedBy = ""
-		goal.CompletionSummary = ""
-	}
-	if status != runtimegoal.StatusBlocked {
-		goal.BlockedReason = ""
-	}
+	// 与 runtime-server 的 goal 管理 HTTP 面共用同一规范化（internal/goal），
+	// 保证完成字段 / 阻塞原因的清理规则不漂移。
+	runtimegoal.ApplyUserStatusUpdate(goal, status, completedBy, completionSummary, now)
 	updated, err := store.PutPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)

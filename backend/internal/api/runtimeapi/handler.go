@@ -1120,6 +1120,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}/disable", h.DisableSessionRuntimeMCP).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}/tools", h.ListSessionRuntimeMCPTools).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
+	// 会话 goal 管理面（gap 2）：与 CLI `/goal` 同语义（set/pause/resume/complete/
+	// clear/budget），供 web 控制台不依赖 CLI 管理持久目标（session_goal_handlers.go）。
+	runtimeRouter.HandleFunc("/sessions/{id}/goal", h.GetSessionGoal).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/goal", h.UpdateSessionGoal).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
 	// §4.13 按需解释：只读摘要（模型优先，失败降级规则），不写状态、不解析决定。
