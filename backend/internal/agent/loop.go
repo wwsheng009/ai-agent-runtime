@@ -4615,6 +4615,19 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 			item.Description = "搜索文件内容。优先用 patterns + paths 在一次调用中批量搜索相关目标；高级 ripgrep 选项放入 rg_args。结果统一为 path:line[:column]: text。"
 			item.Parameters = compactGrepParametersForModel(item.Parameters)
 		}
+		switch name {
+		case "aicli_exec":
+			item.Description = "以确定性 argv 启动本机 aicli exec 子进程并返回合并输出。prompt 走 stdin；未显式传 config 时子 aicli 按自身默认配置查找。默认 --disable-tools。"
+			item.Parameters = compactAICLIExecParametersForModel(item.Parameters)
+		case "shell":
+			item.Description = "用检测到的用户 shell 执行一条命令，或用 commands 批量执行并一次返回全部结果。非零退出码是内容结果（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝是硬失败。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要用 bash heredoc。"
+			item.Parameters = compactShellParametersForModel(item.Parameters)
+		case "view":
+			item.Description = "查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出含稳定行号与截断元数据；已知符号名可传 symbol。"
+			item.Parameters = compactViewParametersForModel(item.Parameters)
+		case "todos":
+			item.Description = "创建和管理结构化任务列表跟踪多步任务。状态：pending/in_progress/completed；同一时间最多一个 in_progress。若列表较长请拆分为多次调用，每次只聚焦一组相关任务。"
+		}
 		optimized = append(optimized, item)
 	}
 	return optimized
@@ -4694,6 +4707,71 @@ func compactGrepParametersForModel(parameters map[string]interface{}) map[string
 	compacted := map[string]interface{}{
 		"type":                 "object",
 		"properties":           compactProperties,
+		"additionalProperties": false,
+	}
+	if required, ok := parameters["required"]; ok {
+		compacted["required"] = required
+	}
+	return compacted
+}
+
+// compactAICLIExecParametersForModel narrows aicli_exec's 28-property schema to
+// the surface the model actually needs: prompt + cwd + a minimal exec-knob set.
+// Advanced flags (config/provider/model/profile/skills/logs/debug/http) remain
+// accepted by the executor but are no longer advertised, mirroring the grep
+// whitelist pattern.
+func compactAICLIExecParametersForModel(parameters map[string]interface{}) map[string]interface{} {
+	properties, _ := parameters["properties"].(map[string]interface{})
+	if len(properties) == 0 {
+		return parameters
+	}
+	modelNames := []string{
+		"prompt", "cwd", "timeout_ms", "timeout",
+		"disable_tools", "permission_mode", "yolo", "allow_nested",
+		"session_dir", "log_dir", "output_bytes_cap",
+	}
+	return compactToolPropertiesForModel(parameters, properties, modelNames)
+}
+
+// compactShellParametersForModel keeps the command surfaces and the knobs that
+// change how results are returned; process-level plumbing (detach, output caps,
+// mutated-path auditing) stays accepted but unadvertised.
+func compactShellParametersForModel(parameters map[string]interface{}) map[string]interface{} {
+	properties, _ := parameters["properties"].(map[string]interface{})
+	if len(properties) == 0 {
+		return parameters
+	}
+	modelNames := []string{
+		"command", "commands", "workdir", "timeout_ms", "timeout_sec",
+		"parallel", "max_parallel", "stop_on_error",
+	}
+	return compactToolPropertiesForModel(parameters, properties, modelNames)
+}
+
+// compactViewParametersForModel drops the compact scan-mode knob only; the
+// file/symbol/offset/limit core stays fully advertised.
+func compactViewParametersForModel(parameters map[string]interface{}) map[string]interface{} {
+	properties, _ := parameters["properties"].(map[string]interface{})
+	if len(properties) == 0 {
+		return parameters
+	}
+	modelNames := []string{"file_path", "files", "symbol", "offset", "limit"}
+	return compactToolPropertiesForModel(parameters, properties, modelNames)
+}
+
+// compactToolPropertiesForModel rebuilds a parameters object that advertises
+// only the listed property names. Nested item schemas are preserved verbatim
+// so array properties keep their child definitions.
+func compactToolPropertiesForModel(parameters, properties map[string]interface{}, modelNames []string) map[string]interface{} {
+	compactedProperties := make(map[string]interface{}, len(modelNames))
+	for _, propertyName := range modelNames {
+		if child, ok := properties[propertyName]; ok {
+			compactedProperties[propertyName] = child
+		}
+	}
+	compacted := map[string]interface{}{
+		"type":                 "object",
+		"properties":           compactedProperties,
 		"additionalProperties": false,
 	}
 	if required, ok := parameters["required"]; ok {

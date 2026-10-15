@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
@@ -72,6 +73,65 @@ func TestBuildAgentContextMessages_UsesFrozenEnvironmentBlock(t *testing.T) {
 	}
 	if !foundShell {
 		t.Fatalf("expected shell guidance with frozen capability, got %#v", messages)
+	}
+}
+
+func TestBuildAgentContextMessages_ReadOnlyPolicyWithholdsFileEditingGuidance(t *testing.T) {
+	contextValues := map[string]interface{}{
+		"workspace_path":          `E:\projects\demo`,
+		agentContextToolPolicyKey: &runtimepolicy.ToolExecutionPolicy{ReadOnly: true},
+	}
+	messages := buildAgentContextMessages(contextValues, nil)
+	foundShell := false
+	for _, message := range messages {
+		content := message.Content
+		if strings.Contains(content, "Shell guidance:") {
+			foundShell = true
+		}
+		if strings.Contains(content, "File editing guidance:") {
+			t.Fatalf("read-only policy must withhold file editing guidance, got: %s", content)
+		}
+	}
+	if !foundShell {
+		t.Fatalf("read-only surface keeps shell/read tools: shell guidance must stay, got %#v", messages)
+	}
+}
+
+func TestBuildAgentContextMessages_NarrowAllowlistWithholdsShellGuidance(t *testing.T) {
+	contextValues := map[string]interface{}{
+		"workspace_path": `E:\projects\demo`,
+		agentContextToolPolicyKey: &runtimepolicy.ToolExecutionPolicy{
+			AllowlistEnabled: true,
+			// Neither the shell family nor the read/inspection tools the
+			// shell guidance covers: every subject tool is absent.
+			AllowedTools: map[string]bool{"spawn_subagents": true},
+		},
+	}
+	messages := buildAgentContextMessages(contextValues, nil)
+	for _, message := range messages {
+		if strings.Contains(message.Content, "Shell guidance:") {
+			t.Fatalf("allowlist without shell/read family must withhold shell guidance, got: %s", message.Content)
+		}
+		if strings.Contains(message.Content, "File editing guidance:") {
+			t.Fatalf("allowlist without write tools must withhold file editing guidance, got: %s", message.Content)
+		}
+	}
+}
+
+func TestBuildAgentContextMessages_NoPolicyKeepsLegacyGuidance(t *testing.T) {
+	messages := buildAgentContextMessages(map[string]interface{}{"workspace_path": `E:\projects\demo`}, nil)
+	foundShell := false
+	foundFile := false
+	for _, message := range messages {
+		if strings.Contains(message.Content, "Shell guidance:") {
+			foundShell = true
+		}
+		if strings.Contains(message.Content, "File editing guidance:") {
+			foundFile = true
+		}
+	}
+	if !foundShell || !foundFile {
+		t.Fatalf("no policy must keep legacy guidance sections (shell=%v file=%v)", foundShell, foundFile)
 	}
 }
 

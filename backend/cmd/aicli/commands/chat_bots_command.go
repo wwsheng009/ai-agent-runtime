@@ -366,7 +366,7 @@ func chatScreenBotsActionSpec(host *LocalConnectorHost, cfg connectors.Config) c
 	if cfg.Enabled {
 		add(botsActionDisable, "停用", "停止轮询/长连接（保留配置与凭据）", "disable stop 停用")
 	} else {
-		add(botsActionEnable, "启用", "开始轮询/长连接（需 allowed_users 非空）", "enable start 启用")
+		add(botsActionEnable, "启用", "开始轮询/长连接（allowed_users 留空=不限制用户）", "enable start 启用")
 	}
 	add(botsActionLogs, "查看日志", "最近 50 条运行日志 + 累计计数", "logs 日志")
 	add(botsActionDelete, "删除", "从配置移除该机器人（不可恢复）", "delete remove 删除")

@@ -449,7 +449,7 @@ type SkillFunction struct {
 	// skillOutputWindow 解析本会话 skills_runtime.skill_output_window_bytes；
 	// 未接线或返回 0 时 ExecuteWithMeta 回退 skillModelVisibleBudgetBytes。
 	skillOutputWindow func() int
-	schema           map[string]interface{}
+	schema            map[string]interface{}
 	// invocationPublisher 把技能调用发布到本地 runtime 总线（SK-3 观测）；
 	// nil 时退化为结构化日志（宿主尚未建立 EventBus 的场景）。
 	invocationPublisher func(runtimeskill.ImplicitInvocation)

@@ -241,6 +241,7 @@ aicli 侧已实测 `cache_read_reported: true`）。提供 per-profile 的 MCP �
 
 - profile 体系（已实施）：[docs/profile/architecture.md](../profile/architecture.md) /
   [design.md](../profile/design.md) / [configuration.md](../profile/configuration.md)
+- 后续主线（暴露面收敛）：[docs/tools/progressive-tool-disclosure-plan.md](../tools/progressive-tool-disclosure-plan.md)（v2，2026-10-15；与 §22 登记一致）
 - 执行核统一：`docs/automation-tasks/aicli-executor-reuse-design.md`（E3.4 系列）
 - MCP 集成：[docs/mcp/mcp-tool-llm-integration.md](../mcp/mcp-tool-llm-integration.md)
 - 现场依据：会话 `session_20261014141903_lb0uSShK` / `session_20261014142651_sezoj1oD`
@@ -935,3 +936,27 @@ runtime-server 上全部承接（请求面 + 执行 + 用户回答/裁决通道�
 - inline 的 ask_user_question 依赖请求 ctx（非 resume 时客户端断开即清
   挂起）；actor 版 waiter 跨请求存活。两者都由 answer_question 命令
   唤醒，Web 前端统一走该通道。
+
+---
+
+## 22. 后续主线登记：渐进式工具披露（2026-10-15）
+
+**登记对象**：[docs/tools/progressive-tool-disclosure-plan.md](../tools/progressive-tool-disclosure-plan.md)（v2，2026-10-15）。
+
+**与本文档的关系**：本文档收敛"工具面从哪来、如何被观测/审计、双宿主如何同源"（装配面与账本）；披露方案在其之上收敛"授权面之内，多少工具与多少 schema 进入模型可见前缀"（暴露面）。分工与包含关系（授权面 ⊇ 暴露面）：
+
+| 层 | 时间点 | 归属 | 职责 |
+| --- | --- | --- | --- |
+| 授权范围 | 会话/agent 构建期 | profile 解析链：`profile.Resolve`（`resolver.go:10`）→ `MergeToolPolicies`（`merge.go:153`）→ `profileinput.BuildToolExecutionPolicy`（`inputs.go:166`）；双落点 `applyAgentExecutionPolicy`（`handler.go:5568`）/ `buildLocalChatToolPolicy`（`chat_actor_host.go:2767`） | allowlist / denylist / read_only / sandbox（`ResolvedToolPolicy` 字段集）；其余策略字段由各宿主既有装配补齐 |
+| 暴露面 | 装配期（回合冻结前一次成型） | 披露方案层一~层三 | 组启停 / schema 瘦身 / 路由表；**只做减法，不得扩权** |
+| 执行拦截 | 运行时每调用 | `ToolExecutionPolicy` 执行期检查（既有） | 权限/沙箱/审批语义，不变 |
+
+**登记要点**：
+
+1. 组配置建议挂 profile 解析链（新字段经 Resolve/Merge 融合后落到既有策略字段与 ShouldList 条件），不新建第四套判定；必须双落点接线——`profile_tool_policy_guard_test.go` 已有两落点等价性护栏；
+2. 冲突优先级（建议，待披露方案阶段 3 定稿）：profile 显式 deny > 组关闭 > allowlist/默认；组关闭永不放宽授权；
+3. 换面时机：`BuildToolSurfaceEligibilityKey` 已把 policy 纳入 key；profile 变更 = 新 key = 新会话/新 cache generation，不在会话中途换面（沿用 §15.2 冻结语义）；
+4. 目录变化的既有先例必须复用：MCP 晚到工具走"策略白名单重同步（`chat_tool_policy_sync.go` 的 `syncLocalChatToolPolicyAllowlist`）+ 稳定面失效（`chat_mcp_surface_invalidation.go`）"，在**回合边界**生效；组启停涉及目录变化时走同一通道；
+5. 观测口径：`/runtime/tools` 与请求 metadata 需能区分 `policy_denied` 与 `group_disabled`（披露方案 §4.1 解释词表）。
+
+**定稿**：组配置字段 = `tools.disabled_groups`（纯减法；protected = `read`/`edit`/`shell`；组注册表落 `internal/toolgroups`）——见阶段 3 前置草案 [docs/tools/profile-tool-groups-design.md](../tools/profile-tool-groups-design.md) v0.2（2026-10-15）；实现随阶段 3a。

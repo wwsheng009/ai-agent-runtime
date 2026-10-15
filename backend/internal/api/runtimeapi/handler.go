@@ -2118,6 +2118,9 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if profileState != nil && len(profileState.ContextValues) > 0 {
 		mergeProfileContextInto(agentContext, profileState.ContextValues)
 	}
+	if profilePolicy := profileStateToolPolicy(profileState); profilePolicy != nil {
+		agentContext[agentContextToolPolicyKey] = profilePolicy
+	}
 	estimatedPromptTokens := h.estimateMessagesTokens(chatMessages)
 	if err := h.enforceUsageQuota(usageScope, estimatedPromptTokens, "agent_chat"); err != nil {
 		h.writeError(w, http.StatusTooManyRequests, err)

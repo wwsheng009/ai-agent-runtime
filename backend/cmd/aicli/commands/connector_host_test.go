@@ -118,12 +118,14 @@ func TestLocalConnectorHostCloseIsIdempotent(t *testing.T) {
 	host.Close()
 }
 
-// TestStartLocalConnectorsEnforcesAllowedUsersGate 覆盖 Fix-S2 的 aicli 接线：
-// StartLocalConnectors 必须设置 RequireAllowedUsers=true——启用中的连接器若
-// policy.allowed_users 为空，则不得 Activate（不向平台发 getMe/轮询）；同一份
-// 配置里白名单非空的连接器照常 Activate，既证明配置被正确解析，也证明闸只拦
-// 空白名单（避免 YAML 解析失败导致的假阳性）。
-func TestStartLocalConnectorsEnforcesAllowedUsersGate(t *testing.T) {
+// TestStartLocalConnectorsAllowsEmptyWhitelist 覆盖 2026-10-15 语义调整：
+// StartLocalConnectors 不再对空白名单 fail-closed（RequireAllowedUsers=false，
+// 与 runtime-server/gateway 同口径）——allowed_users 为空 = 不限制用户，
+// 启用中的连接器照常 Activate/轮询；同一份配置里白名单非空的连接器同样
+// Activate，既证明配置被正确解析，也证明白名单仍是可选收窄项而非启动前提。
+// 需要 fail-closed 的部署显式把 connectors.Deps.RequireAllowedUsers 置回 true
+// （闸本体测试见 internal/connectors/service_test.go）。
+func TestStartLocalConnectorsAllowsEmptyWhitelist(t *testing.T) {
 	var mu sync.Mutex
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +140,7 @@ func TestStartLocalConnectorsEnforcesAllowedUsersGate(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 	configYAML := "connectors:\n" +
-		"  - id: tg-gate\n" +
+		"  - id: tg-open-empty-wl\n" +
 		"    provider: telegram\n" +
 		"    enabled: true\n" +
 		"    mode: polling\n" +
@@ -146,7 +148,7 @@ func TestStartLocalConnectorsEnforcesAllowedUsersGate(t *testing.T) {
 		"      api_base: " + server.URL + "\n" +
 		"    secrets:\n" +
 		"      bot_token: \"111:gate\"\n" +
-		"  - id: tg-open\n" +
+		"  - id: tg-narrowed\n" +
 		"    provider: telegram\n" +
 		"    enabled: true\n" +
 		"    mode: webhook\n" +
@@ -168,23 +170,13 @@ func TestStartLocalConnectorsEnforcesAllowedUsersGate(t *testing.T) {
 	require.NotNil(t, host)
 	t.Cleanup(host.Close)
 
-	// tg-open 的 Activate 在 service.Start 内同步完成；轮询等 100ms 兜底。
+	// 两个连接器（空白名单 + 非空白名单）都应完成 Activate。
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		for _, path := range paths {
-			if strings.Contains(path, "222:open") {
-				return true
-			}
-		}
-		return false
-	}, 3*time.Second, 10*time.Millisecond, "白名单非空连接器应照常 Activate")
-
-	time.Sleep(100 * time.Millisecond) // 留出闸失效时空白名单连接器发请求的窗口
-	mu.Lock()
-	joined := strings.Join(paths, "\n")
-	mu.Unlock()
-	require.NotContains(t, joined, "111:gate", "空白名单连接器不得 Activate/轮询")
+		joined := strings.Join(paths, "\n")
+		return strings.Contains(joined, "111:gate") && strings.Contains(joined, "222:open")
+	}, 3*time.Second, 10*time.Millisecond, "空白名单与非空白名单连接器都应照常 Activate")
 	require.Contains(t, strings.Join(logs, "\n"), "aicli connectors: started")
 }
 

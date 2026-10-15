@@ -284,9 +284,11 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		return nil, fmt.Errorf("aicli connectors: resolve canonical state path: %w", statePathErr)
 	}
 	store := storefile.NewConfigStore(configPath, statePath)
-	// 服务层日志：白名单 fail-closed 闸跳过启动是安全告警（消息含
-	// "fail-closed"，见 connectors.Service.startConnector），升级为 warn；
-	// 其余生命周期日志保持调用方给定的级别（默认 info）。
+	// 服务层日志：RequireAllowedUsers=true 的宿主（需要更严部署的显式配置）
+	// 在 fail-closed 闸跳过启动时会产生含 "fail-closed" 的安全告警，升级为
+	// warn；其余生命周期日志保持调用方给定的级别（默认 info）。
+	// 2026-10-15 起默认宿主（含 aicli）停用该闸：空白名单 = 不限制用户，
+	// 启动不再依赖 allowed_users。
 	serviceLogf := func(format string, args ...any) {
 		if strings.Contains(format, "fail-closed") {
 			logpkg.Warnf(format, args...)
@@ -303,9 +305,13 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		// mesh 不可用/未入网时退回 `aicli:<pid>`。policy.runtime_owner 准入按
 		// HostKind（connectors.HostMatchesPolicy）匹配，存量裸词配置不受影响。
 		HostID: connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID()),
-		// Fix-S2：aicli 侧 fail-closed——启用中的连接器若没有非空
-		// policy.allowed_users，跳过启动（不轮询），避免对任意平台用户开放。
-		RequireAllowedUsers: true,
+		// 白名单策略（2026-10-15 调整）：allowed_users 为空 = 不限制（放行所有
+		// 平台用户），非空 = 仅命中清单的用户可对话。此前 aicli 侧 fail-closed
+		//（空白名单跳过启动）会让新连接器既不轮询也无法通过 IM 首条消息拿到
+		// 平台用户标识来补白名单（如 QQ 的 user_openid 对用户不可预知），运维
+		// 死锁；现与 runtime-server/gateway 同口径停用该闸（RequireAllowedUsers
+		// 仍保留，需要更严部署的宿主可显式置回 true）。
+		RequireAllowedUsers: false,
 		// P2 切片 B 后半（docs/bots/09 §7.2/§7.3）：mesh peers 视图与远程派发
 		// 实装（读 node record 档案 + POST 对端 /api/connectors/dispatch）。
 		Peers:          aicliMeshRunnerPeers(logf),
@@ -381,7 +387,7 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 					}
 				}
 			},
-			Store:  store,
+			Store: store,
 			// D5 完整投递（2026-10-14 修复）：绑定会话精确投递，scope=all 未绑定
 			// 事件回退广播到接受连接器的绑定 chats。
 			NotifyScoped: service.NotifyAttentionScoped,
@@ -893,7 +899,7 @@ func aicliDispatchToRunnerPeer(logf func(format string, args ...any)) func(conte
 			return connectors.DispatchResult{}, fmt.Errorf("节点 %s 返回 HTTP %d：%s", req.Target.NodeID, resp.StatusCode, aicliDispatchErrorLine(string(data)))
 		}
 		var wire struct {
-			Reply []connectors.OutboundMessage `json:"reply"`
+			Reply   []connectors.OutboundMessage `json:"reply"`
 			Session struct {
 				NodeID    string `json:"node_id"`
 				SessionID string `json:"session_id"`

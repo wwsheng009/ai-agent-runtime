@@ -7,6 +7,8 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextpack"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/prompt/toolguidance"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -15,15 +17,20 @@ import (
 
 const agentContextSummaryMaxBytes = 4096
 
+// agentContextToolPolicyKey is the agentContext key under which handler.go
+// stores the resolved execution policy for guidance derivation.
+const agentContextToolPolicyKey = "tool_guidance_policy"
+
 func buildAgentContextMessages(contextValues map[string]interface{}, workspaceCtx *workspace.WorkspaceContext) []types.Message {
+	guidanceFacts := agentContextToolGuidanceFacts(contextValues)
 	messages := make([]types.Message, 0, 4)
 	if environment := buildAgentEnvironmentContextMessage(contextValues); environment != nil {
 		messages = append(messages, *environment)
 	}
-	if guidance := buildAgentShellGuidanceMessage(contextValues); guidance != nil {
+	if guidance := buildAgentShellGuidanceMessage(contextValues, guidanceFacts); guidance != nil {
 		messages = append(messages, *guidance)
 	}
-	if guidance := buildAgentFileEditingGuidanceMessage(); guidance != nil {
+	if guidance := buildAgentFileEditingGuidanceMessage(guidanceFacts); guidance != nil {
 		messages = append(messages, *guidance)
 	}
 	if workspaceCtx != nil && strings.TrimSpace(workspaceCtx.Summary) != "" {
@@ -35,6 +42,18 @@ func buildAgentContextMessages(contextValues map[string]interface{}, workspaceCt
 	return messages
 }
 
+// agentContextToolGuidanceFacts derives tool-visibility facts from the policy
+// recorded in the agent context values (handler.go stores it under
+// "tool_guidance_policy"). nil means no narrowing: hosts keep the legacy
+// unconditional guidance sections.
+func agentContextToolGuidanceFacts(contextValues map[string]interface{}) *runtimeprompt.ToolGuidanceFacts {
+	if len(contextValues) == 0 {
+		return nil
+	}
+	policy, _ := contextValues[agentContextToolPolicyKey].(*runtimepolicy.ToolExecutionPolicy)
+	return toolguidance.FactsFromPolicy(policy)
+}
+
 func buildAgentEnvironmentContextMessage(contextValues map[string]interface{}) *types.Message {
 	workspacePath := agentContextWorkspacePath(contextValues)
 	block := strings.TrimSpace(agentContextEnvironmentBlock(contextValues, workspacePath))
@@ -44,22 +63,22 @@ func buildAgentEnvironmentContextMessage(contextValues map[string]interface{}) *
 	return types.NewSystemMessage("Environment context:\n" + block)
 }
 
-func buildAgentShellGuidanceMessage(contextValues map[string]interface{}) *types.Message {
+func buildAgentShellGuidanceMessage(contextValues map[string]interface{}, facts *runtimeprompt.ToolGuidanceFacts) *types.Message {
 	capability := ""
 	if len(contextValues) > 0 {
 		if value, ok := contextValues[sessionmeta.EnvironmentCapabilityGuidance].(string); ok {
 			capability = strings.TrimSpace(value)
 		}
 	}
-	guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceWithCapability(capability))
+	guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceFacts(facts, capability))
 	if guidance == "" {
 		return nil
 	}
 	return types.NewSystemMessage(guidance)
 }
 
-func buildAgentFileEditingGuidanceMessage() *types.Message {
-	guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance())
+func buildAgentFileEditingGuidanceMessage(facts *runtimeprompt.ToolGuidanceFacts) *types.Message {
+	guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidanceFacts(facts))
 	if guidance == "" {
 		return nil
 	}

@@ -35,14 +35,14 @@ func runStartupProviderLogin(cfg *config.Config, reader *bufio.Reader, presetPro
 	setDefault := len(cfg.Providers.Items) == 0 || strings.TrimSpace(cfg.Providers.DefaultProvider) == ""
 
 	req := providerLoginRequest{
-		Context:     context.Background(),
-		Config:      cfg,
-		ConfigPath:  cfg.ConfigFilePath,
+		Context:      context.Background(),
+		Config:       cfg,
+		ConfigPath:   cfg.ConfigFilePath,
 		ProviderName: presetProviderName,
-		SetDefault:  setDefault,
-		Interactive: true,
-		Timeout:     60 * time.Second,
-		Prompter:    prompter,
+		SetDefault:   setDefault,
+		Interactive:  true,
+		Timeout:      60 * time.Second,
+		Prompter:     prompter,
 	}
 	result, err := runProviderLogin(req)
 	if err != nil {

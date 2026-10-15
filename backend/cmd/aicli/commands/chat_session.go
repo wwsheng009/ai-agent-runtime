@@ -24,6 +24,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/prompt/toolguidance"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
@@ -2619,25 +2620,36 @@ func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd 
 	if context := strings.TrimSpace(snapshot.ContextBlock); context != "" {
 		lines = append(lines, "Environment context:\n"+context)
 	}
-	if guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceWithCapability(snapshot.CapabilityGuidance)); guidance != "" {
+	guidanceFacts := chatSessionToolGuidanceFacts(session)
+	if guidance := strings.TrimSpace(runtimeprompt.RenderShellExecutionGuidanceFacts(guidanceFacts, snapshot.CapabilityGuidance)); guidance != "" {
 		lines = append(lines, guidance)
 	}
-	if guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidance()); guidance != "" {
+	if guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidanceFacts(guidanceFacts)); guidance != "" {
 		lines = append(lines, guidance)
 	}
-	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidance()); guidance != "" {
+	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidanceFacts(guidanceFacts)); guidance != "" {
 		lines = append(lines, guidance)
 	}
-	if guidance := strings.TrimSpace(runtimeprompt.RenderTaskDifficultyGuidance()); guidance != "" {
+	if guidance := strings.TrimSpace(runtimeprompt.RenderTaskDifficultyGuidanceFacts(guidanceFacts)); guidance != "" {
 		lines = append(lines, guidance)
 	}
-	if guidance := strings.TrimSpace(runtimeprompt.RenderMultiAgentCollaborationGuidance()); guidance != "" {
+	if guidance := strings.TrimSpace(runtimeprompt.RenderMultiAgentCollaborationGuidanceFacts(guidanceFacts)); guidance != "" {
 		lines = append(lines, guidance)
 	}
 	if profilePrompt != "" && appendProfilePrompt {
 		lines = append(lines, profilePrompt)
 	}
 	return strings.Join(lines, "\n\n")
+}
+
+// chatSessionToolGuidanceFacts derives tool-visibility facts from the session's
+// resolved tool policy so prompt guidance sections follow the actual model
+// surface: sections whose subject tools were removed (profile denylist /
+// read-only stripping) are withheld instead of steering toward unavailable
+// tools. nil facts (no policy / no narrowing) keep the legacy unconditional
+// sections byte-for-byte.
+func chatSessionToolGuidanceFacts(session *ChatSession) *runtimeprompt.ToolGuidanceFacts {
+	return toolguidance.FactsFromPolicy(session.ToolPolicy)
 }
 
 // ensureSessionEnvironmentSnapshot freezes measured environment facts onto the
