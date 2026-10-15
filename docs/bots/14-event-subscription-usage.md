@@ -232,16 +232,16 @@ policy:
   （保留未展示的键）；关闭订阅时显式写 `enabled:false`。
 - 鉴权：runtime-server 管理面 token（与 skills 管理面同口径）。
 
-### 11.2 aicli 微前端（micro web，`/web/`）——⚠️ 不含订阅编辑面
+### 11.2 aicli 微前端（micro web，`/web/`）——连接器与订阅均可编辑
 
 - 入口：`aicli --web` 后打开 `http://127.0.0.1:<port>/web/`，切到「连接器」页签。
-- 能力：连接器列表 / 新建 / 编辑 / 测试 / 日志 / 绑定管理；策略表单仅含
-  `allowed_users`、`command_prefix`、`session_mode`、`reply_mode`、`runtime_owner`、`route`。
-- **⚠️ 现状（2026-10-15）**：微前端保存走 `PATCH /api/connectors/{id}`，而后端对
-  `policy` 是**整体替换**（`policyFrom(view)`）；其表单未携带的 `events`、`notify`、
-  `content_mirror` 会被一并清空。**该连接器一旦配置了订阅，避免再用微前端保存它的策略**——
-  否则订阅、通知开关、内容镜像开关都会丢失。要在页面上改订阅：用 11.1 的 React 对话框，
-  或走 11.3 的 REST（携带全量 policy）。
+- 能力：连接器列表 / 新建 / 编辑 / 测试 / 日志 / 绑定管理；策略表单含
+  `allowed_users`、`command_prefix`、`session_mode`、`reply_mode`、`runtime_owner`、`route`，
+  以及**事件订阅编辑器**（总开关 + 逐条 id / 会话选择器（bound|ids|all + 列表）/
+  事件类型 / 投递形态（notice|content|digest|stream）/ 单条启停；2026-10-15 补齐）。
+- 保存语义（与 React 对话框对齐）：保存走 `PATCH /api/connectors/{id}`，前端先**原样带回
+  既有 policy** 再覆盖表单字段与 `route`/`events`——未展示键（`notify`、`content_mirror` 等）
+  不再丢失（2026-10-15 修复此前「保存策略会清空订阅/开关」的问题）。
 - TUI `/bots`：只读（状态 / 日志 / 绑定查看）。
 
 ### 11.3 REST 直连（脚本 / 自动化）

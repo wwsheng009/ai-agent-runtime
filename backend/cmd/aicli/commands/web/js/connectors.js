@@ -501,8 +501,24 @@ function renderEditor() {
     '<datalist id="connector-route-reasoning-list" hidden>' + routeReasoningOptions() + "</datalist>" +
     "</div>";
 
+  // 事件订阅(docs/bots/13 §6.1;与 React 对话框同口径):总开关 + 逐条编辑。
+  // 行由 renderEventSubRows 在 setModalBody 后回填;字段用 data-sub-field 标记,
+  // collectEventSubs 按行收集后整体写入 policy.events。
+  var events = (policy.events || {});
+  html += '<div class="connector-form-section">事件订阅</div>' +
+    '<div class="connector-form-grid">' +
+    fieldHTML("启用事件订阅", '<input id="connector-form-events-enabled" type="checkbox"' +
+      (events.enabled ? " checked" : "") + ">",
+      "按下方订阅把事件投递到绑定 chat(docs/bots/13)。关闭时显式写 enabled:false;旧 notify/content_mirror 仅在此未配置时兜底。") +
+    "</div>" +
+    '<div id="connector-event-subs"></div>' +
+    '<p class="connector-form-note">types 必填(支持 assistant_message / turn.* / approval 等别名与族通配);' +
+    "工作类(tool./subagent.)仅 digest 生效,stream 仅 assistant_delta;空 types/未知模式的订阅会被后端忽略。</p>" +
+    '<div class="connector-events-actions"><button type="button" data-editor="add-event-sub">＋ 添加订阅</button></div>';
+
   html += '<p class="connector-form-note">留空=保持原值;输入 <code>__clear__</code> 可清除既有非密钥字段。密钥只写不读(GET 仅回字段名)。</p>';
   setModalBody(html);
+  renderEventSubRows(events.subscriptions || []);
   setModalFooter(
     '<button type="button" data-editor="cancel">取消</button>' +
     '<button type="button" class="primary-btn" data-editor="save">保存</button>'
@@ -894,6 +910,114 @@ function schemaFieldHTML(field, settings, secretKeys, item) {
     esc(field.placeholder || "") + '" value="' + esc(fallback) + '">', help);
 }
 
+// ---- 事件订阅编辑(docs/bots/13 §6.1;与 React 对话框同口径) ----
+
+// renderEventSubRows 用既有订阅回填行列表(renderEditor 于 setModalBody 后调用)。
+function renderEventSubRows(subs) {
+  var host = connEl("connector-event-subs");
+  if (!host) { return; }
+  var html = "";
+  for (var i = 0; i < subs.length; i++) { html += eventSubRowHTML(subs[i]); }
+  host.innerHTML = html;
+}
+
+// eventSubRowHTML 渲染一条订阅行:字段以 data-sub-field 标记,collectEventSubs 按行收集。
+function eventSubRowHTML(sub) {
+  sub = sub || {};
+  var sessions = sub.sessions || {};
+  var modeOptions = subSelectOptions(
+    [["bound", "bound(绑定会话)"], ["ids", "ids(指定会话)"], ["all", "all(全部会话)"]],
+    sessions.mode || "bound");
+  var deliverOptions = subSelectOptions(
+    [["notice", "notice(通知)"], ["content", "content(正文副本)"],
+     ["digest", "digest(聚合)"], ["stream", "stream(流式编辑)"]],
+    sub.deliver || "notice");
+  var enabled = sub.enabled !== false; // 缺省启用(与后端 IsEnabled 同口径)
+  return '<div class="connector-event-sub" data-event-sub>' +
+    '<div class="connector-form-grid">' +
+    fieldHTML("订阅 ID", '<input type="text" data-sub-field="id" autocomplete="off" placeholder="如 main-chat" value="' + esc(sub.id || "") + '">',
+      "稳定标识,落审计日志;可留空(后端按序号生成)。") +
+    fieldHTML("会话模式", '<select data-sub-field="sessions-mode">' + modeOptions + "</select>",
+      "bound=绑定到本 bot 的会话;ids=显式列表;all=宿主全部会话。") +
+    fieldHTML("会话列表(mode=ids)", '<input type="text" data-sub-field="sessions-ids" autocomplete="off" placeholder="session_a, session_b" value="' + esc((sessions.ids || []).join(", ")) + '">',
+      "逗号/空格分隔;mode 非 ids 时忽略。") +
+    fieldHTML("事件类型 *", '<input type="text" data-sub-field="types" autocomplete="off" placeholder="assistant_message, turn.*, approval" value="' + esc((sub.types || []).join(", ")) + '">',
+      "支持规范名/别名/族通配(turn.*、work.*)。") +
+    fieldHTML("投递形态", '<select data-sub-field="deliver">' + deliverOptions + "</select>",
+      "stream 仅 assistant_delta;工作类仅 digest。") +
+    fieldHTML("启用", '<input type="checkbox" data-sub-field="enabled"' + (enabled ? " checked" : "") + ">",
+      "单条启停(缺省启用)。") +
+    "</div>" +
+    '<button type="button" data-editor="remove-event-sub">删除此订阅</button>' +
+    "</div>";
+}
+
+// subSelectOptions 生成 select 选项(选中项 = current)。
+function subSelectOptions(pairs, current) {
+  var html = "";
+  for (var i = 0; i < pairs.length; i++) {
+    html += '<option value="' + esc(pairs[i][0]) + '"' + (pairs[i][0] === current ? " selected" : "") + ">" +
+      esc(pairs[i][1]) + "</option>";
+  }
+  return html;
+}
+
+// appendEventSubRow 追加一条空订阅行(默认 bound/notice/启用)。
+function appendEventSubRow() {
+  var host = connEl("connector-event-subs");
+  if (!host) { return; }
+  host.insertAdjacentHTML("beforeend", eventSubRowHTML({}));
+}
+
+// removeEventSubRow 删除按钮所在行。
+function removeEventSubRow(btn) {
+  var row = btn && btn.closest ? btn.closest("[data-event-sub]") : null;
+  if (row && row.parentNode) { row.parentNode.removeChild(row); }
+}
+
+// collectEventSubs 把行列表收集为 policy.events(关闭时只写 enabled:false,
+// 与 React mergeEventsIntoPayload 同语义)。
+function collectEventSubs() {
+  var enabledEl = connEl("connector-form-events-enabled");
+  if (!enabledEl || !enabledEl.checked) { return { enabled: false }; }
+  var subs = [];
+  var host = connEl("connector-event-subs");
+  var rows = host ? host.querySelectorAll("[data-event-sub]") : [];
+  for (var i = 0; i < rows.length; i++) { subs.push(collectEventSubRow(rows[i])); }
+  return { enabled: true, subscriptions: subs };
+}
+
+function collectEventSubRow(row) {
+  var sub = {
+    id: subFieldValue(row, "id").trim(),
+    sessions: {
+      mode: subFieldValue(row, "sessions-mode") || "bound",
+      ids: splitSubList(subFieldValue(row, "sessions-ids"))
+    },
+    types: splitSubList(subFieldValue(row, "types")),
+    deliver: subFieldValue(row, "deliver") || "notice"
+  };
+  var enabledField = row.querySelector('[data-sub-field="enabled"]');
+  if (enabledField && !enabledField.checked) { sub.enabled = false; }
+  return sub;
+}
+
+function subFieldValue(row, name) {
+  var el = row ? row.querySelector('[data-sub-field="' + name + '"]') : null;
+  return el && el.value ? el.value : "";
+}
+
+// splitSubList 解析逗号/空白分隔的列表(容忍中文逗号)。
+function splitSubList(raw) {
+  var parts = String(raw || "").split(/[\s,，]+/);
+  var out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var item = parts[i].trim();
+    if (item) { out.push(item); }
+  }
+  return out;
+}
+
 // collectEditor 读取表单为 submitRequest(与 restapi 的字段一一对应)。
 // settings/secrets 的留空=保持语义交给后端 MergeSubmit;新建时留空走默认值。
 function collectEditor() {
@@ -929,24 +1053,34 @@ function collectEditor() {
       if (name) { users.push(name); }
     }
   }
+  // 事件订阅(docs/bots/13):与 React 同口径——关闭仅写 enabled:false,开启写全量 subscriptions。
+  var events = collectEventSubs();
+  // 保留既有 policy 的未展示键(notify/content_mirror 等;route/events 随后覆盖)。
+  // 后端 policyFrom 是整体替换语义:编辑态必须把既有 policy 带回,否则保存策略会丢配置
+  // (2026-10-15 修复:此前表单未携带 events/notify/content_mirror 会被清空)。
+  var policy = {};
+  if (editorState.isEdit) {
+    var current = findItem(editorState.id);
+    if (current && current.policy) { policy = Object.assign({}, current.policy); }
+  }
+  policy.allowed_users = users;
+  policy.command_prefix = ((connEl("connector-form-command-prefix") || {}).value || "").trim();
+  policy.session_mode = ((connEl("connector-form-session-mode") || {}).value || "").trim();
+  policy.reply_mode = ((connEl("connector-form-reply-mode") || {}).value || "").trim();
+  policy.runtime_owner = (connEl("connector-form-runtime-owner") || {}).value || "";
+  policy.route = {
+    provider: ((connEl("connector-form-route-provider") || {}).value || "").trim(),
+    model: ((connEl("connector-form-route-model") || {}).value || "").trim(),
+    reasoning_effort: ((connEl("connector-form-route-reasoning") || {}).value || "").trim()
+  };
+  policy.events = events;
   var payload = {
     name: (connEl("connector-form-name") || {}).value || "",
     enabled: !!(connEl("connector-form-enabled") || {}).checked,
     mode: (connEl("connector-form-mode") || {}).value || "",
     settings: settings,
     secrets: secrets,
-    policy: {
-      allowed_users: users,
-      command_prefix: ((connEl("connector-form-command-prefix") || {}).value || "").trim(),
-      session_mode: ((connEl("connector-form-session-mode") || {}).value || "").trim(),
-      reply_mode: ((connEl("connector-form-reply-mode") || {}).value || "").trim(),
-      runtime_owner: (connEl("connector-form-runtime-owner") || {}).value || "",
-      route: {
-        provider: ((connEl("connector-form-route-provider") || {}).value || "").trim(),
-        model: ((connEl("connector-form-route-model") || {}).value || "").trim(),
-        reasoning_effort: ((connEl("connector-form-route-reasoning") || {}).value || "").trim()
-      }
-    }
+    policy: policy
   };
   if (!editorState.isEdit) {
     payload.id = ((connEl("connector-form-id") || {}).value || "").trim();
@@ -1258,8 +1392,16 @@ function onQRButton(act) {
 }
 
 function onModalBodyClick(event) {
-  var btn = event.target && event.target.closest ? event.target.closest("[data-qr]") : null;
-  if (btn) { onQRButton(btn.getAttribute("data-qr")); }
+  var target = event.target;
+  if (!target || !target.closest) { return; }
+  var qrBtn = target.closest("[data-qr]");
+  if (qrBtn) { onQRButton(qrBtn.getAttribute("data-qr")); return; }
+  // 事件订阅行操作(docs/bots/13):添加/删除(委托,行内按钮随行销毁)。
+  var editorBtn = target.closest("[data-editor]");
+  if (!editorBtn) { return; }
+  var act = editorBtn.getAttribute("data-editor");
+  if (act === "add-event-sub") { appendEventSubRow(); }
+  if (act === "remove-event-sub") { removeEventSubRow(editorBtn); }
 }
 
 // 新建时切换通道 → 按新 Schema 重渲染字段集(编辑时 provider 锁定,选择器不存在)。

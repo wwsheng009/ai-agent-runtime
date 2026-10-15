@@ -3317,6 +3317,11 @@ body.low-bandwidth img {
 .connector-field textarea { resize: vertical; }
 .connector-field-help { color: var(--fg3); font-size: 11px; }
 .connector-form-note { color: var(--fg3); font-size: 11px; margin: 2px 0 0; }
+/* 事件订阅(docs/bots/13):行卡片 + 删除按钮 + 添加按钮行 */
+.connector-event-sub { border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-top: 6px; }
+.connector-event-sub > button { margin-top: 6px; font-size: 12px; }
+.connector-events-actions { margin-top: 6px; }
+#connector-event-subs:empty { display: none; }
 
 /* 连接器表单模型路由三字段:input + ▼ + 自定义弹层(同配置编辑器协议字段方案)。
    不用原生 datalist 下拉:input 有值时浏览器按当前值过滤候选,下拉恒显示 0~1 项,

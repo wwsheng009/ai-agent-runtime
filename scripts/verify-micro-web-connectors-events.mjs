@@ -1,0 +1,339 @@
+// 行为验证:aicli micro web client 连接器对话框——事件订阅编辑(docs/bots/13 §6.1)
+// 与「保存策略不再清空未展示键」修复。
+// 运行: node scripts/verify-micro-web-connectors-events.mjs  (exit 0 = 全部通过)
+// 覆盖:
+//   1. eventSubRowHTML:字段/选中态/勾选态/删除按钮结构;
+//   2. renderEventSubRows → collectEventSubs 回填-收集往返(ids 解析、enabled:false 保留);
+//   3. 总开关关闭 = 仅 {enabled:false}(与 React mergeEventsIntoPayload 同语义);
+//   4. onModalBodyClick 委托:添加行/删除行;
+//   5. collectEditor:编辑态保留既有 policy 未展示键(notify/content_mirror),
+//      覆盖 route/events;新建态不继承。
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const root = path.dirname(fileURLToPath(import.meta.url)) + "/..";
+const jsPath = path.join(root, "backend/cmd/aicli/commands/web/js/connectors.js");
+const src = readFileSync(jsPath, "utf8");
+
+let failures = 0;
+const ok = (cond, name, detail) => {
+  if (cond) { console.log("  ok  - " + name); }
+  else { failures++; console.error("  FAIL - " + name + (detail !== undefined ? " :: " + JSON.stringify(detail) : "")); }
+};
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// ---- 静态守卫 ----
+ok(/function collectEventSubs\(/.test(src), "源码包含 collectEventSubs");
+ok(/function onModalBodyClick[\s\S]*add-event-sub/.test(src), "onModalBodyClick 委托包含 add-event-sub");
+ok(/Object\.assign\(\{\}, current\.policy\)/.test(src), "collectEditor 编辑态保留既有 policy(浅拷贝)");
+
+// ---- 最小 DOM mock ----
+function matchesSelector(node, sel) {
+  const m = String(sel).match(/^\[([\w-]+)(?:="([^"]*)")?\]$/);
+  if (!m) { return false; }
+  const attr = m[1], val = m[2];
+  if (!(attr in (node.attributes || {}))) { return false; }
+  return val === undefined || String(node.attributes[attr]) === val;
+}
+function makeNode(tag, attrs = {}) {
+  const node = {
+    tagName: tag.toUpperCase(),
+    attrs: Object.assign({}, attrs.attr || {}),
+    attributes: Object.assign({}, attrs.attr || {}),
+    id: attrs.id || "",
+    value: attrs.value || "",
+    checked: !!attrs.checked,
+    children: [],
+    parentNode: null,
+    listeners: {},
+    _innerHTML: "",
+    addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+    appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
+    removeChild(c) {
+      const i = this.children.indexOf(c);
+      if (i >= 0) { this.children.splice(i, 1); c.parentNode = null; }
+      return c;
+    },
+    getAttribute(k) { return k in this.attributes ? this.attributes[k] : null; },
+    hasAttribute(k) { return k in this.attributes; },
+    setAttribute(k, v) { this.attributes[k] = String(v); },
+    closest(sel) {
+      let cur = this;
+      while (cur) { if (matchesSelector(cur, sel)) { return cur; } cur = cur.parentNode; }
+      return null;
+    },
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
+    querySelectorAll(sel) {
+      const out = [];
+      const walk = el => {
+        for (const c of el.children) {
+          if (matchesSelector(c, sel)) { out.push(c); }
+          walk(c);
+        }
+      };
+      walk(this);
+      return out;
+    },
+    dispatch(type) {
+      const ev = { target: this, preventDefault() {}, stopPropagation() {} };
+      let cur = this;
+      while (cur) {
+        for (const fn of (cur.listeners && cur.listeners[type]) || []) { fn(ev); }
+        cur = cur.parentNode;
+      }
+    },
+    get innerHTML() { return this._innerHTML; },
+    set innerHTML(html) {
+      this._innerHTML = String(html || "");
+      this.children = parseEventSubRows(this._innerHTML).map(r => { r.parentNode = this; return r; });
+    },
+    insertAdjacentHTML(pos, html) {
+      const frag = String(html || "");
+      this._innerHTML = this._innerHTML + frag;
+      for (const r of parseEventSubRows(frag)) { r.parentNode = this; this.children.push(r); }
+    },
+  };
+  return node;
+}
+
+// parseEventSubRows 只解析本编辑器产出的行标记(字段/选中态/勾选态/删除按钮)。
+function parseEventSubRows(html) {
+  const rows = [];
+  const chunks = String(html).split("data-event-sub>");
+  for (let i = 1; i < chunks.length; i++) {
+    rows.push(parseEventSubRow(chunks[i]));
+  }
+  return rows;
+}
+
+function attrsOfTag(tagHtml) {
+  const out = {};
+  const re = /([\w-]+)(?:="([^"]*)")?/g;
+  let m;
+  const body = tagHtml.replace(/^<\w+/, "").replace(/>$/, "");
+  while ((m = re.exec(body)) !== null) { out[m[1]] = m[2] === undefined ? "" : decodeEntities(m[2]); }
+  return out;
+}
+
+function decodeEntities(s) {
+  return String(s).replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+}
+
+function parseEventSubRow(chunk) {
+  const row = makeNode("div", { class: "connector-event-sub", attr: { "data-event-sub": "" } });
+  const addField = (name, tag, attrs, isSelect, optionsHtml) => {
+    const node = makeNode(isSelect ? "select" : tag, { attr: Object.assign({ "data-sub-field": name }, attrs.attr || {}) });
+    node.attributes = node.attrs;
+    node.value = attrs.value || "";
+    node.checked = !!attrs.checked;
+    if (isSelect) {
+      const m = String(optionsHtml || "").match(/<option value="([^"]*)" selected>/);
+      node.value = m ? decodeEntities(m[1]) : "";
+    }
+    row.appendChild(node);
+  };
+  const inputTag = name => {
+    const re = new RegExp('<input[^>]*data-sub-field="' + name + '"[^>]*>');
+    const m = chunk.match(re);
+    if (!m) { return null; }
+    return attrsOfTag(m[0]);
+  };
+  const selectHtml = name => {
+    const re = new RegExp('<select[^>]*data-sub-field="' + name + '"[^>]*>([\\s\\S]*?)<\\/select>');
+    const m = chunk.match(re);
+    return m ? { tag: m[0], options: m[1] } : null;
+  };
+  addField("id", "input", { value: (inputTag("id") || {}).value || "" });
+  const mode = selectHtml("sessions-mode");
+  addField("sessions-mode", "select", {}, true, mode ? mode.options : "");
+  addField("sessions-ids", "input", { value: (inputTag("sessions-ids") || {}).value || "" });
+  addField("types", "input", { value: (inputTag("types") || {}).value || "" });
+  const deliver = selectHtml("deliver");
+  addField("deliver", "select", {}, true, deliver ? deliver.options : "");
+  const enabledAttrs = inputTag("enabled") || {};
+  addField("enabled", "input", { checked: "checked" in enabledAttrs });
+  if (/data-editor="remove-event-sub"/.test(chunk)) {
+    row.appendChild(makeNode("button", { attr: { "data-editor": "remove-event-sub" } }));
+  }
+  return row;
+}
+
+// ---- document mock ----
+const documentMock = {
+  children: [],
+  listeners: {},
+  getElementById(id) {
+    const find = el => {
+      if (el.id === id) { return el; }
+      for (const c of el.children) { const r = find(c); if (r) { return r; } }
+      return null;
+    };
+    for (const top of this.children) { const r = find(top); if (r) { return r; } }
+    return null;
+  },
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+  appendChild(el) { this.children.push(el); },
+};
+globalThis.document = documentMock;
+
+// ---- 编译源码(去 import/export)并真跑内部函数 ----
+const stripped = src
+  .replace(/^import[\s\S]*?from\s+"\.\/[^"]+";/gm, "")
+  .replace(/^export\s+function/gm, "function");
+const sandbox = `
+var esc = function(s){ return String(s == null ? "" : s).replace(/[&<>"']/g, function(c){ return c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;"; }); };
+var showToast = function(){};
+var apiJSON = function(){ return Promise.resolve({}); };
+var jsonInit = function(){ return {}; };
+var copyText = function(){};
+var loadRouteCatalog = function(){ return Promise.resolve(); };
+var schemaProviders = [], connectorItems = [], editorState = null;
+` + stripped + `
+return {
+  collectEditor: collectEditor,
+  collectEventSubs: collectEventSubs,
+  eventSubRowHTML: eventSubRowHTML,
+  renderEventSubRows: renderEventSubRows,
+  onModalBodyClick: onModalBodyClick,
+  splitSubList: splitSubList,
+  setSchemaProviders: function(v){ schemaProviders = v; },
+  setItems: function(v){ connectorItems = v; },
+  setEditorState: function(v){ editorState = v; }
+};
+`;
+const api = new Function("document", sandbox)(documentMock);
+
+// ---- 构建表单 DOM(与 index.html + renderEditor 产出同构) ----
+const modalBody = makeNode("div", { id: "connectors-modal-body" });
+documentMock.appendChild(modalBody);
+const input = (id, value, checked) => {
+  const n = makeNode("input", { id, value: value || "" });
+  n.value = value || "";
+  n.checked = !!checked;
+  modalBody.appendChild(n);
+  return n;
+};
+const name_ = input("connector-form-name", "tg-main");
+input("connector-form-enabled", "", true);
+input("connector-form-mode", "polling");
+input("connector-form-allowed-users", "u1\nu2");
+input("connector-form-command-prefix", "/");
+input("connector-form-session-mode", "chat");
+input("connector-form-reply-mode", "stream");
+input("connector-form-runtime-owner", "");
+input("connector-form-route-provider", "p2");
+input("connector-form-route-model", "m2");
+input("connector-form-route-reasoning", "high");
+const eventsEnabled = input("connector-form-events-enabled", "", false);
+const subsHost = makeNode("div", { id: "connector-event-subs" });
+modalBody.appendChild(subsHost);
+
+// ===== 1. eventSubRowHTML 结构 =====
+{
+  const html = api.eventSubRowHTML({
+    id: "main-chat",
+    sessions: { mode: "ids", ids: ["session_a", "session_b"] },
+    types: ["assistant_message", "turn.*"],
+    deliver: "content",
+  });
+  ok(html.includes('data-sub-field="id"') && html.includes('value="main-chat"'), "行 HTML 含 id 字段与值");
+  ok(/data-sub-field="sessions-mode">[\s\S]*<option value="ids" selected>/.test(html), "sessions-mode 选中 ids");
+  ok(html.includes('data-sub-field="sessions-ids"') && html.includes('value="session_a, session_b"'), "ids 列表回填为逗号分隔");
+  ok(html.includes('data-sub-field="types"') && html.includes('value="assistant_message, turn.*"'), "types 回填(族通配保留)");
+  ok(/data-sub-field="deliver">[\s\S]*<option value="content" selected>/.test(html), "deliver 选中 content");
+  ok(/data-sub-field="enabled" checked>/.test(html), "enabled 缺省勾选(缺省启用)");
+  ok(html.includes('data-editor="remove-event-sub"'), "行内含删除按钮");
+  const htmlOff = api.eventSubRowHTML({ id: "x", enabled: false });
+  ok(!/data-sub-field="enabled" checked>/.test(htmlOff), "enabled:false 不勾选");
+  ok(/data-sub-field="sessions-mode">[\s\S]*<option value="bound" selected>/.test(htmlOff), "空订阅默认 bound");
+  ok(/data-sub-field="deliver">[\s\S]*<option value="notice" selected>/.test(htmlOff), "空订阅默认 notice");
+}
+
+// ===== 2. renderEventSubRows → collectEventSubs 往返 =====
+{
+  const subs = [
+    { id: "main-chat", sessions: { mode: "bound" }, types: ["assistant_message"], deliver: "content" },
+    { id: "live", sessions: { mode: "ids", ids: ["session_a", "session_b"] }, types: ["assistant_delta"], deliver: "stream", enabled: false },
+  ];
+  api.renderEventSubRows(subs);
+  ok(subsHost.children.length === 2, "回填后容器含 2 行", subsHost.children.length);
+  eventsEnabled.checked = true;
+  const collected = api.collectEventSubs();
+  ok(collected.enabled === true && collected.subscriptions.length === 2, "收集 2 条订阅", collected);
+  ok(collected.subscriptions[0].id === "main-chat"
+    && collected.subscriptions[0].deliver === "content"
+    && eq(collected.subscriptions[0].types, ["assistant_message"])
+    && collected.subscriptions[0].sessions.mode === "bound", "第 1 条字段往返一致", collected.subscriptions[0]);
+  ok(collected.subscriptions[1].enabled === false, "enabled:false 单条保留", collected.subscriptions[1]);
+  ok(collected.subscriptions[1].sessions.mode === "ids"
+    && eq(collected.subscriptions[1].sessions.ids, ["session_a", "session_b"]), "ids 列表往返一致", collected.subscriptions[1].sessions);
+}
+
+// ===== 3. 总开关关闭 = 仅 enabled:false =====
+{
+  eventsEnabled.checked = false;
+  ok(eq(api.collectEventSubs(), { enabled: false }), "关闭时只写 enabled:false(不保留 subscriptions)");
+  eventsEnabled.checked = true;
+}
+
+// ===== 4. onModalBodyClick 委托:添加/删除行 =====
+{
+  const before = subsHost.children.length;
+  const addBtn = makeNode("button", { attr: { "data-editor": "add-event-sub" } });
+  modalBody.appendChild(addBtn);
+  api.onModalBodyClick({ target: addBtn });
+  ok(subsHost.children.length === before + 1, "点添加按钮 → 追加一行", subsHost.children.length);
+  const newRow = subsHost.children[subsHost.children.length - 1];
+  const removeBtn = newRow.querySelector('[data-editor="remove-event-sub"]');
+  ok(!!removeBtn, "新行含删除按钮");
+  api.onModalBodyClick({ target: removeBtn });
+  ok(subsHost.children.length === before, "点删除按钮 → 移除该行", subsHost.children.length);
+}
+
+// ===== 5. collectEditor:编辑态保留未展示键 + 覆盖 route/events =====
+{
+  api.setSchemaProviders([{ provider: "telegram", label: "Telegram", fields: [] }]);
+  api.setItems([{
+    id: "c1", provider: "telegram", name: "tg-main",
+    policy: {
+      allowed_users: ["u9"], command_prefix: "!", content_mirror: true,
+      notify: { enabled: true, kinds: ["approval"], scope: "all" },
+      route: { provider: "old", model: "old-m", reasoning_effort: "low" },
+      events: { enabled: false },
+    },
+  }]);
+  api.setEditorState({ id: "c1", isEdit: true, provider: "telegram" });
+  eventsEnabled.checked = true;
+  api.renderEventSubRows([{ id: "ops", sessions: { mode: "bound" }, types: ["turn.*"], deliver: "digest" }]);
+  const payload = api.collectEditor();
+  ok(eq(payload.policy.notify, { enabled: true, kinds: ["approval"], scope: "all" }), "既有 notify 保留(不再被清空)", payload.policy.notify);
+  ok(payload.policy.content_mirror === true, "既有 content_mirror 保留", payload.policy.content_mirror);
+  ok(payload.policy.command_prefix === "/", "表单字段覆盖 command_prefix", payload.policy.command_prefix);
+  ok(payload.policy.route.provider === "p2" && payload.policy.route.model === "m2", "route 由表单覆盖", payload.policy.route);
+  ok(payload.policy.events.enabled === true
+    && payload.policy.events.subscriptions[0].id === "ops"
+    && payload.policy.events.subscriptions[0].deliver === "digest", "events 由表单覆盖", payload.policy.events);
+  ok(eq(payload.policy.allowed_users, ["u1", "u2"]), "allowed_users 来自表单", payload.policy.allowed_users);
+  ok(payload.policy.id === undefined && payload.provider === undefined, "编辑态不发送 id/provider 字段");
+}
+
+// ===== 6. collectEditor:新建态不继承既有 policy =====
+{
+  api.setEditorState({ id: "", isEdit: false, provider: "telegram" });
+  eventsEnabled.checked = false;
+  const payload = api.collectEditor();
+  ok(!("notify" in payload.policy) && !("content_mirror" in payload.policy), "新建态不继承既有 policy 键", payload.policy);
+  ok(eq(payload.policy.events, { enabled: false }), "新建态 events 只写开关", payload.policy.events);
+  ok(payload.provider === "telegram", "新建态包含 provider");
+}
+
+// ===== 7. splitSubList 边界 =====
+{
+  ok(eq(api.splitSubList("a, b，c  d"), ["a", "b", "c", "d"]), "逗号/中文逗号/空白混排解析");
+  ok(eq(api.splitSubList(""), []), "空串 → 空数组");
+}
+
+console.log(failures === 0 ? "\n全部通过" : "\n存在失败项: " + failures);
+process.exit(failures === 0 ? 0 : 1);
