@@ -109,6 +109,8 @@ type presenceEntry struct {
   兜住未自行前置检查的生产者）。单测三条：抑制且不认领键（离开后补推一次）、
   nil = 行为不变、缺 node/session 定位时放行（宁多推不误吞）。**三宿主迁移（S4b）
   随 D4 余下切片。**
+  ➡ S4b 迁移方案见 [12-notify-consolidation-plan.md](./12-notify-consolidation-plan.md)
+  （G1–G3/R1/R2 切片、双门收敛与账本键语义设计）。
 - **部署（2026-10-15）**：gateway S1 上生产（`fca03ac0…a9961d84`，落在
   `/opt/aicli-gateway/gateway`，备份 `gateway.bak-20261015-002152`）；本地 runtime-server
   已含 S3（`sessionViewers` 符号在位、进程即该构建）；本地 aicli 换为 `presence-s2`
