@@ -283,6 +283,16 @@ flowchart TD
 | **R2b**（D3 后半） | 无绑定 | **不迁移/不新增任何绑定**；接管处理器按共享绑定表现状处理：该 chat 之后的消息走 auto-create（在新节点建会话并按 §5.1 正常落绑定） |
 | **R3**（D2） | 无绑定 | 按 `connectors.runner_preference` 选举：默认优先任一活着的 runtime-server；没有则 aicli；`round-robin` 轮转 |
 
+> **真机修复（2026-10-15，qq-bot1）**：绑定 NodeID 的三种写入格式不一致——runner 回传裸
+> kind（`aicli`/`runtime-server`）、R2a 回写实例 HostID（`aicli:node-x`）、peers 视图用
+> mesh node id——曾导致「绑定在本机」被误判为「原节点掉线」，每条消息触发假 R2a（重复
+> 回写 + 向用户发接管提示）。修复：①`DecideRoute` 对本机绑定（实例 HostID 或本机裸 kind）
+> 短路为本机亲和，不再进 R2a 分支；②`dispatchRemote` 回写绑定前把 `Session.NodeID`
+> 归一化为**路由目标 peer 的 NodeID**（runner 回传的宿主身份不再污染绑定）。回归用例：
+> `TestDecideRouteLocalBindingNoFalseFailover`（自绑定 / 裸 kind / 他实例陈旧三态）。
+
+> **跨系统复用（2026-10-14）**：自动化任务（Schedule）的联盟式调度直接复用本章模式——能力位选举（`scheduler`）、绑定亲和（会话宿主优先）、掉线接管（R2a 式 failover）、幂等键（`occurrence_key`）；实现侧可共享 `DecideRoute` 的思路。差异仅在候选集语义：Schedule 竞争的是"调度领导权"，而非消息 runner。见 [`../automation-tasks/mesh-scheduler-federation-design.md`](../automation-tasks/mesh-scheduler-federation-design.md) §2.2/§3.3。
+
 ### 7.3 turn 派发契约（P2 定稿占位）
 
 ```

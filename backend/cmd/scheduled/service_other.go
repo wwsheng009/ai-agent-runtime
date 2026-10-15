@@ -16,8 +16,9 @@ func runAsWindowsService(run serviceScheduleRunner) error {
 	return errNotService
 }
 
-func installWindowsService(executable string) error {
+func installWindowsService(executable, configPath string) error {
 	_ = executable
+	_ = configPath
 	return fmt.Errorf("windows service install is not supported on this platform; use systemd (see docs/automation-tasks/scheduler-daemon-design.md)")
 }
 

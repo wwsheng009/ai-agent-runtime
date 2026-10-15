@@ -604,6 +604,9 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 	}
 	session.LocalRuntimeHost = localRuntimeHost
 	session.ActorFirstReady = true
+	// S2b：把本进程的调度服务登记为 L2 接收侧账本来源（web/mesh 处理器拿到的
+	// 可能是能力面装载前的早期 session 快照，见 chat_schedule_host.go 说明）。
+	registerProcessScheduleService(localRuntimeHost.Schedule)
 	// turn 记录器在能力面挂载点同步安装（幂等）：不能只靠 invoke 等待循环的
 	// 轮询安装——首轮 host 挂载与 session_start 可能落在两次轮询之间，记录器
 	// 晚订阅会丢掉 session_start/assistant_message，/web/api/turn 的首轮记录
@@ -671,6 +674,7 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 			onDemand.Close()
 		}
 		if session.LocalRuntimeHost != nil {
+			registerProcessScheduleService(nil)
 			session.LocalRuntimeHost.Close()
 		}
 		if skillsBinding != nil {
@@ -780,6 +784,9 @@ func prepareChatCapabilitiesAsync(cfg *config.Config, opts *chatCommandOptions, 
 	var cleanupAllOnce sync.Once
 	cleanupAll := func() {
 		cleanupAllOnce.Do(func() {
+			// S5：调度者与会话宿主生命周期解耦——启动早于宿主挂载、这里无条件停止
+			// （不依赖能力面是否装载成功，见 chat_schedule_driver.go）。
+			stopChatScheduleDriver()
 			load := currentChatCapabilityLoad(session)
 			if load != nil {
 				// 有界等待：发现阶段（后台）+ 挂载阶段（此处，主 goroutine）都跑完
@@ -812,6 +819,11 @@ func prepareChatCapabilitiesAsync(cfg *config.Config, opts *chatCommandOptions, 
 		capabilitiesCleanupMu.Unlock()
 		return cleanup, nil
 	})
+	// S5：aicli 以最低优先级参与调度领导权（opt-in：schedule.driver.participants
+	// 含 aicli 才生效）。在这里启动而不是等能力面挂载：交互式 TUI 的挂载是异步的
+	// （可能到首个 turn 才发生），而"开着 aicli 就有调度"应当从会话建立即成立。
+	// 驱动自带 store/service（不依赖本地宿主），更高优先级在岗时自动让位。
+	startChatScheduleDriver(loadRuntimeToolConfig(cfg, session), nil)
 	start = func() {
 		go runChatCapabilitiesLoad(session)
 	}

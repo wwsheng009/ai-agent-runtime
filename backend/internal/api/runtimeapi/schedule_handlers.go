@@ -217,10 +217,16 @@ func (h *Handler) CreateScheduleTask(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// S3（§4.1）：回执携带在岗检查快照；非在岗/不兼容时 view.notice 给出
+	// 可操作警告（任务照常创建——存储与控制面独立于调度面）。
+	presence := h.schedulePresenceForCreate()
+	view := schedule.BuildView(record, service.Now())
+	view.Notice = presence.Notice()
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"record": record,
-		"origin": schedule.OriginManual,
-		"view":   schedule.BuildView(record, service.Now()),
+		"record":   record,
+		"origin":   schedule.OriginManual,
+		"view":     view,
+		"presence": presence,
 	})
 }
 

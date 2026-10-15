@@ -16,6 +16,8 @@
 
 目的：`embedded` 解决"宿主长期不在线 → 提醒只能落库不能执行"的缺口，实现**完全无人值守**。
 
+> **v1.1 修订（2026-10-14）**：完整投递路由为 **L1 本进程 hub → L2 目标节点（`mesh.Call`）→ L3 HTTP delegate → L4 embedded → L5 mailbox**（见 [`mesh-scheduler-federation-design.md`](./mesh-scheduler-federation-design.md) §3.3）。本表三模式是"驱动侧选择执行体"的算法：`embedded` 仍是**最后的执行兜底**与完全无人值守路径，语义不变（session 租约仲裁 + `dont_ask` 预置拒绝）；联盟化后执行体可以是任一具备执行核的宿主，不限于 daemon。
+
 ---
 
 ## 2. 现状：执行栈在哪里（核验）

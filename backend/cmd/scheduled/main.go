@@ -1,10 +1,13 @@
 // Command scheduled 是"自动化任务"（Schedule）的调度守护进程。
 //
-// P0（前台运行）：加载配置 → 打开共享 schedule.sqlite → 获取 mesh 单实例租约 →
-// 启动单定时器运行时 → 到点经 runtime-server 的会话命令端点投递提醒。
+// 装配（S1 联盟式调度后）：加载配置 → 打开共享 schedule.sqlite → mesh 入网
+// （无 endpoint 档案 + scheduler 能力位）→ 以 mesh 租约竞争"调度领导权"
+// （schedulehost.Leader）→ 持租约者驱动单定时器运行时；失租/被接管自动回到
+// standby（待命而非退出），任一在岗节点在 TTL 内接管
+// （见 docs/automation-tasks/mesh-scheduler-federation-design.md §3.2/§12.2.1）。
 //
-// 后续阶段（见 docs/automation-tasks/scheduler-daemon-design.md）将补：
-// 服务化安装（Windows Service / systemd）、持久 mailbox 兜底、内嵌执行、运维端点。
+// 到点投递走 delegate → embedded → mailbox 三级兜底
+// （见 docs/automation-tasks/scheduler-daemon-design.md §6）。
 package main
 
 import (
@@ -22,6 +25,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 )
 
 func main() {
@@ -37,21 +41,30 @@ func run(args []string) error {
 	storePath := fs.String("store", "", "schedule.sqlite 路径（覆盖配置）")
 	runtimeServer := fs.String("runtime-server", "", "delegate 目标 base URL（覆盖配置）")
 	dataDir := fs.String("data-dir", "", "数据目录（默认 <auth-dir>/data/schedule）")
-	if err := fs.Parse(args); err != nil {
+	logFile := fs.String("log-file", "", "运行期日志文件（默认 <home>/.aicli/logs/scheduled.log）")
+	command, err := parseCommandFlags(fs, args)
+	if err != nil {
 		return err
 	}
+	// S0 收尾：运行期日志落盘（服务模式 stderr 不可见）；打开失败只警告。
+	logPath := strings.TrimSpace(*logFile)
+	if logPath == "" {
+		logPath = defaultDaemonLogPath()
+	}
+	initDaemonLog(logPath)
+	defer closeDaemonLog()
 
 	// 子命令路由：run = 显式前台（等价于无参数）；doctor = 自检；
 	// install/uninstall/start/stop/status = 服务管理（需管理员）。
-	if fs.NArg() > 0 {
-		switch command := fs.Arg(0); command {
-		case "run":
-			// 显式前台：继续下面的前台装配。
-		case "doctor":
-			return runDoctorCommand(*configPath, *storePath, *dataDir, *runtimeServer)
-		default:
-			return runServiceCommand(command)
-		}
+	switch command {
+	case "":
+		// 无子命令：等价 run（历史行为）。
+	case "run":
+		// 显式前台：继续下面的前台装配。
+	case "doctor":
+		return runDoctorCommand(*configPath, *storePath, *dataDir, *runtimeServer)
+	default:
+		return runServiceCommand(command, *configPath)
 	}
 
 	cfg, err := loadScheduleConfig(*configPath, *runtimeServer)
@@ -80,7 +93,7 @@ func run(args []string) error {
 	if schedule.ModeAllowsEmbedded(cfg.Execution.Mode) {
 		leaseStore, closeLeaseStore, leaseErr := openSharedSessionLeaseStore(*configPath)
 		if leaseErr != nil {
-			fmt.Fprintf(os.Stderr, "scheduled: warning: shared session lease store unavailable (%v); embedded execution stays fail-closed\n", leaseErr)
+			logf("scheduled: warning: shared session lease store unavailable (%v); embedded execution stays fail-closed", leaseErr)
 		} else {
 			sessionLeaseStore = leaseStore
 			defer closeLeaseStore()
@@ -93,9 +106,9 @@ func run(args []string) error {
 	if schedule.ModeAllowsEmbedded(cfg.Execution.Mode) {
 		runtimeConfig, cfgErr := loadRuntimeConfig(*configPath)
 		if cfgErr != nil {
-			fmt.Fprintf(os.Stderr, "scheduled: warning: embedded executor unavailable (%v); embedded stays disabled\n", cfgErr)
+			logf("scheduled: warning: embedded executor unavailable (%v); embedded stays disabled", cfgErr)
 		} else if headless, headlessErr := buildHeadlessExecutor(runtimeConfig, *configPath); headlessErr != nil {
-			fmt.Fprintf(os.Stderr, "scheduled: warning: embedded executor unavailable (%v); embedded stays disabled\n", headlessErr)
+			logf("scheduled: warning: embedded executor unavailable (%v); embedded stays disabled", headlessErr)
 		} else {
 			embeddedExecutor = scheduleExecutorAdapter{
 				exec:           headless.executor,
@@ -107,55 +120,96 @@ func run(args []string) error {
 		}
 	}
 
+	// S1（M4）：daemon 以**无 endpoint** 的 mesh 节点入网——节点档案负责在岗
+	// 可见性（capabilities 含 scheduler），不注册 HTTP 端点（只被看见、不被
+	// mesh.Call 调用）；mesh 不可用只降级 warning（与 aicli/runtime-server 同纪律）。
+	meshHost := startDaemonMeshHost()
+	defer stopDaemonMeshHost(meshHost)
+
 	service := schedule.NewService(store, schedule.SystemClock)
-	deliverer := &schedule.HTTPDeliverer{BaseURL: cfg.Execution.RuntimeServerURL}
-	runtime := schedule.NewRuntime(schedule.RuntimeOptions{
+	// S2：投递走"就近优先"组合（L1 本进程 hub → L2 目标节点 → L3 HTTP delegate）。
+	// daemon 没有会话 hub（L1 为空）；L2 = mesh.Call schedule.deliver（目标会话
+	// 宿主优先，S2b）；L3 = 既有 HTTP delegate。全部携带 occurrence 键。
+	var peerDeliverer schedule.Deliverer
+	if peer, peerErr := schedulehost.NewPeerDeliverer(schedulehost.PeerDelivererOptions{
+		CallerNodeID: meshHost.NodeID(),
+		Logf:         logf,
+	}); peerErr != nil {
+		logf("scheduled: warning: peer delivery unavailable (%v); falling back to HTTP delegate", peerErr)
+	} else {
+		peerDeliverer = peer
+	}
+	deliverer, err := schedulehost.NewLocalFirstDeliverer(schedulehost.LocalFirstOptions{
+		Peer: peerDeliverer,
+		HTTP: &schedule.HTTPDeliverer{BaseURL: cfg.Execution.RuntimeServerURL},
+		Logf: logf,
+	})
+	if err != nil {
+		return fmt.Errorf("schedule deliverer: %w", err)
+	}
+
+	// S1：调度领导权 = mesh 可抢占角色（联盟式调度）。daemon 仍是默认常驻成员
+	// 与第一优先级；持租约者驱动 Runtime，失租/被接管回到 standby（不再退出），
+	// 由任一在岗成员接管（见联盟设计 §12.2.1）。
+	if !cfg.DriverAllows(config.ScheduleRoleDaemon) {
+		return fmt.Errorf("schedule.driver.participants excludes %q; refusing to run as a schedule driver", config.ScheduleRoleDaemon)
+	}
+	leader, err := schedulehost.NewLeader(schedulehost.LeaderOptions{
 		Store:             store,
 		Service:           service,
 		Deliverer:         deliverer,
 		MaxAttempts:       cfg.MaxDeliveryAttempts,
 		FallbackToMailbox: cfg.Execution.FallbackToMailbox,
+		// S4b（§4.4）：一次性任务补发宽限窗口（0=总是补发）。
+		MisfireGrace: cfg.MisfireGrace,
 		// 执行模式：delegate 永不内嵌（即使未来注入 Executor）；embedded/auto 才内嵌。
 		Mode: cfg.Execution.Mode,
 		// E3.3：内嵌执行核（embedded/auto 时注入；delegate 为 nil）。
 		Executor: embeddedExecutor,
 		// E1：会话租约仲裁（与宿主同源，见 runtimehost-executor-extraction-plan.md §2.5a）。
 		Arbiter: newDaemonSessionArbiter(sessionLeaseStore),
-		Logf:    func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+		// S3 版本握手（§4.2）：store 被更新的二进制升级后本进程不再理解，
+		// 立即放弃/退出领导权并标记 incompatible，让合格节点接管。
+		StoreCompatCheck: schedulehost.StoreCompatCheck(store.SchemaVersion),
+		Identity: schedulehost.DriverIdentity{
+			NodeID:   meshHost.NodeID(),
+			Kind:     schedulehost.RoleDaemon,
+			Priority: cfg.DriverPriority(config.ScheduleRoleDaemon),
+		},
+		LeaseTTL:     cfg.Driver.LeaseTTL,
+		StandbyRetry: cfg.Driver.StandbyRetry,
+		// daemon 默认 degraded=standalone（历史行为）；配置显式覆盖优先。
+		Degraded: schedulehost.DegradedPolicy(cfg.DriverDegradedPolicy(config.ScheduleRoleDaemon)),
+		Logf:     logf,
 	})
-	// 单实例租约：续租 + 失租停止。另一实例在跑时本进程待命退出（不双投递）。
-	lease, ok := newSchedulerLease()
-	if !ok {
-		return nil
+	if err != nil {
+		return fmt.Errorf("schedule driver: %w", err)
 	}
-	defer lease.release()
 
 	// D3：loopback 运维端点（127.0.0.1:8919）。
 	status := &statusServer{
 		store:         store,
-		runtime:       runtime, // P6：/status 携带 metrics 快照
+		leader:        leader, // P6/S1：/status 携带 driver 状态与 metrics 快照
 		mode:          cfg.Execution.Mode,
 		runtimeServer: cfg.Execution.RuntimeServerURL,
 		startedAt:     time.Now(),
 	}
 	stopStatus, err := status.Serve(8919)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "scheduled: warning: status endpoint unavailable: %v\n", err)
+		logf("scheduled: warning: status endpoint unavailable: %v", err)
 	} else {
 		defer stopStatus()
 	}
 
-	// runUntil 启动运行时，直到外部 stop 或租约被接管。
+	// runUntil 启动领导权监督循环，直到外部 stop（服务控制/进程信号）。
 	runUntil := func(stop <-chan struct{}) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		runtime.Start(ctx)
-		select {
-		case <-stop:
-		case <-lease.Lost():
-			fmt.Fprintln(os.Stderr, "scheduled: scheduler lease lost to another instance; stopping to avoid double delivery")
-		}
-		runtime.Stop()
+		leader.Start(ctx)
+		<-stop
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		leader.Stop(stopCtx)
+		stopCancel()
 	}
 
 	// Windows 服务模式：由 SCM 启动时改走服务循环（不装 signal handler）。
@@ -168,25 +222,55 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runtime.Start(ctx)
-	fmt.Fprintf(os.Stderr, "scheduled: running (store=%s, mode=%s, runtime-server=%s)\n",
-		path, cfg.Execution.Mode, cfg.Execution.RuntimeServerURL)
-	select {
-	case <-ctx.Done():
-	case <-lease.Lost():
-		fmt.Fprintln(os.Stderr, "scheduled: scheduler lease lost to another instance; stopping to avoid double delivery")
-	}
-	runtime.Stop()
+	leader.Start(ctx)
+	logf("scheduled: running (store=%s, mode=%s, runtime-server=%s, driver=%s)",
+		path, cfg.Execution.Mode, cfg.Execution.RuntimeServerURL, leader.Status().State)
+	<-ctx.Done()
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	leader.Stop(stopCtx)
+	stopCancel()
 	return nil
+}
+
+// parseCommandFlags 解析"子命令 + flags"的两种书写顺序，返回子命令名
+// （空串 = 无子命令，等价 run）：
+//
+//	scheduled run  --store X   （命令在前）
+//	scheduled --store X run    （flags 在前）
+//
+// 为什么必须显式剥离子命令：Go flag 在首个非 flag 参数处停止解析，若不先
+// 剥离 `run`，`run --store X` 的 --store 会被**静默丢弃**、daemon 落回默认
+// store（2026-10-14 冒烟事故根因）。多余的位置参数一律报错，不再静默吞掉。
+func parseCommandFlags(fs *flag.FlagSet, args []string) (string, error) {
+	command := ""
+	parseArgs := args
+	if len(args) > 0 && !strings.HasPrefix(strings.TrimSpace(args[0]), "-") {
+		command = strings.TrimSpace(args[0])
+		parseArgs = args[1:]
+	}
+	if err := fs.Parse(parseArgs); err != nil {
+		return "", err
+	}
+	if command == "" && fs.NArg() > 0 {
+		command = fs.Arg(0)
+	}
+	remainder := fs.Args()
+	if command != "" && len(remainder) > 0 && remainder[0] == command {
+		remainder = remainder[1:]
+	}
+	if len(remainder) > 0 {
+		return "", fmt.Errorf("unexpected arguments: %s", strings.Join(remainder, " "))
+	}
+	return command, nil
 }
 
 // runServiceCommand 处理 install/uninstall/start/stop/status；
 // 无参数时是普通前台运行。服务模式（SCM 启动）由 runAsWindowsService 检测。
-func runServiceCommand(command string) error {
+func runServiceCommand(command, configPath string) error {
 	executable, _ := os.Executable()
 	switch command {
 	case "install":
-		return installWindowsService(executable)
+		return installWindowsService(executable, configPath)
 	case "uninstall":
 		return uninstallWindowsService()
 	case "start", "stop", "status":

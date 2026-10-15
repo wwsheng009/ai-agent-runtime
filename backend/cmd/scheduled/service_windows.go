@@ -7,6 +7,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
@@ -57,8 +59,11 @@ func (s *scheduleService) Execute(_ []string, requests <-chan svc.ChangeRequest,
 	return false, 0
 }
 
-// installWindowsService 注册服务（需管理员），--start=auto。
-func installWindowsService(executable string) error {
+// installWindowsService 注册服务（需管理员），--start=auto；并把**安装者**
+// 环境解析出的绝对路径烘焙进服务命令行（S0 收尾）：服务默认以 LocalSystem
+// 运行，`~` 会解析到系统配置文件目录——不烘焙路径时服务会读写与用户不同的
+// schedule.sqlite / 日志文件，表现为"服务在跑但提醒不投递"。
+func installWindowsService(executable, configPath string) error {
 	manager, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect to service manager (admin required): %w", err)
@@ -72,7 +77,7 @@ func installWindowsService(executable string) error {
 		DisplayName: "AI Agent Runtime Scheduled",
 		Description: "Automation task (Schedule) scheduler daemon: delivers due reminders to their original sessions.",
 		StartType:   mgr.StartAutomatic,
-	})
+	}, serviceCommandLineArgs(configPath)...)
 	if err != nil {
 		return fmt.Errorf("create service: %w", err)
 	}
@@ -81,6 +86,27 @@ func installWindowsService(executable string) error {
 		return fmt.Errorf("start service: %w", err)
 	}
 	return nil
+}
+
+// serviceCommandLineArgs 计算要烘焙进服务命令行的参数（安装时快照，绝对路径）。
+func serviceCommandLineArgs(configPath string) []string {
+	args := make([]string, 0, 6)
+	if cfg, err := loadScheduleConfig(configPath, ""); err == nil {
+		if store, err := resolveStorePath("", "", cfg); err == nil {
+			if abs, err := filepath.Abs(store); err == nil {
+				args = append(args, "--store", abs)
+			}
+		}
+	}
+	if logPath := defaultDaemonLogPath(); logPath != "" {
+		args = append(args, "--log-file", logPath)
+	}
+	if path := strings.TrimSpace(configPath); path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			args = append(args, "--config", abs)
+		}
+	}
+	return args
 }
 
 // uninstallWindowsService 停止并删除服务（需管理员）。

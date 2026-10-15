@@ -556,6 +556,10 @@ func registerChatWebRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(commands.ChatWebAPIRuntimePath, commands.HandleChatWebAPIRuntime)
 	mux.HandleFunc(commands.ChatWebAPIEventsPath, commands.HandleChatWebAPIEvents)
 	mux.HandleFunc(commands.ChatWebAPIInputPath, commands.HandleChatWebAPIInput)
+	// /web/api/schedule-deliver 调度投递接收端（S2b，联盟设计 §3.3 L2）：
+	// driver 就近把提醒投进本进程会话；按交付账本 occurrence 去重。
+	// 写 op——由 mesh 调用层强制 allow_write=true 且仅回环。
+	mux.HandleFunc(commands.ChatWebAPIScheduleDeliverPath, commands.HandleChatWebAPIScheduleDeliver)
 	// /web/api/attachments 图片附件上传：micro web client 的附件轨把用户选择的
 	// 图片/粘贴的位图/拖入的文件传到这里，拿到受校验与上限约束的本地路径后，
 	// 再随 /web/api/input 的 image_paths 一起发送。

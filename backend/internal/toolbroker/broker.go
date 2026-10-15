@@ -24,6 +24,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
@@ -164,6 +165,9 @@ type Broker struct {
 	// Schedule backs the schedule_* automation-task tools. Optional: nil keeps
 	// the whole family out of Definitions() and the execute switch.
 	Schedule *schedule.Service
+	// SchedulePresence 是创建回执的在岗检查探针（S3 §4.1）。nil → 默认
+	// schedulehost.ProbePresence(...)；测试注入固定值，避开本机真实 mesh 状态。
+	SchedulePresence func() schedulehost.Presence
 	// agentEventsReads remembers the last read_agent_events window per
 	// caller/target cursor so an identical repeated read can answer with an
 	// explicit unchanged/repeat_count signal (plan P1-7 待补) instead of a

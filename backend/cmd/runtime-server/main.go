@@ -37,6 +37,7 @@ import (
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	profileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
@@ -366,9 +367,13 @@ func runServe(args []string) int {
 	serveLogOutput := strings.ToLower(strings.TrimSpace(cfg.Log.Output))
 	if serveLogOutput == "" || serveLogOutput == "stdout" {
 		cfg.Log.Output = "both"
-		if strings.TrimSpace(cfg.Log.FilePath) == "" {
-			cfg.Log.FilePath = "~/.aicli/logs/runtime-server.log"
-		}
+		serveLogOutput = "both"
+	}
+	// S0 收尾：只要日志目标是文件（显式 output=file/both 或默认 both），就落到
+	// runtime-server 专属文件——配置模板（configs/config.yaml）的默认是共享的
+	// gateway.log，混写会让 start 的失败诊断（读专属文件）看不到任何日志。
+	if serveLogOutput == "file" || serveLogOutput == "both" || cfg.Log.EnableConsole {
+		cfg.Log.FilePath = runtimeServerLogFilePath(&cfg.Log)
 	}
 	if err := logger.InitLogger(&cfg.Log); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
@@ -470,10 +475,15 @@ func runServe(args []string) int {
 	//（kind=runtime-server + runner/poller 能力位，其它节点的派发/扇出视角
 	//自此可见本节点）；降级纪律与 aicli 一致——mesh 不可用只 warn，不影响
 	//主功能。defer 停机移档（尽力）。
-	meshHost := startRuntimeServerMeshHost("http://"+addr, func(format string, args ...any) {
+	meshHost := startRuntimeServerMeshHost("http://"+addr, runtimeServerParticipatesInSchedule(app), func(format string, args ...any) {
 		logger.Warn("mesh: " + fmt.Sprintf(format, args...))
 	})
 	defer stopRuntimeServerMeshHost(meshHost)
+
+	// S1（联盟式调度）：runtime-server 以"在岗替补"参与调度领导权——与 daemon
+	// 竞争同一把 mesh 租约；持租约时投递走本进程会话 hub（L1 就近，不依赖
+	// runtimeServerURL）。门控与降级策略见 schedule_driver.go。
+	startRuntimeServerScheduleDriver(ctx, app, meshHost)
 
 	server := &http.Server{
 		Handler:           app.router,
@@ -566,6 +576,13 @@ func runStart(args []string) int {
 
 	env := ensureEnvDefault(os.Environ(), "LOG_OUTPUT", "file")
 	env = ensureEnvDefault(env, "LOG_ENABLE_CONSOLE", "false")
+	// S0 收尾：子进程日志文件必须与父进程的诊断捕获指向同一路径。配置模板
+	// （configs/config.yaml）的默认是共享的 gateway.log，而 start 的失败诊断
+	// 读的是 runtime-server 专属文件——不统一时"启动失败却看不到任何日志"。
+	// 仅当调用方未显式设置 LOG_FILE_PATH 时补默认（尊重用户覆盖）。
+	if strings.TrimSpace(logCapture.Path) != "" {
+		env = ensureEnvDefault(env, "LOG_FILE_PATH", logCapture.Path)
+	}
 
 	// 日志文件路径未配置时，把子进程 stdout/stderr 捕获到 PID 文件同目录的
 	// fallback 文件，保证启动失败的真实原因可诊断（否则错误被丢弃只剩
@@ -745,10 +762,9 @@ func resolveRuntimeServerLogPath(configPath, cwd string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	logPath := strings.TrimSpace(cfg.Log.FilePath)
-	if logPath == "" {
-		return "", nil
-	}
+	// S0 收尾：与 serve 路径同口径归一（含"模板默认 gateway.log → 专属文件"），
+	// 保证父进程的诊断捕获与子进程实际写入路径一致。
+	logPath := runtimeServerLogFilePath(&cfg.Log)
 	logPath = aiclipaths.ExpandUserPath(logPath)
 	if filepath.IsAbs(logPath) {
 		return filepath.Clean(logPath), nil
@@ -763,6 +779,20 @@ func resolveRuntimeServerLogPath(configPath, cwd string) (string, error) {
 		return filepath.Clean(logPath), nil
 	}
 	return filepath.Clean(filepath.Join(cwd, logPath)), nil
+}
+
+// runtimeServerLogFilePath 归一 runtime-server 的日志文件（S0 收尾）：未配置、
+// 或沿用了配置模板的共享默认（gateway.log）时返回专属文件
+// ~/.aicli/logs/runtime-server.log；用户显式指定的其它路径原样保留。
+func runtimeServerLogFilePath(cfg *logger.LogConfig) string {
+	path := ""
+	if cfg != nil {
+		path = strings.TrimSpace(cfg.FilePath)
+	}
+	if path == "" || filepath.Base(path) == "gateway.log" {
+		return "~/.aicli/logs/runtime-server.log"
+	}
+	return path
 }
 
 func buildRuntimeServerStartFailureMessage(prefix string, startErr error, capture runtimeServerStartupLogCapture) string {
@@ -1020,6 +1050,9 @@ type runtimeServerApp struct {
 	// connectorService 是 IM 连接器服务（docs/bots/04-migration-roadmap.md P0 宿主接线）。
 	// 启动失败时为 nil（连接器是可降级能力，不影响 runtime-server 本体）。
 	connectorService io.Closer
+	// scheduleDriver 是调度领导权参与者（S1 联盟式调度）；未参与/装配失败为 nil。
+	// close() 里最先停它：先停驱动、后放租约（让位顺序由 schedulehost.Leader 保证）。
+	scheduleDriver *schedulehost.Leader
 }
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
@@ -1056,7 +1089,7 @@ func loadRuntimeServerManager(runtimeManager *runtimecfg.RuntimeManager) error {
 }
 
 // agentRuntimeDefaultFor 解析 config.yaml 的运行时默认 provider 与跟随模型
-//（providers.default_provider 为空时返回空串，表示不覆盖既有语义）。
+// （providers.default_provider 为空时返回空串，表示不覆盖既有语义）。
 func agentRuntimeDefaultFor(cfg *config.Config) (string, string) {
 	if cfg == nil {
 		return "", ""
@@ -1073,7 +1106,7 @@ func agentRuntimeDefaultFor(cfg *config.Config) (string, string) {
 }
 
 // syncAgentRuntimeDefaults 把 config.yaml 的默认 provider/model 写进 runtimeManager
-//（resolveRuntimeConfig 的快照来源——actor 回合的 provider/model 最终从这里读）。
+// （resolveRuntimeConfig 的快照来源——actor 回合的 provider/model 最终从这里读）。
 func syncAgentRuntimeDefaults(runtimeManager *runtimecfg.RuntimeManager, cfg *config.Config) {
 	if runtimeManager == nil {
 		return
@@ -1083,7 +1116,7 @@ func syncAgentRuntimeDefaults(runtimeManager *runtimecfg.RuntimeManager, cfg *co
 }
 
 // syncLLMRuntimeDefaults 把 config.yaml 的默认 provider/model 推到 live LLMRuntime
-//（/api/runtime/models 与 composer 目录的展示层）。
+// （/api/runtime/models 与 composer 目录的展示层）。
 func syncLLMRuntimeDefaults(bootstrapManager *runtimebootstrap.Manager, cfg *config.Config) {
 	if bootstrapManager == nil {
 		return
@@ -1506,6 +1539,14 @@ func (a *runtimeServerApp) configureServiceControl(pidFile, listenAddr, configPa
 func (a *runtimeServerApp) close() {
 	if a == nil {
 		return
+	}
+	// 调度驱动最先停：它持有 mesh 租约并驱动 schedule.Runtime（"先停驱动、后放
+	// 租约"的顺序由 schedulehost.Leader.Stop 保证），且投递路径依赖 handler hub。
+	if a.scheduleDriver != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		a.scheduleDriver.Stop(stopCtx)
+		cancel()
+		a.scheduleDriver = nil
 	}
 	// 会话级 workspace manager 先于全局 manager 停止（两者都持有 MCP 客户端连接）。
 	if a.handler != nil {

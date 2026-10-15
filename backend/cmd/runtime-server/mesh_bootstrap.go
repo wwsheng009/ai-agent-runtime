@@ -20,17 +20,27 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 )
 
 // startRuntimeServerMeshHost 创建并启动 runtime-server 的 mesh 节点档案。
 // baseURL 是本服务对外可达地址（listener addr 已解析）；失败只返回 host 并
 // 记 warn（调用方继续启动；未写档时 peers 视图看不到本节点，连接器派发/
 // 注意力扇出退化为单机模式——与 aicli 的 --mesh=false 降级同口径）。
-func startRuntimeServerMeshHost(baseURL string, warn func(format string, args ...any)) *mesh.Host {
+func startRuntimeServerMeshHost(baseURL string, scheduleParticipant bool, warn func(format string, args ...any)) *mesh.Host {
 	if warn == nil {
 		warn = func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "runtime-server: mesh: "+format+"\n", args...)
 		}
+	}
+	capabilities := []string{"mesh", "runner", "poller"}
+	// S3（§4.1/§4.2）：配置参战时携带 scheduler 能力位与 store 兼容档，
+	// 让在岗检查与 aicli-mesh 视图能回答"谁在调度、能否跑当前 store"。
+	if scheduleParticipant {
+		capabilities = append(capabilities,
+			schedulehost.CapabilityScheduler,
+			schedulehost.SchedulerCapability(schedule.SupportedSchemaVersion()))
 	}
 	info := buildinfo.Backend()
 	host := mesh.NewHost(mesh.HostConfig{
@@ -43,7 +53,7 @@ func startRuntimeServerMeshHost(baseURL string, warn func(format string, args ..
 		WorkspaceName: runtimeServerWorkspaceName(),
 		// runner/poller 能力位（docs/bots/09 §7.5 切片 A）：本节点可作为
 		// connector turn 执行体（派发目标）与轮询归属持有者。
-		Capabilities: []string{"mesh", "runner", "poller"},
+		Capabilities: capabilities,
 	})
 	mesh.SetCurrent(host)
 	if err := host.Start(); err != nil {

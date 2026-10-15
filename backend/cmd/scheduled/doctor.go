@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 )
 
 // runDoctorCommand 自检（设计文档 scheduler-daemon-design.md §3.1）：
@@ -74,7 +75,7 @@ func schedulerLeaseStatus() map[string]any {
 	if strings.TrimSpace(paths.Root) == "" {
 		return map[string]any{"available": false, "reason": "mesh root unavailable"}
 	}
-	lease, ok := mesh.ReadLease(paths.LeasePath(schedulerLeasePurpose, schedulerLeaseKey))
+	lease, ok := mesh.ReadLease(paths.LeasePath(schedulehost.LeasePurpose, schedulehost.LeaseKey))
 	if !ok {
 		return map[string]any{"available": true, "held": false}
 	}
@@ -83,6 +84,7 @@ func schedulerLeaseStatus() map[string]any {
 		"held":          true,
 		"owner_node_id": lease.OwnerNodeID,
 		"owner_pid":     lease.OwnerPID,
+		"epoch":         lease.Epoch,
 		"stale":         lease.Stale(mesh.NowUTC()),
 	}
 }

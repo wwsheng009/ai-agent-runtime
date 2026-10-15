@@ -4,6 +4,8 @@
 > 结论：新增 **`cmd/scheduled`** 守护进程（三平面拆分：控制面 / 调度面 / 执行面），复用 `internal/mesh` 租约做单实例，投递经 runtime-server 的会话命令端点 + 持久 mailbox 兜底。
 > 本文修订 [`analysis-and-implementation-plan.md`](./analysis-and-implementation-plan.md) §6 的"进程内单定时器"假设。
 
+> **v1.1 修订（2026-10-14，联盟式调度）**：本文的"调度面 = 独立守护进程"泛化为"**调度面 = mesh 可抢占角色**"——daemon 仍是默认常驻成员与第一优先级，但 `runtime-server`（可选 `aicli`）也可按配置参与领导权竞争；投递路由扩展为"就近优先 L1→L5"（本进程 hub → 目标节点 `mesh.Call` → HTTP delegate → embedded → mailbox）。协调机制、风险与落地切片见 [`mesh-scheduler-federation-design.md`](./mesh-scheduler-federation-design.md)。本文其余内容（子命令、服务化、存储、mailbox 语义）不变。
+
 ---
 
 ## 1. 问题与动机
@@ -90,6 +92,8 @@ outcome := mesh.Acquire(paths, "schedule-scheduler", "global", owner, mesh.Acqui
 
 - **只有持租约的 daemon 触发任务**；多实例并存时其余实例待命（租约到期自动接管，`mesh.Takeover` 语义）。
 - 心跳/续租复用 mesh，不新造。
+
+> **v1.1 补充**：① 租约参与者不再限于 daemon——`participants`（默认 `[daemon, runtime-server]`）按序即优先级，让位语义为"先停驱动、后放租约"；② 宿主默认 **fail-closed standby**（mesh 降级不参战），daemon 保留可配置的 `degraded: standalone`；③ driver 租约 TTL 显式 30s（mesh 默认 90s）；④ mesh `Renew` 的已知竞态（M1）与 Epoch 建议（M2）由联盟方案 §12.3 跟踪。均见 [`mesh-scheduler-federation-design.md`](./mesh-scheduler-federation-design.md) §3.2/§12。
 
 ---
 

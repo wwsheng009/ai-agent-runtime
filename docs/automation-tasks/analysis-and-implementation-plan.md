@@ -358,6 +358,8 @@ type Runtime struct {
 
 > **架构修订（守护进程）**：定时器**不放宿主进程内**——宿主不运行则任务永不触发。改为**独立守护进程** `cmd/scheduled`（Windows 服务 / systemd）长驻调度，宿主只做控制与执行。详见 [`scheduler-daemon-design.md`](./scheduler-daemon-design.md)。
 
+> **v1.1 补记（2026-10-14，联盟式调度）**：当时否掉"宿主内嵌定时器"的三个理由——① 宿主不运行=不触发、② 多实例竞争、③ 双投递——现已分别由 ① mesh 租约选主（任一成员在岗即可触发，daemon 仍为默认常驻成员与兜底）、② 单实例租约 + 任务级 CAS claim、③ 交付账本 + `occurrence_key` 幂等去重 化解。宿主（runtime-server，可选 aicli）可按配置参与调度领导权竞争；控制面"不持定时器"的表述保留不变。见 [`mesh-scheduler-federation-design.md`](./mesh-scheduler-federation-design.md) §3.5/§12.6。
+
 - **调度者**：`cmd/scheduled` 启动时扫描一次 `active` 任务并 `RequestDrive()`，随后持**单定时器**（"至多一个待触发"）；进程重启由启动扫描恢复。
 - **单实例（取代原 F9/F10 的"单实例假设 + wake"）**：复用 `internal/mesh` 的**租约**（`mesh.Acquire(paths, "schedule-scheduler", "global", owner, …)`）——**只有持租约的 daemon 触发与投递**，多实例自动接管（`mesh.Takeover`）。**不再需要** supervision 的 `WakeScheduler`/`schedule_wake_link`（daemon 自长驻）。
 - **存储共享**：daemon 与控制面共享 `schedule.sqlite`（WAL + busy_timeout + 单连接池）；`owner_instance_id` 记为 **daemon 实例**。跨库约束不变：**不读 `background.sqlite` 的 `runtime_instances`**。

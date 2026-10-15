@@ -109,8 +109,8 @@ func callEnvelopeServer(t *testing.T, capture *callCapture, httpStatus int, enve
 
 func TestCallOpWhitelistParity(t *testing.T) {
 	ops := CallOps()
-	if len(ops) != 9 {
-		t.Fatalf("白名单 = %d 项, want 9（§5.6）", len(ops))
+	if len(ops) != 10 {
+		t.Fatalf("白名单 = %d 项, want 10（§5.6 九项 + S2b schedule.deliver）", len(ops))
 	}
 	writeOps := map[string]bool{}
 	for _, spec := range ops {
@@ -119,7 +119,7 @@ func TestCallOpWhitelistParity(t *testing.T) {
 		}
 		writeOps[spec.Op] = spec.Write
 	}
-	for _, op := range []string{"invoke", "input", "cancel", "sessions.resume"} {
+	for _, op := range []string{"invoke", "input", "cancel", "sessions.resume", "schedule.deliver"} {
 		if !writeOps[op] {
 			t.Fatalf("op %s 必须是写操作（无隐式放行）", op)
 		}

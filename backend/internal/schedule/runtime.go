@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,10 @@ import (
 
 // maxTimerDelay 是单次定时器等待的上限，超过则分段重算。
 const maxTimerDelay = time.Hour
+
+// idleSweepInterval 是空闲期的兜底扫描间隔（S2 修复）：即使变更唤醒丢失
+// （跨进程写库、通知异常），新任务也会在一个周期内被发现，不永久滞留。
+const idleSweepInterval = time.Minute
 
 // embeddedTurnTimeout 是一次内嵌 turn 的上限（方案 E2：maxTurnDuration 默认 10m）。
 const embeddedTurnTimeout = 10 * time.Minute
@@ -58,17 +63,27 @@ type HTTPDeliverer struct {
 	Client  *http.Client
 }
 
-// Deliver 提交一条 prompt 到指定会话。
+// Deliver 提交一条 prompt 到指定会话（legacy 形态：不携带 occurrence 键）。
 func (d *HTTPDeliverer) Deliver(ctx context.Context, sessionID, text string) error {
+	return d.DeliverEnvelope(ctx, DeliveryEnvelope{SessionID: sessionID, Text: text})
+}
+
+// DeliverEnvelope 提交一条 prompt 并携带 occurrence 键（S2：服务端按交付账本
+// 去重——同一 occurrence 已送达时返回 2xx 且不重复入会话 actor）。
+func (d *HTTPDeliverer) DeliverEnvelope(ctx context.Context, env DeliveryEnvelope) error {
 	base := strings.TrimRight(strings.TrimSpace(d.BaseURL), "/")
 	if base == "" {
 		return fmt.Errorf("schedule: runtime server URL is empty")
 	}
-	body, err := json.Marshal(map[string]any{"type": "submit_prompt", "prompt": text})
+	payload := map[string]any{"type": "submit_prompt", "prompt": env.Text}
+	if keys := cleanOccurrenceKeys(env.Occurrences); len(keys) > 0 {
+		payload["occurrences"] = keys
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	url := fmt.Sprintf("%s/api/runtime/sessions/%s/runtime/commands", base, sessionID)
+	url := fmt.Sprintf("%s/api/runtime/sessions/%s/runtime/commands", base, env.SessionID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -80,11 +95,11 @@ func (d *HTTPDeliverer) Deliver(ctx context.Context, sessionID, text string) err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("schedule: deliver to session %s: %w", sessionID, err)
+		return fmt.Errorf("schedule: deliver to session %s: %w", env.SessionID, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("schedule: deliver to session %s: status %d", sessionID, resp.StatusCode)
+		return fmt.Errorf("schedule: deliver to session %s: status %d", env.SessionID, resp.StatusCode)
 	}
 	return nil
 }
@@ -106,7 +121,14 @@ type RuntimeOptions struct {
 	Mode string
 	// FallbackToMailbox 落持久兜底消息（宿主恢复后消费）；默认 true。
 	FallbackToMailbox bool
-	Logf              func(format string, args ...any)
+	// MisfireGrace 是一次性任务（after/at）的补发宽限窗口（S4b，§4.4）：
+	// 0 = 不限宽限（总是补发，兼容既有行为）；>0 时逾期超过窗口的任务不再
+	// 投递，直接转 inactive 并计入 MisfireSkippedTotal。
+	MisfireGrace time.Duration
+	// InstanceID 是任务 claim 的持有者标识（S4，§4.3）：同一 store 上的不同
+	// 进程/节点必须不同（Leader 传 node id）。空值回落 "runtime-<pid>"。
+	InstanceID string
+	Logf       func(format string, args ...any)
 }
 
 // Runtime 拥有至多一个定时器，负责启动扫描、到期投递与重试退避。
@@ -133,6 +155,9 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 	}
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
+	}
+	if opts.InstanceID == "" {
+		opts.InstanceID = fmt.Sprintf("runtime-%d", os.Getpid())
 	}
 	return &Runtime{
 		opts:        opts,
@@ -243,8 +268,20 @@ func (r *Runtime) drive() {
 		group := r.groupFor(task, due)
 		for _, member := range group {
 			handled[member.Record.ID] = true
+			// S4（§4.3 ③）：leader 易主后从持久层恢复退避状态（接管不风暴）。
+			r.hydrateAttempts(member)
 		}
 		if !r.admitted(task.Record.ID, now) {
+			continue
+		}
+		// S4（§4.3）：组级 claim——抢不到的成员延后重扫，空组直接跳过。
+		group = r.claimOrDefer(group, now)
+		if len(group) == 0 {
+			continue
+		}
+		// S4b（§4.4）misfire：一次性任务逾期超过宽限窗口 → 不再补发（跳过即留痕）。
+		if r.misfireExpired(task, now) {
+			r.skipMisfired(task, now)
 			continue
 		}
 		// J2：非 session 目标无既有会话可投递，走 headless 分支。
@@ -252,13 +289,30 @@ func (r *Runtime) drive() {
 			r.driveHeadless(group, task, now)
 			continue
 		}
+		keys := occurrenceKeys(group)
+		// S2（§12.1）：账本命中 = 上一任 leader 已投递成功但未 commit（U1 崩溃
+		// 窗口）→ 不重复投递，直接推进（与"投递成功"同语义）。
+		if r.allOccurrencesDelivered(keys) {
+			r.mtr.duplicateSkippedTotal.Add(int64(len(group)))
+			r.opts.Logf("schedule: reminders %v already delivered (ledger hit); advancing", groupIDs(group))
+			for _, member := range group {
+				r.commit(member, now)
+			}
+			continue
+		}
 		text := r.renderGroup(group)
+		envelope := DeliveryEnvelope{SessionID: task.SessionID, Text: text, Occurrences: keys}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		deliverErr := r.opts.Deliverer.Deliver(ctx, task.SessionID, text)
+		deliverErr := DeliverEnvelopeTo(ctx, r.opts.Deliverer, envelope)
 		cancel()
 		if deliverErr != nil {
 			// 内嵌执行（E0/E1）：delegate 失败且配置允许时，先经 Arbiter 取
 			// session 租约——拿到才自跑 turn（活跃会话绝不抢占）。
+			// S4：长执行前把 claim 续到覆盖执行上限（防易主后重复执行）；
+			// 不可能内嵌时不续期——失败任务的让位窗口保持短租约。
+			if r.embeddedPossible() {
+				r.renewClaimsForLongWork(group, now)
+			}
 			if r.tryEmbedded(task.SessionID, text) {
 				r.mtr.embeddedTotal.Add(int64(len(group)))
 				r.mtr.deliveredTotal.Add(int64(len(group)))
@@ -301,6 +355,8 @@ func (r *Runtime) driveHeadless(group []Task, task Task, now time.Time) {
 		r.opts.Logf("schedule: job %s (%s) deferred: no headless executor configured", task.Record.ID, task.TargetKind)
 		return
 	}
+	// S4：长执行前续期 claim（与内嵌路径同口径）。
+	r.renewClaimsForLongWork(group, now)
 	ctx, cancel := context.WithTimeout(context.Background(), embeddedTurnTimeout)
 	defer cancel()
 	result, err := exec.ExecuteHeadlessTurn(ctx, HeadlessTurnRequest{
@@ -424,19 +480,31 @@ func (r *Runtime) admitted(id string, now time.Time) bool {
 
 func (r *Runtime) markFailed(id string, now time.Time) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.attempts[id]++
 	attempt := r.attempts[id]
-	if attempt >= r.opts.MaxAttempts {
+	deadLettered := attempt >= r.opts.MaxAttempts
+	if deadLettered {
 		r.opts.Logf("schedule: reminder %s reached max delivery attempts (%d)", id, attempt)
 		r.mtr.deadLetterTotal.Add(1)
 	}
 	r.mtr.retriesScheduled.Add(1)
+	r.failedUntil[id] = now.Add(deliveryBackoff(attempt))
+	r.mu.Unlock()
+	// S4（§4.3 ③）：attempts/死信持久化——leader 易主后退避不归零、状态可查。
+	if attempts, ok := r.opts.Store.(TaskAttemptStore); ok {
+		if _, err := attempts.RecordTaskAttempt(id, now, deadLettered); err != nil {
+			r.opts.Logf("schedule: persist attempt for %s: %v", id, err)
+		}
+	}
+}
+
+// deliveryBackoff 是第 attempt 次失败后的退避（30s × n，封顶 10m）。
+func deliveryBackoff(attempt int) time.Duration {
 	backoff := time.Duration(attempt) * 30 * time.Second
 	if backoff > 10*time.Minute {
 		backoff = 10 * time.Minute
 	}
-	r.failedUntil[id] = now.Add(backoff)
+	return backoff
 }
 
 // deferTask 延后某任务的下次尝试（不改 attempts，不产生死信）。
@@ -444,6 +512,120 @@ func (r *Runtime) deferTask(id string, until time.Time) {
 	r.mu.Lock()
 	r.failedUntil[id] = until
 	r.mu.Unlock()
+}
+
+// hydrateAttempts 在本地无记录时从持久层恢复退避状态（S4：leader 易主后
+// 不立即重试；与 markFailed 的退避公式一致）。
+func (r *Runtime) hydrateAttempts(task Task) {
+	if task.AttemptCount <= 0 {
+		return
+	}
+	id := task.Record.ID
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.attempts[id]; ok {
+		return
+	}
+	r.attempts[id] = task.AttemptCount
+	if task.LastAttemptAt != nil {
+		r.failedUntil[id] = task.LastAttemptAt.Add(deliveryBackoff(task.AttemptCount))
+	}
+}
+
+// claimOrDefer 对一批任务做组级 claim（§4.3）：未抢到的成员本地延后重扫，
+// 返回抢到的子集（可能为空或小于原组）。store 未实现 TaskClaimer 时原样
+// 返回（fail-open：claim 是防双投递的冗余层，不是投递前提）。
+func (r *Runtime) claimOrDefer(group []Task, now time.Time) []Task {
+	claimer, ok := r.opts.Store.(TaskClaimer)
+	if !ok {
+		return group
+	}
+	ids := groupIDs(group)
+	claimed, err := claimer.ClaimTasks(ids, r.opts.InstanceID, now.Add(claimLease), now)
+	if err != nil {
+		r.opts.Logf("schedule: claim tasks %v: %v", ids, err)
+		return group
+	}
+	if len(claimed) == len(ids) {
+		return group
+	}
+	claimedSet := make(map[string]bool, len(claimed))
+	for _, id := range claimed {
+		claimedSet[id] = true
+	}
+	out := make([]Task, 0, len(claimed))
+	for _, member := range group {
+		if claimedSet[member.Record.ID] {
+			out = append(out, member)
+			continue
+		}
+		// 抢不到：另一节点正在处理（或刚崩溃、租约未过期）——延后重扫。
+		r.deferTask(member.Record.ID, now.Add(claimRetryDelay))
+	}
+	r.mtr.claimConflictsTotal.Add(int64(len(ids) - len(claimed)))
+	return out
+}
+
+// renewClaimsForLongWork 把 claim 租期延长到覆盖一次长执行（内嵌/headless
+// 上限 embeddedTurnTimeout + 余量）：执行期间即使 leader 易主，新 leader 也
+// 不会把同一任务当作"无主"重复执行。
+func (r *Runtime) renewClaimsForLongWork(group []Task, now time.Time) {
+	claimer, ok := r.opts.Store.(TaskClaimer)
+	if !ok {
+		return
+	}
+	until := now.Add(embeddedTurnTimeout + claimLease)
+	if _, err := claimer.RenewTaskClaims(groupIDs(group), r.opts.InstanceID, until); err != nil {
+		r.opts.Logf("schedule: renew claims for long work: %v", err)
+	}
+}
+
+// misfireExpired 报告一次性任务（after/at）是否已超出补发宽限窗口（§4.4）：
+// 未配置宽限（<=0）时恒 false（总是补发，兼容既有行为）；周期任务不适用。
+func (r *Runtime) misfireExpired(task Task, now time.Time) bool {
+	if r.opts.MisfireGrace <= 0 {
+		return false
+	}
+	switch task.Record.Kind {
+	case KindAfter, KindAt:
+	default:
+		return false
+	}
+	return now.Sub(task.Record.ScheduledAt) > r.opts.MisfireGrace
+}
+
+// skipMisfired 把超窗的一次性任务直接转 inactive（不投递）：留痕计数 + 日志，
+// 清 attempts/死信并释放 claim（与投递成功同口径的簿记收尾）。
+func (r *Runtime) skipMisfired(task Task, now time.Time) {
+	r.mtr.misfireSkippedTotal.Add(1)
+	r.opts.Logf("schedule: reminder %s misfired beyond grace (%s late > %s); marking inactive without delivery",
+		task.Record.ID, now.Sub(task.Record.ScheduledAt).Round(time.Second), r.opts.MisfireGrace)
+	next := task
+	next.Status = StatusInactive
+	applied, err := r.opts.Store.UpdateCAS(next, task.StateVersion)
+	if err != nil {
+		r.opts.Logf("schedule: mark misfired %s: %v", task.Record.ID, err)
+		return
+	}
+	if !applied {
+		r.opts.Logf("schedule: mark misfired %s skipped (stale state version)", task.Record.ID)
+		return
+	}
+	if attempts, ok := r.opts.Store.(TaskAttemptStore); ok {
+		if err := attempts.ClearTaskAttempts(task.Record.ID); err != nil {
+			r.opts.Logf("schedule: clear attempts for misfired %s: %v", task.Record.ID, err)
+		}
+	}
+	if claimer, ok := r.opts.Store.(TaskClaimer); ok {
+		if err := claimer.ReleaseTaskClaims([]string{task.Record.ID}, r.opts.InstanceID); err != nil {
+			r.opts.Logf("schedule: release claim for misfired %s: %v", task.Record.ID, err)
+		}
+	}
+	r.mu.Lock()
+	delete(r.attempts, task.Record.ID)
+	delete(r.failedUntil, task.Record.ID)
+	r.mu.Unlock()
+	r.notifyChanged()
 }
 
 // appendPending 把一次失败的投递落成持久兜底消息（`schedule_pending_messages`）。
@@ -461,10 +643,7 @@ func (r *Runtime) appendPending(task Task, deliverErr error, now time.Time) erro
 // 拿到后提交一次 turn 并释放租约。返回是否已内嵌执行成功。
 func (r *Runtime) tryEmbedded(sessionID, text string) bool {
 	// mode 门控：delegate（或未知值）永不内嵌，即使 Executor/Arbiter 已注入。
-	if !ModeAllowsEmbedded(r.opts.Mode) {
-		return false
-	}
-	if r.opts.Executor == nil || r.opts.Arbiter == nil {
+	if !r.embeddedPossible() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), embeddedTurnTimeout)
@@ -481,6 +660,11 @@ func (r *Runtime) tryEmbedded(sessionID, text string) bool {
 		return false
 	}
 	return true
+}
+
+// embeddedPossible 报告内嵌执行是否可能（与 tryEmbedded 的入口门一致）。
+func (r *Runtime) embeddedPossible() bool {
+	return ModeAllowsEmbedded(r.opts.Mode) && r.opts.Executor != nil && r.opts.Arbiter != nil
 }
 
 // DrainPendingMessages 消费某会话的兜底消息：逐条尝试投递，成功即标记消费。
@@ -580,6 +764,18 @@ func (r *Runtime) commit(task Task, now time.Time) {
 			r.opts.Logf("schedule: clear pending for %s: %v", task.Record.ID, err)
 		}
 	}
+	// S4（§4.3 ③）：投递成功——清空 attempts/死信留痕并释放 claim（簿记写，
+	// 不影响 state_version；失败只记日志，不阻断投递推进）。
+	if attempts, ok := r.opts.Store.(TaskAttemptStore); ok {
+		if err := attempts.ClearTaskAttempts(task.Record.ID); err != nil {
+			r.opts.Logf("schedule: clear attempts for %s: %v", task.Record.ID, err)
+		}
+	}
+	if claimer, ok := r.opts.Store.(TaskClaimer); ok {
+		if err := claimer.ReleaseTaskClaims([]string{task.Record.ID}, r.opts.InstanceID); err != nil {
+			r.opts.Logf("schedule: release claim for %s: %v", task.Record.ID, err)
+		}
+	}
 	r.mu.Lock()
 	delete(r.attempts, task.Record.ID)
 	delete(r.failedUntil, task.Record.ID)
@@ -630,6 +826,14 @@ func (r *Runtime) scheduleNext(now time.Time) {
 		}
 	}
 	if next == nil {
+		// 空闲兜底：没有 active 任务时也保留一个低频重扫，避免"创建后无人
+		// 唤醒"导致任务滞留到下一次外部事件（见 Service.SetDriverWaker）。
+		r.timer = time.AfterFunc(idleSweepInterval, func() {
+			r.mu.Lock()
+			r.timer = nil
+			r.mu.Unlock()
+			r.RequestDrive()
+		})
 		return
 	}
 	delay := next.Sub(now)
@@ -691,4 +895,31 @@ func groupIDs(group []Task) []string {
 		ids = append(ids, task.Record.ID)
 	}
 	return ids
+}
+
+// occurrenceKeys 计算一组到期任务的交付键（与投递载荷的 occurrence_at 同源：
+// 使用该 occurrence 的 scheduled_at；commit 前保持稳定）。
+func occurrenceKeys(group []Task) []string {
+	keys := make([]string, 0, len(group))
+	for _, task := range group {
+		keys = append(keys, OccurrenceKey(task.Record.ID, task.Record.ScheduledAt))
+	}
+	return keys
+}
+
+// allOccurrencesDelivered 查询交付账本（store 未实现 OccurrenceLedger 时恒 false）。
+func (r *Runtime) allOccurrencesDelivered(keys []string) bool {
+	if len(keys) == 0 {
+		return false
+	}
+	ledger, ok := r.opts.Store.(OccurrenceLedger)
+	if !ok {
+		return false
+	}
+	delivered, err := ledger.AllOccurrencesDelivered(keys)
+	if err != nil {
+		r.opts.Logf("schedule: delivery ledger lookup failed: %v", err)
+		return false
+	}
+	return delivered
 }

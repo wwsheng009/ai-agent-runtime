@@ -138,6 +138,8 @@ vs `buildSessionActor(sessionID, session, sessionStore, runtimeConfig, workspace
 > DB），daemon 的 arbiter 改为使用同一把锁；`internal/mesh` 的 session 租约不应再用于执行互斥
 > （它属于 mesh 控制面：presence / bindings / stop 能力）。
 
+> **v1.1 补记（2026-10-14，调度联盟审查）**：锁域从"两把"扩展为"三把"——① **领导权** = mesh 文件租约（`schedule-scheduler`，daemon/宿主竞争，粗粒度唯一性）；② **会话执行** = `chat.SessionLeaseStore`（DB，本节结论不变）；③ **任务并发** = `schedule.sqlite` CAS claim（`schedule_tasks.owner_instance_id/lease_expires_at` 预留列转正，S4）。另：`cmd/runtime-server` 已于 2026-10-14 经 `mesh_bootstrap.go` 入网（节点档案/派发用途）——但**不改变本节结论**：执行互斥仍只认 DB 租约，mesh session 租约只服务控制面。见 [`mesh-scheduler-federation-design.md`](./mesh-scheduler-federation-design.md) §12.1/§12.3。
+
 **修复（已落地）**：删除 `cmd/scheduled/arbiter_windows.go` / `arbiter_other.go`（mesh 版），
 新增 `cmd/scheduled/arbiter.go`——`daemonSessionArbiter` 改为 `chat.SessionLeaseStore`；
 新增 `cmd/scheduled/sessionlease.go`：从 `sessionRuntime.storePath/storeDSN` 打开共享存储，

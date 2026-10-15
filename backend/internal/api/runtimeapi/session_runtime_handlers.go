@@ -18,6 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimehost "github.com/wwsheng009/ai-agent-runtime/internal/runtimehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -45,7 +46,10 @@ type sessionRuntimeCommandRequest struct {
 	Prompt string `json:"prompt,omitempty"`
 	// Images 是本次 prompt 携带的图片附件路径（来自 POST /api/runtime/uploads）。
 	// 只有落在附件目录内的路径会被接受，见 resolveRuntimeUploadImages。
-	Images               []string               `json:"images,omitempty"`
+	Images []string `json:"images,omitempty"`
+	// Occurrences 是调度投递的交付键（S2，§12.1）：带键时按交付账本去重——
+	// 已送达直接回 200 duplicate，不重复入 actor；提交成功后落账。
+	Occurrences          []string               `json:"occurrences,omitempty"`
 	ContinuationMetadata map[string]interface{} `json:"continuation_metadata,omitempty"`
 	StripMetadataKeys    []string               `json:"strip_metadata_keys,omitempty"`
 	RunMeta              *team.RunMeta          `json:"run_meta,omitempty"`
@@ -960,6 +964,21 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 	// 空闲的命令入口驱逐旧 actor，使紧随其后的 GetOrCreate 取新 profile。
 	h.reconcilePendingActorRebuild(sessionID)
 
+	// S2（§12.1）：带 occurrence 键的调度投递先查交付账本——已送达直接回
+	// duplicate 成功（不重复入 actor）。刻意放在 hub 获取之前：重放恒幂等，
+	// 不受"hub 暂时不可用"影响。
+	if (commandType == "submit_prompt" || commandType == "submit") && len(req.Occurrences) > 0 {
+		if ledger := h.scheduleOccurrenceLedger(); ledger != nil {
+			if delivered, ledgerErr := ledger.AllOccurrencesDelivered(req.Occurrences); ledgerErr == nil && delivered {
+				h.writeJSON(w, http.StatusOK, map[string]interface{}{
+					"duplicate":   true,
+					"occurrences": req.Occurrences,
+				})
+				return
+			}
+		}
+	}
+
 	hub := h.getSessionHub()
 	if hub == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
@@ -982,6 +1001,8 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "prompt is required"))
 			return
 		}
+		// S2（§12.1）：账本读取器用于提交成功后的落账（去重判定在上面统一做）。
+		ledger := h.scheduleOccurrenceLedger()
 		prompt, err = h.injectSupervisionPreflight(r.Context(), sessionID, prompt, req.RunMeta)
 		if err != nil {
 			h.writeError(w, http.StatusInternalServerError, err)
@@ -1005,6 +1026,13 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			}
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+		// S2（§12.1）：提交被 actor 接受即视为送达，落账（先提交后落账；落账
+		// 失败只告警——把"已受理未落账"留给下一次重试，绝不丢消息）。
+		if ledger != nil && len(req.Occurrences) > 0 {
+			if markErr := ledger.MarkOccurrencesDelivered(req.Occurrences, time.Now()); markErr != nil {
+				logger.Warn("schedule: mark occurrences delivered failed", logger.Err(markErr))
+			}
 		}
 		if !completed {
 			payload := map[string]interface{}{

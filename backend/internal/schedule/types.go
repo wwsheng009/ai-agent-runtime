@@ -147,6 +147,13 @@ type Task struct {
 	LastDelivery       *DeliveryReceipt `json:"lastDelivery,omitempty"`
 	DeliveryHistory    *DeliveryHistory `json:"deliveryHistory,omitempty"`
 	StateVersion       int64            `json:"stateVersion"`
+	// S4（§4.3 ③）：attempts 持久化与死信状态显式化。claim（owner/lease）不进
+	// 内存模型——由 SQLiteStore 的 CAS 语句独占管理，不参与 state_version。
+	AttemptCount int `json:"attemptCount,omitempty"`
+	// LastAttemptAt 是最近一次失败尝试时间（leader 易主后退避延续用）。
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	// DeadLetteredAt 是首次达到 MaxAttempts 的时间（显式死信留痕，可查询）。
+	DeadLetteredAt *time.Time `json:"deadLetteredAt,omitempty"`
 }
 
 // JobRunStatus 是一次作业运行的结果状态。
@@ -179,6 +186,10 @@ type View struct {
 	Record
 	State        ScheduleState `json:"state"`
 	DeliveryMode string        `json:"deliveryMode"`
+	// Notice 是创建/查看时的在岗警告（S3 §4.1）：非空表示任务已创建，但
+	// 当前没有（或不兼容的）调度者在岗、不会准时触发。由调用方注入
+	// （schedulehost.Presence.Notice()），schedule 包本身不做 mesh 探测。
+	Notice string `json:"notice,omitempty"`
 }
 
 // Occurrence 是一次发生点解析结果。

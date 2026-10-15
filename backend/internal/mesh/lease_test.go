@@ -262,6 +262,38 @@ func TestLeaseRenewRefreshesAndDetectsLoss(t *testing.T) {
 	}
 }
 
+// TestRenewAfterTakeoverNeverClobbers 钉住 2026-10-14 的 M1 修复：续约在
+// `.claim` 锁内重读校验，租约被显式接管后 Renew 必须报 Lost，并且**绝不**
+// 用陈旧内容覆盖新持有者写下的租约（修复前是"读→rename 覆盖"的裸写）。
+func TestRenewAfterTakeoverNeverClobbers(t *testing.T) {
+	paths := testPaths(t)
+	now := NowUTC()
+	ownerA := LeaseOwner{NodeID: "node-a", PID: os.Getpid()}
+	ownerB := LeaseOwner{NodeID: "node-b", PID: os.Getpid()}
+
+	if outcome := Acquire(paths, LeasePurposeSession, "session_m1", ownerA, AcquireOptions{Now: now}); !outcome.Acquired {
+		t.Fatalf("acquire A: %+v", outcome)
+	}
+	// B 显式接管（模拟回收路径）：接管之后 A 的续约不得覆盖 B。
+	if outcome := Acquire(paths, LeasePurposeSession, "session_m1", ownerB, AcquireOptions{Now: now.Add(time.Second), TTL: time.Minute, Takeover: true}); !outcome.Acquired {
+		t.Fatalf("takeover B: %+v", outcome)
+	}
+	lost := Renew(paths, LeasePurposeSession, "session_m1", ownerA, now.Add(2*time.Second), DefaultLeaseTTL)
+	if !lost.Lost || lost.Renewed {
+		t.Fatalf("renew by stale owner = %+v, want lost", lost)
+	}
+	stored, ok := ReadLease(paths.LeasePath(LeasePurposeSession, "session_m1"))
+	if !ok {
+		t.Fatal("lease file missing after takeover")
+	}
+	if stored.OwnerNodeID != "node-b" {
+		t.Fatalf("stale renew clobbered the new owner: owner=%q, want node-b", stored.OwnerNodeID)
+	}
+	if renewed := Renew(paths, LeasePurposeSession, "session_m1", ownerB, now.Add(3*time.Second), time.Minute); !renewed.Renewed || renewed.Lost {
+		t.Fatalf("new owner must still renew: %+v", renewed)
+	}
+}
+
 func TestLeaseReleaseOnlyWhenOwned(t *testing.T) {
 	paths := testPaths(t)
 	owner := LeaseOwner{NodeID: "node-a", PID: os.Getpid()}
@@ -501,5 +533,78 @@ func TestHostNoticesLeaseTakeover(t *testing.T) {
 	host.heartbeatOnce()
 	if renewed, ok := ReadLease(paths.LeasePath(LeasePurposeSession, sessionID)); !ok || !renewed.RenewedAt.Equal(clock.Now().Add(-60*time.Second)) {
 		t.Fatalf("a lost lease must not be renewed: %+v", renewed)
+	}
+}
+
+// TestAcquireAssignsMonotonicEpoch 钉住 M2（fencing token）：新建 = 1；续约
+// 保持不变；接管他人租约 = 旧值 + 1（下游据此判定"我的任期是否已被接管"）。
+func TestAcquireAssignsMonotonicEpoch(t *testing.T) {
+	paths := testPaths(t)
+	now := NowUTC()
+	owner := LeaseOwner{NodeID: "node-epoch", PID: os.Getpid()}
+	other := LeaseOwner{NodeID: "node-epoch-b", PID: os.Getpid()}
+
+	first := Acquire(paths, LeasePurposeSession, "session_epoch", owner, AcquireOptions{Now: now})
+	if !first.Acquired || first.Epoch != 1 {
+		t.Fatalf("first acquire = %+v, want acquired with epoch 1", first)
+	}
+	if stored, ok := ReadLease(paths.LeasePath(LeasePurposeSession, "session_epoch")); !ok || stored.Epoch != 1 {
+		t.Fatalf("stored lease = %+v ok=%v, want epoch 1", stored, ok)
+	}
+	// 续约保持 epoch（同一任期）。
+	renewed := Renew(paths, LeasePurposeSession, "session_epoch", owner, now.Add(10*time.Second), time.Minute)
+	if !renewed.Renewed || renewed.Lease.Epoch != 1 {
+		t.Fatalf("renew = %+v, want renewed with epoch 1", renewed)
+	}
+	// 接管（显式 takeover）→ 旧值 + 1。
+	takeover := Acquire(paths, LeasePurposeSession, "session_epoch", other, AcquireOptions{Now: now.Add(20 * time.Second), TTL: time.Minute, Takeover: true})
+	if !takeover.Acquired || takeover.Epoch != 2 {
+		t.Fatalf("takeover = %+v, want acquired with epoch 2", takeover)
+	}
+	// 再接管回原 owner → 3（单调不减）。
+	back := Acquire(paths, LeasePurposeSession, "session_epoch", owner, AcquireOptions{Now: now.Add(30 * time.Second), TTL: time.Minute, Takeover: true})
+	if !back.Acquired || back.Epoch != 3 {
+		t.Fatalf("second takeover = %+v, want acquired with epoch 3", back)
+	}
+}
+
+// TestAcquireEpochAfterReleaseRestarts 记录一个刻意的边界：release 表示旧持有者
+// 已明确放弃，无重叠任期需要栅栏，因此重新竞争从 1 起（fencing 只需覆盖"接管"）。
+func TestAcquireEpochAfterReleaseRestarts(t *testing.T) {
+	paths := testPaths(t)
+	now := NowUTC()
+	owner := LeaseOwner{NodeID: "node-epoch-release", PID: os.Getpid()}
+	if outcome := Acquire(paths, LeasePurposeSession, "session_epoch_rel", owner, AcquireOptions{Now: now}); !outcome.Acquired || outcome.Epoch != 1 {
+		t.Fatalf("acquire = %+v", outcome)
+	}
+	Release(paths, LeasePurposeSession, "session_epoch_rel", owner)
+	again := Acquire(paths, LeasePurposeSession, "session_epoch_rel", owner, AcquireOptions{Now: now.Add(time.Second)})
+	if !again.Acquired || again.Epoch != 1 {
+		t.Fatalf("acquire after release = %+v, want epoch 1", again)
+	}
+}
+
+// TestAcquireLegacyLeaseEpoch 钉住兼容面：旧文件无 epoch 字段 → 读到 0（不可
+// 判定），接管后从 1 起，不因缺字段拒绝读取。
+func TestAcquireLegacyLeaseEpoch(t *testing.T) {
+	paths := testPaths(t)
+	now := NowUTC()
+	writeRawLease(t, paths, Lease{
+		Purpose:     LeasePurposeSession,
+		Key:         "session_epoch_legacy",
+		OwnerNodeID: "node-legacy",
+		OwnerPID:    os.Getpid(),
+		AcquiredAt:  now.Add(-time.Minute),
+		RenewedAt:   now.Add(-time.Minute),
+		TTLSec:      90,
+	})
+	legacy, ok := ReadLease(paths.LeasePath(LeasePurposeSession, "session_epoch_legacy"))
+	if !ok || legacy.Epoch != 0 {
+		t.Fatalf("legacy lease = %+v ok=%v, want epoch 0", legacy, ok)
+	}
+	taker := LeaseOwner{NodeID: "node-epoch-taker", PID: os.Getpid()}
+	outcome := Acquire(paths, LeasePurposeSession, "session_epoch_legacy", taker, AcquireOptions{Now: now, TTL: time.Minute, Takeover: true})
+	if !outcome.Acquired || outcome.Epoch != 1 {
+		t.Fatalf("takeover of legacy lease = %+v, want epoch 1", outcome)
 	}
 }

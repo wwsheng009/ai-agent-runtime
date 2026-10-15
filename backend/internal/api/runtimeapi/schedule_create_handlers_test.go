@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 )
 
 // newScheduleTestHandler returns a handler whose schedule service is backed by
@@ -29,6 +30,8 @@ func newScheduleTestHandler(t *testing.T) (*Handler, *mux.Router) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	handler.scheduleService = schedule.NewService(store, schedule.SystemClock)
+	// 与生产 getScheduleService 同口径：store 一并挂到 handler（S2 交付账本用）。
+	handler.scheduleStore = store
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 	return handler, router
@@ -116,4 +119,30 @@ func TestCreateScheduleTask_ReusesServiceValidation(t *testing.T) {
 			require.Contains(t, rec.Body.String(), tc.wantMsg)
 		})
 	}
+}
+
+// TestCreateScheduleTask_CarriesDriverAbsentNotice 钉住 S3（§4.1）：创建回执
+// 携带 presence 快照；无调度者在岗时 view.notice 给出可操作警告（创建不受阻）。
+func TestCreateScheduleTask_CarriesDriverAbsentNotice(t *testing.T) {
+	handler, router := newScheduleTestHandler(t)
+	handler.schedulePresenceOverride = func() schedulehost.Presence {
+		return schedulehost.Presence{
+			State:       schedulehost.PresenceAbsent,
+			StoreSchema: schedule.SupportedSchemaVersion(),
+		}
+	}
+
+	body := `{"session_id":"sess-notice","title":"Notice ping","prompt":"p","after_seconds":600}`
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/schedule/create", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var created struct {
+		View     schedule.View         `json:"view"`
+		Presence schedulehost.Presence `json:"presence"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.Equal(t, schedulehost.PresenceAbsent, created.Presence.State)
+	require.Contains(t, created.View.Notice, "无调度者在岗")
 }

@@ -396,8 +396,16 @@ type ScheduleConfig struct {
 	MaxActivePerSession int `yaml:"maxActivePerSession" json:"maxActivePerSession"`
 	// MaxDeliveryAttempts bounds delivery retries before a task goes inactive.
 	MaxDeliveryAttempts int `yaml:"maxDeliveryAttempts" json:"maxDeliveryAttempts"`
+	// MisfireGrace 是一次性任务（after/at）的补发宽限窗口（S4b，§4.4）：
+	// 0（缺省）= 不限宽限（总是补发，兼容既有行为）；>0 时逾期超过窗口的
+	// 一次性任务不再投递，直接转 inactive 并计入 misfireSkippedTotal。
+	// 周期任务（every/daily/weekly/cron）不适用：沿用"停机只补最近一次"。
+	MisfireGrace time.Duration `yaml:"misfireGrace" json:"misfireGrace"`
 	// Execution selects how due reminders are executed.
 	Execution ScheduleExecutionConfig `yaml:"execution" json:"execution"`
+	// Driver controls who may compete for the schedule leadership lease
+	// (v1.1 federation；见 docs/automation-tasks/mesh-scheduler-federation-design.md §7)。
+	Driver ScheduleDriverConfig `yaml:"driver" json:"driver"`
 }
 
 // ScheduleExecutionConfig selects the reminder execution mode.
@@ -416,6 +424,93 @@ type ScheduleExecutionConfig struct {
 	FallbackToMailbox bool `yaml:"fallbackToMailbox" json:"fallbackToMailbox"`
 }
 
+// Schedule driver roles（v1.1 联盟式调度）：schedule.driver.participants 词表。
+const (
+	// ScheduleRoleDaemon 是独立守护进程 cmd/scheduled。
+	ScheduleRoleDaemon = "daemon"
+	// ScheduleRoleRuntimeServer 是 runtime-server 常驻宿主。
+	ScheduleRoleRuntimeServer = "runtime-server"
+	// ScheduleRoleAICLI 是 aicli 交互宿主（默认不参与，需显式加入）。
+	ScheduleRoleAICLI = "aicli"
+)
+
+// Driver degraded policies（mesh 根不可用时）。
+const (
+	ScheduleDriverDegradedStandby    = "standby"
+	ScheduleDriverDegradedStandalone = "standalone"
+)
+
+// DefaultScheduleDriverLeaseTTL 是 driver 租约的显式寿命：mesh 默认 90s，
+// driver 用 30s 换取更快的接管（M3）。
+const DefaultScheduleDriverLeaseTTL = 30 * time.Second
+
+// ScheduleDriverConfig 控制调度领导权的参与与降级（联盟式调度 v1.1）。
+type ScheduleDriverConfig struct {
+	// Participants 是有资格竞争调度租约的角色，按序即优先级；默认 [daemon, runtime-server]。
+	Participants []string `yaml:"participants" json:"participants"`
+	// LeaseTTL 是 driver 租约寿命（默认 30s；小于 1s 会被 schedulehost 抬到 1s——
+	// mesh 租约以秒为存储粒度）。
+	LeaseTTL time.Duration `yaml:"leaseTTL" json:"leaseTTL"`
+	// StandbyRetry 是待命轮询间隔（默认 min(LeaseTTL/3, 10s)）。
+	StandbyRetry time.Duration `yaml:"standbyRetry" json:"standbyRetry"`
+	// Degraded 是 mesh 不可用时的策略：standby（fail-closed；宿主默认）|
+	// standalone（单机自跑；daemon 默认）。留空 → 按角色取默认。
+	Degraded string `yaml:"degraded" json:"degraded"`
+}
+
+// DefaultScheduleDriverConfig returns the shipped driver defaults.
+func DefaultScheduleDriverConfig() ScheduleDriverConfig {
+	return ScheduleDriverConfig{
+		Participants: []string{ScheduleRoleDaemon, ScheduleRoleRuntimeServer},
+		LeaseTTL:     DefaultScheduleDriverLeaseTTL,
+	}
+}
+
+// DriverAllows reports whether role may compete for the schedule leadership lease.
+func (c ScheduleConfig) DriverAllows(role string) bool {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return false
+	}
+	list := c.Driver.Participants
+	if len(list) == 0 {
+		list = DefaultScheduleDriverConfig().Participants
+	}
+	for _, candidate := range list {
+		if strings.EqualFold(strings.TrimSpace(candidate), role) {
+			return true
+		}
+	}
+	return false
+}
+
+// DriverPriority returns the 1-based position of role in participants (0 = not allowed)。
+func (c ScheduleConfig) DriverPriority(role string) int {
+	role = strings.TrimSpace(role)
+	list := c.Driver.Participants
+	if len(list) == 0 {
+		list = DefaultScheduleDriverConfig().Participants
+	}
+	for index, candidate := range list {
+		if strings.EqualFold(strings.TrimSpace(candidate), role) {
+			return index + 1
+		}
+	}
+	return 0
+}
+
+// DriverDegradedPolicy returns the effective degraded policy for role:
+// 显式配置优先；留空时 daemon=standalone（历史行为），其余角色=standby（fail-closed）。
+func (c ScheduleConfig) DriverDegradedPolicy(role string) string {
+	if value := strings.ToLower(strings.TrimSpace(c.Driver.Degraded)); value != "" {
+		return value
+	}
+	if strings.EqualFold(strings.TrimSpace(role), ScheduleRoleDaemon) {
+		return ScheduleDriverDegradedStandalone
+	}
+	return ScheduleDriverDegradedStandby
+}
+
 // DefaultScheduleConfig returns the shipped Schedule defaults (disabled, delegate).
 func DefaultScheduleConfig() ScheduleConfig {
 	return ScheduleConfig{
@@ -429,6 +524,7 @@ func DefaultScheduleConfig() ScheduleConfig {
 			MaxTurnDuration:         10 * time.Minute,
 			FallbackToMailbox:       true,
 		},
+		Driver: DefaultScheduleDriverConfig(),
 	}
 }
 
@@ -453,6 +549,12 @@ func (c ScheduleConfig) WithDefaults() ScheduleConfig {
 	}
 	if out.Execution.MaxTurnDuration <= 0 {
 		out.Execution.MaxTurnDuration = def.Execution.MaxTurnDuration
+	}
+	if len(out.Driver.Participants) == 0 {
+		out.Driver.Participants = append([]string(nil), def.Driver.Participants...)
+	}
+	if out.Driver.LeaseTTL <= 0 {
+		out.Driver.LeaseTTL = def.Driver.LeaseTTL
 	}
 	return out
 }

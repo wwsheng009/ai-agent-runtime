@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -261,7 +262,18 @@ func (b *Broker) executeScheduleCreate(sessionID string, args map[string]interfa
 	if err != nil {
 		return scheduleFailure(err), nil, nil
 	}
-	return schedule.BuildView(record, b.Schedule.Now()), nil, nil
+	view := schedule.BuildView(record, b.Schedule.Now())
+	// S3（§4.1）：非在岗/不兼容时不拦创建，但在回执里给出可操作警告。
+	view.Notice = b.schedulePresence().Notice()
+	return view, nil, nil
+}
+
+// schedulePresence 返回在岗检查快照（探针未注入时为真实 mesh 探测）。
+func (b *Broker) schedulePresence() schedulehost.Presence {
+	if b.SchedulePresence != nil {
+		return b.SchedulePresence()
+	}
+	return schedulehost.ProbePresence(schedule.SupportedSchemaVersion())
 }
 
 func (b *Broker) executeScheduleList(sessionID string) (interface{}, map[string]interface{}, error) {

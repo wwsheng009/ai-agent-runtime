@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 )
 
 // statusServer 暴露 loopback 运维端点（D3 + P6）：
@@ -18,7 +19,7 @@ import (
 //	GET /metrics —— 投递成功/失败/重试/内嵌/死信累计（P6 观测收敛）
 type statusServer struct {
 	store         *schedule.SQLiteStore
-	runtime       *schedule.Runtime
+	leader        *schedulehost.Leader
 	mode          string
 	runtimeServer string
 	startedAt     time.Time
@@ -37,14 +38,26 @@ func (s *statusServer) Serve(port int) (func(), error) {
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// S3（§4.1）：在岗三态快照（与 /schedule 面板、create 回执同口径）。
+		presence := schedulehost.ProbePresence(schedule.SupportedSchemaVersion())
 		payload := map[string]interface{}{
 			"mode":           s.mode,
 			"runtime_server": s.runtimeServer,
 			"started_at":     s.startedAt.UTC().Format(time.RFC3339),
 			"uptime":         time.Since(s.startedAt).Round(time.Second).String(),
+			"store_schema":   presence.StoreSchema,
+			"presence":       presence,
 		}
-		if s.runtime != nil {
-			payload["metrics"] = s.runtime.Metrics()
+		// S4b：账本对账快照（任务状态 / pending 兜底 / 交付账本条目）。
+		if s.store != nil {
+			if stats, err := s.store.StoreStats(); err == nil {
+				payload["stats"] = stats
+			}
+		}
+		if s.leader != nil {
+			driver := s.leader.Status()
+			payload["driver"] = driver
+			payload["metrics"] = driver.Metrics
 		}
 		_ = json.NewEncoder(w).Encode(payload)
 	})

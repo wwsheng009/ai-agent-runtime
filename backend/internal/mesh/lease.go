@@ -74,6 +74,10 @@ type Lease struct {
 	AcquiredAt    time.Time `json:"acquired_at"`
 	RenewedAt     time.Time `json:"renewed_at"`
 	TTLSec        int       `json:"ttl_sec"`
+	// Epoch 是 fencing token（M2，§12.3）：每次"新建或回收接管"递增，续约保持
+	// 不变。下游据此判定"我的任期是否已被接管"；旧文件缺该字段 → 0 = 未知/
+	// legacy（按"不可判定"处理，不引入误判）。字段是加性扩展，schema 不变。
+	Epoch int64 `json:"epoch,omitempty"`
 }
 
 // LeaseOwner identifies the process claiming or renewing a lease.
@@ -100,9 +104,11 @@ type LeaseOutcome struct {
 	Acquired  bool
 	Reclaimed bool
 	Holder    *Lease
-	Degraded  bool
-	Reason    string
-	Err       error
+	// Epoch 是本次成功获取（新建或接管）的任期号（Acquired=true 时有效）。
+	Epoch    int64
+	Degraded bool
+	Reason   string
+	Err      error
 }
 
 // LeaseRenewal reports the result of a heartbeat renewal.
@@ -199,6 +205,7 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 		AcquiredAt:    opts.Now,
 		RenewedAt:     opts.Now,
 		TTLSec:        int(opts.TTL / time.Second),
+		Epoch:         1,
 	}
 	reclaimed := false
 	for attempt := 0; attempt < leaseAcquireAttempts; attempt++ {
@@ -220,7 +227,7 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 		err := createLeaseFile(path, lease)
 		if err == nil {
 			release()
-			return LeaseOutcome{Acquired: true, Reclaimed: reclaimed, Reason: LeaseReasonAcquired}
+			return LeaseOutcome{Acquired: true, Reclaimed: reclaimed, Reason: LeaseReasonAcquired, Epoch: lease.Epoch}
 		}
 		if !errors.Is(err, fs.ErrExist) {
 			release()
@@ -237,13 +244,18 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 		if existing.OwnedBy(owner) {
 			// Same node re-acquiring (resume of the same session inside one
 			// process): keep the original acquisition time, refresh the rest.
+			// M2：同一任期内重入不递增 epoch（legacy 0 → 1 归一）。
 			lease.AcquiredAt = existing.AcquiredAt
+			lease.Epoch = existing.Epoch
+			if lease.Epoch <= 0 {
+				lease.Epoch = 1
+			}
 			if err := writeLeaseFile(path, lease); err != nil {
 				release()
 				return LeaseOutcome{Reason: LeaseReasonDegraded, Degraded: true, Err: err}
 			}
 			release()
-			return LeaseOutcome{Acquired: true, Reclaimed: reclaimed, Reason: LeaseReasonAcquired}
+			return LeaseOutcome{Acquired: true, Reclaimed: reclaimed, Reason: LeaseReasonAcquired, Epoch: lease.Epoch}
 		}
 		if !opts.Takeover && !existing.Stale(opts.Now) {
 			holder := existing
@@ -256,6 +268,11 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 			continue
 		}
 		reclaimed = true
+		// M2（fencing）：接管即开启新任期——epoch = 旧值 + 1（legacy 0 → 1）。
+		lease.Epoch = existing.Epoch + 1
+		if lease.Epoch <= 0 {
+			lease.Epoch = 1
+		}
 		// Publish the new lease while still holding the claim: no contender can
 		// slip a create into the window between reclaim and create.
 		if err := createLeaseFile(path, lease); err != nil {
@@ -266,13 +283,24 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 			return LeaseOutcome{Reason: LeaseReasonDegraded, Degraded: true, Err: err}
 		}
 		release()
-		return LeaseOutcome{Acquired: true, Reclaimed: true, Reason: LeaseReasonAcquired}
+		return LeaseOutcome{Acquired: true, Reclaimed: true, Reason: LeaseReasonAcquired, Epoch: lease.Epoch}
 	}
 	return LeaseOutcome{Reason: LeaseReasonContended}
 }
 
 // Renew refreshes renewed_at of a lease this process still owns. It is called
 // from the heartbeat (architecture §4.1) and never creates a lease.
+//
+// 2026-10-14（M1 修复）：续约与回收共享同一把 `.claim` 串行化锁。此前续约是
+// "读 → 写"的无锁覆盖，与回收存在低概率覆盖竞态：A 读到自持的旧租约后，
+// B 判定 A stale 并回收+创建，随后 A 的续约 rename 覆盖 B 的新文件，形成
+// 双持有者（见 docs/automation-tasks/mesh-scheduler-federation-design.md §12.3 M1）。
+// 现在：
+//   - 拿不到 claim（有竞争者正在回收/创建）：重读判断归属——仍归本人则本次
+//     不刷新（下一拍再试）、不报 Lost；已易主则报 Lost。
+//   - 锁内重读后必须仍归本人所有，否则 Lost（绝不覆盖他人已生效的租约）。
+//   - claim 不可用（目录不可写）时保守不写；调用方应把"多拍未续约"当作失租
+//     信号（schedulehost.Leader 按 TTL 兜底自降级）。
 func Renew(paths Paths, purpose, key string, owner LeaseOwner, now time.Time, ttl time.Duration) LeaseRenewal {
 	if now.IsZero() {
 		now = NowUTC()
@@ -281,6 +309,24 @@ func Renew(paths Paths, purpose, key string, owner LeaseOwner, now time.Time, tt
 	if path == "" {
 		return LeaseRenewal{Lost: true}
 	}
+	release, claimErr := acquireLeaseClaim(path)
+	if claimErr != nil {
+		// 串行化不可用（目录/权限问题）：不写、不谎报 Lost；返回未续约。
+		if current, ok := ReadLease(path); ok && current.OwnedBy(owner) {
+			return LeaseRenewal{Lease: current}
+		}
+		return LeaseRenewal{Lost: true}
+	}
+	if release == nil {
+		// 竞争者持有 claim：可能正在回收本租约。重读：仍归本人 → 暂不刷新
+		//（不报 Lost，下一拍重试）；已易主 → Lost。
+		if current, ok := ReadLease(path); ok && current.OwnedBy(owner) {
+			return LeaseRenewal{Lease: current}
+		}
+		return LeaseRenewal{Lost: true}
+	}
+	defer release()
+
 	current, ok := ReadLease(path)
 	if !ok || !current.OwnedBy(owner) {
 		return LeaseRenewal{Lost: true}

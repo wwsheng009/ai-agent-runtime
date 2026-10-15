@@ -46,6 +46,10 @@ const (
 	ChatWebAPIStatusBarPath = "/web/api/statusbar"
 	ChatWebAPIEventsPath    = "/web/api/events"
 	ChatWebAPIInputPath     = "/web/api/input"
+	// ChatWebAPIScheduleDeliverPath 是调度投递接收端点（S2b，联盟设计 §3.3 L2）：
+	// driver 经 mesh.Call(op=schedule.deliver) 把提醒投进本进程会话，并按交付
+	// 账本做 occurrence 去重（对应 schedule_create 任务的就近投递）。
+	ChatWebAPIScheduleDeliverPath = "/web/api/schedule-deliver"
 	// ChatWebAPIAttachmentsPath 是图片附件上传端点（POST，multipart/form-data，
 	// 字段名 file，可多份）：内容经 internal/imageattach 校验/压缩后落到会话
 	// images artifact 目录，返回的 path 由前端在 /web/api/input 的 image_paths

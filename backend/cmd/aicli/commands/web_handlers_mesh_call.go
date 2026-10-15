@@ -258,6 +258,8 @@ func chatWebMeshCallHandler(path string) (func(http.ResponseWriter, *http.Reques
 		return HandleChatWebAPIInput, true
 	case ChatWebAPISessionsResumePath:
 		return HandleChatWebAPISessionsResume, true
+	case ChatWebAPIScheduleDeliverPath:
+		return HandleChatWebAPIScheduleDeliver, true
 	default:
 		return nil, false
 	}
@@ -329,6 +331,16 @@ func chatWebMeshCallPlanFor(op string, args json.RawMessage, clientRequestID str
 			return chatWebMeshCallPlan{}, err
 		}
 		return chatWebMeshCallPlan{method: http.MethodPost, path: ChatWebAPISessionsResumePath, body: encoded}, nil
+	case "schedule.deliver":
+		body, err := chatWebMeshCallSubset(args, "session_id", "text", "occurrences")
+		if err != nil {
+			return chatWebMeshCallPlan{}, err
+		}
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return chatWebMeshCallPlan{}, err
+		}
+		return chatWebMeshCallPlan{method: http.MethodPost, path: ChatWebAPIScheduleDeliverPath, body: encoded}, nil
 	default:
 		return chatWebMeshCallPlan{}, fmt.Errorf("unknown op %q", op)
 	}

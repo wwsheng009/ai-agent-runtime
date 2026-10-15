@@ -90,7 +90,8 @@ type CallOpSpec struct {
 	Endpoint string
 }
 
-// callOpSpecs 是 §5.6 的 op 白名单（9 项，顺序与文档表格一致）。
+// callOpSpecs 是 §5.6 的 op 白名单（9 项，顺序与文档表格一致）
+// + S2b（调度联盟）新增的 schedule.deliver（第 10 项）。
 var callOpSpecs = []CallOpSpec{
 	{Op: "node.info", Endpoint: "/web/api/mesh/self"},
 	{Op: "status", Endpoint: "/web/api/status"},
@@ -101,6 +102,9 @@ var callOpSpecs = []CallOpSpec{
 	{Op: "input", Write: true, Endpoint: "/web/api/input"},
 	{Op: "cancel", Write: true, Endpoint: "/web/api/input"},
 	{Op: "sessions.resume", Write: true, Endpoint: "/web/api/sessions/resume"},
+	// S2b（调度联盟 §3.3 L2）：driver 把提醒就近投递到目标会话宿主；
+	// 接收侧按交付账本 occurrence 去重（写操作，无隐式放行）。
+	{Op: "schedule.deliver", Write: true, Endpoint: "/web/api/schedule-deliver"},
 }
 
 // CallOps 返回白名单副本：调用方（CLI 帮助、Web 前端）据此渲染可选 op，

@@ -72,6 +72,10 @@ type Service struct {
 	// hostRuntime 是宿主侧兜底消费运行时（缺口 1：ActivateSession 消费
 	// daemon 落库的 pending 提醒）；nil = 宿主未注册（pending 只能由 daemon 消费）。
 	hostRuntime *Runtime
+	// driverWaker 在每次任务变更提交后唤醒调度驱动（S2 修复）：空闲期创建的
+	// 任务不会自动进入 driver 的定时器重算，需要一次显式 RequestDrive。
+	driverWakerMu sync.RWMutex
+	driverWaker   func()
 
 	// notifyMu 保护 notify 的装配期写入与运行期读取。**绝不能与 mu 混用**：
 	// Create/Update/Delete 持有 mu 期间调用 emitChanged，若 emitChanged 再取
@@ -98,12 +102,27 @@ func (s *Service) SetNotifier(notify func()) {
 	s.notifyMu.Unlock()
 }
 
+// SetDriverWaker 注册"任务变更后唤醒调度驱动"回调（nil 清除）。
+//
+// S2b 实测发现：driver 的定时器只在 drive() 末尾按"最近目标"重排；空闲期
+// （无任何 active 任务）创建的新任务不会触发重排，提醒要等下一次 drive 才被
+// 看见。控制面每次变更提交后经此回调唤醒驱动（实现为 RequestDrive 的合并
+// 语义：非阻塞、可重入）。
+func (s *Service) SetDriverWaker(wake func()) {
+	s.driverWakerMu.Lock()
+	s.driverWaker = wake
+	s.driverWakerMu.Unlock()
+}
+
 // emitChanged 发布一次变更通知（同步监听器失败只记日志，不影响调用方）。
 func (s *Service) emitChanged() {
 	s.notifyMu.RLock()
 	notify := s.notify
 	s.notifyMu.RUnlock()
-	if notify == nil {
+	s.driverWakerMu.RLock()
+	wake := s.driverWaker
+	s.driverWakerMu.RUnlock()
+	if notify == nil && wake == nil {
 		return
 	}
 	defer func() {
@@ -112,7 +131,13 @@ func (s *Service) emitChanged() {
 			_ = r
 		}
 	}()
-	notify()
+	if notify != nil {
+		notify()
+	}
+	if wake != nil {
+		// 唤醒必须非阻塞（RequestDrive 自带合并语义；panic 由上方 recover 兜底）。
+		wake()
+	}
 }
 
 // Store 返回底层存储（供运行时读写）。

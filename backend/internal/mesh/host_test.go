@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -546,4 +547,40 @@ func TestCurrentHostHelpersAreNilSafe(t *testing.T) {
 	if _, err := os.Stat(paths.NodePath(nodeID)); !os.IsNotExist(err) {
 		t.Fatalf("CloseCurrent must delete the record (stat err = %v)", err)
 	}
+}
+
+// TestHostAddCapabilities 钉住 S5 的"运行期追加能力位"：aicli 的节点档案在
+// 进程启动时写出，而"是否参战调度"要到宿主挂载后才决定，因此需要不重启 Host
+// 就补 scheduler 能力位；重复位/空位忽略；nil host 安全。
+func TestHostAddCapabilities(t *testing.T) {
+	paths := testMeshPaths(t)
+	host := NewHost(HostConfig{Kind: "chat", Warn: func(string, ...any) {}})
+	if err := host.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = host.Stop(ctx, StopRequest{Target: host.NodeID()})
+	})
+
+	host.AddCapabilities("scheduler", "scheduler:store-v7", "  ")
+	host.AddCapabilities("scheduler") // 重复：忽略
+
+	record := readRecord(t, paths, host.NodeID())
+	if !HasCapability(record.Capabilities, "scheduler") || !HasCapability(record.Capabilities, "scheduler:store-v7") {
+		t.Fatalf("capabilities = %v, want scheduler + store marker", record.Capabilities)
+	}
+	schedulerCount := 0
+	for _, capability := range record.Capabilities {
+		if capability == "scheduler" {
+			schedulerCount++
+		}
+	}
+	if schedulerCount != 1 {
+		t.Fatalf("scheduler capability duplicated: %v", record.Capabilities)
+	}
+
+	var nilHost *Host
+	nilHost.AddCapabilities("scheduler") // 必须安全 no-op
 }

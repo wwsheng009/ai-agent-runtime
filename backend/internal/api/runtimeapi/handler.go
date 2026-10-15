@@ -53,6 +53,7 @@ import (
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -364,6 +365,12 @@ type Handler struct {
 
 	scheduleMu      sync.Mutex
 	scheduleService *schedule.Service
+	// scheduleStore 是 scheduleService 所用的共享 store（S1 联盟式调度：
+	// runtime-server 以 driver 身份运行时需要把它交给 schedulehost.Leader）。
+	scheduleStore schedule.Store
+	// schedulePresenceOverride 覆盖创建回执与在岗面板的检查（S3 §4.1；nil →
+	// schedulehost.ProbePresence 真实探测）。测试注入固定值用。
+	schedulePresenceOverride func() schedulehost.Presence
 
 	codexSkillsListMu           sync.RWMutex
 	codexSkillsListCache        map[string]codexSkillsListResponse
@@ -5890,6 +5897,7 @@ func (h *Handler) getScheduleService() *schedule.Service {
 	if err != nil {
 		return nil
 	}
+	h.scheduleStore = store
 	service := schedule.NewService(store, schedule.SystemClock)
 	// schedule.changed（缺口 2）：任务变更提交后发布 runtime 事件（B 通道
 	// live-only，contract.go 已注册），前端面板据此刷新目录。
@@ -5902,6 +5910,15 @@ func (h *Handler) getScheduleService() *schedule.Service {
 	h.attachScheduleDrainRuntime(service, store)
 	h.scheduleService = service
 	return h.scheduleService
+}
+
+// schedulePresenceForCreate 返回创建回执/在岗面板用的检查快照（S3 §4.1）：
+// 测试注入优先；默认真实探测（store schema 取本二进制支持档）。
+func (h *Handler) schedulePresenceForCreate() schedulehost.Presence {
+	if h != nil && h.schedulePresenceOverride != nil {
+		return h.schedulePresenceOverride()
+	}
+	return schedulehost.ProbePresence(schedule.SupportedSchemaVersion())
 }
 
 // drainSchedulePending 消费某会话的持久兜底消息（缺口 1）：会话激活时调用，

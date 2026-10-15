@@ -80,7 +80,13 @@ func NewMemoryStore() (*SQLiteStore, error) {
 }
 
 func (s *SQLiteStore) migrate(ctx context.Context) error {
-	migrations := []migrate.Migration{{
+	return migrate.Apply(ctx, s.db, storeMigrations())
+}
+
+// storeMigrations 是 schedule store 全部迁移的唯一事实源（migrate 与
+// SupportedSchemaVersion 共用，避免版本号两处漂移）。
+func storeMigrations() []migrate.Migration {
+	return []migrate.Migration{{
 		Version: 1,
 		Name:    "schedule_tasks",
 		UpSQL: `
@@ -173,8 +179,86 @@ CREATE TABLE IF NOT EXISTS schedule_job_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_job_runs_task ON schedule_job_runs(schedule_id, id);
 `,
+	}, {
+		Version: 6,
+		Name:    "schedule_delivery_intents",
+		// S2（§12.1）：交付账本——接收侧按 occurrence_key 去重，收敛
+		// "先投递、后 commit" 崩溃窗口（leader 失租重扫同一 occurrence）。
+		// 当前只写 state='delivered'；'intent' 状态留给 S4 的任务级 claim 细化。
+		UpSQL: `
+CREATE TABLE IF NOT EXISTS schedule_delivery_intents (
+    occurrence_key TEXT PRIMARY KEY,
+    schedule_id    TEXT NOT NULL,
+    state          TEXT NOT NULL DEFAULT 'delivered',
+    owner          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_delivery_intents_task ON schedule_delivery_intents(schedule_id);
+`,
+	}, {
+		Version: 7,
+		Name:    "schedule_task_claims_attempts",
+		UpSQL: `
+ALTER TABLE schedule_tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE schedule_tasks ADD COLUMN last_attempt_at TEXT;
+ALTER TABLE schedule_tasks ADD COLUMN dead_lettered_at TEXT;
+`,
 	}}
-	return migrate.Apply(ctx, s.db, migrations)
+}
+
+// SupportedSchemaVersion 返回本二进制支持的最新 store schema 版本
+// （= 迁移集最高版本）。用于在岗可见性创建检查（§4.1）与版本握手（§4.2）：
+// 能力位标记 scheduler:store-v<N> 中的 N 即此值。
+func SupportedSchemaVersion() int {
+	return migrate.LatestVersion(storeMigrations())
+}
+
+// SchemaVersion 读取底层库当前已应用的最高迁移版本（读不到返回错误；
+// 空库无迁移记录时为 0——调用方按"低于支持版本"处理即可）。
+func (s *SQLiteStore) SchemaVersion(ctx context.Context) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("schedule: store is not open")
+	}
+	var version int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("schedule: read schema version: %w", err)
+	}
+	return version, nil
+}
+
+// StoreStats 是运维对账快照（S4b，§4 ⑥）：任务状态计数 + pending 兜底消息 +
+// 交付账本条目，供 daemon /status 与面板展示。
+type StoreStats struct {
+	ActiveTasks     int `json:"activeTasks"`
+	InactiveTasks   int `json:"inactiveTasks"`
+	PendingMessages int `json:"pendingMessages"`
+	DeliveryIntents int `json:"deliveryIntents"`
+}
+
+// StoreStats 汇总对账计数（只读单语句；不参与驱动路径的锁域）。
+func (s *SQLiteStore) StoreStats() (StoreStats, error) {
+	if s == nil || s.db == nil {
+		return StoreStats{}, fmt.Errorf("schedule: store is not open")
+	}
+	ctx := context.Background()
+	var stats StoreStats
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END), 0)
+FROM schedule_tasks`).Scan(&stats.ActiveTasks, &stats.InactiveTasks); err != nil {
+		return StoreStats{}, fmt.Errorf("schedule: count tasks: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schedule_pending_messages`).Scan(&stats.PendingMessages); err != nil {
+		return StoreStats{}, fmt.Errorf("schedule: count pending messages: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schedule_delivery_intents`).Scan(&stats.DeliveryIntents); err != nil {
+		return StoreStats{}, fmt.Errorf("schedule: count delivery intents: %w", err)
+	}
+	return stats, nil
 }
 
 // Close 关闭底层数据库。
@@ -188,6 +272,47 @@ func (s *SQLiteStore) Close() error {
 // DB 暴露底层句柄（供历史查询等同包扩展使用）。
 func (s *SQLiteStore) DB() *sql.DB { return s.db }
 
+// MarkOccurrencesDelivered 把 occurrence 键幂等落账（交付账本的"送达"侧，§12.1）。
+// 重复写只刷新 updated_at，created_at 保持首次值。
+func (s *SQLiteStore) MarkOccurrencesDelivered(keys []string, now time.Time) error {
+	cleaned := cleanOccurrenceKeys(keys)
+	if len(cleaned) == 0 {
+		return nil
+	}
+	now = now.UTC()
+	stamp := formatInstant(now)
+	for _, key := range cleaned {
+		if _, err := s.db.ExecContext(context.Background(), `
+INSERT INTO schedule_delivery_intents (occurrence_key, schedule_id, state, owner, created_at, updated_at)
+VALUES (?, ?, 'delivered', '', ?, ?)
+ON CONFLICT(occurrence_key) DO UPDATE SET state = 'delivered', updated_at = excluded.updated_at`,
+			key, ScheduleIDFromOccurrenceKey(key), stamp, stamp); err != nil {
+			return fmt.Errorf("mark occurrence delivered %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// AllOccurrencesDelivered 报告 keys 是否全部已送达（空列表恒 false：无键不做去重）。
+func (s *SQLiteStore) AllOccurrencesDelivered(keys []string) (bool, error) {
+	cleaned := cleanOccurrenceKeys(keys)
+	if len(cleaned) == 0 {
+		return false, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(cleaned)), ",")
+	args := make([]any, 0, len(cleaned))
+	for _, key := range cleaned {
+		args = append(args, key)
+	}
+	var count int
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM schedule_delivery_intents WHERE state = 'delivered' AND occurrence_key IN (`+placeholders+`)`,
+		args...).Scan(&count); err != nil {
+		return false, fmt.Errorf("count delivered occurrences: %w", err)
+	}
+	return count == len(cleaned), nil
+}
+
 // ExecRaw 执行一条原始 SQL（测试用：构造持久层边界数据）。
 func (s *SQLiteStore) ExecRaw(query string, args ...any) error {
 	_, err := s.db.ExecContext(context.Background(), query, args...)
@@ -197,7 +322,8 @@ func (s *SQLiteStore) ExecRaw(query string, args ...any) error {
 const taskColumns = `id, session_id, kind, title, prompt, scheduled_at, after_seconds, every_seconds,
     local_time, time_zone, weekdays_json, expression, status,
     last_scheduled_at, last_delivered_at, last_message_id, state_version, origin,
-    goal, plan_json, target_kind, target_workspace, target_profile, created_by_session_id`
+    goal, plan_json, target_kind, target_workspace, target_profile, created_by_session_id,
+    attempt_count, last_attempt_at, dead_lettered_at`
 
 func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	var (
@@ -223,11 +349,15 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 		targetWS    string
 		targetProf  string
 		createdBy   string
+		attempts    int64
+		lastAttempt sql.NullString
+		deadLetter  sql.NullString
 	)
 	if err := scanner.Scan(&id, &task.SessionID, &kind, &task.Record.Title, &task.Record.Prompt, &scheduledAt,
 		&afterRaw, &everyRaw, &localTime, &timeZone, &weekdaysRaw, &expression, &status,
 		&lastSched, &lastDeliv, &lastMsgID, &version, &origin,
-		&goal, &planJSON, &targetKind, &targetWS, &targetProf, &createdBy); err != nil {
+		&goal, &planJSON, &targetKind, &targetWS, &targetProf, &createdBy,
+		&attempts, &lastAttempt, &deadLetter); err != nil {
 		return Task{}, err
 	}
 	target, err := parseInstant(scheduledAt)
@@ -250,6 +380,18 @@ func scanTask(scanner interface{ Scan(...any) error }) (Task, error) {
 	task.TargetWorkspace = targetWS
 	task.TargetProfile = targetProf
 	task.CreatedBySessionID = createdBy
+	// S4：attempts/死信为簿记字段——坏值降级为 0/nil，不让整行读取失败。
+	task.AttemptCount = int(attempts)
+	if lastAttempt.Valid {
+		if parsed, perr := parseInstant(lastAttempt.String); perr == nil {
+			task.LastAttemptAt = &parsed
+		}
+	}
+	if deadLetter.Valid {
+		if parsed, perr := parseInstant(deadLetter.String); perr == nil {
+			task.DeadLetteredAt = &parsed
+		}
+	}
 	task.Status = Status(status)
 	task.StateVersion = version
 	// 未知/空来源回落 model：旧数据与外部写入零迁移语义。
@@ -404,16 +546,26 @@ func nullableString(value string) any {
 	return value
 }
 
+// nullableInstant 把可选时间写成可存储值（nil → NULL）。
+func nullableInstant(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return formatInstant(*value)
+}
+
 // Put 插入一条新任务；已存在同 id 时返回错误。
 func (s *SQLiteStore) Put(task Task) error {
 	now := formatInstant(time.Now())
 	_, err := s.db.ExecContext(context.Background(), `
 INSERT INTO schedule_tasks (`+taskColumns+`, owner_instance_id, lease_expires_at, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?,
-        ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
 		append(recordArgs(task), task.StateVersion, originArg(task),
 			task.Record.Goal, encodePlan(task.Record.Plan), string(NormalizeTargetKind(string(task.TargetKind))),
-			task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID, now, now)...)
+			task.TargetWorkspace, task.TargetProfile, task.CreatedBySessionID,
+			int64(task.AttemptCount), nullableInstant(task.LastAttemptAt), nullableInstant(task.DeadLetteredAt),
+			now, now)...)
 	if err != nil {
 		return fmt.Errorf("insert schedule task %s: %w", task.Record.ID, err)
 	}

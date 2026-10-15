@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/internal/schedule"
+	"github.com/wwsheng009/ai-agent-runtime/internal/schedulehost"
 )
 
 // /schedule — 自动化任务（Schedule）查看命令（P4，方案见
@@ -46,9 +47,28 @@ func executeStructuredScheduleCommand(session *ChatSession, command string) Comm
 	if err != nil {
 		return commandTextResult("自动化任务目录读取失败: " + err.Error())
 	}
+	// S3（§4.1）：目录头部展示调度者在岗状态（与 daemon /status 同口径）。
+	presenceLine := chatSchedulePresenceLine(schedulehost.ProbePresence(schedule.SupportedSchemaVersion()))
 	return CommandResult{
-		Blocks: []RenderBlock{{Document: buildChatScheduleDocument(rows, filter)}},
+		Blocks: []RenderBlock{{Document: buildChatScheduleDocument(rows, filter, presenceLine)}},
 		Action: CommandContinue,
+	}
+}
+
+// chatSchedulePresenceLine 渲染在岗状态行（S3 §4.1；数据面为
+// schedulehost.Presence，与 daemon /status 的 presence 字段同源）。
+func chatSchedulePresenceLine(presence schedulehost.Presence) string {
+	switch presence.State {
+	case schedulehost.PresenceOnline:
+		line := fmt.Sprintf("调度者: 在岗 · %s (pid %d)", presence.HolderNodeID, presence.HolderPID)
+		if !presence.LeaseExpiresAt.IsZero() {
+			line += " · 租约至 " + presence.LeaseExpiresAt.Local().Format("15:04:05")
+		}
+		return line
+	case schedulehost.PresenceIncompatible:
+		return "调度者: 已在线但不兼容 — " + presence.Notice()
+	default:
+		return "调度者: 不在岗 — " + presence.Notice()
 	}
 }
 
@@ -115,10 +135,14 @@ func chatScheduleFrequency(record schedule.Record) string {
 }
 
 // buildChatScheduleDocument 渲染目录文档。
-func buildChatScheduleDocument(rows []scheduleRow, filter string) render.Document {
+func buildChatScheduleDocument(rows []scheduleRow, filter string, presenceLine string) render.Document {
 	var builder strings.Builder
 	builder.WriteString("自动化任务\n")
 	builder.WriteString("==========\n\n")
+	if presenceLine != "" {
+		builder.WriteString(presenceLine)
+		builder.WriteString("\n\n")
+	}
 
 	active := make([]scheduleRow, 0, len(rows))
 	inactive := make([]scheduleRow, 0, len(rows))

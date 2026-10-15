@@ -327,6 +327,43 @@ func (h *Host) SetEndpoint(endpoint EndpointInfo, auth AuthInfo) {
 	}
 }
 
+// AddCapabilities appends capability bits to the live node record (S5)：节点档案
+// 在进程启动时按静态配置写出，而"是否参战调度"要到能力面/宿主挂载后才决定
+// （aicli opt-in），因此需要运行期补位。空位与重复位忽略；写入失败只 warn
+// （下一次心跳会重写同一记录，不因补位失败阻断宿主）。
+func (h *Host) AddCapabilities(capabilities ...string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	added := false
+	for _, capability := range capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability == "" || HasCapability(h.record.Capabilities, capability) {
+			continue
+		}
+		h.record.Capabilities = append(h.record.Capabilities, capability)
+		added = true
+	}
+	if !added {
+		h.mu.Unlock()
+		return
+	}
+	h.touchLocked()
+	h.publishPeerUpdatedLocked(map[string]any{
+		"capabilities": append([]string(nil), h.record.Capabilities...),
+	})
+	writeErr := h.writeRecordLocked()
+	h.mu.Unlock()
+	if writeErr != nil {
+		h.warn("cannot update node capabilities: %v", writeErr)
+	}
+}
+
 // SetSession records the active session (nil clears it). Called on session
 // activation / resume / switch.
 func (h *Host) SetSession(session *SessionInfo) {
