@@ -28,7 +28,7 @@ const mkSession1 = () => ({
   session_id: "s1", title: "会话一", state: "running", busy: true,
   status_text: "Analyzing", status_started_at: iso(120),
   status_tail: "line1\nline2", updated_at: iso(3), synced_at: iso(3),
-  preview: "preview one", last_message: "last message one", last_message_role: "assistant",
+  preview: "preview one", last_message: "**bold** 与 `code`", last_message_role: "assistant",
 });
 const mkSession2 = () => ({
   session_id: "s2", title: "会话二", state: "idle", busy: false,
@@ -84,6 +84,10 @@ Object.defineProperty(tb, "clientHeight", { get: () => ch, configurable: true })
 Object.defineProperty(tb, "scrollTop", { get: () => st, set: (v) => { st = v; }, configurable: true });
 
 assert(tb.textContent.includes("line2"), "初始尾流文本已渲染");
+assert(!!tb.querySelector("p"), "尾流默认按 Markdown 渲染（段落 p）");
+const lastEl = card.querySelector(".s-last-text");
+assert(!!lastEl && !!lastEl.querySelector("strong") && !!lastEl.querySelector("code"),
+  "最近消息默认按 Markdown 渲染（strong/code）");
 
 // 模拟用户向上滚动阅读
 st = 120;
@@ -139,6 +143,18 @@ s1d.status_tail = "line1\nline2\nline3\nline4\nline5\nline6";
 emitSession(s1d);
 await tick();
 assert(st === sh, "分组内更新（跟随中）保持钉底");
+
+// Markdown 开关（会话工具栏按钮，默认开）：关闭回落纯文本（保留换行），再次
+// 开启恢复富文本；两种模式下尾流元素身份都不变。
+const mdBtn = doc.getElementById("md-toggle");
+assert(!!mdBtn, "Markdown 开关按钮存在");
+mdBtn.dispatchEvent(new window.Event("click"));
+await tick();
+assert(card.querySelector(".s-tail-body") === tb, "切换 Markdown 后尾流元素身份不变");
+assert(!tb.querySelector("p") && tb.textContent.includes("line6"), "关闭 Markdown 后回落纯文本（保留换行）");
+mdBtn.dispatchEvent(new window.Event("click"));
+await tick();
+assert(!!tb.querySelector("p"), "重新开启 Markdown 后恢复渲染");
 
 console.log("\n==== 结果 ====");
 if (failures.length) {

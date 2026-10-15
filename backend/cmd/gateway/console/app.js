@@ -834,12 +834,13 @@
       if (typeof p.sort === "string" && p.sort) { sessionSort = p.sort; }
       if (p.tail === false) { tailEnabled = false; }
       if (p.subagents === false) { showSubagents = false; }
+      if (p.md === false) { mdEnabled = false; }
     } catch (err) { /* storage unavailable */ }
   }
 
   function saveSessionPrefs() {
     try {
-      localStorage.setItem(SESSION_PREFS_KEY, JSON.stringify({ kind: sessionFilterKind, sort: sessionSort, tail: tailEnabled, subagents: showSubagents }));
+      localStorage.setItem(SESSION_PREFS_KEY, JSON.stringify({ kind: sessionFilterKind, sort: sessionSort, tail: tailEnabled, subagents: showSubagents, md: mdEnabled }));
     } catch (err) { /* storage unavailable */ }
   }
 
@@ -890,6 +891,10 @@
   // 控制台默认显示，可折叠成"只看顶层会话"（docs/gateway/07-console.md）。
   var showSubagents = true;
   var tailFollow = {};
+  // 消息正文 Markdown 渲染（持久化，默认开）：会话卡片最近消息、实时输出与
+  // 详情弹窗共用内置渲染器 renderMarkdown——无外部依赖，先转义再渲染，不支持
+  // 原始 HTML，链接仅放行 http(s)/mailto。
+  var mdEnabled = true;
 
   // Fingerprint of the visible session fields; a change pulses the card so a
   // busy list still tells the operator where something moved.
@@ -915,6 +920,7 @@
     // the cards even when the session data itself is unchanged.
     return sessionFilterKind + "\u0002" + sessionFilterText + "\u0002" + sessionSort +
       "\u0002" + (tailEnabled ? "1" : "0") + "\u0002" + (showSubagents ? "1" : "0") +
+      "\u0002" + (mdEnabled ? "1" : "0") +
       "\u0002" + parts.join("\u0003");
   }
 
@@ -994,6 +1000,131 @@
     refreshRelativeTimes();
     pruneStripEvents();
   }, 5000);
+
+  /* ─────────────────────── markdown rendering ────────────────── */
+
+  function escapeHTML(text) {
+    return String(text).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+
+  // safeLinkHref 只放行 http(s)/mailto 链接（输入已转义）：其余协议整体丢弃，
+  // 防止 agent 输出里的 javascript: 等伪协议被点开。
+  function safeLinkHref(href) {
+    return /^(https?:\/\/|mailto:)/i.test(href) ? href : "";
+  }
+
+  // mdInline 渲染一行内的标记（输入为未转义的原始文本，内部先转义）。代码
+  // span 与链接先抽取成占位符，避免强调/删除线规则改写它们内部的文本。
+  function mdInline(raw) {
+    var tokens = [];
+    var stash = function (html) {
+      tokens.push(html);
+      return "\u0000" + (tokens.length - 1) + "\u0000";
+    };
+    var out = escapeHTML(raw)
+      .replace(/`([^`\n]+)`/g, function (m, code) { return stash("<code>" + code + "</code>"); })
+      .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, function (m, label, href) {
+        var safe = safeLinkHref(href);
+        if (!safe) { return m; }
+        return stash('<a href="' + safe + '" target="_blank" rel="noopener noreferrer">' + label + "</a>");
+      });
+    out = out
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
+      .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
+      .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+      .replace(/(^|[^A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])/g, "$1<em>$2</em>");
+    return out.replace(/\u0000(\d+)\u0000/g, function (m, i) { return tokens[+i]; });
+  }
+
+  // renderMarkdown 是有意收敛的子集渲染器（消息正文用）：标题、粗体/斜体/
+  // 删除线、行内代码、围栏代码块、有序/无序列表、引用、分割线与链接；段落内
+  // 的单个换行保留为 <br>（聊天语义）。先逐行判块、再行内渲染；输出不含原始
+  // HTML（输入全量转义），可安全写入 innerHTML。
+  function renderMarkdown(text) {
+    var lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+    var html = [];
+    var para = [];
+    var flushPara = function () {
+      if (!para.length) { return; }
+      html.push("<p>" + para.map(mdInline).join("<br>") + "</p>");
+      para = [];
+    };
+    var i = 0;
+    while (i < lines.length) {
+      var line = lines[i];
+      var fence = line.match(/^\s*(```|~~~)\s*([\w.+#-]*)\s*$/);
+      if (fence) {
+        flushPara();
+        var buf = [];
+        i++;
+        for (; i < lines.length; i++) {
+          if (/^\s*(```|~~~)\s*$/.test(lines[i])) { i++; break; }
+          buf.push(lines[i]);
+        }
+        html.push('<pre class="md-code"><code>' + escapeHTML(buf.join("\n")) + "</code></pre>");
+        continue;
+      }
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushPara(); html.push("<hr>"); i++; continue; }
+      var head = line.match(/^\s*(#{1,6})\s+(.*)$/);
+      if (head) {
+        flushPara();
+        var lvl = Math.min(6, head[1].length + 2); // # → h3：#/## 对卡片字号太粗放
+        html.push("<h" + lvl + ">" + mdInline(head[2]) + "</h" + lvl + ">");
+        i++;
+        continue;
+      }
+      if (/^\s*>\s?/.test(line)) {
+        flushPara();
+        var quote = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+          quote.push(lines[i].replace(/^\s*>\s?/, ""));
+          i++;
+        }
+        html.push("<blockquote>" + quote.map(mdInline).join("<br>") + "</blockquote>");
+        continue;
+      }
+      var ul = line.match(/^\s*[-*+]\s+(.*)$/);
+      var ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (ul || ol) {
+        flushPara();
+        var ordered = !!ol;
+        var items = [];
+        while (i < lines.length) {
+          var item = lines[i].match(ordered ? /^\s*\d+[.)]\s+(.*)$/ : /^\s*[-*+]\s+(.*)$/);
+          if (!item) { break; }
+          items.push("<li>" + mdInline(item[1]) + "</li>");
+          i++;
+        }
+        html.push(ordered ? "<ol>" + items.join("") + "</ol>" : "<ul>" + items.join("") + "</ul>");
+        continue;
+      }
+      if (!line.trim()) { flushPara(); i++; continue; }
+      para.push(line);
+      i++;
+    }
+    flushPara();
+    return html.join("");
+  }
+
+  // setMessageHTML 渲染消息正文（Markdown 开关决定富文本或纯文本），并且只在
+  // 源文本/渲染模式变化时写入——流式刷新因此不会触碰未变化的 DOM。
+  function setMessageHTML(node, text) {
+    if (!node) { return; }
+    var src = text || "";
+    if (node.__mdSrc === src && node.__mdOn === mdEnabled) { return; }
+    node.__mdSrc = src;
+    node.__mdOn = mdEnabled;
+    if (mdEnabled) {
+      node.classList.add("md");
+      node.innerHTML = renderMarkdown(src);
+    } else {
+      node.classList.remove("md");
+      setText(node, src);
+    }
+  }
 
   // ── Incremental board: keyed reconcile instead of a full rebuild ──
   // setText writes only when the value actually changed: untouched nodes keep
@@ -1381,7 +1512,7 @@
       var roleEl = card.querySelector(".s-last-role");
       roleEl.className = "s-last-role" + (role ? " role-" + role : "");
       setText(roleEl, roleLabelOf(role));
-      setText(card.querySelector(".s-last-text"), lastText);
+      setMessageHTML(card.querySelector(".s-last-text"), lastText);
       lastBlock.hidden = false;
     } else {
       lastBlock.hidden = true;
@@ -1399,7 +1530,7 @@
       liveLine.hidden = false;
       tailBlock.hidden = false;
       var tailBody = card.querySelector(".s-tail-body");
-      if (tailBody.textContent !== tailText) { tailBody.textContent = tailText; }
+      setMessageHTML(tailBody, tailText);
       setText(card.querySelector(".s-tail-meta"), tailText.length + " 字符");
       card.__syncFollowBtn();
       // Follow mode pins the viewport to the newest line. When the operator
@@ -2016,7 +2147,7 @@
       var role = el("sd-last-role");
       role.textContent = roleLabelOf(session.last_message_role || "");
       role.className = "s-last-role" + (session.last_message_role ? " role-" + session.last_message_role : "");
-      el("sd-last").textContent = session.last_message;
+      setMessageHTML(el("sd-last"), session.last_message);
       lastWrap.hidden = false;
     } else {
       lastWrap.hidden = true;
@@ -2024,7 +2155,7 @@
     var tailText = (session.status_tail || "").trim();
     var tailWrap = el("sd-tail-wrap");
     if (tailText) {
-      el("sd-tail").textContent = tailText;
+      setMessageHTML(el("sd-tail"), tailText);
       tailWrap.hidden = false;
     } else {
       tailWrap.hidden = true;
@@ -2672,6 +2803,23 @@
   }
   syncSubagentToggle();
 
+  // 消息 Markdown 渲染开关（持久化，默认开，见 renderMarkdown）：关闭回落纯文本。
+  function syncMdToggle() {
+    var btn = el("md-toggle");
+    if (btn) { btn.textContent = "Markdown：" + (mdEnabled ? "开" : "关"); }
+  }
+  var mdToggleBtn = el("md-toggle");
+  if (mdToggleBtn) {
+    mdToggleBtn.addEventListener("click", function () {
+      mdEnabled = !mdEnabled;
+      saveSessionPrefs();
+      syncMdToggle();
+      renderSessionTable(lastNodes);
+      if (detailTarget) { openSessionDetail(detailTarget.node, detailTarget.session); }
+    });
+  }
+  syncMdToggle();
+
   // Keyboard model: "/" focuses the search, ↑/↓ (or j/k) walks the session
   // cards, Enter opens the focused card's detail dialog, Space toggles 展开.
   document.addEventListener("keydown", function (e) {
@@ -2874,13 +3022,14 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=36").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=37").catch(function () {});
     });
   }
 
   loadSessionPrefs();
   syncFilterControls();
   syncTailToggle();
+  syncMdToggle();
   applyHashParams();
   applyRoute();
   // Probe once for an existing owner session; only fetch the device list when
