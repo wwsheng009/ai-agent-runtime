@@ -371,6 +371,16 @@ goal:
 - **提交**：`03ec0a26`。`runtimeapi/handler.go` 的 4 行路由以**部分暂存**（`git apply --cached` 单 hunk）提交，未卷入并行 schedule/mesh/bots 工作流在该文件里的未提交改动。
 - **测试**：`internal/goal` 状态规范化单测；HTTP 面生命周期（set→get→pause→resume→budget→complete→clear）；校验矩阵（缺 action / 未知 action / 缺 objective / 负预算 / 无 goal 的 pause|resume|complete|budget / 非法 JSON / 未知会话 404）；complete 终态（含用新 objective 替换）；budget_limited 守卫（未提高预算 resume 不复活 → 提高后自动 active）；非回环无凭证 403。
 
+#### 前端接线（控制台 goal 面板，2026-10-15 完成）
+
+- **共享 API**：`frontend/src/api/runtime/goal.ts`——`fetchSessionGoal(sessionId)` / `updateSessionGoal(sessionId, payload)`，复用 `shared.ts` 的 `fetchRuntimeJson`/`buildRuntimeUrl`（路径 ID 编码、404 归一为 `RuntimeApiError`）与 session-goal 解析器 `parseSessionGoalEnvelope`（工具结果与 REST 信封同口径解析）。
+- **Hook**：`frontend/src/hooks/workspace/use-runtime-goal.ts`——`useRuntimeSessionGoal`：挂载时 GET 一次作为**权威快照**，暴露 `run(action, payload)` 写动作；sessionId 切换保护（响应到达时若会话已切换则丢弃，不污染新会话视图）；`applied=false`（GoalMergePolicy 守卫保留原状态）透传为 notice，不静默不清空。
+- **组件**：`frontend/src/components/workspace/session-goal-indicator.tsx` 重写——SSE 观测与权威快照按时间戳取新（不双写）；相位标签 + objective + token 用量；按相位渲染有效动作按钮（pause/resume/complete/clear），动作后以服务端响应为准刷新；`data-testid: topbar-session-goal*`。挂载点 `workspace-shell-topbar.tsx:214` 传 `selectedThread.sessionId`，组件签名不变（`{sessionId?}`）。
+- **store/derive**：`lib/session-goal/store.ts` 新增 `setAuthoritativeSessionGoal` / `isSessionGoalAuthoritative` / `useSessionGoalAuthoritative`（权威快照 vs SSE 观测按时间戳取新）；`lib/session-goal/derive.ts` 抽出 `parseSessionGoalEnvelope` 供 REST 复用。
+- **i18n**：zh-CN/en-US `workspace/base.ts`——derivedNote 措辞更新 + authoritativeNote（权威快照来源说明）+ 四动作标签；`verify-frontend-i18n` 1001 资源 0 违规。
+- **测试与验证**：`api/runtime/goal.test.ts` 7 例（路径编码 / 信封解析 / POST snake_case 请求体 / applied=false 透传 / clear→absent / 404→RuntimeApiError）；`session-goal.test.ts` 追加权威快照 5 例；组件测试 7 例——goal 相关 33/33 通过；全量 `npx vitest run` 392 文件 / 3287 例通过；`npx tsc -b` 无本特性错误；eslint（本特性 7 文件）0 错误；indicator 重写后约 190 行，`verify-max-lines` 达标（脚本现存 4 个超限文件均为其他工作流在途文件，非本特性引入）。
+- **边界（如实登记）**：控制台动作按钮只调用状态端点，与后端同边界——不触发续跑；resume 后仍需 CLI 续跑循环或消息投递驱动下一轮。组件级动作交互的端到端渲染测试为可选后续。
+
 ---
 
 ## 附录 A：Codex main 关键证据索引
