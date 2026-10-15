@@ -95,6 +95,8 @@ type presenceEntry struct {
   ✅ 2026-10-14 落地：`--presence-sources=console,host` 缺省两源（置 `console` 即
   回退现状）；host 源以心跳 TTL（2×周期，下限 90s）续期。
 - **S2（aicli TUI）**：前台会话检测 + 心跳携带 `viewing` + 单测（切换/聚焦边界）。
+  ✅ 2026-10-14 落地：`ChatSession.InteractiveUI` 门禁（TUI 且非脚本化；headless/
+  降级不报）+ `Controller.SessionDigests` 摘要携带 `Viewing`（高频续期）。
 - **S3（runtime-server web）**：SSE 订阅计数 → `Summary.Viewing` + 单测。
 - **S4（收敛）**：notify 内核 `Presence` 接口 + Dispatcher gate（此刻才从 gateway 私有
   登记表抽象），三宿主迁移随 D4 余下切片。

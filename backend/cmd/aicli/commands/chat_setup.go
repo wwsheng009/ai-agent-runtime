@@ -206,6 +206,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		CLIDenyTools:             append([]string(nil), opts.CLIDenyTools...),
 		ApprovalReuseMode:        opts.ApprovalReuseMode,
 		Surface:                  surface,
+		InteractiveUI:            interactiveUI,
 		runtimeHTTPCapture:       &chatRuntimeHTTPCapture{},
 		ImagePaths:               opts.ImagePaths,
 	}

@@ -62,9 +62,9 @@ func chatGatewayRegisterFunc(cfg gatewayagent.Config, routes []string, session *
 		effectiveRoutes, effectiveCapabilities := chatGatewayEffectiveRegistration(
 			routes, chatGatewayForwardConfig().LocalBaseURL)
 		return wire.Register{
-			NodeID: nodeID,
-			Kind:   "aicli",
-			Name:   cfg.Name,
+			NodeID:     nodeID,
+			Kind:       "aicli",
+			Name:       cfg.Name,
 			DeviceName: cfg.Name,
 			// runner 能力位（docs/bots/09 §7.5 切片 A）：aicli 节点可作 connector
 			// turn 执行体（runner_preference 选举/R1 派发的候选过滤位；与 gateway
@@ -102,6 +102,11 @@ func chatGatewaySessions(session *ChatSession) []wire.SessionSummary {
 		LastMessageRole: lastRole,
 		LastMessage:     lastMessage,
 		UpdatedAt:       updatedAt,
+		// 在场（docs/bots/10 §4）：仅 TUI（未被降级/兼容模式）且非脚本化时报
+		// Viewing——“当前挂载会话”的保守近似（终端聚焦不可得）；headless/脚本
+		// 不报，避免误吞通知。切换会话后旧会话随 reconcile 移出列表，其 host
+		// 在场由 TTL 自然失效。
+		Viewing: session.InteractiveUI && session.ScriptedInput == nil,
 	}
 	// Overlay the shared state projection (state/attention/busy/status text);
 	// the store defaults to idle/running so both hosts report the same baseline.

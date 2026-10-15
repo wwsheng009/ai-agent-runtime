@@ -382,6 +382,11 @@ type ChatSession struct {
 	commandMu   sync.Mutex
 	Interaction *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
 	Surface     *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
+	// InteractiveUI 表示本进程由统一交互渲染器（TUI）接管屏幕（chat_setup 在
+	// shouldInitializeChatInteractiveUI && !compatMode 且未被 TTY 降级时置位）。
+	// 在场 host 源的上报前提（docs/bots/10-presence-signals-design.md §4）：仅
+	// TUI 且非脚本化时报 Viewing。
+	InteractiveUI bool
 	// TerminalSession is the sole physical writer for the unified interactive
 	// renderer. Surface remains only as a compatibility state facade while the
 	// session is active; it must not emit terminal bytes in that mode.

@@ -94,7 +94,11 @@ func (c *Controller) SessionDigests() []wire.SessionDigest {
 			State:      s.State,
 			Attention:  s.Attention,
 			StatusText: s.StatusText,
-			UpdatedAt:  s.UpdatedAt,
+			// Viewing rides the digest so heartbeats renew host presence
+			// (docs/bots/10 §3.1); without it presence would only refresh on
+			// SESSION_UPDATE frames.
+			Viewing:   s.Viewing,
+			UpdatedAt: s.UpdatedAt,
 		})
 	}
 	return out
