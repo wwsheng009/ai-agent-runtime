@@ -359,7 +359,17 @@ goal:
   - 与 CLI 同口径限定**基础会话**（`isBaseSessionContext`：无 agent_type / depth / read_only）——子代理会话不继承父会话的持久目标。
 - **测试**：`internal/goal` 渲染器（active / 非 active / 空 objective / 预算夹紧 / 转义 / update_goal 可用性两分支）；`internal/runtimehost` 顺序契约（先租约后宿主刷新、租约失败不执行刷新、`PrepareRun` 覆盖优先、空钩子直通）；`internal/api/runtimeapi` 注入单测 + `buildSessionActor → SubmitPrompt` **端到端**（首轮含 objective/审计/update_goal；改目标后第二轮无需重建 actor 即刷新）+ `isBaseSessionContext` 门控。
 - **验证**：`go build ./...`、`go test ./internal/goal/... ./internal/runtimehost/...`、`go test ./internal/api/runtimeapi/`（全量）全绿；commands 包 goal/parity/freeze/runtime-server 子集全绿。
-- **遗留（gap 2）**：web/控制台仍无 goal 管理 HTTP 端点（仅模型工具 + 通用会话 PATCH）。路由注册在 `runtimeapi/handler.go`、会话命令面在 `session_runtime_handlers.go`，二者当前被并行的 schedule/mesh/bots 工作流占用（工作区未提交），需协调后再动，避免把外部改动卷进提交。
+- **后续**：gap 2（web/控制台 goal 管理 HTTP 面）见下节。
+
+### web/控制台 goal 管理 HTTP 面（gap 2，2026-10-15 完成）
+
+- **端点**：`GET /sessions/{id}/goal`（读取当前 goal + remaining_tokens；无 goal 返回 200 + `goal=null`）、`POST /sessions/{id}/goal`（`{"action":"set|pause|resume|complete|clear|budget","objective":...,"token_budget":N,"summary":...}`，响应含 `applied`/`message`/`goal`）。
+- **同口径**：动作与 CLI `/goal` 一一对应；校验、状态机与 `GoalMergePolicy(actor=user)` 全部复用 `internal/goal`（complete 终态、`budget_limited→active` 仅在预算提高到超过已用时成立、用户可完成 paused/blocked 目标）；`set` 的缺省预算取服务端 `goal.defaultTokenBudget`。
+- **共享**：新增 `internal/goal.ApplyUserStatusUpdate`（完成字段 / 阻塞原因清理），CLI `updateGoalStatusCommand` 改为共用同一实现，避免两条路径的字段规则漂移。
+- **授权**：写端点沿用会话写授权（回环 / admin token / admin role）→ 非回环无凭证 403；GET 为只读（与 plan mode 读端点同级，不额外设限）。
+- **边界（如实登记）**：本端点只管理**状态**，不触发续跑——goal 的自动续跑循环当前由 CLI 驱动（`aicliGoalContinuationExecutor`），纯 web 会话不会自行续跑；控制台可在 resume 后按需投递一条消息。服务端 auto-continuation 是独立议题。
+- **提交**：`03ec0a26`。`runtimeapi/handler.go` 的 4 行路由以**部分暂存**（`git apply --cached` 单 hunk）提交，未卷入并行 schedule/mesh/bots 工作流在该文件里的未提交改动。
+- **测试**：`internal/goal` 状态规范化单测；HTTP 面生命周期（set→get→pause→resume→budget→complete→clear）；校验矩阵（缺 action / 未知 action / 缺 objective / 负预算 / 无 goal 的 pause|resume|complete|budget / 非法 JSON / 未知会话 404）；complete 终态（含用新 objective 替换）；budget_limited 守卫（未提高预算 resume 不复活 → 提高后自动 active）；非回环无凭证 403。
 
 ---
 
