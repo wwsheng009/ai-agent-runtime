@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1742,5 +1743,91 @@ func TestParseLegacyQuotedStillWorks(t *testing.T) {
 	want := "Quoted: 上一句\n继续\n\n引用的嵌套内容"
 	if msg.Text != want {
 		t.Fatalf("text = %q, want %q", msg.Text, want)
+	}
+}
+
+// ── WS 关闭码语义 与 域名统一（官方 2026-08） ────────────────────────────────
+
+// TestCloseCodeToReconnect 锁定官方 WS 关闭码 → 重连语义映射：
+// 4006 清 session 重 Identify；4007/4009 可重连保持游标；4914/4915 致命。
+func TestCloseCodeToReconnect(t *testing.T) {
+	cases := []struct {
+		code         int
+		clearSession bool
+		fatal        bool
+	}{
+		{gatewayCloseInvalidSession, true, false},
+		{gatewayCloseSeqMismatch, false, false},
+		{gatewayCloseExpired, false, false},
+		{gatewayCloseSandboxOnly, false, true},
+		{gatewayCloseBanned, false, true},
+	}
+	for _, tc := range cases {
+		out := closeCodeToReconnect(tc.code)
+		if out.clearSession != tc.clearSession || out.fatal != tc.fatal {
+			t.Fatalf("close %d → clear=%v fatal=%v, want clear=%v fatal=%v",
+				tc.code, out.clearSession, out.fatal, tc.clearSession, tc.fatal)
+		}
+	}
+	if fatal := closeCodeToReconnect(gatewayCloseBanned); !strings.Contains(fatal.Error(), "封禁") {
+		t.Fatalf("banned error text = %q", fatal.Error())
+	}
+	if sandbox := closeCodeToReconnect(gatewayCloseSandboxOnly); !strings.Contains(sandbox.Error(), "下架") ||
+		!strings.Contains(sandbox.Error(), "沙箱") {
+		t.Fatalf("sandbox error text = %q", sandbox.Error())
+	}
+}
+
+// TestDefaultAPIBaseIsUnifiedDomain 锁定官方 2026-08 域名统一：
+// 默认基址 = api.bot.qq.com；legacy sgroup 域名保留为回退。
+func TestDefaultAPIBaseIsUnifiedDomain(t *testing.T) {
+	if defaultAPIBase != "https://api.bot.qq.com" {
+		t.Fatalf("default api base = %q", defaultAPIBase)
+	}
+	if legacyAPIBase != "https://api.sgroup.qq.com" {
+		t.Fatalf("legacy api base = %q", legacyAPIBase)
+	}
+}
+
+// ── 致命关闭码端到端（4915 封禁 → RunPolling 立即终止不重连） ─────────────────
+
+func TestRunPollingStopsOnFatalClose(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	fake.script = func(f *fakeQQ, _ int, conn *websocket.Conn) {
+		if !writeHello(conn, 60000) {
+			return
+		}
+		if _, ok := readOne(conn); !ok {
+			return
+		}
+		if !writeRaw(conn, readyEvent("session-fatal", 1)) {
+			return
+		}
+		// 以官方「机器人已封禁」关闭码关闭连接。
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(gatewayCloseBanned, "bot banned"),
+			time.Now().Add(time.Second))
+		_ = conn.Close()
+	}
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL), WithRetryDelay(5*time.Millisecond))
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+
+	err := provider.RunPolling(context.Background(), cfg, func(_ context.Context, _ connectors.InboundMessage) error {
+		return nil
+	}, newMemState())
+	if err == nil {
+		t.Fatal("fatal close must terminate polling with error")
+	}
+	var reconnect *reconnectError
+	if !errors.As(err, &reconnect) || !reconnect.fatal {
+		t.Fatalf("err = %v, want fatal reconnectError", err)
+	}
+	if !strings.Contains(err.Error(), "4915") || !strings.Contains(err.Error(), "封禁") {
+		t.Fatalf("err = %v, want close code and platform hint", err)
+	}
+	// 致命错误不重试：只有一次网关连接。
+	if got := fake.connectsCount(); got != 1 {
+		t.Fatalf("gateway connects = %d, want 1（致命码不重连）", got)
 	}
 }

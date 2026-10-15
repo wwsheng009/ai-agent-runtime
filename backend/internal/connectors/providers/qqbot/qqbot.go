@@ -37,7 +37,11 @@ import (
 const Name = "qqbot"
 
 const (
-	defaultAPIBase   = "https://api.sgroup.qq.com"
+	// defaultAPIBase 是官方 2026-08 起统一的接口域名（变更记录：所有接口
+	// 调用域名统一为 api.bot.qq.com）。legacy 域名作为 404/405 回退保留，
+	// 兼容存量反代/内网部署。
+	defaultAPIBase   = "https://api.bot.qq.com"
+	legacyAPIBase    = "https://api.sgroup.qq.com"
 	sandboxAPIBase   = "https://sandbox.api.sgroup.qq.com"
 	defaultTokenBase = "https://bots.qq.com"
 
@@ -839,7 +843,7 @@ func (p *Provider) fetchAccessToken(ctx context.Context, base, appID, appSecret 
 		return "", 0, fmt.Errorf("qqbot: encode token request: %w", err)
 	}
 	endpoints := []string{base + "/app/getAppAccessToken"}
-	if base == defaultAPIBase || base == sandboxAPIBase {
+	if base == defaultAPIBase || base == legacyAPIBase || base == sandboxAPIBase {
 		endpoints = append(endpoints, defaultTokenBase+"/app/getAppAccessToken")
 	}
 	var lastErr error

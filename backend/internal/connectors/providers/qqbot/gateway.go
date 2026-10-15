@@ -35,6 +35,43 @@ const (
 	gatewayReadyTimeout = 15 * time.Second
 )
 
+// 官方 WebSocket 关闭码（docs：4006/4007/4009 可重连，4914/4915 不可连接）。
+const (
+	gatewayCloseInvalidSession = 4006 // 无效 session id，需 Identify
+	gatewayCloseSeqMismatch    = 4007 // seq 错误，可 Resume 重试
+	gatewayCloseExpired        = 4009 // 连接过期，需 Resume 重连
+	gatewayCloseSandboxOnly    = 4914 // 机器人已下架，仅允许沙箱
+	gatewayCloseBanned         = 4915 // 机器人已封禁
+)
+
+// closeCodeToReconnect 把 WS 关闭码映射为重连语义（官方错误码表）：
+//   - 4006：session 无效 → 清空游标重新 Identify；
+//   - 4007/4009：可重连（4009 优先 Resume）；
+//   - 4914/4915：致命（不重试）；
+//   - 其余码：保守重连（保持当前游标）。
+func closeCodeToReconnect(code int) *reconnectError {
+	out := &reconnectError{closeCode: code}
+	switch code {
+	case gatewayCloseInvalidSession:
+		out.clearSession = true
+	case gatewayCloseSandboxOnly, gatewayCloseBanned:
+		out.fatal = true
+	}
+	return out
+}
+
+// websocketCloseError 从 dial/read 错误中提取 WS 关闭码（非 Close 帧返回 0）。
+func websocketCloseError(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return closeErr.Code, true
+	}
+	return 0, false
+}
+
 // gatewayPayload 是 gateway 上下行的统一信封。
 type gatewayPayload struct {
 	Op int             `json:"op"`
@@ -64,15 +101,35 @@ type gatewaySessionState struct {
 
 // reconnectError 表示"断开需要重连"（可重试）；clearSession 表示平台拒绝
 // Resume（op 9 d=false 等），必须丢弃 session_id/seq 重新 Identify。
+//
+// fatal（官方 WS 关闭码 4914/4915）= 机器人被下架/封禁，重连只会失败：
+// RunPolling 立即终止并向宿主返回明确错误（连接器状态置异常，而非无限退避）。
 type reconnectError struct {
 	clearSession bool
+	// closeCode 是平台 WS Close 帧的关闭码（0 = 非 Close 帧断开）。
+	closeCode int
+	// fatal 报告该断开不可重试（4914 下架仅沙箱、4915 封禁）。
+	fatal bool
 }
 
 func (e *reconnectError) Error() string {
 	if e == nil {
 		return ""
 	}
-	return "qqbot: gateway reconnect required"
+	base := "qqbot: gateway reconnect required"
+	if e.fatal {
+		base = "qqbot: gateway fatal close (code " + strconv.Itoa(e.closeCode) + ")"
+		if e.closeCode == gatewayCloseSandboxOnly {
+			base += "：机器人已下架，仅允许连接沙箱环境（请核对连接环境/平台状态）"
+		} else if e.closeCode == gatewayCloseBanned {
+			base += "：机器人已被封禁，请申请解封后再连接"
+		}
+		return base
+	}
+	if e.closeCode > 0 {
+		base += " (close code " + strconv.Itoa(e.closeCode) + ")"
+	}
+	return base
 }
 
 // RunPolling 运行 gateway 长连接直至 ctx 取消（返回 nil）：
@@ -140,6 +197,10 @@ func (p *Provider) runGatewaySession(ctx context.Context, cfg connectors.Config,
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
+		}
+		if code, ok := websocketCloseError(err); ok && code > 0 {
+			p.logf("qqbot: gateway rejected with close code %d", code)
+			return closeCodeToReconnect(code)
 		}
 		p.logf("qqbot: dial gateway failed: %s", redact(err.Error(), token))
 		return &reconnectError{}
@@ -216,6 +277,10 @@ func (p *Provider) runGatewaySession(ctx context.Context, cfg connectors.Config,
 			if result.err != nil {
 				if ctx.Err() != nil {
 					return nil
+				}
+				if code, ok := websocketCloseError(result.err); ok && code > 0 {
+					p.logf("qqbot: gateway closed with code %d", code)
+					return closeCodeToReconnect(code)
 				}
 				return &reconnectError{}
 			}
