@@ -120,11 +120,17 @@ type presenceEntry struct {
      未被记入 `seen`；
   5. **不绕门**：NOTIFY 帧经 `applyNotifyToSessions` 只改 attention，仍走
      `observe` 的在场检查（`presence_emit_test.go` + 负例实机同证）。
+  6. **S3 生产实证（2026-10-15 补）**：修复 runtime-server 隧道后，对其会话挂真实
+     web SSE 观看者 → 注册表 `viewing=true`；断开后 host 源 TTL 失效 → 回落
+     `None`（0→1→0 双向实测；期间隧道 `reconnects=0` 稳定）。
   **运维提示**：① normal 类（含 `completed`）按 D6 走 WebPush 主通道，ntfy 静默
-  ——观测抑制/补推须用高优先 attention（approval/question/error）；② 直连
-  `ws://192.210.174.189:8080` 在办公网不可达，宿主须配
-  `wss://aicli.ttai.online/gw/agent`（runtime-server 配置里仍是直连 IP，其隧道
-  因此长期 `error`——与本切片无关的既有配置问题）。
+  ——观测抑制/补推须用高优先 attention（approval/question/error）；② 宿主到网关
+  的地址必须走 `wss://aicli.ttai.online/gw/agent`：直连
+  `ws://192.210.174.189:8080` 在办公网不可达，经
+  `proxy_url: socks5://127.0.0.1:10809` 时 WS 升级被拒（网关侧 `close 1006`、
+  每 ~15s 循环）。已修 `backend/.aicli/config.yaml`（删 `proxy_url`、改隧道地址，
+  经 `POST /api/runtime/service/restart` 自重启）；修复前该 runtime-server 的
+  `connected_at` 恒为零、注册表里根本没有 `kind=runtime-server` 节点。
 
 ## 6. 风险与回退
 
