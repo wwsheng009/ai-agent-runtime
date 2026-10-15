@@ -1,7 +1,8 @@
-// dispatcher.go 是通知分发器（docs/bots/schema-architecture 06 §2.4）：跨通道
-// 去重（Ledger）→ 按优先级择通道（high=扇出全部通道、normal=主通道、low=仅收件箱）
-// → 记录回执。策略链扩展点（免打扰/合并/在场/偏好，06 D1/D6）随后续切片接入，
-// 本切片固定路由规则、不做静默/合并（宿主侧现有行为保持由各自适配层承担）。
+// dispatcher.go 是通知分发器（docs/bots/schema-architecture 06 §2.4）：在场门
+// （Presence，docs/bots/10 §3.2）→ 跨通道去重（Ledger）→ 按优先级择通道
+// （high=扇出全部通道、normal=主通道、low=仅收件箱）→ 通道偏好（prefs）→
+// 记录回执。免打扰/合并（06 D1/D6）随后续切片接入：静默与合并仍由宿主侧
+// 适配层承担（如 gateway pushNotifier 的 quietHours/coalesceWindow）。
 package notify
 
 import (
@@ -30,6 +31,9 @@ type Event struct {
 	// Target 是通道专用寻址提示（可选）：IM 通道用它定位会话
 	// （SessionRef.SessionID）；WebPush/ntfy 忽略。
 	Target string
+	// Node 是事件归属宿主节点（可选）：在场门（docs/bots/10 §3.2）的定位键，
+	// 与 Session 同时存在时才参与在场判定。
+	Node string
 	// Session 是事件归属会话（可选）：偏好解析（session:<id>）用；IM 通道的
 	// 投递寻址仍用 Target（两者通常相同，但语义分层）。
 	Session      string
@@ -59,6 +63,7 @@ type Dispatcher struct {
 	clock    func() time.Time
 	logf     func(string, ...any)
 	prefs    PreferenceStore
+	presence Presence
 }
 
 // NewDispatcher 注册通道（顺序 = 确定性扇出顺序）；ledger 可为 nil（不去重）。
@@ -93,6 +98,16 @@ func (d *Dispatcher) SetClock(clock func() time.Time) {
 // Dispatch 执行一次外发：去重短路 → 依优先级择通道投递 → 记回执。
 // 重复 DedupKey 直接返回既有回执（不再投递）；空 DedupKey 不去重。
 func (d *Dispatcher) Dispatch(ctx context.Context, ev Event) (Receipt, error) {
+	// 在场门（docs/bots/10 §3.3）：人机同屏时跳过投递，且**不认领去重键**
+	// ——查看者离开后同一事件可再次投递（"切走补推一次"）。门禁必须早于
+	// 认领，否则去重会吞掉补推。
+	if d.presenceActive(ev) {
+		if d.logf != nil {
+			d.logf("notify dispatcher: presence active for %s/%s (kind=%s), skip delivery",
+				strings.TrimSpace(ev.Node), strings.TrimSpace(ev.Session), ev.Kind)
+		}
+		return Receipt{Key: strings.TrimSpace(ev.DedupKey), At: d.now(), Suppressed: true}, nil
+	}
 	key := strings.TrimSpace(ev.DedupKey)
 	if key != "" && d.ledger != nil && !d.ledger.Claim(key) {
 		if d.logf != nil {

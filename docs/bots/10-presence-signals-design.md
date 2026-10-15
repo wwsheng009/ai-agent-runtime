@@ -102,6 +102,13 @@ type presenceEntry struct {
   增/减 + 0↔1 跃迁刷新网关怀摘要）；`GatewaySessions` 摘要携带 `Viewing`。
 - **S4（收敛）**：notify 内核 `Presence` 接口 + Dispatcher gate（此刻才从 gateway 私有
   登记表抽象），三宿主迁移随 D4 余下切片。
+  ✅ 2026-10-15 落地**内核面（S4a）**：`notify.Presence` + `PresenceFunc`、`Event.Node`
+  定位键、`Dispatcher.SetPresence` 门禁——门禁置于**认领去重键之前**且回执标记
+  `Suppressed`，故内核层同样满足"跳过且不认领 → 离开后补推一次"；gateway 私有
+  `presenceRegistry` 直接作为实现注入（`observe` 的 seen 前置检查仍是语义门，内核门
+  兜住未自行前置检查的生产者）。单测三条：抑制且不认领键（离开后补推一次）、
+  nil = 行为不变、缺 node/session 定位时放行（宁多推不误吞）。**三宿主迁移（S4b）
+  随 D4 余下切片。**
 - **部署（2026-10-15）**：gateway S1 上生产（`fca03ac0…a9961d84`，落在
   `/opt/aicli-gateway/gateway`，备份 `gateway.bak-20261015-002152`）；本地 runtime-server
   已含 S3（`sessionViewers` 符号在位、进程即该构建）；本地 aicli 换为 `presence-s2`

@@ -226,6 +226,12 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 	dispatcher := notify.NewDispatcher(nil, chans...)
 	dispatcher.SetPrimary("webpush")
 	dispatcher.SetPreferences(p.preferences)
+	// 在场门下沉到内核（docs/bots/10 §5 S4）：网关登记表即 Presence 权威。
+	// observe 的 seen 前置检查仍是"跳过且不记 seen → 补推一次"的语义门；
+	// 这里兜住未自行前置检查的生产者（内核门同样不认领去重键）。
+	if p.presence != nil {
+		dispatcher.SetPresence(p.presence)
+	}
 	if p.manager != nil && p.manager.Store().Count() == 0 && !(p.ntfy != nil && p.ntfy.Enabled()) {
 		// Without subscribers the dispatch below silently delivers nothing, which
 		// looks like "notifications never fire". Make that state visible.
@@ -241,6 +247,7 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 				continue
 			}
 			ev := notify.EventFor(item.attention, item.note.Tag, item.note)
+			ev.Node = item.nodeID
 			ev.Session = item.sessionID
 			if _, err := dispatcher.Dispatch(ctx, ev); err != nil {
 				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)

@@ -24,6 +24,10 @@ type Receipt struct {
 	Key      string
 	At       time.Time
 	Outcomes []ChannelOutcome
+	// Suppressed 表示该事件因在场（人机同屏）被跳过、未投递任何通道；此时
+	// DedupKey **未被认领**，查看者离开后同一事件可再次投递（补推语义，
+	// docs/bots/10 §3.3）。
+	Suppressed bool
 }
 
 // Ledger 是投递账本契约。
