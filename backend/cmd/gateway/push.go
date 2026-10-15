@@ -56,6 +56,10 @@ type pushNotifier struct {
 	// 重建；G2 账本接线后单实例语义才完整）。由 ensureDispatcher 按 mu 加锁
 	// 构建/失效，锁外仅读引用。
 	dispatcher *notify.Dispatcher
+	// ledger 是跨路径去重账本（S4b G2）：实例上提为字段——Release（换值/
+	// 清除时释放旧键）必须作用在与 Dispatch 相同的账本上；每次新建会使
+	// 释放失效。键 = tag|attention（§3 D2）；生命周期镜像 seen 快照。
+	ledger *notify.MemoryLedger
 }
 
 func newPushNotifier(manager *push.Manager, baseURL string, presence notify.Presence) *pushNotifier {
@@ -120,6 +124,12 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 				continue
 			}
 			key := node.NodeID + "|" + sess.SessionID
+			// 账本键生命周期镜像 seen 快照（docs/bots/12 §3 D2）：换值即
+			// 释放旧账本键——"clear→re-arm 同值"是新的代次事件，必须可重投
+			// （TestPushNotifierObserve 的既有契约）。释放动作本身幂等。
+			if prev, ok := p.seen[key]; ok && prev != attention && p.ledger != nil {
+				p.ledger.Release(key + "|" + prev)
+			}
 			// Suppress while a console client is viewing this session, and leave
 			// it unrecorded so the notification still fires once they look away.
 			if p.presence != nil && p.presence.Active(node.NodeID, sess.SessionID) {
@@ -145,6 +155,14 @@ func (p *pushNotifier) observe(nodes []*tunnel.Node) {
 			} else {
 				batched = append(batched, item)
 			}
+		}
+	}
+	// 清除路径：本轮快照中消失的键（attention 已清空）同样释放旧账本键。
+	// 与上一循环的换值释放互补，共同保证账本键生命周期 == seen 快照生命周期。
+	// 必须在替换 seen **之前**遍历旧快照（替换后旧键已不可达）。
+	for key, prev := range p.seen {
+		if _, still := next[key]; !still && p.ledger != nil {
+			p.ledger.Release(key + "|" + prev)
 		}
 	}
 	p.seen = next
@@ -232,7 +250,14 @@ func (p *pushNotifier) ensureDispatcher() *notify.Dispatcher {
 	if len(chans) == 0 {
 		return nil
 	}
-	d := notify.NewDispatcher(nil, chans...)
+	if p.ledger == nil {
+		p.ledger = notify.NewMemoryLedger(1024)
+	}
+	d := notify.NewDispatcher(p.ledger, chans...)
+	// 跨路径去重账本（docs/bots/12 §3 D2）：键 = tag|attention（tag=node|session）。
+	// attention 维度保证 approval→error 序列不会被吞；换值/清除时 observe
+	// 释放旧账本键（生命周期镜像 seen 快照，TestPushNotifierObserve 的
+	// clear→re-arm 场景依赖此点）；G1 的 Suppressed 回滚语义同前。
 	d.SetPrimary("webpush")
 	d.SetPreferences(p.preferences)
 	// 在场门下沉到内核（docs/bots/10 §5 S4a）：登记表即 Presence 权威。
@@ -271,17 +296,24 @@ func (p *pushNotifier) dispatch(items []pendingNotification) {
 				log.Printf("push: %s routed to IM main channel, push suppressed (%s)", item.attention, item.note.Tag)
 				continue
 			}
-			ev := notify.EventFor(item.attention, item.note.Tag, item.note)
+			// 账本键（docs/bots/12 §3 D2）= tag|attention：tag（=node|session）
+			// 供控制台折叠同会话通知；attention 维度保证同一会话先后两种
+			// attention（approval→error）不互相吞——与 seen 快照的换值重推
+			// 语义逐字一致。agent NOTIFY 的 DedupKey 目前不落 registry 摘要，
+			// 跨路径透传另行切片（12 号 §4 G2 备注）。
+			ev := notify.EventFor(item.attention, item.note.Tag+"|"+item.attention, item.note)
 			ev.Node = item.nodeID
 			ev.Session = item.sessionID
 			receipt, err := dispatcher.Dispatch(ctx, ev)
 			if err != nil {
 				log.Printf("push: dispatch failed (attention=%s): %v", item.attention, err)
 			}
-			// 双门收敛（docs/bots/12 §3 D1）：内核在场门抑制（Suppressed）时
-			// 撤销 observe 已记的 seen——否则"observe 记 seen → 内核门抑制"
-			// 的毫秒级竞态会吞掉通知且永不补推。回滚后下一次 observe 把该
-			// 事件视作新事件重投，与"跳过且不记 seen"语义逐字等价。
+			// 双门收敛（docs/bots/12 §3 D1）+ 账本不变式（§3 D2）：内核在场门
+			// 抑制（Suppressed）时撤销 observe 已记的 seen——抑制不是投递，
+			// seen 不能占位，否则竞态窗口内的通知被永久吞掉且永不补推。账本
+			// 键无需回收：内核在场门位于 Claim **之前**，Suppressed 路径根本
+			// 没认领过键（Dispatch 源码顺序保证）。回滚后下一次 observe 把
+			// 该事件视作新事件重投，与"跳过且不记 seen"语义逐字等价。
 			if receipt.Suppressed {
 				p.mu.Lock()
 				if p.seen[item.note.Tag] == item.attention {

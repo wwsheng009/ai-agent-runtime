@@ -101,3 +101,26 @@ func (l *MemoryLedger) Receipt(key string) (Receipt, bool) {
 	r, ok := l.items[strings.TrimSpace(key)]
 	return r, ok
 }
+
+// Release 撤销某键的认领与回执。生命周期镜像宿主快照：attention 换值/清除时
+// 宿主据此释放旧键，使"清空再挂回"等**代次事件**可重新投递——纯 (node,
+// session, attention) 键不含代次，持久认领会吞掉 re-arm（现有单测
+// TestPushNotifierObserve 抓住的回归，docs/bots/12 §3 D2）。未认领键忽略。
+func (l *MemoryLedger) Release(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.items[key]; !ok {
+		return
+	}
+	delete(l.items, key)
+	for i, k := range l.order {
+		if k == key {
+			l.order = append(l.order[:i], l.order[i+1:]...)
+			break
+		}
+	}
+}

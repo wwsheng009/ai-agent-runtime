@@ -75,7 +75,7 @@ Dispatcher，替换自定路由。绑定反查仍是宿主职责（内核不知�
 | 切片 | 内容 | 主要落点 | 测试 | 回退 |
 |---|---|---|---|---|
 | **G1** 双门收敛 | ✅ 2026-10-15 落地：`Receipt.Suppressed` 条件回滚 seen（值匹配才删，不覆盖并发更新）；`presence` 字段放宽为 `notify.Presence` 接口（`flipPresence` 测试注入确定性复现竞态窗口）；Dispatcher 构造上提（`ensureDispatcher` 惰性缓存，p.mu 下并发安全）。验证：竞态用例 ×3 全绿（回滚+条件删除）、gateway 全包、`-race` 通过 | `cmd/gateway/push.go` | 竞态用例（observe→续期→dispatch 不丢通知）；既有 push/presence 全包 | 单点 revert |
-| **G2** 账本接线 | 按 §3 D2 键语义接 `NewMemoryLedger`（或持久账本随宿主）；NOTIFY DedupKey 透传 | `cmd/gateway/push.go`、wire/tunnel | 跨路径同键只投一次；键冲突用例（approval→error 不得吞） | 传回 nil |
+| **G2** 账本接线 | ✅ 2026-10-15 落地：`MemoryLedger.Release`（内核新增）；账本实例上提为字段；键 = `tag|attention`；**生命周期镜像 seen 快照**（换值释放旧键 + 清除释放消失键，清理必须遍历替换**前**的旧快照）。设计修正：现有单测 `TestPushNotifierObserve` 抓住"clear→re-arm 同值被持久键吞"的回归——纯 `(node, session, attention)` 键不含代次，D2 据此修正为键生命周期随 seen；agent NOTIFY DedupKey 跨路径透传仍留后续（registry 摘要不含该字段）。验证：notify+gateway 全包、G2 用例 ×2、`-race` | `cmd/gateway/push.go`、`internal/notify/ledger.go` | 跨路径同键只投一次；键冲突用例（approval→error 不得吞）；re-arm 重投回归 | 传回 nil |
 | **G3** 静默/合并下沉 | 内核策略链新增 quietHours/coalesce 环节；pushNotifier 剪枝；notify_policy.go 退役 | `internal/notify/dispatcher.go`、`cmd/gateway/{push,notify_policy}.go` | 既有 gateway 全包（行为不变护栏）+ 内核新环节单测 | 保留别名文件恢复 |
 | **R1** runtime-server 接入 | IM 投影改走内核 Dispatcher（§3 D4）；sessionViewers 作为 Presence 注入 | `cmd/runtime-server/connector_bootstrap.go`、`internal/api/runtimeapi/session_viewers.go` | 既有 connector_command_attention_test 语义不变 | 绑定回原 hook |
 | **R2** aicli 接入 | 连接器出站走内核；InteractiveUI 信号复用为 Presence（本地面用） | `internal/connectors/service.go`、`cmd/aicli/commands/chat_gateway_host.go` | 既有 NotifySession/NotifyAttention 单测 | 同上 |

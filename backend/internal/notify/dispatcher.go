@@ -88,6 +88,10 @@ func (d *Dispatcher) SetLogger(logf func(string, ...any)) { d.logf = logf }
 // SetPreferences 注入偏好存储（nil = 无偏好，行为不变）。
 func (d *Dispatcher) SetPreferences(prefs PreferenceStore) { d.prefs = prefs }
 
+// SetLedger 注入跨路径去重账本（构造后注入用；nil = 不去重）。
+// 仅应在通道装配阶段调用（与 NewDispatcher 的 ledger 参数等价）。
+func (d *Dispatcher) SetLedger(l Ledger) { d.ledger = l }
+
 // SetClock 注入时钟（测试用；缺省 time.Now）。
 func (d *Dispatcher) SetClock(clock func() time.Time) {
 	if clock != nil {

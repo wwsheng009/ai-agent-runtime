@@ -136,3 +136,72 @@ func TestPushNotifierSuppressedConditionalDelete(t *testing.T) {
 		t.Fatalf("条件删除不得覆盖并发更新的 seen，got %q", got)
 	}
 }
+
+// —— G2 账本接线（docs/bots/12-notify-consolidation-plan.md §4 G2 / §3 D2）——
+
+// TestLedgerKeyCarriesAttention 锁定 G2 键语义（账本键 = tag|attention，
+// tag = node|session）。通过 ntfy 假服务的投递计数断言三段行为：
+//
+//  1. approval→error 换值：**两次都投**——账本的 attention 维度保证绝不吞
+//     同类后续事件（这是 D2 拒绝裸 node|session 键的原因；与 seen 快照的
+//     换值重推语义逐字一致）；
+//  2. 同一 attention 重复 observe（事件重放）：只投一次——跨路径幂等生效；
+//  3. 重放不复活旧值：error 已投后再次 approval→error 序列重放，approval
+//     不产生投递（键互不干扰）。
+func TestLedgerKeyCarriesAttention(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := newPushNotifier(nil, "https://gw.example.com", nil)
+	n.ntfy = ntfy.NewSender(srv.URL, "topic-a", "")
+
+	nodesWith := func(attention string) []*tunnel.Node {
+		return []*tunnel.Node{{
+			NodeID:   "node-x",
+			Sessions: []wire.SessionSummary{{SessionID: "s-y", Title: "A", Attention: attention}},
+		}}
+	}
+	waitHits := func(want int32, what string) int32 {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if got := hits.Load(); got >= want {
+				return got
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("%s：期望投递 ≥%d，实际 %d", what, want, hits.Load())
+		return 0
+	}
+
+	// 1) approval → 投递 #1。
+	n.observe(nodesWith("approval"))
+	waitHits(1, "approval 首投")
+
+	// 2) error 换值 → 投递 #2（裸 node|session 键会在此被账本吞掉）。
+	n.observe(nodesWith("error"))
+	waitHits(2, "approval→error 换值重投")
+
+	// 3) 同 attention 重放：seen 命中短路（不进 dispatch）；即便绕过 seen，
+	//    账本键 node-x|s-y|error 已认领 → 不重复投递。计数必须停在 2。
+	n.observe(nodesWith("error"))
+	time.Sleep(300 * time.Millisecond)
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("同 attention 重放不得重复投递：期望 2，实际 %d", got)
+	}
+
+	// 4) 换回 approval 再到 error 的完整序列：approval 投 #3（新事件），
+	//    error 被 seen 短路（值未变）——但注意此时 seen[node|s]=approval，
+	//    error 是换值 → 投 #4。最终恰 4 次，绝无多吞。
+	n.observe(nodesWith("approval"))
+	waitHits(3, "approval 再次换值")
+	n.observe(nodesWith("error"))
+	waitHits(4, "error 再次换值")
+	if got := hits.Load(); got != 4 {
+		t.Fatalf("完整序列应恰投 4 次，实际 %d", got)
+	}
+}
