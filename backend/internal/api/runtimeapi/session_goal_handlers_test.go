@@ -228,3 +228,28 @@ func TestSessionGoalAPI_WriteRequiresAuthorization(t *testing.T) {
 	rec = callSessionGoalAPIFrom(t, handler, http.MethodGet, id, "", "203.0.113.7:5555")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
+
+// TestSessionGoalAPI_RoutesRegistered 经真实路由表验证
+// GET/POST /api/runtime/sessions/{id}/goal 已注册（直接调用 handler 的用例不覆盖
+// 路由注册，正是本测试的价值）。
+func TestSessionGoalAPI_RoutesRegistered(t *testing.T) {
+	handler, _, session := newSessionGoalAPIHarness(t)
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/goal", nil)
+	getReq.RemoteAddr = "127.0.0.1:43210"
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	require.Nil(t, decodeSessionGoalReadResponse(t, getRec).Goal)
+
+	postReq := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+session.ID+"/goal",
+		strings.NewReader(`{"action":"set","objective":"route smoke"}`))
+	postReq.RemoteAddr = "127.0.0.1:43210"
+	postReq.Header.Set("Content-Type", "application/json")
+	postRec := httptest.NewRecorder()
+	router.ServeHTTP(postRec, postReq)
+	require.Equal(t, http.StatusOK, postRec.Code, postRec.Body.String())
+	require.Equal(t, "route smoke", decodeSessionGoalResponse(t, postRec).Goal.Objective)
+}
