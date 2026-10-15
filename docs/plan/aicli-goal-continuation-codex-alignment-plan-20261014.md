@@ -349,6 +349,20 @@ goal:
 
 ---
 
+### runtime-server 缺口修复：逐轮 goal 指引注入（gap 1，2026-10-15 完成）
+
+- **缺口**：runtime-server actor 只在构建期装配 agent（`PrepareAgent` 仅在 `BuildSessionActor` 调用一次），没有 run 级刷新，因此服务端 turn 拿不到 `active_goal_guidance`（CLI 本地 actor 由 `localChatPrepareRunHook` 每轮注入）。影响：服务端普通 turn 缺 objective 包裹 / 完成审计模板 / 预算行 / blocked 条款（续跑轮由 CLI 侧多段 prompt 兜底，模型也可 `get_goal` 自取）。
+- **修复**：
+  - `internal/goal`：抽出共享渲染器 `RenderTurnGuidance` / `EscapePromptText` / `GuidanceOptionKey`；CLI 本地路径（`renderActiveGoalGuidance`）改为调用同一实现，文案逐字不变。
+  - `internal/runtimehost`：新增 `Deps.OnRunPrepare`（在 `PrepareRun` / 默认取租约**之后**追加执行），并抽出 `composePrepareRun` 固化「先租约、后宿主刷新」顺序契约（宿主无需自行管理租约；钩子报错与租约失败同口径终止 run）。
+  - `internal/api/runtimeapi`：`SessionDeps` 捕获 `preparedAgent` 并装配 `OnRunPrepare`，每次 run 前按**实时会话**（run 时 `loadSession` 的结果）刷新 `active_goal_guidance`——`/goal` 的 set/pause/resume/clear/complete 无需重建 actor 即在下一轮生效；无 goal / 非 active / 元数据损坏时清除该 option 或降级（fail-open，不让 goal 读取失败终止 turn）。
+  - 与 CLI 同口径限定**基础会话**（`isBaseSessionContext`：无 agent_type / depth / read_only）——子代理会话不继承父会话的持久目标。
+- **测试**：`internal/goal` 渲染器（active / 非 active / 空 objective / 预算夹紧 / 转义 / update_goal 可用性两分支）；`internal/runtimehost` 顺序契约（先租约后宿主刷新、租约失败不执行刷新、`PrepareRun` 覆盖优先、空钩子直通）；`internal/api/runtimeapi` 注入单测 + `buildSessionActor → SubmitPrompt` **端到端**（首轮含 objective/审计/update_goal；改目标后第二轮无需重建 actor 即刷新）+ `isBaseSessionContext` 门控。
+- **验证**：`go build ./...`、`go test ./internal/goal/... ./internal/runtimehost/...`、`go test ./internal/api/runtimeapi/`（全量）全绿；commands 包 goal/parity/freeze/runtime-server 子集全绿。
+- **遗留（gap 2）**：web/控制台仍无 goal 管理 HTTP 端点（仅模型工具 + 通用会话 PATCH）。路由注册在 `runtimeapi/handler.go`、会话命令面在 `session_runtime_handlers.go`，二者当前被并行的 schedule/mesh/bots 工作流占用（工作区未提交），需协调后再动，避免把外部改动卷进提交。
+
+---
+
 ## 附录 A：Codex main 关键证据索引
 
 - 续跑：`codex-rs/ext/goal/src/runtime.rs:436-535`（continue_if_idle）、`:226-241`（set/resume 触发）、`:490-503`（turn 血缘）
