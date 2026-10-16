@@ -18,7 +18,7 @@
 | 诉求 | 现状 | 判定 |
 | --- | --- | --- |
 | 统一**分类/账本** | `internal/toolsurface`（`Classify`/`Build`/`SummarizeSources`）已是单一实现点，请求路径已接入 | ✅ 已完成 |
-| 统一**注册** | `internal/tools` 侧已收敛（核心表 `builtinToolkitRegistrations` + `code.*` 条件表 `codeToolRegistrations`，均有双向闸门）；**宿主侧仍 5 处**（`cmd/aicli/commands`，slice 2 推迟） | ⚠️ 部分完成 |
+| 统一**注册** | `internal/tools` 侧已收敛（核心表 `builtinToolkitRegistrations` + `code.*` 条件表 `codeToolRegistrations`，均有双向闸门）；**宿主侧 5 处也已收敛**为单一 helper `registerRuntimeBuiltinTool`（slice 2，含源码门禁） | ✅ 已完成 |
 | **元数据对外接口** | 分类被刻意排除在定义外，`/runtime/tools` 响应无分类/分组 | ❌ 不存在 |
 
 关键认知：**"装配"（谁组装工具面）已统一，"注册"（谁产出工具定义）没有。**
@@ -246,20 +246,19 @@ func IsEssential(name string) bool           // 取代 policy.IsRuntimeOwnedEsse
 - **slice 1（已完成）**：`tools/manager.go` 的 25 个硬编码 `register(...)` → 单一构造表
   `builtinToolkitRegistrations`（21 条无条件 + 1 条按 provider 条件）；`Entry.ToolkitBuiltin`
   覆盖 18 个规范条目；新增漂移闸门测试。
-- **slice 2（待办，当前被外部占用阻塞）**：5 处 `RegisterBuiltinToolFunction`（§1.2）收敛为
-  单一 helper。**阻塞原因**：这 5 处全部位于 `cmd/aicli/commands`，该包当前有本 campaign
-  之外的**第二个写入者**（`/provider refresh` 施工）在改；跨写入者改同一包会互相破坏，
-  故推迟到该施工落地后。
-  **风险已量化（2026-10-16 15:22 复核）**：5 个目标文件（`acp_mcp_host.go` /
-  `chat_lsp_bootstrap.go` / `chat_mcp_session_scope.go` / `chat_setup.go` /
-  `web_mcp_handlers.go`）与该写入者的 21 个在改文件**交集为空**，且该包此刻 `go build`
-  通过。所以推迟的理由不是"改同一文件必冲突"，而是不与**活动**写入者共用同一包
-  （对方可能整包格式化或回滚，代价不可控）；该 slice 只收敛一行调用惯用法，收益小、
-  等待成本低，故维持推迟。
-  **16:23 复核（提交后）**：该包脏文件已增至 **31** 个，最近一次写入距今 **3 分钟**
-  （`agent_stdio_session_mgmt.go` 16:20:08、`chat_actor_host.go` 16:18:46）——写入者**仍在活动**，
-  故推迟结论不变。另：本战役的 29 个文件已于 `3bc49a2f` 提交，此后不再与他们的改动混在同一份
-  未提交状态里。
+- **slice 2（已完成，2026-10-16）**：5 处 `RegisterBuiltinToolFunction`（§1.2）收敛为
+  `function_catalog.go` 的单一 helper `registerRuntimeBuiltinTool`。
+  **落地形态**：helper 收 `*aicliFunctionCatalog` + `functions.RuntimeToolProvider` + 描述，
+  内部就是原先那一行包装；5 处调用点各减为一行（`acp_mcp_host` / `chat_lsp_bootstrap` /
+  `chat_mcp_session_scope` / `chat_setup` / `web_mcp_handlers`），其中 3 个文件的 `functions`
+  import 随之失效并移除；**各调用点自己的过滤条件（skipMCP / sessionMCPOverrideDisabled /
+  registered 去重）留在原处**——那是宿主策略，不是惯用法的一部分。
+  **新增门禁**：`TestRuntimeToolFunctionWrappingIsSingleSourced`（源码扫描：非注释行里
+  `functions.NewRuntimeToolFunction(` 只能出现 1 次，即 helper 本体；既防别的文件再抄一份，
+  也防同文件里多抄一份）。
+  **历史（为何曾一再推迟）**：该包有第二写入者。15:22 复核时其 21 个脏文件与 5 个目标文件
+  **交集为空**；16:23 脏文件增至 31 且仍在活动，故继续推迟。最终在**再次确认 5 个目标文件干净、
+  且改动期间其提交（`840b960f`）与本批文件零交集**之后施工。
 - **slice 3（已完成，2026-10-16）**：`code.*` 条件注册路径（`gate.add`）收敛。
   **本节原先写的"仍受同一阻塞（5 处注册点位于 `cmd/aicli/commands`）"是错的，已改正**：
   闸门与它的名单都在 `internal/tools`（`manager.go:48 codeGate`、`:96` 由
@@ -1139,3 +1138,46 @@ runtimeapi 50.452s）。提交后，本战役文件在工作树里已全部干�
 （`types.go` / `supervision_tools.go` / `spawn_*_arg_types.go` / `broker_arg_audit*.go` /
 `agent_events_view.go` 及其测试）。它们与本战役**同主题**（都指向规范名），但**无法证明归属**，
 故不代为提交——宁可留白，不越权。
+
+---
+
+### 2026-10-16 — P2 slice 2 已落地：宿主侧 5 处注册收敛为单一惯用法 + 源码门禁
+
+**改动（7 文件）**：`function_catalog.go` 新增
+`registerRuntimeBuiltinTool(catalog *aicliFunctionCatalog, manager functions.RuntimeToolProvider, desc runtimetools.ToolDescriptor)`
+——内部就是原先那一行 `catalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(manager, desc), desc)`；
+5 处调用点各减为一行：`acp_mcp_host.go`、`chat_lsp_bootstrap.go`、`chat_mcp_session_scope.go`、
+`chat_setup.go`、`web_mcp_handlers.go`。其中 3 个文件的 `functions` import 随之失效并移除
+（另 2 个文件仍用它做别的事）。
+**各调用点自己的过滤条件（skipMCP / sessionMCPOverrideDisabled / registered 去重）留在原处**——
+那是宿主策略，不是惯用法的一部分。
+
+**新增门禁**：`runtime_tool_registration_test.go::TestRuntimeToolFunctionWrappingIsSingleSourced`
+——源码扫描：生产文件**非注释行**里 `functions.NewRuntimeToolFunction(` 只能出现 **1** 次（helper 本体），
+既防"别的文件再抄一份"，也防"同文件里多抄一份"；另有 `scanned > 50` 的语料下限防假绿。
+
+**红探针（2 条，按设计变红，已回滚，哈希还原一致）**：
+
+| 探针 | 注入 | 期望红点 | 结果 |
+| --- | --- | --- | --- |
+| A | 在 `chat_setup.go` 里再写一次直接包装 | 多入口 | 红 ✓ `chat_setup.go 直接包装了 runtime 工具函数…` |
+| B | 改测试里的 needle 使语料扫不到 | 次数守卫 | 红 ✓ `expected exactly one production call site …` |
+
+**验证**：
+
+- `gofmt -l` 7 个文件 ⇒ 空；`go build ./cmd/aicli/commands/` ⇒ 0；
+- **整包测试（工作树，含他方在飞改动）⇒ ok 172.025s**（行为未变的直接证据：该包自身的
+  注册路径用例全绿）；
+- **隔离快照（HEAD + 本补丁）**：build 0、门禁绿；整包测试 **一次红一次绿**——红的用例是
+  `TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory`（流式尾包移交，时序敏感）。
+  对照实验：该用例在**有补丁**与**纯 HEAD** 两个快照下各单跑 `-count=3` **均 3/3 绿** ⇒
+  既有、负载敏感的 flaky，与本改动无关（本改动只换"用哪个函数对象注册"，不触及流式路径）。
+- 改动期间第二写入者推进了 HEAD（`840b960f fix(aicli): 修复 runtime context map 并发读写 fatal`），
+  经核对与本批 7 文件**零交集**，补丁在新 HEAD 上干净应用。
+
+**操作事故与教训（重要）**：首次提交**只进了 1 个文件**——6 个改动文件在提交时已不在索引里
+（工作树里它们的改动没丢，但暂存被清空）。原因：**同一仓库里有另一个写入者并发执行 git 命令**
+（其提交 `840b960f` 就在我暂存之后落地）。处置：`git add` + `git commit --amend --no-edit`
+在**同一条命令内**完成，补齐为 7 文件（`55144f6e`）。
+教训：在这种多写入者共享工作树的仓库里，**暂存与提交之间不要插入其它工具调用**；
+提交后必须 `git show --stat` 复核实际入库文件数，不能只看命令的退出码。
