@@ -360,10 +360,15 @@ func ApplyPermissionsOverlayToPolicy(policy *ToolExecutionPolicy, overlay Permis
 	}
 	if len(overlay.AllowTools) > 0 {
 		// Intersect with existing allowlist when present; otherwise enable allowlist.
+		// The membership test is wildcard-aware (allowedToolsAdmit): a parent
+		// allowlist holding "*" or a prefix pattern must not strip every
+		// overlay entry down to an empty (deny-everything) list — the same
+		// blackout intersectAllowedTools guards against. Pattern entries the
+		// parent admits stay in the result as patterns.
 		if policy.AllowlistEnabled {
 			allowed := make(map[string]bool, len(overlay.AllowTools))
 			for _, name := range overlay.AllowTools {
-				if policy.AllowedTools[name] {
+				if allowedToolsAdmit(policy.AllowedTools, name) {
 					allowed[name] = true
 				}
 			}

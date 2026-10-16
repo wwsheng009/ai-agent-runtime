@@ -9,6 +9,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // profileValidateIssue 是 `profile validate` 的一条发现。
@@ -125,6 +126,17 @@ func runProfileValidateCommand(cfg *config.Config, ref, agent string) (profileVa
 		for _, name := range names {
 			name = strings.TrimSpace(name)
 			if name == "" || name == "*" {
+				continue
+			}
+			// 通配模式（"*" / "prefix_*"）：命中任一登记工具名即通过；
+			// 一个命中不了的模式保留 warning（大概率拼写错误）。
+			// 与 internal/profile.ValidateProfileReference 同口径。
+			if strings.Contains(name, "*") {
+				if toolregistry.PatternHitsRegisteredName(name) {
+					continue
+				}
+				addIssue(profileValidateSeverityWarning, path,
+					"通配模式 %q 未命中任何登记工具名（若为 MCP/动态工具可忽略）", name)
 				continue
 			}
 			if _, ok := runtimepolicy.LookupToolTaxonomy(name); !ok {
