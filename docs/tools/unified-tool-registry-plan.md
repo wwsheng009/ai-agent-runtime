@@ -291,9 +291,10 @@ func IsEssential(name string) bool           // 取代 policy.IsRuntimeOwnedEsse
    都已存在（`Capability` 8 域 / `Kind` 6 类），再建第三套是重复；仅'配置便利性'不足以支撑新体系"；
    `profile-tool-groups-design.md` 的 v0.3 状态行同口径（"属**第三套同类机制**……裁决见
    `progressive-tool-disclosure-plan.md` §10"）。
-2. **首要用例在该草案自己的规则下表达不出来**（本轮复核的 `file:line`）：
-   - `toolregistry/registry.go:153-158`：`code.*` 五个条目归 `GroupRead`；
-   - `toolregistry/registry.go:243`：`GroupRead` 的 `Protected=true`
+2. **首要用例在该草案自己的规则下表达不出来**（`file:line` 已按当前代码逐条复核）：
+   - `toolregistry/registry.go:162-166`：`code.*` 五个条目归 `GroupRead`
+     （slice 3 之前为 `:153-158`，加 `CodeTool` 字段后位移 +9）；
+   - `toolregistry/registry.go:251`：`GroupRead` 的 `Protected=true`（原 `:243`）
      （`registry_test.go:161-166` 已把 read/edit/shell 三组钉为 protected，并显式引用该草案 §3.3）；
    - `profile-tool-groups-design.md:79`：草案自定规则——`disabled_groups` 含 protected 组 ⇒
      `profile validate` **报错**，并要求"改用 allowlist/denylist 逐工具表达"。
