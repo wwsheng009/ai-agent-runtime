@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -70,6 +71,10 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	attempts := 0
 	errorStrikes := 0
 	noProgressStrikes := 0
+	// 升级路径（P2-2' 入口 2）：连续无进展达到共享阈值且部署启用了
+	// iterate_goal 时，下一次续跑改用 IterateEscalationPrompt（恰好一次）。
+	escalationAttempted := false
+	iterationAvailable := goalIterationEscalationAvailable(session)
 	for {
 		if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
 			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=context_done attempts_completed=%d", attempts), false)
@@ -107,7 +112,8 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 		session.goalContinuationAttempt.Store(int32(attempts))
 		attemptCtx, cancel := goalAutoContinuationAttemptContext(ctx, session)
 		toolsBefore := chatTurnToolExecutions(session)
-		output, continueErr := continuer.ContinueGoal(attemptCtx, session)
+		output, continueErr := goalContinuationAttemptWithEscalation(
+			attemptCtx, continuer, session, noProgressStrikes, &escalationAttempted, iterationAvailable)
 		cancel()
 		toolsDelta := chatTurnToolExecutions(session) - toolsBefore
 		if continueErr != nil {
@@ -154,7 +160,36 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			continue
 		}
 		noProgressStrikes = 0
+		// 有实质进展即重置升级状态：后续若再次连续空转，允许再来一次升级。
+		escalationAttempted = false
 	}
+}
+
+// goalContinuationAttemptWithEscalation 选择本次续跑注入的提示词：连续无进展
+// 达到共享升级阈值、部署启用了 iterate_goal（iterationAvailable）、且尚未尝试
+// 过升级时，改用 IterateEscalationPrompt（恰好一次）。其余情况保持默认续跑提示。
+func goalContinuationAttemptWithEscalation(ctx context.Context, continuer aicliGoalContinuationExecutor, session *ChatSession, noProgressStrikes int, escalationAttempted *bool, iterationAvailable bool) (string, error) {
+	if runtimegoal.DecideIterationEscalation(noProgressStrikes, escalationAttempted != nil && *escalationAttempted, iterationAvailable) {
+		if escalationAttempted != nil {
+			*escalationAttempted = true
+		}
+		writeSessionDebugInfo(session, fmt.Sprintf(
+			"[goal] auto continuation escalating to fresh-context iteration strikes=%d/%d",
+			noProgressStrikes, goalAutoContinuationNoProgressStrikeLimit), false)
+		return continuer.ContinueGoalWithPrompt(ctx, session, runtimegoal.IterateEscalationPrompt)
+	}
+	return continuer.ContinueGoal(ctx, session)
+}
+
+// goalIterationEscalationAvailable 报告本会话部署是否启用了 iterate_goal 工具
+// （agents.iterateGoalEnabled）。未启用时驱动器不做升级注入——避免向模型指示
+// 一个不存在的工具；托管宿主未挂载（如远端 server 模式）时保守返回 false，
+// 由服务端驱动器在各自宿主上独立判定。
+func goalIterationEscalationAvailable(session *ChatSession) bool {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.RuntimeConfig == nil {
+		return false
+	}
+	return runtimecfg.NormalizeAgentsConfig(session.LocalRuntimeHost.RuntimeConfig.Agents).IterateGoalEnabled
 }
 
 // goalAutoContinuationLimit 返回生效的自动续跑安全阀：0（缺省）与负值都表示

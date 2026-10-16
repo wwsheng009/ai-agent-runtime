@@ -8,6 +8,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -359,6 +360,135 @@ func TestSendMessage_NoProgressStrikesResetOnToolActivity(t *testing.T) {
 		t.Fatalf("expected tool activity to reset no-progress strikes (cap 5), got %d", executor.continuations)
 	}
 	assertGoalStatus(t, session, runtimegoal.StatusActive)
+}
+
+// TestSendMessage_NoProgressEscalatesToFreshContextIteration 覆盖升级路径
+// （P2-2' 入口 2）：连续无进展达到共享阈值（2）且部署启用 iterate_goal 时，
+// 下一次续跑改用 IterateEscalationPrompt（恰好一次），随后仍无进展则按原
+// 停止线置 blocked。未完成升级注入的轮次仍是默认续跑提示。
+func TestSendMessage_NoProgressEscalatesToFreshContextIteration(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	// 部署启用 iterate_goal（本地宿主的 agents 配置是驱动器的可用性判定来源）。
+	session.LocalRuntimeHost = &localChatRuntimeHost{
+		RuntimeConfig: &runtimecfg.RuntimeConfig{
+			Agents: runtimecfg.AgentsConfig{IterateGoalEnabled: true},
+		},
+	}
+
+	var continuedPrompts []string
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			fake := session.ChatExecutor.(*fakeChatExecutor)
+			continuedPrompts = append(continuedPrompts, fake.lastContinuationPrompt)
+			return "", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	if _, err := sendMessage(session, "start"); err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
+	}
+	if executor.continuations != goalAutoContinuationNoProgressStrikeLimit {
+		t.Fatalf("expected %d continuations before blocked, got %d",
+			goalAutoContinuationNoProgressStrikeLimit, executor.continuations)
+	}
+	if len(continuedPrompts) != 3 {
+		t.Fatalf("expected 3 continuation prompts, got %d", len(continuedPrompts))
+	}
+	if continuedPrompts[0] != goalAutoContinuationPrompt || continuedPrompts[1] != goalAutoContinuationPrompt {
+		t.Fatalf("pre-threshold continuations must use the default prompt, got %q / %q",
+			continuedPrompts[0], continuedPrompts[1])
+	}
+	if continuedPrompts[2] != runtimegoal.IterateEscalationPrompt {
+		t.Fatalf("threshold continuation must use the escalation prompt, got %q", continuedPrompts[2])
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusBlocked)
+}
+
+// TestSendMessage_NoProgressEscalationUnavailableWithoutTool 锁定回退口径：
+// 部署未启用 iterate_goal 时，驱动器不得注入升级提示（避免指示不存在的工具），
+// 空转全部走默认续跑提示后按停止线置 blocked。
+func TestSendMessage_NoProgressEscalationUnavailableWithoutTool(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	// 未挂载宿主（等价 iterate_goal 不可用）。
+
+	var continuedPrompts []string
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			fake := session.ChatExecutor.(*fakeChatExecutor)
+			continuedPrompts = append(continuedPrompts, fake.lastContinuationPrompt)
+			return "", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	if _, err := sendMessage(session, "start"); err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
+	}
+	for i, prompt := range continuedPrompts {
+		if prompt != goalAutoContinuationPrompt {
+			t.Fatalf("continuation %d must stay on the default prompt when the tool is unavailable, got %q", i+1, prompt)
+		}
+	}
+	if executor.continuations != goalAutoContinuationNoProgressStrikeLimit {
+		t.Fatalf("expected stop at the no-progress limit, got %d", executor.continuations)
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusBlocked)
+}
+
+// TestSendMessage_NoProgressEscalationResetsAfterProgress 锁定升级状态的重置：
+// 升级轮产生实质进展后，strike 与升级标记一并清零；后续再次连续空转时允许
+// 再来一次升级（而不是永久失去该路径）。
+func TestSendMessage_NoProgressEscalationResetsAfterProgress(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	session.goalMaxContinuations = 6
+	session.LocalRuntimeHost = &localChatRuntimeHost{
+		RuntimeConfig: &runtimecfg.RuntimeConfig{
+			Agents: runtimecfg.AgentsConfig{IterateGoalEnabled: true},
+		},
+	}
+
+	var continuedPrompts []string
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			fake := session.ChatExecutor.(*fakeChatExecutor)
+			continuedPrompts = append(continuedPrompts, fake.lastContinuationPrompt)
+			if fake.continuations == 3 {
+				// 升级轮（第 3 次续跑）产生非空输出 → 有进展，重置 strike 与升级标记。
+				return "escalated progress", nil
+			}
+			return "", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	if _, err := sendMessage(session, "start"); err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
+	}
+	if len(continuedPrompts) != 6 {
+		t.Fatalf("expected 6 continuations, got %d", len(continuedPrompts))
+	}
+	// 第一段：默认 / 默认 / 升级；第二段（重置后）：默认 / 默认 / 升级后触发停止线。
+	wantPrompts := []string{
+		goalAutoContinuationPrompt,
+		goalAutoContinuationPrompt,
+		runtimegoal.IterateEscalationPrompt,
+		goalAutoContinuationPrompt,
+		goalAutoContinuationPrompt,
+		runtimegoal.IterateEscalationPrompt,
+	}
+	for i, want := range wantPrompts {
+		if continuedPrompts[i] != want {
+			t.Fatalf("continuation %d prompt = %q, want %q", i+1, continuedPrompts[i], want)
+		}
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusBlocked)
 }
 
 func TestSendMessage_AccountsGoalUsageAndStopsAtBudget(t *testing.T) {

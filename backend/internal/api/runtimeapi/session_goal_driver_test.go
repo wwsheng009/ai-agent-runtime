@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -96,6 +97,53 @@ func TestGoalDriverNoteCLIRefreshesWindow(t *testing.T) {
 	handler.goalDriverNoteCLI(sessionID)
 	if !state.cliActive(sessionID, time.Now()) {
 		t.Fatal("goalDriverNoteCLI must refresh the CLI presence window")
+	}
+}
+
+// TestGoalDriverEscalationStateLifecycle 锁定升级标记的生命周期（P2-2' 入口 2）：
+// 标记注入一次；有进展（resetStrikes）时一并清除，允许后续再次升级。
+func TestGoalDriverEscalationStateLifecycle(t *testing.T) {
+	state := newGoalDriverState()
+	sessionID := "sess-driver-escalation"
+
+	if state.escalationTried(sessionID) {
+		t.Fatal("fresh state must not report an attempted escalation")
+	}
+	state.markEscalationAttempted(sessionID)
+	if !state.escalationTried(sessionID) {
+		t.Fatal("markEscalationAttempted must be observable via escalationTried")
+	}
+	if strikes := state.noProgressStrikes(sessionID); strikes != 0 {
+		t.Fatalf("escalation bookkeeping must not touch the strike counter, got %d", strikes)
+	}
+
+	// 有进展 / 状态重置 → 升级标记与 strike 一并清除。
+	state.noteNoProgress(sessionID)
+	state.noteNoProgress(sessionID)
+	if strikes := state.noProgressStrikes(sessionID); strikes != 2 {
+		t.Fatalf("expected 2 no-progress strikes, got %d", strikes)
+	}
+	state.resetStrikes(sessionID)
+	if state.escalationTried(sessionID) {
+		t.Fatal("resetStrikes must clear the escalation-attempted mark")
+	}
+	if strikes := state.noProgressStrikes(sessionID); strikes != 0 {
+		t.Fatalf("resetStrikes must clear no-progress strikes, got %d", strikes)
+	}
+}
+
+// TestGoalDriverEscalationAvailabilityDefaultsOff 锁定服务端可用性口径：
+// 未配置 runtimeConfig 的宿主（含默认测试 Handler）必须回落 iterate_goal
+// 未启用（默认关闭），驱动器不得注入升级提示。
+func TestGoalDriverEscalationAvailabilityDefaultsOff(t *testing.T) {
+	handler := newGoalDriverTestHandler(t)
+	if handler.goalDriverIterationEscalationAvailable() {
+		t.Fatal("iterate_goal escalation must default off without configured agents.iterateGoalEnabled")
+	}
+	// 显式启用 → 可用（runtimeConfig 注入路径）。
+	enabled := &Handler{runtimeConfig: &runtimecfg.RuntimeConfig{Agents: runtimecfg.AgentsConfig{IterateGoalEnabled: true}}}
+	if !enabled.goalDriverIterationEscalationAvailable() {
+		t.Fatal("configured agents.iterateGoalEnabled must enable escalation")
 	}
 }
 

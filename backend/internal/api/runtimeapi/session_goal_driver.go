@@ -53,19 +53,22 @@ const goalDriverRunSource = "driver:goal"
 const goalDriverCooldown = goal.ContinuationCLICooldownWindow
 
 // goalDriverState 是驱动器在 Handler 上的进程内状态：CLI 在场标记与每会话
-// strike 计数（连续错误/连续空转，成功且非空转一轮即重置）。
+// strike 计数（连续错误/连续空转，成功且非空转一轮即重置），以及升级尝试标记
+// （P2-2' 入口 2：同一轮空转序列内 IterateEscalationPrompt 至多注入一次）。
 type goalDriverState struct {
-	mu            sync.Mutex
-	cliLastSeen   map[string]time.Time // sessionID → 最近一次 CLI 来源 turn 上报
-	errorStrikes  map[string]int
-	noProgStrikes map[string]int
+	mu                  sync.Mutex
+	cliLastSeen         map[string]time.Time // sessionID → 最近一次 CLI 来源 turn 上报
+	errorStrikes        map[string]int
+	noProgStrikes       map[string]int
+	escalationAttempted map[string]struct{}
 }
 
 func newGoalDriverState() *goalDriverState {
 	return &goalDriverState{
-		cliLastSeen:   map[string]time.Time{},
-		errorStrikes:  map[string]int{},
-		noProgStrikes: map[string]int{},
+		cliLastSeen:         map[string]time.Time{},
+		errorStrikes:        map[string]int{},
+		noProgStrikes:       map[string]int{},
+		escalationAttempted: map[string]struct{}{},
 	}
 }
 
@@ -111,6 +114,37 @@ func (s *goalDriverState) noteNoProgress(sessionID string) int {
 	return s.noProgStrikes[sessionID]
 }
 
+// noProgressStrikes 返回当前连续无进展计数（升级决策的只读输入）。
+func (s *goalDriverState) noProgressStrikes(sessionID string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.noProgStrikes[sessionID]
+}
+
+// escalationTried 报告本轮空转序列内是否已注入过升级提示。
+func (s *goalDriverState) escalationTried(sessionID string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.escalationAttempted[sessionID]
+	return ok
+}
+
+// markEscalationAttempted 记录升级提示已注入（同一序列不再重复）。
+func (s *goalDriverState) markEscalationAttempted(sessionID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.escalationAttempted[sessionID] = struct{}{}
+}
+
 func (s *goalDriverState) resetStrikes(sessionID string) {
 	if s == nil {
 		return
@@ -119,6 +153,8 @@ func (s *goalDriverState) resetStrikes(sessionID string) {
 	defer s.mu.Unlock()
 	delete(s.errorStrikes, sessionID)
 	delete(s.noProgStrikes, sessionID)
+	// 有实质进展（或 CLI 接管）时重置升级标记：后续再次连续空转允许再升级一次。
+	delete(s.escalationAttempted, sessionID)
 }
 
 // goalDriverTurnOutcome 是一次 turn 终态的驱动器观测输入。
@@ -296,16 +332,42 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		return
 	}
 
-	// 4) 提交续跑轮（共享 prompt，与 CLI 逐字节同文案）。
-	if err := h.goalDriverSubmitContinuation(ctx, sessionID); err != nil {
+	// 4) 提交续跑轮（共享 prompt，与 CLI 逐字节同文案）；连续无进展达到共享
+	// 升级阈值且部署启用了 iterate_goal 时，本轮改用升级提示词（P2-2' 入口 2，
+	// 同一空转序列至多一次）。
+	state := h.getGoalDriverState()
+	prompt := goal.ContinuationPrompt
+	if goal.DecideIterationEscalation(state.noProgressStrikes(sessionID), state.escalationTried(sessionID), h.goalDriverIterationEscalationAvailable()) {
+		state.markEscalationAttempted(sessionID)
+		prompt = goal.IterateEscalationPrompt
+		logger.Infof("goal driver: escalating to fresh-context iteration session=%s strikes=%d", sessionID, state.noProgressStrikes(sessionID))
+	}
+	if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, prompt); err != nil {
 		logger.Warnf("goal driver: submit continuation %s: %s", sessionID, err)
 	}
 }
 
-// goalDriverSubmitContinuation 通过 hub 取（或建）actor 并异步提交续跑轮。
-// run_meta.source 标记 driver 来源（观测归因）；turn 的指引注入、工具面与
-// 持久化由既有 actor 路径承担；终态事件会再次进入本驱动器形成闭环。
+// goalDriverIterationEscalationAvailable 报告服务端宿主部署是否启用了
+// iterate_goal（agents.iterateGoalEnabled）。未启用时驱动器不做升级注入——
+// 与 CLI 侧 goalIterationEscalationAvailable 同口径。未配置 runtimeConfig 的
+// 宿主由 agentsConfig() 回落默认（false）。
+func (h *Handler) goalDriverIterationEscalationAvailable() bool {
+	if h == nil {
+		return false
+	}
+	return (&sessionAgentController{handler: h}).agentsConfig().IterateGoalEnabled
+}
+
+// goalDriverSubmitContinuation 通过 hub 取（或建）actor 并异步提交默认续跑轮。
 func (h *Handler) goalDriverSubmitContinuation(ctx context.Context, sessionID string) error {
+	return h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, goal.ContinuationPrompt)
+}
+
+// goalDriverSubmitContinuationWithPrompt 通过 hub 取（或建）actor 并异步提交
+// 指定提示词的续跑轮。run_meta.source 标记 driver 来源（观测归因）；turn 的
+// 指引注入、工具面与持久化由既有 actor 路径承担；终态事件会再次进入本驱动器
+// 形成闭环。
+func (h *Handler) goalDriverSubmitContinuationWithPrompt(ctx context.Context, sessionID, prompt string) error {
 	if h == nil || h.sessionManager == nil {
 		return fmt.Errorf("goal driver: handler/session manager not configured")
 	}
@@ -317,7 +379,7 @@ func (h *Handler) goalDriverSubmitContinuation(ctx context.Context, sessionID st
 	if err != nil {
 		return err
 	}
-	return actor.SubmitPromptAsync(ctx, goal.ContinuationPrompt, &team.RunMeta{Source: goalDriverRunSource})
+	return actor.SubmitPromptAsync(ctx, prompt, &team.RunMeta{Source: goalDriverRunSource})
 }
 
 // goalDriverBudgetWrapUp 预算耗尽：置 budget_limited（系统写）并跑一次收尾轮
