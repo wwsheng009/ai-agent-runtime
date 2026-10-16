@@ -33,9 +33,13 @@ func seedListRowInternalContext(t *testing.T, handler *Handler, sessionID string
 		require.NoError(t, handler.sessionManager.SetContext(ctx, sessionID, key, value))
 	}
 	for key, value := range map[string]interface{}{
-		sessionmeta.ReasoningEffort: "high",
-		"fork_parent_session_id":    "session-parent",
-		"fork_origin_title":         "父会话",
+		sessionmeta.ReasoningEffort:        "high",
+		"fork_parent_session_id":           "session-parent",
+		"fork_origin_title":                "父会话",
+		sessionmeta.ProfileRef:             "reviewer",
+		sessionmeta.ProfileName:            "reviewer",
+		sessionmeta.ProfileAgent:           "review-agent",
+		sessionmeta.LegacyAICLIProfileName: "legacy-name",
 	} {
 		require.NoError(t, handler.sessionManager.SetContext(ctx, sessionID, key, value))
 	}
@@ -66,6 +70,11 @@ func requireTrimmedListContext(t *testing.T, row map[string]interface{}, dir str
 	require.Equal(t, "high", contextMap[sessionmeta.ReasoningEffort])
 	require.Equal(t, "session-parent", contextMap["fork_parent_session_id"])
 	require.Equal(t, "父会话", contextMap["fork_origin_title"])
+	// Composer profile 切换器回显当前绑定（handler.go sessionListContextKeys）。
+	require.Equal(t, "reviewer", contextMap[sessionmeta.ProfileRef])
+	require.Equal(t, "reviewer", contextMap[sessionmeta.ProfileName])
+	require.Equal(t, "review-agent", contextMap[sessionmeta.ProfileAgent])
+	require.Equal(t, "legacy-name", contextMap[sessionmeta.LegacyAICLIProfileName])
 
 	// Internal bookkeeping must not be serialized into list rows.
 	for _, dropped := range []string{

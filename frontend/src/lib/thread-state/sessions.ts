@@ -2,6 +2,7 @@
 
 import { type Thread } from "@/data/mock";
 import { readSessionReasoningEffort } from "@/lib/reasoning-effort";
+import { readSessionProfileIdentity } from "@/lib/session-profile";
 import { normalizeSessionId } from "@/lib/session-id";
 import {
   isSameSessionLineage,
@@ -27,6 +28,8 @@ type DerivedRuntimeSession = {
   tags: string[];
   forkedFrom: Thread["forkedFrom"];
   reasoningEffort: Thread["reasoningEffort"];
+  profileRef: Thread["profileRef"];
+  profileName: Thread["profileName"];
 };
 
 /**
@@ -61,6 +64,7 @@ function deriveRuntimeSession(
   if (!sessionId) {
     return null;
   }
+  const profileIdentity = readSessionProfileIdentity(session.metadata?.context);
   const derived: DerivedRuntimeSession = {
     sessionId,
     title:
@@ -85,6 +89,8 @@ function deriveRuntimeSession(
     ),
     forkedFrom: readSessionLineage(session.metadata?.context),
     reasoningEffort: readSessionReasoningEffort(session.metadata?.context),
+    profileRef: profileIdentity.ref,
+    profileName: profileIdentity.name,
   };
   derivedRuntimeSessionCache.set(session, derived);
   return derived;
@@ -191,7 +197,7 @@ export function mergeRuntimeSessionsIntoThreads(
     }
     // 标题 / 标签 / 时间戳等派生字段由 deriveRuntimeSession 计算并按对象身份缓存
     // （每个 SSE 事件都会重跑本函数，见函数头注释）。
-    const { title, summary, updatedAt, reasoningEffort, forkedFrom, tags } =
+    const { title, summary, updatedAt, reasoningEffort, profileRef, profileName, forkedFrom, tags } =
       derived;
 
     if (existingIndex < 0) {
@@ -207,6 +213,8 @@ export function mergeRuntimeSessionsIntoThreads(
         runtimeSource: session.metadata?.lastAgent || session.metadata?.lastSkill || "runtime",
         lastError: null,
         reasoningEffort,
+        profileRef,
+        profileName,
         forkedFrom,
         tags,
         prompts: [
@@ -245,6 +253,8 @@ export function mergeRuntimeSessionsIntoThreads(
         session.metadata?.lastSkill ||
         "runtime",
       reasoningEffort,
+      profileRef,
+      profileName,
       forkedFrom,
       tags,
     } satisfies Thread;
@@ -258,6 +268,8 @@ export function mergeRuntimeSessionsIntoThreads(
       merged.transport !== current.transport ||
       merged.runtimeSource !== current.runtimeSource ||
       merged.reasoningEffort !== current.reasoningEffort ||
+      merged.profileRef !== current.profileRef ||
+      merged.profileName !== current.profileName ||
       !isSameSessionLineage(merged.forkedFrom, current.forkedFrom) ||
       merged.tags.join("|") !== current.tags.join("|")
     ) {

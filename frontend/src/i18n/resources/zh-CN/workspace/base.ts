@@ -410,6 +410,18 @@ export const zhWorkspaceBase = {
         checkpoints: "新增 {{count}} 个检查点",
       },
     },
+    profile: {
+      controlLabel: "Profile",
+      controlTitle: "切换当前会话的 profile（下一轮生效）",
+      unbound: "默认",
+      pending: "切换中",
+      switchFailed: "切换 profile 失败",
+      catalogError: "profile 目录不可用",
+      catalogLoading: "正在加载 profile",
+      unsupported: "暂不支持切换 profile",
+      optionDefault: "{{label}}（默认）",
+      optionUnknown: "{{label}}（不在目录中）",
+    },
     permission: {
       label: "权限",
       pending: "切换中",

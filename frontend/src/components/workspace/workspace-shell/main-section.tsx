@@ -2,10 +2,10 @@
 
 import { Suspense, useCallback, useMemo, useState } from "react";
 
-import { setSessionProfile, type SessionProfileSwitchReport } from "@/api/runtime/profiles";
 import { MessageComposer } from "@/components/workspace/message-composer";
 import { ComposerContextUsageControl } from "@/components/workspace/composer-context-usage-control";
 import { ComposerPermissionModeControl } from "@/components/workspace/composer-permission-mode-control";
+import { ComposerProfileControl } from "@/components/workspace/composer-profile-control";
 import { MessageList } from "@/components/workspace/message-list";
 import { TodoPanel } from "@/components/workspace/task-panel";
 import { ComposerModelDialog } from "@/components/workspace/composer-model-dialog";
@@ -33,6 +33,7 @@ import { useComposerReferenceGroups } from "@/hooks/workspace/composer/use-compo
 import { useComposerSkillGroups } from "@/hooks/workspace/composer/use-composer-skill-groups";
 import { type ComposerMenuState } from "@/hooks/workspace/composer/use-composer-menu";
 import { useComposerCommandSurface } from "@/hooks/workspace/composer/use-composer-command-surface";
+import { useComposerProfileSwitch } from "@/hooks/workspace/composer/use-composer-profile-command";
 import { createComposerSkillTurnRunner } from "@/hooks/workspace/composer/composer-skill-turn";
 import { useRuntimeProfileCatalog } from "@/hooks/workspace/composer/use-runtime-profile-catalog";
 import { useSessionAgents } from "@/hooks/use-session-agents";
@@ -195,23 +196,9 @@ export function WorkspaceMainSection({
   );
 
   // Batch 12：`/profile` 运行时目录（宿主数据源，一次拉取）+ 切换动作（单一处理器：
-  // 命令行提交与弹窗点选都经命令执行器派发，回执文案一致）。
+  // 命令行提交、弹窗点选与常驻切换器都经它派发，回执文案一致）。
   const runtimeProfileCatalog = useRuntimeProfileCatalog();
-  const handleProfileSwitch = useCallback(
-    async (profileRef: string): Promise<SessionProfileSwitchReport> => {
-      const targetSessionId = selectedThread.sessionId?.trim() ?? "";
-      if (targetSessionId.length === 0) {
-        // 新会话尚未登记：如实抛错（执行器转成回执），不把请求发给空 id。
-        throw new Error("profile switch requires a registered session");
-      }
-      const result = await setSessionProfile(targetSessionId, profileRef);
-      if (!result.ok) {
-        throw new Error("profile switch was rejected by the runtime");
-      }
-      return result.report;
-    },
-    [selectedThread.sessionId],
-  );
+  const handleProfileSwitch = useComposerProfileSwitch(selectedThread.sessionId);
   const composerCommandSurface = useComposerCommandSurface({
     runtimeModels,
     runtimeSkills,
@@ -456,6 +443,16 @@ export function WorkspaceMainSection({
                       <ComposerPermissionModeControl
                         lastRuntimeEventType={selectedThread.lastRuntimeEventType}
                         runtimeEventCount={selectedThread.runtimeEventCount}
+                        sessionId={selectedThread.sessionId}
+                      />
+                    }
+                    profileControl={
+                      <ComposerProfileControl
+                        catalog={runtimeProfileCatalog.catalog}
+                        catalogError={runtimeProfileCatalog.error}
+                        onSwitch={handleProfileSwitch}
+                        profileName={selectedThread.profileName}
+                        profileRef={selectedThread.profileRef}
                         sessionId={selectedThread.sessionId}
                       />
                     }

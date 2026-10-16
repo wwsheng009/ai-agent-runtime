@@ -432,6 +432,18 @@ export const enWorkspaceBase = {
         checkpoints: "{{count}} new checkpoints",
       },
     },
+    profile: {
+      controlLabel: "Profile",
+      controlTitle: "Switch the session profile (takes effect next turn)",
+      unbound: "default",
+      pending: "switching",
+      switchFailed: "profile switch failed",
+      catalogError: "profile catalog unavailable",
+      catalogLoading: "loading profiles",
+      unsupported: "profile switching unavailable",
+      optionDefault: "{{label}} (default)",
+      optionUnknown: "{{label}} (not in catalog)",
+    },
     permission: {
       label: "Permission",
       pending: "switching",

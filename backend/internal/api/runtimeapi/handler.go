@@ -3199,6 +3199,9 @@ func sessionNeedsWorkspacePathMaterialization(session *chat.Session, workspacePa
 //   - 工作目录绑定：侧栏按目录分组（frontend/src/components/workspace/workspace-sidebar-shared.ts）
 //   - 分支谱系：分支行归属（frontend/src/lib/workspace/session-lineage.ts）
 //   - reasoning_effort：输入框档位回显（frontend/src/lib/thread-state/sessions.ts）
+//   - profile 身份：composer profile 切换器回显当前绑定
+//     （frontend/src/lib/session-profile.ts；profile_ref/profile_name/profile_agent
+//     都是小字段，随 whitelist 放行列表行才能带出当前绑定，与 reasoning_effort 同路）
 //
 // 单会话详情（GET /sessions/{id}）与运行时接口不做裁剪，需要完整上下文的调用方
 // 应直接使用 sessionManager 返回的对象。
@@ -3211,6 +3214,12 @@ var sessionListContextKeys = []string{
 	sessionmeta.ProfileRoot,
 	"profileRoot",
 	sessionmeta.LegacyAICLIProfileRoot,
+	sessionmeta.ProfileRef,
+	sessionmeta.LegacyAPIProfileReference,
+	sessionmeta.ProfileName,
+	sessionmeta.LegacyAICLIProfileName,
+	sessionmeta.ProfileAgent,
+	sessionmeta.LegacyAICLIProfileAgent,
 	sessionmeta.ReasoningEffort,
 	"fork_parent_session_id",
 	"fork_source_message_id",

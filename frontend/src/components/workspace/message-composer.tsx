@@ -57,21 +57,18 @@ type MessageComposerProps = {
   modelOptions: string[];
   onModelChange: (value: string) => void;
   /**
-   * P0：`@` 菜单可见状态回调（宿主用 query 拉取工作区文件候选；
-   * 菜单关闭时不得触发请求）。
+   * P0：`@` 菜单可见状态回调（宿主用 query 拉取工作区文件候选；菜单关闭时不得触发请求）。
    */
   onMenuStateChange?: (state: ComposerMenuState) => void;
   /** P1-4 子片 3：`/` 命令派发；返回 true 表示已处理（否则给出未接入提示，不降级为 prompt）。 */
-  onCommand?: (
-    command: ComposerCommand,
-    args: string,
-    source: "pick" | "submit",
-  ) => boolean | void;
+  onCommand?: (command: ComposerCommand, args: string, source: "pick" | "submit") => boolean | void;
   onProviderChange: (value: string) => void;
   onDismissCommandResult?: () => void;
   onReasoningEffortChange: (value: string) => void;
   /** P1-x：会话权限选择器（由宿主注入，composer 不直接耦合 runtime API）。 */
   permissionModeControl?: ReactNode;
+  /** Composer profile 切换器（宿主注入；渲染在 context 用量图标左侧，纪律同 permissionModeControl）。 */
+  profileControl?: ReactNode;
   providerOptions: string[];
   reasoningEffortDefault: string;
   reasoningEffortError: string | null;
@@ -118,6 +115,7 @@ export function MessageComposer({
   onProviderChange,
   onReasoningEffortChange,
   permissionModeControl = null,
+  profileControl = null,
   providerOptions,
   reasoningEffortDefault,
   reasoningEffortError,
@@ -476,6 +474,7 @@ export function MessageComposer({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {profileControl}
             {contextUsageControl}
             <Button
               variant="secondary"

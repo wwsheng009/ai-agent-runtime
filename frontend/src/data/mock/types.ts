@@ -116,6 +116,13 @@ export type Thread = {
   /** 会话级 reasoning effort 覆盖；空值表示跟随 config.yaml 默认档位。 */
   reasoningEffort?: string;
   /**
+   * 会话绑定的 profile 引用（sessionmeta `profile_ref`；composer profile
+   * 切换器回显用）。空值 = 未绑定（跟随运行时默认 profile）。
+   */
+  profileRef?: string;
+  /** 绑定 profile 的显示名（`profile_name`）；缺失时回退 profileRef。 */
+  profileName?: string;
+  /**
    * 批次 3（§5.5）：会话分支来源（由快照 `metadata.context` 的谱系键映射）。
    * 纯前端视图字段，不入后端请求；缺省 = 非分支会话。
    */

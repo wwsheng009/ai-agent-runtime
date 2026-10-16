@@ -150,8 +150,49 @@ describe("runtime events and session merge", () => {
     expect(third).toBe(first);
   });
 
-  it("会话更新后仍复用同一条线程（索引替换路径不丢匹配）", () => {
+  // Composer profile 切换器回显：metadata.context 的 profile 身份键映射到线程。
+  it("从会话 context 派生 profileRef/profileName 并随会话更新收敛", () => {
     const seeded = mergeRuntimeSessionsIntoThreads([], [
+      {
+        id: "session-profile",
+        state: "active",
+        metadata: {
+          title: "Profile thread",
+          context: { profile_ref: "reviewer", profile_name: "Reviewer" },
+        },
+      },
+    ]);
+    expect(seeded).toHaveLength(1);
+    expect(seeded[0]).toMatchObject({
+      sessionId: "session-profile",
+      profileRef: "reviewer",
+      profileName: "Reviewer",
+    });
+
+    // 切换 profile 后的下一份列表快照：线程值随 sessionmeta 收敛。
+    const next = mergeRuntimeSessionsIntoThreads(seeded, [
+      {
+        id: "session-profile",
+        state: "active",
+        metadata: {
+          title: "Profile thread",
+          context: { profile_ref: "coder", profile_name: "Coder" },
+        },
+      },
+    ]);
+    expect(next.find((thread) => thread.sessionId === "session-profile")).toMatchObject({
+      profileRef: "coder",
+      profileName: "Coder",
+    });
+
+    // 未绑定 profile 的会话为空值（不伪造默认值）。
+    const unbound = mergeRuntimeSessionsIntoThreads([], [
+      { id: "session-plain", state: "active", metadata: { title: "Plain" } },
+    ]);
+    expect(unbound[0].profileRef ?? "").toBe("");
+  });
+
+  it("会话更新后仍复用同一条线程（索引替换路径不丢匹配）", () => {    const seeded = mergeRuntimeSessionsIntoThreads([], [
       { id: "session-a", state: "active", metadata: { title: "First" } },
       { id: "session-b", state: "active", metadata: { title: "Second" } },
     ]);

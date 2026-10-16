@@ -9,6 +9,7 @@ import { useCallback, useRef } from "react";
 
 import {
   createRuntimeProfile,
+  setSessionProfile,
   type SessionProfileSwitchReport,
 } from "@/api/runtime/profiles";
 import { createLogger } from "@/core/logger";
@@ -73,6 +74,31 @@ export type UseComposerProfileCommandOptions = {
   /** 结果回执（执行器持有的同一 state setter，保证只有一处回执出口）。 */
   setNotice: (notice: ComposerCommandResultNotice) => void;
 };
+
+/**
+ * 会话级 profile 切换的单一处理器（Batch 12；composer `/profile` 命令、弹窗点选与
+ * 常驻切换器共用同一执行入口，回执口径一致）。
+ *
+ * 抛错语义：会话未登记 / 后端拒绝切换时抛 `Error`，调用方（命令执行器 → 回执、
+ * 切换器 → 内联错误）各自如实呈现，本 hook 不吞错误、不伪造「已切换」。
+ */
+export function useComposerProfileSwitch(sessionId?: string) {
+  return useCallback(
+    async (profileRef: string): Promise<SessionProfileSwitchReport> => {
+      const targetSessionId = sessionId?.trim() ?? "";
+      if (targetSessionId.length === 0) {
+        // 新会话尚未登记：如实抛错，不把请求发给空 id。
+        throw new Error("profile switch requires a registered session");
+      }
+      const result = await setSessionProfile(targetSessionId, profileRef);
+      if (!result.ok) {
+        throw new Error("profile switch was rejected by the runtime");
+      }
+      return result.report;
+    },
+    [sessionId],
+  );
+}
 
 /** `/profile` 命令的运行器：返回执行器 dispatch 表要调用的 `runProfile`。 */
 export function useComposerProfileCommand({
