@@ -86,6 +86,21 @@ next_action=use_fresh_context_or_enable_agents.capabilities.fork_context)
 }
 ```
 
+### 3.4 fork 前缀度量（G3）
+
+fork 子级的**首个组装请求**上做一次继承前缀保持性审计（`agent/fork_audit.go`）：
+
+- **判定**：在最终装配消息中查找继承快照的连续整段——整段命中 = 保持；
+  否则给出最长连续保持前缀长度（被预算裁剪 / 上下文改写时可见缩水程度）；
+- **字段**（盖进请求 metadata，随 `llm.request.started` 载荷进入 cache analytics
+  的 `cache_requests.record_json`，无 schema 迁移）：`fork_prefix_preserved`
+  （bool，仅 fork 首请求出现，nil=未观测）、`fork_snapshot_messages`、
+  `fork_snapshot_tokens`、`fork_prefix_kept_messages`；
+- **读法**：fork 前缀保持率 = preserved=true / 全部存在该键的记录；提供方缓
+  存命中证据 = 同批记录 `usage.cache_read_tokens > 0` 占比（`cache_hit_ratio`
+  已有本地重算口径）；
+- **分母纪律**：仅 fork 子级首尝试审计（重试会重复注入同一快照，不重复计入）。
+
 ## 4. 结构化回执与 handoff（P1-2'）
 
 ### 4.1 handoff 契约
@@ -194,7 +209,6 @@ doom_loop 告警**（同一语义工具批反复回放）时，把下一次续�
 | 项 | 说明 |
 |---|---|
 | ToolChoice 逐请求强制 | `submit_report` 采用**按需注入 + 一次性提交**（见 §5.3）：强制每次请求的工具选择会与多步真实工具使用冲突，因此未采用；契约强度由提交时校验（required / additionalProperties）+ 状态机解码双保险提供 |
-| fork 的 KV Cache 共享率度量 | 验收指标（G3）待接 llm-cache-analytics 通道，灰度期观测 |
 | 真实终端验证 | 按 `docs/plan/multi-agent-real-terminal-validation-runbook.md` 补充两个场景：fork 上下文复述、iterate_goal 多轮交接 |
 
 ## 7. 测试与验收

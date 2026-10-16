@@ -117,9 +117,9 @@ func (u *CacheUsage) InputTotal() int64 {
 // CacheRequestRecord 每条 LLM 请求一行（§4.1）。
 // 记录终态后不可变（assistant/user message id 回填除外，且回填不改 usage/聚合）。
 type CacheRequestRecord struct {
-	SchemaVersion string     `json:"schema_version"`
-	LLMRequestID  string     `json:"llm_request_id"`
-	SessionID     string     `json:"session_id"`
+	SchemaVersion string `json:"schema_version"`
+	LLMRequestID  string `json:"llm_request_id"`
+	SessionID     string `json:"session_id"`
 	// ParentSessionID / RootSessionID / SubagentID 是子代理请求的父链归属
 	// （additive 字段）：顶层请求 ParentSessionID/SubagentID 为空、RootSessionID
 	// 等于 SessionID；子代理请求的 RootSessionID 指向根会话，父会话视图据此
@@ -128,17 +128,17 @@ type CacheRequestRecord struct {
 	ParentSessionID string     `json:"parent_session_id,omitempty"`
 	RootSessionID   string     `json:"root_session_id,omitempty"`
 	SubagentID      string     `json:"subagent_id,omitempty"`
-	TraceID       string     `json:"trace_id,omitempty"`
-	TurnID        string     `json:"turn_id,omitempty"`
-	Step          int        `json:"step,omitempty"`
-	Provider      string     `json:"provider,omitempty"`
-	Model         string     `json:"model,omitempty"`
-	Stream        bool       `json:"stream,omitempty"`
-	Status        string     `json:"status"`
-	Attempt       int        `json:"attempt,omitempty"`
-	StartedAt     time.Time  `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	DurationMS    int64      `json:"duration_ms,omitempty"`
+	TraceID         string     `json:"trace_id,omitempty"`
+	TurnID          string     `json:"turn_id,omitempty"`
+	Step            int        `json:"step,omitempty"`
+	Provider        string     `json:"provider,omitempty"`
+	Model           string     `json:"model,omitempty"`
+	Stream          bool       `json:"stream,omitempty"`
+	Status          string     `json:"status"`
+	Attempt         int        `json:"attempt,omitempty"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	DurationMS      int64      `json:"duration_ms,omitempty"`
 	// FirstTokenMS 首字时间（TTFT）：从本次尝试发起（llm.request.started）到
 	// 第一个流式增量（文本/思考/图片进度）到达的毫秒数。仅流式请求可观测；
 	// 0 表示未采集（非流式、历史记录或首个增量前就失败），前端必须显示
@@ -158,11 +158,20 @@ type CacheRequestRecord struct {
 	CacheEpoch          int         `json:"cache_epoch,omitempty"`
 	PromptCacheKey      string      `json:"prompt_cache_key,omitempty"`
 	PromptFingerprint   string      `json:"prompt_fingerprint,omitempty"`
-	UserMessageID       string      `json:"user_message_id,omitempty"`
-	AssistantMessageID  string      `json:"assistant_message_id,omitempty"`
-	ProviderRequestID   string      `json:"provider_request_id,omitempty"`
-	ErrorCategory       string      `json:"error_category,omitempty"`
-	CorrelationSource   string      `json:"correlation_source,omitempty"`
+	// ForkPrefixPreserved / ForkSnapshotMessages / ForkSnapshotTokens /
+	// ForkPrefixKeptMessages：fork 子级首请求的继承前缀审计（P2-1' G3，
+	// additive 字段）。ForkPrefixPreserved 为 nil = 非 fork 首请求（未观测）；
+	// true = 继承快照在最终装配前缀中仍连续完整；false = 被装配改写
+	// （kept 给出缩水后的连续保持长度）。
+	ForkPrefixPreserved    *bool  `json:"fork_prefix_preserved,omitempty"`
+	ForkSnapshotMessages   int    `json:"fork_snapshot_messages,omitempty"`
+	ForkSnapshotTokens     int    `json:"fork_snapshot_tokens,omitempty"`
+	ForkPrefixKeptMessages int    `json:"fork_prefix_kept_messages,omitempty"`
+	UserMessageID          string `json:"user_message_id,omitempty"`
+	AssistantMessageID     string `json:"assistant_message_id,omitempty"`
+	ProviderRequestID      string `json:"provider_request_id,omitempty"`
+	ErrorCategory          string `json:"error_category,omitempty"`
+	CorrelationSource      string `json:"correlation_source,omitempty"`
 	// TerminalSeen 标记本次请求是否观测到上游终结信号（finish_reason / 完成事件 /
 	// [DONE]）。与「是否被截断」分开记录（P0-2）：没有终结信号又拿到半截参数 =
 	// 传输中断；有终结信号但参数非法 = 模型退化，两者恢复路径不同。
@@ -197,19 +206,19 @@ type CoverageInfo struct {
 
 // CacheOverview 会话级总览（§4.2）。
 type CacheOverview struct {
-	SchemaVersion           string                  `json:"schema_version"`
-	SessionID               string                  `json:"session_id"`
-	GeneratedAt             time.Time               `json:"generated_at"`
-	WindowFrom              *time.Time              `json:"window_from,omitempty"`
-	WindowTo                *time.Time              `json:"window_to,omitempty"`
-	RequestsTotal           int                     `json:"requests_total"`
-	RequestsWithUsage       int                     `json:"requests_with_usage"`
-	RequestsCacheReported   int                     `json:"requests_cache_reported"`
+	SchemaVersion         string     `json:"schema_version"`
+	SessionID             string     `json:"session_id"`
+	GeneratedAt           time.Time  `json:"generated_at"`
+	WindowFrom            *time.Time `json:"window_from,omitempty"`
+	WindowTo              *time.Time `json:"window_to,omitempty"`
+	RequestsTotal         int        `json:"requests_total"`
+	RequestsWithUsage     int        `json:"requests_with_usage"`
+	RequestsCacheReported int        `json:"requests_cache_reported"`
 	// ChildSessionCount / ChildRequestsTotal 是父会话视图中包含的子会话事实
 	// （additive）：请求来源中的子会话数与子会话请求数。0 表示无子代理请求
 	// 或旧数据源未提供（前端显示"-"而不是伪造 0 语义）。
-	ChildSessionCount  int `json:"child_session_count,omitempty"`
-	ChildRequestsTotal int `json:"child_requests_total,omitempty"`
+	ChildSessionCount       int                     `json:"child_session_count,omitempty"`
+	ChildRequestsTotal      int                     `json:"child_requests_total,omitempty"`
 	Tokens                  CacheOverviewTokens     `json:"tokens"`
 	CacheHitRatio           *float64                `json:"cache_hit_ratio,omitempty"`
 	CacheWriteRatio         *float64                `json:"cache_write_ratio,omitempty"`

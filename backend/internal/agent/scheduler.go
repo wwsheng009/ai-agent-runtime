@@ -1104,6 +1104,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			// submit_report 工具，接受的回执 JSON 成为结果 Output，下方
 			// 的 decode 路径据此回填 HandoffOut。
 			ReportSchema: task.ReportSchema,
+			// Fork 前缀审计（P2-1' G3）：仅 fork 子级首次尝试启用（重试会
+			// 重新注入同一快照，重复审计无增量价值）。
+			ForkAudit: forkAuditSpecForTask(task, spec.ForkHistory, attempt),
 		})
 		if runErr == nil {
 			break

@@ -222,6 +222,11 @@ type ReActLoop struct {
 	// 继承上一 attempt 的回执。
 	reportSchema    map[string]interface{}
 	reportSubmitted map[string]interface{}
+	// forkAudit / forkAuditDone 是 fork 子级首请求前缀审计（P2-1' G3）的
+	// run 作用域状态：首个组装请求上检查一次继承快照是否仍在最终前缀中，
+	// 结果盖进请求 metadata。生命周期等于一次 run()。
+	forkAudit     *ForkAuditSpec
+	forkAuditDone bool
 }
 
 // runLineage 描述本次运行的父链归属；全空 = 顶层运行（不注入载荷）。
@@ -272,6 +277,9 @@ type loopRunOptions struct {
 	// submit_report 工具（参数即 schema），子级以其交付结构化回执；
 	// 接受的回执成为 run 的最终 Output。
 	ReportSchema map[string]interface{}
+	// ForkAudit 非 nil 时在首个组装请求上审计继承快照的前缀保持性
+	// （P2-1' G3）；由调度器仅为 fork 子级首尝试设置。
+	ForkAudit *ForkAuditSpec
 }
 
 // HistorySession 描述 ReActLoop 运行时需要的最小 session 能力。
@@ -626,6 +634,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// attempt 不得继承上一 attempt 已接受的回执。
 	loop.reportSchema = options.ReportSchema
 	loop.reportSubmitted = nil
+	// Fork 前缀审计（P2-1'）：同样按 run 重置，重试不自带上一 attempt 的结果。
+	loop.forkAudit = options.ForkAudit
+	loop.forkAuditDone = false
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：turn_id 在此固定；session_id 必须取
 	// 下面解析后的值（与派发方 parkBackgroundTurn 写账本的键同源），因此 settle 的
 	// defer 注册在 sessionID 解析之后。记录由派发方（本 loop）维护，chat actor 只读。
@@ -2683,6 +2694,19 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			action.Metadata = map[string]interface{}{}
 		}
 		action.Metadata["prompt_fingerprint"] = fingerprint
+	}
+	// Fork 前缀审计（P2-1' G3）：fork 子级的首个组装请求上记录一次
+	// 「继承快照是否仍在最终前缀中」；字段随 llm.request.started 载荷进入
+	// cache analytics（cache_requests.record_json）与事件回放，供共享率
+	// 聚合（fork 前缀保持率 / 提供方缓存读取命中占比）。
+	if loop.forkAudit != nil && !loop.forkAuditDone {
+		loop.forkAuditDone = true
+		stats := evaluateForkPrefixPreservation(
+			loop.forkAudit.Snapshot, managedHistory, forkSnapshotRuntimeTokens(loop.llmRuntime))
+		for key, value := range stats.metadata() {
+			req.Metadata[key] = value
+			requestPayload[key] = value
+		}
 	}
 	// 同一 prompt_fingerprint 连续失败触发熔断后，窗口内第一次重发要先退避
 	// （指数、有上限）。只对同指纹生效、每窗口至多一次，因此不会与 llm 包的
@@ -8556,7 +8580,7 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 					},
 				},
 			},
-						"required": []string{"agents"},
+			"required": []string{"agents"},
 		},
 	}
 	// 能力协商的第三层（G7 三层一致）：未授予的能力位不进 schema——

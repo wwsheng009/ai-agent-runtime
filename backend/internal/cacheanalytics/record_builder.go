@@ -21,12 +21,12 @@ type TerminalRecordInput struct {
 	ParentSessionID string
 	RootSessionID   string
 	SubagentID      string
-	TraceID      string
-	TurnID       string
-	Step         int
-	Provider     string
-	Model        string
-	Stream       bool
+	TraceID         string
+	TurnID          string
+	Step            int
+	Provider        string
+	Model           string
+	Stream          bool
 	// Attempt 重试次数；Collector 终态路径置 1，会话终止兜底路径保持 0（与 v1 一致）。
 	Attempt int
 	// StartedAt 来自 llm.request.started 事件（缺失时回退到终态时刻）。
@@ -36,6 +36,12 @@ type TerminalRecordInput struct {
 	CacheEpoch        int
 	PromptCacheKey    string
 	PromptFingerprint string
+	// ForkPrefixPreserved 等为 fork 首请求的继承前缀审计（P2-1' G3）；
+	// nil 指针表示非 fork 首请求（未观测）。
+	ForkPrefixPreserved    *bool
+	ForkSnapshotMessages   int
+	ForkSnapshotTokens     int
+	ForkPrefixKeptMessages int
 	// Payload 是 llm.request.finished 的事件载荷（success/error_code/usage_*）。
 	Payload map[string]interface{}
 	// Interrupted 标记会话/进程终止时仍未终态的 in-flight 请求（§16.1 边界 3）。
@@ -74,6 +80,10 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 		PromptCacheKey:    in.PromptCacheKey,
 		PromptFingerprint: in.PromptFingerprint,
 	}
+	record.ForkPrefixPreserved = in.ForkPrefixPreserved
+	record.ForkSnapshotMessages = in.ForkSnapshotMessages
+	record.ForkSnapshotTokens = in.ForkSnapshotTokens
+	record.ForkPrefixKeptMessages = in.ForkPrefixKeptMessages
 	// 上下文事实先于错误分支提取：失败请求（如上下文超限被拒）同样携带窗口与预算，
 	// 前端仍能显示"已用 / 窗口 / 预算"。interrupted 兜底路径没有载荷，保持 0。
 	record.ContextPromptTokens = payloadInt(payload, "context_prompt_tokens")

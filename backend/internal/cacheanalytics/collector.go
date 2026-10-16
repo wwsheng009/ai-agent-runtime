@@ -48,6 +48,11 @@ type inflightRequest struct {
 	cacheEpoch        int
 	promptCacheKey    string
 	promptFingerprint string
+	// fork 前缀审计（P2-1' G3）：started 载荷携带，终态时随记录落库。
+	forkPrefixPreserved    *bool
+	forkSnapshotMessages   int
+	forkSnapshotTokens     int
+	forkPrefixKeptMessages int
 }
 
 // Collector 订阅 runtime EventBus，把 llm.request.* 事件投影为
@@ -213,6 +218,15 @@ func (c *Collector) onRequestStarted(event runtimeevents.Event) {
 		promptCacheKey:    payloadString(payload, "prompt_cache_key"),
 		promptFingerprint: payloadString(payload, "prompt_fingerprint"),
 	}
+	// fork 前缀审计（P2-1' G3）：仅当 started 载荷带有该键时记录
+	//（nil 指针 = 非 fork 首请求，避免把"未观测"与 false 混为一谈）。
+	if _, ok := payload["fork_prefix_preserved"]; ok {
+		preserved := payloadBool(payload, "fork_prefix_preserved")
+		inflight.forkPrefixPreserved = &preserved
+	}
+	inflight.forkSnapshotMessages = payloadInt(payload, "fork_snapshot_messages")
+	inflight.forkSnapshotTokens = payloadInt(payload, "fork_snapshot_tokens")
+	inflight.forkPrefixKeptMessages = payloadInt(payload, "fork_prefix_kept_messages")
 	c.mu.Lock()
 	c.inflight[llmRequestID] = inflight
 	c.mu.Unlock()
@@ -270,24 +284,28 @@ func (c *Collector) onRequestFinished(event runtimeevents.Event) {
 
 	finishedAt := now
 	record := BuildTerminalRecord(TerminalRecordInput{
-		LLMRequestID:      llmRequestID,
-		SessionID:         inflight.sessionID,
-		ParentSessionID:   inflight.parentSessionID,
-		RootSessionID:     inflight.rootSessionID,
-		SubagentID:        inflight.subagentID,
-		TraceID:           inflight.traceID,
-		TurnID:            inflight.turnID,
-		Step:              inflight.step,
-		Provider:          inflight.provider,
-		Model:             inflight.model,
-		Stream:            inflight.stream,
-		Attempt:           1,
-		StartedAt:         inflight.startedAt,
-		FinishedAt:        finishedAt,
-		CacheEpoch:        inflight.cacheEpoch,
-		PromptCacheKey:    inflight.promptCacheKey,
-		PromptFingerprint: inflight.promptFingerprint,
-		Payload:           payload,
+		LLMRequestID:           llmRequestID,
+		SessionID:              inflight.sessionID,
+		ParentSessionID:        inflight.parentSessionID,
+		RootSessionID:          inflight.rootSessionID,
+		SubagentID:             inflight.subagentID,
+		TraceID:                inflight.traceID,
+		TurnID:                 inflight.turnID,
+		Step:                   inflight.step,
+		Provider:               inflight.provider,
+		Model:                  inflight.model,
+		Stream:                 inflight.stream,
+		Attempt:                1,
+		StartedAt:              inflight.startedAt,
+		FinishedAt:             finishedAt,
+		CacheEpoch:             inflight.cacheEpoch,
+		PromptCacheKey:         inflight.promptCacheKey,
+		PromptFingerprint:      inflight.promptFingerprint,
+		Payload:                payload,
+		ForkPrefixPreserved:    inflight.forkPrefixPreserved,
+		ForkSnapshotMessages:   inflight.forkSnapshotMessages,
+		ForkSnapshotTokens:     inflight.forkSnapshotTokens,
+		ForkPrefixKeptMessages: inflight.forkPrefixKeptMessages,
 	})
 	c.projector.append(&record)
 	c.publishRecordFinished(&record)
