@@ -37,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/goal"
@@ -61,6 +62,10 @@ type goalDriverState struct {
 	errorStrikes        map[string]int
 	noProgStrikes       map[string]int
 	escalationAttempted map[string]struct{}
+	// doomLoopAdvised 是 doom_loop 告警的上浮标记（工具循环反复回放同一语义批）：
+	// 由总线订阅写入，升级注入时消费；有进展（resetStrikes）不自动清除——告警
+	// 多数发生在「有输出但重复工具批」的成功轮，否则信号会在评估时被误清。
+	doomLoopAdvised map[string]struct{}
 }
 
 func newGoalDriverState() *goalDriverState {
@@ -69,6 +74,7 @@ func newGoalDriverState() *goalDriverState {
 		errorStrikes:        map[string]int{},
 		noProgStrikes:       map[string]int{},
 		escalationAttempted: map[string]struct{}{},
+		doomLoopAdvised:     map[string]struct{}{},
 	}
 }
 
@@ -135,7 +141,8 @@ func (s *goalDriverState) escalationTried(sessionID string) bool {
 	return ok
 }
 
-// markEscalationAttempted 记录升级提示已注入（同一序列不再重复）。
+// markEscalationAttempted 记录升级提示已注入（同一序列不再重复），并消费
+// doom_loop 上浮标记（一次性信号）。
 func (s *goalDriverState) markEscalationAttempted(sessionID string) {
 	if s == nil {
 		return
@@ -143,6 +150,28 @@ func (s *goalDriverState) markEscalationAttempted(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.escalationAttempted[sessionID] = struct{}{}
+	delete(s.doomLoopAdvised, sessionID)
+}
+
+// noteDoomLoopWarning 记录一次 doom_loop 告警（升级判定的 OR 条件）。
+func (s *goalDriverState) noteDoomLoopWarning(sessionID string) {
+	if s == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.doomLoopAdvised[sessionID] = struct{}{}
+}
+
+// doomLoopAdvisedFor 报告本会话是否持有未消费的 doom_loop 告警。
+func (s *goalDriverState) doomLoopAdvisedFor(sessionID string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.doomLoopAdvised[sessionID]
+	return ok
 }
 
 func (s *goalDriverState) resetStrikes(sessionID string) {
@@ -203,6 +232,12 @@ func (h *Handler) subscribeGoalDriver(bus *runtimeevents.Bus) {
 			Steps:        intFromAny(payload["steps"]),
 			UsageTokens:  intFromAny(payload["usage_total_tokens"]),
 		})
+	})
+	// doom_loop 告警上浮（P2-2' 入口 2 的 OR 条件）：agent 循环在同一个语义
+	// 工具批反复回放时发 tool_loop.doom_loop_warning（会话级）；驱动器记下
+	// 该标记，下一次续跑升级注入（消费一次）。订阅与 session_end 同一条总线。
+	bus.Subscribe(agent.EventDoomLoopWarning, func(event runtimeevents.Event) {
+		h.getGoalDriverState().noteDoomLoopWarning(strings.TrimSpace(event.SessionID))
 	})
 }
 
@@ -333,14 +368,15 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 	}
 
 	// 4) 提交续跑轮（共享 prompt，与 CLI 逐字节同文案）；连续无进展达到共享
-	// 升级阈值且部署启用了 iterate_goal 时，本轮改用升级提示词（P2-2' 入口 2，
-	// 同一空转序列至多一次）。
+	// 升级阈值、或收到 doom_loop 告警，且部署启用了 iterate_goal 时，本轮改用
+	// 升级提示词（P2-2' 入口 2，同一空转序列至多一次，doom 标记随之消费）。
 	state := h.getGoalDriverState()
 	prompt := goal.ContinuationPrompt
-	if goal.DecideIterationEscalation(state.noProgressStrikes(sessionID), state.escalationTried(sessionID), h.goalDriverIterationEscalationAvailable()) {
+	doomAdvised := state.doomLoopAdvisedFor(sessionID)
+	if goal.DecideIterationEscalation(state.noProgressStrikes(sessionID), doomAdvised, state.escalationTried(sessionID), h.goalDriverIterationEscalationAvailable()) {
 		state.markEscalationAttempted(sessionID)
 		prompt = goal.IterateEscalationPrompt
-		logger.Infof("goal driver: escalating to fresh-context iteration session=%s strikes=%d", sessionID, state.noProgressStrikes(sessionID))
+		logger.Infof("goal driver: escalating to fresh-context iteration session=%s strikes=%d doom_loop=%v", sessionID, state.noProgressStrikes(sessionID), doomAdvised)
 	}
 	if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, prompt); err != nil {
 		logger.Warnf("goal driver: submit continuation %s: %s", sessionID, err)

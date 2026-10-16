@@ -81,29 +81,33 @@ func TestContinuationPromptsNonEmpty(t *testing.T) {
 }
 
 // TestDecideIterationEscalation 锁定升级判定矩阵（P2-2' 入口 2）：
-// 仅在 可用 && 未尝试 && strikes 达阈值 三者同时成立时升级。
+// 仅在 可用 && 未尝试 &&（strikes 达阈值 || doom_loop 告警）三者同时成立时升级。
 func TestDecideIterationEscalation(t *testing.T) {
 	if IterationEscalationStrikeThreshold != 2 {
 		t.Fatalf("escalation threshold drifted: %d", IterationEscalationStrikeThreshold)
 	}
 	cases := []struct {
 		strikes   int
+		doom      bool
 		attempted bool
 		available bool
 		want      bool
 	}{
-		{0, false, true, false},
-		{1, false, true, false},
-		{2, false, true, true},   // 阈值命中
-		{3, false, true, true},   // 理论上限前仍命中（调用方在停止线先拦截）
-		{2, true, true, false},   // 已尝试过一次：不重复升级
-		{2, false, false, false}, // 部署未启用工具：不升级
-		{3, true, false, false},  // 全否
+		{0, false, false, true, false},
+		{1, false, false, true, false},
+		{2, false, false, true, true},   // 阈值命中
+		{3, false, false, true, true},   // 理论上限前仍命中（调用方在停止线先拦截）
+		{2, true, false, true, true},    // strike 与 doom 同时成立仍只升级一次
+		{0, true, false, true, true},    // 仅 doom_loop 告警也可触发（OR 条件）
+		{0, true, true, true, false},    // 已尝试过一次：不重复升级
+		{2, false, false, false, false}, // 部署未启用工具：不升级
+		{0, true, false, false, false},  // doom 告警但工具不可用：不升级
+		{3, true, true, false, false},   // 全否
 	}
 	for _, tc := range cases {
-		if got := DecideIterationEscalation(tc.strikes, tc.attempted, tc.available); got != tc.want {
-			t.Fatalf("DecideIterationEscalation(%d, %v, %v) = %v, want %v",
-				tc.strikes, tc.attempted, tc.available, got, tc.want)
+		if got := DecideIterationEscalation(tc.strikes, tc.doom, tc.attempted, tc.available); got != tc.want {
+			t.Fatalf("DecideIterationEscalation(%d, %v, %v, %v) = %v, want %v",
+				tc.strikes, tc.doom, tc.attempted, tc.available, got, tc.want)
 		}
 	}
 }

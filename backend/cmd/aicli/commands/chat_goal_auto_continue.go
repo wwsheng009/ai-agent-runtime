@@ -7,9 +7,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -71,10 +74,24 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	attempts := 0
 	errorStrikes := 0
 	noProgressStrikes := 0
-	// 升级路径（P2-2' 入口 2）：连续无进展达到共享阈值且部署启用了
-	// iterate_goal 时，下一次续跑改用 IterateEscalationPrompt（恰好一次）。
+	// 升级路径（P2-2' 入口 2）：连续无进展达到共享阈值、或收到 doom_loop
+	// 告警（同一语义工具批反复回放）且部署启用了 iterate_goal 时，下一次续跑
+	// 改用 IterateEscalationPrompt（恰好一次）。
 	escalationAttempted := false
 	iterationAvailable := goalIterationEscalationAvailable(session)
+	// doom_loop 信号上浮：本会话循环期间收到 tool_loop.doom_loop_warning 即
+	// 标记升级；升级注入时消费该标记（一次性）。事件处理器可能在其他 goroutine
+	// 派发，因此用 atomic 传递。
+	var doomWarned atomic.Bool
+	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.EventBus != nil {
+		runtimeSessionID := strings.TrimSpace(currentRuntimeSessionID(session))
+		unsubscribe := session.LocalRuntimeHost.EventBus.SubscribeCancelable(agent.EventDoomLoopWarning, func(event runtimeevents.Event) {
+			if runtimeSessionID != "" && strings.TrimSpace(event.SessionID) == runtimeSessionID {
+				doomWarned.Store(true)
+			}
+		})
+		defer unsubscribe()
+	}
 	for {
 		if ctx != nil && errors.Is(ctx.Err(), context.Canceled) {
 			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation stopped reason=context_done attempts_completed=%d", attempts), false)
@@ -113,7 +130,7 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 		attemptCtx, cancel := goalAutoContinuationAttemptContext(ctx, session)
 		toolsBefore := chatTurnToolExecutions(session)
 		output, continueErr := goalContinuationAttemptWithEscalation(
-			attemptCtx, continuer, session, noProgressStrikes, &escalationAttempted, iterationAvailable)
+			attemptCtx, continuer, session, noProgressStrikes, &doomWarned, &escalationAttempted, iterationAvailable)
 		cancel()
 		toolsDelta := chatTurnToolExecutions(session) - toolsBefore
 		if continueErr != nil {
@@ -166,16 +183,22 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 }
 
 // goalContinuationAttemptWithEscalation 选择本次续跑注入的提示词：连续无进展
-// 达到共享升级阈值、部署启用了 iterate_goal（iterationAvailable）、且尚未尝试
-// 过升级时，改用 IterateEscalationPrompt（恰好一次）。其余情况保持默认续跑提示。
-func goalContinuationAttemptWithEscalation(ctx context.Context, continuer aicliGoalContinuationExecutor, session *ChatSession, noProgressStrikes int, escalationAttempted *bool, iterationAvailable bool) (string, error) {
-	if runtimegoal.DecideIterationEscalation(noProgressStrikes, escalationAttempted != nil && *escalationAttempted, iterationAvailable) {
+// 达到共享升级阈值、或本会话已收到 doom_loop 告警（doomWarned），且部署启用了
+// iterate_goal（iterationAvailable）且尚未尝试过升级时，改用
+// IterateEscalationPrompt（恰好一次，doom 标记随之消费）。其余情况保持默认续跑提示。
+func goalContinuationAttemptWithEscalation(ctx context.Context, continuer aicliGoalContinuationExecutor, session *ChatSession, noProgressStrikes int, doomWarned *atomic.Bool, escalationAttempted *bool, iterationAvailable bool) (string, error) {
+	doomAdvised := doomWarned != nil && doomWarned.Load()
+	if runtimegoal.DecideIterationEscalation(noProgressStrikes, doomAdvised, escalationAttempted != nil && *escalationAttempted, iterationAvailable) {
 		if escalationAttempted != nil {
 			*escalationAttempted = true
 		}
+		if doomWarned != nil {
+			// 消费一次性信号：升级轮若仍无措，下一次同类告警才可再次升级。
+			doomWarned.Store(false)
+		}
 		writeSessionDebugInfo(session, fmt.Sprintf(
-			"[goal] auto continuation escalating to fresh-context iteration strikes=%d/%d",
-			noProgressStrikes, goalAutoContinuationNoProgressStrikeLimit), false)
+			"[goal] auto continuation escalating to fresh-context iteration strikes=%d/%d doom_loop=%v",
+			noProgressStrikes, goalAutoContinuationNoProgressStrikeLimit, doomAdvised), false)
 		return continuer.ContinueGoalWithPrompt(ctx, session, runtimegoal.IterateEscalationPrompt)
 	}
 	return continuer.ContinueGoal(ctx, session)

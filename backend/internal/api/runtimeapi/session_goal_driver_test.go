@@ -130,6 +130,25 @@ func TestGoalDriverEscalationStateLifecycle(t *testing.T) {
 	if strikes := state.noProgressStrikes(sessionID); strikes != 0 {
 		t.Fatalf("resetStrikes must clear no-progress strikes, got %d", strikes)
 	}
+
+	// doom_loop 上浮标记（OR 条件）：写入 → 可读；升级注入时消费；resetStrikes
+	// 不自动清除（告警多发生在「有输出但重复工具批」的成功轮，否则信号会在
+	// 评估阶段被误清）。
+	state.noteDoomLoopWarning(sessionID)
+	if !state.doomLoopAdvisedFor(sessionID) {
+		t.Fatal("noteDoomLoopWarning must be observable via doomLoopAdvisedFor")
+	}
+	state.markEscalationAttempted(sessionID)
+	if state.doomLoopAdvisedFor(sessionID) {
+		t.Fatal("markEscalationAttempted must consume the doom-loop advisory")
+	}
+	state.noteDoomLoopWarning(sessionID)
+	state.resetStrikes(sessionID)
+	if !state.doomLoopAdvisedFor(sessionID) {
+		t.Fatal("resetStrikes must preserve the doom-loop advisory until it is consumed")
+	}
+	// 空 sessionID 写入是无操作。
+	state.noteDoomLoopWarning("  ")
 }
 
 // TestGoalDriverEscalationAvailabilityDefaultsOff 锁定服务端可用性口径：

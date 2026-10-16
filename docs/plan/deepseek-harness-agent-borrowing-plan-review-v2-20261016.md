@@ -10,7 +10,7 @@
 - P1-1' 能力协商已实施（`capabilities.go`：`Negotiate` + 三层一致 + `SUBAGENT_CAPABILITY_UNSUPPORTED` + schema 能力门控）。
 - P1-2' handoff 契约已实施（`subagent_handoff.go` 状态机/防御解码 + 任务包解码 + 结果降级）；**`submit_report` 契约已实施**（按需注入 + 提交时校验 + 终态捕获 + `StructuredReport` 回填，见实施记录 §5.3）；逐请求 ToolChoice 强制未采用——强制每次请求的工具选择会与多步真实工具使用冲突，契约强度由提交时校验与状态机解码双保险提供。
 - P2-1' fork 已实施（`subagent_context.go` 配平前缀/冻结/超限拒绝 + 双宿主 `ParentHistoryFor` 接线）；KV Cache 共享率度量待接 llm-cache-analytics。
-- P2-2' iterate_goal 已实施（`iterate_goal.go` 固定编排 + G6 进展门控 stalled 终态 + `agents.iterateGoalEnabled` 灰度 + doom_loop 联动）；**goal 驱动器升级路径（入口 2）已实施**：CLI 与服务端驱动器在连续无进展达共享阈值（2）时改用 `IterateEscalationPrompt`（至多一次、可用性由部署的 `agents.iterateGoalEnabled` 门控），见实施记录 §5.4。
+- P2-2' iterate_goal 已实施（`iterate_goal.go` 固定编排 + G6 进展门控 stalled 终态 + `agents.iterateGoalEnabled` 灰度 + doom_loop 联动）；**goal 驱动器升级路径（入口 2）已实施**：CLI 与服务端驱动器在连续无进展达共享阈值（2）**或 doom_loop 告警上浮**时改用 `IterateEscalationPrompt`（至多一次、可用性由部署的 `agents.iterateGoalEnabled` 门控；告警标记被升级消费一次），见实施记录 §5.4。
 - 实施细节与测试矩阵见 `docs/multi-agents/agents/dsh-borrowing-implementation-record-20261016.md`。
 
 ---

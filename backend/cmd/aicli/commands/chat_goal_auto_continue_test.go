@@ -6,9 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -482,6 +484,59 @@ func TestSendMessage_NoProgressEscalationResetsAfterProgress(t *testing.T) {
 		goalAutoContinuationPrompt,
 		goalAutoContinuationPrompt,
 		runtimegoal.IterateEscalationPrompt,
+	}
+	for i, want := range wantPrompts {
+		if continuedPrompts[i] != want {
+			t.Fatalf("continuation %d prompt = %q, want %q", i+1, continuedPrompts[i], want)
+		}
+	}
+	assertGoalStatus(t, session, runtimegoal.StatusBlocked)
+}
+
+// TestSendMessage_DoomLoopWarningEscalatesToIteration 覆盖入口 2 的 doom_loop
+// OR 条件：续跑轮内收到会话级 tool_loop.doom_loop_warning 且部署启用
+// iterate_goal 时，下一次续跑立即升级（无需等无进展 strike 达阈值）；该标记
+// 被升级消费一次，后续空转回到默认提示并按原停止线置 blocked。
+func TestSendMessage_DoomLoopWarningEscalatesToIteration(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	bus := runtimeevents.NewBus()
+	session.LocalRuntimeHost = &localChatRuntimeHost{
+		EventBus: bus,
+		RuntimeConfig: &runtimecfg.RuntimeConfig{
+			Agents: runtimecfg.AgentsConfig{IterateGoalEnabled: true},
+		},
+	}
+
+	var continuedPrompts []string
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			fake := session.ChatExecutor.(*fakeChatExecutor)
+			continuedPrompts = append(continuedPrompts, fake.lastContinuationPrompt)
+			if fake.continuations == 1 {
+				// 首轮续跑内 agent 循环回放同一语义工具批 → 发 doom_loop 告警。
+				bus.Publish(runtimeevents.Event{Type: agent.EventDoomLoopWarning, SessionID: session.RuntimeSession.ID})
+				return "progress", nil
+			}
+			return "", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	if _, err := sendMessage(session, "start"); err != nil {
+		t.Fatalf("sendMessage failed: %v", err)
+	}
+	// 轮次序列：1）有进展 + 告警 → 2）升级轮（消费告警）；3/4）空转 strike 累计，
+	// 第 4 轮达停止线置 blocked。
+	if executor.continuations != 4 {
+		t.Fatalf("expected 4 continuations, got %d", executor.continuations)
+	}
+	wantPrompts := []string{
+		goalAutoContinuationPrompt,
+		runtimegoal.IterateEscalationPrompt,
+		goalAutoContinuationPrompt,
+		goalAutoContinuationPrompt,
 	}
 	for i, want := range wantPrompts {
 		if continuedPrompts[i] != want {

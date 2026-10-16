@@ -18,7 +18,7 @@
 | P2-1' 接线 | 宿主 `ParentHistory` 数据源（CLI + runtime-server 双宿主） | ✅ |
 | P2-2' | iterate_goal 有界全新上下文迭代（含进展门控 stalled 终态） | ✅ |
 | P2-2' 接线 | `agents.iterateGoalEnabled` 配置灰度（双宿主） | ✅ |
-| P2-2' 入口 2 | goal 驱动器升级路径：无进展达共享阈值 → `IterateEscalationPrompt`（CLI + 服务端双驱动器，至多一次） | ✅ |
+| P2-2' 入口 2 | goal 驱动器升级路径：无进展达共享阈值 **或 doom_loop 告警上浮** → `IterateEscalationPrompt`（CLI + 服务端双驱动器，至多一次） | ✅ |
 | P1-2' 收尾 | `submit_report` 契约：按需注入 + 提交时校验 + 终态捕获 | ✅ |
 | P2-1' 配置 | `agents.forkMaxSnapshotTokens`（双宿主，0=运行时缺省 96K） | ✅ |
 | G7 第三层 | 未授予能力位不进模型 schema（schema 零增量） | ✅ |
@@ -167,17 +167,24 @@ Final handoff: {"status":"complete","summary":"...","evidence":["..."],...}
 
 goal 自动续跑的两个驱动器（CLI `chat_goal_auto_continue.go` 与服务端
 `session_goal_driver.go`）在**连续无进展达到共享阈值**
-（`goal.IterationEscalationStrikeThreshold = 2`，先于停止线 3）时，把下一次
-续跑改用共享的 `goal.IterateEscalationPrompt`：
+（`goal.IterationEscalationStrikeThreshold = 2`，先于停止线 3）**或收到
+doom_loop 告警**（同一语义工具批反复回放）时，把下一次续跑改用共享的
+`goal.IterateEscalationPrompt`：
 
 - **升级路径**：提示模型调用 `iterate_goal`（一次、有界轮数），完成后从最终
   handoff 与工作区证据继续目标；handoff 自然沉淀在会话记录中，goal 态由既有
   `update_goal` 纪律维护（单写者：驱动器不直接写 goal 态）。
 - **回退路径**：部署未启用 `agents.iterateGoalEnabled` 时**不注入**升级提示
-  （避免指示不存在的工具）；提示词内置兜底文案（要求改变做法而非重复）。
+  （避免指示不存在的工具）；提示词内置兜底文案（要求改变做法或中止重复工具批）。
+- **doom_loop 信号上浮**：agent 循环发出的 `tool_loop.doom_loop_warning`
+  （会话级运行时事件）被两个驱动器订阅——CLI 在续跑循环期间订阅本地宿主
+  `EventBus`（循环外订阅自动释放）；服务端在 `subscribeGoalDriver` 与
+  `session_end` 订阅同一条总线并记会话标记。该标记被升级注入**消费一次**；
+  `resetStrikes` 不自动清除它（告警多发生在「有输出但重复工具批」的成功轮，
+  否则信号会在评估阶段被误清）。
 - **至多一次**：同一空转序列内升级只注入一次；升级轮若仍无进展则按原停止线
   置 blocked。升级轮产生实质进展（非空输出或有工具执行）时，strike 与升级
-  标记一并重置，后续再次空转允许再来一次。
+  标记一并重置，后续再次空转/告警允许再来一次。
 - **双驱动器同源**：阈值、提示词、判定（`goal.DecideIterationEscalation`）均在
   `internal/goal` 共享层；两侧各自的可用性判定分别读本地宿主
   （`goalIterationEscalationAvailable`）与服务端 `agentsConfig()`。
@@ -189,7 +196,6 @@ goal 自动续跑的两个驱动器（CLI `chat_goal_auto_continue.go` 与服务
 | ToolChoice 逐请求强制 | `submit_report` 采用**按需注入 + 一次性提交**（见 §5.3）：强制每次请求的工具选择会与多步真实工具使用冲突，因此未采用；契约强度由提交时校验（required / additionalProperties）+ 状态机解码双保险提供 |
 | fork 的 KV Cache 共享率度量 | 验收指标（G3）待接 llm-cache-analytics 通道，灰度期观测 |
 | 真实终端验证 | 按 `docs/plan/multi-agent-real-terminal-validation-runbook.md` 补充两个场景：fork 上下文复述、iterate_goal 多轮交接 |
-| doom_loop 信号触发升级 | 入口 2 当前只接**连续无进展 strike** 触发；会话级 doom_loop 告警信号未上浮到驱动器（doom_loop 的 iterate_goal 建议已在工具侧 advisory 提供） |
 
 ## 7. 测试与验收
 
