@@ -1009,6 +1009,7 @@ broker 派发"**，于是它打到的是违例路径（32 处违例）而不是�
 `toolregistry.Normalize`；14:47 的 `broker_advertised_essentials_test.go`）。本轮改动与它们
 **不同区域、无重叠**（`git diff` 区块可核：我的区块是 `IsBrokerTool` 附近的 `+238,31` / `-239,6`），
 但所有验证证据都是在**混合工作树**上取得的——与战役此前各轮口径一致。
+（该混合状态已在提交 `3bc49a2f` 时收敛：见本文件末条日志。）
 另：broker 侧剩下的 `switch normalizeToolName`（`broker.go:230` volatile-empty、`:1548`、
 `supervision_tools.go:1213`、`team_tools.go:16`）都是**按行为分组**的子表（空回放缓存、
 team 可见性、参数审计…），不构成第二份"工具身份"真源，故不在本轮收敛范围内。
@@ -1072,3 +1073,45 @@ toolkit 内置（`view`/`shell`/…）不在其中，它们由 slice 1 的"表 �
 - 基线 + 末态复跑 ⇒ 绿；
 - 回归 **3/3 exit=0**：`./internal/api/runtimeapi/` 52.594s、`./internal/toolregistry/` 0.896s、
   `./internal/toolbroker/` 26.684s。
+
+---
+
+### 2026-10-16 — 提交 `3bc49a2f`（工具身份单一真源，29 文件）＋ 提交前的**隔离快照验证**
+
+**为什么先验证再提交**：工作树里同时存在**第二写入者**的未提交改动（`cmd/aicli/commands` 等）。
+把本战役的文件单独提交，可能与"留在 HEAD 的另一半"组成一个**红快照**（被排除的镜像测试仍在断言
+旧拼写）。故提交前先把暂存内容导出为补丁，在**隔离 worktree**（HEAD + 该补丁、不含任何其它未提交
+改动）里构建并跑测试——这是"提交不红"的唯一可靠证明。
+
+**第一次隔离验证就抓到问题（这一步没白做）**：只暂存 23 个文件时，隔离快照 **红**——
+`internal/policy` 里 8 个用例失败：`TestNormalizeToolNameMapsReportTaskOutcomeAliases`
+（期望 `report_task_outcome`、实得 `team_task_report`）、plan_enter 门控 6 例、
+`TestDeriveGrantPatternForWriteStdinIsJobScoped`。根因：`policy/capability.go` 已折向规范名，
+而**镜像测试**（`capability_test.go`、`engine_plan_enter_test.go`）与配套生产文件
+（`grant_pattern.go` / `grants.go` / `plan_enter.go` / `plan_paths.go`）被我判成"非本战役"而排除。
+补入这 6 个文件（合计 **29**）后隔离快照转绿。
+
+**提交范围（29 文件，4076 插入 / 435 删除）**：`internal/toolregistry`（新包：registry/predicates/
+registry_test）、`internal/tools`（构造表 + 契约测试）、`internal/toolbroker`（`broker.go` +
+`toolregistry_contract_test.go` + `tool_naming_contract_test.go` + `broker_advertised_essentials_test.go`）、
+`internal/policy`（taxonomy / tool_policy / capability / grants / plan_* + `essential_equivalence_test.go`
++ `taxonomy_registry_coverage_test.go`）、`internal/api/runtimeapi`（catalog 端点 + `/tools` enrich +
+端到端闸门）、`internal/toolsurface`（observation）、`cmd/aicli/ui/cell/tool.go`，以及本文档。
+
+**刻意排除（未提交，仍是工作树里的他方改动）**：`cmd/aicli/commands/**`（第二写入者的 21+ 文件）、
+`internal/agent/**`、`internal/prompt/**`、`internal/supervision/**`、`internal/team/**`、
+`internal/background/**`、`internal/output/**`、`internal/chatcore/**`、`internal/agentcontrol/**`、
+`internal/agentguidance/**`、`internal/toolresult/**`、`internal/profile/**`、`internal/skill/**`、
+`internal/toolargs/**`、`internal/toolkit/**`、`cmd/tool-schema-measure/**`、`.race_out.txt`。
+
+**归属判据与局限（重要）**：本战役文件 = ①本文档 §8 自述的产物 + ②本次会话亲手改过的文件。
+**"是否 import `internal/toolregistry`" 不能当判据**——第二写入者也已采纳该包（29 个改动文件里
+有一批是他们的），这也说明本战役的"单一真源"正在被其他工作流复用。
+按此判据，`internal/toolbroker` 的拼写收敛（`types.go` / `supervision_tools.go` / `spawn_*_arg_types.go` /
+`broker_arg_audit*.go` / `agent_events_view.go` 等，11:08–11:24）**判为他方**、未提交；
+但它们与本次提交的 `broker.go` 同处一包——这是本提交最脆弱的边界，已如实登记。
+
+**隔离快照证据**：`go build`（toolregistry / tools / toolbroker / policy / toolsurface / runtimeapi /
+`cmd/aicli/ui/cell`）⇒ **0**；`go test -count=1` 同 6 包 ⇒ **6/6 ok**
+（toolregistry 0.525s、tools 4.804s、toolbroker 25.377s、policy 1.800s、toolsurface 0.824s、
+runtimeapi 50.452s）。提交后，本战役文件在工作树里已全部干净。
