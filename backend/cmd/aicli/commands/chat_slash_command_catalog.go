@@ -521,10 +521,15 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/provider",
-			Usage:       "/provider [name|status|--provider ... --reasoning-effort ...]",
-			Summary:     "查看或切换 provider（及其模型/reasoning_effort）",
+			Usage:       "/provider [name|status|refresh [name...] [--all] [--dry-run]|--provider ... --reasoning-effort ...]",
+			Summary:     "查看或切换 provider（及其模型/reasoning_effort），refresh 重新拉取模型列表",
 			Group:       string(chatSlashCommandGroupModel),
 			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "refresh", Summary: "重新拉取 provider 的 /models 并写回 supported_models / 模型能力"},
+				{Token: "--all", Summary: "refresh 时刷新全部 provider（缺省只刷新当前 provider）"},
+				{Token: "--dry-run", Summary: "refresh 时只预览变更，不写配置"},
+			},
 		},
 		{
 			Name:        "/model",

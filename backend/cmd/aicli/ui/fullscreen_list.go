@@ -27,6 +27,13 @@ type FullScreenListItem struct {
 	Preview    string
 	SearchText string
 	Disabled   bool
+	// NoIndex renders the row without a rank label. Action rows that are not
+	// catalog entries use it (the model picker's "刷新模型列表" / "添加模型"),
+	// because a rank there would either make the catalog read as "[1] 刷新" or
+	// renumber the first real model to [3]. The row stays selectable and keeps
+	// confirm/delete; it is only left out of the 1..N ranking, exactly like a
+	// Disabled row is, so the catalog rows below still start at [1].
+	NoIndex bool
 }
 
 // FullScreenListOptions configures the full-screen list header and items.
@@ -930,7 +937,11 @@ func renderCompactFullScreenListFrame(options FullScreenListOptions, state fullS
 			lines[1] = fullScreenListEmptyMessage(options)
 		} else {
 			item := options.Items[matches[state.selected]]
-			lines[1] = fmt.Sprintf("> %s %s", fullScreenListItemNumber(options.Items, matches, state.selected), item.Title)
+			if label := strings.TrimSpace(fullScreenListItemNumber(options.Items, matches, state.selected)); label != "" {
+				lines[1] = fmt.Sprintf("> %s %s", label, item.Title)
+			} else {
+				lines[1] = "> " + item.Title
+			}
 		}
 	}
 	if height > 2 {
@@ -965,7 +976,9 @@ func fullScreenListConfirmLabel(options FullScreenListOptions) string {
 // fullScreenListItemNumber returns the visible rank label for a matched row.
 // Disabled rows use "[·]" so they do not consume selectable ranks; enabled rows
 // are numbered 1..N among currently matched enabled items only. Selection still
-// maps through the original item index stored in matches.
+// maps through the original item index stored in matches. NoIndex rows (action
+// rows such as 刷新/添加模型) render without a label and consume no rank either,
+// so the catalog rows under them still start at [1].
 func fullScreenListItemNumber(items []FullScreenListItem, matches []int, visibleIndex int) string {
 	if visibleIndex < 0 || visibleIndex >= len(matches) {
 		return "[·]"
@@ -974,13 +987,25 @@ func fullScreenListItemNumber(items []FullScreenListItem, matches []int, visible
 	if fullScreenListItemDisabled(items, itemIndex) {
 		return "[·]"
 	}
+	if fullScreenListItemNoIndex(items, itemIndex) {
+		return ""
+	}
 	rank := 0
 	for index := 0; index <= visibleIndex; index++ {
-		if !fullScreenListItemDisabled(items, matches[index]) {
-			rank++
+		if fullScreenListItemDisabled(items, matches[index]) || fullScreenListItemNoIndex(items, matches[index]) {
+			continue
 		}
+		rank++
 	}
 	return fmt.Sprintf("[%d]", rank)
+}
+
+// fullScreenListItemNoIndex reports whether a row opts out of the rank column.
+func fullScreenListItemNoIndex(items []FullScreenListItem, index int) bool {
+	if index < 0 || index >= len(items) {
+		return false
+	}
+	return items[index].NoIndex
 }
 
 // fullScreenListLeadingMaxWidth caps the aligned leading column so a long
@@ -1020,10 +1045,12 @@ func renderFullScreenListItem(item FullScreenListItem, indexLabel string, select
 		marker = "· "
 	}
 	number := strings.TrimSpace(indexLabel)
-	if number == "" {
+	if number == "" && !item.NoIndex {
 		number = "[·]"
 	}
-	number += " "
+	if number != "" {
+		number += " "
+	}
 	detail := strings.TrimSpace(item.Detail)
 	detailWidth := min(32, max(12, width/3))
 	detail = fitFullScreenText(detail, detailWidth)

@@ -125,18 +125,21 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 
 			// Stage 2: model. Skipped when the request pinned one explicitly.
 			if modelName == "" {
+				// 副屏期间 transcript 不可见，所以动作行的结果必须就地显示：header
+				// 一行摘要 + 刷新行 preview 详情。否则按下刷新后界面与按下之前一模
+				// 一样（清单没变、或刷新直接失败），用户看到的就是"没有反馈"。
+				stageSummary, stageDetail := "", ""
 				for {
 					models := modelPickerModelOptions(providerCtx.Provider, currentModelForProvider(session, providerName))
-					if len(models) == 0 {
-						result := commandTextResult(fmt.Sprintf("provider %s 没有可用的模型", providerName))
-						early = &result
-						return nil
-					}
 					currentModel := currentModelForProvider(session, providerName)
-					pickerList := buildModelPickerItemsWithAddRow(models, currentModel)
+					// 首行「刷新模型列表」，其次「添加模型」，最后是模型目录。目录
+					// 为空时列表仍有两个可用的动作行（刷新能把端点清单写回配置，
+					// 手动添加能补一个 id），比一句"没有可用的模型"更有出路，所以
+					// 这里不再提前退出。
+					pickerList := buildModelPickerItemsWithRefreshRowDetail(models, currentModel, stageDetail)
 					picked, pickErr := chatPickerStageResult(context.Background(), session, lease, ui.FullScreenListOptions{
 						Title:        "选择模型",
-						Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，Delete 删除选中模型，Esc 取消", providerName),
+						Subtitle:     chatModelPickerModelStageSubtitle(providerName, stageSummary),
 						EmptyMessage: "没有匹配的模型",
 						ConfirmLabel: "使用选中模型",
 						Items:        pickerList.items,
@@ -151,6 +154,18 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						result := commandTextResult("已取消切换模型")
 						early = &result
 						return nil
+					}
+					if picked.Index == pickerList.refreshIndex {
+						// 与添加/删除同构：刷新把新清单写回配置文件并同步会话，然后
+						// 重开列表，让新模型出现在原位（刷新行仍在首行）。回执同时挂
+						// 到 header 与刷新行 preview 上，副屏里立刻可见。
+						result, receipt := refreshChatPickerProviderModelsWithReceipt(session, providerName)
+						_ = renderChatCommandResult(session, result, false)
+						stageSummary, stageDetail = receipt.Summary, receipt.Detail
+						if reloadedCtx, _, reloadErr := resolveModelCommandExecutionContext(session, providerName, ""); reloadErr == nil {
+							providerCtx = reloadedCtx
+						}
+						continue
 					}
 					if picked.Index == pickerList.addIndex {
 						// 自由文本录入模型 id。模型 id 不含空白，所以按空白/逗号切分
@@ -177,6 +192,7 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						added, skipped := splitChatModelAdditions(typed, providerCtx.Provider)
 						if persistErr := persistChatModelAddition(session.Config, providerName, added); persistErr != nil {
 							_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("添加模型失败: %w", persistErr)), false)
+							stageSummary, stageDetail = chatModelPickerStageNotice("添加模型失败：" + persistErr.Error())
 							continue
 						}
 						// 点名跳过项，不静默丢弃：用户粘的是一份清单，少了一个要看得见。
@@ -185,6 +201,7 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 							summary += fmt.Sprintf("；已存在跳过 %s", strings.Join(skipped, "、"))
 						}
 						_ = renderChatCommandResult(session, commandTextResult(summary), false)
+						stageSummary, stageDetail = chatModelPickerStageNotice(summary)
 						// 与删除同构：刷新上下文后重开列表，让新模型出现在原位。
 						if reloadedCtx, _, reloadErr := resolveModelCommandExecutionContext(session, providerName, ""); reloadErr == nil {
 							providerCtx = reloadedCtx
@@ -202,6 +219,7 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						target := models[modelIndex]
 						if guardErr := chatModelRemovalGuard(providerCtx.Provider, currentModel, target); guardErr != nil {
 							_ = renderChatCommandResult(session, commandTextResult(guardErr.Error()), false)
+							stageSummary, stageDetail = chatModelPickerStageNotice(guardErr.Error())
 							continue
 						}
 						if !confirmChatModelDeletion(session, lease, providerName, target) {
@@ -209,9 +227,11 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						}
 						if persistErr := persistChatModelRemoval(session.Config, providerName, target); persistErr != nil {
 							_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("删除模型 %s 失败: %w", target, persistErr)), false)
+							stageSummary, stageDetail = chatModelPickerStageNotice(fmt.Sprintf("删除模型 %s 失败：%s", target, persistErr.Error()))
 							continue
 						}
 						_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("已删除模型 %s（已保存到配置文件）", target)), false)
+						stageSummary, stageDetail = chatModelPickerStageNotice(fmt.Sprintf("已删除模型 %s（已保存到配置文件）", target))
 						// Reload so the reopened stage lists the persisted catalog.
 						if reloadedCtx, _, reloadErr := resolveModelCommandExecutionContext(session, providerName, ""); reloadErr == nil {
 							providerCtx = reloadedCtx
@@ -325,17 +345,25 @@ func buildModelProviderFullScreenItems(providers []string, current string) []ui.
 // chatModelPickerAddRowTitle is the leading row that opens the add-model input.
 const chatModelPickerAddRowTitle = "＋ 添加模型（手动输入 id）"
 
+// chatModelPickerRefreshRowTitle is the leading row of /model's model stage: it
+// re-fetches the provider's model list from its /models endpoint and writes the
+// result back to the config file.
+const chatModelPickerRefreshRowTitle = "⟳ 刷新模型列表（重新拉取本 provider）"
+
 // modelPickerList is the model picker's rows plus the offset needed to map a
-// picker item index back to an entry in models. The add row is deliberately
-// prepended (mirroring the /login provider stage) so adding is the first
-// action, independent of the model catalog or the current filter.
+// picker item index back to an entry in models. The action rows are deliberately
+// prepended (mirroring the /login provider stage) so acting on the catalog comes
+// before browsing it, independent of the current filter.
 //
 // Adding is a row rather than a key on purpose: type-to-filter owns every
 // printable character, and 'a' is common in model ids (llama, audio, large).
 // Reserving it would force a "/" prefix that nothing advertises, which reads
 // as a dead key rather than a documented escape hatch.
 type modelPickerList struct {
-	items          []ui.FullScreenListItem
+	items []ui.FullScreenListItem
+	// refreshIndex is the refresh row, or -1 when the list has no refresh entry
+	// (builders that run without a ChatSession cannot re-fetch the endpoint).
+	refreshIndex   int
 	addIndex       int
 	optionIndexOff int
 }
@@ -346,12 +374,66 @@ func buildModelPickerItemsWithAddRow(models []string, current string) modelPicke
 		Title:      chatModelPickerAddRowTitle,
 		Detail:     "model",
 		SearchText: "create new model 添加模型 新建",
+		// 动作行不是模型目录项：不参与 1..N 编号，也不占号，模型行仍从 [1] 起。
+		NoIndex: true,
 	}
 	return modelPickerList{
 		items:          append([]ui.FullScreenListItem{addItem}, items...),
+		refreshIndex:   -1,
 		addIndex:       0,
 		optionIndexOff: 1,
 	}
+}
+
+// buildModelPickerItemsWithRefreshRow prepends the refresh action above the add
+// row. Refreshing leads because it is the action that changes what every later
+// row can offer — most visibly when the provider has no usable catalog yet, so
+// the session-backed model stage still has a way forward.
+func buildModelPickerItemsWithRefreshRow(models []string, current string) modelPickerList {
+	list := buildModelPickerItemsWithAddRow(models, current)
+	refreshItem := ui.FullScreenListItem{
+		Title:      chatModelPickerRefreshRowTitle,
+		Detail:     "model",
+		SearchText: "refresh reload models 刷新 重新拉取 模型列表",
+		// 同 addItem：刷新是动作，不是可选模型，所以不显示序号。
+		NoIndex: true,
+	}
+	return modelPickerList{
+		items:          append([]ui.FullScreenListItem{refreshItem}, list.items...),
+		refreshIndex:   0,
+		addIndex:       list.addIndex + 1,
+		optionIndexOff: list.optionIndexOff + 1,
+	}
+}
+
+// buildModelPickerItemsWithRefreshRowDetail 在刷新行上挂副屏可见回执（preview）。
+// 列表每次重开都以刷新行作为高亮行，所以刷新一结束，回执就出现在底部 preview
+// 区；非空 detail 才写入，保持没有回执时与 buildModelPickerItemsWithRefreshRow
+// 完全一致（含 refreshIndex/addIndex/optionIndexOff 契约）。
+func buildModelPickerItemsWithRefreshRowDetail(models []string, current, detail string) modelPickerList {
+	list := buildModelPickerItemsWithRefreshRow(models, current)
+	if detail = strings.TrimSpace(detail); detail != "" && list.refreshIndex >= 0 && list.refreshIndex < len(list.items) {
+		list.items[list.refreshIndex].Preview = detail
+	}
+	return list
+}
+
+// chatModelPickerModelStageSubtitle 在模型阶段的 header 里插入最近一次动作结果。
+// 副屏期间 transcript 不可见，header 是唯一"就地可见"的一行摘要（超长会被 fit
+// 截断，所以回执本身要短）；notice 为空时输出与旧行为逐字一致。
+func chatModelPickerModelStageSubtitle(providerName, notice string) string {
+	hint := "Enter 确认，Delete 删除选中模型，Esc 取消"
+	if notice = strings.TrimSpace(notice); notice != "" {
+		return fmt.Sprintf("provider: %s · %s · %s", providerName, notice, hint)
+	}
+	return fmt.Sprintf("provider: %s · %s", providerName, hint)
+}
+
+// chatModelPickerStageNotice 把添加/删除这类动作行的文本回执压成 (header, preview)
+// 两段，与刷新回执同构：header 只留短摘要，完整原因进 preview。
+func chatModelPickerStageNotice(text string) (string, string) {
+	text = strings.TrimSpace(text)
+	return chatModelPickerRefreshCompactSummary(text), text
 }
 
 func buildModelPickerModelItems(models []string, current string) []ui.FullScreenListItem {
@@ -634,6 +716,16 @@ func modelStatusCommandResult(session *ChatSession, variant modelCommandVariant,
 }
 
 func executeStructuredModelCommandVariant(session *ChatSession, command string, variant modelCommandVariant) (CommandResult, bool) {
+	// /provider 的二级子命令 refresh 必须在共享解析之前拦截：否则 "refresh"
+	// 会被 parseModelCommandRequest 当成 provider 名或模型名。
+	if variant == modelCommandVariantProvider {
+		if refreshRequest, ok, parseErr := parseChatProviderRefreshCommand(command); ok {
+			if parseErr != nil {
+				return commandErrorResult(parseErr), true
+			}
+			return executeStructuredProviderRefreshCommand(session, refreshRequest), true
+		}
+	}
 	request, err := parseModelCommandRequest(command)
 	if err != nil {
 		return commandErrorResult(err), true

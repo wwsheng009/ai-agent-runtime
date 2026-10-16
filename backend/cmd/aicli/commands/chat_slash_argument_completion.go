@@ -61,7 +61,7 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 
 	switch command {
 	case "/provider":
-		return completeModelSlashArgs(session, argsText, cursor)
+		return completeProviderSlashArgs(session, argsText, cursor)
 	case "/model":
 		return completeModelSlashArgs(session, argsText, cursor)
 	case "/login":
@@ -559,6 +559,133 @@ func sessionSelectedAgentTarget(session *ChatSession) string {
 		return ""
 	}
 	return strings.TrimSpace(chatSessionSelectedAgentTarget(session))
+}
+
+// completeProviderSlashArgs 在 /model 共享候选之上补充 /provider 独有的二级子命令
+// （refresh）。只在当前 token 不是 provider/model/reasoning 取值域时追加，避免在
+// `--provider <name>` 的候选里混入命令名。
+//
+// `refresh` 之后的参数是它自己的取值域（provider 名 + refresh 专有 flag），
+// 必须换用 completeProviderRefreshSlashArgs：沿用 /model 的 general 候选会把
+// `--provider`/模型名混进 refresh 的参数里，而且 `refresh` 自己也会变成候选，
+// 让「选完 provider 再回车」又把 refresh/provider 名补一遍。
+func completeProviderSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
+	ctx := parseSlashArgumentContext(argsText, cursor)
+	if slashProviderRefreshValueIndex(ctx) >= 0 {
+		return completeProviderRefreshSlashArgs(session, ctx)
+	}
+	candidates := completeModelSlashArgs(session, argsText, cursor)
+	if slashModelArgumentFocus(ctx) != "general" {
+		return candidates
+	}
+	candidates = append(candidates, chatSlashCompletionCandidate{
+		Command:     chatProviderRefreshToken,
+		Summary:     "重新拉取 provider 模型列表",
+		Group:       string(chatSlashCommandGroupModel),
+		AcceptsArgs: true,
+	})
+	return dedupeSlashArgumentCandidates(candidates)
+}
+
+// slashProviderRefreshValueIndex 返回光标所在的 refresh 取值位下标（0 表示
+// `refresh` 之后的第一个参数位）。以下情况返回 -1，调用方继续走通用 provider
+// 候选：token 为空、首 token 不是 refresh、光标还停在 `refresh` 这个 token 内
+// （例如 `/provider ref|`，此时应当继续补全子命令名本身）。
+func slashProviderRefreshValueIndex(ctx slashArgumentContext) int {
+	if len(ctx.Tokens) == 0 || !strings.EqualFold(slashArgumentTokenText(ctx, 0), chatProviderRefreshToken) {
+		return -1
+	}
+	if slashArgumentCursorInToken(ctx, 0) {
+		return -1
+	}
+	if ctx.CurrentOK {
+		for index := range ctx.Tokens {
+			if slashArgumentCursorInToken(ctx, index) {
+				return index - 1
+			}
+		}
+	}
+	return len(ctx.Tokens) - 1
+}
+
+// completeProviderRefreshSlashArgs 给出 `/provider refresh` 的位置感知候选：
+//
+//   - 第一个取值位：provider 名（终值）+ refresh 专有 flag；
+//   - 后续取值位：空位不再给任何候选，回车直接提交命令。旧行为在这里继续沿用
+//     general 候选，且上一轮选中的候选会被粘住（例如 refresh/provider 名），
+//     于是「已经选好 provider 再回车」只是把同一个 provider 名再补一次，命令
+//     永远提交不了；已经动手输入时仍给候选，便于补第二个 provider 名或 flag；
+//   - `--models-path` / `--timeout` 取值位：路径是自由文本，超时给常用秒数，
+//     不再回到 provider 名域。
+func completeProviderRefreshSlashArgs(session *ChatSession, ctx slashArgumentContext) []chatSlashCompletionCandidate {
+	current := strings.TrimSpace(ctx.Current.Text)
+	previous := strings.TrimSpace(ctx.Previous.Text)
+
+	switch {
+	case strings.HasPrefix(current, "--models-path="):
+		return nil
+	case strings.HasPrefix(current, "--timeout="):
+		return matchSlashArgumentCandidates(chatProviderRefreshTimeoutCandidates(), slashArgumentAssignmentValue(current))
+	case previous == "--models-path":
+		return nil
+	case previous == "--timeout":
+		return matchSlashArgumentCandidates(chatProviderRefreshTimeoutCandidates(), activeSlashArgumentQuery(ctx))
+	}
+
+	if current == "" {
+		if slashProviderRefreshValueIndex(ctx) > 0 {
+			return nil
+		}
+		candidates := chatProviderRefreshProviderCandidates(session)
+		candidates = append(candidates, chatProviderRefreshFlagCandidates()...)
+		return matchSlashArgumentCandidates(candidates, "")
+	}
+
+	candidates := chatProviderRefreshProviderCandidates(session)
+	candidates = append(candidates, chatProviderRefreshFlagCandidates()...)
+	return matchSlashArgumentCandidates(candidates, activeSlashArgumentQuery(ctx))
+}
+
+// chatProviderRefreshProviderCandidates 复用 /model --provider 的 provider 名单，
+// 但把 provider 名标成终值（AcceptsArgs=false）：refresh 的 provider 名后面没有
+// 专属子参数，这样选中或输完 provider 后按 Enter 会提交命令，而不是因为
+// AcceptsArgs 又补一个空格、把同一个名字当待补全参数再补一次。
+func chatProviderRefreshProviderCandidates(session *ChatSession) []chatSlashCompletionCandidate {
+	names := providerNameArgumentCandidates(session)
+	candidates := make([]chatSlashCompletionCandidate, 0, len(names))
+	for _, candidate := range names {
+		candidate.Summary = "重新拉取该 provider 的模型列表"
+		candidate.AcceptsArgs = false
+		candidates = append(candidates, candidate)
+	}
+	return candidates
+}
+
+// chatProviderRefreshFlagCandidates 与 parseChatProviderRefreshCommand 的 flag
+// 分支同源：`--all`/`--dry-run` 是终值，`--models-path`/`--timeout` 还要补值。
+func chatProviderRefreshFlagCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupModel)
+	return []chatSlashCompletionCandidate{
+		{Command: "--all", Summary: "刷新配置中的全部 provider", Group: group},
+		{Command: "--dry-run", Summary: "只预览变更，不写配置", Group: group},
+		{Command: "--models-path", Summary: "覆盖 models 端点路径（可选）", Group: group, AcceptsArgs: true},
+		{Command: "--timeout", Summary: "单次请求超时秒数（可选）", Group: group, AcceptsArgs: true},
+	}
+}
+
+// chatProviderRefreshTimeoutCandidates 是 `--timeout` 的常用取值；其它秒数直接
+// 手输即可（无匹配时候选为空，弹层自动收起）。
+func chatProviderRefreshTimeoutCandidates() []chatSlashCompletionCandidate {
+	group := string(chatSlashCommandGroupModel)
+	candidates := make([]chatSlashCompletionCandidate, 0, 4)
+	for _, seconds := range []string{"15", "30", "60", "120"} {
+		candidates = append(candidates, chatSlashCompletionCandidate{
+			Command: seconds,
+			Summary: seconds + " 秒超时",
+			Group:   group,
+		})
+	}
+	return candidates
 }
 
 func completeModelSlashArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {

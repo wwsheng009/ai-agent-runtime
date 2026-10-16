@@ -52,6 +52,14 @@ func handleProviderCommand(session *ChatSession, command string, noInteractive b
 		return false
 	}
 
+	// /provider refresh：二级子命令重新拉取 /models 并写回配置。必须在
+	// parseModelCommandRequest 之前拦截，避免 "refresh" 被当成 provider/model。
+	// 直写点收敛在 handleLegacyProviderRefreshCommand 内（本文件的直写点计数被
+	// chat_command_result_test.go 冻结，不在此处新增 fmt.Print）。
+	if refreshRequest, ok, refreshErr := parseChatProviderRefreshCommand(command); ok {
+		return handleLegacyProviderRefreshCommand(session, refreshRequest, refreshErr)
+	}
+
 	request, err := parseModelCommandRequest(command)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)

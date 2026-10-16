@@ -293,8 +293,14 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Wildcard: ptrRuntimeSpec(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
 	},
 	"/provider": {
-		Bare:     rtBare(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
-		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))},
+		Bare: rtBare(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
+		Variants: map[string]runtimeCommandSpec{
+			"status": rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			// refresh：重新拉取 /models 并写回 supported_models / capabilities，
+			// 与裸 /provider 同为配置写入 + 下一回合生效；prompt 档复用统一确认门
+			// （忙时未列入 prompt 白名单 → fail-closed 排队，不打断当前回合）。
+			"refresh": rtSpec("/provider", categoryModelRouting, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("重新拉取模型列表并写回配置，下一回合生效")),
+		},
 		Wildcard: ptrRuntimeSpec(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive), rtBusyAllow())),
 	},
 	"/routing": {

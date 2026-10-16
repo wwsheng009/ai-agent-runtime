@@ -133,10 +133,16 @@ CLI flag > session 恢复上下文 > workspace 偏好 > 全局 aicli.chat > 交�
 
 | 入口 | 位置 | 行为 |
 |---|---|---|
-| `handleProviderCommand` | chat_model_switch.go:37 | 裸 `/provider` 打开 provider→model→reasoning 三级 picker；带参数直接应用；`/provider status` 只读打印 |
+| `handleProviderCommand` | chat_model_switch.go:37 | 裸 `/provider` 打开 provider→model→reasoning 三级 picker；带参数直接应用；`/provider status` 只读打印；`/provider refresh [name…] [--all] [--dry-run]` 重新拉取端点 `/models` 并写回 `supported_models` / `model_capabilities`（`chat_provider_refresh_command.go`，与 web「获取模型列表」同源语义，下一回合生效） |
 | `handleModelCommand` | chat_model_switch.go:79 | 裸 `/model` 只开 model picker；带参数直接应用 |
 
 统一交互输出模式下先走结构化路径（`executeStructuredProviderCommand`；chat_command_result.go:233-243 注明 `/provider` `/model` 已完全迁移），返回 `ChatCommandResult`，`OpenModelPicker` 作为 effect 再开 picker。
+
+`/provider refresh` 的 `refresh` token 在 `parseModelCommandRequest` 之前由 `parseChatProviderRefreshCommand` 拦截，确保它不会退化成 provider 名 / 模型名；写配置成功后重载会话配置并对账当前 provider（`refreshChatSessionAfterProviderModelRefresh`）。
+
+模型列表（picker）第一行是「⟳ 刷新模型列表」（`buildModelPickerItemsWithRefreshRow`，chat_model_picker.go），选中即调用 `refreshChatPickerProviderModels`（chat_provider_refresh_command.go）重新拉取该 provider 的 `/models` 并写回 `supported_models` / `model_capabilities`，随后把列表重开在原位；`/model` 与 `/provider` 的模型阶段共享这一行，目录为空时也不再提前退出（刷新/手动添加仍可把模型写回配置）。
+
+刷新/添加/删除的结果以**副屏内回执**呈现：picker 全程持有 alternate screen lease，transcript 在其间不可见，若只写 `renderChatCommandResult`，则「清单没变（已是最新）」与「刷新失败」两种结果在屏幕上都无法与「没按」区分。故模型阶段循环用跨迭代的 `stageSummary/stageDetail` 承载回执——摘要进 picker header（`chatModelPickerModelStageSubtitle(providerName, stageSummary)`），详情进刷新行 `Preview`（`buildModelPickerItemsWithRefreshRowDetail`；回执结构 `chatModelPickerRefreshReceipt` 与 `refreshChatPickerProviderModelsWithReceipt` 在 chat_provider_refresh_command.go）。无回执时 header 文本与 items 均与旧的 `buildModelPickerItemsWithRefreshRow` 逐字一致（`refreshIndex=0/addIndex=1/optionIndexOff=2` 契约不变）。
 
 ### (2) 内存切换（`applyRuntimeModelSwitch`，chat_model_switch.go:171）
 
