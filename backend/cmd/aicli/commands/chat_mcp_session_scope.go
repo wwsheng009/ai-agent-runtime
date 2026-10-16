@@ -508,7 +508,7 @@ func (t *sessionMCPTempRuntime) registerNewTools(session *ChatSession) int {
 			continue
 		}
 		t.registered[name] = struct{}{}
-		session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(t.toolManager, desc), desc)
+		registerRuntimeBuiltinTool(session.FunctionCatalog, t.toolManager, desc)
 		added++
 	}
 	return added

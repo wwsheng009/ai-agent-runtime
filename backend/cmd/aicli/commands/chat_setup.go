@@ -551,7 +551,7 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 			if sessionMCPOverrideDisabled(session, mcpNameFromDescriptor(desc)) {
 				continue
 			}
-			session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
+			registerRuntimeBuiltinTool(session.FunctionCatalog, toolManager, desc)
 		}
 		markChatStartup("tools_register")
 		// 工具面刷新器：会话私有与本地配置链两条来源都是异步建连，迟到的工具

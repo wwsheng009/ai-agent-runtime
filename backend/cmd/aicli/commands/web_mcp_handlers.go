@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
@@ -353,7 +352,7 @@ func refreshChatWebMCPTools() {
 		if sessionMCPOverrideDisabled(session, mcpNameFromDescriptor(desc)) {
 			continue
 		}
-		session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
+		registerRuntimeBuiltinTool(session.FunctionCatalog, toolManager, desc)
 	}
 	// 管理面变更（热重载/服务启停/工具启停）后让活跃会话在下个 turn 重建工具面。
 	invalidateChatSessionToolSurfaces()

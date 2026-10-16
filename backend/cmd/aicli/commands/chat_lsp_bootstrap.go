@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimelsp "github.com/wwsheng009/ai-agent-runtime/internal/lsp"
@@ -103,7 +102,7 @@ func (l *chatLSPLateEnable) apply(session *ChatSession) int {
 			continue
 		}
 		registered[name] = struct{}{}
-		catalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(manager, desc), desc)
+		registerRuntimeBuiltinTool(catalog, manager, desc)
 		added++
 	}
 	if added > 0 && l.invalidateSurface != nil {

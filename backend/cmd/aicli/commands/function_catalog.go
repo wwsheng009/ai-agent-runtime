@@ -178,6 +178,22 @@ func (c *aicliFunctionCatalog) RegisterBuiltinToolFunction(fn functions.Function
 	c.registerFunction(fn, descriptor, false)
 }
 
+// registerRuntimeBuiltinTool 是"把 runtime 工具挂进函数目录"的**唯一惯用法**（P2 slice 2）。
+//
+// 此前这段包装在 5 处逐字节重复——`acp_mcp_host.go`、`chat_lsp_bootstrap.go`、
+// `chat_mcp_session_scope.go`、`chat_setup.go`、`web_mcp_handlers.go` 各写一遍
+// `X.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(mgr, desc), desc)`，
+// 只差接收者与 manager 变量名。收敛到此处后：
+//   - "包装 + 注册"只有一份实现，新增宿主不必再各写一遍；
+//   - 由 `runtime_tool_registration_test.go::TestRuntimeToolFunctionWrappingIsSingleSourced`
+//     钉死（生产代码里除本文件外不得再出现 `functions.NewRuntimeToolFunction(`）。
+//
+// 各调用点自己的**过滤条件**（skipMCP / sessionMCPOverrideDisabled / registered 去重）
+// 仍留在原处：那是宿主策略，不是本惯用法的一部分。
+func registerRuntimeBuiltinTool(catalog *aicliFunctionCatalog, manager functions.RuntimeToolProvider, desc runtimetools.ToolDescriptor) {
+	catalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(manager, desc), desc)
+}
+
 func (c *aicliFunctionCatalog) RegisterFunction(fn functions.Function) {
 	if c == nil || fn == nil {
 		return

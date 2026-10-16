@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
@@ -485,7 +484,7 @@ func (s *acpSessionMCP) refreshTools() int {
 			continue
 		}
 		s.registered[name] = struct{}{}
-		s.catalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(s.toolManager, desc), desc)
+		registerRuntimeBuiltinTool(s.catalog, s.toolManager, desc)
 		added++
 	}
 	invalidate := s.invalidateSurface
