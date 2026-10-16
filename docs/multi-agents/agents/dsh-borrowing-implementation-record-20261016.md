@@ -209,7 +209,7 @@ doom_loop 告警**（同一语义工具批反复回放）时，把下一次续�
 | 项 | 说明 |
 |---|---|
 | ToolChoice 逐请求强制 | `submit_report` 采用**按需注入 + 一次性提交**（见 §5.3）：强制每次请求的工具选择会与多步真实工具使用冲突，因此未采用；契约强度由提交时校验（required / additionalProperties）+ 状态机解码双保险提供 |
-| 真实终端验证 | 按 `docs/plan/multi-agent-real-terminal-validation-runbook.md` 补充两个场景：fork 上下文复述、iterate_goal 多轮交接 |
+| 真实终端验证 | runbook 已补齐两个场景（验证 E: fork 上下文复述含 `fork_prefix_*`/`cache_read_tokens` 断言与超限负路径；验证 F: iterate_goal 多轮交接含可确定性构造的 stalled 变体与升级入口指纹）；待真实 provider 凭据环境执行，结果落 `docs/working/` |
 
 ## 7. 测试与验收
 

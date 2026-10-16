@@ -1,6 +1,6 @@
 # Multi-Agent 真实终端验证 Runbook
 
-更新时间: 2026-05-09
+更新时间: 2026-10-16（新增验证 E/F；历史验证记录见 §9）
 
 ## 1. 目的
 
@@ -12,6 +12,8 @@
 - `spawn_team auto_start=true` 不再出现 busy error storm。
 - Ctrl+C 第一次取消 active child/team，第二次退出 chat loop。
 - provider stream error 或慢响应时，后台 team 能稳定进入 terminal state。
+- fork 子级继承父级已完成轮次快照时，继承前缀在最终装配中保持（P2-1'；观测 `fork_prefix_*` 审计键与缓存读取证据），快照超限时整体拒绝而不是静默截断。
+- iterate_goal 多轮 fresh 子级 + 有界结构化 handoff 的轮次链路，以及 G6 进展门控的 stalled 终态（P2-2'）。
 
 ## 2. 前置条件
 
@@ -244,7 +246,94 @@ spawn_team auto_start=true，创建 3 个成员分别执行耗时检查任务，
 - 后台 orchestrator 不挂死。
 - 错误进入结构化 event/mailbox，而不是散落在 primary console。
 
-## 7. 需要保存的证据
+## 7. 验证 E: fork 上下文复述（P2-1'）
+
+前置:
+
+- `agents.forkContextEnabled=true`（授予 `fork_context` 能力；未授予时 `spawn_subagents` 的 `context` 字段不会出现在模型侧 schema）。
+- 父会话至少有 1 个已完成轮次——快照 = 父级"已完成轮次"前缀（终止于最后一条 assistant 消息）；进行中的当前轮不会进入快照。
+- 可选: `agents.forkMaxSnapshotTokens` 设小值（如 200）用于超限拒绝负路径。
+- 建议 provider 能上报缓存使用，才有 `cache_read_tokens` 证据。
+
+输入:
+
+```text
+先完成一轮自述: 用一句话说明本会话正在验证 fork 上下文复述。
+然后调用 spawn_subagents 启动 1 个子 agent，任务 context 设为 fork（继承本会话已完成轮次快照），
+goal 为「复述你继承到的对话内容: 用一句话概括你继承到的上下文里父级做过什么，
+再用一句话说明你当前这一轮要做什么」。拿到结果后用不超过 100 字汇总。
+```
+
+观察点:
+
+- 子会话**首个** LLM 请求的 metadata 带 4 个审计键: `fork_prefix_preserved=true`、`fork_snapshot_messages > 0`、`fork_snapshot_tokens > 0`、`fork_prefix_kept_messages == fork_snapshot_messages`（整段前缀保持）。
+- `llm.request.started` 事件载荷含同样 4 键；只出现一次（fork 子级首请求），重试与后续请求不再带。
+- fork 子级**继承父路由**（provider/model 覆盖会被准入拒绝）；其复述应只包含父级已完成轮次，**不包含**本次 fork 请求与验证 prompt 本身（进行中轮次不在快照内）。
+- 若 provider 上报缓存: 同批 `usage` 记录的 `cache_read_tokens > 0` 可作缓存读取命中证据（`cache_hit_ratio` 为本地重算口径）；`cache_requests` 行按子会话 session_id 落库。
+
+验证命令（需要 `sqlite3` 在 PATH；会话活跃时读取一般可并发，遇 BUSY 等会话空闲后重试）:
+
+```powershell
+$db = "$env:USERPROFILE\.aicli\sessions\runtime\session_runtime.sqlite"
+sqlite3 $db "SELECT session_id, json_extract(CAST(record_json AS TEXT), '$.fork_prefix_preserved') AS preserved, json_extract(CAST(record_json AS TEXT), '$.fork_prefix_kept_messages') AS kept, json_extract(CAST(record_json AS TEXT), '$.fork_snapshot_messages') AS snap, json_extract(CAST(record_json AS TEXT), '$.fork_snapshot_tokens') AS snap_tokens FROM cache_requests ORDER BY started_at_unix_nano DESC LIMIT 20;"
+```
+
+或 debug log 检索: `Select-String -Path "$env:USERPROFILE\.aicli\chat-logs\*\*.debug.log" -Pattern 'fork_prefix_preserved' | Select-Object -First 20`（目录以实际 chat log 路径为准）。
+
+负路径（可选，任一即可）:
+
+- **超限拒绝**: 临时把 `agents.forkMaxSnapshotTokens` 设为小值（如 200）再 fork → 工具结果报 `fork context snapshot exceeds the token ceiling (N > 200); next_action=use_fresh_context_or_raise_agents.fork.max_snapshot_tokens`；子级不会拿到被截断的半截历史（拒绝 ≠ 静默截断）。
+- **能力未授予**: `agents.forkContextEnabled=false` 时 schema 中无 `context` 字段；若模型仍传 `context=fork`，能力准入拒绝，理由含 `fork_context` 与 `next_action=use_fresh_context_or_enable_agents.capabilities.fork_context`。
+
+通过标准:
+
+- fork 子级首请求观测到 preserved=true 且 kept==snapshot 规模（4 键齐全）。
+- 复述内容与父级已完成轮次一致且不含进行中轮次；父控制台无子级原始 delta/reasoning 污染（同验证 A 口径）。
+
+## 8. 验证 F: iterate_goal 多轮交接与进展门控（P2-2'）
+
+前置:
+
+- `agents.iterateGoalEnabled=true`（根代理工具面才挂载 `iterate_goal`；未启用时 goal 驱动器也不注入升级提示）。
+- 子任务难度路由可达（§2.1 / §2.2 的环境阻断判读同样适用: 每轮 spawn 的是真实子级，零产出先判环境阻断）。
+
+输入（成功路径，建议用小 max_rounds 控制成本）:
+
+```text
+调用 iterate_goal 工具执行一个目标: 「读取工作区 README（或任一可读文本文件）首行，并在每个 round 的
+handoff summary 中引用该证据；round 1 报告 continue 并给出具体的 next_steps，round 2 基于该证据给出
+不超过 20 字的总结并报告 complete。」max_rounds=3。
+完成后用一句话汇总最终 status 与 rounds_started。
+```
+
+观察点:
+
+- 父会话 transcript 出现一次 `iterate_goal` 工具调用，结果行形如 `iterate_goal finished: status=<complete|blocked|budget-limited|round-failed|stalled> rounds_started=<n>`。
+- `/agents` / AgentControl `agent_control_agents` 出现 `iterate_1..n` 子任务行（TaskSubject 为 `iteration round n`；每轮一个 fresh 子级）。
+- 每轮子级通过 `submit_report` 交付 round 报告（结构化通道解码）；下一轮 prompt 含 `Previous structured handoff`（轮间有界交接；子级看不到父级会话）。
+- fresh 对照证据: 轮子级首请求**不带** fork 审计 4 键（与验证 E 的 fork 子级形成对照；`cache_requests` 查询同一口径）。
+
+stalled 变体（可确定性构造，验证 G6 进展门控）:
+
+```text
+调用 iterate_goal 执行目标: 「本轮不要做实质工作: 每轮调用 submit_report，status=continue，
+next_steps 固定为 ['no-op']，summary 固定为 'no progress by design'。」max_rounds=6。
+```
+
+预期: round 2 起 nextSteps 与上一轮逐字节相同 → no-progress strike 递增；连续 3 次（round 2/3/4）→ `status=stalled rounds_started=4`，不烧满 6 轮预算。（若 round 1 就没有可用报告，也按 no-progress 计数，同样收敛为 stalled 语义。）
+
+升级路径（入口 2，真实终端可选）:
+
+- 在 `agents.iterateGoalEnabled=true` 且存在活动 goal（`/goal <objective>` 后的自动续跑）时: 连续无进展 strike ≥ 2 或会话收到 doom_loop 告警（同一语义工具批反复回放）→ 下一次续跑提示变为 IterateEscalationPrompt；transcript 指纹 `This goal is stuck` 与 `call it exactly once` 应**恰好出现一次**（升级至多注入一次，doom 告警标记被消费一次）。
+- 空转在真实模型下难以稳定构造: 若本轮无法自然触发，可只以单元测试覆盖（`internal/goal`、`cmd/aicli/commands`、`internal/api/runtimeapi` 的驱动测试）并在报告里如实标注「未在本环境构造成功」，不要为凑结论人为反复诱导。
+
+通过标准:
+
+- 成功路径: 轮数/每轮 spawn 行/`submit_report` 交接链路与观察点一致；终态为 complete 或 budget-limited（max_rounds 生效）。
+- stalled 变体: 恰好 4 轮、`status=stalled`。
+- 失败判读: 轮子级零产出（`message_count=1`）先按 §2.2 判环境阻断；`iterate_goal requires a subagent scheduler` 类错误说明宿主装配缺 scheduler（不是迭代逻辑回归）。
+
+## 9. 需要保存的证据
 
 每次真实验证至少保存:
 
@@ -264,7 +353,7 @@ spawn_team auto_start=true，创建 3 个成员分别执行耗时检查任务，
 docs/working/multi-agent-real-terminal-validation-YYYYMMDD.md
 ```
 
-## 8. 当前自动化覆盖
+## 10. 当前自动化覆盖
 
 本 runbook 对应的确定性测试已经覆盖以下基础行为:
 
@@ -275,5 +364,7 @@ docs/working/multi-agent-real-terminal-validation-YYYYMMDD.md
 - runtime/team projection mode 可见。
 - write-through global 写失败时 local projection 保留，后续 repair 可补齐 global row。
 - `/agents panel follow` 可等待 mailbox 更新并刷新 panel 输出。
+- fork 链路（P2-1'）: `capabilities_test.go`（能力协商/门控）、`subagent_context_test.go`（快照配平/冻结/超限拒绝）、`fork_audit_test.go`（首请求审计盖章与 gating）、`cacheanalytics/fork_prefix_test.go`（`cache_requests.record_json` 往返保真）。
+- iterate_goal 链路（P2-2'）: `iterate_goal_test.go`（多轮状态机/进展门控/stalled/默认关工具面）、`internal/goal` 与双宿主驱动器测试（升级判定 OR 条件、至多一次注入、告警标记消费）。
 
 真实终端验证仍是必要补充，因为 Ctrl+C、provider stream、终端 surface 和真实模型流式输出属于端到端行为。
