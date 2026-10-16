@@ -2612,18 +2612,18 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 
 // frozenChatSystemPromptContext returns the durable session context map used to
 // anchor the frozen outbound system prompt, initializing it when missing.
+//
+// A non-nil runtimeSession is owned by the caller (the actor's own session), so
+// it can be used directly. The ChatSession fallback would hand back the shared
+// CLI copy's map, which must only be touched under ChatSession.runtimeContextMapMu
+// — callers use loadFrozenChatSystemPrompt/storeFrozenChatSystemPrompt, which
+// take the lock for that path (see chat_runtime_context_map.go).
 func frozenChatSystemPromptContext(runtimeSession *runtimechat.Session, session *ChatSession) map[string]interface{} {
 	if runtimeSession != nil {
 		if runtimeSession.Metadata.Context == nil {
 			runtimeSession.Metadata.Context = make(map[string]interface{})
 		}
 		return runtimeSession.Metadata.Context
-	}
-	if session != nil && session.RuntimeSession != nil {
-		if session.RuntimeSession.Metadata.Context == nil {
-			session.RuntimeSession.Metadata.Context = make(map[string]interface{})
-		}
-		return session.RuntimeSession.Metadata.Context
 	}
 	return nil
 }
@@ -2632,19 +2632,23 @@ func frozenChatSystemPromptContext(runtimeSession *runtimechat.Session, session 
 // anchored by the first prepare run, or "" when the session has not anchored
 // one yet.
 func loadFrozenChatSystemPrompt(runtimeSession *runtimechat.Session, session *ChatSession) string {
-	if ctx := frozenChatSystemPromptContext(runtimeSession, session); ctx != nil {
-		return strings.TrimSpace(sessionmeta.String(ctx, sessionmeta.SystemPromptFrozen))
+	if runtimeSession != nil {
+		return strings.TrimSpace(sessionmeta.String(frozenChatSystemPromptContext(runtimeSession, session), sessionmeta.SystemPromptFrozen))
 	}
-	return ""
+	return chatRuntimeContextString(session, sessionmeta.SystemPromptFrozen)
 }
 
 // storeFrozenChatSystemPrompt anchors the composed outbound system prompt for
 // the life of the session so later prepare runs reuse the identical head and
 // never invalidate the provider prompt cache mid-session.
 func storeFrozenChatSystemPrompt(runtimeSession *runtimechat.Session, session *ChatSession, composed string) {
-	if ctx := frozenChatSystemPromptContext(runtimeSession, session); ctx != nil {
-		sessionmeta.Set(ctx, sessionmeta.SystemPromptFrozen, strings.TrimSpace(composed))
+	if runtimeSession != nil {
+		sessionmeta.Set(frozenChatSystemPromptContext(runtimeSession, session), sessionmeta.SystemPromptFrozen, strings.TrimSpace(composed))
+		return
 	}
+	withRuntimeContextWrite(session, func(ctx map[string]interface{}) {
+		sessionmeta.Set(ctx, sessionmeta.SystemPromptFrozen, strings.TrimSpace(composed))
+	})
 }
 
 // applyChatPlanModeToAgent configures the permission engine for active plan mode.
@@ -2662,8 +2666,8 @@ func applyChatPlanModeToAgent(apiAgent *agent.Agent, session *ChatSession, runti
 	state := planmode.State{Status: planmode.StatusInactive}
 	if runtimeSession != nil {
 		state = planmode.Load(runtimeSession)
-	} else if session != nil && session.RuntimeSession != nil {
-		state = planmode.Load(session.RuntimeSession)
+	} else if session != nil {
+		state = loadChatPlanMode(session)
 	}
 	if planmode.IsActive(state) {
 		planmode.ApplyToEngine(engine, state)
@@ -2851,10 +2855,7 @@ func applyLocalChatToolObservation(config *agent.LoopReActConfig, session *ChatS
 // 团队任务锚点（active_team_task_id），不编造任务语义；无锚点时回退 session
 // 级工作集（task_id 为空，W1 的 DTO 允许该回退）。
 func localChatObservationTaskID(session *ChatSession) string {
-	if session == nil || session.RuntimeSession == nil {
-		return ""
-	}
-	return runtimeSessionContextString(session.RuntimeSession, chatRuntimeContextActiveTaskID)
+	return chatRuntimeContextString(session, chatRuntimeContextActiveTaskID)
 }
 
 // ledgerAttributionSink 把本地账本服务折叠成 exploration_attribution 落库口；
@@ -3173,13 +3174,14 @@ func applyLocalChatKnowledgeOptions(agentConfig *agent.Config, activation *knowl
 // skips the external_dir:admit approval; writes under the repo still go
 // through the gate (the policy checks CapWriteFS before exempting).
 func chatReadOnlyRoots(session *ChatSession) []string {
-	if session == nil || session.RuntimeSession == nil {
+	runtimeSession := chatRuntimeSessionSnapshot(session)
+	if runtimeSession == nil {
 		return nil
 	}
-	if agentcontrol.ContextString(session.RuntimeSession, toolbroker.AgentSessionContextIsolation) != worktree.ModeWorktree {
+	if agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextIsolation) != worktree.ModeWorktree {
 		return nil
 	}
-	repoRoot := strings.TrimSpace(agentcontrol.ContextString(session.RuntimeSession, toolbroker.AgentSessionContextWorktreeRepoRoot))
+	repoRoot := strings.TrimSpace(agentcontrol.ContextString(runtimeSession, toolbroker.AgentSessionContextWorktreeRepoRoot))
 	if repoRoot == "" {
 		return nil
 	}

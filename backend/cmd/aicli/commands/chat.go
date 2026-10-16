@@ -381,6 +381,13 @@ type ChatSession struct {
 	// DebugMode, PermissionMode, ApprovalReuseMode, SelectedAgentTarget,
 	// RequestedPermissionMode, EffectivePermissionMode and ActiveTeam.
 	runtimeCtxMu sync.RWMutex
+	// runtimeContextMapMu guards RuntimeSession.Metadata.Context, the shared
+	// runtime-context map read by the event-bridge worker while the owner /
+	// actor goroutines write it (fatal: concurrent map read and map write, see
+	// chat_runtime_context_map.go). All access must go through the helpers in
+	// that file; it also guards the RuntimeSession pointer itself, which the
+	// owner goroutine swaps mid-turn.
+	runtimeContextMapMu sync.RWMutex
 	// commandMu serializes Phase A of chat command dispatch（方案 §3.3 两阶段锁）：
 	// 解析 + 会话/配置变更 + 命令结果渲染。Phase B 效应（send/picker/overlay/
 	// screen）必须在释放本锁之后应用；忙时 immediate 通道用 TryLock 探测占用，
@@ -1507,10 +1514,10 @@ func printSessionInfo(session *ChatSession) {
 }
 
 func printChatSessionCompactLineage(session *ChatSession) {
-	if session == nil || session.RuntimeSession == nil {
+	runtimeSession := chatRuntimeSessionSnapshot(session)
+	if runtimeSession == nil {
 		return
 	}
-	runtimeSession := session.RuntimeSession
 	generation := runtimeSessionCompactGeneration(runtimeSession)
 	if generation <= 0 {
 		return

@@ -584,14 +584,12 @@ func currentRunMetaForSession(session *ChatSession) *team.RunMeta {
 	if permissionMode := chatSessionPermissionMode(session); permissionMode != "" {
 		runMeta.PermissionMode = string(permissionMode)
 	}
-	if session.RuntimeSession != nil {
-		// Ordinary interactive/child sessions never own a Team completion
-		// contract via session context alone. Force none so a forked or
-		// legacy complete_task value cannot re-enter RunMeta outside a bound
-		// Team assignment (which TeammateRunner injects directly).
-		if requirement := strings.TrimSpace(runtimeSessionContextString(session.RuntimeSession, toolbroker.AgentSessionContextCompletionRequirement)); requirement != "" {
-			runMeta.CompletionRequirement = "none"
-		}
+	// Ordinary interactive/child sessions never own a Team completion
+	// contract via session context alone. Force none so a forked or
+	// legacy complete_task value cannot re-enter RunMeta outside a bound
+	// Team assignment (which TeammateRunner injects directly).
+	if requirement := chatRuntimeContextString(session, toolbroker.AgentSessionContextCompletionRequirement); strings.TrimSpace(requirement) != "" {
+		runMeta.CompletionRequirement = "none"
 	}
 	binding := resolvedInteractiveTeamBinding(session)
 	if binding != nil && strings.TrimSpace(binding.TeamID) != "" && shouldPropagateTeamRunMeta(session, binding) {

@@ -151,13 +151,51 @@ func setChatActiveTeam(session *ChatSession, binding *chatTeamBinding) {
 	session.runtimeCtxMu.Unlock()
 }
 
-func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat.Session) {
-	if session == nil || runtimeSession == nil {
+// chatRestoredRuntimeContext 是一次「读锁内」取出的运行时会话上下文字段。
+type chatRestoredRuntimeContext struct {
+	approvalReuse  string
+	permissionMode string
+	debugMode      bool
+	debugModeOK    bool
+	selectedAgent  string
+	activeTeamID   string
+	activeAgentID  string
+	activeTaskID   string
+}
+
+// readChatRestoredRuntimeContext 必须在 runtimeContextMapMu 读锁下执行（由
+// chatRuntimeSessionRead 保证），只读该 map，不得再进入其它加锁辅助函数。
+func readChatRestoredRuntimeContext(runtimeSession *runtimechat.Session) chatRestoredRuntimeContext {
+	debugMode, debugModeOK := runtimeSessionContextBool(runtimeSession, chatRuntimeContextDebugMode)
+	return chatRestoredRuntimeContext{
+		approvalReuse:  runtimeSessionContextString(runtimeSession, chatRuntimeContextApprovalReuse),
+		permissionMode: runtimeSessionContextString(runtimeSession, chatRuntimeContextPermissionMode),
+		debugMode:      debugMode,
+		debugModeOK:    debugModeOK,
+		selectedAgent:  runtimeSessionContextString(runtimeSession, chatRuntimeContextSelectedAgent),
+		activeTeamID:   runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveTeamID),
+		activeAgentID:  runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveAgentID),
+		activeTaskID:   runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveTaskID),
+	}
+}
+
+// restoreChatRuntimeContext 把持久化会话里的运行时节段恢复进 ChatSession。
+//
+// 本函数会被后台 goroutine 调用（goal actor 对账、tool session 上下文刷新等），
+// 而共享 context map 同时会被 TUI 侧在 runtimeContextMapMu 下写入，因此 map 读取
+// 必须在读锁内完成。这里刻意分两段：先在叶子读锁下取值，再在 runtimeCtxMu 下
+// 落字段——两个叶子锁不得互相嵌套（会与反向获取顺序形成死锁）。
+func restoreChatRuntimeContext(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	restored, ok := chatRuntimeSessionRead(session, readChatRestoredRuntimeContext)
+	if !ok {
 		return
 	}
 	session.runtimeCtxMu.Lock()
 	defer session.runtimeCtxMu.Unlock()
-	if mode, err := parseChatApprovalReuseMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextApprovalReuse)); err == nil {
+	if mode, err := parseChatApprovalReuseMode(restored.approvalReuse); err == nil {
 		session.ApprovalReuseMode = mode
 	}
 	// CLI 显式指定的权限模式（--yolo / --permission-mode）优先于
@@ -165,7 +203,7 @@ func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat
 	// 覆盖用户本次命令行上的明确要求（否则 --yolo 会被降级为
 	// default，导致工具调用继续弹审批）。
 	if !session.permissionModeCLIChanged {
-		if mode, err := parseChatPermissionMode(runtimeSessionContextString(runtimeSession, chatRuntimeContextPermissionMode), false); err == nil {
+		if mode, err := parseChatPermissionMode(restored.permissionMode, false); err == nil {
 			// plan is a durable lifecycle, not a CLI mode: the stored canonical
 			// key may legitimately read "plan" while the lifecycle is active
 			// (see syncRuntimeSessionFromChatMode), but restoring it here would
@@ -176,21 +214,20 @@ func restoreChatRuntimeContext(session *ChatSession, runtimeSession *runtimechat
 			}
 		}
 	}
-	if debugMode, ok := runtimeSessionContextBool(runtimeSession, chatRuntimeContextDebugMode); ok {
-		session.DebugMode = debugMode
+	if restored.debugModeOK {
+		session.DebugMode = restored.debugMode
 	} else {
 		session.DebugMode = false
 	}
-	session.SelectedAgentTarget = runtimeSessionContextString(runtimeSession, chatRuntimeContextSelectedAgent)
-	teamID := runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveTeamID)
-	if teamID == "" {
+	session.SelectedAgentTarget = restored.selectedAgent
+	if restored.activeTeamID == "" {
 		session.ActiveTeam = nil
 		return
 	}
 	session.ActiveTeam = &chatTeamBinding{
-		TeamID:         teamID,
-		AgentID:        firstNonEmptyChatValue(runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveAgentID), "lead"),
-		TaskID:         runtimeSessionContextString(runtimeSession, chatRuntimeContextActiveTaskID),
+		TeamID:         restored.activeTeamID,
+		AgentID:        firstNonEmptyChatValue(restored.activeAgentID, "lead"),
+		TaskID:         restored.activeTaskID,
 		PermissionMode: session.PermissionMode,
 	}
 }

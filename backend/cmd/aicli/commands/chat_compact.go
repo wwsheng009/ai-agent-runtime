@@ -85,26 +85,51 @@ func executeManualChatCompact(session *ChatSession, requestedMode string) (*chat
 	return report, nil
 }
 
-func attachChatCompactLineage(report *chatCompactReport, session *ChatSession) {
-	if report == nil || session == nil || session.RuntimeSession == nil {
-		return
+// chatCompactLineageSnapshot 是压缩血缘在锁内取出的字段快照。
+type chatCompactLineageSnapshot struct {
+	generation    int
+	hasGeneration bool
+	rootTitle     string
+	title         string
+}
+
+// readChatCompactLineageSnapshot 在 runtimeContextMapMu 读锁下执行（由
+// chatRuntimeSessionRead 保证），只读。BuildPreview 依赖历史，故这里不能退化成
+// chatRuntimeSessionSnapshot（无历史会静默读到空标题）。
+func readChatCompactLineageSnapshot(runtimeSession *runtimechat.Session) chatCompactLineageSnapshot {
+	snapshot := chatCompactLineageSnapshot{
+		rootTitle: strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootTitle)),
 	}
-	runtimeSession := session.RuntimeSession
 	if generation, ok := runtimeSessionContextInt(runtimeSession, runtimechat.ContextCompactGeneration); ok && generation > 0 {
-		report.Generation = generation
-	}
-	if rootTitle := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootTitle)); rootTitle != "" {
-		report.RootTitle = rootTitle
+		snapshot.generation = generation
+		snapshot.hasGeneration = true
 	}
 	title := strings.TrimSpace(runtimeSession.Metadata.Title)
 	if title == "" {
-		preview := runtimeSession.BuildPreview()
-		if preview != nil {
+		if preview := runtimeSession.BuildPreview(); preview != nil {
 			title = strings.TrimSpace(preview.Title)
 		}
 	}
-	if title != "" {
-		report.Title = title
+	snapshot.title = title
+	return snapshot
+}
+
+func attachChatCompactLineage(report *chatCompactReport, session *ChatSession) {
+	if report == nil || session == nil {
+		return
+	}
+	lineage, ok := chatRuntimeSessionRead(session, readChatCompactLineageSnapshot)
+	if !ok {
+		return
+	}
+	if lineage.hasGeneration {
+		report.Generation = lineage.generation
+	}
+	if lineage.rootTitle != "" {
+		report.RootTitle = lineage.rootTitle
+	}
+	if lineage.title != "" {
+		report.Title = lineage.title
 	}
 }
 

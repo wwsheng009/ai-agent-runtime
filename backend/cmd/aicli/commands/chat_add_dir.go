@@ -29,10 +29,10 @@ func chatAllowedRoots(session *ChatSession) []string {
 	if len(session.AllowedRoots) > 0 {
 		return append([]string(nil), session.AllowedRoots...)
 	}
-	if session.RuntimeSession == nil || session.RuntimeSession.Metadata.Context == nil {
+	raw, ok := chatRuntimeContextRawValue(session, chatAllowedRootsContextKey)
+	if !ok {
 		return nil
 	}
-	raw := session.RuntimeSession.Metadata.Context[chatAllowedRootsContextKey]
 	return normalizePersistedAllowedRoots(raw)
 }
 
@@ -84,15 +84,13 @@ func setChatAllowedRoots(session *ChatSession, roots []string) {
 	}
 	roots = dedupeChatPaths(roots)
 	session.AllowedRoots = roots
-	if session.RuntimeSession == nil {
-		return
-	}
-	if session.RuntimeSession.Metadata.Context == nil {
-		session.RuntimeSession.Metadata.Context = map[string]interface{}{}
-	}
-	session.RuntimeSession.Metadata.Context[chatAllowedRootsContextKey] = roots
-	if session.SessionManager != nil && strings.TrimSpace(session.RuntimeSession.ID) != "" {
-		_ = session.SessionManager.UpdateContext(context.Background(), session.RuntimeSession.ID, chatAllowedRootsContextKey, roots)
+	withRuntimeContextWrite(session, func(ctx map[string]interface{}) {
+		ctx[chatAllowedRootsContextKey] = roots
+	})
+	if session.SessionManager != nil {
+		if sessionID := chatRuntimeSessionID(session); sessionID != "" {
+			_ = session.SessionManager.UpdateContext(context.Background(), sessionID, chatAllowedRootsContextKey, roots)
+		}
 	}
 }
 

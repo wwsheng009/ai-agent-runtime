@@ -763,24 +763,11 @@ func readHistoricalSessionPickWithCurrent(session *ChatSession, sessions []*runt
 }
 
 func printResumeSuccess(session *ChatSession) {
-	if session != nil && session.RuntimeSession != nil {
-		turnCount, messageCount := runtimeSessionConversationCounts(session.RuntimeSession)
-		title := runtimeResumeSessionTitle(session.RuntimeSession)
-		var line string
-		if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
-			line = fmt.Sprintf("已恢复历史会话: %s（compact #%d · %d轮/%d条消息）\n",
-				title,
-				generation,
-				turnCount,
-				messageCount,
-			)
-		} else {
-			line = fmt.Sprintf("已恢复历史会话: %s（%d轮/%d条消息）\n",
-				title,
-				turnCount,
-				messageCount,
-			)
-		}
+	// 摘要里的轮数/标题都来自历史，必须读 live session；快照（CloneWithoutHistory）
+	// 不含历史，会让轮数归零、派生标题丢失。
+	if line, ok := chatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) string {
+		return "已恢复历史会话: " + runtimeSessionSwitchSummaryText(runtimeSession) + "\n"
+	}); ok {
 		// 交互式 resume 停放上一进程遗留团队时，明确告知用户当前是等待输入状态。
 		// 提示并入同一次直写：printResumeSuccess 的直接写入者是 inventory
 		// 基线的一部分，不允许在这里新增第二个输出调用。

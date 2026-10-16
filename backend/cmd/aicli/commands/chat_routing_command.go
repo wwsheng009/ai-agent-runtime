@@ -748,12 +748,13 @@ func chatRoutingCommitOverride(session *ChatSession, override *agentconfig.AICLI
 	if err != nil {
 		return err
 	}
-	ctx := session.RuntimeSession.Metadata.Context
-	if strings.TrimSpace(encoded) == "" {
-		sessionmeta.Delete(ctx, sessionmeta.LegacyAICLIRoutingOverride, agentconfig.SessionRoutingOverrideContextKey)
-	} else {
-		sessionmeta.Set(ctx, sessionmeta.LegacyAICLIRoutingOverride, encoded, agentconfig.SessionRoutingOverrideContextKey)
-	}
+	withRuntimeContextWrite(session, func(ctx map[string]interface{}) {
+		if strings.TrimSpace(encoded) == "" {
+			sessionmeta.Delete(ctx, sessionmeta.LegacyAICLIRoutingOverride, agentconfig.SessionRoutingOverrideContextKey)
+		} else {
+			sessionmeta.Set(ctx, sessionmeta.LegacyAICLIRoutingOverride, encoded, agentconfig.SessionRoutingOverrideContextKey)
+		}
+	})
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		return fmt.Errorf("路由已写入会话内存但持久化失败: %w", err)
 	}

@@ -277,13 +277,14 @@ func enterChatPlanModeWithResult(session *ChatSession, planPath string) (chatPla
 // snapshot for the CLI /plan path. Best-effort: the durable plan-mode state is
 // already written, so archive failures must not fail the command.
 func archiveChatPlanArtifact(session *ChatSession, decision, notes string) {
-	if session == nil || session.RuntimeSession == nil {
+	runtimeSession := chatRuntimeSessionSnapshot(session)
+	if runtimeSession == nil {
 		return
 	}
-	state := planmode.Load(session.RuntimeSession)
+	state := planmode.Load(runtimeSession)
 	_, _ = planmode.ArchivePlan(context.Background(), planmode.ArchiveOptions{
 		Store:     chatPlanArtifactStore,
-		SessionID: session.RuntimeSession.ID,
+		SessionID: runtimeSession.ID,
 		Workspace: chatPlanWorkspacePath(session),
 		PlanPath:  state.PlanPath,
 		Decision:  strings.TrimSpace(decision),
@@ -370,20 +371,22 @@ func applyChatPlanPermissionMode(session *ChatSession, mode runtimepolicy.Mode) 
 // chatPlanWorkspacePath returns the session workspace root used to resolve
 // relative plan paths (mirrors the runtime session context key).
 func chatPlanWorkspacePath(session *ChatSession) string {
-	if session == nil || session.RuntimeSession == nil || session.RuntimeSession.Metadata.Context == nil {
+	raw, ok := chatRuntimeContextRawValue(session, chatPlanWorkspacePathKey)
+	if !ok {
 		return ""
 	}
-	if raw, ok := session.RuntimeSession.Metadata.Context[chatPlanWorkspacePathKey]; ok {
-		return strings.TrimSpace(fmt.Sprint(raw))
-	}
-	return ""
+	return strings.TrimSpace(fmt.Sprint(raw))
 }
 
 func loadChatPlanMode(session *ChatSession) planmode.State {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil {
 		return planmode.State{Status: planmode.StatusInactive}
 	}
-	return planmode.Load(session.RuntimeSession)
+	state := planmode.State{Status: planmode.StatusInactive}
+	withChatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) {
+		state = planmode.Load(runtimeSession)
+	})
+	return state
 }
 
 func saveChatPlanMode(session *ChatSession, state planmode.State) {
@@ -391,32 +394,29 @@ func saveChatPlanMode(session *ChatSession, state planmode.State) {
 		return
 	}
 	ensureChatPlanModeRuntimeSession(session)
-	if session.RuntimeSession == nil {
-		return
-	}
-	planmode.Save(session.RuntimeSession, state)
+	withChatRuntimeSessionWrite(session, func(runtimeSession *runtimechat.Session) {
+		planmode.Save(runtimeSession, state)
+	})
 }
 
 func ensureChatPlanModeRuntimeSession(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	if session.RuntimeSession == nil {
+	if chatRuntimeSessionPointer(session) == nil {
 		now := time.Now()
-		session.RuntimeSession = &runtimechat.Session{
+		setChatRuntimeSessionPointer(session, &runtimechat.Session{
 			ID:        "ephemeral-plan-mode",
 			CreatedAt: now,
 			UpdatedAt: now,
 			Metadata: runtimechat.SessionMetadata{
 				Context: map[string]interface{}{},
 			},
-		}
+		})
 		updateChatRuntimeEventBridgePrimarySession(session)
 		return
 	}
-	if session.RuntimeSession.Metadata.Context == nil {
-		session.RuntimeSession.Metadata.Context = make(map[string]interface{})
-	}
+	ensureChatRuntimeContextMap(session)
 }
 
 func printPlanModeStatus(session *ChatSession) {

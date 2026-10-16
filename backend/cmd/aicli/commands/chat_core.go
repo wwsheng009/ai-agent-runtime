@@ -536,10 +536,10 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 		applyChatCompactContextUsage(session, result, status, false)
 		return history, report, err
 	}
-	if session.RuntimeSession != nil {
+	if runtimeSession := chatRuntimeSessionSnapshot(session); runtimeSession != nil {
 		replacement, reconciliation := contextreconcile.Reconcile(
 			result.ReplacementHistory,
-			runtimechat.CanonicalContextSnapshot(session.RuntimeSession),
+			runtimechat.CanonicalContextSnapshot(runtimeSession),
 		)
 		result.ReplacementHistory = replacement
 		result.Reconciliation = &reconciliation
@@ -548,11 +548,22 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 
 	// Capture root title before history rewrite so the compaction summary cannot
 	// become the display title when syncRuntimeSessionFromChat replaces history.
+	// CompactRootTitleCandidate 会退化到 effectiveTitle()（历史派生），必须读 live
+	// session；CloneWithoutHistory 快照会读到空历史。
+	type compactRootIdentity struct {
+		rootTitle string
+		parentID  string
+	}
 	rootTitleHint := ""
 	parentSessionID := ""
-	if session.RuntimeSession != nil {
-		rootTitleHint = session.RuntimeSession.CompactRootTitleCandidate()
-		parentSessionID = strings.TrimSpace(session.RuntimeSession.ID)
+	if identity, ok := chatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) compactRootIdentity {
+		return compactRootIdentity{
+			rootTitle: runtimeSession.CompactRootTitleCandidate(),
+			parentID:  strings.TrimSpace(runtimeSession.ID),
+		}
+	}); ok {
+		rootTitleHint = identity.rootTitle
+		parentSessionID = identity.parentID
 	}
 	if err := replaceRuntimeMessages(session, result.ReplacementHistory); err != nil {
 		return history, report, fmt.Errorf("共享 chat 自动压缩结果更新失败: %w", err)
@@ -566,7 +577,11 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 	if session.RuntimeSession != nil {
 		// Shared-chat fallback path does not go through actor.Compact; apply the
 		// same in-place compact title lineage used by the actor-first path.
-		session.RuntimeSession.ApplyCompactTitleLineage(parentSessionID, rootTitleHint)
+		// ApplyCompactTitleLineage 会写入同一张运行时 context map（5 个 lineage 键），
+		// 必须持 ChatSession 叶子锁，否则与 bridge worker 的读构成并发 map 读写。
+		withChatRuntimeSessionWrite(session, func(runtimeSession *runtimechat.Session) {
+			runtimeSession.ApplyCompactTitleLineage(parentSessionID, rootTitleHint)
+		})
 	}
 	applyChatCompactContextUsage(session, result, status, true)
 	if session.RuntimeSession != nil {
@@ -588,10 +603,10 @@ func maybeAutoCompactSharedChatHistory(ctx context.Context, session *ChatSession
 // chatSessionPromptCacheEpoch reads the durable prompt-cache generation that
 // the actor-first path maintains under agent.PromptCacheEpochSessionContextKey.
 func chatSessionPromptCacheEpoch(session *ChatSession) int {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil {
 		return 0
 	}
-	epoch := chatContextIntValue(session.RuntimeSession.Metadata.Context, agent.PromptCacheEpochSessionContextKey)
+	epoch := chatContextIntValue(chatRuntimeContextMapSnapshot(session), agent.PromptCacheEpochSessionContextKey)
 	if epoch < 0 {
 		return 0
 	}
@@ -608,7 +623,9 @@ func advanceSharedChatPromptCacheEpoch(session *ChatSession) int {
 		return 0
 	}
 	next := chatSessionPromptCacheEpoch(session) + 1
-	session.RuntimeSession.SetContext(agent.PromptCacheEpochSessionContextKey, next)
+	withChatRuntimeSessionWrite(session, func(runtimeSession *runtimechat.Session) {
+		runtimeSession.SetContext(agent.PromptCacheEpochSessionContextKey, next)
+	})
 	return next
 }
 

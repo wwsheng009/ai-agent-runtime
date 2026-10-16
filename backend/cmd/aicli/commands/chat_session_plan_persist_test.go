@@ -141,7 +141,8 @@ func TestRestoreChatRuntimeContext_StoredPlanDoesNotPoisonCLIMode(t *testing.T) 
 	sessionmeta.Set(runtimeSession.Metadata.Context, sessionmeta.PermissionMode, string(runtimepolicy.ModePlan), chatRuntimeContextPermissionMode)
 
 	session := &ChatSession{PermissionMode: runtimepolicy.ModeBypassPermissions}
-	restoreChatRuntimeContext(session, runtimeSession)
+	setChatRuntimeSessionPointer(session, runtimeSession)
+	restoreChatRuntimeContext(session)
 	if session.PermissionMode != runtimepolicy.ModeBypassPermissions {
 		t.Fatalf("stored plan must not poison the CLI permission mode: got %s", session.PermissionMode)
 	}

@@ -320,10 +320,18 @@ func runtimeSessionContextInt(session *runtimechat.Session, key string) (int, bo
 // canonical 残留陈旧小值而 legacy 是实时锚点时会把锚点遮蔽掉（2026-10-12
 // 状态栏 “Context 0%” 事件）。需要读取锚点原值的调用方使用本函数。
 func runtimeSessionContextRawInt(session *runtimechat.Session, key string) (int, bool) {
-	if session == nil || session.Metadata.Context == nil {
+	if session == nil {
 		return 0, false
 	}
-	value, ok := session.Metadata.Context[key]
+	return contextRawIntValue(session.Metadata.Context, key)
+}
+
+// contextRawIntValue 逐字读取单个 context 键并做数值转换（不做候选键别名解析）。
+func contextRawIntValue(ctx map[string]interface{}, key string) (int, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	value, ok := ctx[key]
 	if !ok || value == nil {
 		return 0, false
 	}
@@ -345,18 +353,28 @@ const (
 //     纵深防御）；
 //  2. 无结构化锚点时保持历史顺序：canonical → legacy。
 func runtimeSessionAnchoredContextInt(session *runtimechat.Session) (int, string, bool) {
-	if session == nil || session.Metadata.Context == nil {
+	if session == nil {
 		return 0, "", false
 	}
-	if _, structured := session.Metadata.Context[runtimechat.RuntimeContextAnchorFingerprintKey]; structured {
-		if anchor, ok := runtimeSessionContextRawInt(session, chatRuntimeContextContextTokenCount); ok && anchor > 0 {
+	return runtimeContextAnchoredInt(session.Metadata.Context)
+}
+
+// runtimeContextAnchoredInt 是 runtimeSessionAnchoredContextInt 的 map 形态核心：
+// 调用方负责保证 ctx 的并发访问已被 ChatSession.runtimeContextMapMu 保护（或 ctx 是
+// 私有快照）。
+func runtimeContextAnchoredInt(ctx map[string]interface{}) (int, string, bool) {
+	if ctx == nil {
+		return 0, "", false
+	}
+	if _, structured := ctx[runtimechat.RuntimeContextAnchorFingerprintKey]; structured {
+		if anchor, ok := contextRawIntValue(ctx, chatRuntimeContextContextTokenCount); ok && anchor > 0 {
 			return anchor, chatContextUsedSourceAnchorLegacy, true
 		}
 	}
-	if value, ok := runtimeSessionContextRawInt(session, sessionmeta.ContextTokenCount); ok && value > 0 {
+	if value, ok := contextRawIntValue(ctx, sessionmeta.ContextTokenCount); ok && value > 0 {
 		return value, chatContextUsedSourceAnchorCanonical, true
 	}
-	if value, ok := runtimeSessionContextRawInt(session, chatRuntimeContextContextTokenCount); ok && value > 0 {
+	if value, ok := contextRawIntValue(ctx, chatRuntimeContextContextTokenCount); ok && value > 0 {
 		return value, chatContextUsedSourceAnchorLegacy, true
 	}
 	return 0, "", false
@@ -373,14 +391,13 @@ func isChatProviderReportedUsageSource(source string) bool {
 // 按次写锚点，而 CLI 副本此前只在 resume/compact 刷新——长回合中状态栏 tier-1
 // 因此读到冻结旧值（2026-10-12 现场：请求结束后 used 不更新，resume 后正常）。
 func updateChatRuntimeSessionContextAnchor(session *ChatSession, inputTokens int) {
-	if session == nil || session.RuntimeSession == nil || inputTokens <= 0 {
+	if session == nil || inputTokens <= 0 {
 		return
 	}
-	ctx := session.RuntimeSession.Metadata.Context
-	if ctx == nil {
-		ctx = make(map[string]interface{})
-		session.RuntimeSession.Metadata.Context = ctx
-	}
-	ctx[chatRuntimeContextContextTokenCount] = inputTokens
-	ctx[sessionmeta.ContextTokenCount] = inputTokens
+	// 本函数由 bridge worker 在流式回合中调用，与会话属主 / actor 的 context 写
+	// 并发；必须走共享 map 锁，否则就是 2026-10-16 fatal 的写方。
+	withRuntimeContextWrite(session, func(ctx map[string]interface{}) {
+		ctx[chatRuntimeContextContextTokenCount] = inputTokens
+		ctx[sessionmeta.ContextTokenCount] = inputTokens
+	})
 }

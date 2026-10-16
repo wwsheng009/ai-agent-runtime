@@ -241,12 +241,11 @@ func recordACPSessionWorkspace(ctx context.Context, hostSess *acpHostSession, wo
 	if chat == nil {
 		return
 	}
-	if chat.RuntimeSession != nil {
-		if chat.RuntimeSession.Metadata.Context == nil {
-			chat.RuntimeSession.Metadata.Context = map[string]interface{}{}
-		}
-		chat.RuntimeSession.Metadata.Context["cwd"] = workspace
-	}
+	// 本函数由 ACP/host goroutine 调用，写的是 CLI 会话副本的共享 context map，
+	// 必须与 bridge worker 的状态读取互斥（2026-10-16 fatal 的写方之一）。
+	withRuntimeContextWrite(chat, func(ctx map[string]interface{}) {
+		ctx["cwd"] = workspace
+	})
 	if chat.SessionManager == nil {
 		return
 	}
@@ -293,8 +292,8 @@ func acpLiveSessionMatchesCwd(chat *ChatSession, cwd string) bool {
 	}
 	// Only an explicit runtime session workspace is authoritative; sessions
 	// that never recorded one stay visible (unknown workspace).
-	if chat.RuntimeSession != nil {
-		if workspace := acpSessionCwd(chat.RuntimeSession); workspace != "" {
+	if runtimeSession := chatRuntimeSessionSnapshot(chat); runtimeSession != nil {
+		if workspace := acpSessionCwd(runtimeSession); workspace != "" {
 			return acpSamePath(workspace, want)
 		}
 	}
@@ -328,8 +327,8 @@ func acpSessionSummaryForChat(sessionID string, chat *ChatSession) acp.SessionSu
 	if chat == nil {
 		return summary
 	}
-	if chat.RuntimeSession != nil {
-		return acpSessionSummaryForStore(chat.RuntimeSession)
+	if runtimeSession := chatRuntimeSessionSnapshot(chat); runtimeSession != nil {
+		return acpSessionSummaryForStore(runtimeSession)
 	}
 	return summary
 }

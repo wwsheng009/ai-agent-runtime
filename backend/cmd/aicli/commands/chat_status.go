@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
@@ -430,22 +431,29 @@ func buildChatStatusFastModeValue(session *ChatSession) string {
 }
 
 func buildChatStatusSessionValue(session *ChatSession) string {
-	if session == nil || session.RuntimeSession == nil {
+	// 状态栏由 bridge worker 构建：在读锁内直接读 live session。标题是历史派生值
+	// （BuildPreview 需要历史），脱钩快照（CloneWithoutHistory）会读到空历史而丢标题。
+	value, ok := chatRuntimeSessionRead(session, buildChatStatusSessionValueText)
+	if !ok {
 		return "<none>"
 	}
-	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	return value
+}
+
+func buildChatStatusSessionValueText(runtimeSession *runtimechat.Session) string {
+	sessionID := strings.TrimSpace(runtimeSession.ID)
 	if sessionID == "" {
 		return "<none>"
 	}
 	parts := []string{sessionID}
-	title := strings.TrimSpace(runtimeResumeSessionTitle(session.RuntimeSession))
+	title := strings.TrimSpace(runtimeResumeSessionTitle(runtimeSession))
 	if title != "" && title != "(untitled)" {
 		parts = append(parts, title)
 	}
 	// Only append a separate badge when the title does not already embed
 	// "· compact #N" (sticky compact titles do). Keeps /status scannable without
 	// "title · compact #2 · compact #2" redundancy.
-	if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
+	if generation := runtimeSessionCompactGeneration(runtimeSession); generation > 0 {
 		badge := fmt.Sprintf("compact #%d", generation)
 		if title == "" || title == "(untitled)" || !strings.Contains(strings.ToLower(title), strings.ToLower(badge)) {
 			parts = append(parts, badge)
@@ -554,7 +562,7 @@ func resolveChatStatusContextUsedTokensWithSource(session *ChatSession) (int, st
 	// 262K). Structured anchors are read verbatim (legacy key) so a stale
 	// canonical twin cannot shadow the live anchor (2026-10-12 reader-side
 	// defense, §5.2-C of docs/analysis/context-usage-status-value-chain-analysis-20261012.md).
-	if value, source, ok := runtimeSessionAnchoredContextInt(session.RuntimeSession); ok {
+	if value, source, ok := chatRuntimeContextAnchoredInt(session); ok {
 		return value, source
 	}
 	if session.ContextTokenCount > 0 {

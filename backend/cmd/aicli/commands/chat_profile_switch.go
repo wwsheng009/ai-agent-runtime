@@ -280,14 +280,12 @@ func applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitch
 // clearFrozenChatSystemPromptAnchor 删除会话级 prompt 冻结锚点，使下一次 compose
 // 重新组合 head（①）。锚点只在下一次 compose 被读取，因此在途 turn 的 head 不受影响。
 func clearFrozenChatSystemPromptAnchor(session *ChatSession) bool {
-	ctx := frozenChatSystemPromptContext(session.RuntimeSession, session)
-	if ctx == nil {
+	if _, ok := chatRuntimeContextValue(session, sessionmeta.SystemPromptFrozen); !ok {
 		return false
 	}
-	if _, ok := sessionmeta.Value(ctx, sessionmeta.SystemPromptFrozen); !ok {
-		return false
-	}
-	sessionmeta.Delete(ctx, sessionmeta.SystemPromptFrozen)
+	withRuntimeContextEdit(session, func(ctx map[string]interface{}) {
+		sessionmeta.Delete(ctx, sessionmeta.SystemPromptFrozen)
+	})
 	return true
 }
 
@@ -427,14 +425,12 @@ func applyChatProfileIdentityToRuntimeSession(session *ChatSession, state *chatP
 	if session == nil || state == nil || !state.Active() {
 		return
 	}
-	ctx := frozenChatSystemPromptContext(session.RuntimeSession, session)
-	if ctx == nil {
-		return
-	}
-	sessionmeta.Set(ctx, sessionmeta.ProfileRef, strings.TrimSpace(state.Reference))
-	sessionmeta.Set(ctx, sessionmeta.ProfileName, strings.TrimSpace(state.Resolved.ProfileName))
-	sessionmeta.Set(ctx, sessionmeta.ProfileAgent, strings.TrimSpace(state.Resolved.AgentID))
-	sessionmeta.Set(ctx, sessionmeta.ProfileRoot, strings.TrimSpace(state.Resolved.ProfileRoot))
+	withRuntimeContextWrite(session, func(ctx map[string]interface{}) {
+		sessionmeta.Set(ctx, sessionmeta.ProfileRef, strings.TrimSpace(state.Reference))
+		sessionmeta.Set(ctx, sessionmeta.ProfileName, strings.TrimSpace(state.Resolved.ProfileName))
+		sessionmeta.Set(ctx, sessionmeta.ProfileAgent, strings.TrimSpace(state.Resolved.AgentID))
+		sessionmeta.Set(ctx, sessionmeta.ProfileRoot, strings.TrimSpace(state.Resolved.ProfileRoot))
+	})
 }
 
 // profileSwitchDeferredDefaultWarnings 报告 provider/model/permission 的差异。
@@ -473,11 +469,7 @@ func chatSessionStoredPermissionMode(session *ChatSession) string {
 	if session == nil {
 		return ""
 	}
-	ctx := frozenChatSystemPromptContext(session.RuntimeSession, session)
-	if ctx == nil {
-		return ""
-	}
-	return sessionmeta.String(ctx, sessionmeta.PermissionMode)
+	return chatRuntimeContextString(session, sessionmeta.PermissionMode)
 }
 
 // profileSwitchToolPolicyWarnings 提示工具面安全属性的变化（read_only 翻转）。
@@ -620,12 +612,12 @@ func applyRuntimeProfileDetach(session *ChatSession) (*ProfileSwitchReport, erro
 	report.ContextTokenCountReset = true
 
 	// 阶段 4：身份与持久化——删除 sessionmeta 中的 profile 身份键（⑩）。
-	if ctx := frozenChatSystemPromptContext(session.RuntimeSession, session); ctx != nil {
+	withRuntimeContextEdit(session, func(ctx map[string]interface{}) {
 		sessionmeta.Delete(ctx, sessionmeta.ProfileRef)
 		sessionmeta.Delete(ctx, sessionmeta.ProfileName)
 		sessionmeta.Delete(ctx, sessionmeta.ProfileAgent)
 		sessionmeta.Delete(ctx, sessionmeta.ProfileRoot)
-	}
+	})
 	warnIfChatSessionSyncFails(session, "detach profile", syncRuntimeSessionFromChat(session))
 
 	// 阶段 5：状态栏刷新。

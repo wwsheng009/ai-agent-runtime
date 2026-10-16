@@ -20,7 +20,8 @@ func chatSessionRoutingOverrideRaw(session *ChatSession) string {
 	if session == nil {
 		return ""
 	}
-	return strings.TrimSpace(runtimeSessionContextString(session.RuntimeSession, sessionmeta.LegacyAICLIRoutingOverride))
+	// 状态栏段由 bridge worker 构建，读取必须走共享 map 读锁（fatal 现场栈顶端）。
+	return chatRuntimeContextString(session, sessionmeta.LegacyAICLIRoutingOverride)
 }
 
 // chatSessionRoutingWorkspacePath 取会话绑定的 workspace 路径（N9）：
@@ -29,7 +30,7 @@ func chatSessionRoutingWorkspacePath(session *ChatSession) string {
 	if session == nil {
 		return ""
 	}
-	return strings.TrimSpace(runtimeSessionContextString(session.RuntimeSession, sessionmeta.WorkspacePath))
+	return chatRuntimeContextString(session, sessionmeta.WorkspacePath)
 }
 
 // chatRoutingResolutionForSession 解析当前会话的主 Agent 路由（§4.1 五层）。

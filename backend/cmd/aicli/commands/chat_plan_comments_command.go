@@ -33,10 +33,11 @@ func chatPlanCommentsCommandText(session *ChatSession, verb, rest string) string
 // chatPlanCommentRecordID 解析当前会话计划对应的归档 id；空表示会话还没有计划
 // 上下文（既没 /plan enter 过，也没有可解析的计划路径）。
 func chatPlanCommentRecordID(session *ChatSession) string {
-	if session == nil || session.RuntimeSession == nil {
+	runtimeSession := chatRuntimeSessionSnapshot(session)
+	if runtimeSession == nil {
 		return ""
 	}
-	state := planmode.Load(session.RuntimeSession)
+	state := planmode.Load(runtimeSession)
 	if strings.TrimSpace(state.PlanPath) == "" {
 		return ""
 	}
@@ -100,7 +101,7 @@ func addChatPlanComment(session *ChatSession, rest string) string {
 // 真正看到的正文。没有轮次时先按 decision=comment 归档当前计划（只登记快照：
 // archiveStatus 对 comment 保持原状态），已有轮次则直接复用最新轮。
 func ensureChatPlanCommentRevision(session *ChatSession, store *planstore.Store, notes string) (planstore.Record, error) {
-	state := planmode.Load(session.RuntimeSession)
+	state := loadChatPlanMode(session)
 	record, ok, err := store.Get(chatPlanCommentRecordID(session))
 	if err != nil {
 		return planstore.Record{}, err

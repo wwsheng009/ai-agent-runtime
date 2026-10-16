@@ -174,7 +174,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	}
 	restoredRuntimeSession.History = session.Messages
 	restoredRuntimeSession.HistoryLoaded = runtimeSession.HistoryLoaded
-	session.RuntimeSession = restoredRuntimeSession
+	setChatRuntimeSessionPointer(session, restoredRuntimeSession)
 	updateChatRuntimeEventBridgePrimarySession(session)
 	clearChatTurnRecovery(session)
 	if !strings.EqualFold(strings.TrimSpace(previousSessionID), strings.TrimSpace(runtimeSession.ID)) {
@@ -192,7 +192,7 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	// hydrateChatProfileIdentityFromResumedSession 改写 ProfileRoot 之前执行，
 	// 使锚点来自会话持久化状态而不是 profile 配置目录。
 	freezeChatWorkspaceAnchor(session, nil, runtimeSessionWorkspacePath(runtimeSession))
-	restoreChatRuntimeContext(session, session.RuntimeSession)
+	restoreChatRuntimeContext(session)
 	// A4 resume 半程（Batch 11a）：把持久化的 profile 身份读回会话，并按该引用
 	// 重新解析投影生效面（prompt/tools/skills/mcp 与身份一致；也避免下一次 sync
 	// 因内存字段为空而删除 sessionmeta 里的 profile_ref）。启动路径解析出的显式/
@@ -274,7 +274,7 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	session.TurnRequestCount = 0
 	session.turnPrimed = false
 	resetChatConversationTokenUsage(session)
-	session.RuntimeSession = runtimeSession
+	setChatRuntimeSessionPointer(session, runtimeSession)
 	// 方案 2（工作区权威锚点）：新会话建立时解析一次当前工作区并固化。此后
 	// profile 热切换/配置覆盖不再改写它，/profile use 不会漂移工作目录。
 	freezeChatWorkspaceAnchor(session, loadRuntimeToolConfig(session.Config, session), "")
@@ -625,10 +625,16 @@ func resumeHistoryHasCompactionCheckpoint(messages []runtimetypes.Message) bool 
 // （runtimechat.ContextCompactBoundary）。消息级 checkpoint 扫描 miss
 // （投影损坏 / legacy 重建丢标记）时，它是 canonical 层权威兜底。
 func resumeCompactBoundaryFromContext(session *ChatSession) (runtimechat.CompactBoundary, bool) {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil {
 		return runtimechat.CompactBoundary{}, false
 	}
-	value, ok := session.RuntimeSession.GetContext(runtimechat.ContextCompactBoundary)
+	var (
+		value interface{}
+		ok    bool
+	)
+	withChatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) {
+		value, ok = runtimeSession.GetContext(runtimechat.ContextCompactBoundary)
+	})
 	if !ok {
 		return runtimechat.CompactBoundary{}, false
 	}
@@ -1558,11 +1564,12 @@ func syncRuntimeSessionFromChatAfterPlanMutation(session *ChatSession) error {
 // deliberate CLI-side plan transition; routine end-of-turn syncs always pass
 // false so the 2026-09-18 durable-plan protection stays in effect for them.
 func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt, planMutated bool) error {
-	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
+	if session == nil || session.SessionManager == nil || chatRuntimeSessionPointer(session) == nil {
 		return nil
 	}
 
-	runtimeSession := session.RuntimeSession.CloneWithoutHistory()
+	// Clone 会整张复制 Metadata.Context：必须与并发的 anchor/context 写互斥。
+	runtimeSession := cloneChatRuntimeSessionWithoutHistory(session)
 	if runtimeSession == nil {
 		return runtimechat.ErrInvalidSession
 	}
@@ -1730,7 +1737,7 @@ func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt, pla
 	// 瞬态标志只服务于本次持久化，落库后必须清除，避免后续普通 sync
 	// 克隆时把"保留 UpdatedAt"语义带进正常更新流程。
 	runtimeSession.PreserveUpdatedAt = false
-	session.RuntimeSession = runtimeSession
+	setChatRuntimeSessionPointer(session, runtimeSession)
 	updateChatRuntimeEventBridgePrimarySession(session)
 	return nil
 }
@@ -2262,10 +2269,7 @@ func startupSessionOptionLabelWidth() int {
 }
 
 func currentRuntimeSessionID(session *ChatSession) string {
-	if session == nil || session.RuntimeSession == nil {
-		return ""
-	}
-	return session.RuntimeSession.ID
+	return chatRuntimeSessionID(session)
 }
 
 // updateChatRuntimeEventBridgePrimarySession publishes the current runtime
@@ -2761,19 +2765,20 @@ func ensureSessionEnvironmentSnapshot(session *ChatSession, cwd string) runtimep
 }
 
 func loadSessionEnvironmentSnapshot(session *ChatSession) (runtimeprompt.EnvironmentSnapshot, bool) {
-	if session == nil || session.RuntimeSession == nil || session.RuntimeSession.Metadata.Context == nil {
+	ctx := chatRuntimeContextMapSnapshot(session)
+	if ctx == nil {
 		return runtimeprompt.EnvironmentSnapshot{}, false
 	}
-	contextBlock := strings.TrimSpace(sessionmeta.String(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentContextBlock))
+	contextBlock := strings.TrimSpace(sessionmeta.String(ctx, sessionmeta.EnvironmentContextBlock))
 	if contextBlock == "" {
 		return runtimeprompt.EnvironmentSnapshot{}, false
 	}
 	snap := runtimeprompt.EnvironmentSnapshot{
 		ContextBlock:       contextBlock,
-		CapabilityGuidance: strings.TrimSpace(sessionmeta.String(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentCapabilityGuidance)),
-		Values:             loadEnvironmentValuesMap(session.RuntimeSession.Metadata.Context),
+		CapabilityGuidance: strings.TrimSpace(sessionmeta.String(ctx, sessionmeta.EnvironmentCapabilityGuidance)),
+		Values:             loadEnvironmentValuesMap(ctx),
 	}
-	if probedAt := strings.TrimSpace(sessionmeta.String(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentProbedAt)); probedAt != "" {
+	if probedAt := strings.TrimSpace(sessionmeta.String(ctx, sessionmeta.EnvironmentProbedAt)); probedAt != "" {
 		if parsed, err := time.Parse(time.RFC3339Nano, probedAt); err == nil {
 			snap.ProbedAt = parsed
 		} else if parsed, err := time.Parse(time.RFC3339, probedAt); err == nil {
@@ -2784,22 +2789,21 @@ func loadSessionEnvironmentSnapshot(session *ChatSession) (runtimeprompt.Environ
 }
 
 func storeSessionEnvironmentSnapshot(session *ChatSession, snap runtimeprompt.EnvironmentSnapshot) {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil {
 		return
 	}
-	if session.RuntimeSession.Metadata.Context == nil {
-		session.RuntimeSession.Metadata.Context = make(map[string]interface{})
-	}
-	sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentContextBlock, strings.TrimSpace(snap.ContextBlock))
-	sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentCapabilityGuidance, strings.TrimSpace(snap.CapabilityGuidance))
-	if len(snap.Values) > 0 {
-		sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentValues, cloneEnvironmentValuesMap(snap.Values))
-	}
-	probedAt := snap.ProbedAt
-	if probedAt.IsZero() {
-		probedAt = time.Now().UTC()
-	}
-	sessionmeta.Set(session.RuntimeSession.Metadata.Context, sessionmeta.EnvironmentProbedAt, probedAt.UTC().Format(time.RFC3339Nano))
+	withRuntimeContextWrite(session, func(ctx map[string]interface{}) {
+		sessionmeta.Set(ctx, sessionmeta.EnvironmentContextBlock, strings.TrimSpace(snap.ContextBlock))
+		sessionmeta.Set(ctx, sessionmeta.EnvironmentCapabilityGuidance, strings.TrimSpace(snap.CapabilityGuidance))
+		if len(snap.Values) > 0 {
+			sessionmeta.Set(ctx, sessionmeta.EnvironmentValues, cloneEnvironmentValuesMap(snap.Values))
+		}
+		probedAt := snap.ProbedAt
+		if probedAt.IsZero() {
+			probedAt = time.Now().UTC()
+		}
+		sessionmeta.Set(ctx, sessionmeta.EnvironmentProbedAt, probedAt.UTC().Format(time.RFC3339Nano))
+	})
 }
 
 func loadEnvironmentValuesMap(context map[string]interface{}) map[string]interface{} {

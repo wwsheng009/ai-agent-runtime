@@ -80,9 +80,20 @@ func buildChatResumeDocument(session *ChatSession) render.Document {
 // identity shared by the one-line session-switch confirmations (/resume and
 // /load) so the two entry points cannot drift.
 func runtimeSessionSwitchSummary(session *ChatSession) string {
-	turnCount, messageCount := runtimeSessionConversationCounts(session.RuntimeSession)
-	title := runtimeResumeSessionTitle(session.RuntimeSession)
-	if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
+	// 摘要里的轮数/标题都来自历史，必须读 live session；快照（CloneWithoutHistory）
+	// 不含历史，会让轮数归零、派生标题丢失。
+	if summary, ok := chatRuntimeSessionRead(session, runtimeSessionSwitchSummaryText); ok {
+		return summary
+	}
+	return runtimeSessionSwitchSummaryText(nil)
+}
+
+// runtimeSessionSwitchSummaryText 是纯函数形态的摘要（nil session 退化为
+// "(untitled)（0轮/0条消息）"），供持读锁的调用方与缺 runtime session 的退化路径共用。
+func runtimeSessionSwitchSummaryText(runtimeSession *runtimechat.Session) string {
+	turnCount, messageCount := runtimeSessionConversationCounts(runtimeSession)
+	title := runtimeResumeSessionTitle(runtimeSession)
+	if generation := runtimeSessionCompactGeneration(runtimeSession); generation > 0 {
 		return fmt.Sprintf("%s（compact #%d · %d轮/%d条消息）", title, generation, turnCount, messageCount)
 	}
 	return fmt.Sprintf("%s（%d轮/%d条消息）", title, turnCount, messageCount)
@@ -101,13 +112,39 @@ func buildChatCurrentSessionDocument(session *ChatSession) render.Document {
 	return builder.document()
 }
 
+// chatLoadSessionPreviewSnapshot 是读锁内从 runtime session 摘出的展示字段，
+// 使 BuildPreview（依赖历史）在锁内完成、行拼装在锁外完成。
+type chatLoadSessionPreviewSnapshot struct {
+	sessionLine  string
+	title        string
+	messageCount int
+	hasPreview   bool
+}
+
+// buildChatLoadSessionPreviewSnapshot 在 runtimeContextMapMu 读锁下执行，只读。
+func buildChatLoadSessionPreviewSnapshot(runtimeSession *runtimechat.Session) chatLoadSessionPreviewSnapshot {
+	preview := runtimeSession.BuildPreview()
+	if preview == nil {
+		return chatLoadSessionPreviewSnapshot{}
+	}
+	return chatLoadSessionPreviewSnapshot{
+		sessionLine:  fmt.Sprintf("%s [%s]", preview.ID, preview.State),
+		title:        preview.Title,
+		messageCount: preview.MessageCount,
+		hasPreview:   true,
+	}
+}
+
 func appendChatLoadSessionMeta(builder *chatDebugDocumentBuilder, session *ChatSession) {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil {
 		return
 	}
-	preview := session.RuntimeSession.BuildPreview()
-	if preview != nil {
-		builder.meta("Session:", fmt.Sprintf("%s [%s]", preview.ID, preview.State))
+	preview, ok := chatRuntimeSessionRead(session, buildChatLoadSessionPreviewSnapshot)
+	if !ok {
+		return
+	}
+	if preview.hasPreview {
+		builder.meta("Session:", preview.sessionLine)
 	}
 	if sessionPath := currentRuntimeSessionPath(session); sessionPath != "" {
 		builder.meta("Session File:", sessionPath)
@@ -139,12 +176,28 @@ func appendChatLoadSessionMeta(builder *chatDebugDocumentBuilder, session *ChatS
 	if path := currentLastLocalShellArtifactPath(session); path != "" {
 		builder.meta("Last Shell Out:", path)
 	}
-	if preview != nil && preview.Title != "" {
-		builder.meta("Title:", preview.Title)
+	if preview.hasPreview && preview.title != "" {
+		builder.meta("Title:", preview.title)
 	}
 	appendChatLoadCompactLineage(builder, session)
-	if preview != nil && preview.MessageCount > 0 {
-		builder.meta("History:", fmt.Sprintf("%d messages", preview.MessageCount))
+	if preview.hasPreview && preview.messageCount > 0 {
+		builder.meta("History:", fmt.Sprintf("%d messages", preview.messageCount))
+	}
+}
+
+// chatLoadCompactLineageSnapshot 是压缩血缘行的锁内取值。
+type chatLoadCompactLineageSnapshot struct {
+	generation int
+	rootTitle  string
+	rootID     string
+}
+
+// readChatLoadCompactLineageSnapshot 在 runtimeContextMapMu 读锁下执行，只读。
+func readChatLoadCompactLineageSnapshot(runtimeSession *runtimechat.Session) chatLoadCompactLineageSnapshot {
+	return chatLoadCompactLineageSnapshot{
+		generation: runtimeSessionCompactGeneration(runtimeSession),
+		rootTitle:  strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootTitle)),
+		rootID:     strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootSessionID)),
 	}
 }
 
@@ -152,19 +205,18 @@ func appendChatLoadSessionMeta(builder *chatDebugDocumentBuilder, session *ChatS
 // so /load, /session, and resume success surface generation + root title +
 // root id consistently.
 func appendChatLoadCompactLineage(builder *chatDebugDocumentBuilder, session *ChatSession) {
-	if session == nil || session.RuntimeSession == nil {
+	if builder == nil || session == nil {
 		return
 	}
-	runtimeSession := session.RuntimeSession
-	generation := runtimeSessionCompactGeneration(runtimeSession)
-	if generation <= 0 {
+	lineage, ok := chatRuntimeSessionRead(session, readChatLoadCompactLineageSnapshot)
+	if !ok || lineage.generation <= 0 {
 		return
 	}
-	builder.meta("Compact Gen:", fmt.Sprintf("#%d", generation))
-	if rootTitle := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootTitle)); rootTitle != "" {
-		builder.meta("Compact Root:", rootTitle)
+	builder.meta("Compact Gen:", fmt.Sprintf("#%d", lineage.generation))
+	if lineage.rootTitle != "" {
+		builder.meta("Compact Root:", lineage.rootTitle)
 	}
-	if rootID := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootSessionID)); rootID != "" {
-		builder.meta("Compact Root ID:", rootID)
+	if lineage.rootID != "" {
+		builder.meta("Compact Root ID:", lineage.rootID)
 	}
 }

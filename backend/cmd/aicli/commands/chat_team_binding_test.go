@@ -89,7 +89,8 @@ func TestChatRuntimeContext_RoundTripsSelectedAgentTarget(t *testing.T) {
 	}
 
 	restored := &ChatSession{}
-	restoreChatRuntimeContext(restored, runtimeSession)
+	setChatRuntimeSessionPointer(restored, runtimeSession)
+	restoreChatRuntimeContext(restored)
 	if restored.SelectedAgentTarget != "/root/agent-1" {
 		t.Fatalf("expected selected target to restore, got %q", restored.SelectedAgentTarget)
 	}
@@ -104,8 +105,9 @@ func TestChatRuntimeContext_RoundTripsSelectedAgentTarget(t *testing.T) {
 func TestRestoreChatRuntimeContext_ClearsDebugModeWhenMetadataMissing(t *testing.T) {
 	runtimeSession := runtimechat.NewSession("tester")
 	session := &ChatSession{DebugMode: true}
+	setChatRuntimeSessionPointer(session, runtimeSession)
 
-	restoreChatRuntimeContext(session, runtimeSession)
+	restoreChatRuntimeContext(session)
 
 	if session.DebugMode {
 		t.Fatal("expected debug mode to reset when restored session has no debug metadata")
@@ -125,7 +127,8 @@ func TestRestoreChatRuntimeContext_KeepsCLIPermissionOverride(t *testing.T) {
 		permissionModeCLIChanged: true, // 相当于 --yolo / --permission-mode
 	}
 
-	restoreChatRuntimeContext(session, runtimeSession)
+	setChatRuntimeSessionPointer(session, runtimeSession)
+	restoreChatRuntimeContext(session)
 	if session.PermissionMode != runtimepolicy.ModeBypassPermissions {
 		t.Fatalf("CLI 显式指定的权限模式被持久化会话覆盖: got %s, want %s", session.PermissionMode, runtimepolicy.ModeBypassPermissions)
 	}
@@ -151,7 +154,8 @@ func TestRestoreChatRuntimeContext_StoredModeWinsWithoutCLIOverride(t *testing.T
 		EffectivePermissionMode: string(runtimepolicy.ModeBypassPermissions),
 	}
 
-	restoreChatRuntimeContext(session, runtimeSession)
+	setChatRuntimeSessionPointer(session, runtimeSession)
+	restoreChatRuntimeContext(session)
 	if session.PermissionMode != runtimepolicy.ModeDefault {
 		t.Fatalf("未显式指定权限模式时应恢复持久化会话的模式: got %s, want %s", session.PermissionMode, runtimepolicy.ModeDefault)
 	}

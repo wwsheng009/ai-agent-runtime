@@ -868,15 +868,16 @@ func appendChatDebugSessionDetails(builder *chatDebugDocumentBuilder, session *C
 	if session.RetryConfig.DisableRetries {
 		builder.meta("Retry Mode:", "fail-fast")
 	}
-	if session.RuntimeSession == nil {
+	runtimeSession := chatRuntimeSessionSnapshot(session)
+	if runtimeSession == nil {
 		return
 	}
-	if generation := runtimeSessionCompactGeneration(session.RuntimeSession); generation > 0 {
+	if generation := runtimeSessionCompactGeneration(runtimeSession); generation > 0 {
 		builder.meta("Compact Gen:", fmt.Sprintf("#%d", generation))
-		if rootTitle := strings.TrimSpace(runtimeSessionContextString(session.RuntimeSession, runtimechat.ContextCompactRootTitle)); rootTitle != "" {
+		if rootTitle := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootTitle)); rootTitle != "" {
 			builder.meta("Compact Root:", rootTitle)
 		}
-		if rootID := strings.TrimSpace(runtimeSessionContextString(session.RuntimeSession, runtimechat.ContextCompactRootSessionID)); rootID != "" {
+		if rootID := strings.TrimSpace(runtimeSessionContextString(runtimeSession, runtimechat.ContextCompactRootSessionID)); rootID != "" {
 			builder.meta("Compact Root ID:", rootID)
 		}
 	}
