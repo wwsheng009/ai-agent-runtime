@@ -313,8 +313,23 @@ func IsEssential(name string) bool           // 取代 policy.IsRuntimeOwnedEsse
 两者已由新增守卫 `policy/taxonomy_registry_coverage_test.go`（语料取自 `toolregistry.Entries()`、
 不硬编码数量）钉成不变量：**注册表条目必须在策略表中声明；网络判定只认声明、不认名字**。
 
-**残留（诚实标注）**：把 `Capability` 域做成 profile 可声明字段（§10 替换方案的**本体**）是
-**独立提案**，不在本 campaign 范围；本 campaign 只保证"域表覆盖注册表全量、无名字启发式"。
+**替换路径的现状（2026-10-16 复核，**修正原稿的"残留"表述**）**：`tools.disabled_capabilities`
+（`profile/spec.go:87`，合法域取自 `policy.AllUserDisablableCapabilities()`）**已落地并端到端接线**
+——profile 双镜像 + Merge 并集 + validate 域名校验 → `profileinput.BuildToolExecutionPolicy`
+（未知域报错；翻译为 `SetCapabilityScope(全集−disabled)`；`read_only`/`exec_shell` 为底座域不可禁用）
+→ 双落点护栏 `TestProfileToolPolicyDisabledCapabilitiesEquivalence`；能力域 e2e
+`profileinput/disabled_capabilities_test.go`（`network`/`background_task` 不在允许集、
+`read_only`/`exec_shell`/`write_fs`/`agent_management` 在；被撤下的域再 `AllowCapabilities` 报错；
+未知域报错；无声明保持 nil 零改动）。披露方案 §10.3 第 4 条已记为"可选 → 已实施（2026-10-15）"。
+**本 campaign 负责的是它成立的前提**：域表覆盖注册表全量、网络判定不认名字——否则域门控会
+漏放（`spawn_subagents` 授权逃逸）或误拒（`code.*` 被当需要 network）。
+（原稿此处写"是独立提案、不在本 campaign 范围"**不准确**，已按代码复核改正。）
+
+**同线的另一条（prompt 撤段）也已实现，但机制与 §10.3 原文不同**：§10.3 第 2 条要求"6 处 guidance
+的注入条件改为'该能力域已启用'"，实际落地是**按主题工具是否对模型可见**撤段
+（`prompt/tool_guidance.go` 的 `ToolGuidanceFacts`，工具名语料取自
+`toolregistry.CallableNames(...)`）——效果等价且更直接（域被禁用 ⇒ 工具不可见 ⇒ 撤段），
+并额外覆盖"被 allowlist 裁掉"的情形。
 
 ---
 
