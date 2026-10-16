@@ -82,7 +82,7 @@ func brokerIgnoredArgHint(toolName, key string) string {
 		return "no broker tool restricts its tool surface this way; spawn_subagents task entries take tools_whitelist"
 	case "message", "goal", "task", "prompt", "instruction", "instructions",
 		"task_description", "objective", "goal_text", "content", "text", "description":
-		return "this tool carries no task prompt; spawn_agent (message, alias goal/task/prompt), send_message, followup_task and send_input do"
+		return "this tool carries no task prompt; subagent_spawn (message, alias goal/task/prompt), subagent_send, subagent_followup and subagent_input do"
 	case "read_only", "permission_mode", "difficulty", "difficulty_rationale",
 		"task_type", "task_subject", "isolation",
 		"fork_context", "fork_turns", "completion_requirement", "provider", "model",
@@ -99,13 +99,13 @@ func brokerIgnoredArgHint(toolName, key string) string {
 	case "agent_id":
 		return "team_mailbox addresses a mailbox by agent_id; child sessions use id/session_id"
 	case "target":
-		return "send_message and followup_task address a child by target/id/session_id"
+		return "subagent_send and subagent_followup address a child by target/id/session_id"
 	case "keep":
-		return "apply_agent_worktree is the only tool that accepts keep"
+		return "subagent_apply_worktree is the only tool that accepts keep"
 	case "interrupt":
-		return "send_input is the only tool that accepts interrupt"
+		return "subagent_input is the only tool that accepts interrupt"
 	case "allow":
-		return "resolve_agent_approval is the only tool that accepts allow"
+		return "subagent_approve is the only tool that accepts allow"
 	default:
 		return ""
 	}

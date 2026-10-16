@@ -8,7 +8,7 @@ import (
 
 // TestBrokerToolArgKeys_CoversEveryBrokerTool keeps the audit table complete: a
 // broker tool without an entry would silently drop unsupported keys again, which
-// is the failure class (`goal` on spawn_agent, `tools_whitelist` on tools that
+// is the failure class (`goal` on subagent_spawn, `tools_whitelist` on tools that
 // never restrict their surface) this package already fixed at the tool level.
 func TestBrokerToolArgKeys_CoversEveryBrokerTool(t *testing.T) {
 	tools := []string{
@@ -89,7 +89,7 @@ func TestAnnotateIgnoredBrokerToolArgs_ReportsDroppedKeys(t *testing.T) {
 	if !strings.Contains(next, "existing guidance") {
 		t.Fatalf("existing next_action must be preserved, got %q", next)
 	}
-	if !strings.Contains(next, "goal") || !strings.Contains(next, "spawn_agent") {
+	if !strings.Contains(next, "goal") || !strings.Contains(next, "subagent_spawn") {
 		t.Fatalf("next_action must explain the dropped key and the tool that takes it, got %q", next)
 	}
 
@@ -120,7 +120,7 @@ func TestBroker_Execute_ReportsIgnoredArgumentsInsteadOfDroppingThem(t *testing.
 	if !ok || len(ignored) != 1 || ignored[0] != "goal" {
 		t.Fatalf("expected ignored_args=[goal], got %#v", metadata["ignored_args"])
 	}
-	if next, _ := metadata["next_action"].(string); !strings.Contains(next, "spawn_agent") {
+	if next, _ := metadata["next_action"].(string); !strings.Contains(next, "subagent_spawn") {
 		t.Fatalf("expected an actionable hint, got %q", next)
 	}
 }

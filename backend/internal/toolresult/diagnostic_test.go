@@ -104,8 +104,8 @@ func TestDiagnoseArtifactNotFoundGetsExpiryHint(t *testing.T) {
 			if !strings.Contains(diagnostic.NextAction, "expired or been pruned") {
 				t.Fatalf("expected expiry/prune mention, got %q", diagnostic.NextAction)
 			}
-			if !strings.Contains(diagnostic.NextAction, "task_output") {
-				t.Fatalf("expected never-pass-to-task_output warning, got %q", diagnostic.NextAction)
+			if !strings.Contains(diagnostic.NextAction, "job_output") {
+				t.Fatalf("expected never-pass-to-job_output warning, got %q", diagnostic.NextAction)
 			}
 		})
 	}
@@ -595,9 +595,9 @@ func TestDiagnoseAgentLifecycleConflictNextActions(t *testing.T) {
 		code           runtimeerrors.ErrorCode
 		wantNextSubstr string
 	}{
-		{name: "already exists", message: "session already exists: child-1", code: runtimeerrors.ErrAgentAlreadyExists, wantNextSubstr: "Do not retry the same spawn_agent unchanged"},
-		{name: "busy", message: "session is busy (running)", code: runtimeerrors.ErrAgentBusy, wantNextSubstr: "Do not retry the same send_input unchanged"},
-		{name: "session not found", message: "[AGENT_SESSION_NOT_FOUND] agent session reference not found: session_ref_missing", code: runtimeerrors.ErrAgentSessionNotFound, wantNextSubstr: "Use list_agents"},
+		{name: "already exists", message: "session already exists: child-1", code: runtimeerrors.ErrAgentAlreadyExists, wantNextSubstr: "Do not retry the same subagent_spawn unchanged"},
+		{name: "busy", message: "session is busy (running)", code: runtimeerrors.ErrAgentBusy, wantNextSubstr: "Do not retry the same subagent_input unchanged"},
+		{name: "session not found", message: "[AGENT_SESSION_NOT_FOUND] agent session reference not found: session_ref_missing", code: runtimeerrors.ErrAgentSessionNotFound, wantNextSubstr: "Use subagent_list"},
 		{name: "acting session not found", message: "session not found: sess-missing", code: runtimeerrors.ErrSessionNotFound, wantNextSubstr: "host-side session lifecycle"},
 		{name: "thread limit", message: "agent spawn thread limit reached: max_threads=4 active_children=4", code: runtimeerrors.ErrAgentThreadLimit, wantNextSubstr: "Free capacity first"},
 		{name: "registry unavailable", message: "agent control agent registry store is not initialized", code: runtimeerrors.ErrAgentRegistryUnavailable, wantNextSubstr: "Do not retry the same call unchanged"},

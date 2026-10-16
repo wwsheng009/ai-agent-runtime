@@ -103,7 +103,8 @@ func TestHandlerSupervisionToolController_ReadAgentResult(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, supervision.ResultSourceNone, missing.Source)
 	require.Equal(t, "no_result_recorded", missing.ErrorCode)
-	require.Contains(t, missing.NextAction, "read_agent_events")
+	require.Contains(t, missing.NextAction, "subagent_events",
+		"引导必须点名注册表规范名（read_agent_events 只是别名）")
 }
 
 // TestHandlerSupervisionToolController_ReadAgentResultWithoutResultProvider:
@@ -119,7 +120,8 @@ func TestHandlerSupervisionToolController_ReadAgentResultWithoutResultProvider(t
 	require.NoError(t, err)
 	require.Equal(t, supervision.ResultSourceNone, payload.Source)
 	require.Equal(t, "no_result_recorded", payload.ErrorCode)
-	require.Contains(t, payload.NextAction, "wait_agent")
+	require.Contains(t, payload.NextAction, "subagent_wait",
+		"引导必须点名注册表规范名（wait_agent 只是别名）")
 }
 
 // TestHandlerSupervisionToolController_DescendantsIncludeResultsPassthrough

@@ -92,8 +92,8 @@ func TestNoResultRecordedPayloadIsActionable(t *testing.T) {
 	require.Equal(t, "no_result_recorded", payload.ErrorCode)
 	require.Equal(t, "child-1", payload.SessionID)
 	require.Equal(t, "task-1", payload.TaskID)
-	require.Contains(t, payload.NextAction, "read_agent_events")
-	require.Contains(t, payload.NextAction, "wait_agent")
+	require.Contains(t, payload.NextAction, "subagent_events")
+	require.Contains(t, payload.NextAction, "subagent_wait")
 
 	raw, err := json.Marshal(payload)
 	require.NoError(t, err)

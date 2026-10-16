@@ -1241,8 +1241,8 @@ func TestFinalizeAgentWaitResultProvidesSchedulingGuidance(t *testing.T) {
 	if !strings.HasPrefix(result.NextAction, "resolve_pending_approval") {
 		t.Fatalf("approval guidance must take precedence: %#v", result)
 	}
-	if !strings.Contains(result.NextAction, "resolve_agent_approval") || !strings.Contains(result.NextAction, "child-2") {
-		t.Fatalf("approval next_action should name resolve_agent_approval and child id: %#v", result)
+	if !strings.Contains(result.NextAction, "subagent_approve") || !strings.Contains(result.NextAction, "child-2") {
+		t.Fatalf("approval next_action should name subagent_approve and child id: %#v", result)
 	}
 
 	result = FinalizeAgentWaitResult(&AgentWaitResult{
@@ -1584,7 +1584,7 @@ func TestFinalizeAgentEventsResult(t *testing.T) {
 		Count:    0,
 		TimedOut: true,
 	})
-	if result.NextAction != "stop_empty_event_poll: timed out with 0 events; use wait_agent for child readiness, send_message/followup_task for work, or proceed without re-calling the same read_agent_events" {
+	if result.NextAction != "stop_empty_event_poll: timed out with 0 events; use subagent_wait for child readiness, subagent_send/subagent_followup for work, or proceed without re-calling the same subagent_events" {
 		t.Fatalf("unexpected timeout next_action: %#v", result.NextAction)
 	}
 
@@ -1602,12 +1602,12 @@ func TestFinalizeAgentEventsResult(t *testing.T) {
 		Events: []AgentEventItem{{Type: "assistant_message"}},
 		Count:  1,
 	})
-	if result.NextAction != "consume_events: use returned events now; only re-call read_agent_events with a higher after_seq when new events are needed" {
+	if result.NextAction != "consume_events: use returned events now; only re-call subagent_events with a higher after_seq when new events are needed" {
 		t.Fatalf("events next_action: %#v", result.NextAction)
 	}
 
 	result = FinalizeAgentEventsResult(&AgentEventsResult{Count: 0})
-	if !strings.Contains(result.NextAction, "stop_empty_event_poll") || !strings.Contains(result.NextAction, "do not immediately re-call read_agent_events with the same id") {
+	if !strings.Contains(result.NextAction, "stop_empty_event_poll") || !strings.Contains(result.NextAction, "do not immediately re-call subagent_events with the same id") {
 		t.Fatalf("empty non-blocking next_action: %#v", result.NextAction)
 	}
 }

@@ -199,10 +199,26 @@ type HTTPTimeout struct {
 	UpstreamAcceptEncoding   string        `yaml:"upstream_accept_encoding" mapstructure:"upstream_accept_encoding"`
 }
 
+// NativeWebSearchCapability declares provider-native web search support for one
+// model. It is the normalized capability bit of the native-search strategy
+// (P2-5): Supported gates routing, ToolType/Protocol are descriptive hints for
+// the protocol adapter ("" protocol = infer from the provider template later).
+//
+// The declaration is optional on purpose: nil means "not declared", which keeps
+// serialized provider snapshots byte-stable for models that never opted in
+// (same presence discipline as ReplayReasoningContent).
+type NativeWebSearchCapability struct {
+	Supported bool   `yaml:"supported" mapstructure:"supported" json:"supported"`
+	ToolType  string `yaml:"tool_type,omitempty" mapstructure:"tool_type" json:"tool_type,omitempty"`
+	Protocol  string `yaml:"protocol,omitempty" mapstructure:"protocol" json:"protocol,omitempty"`
+}
+
 // NativeToolCapabilities declares provider-native tool support for one model.
 type NativeToolCapabilities struct {
 	ImageGeneration      bool `yaml:"image_generation" mapstructure:"image_generation" json:"image_generation"`
 	ImagesGenerationsAPI bool `yaml:"images_generations_api" mapstructure:"images_generations_api" json:"images_generations_api"`
+	// WebSearch is the normalized native web search declaration; nil = not declared.
+	WebSearch *NativeWebSearchCapability `yaml:"web_search,omitempty" mapstructure:"web_search" json:"web_search,omitempty"`
 }
 
 // ModelCapabilitySpec declares per-model input modalities and native tool support.
@@ -233,6 +249,39 @@ type ModelCapabilitySpec struct {
 	AutoCompactMode        string  `yaml:"auto_compact_mode" mapstructure:"auto_compact_mode" json:"auto_compact_mode"`
 	SupportsRemoteCompact  bool    `yaml:"supports_remote_compact" mapstructure:"supports_remote_compact" json:"supports_remote_compact"`
 	CompactReasoningEffort string  `yaml:"compact_reasoning_effort" mapstructure:"compact_reasoning_effort" json:"compact_reasoning_effort"`
+	// SupportsSearchTool / WebSearchToolType are the legacy capability-level
+	// declaration keys (capability.supports_search_tool /
+	// capability.web_search_tool_type) kept for model-card compatibility.
+	// New configurations should use native_tools.web_search; the effective
+	// accessor folds these keys in as a fallback, and the new key wins whenever
+	// both are present.
+	SupportsSearchTool *bool  `yaml:"supports_search_tool" mapstructure:"supports_search_tool" json:"supports_search_tool,omitempty"`
+	WebSearchToolType  string `yaml:"web_search_tool_type,omitempty" mapstructure:"web_search_tool_type" json:"web_search_tool_type,omitempty"`
+}
+
+// EffectiveNativeWebSearch returns the normalized native web search capability.
+//
+// Merge semantics mirror native_tools.image_generation ("any source declaring
+// support wins"): the new native_tools.web_search block supplies the preferred
+// ToolType/Protocol, and the legacy capability-level keys remain a fallback for
+// models that have not been migrated plus a support source of their own. An
+// explicit "unsupported" override is therefore not expressible today; if a
+// future endpoint needs to withdraw an inherited capability, extend this type
+// with a presence-aware pointer then.
+func (s ModelCapabilitySpec) EffectiveNativeWebSearch() NativeWebSearchCapability {
+	out := NativeWebSearchCapability{}
+	if s.NativeTools.WebSearch != nil {
+		out = *s.NativeTools.WebSearch
+	}
+	if !out.Supported && s.SupportsSearchTool != nil && *s.SupportsSearchTool {
+		out.Supported = true
+	}
+	out.ToolType = strings.TrimSpace(out.ToolType)
+	if out.ToolType == "" {
+		out.ToolType = strings.TrimSpace(s.WebSearchToolType)
+	}
+	out.Protocol = strings.TrimSpace(out.Protocol)
+	return out
 }
 
 // Provider holds provider configuration.

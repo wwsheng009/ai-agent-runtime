@@ -4711,8 +4711,13 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 		GlobalLimiter: h.subagentGlobalLimiter(agentsConfig.MaxThreads),
 		MaxQueueDepth: agentsConfig.MaxConcurrentQueueDepth,
 		QueueTimeout:  time.Duration(agentsConfig.MaxConcurrentQueueTimeoutMs) * time.Millisecond,
+		// 能力位（P1-1'）：与 CLI 宿主同口径，未授予的请求在 spawn 准入即拒绝。
+		Capabilities:          apiSubagentCapabilities(agentsConfig),
+		ForkMaxSnapshotTokens: agentsConfig.ForkMaxSnapshotTokens,
 	})
 	apiAgent.SetSubagentScheduler(subagentScheduler)
+	// iterate_goal（P2-2'）默认关，宿主显式开启才会进入工具面。
+	apiAgent.SetIterateGoalEnabled(agentsConfig.IterateGoalEnabled)
 	// Batch 终态投影：只有 durable 控制面就绪时才装（与 supervision 工具门控同
 	// 口径，无 store 的宿主保持现状）。没有这一钩子，API 宿主的后台 batch 终态
 	// 不会进入 store/digest/wake——父会话在 runtime-server 上永远等不到"batch

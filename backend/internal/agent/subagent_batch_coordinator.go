@@ -24,6 +24,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/uniqid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // BatchStartOptions describes the durable metadata of one background batch.
@@ -120,6 +121,14 @@ type SubagentBatchCoordinatorConfig struct {
 	// nil disables the check (pre-change behavior). Hosts wire this from
 	// internal/subagentquota.
 	LiveSlotGate SubagentLiveSlotGate
+	// ParentHistoryFor, when set, resolves the parent session's completed-turn
+	// history for fork requests (P2-1', task context=fork). The host closure
+	// loads the parent session and returns its messages; BuildForkHistory in
+	// the child factory performs the balanced-prefix trim, token-ceiling
+	// check, and freeze. nil leaves fork tasks without a snapshot — each such
+	// task then fails its child build with an actionable error instead of
+	// silently degrading to fresh.
+	ParentHistoryFor func(ctx context.Context, parentSessionID string) []types.Message
 }
 
 // SubagentLiveSlotGate admits (or rejects) a batch before it is persisted,
@@ -152,6 +161,7 @@ type SubagentBatchCoordinator struct {
 	heartbeatEvery     time.Duration
 	taskProgressEvery  time.Duration
 	liveSlotGate       SubagentLiveSlotGate
+	parentHistoryFor   func(ctx context.Context, parentSessionID string) []types.Message
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -248,6 +258,7 @@ func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBa
 		heartbeatEvery:     cfg.HeartbeatInterval,
 		taskProgressEvery:  cfg.TaskProgressInterval,
 		liveSlotGate:       cfg.LiveSlotGate,
+		parentHistoryFor:   cfg.ParentHistoryFor,
 		cancels:            make(map[string]context.CancelFunc),
 		owned:              make(map[string]struct{}),
 		abandoned:          make(map[string]struct{}),
@@ -1451,6 +1462,13 @@ func (c *SubagentBatchCoordinator) runTasksWithProgress(ctx context.Context, bat
 		OnTaskBound: func(taskID, childSessionID string) {
 			c.bindTaskChildSession(ctx, batchID, taskID, childSessionID)
 		},
+	}
+	// Fork snapshot injection (P2-1'): only load the parent history when at
+	// least one task actually requests context=fork — a normal batch must not
+	// pay a parent-session load per run. A nil result leaves the fork task to
+	// fail its child build with the actionable host-not-wired error.
+	if c.parentHistoryFor != nil && subagentTasksRequestFork(tasks) {
+		runOpts.ParentHistory = c.parentHistoryFor(ctx, opts.ParentSessionID)
 	}
 	return executor.RunChildren(ctx, runOpts, tasks)
 }

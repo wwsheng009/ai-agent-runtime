@@ -222,9 +222,9 @@ func formatProgressText(digest *Digest, now time.Time) string {
 			// The batch-done row is resolution=closed, so the evaluator only
 			// allows inspect on it (plan §4.1.1/§7.1): advising a control action
 			// here would send the parent into a call that is always rejected.
-			// close_agent addresses the child session ids and is the executable
+			// subagent_close addresses the child session ids and is the executable
 			// convergence path (same wording as the BatchDone hint).
-			b.WriteString(" (terminal; close the finished children with close_agent if they are no longer needed)")
+			b.WriteString(" (terminal; close the finished children with subagent_close if they are no longer needed)")
 		} else if group.ProgressAgeMs > 0 {
 			fmt.Fprintf(&b, " (last progress %s ago)", formatProgressAge(time.Duration(group.ProgressAgeMs)*time.Millisecond))
 		}
@@ -238,7 +238,7 @@ func formatProgressText(digest *Digest, now time.Time) string {
 				fmt.Fprintf(&b, ": %s", task.State)
 			}
 			// The child session id is what the convergence tools address
-			// (close_agent, or control_descendant on a still-unresolved row), so
+			// (subagent_close, or subagent_control on a still-unresolved row), so
 			// print it whenever it differs from the display name; without it the
 			// parent has to look the session up before it can act.
 			if task.ChildSessionID != "" && task.ChildSessionID != name {

@@ -76,6 +76,29 @@ type SubagentTask struct {
 	// serialize on the process-wide SubagentWriterArbiter. Empty means "no
 	// declaration" (whole-workspace claim), never "cannot write".
 	WritePaths []string `json:"write_paths,omitempty" yaml:"write_paths,omitempty"`
+	// Context selects the child context mode: "" / "fresh" (default, current
+	// behavior) or "fork" (inherit a snapshot of the parent's context; P2-1').
+	// Fork requests are rejected at capability admission until the fork
+	// capability is granted (capabilities.go Negotiate).
+	Context string `json:"context,omitempty" yaml:"context,omitempty"`
+	// ReportSchema optionally requests a structured final report from the
+	// child (P1-2' submit_report contract). Object-rooted JSON Schema.
+	// Rejected at capability admission while OutputSchema is not granted.
+	ReportSchema map[string]interface{} `json:"report_schema,omitempty" yaml:"report_schema,omitempty"`
+	// ReportSchemaGranted marks a deployment-owned report contract (internal
+	// kernels such as iterate_goal): the schema is imposed by the deployment
+	// itself, not negotiated as a model request, so capability admission does
+	// not refuse it. Never set from the model-facing decode path; the submit
+	// contract still validates the delivered report regardless.
+	ReportSchemaGranted bool `json:"-" yaml:"-"`
+	// HandoffIn optionally carries the previous round's normalized handoff
+	// into the child prompt (writer→verifier relay, iterate_goal rounds).
+	// Nil means "no handoff"; present values are validated before use.
+	HandoffIn *Handoff `json:"handoff_in,omitempty" yaml:"handoff_in,omitempty"`
+	// CapabilityRefusals records the admission-time capability negotiation
+	// outcome for this task. Populated by prepareTasks; empty means granted.
+	// Internal audit metadata; not part of the model-facing payload.
+	CapabilityRefusals []CapabilityRefusal `json:"-" yaml:"-"`
 }
 
 // SubagentResult 是父代理可见的结构化回执。
@@ -114,6 +137,14 @@ type SubagentResult struct {
 	// Route 是父代理可见的一行路由回执（G7）。不参与序列化：它只用于
 	// renderSubagentResults 的文本回执，避免改变既有 payload 契约。
 	Route subagentRouteReceipt `json:"-" yaml:"-"`
+	// HandoffOut 是子级返回的规范化交接报告（P1-2'）。可选：nil 表示该
+	// 子级未使用 handoff 通道；非 nil 已通过状态机校验（无效值在结果构建
+	// 时降级为 RouteWarnings，不进入本字段）。
+	HandoffOut *Handoff `json:"handoff_out,omitempty" yaml:"handoff_out,omitempty"`
+	// StructuredReport 是子级经 submit_report 交付的自定义结构化报告
+	// （report_schema 契约，P1-2'）。提交时已做契约校验（required /
+	// additionalProperties）；这里原样承载 schema 定义的任意字段集。
+	StructuredReport map[string]interface{} `json:"structured_report,omitempty" yaml:"structured_report,omitempty"`
 }
 
 // SubagentSchedulerConfig 控制子代理并发与递归深度。
@@ -169,6 +200,13 @@ type SubagentSchedulerConfig struct {
 	//（方案 §6.2）。0 使用默认值 2；1 表示关闭自动重试。
 	// 写任务永不在任务级自动重试（避免重复副作用），只产出 §6.1 的建议。
 	MaxAttemptsPerTask int `json:"maxAttemptsPerTask,omitempty" yaml:"maxAttemptsPerTask,omitempty"`
+	// Capabilities 是 spawn 准入的能力位来源（P1-1'）。nil = DefaultCapabilities()：
+	// 现状已支持的请求位全开、新能力位（fork/结构化回执）默认关（G4）。
+	// 宿主按部署配置开启对应位；未授予的请求在 prepareTasks 即被拒绝。
+	Capabilities *SubagentCapabilities `json:"-" yaml:"-"`
+	// ForkMaxSnapshotTokens 是单个 fork 快照的 token 上限（P2-1'）。0 用运行时
+	// 缺省（MaxForkSnapshotTokens）；超限的快照整体拒绝，绝不静默截断。
+	ForkMaxSnapshotTokens int `json:"-" yaml:"-"`
 }
 
 // 子代理任务级重试默认参数（§6.2：指数退避 + jitter，封顶 5s）。
@@ -199,6 +237,11 @@ type SubagentRunOptions struct {
 	// only at terminal settle, which is what makes a running task resolvable by
 	// task_id (wait_agent / read_agent_events) while it is still working.
 	OnTaskBound func(taskID, childSessionID string)
+	// ParentHistory 供 fork 请求（context=fork）取父级已完成轮次快照。
+	// 宿主（持有对话历史的层）在构造 SubagentRunOptions 时注入；nil 时 fork
+	// 请求在 child build 阶段以可操作错误拒绝——绝不静默降级为 fresh（那会
+	// 让"继承上下文"的委派在无人察觉的情况下丢失全部前期结论）。
+	ParentHistory []types.Message
 }
 
 // notifyTaskEvent calls OnTaskEvent when configured. It is best-effort: the
@@ -1054,6 +1097,13 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 			Depth:           options.Depth,
 			BudgetTokens:    task.BudgetTokens,
 			ToolWhitelist:   task.ToolsWhitelist,
+			// Fork 快照（P2-1'）：一次性注入父级已完成轮次；fresh 任务为 nil。
+			// scheduler 路径不挂 PersistHistory，快照不落子会话持久层。
+			History: spec.ForkHistory,
+			// 结构化回执契约（P1-2'）：report_schema 请求时 loop 注入
+			// submit_report 工具，接受的回执 JSON 成为结果 Output，下方
+			// 的 decode 路径据此回填 HandoffOut。
+			ReportSchema: task.ReportSchema,
 		})
 		if runErr == nil {
 			break
@@ -1173,6 +1223,43 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	}
 	if result.Error != "" {
 		report.Error = result.Error
+	}
+	// Handoff contract (P1-2'): structured output delivered through the
+	// submit_report contract (report_schema) or the handoff relay channel.
+	// - ReportSchema != nil: the accepted submission is captured verbatim as
+	//   StructuredReport (validated at submit time against required /
+	//   additionalProperties; absence degrades to a route warning).
+	// - HandoffIn != nil: the round relay additionally decodes the strict
+	//   handoff state machine into HandoffOut; an invalid handoff degrades to
+	//   a route warning instead of failing the run — the rest of the child's
+	//   output may still be valid. Admission-time capability negotiation stays
+	//   the hard boundary; output validation is the degrade boundary.
+	//
+	// Warnings attach to the task's RouteWarnings so they surface through the
+	// same route-receipt channel as the other dispatch-side warnings (the
+	// receipt is rebuilt after the decision; appending to the task keeps both
+	// event payloads and the parent-facing receipt on one source).
+	if task.ReportSchema != nil || task.HandoffIn != nil {
+		candidate := decodeHandoffCandidate(result.Output)
+		if task.ReportSchema != nil {
+			if candidate.raw == nil {
+				task.RouteWarnings = append(task.RouteWarnings,
+					"report_contract_missing: the child finished without submitting a structured report via submit_report; its text output is preserved")
+				report.Route = subagentRouteReceiptFromTask(task)
+			} else {
+				report.StructuredReport = cloneInterfaceMap(candidate.raw)
+			}
+		}
+		if task.HandoffIn != nil && candidate.raw != nil {
+			handoff, err := DecodeHandoff(candidate.raw, candidate.status, 0)
+			if err != nil {
+				warning := "handoff_invalid:" + err.Error()
+				task.RouteWarnings = append(task.RouteWarnings, warning)
+				report.Route = subagentRouteReceiptFromTask(task)
+			} else {
+				report.HandoffOut = &handoff
+			}
+		}
 	}
 	// §6.3（部分实施）：预算/上下文耗尽时保留已收集的 Findings/Patches
 	//（上面已按只读/写任务分别收集），并把 completion_reason 标注为
@@ -1896,11 +1983,23 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 		if knownIDs[effective.ID] {
 			return nil, fmt.Errorf("duplicate subagent task id %q", effective.ID)
 		}
+		// Capability admission (P1-1'): optional request fields are negotiated
+		// against the deployment's granted capabilities before any child
+		// session, batch row, or task row exists. A refusal fails the whole
+		// batch here — mirroring the LiveSlotGate contract that rejection must
+		// happen before persistence — with per-field reasons the parent can
+		// act on (drop the field or extend capabilities).
+		negotiation := Negotiate(s.config.Capabilities, effective)
+		if !negotiation.OK() {
+			effective.CapabilityRefusals = append(
+				[]CapabilityRefusal(nil), negotiation.Refusals...)
+			return nil, negotiation.Err(effective.ID)
+		}
+		// A child cannot widen a read-only parent boundary. Narrow the
+		// request instead of rejecting the whole batch; the requested
+		// write-like tools are removed below and the child remains subject
+		// to the execution-side hard deny.
 		if parentPolicy != nil && parentPolicy.ReadOnly && !effective.ReadOnly {
-			// A child cannot widen a read-only parent boundary. Narrow the
-			// request instead of rejecting the whole batch; the requested
-			// write-like tools are removed below and the child remains subject
-			// to the execution-side hard deny.
 			effective.ReadOnly = true
 			effective.ReadOnlySource = "parent_tool_execution_policy"
 		}

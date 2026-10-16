@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -33,6 +35,13 @@ type WebSearchTool struct {
 	providers []webSearchProvider
 	// bingLocale Bing 端点的 setlang/mkt 参数（默认英文 en / en-US）。
 	bingLocale bingSearchLocale
+	// native 是原生搜索（P2-5b/c）解析后的路由配置；mode=off 时链不含 native。
+	native webSearchNativeConfig
+	// configuredProviders 是 runtime.yaml webSearch.providers 的链序回退
+	// （WEB_SEARCH_PROVIDERS 环境变量优先）。
+	configuredProviders string
+	// providerConfig 查询全局 agent 配置（原生 target 解析用；测试可替换）。
+	providerConfig func() *agentconfig.Config
 }
 
 // webSearchProvider 一个搜索引擎后端。source 用于结果 metadata 标记
@@ -74,6 +83,7 @@ const (
 	// bingSearchURLWWW 为 Bing 英文版默认端点，bingSearchURLCN 为中文站
 	// 端点（默认链中仅作最后兜底）。语言/市场参数由 searchBing 用
 	// url.Values 安全拼装，不在端点常量中硬编码。
+	// 链序取值额外支持 native（P2-5 原生搜索；mode=off 时自动剔除）。
 	bingSearchURLWWW          = "https://www.bing.com/search"
 	bingSearchURLCN           = "https://cn.bing.com/search"
 	webSearchConnectTimeout   = 5 * time.Second
@@ -82,8 +92,16 @@ const (
 	webSearchTotalTimeout     = 30 * time.Second
 )
 
-// NewWebSearchTool 创建网络搜索工具
+// NewWebSearchTool 创建网络搜索工具（仅环境变量/内置默认；等价于
+// NewWebSearchToolWithConfig(nil)）。
 func NewWebSearchTool() *WebSearchTool {
+	return NewWebSearchToolWithConfig(nil)
+}
+
+// NewWebSearchToolWithConfig 按宿主运行时配置构造工具：webSearch.providers
+// 提供链序回退，webSearch.native 控制原生搜索成员（P2-5b/c）。cfg 为 nil 或
+// 分节缺省时行为与历史一致。
+func NewWebSearchToolWithConfig(cfg *runtimecfg.RuntimeConfig) *WebSearchTool {
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -127,8 +145,11 @@ func NewWebSearchTool() *WebSearchTool {
 			parameters,
 			true,
 		),
-		httpClient: newSearchHTTPClient(),
-		bingLocale: resolveBingSearchLocale(),
+		httpClient:          newSearchHTTPClient(),
+		bingLocale:          resolveBingSearchLocale(),
+		native:              resolveWebSearchNativeConfig(cfg),
+		configuredProviders: webSearchProvidersFromConfig(cfg),
+		providerConfig:      agentconfig.GetGlobalConfig,
 	}
 	tool.providers = tool.buildProviders()
 	return tool
@@ -233,15 +254,27 @@ func newSearchHTTPClient() *http.Client {
 	}
 }
 
-// buildProviders 按环境变量构建 provider 链；配置缺失或全部非法时回退默认链。
+// buildProviders 构建 provider 链：链序来自 WEB_SEARCH_PROVIDERS（优先）、
+// runtime.yaml webSearch.providers，最后回退默认链。native 成员仅在
+// webSearch.native.mode 非 off 时参与：prefer 要求本地可用（能力位/凭据/
+// 端点均可解析），force 始终保留（执行期报结构化错误）；显式 mode 但链序未
+// 列出 native 时置于链首，列入时按位置参与。
 func (w *WebSearchTool) buildProviders() []webSearchProvider {
-	names := parseWebSearchProviders(os.Getenv(webSearchProvidersEnv))
-	if len(names) == 0 {
-		names = parseWebSearchProviders(defaultWebSearchProviders)
+	names := w.resolveChainNames()
+	if w.native.enabled() && !containsProviderName(names, webSearchNativeName) {
+		names = append([]string{webSearchNativeName}, names...)
 	}
 	out := make([]webSearchProvider, 0, len(names))
 	for _, name := range names {
 		switch name {
+		case webSearchNativeName:
+			if !w.native.enabled() {
+				continue
+			}
+			if w.native.mode != webSearchNativeModeForce && !w.nativeAvailable() {
+				continue
+			}
+			out = append(out, webSearchProvider{name: name, search: w.searchNativeProvider})
 		case "duckduckgo":
 			out = append(out, webSearchProvider{name: name, search: w.searchDuckDuckGoProvider})
 		case "bing":
@@ -253,6 +286,28 @@ func (w *WebSearchTool) buildProviders() []webSearchProvider {
 	return out
 }
 
+// resolveChainNames 解析链序：环境变量 > runtime 配置 > 内置默认；空/全非法
+// 输入回退默认链。
+func (w *WebSearchTool) resolveChainNames() []string {
+	if names := parseWebSearchProviders(os.Getenv(webSearchProvidersEnv)); len(names) > 0 {
+		return names
+	}
+	if names := parseWebSearchProviders(w.configuredProviders); len(names) > 0 {
+		return names
+	}
+	return parseWebSearchProviders(defaultWebSearchProviders)
+}
+
+// containsProviderName reports whether the resolved chain already lists name.
+func containsProviderName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
+
 // parseWebSearchProviders 解析 WEB_SEARCH_PROVIDERS：逗号分隔、去重、
 // 小写化、忽略未知值。空输入返回空列表（由 buildProviders 回退默认）。
 func parseWebSearchProviders(value string) []string {
@@ -260,7 +315,7 @@ func parseWebSearchProviders(value string) []string {
 	var out []string
 	for _, part := range strings.Split(value, ",") {
 		name := strings.ToLower(strings.TrimSpace(part))
-		if name != "duckduckgo" && name != "bing" && name != "bing_cn" {
+		if name != "duckduckgo" && name != "bing" && name != "bing_cn" && name != webSearchNativeName {
 			continue
 		}
 		if seen[name] {
@@ -497,6 +552,12 @@ func classifyWebSearchFailureCode(err error) string {
 	if err == nil {
 		return ""
 	}
+	// Native-routing configuration failures carry an explicit typed marker so
+	// they never get misread as transport errors by the heuristics below.
+	var unavailable *searchProviderUnavailableError
+	if errors.As(err, &unavailable) {
+		return string(runtimeerrors.ErrSearchProviderUnavailable)
+	}
 	// Scan the full error string first so HTTP 429/5xx still win when the
 	// client wraps a transport/status error in *url.Error / *net.OpError.
 	if code := classifyWebSearchFailureMessage(err.Error()); code != "" {
@@ -611,6 +672,8 @@ func webSearchFailureNextAction(code, query string) string {
 		return "Rate limited by the search provider. Wait with backoff, reduce count/frequency, or continue with local tools. Do not immediately replay the same query."
 	case runtimeerrors.ErrAPIServerError:
 		return "Search upstream returned a server error. Retry with bounded backoff or continue without web evidence. Do not spam identical queries."
+	case runtimeerrors.ErrSearchProviderUnavailable:
+		return "Native web search is configured with mode=force but unavailable. Fix webSearch.native (provider/model capability, credential, endpoint) or switch mode to prefer/off; do not retry the same query."
 	default:
 		return ""
 	}

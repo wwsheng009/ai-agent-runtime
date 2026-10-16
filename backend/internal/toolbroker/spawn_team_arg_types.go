@@ -78,10 +78,10 @@ var spawnTeamTaskFieldKinds = []struct {
 	{"depends_on", spawnTeamFieldStringOrList},
 }
 
-// validateSpawnTeamArgTypes checks the top-level spawn_team arguments.
+// validateSpawnTeamArgTypes checks the top-level team_spawn arguments.
 func validateSpawnTeamArgTypes(args map[string]interface{}) error {
 	for _, field := range spawnTeamTopLevelFieldKinds {
-		if err := validateSpawnTeamFieldType("spawn_team", field.key, field.want, args[field.key]); err != nil {
+		if err := validateSpawnTeamFieldType(ToolTeamSpawn, field.key, field.want, args[field.key]); err != nil {
 			return err
 		}
 	}
@@ -102,7 +102,7 @@ func validateSpawnTeamTeammateTypes(index int, entry map[string]interface{}) err
 // validateSpawnTeamTaskTypes checks one tasks[] entry.
 func validateSpawnTeamTaskTypes(index int, entry map[string]interface{}) error {
 	for _, field := range spawnTeamTaskFieldKinds {
-		owner := fmt.Sprintf("spawn_team tasks[%d]", index)
+		owner := fmt.Sprintf("%s tasks[%d]", ToolTeamSpawn, index)
 		if err := validateSpawnTeamFieldType(owner, field.key, field.want, entry[field.key]); err != nil {
 			return err
 		}

@@ -58,6 +58,11 @@ const (
 	ErrToolBrokerFailure        ErrorCode = "TOOL_BROKER_FAILURE"
 	ErrProcessStartFailed       ErrorCode = "PROCESS_START_FAILED"
 	ErrProcessHealthcheck       ErrorCode = "PROCESS_HEALTHCHECK_FAILED"
+	// ErrSearchProviderUnavailable marks a web_search native-routing failure
+	// (P2-5) where mode=force has no usable native target: model capability not
+	// declared, credential missing, or endpoint config invalid. Not retryable:
+	// fix webSearch.native or the provider capability, or switch to prefer.
+	ErrSearchProviderUnavailable ErrorCode = "SEARCH_PROVIDER_UNAVAILABLE"
 
 	// Agent 错误
 	ErrAgentMaxSteps   ErrorCode = "AGENT_MAX_STEPS"
@@ -76,6 +81,12 @@ const (
 	// agents.maxThreads. The quota is a live count of active children, so the
 	// caller must free capacity (close/reuse) instead of replaying the spawn.
 	ErrAgentThreadLimit ErrorCode = "AGENT_THREAD_LIMIT"
+	// ErrSubagentCapabilityUnsupported marks a spawn request whose optional
+	// task fields ask for a capability the deployment did not grant at
+	// admission time (capabilities negotiation, DSH-borrowing plan P1-1').
+	// Not retryable: replaying the same task fields cannot succeed; the caller
+	// must drop the refused field or extend the deployment capabilities.
+	ErrSubagentCapabilityUnsupported ErrorCode = "SUBAGENT_CAPABILITY_UNSUPPORTED"
 	// ErrAgentRegistryUnavailable marks durable agent-registry failures (store
 	// not initialized/closed). Not model-retryable: the host must fix wiring.
 	ErrAgentRegistryUnavailable ErrorCode = "AGENT_REGISTRY_UNAVAILABLE"

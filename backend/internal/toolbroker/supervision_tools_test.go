@@ -167,7 +167,7 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	require.Equal(t, false, inspect.Metadata[types.ToolMetadataEmptyReplayCacheKey],
 		"subagent_inspect_task is a polling tool: an empty answer must not be cached as a negative one")
 	require.Contains(t, inspect.Description, "no_result_recorded")
-	require.Contains(t, inspect.Description, "read_agent_events")
+	require.Contains(t, inspect.Description, "subagent_events")
 	require.Contains(t, inspect.Description, "max_chars")
 	inspectParams, ok := inspect.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
@@ -398,7 +398,7 @@ func TestBroker_Execute_ReadAgentResultNoRecordedResult(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, supervision.ResultSourceNone, result.Source)
 	require.Equal(t, "no_result_recorded", result.ErrorCode)
-	require.Contains(t, result.NextAction, "read_agent_events")
+	require.Contains(t, result.NextAction, "subagent_events")
 	require.Equal(t, "no_result_recorded", meta["error_code"])
 	require.Contains(t, meta[cacheSafeSummaryMetadataKey], "no durable result recorded")
 }

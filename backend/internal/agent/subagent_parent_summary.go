@@ -363,10 +363,35 @@ func projectSubagentReportForParent(report SubagentResult, budget int) (map[stri
 		"success":    report.Success,
 		"read_only":  report.ReadOnly,
 	}
-	if len(report.ReadOnlyFilteredTools) > 0 {
+	truncated := report.Contract != nil
+	if report.ReadOnly && len(report.ReadOnlyFilteredTools) > 0 {
 		projection["read_only_filtered_tools"] = compactSubagentFilteredTools(report.ReadOnlyFilteredTools)
 	}
-	truncated := report.Contract != nil
+	if report.HandoffOut != nil {
+		// Handoff contract (P1-2'): the validated handoff reaches the parent
+		// as a structured block. Values were normalized at admission of the
+		// report (invalid ones degrade to RouteWarnings), so this path only
+		// budgets the text fields.
+		projection["handoff"] = map[string]interface{}{
+			"status":     string(report.HandoffOut.Status),
+			"summary":    truncateSubagentParentText(report.HandoffOut.Summary, textBudget),
+			"evidence":   compactSubagentParentList(report.HandoffOut.Evidence, budget/12),
+			"next_steps": compactSubagentParentList(report.HandoffOut.NextSteps, budget/12),
+			"blocker":    truncateSubagentParentText(report.HandoffOut.Blocker, budget/8),
+		}
+	}
+	if len(report.StructuredReport) > 0 {
+		// Structured receipt (P1-2', report_schema): the parent receives the
+		// submitted JSON as a bounded block — serialized compactly and cut by
+		// the shared text budget so a verbose report cannot crowd out the
+		// rest of the projection. Truncation is flagged like every other
+		// bounded field.
+		if encoded, encodeErr := json.Marshal(report.StructuredReport); encodeErr == nil {
+			text, reportTruncated := truncateSubagentParentTextWithFlag(string(encoded), textBudget)
+			projection["structured_report"] = text
+			truncated = truncated || reportTruncated
+		}
+	}
 	if report.BudgetTokens > 0 {
 		projection["budget_tokens"] = report.BudgetTokens
 	}
@@ -446,6 +471,29 @@ func projectSubagentReportForParent(report SubagentResult, budget int) (map[stri
 		projection["truncated"] = true
 	}
 	return projection, truncated
+}
+
+// compactSubagentParentList 有界投影一个字符串列表：每项按 limit 截断，
+// 超出 maxItems 的项丢弃并整体置 truncated（由调用方并入 truncated 汇总）。
+// 供 handoff evidence/next_steps 等新列表字段复用，避免逐处复制截断逻辑。
+func compactSubagentParentList(values []string, perItemLimit int) []string {
+	const maxItems = 8
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, minInt(len(values), maxItems))
+	for index, value := range values {
+		if index >= maxItems {
+			break
+		}
+		if text := truncateSubagentParentText(value, perItemLimit); text != "" {
+			out = append(out, text)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func compactSubagentArtifactRefs(values []string) []string {

@@ -12,6 +12,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 )
 
@@ -50,12 +51,12 @@ func headerTemplateContext(session *ChatSession) config.HeaderTemplateContext {
 		Client:   buildinfo.Originator(),
 		UserID:   strings.TrimSpace(session.SessionUserID),
 	}
-	if session.RuntimeSession != nil {
-		ctx.SessionID = strings.TrimSpace(session.RuntimeSession.ID)
-		if parent, ok := session.RuntimeSession.GetContext(agentcontrol.SessionContextParentSessionID); ok {
+	withChatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) {
+		ctx.SessionID = strings.TrimSpace(runtimeSession.ID)
+		if parent, ok := runtimeSession.GetContext(agentcontrol.SessionContextParentSessionID); ok {
 			ctx.ParentSessionID = strings.TrimSpace(fmt.Sprintf("%v", parent))
 		}
-	}
+	})
 	ctx.ProjectID = headerTemplateProjectID()
 	return ctx
 }

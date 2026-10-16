@@ -4,14 +4,19 @@ package commands
 // 冻结面分支与本地目录分支各一组，渲染断言按账本分组口径。
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -145,4 +150,130 @@ func TestFormatBlockedToolNamesTruncatesOverLimit(t *testing.T) {
 	require.Contains(t, text, "tool_00, tool_01")
 	require.Contains(t, text, "…（共 18 个）")
 	require.NotContains(t, text, "tool_17")
+}
+
+// §2.2-C / T7：server 模式下 /tools 直接消费 /api/runtime/tools 的同一 payload。
+// 计数、分组、裁剪明细全部取端点字段；本地 session.ToolPolicy 不再二次裁剪——
+// 旧实现用本地策略重算目录正是 "10 vs 22" 缺口的来源，这里做回归锁定。
+func TestBuildToolsScreenBodyServerModeUsesEndpointPayload(t *testing.T) {
+	tools := make([]runtimetypes.ToolDefinition, 0, 22)
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("core_tool_%02d", i)
+		tools = append(tools, runtimetypes.ToolDefinition{
+			Name:        name,
+			Description: "core capability " + name,
+			Metadata:    map[string]interface{}{"surface_source": "core"},
+		})
+	}
+	for _, name := range []string{"job_start", "subagent_spawn"} {
+		tools = append(tools, runtimetypes.ToolDefinition{
+			Name:        name,
+			Description: "orchestration capability " + name,
+			Metadata:    map[string]interface{}{"surface_source": "orchestration"},
+		})
+	}
+	require.Len(t, tools, 22)
+
+	payload := map[string]interface{}{
+		"session_id": "sess-22",
+		"source":     "runtime-server",
+		"count":      len(tools),
+		"tools":      tools,
+		"groups": []toolsurface.Group{
+			{ID: "core", Label: "工作区", Protected: true, Enabled: true, ToolCount: 20},
+			{ID: "orchestration", Label: "编排", Enabled: true, ToolCount: 2},
+		},
+		"filtered": []toolsurface.FilteredTool{
+			{Name: "mcp:chrome-devtools", Reason: toolsurface.FilterMCPDisabled},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if want := "/api/runtime/sessions/sess-22/runtime/tools"; r.URL.Path != want {
+			t.Errorf("runtime tools path = %q, want %q", r.URL.Path, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			t.Errorf("encode payload: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	session := &ChatSession{
+		ChatExecutor:   newAICLIRuntimeServerChatExecutor(server.URL),
+		RuntimeSession: &runtimechat.Session{ID: "sess-22"},
+		// 本地策略只放行 10 个：server 模式必须无视它（端点才是权威口径）。
+		ToolPolicy: runtimepolicy.NewToolExecutionPolicy([]string{
+			"view", "read", "shell", "write", "edit", "glob", "grep", "ls", "apply_patch", "multiedit",
+		}, false),
+	}
+
+	body, ok := buildToolsScreenBody(session)
+	require.True(t, ok)
+	require.Contains(t, body, "当前会话工具面：22 个工具（与 /api/runtime/tools 同一 payload）")
+	require.NotContains(t, body, "10 个工具")
+	require.NotContains(t, body, "策略裁剪")
+	// 分组目录行取端点 groups[]（含 protected/enabled/计数）。
+	require.Contains(t, body, "分组: core(工作区) ×20, orchestration(编排) ×2")
+	// 裁剪明细取端点 filtered[]，不在本地重算。
+	require.Contains(t, body, "已裁剪: mcp:chrome-devtools(mcp_disabled)")
+	// 正文仍按 surface_source 分组，且两端工具都在。
+	require.Contains(t, body, "[core] ×20")
+	require.Contains(t, body, "[orchestration] ×2")
+	require.Contains(t, body, "• job_start — orchestration capability job_start")
+}
+
+// 旧版 server（响应缺 groups[]）时用共享构建点补齐，渲染口径不变；
+// 缺 filtered[] 时按空数组处理（可加性契约：不出现 nil/缺失差异）。
+func TestServerToolsObservationFillsGroupsWhenEndpointOmitsThem(t *testing.T) {
+	payload := runtimeServerRuntimeToolsResponse{
+		Tools: []runtimetypes.ToolDefinition{
+			{Name: "job_start", Description: "Start a job", Metadata: map[string]interface{}{"surface_source": "orchestration"}},
+		},
+	}
+
+	observation := serverToolsObservation(payload)
+	require.NotEmpty(t, observation.Groups)
+	require.NotNil(t, observation.Filtered)
+
+	body := renderToolsScreenObservation(observation)
+	require.Contains(t, body, "当前会话工具面：1 个工具（与 /api/runtime/tools 同一 payload）")
+	require.Contains(t, body, "[orchestration] ×1")
+	require.NotContains(t, body, "已裁剪")
+}
+
+// 端点已给 groups[]/filtered[] 时原样采用（端点权威）：已关闭的组必须可见。
+func TestServerToolsObservationKeepsEndpointGroupsAndFiltered(t *testing.T) {
+	payload := runtimeServerRuntimeToolsResponse{
+		Tools: []runtimetypes.ToolDefinition{
+			{Name: "view", Description: "View file content", Metadata: map[string]interface{}{"surface_source": "core"}},
+		},
+		Groups: []toolsurface.Group{
+			{ID: "core", Label: "工作区", Protected: true, Enabled: true, ToolCount: 7},
+			{ID: "mesh", Label: "网格", Enabled: false, ToolCount: 0},
+		},
+		Filtered: []toolsurface.FilteredTool{
+			{Name: "mcp:chrome-devtools", Reason: toolsurface.FilterMCPDisabled},
+		},
+	}
+
+	observation := serverToolsObservation(payload)
+	require.Equal(t, payload.Groups, observation.Groups)
+	require.Equal(t, payload.Filtered, observation.Filtered)
+
+	body := renderToolsScreenObservation(observation)
+	require.Contains(t, body, "分组: core(工作区) ×7, mesh(网格) 已关闭 ×0")
+	require.Contains(t, body, "已裁剪: mcp:chrome-devtools(mcp_disabled)")
+	require.Contains(t, body, "• view — View file content")
+}
+
+func TestFormatFilteredToolsTruncatesOverLimit(t *testing.T) {
+	filtered := make([]toolsurface.FilteredTool, 0, 11)
+	for i := 0; i < 11; i++ {
+		filtered = append(filtered, toolsurface.FilteredTool{Name: fmt.Sprintf("mcp:server_%02d", i), Reason: toolsurface.FilterMCPDisabled})
+	}
+
+	text := formatFilteredTools(filtered)
+	require.Contains(t, text, "mcp:server_00(mcp_disabled), mcp:server_01(mcp_disabled)")
+	require.Contains(t, text, "…（共 11 个）")
+	require.NotContains(t, text, "mcp:server_10")
 }

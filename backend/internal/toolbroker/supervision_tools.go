@@ -243,7 +243,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 				"The output is bounded: findings <=3, changes <=8, artifacts <=8, errors <=3 and a total max_chars budget (default 4000); truncated=true reports any cut. source is task_result | completion_payload | none. " +
 				"A failed/canceled record also carries wrap_up (completed / unfinished / artifacts): what landed, what did not, and where the deliverables are — read it before deciding to re-dispatch, and honour result_available/do_not_retry. " +
 				"A killed/cancelled record may also carry partial_product (the bounded salvage the child had produced before it was stopped) and workspace (the isolated worktree still holding its uncommitted changes). " +
-				"When no durable record exists the call still succeeds with source=none and error_code=no_result_recorded plus a next_action: follow it (read_agent_events / wait_agent) instead of retrying the same read. Sections let you fetch only what you need (summary/findings/changes/artifacts/errors/usage).",
+				"When no durable record exists the call still succeeds with source=none and error_code=no_result_recorded plus a next_action: follow it (subagent_events / subagent_wait) instead of retrying the same read. Sections let you fetch only what you need (summary/findings/changes/artifacts/errors/usage).",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -415,7 +415,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 			Name: ToolSubagentInspectTask,
 			Description: "Inspect one subagent or durable task inside this session's own scope (read-only): returns the bounded durable result (source/status/findings/changes/artifacts/errors/usage/truncated) and, unless include_status=false, the subject's current supervision row (execution_status, supervision_state, heartbeat/progress ages, allowed_actions, action_required). " +
 				"Output is byte-bounded by max_chars (default 4000, clamped to 256..20000); the summary defaults to that same budget and pages with offset/limit, and truncated=true plus next_offset/next_action reports exactly how to read on instead of losing the tail. " +
-				"A subject outside your scope, or a missing durable record, is reported as an observation (status_source / source=none + error_code=no_result_recorded + next_action), never as a tool failure; follow that next_action (read_agent_events / wait_agent) instead of retrying the same read. If the status read fails the result is still returned with status_source=matrix_unavailable. " +
+				"A subject outside your scope, or a missing durable record, is reported as an observation (status_source / source=none + error_code=no_result_recorded + next_action), never as a tool failure; follow that next_action (subagent_events / subagent_wait) instead of retrying the same read. If the status read fails the result is still returned with status_source=matrix_unavailable. " +
 				"Prefer this over re-reading the whole matrix when you need one subject's deliverable.",
 			Parameters: map[string]interface{}{
 				"type": "object",

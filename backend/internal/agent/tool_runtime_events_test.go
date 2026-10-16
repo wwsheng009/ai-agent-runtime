@@ -1058,13 +1058,13 @@ func TestToolCompletedEventPayloadRehydratesSnippetFromErrorBody(t *testing.T) {
 
 func TestToolCompletedEventPayloadIncludesActionableDiagnostic(t *testing.T) {
 	result := toolExecutionResult{
-		Call:  types.ToolCall{ID: "call-missing", Name: "task_output"},
+		Call:  types.ToolCall{ID: "call-missing", Name: "job_output"},
 		Error: "background job not found",
 		Envelope: &output.Envelope{Metadata: map[string]interface{}{
 			"ok":          false,
 			"error_code":  "JOB_NOT_FOUND",
 			"retryable":   false,
-			"next_action": "Use the exact job_id returned by background_task.",
+			"next_action": "Use the exact job_id returned by job_start.",
 		}},
 	}
 
@@ -1072,7 +1072,7 @@ func TestToolCompletedEventPayloadIncludesActionableDiagnostic(t *testing.T) {
 	if payload["ok"] != false || payload["error_code"] != "JOB_NOT_FOUND" || payload["retryable"] != false {
 		t.Fatalf("expected structured failure diagnostic, got %#v", payload)
 	}
-	if payload["next_action"] != "Use the exact job_id returned by background_task." {
+	if payload["next_action"] != "Use the exact job_id returned by job_start." {
 		t.Fatalf("expected next action, got %#v", payload)
 	}
 	if payload[toolresult.MetadataOutcomeKey] != toolresult.OutcomeFailed {

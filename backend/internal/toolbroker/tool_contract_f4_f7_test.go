@@ -30,7 +30,7 @@ func TestStampAgentWaitBudgetExposesObservedBudget(t *testing.T) {
 	require.True(t, strings.HasPrefix(exhausted.NextAction, "suspend:"))
 }
 
-// F7：超时返回的 next_action 必须指向只读巡检原语（read_agent_events
+// F7：超时返回的 next_action 必须指向只读巡检原语（subagent_events
 // view=tool_progress / subagent_status），让"再等一次"之前先拿到便宜证据。
 func TestFinalizeAgentWaitResultTimedOutNamesCheapProbes(t *testing.T) {
 	pending := FinalizeAgentWaitResult(&AgentWaitResult{
@@ -39,11 +39,11 @@ func TestFinalizeAgentWaitResultTimedOutNamesCheapProbes(t *testing.T) {
 		PendingIDs:   []string{"child-1"},
 	}, time.Now().Add(-time.Second))
 	require.True(t, strings.HasPrefix(pending.NextAction, "continue_independent_work_before_waiting_again"))
-	require.Contains(t, pending.NextAction, "read_agent_events(view=tool_progress")
+	require.Contains(t, pending.NextAction, "subagent_events(view=tool_progress")
 	require.Contains(t, pending.NextAction, "subagent_status")
 
 	plain := FinalizeAgentWaitResult(&AgentWaitResult{TimedOut: true}, time.Now().Add(-time.Second))
-	require.Contains(t, plain.NextAction, "read_agent_events")
+	require.Contains(t, plain.NextAction, "subagent_events")
 	require.Contains(t, plain.NextAction, "subagent_status")
 }
 

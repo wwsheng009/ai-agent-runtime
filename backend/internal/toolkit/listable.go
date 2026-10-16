@@ -3,6 +3,8 @@ package toolkit
 import (
 	"context"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // ListToolsContext carries per-turn listing signals for ShouldList predicates.
@@ -183,28 +185,29 @@ func metadataString(metadata map[string]interface{}, key string) string {
 }
 
 // Builtin core tools that stay listed when the catalog is projected through search.
+//
+// 名单是注册表目录的**策展子集**：code_*/schedule_*/aicli_exec/openai_image_generate
+// 等已登记工具刻意不在核心面内，所以逐名列举本身是有意的。但 shell 家族的现役别名
+// （bash/execute_shell_command）不再写死在这里——它们是不是"同一把 shell"由注册表
+// 判定，新增别名不需要改本文件。
 func isBuiltinCoreToolName(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "shell", "bash", "execute_shell_command",
-		"view", "grep", "glob", "ls",
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	switch normalized {
+	case "view", "grep", "glob", "ls",
 		"write", "edit", "multiedit", "apply_patch", "append_write",
 		"todos", "artifact_read", "web_search", "fetch", "download",
 		"ask_user_question", "plan_enter", "plan_exit",
 		"job_start", "job_output", "job_cancel", "job_monitor", "job_control", "job_input", "job_list", "job_search",
-		"background_task", "task_output",
-		"write_stdin", "task_input",
-		"spawn_agent", "spawn_team", "spawn_subagents",
-		"wait_agent", "wait_team", "list_agents",
-		"send_message", "send_input", "followup_task",
-		"read_agent_events", "close_agent", "resume_agent",
-		"apply_agent_worktree", "discard_agent_worktree",
-		"resolve_agent_approval",
+		"spawn_subagents", "subagent_spawn", "subagent_list", "subagent_wait", "subagent_events",
+		"subagent_send", "subagent_input", "subagent_followup", "subagent_close", "subagent_resume",
+		"subagent_approve", "subagent_apply_worktree", "subagent_discard_worktree",
+		"team_spawn", "team_wait", "team_send", "team_mailbox",
+		"team_task_spec", "team_task_context", "team_task_report", "team_task_block",
 		"supervision_snapshot", "supervision_descendants", "read_agent_result", "subagent_status", "subagent_inspect_task",
-		"subagent_ack_lifecycle", "subagent_control", "ack_lifecycle", "control_descendant",
+		"subagent_ack_lifecycle", "subagent_control",
 		"get_goal", "read_goal", "update_goal",
 		ToolSearchName:
 		return true
-	default:
-		return false
 	}
+	return toolregistry.IsSpellingOf("shell", normalized)
 }

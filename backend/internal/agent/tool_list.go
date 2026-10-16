@@ -191,7 +191,16 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
 		if shouldExposeSpawnSubagents(loop.agent, allowed) {
-			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary())
+			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary(), DefaultCapabilities())
+			if !seen[definition.Name] {
+				seen[definition.Name] = true
+				tools = append(tools, definition)
+			}
+		}
+		// iterate_goal（P2-2'）：G4 默认关 + 显式灰度——懒初始化的
+		// scheduler 恒非 nil，不能当启用信号；只有宿主显式开启才暴露。
+		if loop.agent.iterateGoalToolEnabled() && (allowed == nil || allowed[IterateGoalToolName]) {
+			definition := IterateGoalToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
 				tools = append(tools, definition)

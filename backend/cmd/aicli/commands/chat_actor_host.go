@@ -44,6 +44,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
@@ -485,6 +486,36 @@ func localSubagentBatchEmitter(host *localChatRuntimeHost) agent.BatchEmitter {
 			}
 		}
 		host.EventBus.Publish(runtimeevents.Event{Type: eventType, SessionID: sessionID, ToolName: "spawn_subagents", Payload: payload})
+	}
+}
+
+// localSubagentCapabilities 把 agents 配置折算成 spawn 准入能力位（P1-1'）。
+// 现状已支持的请求位恒开（零行为变化基线）；fork/结构化回执按部署配置灰度。
+func localSubagentCapabilities(agentsConfig runtimecfg.AgentsConfig) *agent.SubagentCapabilities {
+	caps := agent.DefaultCapabilities()
+	caps.ForkContext = agentsConfig.ForkContextEnabled
+	caps.OutputSchema = agentsConfig.OutputSchemaEnabled
+	return &caps
+}
+
+// localSubagentParentHistory 是 fork 快照的父会话读取面（P2-1'）：按
+// parentSessionID 装载会话并返回其消息；协调器只在批次确有 context=fork
+// 任务时调用。读取失败返回 nil——fork 子级会以可操作错误失败，不会静默
+// 降级为 fresh。
+func localSubagentParentHistory(host *localChatRuntimeHost) func(ctx context.Context, parentSessionID string) []runtimetypes.Message {
+	return func(ctx context.Context, parentSessionID string) []runtimetypes.Message {
+		if host == nil || host.SessionStore == nil {
+			return nil
+		}
+		parentSessionID = strings.TrimSpace(parentSessionID)
+		if parentSessionID == "" {
+			return nil
+		}
+		parent, err := host.SessionStore.Load(ctx, parentSessionID)
+		if err != nil || parent == nil {
+			return nil
+		}
+		return parent.GetMessages()
 	}
 }
 
@@ -2032,7 +2063,8 @@ func applyLocalChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 	if toolPolicy.DeniedTools == nil {
 		toolPolicy.DeniedTools = map[string]bool{}
 	}
-	for _, toolName := range []string{"spawn_agent", "subagent_spawn", "spawn_subagents", "spawn_team", "team_spawn"} {
+	// 展开现役拼写：拒绝表按模型请求的原始拼写匹配，别名与规范名都要覆盖。
+	for _, toolName := range toolregistry.CallableNames("subagent_spawn", "spawn_subagents", "team_spawn") {
 		toolPolicy.DeniedTools[toolName] = true
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
@@ -2372,8 +2404,14 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		GlobalLimiter: host.subagentGlobalLimiter(agentsConfig.MaxThreads),
 		MaxQueueDepth: agentsConfig.MaxConcurrentQueueDepth,
 		QueueTimeout:  time.Duration(agentsConfig.MaxConcurrentQueueTimeoutMs) * time.Millisecond,
+		// 能力位（P1-1'）：现状已支持的请求位默认开；新能力位由 agents
+		// 配置显式灰度（G4），未授予的请求在 spawn 准入即拒绝。
+		Capabilities:          localSubagentCapabilities(agentsConfig),
+		ForkMaxSnapshotTokens: agentsConfig.ForkMaxSnapshotTokens,
 	})
 	apiAgent.SetSubagentScheduler(scheduler)
+	// iterate_goal（P2-2'）默认关，宿主显式开启才会进入工具面。
+	apiAgent.SetIterateGoalEnabled(agentsConfig.IterateGoalEnabled)
 	var batchCoordinator *agent.SubagentBatchCoordinator
 	if host.SubagentBatches != nil {
 		coordinator := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
@@ -2385,6 +2423,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			// P0-1a/M1: task-level progress write-back is an explicit opt-in
 			// (supervision.task_progress_interval, default 0 = no writes).
 			TaskProgressInterval: host.supervisionConfig.WithDefaults().TaskProgressInterval,
+			// Fork 快照数据源（P2-1'）：只有批次中确有 context=fork 任务时才会
+			// 真正读取父会话；普通批次零额外成本。
+			ParentHistoryFor: localSubagentParentHistory(host),
 			// Live-slot ceiling (agents.maxThreads) across spawn_agent and
 			// spawn_subagents: the batch path previously had only a concurrency
 			// window, so it could accumulate unbounded idle children. The gate

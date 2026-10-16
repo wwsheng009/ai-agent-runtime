@@ -96,13 +96,13 @@ func TestApprovalExplanationClassifiesFileAndNetworkTools(t *testing.T) {
 		args string
 		want string
 	}{
-		{"write_file", `{"path":"internal/app.go"}`, "修改文件内容"},
+		{"write", `{"path":"internal/app.go"}`, "修改文件内容"},
 		{"apply_patch", `{"file_path":"backend/main.go"}`, "修改文件内容"},
 		{"delete_file", `{"path":"tmp/old.txt"}`, "删除文件或目录"},
 		{"web_fetch", `{"url":"https://example.com"}`, "访问网络"},
 		{"mcp__github__create_issue", `{"name":"create_issue"}`, "调用 MCP 工具"},
 		{"spawn_agent", `{"goal":"实现登录"}`, "启动子 agent"},
-		{"background_task", `{"command":"npm run dev"}`, "启动后台任务"},
+		{"job_start", `{"command":"npm run dev"}`, "启动后台任务"},
 		{"view", `{"path":"docs/a.md"}`, "读取文件内容"},
 	}
 	for _, tc := range cases {

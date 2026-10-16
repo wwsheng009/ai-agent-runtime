@@ -43,6 +43,7 @@ type RuntimeConfig struct {
 	Checkpoint     CheckpointConfig          `yaml:"checkpoint" json:"checkpoint"`
 	Background     BackgroundConfig          `yaml:"background" json:"background"`
 	Images         ImagesConfig              `yaml:"images" json:"images"`
+	WebSearch      WebSearchConfig           `yaml:"webSearch" json:"webSearch"`
 	Schedule       ScheduleConfig            `yaml:"schedule" json:"schedule"`
 
 	// Goal 控制 /goal 自动续跑（对齐 Codex 语义；2026-10-14 方案：
@@ -187,6 +188,30 @@ type AgentsConfig struct {
 	// (audit + resolution receipt). Non-succeeded terminal children are never
 	// auto-closed — a failed/timed-out child is evidence the parent must judge.
 	AutoCloseCompleted string `yaml:"autoCloseCompleted,omitempty" json:"autoCloseCompleted,omitempty"`
+	// ForkContextEnabled admits task context=fork on spawn_subagents batches
+	// and additional agent-creation paths (P2-1', the DSH-borrowing plan):
+	// each fork child starts from a frozen snapshot of the parent session's
+	// completed turns and inherits the parent route (no provider/model
+	// override). Default false = capability not granted: fork requests are
+	// refused at spawn admission with SUBAGENT_CAPABILITY_UNSUPPORTED rather
+	// than silently degrading to a fresh context (G4 opt-in).
+	ForkContextEnabled bool `yaml:"forkContextEnabled,omitempty" json:"forkContextEnabled,omitempty"`
+	// OutputSchemaEnabled admits the structured-receipt channel on
+	// spawn_subagents batches (P1-2'): report_schema / handoff_in task fields
+	// plus the validate-and-degrade decode path. Default false = the fields
+	// are rejected at admission and absent from the model-facing schema.
+	OutputSchemaEnabled bool `yaml:"outputSchemaEnabled,omitempty" json:"outputSchemaEnabled,omitempty"`
+	// IterateGoalEnabled exposes the iterate_goal tool on root agents (P2-2'):
+	// a bounded loop of fresh-context child rounds toward one objective with a
+	// structured handoff per round and a no-progress stall gate. Default false
+	// (the tool is experimental; G4 opt-in).
+	IterateGoalEnabled bool `yaml:"iterateGoalEnabled,omitempty" json:"iterateGoalEnabled,omitempty"`
+	// ForkMaxSnapshotTokens bounds one fork snapshot (P2-1', task context=fork)
+	// in estimated prompt tokens. 0 uses the runtime default (96000). A fork
+	// whose completed-turn snapshot exceeds the bound is refused whole
+	// (next_action=use_fresh_context_or_raise_agents.fork_max_snapshot_tokens)
+	// — never silently truncated.
+	ForkMaxSnapshotTokens int `yaml:"forkMaxSnapshotTokens,omitempty" json:"forkMaxSnapshotTokens,omitempty"`
 }
 
 // agents.autoCloseCompleted policy values (P1-C 方案 C).
@@ -643,6 +668,53 @@ type ImagesGenerationsConfig struct {
 	MaxN                int           `yaml:"max_n" json:"max_n"`
 }
 
+// WebSearchConfig controls the web_search tool chain and its native-search
+// routing (P2-5b/c). All fields are optional; the tool falls back to env vars
+// and built-in defaults when a field is zero, so an absent section keeps the
+// historical behavior byte-for-byte.
+type WebSearchConfig struct {
+	// Providers is the fallback chain order (comma separated). The legacy
+	// WEB_SEARCH_PROVIDERS env var still wins when set. Empty = built-in
+	// default chain ("bing,duckduckgo,bing_cn").
+	Providers string                `yaml:"providers,omitempty" json:"providers,omitempty"`
+	Native    NativeWebSearchConfig `yaml:"native" json:"native"`
+}
+
+// NativeWebSearchConfig controls provider/model-native web search routing
+// (P2-5c): "off" (default) keeps the chain unchanged; "prefer" uses the native
+// target when it is available and silently skips it otherwise; "force" always
+// routes native and fails with SEARCH_PROVIDER_UNAVAILABLE when unavailable.
+type NativeWebSearchConfig struct {
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	// Allow lists provider/model glob patterns eligible for native routing
+	// (e.g. "deepseek/*"). Empty = no allowlist restriction; eligibility is
+	// still gated by the capability bit, credential, and endpoint config.
+	Allow []string `yaml:"allow,omitempty" json:"allow,omitempty"`
+	// Provider/Model pin the native-search target. Empty provider resolves the
+	// current chat default provider (then the providers default); empty model
+	// resolves that provider's default model.
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model    string `yaml:"model,omitempty" json:"model,omitempty"`
+	// MaxUses caps native web_search tool uses per request (default 5).
+	MaxUses int `yaml:"maxUses,omitempty" json:"maxUses,omitempty"`
+	// APIKey is a literal credential override; prefer APIKeyEnv or the target
+	// provider's configured key so no secret enters config files.
+	APIKey string `yaml:"apiKey,omitempty" json:"apiKey,omitempty"`
+	// APIKeyEnv names the environment variable holding the credential
+	// (default DEEPSEEK_API_KEY); used when neither APIKey nor the provider
+	// key resolves.
+	APIKeyEnv string `yaml:"apiKeyEnv,omitempty" json:"apiKeyEnv,omitempty"`
+	// BaseURL is the Anthropic-compatible Messages base URL ("/messages" is
+	// appended). Empty prefers the pinned provider's base URL when that
+	// provider speaks the anthropic protocol, then the built-in DeepSeek
+	// default.
+	BaseURL string `yaml:"baseURL,omitempty" json:"baseURL,omitempty"`
+	// APIVersion is the anthropic-version header (default 2023-06-01).
+	APIVersion string `yaml:"apiVersion,omitempty" json:"apiVersion,omitempty"`
+	// MaxTokens bounds the auxiliary Messages response (default 4096).
+	MaxTokens int `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
+}
+
 // PerformanceConfig 性能配置
 type PerformanceConfig struct {
 	MaxConcurrency int           `yaml:"maxConcurrency" json:"maxConcurrency"`
@@ -829,6 +901,15 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				DefaultOutputFormat: "png",
 				RequestTimeout:      5 * time.Minute,
 				MaxN:                4,
+			},
+		},
+		WebSearch: WebSearchConfig{
+			Native: NativeWebSearchConfig{
+				Mode:       "off",
+				MaxUses:    5,
+				APIKeyEnv:  "DEEPSEEK_API_KEY",
+				APIVersion: "2023-06-01",
+				MaxTokens:  4096,
 			},
 		},
 		Performance: PerformanceConfig{

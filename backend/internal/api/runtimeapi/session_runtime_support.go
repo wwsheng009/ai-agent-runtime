@@ -33,6 +33,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 )
@@ -875,7 +876,7 @@ func (c *sessionAgentController) ApplyWorktree(ctx context.Context, args toolbro
 		// child's remaining writes (2026-09-27 incident: a child applied its own
 		// worktree mid-turn). Wait or close first; "no evidence" never blocks.
 		return nil, fmt.Errorf(
-			"apply refused: session %s is still executing (runtime_state=%s); wait for it to finish (wait_agent) or close it (close_agent) before landing its worktree",
+			"apply refused: session %s is still executing (runtime_state=%s); wait for it to finish (subagent_wait) or close it (subagent_close) before landing its worktree",
 			sessionID, state,
 		)
 	}
@@ -969,7 +970,7 @@ func (c *sessionAgentController) DiscardWorktree(ctx context.Context, args toolb
 		// Removing a worktree under a session that still holds a turn deletes
 		// the child's workspace while it may still be writing.
 		return nil, fmt.Errorf(
-			"discard refused: session %s is still executing (runtime_state=%s); wait for it to finish (wait_agent) or close it (close_agent) before discarding its worktree",
+			"discard refused: session %s is still executing (runtime_state=%s); wait for it to finish (subagent_wait) or close it (subagent_close) before discarding its worktree",
 			sessionID, state,
 		)
 	}
@@ -1039,7 +1040,7 @@ func annotateAPISpawnWorktreeCompletion(ctx context.Context, c *sessionAgentCont
 		if diff, err := handle.DiffStat(ctx); err == nil && strings.TrimSpace(diff) != "" {
 			payload["worktree_diff_stat"] = diff
 		}
-		payload["next_action"] = "Call apply_agent_worktree to land changes in the main repo, or discard_agent_worktree to drop them. close_agent also cleans remaining worktrees."
+		payload["next_action"] = "Call subagent_apply_worktree to land changes in the main repo, or subagent_discard_worktree to drop them. subagent_close also cleans remaining worktrees."
 		return
 	}
 	if disposition != "" {
@@ -1164,7 +1165,7 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 		c.projectAgentCompletion(context.Background(), parentSessionID, childSessionID, agentCompletionStatus(event), eventType)
 		c.completeSupervisedRun(context.Background(), parentSessionID, childSessionID, agentCompletionStatus(event), eventType)
 		// Keep worktree after completion so parent can apply/discard explicitly.
-		// close_agent still cleans remaining worktrees.
+		// subagent_close still cleans remaining worktrees.
 		annotateAPISpawnWorktreeCompletion(context.Background(), c, childSession, payload)
 		completionMessage, mailboxErr := c.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
 		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
@@ -4629,7 +4630,8 @@ func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 	if toolPolicy.DeniedTools == nil {
 		toolPolicy.DeniedTools = map[string]bool{}
 	}
-	for _, toolName := range []string{"spawn_agent", "subagent_spawn", "spawn_subagents", "spawn_team", "team_spawn"} {
+	// 展开现役拼写：拒绝表按模型请求的原始拼写匹配，别名与规范名都要覆盖。
+	for _, toolName := range toolregistry.CallableNames("subagent_spawn", "spawn_subagents", "team_spawn") {
 		toolPolicy.DeniedTools[toolName] = true
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)

@@ -737,8 +737,8 @@ func applyObservedTaskOutcome(run *TaskRunResult, observations []SessionObservat
 		}
 		switch normalizeObservedTaskOutcomeTool(observation.Tool) {
 		// Observed-outcome tool names: the canonical team_task_report /
-		// team_task_block spellings (naming contract B2) plus the legacy
-		// report_task_outcome / block_current_task aliases.
+		// team_task_block spellings (naming contract B2) plus their registered
+		// report_task_outcome / block_current_task aliases (registry Entry.Aliases).
 		case "team_task_report", "team_task_block", "report_task_outcome", "block_current_task":
 		default:
 			continue

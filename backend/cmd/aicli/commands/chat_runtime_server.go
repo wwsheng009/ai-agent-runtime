@@ -25,6 +25,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextreconcile"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -445,6 +446,10 @@ type runtimeServerRuntimeToolsResponse struct {
 	Tools     []runtimetypes.ToolDefinition `json:"tools"`
 	Count     int                           `json:"count"`
 	Source    string                        `json:"source"`
+	// §2.2-A：观测面可加字段。旧版 runtime-server 不返回时为 nil，
+	// 消费方（TUI /tools）按"字段缺失就本地补齐"的口径降级。
+	Groups   []toolsurface.Group        `json:"groups"`
+	Filtered []toolsurface.FilteredTool `json:"filtered"`
 }
 
 type runtimeServerRuntimeEventView struct {
@@ -1012,22 +1017,34 @@ func (e *aicliRuntimeServerChatExecutor) storeRuntimeServerToolNames(sessionID s
 }
 
 func (e *aicliRuntimeServerChatExecutor) listRuntimeServerTools(ctx context.Context, session *ChatSession, sessionID string) ([]runtimetypes.ToolDefinition, error) {
+	payload, err := e.listRuntimeServerToolsPayload(ctx, session, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return payload.Tools, nil
+}
+
+// listRuntimeServerToolsPayload 取 runtime-server 会话级工具面观测 payload（§2.2-A/§2.2-C）。
+//
+// TUI /tools 直接消费这里的 groups[]/filtered[]，与 web 端点同一份响应（不再本地
+// 二次 Build/二次分类）——这是"TUI 观测面与 /api/runtime/tools 同源"的落点。
+func (e *aicliRuntimeServerChatExecutor) listRuntimeServerToolsPayload(ctx context.Context, session *ChatSession, sessionID string) (runtimeServerRuntimeToolsResponse, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if e == nil {
-		return nil, fmt.Errorf("runtime-server executor is nil")
+		return runtimeServerRuntimeToolsResponse{}, fmt.Errorf("runtime-server executor is nil")
 	}
 	if sessionID == "" {
-		return nil, fmt.Errorf("runtime-server session id is required")
+		return runtimeServerRuntimeToolsResponse{}, fmt.Errorf("runtime-server session id is required")
 	}
 	var decoded runtimeServerRuntimeToolsResponse
 	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodGet, runtimeServerToolsPath(sessionID), "", nil, &decoded)
 	if err != nil {
-		return nil, err
+		return runtimeServerRuntimeToolsResponse{}, err
 	}
 	if decoded.Tools == nil {
-		return []runtimetypes.ToolDefinition{}, nil
+		decoded.Tools = []runtimetypes.ToolDefinition{}
 	}
-	return decoded.Tools, nil
+	return decoded, nil
 }
 
 func runtimeServerToolsPath(sessionID string) string {

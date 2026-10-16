@@ -70,7 +70,7 @@ func AgentSteerApprovalFirstNextAction(approvalID, reason string) string {
 		detail = "pending tool approval"
 	}
 	return "approval_first: the target is blocked on a pending approval (" + detail +
-		"); call resolve_agent_approval with allow=true|false before steering — this message stays queued and is injected only after the approval resolves; do not bypass the approval gate"
+		"); call subagent_approve with allow=true|false before steering — this message stays queued and is injected only after the approval resolves; do not bypass the approval gate"
 }
 
 // AgentWaitSteerInterruptNextAction explains an early wait exit caused by the
@@ -90,7 +90,7 @@ func AgentWaitSteerInterruptNextAction() string {
 // a terminal state.
 func AgentWaitSuspendNextAction(consecutive, limit int) string {
 	return fmt.Sprintf(
-		"suspend: %d consecutive active waits observed no obligation progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the children once (subagent_status / read_agent_events with view=tool_progress / subagent_inspect_task), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call wait_agent again with the same ids",
+		"suspend: %d consecutive active waits observed no obligation progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the children once (subagent_status / subagent_events with view=tool_progress / subagent_inspect_task), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call subagent_wait again with the same ids",
 		consecutive, limit,
 	)
 }
@@ -276,7 +276,7 @@ type WaitTeamResult struct {
 	TerminalDelta []string              `json:"terminal_delta,omitempty"`
 	PendingCount  int                   `json:"pending_count,omitempty"`
 	// WaitBudgetExhausted mirrors AgentWaitResult.WaitBudgetExhausted for the
-	// team wait (plan §16.3 "wait_team 同口径"): the calling turn spent its
+	// team wait (plan §16.3 "team_wait 同口径"): the calling turn spent its
 	// consecutive no-progress active-wait budget, so the broker stops opening
 	// new observation windows and returns next_action=suspend instead. The
 	// task-ledger view is preserved either way.
@@ -862,15 +862,15 @@ func FinalizeAgentEventsResult(result *AgentEventsResult) *AgentEventsResult {
 	}
 	switch {
 	case hasApproval:
-		result.NextAction = "resolve_pending_approval: call resolve_agent_approval with allow=true|false; do not re-poll read_agent_events for the same approval"
+		result.NextAction = "resolve_pending_approval: call subagent_approve with allow=true|false; do not re-poll subagent_events for the same approval"
 	case result.Count > 0:
-		result.NextAction = "consume_events: use returned events now; only re-call read_agent_events with a higher after_seq when new events are needed"
+		result.NextAction = "consume_events: use returned events now; only re-call subagent_events with a higher after_seq when new events are needed"
 	case result.TimedOut:
-		result.NextAction = "stop_empty_event_poll: timed out with 0 events; use wait_agent for child readiness, send_message/followup_task for work, or proceed without re-calling the same read_agent_events"
+		result.NextAction = "stop_empty_event_poll: timed out with 0 events; use subagent_wait for child readiness, subagent_send/subagent_followup for work, or proceed without re-calling the same subagent_events"
 	default:
 		// Non-blocking empty read (wait_ms=0 or no wait). Explicitly steer away
 		// from tight unchanged polling loops that doom-loop exempts.
-		result.NextAction = "stop_empty_event_poll: 0 events returned; do not immediately re-call read_agent_events with the same id/after_seq. prefer subagent_wait for readiness, or use wait_ms>0 once if waiting for a specific new event"
+		result.NextAction = "stop_empty_event_poll: 0 events returned; do not immediately re-call subagent_events with the same id/after_seq. prefer subagent_wait for readiness, or use wait_ms>0 once if waiting for a specific new event"
 	}
 	return result
 }
@@ -1070,13 +1070,13 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 		result.NextAction = "target_not_found: the requested id does not exist as an agent session. If it is a dispatch batch id, take a task_id from the receipt tasks[] and wait on that (or read the child session directly); do not re-wait on the same id"
 	} else if result.TimedOut && result.PendingCount > 0 {
 		result.ExecutionContinues = true
-		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; pending child execution continues. Do not immediately re-call wait_agent with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children. Cheap non-blocking evidence before the next window: read_agent_events(view=tool_progress, after_seq=<last seen>) or subagent_status"
+		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; pending child execution continues. Do not immediately re-call subagent_wait with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children. Cheap non-blocking evidence before the next window: subagent_events(view=tool_progress, after_seq=<last seen>) or subagent_status"
 	} else if result.ReadyCount > 0 && result.PendingCount > 0 {
 		result.NextAction = "consume_ready_outputs_and_continue_independent_work: use ready child outputs now; keep other independent work moving instead of blocking only on pending agents"
 	} else if result.ReadyCount > 0 {
 		result.NextAction = "consume_ready_outputs: use the returned ready outputs and do not re-wait for already-ready agents"
 	} else if result.TimedOut {
-		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; do other work or inspect child status before waiting again. Cheap non-blocking evidence: read_agent_events(view=tool_progress) or subagent_status"
+		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; do other work or inspect child status before waiting again. Cheap non-blocking evidence: subagent_events(view=tool_progress) or subagent_status"
 	}
 	return result
 }
@@ -1112,19 +1112,19 @@ func agentWaitMatchedTargetMissing(result *AgentWaitResult) bool {
 func agentWaitPendingApprovalNextAction(result *AgentWaitResult) string {
 	pending := firstAgentWaitPendingApproval(result)
 	if pending == nil {
-		return "resolve_pending_approval: call resolve_agent_approval with allow=true|false; do not re-wait or poll for the same approval"
+		return "resolve_pending_approval: call subagent_approve with allow=true|false; do not re-wait or poll for the same approval"
 	}
 	sessionRef := firstNonEmptyToolValue(pending.ID, pending.SessionID, pending.Path)
 	requestID := strings.TrimSpace(pending.PendingApprovalID)
 	parts := []string{"resolve_pending_approval"}
 	if sessionRef != "" && requestID != "" {
-		parts = append(parts, fmt.Sprintf("call resolve_agent_approval with id=%q request_id=%q allow=true|false", sessionRef, requestID))
+		parts = append(parts, fmt.Sprintf("call subagent_approve with id=%q request_id=%q allow=true|false", sessionRef, requestID))
 	} else if sessionRef != "" {
-		parts = append(parts, fmt.Sprintf("inspect pending_approval_id for id=%q then call resolve_agent_approval with allow=true|false", sessionRef))
+		parts = append(parts, fmt.Sprintf("inspect pending_approval_id for id=%q then call subagent_approve with allow=true|false", sessionRef))
 	} else if requestID != "" {
-		parts = append(parts, fmt.Sprintf("call resolve_agent_approval with request_id=%q allow=true|false", requestID))
+		parts = append(parts, fmt.Sprintf("call subagent_approve with request_id=%q allow=true|false", requestID))
 	} else {
-		parts = append(parts, "call resolve_agent_approval with allow=true|false")
+		parts = append(parts, "call subagent_approve with allow=true|false")
 	}
 	parts = append(parts, "do not re-wait, poll, or start a fallback agent for the same approval")
 	return strings.Join(parts, ": ")
@@ -1384,7 +1384,7 @@ func ApplyAgentEventsPagination(result *AgentEventsResult, hasMore bool, unread 
 	case unread > 0:
 		detail = fmt.Sprintf("%d more event(s) remain", unread)
 	}
-	result.NextAction = fmt.Sprintf("consume_events_then_advance: %d event(s) returned (latest_seq=%d); %s — consume these first, then re-call read_agent_events with after_seq=%d", result.Count, result.LatestSeq, detail, result.LatestSeq)
+	result.NextAction = fmt.Sprintf("consume_events_then_advance: %d event(s) returned (latest_seq=%d); %s — consume these first, then re-call subagent_events with after_seq=%d", result.Count, result.LatestSeq, detail, result.LatestSeq)
 	return result
 }
 

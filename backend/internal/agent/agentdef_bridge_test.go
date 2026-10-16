@@ -105,7 +105,7 @@ func TestDecodeSubagentTasksAcceptsAgentTypeAndMaxTurns(t *testing.T) {
 }
 
 func TestSpawnSubagentsSchemaAdvertisesAgentTypeAndMaxTurns(t *testing.T) {
-	definition := spawnSubagentsToolDefinition(true, "")
+	definition := spawnSubagentsToolDefinition(true, "", DefaultCapabilities())
 	properties, ok := definition.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
 	agents, ok := properties["agents"].(map[string]interface{})
@@ -118,6 +118,6 @@ func TestSpawnSubagentsSchemaAdvertisesAgentTypeAndMaxTurns(t *testing.T) {
 	require.Contains(t, itemProps, "max_turns")
 	require.Contains(t, itemProps, "tools_whitelist")
 
-	withCatalog := spawnSubagentsToolDefinition(true, "- explore: Read-only codebase explorer (builtin, read-only)")
+	withCatalog := spawnSubagentsToolDefinition(true, "- explore: Read-only codebase explorer (builtin, read-only)", DefaultCapabilities())
 	require.Contains(t, withCatalog.Description, "- explore: Read-only codebase explorer")
 }

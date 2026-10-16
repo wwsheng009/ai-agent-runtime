@@ -45,20 +45,20 @@ func (b *Broker) readAgentEventsWithView(ctx context.Context, request ReadAgentE
 			if result == nil {
 				return nil, nil
 			}
-			return nil, fmt.Errorf("read_agent_events: raw reader returned a nil continuation page")
+			return nil, fmt.Errorf("subagent_events: raw reader returned a nil continuation page")
 		}
 		if len(page.Events) > pageArgs.Limit || page.Filtered != 0 || NormalizeAgentEventsView(page.View) == AgentEventsViewToolProgress {
-			return nil, fmt.Errorf("read_agent_events: projection scan requires unprojected raw pages within limit=%d", pageArgs.Limit)
+			return nil, fmt.Errorf("subagent_events: projection scan requires unprojected raw pages within limit=%d", pageArgs.Limit)
 		}
 		if page.HasMore && page.LatestSeq <= pageArgs.AfterSeq {
 			// Fail without publishing a cursor or updating the read memo. The
 			// caller can retry its original window; no events were acknowledged.
-			return nil, fmt.Errorf("read_agent_events: raw page has_more=true without advancing after_seq=%d", pageArgs.AfterSeq)
+			return nil, fmt.Errorf("subagent_events: raw page has_more=true without advancing after_seq=%d", pageArgs.AfterSeq)
 		}
 		if result == nil {
 			result = &AgentEventsResult{SessionID: page.SessionID, LatestSeq: request.AfterSeq}
 		} else if result.SessionID != page.SessionID {
-			return nil, fmt.Errorf("read_agent_events: raw reader changed session during projection scan")
+			return nil, fmt.Errorf("subagent_events: raw reader changed session during projection scan")
 		}
 		result.Events = append(result.Events, page.Events...)
 		rawCount += len(page.Events)
@@ -123,9 +123,9 @@ func refreshAgentEventsViewGuidance(result *AgentEventsResult) *AgentEventsResul
 		detail = fmt.Sprintf("%d more raw event(s) remain", result.UnreadCount)
 	}
 	if result.Count == 0 {
-		result.NextAction = fmt.Sprintf("continue_tool_progress_scan: 0 tool_progress event(s) returned by the bounded raw scan; filtered=%d; %s. Continue read_agent_events: %s", result.Filtered, detail, cursor)
+		result.NextAction = fmt.Sprintf("continue_tool_progress_scan: 0 tool_progress event(s) returned by the bounded raw scan; filtered=%d; %s. Continue subagent_events: %s", result.Filtered, detail, cursor)
 	} else {
-		result.NextAction = fmt.Sprintf("consume_events_then_advance: %d tool_progress event(s) returned; filtered=%d; %s. Consume these first, then continue read_agent_events: %s", result.Count, result.Filtered, detail, cursor)
+		result.NextAction = fmt.Sprintf("consume_events_then_advance: %d tool_progress event(s) returned; filtered=%d; %s. Consume these first, then continue subagent_events: %s", result.Count, result.Filtered, detail, cursor)
 	}
 	return result
 }

@@ -323,7 +323,7 @@ func ThreadLimitMessage(limit, active int, occupants []ThreadOccupant, extras ..
 		}
 	}
 	message := strings.Join(parts, " ") + fmt.Sprintf(
-		"; next_action=%s — reuse an existing child with send_input/wait_agent, close an idle child with close_agent, or raise agents.maxThreads (set %d for unlimited)",
+		"; next_action=%s — reuse an existing child with subagent_input/subagent_wait, close an idle child with subagent_close, or raise agents.maxThreads (set %d for unlimited)",
 		ThreadLimitNextAction, MaxThreadsUnlimited,
 	)
 	if summary := FormatThreadOccupants(occupants, defaultThreadOccupantLimit); summary != "" {

@@ -116,7 +116,8 @@ func TestLocalActorRegistryV2SendInputApprovalFirstNextAction(t *testing.T) {
 	assert.True(t, result.Queued, "AC-P2-7b: 审批阻塞时 steer 必须保持排队，不得绕过闸门")
 	assert.Contains(t, result.NextAction, "approval_first", "AC-P2-7b: 回执必须给出审批优先引导")
 	assert.Contains(t, result.NextAction, "apr-cli-1", "引导必须点名待批的 approval id")
-	assert.Contains(t, result.NextAction, "resolve_agent_approval", "引导必须指向审批解决工具")
+	assert.Contains(t, result.NextAction, "subagent_approve",
+		"引导必须指向审批解决工具的注册表规范名（resolve_agent_approval 只是别名）")
 }
 
 func TestLocalActorRegistryWaitEndsOnCallerSteerInterrupt(t *testing.T) {

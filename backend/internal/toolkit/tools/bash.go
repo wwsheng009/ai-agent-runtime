@@ -158,7 +158,7 @@ func NewBashTool() *BashTool {
 			},
 			"detach": map[string]interface{}{
 				"type":        "boolean",
-				"description": "可选：设为 true 时把命令作为独立进程启动（fire-and-forget），立即返回 PID。**已弃用**：该进程不继承输出管道（输出不会进入工具结果、无监督），请优先改用 `background_task`（需要交互会话时用 interactive=true，之后用 `write_stdin` 驱动）。仅支持单条 command（不适用于 commands 批次）；运行时可用 AICLI_SHELL_ALLOW_DETACH=0 全局禁用；仍适用于需要真实控制台/TTY 的程序（如再开一个 aicli TUI）。",
+				"description": "可选：设为 true 时把命令作为独立进程启动（fire-and-forget），立即返回 PID。**已弃用**：该进程不继承输出管道（输出不会进入工具结果、无监督），请优先改用 `job_start`（需要交互会话时用 interactive=true，之后用 `job_input` 驱动）。仅支持单条 command（不适用于 commands 批次）；运行时可用 AICLI_SHELL_ALLOW_DETACH=0 全局禁用；仍适用于需要真实控制台/TTY 的程序（如再开一个 aicli TUI）。",
 			},
 		},
 		"required": []string{},
@@ -454,7 +454,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			}
 		}
 		if recoveryHint == "" && execResult.WaitDelayUsed {
-			recoveryHint = "命令本体已结束，但仍有后代进程占用输出管道；runtime 已按 WaitDelay 收敛，输出可能不完整。若该进程是有意保留的守护进程，请改用 background_task，或在命令内显式等待/终止该子进程。"
+			recoveryHint = "命令本体已结束，但仍有后代进程占用输出管道；runtime 已按 WaitDelay 收敛，输出可能不完整。若该进程是有意保留的守护进程，请改用 job_start，或在命令内显式等待/终止该子进程。"
 			failureMetadata["wait_delay_note"] = true
 		}
 		if recoveryHint != "" {
@@ -1301,7 +1301,7 @@ func (b *BashTool) executeDetachedCommand(ctx context.Context, command, resolved
 		content += "\n提示: " + warning
 		content += "（该进程仍独立于本次调用的作业对象，但可能被外层作业跟踪。）"
 	}
-	content += "\n注意: detach=true 已弃用（输出不被捕获、无监督）。需要读取输出或后续交互时，请改用 background_task（交互会话用 interactive=true + write_stdin）。"
+	content += "\n注意: detach=true 已弃用（输出不被捕获、无监督）。需要读取输出或后续交互时，请改用 job_start（交互会话用 interactive=true + job_input）。"
 	metadata := map[string]interface{}{
 		toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
 		"detached":                    true,
@@ -1313,7 +1313,7 @@ func (b *BashTool) executeDetachedCommand(ctx context.Context, command, resolved
 		"deprecated":                  true,
 		"deprecated_reason":           "detach=true is fire-and-forget: output is not captured and the process is unsupervised",
 		toolresult.MetadataNextActionKey: fmt.Sprintf(
-			"detach=true is deprecated (fire-and-forget, no captured output). Prefer background_task (interactive=true for a session driven by write_stdin); otherwise manage pid=%d explicitly (Stop-Process -Id %d / kill %d) and avoid launching duplicates.",
+			"detach=true is deprecated (fire-and-forget, no captured output). Prefer job_start (interactive=true for a session driven by job_input); otherwise manage pid=%d explicitly (Stop-Process -Id %d / kill %d) and avoid launching duplicates.",
 			proc.PID, proc.PID, proc.PID,
 		),
 	}
@@ -1384,7 +1384,7 @@ func longRunningShellCommandHint(command string) string {
 	}
 	for _, pattern := range longRunningShellCommandPatterns {
 		if pattern.MatchString(trimmed) {
-			return "该命令疑似常驻/守护类命令（daemon、dev server、watch 等）：前台执行请显式传 timeout，并优先改用 background_task；若必须先拉起守护进程，请先 `daemon start`（带超时）再查询状态，避免首次调用阻塞。"
+			return "该命令疑似常驻/守护类命令（daemon、dev server、watch 等）：前台执行请显式传 timeout，并优先改用 job_start；若必须先拉起守护进程，请先 `daemon start`（带超时）再查询状态，避免首次调用阻塞。"
 		}
 	}
 	return ""

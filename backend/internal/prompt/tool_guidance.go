@@ -2,6 +2,8 @@ package prompt
 
 import (
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // ToolGuidanceFacts describes which tools are actually visible to the model so
@@ -44,11 +46,14 @@ func (f *ToolGuidanceFacts) any(names ...string) bool {
 var WriteLikeTools = []string{"write", "edit", "multiedit", "append_write", "apply_patch"}
 
 var (
-	shellGuidanceTools       = []string{"shell", "bash", "execute_shell_command", "aicli_exec", "grep", "rg", "view", "read", "ls", "glob"}
-	fileEditingGuidanceTools = []string{"apply_patch", "edit", "write", "append_write", "multiedit"}
-	parallelGuidanceTools    = []string{"view", "read", "grep", "rg", "glob", "ls", "shell", "bash", "execute_shell_command", "aicli_exec"}
-	delegationGuidanceTools  = []string{"spawn_subagents", "spawn_agent"}
-	multiAgentGuidanceTools  = []string{"spawn_subagents", "spawn_agent", "spawn_team", "team_spawn", "wait_agent", "wait_team"}
+	// 下列名单只写规范名；CallableNames 展开现役别名（bash/rg/read/...），
+	// 使可见性检测对模型可能请求的任意拼写都成立，而拼写表只在
+	// internal/toolregistry 维护一份。
+	shellGuidanceTools       = toolregistry.CallableNames("shell", "aicli_exec", "grep", "view", "ls", "glob")
+	fileEditingGuidanceTools = toolregistry.CallableNames("apply_patch", "edit", "write", "append_write", "multiedit")
+	parallelGuidanceTools    = toolregistry.CallableNames("view", "grep", "glob", "ls", "shell", "aicli_exec")
+	delegationGuidanceTools  = toolregistry.CallableNames("spawn_subagents", "subagent_spawn")
+	multiAgentGuidanceTools  = toolregistry.CallableNames("spawn_subagents", "subagent_spawn", "team_spawn", "subagent_wait", "team_wait")
 )
 
 // RenderShellExecutionGuidanceFacts renders the shell/toolkit guidance only

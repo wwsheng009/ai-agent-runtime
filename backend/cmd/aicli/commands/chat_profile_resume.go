@@ -24,14 +24,14 @@ import (
 // hydrateChatProfileIdentityFromResumedSession 从运行时会话元数据回填 profile 身份
 // 字段（引用/名称/agent/根目录），返回回填的引用；无持久化绑定或会话已有绑定时返回 ""。
 func hydrateChatProfileIdentityFromResumedSession(session *ChatSession) string {
-	if session == nil || session.RuntimeSession == nil {
+	if session == nil {
 		return ""
 	}
 	// 已有绑定（本次启动解析出的显式/默认 profile）不覆盖。
 	if strings.TrimSpace(session.ProfileReference) != "" || strings.TrimSpace(session.ProfileName) != "" {
 		return ""
 	}
-	ctx := session.RuntimeSession.Metadata.Context
+	ctx := chatRuntimeContextMapSnapshot(session)
 	if ctx == nil {
 		return ""
 	}

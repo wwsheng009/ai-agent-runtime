@@ -998,7 +998,9 @@ func TestApplyLocalChildDepthPolicyHidesUnavailableSpawnTools(t *testing.T) {
 
 	applyLocalChildDepthPolicy(apiAgent, 1, 1)
 	policy := apiAgent.GetToolExecutionPolicy()
-	for _, toolName := range []string{"spawn_agent", "spawn_subagents", "spawn_team"} {
+	// 拒绝集必须覆盖规范名与现役别名的全部拼写（CallableNames 展开），
+	// 否则深限子会话仍能通过别名发起委派。
+	for _, toolName := range []string{"subagent_spawn", "spawn_agent", "spawn_subagents", "team_spawn", "spawn_team"} {
 		if err := policy.AllowTool(toolName); err == nil {
 			t.Fatalf("expected max-depth policy to hide %s", toolName)
 		}

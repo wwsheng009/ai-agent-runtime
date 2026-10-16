@@ -73,11 +73,14 @@ func TestRenderParallelToolGuidanceFactsGatesOnBatchableTools(t *testing.T) {
 }
 
 func TestDelegationAndMultiAgentGuidanceGateOnSpawnTools(t *testing.T) {
+	// 覆盖 subagent/team 的 spawn+wait 家族的全部现役拼写（规范名 + 别名）。
+	// 这里刻意写字符串字面量而不是引用 toolregistry：测试要独立钉住对外的
+	// 拼写面，才拦得住"生产改了名、测试跟着改"的同源漂移。
 	noSpawn := &ToolGuidanceFacts{
 		Denied: map[string]bool{
-			"spawn_subagents": true, "spawn_agent": true,
+			"spawn_subagents": true, "subagent_spawn": true, "spawn_agent": true,
 			"spawn_team": true, "team_spawn": true,
-			"wait_agent": true, "wait_team": true,
+			"subagent_wait": true, "wait_agent": true, "team_wait": true, "wait_team": true,
 		},
 	}
 	if got := RenderTaskDifficultyGuidanceFacts(noSpawn); got != "" {

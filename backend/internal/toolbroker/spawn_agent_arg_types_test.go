@@ -94,7 +94,7 @@ func TestValidateSpawnAgentArgTypesRejectsKindMismatch(t *testing.T) {
 			if !strings.Contains(err.Error(), "\""+tc.wantKey+"\"") {
 				t.Fatalf("error should name the offending key, got %v", err)
 			}
-			if !strings.Contains(err.Error(), "spawn_agent") {
+			if !strings.Contains(err.Error(), "subagent_spawn") {
 				t.Fatalf("error should name the tool, got %v", err)
 			}
 		})
@@ -122,7 +122,7 @@ func TestSpawnAgentIntArgCoercion(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			args := map[string]interface{}{"timeout_sec": tc.value}
-			got, ok, err := toolArgInt64("spawn_agent", args, "timeout_sec")
+			got, ok, err := toolArgInt64(ToolSubagentSpawn, args, "timeout_sec")
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected error containing %q, got value=%d ok=%v err=%v", tc.wantErr, got, ok, err)
@@ -138,7 +138,7 @@ func TestSpawnAgentIntArgCoercion(t *testing.T) {
 		})
 	}
 
-	if _, ok, err := toolArgInt64("spawn_agent", map[string]interface{}{}, "timeout_sec"); err != nil || ok {
+	if _, ok, err := toolArgInt64(ToolSubagentSpawn, map[string]interface{}{}, "timeout_sec"); err != nil || ok {
 		t.Fatalf("absent key must report ok=false without error, got ok=%v err=%v", ok, err)
 	}
 }

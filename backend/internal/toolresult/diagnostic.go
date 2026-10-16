@@ -2160,7 +2160,7 @@ func nextActionForToolError(code string, message string) string {
 		if refined := jobReferenceNextAction(message); refined != "" {
 			return refined
 		}
-		return "Use the exact job_id returned by background_task; do not guess or synthesize an id."
+		return "Use the exact job_id returned by job_start; do not guess or synthesize an id."
 	case runtimeerrors.ErrToolNotFound, runtimeerrors.ErrToolNotRegistered:
 		if refined := artifactReferenceNextAction(message); refined != "" {
 			return refined
@@ -2215,19 +2215,19 @@ func nextActionForToolError(code string, message string) string {
 	case runtimeerrors.ErrWritePrecondition, runtimeerrors.ErrToolStaleContext:
 		return "Re-read the target file with view/grep, rebuild the edit/patch from the latest content, and do not retry the same stale context unchanged."
 	case runtimeerrors.ErrAgentSpawnDepthLimit:
-		return "complete_locally_or_use_spawn_team: this agent cannot spawn another child (max depth). Continue the work in the current agent, reuse an existing child, or use spawn_team for multi-worker orchestration. Do not retry the same spawn_agent."
+		return "complete_locally_or_use_team_spawn: this agent cannot spawn another child (max depth). Continue the work in the current agent, reuse an existing child, or use team_spawn for multi-worker orchestration. Do not retry the same subagent_spawn."
 	case runtimeerrors.ErrAgentAlreadyExists:
-		return "The requested child id already exists. Reuse the existing child with send_input/followup_task, close it if replacement is intended, or spawn with a different id. Do not retry the same spawn_agent unchanged."
+		return "The requested child id already exists. Reuse the existing child with subagent_input/subagent_followup, close it if replacement is intended, or spawn with a different id. Do not retry the same subagent_spawn unchanged."
 	case runtimeerrors.ErrAgentBusy:
-		return "The child already has an active run. Use wait_agent/read_agent_events to observe it, send_input with interrupt=true only when replacing that run is intentional, or use followup_task to queue follow-up work. Do not retry the same send_input unchanged."
+		return "The child already has an active run. Use subagent_wait/subagent_events to observe it, subagent_input with interrupt=true only when replacing that run is intentional, or use subagent_followup to queue follow-up work. Do not retry the same subagent_input unchanged."
 	case runtimeerrors.ErrAgentRunSuperseded:
-		return "The child run that owned this approval/question is gone (interrupted, superseded by a newer turn, or its session already terminal). Read the child with list_agents/wait_agent/read_agent_events, then re-dispatch the work with send_input or followup_task. Do not replay the same approval request unchanged."
+		return "The child run that owned this approval/question is gone (interrupted, superseded by a newer turn, or its session already terminal). Read the child with subagent_list/subagent_wait/subagent_events, then re-dispatch the work with subagent_input or subagent_followup. Do not replay the same approval request unchanged."
 	case runtimeerrors.ErrAgentThreadLimit:
-		return "agents.maxThreads is fully used by active children (active_children is reported in the error). Free capacity first: close finished/idle children with close_agent, reuse an existing child via send_input/followup_task, or reduce the spawn batch. Do not retry the same spawn_agent unchanged."
+		return "agents.maxThreads is fully used by active children (active_children is reported in the error). Free capacity first: close finished/idle children with subagent_close, reuse an existing child via subagent_input/subagent_followup, or reduce the spawn batch. Do not retry the same subagent_spawn unchanged."
 	case runtimeerrors.ErrAgentRegistryUnavailable:
 		return "The durable agent registry/store is not initialized or already closed, so spawn/query cannot be served. Do not retry the same call unchanged; report the host-side wiring failure, or continue without durable agent tracking when the host supports it."
 	case runtimeerrors.ErrAgentSessionNotFound:
-		return "Use list_agents for the current root session, then retry with an existing child id, session_id, or path. Do not retry the same unknown session reference unchanged."
+		return "Use subagent_list for the current root session, then retry with an existing child id, session_id, or path. Do not retry the same unknown session reference unchanged."
 	case runtimeerrors.ErrSessionNotFound:
 		return "The acting session record is missing from the store (deleted, expired, or never persisted). This is a host-side session lifecycle failure, not a path or reference problem: do not retry the same call unchanged; the session must be recreated or the store repaired before this tool can run."
 	case runtimeerrors.ErrContextBudget:
@@ -2267,12 +2267,12 @@ func jobReferenceNextAction(message string) string {
 	}
 	id = strings.TrimSpace(strings.TrimSuffix(id, ";"))
 	if strings.HasPrefix(id, "art_") {
-		return "The id passed to task_output is an artifact record id (art_…), not a background job id. Use the exact job_id returned by background_task (job_ref_… or job_…); do not reuse an artifact_id seen in tool output."
+		return "The id passed to job_output is an artifact record id (art_…), not a background job id. Use the exact job_id returned by job_start (job_ref_… or job_…); do not reuse an artifact_id seen in tool output."
 	}
 	// Some manager/chat wrappers reflow the message so the referenced id is not
 	// the last ": " segment; scan the whole message for an artifact id token.
 	if aid := firstArtifactID(message); aid != "" {
-		return "The task_output reference (" + aid + ") is an artifact record id (art_…), not a background job id. Use the exact job_id returned by background_task (job_ref_… or job_…); do not reuse an artifact_id seen in tool output."
+		return "The job_output reference (" + aid + ") is an artifact record id (art_…), not a background job id. Use the exact job_id returned by job_start (job_ref_… or job_…); do not reuse an artifact_id seen in tool output."
 	}
 	return ""
 }
@@ -2292,7 +2292,7 @@ func artifactReferenceNextAction(message string) string {
 	if id == "" {
 		return ""
 	}
-	return "The reference (" + id + ") is an artifact record id (art_…), not a file path, tool name, or background job id. The record may have expired or been pruned from the artifact store; re-run the tool that produced it or use context/artifact search to regenerate the full raw output. Never pass artifact ids to task_output."
+	return "The reference (" + id + ") is an artifact record id (art_…), not a file path, tool name, or background job id. The record may have expired or been pruned from the artifact store; re-run the tool that produced it or use context/artifact search to regenerate the full raw output. Never pass artifact ids to job_output."
 }
 
 // firstArtifactID scans text for an artifact record id token (art_ followed by

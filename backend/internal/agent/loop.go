@@ -41,6 +41,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
@@ -214,6 +215,13 @@ type ReActLoop struct {
 	// runLineage 是本 run 的父链归属（子代理运行由调度器注入）：随
 	// llm.request.* 载荷落库，供父会话统计按 root 归集。生命周期等于一次 run()。
 	runLineage runLineage
+	// reportSchema / reportSubmitted 是结构化回执契约（P1-2'）的 run 作用域
+	// 状态：reportSchema 非 nil 时 think() 注入 submit_report 工具，act() 在
+	// whitelist/权限门之前处理其调用；接受的回执由 run() 收尾写回 Output。
+	// 生命周期严格等于一次 run()：入口重置，重试（同 loop 多次 run）不得
+	// 继承上一 attempt 的回执。
+	reportSchema    map[string]interface{}
+	reportSubmitted map[string]interface{}
 }
 
 // runLineage 描述本次运行的父链归属；全空 = 顶层运行（不注入载荷）。
@@ -260,6 +268,10 @@ type loopRunOptions struct {
 	PromptCacheEpoch        int
 	PersistHistory          func([]types.Message) error
 	PersistPromptCacheEpoch func(int) error
+	// ReportSchema 非 nil 时启用结构化回执契约（P1-2'）：think() 注入
+	// submit_report 工具（参数即 schema），子级以其交付结构化回执；
+	// 接受的回执成为 run 的最终 Output。
+	ReportSchema map[string]interface{}
 }
 
 // HistorySession 描述 ReActLoop 运行时需要的最小 session 能力。
@@ -610,6 +622,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		return nil, errors.New(errors.ErrValidationFailed, "LLM runtime is nil")
 	}
 	loop.turnID = TurnIDFromContext(ctx)
+	// 结构化回执契约（P1-2'）：run-scoped 状态入口重置——同一 loop 的重试
+	// attempt 不得继承上一 attempt 已接受的回执。
+	loop.reportSchema = options.ReportSchema
+	loop.reportSubmitted = nil
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：turn_id 在此固定；session_id 必须取
 	// 下面解析后的值（与派发方 parkBackgroundTurn 写账本的键同源），因此 settle 的
 	// defer 注册在 sessionID 解析之后。记录由派发方（本 loop）维护，chat actor 只读。
@@ -704,6 +720,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		result.ToolErrorCount = toolErrorCount
 		result.RecoveredToolErrorCount = recoveredToolErrorCount
 		result.UnrecoveredToolErrorCount = len(pendingFailures)
+		// 结构化回执契约（P1-2'）：一旦回执被接受即为终态交付物——覆盖文本
+		// Output，让宿主/scheduler 的 decode 路径拿到结构化 JSON（DSH 的
+		// terminal protection 语义：已接受的回执不再被后续输出改写）。
+		if len(loop.reportSubmitted) > 0 {
+			if encoded, marshalErr := json.Marshal(loop.reportSubmitted); marshalErr == nil {
+				result.Output = string(encoded)
+			}
+		}
 		if runErr != nil && strings.TrimSpace(result.Output) == "" &&
 			(stderrors.Is(runErr, context.Canceled) || stderrors.Is(runErr, context.DeadlineExceeded)) {
 			result.Output = fmt.Sprintf("当前运行已停止；已保留 %d 条工具观察，可从现有会话继续。", len(result.Observations))
@@ -2243,6 +2267,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if def, ok := loop.mainAgentRoutingToolDefinition(); ok {
 			availableTools = append(availableTools, def)
 		}
+		// 结构化回执契约（P1-2'）：report_schema 请求时叠加 submit_report 工具。
+		// 与难度上报同层——冻结后追加、不参与白名单裁剪（loop 合成工具），
+		// schema 来自本 run 的契约，run 内逐字节稳定。
+		if loop.reportSchema != nil {
+			availableTools = append(availableTools, submitReportToolDefinition(loop.reportSchema))
+		}
 	}
 	var preflightMetadata map[string]interface{}
 	managedHistory, preflightMetadata, err = loop.enforcePromptPreflightWithTools(traceID, sessionID, step, managedHistory, availableTools, remainingBudget, promptCacheEpoch)
@@ -3204,6 +3234,27 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		}
 
 		visibleSearchCall := searchToolVisible && strings.EqualFold(strings.TrimSpace(tc.Name), toolSearchName)
+		// 结构化回执契约（P1-2'）：submit_report 是 loop 合成工具（非注册表
+		// 工具），必须在白名单/权限门之前处理——它不执行任何外部操作，只是
+		// 把模型交付的结构化回执经契约校验后捕获进 run 状态。校验失败按普通
+		// 工具错误返回，让模型在下一步修正重交。
+		if tc.Name == SubmitReportToolName {
+			output, submitErr := loop.handleSubmitReport(tc.Args)
+			if submitErr != nil {
+				result.Error = submitErr.Error()
+			} else {
+				result.Output = output
+			}
+			envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
+			if gatewayErr != nil && envelope != nil {
+				envelope.Metadata["gateway_error"] = gatewayErr.Error()
+			}
+			result.Envelope = envelope
+			loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, nil))
+			results[i] = result
+			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+			continue
+		}
 		if allowedTools != nil && !allowedTools[tc.Name] && !visibleSearchCall {
 			result.Error = fmt.Sprintf("tool not allowed for this agent: %s", tc.Name)
 			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_whitelist", result.Error, nil)
@@ -3399,6 +3450,27 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, map[string]interface{}{
 				"awaiting_model": i == len(toolCalls)-1 && hasRemainingStepBudget(loop.config.MaxSteps, step),
 			}))
+			results[i] = result
+			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
+			continue
+		}
+
+		if tc.Name == IterateGoalToolName {
+			// P2-2'：有界全新上下文迭代。前台语义（阻塞父轮直到终态返回，
+			// 对齐 DSH Ralph 的 foreground 设计）；任务包部署固定，模型只供
+			// objective 与可选 max_rounds。
+			output := loop.executeIterateGoal(ctx, sessionID, traceID, tc)
+			if output.err != "" {
+				result.Error = output.err
+			} else {
+				result.Output = output.text
+			}
+			envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, result.Error, metadata))
+			if gatewayErr != nil && envelope != nil {
+				envelope.Metadata["gateway_error"] = gatewayErr.Error()
+			}
+			result.Envelope = envelope
+			loop.emitRuntimeEvent("tool.completed", sessionID, tc.Name, toolCompletedEventPayload(result, step, traceID, nil))
 			results[i] = result
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 			continue
@@ -4264,7 +4336,17 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
 		if shouldExposeSpawnSubagents(loop.agent, allowed) {
-			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary())
+			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary(), DefaultCapabilities())
+			if !seen[definition.Name] {
+				seen[definition.Name] = true
+				tools = append(tools, definition)
+			}
+		}
+		// iterate_goal（P2-2'）：G4 默认关 + 显式灰度。懒初始化的 scheduler
+		// 恒非 nil，不能当启用信号；只有宿主 SetIterateGoalEnabled(true) 后
+		// 工具面才暴露，避免预算敏感场景（长会话压缩轨迹）被额外 schema 推高。
+		if loop.agent.iterateGoalToolEnabled() && (allowed == nil || allowed[IterateGoalToolName]) {
+			definition := IterateGoalToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
 				tools = append(tools, definition)
@@ -4381,11 +4463,12 @@ func isSimpleGoalProjectedToolSurface(tools []types.ToolDefinition) bool {
 	}
 	sort.Strings(names)
 	switch strings.Join(names, ",") {
-	case "glob,ls", "glob,grep", "glob", "ls", "view", "grep", "shell", "bash", "execute_shell_command":
+	case "glob,ls", "glob,grep", "glob", "ls", "view", "grep":
 		return true
-	default:
-		return false
 	}
+	// 单一 shell 面：接受注册表里 shell 家族的任一现役拼写（shell/bash/execute_shell_command），
+	// 拼写表由别名表推导，新增别名不必改这里。
+	return len(names) == 1 && toolregistry.IsSpellingOf("shell", names[0])
 }
 
 // shouldRefreshStableToolSurface 判断会话级冻结工具面是否需要在 turn 边界重建：
@@ -4444,6 +4527,16 @@ func toolSurfaceAddsCapabilities(current []types.ToolDefinition, candidate []typ
 	return false
 }
 
+// toolNameSet 把名字列表折成集合，供按注册表展开的工具家族做包含判断，
+// 避免在判断点再手写一份拼写清单。
+func toolNameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
 func simpleGoalToolNames(goal string) map[string]bool {
 	normalized := strings.ToLower(strings.TrimSpace(goal))
 	if normalized == "" || len([]rune(normalized)) > 120 || strings.ContainsAny(normalized, "\n;&|") {
@@ -4468,7 +4561,8 @@ func simpleGoalToolNames(goal string) map[string]bool {
 	case simpleGoalIsFileNameSearch(normalized):
 		return map[string]bool{"glob": true}
 	case normalized == "pwd" || normalized == "date" || normalized == "whoami" || normalized == "git status":
-		return map[string]bool{"shell": true, "bash": true, "execute_shell_command": true}
+		// shell 家族的现役拼写（含别名）由注册表展开，避免手写清单漂移。
+		return toolNameSet(toolregistry.CallableNames("shell"))
 	default:
 		return nil
 	}
@@ -4537,32 +4631,21 @@ func simpleGoalHasFileNameCue(normalized string) bool {
 // compaction. Higher rank wins; zero means not a content-search surface alias.
 // The registered `rg` alias stays executable through the tool registry, but the
 // model-facing wire advertises only the canonical `grep` name so the model does
-// not face two identical schemas.
+// not face two identical schemas. The ranking itself is derived from the tool
+// registry alias table (canonical highest, aliases in declared order), so adding
+// a content-search alias needs no edit here.
 func grepToolSurfaceRank(name string) int {
-	switch name {
-	case "grep":
-		return 2
-	case "rg":
-		return 1
-	default:
-		return 0
-	}
+	return toolregistry.SurfaceRank("grep", name)
 }
 
 // readToolSurfaceRank ranks file-reading tool aliases for model surface
 // compaction. Higher rank wins; zero means not a read surface alias.
 // The registered `read` alias stays executable through the tool registry, but
 // the model-facing wire advertises only the canonical `view` name so the model
-// does not face two identical schemas.
+// does not face two identical schemas. The ranking itself is derived from the
+// tool registry alias table (canonical highest, aliases in declared order).
 func readToolSurfaceRank(name string) int {
-	switch name {
-	case "view":
-		return 2
-	case "read":
-		return 1
-	default:
-		return 0
-	}
+	return toolregistry.SurfaceRank("view", name)
 }
 
 func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefinition {
@@ -4668,18 +4751,11 @@ func filterPolicyBlockedToolDefinitions(tools []types.ToolDefinition, policy *To
 }
 
 // shellToolSurfaceRank ranks shell tool aliases for model surface compaction.
-// Higher rank wins; zero means not a shell surface alias.
+// Higher rank wins; zero means not a shell surface alias. The ranking itself is
+// derived from the tool registry alias table (canonical highest, aliases in
+// declared order), so adding a shell alias needs no edit here.
 func shellToolSurfaceRank(name string) int {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "shell":
-		return 3
-	case "bash":
-		return 2
-	case "execute_shell_command":
-		return 1
-	default:
-		return 0
-	}
+	return toolregistry.SurfaceRank("shell", name)
 }
 
 func compactGrepParametersForModel(parameters map[string]interface{}) map[string]interface{} {
@@ -5108,6 +5184,9 @@ func repeatedSemanticToolCallAdvisory(repeatCount int) string {
 	if repeatCount < 2 {
 		return ""
 	}
+	// 注意：这条 advisory 逐轮进入 prompt（token 预算敏感，见 prompt budget
+	// compaction 测试），iterate_goal 联动提示不放这里——只放在跨过
+	// DoomLoopWarningThreshold 的产品级 warning payload（一次性、低频）。
 	return fmt.Sprintf(
 		"Runtime advisory: the same semantic tool request has run %d consecutive times. Execution was not blocked. If the evidence is unchanged, reuse it and change the query, batch related inputs, or proceed to the next task step instead of repeating the call.",
 		repeatCount,
@@ -5340,11 +5419,14 @@ func isExplorationOnlyToolCall(call types.ToolCall) bool {
 	switch strings.ToLower(strings.TrimSpace(call.Name)) {
 	case "view", "grep", "glob", "ls", "fetch", "web_search", "sourcegraph", "list_mcp_resources":
 		return true
-	case "bash", "shell", "execute_shell_command":
-		return !toolCallDeclaresMutatedPaths(call.Args)
-	default:
-		return false
 	}
+	// shell 家族按注册表的现役拼写识别（shell / bash / execute_shell_command）：
+	// 不猜未登记的第三方同名工具（MCP 也暴露 run_tests 之类的名字时不误判），
+	// 同时自动接受注册表后续新增的 shell 别名。
+	if toolregistry.IsSpellingOf("shell", call.Name) {
+		return !toolCallDeclaresMutatedPaths(call.Args)
+	}
+	return false
 }
 
 func toolCallDeclaresMutatedPaths(args map[string]interface{}) bool {
@@ -7297,6 +7379,41 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		task.DependsOn = stringSliceValue(item["depends_on"])
 		task.PatchContext = filePatchSliceValue(item["patches"])
 		task.WritePaths = stringSliceValue(item["write_paths"])
+		// Capability-request fields (P1-1'): decoded here, negotiated at
+		// admission (prepareTasks → Negotiate). Unknown values fail here so a
+		// typo cannot silently degrade to fresh context.
+		task.Context = strings.ToLower(strings.TrimSpace(stringValue(item["context"])))
+		if task.Context != "" && task.Context != SubagentContextFresh && task.Context != SubagentContextFork {
+			return nil, fmt.Errorf("spawn_subagents agent %d has invalid context %q (expected \"fresh\" or \"fork\")", index, task.Context)
+		}
+		if raw, ok := item["report_schema"]; ok && raw != nil {
+			schema, ok := raw.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("spawn_subagents agent %d report_schema must be an object", index)
+			}
+			task.ReportSchema = schema
+		}
+		if raw, ok := item["handoff_in"]; ok && raw != nil {
+			handoffRaw, ok := raw.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in must be an object", index)
+			}
+			encoded, marshalErr := json.Marshal(handoffRaw)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in is not serializable: %w", index, marshalErr)
+			}
+			var handoff Handoff
+			if err := json.Unmarshal(encoded, &handoff); err != nil {
+				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in is malformed: %w", index, err)
+			}
+			// Admission-time shape check: the wire contract requires all five
+			// keys and a valid status machine. Refuse here with a decode-style
+			// error rather than passing garbage into the child prompt.
+			if err := ValidateHandoff(handoff, 0); err != nil {
+				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in invalid: %w", index, err)
+			}
+			task.HandoffIn = &handoff
+		}
 		if task.ID == "" {
 			task.ID = fmt.Sprintf("subagent_%d", index+1)
 		}
@@ -8330,7 +8447,7 @@ func cloneOptionValue(value interface{}) interface{} {
 // description must say so, because a parked turn then cannot be resumed after a
 // crash. The dispatch itself stays asynchronous — P3 / C4-1 deleted the inline
 // blocking path, so nothing falls back to a synchronous wait any more.
-func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string) types.ToolDefinition {
+func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string, caps SubagentCapabilities) types.ToolDefinition {
 	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume. " + runtimepolicy.SubagentWriterPolicyDescription
 	if catalog := strings.TrimSpace(agentCatalog); catalog != "" {
 		description += "\n\nAvailable agent definitions (pass the name as agent_type to inherit its defaults):\n" + catalog
@@ -8340,7 +8457,7 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string)
 		description += " This session does not support supervised suspension (当前会话不支持托管挂起): the batch control plane does not survive a restart, so a parked turn cannot be resumed after a crash. The dispatch still returns a batch handle and the host projects one degradation warning."
 		executionModeDescription = "Deprecated and optional — omit it. Dispatch is always asynchronous, but this session does not support supervised suspension (当前会话不支持托管挂起): the parked turn cannot be resumed after a restart. Legacy wait|sync stay accepted and no longer block the parent turn."
 	}
-	return types.ToolDefinition{
+	definition := types.ToolDefinition{
 		Name:        "spawn_subagents",
 		Description: description,
 		Parameters: map[string]interface{}{
@@ -8439,9 +8556,34 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string)
 					},
 				},
 			},
-			"required": []string{"agents"},
+						"required": []string{"agents"},
 		},
 	}
+	// 能力协商的第三层（G7 三层一致）：未授予的能力位不进 schema——
+	// 模型看得见却调不通的工具字段会浪费轮次，也让预算敏感场景
+	// （长会话压缩轨迹）被恒定 schema 增量推高。授予后字段原样出现。
+	properties := definition.Parameters["properties"].(map[string]interface{})
+	agentsItems := properties["agents"].(map[string]interface{})["items"].(map[string]interface{})["properties"].(map[string]interface{})
+	if caps.ForkContext {
+		agentsItems["context"] = map[string]interface{}{
+			"type":        "string",
+			"enum":        []string{"fresh", "fork"},
+			"description": "fresh (default) starts the child with no conversation history; the task must be self-contained. fork seeds the child with a one-time snapshot of this conversation's completed turns (it does not see the current in-flight turn). Fork children always inherit this route — provider/model overrides are rejected.",
+		}
+	}
+	// handoff_in 与 OutputSchema 同进退：handoff 是结构化通道的一部分，
+	// 未授予结构化能力的部署同样不暴露该字段（schema 零增量）。
+	if caps.OutputSchema {
+		agentsItems["report_schema"] = map[string]interface{}{
+			"type":        "object",
+			"description": "Optional object-rooted JSON Schema for the child's final structured report.",
+		}
+		agentsItems["handoff_in"] = map[string]interface{}{
+			"type":        "object",
+			"description": "Optional normalized handoff carried into the child prompt (writer→verifier relay). Shape: {status: continue|complete|blocked, summary, evidence[], next_steps[], blocker}. continue needs next_steps and an empty blocker; complete needs evidence with no next_steps; blocked needs a concrete blocker.",
+		}
+	}
+	return definition
 }
 
 func summarizeToolAvailability(tools []types.ToolDefinition) map[string]interface{} {

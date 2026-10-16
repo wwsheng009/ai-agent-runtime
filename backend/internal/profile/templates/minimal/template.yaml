@@ -1,3 +1,3 @@
 name: minimal
-description: Minimal profile with the smallest tool surface and all skills disabled
+description: Minimal profile with a small read/write tool surface (basic file editing) and all skills disabled
 default_agent: default

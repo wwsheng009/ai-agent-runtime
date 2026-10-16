@@ -35,10 +35,10 @@ const (
 	// WaitLedgerBoundaryRule writes the §C3-4 semantic boundary into every wait
 	// tool description (plan line 378 / change #13): a timed-out wait is a
 	// successful observation, a pending obligation ledger forbids finalizing
-	// (I1), wait_agent never parks a turn by itself, and a drained ledger
-	// finalizes immediately. wait_team shares the same contract with its own
+	// (I1), subagent_wait never parks a turn by itself, and a drained ledger
+	// finalizes immediately. team_wait shares the same contract with its own
 	// subject kind, so the two wait paths cannot drift in what the model is told.
-	WaitLedgerBoundaryRule = "Semantics: timed_out is a successful observation, not the end of the turn and not a child failure, so never cancel a child because a wait timed out. When the result reports pending_count>0 you must not finalize the turn: I1 intercepts a premature finalize and converts it into a turn suspension. wait_agent never parks a turn by itself. When the obligation ledger is empty or fully terminal the call returns immediately with next_action=finalize. wait_team follows the same contract for the awaited team: its obligations[] rows are that team's tasks with subject_kind=team_task, and a team that is not terminal is never reported as finalizable."
+	WaitLedgerBoundaryRule = "Semantics: timed_out is a successful observation, not the end of the turn and not a child failure, so never cancel a child because a wait timed out. When the result reports pending_count>0 you must not finalize the turn: I1 intercepts a premature finalize and converts it into a turn suspension. subagent_wait never parks a turn by itself. When the obligation ledger is empty or fully terminal the call returns immediately with next_action=finalize. team_wait follows the same contract for the awaited team: its obligations[] rows are that team's tasks with subject_kind=team_task, and a team that is not terminal is never reported as finalizable."
 
 	// WaitResultEchoNote documents the fields that make a bounded wait
 	// auditable, so a shortened observation is never silent.
@@ -49,7 +49,7 @@ const (
 	EventsWaitNonBlockingNote = "Omit it (or pass 0) for a non-blocking read: wait_ms=0 keeps the immediate-return semantics and is not treated as a request for the default window."
 )
 
-// WaitTimeoutArgText renders the shared wait_agent timeout_ms description from
+// WaitTimeoutArgText renders the shared subagent_wait timeout_ms description from
 // the same bounds the host enforces (agentcontrol.WaitTimeoutPolicy), so the
 // schema can never advertise a window the runtime would reject or silently
 // shorten.
@@ -60,9 +60,9 @@ func WaitTimeoutArgText(defaultMs, minMs, maxMs int) string {
 	)
 }
 
-// EventsWaitArgText renders the read_agent_events wait_ms description. It is a
+// EventsWaitArgText renders the subagent_events wait_ms description. It is a
 // separate function because wait_ms=0 means "non-blocking read" rather than
-// "use the default", so the wait_agent text cannot be reused verbatim.
+// "use the default", so the subagent_wait text cannot be reused verbatim.
 func EventsWaitArgText(minMs, maxMs int) string {
 	return fmt.Sprintf(
 		"Optional wait timeout in milliseconds while waiting for new events. %s Positive values are bounded by agents.minWaitTimeoutMs (%dms) and agents.maxWaitTimeoutMs (%dms): agents.waitTimeoutMode=error rejects an out-of-range wait_ms with an actionable message, agents.waitTimeoutMode=clamp pins it to the nearest bound.",
@@ -71,7 +71,7 @@ func EventsWaitArgText(minMs, maxMs int) string {
 }
 
 // WaitDisciplineText joins the shared wait rules into the single block appended
-// to the wait_agent tool description (all host variants).
+// to the subagent_wait tool description (all host variants).
 func WaitDisciplineText() string {
 	return strings.Join([]string{WaitBudgetRule, WaitEscalationRule, WaitLedgerBoundaryRule}, " ")
 }

@@ -63,7 +63,7 @@ func TestDoomLoopTracker_ResetsOnDifferentArgs(t *testing.T) {
 
 func TestDoomLoopTracker_ExemptsPollingTools(t *testing.T) {
 	for _, toolName := range []string{
-		"task_output",
+		"job_output",
 		"subagent_wait",
 		"subagent_events",
 		"subagent_list",
@@ -106,7 +106,7 @@ func TestSemanticToolCallFingerprintStableAndExempt(t *testing.T) {
 		Args: map[string]interface{}{"file_path": "b.go"},
 	}}))
 	require.Empty(t, semanticToolCallFingerprint([]types.ToolCall{{
-		Name: "background_task",
+		Name: "job_start",
 		Args: map[string]interface{}{"task_id": "t1"},
 	}}))
 }

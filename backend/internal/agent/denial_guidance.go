@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -249,7 +250,9 @@ func enrichReadOnlyToolDescriptions(tools []types.ToolDefinition, policy *runtim
 	changed := false
 	out := make([]types.ToolDefinition, 0, len(tools))
 	for _, def := range tools {
-		if (def.Name == "shell" || def.Name == "bash") && !strings.Contains(def.Description, "READ-ONLY MODE") {
+		// shell 家族的现役拼写由注册表判定（shell/bash/execute_shell_command），
+		// 不再手写清单、也不再漏掉别名拼写的只读预告。
+		if toolregistry.IsSpellingOf("shell", def.Name) && !strings.Contains(def.Description, "READ-ONLY MODE") {
 			def.Description += readOnlyShellModeNote
 			changed = true
 		}

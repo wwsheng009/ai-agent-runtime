@@ -83,6 +83,25 @@ func (s *SubagentScheduler) emitSubagentRouteResolved(options SubagentRunOptions
 		// -1 是显式不限，0 是历史遗留写法（配置校验会给出告警）。
 		"expert_limit": modelrouting.ExpertLimitLabel(s.config.Routing),
 	}
+	// 能力协商审计（P1-1'，G7 三层一致）：记录准入结果与请求的上下文模式，
+	// 使"这个子代理请求过哪些可选能力、被授予了什么"可从父会话事件流反查。
+	// 子会话已通过准入（refusals 非空不会走到这里），故只记 granted 摘要。
+	if task.Context != "" {
+		base["context"] = task.Context
+	}
+	if task.ReportSchema != nil {
+		base["report_schema"] = true
+	}
+	if task.HandoffIn != nil {
+		base["handoff_in"] = true
+	}
+	if len(task.CapabilityRefusals) > 0 {
+		refusals := make([]string, 0, len(task.CapabilityRefusals))
+		for _, refusal := range task.CapabilityRefusals {
+			refusals = append(refusals, refusal.Field)
+		}
+		base["capability_refusals"] = refusals
+	}
 	if options.BatchID != "" {
 		base["batch_id"] = options.BatchID
 	}

@@ -43,6 +43,12 @@ type DoomLoopObservation struct {
 	LimitReason string
 }
 
+// DoomLoopIterateAdvice 是 P2-2' 的闭环联动文案（G1 组合而非复制）：
+// doom_loop 检测到重复语义批次时，提示模型可改用 iterate_goal 换全新
+// 上下文推进同一目标——检测（本模块）→ 止损（硬停可选）→ 换脑
+// （iterate_goal）三段闭环。只追加到 advisory，不改变告警/硬停阈值语义。
+const DoomLoopIterateAdvice = "If the repeated batches are the same approach to one objective, consider the iterate_goal tool: it restarts each round from a fresh child context with a bounded structured handoff, which can break the loop."
+
 // DoomLoopTracker tracks consecutive identical semantic tool batches.
 type DoomLoopTracker struct {
 	lastFingerprint string
@@ -113,6 +119,9 @@ func (t *DoomLoopTracker) ObserveSemanticToolBatch(calls []types.ToolCall) DoomL
 }
 
 // WarningEventPayload builds the dual-name warning payload for runtime events.
+// The iterate_goal advice (P2-2' closed loop) rides only on this one-shot
+// product warning — never on the per-repeat advisory, which lands in the
+// prompt every step and is budget-sensitive.
 func DoomLoopWarningPayload(traceID string, step int, obs DoomLoopObservation) map[string]interface{} {
 	return map[string]interface{}{
 		"trace_id":              traceID,
@@ -121,6 +130,7 @@ func DoomLoopWarningPayload(traceID string, step int, obs DoomLoopObservation) m
 		"repeat_count":          obs.RepeatCount,
 		"tool_call_count":       obs.ToolCallCount,
 		"warning_threshold":     DoomLoopWarningThreshold,
+		"advice":                DoomLoopIterateAdvice,
 		"phase":                 "warning",
 		"kind":                  "semantic_tool_repeat",
 	}
@@ -176,10 +186,9 @@ func semanticToolCallRepeatExempt(name string) bool {
 		return true
 	}
 	switch normalized {
-	case "background_task", "job_start",
-		"task_output", "job_output", "job_list", "job_search",
-		"write_stdin",
-		"task_input", "job_input",
+	case "job_start",
+		"job_output", "job_list", "job_search",
+		"job_input",
 		"subagent_wait",
 		"read_agent",
 		"subagent_events",

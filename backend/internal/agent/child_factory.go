@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
@@ -25,6 +27,9 @@ type ChildAgentSpec struct {
 	Config     Config
 	Task       SubagentTask
 	Decision   modelrouting.RouteDecision
+	// ForkHistory 是 fork 请求的一次性父级已完成轮次快照（P2-1'）。
+	// fresh 任务恒为 nil。scheduler 在 loop.run 注入，不经子会话持久化。
+	ForkHistory []types.Message
 }
 
 type ChildAgentFactory struct{}
@@ -120,6 +125,18 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	promptTask = taskWithRouteDecision(task, decision)
 	childConfig.SystemPrompt = parent.GetPromptBuilder().BuildSubagentPrompt(parentConfig, promptTask)
 
+	// Fork context (P2-1'): when the task requests context=fork (capability
+	// granted at admission), the child's initial history is a one-time frozen
+	// snapshot of the parent's completed-turn prefix. Constraints: dialogue
+	// only (parent system messages stripped), frozen at build time (no live
+	// sharing), and the whole snapshot is refused when it exceeds the token
+	// ceiling — never silently truncated. Fork equivalence with fresh on a
+	// first-turn parent matches the DSH reference behavior.
+	forkHistory, forkErr := buildForkHistoryForTask(req.Options, task, parent.llmRuntime, req.Config.ForkMaxSnapshotTokens)
+	if forkErr != nil {
+		return ChildAgentSpec{}, forkErr
+	}
+
 	childAgent := NewAgentWithLLM(&childConfig, parent.mcpManager, parent.llmRuntime)
 	childSchedulerConfig := childSubagentSchedulerConfig(parent.GetSubagentScheduler(), req.Config)
 	childAgent.SetSubagentScheduler(NewSubagentScheduler(childAgent, childSchedulerConfig))
@@ -156,14 +173,35 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	}
 
 	return ChildAgentSpec{
-		Agent:      childAgent,
-		Runtime:    parent.llmRuntime,
-		LoopConfig: loopConfig,
-		SessionID:  buildSubagentSessionID(task.ID),
-		Config:     childConfig,
-		Task:       task,
-		Decision:   decision,
+		Agent:       childAgent,
+		Runtime:     parent.llmRuntime,
+		LoopConfig:  loopConfig,
+		SessionID:   buildSubagentSessionID(task.ID),
+		Config:      childConfig,
+		Task:        task,
+		Decision:    decision,
+		ForkHistory: forkHistory,
 	}, nil
+}
+
+// buildForkHistoryForTask computes the fork snapshot for a task requesting
+// context=fork; fresh tasks return nil. The snapshot source is the host-side
+// parent history (SubagentRunOptions.ParentHistory) — the agent object itself
+// holds no conversation history, so a fork request without a host-provided
+// history is an actionable error, never a silent fresh fallback. Oversize
+// snapshots fail the child build the same way (G5: refuse, don't truncate);
+// maxSnapshotTokens 0 selects the runtime default.
+func buildForkHistoryForTask(options SubagentRunOptions, task SubagentTask, runtime *llm.LLMRuntime, maxSnapshotTokens int) ([]types.Message, error) {
+	if strings.TrimSpace(task.Context) != SubagentContextFork {
+		return nil, nil
+	}
+	if len(options.ParentHistory) == 0 {
+		return nil, fmt.Errorf(
+			"task %s requests context=fork but the host did not provide a parent history snapshot; next_action=retry_without_context_field_or_wire_parent_history_in_the_spawn_path",
+			task.ID,
+		)
+	}
+	return BuildForkHistory(options.ParentHistory, forkSnapshotRuntimeTokens(runtime), maxSnapshotTokens)
 }
 
 func childSubagentSchedulerConfig(parentScheduler *SubagentScheduler, config SubagentSchedulerConfig) SubagentSchedulerConfig {

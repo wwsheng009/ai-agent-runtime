@@ -1,11 +1,15 @@
 package runtimeapi
 
 import (
+	"context"
+	"strings"
+
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentquota"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // SetSubagentBatchStore installs the host-owned durable batch control plane.
@@ -94,7 +98,41 @@ func (h *Handler) subagentBatchCoordinator(scheduler *agent.SubagentScheduler) *
 			(&sessionAgentController{handler: h}).agentsConfig().MaxThreads,
 			runtimecfg.DefaultRuntimeConfig().Agents.MaxThreads,
 		),
+		// Fork 快照数据源（P2-1'）：与 CLI 宿主同形（chat_actor_host.go 的
+		// localSubagentParentHistory）；协调器只在批次确有 context=fork 任务时
+		// 调用，普通批次零额外读取。
+		ParentHistoryFor: h.apiSubagentParentHistory(),
 	})
+}
+
+// apiSubagentCapabilities 把 agents 配置折算成 spawn 准入能力位（P1-1'），
+// 与 CLI 宿主（localSubagentCapabilities）同口径：现状已支持的请求位恒开，
+// fork/结构化回执按部署配置灰度（G4）。
+func apiSubagentCapabilities(agentsConfig runtimecfg.AgentsConfig) *agent.SubagentCapabilities {
+	caps := agent.DefaultCapabilities()
+	caps.ForkContext = agentsConfig.ForkContextEnabled
+	caps.OutputSchema = agentsConfig.OutputSchemaEnabled
+	return &caps
+}
+
+// apiSubagentParentHistory 是 fork 快照的父会话读取面（P2-1'）：按
+// parentSessionID 装载会话并返回其消息。读取失败返回 nil——fork 子级会以
+// 可操作错误失败，绝不静默降级为 fresh。
+func (h *Handler) apiSubagentParentHistory() func(ctx context.Context, parentSessionID string) []types.Message {
+	return func(ctx context.Context, parentSessionID string) []types.Message {
+		if h == nil || h.sessionManager == nil {
+			return nil
+		}
+		parentSessionID = strings.TrimSpace(parentSessionID)
+		if parentSessionID == "" {
+			return nil
+		}
+		session, err := h.sessionManager.Get(ctx, parentSessionID)
+		if err != nil || session == nil {
+			return nil
+		}
+		return session.GetMessages()
+	}
 }
 
 // supervisionProgressSource 是 P0-B 的只读投影入口：nil 表示本宿主没有可读的

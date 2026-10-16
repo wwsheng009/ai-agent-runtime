@@ -433,7 +433,7 @@ func isTaskOutputToolResult(envelope *Envelope) bool {
 		return false
 	}
 	name := strings.ToLower(strings.TrimSpace(envelope.ToolName))
-	return name == "task_output" || name == "job_output"
+	return name == "job_output"
 }
 
 // isCollaborationResult reports whether the tool result carries the parent's
@@ -447,10 +447,10 @@ func isCollaborationResult(envelope *Envelope) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(envelope.ToolName)) {
-	case "wait_agent", "read_agent_events", "read_agent_result", "list_agents", "spawn_agent", "send_message", "followup_task",
-		"send_input", "resolve_agent_approval", "close_agent", "resume_agent",
+	case "subagent_wait", "subagent_events", "read_agent_result", "subagent_list", "subagent_spawn", "subagent_send", "subagent_followup",
+		"subagent_input", "subagent_approve", "subagent_close", "subagent_resume",
 		"supervision_snapshot", "supervision_descendants", "subagent_status", "subagent_inspect_task",
-		"ack_lifecycle", "control_descendant", "subagent_ack_lifecycle", "subagent_control":
+		"subagent_ack_lifecycle", "subagent_control":
 		return true
 	default:
 		return false
@@ -462,7 +462,7 @@ func isBackgroundTaskResult(envelope *Envelope) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(envelope.ToolName)) {
-	case "background_task", "job_start":
+	case "job_start":
 		return true
 	default:
 		return false

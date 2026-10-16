@@ -78,8 +78,8 @@ func TestBuildDigest_ProgressRollupVisibleInTurn(t *testing.T) {
 	require.Contains(t, digest.Text, "batch-b-456: 3/3 completed (terminal")
 	// 收敛提示必须是可执行路径：终态 batch 的 done 行是 resolution=closed，
 	// evaluator 对这类行只允许 inspect，control_descendant 必然被拒
-	// （plan §4.1.1/§7.1）——提示文本只能指向 broker 工具 close_agent。
-	require.Contains(t, digest.Text, "close the finished children with close_agent")
+	// （plan §4.1.1/§7.1）——提示文本只能指向 broker 工具 subagent_close。
+	require.Contains(t, digest.Text, "close the finished children with subagent_close")
 	require.NotContains(t, digest.Text, "control_descendant")
 	require.Len(t, digest.Progress, 2)
 	require.Equal(t, 2, digest.Progress[0].Completed)

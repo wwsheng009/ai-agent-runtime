@@ -405,8 +405,8 @@ func NoResultRecordedPayload(sessionID, taskID string) ReadResultPayload {
 		TaskID:    strings.TrimSpace(taskID),
 		Source:    ResultSourceNone,
 		ErrorCode: "no_result_recorded",
-		NextAction: "no durable result is recorded for this target yet: call read_agent_events " +
-			"(or wait_agent) to observe the child, then retry subagent_inspect_task once it reaches a terminal state",
+		NextAction: "no durable result is recorded for this target yet: call subagent_events " +
+			"(or subagent_wait) to observe the child, then retry subagent_inspect_task once it reaches a terminal state",
 	}
 }
 
@@ -505,7 +505,7 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 	if status == ReadResultStatusPendingBinding {
 		payload.ErrorCode = ReadResultStatusPendingBinding
 		payload.NextAction = "the task is still in flight and no durable result exists yet: " +
-			"call wait_agent (or read_agent_events) to observe it, then retry subagent_inspect_task after it settles; " +
+			"call subagent_wait (or subagent_events) to observe it, then retry subagent_inspect_task after it settles; " +
 			"do not re-dispatch the same task"
 	}
 
@@ -831,7 +831,7 @@ func applyWorkspaceHint(payload *ReadResultPayload, record AgentResultRecord) {
 	}
 	hint := ""
 	if worktreePath != "" {
-		hint = "uncommitted changes stay in the isolated worktree until the parent applies or discards it (apply_agent_worktree / discard_agent_worktree)"
+		hint = "uncommitted changes stay in the isolated worktree until the parent applies or discards it (subagent_apply_worktree / subagent_discard_worktree)"
 	}
 	payload.Workspace = &ReadResultWorkspace{
 		Isolation:    isolation,

@@ -1679,7 +1679,7 @@ func TestProjectSimpleGoalToolSurfaceKeepsOnlyRelevantTools(t *testing.T) {
 func TestSemanticToolCallFingerprintExemptsPollingTools(t *testing.T) {
 	fingerprint := semanticToolCallFingerprint([]types.ToolCall{{
 		ID:   "poll-1",
-		Name: "background_task",
+		Name: "job_start",
 		Args: map[string]interface{}{"task_id": "task-1"},
 	}})
 	require.Empty(t, fingerprint)

@@ -61,7 +61,7 @@ func TestSpawnTeamArgTypeValidation(t *testing.T) {
 			err := validateSpawnTeamArgTypes(tc.args)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "\""+tc.wantKey+"\"")
-			assert.Contains(t, err.Error(), "spawn_team")
+			assert.Contains(t, err.Error(), "team_spawn")
 		})
 	}
 
@@ -120,7 +120,7 @@ func TestBrokerSpawnTeamRejectsKindMismatchBeforeCreatingTeam(t *testing.T) {
 
 	record, loadErr := store.GetTeam(ctx, "team-kind-mismatch")
 	require.NoError(t, loadErr)
-	assert.Nil(t, record, "rejected spawn_team must not create a team")
+	assert.Nil(t, record, "rejected team_spawn must not create a team")
 }
 
 // TestBrokerSpawnTeamReadsEveryJSONNumberSpelling guards the sibling regression

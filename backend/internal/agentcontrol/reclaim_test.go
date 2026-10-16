@@ -111,7 +111,7 @@ func TestThreadLimitMessageCarriesNextActionAndOccupants(t *testing.T) {
 	require.Contains(t, message, "agent spawn thread limit reached: max_threads=6 active_children=6")
 	require.Contains(t, message, "reclaimed=1 reclaimed_rows=2")
 	require.Contains(t, message, "next_action="+ThreadLimitNextAction)
-	require.Contains(t, message, "close_agent")
+	require.Contains(t, message, "subagent_close")
 	require.Contains(t, message, fmt.Sprintf("set %d for unlimited", MaxThreadsUnlimited))
 	require.Contains(t, message, "path=/root/a session=sess-a status=active idle=3m0s")
 	require.Contains(t, message, "idle=unknown")

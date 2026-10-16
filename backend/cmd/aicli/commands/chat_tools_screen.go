@@ -7,10 +7,13 @@ package commands
 // 数据源优先级（与 web 端点同口径）：
 //  1. 会话 actor 的 StableToolSurface（冻结面 = 真实请求前缀，turn 装配时已按
 //     执行策略裁剪，天然含 profile 收窄）；
-//  2. 兜底：runtime-server live 目录 / 本地 ToolSurface 目录经 toolsurface.Build
-//     （无 actor / 未冻结时）。兜底分支按 session.ToolPolicy 过滤基线候选，显示
-//     "下一 turn 将请求的面"——否则 /profile use 清掉冻结面后，展示反而不含新
-//     profile 的裁剪（看起来像假开关或切完工具变多）。
+//  2. server 模式：runtime-server 的 GET /api/runtime/tools **同一 payload**
+//     （§2.2-C：tools + groups + filtered 直接渲染，不再本地二次 Build/二次分类）；
+//  3. 兜底（无 actor / 未冻结 / local 模式）：按 buildLocalChatAgent 同一条装配路径
+//     （含 broker 源）取候选目录，用真实 sourcesurface 账本经 toolsurface.Observe
+//     装配；装配不可行时退回本会话 ToolSurface 目录。兜底分支按 session.ToolPolicy
+//     过滤基线候选，显示"下一 turn 将请求的面"——否则 /profile use 清掉冻结面后，
+//     展示反而不含新 profile 的裁剪（看起来像假开关或切完工具变多）。
 //
 // 输出：按 surface_source 分组 + 计数行；兜底分支附数据源说明与策略裁剪明细。
 
@@ -44,42 +47,82 @@ func buildToolsScreenBody(session *ChatSession) (string, bool) {
 			if session.RuntimeSession == nil {
 				return "", false
 			}
-			tools, listErr := serverExecutor.listRuntimeServerTools(context.Background(), session, session.RuntimeSession.ID)
+			payload, listErr := serverExecutor.listRuntimeServerToolsPayload(context.Background(), session, session.RuntimeSession.ID)
 			if listErr != nil {
 				return fmt.Sprintf("工具面查询失败（runtime-server）: %v", listErr), true
 			}
-			if len(tools) == 0 {
+			if len(payload.Tools) == 0 {
 				return "", false
 			}
-			return renderFallbackToolsScreenBody(session, tools, toolsurface.Ledger{}), true
+			// §2.2-C：TUI 观测面 = 端点同一 payload。这里刻意**不**再按本地
+			// session.ToolPolicy 过滤、也不用空账本二次 Build：server 模式下
+			// profile 归属 server 会话，本地二次判定正是 10 vs 22 缺口的来源。
+			return renderToolsScreenObservation(serverToolsObservation(payload)), true
 		}
 	}
-	if host := session.LocalRuntimeHost; host != nil && host.ToolSurface != nil {
-		infos := host.ToolSurface.ListTools()
-		if len(infos) == 0 {
-			return "", false
+	if host := session.LocalRuntimeHost; host != nil {
+		if catalog, ledger, ok := localToolsScreenAssembly(session, host); ok {
+			return renderFallbackToolsScreenBody(session, catalog, ledger), true
 		}
-		catalog := make([]runtimetypes.ToolDefinition, 0, len(infos))
-		for _, info := range infos {
-			catalog = append(catalog, runtimetypes.ToolDefinition{
-				Name:        info.Name,
-				Description: info.Description,
-				Parameters:  nil,
-				Metadata:    cloneToolInfoMetadata(info.Metadata),
-			})
+		if host.ToolSurface != nil {
+			infos := host.ToolSurface.ListTools()
+			if len(infos) == 0 {
+				return "", false
+			}
+			catalog := make([]runtimetypes.ToolDefinition, 0, len(infos))
+			for _, info := range infos {
+				catalog = append(catalog, runtimetypes.ToolDefinition{
+					Name:        info.Name,
+					Description: info.Description,
+					Parameters:  nil,
+					Metadata:    cloneToolInfoMetadata(info.Metadata),
+				})
+			}
+			// 兜底目录只有 MCP/goal 包装面（ToolSurface 不含 broker），账本如实缺失：
+			// 按 Classify 的 default（core）标注，不虚构编排面。
+			return renderFallbackToolsScreenBody(session, catalog, toolsurface.Ledger{}), true
 		}
-		return renderFallbackToolsScreenBody(session, catalog, toolsurface.Ledger{}), true
 	}
 	return "", false
 }
 
+// localToolsScreenAssembly 用与本会话请求装配同一条路径重建候选目录（§2.2-C）：
+//
+//	buildLocalChatAgent（chat_actor_executor_deps.go 同一函数：内置 + MCP + scheduler
+//	+ broker 四源）→ CollectToolCatalogDefinitions → Ledger{Broker: 真实 broker}。
+//
+// 装配不可行（无 Bootstrap/无 session 行/无 ToolSurface，例如单测与降级宿主）返回
+// ok=false，调用方退回 ToolSurface 目录口径。
+func localToolsScreenAssembly(session *ChatSession, host *localChatRuntimeHost) ([]runtimetypes.ToolDefinition, toolsurface.Ledger, bool) {
+	if session == nil || host == nil || host.Bootstrap == nil || host.ToolSurface == nil {
+		return nil, toolsurface.Ledger{}, false
+	}
+	if session.RuntimeSession == nil {
+		return nil, toolsurface.Ledger{}, false
+	}
+	workspaceRoot := ""
+	if host.RuntimeConfig != nil {
+		workspaceRoot = strings.TrimSpace(host.RuntimeConfig.Workspace.Root)
+	}
+	apiAgent := buildLocalChatAgent(session, host, host.RuntimeConfig, workspaceRoot, "", "")
+	if apiAgent == nil {
+		return nil, toolsurface.Ledger{}, false
+	}
+	catalog := apiAgent.CollectToolCatalogDefinitions(context.Background())
+	if len(catalog) == 0 {
+		return nil, toolsurface.Ledger{}, false
+	}
+	return catalog, toolsurface.Ledger{Broker: apiAgent.GetToolBroker()}, true
+}
+
 // renderFallbackToolsScreenBody 渲染"冻结面缺失"时的兜底目录：先按当前会话策略
-// 过滤（若有），再经 toolsurface.Build 标注来源账本。过滤后为空也要渲染
-// （0 个工具 + 裁剪明细）：一个把工具全部收窄掉的 profile 必须可见，不能退回
-// "没有可枚举的工具面"。
+// 过滤（若有），再经 toolsurface.Observe（Build + 共享观测补齐）标注来源账本。
+// 过滤后为空也要渲染（0 个工具 + 裁剪明细）：一个把工具全部收窄掉的 profile
+// 必须可见，不能退回"没有可枚举的工具面"。
 func renderFallbackToolsScreenBody(session *ChatSession, catalog []runtimetypes.ToolDefinition, ledger toolsurface.Ledger) string {
 	filtered, blocked := filterToolsByChatPolicy(session, catalog)
-	tools, ok := toolsurface.Build(filtered, ledger)
+	observation, ok := toolsurface.Observe(filtered, ledger, nil)
+	tools := observation.Tools
 	if !ok {
 		// 空目录（含策略收窄到 0）时不虚构账本，直接渲染过滤后的目录。
 		tools = filtered
@@ -88,6 +131,83 @@ func renderFallbackToolsScreenBody(session *ChatSession, catalog []runtimetypes.
 		return renderToolsScreenBody(tools)
 	}
 	return renderToolsScreenBodyPolicyFiltered(tools, blocked)
+}
+
+// serverToolsObservation 把 runtime-server 的 /runtime/tools payload 映射成共享观测
+// 结构（§2.2-C）：端点已给 groups[]/filtered[] 时原样采用，缺失（旧版 server）时
+// 用共享构建点本地补齐，保证渲染口径不因服务端版本而分叉。
+func serverToolsObservation(payload runtimeServerRuntimeToolsResponse) toolsurface.Observation {
+	// 账本为空是有意的：端点返回的工具已带 surface_source（服务端已按真实 broker
+	// 账本装配），这里只补 registry 元数据与 groups[]/filtered[] 缺省。
+	observation := toolsurface.Enrich(payload.Tools, toolsurface.Ledger{}, payload.Filtered)
+	if len(payload.Groups) > 0 {
+		observation.Groups = payload.Groups
+	}
+	return observation
+}
+
+// renderToolsScreenObservation 渲染与 /api/runtime/tools 同一 payload 的观测面：
+// 计数、分组目录、裁剪明细全部取端点字段，正文仍按 surface_source 分组。
+func renderToolsScreenObservation(observation toolsurface.Observation) string {
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf("当前会话工具面：%d 个工具（与 /api/runtime/tools 同一 payload）\n", len(observation.Tools)))
+	if line := renderToolsScreenGroupDirectory(observation.Groups); line != "" {
+		body.WriteString(line)
+	}
+	if len(observation.Filtered) > 0 {
+		body.WriteString(fmt.Sprintf("  已裁剪: %s\n", formatFilteredTools(observation.Filtered)))
+	}
+	body.WriteString(renderToolsScreenGroups(observation.Tools))
+	return body.String()
+}
+
+// renderToolsScreenGroupDirectory 渲染 groups[] 目录行（只列有工具或已关闭的组）。
+func renderToolsScreenGroupDirectory(groups []toolsurface.Group) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(groups))
+	for _, group := range groups {
+		id := strings.TrimSpace(group.ID)
+		if id == "" {
+			continue
+		}
+		if group.ToolCount == 0 && group.Enabled {
+			continue
+		}
+		label := id
+		if groupLabel := strings.TrimSpace(group.Label); groupLabel != "" {
+			label = fmt.Sprintf("%s(%s)", id, groupLabel)
+		}
+		if !group.Enabled {
+			label += " 已关闭"
+		}
+		parts = append(parts, fmt.Sprintf("%s ×%d", label, group.ToolCount))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("  分组: %s\n", strings.Join(parts, ", "))
+}
+
+// formatFilteredTools 折叠 filtered[]：name(reason) 形式，超过上限截断并给出总数。
+func formatFilteredTools(filtered []toolsurface.FilteredTool) string {
+	parts := make([]string, 0, len(filtered))
+	for _, item := range filtered {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s(%s)", name, item.Reason))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	const maxNames = 8
+	if len(parts) > maxNames {
+		return strings.Join(parts[:maxNames], ", ") + fmt.Sprintf(" …（共 %d 个）", len(parts))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // filterToolsByChatPolicy 按会话执行策略过滤候选工具面，语义与 agent loop 的

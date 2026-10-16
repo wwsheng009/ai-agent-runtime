@@ -1141,7 +1141,15 @@ func resolveChatExportRuntimeSession(session *ChatSession, opts chatExportOption
 			return nil, "", fmt.Errorf("当前没有可导出的持久化会话")
 		}
 		warnIfChatSessionSyncFails(session, "export current session", syncRuntimeSessionFromChat(session))
-		return session.RuntimeSession.Clone(), "current", nil
+		// Clone 会整张复制 Metadata.Context（全 map 读），必须在读锁内进行。
+		var exported *runtimechat.Session
+		withChatRuntimeSessionRead(session, func(runtimeSession *runtimechat.Session) {
+			exported = runtimeSession.Clone()
+		})
+		if exported == nil {
+			return nil, "", fmt.Errorf("当前没有可导出的持久化会话")
+		}
+		return exported, "current", nil
 	case "latest", "last":
 		if session == nil || session.SessionManager == nil {
 			return nil, "", fmt.Errorf("会话管理未启用")

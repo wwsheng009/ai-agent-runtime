@@ -127,3 +127,4 @@ terminal-output-inventory.json
 .tmp*
 backend/runtime-server.exe.bak-*
 /data/
+.stash-recovery-backup/

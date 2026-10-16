@@ -50,6 +50,14 @@ func CloneCapabilitySpec(input agentconfig.ModelCapabilitySpec) agentconfig.Mode
 		}
 		input.ReasoningEffortBudgets = budgets
 	}
+	if input.NativeTools.WebSearch != nil {
+		webSearch := *input.NativeTools.WebSearch
+		input.NativeTools.WebSearch = &webSearch
+	}
+	if input.SupportsSearchTool != nil {
+		supports := *input.SupportsSearchTool
+		input.SupportsSearchTool = &supports
+	}
 	return input
 }
 
@@ -65,6 +73,14 @@ func fillCapabilityMissing(target *agentconfig.ModelCapabilitySpec, source agent
 	}
 	if !target.NativeTools.ImagesGenerationsAPI && source.NativeTools.ImagesGenerationsAPI {
 		target.NativeTools.ImagesGenerationsAPI = true
+	}
+	fillNativeWebSearch(target, source.NativeTools.WebSearch)
+	if target.SupportsSearchTool == nil && source.SupportsSearchTool != nil {
+		value := *source.SupportsSearchTool
+		target.SupportsSearchTool = &value
+	}
+	if strings.TrimSpace(target.WebSearchToolType) == "" && strings.TrimSpace(source.WebSearchToolType) != "" {
+		target.WebSearchToolType = strings.TrimSpace(source.WebSearchToolType)
 	}
 	if !target.ReasoningModel && source.ReasoningModel {
 		target.ReasoningModel = true
@@ -111,8 +127,32 @@ func fillCapabilityMissing(target *agentconfig.ModelCapabilitySpec, source agent
 	}
 }
 
+// fillNativeWebSearch fills the web search declaration target-first: an
+// existing explicit declaration survives, missing scalar fields are borrowed,
+// and a missing block is copied wholesale (nil = not declared).
+func fillNativeWebSearch(target *agentconfig.ModelCapabilitySpec, source *agentconfig.NativeWebSearchCapability) {
+	if target == nil || source == nil {
+		return
+	}
+	if target.NativeTools.WebSearch == nil {
+		copied := *source
+		target.NativeTools.WebSearch = &copied
+		return
+	}
+	current := target.NativeTools.WebSearch
+	if !current.Supported && source.Supported {
+		current.Supported = true
+	}
+	if strings.TrimSpace(current.ToolType) == "" {
+		current.ToolType = strings.TrimSpace(source.ToolType)
+	}
+	if strings.TrimSpace(current.Protocol) == "" {
+		current.Protocol = strings.TrimSpace(source.Protocol)
+	}
+}
+
 func CapabilityFieldNames(spec agentconfig.ModelCapabilitySpec) []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 16)
 	if len(spec.InputModalities) > 0 {
 		fields = append(fields, "input_modalities")
 	}
@@ -121,6 +161,10 @@ func CapabilityFieldNames(spec agentconfig.ModelCapabilitySpec) []string {
 	}
 	if spec.NativeTools.ImagesGenerationsAPI {
 		fields = append(fields, "native_tools.images_generations_api")
+	}
+	if nativeSearch := spec.EffectiveNativeWebSearch(); nativeSearch.Supported ||
+		nativeSearch.ToolType != "" || nativeSearch.Protocol != "" {
+		fields = append(fields, "native_tools.web_search")
 	}
 	if spec.ReasoningModel {
 		fields = append(fields, "reasoning_model")
@@ -168,6 +212,13 @@ func CapabilitySpecsEqual(a, b agentconfig.ModelCapabilitySpec) bool {
 	}
 	if a.NativeTools.ImageGeneration != b.NativeTools.ImageGeneration ||
 		a.NativeTools.ImagesGenerationsAPI != b.NativeTools.ImagesGenerationsAPI {
+		return false
+	}
+	aNativeSearch := a.EffectiveNativeWebSearch()
+	bNativeSearch := b.EffectiveNativeWebSearch()
+	if aNativeSearch.Supported != bNativeSearch.Supported ||
+		aNativeSearch.ToolType != bNativeSearch.ToolType ||
+		aNativeSearch.Protocol != bNativeSearch.Protocol {
 		return false
 	}
 	if a.ReasoningModel != b.ReasoningModel {
@@ -233,9 +284,13 @@ func intMapsEqual(a, b map[string]int) bool {
 }
 
 func capabilityIsEmpty(spec agentconfig.ModelCapabilitySpec) bool {
+	effectiveNativeSearch := spec.EffectiveNativeWebSearch()
 	return len(spec.InputModalities) == 0 &&
 		!spec.NativeTools.ImageGeneration &&
 		!spec.NativeTools.ImagesGenerationsAPI &&
+		!effectiveNativeSearch.Supported &&
+		effectiveNativeSearch.ToolType == "" &&
+		effectiveNativeSearch.Protocol == "" &&
 		!spec.ReasoningModel &&
 		spec.ReplayReasoningContent == nil &&
 		len(spec.ReasoningEfforts) == 0 &&

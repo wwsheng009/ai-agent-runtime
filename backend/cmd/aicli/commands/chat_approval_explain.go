@@ -52,7 +52,7 @@ func approvalExplanation(approval *runtimechat.ApprovalRequest) chatApprovalExpl
 			Action: "启动子 agent（会消耗额度并可能与主会话并行执行）",
 			Target: truncateChatRuntimeText(approvalRequestArg(args, "goal", "message", "task", "title"), 120),
 		}
-	case strings.Contains(tool, "background_task") || strings.HasPrefix(tool, "job_"):
+	case strings.HasPrefix(tool, "job_"):
 		return chatApprovalExplanation{
 			Action: "启动后台任务（在独立进程中持续运行）",
 			Target: truncateChatRuntimeText(approvalRequestArg(args, "command"), 120),

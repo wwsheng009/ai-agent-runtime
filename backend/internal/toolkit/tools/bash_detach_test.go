@@ -205,10 +205,10 @@ func TestBashToolDetachIsMarkedDeprecatedWithGuidance(t *testing.T) {
 		t.Fatalf("expected deprecated=true metadata, got %#v", result.Metadata)
 	}
 	nextAction, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
-	if !strings.Contains(nextAction, "background_task") {
-		t.Fatalf("next_action must guide toward background_task, got %q", nextAction)
+	if !strings.Contains(nextAction, "job_start") {
+		t.Fatalf("next_action must guide toward job_start, got %q", nextAction)
 	}
-	if !strings.Contains(result.Content, "background_task") {
-		t.Fatalf("content must mention background_task, got %q", result.Content)
+	if !strings.Contains(result.Content, "job_start") {
+		t.Fatalf("content must mention job_start, got %q", result.Content)
 	}
 }

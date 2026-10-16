@@ -513,7 +513,7 @@ func (m *Manager) WriteStdin(ctx context.Context, jobID, input string, yieldMs i
 	if sess == nil {
 		if job, _ := m.GetJob(ctx, jobID); job != nil {
 			if !job.Interactive {
-				return nil, fmt.Errorf("%w: %s; use task_output for one-shot jobs", ErrNotInteractive, jobID)
+				return nil, fmt.Errorf("%w: %s; use job_output for one-shot jobs", ErrNotInteractive, jobID)
 			}
 			if owner := strings.TrimSpace(job.OwnerInstanceID); owner != "" && owner != m.instanceID {
 				return nil, fmt.Errorf("%w: %s (owner=%s); cross-instance interaction is not supported", ErrSessionNotLocal, jobID, owner)

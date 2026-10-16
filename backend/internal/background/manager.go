@@ -2382,10 +2382,10 @@ func (m *Manager) pendingQueueDiagnostics(queuePosition, active, maxConcurrent i
 		diag.NextAction = fmt.Sprintf("queue saturated: %d/%d slots active; wait for a slot to free or cancel a stuck job%s", active, maxConcurrent, deadlineNote)
 	case queuePosition > 1:
 		diag.SchedulerState = "queued"
-		diag.NextAction = fmt.Sprintf("job queued at position %d; retry task_output shortly%s", queuePosition, deadlineNote)
+		diag.NextAction = fmt.Sprintf("job queued at position %d; retry job_output shortly%s", queuePosition, deadlineNote)
 	default:
 		diag.SchedulerState = "dispatched"
-		diag.NextAction = "job is next in line or starting; retry task_output shortly" + deadlineNote
+		diag.NextAction = "job is next in line or starting; retry job_output shortly" + deadlineNote
 	}
 	return diag
 }

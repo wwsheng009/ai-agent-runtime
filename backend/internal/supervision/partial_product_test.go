@@ -39,7 +39,7 @@ func TestReadResultCarriesKillSalvage(t *testing.T) {
 	require.Equal(t, "worktree", payload.Workspace.Isolation)
 	require.Equal(t, "/tmp/wt/child-killed", payload.Workspace.WorktreePath)
 	require.Equal(t, "agent/child-killed", payload.Workspace.Branch)
-	require.Contains(t, payload.Workspace.Hint, "apply_agent_worktree")
+	require.Contains(t, payload.Workspace.Hint, "subagent_apply_worktree")
 	// The salvage is a deliverable: the read must keep the §2.4-3 guidance
 	// (read it, do not blindly re-dispatch).
 	require.True(t, payload.ResultAvailable)

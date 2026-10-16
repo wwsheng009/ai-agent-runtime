@@ -88,6 +88,12 @@ func agentsProbeValue(t *testing.T, fieldType reflect.Type, defaultValue reflect
 		return reflect.ValueOf(time.Duration(defaultValue.Int()) + time.Minute).Convert(fieldType)
 	case reflect.String:
 		return reflect.ValueOf("probe-value").Convert(fieldType)
+	case reflect.Bool:
+		// 灰度能力位（forkContextEnabled / outputSchemaEnabled /
+		// iterateGoalEnabled）默认全为 false（G4 默认关）；零值即"未设置"，
+		// 无独立归一化逻辑，探针取反值即可。若未来引入默认 true 的布尔位，
+		// 应改为三态字符串而不是在此扩展——false 将无法区分"显式关"与"未设置"。
+		return reflect.ValueOf(!defaultValue.Bool()).Convert(fieldType)
 	default:
 		t.Fatalf("unhandled agents config field kind %s; extend agentsProbeValue", fieldType.Kind())
 		return reflect.Value{}

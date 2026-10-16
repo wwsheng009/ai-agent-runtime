@@ -13,7 +13,7 @@ import (
 // text and the write_paths field: the arbiter only rewards callers that know
 // disjoint declarations restore parallelism (see internal/agent/scheduler.go).
 func TestSpawnSubagentsSchemaAdvertisesWriterPolicy(t *testing.T) {
-	definition := spawnSubagentsToolDefinition(true, "")
+	definition := spawnSubagentsToolDefinition(true, "", DefaultCapabilities())
 	assert.Contains(t, definition.Description, runtimepolicy.SubagentWriterPolicyDescription)
 
 	parameters, ok := definition.Parameters["properties"].(map[string]interface{})

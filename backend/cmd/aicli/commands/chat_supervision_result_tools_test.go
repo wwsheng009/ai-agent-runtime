@@ -98,13 +98,15 @@ func TestLocalSupervisionToolController_ReadAgentResultUsesHostBatchStore(t *tes
 	require.NoError(t, err)
 	require.Equal(t, supervision.ResultSourceNone, foreign.Source)
 	require.Equal(t, "no_result_recorded", foreign.ErrorCode)
-	require.Contains(t, foreign.NextAction, "read_agent_events")
+	require.Contains(t, foreign.NextAction, "subagent_events",
+		"引导必须点名注册表规范名（read_agent_events 只是别名）")
 
 	missing, err := controller.ReadAgentResult(context.Background(), "parent-session", toolbroker.ReadAgentResultArgs{SessionID: "child-missing"})
 	require.NoError(t, err)
 	require.Equal(t, supervision.ResultSourceNone, missing.Source)
 	require.Equal(t, "no_result_recorded", missing.ErrorCode)
-	require.Contains(t, missing.NextAction, "wait_agent")
+	require.Contains(t, missing.NextAction, "subagent_wait",
+		"引导必须点名注册表规范名（wait_agent 只是别名）")
 	require.Equal(t, "child-missing", missing.SessionID)
 }
 

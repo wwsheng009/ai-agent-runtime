@@ -18,8 +18,9 @@ import (
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/policy"
-	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -90,26 +91,36 @@ func sortedPairs(m map[string][2]int) []string {
 }
 
 // aliasCollapse mimics the shipped agent-loop optimization (optimizeModelToolSurface):
-// keep one preferred definition per alias family (shell > bash > execute_shell_command,
-// grep > rg, view > read) so the scenario numbers reflect what a real request ships.
+// keep the highest-ranked definition per alias family (shell > bash >
+// execute_shell_command、grep > rg、view > read) so the scenario numbers reflect what
+// a real request ships.
+//
+// 家族与排名全部由 toolregistry 的别名表推导（Canonical + SurfaceRank），不再手写
+// 拼写表。旧实现按 rows 顺序"先到先留"，而 rows 是**按 schema 字节数降序**排的，
+// 于是同族留下的其实是"schema 最大的那个拼写"——与文档承诺的偏好顺序无关；
+// 改用排名后，本命令的压缩后体积与线上 optimizeModelToolSurface 的选择一致。
 func aliasCollapse(rows []row) []row {
-	preferred := map[string]string{
-		"shell": "shell", "bash": "shell", "execute_shell_command": "shell",
-		"grep": "grep", "rg": "grep",
-		"view": "view", "read": "view",
+	best := make(map[string]int, len(rows))
+	for _, r := range rows {
+		family := toolregistry.Canonical(r.name)
+		if rank := toolregistry.SurfaceRank(family, r.name); rank > best[family] {
+			best[family] = rank
+		}
 	}
-	kept := map[string]bool{}
+
+	emitted := make(map[string]bool, len(best))
 	out := make([]row, 0, len(rows))
 	for _, r := range rows {
-		family, ok := preferred[r.name]
-		if !ok {
-			out = append(out, r)
+		family := toolregistry.Canonical(r.name)
+		rank := toolregistry.SurfaceRank(family, r.name)
+		if rank == 0 {
+			out = append(out, r) // 不属于任何别名族（或未登记）：原样保留
 			continue
 		}
-		if kept[family] {
-			continue
+		if emitted[family] || rank != best[family] {
+			continue // 同族只留排名最高的一份，其余是同工具的另一份 schema
 		}
-		kept[family] = true
+		emitted[family] = true
 		out = append(out, r)
 	}
 	return out

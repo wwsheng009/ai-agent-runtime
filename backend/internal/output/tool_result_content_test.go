@@ -80,7 +80,7 @@ func TestRenderToolResultContentForModel_PreservesStructuredEnvelopeSummary(t *t
 
 func TestRenderToolResultContentForModel_TaskOutputPreservesRawStructuredOutput(t *testing.T) {
 	envelope := &Envelope{
-		ToolName: "task_output",
+		ToolName: "job_output",
 		Summary:  "Parsed JSON object with 5 keys.",
 		Metadata: map[string]interface{}{
 			toolresult.MetadataKey: toolresult.KindStructured,
@@ -97,10 +97,10 @@ func TestRenderToolResultContentForModel_TaskOutputPreservesRawStructuredOutput(
 	want := RenderFullToolResultContent(content, "")
 
 	if got != want {
-		t.Fatalf("expected task_output to preserve raw structured output, got %q", got)
+		t.Fatalf("expected job_output to preserve raw structured output, got %q", got)
 	}
 	if got == envelope.Summary {
-		t.Fatalf("expected task_output to bypass envelope summary, got %q", got)
+		t.Fatalf("expected job_output to bypass envelope summary, got %q", got)
 	}
 	if !strings.Contains(got, `"job_id": "job_ref_42"`) {
 		t.Fatalf("expected job_id in raw output, got %q", got)
@@ -127,7 +127,7 @@ func TestRenderToolResultContentForModel_WaitAgentPreservesCompleteFinalOutput(t
 		"ready_count": 1,
 	}
 	envelope := &Envelope{
-		ToolName: "wait_agent",
+		ToolName: "subagent_wait",
 		Summary:  "Waited on child agents. Output: " + finalOutput[:200] + "...",
 		Metadata: map[string]interface{}{toolresult.MetadataKey: toolresult.KindStructured},
 	}
@@ -137,7 +137,7 @@ func TestRenderToolResultContentForModel_WaitAgentPreservesCompleteFinalOutput(t
 		t.Fatalf("expected complete child final output, got %q", got)
 	}
 	if got == envelope.Summary {
-		t.Fatal("wait_agent must not replace the final output with its cache-safe preview")
+		t.Fatal("subagent_wait must not replace the final output with its cache-safe preview")
 	}
 }
 
@@ -147,7 +147,7 @@ func TestRenderToolResultContentForModel_BackgroundTaskPreservesJobContract(t *t
 		"status": "pending",
 	}
 	envelope := &Envelope{
-		ToolName: "background_task",
+		ToolName: "job_start",
 		Summary:  "Background task queued.",
 		Metadata: map[string]interface{}{toolresult.MetadataKey: toolresult.KindStructured},
 	}
@@ -312,7 +312,7 @@ func TestRenderToolResultContentForModel_TruncatesLargeErrorOutputForHistory(t *
 
 func TestRenderToolResultContentForModel_ExposesActionableFailureContract(t *testing.T) {
 	envelope := &Envelope{
-		ToolName:   "task_output",
+		ToolName:   "job_output",
 		ToolCallID: "call-missing-job",
 		Metadata: map[string]interface{}{
 			"error_code": "JOB_NOT_FOUND",
@@ -322,11 +322,11 @@ func TestRenderToolResultContentForModel_ExposesActionableFailureContract(t *tes
 	got := RenderToolResultContentForModel(nil, "background job not found: guessed-id", envelope)
 	for _, expected := range []string{
 		`"ok":false`,
-		`"tool_name":"task_output"`,
+		`"tool_name":"job_output"`,
 		`"tool_call_id":"call-missing-job"`,
 		`"error_code":"JOB_NOT_FOUND"`,
 		`"retryable":false`,
-		`"next_action":"Use the exact job_id returned by background_task; do not guess or synthesize an id."`,
+		`"next_action":"Use the exact job_id returned by job_start; do not guess or synthesize an id."`,
 		"Tool execution failed: background job not found: guessed-id",
 	} {
 		if !strings.Contains(got, expected) {

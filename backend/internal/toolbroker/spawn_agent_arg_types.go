@@ -7,13 +7,13 @@ import (
 	"strconv"
 )
 
-// spawn_agent argument kinds.
+// subagent_spawn argument kinds.
 //
-// spawn_agent is the fail-closed delegation tool: an unknown key is rejected
+// subagent_spawn is the fail-closed delegation tool: an unknown key is rejected
 // outright (spawnAgentToolArgKeys) instead of being dropped. The decode path
 // still read every known key with a direct type assertion, which folded a
 // mismatched JSON kind into the zero value *silently* - the same class of bug
-// that spawn_team had:
+// that team_spawn had:
 //
 //   - `read_only: "true"` / `fork_context: "false"` were ignored, so a child
 //     that the caller asked to sandbox ran with the parent's write surface.
@@ -83,8 +83,8 @@ func validateSpawnAgentArgTypes(args map[string]interface{}) error {
 		if spawnAgentValueMatchesKind(value, field.want) {
 			continue
 		}
-		return fmt.Errorf("spawn_agent argument %q must be a %s, got %T (%v); omit it to use the runtime default",
-			field.key, field.want, value, value)
+		return fmt.Errorf("%s argument %q must be a %s, got %T (%v); omit it to use the runtime default",
+			ToolSubagentSpawn, field.key, field.want, value, value)
 	}
 	return nil
 }

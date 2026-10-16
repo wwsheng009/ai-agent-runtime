@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // InvocationKind 描述一次技能调用的触发方式。
@@ -208,11 +210,15 @@ const (
 )
 
 // implicitShellToolNames 参与 scripts_dir 判定的 shell 类工具名（小写）。
+//
+// 运行期内置工具的现役拼写（shell / bash / execute_shell_command）**不在这里手写**：
+// 由 toolregistry 的别名表判定（见 registrySpellingIn），新增别名自动生效，
+// 也不会再漏掉既有拼写（execute_shell_command 就是曾经漏掉的那一个）。
+// 本表只登记运行时**没有**登记的名字——第三方 skill / MCP 自带的 shell 类工具，
+// 它们无法从注册表推导，只能显式列出。
 var implicitShellToolNames = map[string]struct{}{
 	"run_shell_command": {},
-	"bash":              {},
 	"sh":                {},
-	"shell":             {},
 	"execute_command":   {},
 	"exec":              {},
 	"command":           {},
@@ -220,13 +226,36 @@ var implicitShellToolNames = map[string]struct{}{
 }
 
 // implicitReadToolNames 参与 doc_path 判定的文件读取类工具名（小写）。
+//
+// 同样只登记运行时未登记的名字：view / read 由注册表推导（见 registrySpellingIn）。
 var implicitReadToolNames = map[string]struct{}{
 	"read_file": {},
 	"file_read": {},
-	"read":      {},
 	"cat":       {},
 	"head":      {},
 	"tail":      {},
+}
+
+// registrySpellingIn 报告 name 是否命中某个内置工具的现役拼写：先比规范名/别名，
+// 再看 name 是否**包含**其中一个拼写（兼容 mcp__bash、run_shell_command_v2 这类
+// 带命名空间或后缀的第三方写法）。拼写表来自 toolregistry，本文件不再手抄一份。
+func registrySpellingIn(canonical, name string) bool {
+	if toolregistry.IsSpellingOf(canonical, name) {
+		return true
+	}
+	entry, ok := toolregistry.Lookup(canonical)
+	if !ok {
+		return false
+	}
+	if strings.Contains(name, entry.Name) {
+		return true
+	}
+	for _, alias := range entry.Aliases {
+		if strings.Contains(name, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyImplicitTool(toolName string) implicitToolClass {
@@ -234,13 +263,20 @@ func classifyImplicitTool(toolName string) implicitToolClass {
 	if name == "" {
 		return implicitToolUnknown
 	}
+	// 运行期内置工具先按注册表判定：规范名 + 别名，也覆盖带命名空间/后缀的写法。
+	if registrySpellingIn("shell", name) {
+		return implicitToolShell
+	}
+	if registrySpellingIn("view", name) {
+		return implicitToolRead
+	}
+	// 其余是运行时未登记的第三方工具名：显式登记 + 子串兜底。
 	if _, ok := implicitShellToolNames[name]; ok {
 		return implicitToolShell
 	}
 	if _, ok := implicitReadToolNames[name]; ok {
 		return implicitToolRead
 	}
-	// 兼容带命名空间或后缀的工具名（例如 mcp__bash、run_shell_command_v2）。
 	for key := range implicitShellToolNames {
 		if strings.Contains(name, key) {
 			return implicitToolShell

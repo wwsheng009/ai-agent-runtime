@@ -204,11 +204,11 @@ func TestExecuteToolLoop_PropagatesRequestMetadataToProvider(t *testing.T) {
 
 func TestExecuteToolLoop_RendersActionableToolFailure(t *testing.T) {
 	provider := &fakeProviderTurnExecutor{responses: []*ProviderTurnResponse{
-		{Message: &types.Message{Role: "assistant", ToolCalls: []types.ToolCall{{ID: "call_bad", Name: "task_output"}}}},
+		{Message: &types.Message{Role: "assistant", ToolCalls: []types.ToolCall{{ID: "call_bad", Name: "job_output"}}}},
 		{Message: types.NewAssistantMessage("Handled failure")},
 	}}
 	tools := &fakeToolExecutor{results: map[string]ToolResult{
-		"task_output": {Error: "background job not found: guessed-id", Metadata: map[string]interface{}{"error_code": "JOB_NOT_FOUND"}},
+		"job_output": {Error: "background job not found: guessed-id", Metadata: map[string]interface{}{"error_code": "JOB_NOT_FOUND"}},
 	}}
 
 	result, err := ExecuteToolLoop(context.Background(), ToolLoopRequest{
@@ -219,8 +219,8 @@ func TestExecuteToolLoop_RendersActionableToolFailure(t *testing.T) {
 	}
 	toolMessage := result.History[len(result.History)-2]
 	for _, expected := range []string{
-		`"ok":false`, `"tool_name":"task_output"`, `"tool_call_id":"call_bad"`,
-		`"error_code":"JOB_NOT_FOUND"`, `"retryable":false`, `"next_action":"Use the exact job_id returned by background_task; do not guess or synthesize an id."`,
+		`"ok":false`, `"tool_name":"job_output"`, `"tool_call_id":"call_bad"`,
+		`"error_code":"JOB_NOT_FOUND"`, `"retryable":false`, `"next_action":"Use the exact job_id returned by job_start; do not guess or synthesize an id."`,
 	} {
 		if !strings.Contains(toolMessage.Content, expected) {
 			t.Fatalf("expected %q in failure result, got %q", expected, toolMessage.Content)

@@ -299,6 +299,8 @@ func TestParseWebSearchProviders(t *testing.T) {
 		{name: "reorder", in: "bing,duckduckgo", want: "bing,duckduckgo"},
 		{name: "cn last", in: "bing,duckduckgo,bing_cn", want: "bing,duckduckgo,bing_cn"},
 		{name: "case and dedupe", in: "BING, bing, unknown, duckduckgo, BING_CN, bing_cn,", want: "bing,duckduckgo,bing_cn"},
+		{name: "native token", in: "native,bing", want: "native,bing"},
+		{name: "native dedupe", in: "NATIVE, native, bing", want: "native,bing"},
 		{name: "all unknown", in: "google,yahoo", want: ""},
 	}
 	for _, tc := range cases {

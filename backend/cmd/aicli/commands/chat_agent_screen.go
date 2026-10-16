@@ -38,7 +38,7 @@ func chatScreenAgentsListSpec(session *ChatSession) chatScreenSpec {
 	} else if len(agents) == 0 {
 		rows = append(rows, chatScreenRow{
 			Title:  "（暂无子 agent）",
-			Detail: "spawn_agent 后在此查看输出",
+			Detail: "subagent_spawn 后在此查看输出",
 		})
 	}
 	return chatScreenSpec{

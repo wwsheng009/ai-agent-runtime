@@ -560,7 +560,7 @@ var builtinToolkitRegistrations = []builtinToolkitRegistration{
 	{Canonical: "todos", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewTodosTool() }},
 	{Canonical: "artifact_read", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewArtifactReadTool() }},
 	{Canonical: "sourcegraph", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewSourcegraphTool() }},
-	{Canonical: "web_search", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewWebSearchTool() }},
+	{Canonical: "web_search", New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewWebSearchToolWithConfig(cfg) }},
 	// 图像工具按 provider 可用性条件注册。
 	{
 		Canonical: "openai_image_generate",
