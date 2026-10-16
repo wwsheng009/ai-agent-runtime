@@ -215,6 +215,8 @@ func webSearchProviderFunc(name string, search func(context.Context, string, int
 
 ### 5.2 实施项 P2-2：结果归一模型与 maxResults 边界闭环
 
+> **落地进展（2026-10-16）**：已实施——新增归一契约 `web_search_result.go`（`WebSearchResult{Answer,Sources,Truncated}` + `WebSearchSource{Title,URL,Snippet,PublishedAt}`）；工具层在选定尝试后统一 `capWebSearchResults`（provider 超量返回也会被截断，置 metadata `truncated=true`），文本渲染与 metadata 同源使用截断后集合；metadata 增加 `sources[]` 投影（title/url/snippet/published_at，缺省字段省略）；`DuckDuckGoResult` 增 `PublishedAt`，Bing RSS `pubDate` 与 native `page_age` 已贯通。测试：`web_search_result_test.go` 4 组（截断与投影、端到端 count 边界、RSS pubDate、native page_age）。
+
 **问题**：结果结构 `DuckDuckGoResult{title,url,snippet}`（`web_search.go:329-333`）无 `publishedAt`/`Answer`/`Truncated`；count 只透传 provider，工具层无强制截断。
 
 **目标**：定义归一结果契约（对齐 DSH `WebSearchResult` / `WebSearchSource`，`web/src/types.ts:35-56`），工具层执行 `capSources(count)` 并置 `truncated`；为答案引擎与日期字段预留位置。
@@ -546,7 +548,7 @@ type NativeToolCapabilities struct {
 | P1-2 | 链预算生效与钳制、逐请求预算、超时归属 metadata、非法值回退 | `web_search_test.go` |
 | P1-3 | 429+Retry-After、failure_provider、无头 429 兼容 | `web_search_test.go` |
 | P2-1 | 注册表顺序/未知名/重复名；可用性跳过；假 provider 注入 | 新增 `web_search_provider_test.go`、迁移 3 处测试 |
-| P2-2 | 类型映射（含 RSS 日期）、capSources 截断、`sources[]` 投影、格式防回归 | `web_search_test.go`、新增 `web_search_merge_test.go` |
+| P2-2 | 类型映射（含 RSS 日期）、capSources 截断、`sources[]` 投影、格式防回归 | `web_search_result_test.go`（已落地）、`web_search_test.go` |
 | P2-3 | 轮转顺序/去重/封顶、部分失败、strict、单查询等价、取消 join | `web_search_merge_test.go`、`web_search_test.go` |
 | P2-4 | 每 provider：请求/结果/错误映射、可用性、sandbox、key 轮换 | 新增 `web_search_api_*_test.go` |
 | P2-5 | 能力位解析（旧/新键）/链门控（off/prefer/force/allow）/请求与映射/严格模式/prefer 回退/force 结构化错误/沙箱/P2-5d 适配器事件 | `web_search_native_test.go`、`websearch_config_test.go`、`native_web_search_test.go`（agentconfig/modelcard）；P2-5d 待补 |

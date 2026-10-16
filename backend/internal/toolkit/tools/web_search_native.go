@@ -409,7 +409,7 @@ func mapNativeAnthropicResponse(resp *nativeAnthropicResponse, count int) ([]Duc
 			if snippet == "" {
 				snippet = title
 			}
-			results = append(results, DuckDuckGoResult{Title: title, URL: urlText, Snippet: snippet})
+			results = append(results, DuckDuckGoResult{Title: title, URL: urlText, Snippet: snippet, PublishedAt: strings.TrimSpace(item.PageAge)})
 			if len(results) >= count {
 				break
 			}

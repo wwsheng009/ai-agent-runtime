@@ -408,9 +408,10 @@ func (w *WebSearchTool) DefinitionMetadata() map[string]interface{} {
 
 // DuckDuckGoResult DuckDuckGo 搜索结果
 type DuckDuckGoResult struct {
-	Title   string `json:"title"`
-	URL     string `json:"url"`
-	Snippet string `json:"snippet"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	Snippet     string `json:"snippet"`
+	PublishedAt string `json:"publishedAt,omitempty"`
 }
 
 // DDGInstantAnswer DuckDuckGo Instant Answer API 响应结构
@@ -525,7 +526,7 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 			bestIndex = currentIndex
 		}
 		if attempts[currentIndex].quality.Tier == "ok" && len(attempts[currentIndex].results) > 0 {
-			return w.stampBudgetMetadata(w.successSearchAttempt(query, attempts[currentIndex], filter, attempts, failures, options), started, false, ""), nil
+			return w.stampBudgetMetadata(w.successSearchAttempt(query, attempts[currentIndex], filter, attempts, failures, options, count), started, false, ""), nil
 		}
 	}
 
@@ -543,7 +544,7 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 	}
 
 	if bestIndex >= 0 {
-		return w.stampBudgetMetadata(w.successSearchAttempt(query, attempts[bestIndex], filter, attempts, failures, options), started, budgetExhausted, timedOutProvider), nil
+		return w.stampBudgetMetadata(w.successSearchAttempt(query, attempts[bestIndex], filter, attempts, failures, options, count), started, budgetExhausted, timedOutProvider), nil
 	}
 	return w.stampBudgetMetadata(w.failureSearchResult(query, failures), started, budgetExhausted, timedOutProvider), nil
 }
@@ -824,11 +825,14 @@ func webSearchFailureNextAction(code, query string, retryAfter time.Duration) st
 
 // successSearchResultWithCounts builds a successful search ToolResult from an
 // already-filtered result set. providerCount and dropped preserve the raw
-// provider payload size and filter accounting for metadata.
-func (w *WebSearchTool) successSearchResultWithCounts(query string, results []DuckDuckGoResult, source string, filter webSearchDomainFilter, providerCount, dropped int) *toolkit.ToolResult {
+// provider payload size and filter accounting for metadata; maxResults is the
+// consumer-owned count boundary (P2-2) enforced here regardless of provider
+// behavior.
+func (w *WebSearchTool) successSearchResultWithCounts(query string, results []DuckDuckGoResult, source string, filter webSearchDomainFilter, providerCount, dropped, maxResults int) *toolkit.ToolResult {
 	if results == nil {
 		results = []DuckDuckGoResult{}
 	}
+	results, truncated := capWebSearchResults(results, maxResults)
 	metadata := map[string]interface{}{
 		"query":          query,
 		"count":          len(results),
@@ -838,6 +842,10 @@ func (w *WebSearchTool) successSearchResultWithCounts(query string, results []Du
 		"source":         source,
 		"trust":          "untrusted",
 	}
+	if truncated {
+		metadata["truncated"] = true
+	}
+	metadata["sources"] = webSearchSourcesMetadata(webSearchSourcesFromResults(results))
 	if filter.active() {
 		metadata["provider_count"] = providerCount
 		metadata["filtered_out"] = dropped
@@ -874,8 +882,8 @@ func (w *WebSearchTool) successSearchResultWithCounts(query string, results []Du
 // result. Low-quality results are still successful (the search itself ran),
 // but the metadata and next_action tell the model to refine or split the query
 // instead of treating the output as a confident hit.
-func (w *WebSearchTool) successSearchAttempt(query string, attempt webSearchAttempt, filter webSearchDomainFilter, attempts []webSearchAttempt, failures []providerFailure, options webSearchOptions) *toolkit.ToolResult {
-	result := w.successSearchResultWithCounts(query, attempt.results, attempt.source, filter, attempt.rawCount, attempt.filteredOut)
+func (w *WebSearchTool) successSearchAttempt(query string, attempt webSearchAttempt, filter webSearchDomainFilter, attempts []webSearchAttempt, failures []providerFailure, options webSearchOptions, maxResults int) *toolkit.ToolResult {
+	result := w.successSearchResultWithCounts(query, attempt.results, attempt.source, filter, attempt.rawCount, attempt.filteredOut, maxResults)
 	quality := attempt.quality
 	if result.Metadata == nil {
 		result.Metadata = map[string]interface{}{}
@@ -1108,6 +1116,7 @@ type bingRSSItem struct {
 	Title       string `xml:"title"`
 	Link        string `xml:"link"`
 	Description string `xml:"description"`
+	PubDate     string `xml:"pubDate"`
 }
 
 func parseBingRSSResults(xmlBody string, count int) ([]DuckDuckGoResult, error) {
@@ -1129,7 +1138,7 @@ func parseBingRSSResults(xmlBody string, count int) ([]DuckDuckGoResult, error) 
 		if snippet == "" {
 			snippet = title
 		}
-		results = append(results, DuckDuckGoResult{Title: title, URL: link, Snippet: snippet})
+		results = append(results, DuckDuckGoResult{Title: title, URL: link, Snippet: snippet, PublishedAt: strings.TrimSpace(item.PubDate)})
 	}
 	return results, nil
 }
