@@ -83,6 +83,12 @@ var webSearchProviderRegistry = map[string]func(tool *WebSearchTool) WebSearchPr
 	"duckduckgo": func(tool *WebSearchTool) WebSearchProvider {
 		return newWebSearchProvider("duckduckgo", tool.searchDuckDuckGoProvider, nil)
 	},
+	braveProviderName: func(tool *WebSearchTool) WebSearchProvider {
+		return newWebSearchProvider(braveProviderName, tool.searchBraveProvider, func() bool { return tool.brave.available() })
+	},
+	tavilyProviderName: func(tool *WebSearchTool) WebSearchProvider {
+		return newWebSearchProvider(tavilyProviderName, tool.searchTavilyProvider, func() bool { return tool.tavily.available() })
+	},
 	webSearchNativeName: func(tool *WebSearchTool) WebSearchProvider {
 		return newWebSearchProvider(webSearchNativeName, tool.searchNativeProvider, tool.nativeAvailable)
 	},

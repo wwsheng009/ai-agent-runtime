@@ -689,6 +689,33 @@ type WebSearchConfig struct {
 	// (default) merges partial successes; true aborts the whole call on the
 	// first failed query and cancels its siblings (DSH-style).
 	StrictMultiQuery bool `yaml:"strictMultiQuery,omitempty" json:"strictMultiQuery,omitempty"`
+	// API configures the optional official API providers (P2-4). A provider
+	// joins the chain only when it is listed in Providers and its credential
+	// resolves; the default chain stays scrape-only.
+	API WebSearchAPIConfig `yaml:"api" json:"api"`
+}
+
+// WebSearchAPIConfig holds the per-provider settings of the optional official
+// API search backends. Empty sections fall back to each provider's default
+// endpoint and credential environment variable.
+type WebSearchAPIConfig struct {
+	Brave  WebSearchAPIProviderConfig `yaml:"brave,omitempty" json:"brave,omitempty"`
+	Tavily WebSearchAPIProviderConfig `yaml:"tavily,omitempty" json:"tavily,omitempty"`
+}
+
+// WebSearchAPIProviderConfig is one API provider's resolved-input settings.
+type WebSearchAPIProviderConfig struct {
+	// APIKey is a literal credential override; prefer APIKeyEnv so no secret
+	// enters config files.
+	APIKey string `yaml:"apiKey,omitempty" json:"apiKey,omitempty"`
+	// APIKeyEnv names the environment variable holding the credential; empty
+	// uses the provider default (BRAVE_API_KEY / TAVILY_API_KEY).
+	APIKeyEnv string `yaml:"apiKeyEnv,omitempty" json:"apiKeyEnv,omitempty"`
+	// BaseURL overrides the provider default endpoint.
+	BaseURL string `yaml:"baseURL,omitempty" json:"baseURL,omitempty"`
+	// MaxResults caps this backend's per-request result count (0 = provider
+	// default).
+	MaxResults int `yaml:"maxResults,omitempty" json:"maxResults,omitempty"`
 }
 
 // NativeWebSearchConfig controls provider/model-native web search routing

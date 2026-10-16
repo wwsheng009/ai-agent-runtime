@@ -28,7 +28,7 @@
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `WEB_SEARCH_PROVIDERS` | `bing,duckduckgo,bing_cn` | 链序（逗号分隔）；取值 `bing` / `duckduckgo` / `bing_cn` / `native`；未知值忽略；空/全非法回退默认 |
+| `WEB_SEARCH_PROVIDERS` | `bing,duckduckgo,bing_cn` | 链序（逗号分隔）；取值 `bing` / `duckduckgo` / `bing_cn` / `native` / `brave` / `tavily`；未知值忽略；空/全非法回退默认 |
 | `WEB_SEARCH_BING_SETLANG` | `en` | Bing `setlang`（界面/内容语言）；非法回退默认 |
 | `WEB_SEARCH_BING_MKT` | `en-US` | Bing `mkt`（结果市场）；非法回退默认 |
 | `WEB_SEARCH_MIN_QUALITY` | `0.30` | 质量门阈值（query 词项覆盖率）；低于阈值触发换链 |
@@ -52,6 +52,10 @@ webSearch:
     baseURL: ""              # 空 = provider(anthropic) 端点，再回落 https://api.deepseek.com/anthropic/v1
     apiVersion: "2023-06-01"
     maxTokens: 4096
+  api:                       # P2-4：官方 API provider（默认不入链；凭据存在且列入链序才参与）
+    brave:  { apiKeyEnv: BRAVE_API_KEY, maxResults: 10 }    # 已落地
+    tavily: { apiKeyEnv: TAVILY_API_KEY, maxResults: 10 }   # 已落地
+    # exa / perplexity：后续批次（当前会被忽略）
 ```
 
 ## 4. 链式检索与质量门
@@ -90,6 +94,15 @@ webSearch:
 
 **请求与结果**：`POST {baseURL}/messages`，body 携带 `tools:[{type:"web_search_20250305", name:"web_search", max_uses}]`；双认证头（`x-api-key` + `Authorization: Bearer`）；拒绝 HTTP 重定向；结果取 `web_search_tool_result` 块，摘要取 text 块 citations 的 `cited_text`（按 url 首见胜）、跨块去重、按 `count` 封顶；**严格模式**：无结果块即报错（不做 prose 兜底）。
 
+### 5.1 官方 API provider（Brave / Tavily，P2-4 首批）
+
+- **启用条件**：链序（`WEB_SEARCH_PROVIDERS` / `webSearch.providers`）显式列出 `brave` / `tavily`，且凭据可解析（字面量 `apiKey` > `apiKeyEnv` > 默认环境变量 `BRAVE_API_KEY` / `TAVILY_API_KEY`）；默认链不含 API 后端，无凭据时链上静默跳过；
+- **链序过滤后为空**（例如只列出未配置凭据的 API provider）→ 结构化失败 `SEARCH_PROVIDER_UNAVAILABLE`，附带修复指引；
+- **Brave**：`GET /res/v1/web/search`（`X-Subscription-Token`）；支持 `time_range`（freshness `pd/pw/pm/py`）与 `language`（`search_lang`）；`page_age` → `published_at`；`maxResults` 默认 10；
+- **Tavily**：`POST /search`（Bearer）；`content` → snippet、`published_date` → `published_at`；`time_range`/`language` 未映射（metadata 标记 `*_supported=false`）；`maxResults` 默认 10；
+- 两者统一走 `fetchWebSearchAPI`：sandbox `checkURL`、redirect 拒绝、状态错误映射（含 Retry-After）与 `failure_provider` 归属；
+- `exa` / `perplexity` 为后续批次（规划见方案 P2-4）。
+
 ## 6. 信任与安全
 
 - 所有搜索输出首行固定不可信声明，metadata `trust=untrusted`；成功/空结果同样标注；
@@ -125,6 +138,7 @@ webSearch:
 
 ## 9. 变更记录
 
+- **2026-10-16（1.5.0）**：官方 API provider 首批——Brave / Tavily 接入（P2-4；凭据门控、默认不入链、空链结构化错误）。
 - **2026-10-16（1.4.0）**：多查询 `queries`（≤4）并发轮转合并、`strictMultiQuery` 严格模式与取消级联（P2-3）；provider seam 重构（P2-1，行为不变）。
 - **2026-10-16（1.3.0）**：信任标注 + 引用指令（P1-1）；链级/逐请求超时预算与预算 metadata（P1-2）；`failure_provider` + Retry-After 透传（P1-3）；provider/model 原生搜索（P2-5a/b/c）与本文件（P1-4）。
 - 1.2.0：域名过滤（`allowed_domains`/`blocked_domains`）、质量门、链式回退、`time_range`/`language`。

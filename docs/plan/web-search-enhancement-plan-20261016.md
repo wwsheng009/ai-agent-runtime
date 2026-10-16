@@ -302,6 +302,8 @@ type WebSearchResult struct {
 
 ### 5.4 实施项 P2-4：API provider 插件式接入（可选启用）
 
+> **落地进展（2026-10-16，首批）**：Brave 与 Tavily 已落地——`web_search_api.go`（配置解析 literal > env > provider 默认；统一出口 `fetchWebSearchAPI`：sandbox `checkURL`、redirect 拒绝、非 200 → `webSearchStatusError` 含 Retry-After）；`web_search_api_brave.go`（GET `/res/v1/web/search`、`X-Subscription-Token`、`freshness`/`search_lang` 映射、`page_age`→`publishedAt`、摘要 HTML 清洗）；`web_search_api_tavily.go`（POST `/search`、Bearer、`content`→snippet、`published_date`→`publishedAt`）；两者经注册表（P2-1）接入且 `Available()` 凭据门控，默认链不变；链序过滤后无可用后端 → `SEARCH_PROVIDER_UNAVAILABLE` 结构化错误；`time_range_supported`/`language_supported` 按真实能力标记（Brave 均支持，Tavily 均不支持）。工具版本→1.5.0。测试：`web_search_api_test.go` 6 组（配置解析、Brave 请求/映射/上限/能力标记、Tavily 请求/映射、无凭据空链结构化错误、sandbox 拒绝、429 Retry-After 归属）。`exa`/`perplexity` 为下一批。
+
 **问题**：现有三个抓取后端质量/稳定性受反爬影响；没有官方 API 后端（DSH 有 deepseek/exa/perplexity 三个）。
 
 **目标**：以**可选启用**方式接入官方 API 后端，凭据存在才进入链；默认链不变。首批建议（按接入成本与价值）：
@@ -566,7 +568,7 @@ type NativeToolCapabilities struct {
 | P2-1 | 注册表覆盖/未知 token 跳过；可用性与错误透传；请求选项回注 | `web_search_provider_test.go`（已落地）+ 6 个测试文件构造迁移 |
 | P2-2 | 类型映射（含 RSS 日期）、capSources 截断、`sources[]` 投影、格式防回归 | `web_search_result_test.go`（已落地）、`web_search_test.go` |
 | P2-3 | 轮转顺序/去重/封顶、部分失败、strict、单查询等价、取消 join | `web_search_merge_test.go`（已落地） |
-| P2-4 | 每 provider：请求/结果/错误映射、可用性、sandbox、key 轮换 | 新增 `web_search_api_*_test.go` |
+| P2-4 | 每 provider：请求/结果/错误映射、可用性、sandbox、key 轮换；空链结构化错误 | `web_search_api_test.go`（Brave/Tavily 已落地）；Exa/Perplexity 待补 |
 | P2-5 | 能力位解析（旧/新键）/链门控（off/prefer/force/allow）/请求与映射/严格模式/prefer 回退/force 结构化错误/沙箱/P2-5d 适配器事件 | `web_search_native_test.go`、`websearch_config_test.go`、`native_web_search_test.go`（agentconfig/modelcard）；P2-5d 待补 |
 | P3-1 | 前端 meta 防御解析/回退/徽标；e2e 卡片读取 | frontend 单测 + `e2e/workspace-chat.spec.ts` |
 | P3-2 | 取消级联/join/部分完成 | `web_search_merge_test.go` |
