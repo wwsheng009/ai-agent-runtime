@@ -434,5 +434,40 @@ curl -s 'https://ntfy.ttai.online/<topic>/json?poll=1&since=10m'   # 拉取最�
 > 账本键 tag|attention 生命周期镜像 seen / 静默门 Muted / 合并门内核自持批处理），
 > `notify_policy.go` 薄适配层退役（docs/bots/12 §4）。
 
+> **部署记录（2026-10-16 第五笔，控制台会话实时消息面板 + 状态栏 + 表格 + 折叠）**：
+> HEAD `840b960f` + 工作区未提交改动。三趟：`v=38`（会话面板 + 6 处契约修复，raw sha256
+> `80799be8…390c59b`，备份 `gateway.bak-20261016-180522`）→ 实测反馈「live 不渲染 + 缺动态
+> 状态栏 + 表格不渲染」后修完发 `v=39`（raw sha256 `cab079b9…4c32136d`，备份
+> `gateway.bak-20261016-184340`）→ 实测反馈「推理/工具应默认折叠」后补折叠状态机，发
+> **`v=40`（当前生产）**：raw sha256 `653046ba…da4b7563b`（gz `9df6eb03…bfd5332d`）；
+> 分块上传（1MB×10；5 块首传失败、part-09 三连失败后第 4 次成功——代理通道劣化）→
+> 服务端 `cat` 拼装双 sha 门禁 → 备份 `gateway.bak-20261016-193902` → 替换重启。
+> 验证：`/proc/<pid>/exe` sha 与本地构建**逐位一致**、`/api/health` 200（72 节点恢复，
+> 刚重启时 `live_nodes:0` 属回连窗口）、CF 与源站均发 `app.js?v=40`/`style.css?v=40`、
+> `app.js?v=40` 含 `chat-reasoning`/`chat-tool-toggle`/`chatUserExpanded`/`chatApplyLiveTail`、
+> `style.css?v=40` 含折叠面板与折叠控件规则、`sw.js` CACHE `v40`、日志零 error。
+>
+> 新增能力：会话卡片行内「会话」按钮 + 近全屏实时消息面板（`screen` 快照分页 + SSE 增量 +
+> 输入，不含 provider/model/reasoning 切换）；底部**状态栏**（`dynamic_status` 动态状态行 +
+> `/web/api/statusbar` 静态段）；**GFM 管道表格**渲染；**忙时 2s 兜底快照轮询**（SSE 静默丢帧
+> 时的实时性第二条腿）；连接状态点显示**累计帧数**（区分「连上零帧」与「连接失败」）。
+> `v40` 追加：**推理/工具折叠**（`<details>` 面板 + 5 行折叠 + 展开控件 +
+> 「最后一块自动展开 / 用户展开永不折回」状态机，与 micro web client 同语义）。
+>
+> **本笔核到的三条契约**（都是「读错不报错、只是功能静默失效」那一类，已写进
+> [07-console.md](./07-console.md) §4.3）：
+> ① `screen` 的分页元信息键名是 **`message_window`**（无 `window` 别名）；
+> ② `session_start`/`session_end` 是**每次 run 的起止边界**（载荷只带 `turn_id`），不是会话
+> 切换——按「整块重建面板」处理会在每个回合清空消息与滚动位置；
+> ③ `dynamic_status` 载荷是 `{active,text,role,interruptible,elapsed_ms}`，**没有 `started_at`**，
+> 且服务端只在状态变化时推一次（时钟必须前端本地走）。
+>
+> **本笔新增的运维注意**：经代理连本机 `ssh-client` 若报
+> `host key mismatch ... knownhosts: key mismatch`，**不是**主机密钥被换——是客户端协商到了
+> 非 ed25519 主机密钥，而 known_hosts 里只存了 ed25519 那条。加
+> `-o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes` 即可用既有 known_hosts 正常
+> 校验并连通（plink 独立报出的 ed25519 指纹与缓存条目一致，已交叉验证）。不要为了绕过它而
+> 长期使用 `StrictHostKeyChecking=no`。
+
 回滚点：`/opt/ai-gateway-edge/configs/config.yaml.pre-aicli-online-*`、
 `/etc/systemd/system/aicli-gateway.service.bak-*`。

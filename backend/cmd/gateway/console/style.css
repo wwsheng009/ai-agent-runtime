@@ -1210,6 +1210,17 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .md pre.md-code code { background: none; border: 0; padding: 0; }
 .md a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
 .md del { opacity: 0.65; }
+/* GFM 管道表格（与 micro web client 的 .msg-md table 同一排版口径）。窄屏下
+   允许横向滚动，避免列多时把气泡撑破。 */
+.md table {
+  border-collapse: collapse; margin: 0.35em 0;
+  font-size: 0.95em; display: block; overflow-x: auto; max-width: 100%;
+}
+.md th, .md td {
+  border: 1px solid var(--border); padding: 3px 8px;
+  text-align: left; vertical-align: top;
+}
+.md th { background: var(--bg); font-weight: 600; }
 
 /* ── Migration event strip (P2) ────────────────────────────────── */
 
@@ -1308,4 +1319,259 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   font-size: 11.5px;
   color: var(--fg-muted);
   white-space: nowrap;
+}
+
+/* ── Session chat panel (near-fullscreen transcript + SSE live) ──────────
+   Opened from a session card's 会话 button. History and live frames come from
+   the node's own micro web client through the gateway reverse proxy
+   (/n/{node}/web/api/screen + /web/api/events); this panel only renders
+   messages and posts plain input — deliberately no provider/model/effort
+   controls. */
+
+/* Near-fullscreen: override the shared scrim's top-heavy padding locally so
+   the taller panel can use almost the whole viewport (other dialogs keep
+   their existing placement). */
+#chat-modal { padding: 12px 16px; align-items: center; }
+
+.modal.modal-xl {
+  max-width: 1100px;
+  width: min(1100px, 100%);
+  height: min(92vh, 900px);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px;
+}
+
+.chat-head { align-items: flex-start; }
+.chat-head-main { min-width: 0; }
+.chat-head-main h3 {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 52ch;
+}
+.chat-head-sub {
+  display: block; margin-top: 3px;
+  font-size: 12px; color: var(--fg-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+/* Connection state: colour + shape carry the meaning, the text is explicit
+   so the state is never conveyed by colour alone. */
+.chat-live-dot {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--fg-muted); white-space: nowrap;
+}
+.chat-live-dot::before {
+  content: ""; flex-shrink: 0;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint);
+}
+.chat-live-dot.is-live { color: var(--ok-ink); }
+.chat-live-dot.is-live::before { background: var(--ok); animation: live-pulse 1.4s ease-in-out infinite; }
+.chat-live-dot.is-busy { color: var(--accent); }
+.chat-live-dot.is-busy::before { background: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
+.chat-live-dot.is-down { color: var(--warn-ink); }
+.chat-live-dot.is-down::before { background: var(--warn); }
+
+.chat-notice {
+  flex-shrink: 0; margin-top: 10px; padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft); color: var(--warn-ink);
+  font-size: 12.5px; line-height: 1.5;
+}
+
+.chat-older { flex-shrink: 0; display: flex; justify-content: center; padding: 8px 0 0; }
+
+.chat-list {
+  flex: 1 1 auto; min-height: 0;
+  margin-top: 10px; padding: 4px 2px 8px;
+  overflow-y: auto;
+  /* Trapping the scroll keeps a wheel/touch at the end of the transcript from
+     scrolling the page behind the dialog. */
+  overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+.chat-placeholder {
+  margin: auto; padding: 24px 12px; text-align: center;
+  color: var(--fg-muted); font-size: 13px;
+}
+
+.chat-msg { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.chat-msg-role { font-size: 11px; color: var(--fg-faint); }
+.chat-bubble {
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  font-size: 13px; line-height: 1.6; color: var(--fg);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.chat-msg-user { align-items: flex-end; }
+.chat-msg-user .chat-bubble {
+  max-width: 82%;
+  background: var(--accent-soft); border-color: transparent;
+}
+.chat-msg-assistant .chat-bubble { max-width: 92%; }
+
+/* Secondary roles (reasoning / tool / system chatter) read as quiet,
+   monospaced metadata rather than as conversation turns. */
+.chat-msg-reasoning .chat-bubble,
+.chat-msg-tool .chat-bubble,
+.chat-msg-command .chat-bubble,
+.chat-msg-diagnostic .chat-bubble,
+.chat-msg-runtime .chat-bubble {
+  background: var(--bg-elev); color: var(--fg-muted); font-size: 12.5px;
+}
+.chat-msg-tool .chat-bubble,
+.chat-msg-command .chat-bubble { font-family: var(--font-mono); font-size: 11.5px; }
+
+/* Long tool/reasoning chatter is clamped in place: the turn stays visible
+   without one dump of stderr pushing the rest of the transcript off screen
+   (and the nested scroll owns its own wheel/touch, like .chat-list). */
+.chat-msg-tool .chat-bubble,
+.chat-msg-diagnostic .chat-bubble,
+.chat-msg-runtime .chat-bubble {
+  max-width: 92%; max-height: 220px;
+  overflow-y: auto; overscroll-behavior: contain;
+}
+/* 推理行不再用滚动钳制：改用 <details> 折叠面板（见下），抬头行即 summary。 */
+.chat-msg-reasoning .chat-bubble { max-width: 92%; }
+
+/* ── 折叠（与 micro web client chat.js/style.css 同一语义） ───────────── */
+
+/* 推理：原生 <details> 折叠面板，summary 即抬头行（默认收起一行）。 */
+.chat-reasoning {
+  margin: 0; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.chat-reasoning summary {
+  padding: 4px 9px; cursor: pointer; user-select: none; list-style: none;
+  color: var(--fg-muted); font-style: italic; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-reasoning summary::-webkit-details-marker { display: none; }
+.chat-reasoning summary::before { content: "▸ "; }
+.chat-reasoning[open] summary::before { content: "▾ "; }
+.chat-reasoning summary:hover { background: var(--accent-soft); }
+.chat-reasoning-body {
+  padding: 6px 9px 8px;
+  border-top: 1px dashed var(--border);
+  color: var(--fg-muted); font-style: italic; font-size: 12px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 260px; overflow-y: auto; overscroll-behavior: contain;
+}
+
+/* 工具：默认折叠约 5 行（完整文本始终在 DOM 里，CSS 截断）。 */
+.chat-tool-output { position: relative; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-tool-output.chat-collapsed { max-height: 8em; overflow: hidden; }
+.chat-tool-output.chat-collapsed::after {
+  content: ""; position: absolute; bottom: 0; left: 0; right: 0;
+  height: 1.5em;
+  background: linear-gradient(to bottom, transparent, var(--bg-elev));
+  pointer-events: none;
+}
+.chat-tool-output.chat-expanded { max-height: none; }
+
+/* 折叠控件（长在「工具」抬头行里）：文字胶囊 + ▼/▲ 图标；
+   内容未溢出时 is-off 隐藏控件，抬头恢复纯文本。 */
+.chat-tool-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-left: 6px; padding: 0;
+  background: none; border: 0; font: inherit; color: inherit;
+  cursor: pointer; user-select: none;
+}
+.chat-tool-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+.chat-tool-action {
+  padding: 0 5px; font-size: 10px; line-height: 1.5;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--border); border-radius: 3px;
+}
+.chat-tool-icon { font-size: 9px; line-height: 1; color: var(--accent); }
+.chat-tool-toggle.is-off { cursor: default; }
+.chat-tool-toggle.is-off .chat-tool-action,
+.chat-tool-toggle.is-off .chat-tool-icon { display: none; }
+
+/* Rendered Markdown bubbles drop the pre-wrap (block elements own the flow). */
+.chat-bubble.md { white-space: normal; }
+.chat-bubble img {
+  display: block; max-width: 100%; height: auto;
+  margin-top: 6px; border-radius: var(--radius-sm);
+}
+
+/* A streaming turn keeps a caret so "still writing" is visible; the pending
+   state marks an optimistic echo the server has not confirmed yet. */
+.chat-msg.is-streaming .chat-bubble::after {
+  content: ""; display: inline-block;
+  width: 6px; height: 12px; margin-left: 3px; vertical-align: -2px;
+  background: var(--fg-muted);
+  animation: chat-caret 1s steps(2, start) infinite;
+}
+@keyframes chat-caret { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+.chat-msg.is-pending .chat-bubble { opacity: 0.72; border-style: dashed; }
+
+.chat-foot {
+  flex-shrink: 0; margin-top: 8px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.chat-composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin: 0; }
+.chat-input {
+  flex: 1 1 auto; min-width: 0; resize: none;
+  min-height: var(--ctl-h-sm); max-height: 160px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--bg-elev); color: var(--fg);
+  font-family: inherit; font-size: 13px; line-height: 1.5;
+}
+.chat-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-send { flex-shrink: 0; }
+.chat-hint { flex-basis: 100%; font-size: 11.5px; color: var(--fg-muted); }
+.chat-readonly {
+  margin: 0; padding: 2px 0;
+  text-align: center; font-size: 12.5px; color: var(--fg-muted);
+}
+
+/* 状态栏：动态状态行（SSE dynamic_status）+ 静态段（/web/api/statusbar）。
+   固定在面板底部（输入区之上），与节点 micro web client 的底部状态栏同位。 */
+.chat-status {
+  flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 2px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+  font-size: 11.5px; color: var(--fg-muted);
+  min-width: 0;
+}
+.chat-dyn {
+  color: var(--accent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-dyn.is-warn { color: var(--warn-ink); }
+.chat-dyn.is-error { color: var(--danger-ink); }
+.chat-segs {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px;
+  min-width: 0;
+  font-family: var(--font-mono); font-size: 11px;
+}
+.chat-seg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40ch; }
+.chat-seg-sep { color: var(--fg-faint); }
+
+/* Phones: the panel takes the whole viewport (no wasted scrim margin, and no
+   horizontal scroll at 320px). */
+@media (max-width: 860px) {
+  #chat-modal { padding: 0; align-items: stretch; }
+  .modal.modal-xl {
+    width: 100%; max-width: none;
+    height: 100vh; height: 100dvh;
+    border: 0; border-radius: 0;
+  }
+  .chat-head-main h3 { max-width: 38vw; }
+  .chat-msg-user .chat-bubble,
+  .chat-msg-assistant .chat-bubble { max-width: 96%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-live-dot.is-live::before,
+  .chat-live-dot.is-busy::before { animation: none; }
+  .chat-msg.is-streaming .chat-bubble::after { animation: none; }
 }
