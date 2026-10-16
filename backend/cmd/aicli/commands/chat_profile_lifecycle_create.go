@@ -19,7 +19,7 @@ func chatProfileCreateLifecycleText(session *ChatSession, name, template, layer 
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", fmt.Errorf("用法: /profile create <name> [--template coding|review|minimal|docs] [--to user|project]")
+		return "", fmt.Errorf("用法: /profile create <name> [--template coding|full|review|minimal|docs] [--to user|project]")
 	}
 	if err := validateProfileCreateName(name); err != nil {
 		return "", err

@@ -28,7 +28,7 @@ func NewProfileCommand(getConfig func() *config.Config) *cobra.Command {
   list      列出可用 profile（config 注册项 / default root 下的目录 / user|project 层目录 / 显式路径）
   show      解析并展示一个 profile 的最终生效面（工具/skills/mcp/prompt/paths）
   validate  校验 profile 声明（语法/必填/工具名/skill/mcp 引用/prompt 可读性）
-  create    从内置模板（coding|review|minimal|docs）生成 profile 目录
+  create    从内置模板（coding|full|review|minimal|docs）生成 profile 目录
   export    导出 profile 为 zip 包（分享/分发；只读，不写 profile/配置/会话）
   import    导入目录或 zip 包为新 profile（先 validate、绝不自动激活、不覆盖同名）
 

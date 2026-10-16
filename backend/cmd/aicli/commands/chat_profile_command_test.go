@@ -497,7 +497,7 @@ func TestProfileCommandHelpText(t *testing.T) {
 	defer cleanup()
 
 	text, _ := chatProfileCommandText(session, "/profile help")
-	for _, want := range []string{"用法:", "/profile use <name>", "/profile off", "只能收窄安全基线"} {
+	for _, want := range []string{"用法:", "/profile use <name>", "/profile off", "full 模板"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("help 缺少 %q，got: %s", want, text)
 		}

@@ -1,0 +1,3 @@
+name: full
+description: Full tool baseline profile that restores every tool (allowlist "*")
+default_agent: default

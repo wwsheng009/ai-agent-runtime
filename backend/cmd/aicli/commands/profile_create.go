@@ -41,7 +41,7 @@ func newProfileCreateCommand(getConfig func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "从内置模板生成 profile 目录",
-		Long: `从内置模板（coding|review|minimal|docs）生成一个 profile 目录。
+		Long: `从内置模板（coding|full|review|minimal|docs）生成一个 profile 目录。
 
 目标目录：
   --root 指定；否则 profiles.root/<name>；两者都没有时用 ./profiles/<name>。
@@ -74,7 +74,7 @@ func newProfileCreateCommand(getConfig func() *config.Config) *cobra.Command {
 			}, renderProfileCreateText)
 		},
 	}
-	cmd.Flags().String("template", "coding", "内置模板：coding|review|minimal|docs")
+	cmd.Flags().String("template", "coding", "内置模板：coding|full|review|minimal|docs")
 	cmd.Flags().String("root", "", "目标 profile 目录（默认 profiles.root/<name> 或 ./profiles/<name>）")
 	cmd.Flags().String("agent", "", "默认 agent id（默认模板自带的 default）")
 	cmd.Flags().Bool("use", false, "生成后注册到 config profiles.items[<name>].root")

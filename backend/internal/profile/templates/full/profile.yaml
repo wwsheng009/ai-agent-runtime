@@ -1,0 +1,26 @@
+# {{name}} — 全量恢复场景：显式放行全部工具，用于从窄面 profile 恢复。
+# 由 `aicli profile create` 从内置模板生成；字段语义见 docs/aicli/profiles.md。
+#
+# 与 coding（不声明 = 全量）的差别：full 用 allowlist: ["*"] **显式**声明全量。
+# 2026-10-16 起 essential 豁免已移除（allowlist 是硬闸门），窄面 profile 裁掉的
+# 控制面工具（job_*/plan_*/subagent_*/team_* 等）由本模板的通配放行恢复——
+# 会话内 `/profile use <本profile>` 即完成"裁剪 → 恢复"闭环。
+profile:
+  name: {{name}}
+  description: {{description}}
+  default_agent: {{agent}}
+
+# 提示词组合：replace = profile 提示词整体替换内置基础 prompt（默认，零行为变化）。
+prompts:
+  mode: replace
+
+# 全量恢复：allowlist: ["*"] 放行一切（含运行时控制面工具），不声明 denylist、
+# 不声明 disabled_capabilities（不做能力域裁剪），read_only: false 允许写操作。
+# denylist: []（缺省）恒等于"无显式拒绝"；需要再收窄时改用其它模板或手工编辑。
+tools:
+  allowlist:
+    - "*"
+  read_only: false
+
+# skills：不声明 allowlist/denylist 即全部技能可见（deny 恒优先）。
+# mcp：不声明 use_servers/exclude_servers 即沿用 mcp.yaml 的全量服务器。

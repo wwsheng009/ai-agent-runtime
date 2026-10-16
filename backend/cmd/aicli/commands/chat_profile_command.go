@@ -32,7 +32,7 @@ func chatProfileUsageText() string {
 		"  /profile reload                                    重新解析当前 profile（磁盘编辑后）",
 		"  /profile off                                       回到无 profile 基线（完整失效）",
 		"  /profile save [--to session|workspace|config] [--yes]   持久化默认 profile",
-		"  /profile create <name> [--template coding|review|minimal|docs] [--to user|project] [--force]",
+		"  /profile create <name> [--template coding|full|review|minimal|docs] [--to user|project] [--force]",
 		"  /profile duplicate <ref> <name> [--to user|project]     复制（不覆盖同名）",
 		"  /profile save-as <name> [--to user|project]        从当前会话固化差分（D24；不覆盖同名）",
 		"  /profile edit [<ref>] [--open]                     打印 profile.yaml 路径；--open 拉起 $EDITOR",
@@ -43,7 +43,8 @@ func chatProfileUsageText() string {
 		"  /profile import <包路径|目录> [--to user|project] [--name <名字>] [--dry-run]",
 		"                                                     导入 zip/目录（不覆盖、不自动激活）",
 		"  /profile help                                      显示本用法",
-		"说明: 切换在下一个 turn 边界生效；profile 只能收窄安全基线，不会放宽权限",
+		"说明: 切换在下一个 turn 边界生效；切换语义由目标 profile 决定（窄面模板收窄、",
+		"      full 模板用 allowlist [\"*\"] 恢复全量；/profile off 回到无 profile 基线）",
 		"      save-as 固化的是与内置默认面的差分（prompt/权限模式不在 profile.yaml 字段内，报告中逐项明示）",
 		"      复杂编辑仍在前端 Profiles 页",
 	}, "\n")
@@ -118,7 +119,7 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 	case "create":
 		if len(positional) == 0 {
 			return commandErrorResult(fmt.Errorf(
-				"用法: /profile create <name> [--template coding|review|minimal|docs] [--to user|project] [--force]")), true
+				"用法: /profile create <name> [--template coding|full|review|minimal|docs] [--to user|project] [--force]")), true
 		}
 		text, err := chatProfileCreateLifecycleText(session, positional[0], flags.Template, flags.Layer, flags.Force)
 		if err != nil {
