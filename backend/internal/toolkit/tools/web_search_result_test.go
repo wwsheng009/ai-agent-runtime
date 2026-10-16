@@ -44,14 +44,14 @@ func TestWebSearchResultCapAndSourcesMetadata(t *testing.T) {
 
 func TestWebSearchExecutionEnforcesCountBoundary(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "fake", search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+	tool.providers = []WebSearchProvider{newWebSearchProvider("fake", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
 		// Deliberately ignores the requested count.
 		return "fake", []DuckDuckGoResult{
 			{Title: "T1", URL: "https://one.example/1"},
 			{Title: "T2", URL: "https://two.example/2"},
 			{Title: "T3", URL: "https://three.example/3"},
 		}, nil
-	}}}
+	}, nil)}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "boundary", "count": float64(2)})
 	if err != nil {

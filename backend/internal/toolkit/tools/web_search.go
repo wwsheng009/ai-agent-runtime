@@ -32,7 +32,7 @@ type WebSearchTool struct {
 	sandboxPolicy
 	httpClient *http.Client
 	// providers 按优先级排列的搜索引擎后端链，由 WEB_SEARCH_PROVIDERS 配置。
-	providers []webSearchProvider
+	providers []WebSearchProvider
 	// bingLocale Bing 端点的 setlang/mkt 参数（默认英文 en / en-US）。
 	bingLocale bingSearchLocale
 	// native 是原生搜索（P2-5b/c）解析后的路由配置；mode=off 时链不含 native。
@@ -45,13 +45,6 @@ type WebSearchTool struct {
 	// chainTimeout/requestTimeout 是 P1-2 解析后的两级超时预算。
 	chainTimeout   time.Duration
 	requestTimeout time.Duration
-}
-
-// webSearchProvider 一个搜索引擎后端。source 用于结果 metadata 标记
-// （duckduckgo / duckduckgo_html / bing / bing_cn）。
-type webSearchProvider struct {
-	name   string
-	search func(ctx context.Context, query string, count int) (source string, results []DuckDuckGoResult, err error)
 }
 
 // webSearchAttempt is one provider's result after the client-side domain filter
@@ -284,30 +277,30 @@ func newSearchHTTPClient(requestTimeout time.Duration) *http.Client {
 // runtime.yaml webSearch.providers，最后回退默认链。native 成员仅在
 // webSearch.native.mode 非 off 时参与：prefer 要求本地可用（能力位/凭据/
 // 端点均可解析），force 始终保留（执行期报结构化错误）；显式 mode 但链序未
-// 列出 native 时置于链首，列入时按位置参与。
-func (w *WebSearchTool) buildProviders() []webSearchProvider {
+// 列出 native 时置于链首，列入时按位置参与。后端构造走注册表（P2-1）。
+func (w *WebSearchTool) buildProviders() []WebSearchProvider {
 	names := w.resolveChainNames()
 	if w.native.enabled() && !containsProviderName(names, webSearchNativeName) {
 		names = append([]string{webSearchNativeName}, names...)
 	}
-	out := make([]webSearchProvider, 0, len(names))
+	out := make([]WebSearchProvider, 0, len(names))
 	for _, name := range names {
-		switch name {
-		case webSearchNativeName:
+		factory, ok := webSearchProviderRegistry[name]
+		if !ok {
+			continue
+		}
+		provider := factory(w)
+		if name == webSearchNativeName {
 			if !w.native.enabled() {
 				continue
 			}
-			if w.native.mode != webSearchNativeModeForce && !w.nativeAvailable() {
+			if w.native.mode != webSearchNativeModeForce && !provider.Available() {
 				continue
 			}
-			out = append(out, webSearchProvider{name: name, search: w.searchNativeProvider})
-		case "duckduckgo":
-			out = append(out, webSearchProvider{name: name, search: w.searchDuckDuckGoProvider})
-		case "bing":
-			out = append(out, webSearchProvider{name: name, search: w.searchBingProvider})
-		case "bing_cn":
-			out = append(out, webSearchProvider{name: name, search: w.searchBingCNProvider})
+		} else if !provider.Available() {
+			continue
 		}
+		out = append(out, provider)
 	}
 	return out
 }
@@ -503,16 +496,17 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 			budgetExhausted = true
 			break
 		}
-		lastProvider = p.name
+		lastProvider = p.Name()
 		diagnostics.finalHost = ""
-		source, results, err := p.search(ctx, query, count)
+		providerResult, err := p.Search(ctx, WebSearchRequest{Query: query, Count: count, TimeRange: options.timeRange, Language: options.language})
 		if err != nil {
-			failures = append(failures, providerFailure{name: p.name, err: err})
+			failures = append(failures, providerFailure{name: p.Name(), err: err})
 			continue
 		}
+		source, results := providerResult.Source, providerResult.Results
 		kept, dropped := filter.apply(results)
 		attempt := webSearchAttempt{
-			name:        p.name,
+			name:        p.Name(),
 			source:      source,
 			results:     kept,
 			rawCount:    len(results),

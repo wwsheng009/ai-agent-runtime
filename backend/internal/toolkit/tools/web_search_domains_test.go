@@ -73,12 +73,9 @@ func TestParseWebSearchDomainFilterValidatesMutualExclusion(t *testing.T) {
 
 func stubWebSearchTool(results []DuckDuckGoResult) *WebSearchTool {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{
-		name: "stub",
-		search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
-			return "stub", results, nil
-		},
-	}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("stub", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+		return "stub", results, nil
+	}, nil)}
 	return tool
 }
 

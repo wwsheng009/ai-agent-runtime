@@ -162,11 +162,15 @@ defer cancel()
 5. 常见问题（为什么默认英文端点；如何切中文市场；为什么 Low quality；与"模型原生 server-side 搜索"的边界）；
 6. 变更记录（Phase 1 行为变化：链预算、notice）。
 
-**测试计划**：文档不配代码测试；README 表格与 `web_search.go` 常量做一次人工对拍（避免文档漂移）。**验收**：用户仅凭文档可配置链序/超时/locale 并解释失败分类。---
+**测试计划**：文档不配代码测试；README 表格与 `web_search.go` 常量做一次人工对拍（避免文档漂移）。**验收**：用户仅凭文档可配置链序/超时/locale 并解释失败分类。
+
+---
 
 ## 5. Phase 2：结构改造与能力扩展
 
 ### 5.1 实施项 P2-1：provider seam 化（接口 + 注册表 + 可用性）
+
+> **落地进展（2026-10-16）**：已实施——新增 `web_search_provider.go`：`WebSearchProvider{Name,Available,Search}` 接口 + `WebSearchRequest`（time_range/language 随请求传递，适配器回注 ctx 兼容既有抓取函数）+ `WebSearchProviderResult{Source,Results}` + `webSearchProviderFunc` 适配器（构造入口 `newWebSearchProvider`，nil available = 恒可用）+ `webSearchProviderRegistry`（bing/bing_cn/duckduckgo/native 构造表）。`WebSearchTool.providers` 改为接口切片；链循环走 `p.Name()/p.Search(req)`；`buildProviders` 统一走注册表 + `Available()` 门控（native 的 off/prefer/force 语义不变）；未知链序 token 由注册表查空自动跳过。实现注记：链内契约沿用抓取行类型（供质量门/域名过滤复用），归一 `WebSearchResult` 仍由工具层产出（P2-2），避免二次返工。测试：`web_search_provider_test.go` 5 组（选项回注、可用性、错误透传、注册表覆盖、未知 token 跳过）；6 个既有测试文件完成构造迁移；行为与改造前逐字节一致（全套用例全绿）。
 
 **问题**：`webSearchProvider` 是 `{name, search func}` 函数值 + 硬编码 switch（`web_search.go:40-43,236-273`），未知名字静默忽略；新增后端必须改工具源码；没有"凭据存在才启用"的准入概念。
 
@@ -191,12 +195,22 @@ type WebSearchRequest struct {
 type WebSearchProvider interface {
     Name() string
     Available() bool
-    Search(ctx context.Context, req WebSearchRequest) (WebSearchResult, error)
+    // 实现注记：链内契约沿用抓取行（供质量门/域名过滤复用）；归一
+    // WebSearchResult 由工具层在选定尝试后产出（P2-2）。
+    Search(ctx context.Context, req WebSearchRequest) (WebSearchProviderResult, error)
 }
 
-// webSearchProviderFunc 适配器：把既有函数值写法迁移到接口（测试与内置
-// 抓取后端共用），签名保持 (source string, results []DuckDuckGoResult, err)。
-func webSearchProviderFunc(name string, search func(context.Context, string, int) (string, []DuckDuckGoResult, error)) WebSearchProvider
+// WebSearchProviderResult 单次后端结果：Source 用于 metadata 标记，
+// Results 供质量门/过滤消费。
+type WebSearchProviderResult struct {
+    Source  string
+    Results []DuckDuckGoResult
+}
+
+// webSearchProviderFunc 适配器（实现接口）：把既有函数值写法迁移到接口（测试
+// 与内置抓取后端共用），底层签名保持 (source, results, err)；available 为
+// nil 表示恒可用。构造入口：newWebSearchProvider(name, search, available)。
+func newWebSearchProvider(name string, search webSearchSearchFunc, available func() bool) WebSearchProvider
 
 // buildProviderChain 解析链序（WEB_SEARCH_PROVIDERS → 默认链），查注册表，
 // 跳过不可用者（写 providers_skipped 诊断），未知名保留在 providers_unknown。
@@ -547,7 +561,7 @@ type NativeToolCapabilities struct {
 | P1-1 | notice 首行/引用尾行/空结果也带 notice/描述更新 | `web_search_test.go` |
 | P1-2 | 链预算生效与钳制、逐请求预算、超时归属 metadata、非法值回退 | `web_search_test.go` |
 | P1-3 | 429+Retry-After、failure_provider、无头 429 兼容 | `web_search_test.go` |
-| P2-1 | 注册表顺序/未知名/重复名；可用性跳过；假 provider 注入 | 新增 `web_search_provider_test.go`、迁移 3 处测试 |
+| P2-1 | 注册表覆盖/未知 token 跳过；可用性与错误透传；请求选项回注 | `web_search_provider_test.go`（已落地）+ 6 个测试文件构造迁移 |
 | P2-2 | 类型映射（含 RSS 日期）、capSources 截断、`sources[]` 投影、格式防回归 | `web_search_result_test.go`（已落地）、`web_search_test.go` |
 | P2-3 | 轮转顺序/去重/封顶、部分失败、strict、单查询等价、取消 join | `web_search_merge_test.go`、`web_search_test.go` |
 | P2-4 | 每 provider：请求/结果/错误映射、可用性、sandbox、key 轮换 | 新增 `web_search_api_*_test.go` |
@@ -621,7 +635,7 @@ webSearch:
 type WebSearchProvider interface {
     Name() string
     Available() bool
-    Search(ctx context.Context, req WebSearchRequest) (WebSearchResult, error)
+    Search(ctx context.Context, req WebSearchRequest) (WebSearchProviderResult, error)
 }
 
 type WebSearchRequest struct {
@@ -631,6 +645,12 @@ type WebSearchRequest struct {
     Language  string
 }
 
+type WebSearchProviderResult struct { // 链内契约（抓取行）
+    Source  string
+    Results []DuckDuckGoResult
+}
+
+// 归一结果由工具层产出（P2-2）：
 type WebSearchSource struct {
     Title, URL, Snippet, PublishedAt string
 }

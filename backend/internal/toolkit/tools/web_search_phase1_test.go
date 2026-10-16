@@ -68,15 +68,15 @@ func TestWebSearchChainBudgetExhaustion(t *testing.T) {
 	tool := NewWebSearchTool()
 	tool.chainTimeout = 150 * time.Millisecond
 	secondCalled := false
-	tool.providers = []webSearchProvider{
-		{name: "slow", search: func(ctx context.Context, query string, count int) (string, []DuckDuckGoResult, error) {
+	tool.providers = []WebSearchProvider{
+		newWebSearchProvider("slow", func(ctx context.Context, query string, count int) (string, []DuckDuckGoResult, error) {
 			<-ctx.Done()
 			return "", nil, ctx.Err()
-		}},
-		{name: "second", search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+		}, nil),
+		newWebSearchProvider("second", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
 			secondCalled = true
 			return "second", []DuckDuckGoResult{{Title: "T", URL: "https://e.example"}}, nil
-		}},
+		}, nil),
 	}
 
 	started := time.Now()
@@ -109,11 +109,11 @@ func TestWebSearchChainBudgetExhaustion(t *testing.T) {
 
 func TestWebSearchRetryAfterAndFailureProvider(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+	tool.providers = []WebSearchProvider{newWebSearchProvider("bing", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
 		return "", nil, webSearchHTTPStatusError(http.StatusTooManyRequests,
 			http.Header{"Retry-After": []string{"7"}},
 			"Bing 搜索错误 (状态码 429): slow down")
-	}}}
+	}, nil)}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "rate-limited"})
 	if err != nil {

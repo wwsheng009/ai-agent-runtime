@@ -69,7 +69,7 @@ func newNativeSearchToolForTest(t *testing.T, cfg *runtimecfg.RuntimeConfig, pro
 func providerNames(tool *WebSearchTool) string {
 	names := make([]string, 0, len(tool.providers))
 	for _, provider := range tool.providers {
-		names = append(names, provider.name)
+		names = append(names, provider.Name())
 	}
 	return strings.Join(names, ",")
 }

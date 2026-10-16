@@ -315,7 +315,7 @@ func TestParseWebSearchProviders(t *testing.T) {
 
 func TestWebSearchTool_BingParsesResultsAndDecodesRedirect(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("bing", tool.searchBingProvider, nil)}
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if req.URL.Host != "www.bing.com" {
@@ -416,23 +416,17 @@ func TestWebSearchTool_DefaultChainFallsBackToDDG(t *testing.T) {
 
 func TestWebSearchTool_LowQualityFirstProviderFallsBack(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{
-		{
-			name: "first",
-			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
-				return "first", []DuckDuckGoResult{
-					{Title: "完全无关的结果", URL: "https://noise.example/", Snippet: "noise"},
-				}, nil
-			},
-		},
-		{
-			name: "second",
-			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
-				return "second", []DuckDuckGoResult{
-					{Title: "GitHub trending weekly AI repositories", URL: "https://github.com/trending", Snippet: "weekly AI repositories"},
-				}, nil
-			},
-		},
+	tool.providers = []WebSearchProvider{
+		newWebSearchProvider("first", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+			return "first", []DuckDuckGoResult{
+				{Title: "完全无关的结果", URL: "https://noise.example/", Snippet: "noise"},
+			}, nil
+		}, nil),
+		newWebSearchProvider("second", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+			return "second", []DuckDuckGoResult{
+				{Title: "GitHub trending weekly AI repositories", URL: "https://github.com/trending", Snippet: "weekly AI repositories"},
+			}, nil
+		}, nil),
 	}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
@@ -459,21 +453,15 @@ func TestWebSearchTool_LowQualityFirstProviderFallsBack(t *testing.T) {
 
 func TestWebSearchTool_EmptyFirstProviderFallsBack(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{
-		{
-			name: "empty",
-			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
-				return "empty", nil, nil
-			},
-		},
-		{
-			name: "hit",
-			search: func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
-				return "hit", []DuckDuckGoResult{
-					{Title: "AI trending project", URL: "https://example.com/ai", Snippet: "AI project"},
-				}, nil
-			},
-		},
+	tool.providers = []WebSearchProvider{
+		newWebSearchProvider("empty", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+			return "empty", nil, nil
+		}, nil),
+		newWebSearchProvider("hit", func(context.Context, string, int) (string, []DuckDuckGoResult, error) {
+			return "hit", []DuckDuckGoResult{
+				{Title: "AI trending project", URL: "https://example.com/ai", Snippet: "AI project"},
+			}, nil
+		}, nil),
 	}
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{"query": "AI trending project"})
@@ -490,7 +478,7 @@ func TestWebSearchTool_EmptyFirstProviderFallsBack(t *testing.T) {
 
 func TestWebSearchTool_DuckDuckGoInstantZeroTriesHTML(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "duckduckgo", search: tool.searchDuckDuckGoProvider}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("duckduckgo", tool.searchDuckDuckGoProvider, nil)}
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if strings.Contains(req.URL.Host, "api.duckduckgo.com") {
@@ -526,7 +514,7 @@ func TestWebSearchTool_DuckDuckGoInstantZeroTriesHTML(t *testing.T) {
 
 func TestWebSearchTool_TimeRangeAndLanguageMapToBing(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("bing", tool.searchBingProvider, nil)}
 	var gotQuery url.Values
 	var gotAcceptLanguage string
 	tool.httpClient = &http.Client{
@@ -606,7 +594,7 @@ func TestWebSearchOptionalHelpers(t *testing.T) {
 
 func TestWebSearchTool_BingFallsBackToRSSWhenHTMLHasNoResults(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("bing", tool.searchBingProvider, nil)}
 	requests := 0
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -641,7 +629,7 @@ func TestWebSearchTool_BingFallsBackToRSSWhenHTMLHasNoResults(t *testing.T) {
 
 func TestWebSearchTool_BingSkipsRSSForPlainEmptyPage(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("bing", tool.searchBingProvider, nil)}
 	requests := 0
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -669,7 +657,7 @@ func TestWebSearchTool_BingSkipsRSSForPlainEmptyPage(t *testing.T) {
 
 func TestWebSearchTool_BingBlockedPageIsStructured(t *testing.T) {
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("bing", tool.searchBingProvider, nil)}
 	tool.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if req.URL.Query().Get("format") == "rss" {
@@ -762,7 +750,7 @@ func TestWebSearchTool_BingDefaultsToEnglishEndpoint(t *testing.T) {
 	t.Setenv(webSearchBingSetLangEnv, "")
 	t.Setenv(webSearchBingMarketEnv, "")
 	tool := NewWebSearchTool()
-	tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+	tool.providers = []WebSearchProvider{newWebSearchProvider("bing", tool.searchBingProvider, nil)}
 	var gotURL *url.URL
 	var gotAcceptLanguage string
 	tool.httpClient = &http.Client{
@@ -823,7 +811,7 @@ func TestWebSearchTool_BingLocaleFromEnv(t *testing.T) {
 			t.Setenv(webSearchBingSetLangEnv, tc.setLang)
 			t.Setenv(webSearchBingMarketEnv, tc.market)
 			tool := NewWebSearchTool()
-			tool.providers = []webSearchProvider{{name: "bing", search: tool.searchBingProvider}}
+			tool.providers = []WebSearchProvider{newWebSearchProvider("bing", tool.searchBingProvider, nil)}
 			var gotURL *url.URL
 			var gotAcceptLanguage string
 			tool.httpClient = &http.Client{
@@ -984,7 +972,7 @@ func TestNewWebSearchTool_ProvidersFromEnv(t *testing.T) {
 		tool := NewWebSearchTool()
 		names := make([]string, 0, len(tool.providers))
 		for _, p := range tool.providers {
-			names = append(names, p.name)
+			names = append(names, p.Name())
 		}
 		if strings.Join(names, ",") != "bing,duckduckgo,bing_cn" {
 			t.Fatalf("default providers = %v, want [bing duckduckgo bing_cn]", names)
@@ -994,7 +982,7 @@ func TestNewWebSearchTool_ProvidersFromEnv(t *testing.T) {
 	t.Run("env overrides", func(t *testing.T) {
 		t.Setenv(webSearchProvidersEnv, "duckduckgo,bing_cn")
 		tool := NewWebSearchTool()
-		if len(tool.providers) != 2 || tool.providers[0].name != "duckduckgo" || tool.providers[1].name != "bing_cn" {
+		if len(tool.providers) != 2 || tool.providers[0].Name() != "duckduckgo" || tool.providers[1].Name() != "bing_cn" {
 			t.Fatalf("env providers = %v, want [duckduckgo bing_cn]", tool.providers)
 		}
 	})
@@ -1002,7 +990,7 @@ func TestNewWebSearchTool_ProvidersFromEnv(t *testing.T) {
 	t.Run("env reorders chain", func(t *testing.T) {
 		t.Setenv(webSearchProvidersEnv, "bing_cn,bing")
 		tool := NewWebSearchTool()
-		if len(tool.providers) != 2 || tool.providers[0].name != "bing_cn" || tool.providers[1].name != "bing" {
+		if len(tool.providers) != 2 || tool.providers[0].Name() != "bing_cn" || tool.providers[1].Name() != "bing" {
 			t.Fatalf("env providers = %v, want [bing_cn bing]", tool.providers)
 		}
 	})
@@ -1010,7 +998,7 @@ func TestNewWebSearchTool_ProvidersFromEnv(t *testing.T) {
 	t.Run("invalid env falls back to default", func(t *testing.T) {
 		t.Setenv(webSearchProvidersEnv, "google")
 		tool := NewWebSearchTool()
-		if len(tool.providers) != 3 || tool.providers[0].name != "bing" || tool.providers[1].name != "duckduckgo" || tool.providers[2].name != "bing_cn" {
+		if len(tool.providers) != 3 || tool.providers[0].Name() != "bing" || tool.providers[1].Name() != "duckduckgo" || tool.providers[2].Name() != "bing_cn" {
 			t.Fatalf("invalid env providers = %v, want default chain", tool.providers)
 		}
 	})
