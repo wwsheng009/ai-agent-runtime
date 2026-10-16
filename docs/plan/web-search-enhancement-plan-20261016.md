@@ -270,6 +270,8 @@ type WebSearchResult struct {
 
 ### 5.3 实施项 P2-3：多查询合并（可选 schema）
 
+> **落地进展（2026-10-16）**：已实施——schema 增加可选 `queries`（≤4；`query` 保留且 schema `required` 移除，运行时校验二者至少其一）；`parseWebSearchQueries` 先上限检查再按首现顺序去重；`Execute` 拆为单查询直通与 `executeMultiQuery`（并发 goroutine + `context.WithCancel`，共享链级预算，`WaitGroup` join）；合并 `mergeWebSearchRuns`：rank 轮转 + URL 首见去重 + count 封顶（置 `truncated`）；默认部分成功合并（失败查询写 `query_failures`，provider 错误以 `query:provider` 前缀去碰撞），`webSearch.strictMultiQuery=true` 时首个失败即中止并取消兄弟（DSH 语义）；metadata：`queries`/`merged_count`/`per_query_sources`/`provider_sources`/`query_failures`；质量门按合并结果重新评估。工具版本 1.3.0→1.4.0。测试：`web_search_merge_test.go` 6 组（解析矩阵、轮转合并/去重/封顶、部分成功合并、严格中止、单元素等价、取消 join）。注记：`### <query>` Answer 分节待答案型 provider 提供内容后启用（当前链无答案文本）。
+
 **问题**：单 query；工具描述要求模型自行拆分多调用（`web_search.go:125,92`），多意图场景往返成本高且链式单调用较慢。
 
 **目标**：schema 增加可选 `queries: []string`（上限 4，先上限检查再按首现顺序去重，对齐 DSH `search.ts:39-51`）；并发执行 + 轮转合并 + URL 去重 + count 封顶；**有意偏离 DSH 的首败中止**——AAR 优先韧性（部分成功合并，全部失败才失败）。
@@ -283,14 +285,14 @@ type WebSearchResult struct {
 //   2. 并发 ≤4（errgroup + context.WithCancel 派生批量 ctx）
 //   3. 每个查询独立跑 provider 链（复用 P2-1 链 + 既有质量门）
 //   4. 合并：rank 轮转（各查询同序位交错）→ URL 首见去重 → count 封顶
-//      → Answer 按 `### <query>` 分节
+//      → Answer 按 `### <query>` 分节（答案型 provider 落地后启用）
 //   5. 部分失败：失败查询写 provider_errors，成功者正常合并；
 //      全部失败才走 failureSearchResult（可选 strictMultiQuery 首次失败即中止）
 ```
 
 - `time_range`/`language`/域名过滤对每个子查询同参应用；
 - 取消：`ctx` 取消 → 派生批量 ctx 取消 → 所有子链的 HTTP 请求随之取消；`WaitGroup` 确保 join 后才返回（P3-2 细化）；
-- metadata：`queries`、`merged_count`、`per_query_sources`（每查询命中数）、`dropped_sources`（去重/截断计数）。
+- metadata（以落地为准）：`queries`、`merged_count`、`per_query_sources`（每查询入选数）、`provider_sources`、`query_failures`。
 
 **改动文件**：`web_search.go`（schema/执行/合并）、新增 `web_search_merge.go`（纯函数，便于表驱动测试）、测试。
 
@@ -563,7 +565,7 @@ type NativeToolCapabilities struct {
 | P1-3 | 429+Retry-After、failure_provider、无头 429 兼容 | `web_search_test.go` |
 | P2-1 | 注册表覆盖/未知 token 跳过；可用性与错误透传；请求选项回注 | `web_search_provider_test.go`（已落地）+ 6 个测试文件构造迁移 |
 | P2-2 | 类型映射（含 RSS 日期）、capSources 截断、`sources[]` 投影、格式防回归 | `web_search_result_test.go`（已落地）、`web_search_test.go` |
-| P2-3 | 轮转顺序/去重/封顶、部分失败、strict、单查询等价、取消 join | `web_search_merge_test.go`、`web_search_test.go` |
+| P2-3 | 轮转顺序/去重/封顶、部分失败、strict、单查询等价、取消 join | `web_search_merge_test.go`（已落地） |
 | P2-4 | 每 provider：请求/结果/错误映射、可用性、sandbox、key 轮换 | 新增 `web_search_api_*_test.go` |
 | P2-5 | 能力位解析（旧/新键）/链门控（off/prefer/force/allow）/请求与映射/严格模式/prefer 回退/force 结构化错误/沙箱/P2-5d 适配器事件 | `web_search_native_test.go`、`websearch_config_test.go`、`native_web_search_test.go`（agentconfig/modelcard）；P2-5d 待补 |
 | P3-1 | 前端 meta 防御解析/回退/徽标；e2e 卡片读取 | frontend 单测 + `e2e/workspace-chat.spec.ts` |

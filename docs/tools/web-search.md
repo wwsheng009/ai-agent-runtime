@@ -14,8 +14,9 @@
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `query` | string（必填） | 搜索关键词或问题；多意图请拆分为多次调用，每次聚焦一个目标 |
-| `count` | integer | 返回条数，默认 5、上限 10 |
+| `query` | string（与 `queries` 二选一） | 单条搜索关键词或问题 |
+| `queries` | string[]（与 `query` 二选一） | 1–4 条查询；并发执行并按轮转合并去重（多意图优先） |
+| `count` | integer | 返回条数上限，默认 5、上限 10（多查询时为合并后总上限） |
 | `time_range` | string | `day` / `week` / `month` / `year`；不支持的 provider 会被忽略并在 metadata 标记 `time_range_supported=false` |
 | `language` | string | `auto` / BCP-47 形态（如 `en`、`zh-CN`）；`auto` 按查询内 CJK 字符选择中文市场 |
 | `allowed_domains` | array 或逗号串 | 只保留这些域名（含子域）；与 `blocked_domains` 互斥 |
@@ -58,6 +59,14 @@ webSearch:
 - 按链序逐个后端尝试；**失败、空结果、过滤后空结果、低相关结果**都不结束链路，只有达到质量阈值（`tier=ok`）且有结果才立即返回；
 - 链结束后：返回得分最高的尝试（低质仍成功，附 `LOW_SEARCH_QUALITY` next_action）；全失败则返回结构化失败（错误码 + `failure_class` + `provider_errors`）；
 - **预算耗尽**：达到链级预算即停止换链，metadata 输出 `budget_exhausted=true`、`timed_out_provider=<name>`，错误码按超时（`NETWORK_TIMEOUT`）路由；所有结果都带 `budget_ms` / `elapsed_ms`。
+
+### 4.1 多查询合并（`queries`，P2-3）
+
+- 传入 `queries` 数组时：**先上限检查（≤4）再按首现顺序去重**；各查询并发执行（共享同一条链级预算），任一查询失败默认**不中止**其他查询；
+- 合并顺序：按 rank 轮转（query 顺序交错）→ URL 首见去重 → 受 `count` 封顶（超出置 `truncated`）；
+- 默认合并部分成功；`webSearch.strictMultiQuery=true` 时首个失败查询即中止整次调用并取消兄弟查询（DSH 语义）；
+- 合并 metadata：`queries`、`merged_count`、`per_query_sources`（每查询入选条数）、`provider_sources`（参与来源）、`query_failures`（失败查询→错误摘要，仅失败时）；
+- 单元素 `queries` 与 `query` 行为逐字节一致。
 
 ## 5. 原生搜索（provider/model 能力位）
 
@@ -104,7 +113,7 @@ webSearch:
 在回答中以 markdown 链接形式引用相关来源 URL。
 ```
 
-常用 metadata 键：`source`、`trust`、`quality`/`quality_score`/`quality_terms`、`providers_attempted`、`provider_errors`、`failure_provider`、`retry_after_ms`、`budget_ms`/`elapsed_ms`/`budget_exhausted`/`timed_out_provider`、`filtered_out`/`provider_count`、`time_range_supported`/`language_supported`、`match_count`。
+常用 metadata 键：`source`、`trust`、`quality`/`quality_score`/`quality_terms`、`providers_attempted`、`provider_errors`、`failure_provider`、`retry_after_ms`、`budget_ms`/`elapsed_ms`/`budget_exhausted`/`timed_out_provider`、`filtered_out`/`provider_count`、`time_range_supported`/`language_supported`、`match_count`；多查询另带 `queries`/`merged_count`/`per_query_sources`/`provider_sources`/`query_failures`。
 
 ## 8. 常见问题
 
@@ -116,5 +125,6 @@ webSearch:
 
 ## 9. 变更记录
 
+- **2026-10-16（1.4.0）**：多查询 `queries`（≤4）并发轮转合并、`strictMultiQuery` 严格模式与取消级联（P2-3）；provider seam 重构（P2-1，行为不变）。
 - **2026-10-16（1.3.0）**：信任标注 + 引用指令（P1-1）；链级/逐请求超时预算与预算 metadata（P1-2）；`failure_provider` + Retry-After 透传（P1-3）；provider/model 原生搜索（P2-5a/b/c）与本文件（P1-4）。
 - 1.2.0：域名过滤（`allowed_domains`/`blocked_domains`）、质量门、链式回退、`time_range`/`language`。

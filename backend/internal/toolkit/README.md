@@ -55,7 +55,7 @@ internal/toolkit/
 | multiedit | P3 | 单文件多处编辑；长内容请拆分为多次 multiedit 调用 |
 | todos | P3 | 结构化任务列表；长列表请拆分为多次 todos 调用 |
 | sourcegraph | P3 | 代码搜索；复杂查询请拆分为多次 sourcegraph 调用 |
-| web_search | P3 | 网络搜索（默认 Bing 英文版 www.bing.com → DuckDuckGo → cn.bing.com 最后兜底；空结果/低相关结果会继续回退；支持可选 `time_range=day/week/month/year` 与 `language=auto/en/zh-CN`；链序 env `WEB_SEARCH_PROVIDERS`，语言/市场 env `WEB_SEARCH_BING_SETLANG`/`WEB_SEARCH_BING_MKT`，质量阈值 env `WEB_SEARCH_MIN_QUALITY`，默认 en/en-US；超时预算 env `WEB_SEARCH_CHAIN_TIMEOUT_MS`（默认 60000，上限 120000）/`WEB_SEARCH_REQUEST_TIMEOUT_MS`（默认 30000）；原生搜索与完整配置见 `docs/tools/web-search.md`）；多意图查询请拆分为多次 web_search 调用 |
+| web_search | P3 | 网络搜索（默认 Bing 英文版 www.bing.com → DuckDuckGo → cn.bing.com 最后兜底；空结果/低相关结果会继续回退；支持可选 `time_range=day/week/month/year` 与 `language=auto/en/zh-CN`；多意图可用 `queries`（≤4 条）一次合并，或拆分为多次调用；链序 env `WEB_SEARCH_PROVIDERS`，语言/市场 env `WEB_SEARCH_BING_SETLANG`/`WEB_SEARCH_BING_MKT`，质量阈值 env `WEB_SEARCH_MIN_QUALITY`，默认 en/en-US；超时预算 env `WEB_SEARCH_CHAIN_TIMEOUT_MS`（默认 60000，上限 120000）/`WEB_SEARCH_REQUEST_TIMEOUT_MS`（默认 30000）；原生搜索、多查询与完整配置见 `docs/tools/web-search.md`） |
 
 ## 快速开始
 

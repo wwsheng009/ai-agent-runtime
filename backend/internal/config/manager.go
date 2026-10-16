@@ -685,6 +685,10 @@ type WebSearchConfig struct {
 	// RequestTimeoutMs caps one HTTP request (P1-2). 0 = built-in default
 	// (30000); the WEB_SEARCH_REQUEST_TIMEOUT_MS env var still wins.
 	RequestTimeoutMs int `yaml:"requestTimeoutMs,omitempty" json:"requestTimeoutMs,omitempty"`
+	// StrictMultiQuery selects the multi-query failure semantics (P2-3). false
+	// (default) merges partial successes; true aborts the whole call on the
+	// first failed query and cancels its siblings (DSH-style).
+	StrictMultiQuery bool `yaml:"strictMultiQuery,omitempty" json:"strictMultiQuery,omitempty"`
 }
 
 // NativeWebSearchConfig controls provider/model-native web search routing
