@@ -203,12 +203,12 @@ func (p *ToolExecutionPolicy) AdmitsAnyShellLikeTool() bool {
 }
 
 // deniedToolsReject is the deny-list membership test (see DeniesTool).
+// Identity-aware: a deny on any spelling of a tool ("read", "view",
+// "bash", "background_task", "task_kill", ...) blocks every other spelling of
+// the same canonical tool, so an alias deny cannot be bypassed by calling the
+// canonical name (or vice versa).
 func deniedToolsReject(list map[string]bool, toolName string) bool {
-	if list[toolName] {
-		return true
-	}
-	normalized := normalizeToolName(toolName)
-	if normalized != "" && normalized != toolName && list[normalized] {
+	if listNameMatches(list, toolName) {
 		return true
 	}
 	for pattern := range list {
@@ -220,7 +220,28 @@ func deniedToolsReject(list map[string]bool, toolName string) bool {
 }
 
 // allowedToolsAdmit is the allow-list membership test (see AllowsTool).
+// Identity-aware in the same way as deniedToolsReject: naming the tool by any
+// registered alias or retired spelling ("read" for view, "background_task"
+// for job_start) admits the tool, so a profile may use whichever spelling it
+// prefers and the model may call whichever spelling the surface exposes.
 func allowedToolsAdmit(list map[string]bool, toolName string) bool {
+	if listNameMatches(list, toolName) {
+		return true
+	}
+	for pattern := range list {
+		if toolregistry.MatchPattern(pattern, toolName) {
+			return true
+		}
+	}
+	return false
+}
+
+// listNameMatches reports whether the list names the same tool identity as
+// toolName: exact entry, spelling-normalized entry, the request folded to its
+// canonical name, or a list entry that folds to the same canonical identity
+// (Entry.Aliases and retired spellings included — Canonical resolves them all).
+// Wildcard patterns are handled by the callers via MatchPattern, not here.
+func listNameMatches(list map[string]bool, toolName string) bool {
 	if list[toolName] {
 		return true
 	}
@@ -228,8 +249,15 @@ func allowedToolsAdmit(list map[string]bool, toolName string) bool {
 	if normalized != "" && normalized != toolName && list[normalized] {
 		return true
 	}
-	for pattern := range list {
-		if toolregistry.MatchPattern(pattern, toolName) {
+	canonical := toolregistry.Canonical(toolName)
+	if canonical != "" && list[canonical] {
+		return true
+	}
+	if canonical == "" {
+		return false
+	}
+	for entry := range list {
+		if toolregistry.Canonical(entry) == canonical {
 			return true
 		}
 	}

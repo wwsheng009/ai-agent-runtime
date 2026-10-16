@@ -1154,3 +1154,61 @@ func TestToolExecutionPolicy_AllowToolCall_DeclaredOutputRoleUsesWriteChecks(t *
 		t.Fatal("declared output role must be validated as a write")
 	}
 }
+
+// 别名身份互通（2026-10-16）：read 是 view 的现役注册别名（同一工具身份），
+// 名单无论写哪个拼写都指同一个工具。本组测试钉死三向语义：
+//   1. allowlist 写 "read"（别名）⇒ 规范名 "view" 请求放行；
+//   2. allowlist 写 "view"（规范名）⇒ 别名 "read" 请求放行；
+//   3. deny 写任一拼写 ⇒ 同一工具的其它拼写同样被拒（别名 deny 不可被
+//      规范名调用绕过——修复前的字面匹配会漏掉这个方向）。
+func TestToolExecutionPolicy_AliasIdentitySharedAcrossAllowAndDeny(t *testing.T) {
+	// allowlist 写别名 read：view 请求放行（同一身份）。
+	byAlias := NewToolExecutionPolicy([]string{"read"}, false)
+	if err := byAlias.AllowTool("read"); err != nil {
+		t.Fatalf("allowlist 写别名 read 应放行 read: %v", err)
+	}
+	if err := byAlias.AllowTool("view"); err != nil {
+		t.Fatalf("allowlist 写别名 read 应放行规范名 view（同一工具身份）: %v", err)
+	}
+	if err := byAlias.AllowTool("grep"); err == nil {
+		t.Fatal("其它工具不受影响")
+	}
+
+	// allowlist 写规范名 view：别名 read 请求放行。
+	byCanonical := NewToolExecutionPolicy([]string{"view"}, false)
+	if err := byCanonical.AllowTool("view"); err != nil {
+		t.Fatalf("allowlist 写 view 应放行 view: %v", err)
+	}
+	if err := byCanonical.AllowTool("read"); err != nil {
+		t.Fatalf("allowlist 写 view 应放行别名 read（同一工具身份）: %v", err)
+	}
+
+	// deny 任一拼写 ⇒ 同一工具的其它拼写都被拒（deny 恒优先的身份口径）。
+	denyAlias := NewToolExecutionPolicy([]string{"*"}, false)
+	denyAlias.DeniedTools = map[string]bool{"read": true}
+	if err := denyAlias.AllowTool("read"); err == nil {
+		t.Fatal("deny read 应拦 read")
+	}
+	if err := denyAlias.AllowTool("view"); err == nil {
+		t.Fatal("deny read 应同样拦住规范名 view（别名 deny 不可被规范名绕过）")
+	}
+	denyCanonical := NewToolExecutionPolicy([]string{"*"}, false)
+	denyCanonical.DeniedTools = map[string]bool{"view": true}
+	if err := denyCanonical.AllowTool("view"); err == nil {
+		t.Fatal("deny view 应拦 view")
+	}
+	if err := denyCanonical.AllowTool("read"); err == nil {
+		t.Fatal("deny view 应同样拦住别名 read")
+	}
+
+	// 退役拼写（LegacyReplacement）同样参与身份折叠：background_task → job_start。
+	legacy := NewToolExecutionPolicy([]string{"background_task"}, false)
+	if err := legacy.AllowTool("job_start"); err != nil {
+		t.Fatalf("allowlist 写退役拼写 background_task 应放行 job_start: %v", err)
+	}
+	denyLegacy := NewToolExecutionPolicy([]string{"*"}, false)
+	denyLegacy.DeniedTools = map[string]bool{"task_kill": true}
+	if err := denyLegacy.AllowTool("job_cancel"); err == nil {
+		t.Fatal("deny 退役拼写 task_kill 应拦住 job_cancel")
+	}
+}
