@@ -19,6 +19,8 @@ func newAPITestTool(t *testing.T, chain string, env map[string]string, mutate fu
 	t.Setenv(webSearchProvidersEnv, chain)
 	t.Setenv(braveDefaultKeyEnv, "")
 	t.Setenv(tavilyDefaultKeyEnv, "")
+	t.Setenv(exaDefaultKeyEnv, "")
+	t.Setenv(perplexityDefaultKeyEnv, "")
 	for key, value := range env {
 		t.Setenv(key, value)
 	}
@@ -159,7 +161,7 @@ func TestTavilyProviderRequestAndMapping(t *testing.T) {
 }
 
 func TestWebSearchAPIProviderUnavailableYieldsStructuredError(t *testing.T) {
-	tool := newAPITestTool(t, "brave,tavily", nil, nil)
+	tool := newAPITestTool(t, "brave,tavily,exa,perplexity", nil, nil)
 	if len(tool.providers) != 0 {
 		t.Fatalf("providers = %d, want none without credentials", len(tool.providers))
 	}

@@ -21,7 +21,7 @@ func TestWebSearchOutputCarriesTrustNoticeAndCitation(t *testing.T) {
 		t.Fatalf("output must carry the citation instruction: %q", out)
 	}
 
-	empty := tool.successSearchResultWithCounts("q", nil, "bing", webSearchDomainFilter{}, 0, 0, 5)
+	empty := tool.successSearchResultWithCounts("q", nil, "bing", webSearchDomainFilter{}, 0, 0, 5, nil)
 	if empty.Metadata["trust"] != "untrusted" {
 		t.Fatalf("trust metadata missing: %#v", empty.Metadata)
 	}

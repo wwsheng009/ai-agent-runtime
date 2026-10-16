@@ -62,13 +62,16 @@ func (w *WebSearchTool) runChain(ctx context.Context, query string, count int, f
 			quality:     assessWebSearchQuality(query, kept),
 			filteredOut: dropped,
 			finalHost:   finalHost,
+			answer:      strings.TrimSpace(providerResult.Answer),
 		}
 		run.attempts = append(run.attempts, attempt)
 		currentIndex := len(run.attempts) - 1
 		if bestIndex < 0 || run.attempts[currentIndex].quality.Score > run.attempts[bestIndex].quality.Score {
 			bestIndex = currentIndex
 		}
-		if run.attempts[currentIndex].quality.Tier == "ok" && len(run.attempts[currentIndex].results) > 0 {
+		if run.attempts[currentIndex].answer != "" || (run.attempts[currentIndex].quality.Tier == "ok" && len(run.attempts[currentIndex].results) > 0) {
+			// 答案型后端（Perplexity）的答案即有效载荷：即使没有排序结果也
+			// 立即采用；抓取后端仍要求质量门过关且有结果。
 			selected := run.attempts[currentIndex]
 			run.attempt = &selected
 			return run
@@ -97,7 +100,11 @@ func (w *WebSearchTool) runChain(ctx context.Context, query string, count int, f
 // path did (success of the selected attempt, or a structured failure).
 func (w *WebSearchTool) finishSingleQuery(query string, count int, filter webSearchDomainFilter, options webSearchOptions, run webSearchChainRun, started time.Time) *toolkit.ToolResult {
 	if run.attempt != nil {
-		return w.stampBudgetMetadata(w.successSearchAttempt(query, *run.attempt, filter, run.attempts, run.failures, options, count), started, run.budgetExhausted, run.timedOutProvider)
+		var answers []webSearchAnswerSection
+		if run.attempt.answer != "" {
+			answers = append(answers, webSearchAnswerSection{query: run.query, answer: run.attempt.answer})
+		}
+		return w.stampBudgetMetadata(w.successSearchAttempt(query, *run.attempt, filter, run.attempts, run.failures, options, count, answers), started, run.budgetExhausted, run.timedOutProvider)
 	}
 	return w.stampBudgetMetadata(w.failureSearchResult(query, run.failures), started, run.budgetExhausted, run.timedOutProvider)
 }
@@ -187,7 +194,13 @@ func (w *WebSearchTool) executeMultiQuery(ctx context.Context, queries []string,
 		quality:     assessWebSearchQuality(strings.Join(queries, " "), merged),
 		filteredOut: 0,
 	}
-	result := w.successSearchAttempt(strings.Join(queries, " "), combined, filter, dedupeWebSearchAttempts(runs), mergedFailures, options, count)
+	var answers []webSearchAnswerSection
+	for _, run := range runs {
+		if run.attempt != nil && run.attempt.answer != "" {
+			answers = append(answers, webSearchAnswerSection{query: run.query, answer: run.attempt.answer})
+		}
+	}
+	result := w.successSearchAttempt(strings.Join(queries, " "), combined, filter, dedupeWebSearchAttempts(runs), mergedFailures, options, count, answers)
 	if result.Metadata == nil {
 		result.Metadata = map[string]interface{}{}
 	}

@@ -1,6 +1,6 @@
 # web_search 工具
 
-> 状态：已落地（工具版本 1.3.0，2026-10-16）
+> 状态：已落地（工具版本 1.6.0，2026-10-16）
 > 关联方案：`docs/plan/web-search-enhancement-plan-20261016.md`；对比分析：`docs/analysis/deepseek-harness-vs-aar-web-search-20261016.md`
 > 代码：`backend/internal/toolkit/tools/web_search.go`（链/诊断/格式化）、`web_search_native.go`（原生搜索）、`web_search_quality.go`（质量门）、`web_search_domains.go`（域名过滤）、`web_search_config.go`（超时解析）
 
@@ -28,7 +28,7 @@
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `WEB_SEARCH_PROVIDERS` | `bing,duckduckgo,bing_cn` | 链序（逗号分隔）；取值 `bing` / `duckduckgo` / `bing_cn` / `native` / `brave` / `tavily`；未知值忽略；空/全非法回退默认 |
+| `WEB_SEARCH_PROVIDERS` | `bing,duckduckgo,bing_cn` | 链序（逗号分隔）；取值 `bing` / `duckduckgo` / `bing_cn` / `native` / `brave` / `tavily` / `exa` / `perplexity`；未知值忽略；空/全非法回退默认 |
 | `WEB_SEARCH_BING_SETLANG` | `en` | Bing `setlang`（界面/内容语言）；非法回退默认 |
 | `WEB_SEARCH_BING_MKT` | `en-US` | Bing `mkt`（结果市场）；非法回退默认 |
 | `WEB_SEARCH_MIN_QUALITY` | `0.30` | 质量门阈值（query 词项覆盖率）；低于阈值触发换链 |
@@ -55,7 +55,8 @@ webSearch:
   api:                       # P2-4：官方 API provider（默认不入链；凭据存在且列入链序才参与）
     brave:  { apiKeyEnv: BRAVE_API_KEY, maxResults: 10 }    # 已落地
     tavily: { apiKeyEnv: TAVILY_API_KEY, maxResults: 10 }   # 已落地
-    # exa / perplexity：后续批次（当前会被忽略）
+    exa:        { apiKeyEnv: EXA_API_KEY, maxResults: 10 }                   # 已落地（神经检索）
+    perplexity: { apiKeyEnv: PERPLEXITY_API_KEY, model: sonar, maxResults: 10 }  # 已落地（答案型）
 ```
 
 ## 4. 链式检索与质量门
@@ -94,14 +95,15 @@ webSearch:
 
 **请求与结果**：`POST {baseURL}/messages`，body 携带 `tools:[{type:"web_search_20250305", name:"web_search", max_uses}]`；双认证头（`x-api-key` + `Authorization: Bearer`）；拒绝 HTTP 重定向；结果取 `web_search_tool_result` 块，摘要取 text 块 citations 的 `cited_text`（按 url 首见胜）、跨块去重、按 `count` 封顶；**严格模式**：无结果块即报错（不做 prose 兜底）。
 
-### 5.1 官方 API provider（Brave / Tavily，P2-4 首批）
+### 5.1 官方 API provider（Brave / Tavily / Exa / Perplexity，P2-4）
 
-- **启用条件**：链序（`WEB_SEARCH_PROVIDERS` / `webSearch.providers`）显式列出 `brave` / `tavily`，且凭据可解析（字面量 `apiKey` > `apiKeyEnv` > 默认环境变量 `BRAVE_API_KEY` / `TAVILY_API_KEY`）；默认链不含 API 后端，无凭据时链上静默跳过；
+- **启用条件**：链序（`WEB_SEARCH_PROVIDERS` / `webSearch.providers`）显式列出 `brave` / `tavily` / `exa` / `perplexity`，且凭据可解析（字面量 `apiKey` > `apiKeyEnv` > 默认环境变量 `BRAVE_API_KEY` / `TAVILY_API_KEY` / `EXA_API_KEY` / `PERPLEXITY_API_KEY`）；默认链不含 API 后端，无凭据时链上静默跳过；
 - **链序过滤后为空**（例如只列出未配置凭据的 API provider）→ 结构化失败 `SEARCH_PROVIDER_UNAVAILABLE`，附带修复指引；
 - **Brave**：`GET /res/v1/web/search`（`X-Subscription-Token`）；支持 `time_range`（freshness `pd/pw/pm/py`）与 `language`（`search_lang`）；`page_age` → `published_at`；`maxResults` 默认 10；
 - **Tavily**：`POST /search`（Bearer）；`content` → snippet、`published_date` → `published_at`；`time_range`/`language` 未映射（metadata 标记 `*_supported=false`）；`maxResults` 默认 10；
-- 两者统一走 `fetchWebSearchAPI`：sandbox `checkURL`、redirect 拒绝、状态错误映射（含 Retry-After）与 `failure_provider` 归属；
-- `exa` / `perplexity` 为后续批次（规划见方案 P2-4）。
+- **Exa**：`POST /search`（`x-api-key`）；请求 `contents.highlights`（+ 限长 `text` 兜底），首个 highlight → snippet、`text` 兜底 → snippet、`publishedDate` → `published_at`；`time_range`/`language` 未映射；`maxResults` 默认 10；
+- **Perplexity**（答案型）：`POST /chat/completions`（Bearer；`model` 默认 `sonar`，可经 `webSearch.api.perplexity.model` 覆盖）；`choices[0].message.content` 为答案，正文以 `### <query>` 分节渲染（多查询每查询一节）；来源优先 `search_results[]`（title/date），为空时回退 `citations[]`（仅 URL）；`time_range`/`language` 未映射；
+- 四者统一走 `fetchWebSearchAPI`：sandbox `checkURL`、redirect 拒绝、状态错误映射（含 Retry-After）与 `failure_provider` 归属；401/403 分类为 `API_UNAUTHORIZED`（`failure_class=auth`，不重试）。
 
 ## 6. 信任与安全
 
@@ -126,7 +128,9 @@ webSearch:
 在回答中以 markdown 链接形式引用相关来源 URL。
 ```
 
-常用 metadata 键：`source`、`trust`、`quality`/`quality_score`/`quality_terms`、`providers_attempted`、`provider_errors`、`failure_provider`、`retry_after_ms`、`budget_ms`/`elapsed_ms`/`budget_exhausted`/`timed_out_provider`、`filtered_out`/`provider_count`、`time_range_supported`/`language_supported`、`match_count`；多查询另带 `queries`/`merged_count`/`per_query_sources`/`provider_sources`/`query_failures`。
+答案型 provider（Perplexity）在来源列表前先输出 `### <query>` + 答案分节（多查询每查询一节）；无来源时省略来源列表与引用指令。
+
+常用 metadata 键：`source`、`trust`、`quality`/`quality_score`/`quality_terms`、`providers_attempted`、`provider_errors`、`failure_provider`、`retry_after_ms`、`budget_ms`/`elapsed_ms`/`budget_exhausted`/`timed_out_provider`、`filtered_out`/`provider_count`、`time_range_supported`/`language_supported`、`match_count`、`has_answer`/`answer_queries`（答案型后端）；多查询另带 `queries`/`merged_count`/`per_query_sources`/`provider_sources`/`query_failures`。
 
 ## 8. 常见问题
 
@@ -138,6 +142,7 @@ webSearch:
 
 ## 9. 变更记录
 
+- **2026-10-16（1.6.0）**：官方 API provider 第二批——Exa（神经检索；`highlights`→snippet、限长 `text` 兜底）与 Perplexity（答案型；`### <query>` 答案分节 + `search_results`/`citations` 来源）接入（P2-4）；401/403 → `API_UNAUTHORIZED`（`failure_class=auth`）分类补齐。
 - **2026-10-16（1.5.0）**：官方 API provider 首批——Brave / Tavily 接入（P2-4；凭据门控、默认不入链、空链结构化错误）。
 - **2026-10-16（1.4.0）**：多查询 `queries`（≤4）并发轮转合并、`strictMultiQuery` 严格模式与取消级联（P2-3）；provider seam 重构（P2-1，行为不变）。
 - **2026-10-16（1.3.0）**：信任标注 + 引用指令（P1-1）；链级/逐请求超时预算与预算 metadata（P1-2）；`failure_provider` + Retry-After 透传（P1-3）；provider/model 原生搜索（P2-5a/b/c）与本文件（P1-4）。

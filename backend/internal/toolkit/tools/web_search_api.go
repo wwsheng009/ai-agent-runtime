@@ -30,6 +30,9 @@ type webSearchAPIProviderConfig struct {
 	apiKey     string
 	baseURL    string
 	maxResults int
+	// model pins a chat-style backend's model id (P2-4 second batch:
+	// Perplexity); empty for rank-only backends.
+	model string
 }
 
 // available is a cheap local check (credential + endpoint), never network I/O.
@@ -84,6 +87,15 @@ func resolveWebSearchAPIProviderConfig(
 		maxResults = maxResultsFallback
 	}
 	return webSearchAPIProviderConfig{name: name, apiKey: apiKey, baseURL: baseURL, maxResults: maxResults}
+}
+
+// resolveWebSearchAPIModel resolves a chat-style provider's model id: literal
+// spec.Model > provider default (Perplexity: "sonar").
+func resolveWebSearchAPIModel(spec runtimecfg.WebSearchAPIProviderConfig, fallback string) string {
+	if model := strings.TrimSpace(spec.Model); model != "" {
+		return model
+	}
+	return fallback
 }
 
 // fetchWebSearchAPI performs one API-provider request through the tool's

@@ -14,7 +14,7 @@ func TestWebSearchResultCapAndSourcesMetadata(t *testing.T) {
 		{Title: "C", URL: "https://c.example/3", Snippet: "s3"},
 	}
 
-	capped := tool.successSearchResultWithCounts("q", results, "bing", webSearchDomainFilter{}, 3, 0, 2)
+	capped := tool.successSearchResultWithCounts("q", results, "bing", webSearchDomainFilter{}, 3, 0, 2, nil)
 	if capped.Metadata["truncated"] != true {
 		t.Fatalf("expected truncated metadata for over-returning provider: %#v", capped.Metadata)
 	}
@@ -32,7 +32,7 @@ func TestWebSearchResultCapAndSourcesMetadata(t *testing.T) {
 		t.Fatalf("rendered text must honor the count cap: %q", capped.Content)
 	}
 
-	uncapped := tool.successSearchResultWithCounts("q", results, "bing", webSearchDomainFilter{}, 3, 0, 5)
+	uncapped := tool.successSearchResultWithCounts("q", results, "bing", webSearchDomainFilter{}, 3, 0, 5, nil)
 	if _, present := uncapped.Metadata["truncated"]; present {
 		t.Fatalf("truncated must stay unset when the provider respects the cap: %#v", uncapped.Metadata)
 	}

@@ -24,9 +24,11 @@ type WebSearchRequest struct {
 
 // WebSearchProviderResult carries one provider attempt: the source tag recorded
 // in result metadata plus the scraped rows consumed by the quality gate and
-// domain filter.
+// domain filter. Answer carries provider-generated summary text for answer
+// backends (Perplexity, P2-4 second batch); empty for rank-based backends.
 type WebSearchProviderResult struct {
 	Source  string
+	Answer  string
 	Results []DuckDuckGoResult
 }
 
@@ -71,6 +73,40 @@ func (p webSearchProviderFunc) Search(ctx context.Context, req WebSearchRequest)
 	return WebSearchProviderResult{Source: source, Results: results}, nil
 }
 
+// webSearchAnswerFunc is the answer-bearing provider signature (P2-4 second
+// batch): answer backends return generated summary text next to their ranked
+// sources.
+type webSearchAnswerFunc func(ctx context.Context, query string, count int) (source, answer string, results []DuckDuckGoResult, err error)
+
+// webSearchAnswerProviderFunc adapts an answer-bearing search func into the
+// provider seam (same availability contract as webSearchProviderFunc).
+type webSearchAnswerProviderFunc struct {
+	name      string
+	search    webSearchAnswerFunc
+	available func() bool
+}
+
+// newWebSearchAnswerProvider builds a seam provider from one answer-bearing
+// search func.
+func newWebSearchAnswerProvider(name string, search webSearchAnswerFunc, available func() bool) WebSearchProvider {
+	return webSearchAnswerProviderFunc{name: name, search: search, available: available}
+}
+
+func (p webSearchAnswerProviderFunc) Name() string { return p.name }
+
+func (p webSearchAnswerProviderFunc) Available() bool {
+	return p.available == nil || p.available()
+}
+
+func (p webSearchAnswerProviderFunc) Search(ctx context.Context, req WebSearchRequest) (WebSearchProviderResult, error) {
+	ctx = withWebSearchOptions(ctx, webSearchOptions{timeRange: req.TimeRange, language: req.Language})
+	source, answer, results, err := p.search(ctx, req.Query, req.Count)
+	if err != nil {
+		return WebSearchProviderResult{}, err
+	}
+	return WebSearchProviderResult{Source: source, Answer: answer, Results: results}, nil
+}
+
 // webSearchProviderRegistry is the built-in construction table (P2-1). Adding a
 // backend is one entry here; the chain loop, gating, and Execute stay untouched.
 var webSearchProviderRegistry = map[string]func(tool *WebSearchTool) WebSearchProvider{
@@ -88,6 +124,12 @@ var webSearchProviderRegistry = map[string]func(tool *WebSearchTool) WebSearchPr
 	},
 	tavilyProviderName: func(tool *WebSearchTool) WebSearchProvider {
 		return newWebSearchProvider(tavilyProviderName, tool.searchTavilyProvider, func() bool { return tool.tavily.available() })
+	},
+	exaProviderName: func(tool *WebSearchTool) WebSearchProvider {
+		return newWebSearchProvider(exaProviderName, tool.searchExaProvider, func() bool { return tool.exa.available() })
+	},
+	perplexityProviderName: func(tool *WebSearchTool) WebSearchProvider {
+		return newWebSearchAnswerProvider(perplexityProviderName, tool.searchPerplexityProvider, func() bool { return tool.perplexity.available() })
 	},
 	webSearchNativeName: func(tool *WebSearchTool) WebSearchProvider {
 		return newWebSearchProvider(webSearchNativeName, tool.searchNativeProvider, tool.nativeAvailable)
