@@ -34,6 +34,7 @@ func chatProfileCompletionSubcommands() []chatSlashCompletionCandidate {
 		{Command: "save", Summary: "持久化默认 profile（--to session|workspace|config）", Group: group, AcceptsArgs: true},
 		{Command: "save-as", Summary: "从当前会话固化差分（不覆盖同名）", Group: group, AcceptsArgs: true},
 		{Command: "create", Summary: "按模板新建 profile（--template coding|full|review|minimal|docs）", Group: group, AcceptsArgs: true},
+		{Command: "seed", Summary: "补齐缺失的内置 profile（full 等；不覆盖已有内容）", Group: group, AcceptsArgs: true},
 		{Command: "duplicate", Summary: "复制 profile（不覆盖同名）", Group: group, AcceptsArgs: true},
 		{Command: "rename", Summary: "重命名 profile（同层；含配置引用改写）", Group: group, AcceptsArgs: true},
 		{Command: "move", Summary: "层级移动（--to user|project；同层拒绝）", Group: group, AcceptsArgs: true},

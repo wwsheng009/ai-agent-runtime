@@ -32,6 +32,7 @@ func chatProfileUsageText() string {
 		"  /profile reload                                    重新解析当前 profile（磁盘编辑后）",
 		"  /profile off                                       回到无 profile 基线（完整失效）",
 		"  /profile save [--to session|workspace|config] [--yes]   持久化默认 profile",
+		"  /profile seed [--force]                            补齐缺失的内置 profile（full 等；不覆盖已有）",
 		"  /profile create <name> [--template coding|full|review|minimal|docs] [--to user|project] [--force]",
 		"  /profile duplicate <ref> <name> [--to user|project]     复制（不覆盖同名）",
 		"  /profile save-as <name> [--to user|project]        从当前会话固化差分（D24；不覆盖同名）",
@@ -116,6 +117,12 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 		return commandTextResult(text), true
 	case "pick":
 		return chatProfilePickResult(session), true
+	case "seed":
+		text, err := chatProfileSeedLifecycleText(session, flags.Force)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
 	case "create":
 		if len(positional) == 0 {
 			return commandErrorResult(fmt.Errorf(
