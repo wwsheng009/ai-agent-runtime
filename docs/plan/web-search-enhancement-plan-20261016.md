@@ -38,6 +38,14 @@
 | Phase 2 | provider seam（P2-1）+ 结果归一（P2-2）+ 多查询（P2-3）+ API provider（P2-4）+ 原生搜索能力位接入（P2-5，provider/model 配置驱动） | 2–3 周 | 注册表/可用性/边界/合并/能力位与选择策略均有测试；无配置环境行为与现状一致 |
 | Phase 3 | 呈现层 meta 与前端卡片（P3-1）+ 取消编排（P3-2）+ 质量升级（P3-3）+ 缓存观察项（P3-4） | 按需 | 前端 e2e/单测无回归；观察项有评审结论 |
 
+> **落地进展（2026-10-16，Phase 1 已实施）**：
+> - **P1-1 信任标注**：`webSearchExternalContentNotice` 置顶 + `webSearchCitationInstruction` 尾行 + `trust=untrusted` metadata + 工具描述声明；工具版本 1.2.0→1.3.0；
+> - **P1-2 超时预算**：`WEB_SEARCH_CHAIN_TIMEOUT_MS`（默认 60000，上限 120000 钳制）/`WEB_SEARCH_REQUEST_TIMEOUT_MS`（默认 30000）+ runtime `webSearch.chainTimeoutMs/requestTimeoutMs`（env 优先）；`Execute` 以链级 `context.WithTimeout` 封顶并停止换链，`stampBudgetMetadata` 输出 `budget_ms/elapsed_ms/budget_exhausted/timed_out_provider`，预算耗尽合成超时失败（`NETWORK_TIMEOUT` 可路由）；
+> - **P1-3 错误归属与退避**：`webSearchStatusError` + `parseRetryAfter`（秒/HTTP-date，上限 300s）接入全部抓取后端与 native 适配器；失败 metadata 增 `failure_provider`/`retry_after_ms`，429 next_action 追加 Retry-After 等待提示；
+> - **P1-4 文档**：新增 `docs/tools/web-search.md`（参数/env/runtime 配置/链语义/质量门/原生搜索/信任安全/metadata/FAQ/变更记录），`toolkit/README.md` 工具表同步。
+>
+> 验证：`go test ./internal/toolkit/tools/ ./internal/config/` 全绿（新增 Phase 1 测试 5 组：信任标注、超时配置/钳制、链预算耗尽、Retry-After/失败归属、Retry-After 解析矩阵）。
+
 每个 Phase 结束跑 `go test ./backend/internal/toolkit/... ./backend/internal/tools/... ./backend/internal/toolregistry/... ./backend/internal/policy/...` + `go test ./backend/internal/agent/...`（引用面回归），Phase 3 加前端 `npm test`（frontend 工作区）。
 
 ---

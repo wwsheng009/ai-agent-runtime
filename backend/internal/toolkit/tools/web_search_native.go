@@ -348,7 +348,8 @@ func (w *WebSearchTool) callNativeSearch(ctx context.Context, target nativeSearc
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("原生搜索错误 (状态码 %d): %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		return nil, webSearchHTTPStatusError(resp.StatusCode, resp.Header,
+			fmt.Sprintf("原生搜索错误 (状态码 %d): %s", resp.StatusCode, strings.TrimSpace(string(payload))))
 	}
 
 	var parsed nativeAnthropicResponse

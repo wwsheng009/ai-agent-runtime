@@ -678,6 +678,13 @@ type WebSearchConfig struct {
 	// default chain ("bing,duckduckgo,bing_cn").
 	Providers string                `yaml:"providers,omitempty" json:"providers,omitempty"`
 	Native    NativeWebSearchConfig `yaml:"native" json:"native"`
+	// ChainTimeoutMs caps the whole fallback chain (P1-2). 0 = built-in
+	// default (60000); values above 120000 are clamped. The
+	// WEB_SEARCH_CHAIN_TIMEOUT_MS env var still wins when set.
+	ChainTimeoutMs int `yaml:"chainTimeoutMs,omitempty" json:"chainTimeoutMs,omitempty"`
+	// RequestTimeoutMs caps one HTTP request (P1-2). 0 = built-in default
+	// (30000); the WEB_SEARCH_REQUEST_TIMEOUT_MS env var still wins.
+	RequestTimeoutMs int `yaml:"requestTimeoutMs,omitempty" json:"requestTimeoutMs,omitempty"`
 }
 
 // NativeWebSearchConfig controls provider/model-native web search routing
@@ -911,6 +918,8 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 				APIVersion: "2023-06-01",
 				MaxTokens:  4096,
 			},
+			ChainTimeoutMs:   60000,
+			RequestTimeoutMs: 30000,
 		},
 		Performance: PerformanceConfig{
 			MaxConcurrency: 10,
