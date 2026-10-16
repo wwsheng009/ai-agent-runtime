@@ -1097,6 +1097,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/teams/reload", h.ReloadRuntimeTeams).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/validate", h.ValidateRuntimeConfig).Methods(http.MethodGet)
 
+	// 内置工具注册表目录（docs/tools/unified-tool-registry-plan.md §2.2-B）：
+	// 全量、无会话依赖，供前端 profile 编辑器渲染"可关闭组"清单与工具身份。
+	runtimeRouter.HandleFunc("/tools/catalog", h.ListBuiltinToolCatalog).Methods(http.MethodGet)
+
 	// Profiles（§10.5 + §23 G1-G3：list/get/put/validate/preview/default/apply
 	// + create/duplicate/rename/move/delete/references）。
 	h.registerProfileRoutes(runtimeRouter)

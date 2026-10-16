@@ -17,15 +17,17 @@ func TestDefaultCapabilityResolverTreatsReportTaskOutcomeAsReadOnly(t *testing.T
 	assert.Equal(t, []Capability{CapReadOnly}, caps)
 }
 
+// 规范名一律对齐**命名契约**（broker 暴露面口径 <domain>_<verb>）：legacy 拼写
+// 必须归一到契约名；policy 内部的旧口径（spawn_agent/list_agents/... ）已退役。
 func TestNormalizeToolNameMapsReportTaskOutcomeAliases(t *testing.T) {
-	assert.Equal(t, "report_task_outcome", normalizeToolName("reporttaskoutcome"))
-	assert.Equal(t, "report_task_outcome", normalizeToolName("report-task-outcome"))
-	assert.Equal(t, "spawn_agent", normalizeToolName("spawnagent"))
-	assert.Equal(t, "list_agents", normalizeToolName("listagents"))
-	assert.Equal(t, "send_message", normalizeToolName("sendmessage"))
-	assert.Equal(t, "followup_task", normalizeToolName("followuptask"))
-	assert.Equal(t, "wait_agent", normalizeToolName("wait-agent"))
-	assert.Equal(t, "read_agent_events", normalizeToolName("readagentevents"))
+	assert.Equal(t, "team_task_report", normalizeToolName("reporttaskoutcome"))
+	assert.Equal(t, "team_task_report", normalizeToolName("report-task-outcome"))
+	assert.Equal(t, "subagent_spawn", normalizeToolName("spawnagent"))
+	assert.Equal(t, "subagent_list", normalizeToolName("listagents"))
+	assert.Equal(t, "subagent_send", normalizeToolName("sendmessage"))
+	assert.Equal(t, "subagent_followup", normalizeToolName("followuptask"))
+	assert.Equal(t, "subagent_wait", normalizeToolName("wait-agent"))
+	assert.Equal(t, "subagent_events", normalizeToolName("readagentevents"))
 }
 
 func TestDefaultCapabilityResolverSeparatesAgentManagementFromObservation(t *testing.T) {

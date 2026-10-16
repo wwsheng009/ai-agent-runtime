@@ -511,21 +511,62 @@ func (h *Handler) ListSessionRuntimeTools(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	session := h.sessionByID(r.Context(), sessionID)
 	tools := []runtimetypes.ToolDefinition{}
 	if !h.sessionRuntimeToolsDisabled(r.Context(), sessionID) {
 		tools = h.sessionRuntimeToolDefinitions(r.Context(), sessionID)
 	}
+	// §2.2-A：观测 payload 由共享构建点补齐 metadata{}/groups[]/filtered[]
+	// （可加字段，tools/count/source/session_id 语义与顺序不变）。
+	// frozen/live 两条路取回的目录已带 surface_source（live 路已按真实 broker 账本
+	// 装配，冻结面是请求前缀快照），这里只补 registry 元数据与 groups[]/filtered[]。
+	//
+	// R1（已知限制，P0 明确接受）：此处传入的是空账本。第 3 条回退路
+	// （sessionRuntimeToolDefinitions：无 runtime config 时退回 MCP+goal 旧口径）
+	// 的定义若不带 surface_source，Ledger{}.Classify 会把它们默认判为 core。该路只在
+	// 降级宿主触发，其面仍是宿主真实携带的 MCP+goal 面（名单与数量不失真），退化的
+	// 只是非 MCP 条目的来源标签——且该默认行为已被 toolsurface.TestClassifyWithoutBrokerKeepsCore
+	// 钉死。**不要**在此处手拼 CapabilityTools 名单来"修好"它：那会复活本战役要消灭的
+	// 手抄表漂移；正解是 P1 把分类事实收敛到 internal/toolregistry 后按 registry 补标。
+	observation := toolsurface.Enrich(tools, toolsurface.Ledger{}, sessionRuntimeFilteredTools(session))
 	payload := map[string]interface{}{
 		"session_id": sessionID,
-		"tools":      tools,
-		"count":      len(tools),
+		"tools":      observation.Tools,
+		"count":      len(observation.Tools),
 		"source":     "runtime_server",
+		"groups":     observation.Groups,
+		"filtered":   observation.Filtered,
 	}
 	// 会话级 MCP 覆盖随工具面回传：前端据此标注"本会话停用"与恢复入口。
-	if disabled := sessionMCPDisabledNames(h.sessionByID(r.Context(), sessionID)); len(disabled) > 0 {
+	if disabled := sessionMCPDisabledNames(session); len(disabled) > 0 {
 		payload["mcp_session"] = map[string]interface{}{"disabled": disabled}
 	}
 	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// sessionRuntimeFilteredTools 把本会话已有的裁剪事实翻译成 filtered[]（§2.2-A）。
+//
+// P0 只落地有单一事实来源的 mcp_disabled：会话级 MCP 停用名单（sessionMCPDisabledNames
+// 与 sessionScopedMCPManager 的过滤读的是同一份输入），名字口径与 Ledger.Classify 的
+// MCP 来源一致（mcp:<server>）。profile_deny / group_disabled / host_read_only 分别在
+// profile 投影、disabled_groups（P3）、宿主只读挂载落地时补进来——这里不新增判定点。
+func sessionRuntimeFilteredTools(session *chat.Session) []toolsurface.FilteredTool {
+	disabled := sessionMCPDisabledNames(session)
+	if len(disabled) == 0 {
+		return nil
+	}
+	filtered := make([]toolsurface.FilteredTool, 0, len(disabled))
+	for _, server := range disabled {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			continue
+		}
+		filtered = append(filtered, toolsurface.FilteredTool{
+			Name:   "mcp:" + server,
+			Reason: toolsurface.FilterMCPDisabled,
+		})
+	}
+	return filtered
 }
 
 // sessionRuntimeToolDefinitions 返回会话的工具面观测。

@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -136,7 +137,7 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		return fmt.Errorf("tool %s: %w", toolName, err)
 	}
 	if p.ReadOnly {
-		if normalizedToolName == "background_task" || normalizedToolName == "job_start" || normalizedToolName == "task_kill" || normalizedToolName == "job_cancel" || normalizedToolName == "task_monitor" || normalizedToolName == "job_monitor" || normalizedToolName == "task_control" || normalizedToolName == "job_control" || normalizedToolName == "write_stdin" || normalizedToolName == "task_input" || normalizedToolName == "job_input" {
+		if normalizedToolName == "job_start" || normalizedToolName == "job_cancel" || normalizedToolName == "job_monitor" || normalizedToolName == "job_control" || normalizedToolName == "job_input" {
 			return fmt.Errorf("read-only policy blocks background command execution: %s", toolName)
 		}
 		if IsWriteLikeToolName(toolName) {
@@ -155,27 +156,10 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 // allowlist gates so a narrow --allow-tool / profile allowlist cannot brick the
 // agent control plane. Explicit DeniedTools, capability scope, and read-only
 // still apply.
+//
+// 名单真源已迁至 internal/toolregistry（Entry.Essential）；本函数只做转发。
 func IsRuntimeOwnedEssentialTool(toolName string) bool {
-	switch normalizeToolName(toolName) {
-	case "search_tool",
-		"ask_user_question",
-		"plan_enter", "plan_exit", "plan_review",
-		"todos", "get_goal", "read_goal", "update_goal",
-		"background_task", "job_start", "task_output", "job_output", "job_list", "job_search",
-		"spawn_agent", "spawn_subagents", "spawn_team",
-		"list_agents", "wait_agent", "read_agent_events",
-		"send_message", "send_input", "followup_task",
-		"close_agent", "resume_agent",
-		"apply_agent_worktree", "discard_agent_worktree",
-		"resolve_agent_approval",
-		"wait_team", "send_team_message",
-		"read_mailbox_digest", "read_task_spec", "read_task_context",
-		"report_task_outcome", "block_current_task",
-		"supervision_snapshot", "supervision_descendants", "read_agent_result", "subagent_status", "subagent_inspect_task", "subagent_ack_lifecycle", "subagent_control", "ack_lifecycle", "control_descendant":
-		return true
-	default:
-		return false
-	}
+	return toolregistry.IsEssential(toolName)
 }
 
 func runtimeOwnedEssentialExplicitlyDenied(deniedTools map[string]bool, normalizedToolName string) bool {
@@ -560,13 +544,11 @@ func (p *ToolExecutionPolicy) DeriveChildForTask(allowedTools []string, readOnly
 // Keep this list independent of the tool broker package so policy can enforce
 // the boundary on both built-in and broker-provided control-plane tools
 // without introducing an import cycle.
+//
+// 名单真源已迁至 internal/toolregistry（Entry.Delegation）；本函数只做转发。
+// toolregistry 是不依赖 policy 的叶子包，故"独立于 tool broker"这一性质不变。
 func IsDelegationToolName(toolName string) bool {
-	switch normalizeToolName(toolName) {
-	case "spawn_agent", "spawn_subagents", "spawn_team":
-		return true
-	default:
-		return false
-	}
+	return toolregistry.IsDelegation(toolName)
 }
 
 // AllowedToolNames returns sorted allowed tool names.
@@ -586,28 +568,19 @@ func (p *ToolExecutionPolicy) AllowedToolNames() []string {
 }
 
 // IsWriteLikeToolName reports whether a tool name implies mutation.
+//
+// 已登记工具走注册表事实（Entry.WriteLike），未登记名字（MCP / 第三方）回退到
+// 原有子串启发式；两条路径都在 toolregistry 内，判定结果与迁移前逐字节一致。
 func IsWriteLikeToolName(toolName string) bool {
-	lower := strings.ToLower(toolName)
-	for _, marker := range []string{"write", "edit", "patch", "apply", "delete", "remove", "rename", "move", "download"} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return toolregistry.IsWriteLike(toolName)
 }
 
 // IsShellLikeToolName reports whether a tool name likely executes shell commands.
+//
+// 同 IsWriteLikeToolName：注册表优先，未登记回退子串启发式（含 TrimSpace
+// 与空串短路）。
 func IsShellLikeToolName(toolName string) bool {
-	lower := strings.ToLower(strings.TrimSpace(toolName))
-	if lower == "" {
-		return false
-	}
-	for _, marker := range []string{"shell", "bash", "exec"} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return toolregistry.IsShellLike(toolName)
 }
 
 // policyMutationHintArgKeys lists argument names that unambiguously announce an

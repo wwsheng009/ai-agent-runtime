@@ -81,46 +81,51 @@ func TestAdvertisedToolNamesFollowNamingContract(t *testing.T) {
 	}
 }
 
+// legacyToolAliases is the authoritative legacy→canonical table for the B1–B4
+// renames. toolregistry_contract_test.go consumes it for the reverse direction
+// (every legacy spelling must still resolve to a registered tool), so the two
+// naming tables cannot drift apart again.
+var legacyToolAliases = map[string]string{
+	// B1 job family.
+	"background_task": ToolJobStart,
+	"task_output":     ToolJobOutput,
+	"task_kill":       ToolJobCancel,
+	"task_monitor":    ToolJobMonitor,
+	"task_control":    ToolJobControl,
+	"write_stdin":     ToolJobInput,
+	"task_input":      ToolJobInput,
+	// B2 team family.
+	"spawn_team":          ToolTeamSpawn,
+	"wait_team":           ToolTeamWait,
+	"send_team_message":   ToolTeamSend,
+	"read_mailbox_digest": ToolTeamMailbox,
+	"read_task_spec":      ToolTeamTaskSpec,
+	"read_task_context":   ToolTeamTaskContext,
+	"report_task_outcome": ToolTeamTaskReport,
+	"block_current_task":  ToolTeamTaskBlock,
+	// B3 subagent family.
+	"spawn_agent":            ToolSubagentSpawn,
+	"list_agents":            ToolSubagentList,
+	"send_message":           ToolSubagentSend,
+	"followup_task":          ToolSubagentFollowup,
+	"send_input":             ToolSubagentInput,
+	"resolve_agent_approval": ToolSubagentApprove,
+	"wait_agent":             ToolSubagentWait,
+	"read_agent_events":      ToolSubagentEvents,
+	"close_agent":            ToolSubagentClose,
+	"resume_agent":           ToolSubagentResume,
+	"apply_agent_worktree":   ToolSubagentApplyWorktree,
+	"discard_agent_worktree": ToolSubagentDiscardWorktree,
+	// B4 plan family.
+	"enter_plan_mode": ToolPlanEnter,
+	"exit_plan_mode":  ToolPlanExit,
+}
+
 // TestLegacyToolAliasesStayCallable pins the migration invariant: every legacy
 // spelling renamed in B1–B4 must still normalize onto its canonical constant,
 // while the advertised surface carries only the canonical name.
 func TestLegacyToolAliasesStayCallable(t *testing.T) {
-	legacyAliases := map[string]string{
-		// B1 job family.
-		"background_task": ToolJobStart,
-		"task_output":     ToolJobOutput,
-		"task_kill":       ToolJobCancel,
-		"task_monitor":    ToolJobMonitor,
-		"task_control":    ToolJobControl,
-		"write_stdin":     ToolJobInput,
-		"task_input":      ToolJobInput,
-		// B2 team family.
-		"spawn_team":          ToolTeamSpawn,
-		"wait_team":           ToolTeamWait,
-		"send_team_message":   ToolTeamSend,
-		"read_mailbox_digest": ToolTeamMailbox,
-		"read_task_spec":      ToolTeamTaskSpec,
-		"read_task_context":   ToolTeamTaskContext,
-		"report_task_outcome": ToolTeamTaskReport,
-		"block_current_task":  ToolTeamTaskBlock,
-		// B3 subagent family.
-		"spawn_agent":            ToolSubagentSpawn,
-		"list_agents":            ToolSubagentList,
-		"send_message":           ToolSubagentSend,
-		"followup_task":          ToolSubagentFollowup,
-		"send_input":             ToolSubagentInput,
-		"resolve_agent_approval": ToolSubagentApprove,
-		"wait_agent":             ToolSubagentWait,
-		"read_agent_events":      ToolSubagentEvents,
-		"close_agent":            ToolSubagentClose,
-		"resume_agent":           ToolSubagentResume,
-		"apply_agent_worktree":   ToolSubagentApplyWorktree,
-		"discard_agent_worktree": ToolSubagentDiscardWorktree,
-		// B4 plan family.
-		"enter_plan_mode": ToolPlanEnter,
-		"exit_plan_mode":  ToolPlanExit,
-	}
-	for legacy, canonical := range legacyAliases {
+	for legacy, canonical := range legacyToolAliases {
 		if got := normalizeToolName(legacy); got != canonical {
 			t.Fatalf("legacy alias %q must normalize to %q, got %q", legacy, canonical, got)
 		}
@@ -153,16 +158,11 @@ func TestAdvertisedSurfaceCarriesOnlyCanonicalNames(t *testing.T) {
 
 // TestCanonicalFamilyRoundTrip asserts every canonical constant is its own
 // fixed point in normalizeToolName (no accidental shadowing by a later case).
+//
+// 语料是**派生的**：直接遍历 broker 的规范名真源表 `brokerToolCanonicalNames`，
+// 故新增 broker 工具时自动纳入（此前这里另抄了一份 35 个常量的名单）。
 func TestCanonicalFamilyRoundTrip(t *testing.T) {
-	canonical := []string{
-		ToolJobStart, ToolJobOutput, ToolJobCancel, ToolJobMonitor, ToolJobControl, ToolJobInput, ToolJobList, ToolJobSearch,
-		ToolScheduleCreate, ToolScheduleList, ToolScheduleUpdate, ToolScheduleDelete,
-		ToolTeamSpawn, ToolTeamWait, ToolTeamSend, ToolTeamMailbox, ToolTeamTaskSpec, ToolTeamTaskContext, ToolTeamTaskReport, ToolTeamTaskBlock,
-		ToolSubagentSpawn, ToolSubagentList, ToolSubagentSend, ToolSubagentFollowup, ToolSubagentInput, ToolSubagentApprove,
-		ToolSubagentWait, ToolSubagentEvents, ToolSubagentClose, ToolSubagentResume, ToolSubagentApplyWorktree, ToolSubagentDiscardWorktree,
-		ToolPlanEnter, ToolPlanExit, ToolPlanReview,
-	}
-	for _, name := range canonical {
+	for _, name := range brokerToolCanonicalNames {
 		if got := normalizeToolName(name); got != name {
 			t.Fatalf("canonical name %q must be a normalizeToolName fixed point, got %q", name, got)
 		}

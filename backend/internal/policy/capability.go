@@ -2,6 +2,8 @@ package policy
 
 import (
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // Capability describes an abstract resource capability required by a tool.
@@ -88,7 +90,10 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 	} else {
 		caps = append(caps, CapReadOnly)
 	}
-	if strings.Contains(toolName, "bash") || strings.Contains(toolName, "shell") || strings.Contains(toolName, "exec") {
+	// shell 判定与 IsWriteLikeToolName 同源：注册表事实优先，未登记名字回退
+	// 子串启发式（含 TrimSpace/小写归一）。此前这里是手写的三段 Contains，
+	// 漏掉了 TrimSpace 与小写，也就成了真源之外的第二份启发式。
+	if IsShellLikeToolName(toolName) {
 		caps = append(caps, CapExecShell)
 	}
 	if strings.Contains(toolName, "fetch") || strings.Contains(toolName, "http") || strings.Contains(toolName, "web") || strings.Contains(toolName, "download") || strings.Contains(toolName, "sourcegraph") || strings.Contains(toolName, "search") {
@@ -123,36 +128,43 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 	case "plan_enter", "plan_exit":
 		// Control tools usable while already in plan mode (read-only + ask_user).
 		return []Capability{CapReadOnly, CapAskUser}, true
-	case "background_task", "job_start":
+	case "job_start":
 		return []Capability{CapBackgroundTask}, true
-	case "task_kill", "task_control", "job_cancel", "job_control":
+	case "job_cancel", "job_control":
 		// 终止后台进程与启动它同级：都要 background_task 能力，并在
 		// accept_edits/dont_ask 等模式下走 ask/deny。
 		return []Capability{CapBackgroundTask}, true
-	case "write_stdin", "task_input", "job_input":
+	case "job_input":
 		// Driving a running session's stdin is the same authority as starting
 		// it: a capability scope that allows background_task also allows
-		// write_stdin, and a read-only scope blocks it (2026-10-11).
+		// job_input, and a read-only scope blocks it (2026-10-11).
 		return []Capability{CapBackgroundTask}, true
-	case "task_monitor", "job_monitor":
+	case "job_monitor":
 		// 巡检本身只读，但 max_duration_ms 能终止进程，故与 background_task
 		// 同级授权（宁可多问一次，不给只读通道开后门）。
 		return []Capability{CapBackgroundTask}, true
-	case "task_output", "job_output", "job_list", "job_search":
+	case "job_output", "job_list", "job_search":
 		return []Capability{CapReadOnly}, true
-	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
+	case "spawn_subagents":
+		// agent 侧注册的批量委派入口（agent.SpawnSubagentsToolName），与
+		// subagent_spawn / team_spawn 是同一授权族，必须同级登记。它此前既没有
+		// taxonomy 行、也不在本表，解析落到名字启发式只得到 read_only ⇒
+		// `disabled_capabilities: [agent_management]` 关得住两个兄弟入口，却关不住
+		// 它。这正是本函数头注释里 ack_lifecycle 那类"表外漏项 = 门控失效"。
 		return []Capability{CapReadOnly, CapAgentManagement}, true
-	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
+	case "subagent_spawn", "subagent_send", "subagent_followup", "subagent_input", "subagent_close", "subagent_resume", "subagent_approve", "team_spawn", "team_send":
+		return []Capability{CapReadOnly, CapAgentManagement}, true
+	case "subagent_list", "subagent_wait", "subagent_events", "team_wait", "team_mailbox", "team_task_spec", "team_task_context", "team_task_report", "team_task_block":
 		return []Capability{CapReadOnly}, true
 	case "supervision_snapshot", "supervision_descendants", "read_agent_result", "subagent_status", "subagent_inspect_task":
 		// Observation-only supervision reads: no durable write, so read_only is
 		// enough and a read-only session may still inspect its own scope.
 		return []Capability{CapReadOnly}, true
-	case "subagent_ack_lifecycle", "subagent_control", "ack_lifecycle", "control_descendant":
+	case "subagent_ack_lifecycle", "subagent_control":
 		// Writes to the durable supervision control plane: audit + CAS still
 		// apply, and they are never satisfied by a read-only session.
 		return []Capability{CapReadOnly, CapAgentManagement}, true
-	case "apply_agent_worktree", "discard_agent_worktree":
+	case "subagent_apply_worktree", "subagent_discard_worktree":
 		// Landing (or dropping) an isolated child's worktree mutates the main
 		// repository and the child's lifecycle: a control-plane write, not a
 		// plain filesystem write. A capability-scoped policy must grant both
@@ -181,83 +193,22 @@ func dedupeCapabilities(values []Capability) []Capability {
 	return out
 }
 
+// normalizeToolName 把任意工具名拼写归一到规范名。
+//
+// 归一表（含 camelCase / 旧拼写 / 退役名替代）的唯一真源是
+// internal/toolregistry.Normalize；本函数只做转发，供包内既有调用点使用。
+// 保留包内名字是为了不让 30+ 处调用点在本轮收敛里一起变形，从而让
+// "policy 是否仍与真源一致"这件事保持可逐字节核对。
 func normalizeToolName(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
-	name = strings.ReplaceAll(name, "-", "_")
-	switch name {
-	case "askuserquestion":
-		return "ask_user_question"
-	case "enterplanmode":
-		return "enter_plan_mode"
-	case "exitplanmode":
-		return "exit_plan_mode"
-	case "backgroundtask", "jobstart", "job_start":
-		return "background_task"
-	case "joboutput", "job_output", "taskoutput":
-		return "task_output"
-	case "jobcancel", "job_cancel", "taskkill":
-		return "task_kill"
-	case "jobmonitor", "job_monitor", "taskmonitor":
-		return "task_monitor"
-	case "jobcontrol", "job_control", "taskcontrol":
-		return "task_control"
-	case "jobinput", "job_input", "writestdin", "taskinput", "write_stdin", "task_input":
-		return "write_stdin"
-	case "spawnagent":
-		return "spawn_agent"
-	case "listagents":
-		return "list_agents"
-	case "sendmessage":
-		return "send_message"
-	case "followuptask":
-		return "followup_task"
-	case "sendinput":
-		return "send_input"
-	case "waitagent":
-		return "wait_agent"
-	case "readagentevents":
-		return "read_agent_events"
-	case "closeagent":
-		return "close_agent"
-	case "resumeagent":
-		return "resume_agent"
-	case "resolveagentapproval":
-		return "resolve_agent_approval"
-	case "spawnteam":
-		return "spawn_team"
-	case "waitteam":
-		return "wait_team"
-	case "sendteammessage":
-		return "send_team_message"
-	case "readmailboxdigest":
-		return "read_mailbox_digest"
-	case "readtaskspec":
-		return "read_task_spec"
-	case "readtaskcontext":
-		return "read_task_context"
-	case "reporttaskoutcome":
-		return "report_task_outcome"
-	case "blockcurrenttask":
-		return "block_current_task"
-	case "readagentresult", "read_agent_result", "agentresult":
-		return "read_agent_result"
-	case "supervisionsnapshot":
-		return "supervision_snapshot"
-	case "supervisiondescendants":
-		return "supervision_descendants"
-	case "subagentstatus", "agentstatus", "agent_status":
-		return "subagent_status"
-	case "subagentinspecttask", "subagentinspect", "subagent_inspect", "inspecttask":
-		return "subagent_inspect_task"
-	case "acklifecycle", "ack_lifecycle":
-		return "subagent_ack_lifecycle"
-	case "subagentacklifecycle":
-		return "subagent_ack_lifecycle"
-	case "controldescendant", "control_descendant":
-		return "subagent_control"
-	case "subagentcontrol":
-		return "subagent_control"
-	default:
-		return name
-	}
+	return toolregistry.Normalize(name)
+}
+
+// canonicalToolName 归一到**规范名**：在拼写归一之上再折叠别名与退役名
+// （read→view、rg→grep、bash/execute_shell_command→shell、spawn_agent→subagent_spawn）。
+//
+// 与 normalizeToolName 的分工：需要回答"这个名字属于哪个工具"时用本函数；
+// 只做拼写规范化（例如 taxonomy 行自洽性检查）时用 normalizeToolName。
+// 两者都转发到 internal/toolregistry，policy 不再自持任何名字表。
+func canonicalToolName(name string) string {
+	return toolregistry.Canonical(name)
 }

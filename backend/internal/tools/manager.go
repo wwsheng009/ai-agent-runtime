@@ -24,6 +24,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 )
@@ -56,14 +57,16 @@ type Manager struct {
 
 const toolkitMCPName = "toolkit"
 
-var localToolkitPriorityTools = map[string]struct{}{
-	"ls":   {},
-	"glob": {},
-	"grep": {},
-	"rg":   {},
-	"view": {},
-	"read": {},
-}
+// localToolkitPriorityTools 是"本地 toolkit 优先"的读取类工具集合
+// （ls/glob/grep/view 及其现役别名）：拼写表由注册表展开，新增别名不必改这里。
+var localToolkitPriorityTools = func() map[string]struct{} {
+	names := toolregistry.CallableNames("ls", "glob", "grep", "view")
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}()
 
 // NewDefaultManager registers the built-in toolkit tools and merges MCP tools.
 func NewDefaultManager(mcp manager.Manager) *Manager {
@@ -501,6 +504,108 @@ func canonicalManagedToolName(name string) string {
 	return strings.TrimSpace(name)
 }
 
+// builtinToolkitRegistration 是 toolkit 内置工具的一条构造行（P2 收敛点）。
+//
+// 职责边界：本表回答"**怎么构造**"（构造参数只有宿主知道，如 runtimeConfig），
+// toolregistry.Entry.ToolkitBuiltin 回答"**有哪些**"。两侧成员集合由
+// builtin_registry_contract_test.go 双向断言，避免两种漂移：
+// "注册表登记了却没人注册"（工具对模型不可见）与
+// "注册了却不在注册表"（落回启发式判定，正是 P1 修掉的病类）。
+//
+// Condition 为 nil 表示无条件注册；非 nil 表示运行期条件（例：图像工具需要
+// 可用的 images_generations provider）。
+//
+// 别名条目（bash / execute_shell_command / read / rg）各自持有自己的 schema 与
+// 描述，必须作为独立实例注册，否则模型以别名发起调用会得到 "tool not found"。
+// image_generate 是例外：它在派发期由 canonicalManagedToolName 归一到
+// openai_image_generate，因此**不**需要（也不应）有独立实例。
+type builtinToolkitRegistration struct {
+	// Canonical 是该构造行归属的注册表条目**规范名**（T6 对账键）。
+	Canonical string
+	// Condition 为 nil 表示无条件注册。
+	Condition func(*runtimecfg.RuntimeConfig) bool
+	// New 按宿主配置构造工具实例。
+	New func(*runtimecfg.RuntimeConfig) toolkit.Tool
+}
+
+// builtinToolkitRegistrations 是内置 toolkit 工具的构造表（顺序不承载语义）。
+//
+// 重复注册被忽略（`register` 吞掉 registry 的报错，沿用既有行为）。
+var builtinToolkitRegistrations = []builtinToolkitRegistration{
+	// shell 是首选的 Codex 对齐面；bash 与 execute_shell_command 是执行语义相同
+	// 的兼容别名（含"非零退出码按内容结果返回"）。
+	{Canonical: "shell", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewShellTool() }},
+	{Canonical: "shell", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewBashTool() }},
+	{Canonical: "shell", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewExecuteShellCommandTool() }},
+	{Canonical: "aicli_exec", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewAICLIExecTool() }},
+	{Canonical: "apply_patch", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewApplyPatchTool() }},
+	// read 是 view 的兼容别名（同一 schema/执行实现）：注册它让偏好 `read` 这个
+	// 习惯名的模型调用落到 view，而不是 "tool not found"。模型面仍只列出 view
+	// （见 agent.optimizeModelToolSurface 的读取面折叠）。
+	{Canonical: "view", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewViewTool() }},
+	{Canonical: "view", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewReadTool() }},
+	{Canonical: "edit", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewEditTool() }},
+	{Canonical: "write", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewWriteTool() }},
+	{Canonical: "append_write", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewAppendWriteTool() }},
+	{Canonical: "glob", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewGlobTool() }},
+	// rg 是 grep 的兼容别名（同一 schema/执行实现）：注册它让以 shell 习惯名 `rg`
+	// 发起的工具调用落到 grep，而不是 "tool not found"。模型面仍只列出 grep
+	// （见 agent.optimizeModelToolSurface 的搜索面折叠）。
+	{Canonical: "grep", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewGrepTool() }},
+	{Canonical: "grep", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewRGTool() }},
+	{Canonical: "ls", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewLsTool() }},
+	{Canonical: "download", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewDownloadTool() }},
+	{Canonical: "fetch", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewFetchTool() }},
+	{Canonical: "multiedit", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMultieditTool() }},
+	{Canonical: "todos", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewTodosTool() }},
+	{Canonical: "artifact_read", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewArtifactReadTool() }},
+	{Canonical: "sourcegraph", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewSourcegraphTool() }},
+	{Canonical: "web_search", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewWebSearchTool() }},
+	// 图像工具按 provider 可用性条件注册。
+	{
+		Canonical: "openai_image_generate",
+		Condition: shouldRegisterOpenAIImageGenerateTool,
+		New:       func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewOpenAIImageGenerateTool(cfg) },
+	},
+}
+
+// codeToolRegistration 是 code.* 构造表的一行（P2 slice 3 收敛点）。
+//
+// 与 builtinToolkitRegistration 同构：本表回答"怎么造 + 属哪一类"，注册表
+// （toolregistry.Entry.CodeTool）回答"有哪些"。两侧成员集合由
+// builtin_registry_contract_test.go 双向钉死。
+//
+// 用构造函数而不是共享实例：configure 会往实例上写 sandbox / basePath /
+// codeIndexResolver（宿主态），共享实例会让多个 Manager 互相覆写配置。
+type codeToolRegistration struct {
+	// Name 是规范名；**必须等于** New().Name()（见下方不变量说明）。
+	Name string
+	// Class 决定档位可见性（codeToolClassDefinition / codeToolClassRelation）。
+	Class string
+	// New 按调用方（每个 Manager）构造独立实例。
+	New func() toolkit.Tool
+}
+
+// codeToolRegistrations 是 ADR-0004 code gate 管辖的 code.* 构造表。
+//
+// 与 builtinToolkitRegistrations 的唯一差别是注册时机：本表由 codeToolGate.sync
+// 按档位（all / definitions / none）动态增删，故不声明 Condition。
+//
+// **不变量（Name == New().Name()）**：sync 用 spec.tool 注册（注册表 key =
+// tool.Name()），却用 spec.name 注销与记账（Unregister(spec.name)、registered /
+// classes 均以 spec.name 为 key）。两者不一致会导致两个静默故障：
+//  1. 降档时 Unregister 删错 key ⇒ 工具注销不掉，档位降级后仍对模型可见；
+//  2. isCodeTool 认不出该工具 ⇒ manager.callTool 的第二道防线失效。
+//
+// 该不变量由 TestCodeToolRegistrationTableMatchesRegistryDeclaration 钉死。
+var codeToolRegistrations = []codeToolRegistration{
+	{Name: "code_search", Class: codeToolClassDefinition, New: func() toolkit.Tool { return tools.NewCodeSearchTool() }},
+	{Name: "code_inspect", Class: codeToolClassDefinition, New: func() toolkit.Tool { return tools.NewCodeInspectTool() }},
+	{Name: "code_navigate", Class: codeToolClassDefinition, New: func() toolkit.Tool { return tools.NewCodeNavigateTool() }},
+	{Name: "code_references", Class: codeToolClassRelation, New: func() toolkit.Tool { return tools.NewCodeReferencesTool() }},
+	{Name: "code_callers", Class: codeToolClassRelation, New: func() toolkit.Tool { return tools.NewCodeCallersTool() }},
+}
+
 // registerBuiltinToolkitTools 注册内置 toolkit 工具。
 //
 // sharedLanguageClient 是语义通道的进程借用缝（单实例）；nil = 语义通道自建
@@ -538,39 +643,18 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 		_ = registry.Register(tool)
 	}
 
-	// Ignore duplicates; registry will reject with error.
-	// shell is the preferred Codex-aligned surface; bash and
-	// execute_shell_command remain compatibility aliases with identical
-	// execution semantics (including content-success for non-zero exits).
-	register(tools.NewShellTool())
-	register(tools.NewBashTool())
-	register(tools.NewExecuteShellCommandTool())
-	register(tools.NewAICLIExecTool())
-	register(tools.NewApplyPatchTool())
-	register(tools.NewViewTool())
-	// read 是 view 的兼容别名（同一 schema/执行实现）：注册它让偏好 `read`
-	// 这个习惯名的模型调用落到 view，而不是 "tool not found"。模型面仍只列出
-	// view（见 agent.optimizeModelToolSurface 的读取面折叠）。
-	register(tools.NewReadTool())
-	register(tools.NewEditTool())
-	register(tools.NewWriteTool())
-	register(tools.NewAppendWriteTool())
-	register(tools.NewGlobTool())
-	register(tools.NewGrepTool())
-	// rg 是 grep 的兼容别名（同一 schema/执行实现）：注册它让以 shell 习惯名
-	// `rg` 发起的工具调用落到 grep，而不是 "tool not found"。模型面仍只列出
-	// grep（见 agent.optimizeModelToolSurface 的搜索面折叠）。
-	register(tools.NewRGTool())
-	register(tools.NewLsTool())
-	register(tools.NewDownloadTool())
-	register(tools.NewFetchTool())
-	register(tools.NewMultieditTool())
-	register(tools.NewTodosTool())
-	register(tools.NewArtifactReadTool())
-	register(tools.NewSourcegraphTool())
-	register(tools.NewWebSearchTool())
-	if shouldRegisterOpenAIImageGenerateTool(runtimeConfig) {
-		register(tools.NewOpenAIImageGenerateTool(runtimeConfig))
+	// 内置工具一律按构造表注册（P2 收敛点，见 §P2）：
+	// "有哪些"由 toolregistry.Entry.ToolkitBuiltin 声明（T6 单一真源），
+	// "怎么造"由 builtinToolkitRegistrations 回答；两侧成员集合由
+	// builtin_registry_contract_test.go 双向钉死，任一侧单独漂移即失败。
+	//
+	// 顺序不承载语义：toolkit.Registry.List() 按工具名排序输出，注册顺序不构成
+	// 对外可观察的工具面。
+	for _, spec := range builtinToolkitRegistrations {
+		if spec.Condition != nil && !spec.Condition(runtimeConfig) {
+			continue
+		}
+		register(spec.New(runtimeConfig))
 	}
 	if codeResolver == nil {
 		return nil
@@ -579,15 +663,12 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	// 注册机制）；之后每次 ListTools 由 gate.sync 重新评估并切换分组，
 	// 会话内动态生效、无需重启。工具自身还有执行期陈旧度守卫（第二道防线）。
 	gate := newCodeToolGate(codeResolver, runtimeConfig.Knowledge, registry)
-	for _, spec := range []codeToolSpec{
-		{name: "code_search", class: codeToolClassDefinition, tool: tools.NewCodeSearchTool()},
-		{name: "code_inspect", class: codeToolClassDefinition, tool: tools.NewCodeInspectTool()},
-		{name: "code_navigate", class: codeToolClassDefinition, tool: tools.NewCodeNavigateTool()},
-		{name: "code_references", class: codeToolClassRelation, tool: tools.NewCodeReferencesTool()},
-		{name: "code_callers", class: codeToolClassRelation, tool: tools.NewCodeCallersTool()},
-	} {
-		configure(spec.tool)
-		gate.add(spec.name, spec.class, spec.tool)
+	// 单一构造表（P2 slice 3）：成员集合由注册表的 Entry.CodeTool 声明，
+	// "怎么造 + 属哪一类"由 codeToolRegistrations 回答，两侧由契约测试双向钉死。
+	for _, spec := range codeToolRegistrations {
+		tool := spec.New()
+		configure(tool)
+		gate.add(spec.Name, spec.Class, tool)
 	}
 	gate.sync(context.Background())
 	return gate

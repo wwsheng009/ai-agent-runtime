@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -234,14 +235,40 @@ func isVolatileEmptyReplayTool(name string) bool {
 	}
 }
 
+// brokerToolCanonicalNames 是 broker 接管派发的**规范名**单一真源。
+//
+// 为什么是数据而不是 `switch`：`IsBrokerTool` 只回答"这个工具归不归 broker 管"，而外部还需要
+// **枚举**这份名单——`toolregistry_contract_test.go` 用它把"broker 派发面 ⊆ 注册表
+// orchestration 组"焊死（该方向此前靠**手抄常量名单**兜底，新增 broker 工具时会静默漏检）。
+// 改成表后，新增工具只改这一处，且立刻被对账测试看到。
+//
+// 别名（background_task / spawn_agent / plan-review / EnterPlanMode …）**不在表内**：入口统一经
+// `normalizeToolName` 归一后再查表。
+var brokerToolCanonicalNames = []string{
+	ToolAskUserQuestion,
+	ToolPlanEnter, ToolPlanExit, ToolPlanReview,
+	ToolJobStart, ToolJobOutput, ToolJobCancel, ToolJobMonitor, ToolJobControl, ToolJobInput, ToolJobList, ToolJobSearch,
+	ToolScheduleCreate, ToolScheduleList, ToolScheduleUpdate, ToolScheduleDelete,
+	ToolSubagentSpawn, ToolSubagentList, ToolSubagentSend, ToolSubagentFollowup, ToolSubagentInput, ToolSubagentApprove,
+	ToolSubagentWait, ToolSubagentEvents, ToolSubagentClose, ToolSubagentResume,
+	ToolSubagentApplyWorktree, ToolSubagentDiscardWorktree, ToolSubagentStatus, ToolSubagentInspectTask,
+	ToolTeamSpawn, ToolTeamWait, ToolTeamSend, ToolTeamMailbox,
+	ToolTeamTaskSpec, ToolTeamTaskContext, ToolTeamTaskReport, ToolTeamTaskBlock,
+	ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult,
+	ToolAckLifecycle, ToolControlDescendant,
+}
+
+var brokerToolCanonicalSet = func() map[string]bool {
+	set := make(map[string]bool, len(brokerToolCanonicalNames))
+	for _, name := range brokerToolCanonicalNames {
+		set[name] = true
+	}
+	return set
+}()
+
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
-	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolPlanEnter, ToolPlanExit, ToolPlanReview, ToolJobStart, ToolJobOutput, ToolJobCancel, ToolJobMonitor, ToolJobControl, ToolJobInput, ToolJobList, ToolJobSearch, ToolScheduleCreate, ToolScheduleList, ToolScheduleUpdate, ToolScheduleDelete, ToolSubagentSpawn, ToolSubagentList, ToolSubagentSend, ToolSubagentFollowup, ToolSubagentInput, ToolSubagentApprove, ToolSubagentWait, ToolSubagentEvents, ToolSubagentClose, ToolSubagentResume, ToolSubagentApplyWorktree, ToolSubagentDiscardWorktree, ToolTeamSpawn, ToolTeamWait, ToolTeamSend, ToolTeamMailbox, ToolTeamTaskSpec, ToolTeamTaskContext, ToolTeamTaskReport, ToolTeamTaskBlock, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
-		return true
-	default:
-		return false
-	}
+	return brokerToolCanonicalSet[normalizeToolName(name)]
 }
 
 // Definitions returns tool definitions exposed to the LLM.
@@ -737,7 +764,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentApprove,
-				Description: "Approve or deny a pending tool approval request in a subagent_spawn child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
+				Description: "Approve or deny a pending tool approval request in a subagent_spawn child session. Use this when subagent_wait/subagent_events reports waiting_approval; do not repeatedly wait for the same approval.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -929,7 +956,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentApprove,
-				Description: "Approve or deny a pending tool approval request in a subagent_spawn child session. Use this when wait_agent/read_agent_events reports waiting_approval; do not repeatedly wait for the same approval.",
+				Description: "Approve or deny a pending tool approval request in a subagent_spawn child session. Use this when subagent_wait/subagent_events reports waiting_approval; do not repeatedly wait for the same approval.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -2314,22 +2341,22 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		// preflight path), never int64, so the old direct assertions dropped
 		// these keys for every real caller - and made the non-negative check
 		// below unreachable for them.
-		if value, ok, err := toolArgInt64("spawn_agent", args, "timeout_sec"); err != nil {
+		if value, ok, err := toolArgInt64(ToolSubagentSpawn, args, "timeout_sec"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.TimeoutSec = value
 		}
-		if value, ok, err := toolArgInt64("spawn_agent", args, "progress_timeout_sec"); err != nil {
+		if value, ok, err := toolArgInt64(ToolSubagentSpawn, args, "progress_timeout_sec"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.ProgressTimeoutSec = value
 		}
-		if value, ok, err := toolArgInt64("spawn_agent", args, "approval_timeout_sec"); err != nil {
+		if value, ok, err := toolArgInt64(ToolSubagentSpawn, args, "approval_timeout_sec"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.ApprovalTimeoutSec = value
 		}
-		if value, ok, err := toolArgInt64("spawn_agent", args, "cancel_grace_sec"); err != nil {
+		if value, ok, err := toolArgInt64(ToolSubagentSpawn, args, "cancel_grace_sec"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.CancelGraceSec = value
@@ -3104,12 +3131,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		// Numeric reads go through toolArgInt64 so every JSON spelling reaches
 		// the request; the previous float64/int assertions dropped json.Number
 		// and Go-native int64/uint values that validateSpawnTeamArgTypes accepts.
-		if value, ok, err := toolArgInt64("spawn_team", args, "max_teammates"); err != nil {
+		if value, ok, err := toolArgInt64(ToolTeamSpawn, args, "max_teammates"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.MaxTeammates = int(value)
 		}
-		if value, ok, err := toolArgInt64("spawn_team", args, "max_writers"); err != nil {
+		if value, ok, err := toolArgInt64(ToolTeamSpawn, args, "max_writers"); err != nil {
 			return nil, nil, err
 		} else if ok {
 			request.MaxWriters = int(value)
@@ -4191,105 +4218,17 @@ func classifyWriteStdinError(err error) (code, nextAction string, actionable boo
 	}
 }
 
+// normalizeToolName folds any tool-name spelling onto its canonical wire name.
+//
+// 归一表的唯一真源是 internal/toolregistry.Normalize（叶子包，只依赖标准库）。
+// 本函数此前是第二份逐字复制的 switch（~100 行），任何一次改名都要在两处同步，
+// 正是"多入口"要消灭的形态；现在只做转发。
+//
+// 旧拼写（task_output / spawn_agent / spawn_team / enter_plan_mode …）仍然
+// 可调用，但它们**只存在于这一张表里**，不再作为独立名字出现在常量、
+// taxonomy、能力表或测试清单中。
 func normalizeToolName(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
-	name = strings.ReplaceAll(name, "-", "_")
-	switch name {
-	case "askuserquestion":
-		return ToolAskUserQuestion
-	// Plan family (naming contract B4): canonical plan_* plus the legacy
-	// *_plan_mode spellings, which stay callable.
-	case "plan_enter", "planenter", "enterplanmode", "enter_plan_mode":
-		return ToolPlanEnter
-	case "plan_exit", "planexit", "exitplanmode", "exit_plan_mode":
-		return ToolPlanExit
-	case "planreview":
-		return ToolPlanReview
-	// Job family (naming contract B1): the canonical job_* spellings plus the
-	// legacy task_*/background_task/write_stdin aliases, which stay callable.
-	case "job_start", "jobstart", "backgroundtask", "background_task", "task_start":
-		return ToolJobStart
-	case "job_output", "joboutput", "taskoutput", "task_output":
-		return ToolJobOutput
-	case "job_cancel", "jobcancel", "taskkill", "task_kill":
-		return ToolJobCancel
-	case "job_monitor", "jobmonitor", "taskmonitor", "task_monitor":
-		return ToolJobMonitor
-	case "job_control", "jobcontrol", "taskcontrol", "task_control":
-		return ToolJobControl
-	case "job_input", "jobinput", "writestdin", "taskinput", "write_stdin", "task_input":
-		return ToolJobInput
-	case "job_list", "joblist":
-		return ToolJobList
-	case "job_search", "jobsearch":
-		return ToolJobSearch
-	// Subagent family (naming contract B3): canonical subagent_* plus the
-	// legacy *_agent / generic spellings, which stay callable.
-	case "subagent_spawn", "subagentspawn", "spawnagent", "spawn_agent":
-		return ToolSubagentSpawn
-	case "subagent_list", "subagentlist", "listagents", "list_agents":
-		return ToolSubagentList
-	case "subagent_send", "subagentsend", "sendmessage", "send_message":
-		return ToolSubagentSend
-	case "subagent_followup", "subagentfollowup", "followuptask", "followup_task":
-		return ToolSubagentFollowup
-	case "subagent_input", "subagentinput", "sendinput", "send_input":
-		return ToolSubagentInput
-	case "subagent_approve", "subagentapprove", "resolveagentapproval", "resolve_agent_approval", "approve_agent_tool", "approveagenttool", "approve_child_tool", "approvechildtool":
-		return ToolSubagentApprove
-	case "subagent_wait", "subagentwait", "waitagent", "wait_agent":
-		return ToolSubagentWait
-	case "subagent_events", "subagentevents", "readagentevents", "read_agent_events":
-		return ToolSubagentEvents
-	case "subagent_close", "subagentclose", "closeagent", "close_agent":
-		return ToolSubagentClose
-	case "subagent_resume", "subagentresume", "resumeagent", "resume_agent":
-		return ToolSubagentResume
-	case "subagent_apply_worktree", "subagentapplyworktree", "applyagentworktree", "apply_agent_worktree", "apply_worktree", "applyworktree":
-		return ToolSubagentApplyWorktree
-	case "subagent_discard_worktree", "subagentdiscardworktree", "discardagentworktree", "discard_agent_worktree", "discard_worktree", "discardworktree":
-		return ToolSubagentDiscardWorktree
-	// Team family (naming contract B2): canonical team_* plus the mixed legacy
-	// spellings, which stay callable.
-	case "team_spawn", "teamspawn", "spawnteam", "spawn_team":
-		return ToolTeamSpawn
-	case "team_wait", "teamwait", "waitteam", "wait_team":
-		return ToolTeamWait
-	case "team_send", "teamsend", "sendteammessage", "send_team_message":
-		return ToolTeamSend
-	case "team_mailbox", "teammailbox", "readmailboxdigest", "read_mailbox_digest":
-		return ToolTeamMailbox
-	case "team_task_spec", "teamtaskspec", "readtaskspec", "read_task_spec":
-		return ToolTeamTaskSpec
-	case "team_task_context", "teamtaskcontext", "readtaskcontext", "read_task_context":
-		return ToolTeamTaskContext
-	case "team_task_report", "teamtaskreport", "reporttaskoutcome", "report_task_outcome":
-		return ToolTeamTaskReport
-	case "team_task_block", "teamtaskblock", "blockcurrenttask", "block_current_task":
-		return ToolTeamTaskBlock
-	case "supervisionsnapshot":
-		return ToolSupervisionSnapshot
-	case "supervisiondescendants":
-		return ToolSupervisionDescendants
-	case "subagentstatus", "agentstatus", "agent_status":
-		return ToolSubagentStatus
-	case "subagentinspecttask", "subagentinspect", "subagent_inspect", "inspecttask":
-		return ToolSubagentInspectTask
-	case "readagentresult", "read_agent_result", "agentresult":
-		return ToolReadAgentResult
-	// Legacy spellings (pre-rename prompts, hosts, plan text) plus the camel
-	// spellings of the new wire names.
-	case "acklifecycle", "ack_lifecycle":
-		return ToolAckLifecycle
-	case "subagentacklifecycle":
-		return ToolAckLifecycle
-	case "controldescendant", "control_descendant":
-		return ToolControlDescendant
-	case "subagentcontrol":
-		return ToolControlDescendant
-	default:
-		return name
-	}
+	return toolregistry.Normalize(name)
 }
 
 func waitResultStatus(result *AgentWaitResult) string {

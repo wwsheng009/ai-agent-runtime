@@ -31,6 +31,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -407,6 +409,187 @@ func TestListSessionRuntimeTools_LiveSurfaceCarriesSourceLedger(t *testing.T) {
 	// mcp_name 优先 → 标为 mcp:aicli_goal（语义正确：来源即该包装层）。
 	require.Equal(t, "mcp:aicli_goal", goal.Metadata["surface_source"], "get_goal arrives through the aicli_goal capability MCP wrap")
 }
+
+// §2.2-A：会话级工具面 payload 必须带 groups[] / filtered[] 与每工具 metadata
+// （surface_source/group/exposure/essential），且 count 与 tools 逐一对应（T7）。
+func TestListSessionRuntimeTools_CarriesObservationGroupsAndMetadata(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime/tools", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+	handler.ListSessionRuntimeTools(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := rec.Body.Bytes()
+	var decoded struct {
+		Count    int                        `json:"count"`
+		Tools    []types.ToolDefinition     `json:"tools"`
+		Groups   []toolsurface.Group        `json:"groups"`
+		Filtered []toolsurface.FilteredTool `json:"filtered"`
+	}
+	require.NoError(t, json.Unmarshal(body, &decoded))
+	require.Equal(t, len(decoded.Tools), decoded.Count)
+	require.NotEmpty(t, decoded.Tools)
+
+	// groups[] 是 registry 分组目录的投影（id/label/protected/enabled 齐全，P0 enabled=true）。
+	require.Len(t, decoded.Groups, len(toolregistry.Groups()))
+	groups := make(map[string]toolsurface.Group, len(decoded.Groups))
+	for _, group := range decoded.Groups {
+		groups[group.ID] = group
+		require.NotEmpty(t, group.ID)
+		require.NotEmpty(t, group.Label)
+		require.True(t, group.Enabled)
+	}
+	// 工作区读写基本盘受保护；编排组可整组关闭（profile-tool-groups-design §3.3）。
+	readGroup, ok := groups[string(toolregistry.GroupRead)]
+	require.True(t, ok)
+	require.True(t, readGroup.Protected)
+	orchestration, ok := groups[string(toolregistry.GroupOrchestration)]
+	require.True(t, ok)
+	require.False(t, orchestration.Protected)
+	require.GreaterOrEqual(t, orchestration.ToolCount, 1, "job_start must be counted in the orchestration group")
+
+	// 每工具 metadata：账本来源 + registry 身份事实（§2.2-A）。
+	byName := make(map[string]types.ToolDefinition, len(decoded.Tools))
+	for _, tool := range decoded.Tools {
+		byName[tool.Name] = tool
+	}
+	job, ok := byName["job_start"]
+	require.True(t, ok)
+	require.Equal(t, "orchestration", job.Metadata[string(toolsurface.MetadataSurfaceSource)])
+	require.Equal(t, string(toolregistry.GroupOrchestration), job.Metadata[string(toolsurface.MetadataGroup)])
+	require.Equal(t, true, job.Metadata[string(toolsurface.MetadataEssential)])
+	exposure, ok := job.Metadata[string(toolsurface.MetadataExposure)].([]interface{})
+	require.True(t, ok)
+	require.NotEmpty(t, exposure)
+
+	// 无可报裁剪事实时 filtered 是可加契约要求的空数组（不是缺字段/null）。
+	require.Contains(t, string(body), `"filtered":[]`)
+}
+
+// T7 / §2.2-C：端点报的工具面必须与「请求携带面」同源同数。
+//
+// 这里不做任何硬编码计数（不同宿主/配置下目录大小本就不同，硬写数字等于造假）；
+// 而是直接与真实请求装配点 sessionLiveRequestSurface（与 inline web turn 同一
+// buildSessionAgentForContext → CollectToolCatalogDefinitions 路径）逐名对齐：
+// 端点 payload 的名字集合与顺序都必须与请求面完全一致，count 必须等于请求面大小。
+// 这样任何「端点显示 ≠ 请求携带」的回归（漏项/多项/错序）都会被这条测试抓住。
+func TestListSessionRuntimeTools_EndpointMatchesLiveRequestSurface(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+
+	// 请求侧：真实装配点（同一函数被 inline web turn / 会话工具面共同使用）。
+	surface, ok := handler.sessionLiveRequestSurface(context.Background(), session.ID)
+	require.True(t, ok, "live request surface must assemble when runtime config + session row exist")
+	require.NotEmpty(t, surface)
+	requestNames := make([]string, 0, len(surface))
+	for _, def := range surface {
+		requestNames = append(requestNames, def.Name)
+	}
+
+	// 端点侧：HTTP payload。
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime/tools", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+	handler.ListSessionRuntimeTools(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var decoded struct {
+		Count int                    `json:"count"`
+		Tools []types.ToolDefinition `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &decoded))
+
+	payloadNames := make([]string, 0, len(decoded.Tools))
+	for _, def := range decoded.Tools {
+		payloadNames = append(payloadNames, def.Name)
+	}
+	require.Equal(t, requestNames, payloadNames,
+		"endpoint tool list must match the request-carried surface name-for-name and in order")
+	require.Equal(t, len(surface), decoded.Count,
+		"endpoint count must equal the request-side catalog size")
+}
+
+// TestListSessionRuntimeTools_RequestSurfaceNamesAreCanonicalAndRegistered 把"注册表 = 工具身份
+// 单一真源"写成可执行断言：请求面（模型实际看到的目录）里**非 MCP 包装**的每个名字都必须是
+// `toolregistry` 的**规范名**且能查到。
+//
+// 两条失败语义：
+//   - 查不到 ⇒ 该名字在策略/分组/必需面里会落到**启发式判定**（本战役 P1 病类：同一个工具靠猜）；
+//   - 用了别名拼写 ⇒ "同一工具两个规范名"复发（`/catalog` 只列 canonical，两侧就对不上）。
+//
+// 语料取自**真实装配路径**（`sessionLiveRequestSurface`，与 inline web turn 同一个函数），
+// 不硬编码任何工具名单；MCP 包装（带 `mcp_name`）由 MCP 服务器提供、不在注册表管辖内，跳过。
+func TestListSessionRuntimeTools_RequestSurfaceNamesAreCanonicalAndRegistered(t *testing.T) {
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+
+	surface, ok := handler.sessionLiveRequestSurface(context.Background(), session.ID)
+	require.True(t, ok, "live request surface must assemble when runtime config + session row exist")
+
+	checked := 0
+	for _, def := range surface {
+		if def.Metadata != nil {
+			if mcpName, _ := def.Metadata["mcp_name"].(string); strings.TrimSpace(mcpName) != "" {
+				continue
+			}
+		}
+		checked++
+		_, found := toolregistry.Lookup(def.Name)
+		require.Truef(t, found,
+			"request-surface tool %q is not in toolregistry; a name the model can see must resolve to the single identity source, otherwise policy/grouping falls back to heuristics", def.Name)
+		require.Equalf(t, def.Name, toolregistry.Canonical(def.Name),
+			"request-surface tool %q is an alias spelling; the surface must carry the canonical name so /catalog and /tools agree", def.Name)
+	}
+	// 语料下限：防"surface 为空 / 全被跳过"导致断言假绿（今天实测 27 个非 MCP 名字）。
+	require.Greater(t, checked, 10,
+		"too few non-MCP request-surface tools were checked; the assertion would silently pass")
+}
+
+// §2.2-A：会话级 MCP 停用是 P0 唯一有单一事实来源的裁剪事实，
+// 以 mcp:<server> 口径出现在 filtered[]（与 Ledger.Classify 的来源命名一致）。
+func TestListSessionRuntimeTools_FilteredReportsMCPDisabledSources(t *testing.T) {
+	mcpManager := &runtimeToolSurfaceMCPManager{}
+	handler := NewHandler(skill.NewRegistry(mcpManager), nil, mcpManager)
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	handler.SetSessionManager(sessionManager)
+	session, err := sessionManager.Create(context.Background(), "user-1")
+	require.NoError(t, err)
+	if session.Metadata.Context == nil {
+		session.Metadata.Context = make(map[string]interface{})
+	}
+	session.Metadata.Context[chat.SessionMCPDisabledContextKey] = []string{"chrome-devtools"}
+	require.NoError(t, sessionManager.Update(context.Background(), session))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/runtime/tools", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": session.ID})
+	rec := httptest.NewRecorder()
+	handler.ListSessionRuntimeTools(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var decoded struct {
+		Filtered []toolsurface.FilteredTool `json:"filtered"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&decoded))
+	require.Equal(t, []toolsurface.FilteredTool{
+		{Name: "mcp:chrome-devtools", Reason: toolsurface.FilterMCPDisabled},
+	}, decoded.Filtered)
+}
+
 func TestListSessionRuntimeTools_DisabledToolsReturnsEmptySurface(t *testing.T) {
 	mcpManager := &runtimeToolSurfaceMCPManager{}
 	handler := NewHandler(skill.NewRegistry(mcpManager), nil, mcpManager)

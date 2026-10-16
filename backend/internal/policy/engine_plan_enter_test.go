@@ -25,7 +25,7 @@ func (h *recordingApprovalHandler) RequestApproval(_ context.Context, req Approv
 
 func TestPlanEnterGateContract(t *testing.T) {
 	// The gate is a public contract: hosts match on these values, so pin them.
-	assert.Equal(t, "enter_plan_mode", PlanEnterToolName)
+	assert.Equal(t, "plan_enter", PlanEnterToolName)
 	assert.Equal(t, "plan_mode:model_auto_enter", PlanAutoEnterApprovalReason)
 }
 

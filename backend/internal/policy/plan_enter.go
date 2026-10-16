@@ -8,10 +8,10 @@ import (
 // PlanEnterToolName is the model-facing tool that switches the session into
 // plan mode. It is the only tool the model plan-entry confirmation gate applies
 // to (see Engine.PlanAutoEnterWithoutApproval).
-const PlanEnterToolName = "enter_plan_mode"
+const PlanEnterToolName = "plan_enter"
 
 // PlanAutoEnterApprovalReason is the approval reason carried by the
-// confirmation request the engine emits when the model calls enter_plan_mode
+// confirmation request the engine emits when the model calls plan_enter
 // without an explicit autonomy policy. Hosts reuse the existing approval
 // channel / pending-approval card for it; no separate mechanism is introduced.
 const PlanAutoEnterApprovalReason = "plan_mode:model_auto_enter"
@@ -39,7 +39,7 @@ func PlanModelAutonomyEnabled() bool {
 }
 
 // planEnterGateArmed reports whether the model plan-entry confirmation gate is
-// in force for this request: the request targets enter_plan_mode and neither
+// in force for this request: the request targets plan_enter and neither
 // opt-out is set —
 //
 //   - Engine.PlanAutoEnterWithoutApproval (host/engine field), or

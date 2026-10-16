@@ -8,6 +8,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pathdisplay"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // ToolCell is the structured tool-call presentation model.
@@ -153,13 +154,11 @@ func statusMarkerSpan(st EventStatus) render.Span {
 }
 
 func formatToolName(name string) string {
-	shortNames := map[string]string{
-		"shell":                 "Shell",
-		"bash":                  "Shell",
-		"execute_shell_command": "Shell",
-	}
-	if short, ok := shortNames[name]; ok {
-		return short
+	// shell 家族的显示名由注册表判定（shell / bash / execute_shell_command），
+	// 不再手写拼写表：新增别名自动显示为 Shell，也不会像 execute_shell_command
+	// 那样只能靠手抄一行才不至于渲染成 "ShellCommand"。
+	if toolregistry.IsSpellingOf("shell", name) {
+		return "Shell"
 	}
 	name = strings.TrimPrefix(name, "execute_")
 	name = strings.TrimPrefix(name, "run_")

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // This file owns the precise path semantics of the plan-mode write allowlist
@@ -24,32 +25,15 @@ import (
 // policy (narrow --allow-tool exemption) use these helpers so the two layers
 // cannot drift apart.
 
-// planWriteToolNames are the built-in file-mutating tools whose write targets
-// the plan allowlist can verify by path. Aliases are normalized (lowercase,
-// dashes to underscores) before the lookup; the runtime's control-plane tools
-// never belong here.
-var planWriteToolNames = map[string]bool{
-	"write":              true,
-	"write_file":         true,
-	"create_file":        true,
-	"overwrite_file":     true,
-	"edit":               true,
-	"update_file":        true,
-	"str_replace":        true,
-	"str_replace_editor": true,
-	"multiedit":          true,
-	"multi_edit":         true,
-	"append_write":       true,
-	"append_file":        true,
-	"apply_patch":        true,
-	"applypatch":         true,
-	"patch_file":         true,
-}
-
 // isPlanWriteToolName reports whether a tool mutates file contents through a
 // path the plan allowlist can check.
+//
+// 名单真源已迁至 internal/toolregistry（Entry.PlanWrite）。人可读别名与退役名
+// （write_file / update_file / str_replace / applypatch / patch_file …）由
+// toolregistry.Canonical 先归一为规范名再解析，故本地 map 不再需要；原表里
+// 的每个键都能且仅能归一到已登记的 edit 组条目。
 func isPlanWriteToolName(toolName string) bool {
-	return planWriteToolNames[normalizeToolName(toolName)]
+	return toolregistry.IsPlanWrite(toolName)
 }
 
 // planWriteTargets returns every file a call may mutate: the explicit path

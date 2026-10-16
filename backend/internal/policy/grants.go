@@ -188,7 +188,7 @@ func (e monadicError) Error() string { return string(e) }
 func IsDangerousTool(toolName string) bool {
 	name := normalizeToolName(toolName)
 	switch name {
-	case "shell", "bash", "aicli_exec", "background_task", "job_start", "task_kill", "job_cancel", "task_monitor", "job_monitor", "task_control", "job_control", "write_stdin", "task_input", "job_input":
+	case "shell", "bash", "aicli_exec", "job_start", "job_cancel", "job_monitor", "job_control", "job_input":
 		return true
 	default:
 		return false

@@ -281,7 +281,7 @@ type RootedGrantFinder interface {
 // remembered grant can never widen to every session (2026-10-11).
 func IsJobScopedGrantTool(toolName string) bool {
 	switch normalizeToolName(toolName) {
-	case "write_stdin", "task_input":
+	case "job_input":
 		return true
 	default:
 		return false
