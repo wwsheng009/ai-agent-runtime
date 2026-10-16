@@ -1119,3 +1119,23 @@ registry_test）、`internal/tools`（构造表 + 契约测试）、`internal/to
 `cmd/aicli/ui/cell`）⇒ **0**；`go test -count=1` 同 6 包 ⇒ **6/6 ok**
 （toolregistry 0.525s、tools 4.804s、toolbroker 25.377s、policy 1.800s、toolsurface 0.824s、
 runtimeapi 50.452s）。提交后，本战役文件在工作树里已全部干净。
+
+---
+
+### 2026-10-16 — 提交快照的全量消费者包回归：**11/11 绿**（§5.3 在提交态达成）
+
+提交 `3bc49a2f` / `56ae9693` / `119d3e8f` 之后，在**隔离 worktree（直接 checkout HEAD，无需打补丁）**
+里跑 §5.3 承诺的全量消费者面：**11/11 exit=0** ——
+`toolregistry` 0.254s、`tools` 5.679s、`toolbroker` 28.893s、`policy` 2.535s、`toolsurface` 1.069s、
+`runtimeapi` 54.695s、`agent` 18.698s、`prompt` 1.285s、`skill` 3.197s、`toolargs` 0.624s、
+`toolkit` 4.531s。
+
+**意义**：此前所有回归证据都取自**混合工作树**（含第二写入者的在飞改动）；这一条是**提交快照自身**
+的证据——"这个提交不会破坏它的消费者"。§5.3 的回归范围据此在提交态闭合。
+
+**未决（保持未提交，判据见上一条日志）**：`internal/policy/taxonomy_vocabulary_test.go`（新文件，
+"一份词表"守卫：`knownToolTaxonomy` 只登记规范名）与 `internal/policy/capability_scope.go`
+（1 行：`background_task` → `job_start`），以及 `internal/toolbroker` 的拼写收敛批次
+（`types.go` / `supervision_tools.go` / `spawn_*_arg_types.go` / `broker_arg_audit*.go` /
+`agent_events_view.go` 及其测试）。它们与本战役**同主题**（都指向规范名），但**无法证明归属**，
+故不代为提交——宁可留白，不越权。
