@@ -597,14 +597,14 @@ func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
 		return false
 	}
 	if policy := a.GetToolExecutionPolicy(); policy != nil {
-		// spawn_subagents is a control-plane capability, so direct execution
-		// may use the runtime-essential allowlist bypass. Its model-visible
-		// definition is stricter: an explicit allowlist must opt it in, while
-		// an explicit deny always hides it.
-		if policy.BlockDelegation || policy.DeniedTools[SpawnSubagentsToolName] {
+		// The essential allowlist bypass was removed 2026-10-16: the
+		// model-visible definition follows the same semantics as AllowTool —
+		// an explicit allowlist must opt it in (by name or wildcard pattern),
+		// while an explicit deny always hides it.
+		if policy.BlockDelegation || policy.DeniesTool(SpawnSubagentsToolName) {
 			return false
 		}
-		if policy.AllowlistEnabled && !policy.AllowedTools[SpawnSubagentsToolName] {
+		if policy.AllowlistEnabled && !policy.AllowsTool(SpawnSubagentsToolName) {
 			return false
 		}
 	}

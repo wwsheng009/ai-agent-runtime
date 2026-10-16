@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 var (
@@ -131,6 +132,22 @@ func ValidateProfileSpec(spec *ProfileSpec) []ProfileSpecIssue {
 				appendIssue(ProfileSpecIssueWarning, path, "duplicate capability domain %q", normalized)
 			}
 			seen[normalized] = struct{}{}
+			// 通配声明（"*" / "prefix*"）由 profileinput 展开到封闭枚举，
+			// 这里只检查它能否命中至少一个用户可禁域，不再按精确名报 unknown。
+			if strings.Contains(normalized, "*") {
+				matched := false
+				for _, capability := range runtimepolicy.AllUserDisablableCapabilities() {
+					if toolregistry.MatchPattern(normalized, string(capability)) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					appendIssue(ProfileSpecIssueError, path,
+						"capability wildcard %q matches no domain (valid: %s)", name, strings.Join(validNames, ", "))
+				}
+				continue
+			}
 			if _, ok := valid[normalized]; !ok {
 				appendIssue(ProfileSpecIssueError, path,
 					"unknown capability domain %q (valid: %s)", name, strings.Join(validNames, ", "))

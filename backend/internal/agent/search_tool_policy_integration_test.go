@@ -21,6 +21,10 @@ func TestVisibleSearchToolExecutesOutsideDerivedAllowlists(t *testing.T) {
 			policyAllowlist = append(policyAllowlist, info.Name)
 		}
 	}
+	// The essential allowlist bypass was removed 2026-10-16: a host that
+	// explicitly exposes search_tool on the frozen surface must also admit it
+	// in the policy allowlist (execution gating follows the surface now).
+	policyAllowlist = append(policyAllowlist, toolSearchName)
 
 	agent := &Agent{
 		config:     &Config{Name: "search-agent", Model: "test-model"},
@@ -37,7 +41,7 @@ func TestVisibleSearchToolExecutesOutsideDerivedAllowlists(t *testing.T) {
 	// Policy-denied tools are filtered from the direct surface.
 	require.NotContains(t, toolDefinitionNames(surface), "deferred_helper")
 	require.NotContains(t, whitelist, toolSearchName)
-	require.NotContains(t, policyAllowlist, toolSearchName)
+	require.Contains(t, policyAllowlist, toolSearchName)
 
 	snapshot, ok := TurnToolSurfaceSnapshotFromContext(ctx)
 	require.True(t, ok)

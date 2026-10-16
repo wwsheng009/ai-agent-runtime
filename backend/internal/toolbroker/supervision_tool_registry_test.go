@@ -9,11 +9,12 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // 巡检工具族横跨多张并行注册表，任何一张漏项都会让工具面自相矛盾：
 //
-//	broker 常量（模型可见入口） -> policy essentials（窄 allowlist / 定义过滤）
+//	broker 常量（模型可见入口） -> registry Essential（观测/目录标记）
 //	                          -> policy taxonomy（taxonomy-first 能力解析）
 //	                          -> policy capability resolver（能力作用域）
 //	                          -> toolkit.IsCoreTool（search 投影下的常驻清单）
@@ -21,8 +22,9 @@ import (
 // 以 broker 常量为单一事实源做交叉校验，防止只改一处就「看起来接好了」。
 //
 // 表分成两层：advertised 是模型能看到的入口，每个能力只留一个名字；
-// legacy 是退役名字，仍然可调用（dispatch / 别名 / 已落库审计记录都还指向
-// 它们），因此必须继续留在 essentials / core / taxonomy / capability 四张表里。
+// retired 是不再广播、但 dispatch 与已落库指针仍指向的定义名，故四张策略表
+// 必须继续注册。旧拼写（ack_lifecycle / control_descendant 等）自 2026-10
+// 起不再被任何一层接受，已从本表移除。
 var advertisedSupervisionToolRegistry = []string{
 	ToolSubagentStatus,
 	ToolSubagentInspectTask,
@@ -38,25 +40,18 @@ var retiredSupervisionToolRegistry = []string{
 	ToolReadAgentResult,
 }
 
-// aliasOnlySupervisionToolRegistry 是只有别名、没有定义的名字：它们只作为
-// normalizeToolName 的输入拼写存在，必须归一化到可见面名字。
-var aliasOnlySupervisionToolRegistry = []string{
-	"ack_lifecycle",
-	"control_descendant",
-}
-
-// supervisionToolRegistry 是「可调用名字」全集：可见面 + 退役面 + 别名面。
+// supervisionToolRegistry 是「可调用名字」全集：可见面 + 退役面。
 var supervisionToolRegistry = append(
-	append(append([]string{}, advertisedSupervisionToolRegistry...), retiredSupervisionToolRegistry...),
-	aliasOnlySupervisionToolRegistry...,
+	append([]string{}, advertisedSupervisionToolRegistry...),
+	retiredSupervisionToolRegistry...,
 )
 
 func TestSupervisionToolFamilyIsRegisteredConsistently(t *testing.T) {
 	resolver := runtimepolicy.DefaultCapabilityResolver{}
 	for _, name := range supervisionToolRegistry {
 		t.Run(name, func(t *testing.T) {
-			require.True(t, runtimepolicy.IsRuntimeOwnedEssentialTool(name),
-				"%s must be runtime-owned essential, otherwise a narrow allowlist filters its definition out of the provider request", name)
+			require.True(t, toolregistry.IsEssential(name),
+				"%s must be declared Essential in the registry (observation/catalog metadata)", name)
 			require.True(t, toolkit.IsCoreTool(nil, name),
 				"%s must stay listed as a builtin core tool when the catalog is projected through search", name)
 			_, ok := runtimepolicy.LookupToolTaxonomy(name)
@@ -67,17 +62,20 @@ func TestSupervisionToolFamilyIsRegisteredConsistently(t *testing.T) {
 	}
 }
 
-// 宿主广播出来的巡检工具必须同时通过策略的定义过滤。否则会出现
-// 「Definitions 里有、模型却看不到」的假接入：宿主以为接好了，窄 allowlist
-// 下 filterPolicyBlockedToolDefinitions 会把定义从 provider 请求里摘掉。
-func TestAdvertisedSupervisionToolsSurviveNarrowAllowlist(t *testing.T) {
+// 宿主广播出来的巡检工具必须同时通过策略的定义过滤。essential 豁免移除后
+// （2026-10-16），窄 allowlist 会裁掉未列出的 essential 定义——需要控制面的
+// 名单用通配（["*"] / ["subagent_*"]）放行；这里钉住"窄名单裁、通配留"。
+func TestAdvertisedSupervisionToolsGatedByAllowlist(t *testing.T) {
 	broker := &Broker{Supervision: &fakeSupervisionController{}}
 	defs := broker.Definitions()
 	policy := runtimepolicy.NewToolExecutionPolicy([]string{"view", "grep"}, false)
+	wildcard := runtimepolicy.NewToolExecutionPolicy([]string{"subagent_*", "supervision_*", "read_agent_result"}, false)
 	for _, name := range advertisedSupervisionToolRegistry {
 		_ = supervisionDefinition(t, defs, name)
-		require.True(t, policy.AllowsDefinition(name),
-			"%s is advertised by the broker but hidden by a narrow allowlist", name)
+		require.False(t, policy.AllowsDefinition(name),
+			"%s: a narrow allowlist must hide the definition of an essential tool it does not list", name)
+		require.True(t, wildcard.AllowsDefinition(name),
+			"%s: the wildcard allowlist must keep the advertised definition visible", name)
 	}
 }
 

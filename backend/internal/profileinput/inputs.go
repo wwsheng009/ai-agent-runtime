@@ -12,6 +12,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // ResolvedAgentInputs contains shared runtime-facing inputs derived from a resolved profile.
@@ -201,6 +202,25 @@ func BuildToolExecutionPolicyWithWorkspace(resolved ResolvedToolPolicy, workspac
 		for _, name := range resolved.DisabledCapabilities {
 			normalized := strings.ToLower(strings.TrimSpace(name))
 			if normalized == "" {
+				continue
+			}
+			// Capability domains are a closed enumeration, so wildcard
+			// declarations are resolved eagerly: "*" expands to every
+			// user-disablable domain and "prefix*" matches domain names by
+			// prefix (e.g. "agent_*" -> agent_management). The toolregistry
+			// MatchPattern keeps the wildcard semantics identical to the
+			// allowlist/denylist.
+			if strings.Contains(normalized, "*") {
+				expanded := false
+				for _, capability := range runtimepolicy.AllUserDisablableCapabilities() {
+					if toolregistry.MatchPattern(normalized, string(capability)) {
+						disabled = append(disabled, capability)
+						expanded = true
+					}
+				}
+				if !expanded {
+					return nil, nil, fmt.Errorf("profile tools.disabled_capabilities: wildcard %q matches no capability domain (valid: write_fs, network, external_side_effect, ask_user, background_task, agent_management)", name)
+				}
 				continue
 			}
 			if !valid[normalized] {

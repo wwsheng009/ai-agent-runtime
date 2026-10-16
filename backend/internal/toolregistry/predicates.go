@@ -192,13 +192,72 @@ func LookupLive(name string) (Entry, bool) {
 	return lookupLive(name)
 }
 
-// IsEssential 报告该工具是否是"运行时自有必需工具"：窄 allowlist 不得裁剪它，
-// 否则会 brick 掉 agent 控制面。语义与原 policy.IsRuntimeOwnedEssentialTool 等价。
+// IsEssential 报告该工具是否属于"运行时自有工具"。policy 的 essential
+// 豁免层已于 2026-10-16 移除（profile 必须能完全控制工具面），字段保留，
+// 供观测面（metadata.essential）、目录 API 与测试引用。
 //
-// 未登记的名字返回 false（原实现同样是精确 switch，不猜）。
+// 与新语义的关系：essential 不再让工具绕过 allowlist；窄 allowlist 下
+// 未列出的 essential 工具会被裁掉，需要用通配模式（见 MatchPattern）
+// 或显式名单把它们放回来。未登记的名字返回 false。
 func IsEssential(name string) bool {
 	entry, ok := lookupLive(name)
 	return ok && entry.Essential
+}
+
+// MatchPattern 报告 name 是否命中一条工具名单模式。工具名单
+// （allowlist / denylist / skills / MCP 名单）的统一通配语义：
+//
+//   - "*"          —— 匹配一切；
+//   - "prefix_*"   —— 前缀匹配（以 prefix_ 开头，如 "subagent_*"）；
+//   - 其余          —— 归一化后精确匹配（走 Normalize，接受别名/大小写/连字符变体）。
+//
+// 这是 skill 层 nameMatchesSelection（profile/merge.go，裸 * + 大小写折叠）
+// 的工具面超集：两者并存，本函数供工具策略相关名单使用。调用方约定
+// "deny 恒优先于 allow"：通配 allow 放进来的工具，通配 deny 仍能拦住。
+func MatchPattern(pattern string, name string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	normalizedPattern := Normalize(pattern)
+	if strings.HasSuffix(normalizedPattern, "*") {
+		prefix := strings.TrimSuffix(normalizedPattern, "*")
+		return strings.HasPrefix(Normalize(name), prefix)
+	}
+	return normalizedPattern == Normalize(name)
+}
+
+// MatchesAnyPattern 报告 name 是否命中名单中的任一模式。名单元素为空时
+// 整体返回 false（空名单必须表示"未声明"而不是"全匹配"）。
+func MatchesAnyPattern(list []string, name string) bool {
+	for _, pattern := range list {
+		if MatchPattern(pattern, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// ListDeclaresWildcard 报告名单是否声明过通配模式（"*" 或 "prefix_*"）。
+// 调用方用它区分"全量放行"（需要展开）与"纯显式名单"（可保持 map 语义）。
+func ListDeclaresWildcard(list []string) bool {
+	for _, pattern := range list {
+		if strings.HasSuffix(strings.TrimSpace(pattern), "*") {
+			return true
+		}
+	}
+	return false
+}
+
+// PatternHitsRegisteredName 报告一条模式能否命中至少一个登记中的现役工具名。
+// 校验器用它区分"有效的域级通配"与"大概率拼错的模式"。
+func PatternHitsRegisteredName(pattern string) bool {
+	for _, entry := range Entries() {
+		if MatchPattern(pattern, entry.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsDelegation 报告该工具能否创建新的执行节点。

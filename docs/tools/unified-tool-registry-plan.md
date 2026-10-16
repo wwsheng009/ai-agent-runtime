@@ -88,7 +88,9 @@
 同一会话内三个数字不一致：profile 声明 7 / `/tools` 显示 10 / 模型实收 22。根因已定位为两条：
 (a) `/tools` 兜底分支读的是 `runtimeMCP` 单一源（`chat_actor_host.go:1413`），**缺 broker 这一源**，
 且传的是空账本 `toolsurface.Ledger{}`；
-(b) profile 的 allowlist 本就不约束控制面（`policy.IsRuntimeOwnedEssentialTool`）。
+(b) profile 的 allowlist 在当时不约束控制面（`policy.IsRuntimeOwnedEssentialTool`；
+    **2026-10-16 已变**：essential 豁免移除，allowlist 完全约束工具面，
+    见 [`tool-policy-wildcards.md`](tool-policy-wildcards.md) §2）。
 本方案的元数据接口必须做到**观测数字与请求数字同源**，否则新旧口径继续打架（→ 不变量 T7）。
 
 ---
@@ -225,6 +227,21 @@ func IsEssential(name string) bool           // 取代 policy.IsRuntimeOwnedEsse
 **实施时发现清单本身在迁移前是坏的**：基线把名字折向旧拼写、broker 却广播规范名，
 于是窄 allowlist 会静默摘掉委派入口的定义；等价口径因此按「**身份级集合相等**」而非
 「逐拼写相等」验收（§5.1 该行按此理解）。
+
+### P1.1 — `Essential` 豁免移除 + 名单通配（2026-10-16）——**已完成**
+
+P1 之后用户提出：profile 必须能**完全控制**工具面。同日落地（设计全文见
+[`tool-policy-wildcards.md`](tool-policy-wildcards.md)）：
+
+- `policy.AllowTool` 删除 essential 豁免分支：allowlist 变硬闸门，deny 恒优先；
+  `IsRuntimeOwnedEssentialTool` / `runtimeOwnedEssentialExplicitlyDenied` 退役，
+  测试与观测面改用 `toolregistry.IsEssential`（字段保留，仅观测语义）；
+- 新增 `toolregistry.MatchPattern` / `MatchesAnyPattern` / `ListDeclaresWildcard` /
+  `PatternHitsRegisteredName`：`*` 匹配一切、`prefix_*` 归一化前缀、其余归一精确；
+- `allowlist` / `denylist` 支持通配；父子交集（`intersectAllowedTools`）通配感知；
+- `disabled_capabilities` 通配在 profileinput 展开为封闭枚举域（`*`→全部用户可禁域）；
+- 消费端适配：agent spawn 定义闸门、`childSurfaceLacksShell`、toolguidance facts、
+  profile validate / reference_validation 的通配校验。
 
 ### P2 — 注册点收敛（中高风险）
 

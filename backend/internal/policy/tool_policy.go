@@ -18,7 +18,12 @@ import (
 
 // ToolExecutionPolicy constrains which runtime tools may execute.
 type ToolExecutionPolicy struct {
-	ReadOnly         bool
+	ReadOnly bool
+	// AllowedTools / DeniedTools 的名单元素支持通配模式
+	// （toolregistry.MatchPattern："*" 匹配一切、"prefix_*" 前缀匹配、
+	// 其余归一化精确匹配）。AllowedTools 只在 AllowlistEnabled 为真时生效，
+	// 空 map = 全部拒绝（DisableTools 语义）。Deny 恒优先于 allow：通配 deny
+	// 同样拦得住通配 allow 放进来的工具。
 	AllowedTools     map[string]bool
 	DeniedTools      map[string]bool
 	AllowlistEnabled bool
@@ -111,27 +116,30 @@ func (p *ToolExecutionPolicy) SetPlanWriteExemption(active bool, raw []string, r
 }
 
 // AllowTool checks whether a tool is allowed by name.
+//
+// 判定顺序：deny（恒优先，支持通配）→ BlockDelegation → allowlist 闸门
+// （支持通配，无豁免）→ capability scope → read-only。runtime essential
+// 自 2026-10-16 起不再绕过 allowlist：profile 必须能完全控制工具面，
+// 需要控制面的 profile 用通配（如 ["*"]、["subagent_*"]）或显式名单放行。
 func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	if p == nil {
 		return nil
 	}
 	normalizedToolName := normalizeToolName(toolName)
-	if p.DeniedTools[toolName] || runtimeOwnedEssentialExplicitlyDenied(p.DeniedTools, normalizedToolName) {
+	if p.DeniesTool(toolName) {
 		return fmt.Errorf("tool denied by execution policy: %s", toolName)
 	}
 	if p.BlockDelegation && IsDelegationToolName(normalizedToolName) {
 		return fmt.Errorf("nested delegation is disabled by execution policy: %s", toolName)
 	}
-	// Runtime-owned agent essentials (plan mode, goal/todos, collab, search_tool)
-	// may be injected after a *narrow non-empty* product/profile allowlist is
-	// derived. The allowlist must not brick the agent control plane. An empty
-	// allowlist means tools are fully disabled (DisableTools) and essentials
-	// do not bypass. Explicit deny, capability scope, and read-only still apply.
-	if p.AllowlistEnabled && !p.AllowedTools[toolName] {
-		if len(p.AllowedTools) == 0 ||
-			(!IsRuntimeOwnedEssentialTool(normalizedToolName) && !p.planWriteAllowlistExempt(normalizedToolName)) {
-			return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
-		}
+	// The allowlist is a hard gate: a tool not matched by the list (exact
+	// name or wildcard pattern, see toolregistry.MatchPattern) is denied,
+	// runtime-owned essentials included. Profiles that need the agent control
+	// plane opt in explicitly, e.g. allowlist: ["*"] or ["view", "subagent_*"].
+	// The plan-mode write exemption stays the only relaxation; capability
+	// scope and read-only still apply below.
+	if p.AllowlistEnabled && !p.AllowsTool(toolName) && !p.planWriteAllowlistExempt(normalizedToolName) {
+		return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
 	}
 	if err := p.AllowCapabilities(p.resolveCapabilities(EvalRequest{ToolName: toolName})); err != nil {
 		return fmt.Errorf("tool %s: %w", toolName, err)
@@ -151,23 +159,77 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	return nil
 }
 
-// IsRuntimeOwnedEssentialTool reports tools the runtime needs for agent
-// operation (session control, plan mode, collab, catalog search). These bypass
-// allowlist gates so a narrow --allow-tool / profile allowlist cannot brick the
-// agent control plane. Explicit DeniedTools, capability scope, and read-only
-// still apply.
-//
-// 名单真源已迁至 internal/toolregistry（Entry.Essential）；本函数只做转发。
-func IsRuntimeOwnedEssentialTool(toolName string) bool {
-	return toolregistry.IsEssential(toolName)
-}
-
-func runtimeOwnedEssentialExplicitlyDenied(deniedTools map[string]bool, normalizedToolName string) bool {
-	if !IsRuntimeOwnedEssentialTool(normalizedToolName) {
+// DeniesTool reports whether the deny list rejects the tool: exact entries
+// (raw or normalized spelling) or wildcard patterns. Exported for callers
+// that need list membership semantics rather than a full AllowTool
+// evaluation (capability scope and read-only are not consulted here).
+func (p *ToolExecutionPolicy) DeniesTool(toolName string) bool {
+	if p == nil {
 		return false
 	}
-	for name, denied := range deniedTools {
-		if denied && normalizeToolName(name) == normalizedToolName {
+	return deniedToolsReject(p.DeniedTools, toolName)
+}
+
+// AllowsTool reports whether the allow list admits the tool: exact entries
+// (raw or normalized spelling) or wildcard patterns. An empty list admits
+// nothing: that is the DisableTools surface. Exported for callers that need
+// list membership semantics rather than a full AllowTool evaluation.
+func (p *ToolExecutionPolicy) AllowsTool(toolName string) bool {
+	if p == nil {
+		return false
+	}
+	return allowedToolsAdmit(p.AllowedTools, toolName)
+}
+
+// AdmitsAnyShellLikeTool reports whether the allowlist can still admit any
+// shell-like tool, wildcard patterns included. Used by surface diagnostics
+// that must not flag a wildcard-enabled policy as shell-less.
+func (p *ToolExecutionPolicy) AdmitsAnyShellLikeTool() bool {
+	if p == nil {
+		return false
+	}
+	for _, entry := range toolregistry.Entries() {
+		if toolregistry.IsShellLike(entry.Name) && allowedToolsAdmit(p.AllowedTools, entry.Name) {
+			return true
+		}
+	}
+	// Retired spellings can still be granted through aliases/normalization.
+	for _, name := range []string{"bash", "execute_shell_command", "run_command"} {
+		if allowedToolsAdmit(p.AllowedTools, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// deniedToolsReject is the deny-list membership test (see DeniesTool).
+func deniedToolsReject(list map[string]bool, toolName string) bool {
+	if list[toolName] {
+		return true
+	}
+	normalized := normalizeToolName(toolName)
+	if normalized != "" && normalized != toolName && list[normalized] {
+		return true
+	}
+	for pattern := range list {
+		if toolregistry.MatchPattern(pattern, toolName) {
+			return true
+		}
+	}
+	return false
+}
+
+// allowedToolsAdmit is the allow-list membership test (see AllowsTool).
+func allowedToolsAdmit(list map[string]bool, toolName string) bool {
+	if list[toolName] {
+		return true
+	}
+	normalized := normalizeToolName(toolName)
+	if normalized != "" && normalized != toolName && list[normalized] {
+		return true
+	}
+	for pattern := range list {
+		if toolregistry.MatchPattern(pattern, toolName) {
 			return true
 		}
 	}
@@ -197,7 +259,7 @@ func (p *ToolExecutionPolicy) planWriteAllowlistExempt(normalizedToolName string
 // condition mirrors AllowTool's gate so the per-call target verification in
 // allowToolCall runs exactly for the calls the exemption let through.
 func (p *ToolExecutionPolicy) planWriteExemptionClaimed(toolName string) bool {
-	if p == nil || !p.AllowlistEnabled || p.AllowedTools[toolName] {
+	if p == nil || !p.AllowlistEnabled || p.AllowsTool(toolName) {
 		return false
 	}
 	return p.planWriteAllowlistExempt(toolName)
@@ -1098,12 +1160,20 @@ func intersectAllowedTools(parentEnabled bool, parent map[string]bool, requested
 		return true, buildAllowedToolsMap(requested)
 	default:
 		requestedSet := buildAllowedToolsMap(requested)
-		result := make(map[string]bool)
+		// Wildcard-aware intersection: the child never gets wider than the
+		// parent. A parent wildcard ("*" or "prefix_*") keeps matching child
+		// entries that a literal map lookup would drop (the pre-wildcard
+		// behavior would silently strip such children to zero — the exact
+		// blackout validateChildToolAllowlist guards against); a child
+		// wildcard entry never widens a narrower parent list because only
+		// requested names are re-tested against the parent list.
+		result := make(map[string]bool, len(requestedSet))
 		for name := range requestedSet {
-			if parent[name] {
+			if allowedToolsAdmit(parent, name) {
 				result[name] = true
 			}
 		}
 		return true, result
 	}
 }
+

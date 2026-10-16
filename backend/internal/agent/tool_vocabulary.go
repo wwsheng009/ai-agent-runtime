@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // Registered built-in runtime tool names.
@@ -82,41 +83,14 @@ func validateChildToolAllowlist(taskID, source string, requested []string, child
 	)
 }
 
-// legacyToolSuggestions maps retired built-in tool vocabulary onto the runtime
-// tool that replaced it.
+// 退役内置工具名 → 现役替代名的表只保留在 toolregistry（LegacyReplacement）。
+// 这里曾有过第二份副本，它既落后于注册表（缺 overwrite_file/multi_edit 等条目），
+// 又把现役别名 bash 误列为退役名——于是 surface 含 shell 时，一个本来可执行的
+// bash 请求会被判成"运行时已不再提供"而拒掉。
 //
-// The table only powers diagnostics: a request is never rewritten, because
-// names such as read_file/write_file can equally belong to a real broker or MCP
-// server. A retired name is reported only when its replacement is present in
-// the agent's live tool surface, which cannot be true for an MCP-only tool.
-var legacyToolSuggestions = map[string]string{
-	"read_file":      toolNameView,
-	"read_files":     toolNameView,
-	"view_file":      toolNameView,
-	"open_file":      toolNameView,
-	"read_logs":      toolNameView,
-	"list_directory": toolNameLs,
-	"list_files":     toolNameLs,
-	"list_dir":       toolNameLs,
-	"ls_dir":         toolNameLs,
-	"search_code":    toolNameGrep,
-	"search_repo":    toolNameGrep,
-	"grep_repo":      toolNameGrep,
-	"find_in_files":  toolNameGrep,
-	"write_file":     toolNameWrite,
-	"create_file":    toolNameWrite,
-	"edit_file":      toolNameEdit,
-	"apply_diff":     toolNameApplyPatch,
-	"run_tests":      toolNameShell,
-	"run_command":    toolNameShell,
-	"bash":           toolNameShell,
-	"git_log":        toolNameShell,
-	"git_status":     toolNameShell,
-	"git_diff":       toolNameShell,
-	"web_fetch":      toolNameFetch,
-	"http_get":       toolNameFetch,
-	"search_web":     toolNameWebSearch,
-}
+// 该表的既有契约不变：只做诊断，绝不改写请求（read_file/write_file 之类的名字
+// 同样可能属于真实的 broker/MCP 工具），且只有替代名确实出现在 agent 的现役
+// 工具面里才报告。
 
 // agentToolSurface returns the tool names the agent can execute right now.
 //
@@ -162,7 +136,11 @@ func validateRequestedToolVocabulary(taskID, source string, requested []string, 
 		if trimmed == "" || surface[trimmed] {
 			continue
 		}
-		replacement, ok := legacyToolSuggestions[strings.ToLower(trimmed)]
+		// 退役名 → 现役替代名的单一真源在 toolregistry.LegacyReplacement。
+		// agent 侧不再自持一份表：旧副本把现役别名 bash 也列成退役名，
+		// 于是 surface 含 shell 时会把合法的 bash 请求当成"运行时已不再提供"拒掉；
+		// 两侧各持一份表的漂移也是这一类 bug 的温床。
+		replacement, ok := toolregistry.LegacyReplacement(trimmed)
 		if !ok || !surface[replacement] {
 			continue
 		}
@@ -295,7 +273,10 @@ func childSurfaceLacksShell(child *ToolExecutionPolicy) bool {
 	if child == nil {
 		return false
 	}
-	if child.AllowlistEnabled && !containsShellLikeToolName(child.AllowedToolNames()) {
+	// The allowlist may carry wildcard patterns ("*" / "shell-like prefixes");
+	// AllowedToolNames only lists the literal entries, so the wildcard-aware
+	// AdmitsAnyShellLikeTool check guards against false "shell-less" warnings.
+	if child.AllowlistEnabled && !child.AdmitsAnyShellLikeTool() && !containsShellLikeToolName(child.AllowedToolNames()) {
 		return true
 	}
 	if child.CapabilityScopeEnabled {

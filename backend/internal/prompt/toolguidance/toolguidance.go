@@ -13,6 +13,7 @@ import (
 
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // FactsFromPolicy derives ToolGuidanceFacts from a resolved execution policy.
@@ -28,14 +29,19 @@ func FactsFromPolicy(policy *runtimepolicy.ToolExecutionPolicy) *runtimeprompt.T
 	}
 	facts := &runtimeprompt.ToolGuidanceFacts{}
 	if policy.AllowlistEnabled {
-		only := make(map[string]bool, len(policy.AllowedTools))
-		for name, allowed := range policy.AllowedTools {
-			if !allowed {
-				continue
+		// 通配名单（"*" / "prefix_*"）不构成"only 这些工具"的语义（面被通配
+		// 放大，列出字面项会误导渲染器把别的工具当缺席），此时 Only 保持 nil
+		// = "有名单但不收窄到字面名单"。
+		if !toolregistry.ListDeclaresWildcard(allowedToolPatternNames(policy.AllowedTools)) {
+			only := make(map[string]bool, len(policy.AllowedTools))
+			for name, allowed := range policy.AllowedTools {
+				if !allowed {
+					continue
+				}
+				only[strings.ToLower(strings.TrimSpace(name))] = true
 			}
-			only[strings.ToLower(strings.TrimSpace(name))] = true
+			facts.Only = only
 		}
-		facts.Only = only
 	}
 	if len(policy.DeniedTools) > 0 || policy.ReadOnly {
 		denied := make(map[string]bool, len(policy.DeniedTools)+len(runtimeprompt.WriteLikeTools))
@@ -53,4 +59,14 @@ func FactsFromPolicy(policy *runtimepolicy.ToolExecutionPolicy) *runtimeprompt.T
 		facts.Denied = denied
 	}
 	return facts
+}
+
+// allowedToolPatternNames flattens the allowlist map into a name slice for
+// wildcard detection.
+func allowedToolPatternNames(allowed map[string]bool) []string {
+	names := make([]string, 0, len(allowed))
+	for name := range allowed {
+		names = append(names, name)
+	}
+	return names
 }

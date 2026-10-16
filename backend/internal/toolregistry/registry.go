@@ -81,8 +81,11 @@ type Entry struct {
 	Group Group
 	// Exposure 是该工具允许出现的宿主面。
 	Exposure []Exposure
-	// Essential 为真表示"运行时自有必需工具"：窄 allowlist 不得裁剪它，
-	// 否则会 brick 掉 agent 控制面（语义同 policy.IsRuntimeOwnedEssentialTool）。
+	// Essential 为真表示"运行时自有工具"（会话控制、计划、协作、目录检索等）。
+	// 它**不再**是 allowlist 豁免：自 2026-10-16 起 profile 必须能完全控制工具
+	// 面，窄 allowlist 下未列出的 essential 工具同样被裁剪，需要用通配模式
+	// （toolregistry.MatchPattern，如 "subagent_*"）或显式名单放回来。字段保留
+	// 供观测面（toolsurface metadata.essential）、目录 API 与测试引用。
 	Essential bool
 	// ToolkitBuiltin 为真表示该内置工具的**定义**由 internal/toolkit/tools 提供，
 	// 且必须由 toolkit 装配点（internal/tools.registerBuiltinToolkitTools 的
@@ -190,7 +193,8 @@ var builtinEntries = []Entry{
 	{Name: "job_list", Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},
 	{Name: "job_search", Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},
 	// 注意：下面四个**不是** essential。原 IsRuntimeOwnedEssentialTool 不含它们，
-	// 它们只在 AllowTool 的 read-only 分支被显式拦截。
+	// 它们只在 AllowTool 的 read-only 分支被显式拦截。（Essential 自 2026-10-16
+	// 起不再是 allowlist 豁免，此处注释仅描述历史差异。）
 	{Name: "job_cancel", Aliases: []string{"task_kill"}, Group: GroupOrchestration, Exposure: controlPlaneExposure},
 	{Name: "job_monitor", Aliases: []string{"task_monitor"}, Group: GroupOrchestration, Exposure: controlPlaneExposure},
 	{Name: "job_control", Aliases: []string{"task_control"}, Group: GroupOrchestration, Exposure: controlPlaneExposure},

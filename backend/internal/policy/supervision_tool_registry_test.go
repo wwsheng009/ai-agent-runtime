@@ -5,15 +5,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // 巡检工具族在 policy 包内有三张并行注册表：
 //
-//  1. IsRuntimeOwnedEssentialTool —— 窄 allowlist 下保留定义 + 执行豁免；
-//     agent/loop.go 的 filterPolicyBlockedToolDefinitions 按允许结果把定义从
-//     provider 请求里摘掉，所以漏项 = 模型看不见该工具（比执行被拒更糟），
-//     而 prompt 引导词仍在让模型调用它。
+//  1. toolregistry.Entry.Essential —— "运行时自有"标记（观测/目录用）。
+//     自 2026-10-16 起它**不再**是 allowlist 豁免：窄 allowlist 会连巡检
+//     族一起裁掉，需要控制面的名单用通配（["*"] / ["subagent_*"]）或
+//     显式名字放行。
 //  2. knownToolTaxonomy —— taxonomy-first 的能力解析入口。
 //  3. normalizeToolName 别名表 + 能力表 —— 模型少写下划线时的归一化。
 //
@@ -32,22 +33,32 @@ var supervisionToolFamily = []string{
 	"subagent_control",
 }
 
-func TestSupervisionToolsAreRuntimeOwnedEssentials(t *testing.T) {
+func TestSupervisionToolsAreDeclaredRuntimeOwned(t *testing.T) {
 	for _, name := range supervisionToolFamily {
-		if !IsRuntimeOwnedEssentialTool(name) {
-			t.Errorf("%s must be runtime-owned essential: a narrow --allow-tool/profile allowlist would otherwise filter its definition out of the provider request", name)
+		if !toolregistry.IsEssential(name) {
+			t.Errorf("%s must be declared Essential in the tool registry (observation/catalog metadata)", name)
 		}
 	}
 }
 
-func TestSupervisionToolsSurviveNarrowAllowlist(t *testing.T) {
+func TestSupervisionToolsGatedByAllowlistUnlessWildcard(t *testing.T) {
 	policy := NewToolExecutionPolicy([]string{"view", "grep"}, false)
 	for _, name := range supervisionToolFamily {
-		if err := policy.AllowTool(name); err != nil {
-			t.Errorf("expected %s to stay executable under a narrow allowlist, got %v", name, err)
+		if err := policy.AllowTool(name); err == nil {
+			t.Errorf("expected the narrow allowlist to gate %s (essential bypass removed 2026-10-16)", name)
 		}
-		if !policy.AllowsDefinition(name) {
-			t.Errorf("expected %s to stay visible under a narrow allowlist", name)
+		if policy.AllowsDefinition(name) {
+			t.Errorf("expected the narrow allowlist to hide the definition of %s", name)
+		}
+	}
+
+	// supervision_snapshot / supervision_descendants / read_agent_result 是
+	// 独立注册条目（规范名即自身，不落 subagent_ 前缀），需要显式名字放行；
+	// subagent_* 前缀覆盖其余族员。
+	wildcard := NewToolExecutionPolicy([]string{"subagent_*", "supervision_*", "read_agent_result", "view"}, false)
+	for _, name := range supervisionToolFamily {
+		if err := wildcard.AllowTool(name); err != nil {
+			t.Errorf("expected the subagent_* wildcard to admit %s, got %v", name, err)
 		}
 	}
 }

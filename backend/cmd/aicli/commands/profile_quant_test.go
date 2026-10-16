@@ -16,15 +16,15 @@ import (
 // 全量清单取 runtimepolicy.KnownToolTaxonomyNames()（与 `profile validate`
 // 的登记清单同一事实源），不重复维护第二份名单。
 //
-// 实测证据（2026-09-24，`aicli exec --enable-tools --debug-http` 的请求 artifact
-// `*_request_provider_wrapper.json`）：
-//   - 全量基线请求 tools[] = 45：其中 21 个为 profile 可控的目录工具，24 个为
-//     runtime-owned 控制面工具；后者按 `policy/tool_policy.go`
-//     IsRuntimeOwnedEssentialTool 设计**不受 allowlist 收窄**，仅显式 denylist
-//     可裁剪（设计 §9.2 T2 / Batch 9），故量化界按"profile 可控工具面"计量；
-//   - minimal 生效 2（view/grep）、review 生效 6（fetch/glob/grep/ls/view/web_search），
-//     相对 21 个可控工具分别 9.5% / 28.6%，均 ≤ 40%；
-//   - 两个模板被排除的目录工具均未出现在 tools[]（extra=0，无"假裁剪"）。
+// 边界说明（`policy/tool_policy.go`）：runtime-owned 控制面工具的 essential
+// 豁免已于 2026-10-16 移除——allowlist 现在完全裁剪工具面（含控制面），需要
+// 控制面的模板用通配（["*"] / ["subagent_*"]）或显式名单放行；本测试按
+// `KnownToolTaxonomyNames()` 的全量清单计量，两个模板的生效工具面均
+// 远低于 40%：
+//   - minimal 生效 7（view/grep/glob/ls/write/edit/apply_patch，读取 + 基础文件编辑）；
+//   - review 生效 6（fetch/glob/grep/ls/view/web_search）。
+//
+// 两个模板被排除的目录工具均未出现在 tools[]（extra=0，无"假裁剪"）。
 func TestBuiltinTemplateToolSurfaceQuantifiedBound(t *testing.T) {
 	baseline := runtimepolicy.KnownToolTaxonomyNames()
 	if len(baseline) == 0 {

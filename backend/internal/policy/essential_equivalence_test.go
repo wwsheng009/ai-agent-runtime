@@ -25,6 +25,10 @@ import (
 // 所以 P1 不是"换个地方查表"，而是**修掉一个真红 bug**。本文件把这个事实
 // 钉成可回归的断言：注册表声明为 Essential 的工具，其规范名必须判定为必需。
 //
+// 语义注记（2026-10-16）：Entry.Essential 已不再是 allowlist 豁免（policy
+// 移除了 bypass），本文件审计的"必需判定"现在只服务观测面（metadata.
+// essential）与目录 API；集合等价断言原样保留。
+//
 // 为让"迁移前后的差异"可审计而不是自说自话，下面把 P1 前的实现**逐字冻结**
 // 为基准（legacyP1Normalize / legacyP1Essential），再从 toolregistry 的登记表
 // 派生语料做集合级比对。冻结副本只作审计基准，**不得**跟随真源演进。
@@ -204,7 +208,7 @@ func TestEssentialSetMatchesPreMigrationBaseline(t *testing.T) {
 
 	for _, name := range corpus {
 		legacy := legacyP1Essential(name)
-		current := IsRuntimeOwnedEssentialTool(name)
+		current := toolregistry.IsEssential(name)
 		legacyByName[name], currentByName[name] = legacy, current
 		if legacy {
 			legacyIdentities[toolregistry.Canonical(name)] = true
@@ -250,17 +254,17 @@ func TestEssentialFollowsRegistryDeclaration(t *testing.T) {
 	require.NotEmpty(t, entries)
 
 	for _, entry := range entries {
-		require.Equal(t, entry.Essential, IsRuntimeOwnedEssentialTool(entry.Name),
+		require.Equal(t, entry.Essential, toolregistry.IsEssential(entry.Name),
 			"%s: policy 的必需判定必须等于 Entry.Essential", entry.Name)
 		for _, alias := range entry.Aliases {
-			require.Equal(t, entry.Essential, IsRuntimeOwnedEssentialTool(alias),
+			require.Equal(t, entry.Essential, toolregistry.IsEssential(alias),
 				"%s（%s 的现役别名）: 别名必须与规范名同向", alias, entry.Name)
 		}
 	}
 
 	// 负对照：非必需与外部来源名不得被顺手放行。
 	for _, name := range []string{"view", "grep", "job_cancel", "job_monitor", "mcp__foo__spawn_agent", "no_such_tool", ""} {
-		require.False(t, IsRuntimeOwnedEssentialTool(name),
+		require.False(t, toolregistry.IsEssential(name),
 			"%q 不是 runtime-owned essential", name)
 	}
 }

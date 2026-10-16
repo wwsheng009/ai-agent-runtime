@@ -13,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -77,11 +78,14 @@ func TestToolExecutionPolicy_AllowTool_BlocksDenylistedTool(t *testing.T) {
 	}
 }
 
-func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *testing.T) {
+func TestToolExecutionPolicy_AllowTool_RuntimeSearchGatedByAllowlist(t *testing.T) {
 	policy := NewToolExecutionPolicy([]string{"view", "grep"}, true)
-	if err := policy.AllowTool("search_tool"); err != nil {
-		t.Fatalf("expected runtime search meta-tool to remain executable, got %v", err)
+	// 自 2026-10-16 起 runtime essential 不再绕过 allowlist：窄名单连
+	// search_tool 一起裁掉（需要控制面的 profile 用 ["*"] / ["search_tool"] 放行）。
+	if err := policy.AllowTool("search_tool"); err == nil {
+		t.Fatalf("expected narrow allowlist to gate runtime search meta-tool (essential bypass removed 2026-10-16), got %v", err)
 	}
+	// 显式 deny 恒优先：无论工具是否在名单里，deny 的报错口径不变。
 	policy.DeniedTools = map[string]bool{"search_tool": true}
 	for _, name := range []string{"search_tool", "Search_Tool"} {
 		if err := policy.AllowTool(name); err == nil {
@@ -94,7 +98,7 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *te
 	}
 }
 
-func TestToolExecutionPolicy_AllowTool_AllowsRuntimeOwnedEssentialsOutsideAllowlist(t *testing.T) {
+func TestToolExecutionPolicy_AllowTool_EssentialsGatedByAllowlist(t *testing.T) {
 	policy := NewToolExecutionPolicy([]string{"view", "grep"}, false)
 	essentials := []string{
 		"plan_enter", "plan_exit", "plan_review", "ask_user_question",
@@ -103,10 +107,10 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeOwnedEssentialsOutsideAllowl
 		"task_output", "search_tool",
 	}
 	for _, name := range essentials {
-		if err := policy.AllowTool(name); err != nil {
-			t.Fatalf("expected runtime-owned essential %q to remain executable under narrow allowlist, got %v", name, err)
+		if err := policy.AllowTool(name); err == nil {
+			t.Fatalf("expected narrow allowlist to gate runtime-owned essential %q (essential bypass removed 2026-10-16)", name)
 		}
-		if !IsRuntimeOwnedEssentialTool(name) {
+		if !toolregistry.IsEssential(name) {
 			t.Fatalf("expected %q to be classified as runtime-owned essential", name)
 		}
 	}
@@ -117,7 +121,36 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeOwnedEssentialsOutsideAllowl
 	if err := policy.AllowTool("shell"); err == nil {
 		t.Fatal("expected non-essential shell tool to remain allowlist-gated")
 	}
-	// Explicit deny still wins over essential bypass.
+	// 通配放行：["*"] 全量放行（essential 包含在内），prefix 模式按域放行；
+	// deny 恒优先——通配 deny 同样拦得住通配 allow 放进来的工具。
+	wildcard := NewToolExecutionPolicy([]string{"*"}, false)
+	for _, name := range essentials {
+		if err := wildcard.AllowTool(name); err != nil {
+			t.Fatalf("expected wildcard allowlist to admit %q, got %v", name, err)
+		}
+	}
+	prefixed := NewToolExecutionPolicy([]string{"subagent_*"}, false)
+	if err := prefixed.AllowTool("subagent_spawn"); err != nil {
+		t.Fatalf("expected prefix pattern to admit subagent_spawn, got %v", err)
+	}
+	// spawn_subagents 是独立注册条目（非 subagent_spawn 别名），不落在
+	// subagent_* 前缀内——需要控制面的名单要显式列它或用 "*"。
+	if err := prefixed.AllowTool("spawn_subagents"); err == nil {
+		t.Fatal("expected prefix pattern to keep the standalone spawn_subagents entry gated")
+	}
+	if err := prefixed.AllowTool("job_start"); err == nil {
+		t.Fatal("expected prefix pattern to keep job_start gated")
+	}
+	denyWins := NewToolExecutionPolicy([]string{"*"}, false)
+	denyWins.DeniedTools = map[string]bool{"job_*": true}
+	if err := denyWins.AllowTool("job_start"); err == nil {
+		t.Fatal("expected wildcard deny to beat wildcard allow for job_start")
+	}
+	if err := denyWins.AllowTool("view"); err != nil {
+		t.Fatalf("expected wildcard allow to keep view, got %v", err)
+	}
+
+	// Explicit deny still wins for exact entries.
 	policy.DeniedTools = map[string]bool{"Plan_Enter": true}
 	if err := policy.AllowTool("plan_enter"); err == nil {
 		t.Fatal("expected normalized explicit deny to block enter_plan_mode")
@@ -138,14 +171,14 @@ func TestToolExecutionPolicy_AllowTool_EmptyAllowlistBlocksEssentials(t *testing
 	}
 }
 
-func TestToolExecutionPolicy_AllowTool_EssentialStillHonorsCapabilityScope(t *testing.T) {
+func TestToolExecutionPolicy_AllowTool_AllowlistedToolsStillHonorCapabilityScope(t *testing.T) {
 	// enter_plan_mode requires CapReadOnly + CapAskUser; network alone is insufficient.
-	policy := NewCapabilityScopedToolExecutionPolicy([]string{"view"}, []Capability{CapReadOnly, CapAskUser, CapNetwork})
+	policy := NewCapabilityScopedToolExecutionPolicy([]string{"*"}, []Capability{CapReadOnly, CapAskUser, CapNetwork})
 	if err := policy.AllowTool("plan_enter"); err != nil {
 		t.Fatalf("expected plan_enter under read_only+ask_user+network scope, got %v", err)
 	}
 	// Without CapAskUser, enter_plan_mode is still capability-gated (allowlist bypass is not enough).
-	narrow := NewCapabilityScopedToolExecutionPolicy([]string{"view"}, []Capability{CapReadOnly, CapNetwork})
+	narrow := NewCapabilityScopedToolExecutionPolicy([]string{"*"}, []Capability{CapReadOnly, CapNetwork})
 	if err := narrow.AllowTool("plan_enter"); err == nil {
 		t.Fatal("expected plan_enter to remain capability-gated without CapAskUser")
 	}

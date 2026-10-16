@@ -16,11 +16,9 @@ tools:
     - ls
     - web_search
     - fetch
-  # T2 能力裁剪（§9.2）：子代理/团队工具属"运行时自有"工具
-  # （policy.IsRuntimeOwnedEssentialTool），**不受 allowlist 收窄**——allowlist
-  # 只裁剪目录工具；要真正关闭只能显式 denylist（deny 恒优先于 allow，且显式
-  # deny 会覆盖 essential 豁免，见 policy/tool_policy.go:90-101）。
-  # 不新增 subagents.enabled 之类的配置开关：那是假开关（工具面不联动）。
+  # 子代理/团队等控制面工具自 2026-10-16 起不再有 essential 豁免：上面的
+  # allowlist 本身就会裁掉它们；这里的 denylist 是防御性双保险（deny 恒优先，
+  # 即便日后有人放宽 allowlist，deny 仍能拦住；也覆盖 MCP/宿主侧同名工具）。
   denylist:
     - spawn_agent
     - spawn_subagents

@@ -68,3 +68,45 @@ func TestCapabilitiesComplementOfKeepsFloorDomains(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{"read_only", "exec_shell"}, names)
 }
+
+// 通配能力域（2026-10-16）：能力域是封闭枚举，"*" 展开为全部用户可禁域，
+// "prefix*" 按域名前缀匹配（agent_* -> agent_management），与 allowlist/
+// denylist 的 toolregistry.MatchPattern 语义一致。
+func TestBuildToolExecutionPolicyDisabledCapabilitiesWildcardAll(t *testing.T) {
+	policy, err := BuildToolExecutionPolicy(ResolvedToolPolicy{
+		DisabledCapabilities: []string{"*"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, policy)
+
+	names := policy.AllowedCapabilityNames()
+	// 全部用户可禁域被禁；地板域（read_only/exec_shell）必须保留。
+	for _, domain := range runtimepolicy.AllUserDisablableCapabilities() {
+		require.NotContains(t, names, string(domain))
+	}
+	require.Contains(t, names, "read_only")
+	require.Contains(t, names, "exec_shell")
+}
+
+func TestBuildToolExecutionPolicyDisabledCapabilitiesWildcardPrefix(t *testing.T) {
+	policy, err := BuildToolExecutionPolicy(ResolvedToolPolicy{
+		DisabledCapabilities: []string{"agent_*", "background_task"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, policy)
+
+	names := policy.AllowedCapabilityNames()
+	require.NotContains(t, names, "agent_management")
+	require.NotContains(t, names, "background_task")
+	// 前缀只命中 agent_*；其余域不受影响。
+	require.Contains(t, names, "network")
+	require.Contains(t, names, "write_fs")
+}
+
+func TestBuildToolExecutionPolicyDisabledCapabilitiesWildcardNoMatchErrors(t *testing.T) {
+	_, err := BuildToolExecutionPolicy(ResolvedToolPolicy{
+		DisabledCapabilities: []string{"nonexistent_*"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "matches no capability domain")
+}

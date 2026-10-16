@@ -264,11 +264,23 @@ func TestRunProfileShowCommandEffectiveSurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("show minimal: %v", err)
 	}
-	if minimal.ToolPolicy.EffectiveAllowCount != 2 {
-		t.Fatalf("minimal allowlist 生效数量应为 2（view/grep），got %d", minimal.ToolPolicy.EffectiveAllowCount)
+	// minimal 已从"只读 view/grep"重新校准为"读取 + 基础编辑"：
+	// view/grep/glob/ls + write/edit/apply_patch = 7 个生效工具。
+	if minimal.ToolPolicy.EffectiveAllowCount != 7 {
+		t.Fatalf("minimal allowlist 生效数量应为 7（view/grep/glob/ls/write/edit/apply_patch），got %d", minimal.ToolPolicy.EffectiveAllowCount)
 	}
-	if minimal.ToolPolicy.ReadOnly == nil || !*minimal.ToolPolicy.ReadOnly {
-		t.Fatalf("minimal 应解析 read_only=true：%+v", minimal.ToolPolicy.ReadOnly)
+	// read_only 取消：agent 需能完成基础的文件编辑。
+	if minimal.ToolPolicy.ReadOnly != nil && *minimal.ToolPolicy.ReadOnly {
+		t.Fatalf("minimal 已取消 read_only，got %+v", minimal.ToolPolicy.ReadOnly)
+	}
+	allowed := make(map[string]bool, len(minimal.ToolPolicy.Allowlist))
+	for _, name := range minimal.ToolPolicy.Allowlist {
+		allowed[name] = true
+	}
+	for _, want := range []string{"view", "grep", "glob", "ls", "write", "edit", "apply_patch"} {
+		if !allowed[want] {
+			t.Fatalf("minimal allowlist 缺少基础编辑工具 %q：%v", want, minimal.ToolPolicy.Allowlist)
+		}
 	}
 	if len(minimal.Skills.Effective) != 0 {
 		t.Fatalf("minimal denylist=[*] 应清空技能：%v", minimal.Skills.Effective)
@@ -279,9 +291,10 @@ func TestRunProfileShowCommandEffectiveSurface(t *testing.T) {
 }
 
 // TestRenderedReviewTemplateDeniesDelegationTools 是 Batch 9 / T2 的验收线：
-// 子代理/团队工具属"运行时自有"工具，allowlist 裁不掉它们
-// （policy.IsRuntimeOwnedEssentialTool），模板必须用显式 denylist 才能真正关闭；
-// 且 deny 必须精确命中——未被 deny 的运行时自有工具仍可用（不是"全禁"）。
+// 子代理/团队工具的 essential 豁免已于 2026-10-16 移除——allowlist 本身就能
+// 裁掉它们；模板仍保留显式 denylist 作为防御性双保险（deny 恒优先，且覆盖
+// MCP/宿主侧同名工具）；且 deny 必须精确命中——未被 deny 的工具仍可用
+//（不是"全禁"）。
 func TestRenderedReviewTemplateDeniesDelegationTools(t *testing.T) {
 	root := t.TempDir()
 	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{}}
@@ -315,12 +328,17 @@ func TestRenderedReviewTemplateDeniesDelegationTools(t *testing.T) {
 	}
 	for _, name := range delegationTools {
 		if err := state.ToolPolicy.AllowTool(name); err == nil {
-			t.Fatalf("review 模板必须真正拒绝 %s（allowlist 裁不掉运行时自有工具，只有显式 denylist 生效）", name)
+			t.Fatalf("review 模板必须真正拒绝 %s（deny 恒优先）", name)
 		}
 	}
-	// 精确命中：未被 deny 的运行时自有工具仍然可用。
-	if err := state.ToolPolicy.AllowTool("todos"); err != nil {
-		t.Fatalf("todos 未被 deny，应仍可用：%v", err)
+	// 精确命中（2026-10-16 新语义）：essential 豁免已移除——todos 不在 review
+	// 模板的 allowlist 里，allowlist 本身就把它裁掉了；denylist 只是防御双保险。
+	// 而 allowlist 里的工具（view）必须仍然可用，证明裁剪来自 allowlist 而非全禁。
+	if err := state.ToolPolicy.AllowTool("todos"); err == nil {
+		t.Fatal("todos 不在 review allowlist 中，essential 豁免移除后应被裁掉")
+	}
+	if err := state.ToolPolicy.AllowTool("view"); err != nil {
+		t.Fatalf("allowlist 内的 view 应仍可用：%v", err)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 )
 
 // 共享校验实现（实施方案 Batch 8 任务 1）：`aicli profile validate`（CLI）与
@@ -107,6 +108,16 @@ func ValidateProfileReference(root, agent string, options ResolveOptions) (*Refe
 		for _, name := range names {
 			name = strings.TrimSpace(name)
 			if name == "" || name == "*" {
+				continue
+			}
+			// 通配模式（"*" / "prefix_*"）按模式匹配登记表，命中即不报；
+			// 一个命中不了任何登记名的模式保留 warning（很可能是拼写错误）。
+			if strings.Contains(name, "*") {
+				if toolregistry.PatternHitsRegisteredName(name) {
+					continue
+				}
+				addIssue(ProfileSpecIssueWarning, path,
+					"通配模式 %q 未命中任何登记工具名（若为 MCP/动态工具可忽略）", name)
 				continue
 			}
 			if _, ok := runtimepolicy.LookupToolTaxonomy(name); !ok {
