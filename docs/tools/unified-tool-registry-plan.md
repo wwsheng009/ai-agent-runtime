@@ -256,6 +256,10 @@ func IsEssential(name string) bool           // 取代 policy.IsRuntimeOwnedEsse
   通过。所以推迟的理由不是"改同一文件必冲突"，而是不与**活动**写入者共用同一包
   （对方可能整包格式化或回滚，代价不可控）；该 slice 只收敛一行调用惯用法，收益小、
   等待成本低，故维持推迟。
+  **16:23 复核（提交后）**：该包脏文件已增至 **31** 个，最近一次写入距今 **3 分钟**
+  （`agent_stdio_session_mgmt.go` 16:20:08、`chat_actor_host.go` 16:18:46）——写入者**仍在活动**，
+  故推迟结论不变。另：本战役的 29 个文件已于 `3bc49a2f` 提交，此后不再与他们的改动混在同一份
+  未提交状态里。
 - **slice 3（已完成，2026-10-16）**：`code.*` 条件注册路径（`gate.add`）收敛。
   **本节原先写的"仍受同一阻塞（5 处注册点位于 `cmd/aicli/commands`）"是错的，已改正**：
   闸门与它的名单都在 `internal/tools`（`manager.go:48 codeGate`、`:96` 由
