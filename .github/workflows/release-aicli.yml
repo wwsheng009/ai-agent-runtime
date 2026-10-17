@@ -702,8 +702,8 @@ jobs:
         with:
           name: ${{ steps.pkg.outputs.basename }}
           path: |
-            dist/${{ steps.pkg.outputs.archive }}
-            dist/${{ steps.pkg.outputs.archive }}.sha256
+            ${{ env.WORKDIR }}/dist/${{ steps.pkg.outputs.archive }}
+            ${{ env.WORKDIR }}/dist/${{ steps.pkg.outputs.archive }}.sha256
           if-no-files-found: error
           retention-days: 14
 
