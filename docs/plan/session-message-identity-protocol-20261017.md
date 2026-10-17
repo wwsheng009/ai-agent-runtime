@@ -191,6 +191,19 @@ P1 工期承诺前必须完成：用 `rg "loadSession"` 全量枚举 actor 内�
 预估：P0（含 spike）0.5–1 天；P1+P2 约 3–4 天（含 5+ 分叉点逐一改造与回归）；
 P3+P4 约 1–2 天 + 一周观测窗。**工期以 spike 清单确认为准，此为上限估计。**
 
+### 5.1 落地进展（2026-10-17，P0–P3 主体完成）
+
+| 阶段 | 状态 | commit | 交付 |
+|---|---|---|---|
+| P0 验收门 + spike | ✅ | `acdf1402` | 复现测试入库（双模式：CI 默认记录 known-defect / `AICLI_IDENTITY_PROTOCOL_STRICT=1` 硬门）；分叉点封闭清单（15 处 loadSession 全量枚举，§2.2 表） |
+| P1 创建时授予 | ✅ | `888ce38c` / `8d3a5e11` | `BuilderIdentity`（builder 两创建点接线，nil=零行为变化）+ run 起点接线；3 组单测（重复内容 id 恒异/nil 行为/已有 id 保留）；回执回放身份保持审计 2 组 |
+| P2 单写者收敛 | ✅ | `4180d359` | `RunLiveSession` 受控接口（真身引用挂载/解除）；3 个 run 中分叉点迁移（recordPendingToolCall / resumePendingToolWithResult / resumeApprovedPendingTool）；**strict 验收门转绿**（实测缺陷端到端闭环） |
+| P3 观测 + backfill 原语 | ✅ 主体 | `9b6b86bd` | `identity_missing` 计数器 + 结构化日志（不改行为）；`BackfillCanonicalIdentities` 幂等原语（只授予行级身份，不伪造 turn_id）；3 组测试 |
+| P3 剩余 | ⏳ | — | CLI 命令 `aicli session backfill-identities` 包装（Load→backfill→Update 循环）；观测窗（7 天判据） |
+| P4 清理 | ⏳ 观测窗后 | — | 删 `message_identity_inherit.go` 与 legacy 启发式分支；session-dedupe 退役评估 |
+
+**验证状态**：strict 门双模式行为符合设计（默认=PASS+known-defect 记录；strict=缺陷未修时 FAIL、P2 后 PASS）；`internal/agent` 全量绿；`internal/chat` 唯一失败为并发 workstream 既有回归（`TestUpdateDoesNotAppendRebuiltPromptOfOpenTurn`，stash 二分证实与本线无关）。
+
 ---
 
 ## 6. 风险与对策
