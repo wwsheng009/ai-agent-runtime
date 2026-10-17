@@ -42,6 +42,9 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 	case "pause":
 		return updateGoalStatusCommand(session, runtimegoal.StatusPaused, "Goal 已暂停", "user", "")
 	case "resume":
+		// G4 rearm 闸：/goal resume 是用户的明示继续意图，先于状态迁移清除
+		// disarmed 标记（updateGoalStatusCommand 内部的续跑 kick 因此可以生效）。
+		rearmGoalContinuation(session)
 		return updateGoalStatusCommand(session, runtimegoal.StatusActive, "Goal 已恢复", "user", "")
 	case "complete":
 		return updateGoalStatusCommand(session, runtimegoal.StatusComplete, "Goal 已标记完成", "user", "")
@@ -177,6 +180,10 @@ func printGoalStatus(session *ChatSession, jsonOutput bool) {
 		return
 	}
 	fmt.Println(formatGoalSummary(*goal))
+	// G4 rearm 闸可见性：disarmed 的 active goal 明确告知自动续跑被挡、如何恢复。
+	if goal.Status == runtimegoal.StatusActive && session.goalContinuationDisarmed.Load() {
+		fmt.Println(goalDisarmedStatusHint)
+	}
 }
 
 func updateGoalStatusCommand(session *ChatSession, status runtimegoal.Status, message string, completedBy string, completionSummary string) bool {

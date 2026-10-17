@@ -522,6 +522,9 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
 		return failLoad(err)
 	}
+	// G4 rearm 闸（同 resumeLatestRuntimeConversation）：按 ID 加载的历史会话
+	// 若带 active goal，同样默认不自动续跑。
+	disarmGoalContinuationAfterRestore(session)
 	ensureChatSystemPromptMessage(session)
 	if err := syncRuntimeSessionFromChatPreservingUpdatedAt(session); err != nil {
 		return failLoad(err)
@@ -1417,6 +1420,10 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
 		return failResume(err)
 	}
+	// G4 rearm 闸（DSH goal 借鉴）：恢复含 active goal 的历史会话后默认不
+	// 自动续跑；/goal resume 或用户显式继续意图重新武装。普通会话（无 goal
+	// 或非 active）零行为变化。
+	disarmGoalContinuationAfterRestore(session)
 	ensureChatSystemPromptMessage(session)
 	if err := syncRuntimeSessionFromChatPreservingUpdatedAt(session); err != nil {
 		return failResume(err)

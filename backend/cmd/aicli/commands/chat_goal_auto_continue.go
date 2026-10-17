@@ -419,6 +419,11 @@ func shouldAutoContinueActiveGoalDecision(session *ChatSession) (goalAutoContinu
 	if session.IsInterrupted() {
 		return goalAutoContinuationDecision{Reason: "interrupted"}, nil
 	}
+	if session.goalContinuationDisarmed.Load() {
+		// G4 rearm 闸：恢复会话后默认不自动续跑（对齐 DSH goal 的 armed/
+		// disarmed 语义）；/goal resume 或带继续意图的用户消息重新武装。
+		return goalAutoContinuationDecision{Reason: "goal_disarmed"}, nil
+	}
 	if session.RuntimeSession == nil {
 		return goalAutoContinuationDecision{Reason: "runtime_session_missing"}, nil
 	}
@@ -571,6 +576,33 @@ func sessionHasActivePersistedGoal(session *ChatSession) bool {
 		return false
 	}
 	return goal.Status == runtimegoal.StatusActive
+}
+
+// goalDisarmedStatusHint 是恢复态下 active goal 的状态提示：自动续跑已被
+// rearm 闸挡住，需要 /goal resume（或用户在消息中明示继续）才恢复（G4，
+// docs/analysis/dsh-goal-domain-vs-aar-goal-20261017.md §2.3/G4）。
+const goalDisarmedStatusHint = "提示: 已恢复的历史会话默认不自动续跑；/goal resume 可重新启动该目标。"
+
+// disarmGoalContinuationAfterRestore 在会话恢复（--resume / /resume / 会话切换
+// 加载）完成后调用：目标仍为 active 时置 rearm 闸——用户随后的任意消息不再
+// 触发自动续跑，直到 /goal resume 或用户在消息中明示继续。无 goal 或 goal
+// 非 active 的会话不受影响（普通历史会话行为零变化）。进程内标记，不落库。
+func disarmGoalContinuationAfterRestore(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	if !sessionHasActivePersistedGoal(session) {
+		return
+	}
+	session.goalContinuationDisarmed.Store(true)
+}
+
+// rearmGoalContinuation 清除 rearm 闸（/goal resume 与用户显式继续意图入口）。
+func rearmGoalContinuation(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	session.goalContinuationDisarmed.Store(false)
 }
 
 // requestGoalContinuationKick 请求一次隐藏续跑：/goal resume（以及其它把 goal
