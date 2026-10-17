@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -701,6 +702,14 @@ func newGrepTool(name string) *GrepTool {
 	}
 }
 
+// grepFollowsJunctionsByDefault 报告 grep 是否应默认跟随 Windows reparse
+// point 目录（NTFS junction）。junction 在部分 Go/rg 版本里既不是目录也不是
+// symlink 形态，rg 缺省遍历会整棵跳过；Windows 上这类布局常见于标准安装位，
+// 因此默认按 --follow 语义搜索。
+func grepFollowsJunctionsByDefault() bool {
+	return runtime.GOOS == "windows"
+}
+
 // Description returns a static tool description so provider-side tool caching is stable.
 func (g *GrepTool) Description() string {
 	if g != nil && strings.EqualFold(g.Name(), "rg") {
@@ -1196,6 +1205,21 @@ func (g *GrepTool) parseOptions(ctx context.Context, params map[string]interface
 		followSymlinks = value
 		followSet = true
 	}
+	// rg_args 里的 -L/--follow 与显式 follow=true 同样算用户显式请求。
+	if compat.hasFollow {
+		followSet = true
+	}
+	// Windows junction 默认跟随：rg 的递归遍历默认不进入 NTFS junction 子树
+	// （walkdir 把 junction 视为 symlink），而第三方工具常以 junction 把
+	// skill/目录挂进标准安装位（如 %USERPROFILE%\.agents\skills），缺省搜索会
+	// 整棵静默跳过（2026-10-17 tabbit 实例）。Windows 宿主上未显式指定 follow
+	// 时默认开启；显式 follow=false 仍可关闭。非 Windows 保持 rg 缺省语义。
+	junctionDefaultFollow := false
+	if !followSet && grepFollowsJunctionsByDefault() {
+		followSymlinks = true
+		followSet = true
+		junctionDefaultFollow = true
+	}
 	column := compat.column
 	columnSet := false
 	if value, ok := resolveBoolParam(params, "column"); ok {
@@ -1638,7 +1662,9 @@ func (g *GrepTool) parseOptions(ctx context.Context, params map[string]interface
 	if pcre2Requested {
 		requiresRipgrep = true
 	}
-	if followSymlinks {
+	// 只有用户显式请求的 follow 才视为 rg-only 能力；Windows junction 默认跟随
+	// 不能把 builtin 回退路径变成硬失败——builtin 引擎对 reparse 目录另行处理。
+	if followSymlinks && !junctionDefaultFollow {
 		requiresRipgrep = true
 	}
 	if len(typeAdd) > 0 || len(typeClear) > 0 {
@@ -5159,7 +5185,7 @@ func (g *GrepTool) collectFileCandidates(ctx context.Context, opts *grepOptions)
 			continue
 		}
 
-		walkErr := filepath.Walk(scope.workingDir, func(path string, info os.FileInfo, walkErr error) error {
+		walkErr := grepWalkFileTree(scope.workingDir, func(path string, info os.FileInfo, walkErr error) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -5262,6 +5288,79 @@ func (g *GrepTool) collectFileCandidates(ctx context.Context, opts *grepOptions)
 		})
 	}
 	return candidates, nil
+}
+
+// grepWalkFileTree 是 grep builtin 引擎的目录遍历：语义对齐 filepath.Walk
+// （前序遍历、walkErr 透传、SkipDir 支持），但对 Windows reparse point
+// （NTFS junction、OneDrive 占位目录）额外下钻。部分 Go 版本对 junction 的
+// Lstat 既不带 ModeDir 也不带 ModeSymlink（标记 ModeIrregular），
+// filepath.Walk 会把 junction 子树整棵跳过；第三方工具常以 junction 把
+// skill 目录挂进标准安装位，builtin 引擎必须能搜到（2026-10-17 tabbit 实例）。
+//
+// 复核以 ModeIrregular 门控：普通文件/目录零额外系统调用。已解析路径去重，
+// 防止 junction 指回祖先导致死循环。
+func grepWalkFileTree(root string, fn filepath.WalkFunc) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return fn(root, nil, err)
+	}
+	visited := make(map[string]struct{})
+	if resolved, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+		visited[filepath.Clean(resolved)] = struct{}{}
+	}
+	return grepWalkDir(root, info, fn, visited)
+}
+
+func grepWalkDir(path string, info os.FileInfo, fn filepath.WalkFunc, visited map[string]struct{}) error {
+	if err := fn(path, info, nil); err != nil {
+		if info.IsDir() && err == filepath.SkipDir {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	entries, readErr := os.ReadDir(path)
+	if readErr != nil {
+		// 与 filepath.Walk 一致：读取失败以 walkErr 形态回调一次。
+		return fn(path, info, readErr)
+	}
+	for _, entry := range entries {
+		childPath := filepath.Join(path, entry.Name())
+		childInfo, err := os.Lstat(childPath)
+		if err != nil {
+			if callErr := fn(childPath, nil, err); callErr != nil && callErr != filepath.SkipDir {
+				return callErr
+			}
+			continue
+		}
+		descend := childInfo.IsDir()
+		if !descend && childInfo.Mode()&os.ModeIrregular != 0 {
+			if statInfo, statErr := os.Stat(childPath); statErr == nil && statInfo.IsDir() {
+				descend = true
+				childInfo = statInfo
+			}
+		}
+		if descend {
+			resolved := childPath
+			if resolvedPath, resolveErr := filepath.EvalSymlinks(childPath); resolveErr == nil {
+				resolved = filepath.Clean(resolvedPath)
+			}
+			if _, seen := visited[resolved]; seen {
+				continue
+			}
+			visited[resolved] = struct{}{}
+			if err := grepWalkDir(childPath, childInfo, fn, visited); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := fn(childPath, childInfo, nil); err != nil && err != filepath.SkipDir {
+			return err
+		}
+	}
+	return nil
 }
 
 // resolveIncludeGlobs builds the include glob list from include and type parameters.

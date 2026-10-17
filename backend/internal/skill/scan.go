@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -66,6 +67,15 @@ func walkSkillTreeWithLimits(root string, followSymlinks bool, limits skillWalkL
 		rootInfo, err = os.Stat(root)
 		if err != nil {
 			return nil, err
+		}
+	}
+	if !rootInfo.IsDir() {
+		if !isWindowsReparseDir(root, rootInfo) {
+			return nil, nil
+		}
+		rootInfo, err = os.Stat(root)
+		if err != nil || !rootInfo.IsDir() {
+			return nil, nil
 		}
 	}
 	if !rootInfo.IsDir() {
@@ -148,7 +158,7 @@ walkLoop:
 				continue
 			}
 
-			if info.IsDir() {
+			if info.IsDir() || isWindowsReparseDir(path, info) {
 				resolved := canonicalizeSkillTreePath(path, followSymlinks)
 				if resolved == "" {
 					continue
@@ -194,6 +204,23 @@ walkLoop:
 		warnings = append(warnings, fmt.Sprintf("skills scan reached its traversal limit (root: %s)", root))
 	}
 	return warnings, nil
+}
+
+// isWindowsReparseDir 复核 Windows reparse point（NTFS junction、OneDrive 占位
+// 目录等）是否实际是目录。部分 Go 版本对 junction 的 Lstat 既不带 ModeDir 也
+// 不带 ModeSymlink，而是标记 ModeIrregular；walkSkillTree 若按普通文件跳过，
+// junction 形式的 skill 目录会被整棵静默丢弃（第三方工具常以 junction 把
+// skill 安装进 %USERPROFILE%\.agents\skills，是 Windows 上的常见布局）。
+// 以 ModeIrregular 门控：普通文件/目录零额外开销，仅 Windows 复核。
+func isWindowsReparseDir(path string, info os.FileInfo) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	if info == nil || info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+		return false
+	}
+	statInfo, err := os.Stat(path)
+	return err == nil && statInfo.IsDir()
 }
 
 func canonicalizeSkillTreePath(path string, followSymlinks bool) string {
