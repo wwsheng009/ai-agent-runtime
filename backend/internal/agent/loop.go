@@ -801,7 +801,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
 	}
-	builder := NewMessageBuilder(history)
+	// P1 INV-1（session-message-identity-protocol-20261017）：run 起点构造身份源，
+	// 本 run 新建的 assistant/tool 消息在 builder 创建处铸 id（空 turnID 时
+	// identity 仍铸 message_id，只是不盖 turn）。
+	identity := NewBuilderIdentity(loop.turnID)
+	builder := NewMessageBuilderWithIdentity(history, identity)
 	// Keep a compact prompt view separate from the full durable audit history.
 	// Once preflight compacts a long active turn, later model calls build on that
 	// view instead of reprocessing the same raw replay on every step.
@@ -3500,7 +3504,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			continue
 		}
 
-		if tc.Name == "spawn_subagents" {
+		if toolregistry.IsSpellingOf(SpawnSubagentsToolName, tc.Name) {
 			if engine != nil {
 				decision, evalErr := engine.Evaluate(callCtx, runtimepolicy.EvalRequest{
 					SessionID:  sessionID,
@@ -8482,7 +8486,7 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string,
 		executionModeDescription = "Deprecated and optional — omit it. Dispatch is always asynchronous, but this session does not support supervised suspension (当前会话不支持托管挂起): the parked turn cannot be resumed after a restart. Legacy wait|sync stay accepted and no longer block the parent turn."
 	}
 	definition := types.ToolDefinition{
-		Name:        "spawn_subagents",
+		Name:        SpawnSubagentsToolName,
 		Description: description,
 		Parameters: map[string]interface{}{
 			"type": "object",

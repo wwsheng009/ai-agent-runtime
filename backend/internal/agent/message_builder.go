@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -17,12 +18,58 @@ type ToolResultPayload struct {
 // MessageBuilder 负责构建并修复 tool_use/tool_result 历史。
 type MessageBuilder struct {
 	history []types.Message
+	// identity 是 P1「创建时授予」（session-message-identity-protocol-20261017
+	// §3 INV-1）的可选身份源：非 nil 时，本 builder 新创建的 assistant/tool 消息
+	// 在构造处一次性铸 message_id/turn_id，不再依赖 persist 时的 substance 反推。
+	// nil 时保持历史行为（由 ReplaceHistory 的继承层兜底），零行为变化。
+	identity *BuilderIdentity
+}
+
+// BuilderIdentity 是一个 run 的身份上下文：turn_id 由 actor 在 run 边界授予，
+// 序号在 builder 内单调递增。GrantMessage 把身份写进消息 metadata（已带 id 的
+// 消息不覆盖）。
+type BuilderIdentity struct {
+	TurnID string
+	seq    int
+}
+
+// NewBuilderIdentity 以 run 边界已知的 turn_id 构造身份源。
+func NewBuilderIdentity(turnID string) *BuilderIdentity {
+	return &BuilderIdentity{TurnID: strings.TrimSpace(turnID)}
+}
+
+// GrantMessage 在创建时授予身份：缺失 message_id 铸 msg_<uuid>；缺失 turn_id
+// 盖本 run 的 turn_id。已带 id 的消息保持不变（重放/继承场景）。
+func (bi *BuilderIdentity) GrantMessage(message *types.Message) {
+	if bi == nil || message == nil {
+		return
+	}
+	bi.seq++
+	if types.MessageID(*message) == "" {
+		if message.Metadata == nil {
+			message.Metadata = types.NewMetadata()
+		}
+		message.Metadata.Set(types.MetadataKeyMessageID, "msg_"+strings.ReplaceAll(uuid.NewString(), "-", ""))
+	}
+	if types.TurnID(*message) == "" && bi.TurnID != "" {
+		if message.Metadata == nil {
+			message.Metadata = types.NewMetadata()
+		}
+		message.Metadata.Set(types.MetadataKeyTurnID, bi.TurnID)
+	}
 }
 
 // NewMessageBuilder 创建一个新的 message builder。
 func NewMessageBuilder(history []types.Message) *MessageBuilder {
+	return NewMessageBuilderWithIdentity(history, nil)
+}
+
+// NewMessageBuilderWithIdentity 创建带身份源的 builder（INV-1 接线点）：run 起
+// 点传入 NewBuilderIdentity(turnID)，本 run 新建的消息即获得创建时授予的身份。
+func NewMessageBuilderWithIdentity(history []types.Message, identity *BuilderIdentity) *MessageBuilder {
 	builder := &MessageBuilder{
-		history: make([]types.Message, 0, len(history)),
+		history:  make([]types.Message, 0, len(history)),
+		identity: identity,
 	}
 	for _, message := range history {
 		builder.history = append(builder.history, *message.Clone())
@@ -55,6 +102,8 @@ func (b *MessageBuilder) AppendAssistantAction(content string, toolCalls []types
 	if reasoning != nil {
 		types.SetReasoningBlock(assistant.Metadata, reasoning)
 	}
+	// P1 INV-1：创建时授予身份（identity 为 nil 时保持历史行为）。
+	b.identity.GrantMessage(assistant)
 	b.history = append(b.history, *assistant)
 	return normalizedCalls
 }
@@ -69,6 +118,8 @@ func (b *MessageBuilder) AppendToolResults(toolCalls []types.ToolCall, results [
 		if len(result.Metadata) > 0 {
 			message.Metadata = result.Metadata.Clone()
 		}
+		// P1 INV-1：创建时授予身份（identity 为 nil 时保持历史行为）。
+		b.identity.GrantMessage(message)
 		b.history = append(b.history, *message)
 	}
 	// 工具结果里的图片直通附件必须在整批 tool_result 之后注入 user 消息：
