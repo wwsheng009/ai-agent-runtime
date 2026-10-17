@@ -9,6 +9,7 @@ import { parseToolPatch, patchTextFromArgs, patchTextFromOutput } from "./diff-t
 import { resolveToolCardKind, type ToolCardKind } from "./kind";
 import { QUERY_ARG_KEYS, queryTextFromArgs, queryTextFromPreviewRaw } from "./query-text";
 import { shellCommandTextFromArgs, shellCommandTextFromPreview } from "./shell-command";
+import { attachWebSearchMetadata, type WebSearchMetaView } from "./web-search-meta";
 
 export type ToolDiffStats = {
   additions?: number;
@@ -31,6 +32,8 @@ export type ToolSegmentDetails = {
   diffText?: string;
   /** 补丁文本已按行边界截断到上限（UI 必须明示，不得假装完整）。 */
   diffTextTruncated?: boolean;
+  /** P3-1：web_search 结构化结果（来源/答案/截断）；缺失即不渲染结构化卡片。 */
+  webSearch?: WebSearchMetaView;
 };
 
 const PATCH_TARGET_PATTERN = /^\*\*\* (?:Update|Add|Delete) File: (.+)$/m;
@@ -507,6 +510,8 @@ export function extractToolDetails(
       firstText(sources, ["render_output"]) || firstText(sources, ["content", "output", "result"]);
     withDiffText(details, args, outputText);
   }
+
+  attachWebSearchMetadata(details, sources);
 
   return compact(details);
 }

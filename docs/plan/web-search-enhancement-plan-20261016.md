@@ -503,6 +503,8 @@ type NativeToolCapabilities struct {
 
 ### 6.1 实施项 P3-1：呈现层 meta 与前端 web 卡片
 
+> **落地进展（2026-10-16）**：metadata 投影与前端卡片已落地——后端 `copyToolWebSearchMetadata`（`agent/tool_runtime_events.go`）把 `sources`/`has_answer`/`answer_queries`（及来源存在时的 `truncated`）提升进 tool.completed 载荷（实时帧与历史回放同一通道）；前端新增 `web-search-meta.ts` 防御式解析（非对象/类型不符/URL 缺失/重复 → 收窄或回退 null）、`details.ts`（实时）与 `history-mapping.ts`（回放）共用同一解析、`tool-row-web-sources.tsx` 渲染数量徽标 + 域名列表（外链仅 http(s)）+ 截断/含答案徽标；面板仅在解析成功时渲染，畸形回退原始文本块；i18n 双语言键。测试：`web-search-meta.test.ts`（6 组）+ `tool-row-web-sources.test.tsx`（3 组）+ 后端 `tool_runtime_events_web_search_test.go`（2 组），前端全量 3355 用例与后端 agent 包全绿；e2e `workspace-chat.spec.ts` G2 已补 `sources` 卡片读取断言（本机该用例存在既有时序 flake：干净 HEAD worktree 同样复现，与本次改动无关）。
+
 **问题**：metadata 已有诊断字段但没有逐源结构化数组；前端 `web` 卡片类型已存在（`frontend/src/lib/tool-row/kind.ts:72`）但没有 `sources[]` 可消费；DSH 的 result meta + 回放安全契约（`search.ts:107-122,162-190`）无对应物。
 
 **目标**：P2-2 的 `sources[]`/`truncated`/`answer` 投影进入 result metadata；前端卡片读取时防御式校验、缺失回退现有文本渲染；对渲染加最小快照测试。
@@ -572,7 +574,7 @@ type NativeToolCapabilities struct {
 | P2-3 | 轮转顺序/去重/封顶、部分失败、strict、单查询等价、取消 join | `web_search_merge_test.go`（已落地） |
 | P2-4 | 每 provider：请求/结果/错误映射、可用性、sandbox、key 轮换；空链结构化错误 | `web_search_api_test.go`（Brave/Tavily）+ `web_search_api_answer_test.go`（Exa/Perplexity；含答案分节与 401 分类）已落地 |
 | P2-5 | 能力位解析（旧/新键）/链门控（off/prefer/force/allow）/请求与映射/严格模式/prefer 回退/force 结构化错误/沙箱/P2-5d 适配器事件 | `web_search_native_test.go`、`websearch_config_test.go`、`native_web_search_test.go`（agentconfig/modelcard）；P2-5d 待补 |
-| P3-1 | 前端 meta 防御解析/回退/徽标；e2e 卡片读取 | frontend 单测 + `e2e/workspace-chat.spec.ts` |
+| P3-1 | 前端 meta 防御解析/回退/徽标；e2e 卡片读取 | `web-search-meta.test.ts` + `tool-row-web-sources.test.tsx` + 后端 `tool_runtime_events_web_search_test.go`（已落地）+ `e2e/workspace-chat.spec.ts` G2 断言 |
 | P3-2 | 取消级联/join/部分完成 | `web_search_merge_test.go` |
 | P3-3 | 信号权重/阈值覆盖/既有质量测试不回归 | `web_search_quality_test.go` |
 

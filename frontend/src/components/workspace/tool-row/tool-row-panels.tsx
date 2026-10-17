@@ -16,6 +16,7 @@ import { stripRenderedPatch } from "@/lib/tool-row/diff-text";
 import { cn } from "@/lib/utils";
 
 import { ToolRowDiffPanel } from "./tool-row-diff-panel";
+import { ToolRowWebSources } from "./tool-row-web-sources";
 
 type ToolRowPanelsProps = {
   expandable: boolean;
@@ -48,8 +49,10 @@ export function ToolRowPanels({
 }: ToolRowPanelsProps) {
   const { t } = useTranslation("workspace");
   const failureText = segment.errorMessage?.trim() || segment.resultSummary?.trim() || "";
-  const details = kind === "diff" && !isFailure ? resolveToolSegmentDetails(segment) : undefined;
+  const details = !isFailure ? resolveToolSegmentDetails(segment) : undefined;
   const diffText = details?.diffText;
+  // P3-1：web 卡的结构化来源块只在解析成功时渲染（失败/畸形回退原始文本）。
+  const webSearch = kind === "web" ? details?.webSearch : undefined;
   const rawOutputText = segment.resultSummary?.trim() || "";
   // 行级视图已经承载补丁正文：输出面板不再重复原始 diff 文本（原文仍可复制 / 下载）。
   const outputText = diffText ? stripRenderedPatch(rawOutputText) : rawOutputText;
@@ -95,6 +98,7 @@ export function ToolRowPanels({
       hidden={!open}
       id={panelId}
     >
+      {webSearch ? <ToolRowWebSources meta={webSearch} /> : null}
       {detail}
       {diffText ? (
         <ToolRowDiffPanel

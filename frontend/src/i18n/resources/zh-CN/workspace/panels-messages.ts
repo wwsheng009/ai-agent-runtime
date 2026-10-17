@@ -116,6 +116,12 @@ export const zhWorkspacePanelsMessages = {
       truncated: "补丁文本已截断（保留前 {{count}} 行）：行级视图只覆盖保留部分。",
       partial: "补丁文本不完整（末尾 hunk 行数不足），行号仍取自补丁本身，未补行。",
     },
+    webSources: {
+      label: "来源",
+      count: "{{count}} 条",
+      answer: "含答案",
+      truncated: "已截断",
+    },
   },
   richContent: {
     relatedEvidence: "相关证据",

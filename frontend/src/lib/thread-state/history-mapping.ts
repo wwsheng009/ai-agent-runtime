@@ -7,6 +7,7 @@
 import { type Artifact, type MessageSegment } from "@/data/mock";
 import { type SessionHistoryMessage, type SessionHistoryToolCall } from "@/types/runtime";
 import { parseToolDetailsFromArgsText, resolveToolSegmentDetails } from "@/lib/tool-row/details";
+import { parseWebSearchMetaFromCandidates } from "@/lib/tool-row/web-search-meta";
 
 export function readFirstTextValue(
   source: Record<string, unknown>,
@@ -249,8 +250,14 @@ export function buildHistoryToolSegment(
   const details =
     parseToolDetailsFromArgsText(argsSummary, name, result) ??
     (result ? resolveToolSegmentDetails({ name, resultSummary: result }) : undefined);
-  if (details) {
-    segment.details = details;
+  // P3-1：历史消息 metadata 里的 web_search 结构化结果走同一套防御式解析；
+  // 缺失/畸形时不写入，展开面板回退原始文本块。
+  const webSearch = parseWebSearchMetaFromCandidates([metadata]);
+  if (details || webSearch) {
+    segment.details = {
+      ...(details ?? {}),
+      ...(webSearch ? { webSearch } : {}),
+    };
   }
   return segment;
 }

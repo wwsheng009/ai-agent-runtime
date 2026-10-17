@@ -401,7 +401,18 @@ const toolScript = [
         result: "Paris",
       },
       delta: { id: "tool-1" },
-      metadata: { name: "web_search", result: "Paris" },
+      metadata: {
+        name: "web_search",
+        result: "Paris",
+        // P3-1：结构化来源（live 帧 metadata.sources）→ 前端来源卡片。
+        sources: [
+          {
+            title: "Paris - Wikipedia",
+            url: "https://en.wikipedia.org/wiki/Paris",
+            snippet: "Paris is the capital of France.",
+          },
+        ],
+      },
     },
   },
   {

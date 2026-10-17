@@ -130,6 +130,8 @@ webSearch:
 
 答案型 provider（Perplexity）在来源列表前先输出 `### <query>` + 答案分节（多查询每查询一节）；无来源时省略来源列表与引用指令。
 
+前端工具卡片（P3-1）：展开面板消费同一份 `sources`/`has_answer`/`answer_queries`/`truncated` metadata 渲染结构化来源卡片（数量徽标 + 域名列表（仅 http(s) 渲染外链）+ 截断/含答案徽标）；解析畸形时回退原始文本块，历史重放与实时帧同口径。
+
 常用 metadata 键：`source`、`trust`、`quality`/`quality_score`/`quality_terms`、`providers_attempted`、`provider_errors`、`failure_provider`、`retry_after_ms`、`budget_ms`/`elapsed_ms`/`budget_exhausted`/`timed_out_provider`、`filtered_out`/`provider_count`、`time_range_supported`/`language_supported`、`match_count`、`has_answer`/`answer_queries`（答案型后端）；多查询另带 `queries`/`merged_count`/`per_query_sources`/`provider_sources`/`query_failures`。
 
 ## 8. 常见问题

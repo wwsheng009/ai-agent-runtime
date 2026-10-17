@@ -117,6 +117,12 @@ export const enWorkspacePanelsMessages = {
       truncated: "Patch text was truncated (first {{count}} lines kept): the line view covers only what was kept.",
       partial: "Patch text is incomplete (the trailing hunk has fewer lines); line numbers still come from the patch itself.",
     },
+    webSources: {
+      label: "Sources",
+      count: "{{count}}",
+      answer: "answer",
+      truncated: "truncated",
+    },
   },
   richContent: {
     relatedEvidence: "Related evidence",

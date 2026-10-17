@@ -160,6 +160,11 @@ test("G2: tool card walks Started -> Running -> Finished；折叠态单行，展
   await toolRow.locator('[data-chat-row-toggle="chevron"]').click();
   await expect(resultText).toBeVisible();
 
+  // P3-1：展开面板读取 tool_end metadata.sources，渲染结构化来源卡片。
+  const sourcesCard = toolRow.locator('[data-tool-row-web-sources="true"]');
+  await expect(sourcesCard).toBeVisible();
+  await expect(sourcesCard).toContainText("en.wikipedia.org");
+
   // final assistant text arrives
   await expect(page.getByText("Paris is the capital of France.")).toBeVisible({
     timeout: 15_000,

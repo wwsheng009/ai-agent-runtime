@@ -94,6 +94,7 @@ func toolCompletedEventPayload(result toolExecutionResult, step int, traceID str
 			payload[toolresult.MetadataKey] = kind
 		}
 		copyToolShellMetadata(payload, result.Envelope.Metadata)
+		copyToolWebSearchMetadata(payload, result.Envelope.Metadata)
 		copyToolReliabilityMetadata(payload, result.Envelope.Metadata)
 		copyToolArtifactFlowMetadata(payload, result.Envelope)
 	}
@@ -680,6 +681,40 @@ func toolMetadataFromEnvelope(envelope *output.Envelope) map[string]interface{} 
 		return nil
 	}
 	return raw
+}
+
+// copyToolWebSearchMetadata 把 web_search 的结构化结果（sources / has_answer /
+// answer_queries，及来源存在时的 truncated）提升到 tool.completed 载荷，供
+// 前端来源卡片在前端做防御式解析（P3-1）。仅提升真实存在且形状正确的字段，
+// 缺失不补、类型不符即忽略；truncated 只在 sources 命中时提升，避免把其他
+// 工具的同名字段混入。
+func copyToolWebSearchMetadata(payload map[string]interface{}, metadata map[string]interface{}) {
+	if payload == nil || len(metadata) == 0 {
+		return
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		copyToolWebSearchMetadata(payload, nested)
+	}
+	if sources, ok := metadata["sources"].([]map[string]interface{}); ok && len(sources) > 0 {
+		if _, exists := payload["sources"]; !exists {
+			payload["sources"] = sources
+		}
+		if truncated, ok := metadata["truncated"].(bool); ok && truncated {
+			if _, exists := payload["truncated"]; !exists {
+				payload["truncated"] = true
+			}
+		}
+	}
+	if hasAnswer, ok := metadata["has_answer"].(bool); ok && hasAnswer {
+		if _, exists := payload["has_answer"]; !exists {
+			payload["has_answer"] = true
+		}
+	}
+	if queries, ok := metadata["answer_queries"].([]string); ok && len(queries) > 0 {
+		if _, exists := payload["answer_queries"]; !exists {
+			payload["answer_queries"] = queries
+		}
+	}
 }
 
 func copyToolShellMetadata(payload map[string]interface{}, metadata map[string]interface{}) {

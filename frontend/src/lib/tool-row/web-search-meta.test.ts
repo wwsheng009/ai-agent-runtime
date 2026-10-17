@@ -1,0 +1,79 @@
+import { describe, expect, it } from "vitest";
+
+import { parseWebSearchMetaFromCandidates, webSearchSourceDomain } from "./web-search-meta";
+
+describe("parseWebSearchMetaFromCandidates", () => {
+  it("解析 sources / has_answer / truncated / answer_queries", () => {
+    const meta = parseWebSearchMetaFromCandidates([
+      {
+        sources: [
+          { url: "https://a.example/1", title: "A", snippet: "s", published_at: "2026-10-01" },
+          { url: "https://b.example/2", publishedAt: "2026-10-02" },
+        ],
+        has_answer: true,
+        truncated: true,
+        answer_queries: ["q1", " q2 ", 3, ""],
+      },
+    ]);
+    expect(meta).not.toBeNull();
+    expect(meta?.sources).toEqual([
+      { url: "https://a.example/1", title: "A", snippet: "s", publishedAt: "2026-10-01" },
+      { url: "https://b.example/2", title: "", snippet: "", publishedAt: "2026-10-02" },
+    ]);
+    expect(meta?.hasAnswer).toBe(true);
+    expect(meta?.truncated).toBe(true);
+    expect(meta?.answerQueries).toEqual(["q1", "q2"]);
+  });
+
+  it("畸形矩阵：非对象候选 / 字段类型不符 / URL 缺失 / 重复 URL 全部收窄", () => {
+    expect(parseWebSearchMetaFromCandidates([null, "x", 42, []])).toBeNull();
+
+    // 字段类型不符（sources 非数组、布尔非 true）→ 无可用信息。
+    expect(
+      parseWebSearchMetaFromCandidates([
+        { sources: "nope", has_answer: "yes", truncated: "yes", answer_queries: "q" },
+      ]),
+    ).toBeNull();
+
+    const filtered = parseWebSearchMetaFromCandidates([
+      {
+        sources: [
+          { title: "无 URL" },
+          null,
+          { url: "  " },
+          { url: "https://a.example/1" },
+          { url: "https://a.example/1", title: "Dup" },
+        ],
+      },
+    ]);
+    expect(filtered?.sources).toHaveLength(1);
+    expect(filtered?.sources[0].title).toBe("");
+  });
+
+  it("嵌套 payload 形态（tool.metadata）可命中", () => {
+    const meta = parseWebSearchMetaFromCandidates([
+      { tool: { metadata: { sources: [{ url: "https://nested.example/1" }] } } },
+    ]);
+    expect(meta?.sources[0].url).toBe("https://nested.example/1");
+  });
+
+  it("answer 非空字符串兼容为 hasAnswer（无 sources 也成立）", () => {
+    const meta = parseWebSearchMetaFromCandidates([{ answer: "摘要" }]);
+    expect(meta?.hasAnswer).toBe(true);
+    expect(meta?.sources).toEqual([]);
+  });
+
+  it("仅弱信号（truncated）不足以生成卡片：返回 null 回退文本", () => {
+    expect(parseWebSearchMetaFromCandidates([{ truncated: true }])).toBeNull();
+    expect(parseWebSearchMetaFromCandidates([{ sources: [] }])).toBeNull();
+  });
+});
+
+describe("webSearchSourceDomain", () => {
+  it("取主机名并去 www；非法 URL 回退原始文本", () => {
+    expect(webSearchSourceDomain("https://www.example.com/a")).toBe("example.com");
+    expect(webSearchSourceDomain("https://sub.example.com/a")).toBe("sub.example.com");
+    expect(webSearchSourceDomain("not a url")).toBe("not a url");
+    expect(webSearchSourceDomain("")).toBe("");
+  });
+});
