@@ -22,6 +22,11 @@ export type WebSearchMetaView = {
   hasAnswer: boolean;
   truncated: boolean;
   answerQueries: string[];
+  /** P3-3 展示面：评分 tier（ok/low/empty）与可解释信号表；缺失为 null。 */
+  quality: string | null;
+  qualitySignals: Record<string, number> | null;
+  /** P3-2 展示面：外部取消时被丢弃的查询；缺失为空。 */
+  cancelledQueries: string[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -78,11 +83,38 @@ function answerQueriesFrom(value: unknown) {
     .slice(0, MAX_SOURCES);
 }
 
+function qualitySignalsFrom(value: unknown): Record<string, number> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const signals: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      signals[key] = raw;
+    }
+  }
+  return Object.keys(signals).length > 0 ? signals : null;
+}
+
+function textListFrom(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => readText(item))
+    .filter((item) => item.length > 0)
+    .slice(0, MAX_SOURCES);
+}
+
 function metaFromRecord(record: Record<string, unknown>): WebSearchMetaView | null {
   const sources = sourcesFrom(record.sources);
   // `has_answer` 是本仓库的显式键；`answer` 字符串兼容答案型后端的裸答案字段。
   const hasAnswer = record.has_answer === true || readText(record.answer) !== "";
-  if (sources.length === 0 && !hasAnswer) {
+  // P3-2/P3-3 展示面：取消清单/质量信号单独成立（失败结果没有 sources，
+  // 但 cancelled_queries 也应在卡片上可解释）。
+  const cancelledQueries = textListFrom(record.cancelled_queries);
+  const qualitySignals = qualitySignalsFrom(record.quality_signals);
+  if (sources.length === 0 && !hasAnswer && cancelledQueries.length === 0 && !qualitySignals) {
     return null;
   }
   return {
@@ -90,6 +122,9 @@ function metaFromRecord(record: Record<string, unknown>): WebSearchMetaView | nu
     hasAnswer,
     truncated: record.truncated === true,
     answerQueries: answerQueriesFrom(record.answer_queries),
+    quality: readText(record.quality) || null,
+    qualitySignals,
+    cancelledQueries,
   };
 }
 

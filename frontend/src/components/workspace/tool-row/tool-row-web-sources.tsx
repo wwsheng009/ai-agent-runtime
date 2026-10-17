@@ -48,6 +48,25 @@ export function ToolRowWebSources({ meta }: ToolRowWebSourcesProps) {
             {t("panels.messages.toolRow.webSources.truncated")}
           </span>
         ) : null}
+        {meta.quality && meta.quality !== "ok" ? (
+          <span
+            className="rounded-full bg-accent-gold/10 px-1.5 app-text-10 normal-case tracking-normal text-accent-gold"
+            data-tool-row-web-quality={meta.quality}
+            title={qualitySignalsTitle(meta.qualitySignals)}
+          >
+            {t("panels.messages.toolRow.webSources.lowQuality")}
+          </span>
+        ) : null}
+        {meta.cancelledQueries.map((query) => (
+          <span
+            className="rounded-full bg-accent-orange/10 px-1.5 app-text-10 normal-case tracking-normal text-accent-orange"
+            data-tool-row-web-cancelled={query}
+            key={`cancelled:${query}`}
+            title={query}
+          >
+            {t("panels.messages.toolRow.webSources.cancelled", { query })}
+          </span>
+        ))}
       </div>
       {meta.sources.length > 0 ? (
         <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto">
@@ -92,4 +111,14 @@ export function ToolRowWebSources({ meta }: ToolRowWebSourcesProps) {
       ) : null}
     </div>
   );
+}
+
+// P3-3：信号表进 tooltip（可解释面），卡片本体只保留一个低质徽标不放大噪音。
+function qualitySignalsTitle(signals: Record<string, number> | null) {
+  if (!signals) {
+    return "";
+  }
+  return Object.entries(signals)
+    .map(([key, value]) => `${key}: ${Math.round(value * 100)}%`)
+    .join(" · ");
 }

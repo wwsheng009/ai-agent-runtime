@@ -16,10 +16,14 @@ func TestToolCompletedEventPayloadPromotesWebSearchMetadata(t *testing.T) {
 	payload := toolCompletedEventPayload(toolExecutionResult{
 		Call: types.ToolCall{ID: "call-web", Name: "web_search"},
 		Envelope: &output.Envelope{Metadata: map[string]interface{}{
-			"sources":        sources,
-			"has_answer":     true,
-			"answer_queries": []string{"q1", "q2"},
-			"truncated":      true,
+			"sources":           sources,
+			"has_answer":        true,
+			"answer_queries":    []string{"q1", "q2"},
+			"truncated":         true,
+			"quality_signals":   map[string]float64{"coverage": 0.83, "domain_diversity": 0.6, "snippet_presence": 1},
+			"quality":           "ok",
+			"quality_score":     0.72,
+			"cancelled_queries": []string{"c1"},
 		}},
 	}, 1, "trace-web", nil)
 
@@ -35,6 +39,16 @@ func TestToolCompletedEventPayloadPromotesWebSearchMetadata(t *testing.T) {
 	}
 	if payload["truncated"] != true {
 		t.Fatalf("truncated not promoted with sources: %#v", payload["truncated"])
+	}
+	signals, ok := payload["quality_signals"].(map[string]float64)
+	if !ok || signals["coverage"] != 0.83 {
+		t.Fatalf("quality_signals not promoted: %#v", payload["quality_signals"])
+	}
+	if payload["quality"] != "ok" || payload["quality_score"] != 0.72 {
+		t.Fatalf("quality tier/score not promoted: %v / %v", payload["quality"], payload["quality_score"])
+	}
+	if cancelled, ok := payload["cancelled_queries"].([]string); !ok || len(cancelled) != 1 || cancelled[0] != "c1" {
+		t.Fatalf("cancelled_queries not promoted: %#v", payload["cancelled_queries"])
 	}
 }
 
@@ -54,5 +68,9 @@ func TestToolCompletedEventPayloadSkipsMalformedWebSearchMetadata(t *testing.T) 
 	// truncated 只在 sources 命中时提升：其他工具的 truncated 不得借 web_search 通道混入。
 	if _, present := payload["truncated"]; present {
 		t.Fatalf("truncated must not be promoted without sources: %#v", payload["truncated"])
+	}
+	// 同 gate：无 quality_signals 时泛化键 quality 也不得单独混入。
+	if _, present := payload["quality"]; present {
+		t.Fatalf("quality must not be promoted without quality_signals: %#v", payload["quality"])
 	}
 }

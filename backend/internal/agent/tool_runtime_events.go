@@ -715,6 +715,29 @@ func copyToolWebSearchMetadata(payload map[string]interface{}, metadata map[stri
 			payload["answer_queries"] = queries
 		}
 	}
+	// P3-3 展示面：quality_signals 存在时才一并提升 tier/score（与其他工具
+	// 可能的同名泛化键隔离）；signals 是评分的可解释信号表。
+	if signals, ok := metadata["quality_signals"].(map[string]float64); ok && len(signals) > 0 {
+		if _, exists := payload["quality_signals"]; !exists {
+			payload["quality_signals"] = signals
+		}
+		if tier, ok := metadata["quality"].(string); ok && tier != "" {
+			if _, exists := payload["quality"]; !exists {
+				payload["quality"] = tier
+			}
+		}
+		if score, ok := metadata["quality_score"].(float64); ok {
+			if _, exists := payload["quality_score"]; !exists {
+				payload["quality_score"] = score
+			}
+		}
+	}
+	// P3-2 展示面：外部取消时被丢弃的查询清单（成功合并的部分取消结果也带）。
+	if cancelled, ok := metadata["cancelled_queries"].([]string); ok && len(cancelled) > 0 {
+		if _, exists := payload["cancelled_queries"]; !exists {
+			payload["cancelled_queries"] = cancelled
+		}
+	}
 }
 
 func copyToolShellMetadata(payload map[string]interface{}, metadata map[string]interface{}) {

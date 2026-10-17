@@ -25,6 +25,35 @@ describe("parseWebSearchMetaFromCandidates", () => {
     expect(meta?.answerQueries).toEqual(["q1", "q2"]);
   });
 
+  it("解析 quality_signals / quality / cancelled_queries（P3-2/P3-3 展示面）", () => {
+    const meta = parseWebSearchMetaFromCandidates([
+      {
+        sources: [{ url: "https://a.example/1" }],
+        quality: "low",
+        quality_signals: { coverage: 0.4, domain_diversity: 0.6, bad: "x", nan: Number.NaN },
+        cancelled_queries: ["c1", " c2 ", 7, ""],
+      },
+    ]);
+    expect(meta?.quality).toBe("low");
+    expect(meta?.qualitySignals).toEqual({ coverage: 0.4, domain_diversity: 0.6 });
+    expect(meta?.cancelledQueries).toEqual(["c1", "c2"]);
+  });
+
+  it("仅 cancelled_queries 也可成立（失败结果没有 sources）", () => {
+    const meta = parseWebSearchMetaFromCandidates([{ cancelled_queries: ["q1"] }]);
+    expect(meta?.cancelledQueries).toEqual(["q1"]);
+    expect(meta?.sources).toEqual([]);
+    expect(meta?.qualitySignals).toBeNull();
+  });
+
+  it("quality 非字符串 / 信号类型不符时不进入视图", () => {
+    const meta = parseWebSearchMetaFromCandidates([
+      { sources: [{ url: "https://a.example/1" }], quality: 3, quality_signals: "nope" },
+    ]);
+    expect(meta?.quality).toBeNull();
+    expect(meta?.qualitySignals).toBeNull();
+  });
+
   it("畸形矩阵：非对象候选 / 字段类型不符 / URL 缺失 / 重复 URL 全部收窄", () => {
     expect(parseWebSearchMetaFromCandidates([null, "x", 42, []])).toBeNull();
 

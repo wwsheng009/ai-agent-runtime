@@ -54,6 +54,12 @@ describe("ToolRowWebSources", () => {
     });
   }
 
+  const emptyView = {
+    quality: null,
+    qualitySignals: null,
+    cancelledQueries: [] as string[],
+  };
+
   it("渲染数量徽标 / 域名列表 / 截断提示 / 含答案徽标", () => {
     render({
       sources: [
@@ -67,6 +73,7 @@ describe("ToolRowWebSources", () => {
       hasAnswer: true,
       truncated: true,
       answerQueries: ["q"],
+      ...emptyView,
     });
 
     expect(container.querySelector('[data-tool-row-web-sources="true"]')).not.toBeNull();
@@ -90,6 +97,7 @@ describe("ToolRowWebSources", () => {
       hasAnswer: false,
       truncated: false,
       answerQueries: [],
+      ...emptyView,
     });
 
     expect(container.querySelector('[data-tool-row-web-source="true"] a')).toBeNull();
@@ -97,7 +105,40 @@ describe("ToolRowWebSources", () => {
   });
 
   it("无来源且无答案时不渲染（回退文本块）", () => {
-    render({ sources: [], hasAnswer: false, truncated: false, answerQueries: [] });
+    render({ sources: [], hasAnswer: false, truncated: false, answerQueries: [], ...emptyView });
     expect(container.querySelector('[data-tool-row-web-sources="true"]')).toBeNull();
+  });
+
+  it("低质徽标带信号 tooltip；ok 无徽标；取消查询渲染 chip（P3-2/P3-3）", () => {
+    render({
+      sources: [{ url: "https://a.example/1", title: "", snippet: "", publishedAt: "" }],
+      hasAnswer: false,
+      truncated: false,
+      answerQueries: [],
+      quality: "low",
+      qualitySignals: { coverage: 0.4, domain_diversity: 0.6, snippet_presence: 1 },
+      cancelledQueries: ["m1"],
+    });
+
+    const badge = container.querySelector('[data-tool-row-web-quality="low"]');
+    expect(badge).not.toBeNull();
+    expect(badge?.getAttribute("title")).toBe("coverage: 40% · domain_diversity: 60% · snippet_presence: 100%");
+
+    const cancelled = container.querySelector('[data-tool-row-web-cancelled="m1"]');
+    expect(cancelled).not.toBeNull();
+    expect(cancelled?.textContent).toContain("m1");
+  });
+
+  it("quality=ok 不渲染低质徽标", () => {
+    render({
+      sources: [{ url: "https://a.example/1", title: "", snippet: "", publishedAt: "" }],
+      hasAnswer: false,
+      truncated: false,
+      answerQueries: [],
+      quality: "ok",
+      qualitySignals: { coverage: 1 },
+      cancelledQueries: [],
+    });
+    expect(container.querySelector('[data-tool-row-web-quality]')).toBeNull();
   });
 });

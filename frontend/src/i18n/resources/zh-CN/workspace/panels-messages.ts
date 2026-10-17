@@ -121,6 +121,8 @@ export const zhWorkspacePanelsMessages = {
       count: "{{count}} 条",
       answer: "含答案",
       truncated: "已截断",
+      lowQuality: "相关度低",
+      cancelled: "已取消：{{query}}",
     },
   },
   richContent: {

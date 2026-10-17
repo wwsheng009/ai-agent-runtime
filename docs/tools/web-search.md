@@ -133,6 +133,8 @@ webSearch:
 
 前端工具卡片（P3-1）：展开面板消费同一份 `sources`/`has_answer`/`answer_queries`/`truncated` metadata 渲染结构化来源卡片（数量徽标 + 域名列表（仅 http(s) 渲染外链）+ 截断/含答案徽标）；解析畸形时回退原始文本块，历史重放与实时帧同口径。
 
+展示增强（P3-2/P3-3 消费面）：`quality_signals`/`quality` 与 `cancelled_queries` 同通道进入 tool.completed 载荷与卡片视图——tier 非 `ok` 时渲染「相关度低」徽标（tooltip 展示 coverage/domain_diversity/snippet_presence 百分比），外部取消的查询渲染「已取消」chip；类型不符即不渲染，无任何字段时回退原始文本块。
+
 常用 metadata 键：`source`、`trust`、`quality`/`quality_score`/`quality_terms`、`providers_attempted`、`provider_errors`、`failure_provider`、`retry_after_ms`、`budget_ms`/`elapsed_ms`/`budget_exhausted`/`timed_out_provider`、`filtered_out`/`provider_count`、`time_range_supported`/`language_supported`、`match_count`、`has_answer`/`answer_queries`（答案型后端）；多查询另带 `queries`/`merged_count`/`per_query_sources`/`provider_sources`/`query_failures`。
 
 ## 8. 常见问题

@@ -122,6 +122,8 @@ export const enWorkspacePanelsMessages = {
       count: "{{count}}",
       answer: "answer",
       truncated: "truncated",
+      lowQuality: "low relevance",
+      cancelled: "cancelled: {{query}}",
     },
   },
   richContent: {
