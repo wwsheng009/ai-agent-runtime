@@ -2029,14 +2029,18 @@ type replySink struct {
 	chat     string
 	session  StreamingSession
 	throttle *deltaThrottle
+	// accumulated 是已收到的 assistant_delta 累积全文；StreamingSession.Update
+	// 的契约是累计全文（与 StreamMirror 同口径），Provider 直接做整段替换。
+	accumulated string
 }
 
 func (s *replySink) Delta(ctx context.Context, text string) error {
 	if s == nil || s.session == nil {
 		return nil // 不支持流式：终态回复会一次性发出
 	}
-	if !s.throttle.shouldEmit(text) {
+	s.accumulated += text
+	if !s.throttle.shouldEmit(s.accumulated) {
 		return nil
 	}
-	return s.session.Update(ctx, strings.TrimSpace(text))
+	return s.session.Update(ctx, strings.TrimSpace(s.accumulated))
 }

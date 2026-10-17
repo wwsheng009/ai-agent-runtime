@@ -273,7 +273,7 @@
   | 语音 `voice_wav_url` | ✅ 语音附件优先取 `voice_wav_url`（官方转 WAV，agent 可直接读；无则回退原始地址/ASR 转写） | — |
   | 引用消息（`message_reference` / `message_type=103`+`msg_elements`） | ◐ 旧 `message_reference` 摘要；103 嵌套元素未解析 | P2 |
   | `GROUP_MESSAGE_CREATE`（全量群消息，平台开启后推送） | ✅ 已解析：`group_message_mode`（默认 `mention` 仅@机器人；`all` 全量） | 已接（2026-10-15，切片 4） |
-  | 流式消息（`/v2/users/{openid}/stream_messages`，单聊） | ❌ 未实现 | P2（可接 `StreamingProvider`；群聊不支持） |
+   | 流式消息（`/v2/users/{openid}/stream_messages`，单聊） | ✅ 已接 `StreamingProvider`（`qqbot/stream.go`：`input_mode=replace` + 累积全文、`input_state` 1/10、`stream_msg_id` 回填；群/频道/无被动上下文安全退化） | 已接（2026:10: 15，切片 7；契约核对 2026:10: 17） |
   | 输入状态（msg_type=6 `input_notify`） | ✅ 已接 `TypingProvider`（仅单聊；主动消息语义不占被动回复配额；失败静默降级） | 已接（2026-10-15，切片 5） |
   | 消息撤回（发送后 2 分钟内） | ❌ 未实现 | P3 |
   | 频道（子频道/私信/Embed/表情表态） | ◐ 仅 `AT_MESSAGE_CREATE` 防御性解析，发送未实现；表情仅频道 | 设计范围外（QQ=群/C2C）；按需扩展 |

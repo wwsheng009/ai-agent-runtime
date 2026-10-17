@@ -484,17 +484,25 @@ type streamingSession struct {
 	token     string
 	chat      string
 	messageID int64
-	last      string
+	// raw 是原始增量累积（含出站媒体指令）；last 是已下发的可见文本。
+	raw  string
+	last string
 }
 
 func (s *streamingSession) Update(ctx context.Context, text string) error {
+	s.raw = text
+	return s.publishVisible(ctx, text)
+}
+
+// publishVisible 把已累积的原始文本转换为可见正文并编辑占位消息。
+func (s *streamingSession) publishVisible(ctx context.Context, raw string) error {
 	// 出站媒体指令（```telegram-attachments``` 围栏 / IMAGE: 等指令行）是协议
 	// 而非用户正文：流式中间态先截断未闭合块、再剥离已闭合块与指令行（与 QQ
 	// 流式同口径，2026-10-15），避免指令原文泄漏给用户；终态由 Final 解析并
 	// 补发附件。
-	visible := connectors.TruncateOpenAttachmentBlocks(text, telegramAttachmentFenceNames...)
+	visible := connectors.TruncateOpenAttachmentBlocks(raw, telegramAttachmentFenceNames...)
 	visible, _ = connectors.ParseOutboundMediaDirectives(visible, telegramAttachmentFenceNames...)
-	text = strings.TrimSpace(visible)
+	text := strings.TrimSpace(visible)
 	if text == "" || text == s.last {
 		return nil
 	}
@@ -502,6 +510,27 @@ func (s *streamingSession) Update(ctx context.Context, text string) error {
 	if err := s.provider.call(ctx, s.base, s.token, "editMessageText", payload, nil); err != nil {
 		return err
 	}
+	s.last = text
+	return nil
+}
+
+// finalize 以终态全文做最后一次编辑（Final/Fail 的 text 已是完整正文，不再
+// 走增量累积）。
+func (s *streamingSession) finalize(ctx context.Context, raw string) error {
+	visible := connectors.TruncateOpenAttachmentBlocks(raw, telegramAttachmentFenceNames...)
+	visible, _ = connectors.ParseOutboundMediaDirectives(visible, telegramAttachmentFenceNames...)
+	text := strings.TrimSpace(visible)
+	if text == "" {
+		text = s.last
+	}
+	if text == "" || text == s.last {
+		return nil
+	}
+	payload := map[string]any{"chat_id": s.chat, "message_id": s.messageID, "text": text}
+	if err := s.provider.call(ctx, s.base, s.token, "editMessageText", payload, nil); err != nil {
+		return err
+	}
+	s.raw = raw
 	s.last = text
 	return nil
 }
@@ -520,7 +549,7 @@ func (s *streamingSession) Final(ctx context.Context, msgs []connectors.Outbound
 		outboundMedia = append(outboundMedia, attachments...)
 	}
 	if text := strings.TrimSpace(strings.Join(visibleParts, "\n\n")); text != "" {
-		if err := s.Update(ctx, text); err != nil {
+		if err := s.finalize(ctx, text); err != nil {
 			return err
 		}
 	}
@@ -532,7 +561,7 @@ func (s *streamingSession) Fail(ctx context.Context, text string) error {
 	if text == "" {
 		text = "处理失败，请稍后重试。"
 	}
-	return s.Update(ctx, text)
+	return s.finalize(ctx, text)
 }
 
 type update struct {

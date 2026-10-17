@@ -124,7 +124,9 @@ type streamSession struct {
 
 	mu    sync.Mutex
 	msgID string
-	last  string
+	// raw 是原始增量累积（含出站媒体指令）；last 是已下发的可见文本。
+	raw  string
+	last string
 }
 
 // patchCard 用 PATCH（interactive）替换卡片正文。
@@ -150,14 +152,23 @@ func (s *streamSession) patchCard(ctx context.Context, content string) error {
 	return nil
 }
 
-// Update 以累积文本替换卡片正文（Service 已节流；与前次相同则跳过）。
+// Update 接收累计全文（Service.replySink / StreamMirror 已累积），直接替换
+// 卡片正文（Service 已节流；与前次相同则跳过）。
 // 出站媒体指令（```feishu-attachments``` 围栏 / IMAGE: 等指令行）是协议而非
 // 用户正文：中间态先截断未闭合块、再剥离已闭合块与指令行（与 QQ/Telegram
 // 流式同口径，2026-10-15），终态由 Final 解析并补发附件。
 func (s *streamSession) Update(ctx context.Context, text string) error {
-	visible := connectors.TruncateOpenAttachmentBlocks(text, feishuAttachmentFenceNames...)
+	s.mu.Lock()
+	s.raw = text
+	s.mu.Unlock()
+	return s.publishVisible(ctx, text)
+}
+
+// publishVisible 把已累积的原始文本转换为可见正文并替换卡片正文。
+func (s *streamSession) publishVisible(ctx context.Context, raw string) error {
+	visible := connectors.TruncateOpenAttachmentBlocks(raw, feishuAttachmentFenceNames...)
 	visible, _ = connectors.ParseOutboundMediaDirectives(visible, feishuAttachmentFenceNames...)
-	text = strings.TrimSpace(visible)
+	text := strings.TrimSpace(visible)
 	if text == "" {
 		return nil
 	}
@@ -171,6 +182,31 @@ func (s *streamSession) Update(ctx context.Context, text string) error {
 		return err
 	}
 	s.mu.Lock()
+	s.last = text
+	s.mu.Unlock()
+	return nil
+}
+
+// finalize 以终态全文做最后一次 PATCH（Final/Fail 的 text 已是完整正文，
+// 不再走增量累积）。
+func (s *streamSession) finalize(ctx context.Context, raw string) error {
+	visible := connectors.TruncateOpenAttachmentBlocks(raw, feishuAttachmentFenceNames...)
+	visible, _ = connectors.ParseOutboundMediaDirectives(visible, feishuAttachmentFenceNames...)
+	text := strings.TrimSpace(visible)
+	s.mu.Lock()
+	last := s.last
+	s.mu.Unlock()
+	if text == "" {
+		text = last
+	}
+	if text == "" || text == last {
+		return nil
+	}
+	if err := s.patchCard(ctx, text); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.raw = raw
 	s.last = text
 	s.mu.Unlock()
 	return nil
@@ -203,7 +239,7 @@ func (s *streamSession) Final(ctx context.Context, msgs []connectors.OutboundMes
 	if final == "" {
 		return nil
 	}
-	return s.Update(ctx, final)
+	return s.finalize(ctx, final)
 }
 
 // Fail 收尾为失败提示（PATCH 失败时不抛错——占位卡已尽力，回复本体另有失败路径）。
@@ -212,7 +248,7 @@ func (s *streamSession) Fail(ctx context.Context, text string) error {
 	if text == "" {
 		text = streamFailureText
 	}
-	if err := s.Update(ctx, text); err != nil {
+	if err := s.finalize(ctx, text); err != nil {
 		s.provider.logf("feishu: 流式失败提示 PATCH 失败（%s）：%v", text, err)
 	}
 	return nil

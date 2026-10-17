@@ -47,8 +47,12 @@ type streamSession struct {
 	msgSeq    int
 	streamID  string
 	index     int
-	lastText  string
-	closed    bool
+	// rawText 是收到的原始增量累积（含出站媒体指令）；lastText 是已下发的
+	// 可见文本前缀（指令块剥离/截断后）。两者分开保存，避免跨分片的围栏
+	// 指令因中间态截断而丢失。
+	rawText  string
+	lastText string
+	closed   bool
 }
 
 // StartStreaming 实现 connectors.StreamingProvider。
@@ -68,15 +72,22 @@ func (p *Provider) StartStreaming(_ context.Context, cfg connectors.Config, chat
 	return session, nil
 }
 
-// Update 以 replace 模式推送当前全量正文（Service 已做节流，传参为累积文本）。
+// Update 接收累计全文（Service.replySink / StreamMirror 已累积），以 replace
+// 模式推送当前全量正文。
 func (s *streamSession) Update(ctx context.Context, text string) error {
 	if !s.streaming || s.closed {
 		return nil
 	}
+	s.rawText = text
+	return s.publishVisible(ctx, text)
+}
+
+// publishVisible 把已累积的原始文本转换为可见正文并发送流式分片。
+func (s *streamSession) publishVisible(ctx context.Context, raw string) error {
 	// 出站媒体指令（```qq-attachments``` 围栏 / 指令行）是协议而非用户正文：
 	// 流式中间态先剥离已闭合块，并截断尚未闭合的块（前缀按流式只增约束，
 	// 闭合后下一次 Update 会自然续上），避免把指令原文流式泄漏给用户。
-	visible := connectors.TruncateOpenAttachmentBlocks(text, qqAttachmentFenceNames...)
+	visible := connectors.TruncateOpenAttachmentBlocks(raw, qqAttachmentFenceNames...)
 	visible, _ = connectors.ParseOutboundMediaDirectives(visible, qqAttachmentFenceNames...)
 	trimmed := strings.TrimSpace(visible)
 	if trimmed == "" || trimmed == s.lastText {
@@ -90,6 +101,29 @@ func (s *streamSession) Update(ctx context.Context, text string) error {
 		return err
 	}
 	s.lastText = trimmed
+	return nil
+}
+
+// finalizeVisible 以终态全文收尾（Final/Fail 的 text 已是完整正文，不再
+// 走增量累积；若终态与已下发前缀不一致，保持已下发内容以避开 40007）。
+func (s *streamSession) finalizeVisible(ctx context.Context, raw string) error {
+	visible := connectors.TruncateOpenAttachmentBlocks(raw, qqAttachmentFenceNames...)
+	visible, _ = connectors.ParseOutboundMediaDirectives(visible, qqAttachmentFenceNames...)
+	final := strings.TrimSpace(visible)
+	switch {
+	case final == "":
+		final = s.lastText
+	case s.lastText != "" && !strings.HasPrefix(final, s.lastText):
+		final = s.lastText
+	}
+	if final == "" {
+		return nil
+	}
+	if err := s.sendStreamFragment(ctx, final, streamInputStateFinished); err != nil {
+		return err
+	}
+	s.rawText = raw
+	s.lastText = final
 	return nil
 }
 
@@ -115,23 +149,15 @@ func (s *streamSession) Final(ctx context.Context, msgs []connectors.OutboundMes
 	}
 	if !s.closed {
 		final := strings.TrimSpace(strings.Join(visibleParts, "\n\n"))
-		switch {
-		case final == "":
-			final = s.lastText
-		case s.lastText != "" && !strings.HasPrefix(final, s.lastText):
-			// 终态文本与前缀不一致（异常）：以已下发内容收尾，保证前缀不变。
-			final = s.lastText
-		}
 		if final == "" {
 			// 全程无可见文本（如仅媒体）：无法用流式收尾，退化为普通发送
 			//（mediaMsgs 已含 msg.Media 与指令解析出的附件，不会重复指令文本）。
 			s.closed = true
 			return s.provider.Send(ctx, s.cfg, s.chat, mediaMsgs)
 		}
-		if err := s.sendStreamFragment(ctx, final, streamInputStateFinished); err != nil {
+		if err := s.finalizeVisible(ctx, final); err != nil {
 			return err
 		}
-		s.lastText = final
 		s.closed = true
 	}
 	for _, msg := range mediaMsgs {
@@ -163,7 +189,7 @@ func (s *streamSession) Fail(ctx context.Context, text string) error {
 		final = final + "\n\n" + note
 	}
 	if final != "" {
-		if err := s.sendStreamFragment(ctx, final, streamInputStateFinished); err != nil {
+		if err := s.finalizeVisible(ctx, final); err != nil {
 			return err
 		}
 	}

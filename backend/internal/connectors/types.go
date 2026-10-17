@@ -435,12 +435,23 @@ type TypingProvider interface {
 }
 
 // StreamingSession 是一次可编辑的流式回复。
+//
+// 契约（2026-10-17 核实）：
+//   - Update 接收**累计全文**（当前回合已生成的全部可见正文），不是单个
+//     token/增量。调用方（Service.replySink / StreamMirror）负责把
+//     assistant_delta 累积后再传入。
+//   - Telegram editMessageText、飞书卡片 PATCH、QQ stream_messages
+//     （input_mode=replace）都是「以本次文本替换已发送内容」，因此 Provider
+//     收到全量后直接替换；Provider 不做增量累积。
+//   - Provider 必须保证已下发的可见文本不缩短（媒体指令块可能被剥离，见
+//     QQ/Telegram/飞书的中间态处理），否则平台前缀约束会失败。
+//   - Final/Fail 同样接收完整终态正文/提示，不是增量。
 type StreamingSession interface {
-	// Update 用累积文本编辑已发送的占位消息（实现可自行节流/降级）。
+	// Update 用累计全文更新已发送的占位消息（实现可自行节流/降级）。
 	Update(ctx context.Context, text string) error
-	// Final 以终态消息收尾（文内可追加最终内容）。
+	// Final 以终态消息收尾（文本为完整终态正文）。
 	Final(ctx context.Context, msgs []OutboundMessage) error
-	// Fail 收尾为失败提示。
+	// Fail 收尾为失败提示（text 为完整提示文本）。
 	Fail(ctx context.Context, text string) error
 }
 
