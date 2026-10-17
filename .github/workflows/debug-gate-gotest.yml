@@ -10,6 +10,7 @@ name: Debug release gate go test
 #   2. 若失败，用 -json 重跑，逐包解析出 FAIL 的包与测试名
 #   3. 再对失败包单独 -v 重跑，拿到失败断言细节
 # 触发说明：仅 workflow 文件自身变更会触发本调试流程（paths 过滤）。
+# 第 2 轮：skill-mention 路径断言已改为平台无关，验证 Linux 侧是否转绿。
 on:
   push:
     branches:
