@@ -1,0 +1,122 @@
+name: Debug release gate go test
+
+# 目的：定位 Release reliability gate 中 go.test 的失败点。
+# 匿名 API 读不到 job logs（401）和 artifacts（401），但 check-runs
+# annotations 是公开可读的，所以所有诊断信息都通过 ::error::/::notice::
+# 注解回传。
+#
+# 策略：
+#   1. 先按 CI 完全相同的命令跑（-p=1 ./... -count=1 -timeout=600s）
+#   2. 若失败，用 -json 重跑，逐包解析出 FAIL 的包与测试名
+#   3. 再对失败包单独 -v 重跑，拿到失败断言细节
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/debug-gate-gotest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: '0'
+  GOPROXY: https://proxy.golang.org,direct
+
+jobs:
+  gotest-debug:
+    name: go test ./... diagnosis
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Baseline (exact CI command)
+        shell: bash
+        run: |
+          set +e
+          cd backend
+          START=$(date +%s)
+          go test -p=1 ./... -count=1 -timeout=600s > /tmp/baseline.log 2>&1
+          RC=$?
+          END=$(date +%s)
+          DUR=$((END-START))
+          echo "baseline rc=$RC duration=${DUR}s"
+          echo "::notice title=baseline::rc=$RC duration=${DUR}s lines=$(wc -l < /tmp/baseline.log)"
+          if [ "$RC" -eq 0 ]; then
+            echo "::notice title=baseline GREEN::go test ./... passed in ${DUR}s"
+            exit 0
+          fi
+          # 失败：把 FAIL 行与 panic 行发成注解
+          n=0
+          while IFS= read -r line; do
+            n=$((n+1)); [ "$n" -gt 12 ] && break
+            msg=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r//g')
+            echo "::error title=baseline FAIL $n::$msg"
+          done < <(grep -nE '^--- FAIL|^FAIL|^panic:|Timed out after|^# ' /tmp/baseline.log | head -n 12)
+          exit 1
+
+      - name: Per-package JSON re-run (identify exact tests)
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          cd backend
+          # -json 逐行输出事件；只保留 fail 事件，避免日志爆量
+          go test -p=1 ./... -count=1 -timeout=300s -json > /tmp/json.log 2>&1
+          RC=$?
+          echo "json rc=$RC"
+          echo "::warning title=json rc::rc=$RC"
+
+          # 提取失败测试（Test 事件 action=fail）
+          n=0
+          while IFS= read -r t; do
+            n=$((n+1)); [ "$n" -gt 12 ] && break
+            echo "::error title=FAILED TEST $n::$t"
+          done < <(grep -oE '"Action":"fail","Package":"[^"]+","Test":"[^"]+"' /tmp/json.log \
+                     | sed -E 's/.*"Package":"([^"]+)","Test":"([^"]+)"/\1 :: \2/' | sort -u | head -n 12)
+
+          # 提取失败包（Package 级 fail，无 Test 字段）
+          p=0
+          while IFS= read -r pkg; do
+            p=$((p+1)); [ "$p" -gt 12 ] && break
+            echo "::error title=FAILED PKG $p::$pkg"
+          done < <(grep -oE '"Action":"fail","Package":"[^"]+"' /tmp/json.log \
+                     | sed -E 's/.*"Package":"([^"]+)"/\1/' | sort -u | head -n 12)
+
+          # 记录耗时最长的包（排查超时型失败）
+          echo "::notice title=slowest pkgs::$(grep -oE '"Action":"pass","Package":"[^"]+","Elapsed":[0-9.]+' /tmp/json.log | sed -E 's/.*"Package":"([^"]+)","Elapsed":([0-9.]+)/\2 \1/' | sort -rn | head -n 5 | tr '\n' ';')"
+          exit 1
+
+      - name: Verbose rerun of failing packages
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+          cd backend
+          PKGS=$(grep -oE '"Action":"fail","Package":"[^"]+"' /tmp/json.log 2>/dev/null \
+                   | sed -E 's/.*"Package":"([^"]+)"/\1/' | sort -u | tr '\n' ' ')
+          echo "failing_pkgs=${PKGS:-<none>}"
+          if [ -z "$PKGS" ]; then
+            echo "::warning title=no failing pkgs::json log had no package-level fail"
+            exit 1
+          fi
+          go test -count=1 -timeout=240s -v $PKGS > /tmp/verbose.log 2>&1
+          echo "verbose rc=$?"
+          # 只取失败断言附近的行，转成注解
+          n=0
+          while IFS= read -r line; do
+            n=$((n+1)); [ "$n" -gt 12 ] && break
+            msg=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r//g')
+            echo "::error title=verbose $n::$msg"
+          done < <(grep -nE '^--- FAIL|^=== RUN|Error Trace|Error:|Test:|expected|actual|^\s+[a-zA-Z0-9_]+_test\.go:[0-9]+' /tmp/verbose.log | head -n 12)
+          exit 1
