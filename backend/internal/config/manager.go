@@ -608,6 +608,12 @@ type GoalConfig struct {
 	// 行为零变化（续跑仍由 CLI 驱动）；开启后服务端在 CLI 冷却窗内让位，避免
 	// 双驱动。安全阀沿用 MaxConsecutiveContinuations。
 	ServerAutoContinuation bool `yaml:"serverAutoContinuation" json:"serverAutoContinuation"`
+	// MaxRounds 是新建 goal 的默认总轮数上限（0=不限制，对齐 DSH goal 的
+	// maxGoalRounds 缺省注入语义；DSH goal 借鉴 G2，见
+	// docs/analysis/dsh-goal-domain-vs-aar-goal-20261017.md §3.1）。仅在新
+	// goal 创建时应用；达到上限由驱动器置 blocked（code=round-limit），
+	// /goal resume 解除后从当前轮数继续计数。
+	MaxRounds int `yaml:"maxRounds" json:"maxRounds"`
 }
 
 // BackgroundConfig controls background task persistence.

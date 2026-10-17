@@ -196,6 +196,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		RequestTimeout:           runtimeState.requestTimeout,
 		goalMaxContinuations:     persistenceState.goalMaxContinuations,
 		goalDefaultTokenBudget:   persistenceState.goalDefaultTokenBudget,
+		goalDefaultMaxRounds:     persistenceState.goalDefaultMaxRounds,
 		OutputFormat:             opts.OutputFormat,
 		InputReader:              chatOptionInputReader(opts),
 		ScriptedInput:            newChatScriptedInput(opts.ScriptLines),

@@ -27,6 +27,9 @@ type chatPersistenceState struct {
 	// goalDefaultTokenBudget 来自 runtime.yaml 的 goal.defaultTokenBudget：
 	// 新建 goal 的默认 token 预算（0=无预算）。
 	goalDefaultTokenBudget int
+	// goalDefaultMaxRounds 来自 runtime.yaml 的 goal.maxRounds：新建 goal 的
+	// 默认总轮数上限（0=不限制；G2，DSH goal 借鉴）。
+	goalDefaultMaxRounds int
 }
 
 type chatRuntimeState struct {
@@ -62,6 +65,9 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 	}
 	if runtimeConfig != nil && runtimeConfig.Goal.DefaultTokenBudget > 0 {
 		state.goalDefaultTokenBudget = runtimeConfig.Goal.DefaultTokenBudget
+	}
+	if runtimeConfig != nil && runtimeConfig.Goal.MaxRounds > 0 {
+		state.goalDefaultMaxRounds = runtimeConfig.Goal.MaxRounds
 	}
 	markChatStartup("persistence_config")
 	if manager, userID, sessionDir, configured, err := prepareRuntimeServerChatPersistence(runtimeConfig, opts); err != nil {

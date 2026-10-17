@@ -95,6 +95,9 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 	if goal.TokenBudget <= 0 && session.goalDefaultTokenBudget > 0 {
 		goal.TokenBudget = session.goalDefaultTokenBudget
 	}
+	if goal.MaxRounds <= 0 && session.goalDefaultMaxRounds > 0 {
+		goal.MaxRounds = session.goalDefaultMaxRounds
+	}
 	store := runtimegoal.NewMetadataStore()
 	replaced := ""
 	if existing, ok, err := store.Get(session.RuntimeSession); err != nil {
