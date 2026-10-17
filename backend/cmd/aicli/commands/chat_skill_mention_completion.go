@@ -29,6 +29,10 @@ const (
 	// skillMentionCompletionNoMatchPrefix 是 0 候选项的弹层文案前缀；
 	// query 非空时追加 `: $<query>`。
 	skillMentionCompletionNoMatchPrefix = "未找到匹配技能"
+	// skillMentionCompletionLoadingLabel 是技能面仍在后台发现/挂载时的弹层文案。
+	// 比“未找到匹配技能”诚实：列表只是还没挂上，用户不必（也不该）手动执行
+	// /skills 去“激活”它；发现完成后下一次编辑动作会自动挂载。
+	skillMentionCompletionLoadingLabel = "技能仍在加载中…"
 	// skillMentionCompletionMaxCandidates 是弹层候选上限（超出只显示前 10）。
 	skillMentionCompletionMaxCandidates = 10
 )
@@ -97,6 +101,9 @@ type chatSkillMentionCompletionState struct {
 	Candidates   []chatSkillMentionCompletionCandidate
 	Selected     int
 	CommonPrefix string
+	// Loading 表示 token 有效但技能面尚未挂载、且后台发现仍在进行。弹层据此
+	// 渲染“加载中”而不是“未找到匹配技能”（见 renderSkillMentionCompletionPopup）。
+	Loading bool
 }
 
 // detectChatSkillMentionToken 解析光标左侧的 `$name` token（plan §5 P2 行为 1）：
@@ -469,6 +476,13 @@ func (c *chatSkillMentionCompletionController) buildStateLocked(text string, cur
 	}
 	state.Active = true
 	state.Candidates = c.collectCandidatesLocked(context.Query)
+	if len(state.Candidates) == 0 &&
+		skillMentionBinding(c.session) == nil &&
+		capabilitiesDiscoveryPending(c.session) {
+		// 技能面仍在后台发现：弹层给出“加载中”。发现完成后下一次编辑动作会在
+		// collectCandidatesLocked 里自动挂载（tryAttachChatCapabilities）并出候选。
+		state.Loading = true
+	}
 	state.CommonPrefix = skillMentionCompletionCommonPrefix(state.Candidates)
 	if len(state.Candidates) == 0 {
 		return state
@@ -493,6 +507,13 @@ func (c *chatSkillMentionCompletionController) collectCandidatesLocked(query str
 		return nil
 	}
 	binding := skillMentionBinding(c.session)
+	if binding == nil {
+		// 后台发现已完成而尚未挂载时立即补挂（主 goroutine 调用点；发现未完成
+		// 则直接返回 false，不阻塞键入）。`$` 列表因此不必依赖 /skills 或首个
+		// turn 的显式 await 才可用。
+		tryAttachChatCapabilities(c.session)
+		binding = skillMentionBinding(c.session)
+	}
 	if binding == nil {
 		return nil
 	}
@@ -676,6 +697,11 @@ func renderSkillMentionCompletionPopup(state chatSkillMentionCompletionState, wi
 		width = 80
 	}
 	if len(state.Candidates) == 0 {
+		if state.Loading {
+			// 技能面尚未挂载且后台发现仍在进行：说清“还在加载”，不要谎报
+			// “未找到”，否则用户会以为必须手动 /skills 一次才生效。
+			return clampSlashCompletionPopupLines([]string{skillMentionCompletionLoadingLabel}, width)
+		}
 		label := skillMentionCompletionNoMatchPrefix
 		if query := strings.TrimSpace(state.Query); query != "" {
 			label = fmt.Sprintf("%s: $%s", label, query)

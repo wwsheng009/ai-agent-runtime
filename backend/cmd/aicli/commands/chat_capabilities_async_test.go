@@ -355,3 +355,93 @@ func newStartupProgressTestCoordinator(t *testing.T) *chatInteractionCoordinator
 	session.Interaction.session = session
 	return session.Interaction
 }
+
+// TestTryAttachChatCapabilities_AutoMountsAfterDiscovery 锁住「skill 加载完成后
+// 直接加载 skill 列表」的门控语义：发现完成前后 tryAttach 的返回必须正确，且
+// 挂载恰好执行一次——它正是 `$` 补全不再依赖 /skills / 首个 turn 的落点。
+func TestTryAttachChatCapabilities_AutoMountsAfterDiscovery(t *testing.T) {
+	session := &ChatSession{}
+	release := make(chan struct{})
+	discoveryStarted := make(chan struct{})
+	attached := make(chan struct{})
+	var (
+		mu          sync.Mutex
+		attachCalls int
+	)
+	installChatCapabilitiesGate(session,
+		func() (*chatCapabilityDiscovery, error) {
+			close(discoveryStarted)
+			<-release
+			return &chatCapabilityDiscovery{}, nil
+		},
+		func(*chatCapabilityDiscovery) (func(), error) {
+			mu.Lock()
+			attachCalls++
+			mu.Unlock()
+			close(attached)
+			return func() {}, nil
+		},
+	)
+
+	go runChatCapabilitiesLoad(session)
+	<-discoveryStarted
+
+	// 发现未完成：自动挂载必须非阻塞拒绝，否则会把键入/主循环卡在后台扫描上。
+	if tryAttachChatCapabilities(session) {
+		t.Fatal("发现未完成时 tryAttach 必须返回 false，不能阻塞等待")
+	}
+	if !capabilitiesDiscoveryPending(session) {
+		t.Fatal("发现未完成时 capabilitiesDiscoveryPending 必须为 true")
+	}
+
+	close(release)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := currentChatCapabilityLoad(session).awaitDiscovery(waitCtx); err != nil {
+		t.Fatalf("awaitDiscovery: %v", err)
+	}
+	if capabilitiesDiscoveryPending(session) {
+		t.Fatal("发现落地后 capabilitiesDiscoveryPending 必须为 false")
+	}
+
+	// 发现落地后的下一个主 goroutine 时机：自动挂载一次。
+	if !tryAttachChatCapabilities(session) {
+		t.Fatal("发现完成后 tryAttach 必须执行挂载并返回 true")
+	}
+	select {
+	case <-attached:
+	default:
+		t.Fatal("attach 闭包未执行：SkillsBinding 不会被写入 session")
+	}
+	if tryAttachChatCapabilities(session) {
+		t.Fatal("已挂载后 tryAttach 必须返回 false（不得重复挂载）")
+	}
+	mu.Lock()
+	got := attachCalls
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("attach 必须恰好执行一次，实际 %d", got)
+	}
+}
+
+// TestTryAttachChatCapabilities_AttachFailureRecordedOnce 锁住失败路径：自动挂载
+// 失败不得吞错（根因写回会话诊断），也不得借自动入口反复重试挂载。
+func TestTryAttachChatCapabilities_AttachFailureRecordedOnce(t *testing.T) {
+	boom := errors.New("attach boom")
+	session := &ChatSession{}
+	installChatCapabilitiesGate(session,
+		func() (*chatCapabilityDiscovery, error) { return &chatCapabilityDiscovery{}, nil },
+		func(*chatCapabilityDiscovery) (func(), error) { return nil, boom },
+	)
+
+	runChatCapabilitiesLoad(session)
+	if tryAttachChatCapabilities(session) {
+		t.Fatal("挂载失败时 tryAttach 必须返回 false")
+	}
+	if !strings.Contains(session.CapabilitiesInitError, "attach boom") {
+		t.Fatalf("挂载失败必须把根因写回会话诊断，实际 %q", session.CapabilitiesInitError)
+	}
+	if tryAttachChatCapabilities(session) {
+		t.Fatal("已失败的挂载不得被自动入口重复执行")
+	}
+}

@@ -1950,6 +1950,11 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			break
 		}
 
+		// 能力面自动挂载：后台发现已完成而挂载尚未执行时，在本轮开头（主 goroutine）
+		// 立即挂载，见 chat_capabilities_async.go。`$` 技能列表从此不必等首个 turn
+		// 或手动执行 /skills 才有候选。
+		tryAttachChatCapabilities(session)
+
 		// 恢复态作答：上一进程遗留的 pending 提问/审批在作答前每轮保持可见
 		// （历史重放/切换会话会重置底部面板，弹层需要重新铺一次）。
 		if !noInteractive {

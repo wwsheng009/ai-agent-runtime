@@ -155,6 +155,10 @@ func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
 	if c == nil || c.session == nil {
 		return
 	}
+	// 能力面自动挂载：后台发现完成后，首个编辑动作（含输入 `$`）即把能力面挂到
+	// 会话上，让 `$` 技能补全不必先执行 /skills 才有候选（见
+	// chat_capabilities_async.go 的 tryAttachChatCapabilities）。
+	tryAttachChatCapabilities(c.session)
 	// Slash popup rendering must preserve the cursor from the last completed
 	// editor redraw. Track the prompt snapshot first so popup rendering and
 	// paste-active blocking observe the same composer state that the editor is

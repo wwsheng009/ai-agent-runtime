@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -506,5 +508,57 @@ func TestShouldEnableSkillMentionCompletion(t *testing.T) {
 	}
 	if !shouldEnableSkillMentionCompletion(newSession(enabledSurface, config.SkillMentionInjectionOn, untrusted)) {
 		t.Fatal("explicit on must override untrusted project")
+	}
+}
+
+// TestSkillMentionCompletion_AutoMountsAfterCapabilitiesDiscovery 锁住本次修复的
+// 用户故事：TUI 启动后技能面仍在后台发现时输入 `$`，弹层显示“技能仍在加载中…”
+// 而不是“未找到匹配技能”；后台发现完成后无需执行 /skills，下一次编辑动作即
+// 自动挂载能力面并给出候选。
+func TestSkillMentionCompletion_AutoMountsAfterCapabilitiesDiscovery(t *testing.T) {
+	base, binding := mentionTestSession(t, nil,
+		mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
+	)
+	session := &ChatSession{Config: base.Config}
+	release := make(chan struct{})
+	discoveryStarted := make(chan struct{})
+	installChatCapabilitiesGate(session,
+		func() (*chatCapabilityDiscovery, error) {
+			close(discoveryStarted)
+			<-release
+			return &chatCapabilityDiscovery{}, nil
+		},
+		func(*chatCapabilityDiscovery) (func(), error) {
+			session.SkillsBinding = binding
+			return func() {}, nil
+		},
+	)
+	go runChatCapabilitiesLoad(session)
+	<-discoveryStarted
+
+	controller := newChatSkillMentionCompletionController(session)
+	controller.UpdateSnapshot(ui.LineEditorSnapshot{Text: "$", Cursor: 1})
+	if len(controller.state.Candidates) != 0 {
+		t.Fatalf("发现未完成时不得有候选，实际 %v", completionCandidateNames(controller.state.Candidates))
+	}
+	if !controller.state.Loading {
+		t.Fatal("发现未完成时弹层必须进入加载中状态，而不是谎报未找到匹配技能")
+	}
+	if lines := renderSkillMentionCompletionPopup(controller.state, 80); len(lines) == 0 || lines[0] != skillMentionCompletionLoadingLabel {
+		t.Fatalf("加载中弹层 = %#v，want %q", lines, skillMentionCompletionLoadingLabel)
+	}
+
+	close(release)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := currentChatCapabilityLoad(session).awaitDiscovery(waitCtx); err != nil {
+		t.Fatalf("awaitDiscovery: %v", err)
+	}
+
+	// 发现落地后的下一个编辑动作：无需 /skills，自动挂载并出候选。
+	controller.UpdateSnapshot(ui.LineEditorSnapshot{Text: "$a", Cursor: 2})
+	assertCompletionCandidateNames(t, controller.state.Candidates, []string{"alpha"})
+	if controller.state.Loading {
+		t.Fatal("挂载完成后不得再显示加载中")
 	}
 }

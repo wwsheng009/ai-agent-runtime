@@ -74,6 +74,35 @@ func (l *chatCapabilityLoad) currentErr() error {
 	return l.err
 }
 
+// discoveryDone 非阻塞报告发现阶段是否已经落地（未启动时为 false）。
+func (l *chatCapabilityLoad) discoveryDone() bool {
+	if l == nil {
+		return false
+	}
+	select {
+	case <-l.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// attachPending 报告「发现已完成、挂载尚未执行」——允许立即补挂载的唯一窗口。
+// attachDone 与真正执行挂载的 await 共用 attachMu，保证并发判定不会越过
+// runAttach 的一次性约束。
+// 挂载正在别处执行（例如 web 请求先到）时用 TryLock 直接返回 false：UI 读取路径
+// 上不得为一个已在进行的挂载排队等锁。
+func (l *chatCapabilityLoad) attachPending() bool {
+	if l == nil || l.attach == nil || !l.discoveryDone() {
+		return false
+	}
+	if !l.attachMu.TryLock() {
+		return false
+	}
+	defer l.attachMu.Unlock()
+	return !l.attachDone
+}
+
 // awaitDiscovery 阻塞到发现阶段结束，返回其错误。
 func (l *chatCapabilityLoad) awaitDiscovery(ctx context.Context) error {
 	if l == nil {
@@ -216,6 +245,46 @@ func awaitChatCapabilities(ctx context.Context, session *ChatSession) error {
 		return nil
 	}
 	return load.runAttach(ctx)
+}
+
+// capabilitiesDiscoveryPending 报告本会话的能力面发现阶段仍在后台进行。
+// 未安装门控（同步构建 / runtime-server / 测试路径）恒 false。
+func capabilitiesDiscoveryPending(session *ChatSession) bool {
+	load := currentChatCapabilityLoad(session)
+	return load != nil && !load.discoveryDone()
+}
+
+// tryAttachChatCapabilities 是能力面的非阻塞自动挂载入口：后台发现已完成而挂载
+// 尚未执行时，立即在调用者（主）goroutine 上执行挂载阶段；未安装门控 / 发现未完成
+// / 已挂载时返回 false。
+//
+// 这是「skill 加载完成后直接加载 skill 列表」的落点：交互 TUI 的 `$` 技能补全直读
+// session.SkillsBinding（skillMentionBinding），而该字段只有挂载阶段会写。缺了本入口
+// 时，用户必须先提交首个 turn 或执行一次 /skills（两条路径都会 await 门控）才能拿到
+// 候选，表现就是「必须 /skills 一次，`$` 才生效」。
+//
+// 只允许在主 goroutine 上调用：挂载阶段写 session 能力字段，而首帧之后主 goroutine
+// 一直在读这些字段（状态行 / executor descriptor / 工具可用性）。发现阶段未完成时
+// 直接返回 false，绝不阻塞 UI。
+func tryAttachChatCapabilities(session *ChatSession) bool {
+	load := currentChatCapabilityLoad(session)
+	if load == nil || !load.attachPending() {
+		return false
+	}
+	// 发现阶段已结束，runAttach 内部的 awaitDiscovery 立即返回，不会阻塞。
+	if err := load.runAttach(context.Background()); err != nil {
+		// 与后台发现失败同口径：记录根因供 /skills 诊断复述，并投递动态栏。
+		// 这里不落裸 stderr 兜底（直接写入者门禁只允许迁移、不新增）：未登记
+		// 交互出口时，同一错误会在首个 turn 的 ensureChatExecutor 或 /skills
+		// 诊断处原样呈现，不会丢失。
+		message := fmt.Sprintf("能力面初始化失败: %v", err)
+		if session != nil {
+			session.CapabilitiesInitError = message
+		}
+		NotifyChatDiagnostic(fmt.Sprintf("Warning: 能力面初始化失败（工具/Skills/运行时宿主不可用）: %v", err))
+		return false
+	}
+	return true
 }
 
 // runChatCapabilitiesLoad 在已安装的门控上执行「发现」阶段，并推进动态栏上的
