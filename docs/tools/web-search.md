@@ -70,7 +70,7 @@ webSearch:
 - 传入 `queries` 数组时：**先上限检查（≤4）再按首现顺序去重**；各查询并发执行（共享同一条链级预算），任一查询失败默认**不中止**其他查询；
 - 合并顺序：按 rank 轮转（query 顺序交错）→ URL 首见去重 → 受 `count` 封顶（超出置 `truncated`）；
 - 默认合并部分成功；`webSearch.strictMultiQuery=true` 时首个失败查询即中止整次调用并取消兄弟查询（DSH 语义）；
-- 合并 metadata：`queries`、`merged_count`、`per_query_sources`（每查询入选条数）、`provider_sources`（参与来源）、`query_failures`（失败查询→错误摘要，仅失败时）；
+- 合并 metadata：`queries`、`merged_count`、`per_query_sources`（每查询入选条数）、`provider_sources`（参与来源）、`query_failures`（失败查询→错误摘要，仅失败时）、`cancelled_queries`（外部取消时被丢弃的查询；已完成查询保留合并）；
 - 单元素 `queries` 与 `query` 行为逐字节一致。
 
 ## 5. 原生搜索（provider/model 能力位）

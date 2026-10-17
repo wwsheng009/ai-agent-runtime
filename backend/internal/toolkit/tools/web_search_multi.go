@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -114,7 +115,8 @@ func (w *WebSearchTool) finishSingleQuery(query string, count int, filter webSea
 // partial successes; webSearch.strictMultiQuery aborts the whole call on the
 // first failed query and cancels its siblings (DSH-style).
 func (w *WebSearchTool) executeMultiQuery(ctx context.Context, queries []string, count int, filter webSearchDomainFilter, options webSearchOptions, started time.Time) *toolkit.ToolResult {
-	ctx, cancel := context.WithCancel(ctx)
+	parentCtx := ctx
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
 	runs := make([]webSearchChainRun, len(queries))
@@ -138,6 +140,10 @@ func (w *WebSearchTool) executeMultiQuery(ctx context.Context, queries []string,
 		}(index)
 	}
 	waitGroup.Wait()
+
+	// P3-2：外部取消（调用方 cancel / 上游取消）的可解释语义。strict 内部
+	// 取消走独立失败路径（下方提前返回），不进入该分类。
+	externallyCancelled := parentCtx.Err() == context.Canceled
 
 	budgetExhausted := false
 	timedOutProvider := ""
@@ -167,7 +173,9 @@ func (w *WebSearchTool) executeMultiQuery(ctx context.Context, queries []string,
 		for _, failure := range run.failures {
 			mergedFailures = append(mergedFailures, providerFailure{name: run.query + ":" + failure.name, err: failure.err})
 		}
-		if run.attempt == nil && len(run.failures) > 0 {
+		// 被外部取消的查询进 cancelled_queries（而非 query_failures）：它的
+		// "失败"只是取消本身；真实失败（429/无结果等）保持原口径。
+		if run.attempt == nil && len(run.failures) > 0 && !webSearchRunCancelled(run, externallyCancelled) {
 			parts := make([]string, 0, len(run.failures))
 			for _, failure := range run.failures {
 				parts = append(parts, failure.err.Error())
@@ -181,6 +189,9 @@ func (w *WebSearchTool) executeMultiQuery(ctx context.Context, queries []string,
 		result.Metadata["queries"] = append([]string(nil), queries...)
 		if len(queryFailures) > 0 {
 			result.Metadata["query_failures"] = queryFailures
+		}
+		if cancelled := cancelledQueryNames(queries, runs, externallyCancelled); len(cancelled) > 0 {
+			result.Metadata["cancelled_queries"] = cancelled
 		}
 		return w.stampBudgetMetadata(result, started, budgetExhausted, timedOutProvider)
 	}
@@ -214,7 +225,47 @@ func (w *WebSearchTool) executeMultiQuery(ctx context.Context, queries []string,
 	if len(queryFailures) > 0 {
 		result.Metadata["query_failures"] = queryFailures
 	}
+	if cancelled := cancelledQueryNames(queries, runs, externallyCancelled); len(cancelled) > 0 {
+		result.Metadata["cancelled_queries"] = cancelled
+	}
 	return w.stampBudgetMetadata(result, started, budgetExhausted, timedOutProvider)
+}
+
+// webSearchRunCancelled reports whether one chain run ended because the whole
+// call was cancelled externally (P3-2): no attempt, and either a
+// context.Canceled failure anywhere in the run or the cancel landed before the
+// chain reached any provider (empty failures). A run that failed on its own
+// (real upstream error, no Canceled signal) stays a genuine failure even when
+// an external cancel raced it. Strict-mode sibling cancellation never reaches
+// this classification (strict returns its own failure path first).
+func webSearchRunCancelled(run webSearchChainRun, externallyCancelled bool) bool {
+	if run.attempt != nil {
+		return false
+	}
+	if externallyCancelled && len(run.failures) == 0 {
+		return true
+	}
+	for _, failure := range run.failures {
+		if errors.Is(failure.err, context.Canceled) {
+			return true
+		}
+	}
+	return false
+}
+
+// cancelledQueryNames lists the queries dropped by the external cancellation
+// (P3-2 metadata contract: completed runs merge, cancelled ones are named).
+func cancelledQueryNames(queries []string, runs []webSearchChainRun, externallyCancelled bool) []string {
+	if !externallyCancelled {
+		return nil
+	}
+	out := make([]string, 0, len(runs))
+	for index, run := range runs {
+		if webSearchRunCancelled(run, externallyCancelled) {
+			out = append(out, queries[index])
+		}
+	}
+	return out
 }
 
 // dedupeWebSearchAttempts keeps the first attempt per provider name so the

@@ -521,6 +521,8 @@ type NativeToolCapabilities struct {
 
 ### 6.2 实施项 P3-2：多查询取消编排
 
+> **落地进展（2026-10-16）**：取消分类已落地——`executeMultiQuery` 区分父 ctx（外部取消）与批量 ctx（strict 内部取消）：外部取消时按 run 级判别，`attempt!=nil` 的已完成查询保留并入合并输出，无结果的查询经 `webSearchRunCancelled`（失败含 `context.Canceled` 或取消后从未执行）标注进新 metadata `cancelled_queries`；`query_failures` 不再把取消误报为真实失败（取消期内完成的真实失败保持原口径，确定性测试覆盖）；strict 内部取消沿用原失败路径不误标。join 语义不变（`waitGroup.Wait` 返回前收集，无泄漏）。测试：`web_search_merge_test.go` 新增 4 组（混合取消保留已完成结果、全取消失败携带 `cancelled_queries`、预取消标注未执行查询、取消与真实失败竞态区分）；既有 strict/取消 join 用例不回归。
+
 **问题**：Phase 2 的多查询取消只做了"派生 ctx + join"；需要细化为可测契约：外部取消 → 所有子链请求终止；任一子链不可取消的底层调用最迟在 request budget 内退出。
 
 **设计**：`context.WithCancel` 派生批量 ctx；每个子搜索用自己的 `context.WithTimeout(batchCtx, remainingBudget)`；取消时收集子结果（已完成的保留、未完成的丢弃）并标记 `cancelled_queries`；保证返回前 join（无泄漏 goroutine）。
@@ -575,7 +577,7 @@ type NativeToolCapabilities struct {
 | P2-4 | 每 provider：请求/结果/错误映射、可用性、sandbox、key 轮换；空链结构化错误 | `web_search_api_test.go`（Brave/Tavily）+ `web_search_api_answer_test.go`（Exa/Perplexity；含答案分节与 401 分类）已落地 |
 | P2-5 | 能力位解析（旧/新键）/链门控（off/prefer/force/allow）/请求与映射/严格模式/prefer 回退/force 结构化错误/沙箱/P2-5d 适配器事件 | `web_search_native_test.go`、`websearch_config_test.go`、`native_web_search_test.go`（agentconfig/modelcard）；P2-5d 待补 |
 | P3-1 | 前端 meta 防御解析/回退/徽标；e2e 卡片读取 | `web-search-meta.test.ts` + `tool-row-web-sources.test.tsx` + 后端 `tool_runtime_events_web_search_test.go`（已落地）+ `e2e/workspace-chat.spec.ts` G2 断言 |
-| P3-2 | 取消级联/join/部分完成 | `web_search_merge_test.go` |
+| P3-2 | 取消级联/join/部分完成 | `web_search_merge_test.go`（外部取消分类 4 组已落地；strict/取消 join 既有用例回归） |
 | P3-3 | 信号权重/阈值覆盖/既有质量测试不回归 | `web_search_quality_test.go` |
 
 跨包回归：`tools/manager_test.go`、`toolregistry` 契约、`policy` 策略测试、`profileinput/disabled_capabilities_e2e_test.go`、`llm/adapter` 拒绝语义测试。

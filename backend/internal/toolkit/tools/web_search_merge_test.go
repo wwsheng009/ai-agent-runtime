@@ -243,3 +243,141 @@ func TestExecuteMultiQueryCancellationJoins(t *testing.T) {
 		t.Fatalf("canceled multi-query must not report success")
 	}
 }
+
+// P3-2：混合取消——不可取消调用自旋退出→结果保留；可取消阻塞调用→终止。
+// 断言：已完成查询的结果进入合并输出，被取消查询进 cancelled_queries，
+// elapsed 远小于链预算（join 不等待不可取消调用的完整时长）。
+func TestExecuteMultiQueryExternalCancellationKeepsFinishedQueries(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []WebSearchProvider{
+		perQueryFakeProvider(map[string][]DuckDuckGoResult{
+			"spin": {{Title: "spin result", URL: "https://spin.example/1"}},
+		}),
+		newWebSearchProvider("blocking", func(ctx context.Context, query string, count int) (string, []DuckDuckGoResult, error) {
+			<-ctx.Done()
+			return "", nil, fmt.Errorf("wrapped: %w", ctx.Err())
+		}, nil),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	started := time.Now()
+	result, err := tool.Execute(ctx, map[string]interface{}{"queries": []interface{}{"spin", "blocking"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("cancellation did not join promptly: %s", elapsed)
+	}
+	if !result.Success {
+		t.Fatalf("finished queries must survive the cancellation: %v", result.Error)
+	}
+	if result.Metadata["merged_count"] != 1 {
+		t.Fatalf("merged_count = %v", result.Metadata["merged_count"])
+	}
+	cancelled, _ := result.Metadata["cancelled_queries"].([]string)
+	if len(cancelled) != 1 || cancelled[0] != "blocking" {
+		t.Fatalf("cancelled_queries = %#v", result.Metadata["cancelled_queries"])
+	}
+	if !strings.Contains(result.Content, "spin result") {
+		t.Fatalf("finished result missing from merged content: %q", result.Content)
+	}
+}
+
+// P3-2：全部查询被取消 → 结构化失败携带 cancelled_queries；query_failures
+// 不得把取消误报成真实失败。
+func TestExecuteMultiQueryExternalCancellationFailsWithCancelledQueries(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []WebSearchProvider{newWebSearchProvider("slow", func(ctx context.Context, query string, count int) (string, []DuckDuckGoResult, error) {
+		<-ctx.Done()
+		return "", nil, ctx.Err()
+	}, nil)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	result, err := tool.Execute(ctx, map[string]interface{}{"queries": []interface{}{"a", "b"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("fully cancelled multi-query must fail")
+	}
+	cancelled, _ := result.Metadata["cancelled_queries"].([]string)
+	if len(cancelled) != 2 || cancelled[0] != "a" || cancelled[1] != "b" {
+		t.Fatalf("cancelled_queries = %#v", result.Metadata["cancelled_queries"])
+	}
+	if _, present := result.Metadata["query_failures"]; present {
+		t.Fatalf("cancellation must not be reported as query_failures: %#v", result.Metadata["query_failures"])
+	}
+}
+
+// P3-2：ctx 预先取消 → 两个查询都未执行，全部进 cancelled_queries；
+// query_failures 不把「从未执行」误报成真实失败。
+func TestExecuteMultiQueryPreCancelledMarksNeverExecutedQueries(t *testing.T) {
+	tool := NewWebSearchTool()
+	tool.providers = []WebSearchProvider{perQueryFakeProvider(map[string][]DuckDuckGoResult{})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := tool.Execute(ctx, map[string]interface{}{"queries": []interface{}{"m1", "m2"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("pre-cancelled multi-query must fail")
+	}
+	cancelled, _ := result.Metadata["cancelled_queries"].([]string)
+	if len(cancelled) != 2 || cancelled[0] != "m1" || cancelled[1] != "m2" {
+		t.Fatalf("cancelled_queries = %#v", result.Metadata["cancelled_queries"])
+	}
+	if _, present := result.Metadata["query_failures"]; present {
+		t.Fatalf("never-executed query must not be reported as a real failure: %#v", result.Metadata["query_failures"])
+	}
+}
+
+// P3-2：外部取消与真实失败竞态时，确定性区分：立即真实失败的查询保持
+// query_failures 原口径，被取消的阻塞查询进 cancelled_queries。
+func TestExecuteMultiQueryGenuineFailureSurvivesExternalCancellation(t *testing.T) {
+	tool := NewWebSearchTool()
+	// 单 provider 按查询分流（链上每个查询会走完整个链，多 provider 会让
+	// genuine 也追加 Canceled 失败、破坏确定性）：genuine 立即真实失败
+	// （先于取消完成，不观察 ctx）；blocking 阻塞到取消。
+	tool.providers = []WebSearchProvider{newWebSearchProvider("mixed", func(ctx context.Context, query string, count int) (string, []DuckDuckGoResult, error) {
+		if query == "genuine" {
+			return "", nil, fmt.Errorf("no answer for %q", query)
+		}
+		<-ctx.Done()
+		return "", nil, ctx.Err()
+	}, nil)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	result, err := tool.Execute(ctx, map[string]interface{}{"queries": []interface{}{"genuine", "blocking"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected failure (no successful query)")
+	}
+	cancelled, _ := result.Metadata["cancelled_queries"].([]string)
+	if len(cancelled) != 1 || cancelled[0] != "blocking" {
+		t.Fatalf("cancelled_queries = %#v", result.Metadata["cancelled_queries"])
+	}
+	queryFailures, _ := result.Metadata["query_failures"].(map[string]interface{})
+	if !strings.Contains(fmt.Sprint(queryFailures["genuine"]), "genuine") {
+		t.Fatalf("genuine failure must stay in query_failures: %#v", result.Metadata["query_failures"])
+	}
+}
