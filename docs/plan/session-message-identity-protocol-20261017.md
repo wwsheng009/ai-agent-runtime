@@ -62,15 +62,22 @@ canonical 转录（`session_messages`）丢失第二轮的 `assistant(tool_calls
 覆盖 loop 对真身的并发写入（loop 每 step 经 `PersistHistory` → `ReplaceHistory`
 提交的身份铸新随副本写回丢失）。
 
-已知分叉调用点（P2 需逐一收敛，P1 spike 时复核全量）：
+已知分叉调用点（**P0 spike 已全量枚举，actor.go 共 15 处 loadSession/Load，下表为
+其中构成「run 中副本写回」风险的封闭清单**；其余为只读消费——plan-mode 读取
+:5998、persistSession 内 latest 合并 :3527（只取 context 不写历史）、
+loadSession 自身 :3451——不在收敛范围）：
 
-| 调用点 | 位置 | 行为 |
-|---|---|---|
-| `recordPendingToolCall` | actor.go ~4052 | loadSession → ensurePendingToolBatchInSession → persistSession |
-| `resumePendingToolWithResult` | actor.go ~4068 | loadSession → AddMessage(tool) → persistSession |
-| `resumeApprovedPendingTool` | actor.go ~4148 | loadSession → 回执回放 AddMessage → persistSession |
-| `appendPendingToolReceiptToSession` 链 | actor.go ~4190 | 同上族 |
-| checkpoint 路径（interval>0 时） | historyCheckpointLoopConfig | loadSession → persistSession |
+| 调用点 | 位置 | run 中？ | 行为 | P2 处置 |
+|---|---|---|---|---|
+| `handleSubmitPrompt` / `handleContinueSession` | :1094 / :1183 | 否（run 起点） | 一次性加载，作为真身贯穿 run | 保留（即 INV-2 的「真身」来源） |
+| `handleCompactSession` | :1754 | 视触发时机 | 手动压缩：loadSession → runManualCompact → persist | run 中触发时走受控接口 |
+| `applyConversationSnapshot` | :1788 | 否（回溯命令） | replaceSessionHistory + persist | 保留（run 外语义） |
+| `applyConversationPrefix` | :1813 | 否（回溯命令） | 截断 + persist | 保留（run 外语义） |
+| `recordPendingToolCall` | :4059 | **是** | ensurePendingToolBatch → persist | **受控接口** |
+| `resumePendingToolWithResult` | :4078/:4086 | **是** | loadSession → AddMessage(tool) → persist | **受控接口** |
+| `resumeApprovedPendingTool` | :4158/:4170 | **是** | 回执回放 AddMessage → persist | **受控接口** |
+
+（P2 实施时以本清单 + `rg "loadSession"` 复核为准；新增调用点必须过审。）
 
 实测打点佐证：loop 的 ReplaceHistory 序列 7 次全部正确铸新，最终 durable 仍错——
 覆盖发生在「副本写回」与真身之间；「previous=1 截短」「铸好的 id 又变旧」均为该
