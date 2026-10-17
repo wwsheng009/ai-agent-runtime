@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,14 +29,30 @@ func webSearchQualityThreshold() float64 {
 	return value
 }
 
+// P3-3 signal weights: a term hit in the title counts more than one in the
+// snippet, which counts more than one that only appears in the URL.
+const (
+	webSearchQualityTitleWeight   = 1.0
+	webSearchQualitySnippetWeight = 0.7
+	webSearchQualityURLWeight     = 0.4
+	// Modulation floor: the diversity and snippet-presence dampeners can only
+	// shrink the coverage score (bounded to [floor, 1]); they never inflate it,
+	// so unrelated results stay at 0 and relevant ones are not inflated.
+	webSearchQualityModulationFloor = 0.7
+)
+
 // webSearchQuality describes how well a provider result set matches the
-// query. Score is the fraction of meaningful query terms found in the result
-// title/snippet/URL; tier is "ok" for a normal hit and "low" for a result that
-// should trigger fallback but may still be returned if it is the best attempt.
+// query. Score is the weighted term coverage (title > snippet > URL) times a
+// bounded modulation factor (domain diversity + snippet presence); Signals
+// carries the per-signal values for the explainable quality_signals metadata.
+// tier is "ok" for a normal hit and "low" for a result that should trigger
+// fallback but may still be returned if it is the best attempt.
 type webSearchQuality struct {
-	Score float64
-	Tier  string
-	Terms []string
+	Score   float64
+	Tier    string
+	Terms   []string
+	Signals map[string]float64
+	Factor  float64
 }
 
 // assessWebSearchQuality scores a result set against the query. Empty result
@@ -44,36 +61,113 @@ type webSearchQuality struct {
 func assessWebSearchQuality(query string, results []DuckDuckGoResult) webSearchQuality {
 	terms := webSearchQueryTerms(query)
 	if len(results) == 0 {
-		return webSearchQuality{Score: 0, Tier: "empty", Terms: terms}
+		return webSearchQuality{Score: 0, Tier: "empty", Terms: terms, Factor: 1}
 	}
 	if len(terms) == 0 {
-		return webSearchQuality{Score: 1, Tier: "ok", Terms: terms}
+		return webSearchQuality{Score: 1, Tier: "ok", Terms: terms, Factor: 1}
 	}
 
 	normalizedQuery := strings.Join(terms, " ")
-	matched := make(map[string]struct{}, len(terms))
+	// termWeight 记录每个词项命中的最高字段权重（title > snippet > URL）。
+	termWeight := make(map[string]float64, len(terms))
+	for _, term := range terms {
+		termWeight[term] = 0
+	}
 	phraseHit := false
 	for _, result := range results {
-		text := strings.ToLower(strings.Join([]string{result.Title, result.Snippet, result.URL}, " "))
-		if normalizedQuery != "" && strings.Contains(text, normalizedQuery) {
+		title := strings.ToLower(result.Title)
+		snippet := strings.ToLower(result.Snippet)
+		url := strings.ToLower(result.URL)
+		if normalizedQuery != "" && strings.Contains(strings.Join([]string{title, snippet, url}, " "), normalizedQuery) {
 			phraseHit = true
 		}
 		for _, term := range terms {
-			if strings.Contains(text, term) {
-				matched[term] = struct{}{}
+			weight := termWeight[term]
+			if strings.Contains(title, term) {
+				weight = webSearchQualityTitleWeight
+			} else if weight < webSearchQualitySnippetWeight && strings.Contains(snippet, term) {
+				weight = webSearchQualitySnippetWeight
+			} else if weight < webSearchQualityURLWeight && strings.Contains(url, term) {
+				weight = webSearchQualityURLWeight
 			}
+			termWeight[term] = weight
 		}
 	}
 
-	score := float64(len(matched)) / float64(len(terms))
+	coverage := 0.0
+	for _, weight := range termWeight {
+		coverage += weight
+	}
+	coverage /= float64(len(terms))
+
+	diversity := webSearchDomainDiversity(results)
+	snippetRatio := webSearchSnippetPresence(results)
+	factor := webSearchQualityModulationFloor + (1-webSearchQualityModulationFloor)*(0.5*diversity+0.5*snippetRatio)
+
+	score := coverage * factor
 	if phraseHit {
 		score = 1
+	}
+	signals := map[string]float64{
+		"coverage":         coverage,
+		"domain_diversity": diversity,
+		"snippet_presence": snippetRatio,
 	}
 	tier := "low"
 	if score >= webSearchQualityThreshold() {
 		tier = "ok"
 	}
-	return webSearchQuality{Score: score, Tier: tier, Terms: terms}
+	return webSearchQuality{Score: score, Tier: tier, Terms: terms, Signals: signals, Factor: factor}
+}
+
+// webSearchDomainDiversity reports the unique-host share among the top few
+// results (P3-3): a provider echoing one domain five times scores low.
+func webSearchDomainDiversity(results []DuckDuckGoResult) float64 {
+	const window = 5
+	if len(results) == 0 {
+		return 0
+	}
+	seen := make(map[string]struct{}, window)
+	for index, result := range results {
+		if index >= window {
+			break
+		}
+		if host := webSearchHostOf(result.URL); host != "" {
+			seen[host] = struct{}{}
+		}
+	}
+	denominator := window
+	if len(results) < window {
+		denominator = len(results)
+	}
+	if denominator == 0 {
+		return 0
+	}
+	return float64(len(seen)) / float64(denominator)
+}
+
+// webSearchSnippetPresence reports the non-empty-snippet ratio (P3-3).
+func webSearchSnippetPresence(results []DuckDuckGoResult) float64 {
+	if len(results) == 0 {
+		return 0
+	}
+	nonEmpty := 0
+	for _, result := range results {
+		if strings.TrimSpace(result.Snippet) != "" {
+			nonEmpty++
+		}
+	}
+	return float64(nonEmpty) / float64(len(results))
+}
+
+// webSearchHostOf extracts the lowercase host of one result URL; unparseable
+// URLs return "" and never inflate the diversity denominator.
+func webSearchHostOf(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
 }
 
 // webSearchQueryTerms extracts meaningful, lower-cased terms for the quality

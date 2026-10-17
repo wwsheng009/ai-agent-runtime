@@ -533,6 +533,8 @@ type NativeToolCapabilities struct {
 
 ### 6.3 实施项 P3-3：质量启发式升级（观察项）
 
+> **落地进展（2026-10-16）**：多信号评分已落地——`assessWebSearchQuality` 升级为**加权词项覆盖**（title 1.0 > snippet 0.7 > URL 0.4，每词项取最高字段权重）× **有界调制因子**（域名多样性前 5 条 unique-host 占比 + snippet 非空占比各 50%，钳制在 [0.7, 1.0]，只降不升：无关结果恒 0、相关结果不虚高）；短语命中仍短路 1.0（口径不变）；metadata 新增 `quality_signals`（coverage / domain_diversity / snippet_presence）保持可解释；「低质仍返回但换链」语义与 `quality`/`quality_score`/`quality_terms` 输出不变。每 provider 阈值覆盖（`webSearch.minQuality.<provider>`）未立项：阈值仍全局 `WEB_SEARCH_MIN_QUALITY`。测试：`web_search_quality_test.go` 新增 4 组（字段权重序、无关恒 0 + 信号值、多样性信号压分/抬分、短语命中不变），既有 4 组不回归；四包全量回归通过。工具版本→1.7.0。
+
 **问题**：当前评分是单阈值词项覆盖率（`web_search_quality.go:44-77`），短语命中直接 1.0；对"标题命中"与"正文碎片命中"不加权，provider 间共用同一阈值。
 
 **目标**：多信号、可解释、零外部依赖的评分升级；不改"低质仍返回但换链"的语义。
@@ -578,7 +580,7 @@ type NativeToolCapabilities struct {
 | P2-5 | 能力位解析（旧/新键）/链门控（off/prefer/force/allow）/请求与映射/严格模式/prefer 回退/force 结构化错误/沙箱/P2-5d 适配器事件 | `web_search_native_test.go`、`websearch_config_test.go`、`native_web_search_test.go`（agentconfig/modelcard）；P2-5d 待补 |
 | P3-1 | 前端 meta 防御解析/回退/徽标；e2e 卡片读取 | `web-search-meta.test.ts` + `tool-row-web-sources.test.tsx` + 后端 `tool_runtime_events_web_search_test.go`（已落地）+ `e2e/workspace-chat.spec.ts` G2 断言 |
 | P3-2 | 取消级联/join/部分完成 | `web_search_merge_test.go`（外部取消分类 4 组已落地；strict/取消 join 既有用例回归） |
-| P3-3 | 信号权重/阈值覆盖/既有质量测试不回归 | `web_search_quality_test.go` |
+| P3-3 | 信号权重/阈值覆盖/既有质量测试不回归 | `web_search_quality_test.go`（字段权重/多样性/短语命中 4 组已落地；既有 4 组回归） |
 
 跨包回归：`tools/manager_test.go`、`toolregistry` 契约、`policy` 策略测试、`profileinput/disabled_capabilities_e2e_test.go`、`llm/adapter` 拒绝语义测试。
 

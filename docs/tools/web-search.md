@@ -62,6 +62,7 @@ webSearch:
 ## 4. 链式检索与质量门
 
 - 按链序逐个后端尝试；**失败、空结果、过滤后空结果、低相关结果**都不结束链路，只有达到质量阈值（`tier=ok`）且有结果才立即返回；
+- **质量评分（P3-3，多信号）**：加权词项覆盖（title 1.0 > snippet 0.7 > URL 0.4）× 有界调制因子（域名多样性 + snippet 非空占比，钳制 [0.7,1.0] 只降不升）；短语命中直接 1.0；metadata 另带 `quality_signals`（coverage/domain_diversity/snippet_presence）可解释输出；
 - 链结束后：返回得分最高的尝试（低质仍成功，附 `LOW_SEARCH_QUALITY` next_action）；全失败则返回结构化失败（错误码 + `failure_class` + `provider_errors`）；
 - **预算耗尽**：达到链级预算即停止换链，metadata 输出 `budget_exhausted=true`、`timed_out_provider=<name>`，错误码按超时（`NETWORK_TIMEOUT`）路由；所有结果都带 `budget_ms` / `elapsed_ms`。
 
