@@ -264,10 +264,12 @@ func TestRunProfileShowCommandEffectiveSurface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("show minimal: %v", err)
 	}
-	// minimal 已从"只读 view/grep"重新校准为"读取 + 基础编辑"：
-	// view/grep/glob/ls + write/edit/apply_patch = 7 个生效工具。
-	if minimal.ToolPolicy.EffectiveAllowCount != 7 {
-		t.Fatalf("minimal allowlist 生效数量应为 7（view/grep/glob/ls/write/edit/apply_patch），got %d", minimal.ToolPolicy.EffectiveAllowCount)
+	// minimal 已从"只读 view/grep"重新校准为"读取 + 基础编辑 + 命令执行"：
+	// view/grep/glob/ls + write/edit/apply_patch + shell = 8 个生效工具。
+	// （a5755f62 放开 minimal 模板的 shell，本断言此前仍写 7，导致
+	// release-gate 的 go test ./... 在 cmd/aicli/commands 包稳定失败。）
+	if minimal.ToolPolicy.EffectiveAllowCount != 8 {
+		t.Fatalf("minimal allowlist 生效数量应为 8（view/grep/glob/ls/write/edit/apply_patch/shell），got %d", minimal.ToolPolicy.EffectiveAllowCount)
 	}
 	// read_only 取消：agent 需能完成基础的文件编辑。
 	if minimal.ToolPolicy.ReadOnly != nil && *minimal.ToolPolicy.ReadOnly {
@@ -277,7 +279,7 @@ func TestRunProfileShowCommandEffectiveSurface(t *testing.T) {
 	for _, name := range minimal.ToolPolicy.Allowlist {
 		allowed[name] = true
 	}
-	for _, want := range []string{"view", "grep", "glob", "ls", "write", "edit", "apply_patch"} {
+	for _, want := range []string{"view", "grep", "glob", "ls", "write", "edit", "apply_patch", "shell"} {
 		if !allowed[want] {
 			t.Fatalf("minimal allowlist 缺少基础编辑工具 %q：%v", want, minimal.ToolPolicy.Allowlist)
 		}
