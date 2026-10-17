@@ -143,6 +143,10 @@ type sessionRunControl struct {
 	// 运行期只有节流 checkpoint 落库（权威落库在 turn 结束），中断时存储快照可能
 	// 还停在用户 prompt（真机实测）。
 	partialProduct atomic.Pointer[runPartialProduct]
+	// live 是 P2 单写者收敛（session-message-identity-protocol-20261017）的真身
+	// 引用：run 接管 session 时挂载，终结时解除。恢复路径经 RunLiveSession 在
+	// 真身上操作，禁止 loadSession 副本写回（见 session_run_live.go）。
+	live liveSessionRef
 }
 
 // runPartialProduct 是一份不可变的有界产物快照（整体替换，读取无需加锁）。
@@ -2982,6 +2986,9 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		run = a.claimSessionRun(turnID, nil, reply)
 	}
 	ctx = withSessionRunControl(ctx, run)
+	// P2 单写者收敛：run 接管 session 即挂真身引用，恢复路径经 RunLiveSession
+	// 在真身上操作（禁止 loadSession 副本写回）。
+	run.attachLiveSession(session)
 	runCtx, cancelCause := context.WithCancelCause(ctx)
 	cancel := func() { cancelCause(context.Canceled) }
 	approvalDetach := &approvalDetachState{}
@@ -4056,9 +4063,15 @@ func (a *SessionActor) recordPendingToolCall(ctx context.Context, pending *Pendi
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	session, err := a.loadSession(ctx)
-	if err != nil {
-		return err
+	// P2 单写者收敛：run 中优先在真身上操作（loop 并发写历史不受副本写回覆盖）；
+	// run 外回退 loadSession 语义。
+	session := a.RunLiveSession(ctx)
+	if session == nil {
+		var err error
+		session, err = a.loadSession(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	batchCtx, _ := agent.ToolBatchContextFromContext(ctx)
 	ensurePendingToolBatchInSession(session, pending, batchCtx.CompletedToolMessages)
@@ -4075,17 +4088,29 @@ func (a *SessionActor) resumePendingToolWithResult(ctx context.Context, state *R
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	session, err := a.loadSession(ctx)
-	if err != nil {
-		return err
+	// P2 单写者收敛：run 中优先在真身上操作；recordPendingToolCall 在真身上
+	// 落了 assistant(tool_calls) 后真身已包含它，无需重新 loadSession。
+	session := a.RunLiveSession(ctx)
+	freshLoad := false
+	if session == nil {
+		var err error
+		session, err = a.loadSession(ctx)
+		if err != nil {
+			return err
+		}
+		freshLoad = true
 	}
 	if !sessionHasToolCall(session, state.PendingTool.ToolCallID) {
 		if err := a.recordPendingToolCall(ctx, state.PendingTool); err != nil {
 			return err
 		}
-		session, err = a.loadSession(ctx)
-		if err != nil {
-			return err
+		if freshLoad {
+			// run 外路径：record 刚写回 store，重新加载。
+			loaded, loadErr := a.loadSession(ctx)
+			if loadErr != nil {
+				return loadErr
+			}
+			session = loaded
 		}
 	}
 	if sessionHasToolResult(session, state.PendingTool.ToolCallID) {
@@ -4155,9 +4180,16 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	session, err := a.loadSession(ctx)
-	if err != nil {
-		return err
+	// P2 单写者收敛：run 中优先在真身上操作（同 resumePendingToolWithResult）。
+	session := a.RunLiveSession(ctx)
+	freshLoad := false
+	if session == nil {
+		var err error
+		session, err = a.loadSession(ctx)
+		if err != nil {
+			return err
+		}
+		freshLoad = true
 	}
 	pending := *state.PendingTool
 	if len(patchedArgs) > 0 {
@@ -4167,9 +4199,13 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 		if err := a.recordPendingToolCall(ctx, &pending); err != nil {
 			return err
 		}
-		session, err = a.loadSession(ctx)
-		if err != nil {
-			return err
+		if freshLoad {
+			// run 外路径：record 刚写回 store，重新加载。
+			loaded, loadErr := a.loadSession(ctx)
+			if loadErr != nil {
+				return loadErr
+			}
+			session = loaded
 		}
 	}
 	if sessionHasToolResult(session, pending.ToolCallID) {
@@ -4187,10 +4223,11 @@ func (a *SessionActor) resumeApprovedPendingTool(ctx context.Context, state *Run
 		return a.resumeFromPersistedToolResult(ctx, state, session)
 	}
 	if strings.TrimSpace(pending.ExecutionState) == PendingToolExecutionCompleted {
-		session, err = a.appendPendingToolReceiptToSession(ctx, &pending, session)
-		if err != nil {
-			return err
+		appended, appendErr := a.appendPendingToolReceiptToSession(ctx, &pending, session)
+		if appendErr != nil {
+			return appendErr
 		}
+		session = appended
 		a.markReplayedToolReceipt(pending.ToolCallID)
 		a.publishToolReceiptEvent(EventToolReceiptReplayed, strings.TrimSpace(state.CurrentTurnID), "runtime_state", toolExecutionReceiptFromPending(a.id, &pending))
 		return a.resumeFromPersistedToolResult(ctx, state, session)
@@ -4787,6 +4824,8 @@ func (a *SessionActor) releaseSessionRun(run *sessionRunControl) {
 	if a == nil || run == nil {
 		return
 	}
+	// P2 单写者收敛：run 终结即解除真身引用，恢复路径此后回退 loadSession 语义。
+	run.detachLiveSession()
 	var (
 		cancel      context.CancelFunc
 		cancelCause context.CancelCauseFunc
