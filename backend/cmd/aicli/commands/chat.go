@@ -92,6 +92,11 @@ type ChatSession struct {
 	goalDefaultTokenBudget int
 	goalAccountingGoalID   string
 	goalAccountedTokens    int
+	// goalTerminalWrapUpPrompt 是 post-turn reconciler 检测到"本轮模型把
+	// goal 置为终态（complete/blocked）"后暂存的收尾轮提示词（G3）；自动续跑
+	// 循环在下一轮决策前消费并执行收尾轮，然后自然退出（goal 已终态）。
+	// 空串 = 无待执行收尾。进程内标记，不落库。
+	goalTerminalWrapUpPrompt atomic.Value
 
 	RequestedProvider        string
 	EffectiveProvider        string

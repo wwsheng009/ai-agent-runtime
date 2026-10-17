@@ -71,5 +71,39 @@ func reconcileGoalCompletionFromToolMessages(session *ChatSession) (bool, error)
 		return false, err
 	}
 	ensureChatSystemPromptMessage(session)
+	requestGoalTerminalWrapUp(session, completed)
 	return true, nil
+}
+
+// requestGoalTerminalWrapUp 在模型把 goal 置为终态（complete/blocked）后暂存
+// 收尾轮提示词（G3，DSH goal wrapup 借鉴）。CLI 自动续跑循环在下一轮决策前
+// 消费；仅模型终态触发（用户 /goal complete 有自己的确认输出，不需要收尾轮）。
+// prompt 为空表示无需收尾（防御：未知终态）。
+func requestGoalTerminalWrapUp(session *ChatSession, goal *runtimegoal.SessionGoal) {
+	if session == nil || goal == nil {
+		return
+	}
+	var prompt string
+	switch goal.Status {
+	case runtimegoal.StatusComplete:
+		prompt = runtimegoal.CompleteWrapUpPrompt
+	case runtimegoal.StatusBlocked:
+		prompt = runtimegoal.BlockedWrapUpPrompt
+	default:
+		return
+	}
+	session.goalTerminalWrapUpPrompt.Store(prompt)
+	writeSessionDebugInfo(session, "[goal] terminal wrap-up requested status="+string(goal.Status), false)
+}
+
+// consumeGoalTerminalWrapUp 取走暂存的收尾轮提示词（一次性）；空串表示无。
+func consumeGoalTerminalWrapUp(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	prompt, _ := session.goalTerminalWrapUpPrompt.Load().(string)
+	if prompt != "" {
+		session.goalTerminalWrapUpPrompt.Store("")
+	}
+	return prompt
 }

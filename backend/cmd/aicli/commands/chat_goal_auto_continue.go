@@ -102,6 +102,17 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			return err
 		}
 		if !decision.Continue {
+			// G3 终局收尾：本轮模型把 goal 置为终态后循环将退出；先执行一次
+			// 收尾轮（向用户交代结果/验证/产物），再退出。预算收尾轮（已有
+			// goalBudgetWrapUpPrompt 路径）不受影响。
+			if wrapPrompt := consumeGoalTerminalWrapUp(session); wrapPrompt != "" {
+				wrapCtx, wrapCancel := goalAutoContinuationAttemptContext(ctx, session)
+				_, wrapErr := continuer.ContinueGoalWithPrompt(wrapCtx, session, wrapPrompt)
+				wrapCancel()
+				if wrapErr != nil {
+					writeSessionDebugInfo(session, fmt.Sprintf("[goal] terminal wrap-up turn failed: %q", wrapErr.Error()), false)
+				}
+			}
 			if decision.Reason == "update_goal_unavailable" {
 				reportGoalAutoContinuationUnavailableOnce(session)
 			}

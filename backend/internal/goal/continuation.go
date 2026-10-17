@@ -100,6 +100,29 @@ const IterateEscalationPrompt = "This goal is stuck: recent goal turns show no p
 	"- Keep the full objective intact; do not redefine success around a smaller or easier task.\n" +
 	"- Do not reply with a plan or status restatement; perform a concrete action in this turn."
 
+// CompleteWrapUpPrompt / BlockedWrapUpPrompt 是模型终态（complete/blocked）后
+// 的收尾轮指令（G3，DSH goal wrapup 借鉴：docs/analysis/dsh-goal-domain-vs-
+// aar-goal-20261017.md §1.3）。语义：
+//   - 强制向用户写一条收尾消息（结果/验证方式/产物指引），不调用工具；
+//   - grounding 纪律（对齐 DSH wrapup）：只报告本会话既有轮次与工具结果真正
+//     建立的结论；细节不在会话内就说未掌握，不编造。
+//
+// CLI 驱动器在 post-turn reconciler 检测到终态后下一轮消费；服务端驱动器在
+// 终态提交收尾轮。与 ContinuationPrompt/BudgetWrapUpPrompt 同一逐字节约束。
+const CompleteWrapUpPrompt = "The active goal has just been marked complete.\n" +
+	"\n" +
+	"Write the closing message to the user now; do not call any more tools in this turn.\n" +
+	"- State the outcome, summarize what was done and how it was verified, and point to the concrete results (files, commits, or other artifacts).\n" +
+	"- Report only what earlier rounds and tool results in this session actually establish; when a detail is not in the session, say so instead of inventing it.\n" +
+	"- Note anything the user should review or do next. Address the user directly."
+
+const BlockedWrapUpPrompt = "The active goal has just been marked blocked.\n" +
+	"\n" +
+	"Write the closing message to the user now; do not call any more tools in this turn.\n" +
+	"- State what has been completed so far, describe the concrete blocking condition and what was tried, and say exactly what is needed from the user to continue.\n" +
+	"- Report only what earlier rounds and tool results in this session actually establish; when a detail is not in the session, say so instead of inventing it.\n" +
+	"- Address the user directly."
+
 // DecideIterationEscalation 是升级判定的单一事实源：只有部署启用了 iterate_goal
 // 工具（iterationToolAvailable）、本轮未尝试过升级（escalationAttempted）、且
 // （连续无进展达到阈值 **或** 收到 doom_loop 告警）时才升级。升级一旦尝试过

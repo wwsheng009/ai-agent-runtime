@@ -359,6 +359,26 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 	decision := goal.EvaluateGoalContinuation(current, hasGoal)
 	if !decision.Continue {
 		h.getGoalDriverState().resetStrikes(sessionID)
+		// G3 终局收尾（DSH wrapup 借鉴）：模型刚把 goal 置为终态时，提交一次
+		// 收尾轮（向用户交代结果/验证/产物），让会话在自主结束前给用户一个
+		// 交代。仅模型终态（completed_by=model 或系统 blocked）触发；用户命令
+		// 终态有自己的确认输出，不需要收尾轮。
+		if current != nil && current.CompletedBy == "model" {
+			var wrapPrompt string
+			switch current.Status {
+			case goal.StatusComplete:
+				wrapPrompt = goal.CompleteWrapUpPrompt
+			case goal.StatusBlocked:
+				wrapPrompt = goal.BlockedWrapUpPrompt
+			}
+			if wrapPrompt != "" {
+				if err := h.goalDriverSubmitContinuationWithPrompt(ctx, sessionID, wrapPrompt); err != nil {
+					logger.Warnf("goal driver: terminal wrap-up submit %s: %s", sessionID, err)
+				} else {
+					logger.Infof("goal driver: terminal wrap-up submitted session=%s status=%s", sessionID, current.Status)
+				}
+			}
+		}
 		return
 	}
 
