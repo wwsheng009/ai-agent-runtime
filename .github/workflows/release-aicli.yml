@@ -23,11 +23,11 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: '1.24.2'
-  # Windows 7 兼容构建：Go 1.21.4 + 独立依赖图 go.win7.mod + win7compat tag。
-  # 主线 go 1.24 产物调用 ConPTY 等 Win10+ 才存在的系统 API，Win7 上
-  # 启动即崩溃（0xc0000005）；兼容产物由本 workflow 的 build-win7 job
-  # 随每次 v* 发布附带。
+  # Go 版本跟随 backend/go.mod 的 go 指令（setup-go go-version-file）。此前钉死
+  # '1.24.2'，在 go.mod 升到 1.26.0（19db390b sqlite WAL 修复）后，Go 1.24 读
+  # 模块指令即加载期报错，validate 第 5 步 0.4 秒失败并跳过全部 build/release
+  # （v0.5.0 首次发布卡死的根因）。win7 构建独立用 WIN7_GO_VERSION +
+  # go.win7.mod（go 1.21 指令），不受影响。
   WIN7_GO_VERSION: '1.21.4'
   WIN7_MODFILE: go.win7.mod
   WIN7_BUILD_TAGS: win7compat
@@ -62,7 +62,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: backend/go.mod
           cache: true
           cache-dependency-path: ${{ env.WORKDIR }}/go.sum
 
@@ -193,7 +193,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: backend/go.mod
           cache: true
           cache-dependency-path: ${{ env.WORKDIR }}/go.sum
 
@@ -333,7 +333,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: backend/go.mod
           cache: true
           cache-dependency-path: ${{ env.WORKDIR }}/go.sum
 
@@ -460,7 +460,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: backend/go.mod
           cache: true
           cache-dependency-path: ${{ env.WORKDIR }}/go.sum
 
