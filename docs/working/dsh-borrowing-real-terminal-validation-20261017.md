@@ -59,3 +59,39 @@ fresh 对照（cache_requests）：`iterate_1..4` 各子会话所有请求 `fork
 - 修复前对照：`output/real-test/dsh-e2e-run-20261017-073232/`（模型明确报告 iterate_goal 不存在 + fork 审计键全空的现场）
 - 夹具：`output/real-test/dsh-e2e-ws/`（rounds.txt / .aicli/runtime.yaml / evidence.txt）、`output/real-test/run-dsh-e2e.ps1`
 - 修复提交：`f33301b2`；runbook 场景定义：`docs/plan/multi-agent-real-terminal-validation-runbook.md` §7/§8
+
+## 5. 第二轮验证（2026-10-17 追加：缓存命中正向 + 超限拒绝负路径）
+
+运行目录：`output/real-test/dsh-e2e-r2-20261017-084849/`（negpath / multiturn 两段；exe 从 HEAD `c345e5df` 重建）。
+
+### 5.1 超限整体拒绝负路径 — 通过
+
+`agents.forkMaxSnapshotTokens=120`（父级已有约 13.6k tokens 历史时）spawn `context=fork`：
+
+- 工具结果返回**逐字命中**的错误指纹：`fork context snapshot exceeds the token ceiling (13595 > 120); next_action=use_fresh_context_or_raise_agents.fork.max_snapshot_tokens`；
+- 子级未创建（`cache_requests` 无带 fork 键的行），历史未被截断——"拒绝 ≠ 静默截断"在实机成立；
+- 拒绝经监督面通知收敛（batch 终态 failed → acknowledge），无遗留 running 义务。
+
+### 5.2 fork 多轮任务的子级自身缓存命中 — 通过（最后一环闭环）
+
+fork 子级（快照 11 条/975 tokens/kept 11，preserved=1）执行多步 view 任务，产生 ≥2 次 LLM 往返：
+
+| 子会话请求 | cache_read_tokens | 说明 |
+|---|---|---|
+| 首请求 | `0`（rep=1） | 全新前缀 → 写缓存（与 §3 机制一致） |
+| 第二请求 | **`35072`**（prompt 35367，命中率 ≈99.1%） | **自身稳定前缀命中**——provider 上报链路 + fork 前缀保持 → 实际缓存复用的完整正向证据链闭合 |
+
+对照同批父会话请求命中 31k–34k：fork 子级的命中量级与父级一致（快照继承使子请求前缀体量接近父级）。
+
+### 5.3 新观察：fork 快照的"指令注入面"（设计边界确认，非缺陷）
+
+multiturn 场景的父级 prompt 中"现在调用 spawn_subagents 工具…"这句进入了快照，子级将其误读为对自己的指令并尝试调用 `spawn_subagents`，被只读白名单拒绝（`AGENT_PERMISSION`，任务失败）。这暴露了 fork 语义的一个**固有边界**：
+
+- 快照是父级对话的**忠实回放**（含父级的工具调用指令）——机制按设计工作；
+- 但"继承上下文"与"指令不继承"之间没有天然的隔离带：快照里父级对**它自己**下的指令，子级可能误认为是对**自己**下的。
+- 缓解方向（后续可选项）：iterate_goal 的 round prompt 已示范了正确形态——在子级 prompt 头部显式声明"You receive no parent conversation… this round already is the worker"；spawn fork 路径可在 goal 前注入同型的一次性边界声明（不改变快照内容，零缓存影响——只动注入的指令头，其位于快照之后）。
+- 本次不改代码：该风险由只读白名单 + 能力准入兜底（实际后果 = 一次被拒的工具调用），属提示词工程范畴，记录为已知边界。
+
+### 5.4 第二轮结论
+
+负路径（整体拒绝）与正向最后一环（子级自身缓存命中 35072/35367）均实机闭环；此前"待补"项全部收敛。fork 的缓存收益定性最终版：**preserved 审计（必要条件）→ 子级自身会话内后续请求命中（充分证据）**；跨会话复用父级 KV 不成立（信封有意分叉）。
