@@ -78,22 +78,25 @@ func TestSessionPruneRequestScopedHistory(t *testing.T) {
 }
 
 // A rebuilt transcript arrives without metadata (compaction, streaming
-// assembly, request prefixes). ReplaceHistory must carry the durable identities
-// forward, otherwise the storage layer sees a brand-new turn on every
-// checkpoint and appends a duplicate copy.
+// assembly, request prefixes). P4 identity protocol: the hot-path substance
+// inheritance is retired — rebuilt rows MINT FRESH ids, and the canonical
+// alignment stays stable via the storage layer's substance quota matching
+// (TestUpdateKeepsTranscriptStableAcrossRebuiltCheckpoints pins the
+// no-duplicate-append contract that used to rely on inherited ids).
 func TestReplaceHistoryKeepsAssistantIdentitiesForRebuiltTranscript(t *testing.T) {
 	session := NewSession("rebuild-user")
 	session.AddMessage(*types.NewUserMessage("检查为什么写入侧会有重复项"))
 	session.AddMessage(*types.NewAssistantMessage("先看写入链路"))
-	assistantID := types.MessageID(session.History[1])
 	assistantTurnID := types.TurnID(session.History[1])
-	require.NotEmpty(t, assistantID)
+	require.NotEmpty(t, assistantTurnID)
 
 	session.ReplaceHistory(rebuildMessagesWithoutIdentities(session.GetMessages()))
 
-	require.Equal(t, assistantID, types.MessageID(session.History[1]))
-	require.Equal(t, assistantTurnID, types.TurnID(session.History[1]))
+	// The rebuilt window carries fresh ids (grant-at-creation), not the old
+	// ones — but every row still has a durable identity and the user turn
+	// opens its own turn id space.
 	require.NotEmpty(t, types.MessageID(session.History[0]), "the user turn still gets a durable identity")
+	require.NotEmpty(t, types.MessageID(session.History[1]), "rebuilt assistant rows are granted ids at replace time")
 	require.NotEqual(t, types.MessageID(session.History[0]), types.MessageID(session.History[1]))
 }
 

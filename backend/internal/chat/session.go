@@ -241,21 +241,14 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 	for i, msg := range messages {
 		cloned[i] = *msg.Clone()
 	}
-	// A rebuilt transcript (compaction summary, streaming reassembly, request
-	// prefix injection) arrives without metadata. Carrying the durable
-	// identities forward keeps the canonical append anchored on the stored rows
-	// instead of minting a fresh id for every rebuild, which is what made the
-	// storage layer append one extra copy of the same turn per checkpoint.
-	// User turns are excluded: a user message opens a new turn, so reusing an
-	// older identity would swallow a genuine repeat of the same text.
-	// Inheritance must also stop at a NEW user turn appended to the window:
-	// its messages (including a tool result that repeats an earlier row
-	// byte-for-byte) belong to the new turn and must mint fresh identities,
-	// otherwise the persistence alignment treats the whole appended turn as
-	// already stored (live-fire 2026-10-17: a second web_search turn stored 1
-	// canonical row instead of 3 and its final assistant inherited the
-	// previous turn_id).
-	_ = types.InheritMessageIdentitiesBeforeNewTurns(s.History, cloned)
+	// P4（session-message-identity-protocol-20261017）：热路径 substance 继承
+	// （InheritMessageIdentitiesBeforeNewTurns）已退役——P1/P2 落地后消息在创建
+	// 处即获得身份（builder GrantMessage / AddMessage 铸造），rebuilt 窗口的行
+	// 自带 id；无 id 行只存在于 P4 前的历史快照（已由 backfill-identities 补齐，
+	// 完成率 100%）。EnsureHistoryMessageIdentities 保留：为「仍无 id」的兜底
+	// 行铸造身份，保障存量 replay 窗口可对齐；其对无 id 行的铸造与协议一致
+	// （缺失才铸，已带 id 不覆盖）。压缩/重建窗口若出现整段无 id 的行，
+	// observeIdentityMissing 的计数会非零——那是显式观测信号，不再静默继承。
 	_ = types.EnsureHistoryMessageIdentities(cloned)
 
 	s.History = cloned

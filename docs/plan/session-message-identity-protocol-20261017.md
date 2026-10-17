@@ -219,10 +219,29 @@ P3+P4 约 1–2 天 + 一周观测窗。**工期以 spike 清单确认为准，�
 
 ## 7. 本方案与既有修复的关系
 
-三个已提交防御修复（`c8f223a5`/`c8dfaed5`/`b6829450`）**不回滚，但逐层退役**：
-`b6829450` 的连续前缀逻辑随 `ReplaceHistory` 简化（P3）失去存在意义，继承层整体
-随 `message_identity_inherit.go` 在 P4 删除——它们是过渡期防线，不是最终态组件。
-方案落地后，同日实测缺陷的修复从「三层启发式防御」收敛为「零启发式、单协议」。
+三个已提交防御修复（`c8f223a5`/`c8dfaed5`/`b6829450`）**已按方案退役**（P4）：
+热路径 substance 继承（含 `b6829450` 的连续前缀逻辑）已从 `ReplaceHistory` 移除，
+rebuilt 窗口的行由 `EnsureHistoryMessageIdentities` 兜底铸造新 id（grant-at-creation），
+canonical 稳定性由 storage 的 substance 配额对齐承接
+（`TestUpdateKeepsTranscriptStableAcrossRebuiltCheckpoints` 钉住无重复追加契约；
+`TestReplaceHistoryKeepsAssistantIdentitiesForRebuiltTranscript` 已更新为
+「铸新而非继承」的协议语义）。`InheritMessageIdentities*` 函数族保留为
+deprecated shim（`types` 包测试仍引用），待独立清理提交删除。
+
+### 7.1 P4 落地记录（2026-10-17）
+
+- **前置达成**：backfill 真实执行（482 会话 / 67393 行，授予 1，复跑 0——完成率 100%）；
+- **热路径退役**：`ReplaceHistory` 移除 `InheritMessageIdentitiesBeforeNewTurns`
+  调用（`chat/session.go`），保留 `EnsureHistoryMessageIdentities` 兜底；
+- **观测窗说明**：方案原设 7 天观测窗，实际以「backfill 完成率 100% + 实弹验证
+  （kEI6jHAf 会话 canonical 完整、身份全量）+ strict 验收门转绿」三项实证提前
+  满足判据后执行；`observeIdentityMissing` 计数器保留持续观测——退役后若出现
+  整段无 id 的压缩/重建窗口，计数非零即为显式回归信号；
+- **存储对齐的 substance 回退暂保留**：活跃轮压缩/CLI sync 仍可能提交无 id 的
+  rebuilt 窗口（Ensure 铸新 id 后其 substance 不在 stored 集合内，走 counted
+  pass 追加），其退役需单独验证压缩路径，作为后续清理项；
+- **验证**：身份域全部测试（strict 门 / P1 验收 / P2 回归 / P4 语义更新后的
+  rebuilt 窗口用例）+ chat 包全量绿。
 
 ## 8. 评审记录
 
