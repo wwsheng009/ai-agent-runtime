@@ -232,10 +232,9 @@ jobs:
           AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check gc --json > /dev/null
 
       # E4 hard gate: render packages must be green before any release.
-      # NOTE: as of the semantic red baseline (Phase 0/C0), 4 band-scrollback
-      # semantic tests in ./cmd/aicli/ui fail by design; this gate stays red
-      # until Phase 1 fixes the underlying geometry bug (docs/plan/
-      # aicli-tui-owned-render-simplification-implementation-guide.md §6).
+      # 历史注记：早期 Phase 0/C0 曾有 4 个 band-scrollback 语义测试「设计上
+      # 必红」，该基线已被后续修复消除，本 gate 现在是真实硬门禁（本地与 CI
+      # 均全绿）。若这里变红，请按真实回归处理，不要当作已知红基线跳过。
       - name: Verify aicli render packages (E4 hard gate)
         working-directory: ${{ env.WORKDIR }}
         run: |

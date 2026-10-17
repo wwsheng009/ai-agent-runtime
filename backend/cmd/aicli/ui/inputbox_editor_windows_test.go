@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"testing"
@@ -153,5 +154,58 @@ func TestConsoleKeyEventCanProduceInputAcceptsCharactersAndEditingKeys(t *testin
 	}
 	if consoleKeyEventCanProduceInput(keyUp) {
 		t.Fatal("expected key-up event not to mark stdin ready")
+	}
+}
+
+// TestReadInteractiveLineForcedReadWhenPeekAlwaysEmpty 模拟 MobaXterm 的
+// cygwin 桥接管道：PeekNamedPipe 永远报告「无数据」（waitForInteractive
+// InputReady 恒返回 false,nil），但字节实际已在管道里。回归验证：编辑器
+// 空转超过 nonConsoleForcedReadTicks 后必须切换为直接阻塞读，仍能读到键。
+//
+// 该兜底分支是 Windows 专属：inputbox_editor.go 的强制直读条件包含
+// !interactiveStdinNeedsPolledReadiness()，而 Unix 实现恒返回 true（Poll
+// 对 tty/管道都可靠），所以此回归必须在 windows 构建下验证，不能放在
+// 无 build tag 的测试文件里（否则 Linux CI 必然 5s 超时）。
+func TestReadInteractiveLineForcedReadWhenPeekAlwaysEmpty(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	oldWait := waitForInteractiveInputReady
+	waitForInteractiveInputReady = func(int, time.Duration) (bool, error) {
+		return false, nil
+	}
+	defer func() {
+		waitForInteractiveInputReady = oldWait
+	}()
+
+	if _, err := writer.WriteString("hello cygwin\n"); err != nil {
+		t.Fatalf("seed input: %v", err)
+	}
+
+	var output bytes.Buffer
+	type lineResult struct {
+		line string
+		err  error
+	}
+	result := make(chan lineResult, 1)
+	go func() {
+		line, err := readInteractiveLine(reader, &output, UserPromptText(0), nil, nil)
+		result <- lineResult{line, err}
+	}()
+
+	select {
+	case r := <-result:
+		if r.err != nil {
+			t.Fatalf("readInteractiveLine: %v", r.err)
+		}
+		if r.line != "hello cygwin" {
+			t.Fatalf("expected 'hello cygwin', got %q", r.line)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("editor starved: peek always empty and forced direct read never engaged")
 	}
 }
