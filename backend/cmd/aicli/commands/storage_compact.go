@@ -113,6 +113,7 @@ func NewStorageCommand() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newStorageCompactCommand())
+	cmd.AddCommand(newStorageBackfillCommand())
 	return cmd
 }
 
