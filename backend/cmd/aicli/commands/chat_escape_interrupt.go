@@ -109,28 +109,41 @@ func runChatEscapeInterruptConsumer(session *ChatSession, escCh <-chan bool, don
 	for {
 		select {
 		case <-escCh:
-			// 重复 Esc 语义（P2-10 + ESC 失效修复）：
-			//   - 中断清理仍在途且未超期：视为“正在停止”，不再叠加新的
-			//     中断请求，每个中断周期提示一次“停止处理中”；
-			//   - 清理已结束 / 从未启动 / 已超期：不能按会话级 interrupted
-			//     标志永久吞键。wake/actor 直驱回合不经过本地主循环的
-			//     ResetInterrupt，一次未生效的中断会残留标志，把后续 Esc
-			//     全部吞掉（表现为 Esc 无响应）。此时解除超期信号并重新发起
-			//     真实中断——interrupt 路径幂等，reserveInterruptCleanup
-			//     保证清理 goroutine 不叠加。
-			if session.IsInterrupted() && session.isInterruptCleanupInFlight() && !session.interruptCleanupStalled() {
-				if session.chatEscapeStoppingNoticeDue() {
-					renderChatEscapeStoppingNotice(session)
-				}
-				continue
-			}
-			session.detachStalledInterruptCleanup()
-			session.InterruptPreservePendingInput()
-			renderChatEscapeInterruptNotice(session)
+			handleChatEscapeInterruptRequest(session)
 		case <-done:
 			return
 		}
 	}
+}
+
+// handleChatEscapeInterruptRequest is the single decision point for one ESC
+// keypress observed by the session-level consumer.
+//
+// The old inline branch could swallow a keypress in two situations:
+//   - a stale `interrupted` flag with no cleanup in flight (wake/actor turns do
+//     not pass through the local loop's ResetInterrupt); the retry fix covers
+//     that case;
+//   - a failed interrupt whose cleanup had already completed but whose
+//     `interrupted` flag was still set, while the UI had already returned to
+//     Ready. The next Esc was treated as a repeat and silently dropped, so the
+//     user had to press Esc twice with no feedback and no second attempt.
+//
+// A completed cleanup means the previous attempt is over: a new keypress must
+// always start a fresh interrupt attempt. Only an actually in-flight cleanup
+// (and not stalled) may collapse the keypress into the "stopping" window.
+func handleChatEscapeInterruptRequest(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	if session.IsInterrupted() && session.isInterruptCleanupInFlight() && !session.interruptCleanupStalled() {
+		if session.chatEscapeStoppingNoticeDue() {
+			renderChatEscapeStoppingNotice(session)
+		}
+		return
+	}
+	session.detachStalledInterruptCleanup()
+	session.InterruptPreservePendingInput()
+	renderChatEscapeInterruptNotice(session)
 }
 
 // chatEscapeStoppingNoticeDue reports whether the "stop in progress" note for a

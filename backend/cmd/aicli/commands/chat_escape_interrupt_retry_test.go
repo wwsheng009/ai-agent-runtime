@@ -114,6 +114,25 @@ func TestStartChatEscapeInterruptWatcherKeepsStoppingWindowWithoutRetry(t *testi
 	}
 }
 
+// Regression: the first Esc was consumed while the session was still marked
+// interrupted but the cleanup had already finished and the UI was Ready again.
+// That state used to swallow the keypress as a "repeat", so a second Esc never
+// issued a new interrupt. A completed cleanup must always allow a fresh attempt.
+func TestChatEscapeInterruptRequestRetriesAfterCompletedCleanupEvenWhenInterrupted(t *testing.T) {
+	session, _, interrupts := newEscapeRetryTestSession(t)
+	session.interrupted.Store(true)
+
+	completed := make(chan struct{})
+	close(completed)
+	session.setInterruptCleanup(completed)
+
+	handleChatEscapeInterruptRequest(session)
+
+	if got := atomic.LoadInt32(interrupts); got != 1 {
+		t.Fatalf("Esc after a completed cleanup must start a new interrupt, got %d", got)
+	}
+}
+
 func TestInterruptCleanupStalledDetach(t *testing.T) {
 	session := &ChatSession{}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,6 +237,31 @@ func TestHandleInteractiveBacktrackSelectUnifiedTeardownFailsClosed(t *testing.T
 	})
 	if raw != "" {
 		t.Fatalf("unified backtrack shortcut revived legacy stdout: %q", raw)
+	}
+}
+
+// Regression: bare Esc on an empty composer while a turn is running must
+// interrupt that turn instead of only printing "cannot open backtrack picker".
+// The old notice-only branch consumed the keypress, so a second Esc repeated the
+// same dead end and the user saw no response at all.
+func TestHandleInteractiveBacktrackSelectBusyEscInterruptsTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var interrupts int32
+	session := &ChatSession{
+		cancelCtx:  ctx,
+		cancelFunc: cancel,
+	}
+	session.cancelCause = func(error) { atomic.AddInt32(&interrupts, 1) }
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
+	session.Interaction.StartWaiting()
+
+	require.False(t, handleInteractiveBacktrackSelect(session))
+	if !session.IsInterrupted() {
+		t.Fatal("busy Esc on the empty composer must interrupt the running turn")
+	}
+	if got := atomic.LoadInt32(&interrupts); got != 1 {
+		t.Fatalf("busy Esc must issue exactly one interrupt, got %d", got)
 	}
 }
 

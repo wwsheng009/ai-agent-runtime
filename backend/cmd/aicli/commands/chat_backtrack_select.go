@@ -23,7 +23,13 @@ import (
 // canonical history instead of writing/replaying terminal rows directly.
 func handleInteractiveBacktrackSelect(session *ChatSession) bool {
 	if session != nil && session.Interaction != nil && !session.Interaction.IsReady() {
-		session.Interaction.RenderLocalSupplement("[input] 当前操作仍在进行，无法打开回溯选择器。可等待其完成，或连续按两次 Ctrl+C 中断/退出。")
+		// Bare Esc on an empty composer is the highest-priority cancel gesture.
+		// While a turn is running the picker cannot open, but consuming the
+		// keypress with a notice-only branch makes every later Esc repeat the
+		// same dead end (the reported "first Esc did nothing, second Esc also
+		// does nothing"). Route the same keypress into the interrupt path
+		// instead; once the turn is over the next Esc opens the picker again.
+		handleChatEscapeInterruptRequest(session)
 		return false
 	}
 	if unifiedDirectInteractiveOutput(session) {
