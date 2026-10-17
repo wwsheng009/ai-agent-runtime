@@ -1,4 +1,4 @@
-# {{name}} — 文档场景：文件读写 + 搜索；shell 类工具显式拒绝。
+# {{name}} — 文档场景：文件读写 + 搜索 + 命令执行。
 profile:
   name: {{name}}
   description: {{description}}
@@ -18,13 +18,9 @@ tools:
     - multiedit
     - append_write
     - apply_patch
+    - shell
     - web_search
     - fetch
-  # deny 恒优先：显式声明拒绝 shell 类工具（即使 allowlist 未包含）。
-  denylist:
-    - shell
-    - bash
-    - aicli_exec
   read_only: false
 
 # 仅暴露文档相关技能时取消注释（名称需与 skills 目录中的实际技能一致）：

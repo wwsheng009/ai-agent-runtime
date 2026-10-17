@@ -1,5 +1,5 @@
-# {{name}} — 最小可用场景：读取/检索 + 基础文件编辑，全部技能关闭。
-# 适合低成本/受限环境，但需完成基础的文件编辑工作（不执行 shell）。
+# {{name}} — 最小可用场景：读取/检索 + 基础文件编辑 + 命令执行，全部技能关闭。
+# 适合低成本/受限环境，但需完成基础的文件编辑与命令执行工作（不含子代理/团队等控制面）。
 profile:
   name: {{name}}
   description: {{description}}
@@ -9,8 +9,9 @@ profile:
 prompts:
   mode: replace
 
-# 工具面 = 读取/检索（view/grep/glob/ls）+ 基础编辑（write/edit/apply_patch）；
-# read_only: false 允许写操作，使 agent 能完成基础的文件编辑。
+# 工具面 = 读取/检索（view/grep/glob/ls）+ 基础编辑（write/edit/apply_patch）+ 命令执行（shell）；
+# 读取/检索/编辑/执行的最小集，不放行子代理/团队等控制面工具。
+# read_only: false 允许写操作与命令执行，使 agent 能完成基础的文件编辑与命令。
 tools:
   allowlist:
     - view
@@ -20,11 +21,7 @@ tools:
     - write
     - edit
     - apply_patch
-  # 不提供命令执行：显式拒绝 shell 类工具（deny 恒优先于 allow）。
-  denylist:
     - shell
-    - bash
-    - aicli_exec
   read_only: false
 
 # 全部技能关闭（通配 deny；deny 恒优先于 allow）。

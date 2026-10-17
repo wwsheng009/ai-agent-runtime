@@ -6,8 +6,7 @@
 
 ## 裁剪了什么
 
-- 工具面：文件读写 + 搜索（allowlist）
-- denylist：shell / bash / aicli_exec（deny 恒优先）
+- 工具面：文件读写 + 搜索 + 命令执行（allowlist）
 - skills：默认不声明（全部可见）；如需只暴露文档技能，取消 profile.yaml 中的注释
 
 ## 用法
