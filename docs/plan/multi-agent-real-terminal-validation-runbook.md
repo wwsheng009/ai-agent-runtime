@@ -269,7 +269,7 @@ goal 为「复述你继承到的对话内容: 用一句话概括你继承到的�
 - 子会话**首个** LLM 请求的 metadata 带 4 个审计键: `fork_prefix_preserved=true`、`fork_snapshot_messages > 0`、`fork_snapshot_tokens > 0`、`fork_prefix_kept_messages == fork_snapshot_messages`（整段前缀保持）。
 - `llm.request.started` 事件载荷含同样 4 键；只出现一次（fork 子级首请求），重试与后续请求不再带。
 - fork 子级**继承父路由**（provider/model 覆盖会被准入拒绝）；其复述应只包含父级已完成轮次，**不包含**本次 fork 请求与验证 prompt 本身（进行中轮次不在快照内）。
-- 若 provider 上报缓存: 同批 `usage` 记录的 `cache_read_tokens > 0` 可作缓存读取命中证据（`cache_hit_ratio` 为本地重算口径）；`cache_requests` 行按子会话 session_id 落库。
+- 缓存证据口径（2026-10-17 实测修正）: provider 上报 `cache_read_reported=1` 即上报链路完好；fork 子级**首请求** `cache_read_tokens=0` 是隐式精确前缀缓存的预期行为（全新前缀首请求=写缓存；且子级信封 system+工具面与父级有意不同，跨会话复用父级 KV 不成立），不应判失败。可观测的正向证据是"fork 前缀保持 + 子级多轮任务时自身后续请求命中"；`fork_prefix_*` 四键是命中前缀的必要条件审计，不是充分条件。
 
 验证命令（需要 `sqlite3` 在 PATH；会话活跃时读取一般可并发，遇 BUSY 等会话空闲后重试）:
 

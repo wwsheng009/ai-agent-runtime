@@ -28,7 +28,7 @@
 | `fork_snapshot_messages` | `2` | 父级已完成轮次（1 条 user + 1 条 assistant），system 剥离、进行中轮次不在内 |
 | `fork_snapshot_tokens` | `44` | 快照规模 |
 | `fork_prefix_kept_messages` | `2` | kept == snapshot → 零缩水 |
-| `usage.cache_read_tokens` | `0` | 本 provider 未上报缓存读（glm-5.3-flash 经 workbuddy 包装不报 cache_read），符合 runbook "无缓存证据不判失败" 口径 |
+| `usage.cache_read_tokens` | `0`（`cache_read_reported=1`） | **provider 正常上报，0 = 该请求零命中**。机制见 §3 修正说明：隐式精确前缀缓存下，fork 子级首请求是"写缓存"而非"读命中"；同批父会话与 iterate 子级首请求同样为 0、第二条请求起命中 31k–36k（数据佐证 provider 上报链路完好）。早前"本 provider 不上报"为误读，已更正 |
 
 行为证据（transcript）：
 - 子级复述："父级之前只完成了第 1 轮工作（快照里仅有"父级第 1 轮已完成"这一条记录）；它本轮收到的任务是复述继承到的上下文……"——复述内容**恰为父级已完成轮次**，未包含本次 fork 请求与验证 prompt（进行中轮次不在快照内），与"配平前缀"设计一致。
@@ -48,8 +48,9 @@ fresh 对照（cache_requests）：`iterate_1..4` 各子会话所有请求 `fork
 
 ## 3. 观察到的运行时事实（不判失败，供后续改进）
 
+- **缓存命中数据修正（2026-10-17 复核）**：全部 26 条请求 `cache_read_reported=1`——provider 上报链路完好。父会话与 iterate 子级呈"首请求 0 → 后续命中 31k–36k"的标准隐式前缀缓存曲线；fork 子级首（且唯一）请求 `cached=0` 的根因是：其请求前缀（子级 system + 快照 + 子级工具面）与父级已缓存前缀在第一条消息即分叉（子级有意拥有独立角色与收窄工具面），对精确前缀匹配的 provider 是全新前缀 → 首请求写缓存不读命中，且单轮任务没有第二次请求命中自身前缀。
+- **设计口径修正**：fork 的 KV 复用收益 = `fork_prefix_preserved`（必要条件：前缀未被装配改写）+ 子级自身会话内的后续请求命中；跨会话直接复用父级 KV 需要"子级信封（system+tools）与父级逐字节一致"，与"子级独立角色/工具面"的设计互斥，不作为验收目标。runbook 验证 E 的缓存证据口径已同步改写。
 - `session_runtime.sqlite` 的 `cache_requests.prompt_fingerprint` 全部为空（`usage` 上报为空字符串时未写指纹）；shared-session 场景下如需按指纹聚合需另行补齐。
-- runbook 验证 E 的"缓存读取命中证据"（`cache_read_tokens > 0`）在本 provider 组合上不可观测——建议后续在 runbook 中标注"仅对上报 cache_usage 的 provider 有效"（本次验证以 `fork_prefix_*` 四键 + 复述内容为准）。
 - 父会话多轮续跑出现一次 `context.tool_schema.frozen` 后的 schema 增量（`iterate_goal` 进入工具面），属 turn 边界重建的预期行为。
 
 ## 4. 产物索引
