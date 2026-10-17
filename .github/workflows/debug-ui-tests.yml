@@ -1,0 +1,44 @@
+name: Debug ui tests on linux
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WORKDIR: backend
+  CGO_ENABLED: '0'
+
+jobs:
+  ui-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go (follow go.mod)
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          public_repo_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run ui tests, verbose on failure
+        id: test
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd backend
+          if go test ./cmd/aicli/ui/... -count=1 > ui-test.log 2>&1; then
+            echo "UI TESTS GREEN"
+            tail -n 30 ui-test.log
+          else
+            echo "UI TESTS RED"
+            # re-run failing packages with -v to capture test names + diffs
+            grep -E "^FAIL|^--- FAIL" ui-test.log | sort -u | head -20 || true
+            for pkg in $(grep -E "^FAIL" ui-test.log | awk '{print $2}' | sort -u); do
+              echo "=== verbose: $pkg ==="
+              go test "$pkg" -count=1 -v 2>&1 | grep -E "^(=== RUN|--- FAIL|--- PASS|FAIL|ok |PASS)" | head -80
+              go test "$pkg" -count=1 -run "$(go test "$pkg" -count=1 -v 2>&1 | grep -E '^--- FAIL' | sed -E 's/^--- FAIL: ([A-Za-z0-9_]+).*$/\1/' | paste -sd'|' -)" -v 2>&1 | tail -n 120 || true
+            done
+          fi
