@@ -150,3 +150,24 @@ func BudgetExhausted(goal *SessionGoal) bool {
 	return goal != nil && goal.Status == StatusActive &&
 		goal.TokenBudget > 0 && goal.TokensUsed >= goal.TokenBudget
 }
+
+// BlockedCodeRoundLimit 是自动续跑达到 MaxRounds 总轮上限时由系统写入的
+// blocked 分类码（DSH goal 借鉴 G2：失控面收敛为可预期终态）。
+const BlockedCodeRoundLimit = "round-limit"
+
+// RoundLimitReached 报告 active goal 的 durable 轮数是否已达上限（仅
+// MaxRounds>0 时生效；0 = 不限制）。
+func RoundLimitReached(goal *SessionGoal) bool {
+	return goal != nil && goal.Status == StatusActive &&
+		goal.MaxRounds > 0 && goal.RoundsStarted >= goal.MaxRounds
+}
+
+// AdmitGoalRound 把一轮自动续跑记入 durable 轮数（双宿主驱动器共用：
+// 续跑轮提交成功后调用）。返回已达轮上限；非 active goal 不计数。
+func AdmitGoalRound(goal *SessionGoal) bool {
+	if goal == nil || goal.Status != StatusActive {
+		return false
+	}
+	goal.RoundsStarted++
+	return goal.MaxRounds > 0 && goal.RoundsStarted >= goal.MaxRounds
+}

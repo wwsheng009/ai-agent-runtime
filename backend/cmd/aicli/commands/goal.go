@@ -324,6 +324,11 @@ func formatGoalSummary(goal runtimegoal.SessionGoal) string {
 	if goal.BlockedReason != "" {
 		lines = append(lines, "Blocked reason: "+goal.BlockedReason)
 	}
+	if goal.MaxRounds > 0 {
+		lines = append(lines, fmt.Sprintf("Rounds: %d / %d", goal.RoundsStarted, goal.MaxRounds))
+	} else if goal.RoundsStarted > 0 {
+		lines = append(lines, fmt.Sprintf("Rounds: %d", goal.RoundsStarted))
+	}
 	if goal.CompletedBy != "" {
 		lines = append(lines, "Completed by: "+goal.CompletedBy)
 	}

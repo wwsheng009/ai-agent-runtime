@@ -362,6 +362,28 @@ func (h *Handler) sessionGoalDriverDecide(outcome goalDriverTurnOutcome) {
 		return
 	}
 
+	// G2 轮上限（DSH 借鉴）：durable 轮数达到 MaxRounds 即置 blocked 终态
+	//（round-limit），不再提交续跑轮——与 CLI 驱动器同语义（单点
+	// internal/goal.AdmitGoalRound）。
+	if goal.AdmitGoalRound(current) {
+		current.Status = goal.StatusBlocked
+		current.BlockedCode = goal.BlockedCodeRoundLimit
+		current.BlockedReason = fmt.Sprintf("Goal reached its configured limit of %d rounds.", current.MaxRounds)
+		current.UpdatedAt = time.Now()
+		if _, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem); err != nil {
+			logger.Warnf("goal driver: mark round-limit blocked %s: %s", sessionID, err)
+			return
+		}
+		logger.Infof("goal driver: goal blocked session=%s reason=round-limit rounds=%d/%d", sessionID, current.RoundsStarted, current.MaxRounds)
+		return
+	}
+	if current.RoundsStarted > 0 || current.MaxRounds > 0 {
+		if _, err := store.PutPersistent(ctx, h.sessionManager.GetStorage(), sessionID, *current, goal.MutationSystem); err != nil {
+			logger.Warnf("goal driver: admit round %s: %s", sessionID, err)
+			return
+		}
+	}
+
 	// 3) 挂起审批/工具：等用户决断，不续跑。
 	if h.goalDriverHasPendingApproval(sessionID) {
 		return

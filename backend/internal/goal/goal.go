@@ -31,10 +31,18 @@ const (
 )
 
 type SessionGoal struct {
-	GoalID            string `json:"goal_id" yaml:"goal_id"`
-	SessionID         string `json:"session_id" yaml:"session_id"`
-	Objective         string `json:"objective" yaml:"objective"`
-	Status            Status `json:"status" yaml:"status"`
+	GoalID    string `json:"goal_id" yaml:"goal_id"`
+	SessionID string `json:"session_id" yaml:"session_id"`
+	Objective string `json:"objective" yaml:"objective"`
+	Status    Status `json:"status" yaml:"status"`
+	// MaxRounds 是自动续跑的总轮数上限（0=不限制；>0 时 RoundsStarted 达到
+	// 即由驱动器置 blocked，BlockedCode=round-limit）。DSH goal 借鉴 G2，
+	// docs/analysis/dsh-goal-domain-vs-aar-goal-20261017.md §3.1。
+	MaxRounds int `json:"max_rounds,omitempty" yaml:"max_rounds,omitempty"`
+	// RoundsStarted 是已被驱动器 admitted 的自动续跑轮数（durable 计数，
+	// 与 DSH 的 roundsStarted 同语义；用户手动轮不计入）。
+	RoundsStarted     int    `json:"rounds_started,omitempty" yaml:"rounds_started,omitempty"`
+	BlockedCode       string `json:"blocked_code,omitempty" yaml:"blocked_code,omitempty"`
 	TokenBudget       int    `json:"token_budget,omitempty" yaml:"token_budget,omitempty"`
 	TokensUsed        int    `json:"tokens_used,omitempty" yaml:"tokens_used,omitempty"`
 	TimeUsedSeconds   int64  `json:"time_used_seconds,omitempty" yaml:"time_used_seconds,omitempty"`

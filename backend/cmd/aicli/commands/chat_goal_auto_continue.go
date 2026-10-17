@@ -124,6 +124,16 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			reportGoalAutoContinuationLimitReached(session, limit)
 			return nil
 		}
+		// G2 轮上限（DSH 借鉴）：durable 轮数达到 MaxRounds 即置 blocked 终态
+		//（round-limit），不再提交续跑轮。放在 attempt 提交前，保证"轮数"与
+		// "实际提交的续跑轮"一一对应。
+		if reached, roundErr := admitGoalRoundForSession(session); roundErr != nil {
+			writeSessionDebugInfo(session, fmt.Sprintf("[goal] round accounting failed: %v", roundErr), false)
+		} else if reached {
+			markActiveGoalBlockedRoundLimit(session)
+			reportGoalRoundLimitReached(session)
+			return nil
+		}
 		attempts++
 		writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation attempt=%d limit=%d status=%s", attempts, limit, decision.GoalStatus), false)
 		session.goalContinuationAttempt.Store(int32(attempts))
@@ -343,6 +353,71 @@ func reportGoalBudgetLimited(session *ChatSession) {
 	}
 	reportGoalAutoContinuationSupplement(session, fmt.Sprintf(
 		"[goal] token 预算已用完（%d/%d），目标已置为 budget_limited；/goal budget <n> 提高预算后 /goal resume 可继续。", used, budget))
+}
+
+// admitGoalRoundForSession 把本轮续跑记入 durable 轮数（G2，双宿主语义由
+// internal/goal.AdmitGoalRound 单点承载）。返回是否已达轮上限。
+func admitGoalRoundForSession(session *ChatSession) (bool, error) {
+	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
+		return false, nil
+	}
+	goal, ok, err := currentSessionGoal(session)
+	if err != nil || !ok || goal == nil {
+		return false, err
+	}
+	if !runtimegoal.AdmitGoalRound(goal) && goal.RoundsStarted == 0 {
+		// 非 active goal：不落库（与记账窗口口径一致）。
+		return false, nil
+	}
+	updated, err := runtimegoal.NewMetadataStore().PutPersistent(
+		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
+	if err != nil {
+		// 持久化失败回退内存增量，避免重复累计。
+		goal.RoundsStarted--
+		return false, err
+	}
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		return false, err
+	}
+	return runtimegoal.RoundLimitReached(goal), nil
+}
+
+// markActiveGoalBlockedRoundLimit 把 active goal 置为 blocked（系统写，
+// BlockedCode=round-limit；/goal resume 可解除）。
+func markActiveGoalBlockedRoundLimit(session *ChatSession) bool {
+	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
+		return false
+	}
+	goal, ok, err := currentSessionGoal(session)
+	if err != nil || !ok || goal == nil || goal.Status != runtimegoal.StatusActive {
+		return false
+	}
+	goal.Status = runtimegoal.StatusBlocked
+	goal.BlockedCode = runtimegoal.BlockedCodeRoundLimit
+	goal.BlockedReason = fmt.Sprintf("Goal reached its configured limit of %d rounds.", goal.MaxRounds)
+	goal.UpdatedAt = time.Now()
+	updated, err := runtimegoal.NewMetadataStore().PutPersistent(
+		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationSystem)
+	if err != nil {
+		writeSessionDebugInfo(session, "[goal] mark round-limit blocked failed: "+err.Error(), false)
+		return false
+	}
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		writeSessionDebugInfo(session, "[goal] round-limit blocked state restore failed: "+err.Error(), false)
+		return false
+	}
+	writeSessionDebugInfo(session, "[goal] goal marked blocked (round-limit)", false)
+	return true
+}
+
+// reportGoalRoundLimitReached 输出轮上限到达的可见提示。
+func reportGoalRoundLimitReached(session *ChatSession) {
+	rounds, maxRounds := 0, 0
+	if goal, ok, err := currentSessionGoal(session); err == nil && ok && goal != nil {
+		rounds, maxRounds = goal.RoundsStarted, goal.MaxRounds
+	}
+	reportGoalAutoContinuationSupplement(session, fmt.Sprintf(
+		"[goal] 已达轮数上限（%d/%d），目标已置为 blocked（round-limit）；/goal resume 可解除并继续。", rounds, maxRounds))
 }
 
 func shouldAutoContinueAfterGoalTurnError(session *ChatSession, err error) bool {
