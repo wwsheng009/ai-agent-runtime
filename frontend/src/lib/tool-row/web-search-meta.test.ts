@@ -86,6 +86,26 @@ describe("parseWebSearchMetaFromCandidates", () => {
     expect(meta?.sources[0].url).toBe("https://nested.example/1");
   });
 
+  it("历史回放形状（message.metadata.tool_metadata）可命中（实测缺口回归）", () => {
+    const meta = parseWebSearchMetaFromCandidates([
+      {
+        arguments_digest: "abc",
+        turn_id: "turn_x",
+        tool_metadata: {
+          sources: [
+            { url: "https://hist.example/1", title: "历史", snippet: "s" },
+          ],
+          quality_signals: { coverage: 0.25, domain_diversity: 1, snippet_presence: 1 },
+          quality: "low",
+          trust: "untrusted",
+        },
+      },
+    ]);
+    expect(meta?.sources[0].url).toBe("https://hist.example/1");
+    expect(meta?.quality).toBe("low");
+    expect(meta?.qualitySignals?.coverage).toBe(0.25);
+  });
+
   it("answer 非空字符串兼容为 hasAnswer（无 sources 也成立）", () => {
     const meta = parseWebSearchMetaFromCandidates([{ answer: "摘要" }]);
     expect(meta?.hasAnswer).toBe(true);

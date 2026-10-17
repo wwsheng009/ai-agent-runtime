@@ -151,6 +151,9 @@ export function parseWebSearchMetaFromCandidates(
     for (const key of [
       "metadata",
       "meta",
+      // 历史落库形状（实测 session 导出）：web_search 键嵌在
+      // `message.metadata.tool_metadata` 下，实时帧则在载荷顶层。
+      "tool_metadata",
       "result",
       "output",
       "tool",
