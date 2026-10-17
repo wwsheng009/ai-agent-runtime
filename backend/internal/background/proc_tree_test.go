@@ -152,7 +152,13 @@ func treeSpawnCommand(t *testing.T, dir, pidFile string) string {
 Set-Content -Path '%s' -Value $p.Id
 `, host, outFile, errFile, pidFile)
 	}
-	return fmt.Sprintf("sleep 120 &\necho $! > '%s'\n", pidFile)
+	// `wait` keeps the runner (sh) alive while the background child sleeps:
+	// a bare `sleep 120 &` lets the shell exit immediately, so the job
+	// reaches "completed" before the test can observe "running" and cancel
+	// it (Linux reached completed in ~120ms; Windows keeps running because
+	// its job object tracks descendants). The test needs a *running* job
+	// with a live descendant to exercise cancel-kills-the-whole-tree.
+	return fmt.Sprintf("sleep 120 &\necho $! > '%s'\nwait\n", pidFile)
 }
 
 func waitForRecordedPID(t *testing.T, path string, timeout time.Duration) int {

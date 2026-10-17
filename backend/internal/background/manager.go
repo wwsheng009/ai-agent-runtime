@@ -1509,6 +1509,29 @@ func (m *Manager) terminalTransitionVisible(managed *managedJob, intended JobSta
 	return managed.info.Status == intended
 }
 
+// settleTerminalTransitionEffects lands the in-memory side effects of a
+// terminal transition as early as possible: the observed-by-waiter stamp and
+// the monitor disarm. They must not wait for appendJobEvent, which the writers
+// call only after releaseJobTree — on Unix that helper escalates
+// TERM -> sleep 0.2 -> KILL, and a task_output long-poll can read the
+// already-visible terminal status and unregister inside that window, after
+// which the observed stamp would never land (Linux reproduction:
+// TestTaskOutputWaitExitMarksTerminalObserved). A late monitor check in the
+// same window would nudge a session after its terminal event
+// (TestTerminalTransitionCancelsPendingMonitors). appendJobEvent keeps calling
+// both as an idempotent backstop for event-only paths.
+func (m *Manager) settleTerminalTransitionEffects(jobID string) {
+	if m == nil {
+		return
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return
+	}
+	m.markTerminalObservedByWaiter(jobID)
+	m.cancelJobMonitors(jobID)
+}
+
 // instanceStoreWriter is implemented by the SQLite store: instance heartbeats,
 // lease renewal and clean shutdown records for the ownership model.
 type instanceStoreWriter interface {
@@ -1741,6 +1764,7 @@ func (m *Manager) expireQueuedJob(managed *managedJob) {
 	managed.info.ExitCode = nil
 	managed.info.FinishedAt = &finishedAt
 	managed.mu.Unlock()
+	m.settleTerminalTransitionEffects(managed.info.ID)
 	m.persistJobStateCAS(managed)
 	m.releaseJobTree(managed)
 	m.registerTerminalKillWatch(managed)
@@ -1854,6 +1878,7 @@ func (m *Manager) completeJobWithMessage(managed *managedJob, exitCode int, mess
 	// Finished processes are never hard tool failures; drop any stale error_code.
 	delete(managed.info.Metadata, "error_code")
 	managed.mu.Unlock()
+	m.settleTerminalTransitionEffects(managed.info.ID)
 	m.persistJobStateCAS(managed)
 	m.releaseJobTree(managed)
 	m.registerTerminalKillWatch(managed)
@@ -1909,6 +1934,7 @@ func (m *Manager) failJobWithCodeAndError(managed *managedJob, exitCode int, cod
 		managed.info.Metadata[backgroundMetaLaunchState] = launchStateFailed
 	}
 	managed.mu.Unlock()
+	m.settleTerminalTransitionEffects(managed.info.ID)
 	m.persistJobStateCAS(managed)
 	m.releaseJobTree(managed)
 	m.registerTerminalKillWatch(managed)
@@ -1947,6 +1973,7 @@ func (m *Manager) markTimedOut(managed *managedJob, message string) {
 	}
 	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrToolTimeout)
 	managed.mu.Unlock()
+	m.settleTerminalTransitionEffects(managed.info.ID)
 	m.persistJobStateCAS(managed)
 	m.releaseJobTree(managed)
 	m.registerTerminalKillWatch(managed)
@@ -1987,6 +2014,7 @@ func (m *Manager) orphanJob(managed *managedJob, message string) {
 	}
 	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrProcessHealthcheck)
 	managed.mu.Unlock()
+	m.settleTerminalTransitionEffects(managed.info.ID)
 	m.persistJobStateCAS(managed)
 	m.releaseJobTree(managed)
 	m.registerTerminalKillWatch(managed)
@@ -2045,6 +2073,7 @@ func (m *Manager) markCancelled(ctx context.Context, managed *managedJob, reason
 		delete(managed.info.Metadata, key)
 	}
 	managed.mu.Unlock()
+	m.settleTerminalTransitionEffects(managed.info.ID)
 	m.persistJobStateCAS(managed)
 	m.releaseJobTree(managed)
 	m.registerTerminalKillWatch(managed)
@@ -2524,6 +2553,10 @@ func (m *Manager) reclaimStuckJob(managed *managedJob) {
 	managed.info.Metadata[backgroundMetaLaunchState] = launchStateFailed
 	cancel := managed.cancel
 	managed.mu.Unlock()
+	// The scheduler_stuck event name is not a terminal status, so
+	// appendJobEvent below will not run the settle path; land the terminal
+	// side effects here explicitly for parity with the other writers.
+	m.settleTerminalTransitionEffects(managed.info.ID)
 	if cancel != nil {
 		cancel()
 	}

@@ -78,7 +78,11 @@ func TestDelegationAndMultiAgentGuidanceGateOnSpawnTools(t *testing.T) {
 	// 拼写面，才拦得住"生产改了名、测试跟着改"的同源漂移。
 	noSpawn := &ToolGuidanceFacts{
 		Denied: map[string]bool{
-			"spawn_subagents": true, "subagent_spawn": true, "spawn_agent": true,
+			// subagent_spawn_batch 是 20fed2ef 之后的规范名（spawn_subagents
+			// 降为其别名）；本测试刻意用字面量钉住拼写面，重命名时漏掉了
+			// 规范名，导致「无 spawn 工具」模拟不完整而误报有 guidance。
+			"subagent_spawn_batch": true,
+			"spawn_subagents":      true, "subagent_spawn": true, "spawn_agent": true,
 			"spawn_team": true, "team_spawn": true,
 			"subagent_wait": true, "wait_agent": true, "team_wait": true, "wait_team": true,
 		},
