@@ -99,28 +99,31 @@ jobs:
           echo "::notice title=slowest pkgs::$(grep -oE '"Action":"pass","Package":"[^"]+","Elapsed":[0-9.]+' /tmp/json.log | sed -E 's/.*"Package":"([^"]+)","Elapsed":([0-9.]+)/\2 \1/' | sort -rn | head -n 5 | tr '\n' ';')"
           exit 1
 
-      - name: Verbose rerun of failing packages
+      # 按包重跑失败用例并抓「--- FAIL 之前」的断言消息（t.Fatalf 的消息行
+      # 出现在 FAIL 汇总行之前；此前 grep -A 抓的是后续测试的 RUN 行，白费
+      # 注解额度）。每个包合并成一条多行注解，7 个包 ≈ 7 条，控制在
+      # GitHub 每步 10 条注解的上限内。
+      - name: Verbose rerun of failing tests (messages)
         if: failure()
         shell: bash
         run: |
           set +e
           cd backend
-          PKGS=$(grep -oE '"Action":"fail","Package":"[^"]+"' /tmp/json.log 2>/dev/null \
-                   | sed -E 's/.*"Package":"([^"]+)"/\1/' | sort -u | tr '\n' ' ')
-          echo "failing_pkgs=${PKGS:-<none>}"
-          if [ -z "$PKGS" ]; then
-            echo "::warning title=no failing pkgs::json log had no package-level fail"
-            exit 1
-          fi
-          go test -count=1 -timeout=240s -v $PKGS > /tmp/verbose.log 2>&1
-          echo "verbose rc=$?"
-          # 只取失败断言的上下文（--- FAIL 之后 25 行），转成注解。
-          # 注意：不要匹配 ^=== RUN —— 它会把每个用例的启动行都抓进来，
-          # 上两轮就是这么把注解额度耗光的。
-          n=0
-          while IFS= read -r line; do
-            n=$((n+1)); [ "$n" -gt 12 ] && break
-            msg=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r//g')
-            echo "::error title=verbose $n::$msg"
-          done < <(grep -A 25 -E '^--- FAIL' /tmp/verbose.log | head -n 12)
+          grep -oE '"Action":"fail","Package":"[^"]+","Test":"[^"]+"' /tmp/json.log 2>/dev/null \
+            | sed -E 's/.*"Package":"([^"]+)","Test":"([^"]+)"/\1 :: \2/' | sort -u > /tmp/failing_tests.txt
+          echo '--- failing tests ---'; cat /tmp/failing_tests.txt
+          sed -E 's/ :: .*//' /tmp/failing_tests.txt | sort -u > /tmp/failing_pkgs.txt
+
+          while IFS= read -r pkg; do
+            [ -z "$pkg" ] && continue
+            log="/tmp/vlog_$(echo "$pkg" | tr '/.' '__').log"
+            tests=$(grep -F "$pkg :: " /tmp/failing_tests.txt | sed -E 's/^[^:]+ :: //' | tr '\n' '|' | sed 's/|$//')
+            go test -count=1 -timeout=240s -v -run "^(${tests})$" "$pkg" > "$log" 2>&1
+            echo "pkg=$pkg rc=$? tests=$tests"
+            msg=$(grep -B 40 -E '^--- FAIL' "$log" | head -n 80 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            if [ -z "$msg" ]; then
+              msg=$(tail -n 40 "$log" | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            fi
+            echo "::error title=${pkg##*/}::${msg}"
+          done < /tmp/failing_pkgs.txt
           exit 1
