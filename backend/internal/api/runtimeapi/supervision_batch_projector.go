@@ -14,7 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
-// apiBatchLifecycleProjector 是 API 宿主的 spawn_subagents 终态桥，与 CLI 的
+// apiBatchLifecycleProjector 是 API 宿主的 subagent_spawn_batch 终态桥，与 CLI 的
 // localSubagentBatchLifecycleProjector 同语义：agent 包不依赖 supervision，由
 // 宿主把 host-neutral 的 BatchTerminalLifecycle 翻成 durable 生命周期通知，
 // 再给 wake consumer 一个可运行转换点。
@@ -74,7 +74,7 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 		case subagentbatch.BatchCanceled:
 			severity = supervision.SeverityWarning
 		default:
-			// P1-C：干净完成的 batch 推荐"收敛"（模型用 close_agent 关闭已结束
+			// P1-C：干净完成的 batch 推荐"收敛"（模型用 subagent_close 关闭已结束
 			// 的子会话）。该行本身 resolution=closed，evaluator 对已关闭行只允许
 			// inspect（plan §4.1.1），所以这里给的是模型面提示，而不是让模型对
 			// 终态行发 control 动作。

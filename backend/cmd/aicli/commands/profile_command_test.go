@@ -305,7 +305,7 @@ func TestRenderedReviewTemplateDeniesDelegationTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("show review: %v", err)
 	}
-	delegationTools := []string{"spawn_agent", "spawn_subagents", "spawn_team"}
+	delegationTools := []string{"subagent_spawn", "subagent_spawn_batch", "team_spawn"}
 	for _, name := range delegationTools {
 		found := false
 		for _, declared := range shown.ToolPolicy.Denylist {

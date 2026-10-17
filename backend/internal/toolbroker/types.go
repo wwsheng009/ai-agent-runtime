@@ -20,10 +20,10 @@ import (
 var ErrAgentSessionClosed = errors.New("agent session is closed")
 
 // ErrAgentBatchTaskNotMessageable marks an instruction aimed at a durable
-// spawn_subagents batch worker: batch tasks run as in-process workers without a
-// mailbox or input channel, so send_message / followup_task / send_input can
+// subagent_spawn_batch batch worker: batch tasks run as in-process workers without a
+// mailbox or input channel, so subagent_send / subagent_followup / subagent_input can
 // never be delivered to them.
-var ErrAgentBatchTaskNotMessageable = errors.New("target is a durable spawn_subagents batch worker and is not messageable")
+var ErrAgentBatchTaskNotMessageable = errors.New("target is a durable subagent_spawn_batch batch worker and is not messageable")
 
 // AgentSessionClosedError builds the terminal-target rejection shared by both
 // hosts. It keeps the P0-3a contract (the wrapped ErrAgentSessionClosed stays
@@ -47,7 +47,7 @@ func AgentBatchTaskNotMessageableError(toolName, target, batchID, taskID string)
 		detail = fmt.Sprintf("%s (batch %s task %s)", detail, strings.TrimSpace(batchID), tid)
 	}
 	return fmt.Errorf(
-		"%s target %s: %w; next_action=read|wait — batch workers have no mailbox or input channel, so this instruction was not delivered and no session was created; collect it with wait_agent / subagent_status / subagent_inspect_task, or use spawn_agent when you need a child you can steer mid-run",
+		"%s target %s: %w; next_action=read|wait — batch workers have no mailbox or input channel, so this instruction was not delivered and no session was created; collect it with subagent_wait / subagent_status / subagent_inspect_task, or use subagent_spawn when you need a child you can steer mid-run",
 		strings.TrimSpace(toolName), detail, ErrAgentBatchTaskNotMessageable,
 	)
 }
@@ -253,7 +253,7 @@ type WaitTeamResult struct {
 	WaitTimeoutClamped     bool `json:"wait_timeout_clamped,omitempty"`
 	// WaitedMs is the observation window actually spent waiting, in
 	// milliseconds (plan §C3-4 统一返回契约 waited_ms), measured from the start
-	// of the wait loop so it stays comparable with wait_agent's waited_ms.
+	// of the wait loop so it stays comparable with subagent_wait's waited_ms.
 	WaitedMs           int64                  `json:"waited_ms,omitempty"`
 	ExecutionContinues bool                   `json:"execution_continues,omitempty"`
 	NextAction         string                 `json:"next_action,omitempty"`
@@ -266,7 +266,7 @@ type WaitTeamResult struct {
 	EventCount         int                    `json:"event_count"`
 	LatestSeq          int64                  `json:"latest_seq,omitempty"`
 	// Obligations / TerminalCount / TerminalDelta / PendingCount carry the same
-	// wait-ledger view wait_agent returns (plan §C3-4 统一返回契约 / AC-P2-4g
+	// wait-ledger view subagent_wait returns (plan §C3-4 统一返回契约 / AC-P2-4g
 	// 共享实现), scoped to the awaited team's tasks: subject_kind "team_task",
 	// obligation id = task id. PendingCount counts the non-terminal task rows —
 	// the rows that forbid the parent turn from finalizing (I1). TerminalDelta
@@ -563,7 +563,7 @@ type SpawnAgentArgs struct {
 	ThinkingEffort      string `json:"thinking_effort,omitempty"`
 	PermissionMode      string `json:"permission_mode,omitempty"`
 	// CompletionRequirement is retained for wire compatibility, but ordinary
-	// spawn_agent children only support none. Team workers receive complete_task
+	// subagent_spawn children only support none. Team workers receive complete_task
 	// from TeammateRunner RunMeta after a real task assignment is bound.
 	CompletionRequirement string `json:"completion_requirement,omitempty"`
 	// Isolation is none|worktree. Empty normalizes to none. worktree fails closed
@@ -573,9 +573,9 @@ type SpawnAgentArgs struct {
 	ForkContext *bool  `json:"fork_context,omitempty"`
 	ForkTurns   string `json:"fork_turns,omitempty"`
 	// ParentToolCallID 是发起本次 spawn 的父侧 tool_call_id，由 broker 在执行
-	// spawn_agent 工具调用时内部注入（不来自模型入参，json:"-" 不落地/不回显）。
+	// subagent_spawn 工具调用时内部注入（不来自模型入参，json:"-" 不落地/不回显）。
 	// 宿主把它写进子会话上下文，subagent.progress 镜像据此回填
-	// parent_tool_call_id，供前端/ACP 把进度归位到 spawn_agent 行。
+	// parent_tool_call_id，供前端/ACP 把进度归位到 subagent_spawn 行。
 	ParentToolCallID string `json:"-"`
 	// Execution supervision timeouts (doc 7.2). Zero means "use operator
 	// default"; a negative value is rejected by the broker.
@@ -628,7 +628,7 @@ type WaitAgentArgs struct {
 // ListAgentsArgs lists lightweight child-agent sessions under a parent/root.
 type ListAgentsArgs struct {
 	// ParentSessionID is retained for internal/operator callers only. The
-	// model-facing list_agents dispatch derives the scope from the calling
+	// model-facing subagent_list dispatch derives the scope from the calling
 	// session (its root session) and ignores any model-supplied value, so a
 	// call can never read another agent's tree.
 	ParentSessionID string `json:"parent_session_id,omitempty"`
@@ -692,7 +692,7 @@ type AgentStatusResult struct {
 	Exists                   bool     `json:"exists"`
 	Created                  bool     `json:"created,omitempty"`
 	Queued                   bool     `json:"queued,omitempty"`
-	// Delivered/Triggered/Duplicate mirror AgentMessageResult for send_input,
+	// Delivered/Triggered/Duplicate mirror AgentMessageResult for subagent_input,
 	// whose v2 return type is this status result (P0-3a, plan §3.3). All three
 	// are omitted when false, so pre-v2 hosts serialize the same fields.
 	Delivered bool `json:"delivered,omitempty"`
@@ -845,7 +845,7 @@ func agentWaitListContains(agents []AgentStatusResult, target *AgentStatusResult
 }
 
 // FinalizeAgentEventsResult adds compact polling guidance so parents do not
-// spin forever on empty read_agent_events results (doom-loop exempt tool).
+// spin forever on empty subagent_events results (doom-loop exempt tool).
 func FinalizeAgentEventsResult(result *AgentEventsResult) *AgentEventsResult {
 	if result == nil {
 		return nil
@@ -929,7 +929,7 @@ func ApplyAgentWaitLedger(result *AgentWaitResult, obligations []AgentWaitObliga
 }
 
 // AgentWaitLedgerView is the shared obligation-ledger computation behind both
-// wait_agent (ApplyAgentWaitLedger) and wait_team (ApplyWaitTeamLedger), so the
+// subagent_wait (ApplyAgentWaitLedger) and team_wait (ApplyWaitTeamLedger), so the
 // two wait paths cannot drift in how rows, counts and the terminal delta are
 // derived (plan §C3-4 统一返回契约 / AC-P2-4g 共享实现).
 type AgentWaitLedgerView struct {
@@ -964,12 +964,12 @@ func SummarizeAgentWaitLedger(obligations []AgentWaitObligation, baselineTermina
 	return view
 }
 
-// ApplyWaitTeamLedger attaches the team-task obligation ledger to a wait_team
-// result using the same row computation as wait_agent (AC-P2-4g 共享实现). Rows
+// ApplyWaitTeamLedger attaches the team-task obligation ledger to a team_wait
+// result using the same row computation as subagent_wait (AC-P2-4g 共享实现). Rows
 // are the awaited team's tasks with subject_kind "team_task".
 //
 // It is decisive in one direction only, and deliberately narrower than the
-// wait_agent rule: "finalize" is only stamped when the team itself is terminal
+// subagent_wait rule: "finalize" is only stamped when the team itself is terminal
 // and no task row is pending. A non-terminal team (e.g. one that has not
 // planned its tasks yet, so the ledger is empty) must never produce "finalize",
 // and more specific guidance already on the result — such as "team is terminal
@@ -993,9 +993,9 @@ func ApplyWaitTeamLedger(result *WaitTeamResult, obligations []AgentWaitObligati
 	return result
 }
 
-// ApplyWaitTeamTimeout records the normalized observation window on a wait_team
-// result. wait_team shares the agents.minWaitTimeoutMs / agents.maxWaitTimeoutMs
-// policy with wait_agent, so a team wait must echo the same request/effective/
+// ApplyWaitTeamTimeout records the normalized observation window on a team_wait
+// result. team_wait shares the agents.minWaitTimeoutMs / agents.maxWaitTimeoutMs
+// policy with subagent_wait, so a team wait must echo the same request/effective/
 // clamped triple: requestedMs is echoed verbatim (0 means "host default"),
 // effectiveMs is the window the host actually used, and clamped reports whether
 // the request was pinned to a bound.
@@ -1012,17 +1012,17 @@ func ApplyWaitTeamTimeout(result *WaitTeamResult, requestedMs, effectiveMs int, 
 }
 
 // WaitTeamSuspendNextAction is the team-scoped §16.3 verdict text: the same
-// budget judgement as wait_agent, with the team-side inspection primitives
+// budget judgement as subagent_wait, with the team-side inspection primitives
 // spelled out instead of the subagent ones.
 func WaitTeamSuspendNextAction(consecutive, limit int) string {
 	return fmt.Sprintf(
-		"suspend: %d consecutive active waits observed no team-task progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the team once (read_mailbox_digest / job_output / subagent_status), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call wait_team again with the same team_id",
+		"suspend: %d consecutive active waits observed no team-task progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the team once (team_mailbox / job_output / subagent_status), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call team_wait again with the same team_id",
 		consecutive, limit,
 	)
 }
 
 // SuspendWaitTeamResultForBudget stamps the exhausted-wait-budget verdict onto
-// an already-built wait_team result, preserving the task-ledger view. A
+// an already-built team_wait result, preserving the task-ledger view. A
 // "finalize" verdict is never overridden: a drained ledger has nothing to
 // suspend for.
 func SuspendWaitTeamResultForBudget(result *WaitTeamResult, consecutive, limit int) *WaitTeamResult {
@@ -1063,7 +1063,7 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 	} else if agentWaitHasPendingApproval(result) {
 		result.NextAction = agentWaitPendingApprovalNextAction(result)
 	} else if agentWaitMatchedTargetMissing(result) {
-		// 2026-09-26 真机 E2E：把派发回执的 batch_id 直接喂给 wait_agent 时，旧行为
+		// 2026-09-26 真机 E2E：把派发回执的 batch_id 直接喂给 subagent_wait 时，旧行为
 		// 把不存在的目标计成 ready 并回 "consume_ready_outputs"——既没有可消费输出，
 		// 也没有可寻址目标。这里给出诚实且可执行的指引：回执的 tasks[] 里取 task_id
 		// 再等（G4 解析侧已支持 task_id → child session）。
@@ -1099,7 +1099,7 @@ func agentWaitHasPendingApproval(result *AgentWaitResult) bool {
 // agentWaitMatchedTargetMissing reports a matched subject that does not exist as an
 // agent session (session store returned "missing"). Such a target must never be
 // advertised as "ready output" — 2026-09-26 真机 E2E：把派发回执的 batch_id 直接
-// 喂给 wait_agent 时，目标不存在却被计成 ready。
+// 喂给 subagent_wait 时，目标不存在却被计成 ready。
 func agentWaitMatchedTargetMissing(result *AgentWaitResult) bool {
 	if result == nil || result.Agent == nil || result.Agent.Exists {
 		return false
@@ -1107,7 +1107,7 @@ func agentWaitMatchedTargetMissing(result *AgentWaitResult) bool {
 	return strings.TrimSpace(result.Agent.Status) == "missing"
 }
 
-// agentWaitPendingApprovalNextAction steers parents toward resolve_agent_approval
+// agentWaitPendingApprovalNextAction steers parents toward subagent_approve
 // instead of re-wait/poll loops when a child is blocked on tool approval.
 func agentWaitPendingApprovalNextAction(result *AgentWaitResult) string {
 	pending := firstAgentWaitPendingApproval(result)
@@ -1162,8 +1162,8 @@ type AgentMessageResult struct {
 	Delivered       bool   `json:"delivered"`
 	Triggered       bool   `json:"triggered,omitempty"`
 	// Queued reports that delivery waits in the child mailbox until the child
-	// consumes it (a busy followup_task / send_input(interrupt=false), or every
-	// send_message).
+	// consumes it (a busy subagent_followup / subagent_input(interrupt=false), or every
+	// subagent_send).
 	Queued bool `json:"queued,omitempty"`
 	// Duplicate reports that the durable mailbox id was already committed, so
 	// the retry is an idempotent hit and no second turn/message is produced.
@@ -1411,7 +1411,7 @@ func MarkAgentEventsRepeatedRead(result *AgentEventsResult, afterSeq int64, repe
 		result.NextAction += fmt.Sprintf("; unchanged_window: identical read #%d with after_seq=%d; do not re-read this window", repeatCount, afterSeq)
 		return result
 	}
-	result.NextAction = fmt.Sprintf("unchanged_window: identical read #%d with after_seq=%d returned the same window (no new events); the payload adds no information — do other work, use wait_agent for readiness or a longer wait, and advance after_seq only once new events exist", repeatCount, afterSeq)
+	result.NextAction = fmt.Sprintf("unchanged_window: identical read #%d with after_seq=%d returned the same window (no new events); the payload adds no information — do other work, use subagent_wait for readiness or a longer wait, and advance after_seq only once new events exist", repeatCount, afterSeq)
 	return result
 }
 
@@ -1533,7 +1533,7 @@ const (
 	// WorktreeDispositionKeptUncommitted records §2.4-1 产物保全: when a
 	// close / force-kill finds the worktree carrying uncommitted changes it is
 	// kept instead of silently removed, so the parent can still
-	// apply_agent_worktree / discard_agent_worktree explicitly.
+	// subagent_apply_worktree / subagent_discard_worktree explicitly.
 	WorktreeDispositionKeptUncommitted          = "kept_uncommitted"
 	AgentSessionContextRequestedProvider        = "agent_requested_provider"
 	AgentSessionContextRequestedReasoningEffort = "agent_requested_reasoning_effort"
@@ -1541,7 +1541,7 @@ const (
 	AgentSessionContextEffectivePermissionMode  = "agent_effective_permission_mode"
 )
 
-// ApplySpawnAgentRouteContext persists spawn_agent route hints on a child
+// ApplySpawnAgentRouteContext persists subagent_spawn route hints on a child
 // session. Provider/model/reasoning use canonical session metadata keys so
 // actor builders can recover the same route after restart/resume.
 func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnAgentArgs) {
@@ -1629,7 +1629,7 @@ func ApplySpawnAgentRouteContext(session agentcontrol.ContextSetter, args SpawnA
 	}
 }
 
-// ApplySpawnAgentRouteStatusContext copies persisted spawn_agent route
+// ApplySpawnAgentRouteStatusContext copies persisted subagent_spawn route
 // metadata from a session context into an agent status result.
 func ApplySpawnAgentRouteStatusContext(result *AgentStatusResult, session agentcontrol.ContextGetter) {
 	if result == nil || session == nil {

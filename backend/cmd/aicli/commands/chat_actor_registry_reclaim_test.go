@@ -144,7 +144,7 @@ func TestLocalActorRegistry_ReclaimsIdleChildWhenEvictionEnabled(t *testing.T) {
 
 	// Spawn materializes the projection before it evicts, so drain the stream
 	// instead of asserting on the first frame: the eviction must be reported by
-	// its own reclaim kind and never as an orderly close_agent.
+	// its own reclaim kind and never as an orderly subagent_close.
 	require.Eventually(t, func() bool {
 		for _, event := range wakes.snapshot() {
 			require.NotEqual(t, "closed", event.EventKind, "an automatic eviction must not look like an orderly close")
@@ -165,7 +165,7 @@ func TestLocalActorRegistry_ReclaimsIdleChildWhenEvictionEnabled(t *testing.T) {
 	require.Equal(t, "/root/held-child", reclaimWake.AgentPath)
 
 	// The durable wake stream carries the eviction reason, so a parent reading
-	// read_agent_events can tell an automatic reclaim from close_agent.
+	// subagent_events can tell an automatic reclaim from subagent_close.
 	seq, err := agentStore.LastAgentControlAgentWakeSeq(context.Background(), agentcontrol.AgentWakeFilter{
 		RootSessionID: rootSession.ID,
 		AgentPath:     "/root/held-child",

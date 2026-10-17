@@ -186,8 +186,8 @@ func bigSystem(guidanceVariant string) string {
 	}
 	head += "Session identity: " + nonce + "\n"
 	tail := map[string]string{
-		"A": "Task difficulty guidance:\n  - Rate difficulty before delegating.\n  - Do not spawn subagents for easy work.\n\nMulti-agent collaboration guidance:\n  - Consume progress incrementally with read_agent_events.\n  - Close children you no longer need.\n",
-		"B": "Delegation policy:\n  - Rate difficulty before delegating; expert work may use subagents when isolated.\n  - Difficulty and difficulty_rationale accompany every child task.\n\nOrchestration notes:\n  - Read events incrementally with after_seq; never re-read consumed windows.\n  - Release agent slots with close_agent when a child is no longer needed.\n",
+		"A": "Task difficulty guidance:\n  - Rate difficulty before delegating.\n  - Do not spawn subagents for easy work.\n\nMulti-agent collaboration guidance:\n  - Consume progress incrementally with subagent_events.\n  - Close children you no longer need.\n",
+		"B": "Delegation policy:\n  - Rate difficulty before delegating; expert work may use subagents when isolated.\n  - Difficulty and difficulty_rationale accompany every child task.\n\nOrchestration notes:\n  - Read events incrementally with after_seq; never re-read consumed windows.\n  - Release agent slots with subagent_close when a child is no longer needed.\n",
 	}
 	return head + tail[guidanceVariant]
 }

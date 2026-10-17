@@ -215,7 +215,7 @@ func TestBus_RecentTraces_GroupsAndOrdersByLatestEvent(t *testing.T) {
 	bus.Publish(Event{Type: "tool.requested", TraceID: "trace-1", AgentName: "agent-a", SessionID: "session-a", ToolName: "read_logs"})
 	bus.Publish(Event{Type: "tool.completed", TraceID: "trace-1", AgentName: "agent-a", SessionID: "session-a", ToolName: "read_logs", Payload: map[string]interface{}{"mcp_name": "mcp-a", "transport_type": "stdio"}})
 	bus.Publish(Event{Type: "tool.denied", TraceID: "trace-1", AgentName: "agent-a", ToolName: "write_file", Payload: map[string]interface{}{"policy": "read_only"}})
-	bus.Publish(Event{Type: "patch.decision", TraceID: "trace-1", AgentName: "agent-a", ToolName: "spawn_subagents", Payload: map[string]interface{}{"patch_decision": "approved_override", "patch_decision_policy": "strict", "patch_approval": map[string]interface{}{"ticket_id": "CAB-1"}}})
+	bus.Publish(Event{Type: "patch.decision", TraceID: "trace-1", AgentName: "agent-a", ToolName: "subagent_spawn_batch", Payload: map[string]interface{}{"patch_decision": "approved_override", "patch_decision_policy": "strict", "patch_approval": map[string]interface{}{"ticket_id": "CAB-1"}}})
 	bus.Publish(Event{Type: "mcp.transport.connected", TraceID: "trace-2", AgentName: "mcp-manager", Payload: map[string]interface{}{"mcp_name": "mcp-b", "transport_type": "websocket"}})
 
 	traces := bus.RecentTraces(TraceFilter{Limit: 10})
@@ -283,7 +283,7 @@ func TestBus_RecentTraces_ExecutionSummaryAndToolFilter(t *testing.T) {
 	bus.Publish(Event{Type: "tool.requested", TraceID: "trace-1", ToolName: "read_logs"})
 	bus.Publish(Event{Type: "tool.completed", TraceID: "trace-1", ToolName: "read_logs"})
 	bus.Publish(Event{Type: "tool.reduced", TraceID: "trace-1", ToolName: "read_logs", Payload: map[string]interface{}{"reducer": "text_truncation", "artifact_ref_count": 1}})
-	bus.Publish(Event{Type: "subagent.batch.started", TraceID: "trace-1", ToolName: "spawn_subagents"})
+	bus.Publish(Event{Type: "subagent.batch.started", TraceID: "trace-1", ToolName: "subagent_spawn_batch"})
 	bus.Publish(Event{Type: "subagent.started", TraceID: "trace-1", Payload: map[string]interface{}{
 		"role":                   "researcher",
 		"difficulty":             "hard",
@@ -300,8 +300,8 @@ func TestBus_RecentTraces_ExecutionSummaryAndToolFilter(t *testing.T) {
 		"route_model":        "strong-model",
 		"usage_total_tokens": 1200,
 	}})
-	bus.Publish(Event{Type: "subagent.batch.completed", TraceID: "trace-1", ToolName: "spawn_subagents"})
-	bus.Publish(Event{Type: "patch.applied", TraceID: "trace-1", ToolName: "spawn_subagents", Payload: map[string]interface{}{"applied_by": []interface{}{"writer-1"}, "artifact_ref_count": 2}})
+	bus.Publish(Event{Type: "subagent.batch.completed", TraceID: "trace-1", ToolName: "subagent_spawn_batch"})
+	bus.Publish(Event{Type: "patch.applied", TraceID: "trace-1", ToolName: "subagent_spawn_batch", Payload: map[string]interface{}{"applied_by": []interface{}{"writer-1"}, "artifact_ref_count": 2}})
 	bus.Publish(Event{Type: "tool.reduced", TraceID: "trace-2", ToolName: "run_tests", Payload: map[string]interface{}{"reducer": "go_test_json"}})
 
 	traces := bus.RecentTraces(TraceFilter{ToolName: "read_logs", Limit: 10})

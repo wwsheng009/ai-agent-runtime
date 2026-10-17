@@ -316,7 +316,7 @@ export type AnalyticsToolStatsResponse = {
 export type AnalyticsSubagentStat = {
   subagent_id: string;
   parent_session_id: string;
-  /** 区分同一父会话下的多次 spawn_subagents 调用；历史行为空串（后端 omitempty 时缺失）。 */
+  /** 区分同一父会话下的多次 subagent_spawn_batch 调用；历史行为空串（后端 omitempty 时缺失）。 */
   batch_id?: string;
   child_session_id?: string;
   role?: string;

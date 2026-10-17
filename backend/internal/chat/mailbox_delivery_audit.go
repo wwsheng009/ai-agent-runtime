@@ -12,7 +12,7 @@ import (
 // 单发指令投递审计（P0-3a 改动 4，方案 §3.3/§7.3）。字段命名对齐批量路径
 // subagent_batch_coordinator.go 的 mailbox_delivery_status /
 // mailbox_delivery_error：成功投递写在目标 mailbox 消息的 metadata 上（
-// mailbox_received 事件与 read_mailbox_digest 都能看到），发起方会话再留一条
+// mailbox_received 事件与 team_mailbox 都能看到），发起方会话再留一条
 // mailbox_delivery 事件，失败也能被 /debug 观察到。该审计不进入 supervision
 // control 动作管线，它只是消息记录。
 
@@ -41,7 +41,7 @@ type MailboxDeliveryAudit struct {
 
 // AnnotateAgentMailboxDelivery stamps the delivery status onto the outgoing
 // mailbox message metadata so the durable mailbox row itself carries the audit
-// fields (read_mailbox_digest / mailbox_received consumers see them).
+// fields (team_mailbox / mailbox_received consumers see them).
 func AnnotateAgentMailboxDelivery(message *team.MailMessage, status string, deliveryErr error, duplicate bool) {
 	if message == nil {
 		return

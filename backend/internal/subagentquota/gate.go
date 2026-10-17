@@ -1,9 +1,9 @@
 // Package subagentquota enforces the live-subagent ceiling (agents.maxThreads)
 // across BOTH spawn paths.
 //
-// The single-spawn path (spawn_agent) already reserves a slot in the durable
+// The single-spawn path (subagent_spawn) already reserves a slot in the durable
 // agent registry at spawn time and rejects an over-limit child with
-// agentcontrol.ThreadLimitMessage. The batch path (spawn_subagents) only had a
+// agentcontrol.ThreadLimitMessage. The batch path (subagent_spawn_batch) only had a
 // concurrency limiter: a slot was held for the duration of one child execution
 // and released when it finished, so a session could accumulate an unbounded
 // number of idle/terminal child sessions. This package closes that gap by
@@ -60,7 +60,7 @@ type Gate struct {
 // store is the host's BatchStore; the live-task counter is the optional
 // LiveTaskCounter extension, resolved by type assertion. A store that does not
 // implement it yields a nil gate (the batch footprint cannot be counted, and
-// the registry path already gates itself at spawn_agent time).
+// the registry path already gates itself at subagent_spawn time).
 func New(registry RegistryCounter, store subagentbatch.BatchStore, rawMaxThreads, defaultMax int) *Gate {
 	counter, _ := store.(subagentbatch.LiveTaskCounter)
 	return newWithCounter(registry, counter, rawMaxThreads, defaultMax)

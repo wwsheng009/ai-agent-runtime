@@ -14,7 +14,7 @@ import (
 )
 
 // recordingWaitBudget is a deterministic stand-in for the host-side
-// agentcontrol.WaitBudget adapter (plan §16.3: wait_team shares wait_agent's
+// agentcontrol.WaitBudget adapter (plan §16.3: team_wait shares subagent_wait's
 // per-turn counter through the broker-side WaitSegmentBudget seam).
 type recordingWaitBudget struct {
 	mu           sync.Mutex
@@ -89,7 +89,7 @@ func TestBrokerExecuteWaitTeamExhaustedBudgetSkipsWindow(t *testing.T) {
 	result := raw.(WaitTeamResult)
 	assert.True(t, result.WaitBudgetExhausted)
 	assert.Contains(t, result.NextAction, "suspend:")
-	assert.Contains(t, result.NextAction, "Do not call wait_team again")
+	assert.Contains(t, result.NextAction, "Do not call team_wait again")
 	assert.False(t, result.TimedOut, "no observation window was opened, so nothing timed out")
 	assert.Less(t, time.Since(started), 500*time.Millisecond,
 		"an exhausted wait budget must return immediately instead of blocking")
@@ -185,7 +185,7 @@ func TestBrokerExecuteWaitTeamWithoutBudgetKeepsLegacyResult(t *testing.T) {
 	require.NoError(t, err)
 
 	// nil budget (host did not inject one) and a disarmed budget must both leave
-	// the legacy wait_team contract untouched: no stamp, no accounting.
+	// the legacy team_wait contract untouched: no stamp, no accounting.
 	for name, budget := range map[string]WaitSegmentBudget{
 		"nil":      nil,
 		"disarmed": &recordingWaitBudget{active: false, limit: 2},

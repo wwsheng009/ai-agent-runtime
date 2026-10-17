@@ -17,7 +17,7 @@ import (
 
 const apiWaitLedgerTestSession = "api-wait-ledger-parent"
 
-// newAPIWaitLedgerFixture 组装 wait_agent 账本视图的最小 API 宿主：真实 batch store
+// newAPIWaitLedgerFixture 组装 subagent_wait 账本视图的最小 API 宿主：真实 batch store
 // 上的 §6.12 挂起记录 + 指向该 turn 的运行态派生缓存（RuntimeState.SuspendedTurnID）。
 // 账本读数必须来自宿主自己的控制面，所以夹具用真 store 而不是打桩。
 func newAPIWaitLedgerFixture(t *testing.T, batchStatus subagentbatch.BatchStatus, suspendedTurnID string) (*sessionAgentController, string) {
@@ -153,7 +153,7 @@ func TestPeekSubagentBatchStoreDoesNotLazyCreate(t *testing.T) {
 }
 
 // TestSessionAgentControllerWaitBudgetStopsActiveWindows 钉住 API 宿主的同一判据：
-// 预算耗尽后 wait_agent 不再打开观测窗口，立即返回 next_action=suspend 且账本视图
+// 预算耗尽后 subagent_wait 不再打开观测窗口，立即返回 next_action=suspend 且账本视图
 // 完整（供模型巡检/收尾决策）。
 func TestSessionAgentControllerWaitBudgetStopsActiveWindows(t *testing.T) {
 	controller, batchID := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
@@ -232,7 +232,7 @@ func TestSessionAgentControllerWaitCreditsProgressCompletedDuringWait(t *testing
 }
 
 // TestSessionAgentControllerWaitBudgetSharedWithTeamWait 与 CLI 宿主同口径：
-// wait_team 的 broker 直连路径通过 WaitSegmentBudget 读写同一把预算键/计数器。
+// team_wait 的 broker 直连路径通过 WaitSegmentBudget 读写同一把预算键/计数器。
 func TestSessionAgentControllerWaitBudgetSharedWithTeamWait(t *testing.T) {
 	controller, _ := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
 	cfg := runtimecfg.DefaultRuntimeConfig()
@@ -264,7 +264,7 @@ func TestSessionAgentControllerWaitBudgetSharedWithTeamWait(t *testing.T) {
 }
 
 // TestSessionAgentControllerWaitBudgetKeyWithoutBatchSuspension 钉住 team-only
-// 挂起：batch 账本为空（wait_agent fail-open 旧语义），wait_team 仍拿到预算键。
+// 挂起：batch 账本为空（subagent_wait fail-open 旧语义），team_wait 仍拿到预算键。
 func TestSessionAgentControllerWaitBudgetKeyWithoutBatchSuspension(t *testing.T) {
 	controller, _ := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
 	ctx := toolctx.WithSessionID(context.Background(), apiWaitLedgerTestSession)
@@ -275,7 +275,7 @@ func TestSessionAgentControllerWaitBudgetKeyWithoutBatchSuspension(t *testing.T)
 	}))
 
 	_, _, _, ledgerKey := controller.waitLedger(ctx)
-	require.Empty(t, ledgerKey, "without a batch suspension row the wait_agent ledger stays empty")
+	require.Empty(t, ledgerKey, "without a batch suspension row the subagent_wait ledger stays empty")
 
 	key, _ := controller.waitBudgetKey(ctx)
 	require.Equal(t, apiWaitLedgerTestSession+"|turn-team-only", key)

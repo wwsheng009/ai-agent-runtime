@@ -209,7 +209,7 @@ type Handler struct {
 	writerArbiter   *agent.SubagentWriterArbiter
 	// waitBudget bounds consecutive no-progress active wait segments per parent
 	// turn (design §16.2/§16.3): once spent, the host refuses to open a new
-	// wait_agent window and returns next_action=suspend. It lives on the
+	// subagent_wait window and returns next_action=suspend. It lives on the
 	// long-lived Handler because sessionAgentController instances are built per
 	// broker/request, while the budget must survive them.
 	waitBudget agentcontrol.WaitBudget
@@ -5729,17 +5729,17 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 	if a == nil {
 		return
 	}
-	// The broker resolves wait_team windows on its own, so it has to read the
-	// same live agents policy as this host's wait_agent / read_agent_events
+	// The broker resolves team_wait windows on its own, so it has to read the
+	// same live agents policy as this host's subagent_wait / subagent_events
 	// paths. Stamped on the way out so every branch below (including the
 	// config==nil early return) leaves the broker on the operator policy instead
 	// of the shared fallback.
 	defer func() {
 		if broker := a.GetToolBroker(); broker != nil {
 			broker.WaitTimeoutPolicy = h.brokerWaitTimeoutPolicy
-			// wait_team resolves its window inside the broker, so the caller-turn
+			// team_wait resolves its window inside the broker, so the caller-turn
 			// wait budget has to be injected here too — same key/counter as this
-			// host's wait_agent shell (plan §16.3 "两者共享实现").
+			// host's subagent_wait shell (plan §16.3 "两者共享实现").
 			broker.WaitBudget = &sessionAgentController{handler: h}
 		}
 	}()
@@ -5812,7 +5812,7 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 	}
 
 	// P0-A 方案 A（doc 6.2/7）：把 unified 快照读模型接到模型工具面，让父
-	// agent 一次调用看清整个子 agent 批次，而不是逐行轮询 wait_agent。门控与
+	// agent 一次调用看清整个子 agent 批次，而不是逐行轮询 subagent_wait。门控与
 	// CLI 宿主一致：没有 durable store 时 broker.Supervision 保持 nil，四个
 	// 监督工具不会出现在 Definitions()（悬空工具比缺少工具更糟）。
 	if h.getSupervisionStore() != nil {

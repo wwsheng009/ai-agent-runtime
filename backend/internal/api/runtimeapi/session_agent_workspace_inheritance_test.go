@@ -68,7 +68,7 @@ func TestSessionAgentControllerSpawn_InheritsParentWorkspacePath(t *testing.T) {
 	// 出处快照：即使生效目录与父一致，来源键也要写下来，供子代理自报家门。
 	assert.Equal(t, workspace, agentcontrol.ContextString(child, toolbroker.AgentSessionContextParentWorkspacePath))
 
-	// 工具层可见：spawn_agent 的返回值直接回读子会话状态，必须带上工作目录，
+	// 工具层可见：subagent_spawn 的返回值直接回读子会话状态，必须带上工作目录，
 	// 否则父代理无法确认子代理被派到了哪个仓库。
 	assert.Equal(t, workspace, result.WorkspacePath)
 	assert.Equal(t, "root:"+parent.ID, result.ParentAgentID)
@@ -155,7 +155,7 @@ func TestSessionAgentControllerSpawn_WithoutParentWorkspaceKeepsChildUnbound(t *
 }
 
 // TestApiChildAgentRecord_CarriesWorkspaceAndParentAgent 覆盖控制面：AgentRecord 必须
-// 落 working directory 与 parent agent id，否则 list_agents / 监督投影无法回答
+// 落 working directory 与 parent agent id，否则 subagent_list / 监督投影无法回答
 // 「这个子代理在哪个目录、属于谁」。
 func TestApiChildAgentRecord_CarriesWorkspaceAndParentAgent(t *testing.T) {
 	ctx := context.Background()

@@ -27,7 +27,7 @@ func newAgentSessionTestStore(t *testing.T) BatchStore {
 }
 
 // TestTurnObligationsSettledWithAgentSessions pins the child-session half of the
-// settle predicate: a parked turn that dispatched spawn_agent children may only
+// settle predicate: a parked turn that dispatched subagent_spawn children may only
 // clear once every listed child reached a terminal control-plane state, a child
 // without a lifecycle row (still running) blocks the settle instead of being
 // skipped, and an unwired resolver keeps the turn parked (never clear on a guess).
@@ -157,7 +157,7 @@ func TestTurnObligationsSettledWithAgentSessions(t *testing.T) {
 
 // TestTurnObligationsAllTerminal pins the strict sibling the settlement wake
 // uses: unlike the settle predicate, an id without a durable row blocks the
-// verdict — a running spawn_agent child has no lifecycle row yet, so a skipped
+// verdict — a running subagent_spawn child has no lifecycle row yet, so a skipped
 // id here would resume the parent while its cohort is still working.
 func TestTurnObligationsAllTerminal(t *testing.T) {
 	ctx := context.Background()

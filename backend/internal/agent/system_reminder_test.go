@@ -12,9 +12,9 @@ import (
 )
 
 func TestFormatSystemReminder(t *testing.T) {
-	out := FormatSystemReminder(ReminderKindCompletionRequirement, "call report_task_outcome")
+	out := FormatSystemReminder(ReminderKindCompletionRequirement, "call team_task_report")
 	assert.Contains(t, out, `<system-reminder kind="completion_requirement">`)
-	assert.Contains(t, out, "call report_task_outcome")
+	assert.Contains(t, out, "call team_task_report")
 	assert.True(t, strings.HasSuffix(out, "</system-reminder>"))
 
 	assert.Empty(t, FormatSystemReminder("x", "  "))
@@ -107,7 +107,7 @@ func TestDurableToolResultPayloads_StripsPureAdvisory(t *testing.T) {
 func TestDurableMessagesForPersist_DropsNonDurableStandaloneAndStripsTool(t *testing.T) {
 	durableRem := NewSystemReminderMessage(SystemReminder{
 		Kind:    ReminderKindCompletionRequirement,
-		Body:    "call report_task_outcome",
+		Body:    "call team_task_report",
 		Durable: true,
 	})
 	ephemeralRem := NewSystemReminderMessage(SystemReminder{

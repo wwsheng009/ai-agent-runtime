@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// F6：close_agent 必须接受 spawn_subagents 的 batch_id——批次收敛由宿主把
+// F6：subagent_close 必须接受 subagent_spawn_batch 的 batch_id——批次收敛由宿主把
 // batch id 展开为全部子会话，模型侧一次调用即可收敛整批。
 func TestBrokerCloseAgentAcceptsBatchID(t *testing.T) {
 	controller := &fakeAgentSessionController{}
@@ -30,5 +30,5 @@ func TestBrokerCloseAgentAcceptsBatchID(t *testing.T) {
 		properties, _ := definition.Parameters["properties"].(map[string]interface{})
 		_, found = properties["batch_id"]
 	}
-	require.True(t, found, "close_agent must document batch_id")
+	require.True(t, found, "subagent_close must document batch_id")
 }

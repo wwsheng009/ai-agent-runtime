@@ -664,7 +664,7 @@ func applyStructuredTaskOutcome(run *TaskRunResult, output string) {
 		return
 	}
 	// Parse even when the session reported Success=false. Worker harness
-	// complete_task may fail for missing report_task_outcome / block_current_task
+	// complete_task may fail for missing team_task_report / team_task_block
 	// while the assistant still emitted a valid structured status JSON fallback.
 	// That fallback is part of the teammate contract and must recover the run.
 	outcome, err := ParseTaskOutcomeContract(output)

@@ -9,9 +9,9 @@ import (
 const (
 	// AgentTypeRoot identifies the foreground/root session node.
 	AgentTypeRoot = "root"
-	// AgentTypeChild identifies a lightweight spawn_agent child.
+	// AgentTypeChild identifies a lightweight subagent_spawn child.
 	AgentTypeChild = "child"
-	// AgentTypeTeamTeammate identifies a spawn_team teammate session.
+	// AgentTypeTeamTeammate identifies a team_spawn teammate session.
 	AgentTypeTeamTeammate = "team_teammate"
 
 	// AgentStatusActive is the default open identity state.
@@ -62,7 +62,7 @@ type AgentRecord struct {
 	EffectivePermissionMode  string   `json:"effective_permission_mode,omitempty"`
 	Status                   string   `json:"status,omitempty"`
 	// WorkspacePath 是该 agent 绑定的工作目录（子代理创建时从父代理继承，
-	// isolation=worktree 时为 worktree 路径）。落到控制面后，list_agents /
+	// isolation=worktree 时为 worktree 路径）。落到控制面后，subagent_list /
 	// 监督投影无需回读会话 metadata 即可回答「这个子代理在哪个目录工作」。
 	WorkspacePath string     `json:"workspace_path,omitempty"`
 	CreatedAt     time.Time  `json:"created_at,omitempty"`

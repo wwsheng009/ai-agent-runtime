@@ -57,7 +57,7 @@ func TestAPIWaitFeedbackSweepLoopLifecycle(t *testing.T) {
 }
 
 // parkAPIWaitFeedbackSuspension seeds one parked turn on the fixture parent with
-// a team obligation (the shape spawn_team produces), parked long enough that the
+// a team obligation (the shape team_spawn produces), parked long enough that the
 // cadence tracker is due for its first feedback pass.
 func parkAPIWaitFeedbackSuspension(t *testing.T, handler *Handler, turnID string) {
 	t.Helper()

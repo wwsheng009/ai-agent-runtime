@@ -139,7 +139,7 @@ type AgentsConfig struct {
 	MaxConcurrentQueueTimeoutMs int `yaml:"maxConcurrentQueueTimeoutMs,omitempty" json:"maxConcurrentQueueTimeoutMs,omitempty"`
 	DefaultWaitTimeoutMs        int `yaml:"defaultWaitTimeoutMs,omitempty" json:"defaultWaitTimeoutMs,omitempty"`
 	// MinWaitTimeoutMs / MaxWaitTimeoutMs bound every model-issued wait window
-	// (wait_agent, read_agent_events, and wait_team): no wait path may block
+	// (subagent_wait, subagent_events, and team_wait): no wait path may block
 	// longer than MaxWaitTimeoutMs. Timeouts outside the bounds are clamped or
 	// rejected depending on WaitTimeoutMode.
 	MinWaitTimeoutMs int `yaml:"minWaitTimeoutMs,omitempty" json:"minWaitTimeoutMs,omitempty"`
@@ -188,7 +188,7 @@ type AgentsConfig struct {
 	// (audit + resolution receipt). Non-succeeded terminal children are never
 	// auto-closed — a failed/timed-out child is evidence the parent must judge.
 	AutoCloseCompleted string `yaml:"autoCloseCompleted,omitempty" json:"autoCloseCompleted,omitempty"`
-	// ForkContextEnabled admits task context=fork on spawn_subagents batches
+	// ForkContextEnabled admits task context=fork on subagent_spawn_batch batches
 	// and additional agent-creation paths (P2-1', the DSH-borrowing plan):
 	// each fork child starts from a frozen snapshot of the parent session's
 	// completed turns and inherits the parent route (no provider/model
@@ -197,7 +197,7 @@ type AgentsConfig struct {
 	// than silently degrading to a fresh context (G4 opt-in).
 	ForkContextEnabled bool `yaml:"forkContextEnabled,omitempty" json:"forkContextEnabled,omitempty"`
 	// OutputSchemaEnabled admits the structured-receipt channel on
-	// spawn_subagents batches (P1-2'): report_schema / handoff_in task fields
+	// subagent_spawn_batch batches (P1-2'): report_schema / handoff_in task fields
 	// plus the validate-and-degrade decode path. Default false = the fields
 	// are rejected at admission and absent from the model-facing schema.
 	OutputSchemaEnabled bool `yaml:"outputSchemaEnabled,omitempty" json:"outputSchemaEnabled,omitempty"`

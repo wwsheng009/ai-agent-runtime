@@ -147,7 +147,7 @@ func NewAICLIExecTool() *AICLIExecTool {
 			},
 			"allow_nested": map[string]interface{}{
 				"type":        "boolean",
-				"description": "可选：允许根 Agent 在已有嵌套 aicli_exec 子进程中再次运行。默认 false。该参数不能允许 spawn_agent 创建的子 Agent 再启动独立 aicli。",
+				"description": "可选：允许根 Agent 在已有嵌套 aicli_exec 子进程中再次运行。默认 false。该参数不能允许 subagent_spawn 创建的子 Agent 再启动独立 aicli。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",

@@ -70,7 +70,7 @@ type apiProgressCheckParent struct {
 //     rollup / 失败清单（§16.4）；没有它，DeliverResume 只能拿到 pending=-1、
 //     status=unknown 的降级上下文。
 //     2026-10-09 修复：投影必须同时覆盖 §6.12 挂起记录里的 agent_session:/
-//     team: 义务（spawn_agent / spawn_team 的轻量义务不在 batch 表里），否则
+//     team: 义务（subagent_spawn / team_spawn 的轻量义务不在 batch 表里），否则
 //     pending_count 恒为 0，子代理运行中的 turn 会被判成 can_finalize=true。
 //     终态判定复用与 settle/wait 完全相同的 resolver（未接线时保持非终态）。
 //

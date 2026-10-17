@@ -138,7 +138,7 @@ func TestLocalReconcileReclaim_IdlePolicyComesFromAgentsConfig(t *testing.T) {
 // TestLocalRegistrySweep_PublishesReclaimEventForTerminalChild covers the other
 // automatic entry point: the projection sweep (materializeLocalAgentRegistry)
 // used to close terminal rows silently, which made an automatic eviction
-// indistinguishable from an orderly close_agent in the parent stream.
+// indistinguishable from an orderly subagent_close in the parent stream.
 func TestLocalRegistrySweep_PublishesReclaimEventForTerminalChild(t *testing.T) {
 	host, rootSession, agentStore := newLocalQuotaHarness(t, 1, 0)
 	markLocalQuotaHarnessChildTerminal(t, host)

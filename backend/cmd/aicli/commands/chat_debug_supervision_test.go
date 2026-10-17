@@ -230,7 +230,7 @@ func TestLocalSupervisionSubjectPresenceMarksMissingRunStale(t *testing.T) {
 }
 
 // P2-12 残留（N9 同族）：本地操作员入口此前只有 ack/defer/resolve，卡住的子会话
-// 只能靠模型自己去调 control_descendant。本组用例锁定 /debug supervision control
+// 只能靠模型自己去调 subagent_control。本组用例锁定 /debug supervision control
 // 与模型侧、HTTP 宿主共用同一条 durable 控制路径。
 func TestChatDebugSupervisionControlRunsDurableAction(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)

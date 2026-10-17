@@ -3,9 +3,9 @@ package toolbroker
 import "fmt"
 
 // Argument kinds for the message tools that address an existing child session
-// (send_message, followup_task, send_input).
+// (subagent_send, subagent_followup, subagent_input).
 //
-// These tools read their keys with direct type assertions too. For send_input
+// These tools read their keys with direct type assertions too. For subagent_input
 // that is not harmless: `interrupt: "true"` (a string, as models often emit for
 // boolean-looking flags) was dropped, so the call delivered a message that did
 // not interrupt the child while the caller believed it had. A `target`/`id`

@@ -37,7 +37,7 @@ func (a *Agent) agentdefDiscoverOptions() agentdef.DiscoverOptions {
 }
 
 // AgentDefinitionsSummary renders the portable agent catalog for the
-// model-visible spawn_subagents description. Discovery errors degrade to an
+// model-visible subagent_spawn_batch description. Discovery errors degrade to an
 // empty string: tool availability must never depend on filesystem state.
 func (a *Agent) AgentDefinitionsSummary() string {
 	if a == nil {

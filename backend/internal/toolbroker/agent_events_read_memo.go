@@ -39,7 +39,7 @@ type agentEventsReadRecord struct {
 }
 
 // agentEventsReadMemo remembers the last read window per caller/target cursor so
-// a repeated read_agent_events with an unchanged after_seq can be answered with
+// a repeated subagent_events with an unchanged after_seq can be answered with
 // an explicit unchanged/repeat_count signal instead of a silently identical
 // payload (plan P1-7 待补).
 type agentEventsReadMemo struct {
@@ -91,7 +91,7 @@ func (m *agentEventsReadMemo) observe(key agentEventsReadKey, latestSeq int64) (
 }
 
 // forgetTarget drops every remembered window for one target session. Hosts call
-// it after close_agent so a later run reusing the same id cannot inherit a stale
+// it after subagent_close so a later run reusing the same id cannot inherit a stale
 // repeat streak; other targets keep their own streaks.
 func (m *agentEventsReadMemo) forgetTarget(targetSessionID string) {
 	if m == nil || strings.TrimSpace(targetSessionID) == "" {

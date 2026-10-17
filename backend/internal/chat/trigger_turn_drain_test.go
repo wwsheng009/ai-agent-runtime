@@ -126,7 +126,7 @@ func TestTriggerTurnDrainConsumesMergedInstructionsExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 	h.queueTrigger(t, "trigger-1", "parent-a", "please run the first check")
 	h.queueTrigger(t, "trigger-2", "parent-b", "then run the second check")
-	// A plain send_message (trigger_turn=false) must never start a turn.
+	// A plain subagent_send (trigger_turn=false) must never start a turn.
 	plain := toolbroker.BuildAgentMailboxMessage("parent-a", h.session.ID, "just fyi", false)
 	_, _, err := h.store.AppendAgentControlMailbox(ctx, h.session.ID, plain)
 	require.NoError(t, err)
@@ -329,7 +329,7 @@ func TestTriggerTurnDrainStartsTurnAfterBusyRunEnds(t *testing.T) {
 		t.Fatal("first run did not reach the provider")
 	}
 
-	// A followup_task arrives while the child is busy.
+	// A subagent_followup arrives while the child is busy.
 	mail := toolbroker.BuildAgentMailboxMessage("parent-session", session.ID, "second task queued while busy", true)
 	mail.ID = "trigger-busy-1"
 	_, _, err = store.AppendAgentControlMailbox(ctx, session.ID, mail)

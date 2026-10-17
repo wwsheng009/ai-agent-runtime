@@ -5471,7 +5471,7 @@ func TestSessionActorOnRunFinishedFiresOncePerCompletedRun(t *testing.T) {
 }
 
 // TestSessionActor_ForeignRunTokenIsDetached pins the fix for the
-// resolve_agent_approval / answer-question failures: the broker forwards the
+// subagent_approve / answer-question failures: the broker forwards the
 // *caller's* run token into the target session's actor, and that foreign token
 // must be dropped before any state write. A token this actor minted (even a
 // stale generation) or a legacy token without an owner stays attached so the

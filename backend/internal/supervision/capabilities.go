@@ -8,7 +8,7 @@ import "strings"
 // 保持宿主中立，否则同一条通知在不同宿主读出来会成为两套事实。但 preflight /
 // digest / snapshot / CLI list 是**宣告**：宣告的必须是「这个宿主真的能执行的
 // 动作」。宿主没有 wired executor 时照抄 cancel/close，模型会去规划一个必然失败
-// 的步骤（历史症状：control_descendant 返回 "no executor configured"，父回合
+// 的步骤（历史症状：subagent_control 返回 "no executor configured"，父回合
 // 白白多跑一轮）。
 //
 // 因此口径分两层，且由同一函数计算：
@@ -23,7 +23,7 @@ import "strings"
 const (
 	// HintAcknowledgeRequiresLocalCommand is emitted when the notification would
 	// allow acknowledge/defer but this host exposes no decision channel
-	// (CLI `/debug supervision ack|defer|resolve`, model `ack_lifecycle`).
+	// (CLI `/debug supervision ack|defer|resolve`, model `subagent_ack_lifecycle`).
 	HintAcknowledgeRequiresLocalCommand = "ack_requires_local_command"
 	// HintControlRequiresActionExecutor is emitted when the notification would
 	// allow cancel/close/cancel_subtree but this host has no wired durable

@@ -22,8 +22,8 @@ import (
 // reason/note 并支持 expected_version CAS。
 
 // AgentSupervisionController is the host-side capability behind the
-// supervision_snapshot / supervision_descendants / ack_lifecycle /
-// control_descendant / read_agent_result tools. Implementations must derive the
+// supervision_snapshot / supervision_descendants / subagent_ack_lifecycle /
+// subagent_control / read_agent_result tools. Implementations must derive the
 // caller's root scope from parentSessionID and enforce that a notification or
 // result outside that scope is rejected.
 type AgentSupervisionController interface {
@@ -33,7 +33,7 @@ type AgentSupervisionController interface {
 	// (doc 6.2, read-only). It is the inspection primitive for business
 	// supervision: one call shows every child/descendant of the caller's scope
 	// with its execution status, supervision state and remediation hints, so a
-	// parent does not have to poll wait_agent row by row.
+	// parent does not have to poll subagent_wait row by row.
 	SupervisionDescendants(ctx context.Context, parentSessionID string, args SupervisionDescendantsArgs) (*supervision.Snapshot, error)
 	// AckLifecycle applies one decision (acknowledge / defer / resolve).
 	AckLifecycle(ctx context.Context, parentSessionID string, args AckLifecycleArgs) (*supervision.Notification, error)
@@ -95,7 +95,7 @@ type ReadAgentResultArgs struct {
 	MaxChars int
 }
 
-// AckLifecycleArgs is the parsed input of ack_lifecycle.
+// AckLifecycleArgs is the parsed input of subagent_ack_lifecycle.
 type AckLifecycleArgs struct {
 	NotificationID     string
 	Decision           string
@@ -107,7 +107,7 @@ type AckLifecycleArgs struct {
 	HasExpectedVersion bool
 }
 
-// ControlDescendantArgs is the parsed input of control_descendant.
+// ControlDescendantArgs is the parsed input of subagent_control.
 type ControlDescendantArgs struct {
 	NotificationID string
 	Action         string
@@ -179,7 +179,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 		{
 			Name: ToolSupervisionSnapshot,
 			Description: "Read the scoped supervision digest for this session (read-only). Returns critical_unresolved / action_required counts, the lifecycle items with their notification_id + version, the rendered text and next_seq for incremental reads. Rows whose subject no longer exists are reported as stale and need no action. " +
-				"Use this digest for lifecycle decisions (acknowledge/defer/resolve); use supervision_descendants when you need the child/descendant state matrix - do not poll wait_agent row by row. Call this before ack_lifecycle whenever a version conflict is reported.",
+				"Use this digest for lifecycle decisions (acknowledge/defer/resolve); use supervision_descendants when you need the child/descendant state matrix - do not poll subagent_wait row by row. Call this before subagent_ack_lifecycle whenever a version conflict is reported.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -201,8 +201,8 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 		{
 			Name: ToolSupervisionDescendants,
 			Description: "Read the scoped descendant state matrix (doc 6.2, read-only): one call lists the children/descendants of this session's own scope with execution_status, supervision_state (running/blocked/stalled/timed_out/orphaned/terminal), heartbeat_age_ms / progress_age_ms, action_required, recommended_action, allowed_actions and notification_id. " +
-				"Prefer this tool for supervision inspection: it returns the whole N-row matrix (how many are still running, which one is stalled, which finished) in one call, so do not poll wait_agent / list_agents row by row; repeat calls are expected and are exempt from the anti-polling advisory because they are an observation, not a blocking wait. " +
-				"Read a row as follows: action_required=true means the parent must decide; recommended_action is the host's suggested next step for that row; allowed_actions is the subset this host can actually execute (control_descendant re-validates against it); next_action explains any remediation path that was filtered out because the host has no entry point for it. " +
+				"Prefer this tool for supervision inspection: it returns the whole N-row matrix (how many are still running, which one is stalled, which finished) in one call, so do not poll subagent_wait / subagent_list row by row; repeat calls are expected and are exempt from the anti-polling advisory because they are an observation, not a blocking wait. " +
+				"Read a row as follows: action_required=true means the parent must decide; recommended_action is the host's suggested next step for that row; allowed_actions is the subset this host can actually execute (subagent_control re-validates against it); next_action explains any remediation path that was filtered out because the host has no entry point for it. " +
 				"include_results=true additionally attaches the bounded per-row result projection (result_status/result_summary/artifact_refs/error_class/finished_at); it significantly increases the output, so use it only when converging finished rows. " +
 				"Rows whose subject no longer exists are reported with the state the control plane last saw. Only rows inside this session's scope are returned; the model cannot widen the scope.",
 			Parameters: map[string]interface{}{
@@ -368,7 +368,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 			Name: ToolSubagentStatus,
 			Description: "Read the scoped subagent ledger overview (read-only): one call returns every child/descendant row of this session's own scope with execution_status, supervision_state (running/blocked/stalled/timed_out/orphaned/terminal), heartbeat_age_ms / progress_age_ms, attempt/max_attempts, deadlines, action_required, recommended_action, allowed_actions[] and notification_id, plus the ledger rollup pending_count / terminal_count / terminal_delta[]. " +
 				"Rows include running subagent batch tasks, projected live from the durable batch store, as well as terminal lifecycle notifications: a batch that is still working is never reported as an empty ledger. " +
-				"terminal_delta[] lists the rows that finished since your after_seq cursor, so pass the next_seq of your previous read to see only what changed. Use this as the inspection primitive instead of polling wait_agent row by row; repeat calls are legitimate observation and are exempt from the anti-polling advisory. " +
+				"terminal_delta[] lists the rows that finished since your after_seq cursor, so pass the next_seq of your previous read to see only what changed. Use this as the inspection primitive instead of polling subagent_wait row by row; repeat calls are legitimate observation and are exempt from the anti-polling advisory. " +
 				"An empty ledger returns next_action=finalize immediately (no empty wait); while any row may still be pending, next_action never claims you may finalize. allowed_actions[] is per row: a control action must be one of that row's values and is re-validated by subagent_control. include_results=true attaches the bounded per-row result projection (result_status/result_summary/artifact_refs/error_class/finished_at). " +
 				"Set include_digest=true to fold the scoped lifecycle digest into the same answer (critical_unresolved / action_required counts, the notification rows with their notification_id + version, the rendered text and next_seq for incremental reads); include_resolved=true additionally lists items resolved after your after_seq cursor. A digest read failure is reported as digest_error and never hides the matrix. Use the digest for lifecycle decisions with subagent_ack_lifecycle. The scope is derived from the caller's own session and cannot be widened by the model.",
 			Parameters: map[string]interface{}{
@@ -892,10 +892,10 @@ func supervisionDescendantsNextActionExcluding(snapshot *supervision.Snapshot, s
 		// auto-action（allowed_actions 只剩 inspect），计数仍因游标未推进而 >0。
 		// 旧的 "ack or close to converge" 指引会把模型推去重复 acknowledge（被
 		// 拒后失败）。改为只引导真正可行的动作：报告 + 关闭 + 推进游标。
-		return "report the finished rows to the user; already-acknowledged rows need no further acknowledge — close finished children with close_agent if they are still open, and advance after_seq=next_seq to clear terminal_unacknowledged"
+		return "report the finished rows to the user; already-acknowledged rows need no further acknowledge — close finished children with subagent_close if they are still open, and advance after_seq=next_seq to clear terminal_unacknowledged"
 	}
 	if snapshot.Summary.Running+snapshot.Summary.Blocked > 0 {
-		return "children still running: continue independent work; re-read this matrix instead of polling wait_agent"
+		return "children still running: continue independent work; re-read this matrix instead of polling subagent_wait"
 	}
 	return ""
 }
@@ -985,7 +985,7 @@ func readAgentResultSummary(payload supervision.ReadResultPayload) string {
 // Contract notes (plan AC-P2-1e):
 //   - rows keep the SnapshotItem shape, so allowed_actions[] stays per row; no
 //     top-level union is invented, because a union would hide which row may do
-//     what and control_descendant re-validates per row anyway.
+//     what and subagent_control re-validates per row anyway.
 //   - terminal_delta[] lists the rows that reached terminal *since the
 //     caller's after_seq cursor* - the same cursor interpretation the data
 //     plane already uses for terminal_unacknowledged.

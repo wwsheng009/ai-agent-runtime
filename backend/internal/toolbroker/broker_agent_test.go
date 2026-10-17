@@ -233,15 +233,15 @@ func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
 		}
 	}
 	if spawnDef == nil {
-		t.Fatal("spawn_agent definition missing")
+		t.Fatal("subagent_spawn definition missing")
 	}
 	properties, ok := spawnDef["properties"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("spawn_agent properties missing: %#v", spawnDef)
+		t.Fatalf("subagent_spawn properties missing: %#v", spawnDef)
 	}
 	for _, key := range []string{"difficulty", "difficulty_rationale", "provider", "model", "reasoning_effort", "thinking_effort", "permission_mode", "read_only", "completion_requirement", "completionRequirement", "isolation"} {
 		if _, ok := properties[key]; !ok {
-			t.Fatalf("expected spawn_agent property %q in %#v", key, properties)
+			t.Fatalf("expected subagent_spawn property %q in %#v", key, properties)
 		}
 	}
 	completionRequirement, ok := properties["completion_requirement"].(map[string]interface{})
@@ -292,20 +292,20 @@ func TestBroker_Definitions_ExposeResolveAgentApprovalSchema(t *testing.T) {
 		}
 	}
 	if approveDef == nil {
-		t.Fatal("resolve_agent_approval definition missing")
+		t.Fatal("subagent_approve definition missing")
 	}
 	properties, ok := approveDef["properties"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("resolve_agent_approval properties missing: %#v", approveDef)
+		t.Fatalf("subagent_approve properties missing: %#v", approveDef)
 	}
 	for _, key := range []string{"id", "session_id", "request_id", "allow", "patched_args"} {
 		if _, ok := properties[key]; !ok {
-			t.Fatalf("expected resolve_agent_approval property %q in %#v", key, properties)
+			t.Fatalf("expected subagent_approve property %q in %#v", key, properties)
 		}
 	}
 	required, ok := approveDef["required"].([]string)
 	if !ok || strings.Join(required, ",") != "request_id,allow" {
-		t.Fatalf("unexpected resolve_agent_approval required fields: %#v", approveDef["required"])
+		t.Fatalf("unexpected subagent_approve required fields: %#v", approveDef["required"])
 	}
 }
 
@@ -420,7 +420,7 @@ func TestBroker_Execute_SpawnAgentParsesRouteHints(t *testing.T) {
 		"permission_mode":      "bypass_permissions",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.Difficulty != "hard" ||
 		controller.lastSpawn.DifficultyRationale != "touches provider policy" ||
@@ -449,7 +449,7 @@ func TestBroker_ExecuteToolCall_SpawnAgentInjectsParentToolCallID(t *testing.T) 
 		Args: map[string]interface{}{"message": "inspect"},
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.ParentToolCallID != "call-spawn-42" {
 		t.Fatalf("ParentToolCallID = %q, want call-spawn-42", controller.lastSpawn.ParentToolCallID)
@@ -457,7 +457,7 @@ func TestBroker_ExecuteToolCall_SpawnAgentInjectsParentToolCallID(t *testing.T) 
 
 	// 旧入口（无 tool call id）不得伪造归位信息。
 	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"}); err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.ParentToolCallID != "" {
 		t.Fatalf("ParentToolCallID = %q, want empty for legacy Execute", controller.lastSpawn.ParentToolCallID)
@@ -471,7 +471,7 @@ func TestBroker_Execute_SpawnAgentInheritsPermissionModeFromRunMeta(t *testing.T
 
 	_, _, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.PermissionMode != "bypass_permissions" {
 		t.Fatalf("expected inherited permission_mode, got %#v", controller.lastSpawn)
@@ -513,7 +513,7 @@ func TestBroker_Execute_SpawnAgentDoesNotInheritCompletionRequirementFromRunMeta
 
 	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.CompletionRequirement != "" {
 		t.Fatalf("ordinary child must not inherit completion_requirement, got %#v", controller.lastSpawn)
@@ -551,7 +551,7 @@ func TestBroker_Execute_SpawnAgentParsesIsolation(t *testing.T) {
 		"isolation": " WorkTree ",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.Isolation != "worktree" {
 		t.Fatalf("expected isolation worktree, got %#v", controller.lastSpawn)
@@ -573,7 +573,7 @@ func TestBroker_Execute_SpawnAgentDefaultsIsolationNone(t *testing.T) {
 		"message": "default isolation",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.Isolation != "" {
 		t.Fatalf("expected empty isolation arg (none by default), got %#v", controller.lastSpawn)
@@ -611,7 +611,7 @@ func TestBroker_Execute_SpawnAgentAppliesAgentdefDefaults(t *testing.T) {
 		"agent_type": "explore",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if !controller.lastSpawn.ReadOnly {
 		t.Fatalf("expected explore agentdef read_only default, got %#v", controller.lastSpawn)
@@ -636,7 +636,7 @@ func TestBroker_Execute_SpawnAgentExplicitArgsWinOverAgentdef(t *testing.T) {
 		"model":           "explicit-model",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.ReadOnly {
 		t.Fatalf("expected explicit read_only=false to win, got %#v", controller.lastSpawn)
@@ -659,7 +659,7 @@ func TestBroker_Execute_ReadOnlySpawnDefaultsToPlanMode(t *testing.T) {
 		"read_only": true,
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if !controller.lastSpawn.ReadOnly || controller.lastSpawn.PermissionMode != "plan" {
 		t.Fatalf("expected read-only plan child, got %#v", controller.lastSpawn)
@@ -694,7 +694,7 @@ func TestBroker_Execute_SpawnAgentUsesThinkingEffortAlias(t *testing.T) {
 		"thinking_effort": "medium",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.ReasoningEffort != "medium" || controller.lastSpawn.ThinkingEffort != "medium" {
 		t.Fatalf("expected thinking_effort alias, got %#v", controller.lastSpawn)
@@ -918,7 +918,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"fork_context": true,
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastParent != "parent-session" {
 		t.Fatalf("unexpected parent session: %s", controller.lastParent)
@@ -935,14 +935,14 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"include_closed": true,
 	})
 	if err != nil {
-		t.Fatalf("list_agents failed: %v", err)
+		t.Fatalf("subagent_list failed: %v", err)
 	}
 	if controller.lastParent != "parent-session" || controller.lastList.PathPrefix != "/root" || !controller.lastList.IncludeClosed {
-		t.Fatalf("unexpected list_agents args: parent=%q args=%#v", controller.lastParent, controller.lastList)
+		t.Fatalf("unexpected subagent_list args: parent=%q args=%#v", controller.lastParent, controller.lastList)
 	}
 	listResult, ok := rawList.(*AgentListResult)
 	if !ok || listResult.Count != 1 {
-		t.Fatalf("unexpected list_agents result/meta: %#v %#v", rawList, meta)
+		t.Fatalf("unexpected subagent_list result/meta: %#v %#v", rawList, meta)
 	}
 
 	// The scope is host-derived: a model-supplied parent_session_id is ignored
@@ -952,7 +952,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"parent_session_id": "other-root-session",
 	})
 	if err != nil {
-		t.Fatalf("list_agents with foreign scope failed: %v", err)
+		t.Fatalf("subagent_list with foreign scope failed: %v", err)
 	}
 	if controller.lastParent != "parent-session" {
 		t.Fatalf("model-supplied parent_session_id changed the scope: parent=%q", controller.lastParent)
@@ -969,14 +969,14 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"message": "note only",
 	})
 	if err != nil {
-		t.Fatalf("send_message failed: %v", err)
+		t.Fatalf("subagent_send failed: %v", err)
 	}
 	if controller.lastParent != "parent-session" || controller.lastMsg.SessionID != "child-1" || controller.lastMsg.Message != "note only" {
-		t.Fatalf("unexpected send_message args: parent=%q args=%#v", controller.lastParent, controller.lastMsg)
+		t.Fatalf("unexpected subagent_send args: parent=%q args=%#v", controller.lastParent, controller.lastMsg)
 	}
 	msgResult, ok := rawMsg.(*AgentMessageResult)
 	if !ok || !msgResult.Delivered || msgResult.Triggered || meta["delivered"] != true {
-		t.Fatalf("unexpected send_message result/meta: %#v %#v", rawMsg, meta)
+		t.Fatalf("unexpected subagent_send result/meta: %#v %#v", rawMsg, meta)
 	}
 
 	rawFollow, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentFollowup, map[string]interface{}{
@@ -984,14 +984,14 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"message": "new task",
 	})
 	if err != nil {
-		t.Fatalf("followup_task failed: %v", err)
+		t.Fatalf("subagent_followup failed: %v", err)
 	}
 	if controller.lastParent != "parent-session" || controller.lastFollow.SessionID != "child-1" || controller.lastFollow.Message != "new task" {
-		t.Fatalf("unexpected followup_task args: parent=%q args=%#v", controller.lastParent, controller.lastFollow)
+		t.Fatalf("unexpected subagent_followup args: parent=%q args=%#v", controller.lastParent, controller.lastFollow)
 	}
 	followResult, ok := rawFollow.(*AgentMessageResult)
 	if !ok || !followResult.Delivered || !followResult.Triggered || meta["triggered"] != true {
-		t.Fatalf("unexpected followup_task result/meta: %#v %#v", rawFollow, meta)
+		t.Fatalf("unexpected subagent_followup result/meta: %#v %#v", rawFollow, meta)
 	}
 
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentInput, map[string]interface{}{
@@ -1000,10 +1000,10 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"interrupt": true,
 	})
 	if err != nil {
-		t.Fatalf("send_input failed: %v", err)
+		t.Fatalf("subagent_input failed: %v", err)
 	}
 	if controller.lastInput.ID != "child-1" || controller.lastInput.Message != "continue" || controller.lastInput.Interrupt == nil || !*controller.lastInput.Interrupt {
-		t.Fatalf("unexpected send_input args: %#v", controller.lastInput)
+		t.Fatalf("unexpected subagent_input args: %#v", controller.lastInput)
 	}
 
 	rawApprove, meta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentApprove, map[string]interface{}{
@@ -1015,14 +1015,14 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("resolve_agent_approval failed: %v", err)
+		t.Fatalf("subagent_approve failed: %v", err)
 	}
 	if controller.lastApprove.ID != "child-1" || controller.lastApprove.RequestID != "approval-1" || !controller.lastApprove.Allow || string(controller.lastApprove.PatchedArgs) != `{"command":"git status --short --branch"}` {
-		t.Fatalf("unexpected resolve_agent_approval args: %#v", controller.lastApprove)
+		t.Fatalf("unexpected subagent_approve args: %#v", controller.lastApprove)
 	}
 	approvalResult, ok := rawApprove.(*AgentApprovalResult)
 	if !ok || approvalResult == nil || !approvalResult.Resolved || !approvalResult.Allowed || meta["resolved"] != true {
-		t.Fatalf("unexpected resolve_agent_approval result/meta: %#v %#v", rawApprove, meta)
+		t.Fatalf("unexpected subagent_approve result/meta: %#v %#v", rawApprove, meta)
 	}
 
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentWait, map[string]interface{}{
@@ -1030,7 +1030,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"timeout_ms": float64((5 * time.Second).Milliseconds()),
 	})
 	if err != nil {
-		t.Fatalf("wait_agent failed: %v", err)
+		t.Fatalf("subagent_wait failed: %v", err)
 	}
 	if controller.lastWait.ID != "child-1" || controller.lastWait.TimeoutMs != 5000 {
 		t.Fatalf("unexpected wait args: %#v", controller.lastWait)
@@ -1038,7 +1038,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentClose, map[string]interface{}{"id": "child-1"})
 	if err != nil {
-		t.Fatalf("close_agent failed: %v", err)
+		t.Fatalf("subagent_close failed: %v", err)
 	}
 	if controller.lastClose != "child-1" {
 		t.Fatalf("unexpected close id: %s", controller.lastClose)
@@ -1046,7 +1046,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentClose, map[string]interface{}{"id": "/root/child-1"})
 	if err != nil {
-		t.Fatalf("close_agent path failed: %v", err)
+		t.Fatalf("subagent_close path failed: %v", err)
 	}
 	if controller.lastClose != "/root/child-1" {
 		t.Fatalf("unexpected close path: %s", controller.lastClose)
@@ -1054,7 +1054,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 
 	_, _, err = broker.Execute(context.Background(), "parent-session", ToolSubagentResume, map[string]interface{}{"id": "child-1"})
 	if err != nil {
-		t.Fatalf("resume_agent failed: %v", err)
+		t.Fatalf("subagent_resume failed: %v", err)
 	}
 	if controller.lastResume != "child-1" {
 		t.Fatalf("unexpected resume id: %s", controller.lastResume)
@@ -1066,7 +1066,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"keep":  true,
 	})
 	if err != nil {
-		t.Fatalf("apply_agent_worktree failed: %v", err)
+		t.Fatalf("subagent_apply_worktree failed: %v", err)
 	}
 	if controller.lastApply.ID != "child-1" || !controller.lastApply.Keep || len(controller.lastApply.Paths) != 1 || controller.lastApply.Paths[0] != "src/a.go" {
 		t.Fatalf("unexpected apply args: %#v", controller.lastApply)
@@ -1080,7 +1080,7 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 		"session_id": "child-2",
 	})
 	if err != nil {
-		t.Fatalf("discard_agent_worktree failed: %v", err)
+		t.Fatalf("subagent_discard_worktree failed: %v", err)
 	}
 	if controller.lastDiscard.SessionID != "child-2" {
 		t.Fatalf("unexpected discard args: %#v", controller.lastDiscard)
@@ -1139,7 +1139,7 @@ func TestBroker_Execute_WaitAgentAcceptsBatchIDs(t *testing.T) {
 		"timeout_ms":  1000,
 	})
 	if err != nil {
-		t.Fatalf("wait_agent failed: %v", err)
+		t.Fatalf("subagent_wait failed: %v", err)
 	}
 	if len(controller.lastWait.IDs) != 2 || controller.lastWait.IDs[0] != "child-1" || controller.lastWait.IDs[1] != "child-2" {
 		t.Fatalf("unexpected batch ids: %#v", controller.lastWait)
@@ -1192,7 +1192,7 @@ func TestAgentWaitResultMarshalJSONAvoidsDuplicateAgentOutputs(t *testing.T) {
 }
 
 // TestFinalizeAgentWaitResultMissingTargetGuidesToReceiptTaskID 钉住 2026-09-26
-// 真机 E2E 的修复：wait_agent 收到不存在的目标（典型来源：把派发回执的 batch_id
+// 真机 E2E 的修复：subagent_wait 收到不存在的目标（典型来源：把派发回执的 batch_id
 // 当 id）不得再回 "consume_ready_outputs"（既没有输出也没有可寻址目标），必须
 // 指向"从回执 tasks[] 取 task_id"这条可执行路径；真正存在的子会话保持原指引。
 func TestFinalizeAgentWaitResultMissingTargetGuidesToReceiptTaskID(t *testing.T) {
@@ -1283,7 +1283,7 @@ func TestBroker_Execute_WaitAgentWithoutTargetWaitsParentMailbox(t *testing.T) {
 		"after_seq":  12,
 	})
 	if err != nil {
-		t.Fatalf("wait_agent failed: %v", err)
+		t.Fatalf("subagent_wait failed: %v", err)
 	}
 	if controller.lastWait.SessionID != "parent-session" || !controller.lastWait.MailboxOnly || controller.lastWait.AfterSeq != 12 {
 		t.Fatalf("unexpected mailbox wait args: %#v", controller.lastWait)
@@ -1309,7 +1309,7 @@ func TestBroker_Execute_FollowupTaskRejectsCurrentSession(t *testing.T) {
 		t.Fatalf("expected current/root rejection, got %v", err)
 	}
 	if controller.lastFollow.Message != "" {
-		t.Fatalf("expected controller not to receive followup_task, got %#v", controller.lastFollow)
+		t.Fatalf("expected controller not to receive subagent_followup, got %#v", controller.lastFollow)
 	}
 }
 
@@ -1348,17 +1348,17 @@ func TestBroker_Execute_ReadAgentEventsDelegatesToController(t *testing.T) {
 		"wait_ms":   float64(250),
 	})
 	if err != nil {
-		t.Fatalf("read_agent_events failed: %v", err)
+		t.Fatalf("subagent_events failed: %v", err)
 	}
 	if controller.lastRead.ID != "child-1" || controller.lastRead.AfterSeq != 5 || controller.lastRead.Limit != 10 || controller.lastRead.WaitMs != 250 {
-		t.Fatalf("unexpected read_agent_events args: %#v", controller.lastRead)
+		t.Fatalf("unexpected subagent_events args: %#v", controller.lastRead)
 	}
 	result, ok := rawResult.(*AgentEventsResult)
 	if !ok || result == nil || result.Count != 1 || result.LatestSeq != 7 || result.NextAction == "" {
-		t.Fatalf("unexpected read_agent_events result: %#v", rawResult)
+		t.Fatalf("unexpected subagent_events result: %#v", rawResult)
 	}
 	if meta["latest_seq"] != int64(7) && meta["latest_seq"] != 7 {
-		t.Fatalf("unexpected read_agent_events meta: %#v", meta)
+		t.Fatalf("unexpected subagent_events meta: %#v", meta)
 	}
 }
 
@@ -1371,7 +1371,7 @@ func TestBroker_Execute_ReadAgentEventsAppliesToolProgressView(t *testing.T) {
 		"view": "tool_progress",
 	})
 	if err != nil {
-		t.Fatalf("read_agent_events failed: %v", err)
+		t.Fatalf("subagent_events failed: %v", err)
 	}
 	// The broker now performs the tool_progress projection itself: the host read
 	// must stay raw (view=all) so the bounded scan can see past reasoning-only
@@ -1396,7 +1396,7 @@ func TestBroker_Execute_ReadAgentEventsWithoutTargetReadsParentMailbox(t *testin
 		"wait_ms":   float64(250),
 	})
 	if err != nil {
-		t.Fatalf("read_agent_events failed: %v", err)
+		t.Fatalf("subagent_events failed: %v", err)
 	}
 	if controller.lastRead.SessionID != "parent-session" || !controller.lastRead.MailboxOnly || controller.lastRead.AfterSeq != 5 || controller.lastRead.Limit != 10 || controller.lastRead.WaitMs != 250 {
 		t.Fatalf("unexpected parent mailbox read args: %#v", controller.lastRead)
@@ -1426,20 +1426,20 @@ func TestBroker_Execute_AgentToolsRejectTeamTeammateIDs(t *testing.T) {
 		"id": "member-1",
 	})
 	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
-		t.Fatalf("expected wait_agent teammate id error, got %v", err)
+		t.Fatalf("expected subagent_wait teammate id error, got %v", err)
 	}
 	if controller.lastWait.ID != "" {
-		t.Fatalf("expected wait_agent not to reach controller, got %#v", controller.lastWait)
+		t.Fatalf("expected subagent_wait not to reach controller, got %#v", controller.lastWait)
 	}
 
 	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"id": "member-1",
 	})
 	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
-		t.Fatalf("expected read_agent_events teammate id error, got %v", err)
+		t.Fatalf("expected subagent_events teammate id error, got %v", err)
 	}
 	if controller.lastRead.ID != "" {
-		t.Fatalf("expected read_agent_events not to reach controller, got %#v", controller.lastRead)
+		t.Fatalf("expected subagent_events not to reach controller, got %#v", controller.lastRead)
 	}
 
 	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentApprove, map[string]interface{}{
@@ -1448,30 +1448,30 @@ func TestBroker_Execute_AgentToolsRejectTeamTeammateIDs(t *testing.T) {
 		"allow":      true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
-		t.Fatalf("expected resolve_agent_approval teammate id error, got %v", err)
+		t.Fatalf("expected subagent_approve teammate id error, got %v", err)
 	}
 	if controller.lastApprove.ID != "" {
-		t.Fatalf("expected resolve_agent_approval not to reach controller, got %#v", controller.lastApprove)
+		t.Fatalf("expected subagent_approve not to reach controller, got %#v", controller.lastApprove)
 	}
 
 	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentApplyWorktree, map[string]interface{}{
 		"id": "member-1",
 	})
 	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
-		t.Fatalf("expected apply_agent_worktree teammate id error, got %v", err)
+		t.Fatalf("expected subagent_apply_worktree teammate id error, got %v", err)
 	}
 	if controller.lastApply.ID != "" || controller.lastApply.SessionID != "" {
-		t.Fatalf("expected apply_agent_worktree not to reach controller, got %#v", controller.lastApply)
+		t.Fatalf("expected subagent_apply_worktree not to reach controller, got %#v", controller.lastApply)
 	}
 
 	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentDiscardWorktree, map[string]interface{}{
 		"id": "member-1",
 	})
 	if err == nil || !strings.Contains(err.Error(), "team_spawn teammate id") {
-		t.Fatalf("expected discard_agent_worktree teammate id error, got %v", err)
+		t.Fatalf("expected subagent_discard_worktree teammate id error, got %v", err)
 	}
 	if controller.lastDiscard.ID != "" || controller.lastDiscard.SessionID != "" {
-		t.Fatalf("expected discard_agent_worktree not to reach controller, got %#v", controller.lastDiscard)
+		t.Fatalf("expected subagent_discard_worktree not to reach controller, got %#v", controller.lastDiscard)
 	}
 }
 
@@ -1508,20 +1508,20 @@ func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeamm
 		"id": "agent-a",
 	})
 	if err != nil {
-		t.Fatalf("wait_agent should prefer current spawn_agent child over stale teammate id: %v", err)
+		t.Fatalf("subagent_wait should prefer current subagent_spawn child over stale teammate id: %v", err)
 	}
 	if controller.lastWait.ID != "agent-a" {
-		t.Fatalf("expected wait_agent to reach controller with child id, got %#v", controller.lastWait)
+		t.Fatalf("expected subagent_wait to reach controller with child id, got %#v", controller.lastWait)
 	}
 
 	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentEvents, map[string]interface{}{
 		"id": "/root/agent-a",
 	})
 	if err != nil {
-		t.Fatalf("read_agent_events should prefer current spawn_agent path over stale teammate id: %v", err)
+		t.Fatalf("subagent_events should prefer current subagent_spawn path over stale teammate id: %v", err)
 	}
 	if controller.lastRead.ID != "/root/agent-a" {
-		t.Fatalf("expected read_agent_events to reach controller with child path, got %#v", controller.lastRead)
+		t.Fatalf("expected subagent_events to reach controller with child path, got %#v", controller.lastRead)
 	}
 
 	_, _, err = broker.Execute(ctx, "parent-session", ToolSubagentApprove, map[string]interface{}{
@@ -1530,10 +1530,10 @@ func TestBroker_Execute_AgentToolsPreferCurrentSpawnAgentWhenIDCollidesWithTeamm
 		"allow":      false,
 	})
 	if err != nil {
-		t.Fatalf("resolve_agent_approval should prefer current spawn_agent child over stale teammate id: %v", err)
+		t.Fatalf("subagent_approve should prefer current subagent_spawn child over stale teammate id: %v", err)
 	}
 	if controller.lastApprove.ID != "agent-a" {
-		t.Fatalf("expected resolve_agent_approval to reach controller with child id, got %#v", controller.lastApprove)
+		t.Fatalf("expected subagent_approve to reach controller with child id, got %#v", controller.lastApprove)
 	}
 }
 

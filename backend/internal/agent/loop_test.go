@@ -3642,7 +3642,7 @@ func TestReActLoop_RunWithSession_PersistsHistoryAcrossRuns(t *testing.T) {
 	}
 }
 
-// C4-1: spawn_subagents 只有异步语义。本用例固定循环侧契约：工具回执是 batch
+// C4-1: subagent_spawn_batch 只有异步语义。本用例固定循环侧契约：工具回执是 batch
 // 句柄（父 turn 不阻塞），子任务经 scheduler 真跑，终态经 lifecycle 投影异步到达
 // 且 ExecutionMode 恒为 background。子报告回到父会话由 resume 路径负责，不在本
 // 用例范围。
@@ -5459,7 +5459,7 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 			MaxSteps:     3,
 			SystemPrompt: "You are a helpful assistant.",
 			Options: map[string]interface{}{
-				"read_only_source": "spawn_subagents.read_only",
+				"read_only_source": "subagent_spawn_batch.read_only",
 			},
 		},
 		skillRouter: &skill.Router{},
@@ -5529,7 +5529,7 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 	assert.Contains(t, result.Observations[0].Error, "read-only policy blocks write-like tool")
 	assert.Contains(t, deniedPolicies, "read_only")
 	assert.Contains(t, deniedCodes, string(runtimeerrors.ErrAgentReadOnly))
-	assert.Contains(t, deniedSources, "spawn_subagents.read_only")
+	assert.Contains(t, deniedSources, "subagent_spawn_batch.read_only")
 	assert.Contains(t, deniedOverridable, false)
 	require.NotEmpty(t, completedOutcomes)
 	assert.Contains(t, completedOutcomes, "failed")
@@ -5537,7 +5537,7 @@ func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {
 	effectiveSurface, ok := provider.requests[0].Metadata["effective_tool_surface"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, true, effectiveSurface["read_only"])
-	assert.Equal(t, "spawn_subagents.read_only", effectiveSurface["policy_source"])
+	assert.Equal(t, "subagent_spawn_batch.read_only", effectiveSurface["policy_source"])
 	assert.Contains(t, effectiveSurface["blocked"], "write_file")
 
 	tools, err := loop.getAvailableTools(context.Background(), "write file", nil)
@@ -6039,7 +6039,7 @@ func TestSubagentScheduler_ReadOnlyFiltersWriteLikeTools(t *testing.T) {
 	assert.True(t, prepared[0].ReadOnly)
 	assert.Equal(t, []string{"read_file", "git_log"}, prepared[0].ToolsWhitelist)
 	assert.Equal(t, []string{"write_file", "apply_patch"}, prepared[0].ReadOnlyFilteredTools)
-	assert.Equal(t, "spawn_subagents.read_only", prepared[0].ReadOnlySource)
+	assert.Equal(t, "subagent_spawn_batch.read_only", prepared[0].ReadOnlySource)
 
 	readers, writers, err := scheduler.partitionTasks(prepared)
 	require.NoError(t, err)

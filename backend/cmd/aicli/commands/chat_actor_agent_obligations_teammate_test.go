@@ -35,7 +35,7 @@ func TestInFlightLocalChildSessionsExcludesProfiledTeammates(t *testing.T) {
 		Status: agentcontrol.AgentStatusActive,
 	})
 
-	// A real spawn_agent child: must stay in the in-flight list.
+	// A real subagent_spawn child: must stay in the in-flight list.
 	seed(agentcontrol.AgentRecord{
 		AgentID: "child-1", SessionID: "child-1", RootSessionID: root,
 		AgentPath: "/root/child-1", Depth: 1, AgentType: "general",
@@ -60,5 +60,5 @@ func TestInFlightLocalChildSessionsExcludesProfiledTeammates(t *testing.T) {
 
 	inFlight := host.inFlightLocalChildSessions(ctx, root)
 	require.Equal(t, []string{"child-1"}, inFlight,
-		"only the spawn_agent child is in flight; teammates are owned by the Team orchestrator")
+		"only the subagent_spawn child is in flight; teammates are owned by the Team orchestrator")
 }

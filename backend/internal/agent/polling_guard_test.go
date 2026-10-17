@@ -22,7 +22,7 @@ func waitAgentCall(id, timeoutMs string) types.ToolCall {
 	}
 }
 
-// waitAgentResults builds one executed wait_agent batch: the requested window is
+// waitAgentResults builds one executed subagent_wait batch: the requested window is
 // deliberately separate from the waited_ms the host actually reports, mirroring
 // the production clamp (a 40m request can complete in 2m).
 func waitAgentResults(timeoutMs, waitedMs string) []toolExecutionResult {
@@ -90,7 +90,7 @@ func TestPollingBackoffTracker_SupervisionInspectIsNotPolling(t *testing.T) {
 		require.False(t, obs.EmitNotice)
 	}
 
-	// The brake itself is unchanged: a wait_agent streak still crosses the
+	// The brake itself is unchanged: a subagent_wait streak still crosses the
 	// threshold after the inspection reset.
 	for i := 1; i <= PollingBackoffNoticeThreshold; i++ {
 		obs := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
@@ -270,7 +270,7 @@ func TestPollingBackoffTracker_DisabledWithNegativeThreshold(t *testing.T) {
 }
 
 func TestPollingBackoffAdvisory_ReminderKindWiring(t *testing.T) {
-	advisory := pollingBackoffAdvisory([]string{"wait_agent", "wait_agent"}, 3)
+	advisory := pollingBackoffAdvisory([]string{"subagent_wait", "subagent_wait"}, 3)
 	require.NotEmpty(t, advisory)
 	require.Equal(t, ReminderKindPollingBackoff, inferAdvisoryReminderKind(advisory))
 	require.Equal(t, ReminderKindPollingBackoff, NormalizeReminderKind(ReminderKindPollingBackoff))
@@ -278,7 +278,7 @@ func TestPollingBackoffAdvisory_ReminderKindWiring(t *testing.T) {
 }
 
 // TestReActLoop_InjectsPollingBackoffAdvisoryWithoutStopping is the loop-level
-// contract for P1-7: identical repeated wait_agent calls stay exempt from the
+// contract for P1-7: identical repeated subagent_wait calls stay exempt from the
 // doom loop, receive non-blocking backoff guidance, and emit the product event
 // once per streak. The event is measured from executed results, not requested
 // windows.

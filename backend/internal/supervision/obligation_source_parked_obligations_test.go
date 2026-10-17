@@ -10,7 +10,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
-// 2026-10-09 真机回归：spawn_agent 轻量子会话是 agent_session: 义务，只存在于
+// 2026-10-09 真机回归：subagent_spawn 轻量子会话是 agent_session: 义务，只存在于
 // §6.12 挂起记录里。只按 batch 表投影会让 resume 上下文输出
 // "obligations: total=0 pending=0 can_finalize=true"，在子代理仍在运行时宣告
 // "所有 obligation 均已终态"（wait_feedback 唤醒 episode）。本组用例钉住修复：

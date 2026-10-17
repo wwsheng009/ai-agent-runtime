@@ -182,7 +182,7 @@ func (h *Handler) buildSessionLoopConfigFor(
 	// 未装配 supervision store 时为 nil——记录保持挂起（保守方向），批量义务
 	// 的结清规则不变。
 	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
-	// §6.12 扩展：spawn_team 的 team: 义务同样需要 run 末的 durable 判读器
+	// §6.12 扩展：team_spawn 的 team: 义务同样需要 run 末的 durable 判读器
 	// （team store 终态）；未接线时 team 义务保持保守不清账。
 	loopConfig.TeamObligations = h.teamObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。child 标记（agent_type / depth /

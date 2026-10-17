@@ -9,10 +9,10 @@ import (
 // consecutive no-progress active wait segments on one parent turn (design
 // §16.2 成本口径："连续 active wait 超过 N 次且无进展 ⇒ 提示模型改用挂起").
 //
-// A "segment" is one wait_agent observation window. Progress means the ledger
+// A "segment" is one subagent_wait observation window. Progress means the ledger
 // reported at least one terminal_delta during the segment. Once the budget is
 // spent the host must stop opening new active windows for that turn and steer
-// the model to the suspension path instead: the design keeps wait_agent itself
+// the model to the suspension path instead: the design keeps subagent_wait itself
 // from parking a turn, so the enforcement is "no more active waiting" plus
 // next_action=suspend — a parent that then tries to finish is caught by I1,
 // which converts the premature finalize into a turn suspension.

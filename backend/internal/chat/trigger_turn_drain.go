@@ -20,13 +20,13 @@ import (
 // 失败不写标记，下次 run 结束/resume 会重试。
 const (
 	// EventTriggerTurnConsumed 记录一次 drain 已消费的 trigger_turn 消息；
-	// 它同时是幂等账本的持久化标记，父侧 read_agent_events 可见。
+	// 它同时是幂等账本的持久化标记，父侧 subagent_events 可见。
 	EventTriggerTurnConsumed = "agent.trigger_turn.consumed"
 	// EventTriggerTurnDropped 记录被限流/环保护拒绝的 drain，指令留在
 	// mailbox（不静默丢弃），由父侧 digest 提示。
 	EventTriggerTurnDropped = "agent.trigger_turn.dropped"
 	// EventMailboxDelivery 是单发指令投递审计事件（P0-3a 改动 4），写在
-	// 发起方会话事件流里，供 read_mailbox_digest / /debug 观察。
+	// 发起方会话事件流里，供 team_mailbox / /debug 观察。
 	EventMailboxDelivery = "mailbox_delivery"
 
 	// TriggerTurnDrainMinInterval 是同一 child 自动触发 turn 的间隔下限
@@ -42,8 +42,8 @@ const (
 )
 
 // MailboxMessageRequestsTriggerTurn reports whether a mailbox message carries
-// the trigger_turn=true flag written by a busy followup_task /
-// send_input(interrupt=false) delivery.
+// the trigger_turn=true flag written by a busy subagent_followup /
+// subagent_input(interrupt=false) delivery.
 func MailboxMessageRequestsTriggerTurn(message team.MailMessage) bool {
 	if message.Metadata == nil {
 		return false
@@ -254,7 +254,7 @@ func buildTriggerTurnPrompt(messages []team.MailMessage) string {
 }
 
 // publishTriggerTurnConsumed writes the durable idempotency marker and the
-// collaboration event the parent can read via read_agent_events.
+// collaboration event the parent can read via subagent_events.
 func (a *SessionActor) publishTriggerTurnConsumed(messages []team.MailMessage, consecutive, promptChars int) {
 	ids, highWater := triggerTurnMessageIdentity(messages)
 	a.publish(runtimeevents.Event{

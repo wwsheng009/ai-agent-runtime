@@ -1,5 +1,5 @@
 // Package subagentbatch defines the durable Batch/Task model, state machine
-// and storage contract for asynchronous spawn_subagents background batches.
+// and storage contract for asynchronous subagent_spawn_batch background batches.
 //
 // This package is host-neutral: it has no dependency on the agent runtime, so
 // the same durable lifecycle can be driven by an in-process worker, an
@@ -30,7 +30,7 @@ type ExecutionMode string
 const (
 	// ExecutionModeWait is deprecated (P3 / C4-1). The constant is kept so
 	// legacy persisted rows and old callers still parse, but it no longer
-	// selects an execution path: spawn_subagents never blocks the parent turn
+	// selects an execution path: subagent_spawn_batch never blocks the parent turn
 	// inline, so every dispatch is asynchronous.
 	//
 	// Deprecated: the parent tool call no longer waits for the batch.
@@ -66,7 +66,7 @@ func LegacyExecutionModeNotice(value string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(value))
 	switch trimmed {
 	case "wait", "sync":
-		return fmt.Sprintf("execution_mode=%q is deprecated and no longer blocks: spawn_subagents always dispatches a background batch and returns a handle, and lifecycle updates arrive through supervision resume", trimmed)
+		return fmt.Sprintf("execution_mode=%q is deprecated and no longer blocks: subagent_spawn_batch always dispatches a background batch and returns a handle, and lifecycle updates arrive through supervision resume", trimmed)
 	default:
 		return ""
 	}

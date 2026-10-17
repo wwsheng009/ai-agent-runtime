@@ -67,9 +67,9 @@ type SubagentStatsQuery struct {
 type SubagentStat struct {
 	SubagentID      string `json:"subagent_id"`
 	ParentSessionID string `json:"parent_session_id"`
-	// BatchID 是派发批次维度（v8）：同一父会话的多次 spawn_subagents 会复用
+	// BatchID 是派发批次维度（v8）：同一父会话的多次 subagent_spawn_batch 会复用
 	// 合成 id（subagent_1…），批次维度保证两次独立运行各自成行（空串 = 历史行
-	// 或非批次 spawn_agent）。
+	// 或非批次 subagent_spawn）。
 	BatchID          string `json:"batch_id,omitempty"`
 	ChildSessionID   string `json:"child_session_id,omitempty"`
 	Role             string `json:"role,omitempty"`

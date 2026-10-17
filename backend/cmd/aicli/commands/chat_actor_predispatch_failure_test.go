@@ -15,7 +15,7 @@ const localPreDispatchParent = "local-predispatch-parent"
 
 // TestLocalWaitAgentTaskIDProducesPreDispatchFailureObservation 钉住 doc1 §7.10
 // 新遗留① 在 CLI 宿主的镜像：派发前失败（如 single-writer 拒绝）的终态任务没有、
-// 也永远不会有 child_session_id，`wait_agent(task_id)` 必须给出可读的失败观测
+// 也永远不会有 child_session_id，`subagent_wait(task_id)` 必须给出可读的失败观测
 // （stopped + 错误分类 + 任务身份），而不是让模型 "retry shortly"。
 func TestLocalWaitAgentTaskIDProducesPreDispatchFailureObservation(t *testing.T) {
 	ctx := context.Background()

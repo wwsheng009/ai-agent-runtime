@@ -56,8 +56,8 @@ func newAPITaskIdentityFixture(t *testing.T, withBinding bool) (*sessionAgentCon
 }
 
 // TestResolveTargetSessionIDMapsTaskToChildSession 钉住 G4/H7 的解析入口：派发回执
-// 只给 task id，运行期必须能把它解析成子会话，`wait_agent(task_id)` /
-// `read_agent_events(task_id)` 才不会报 missing / 0 events。
+// 只给 task id，运行期必须能把它解析成子会话，`subagent_wait(task_id)` /
+// `subagent_events(task_id)` 才不会报 missing / 0 events。
 func TestResolveTargetSessionIDMapsTaskToChildSession(t *testing.T) {
 	controller, _ := newAPITaskIdentityFixture(t, true)
 	ctx := toolctx.WithSessionID(context.Background(), apiTaskIdentityParent)
@@ -95,7 +95,7 @@ func TestResolveTargetSessionIDKeepsUnknownIDs(t *testing.T) {
 	require.Equal(t, "t1", resolved, "a task id outside the caller's scope must not resolve to a foreign child session")
 }
 
-// 2026-09-26 真机 E2E（API 宿主对齐 CLI）：wait_agent(batch_id) 必须先把 batch id
+// 2026-09-26 真机 E2E（API 宿主对齐 CLI）：subagent_wait(batch_id) 必须先把 batch id
 // 展开成它早绑定 child_session_id 的 task 子会话，而不是报 target_not_found。
 func TestExpandBatchWaitTargetsMapsBatchToTaskChildren(t *testing.T) {
 	controller, batchID := newAPITaskIdentityFixture(t, true)

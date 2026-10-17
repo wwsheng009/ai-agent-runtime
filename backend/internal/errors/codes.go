@@ -23,7 +23,7 @@ const (
 	ErrJobNotFound          ErrorCode = "JOB_NOT_FOUND"
 	ErrTurnDeadlineExceeded ErrorCode = "TURN_DEADLINE_EXCEEDED"
 	ErrAgentRunCanceled     ErrorCode = "AGENT_RUN_CANCELED"
-	// ErrAgentRunSuperseded marks control-plane calls (resolve_agent_approval /
+	// ErrAgentRunSuperseded marks control-plane calls (subagent_approve /
 	// answer question) whose target run ownership token is no longer current:
 	// the child run was interrupted, replaced by a newer turn, or its session
 	// already reached a terminal state. Replaying the same request_id cannot
@@ -46,8 +46,8 @@ const (
 	// recoverable by changing the command shape (missing utility, wrong shell
 	// dialect, Unix-only pipeline on Windows, etc.). Generic — not tool-name bound.
 	ErrToolShellCompat ErrorCode = "TOOL_SHELL_COMPAT"
-	// ErrAgentSpawnDepthLimit marks spawn_agent failures caused by MaxDepth.
-	// Not retryable: continue locally or use spawn_team / an existing agent.
+	// ErrAgentSpawnDepthLimit marks subagent_spawn failures caused by MaxDepth.
+	// Not retryable: continue locally or use team_spawn / an existing agent.
 	ErrAgentSpawnDepthLimit ErrorCode = "SPAWN_DEPTH_LIMIT"
 	// ErrAgentNestedDelegation marks a child attempting to create another
 	// execution node without an explicit inherited delegation opt-in.
@@ -74,10 +74,10 @@ const (
 	// same explicit child id cannot succeed; callers must reuse/close it or pick
 	// another id.
 	ErrAgentAlreadyExists ErrorCode = "AGENT_ALREADY_EXISTS"
-	// ErrAgentBusy marks send_input attempts that require the caller to wait for
+	// ErrAgentBusy marks subagent_input attempts that require the caller to wait for
 	// the active run or explicitly request interruption before resubmitting.
 	ErrAgentBusy ErrorCode = "AGENT_BUSY"
-	// ErrAgentThreadLimit marks spawn_agent attempts rejected by
+	// ErrAgentThreadLimit marks subagent_spawn attempts rejected by
 	// agents.maxThreads. The quota is a live count of active children, so the
 	// caller must free capacity (close/reuse) instead of replaying the spawn.
 	ErrAgentThreadLimit ErrorCode = "AGENT_THREAD_LIMIT"

@@ -874,7 +874,7 @@ func TestLocalChatRuntimeHostBuildSessionActorUsesChildRouteContext(t *testing.T
 	}
 }
 
-// With aicli.subagents.routing absent/disabled, spawn_agent deliberately stores
+// With aicli.subagents.routing absent/disabled, subagent_spawn deliberately stores
 // no per-child reasoning override (resolveSpawnAgentRoute clears the explicit
 // args). The child actor is still built against the base ChatSession, so it must
 // inherit the base session's reasoning effort through the loop-config fallback
@@ -1077,7 +1077,7 @@ func TestLocalActorRegistry_EnforcesAgentLimitsAndListsChildren(t *testing.T) {
 }
 
 // TestLocalActorRegistry_ListScopeIsHostDerived pins the scope contract: the
-// model cannot steer list_agents (parent_session_id is ignored), a subagent
+// model cannot steer subagent_list (parent_session_id is ignored), a subagent
 // defaults to its main agent's tree, and an unresolvable caller fails closed
 // instead of scanning every session.
 func TestLocalActorRegistry_ListScopeIsHostDerived(t *testing.T) {
@@ -1289,7 +1289,7 @@ func TestLocalActorRegistrySpawnWorktreeIsolationBindsAndCleansUp(t *testing.T) 
 		t.Fatalf("expected default write_paths claim of isolation root %q, got %#v", result.WorktreePath, got)
 	}
 
-	// Child mutation must stay isolated from the main tree until parent apply_agent_worktree.
+	// Child mutation must stay isolated from the main tree until parent subagent_apply_worktree.
 	isolatedFile := filepath.Join(result.WorktreePath, "isolated-only.txt")
 	if err := os.WriteFile(isolatedFile, []byte("child-only\n"), 0o644); err != nil {
 		t.Fatalf("write isolated file: %v", err)
@@ -1302,7 +1302,7 @@ func TestLocalActorRegistrySpawnWorktreeIsolationBindsAndCleansUp(t *testing.T) 
 		t.Fatalf("Close worktree child: %v", err)
 	}
 	// §2.4-1 产物保全：close / 强杀路径不再静默销毁未提交产物——脏 worktree
-	// 保留给父代理显式 apply_agent_worktree / discard_agent_worktree。
+	// 保留给父代理显式 subagent_apply_worktree / subagent_discard_worktree。
 	if _, err := os.Stat(isolatedFile); err != nil {
 		t.Fatalf("dirty worktree must survive close for explicit apply/discard, err=%v path=%s", err, result.WorktreePath)
 	}
@@ -1487,7 +1487,7 @@ func TestLocalActorRegistryApplyAndDiscardWorktree(t *testing.T) {
 }
 
 // 2026-09-27 incident hardening: a worktree whose session is still executing
-// must not be landed; the parent has to wait (wait_agent) or close first.
+// must not be landed; the parent has to wait (subagent_wait) or close first.
 func TestLocalActorRegistryApplyWorktreeRefusesWhileChildRunning(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -2981,7 +2981,7 @@ func TestLocalActorRegistry_ReadEventsUsesEventStoreWakeup(t *testing.T) {
 			t.Fatalf("unexpected events: %#v", result.Events)
 		}
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("read_agent_events did not wake from event store append")
+		t.Fatal("subagent_events did not wake from event store append")
 	}
 }
 
@@ -3048,7 +3048,7 @@ func TestLocalActorRegistry_WaitWithoutTargetUsesParentMailbox(t *testing.T) {
 			t.Fatalf("expected actionable mailbox diagnostics: %#v", result)
 		}
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("wait_agent did not wake from parent mailbox event")
+		t.Fatal("subagent_wait did not wake from parent mailbox event")
 	}
 }
 
@@ -3124,7 +3124,7 @@ func TestLocalActorRegistry_ReadEventsWithoutTargetUsesParentMailbox(t *testing.
 			t.Fatalf("unexpected mailbox payload: %#v", result.Events[0].Payload)
 		}
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("read_agent_events did not wake from parent mailbox event")
+		t.Fatal("subagent_events did not wake from parent mailbox event")
 	}
 }
 
@@ -3283,7 +3283,7 @@ func TestLocalActorRegistry_SendMessagePersistsMailboxWithoutTargetActor(t *test
 		t.Fatalf("unexpected send result: %#v", result)
 	}
 	if _, ok := host.SessionHub.Get("mailbox-child"); ok {
-		t.Fatal("send_message should persist mailbox event without starting target actor")
+		t.Fatal("subagent_send should persist mailbox event without starting target actor")
 	}
 
 	events, err := host.EventStore.ListEvents(context.Background(), "mailbox-child", 0, 10)
@@ -4928,9 +4928,9 @@ func TestRunLocalSubagentStartupRecoveryCancellationSkipsDelayedPass(t *testing.
 	}
 }
 
-// wait_team 的观察窗口由 broker 自己解析，所以本地宿主必须把同一份 agents 策略交给
-// broker：否则 wait_agent/read_agent_events 受 agents.maxWaitTimeoutMs 约束，而
-// wait_team 会悄悄回落到共享默认值（P2-11 目标：任何路径的等待时长都落在
+// team_wait 的观察窗口由 broker 自己解析，所以本地宿主必须把同一份 agents 策略交给
+// broker：否则 subagent_wait/subagent_events 受 agents.maxWaitTimeoutMs 约束，而
+// team_wait 会悄悄回落到共享默认值（P2-11 目标：任何路径的等待时长都落在
 // [minWaitTimeoutMs, maxWaitTimeoutMs]）。
 func TestBuildLocalChatAgentStampsSharedWaitTimeoutPolicyOnBroker(t *testing.T) {
 	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
@@ -4955,7 +4955,7 @@ func TestBuildLocalChatAgentStampsSharedWaitTimeoutPolicyOnBroker(t *testing.T) 
 		t.Fatal("expected tool broker")
 	}
 	if broker.WaitTimeoutPolicy == nil {
-		t.Fatal("local host must let the broker resolve wait_team windows from the live agents policy")
+		t.Fatal("local host must let the broker resolve team_wait windows from the live agents policy")
 	}
 	policy := broker.WaitTimeoutPolicy().Normalize()
 	if policy.DefaultMs != 45000 || policy.MinMs != 20000 || policy.MaxMs != 60000 || policy.Mode != agentcontrol.WaitTimeoutModeError {
@@ -4963,7 +4963,7 @@ func TestBuildLocalChatAgentStampsSharedWaitTimeoutPolicyOnBroker(t *testing.T) 
 	}
 
 	// provider 必须每次读取宿主配置，而不是在装配时缓存：配置重载后下一次
-	// wait_team 必须跟着变。
+	// team_wait 必须跟着变。
 	host.RuntimeConfig = nil
 	host.Bootstrap = nil
 	fallback := broker.WaitTimeoutPolicy().Normalize()

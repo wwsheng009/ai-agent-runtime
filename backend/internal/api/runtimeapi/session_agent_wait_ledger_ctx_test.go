@@ -14,7 +14,7 @@ import (
 // TestAPIWaitLedgerFallsBackToContextTurnID 钉住直连 /api/agent/chat 路径的账本
 // 可见性：该路径不持久化 RuntimeState（SuspendedTurnID 为空），wait 账本必须用
 // 调用 ctx 上的 turn 注解兜底定位挂起记录——与 parkAgentChildObligation 同源。
-// 没有这条兜底，Web 回合派发的轻量子会话/批次义务在 wait_agent 里永远不可见。
+// 没有这条兜底，Web 回合派发的轻量子会话/批次义务在 subagent_wait 里永远不可见。
 func TestAPIWaitLedgerFallsBackToContextTurnID(t *testing.T) {
 	ctx := context.Background()
 	controller, sessionManager := newAPIAgentObligationFixture(t)

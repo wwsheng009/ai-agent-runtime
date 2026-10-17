@@ -100,7 +100,7 @@ func TestAnnotateIgnoredBrokerToolArgs_ReportsDroppedKeys(t *testing.T) {
 }
 
 // TestBroker_Execute_ReportsIgnoredArgumentsInsteadOfDroppingThem covers the live
-// path: wait_agent without a target silently falls back to mailbox mode, so a
+// path: subagent_wait without a target silently falls back to mailbox mode, so a
 // caller that meant to wait for a child must learn that its key was ignored.
 func TestBroker_Execute_ReportsIgnoredArgumentsInsteadOfDroppingThem(t *testing.T) {
 	controller := &fakeAgentSessionController{}
@@ -111,7 +111,7 @@ func TestBroker_Execute_ReportsIgnoredArgumentsInsteadOfDroppingThem(t *testing.
 		"timeout_ms": 10,
 	})
 	if err != nil {
-		t.Fatalf("wait_agent must still succeed with an unsupported extra key: %v", err)
+		t.Fatalf("subagent_wait must still succeed with an unsupported extra key: %v", err)
 	}
 	if !controller.lastWait.MailboxOnly {
 		t.Fatalf("the call still falls back to mailbox mode, got %#v", controller.lastWait)

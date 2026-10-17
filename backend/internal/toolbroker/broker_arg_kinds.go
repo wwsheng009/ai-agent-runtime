@@ -12,20 +12,20 @@ import "fmt"
 // unsafe direction, so a wrong kind used to change the meaning of a call
 // instead of failing it:
 //
-//   - apply_agent_worktree keep: "true" removed the worktree the caller asked
+//   - subagent_apply_worktree keep: "true" removed the worktree the caller asked
 //     to preserve (keep defaults to false, which deletes it).
-//   - resolve_agent_approval allow: "true" was denied as if allow were missing.
-//   - read_mailbox_digest/read_task_context mark_read: "true" left the digest
+//   - subagent_approve allow: "true" was denied as if allow were missing.
+//   - team_mailbox/team_task_context mark_read: "true" left the digest
 //     unread, so the same messages were reported again on the next call.
-//   - list_agents include_closed: "true" hid the closed children the caller
+//   - subagent_list include_closed: "true" hid the closed children the caller
 //     asked for.
 //   - supervision_snapshot include_resolved: "true" dropped resolved rows.
-//   - report_task_outcome/block_current_task notify_lead/auto_replan: "true"
+//   - team_task_report/team_task_block notify_lead/auto_replan: "true"
 //     silently skipped the lead notification or the replan.
-//   - spawn_team allow_existing/auto_start, wait_team require_summary: "false"
+//   - team_spawn allow_existing/auto_start, team_wait require_summary: "false"
 //     fell back to the pointer default instead of the requested value.
-//   - the identifier keys: a numeric id was dropped, and wait_agent /
-//     read_agent_events then silently switched to mailbox-only mode on the
+//   - the identifier keys: a numeric id was dropped, and subagent_wait /
+//     subagent_events then silently switched to mailbox-only mode on the
 //     caller's own session instead of addressing the child.
 //
 // Numeric keys are validated here as well as at their read site: this table
@@ -34,14 +34,14 @@ import "fmt"
 // coercion rules - a whole-number check, an int narrowing and range guards.
 //
 // Keys whose kind is already validated by a dedicated tool validator
-// (spawn_agent via spawnAgentFieldKinds, send_input via
-// validateAgentMessageToolArgTypes, spawn_team task/teammate entries via
+// (subagent_spawn via spawnAgentFieldKinds, subagent_input via
+// validateAgentMessageToolArgTypes, team_spawn task/teammate entries via
 // validateSpawnTeamTaskTypes) are not repeated here.
 //
 // Object- and list-valued keys are covered too, because dropping them is just
 // as silent: `startup_acceptance` as a string launched the job with no
 // acceptance gate, `patched_args` as a string approved the original arguments,
-// and `ids: [1, 2]` emptied the target list so wait_agent fell back to reading
+// and `ids: [1, 2]` emptied the target list so subagent_wait fell back to reading
 // the caller's own mailbox.
 var brokerToolArgKinds = map[string]map[string]string{
 	ToolAskUserQuestion: {

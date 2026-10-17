@@ -11,5 +11,5 @@ nothing is blocked, not so everything gets used.
 ## Control-plane tools
 
 Plan mode (plan_enter/plan_exit/plan_review), background jobs (job_*),
-subagent/team orchestration (subagent_*, team_*, spawn_subagents), and
+subagent/team orchestration (subagent_*, team_*), and
 todos/goal tools are all available for complex, multi-step work.

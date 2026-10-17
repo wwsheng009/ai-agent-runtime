@@ -27,7 +27,7 @@ func (h *localChatRuntimeHost) localWaitFeedbackTracker() *supervision.WaitFeedb
 // a hang. Gates (confirmed design 2026-10-04):
 //
 //   - user first: pending queued input / an active input drain pauses feedback;
-//   - active run or active wait window (wait_agent/wait_team block inside the
+//   - active run or active wait window (subagent_wait/team_wait block inside the
 //     run): fully silent — the wait window itself is the feedback channel;
 //   - an already pending (undelivered) wake wins: lifecycle/approval edges are
 //     delivered first and must not race a duplicate feedback episode;

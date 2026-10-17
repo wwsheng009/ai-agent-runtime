@@ -108,7 +108,7 @@ const (
 
 // WaitSegmentBudget is the host-provided accounting for consecutive no-progress
 // active wait segments on the calling turn (design §16.2/§16.3). It was
-// introduced for wait_agent and is shared with wait_team (2026-09-26 hardening
+// introduced for subagent_wait and is shared with team_wait (2026-09-26 hardening
 // plan §5）：两个等待工具的预算键都是"调用方当前挂起 turn"，因此任一义务的终态
 // 进展都会清零同一个计数器。
 //
@@ -145,20 +145,20 @@ type Broker struct {
 	// sessions (P3). Optional: nil keeps spawn behavior unchanged.
 	ExecutionSupervisor *supervision.ExecutionSupervisor
 	// Supervision is the host-side control-plane capability behind
-	// supervision_snapshot / supervision_descendants / ack_lifecycle /
-	// control_descendant (P2-12 方案 3). Optional: nil keeps those tools out of
+	// supervision_snapshot / supervision_descendants / subagent_ack_lifecycle /
+	// subagent_control (P2-12 方案 3). Optional: nil keeps those tools out of
 	// Definitions() entirely, so a host without durable supervision never
 	// advertises a tool it cannot serve.
 	// WaitTimeoutPolicy optionally supplies the operator's wait-window policy
 	// (agents.defaultWaitTimeoutMs / minWaitTimeoutMs / maxWaitTimeoutMs /
-	// waitTimeoutMode) for wait_team, which resolves its window inside the
+	// waitTimeoutMode) for team_wait, which resolves its window inside the
 	// broker instead of in the session host. It is a provider, not a snapshot:
 	// the host reads its live config on every wait, so a late runtime config
 	// update still takes effect. nil falls back to the shared defaults, never to
 	// an unbounded wait.
 	WaitTimeoutPolicy func() agentcontrol.WaitTimeoutPolicy
 	// WaitBudget optionally bounds active wait windows for the calling turn.
-	// wait_agent resolves its budget in the session host; wait_team resolves its
+	// subagent_wait resolves its budget in the session host; team_wait resolves its
 	// window inside the broker, so the host injects the same per-turn budget here
 	// (plan §16.3 同口径). nil keeps team waits unbounded by this judgement.
 	WaitBudget  WaitSegmentBudget
@@ -169,7 +169,7 @@ type Broker struct {
 	// SchedulePresence 是创建回执的在岗检查探针（S3 §4.1）。nil → 默认
 	// schedulehost.ProbePresence(...)；测试注入固定值，避开本机真实 mesh 状态。
 	SchedulePresence func() schedulehost.Presence
-	// agentEventsReads remembers the last read_agent_events window per
+	// agentEventsReads remembers the last subagent_events window per
 	// caller/target cursor so an identical repeated read can answer with an
 	// explicit unchanged/repeat_count signal (plan P1-7 待补) instead of a
 	// silently identical payload. Lazily created; see agentEventsReadsMemo.
@@ -669,14 +669,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		return withBrokerSourceDefinitions(append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSubagentSpawn,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from team_spawn teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use team_spawn. This is separate from team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
 						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. a subagent_spawn call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
-						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
+						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (subagent_spawn_batch/team_spawn name the same concept goal). Prefer message."},
 						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
 						"prompt":               map[string]interface{}{"type": "string", "description": "Alias for message."},
 						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional portable agent definition (builtin/user/project) whose defaults (read_only, permission_mode, model, provider) fill fields the call left empty; explicit args win. Also accepted as an orchestration role hint for the child agent."},
@@ -696,7 +696,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
 						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions, plan, or dont_ask keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
-						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use team_spawn for complete_task Team workers."},
+						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary subagent_spawn sessions only support none; use team_spawn for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
@@ -711,7 +711,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentList,
-				Description: "List subagent_spawn child sessions plus durable spawn_subagents batch-task rows for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). Running batch tasks are always listed; terminal tasks require include_closed=true. This is separate from team_spawn task progress.",
+				Description: "List subagent_spawn child sessions plus durable subagent_spawn_batch batch-task rows for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). Running batch tasks are always listed; terminal tasks require include_closed=true. This is separate from team_spawn task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -750,7 +750,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentInput,
-				Description: "Send input to an existing subagent_spawn child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address team_spawn teammates.",
+				Description: "Send input to an existing subagent_spawn child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like subagent_followup: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -770,7 +770,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					"properties": map[string]interface{}{
 						"id":           map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id":   map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"request_id":   map[string]interface{}{"type": "string", "description": "Pending approval request id from wait_agent status or approval_requested event."},
+						"request_id":   map[string]interface{}{"type": "string", "description": "Pending approval request id from subagent_wait status or approval_requested event."},
 						"allow":        map[string]interface{}{"type": "boolean", "description": "true to approve the child tool call, false to deny it."},
 						"patched_args": map[string]interface{}{"type": "object", "description": "Optional replacement tool arguments to use when approving."},
 					},
@@ -779,7 +779,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentWait,
-				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Do not use this for team_spawn teammate ids. " + agentguidance.WaitDisciplineText(),
+				Description: "Wait for subagent_spawn progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Do not use this for team_spawn teammate ids. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -809,13 +809,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentClose,
-				Description: "Stop and close a child agent session, agent path, or a spawn_subagents batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
+				Description: "Stop and close a child agent session, agent path, or a subagent_spawn_batch batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a spawn_subagents batch id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a subagent_spawn_batch batch id."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"batch_id":   map[string]interface{}{"type": "string", "description": "spawn_subagents batch id from the dispatch receipt; closes every child session of the batch in one call (equivalent to passing the batch id as id)."},
+						"batch_id":   map[string]interface{}{"type": "string", "description": "subagent_spawn_batch batch id from the dispatch receipt; closes every child session of the batch in one call (equivalent to passing the batch id as id)."},
 					},
 				},
 			},
@@ -846,7 +846,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentDiscardWorktree,
-				Description: "Discard a subagent_spawn child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; only the parent/orchestrator can discard a child's worktree (a session cannot discard its own), and close_agent also cleans up remaining worktrees.",
+				Description: "Discard a subagent_spawn child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; only the parent/orchestrator can discard a child's worktree (a session cannot discard its own), and subagent_close also cleans up remaining worktrees.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -861,14 +861,14 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		definitions = append(definitions,
 			types.ToolDefinition{
 				Name:        ToolSubagentSpawn,
-				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use spawn_team. This is separate from team_spawn teammates.",
+				Description: "Create a child session for bounded, independent work that can run in parallel and whose result is needed. Required: message — the child's initial task prompt (aliases: goal, task). A call without a task prompt is rejected instead of creating an empty child session. Unsupported arguments (for example tools_whitelist) are rejected. Avoid delegation when the parent can finish the same work with fewer calls. Depth limit errors are not retryable: complete locally, reuse an existing child, or use team_spawn. This is separate from team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"id":                   map[string]interface{}{"type": "string", "description": "Optional explicit child session id."},
 						"session_id":           map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. a subagent_spawn call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
-						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
+						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (subagent_spawn_batch/team_spawn name the same concept goal). Prefer message."},
 						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
 						"prompt":               map[string]interface{}{"type": "string", "description": "Alias for message."},
 						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional portable agent definition (builtin/user/project) whose defaults (read_only, permission_mode, model, provider) fill fields the call left empty; explicit args win. Also accepted as an orchestration role hint for the child agent."},
@@ -888,7 +888,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"reasoning_effort":       map[string]interface{}{"type": "string", "description": "Optional reasoning effort hint for the child session."},
 						"thinking_effort":        map[string]interface{}{"type": "string", "description": "Compatibility alias for reasoning_effort."},
 						"permission_mode":        map[string]interface{}{"type": "string", "enum": []string{"default", "accept_edits", "plan", "bypass_permissions", "dont_ask"}, "description": "Optional permission mode for the child agent run. Omit it to inherit the parent session's mode. The parent session mode is the ceiling for the session tree: a parent pinned to bypass_permissions, plan, or dont_ask keeps its mode, and a request wider than the parent mode is blocked by default and pinned back to the parent mode, reported in route_warnings plus a next_action. Set AICLI_AGENTS_ALLOW_PERMISSION_ESCALATION=1 to explicitly allow children to request a wider mode for trusted bounded subtasks. Use bypass_permissions only when the child task is trusted and bounded; otherwise default may wait for approval. Use dont_ask for unattended/CI children that must fail closed (deny instead of prompting)."},
-						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary spawn_agent sessions only support none; use team_spawn for complete_task Team workers."},
+						"completion_requirement": map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Optional child completion contract. Ordinary subagent_spawn sessions only support none; use team_spawn for complete_task Team workers."},
 						"completionRequirement":  map[string]interface{}{"type": "string", "enum": []string{"none"}, "description": "Compatibility alias for completion_requirement. Ordinary children only support none."},
 						"isolation":              map[string]interface{}{"type": "string", "enum": []string{"none", "worktree"}, "description": "Optional workspace isolation for the child. worktree creates a dedicated git worktree under .aicli/agent-worktrees; fails closed with no main-tree fallback."},
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
@@ -903,7 +903,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentList,
-				Description: "List subagent_spawn child sessions plus durable spawn_subagents batch-task rows for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). Running batch tasks are always listed; terminal tasks require include_closed=true. This is separate from team_spawn task progress.",
+				Description: "List subagent_spawn child sessions plus durable subagent_spawn_batch batch-task rows for the current root session (the calling session's main-agent tree; the scope is host-derived and cannot be changed by the caller). Running batch tasks are always listed; terminal tasks require include_closed=true. This is separate from team_spawn task progress.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -942,7 +942,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentInput,
-				Description: "Send input to an existing subagent_spawn child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like followup_task: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address team_spawn teammates.",
+				Description: "Send input to an existing subagent_spawn child session. interrupt=true stops the active run (bounded wait) before submitting the prompt. interrupt=false behaves like subagent_followup: an idle child starts a turn immediately, a busy child gets a queued mailbox delivery with trigger_turn=true (queued=true) that starts a turn when the current run ends. Returns delivered/queued/triggered/duplicate. A closed child returns agent session is closed. This does not address team_spawn teammates.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -962,7 +962,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					"properties": map[string]interface{}{
 						"id":           map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
 						"session_id":   map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"request_id":   map[string]interface{}{"type": "string", "description": "Pending approval request id from wait_agent status or approval_requested event."},
+						"request_id":   map[string]interface{}{"type": "string", "description": "Pending approval request id from subagent_wait status or approval_requested event."},
 						"allow":        map[string]interface{}{"type": "boolean", "description": "true to approve the child tool call, false to deny it."},
 						"patched_args": map[string]interface{}{"type": "object", "description": "Optional replacement tool arguments to use when approving."},
 					},
@@ -971,7 +971,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentWait,
-				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Use team_wait for team_spawn teammates. " + agentguidance.WaitDisciplineText(),
+				Description: "Wait for subagent_spawn children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Use team_wait for team_spawn teammates. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -985,7 +985,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentEvents,
-				Description: "Read collaboration events. With id, reads recent runtime events for a subagent_spawn child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer subagent_wait for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for team_spawn teammate ids such as member-1; call wait_team with the spawn_team team_id for team lifecycle events.",
+				Description: "Read collaboration events. With id, reads recent runtime events for a subagent_spawn child session and optionally waits for new events. If the child is waiting_approval, inspect the returned approval_requested event/status instead of polling repeatedly. When count=0 or timed_out, follow next_action and do not immediately re-call with the same id/after_seq; prefer subagent_wait for readiness. Results report latest_seq/has_more/unread_count: when has_more=true, consume the returned events first and only then re-call with after_seq=latest_seq. A repeated read with the same after_seq on a window that did not move returns unchanged=true plus repeat_count — treat it as \"no new events\" and do not re-read that window. Pass view=tool_progress for a token-cheap progress window (tool events plus terminal/approval events; filtered reports how many were dropped). Without id, reads the current parent session mailbox/collab events after after_seq. Do not use this for team_spawn teammate ids such as member-1; call team_wait with the team_spawn team_id for team lifecycle events.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1000,13 +1000,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentClose,
-				Description: "Stop and close a child agent session, agent path, or a spawn_subagents batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
+				Description: "Stop and close a child agent session, agent path, or a subagent_spawn_batch batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a spawn_subagents batch id."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a subagent_spawn_batch batch id."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
-						"batch_id":   map[string]interface{}{"type": "string", "description": "spawn_subagents batch id from the dispatch receipt; closes every child session of the batch in one call (equivalent to passing the batch id as id)."},
+						"batch_id":   map[string]interface{}{"type": "string", "description": "subagent_spawn_batch batch id from the dispatch receipt; closes every child session of the batch in one call (equivalent to passing the batch id as id)."},
 					},
 				},
 			},
@@ -1037,7 +1037,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolSubagentDiscardWorktree,
-				Description: "Discard a subagent_spawn child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; close_agent also cleans up remaining worktrees.",
+				Description: "Discard a subagent_spawn child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; subagent_close also cleans up remaining worktrees.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1202,13 +1202,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolTeamWait,
-			Description: "Wait for a team_spawn run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after spawn_team auto_start=true instead of subagent_wait/subagent_events; those are only for subagent_spawn child sessions. " + agentguidance.WaitDisciplineText(),
+			Description: "Wait for a team_spawn run to reach durable team.completed/team.summary state and return recent persisted team lifecycle events. Use this after team_spawn auto_start=true instead of subagent_wait/subagent_events; those are only for subagent_spawn child sessions. " + agentguidance.WaitDisciplineText(),
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"team_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Team id returned by spawn_team. If omitted, defaults to the current active team run when one is bound in context.",
+						"description": "Team id returned by team_spawn. If omitted, defaults to the current active team run when one is bound in context.",
 					},
 					"after_seq": map[string]interface{}{
 						"type":        "integer",
@@ -2205,10 +2205,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err := validateSpawnAgentArgTypes(args); err != nil {
 			return nil, nil, err
 		}
-		// 父侧工具调用归位（D）：spawn_agent 调用的 tool_call_id 只存在于
+		// 父侧工具调用归位（D）：subagent_spawn 调用的 tool_call_id 只存在于
 		// broker 执行上下文（不来自模型入参），在此注入请求，宿主随子会话
 		// 上下文持久化；subagent.progress 镜像据此回填 parent_tool_call_id，
-		// 前端/ACP 才能把子代理进度挂到对应的 spawn_agent 行上。
+		// 前端/ACP 才能把子代理进度挂到对应的 subagent_spawn 行上。
 		request := SpawnAgentArgs{Message: message, ParentToolCallID: strings.TrimSpace(toolCallID)}
 		if value, ok := args["id"].(string); ok {
 			request.ID = strings.TrimSpace(value)
@@ -2551,7 +2551,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		var result *AgentMessageResult
 		if toolName == ToolSubagentFollowup {
 			if strings.TrimSpace(actualSessionID) == strings.TrimSpace(sessionID) {
-				return nil, nil, fmt.Errorf("followup_task target cannot be the current/root session")
+				return nil, nil, fmt.Errorf("subagent_followup target cannot be the current/root session")
 			}
 			result, err = b.AgentSessions.FollowupTask(ctx, strings.TrimSpace(sessionID), request)
 		} else {
@@ -2575,15 +2575,15 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if result != nil && result.Duplicate {
 			summary["duplicate"] = true
 		}
-		// F4: send_message never starts a turn. Surface that in the delivery
-		// receipt (and point an idle child at followup_task) so "delivered"
+		// F4: subagent_send never starts a turn. Surface that in the delivery
+		// receipt (and point an idle child at subagent_followup) so "delivered"
 		// cannot be mistaken for "the child will act on this".
 		if toolName == ToolSubagentSend && result != nil && !result.Triggered {
 			summary["turn_started"] = false
-			nextAction := "message_queued_no_turn: send_message never starts a turn; the child reads it on its next natural turn. Use followup_task if the child must act now."
+			nextAction := "message_queued_no_turn: subagent_send never starts a turn; the child reads it on its next natural turn. Use subagent_followup if the child must act now."
 			if result.Status != nil && strings.EqualFold(strings.TrimSpace(result.Status.Status), "idle") {
 				summary["no_turn_expected"] = true
-				nextAction = "idle_child_message_queued: send_message never starts a turn and this child is idle, so the message is read only when something else wakes the child. Use followup_task to start a turn now, or send_input to interrupt/steer."
+				nextAction = "idle_child_message_queued: subagent_send never starts a turn and this child is idle, so the message is read only when something else wakes the child. Use subagent_followup to start a turn now, or subagent_input to interrupt/steer."
 			}
 			summary["next_action"] = nextAction
 		}
@@ -2912,7 +2912,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			sessionKey = agentSessionRefArgValue(args["session_id"])
 		}
 		if sessionKey == "" {
-			// F6: a spawn_subagents batch id converges the whole batch — the
+			// F6: a subagent_spawn_batch batch id converges the whole batch — the
 			// host resolves it to every child session, so one call replaces N.
 			sessionKey = agentSessionRefArgValue(args["batch_id"])
 		}
@@ -3545,14 +3545,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"summary_ready":   result.SummaryReady,
 			"timed_out":       result.TimedOut,
 			"wait_timeout_ms": result.WaitTimeoutMs,
-			// Same echo as wait_agent: the model must be able to see that its
+			// Same echo as subagent_wait: the model must be able to see that its
 			// requested team window was normalized, not silently replaced.
 			"wait_timeout_requested_ms": result.WaitTimeoutRequestedMs,
 			"wait_timeout_clamped":      result.WaitTimeoutClamped,
 			"execution_continues":       result.ExecutionContinues,
 			"next_action":               result.NextAction,
 			"latest_seq":                result.LatestSeq,
-			// Same ledger echo as wait_agent: pending_count is the number of
+			// Same ledger echo as subagent_wait: pending_count is the number of
 			// non-terminal task rows in the team view (plan §C3-4 / AC-P2-4g).
 			"pending_count":  result.PendingCount,
 			"terminal_count": result.TerminalCount,
@@ -3993,16 +3993,16 @@ func synthesizeAutoStartTeammates(tasks []SpawnTaskSpec, maxTeammates int) []Spa
 }
 
 // spawnAgentMessageAliasKeys are the alternative keys callers use for the
-// spawn_agent task prompt. spawn_subagents and spawn_team name the same concept
-// `goal`, so prompts written for those tools routinely send it to spawn_agent;
+// subagent_spawn task prompt. subagent_spawn_batch and team_spawn name the same concept
+// `goal`, so prompts written for those tools routinely send it to subagent_spawn;
 // silently ignoring it created a child session with an empty prompt, and the
 // child then correctly reported that no task was visible in its context.
 var spawnAgentMessageAliasKeys = []string{"goal", "task", "prompt"}
 
-// spawnAgentToolArgKeys is the fail-closed allowlist of spawn_agent arguments.
+// spawnAgentToolArgKeys is the fail-closed allowlist of subagent_spawn arguments.
 // Every key the broker consumes must be listed here: a key that is accepted but
 // never read is a silent intent drop (callers used to pass tools_whitelist,
-// which spawn_agent does not implement).
+// which subagent_spawn does not implement).
 var spawnAgentToolArgKeys = []string{
 	"id", "session_id", "message", "goal", "task", "prompt",
 	"agent_type", "difficulty", "difficulty_rationale",
@@ -4018,7 +4018,7 @@ var spawnAgentToolArgKeys = []string{
 func unsupportedSpawnAgentArgHint(key string) string {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "tools_whitelist", "tool_whitelist", "tools", "whitelist":
-		return "spawn_agent does not restrict the child tool surface; use read_only/permission_mode, or spawn_subagents for per-task tools_whitelist"
+		return "subagent_spawn does not restrict the child tool surface; use read_only/permission_mode, or subagent_spawn_batch for per-task tools_whitelist"
 	case "description", "content", "text", "instruction", "instructions", "task_description":
 		return "did you mean message"
 	case "objective", "task_goal", "goal_text":
@@ -4053,7 +4053,7 @@ func normalizeSpawnAgentToolArgs(args map[string]interface{}) (message string, a
 			}
 			described = append(described, key)
 		}
-		return "", "", fmt.Errorf("spawn_agent invalid arguments: unsupported argument(s): %s; supported arguments: %s",
+		return "", "", fmt.Errorf("subagent_spawn invalid arguments: unsupported argument(s): %s; supported arguments: %s",
 			strings.Join(described, ", "), strings.Join(spawnAgentToolArgKeys, ", "))
 	}
 	if value, ok := args["message"].(string); ok {
@@ -4073,7 +4073,7 @@ func normalizeSpawnAgentToolArgs(args map[string]interface{}) (message string, a
 		}
 	}
 	if message == "" {
-		return "", "", fmt.Errorf("spawn_agent invalid arguments: message is required (accepted aliases: %s); pass the child's initial task prompt, or use send_message/followup_task to reach an existing child",
+		return "", "", fmt.Errorf("subagent_spawn invalid arguments: message is required (accepted aliases: %s); pass the child's initial task prompt, or use subagent_send/subagent_followup to reach an existing child",
 			strings.Join(spawnAgentMessageAliasKeys, ", "))
 	}
 	return message, alias, nil
@@ -4468,7 +4468,7 @@ func (b *Broker) resolveWaitTeamID(ctx context.Context, sessionID, explicitTeamI
 }
 
 // waitTimeoutPolicy returns the operator's wait-window policy for waits the
-// broker resolves itself (wait_team). A broker with no provider keeps the shared
+// broker resolves itself (team_wait). A broker with no provider keeps the shared
 // defaults (agents defaults: 30s window, 10s..1h bounds, clamp), so a wait can
 // never become unbounded just because a host forgot to wire the provider.
 func (b *Broker) waitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
@@ -4482,10 +4482,10 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 	if b == nil || b.TeamStore == nil {
 		return WaitTeamResult{}, fmt.Errorf("team store is not configured")
 	}
-	// wait_team is a wait path like any other: its observation window is
+	// team_wait is a wait path like any other: its observation window is
 	// normalized against the same agents.minWaitTimeoutMs /
 	// agents.maxWaitTimeoutMs / waitTimeoutMode policy the session hosts apply to
-	// wait_agent and read_agent_events. Resolving before any side effect keeps a
+	// subagent_wait and subagent_events. Resolving before any side effect keeps a
 	// rejected out-of-range request from reconciling or notifying first.
 	resolution, err := agentcontrol.ResolveWaitTimeout(request.TimeoutMs, b.waitTimeoutPolicy())
 	if err != nil {
@@ -4531,13 +4531,13 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 		}
 		return *ApplyWaitTeamLedger(&result, rows, baselineTerminal), true
 	}
-	// Active-wait budget (plan §16.2/§16.3, shared with wait_agent since the
+	// Active-wait budget (plan §16.2/§16.3, shared with subagent_wait since the
 	// 2026-09-26 hardening plan §5): the host injects the caller-turn budget, so
 	// both wait tools draw from one counter keyed by the parked turn. A window
 	// this call never opened (team already terminal+ready on entry) must not
 	// consume budget; an opened window counts as progress iff a task reached a
 	// terminal state during it — or the team itself became terminal — mirroring
-	// wait_agent's terminal_delta rule.
+	// subagent_wait's terminal_delta rule.
 	budget := b.WaitBudget
 	budgetConsecutive, budgetLimit := 0, 0
 	budgetActive, budgetExhausted := false, false
@@ -4566,14 +4566,14 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 	}
 	// waited_ms is measured from the start of the observation loop, not from the
 	// call entry, so it reports the window actually spent waiting (AC-P2-4b) and
-	// stays comparable with wait_agent's waited_ms.
+	// stays comparable with subagent_wait's waited_ms.
 	started := time.Now()
 	stampWaited := func(result WaitTeamResult) WaitTeamResult {
 		result.WaitedMs = time.Since(started).Milliseconds()
 		return result
 	}
 	if budgetActive && budgetExhausted {
-		// 预算耗尽：不再打开新的活动等待窗口（与 wait_agent 同判据）。账本视图
+		// 预算耗尽：不再打开新的活动等待窗口（与 subagent_wait 同判据）。账本视图
 		// 照旧返回，I1 继续兜底收尾；没有开窗就不谎报超时。
 		result, snapshotErr := b.readWaitTeamSnapshot(ctx, teamID, request)
 		if snapshotErr != nil {
@@ -4661,7 +4661,7 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 // readWaitTeamTaskLedger reads the awaited team's tasks as obligation-ledger
 // rows (plan §C3-4 统一返回契约 / AC-P2-4g): subject_kind "team_task" with the
 // task id as the obligation id, so the team view carries the same row shape the
-// wait_agent batch rows use. DeadlineAt stays empty until per-task deadlines
+// subagent_wait batch rows use. DeadlineAt stays empty until per-task deadlines
 // exist on the dispatch side (plan C3-4 派发接口) — an invented deadline would be
 // worse than a missing one. Callers treat every error as fail-open (plan §13.8).
 func (b *Broker) readWaitTeamTaskLedger(ctx context.Context, teamID string) ([]AgentWaitObligation, error) {
@@ -4809,7 +4809,7 @@ func normalizeSpawnAgentPermissionMode(raw string) (string, error) {
 	}
 }
 
-// normalizeSpawnAgentCompletionRequirement validates the public spawn_agent
+// normalizeSpawnAgentCompletionRequirement validates the public subagent_spawn
 // contract. Ordinary children have no Team task identity, so complete_task can
 // only be introduced later by TeammateRunner for a bound Team assignment.
 func normalizeSpawnAgentCompletionRequirement(raw string) (string, error) {
@@ -4827,7 +4827,7 @@ func normalizeSpawnAgentCompletionRequirement(raw string) (string, error) {
 }
 
 // resolveSpawnAgentCompletionRequirement fills completion from agentdef when
-// spawn_agent only provided agent_type. Missing definitions are not errors.
+// subagent_spawn only provided agent_type. Missing definitions are not errors.
 func resolveSpawnAgentCompletionRequirement(agentType string) (string, error) {
 	agentType = strings.TrimSpace(agentType)
 	if agentType == "" {
@@ -4841,7 +4841,7 @@ func resolveSpawnAgentCompletionRequirement(agentType string) (string, error) {
 }
 
 // applySpawnAgentAgentdefDefaults fills permission_mode / read_only / model /
-// provider from the portable agent definition when spawn_agent only provided
+// provider from the portable agent definition when subagent_spawn only provided
 // agent_type (or left those fields empty). Explicit spawn args win.
 func applySpawnAgentAgentdefDefaults(request *SpawnAgentArgs, permissionModeExplicit, readOnlyExplicit bool) {
 	if request == nil {
@@ -5159,7 +5159,7 @@ func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, parentSessionI
 		if teammate == nil {
 			continue
 		}
-		return fmt.Errorf("%s is a subagent_spawn child-session tool, but %q is a team_spawn teammate id in team %q; use subagent_spawn child session ids/paths with this tool, or call team_wait with team_id %q for spawn_team progress", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
+		return fmt.Errorf("%s is a subagent_spawn child-session tool, but %q is a team_spawn teammate id in team %q; use subagent_spawn child session ids/paths with this tool, or call team_wait with team_id %q for team_spawn progress", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
 	}
 	return nil
 }
@@ -5177,7 +5177,7 @@ func (b *Broker) rejectSelfWorktreeOperation(callerSessionID, targetSessionID, t
 		return nil
 	}
 	return fmt.Errorf(
-		"%s is a parent-side operation: session %s cannot target its own worktree; finish and report, and let the parent/orchestrator act on it (close_agent also cleans remaining worktrees)",
+		"%s is a parent-side operation: session %s cannot target its own worktree; finish and report, and let the parent/orchestrator act on it (subagent_close also cleans remaining worktrees)",
 		toolName, target,
 	)
 }
@@ -5241,7 +5241,7 @@ func payloadString(payload map[string]interface{}, key string) string {
 // explicitly null JSON argument) must render as empty: fmt.Sprintf("%v", nil)
 // yields the literal "<nil>", and callers that read identifiers through this
 // helper then treated that text as a real reference. That defect is what
-// produced agent sessions literally named "<nil>" (resume_agent received
+// produced agent sessions literally named "<nil>" (subagent_resume received
 // {"id": null} and resolved it as a session reference). Typed nil pointers,
 // maps, slices and interfaces read as empty for the same reason.
 func stringValue(value interface{}) string {

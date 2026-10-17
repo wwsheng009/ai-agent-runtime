@@ -11,7 +11,7 @@ import (
 //
 // The durable mirror stays on the registry row / wake stream
 // (`reclaimed:<reason>`, see ReclaimDecision.EventKind), so a parent reading
-// read_agent_events keeps the authoritative per-child explanation; this product
+// subagent_events keeps the authoritative per-child explanation; this product
 // event is the compact, session-scoped summary that the parent session stream
 // (frontend `/runtime/events`, subagent drill-down) and `/debug` render.
 const EventAgentReclaimed = "agent.reclaimed"

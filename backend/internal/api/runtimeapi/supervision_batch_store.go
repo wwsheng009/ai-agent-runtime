@@ -58,7 +58,7 @@ func (h *Handler) getSubagentBatchStore() subagentbatch.BatchStore {
 }
 
 // peekSubagentBatchStore 只读探测已建好的 batch store，**不触发懒加载**：账本判读
-// （wait_agent 的 obligation 视图）是纯读路径，没有 store 就等价于"没有挂起记录"，
+// （subagent_wait 的 obligation 视图）是纯读路径，没有 store 就等价于"没有挂起记录"，
 // 不该为一次等待在宿主上凭空建库（与 peekSessionHub / peekDurableSessionRuntimeStore
 // 同形）。挂起记录一旦写入就必然已经建过 store，因此探测为 nil 时返回空账本是安全的。
 func (h *Handler) peekSubagentBatchStore() subagentbatch.BatchStore {
@@ -88,8 +88,8 @@ func (h *Handler) subagentBatchCoordinator(scheduler *agent.SubagentScheduler) *
 		// (supervision.task_progress_interval, default 0 = no writes), wired
 		// from the same host tuning the CLI reads so the two hosts cannot drift.
 		TaskProgressInterval: h.supervisionTuning().TaskProgressInterval,
-		// Live-slot ceiling (agents.maxThreads) across spawn_agent and
-		// spawn_subagents: without this the batch path only had a concurrency
+		// Live-slot ceiling (agents.maxThreads) across subagent_spawn and
+		// subagent_spawn_batch: without this the batch path only had a concurrency
 		// window and could accumulate unbounded idle children. Mirrors the CLI
 		// host wiring in chat_actor_host.go.
 		LiveSlotGate: subagentquota.New(

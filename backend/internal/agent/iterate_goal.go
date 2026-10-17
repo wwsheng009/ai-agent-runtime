@@ -309,7 +309,7 @@ func IterateGoalToolDefinition() types.ToolDefinition {
 		Name: IterateGoalToolName,
 		Description: "Iterate toward one objective with a fresh child and a bounded structured handoff per round. " +
 			"Use only when work needs several independent fresh-context rounds on the same objective (refining a document, debugging a stubborn issue) — the child of each round sees no parent conversation; the shared workspace is the long-term memory and only a bounded handoff crosses rounds. " +
-			"The call blocks until a round reports complete/blocked, the progress gate stalls, or the round budget is exhausted. For parallel independent subtasks use spawn_subagents instead; for ordinary same-session work just keep working.",
+			"The call blocks until a round reports complete/blocked, the progress gate stalls, or the round budget is exhausted. For parallel independent subtasks use subagent_spawn_batch instead; for ordinary same-session work just keep working.",
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -329,7 +329,7 @@ func IterateGoalToolDefinition() types.ToolDefinition {
 }
 
 // executeIterateGoal 在父级 loop 的 act 路径同步执行一次迭代。
-// 与 spawn_subagents 的异步批次不同：迭代需要每轮 handoff 反馈决定下一轮，
+// 与 subagent_spawn_batch 的异步批次不同：迭代需要每轮 handoff 反馈决定下一轮，
 // 无法后台化而不破坏语义（对齐 DSH foreground Ralph）。
 func (loop *ReActLoop) executeIterateGoal(ctx context.Context, sessionID, traceID string, tc types.ToolCall) iterateGoalToolOutput {
 	objective := strings.TrimSpace(stringValue(tc.Args["objective"]))

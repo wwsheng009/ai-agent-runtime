@@ -20,9 +20,9 @@ tools:
   # allowlist 本身就会裁掉它们；这里的 denylist 是防御性双保险（deny 恒优先，
   # 即便日后有人放宽 allowlist，deny 仍能拦住；也覆盖 MCP/宿主侧同名工具）。
   denylist:
-    - spawn_agent
-    - spawn_subagents
-    - spawn_team
+    - subagent_spawn
+    - subagent_spawn_batch
+    - team_spawn
   read_only: true
 
 # 无 MCP：排除全部服务器（连接前过滤：不连接、不注册工具）。

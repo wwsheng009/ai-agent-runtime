@@ -145,7 +145,7 @@ func (p *recordingDescendantProvider) ListDescendants(ctx context.Context, scope
 
 // TestLocalSupervisionToolController_DescendantsCoversWholeBatch is the P0-A
 // acceptance scenario: a parent that spawned three children reads all three in
-// one call (2 running + 1 stalled) instead of polling wait_agent row by row.
+// one call (2 running + 1 stalled) instead of polling subagent_wait row by row.
 func TestLocalSupervisionToolController_DescendantsCoversWholeBatch(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)
 	session := newChatDebugSupervisionSession(host, "parent-session")
@@ -305,7 +305,7 @@ func TestLocalSupervisionToolController_RequiresStore(t *testing.T) {
 	require.Nil(t, newLocalSupervisionToolController(host, nil))
 }
 
-// F2 回归：close_agent 取消的子会话在终态事件里同时携带 success=false 与
+// F2 回归：subagent_close 取消的子会话在终态事件里同时携带 success=false 与
 // status=stopped。分类必须以 stop 状态为准，否则"请求的关闭"会被上报为
 // critical 子会话失败（实测现场：run_status=failed, error_class=context canceled）。
 func TestLocalAgentCompletionStatus_StopStatusWinsOverFailureHeuristic(t *testing.T) {
@@ -343,7 +343,7 @@ func TestLocalAgentCompletionStatus_StopStatusWinsOverFailureHeuristic(t *testin
 	require.Equal(t, string(runtimechat.SessionStopped), localAgentCompletionStatus(interrupted))
 }
 
-// F1 回归：spawn_team 之后会话成为 team lead，写面 scope 必须同时覆盖会话域与
+// F1 回归：team_spawn 之后会话成为 team lead，写面 scope 必须同时覆盖会话域与
 // 团队域。旧实现把 scope 整体切换成 team，导致直接子代理（会话域）的通知在
 // digest 里照常建议处置、实际调用却报 "outside the caller scope"。
 func TestLocalSupervisionToolController_DecisionScopesCoverSessionAndTeam(t *testing.T) {

@@ -174,7 +174,7 @@ func TestDecodeSubagentTasksWriteIntentWarning(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
 	require.True(t, routeWarningsContain(tasks[0].RouteWarnings, "goal_appears_to_require_writes"))
-	require.Equal(t, "spawn_subagents.read_only", tasks[0].ReadOnlySource)
+	require.Equal(t, "subagent_spawn_batch.read_only", tasks[0].ReadOnlySource)
 	require.False(t, routeWarningsContain(tasks[1].RouteWarnings, "goal_appears_to_require_writes"))
 }
 

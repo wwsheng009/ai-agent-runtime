@@ -165,7 +165,7 @@ type ReclaimDecision struct {
 }
 
 // EventKind is the durable wake-event kind emitted for this eviction. It keeps
-// the reclaim action distinguishable from an orderly close_agent ("closed").
+// the reclaim action distinguishable from an orderly subagent_close ("closed").
 func (d ReclaimDecision) EventKind() string {
 	reason := strings.TrimSpace(d.Reason)
 	if reason == "" {
@@ -334,7 +334,7 @@ func ThreadLimitMessage(limit, active int, occupants []ThreadOccupant, extras ..
 
 // AgentReclaimStore closes an agent identity subtree as a quota eviction. The
 // wake event kind distinguishes an eviction (reclaimed:<reason>) from an
-// orderly close_agent ("closed") so parents and /debug can explain it.
+// orderly subagent_close ("closed") so parents and /debug can explain it.
 type AgentReclaimStore interface {
 	ReclaimAgentControlAgentSubtree(ctx context.Context, rootSessionID string, agentPath string, reason string, reclaimedAt time.Time) (int64, error)
 }

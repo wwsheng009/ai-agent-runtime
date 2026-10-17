@@ -131,8 +131,8 @@ func TestSubagentProgressMirrorCarriesParentToolCallID(t *testing.T) {
 	mirror := NewSubagentProgressMirror(time.Second)
 	now := time.Date(2026, 9, 13, 14, 0, 0, 0, time.UTC)
 
-	// 归位主路径：宿主从 spawn_agent 请求继承的父侧 tool_call_id 进载荷，
-	// 前端/ACP 据此把子代理进度挂到对应 spawn_agent 行。
+	// 归位主路径：宿主从 subagent_spawn 请求继承的父侧 tool_call_id 进载荷，
+	// 前端/ACP 据此把子代理进度挂到对应 subagent_spawn 行。
 	target := SubagentProgressTarget{
 		ParentSessionID:  "parent-1",
 		ChildSessionID:   "child-1",

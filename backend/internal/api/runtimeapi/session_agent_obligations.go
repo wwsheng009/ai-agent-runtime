@@ -11,7 +11,7 @@ import (
 )
 
 // apiAgentSessionObligationResolver judges the durable state of one lightweight
-// spawn_agent child session from the same supervision notification plane that
+// subagent_spawn child session from the same supervision notification plane that
 // drives the API host's auto-wake/resume path: ProjectAgentCompletion writes an
 // agent_completed/agent_failed/agent_interrupted lifecycle row per child whose
 // SupervisionState is terminated. Reading that row back (including resolved
@@ -66,7 +66,7 @@ func (h *Handler) agentSessionObligationResolver() subagentbatch.AgentSessionObl
 	return apiAgentSessionObligationResolver{store: store}
 }
 
-// apiTurnIDForSession resolves the turn identity a spawn_agent child must be
+// apiTurnIDForSession resolves the turn identity a subagent_spawn child must be
 // parked under. The broker call context carries the running loop's turn
 // annotation on both the actor path and the direct /api/agent/chat path; when it
 // is absent (e.g. detached/delegated callers) the parent's runtime state is the
@@ -94,7 +94,7 @@ func (c *sessionAgentController) apiTurnIDForSession(ctx context.Context, sessio
 }
 
 // parkAgentChildObligation records that the current parent turn handed work to
-// one live spawn_agent child session and parks the turn on it (§6.12), mirroring
+// one live subagent_spawn child session and parks the turn on it (§6.12), mirroring
 // the CLI host's parkLocalAgentChildObligation. The obligation id is
 // prefix-encoded (agent_session:<session_id>) so it reuses the existing
 // obligation_ids_json representation with no schema migration; settlement reads

@@ -97,7 +97,7 @@ dynamic tail first → older raw history → keep active turn + system/stable
 ### Problem that was fixed
 
 Freezing after step 1 **without** lean compaction left large tool schemas
-(e.g. ~600 tokens including `spawn_subagents`). Later steps then either:
+(e.g. ~600 tokens including `subagent_spawn_batch`). Later steps then either:
 
 - re-compacted tools every step (cache-hostile), or
 - failed preflight when active-turn replay grew

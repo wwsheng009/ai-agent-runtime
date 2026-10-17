@@ -12,8 +12,8 @@ func (c Config) MessageSemanticsV2Enabled() bool {
 	return c.WithDefaults().MessageSemanticsV2
 }
 
-// TriggerTurnAutoEnabled reports whether a busy child's followup_task /
-// send_input(interrupt=false) delivery may be consumed by the run-end
+// TriggerTurnAutoEnabled reports whether a busy child's subagent_followup /
+// subagent_input(interrupt=false) delivery may be consumed by the run-end
 // trigger_turn drain (P0-3b). Default true; nil means enabled. It only has an
 // effect when MessageSemanticsV2Enabled is true.
 func (c Config) TriggerTurnAutoEnabled() bool {

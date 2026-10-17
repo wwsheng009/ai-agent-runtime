@@ -10,7 +10,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
-// P2-12 方案 3：把 supervision_snapshot / ack_lifecycle / control_descendant
+// P2-12 方案 3：把 supervision_snapshot / subagent_ack_lifecycle / subagent_control
 // 接到 CLI 宿主的 durable 控制面。
 //
 // scope 口径与注入式 preflight（chat_actor_host.go:2145-2161）完全一致：默认
@@ -113,7 +113,7 @@ func (c *localSupervisionToolController) resolution(ctx context.Context, parentS
 // /debug supervision command (chatDebugSupervisionScopes): the caller's own
 // session is always a root scope and a bound team adds its scope. Restricting
 // writes to the single switched scope made session-scope notifications
-// (direct spawn_agent children) unactionable for a team lead while the digest
+// (direct subagent_spawn children) unactionable for a team lead while the digest
 // still advertised them as action_required.
 func (c *localSupervisionToolController) decisionScopes(ctx context.Context, parentSessionID string) []string {
 	sessionID := c.callerSessionID(parentSessionID)
@@ -161,7 +161,7 @@ func (c *localSupervisionToolController) SupervisionSnapshot(ctx context.Context
 // child/descendant of the caller's own scope with execution_status,
 // supervision_state, heartbeat/progress ages plus the remediation hints this
 // host can actually execute, so a parent inspects a whole batch instead of
-// polling wait_agent / list_agents row by row.
+// polling subagent_wait / subagent_list row by row.
 //
 // Scope 口径与 SupervisionSnapshot 完全相同（模型不能指定 root scope）：
 //   - 普通会话：投影子树与 durable root scope 都是自身会话；

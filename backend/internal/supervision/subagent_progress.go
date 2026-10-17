@@ -45,9 +45,9 @@ type SubagentProgressTarget struct {
 	Path            string
 	Depth           int
 	AgentType       string
-	// ParentToolCallID 是发起该子会话的父侧 tool_call_id（spawn_agent 调用的 id）。
+	// ParentToolCallID 是发起该子会话的父侧 tool_call_id（subagent_spawn 调用的 id）。
 	// 非空时随镜像回填 parent_tool_call_id，前端/ACP 可把子代理进度挂到对应的
-	// spawn_agent 行上；缺省为空（旧路径/降级时保持既有载荷形状）。
+	// subagent_spawn 行上；缺省为空（旧路径/降级时保持既有载荷形状）。
 	ParentToolCallID string
 }
 

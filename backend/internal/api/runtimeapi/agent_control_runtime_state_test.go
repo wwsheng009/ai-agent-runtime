@@ -17,7 +17,7 @@ import (
 
 // 本次修复的核心回归：子代理跑完（容器 idle）后，兼容投影**必须**如实上报
 // `runtime_state=idle`，同时**不得**改写身份状态（仍是 active，直到有人显式
-// close）。否则面板会一直显示「运行中」，直到主代理调用 close_agent。
+// close）。否则面板会一直显示「运行中」，直到主代理调用 subagent_close。
 func TestListAgentControlAgentsReportsIdleRuntimeStateForFinishedChild(t *testing.T) {
 	ctx := context.Background()
 	handler, sessionManager := newAgentRuntimeStateHandler(t)

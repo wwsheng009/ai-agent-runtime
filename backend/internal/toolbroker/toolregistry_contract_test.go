@@ -134,7 +134,7 @@ func TestRegistryResolvesEveryLegacySpelling(t *testing.T) {
 // 方向与语料：遍历注册表（toolregistry 是叶子包，不能反向 import broker），判定用 broker 自己的
 // 函数，故**无需手抄名单**——新增 broker 工具、或把 broker 认得的别名挂到别的组上，都会立刻变红。
 //
-// 反向（registry orchestration ⊆ broker 工具）**故意不成立**，因此这里不钉：`spawn_subagents`
+// 反向（registry orchestration ⊆ broker 工具）**故意不成立**，因此这里不钉：`subagent_spawn_batch`
 // 由 `internal/agent/loop.go:8342` 自建定义、`:3408` 自行派发，不是 broker 工具，但按族归类仍属
 // 编排面。可成立的只有本断言这一个方向。
 func TestBrokerDispatchedNamesAreLabelledOrchestrationInRegistry(t *testing.T) {

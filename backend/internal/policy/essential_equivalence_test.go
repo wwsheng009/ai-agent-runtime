@@ -18,7 +18,7 @@ import (
 //	enter_plan_mode→enter_plan_mode…），再按旧拼写匹配；而 toolbroker 广播的
 //	是**规范名**（subagent_spawn / team_spawn / subagent_list …）。
 //	两张表的方向相反，于是「规范化之后的名字」在 essential 表里全部落空：
-//	窄 allowlist 下 subagent_spawn / team_spawn / spawn_subagents 这些委派入口
+//	窄 allowlist 下 subagent_spawn / team_spawn / subagent_spawn_batch 这些委派入口
 //	会被 filterPolicyBlockedToolDefinitions 静默摘掉定义，而 prompt 仍在教
 //	模型去委派——正是 supervision_tool_registry_test.go 记载的那类假接入。
 //

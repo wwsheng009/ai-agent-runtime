@@ -32,7 +32,7 @@ func TestEventsWaitArgTextKeepsNonBlockingSemantics(t *testing.T) {
 		"agents.waitTimeoutMode=clamp",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("read_agent_events wait text must mention %q, got: %s", want, got)
+			t.Fatalf("subagent_events wait text must mention %q, got: %s", want, got)
 		}
 	}
 	if strings.Contains(got, "host default") {

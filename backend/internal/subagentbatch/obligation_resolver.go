@@ -4,7 +4,7 @@ import "context"
 
 // AgentSessionObligationResolver answers the durable control-plane state of a
 // child agent session referenced by an agent_session: obligation. Lightweight
-// spawn_agent children live in the agent registry (not in the batch store), so
+// subagent_spawn children live in the agent registry (not in the batch store), so
 // the settle/ledger predicates must ask the host for their state instead of
 // assuming the batch table is the whole obligation universe.
 //
@@ -17,7 +17,7 @@ type AgentSessionObligationResolver interface {
 }
 
 // TeamObligationResolver answers the durable control-plane state of a team run
-// referenced by a team: obligation (spawn_team with auto_start). Team runs live
+// referenced by a team: obligation (team_spawn with auto_start). Team runs live
 // in the team store (not the batch store), so the settle/ledger predicates must
 // ask the host for their state instead of assuming the batch table is the whole
 // obligation universe.
@@ -137,7 +137,7 @@ func TurnObligationsSettledWithTeams(
 // TurnObligationsSettledWith for callers that are about to *start* the parent
 // turn again (the settlement wake). TurnObligationsSettledWith skips ids the
 // control plane has no row for — the batch-GC rule: a vanished batch is not
-// evidence that work is still owed. A spawn_agent child is different: while it
+// evidence that work is still owed. A subagent_spawn child is different: while it
 // runs it has no lifecycle row at all, so a missing child row must block the
 // verdict instead of being skipped. Otherwise the first finished child of a
 // cohort would settle the turn while its siblings are still running, and the

@@ -46,7 +46,7 @@ var (
 // 工具能力。契约测试 tool_vocabulary_contract_test.go 会校验这里的每个名字。
 //
 // 角色词表按 runtimepolicy.RoleFamilyForTask 归一：模型实际使用的是
-// spawn_agent 的 agent_type（explore/general/plan）与 spawn_subagents 的
+// subagent_spawn 的 agent_type（explore/general/plan）与 subagent_spawn_batch 的
 // task_type（config/explore/generate/implement/...），旧的精确角色名只是其中
 // 一部分；未归一的 role 会落到 nil（"继承父策略"），其能力面也会丢掉
 // exec_shell/network，子代理因此静默失去 shell。

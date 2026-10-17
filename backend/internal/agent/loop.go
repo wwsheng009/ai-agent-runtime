@@ -139,7 +139,7 @@ type LoopReActConfig struct {
 	// 冒泡为 turn 失败。nil = 完全 no-op（mode=off / 未接入知识层的路径）。
 	OnToolObserved func(ctx context.Context, sessionID string, call types.ToolCall, output string, toolErr string) `yaml:"-"`
 	// AgentSessionObligations resolves child agent sessions parked as
-	// `agent_session:` obligations (lightweight spawn_agent children). nil keeps
+	// `agent_session:` obligations (lightweight subagent_spawn children). nil keeps
 	// the batch-only §6.12 settle predicate; hosts that park child sessions must
 	// wire their durable registry reader so the parked turn can clear once every
 	// listed child reached a terminal control-plane state. A record carrying
@@ -147,7 +147,7 @@ type LoopReActConfig struct {
 	// never clear on a guess).
 	AgentSessionObligations subagentbatch.AgentSessionObligationResolver `yaml:"-"`
 	// TeamObligations resolves team runs parked as `team:` obligations
-	// (spawn_team with auto_start). nil keeps the batch+child-only settle
+	// (team_spawn with auto_start). nil keeps the batch+child-only settle
 	// predicate; hosts that park team runs must wire their durable team-store
 	// reader so the parked turn can clear once every listed team reached a
 	// terminal control-plane state. A record carrying team obligations never
@@ -3558,10 +3558,10 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				} else if !loop.dispatchSubagentsAsync() {
 					// P3 / C4-1：内联阻塞分支已删除 —— 无法异步派发的宿主必须显式
 					// 失败（模型可见错误），不得静默退回阻塞父 turn 的旧路径。
-					result.Error = "spawn_subagents requires asynchronous background dispatch, but this host has background subagent batches disabled or no batch coordinator"
+					result.Error = "subagent_spawn_batch requires asynchronous background dispatch, but this host has background subagent batches disabled or no batch coordinator"
 					loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_batch", result.Error, nil)
 				} else {
-					// P3 / C4-1：内联阻塞分支已删除，spawn_subagents 只有异步语义。
+					// P3 / C4-1：内联阻塞分支已删除，subagent_spawn_batch 只有异步语义。
 					// I9 降级（§6.13）下仍异步派发（不再退回阻塞），但投影恰好一条
 					// 降级告警（不刷屏）；旧 execution_mode 取值保持可读并带
 					// deprecation 提示（AC-P3-1b）。
@@ -3583,9 +3583,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 							"parent_action":  "continue_parent_turn; lifecycle_updates_will_be_delivered_by_supervision",
 						}
 						// G4/H7 真机 E2E 补：回执必须给出**可寻址的身份**。此前只有
-						// batch_id，父代理拿它去 wait_agent 只会得到 agent=missing；
+						// batch_id，父代理拿它去 subagent_wait 只会得到 agent=missing；
 						// 这里带上每个任务行的 task_id（+ 已早绑定的 child_session_id），
-						// 让 `wait_agent(task_id)` / `read_agent_events(task_id)` 从回执
+						// 让 `subagent_wait(task_id)` / `subagent_events(task_id)` 从回执
 						// 就能直达子会话。
 						if coordinator := loop.agent.GetSubagentBatchCoordinator(); coordinator != nil {
 							if store := coordinator.Store(); store != nil {
@@ -7336,19 +7336,19 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 	}
 	rawTasks, ok := args["agents"]
 	if !ok {
-		return nil, fmt.Errorf("spawn_subagents missing agents")
+		return nil, fmt.Errorf("subagent_spawn_batch missing agents")
 	}
 
 	items, ok := rawTasks.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("spawn_subagents agents must be an array")
+		return nil, fmt.Errorf("subagent_spawn_batch agents must be an array")
 	}
 
 	tasks := make([]SubagentTask, 0, len(items))
 	for index, rawItem := range items {
 		item, ok := rawItem.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("spawn_subagents agent %d is invalid", index)
+			return nil, fmt.Errorf("subagent_spawn_batch agent %d is invalid", index)
 		}
 		if err := validateDecodedSubagentFieldTypes(index, item); err != nil {
 			return nil, err
@@ -7412,33 +7412,33 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		// typo cannot silently degrade to fresh context.
 		task.Context = strings.ToLower(strings.TrimSpace(stringValue(item["context"])))
 		if task.Context != "" && task.Context != SubagentContextFresh && task.Context != SubagentContextFork {
-			return nil, fmt.Errorf("spawn_subagents agent %d has invalid context %q (expected \"fresh\" or \"fork\")", index, task.Context)
+			return nil, fmt.Errorf("subagent_spawn_batch agent %d has invalid context %q (expected \"fresh\" or \"fork\")", index, task.Context)
 		}
 		if raw, ok := item["report_schema"]; ok && raw != nil {
 			schema, ok := raw.(map[string]interface{})
 			if !ok {
-				return nil, fmt.Errorf("spawn_subagents agent %d report_schema must be an object", index)
+				return nil, fmt.Errorf("subagent_spawn_batch agent %d report_schema must be an object", index)
 			}
 			task.ReportSchema = schema
 		}
 		if raw, ok := item["handoff_in"]; ok && raw != nil {
 			handoffRaw, ok := raw.(map[string]interface{})
 			if !ok {
-				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in must be an object", index)
+				return nil, fmt.Errorf("subagent_spawn_batch agent %d handoff_in must be an object", index)
 			}
 			encoded, marshalErr := json.Marshal(handoffRaw)
 			if marshalErr != nil {
-				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in is not serializable: %w", index, marshalErr)
+				return nil, fmt.Errorf("subagent_spawn_batch agent %d handoff_in is not serializable: %w", index, marshalErr)
 			}
 			var handoff Handoff
 			if err := json.Unmarshal(encoded, &handoff); err != nil {
-				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in is malformed: %w", index, err)
+				return nil, fmt.Errorf("subagent_spawn_batch agent %d handoff_in is malformed: %w", index, err)
 			}
 			// Admission-time shape check: the wire contract requires all five
 			// keys and a valid status machine. Refuse here with a decode-style
 			// error rather than passing garbage into the child prompt.
 			if err := ValidateHandoff(handoff, 0); err != nil {
-				return nil, fmt.Errorf("spawn_subagents agent %d handoff_in invalid: %w", index, err)
+				return nil, fmt.Errorf("subagent_spawn_batch agent %d handoff_in invalid: %w", index, err)
 			}
 			task.HandoffIn = &handoff
 		}
@@ -7446,10 +7446,10 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 			task.ID = fmt.Sprintf("subagent_%d", index+1)
 		}
 		if task.Goal == "" {
-			return nil, fmt.Errorf("spawn_subagents agent %d missing goal", index)
+			return nil, fmt.Errorf("subagent_spawn_batch agent %d missing goal", index)
 		}
 		if task.ReadOnly && task.ReadOnlySource == "" {
-			task.ReadOnlySource = "spawn_subagents.read_only"
+			task.ReadOnlySource = SpawnSubagentsToolName + ".read_only"
 		}
 		// M5：goal 明显需要写操作却声明 read_only 时，在 spawn 结果里即时追加
 		// route_warning，让父模型在决策点就能纠正（去掉 read_only 或改用纯分析
@@ -7468,8 +7468,8 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 }
 
 // normalizeDecodedSubagentDifficulty canonicalizes the routing hint a model sent
-// for one spawned subagent. spawn_agent already fails closed on an unknown
-// difficulty; spawn_subagents forwarded the raw text, and an unrecognized value
+// for one spawned subagent. subagent_spawn already fails closed on an unknown
+// difficulty; subagent_spawn_batch forwarded the raw text, and an unrecognized value
 // silently degraded to the default rank in subagentDifficultyRank.
 func normalizeDecodedSubagentDifficulty(index int, raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
@@ -7479,7 +7479,7 @@ func normalizeDecodedSubagentDifficulty(index int, raw string) (string, error) {
 	difficulty, ok := modelrouting.NormalizeDifficulty(raw)
 	if !ok {
 		return "", fmt.Errorf(
-			"spawn_subagents agent %d has invalid difficulty %q (accepted: easy|normal|hard|expert, plus common synonyms such as low|medium|high)",
+			"subagent_spawn_batch agent %d has invalid difficulty %q (accepted: easy|normal|hard|expert, plus common synonyms such as low|medium|high)",
 			index, raw)
 	}
 	return difficulty, nil
@@ -7502,7 +7502,7 @@ func normalizeDecodedSubagentCompletionRequirement(index int, raw string) (strin
 		return CompletionRequirementCompleteTask, nil
 	default:
 		return "", fmt.Errorf(
-			"spawn_subagents agent %d has invalid completion_requirement %q (want none|complete_task)",
+			"subagent_spawn_batch agent %d has invalid completion_requirement %q (want none|complete_task)",
 			index, trimmed)
 	}
 }
@@ -7514,7 +7514,7 @@ const (
 	subagentFieldArray  = "JSON array"
 )
 
-// decodedSubagentTopLevelArgTypes lists the JSON kinds the spawn_subagents
+// decodedSubagentTopLevelArgTypes lists the JSON kinds the subagent_spawn_batch
 // top-level options must use. execution_mode used to fall back to a silent
 // default on a wrong kind or a typo such as "backgroud", which turned an
 // explicit request into an unintended dispatch mode with no diagnostic;
@@ -7536,7 +7536,7 @@ func validateDecodedSubagentTopLevelArgs(args map[string]interface{}) error {
 		}
 		if !subagentFieldMatchesType(value, field.want) {
 			return fmt.Errorf(
-				"spawn_subagents field %q must be a %s, got %T (%v); omit it to use the runtime default",
+				"subagent_spawn_batch field %q must be a %s, got %T (%v); omit it to use the runtime default",
 				field.key, field.want, value, value)
 		}
 	}
@@ -7544,13 +7544,13 @@ func validateDecodedSubagentTopLevelArgs(args map[string]interface{}) error {
 		mode, ok := raw.(string)
 		if !ok {
 			return fmt.Errorf(
-				"spawn_subagents field %q must be a JSON string, got %T (%v); omit it — dispatch is always asynchronous",
+				"subagent_spawn_batch field %q must be a JSON string, got %T (%v); omit it — dispatch is always asynchronous",
 				"execution_mode", raw, raw)
 		}
 		if trimmed := strings.TrimSpace(mode); trimmed != "" {
 			if _, err := subagentbatch.ParseExecutionMode(trimmed); err != nil {
 				return fmt.Errorf(
-					"spawn_subagents execution_mode %q is not supported (want background; the deprecated wait|sync stay accepted); omit it — dispatch is always asynchronous",
+					"subagent_spawn_batch execution_mode %q is not supported (want background; the deprecated wait|sync stay accepted); omit it — dispatch is always asynchronous",
 					trimmed)
 			}
 		}
@@ -7558,7 +7558,7 @@ func validateDecodedSubagentTopLevelArgs(args map[string]interface{}) error {
 	return nil
 }
 
-// decodedSubagentFieldTypes lists the JSON kind spawn_subagents expects for every
+// decodedSubagentFieldTypes lists the JSON kind subagent_spawn_batch expects for every
 // key this decoder reads. stringValue/boolValue/intValue/stringSliceValue ignore a
 // mismatched kind and yield the zero value, so a mistyped field used to vanish
 // silently. That mattered most for depends_on: a string instead of an array (or a
@@ -7600,7 +7600,7 @@ func validateDecodedSubagentFieldTypes(index int, item map[string]interface{}) e
 		}
 		if !subagentFieldMatchesType(value, field.want) {
 			return fmt.Errorf(
-				"spawn_subagents agent %d field %q must be a %s, got %T (%v); omit it to use the runtime default",
+				"subagent_spawn_batch agent %d field %q must be a %s, got %T (%v); omit it to use the runtime default",
 				index, field.key, field.want, value, value)
 		}
 		switch field.key {
@@ -7612,7 +7612,7 @@ func validateDecodedSubagentFieldTypes(index int, item map[string]interface{}) e
 			for position, patch := range value.([]interface{}) {
 				if _, ok := patch.(map[string]interface{}); !ok {
 					return fmt.Errorf(
-						"spawn_subagents agent %d field \"patches\" item %d must be an object, got %T (%v)",
+						"subagent_spawn_batch agent %d field \"patches\" item %d must be an object, got %T (%v)",
 						index, position, patch, patch)
 				}
 			}
@@ -7630,7 +7630,7 @@ func validateDecodedSubagentStringItems(index int, key string, value interface{}
 		text, ok := item.(string)
 		if !ok || strings.TrimSpace(text) == "" {
 			return fmt.Errorf(
-				"spawn_subagents agent %d field %q item %d must be a non-empty string, got %T (%v)",
+				"subagent_spawn_batch agent %d field %q item %d must be a non-empty string, got %T (%v)",
 				index, key, position, item, item)
 		}
 	}
@@ -7662,7 +7662,7 @@ func subagentFieldMatchesType(value interface{}, want string) bool {
 	}
 }
 
-// subagentNumericOptionMax bounds the two numeric spawn_subagents options. Both
+// subagentNumericOptionMax bounds the two numeric subagent_spawn_batch options. Both
 // are consumed as ints (tokens, seconds) and both feed time.Duration/int
 // arithmetic, so anything above the int32 range is nonsense that only creates
 // overflow paths.
@@ -7757,10 +7757,10 @@ func validateDecodedSubagentDependencies(tasks []SubagentTask) error {
 	for index, task := range tasks {
 		id := strings.TrimSpace(task.ID)
 		if id == "" {
-			return fmt.Errorf("spawn_subagents agent %d is missing id", index)
+			return fmt.Errorf("subagent_spawn_batch agent %d is missing id", index)
 		}
 		if _, exists := byID[id]; exists {
-			return fmt.Errorf("spawn_subagents agent id %q is duplicated; depends_on cannot address it unambiguously", id)
+			return fmt.Errorf("subagent_spawn_batch agent id %q is duplicated; depends_on cannot address it unambiguously", id)
 		}
 		byID[id] = task
 		ids = append(ids, id)
@@ -7773,21 +7773,21 @@ func validateDecodedSubagentDependencies(tasks []SubagentTask) error {
 				continue
 			}
 			if dependency == strings.TrimSpace(task.ID) {
-				return fmt.Errorf("spawn_subagents agent %q cannot depend on itself", task.ID)
+				return fmt.Errorf("subagent_spawn_batch agent %q cannot depend on itself", task.ID)
 			}
 			if _, ok := byID[dependency]; !ok {
-				return fmt.Errorf("spawn_subagents agent %q depends on unknown agent %q (known ids: %s)",
+				return fmt.Errorf("subagent_spawn_batch agent %q depends on unknown agent %q (known ids: %s)",
 					task.ID, dependency, strings.Join(ids, ", "))
 			}
 		}
 	}
 	if hasSubagentDependencyCycle(byID) {
-		return fmt.Errorf("spawn_subagents dependency graph has cyclic dependencies")
+		return fmt.Errorf("subagent_spawn_batch dependency graph has cyclic dependencies")
 	}
 	return nil
 }
 
-// dispatchSubagentsAsync reports whether spawn_subagents can dispatch through the
+// dispatchSubagentsAsync reports whether subagent_spawn_batch can dispatch through the
 // batch coordinator. P3 / C4-1 deleted the inline blocking fallback, so a host
 // that cannot run background batches fails loudly (a model-visible error) instead
 // of silently blocking the parent turn.
@@ -7978,7 +7978,7 @@ func mergeParkedTurnIDs(existing, added []string) []string {
 	return merged
 }
 
-// parkTeamObligation records a team run dispatched by spawn_team as a
+// parkTeamObligation records a team run dispatched by team_spawn as a
 // `team:` obligation on the current turn (§6.12), mirroring parkBackgroundTurn
 // for subagent batches. The team dispatcher (broker) starts the run as part of
 // the spawn tool call, so the loop — which owns the turn identity and the
@@ -8049,7 +8049,7 @@ func (loop *ReActLoop) parkTeamObligation(ctx context.Context, sessionID, teamID
 }
 
 // parkTeamObligationsFromResults parks one team: obligation for every
-// successful spawn_team call in this step whose run was actually started
+// successful team_spawn call in this step whose run was actually started
 // (auto_start defaults to true, matching the broker). Failures and
 // auto_start=false spawns never park: there is no dispatched work to join.
 func (loop *ReActLoop) parkTeamObligationsFromResults(ctx context.Context, sessionID string, results []toolExecutionResult) {
@@ -8069,7 +8069,7 @@ func (loop *ReActLoop) parkTeamObligationsFromResults(ctx context.Context, sessi
 	}
 }
 
-// toolCallAutoStartDefaultTrue resolves the spawn_team auto_start argument
+// toolCallAutoStartDefaultTrue resolves the team_spawn auto_start argument
 // with the broker's default (true). Value kinds are normalized like the
 // broker's lenient boolean coercion, so "false" cannot be mistaken for start.
 func toolCallAutoStartDefaultTrue(call types.ToolCall) bool {
@@ -8469,7 +8469,7 @@ func cloneOptionValue(value interface{}) interface{} {
 	}
 }
 
-// spawnSubagentsToolDefinition builds the model-visible spawn_subagents
+// spawnSubagentsToolDefinition builds the model-visible subagent_spawn_batch
 // definition. suspensionAvailable is the I9 durability probe (SupportsSuspension,
 // design §6.13): when the batch control plane cannot survive a restart the
 // description must say so, because a parked turn then cannot be resumed after a

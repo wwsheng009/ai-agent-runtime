@@ -58,7 +58,7 @@ func chatDebugExecutionSupervisorText(ctx context.Context, session *ChatSession)
 		cfg := localExecutionSupervisorConfig(host.supervisionConfig)
 		return strings.Join([]string{
 			"执行看门狗（P0-4）：已就绪（尚未启动）",
-			"  说明：首次 spawn_agent 时惰性构建并启动后台巡检；本次渲染为只读，未启动。",
+			"  说明：首次 subagent_spawn 时惰性构建并启动后台巡检；本次渲染为只读，未启动。",
 			"  " + chatDebugSupervisorConfigLine(cfg, localExecutionSupervisorMode()),
 			"  模式覆盖：AICLI_EXECUTION_SUPERVISOR_MODE=enforce。",
 		}, "\n")

@@ -12,7 +12,7 @@ import (
 //
 // 父代理在 spawn 决策点就能看到每个孩子被路由到哪，而不是事后去查事件库：
 //   - 同步批次走 renderSubagentResults 的 `route:` 行；
-//   - spawn_agent 走工具结果的 cache-safe 摘要（internal/toolbroker）。
+//   - subagent_spawn 走工具结果的 cache-safe 摘要（internal/toolbroker）。
 //
 // 数据源与审计事件同源（RouteDecision / 请求侧提示），因此不会出现
 // 「回执说 A、审计说 B」的双口径。回执只做展示，不参与任何路由决策。

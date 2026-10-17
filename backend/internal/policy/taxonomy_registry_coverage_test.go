@@ -13,7 +13,7 @@ import (
 // 注册表里有的条目，policy 两条解析路径都不认识，能力就落到名字子串启发式。
 // 这条缝已经造成两起真事故（2026-10-16 探针实测，见 §8 日志）：
 //
-//   - spawn_subagents（agent 侧注册的批量委派入口，agent.SpawnSubagentsToolName）：
+//   - subagent_spawn_batch（agent 侧注册的批量委派入口，agent.SpawnSubagentsToolName）：
 //     taxonomy 无行、控制面表也无项 ⇒ 只解析出 read_only ⇒
 //     `disabled_capabilities: [agent_management]` 关得住 subagent_spawn / team_spawn，
 //     却关不住它（授权逃逸，与 capability.go 记录的 ack_lifecycle 同类）。
@@ -53,7 +53,7 @@ func TestRegistryEntriesAreAllDeclaredInPolicyTables(t *testing.T) {
 	}
 	require.Empty(t, undeclared,
 		"以下注册表条目既无 taxonomy 行、也不在控制面表：其能力由名字子串决定，两边都会错——"+
-			"授权逃逸（像 spawn_subagents）或误拒（像 code_search）")
+			"授权逃逸（像 subagent_spawn_batch）或误拒（像 code_search）")
 }
 
 // TestRegistryEntriesNeverInferNetworkFromName 钉住"网络能力必须声明"：解析出的
@@ -99,6 +99,6 @@ func TestFixedDefectsStayPinned(t *testing.T) {
 	for _, sibling := range []string{"subagent_spawn", "team_spawn"} {
 		require.Equal(t, []Capability{CapReadOnly, CapAgentManagement},
 			resolver.Resolve(EvalRequest{ToolName: sibling}),
-			"%s 是 spawn_subagents 的对照兄弟，三者必须同级", sibling)
+			"%s 是 subagent_spawn_batch 的对照兄弟，三者必须同级", sibling)
 	}
 }

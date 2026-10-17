@@ -3427,7 +3427,7 @@ func (b *chatRuntimeEventBridge) encodeRenderModelEvent(event runtimeevents.Even
 	if b == nil || b.renderEncoder == nil {
 		return
 	}
-	// 子会话（spawn_agent）内容绝不进入父会话的 Scene/事件日志数据面：
+	// 子会话（subagent_spawn）内容绝不进入父会话的 Scene/事件日志数据面：
 	// 编码器按事件类型兜底 append，会把子代理的正文/思考/工具行写进父会话
 	// 的 canonical Scene 与 replay 日志（见 isForeignSessionContentEvent）。
 	if b.isForeignSessionContentEvent(event) {
@@ -6428,7 +6428,7 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldSuppressTimelineDuringAssistantStream(event) {
 		return
 	}
-	// 子会话（spawn_agent）的 tool.* / assistant.* 流绝不能渲染进父会话
+	// 子会话（subagent_spawn）的 tool.* / assistant.* 流绝不能渲染进父会话
 	// timeline：renderChatRuntimeTimelineEvent 会把 tool.requested 渲染成
 	// "• Running …"、tool.completed 渲染成 "[tool] …"，而本桥以
 	// Subscribe("", …) 订阅全总线（子代理与父代理共用 EventBus，见
@@ -9794,7 +9794,7 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		if batchID := strings.TrimSpace(payloadStringValue(event.Payload["batch_id"])); batchID != "" {
 			title += "（batch " + batchID + "）"
 		}
-		// dedup 身份必须含 turn_id：轻量 spawn_agent 子代理的宿主侧挂起没有
+		// dedup 身份必须含 turn_id：轻量 subagent_spawn 子代理的宿主侧挂起没有
 		// batch_id，若回落到 event.Type，同一会话的第二次挂起会被当成重复丢掉。
 		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
 			Kind:   cell.TimelineTeam,
@@ -11542,7 +11542,7 @@ func chatLLMRequestToolAvailabilityHint(payload map[string]interface{}) string {
 		extraCount = len(preview) - 4
 		preview = preview[:4]
 	}
-	line := fmt.Sprintf("[tools] %d team-run tool(s) require spawn_team first", len(names))
+	line := fmt.Sprintf("[tools] %d team-run tool(s) require team_spawn first", len(names))
 	if len(preview) > 0 {
 		line += ": " + strings.Join(preview, ", ")
 		if extraCount > 0 {

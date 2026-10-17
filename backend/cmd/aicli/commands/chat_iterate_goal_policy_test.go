@@ -12,7 +12,7 @@ import (
 // 执行授权接线：合成 allowlist 只在部署显式开启 iterate_goal 时补入该工具
 // （否则它会在 surface 构建后被 filterPolicyBlockedToolDefinitions 剔除，
 // 形成"工具在目录里、模型永远看不到"的静默失效）；显式 profile / permissions
-// 名单不被扩宽（与 spawn_subagents 同口径）。
+// 名单不被扩宽（与 subagent_spawn_batch 同口径）。
 func TestBuildLocalChatToolPolicyGrantsIterateGoalOnlyWhenEnabled(t *testing.T) {
 	surface := stubLocalChatToolSurface{tools: []runtimeskill.ToolInfo{{Name: "view"}}}
 
@@ -24,7 +24,7 @@ func TestBuildLocalChatToolPolicyGrantsIterateGoalOnlyWhenEnabled(t *testing.T) 
 		t.Fatal("iterate_goal must not be authorized while the deployment keeps it disabled")
 	}
 	if !off.AllowsDefinition(agent.SpawnSubagentsToolName) {
-		t.Fatal("spawn_subagents must stay authorized in the synthesized allowlist")
+		t.Fatal("subagent_spawn_batch must stay authorized in the synthesized allowlist")
 	}
 
 	on := buildLocalChatToolPolicy(&ChatSession{}, surface, nil, true)

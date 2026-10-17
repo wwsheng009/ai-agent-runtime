@@ -13,9 +13,9 @@ import (
 // A key the caller sends that is missing here is reported back through
 // annotateIgnoredBrokerToolArgs as ignored_args instead of being dropped in
 // silence. Silent dropping is the failure class behind the delegation bugs this
-// package already fixed: `goal` reached spawn_agent (prompt lost, child had no
+// package already fixed: `goal` reached subagent_spawn (prompt lost, child had no
 // task) and `tools_whitelist` reached tools that never restrict their tool
-// surface. spawn_agent keeps its hard fail-closed allowlist
+// surface. subagent_spawn keeps its hard fail-closed allowlist
 // (spawnAgentToolArgKeys); every other tool reports the dropped keys, because
 // models legitimately add harmless extra keys that must not fail the call.
 var brokerToolArgKeys = map[string][]string{
@@ -79,7 +79,7 @@ var brokerToolArgKeys = map[string][]string{
 func brokerIgnoredArgHint(toolName, key string) string {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "tools_whitelist", "tool_whitelist", "tools", "whitelist", "allowed_tools":
-		return "no broker tool restricts its tool surface this way; spawn_subagents task entries take tools_whitelist"
+		return "no broker tool restricts its tool surface this way; subagent_spawn_batch task entries take tools_whitelist"
 	case "message", "goal", "task", "prompt", "instruction", "instructions",
 		"task_description", "objective", "goal_text", "content", "text", "description":
 		return "this tool carries no task prompt; subagent_spawn (message, alias goal/task/prompt), subagent_send, subagent_followup and subagent_input do"
@@ -87,7 +87,7 @@ func brokerIgnoredArgHint(toolName, key string) string {
 		"task_type", "task_subject", "isolation",
 		"fork_context", "fork_turns", "completion_requirement", "provider", "model",
 		"reasoning_effort", "thinking_effort":
-		return "delegation options are accepted by subagent_spawn, spawn_subagents and team_spawn"
+		return "delegation options are accepted by subagent_spawn, subagent_spawn_batch and team_spawn"
 	case "job_id", "job_ref":
 		return "job_output addresses a background job by job_id"
 	case "task_id", "task_status":

@@ -1,4 +1,4 @@
-// SubagentBatchCoordinator runs durable, background-able spawn_subagents
+// SubagentBatchCoordinator runs durable, background-able subagent_spawn_batch
 // batches. It is the host-side driver for the host-neutral
 // internal/subagentbatch control plane: it persists a batch + task records,
 // detaches a worker from the parent turn, and runs the existing

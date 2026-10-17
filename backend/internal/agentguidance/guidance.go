@@ -4,7 +4,7 @@
 // internal/toolbroker.
 //
 // The two surfaces drifted before (plan P2-11 方案 2): the prompt told the parent
-// to prefer the longest affordable wait while the wait_agent schema still
+// to prefer the longest affordable wait while the subagent_wait schema still
 // advertised a bare "optional wait timeout in milliseconds", so the model could
 // not know the default, the configured bounds, or that an out-of-range window is
 // rejected instead of clamped. Every sentence that must read identically on both
@@ -19,7 +19,7 @@ import (
 
 const (
 	// WaitBudgetRule is the wait discipline shared by the parent guidance and
-	// the wait_agent tool description. It states both the bounded-window rule
+	// the subagent_wait tool description. It states both the bounded-window rule
 	// and the runtime's wait budget (§16.2/§16.3): after
 	// agents.maxConsecutiveWaitWithoutProgress consecutive waits without
 	// obligation progress the host stops granting active windows and returns
@@ -44,7 +44,7 @@ const (
 	// auditable, so a shortened observation is never silent.
 	WaitResultEchoNote = "The host normalizes every wait window: the result echoes wait_timeout_requested_ms and sets wait_timeout_clamped=true when the effective window differs from the request, so a shortened wait is never silent."
 
-	// EventsWaitNonBlockingNote documents the read_agent_events divergence:
+	// EventsWaitNonBlockingNote documents the subagent_events divergence:
 	// wait_ms=0 means "do not block", not "use the default".
 	EventsWaitNonBlockingNote = "Omit it (or pass 0) for a non-blocking read: wait_ms=0 keeps the immediate-return semantics and is not treated as a request for the default window."
 )

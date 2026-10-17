@@ -17,7 +17,7 @@ type LiveTaskFilter struct {
 // LiveTaskCounter is an optional BatchStore extension: it reports how many
 // non-terminal task records a scope currently holds across every batch. Hosts
 // use it to enforce the live-subagent ceiling (agents.maxThreads) on the batch
-// path, so spawn_subagents can no longer accumulate unbounded idle children the
+// path, so subagent_spawn_batch can no longer accumulate unbounded idle children the
 // way the per-batch/global concurrency limiter alone allowed.
 //
 // It is deliberately an optional interface (checked by type assertion) rather

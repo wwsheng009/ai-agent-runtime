@@ -133,10 +133,14 @@ func TestToolExecutionPolicy_AllowTool_EssentialsGatedByAllowlist(t *testing.T) 
 	if err := prefixed.AllowTool("subagent_spawn"); err != nil {
 		t.Fatalf("expected prefix pattern to admit subagent_spawn, got %v", err)
 	}
-	// spawn_subagents 是独立注册条目（非 subagent_spawn 别名），不落在
-	// subagent_* 前缀内——需要控制面的名单要显式列它或用 "*"。
-	if err := prefixed.AllowTool("spawn_subagents"); err == nil {
-		t.Fatal("expected prefix pattern to keep the standalone spawn_subagents entry gated")
+	// subagent_spawn_batch 的规范名落在 subagent_* 前缀内；旧拼写 spawn_subagents
+	// 经 Normalize 折叠到同一规范名，因此前缀同样放行。要收窄控制面必须写更具体的
+	// 模式，或改用 deny（deny 恒优先）。
+	if err := prefixed.AllowTool("subagent_spawn_batch"); err != nil {
+		t.Fatalf("expected prefix pattern to admit subagent_spawn_batch, got %v", err)
+	}
+	if err := prefixed.AllowTool("spawn_subagents"); err != nil {
+		t.Fatalf("expected the spawn_subagents alias to fold into the subagent_* prefix, got %v", err)
 	}
 	if err := prefixed.AllowTool("job_start"); err == nil {
 		t.Fatal("expected prefix pattern to keep job_start gated")

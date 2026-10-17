@@ -12,7 +12,7 @@ import (
 //
 // The lifecycle projection only schedules a wake for critical + action-required
 // rows (projection.go), so an all-success cohort — the happy path of the
-// spawn_agent contract ("ending the turn is safe: the host parks the turn and
+// subagent_spawn contract ("ending the turn is safe: the host parks the turn and
 // auto-resumes it on the child's terminal event") — would otherwise leave the
 // turn parked forever: the settle predicate runs at run end, and by then the
 // run is already gone. This reason carries that missing edge. It deliberately
@@ -56,7 +56,7 @@ func ScheduleSettledTurnWake(
 
 // ScheduleSettledTurnWakeWithTeams is ScheduleSettledTurnWake extended to
 // team-run obligations (team:): a parked turn may also be waiting on
-// spawn_team runs, so the terminal verdict must consult the team control plane.
+// team_spawn runs, so the terminal verdict must consult the team control plane.
 // A nil team resolver keeps the previous conservative behavior (a record
 // carrying team obligations never settles).
 func ScheduleSettledTurnWakeWithTeams(

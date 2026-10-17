@@ -24,7 +24,7 @@ type CompletionRequirement string
 const (
 	// CompletionNone does not require a completion tool call.
 	CompletionNone CompletionRequirement = "none"
-	// CompletionCompleteTask requires report_task_outcome (complete_task semantics).
+	// CompletionCompleteTask requires team_task_report (complete_task semantics).
 	CompletionCompleteTask CompletionRequirement = "complete_task"
 )
 

@@ -38,11 +38,11 @@ func executeReadAgentEvents(t *testing.T, broker *Broker, caller string, args ma
 	t.Helper()
 	rawResult, meta, err := broker.Execute(context.Background(), caller, ToolSubagentEvents, args)
 	if err != nil {
-		t.Fatalf("read_agent_events failed: %v", err)
+		t.Fatalf("subagent_events failed: %v", err)
 	}
 	result, ok := rawResult.(*AgentEventsResult)
 	if !ok || result == nil {
-		t.Fatalf("unexpected read_agent_events result: %#v", rawResult)
+		t.Fatalf("unexpected subagent_events result: %#v", rawResult)
 	}
 	return result, meta
 }
@@ -196,13 +196,13 @@ func TestBroker_CloseAgent_ForgetsReadWindowStreak(t *testing.T) {
 		t.Fatalf("first read must not be marked unchanged: %#v", result)
 	}
 	if _, _, err := broker.Execute(context.Background(), "parent-session", ToolSubagentClose, map[string]interface{}{"id": "child-1"}); err != nil {
-		t.Fatalf("close_agent failed: %v", err)
+		t.Fatalf("subagent_close failed: %v", err)
 	}
 	if result := read(); result.Unchanged {
-		t.Fatalf("close_agent must forget the read-window streak: %#v", result)
+		t.Fatalf("subagent_close must forget the read-window streak: %#v", result)
 	}
 	if result := read(); !result.Unchanged || result.RepeatCount != 1 {
-		t.Fatalf("expected a fresh streak after close_agent: %#v", result)
+		t.Fatalf("expected a fresh streak after subagent_close: %#v", result)
 	}
 }
 
@@ -296,10 +296,10 @@ func TestBrokerDefinitions_ReadAgentEventsDocumentsUnchangedSignal(t *testing.T)
 		}
 		seen++
 		if !strings.Contains(definition.Description, "unchanged=true") {
-			t.Fatalf("read_agent_events description must document the unchanged signal: %q", definition.Description)
+			t.Fatalf("subagent_events description must document the unchanged signal: %q", definition.Description)
 		}
 	}
 	if seen == 0 {
-		t.Fatalf("expected a read_agent_events definition")
+		t.Fatalf("expected a subagent_events definition")
 	}
 }

@@ -14,7 +14,7 @@ import (
 )
 
 // TestParkTeamObligationAnnouncesOnceAndAppends 守护 §6.12 的 team 半边：
-// spawn_team（auto_start）派发把 team:<id> 记到当前 turn 的挂起记录，同一
+// team_spawn（auto_start）派发把 team:<id> 记到当前 turn 的挂起记录，同一
 // team 重复派发不重复记录、不重复播报（turn.suspended 是边沿事件），后续
 // 派发的第二个 team 只追加义务、不再播报。
 func TestParkTeamObligationAnnouncesOnceAndAppends(t *testing.T) {

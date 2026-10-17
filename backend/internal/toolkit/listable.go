@@ -198,7 +198,7 @@ func isBuiltinCoreToolName(name string) bool {
 		"todos", "artifact_read", "web_search", "fetch", "download",
 		"ask_user_question", "plan_enter", "plan_exit",
 		"job_start", "job_output", "job_cancel", "job_monitor", "job_control", "job_input", "job_list", "job_search",
-		"spawn_subagents", "subagent_spawn", "subagent_list", "subagent_wait", "subagent_events",
+		"subagent_spawn_batch", "spawn_subagents", "subagent_spawn", "subagent_list", "subagent_wait", "subagent_events",
 		"subagent_send", "subagent_input", "subagent_followup", "subagent_close", "subagent_resume",
 		"subagent_approve", "subagent_apply_worktree", "subagent_discard_worktree",
 		"team_spawn", "team_wait", "team_send", "team_mailbox",

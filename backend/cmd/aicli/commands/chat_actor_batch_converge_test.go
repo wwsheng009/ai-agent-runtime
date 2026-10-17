@@ -133,15 +133,15 @@ func listConvergenceRows(t *testing.T, host *localChatRuntimeHost, childSessionI
 
 // TestLocalBatchConvergeHintRendersToolAndChildSessions 钉住 P1-C 的模型面契约：
 // BatchDone 行是 resolution=closed，evaluator 只允许 inspect，因此收敛提示必须
-// 指向 broker 工具 close_agent 并带上真实子会话 id，而不是让模型对终态行发
+// 指向 broker 工具 subagent_close 并带上真实子会话 id，而不是让模型对终态行发
 // control 动作。
 func TestLocalBatchConvergeHintRendersToolAndChildSessions(t *testing.T) {
 	ctx := context.Background()
 	host, _, batchID := newLocalBatchConvergeHost(t, runtimecfg.AutoClosePolicyOff, convergingBatchTasks())
 
 	hint := localBatchConvergeHint(ctx, host, batchID)
-	require.Contains(t, hint, "close_agent")
-	require.Contains(t, hint, fmt.Sprintf("close_agent(batch_id=%q)", batchID),
+	require.Contains(t, hint, "subagent_close")
+	require.Contains(t, hint, fmt.Sprintf("subagent_close(batch_id=%q)", batchID),
 		"the one-call batch form is the primary convergence path (F6)")
 	require.Contains(t, hint, "child-1")
 	require.Contains(t, hint, "child-2")
@@ -149,11 +149,11 @@ func TestLocalBatchConvergeHintRendersToolAndChildSessions(t *testing.T) {
 	require.NotContains(t, hint, "task-3", "tasks without a child session must not leak task ids")
 
 	require.Equal(t,
-		fmt.Sprintf("converge with one close_agent call on the batch: close_agent(batch_id=%q)", batchID),
+		fmt.Sprintf("converge with one subagent_close call on the batch: subagent_close(batch_id=%q)", batchID),
 		localBatchConvergeHint(ctx, nil, batchID),
 		"an unwired host still gets the executable instruction")
 	require.Equal(t,
-		"converge by closing the finished child sessions with close_agent",
+		"converge by closing the finished child sessions with subagent_close",
 		localBatchConvergeHint(ctx, host, "   "),
 		"a missing batch id must not produce a dangling hint")
 }
@@ -213,7 +213,7 @@ func TestLocalConvergeTerminalBatchChildrenHonorsPolicy(t *testing.T) {
 	})
 }
 
-// F6：批次 id 必须在 close 目标解析里展开为全部子会话（一次 close_agent 调用
+// F6：批次 id 必须在 close 目标解析里展开为全部子会话（一次 subagent_close 调用
 // 收敛整批）；无子会话的任务不得泄漏，重复子会话去重，未知 id 回落到普通路径。
 func TestLocalAgentCloseTargetsResolveBatchID(t *testing.T) {
 	ctx := context.Background()

@@ -97,7 +97,7 @@ func TestStartSpawnExecutionRunStoreFailureIsReturned(t *testing.T) {
 }
 
 // TestBrokerSpawnRegistersSupervisedRun verifies the P3 host integration:
-// a successful spawn_agent tool call through the Broker registers a durable
+// a successful subagent_spawn tool call through the Broker registers a durable
 // execution run and surfaces run_id / execution_deadline_at in metadata.
 func TestBrokerSpawnRegistersSupervisedRun(t *testing.T) {
 	ctx := context.Background()

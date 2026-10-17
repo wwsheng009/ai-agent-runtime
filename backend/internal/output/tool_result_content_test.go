@@ -344,7 +344,7 @@ func TestRenderToolResultContentForModel_ExposesReadOnlyPolicyContract(t *testin
 		ToolCallID: "call-read-only",
 		Metadata: map[string]interface{}{
 			toolresult.MetadataPolicyKey:         "read_only",
-			toolresult.MetadataPolicySource:      "spawn_subagents.read_only",
+			toolresult.MetadataPolicySource:      "subagent_spawn_batch.read_only",
 			toolresult.MetadataOverridable:       false,
 			toolresult.MetadataErrorCodeKey:      "AGENT_READ_ONLY",
 			toolresult.MetadataRetryableKey:      false,
@@ -370,7 +370,7 @@ func TestRenderToolResultContentForModel_ExposesReadOnlyPolicyContract(t *testin
 		`"error_code":"AGENT_READ_ONLY"`,
 		`"retryable":false`,
 		`"policy":"read_only"`,
-		`"policy_source":"spawn_subagents.read_only"`,
+		`"policy_source":"subagent_spawn_batch.read_only"`,
 		`"overridable":false`,
 		`"command":"git status; git diff"`,
 		`"next_action":"Submit each read-only command as a separate shell.commands entry."`,

@@ -119,7 +119,7 @@ func FailureCategoryFromErrorCode(code string) string {
 		return FailureCategoryToolError
 	case strings.Contains(normalized, "NOT ALLOWED BY EXECUTION POLICY") || strings.Contains(normalized, "CAPABILITY NOT ALLOWED"):
 		return FailureCategoryToolError
-	// 2026-10-02 真机：spawn_subagents 只给子代理发 tools_whitelist:["shell"]
+	// 2026-10-02 真机：subagent_spawn_batch 只给子代理发 tools_whitelist:["shell"]
 	// 时，子代理调用 glob/ls/grep 被 agent/loop.go 的白名单闸门拒绝，终局错误
 	// 原文是 "tool not allowed for this agent: glob; ..."。这是上一条同类的
 	// 确定性工具侧拒绝，但措辞不同，同样漏在兜底之外：ClassifyFailureCode 先把

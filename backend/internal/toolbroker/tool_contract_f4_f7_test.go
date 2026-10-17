@@ -47,8 +47,8 @@ func TestFinalizeAgentWaitResultTimedOutNamesCheapProbes(t *testing.T) {
 	require.Contains(t, plain.NextAction, "subagent_status")
 }
 
-// F4：send_message 的回执必须显式说明"不会开新 turn"；目标空闲时还要给出
-// followup_task / send_input 的可执行替代，避免把 delivered 误读成"会被处理"。
+// F4：subagent_send 的回执必须显式说明"不会开新 turn"；目标空闲时还要给出
+// subagent_followup / subagent_input 的可执行替代，避免把 delivered 误读成"会被处理"。
 func TestBrokerSendMessageSummaryStatesNoTurn(t *testing.T) {
 	broker := &Broker{AgentSessions: idleSendMessageController{
 		fakeAgentSessionController: &fakeAgentSessionController{},
@@ -61,7 +61,7 @@ func TestBrokerSendMessageSummaryStatesNoTurn(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, false, meta["turn_started"])
 	require.Equal(t, true, meta["no_turn_expected"], "an idle child cannot consume the message on its own")
-	require.Contains(t, meta["next_action"], "followup_task")
+	require.Contains(t, meta["next_action"], "subagent_followup")
 
 	_, followMeta, err := broker.Execute(context.Background(), "parent-session", ToolSubagentFollowup, map[string]interface{}{
 		"target":  "child-1",
@@ -69,7 +69,7 @@ func TestBrokerSendMessageSummaryStatesNoTurn(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotContains(t, followMeta, "turn_started",
-		"followup_task starts a turn; the no-turn receipt is send_message-only")
+		"subagent_followup starts a turn; the no-turn receipt is subagent_send-only")
 }
 
 // idleSendMessageController overrides only SendMessage: the fake base type

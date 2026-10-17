@@ -59,19 +59,19 @@ func TestFilterPolicyBlockedToolDefinitionsKeepsSurfaceWithoutPolicy(t *testing.
 	require.Empty(t, blocked)
 }
 
-// spawn_agent and spawn_subagents must serve the same read_only contract text.
+// subagent_spawn and subagent_spawn_batch must serve the same read_only contract text.
 func TestSpawnSubagentsReadOnlyDescriptionMatchesPolicyConstant(t *testing.T) {
 	definition := spawnSubagentsToolDefinition(true, "", DefaultCapabilities())
 	properties, ok := definition.Parameters["properties"].(map[string]interface{})
-	require.True(t, ok, "spawn_subagents properties missing")
+	require.True(t, ok, "subagent_spawn_batch properties missing")
 	agents, ok := properties["agents"].(map[string]interface{})
-	require.True(t, ok, "spawn_subagents agents property missing")
+	require.True(t, ok, "subagent_spawn_batch agents property missing")
 	items, ok := agents["items"].(map[string]interface{})
-	require.True(t, ok, "spawn_subagents agents items missing")
+	require.True(t, ok, "subagent_spawn_batch agents items missing")
 	itemProperties, ok := items["properties"].(map[string]interface{})
-	require.True(t, ok, "spawn_subagents agents item properties missing")
+	require.True(t, ok, "subagent_spawn_batch agents item properties missing")
 	readOnly, ok := itemProperties["read_only"].(map[string]interface{})
-	require.True(t, ok, "spawn_subagents read_only property missing")
+	require.True(t, ok, "subagent_spawn_batch read_only property missing")
 	require.Equal(t, runtimepolicy.ReadOnlyChildOptionDescription, readOnly["description"])
 }
 

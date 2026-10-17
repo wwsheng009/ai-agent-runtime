@@ -6,7 +6,7 @@ import (
 )
 
 // team_spawn argument kinds, mirroring the fail-closed contract that
-// spawn_subagents applies in internal/agent/loop.go (decodeSubagentTasks).
+// subagent_spawn_batch applies in internal/agent/loop.go (decodeSubagentTasks).
 //
 // The team_spawn decode path reads these keys with direct type assertions (and
 // coerceStringSlice for list fields), which fold a mismatched JSON kind into the

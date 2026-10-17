@@ -420,7 +420,7 @@ func containsWarning(items []string, want string) bool {
 	return false
 }
 
-// spawn_subagents 的 write_paths 是 writer 栅栏的声明入口：解码保留条目本身，
+// subagent_spawn_batch 的 write_paths 是 writer 栅栏的声明入口：解码保留条目本身，
 // 栅栏侧（subagentWritePaths → NormalizeSubagentWritePaths）负责清理与去重，
 // 错类型必须点名报错而不是静默丢弃。
 func TestDecodeSubagentTasksAcceptsWritePaths(t *testing.T) {

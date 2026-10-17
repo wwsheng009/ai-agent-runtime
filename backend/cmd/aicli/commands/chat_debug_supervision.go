@@ -30,7 +30,7 @@ func chatDebugSupervisionUsageText() string {
 		"/debug supervision resolve <notification_id> --state <closed|recovered|failed> [--expected-version N]",
 		"    收敛通知的 resolution 状态；标的已消失的 critical 行可据此退出未决集合。",
 		"/debug supervision control <notification_id> --action <cancel|close|cancel_subtree|retry|reassign> --reason <text> [--cascade target|descendants] [--expected-version N]",
-		"    对通知标的执行 durable 控制动作（与模型侧 control_descendant、HTTP 宿主同一实现，动作全程落 action 审计行）。",
+		"    对通知标的执行 durable 控制动作（与模型侧 subagent_control、HTTP 宿主同一实现，动作全程落 action 审计行）。",
 		chatDebugSupervisorUsageText(),
 	}, "\n"), "\n")
 }
@@ -622,7 +622,7 @@ func chatDebugSupervisionMutationSummary(verb, notificationID, actionID string, 
 
 // chatDebugSupervisionControlActionNames lists the durable control actions the
 // local operator may issue. The set mirrors the HTTP host / model-facing
-// control_descendant surface; LocalControlService.Control re-validates the
+// subagent_control surface; LocalControlService.Control re-validates the
 // action against the notification's server-computed allowed actions.
 func chatDebugSupervisionControlActionNames() []string {
 	return []string{
@@ -669,13 +669,13 @@ func chatDebugSupervisionControlService(session *ChatSession) (*supervision.Loca
 	}
 	plane := session.LocalRuntimeHost.Supervision
 	if plane.Actions == nil {
-		return nil, fmt.Errorf("本地宿主未接线 action service：control 无法执行（HTTP 宿主与模型侧 control_descendant 不受影响）")
+		return nil, fmt.Errorf("本地宿主未接线 action service：control 无法执行（HTTP 宿主与模型侧 subagent_control 不受影响）")
 	}
 	return supervision.NewLocalControlService(plane.Store, plane.Actions), nil
 }
 
 // runChatDebugSupervisionControl is the operator half of P2-12: the model-facing
-// control_descendant tool and the HTTP host could already run cancel/close/…,
+// subagent_control tool and the HTTP host could already run cancel/close/…,
 // but an interactive CLI operator could only ack/defer/resolve, so a critical
 // row whose subject is a stuck child had no local convergence path unless the
 // model happened to call the tool itself.

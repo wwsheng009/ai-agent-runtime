@@ -53,26 +53,26 @@ func TestCollaborationToolSchemasShareWaitBoundsAndDiscipline(t *testing.T) {
 			case ToolSubagentWait:
 				seen[ToolSubagentWait]++
 				if !strings.Contains(def.Description, agentguidance.WaitDisciplineText()) {
-					t.Fatalf("%s: wait_agent must carry the shared wait discipline, got: %s", label, def.Description)
+					t.Fatalf("%s: subagent_wait must carry the shared wait discipline, got: %s", label, def.Description)
 				}
 				if !strings.Contains(def.Description, agentguidance.WaitEscalationRule) {
-					t.Fatalf("%s: wait_agent must warn that timing-only changes are not progress, got: %s", label, def.Description)
+					t.Fatalf("%s: subagent_wait must warn that timing-only changes are not progress, got: %s", label, def.Description)
 				}
 				if got := waitSchemaPropDescription(t, def, "timeout_ms"); got != wantTimeout {
-					t.Fatalf("%s: wait_agent timeout_ms must describe the enforced bounds, got: %s", label, got)
+					t.Fatalf("%s: subagent_wait timeout_ms must describe the enforced bounds, got: %s", label, got)
 				}
 			case ToolSubagentEvents:
 				seen[ToolSubagentEvents]++
 				if got := waitSchemaPropDescription(t, def, "wait_ms"); got != wantWait {
-					t.Fatalf("%s: read_agent_events wait_ms must describe the enforced bounds, got: %s", label, got)
+					t.Fatalf("%s: subagent_events wait_ms must describe the enforced bounds, got: %s", label, got)
 				}
 			case ToolTeamWait:
 				seen[ToolTeamWait]++
 				if !strings.Contains(def.Description, agentguidance.WaitDisciplineText()) {
-					t.Fatalf("%s: wait_team must carry the shared wait discipline, got: %s", label, def.Description)
+					t.Fatalf("%s: team_wait must carry the shared wait discipline, got: %s", label, def.Description)
 				}
 				if got := waitSchemaPropDescription(t, def, "timeout_ms"); got != wantTimeout {
-					t.Fatalf("%s: wait_team timeout_ms must describe the enforced bounds, got: %s", label, got)
+					t.Fatalf("%s: team_wait timeout_ms must describe the enforced bounds, got: %s", label, got)
 				}
 			}
 		}
@@ -87,7 +87,7 @@ func TestCollaborationToolSchemasShareWaitBoundsAndDiscipline(t *testing.T) {
 		t.Fatalf("no broker configuration exposed the collaboration wait tools; the runtime guard would be vacuous")
 	}
 	if teamExposed == 0 {
-		t.Fatalf("no broker configuration exposed wait_team; the runtime guard would be vacuous")
+		t.Fatalf("no broker configuration exposed team_wait; the runtime guard would be vacuous")
 	}
 
 	if !strings.Contains(wantTimeout, "wait_timeout_clamped") {
@@ -102,7 +102,7 @@ func TestCollaborationToolSchemasShareWaitBoundsAndDiscipline(t *testing.T) {
 // same guard. Some definition variants are only reachable for hosts this test
 // cannot construct (mailbox-only parent vs child-session host), so the file
 // itself is checked too: no definition may keep the pre-P2-11 bare wait text,
-// and every wait_agent / read_agent_events entry must reference the shared
+// and every subagent_wait / subagent_events entry must reference the shared
 // helpers. Together with the shared constants this makes "synced in one variant
 // only" impossible.
 func TestCollaborationToolSchemaSourceHasNoLegacyWaitText(t *testing.T) {
@@ -128,20 +128,20 @@ func TestCollaborationToolSchemaSourceHasNoLegacyWaitText(t *testing.T) {
 		case strings.Contains(line, "Name:        ToolSubagentWait"):
 			counts[ToolSubagentWait]++
 			if !containsWithin(lines, i, 6, "agentguidance.WaitDisciplineText()") {
-				t.Fatalf("wait_agent definition at broker.go:%d does not attach the shared discipline text", i+1)
+				t.Fatalf("subagent_wait definition at broker.go:%d does not attach the shared discipline text", i+1)
 			}
 		case strings.Contains(line, "Name:        ToolSubagentEvents"):
 			counts[ToolSubagentEvents]++
 			if !containsWithin(lines, i, 24, "agentguidance.EventsWaitArgText(") {
-				t.Fatalf("read_agent_events definition at broker.go:%d does not describe the enforced wait bounds", i+1)
+				t.Fatalf("subagent_events definition at broker.go:%d does not describe the enforced wait bounds", i+1)
 			}
 		case strings.Contains(line, "Name:        ToolTeamWait"):
 			counts[ToolTeamWait]++
 			if !containsWithin(lines, i, 24, "agentguidance.WaitTimeoutArgText(") {
-				t.Fatalf("wait_team definition at broker.go:%d does not describe the enforced wait bounds", i+1)
+				t.Fatalf("team_wait definition at broker.go:%d does not describe the enforced wait bounds", i+1)
 			}
 			if !containsWithin(lines, i, 6, "agentguidance.WaitDisciplineText()") {
-				t.Fatalf("wait_team definition at broker.go:%d does not attach the shared discipline text", i+1)
+				t.Fatalf("team_wait definition at broker.go:%d does not attach the shared discipline text", i+1)
 			}
 		}
 	}

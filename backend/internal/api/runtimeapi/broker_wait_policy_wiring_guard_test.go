@@ -11,10 +11,10 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
 
-// wait_team resolves its observation window inside the tool broker, so an
-// operator config honored by wait_agent / read_agent_events must reach the
+// team_wait resolves its observation window inside the tool broker, so an
+// operator config honored by subagent_wait / subagent_events must reach the
 // broker as well. This guards the host wiring itself: if the stamp is dropped
-// (or moved into a branch a plain session does not take), wait_team silently
+// (or moved into a branch a plain session does not take), team_wait silently
 // falls back to the shared defaults and agents.maxWaitTimeoutMs stops bounding
 // every wait path — the exact drift P2-11 asks to rule out.
 func TestApplyAgentRuntimeServicesStampsBrokerWaitTimeoutPolicy(t *testing.T) {
@@ -31,7 +31,7 @@ func TestApplyAgentRuntimeServicesStampsBrokerWaitTimeoutPolicy(t *testing.T) {
 
 	broker := apiAgent.GetToolBroker()
 	require.NotNil(t, broker, "expected the runtime services pass to install a tool broker")
-	require.NotNil(t, broker.WaitTimeoutPolicy, "the broker must resolve wait_team windows from the live agents policy")
+	require.NotNil(t, broker.WaitTimeoutPolicy, "the broker must resolve team_wait windows from the live agents policy")
 
 	policy := broker.WaitTimeoutPolicy().Normalize()
 	assert.Equal(t, 45000, policy.DefaultMs)

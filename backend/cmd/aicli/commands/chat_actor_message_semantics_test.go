@@ -62,7 +62,7 @@ func TestLocalActorRegistryV2SendInputBusyQueuesInsteadOfError(t *testing.T) {
 		ID:      "cli-v2-sendinput-child",
 		Message: "queued cli input",
 	})
-	require.NoError(t, err, "v2 send_input(interrupt=false) on a busy child must queue instead of failing")
+	require.NoError(t, err, "v2 subagent_input(interrupt=false) on a busy child must queue instead of failing")
 	require.NotNil(t, result)
 	assert.True(t, result.Queued)
 	assert.True(t, result.Delivered)
@@ -87,8 +87,8 @@ func TestLocalActorRegistryV2SendInputBusyQueuesInsteadOfError(t *testing.T) {
 			assert.Equal(t, "cli-v2-sendinput-child", event.Payload["target_session_id"])
 		}
 	}
-	assert.True(t, mailboxDelivered, "busy send_input must write the durable mailbox row")
-	assert.True(t, auditSeen, "busy send_input must write the delivery audit event")
+	assert.True(t, mailboxDelivered, "busy subagent_input must write the durable mailbox row")
+	assert.True(t, auditSeen, "busy subagent_input must write the delivery audit event")
 }
 
 func TestLocalActorRegistryV2SendInputApprovalFirstNextAction(t *testing.T) {

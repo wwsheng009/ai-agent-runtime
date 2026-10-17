@@ -382,7 +382,7 @@ func TestPrintVisibleChatHistory_HidesFactLedger(t *testing.T) {
 		*runtimetypes.NewUserMessage("continue"),
 		{
 			Role:     "assistant",
-			Content:  "Verified fact ledger (authoritative over compacted prose):\n- [workspace] read_agent_events failed {\"error\":\"unknown agent session reference\"}",
+			Content:  "Verified fact ledger (authoritative over compacted prose):\n- [workspace] subagent_events failed {\"error\":\"unknown agent session reference\"}",
 			Metadata: runtimetypes.NewMetadata(),
 		},
 		*runtimetypes.NewUserMessage("next"),
@@ -444,7 +444,7 @@ func TestPrintVisibleChatHistory_HidesLegacyLedgerEvenWithoutMetadata(t *testing
 	session := &ChatSession{
 		SystemPromptText: "You are a helpful assistant.",
 	}
-	ledger := runtimetypes.NewAssistantMessage("Verified fact ledger (authoritative over compacted prose):\n- [workspace] read_agent_events failed")
+	ledger := runtimetypes.NewAssistantMessage("Verified fact ledger (authoritative over compacted prose):\n- [workspace] subagent_events failed")
 	replaceRuntimeMessages(session, []runtimetypes.Message{
 		*runtimetypes.NewSystemMessage("You are a helpful assistant."),
 		*runtimetypes.NewUserMessage("continue"),

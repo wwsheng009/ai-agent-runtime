@@ -17,7 +17,7 @@ import (
 // 的调用点）。宿主重启后，被 resume/恢复续跑的子代理再次结束时，新进程里没有任何
 // 监听者：mailbox `subagent.completed`、supervision 通知、wake 全部不产生，主 agent
 // 永久 idle，只能等下一次自然 turn 的 preflight digest 或人工 /supervision wake。
-// batch（spawn_subagents）有启动重放（localSubagentBatchStartupReplay），轻量子会话
+// batch（subagent_spawn_batch）有启动重放（localSubagentBatchStartupReplay），轻量子会话
 // 没有 —— 本文件补上这两条收敛：
 //
 //  1. rebindLocalChildCompletionSubscriptions：宿主启动 + 子会话 resume 时为

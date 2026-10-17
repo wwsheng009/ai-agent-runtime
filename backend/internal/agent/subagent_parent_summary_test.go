@@ -192,7 +192,7 @@ func TestSummarizeSubagentReportsForParentTruncatedSummaryKeepsDereferencePointe
 	require.Greater(t, projection["summary_runes"], 0)
 }
 
-// C4-1: spawn_subagents 只有异步语义后，父会话拿到的是 batch 句柄，子任务的大段
+// C4-1: subagent_spawn_batch 只有异步语义后，父会话拿到的是 batch 句柄，子任务的大段
 // 输出不再经父工具消息回流（旧断言"父工具消息被截断 + artifact 归档"随内联阻塞
 // 分支一起删除）。子报告回到父会话时的预算裁剪由
 // summarizeSubagentReportsForParent 负责，见本文件上半部分的单元用例。
@@ -292,7 +292,7 @@ func TestSpawnSubagentsLargeResultStaysOutOfParentContext(t *testing.T) {
 	require.Contains(t, toolMessage.Content, `"batch_id"`)
 	require.Contains(t, toolMessage.Content, "continue_parent_turn")
 	// G4/H7 真机 E2E 补：回执必须携带可寻址的任务身份（task_id），父代理据此
-	// 才能在运行期 wait_agent(task_id) / read_agent_events(task_id) 直达子会话。
+	// 才能在运行期 subagent_wait(task_id) / subagent_events(task_id) 直达子会话。
 	require.Contains(t, toolMessage.Content, `"tasks"`)
 	require.Contains(t, toolMessage.Content, `"large-child"`)
 	require.NotContains(t, toolMessage.Content, "CHILD_OUTPUT_END")

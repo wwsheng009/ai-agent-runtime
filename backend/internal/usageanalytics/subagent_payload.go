@@ -31,7 +31,7 @@ type SubagentCompletion struct {
 	SubagentID      string
 	ParentSessionID string
 	ChildSessionID  string
-	// BatchID（schema v8）：派发批次维度；同一父会话的多次 spawn_subagents 会复用
+	// BatchID（schema v8）：派发批次维度；同一父会话的多次 subagent_spawn_batch 会复用
 	// 合成 id（subagent_1…），批次维度用于把两次独立运行分开（历史/非批次载荷为空串）。
 	BatchID string
 	Role    string

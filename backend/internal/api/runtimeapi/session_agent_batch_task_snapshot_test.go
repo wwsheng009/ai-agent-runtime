@@ -178,7 +178,7 @@ func newAPIPreDispatchFailureFixture(t *testing.T) (*sessionAgentController, str
 // TestWaitAgentTaskIDProducesPreDispatchFailureObservation 钉住 doc1 §7.10 新遗留①：
 // 派发前失败的终态任务（无子会话绑定）应当：
 //  1. 解析层不再返回 "retry shortly" 硬错，而是按可寻址 id 透传；
-//  2. wait_agent(task_id) 返回可读的失败观测（stopped + 错误分类 + 任务身份），
+//  2. subagent_wait(task_id) 返回可读的失败观测（stopped + 错误分类 + 任务身份），
 //     让父代理直接读到批次失败原因，而不是无意义重试。
 func TestWaitAgentTaskIDProducesPreDispatchFailureObservation(t *testing.T) {
 	controller, _ := newAPIPreDispatchFailureFixture(t)
@@ -203,7 +203,7 @@ func TestWaitAgentTaskIDProducesPreDispatchFailureObservation(t *testing.T) {
 }
 
 // TestWaitAgentObligationsDirectFromTargetsWithoutParkedRecord 钉住 doc1 §7.9
-// 剩余②：没有 §6.12 挂起记录时，wait_agent 仍按显式等待的目标直出 obligations[]
+// 剩余②：没有 §6.12 挂起记录时，subagent_wait 仍按显式等待的目标直出 obligations[]
 // （行形状与挂起路径同源），而不是只给 agent 投影；未知目标不得臆造行。
 func TestWaitAgentObligationsDirectFromTargetsWithoutParkedRecord(t *testing.T) {
 	controller, batchID := newAPIBatchSnapshotFixture(t)
@@ -228,7 +228,7 @@ func TestWaitAgentObligationsDirectFromTargetsWithoutParkedRecord(t *testing.T) 
 }
 
 // TestWaitAgentDirectObligationsFinalizeWhenTargetTerminal 钉住直出账本与收尾门的
-// 配合：目标批次已终态时，wait_agent 立即返回 finalize，且 obligations[] 带终态行
+// 配合：目标批次已终态时，subagent_wait 立即返回 finalize，且 obligations[] 带终态行
 // （baseline 语义），不会留下"永远再等一次"的空转。
 func TestWaitAgentDirectObligationsFinalizeWhenTargetTerminal(t *testing.T) {
 	controller, batchID := newAPIBatchSnapshotFixture(t)

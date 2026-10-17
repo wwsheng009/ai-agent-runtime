@@ -8,7 +8,7 @@ import (
 // WaitLedgerRow is one obligation row of the wait-time ledger view (plan §C3-4
 // 统一返回契约 obligations[]). Rows are read back from the same durable plane
 // the settle check trusts — the §6.12 parked-turn record plus the batch store —
-// so wait_agent / wait_team can never report a ledger the control plane
+// so subagent_wait / team_wait can never report a ledger the control plane
 // disagrees with, and no new storage is introduced.
 type WaitLedgerRow struct {
 	// ObligationID identifies the obligation (today: the batch id).
@@ -47,7 +47,7 @@ func BuildWaitLedger(ctx context.Context, store BatchStore, record *TurnSuspensi
 }
 
 // BuildWaitLedgerWith renders the obligation ledger including child agent
-// sessions parked by spawn_agent (obligation ids carrying
+// sessions parked by subagent_spawn (obligation ids carrying
 // AgentSessionObligationPrefix). Batch rows keep the original order; agent
 // session rows follow in record order. A missing durable row stays
 // WaitLedgerStateMissing and non-terminal (never evidence of completion), and a

@@ -33,7 +33,7 @@ func TestStringValueRendersNilAsEmpty(t *testing.T) {
 }
 
 // TestBroker_Execute_ResumeAgentTreatsNullIDAsMissing guards the reported
-// regression: resume_agent called with a JSON null id returned
+// regression: subagent_resume called with a JSON null id returned
 // id/session_id = "<nil>" and materialized a session row named "<nil>".
 func TestBroker_Execute_ResumeAgentTreatsNullIDAsMissing(t *testing.T) {
 	controller := &fakeAgentSessionController{}
@@ -53,7 +53,7 @@ func TestBroker_Execute_ResumeAgentTreatsNullIDAsMissing(t *testing.T) {
 
 // TestBroker_Execute_RejectsRenderedPlaceholderSessionRef keeps every tool that
 // acts on an existing child session from accepting the "<nil>" text a model
-// copies out of a rendered tool result. close_agent is destructive, so an
+// copies out of a rendered tool result. subagent_close is destructive, so an
 // unusable reference must not reach the controller at all.
 func TestBroker_Execute_RejectsRenderedPlaceholderSessionRef(t *testing.T) {
 	cases := map[string]struct {
@@ -186,7 +186,7 @@ func TestBroker_Execute_SpawnTeamNormalizesPlaceholderIDs(t *testing.T) {
 	}
 	result, ok := raw.(SpawnTeamResult)
 	if !ok {
-		t.Fatalf("unexpected spawn_team result: %#v", raw)
+		t.Fatalf("unexpected team_spawn result: %#v", raw)
 	}
 	if len(result.TeammateIDs) != 1 || len(result.TaskIDs) != 1 {
 		t.Fatalf("expected one teammate and one task, got %#v", result)

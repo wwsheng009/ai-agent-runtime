@@ -140,7 +140,7 @@ func upsertAPITeamNotification(t *testing.T, store *supervision.SQLiteSupervisio
 // TestHandlerSupervisionToolController_DescendantsCoversWholeBatch is the P0-A
 // acceptance scenario on the HTTP host: a parent that spawned three children
 // reads all three in one call (2 running + 1 stalled) instead of polling
-// wait_agent row by row.
+// subagent_wait row by row.
 func TestHandlerSupervisionToolController_DescendantsCoversWholeBatch(t *testing.T) {
 	handler, _ := newAPISupervisionToolTestHandler(t, "api-supervision-descendants")
 
@@ -293,7 +293,7 @@ func TestHandlerSupervisionToolController_TeamLeadRetainsSessionScopeForAck(t *t
 	require.NotNil(t, controller)
 	require.Equal(t, []string{"lead-session", teamID}, controller.decisionScopes(context.Background(), "lead-session"))
 
-	// A direct spawn_agent child of the lead: the durable row is rooted at the
+	// A direct subagent_spawn child of the lead: the durable row is rooted at the
 	// session, not the team. The digest advertises it; ack must accept it.
 	record, err := store.UpsertNotification(context.Background(), supervision.Notification{
 		RootScopeID:           "lead-session",

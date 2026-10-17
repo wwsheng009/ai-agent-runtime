@@ -744,7 +744,7 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		childSession.SetContext(toolbroker.AgentSessionContextParentWorkspacePath, sessionmeta.String(parentSession.Metadata.Context, sessionmeta.WorkspacePath))
 		sessionmeta.CopyParentWorkspaceBinding(&childSession.Metadata.Context, parentSession.Metadata.Context)
 	}
-	// 父侧工具调用归位（D）：broker 在 spawn_agent 执行上下文注入
+	// 父侧工具调用归位（D）：broker 在 subagent_spawn 执行上下文注入
 	// ParentToolCallID，宿主落进子会话上下文，进度镜像据此回填
 	// parent_tool_call_id（见 subscribeLocalAgentCompletion）。
 	if parentToolCallID := strings.TrimSpace(args.ParentToolCallID); parentToolCallID != "" {
@@ -902,7 +902,7 @@ func (r *localActorRegistry) cleanupLocalSpawnIsolation(ctx context.Context, chi
 		SessionID: strings.TrimSpace(session.ID),
 	}
 	// §2.4-1 产物保全：close / 强杀路径不得静默销毁未提交产物。脏 worktree
-	// 保留给父代理显式 apply_agent_worktree / discard_agent_worktree，并记录
+	// 保留给父代理显式 subagent_apply_worktree / subagent_discard_worktree，并记录
 	// disposition；干净 worktree 照旧移除。脏检查失败按旧行为移除——worktree
 	// 已不存在时 git status 必然失败，此时删除是安全且必要的收尾。
 	if dirty, statusErr := handle.DiffStat(ctx); statusErr == nil && strings.TrimSpace(dirty) != "" {
@@ -999,7 +999,7 @@ func (r *localActorRegistry) ApplyWorktree(ctx context.Context, args toolbroker.
 		// child's remaining writes (2026-09-27 incident: a child applied its own
 		// worktree mid-turn). Wait or close first; no evidence never blocks.
 		return nil, fmt.Errorf(
-			"apply refused: session %s is still executing; wait for it to finish (wait_agent) or close it (close_agent) before landing its worktree",
+			"apply refused: session %s is still executing; wait for it to finish (subagent_wait) or close it (subagent_close) before landing its worktree",
 			sessionID,
 		)
 	}
@@ -1093,7 +1093,7 @@ func (r *localActorRegistry) DiscardWorktree(ctx context.Context, args toolbroke
 		// Removing a worktree under a session that still holds a turn deletes
 		// the child's workspace while it may still be writing.
 		return nil, fmt.Errorf(
-			"discard refused: session %s is still executing; wait for it to finish (wait_agent) or close it (close_agent) before discarding its worktree",
+			"discard refused: session %s is still executing; wait for it to finish (subagent_wait) or close it (subagent_close) before discarding its worktree",
 			sessionID,
 		)
 	}
@@ -1163,7 +1163,7 @@ func annotateLocalSpawnWorktreeCompletion(ctx context.Context, r *localActorRegi
 		if diff, err := handle.DiffStat(ctx); err == nil && strings.TrimSpace(diff) != "" {
 			payload["worktree_diff_stat"] = diff
 		}
-		payload["next_action"] = "Call apply_agent_worktree to land changes in the main repo, or discard_agent_worktree to drop them. close_agent removes a clean worktree; one with uncommitted changes is kept for this explicit choice."
+		payload["next_action"] = "Call subagent_apply_worktree to land changes in the main repo, or subagent_discard_worktree to drop them. subagent_close removes a clean worktree; one with uncommitted changes is kept for this explicit choice."
 		return
 	}
 	if disposition != "" {
@@ -1269,8 +1269,8 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 
 	// P0-1c: 子会话 tool.progress → live-only 父侧镜像（与 API 宿主
 	// session_runtime_support.go 的接线对等）。目标身份与完成投影同一口径。
-	// 父侧工具调用归位（D）：spawn_agent 的 tool_call_id 由 broker 注入 spawn 参数，
-	// 宿主写入子会话上下文；镜像回填后前端/ACP 能把进度挂到对应 spawn_agent 行。
+	// 父侧工具调用归位（D）：subagent_spawn 的 tool_call_id 由 broker 注入 spawn 参数，
+	// 宿主写入子会话上下文；镜像回填后前端/ACP 能把进度挂到对应 subagent_spawn 行。
 	parentToolCallID := ""
 	if value, ok := childSession.GetContext(toolbroker.AgentSessionContextParentToolCallID); ok {
 		if text, ok := value.(string); ok {
@@ -1396,9 +1396,9 @@ func (r *localActorRegistry) handleLocalChildTerminal(ctx context.Context, paren
 	// 方案 §2.1 / D4：本地镜像载荷补齐规范化字段（success 权威、status
 	// 兼容别名），与 runtime-server 侧共用同一归一化实现。
 	payload["source"] = "agent_controller"
-	// v8：把批次维度带给分析侧（同一父会话的第二个 spawn_subagents 批次会复用
+	// v8：把批次维度带给分析侧（同一父会话的第二个 subagent_spawn_batch 批次会复用
 	// 合成 id，缺 batch_id 时两次独立运行会被 usage_subagents 并成一行）。查不到
-	// （非批次 spawn_agent / 非 durable 宿主）保持缺省空串，不影响既有合并语义。
+	// （非批次 subagent_spawn / 非 durable 宿主）保持缺省空串，不影响既有合并语义。
 	if r.Host.SubagentBatches != nil {
 		if _, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, childSessionID); err == nil && ok {
 			if trimmed := strings.TrimSpace(batchID); trimmed != "" {
@@ -1415,7 +1415,7 @@ func (r *localActorRegistry) handleLocalChildTerminal(ctx context.Context, paren
 	}
 	r.projectLocalAgentCompletion(ctx, parentSessionID, childSessionID, localAgentCompletionStatus(event), eventType)
 	// Keep worktree after completion so parent can apply/discard explicitly.
-	// close_agent still cleans remaining worktrees.
+	// subagent_close still cleans remaining worktrees.
 	annotateLocalSpawnWorktreeCompletion(ctx, r, childSession, payload)
 	completionMessage, mailboxErr := r.deliverSubagentCompletionMailbox(ctx, parentSessionID, childSessionID, childPath, childType, eventType, payload)
 	payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
@@ -1471,7 +1471,7 @@ func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, pa
 	if projectErr == nil && !supervision.LifecycleWakeScheduled(notification) {
 		// 成功（info/closed）终态不排生命周期 wake（projection 只在 critical +
 		// action_required 时排），而结算谓词只在 run 结束跑：没有这一笔，
-		// "全部义务成功"的挂起 turn 会永久停放，与 spawn_agent 的
+		// "全部义务成功"的挂起 turn 会永久停放，与 subagent_spawn 的
 		// "auto-resumes it on the child's terminal event" 契约相悖。
 		// 结清判定以 durable 账本为准（ListTurnSuspensions + settle 谓词），
 		// 不依赖派生缓存；排出的 wake 由下面的 wakeSupervisedParent 立即排空。
@@ -2597,9 +2597,9 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 	if err != nil {
 		return nil, err
 	}
-	// 统一观测面（2026-10-14）：spawn_subagents 的子代理只写批任务账本、不落
+	// 统一观测面（2026-10-14）：subagent_spawn_batch 的子代理只写批任务账本、不落
 	// SessionStore/注册表，subagent_list 此前对该派发方式恒为空；与 /agents
-	// 选择器、wait_agent 快照（batchTaskSnapshot）同一作用域纪律，把本会话的
+	// 选择器、subagent_wait 快照（batchTaskSnapshot）同一作用域纪律，把本会话的
 	// 批任务行并入列表。path_prefix 收窄到子树时批任务行（无 agent 路径）不
 	// 参与过滤命中，避免用合成路径误导 target 解析；终态行遵循 include_closed。
 	if toolbroker.PathPrefixCoversWholeAgentTree(args.PathPrefix) {
@@ -2612,8 +2612,8 @@ func (r *localActorRegistry) List(ctx context.Context, parentSessionID string, a
 	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
 }
 
-// listLocalAgentStatusItems 读取会话/注册表来源的子代理行（spawn_agent 派发的
-// 轻量会话）。spawn_subagents 的账本来源由 List 统一合并，两种派发方式共用同一
+// listLocalAgentStatusItems 读取会话/注册表来源的子代理行（subagent_spawn 派发的
+// 轻量会话）。subagent_spawn_batch 的账本来源由 List 统一合并，两种派发方式共用同一
 // 去重与排序口径。
 func (r *localActorRegistry) listLocalAgentStatusItems(ctx context.Context, scopeSessionID string, args toolbroker.ListAgentsArgs) ([]toolbroker.AgentStatusResult, error) {
 	if store := r.localAgentRegistryStore(); store != nil {
@@ -2763,9 +2763,9 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 				}
 				triggered = true
 				// §6.12：触发型投递同样是把一次新 run 交给既有子会话——与
-				// spawn_agent 派发同语义，调用者的 turn 必须能在子会话终态前挂起
+				// subagent_spawn 派发同语义，调用者的 turn 必须能在子会话终态前挂起
 				// 等待；否则回合结束只会冻结 "Worked for …"，而子代理仍在跑
-				// （真机 2026-09-30：resume_agent + followup_task 的 turn 无挂起记录，
+				// （真机 2026-09-30：subagent_resume + subagent_followup 的 turn 无挂起记录，
 				// 状态行停在完成摘要）。仅对调用者自己树内的子会话登记义务。
 				r.parkTriggeredChildObligation(ctx, fromSessionID, sessionID)
 			}
@@ -2836,8 +2836,8 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 	return result, nil
 }
 
-// parkTriggeredChildObligation registers a triggered delivery (followup_task /
-// send_message with trigger) as a durable obligation of the caller's current
+// parkTriggeredChildObligation registers a triggered delivery (subagent_followup /
+// subagent_send with trigger) as a durable obligation of the caller's current
 // turn when the target is a child session inside the caller's own tree. It
 // mirrors the dispatch-time park in Spawn (§6.12): a parent that hands new work
 // to an existing child and then ends its turn must park instead of showing a
@@ -2861,7 +2861,7 @@ func (r *localActorRegistry) parkTriggeredChildObligation(ctx context.Context, c
 	if store == nil {
 		return
 	}
-	// IncludeClosed: a resumed child (resume_agent + followup_task) keeps its
+	// IncludeClosed: a resumed child (subagent_resume + subagent_followup) keeps its
 	// terminal identity row until the host revives it; the row is still the tree
 	// evidence that this target is the caller's own child.
 	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
@@ -2900,8 +2900,8 @@ func (r *localActorRegistry) recordLocalAgentMailboxDeliveryAudit(ctx context.Co
 	if r == nil || r.Host == nil {
 		return
 	}
-	// send_input 没有调用方会话身份（控制器接口不带 from），审计落在目标会话
-	// 事件流；send_message/followup_task 落在发起方会话。
+	// subagent_input 没有调用方会话身份（控制器接口不带 from），审计落在目标会话
+	// 事件流；subagent_send/subagent_followup 落在发起方会话。
 	sessionID := strings.TrimSpace(audit.FromSessionID)
 	if sessionID == "" {
 		sessionID = audit.TargetSessionID
@@ -2986,7 +2986,7 @@ func (r *localActorRegistry) localAgentRunMeta(ctx context.Context, sessionID st
 	}
 	// Child follow-up/resume must rebuild RunMeta from the child session only.
 	// SpawnAgentRunMetaFromContext forces completion_requirement=none for
-	// ordinary spawn_agent children so a legacy complete_task context value
+	// ordinary subagent_spawn children so a legacy complete_task context value
 	// cannot re-enter the run.
 	return toolbroker.SpawnAgentRunMetaFromContext(session)
 }
@@ -3051,7 +3051,7 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 		busy = state.Busy()
 		busyStatus = string(state.Status)
 	}
-	// v2 的 busy 判定对齐 followup_task（hub 或 durable state 任一为 busy）。
+	// v2 的 busy 判定对齐 subagent_followup（hub 或 durable state 任一为 busy）。
 	if v2 && !busy {
 		busy = r.localAgentSessionBusy(ctx, sessionID)
 	}
@@ -3059,7 +3059,7 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 		interrupt := args.Interrupt != nil && *args.Interrupt
 		if !interrupt {
 			if v2 {
-				// ADR-3: busy + interrupt=false 与 followup_task 同语义，
+				// ADR-3: busy + interrupt=false 与 subagent_followup 同语义，
 				// 排队投递（trigger_turn=true）而不是直接报错。
 				mail := toolbroker.BuildAgentMailboxMessage("", sessionID, message, true)
 				runtimechat.AnnotateAgentMailboxDelivery(&mail, runtimechat.MailboxDeliveryStatusQueued, nil, false)
@@ -3114,7 +3114,7 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 			}
 		}
 	}
-	// 触发型 send_input/followup：目标会话的新 run 与调用方回合解耦，理由同上。
+	// 触发型 subagent_input/subagent_followup：目标会话的新 run 与调用方回合解耦，理由同上。
 	if err := actor.SubmitChildPromptAsync(ctx, message, r.localAgentRunMeta(ctx, sessionID)); err != nil {
 		if v2 {
 			r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
@@ -3194,7 +3194,7 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 	}, nil
 }
 
-// Wait 是 wait_agent 的账本外壳（plan §C3-4 统一返回契约）：等待前先读一次调用方
+// Wait 是 subagent_wait 的账本外壳（plan §C3-4 统一返回契约）：等待前先读一次调用方
 // （父会话）本 turn 的 obligation 账本，账本非空且已无待办时立即返回 finalize
 // （AC-P2-4e，不空等）；否则按旧语义等待，并在返回结果上附账本视图与
 // terminal_delta。mailbox-only 与状态快照两条分支共用这一外壳，返回契约一致。
@@ -3221,7 +3221,7 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	if len(obligations) > 0 && pending && budgetKey != "" {
 		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
 		// 无进展 ⇒ 改用挂起」从建议变成判据）。账本视图照常返回，I1 仍由
-		// 收尾门兜底——wait_agent 自身不挂起 turn。
+		// 收尾门兜底——subagent_wait 自身不挂起 turn。
 		if consecutive, exhausted := r.localWaitBudget.Exhausted(budgetKey, waitBudgetLimit); exhausted {
 			result := toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now())
 			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
@@ -3275,7 +3275,7 @@ func (r *localActorRegistry) waitForLocalAgentObserved(ctx context.Context, args
 		return nil, fmt.Errorf("id is required")
 	}
 	// 2026-09-26 真机 E2E：派发回执最显眼的 id 是 batch id，父模型会直接
-	// wait_agent(batch_id)，而 batch id 既不是会话也不是 task id，旧路径只能
+	// subagent_wait(batch_id)，而 batch id 既不是会话也不是 task id，旧路径只能
 	// 报 target_not_found。先把 batch id 展开成它已早绑定 child_session_id 的
 	// task 子会话，再走既有的解析/快照路径。
 	expandedIDs, err := r.expandLocalBatchWaitTargets(ctx, sessionIDs)
@@ -3442,9 +3442,9 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 	if err != nil || state == nil {
 		return nil, nil, false, ""
 	}
-	// 挂起记录可能在 run 仍未结束时由派发方写入（spawn_agent 派发即挂起、
+	// 挂起记录可能在 run 仍未结束时由派发方写入（subagent_spawn 派发即挂起、
 	// 批次派发同理），所以先看挂起 turn，再回落到运行中的 CurrentTurnID：
-	// 这样等待同一 turn 的 wait_agent 在 run 内就能看到账本（否则只能等收尾）。
+	// 这样等待同一 turn 的 subagent_wait 在 run 内就能看到账本（否则只能等收尾）。
 	turnID := strings.TrimSpace(state.SuspendedTurnID)
 	if turnID == "" {
 		turnID = strings.TrimSpace(state.CurrentTurnID)
@@ -3556,8 +3556,8 @@ func (r *localActorRegistry) localWaitTargetObligations(ctx context.Context, arg
 // localWaitBudgetKey returns the calling turn's active-wait budget key (session
 // + parked turn id). Unlike localWaitLedger it does not require a batch
 // suspension record: the key belongs to the parked turn, and a turn can be
-// parked on team obligations as well — wait_team shares this counter and key
-// with wait_agent (plan §16.3 同口径). Fail-open: an unreadable store or an
+// parked on team obligations as well — team_wait shares this counter and key
+// with subagent_wait (plan §16.3 同口径). Fail-open: an unreadable store or an
 // unparked turn yields an empty key, which leaves the budget disarmed.
 func (r *localActorRegistry) localWaitBudgetKey(ctx context.Context) (string, int) {
 	if r == nil || r.Host == nil || r.Host.RuntimeStore == nil {
@@ -3579,7 +3579,7 @@ func (r *localActorRegistry) localWaitBudgetKey(ctx context.Context) (string, in
 }
 
 // BudgetVerdict implements toolbroker.WaitSegmentBudget for the broker-side
-// wait_team path: same key and counter as the wait_agent ledger shell above.
+// team_wait path: same key and counter as the subagent_wait ledger shell above.
 func (r *localActorRegistry) BudgetVerdict(ctx context.Context) (consecutive, limit int, active, exhausted bool) {
 	key, limit := r.localWaitBudgetKey(ctx)
 	if key == "" {
@@ -3589,7 +3589,7 @@ func (r *localActorRegistry) BudgetVerdict(ctx context.Context) (consecutive, li
 	return consecutive, limit, true, exhausted
 }
 
-// ObserveWaitSegment implements toolbroker.WaitSegmentBudget for wait_team.
+// ObserveWaitSegment implements toolbroker.WaitSegmentBudget for team_wait.
 func (r *localActorRegistry) ObserveWaitSegment(ctx context.Context, progress bool) (consecutive, limit int, active, exhausted bool) {
 	key, limit := r.localWaitBudgetKey(ctx)
 	if key == "" {
@@ -4222,9 +4222,9 @@ func (r *localActorRegistry) resolveLocalAgentCloseTargetsFromRegistry(ctx conte
 	return targetSessionID, closeIDs, true, nil
 }
 
-// resolveLocalAgentCloseTargetsFromBatch resolves a spawn_subagents batch id
+// resolveLocalAgentCloseTargetsFromBatch resolves a subagent_spawn_batch batch id
 // (the `batch_*` receipt) to every child session of that batch, so one
-// close_agent call converges the whole batch instead of N calls (F6).
+// subagent_close call converges the whole batch instead of N calls (F6).
 //
 // Best-effort lookup: an unwired/unreadable batch store or an unknown id
 // falls through to the regular session resolution. Running children are
@@ -4323,8 +4323,8 @@ func (r *localActorRegistry) resolveLocalAgentTargetSessionID(ctx context.Contex
 		}
 	}
 	// G4 / H7（解析侧）：批任务 id → 子会话。派发回执只给 task id，生产侧已在运行期
-	// 把 child_session_id 早绑定写进 task 行；没有这一步，`wait_agent(task_id)` /
-	// `read_agent_events(task_id)` 在运行期只能报 missing / 0 events。
+	// 把 child_session_id 早绑定写进 task 行；没有这一步，`subagent_wait(task_id)` /
+	// `subagent_events(task_id)` 在运行期只能报 missing / 0 events。
 	if childSessionID, ok, err := r.resolveLocalTaskChildSessionID(ctx, target); err != nil || ok {
 		if err != nil {
 			return "", err
@@ -4464,8 +4464,8 @@ func (r *localActorRegistry) expandLocalBatchWaitTargets(ctx context.Context, id
 	return out, nil
 }
 
-// rejectLocalBatchTaskMessageTarget 拒绝把 send 类工具（send_message /
-// followup_task / send_input）对准 durable 批任务子会话：批任务 worker 没有
+// rejectLocalBatchTaskMessageTarget 拒绝把 send 类工具（subagent_send /
+// subagent_followup / subagent_input）对准 durable 批任务子会话：批任务 worker 没有
 // mailbox/输入通道，放行只会让 ensureSession 伪造会话行、或为 followup 起一次
 // 重复运行。作用域与 batchTaskSnapshot 一致：只扫本会话自己的批次，不跨会话取身份。
 func (r *localActorRegistry) rejectLocalBatchTaskMessageTarget(ctx context.Context, toolName, target string) error {
@@ -4489,7 +4489,7 @@ func (r *localActorRegistry) rejectLocalBatchTaskMessageTarget(ctx context.Conte
 
 // batchTaskSnapshot 把「子代理会话 id」或「批任务 id」投影成可等待 / 可读的状态行
 // （2026-09-26 真机 E2E）：生产里子代理运行**不落 SessionStore**——身份
-// （child_session_id 早绑定）与结果只写在批任务行上，因此 wait_agent(task_id)
+// （child_session_id 早绑定）与结果只写在批任务行上，因此 subagent_wait(task_id)
 // 解析出的子会话 id 在会话库里永远是 missing。回退到账本行才是权威；派发前失败
 // （或无论何时都没有绑定）的任务没有 child_session_id，再按 task id 兜一次，
 // 让父代理拿到失败观测而不是 target_not_found。
@@ -4920,7 +4920,7 @@ func (r *localActorRegistry) localAgentsConfig() runtimecfg.AgentsConfig {
 }
 
 // localWaitTimeoutPolicy maps the agents config onto the shared wait-window
-// bounds resolver used by the local wait_agent / read_agent_events paths.
+// bounds resolver used by the local subagent_wait / subagent_events paths.
 func (r *localActorRegistry) localWaitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
 	cfg := r.localAgentsConfig()
 	return agentcontrol.WaitTimeoutPolicy{
@@ -5249,11 +5249,11 @@ func localAgentCompletionStatus(event runtimeevents.Event) string {
 		return string(runtimechat.SessionStopped)
 	}
 	if event.Payload != nil {
-		// A cancelled run (close_agent / interrupt / deadline) reports
+		// A cancelled run (subagent_close / interrupt / deadline) reports
 		// success=false together with status=stopped. The stop status is
 		// authoritative for that case and must win over the failure
 		// heuristic, or a requested close surfaces as a critical child
-		// failure (F2: close_agent interruption classification).
+		// failure (F2: subagent_close interruption classification).
 		if text, ok := event.Payload["status"].(string); ok && isStoppedSessionStatusText(text) {
 			return string(runtimechat.SessionStopped)
 		}
@@ -5332,7 +5332,7 @@ func truncateLocalAgentStatusPreview(content string) string {
 
 // isLocalAgentReadWaitInterrupted reports wait-budget cancellation or SQLite
 // interrupt/lock errors that should surface as soft TimedOut results instead of
-// hard tool failures during read_agent_events waits.
+// hard tool failures during subagent_events waits.
 func isLocalAgentReadWaitInterrupted(ctx context.Context, err error) bool {
 	if err == nil {
 		return false

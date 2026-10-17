@@ -1259,7 +1259,7 @@ func TestEmptySoftCacheShortCircuitsAfterThreshold(t *testing.T) {
 
 func TestEmptySoftCacheDisabledForVolatileToolMetadata(t *testing.T) {
 	mem := NewMemory(2)
-	toolName := "read_agent_events"
+	toolName := "subagent_events"
 	args := map[string]interface{}{"after_seq": 10}
 	digest := ArgsDigest(toolName, args)
 	toolMeta := map[string]interface{}{runtimetypes.ToolMetadataEmptyReplayCacheKey: false}

@@ -92,7 +92,7 @@ func TestSummarizeAgentWaitLedgerCountsPendingAndDelta(t *testing.T) {
 }
 
 // TestApplyWaitTeamLedgerSharesAgentLedgerComputation 钉住 AC-P2-4g：team 视图复用
-// wait_agent 的行/计数/增量算法，但 finalize 的放行条件更窄——只有团队本身终态
+// subagent_wait 的行/计数/增量算法，但 finalize 的放行条件更窄——只有团队本身终态
 // 且无待办任务行时才给出，避免把"尚未规划出任务的在跑团队"误判为可以收尾。
 func TestApplyWaitTeamLedgerSharesAgentLedgerComputation(t *testing.T) {
 	rows := []AgentWaitObligation{
@@ -108,7 +108,7 @@ func TestApplyWaitTeamLedgerSharesAgentLedgerComputation(t *testing.T) {
 	require.Equal(t, []string{"task-1"}, pending.TerminalDelta)
 	require.Equal(t, "team execution continues", pending.NextAction)
 
-	// 团队终态 + 全部行终态 ⇒ 与 wait_agent 同一放行方向。
+	// 团队终态 + 全部行终态 ⇒ 与 subagent_wait 同一放行方向。
 	drained := ApplyWaitTeamLedger(&WaitTeamResult{Terminal: true}, rows[:1], nil)
 	require.Equal(t, 1, drained.TerminalCount)
 	require.Equal(t, 0, drained.PendingCount)

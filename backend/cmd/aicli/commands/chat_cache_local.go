@@ -230,7 +230,7 @@ func (l *localSessionMetaLookup) SessionMeta(sessionID string) (usageanalytics.S
 	return meta, true
 }
 
-// SessionLineage 从会话 context 读取父链归属（本地 spawn_agent / spawn_team
+// SessionLineage 从会话 context 读取父链归属（本地 subagent_spawn / team_spawn
 // 子会话：agent_parent_session_id / agent_root_session_id / agent_id）。顶层会话
 // 无父链，返回 ok=false（collector 按顶层处理）。
 func (l *localSessionMetaLookup) SessionLineage(sessionID string) (usageanalytics.SessionLineage, bool) {

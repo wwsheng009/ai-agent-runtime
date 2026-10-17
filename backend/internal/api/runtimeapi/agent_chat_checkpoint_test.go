@@ -251,7 +251,7 @@ func TestAgentChatHistoryCheckpointerRetriesImmediatelyAfterPersistFailure(t *te
 
 // TestAgentChatCheckpointPreservesBrokerHandleAliases 是 [JOB_NOT_FOUND]
 // background job reference not found 的回归：broker 在 background_task /
-// spawn_agent 之后把 job_ref_* / session_ref_* 句柄别名经独立的会话行读改写写进
+// subagent_spawn 之后把 job_ref_* / session_ref_* 句柄别名经独立的会话行读改写写进
 // 权威会话，而本回合持有的 session/execSession 快照早于那次写入。中途 checkpoint
 // 与收尾落库都是整行写回，若不在写前合并别名注册表，模型手里的句柄会在下一次
 // 落库后立即失效。

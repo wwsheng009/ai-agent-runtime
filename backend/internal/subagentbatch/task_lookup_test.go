@@ -49,7 +49,7 @@ func seedLookupBatch(t *testing.T, store BatchStore, parentSessionID, batchID st
 
 // TestFindTaskByIDInParentSessionPrefersLiveTask 钉住解析的命中优先级：同名 task id
 // 跨批次重复时，运行期身份解析必须拿到**还在跑的那个**，而不是最新批次里的历史行
-// （派发重放/重派都会造成重复 id；拿错行会把 wait_agent 定位到已关闭的子会话）。
+// （派发重放/重派都会造成重复 id；拿错行会把 subagent_wait 定位到已关闭的子会话）。
 func TestFindTaskByIDInParentSessionPrefersLiveTask(t *testing.T) {
 	store := newLookupTestStore(t)
 	ctx := context.Background()

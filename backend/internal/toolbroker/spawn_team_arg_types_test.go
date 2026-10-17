@@ -11,8 +11,7 @@ import (
 )
 
 // TestSpawnTeamArgTypeValidation covers the decode contract that
-// spawn_team_arg_types.go adds on top of the fail-closed unknown-field check:
-// a known field with a mismatched JSON kind must fail the call instead of
+// spawn_team_arg_types.go adds on top of the fail-closed unknown-field check:// a known field with a mismatched JSON kind must fail the call instead of
 // silently folding into its zero value.
 func TestSpawnTeamArgTypeValidation(t *testing.T) {
 	accepted := map[string]interface{}{
@@ -124,7 +123,7 @@ func TestBrokerSpawnTeamRejectsKindMismatchBeforeCreatingTeam(t *testing.T) {
 }
 
 // TestBrokerSpawnTeamReadsEveryJSONNumberSpelling guards the sibling regression
-// of the spawn_agent timeout bug: validateSpawnTeamArgTypes accepts json.Number,
+// of the subagent_spawn timeout bug: validateSpawnTeamArgTypes accepts json.Number,
 // int64 and uint spellings, so the numeric reads must accept them too instead of
 // dropping the value through a float64-only assertion.
 func TestBrokerSpawnTeamReadsEveryJSONNumberSpelling(t *testing.T) {

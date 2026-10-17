@@ -326,7 +326,7 @@ func (a *Agent) SetSubagentScheduler(scheduler *SubagentScheduler) {
 
 // SetSubagentBackgroundEnabled toggles the durable background batch feature
 // flag. Since P3 / C4-1 the blocking path no longer exists, so disabling it
-// makes spawn_subagents fail with a model-visible error instead of silently
+// makes subagent_spawn_batch fail with a model-visible error instead of silently
 // blocking the parent turn.
 func (a *Agent) SetSubagentBackgroundEnabled(enabled bool) {
 	a.mu.Lock()
@@ -424,7 +424,10 @@ func (a *Agent) batchRuntimeEventEmitter() BatchEmitter {
 	}
 	return func(eventType string, payload map[string]interface{}) {
 		sessionID := ""
-		toolName := "spawn_subagents"
+		// Event *label*（前端按此分组），不是工具身份：与 scheduler.go /
+		// chat_actor_host.go / supervision_batch_recovery.go 的批次事件标签同源，
+		// 统一取规范名，不再保留旧拼写。工具身份判断同样见 SpawnSubagentsToolName。
+		toolName := SpawnSubagentsToolName
 		if payload != nil {
 			if v, ok := payload["parent_session_id"].(string); ok {
 				sessionID = v
@@ -576,7 +579,7 @@ func (a *Agent) hasSubagentScheduler() bool {
 	return a.subagents != nil
 }
 
-// shouldExposeSpawnSubagents returns whether spawn_subagents may appear in
+// shouldExposeSpawnSubagents returns whether subagent_spawn_batch may appear in
 // the model-visible tool surface. Scheduler presence, optional call whitelist,
 // and execution policy must all agree.
 func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
@@ -611,7 +614,12 @@ func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
 	return true
 }
 
-const SpawnSubagentsToolName = "spawn_subagents"
+// SpawnSubagentsToolName 是 agent 侧注册的批量委派入口的**规范名**（模型可见）。
+// 命名契约（<domain>_<verb>_<object>）由 internal/toolregistry 的
+// subagent_spawn_batch 条目钉住；旧拼写 spawn_subagents 仍作为现役别名保持可调用
+// （迁移期 ≥2 个版本）。判断"这次调用是不是该入口"请用
+// toolregistry.IsSpellingOf(SpawnSubagentsToolName, name)，不要与字符串字面量比较。
+const SpawnSubagentsToolName = "subagent_spawn_batch"
 
 // GetPermissionEngine returns the permission engine.
 func (a *Agent) GetPermissionEngine() *PermissionEngine {

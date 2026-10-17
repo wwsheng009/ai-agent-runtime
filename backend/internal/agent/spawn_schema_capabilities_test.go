@@ -28,7 +28,7 @@ func TestSpawnSubagentsSchemaFollowsSchedulerCapabilities(t *testing.T) {
 			agents, _ := properties["agents"].(map[string]interface{})
 			items, _ := agents["items"].(map[string]interface{})
 			itemProps, _ := items["properties"].(map[string]interface{})
-			require.NotEmpty(t, itemProps, "spawn_subagents agents item schema must have properties")
+			require.NotEmpty(t, itemProps, "subagent_spawn_batch agents item schema must have properties")
 			return itemProps
 		}
 		t.Fatalf("%s must be exposed when no restrictive policy is set", SpawnSubagentsToolName)

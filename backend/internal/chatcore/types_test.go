@@ -70,7 +70,7 @@ func TestChatResultSupportsOrchestrationAndPlanningPayloads(t *testing.T) {
 	result.SessionID = "session-1"
 	result.AgentID = "api-agent"
 	result.Observations = []types.Observation{
-		*types.NewObservation("step_1_tool_0", "spawn_team").MarkSuccess(),
+		*types.NewObservation("step_1_tool_0", "team_spawn").MarkSuccess(),
 	}
 	result.Orchestration = &OrchestrationSummary{
 		Source:        "agent_react",
@@ -91,7 +91,7 @@ func TestChatResultSupportsOrchestrationAndPlanningPayloads(t *testing.T) {
 	if result.Planning == nil || result.Planning.SubagentTaskCount != 2 {
 		t.Fatalf("expected planning summary, got %#v", result.Planning)
 	}
-	if len(result.Observations) != 1 || result.Observations[0].Tool != "spawn_team" {
+	if len(result.Observations) != 1 || result.Observations[0].Tool != "team_spawn" {
 		t.Fatalf("expected observations to be preserved: %#v", result.Observations)
 	}
 }

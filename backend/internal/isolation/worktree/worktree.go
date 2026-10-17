@@ -1,4 +1,4 @@
-// Package worktree provides git worktree isolation for spawn_agent children.
+// Package worktree provides git worktree isolation for subagent_spawn children.
 //
 // Lifecycle: Create → bind child cwd/session paths → run → optional Apply → Remove.
 // Failures never silently fall back to the main tree (no polluted primary checkout).

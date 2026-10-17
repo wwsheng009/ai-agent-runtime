@@ -210,7 +210,7 @@ type SubagentSchedulerConfig struct {
 }
 
 // Capabilities 返回生效的 spawn 准入能力位（部署装配；nil 回落内建默认）。
-// 模型侧 schema（spawn_subagents 的 context / report_schema 字段）与准入共用
+// 模型侧 schema（subagent_spawn_batch 的 context / report_schema 字段）与准入共用
 // 本方法，保证"schema 与准入门"同源（P1-1' 三层一致的第三层不再退化为
 // 静态默认值）。
 func (s *SubagentScheduler) Capabilities() SubagentCapabilities {
@@ -246,7 +246,7 @@ type SubagentRunOptions struct {
 	// session id exists — i.e. before the child actually runs. It exists so a
 	// durable coordinator can write child_session_id back at runtime instead of
 	// only at terminal settle, which is what makes a running task resolvable by
-	// task_id (wait_agent / read_agent_events) while it is still working.
+	// task_id (subagent_wait / subagent_events) while it is still working.
 	OnTaskBound func(taskID, childSessionID string)
 	// ParentHistory 供 fork 请求（context=fork）取父级已完成轮次快照。
 	// 宿主（持有对话历史的层）在构造 SubagentRunOptions 时注入；nil 时 fork
@@ -1560,7 +1560,7 @@ func (s *SubagentScheduler) emitPatchAppliedEvents(options SubagentRunOptions, w
 			"artifact_ref_count":  len(patch.ArtifactRefs),
 			"diff_present":        strings.TrimSpace(patch.Diff) != "",
 		}
-		s.parent.emitRuntimeEvent("patch.applied", options.ParentSessionID, "spawn_subagents", payload)
+		s.parent.emitRuntimeEvent("patch.applied", options.ParentSessionID, SpawnSubagentsToolName, payload)
 	}
 }
 
@@ -2028,7 +2028,7 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 		effective = resolved
 		if effective.ReadOnly {
 			if effective.ReadOnlySource == "" {
-				effective.ReadOnlySource = "spawn_subagents.read_only"
+				effective.ReadOnlySource = SpawnSubagentsToolName + ".read_only"
 			}
 			effective.ToolsWhitelist, effective.ReadOnlyFilteredTools = filterReadOnlyTools(
 				effective.ToolsWhitelist,
@@ -2123,7 +2123,7 @@ func subagentReadOnlySource(task SubagentTask) string {
 		return source
 	}
 	if task.ReadOnly {
-		return "spawn_subagents.read_only"
+		return SpawnSubagentsToolName + ".read_only"
 	}
 	return ""
 }
@@ -2290,7 +2290,7 @@ func (s *SubagentScheduler) recordBatchOutcome(options SubagentRunOptions, resul
 	if !openedNow || s.parent == nil {
 		return
 	}
-	s.parent.emitRuntimeEvent("subagent.batch.circuit_open", options.ParentSessionID, "spawn_subagents", map[string]interface{}{
+	s.parent.emitRuntimeEvent("subagent.batch.circuit_open", options.ParentSessionID, SpawnSubagentsToolName, map[string]interface{}{
 		"trace_id":             options.TraceID,
 		"parent_session_id":    options.ParentSessionID,
 		"parent_tool_call_id":  options.ParentToolCallID,

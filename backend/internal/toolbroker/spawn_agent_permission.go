@@ -8,7 +8,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
-// Route warnings emitted by the spawn_agent permission inheritance policy.
+// Route warnings emitted by the subagent_spawn permission inheritance policy.
 // They are persisted on the child route context and echoed in the spawn result
 // metadata so the parent can explain why a child did not run with the mode it
 // asked for instead of silently degrading (or widening) the session policy.

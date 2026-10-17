@@ -40,7 +40,7 @@ const (
 //
 // nil stays nil so that "inherit the role defaults" keeps working, and an
 // explicit empty slice stays empty so that the documented "disable every tool"
-// contract (for example spawn_subagents with tools_whitelist: []) is preserved.
+// contract (for example subagent_spawn_batch with tools_whitelist: []) is preserved.
 func normalizeToolWhitelist(names []string) []string {
 	if names == nil {
 		return nil
@@ -185,8 +185,8 @@ func agentChildPolicy(parent *Agent, task SubagentTask) *ToolExecutionPolicy {
 
 // subagentPolicyRole resolves the role string used for role-family tool
 // defaults and the capability floor. Models set role, task_type, or agent_type
-// depending on the spawn tool (spawn_subagents marks role as a deprecated
-// routing alias and prefers task_type; spawn_agent uses agent_type), so all
+// depending on the spawn tool (subagent_spawn_batch marks role as a deprecated
+// routing alias and prefers task_type; subagent_spawn uses agent_type), so all
 // three feed the same family table. Keying only off task.Role silently sent
 // "task_type-only" children down the unknown-role path: no role defaults, and
 // an inherited shell tool that the derived capability scope then denied with

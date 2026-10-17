@@ -164,7 +164,7 @@ func ProjectAgentCompletion(ctx context.Context, store Store, wakes *WakeSchedul
 		eventType = "agent_completed"
 	}
 	// A terminal child must also terminalize its execution-run registration.
-	// A spawn_agent run left in a live status keeps firing progress_stalled /
+	// A subagent_spawn run left in a live status keeps firing progress_stalled /
 	// execution_timed_out notifications at the parent for work that already
 	// finished, so the durable run has to follow the child to a terminal
 	// state here. Best-effort: the lifecycle notification is still projected

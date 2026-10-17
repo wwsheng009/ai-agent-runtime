@@ -607,7 +607,7 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		childSession.SetContext(toolbroker.AgentSessionContextParentWorkspacePath, sessionmeta.String(parentSession.Metadata.Context, sessionmeta.WorkspacePath))
 		sessionmeta.CopyParentWorkspaceBinding(&childSession.Metadata.Context, parentSession.Metadata.Context)
 	}
-	// 父侧工具调用归位（D）：broker 在 spawn_agent 执行上下文注入
+	// 父侧工具调用归位（D）：broker 在 subagent_spawn 执行上下文注入
 	// ParentToolCallID，宿主落进子会话上下文，进度镜像据此回填
 	// parent_tool_call_id（见 subscribeAgentCompletion）。
 	if parentToolCallID := strings.TrimSpace(args.ParentToolCallID); parentToolCallID != "" {
@@ -1080,8 +1080,8 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 	// hosts enrich last_message identically); per-child state is dropped via
 	// Forget on session end. It never writes to the event store, so the parent
 	// transcript/replay cannot be polluted by child progress.
-	// 父侧工具调用归位（D）：spawn_agent 的 tool_call_id 由 broker 注入 spawn 参数，
-	// 宿主写入子会话上下文；镜像回填后前端/ACP 能把进度挂到对应 spawn_agent 行。
+	// 父侧工具调用归位（D）：subagent_spawn 的 tool_call_id 由 broker 注入 spawn 参数，
+	// 宿主写入子会话上下文；镜像回填后前端/ACP 能把进度挂到对应 subagent_spawn 行。
 	parentToolCallID := ""
 	if value, ok := childSession.GetContext(toolbroker.AgentSessionContextParentToolCallID); ok {
 		if text, ok := value.(string); ok {
@@ -1260,7 +1260,7 @@ func (c *sessionAgentController) projectAgentCompletion(ctx context.Context, par
 	if projectErr == nil && !supervision.LifecycleWakeScheduled(notification) {
 		// 成功（info/closed）终态不排生命周期 wake（projection 只在 critical +
 		// action_required 时排），而结算谓词只在 run 结束跑：没有这一笔，
-		// "全部义务成功"的挂起 turn 会永久停放，与 spawn_agent 的
+		// "全部义务成功"的挂起 turn 会永久停放，与 subagent_spawn 的
 		// "auto-resumes it on the child's terminal event" 契约相悖。
 		_, _ = supervision.ScheduleSettledTurnWakeWithTeams(
 			ctx,
@@ -1766,7 +1766,7 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 	if err != nil {
 		return nil, err
 	}
-	// 统一观测面（2026-10-14）：spawn_subagents 的子代理只写批任务账本、不落
+	// 统一观测面（2026-10-14）：subagent_spawn_batch 的子代理只写批任务账本、不落
 	// SessionStore/注册表，subagent_list 此前对该派发方式恒为空；与 wait 快照
 	// （batchTaskSnapshot）同一作用域纪律，把本会话的批任务行并入列表。
 	// path_prefix 收窄到子树时批任务行（无 agent 路径）不参与过滤命中；终态行
@@ -1781,8 +1781,8 @@ func (c *sessionAgentController) List(ctx context.Context, parentSessionID strin
 	return &toolbroker.AgentListResult{Agents: agents, Count: len(agents)}, nil
 }
 
-// listAgentStatusItems 读取会话/注册表来源的子代理行（spawn_agent 派发的轻量
-// 会话）。spawn_subagents 的账本来源由 List 统一合并，两种派发方式共用同一去重
+// listAgentStatusItems 读取会话/注册表来源的子代理行（subagent_spawn 派发的轻量
+// 会话）。subagent_spawn_batch 的账本来源由 List 统一合并，两种派发方式共用同一去重
 // 与排序口径。
 func (c *sessionAgentController) listAgentStatusItems(ctx context.Context, scopeSessionID string, args toolbroker.ListAgentsArgs) ([]toolbroker.AgentStatusResult, error) {
 	if store := c.handler.getAgentControlAgentStore(); store != nil {
@@ -1994,8 +1994,8 @@ func (c *sessionAgentController) recordAPIAgentMailboxDeliveryAudit(ctx context.
 	if c == nil || c.handler == nil {
 		return
 	}
-	// send_input 没有调用方会话身份（控制器接口不带 from），审计落在目标会话
-	// 事件流；send_message/followup_task 落在发起方会话。
+	// subagent_input 没有调用方会话身份（控制器接口不带 from），审计落在目标会话
+	// 事件流；subagent_send/subagent_followup 落在发起方会话。
 	sessionID := strings.TrimSpace(audit.FromSessionID)
 	if sessionID == "" {
 		sessionID = audit.TargetSessionID
@@ -2112,7 +2112,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 		busy = state.Busy()
 		busyStatus = string(state.Status)
 	}
-	// v2 的 busy 判定对齐 followup_task（hub 或 durable state 任一为 busy），
+	// v2 的 busy 判定对齐 subagent_followup（hub 或 durable state 任一为 busy），
 	// 避免 actor 未加载 durable running 状态时把排队投递误判为空闲。
 	if v2 && !busy {
 		busy = c.apiAgentSessionBusy(ctx, sessionID)
@@ -2121,7 +2121,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 		interrupt := args.Interrupt != nil && *args.Interrupt
 		if !interrupt {
 			if v2 {
-				// ADR-3: busy + interrupt=false 与 followup_task 同语义，
+				// ADR-3: busy + interrupt=false 与 subagent_followup 同语义，
 				// 排队投递（trigger_turn=true）而不是直接报错。
 				mail := toolbroker.BuildAgentMailboxMessage("", sessionID, message, true)
 				chat.AnnotateAgentMailboxDelivery(&mail, chat.MailboxDeliveryStatusQueued, nil, false)
@@ -2173,7 +2173,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 			return nil, fmt.Errorf("session is still running")
 		}
 	}
-	// 触发型 send_input/followup：目标会话的新 run 与调用方回合解耦，理由同上。
+	// 触发型 subagent_input/subagent_followup：目标会话的新 run 与调用方回合解耦，理由同上。
 	if err := actor.SubmitChildPromptAsync(ctx, message, c.apiAgentRunMeta(ctx, sessionID)); err != nil {
 		if v2 {
 			c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
@@ -2250,7 +2250,7 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 	}, nil
 }
 
-// Wait 是 wait_agent 的账本外壳（plan §C3-4 统一返回契约，AC-P2-4d/e）：等待前先读
+// Wait 是 subagent_wait 的账本外壳（plan §C3-4 统一返回契约，AC-P2-4d/e）：等待前先读
 // 一次**调用方自己**（父会话）本 turn 的 obligation 账本，账本非空且已无待办时立即
 // 返回 finalize（不空等）；否则按旧语义等待，并在返回结果上附账本视图与
 // terminal_delta。mailbox-only 与状态快照两条分支共用这一外壳，返回契约一致。
@@ -2282,7 +2282,7 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	if len(obligations) > 0 && pending && budgetKey != "" {
 		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
 		// 无进展 ⇒ 改用挂起」从建议变成判据）。账本视图照常返回，I1 仍由
-		// 收尾门兜底——wait_agent 自身不挂起 turn。
+		// 收尾门兜底——subagent_wait 自身不挂起 turn。
 		if consecutive, exhausted := c.waitBudget().Exhausted(budgetKey, waitBudgetLimit); exhausted {
 			result := toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now())
 			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
@@ -2345,7 +2345,7 @@ func (c *sessionAgentController) waitBudget() *agentcontrol.WaitBudget {
 // parked turn id) for the caller session injected by the agent loop. It is
 // deliberately independent of waitLedger's batch suspension row: the key
 // belongs to the parked turn, and a turn can be parked on team obligations too
-// — wait_team shares this counter/key with wait_agent (plan §16.3 同口径).
+// — team_wait shares this counter/key with subagent_wait (plan §16.3 同口径).
 // Fail-open: an unreadable store or an unparked turn yields an empty key.
 func (c *sessionAgentController) waitBudgetKey(ctx context.Context) (string, int) {
 	if c == nil || c.handler == nil {
@@ -2371,7 +2371,7 @@ func (c *sessionAgentController) waitBudgetKey(ctx context.Context) (string, int
 }
 
 // BudgetVerdict implements toolbroker.WaitSegmentBudget for the broker-side
-// wait_team path: same key and counter as this host's wait_agent shell above.
+// team_wait path: same key and counter as this host's subagent_wait shell above.
 func (c *sessionAgentController) BudgetVerdict(ctx context.Context) (consecutive, limit int, active, exhausted bool) {
 	key, limit := c.waitBudgetKey(ctx)
 	if key == "" {
@@ -2381,7 +2381,7 @@ func (c *sessionAgentController) BudgetVerdict(ctx context.Context) (consecutive
 	return consecutive, limit, true, exhausted
 }
 
-// ObserveWaitSegment implements toolbroker.WaitSegmentBudget for wait_team.
+// ObserveWaitSegment implements toolbroker.WaitSegmentBudget for team_wait.
 func (c *sessionAgentController) ObserveWaitSegment(ctx context.Context, progress bool) (consecutive, limit int, active, exhausted bool) {
 	key, limit := c.waitBudgetKey(ctx)
 	if key == "" {
@@ -2542,7 +2542,7 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 		return nil, fmt.Errorf("id is required")
 	}
 	// 2026-09-26 真机 E2E（与 CLI 宿主对齐）：派发回执里最显眼的 id 是 batch id，
-	// 父模型会直接 wait_agent(batch_id)。batch id 既不是 agent session 也不是
+	// 父模型会直接 subagent_wait(batch_id)。batch id 既不是 agent session 也不是
 	// task id，旧路径只能报 target_not_found；先把它展开成已早绑定
 	// child_session_id 的 task 子会话，再走既有解析/快照路径。
 	expandedIDs, err := c.expandBatchWaitTargets(ctx, sessionIDs)
@@ -3220,8 +3220,8 @@ func (c *sessionAgentController) resolveCloseTargets(ctx context.Context, target
 	return targetSessionID, closeIDs, nil
 }
 
-// resolveCloseTargetsFromBatch resolves a spawn_subagents batch id to every
-// child session of that batch, so one close_agent call converges the whole
+// resolveCloseTargetsFromBatch resolves a subagent_spawn_batch batch id to every
+// child session of that batch, so one subagent_close call converges the whole
 // batch instead of N calls (F6). Best-effort: an unwired/unreadable batch
 // store or an unknown id falls through to the regular session resolution.
 // Running children are included on purpose — closing a batch is an explicit
@@ -3344,8 +3344,8 @@ func (c *sessionAgentController) resolveTargetSessionID(ctx context.Context, tar
 	}
 	// G4 / H7（解析侧）：批任务 id 不是会话 id，但它是父代理在运行期唯一握有的
 	// 身份（派发回执只给 task id）。生产侧已在派发时把 child_session_id 早绑定写进
-	// task 行，这里把 task id 映射回子会话，让 wait_agent(task_id) /
-	// read_agent_events(task_id) 在运行期可用，而不是报 missing / 0 events。
+	// task 行，这里把 task id 映射回子会话，让 subagent_wait(task_id) /
+	// subagent_events(task_id) 在运行期可用，而不是报 missing / 0 events。
 	if childSessionID, ok, err := c.resolveTaskChildSessionID(ctx, target); err != nil || ok {
 		if err != nil {
 			return "", err
@@ -3524,7 +3524,7 @@ func (c *sessionAgentController) expandBatchWaitTargets(ctx context.Context, ids
 
 // batchTaskSnapshot 把「子代理会话 id」或「批任务 id」投影成可等待 / 可读的状态行
 // （2026-09-26 真机 E2E）：生产里子代理运行**不落 SessionStore**——身份
-// （child_session_id 早绑定）与结果只写在批任务行上，因此 wait_agent(task_id)
+// （child_session_id 早绑定）与结果只写在批任务行上，因此 subagent_wait(task_id)
 // 解析出的子会话 id 在会话库里永远是 missing。回退到账本行才是权威；派发前失败
 // （或无论何时都没有绑定）的任务没有 child_session_id，再按 task id 兜一次，
 // 让父代理拿到失败观测而不是 target_not_found。
@@ -3594,10 +3594,10 @@ func apiBatchTaskStatusResult(childSessionID, batchID string, task subagentbatch
 	return result
 }
 
-// apiAgentBatchItems 列出某个父会话自己的批任务账本行（spawn_subagents 派发的
+// apiAgentBatchItems 列出某个父会话自己的批任务账本行（subagent_spawn_batch 派发的
 // 子代理），与 batchTaskSnapshot 同一作用域纪律：只扫该父会话的批次，不跨会话
 // 取身份。它是 HTTP 宿主 subagent_list（sessionAgentController.List）的账本读取
-// 面，保证 spawn_agent 与 spawn_subagents 的观测口径一致；未绑定的任务回退用
+// 面，保证 subagent_spawn 与 subagent_spawn_batch 的观测口径一致；未绑定的任务回退用
 // 任务 id 呈现（派发前失败也要可见），终态行遵循 include_closed。
 func (c *sessionAgentController) apiAgentBatchItems(ctx context.Context, parentSessionID string, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
 	if c == nil || c.handler == nil {
@@ -3626,8 +3626,8 @@ func (c *sessionAgentController) apiAgentBatchItems(ctx context.Context, parentS
 	return items, nil
 }
 
-// rejectAPIBatchTaskMessageTarget 拒绝把 send 类工具（send_message /
-// followup_task / send_input）对准 durable 批任务子会话：批任务 worker 没有
+// rejectAPIBatchTaskMessageTarget 拒绝把 send 类工具（subagent_send /
+// subagent_followup / subagent_input）对准 durable 批任务子会话：批任务 worker 没有
 // mailbox/输入通道，放行只会为 followup/input 起一次重复运行。作用域与
 // batchTaskSnapshot 一致：只扫调用方自己的批次（toolctx 注入，模型不可指定）。
 func (c *sessionAgentController) rejectAPIBatchTaskMessageTarget(ctx context.Context, toolName, target string) error {
@@ -4042,8 +4042,8 @@ func (c *sessionAgentController) agentsConfig() runtimecfg.AgentsConfig {
 }
 
 // waitTimeoutPolicy maps the agents config onto the shared wait-window bounds
-// resolver used by every wait path: wait_agent and read_agent_events here, and
-// wait_team through brokerWaitTimeoutPolicy below.
+// resolver used by every wait path: subagent_wait and subagent_events here, and
+// team_wait through brokerWaitTimeoutPolicy below.
 func (c *sessionAgentController) waitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
 	cfg := c.agentsConfig()
 	return agentcontrol.WaitTimeoutPolicy{
@@ -4055,7 +4055,7 @@ func (c *sessionAgentController) waitTimeoutPolicy() agentcontrol.WaitTimeoutPol
 }
 
 // brokerWaitTimeoutPolicy hands the same mapping to the tool broker, which
-// resolves the wait_team window on its own. Both consumers share this one
+// resolves the team_wait window on its own. Both consumers share this one
 // mapper so a config change can never move only part of the wait paths
 // (P2-11 目标：任何路径的等待时长都落在 [minWaitTimeoutMs, maxWaitTimeoutMs]).
 func (h *Handler) brokerWaitTimeoutPolicy() agentcontrol.WaitTimeoutPolicy {
@@ -4409,11 +4409,11 @@ func agentCompletionStatus(event runtimeevents.Event) string {
 		return string(chat.SessionStopped)
 	}
 	if event.Payload != nil {
-		// A cancelled run (close_agent / interrupt / deadline) reports
+		// A cancelled run (subagent_close / interrupt / deadline) reports
 		// success=false together with status=stopped. The stop status is
 		// authoritative for that case and must win over the failure
 		// heuristic, or a requested close surfaces as a critical child
-		// failure (F2: close_agent interruption classification).
+		// failure (F2: subagent_close interruption classification).
 		if text, ok := event.Payload["status"].(string); ok && isStoppedSessionStatusText(text) {
 			return string(chat.SessionStopped)
 		}
@@ -4631,7 +4631,7 @@ func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 		toolPolicy.DeniedTools = map[string]bool{}
 	}
 	// 展开现役拼写：拒绝表按模型请求的原始拼写匹配，别名与规范名都要覆盖。
-	for _, toolName := range toolregistry.CallableNames("subagent_spawn", "spawn_subagents", "team_spawn") {
+	for _, toolName := range toolregistry.CallableNames("subagent_spawn", agent.SpawnSubagentsToolName, "team_spawn") {
 		toolPolicy.DeniedTools[toolName] = true
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
@@ -4639,7 +4639,7 @@ func applyAPIAgentChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 
 // applyAPIChildAgentdefToolPolicy overlays agentdef allow/deny/read-only/sandbox
 // onto an API session actor when agent_type resolves to a portable definition.
-// Mirrors applyLocalChildAgentdefToolPolicy for spawn_agent / teammate parity.
+// Mirrors applyLocalChildAgentdefToolPolicy for subagent_spawn / teammate parity.
 func applyAPIChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType, workspaceRoot string) {
 	if apiAgent == nil {
 		return

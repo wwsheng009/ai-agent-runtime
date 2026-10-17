@@ -191,7 +191,7 @@ func TestBroker_Execute_SpawnAgentPinsPermissionModeInYoloSession(t *testing.T) 
 		"permission_mode": "accept_edits",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.PermissionMode != "bypass_permissions" ||
 		controller.lastSpawn.EffectivePermissionMode != "bypass_permissions" ||
@@ -217,7 +217,7 @@ func TestBroker_Execute_SpawnAgentPinsPlanSessionChild(t *testing.T) {
 		"permission_mode": "default",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.PermissionMode != "plan" || controller.lastSpawn.RequestedPermissionMode != "default" {
 		t.Fatalf("expected plan-plan child, got %#v", controller.lastSpawn)
@@ -234,7 +234,7 @@ func TestBroker_Execute_SpawnAgentMarksInheritedPermissionMode(t *testing.T) {
 
 	_, meta, err := broker.Execute(ctx, "parent-session", ToolSubagentSpawn, map[string]interface{}{"message": "inspect"})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.PermissionMode != "bypass_permissions" {
 		t.Fatalf("expected inherited permission mode, got %#v", controller.lastSpawn)
@@ -258,7 +258,7 @@ func TestBroker_Execute_SpawnAgentBlocksPermissionEscalationWithNextAction(t *te
 		"permission_mode": "bypass_permissions",
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.PermissionMode != "accept_edits" ||
 		controller.lastSpawn.RequestedPermissionMode != "bypass_permissions" {

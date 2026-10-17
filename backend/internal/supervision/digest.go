@@ -308,7 +308,7 @@ func formatDigestText(digest *Digest) string {
 		if hint := strings.TrimSpace(item.NextAction); hint != "" {
 			line += "; next_action=" + hint
 		}
-		// notification_id is the only handle ack_lifecycle / control_descendant
+		// notification_id is the only handle subagent_ack_lifecycle / subagent_control
 		// accept. Print it inline with every actionable row: without it the
 		// model has to guess an id from "<subject_kind> <subject_id>", and the
 		// observed failure mode was exactly that (a fabricated

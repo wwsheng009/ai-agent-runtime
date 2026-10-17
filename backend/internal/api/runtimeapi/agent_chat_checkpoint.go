@@ -59,7 +59,7 @@ func (h *Handler) persistAgentChatTurnHistory(
 	ctx, cancel := sessionStoreWriteContext(r)
 	defer cancel()
 	// 与 chat.SessionActor.persistSession 同一口径：broker 的句柄别名注册表由
-	// background_task / spawn_agent 经独立的会话行读改写维护，而本回合持有的
+	// background_task / subagent_spawn 经独立的会话行读改写维护，而本回合持有的
 	// session/execSession 快照早于那次写入。整行写回前必须重新读取并带上，
 	// 否则中途 checkpoint 与收尾落库都会抹掉本回合已交付给模型的
 	// job_ref_* / session_ref_* 句柄（现场表现为 task_output 报

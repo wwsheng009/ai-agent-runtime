@@ -14,10 +14,10 @@ import (
 // 模型工具面。
 //
 // 在此之前，HTTP 宿主只有 /supervision/snapshot 这类宿主接口能看到 descendant
-// 状态矩阵，模型在自己的回合内看不到任何子 agent 的业务状态，只能靠 wait_agent /
-// list_agents 逐行轮询（R4）。本控制器把同一份 BuildSnapshot + DescendantProvider
-// 组合成 supervision_descendants / supervision_snapshot / ack_lifecycle /
-// control_descendant 四个工具的后端，scope 口径与 preflight 注入完全一致
+// 状态矩阵，模型在自己的回合内看不到任何子 agent 的业务状态，只能靠 subagent_wait /
+// subagent_list 逐行轮询（R4）。本控制器把同一份 BuildSnapshot + DescendantProvider
+// 组合成 supervision_descendants / supervision_snapshot / subagent_ack_lifecycle /
+// subagent_control 四个工具的后端，scope 口径与 preflight 注入完全一致
 // （supervision_handlers.go:277-302）：普通会话是自己的会话；团队 lead 的
 // durable root scope 是团队，投影子树仍是 lead 自身会话。模型无法指定 root
 // scope，越权通知一律拒绝（复用 LocalControlService）。
@@ -59,7 +59,7 @@ func (c *handlerSupervisionToolController) resolution(ctx context.Context, paren
 // /supervision command's chatDebugSupervisionScopes union: the caller's own
 // session is always a root scope and a led team adds its scope. Restricting
 // writes to the single switched scope made session-scope notifications
-// (direct spawn_agent children) unactionable for a team lead while the digest
+// (direct subagent_spawn children) unactionable for a team lead while the digest
 // still advertised them as action_required.
 func (c *handlerSupervisionToolController) decisionScopes(ctx context.Context, parentSessionID string) []string {
 	sessionID := strings.TrimSpace(parentSessionID)
@@ -134,7 +134,7 @@ func (c *handlerSupervisionToolController) SupervisionSnapshot(ctx context.Conte
 // child/descendant of the caller's own scope with execution_status,
 // supervision_state, heartbeat/progress ages plus the remediation hints this
 // host can actually execute, so a parent inspects a whole batch instead of
-// polling wait_agent / list_agents row by row.
+// polling subagent_wait / subagent_list row by row.
 //
 // A team lead keeps its own session as the projected subtree (agent rows stay
 // visible) while durable rows stay rooted at the team — the same split the

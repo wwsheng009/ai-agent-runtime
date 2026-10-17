@@ -664,7 +664,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			}
 		}
 	}
-	// v8：usage_subagents 主键补 batch_id（spawn_subagents 的合成 id 在同一父会话的
+	// v8：usage_subagents 主键补 batch_id（subagent_spawn_batch 的合成 id 在同一父会话的
 	// 第二个批次会复用，旧主键 (subagent_id, parent_session_id) 会把两次独立运行并成
 	// 一行，token 取 MAX、read_only 被后到者覆盖）。新库 DDL 已直接带 batch_id；老库
 	// 需要重建表并整行搬移，历史行 batch_id 补空串（无从恢复批次归属，不猜测）。

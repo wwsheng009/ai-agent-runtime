@@ -52,8 +52,8 @@ var (
 	shellGuidanceTools       = toolregistry.CallableNames("shell", "aicli_exec", "grep", "view", "ls", "glob")
 	fileEditingGuidanceTools = toolregistry.CallableNames("apply_patch", "edit", "write", "append_write", "multiedit")
 	parallelGuidanceTools    = toolregistry.CallableNames("view", "grep", "glob", "ls", "shell", "aicli_exec")
-	delegationGuidanceTools  = toolregistry.CallableNames("spawn_subagents", "subagent_spawn")
-	multiAgentGuidanceTools  = toolregistry.CallableNames("spawn_subagents", "subagent_spawn", "team_spawn", "subagent_wait", "team_wait")
+	delegationGuidanceTools  = toolregistry.CallableNames("subagent_spawn_batch", "subagent_spawn")
+	multiAgentGuidanceTools  = toolregistry.CallableNames("subagent_spawn_batch", "subagent_spawn", "team_spawn", "subagent_wait", "team_wait")
 )
 
 // RenderShellExecutionGuidanceFacts renders the shell/toolkit guidance only

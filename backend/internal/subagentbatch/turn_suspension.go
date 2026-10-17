@@ -26,7 +26,7 @@ type TurnSuspension struct {
 	RootScopeID string
 	// ObligationIDs are the obligations dispatched before parking. Batch-backed
 	// obligations stay bare ids (matching ResumeQueue); child agent sessions
-	// dispatched by spawn_agent carry the AgentSessionObligationPrefix so both
+	// dispatched by subagent_spawn carry the AgentSessionObligationPrefix so both
 	// kinds share one persisted representation and no schema migration.
 	ObligationIDs []string
 	// ParkedAt is when the turn parked.
@@ -83,7 +83,7 @@ func normalizeIDList(values []string) []string {
 }
 
 // AgentSessionObligationPrefix marks an obligation backed by a child agent
-// session (a lightweight spawn_agent child) instead of a subagent batch. The
+// session (a lightweight subagent_spawn child) instead of a subagent batch. The
 // obligation stays a single string entry so the §6.12 record keeps exactly one
 // persisted representation (obligation_ids_json) and needs no schema change;
 // readers that only understand batches must skip prefixed ids.
@@ -130,7 +130,7 @@ func (t *TurnSuspension) ObligationAgentSessionIDs() []string {
 }
 
 // TeamObligationPrefix marks an obligation backed by a durable team run
-// (spawn_team with auto_start) instead of a subagent batch or a child session.
+// (team_spawn with auto_start) instead of a subagent batch or a child session.
 // It follows the same single-string representation as
 // AgentSessionObligationPrefix: one persisted form (obligation_ids_json), no
 // schema migration, and readers that only understand batches must skip
@@ -184,7 +184,7 @@ func (t *TurnSuspension) ObligationTeamIDs() []string {
 // child-session obligations; it delegates to TurnObligationsSettledWith with a
 // nil resolver (a record carrying agent_session: obligations therefore stays
 // parked — conservative, never cleared on a guess). Callers that also park
-// spawn_agent children must pass their durable child-session resolver via the
+// subagent_spawn children must pass their durable child-session resolver via the
 // With form.
 func TurnObligationsSettled(ctx context.Context, store BatchStore, record *TurnSuspension) (bool, error) {
 	return TurnObligationsSettledWith(ctx, store, record, nil)

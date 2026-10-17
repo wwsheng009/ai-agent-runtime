@@ -8,7 +8,7 @@ import (
 )
 
 // BatchTerminalLifecycle is the host-neutral terminal projection emitted by a
-// spawn_subagents batch.  The agent package deliberately does not depend on
+// subagent_spawn_batch batch.  The agent package deliberately does not depend on
 // supervision: hosts can translate this record into their own durable
 // lifecycle/notification protocol.
 type BatchTerminalLifecycle struct {

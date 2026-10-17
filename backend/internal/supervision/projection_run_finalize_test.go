@@ -15,7 +15,7 @@ type notificationOnlyStore struct {
 }
 
 // TestProjectAgentCompletionFinalizesChildRun is the regression guard for the
-// dangling spawn_agent run alert observed on 2026-09-13: children p0-verify /
+// dangling subagent_spawn run alert observed on 2026-09-13: children p0-verify /
 // p1-5-verify / p1-67-verify / p2-verify finished, but their registration runs
 // stayed `queued`, so the watchdog kept reporting progress_stalled at the
 // parent for work that was already done.

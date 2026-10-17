@@ -18,6 +18,12 @@ const (
 	AgentMailboxMessageAction         = agentcontrol.ActionAgentMessage
 	AgentMailboxFollowupAction        = agentcontrol.ActionAgentFollowupTask
 	AgentMailboxWorkflow              = agentcontrol.WorkflowSpawnAgent
+	// AgentMailboxBatchWorkflow 是批量委派（subagent_spawn_batch）的持久化 workflow
+	// 标签。它属于 workflow 标签族（{spawn_agent, spawn_team}，见
+	// agentcontrol/envelope.go），不是工具身份：值会落库到
+	// agent_control_mailbox.workflow 并被公开 API 的 workflow 过滤器匹配，历史行
+	// 也带着它，因此不随工具改名迁移。
+	AgentMailboxBatchWorkflow         = "spawn_subagents"
 	AgentMailboxDeliverySessionStore  = agentcontrol.DeliverySessionMailbox
 	SubagentCompletionMailboxKind     = agentcontrol.MailboxKindSubagentCompleted
 	SubagentCompletionMessageType     = agentcontrol.MessageTypeSubagentCompleted
@@ -26,8 +32,8 @@ const (
 	SubagentBatchTerminalMirrorSource = "subagent_batch_terminal_mailbox"
 )
 
-// BuildAgentMailboxMessage creates the mailbox envelope used by send_message
-// and followup_task when a child agent cannot or should not be interrupted.
+// BuildAgentMailboxMessage creates the mailbox envelope used by subagent_send
+// and subagent_followup when a child agent cannot or should not be interrupted.
 func BuildAgentMailboxMessage(fromSessionID, targetSessionID, message string, trigger bool) team.MailMessage {
 	kind := AgentMailboxMessageKind
 	messageType := AgentMailboxMessageType
@@ -164,7 +170,7 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 }
 
 // BuildSubagentBatchTerminalMailboxMessage creates the durable AgentControl
-// mailbox record for a background spawn_subagents batch. deliveryKey is
+// mailbox record for a background subagent_spawn_batch batch. deliveryKey is
 // deterministic and becomes the message id so store retries can deduplicate it.
 func BuildSubagentBatchTerminalMailboxMessage(parentSessionID, batchID, sourceEventType, deliveryKey string, payload map[string]interface{}) team.MailMessage {
 	parentSessionID = strings.TrimSpace(parentSessionID)
@@ -173,7 +179,7 @@ func BuildSubagentBatchTerminalMailboxMessage(parentSessionID, batchID, sourceEv
 	metadata := agentcontrol.Envelope{
 		MessageType:     SubagentCompletionMessageType,
 		ControlAction:   SubagentCompletionAction,
-		Workflow:        "spawn_subagents",
+		Workflow:        AgentMailboxBatchWorkflow,
 		MailboxDelivery: AgentMailboxDeliverySessionStore,
 		MailboxKind:     SubagentCompletionMailboxKind,
 	}.Metadata()

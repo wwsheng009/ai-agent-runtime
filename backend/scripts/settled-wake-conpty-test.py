@@ -30,7 +30,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 SEND_ENTER = "\r"
 INITIAL_PROMPT = (
-    "运行 wake-fix 场景：请调用 spawn_subagents 派发一个后台子代理任务，然后结束回合。"
+    "运行 wake-fix 场景：请调用 subagent_spawn_batch 派发一个后台子代理任务，然后结束回合。"
 )
 
 MOCK_LOG = []
@@ -89,7 +89,7 @@ class MockHandler(BaseHTTPRequestHandler):
             for m in msgs
             if m.get("role") == "assistant"
             and any(
-                (t.get("function") or {}).get("name") == "spawn_subagents"
+                (t.get("function") or {}).get("name") == "subagent_spawn_batch"
                 for t in (m.get("tool_calls") or [])
             )
         )
@@ -140,7 +140,7 @@ class MockHandler(BaseHTTPRequestHandler):
                     "id": tid,
                     "type": "function",
                     "function": {
-                        "name": "spawn_subagents",
+                        "name": "subagent_spawn_batch",
                         "arguments": json.dumps(args, ensure_ascii=False),
                     },
                 }

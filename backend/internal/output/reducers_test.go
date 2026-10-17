@@ -265,7 +265,7 @@ func TestJSONReducer_Reduce_EmitsRuntimeScopeFacts(t *testing.T) {
 
 	env, ok, err := reducer.Reduce(context.Background(), ReducedInput{
 		Raw: RawToolResult{
-			ToolName:   "read_mailbox_digest",
+			ToolName:   "team_mailbox",
 			ToolCallID: "call-7",
 		},
 		Text: text,

@@ -11,7 +11,7 @@ import (
 )
 
 // apiTeamObligationResolver is the API host's durable reader for team runs
-// parked as `team:` obligations (spawn_team with auto_start). It mirrors the
+// parked as `team:` obligations (team_spawn with auto_start). It mirrors the
 // CLI host's localTeamObligationResolver: a team may only settle a parked turn
 // once the team store reports a terminal state; a missing durable row is never
 // evidence of completion.

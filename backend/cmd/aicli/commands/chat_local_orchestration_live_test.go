@@ -135,7 +135,7 @@ func TestAICLIChatActorExecutor_LiveAutoStartShowsTeamProgressTimeline(t *testin
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	teamID := "team-live-" + suffix
 	taskID := "task-live-" + suffix
-	prompt := fmt.Sprintf(`Use the real runtime team tools only and do not simulate. Call spawn_team now with exact args {"team_id":"%s","tasks":[{"id":"%s","assignee":"planner","goal":"Do not edit files. Finish immediately and end with a structured done outcome whose summary is auto smoke finished.","title":"Immediate structured completion","deliverables":["structured done outcome"]}],"teammates":[{"id":"planner","name":"Planner","profile":"planner"},{"id":"executor","name":"Executor","profile":"executor"}],"auto_start":true}. After the tool succeeds, reply briefly with the created team_id and task_id.`, teamID, taskID)
+	prompt := fmt.Sprintf(`Use the real runtime team tools only and do not simulate. Call team_spawn now with exact args {"team_id":"%s","tasks":[{"id":"%s","assignee":"planner","goal":"Do not edit files. Finish immediately and end with a structured done outcome whose summary is auto smoke finished.","title":"Immediate structured completion","deliverables":["structured done outcome"]}],"teammates":[{"id":"planner","name":"Planner","profile":"planner"},{"id":"executor","name":"Executor","profile":"executor"}],"auto_start":true}. After the tool succeeds, reply briefly with the created team_id and task_id.`, teamID, taskID)
 
 	response, err := session.ChatExecutor.Execute(context.Background(), session, prompt)
 	if err != nil {

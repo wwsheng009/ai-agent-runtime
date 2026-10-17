@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// F6（API 宿主对等能力）：close 目标解析必须把 spawn_subagents 批次 id 展开为
+// F6（API 宿主对等能力）：close 目标解析必须把 subagent_spawn_batch 批次 id 展开为
 // 该批次全部子会话，未知 id 不被当作批次。
 func TestSessionAgentControllerResolveCloseTargetsFromBatch(t *testing.T) {
 	handler, _ := newAPISupervisionBudgetTestHandler(t, "api-close-batch-targets")

@@ -537,7 +537,7 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 
 // ReserveAgentControlAgentSpawn atomically upserts the root row, checks the
 // active child count, and creates the child row. This is the registry-first
-// cross-process guard for spawn_agent thread limits.
+// cross-process guard for subagent_spawn thread limits.
 func (s *SQLiteGlobalAgentRegistryStore) ReserveAgentControlAgentSpawn(ctx context.Context, root AgentRecord, child AgentRecord, maxThreads int) (AgentRecord, error) {
 	if s == nil {
 		return AgentRecord{}, fmt.Errorf("agent control agent registry store is not initialized")
@@ -924,8 +924,8 @@ func (s *SQLiteGlobalAgentRegistryStore) CloseAgentControlAgentSubtree(ctx conte
 
 // ReclaimAgentControlAgentSubtree closes one path and all descendants as a
 // quota eviction (plan P2-8 方案 3). Rows end in the same terminal closed state
-// as an orderly close_agent, but the emitted wake event carries
-// "reclaimed:<reason>" so parents, /debug and read_agent_events can tell an
+// as an orderly subagent_close, but the emitted wake event carries
+// "reclaimed:<reason>" so parents, /debug and subagent_events can tell an
 // automatic eviction from an operator action.
 func (s *SQLiteGlobalAgentRegistryStore) ReclaimAgentControlAgentSubtree(ctx context.Context, rootSessionID string, agentPath string, reason string, reclaimedAt time.Time) (int64, error) {
 	reason = strings.TrimSpace(reason)

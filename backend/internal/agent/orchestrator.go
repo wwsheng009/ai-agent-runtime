@@ -278,7 +278,7 @@ func (a *Agent) executePlannedSubagents(ctx context.Context, req *OrchestrationR
 	}
 
 	output := renderSubagentResults(reports)
-	observation := types.NewObservation("planned_subagents", "spawn_subagents").
+	observation := types.NewObservation("planned_subagents", SpawnSubagentsToolName).
 		WithInput(map[string]interface{}{
 			"planned_subagent_tasks": tasks,
 		}).
@@ -511,7 +511,7 @@ func (a *Agent) emitPatchDecisionEvent(req *OrchestrationRequest, result *Orches
 			"reason":    result.PatchApproval.Reason,
 		}
 	}
-	a.emitRuntimeEvent("patch.decision", sessionID, "spawn_subagents", payload)
+	a.emitRuntimeEvent("patch.decision", sessionID, SpawnSubagentsToolName, payload)
 }
 
 func patchDecisionCounts(results []SubagentResult) (int, int, int, int) {
@@ -556,7 +556,7 @@ func plannedSubagentFailureResult(agent *Agent, execErr error, results []Subagen
 	}
 	observations := make([]types.Observation, 0, 1)
 	if len(results) > 0 {
-		observation := types.NewObservation("planned_subagents", "spawn_subagents").
+		observation := types.NewObservation("planned_subagents", SpawnSubagentsToolName).
 			WithOutput(output).
 			WithMetric("subagent_count", len(results)).
 			WithMetric("subagent_reports", results)

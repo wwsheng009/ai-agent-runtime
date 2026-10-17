@@ -111,8 +111,8 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 
 	require.Contains(t, status.Description, "anti-polling",
 		"the description must tell the model that repeated inspection is the intended primitive")
-	require.Contains(t, status.Description, "instead of polling wait_agent",
-		"the description must steer routine supervision away from repeated wait_agent polling")
+	require.Contains(t, status.Description, "instead of polling subagent_wait",
+		"the description must steer routine supervision away from repeated subagent_wait polling")
 	for _, field := range []string{"recommended_action", "allowed_actions", "next_action"} {
 		require.Contains(t, status.Description, field,
 			"the description must explain the decision field %q returned per row", field)
@@ -218,7 +218,7 @@ func TestBroker_Execute_SupervisionSnapshot(t *testing.T) {
 	require.Equal(t, 1, meta["action_required"])
 	require.Equal(t, 1, meta["stale_subjects"])
 	require.Equal(t, int64(7), meta["next_seq"])
-	require.Contains(t, meta["next_action"], "ack_lifecycle")
+	require.Contains(t, meta["next_action"], "subagent_ack_lifecycle")
 }
 
 // TestBroker_Execute_SupervisionDescendants pins the business 巡查 entry: the

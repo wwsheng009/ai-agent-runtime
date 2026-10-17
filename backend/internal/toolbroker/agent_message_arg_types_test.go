@@ -13,13 +13,13 @@ func TestValidateAgentMessageArgTypes(t *testing.T) {
 		"message":   "continue",
 		"interrupt": true,
 	}); err != nil {
-		t.Fatalf("documented send_input kinds must pass, got %v", err)
+		t.Fatalf("documented subagent_input kinds must pass, got %v", err)
 	}
 	if err := validateAgentMessageArgTypes(ToolSubagentSend, map[string]interface{}{
 		"target":  "child-1",
 		"message": "note only",
 	}); err != nil {
-		t.Fatalf("documented send_message kinds must pass, got %v", err)
+		t.Fatalf("documented subagent_send kinds must pass, got %v", err)
 	}
 	// The message tools are not fail-closed on unknown keys: unrelated
 	// arguments stay untouched.
@@ -38,35 +38,35 @@ func TestValidateAgentMessageArgTypes(t *testing.T) {
 		wantKind string
 	}{
 		{
-			name:     "send_input interrupt as string",
+			name:     "subagent_input interrupt as string",
 			tool:     ToolSubagentInput,
 			args:     map[string]interface{}{"id": "child-1", "message": "stop", "interrupt": "true"},
 			wantKey:  "interrupt",
 			wantKind: "JSON boolean",
 		},
 		{
-			name:     "send_input interrupt as number",
+			name:     "subagent_input interrupt as number",
 			tool:     ToolSubagentInput,
 			args:     map[string]interface{}{"id": "child-1", "message": "stop", "interrupt": 1},
 			wantKey:  "interrupt",
 			wantKind: "JSON boolean",
 		},
 		{
-			name:     "send_message target as number",
+			name:     "subagent_send target as number",
 			tool:     ToolSubagentSend,
 			args:     map[string]interface{}{"target": 7, "message": "note"},
 			wantKey:  "target",
 			wantKind: "JSON string",
 		},
 		{
-			name:     "followup_task message as number",
+			name:     "subagent_followup message as number",
 			tool:     ToolSubagentFollowup,
 			args:     map[string]interface{}{"target": "child-1", "message": 42},
 			wantKey:  "message",
 			wantKind: "JSON string",
 		},
 		{
-			name:     "send_input session_id as bool",
+			name:     "subagent_input session_id as bool",
 			tool:     ToolSubagentInput,
 			args:     map[string]interface{}{"session_id": true, "message": "continue"},
 			wantKey:  "session_id",

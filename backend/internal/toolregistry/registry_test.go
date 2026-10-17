@@ -230,8 +230,9 @@ func TestCallableNames(t *testing.T) {
 	require.Equal(t, []string{"view", "read"}, CallableNames("read"))
 
 	// 多名字合并去重，保留首次出现顺序。
-	require.Equal(t, []string{"subagent_spawn", "spawn_agent", "spawn_subagents", "team_spawn", "spawn_team"},
-		CallableNames("subagent_spawn", "spawn_subagents", "team_spawn"))
+	// 批量委派入口：规范名在前，旧拼写 spawn_subagents 作为现役别名随后展开。
+	require.Equal(t, []string{"subagent_spawn", "spawn_agent", "subagent_spawn_batch", "spawn_subagents", "team_spawn", "spawn_team"},
+		CallableNames("subagent_spawn", "subagent_spawn_batch", "team_spawn"))
 	require.Equal(t, []string{"grep", "rg"}, CallableNames("rg", "grep"))
 
 	// 退役名**不**展开成替代工具，否则拒绝表会把替代工具一起禁掉。

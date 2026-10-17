@@ -126,7 +126,7 @@ func TestLocalWakeFallbackLifecycleGated(t *testing.T) {
 }
 
 // parkWaitFeedbackFixture seeds one parked turn with a running team obligation
-// (the shape spawn_team produces) so the fallback feedback gates can be
+// (the shape team_spawn produces) so the fallback feedback gates can be
 // exercised in isolation.
 func parkWaitFeedbackFixture(t *testing.T, host *localChatRuntimeHost) {
 	t.Helper()
@@ -179,7 +179,7 @@ func TestMaybeScheduleWaitFeedbackSchedulesOnceWhilePending(t *testing.T) {
 }
 
 // TestMaybeScheduleWaitFeedbackSilentWhenBusyOrUserFirst pins the two
-// anti-race gates: an active run (wait_agent lives inside the run) and a
+// anti-race gates: an active run (subagent_wait lives inside the run) and a
 // queued user input both keep the fallback fully silent.
 func TestMaybeScheduleWaitFeedbackSilentWhenBusyOrUserFirst(t *testing.T) {
 	ctx := context.Background()
@@ -193,7 +193,7 @@ func TestMaybeScheduleWaitFeedbackSilentWhenBusyOrUserFirst(t *testing.T) {
 		}))
 		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
 		require.Empty(t, pendingWaitFeedbackWakes(t, host),
-			"an active run (or an in-flight wait_agent window) must keep the fallback silent")
+			"an active run (or an in-flight subagent_wait window) must keep the fallback silent")
 	})
 
 	t.Run("queued user input wins", func(t *testing.T) {

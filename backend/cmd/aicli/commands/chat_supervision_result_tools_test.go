@@ -111,7 +111,7 @@ func TestLocalSupervisionToolController_ReadAgentResultUsesHostBatchStore(t *tes
 }
 
 // TestLocalSupervisionToolController_ReadAgentResultFallsBackToMailbox pins the
-// completion-payload fallback on the CLI host: a single spawn_agent child that
+// completion-payload fallback on the CLI host: a single subagent_spawn child that
 // only produced a terminal mailbox row is still readable.
 func TestLocalSupervisionToolController_ReadAgentResultFallsBackToMailbox(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)

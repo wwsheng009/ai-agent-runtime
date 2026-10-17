@@ -9,7 +9,7 @@ import (
 )
 
 // localTeamObligationResolver is the CLI host's durable reader for team runs
-// parked as `team:` obligations (spawn_team with auto_start). It mirrors the
+// parked as `team:` obligations (team_spawn with auto_start). It mirrors the
 // child-session resolver: a team may only settle a parked turn once the team
 // store reports a terminal state and its in-process loop is gone; a missing
 // durable row is never evidence of completion.

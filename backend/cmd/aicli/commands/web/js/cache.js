@@ -302,7 +302,7 @@ function renderRequestsTable(requests) {
     + "<th>时间</th><th>provider/model</th><th>step</th><th>子会话</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>未缓存输入</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
     + "</tr></thead><tbody>" + rows + "</tbody></table>"
     + '<div class="cache-hint">点击行查看请求详情与消息追溯（trace_id / turn_id / 关联消息）</div>'
-    + '<div class="cache-hint">「子会话」列标注该请求由子代理（spawn_agent / spawn_subagents）产生，鼠标悬停可看完整子会话与子代理 ID。</div>'
+    + '<div class="cache-hint">「子会话」列标注该请求由子代理（subagent_spawn / subagent_spawn_batch）产生，鼠标悬停可看完整子会话与子代理 ID。</div>'
     + '<div class="cache-hint">首字/耗时显示"未采集"表示该请求没有观测到（非流式请求、历史记录或首个增量前失败），不代表 0ms。</div>'
     + '<div id="cache-request-detail"></div>';
 }

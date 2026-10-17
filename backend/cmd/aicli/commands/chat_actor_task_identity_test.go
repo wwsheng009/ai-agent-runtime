@@ -53,7 +53,7 @@ func newLocalTaskIdentityRegistry(t *testing.T, withBinding bool) *localActorReg
 }
 
 // TestResolveLocalAgentTargetSessionIDMapsTaskToChildSession 钉住 G4/H7 在 CLI 宿主
-// 的解析入口：运行期 `wait_agent(task_id)` / `read_agent_events(task_id)` 必须能把
+// 的解析入口：运行期 `subagent_wait(task_id)` / `subagent_events(task_id)` 必须能把
 // 派发回执上的 task id 解析成子会话。
 func TestResolveLocalAgentTargetSessionIDMapsTaskToChildSession(t *testing.T) {
 	registry := newLocalTaskIdentityRegistry(t, true)

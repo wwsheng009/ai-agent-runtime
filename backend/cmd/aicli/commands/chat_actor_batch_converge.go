@@ -52,20 +52,20 @@ func localFinishedChildSessionIDs(ctx context.Context, host *localChatRuntimeHos
 // lifecycle row (plan §4.1/§4.1.1).
 //
 // The row itself is resolution=closed, so the only executable channel is the
-// broker tool close_agent; control_descendant would be rejected by the
+// broker tool subagent_close; subagent_control would be rejected by the
 // evaluator on an already terminal row. The hint therefore names the tool and
 // the concrete child sessions instead of relying on the bare recommended_action
 // value, and it is appended to the human-readable reason so both the digest row
 // and the /debug view carry it.
 func localBatchConvergeHint(ctx context.Context, host *localChatRuntimeHost, batchID string) string {
-	const instruction = "converge by closing the finished child sessions with close_agent"
+	const instruction = "converge by closing the finished child sessions with subagent_close"
 	batchID = strings.TrimSpace(batchID)
 	if batchID == "" {
 		return instruction
 	}
 	// F6: one call converges the whole batch; the per-child list stays as a
 	// fallback for hosts that cannot resolve a batch id.
-	hint := fmt.Sprintf("converge with one close_agent call on the batch: close_agent(batch_id=%q)", batchID)
+	hint := fmt.Sprintf("converge with one subagent_close call on the batch: subagent_close(batch_id=%q)", batchID)
 	ids := localFinishedChildSessionIDs(ctx, host, batchID)
 	if len(ids) == 0 {
 		return hint

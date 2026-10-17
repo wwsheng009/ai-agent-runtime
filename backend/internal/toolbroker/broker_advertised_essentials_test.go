@@ -18,7 +18,7 @@ import (
 // team_spawn / subagent_list …），而 P1 前 policy 的 essential 名单用
 // normalizeToolName 先折向**旧拼写**（spawn_agent / spawn_team / list_agents …）
 // 再匹配，方向相反 → 规范名在 essential 表里全部落空 → 窄 allowlist 下
-// subagent_spawn / team_spawn / spawn_subagents 的定义会被
+// subagent_spawn / team_spawn / subagent_spawn_batch 的定义会被
 // filterPolicyBlockedToolDefinitions **静默摘掉**，宿主以为接好了，模型却看不到
 // 委派入口，而 prompt 仍在教它委派。P1 把名单收进 toolregistry 后此 bug 消失；
 // 本测试在 P1 前对 subagent_spawn 是红的。

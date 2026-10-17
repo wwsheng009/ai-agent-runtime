@@ -71,7 +71,7 @@ var spawnAgentFieldKinds = []struct {
 	{"cancel_grace_sec", toolArgFieldNumber},
 }
 
-// validateSpawnAgentArgTypes checks the known spawn_agent arguments for
+// validateSpawnAgentArgTypes checks the known subagent_spawn arguments for
 // JSON-kind mismatches. Message aliases (message/goal/task/prompt) are handled
 // by normalizeSpawnAgentToolArgs, which reports an empty prompt on its own.
 func validateSpawnAgentArgTypes(args map[string]interface{}) error {

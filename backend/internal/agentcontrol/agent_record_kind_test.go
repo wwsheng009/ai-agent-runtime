@@ -42,13 +42,13 @@ func TestAgentRecordIsTeamTeammate(t *testing.T) {
 	require.True(t, AgentRecord{AgentType: AgentTypeTeamTeammate}.IsTeamTeammate(),
 		"historical rows without workflow/team ids must still be recognized")
 
-	// Spawn_agent children and root must never be read as teammates.
+	// Subagent_spawn children and root must never be read as teammates.
 	require.False(t, AgentRecord{
 		AgentType: "general", Workflow: WorkflowSpawnAgent, Depth: 1,
-	}.IsTeamTeammate(), "a spawn_agent child with an agent definition is not a teammate")
+	}.IsTeamTeammate(), "a subagent_spawn child with an agent definition is not a teammate")
 	require.False(t, AgentRecord{
 		AgentType: AgentTypeChild, Depth: 1,
-	}.IsTeamTeammate(), "a plain spawn_agent child is not a teammate")
+	}.IsTeamTeammate(), "a plain subagent_spawn child is not a teammate")
 	require.False(t, AgentRecord{AgentPath: "/root", AgentType: AgentTypeRoot}.IsTeamTeammate(),
 		"the root row is not a teammate")
 	require.False(t, AgentRecord{}.IsTeamTeammate(), "an empty row is not a teammate")
@@ -74,7 +74,7 @@ func TestAgentRecordIsRootAgent(t *testing.T) {
 		AgentPath: "/root/child-1", AgentType: AgentTypeChild, Depth: 1,
 	}.IsRootAgent(), "a depth-1 child path is not root")
 	require.False(t, AgentRecord{AgentType: "general", Workflow: WorkflowSpawnAgent}.IsRootAgent(),
-		"a spawn_agent child type is not root")
+		"a subagent_spawn child type is not root")
 	require.False(t, AgentRecord{AgentType: AgentTypeTeamTeammate}.IsRootAgent(),
 		"a teammate is not root")
 	require.False(t, AgentRecord{}.IsRootAgent())

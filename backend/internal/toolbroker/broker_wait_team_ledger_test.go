@@ -47,7 +47,7 @@ func terminalWaitTeamLedgerFixture(t *testing.T) (*team.SQLiteStore, string) {
 }
 
 // TestBrokerExecuteWaitTeamLedgerFinalizesDrainedTaskLedger 钉住 AC-P2-4g 的放行
-// 方向：团队终态且任务账本无待办 ⇒ 立即返回并给出与 wait_agent 相同的
+// 方向：团队终态且任务账本无待办 ⇒ 立即返回并给出与 subagent_wait 相同的
 // next_action=finalize，行形状为 subject_kind=team_task。
 func TestBrokerExecuteWaitTeamLedgerFinalizesDrainedTaskLedger(t *testing.T) {
 	store, teamID := terminalWaitTeamLedgerFixture(t)
@@ -78,7 +78,7 @@ func TestBrokerExecuteWaitTeamLedgerFinalizesDrainedTaskLedger(t *testing.T) {
 	assert.Empty(t, result.TerminalDelta,
 		"tasks already terminal before the segment are the baseline, not the delta")
 	assert.Equal(t, "finalize", result.NextAction,
-		"an all-terminal team ledger is decisive: wait_team shares the wait_agent finalize rule")
+		"an all-terminal team ledger is decisive: team_wait shares the subagent_wait finalize rule")
 	assert.Less(t, result.WaitedMs, int64(2000),
 		"a drained ledger returns immediately instead of spending the requested window")
 }

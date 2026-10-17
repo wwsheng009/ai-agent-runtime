@@ -64,8 +64,8 @@ func executeWaitTeamPolicyCall(t *testing.T, broker *Broker, teamID string, args
 	return result, meta, nil
 }
 
-// wait_team must obey agents.maxWaitTimeoutMs exactly like wait_agent and
-// read_agent_events: an oversized request is pinned and the result says so
+// team_wait must obey agents.maxWaitTimeoutMs exactly like subagent_wait and
+// subagent_events: an oversized request is pinned and the result says so
 // instead of silently holding the parent for hours.
 func TestBrokerExecuteWaitTeamClampsToSharedMaximum(t *testing.T) {
 	policy := agentcontrol.WaitTimeoutPolicy{MinMs: 1, MaxMs: 250}

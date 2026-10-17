@@ -158,7 +158,7 @@ func TestBroker_SpawnAgentJSONNumberTimeoutsReachRequest(t *testing.T) {
 		"cancel_grace_sec":     5,
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.TimeoutSec != 600 {
 		t.Fatalf("timeout_sec float64 must reach the request, got %d", controller.lastSpawn.TimeoutSec)
@@ -221,7 +221,7 @@ func TestBroker_SpawnAgentForkTurnsStringHonorsOverride(t *testing.T) {
 		"fork_context": true,
 	})
 	if err != nil {
-		t.Fatalf("spawn_agent failed: %v", err)
+		t.Fatalf("subagent_spawn failed: %v", err)
 	}
 	if controller.lastSpawn.ForkTurns != "2" {
 		t.Fatalf("fork_turns must reach the request, got %q", controller.lastSpawn.ForkTurns)

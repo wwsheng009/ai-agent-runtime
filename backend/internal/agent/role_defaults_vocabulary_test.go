@@ -7,8 +7,8 @@ import (
 )
 
 // TestDefaultToolsForRoleCoversRuntimeTaskVocabulary 钉住 2026-09-30 缺口：
-// 模型实际使用的角色词表（spawn_agent agent_type: explore/general/plan；
-// spawn_subagents task_type: config/explore/generate/implement/...）此前不在
+// 模型实际使用的角色词表（subagent_spawn agent_type: explore/general/plan；
+// subagent_spawn_batch task_type: config/explore/generate/implement/...）此前不在
 // DefaultToolsForRole 的精确角色名里，落到 nil（"继承父策略"）的同时能力面也
 // 丢掉 exec_shell/network，子代理静默失去 shell。家族归一后这些词都必须命中
 // 既有默认表，未知词仍保持 nil（不擅自扩权）。

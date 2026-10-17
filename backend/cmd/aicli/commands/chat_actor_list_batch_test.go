@@ -14,10 +14,10 @@ import (
 )
 
 // TestLocalActorRegistryListIncludesBatchLedgerRows 锁定 2026-10-14 缺口：
-// spawn_subagents 的子代理只写批任务账本、不落 SessionStore/注册表，
+// subagent_spawn_batch 的子代理只写批任务账本、不落 SessionStore/注册表，
 // subagent_list（ActorRegistry.List）必须与 /agents 列表、wait 快照
 // （batchTaskSnapshot）同口径合并账本行，否则批量派发场景下列表恒为空，
-// 与 spawn_agent 的列表行为不一致。
+// 与 subagent_spawn 的列表行为不一致。
 func TestLocalActorRegistryListIncludesBatchLedgerRows(t *testing.T) {
 	ctx := context.Background()
 	root := runtimechat.NewSession("batch-list-user")
@@ -151,7 +151,7 @@ func TestLocalActorRegistryListPathPrefixHonorsBoundaries(t *testing.T) {
 }
 
 // TestLocalActorRegistryRejectsMessagingBatchTaskTargets 锁定 2026-10-14 缺口：
-// 批任务 worker 不是可对话会话——send_message / followup_task / send_input 必须
+// 批任务 worker 不是可对话会话——subagent_send / subagent_followup / subagent_input 必须
 // 给出可行动拒绝（而非 ensureSession 为批任务伪造会话行、或 followup 起一次重复
 // 运行）。子会话 id 与 task id 两种寻址都要命中。
 func TestLocalActorRegistryRejectsMessagingBatchTaskTargets(t *testing.T) {

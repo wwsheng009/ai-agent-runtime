@@ -208,7 +208,7 @@ var builtinEntries = []Entry{
 
 	// subagent 家族（命名契约 B3）
 	{Name: "subagent_spawn", Aliases: []string{"spawn_agent"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true, Delegation: true},
-	{Name: "spawn_subagents", Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true, Delegation: true},
+	{Name: "subagent_spawn_batch", Aliases: []string{"spawn_subagents"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true, Delegation: true},
 	{Name: "subagent_list", Aliases: []string{"list_agents"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},
 	{Name: "subagent_wait", Aliases: []string{"wait_agent"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},
 	{Name: "subagent_events", Aliases: []string{"read_agent_events"}, Group: GroupOrchestration, Exposure: controlPlaneExposure, Essential: true},

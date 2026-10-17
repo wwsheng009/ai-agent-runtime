@@ -126,7 +126,7 @@ func TestLocalSupervisionSourcesBuildResumeContextWithVerdict(t *testing.T) {
 }
 
 // TestLocalSupervisionSourcesParkedChildKeepsJoinOpen 是 2026-10-09 真机回归：
-// spawn_agent 轻量子会话是 agent_session: 义务，只存在于 §6.12 挂起记录里，不在
+// subagent_spawn 轻量子会话是 agent_session: 义务，只存在于 §6.12 挂起记录里，不在
 // batch 表里。只按批次投影时 resume 上下文会输出
 // "obligations: total=0 pending=0 can_finalize=true"，在子代理仍在运行时宣告
 // "所有 obligation 均已终态"（wait_feedback 唤醒 episode 的真实故障）。本用例钉住
@@ -159,7 +159,7 @@ func TestLocalSupervisionSourcesParkedChildKeepsJoinOpen(t *testing.T) {
 	})
 	require.NotNil(t, resume)
 	require.Equal(t, 1, resume.TotalCount, "挂起记录里的子会话义务必须进入 resume 账本")
-	require.Equal(t, 1, resume.PendingCount, "运行中的 spawn_agent 子会话必须压住 I1 判据")
+	require.Equal(t, 1, resume.PendingCount, "运行中的 subagent_spawn 子会话必须压住 I1 判据")
 	require.False(t, resume.Terminal)
 	require.Equal(t, turnID, resume.TurnID, "I3：resume 必须锚定挂起 turn")
 

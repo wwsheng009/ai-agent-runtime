@@ -161,7 +161,7 @@ func (q *streamLiveQueue) statsSinceLastReport() (mergedDelta, droppedDelta, dro
 // streamLiveMergeKey 是 live 帧的合并判据：优先 tool_call_id（同一工具的进度帧
 // 天然是一串状态）；否则按 agent（子代理进度）；再否则退化为类型 + trace。
 //
-// 子代理并发（同一父会话下多个 spawn_agent 子会话）场景：subagent.progress 镜像
+// 子代理并发（同一父会话下多个 subagent_spawn 子会话）场景：subagent.progress 镜像
 // 的 AgentName 恒为 "agent-controller"（supervision/subagent_progress.go），
 // 仅凭它会把所有子代理的进度折叠成同一 key，latest-wins 下互相覆盖——被覆盖的
 // 子代理在父流里就"消失"了。因此优先取载荷里的子代理身份（agent_id/session_id），

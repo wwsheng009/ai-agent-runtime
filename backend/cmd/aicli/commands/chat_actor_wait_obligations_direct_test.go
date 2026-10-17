@@ -52,7 +52,7 @@ func newLocalDirectObligationsRegistry(t *testing.T) (*localActorRegistry, strin
 }
 
 // TestLocalWaitAgentObligationsDirectFromTargetsWithoutParkedRecord 钉住 doc1 §7.9
-// 剩余② 在 CLI 宿主的镜像：无挂起记录时，wait_agent 仍按显式目标直出 obligations[]
+// 剩余② 在 CLI 宿主的镜像：无挂起记录时，subagent_wait 仍按显式目标直出 obligations[]
 // （行形状与挂起路径同源），待办行保持 I1 语义（不给 finalize）。
 func TestLocalWaitAgentObligationsDirectFromTargetsWithoutParkedRecord(t *testing.T) {
 	registry, batchID, childSessionID := newLocalDirectObligationsRegistry(t)
@@ -72,7 +72,7 @@ func TestLocalWaitAgentObligationsDirectFromTargetsWithoutParkedRecord(t *testin
 }
 
 // TestLocalWaitAgentDirectObligationsFinalizeWhenTargetTerminal 钉住直出账本与收尾门
-// 的配合：目标批次已终态时，wait_agent 立即返回 finalize 且带终态义务行。
+// 的配合：目标批次已终态时，subagent_wait 立即返回 finalize 且带终态义务行。
 func TestLocalWaitAgentDirectObligationsFinalizeWhenTargetTerminal(t *testing.T) {
 	registry, batchID, childSessionID := newLocalDirectObligationsRegistry(t)
 	ctx := context.Background()

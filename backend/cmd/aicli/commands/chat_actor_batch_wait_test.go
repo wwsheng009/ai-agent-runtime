@@ -13,7 +13,7 @@ import (
 )
 
 // 2026-09-26 真机 E2E：父模型拿派发回执里最显眼的 batch id 直接
-// wait_agent(batch_id)，旧路径只报 target_not_found。现在 batch id 必须先展开为
+// subagent_wait(batch_id)，旧路径只报 target_not_found。现在 batch id 必须先展开为
 // 它早绑定 child_session_id 的 task 子会话，再走既有解析/快照路径。
 func TestWaitAgentOnDispatchBatchIDExpandsToTaskChildren(t *testing.T) {
 	host, _ := newLocalWaitLedgerHost(t, subagentbatch.BatchCompleted, "turn-batch-wait")
@@ -68,8 +68,8 @@ func TestWaitAgentOnDispatchBatchIDExpandsToTaskChildren(t *testing.T) {
 	require.True(t, result.Agents[0].Exists)
 }
 
-// 2026-10-09 真机回归：spawn_subagents 派发后任务尚未绑定子会话时，
-// wait_agent(task_id) 曾直接以 TOOL_BROKER_FAILURE 硬失败（retryable=false），
+// 2026-10-09 真机回归：subagent_spawn_batch 派发后任务尚未绑定子会话时，
+// subagent_wait(task_id) 曾直接以 TOOL_BROKER_FAILURE 硬失败（retryable=false），
 // 模型被迫改用 child session id 绕行。现在必须按 pending 继续等待：窗口内不
 // 绑定则超时返回 pending（保留任务 id），而不是抛错。
 func TestWaitAgentOnUnboundBatchTaskStaysPending(t *testing.T) {

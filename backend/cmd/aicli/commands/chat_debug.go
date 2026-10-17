@@ -974,8 +974,8 @@ func chatAgentGraphItems(session *ChatSession) ([]toolbroker.AgentStatusResult, 
 }
 
 // chatAgentItems 汇总会话可见的子 agent 行：注册表/会话存储来源 + 批任务账本来源。
-// 两个来源缺一不可：单发 spawn_agent 只登记 agent_control_agents；批量
-// spawn_subagents 只写批任务账本（2026-10-09 现场：3 个批任务代理在跑，
+// 两个来源缺一不可：单发 subagent_spawn 只登记 agent_control_agents；批量
+// subagent_spawn_batch 只写批任务账本（2026-10-09 现场：3 个批任务代理在跑，
 // /agents 列表却显示"暂无子 agent"）。
 func chatAgentItems(session *ChatSession, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {
 	agents, err := chatAgentItemsFromSources(session, includeClosed)
@@ -1116,7 +1116,7 @@ func chatAgentItemsFromSessionStore(session *ChatSession, parentSessionID string
 	return agents, true, nil
 }
 
-// chatAgentBatchItems 列出调用方父会话自己的批任务账本行（spawn_subagents 派发
+// chatAgentBatchItems 列出调用方父会话自己的批任务账本行（subagent_spawn_batch 派发
 // 的子代理）。/agents 选择器与 subagent_list（ActorRegistry.List）共用
 // listLocalBatchAgentItems，保证两种派发方式在同一观测口径下可见。
 func chatAgentBatchItems(session *ChatSession, includeClosed bool) ([]toolbroker.AgentStatusResult, error) {

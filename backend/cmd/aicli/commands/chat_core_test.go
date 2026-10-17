@@ -889,7 +889,7 @@ func TestToolDefinitionsFromSelection_PreservesMetadata(t *testing.T) {
 	selection := &aicliFunctionSelection{
 		Schemas: []map[string]interface{}{
 			{
-				"name":        "read_task_spec",
+				"name":        "team_task_spec",
 				"description": "read task spec",
 				"parameters":  map[string]interface{}{"type": "object"},
 				"metadata": map[string]interface{}{
@@ -978,7 +978,7 @@ func TestToolDefinitionsToSchemas_RepairsNullParameterProperties(t *testing.T) {
 func TestToolDefinitionsToSchemas_PreservesMetadata(t *testing.T) {
 	defs := []types.ToolDefinition{
 		{
-			Name:        "read_task_spec",
+			Name:        "team_task_spec",
 			Description: "read task spec",
 			Parameters:  map[string]interface{}{"type": "object"},
 			Metadata: map[string]interface{}{

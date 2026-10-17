@@ -59,7 +59,7 @@ func TestReActLoop_CompleteTaskRecoversThenSucceeds(t *testing.T) {
 	}
 	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
 
-	// Intentionally omit toolBroker so report_task_outcome exercises the MCP path
+	// Intentionally omit toolBroker so team_task_report exercises the MCP path
 	// and remains a unit test of completion recovery (not team store integration).
 	agent := NewAgentWithLLM(&Config{
 		Name: "worker", Provider: "test-provider", Model: "test-model", MaxSteps: 5,
@@ -160,7 +160,7 @@ func TestReActLoop_CompleteTaskUnsatisfiedAfterRecovery(t *testing.T) {
 }
 
 // completionOutcomeMCPManager is a minimal MCPManager for completion recovery tests.
-// report_task_outcome is normally a broker tool; tests omit the broker so this path
+// team_task_report is normally a broker tool; tests omit the broker so this path
 // can mark a successful outcome observation without a team store.
 type completionOutcomeMCPManager struct{}
 

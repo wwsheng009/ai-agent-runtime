@@ -31,8 +31,8 @@ func ReadOnlyChildCapabilities() []Capability {
 }
 
 // ReadOnlyChildOptionDescription is the single source of truth for the
-// read_only spawn option text shown to models. spawn_agent and
-// spawn_subagents must serve this same text so the description cannot drift
+// read_only spawn option text shown to models. subagent_spawn and
+// subagent_spawn_batch must serve this same text so the description cannot drift
 // from the effective boundary or from each other.
 //
 // It documents the behavior the runtime actually enforces: write-like tools
@@ -48,10 +48,10 @@ func ReadOnlyChildCapabilities() []Capability {
 // for children that then needed general shell syntax mid-run (doc1 §7.10 ②):
 // the parent sees the shell contract before dispatch instead of only the
 // child-side denial escalation.
-const ReadOnlyChildOptionDescription = "Hard child execution boundary. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and job_start are removed from the child's model-visible tool surface and denied at execution, while shell stays available but only for individually classified read-only commands. The delegation boundary (BlockDelegation / max depth) may remove spawn_agent/spawn_team as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks. Read-only children's shell stays allowlisted: redirection, command substitution and dynamic expansion are denied, and compound commands (&&, ||, ;, |) must be read-only in every segment — leave read_only unset for children that need writes or general shell syntax."
+const ReadOnlyChildOptionDescription = "Hard child execution boundary. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and job_start are removed from the child's model-visible tool surface and denied at execution, while shell stays available but only for individually classified read-only commands. The delegation boundary (BlockDelegation / max depth) may remove subagent_spawn/team_spawn as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks. Read-only children's shell stays allowlisted: redirection, command substitution and dynamic expansion are denied, and compound commands (&&, ||, ;, |) must be read-only in every segment — leave read_only unset for children that need writes or general shell syntax."
 
 // SubagentWriterPolicyDescription is the model-visible contract for writer
-// governance on spawn_subagents. It is the single source of truth for the
+// governance on subagent_spawn_batch. It is the single source of truth for the
 // dispatch guidance: a batch may carry several writers (they serialize), the
 // process-wide fence serializes writers across batches, and declared disjoint
 // write_paths are how independent writers keep running in parallel.
@@ -145,8 +145,8 @@ func CapabilitiesForTask(role string, readOnly bool, toolNames, writePaths []str
 	}
 	// A task without an explicit tool list inherits the parent's surface, so the
 	// capability floor has to follow the role family instead: the vocabulary
-	// models actually use (spawn_agent agent_type explore/general/plan,
-	// spawn_subagents task_type config/explore/generate/implement/...) is wider
+	// models actually use (subagent_spawn agent_type explore/general/plan,
+	// subagent_spawn_batch task_type config/explore/generate/implement/...) is wider
 	// than the legacy role names, and an unrecognized role used to fall through
 	// to "no defaults" - which silently dropped CapExecShell/CapNetwork from the
 	// derived child scope while the child still inherited the parent's tools.

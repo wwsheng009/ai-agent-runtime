@@ -3940,7 +3940,7 @@ func (s *SQLiteStore) AppendTeamEvent(ctx context.Context, event TeamEvent) (int
 			}
 		}
 		// Mirror every durable team lifecycle event into the unified AgentControl
-		// wake registry so event-driven consumers (wait_team, diagnostics) can
+		// wake registry so event-driven consumers (team_wait, diagnostics) can
 		// react immediately instead of short-interval polling. The wake row is
 		// committed in the same transaction as the team event, so watchers never
 		// observe an event that is not durably visible.

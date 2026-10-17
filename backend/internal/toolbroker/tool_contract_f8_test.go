@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// F8：apply_agent_worktree 的工具面契约——
+// F8：subagent_apply_worktree 的工具面契约——
 //  1. id/paths/keep/force 必须原样到达宿主控制器；
 //  2. 宿主在 H14 主树冲突时拒绝（force=false）的可执行错误必须原样上抛，
 //     让父代理看到冲突路径与 next_action，而不是被折叠成裸 git 失败。

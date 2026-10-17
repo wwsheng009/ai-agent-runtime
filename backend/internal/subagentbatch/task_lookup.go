@@ -7,7 +7,7 @@ import (
 
 // FindTaskByIDInParentSession 在**一个父会话的**批任务行里按 task id 定位任务
 // （H7 / G4 的解析侧入口：生产侧已在派发时把 child_session_id 早绑定写进 task
-// 行，但 `wait_agent(task_id)` / `read_agent_events(task_id)` 的工具面此前没有
+// 行，但 `subagent_wait(task_id)` / `subagent_events(task_id)` 的工具面此前没有
 // 把这层身份映射起来，运行期只能报 missing / 0 events）。
 //
 // 作用域纪律：只扫该父会话自己的批次（ListBatches 按 ParentSessionID 过滤），
@@ -63,7 +63,7 @@ func FindTaskByIDInParentSession(ctx context.Context, store BatchStore, parentSe
 //
 // 为什么需要它（2026-09-26 真机 E2E 缺口）：生产形态里子代理会话不是 durable
 // session——子代理运行只把身份（child_session_id）与结果写进批任务行 + 事件流，
-// 并不落 SessionStore。因此 `wait_agent(task_id)` 解析出 child_session_id 后，
+// 并不落 SessionStore。因此 `subagent_wait(task_id)` 解析出 child_session_id 后，
 // 会话快照仍是 missing/exists=false，父代理依旧拿不到状态与输出。调用方应回退到
 // 这张账本行投影状态/结果。
 //
@@ -103,7 +103,7 @@ func FindTaskByChildSessionIDInParentSession(ctx context.Context, store BatchSto
 // ParentSessionID 过滤），调用方必须先取得调用者会话 id，不得由模型指定。
 //
 // 为什么需要它（2026-09-26 真机 E2E 缺口）：派发回执里最显眼的 id 是 batch id，
-// 父模型会直接 `wait_agent(batch_id)`；batch id 既不是 agent session 也不是
+// 父模型会直接 `subagent_wait(batch_id)`；batch id 既不是 agent session 也不是
 // task id，解析层只能报 target_not_found。把 batch 映射到它的 task 行之后，
 // 调用方才能把 batch id 展开成可寻址的子会话。
 func FindBatchByIDInParentSession(ctx context.Context, store BatchStore, parentSessionID, batchID string) (SubagentBatch, bool, error) {

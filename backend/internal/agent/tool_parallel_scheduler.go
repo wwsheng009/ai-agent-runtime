@@ -10,6 +10,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -63,7 +64,7 @@ func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, to
 		if isParallelBrokerToolCall(name) || runtimepolicy.IsWriteLikeToolName(name) || runtimepolicy.IsShellLikeToolName(name) || runtimepolicy.HasMutationHints(tc.Args) {
 			return nil
 		}
-		if name == "spawn_subagents" {
+		if toolregistry.IsSpellingOf(SpawnSubagentsToolName, name) {
 			return nil
 		}
 		if allowedTools != nil && !allowedTools[name] {

@@ -1056,7 +1056,7 @@ func TestTeammateRunnerUsesObservedReportTaskOutcomeAsCanonicalResult(t *testing
 				Output:  "completed and reported.",
 				Observations: []SessionObservation{
 					{
-						Tool:    "report_task_outcome",
+						Tool:    "team_task_report",
 						Success: true,
 						Output: map[string]interface{}{
 							"status":  "done",
@@ -1096,7 +1096,7 @@ func TestTeammateRunnerUsesRenderedReportTaskOutcomeObservation(t *testing.T) {
 				Output:  "Could not complete the task.",
 				Observations: []SessionObservation{
 					{
-						Tool:    "report_task_outcome",
+						Tool:    "team_task_report",
 						Success: true,
 						// Mirrors loop.observe storing Envelope.Render() as a string.
 						Output: "Task outcome: failed\nSummary: auto smoke failed\nBlocker: auto smoke failed",
@@ -1134,7 +1134,7 @@ func TestTeammateRunnerUsesObservedBlockCurrentTaskAsCanonicalResult(t *testing.
 				Output:  "handoff sent.",
 				Observations: []SessionObservation{
 					{
-						Tool:    "block_current_task",
+						Tool:    "team_task_block",
 						Success: true,
 						Output: map[string]interface{}{
 							"status":     "blocked",

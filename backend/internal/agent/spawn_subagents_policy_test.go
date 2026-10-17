@@ -18,12 +18,12 @@ func TestShouldExposeSpawnSubagentsRequiresWhitelistAndExecutionPolicy(t *testin
 		t.Fatal("expected scheduler tool without restrictive policy to be exposed")
 	}
 	if shouldExposeSpawnSubagents(apiAgent, map[string]bool{"view": true}) {
-		t.Fatal("expected call whitelist without spawn_subagents to hide it")
+		t.Fatal("expected call whitelist without subagent_spawn_batch to hide it")
 	}
 
 	apiAgent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy([]string{"view"}, false))
 	if shouldExposeSpawnSubagents(apiAgent, nil) {
-		t.Fatal("expected execution allowlist without spawn_subagents to hide it")
+		t.Fatal("expected execution allowlist without subagent_spawn_batch to hide it")
 	}
 
 	policy := runtimepolicy.NewToolExecutionPolicy([]string{"view", SpawnSubagentsToolName}, false)
@@ -34,7 +34,7 @@ func TestShouldExposeSpawnSubagentsRequiresWhitelistAndExecutionPolicy(t *testin
 
 	policy.DeniedTools = map[string]bool{SpawnSubagentsToolName: true}
 	if shouldExposeSpawnSubagents(apiAgent, map[string]bool{SpawnSubagentsToolName: true}) {
-		t.Fatal("expected explicit deny to hide spawn_subagents")
+		t.Fatal("expected explicit deny to hide subagent_spawn_batch")
 	}
 }
 
@@ -52,7 +52,7 @@ func TestComputeAvailableToolsDoesNotExposePolicyDeniedSpawnSubagents(t *testing
 	}
 	for _, tool := range tools {
 		if tool.Name == SpawnSubagentsToolName {
-			t.Fatal("policy-denied spawn_subagents must not be model-visible")
+			t.Fatal("policy-denied subagent_spawn_batch must not be model-visible")
 		}
 	}
 }
@@ -64,7 +64,7 @@ func TestDisabledDelegationSchedulerHidesToolAndFailsBeforeChildCreation(t *test
 	}))
 
 	if shouldExposeSpawnSubagents(apiAgent, nil) {
-		t.Fatal("disabled inherited delegation boundary must hide spawn_subagents")
+		t.Fatal("disabled inherited delegation boundary must hide subagent_spawn_batch")
 	}
 	reports, err := apiAgent.GetSubagentScheduler().RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{{ID: "grandchild", Goal: "inspect"}})
 	require.Error(t, err)

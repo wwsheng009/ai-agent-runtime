@@ -13,7 +13,7 @@ const (
 	WakeKindTask = "task"
 	// WakeKindTeam identifies team lifecycle wake events (team.completed,
 	// team.summary, and other durable team_events rows). Consumed by
-	// event-driven wait_team and diagnostics instead of short polling.
+	// event-driven team_wait and diagnostics instead of short polling.
 	WakeKindTeam = "team"
 )
 

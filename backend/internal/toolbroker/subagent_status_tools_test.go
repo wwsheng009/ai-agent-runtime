@@ -84,7 +84,7 @@ func TestBroker_Execute_SubagentStatusLedgerRollup(t *testing.T) {
 	require.Equal(t, []string{"child-done"}, payload["terminal_delta"],
 		"only rows that reached terminal after the cursor are a delta")
 	require.Equal(t, int64(12), payload["next_seq"])
-	require.Equal(t, "report the finished rows to the user; already-acknowledged rows need no further acknowledge — close finished children with close_agent if they are still open, and advance after_seq=next_seq to clear terminal_unacknowledged",
+	require.Equal(t, "report the finished rows to the user; already-acknowledged rows need no further acknowledge — close finished children with subagent_close if they are still open, and advance after_seq=next_seq to clear terminal_unacknowledged",
 		payload["next_action"], "an already-handled finished row must keep the shared matrix guidance without steering a redundant acknowledge")
 	summary, ok := metadata[cacheSafeSummaryMetadataKey].(string)
 	require.True(t, ok, "the ledger rollup must survive into the cache-safe summary")

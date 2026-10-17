@@ -306,7 +306,7 @@ type testLLMProvider struct {
 type testSequenceLLMProvider struct {
 	name      string
 	responses []*llm.LLMResponse
-	// mu 保护 callCount：spawn_subagents 异步派发后，detached 子任务与父 turn
+	// mu 保护 callCount：subagent_spawn_batch 异步派发后，detached 子任务与父 turn
 	// 可能并发调用同一个 provider 实例（C4-1）。
 	mu        sync.Mutex
 	callCount int
@@ -1337,7 +1337,7 @@ func TestAgentChat_EnableReAct_ExposesSubagentSummary(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	result := payload["result"].(map[string]interface{})
 	subagentSummary := result["subagent_summary"].(map[string]interface{})
-	// C4-1：spawn_subagents 异步派发后立即返回 batch 句柄，本 turn 拿不到子任务报告，
+	// C4-1：subagent_spawn_batch 异步派发后立即返回 batch 句柄，本 turn 拿不到子任务报告，
 	// 摘要只报告"已派发批次/任务数"；successful/roles 等终态字段由批次终态投递
 	// （resume / 监督通道）在后续 turn 的观测里补齐。
 	assert.Equal(t, float64(1), subagentSummary["batches"])
@@ -1559,7 +1559,7 @@ func TestGetRuntimeTrace_SummarizesPatchDecisionAudit(t *testing.T) {
 		TraceID:   "trace-patch-audit",
 		AgentName: "agent-a",
 		SessionID: "session-a",
-		ToolName:  "spawn_subagents",
+		ToolName:  "subagent_spawn_batch",
 		Payload: map[string]interface{}{
 			"patch_decision":        "approved_override",
 			"patch_decision_policy": "strict",
@@ -2132,7 +2132,7 @@ func TestGetRuntimeTraceGovernance_ReturnsDeniedView(t *testing.T) {
 		TraceID:   "trace-audit",
 		AgentName: "agent-b",
 		SessionID: "session-b",
-		ToolName:  "spawn_subagents",
+		ToolName:  "subagent_spawn_batch",
 		Payload: map[string]interface{}{
 			"patch_decision":        "approved_override",
 			"patch_decision_policy": "strict",

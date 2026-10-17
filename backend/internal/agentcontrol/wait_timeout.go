@@ -31,8 +31,8 @@ const (
 	WaitTimeoutModeError = "error"
 )
 
-// WaitTimeoutPolicy bounds every model-issued observation window: wait_agent,
-// read_agent_events, and wait_team. The consuming host owns where it resolves
+// WaitTimeoutPolicy bounds every model-issued observation window: subagent_wait,
+// subagent_events, and team_wait. The consuming host owns where it resolves
 // the window (the session hosts resolve agent waits; the broker resolves team
 // waits), but the bounds and the out-of-range behavior come from one place.
 type WaitTimeoutPolicy struct {

@@ -132,7 +132,7 @@ func TestBrokerSendInputV1ResultOmitsV2Fields(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, true, meta["queued"])
 	if _, exists := meta["delivered"]; exists {
-		t.Fatalf("v1 send_input summary must not gain delivered: %#v", meta)
+		t.Fatalf("v1 subagent_input summary must not gain delivered: %#v", meta)
 	}
 	encoded, err := json.Marshal(raw)
 	require.NoError(t, err)
@@ -159,5 +159,5 @@ func TestBrokerInstructionToolDescriptionsMatchV2Semantics(t *testing.T) {
 	require.Contains(t, descriptions[ToolSubagentSend], "without starting a new turn")
 	require.Contains(t, descriptions[ToolSubagentFollowup], "trigger_turn=true")
 	require.Contains(t, descriptions[ToolSubagentInput], "interrupt=false")
-	require.False(t, strings.Contains(descriptions[ToolSubagentSend], "interrupt"), "send_message must not imply interruption")
+	require.False(t, strings.Contains(descriptions[ToolSubagentSend], "interrupt"), "subagent_send must not imply interruption")
 }

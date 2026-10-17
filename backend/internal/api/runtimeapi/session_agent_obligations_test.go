@@ -107,7 +107,7 @@ func TestAPISpawnParksQueuedChildObligation(t *testing.T) {
 	store := controller.handler.getSubagentBatchStore()
 	record, ok, err := store.GetTurnSuspension(ctx, parent.ID, "turn-api-spawn-park")
 	require.NoError(t, err)
-	require.True(t, ok, "a queued spawn_agent child must park the parent turn")
+	require.True(t, ok, "a queued subagent_spawn child must park the parent turn")
 	require.Contains(t, record.ObligationIDs, subagentbatch.AgentSessionObligationID("api-obligation-child"))
 	require.Equal(t, []string{"api-obligation-child"}, record.ObligationAgentSessionIDs())
 

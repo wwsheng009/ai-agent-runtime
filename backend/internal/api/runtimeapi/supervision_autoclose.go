@@ -17,7 +17,7 @@ import (
 // localConvergeTerminalBatchChildren）同语义：batch 终态投影完成后，按
 // agents.autoCloseCompleted 决定是否把「任务成功」的终态子会话真正关闭。此前
 // API 宿主只投影终态行并推荐 close（apiBatchLifecycleProjector 的 default 分支），
-// 收敛动作留给模型自己发 close_agent，于是 runtime-server 上的 spawn 线程配额要
+// 收敛动作留给模型自己发 subagent_close，于是 runtime-server 上的 spawn 线程配额要
 // 等到模型想起这一步才释放。
 const (
 	// apiBatchConvergenceEventType 与 CLI 的 localBatchConvergenceEventType 同值：

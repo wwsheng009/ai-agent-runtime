@@ -247,7 +247,7 @@ type SessionActorConfig struct {
 	// trigger_turn_auto 未关闭）。
 	TriggerTurnDrain bool
 	// TriggerTurnRunMeta 为 drain 提交的新 turn 构造 RunMeta。宿主复用
-	// followup_task 的 child-session RunMeta 重建口径
+	// subagent_followup 的 child-session RunMeta 重建口径
 	// (toolbroker.SpawnAgentRunMetaFromContext)；nil 表示提交空 RunMeta。
 	TriggerTurnRunMeta func(ctx context.Context, session *Session) *team.RunMeta
 	// PlanStore overrides the plan artifact archive store (index + review-round
@@ -1993,7 +1993,7 @@ func cloneLoopConfigForRun(base *agent.LoopReActConfig, routeOverride *RunRouteO
 		}
 	}
 	// complete_task is a Team task terminal protocol, not a reusable session
-	// default. A profile, persisted session, or lightweight spawn_agent RunMeta
+	// default. A profile, persisted session, or lightweight subagent_spawn RunMeta
 	// may still contain the legacy value, but enforcing it without both TeamID
 	// and CurrentTaskID would require tools that are intentionally hidden outside
 	// an active Team task. Start from none, then accept an explicit per-run Team
@@ -4548,7 +4548,7 @@ func foreignSessionRunControl(ctx context.Context, sessionID string) (*sessionRu
 }
 
 // detachForeignSessionRunControl drops a run token that belongs to another
-// session actor. Control-plane callers (resolve_agent_approval, answer
+// session actor. Control-plane callers (subagent_approve, answer
 // question, …) reach this actor through the broker with the caller's run
 // context, and judgeOwnership would otherwise reject every write with
 // errSessionRunSuperseded. This actor's own token — including a stale

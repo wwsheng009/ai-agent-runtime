@@ -225,7 +225,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 	}
 
 	// Drop anything the execution policy would deny before the request is built,
-	// including an injected spawn_subagents the policy blocks via delegation.
+	// including an injected subagent_spawn_batch the policy blocks via delegation.
 	tools, _ = filterPolicyBlockedToolDefinitions(tools, loop.agent.GetToolExecutionPolicy())
 
 	listCtx := listToolsContextForAgent(ctx, loop.agent, len(tools))

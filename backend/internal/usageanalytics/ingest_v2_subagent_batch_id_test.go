@@ -25,7 +25,7 @@ func publishSubagentCompleted(t *testing.T, bus *runtimeevents.Bus, payload map[
 
 // TestSubagentCompletionBatchIDKeepsBatchesSeparate 锁定 v8 迁移的根因修复：
 // subagent_id 在模型省略 id 时按批次内序号合成（subagent_1…），同一父会话的
-// 第二个 spawn_subagents 批次会复用同一批 id。旧主键
+// 第二个 subagent_spawn_batch 批次会复用同一批 id。旧主键
 // (subagent_id, parent_session_id) 会把两次独立运行并成一行——真机证据是
 // /web/api/analysis/subagents 对两个批次只返回 1 行，token 取 MAX 而非 SUM、
 // read_only 被后到者覆盖。主键加入 batch_id 后两次运行必须各占一行。

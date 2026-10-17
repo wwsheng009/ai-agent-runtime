@@ -14,7 +14,7 @@ import (
 //
 // 托管 turn（父派发 durable background obligations 后收尾）在账本终态之前处于
 // **挂起态**：turn 没有结束，只是没有正在执行的 run。此时到达的 steer（用户输入 /
-// send_input / continue / wake resume）不是"新 turn"，而是**同一 turn 的新
+// subagent_input / continue / wake resume）不是"新 turn"，而是**同一 turn 的新
 // episode**：
 //
 //   - `turn_id` 复用挂起 turn 的 id（"resume 复用同一 turn"，与 AC-P1-1a 同口径）；

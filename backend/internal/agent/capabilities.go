@@ -63,7 +63,7 @@ func DefaultCapabilities() SubagentCapabilities {
 	}
 }
 
-// spawnSchemaCapabilities 返回 spawn_subagents 模型侧 schema 使用的能力位：
+// spawnSchemaCapabilities 返回 subagent_spawn_batch 模型侧 schema 使用的能力位：
 // 与准入同源——直接读调度器装配的部署能力位（缺省回落 DefaultCapabilities）。
 // 此处必须走调度器而不是静态默认值，否则部署在 agents.* 灰度开启的字段
 // （context=fork / report_schema）永远进不了模型可见的 schema，三层一致
@@ -82,7 +82,7 @@ func (a *Agent) spawnSchemaCapabilities() SubagentCapabilities {
 // 等价（现状语义）。与 scheduler.go 的任务字段定义同包共享，故在此声明常量。
 const subagentTaskContextFork = "fork"
 
-// 子级上下文模式的公开常量：spawn_subagents 任务包的 context 字段取值。
+// 子级上下文模式的公开常量：subagent_spawn_batch 任务包的 context 字段取值。
 const (
 	SubagentContextFresh = "fresh"
 	SubagentContextFork  = "fork"

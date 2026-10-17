@@ -119,7 +119,7 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 // Keeping the table in a single place matters because ResolveToolTaxonomy is
 // consulted *before* the name lookup: a mapping reachable only from one path
 // would silently never run for a tool that has a taxonomy row. That is how
-// ack_lifecycle once resolved to read_only alone, making the agent_management
+// subagent_ack_lifecycle once resolved to read_only alone, making the agent_management
 // requirement unreachable dead code.
 func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool) {
 	switch normalizedToolName {
@@ -145,12 +145,13 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 		return []Capability{CapBackgroundTask}, true
 	case "job_output", "job_list", "job_search":
 		return []Capability{CapReadOnly}, true
-	case "spawn_subagents":
-		// agent 侧注册的批量委派入口（agent.SpawnSubagentsToolName），与
-		// subagent_spawn / team_spawn 是同一授权族，必须同级登记。它此前既没有
-		// taxonomy 行、也不在本表，解析落到名字启发式只得到 read_only ⇒
+	case "subagent_spawn_batch":
+		// agent 侧注册的批量委派入口（agent.SpawnSubagentsToolName，旧拼写
+		// spawn_subagents 由 toolregistry.Normalize 归一到本名），与 subagent_spawn /
+		// team_spawn 是同一授权族，必须同级登记。它此前既没有 taxonomy 行、也不在
+		// 本表，解析落到名字启发式只得到 read_only ⇒
 		// `disabled_capabilities: [agent_management]` 关得住两个兄弟入口，却关不住
-		// 它。这正是本函数头注释里 ack_lifecycle 那类"表外漏项 = 门控失效"。
+		// 它。这正是本函数头注释里 subagent_ack_lifecycle 那类"表外漏项 = 门控失效"。
 		return []Capability{CapReadOnly, CapAgentManagement}, true
 	case "subagent_spawn", "subagent_send", "subagent_followup", "subagent_input", "subagent_close", "subagent_resume", "subagent_approve", "team_spawn", "team_send":
 		return []Capability{CapReadOnly, CapAgentManagement}, true

@@ -472,7 +472,7 @@ func TestGatewayClient_CallProviderReportsHTTPDebugPayload(t *testing.T) {
 		Metadata: map[string]interface{}{
 			"trace_id": "trace-1",
 			"tool_availability": map[string]interface{}{
-				"requires_active_team_run": []string{"read_task_spec"},
+				"requires_active_team_run": []string{"team_task_spec"},
 			},
 		},
 	})
@@ -508,7 +508,7 @@ func TestGatewayClient_CallProviderReportsHTTPDebugPayload(t *testing.T) {
 		t.Fatalf("expected tool_availability metadata, got %+v", events[0].RequestMetadata["tool_availability"])
 	}
 	requires, ok := availability["requires_active_team_run"].([]string)
-	if !ok || len(requires) != 1 || requires[0] != "read_task_spec" {
+	if !ok || len(requires) != 1 || requires[0] != "team_task_spec" {
 		t.Fatalf("unexpected requires_active_team_run metadata: %+v", availability["requires_active_team_run"])
 	}
 	want := `"hello"`

@@ -73,7 +73,7 @@ func TestGateRejectsWhenLivePlusRequestedExceedsCeiling(t *testing.T) {
 }
 
 // TestGateIgnoresTerminalRegistryRows pins that closed/stale/root rows never
-// hold a slot (the same filter the spawn_agent gate uses).
+// hold a slot (the same filter the subagent_spawn gate uses).
 func TestGateIgnoresTerminalRegistryRows(t *testing.T) {
 	closed := activeChild("closed")
 	closed.Status = agentcontrol.AgentStatusClosed

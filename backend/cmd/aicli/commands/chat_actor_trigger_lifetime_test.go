@@ -101,7 +101,7 @@ func requestHasUserText(req *runtimellm.LLMRequest, marker string) bool {
 }
 
 // TestLocalActorRegistry_TriggeredTurnSurvivesCallerCleanCompletion pins the A3
-// follow-up: FollowupTask/send_message(trigger) start a turn on another session;
+// follow-up: FollowupTask/subagent_send(trigger) start a turn on another session;
 // that turn must survive the caller's clean completion (explicit cancellation
 // still propagates, which the existing parent-cancel tests cover).
 func TestLocalActorRegistry_TriggeredTurnSurvivesCallerCleanCompletion(t *testing.T) {

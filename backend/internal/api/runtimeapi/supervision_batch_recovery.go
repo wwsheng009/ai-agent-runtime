@@ -18,7 +18,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
-// 缺口背景（2026-09-16）：API 宿主（runtime-server）的 spawn_subagents 控制面
+// 缺口背景（2026-09-16）：API 宿主（runtime-server）的 subagent_spawn_batch 控制面
 // 相对 CLI 少了两条腿，父会话因此可能永远收不到「batch 结束」的 durable 汇报：
 //
 //  1. 没有 TerminalSink。CLI 在 chat_actor_host.go 的 agent 构造路径上装
@@ -49,7 +49,7 @@ const (
 )
 
 // apiSubagentBatchEmitter 是 API 宿主的 batch 展示镜像：与 CLI 同口径，事件挂到
-// 父会话上（parent_session_id），ToolName 固定为 spawn_subagents，便于前端按
+// 父会话上（parent_session_id），ToolName 固定为 subagent_spawn_batch，便于前端按
 // 同一规则渲染。
 func (h *Handler) apiSubagentBatchEmitter() agent.BatchEmitter {
 	return func(eventType string, payload map[string]interface{}) {
@@ -65,7 +65,7 @@ func (h *Handler) apiSubagentBatchEmitter() agent.BatchEmitter {
 		h.getRuntimeEventBus().Publish(runtimeevents.Event{
 			Type:      eventType,
 			SessionID: sessionID,
-			ToolName:  "spawn_subagents",
+			ToolName:  "subagent_spawn_batch",
 			Payload:   payload,
 		})
 	}

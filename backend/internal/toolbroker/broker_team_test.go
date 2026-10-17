@@ -406,7 +406,7 @@ func TestBrokerExecuteWaitTeamWaitsForSummaryWhenPlannerConfigured(t *testing.T)
 	assert.Equal(t, "async final summary", result.Summary)
 }
 
-// TestBrokerExecuteWaitTeamEventDrivenWakeReturnsFast verifies P6-1: wait_team
+// TestBrokerExecuteWaitTeamEventDrivenWakeReturnsFast verifies P6-1: team_wait
 // returns on the durable team wake event instead of waiting for the fallback
 // poll ticker. The terminal event is written at ~100ms; the fallback ticker
 // only fires at ~1s, so a polling-only implementation would fail the timing
@@ -461,7 +461,7 @@ func TestBrokerExecuteWaitTeamEventDrivenWakeReturnsFast(t *testing.T) {
 	assert.True(t, result.SummaryReady)
 	assert.Equal(t, "event driven", result.Summary)
 	assert.Less(t, elapsed, 900*time.Millisecond,
-		"wait_team should return on the wake event, not the fallback ticker")
+		"team_wait should return on the wake event, not the fallback ticker")
 }
 
 func TestBrokerExecuteWaitTeamTimeoutReportsExecutionContinues(t *testing.T) {

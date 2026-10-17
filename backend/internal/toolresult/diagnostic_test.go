@@ -157,7 +157,7 @@ func TestDiagnoseReadOnlyCompoundCommandIsNonOverridable(t *testing.T) {
 		"read-only policy blocks compound shell command; submit one command per shell.commands entry: git status; git diff",
 		map[string]interface{}{
 			"policy":        "read_only",
-			"policy_source": "spawn_subagents.read_only",
+			"policy_source": "subagent_spawn_batch.read_only",
 			"overridable":   false,
 		},
 	)
@@ -171,7 +171,7 @@ func TestDiagnoseReadOnlyCompoundCommandIsNonOverridable(t *testing.T) {
 		!strings.Contains(diagnostic.NextAction, "cannot override") {
 		t.Fatalf("expected structured read-only recovery, got %q", diagnostic.NextAction)
 	}
-	if diagnostic.Policy != "read_only" || diagnostic.PolicySource != "spawn_subagents.read_only" {
+	if diagnostic.Policy != "read_only" || diagnostic.PolicySource != "subagent_spawn_batch.read_only" {
 		t.Fatalf("unexpected policy provenance: %#v", diagnostic)
 	}
 	if diagnostic.Overridable == nil || *diagnostic.Overridable {
@@ -189,7 +189,7 @@ func TestDiagnoseReadOnlyAllowlistMissNextAction(t *testing.T) {
 		`read-only policy blocks non-readonly shell command (segment 3: "Remove-Item ."): Get-ChildItem . | Remove-Item .`,
 		map[string]interface{}{
 			"policy":        "read_only",
-			"policy_source": "spawn_subagents.read_only",
+			"policy_source": "subagent_spawn_batch.read_only",
 			"overridable":   false,
 		},
 	)
@@ -208,7 +208,7 @@ func TestDiagnoseReadOnlyAllowlistMissNextAction(t *testing.T) {
 		"read-only policy blocks shell access to sensitive paths: cat .env",
 		map[string]interface{}{
 			"policy":        "read_only",
-			"policy_source": "spawn_subagents.read_only",
+			"policy_source": "subagent_spawn_batch.read_only",
 			"overridable":   false,
 		},
 	)

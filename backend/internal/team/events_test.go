@@ -88,7 +88,7 @@ func TestSQLiteStoreTeamEventsFilters(t *testing.T) {
 
 // TestSQLiteStoreTeamEventsMirrorWakeRegistry verifies P6-1: every durable
 // team event is mirrored into the unified AgentControl wake registry
-// (kind=team) and wakes registered watchers immediately, so wait_team can be
+// (kind=team) and wakes registered watchers immediately, so team_wait can be
 // event-driven instead of short-interval polling.
 func TestSQLiteStoreTeamEventsMirrorWakeRegistry(t *testing.T) {
 	ctx := context.Background()

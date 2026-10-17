@@ -14,7 +14,7 @@ import (
 
 const localWaitLedgerTestSession = "parent-session"
 
-// newLocalWaitLedgerHost 组装 wait_agent 账本视图的最小宿主：真实 batch store 上的
+// newLocalWaitLedgerHost 组装 subagent_wait 账本视图的最小宿主：真实 batch store 上的
 // §6.12 挂起记录 + 指向该 turn 的派生缓存（RuntimeState.SuspendedTurnID）+ mailbox
 // 等待所需的 EventStore。账本读数必须来自 durable 控制面，所以夹具用真 store。
 func newLocalWaitLedgerHost(t *testing.T, batchStatus subagentbatch.BatchStatus, suspendedTurnID string) (*localChatRuntimeHost, string) {
@@ -56,7 +56,7 @@ func newLocalWaitLedgerHost(t *testing.T, batchStatus subagentbatch.BatchStatus,
 	return host, batch.BatchID
 }
 
-// applyFastAgentWaitWindows 把宿主的 wait_agent 观测窗口压到测试尺度：默认
+// applyFastAgentWaitWindows 把宿主的 subagent_wait 观测窗口压到测试尺度：默认
 // 边界是 [10s, 120s]（agentcontrol.MinWaitTimeoutMs），毫秒级 TimeoutMs 会被
 // 钳到 10 秒——单个用例白等 10 秒，时序意图（窗口是否真的开合）也被掩盖。
 // 需要更细的窗口（如 [30ms, 60ms]）时，在用例内直接覆写字段。
@@ -95,7 +95,7 @@ func TestWaitAgentReturnsFinalizeWithoutBlockingOnTerminalLedger(t *testing.T) {
 
 // TestLocalAgentSnapshotFallsBackToBatchTaskRow 钉住 2026-09-26 真机 E2E 缺口：
 // 子代理会话（subagent_<task>_<uuid>）**不落 SessionStore**——身份与结果只在批任务
-// 账本行上。wait_agent(task_id) 解析出该子会话 id 后若只看会话库，永远是
+// 账本行上。subagent_wait(task_id) 解析出该子会话 id 后若只看会话库，永远是
 // missing/exists=false（父代理拿不到状态与输出）；必须回退到账本行投影，且终态
 // 任务要落在 wait 的就绪集合里。
 func TestLocalAgentSnapshotFallsBackToBatchTaskRow(t *testing.T) {
@@ -264,7 +264,7 @@ func TestWaitAgentCreditsProgressCompletedDuringWait(t *testing.T) {
 }
 
 // TestLocalActorRegistryWaitBudgetSharedWithTeamWait 钉住 plan §16.3"两者共享实现"：
-// wait_team 走 broker 直连路径，但预算键/计数器与 wait_agent 完全同一把（宿主通过
+// team_wait 走 broker 直连路径，但预算键/计数器与 subagent_wait 完全同一把（宿主通过
 // toolbroker.WaitSegmentBudget 注入），任一等待的进展都会清零同一个计数器。
 func TestLocalActorRegistryWaitBudgetSharedWithTeamWait(t *testing.T) {
 	host, _ := newLocalWaitLedgerHost(t, subagentbatch.BatchRunning, "turn-parked")
@@ -280,13 +280,13 @@ func TestLocalActorRegistryWaitBudgetSharedWithTeamWait(t *testing.T) {
 	require.Equal(t, 0, consecutive)
 	require.False(t, exhausted)
 
-	// wait_agent 记一次无进展 → 同一计数器对 wait_team 立即可见。
+	// subagent_wait 记一次无进展 → 同一计数器对 team_wait 立即可见。
 	registry.localWaitBudget.Observe(localWaitLedgerTestSession+"|turn-parked", false, limit)
 	consecutive, _, _, exhausted = registry.BudgetVerdict(ctx)
 	require.Equal(t, 1, consecutive)
 	require.False(t, exhausted)
 
-	// wait_team 再记一次无进展 → 触发耗尽判据（同一预算）。
+	// team_wait 再记一次无进展 → 触发耗尽判据（同一预算）。
 	consecutive, _, active, exhausted = registry.ObserveWaitSegment(ctx, false)
 	require.True(t, active)
 	require.Equal(t, 2, consecutive)
@@ -301,8 +301,8 @@ func TestLocalActorRegistryWaitBudgetSharedWithTeamWait(t *testing.T) {
 }
 
 // TestLocalActorRegistryWaitBudgetKeyWithoutBatchSuspension 钉住 team-only 挂起：
-// 挂起 turn 上没有 batch 义务记录时，wait_agent 账本照旧为空（fail-open 旧语义），
-// 但 wait_team 仍必须拿到预算键，否则团队等待永远不会被预算设防。
+// 挂起 turn 上没有 batch 义务记录时，subagent_wait 账本照旧为空（fail-open 旧语义），
+// 但 team_wait 仍必须拿到预算键，否则团队等待永远不会被预算设防。
 func TestLocalActorRegistryWaitBudgetKeyWithoutBatchSuspension(t *testing.T) {
 	host := newLocalSupervisionTestHost(t)
 	host.BaseSession = &ChatSession{RuntimeSession: &runtimechat.Session{ID: localWaitLedgerTestSession}}
@@ -319,7 +319,7 @@ func TestLocalActorRegistryWaitBudgetKeyWithoutBatchSuspension(t *testing.T) {
 
 	obligations, _, _, ledgerKey := registry.localWaitLedger(ctx)
 	require.Empty(t, obligations)
-	require.Empty(t, ledgerKey, "without a batch suspension row the wait_agent ledger stays empty")
+	require.Empty(t, ledgerKey, "without a batch suspension row the subagent_wait ledger stays empty")
 
 	key, _ := registry.localWaitBudgetKey(ctx)
 	require.Equal(t, localWaitLedgerTestSession+"|turn-team-only", key)

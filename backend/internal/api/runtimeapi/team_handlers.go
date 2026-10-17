@@ -1456,7 +1456,7 @@ func (h *Handler) syncTeammateAgentRegistryRecord(ctx context.Context, teamStore
 	return h.upsertTeammateAgentRegistryRecord(ctx, teamStore, mate)
 }
 
-// SyncTeamTeammateAgent lets toolbroker spawn_team project teammate identity
+// SyncTeamTeammateAgent lets toolbroker team_spawn project teammate identity
 // rows immediately after team store writes.
 func (h *Handler) SyncTeamTeammateAgent(ctx context.Context, previous *team.Teammate, mate team.Teammate) error {
 	return h.syncTeammateAgentRegistryRecord(ctx, h.getTeamStore(), previous, mate)

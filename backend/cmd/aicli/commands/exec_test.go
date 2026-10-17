@@ -369,7 +369,7 @@ func TestExecuteExecRecoversTerminalTeamSummaryAfterTurnError(t *testing.T) {
 			Model:         "test-model",
 			NoInteractive: true,
 			ChatExecutor: &fakeChatExecutor{
-				err: errors.New("wait_team deadline exceeded"),
+				err: errors.New("team_wait deadline exceeded"),
 			},
 			ActiveTeam: &chatTeamBinding{TeamID: "team-done"},
 			LocalRuntimeHost: &localChatRuntimeHost{

@@ -43,6 +43,13 @@ func Normalize(name string) string {
 	// Subagent 家族（命名契约 B3）
 	case "spawnagent", "spawn_agent":
 		return "subagent_spawn"
+	// 批量委派入口（命名契约 B3，形状 <domain>_<verb>_<object>）：规范名为
+	// subagent_spawn_batch；旧拼写 spawn_subagents 保留为现役别名（迁移期
+	// ≥2 个版本，见 docs/automation-tasks/tool-surface-inventory-and-naming-review.md §5）。
+	// 归一到这里之后 `subagent_*` 通配模式才会覆盖它——此前 Normalize 是恒等，
+	// 该入口对 subagent_* 是隐形的。
+	case "spawnsubagents", "spawn_subagents":
+		return "subagent_spawn_batch"
 	case "listagents", "list_agents":
 		return "subagent_list"
 	case "sendmessage", "send_message":

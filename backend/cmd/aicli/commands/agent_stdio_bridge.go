@@ -41,7 +41,7 @@ type acpEventBridge struct {
 	// subagent concept, so each child renders as its own tool_call_update row;
 	// concurrent children must never collapse onto one row. Reset per prompt,
 	// like toolCallIDs (children are spawned inside the turn that called
-	// spawn_agent).
+	// subagent_spawn).
 	subagentToolCalls map[string]string
 	// lastPlanFingerprint is the most recent plan payload sent on this session.
 	// Identical repeats are suppressed because clients replace the whole plan on

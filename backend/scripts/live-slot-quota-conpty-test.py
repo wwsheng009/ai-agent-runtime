@@ -1,8 +1,8 @@
-"""ConPTY E2E for the spawn_subagents live-slot quota gate.
+"""ConPTY E2E for the subagent_spawn_batch live-slot quota gate.
 
 Scenario (deterministic, no real provider):
   1. aicli chat (real binary, real ConPTY via pywinpty) gets one prompt.
-  2. The mock provider makes the parent call spawn_subagents with N tasks while
+  2. The mock provider makes the parent call subagent_spawn_batch with N tasks while
      agents.maxThreads is set to M.
   3. The gate must decide BEFORE any durable row is written:
        - N > M  -> the tool result carries the actionable limit diagnostic
@@ -33,7 +33,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 SEND_ENTER = "\r"
 CHILD_GOAL_MARKER = "MOCK-CHILD-GOAL"
 LIMIT_MARKER = "thread limit reached"
-INITIAL_PROMPT = "运行 quota 场景：请调用 spawn_subagents 派发后台子代理任务，然后结束回合。"
+INITIAL_PROMPT = "运行 quota 场景：请调用 subagent_spawn_batch 派发后台子代理任务，然后结束回合。"
 
 MOCK_LOG = []
 MOCK_LOCK = threading.Lock()
@@ -87,7 +87,7 @@ class MockHandler(BaseHTTPRequestHandler):
             for m in msgs
             if m.get("role") == "assistant"
             and any(
-                (t.get("function") or {}).get("name") == "spawn_subagents"
+                (t.get("function") or {}).get("name") == "subagent_spawn_batch"
                 for t in (m.get("tool_calls") or [])
             )
         )
@@ -181,7 +181,7 @@ class MockHandler(BaseHTTPRequestHandler):
                     "id": tid,
                     "type": "function",
                     "function": {
-                        "name": "spawn_subagents",
+                        "name": "subagent_spawn_batch",
                         "arguments": json.dumps(args, ensure_ascii=False),
                     },
                 }
@@ -390,7 +390,7 @@ providers:
         else:
             last_tool = next((r.get("batch_detail", "") for r in MOCK_LOG if r.get("kind") == "admitted"), "")
 
-        check("mock: parent called spawn_subagents", "spawn" in kinds)
+        check("mock: parent called subagent_spawn_batch", "spawn" in kinds)
         if args.expect == "reject":
             check("mock: batch was rejected by the live-slot gate", "rejected" in kinds,
                   "kinds=%s" % kinds)

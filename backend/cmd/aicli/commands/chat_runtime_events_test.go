@@ -1399,11 +1399,11 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"step":  1,
 			"tool_availability": map[string]interface{}{
 				"requires_active_team_run": []interface{}{
-					"read_task_spec",
-					"read_task_context",
-					"send_team_message",
-					"read_mailbox_digest",
-					"report_task_outcome",
+					"team_task_spec",
+					"team_task_context",
+					"team_send",
+					"team_mailbox",
+					"team_task_report",
 				},
 			},
 		},
@@ -1420,7 +1420,7 @@ func TestChatRuntimeEvents_RenderPlanningAndSubagentTimeline(t *testing.T) {
 			"model": "gpt-5.4",
 			"step":  2,
 			"tool_availability": map[string]interface{}{
-				"requires_active_team_run": []interface{}{"read_task_spec"},
+				"requires_active_team_run": []interface{}{"team_task_spec"},
 			},
 		},
 	}); got != "" {

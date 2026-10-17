@@ -14,7 +14,7 @@ import (
 // durable batch/task 事实，本文件只把它们投影成 ObigationSource，不新建表、不新增
 // 事件、不写任何行。
 //
-// 2026-10-09 真机修复：spawn_agent / spawn_team 的轻量义务不在 batch 表里，只按
+// 2026-10-09 真机修复：subagent_spawn / team_spawn 的轻量义务不在 batch 表里，只按
 // 批次投影会让 pending_count 恒为 0，把"子代理仍在运行"的挂起 turn 判成
 // can_finalize=true（wait_feedback 唤醒消息在 l5-2-batch-b 运行中宣告"所有
 // obligation 均已终态"）。投影因此必须同时读 §6.12 挂起记录里的
@@ -56,7 +56,7 @@ func NewBatchObligationSource(store subagentbatch.BatchStore) ObligationSource {
 
 // NewBatchObligationSourceWithResolvers is NewBatchObligationSource extended
 // with the child-session / team control planes. Hosts that can park
-// spawn_agent / spawn_team obligations must pass their resolvers here; a nil
+// subagent_spawn / team_spawn obligations must pass their resolvers here; a nil
 // resolver keeps those rows non-terminal (conservative, never a guessed
 // completion), so an unwired host can never finalize a turn over a live child.
 func NewBatchObligationSourceWithResolvers(store subagentbatch.BatchStore, agentSessions subagentbatch.AgentSessionObligationResolver, teams subagentbatch.TeamObligationResolver) ObligationSource {

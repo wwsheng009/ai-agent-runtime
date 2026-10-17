@@ -105,7 +105,7 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 		childConfig.Options["read_only"] = true
 		source := task.ReadOnlySource
 		if source == "" {
-			source = "spawn_subagents.read_only"
+			source = SpawnSubagentsToolName + ".read_only"
 		}
 		childConfig.Options["read_only_source"] = source
 	} else if task.ReadOnly {
@@ -118,7 +118,7 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 		childConfig.Options["read_only"] = true
 		source := task.ReadOnlySource
 		if source == "" {
-			source = "spawn_subagents.read_only"
+			source = SpawnSubagentsToolName + ".read_only"
 		}
 		childConfig.Options["read_only_source"] = source
 	}

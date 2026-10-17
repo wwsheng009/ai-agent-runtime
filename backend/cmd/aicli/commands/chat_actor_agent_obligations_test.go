@@ -93,7 +93,7 @@ func TestLocalAgentSessionObligationResolverReadsTerminalProjection(t *testing.T
 }
 
 // TestLocalSpawnParkWritesAgentSessionObligationAndAnnouncesOnce pins the
-// dispatch-time park: each queued spawn_agent child becomes one
+// dispatch-time park: each queued subagent_spawn child becomes one
 // agent_session: obligation on the current turn, the first park announces one
 // turn.suspended edge, and repeated parks never duplicate the record or the edge.
 func TestLocalSpawnParkWritesAgentSessionObligationAndAnnouncesOnce(t *testing.T) {
@@ -211,7 +211,7 @@ func TestLocalInFlightSignalFiresWithoutParkedRecord(t *testing.T) {
 }
 
 // TestLocalInFlightSignalCoversAgentDefinitionChildren pins the filter fix for
-// the I9 fallback: spawn_agent children with an explicit agent_type store the
+// the I9 fallback: subagent_spawn children with an explicit agent_type store the
 // definition name (general/explore/plan…) in AgentRecord.AgentType, so the
 // degraded in-flight signal must key on the tree shape instead of the literal
 // "child" type — otherwise the safety net stays silent exactly for the common
@@ -316,12 +316,12 @@ func TestLocalSpawnParksQueuedChildObligation(t *testing.T) {
 
 	record, ok, err := host.SubagentBatches.GetTurnSuspension(ctx, rootSession.ID, "turn-spawn")
 	require.NoError(t, err)
-	require.True(t, ok, "a queued spawn_agent child must park the parent turn")
+	require.True(t, ok, "a queued subagent_spawn child must park the parent turn")
 	require.Equal(t, []string{result.SessionID}, record.ObligationAgentSessionIDs())
 }
 
 // TestLocalFollowupTaskParksTriggeredChildObligation is the call-site guard for
-// the followup half of §6.12: resume_agent + followup_task on an existing child
+// the followup half of §6.12: subagent_resume + subagent_followup on an existing child
 // starts a new run without any spawn, so the delivery itself must park the
 // caller turn (真机 2026-09-30：该路径无 turn.suspended，回合结束冻结
 // "Worked for …" 而子代理仍在跑). The turn id is resolved from the durable

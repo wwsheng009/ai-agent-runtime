@@ -713,7 +713,7 @@ func chatAgentTranscriptFollowOnceLines(session *ChatSession, view *chatAgentTra
 }
 
 // handleChatAgentApprovalCommand 实现 /agents approve|deny <target> <request_id>：
-// 直接调用 localActorRegistry.ResolveApproval —— 与 resolve_agent_approval 工具
+// 直接调用 localActorRegistry.ResolveApproval —— 与 subagent_approve 工具
 // 同一条 supervision 审批链（§5-G5「复用 supervision 审批链」）。视图只在正文
 // 渲染该命令提示，不私建审批通道（§4.4 纪律 3）。
 func handleChatAgentApprovalCommand(session *ChatSession, argument string, allow bool) (string, error) {

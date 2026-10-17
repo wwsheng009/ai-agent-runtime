@@ -249,7 +249,7 @@ type localChatRuntimeHost struct {
 	actorTurnGateMu      sync.Mutex
 	actorTurnGates       map[string]chan struct{}
 	// parkedTurnEdgeMu / parkedTurnEdges 保证「同一 turn 的 turn.suspended / 在途
-	// 降级信号只播报一次」：轻量 spawn_agent 子代理在派发时由宿主侧挂起，与批次
+	// 降级信号只播报一次」：轻量 subagent_spawn 子代理在派发时由宿主侧挂起，与批次
 	// 派发的挂起路径可能竞争同一记录，边沿判定需要宿主侧去重。键为 sessionID|turnID
 	//（降级信号加 inflight| 前缀）。惰性创建：测试常以结构体字面量构造 host。
 	parkedTurnEdgeMu sync.Mutex
@@ -485,7 +485,7 @@ func localSubagentBatchEmitter(host *localChatRuntimeHost) agent.BatchEmitter {
 				sessionID = strings.TrimSpace(value)
 			}
 		}
-		host.EventBus.Publish(runtimeevents.Event{Type: eventType, SessionID: sessionID, ToolName: "spawn_subagents", Payload: payload})
+		host.EventBus.Publish(runtimeevents.Event{Type: eventType, SessionID: sessionID, ToolName: agent.SpawnSubagentsToolName, Payload: payload})
 	}
 }
 
@@ -520,7 +520,7 @@ func localSubagentParentHistory(host *localChatRuntimeHost) func(ctx context.Con
 }
 
 // localSubagentBatchLifecycleProjector is the live host bridge for both
-// synchronous and durable background spawn_subagents terminal states. The
+// synchronous and durable background subagent_spawn_batch terminal states. The
 // agent package stays independent from supervision; this adapter turns the
 // host-neutral record into a durable lifecycle notification and then offers
 // the wake consumer a runnable transition point.
@@ -623,7 +623,7 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 			// P1-C：成功完成的 batch 行推荐"收敛"——关闭已结束的子会话。
 			// 该行本身是 resolution=closed，evaluator 对已关闭行只允许
 			// inspect（plan §4.1.1），所以推荐动作必须配合 reason 里的
-			// close_agent 工具提示使用，而不是让模型对终态行发 control 动作。
+			// subagent_close 工具提示使用，而不是让模型对终态行发 control 动作。
 			if terminal.FailedCount == 0 && terminal.TimedOutCount == 0 {
 				recommended = string(supervision.ActionClose)
 				convergeHint = localBatchConvergeHint(ctx, host, terminal.BatchID)
@@ -1834,11 +1834,11 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		return nil, leaseErr
 	}
 	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, sessionCtx.RequestedReasoningEffort)
-	// §6.12 扩展：轻量 spawn_agent 子代理以 agent_session: 义务写入挂起记录后，
+	// §6.12 扩展：轻量 subagent_spawn 子代理以 agent_session: 义务写入挂起记录后，
 	// run 收尾的 settle 必须能判读子会话终态——接宿主自己的 durable 判读器
 	// （supervision 通知面；未接线时保持 batch-only 语义，已有挂起不受影响）。
 	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
-	// §6.12 扩展：spawn_team 的 team: 义务同样需要 run 收尾时的 durable 判读器
+	// §6.12 扩展：team_spawn 的 team: 义务同样需要 run 收尾时的 durable 判读器
 	// （team store 终态 + 无 live loop）；未接线时 team 义务保持保守不清账。
 	loopConfig.TeamObligations = h.teamObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。子会话走 aicli.subagents.routing
@@ -1869,7 +1869,7 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
 		// P0-3a/M5 + P0-3b/M6：v2 指令语义显式开启且未关闭 trigger_turn_auto
 		// 时，run 结束后消费子会话 mailbox 的 trigger_turn 指令并自动起一次
-		// 新 turn。RunMeta 复用 followup_task 的 child-session 重建口径。
+		// 新 turn。RunMeta 复用 subagent_followup 的 child-session 重建口径。
 		TriggerTurnDrain: h.supervisionConfig.TriggerTurnDrainEnabled(),
 		TriggerTurnRunMeta: func(_ context.Context, session *runtimechat.Session) *team.RunMeta {
 			return toolbroker.SpawnAgentRunMetaFromContext(session)
@@ -1929,7 +1929,7 @@ func localChatActorEnsureSession(session *ChatSession, isBaseSession bool) func(
 }
 
 // applyLocalChildAgentdefToolPolicy overlays agentdef allow/deny/read-only onto
-// a child actor when spawn_agent agent_type resolves to a portable definition.
+// a child actor when subagent_spawn agent_type resolves to a portable definition.
 // toolkitBasePath is the base path the builtin tools were registered with
 // (SetBasePath(config.Workspace.Root)); it becomes the child policy's fallback
 // anchor for relative path checks - never the child's own binding workspace,
@@ -2064,7 +2064,7 @@ func applyLocalChildDepthPolicy(apiAgent *agent.Agent, depth, maxDepth int) {
 		toolPolicy.DeniedTools = map[string]bool{}
 	}
 	// 展开现役拼写：拒绝表按模型请求的原始拼写匹配，别名与规范名都要覆盖。
-	for _, toolName := range toolregistry.CallableNames("subagent_spawn", "spawn_subagents", "team_spawn") {
+	for _, toolName := range toolregistry.CallableNames("subagent_spawn", agent.SpawnSubagentsToolName, "team_spawn") {
 		toolPolicy.DeniedTools[toolName] = true
 	}
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
@@ -2426,8 +2426,8 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			// Fork 快照数据源（P2-1'）：只有批次中确有 context=fork 任务时才会
 			// 真正读取父会话；普通批次零额外成本。
 			ParentHistoryFor: localSubagentParentHistory(host),
-			// Live-slot ceiling (agents.maxThreads) across spawn_agent and
-			// spawn_subagents: the batch path previously had only a concurrency
+			// Live-slot ceiling (agents.maxThreads) across subagent_spawn and
+			// subagent_spawn_batch: the batch path previously had only a concurrency
 			// window, so it could accumulate unbounded idle children. The gate
 			// counts registry children + non-terminal batch tasks.
 			LiveSlotGate: subagentquota.New(
@@ -2531,12 +2531,12 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	if broker := apiAgent.GetToolBroker(); broker != nil && broker.SessionContextStore == nil {
 		broker.SessionContextStore = toolbrokersessionctx.New(host.SessionStore)
 	}
-	// wait_team resolves its window inside the broker, so the broker must read
-	// the same live policy the local wait_agent/read_agent_events paths use
+	// team_wait resolves its window inside the broker, so the broker must read
+	// the same live policy the local subagent_wait/subagent_events paths use
 	// (P2-11 目标：任何路径的等待时长都落在 [minWaitTimeoutMs, maxWaitTimeoutMs]).
 	if broker := apiAgent.GetToolBroker(); broker != nil && host.ActorRegistry != nil {
 		broker.WaitTimeoutPolicy = host.ActorRegistry.localWaitTimeoutPolicy
-		// wait_team 的等待预算与 wait_agent 共用同一把键与计数器（plan §16.3
+		// team_wait 的等待预算与 subagent_wait 共用同一把键与计数器（plan §16.3
 		// "两者共享实现"）：broker 直连路径拿不到 caller-turn 键，所以由宿主注入。
 		broker.WaitBudget = host.ActorRegistry
 	}
@@ -2833,7 +2833,7 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 			allowedTools = append(allowedTools, agent.SpawnSubagentsToolName)
 			// iterate_goal（P2-2'）同为调度器贡献的运行时工具，但只在部署
 			// 显式开启时才补入：未开启时它根本不进模型工具面，无需扩宽执行
-			// 授权面（最小授权原则，与上面 spawn_subagents 的恒开语义区分）。
+			// 授权面（最小授权原则，与上面 subagent_spawn_batch 的恒开语义区分）。
 			if iterateGoalEnabled {
 				allowedTools = append(allowedTools, agent.IterateGoalToolName)
 			}
@@ -3576,7 +3576,7 @@ func resolveLocalChatSupervisionDataDir(session *ChatSession, runtimeConfig *run
 // supervision_snapshot only announce reachable actions (P2-12 方案 1).
 //
 // acknowledge/defer/resolve are durable store writes inside this process
-// (/debug supervision ack|defer|resolve and the model ack_lifecycle tool), so
+// (/debug supervision ack|defer|resolve and the model subagent_ack_lifecycle tool), so
 // they are reachable whenever the store is. cancel/close additionally need a
 // wired runtime executor: without one the action row can only be recorded and
 // execution fails with "runtime executor not configured" — exactly the step the

@@ -105,13 +105,13 @@ type Config struct {
 	// 入口回退到引入守卫前的行为，用于灰度与快速回滚，无需回滚二进制。
 	ApprovalTerminalGuard *bool `json:"approval_terminal_guard,omitempty" yaml:"approval_terminal_guard,omitempty"`
 	// MessageSemanticsV2 是指令投递语义 v2 的灰度开关（P0-3a/M5，方案
-	// §3.3/§7.4）。false（默认）时 send_message/followup_task/send_input 的
+	// §3.3/§7.4）。false（默认）时 subagent_send/subagent_followup/subagent_input 的
 	// 行为与返回字段逐字段保持 2026-09-17 现状；true 时启用三态语义矩阵与
 	// delivered/queued/triggered/duplicate 返回字段。
 	MessageSemanticsV2 bool `json:"message_semantics_v2,omitempty" yaml:"message_semantics_v2,omitempty"`
 	// TriggerTurnAuto 控制 v2 语义下 busy 指令的 trigger_turn 自动消费
 	// （P0-3b/M6，方案 §3.3 改动 2）。nil/true（默认）启用；显式 false 时
-	// busy followup/send_input 只投递 mailbox、不自动起 turn。仅在
+	// busy subagent_followup/subagent_input 只投递 mailbox、不自动起 turn。仅在
 	// MessageSemanticsV2 为 true 时生效（见 TriggerTurnDrainEnabled）。
 	TriggerTurnAuto *bool `json:"trigger_turn_auto,omitempty" yaml:"trigger_turn_auto,omitempty"`
 

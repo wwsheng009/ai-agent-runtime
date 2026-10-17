@@ -227,7 +227,7 @@ func TestProjectAgentCompletion_AllocatesRootScopedCursor(t *testing.T) {
 
 // TestBuildDigest_TextCarriesNotificationID pins the model-facing handle: the
 // injected preflight line must expose the real opaque notification_id, because
-// ack_lifecycle / control_descendant accept nothing else. Without it the model
+// subagent_ack_lifecycle / subagent_control accept nothing else. Without it the model
 // guesses "<subject_kind>:<subject_id>" (observed: "agent_run:run_2026...") and
 // the call fails with a load-notification error.
 func TestBuildDigest_TextCarriesNotificationID(t *testing.T) {

@@ -15,9 +15,9 @@ import (
 )
 
 // TestSessionAgentControllerListMergesBatchLedgerRows 锁定 2026-10-14 缺口：
-// HTTP 宿主的 subagent_list 必须与本地宿主同口径，把 spawn_subagents 的批任务
+// HTTP 宿主的 subagent_list 必须与本地宿主同口径，把 subagent_spawn_batch 的批任务
 // 账本行并入列表（运行中恒可见；终态遵循 include_closed；未绑定任务以 task id
-// 兜底可见），否则批量派发场景下列表恒为空、与 spawn_agent 的列表行为不一致。
+// 兜底可见），否则批量派发场景下列表恒为空、与 subagent_spawn 的列表行为不一致。
 func TestSessionAgentControllerListMergesBatchLedgerRows(t *testing.T) {
 	ctx := context.Background()
 	const parentSessionID = "api-list-batch-parent"
@@ -112,7 +112,7 @@ func TestSessionAgentControllerListMergesBatchLedgerRows(t *testing.T) {
 }
 
 // TestSessionAgentControllerRejectsMessagingBatchTaskTargets 锁定 2026-10-14
-// 缺口：批任务 worker 不是可对话会话——send_message / followup_task / send_input
+// 缺口：批任务 worker 不是可对话会话——subagent_send / subagent_followup / subagent_input
 // 必须给出可行动拒绝（而非为 followup/input 起一次重复运行、或为它建会话行）。
 func TestSessionAgentControllerRejectsMessagingBatchTaskTargets(t *testing.T) {
 	ctx := context.Background()

@@ -19,11 +19,11 @@ import (
 // 也不是静默失败。
 const localSuspensionUnavailableReasonInFlight = "child agent sessions still running; durable turn parking unavailable for this turn"
 
-// localAgentObligationSpawnNextAction 是 spawn_agent 成功登记挂起义务后给模型的
-// 可见语义：wait_agent 会把它当 agent_session 义务行报告，直接收尾也不会丢工作
+// localAgentObligationSpawnNextAction 是 subagent_spawn 成功登记挂起义务后给模型的
+// 可见语义：subagent_wait 会把它当 agent_session 义务行报告，直接收尾也不会丢工作
 // （宿主挂起该 turn 并在子代理终态事件上自动续跑）。模型不知道这层语义时，常见
 // 误用是重复派发同一份工作或空转轮询。
-const localAgentObligationSpawnNextAction = "obligation_registered: this child session is now a durable turn obligation; wait_agent reports it as an agent_session row (pending until the child reaches a terminal state) — ending the turn is safe: the host parks the turn and auto-resumes it on the child's terminal event. Do not spawn the same work again."
+const localAgentObligationSpawnNextAction = "obligation_registered: this child session is now a durable turn obligation; subagent_wait reports it as an agent_session row (pending until the child reaches a terminal state) — ending the turn is safe: the host parks the turn and auto-resumes it on the child's terminal event. Do not spawn the same work again."
 
 // localAgentSessionObligationResolver judges the durable state of one child
 // agent session from the same supervision notification plane that drives the
@@ -77,7 +77,7 @@ func (h *localChatRuntimeHost) agentSessionObligationResolver() subagentbatch.Ag
 }
 
 // parkLocalAgentChildObligation records that the current parent turn handed
-// work to one live spawn_agent child session and parks the turn on it (§6.12),
+// work to one live subagent_spawn child session and parks the turn on it (§6.12),
 // mirroring parkBackgroundTurn for subagent batches. The obligation id is
 // prefix-encoded (agent_session:<session_id>) so it shares the existing
 // obligation_ids_json representation and needs no schema migration.
@@ -209,7 +209,7 @@ func (h *localChatRuntimeHost) claimParkedTurnEdge(kind, sessionID, turnID strin
 	return true
 }
 
-// inFlightLocalChildSessions lists live spawn_agent children of one root
+// inFlightLocalChildSessions lists live subagent_spawn children of one root
 // session: active identity rows (the registry filter already excludes closed
 // rows) whose child session has no terminal lifecycle projection yet. The
 // resolver check keeps finished-but-unclosed children out of the list.
@@ -233,7 +233,7 @@ func (h *localChatRuntimeHost) inFlightLocalChildSessions(ctx context.Context, s
 		if childSessionID == "" || childSessionID == sessionID {
 			continue
 		}
-		// spawn_agent 显式指定 agent_type 时，记录里存的是定义名（general/
+		// subagent_spawn 显式指定 agent_type 时，记录里存的是定义名（general/
 		// explore/plan…），只有未指定才回落为 "child"——按 "child" 白名单过滤会
 		// 漏掉最常见的带定义子代理（真机 2026-09-30：I9 兜底 0 事件）。改用树
 		// 结构判据：depth<=0 排除 root 自身，root/team teammate 不是本会话的
@@ -242,7 +242,7 @@ func (h *localChatRuntimeHost) inFlightLocalChildSessions(ctx context.Context, s
 			continue
 		}
 		// team 判定同样不能只看 AgentType：team 行写进去的是 mate.Profile，
-		// 只有无 profile 才回落成 "team_teammate"（与上面 spawn_agent 同源的
+		// 只有无 profile 才回落成 "team_teammate"（与上面 subagent_spawn 同源的
 		// 重载问题）。改用 agentcontrol.IsTeamTeammate() 的结构判据。
 		if record.IsRootAgent() || record.IsTeamTeammate() {
 			continue

@@ -1094,7 +1094,7 @@ func TestProviderWrapper_CallReportsHTTPDebugPayload(t *testing.T) {
 		Metadata: map[string]interface{}{
 			"trace_id": "trace-1",
 			"tool_availability": map[string]interface{}{
-				"requires_active_team_run": []string{"read_task_spec"},
+				"requires_active_team_run": []string{"team_task_spec"},
 			},
 		},
 	})
@@ -1113,7 +1113,7 @@ func TestProviderWrapper_CallReportsHTTPDebugPayload(t *testing.T) {
 	requires, ok := availability["requires_active_team_run"].([]string)
 	require.True(t, ok)
 	require.Len(t, requires, 1)
-	assert.Equal(t, "read_task_spec", requires[0])
+	assert.Equal(t, "team_task_spec", requires[0])
 	assert.Contains(t, events[0].RequestBody, `"model":"gpt-5.2-codex"`)
 	assert.Contains(t, events[0].RequestBody, `"input"`)
 	assert.Contains(t, events[0].RequestBody, `"hello"`)

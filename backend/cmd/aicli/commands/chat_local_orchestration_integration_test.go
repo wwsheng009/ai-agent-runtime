@@ -63,12 +63,12 @@ func TestAICLIChatActorExecutor_SpawnTeamBindsSessionForFollowupTeamTool(t *test
 	}
 	host.BaseSession = session
 
-	_, err = session.ChatExecutor.Execute(context.Background(), session, "Create a team and use spawn_team now")
+	_, err = session.ChatExecutor.Execute(context.Background(), session, "Create a team and use team_spawn now")
 	if err != nil {
 		t.Fatalf("first Execute failed: %v", err)
 	}
 	if session.ActiveTeam == nil {
-		t.Fatal("expected active team binding after spawn_team")
+		t.Fatal("expected active team binding after team_spawn")
 	}
 	if session.ActiveTeam.TeamID != "team-1" || session.ActiveTeam.AgentID != "lead" {
 		t.Fatalf("unexpected active team after spawn: %+v", session.ActiveTeam)
@@ -144,7 +144,7 @@ func TestAICLIChatActorExecutor_SpawnTeamKeepsFrozenToolSurfaceWithinSameTurn(t 
 		t.Fatalf("expected at least three llm requests, got %+v", snapshots)
 	}
 	if !containsToolName(snapshots[0], toolbroker.ToolTeamSpawn) {
-		t.Fatalf("expected spawn_team in initial tool set, got %+v", snapshots[0])
+		t.Fatalf("expected team_spawn in initial tool set, got %+v", snapshots[0])
 	}
 	for _, hidden := range []string{
 		toolbroker.ToolTeamTaskSpec,
@@ -155,11 +155,11 @@ func TestAICLIChatActorExecutor_SpawnTeamKeepsFrozenToolSurfaceWithinSameTurn(t 
 		toolbroker.ToolTeamTaskBlock,
 	} {
 		if containsToolName(snapshots[0], hidden) {
-			t.Fatalf("did not expect %s in initial tool set before spawn_team, got %+v", hidden, snapshots[0])
+			t.Fatalf("did not expect %s in initial tool set before team_spawn, got %+v", hidden, snapshots[0])
 		}
 	}
 	if !sameToolSnapshot(snapshots[0], snapshots[1]) {
-		t.Fatalf("expected turn tool surface to stay frozen after spawn_team, got initial=%+v followup=%+v", snapshots[0], snapshots[1])
+		t.Fatalf("expected turn tool surface to stay frozen after team_spawn, got initial=%+v followup=%+v", snapshots[0], snapshots[1])
 	}
 }
 
@@ -207,7 +207,7 @@ func TestAICLIChatActorExecutor_RestoresAmbientBindingAfterRestart(t *testing.T)
 	}
 	host1.BaseSession = session1
 
-	if _, err := session1.ChatExecutor.Execute(context.Background(), session1, "Create a team and use spawn_team now"); err != nil {
+	if _, err := session1.ChatExecutor.Execute(context.Background(), session1, "Create a team and use team_spawn now"); err != nil {
 		t.Fatalf("first Execute failed: %v", err)
 	}
 

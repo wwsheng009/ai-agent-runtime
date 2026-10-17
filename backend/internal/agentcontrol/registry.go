@@ -21,8 +21,8 @@ const (
 	// 成 worktree 路径），此键保留「从哪继承而来」的原始出处，两者不可互替。
 	SessionContextParentWorkspacePath = "agent_parent_workspace_path"
 	// SessionContextParentToolCallID 记录发起该子会话的父侧 tool_call_id
-	// （spawn_agent 工具调用的 id）：subagent.progress 镜像据此回填
-	// parent_tool_call_id，前端/ACP 能把子代理进度挂到对应的 spawn_agent 行上。
+	// （subagent_spawn 工具调用的 id）：subagent.progress 镜像据此回填
+	// parent_tool_call_id，前端/ACP 能把子代理进度挂到对应的 subagent_spawn 行上。
 	SessionContextParentToolCallID    = "agent_parent_tool_call_id"
 	SessionContextRootSessionID       = "agent_root_session_id"
 	SessionContextAgentType           = "agent_type"
@@ -134,7 +134,7 @@ func ChildPath(parent ContextGetter, parentSessionID, childSessionID string, par
 	return strings.TrimRight(parentPath, "/") + "/" + SanitizePathSegment(childSessionID)
 }
 
-// TeamTeammatePath returns the AgentRegistry projection path for a spawn_team
+// TeamTeammatePath returns the AgentRegistry projection path for a team_spawn
 // teammate session.
 func TeamTeammatePath(teamID, teammateID, teammateName, sessionID string) string {
 	return "/root/teams/" + SanitizePathSegment(teamID) + "/" + SanitizePathSegment(firstNonEmpty(teammateID, teammateName, sessionID))

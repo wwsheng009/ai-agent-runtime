@@ -20,7 +20,7 @@ func (b *recordingHeadlessBridge) HandleRuntimeEvent(event runtimeevents.Event) 
 	b.runtime = append(b.runtime, event)
 }
 
-// TestChatRuntimeEventBridgeDropsForeignSessionContent 锁定多代理（spawn_agent）
+// TestChatRuntimeEventBridgeDropsForeignSessionContent 锁定多代理（subagent_spawn）
 // 场景下的会话隔离：子代理与父代理共用一条 EventBus
 // （internal/agent/child_factory.go: childAgent.SetEventBus(parent.GetEventBus())），
 // 父桥订阅全总线，因此必须由桥保证子会话内容不进入父会话的输出面

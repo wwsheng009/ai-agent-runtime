@@ -13,7 +13,7 @@ import (
 )
 
 // TestChatAgentItemsIncludeBatchLedgerAgents 锁定 2026-10-09 现场缺口：
-// spawn_subagents 派发的子代理只写批任务账本（不落 agent_control_agents），
+// subagent_spawn_batch 派发的子代理只写批任务账本（不落 agent_control_agents），
 // /agents 列表与 picker 必须合并账本来源，否则批量派发场景下列表恒为空
 // （现场：3 个批任务代理在跑，列表显示"暂无子 agent"）。
 func TestChatAgentItemsIncludeBatchLedgerAgents(t *testing.T) {

@@ -88,7 +88,7 @@ type RuntimeState struct {
 	CurrentTurnID string        `json:"current_turn_id,omitempty"`
 	// SuspendedTurnID 记录本会话处于**挂起态**（§6.12 parked turn）的托管 turn：
 	// 父 turn 派发 durable background obligations 后收尾、账本未终态时，该 turn
-	// 并未结束，只是没有正在执行的 run。此后到达的 steer（用户输入 / send_input
+	// 并未结束，只是没有正在执行的 run。此后到达的 steer（用户输入 / subagent_input
 	// / continue）以**同一 turn_id** 起新 episode，而不是新开 turn（C3-7 /
 	// AC-P2-7a）。空串表示没有挂起 turn，普通输入照常新开 turn。
 	//

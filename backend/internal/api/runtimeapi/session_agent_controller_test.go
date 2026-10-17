@@ -86,7 +86,7 @@ func TestSessionAgentController_PathTargetsAndCloseSubtree(t *testing.T) {
 }
 
 // TestSessionAgentControllerListScopeIsHostDerived pins the same contract for
-// the HTTP host: the model cannot steer list_agents, a subagent defaults to
+// the HTTP host: the model cannot steer subagent_list, a subagent defaults to
 // its main agent's tree, and an empty caller fails closed.
 func TestSessionAgentControllerListScopeIsHostDerived(t *testing.T) {
 	ctx := context.Background()
@@ -590,7 +590,7 @@ func TestSessionAgentController_SendMessagePersistsMailboxWithoutTargetActor(t *
 	assert.True(t, result.Delivered)
 	assert.False(t, result.Triggered)
 	if _, ok := handler.getSessionHub().Get("api-mailbox-child"); ok {
-		t.Fatal("send_message should persist mailbox event without starting target actor")
+		t.Fatal("subagent_send should persist mailbox event without starting target actor")
 	}
 
 	events, err := handler.getSessionEventStore().ListEvents(ctx, "api-mailbox-child", 0, 10)
@@ -787,7 +787,7 @@ func TestSessionAgentController_WaitUsesEventStoreWakeup(t *testing.T) {
 		assert.True(t, strings.HasPrefix(result.NextAction, "consume_ready_outputs"), "next_action=%q", result.NextAction)
 		assert.Positive(t, result.WaitedMs)
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("wait_agent did not wake from event store append")
+		t.Fatal("subagent_wait did not wake from event store append")
 	}
 }
 
@@ -846,7 +846,7 @@ func TestSessionAgentController_ReadEventsUsesEventStoreWakeup(t *testing.T) {
 			assert.Equal(t, chat.EventAssistantMessage, result.Events[0].Type)
 		}
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("read_agent_events did not wake from event store append")
+		t.Fatal("subagent_events did not wake from event store append")
 	}
 }
 
@@ -902,7 +902,7 @@ func TestSessionAgentController_WaitWithoutTargetUsesParentMailbox(t *testing.T)
 		assert.Equal(t, "consume_mailbox_events", result.NextAction)
 		assert.Positive(t, result.WaitedMs)
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("wait_agent did not wake from parent mailbox event")
+		t.Fatal("subagent_wait did not wake from parent mailbox event")
 	}
 }
 
@@ -969,7 +969,7 @@ func TestSessionAgentController_ReadEventsWithoutTargetUsesParentMailbox(t *test
 			assert.Equal(t, "api parent mailbox event read hello", result.Events[0].Payload["body"])
 		}
 	case <-time.After(450 * time.Millisecond):
-		t.Fatal("read_agent_events did not wake from parent mailbox event")
+		t.Fatal("subagent_events did not wake from parent mailbox event")
 	}
 }
 
@@ -1331,7 +1331,7 @@ func TestAPIControllerCompleteSupervisedRunInterruptedMapsCanceled(t *testing.T)
 }
 
 // TestAPIWaitAgentSnapshotAttachesExecutionRunSupervision verifies P6-2:
-// wait_agent/list_agent status snapshots expose the durable execution run
+// subagent_wait/subagent_list status snapshots expose the durable execution run
 // supervision fields (run status, attempt, deadlines, heartbeat, progress)
 // so operators can distinguish "still healthy", "waiting approval", "no
 // progress" and "being canceled" from a single view.
@@ -1454,7 +1454,7 @@ func TestSessionAgentController_ReadEventsReportsPagination(t *testing.T) {
 }
 
 // P0-3a/M5 三态语义矩阵（ADR-3）：v2 默认关闭时保持现状；显式开启后
-// busy send_input 排队投递、终态返回 ErrAgentSessionClosed，并写投递审计。
+// busy subagent_input 排队投递、终态返回 ErrAgentSessionClosed，并写投递审计。
 func newSessionAgentSemanticsV2Host(t *testing.T, v2 bool) (*Handler, *chat.SessionManager) {
 	t.Helper()
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
@@ -1504,7 +1504,7 @@ func TestSessionAgentControllerV2SendInputBusyQueuesWithAudit(t *testing.T) {
 		ID:      "api-v2-sendinput-child",
 		Message: "queue input while busy",
 	})
-	require.NoError(t, err, "v2 send_input(interrupt=false) on a busy child must queue instead of failing")
+	require.NoError(t, err, "v2 subagent_input(interrupt=false) on a busy child must queue instead of failing")
 	require.NotNil(t, result)
 	assert.True(t, result.Queued)
 	assert.True(t, result.Delivered)
@@ -1519,13 +1519,13 @@ func TestSessionAgentControllerV2SendInputBusyQueuesWithAudit(t *testing.T) {
 			break
 		}
 	}
-	require.NotNil(t, mailboxEvent, "busy send_input must deliver a durable mailbox row")
+	require.NotNil(t, mailboxEvent, "busy subagent_input must deliver a durable mailbox row")
 	metadata, ok := mailboxEvent.Payload["metadata"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, true, metadata["trigger_turn"])
 	assert.Equal(t, chat.MailboxDeliveryStatusQueued, metadata["mailbox_delivery_status"])
 
-	// send_input 无调用方身份，审计落在目标会话事件流。
+	// subagent_input 无调用方身份，审计落在目标会话事件流。
 	targetEvents, err := handler.getSessionEventStore().ListEvents(ctx, "api-v2-sendinput-child", 0, 10)
 	require.NoError(t, err)
 	foundAudit := false

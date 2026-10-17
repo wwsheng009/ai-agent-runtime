@@ -225,14 +225,14 @@ func agentStatusCacheSafeSummary(result *AgentStatusResult) string {
 		lines = append(lines, "Error: "+errText)
 	}
 	// G7：与 agent 侧 renderSubagentResults 同格式的一行路由回执，让
-	// spawn_agent 的决策者也能直接看到实际档位/模型/告警数。
+	// subagent_spawn 的决策者也能直接看到实际档位/模型/告警数。
 	if line := agentRouteReceiptLine(result); line != "" {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }
 
-// agentRouteReceiptLine 渲染 spawn_agent 的单行路由回执。未路由时返回空串
+// agentRouteReceiptLine 渲染 subagent_spawn 的单行路由回执。未路由时返回空串
 // （未启用路由是常态，不制造噪音），格式与 agent 包的
 // renderSubagentRouteReceipts 保持一致：
 //
