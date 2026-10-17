@@ -150,3 +150,16 @@
 - 分析部分的事实基础经源码复核成立；先前口述的两处不精确已修正（G1 的 merge 防护现状、A7 的服务端恢复形态）。
 - 借鉴优先级排序（取证后更新）：**G4（rearm 闸，已证实幽灵续跑场景）> G2（轮数上限）> G3（wrapup）> G1（CAS）> G6（blocked code）> G5（约束备忘）**；G4/G2/G3 构成 v2 实施批，G1 随后，其余为决策记录。
 - 本文档为设计稿，未动任何代码；实施前需按 §3.4 边界再过一轮方案评审。
+
+## 5. 实施状态（2026-10-17 更新）
+
+| 项 | 状态 | 提交 | 落地形态 |
+|---|---|---|---|
+| G4 rearm 闸 | ✅ 已实施 | `31efd9a0` | restore 双路径（resume latest / load by id）置进程内 `goalContinuationDisarmed`；decision 新增 `goal_disarmed` 停止原因；`/goal resume` rearm；`/goal status` 显示提示。无 goal / 非 active 会话零行为变化 |
+| G2 轮数上限 | ✅ 已实施 | `9ea2566f` | `SessionGoal` 增 `max_rounds`/`rounds_started`/`blocked_code`（additive，零值=不限）；`internal/goal.AdmitGoalRound` 单点 admit 语义，双宿主驱动器提交续跑轮前记账；达上限置 `blocked`（code=round-limit）；`/goal status` 显示轮数；`/goal resume` 为用户出口 |
+| G3 终局 wrapup | ✅ 已实施 | `252bf012` | 共享层新增 `CompleteWrapUpPrompt`/`BlockedWrapUpPrompt`（含 grounding 纪律、禁再调工具）；CLI post-turn reconciler 检测模型终态 → 续跑循环退出前消费一次收尾轮；服务端驱动器同条件直接提交收尾轮；用户命令终态与预算收尾路径不受影响 |
+| G1 goal CAS | ⏸ 未实施（后续批） | — | 设计保留（`Revision` + CAS 式 PutPersistent，复用 supervision `UpdateExecutionRunCAS` 形态）；当前 `GoalMergePolicy` 的 actor 裁决已覆盖主要状态机风险 |
+| G6 blocked code | ✅ 随 G2 落地 | `9ea2566f` | `BlockedCode` 字段 + `BlockedCodeRoundLimit`（模型申报的 blocked 维持纯文本 reason，与 DSH `model-reported` code 的差异记录为后续可选项） |
+| G5 执行时权威校验 | 📌 约束备忘 | — | 维持设计约束："goal 工具仅限根会话工具面"；工具面若下放子代理必须先补 open-turn 溯源校验 |
+
+回归口径：`internal/goal`、`internal/api/runtimeapi` 全量与 `cmd/aicli/commands` 的 goal 族测试全绿（G2/G3 提交前逐项验证）。
