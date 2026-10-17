@@ -1,6 +1,10 @@
 package types
 
-import "strings"
+import (
+	"fmt"
+	"os"
+	"strings"
+)
 
 // MessageSubstanceKey identifies a message by what it renders: role, content and
 // the tool-call signature. It mirrors the canonical storage key
@@ -22,6 +26,11 @@ func toolCallSubstanceSignature(msg Message) string {
 		builder.WriteByte('\n')
 	}
 	return builder.String()
+}
+
+type inheritedIdentity struct {
+	messageID string
+	turnID    string
 }
 
 // InheritMessageIdentities copies message_id (and turn_id) from a previously
@@ -47,10 +56,6 @@ func InheritMessageIdentities(previous, rebuilt []Message, includeUserTurns bool
 		return false
 	}
 
-	type inheritedIdentity struct {
-		messageID string
-		turnID    string
-	}
 	queues := make(map[string][]inheritedIdentity, len(previous))
 	for index := range previous {
 		messageID := MessageID(previous[index])
@@ -68,6 +73,14 @@ func InheritMessageIdentities(previous, rebuilt []Message, includeUserTurns bool
 	for index := range rebuilt {
 		message := &rebuilt[index]
 		if MessageID(*message) != "" {
+			// A rebuilt row that already carries an id still consumes its
+			// substance slot. The rebuilt window usually contains rows that were
+			// durably persisted earlier in this very turn (mid-turn checkpoints
+			// absorb them into the caller's session); without the consumption
+			// the queue still backs a LATER row of the same substance — a new
+			// turn whose tool result repeats an earlier one byte-for-byte then
+			// inherits the OLD id/turn and the canonical alignment drops the
+			// whole new turn (live-fire 2026-10-17).
 			continue
 		}
 		if !includeUserTurns && isUserRole(message.Role) {
@@ -102,33 +115,55 @@ func InheritMessageIdentities(previous, rebuilt []Message, includeUserTurns bool
 // (live-fire 2026-10-17: a second search turn stored 1 row instead of 3, and
 // its final assistant inherited the previous turn_id).
 func InheritMessageIdentitiesBeforeNewTurns(previous, rebuilt []Message) bool {
-	// The boundary is the first user turn whose substance the previous
-	// transcript cannot back (unconsumed queue): that user message opens a new
-	// turn appended to the window, and everything after it — including a tool
-	// result that repeats an earlier row byte-for-byte — belongs to the new
-	// turn and must mint fresh identities.
-	userQueue := make(map[string][]string)
+	// The boundary is the first rebuilt row the previous transcript cannot
+	// back: inheritance is only sound over a CONTIGUOUS backed prefix. A hole
+	// anywhere (a user turn appended since the last persist, or any other new
+	// row) means everything after it is new and must mint fresh identities —
+	// otherwise a later row that repeats an earlier one byte-for-byte inherits
+	// the OLD id/turn behind the hole (live-fire 2026-10-17: user2 had already
+	// been persisted by a mid-turn checkpoint, so the user-only boundary check
+	// passed, and the new turn's tool result then inherited turn 1's identity).
+	queues := make(map[string][]inheritedIdentity, len(previous))
 	for index := range previous {
-		if !isUserRole(previous[index].Role) {
+		messageID := MessageID(previous[index])
+		if messageID == "" {
 			continue
 		}
-		if id := MessageID(previous[index]); id != "" {
-			key := MessageSubstanceKey(previous[index])
-			userQueue[key] = append(userQueue[key], id)
-		}
+		queues[MessageSubstanceKey(previous[index])] = append(queues[MessageSubstanceKey(previous[index])], inheritedIdentity{
+			messageID: messageID,
+			turnID:    TurnID(previous[index]),
+		})
 	}
-	cut := len(rebuilt)
+	// One ordered pass: consume the backing queue row-by-row and stamp the
+	// assignment in place. Rows the caller already stamped consume their slot
+	// but keep their identity. The first unbacked row ends the backed prefix —
+	// everything after it is new (delegated to EnsureMessageIdentity by the
+	// caller, which mints fresh ids for id-less rows).
+	cut := 0
 	for index := range rebuilt {
-		if !isUserRole(rebuilt[index].Role) {
-			continue
-		}
 		key := MessageSubstanceKey(rebuilt[index])
-		if queue := userQueue[key]; len(queue) > 0 {
-			userQueue[key] = queue[1:]
+		if queue := queues[key]; len(queue) > 0 {
+			cut = index + 1
+			message := &rebuilt[index]
+			if MessageID(*message) != "" {
+				continue
+			}
+			next := queue[0]
+			queues[key] = queue[1:]
+			if message.Metadata == nil {
+				message.Metadata = NewMetadata()
+			}
+			message.Metadata.Set(MetadataKeyMessageID, next.messageID)
+			if next.turnID != "" && strings.TrimSpace(message.Metadata.GetString(MetadataKeyTurnID, "")) == "" {
+				message.Metadata.Set(MetadataKeyTurnID, next.turnID)
+			}
 			continue
 		}
 		cut = index
 		break
 	}
-	return InheritMessageIdentities(previous, rebuilt[:cut], false)
+	if os.Getenv("AICLI_DEBUG_IDENTITY_INHERIT") != "" {
+		fmt.Printf("[identity-inherit] previous=%d rebuilt=%d cut=%d\n", len(previous), len(rebuilt), cut)
+	}
+	return cut > 0
 }
