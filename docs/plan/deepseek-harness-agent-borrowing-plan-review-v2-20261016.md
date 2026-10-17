@@ -11,7 +11,7 @@
 - P1-2' handoff 契约已实施（`subagent_handoff.go` 状态机/防御解码 + 任务包解码 + 结果降级）；**`submit_report` 契约已实施**（按需注入 + 提交时校验 + 终态捕获 + `StructuredReport` 回填，见实施记录 §5.3）；逐请求 ToolChoice 强制未采用——强制每次请求的工具选择会与多步真实工具使用冲突，契约强度由提交时校验与状态机解码双保险提供。
 - P2-1' fork 已实施（`subagent_context.go` 配平前缀/冻结/超限拒绝 + 双宿主 `ParentHistoryFor` 接线）；**fork 前缀度量已接 llm-cache-analytics 通道**（`fork_audit.go` 首请求审计字段写入 `cache_requests`，含 prefix 保持率与缓存读取证据口径，见实施记录 §3.4）。
 - P2-2' iterate_goal 已实施（`iterate_goal.go` 固定编排 + G6 进展门控 stalled 终态 + `agents.iterateGoalEnabled` 灰度 + doom_loop 联动）；**goal 驱动器升级路径（入口 2）已实施**：CLI 与服务端驱动器在连续无进展达共享阈值（2）**或 doom_loop 告警上浮**时改用 `IterateEscalationPrompt`（至多一次、可用性由部署的 `agents.iterateGoalEnabled` 门控；告警标记被升级消费一次），见实施记录 §5.4。
-- 真实终端验证 runbook（`docs/plan/multi-agent-real-terminal-validation-runbook.md`）已补齐验证 E（fork 上下文复述: `fork_prefix_*` 审计键 / `cache_read_tokens` 证据 / 超限与能力负路径）与验证 F（iterate_goal 多轮交接 / 可确定性构造的 stalled 变体 / 升级入口指纹），待真实 provider 凭据环境执行。
+- 真实终端验证 runbook（`docs/plan/multi-agent-real-terminal-validation-runbook.md`）已补齐验证 E（fork 上下文复述: `fork_prefix_*` 审计键 / `cache_read_tokens` 证据 / 超限与能力负路径）与验证 F（iterate_goal 多轮交接 / 可确定性构造的 stalled 变体 / 升级入口指纹），**并已执行通过（2026-10-17）**：fork `preserved=true`（2 条/44 tok/kept 2）、iterate_goal `complete/2` 与确定性 stalled（`rounds_started=4`）；报告 `docs/working/dsh-borrowing-real-terminal-validation-20261017.md`。验证暴露的两个接线缺陷（schema 能力位静态化、合成 allowlist 漏 admit iterate_goal）已在 `f33301b2` 修复。
 - 实施细节与测试矩阵见 `docs/multi-agents/agents/dsh-borrowing-implementation-record-20261016.md`。
 
 ---
