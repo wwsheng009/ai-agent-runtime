@@ -57,7 +57,11 @@ func TestPlanReviewController_SessionPlanReadsWorkspaceFile(t *testing.T) {
 func TestPlanReviewController_RelativePathEscapesWorkspaceRejected(t *testing.T) {
 	handler, session, _ := newPlanReviewTestHandler(t)
 	controller := handler.planReviewControllerForSession()
-	_, err := controller.ReviewPlan(context.Background(), session.ID, toolbroker.PlanReviewArgs{PlanPath: "..\\outside.md"})
+	// 用 filepath.Join 生成平台原生的「上一级」相对路径。原先硬编码
+	// Windows 字面量 `..\outside.md`：在 Linux 上反斜杠不是路径分隔符，
+	// 该字符串只是一个普通文件名，不构成越界，测试因此没等到期望错误。
+	escapePath := filepath.Join("..", "outside.md")
+	_, err := controller.ReviewPlan(context.Background(), session.ID, toolbroker.PlanReviewArgs{PlanPath: escapePath})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "escapes the session workspace")
 }
