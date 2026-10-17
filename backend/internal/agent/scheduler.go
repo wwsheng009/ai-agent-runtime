@@ -209,6 +209,17 @@ type SubagentSchedulerConfig struct {
 	ForkMaxSnapshotTokens int `json:"-" yaml:"-"`
 }
 
+// Capabilities 返回生效的 spawn 准入能力位（部署装配；nil 回落内建默认）。
+// 模型侧 schema（spawn_subagents 的 context / report_schema 字段）与准入共用
+// 本方法，保证"schema 与准入门"同源（P1-1' 三层一致的第三层不再退化为
+// 静态默认值）。
+func (s *SubagentScheduler) Capabilities() SubagentCapabilities {
+	if s == nil || s.config.Capabilities == nil {
+		return DefaultCapabilities()
+	}
+	return *s.config.Capabilities
+}
+
 // 子代理任务级重试默认参数（§6.2：指数退避 + jitter，封顶 5s）。
 const (
 	defaultSubagentMaxAttemptsPerTask = 2

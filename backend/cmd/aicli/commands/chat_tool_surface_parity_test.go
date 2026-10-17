@@ -96,10 +96,15 @@ func TestChatToolAvailable_RespectsToolPolicy(t *testing.T) {
 	if !chatToolAvailable(session, getGoalFunctionName) {
 		t.Fatal("expected allowlisted get_goal to be available")
 	}
-	// update_goal is a runtime-owned essential: a narrow non-empty allowlist must
-	// not hide the agent control surface.
+	// runtime-owned 工具自 2026-10-16（policy: remove essential allowlist
+	// bypass）起不再绕过 allowlist：窄名单必须显式放行 update_goal（或用
+	// 通配）才可见；这里同时锁定"显式放行后可用"的正向路径。
+	if chatToolAvailable(session, updateGoalFunctionName) {
+		t.Fatal("expected narrow allowlist to gate update_goal until it is explicitly admitted")
+	}
+	session.ToolPolicy.AllowedTools[updateGoalFunctionName] = true
 	if !chatToolAvailable(session, updateGoalFunctionName) {
-		t.Fatal("expected runtime-essential update_goal to remain available under narrow allowlist")
+		t.Fatal("expected explicitly allowlisted update_goal to be available")
 	}
 
 	captureStdout(t, func() {

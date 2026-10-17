@@ -2567,7 +2567,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			broker.Supervision = controller
 		}
 	}
-	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker()); toolPolicy != nil {
+	if toolPolicy := buildLocalChatToolPolicy(session, host.ToolSurface, apiAgent.GetToolBroker(), agentsConfig.IterateGoalEnabled); toolPolicy != nil {
 		// Mirror the toolkit base path (SetBasePath(config.Workspace.Root)) for the
 		// static policy: when the run context carries no workspace root, relative
 		// path arguments still have to be validated against the file the executor
@@ -2809,7 +2809,7 @@ func buildLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) stri
 	return strings.Join(lines, "\n\n")
 }
 
-func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCPManager, broker *toolbroker.Broker) *runtimepolicy.ToolExecutionPolicy {
+func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCPManager, broker *toolbroker.Broker, iterateGoalEnabled bool) *runtimepolicy.ToolExecutionPolicy {
 	if session == nil {
 		return nil
 	}
@@ -2831,6 +2831,12 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 			// broker catalogs, so include it in the synthesized default policy.
 			// Explicit profile/permissions allowlists are intentionally not widened.
 			allowedTools = append(allowedTools, agent.SpawnSubagentsToolName)
+			// iterate_goal（P2-2'）同为调度器贡献的运行时工具，但只在部署
+			// 显式开启时才补入：未开启时它根本不进模型工具面，无需扩宽执行
+			// 授权面（最小授权原则，与上面 spawn_subagents 的恒开语义区分）。
+			if iterateGoalEnabled {
+				allowedTools = append(allowedTools, agent.IterateGoalToolName)
+			}
 			if allowedTools == nil {
 				allowedTools = []string{}
 			}

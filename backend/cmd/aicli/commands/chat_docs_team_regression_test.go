@@ -943,7 +943,7 @@ func newWorkspaceLocalOrchestrationTestHost(t *testing.T, session *ChatSession, 
 			broker.TeamEvents = host.Orchestrator.Events
 		}
 		a.SetToolBroker(broker)
-		if policy := buildLocalChatToolPolicy(session, host.ToolSurface, broker); policy != nil {
+		if policy := buildLocalChatToolPolicy(session, host.ToolSurface, broker, false); policy != nil {
 			a.SetToolExecutionPolicy(policy)
 		}
 		if ctxMgr := a.GetContextManager(); ctxMgr != nil {

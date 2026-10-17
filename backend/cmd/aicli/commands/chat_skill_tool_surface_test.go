@@ -181,7 +181,7 @@ func TestLocalChatToolPolicyIncludesSkillFunctions(t *testing.T) {
 		tools: []runtimeskill.ToolInfo{{Name: "view", MCPName: "toolkit", Enabled: true}},
 	})
 
-	policy := buildLocalChatToolPolicy(session, surface, nil)
+	policy := buildLocalChatToolPolicy(session, surface, nil, false)
 	require.NotNil(t, policy)
 	require.True(t, policy.AllowlistEnabled)
 	require.True(t, policy.AllowedTools[fn.Name()], "skill 函数必须进入合成 allowlist")

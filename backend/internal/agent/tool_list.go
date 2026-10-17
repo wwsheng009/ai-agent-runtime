@@ -191,7 +191,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
 		if shouldExposeSpawnSubagents(loop.agent, allowed) {
-			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary(), DefaultCapabilities())
+			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary(), loop.agent.spawnSchemaCapabilities())
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
 				tools = append(tools, definition)

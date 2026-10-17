@@ -56,6 +56,9 @@ func syncLocalChatToolPolicyAllowlist(
 	// 调度器贡献的运行时自有工具不在 MCP / broker 目录里，合成策略包含它，
 	// 同步时保持一致口径。
 	candidates = append(candidates, agent.SpawnSubagentsToolName)
+	// iterate_goal（P2-2'）只在部署显式开启时由 buildLocalChatToolPolicy 补入
+	// （未开启时它不进模型工具面），这里不重复追加，避免把未启用部署的授权面
+	// 扩宽成一个无法调用的登记项。
 
 	var added []string
 	for _, name := range candidates {

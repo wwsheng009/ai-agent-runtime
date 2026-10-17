@@ -1431,7 +1431,7 @@ func TestBuildLocalChatToolPolicy_AllowsBrokerTeamTools(t *testing.T) {
 			{Name: "bash"},
 			{Name: "edit"},
 		},
-	}, &toolbroker.Broker{TeamStore: store})
+	}, &toolbroker.Broker{TeamStore: store}, false)
 	if policy == nil {
 		t.Fatal("expected tool policy")
 	}
@@ -1452,21 +1452,22 @@ func TestBuildLocalChatToolPolicy_DoesNotWidenExplicitAllowlistForScheduler(t *t
 	}
 	policy := buildLocalChatToolPolicy(session, stubLocalChatToolSurface{
 		tools: []runtimeskill.ToolInfo{{Name: "view"}},
-	}, nil)
+	}, nil, false)
 	if policy == nil {
 		t.Fatal("expected explicit tool policy")
 	}
 	// buildLocalChatToolPolicy must not mutate an explicit profile allowlist map
-	// by inserting scheduler tools. Runtime-owned essentials still execute via
-	// AllowTool bypass; non-essentials stay map-gated.
+	// by inserting scheduler tools. 2026-10-16 起 runtime-owned 工具不再绕过
+	// allowlist（见 internal/policy AllowTool）：显式名单必须自行放行目标工具
+	//（或用通配），合成路径不代扩权。
 	if policy.AllowedTools[agent.SpawnSubagentsToolName] {
 		t.Fatal("expected explicit allowlist map not to be widened with spawn_subagents")
 	}
-	if err := policy.AllowTool(agent.SpawnSubagentsToolName); err != nil {
-		t.Fatalf("expected runtime-essential spawn_subagents to remain executable: %v", err)
+	if err := policy.AllowTool(agent.SpawnSubagentsToolName); err == nil {
+		t.Fatal("explicit allowlist must gate spawn_subagents like any other tool")
 	}
 	if err := policy.AllowTool("write"); err == nil {
-		t.Fatal("expected non-essential write to stay allowlist-gated")
+		t.Fatal("expected non-allowlisted write to stay allowlist-gated")
 	}
 }
 
@@ -1480,7 +1481,7 @@ func TestBuildLocalChatToolPolicy_DisableToolsBlocksEveryDefinition(t *testing.T
 	broker := &toolbroker.Broker{TeamStore: store}
 	policy := buildLocalChatToolPolicy(&ChatSession{DisableTools: true}, stubLocalChatToolSurface{
 		tools: []runtimeskill.ToolInfo{{Name: "bash"}, {Name: getGoalFunctionName}},
-	}, broker)
+	}, broker, false)
 	if policy == nil || !policy.AllowlistEnabled || len(policy.AllowedTools) != 0 {
 		t.Fatalf("expected an enabled empty allowlist, got %#v", policy)
 	}
