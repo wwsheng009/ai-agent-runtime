@@ -1,7 +1,7 @@
 name: Debug ui tests on tag
 
-# 目的：复刻 release-aicli.yml 的 validate job（同 env、同前置步骤、tag 触发），
-# 并把 E4 (go test ./cmd/aicli/ui/...) 的失败细节通过 ::error:: annotation 暴露出来。
+# 目的：在 tag 上下文复刻 release-aicli.yml 的 validate job，并把 E4
+# (go test ./cmd/aicli/ui/...) 的失败细节通过 ::error:: annotation 暴露。
 # 匿名 API 读不到 job logs（401），但 check-runs annotations 是公开可读的。
 on:
   push:
@@ -13,18 +13,8 @@ permissions:
   contents: read
 
 env:
-  WIN7_GO_VERSION: '1.21.4'
-  WIN7_MODFILE: go.win7.mod
-  WIN7_BUILD_TAGS: win7compat
-  NODE_VERSION: '24'
-  PNPM_VERSION: '10.27.0'
-  PLAYWRIGHT_CLI_VERSION: '0.1.17'
-  RIPGREP_VERSION: '15.2.0'
   CMD_PATH: ./cmd/aicli
-  CONSOLE_CMD_PATH: ./cmd/aicli-console
   MESH_CMD_PATH: ./cmd/aicli-mesh
-  RUNTIME_SERVER_CMD_PATH: ./cmd/runtime-server
-  BIN_NAME: aicli
   WORKDIR: backend
   CGO_ENABLED: '0'
   GOPROXY: https://proxy.golang.org,direct
@@ -47,13 +37,15 @@ jobs:
       - name: Context dump
         shell: bash
         run: |
-          set -uo pipefail
-          echo "REF=${GITHUB_REF} REF_TYPE=${GITHUB_REF_TYPE} REF_NAME=${GITHUB_REF_NAME} SHA=${GITHUB_SHA}"
-          echo "nproc=$(nproc)"; free -m || true; df -h / /tmp || true
+          set +e
+          echo "REF=${GITHUB_REF} TYPE=${GITHUB_REF_TYPE} NAME=${GITHUB_REF_NAME} SHA=${GITHUB_SHA}"
+          echo "nproc=$(nproc) mem=$(free -m | awk '/^Mem:/{print $2"MB total, "$7"MB avail"}')"
+          echo "disk=$(df -h / | awk 'NR==2{print $4}')"
           cd backend
           go env GOOS GOARCH CGO_ENABLED GOPROXY GOCACHE GOMODCACHE GOFLAGS
           go version
-          du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" 2>/dev/null || true
+          git -C .. status --porcelain | head -n 5
+          echo "::notice title=runner ctx::nproc=$(nproc) mem=$(free -m | awk '/^Mem:/{print $2}')MB avail=$(free -m | awk '/^Mem:/{print $7}')MB ref=${GITHUB_REF}"
 
       - name: Verify Go environment
         working-directory: ${{ env.WORKDIR }}
@@ -82,57 +74,74 @@ jobs:
           go test ./internal/mesh/... -count=1
           go build -trimpath -o /tmp/aicli-mesh-check ${MESH_CMD_PATH}
           /tmp/aicli-mesh-check --help > /dev/null
-          /tmp/aicli-mesh-check version --json > /dev/null
-          AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check ls --json > /dev/null
-          AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check gc --json > /dev/null
 
-      - name: E4 repro (ui tests) with annotations
+      # 关键诊断步：显式 set +e，保证失败后仍能发 annotation。
+      # 跑两遍：判断是稳定失败还是偶发；第二遍用 -p 1 降低并行度。
+      - name: E4 repro with annotations
         shell: bash
         run: |
-          set -uo pipefail
+          set +e
           cd backend
-          START=$(date +%s)
-          go test ./cmd/aicli/ui/... -count=1 -v > /tmp/ui-test.log 2>&1
-          RC=$?
-          END=$(date +%s)
-          echo "E4 exit=${RC} duration=$((END-START))s log_lines=$(wc -l < /tmp/ui-test.log)"
 
-          if [ "$RC" -eq 0 ]; then
-            echo "::notice title=E4 GREEN::ui tests passed in $((END-START))s"
+          run_once() {
+            local label="$1"; shift
+            local start end rc
+            start=$(date +%s)
+            go test ./cmd/aicli/ui/... -count=1 "$@" > "/tmp/ui-$label.log" 2>&1
+            rc=$?
+            end=$(date +%s)
+            echo "attempt=$label rc=$rc duration=$((end-start))s"
+            return $rc
+          }
+
+          emit() {
+            local label="$1" log="$2"
+            local n=0
+            while IFS= read -r line; do
+              n=$((n+1)); [ "$n" -gt 8 ] && break
+              local msg
+              msg=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r//g')
+              echo "::error title=$label FAIL $n::$msg"
+            done < <(grep -E '^--- FAIL: |^panic: |^FAIL[[:space:]]' "$log" | head -n 8)
+            if [ "$n" -eq 0 ]; then
+              local tailmsg
+              tailmsg=$(tail -n 25 "$log" | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+              echo "::error title=$label no-FAIL-line::${tailmsg}"
+            fi
+          }
+
+          run_once a; RC_A=$?
+          if [ "$RC_A" -eq 0 ]; then
+            echo "::notice title=E4 GREEN::attempt a passed"
             exit 0
           fi
+          emit a /tmp/ui-a.log
 
-          echo "=== FAIL lines ==="
-          grep -E '^--- FAIL|^FAIL|^panic:|^# ' /tmp/ui-test.log | head -n 40 || true
-          echo "=== tail 80 ==="
-          tail -n 80 /tmp/ui-test.log || true
+          # 第二遍：确认是否可复现 + 降并行度
+          run_once b -p 1; RC_B=$?
+          echo "::warning title=E4 attempts::a=$RC_A b=$RC_B"
+          if [ "$RC_B" -ne 0 ]; then
+            emit b /tmp/ui-b.log
+          fi
 
-          # Emit one annotation per failing test so the public annotations API
-          # reveals exact test names (job logs require auth).
-          i=0
-          while IFS= read -r name; do
-            i=$((i+1))
-            [ "$i" -gt 10 ] && break
-            echo "::error title=E4 FAIL ${i}::${name}"
-          done < <(grep -E '^--- FAIL: ' /tmp/ui-test.log | sed -E 's/^--- FAIL: ([^ ]+).*/\1/' | sort -u || true)
-
-          # One aggregate annotation with escaped multi-line detail.
-          DETAIL=$(grep -E '^--- FAIL|^FAIL|^panic:|^\s+[a-zA-Z0-9_]+_test\.go:[0-9]+:|Error Trace|Error:|Test:' /tmp/ui-test.log | head -n 60 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
-          echo "::error title=E4 detail::${DETAIL}"
+          # 第三遍：只重跑第一遍失败涉及的包（若有）
+          PKGS=$(grep -E '^FAIL[[:space:]]+github' /tmp/ui-a.log | awk '{print $2}' | sort -u | tr '\n' ' ')
+          echo "failed_pkgs=${PKGS:-<none>}"
+          echo "::warning title=E4 failed pkgs::${PKGS:-none}"
           exit 0
 
       - name: Render parity + inventory (informational)
         if: always()
         shell: bash
         run: |
-          set -uo pipefail
+          set +e
           cd backend
           go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1 > /tmp/parity.log 2>&1; P1=$?
           AICLI_SCENE_PRESENTER=1 go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1 > /tmp/parity2.log 2>&1; P2=$?
           go test ./cmd/aicli/ui ./cmd/aicli/commands -run 'DirectWriterInventory|WriterInventory' -count=1 > /tmp/inv.log 2>&1; P3=$?
           echo "parity_legacy=$P1 parity_scene=$P2 inventory=$P3"
           if [ "$P1" -ne 0 ] || [ "$P2" -ne 0 ] || [ "$P3" -ne 0 ]; then
-            D=$(grep -hE '^--- FAIL|^FAIL|^panic:' /tmp/parity.log /tmp/parity2.log /tmp/inv.log 2>/dev/null | head -n 20 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            D=$(grep -hE '^--- FAIL|^FAIL|^panic:' /tmp/parity.log /tmp/parity2.log /tmp/inv.log 2>/dev/null | head -n 10 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=other gates::${D}"
           else
             echo "::notice title=other gates::parity+inventory green"
