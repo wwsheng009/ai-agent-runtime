@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -615,10 +616,19 @@ func TestManagerExpiresQueuedJobPastDeadline(t *testing.T) {
 	require.Equal(t, StatusExpired, expired.Status)
 	require.Contains(t, expired.Message, "queue deadline exceeded")
 
+	// 状态经内存快照立即可见，而 "expired" 事件由终态写入路径稍后落库
+	// （persist CAS → release → kill watch → appendJobEvent）。CI 高负载下
+	// 这个窗口实测可达数百毫秒：测试线程看到 expired 后立刻 ListEvents
+	// 会抢在事件写入之前（JSON 重跑轮次稳定复现、单包重跑通过）。
+	// 事件面按"最终一致"等待，不与内存状态的即时性混为一谈。
+	require.Eventually(t, func() bool {
+		events, listErr := manager.ListEvents(ctx, queued.ID, 0, 0)
+		return listErr == nil && slices.Contains(eventTypes(events), "expired")
+	}, 5*time.Second, 25*time.Millisecond, "expired event must land in the store")
+
 	events, err := manager.ListEvents(ctx, queued.ID, 0, 0)
 	require.NoError(t, err)
 	expiredTypes := eventTypes(events)
-	require.Contains(t, expiredTypes, "expired")
 	require.NotContains(t, expiredTypes, "process_created")
 
 	_, _ = manager.CancelJob(ctx, blocker.ID)

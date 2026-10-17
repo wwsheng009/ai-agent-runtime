@@ -390,6 +390,14 @@ func TestTTY_LiveLoop_LLMRetryRendersAdvancingTimerE2E(t *testing.T) {
 		// 下的饥饿竞争（全屏渲染 action 风暴导致 40s 级卡死）。
 		ex.onCall = func(ctx context.Context, session *ChatSession, _ string) (string, error) {
 			session.Interaction.SetRetrying("step=1 attempt=2/3 reason=rate_limit")
+			// 注入 retry 状态后必须等这一帧真正落到字节流再返回回复：
+			// 生产路径里 retry 状态会驻留整个重试延迟窗口，而这里立即返回，
+			// 单核/高负载 CI 上 UI actor 会把 SetRetrying 与随后的完成态合并
+			// 成一次绘制，中间帧被吞掉，retry 详情从未出现在渲染输出里
+			// （Linux CI 稳定失败、2 核以上侥幸通过）。显式排空 actor 与
+			// unified presenter 让中间状态帧确定可见，不改产品语义。
+			session.Interaction.waitUIActorIdle()
+			awaitUnifiedPresenterIdle(t, session.Interaction)
 			return reply, nil
 		}
 	})

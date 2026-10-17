@@ -25,6 +25,18 @@ func TestRealRustAnalyzerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Skip("rust-analyzer not installed; skipping real language-server integration")
 	}
+	// A binary on PATH is not proof of a *usable* server: CI images carry a
+	// rust-analyzer stub whose transport dies immediately on spawn (observed
+	// on the ubuntu release-gate runner: "LSP diagnostics unavailable:
+	// transport closed" after 0.1s, while the same test passes on a machine
+	// with a real toolchain). Probe --version first so an unserviceable
+	// installation skips like an absent one instead of reporting a fake
+	// bridge regression.
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer probeCancel()
+	if out, probeErr := exec.CommandContext(probeCtx, binary, "--version").CombinedOutput(); probeErr != nil {
+		t.Skipf("rust-analyzer present but not serviceable (%v): %s", probeErr, strings.TrimSpace(string(out)))
+	}
 
 	// Windows：子进程退出后文件句柄释放可能滞后数毫秒，t.TempDir 的清理会
 	// 偶发 sharing violation（ADR-0005 子进程生命周期）。用显式目录 + 带重试的
