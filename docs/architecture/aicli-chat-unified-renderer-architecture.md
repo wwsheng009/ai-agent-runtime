@@ -1146,10 +1146,14 @@ approval/question 还没有完全拆成 actor effect/result：
 - **Surface/会话层**：`FixedBottomSurface` 的 legacy 即时渲染主体（status/popup/prompt
   直写 `TerminalOutput()`）仍为活跃代码（~7 处直写点），已列入 inventory；其退役依赖
   "legacy 测试迁移到 owned 模式"独立里程碑。
-- **零旁路门禁**：`tools/terminal-inventory` 静态登记全部 terminal writer call sites
-  （当前 1149 条）；`release-aicli.yml` 的 `Verify terminal output inventory` step 在
-  发布前对 baseline 做指纹比对，任何 added/removed 直写点都 fail。`verify` 模式：
-  `go run ./tools/terminal-inventory -root .. -out ../terminal-output-inventory.json -verify`。
+- **零旁路门禁**：terminal writer call sites 由在库 Go 测试静态登记
+  （`TestUIInteractiveDirectWriterInventory` 覆盖 ui 包递归、
+  `TestChatInteractiveDirectWriterInventory` 覆盖 commands 交互面）；
+  `release-aicli.yml` 的 validate 作业在发布前强制运行，任何 added/removed
+  直写点都 fail。基线以 Go 代码内联（`File+Func+Kind`，无行号，源码移动不误报）。
+  外置 JSON 门禁（`tools/terminal-inventory` + `terminal-output-inventory.json`
+  指纹比对）已于 2026-10-17 退役：行号指纹随源码移动误报，且 JSON 基线缺失时
+  CI 无法自愈。
 - **收口后仍保留的 process-compat 回落**：仅启动前初始化、`emitControl` helper 自身、
   legacy surface paint 路径——全部登记在 inventory 中，不允许新的绕过路径。
 

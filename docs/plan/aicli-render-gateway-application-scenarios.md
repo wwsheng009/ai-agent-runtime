@@ -395,15 +395,15 @@
 
 #### H1. 终端效果静态审计
 
-**当前状态**：inventory 已有 1203 条记录覆盖 90 个源文件，`release-aicli.yml` 的 `Verify terminal output inventory` step 强制指纹比对。
+**当前状态**：门禁由两套在库 Go 测试承担（`TestUIInteractiveDirectWriterInventory` / `TestChatInteractiveDirectWriterInventory`），基线以 Go 代码内联，发布流程（`release-aicli.yml` validate 作业）强制运行。
 
-**实施状态**：✅ **已实施**（此前轮次）——`tools/terminal-inventory`（`main.go`）扫描终端直写点生成 `terminal-output-inventory.json`；CI verify step（`go run ./tools/terminal-inventory -verify`）强制指纹比对，新增未登记直写点或删除已登记点均 fail。
+**实施状态**：✅ **已实施**，2026-10-17 重构——外置 JSON 门禁（`tools/terminal-inventory` + `terminal-output-inventory.json` 指纹比对）退役。原因：指纹含 `line:col`，源码移动即误报；且依赖仓库内一份 JSON 基线（曾被删除+gitignore，导致 v0.5.0 发布卡在 validate）。替代实现是同语义的在库测试门禁：ui 包递归 + commands 包 `chat*.go`/`command.go`/`exec_event_processor.go` 的直写点清单（`File+Func+Kind`，无行号，源码移动不误报），新增/删除直写点都会 fail。
 
-**应用场景**：任何新增/删除/修改终端直写点，发布前必须通过 inventory 比对：
-- 新增直写点未登记 → fail，避免第二 physical writer 悄悄引入；
-- 已有直写点被删除但仍在 inventory baseline → fail，避免误删。
+**应用场景**：任何新增/删除/修改终端直写点，发布前必须通过 writer inventory 测试比对：
+- 新增直写点未登记 → 测试 fail，避免第二 physical writer 悄悄引入；
+- 已有直写点被删除但仍在基线 → 测试 fail，避免误删。
 
-**验收标准**：新增未登记直写点 → `Verify terminal output inventory` 步骤 fail；删除已登记直写点 → fail；inventory 指纹比对在 `release-aicli.yml` 中强制执行。
+**验收标准**：新增未登记直写点 → `go test ./cmd/aicli/ui ./cmd/aicli/commands -run 'DirectWriterInventory|WriterInventory'` fail；删除已登记直写点 → fail；该测试门禁在 `release-aicli.yml` validate 作业中强制执行。
 
 #### H2. 性能门禁
 
@@ -422,7 +422,7 @@
 | **P0** | A1 | 虚拟投影 golden 测试 | 已有 `VirtualTerminalSink` + `RenderTestFixture` | ✅ 已交付（golden_projection_test.go） | 回归质量提升，wire 和文本双保险 |
 | **P0** | B2 | 会话录屏 + 离线回放命令 | `FileSink` + `replay.go` 已就绪，缺 CLI 收口 | ✅ 已交付（aicli replay + --replay-verify） | 用户反馈复现、安全跨进程回放 |
 | **P0** | B4 | stdout/stderr 边界验证 | 已有边界约定（§8.5），缺集成测试 | ✅ 已交付（chat_stderr_stdout_boundary_test.go） | 管道消费安全基础契约 |
-| **P0** | H1 | inventory 静态审计门禁 | 已有 baseline + verify step | ✅ 已交付（terminal-inventory 工具 + CI 门禁） | 防止新增旁路点的最后防线 |
+| **P0** | H1 | inventory 静态审计门禁 | 在库 Go 测试基线（ui/commands 直写点清单） | ✅ 已交付（writer inventory 测试门禁；外置 JSON 版本已退役） | 防止新增旁路点的最后防线 |
 | **P1** | A2 | 故障注入与恢复矩阵 | `FaultSink` + `clock` 已就绪，扩展测试 | ✅ 已交付（fault_matrix_test.go） | 不静默 retry 的基石保障 |
 | **P1** | A3 | 渲染器 parity 自动化 | `parity_test.go` 已有，扩展覆盖范围 | 中（1w） | 统一渲染器替换的安全网 |
 | **P1** | B1 | 交付审计日志导出 | journal 已封存，缺导出入口 | 中（1w） | 合规与事故追溯 |
@@ -453,7 +453,7 @@
 > 1. **录屏回放命令**：`aicli replay <file>`（`replay_command.go`），支持 `--replay-verify` 只校验模式；archive 层（`replay_archive.go`）容器 schema + entry checksum fail-closed。
 > 2. **虚拟投影 golden**：`golden_projection_test.go` 为 frame/history/barrier/lease/resize/sequence 建立 wire + `Projection().Rows` 双 golden，全内联、无自动更新。
 > 3. **stdout/stderr 边界验证**：`chat_stderr_stdout_boundary_test.go` 4 个集成测试（交互错误零交集/fence 走 stdout/管道模式无诊断/正常轮次无泄漏）。
-> 4. **inventory 静态审计门禁**：`tools/terminal-inventory` + `release-aicli.yml` `Verify terminal output inventory` step 强制指纹比对。
+> 4. **inventory 静态审计门禁**：在库 Go 测试（`TestUIInteractiveDirectWriterInventory` / `TestChatInteractiveDirectWriterInventory`）+ `release-aicli.yml` validate 强制运行；外置 JSON 版本（`tools/terminal-inventory`）已于 2026-10-17 退役。
 
 **后续可扩展（P1+）**：
 
@@ -487,7 +487,7 @@
 | **A1 虚拟投影 golden** | `golden_projection_test.go`（6 个契约测试） | 回归质量从"wire 字节单保险"升级为"wire + 文本投影双保险"；文本投影反映用户实际看到的屏幕内容，比 ANSI 控制序列更稳定、更可读 | 核心测试（frame/history/lease/resize）均以 `Projection().Rows` 断言，无需依赖 stdout replacement / pseudo-TTY；golden 变更显式 review，防止静默退化 |
 | **B2 会话录屏 + 离线回放** | `aicli replay <file>` 子命令 + `--replay-verify` 模式；archive 层（容器 schema + entry checksum fail-closed） | 用户报告渲染 bug 后，取回录屏文件 → 回放到 `VirtualTerminalSink` → 复现到具体 batch → 导出 golden 作为回归基线；`--replay-verify` 确保损坏/篡改文件 fail-closed | 回放永不触达 console（`NonAuthoritative` 标记），安全跨进程；校验失败返回非零退出码，不执行回放 |
 | **B4 stdout/stderr 边界验证** | `chat_stderr_stdout_boundary_test.go`（4 个集成测试） | 管道/嵌入方可安全消费 stdout 作为数据通道、stderr 作为诊断通道——渲染字节与诊断字节零交叉 | 交互错误、fence 错误、管道模式、正常轮次四类场景全部覆盖，可作为 CI 门禁防止回归 |
-| **H1 inventory 静态审计门禁** | `tools/terminal-inventory` + `release-aicli.yml` `Verify terminal output inventory` step | 防止新增/删除终端直写点悄悄引入第二 physical writer 或误删必要直写点 | 1203 条记录覆盖 90 个源文件，每次发布前强制指纹比对；新增未登记点或删除已登记点均 fail |
+| **H1 inventory 静态审计门禁** | 在库 writer inventory 测试门禁（`release-aicli.yml` validate 强制运行） | 防止新增/删除终端直写点悄悄引入第二 physical writer 或误删必要直写点 | ui 包递归 + commands 交互面直写点全量登记；新增未登记点或删除已登记点均 fail |
 
 ### 7.1 间接收益
 

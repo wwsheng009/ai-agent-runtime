@@ -117,7 +117,6 @@ backend/plan.md
 backend/go.win7.mod.bak
 /analysis/
 backend/configs/backend/
-terminal-output-inventory.json
 .scratch/
 .cache/
 .tmp_view/
