@@ -1,0 +1,59 @@
+# {{name}} — 默认场景：常用工具的中间面（介于 minimal 与 full 之间）。
+# 由 `aicli profile create` 从内置模板生成；字段语义见 docs/aicli/profiles.md。
+#
+# 定位：
+#   - 比 minimal 宽：包含命令执行（shell）、联网取回/检索、产物读取、计划与目标面，
+#     以及 job_*/subagent_* 的后台任务与子代理委派；且不禁用技能与 MCP；
+#   - 比 full 窄：不放行 team_*/schedule_*/code_*/图像生成等（allowlist 是硬闸门，
+#     未列入即不可用）。
+profile:
+  name: {{name}}
+  description: {{description}}
+  default_agent: {{agent}}
+
+# 提示词组合：replace = profile 提示词整体替换内置基础 prompt（默认，零行为变化）。
+prompts:
+  mode: replace
+
+# 常用工具白名单（只收窄，不放宽安全域）。支持通配：prefix_* 前缀匹配。
+#   读取/检索：view / grep / glob / ls
+#   编辑：      write / edit / multiedit / apply_patch / append_write
+#   命令执行：  shell / aicli_exec
+#   网络：      fetch / web_search / download
+#   产物：      artifact_read
+#   控制/计划/目标：ask_user_question / todos / plan_* / get_goal / read_goal / update_goal
+#   后台任务/子代理：job_* / subagent_*（含批量委派 subagent_spawn_batch）
+# read_only: false 允许写操作。未列入的工具（team_*/schedule_*/code_*/
+# openai_image_generate 等）不可用——需要全量时改用 full 模板。
+tools:
+  allowlist:
+    - view
+    - grep
+    - glob
+    - ls
+    - write
+    - edit
+    - multiedit
+    - apply_patch
+    - append_write
+    - shell
+    - aicli_exec
+    - fetch
+    - web_search
+    - download
+    - artifact_read
+    - ask_user_question
+    - todos
+    - plan_*
+    - get_goal
+    - read_goal
+    - update_goal
+    - job_*
+    - subagent_*
+    # 批量委派入口的显式声明：subagent_* 通配已覆盖它，这里写出来是为了让
+    # "default 有意开放批量委派"这件事可读（旧拼写 spawn_subagents 仍是现役别名）。
+    - subagent_spawn_batch
+  read_only: false
+
+# skills：不声明 allowlist/denylist 即全部技能可见（deny 恒优先）——与 minimal 不同。
+# mcp：不声明 use_servers/exclude_servers 即沿用 mcp.yaml 的全量服务器——与 minimal 不同。

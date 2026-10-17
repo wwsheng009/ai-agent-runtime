@@ -1,0 +1,3 @@
+name: default
+description: Default profile with a curated common-tool surface (read/search/edit/exec plus core control tools), between minimal and full
+default_agent: default

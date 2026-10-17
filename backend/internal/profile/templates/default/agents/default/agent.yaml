@@ -1,0 +1,6 @@
+name: default
+description: General-purpose agent for the {{name}} profile (common tool surface)
+model: ""
+permission_mode: default
+completion_requirement: none
+sandbox: workspace
