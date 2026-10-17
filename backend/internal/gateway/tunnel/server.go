@@ -282,9 +282,6 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 		LastHeartbeat: nowUTC(),
 	}
 	stampAllSessionsSynced(node, node.RegisteredAt)
-	s.registry.Upsert(node)
-	s.emitPresence(nodeID, node.Sessions)
-	s.notifyRegistryChangedAndPersist()
 	defer func() {
 		// Only downgrade our own registration: identify the entry by the
 		// RemoteAddr observed at handshake (the heartbeat loop rewrites
@@ -302,19 +299,29 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 	}()
 
 	sess := newSession(nodeID, ws)
-	s.registerSession(nodeID, sess)
-	defer func() {
-		s.unregisterSession(nodeID, sess)
-		sess.closeAll("node_offline", "agent connection closed")
-	}()
-
-	if err := writeJSON(ws, wire.TypeRegisterAck, wire.RegisterAck{
+	// REGISTER_ACK 必须先于会话入表写出：agent 握手把 REGISTER_ACK 视为
+	// REGISTER 的紧接回复（wsconn 握手会拒绝其它类型的首帧），而会话一旦
+	// 入表，代理 goroutine 就可能向同一连接写 STREAM_OPEN。
+	if err := sess.writeJSON(wire.TypeRegisterAck, 0, wire.RegisterAck{
 		NodeID:         nodeID,
 		ConsoleURL:     s.consoleURL(nodeID),
 		AcceptedRoutes: reg.Routes,
 	}); err != nil {
 		return err
 	}
+	s.registerSession(nodeID, sess)
+	defer func() {
+		s.unregisterSession(nodeID, sess)
+		sess.closeAll("node_offline", "agent connection closed")
+	}()
+
+	// 注册可见性晚于反代就绪：registry 发布必须发生在会话入表之后——观察者
+	// 一看到 registry 里的节点就可能发起代理请求，此时若会话尚未注册，
+	// ServeProxy 会返回一次假的 502 "node offline"（CI 高负载下曾以
+	// TestProxyLargeResponse 0.22s 快速失败的形式出现）。
+	s.registry.Upsert(node)
+	s.emitPresence(nodeID, node.Sessions)
+	s.notifyRegistryChangedAndPersist()
 
 	// Control loop.
 	watchSent := map[string]bool{}
@@ -373,11 +380,11 @@ func (s *Server) serveConn(ws *websocket.Conn, r *http.Request) error {
 				watchSent = next
 				ack.Pending = append(ack.Pending, actions...)
 			}
-			if err := writeJSON(ws, wire.TypeHeartbeatAck, ack); err != nil {
+			if err := sess.writeJSON(wire.TypeHeartbeatAck, 0, ack); err != nil {
 				return err
 			}
 		case wire.TypePing:
-			if err := writeJSON(ws, wire.TypePong, map[string]any{}); err != nil {
+			if err := sess.writeJSON(wire.TypePong, 0, map[string]any{}); err != nil {
 				return err
 			}
 		case wire.TypeDeregister, wire.TypeGoAway:

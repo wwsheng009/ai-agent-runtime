@@ -2,11 +2,14 @@ package tunnel_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gateway/tunnel"
@@ -314,5 +317,84 @@ func TestProxyLargeResponse(t *testing.T) {
 	}
 	if len(body) != size {
 		t.Fatalf("body length = %d, want %d", len(body), size)
+	}
+}
+
+// TestProxyStreamSurvivesHeartbeatContention 锁定「同一 WebSocket 连接只有一个
+// 写者」：8 路限速大响应并行灌入同一条 agent 连接，把流帧（STREAM_OPEN /
+// WINDOW_UPDATE）的写占空比推高，20ms 心跳的 HEARTBEAT_ACK 就会与流写入并发。
+// 修复前心跳 ACK 走裸 ws.WriteMessage（不持会话写锁），重叠时 gorilla 直接
+// panic "concurrent write to websocket connection"，连接死亡、响应被截断——CI
+// 上曾表现为 TestProxyLargeResponse 偶发 0.2s 级 body length 不匹配。
+func TestProxyStreamSurvivesHeartbeatContention(t *testing.T) {
+	const (
+		size      = 4 << 20 // 4 MiB per stream
+		chunk     = 16 << 10
+		perChunk  = 200 * time.Microsecond
+		streams   = 12
+		rounds    = 5
+		heartbeat = 100 * time.Millisecond
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		buf := make([]byte, chunk)
+		for written := 0; written < size; written += chunk {
+			if _, err := w.Write(buf); err != nil {
+				return
+			}
+			time.Sleep(perChunk)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	server := tunnel.NewServer(tunnel.Config{ServerVersion: "test"})
+	tunnelHTTP := httptest.NewServer(http.HandlerFunc(server.ServeHTTP))
+	t.Cleanup(tunnelHTTP.Close)
+
+	connector := testConnector("node-hb-race")
+	// 心跳要足够密（提高 ACK 与流写入的重叠机会），但远大于 3×interval 的
+	// watchdog 迟滞，避免负载下把真实竞态与心跳超时混为一谈。
+	connector.HeartbeatInterval = heartbeat
+	connector.Forward = agent.ForwardConfig{LocalBaseURL: upstream.URL}
+	conn, err := connector.Dial(context.Background(), agent.Config{Enabled: true, URL: tunnelHTTP.URL, Token: "agw_x"})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	waitFor(t, func() bool { _, ok := server.Registry().Get("node-hb-race"); return ok })
+
+	proxy := startProxy(t, server, "node-hb-race")
+	// 客户端超时把「连接死亡后挂起」变成快速失败，避免用 5 分钟级 stall 暴露问题。
+	client := &http.Client{Timeout: 30 * time.Second}
+	for round := 0; round < rounds; round++ {
+		errs := make([]error, streams)
+		var wg sync.WaitGroup
+		for i := 0; i < streams; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				resp, err := client.Get(proxy.URL + "/blob")
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				body, err := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				if len(body) != size {
+					errs[i] = fmt.Errorf("body length = %d, want %d", len(body), size)
+				}
+			}(i)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d stream %d: %v", round, i, err)
+			}
+		}
 	}
 }

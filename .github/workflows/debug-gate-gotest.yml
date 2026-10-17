@@ -12,6 +12,10 @@ name: Debug release gate go test
 # 触发说明：仅 workflow 文件自身变更会触发本调试流程（paths 过滤）。
 # 第 4 轮：TTY 渲染中间帧等待 / lsp --version 探针 / expired 事件 Eventually
 # 三项去 flake 修复后，验证 Linux release-gate 是否全绿。
+# 第 5 轮：gateway 反代写路径并发修复——REGISTER_ACK/HEARTBEAT_ACK/PONG 统一
+# 走会话写锁（此前与 STREAM_*/WINDOW_UPDATE 并发写会触发 gorilla panic 并
+# 截断响应）；会话注册先于 registry 发布，消除注册窗口的假 502。
+# 新增 TestProxyStreamSurvivesHeartbeatContention 压力回归用例。
 on:
   push:
     branches:
