@@ -1189,6 +1189,19 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 	if len(history) == 0 || len(canonicalTail) == 0 {
 		return 0, false
 	}
+	// P3 fail-loud 观测（session-message-identity-protocol-20261017 §5）：统计
+	// 本窗口内无 message_id 的行数。协议落地后新行必有 id，该计数应为 0；
+	// 非零即存在绕过创建时授予的写入路径（或存量未 backfill 的行），观测窗
+	// 据此决定启发式能否退役。
+	missingIDs := 0
+	for index := range history {
+		if canonicalMessageID(history[index]) == "" {
+			missingIDs++
+		}
+	}
+	if missingIDs > 0 {
+		observeIdentityMissing(missingIDs, len(history))
+	}
 	storedIDs := make(map[string]struct{}, len(canonicalTail))
 	storedContent := make(map[string]struct{}, len(canonicalTail))
 	for index := range canonicalTail {
