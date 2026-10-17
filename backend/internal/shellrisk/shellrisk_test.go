@@ -235,7 +235,11 @@ func TestAssessTempRemovalExempt(t *testing.T) {
 	if isExemptTempRemovalTarget(temp) {
 		t.Fatal("the temp root itself must never be exempt")
 	}
-	escaped := dir + "/../.."
+	// 爬到受保护位置：Linux 上 t.TempDir() 是 $TMPDIR/<test>/001，爬三级
+	// 越过 temp root 落到 "/"（root）；Windows 上落在 %LOCALAPPDATA%
+	// （home 子树）。两者都必须保持 risky —— 原写法只爬两级，Linux 上
+	// 恰好停在 /tmp（既非 root 也非 home），breaker 不触发导致误报干净。
+	escaped := dir + "/../../.."
 	if isExemptTempRemovalTarget(escaped) {
 		t.Fatalf("%q must not be exempt: it climbs out of temp", escaped)
 	}

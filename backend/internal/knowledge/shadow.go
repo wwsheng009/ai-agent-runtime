@@ -126,7 +126,12 @@ func ProjectIDForWorkspace(workspace string) string {
 	if ws == "" {
 		return ""
 	}
-	normalized := strings.ToLower(filepath.ToSlash(ws))
+	// 分隔符归一必须同时折叠 `\` 与 `/`：filepath.ToSlash 只在 Windows 上
+	// 把反斜杠换成斜杠，Linux 下 `E:\a\b` 会原样保留，导致同一工作区的
+	// Windows 拼写与 `/` 拼写折叠出不同 project_id（Linux CI 上
+	// TestProjectIDForWorkspace_StableAndPrivate 因此失败）。ADR-0003 §4.6
+	// 的「稳定」契约要求跨分隔符拼写稳定，故在此显式折叠。
+	normalized := strings.ToLower(strings.ReplaceAll(filepath.ToSlash(ws), `\`, `/`))
 	sum := sha256.Sum256([]byte(normalized))
 	return "ws-" + hex.EncodeToString(sum[:8])
 }

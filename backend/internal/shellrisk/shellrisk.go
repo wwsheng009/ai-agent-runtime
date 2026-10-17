@@ -709,15 +709,28 @@ func isRootOrHomeTarget(target string) bool {
 	if pathWithinBaseFold(cleaned, home) {
 		return true
 	}
-	// Volume root of the home drive (C:\ on Windows, / elsewhere).
-	volume := filepath.VolumeName(home)
-	if volume != "" {
-		root := volume + string(filepath.Separator)
-		if strings.EqualFold(cleaned, root) {
-			return true
-		}
+	// Filesystem root, judged on the cleaned path so traversal spellings
+	// like `x/../..` cannot launder a root delete: the earlier sh
+	// check above only sees the raw text, and the home-volume shortcut
+	// below never fires on Linux (VolumeName is empty there), which let
+	// a recursive delete of `$TMPDIR/.../../..` slip through on Linux.
+	if isFilesystemRootPath(cleaned) {
+		return true
 	}
 	return false
+}
+
+// isFilesystemRootPath reports whether a cleaned absolute path is a
+// filesystem root: "/" on Unix, "C:\" (or any volume root) on Windows.
+func isFilesystemRootPath(cleaned string) bool {
+	if cleaned == string(filepath.Separator) {
+		return true
+	}
+	volume := filepath.VolumeName(cleaned)
+	if volume == "" {
+		return false
+	}
+	return cleaned == volume+string(filepath.Separator)
 }
 
 // isExemptTempRemovalTarget reports whether a removal target may skip the
