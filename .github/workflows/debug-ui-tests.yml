@@ -12,6 +12,7 @@ permissions:
 
 env:
   CGO_ENABLED: '0'
+  GOPROXY: https://proxy.golang.org,direct
 
 jobs:
   ui-debug:
@@ -27,21 +28,29 @@ jobs:
           cache: true
           cache-dependency-path: backend/go.sum
 
-      - name: Run ui tests, verbose on failure
+      - name: Show go env
+        shell: bash
+        run: |
+          cd backend
+          go env GOOS GOARCH CGO_ENABLED GOPROXY GOCACHE GOMODCACHE
+          go version
+
+      - name: Run ui tests fresh (no cache), verbose on failure
         shell: bash
         run: |
           set -uo pipefail
           cd backend
+          # Isolate from Actions Go cache pollution: clean both caches first.
+          go clean -cache -testcache -modcache
           if go test ./cmd/aicli/ui/... -count=1 > ui-test.log 2>&1; then
-            echo "UI TESTS GREEN"
-            tail -n 30 ui-test.log
+            echo "UI TESTS GREEN (clean caches)"
+            tail -n 5 ui-test.log
             exit 0
           fi
           echo "UI TESTS RED"
           grep -E "^FAIL|^--- FAIL" ui-test.log || true
-          # verbose re-run of each failing package, tail the interesting part
           for pkg in $(grep -E "^FAIL" ui-test.log | awk '{print $2}' | sort -u); do
             echo "=== verbose: $pkg ==="
-            go test "$pkg" -count=1 2>&1 | tail -n 100 || true
+            go test "$pkg" -count=1 2>&1 | tail -n 120 || true
           done
           exit 0
