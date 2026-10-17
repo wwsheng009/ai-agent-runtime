@@ -124,11 +124,11 @@ jobs:
             emit b /tmp/ui-b.log
           fi
 
-          # 第三遍：只重跑第一遍失败涉及的包（若有）
           PKGS=$(grep -E '^FAIL[[:space:]]+github' /tmp/ui-a.log | awk '{print $2}' | sort -u | tr '\n' ' ')
           echo "failed_pkgs=${PKGS:-<none>}"
           echo "::warning title=E4 failed pkgs::${PKGS:-none}"
-          exit 0
+          # 真实反映结果：失败即红，但上面的注解已把失败测试名暴露出来。
+          exit 1
 
       - name: Render parity + inventory (informational)
         if: always()
