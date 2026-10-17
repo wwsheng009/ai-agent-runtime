@@ -211,9 +211,11 @@ func TestSkillMentionCompletionCandidatesLimit(t *testing.T) {
 func TestSkillMentionCompletionApplyUniqueBindsPath(t *testing.T) {
 	t.Parallel()
 
+	alphaPath := mentionTestPath(t, "skills", "alpha", "SKILL.md")
+	betaPath := mentionTestPath(t, "skills", "beta", "SKILL.md")
 	controller, session, _ := skillMentionCompletionTestController(t, nil,
-		mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
-		mentionTestSkill("beta", "beta body", `C:\skills\beta\SKILL.md`),
+		mentionTestSkill("alpha", "alpha body", alphaPath),
+		mentionTestSkill("beta", "beta body", betaPath),
 	)
 	nextText, nextCursor, ok := controller.ApplyCompletion("$alp", 4)
 	if !ok {
@@ -225,10 +227,10 @@ func TestSkillMentionCompletionApplyUniqueBindsPath(t *testing.T) {
 	if controller.state.Active {
 		t.Fatalf("accepted completion must clear popup state, got %+v", controller.state)
 	}
-	if got := session.skillMentionBoundPath("alpha"); got != "C:/skills/alpha/SKILL.md" {
-		t.Fatalf("bound path = %q, want C:/skills/alpha/SKILL.md", got)
+	if got, want := session.skillMentionBoundPath("alpha"), mentionTestSlash(alphaPath); got != want {
+		t.Fatalf("bound path = %q, want %q", got, want)
 	}
-	if got := skillMentionKnownNames(session)["alpha"]; got != "C:/skills/alpha/SKILL.md" {
+	if got, want := skillMentionKnownNames(session)["alpha"], mentionTestSlash(alphaPath); got != want {
 		t.Fatalf("skillMentionKnownNames[alpha] = %q, want bound path", got)
 	}
 }
@@ -236,9 +238,11 @@ func TestSkillMentionCompletionApplyUniqueBindsPath(t *testing.T) {
 func TestSkillMentionCompletionApplyMultiCandidatePrefixThenAccept(t *testing.T) {
 	t.Parallel()
 
+	alphaPath := mentionTestPath(t, "skills", "alpha", "SKILL.md")
+	alpinePath := mentionTestPath(t, "skills", "alpine", "SKILL.md")
 	controller, session, _ := skillMentionCompletionTestController(t, nil,
-		mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
-		mentionTestSkill("alpine", "alpine body", `C:\skills\alpine\SKILL.md`),
+		mentionTestSkill("alpha", "alpha body", alphaPath),
+		mentionTestSkill("alpine", "alpine body", alpinePath),
 	)
 	nextText, nextCursor, ok := controller.ApplyCompletion("$al", 3)
 	if !ok {
@@ -258,8 +262,8 @@ func TestSkillMentionCompletionApplyMultiCandidatePrefixThenAccept(t *testing.T)
 	if nextText != "$alpha " || nextCursor != len([]rune("$alpha ")) {
 		t.Fatalf("accept selected = %q/%d, want $alpha /7", nextText, nextCursor)
 	}
-	if got := session.skillMentionBoundPath("alpha"); got != "C:/skills/alpha/SKILL.md" {
-		t.Fatalf("bound path = %q, want selected candidate path", got)
+	if got, want := session.skillMentionBoundPath("alpha"), mentionTestSlash(alphaPath); got != want {
+		t.Fatalf("bound path = %q, want %q", got, want)
 	}
 }
 
@@ -308,9 +312,11 @@ func TestSkillMentionCompletionApplyNoTokenFallsBack(t *testing.T) {
 func TestSkillMentionCompletionApplySubmission(t *testing.T) {
 	t.Parallel()
 
+	alphaPath := mentionTestPath(t, "skills", "alpha", "SKILL.md")
+	alpinePath := mentionTestPath(t, "skills", "alpine", "SKILL.md")
 	controller, session, _ := skillMentionCompletionTestController(t, nil,
-		mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
-		mentionTestSkill("alpine", "alpine body", `C:\skills\alpine\SKILL.md`),
+		mentionTestSkill("alpha", "alpha body", alphaPath),
+		mentionTestSkill("alpine", "alpine body", alpinePath),
 	)
 	if _, _, ok := controller.ApplySubmission("hello", 5); ok {
 		t.Fatal("text without a $ token must leave Enter to the normal submit path")
@@ -324,8 +330,8 @@ func TestSkillMentionCompletionApplySubmission(t *testing.T) {
 	if nextText != "$alpha " || nextCursor != len([]rune("$alpha ")) {
 		t.Fatalf("submission = %q/%d, want $alpha /7", nextText, nextCursor)
 	}
-	if got := session.skillMentionBoundPath("alpha"); got != "C:/skills/alpha/SKILL.md" {
-		t.Fatalf("submission must record the bound path, got %q", got)
+	if got, want := session.skillMentionBoundPath("alpha"), mentionTestSlash(alphaPath); got != want {
+		t.Fatalf("submission must record the bound path %q, got %q", want, got)
 	}
 
 	controller.UpdateSnapshot(ui.LineEditorSnapshot{Text: "$zzz", Cursor: 4})

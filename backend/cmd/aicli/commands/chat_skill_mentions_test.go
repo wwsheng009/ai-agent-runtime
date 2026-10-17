@@ -13,6 +13,24 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// mentionTestPath 构造一个「本机原生」的技能文件路径。
+//
+// 这些测试原本硬编码 Windows 字面量 `C:\skills\alpha\SKILL.md`，再断言归一化
+// 结果为 `C:/skills/alpha/SKILL.md`。这在 Linux 上必然失败：生产代码用
+// filepath.Clean 归一化（normalizeSkillMentionPath），而 Clean 只在 Windows
+// 把 `\` 当分隔符；在 Linux 上 `C:\skills\...` 只是一个普通文件名，反斜杠会
+// 原样保留。用 t.TempDir() 构造真实路径可让断言在两个平台都成立，同时仍然
+// 覆盖「Windows 反斜杠 → 正斜杠」的归一化意图。
+func mentionTestPath(t *testing.T, parts ...string) string {
+	t.Helper()
+	return filepath.Join(append([]string{t.TempDir()}, parts...)...)
+}
+
+// mentionTestSlash 返回路径在归一化后应当呈现的 `/` 分隔形式。
+func mentionTestSlash(path string) string {
+	return filepath.ToSlash(path)
+}
+
 func mentionTestRuntimeConfig() *config.SkillsRuntimeConfig {
 	return &config.SkillsRuntimeConfig{
 		MentionInjection:     config.SkillMentionInjectionOn,
@@ -121,9 +139,11 @@ func TestCollectSkillMentionNames(t *testing.T) {
 }
 
 func TestResolveMentionedTextSkillsOrderAndCase(t *testing.T) {
+	zetaPath := mentionTestPath(t, "skills", "zeta", "SKILL.md")
+	alphaPath := mentionTestPath(t, "skills", "alpha", "SKILL.md")
 	session, _ := mentionTestSession(t, nil,
-		mentionTestSkill("zeta", "zeta body", `C:\skills\zeta\SKILL.md`),
-		mentionTestSkill("Alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
+		mentionTestSkill("zeta", "zeta body", zetaPath),
+		mentionTestSkill("Alpha", "alpha body", alphaPath),
 	)
 	selection, diag := resolveMentionedTextSkills(context.Background(), session, []skillMention{
 		{Name: "ZETA"},
@@ -135,7 +155,7 @@ func TestResolveMentionedTextSkillsOrderAndCase(t *testing.T) {
 	if selection.skills[0].name != "Alpha" || selection.skills[1].name != "zeta" {
 		t.Fatalf("order = %q,%q; want Alpha,zeta", selection.skills[0].name, selection.skills[1].name)
 	}
-	if selection.skills[0].path != "C:/skills/alpha/SKILL.md" {
+	if want := mentionTestSlash(alphaPath); selection.skills[0].path != want {
 		t.Fatalf("path normalization = %q", selection.skills[0].path)
 	}
 	if len(diag.Skipped) != 0 {
@@ -238,18 +258,21 @@ func TestResolveMentionedTextSkillsLimit(t *testing.T) {
 }
 
 func TestResolveMentionedTextSkillsPathBoundAndMissing(t *testing.T) {
+	alphaPath := mentionTestPath(t, "skills", "alpha", "SKILL.md")
+	alphaOtherPath := mentionTestPath(t, "skills", "alpha-other", "SKILL.md")
+	missingPath := mentionTestPath(t, "skills", "missing", "SKILL.md")
 	session, _ := mentionTestSession(t, nil,
-		mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
-		mentionTestSkill("alpha", "alpha other", `C:\skills\alpha-other\SKILL.md`),
+		mentionTestSkill("alpha", "alpha body", alphaPath),
+		mentionTestSkill("alpha", "alpha other", alphaOtherPath),
 	)
 	selection, diag := resolveMentionedTextSkills(context.Background(), session, []skillMention{
-		{Name: "alpha", Path: `C:\skills\alpha\SKILL.md`},
+		{Name: "alpha", Path: alphaPath},
 	}, nil)
-	if len(selection.skills) != 1 || selection.skills[0].path != "C:/skills/alpha/SKILL.md" {
+	if len(selection.skills) != 1 || selection.skills[0].path != mentionTestSlash(alphaPath) {
 		t.Fatalf("bound path resolution failed: %+v (skipped=%+v)", selection.skills, diag.Skipped)
 	}
 	_, diag = resolveMentionedTextSkills(context.Background(), session, []skillMention{
-		{Name: "alpha", Path: `C:\skills\missing\SKILL.md`},
+		{Name: "alpha", Path: missingPath},
 	}, nil)
 	if len(diag.Skipped) != 1 || diag.Skipped[0].Reason != skillMentionSkipAmbiguous {
 		t.Fatalf("failed bound path must block plain fallback: %+v", diag.Skipped)
@@ -261,9 +284,11 @@ func TestResolveMentionedTextSkillsPathBoundAndMissing(t *testing.T) {
 }
 
 func TestBuildSkillMentionFragmentsGoldenAndQ7(t *testing.T) {
+	brandPath := mentionTestPath(t, "skills", "brand", "SKILL.md")
+	plainPath := mentionTestPath(t, "skills", "plain", "SKILL.md")
 	session, _ := mentionTestSession(t, nil,
-		mentionTestSkill("brand", "line1\n$ARGUMENTS", `C:\skills\brand\SKILL.md`),
-		mentionTestSkill("plain", "no arguments here", `C:\skills\plain\SKILL.md`),
+		mentionTestSkill("brand", "line1\n$ARGUMENTS", brandPath),
+		mentionTestSkill("plain", "no arguments here", plainPath),
 	)
 	selection, _ := resolveMentionedTextSkills(context.Background(), session, []skillMention{
 		{Name: "brand"}, {Name: "plain"},
@@ -276,7 +301,7 @@ func TestBuildSkillMentionFragmentsGoldenAndQ7(t *testing.T) {
 		t.Fatalf("messages = %d, want 2 (diag=%+v)", len(messages), diag)
 	}
 	want := "## Skill: brand\n（未提供显式参数）\n" +
-		"<skill name=\"brand\" path=\"C:/skills/brand/SKILL.md\">\nline1\n</skill>"
+		"<skill name=\"brand\" path=\"" + mentionTestSlash(brandPath) + "\">\nline1\n</skill>"
 	if messages[0].Content != want {
 		t.Fatalf("fragment mismatch:\n got: %q\nwant: %q", messages[0].Content, want)
 	}
