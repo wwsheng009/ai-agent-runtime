@@ -1,56 +1,140 @@
-name: Debug ui tests on linux
+name: Debug ui tests on tag
+
+# 目的：复刻 release-aicli.yml 的 validate job（同 env、同前置步骤、tag 触发），
+# 并把 E4 (go test ./cmd/aicli/ui/...) 的失败细节通过 ::error:: annotation 暴露出来。
+# 匿名 API 读不到 job logs（401），但 check-runs annotations 是公开可读的。
 on:
   push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/debug-ui-tests.yml'
+    tags:
+      - 'debug-*'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
+  WIN7_GO_VERSION: '1.21.4'
+  WIN7_MODFILE: go.win7.mod
+  WIN7_BUILD_TAGS: win7compat
+  NODE_VERSION: '24'
+  PNPM_VERSION: '10.27.0'
+  PLAYWRIGHT_CLI_VERSION: '0.1.17'
+  RIPGREP_VERSION: '15.2.0'
+  CMD_PATH: ./cmd/aicli
+  CONSOLE_CMD_PATH: ./cmd/aicli-console
+  MESH_CMD_PATH: ./cmd/aicli-mesh
+  RUNTIME_SERVER_CMD_PATH: ./cmd/runtime-server
+  BIN_NAME: aicli
+  WORKDIR: backend
   CGO_ENABLED: '0'
   GOPROXY: https://proxy.golang.org,direct
 
 jobs:
-  ui-debug:
+  validate-repro:
+    name: Validate repro (tag context)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Setup Go (follow go.mod)
+      - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
           cache: true
-          cache-dependency-path: backend/go.sum
+          cache-dependency-path: ${{ env.WORKDIR }}/go.sum
 
-      - name: Show go env
+      - name: Context dump
         shell: bash
         run: |
+          set -uo pipefail
+          echo "REF=${GITHUB_REF} REF_TYPE=${GITHUB_REF_TYPE} REF_NAME=${GITHUB_REF_NAME} SHA=${GITHUB_SHA}"
+          echo "nproc=$(nproc)"; free -m || true; df -h / /tmp || true
           cd backend
-          go env GOOS GOARCH CGO_ENABLED GOPROXY GOCACHE GOMODCACHE
+          go env GOOS GOARCH CGO_ENABLED GOPROXY GOCACHE GOMODCACHE GOFLAGS
           go version
+          du -sh "$(go env GOCACHE)" "$(go env GOMODCACHE)" 2>/dev/null || true
 
-      - name: Run ui tests fresh (no cache), verbose on failure
+      - name: Verify Go environment
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go env GOOS GOARCH CGO_ENABLED GOPROXY
+          test "$(go env CGO_ENABLED)" = "0"
+
+      - name: Verify SQLite no-CGO packages
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go test ./internal/sqlitedriver ./internal/chat ./internal/team ./internal/agentcontrol -count=1
+
+      - name: Verify aicli no-CGO build
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/aicli-cgo0-check ${CMD_PATH}
+          /tmp/aicli-cgo0-check version
+
+      - name: Verify aicli-mesh CLI
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go test ./internal/mesh/... -count=1
+          go build -trimpath -o /tmp/aicli-mesh-check ${MESH_CMD_PATH}
+          /tmp/aicli-mesh-check --help > /dev/null
+          /tmp/aicli-mesh-check version --json > /dev/null
+          AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check ls --json > /dev/null
+          AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check gc --json > /dev/null
+
+      - name: E4 repro (ui tests) with annotations
         shell: bash
         run: |
           set -uo pipefail
           cd backend
-          # Isolate from Actions Go cache pollution: clean both caches first.
-          go clean -cache -testcache -modcache
-          if go test ./cmd/aicli/ui/... -count=1 > ui-test.log 2>&1; then
-            echo "UI TESTS GREEN (clean caches)"
-            tail -n 5 ui-test.log
+          START=$(date +%s)
+          go test ./cmd/aicli/ui/... -count=1 -v > /tmp/ui-test.log 2>&1
+          RC=$?
+          END=$(date +%s)
+          echo "E4 exit=${RC} duration=$((END-START))s log_lines=$(wc -l < /tmp/ui-test.log)"
+
+          if [ "$RC" -eq 0 ]; then
+            echo "::notice title=E4 GREEN::ui tests passed in $((END-START))s"
             exit 0
           fi
-          echo "UI TESTS RED"
-          grep -E "^FAIL|^--- FAIL" ui-test.log || true
-          for pkg in $(grep -E "^FAIL" ui-test.log | awk '{print $2}' | sort -u); do
-            echo "=== verbose: $pkg ==="
-            go test "$pkg" -count=1 2>&1 | tail -n 120 || true
-          done
+
+          echo "=== FAIL lines ==="
+          grep -E '^--- FAIL|^FAIL|^panic:|^# ' /tmp/ui-test.log | head -n 40 || true
+          echo "=== tail 80 ==="
+          tail -n 80 /tmp/ui-test.log || true
+
+          # Emit one annotation per failing test so the public annotations API
+          # reveals exact test names (job logs require auth).
+          i=0
+          while IFS= read -r name; do
+            i=$((i+1))
+            [ "$i" -gt 10 ] && break
+            echo "::error title=E4 FAIL ${i}::${name}"
+          done < <(grep -E '^--- FAIL: ' /tmp/ui-test.log | sed -E 's/^--- FAIL: ([^ ]+).*/\1/' | sort -u || true)
+
+          # One aggregate annotation with escaped multi-line detail.
+          DETAIL=$(grep -E '^--- FAIL|^FAIL|^panic:|^\s+[a-zA-Z0-9_]+_test\.go:[0-9]+:|Error Trace|Error:|Test:' /tmp/ui-test.log | head -n 60 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=E4 detail::${DETAIL}"
+          exit 0
+
+      - name: Render parity + inventory (informational)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd backend
+          go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1 > /tmp/parity.log 2>&1; P1=$?
+          AICLI_SCENE_PRESENTER=1 go test ./cmd/aicli/commands/ -run 'TestRenderLayer|TestPresenterSwitch' -count=1 > /tmp/parity2.log 2>&1; P2=$?
+          go test ./cmd/aicli/ui ./cmd/aicli/commands -run 'DirectWriterInventory|WriterInventory' -count=1 > /tmp/inv.log 2>&1; P3=$?
+          echo "parity_legacy=$P1 parity_scene=$P2 inventory=$P3"
+          if [ "$P1" -ne 0 ] || [ "$P2" -ne 0 ] || [ "$P3" -ne 0 ]; then
+            D=$(grep -hE '^--- FAIL|^FAIL|^panic:' /tmp/parity.log /tmp/parity2.log /tmp/inv.log 2>/dev/null | head -n 20 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=other gates::${D}"
+          else
+            echo "::notice title=other gates::parity+inventory green"
+          fi
           exit 0
