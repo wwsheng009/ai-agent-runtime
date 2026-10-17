@@ -101,29 +101,34 @@ func InheritMessageIdentities(previous, rebuilt []Message, includeUserTurns bool
 // makes the persistence alignment treat the whole new turn as already stored
 // (live-fire 2026-10-17: a second search turn stored 1 row instead of 3, and
 // its final assistant inherited the previous turn_id).
-//
-// The boundary itself is found in rebuilt order: walk the rebuilt transcript
-// forward consuming a per-substance queue from previous (exactly the
-// InheritMessageIdentities matching), and stop inheriting at the first user
-// message that has no backing previous user message at the same relative
-// position of consumed rows. Simpler and sufficient: cut rebuilt at the first
-// user message whose preceding rebuilt row count already exceeds the previous
-// length (the window can only be a prefix of itself), then inherit within
-// [0, cut) only.
 func InheritMessageIdentitiesBeforeNewTurns(previous, rebuilt []Message) bool {
-	cut := len(rebuilt)
-	for index := range rebuilt {
-		if index >= len(previous) && isUserRole(rebuilt[index].Role) {
-			cut = index
-			break
+	// The boundary is the first user turn whose substance the previous
+	// transcript cannot back (unconsumed queue): that user message opens a new
+	// turn appended to the window, and everything after it — including a tool
+	// result that repeats an earlier row byte-for-byte — belongs to the new
+	// turn and must mint fresh identities.
+	userQueue := make(map[string][]string)
+	for index := range previous {
+		if !isUserRole(previous[index].Role) {
+			continue
+		}
+		if id := MessageID(previous[index]); id != "" {
+			key := MessageSubstanceKey(previous[index])
+			userQueue[key] = append(userQueue[key], id)
 		}
 	}
-	if cut <= 0 {
-		return InheritMessageIdentities(previous, rebuilt, false)
+	cut := len(rebuilt)
+	for index := range rebuilt {
+		if !isUserRole(rebuilt[index].Role) {
+			continue
+		}
+		key := MessageSubstanceKey(rebuilt[index])
+		if queue := userQueue[key]; len(queue) > 0 {
+			userQueue[key] = queue[1:]
+			continue
+		}
+		cut = index
+		break
 	}
-	changed := InheritMessageIdentities(previous, rebuilt[:cut], false)
-	if changed {
-		return true
-	}
-	return cut < len(rebuilt)
+	return InheritMessageIdentities(previous, rebuilt[:cut], false)
 }
