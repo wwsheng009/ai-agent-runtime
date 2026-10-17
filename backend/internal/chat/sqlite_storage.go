@@ -1204,8 +1204,26 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 		}
 	}
 	openUserTurns := openUserTurnSubstance(canonicalTail, incomingIDs)
+	// The backward walk anchors a message only when a canonical row backs it:
+	// identity (id+substance) always does; substance does through a QUOTA the
+	// walk consumes, so each stored row backs at most one history message.
+	// Without the quota a rebuilt turn whose tool result repeats a stored one
+	// byte-for-byte (same query, same response pool) anchored on the OLD row
+	// and the whole new turn was silently dropped from the transcript
+	// (live-fire 2026-10-17: a second web_search turn stored 1 row instead of
+	// 3). A message that CARRIES an id that no stored row matches is treated
+	// as new without a substance fallback: a fresh id on identical content is
+	// a rebuilt transcript's marker for "this is the new copy" (the counted
+	// pass below keeps covering the no-id paths).
+	//
+	// Quotas are consumed newest-first here; the counted pass below still runs
+	// for the anchored=false fallback and keeps its FIRST-claimant order.
+	substanceQuota := make(map[string]int, len(canonicalTail))
+	for index := range canonicalTail {
+		substanceQuota[canonicalMessageSubstanceKey(canonicalTail[index])]++
+	}
 	for index := len(history) - 1; index >= 0; index-- {
-		if messageStoredInCanonical(history[index], storedIDs, storedContent) {
+		if messageAnchorsCanonical(history[index], storedIDs, substanceQuota) {
 			return index + 1, true
 		}
 		// A rebuilt transcript re-emits the prompt of the turn that is still
@@ -1222,7 +1240,12 @@ func identityAlignedAppendStart(history, canonicalTail []types.Message) (int, bo
 	// Counted substance pass: every canonical row backs at most one history
 	// message, so a message whose content is only present as often as it is
 	// stored stays matched even when its id was reissued, while the surplus at
-	// the end of the history is what actually gets appended.
+	// the end of the history is what actually gets appended. Rows go to the
+	// FIRST history claimant: with the backward pass anchoring on identity
+	// only, a rebuilt turn that repeats a stored row byte-for-byte (same
+	// query, same response pool) keeps its tool rows behind the anchor and is
+	// appended instead of being collapsed (live-fire 2026-10-17: a second
+	// web_search turn stored 1 row instead of 3).
 	quota := make(map[string]int, len(canonicalTail))
 	for index := range canonicalTail {
 		quota[canonicalMessageSubstanceKey(canonicalTail[index])]++
@@ -1283,13 +1306,32 @@ func isUserTurnMessage(message types.Message) bool {
 	return strings.EqualFold(strings.TrimSpace(message.Role), "user")
 }
 
-func messageStoredInCanonical(message types.Message, storedIDs, storedContent map[string]struct{}) bool {
+// messageAnchorsCanonical reports whether the backward walk may ANCHOR one
+// history message on a canonical row. Only an id+substance identity match
+// anchors: a repeated payload that merely matches by substance belongs to an
+// earlier turn's row, which the walk must PASS to reach the real anchor
+// (live-fire 2026-10-17: a second web_search turn whose tool result repeated
+// the first turn's row anchored on the repeat and silently dropped the new
+// turn's rows from the transcript). The substance quota bounds that
+// pass-through: an id-less message consumes one unit so a stored row cannot
+// back unlimited rebuilt copies; when the quota is exhausted the message is
+// simply not anchored (the counted pass below keeps the same one-row-per-
+// message contract for the no-anchor fallback). An id-bearing message whose
+// id matches no stored row does not substance-fallback: a fresh id on
+// identical content marks the rebuilt copy as the new one.
+func messageAnchorsCanonical(message types.Message, storedIDs map[string]struct{}, substanceQuota map[string]int) bool {
 	if id := canonicalMessageID(message); id != "" {
 		_, ok := storedIDs[canonicalMessageIdentityKey(message)]
-		return ok
+		if ok {
+			return true
+		}
+		return false
 	}
-	_, ok := storedContent[canonicalMessageSubstanceKey(message)]
-	return ok
+	key := canonicalMessageSubstanceKey(message)
+	if quota := substanceQuota[key]; quota > 0 {
+		substanceQuota[key] = quota - 1
+	}
+	return false
 }
 
 func canonicalMessageID(message types.Message) string {

@@ -248,7 +248,14 @@ func (s *Session) ReplaceHistory(messages []types.Message) {
 	// storage layer append one extra copy of the same turn per checkpoint.
 	// User turns are excluded: a user message opens a new turn, so reusing an
 	// older identity would swallow a genuine repeat of the same text.
-	_ = types.InheritMessageIdentities(s.History, cloned, false)
+	// Inheritance must also stop at a NEW user turn appended to the window:
+	// its messages (including a tool result that repeats an earlier row
+	// byte-for-byte) belong to the new turn and must mint fresh identities,
+	// otherwise the persistence alignment treats the whole appended turn as
+	// already stored (live-fire 2026-10-17: a second web_search turn stored 1
+	// canonical row instead of 3 and its final assistant inherited the
+	// previous turn_id).
+	_ = types.InheritMessageIdentitiesBeforeNewTurns(s.History, cloned)
 	_ = types.EnsureHistoryMessageIdentities(cloned)
 
 	s.History = cloned

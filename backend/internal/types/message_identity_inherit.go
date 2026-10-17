@@ -91,3 +91,39 @@ func InheritMessageIdentities(previous, rebuilt []Message, includeUserTurns bool
 	}
 	return changed
 }
+
+// InheritMessageIdentitiesBeforeNewTurns is the ReplaceHistory variant of
+// InheritMessageIdentities: inheritance stops at the first user turn that the
+// previous transcript cannot back. Everything after that boundary is a NEW
+// turn appended to the window — its messages must mint fresh identities,
+// because a later turn can repeat an earlier row byte-for-byte (the same
+// web_search query, the same response pool) and inheriting the old id then
+// makes the persistence alignment treat the whole new turn as already stored
+// (live-fire 2026-10-17: a second search turn stored 1 row instead of 3, and
+// its final assistant inherited the previous turn_id).
+//
+// The boundary itself is found in rebuilt order: walk the rebuilt transcript
+// forward consuming a per-substance queue from previous (exactly the
+// InheritMessageIdentities matching), and stop inheriting at the first user
+// message that has no backing previous user message at the same relative
+// position of consumed rows. Simpler and sufficient: cut rebuilt at the first
+// user message whose preceding rebuilt row count already exceeds the previous
+// length (the window can only be a prefix of itself), then inherit within
+// [0, cut) only.
+func InheritMessageIdentitiesBeforeNewTurns(previous, rebuilt []Message) bool {
+	cut := len(rebuilt)
+	for index := range rebuilt {
+		if index >= len(previous) && isUserRole(rebuilt[index].Role) {
+			cut = index
+			break
+		}
+	}
+	if cut <= 0 {
+		return InheritMessageIdentities(previous, rebuilt, false)
+	}
+	changed := InheritMessageIdentities(previous, rebuilt[:cut], false)
+	if changed {
+		return true
+	}
+	return cut < len(rebuilt)
+}
