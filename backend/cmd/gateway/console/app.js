@@ -753,6 +753,11 @@
       input.style.height = Math.min(input.scrollHeight, 160) + "px";
     };
     input.addEventListener("input", autoGrow);
+    // Touch keyboards: Enter should submit, not insert a newline. A soft
+    // keyboard sends keydown with key === "Enter" and no shiftKey, so this is
+    // the same branch desktop already uses; multi-line drafts still use the
+    // on-screen hint (Shift+Enter) where a hardware keyboard exists.
+    input.setAttribute("enterkeyhint", "send");
     // Keep clicks inside the reply box from bubbling out to the card.
     form.addEventListener("click", function (e) { e.stopPropagation(); });
     form.addEventListener("submit", function (e) {
@@ -2328,12 +2333,14 @@
 
   function chatSetStatus(text, kind) {
     var dot = el("chat-live-status");
-    if (!dot) { return; }
+    var label = el("chat-live-text");
+    if (!dot || !label) { return; }
     var st = chatState;
     // 帧计数直接写进状态点：SSE 是否真的在投递，是「面板不更新」类问题的第一个
     // 分叉点（连上了但零帧 ≠ 连接失败），运维/排障时一眼可读。
     var suffix = st && st.frames ? " · " + st.frames + " 帧" : "";
-    dot.textContent = (text || "") + suffix;
+    // 只替换文本节点：状态点本身带 ::before 圆点，textContent 会把它一起清掉。
+    label.textContent = (text || "") + suffix;
     dot.className = "chat-live-dot" + (kind ? " is-" + kind : "");
     dot.title = st && st.lastEvent
       ? "最近事件：" + st.lastEvent + "（累计 " + st.frames + " 帧）"
@@ -2366,6 +2373,32 @@
     if (!hint) { return; }
     hint.textContent = text || "";
     hint.hidden = !text;
+  }
+
+  // chatSetSending 同步发送按钮的三态：空闲（纸飞机）/ 发送中（转圈）/ 失败
+  // （保持可点重试）。输入为空时按钮禁用，避免「点了没反应」的假反馈。
+  function chatSetSending(sending) {
+    var st = chatState;
+    var btn = el("chat-send");
+    var input = el("chat-input");
+    if (!btn) { return; }
+    if (sending) {
+      btn.classList.add("is-sending");
+      btn.disabled = true;
+      btn.setAttribute("aria-busy", "true");
+      return;
+    }
+    btn.classList.remove("is-sending");
+    btn.removeAttribute("aria-busy");
+    var hasText = !!(input && String(input.value || "").trim());
+    btn.disabled = !hasText || !!(st && st.node && st.node.stale);
+  }
+
+  // chatSyncSendState 在每次输入变化时刷新按钮可用性。
+  function chatSyncSendState() {
+    var st = chatState;
+    if (!st || st.sending) { return; }
+    chatSetSending(false);
   }
 
   /* ── 状态栏（动态状态 + 静态段） ─────────────────────────────── */
@@ -2527,6 +2560,7 @@
     if (jump) { jump.hidden = true; }
     var input = el("chat-input");
     if (input) { input.value = ""; input.style.height = ""; }
+    chatSetSending(false);
     chatPlaceholder("正在加载消息…");
     chatState = {
       node: node,
@@ -2744,6 +2778,7 @@
         tgl.type = "button";
         tgl.className = "chat-tool-toggle";
         tgl.setAttribute("aria-expanded", "false");
+        tgl.setAttribute("aria-label", "展开工具输出");
         tgl.innerHTML = '<span class="chat-tool-action">展开</span>' +
           '<span class="chat-tool-icon" aria-hidden="true">▼</span>';
         roleEl.appendChild(document.createTextNode(" "));
@@ -2793,9 +2828,14 @@
       desired.push(chatRowElement(st, "live:reasoning", "reasoning", st.live.reasoning,
         { streaming: st.live.streaming }));
     }
-    if (st.live.assistant || st.live.streaming) {
+    // 只有真的收到助手正文（或图片）时才插实时助手行。turn_start 就会把
+    // streaming 置真，但一回合可能长时间停在推理/工具阶段；此时渲染一个空的
+    // 「助手」气泡会一直占在列表底部（表现为一行只有标签、没有内容），而推理/
+    // 工具行与状态栏已经表达了进度。streaming 只用于已有正文时的光标动画。
+    var liveImages = st.live.images || [];
+    if (st.live.assistant || liveImages.length) {
       desired.push(chatRowElement(st, "live:assistant", "assistant", st.live.assistant,
-        { streaming: st.live.streaming, images: st.live.images }));
+        { streaming: st.live.streaming, images: liveImages }));
     }
     if (st.live.tool) {
       desired.push(chatRowElement(st, "live:tool", "tool", st.live.tool, {}));
@@ -2883,6 +2923,7 @@
       if (act) { act.textContent = expanded ? "收起" : "展开"; }
       if (icon) { icon.textContent = expanded ? "▲" : "▼"; }
       tgl.setAttribute("aria-expanded", expanded ? "true" : "false");
+      tgl.setAttribute("aria-label", expanded ? "收起工具输出" : "展开工具输出");
     }
   }
 
@@ -3093,7 +3134,10 @@
   function chatEndStream() {
     var st = chatState;
     if (!st) { return; }
-    if (!st.live.assistant && !st.live.reasoning) { st.live = chatEmptyLive(); return; }
+    if (!st.live.assistant && !st.live.reasoning && !(st.live.images && st.live.images.length)) {
+      st.live = chatEmptyLive();
+      return;
+    }
     st.live.streaming = false;
     st.live.done = true;
   }
@@ -3294,7 +3338,6 @@
     var st = chatState;
     if (!st) { return; }
     var input = el("chat-input");
-    var sendBtn = el("chat-send");
     var text = (input && input.value ? input.value : "").trim();
     if (!text || st.sending) { return; }
     if (st.node.stale) {
@@ -3306,7 +3349,7 @@
       return;
     }
     st.sending = true;
-    if (sendBtn) { sendBtn.disabled = true; }
+    chatSetSending(true);
     chatShowHint("发送中…");
     api("/n/" + encodeURIComponent(st.node.node_id) + "/web/api/input", {
       method: "POST",
@@ -3323,6 +3366,7 @@
         st.pending.push(text);
         if (input) { input.value = ""; chatAutoGrow(); }
         chatShowHint("");
+        chatSetSending(false);
         chatRender();
         chatScrollToBottom(true);
       });
@@ -3330,10 +3374,11 @@
       if (chatState !== st) { return; }
       notify("发送失败：" + (err && err.message ? err.message : err), "error");
       chatShowHint("发送失败，可重试（草稿已保留）。");
+      chatSetSending(false);
     }).finally(function () {
       if (chatState !== st) { return; }
       st.sending = false;
-      if (sendBtn) { sendBtn.disabled = false; }
+      chatSetSending(false);
     });
   }
 
@@ -4108,7 +4153,10 @@
       e.preventDefault();
       chatSend();
     });
-    el("chat-input").addEventListener("input", chatAutoGrow);
+    el("chat-input").addEventListener("input", function () {
+      chatAutoGrow();
+      chatSyncSendState();
+    });
     // Enter 发送 / Shift+Enter 换行（与卡片回复表单一致）。
     el("chat-input").addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -4287,7 +4335,7 @@
     window.addEventListener("load", function () {
       // ?v= is bumped with CACHE in sw.js on every release so CDN edges do not
       // keep serving an old worker script.
-      navigator.serviceWorker.register("./sw.js?v=40").catch(function () {});
+      navigator.serviceWorker.register("./sw.js?v=44").catch(function () {});
     });
   }
 

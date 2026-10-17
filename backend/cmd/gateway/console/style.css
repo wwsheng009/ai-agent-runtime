@@ -1343,7 +1343,7 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 }
 
 .chat-head { align-items: flex-start; }
-.chat-head-main { min-width: 0; }
+.chat-head-main { flex: 1 1 auto; min-width: 0; }
 .chat-head-main h3 {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   max-width: 52ch;
@@ -1371,6 +1371,14 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
 .chat-live-dot.is-busy::before { background: var(--accent); animation: live-pulse 1.4s ease-in-out infinite; }
 .chat-live-dot.is-down { color: var(--warn-ink); }
 .chat-live-dot.is-down::before { background: var(--warn); }
+.chat-live-text {
+  max-width: 22ch; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Icon-first action: the label stays in the accessibility tree and on wide
+   screens; phones collapse it to the glyph (see the 860px block below). */
+.chat-icon-btn { gap: 6px; }
+.chat-icon-btn svg { flex-shrink: 0; }
 
 .chat-notice {
   flex-shrink: 0; margin-top: 10px; padding: 8px 11px;
@@ -1521,10 +1529,33 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   padding: 6px 10px;
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
   background: var(--bg-elev); color: var(--fg);
-  font-family: inherit; font-size: 13px; line-height: 1.5;
+  /* 16px on phones prevents iOS Safari from auto-zooming the whole console
+     when the composer gets focus; desktop keeps the compact 13px scale. */
+  /* Integer line-height + padding keeps scrollHeight == clientHeight, so the
+     textarea never needs an inner scrollbar while auto-growing. */
+  font-family: inherit; font-size: 13px; line-height: 20px;
+  /* Hide the platform's inner scrollbar: the composer is auto-grown by app.js
+     and capped at 160px, so a visible 1px trough would only add noise. */
+  overflow-y: hidden;
 }
 .chat-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.chat-send { flex-shrink: 0; }
+.chat-send {
+  position: relative; flex-shrink: 0;
+  min-width: var(--ctl-h-sm);
+  transition: background 0.15s ease, opacity 0.15s ease, transform 0.12s ease;
+}
+.chat-send:active { transform: scale(0.96); }
+.chat-send[disabled] { opacity: 0.45; }
+.chat-send-icon { display: block; }
+.chat-send-label { display: inline; }
+.chat-send-spinner {
+  display: none; width: 14px; height: 14px;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; animation: chat-spin 0.7s linear infinite;
+}
+.chat-send.is-sending .chat-send-icon { display: none; }
+.chat-send.is-sending .chat-send-spinner { display: block; }
+@keyframes chat-spin { to { transform: rotate(360deg); } }
 .chat-hint { flex-basis: 100%; font-size: 11.5px; color: var(--fg-muted); }
 .chat-readonly {
   margin: 0; padding: 2px 0;
@@ -1564,8 +1595,73 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
     width: 100%; max-width: none;
     height: 100vh; height: 100dvh;
     border: 0; border-radius: 0;
+    padding: calc(10px + env(safe-area-inset-top)) 12px
+             calc(8px + env(safe-area-inset-bottom));
   }
-  .chat-head-main h3 { max-width: 38vw; }
+  .chat-head { gap: 6px; }
+  .chat-head-main h3 { max-width: none; font-size: 14px; }
+  .chat-head-sub { font-size: 11px; }
+  /* 手机上把顶部动作收成图标：标题拿到宽度，三个 44px 触点也不再挤压。 */
+  .chat-head-actions { gap: 2px; }
+  .chat-icon-btn {
+    min-width: 44px; min-height: 44px; padding: 0;
+    justify-content: center;
+  }
+  .chat-icon-btn .chat-action-label {
+    position: absolute; width: 1px; height: 1px;
+    margin: -1px; padding: 0; border: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .chat-head-actions .modal-close { min-width: 44px; min-height: 44px; }
+  /* 状态点只留圆点：文字在 11px 下已难读，长文案还会把标题挤没。
+     完整状态仍在 title / aria-live 里，读屏与长按都能拿到。 */
+  .chat-live-text {
+    position: absolute; width: 1px; height: 1px;
+    margin: -1px; padding: 0; border: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .chat-live-dot { padding: 0 6px; min-height: 44px; }
+  .chat-live-dot::before { width: 8px; height: 8px; }
+  .chat-list { margin-top: 6px; padding-bottom: 10px; gap: 12px; }
+  .chat-bubble { font-size: 14px; line-height: 1.62; padding: 9px 12px; }
+  .chat-msg-role { font-size: 11.5px; }
+  /* 16px avoids iOS focus zoom; 44px keeps the composer a comfortable target. */
+  .chat-input {
+    font-size: 16px; line-height: 23px;
+    min-height: 44px; padding: 9px 12px;
+    border-radius: 12px;
+  }
+  .chat-composer { gap: 6px; }
+  /* .btn.sm sets an explicit height; this selector must outrank it. */
+  .btn.chat-send {
+    width: 44px; height: 44px; min-width: 44px;
+    padding: 0; border-radius: 12px;
+  }
+  .chat-send-icon { width: 18px; height: 18px; }
+  .chat-send-label {
+    position: absolute; width: 1px; height: 1px;
+    margin: -1px; padding: 0; border: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .chat-foot { margin-top: 4px; padding-top: 8px; }
+  .chat-status { font-size: 11px; gap: 1px; padding-top: 5px; }
+  .chat-segs {
+    flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .chat-segs::-webkit-scrollbar { display: none; }
+  .chat-seg { flex-shrink: 0; max-width: 32ch; }
+  .chat-older { padding-top: 4px; }
+  .chat-older .chat-icon-btn { min-height: 44px; }
+  /* Tool rows keep the action icon-only on phones; the accessible name is on
+     the button (aria-label) and the row already reads「工具」. */
+  .chat-tool-toggle {
+    min-width: 44px; min-height: 44px; padding: 0 4px; margin-left: 2px;
+    justify-content: center;
+  }
+  .chat-tool-action { display: none; }
+  .chat-tool-icon { font-size: 12px; }
+  .chat-reasoning summary { min-height: 40px; display: flex; align-items: center; }
   .chat-msg-user .chat-bubble,
   .chat-msg-assistant .chat-bubble { max-width: 96%; }
 }
@@ -1574,4 +1670,5 @@ body.sb-collapsed #sidebar-expand { display: inline-block !important; }
   .chat-live-dot.is-live::before,
   .chat-live-dot.is-busy::before { animation: none; }
   .chat-msg.is-streaming .chat-bubble::after { animation: none; }
+  .chat-send-spinner { animation: none; border-right-color: currentColor; opacity: 0.6; }
 }

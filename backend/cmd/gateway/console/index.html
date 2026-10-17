@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>aicli-gateway 控制台</title>
 <meta name="theme-color" content="#0b0e14">
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="gateway">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./style.css?v=40">
+<link rel="stylesheet" href="./style.css?v=44">
 <script>
 /* Theme pre-paint: apply the persisted choice before first render (no flash). */
 (function () {
@@ -368,9 +368,17 @@
         <span class="chat-head-sub" id="chat-modal-sub"></span>
       </div>
       <div class="chat-head-actions">
-        <span class="chat-live-dot" id="chat-live-status" role="status"></span>
-        <button class="btn ghost sm" id="chat-jump-latest" type="button" hidden>跳到最新</button>
-        <button class="btn ghost sm" id="chat-modal-open" type="button">打开原版 Web</button>
+        <span class="chat-live-dot" id="chat-live-status" role="status"><span class="chat-live-text" id="chat-live-text"></span></span>
+        <button class="btn ghost sm chat-icon-btn" id="chat-jump-latest" type="button" hidden
+                aria-label="跳到最新消息" title="跳到最新消息">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+          <span class="chat-action-label">跳到最新</span>
+        </button>
+        <button class="btn ghost sm chat-icon-btn" id="chat-modal-open" type="button"
+                aria-label="打开原版 Web" title="打开原版 Web">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          <span class="chat-action-label">打开原版 Web</span>
+        </button>
         <button class="btn ghost sm modal-close" id="chat-modal-close" aria-label="关闭">
           <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
@@ -378,7 +386,11 @@
     </div>
     <div class="chat-notice" id="chat-notice" hidden></div>
     <div class="chat-older" id="chat-older" hidden>
-      <button class="btn ghost sm" id="chat-older-btn" type="button">加载更早消息</button>
+      <button class="btn ghost sm chat-icon-btn" id="chat-older-btn" type="button"
+              aria-label="加载更早消息" title="加载更早消息">
+        <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>
+        <span class="chat-action-label">加载更早消息</span>
+      </button>
     </div>
     <div class="chat-list" id="chat-list" role="log" aria-live="polite" aria-relevant="additions text"
          aria-label="会话消息">
@@ -394,15 +406,21 @@
     <div class="chat-foot">
       <form class="chat-composer" id="chat-form" hidden>
         <textarea class="chat-input" id="chat-input" rows="1"
-                  placeholder="回复该会话…（Enter 发送，Shift+Enter 换行）" aria-label="输入消息"></textarea>
-        <button class="btn primary sm chat-send" id="chat-send" type="submit">发送</button>
-        <span class="chat-hint" id="chat-hint" hidden></span>
+                  placeholder="回复该会话…（Enter 发送，Shift+Enter 换行）" aria-label="输入消息"
+                  enterkeyhint="send" autocapitalize="sentences"></textarea>
+        <button class="btn primary sm chat-send" id="chat-send" type="submit"
+                aria-label="发送消息" title="发送消息" disabled>
+          <svg class="chat-send-icon" aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          <span class="chat-send-spinner" aria-hidden="true"></span>
+          <span class="chat-send-label">发送</span>
+        </button>
+        <span class="chat-hint" id="chat-hint" role="status" hidden></span>
       </form>
       <p class="chat-readonly" id="chat-readonly" hidden>该节点未开启输入通道，仅可查看历史与实时消息。</p>
     </div>
   </div>
 </div>
 
-<script src="./app.js?v=40"></script>
+<script src="./app.js?v=44"></script>
 </body>
 </html>

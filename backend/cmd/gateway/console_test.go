@@ -169,6 +169,33 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		t.Fatal("index.html is missing the chat status bar (#chat-dyn-status / #chat-segs)")
 	}
 
+	// Icon-first mobile actions: every icon-only control keeps a name, and the
+	// status text lives in its own node so writing it cannot wipe the ::before
+	// connection dot (setting textContent on #chat-live-status used to do that).
+	for _, needle := range []string{
+		`id="chat-live-text"`, `aria-label="跳到最新消息"`,
+		`aria-label="打开原版 Web"`, `aria-label="加载更早消息"`,
+		`aria-label="发送消息"`,
+	} {
+		if !strings.Contains(index, needle) {
+			t.Fatalf("index.html is missing %q", needle)
+		}
+	}
+	// Mobile composer contract: 16px input prevents iOS focus zoom, and the
+	// 44px send target must outrank .btn.sm's explicit height.
+	for _, needle := range []string{
+		`font-size: 16px; line-height: 23px;`,
+		`.btn.chat-send {`,
+		`min-width: 44px; min-height: 44px;`,
+	} {
+		if !strings.Contains(readConsoleAsset(t, "style.css"), needle) {
+			t.Fatalf("style.css is missing %q", needle)
+		}
+	}
+	if strings.Contains(app, `dot.textContent = (text || "") + suffix`) {
+		t.Fatal("chatSetStatus must write #chat-live-text, not #chat-live-status: textContent removes the status dot")
+	}
+
 	// The pagination metadata key is message_window; there is no "window" alias
 	// (chatDebugScreenSnapshot.MessageWindow). Reading data.window fails
 	// silently: has_more stays false and the cursor stays 0, so "load older"
@@ -242,5 +269,23 @@ func TestConsoleChatPanelAsset(t *testing.T) {
 		if strings.Contains(arm, "chatResetForSession") {
 			t.Fatalf("%s is a per-run boundary, not a session switch: resetting the panel there wipes it every turn", name)
 		}
+	}
+
+	// A live assistant row must carry content: turn_start sets streaming=true long
+	// before the first assistant delta, so gating the row on streaming alone leaves
+	// an empty「助手」bubble pinned at the bottom for the whole reasoning/tool phase.
+	renderStart := strings.Index(app, "function chatRender()")
+	if renderStart < 0 {
+		t.Fatal("app.js: chatRender not found")
+	}
+	renderBody := app[renderStart:]
+	if cut := strings.Index(renderBody, "function chatScheduleRender"); cut >= 0 {
+		renderBody = renderBody[:cut]
+	}
+	if strings.Contains(renderBody, "if (st.live.assistant || st.live.streaming)") {
+		t.Fatal("chatRender gates the live assistant row on streaming alone: an empty 助手 bubble stays pinned during reasoning/tool phases")
+	}
+	if !strings.Contains(renderBody, "if (st.live.assistant || liveImages.length)") {
+		t.Fatal("chatRender must render the live assistant row only when it has text or images")
 	}
 }
