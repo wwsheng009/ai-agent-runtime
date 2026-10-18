@@ -132,7 +132,8 @@ type Entry struct {
     Group       string     // read|edit|shell|webfetch|search|orchestration|io|mesh|lsp
     Source      string     // core|capability:<pkg>|mcp:<server>|ui
     Exposure    []Exposure
-    Essential   bool       // 控制面工具：allowlist 不可裁剪（取代硬编码 switch）
+    Essential   bool       // 仅观测语义（2026-10-16 起不再是 allowlist 豁免）
+    Contractual bool       // 运行时契约工具：allowlist 未列出仍授予，显式 deny 优先
     Protected   bool       // protected 组：不可整组关闭
 }
 

@@ -212,6 +212,13 @@ type ReActLoop struct {
 	// 把「模型反复尝试写操作烧 token」变成一次明确的终止。
 	readOnlyDenyStreak         int
 	readOnlyDenyEscalationSent bool
+	// surfaceMismatchStreak counts consecutive calls to tools absent from the
+	// frozen turn surface. The calls do not enter pendingFailures, so this is
+	// the guard that stops an unbounded retry loop. Any successful tool call
+	// resets it.
+	surfaceMismatchStreak         int
+	surfaceMismatchEscalationSent bool
+	surfaceMismatchCount          int
 	// runLineage 是本 run 的父链归属（子代理运行由调度器注入）：随
 	// llm.request.* 载荷落库，供父会话统计按 root 归集。生命周期等于一次 run()。
 	runLineage runLineage
@@ -620,6 +627,9 @@ func setSessionPromptCacheEpoch(session HistorySession, epoch int) {
 
 func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOptions) (result *Result, runErr error) {
 	defer func() {
+		if result != nil {
+			result.SurfaceMismatchCount = loop.surfaceMismatchCount
+		}
 		ensureAgentResultContract(result, prompt)
 	}()
 	if loop.agent == nil {
@@ -822,6 +832,11 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		RootSessionID:   strings.TrimSpace(options.RootSessionID),
 		SubagentID:      strings.TrimSpace(options.SubagentID),
 	}
+	// Bind the artifact dereference scope for this run: an agent may read
+	// artifacts produced by itself or by its direct parent (fork snapshots keep
+	// parent tool messages), never by an unrelated session. The tool falls back
+	// to its own session when no scope is bound, so this can only narrow reads.
+	currentCtx = toolctx.WithArtifactReadScopeForSessions(currentCtx, sessionID, loop.runLineage.ParentSessionID)
 	// §6.12 收尾（EC-E1"turn 永不结束"防线）：本回合的 obligation 批次全部终态时，
 	// 挂起记录必须被清掉，turn 才算真正结束；否则 nextTurnID 会永久复用挂起的 turn_id。
 	// session_id 取解析后的值，与 parkBackgroundTurn 写账本的键完全一致。
@@ -883,6 +898,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// streak，只有真正理解边界（某工具执行成功）才会重置。
 	loop.readOnlyDenyStreak = 0
 	loop.readOnlyDenyEscalationSent = false
+	loop.surfaceMismatchStreak = 0
+	loop.surfaceMismatchEscalationSent = false
+	loop.surfaceMismatchCount = 0
 	completionRequirement := NormalizeCompletionRequirement(loop.config.CompletionRequirement)
 	maxCompletionRecoveryTurns := normalizeCompletionRecoveryTurns(loop.config.MaxCompletionRecoveryTurns, completionRequirement)
 	completionRecoveryUsed := 0
@@ -1361,6 +1379,24 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 			return result, nil
 		}
+		// Surface-mismatch hard stop: repeated calls to tools the model cannot
+		// see would otherwise spin forever now that they are non-fatal.
+		if loop.surfaceMismatchStreak >= SurfaceMismatchHardStopThreshold {
+			result.Success = false
+			result.LimitReached = true
+			result.LimitReason = "surface_mismatch"
+			result.Output = surfaceMismatchLimitReachedMessage(loop.surfaceMismatchStreak, SurfaceMismatchHardStopThreshold)
+			result.Error = result.Output
+			result.Steps = step
+			result.Observations = observations
+			result.Duration = *startTime
+			result.Usage = totalUsage.Clone()
+			builder.AppendAssistantAction(result.Output, nil, nil, nil)
+			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+				return nil, err
+			}
+			return result, nil
+		}
 		if doomObs.ShouldStop {
 			termPayload := DoomLoopTerminationPayload(traceID, step, doomObs)
 			loop.emitRuntimeEvent(EventDoomLoopTerminated, sessionID, "", termPayload)
@@ -1470,11 +1506,17 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 			hadToolFailure = true
 			failureMessages = append(failureMessages, toolResult.Error)
+			toolErrorCount++
+			// Calls to tools that were never advertised are a prompt/history
+			// artifact, not an execution failure: they must not flip the whole
+			// run to failed. The streak guard still bounds retries.
+			if isUnadvertisedToolDenial(currentCtx, toolResult) {
+				continue
+			}
 			pendingFailures = append(pendingFailures, pendingToolFailure{
 				toolName: normalizeRecoveryToolName(toolResult.Call.Name),
 				message:  toolResult.Error,
 			})
-			toolErrorCount++
 		}
 		for _, toolResult := range toolResults {
 			if strings.TrimSpace(toolResult.Error) != "" {
@@ -1508,6 +1550,23 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// Prompt path keeps pure advisories; durable builder strips them so
 		// session history / resume do not accumulate doom-loop noise (R3 residual).
 		toolPayloads := toolResultsToPayloads(toolResults, repeatedSemanticAdvisory)
+		// A pointer to artifact_read is only actionable when the reader is in the
+		// current surface. When it is absent, degrade the notice instead of
+		// handing the model a dead pointer.
+		if toolSurfaceKnown(currentCtx) && !toolAdvertisedInTurn(currentCtx, toolNameArtifactRead) {
+			for i := range toolPayloads {
+				if i >= len(toolResults) {
+					break
+				}
+				envelope := toolResults[i].Envelope
+				toolPayloads[i].Content = output.DegradeArtifactPointerForModel(toolPayloads[i].Content, envelope)
+				// toolResultsToPayloads copied metadata before this pass; mirror
+				// the unreadable marker explicitly so the model/host see it.
+				if envelope != nil && envelope.Metadata["artifact_unreadable"] == true {
+					toolPayloads[i].Metadata["artifact_unreadable"] = true
+				}
+			}
+		}
 		if fingerprint := semanticToolCallFingerprint(normalizedCalls); fingerprint != "" {
 			outcome := dominantToolResultDisposition(toolResults)
 			switch outcome {
@@ -2121,6 +2180,22 @@ func (loop *ReActLoop) resetReadOnlyDenyStreakOnSuccess(toolCalls []types.ToolCa
 			continue
 		}
 		loop.readOnlyDenyStreak = 0
+		return
+	}
+}
+
+// resetSurfaceMismatchStreakOnSuccess is the surface-mismatch counterpart of
+// resetReadOnlyDenyStreakOnSuccess: any successful tool call proves the model
+// has found a usable tool, so the consecutive-mismatch streak starts over.
+func (loop *ReActLoop) resetSurfaceMismatchStreakOnSuccess(toolCalls []types.ToolCall, results []toolExecutionResult) {
+	if loop == nil || loop.surfaceMismatchStreak == 0 {
+		return
+	}
+	for i := range toolCalls {
+		if i >= len(results) || results[i].Call.Name == "" || results[i].Error != "" {
+			continue
+		}
+		loop.surfaceMismatchStreak = 0
 		return
 	}
 }
@@ -3187,7 +3262,6 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		return parallelResults, nil
 	}
 	gateway := loop.agent.GetOutputGateway()
-	allowedTools := whitelistSet(toolWhitelist)
 	searchToolVisible := searchToolVisibleInTurn(ctx)
 	var pendingCheckpoints map[string]*runtimecheckpoint.PendingCheckpoint
 	checkpointMgr := loop.agent.GetCheckpointManager()
@@ -3283,10 +3357,11 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 			continue
 		}
-		if allowedTools != nil && !allowedTools[tc.Name] && !visibleSearchCall {
+		if !whitelistAdmits(toolWhitelist, tc.Name) && !visibleSearchCall {
 			result.Error = fmt.Sprintf("tool not allowed for this agent: %s", tc.Name)
-			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_whitelist", result.Error, nil)
-			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, nil)
+			deniedExtra := map[string]interface{}{"surface_mismatch": toolSurfaceKnown(ctx) && !toolAdvertisedInTurn(ctx, tc.Name) && nonFatalSurfaceMismatchName(tc.Name)}
+			loop.emitToolDenied(sessionID, tc, step, traceID, "tool_whitelist", result.Error, deniedExtra)
+			result = loop.finalizeDeniedToolResult(ctx, gateway, sessionID, tc, step, traceID, result, metadata, deniedExtra)
 			results[i] = result
 			loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 			continue
@@ -3845,6 +3920,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 
 	loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, results)
 	loop.resetReadOnlyDenyStreakOnSuccess(toolCalls, results)
+	loop.resetSurfaceMismatchStreakOnSuccess(toolCalls, results)
 	return results, nil
 }
 
@@ -3864,6 +3940,9 @@ func (loop *ReActLoop) finalizeDeniedToolResult(ctx context.Context, gateway *ou
 	content := renderDenialGuidance(tc.Name, result.Error)
 	if loop.readOnlyDenyStreak >= ReadOnlyDenyEscalateThreshold && classifyDeniedPolicy(result.Error) == "read_only" {
 		content += "\n" + readOnlyDenyEscalationAdvisory(loop.readOnlyDenyStreak)
+	}
+	if surfaceMismatch, _ := reducedExtra["surface_mismatch"].(bool); surfaceMismatch && loop.surfaceMismatchStreak >= SurfaceMismatchEscalateThreshold {
+		content += "\n" + surfaceMismatchEscalationAdvisory(loop.surfaceMismatchStreak)
 	}
 	envelope, gatewayErr := gateway.Process(ctx, newRawToolResult(sessionID, tc, step, result.Output, content, metadata))
 	if gatewayErr != nil && envelope != nil {
@@ -3972,6 +4051,25 @@ func (loop *ReActLoop) emitToolDenied(sessionID string, tc types.ToolCall, step 
 		payload["next_action"] = diagnostic.NextAction
 		payload["policy_source"] = loop.readOnlyPolicySource()
 		payload["overridable"] = false
+	}
+	if surfaceMismatch, _ := extra["surface_mismatch"].(bool); surfaceMismatch {
+		loop.surfaceMismatchStreak++
+		loop.surfaceMismatchCount++
+		payload["surface_mismatch"] = true
+		payload["surface_mismatch_streak"] = loop.surfaceMismatchStreak
+		payload["retryable"] = false
+		if !loop.surfaceMismatchEscalationSent && loop.surfaceMismatchStreak == SurfaceMismatchEscalateThreshold {
+			loop.surfaceMismatchEscalationSent = true
+			loop.emitRuntimeEvent("tool.surface_mismatch", sessionID, tc.Name, map[string]interface{}{
+				"trace_id":        traceID,
+				"step":            step,
+				"tool":            tc.Name,
+				"streak":          loop.surfaceMismatchStreak,
+				"advisory":        surfaceMismatchEscalationAdvisory(loop.surfaceMismatchStreak),
+				"escalate_after":  SurfaceMismatchEscalateThreshold,
+				"hard_stop_after": SurfaceMismatchHardStopThreshold,
+			})
+		}
 	}
 	loop.emitRuntimeEvent("tool.denied", sessionID, tc.Name, payload)
 }
@@ -4327,13 +4425,12 @@ func (loop *ReActLoop) resolveAvailableTools(ctx context.Context, goal string, t
 }
 
 func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, toolWhitelist []string, allowSimpleGoalProjection bool) ([]types.ToolDefinition, []string, error) {
-	allowed := whitelistSet(toolWhitelist)
 	tools := make([]types.ToolDefinition, 0, 8)
 	seen := make(map[string]bool)
 
 	if loop.agent.mcpManager != nil {
 		for _, mt := range loop.agent.mcpManager.ListTools() {
-			if allowed != nil && !allowed[mt.Name] {
+			if !whitelistAdmits(toolWhitelist, mt.Name) {
 				continue
 			}
 			if seen[mt.Name] {
@@ -4363,7 +4460,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	}
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
-		if shouldExposeSpawnSubagents(loop.agent, allowed) {
+		if shouldExposeSpawnSubagents(loop.agent, toolWhitelist) {
 			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary(), loop.agent.spawnSchemaCapabilities())
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
@@ -4373,7 +4470,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 		// iterate_goal（P2-2'）：G4 默认关 + 显式灰度。懒初始化的 scheduler
 		// 恒非 nil，不能当启用信号；只有宿主 SetIterateGoalEnabled(true) 后
 		// 工具面才暴露，避免预算敏感场景（长会话压缩轨迹）被额外 schema 推高。
-		if loop.agent.iterateGoalToolEnabled() && (allowed == nil || allowed[IterateGoalToolName]) {
+		if loop.agent.iterateGoalToolEnabled() && whitelistAdmits(toolWhitelist, IterateGoalToolName) {
 			definition := IterateGoalToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
@@ -4384,7 +4481,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 
 	if broker := loop.agent.GetToolBroker(); broker != nil {
 		for _, def := range broker.DefinitionsForContext(ctx) {
-			if allowed != nil && !allowed[def.Name] {
+			if !whitelistAdmits(toolWhitelist, def.Name) {
 				continue
 			}
 			if seen[def.Name] {
@@ -4425,7 +4522,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 	// No automatic directory-size projection: every authorized tool (including
 	// enabled MCP tools) is listed directly. Tool volume is controlled explicitly
 	// via per-tool enable/disable configuration instead of a hidden threshold.
-	if allowSimpleGoalProjection && len(allowed) == 0 {
+	if allowSimpleGoalProjection && len(toolWhitelist) == 0 {
 		projected := projectSimpleGoalToolSurface(goal, tools)
 		// 账本仅在投影**实际收缩**目录时置位：词表命中但目录里没有对应工具
 		// （projectSimpleGoalToolSurface 原样返回）不算投影，避免误标。
@@ -5817,18 +5914,18 @@ func stripSystemMessages(history []types.Message) []types.Message {
 	return filtered
 }
 
-func whitelistSet(values []string) map[string]bool {
+// whitelistAdmits reports whether an explicit tool allowlist admits name.
+//
+// The nil/empty distinction is part of the public contract: nil means "no
+// allowlist" (admit everything), while a non-nil empty slice means "no tools"
+// (admit nothing). Non-empty lists use the registry's normalized wildcard
+// semantics, so "*", "prefix_*", aliases, case, and hyphen variants all behave
+// the same here as they do in ToolExecutionPolicy.AllowTool.
+func whitelistAdmits(values []string, name string) bool {
 	if values == nil {
-		return nil
+		return true
 	}
-	set := make(map[string]bool, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		set[value] = true
-	}
-	return set
+	return toolregistry.MatchesAnyPattern(values, name)
 }
 
 func cloneInterfaceMap(input map[string]interface{}) map[string]interface{} {

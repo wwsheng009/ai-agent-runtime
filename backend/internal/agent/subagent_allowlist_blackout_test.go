@@ -80,7 +80,7 @@ func TestSubagentExplicitEmptyWhitelistIsNotABlackout(t *testing.T) {
 
 	// The child prompt must say that it has no tools instead of staying silent,
 	// otherwise the child keeps probing a surface it will never get.
-	prompt := NewPromptBuilder().BuildSubagentPrompt(&Config{Name: "parent"}, prepared[0])
+	prompt := NewPromptBuilder().BuildSubagentPrompt(&Config{Name: "parent"}, prepared[0], nil)
 	require.Contains(t, prompt, "No tools are available for this task")
 	require.NotContains(t, prompt, "Allowed tools:")
 }
@@ -118,7 +118,7 @@ func TestSubagentStaleToolVocabularyFailsFastWithoutParentAllowlist(t *testing.T
 	})
 	require.NoError(t, err)
 	require.Len(t, prepared, 2)
-	require.Equal(t, []string{"view"}, prepared[0].ToolsWhitelist)
+	require.Equal(t, []string{"view", "artifact_read"}, prepared[0].ToolsWhitelist)
 	require.NotEmpty(t, prepared[1].ToolsWhitelist)
 }
 
@@ -145,11 +145,19 @@ func TestSubagentMCPToolsSharingRetiredNamesSurvive(t *testing.T) {
 // inspected (no manager, or a manager that has not been populated yet) the
 // request must pass through untouched.
 func TestSubagentUnknownToolSurfaceKeepsRequestedNames(t *testing.T) {
-	for name, parent := range map[string]*Agent{
-		"unpopulated manager": NewAgent(&Config{Name: "parent"}, &MockMCPManager{}),
-		"no manager":          NewAgent(&Config{Name: "parent"}, nil),
-	} {
+	cases := map[string]struct {
+		parent *Agent
+		want   []string
+	}{
+		// A populated manager that does not register artifact_read is a known
+		// surface: the contract must not advertise a tool with no schema.
+		"unpopulated manager": {parent: NewAgent(&Config{Name: "parent"}, &MockMCPManager{}), want: []string{"read_file"}},
+		// No manager means the surface is unknown; keep the conservative grant.
+		"no manager": {parent: NewAgent(&Config{Name: "parent"}, nil), want: []string{"read_file", "artifact_read"}},
+	}
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			parent := tc.parent
 			parent.SetSubagentScheduler(NewSubagentScheduler(parent, SubagentSchedulerConfig{}))
 			prepared, err := parent.GetSubagentScheduler().prepareTasks([]SubagentTask{
 				{
@@ -161,7 +169,7 @@ func TestSubagentUnknownToolSurfaceKeepsRequestedNames(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
-			require.Equal(t, []string{"read_file"}, prepared[0].ToolsWhitelist)
+			require.Equal(t, tc.want, prepared[0].ToolsWhitelist)
 		})
 	}
 }

@@ -3,11 +3,13 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -110,8 +112,35 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 		return artifactReadFailure("artifact store 不可用：artifact_read 只能在运行时 agent 循环内执行"), nil
 	}
 
-	record, err := store.Get(ctx, id)
+	scope, scoped := toolctx.ArtifactReadScope(ctx)
+	if !scoped {
+		// Older hosts bind only the session id. Fall back to self-only rather
+		// than unrestricted: a missing scope must never widen the read boundary.
+		if active := toolctx.SessionID(ctx); active != "" {
+			scope = artifact.ReadScope{SessionIDs: map[string]bool{active: true}}
+			scoped = true
+		}
+	}
+	if !scoped {
+		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonBadArgs)
+		return artifactReadFailure("artifact_read 需要会话上下文：无法确定读取范围"), nil
+	}
+
+	record, err := store.GetOwned(ctx, id, scope)
 	if err != nil {
+		switch {
+		case errors.Is(err, artifact.ErrArtifactReadOutOfScope):
+			observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonCrossSession)
+			return artifactReadFailure(fmt.Sprintf(
+				"artifact %s 不属于当前会话或父会话的读取范围；只能解引用本会话或直接父会话产生的指针：%v",
+				id, err,
+			)), nil
+		case errors.Is(err, artifact.ErrArtifactReadUnscoped):
+			observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonUnscoped)
+			return artifactReadFailure(fmt.Sprintf(
+				"artifact %s 缺少会话归属，已拒绝读取（fail-closed）", id,
+			)), nil
+		}
 		if sqliteutil.IsCorruptError(err) {
 			observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonStoreCorrupt)
 			return artifactReadFailure(fmt.Sprintf(
@@ -124,16 +153,6 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 	if record == nil {
 		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNotFound)
 		return artifactReadFailure(fmt.Sprintf("artifact not found: %s", id)), nil
-	}
-
-	// Artifact 是会话内数据；指针只会出现在产生它的会话里。跨会话读取直接拒绝，
-	// 避免把另一个会话的原始输出带进当前上下文。
-	if active := toolctx.SessionID(ctx); active != "" && record.SessionID != "" && record.SessionID != active {
-		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonCrossSession)
-		return artifactReadFailure(fmt.Sprintf(
-			"artifact %s 属于会话 %s，不能在当前会话 %s 中读取",
-			record.ID, record.SessionID, active,
-		)), nil
 	}
 
 	content := record.Content

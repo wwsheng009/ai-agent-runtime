@@ -2777,7 +2777,9 @@ func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPref
 			// 预算按校准后的 token 估算器重新标定：首个越界点仍由 req2 承担
 			// （req1 存活、req2 触发会话压缩）。旧的 len/4 基线（req1_after=1666,
 			// req2_after=1791, 预算 1750）仅作历史参考。
-			"context_max_prompt_tokens":    1300,
+			// 2026-10-18: P2-1 的指针降级改变了模型可见 payload 大小，预算
+			// 1300 → 1280 重新标定（10 次重复稳定通过）。
+			"context_max_prompt_tokens":    1280,
 			"context_max_messages":         16,
 			"context_keep_recent_messages": 8,
 		},
@@ -6037,7 +6039,7 @@ func TestSubagentScheduler_ReadOnlyFiltersWriteLikeTools(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, prepared, 1)
 	assert.True(t, prepared[0].ReadOnly)
-	assert.Equal(t, []string{"read_file", "git_log"}, prepared[0].ToolsWhitelist)
+	assert.Equal(t, []string{"read_file", "git_log", "artifact_read"}, prepared[0].ToolsWhitelist)
 	assert.Equal(t, []string{"write_file", "apply_patch"}, prepared[0].ReadOnlyFilteredTools)
 	assert.Equal(t, "subagent_spawn_batch.read_only", prepared[0].ReadOnlySource)
 
@@ -6236,11 +6238,18 @@ func TestSubagentScheduler_ReadOnlyParentNarrowsWritableSubagent(t *testing.T) {
 	assert.Equal(t, "parent_tool_execution_policy", prepared[0].ReadOnlySource)
 }
 
-func TestWhitelistSetPreservesExplicitEmptyAllowlist(t *testing.T) {
-	assert.Nil(t, whitelistSet(nil))
-	empty := whitelistSet([]string{})
-	require.NotNil(t, empty)
-	assert.Empty(t, empty)
+func TestWhitelistAdmitsPreservesNilAndEmptySemantics(t *testing.T) {
+	assert.True(t, whitelistAdmits(nil, "view"), "nil allowlist admits every tool")
+	assert.False(t, whitelistAdmits([]string{}, "view"), "explicit empty allowlist admits nothing")
+	assert.True(t, whitelistAdmits([]string{"view"}, "view"))
+	assert.False(t, whitelistAdmits([]string{"view"}, "grep"))
+}
+
+func TestWhitelistAdmitsSupportsWildcards(t *testing.T) {
+	assert.True(t, whitelistAdmits([]string{"*"}, "anything"))
+	assert.True(t, whitelistAdmits([]string{"subagent_*"}, "subagent_spawn"))
+	assert.False(t, whitelistAdmits([]string{"subagent_*"}, "view"))
+	assert.True(t, whitelistAdmits([]string{"SUBAGENT_*"}, "subagent_spawn"))
 }
 
 func TestComputeAvailableToolsRespectsExplicitEmptyAllowlist(t *testing.T) {

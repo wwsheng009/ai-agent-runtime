@@ -179,11 +179,30 @@ func RenderFileEditingGuidance() string {
 		"After STALE_CONTEXT / old_string miss / hunk miss, re-view first and rebuild; never replay the same patch or old_string unchanged.",
 		"Keep each apply_patch focused on one file or one nearby change region; split large or multi-file patches.",
 		"For Add File hunks, every content line must start with `+`.",
-		"When using `todos`, keep at most one task `in_progress`; mark the previous task completed/pending before starting another.",
 	}
 
 	rendered := make([]string, 0, len(lines)+1)
 	rendered = append(rendered, "File editing guidance:")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		rendered = append(rendered, "- "+line)
+	}
+	return strings.Join(rendered, "\n")
+}
+
+// RenderTodosGuidance renders the task-list discipline rule. It is kept out of
+// RenderFileEditingGuidance on purpose: the subject tool is `todos`, not the
+// write tools, so the section must be gated by todos visibility rather than by
+// "a write tool is present".
+func RenderTodosGuidance() string {
+	lines := []string{
+		"When using `todos`, keep at most one task `in_progress`; mark the previous task completed/pending before starting another.",
+	}
+
+	rendered := make([]string, 0, len(lines)+1)
+	rendered = append(rendered, "Task list guidance:")
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue

@@ -2021,7 +2021,7 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 		// normalizes the requested allowlist, rejects requests that could only
 		// produce a tool-less child (retired vocabulary / parent intersection)
 		// and narrows the task to what the derived child policy grants.
-		resolved, _, err := resolveChildToolSurface(parentAgent, effective)
+		resolved, childPolicy, err := resolveChildToolSurface(parentAgent, effective)
 		if err != nil {
 			return nil, err
 		}
@@ -2034,6 +2034,7 @@ func (s *SubagentScheduler) prepareTasks(tasks []SubagentTask) ([]SubagentTask, 
 				effective.ToolsWhitelist,
 			)
 		}
+		effective = finalizeChildToolSurface(effective, childPolicy, agentToolSurface(parentAgent))
 		knownIDs[effective.ID] = true
 		prepared = append(prepared, effective)
 	}

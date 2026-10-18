@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
+	"github.com/wwsheng009/ai-agent-runtime/internal/prompt/toolguidance"
 	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -122,8 +123,19 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 		}
 		childConfig.Options["read_only_source"] = source
 	}
+	task = finalizeChildToolSurface(task, childPolicy, agentToolSurface(parent))
 	promptTask = taskWithRouteDecision(task, decision)
-	childConfig.SystemPrompt = parent.GetPromptBuilder().BuildSubagentPrompt(parentConfig, promptTask)
+	// The child renders guidance from its own resolved policy. Inheritance is
+	// limited to the surface-independent head so the parent's shell/file/team
+	// guidance cannot steer a narrower child toward tools it does not have.
+	childFacts := toolguidance.FactsFromPolicy(childPolicy)
+	childConfig.SystemPrompt = parent.GetPromptBuilder().BuildSubagentPrompt(parentConfig, promptTask, childFacts)
+	if childConfig.Options == nil {
+		childConfig.Options = make(map[string]interface{})
+	}
+	// Nested children inherit this child's head, not the root's guidance-bearing
+	// prompt. The head itself is already surface-independent.
+	childConfig.Options[ChildPromptHeadOption] = childPromptHead(parentConfig)
 
 	// Fork context (P2-1'): when the task requests context=fork (capability
 	// granted at admission), the child's initial history is a one-time frozen

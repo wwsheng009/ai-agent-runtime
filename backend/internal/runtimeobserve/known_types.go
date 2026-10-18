@@ -190,6 +190,7 @@ func buildKnownEventTypes() map[string]bool {
 		"tool.requested",                         // internal/agent/loop.go emitRuntimeEvent
 		"tool.reduced",                           // internal/events/bus.go:1088；agent emitRuntimeEvent
 		"tool.denied",                            // internal/agent/loop.go:2828
+		"tool.surface_mismatch",                  // internal/agent/loop.go：surface-mismatch 熔断升级诊断
 		"tool.malformed_arguments.guardrail_hit", // internal/agent/loop.go:1285
 		"tool.malformed_arguments.recovered",     // internal/agent/loop.go:1354
 		"assistant.delta",                        // assistant_delta 的点分隔等价形（总线上两种都在用）

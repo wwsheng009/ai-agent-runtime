@@ -132,6 +132,10 @@ type Result struct {
 	ToolErrorCount                int                    `json:"tool_error_count,omitempty"`
 	RecoveredToolErrorCount       int                    `json:"recovered_tool_error_count,omitempty"`
 	UnrecoveredToolErrorCount     int                    `json:"unrecovered_tool_error_count,omitempty"`
+	// SurfaceMismatchCount counts calls to tools that were not in the frozen
+	// turn surface. They are recorded but excluded from pendingFailures: the
+	// call is a prompt/history artifact, not an execution failure.
+	SurfaceMismatchCount int `json:"surface_mismatch_count,omitempty"`
 	// CompletionSatisfied is false when completionRequirement=complete_task was
 	// not met after recovery attempts (or recovery was disabled).
 	CompletionSatisfied *bool `json:"completion_satisfied,omitempty"`
@@ -582,7 +586,7 @@ func (a *Agent) hasSubagentScheduler() bool {
 // shouldExposeSpawnSubagents returns whether subagent_spawn_batch may appear in
 // the model-visible tool surface. Scheduler presence, optional call whitelist,
 // and execution policy must all agree.
-func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
+func shouldExposeSpawnSubagents(a *Agent, callWhitelist []string) bool {
 	if a == nil || !a.hasSubagentScheduler() {
 		return false
 	}
@@ -596,7 +600,7 @@ func shouldExposeSpawnSubagents(a *Agent, callWhitelist map[string]bool) bool {
 	if scheduler == nil || !scheduler.AllowsDelegation() {
 		return false
 	}
-	if callWhitelist != nil && !callWhitelist[SpawnSubagentsToolName] {
+	if !whitelistAdmits(callWhitelist, SpawnSubagentsToolName) {
 		return false
 	}
 	if policy := a.GetToolExecutionPolicy(); policy != nil {

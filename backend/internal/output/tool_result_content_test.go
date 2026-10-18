@@ -826,6 +826,26 @@ func TestModelArtifactNotice_NewFormatCarriesTailAndConsumerHint(t *testing.T) {
 	}
 }
 
+func TestMetadataIntReadsShellWindowFromNestedToolMetadata(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:    "shell",
+		ArtifactIDs: []string{"art_0123456789abcdef0123456789abcdef"},
+		Metadata: map[string]interface{}{
+			"raw_bytes": 32731,
+			"tool_metadata": map[string]interface{}{
+				"output_window_total_bytes": float64(155009),
+			},
+		},
+	}
+	notice := modelArtifactNotice(envelope)
+	if !strings.Contains(notice, "size=155009") {
+		t.Fatalf("expected complete capture size in notice, got %q", notice)
+	}
+	if strings.Contains(notice, "size=32731") {
+		t.Fatalf("notice must not report the folded body size, got %q", notice)
+	}
+}
+
 func TestModelArtifactNotice_FallsBackToPathWithoutConsumerHint(t *testing.T) {
 	envelope := &Envelope{
 		Metadata: map[string]interface{}{
@@ -1282,5 +1302,104 @@ func TestRenderToolTextForModelHistory_FoldsCaptureTruncatedOutput(t *testing.T)
 	}
 	if len(got) > modelToolTextByteBudget {
 		t.Fatalf("folded payload must fit the %d-byte backstop, got %d bytes", modelToolTextByteBudget, len(got))
+	}
+}
+
+// When the artifact reader is absent from the surface, the render layer must
+// not hand the model a pointer it cannot dereference. The replacement follows
+// the tool's declared recovery mode.
+func TestDegradeArtifactPointerForModel(t *testing.T) {
+	const id = "art_00000000000000000000000000000003"
+	newEnvelope := func(foldRecovery string, failed bool) *Envelope {
+		metadata := map[string]interface{}{
+			"artifact_id":          id,
+			"raw_bytes":            60000,
+			toolresult.MetadataKey: toolresult.KindText,
+		}
+		if foldRecovery != "" {
+			metadata[toolresult.MetadataFoldRecoveryKey] = foldRecovery
+		}
+		envelope := &Envelope{
+			ToolName:    "view",
+			ToolCallID:  "call-degrade",
+			ArtifactIDs: []string{id},
+			Metadata:    metadata,
+		}
+		if failed {
+			envelope.Error = "exit status 1"
+		}
+		return envelope
+	}
+
+	body := strings.Repeat("x", modelToolTextByteBudget+256)
+
+	// Re-issuable tools: narrower-window recovery, no artifact_read mention.
+	envelope := newEnvelope("", false)
+	rendered := RenderToolResultContentForModel(body, "", envelope)
+	if !strings.Contains(rendered, "artifact_read") {
+		t.Fatalf("baseline render must carry the reader pointer, got %q", rendered[len(rendered)-200:])
+	}
+	if notice := modelArtifactNotice(envelope); !strings.Contains(rendered, notice) {
+		t.Fatalf("rendered notice mismatch\nnotice=%q\ntail=%q", notice, rendered[len(rendered)-400:])
+	}
+	degraded := DegradeArtifactPointerForModel(rendered, envelope)
+	if strings.Contains(degraded, "artifact_read(") {
+		t.Fatalf("degraded notice must not mention artifact_read, got %q", degraded)
+	}
+	if !strings.Contains(degraded, "narrower window") {
+		t.Fatalf("expected narrower-window recovery hint, got %q", degraded)
+	}
+	if envelope.Metadata["artifact_unreadable"] != true {
+		t.Fatalf("expected artifact_unreadable metadata, got %#v", envelope.Metadata)
+	}
+
+	// Static payloads: the tail is genuinely unrecoverable.
+	staticEnvelope := newEnvelope(toolresult.FoldRecoveryArtifactRead, false)
+	staticRendered := RenderToolResultContentForModel(body, "", staticEnvelope)
+	staticDegraded := DegradeArtifactPointerForModel(staticRendered, staticEnvelope)
+	if !strings.Contains(staticDegraded, "unrecoverable") {
+		t.Fatalf("expected explicit unrecoverable marker, got %q", staticDegraded)
+	}
+	if strings.Contains(staticDegraded, "artifact_read(") {
+		t.Fatalf("static degradation must not mention artifact_read, got %q", staticDegraded)
+	}
+
+	// Failed results keep the error text but mark the pointer unreadable.
+	failedEnvelope := newEnvelope("", true)
+	failedRendered := RenderToolResultContentForModel("stderr line", "exit status 1", failedEnvelope)
+	failedDegraded := DegradeArtifactPointerForModel(failedRendered, failedEnvelope)
+	if !strings.Contains(failedDegraded, "artifact_unreadable=true") {
+		t.Fatalf("expected artifact_unreadable marker, got %q", failedDegraded)
+	}
+	if strings.Contains(failedDegraded, "artifact_read(") {
+		t.Fatalf("failed degradation must not mention artifact_read, got %q", failedDegraded)
+	}
+}
+
+// A path pointer is still readable from disk without artifact_read; it must not
+// be marked unrecoverable, only its mid-line reader hint needs correcting.
+func TestDegradeArtifactPointerForModelKeepsPathNoticeReadable(t *testing.T) {
+	envelope := &Envelope{
+		ToolName:   "shell",
+		ToolCallID: "call-path-notice",
+		Metadata: map[string]interface{}{
+			"raw_output_artifact_path": `C:\temp\shell-output\toolkit\out.txt`,
+			toolresult.MetadataKey:     toolresult.KindText,
+		},
+	}
+	body := strings.Repeat("x", modelToolTextByteBudget+256)
+	rendered := RenderToolResultContentForModel(body, "", envelope)
+	if !strings.Contains(rendered, modelArtifactNoticePathPrefix) {
+		t.Fatalf("expected a path notice, got %q", rendered[len(rendered)-200:])
+	}
+	degraded := DegradeArtifactPointerForModel(rendered, envelope)
+	if strings.Contains(degraded, "artifact_read(") {
+		t.Fatalf("path degradation must not advertise artifact_read, got %q", degraded)
+	}
+	if !strings.Contains(degraded, "on-disk raw output file") {
+		t.Fatalf("expected an on-disk read hint, got %q", degraded)
+	}
+	if envelope.Metadata["artifact_unreadable"] == true {
+		t.Fatal("path notices must not be marked unrecoverable")
 	}
 }

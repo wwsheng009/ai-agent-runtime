@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -348,6 +349,82 @@ func (s *Store) Get(ctx context.Context, id string) (*Record, error) {
 	}
 
 	return &record, nil
+}
+
+// ReadScope constrains which artifact owners a caller may dereference.
+//
+// The zero value denies every owner: callers that intentionally bypass
+// ownership checks (host/TUI/diagnostic paths) must say so explicitly with
+// Unrestricted. Tool execution must never rely on an implicit bypass.
+type ReadScope struct {
+	// Unrestricted disables the ownership check.
+	Unrestricted bool
+	// SessionIDs is the allowed owner set. nil or empty denies every owner.
+	SessionIDs map[string]bool
+}
+
+var (
+	// ErrArtifactReadOutOfScope reports a record owned by a session outside
+	// the caller's lineage.
+	ErrArtifactReadOutOfScope = errors.New("artifact read out of scope")
+	// ErrArtifactReadUnscoped reports a legacy record with no session owner.
+	// Restricted reads fail closed instead of treating an empty owner as a
+	// wildcard.
+	ErrArtifactReadUnscoped = errors.New("artifact has no owning session")
+)
+
+// GetOwned reads an artifact and enforces the caller's read scope.
+//
+// Get remains the unrestricted accessor for host/diagnostic paths. Tool
+// execution uses GetOwned so a pointer can only be dereferenced by the session
+// (or lineage) that produced it.
+func (s *Store) GetOwned(ctx context.Context, id string, scope ReadScope) (*Record, error) {
+	if s == nil {
+		return nil, fmt.Errorf("artifact store is not initialized")
+	}
+	if scope.Unrestricted {
+		return s.Get(ctx, id)
+	}
+	// Check ownership before loading the content blob. A rejected cross-session
+	// read must not pay the IO cost of a full artifact, and a legacy record with
+	// no owner must fail closed without returning its body to the caller.
+	owner, found, err := s.ownerSessionID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return nil, fmt.Errorf("%w: artifact %s", ErrArtifactReadUnscoped, id)
+	}
+	if !scope.SessionIDs[owner] {
+		return nil, fmt.Errorf("%w: artifact %s belongs to session %s", ErrArtifactReadOutOfScope, id, owner)
+	}
+	return s.Get(ctx, id)
+}
+
+// ownerSessionID performs the scope preflight with a narrow projection. It
+// deliberately does not load summary/content/metadata; those are only needed
+// after the caller proves membership in the allowed session set.
+func (s *Store) ownerSessionID(ctx context.Context, id string) (string, bool, error) {
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return "", false, err
+	}
+	if skipEmpty {
+		return "", false, nil
+	}
+	row := s.db.QueryRowContext(ctx, `SELECT session_id FROM artifacts WHERE id = ?`, id)
+	var owner string
+	if err := row.Scan(&owner); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("load artifact owner: %w", err)
+	}
+	return owner, true, nil
 }
 
 // Search 在当前 session 内执行召回搜索。

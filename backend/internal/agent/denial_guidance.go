@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -28,7 +29,84 @@ const (
 const (
 	ReadOnlyDenyEscalateThreshold = 3
 	ReadOnlyDenyHardStopThreshold = 5
+
+	// SurfaceMismatchEscalateThreshold/HardStopThreshold guard the "model called
+	// a tool it could not see" path. Such denials do not enter pendingFailures
+	// (the call is a prompt/history artifact, not an execution failure), so this
+	// streak is what stops an unbounded retry loop.
+	SurfaceMismatchEscalateThreshold = 3
+	SurfaceMismatchHardStopThreshold = 5
 )
+
+const toolWhitelistDenialPrefix = "tool not allowed for this agent: "
+
+// deniedToolName extracts the tool name from the whitelist-gate denial text.
+// The message is deterministic (loop.go's gate) and may be joined with "; ".
+func deniedToolName(errText string) (string, bool) {
+	trimmed := strings.TrimSpace(errText)
+	if !strings.HasPrefix(trimmed, toolWhitelistDenialPrefix) {
+		return "", false
+	}
+	name := strings.TrimSpace(strings.TrimPrefix(trimmed, toolWhitelistDenialPrefix))
+	if idx := strings.IndexAny(name, ";,\n"); idx >= 0 {
+		name = strings.TrimSpace(name[:idx])
+	}
+	return name, name != ""
+}
+
+// isUnadvertisedToolDenial reports whether the result is a whitelist denial for
+// a tool that was absent from the frozen turn surface. An unknown/empty
+// surface returns false so the legacy fatal path is preserved.
+func isUnadvertisedToolDenial(ctx context.Context, result toolExecutionResult) bool {
+	name, ok := deniedToolName(result.Error)
+	if !ok {
+		return false
+	}
+	if !nonFatalSurfaceMismatchName(name) {
+		return false
+	}
+	surface := frozenTurnToolSurface(ctx)
+	if len(surface) == 0 {
+		return false
+	}
+	for _, def := range surface {
+		if toolregistry.MatchPattern(def.Name, name) || toolregistry.MatchPattern(name, def.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// nonFatalSurfaceMismatchName is the single predicate for "this missing tool is
+// a read-only surface mismatch, not a real boundary violation". Both the gate
+// (which increments the streak/count) and the accounting loop (which decides
+// whether to enter pendingFailures) must use it: otherwise a write-like denial
+// would be fatal in the ledger but still counted as a surface mismatch.
+func nonFatalSurfaceMismatchName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if runtimepolicy.IsWriteLikeToolName(name) || runtimepolicy.IsShellLikeToolName(name) ||
+		runtimepolicy.IsDelegationToolName(name) || toolregistry.GroupOf(name) == toolregistry.GroupOrchestration {
+		return false
+	}
+	return true
+}
+
+func surfaceMismatchEscalationAdvisory(streak int) string {
+	return fmt.Sprintf(
+		"You have called tools outside your current tool surface %d times. Those tools are not available in this run; do not call them again. Finish with the tools you have, or report the missing capability explicitly.",
+		streak,
+	)
+}
+
+func surfaceMismatchLimitReachedMessage(streak, threshold int) string {
+	return fmt.Sprintf(
+		"Stopped after %d consecutive calls to tools outside the current tool surface (hard-stop threshold %d). The model cannot act on tools it cannot see; finish with the available tools or report the missing capability.",
+		streak, threshold,
+	)
+}
 
 // renderDenialGuidance 把 read_only 策略的裸错误串升级为"原因+规则+修复"的
 // 模型可读文本；非只读拒绝原样返回（向后兼容，不改变其他策略的语义）。

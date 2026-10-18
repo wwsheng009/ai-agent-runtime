@@ -56,6 +56,17 @@ func TestEnrichMarksAliasSpellingsWithCanonicalName(t *testing.T) {
 	require.Equal(t, "", canonical.Tools[0].Metadata[MetadataAliasOf])
 }
 
+func TestEnrichMarksContractOriginWithoutClaimingGrant(t *testing.T) {
+	observation := Enrich([]runtimetypes.ToolDefinition{{Name: "artifact_read"}}, Ledger{}, nil)
+	require.Len(t, observation.Tools, 1)
+	metadata := observation.Tools[0].Metadata
+	require.Equal(t, true, metadata[MetadataContractual])
+	require.Equal(t, "output_contract", metadata[MetadataContractSource])
+	// Registry membership alone cannot prove this request admitted the tool
+	// through the contract rather than an explicit profile allowlist.
+	require.NotContains(t, metadata, MetadataGrantedBy)
+}
+
 // 退役名不是现役登记：外部来源（MCP）恰好暴露同名工具时不得被套上替代工具的类别。
 // surface_source 仍按 mcp_name 归一（与 Build 共用 Classify）。
 func TestEnrichDoesNotBorrowFactsFromRetiredNames(t *testing.T) {

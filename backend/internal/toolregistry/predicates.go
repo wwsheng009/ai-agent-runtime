@@ -211,6 +211,15 @@ func IsEssential(name string) bool {
 	return ok && entry.Essential
 }
 
+// IsContractual reports whether the live entry is a runtime contract tool.
+// Policy derivation normally reads ContractualNames; this predicate is the
+// fallback for policies constructed as struct literals (or built before the
+// contract existed), so the grant cannot silently disappear.
+func IsContractual(name string) bool {
+	entry, ok := lookupLive(name)
+	return ok && entry.Contractual
+}
+
 // MatchPattern 报告 name 是否命中一条工具名单模式。工具名单
 // （allowlist / denylist / skills / MCP 名单）的统一通配语义：
 //

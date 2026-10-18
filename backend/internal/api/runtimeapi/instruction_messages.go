@@ -26,6 +26,20 @@ func buildRuntimeInstructionMessages(profileState *profileRuntimeState, workspac
 	return withDelegationGuidance(compiled)
 }
 
+// buildRuntimeInstructionHeadMessages compiles only the surface-independent
+// profile layers: no task-difficulty or multi-agent collaboration guidance.
+// Child agents inherit this head and render guidance from their own tool policy.
+func buildRuntimeInstructionHeadMessages(profileState *profileRuntimeState, workspacePath, provider string) []types.Message {
+	layers := buildRuntimeInstructionLayers(profileState, workspacePath)
+	if layers.HasAny() {
+		return layers.CompileInstructionMessages(provider)
+	}
+	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
+		return []types.Message{*types.NewSystemMessage(strings.TrimSpace(profileState.PromptText))}
+	}
+	return nil
+}
+
 func profilePromptModeIsAppend(profileState *profileRuntimeState) bool {
 	if profileState == nil || profileState.Resolved == nil {
 		return false

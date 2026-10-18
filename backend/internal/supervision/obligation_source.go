@@ -2,6 +2,7 @@ package supervision
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
@@ -223,14 +224,15 @@ func (s *BatchObligationSource) obligationForBatch(ctx context.Context, batch su
 		ref.Skipped = batch.CanceledCount
 	}
 	if strings.TrimSpace(batch.ErrorClass) != "" && ref.Terminal {
+		detail := batchFailureDetail(batch)
 		ref.Failures = append(ref.Failures, FailureItem{
 			ObligationID: ref.ID,
 			BatchID:      ref.ID,
 			State:        ref.State,
 			ErrorClass:   strings.TrimSpace(batch.ErrorClass),
-			Retryable:    retryableFailure(ref.State, batch.ErrorDetail, batch.ErrorClass),
+			Retryable:    retryableFailure(ref.State, detail, batch.ErrorClass),
 			ResultRef:    firstNonEmptyString(batch.ResultSummaryRef, "batch:"+ref.ID),
-			Summary:      s.preview([]byte(batch.ErrorDetail)),
+			Summary:      s.preview([]byte(detail)),
 		})
 	}
 	if batch.ResultSummaryRef != "" {
@@ -238,6 +240,24 @@ func (s *BatchObligationSource) obligationForBatch(ctx context.Context, batch su
 	}
 	s.appendTaskDetails(ctx, &ref)
 	return ref
+}
+
+// batchFailureDetail recovers the batch-level error text when the row's
+// ErrorDetail is empty. Failed task summaries are stored in
+// ResultSummary.CriticalErrors (bounded to a compact prefix), which still
+// carries deterministic markers such as "out of scope".
+func batchFailureDetail(batch subagentbatch.SubagentBatch) string {
+	if detail := strings.TrimSpace(batch.ErrorDetail); detail != "" {
+		return detail
+	}
+	if len(batch.ResultSummary) == 0 {
+		return ""
+	}
+	var summary subagentbatch.BatchSummary
+	if err := json.Unmarshal(batch.ResultSummary, &summary); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(summary.CriticalErrors, "; "))
 }
 
 // appendTaskDetails adds the per-task failure evidence (H3: error class +
@@ -366,7 +386,15 @@ func retryableFailure(state, errorCode, errorClass string) bool {
 	}
 	code := strings.ToLower(strings.TrimSpace(errorCode))
 	class := strings.ToLower(strings.TrimSpace(errorClass))
-	for _, marker := range []string{"superseded", "permission", "denied", "invalid", "policy_conflict", "aborted"} {
+	// Deterministic tool/policy failures are not repaired by replaying the same
+	// work. The batch store may only retain the canonical class
+	// (task_failure/error) plus the original error text, so the text markers are
+	// the last lossless signal available here.
+	for _, marker := range []string{
+		"superseded", "permission", "denied", "invalid", "policy_conflict", "aborted",
+		"tool_error", "tool_execution", "out of scope", "stale_context",
+		"not allowed", "read_only", "artifact_unreadable",
+	} {
 		if strings.Contains(code, marker) || strings.Contains(class, marker) {
 			return false
 		}

@@ -1216,3 +1216,67 @@ func TestToolExecutionPolicy_AliasIdentitySharedAcrossAllowAndDeny(t *testing.T)
 		t.Fatal("deny 退役拼写 task_kill 应拦住 job_cancel")
 	}
 }
+
+// artifact_read is a runtime contract: a profile that lists its task tools but
+// omits the reader still gets it, while an explicit deny always wins.
+func TestToolExecutionPolicy_ContractualToolSurvivesNarrowAllowlist(t *testing.T) {
+	policy := NewToolExecutionPolicy([]string{"view", "shell"}, false)
+	if err := policy.AllowTool("artifact_read"); err != nil {
+		t.Fatalf("contractual tool must survive a narrow allowlist, got %v", err)
+	}
+	if !policy.AllowsDefinition("artifact_read") {
+		t.Fatal("artifact_read definition must be advertised")
+	}
+
+	policy.DeniedTools = map[string]bool{"artifact_read": true}
+	if err := policy.AllowTool("artifact_read"); err == nil {
+		t.Fatal("explicit deny must override the contract")
+	}
+	if policy.AllowsDefinition("artifact_read") {
+		t.Fatal("explicit deny must hide the definition")
+	}
+}
+
+// An explicitly empty allowlist (DisableTools) keeps its total-disable
+// semantics: the contract fills an omitted entry, it does not re-enable a
+// deliberately empty surface.
+func TestToolExecutionPolicy_ContractualToolBlockedByEmptyAllowlist(t *testing.T) {
+	policy := NewToolExecutionPolicy([]string{}, false)
+	if err := policy.AllowTool("artifact_read"); err == nil {
+		t.Fatal("empty allowlist must block the contractual tool")
+	}
+	if policy.AllowsDefinition("artifact_read") {
+		t.Fatal("empty allowlist must hide the contractual definition")
+	}
+}
+
+// Every registry entry declared Contractual must be granted by a narrow
+// allowlist and honoring the same single source. This is the T11 contract test:
+// a new contractual entry cannot be added without a working grant path.
+func TestContractualEntriesAreGrantedByNarrowAllowlist(t *testing.T) {
+	names := toolregistry.ContractualNames()
+	if len(names) == 0 {
+		t.Fatal("expected at least artifact_read to be declared Contractual")
+	}
+	for _, name := range names {
+		policy := NewToolExecutionPolicy([]string{"view"}, false)
+		if err := policy.AllowTool(name); err != nil {
+			t.Fatalf("contractual entry %q must be granted by a narrow allowlist, got %v", name, err)
+		}
+		if !policy.AllowsDefinition(name) {
+			t.Fatalf("contractual entry %q must be advertised", name)
+		}
+	}
+}
+
+// A host may construct ToolExecutionPolicy as a struct literal; the contract
+// must still come from the registry instead of silently disappearing.
+func TestToolExecutionPolicy_LiteralPolicyHonorsContract(t *testing.T) {
+	policy := &ToolExecutionPolicy{
+		AllowlistEnabled: true,
+		AllowedTools:     map[string]bool{"view": true},
+	}
+	if err := policy.AllowTool("artifact_read"); err != nil {
+		t.Fatalf("literal policy must honor the registry contract, got %v", err)
+	}
+}

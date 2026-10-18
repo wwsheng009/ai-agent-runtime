@@ -176,7 +176,36 @@ func TestArtifactReadRejectsCrossSessionRead(t *testing.T) {
 
 	require.False(t, result.Success)
 	require.Error(t, result.Error)
-	require.Contains(t, result.Error.Error(), "属于会话 sess-owner")
+	require.Contains(t, result.Error.Error(), "不属于当前会话或父会话的读取范围")
+	require.Contains(t, result.Error.Error(), "sess-owner")
+}
+
+func TestArtifactReadAllowsParentSessionArtifactInLineageScope(t *testing.T) {
+	store := newArtifactReadTestStore(t)
+	id := putArtifactForRead(t, store, "sess-parent", "shell", "parent output")
+
+	ctx := toolctx.WithArtifactReadScopeForSessions(
+		artifactReadContext(store, "sess-child"),
+		"sess-child",
+		"sess-parent",
+	)
+	result := executeArtifactRead(t, ctx, map[string]interface{}{"artifact_id": id})
+
+	require.True(t, result.Success, result.Error)
+	require.Contains(t, result.Content, "parent output")
+}
+
+func TestArtifactReadRejectsUnscopedArtifact(t *testing.T) {
+	store := newArtifactReadTestStore(t)
+	id := putArtifactForRead(t, store, "", "shell", "legacy output")
+
+	result := executeArtifactRead(t, artifactReadContext(store, "sess-1"), map[string]interface{}{
+		"artifact_id": id,
+	})
+
+	require.False(t, result.Success)
+	require.Error(t, result.Error)
+	require.Contains(t, result.Error.Error(), "缺少会话归属")
 }
 
 func TestArtifactReadAcceptsPastedPointerTail(t *testing.T) {

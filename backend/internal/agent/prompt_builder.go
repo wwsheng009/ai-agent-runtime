@@ -8,6 +8,14 @@ import (
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 )
 
+// ChildPromptHeadOption carries the surface-independent system-prompt head
+// (profile text + environment/workspace context) that a child may inherit.
+//
+// Surface-dependent guidance (shell/file-editing/parallel/delegation sections)
+// is deliberately excluded: a child must render those from its own resolved
+// tool policy instead of inheriting text written for the parent's surface.
+const ChildPromptHeadOption = "child_prompt_head"
+
 // PromptBuilder 为子代理生成专用 system prompt。
 type PromptBuilder struct{}
 
@@ -17,11 +25,15 @@ func NewPromptBuilder() *PromptBuilder {
 }
 
 // BuildSubagentPrompt 生成 fresh child conversation 的系统提示。
-func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) string {
+//
+// facts describes the child's resolved tool surface. Pass nil only when the
+// policy does not narrow the surface: nil keeps the legacy unconditional
+// guidance for compatibility with hosts that have not wired the child policy.
+func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask, facts *runtimeprompt.ToolGuidanceFacts) string {
 	lines := make([]string, 0, 10)
 
-	if parent != nil && strings.TrimSpace(parent.SystemPrompt) != "" {
-		lines = append(lines, strings.TrimSpace(parent.SystemPrompt))
+	if head := childPromptHead(parent); head != "" {
+		lines = append(lines, head)
 	}
 
 	lines = append(lines, "You are an isolated subagent working for a parent coding agent.")
@@ -54,7 +66,10 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 	lines = append(lines, "Focus only on your assigned subtask and return a concise final report.")
 	lines = append(lines, "The parent receives only your compressed report, not your full transcript.")
 	lines = append(lines, "Do not change the overall plan unless the subtask requires it.")
-	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidance()); guidance != "" {
+	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidanceFacts(facts)); guidance != "" {
+		lines = append(lines, guidance)
+	}
+	if guidance := strings.TrimSpace(runtimeprompt.RenderTodosGuidanceFacts(facts)); guidance != "" {
 		lines = append(lines, guidance)
 	}
 
@@ -130,6 +145,25 @@ func (b *PromptBuilder) BuildSubagentPrompt(parent *Config, task SubagentTask) s
 
 	lines = append(lines, "Assigned goal: "+strings.TrimSpace(task.Goal))
 	return strings.Join(lines, "\n")
+}
+
+// childPromptHead resolves the head a child may inherit. Hosts opt into the
+// structured split by setting ChildPromptHeadOption; hosts that have not wired
+// it keep the historical behavior (the full parent prompt) for compatibility.
+func childPromptHead(cfg *Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if cfg.Options != nil {
+		// A present-but-empty option is intentional: the host explicitly says
+		// "this child inherits no head". Falling back to cfg.SystemPrompt here
+		// would reintroduce the guidance leak the split was added to fix.
+		if raw, ok := cfg.Options[ChildPromptHeadOption]; ok {
+			head, _ := raw.(string)
+			return strings.TrimSpace(head)
+		}
+	}
+	return strings.TrimSpace(cfg.SystemPrompt)
 }
 
 func previewPatchDiff(diff string) string {

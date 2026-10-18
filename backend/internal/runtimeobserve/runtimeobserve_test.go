@@ -428,6 +428,7 @@ func TestKnownEventTypeCatalogCoversLocalLoopEmits(t *testing.T) {
 		"tool.completed",                         // internal/agent/loop.go:2295 等
 		"tool.denied",                            // internal/agent/loop.go:2828
 		"tool.reduced",                           // internal/agent/loop.go:2904
+		"tool.surface_mismatch",                  // internal/agent/loop.go：surface-mismatch 熔断升级诊断
 		"tool.malformed_arguments.guardrail_hit", // internal/agent/loop.go:1285
 		"tool.malformed_arguments.recovered",     // internal/agent/loop.go:1354
 		"llm.request.started",                    // internal/agent/loop.go:1858

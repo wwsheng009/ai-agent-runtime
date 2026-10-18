@@ -1009,6 +1009,122 @@ func modelArtifactNotice(envelope *Envelope) string {
 	return ""
 }
 
+// DegradeArtifactPointerForModel rewrites a record-id pointer when the current
+// tool surface cannot call artifact_read. Path notices stay untouched: they
+// point at on-disk artifacts and do not require the reader.
+//
+// The replacement follows the tool's declared recovery mode:
+//   - re-issuable tools (view/grep/shell/...) get a narrower-window hint;
+//   - static payloads (skill bodies) state that the tail is unrecoverable;
+//   - failed results mark artifact_unreadable instead of offering a dead pointer.
+func DegradeArtifactPointerForModel(rendered string, envelope *Envelope) string {
+	notice := modelArtifactNotice(envelope)
+	if notice == "" {
+		return rendered
+	}
+	if !isIDArtifactNotice(notice) {
+		// Path notices point at an on-disk artifact that stays readable without
+		// artifact_read. Only the fold hint's reader reference needs correcting;
+		// the payload is not unrecoverable.
+		for _, hint := range []string{
+			foldRecoveryPartialNextStep(foldRecoveryNarrower),
+			foldRecoveryPartialNextStep(foldRecoveryArtifactRead),
+		} {
+			if strings.Contains(rendered, hint) {
+				rendered = strings.Replace(rendered, hint, degradedPathFoldHint(), 1)
+			}
+		}
+		return rendered
+	}
+	original := rendered
+	// The mid-line fold hint also names artifact_read. Replace it first so the
+	// final text never advertises a tool that is not in the surface.
+	for _, hint := range []string{
+		foldRecoveryPartialNextStep(foldRecoveryNarrower),
+		foldRecoveryPartialNextStep(foldRecoveryArtifactRead),
+	} {
+		if strings.Contains(rendered, hint) {
+			rendered = strings.Replace(rendered, hint, degradedFoldRecoveryHint(envelope), 1)
+		}
+	}
+	replaced := rendered != original
+	if strings.Contains(rendered, notice) {
+		replacement := degradedArtifactNotice(envelope)
+		rendered = strings.Replace(rendered, notice, replacement, 1)
+		replaced = true
+	} else {
+		// The notice may have been byte-truncated by the fold budget; replace
+		// its stable prefix through the end of the line.
+		if id := artifactPointerID(envelope); id != "" {
+			marker := modelArtifactNoticeIDPrefix + id
+			if idx := strings.Index(rendered, marker); idx >= 0 {
+				end := strings.IndexByte(rendered[idx:], '\n')
+				if end < 0 {
+					end = len(rendered) - idx
+				}
+				rendered = rendered[:idx] + degradedArtifactNotice(envelope) + rendered[idx+end:]
+				replaced = true
+			}
+		}
+	}
+	if replaced && envelope != nil && envelope.Metadata != nil {
+		envelope.Metadata["artifact_unreadable"] = true
+	}
+	return rendered
+}
+
+func degradedPathFoldHint() string {
+	return "\n[next step: this window stops mid-line, so a line offset cannot resume it — read the on-disk raw output file named below instead of repeating the identical call]"
+}
+
+func degradedFoldRecoveryHint(envelope *Envelope) string {
+	if failedResult("", envelope) || foldRecoveryFromMetadata(envelopeMetadata(envelope)) == foldRecoveryArtifactRead {
+		return "\n[next step: this window stops mid-line; the omitted bytes are unrecoverable in this profile because the artifact reader is not available — report partial evidence explicitly]"
+	}
+	return "\n[next step: this window stops mid-line, so a line offset cannot resume it — re-issue a narrower call instead of repeating the identical one]"
+}
+
+func degradedArtifactNotice(envelope *Envelope) string {
+	label := "raw output"
+	if id := artifactPointerID(envelope); id != "" {
+		label = "raw output " + id
+	}
+	toolName := "the tool"
+	if envelope != nil && strings.TrimSpace(envelope.ToolName) != "" {
+		toolName = strings.TrimSpace(envelope.ToolName)
+	}
+	switch {
+	case failedResult("", envelope):
+		return fmt.Sprintf(
+			"Raw output archived as %s; artifact_unreadable=true: the artifact reader is not available in this tool surface, so the full payload cannot be retrieved in this run. Report the partial evidence explicitly.",
+			label,
+		)
+	case foldRecoveryFromMetadata(envelopeMetadata(envelope)) == foldRecoveryArtifactRead:
+		return fmt.Sprintf(
+			"Raw output archived as %s; tail omitted and unrecoverable in this profile (artifact_reader denied). Report partial evidence explicitly.",
+			label,
+		)
+	default:
+		return fmt.Sprintf(
+			"Raw output archived as %s; the artifact reader is not available in this tool surface. Re-issue %s with a narrower window to inspect the omitted portion.",
+			label, toolName,
+		)
+	}
+}
+
+func artifactPointerID(envelope *Envelope) string {
+	if envelope == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(metadataString(envelope.Metadata, "artifact_id")); id != "" {
+		return id
+	}
+	if len(envelope.ArtifactIDs) > 0 {
+		return strings.TrimSpace(envelope.ArtifactIDs[0])
+	}
+	return ""
+}
+
 // artifactNoticeTail appends a compact machine-parseable summary to the raw
 // output pointer: size=<bytes> when known, plus kind=<output kind>. The line
 // stays single-line so splitTrailingArtifactNotice and the frontend renderer
@@ -1043,21 +1159,38 @@ func metadataInt(metadata map[string]interface{}, keys ...string) int {
 	if len(metadata) == 0 {
 		return 0
 	}
-	for _, key := range keys {
-		switch value := metadata[key].(type) {
-		case int:
+	if value, ok := directMetadataInt(metadata, keys...); ok {
+		return value
+	}
+	// Tool results are promoted through recordToolExecutionOutcome, which stores
+	// the tool-authored metadata under "tool_metadata" instead of flattening it
+	// into the envelope. Shell's output_window_total_bytes lives there; reading
+	// only the top level used to report the folded body size (e.g. 32731) even
+	// though artifact_read could page the complete capture (e.g. 155009).
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if value, ok := directMetadataInt(nested, keys...); ok {
 			return value
-		case int64:
-			return int(value)
-		case float64:
-			return int(value)
-		case string:
-			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
-				return parsed
-			}
 		}
 	}
 	return 0
+}
+
+func directMetadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch value := metadata[key].(type) {
+		case int:
+			return value, true
+		case int64:
+			return int(value), true
+		case float64:
+			return int(value), true
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func appendToolArtifactNotice(body string, notice string) string {

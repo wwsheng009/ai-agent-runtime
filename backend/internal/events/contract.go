@@ -232,6 +232,9 @@ var runtimeEventContracts = []Contract{
 	{Type: "assistant.delta"},
 	{Type: "tool.reduced"},
 	{Type: "tool.denied"},
+	// 子代理 surface-mismatch 熔断升级的一次性诊断事件：当前只在 agent loop
+	// 内消费，尚无 chat 侧消费者；登记为 0 通道，避免它被当成未知类型。
+	{Type: "tool.surface_mismatch"},
 	{Type: "tool.malformed_arguments.guardrail_hit"},
 	{Type: "tool.malformed_arguments.recovered"},
 	{Type: "session.checkpoint_persist_error"},

@@ -22,6 +22,7 @@ const (
 	workspaceRootKey           contextKey = "tool_workspace_root"
 	allowedRootsKey            contextKey = "tool_allowed_roots"
 	artifactStoreKey           contextKey = "tool_artifact_store"
+	artifactReadScopeKey       contextKey = "tool_artifact_read_scope"
 	fileChangeNotifierKey      contextKey = "tool_file_change_notifier"
 )
 
@@ -280,6 +281,54 @@ func ArtifactStore(ctx context.Context) *artifact.Store {
 	}
 	store, _ := ctx.Value(artifactStoreKey).(*artifact.Store)
 	return store
+}
+
+// WithArtifactReadScopeForSessions binds the set of session ids whose artifacts
+// the current run may dereference. Empty ids are ignored; when none remain the
+// context is left unchanged so the tool can fall back to its own session.
+func WithArtifactReadScopeForSessions(ctx context.Context, sessionIDs ...string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	scope := artifact.ReadScope{SessionIDs: make(map[string]bool, len(sessionIDs))}
+	for _, sessionID := range sessionIDs {
+		if trimmed := strings.TrimSpace(sessionID); trimmed != "" {
+			scope.SessionIDs[trimmed] = true
+		}
+	}
+	if len(scope.SessionIDs) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, artifactReadScopeKey, scope)
+}
+
+// WithArtifactReadScope binds an already-resolved read scope. The session map
+// is copied so callers cannot mutate a scope after it crosses a context
+// boundary. Unrestricted scopes are preserved verbatim for host/diagnostic
+// callers; tool execution must pass a restricted scope explicitly.
+func WithArtifactReadScope(ctx context.Context, scope artifact.ReadScope) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	bound := artifact.ReadScope{Unrestricted: scope.Unrestricted}
+	if len(scope.SessionIDs) > 0 {
+		bound.SessionIDs = make(map[string]bool, len(scope.SessionIDs))
+		for sessionID, allowed := range scope.SessionIDs {
+			if trimmed := strings.TrimSpace(sessionID); trimmed != "" {
+				bound.SessionIDs[trimmed] = allowed
+			}
+		}
+	}
+	return context.WithValue(ctx, artifactReadScopeKey, bound)
+}
+
+// ArtifactReadScope retrieves the bound dereference scope.
+func ArtifactReadScope(ctx context.Context) (artifact.ReadScope, bool) {
+	if ctx == nil {
+		return artifact.ReadScope{}, false
+	}
+	scope, ok := ctx.Value(artifactReadScopeKey).(artifact.ReadScope)
+	return scope, ok
 }
 
 func defaultGeneratedImageRoot() string {

@@ -46,12 +46,7 @@ func listToolsContextForAgent(ctx context.Context, agent *Agent, catalogSize int
 }
 
 func searchToolVisibleInTurn(ctx context.Context) bool {
-	for _, def := range frozenTurnToolSurface(ctx) {
-		if strings.EqualFold(strings.TrimSpace(def.Name), toolSearchName) {
-			return true
-		}
-	}
-	return false
+	return toolAdvertisedInTurn(ctx, toolSearchName)
 }
 
 func filterToolDefinitionsByShouldList(tools []types.ToolDefinition, listCtx toolkit.ListToolsContext) []types.ToolDefinition {
@@ -151,13 +146,12 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 	if loop == nil || loop.agent == nil {
 		return nil
 	}
-	allowed := whitelistSet(toolWhitelist)
 	tools := make([]types.ToolDefinition, 0, 8)
 	seen := make(map[string]bool)
 
 	if loop.agent.mcpManager != nil {
 		for _, mt := range loop.agent.mcpManager.ListTools() {
-			if allowed != nil && !allowed[mt.Name] {
+			if !whitelistAdmits(toolWhitelist, mt.Name) {
 				continue
 			}
 			if policy := loop.agent.GetToolExecutionPolicy(); policy != nil && policy.AllowToolInfo(mt) != nil {
@@ -190,7 +184,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 	}
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
-		if shouldExposeSpawnSubagents(loop.agent, allowed) {
+		if shouldExposeSpawnSubagents(loop.agent, toolWhitelist) {
 			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary(), loop.agent.spawnSchemaCapabilities())
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
@@ -199,7 +193,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 		}
 		// iterate_goal（P2-2'）：G4 默认关 + 显式灰度——懒初始化的
 		// scheduler 恒非 nil，不能当启用信号；只有宿主显式开启才暴露。
-		if loop.agent.iterateGoalToolEnabled() && (allowed == nil || allowed[IterateGoalToolName]) {
+		if loop.agent.iterateGoalToolEnabled() && whitelistAdmits(toolWhitelist, IterateGoalToolName) {
 			definition := IterateGoalToolDefinition()
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
@@ -210,7 +204,7 @@ func (loop *ReActLoop) fullCatalogForSearch(ctx context.Context, toolWhitelist [
 
 	if broker := loop.agent.GetToolBroker(); broker != nil {
 		for _, def := range broker.DefinitionsForContext(ctx) {
-			if allowed != nil && !allowed[def.Name] {
+			if !whitelistAdmits(toolWhitelist, def.Name) {
 				continue
 			}
 			if policy := loop.agent.GetToolExecutionPolicy(); policy != nil && !policy.AllowsDefinition(def.Name) {

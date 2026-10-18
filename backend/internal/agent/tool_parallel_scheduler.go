@@ -49,7 +49,6 @@ func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, to
 		return nil
 	}
 
-	allowedTools := whitelistSet(toolWhitelist)
 	policy := loop.agent.GetToolExecutionPolicy()
 	plan := &parallelToolBatchPlan{
 		calls:       make([]parallelToolCallPlan, 0, len(toolCalls)),
@@ -67,7 +66,7 @@ func (loop *ReActLoop) buildParallelToolBatchPlan(toolCalls []types.ToolCall, to
 		if toolregistry.IsSpellingOf(SpawnSubagentsToolName, name) {
 			return nil
 		}
-		if allowedTools != nil && !allowedTools[name] {
+		if !whitelistAdmits(toolWhitelist, name) {
 			return nil
 		}
 

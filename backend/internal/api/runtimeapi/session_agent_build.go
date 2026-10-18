@@ -58,6 +58,7 @@ func (h *Handler) buildSessionAgentForContext(
 		Model:    agentModel,
 	}
 	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, agentProvider)
+	instructionHeadMessages := buildRuntimeInstructionHeadMessages(profileState, workspacePath, agentProvider)
 	if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
 		agentConfig.SystemPrompt = systemPrompt
 	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
@@ -111,6 +112,10 @@ func (h *Handler) buildSessionAgentForContext(
 		}
 		agentConfig.Options[llm.MetadataKeyDisableTools] = true
 	}
+	if agentConfig.Options == nil {
+		agentConfig.Options = make(map[string]interface{})
+	}
+	agentConfig.Options[agent.ChildPromptHeadOption] = primarySystemInstructionContent(instructionHeadMessages)
 
 	// Always construct the request catalog. disable_tools is an execution/choice
 	// decision and must not remove definitions from an existing cache lane.

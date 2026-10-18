@@ -25,6 +25,17 @@ func ClassifySubagentFailure(err error) SubagentFailureDisposition {
 	if err == nil {
 		return SubagentFailureDisposition{Category: llm.FailureCategoryUnknown}
 	}
+	text := strings.ToLower(err.Error())
+	// Artifact scope denials come from GetOwned: the id is valid but belongs to
+	// another lineage. Retrying the same child cannot succeed, and the generic
+	// classifier would otherwise surface this as UPSTREAM_ERROR/provider_error.
+	if strings.Contains(text, "out of scope") || strings.Contains(err.Error(), "不属于当前会话或父会话的读取范围") {
+		return SubagentFailureDisposition{
+			Category:  llm.FailureCategoryToolError,
+			ErrorCode: "TOOL_EXECUTION",
+			Retryable: false,
+		}
+	}
 	code := strings.TrimSpace(llm.ClassifyFailureCode(err))
 	category := llm.FailureCategoryFromErrorCode(code)
 	if refined := llm.FailureCategoryFromErrorCode(err.Error()); refined != llm.FailureCategoryUnknown {

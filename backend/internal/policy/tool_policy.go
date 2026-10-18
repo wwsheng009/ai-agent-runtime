@@ -27,6 +27,11 @@ type ToolExecutionPolicy struct {
 	AllowedTools     map[string]bool
 	DeniedTools      map[string]bool
 	AllowlistEnabled bool
+	// ContractualTools is the runtime-contract set (currently artifact_read).
+	// It is honored after deny and before the allowlist: a profile that omits
+	// the tool from its allowlist still gets it, while an explicit deny wins.
+	// The names come from toolregistry.ContractualNames (single source).
+	ContractualTools map[string]bool
 	// BlockDelegation is an inherited control-plane boundary.  It is kept
 	// separate from ReadOnly because a read-only agent may still be allowed to
 	// coordinate work, while an ordinary child must not create more agents
@@ -67,6 +72,7 @@ func NewToolExecutionPolicy(allowedTools []string, readOnly bool) *ToolExecution
 		ReadOnly:          readOnly,
 		BlockUntrustedMCP: true,
 		BlockRemoteWrites: true,
+		ContractualTools:  buildContractualToolsMap(),
 	}
 	if allowedTools != nil {
 		policy.AllowlistEnabled = true
@@ -117,8 +123,9 @@ func (p *ToolExecutionPolicy) SetPlanWriteExemption(active bool, raw []string, r
 
 // AllowTool checks whether a tool is allowed by name.
 //
-// 判定顺序：deny（恒优先，支持通配）→ BlockDelegation → allowlist 闸门
-// （支持通配，无豁免）→ capability scope → read-only。runtime essential
+// 判定顺序：deny（恒优先，支持通配）→ ContractualTools（运行时契约）→
+// BlockDelegation → allowlist 闸门（支持通配）→ capability scope → read-only。
+// runtime essential
 // 自 2026-10-16 起不再绕过 allowlist：profile 必须能完全控制工具面，
 // 需要控制面的 profile 用通配（如 ["*"]、["subagent_*"]）或显式名单放行。
 func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
@@ -138,7 +145,7 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	// plane opt in explicitly, e.g. allowlist: ["*"] or ["view", "subagent_*"].
 	// The plan-mode write exemption stays the only relaxation; capability
 	// scope and read-only still apply below.
-	if p.AllowlistEnabled && !p.AllowsTool(toolName) && !p.planWriteAllowlistExempt(normalizedToolName) {
+	if p.AllowlistEnabled && !p.AllowsTool(toolName) && !p.contractualToolAllowed(normalizedToolName) && !p.planWriteAllowlistExempt(normalizedToolName) {
 		return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
 	}
 	if err := p.AllowCapabilities(p.resolveCapabilities(EvalRequest{ToolName: toolName})); err != nil {
@@ -157,6 +164,33 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 		// hard-denies any command outside the read-only allow table.
 	}
 	return nil
+}
+
+// contractualToolAllowed reports whether a contractual tool survives the
+// allowlist gate. An explicitly empty allowlist (DisableTools) still means
+// "no tools": the contract fills an omitted entry, it does not re-enable a
+// totally disabled surface. Deny was already evaluated by the caller.
+func (p *ToolExecutionPolicy) contractualToolAllowed(normalizedName string) bool {
+	if p == nil || !p.AllowlistEnabled || len(p.AllowedTools) == 0 {
+		return false
+	}
+	if len(p.ContractualTools) == 0 {
+		// Legacy/literal policies still honor the registry single source.
+		return toolregistry.IsContractual(normalizedName)
+	}
+	return p.ContractualTools[normalizedName]
+}
+
+func buildContractualToolsMap() map[string]bool {
+	names := toolregistry.ContractualNames()
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
 }
 
 // DeniesTool reports whether the deny list rejects the tool: exact entries
@@ -562,6 +596,7 @@ func (p *ToolExecutionPolicy) Clone() *ToolExecutionPolicy {
 		AllowedTools:           cloneAllowedToolsMap(p.AllowedTools),
 		DeniedTools:            cloneAllowedToolsMap(p.DeniedTools),
 		AllowlistEnabled:       p.AllowlistEnabled,
+		ContractualTools:       cloneAllowedToolsMap(p.ContractualTools),
 		BlockDelegation:        p.BlockDelegation,
 		AllowedCapabilities:    cloneCapabilityMap(p.AllowedCapabilities),
 		CapabilityScopeEnabled: p.CapabilityScopeEnabled,

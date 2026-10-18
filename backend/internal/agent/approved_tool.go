@@ -75,6 +75,13 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		return nil, fmt.Errorf("agent is nil")
 	}
 	ctx = approvedToolCallContext(ctx, a)
+	// Replays bypass toolCallContext, so bind the session (and a self-only
+	// artifact scope) here as well. Without it artifact_read would have no
+	// ownership scope; it must never fall back to an unrestricted read.
+	if trimmed := strings.TrimSpace(sessionID); trimmed != "" {
+		ctx = toolctx.WithSessionID(ctx, trimmed)
+		ctx = bindApprovedArtifactReadScope(ctx, trimmed)
+	}
 	call = NewReActLoop(a, a.llmRuntime, nil).bindFreeformToolCall(ctx, call)
 	traceID := "trace_" + uuid.NewString()
 	gateway := a.GetOutputGateway()
@@ -115,6 +122,9 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		a.runPostToolUseHooks(ctx, sessionID, result)
 		message := types.NewToolMessage(call.ID, "")
 		message.Content = output.RenderToolResultContentForModel(result.Output, result.Error, envelope)
+		if toolSurfaceKnown(ctx) && !toolAdvertisedInTurn(ctx, toolNameArtifactRead) {
+			message.Content = output.DegradeArtifactPointerForModel(message.Content, envelope)
+		}
 		if envelope != nil {
 			if len(envelope.Metadata) > 0 {
 				message.Metadata = types.NewMetadata()
@@ -282,6 +292,28 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		}
 	}
 	return message, nil
+}
+
+// bindApprovedArtifactReadScope preserves lineage bindings supplied by the
+// caller (for example a child replaying an approved artifact_read of a parent
+// artifact) while always adding the replaying session itself. An unrestricted
+// context is narrowed to self-only: approved replays must never inherit a host
+// diagnostic bypass.
+func bindApprovedArtifactReadScope(ctx context.Context, sessionID string) context.Context {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	existing, ok := toolctx.ArtifactReadScope(ctx)
+	if !ok || existing.Unrestricted {
+		return toolctx.WithArtifactReadScopeForSessions(ctx, sessionID)
+	}
+	ids := make([]string, 0, len(existing.SessionIDs)+1)
+	for id := range existing.SessionIDs {
+		ids = append(ids, id)
+	}
+	ids = append(ids, sessionID)
+	return toolctx.WithArtifactReadScopeForSessions(ctx, ids...)
 }
 
 // enforceApprovedToolHardConstraints re-validates an already-approved tool call

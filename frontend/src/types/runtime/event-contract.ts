@@ -123,6 +123,7 @@ export type RuntimeEventType =
   | "tool.progress"
   | "tool.reduced"
   | "tool.requested"
+  | "tool.surface_mismatch"
   | "tool_finished"
   | "tool_loop.exploration_stall_observed"
   | "tool_loop.repeated_prompt_observed"
@@ -237,6 +238,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "tool.progress": ["live_only"],
   "tool.reduced": [],
   "tool.requested": ["session_store", "chat_bridge"],
+  "tool.surface_mismatch": [],
   "tool_finished": [],
   "tool_loop.exploration_stall_observed": [],
   "tool_loop.repeated_prompt_observed": [],

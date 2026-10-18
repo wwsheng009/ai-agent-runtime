@@ -80,6 +80,39 @@ func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.Context
 	return tools, true, nil
 }
 
+func (s *runtimeTurnToolSurfaceSnapshot) LoadTurnToolSurfaceNames(ctx context.Context) ([]string, bool, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, false, ctx.Err()
+	}
+	if s == nil || s.actor == nil || s.turnID == "" {
+		return nil, false, nil
+	}
+	s.actor.mu.RLock()
+	state := s.actor.state
+	if state == nil {
+		s.actor.mu.RUnlock()
+		return nil, false, nil
+	}
+	var tools []types.ToolDefinition
+	switch {
+	case strings.TrimSpace(state.CurrentTurnID) == s.turnID && state.FrozenTurnToolsSet:
+		tools = state.FrozenTurnTools
+	case state.StableToolSurfaceSet:
+		tools = state.StableToolSurface
+	default:
+		s.actor.mu.RUnlock()
+		return nil, false, nil
+	}
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if name := strings.TrimSpace(tool.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	s.actor.mu.RUnlock()
+	return names, true, nil
+}
+
 func (s *runtimeTurnToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context, tools []types.ToolDefinition) error {
 	if s == nil || s.actor == nil || s.turnID == "" {
 		return nil

@@ -27,6 +27,16 @@ const (
 	MetadataExposure      = "exposure"
 	MetadataEssential     = "essential"
 	MetadataAliasOf       = "alias_of"
+	MetadataContractual   = "contractual"
+	// MetadataContractSource describes why a registry entry belongs to the
+	// runtime contract (for example "output_contract"). It is not a grant
+	// decision: an explicit profile allowlist can also admit the same tool.
+	MetadataContractSource = "contract_source"
+	// MetadataGrantedBy is kept for source compatibility with earlier
+	// observation payloads. Enrich no longer writes it: deriving provenance
+	// from the registry alone cannot tell an explicit profile grant from the
+	// runtime contract grant.
+	MetadataGrantedBy = "granted_by"
 )
 
 // FilterReason 是 filtered[] 的裁剪原因取值域（§2.2-A）。
@@ -150,6 +160,13 @@ func applyRegistryMetadata(metadata map[string]interface{}, name string) {
 		}
 	}
 	metadata[MetadataEssential] = entry.Essential
+	metadata[MetadataContractual] = entry.Contractual
+	if entry.Contractual {
+		// This states the entry's contract origin, not that this particular
+		// request admitted it through the contract rather than an explicit
+		// profile allowlist. The latter needs request-assembly facts.
+		metadata[MetadataContractSource] = "output_contract"
+	}
 	// alias_of 对现役登记的工具恒存在：规范名自身为空串，别名拼写写 canonical
 	// （§2.2-A 的响应形状 `"alias_of": ""`，消费方不必区分"缺字段"与"空"）。
 	// 未登记的外部工具（MCP 等）不写这个键——不猜它的归属。

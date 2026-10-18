@@ -205,6 +205,13 @@ func (s *testSessionStableToolSurfaceSnapshot) LoadTurnToolSurface(ctx context.C
 	return cloneToolDefinitions(s.tools), s.set, nil
 }
 
+func (s *testSessionStableToolSurfaceSnapshot) LoadTurnToolSurfaceNames(ctx context.Context) ([]string, bool, error) {
+	if err := contextErr(ctx); err != nil {
+		return nil, false, err
+	}
+	return toolDefinitionNames(s.tools), s.set, nil
+}
+
 func (s *testSessionStableToolSurfaceSnapshot) SaveTurnToolSurface(ctx context.Context, tools []types.ToolDefinition) error {
 	if err := contextErr(ctx); err != nil {
 		return err

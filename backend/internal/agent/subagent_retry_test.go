@@ -190,6 +190,24 @@ func TestClassifySubagentFailureToolWhitelistDenial(t *testing.T) {
 	}
 }
 
+// Artifact scope denial is a deterministic tool error, not a transient
+// provider failure: retrying the same child can never make it succeed.
+func TestClassifySubagentFailureArtifactScopeDenial(t *testing.T) {
+	denied := ClassifySubagentFailure(errors.New(
+		"Tool execution failed: artifact art_99cb057a0daa4e54a1da0aa87d9398ab 不属于当前会话或父会话的读取范围；" +
+			"只能解引用本会话或直接父会话产生的指针：artifact read out of scope: " +
+			"artifact art_99cb057a0daa4e54a1da0aa87d9398ab belongs to session subagent_subagent_1_420b35e765db470891d8691461d4320e"))
+	if denied.Category != llm.FailureCategoryToolError {
+		t.Fatalf("artifact scope denial must be tool_error, got %+v", denied)
+	}
+	if denied.Retryable {
+		t.Fatalf("artifact scope denial must not be retryable, got %+v", denied)
+	}
+	if denied.ErrorCode != "TOOL_EXECUTION" {
+		t.Fatalf("expected TOOL_EXECUTION, got %q", denied.ErrorCode)
+	}
+}
+
 // TestSubagentRetryBackoffBounded 指数退避 + jitter 必须有界（封顶 5s）。
 func TestSubagentRetryBackoffBounded(t *testing.T) {
 	for attempt := 1; attempt <= 10; attempt++ {

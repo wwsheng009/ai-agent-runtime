@@ -17,7 +17,7 @@ func TestShouldExposeSpawnSubagentsRequiresWhitelistAndExecutionPolicy(t *testin
 	if !shouldExposeSpawnSubagents(apiAgent, nil) {
 		t.Fatal("expected scheduler tool without restrictive policy to be exposed")
 	}
-	if shouldExposeSpawnSubagents(apiAgent, map[string]bool{"view": true}) {
+	if shouldExposeSpawnSubagents(apiAgent, []string{"view"}) {
 		t.Fatal("expected call whitelist without subagent_spawn_batch to hide it")
 	}
 
@@ -28,12 +28,12 @@ func TestShouldExposeSpawnSubagentsRequiresWhitelistAndExecutionPolicy(t *testin
 
 	policy := runtimepolicy.NewToolExecutionPolicy([]string{"view", SpawnSubagentsToolName}, false)
 	apiAgent.SetToolExecutionPolicy(policy)
-	if !shouldExposeSpawnSubagents(apiAgent, map[string]bool{SpawnSubagentsToolName: true}) {
+	if !shouldExposeSpawnSubagents(apiAgent, []string{SpawnSubagentsToolName}) {
 		t.Fatal("expected aligned whitelist and execution policy to expose it")
 	}
 
 	policy.DeniedTools = map[string]bool{SpawnSubagentsToolName: true}
-	if shouldExposeSpawnSubagents(apiAgent, map[string]bool{SpawnSubagentsToolName: true}) {
+	if shouldExposeSpawnSubagents(apiAgent, []string{SpawnSubagentsToolName}) {
 		t.Fatal("expected explicit deny to hide subagent_spawn_batch")
 	}
 }

@@ -80,6 +80,7 @@ const (
 	DerefMissReasonNotFound     = "not_found"
 	DerefMissReasonStoreCorrupt = "store_corrupt"
 	DerefMissReasonCrossSession = "cross_session"
+	DerefMissReasonUnscoped     = "unscoped"
 	DerefMissReasonBadOffset    = "bad_offset"
 	DerefMissReasonNoStore      = "no_store"
 	DerefMissReasonBadArgs      = "bad_args"
@@ -248,7 +249,7 @@ func normalizePointerNoticeKind(kind string) string {
 
 func normalizeDerefMissReason(reason string) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case DerefMissReasonNotFound, DerefMissReasonStoreCorrupt, DerefMissReasonCrossSession, DerefMissReasonBadOffset,
+	case DerefMissReasonNotFound, DerefMissReasonStoreCorrupt, DerefMissReasonCrossSession, DerefMissReasonUnscoped, DerefMissReasonBadOffset,
 		DerefMissReasonNoStore, DerefMissReasonBadArgs:
 		return strings.ToLower(strings.TrimSpace(reason))
 	default:

@@ -59,6 +59,28 @@ func TestFilterPolicyBlockedToolDefinitionsKeepsSurfaceWithoutPolicy(t *testing.
 	require.Empty(t, blocked)
 }
 
+// The request-surface filter must honor the runtime contract: a narrow profile
+// allowlist that omits artifact_read still advertises it, while ordinary
+// omitted tools (todos) stay hidden.
+func TestFilterPolicyBlockedToolDefinitionsKeepsContractualTool(t *testing.T) {
+	policy := NewToolExecutionPolicy([]string{"view"}, false)
+	tools := []types.ToolDefinition{
+		{Name: "view"},
+		{Name: "artifact_read"},
+		{Name: "todos"},
+	}
+
+	filtered, blocked := filterPolicyBlockedToolDefinitions(tools, policy)
+	byName := make(map[string]bool, len(filtered))
+	for _, definition := range filtered {
+		byName[definition.Name] = true
+	}
+	require.True(t, byName["view"])
+	require.True(t, byName["artifact_read"], "contractual tool must survive the request-surface filter")
+	require.False(t, byName["todos"], "ordinary omitted tool must stay hidden")
+	require.Contains(t, blocked, "todos")
+}
+
 // subagent_spawn and subagent_spawn_batch must serve the same read_only contract text.
 func TestSpawnSubagentsReadOnlyDescriptionMatchesPolicyConstant(t *testing.T) {
 	definition := spawnSubagentsToolDefinition(true, "", DefaultCapabilities())

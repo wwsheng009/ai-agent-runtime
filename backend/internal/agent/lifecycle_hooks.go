@@ -36,6 +36,7 @@ func (loop *ReActLoop) dispatchStopHook(ctx context.Context, sessionID, traceID 
 		}
 		payload["observation_count"] = len(result.Observations)
 		payload["tool_error_count"] = result.ToolErrorCount
+		payload["surface_mismatch_count"] = result.SurfaceMismatchCount
 		if result.LimitReached {
 			payload["limit_reached"] = true
 			payload["limit_reason"] = result.LimitReason
@@ -87,6 +88,7 @@ func (loop *ReActLoop) dispatchStopFailureHook(ctx context.Context, sessionID, t
 		}
 		payload["observation_count"] = len(result.Observations)
 		payload["tool_error_count"] = result.ToolErrorCount
+		payload["surface_mismatch_count"] = result.SurfaceMismatchCount
 		if result.LimitReached {
 			payload["limit_reached"] = true
 			payload["limit_reason"] = result.LimitReason

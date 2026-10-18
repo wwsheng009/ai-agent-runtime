@@ -54,6 +54,7 @@ var (
 	parallelGuidanceTools    = toolregistry.CallableNames("view", "grep", "glob", "ls", "shell", "aicli_exec")
 	delegationGuidanceTools  = toolregistry.CallableNames("subagent_spawn_batch", "subagent_spawn")
 	multiAgentGuidanceTools  = toolregistry.CallableNames("subagent_spawn_batch", "subagent_spawn", "team_spawn", "subagent_wait", "team_wait")
+	todosGuidanceTools       = toolregistry.CallableNames("todos")
 )
 
 // RenderShellExecutionGuidanceFacts renders the shell/toolkit guidance only
@@ -73,6 +74,15 @@ func RenderFileEditingGuidanceFacts(facts *ToolGuidanceFacts) string {
 		return ""
 	}
 	return RenderFileEditingGuidance()
+}
+
+// RenderTodosGuidanceFacts renders the task-list rule only when `todos` is
+// model-visible. A child whose surface omits todos must not be told to use it.
+func RenderTodosGuidanceFacts(facts *ToolGuidanceFacts) string {
+	if !facts.any(todosGuidanceTools...) {
+		return ""
+	}
+	return RenderTodosGuidance()
 }
 
 // RenderParallelToolGuidanceFacts renders batching guidance only when the

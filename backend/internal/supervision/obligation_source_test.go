@@ -2,6 +2,7 @@ package supervision
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -154,6 +155,43 @@ func TestBatchObligationSource_ClassifiesFailures(t *testing.T) {
 	require.Equal(t, "t3", policy.Failures[0].TaskID)
 	require.False(t, policy.Failures[0].Retryable, "a policy conflict is structural: repeating the same work cannot converge it")
 	require.Equal(t, "batch:batch-policy/task:t3", policy.Failures[0].ResultRef, "a missing artifact falls back to a durable reference")
+}
+
+func TestRetryableFailureTreatsArtifactScopeDenialAsDeterministic(t *testing.T) {
+	require.False(t, retryableFailure(
+		ObligationStateFailed,
+		"artifact read out of scope: artifact art_x belongs to session child-a",
+		"task_failure",
+	))
+	require.False(t, retryableFailure(
+		ObligationStateFailed,
+		"TOOL_EXECUTION",
+		"tool_error",
+	))
+}
+
+func TestBatchObligationSourceUsesCriticalErrorsForRetryVerdict(t *testing.T) {
+	summary, err := json.Marshal(subagentbatch.BatchSummary{
+		BatchID:        "batch-scope",
+		Status:         subagentbatch.BatchFailed,
+		ErrorClass:     "task_failure",
+		CriticalErrors: []string{"subagent_1: artifact read out of scope: artifact art_x belongs to session child-a"},
+	})
+	require.NoError(t, err)
+	store := &fakeBatchStore{batches: []subagentbatch.SubagentBatch{
+		{
+			BatchID: "batch-scope", ParentSessionID: "root-session-1", ParentTurnID: "turn-1",
+			Status: subagentbatch.BatchFailed, TaskCount: 1, FailedCount: 1,
+			ErrorClass: "task_failure", ResultSummary: summary,
+		},
+	}}
+	rows, err := (&BatchObligationSource{Store: store}).ListObligations(context.Background(), "root-session-1")
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Len(t, rows[0].Failures, 1)
+	require.False(t, rows[0].Failures[0].Retryable,
+		"batch shell must inherit the deterministic task failure verdict")
+	require.Contains(t, rows[0].Failures[0].Summary, "out of scope")
 }
 
 // TestBatchObligationSource_BoundsReadsAndPreviews pins I7: the projection is

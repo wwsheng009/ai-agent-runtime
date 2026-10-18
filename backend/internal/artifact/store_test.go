@@ -2,6 +2,7 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -444,5 +445,43 @@ func TestPruneSessionCheckpointsRemovesOldRowsAndOrphanBlobs(t *testing.T) {
 	}
 	if blob, err := store.LoadBlob(ctx, crossSessionConversationBlobID); err != nil || string(blob) != "cross-session conversation" {
 		t.Fatalf("expected cross-session conversation blob to survive, got %q err=%v", string(blob), err)
+	}
+}
+
+// GetOwned is the tool-execution accessor: it must fail closed for records
+// outside the scope and for legacy rows with no owner, while Get stays
+// unrestricted for host/diagnostic paths.
+func TestStoreGetOwnedEnforcesReadScope(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(nil)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ownedID, err := store.Put(ctx, Record{SessionID: "owner", ToolName: "shell", Content: "owned"})
+	if err != nil {
+		t.Fatalf("put owned record: %v", err)
+	}
+	unscopedID, err := store.Put(ctx, Record{ToolName: "shell", Content: "legacy"})
+	if err != nil {
+		t.Fatalf("put unscoped record: %v", err)
+	}
+
+	if record, err := store.GetOwned(ctx, ownedID, ReadScope{SessionIDs: map[string]bool{"owner": true}}); err != nil || record == nil {
+		t.Fatalf("owner read must pass, got record=%v err=%v", record, err)
+	}
+	if _, err := store.GetOwned(ctx, ownedID, ReadScope{SessionIDs: map[string]bool{"other": true}}); !errors.Is(err, ErrArtifactReadOutOfScope) {
+		t.Fatalf("other-session read must fail with out-of-scope, got %v", err)
+	}
+	if _, err := store.GetOwned(ctx, unscopedID, ReadScope{SessionIDs: map[string]bool{"owner": true}}); !errors.Is(err, ErrArtifactReadUnscoped) {
+		t.Fatalf("unscoped record must fail closed, got %v", err)
+	}
+	if record, err := store.GetOwned(ctx, ownedID, ReadScope{Unrestricted: true}); err != nil || record == nil {
+		t.Fatalf("unrestricted read must pass, got record=%v err=%v", record, err)
+	}
+	// Get keeps its historical unrestricted behavior.
+	if record, err := store.Get(ctx, ownedID); err != nil || record == nil {
+		t.Fatalf("Get must stay unrestricted, got record=%v err=%v", record, err)
 	}
 }

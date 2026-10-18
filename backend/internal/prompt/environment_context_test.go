@@ -112,9 +112,6 @@ func TestRenderFileEditingGuidance_PrefersApplyPatchForCodeEdits(t *testing.T) {
 	if !strings.Contains(got, "every content line must start with `+`") {
 		t.Fatalf("expected Add File line-prefix guidance, got:\n%s", got)
 	}
-	if !strings.Contains(got, "at most one task `in_progress`") {
-		t.Fatalf("expected todos single in_progress guidance, got:\n%s", got)
-	}
 }
 
 func TestRenderTaskDifficultyGuidance_IncludesSubagentRoutingMetadata(t *testing.T) {
@@ -162,5 +159,33 @@ func TestRenderMultiAgentCollaborationGuidance_KeepsParentWorkingAndReadsIncreme
 	}
 	if strings.Count(got, "Multi-agent collaboration guidance:") != 1 {
 		t.Fatalf("expected a single guidance header, got:\n%s", got)
+	}
+}
+
+// The todos rule belongs to the todos tool, not to file editing. Keeping it in
+// RenderFileEditingGuidance made every write-capable child read the rule even
+// when its surface omitted todos.
+func TestRenderFileEditingGuidance_DoesNotMentionTodos(t *testing.T) {
+	got := RenderFileEditingGuidance()
+	if strings.Contains(got, "todos") {
+		t.Fatalf("file editing guidance must not mention todos, got:\n%s", got)
+	}
+}
+
+func TestRenderTodosGuidanceFactsFollowsVisibility(t *testing.T) {
+	// nil facts keep the legacy unconditional output.
+	if got := RenderTodosGuidanceFacts(nil); !strings.Contains(got, "Task list guidance:") {
+		t.Fatalf("nil facts must keep the legacy todos section, got:\n%s", got)
+	}
+
+	hidden := &ToolGuidanceFacts{Only: map[string]bool{"view": true, "grep": true}}
+	if got := RenderTodosGuidanceFacts(hidden); got != "" {
+		t.Fatalf("todos must be withheld when it is not visible, got:\n%s", got)
+	}
+
+	visible := &ToolGuidanceFacts{Only: map[string]bool{"todos": true}}
+	got := RenderTodosGuidanceFacts(visible)
+	if !strings.Contains(got, "Task list guidance:") || !strings.Contains(got, "When using `todos`") {
+		t.Fatalf("expected the todos section when visible, got:\n%s", got)
 	}
 }

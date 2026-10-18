@@ -2059,6 +2059,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		instructionProvider = resolveAgentProvider(profileState, selectedConfig, h.llmRuntime)
 	}
 	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, instructionProvider)
+	instructionHeadMessages := buildRuntimeInstructionHeadMessages(profileState, workspacePath, instructionProvider)
 
 	if session != nil {
 		sessionUpdated := false
@@ -2213,6 +2214,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if agentConfig.Options == nil {
 		agentConfig.Options = make(map[string]interface{})
 	}
+	agentConfig.Options[agent.ChildPromptHeadOption] = primarySystemInstructionContent(instructionHeadMessages)
 	agentConfig.Options["route"] = chatRoute.payload()
 	if strings.TrimSpace(req.TeamID) != "" || strings.TrimSpace(req.TaskID) != "" {
 		if agentConfig.Options == nil {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -241,6 +242,51 @@ func resolveChildToolSurface(parent *Agent, task SubagentTask) (SubagentTask, *T
 	}
 	task = appendShellSurfaceRouteWarnings(task, child)
 	return task, child, nil
+}
+
+// finalizeChildToolSurface grants runtime-contract tools after the read-only
+// filter has produced the final requested surface. The grant must happen here,
+// not in resolveChildToolSurface: a read-only parent may strip every requested
+// tool, and an empty surface must stay empty (nothing produces a pointer).
+func finalizeChildToolSurface(task SubagentTask, policy *ToolExecutionPolicy, available map[string]bool) SubagentTask {
+	if task.ToolsWhitelist != nil && len(task.ToolsWhitelist) > 0 {
+		task.ToolsWhitelist = appendContractualToolNames(task.ToolsWhitelist, policy, available)
+	}
+	return task
+}
+
+// appendContractualToolNames adds the policy's contractual tools to an
+// explicit, non-empty whitelist. Denied tools are skipped (deny wins), and the
+// result is deterministic so prompt text and tool-surface ledgers stay stable.
+func appendContractualToolNames(names []string, policy *ToolExecutionPolicy, available map[string]bool) []string {
+	if policy == nil || len(policy.ContractualTools) == 0 {
+		return names
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		seen[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	extra := make([]string, 0, len(policy.ContractualTools))
+	for name := range policy.ContractualTools {
+		if policy.DeniesTool(name) {
+			continue
+		}
+		// A known live surface that does not register the tool means the host
+		// cannot execute it; appending it would advertise a tool with no schema.
+		// An unknown surface (nil/empty) stays conservative and appends.
+		if len(available) > 0 && !available[name] {
+			continue
+		}
+		if seen[strings.ToLower(strings.TrimSpace(name))] {
+			continue
+		}
+		extra = append(extra, name)
+	}
+	if len(extra) == 0 {
+		return names
+	}
+	sort.Strings(extra)
+	return append(names, extra...)
 }
 
 // appendShellSurfaceRouteWarnings adds non-blocking route warnings when the

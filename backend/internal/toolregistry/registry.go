@@ -87,6 +87,14 @@ type Entry struct {
 	// （toolregistry.MatchPattern，如 "subagent_*"）或显式名单放回来。字段保留
 	// 供观测面（toolsurface metadata.essential）、目录 API 与测试引用。
 	Essential bool
+	// Contractual 表示该工具是某条运行时契约的组成部分（当前仅
+	// artifact_read：输出网关写进模型上下文的 `art_…` 指针必须有读取端）。
+	// 契约性工具由运行时按契约授予，不要求 profile 在 allowlist 里逐名列出；
+	// 但显式 deny 恒优先，仍然可以关闭（此时渲染层必须降级指针文案）。
+	//
+	// 与 Essential 的区别：Essential 不影响可用性；Contractual 影响可用性，
+	// 但授权来源是契约而不是用户名单。
+	Contractual bool
 	// ToolkitBuiltin 为真表示该内置工具的**定义**由 internal/toolkit/tools 提供，
 	// 且必须由 toolkit 装配点（internal/tools.registerBuiltinToolkitTools 的
 	// builtinToolkitRegistrations 构造表）注册进运行时注册表。
@@ -158,7 +166,7 @@ var builtinEntries = []Entry{
 	{Name: "search_tool", Group: GroupSearch, Exposure: sharedExposure, Essential: true},
 
 	// ---- 产物与 IO（io 组）----
-	{Name: "artifact_read", Group: GroupIO, Exposure: sharedExposure, ToolkitBuiltin: true},
+	{Name: "artifact_read", Group: GroupIO, Exposure: sharedExposure, Contractual: true, ToolkitBuiltin: true},
 	{Name: "openai_image_generate", Aliases: []string{"image_generate"}, Group: GroupIO, Exposure: sharedExposure, ToolkitBuiltin: true},
 
 	// ---- 符号索引（code.*，由 code gate 按档位条件注册；随 grep 语义归 read 组）----
@@ -168,7 +176,7 @@ var builtinEntries = []Entry{
 	{Name: "code_references", Group: GroupRead, Exposure: sharedExposure, CodeTool: true},
 	{Name: "code_callers", Group: GroupRead, Exposure: sharedExposure, CodeTool: true},
 
-	// ---- 控制面（control 组；运行时必需，allowlist 不可裁剪）----
+	// ---- 控制面（control 组；运行时自有工具，allowlist 可裁剪，见 Entry.Essential 注释）----
 	{Name: "todos", Group: GroupControl, Exposure: sharedExposure, Essential: true, ToolkitBuiltin: true},
 	{Name: "get_goal", Group: GroupControl, Exposure: sharedExposure, Essential: true},
 	{Name: "read_goal", Group: GroupControl, Exposure: sharedExposure, Essential: true},
@@ -285,6 +293,19 @@ func Entries() []Entry {
 	copy(out, builtinEntries)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// ContractualNames returns the normalized names of tools declared Contractual.
+// Policy derivation reads this single list; do not duplicate it elsewhere.
+func ContractualNames() []string {
+	names := make([]string, 0, 2)
+	for _, entry := range builtinEntries {
+		if entry.Contractual {
+			names = append(names, Normalize(entry.Name))
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Lookup 按名字（规范名或别名，均先经 Normalize）查条目。
