@@ -144,8 +144,9 @@
 | Go 单测 | 副屏期 KeyHandler 让位/复 Arm（R5） | 已有（`chat_screen_input_ownership_test.go`） |
 | Go 单测 | Web 键入 `/stop` 忙碌期直通 / 空闲入队（R10） | 已有（`TestHandleChatWebAPIInput_StopPromptInterruptsRunningTurn` 等） |
 | 真机 | 运行中状态行诚实 + Web 中断取消运行中 shell + 重复中断折叠 + 停止摘要 | ✅ 2026-10-18（§6.1） |
-| 真机 | TUI 物理 Esc / 键入 `/stop` 打断运行中回合 | 待用户按键（本机无法注入物理键） |
 | 真机 | 空闲 `/stop` 不误报（R9 修复复验） | ✅ 2026-10-18 23:53 构建复验（§6.1） |
+| 真机 | TUI 物理 Esc / 键入 `/stop` 打断运行中回合 | ✅ 2026-10-19 01:05 构建复验（§6.1 #5/#6） |
+| 真机 | 副屏 Esc 只关面板、不中断回合（R5） | ✅ 2026-10-19 01:05 构建复验（§6.1 #4：opens=1/closes=1/esc=1，屏内无中断） |
 | 手测 | 后台回合（wake/续跑）Esc → Stopping → Ready（Windows console） | 修复待重建二进制后验证 |
 | 手测 | winpty/SSH：裸 Esc / 带草稿 Esc / Ctrl+C / `/stop` 四通道 | 待盲测（R1 已实现） |
 | 手测 | Web 微客户端：焦点在停止按钮 / 会话列表 / 浮层打开时按 Esc | 待盲测（R2 已实现） |
@@ -176,8 +177,19 @@
 | 4 | 回合取消与反馈 | turn `failed`、`error="context canceled"`（3.6s）；transcript `当前运行已停止…/retry` | ✅ |
 | 5 | Web 微客户端含 R2 | 在线 `/web/js/chat.js` 含 `onGlobalEscapeInterrupt` / `escOverlayOwnsKey` / `defaultPrevented` | ✅（浏览器行为待手测） |
 
-**待人工按键（本机无法注入物理键）**：TUI 运行中按物理 Esc、运行中键入 `/stop` 回车——
-期望 `已中断 - ESC 取消当前操作` + 秒级 Ready + 草稿保留；winpty/SSH 下同样适用（R1）。
+**按键复验（2026-10-19 01:05:11 构建 aicli-5x.exe；会话 session_20261019010517_zPeHrKnw；`strings` 已确认含 `beginChatScreenInputOwnership` / `chatInterruptDecision` / `escOverlayOwnsKey`）**：
+
+| # | 场景 | 证据 | 结论 |
+| --- | --- | --- | --- |
+| 1 | 空闲 `/stop` | 回执 `当前没有在途回合，/stop 未触发中断…` | ✅ R3/R9 |
+| 2 | 运行中 Web 键入 `/stop`（R10） | 33ms `{"result":"started","status":"interrupted"}`；回合 `context canceled` | ✅ 直通生效 |
+| 3 | 立即重复中断（R6） | `{"result":"already_stopping"}` | ✅ 不叠加取消 |
+| 4 | **副屏 Esc（R5）** | `Chat Screen Framework` 计数 `opens=1 closes=1 esc=1`（副屏由 Esc 关闭），副屏存续期间**无** `session_interrupted`；关闭后回合继续（后续中断发生在 17:09:35） | ✅ 面板只关不中断 |
+| 5 | TUI 物理 Esc 中断 | 事件 `session_interrupted reason=interrupt` + turn `failed / context canceled`（17:09:35，运行 142s 的 ping 被取消） | ✅ 原始缺陷回归通过 |
+| 6 | 二次中断动作（Esc 或键入 `/stop`） | 17:09:46 起的新回合 5s 后 `context canceled` + `session_interrupted` | ✅ |
+| 7 | 中断后反馈 | transcript `当前运行已停止：已保存 1 条工具观察…` + `/retry` 建议 | ✅ |
+
+**待人工按键（本机无法注入物理键）**：已全部由上述 #4~#6 覆盖；winpty/SSH 场景（R1）仍待具备该环境的盲测。
 
 **真机新发现（本轮修复/记录）**：
 
