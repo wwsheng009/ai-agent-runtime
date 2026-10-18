@@ -2730,6 +2730,9 @@ func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd 
 	if guidance := strings.TrimSpace(runtimeprompt.RenderFileEditingGuidanceFacts(guidanceFacts)); guidance != "" {
 		lines = append(lines, guidance)
 	}
+	if guidance := strings.TrimSpace(runtimeprompt.RenderTodosGuidanceFacts(guidanceFacts)); guidance != "" {
+		lines = append(lines, guidance)
+	}
 	if guidance := strings.TrimSpace(runtimeprompt.RenderParallelToolGuidanceFacts(guidanceFacts)); guidance != "" {
 		lines = append(lines, guidance)
 	}
@@ -2743,6 +2746,34 @@ func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd 
 		lines = append(lines, profilePrompt)
 	}
 	return strings.Join(lines, "\n\n")
+}
+
+// composeDurableChatSystemPromptHeadForCWD is the surface-independent part of
+// the durable prompt: profile text plus environment context, without any tool
+// guidance. Child agents inherit this head and render guidance from their own
+// resolved tool policy.
+func composeDurableChatSystemPromptHeadForCWD(session *ChatSession, cwd string) string {
+	if session == nil {
+		return ""
+	}
+	snapshot := ensureSessionEnvironmentSnapshot(session, cwd)
+	lines := make([]string, 0, 3)
+	profilePrompt := strings.TrimSpace(session.SystemPromptText)
+	appendProfilePrompt := runtimeprofileinput.ProfilePromptModeIsAppend(session.ProfilePromptMode)
+	if profilePrompt != "" && !appendProfilePrompt {
+		lines = append(lines, profilePrompt)
+	}
+	if context := strings.TrimSpace(snapshot.ContextBlock); context != "" {
+		lines = append(lines, "Environment context:\n"+context)
+	}
+	if profilePrompt != "" && appendProfilePrompt {
+		lines = append(lines, profilePrompt)
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+func composeChatSystemPromptHeadForCWD(session *ChatSession, cwd string) string {
+	return composeDurableChatSystemPromptHeadForCWD(session, cwd)
 }
 
 // chatSessionToolGuidanceFacts derives tool-visibility facts from the session's

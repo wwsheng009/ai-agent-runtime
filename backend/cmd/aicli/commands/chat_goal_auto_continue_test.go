@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -774,6 +775,182 @@ func TestAICLISharedChatExecutor_GoalContinuationDoesNotPersistInstructionPrompt
 	}
 	if got := session.Messages[len(session.Messages)-1].Content; got != "audit done" {
 		t.Fatalf("expected continuation assistant response to persist, got %q", got)
+	}
+}
+
+func TestChatGoalElapsedSecondsForAccounting_FreezesAtCompletedAt(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	completedAt := now.Add(-30 * time.Second)
+	goal := &runtimegoal.SessionGoal{
+		Status:      runtimegoal.StatusComplete,
+		CreatedAt:   now.Add(-10 * time.Minute),
+		UpdatedAt:   completedAt,
+		CompletedAt: &completedAt,
+	}
+
+	got := chatGoalElapsedSecondsForAccounting(goal, now.Add(-90*time.Second), now)
+	if got != 60 {
+		t.Fatalf("expected accounting to stop at CompletedAt (60s), got %ds", got)
+	}
+}
+
+func TestAccountChatGoalElapsedInMemoryAndPersist(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+	startedAt := now.Add(-90 * time.Second)
+	store := runtimegoal.NewMetadataStore()
+	goal, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || goal == nil {
+		t.Fatalf("load goal: ok=%v err=%v", ok, err)
+	}
+	goal.CreatedAt = startedAt.Add(-time.Minute)
+	goal.UpdatedAt = goal.CreatedAt
+	if err := store.Put(session.RuntimeSession, *goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+	if err := session.SessionManager.Update(ctx, session.RuntimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	accounting := accountChatGoalElapsedInMemory(session, startedAt, now)
+	if accounting == nil || accounting.Seconds != 90 {
+		t.Fatalf("expected 90s accounting snapshot, got %#v", accounting)
+	}
+	persistChatGoalElapsed(session, accounting)
+
+	persistedSession, err := session.SessionManager.Get(ctx, session.RuntimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	persistedGoal, ok, err := store.Get(persistedSession)
+	if err != nil || !ok || persistedGoal == nil {
+		t.Fatalf("load persisted goal: ok=%v err=%v", ok, err)
+	}
+	if persistedGoal.TimeUsedSeconds != 90 {
+		t.Fatalf("TimeUsedSeconds = %d, want 90", persistedGoal.TimeUsedSeconds)
+	}
+}
+
+func TestFinishWaitingPersistsGoalElapsed(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+
+	ctx := context.Background()
+	store := runtimegoal.NewMetadataStore()
+	goal, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || goal == nil {
+		t.Fatalf("load goal: ok=%v err=%v", ok, err)
+	}
+	goal.CreatedAt = time.Now().Add(-5 * time.Minute)
+	goal.UpdatedAt = goal.CreatedAt
+	if err := store.Put(session.RuntimeSession, *goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+	if err := session.SessionManager.Update(ctx, session.RuntimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	coordinator.mu.Lock()
+	coordinator.waitingActive = true
+	coordinator.mu.Unlock()
+	session.goalStatusMu.Lock()
+	session.goalStatusActiveTurnStartedAt = time.Now().Add(-90 * time.Second)
+	session.goalStatusMu.Unlock()
+
+	coordinator.ClearWaiting()
+
+	current, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || current == nil {
+		t.Fatalf("load current goal: ok=%v err=%v", ok, err)
+	}
+	if current.TimeUsedSeconds < 90 {
+		t.Fatalf("current TimeUsedSeconds = %d, want >= 90", current.TimeUsedSeconds)
+	}
+	if !chatGoalStatusActiveTurnStartedAt(session).IsZero() {
+		t.Fatal("expected live goal timer to be cleared after turn teardown")
+	}
+
+	persistedSession, err := session.SessionManager.Get(ctx, session.RuntimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	persistedGoal, ok, err := store.Get(persistedSession)
+	if err != nil || !ok || persistedGoal == nil {
+		t.Fatalf("load persisted goal: ok=%v err=%v", ok, err)
+	}
+	if persistedGoal.TimeUsedSeconds < 90 {
+		t.Fatalf("persisted TimeUsedSeconds = %d, want >= 90", persistedGoal.TimeUsedSeconds)
+	}
+}
+
+func TestMaybeAutoContinueActiveGoalAccountsKickedTurnElapsed(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+
+	ctx := context.Background()
+	store := runtimegoal.NewMetadataStore()
+	goal, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || goal == nil {
+		t.Fatalf("load goal: ok=%v err=%v", ok, err)
+	}
+	startedAt := time.Now().Add(-90 * time.Second)
+	goal.CreatedAt = startedAt.Add(-time.Minute)
+	goal.UpdatedAt = goal.CreatedAt
+	if err := store.Put(session.RuntimeSession, *goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+	if err := session.SessionManager.Update(ctx, session.RuntimeSession); err != nil {
+		t.Fatalf("manager.Update: %v", err)
+	}
+	session.goalStatusMu.Lock()
+	session.goalStatusActiveTurnStartedAt = startedAt
+	session.goalStatusMu.Unlock()
+
+	executor := &fakeChatExecutor{
+		output: "initial response",
+		onContinue: func(ctx context.Context, session *ChatSession) (string, error) {
+			if _, err := executeUpdateGoalFunction(session, map[string]interface{}{
+				"status":  string(runtimegoal.StatusComplete),
+				"summary": "completed after a kicked continuation",
+			}); err != nil {
+				return "", err
+			}
+			return "done", nil
+		},
+	}
+	session.ChatExecutor = executor
+
+	if err := maybeAutoContinueActiveGoal(ctx, session, executor); err != nil {
+		t.Fatalf("maybeAutoContinueActiveGoal: %v", err)
+	}
+	if !chatGoalStatusActiveTurnStartedAt(session).IsZero() {
+		t.Fatal("expected kick continuation to settle and clear the live goal timer")
+	}
+	current, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || current == nil {
+		t.Fatalf("load current goal: ok=%v err=%v", ok, err)
+	}
+	if current.Status != runtimegoal.StatusComplete {
+		t.Fatalf("goal status = %s, want complete", current.Status)
+	}
+	if current.TimeUsedSeconds < 90 {
+		t.Fatalf("current TimeUsedSeconds = %d, want >= 90", current.TimeUsedSeconds)
+	}
+
+	persistedSession, err := session.SessionManager.Get(ctx, session.RuntimeSession.ID)
+	if err != nil {
+		t.Fatalf("manager.Get: %v", err)
+	}
+	persistedGoal, ok, err := store.Get(persistedSession)
+	if err != nil || !ok || persistedGoal == nil {
+		t.Fatalf("load persisted goal: ok=%v err=%v", ok, err)
+	}
+	if persistedGoal.TimeUsedSeconds < 90 {
+		t.Fatalf("persisted TimeUsedSeconds = %d, want >= 90", persistedGoal.TimeUsedSeconds)
 	}
 }
 

@@ -633,10 +633,21 @@ func documentScreenRows(doc render.Document, cell scene.TranscriptCell, width in
 // cell.Source is always the provider body verbatim: no divider, wrapping, trim,
 // Markdown normalization, or inferred whitespace is persisted back into it.
 func reasoningScreenRows(cell scene.TranscriptCell, width int, _ style.ThemeContext) []AppScreenRow {
+	if !reasoningSourceVisible(cell.Source) {
+		return nil
+	}
 	return reasoningProjectionScreenRows(
 		reasoningProjectionLines(cell.Source, width, cell.Phase != scene.CellMutable),
 		cell.ID,
 	)
+}
+
+// reasoningSourceVisible reports whether a reasoning body has anything a user
+// can see. Providers may emit a single whitespace token for an otherwise
+// tool-only step; those bytes stay in the source/history, but rendering an
+// empty divider pair for them is pure noise.
+func reasoningSourceVisible(source string) bool {
+	return strings.TrimSpace(source) != ""
 }
 
 // reasoningProjectionLines is the single live/committed reasoning projector.
@@ -644,6 +655,9 @@ func reasoningScreenRows(cell scene.TranscriptCell, width int, _ style.ThemeCont
 // wraps. In particular, markdown-looking reasoning remains literal so a parser
 // cannot collapse leading, interior, or trailing provider-owned blank lines.
 func reasoningProjectionLines(source string, width int, terminal bool) []render.Line {
+	if !reasoningSourceVisible(source) {
+		return nil
+	}
 	lines := reasoningDividerBandLines(reasoningChromeLine("reasoning"), width)
 	if source != "" {
 		bodyRows := activeCellBandRows(source, width)

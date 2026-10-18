@@ -26,6 +26,9 @@ const (
 	// between provider and balance so the canonical order stays
 	// model → provider → routing → balance → context.
 	StatusSegRouting
+	// StatusSegGoal marks the persistent goal indicator so the 1Hz status tick
+	// can refresh only its elapsed text without rebuilding unrelated segments.
+	StatusSegGoal
 )
 
 // RunState is the primary chat/runtime state shown in the status line.

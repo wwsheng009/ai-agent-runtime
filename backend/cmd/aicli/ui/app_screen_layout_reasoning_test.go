@@ -170,8 +170,6 @@ func TestCommittedReasoningTrailingLFUsesClosingDividerCursorRow(t *testing.T) {
 		{name: "single trailing LF", body: "A\n", want: []string{"A"}},
 		{name: "double trailing LF", body: "A\n\n", want: []string{"A", ""}},
 		{name: "leading LF", body: "\nA", want: []string{"", "A"}},
-		{name: "single LF body", body: "\n", want: []string{""}},
-		{name: "double LF body", body: "\n\n", want: []string{"", ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rows := rowsText(structuredTranscriptScreenRows(
@@ -187,6 +185,19 @@ func TestCommittedReasoningTrailingLFUsesClosingDividerCursorRow(t *testing.T) {
 				t.Fatalf("body rows = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWhitespaceOnlyReasoningRendersNoChromeOrBody(t *testing.T) {
+	for _, source := range []string{" ", "\t", "\n", "\n\n"} {
+		rows := structuredTranscriptScreenRows(
+			reasoningTestCell(source, scene.PresentationPlain),
+			100,
+			reasoningTestTheme(),
+		)
+		if len(rows) != 0 {
+			t.Fatalf("whitespace-only reasoning %q rendered %d rows: %q", source, len(rows), rowsText(rows))
+		}
 	}
 }
 

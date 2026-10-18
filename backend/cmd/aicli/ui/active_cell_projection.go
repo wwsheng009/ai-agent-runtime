@@ -65,6 +65,9 @@ func ProjectActiveCellBandWithTheme(active ActiveCellState, geometry GeometrySta
 	if active.CellID == 0 || active.Phase == ActiveCellInactive || active.Source == "" {
 		return ActiveBandProjection{}
 	}
+	if active.Kind == scene.KindReasoning && !reasoningSourceVisible(active.Source) {
+		return ActiveBandProjection{}
+	}
 
 	// 工具执行中（Scene tool chain 处于 mutable 阶段）：无论 Acked 边界
 	// 如何，ActiveBand 投影一行 "• Running <命令摘要>"。这对齐旧版
@@ -267,6 +270,9 @@ func activeMarkdownTailLines(source string, width int, theme style.ThemeContext,
 // 覆盖视口的尾部行（reasoning 为逐行字面投影、无跨行状态），与全量展开的
 // 尾部逐行等价。
 func activeReasoningTailLines(source string, width, maxRows int) []render.Line {
+	if !reasoningSourceVisible(source) {
+		return nil
+	}
 	lines := reasoningDividerBandLines(reasoningChromeLine("reasoning"), width)
 	for _, text := range activeCellBandTailRows(source, width, maxRows) {
 		lines = append(lines, render.Line{Spans: []render.Span{{

@@ -261,6 +261,22 @@ func TestProjectActiveCellBandKeepsReasoningPlainTextWithoutMarkdown(t *testing.
 	}
 }
 
+func TestProjectActiveCellBandSkipsWhitespaceOnlyReasoning(t *testing.T) {
+	for _, source := range []string{" ", "\t", "\n", "\n\n"} {
+		active := ActiveCellState{
+			CellID:   31,
+			Revision: 1,
+			Kind:     scene.KindReasoning,
+			Phase:    ActiveCellMutable,
+			Source:   source,
+		}
+		projection := ProjectActiveCellBand(active, GeometryState{Width: 40, Height: 16})
+		if projection.Valid() {
+			t.Fatalf("whitespace-only reasoning %q projected: %+v", source, projection)
+		}
+	}
+}
+
 func TestLayoutAppStateUsesActiveProjectionOnlyWithoutLegacyBand(t *testing.T) {
 	state := AppState{
 		Geometry: GeometryState{Width: 40, Height: 16},

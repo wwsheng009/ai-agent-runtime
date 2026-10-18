@@ -1456,6 +1456,55 @@ func chatAccountBalanceStatusInsertIndex(segments []style.StatusSegment) int {
 	return len(segments)
 }
 
+// refreshChatGoalStatusModel updates only the persistent goal segment. The
+// goal elapsed clock lives on the persistent status row (unlike the transient
+// Analyzing/Retrying row), so the 1Hz dynamic-status tick must refresh it
+// explicitly or "Pursuing goal (3s · attempt 1)" stays frozen forever.
+func refreshChatGoalStatusModel(model style.StatusLineModel, goal chatStatusSegment, width int) style.StatusLineModel {
+	index := -1
+	for i, segment := range model.Segments {
+		if segment.Kind == style.StatusSegGoal {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return model
+	}
+	if goal.full == "" {
+		model.Segments = append(model.Segments[:index], model.Segments[index+1:]...)
+		for i := range model.Segments {
+			model.Segments[i].Priority = i
+		}
+		return model
+	}
+	text := goal.compact
+	if text == "" {
+		text = goal.full
+	}
+	if width <= 0 {
+		width = 80
+	}
+	candidate := cloneChatStatusLineModel(model)
+	candidate.Segments[index].Text = goal.full
+	if ui.DisplayWidth(style.StatusLineDocument(candidate, 0).PlainText()) <= width {
+		text = goal.full
+	}
+	model.Segments[index].Kind = style.StatusSegGoal
+	model.Segments[index].Text = text
+	model.Segments[index].Role = style.RoleProgress
+	return model
+}
+
+func chatStatusModelHasKind(model style.StatusLineModel, kind style.StatusSegmentKind) bool {
+	for _, segment := range model.Segments {
+		if segment.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *chatInteractionCoordinator) updateDynamicStatusClockLocked(s chatSurfaceStatus, now time.Time) {
 	if !s.isRunning() {
 		c.dynamicStatusStarted = time.Time{}
@@ -1522,9 +1571,10 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 	// 用最近一次 updateSurfaceStatusLocked 的结构化状态重建，而不是重新派生：
 	// SetRetrying/SetNotice 写入的状态不反映在 agentStage/activity flags 上，
 	// 重新派生会让 retry 状态行在每秒钟的 tick 中闪回 idle/丢失计时。
+	width := ui.GetTerminalWidth()
 	model := buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(
 		c.surfaceStatus,
-		ui.GetTerminalWidth(),
+		width,
 		c.inputMode,
 		c.dynamicStatusElapsedLocked(now),
 		c.dynamicStatusCompleted,
@@ -1532,7 +1582,25 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 	)
 	model = c.appendStatusHintsLocked(model)
 	c.dynamicStatusModel = cloneChatStatusLineModelPointer(model)
-	c.surface.SetDynamicStatusModel(model)
+	persistentModel := c.persistentStatusModel
+	persistentChanged := false
+	goalSegment := chatSurfaceGoalStatusSegment(c.session)
+	if goalSegment.full != "" && !chatStatusModelHasKind(persistentModel, style.StatusSegGoal) {
+		// Goal was created after the last persistent projection. This is rare;
+		// rebuild the persistent row once so the segment exists for subsequent
+		// incremental ticks.
+		persistentModel = buildChatPersistentStatusModelForWidth(c.session, width)
+		persistentChanged = true
+	} else if chatStatusModelHasKind(persistentModel, style.StatusSegGoal) {
+		persistentModel = refreshChatGoalStatusModel(persistentModel, goalSegment, width)
+		persistentChanged = true
+	}
+	if persistentChanged {
+		c.persistentStatusModel = cloneChatStatusLineModel(persistentModel)
+		c.surface.SetStatusModels(persistentModel, model)
+	} else {
+		c.surface.SetDynamicStatusModel(model)
+	}
 	c.scheduleDynamicStatusTickLocked(now)
 }
 
@@ -2558,8 +2626,26 @@ func (c *chatInteractionCoordinator) finishWaiting(completed bool) {
 		return
 	}
 	c.mu.Lock()
-	if c.shutdown || !c.waitingActive {
+	if c.shutdown {
 		c.mu.Unlock()
+		return
+	}
+	session := c.session
+	// Settle the live goal clock on every teardown, even when an interrupt has
+	// already dropped waitingActive. Interrupt cleanup can race the actor's
+	// failure restore; settling here runs after that restore and prevents the
+	// stale goal snapshot from overwriting the accumulated TimeUsedSeconds.
+	goalElapsed := accountChatGoalElapsedInMemory(
+		session,
+		takeChatGoalStatusActiveTurnStartedAt(session),
+		time.Now(),
+	)
+	if !c.waitingActive {
+		if goalElapsed != nil {
+			c.repaintStatusModelsLocked()
+		}
+		c.mu.Unlock()
+		persistChatGoalElapsed(session, goalElapsed)
 		return
 	}
 	if completed && c.internalRunSeq != c.waitingInternalRunSeq {
@@ -2581,9 +2667,6 @@ func (c *chatInteractionCoordinator) finishWaiting(completed bool) {
 		c.dynamicStatusCompleted = false
 	}
 	c.waitingActive = false
-	// Codex turn_lifecycle.finish: stop live goal-time accrual.
-	clearChatGoalStatusActiveTurnStarted(c.session)
-	session := c.session
 	// Codex refreshes git-branch after turn complete so title/status pick up
 	// branch switches that happened during the turn. Invalidate before the
 	// status rebuild so both surfaces see a fresh probe.
@@ -2599,6 +2682,7 @@ func (c *chatInteractionCoordinator) finishWaiting(completed bool) {
 	}
 	c.updateSurfaceStatusLocked(surface)
 	c.mu.Unlock()
+	persistChatGoalElapsed(session, goalElapsed)
 	refreshChatTitleMetadata(session)
 }
 
@@ -3053,7 +3137,7 @@ func buildChatSurfaceStatusSegments(session *ChatSession, s chatSurfaceStatus, i
 	// Codex-style goal indicator: keep near the front so residual active goals
 	// remain visible even when width drops optional diagnostics.
 	if goalSeg := chatSurfaceGoalStatusSegment(session); goalSeg.full != "" {
-		segments = append(segments, presentChatStatusSegment(goalSeg, style.StatusSegMode, style.RoleProgress))
+		segments = append(segments, presentChatStatusSegment(goalSeg, style.StatusSegGoal, style.RoleProgress))
 	}
 
 	// Reference diagnostics: model · provider · Context N% · cwd · [project] · branch · window · in · out · Fast
@@ -3394,21 +3478,42 @@ func chatSurfaceGoalElapsedSeconds(goal *runtimegoal.SessionGoal, activeTurnStar
 	if seconds < 0 {
 		seconds = 0
 	}
-	if goal.Status != runtimegoal.StatusActive || activeTurnStartedAt.IsZero() {
+	if activeTurnStartedAt.IsZero() {
 		return seconds
 	}
 	if now.IsZero() {
 		now = time.Now()
 	}
-	// Codex GoalStatusState.indicator:
-	// baseline = max(observed_at, active_turn_started_at)
-	// For aicli, goal.UpdatedAt is the last persisted usage observation.
-	baseline := activeTurnStartedAt
-	if !goal.UpdatedAt.IsZero() && goal.UpdatedAt.After(baseline) {
-		baseline = goal.UpdatedAt
-	}
-	if now.After(baseline) {
-		seconds += int64(now.Sub(baseline) / time.Second)
+	switch goal.Status {
+	case runtimegoal.StatusActive:
+		// Codex GoalStatusState.indicator:
+		// baseline = max(observed_at, active_turn_started_at)
+		// For aicli, goal.UpdatedAt is the last persisted usage observation.
+		baseline := activeTurnStartedAt
+		if !goal.UpdatedAt.IsZero() && goal.UpdatedAt.After(baseline) {
+			baseline = goal.UpdatedAt
+		}
+		if now.After(baseline) {
+			seconds += int64(now.Sub(baseline) / time.Second)
+		}
+	case runtimegoal.StatusComplete:
+		// Completion freezes the current turn at CompletedAt. Without this
+		// segment the completed indicator falls back to TimeUsedSeconds, which
+		// is only flushed at turn teardown, and briefly renders "0s".
+		end := now
+		switch {
+		case goal.CompletedAt != nil:
+			end = *goal.CompletedAt
+		case !goal.UpdatedAt.IsZero():
+			end = goal.UpdatedAt
+		}
+		baseline := activeTurnStartedAt
+		if goal.CreatedAt.After(baseline) {
+			baseline = goal.CreatedAt
+		}
+		if end.After(baseline) {
+			seconds += int64(end.Sub(baseline) / time.Second)
+		}
 	}
 	return seconds
 }
@@ -3466,13 +3571,19 @@ func markChatGoalStatusActiveTurnStarted(session *ChatSession) {
 	session.goalStatusMu.Unlock()
 }
 
-func clearChatGoalStatusActiveTurnStarted(session *ChatSession) {
+func takeChatGoalStatusActiveTurnStartedAt(session *ChatSession) time.Time {
 	if session == nil {
-		return
+		return time.Time{}
 	}
 	session.goalStatusMu.Lock()
+	startedAt := session.goalStatusActiveTurnStartedAt
 	session.goalStatusActiveTurnStartedAt = time.Time{}
 	session.goalStatusMu.Unlock()
+	return startedAt
+}
+
+func clearChatGoalStatusActiveTurnStarted(session *ChatSession) {
+	_ = takeChatGoalStatusActiveTurnStartedAt(session)
 }
 
 func chatGoalStatusActiveTurnStartedAt(session *ChatSession) time.Time {
@@ -5934,8 +6045,8 @@ func (c *chatInteractionCoordinator) clearActiveRunStateOnInterrupt() {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.shutdown {
+		c.mu.Unlock()
 		return
 	}
 	c.thinkingActive = false
@@ -5948,8 +6059,8 @@ func (c *chatInteractionCoordinator) clearActiveRunStateOnInterrupt() {
 		c.resetStreamLocked()
 	}
 	c.waitingActive = false
-	clearChatGoalStatusActiveTurnStarted(c.session)
 	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	c.mu.Unlock()
 }
 
 // flushStreamLocked outputs any buffered streaming content before the stream

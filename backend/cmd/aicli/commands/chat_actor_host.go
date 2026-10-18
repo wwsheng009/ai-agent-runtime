@@ -2619,6 +2619,10 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 			if cfg.Options == nil {
 				cfg.Options = make(map[string]interface{})
 			}
+			// Children inherit only the surface-independent head. Guidance
+			// sections describe the parent's tool surface and must be rendered
+			// again by the child from its own resolved policy.
+			cfg.Options[agent.ChildPromptHeadOption] = buildLocalChatSystemPromptHead(session, workspaceRoot)
 			if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
 				cfg.Options["active_goal_guidance"] = guidance
 			} else {
@@ -2804,6 +2808,33 @@ func buildLocalChatSystemPrompt(session *ChatSession, workspaceRoot string) stri
 			"When calling team_spawn from the current chat, do not set lead_session_id unless the user explicitly asked for a different lead session. The current session will be used automatically.",
 			"When you call team_spawn with auto_start=true, treat the delegated work as already in progress. Do not ask the user to choose the next step while the team is running; instead briefly state that the team is working in the background and that you will summarize when it finishes.",
 			"After team_spawn auto_start=true, call team_wait with the returned team_id to wait for durable team.completed/team.summary. Do not use subagent_wait or subagent_events for team_spawn teammate ids such as member-1; those tools are only for subagent_spawn child sessions.",
+		)
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+// buildLocalChatSystemPromptHead returns the subset a child may inherit:
+// profile + environment + workspace identity. Team/subagent collaboration
+// lines and every guidance section are intentionally excluded because they
+// describe the parent's surface.
+func buildLocalChatSystemPromptHead(session *ChatSession, workspaceRoot string) string {
+	promptCWD := strings.TrimSpace(workspaceRoot)
+	if promptCWD == "" {
+		promptCWD, _ = os.Getwd()
+	}
+	base := strings.TrimSpace(composeChatSystemPromptHeadForCWD(session, promptCWD))
+
+	lines := []string{}
+	if base != "" {
+		lines = append(lines, base)
+	}
+	workspaceRoot = strings.TrimSpace(workspaceRoot)
+	if workspaceRoot != "" {
+		lines = append(lines,
+			fmt.Sprintf("Current workspace root: %s", workspaceRoot),
+			"Interpret \"当前目录\", \".\", and relative paths as relative to the current workspace root unless the user explicitly says otherwise.",
+			"If the user asks to inspect or search the current workspace, do that directly instead of asking which current directory they mean.",
+			"When planning file or directory work, only use paths that you directly confirmed from tool output in the current workspace. Do not invent sibling directories or extrapolate missing paths from naming patterns.",
 		)
 	}
 	return strings.Join(lines, "\n\n")

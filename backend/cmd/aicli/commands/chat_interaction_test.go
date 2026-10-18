@@ -2404,6 +2404,23 @@ func TestChatSurfaceGoalUsage_IncludesLiveActiveTurnElapsed(t *testing.T) {
 	}
 }
 
+func TestChatSurfaceGoalUsage_CompletedIncludesCurrentTurnElapsed(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	completedAt := now.Add(-30 * time.Second)
+	goal := &runtimegoal.SessionGoal{
+		Status:          runtimegoal.StatusComplete,
+		TimeUsedSeconds: 60,
+		CreatedAt:       now.Add(-10 * time.Minute),
+		UpdatedAt:       completedAt,
+		CompletedAt:     &completedAt,
+	}
+
+	usage := chatSurfaceGoalUsage(goal, now.Add(-90*time.Second), now)
+	if usage != "2m" {
+		t.Fatalf("expected completed usage to include the frozen current-turn segment, got %q", usage)
+	}
+}
+
 func TestChatSurfaceGoalUsage_ActiveWithoutBudgetAlwaysShowsElapsed(t *testing.T) {
 	goal := &runtimegoal.SessionGoal{
 		Status:          runtimegoal.StatusActive,
@@ -2493,6 +2510,112 @@ func TestBuildChatSurfaceStatusLine_IncludesActiveGoalLiveElapsed(t *testing.T) 
 	status := buildChatSurfaceStatusLineForWidth(session, "Thinking", 120)
 	if !strings.Contains(status, "Pursuing goal (2m)") {
 		t.Fatalf("expected live active-goal elapsed indicator, got %q", status)
+	}
+}
+
+func TestRefreshDynamicStatusTickAdvancesPersistentGoalElapsed(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+
+	store := runtimegoal.NewMetadataStore()
+	goal, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || goal == nil {
+		t.Fatalf("load goal: ok=%v err=%v", ok, err)
+	}
+	goal.UpdatedAt = time.Now().Add(-10 * time.Minute)
+	if err := store.Put(session.RuntimeSession, *goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+	session.goalContinuationAttempt.Store(1)
+
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(160, 12)
+	coordinator.SetSurface(surface)
+	session.Interaction = coordinator
+
+	coordinator.mu.Lock()
+	coordinator.surfaceStatus = chatSurfaceStatus{kind: chatSurfaceStatusPlanning}
+	coordinator.dynamicStatusStarted = time.Now().Add(-time.Second)
+	coordinator.dynamicStatusTimerSeq = 1
+	coordinator.persistentStatusModel = style.StatusLineModel{
+		HideState: true,
+		Segments: []style.StatusSegment{{
+			Kind: style.StatusSegGoal,
+			Text: "Pursuing goal (0s · attempt 1)",
+			Role: style.RoleProgress,
+		}},
+	}
+	coordinator.mu.Unlock()
+
+	session.goalStatusMu.Lock()
+	session.goalStatusActiveTurnStartedAt = time.Now().Add(-5 * time.Second)
+	session.goalStatusMu.Unlock()
+
+	coordinator.refreshDynamicStatusTick(1)
+
+	coordinator.mu.Lock()
+	updated := style.StatusLineDocument(coordinator.persistentStatusModel, 0).PlainText()
+	coordinator.mu.Unlock()
+	if strings.Contains(updated, "(0s · attempt 1)") {
+		t.Fatalf("persistent goal clock stayed frozen after the status tick: %q", updated)
+	}
+	if !strings.Contains(updated, "Pursuing goal (5s · attempt 1)") &&
+		!strings.Contains(updated, "Pursuing goal (6s · attempt 1)") {
+		t.Fatalf("expected persistent goal elapsed to advance, got %q", updated)
+	}
+}
+
+func TestInterruptSettlementSurvivesStaleActorRestore(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+
+	store := runtimegoal.NewMetadataStore()
+	goal, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || goal == nil {
+		t.Fatalf("load goal: ok=%v err=%v", ok, err)
+	}
+	startedAt := time.Now().Add(-5 * time.Second)
+	goal.CreatedAt = startedAt.Add(-time.Minute)
+	goal.UpdatedAt = goal.CreatedAt
+	if err := store.Put(session.RuntimeSession, *goal); err != nil {
+		t.Fatalf("store.Put: %v", err)
+	}
+
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	coordinator.mu.Lock()
+	coordinator.waitingActive = true
+	coordinator.mu.Unlock()
+	session.goalStatusMu.Lock()
+	session.goalStatusActiveTurnStartedAt = startedAt
+	session.goalStatusMu.Unlock()
+
+	coordinator.clearActiveRunStateOnInterrupt()
+	if chatGoalStatusActiveTurnStartedAt(session).IsZero() {
+		t.Fatal("interrupt cleanup must leave the goal clock for turn teardown settlement")
+	}
+
+	// Simulate the actor failure path restoring its stale pre-interrupt snapshot.
+	stale, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || stale == nil {
+		t.Fatalf("reload goal: ok=%v err=%v", ok, err)
+	}
+	stale.TimeUsedSeconds = 0
+	if err := store.Put(session.RuntimeSession, *stale); err != nil {
+		t.Fatalf("store.Put stale: %v", err)
+	}
+
+	coordinator.ClearWaiting()
+
+	current, ok, err := store.Get(session.RuntimeSession)
+	if err != nil || !ok || current == nil {
+		t.Fatalf("load current goal: ok=%v err=%v", ok, err)
+	}
+	if current.TimeUsedSeconds < 5 {
+		t.Fatalf("TimeUsedSeconds = %d, want >= 5 after teardown settlement", current.TimeUsedSeconds)
+	}
+	if !chatGoalStatusActiveTurnStartedAt(session).IsZero() {
+		t.Fatal("expected goal clock to be cleared after settlement")
 	}
 }
 

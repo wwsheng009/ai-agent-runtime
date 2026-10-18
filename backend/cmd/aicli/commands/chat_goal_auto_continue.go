@@ -50,6 +50,23 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 	if session == nil || executor == nil {
 		return nil
 	}
+	// Goal continuation can run either inside the foreground sendMessage or from
+	// the deferred main-loop kick. In the kick path no StartWaiting precedes the
+	// hidden actor turns, so establish/acquire the live clock here and settle it
+	// on every exit path. If the foreground timer is already set, mark is a no-op
+	// and the span covers the initial turn plus all continuations.
+	markChatGoalStatusActiveTurnStarted(session)
+	defer func() {
+		goalElapsed := accountChatGoalElapsedInMemory(
+			session,
+			takeChatGoalStatusActiveTurnStartedAt(session),
+			time.Now(),
+		)
+		persistChatGoalElapsed(session, goalElapsed)
+		if goalElapsed != nil && session.Interaction != nil {
+			session.Interaction.RefreshStatus("")
+		}
+	}()
 	// 状态栏 attempt 计数只在续跑循环存活期间有效：所有退出路径都归零。
 	defer session.goalContinuationAttempt.Store(0)
 	// A canceled turn context must not be answered with a fresh continuation
@@ -283,6 +300,99 @@ func resetGoalAccountingBaseline(session *ChatSession) {
 	}
 	session.goalAccountingGoalID = goal.GoalID
 	session.goalAccountedTokens = session.TokenCount
+}
+
+// chatGoalElapsedAccounting 是一次已写入内存、但尚未落库的 goal 时间增量。
+// 状态行刷新需要先看到累计值，持久化则在释放 coordinator 锁之后执行，避免
+// UI 临界区内做存储 I/O。
+type chatGoalElapsedAccounting struct {
+	Goal    runtimegoal.SessionGoal
+	Seconds int64
+}
+
+// chatGoalElapsedSecondsForAccounting 计算当前 turn 应计入 goal.TimeUsedSeconds
+// 的秒数。与状态栏的实时显示不同，这里以 activeTurnStartedAt 为基线，因为
+// goal.UpdatedAt 会 token 记账/状态刷新推进，不能代表时间记账水位。
+//
+// 终态只计到其冻结时刻：complete 用 CompletedAt；paused/blocked/
+// budget_limited 用 UpdatedAt。这样模型完成目标后的 wrap-up turn 不会被误计入
+// goal 用时。goal 在 turn 中途创建时，从 CreatedAt 起算。
+func chatGoalElapsedSecondsForAccounting(goal *runtimegoal.SessionGoal, activeTurnStartedAt, now time.Time) int64 {
+	if goal == nil || activeTurnStartedAt.IsZero() {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	end := now
+	switch goal.Status {
+	case runtimegoal.StatusActive:
+		// Whole turn remains accountable.
+	case runtimegoal.StatusComplete:
+		switch {
+		case goal.CompletedAt != nil:
+			end = *goal.CompletedAt
+		case !goal.UpdatedAt.IsZero():
+			end = goal.UpdatedAt
+		}
+	case runtimegoal.StatusPaused, runtimegoal.StatusBlocked, runtimegoal.StatusBudgetLimited:
+		if !goal.UpdatedAt.IsZero() {
+			end = goal.UpdatedAt
+		}
+	default:
+		return 0
+	}
+	start := activeTurnStartedAt
+	if goal.CreatedAt.After(start) {
+		start = goal.CreatedAt
+	}
+	if !end.After(start) {
+		return 0
+	}
+	return int64(end.Sub(start) / time.Second)
+}
+
+// accountChatGoalElapsedInMemory 把本 turn 的 goal 活跃时长累加进内存中的
+// goal metadata，返回待持久化的快照。调用方随后必须调用
+// persistChatGoalElapsed；不要把存储 I/O 放进 coordinator 的 UI 锁。
+func accountChatGoalElapsedInMemory(session *ChatSession, activeTurnStartedAt, now time.Time) *chatGoalElapsedAccounting {
+	if session == nil || session.RuntimeSession == nil || activeTurnStartedAt.IsZero() {
+		return nil
+	}
+	goal, ok, err := currentSessionGoal(session)
+	if err != nil || !ok || goal == nil {
+		return nil
+	}
+	delta := chatGoalElapsedSecondsForAccounting(goal, activeTurnStartedAt, now)
+	if delta <= 0 {
+		return nil
+	}
+	goal.TimeUsedSeconds += delta
+	if err := runtimegoal.NewMetadataStore().Put(session.RuntimeSession, *goal); err != nil {
+		writeSessionDebugInfo(session, "[goal] in-memory elapsed accounting failed: "+err.Error(), false)
+		return nil
+	}
+	return &chatGoalElapsedAccounting{Goal: *goal, Seconds: delta}
+}
+
+// persistChatGoalElapsed 在释放 coordinator 锁后落库已累计的 goal 用时。
+// 失败不回退内存值：保持当前界面正确，并留下诊断；后续正常 session sync 仍会
+// 带上该内存快照。
+func persistChatGoalElapsed(session *ChatSession, accounting *chatGoalElapsedAccounting) {
+	if session == nil || accounting == nil || accounting.Seconds <= 0 ||
+		session.SessionManager == nil || session.RuntimeSession == nil {
+		return
+	}
+	_, err := runtimegoal.NewMetadataStore().PutPersistent(
+		context.Background(),
+		session.SessionManager.GetStorage(),
+		currentRuntimeSessionID(session),
+		accounting.Goal,
+		runtimegoal.MutationSystem,
+	)
+	if err != nil {
+		writeSessionDebugInfo(session, "[goal] elapsed accounting persist failed: "+err.Error(), false)
+	}
 }
 
 // goalBudgetExhausted 报告当前 goal 是否已耗尽 token 预算（仅 active 判定）。
