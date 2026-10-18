@@ -6623,14 +6623,31 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		if b.session.NoInteractive {
 			// Headless hosts with a question panel (ACP session/request_question)
 			// answer the prompt through the client instead of failing the turn.
-			if answer, ok := b.answerQuestionHeadless(prompt, suggestions, required); ok {
+			answer, panelAnswered := b.answerQuestionHeadless(prompt, suggestions, required)
+			// 2026-10-17 真机：空串不是回答。面板对必答问题返回空回答（例如
+			// 被关闭）也不算作答；必答问题失败关闭，绝不伪造空答案放行。
+			emptyByPanel := panelAnswered && required && strings.TrimSpace(answer) == ""
+			if panelAnswered && !emptyByPanel {
 				_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, answer)
 				setGatewayAttention(event.SessionID, "")
 				syncChatGatewaySession(b.session)
 				return
 			}
-			b.setRunError(b.nonInteractiveQuestionError(prompt))
-			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
+			// 必答问题不得以空答案伪造通过 —— 空串表示“无人回答”（非交互
+			// 模式没有回答入口，或客户端面板被关闭后返回空回答）。失败关闭：
+			// 让挂起的工具调用以错误结束（turn 以错误收尾），而不是把
+			// {"answer":""} 交给模型续跑；非必答问题保留旧的空答案（跳过）语义。
+			if required {
+				cause := b.nonInteractiveQuestionError(prompt)
+				if emptyByPanel {
+					cause = fmt.Errorf("必答问题未作答：客户端回答面板返回空回答 question=%s prompt=%s",
+						questionID, truncateChatRuntimeText(prompt, 160))
+				}
+				b.setRunError(cause)
+				b.failQuestionRun(event.SessionID, questionID, cause)
+			} else if err := b.resolveQuestion(context.Background(), event.SessionID, questionID, ""); err != nil {
+				b.setRunError(err)
+			}
 			setGatewayAttention(event.SessionID, "")
 			syncChatGatewaySession(b.session)
 			return
@@ -6668,8 +6685,22 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 				// 已由其它入口回答：不再 resolve（避免重复/覆盖回答）。
 				return
 			}
+			// 2026-10-17 真机：必答问题在控制台读取器快速失败时，旧实现用空串
+			// resolve 冒充回答（question_asked 后 75ms 即 question_answered，
+			// 用户从未作答，agent 却带着 answer="" 继续）。空串不是回答：
+			// 保持挂起，等待真实入口（Web pending_question / IM `/answer`）。
+			if required {
+				writeSessionDebugInfo(b.session, fmt.Sprintf(
+					"[question] console ask failed; required question %s stays pending: %v", questionID, askErr), false)
+				b.renderLocalApprovalSupplement(fmt.Sprintf(
+					"[question] 控制台提问失败，问题 %s 保持挂起：可在此重新作答，或从 Web / IM 回复 `/answer %s <文本>`",
+					questionID, questionID))
+				return
+			}
 			b.setRunError(askErr)
-			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
+			if err := b.resolveQuestion(context.Background(), event.SessionID, questionID, ""); err != nil {
+				b.setRunError(err)
+			}
 			return
 		}
 		if err := b.resolveQuestion(context.Background(), event.SessionID, questionID, answer); err != nil {
@@ -9619,6 +9650,29 @@ func (b *chatRuntimeEventBridge) resolveQuestion(ctx context.Context, sessionID,
 		return err
 	}
 	return actor.AnswerQuestion(ctx, questionID, answer)
+}
+
+// failQuestionRun 是必答问题“无人回答”时的失败关闭动作：让挂起的
+// ask_user_question 以 cause 失败结束（工具调用失败，而不是回答），run 继续
+// 以错误收尾，而不是把伪造的空答案交给模型（2026-10-17 真机：question_asked
+// 后 75ms 即被空串 resolve，用户从未作答）。actor 不在本机（无 SessionHub）
+// 时尽力而为：至少 run error 已记录原因。
+func (b *chatRuntimeEventBridge) failQuestionRun(sessionID, questionID string, cause error) {
+	if b == nil {
+		return
+	}
+	actor, err := b.lookupActor(sessionID)
+	if err != nil || actor == nil {
+		if err != nil {
+			b.setRunError(err)
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := actor.FailQuestion(ctx, questionID, cause); err != nil {
+		b.setRunError(err)
+	}
 }
 
 func (b *chatRuntimeEventBridge) setRunError(err error) {

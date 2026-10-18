@@ -42,6 +42,10 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if session.IsInterrupted() {
 		return "", userInterruptError()
 	}
+	// G4 rearm 入口 2（2026-10-18 修复）：用户在消息中明示继续（如「继续」/
+	// 「continue」）时重新武装目标自动续跑闸——恢复态默认 disarmed，查询类
+	// 普通消息不触发自主续跑，只有显式继续意图才放行（与 /goal resume 同语义）。
+	maybeRearmGoalContinuationForUserIntent(session, userMessage)
 	// 配置文件可能在进程运行期间被编辑（例如上调 max_context_tokens、增删
 	// provider）。turn 入口按指纹检查一次：变化则按与启动相同的加载顺序重载
 	// 并与会话视图对账，保证本轮的 prompt 预算与状态栏都基于最新配置，而不是

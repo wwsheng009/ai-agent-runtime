@@ -192,6 +192,14 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 	}
 	session.setQueuedInputDrainActive(false)
 	session.setQueuedInputEchoed(false)
+	// 排空状态刚刚落地（queued=0 且 draining 由本函数清零）：立即重估一次 goal
+	// 续跑 kick。kick 若在 "draining=true" 的瞬时判定里被保留（见
+	// maybeConsumeDeferredGoalKick 的 hold 日志），此后主循环会阻塞在读取上，
+	// 没有任何事件保证它会再被评估——2026-10-18 真机复现：/goal resume 后续跑
+	// 永不启动。此处与主循环顶部的检查同语义、幂等，仅在 kick 待消费时生效。
+	if session.goalKickPending.Load() {
+		maybeConsumeDeferredGoalKick(session)
+	}
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}

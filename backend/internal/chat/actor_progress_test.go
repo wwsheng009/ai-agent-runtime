@@ -38,7 +38,7 @@ func TestSessionActorStateTransitionProgressKinds(t *testing.T) {
 	actor := &SessionActor{
 		onProgress:      func(kind string) { got = append(got, kind) },
 		approvalWaiters: make(map[string]chan runtimepolicy.ApprovalResponse),
-		questionWaiters: make(map[string]chan string),
+		questionWaiters: make(map[string]chan questionWaiterReply),
 	}
 	_ = actor.registerApprovalWaiter("approval-1")
 	require.True(t, actor.resolveApproval("approval-1", runtimepolicy.ApprovalResponse{Allowed: true}))

@@ -372,6 +372,11 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 		if err := restoreChatStateFromRuntimeSession(session, persistenceState.loadedRuntimeSession); err != nil {
 			return fmt.Errorf("恢复会话失败: %w", err)
 		}
+		// G4 rearm 闸：启动期 --session/--resume（含启动选择器）恢复必须与进程内
+		// /resume、resume-latest 两条路径同语义——含 active goal 的历史会话默认
+		// 不自动续跑。2026-10-18 真机复现：--session 启动恢复未 disarm，导致启动
+		// 方式不同行为不一致（同一 goal 在 A 路径静止、B 路径幽灵续跑）。
+		disarmGoalContinuationAfterRestore(session)
 		ensureChatSystemPromptMessage(session)
 		if opts.SessionTitleFlag != "" && session.RuntimeSession != nil {
 			session.RuntimeSession.UpdateTitle(opts.SessionTitleFlag)

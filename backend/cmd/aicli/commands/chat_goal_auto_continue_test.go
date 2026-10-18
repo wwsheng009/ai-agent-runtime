@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"strings"
@@ -648,6 +649,72 @@ func TestRequestGoalKickRejectedForPausedOrNonInteractive(t *testing.T) {
 	active.NoInteractive = true
 	if requestGoalContinuationKick(active) {
 		t.Fatal("non-interactive session must not accept a kick")
+	}
+}
+
+// TestQueuedInputDrainCompletionReevaluatesHeldGoalKick 锁定 2026-10-18 真机
+// 复现：kick 在「queued=0 但 draining=true」的瞬时判定里被保留后，主循环会阻塞
+// 在读取上，没有任何事件再唤醒它——/goal resume 后续跑永不启动。排空状态落地
+// （prepareInteractiveRead 的清零路径）必须立即重估并消费该 kick。
+func TestQueuedInputDrainCompletionReevaluatesHeldGoalKick(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	session.goalMaxContinuations = 1
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+
+	executor := &fakeChatExecutor{output: "held kick resumed"}
+	session.ChatExecutor = executor
+
+	if !requestGoalContinuationKick(session) {
+		t.Fatal("expected kick request to be accepted for interactive active goal")
+	}
+	// 真机时序：kick 已请求，队列处于"排空中（draining=true）且无排队行"。
+	session.setQueuedInputDrainActive(true)
+	if _, _, err := prepareInteractiveRead(session); err != nil {
+		t.Fatalf("prepareInteractiveRead: %v", err)
+	}
+	if session.goalKickPending.Load() {
+		t.Fatal("drain completion must re-evaluate and consume the held kick")
+	}
+	if executor.continuations != 1 {
+		t.Fatalf("held kick must resume the continuation loop (1 capped round), got %d", executor.continuations)
+	}
+}
+
+// TestQueuedInputSkipReArmsGoalKickForLaterConsumption 锁定 2026-10-18 真机第二处
+// 同类缺陷：用户「继续」rearm 后，收尾续跑决策撞上 draining 瞬时态返回
+// queued_input——若按终局跳过，主循环随后阻塞在读取上，没有任何事件再触发
+// 续跑（真机 07:49 复现：rearm 成功但 attempt=0）。让位必须转成延迟 kick，并在
+// 排空落地后被消费启动续跑。
+func TestQueuedInputSkipReArmsGoalKickForLaterConsumption(t *testing.T) {
+	session, cleanup := newGoalAutoContinueTestSession(t, runtimegoal.StatusActive)
+	defer cleanup()
+	session.goalMaxContinuations = 1
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	executor := &fakeChatExecutor{output: "queued skip then resumed"}
+	session.ChatExecutor = executor
+
+	// 排空中（queued=0, draining=true）：续跑决策应让位并重排 kick。
+	session.setQueuedInputDrainActive(true)
+	if err := maybeAutoContinueActiveGoal(context.Background(), session, executor); err != nil {
+		t.Fatalf("maybeAutoContinueActiveGoal: %v", err)
+	}
+	if !session.goalKickPending.Load() {
+		t.Fatal("queued_input skip must re-arm the kick for later re-evaluation")
+	}
+	if executor.continuations != 0 {
+		t.Fatalf("skipped turn must not run continuations, got %d", executor.continuations)
+	}
+
+	// 排空落地：prepareInteractiveRead 的清零路径消费 kick 并启动续跑。
+	if _, _, err := prepareInteractiveRead(session); err != nil {
+		t.Fatalf("prepareInteractiveRead: %v", err)
+	}
+	if session.goalKickPending.Load() {
+		t.Fatal("drain completion must consume the re-armed kick")
+	}
+	if executor.continuations != 1 {
+		t.Fatalf("expected 1 capped continuation after drain, got %d", executor.continuations)
 	}
 }
 

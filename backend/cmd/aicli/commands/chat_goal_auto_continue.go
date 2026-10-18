@@ -113,6 +113,17 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 					writeSessionDebugInfo(session, fmt.Sprintf("[goal] terminal wrap-up turn failed: %q", wrapErr.Error()), false)
 				}
 			}
+			// 瞬时让位（queued_input：有排队输入，或排空中的过渡态）不是终局：
+			// 转成一次性 kick 交给清道夫重估（主循环顶部 / 排空落地路径），否则
+			// 主循环随后阻塞在读取上，没有任何事件再触发续跑——2026-10-18 真机：
+			// 用户「继续」rearm 后收尾决策撞上 draining 瞬时态被跳过，续跑永久
+			// 不启动。kick 的消费门（queued=0 且非 draining）保证不会抢在真实
+			// 排队输入之前。
+			if decision.Reason == "queued_input" && !session.goalKickPending.Load() {
+				session.goalKickPending.Store(true)
+				session.goalKickHoldNoted.Store(false)
+				writeSessionDebugInfo(session, "[goal] continuation deferred reason=queued_input; kick re-armed", false)
+			}
 			if decision.Reason == "update_goal_unavailable" {
 				reportGoalAutoContinuationUnavailableOnce(session)
 			}
@@ -123,6 +134,9 @@ func maybeAutoContinueActiveGoal(ctx context.Context, session *ChatSession, exec
 			writeSessionDebugInfo(session, fmt.Sprintf("[goal] auto continuation %s reason=%s attempts_completed=%d", state, decision.Reason, attempts), false)
 			return nil
 		}
+		// 本次续跑循环即将执行续跑轮本身，消费掉此前因瞬时让位而重排的 kick，
+		// 避免同一段工作被 kick 再驱动一遍。
+		session.goalKickPending.Store(false)
 		if goalBudgetExhausted(session) {
 			if markActiveGoalBudgetLimited(session) {
 				reportGoalBudgetLimited(session)
@@ -680,15 +694,69 @@ func disarmGoalContinuationAfterRestore(session *ChatSession) {
 	if !sessionHasActivePersistedGoal(session) {
 		return
 	}
-	session.goalContinuationDisarmed.Store(true)
+	if session.goalContinuationDisarmed.Swap(true) {
+		return
+	}
+	writeSessionDebugInfo(session, "[goal] continuation disarmed after restore; /goal resume or an explicit continue message re-arms", false)
 }
 
 // rearmGoalContinuation 清除 rearm 闸（/goal resume 与用户显式继续意图入口）。
-func rearmGoalContinuation(session *ChatSession) {
+// reason 只用于 debug 归因（如 "goal_resume_command" / "user_continue_intent"）；
+// 闸门确实置位时才写一行日志，armed 状态下的重复调用保持静默。
+func rearmGoalContinuation(session *ChatSession, reason string) {
 	if session == nil {
 		return
 	}
-	session.goalContinuationDisarmed.Store(false)
+	if !session.goalContinuationDisarmed.Swap(false) {
+		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "explicit"
+	}
+	writeSessionDebugInfo(session, "[goal] continuation rearmed reason="+reason, false)
+}
+
+// goalContinueIntentPhrases 是「用户在消息中明示继续」的保守匹配表（G4 的第二
+// 个 rearm 入口；第一个是 /goal resume）。只认短促、无歧义的显式继续指令——
+// 去除首尾空白与常见句末标点后整串相等才命中；「看一下当前状态」这类查询必须
+// 不命中，否则 rearm 后 turn 结束立即恢复自主续跑，正是 G4 要消除的幽灵续跑。
+// 2026-10-18 现场事故修复：此前注释/设计文档承诺该入口，但代码只有 /goal resume。
+var goalContinueIntentPhrases = map[string]struct{}{
+	"继续": {}, "继续吧": {}, "继续执行": {}, "继续干活": {}, "继续工作": {}, "请继续": {},
+	"接着": {}, "接着来": {}, "接着做": {}, "接着干": {}, "往下做": {}, "往下干": {},
+	"恢复": {}, "恢复吧": {}, "恢复执行": {}, "干吧": {},
+	"continue": {}, "continue please": {}, "please continue": {}, "go on": {},
+	"keep going": {}, "carry on": {}, "proceed": {}, "resume": {}, "keep working": {},
+}
+
+// isGoalContinueIntentMessage 判定一条用户消息是否属于显式继续意图。
+// 归一化：去首尾空白 → 去句末标点/省略号 → 小写（ASCII）后整串比对。
+func isGoalContinueIntentMessage(message string) bool {
+	normalized := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(message), "。．.!！?？~～… "))
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.ToLower(normalized)
+	_, ok := goalContinueIntentPhrases[normalized]
+	return ok
+}
+
+// maybeRearmGoalContinuationForUserIntent 在用户消息进入 turn 前判定显式继续
+// 意图并 rearm（G4 入口 2，与 /goal resume 同语义）。只处理「目标 active +
+// 闸门已置位」的恢复态会话；普通会话与已 armed 会话零行为变化。这里不请求
+// kick——本条消息本身就是一次前台 turn，rearm 后 turn 收尾的既有续跑决策会
+// 自然接上（kick 仅用于没有前台 turn 驱动的 /goal resume）。
+func maybeRearmGoalContinuationForUserIntent(session *ChatSession, message string) {
+	if session == nil || !session.goalContinuationDisarmed.Load() {
+		return
+	}
+	if !isGoalContinueIntentMessage(message) {
+		return
+	}
+	if !sessionHasActivePersistedGoal(session) {
+		return
+	}
+	rearmGoalContinuation(session, "user_continue_intent")
 }
 
 // requestGoalContinuationKick 请求一次隐藏续跑：/goal resume（以及其它把 goal
@@ -696,16 +764,30 @@ func rearmGoalContinuation(session *ChatSession) {
 // 上下文），避免在命令处理中直接启动 turn 与渲染竞争；返回 false 表示当前
 // 模式不支持续跑（非交互/工具禁用/JSON 输出/已中断/无 active goal）。
 func requestGoalContinuationKick(session *ChatSession) bool {
-	if session == nil || session.NoInteractive || session.DisableTools || session.JSONOutput {
+	if session == nil {
 		return false
 	}
-	if session.IsInterrupted() {
+	// 拒绝路径给出 debug 归因：kick 是"请求→延迟消费"两段式，静默拒绝会让
+	// 上游（/goal resume 等）看起来"没有任何作用"（2026-10-18 现场事故）。
+	refuse := func(reason string) bool {
+		writeSessionDebugInfo(session, "[goal] continuation kick refused reason="+reason, false)
 		return false
 	}
-	if !sessionHasActivePersistedGoal(session) {
-		return false
+	switch {
+	case session.NoInteractive:
+		return refuse("no_interactive")
+	case session.DisableTools:
+		return refuse("tools_disabled")
+	case session.JSONOutput:
+		return refuse("json_output")
+	case session.IsInterrupted():
+		return refuse("interrupted")
+	case !sessionHasActivePersistedGoal(session):
+		return refuse("goal_missing")
 	}
 	session.goalKickPending.Store(true)
+	session.goalKickHoldNoted.Store(false)
+	writeSessionDebugInfo(session, "[goal] continuation kick requested", false)
 	return true
 }
 
@@ -727,23 +809,46 @@ func maybeConsumeDeferredGoalKick(session *ChatSession) {
 		return
 	}
 	if session.NoInteractive || session.IsInterrupted() {
+		reason := "interrupted"
+		if session.NoInteractive {
+			reason = "no_interactive"
+		}
+		writeSessionDebugInfo(session, "[goal] continuation kick dropped reason="+reason, false)
 		session.goalKickPending.Store(false)
+		session.goalKickHoldNoted.Store(false)
 		return
 	}
+	// 被挡时记一次归因日志（每笔 kick 只记一条，避免就绪 watcher 轮询刷屏）：
+	// 此前 hold 完全静默，是"kick 请求了却没有后续"的不可观测面。
+	hold := func(reason string) {
+		if session.goalKickHoldNoted.CompareAndSwap(false, true) {
+			writeSessionDebugInfo(session, "[goal] continuation kick held reason="+reason, false)
+		}
+	}
 	if currentRestoredPendingPrompt(session) != nil {
+		hold("restored_pending_prompt")
 		return
 	}
 	if queuedCount, draining := queuedInteractiveInputState(session); queuedCount > 0 || draining {
+		hold(fmt.Sprintf("queued_input queued=%d draining=%t", queuedCount, draining))
 		return
 	}
 	if !chatActorAcceptingWork(session) {
+		hold("actor_not_ready")
+		// actor 未就绪同样是"清道夫缺失"的挂起条件：安排就绪 watcher，actor 可
+		// 接单后唤醒主循环重跑顶部检查，避免 kick 停在 pending 无人重估。
+		startGoalKickReadinessWatcher(session)
 		return
 	}
 	if !sessionHasActivePersistedGoal(session) {
+		writeSessionDebugInfo(session, "[goal] continuation kick dropped reason=goal_missing", false)
 		session.goalKickPending.Store(false)
+		session.goalKickHoldNoted.Store(false)
 		return
 	}
 	session.goalKickPending.Store(false)
+	session.goalKickHoldNoted.Store(false)
+	writeSessionDebugInfo(session, "[goal] continuation kick consumed", false)
 	runGoalContinuationKick(session)
 }
 

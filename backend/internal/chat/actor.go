@@ -343,7 +343,7 @@ type SessionActor struct {
 
 	waiterMu        sync.Mutex
 	approvalWaiters map[string]chan runtimepolicy.ApprovalResponse
-	questionWaiters map[string]chan string
+	questionWaiters map[string]chan questionWaiterReply
 	// lastApprovalOutcome is guarded by waiterMu.
 	lastApprovalOutcome approvalOutcome
 	// abandonHooks cascade a parked turn's non-batch obligations on abandon.
@@ -414,7 +414,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		stop:               make(chan struct{}),
 		done:               make(chan struct{}),
 		approvalWaiters:    make(map[string]chan runtimepolicy.ApprovalResponse),
-		questionWaiters:    make(map[string]chan string),
+		questionWaiters:    make(map[string]chan questionWaiterReply),
 	}
 	if err := actor.loadState(context.Background()); err != nil {
 		return nil, err
@@ -744,6 +744,39 @@ func (a *SessionActor) AnswerQuestion(ctx context.Context, questionID, answer st
 	}
 }
 
+// FailQuestion fails a parked ask_user_question with cause instead of
+// fabricating an answer. It is the fail-closed escape hatch for hosts that
+// cannot produce a real answer (non-interactive runs without a question
+// panel, dismissed client panels): the tool call ends with an error so the
+// model never receives an invented empty answer.
+func (a *SessionActor) FailQuestion(ctx context.Context, questionID string, cause error) error {
+	if a == nil {
+		return fmt.Errorf("session actor is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.Start()
+	reply := make(chan error, 1)
+	cmd := FailQuestion{
+		Ctx:        ctx,
+		QuestionID: questionID,
+		Cause:      cause,
+		Reply:      reply,
+	}
+	if err := a.send(ctx, cmd); err != nil {
+		return err
+	}
+	select {
+	case err := <-reply:
+		return err
+	case <-a.done:
+		return ErrSessionActorStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Interrupt cancels an active execution.
 func (a *SessionActor) Interrupt(ctx context.Context) error {
 	if a == nil {
@@ -1057,6 +1090,8 @@ func (a *SessionActor) handle(cmd Command) {
 		a.handleApproveTool(payload)
 	case AnswerQuestion:
 		a.handleAnswerQuestion(payload)
+	case FailQuestion:
+		a.handleFailQuestion(payload)
 	case Interrupt:
 		a.handleInterrupt(payload)
 	case RewindTo:
@@ -1393,6 +1428,14 @@ func (a *SessionActor) handleAnswerQuestion(cmd AnswerQuestion) {
 		cmd.Reply <- fmt.Errorf("question request not found")
 		return
 	}
+	// 必答问题不接受空答案：空串表示"无人回答"，不是一次回答
+	// （2026-10-17 真机：question_asked 后 75ms 即被空串 resolve，
+	// 用户从未作答，agent 却收到 answer="" 并继续）。保持挂起，
+	// 等待真实输入或其它入口（Web / IM `/answer` / 控制台恢复路径）。
+	if state.PendingQuestion.Required && strings.TrimSpace(cmd.Answer) == "" {
+		cmd.Reply <- fmt.Errorf("required question %s rejects an empty answer", cmd.QuestionID)
+		return
+	}
 	if a.resolveQuestion(cmd.QuestionID, cmd.Answer) {
 		if err := a.updateState(ctx, func(state *RuntimeState) error {
 			if state.PendingQuestion == nil || state.PendingQuestion.ID != cmd.QuestionID {
@@ -1425,6 +1468,39 @@ func (a *SessionActor) handleAnswerQuestion(cmd AnswerQuestion) {
 		payload["turn_id"] = turnID
 	}
 	a.publish(runtimeevents.Event{Type: EventQuestionAnswered, SessionID: a.id, Payload: payload})
+	cmd.Reply <- nil
+}
+
+func (a *SessionActor) handleFailQuestion(cmd FailQuestion) {
+	if cmd.Reply == nil {
+		return
+	}
+	ctx := cmd.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cause := cmd.Cause
+	if cause == nil {
+		cause = fmt.Errorf("question %s ended without an answer", cmd.QuestionID)
+	}
+	if !a.failQuestion(cmd.QuestionID, cause) {
+		// 幂等：问题已被其它入口回答或清除。
+		cmd.Reply <- nil
+		return
+	}
+	if err := a.updateState(ctx, func(state *RuntimeState) error {
+		if state.PendingQuestion == nil || state.PendingQuestion.ID != cmd.QuestionID {
+			return nil
+		}
+		state.PendingQuestion = nil
+		state.PendingTool = nil
+		state.Status = SessionRunning
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		cmd.Reply <- err
+		return
+	}
 	cmd.Reply <- nil
 }
 
@@ -5307,8 +5383,8 @@ func (a *SessionActor) AskUserQuestion(ctx context.Context, req toolbroker.UserQ
 		Payload:   payload,
 	})
 	select {
-	case answer := <-waiter:
-		return answer, nil
+	case reply := <-waiter:
+		return reply.Answer, reply.Err
 	case <-ctx.Done():
 		a.unregisterQuestionWaiter(req.ID)
 		_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
@@ -5446,9 +5522,18 @@ func (a *SessionActor) pendingApprovalRunTerminal(state *RuntimeState, requestID
 	return reason, true
 }
 
-func (a *SessionActor) registerQuestionWaiter(questionID string) chan string {
+// questionWaiterReply 承载一次问题解除等待的两种结果：真实回答，或一个必须
+// 让挂起的 ask_user_question 以错误结束的失败原因。空答案永远不是回答
+// （2026-10-17 真机：无人作答被空串放行），没有回答入口的宿主用 Err 失败
+// 关闭，而不是伪造 answer。
+type questionWaiterReply struct {
+	Answer string
+	Err    error
+}
+
+func (a *SessionActor) registerQuestionWaiter(questionID string) chan questionWaiterReply {
 	a.waiterMu.Lock()
-	ch := make(chan string, 1)
+	ch := make(chan questionWaiterReply, 1)
 	a.questionWaiters[questionID] = ch
 	a.waiterMu.Unlock()
 	// 进入输入等待 = 一次状态迁移。
@@ -5473,7 +5558,29 @@ func (a *SessionActor) resolveQuestion(questionID, answer string) bool {
 	// 解除输入等待 = 状态迁移（回答已送达阻塞中的 run）。
 	a.noteProgress("input_resolved")
 	select {
-	case ch <- answer:
+	case ch <- questionWaiterReply{Answer: answer}:
+	default:
+	}
+	return true
+}
+
+// failQuestion 让挂起的问题以 cause 失败返回：工具调用以错误结束，而不是
+// 把伪造的空答案交给模型。
+func (a *SessionActor) failQuestion(questionID string, cause error) bool {
+	if cause == nil {
+		cause = fmt.Errorf("question %s ended without an answer", questionID)
+	}
+	a.waiterMu.Lock()
+	ch := a.questionWaiters[questionID]
+	delete(a.questionWaiters, questionID)
+	a.waiterMu.Unlock()
+	if ch == nil {
+		return false
+	}
+	// 解除输入等待 = 状态迁移（失败关闭也已送达阻塞中的 run）。
+	a.noteProgress("input_resolved")
+	select {
+	case ch <- questionWaiterReply{Err: cause}:
 	default:
 	}
 	return true

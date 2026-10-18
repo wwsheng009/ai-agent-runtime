@@ -4768,6 +4768,125 @@ func TestSessionActorApproveToolRecoversBatchFromSessionWhenPendingStateHasNoBat
 	require.NotContains(t, provider.requests[0].Messages[4].Content, "pending-tool recovery")
 }
 
+// TestSessionActorRequiredQuestionRejectsEmptyAnswerBeforeSelfHeal 钉住
+// 2026-10-17 真机 bug：required 的 ask_user_question 在用户从未作答时被空串
+// resolve（question_asked 后 75ms 即 question_answered，answer=""），agent
+// 带着空答案继续。空串不是回答：必答问题必须保持挂起，等待真实输入。
+func TestSessionActorRequiredQuestionRejectsEmptyAnswerBeforeSelfHeal(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+
+	session, err := manager.CreateSession(ctx, "actor-user")
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	session.AddMessage(*types.NewUserMessage("Start the flow."))
+	assistant := types.NewAssistantMessage("")
+	assistant.ToolCalls = []types.ToolCall{{
+		ID:   "tool_question_empty",
+		Name: toolbroker.ToolAskUserQuestion,
+		Args: map[string]interface{}{"prompt": "Need confirmation", "required": true},
+	}}
+	session.AddMessage(*assistant)
+	session.AddMessage(*types.NewToolMessage("tool_question_empty", "Already answered"))
+	require.NoError(t, storage.Update(ctx, session))
+
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultModel: "test-empty-answer-question-model",
+		MaxRetries:   0,
+	})
+	provider := &runMetaSequenceProvider{
+		name: "test-empty-answer-question-model",
+		responses: []*llm.LLMResponse{
+			{Content: "Finished after empty-answer rejection.", Model: "test-empty-answer-question-model"},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:         "actor-empty-answer-question-test",
+		Model:        provider.Name(),
+		MaxSteps:     2,
+		SystemPrompt: "You are a helpful assistant.",
+	}, nil, runtime)
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID:     session.ID,
+		Status:        SessionWaitingInput,
+		CurrentTurnID: "turn_question_empty_answer",
+		PendingTool: &PendingToolInvocation{
+			ToolCallID: "tool_question_empty",
+			ToolName:   toolbroker.ToolAskUserQuestion,
+			ArgsJSON:   []byte(`{"prompt":"Need confirmation","required":true}`),
+			CreatedAt:  time.Now().UTC(),
+		},
+		PendingQuestion: &UserQuestionRequest{
+			ID:        "question_empty_answer",
+			SessionID: session.ID,
+			Prompt:    "Need confirmation",
+			Required:  true,
+			CreatedAt: time.Now().UTC(),
+		},
+		UpdatedAt: time.Now().UTC(),
+	}))
+
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+
+	// 空串 / 纯空白都不是回答：必须拒绝并保持挂起，不得触发恢复链。
+	emptyErr := actor.AnswerQuestion(ctx, "question_empty_answer", "")
+	require.Error(t, emptyErr)
+	require.Contains(t, emptyErr.Error(), "rejects an empty answer")
+	require.Error(t, actor.AnswerQuestion(ctx, "question_empty_answer", "   "))
+
+	state := actor.State()
+	require.NotNil(t, state)
+	require.NotNil(t, state.PendingQuestion, "empty answers must not clear the pending question")
+	require.Equal(t, "question_empty_answer", state.PendingQuestion.ID)
+	require.Equal(t, SessionWaitingInput, state.Status)
+	require.Equal(t, 0, provider.callCount, "rejected empty answers must not resume the run")
+
+	// 真实回答仍走原有的自愈恢复链。
+	require.NoError(t, actor.AnswerQuestion(ctx, "question_empty_answer", "yes"))
+	require.Eventually(t, func() bool {
+		state := actor.State()
+		if state == nil || state.Status != SessionIdle || state.PendingQuestion != nil || state.PendingTool != nil {
+			return false
+		}
+		updated, loadErr := storage.Load(ctx, session.ID)
+		if loadErr != nil || updated == nil {
+			return false
+		}
+		messages := updated.GetMessages()
+		if len(messages) == 0 {
+			return false
+		}
+		last := messages[len(messages)-1]
+		return last.Role == "assistant" && last.Content == "Finished after empty-answer rejection."
+	}, 5*time.Second, 20*time.Millisecond)
+}
+
+// TestSessionActorFailQuestionFailsParkedQuestionWithoutFabricatingAnswer 钉住
+// 失败关闭通道：宿主没有回答入口时用 FailQuestion 让挂起的 ask_user_question
+// 以错误结束（工具调用失败），而不是伪造空答案交给模型。
+func TestSessionActorFailQuestionFailsParkedQuestionWithoutFabricatingAnswer(t *testing.T) {
+	actor := &SessionActor{questionWaiters: make(map[string]chan questionWaiterReply)}
+	waiter := actor.registerQuestionWaiter("q-fail-closed")
+	sentinel := fmt.Errorf("非交互模式（--no-interactive）无法回答运行时提问")
+	require.True(t, actor.failQuestion("q-fail-closed", sentinel))
+	reply := <-waiter
+	require.ErrorIs(t, reply.Err, sentinel)
+	require.Empty(t, reply.Answer, "fail-closed must not fabricate an answer")
+	require.False(t, actor.failQuestion("q-fail-closed", sentinel), "second failure must be a no-op")
+}
+
 func TestSessionActorAnswerQuestionSelfHealsWhenToolResultAlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

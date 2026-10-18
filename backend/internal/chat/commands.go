@@ -102,6 +102,16 @@ type AnswerQuestion struct {
 	Reply      chan error
 }
 
+// FailQuestion fails a pending user question request without an answer:
+// used when no surface can produce a real answer so the parked
+// ask_user_question call ends with an error instead of a fabricated one.
+type FailQuestion struct {
+	Ctx        context.Context
+	QuestionID string
+	Cause      error
+	Reply      chan error
+}
+
 // Interrupt attempts to stop an active execution.
 type Interrupt struct {
 	Ctx   context.Context
@@ -168,6 +178,7 @@ func (SubmitPrompt) isCommand()          {}
 func (ContinueSession) isCommand()       {}
 func (ApproveTool) isCommand()           {}
 func (AnswerQuestion) isCommand()        {}
+func (FailQuestion) isCommand()          {}
 func (Interrupt) isCommand()             {}
 func (RewindTo) isCommand()              {}
 func (BacktrackTo) isCommand()           {}

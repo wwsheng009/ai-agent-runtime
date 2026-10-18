@@ -13,6 +13,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -602,6 +603,38 @@ func TestRestoreChatPersistenceState_LoadedSession(t *testing.T) {
 		t.Fatalf("expected missing explicit context usage to restore as zero, got ctx=%d window=%d turn=%d",
 			session.ContextTokenCount, session.ContextWindowTokenCount, session.TurnContextTokenCount)
 	}
+}
+
+// TestRestoreChatPersistenceState_DisarmsActiveGoal 锁定 G4 的启动期覆盖：
+// --session/--resume（bootstrap 恢复，含启动选择器）必须与进程内 /resume、
+// resume-latest 同语义——含 active goal 的历史会话恢复后默认不自动续跑；
+// 非 active goal 不置闸。2026-10-18 真机复现缺口：--session 启动未 disarm。
+func TestRestoreChatPersistenceState_DisarmsActiveGoal(t *testing.T) {
+	activeSession := runtimechat.NewSession("tester")
+	goal, err := runtimegoal.NewSessionGoal(activeSession.ID, "keep shipping", time.Now())
+	require.NoError(t, err)
+	require.NoError(t, runtimegoal.NewMetadataStore().Put(activeSession, goal))
+
+	session := &ChatSession{}
+	require.NoError(t, restoreChatPersistenceState(session, &chatPersistenceState{
+		loadedRuntimeSession: activeSession,
+	}, &chatCommandOptions{}))
+	require.True(t, session.goalContinuationDisarmed.Load(),
+		"bootstrap resume of a session with an active goal must disarm auto-continuation")
+
+	completedSession := runtimechat.NewSession("tester")
+	completedGoal, err := runtimegoal.NewSessionGoal(completedSession.ID, "already done", time.Now())
+	require.NoError(t, err)
+	completedGoal.Status = runtimegoal.StatusComplete
+	completedGoal.CompletedBy = "user"
+	require.NoError(t, runtimegoal.NewMetadataStore().Put(completedSession, completedGoal))
+
+	session2 := &ChatSession{}
+	require.NoError(t, restoreChatPersistenceState(session2, &chatPersistenceState{
+		loadedRuntimeSession: completedSession,
+	}, &chatCommandOptions{}))
+	require.False(t, session2.goalContinuationDisarmed.Load(),
+		"restore without an active goal must not disarm")
 }
 
 func TestRestoreChatPersistenceState_LoadedSessionRestoresCanonicalHistory(t *testing.T) {

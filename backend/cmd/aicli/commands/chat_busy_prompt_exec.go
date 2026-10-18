@@ -85,15 +85,31 @@ var chatBusyPromptChannelAvailable = func(session *ChatSession) bool {
 	return unifiedDirectInteractiveOutput(session)
 }
 
+// chatBusyPromptRejectNonLocalSource 标记「确认手势不可用」的拒绝原因：忙时命令
+// 来自非本地终端（Web/注入行），INV-8 不允许其充当确认——命令被消费但不执行。
+// 调用方据此给出可操作提示，避免静默取消（2026-10-18 可见性修复）。
+const chatBusyPromptRejectNonLocalSource = "non_local_source"
+
+// chatBusyPromptOutcome 是一次忙时确认的结果。
+type chatBusyPromptOutcome struct {
+	Confirmed bool
+	Answered  bool
+	// RejectReason 仅在 Answered && !Confirmed 时有意义："non_local_source"
+	// 表示来源不可确认（区别于用户显式拒绝）。
+	RejectReason string
+}
+
 // chatBusyPromptConfirm 经 priority prompt 通道读取一次确认。
-//   - answered=false：通道不可用/读取被中断 → 调用方必须降级（不消费输入）；
-//   - answered=true, confirmed=false：用户显式拒绝（非本地来源同样视为拒绝）。
-func chatBusyPromptConfirm(session *ChatSession, question string, details []string) (bool, bool) {
+//   - Answered=false：通道不可用/读取被中断 → 调用方必须降级（不消费输入）；
+//   - Answered=true, Confirmed=false：用户显式拒绝，或来源不可确认
+//     （RejectReason=chatBusyPromptRejectNonLocalSource）。
+func chatBusyPromptConfirm(session *ChatSession, question string, details []string) chatBusyPromptOutcome {
 	if chatBusyPromptConfirmOverride != nil {
-		return chatBusyPromptConfirmOverride(session, question, details)
+		confirmed, answered := chatBusyPromptConfirmOverride(session, question, details)
+		return chatBusyPromptOutcome{Confirmed: confirmed, Answered: answered}
 	}
 	if session == nil || session.InputQueue == nil {
-		return false, false
+		return chatBusyPromptOutcome{}
 	}
 	restoreInputMode := pushChatComposerInputMode(session, chatInputModeConfirmation)
 	defer restoreInputMode()
@@ -105,7 +121,7 @@ func chatBusyPromptConfirm(session *ChatSession, question string, details []stri
 	}()
 	cleanupPrompt()
 	if err != nil {
-		return false, false
+		return chatBusyPromptOutcome{}
 	}
 	text := strings.TrimSpace(normalizeQueuedInputLine(item.Text))
 	if transientPrompt {
@@ -113,9 +129,9 @@ func chatBusyPromptConfirm(session *ChatSession, question string, details []stri
 	}
 	if !chatInputSourceIsLocalTerminal(item.Source) {
 		// INV-8 同款：确认手势必须来自终端前的人，Web/注入行不能充当确认。
-		return false, true
+		return chatBusyPromptOutcome{Answered: true, RejectReason: chatBusyPromptRejectNonLocalSource}
 	}
-	return chatBusyPromptAffirmative(text), true
+	return chatBusyPromptOutcome{Answered: true, Confirmed: chatBusyPromptAffirmative(text)}
 }
 
 // chatBusyPromptAffirmative 解析确认输入；只有明确肯定词才算确认（默认拒绝）。
@@ -160,16 +176,21 @@ func runBusyPromptCommand(session *ChatSession, line string) (occupied bool, exe
 		"[确认] 命令将在当前回合继续运行的同时执行（Phase A，无 Phase B 效应）。",
 		"[确认] 输入 y/yes/确认 执行；其他输入取消该行。",
 	}
-	confirmed, answered := chatBusyPromptConfirm(session, question, details)
-	if !answered {
+	outcome := chatBusyPromptConfirm(session, question, details)
+	if !outcome.Answered {
 		// 通道不可用或读取被中断：不消费，回退入队（不丢输入）。
 		session.commandMu.Unlock()
 		return false, false
 	}
-	if !confirmed {
-		// 用户显式拒绝：消费该行并给出提示，避免反复弹确认。
+	if !outcome.Confirmed {
+		// 用户显式拒绝（或非本地来源不可确认）：消费该行并给出提示，避免反复弹确认。
 		if session.Interaction != nil {
-			session.Interaction.RenderLocalSupplement("[input] 已取消忙时执行：" + line)
+			notice := "[input] 已取消忙时执行：" + line
+			if outcome.RejectReason == chatBusyPromptRejectNonLocalSource {
+				notice = "[input] 忙时命令未执行（已取消）：" + line +
+					"；确认手势仅限本地终端，Web/注入来源无法确认——请等当前回合结束后重发，或在本地 TUI 中执行"
+			}
+			session.Interaction.RenderLocalSupplement(notice)
 		}
 		session.commandMu.Unlock()
 		return true, false

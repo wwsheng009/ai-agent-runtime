@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,6 +13,132 @@ import (
 
 const goalPersistenceRequiredMessage = runtimegoal.PersistenceRequiredMessage
 
+// errGoalNotSet 表示当前会话没有 goal：渲染层各自给出用户可见文案（legacy
+// 打印 "当前会话未设置 goal"；结构化面渲染 None 文档）。
+var errGoalNotSet = errors.New("goal not set")
+
+// goalStatusChangeTarget 把 /goal pause|resume|complete 的动词映射到目标状态与
+// 确认文案（legacy 与结构化统一分派共用的单点，防止两套入口文案/状态漂移）。
+func goalStatusChangeTarget(verb string) (runtimegoal.Status, string, bool) {
+	switch verb {
+	case "pause":
+		return runtimegoal.StatusPaused, "Goal 已暂停", true
+	case "resume":
+		return runtimegoal.StatusActive, "Goal 已恢复", true
+	case "complete":
+		return runtimegoal.StatusComplete, "Goal 已标记完成", true
+	default:
+		return "", "", false
+	}
+}
+
+// applyGoalStatusChange 是 /goal pause|resume|complete 的语义单点（2026-10-18
+// 入口收敛）：状态迁移校验、用户态字段规范化、持久化、状态恢复、G4 rearm 与
+// 续跑 kick 只存在这一处——legacy handleGoalCommand 与结构化统一分派都经由此
+// 函数。此前结构化面缺 rearm 导致 "/goal resume 没有作用"（真机 07:42 复现）。
+func applyGoalStatusChange(session *ChatSession, status runtimegoal.Status, message, completedBy, completionSummary string) (runtimegoal.SessionGoal, error) {
+	if err := prepareGoalMutationPersist(session); err != nil {
+		return runtimegoal.SessionGoal{}, err
+	}
+	if status == runtimegoal.StatusActive {
+		// G4 rearm 闸：resume 是用户的明示继续意图——先清进程内 disarmed 标记，
+		// 否则 durable 状态回到 active 也会被 goal_disarmed 决策挡住。
+		rearmGoalContinuation(session, "goal_resume_command")
+	}
+	store := runtimegoal.NewMetadataStore()
+	goal, ok, err := store.Get(session.RuntimeSession)
+	if err != nil {
+		return runtimegoal.SessionGoal{}, err
+	}
+	if !ok || goal == nil {
+		return runtimegoal.SessionGoal{}, errGoalNotSet
+	}
+	if err := validateGoalStatusTransition(goal.Status, status); err != nil {
+		return runtimegoal.SessionGoal{}, err
+	}
+	runtimegoal.ApplyUserStatusUpdate(goal, status, completedBy, completionSummary, time.Now())
+	updated, err := store.PutPersistent(
+		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
+	if err != nil {
+		return runtimegoal.SessionGoal{}, err
+	}
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		return runtimegoal.SessionGoal{}, err
+	}
+	if status == runtimegoal.StatusActive {
+		// /goal resume：请求一次隐藏续跑（主循环下一轮迭代消费；对齐 Codex
+		// 的"置 active 立即续跑"语义）。
+		requestGoalContinuationKick(session)
+	}
+	return *goal, nil
+}
+
+// clearGoalCore 是 /goal clear 的语义单点。deferred storage 下尚无持久化行时
+// 按已清除处理（不为一条 clear 创建空会话行）。
+func clearGoalCore(session *ChatSession) error {
+	if err := requireGoalPersistence(session); err != nil {
+		return err
+	}
+	if session.runtimeSessionUnpersisted {
+		return nil
+	}
+	updated, err := runtimegoal.NewMetadataStore().ClearPersistent(
+		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session))
+	if err != nil {
+		return err
+	}
+	return restoreChatStateFromRuntimeSession(session, updated)
+}
+
+// setGoalCore 是 /goal <objective> 的语义单点（默认预算/轮数、替换说明、持久化
+// 与记账基线重置）。objective 的发送/渲染由各入口承担：legacy 同步调用
+// sendGoalObjectiveRequest；结构化面经 SendObjective 在确认 cell 提交后触发。
+func setGoalCore(session *ChatSession, objective string) (runtimegoal.SessionGoal, string, error) {
+	if err := prepareGoalMutationPersist(session); err != nil {
+		return runtimegoal.SessionGoal{}, "", err
+	}
+	goal, err := runtimegoal.NewSessionGoal(currentRuntimeSessionID(session), objective, time.Now())
+	if err != nil {
+		return runtimegoal.SessionGoal{}, "", err
+	}
+	if goal.TokenBudget <= 0 && session.goalDefaultTokenBudget > 0 {
+		goal.TokenBudget = session.goalDefaultTokenBudget
+	}
+	if goal.MaxRounds <= 0 && session.goalDefaultMaxRounds > 0 {
+		goal.MaxRounds = session.goalDefaultMaxRounds
+	}
+	store := runtimegoal.NewMetadataStore()
+	replaced := ""
+	if existing, ok, err := store.Get(session.RuntimeSession); err != nil {
+		return runtimegoal.SessionGoal{}, "", err
+	} else if ok && existing != nil {
+		replaced = fmt.Sprintf("（已替换原 %s goal）", existing.Status)
+	}
+	updated, err := store.PutPersistent(
+		context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), goal, runtimegoal.MutationUser)
+	if err != nil {
+		return runtimegoal.SessionGoal{}, "", err
+	}
+	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		return runtimegoal.SessionGoal{}, "", err
+	}
+	resetGoalAccountingBaseline(session)
+	return goal, replaced, nil
+}
+
+// goalStatusTrailingHints 返回 /goal status 附在摘要后的提示行（G4 disarmed
+// 可见性单点）：legacy printGoalStatus 与结构化状态文档共用，避免"一套入口有
+// 提示、另一套没有"的漂移（2026-10-18 真机复现项）。
+func goalStatusTrailingHints(session *ChatSession, goal *runtimegoal.SessionGoal) []string {
+	if session == nil || goal == nil {
+		return nil
+	}
+	if goal.Status == runtimegoal.StatusActive && session.goalContinuationDisarmed.Load() {
+		return []string{goalDisarmedStatusHint}
+	}
+	return nil
+}
+
 func handleGoalCommand(session *ChatSession, command string) bool {
 	arg := strings.TrimSpace(extractCommandArgument(command))
 	switch strings.ToLower(arg) {
@@ -19,21 +146,7 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 		printGoalStatus(session, arg == "--json")
 		return false
 	case "clear":
-		if err := requireGoalPersistence(session); err != nil {
-			fmt.Printf("错误: %v\n", err)
-			return false
-		}
-		// deferred storage：新会话尚未落盘时没有可清除的持久化行，按已清除返回。
-		if session.runtimeSessionUnpersisted {
-			fmt.Println("Goal 已清除")
-			return false
-		}
-		updated, err := runtimegoal.NewMetadataStore().ClearPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session))
-		if err != nil {
-			fmt.Printf("错误: %v\n", err)
-			return false
-		}
-		if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		if err := clearGoalCore(session); err != nil {
 			fmt.Printf("错误: %v\n", err)
 			return false
 		}
@@ -42,9 +155,6 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 	case "pause":
 		return updateGoalStatusCommand(session, runtimegoal.StatusPaused, "Goal 已暂停", "user", "")
 	case "resume":
-		// G4 rearm 闸：/goal resume 是用户的明示继续意图，先于状态迁移清除
-		// disarmed 标记（updateGoalStatusCommand 内部的续跑 kick 因此可以生效）。
-		rearmGoalContinuation(session)
 		return updateGoalStatusCommand(session, runtimegoal.StatusActive, "Goal 已恢复", "user", "")
 	case "complete":
 		return updateGoalStatusCommand(session, runtimegoal.StatusComplete, "Goal 已标记完成", "user", "")
@@ -83,39 +193,11 @@ func handleGoalCommand(session *ChatSession, command string) bool {
 		fmt.Println(formatCommandError("错误: /goal --json 仅支持查看当前 goal", true))
 		return false
 	}
-	if err := prepareGoalMutationPersist(session); err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	}
-	goal, err := runtimegoal.NewSessionGoal(currentRuntimeSessionID(session), objective, time.Now())
+	goal, replaced, err := setGoalCore(session, objective)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
-	if goal.TokenBudget <= 0 && session.goalDefaultTokenBudget > 0 {
-		goal.TokenBudget = session.goalDefaultTokenBudget
-	}
-	if goal.MaxRounds <= 0 && session.goalDefaultMaxRounds > 0 {
-		goal.MaxRounds = session.goalDefaultMaxRounds
-	}
-	store := runtimegoal.NewMetadataStore()
-	replaced := ""
-	if existing, ok, err := store.Get(session.RuntimeSession); err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	} else if ok && existing != nil {
-		replaced = fmt.Sprintf("（已替换原 %s goal）", existing.Status)
-	}
-	updated, err := store.PutPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), goal, runtimegoal.MutationUser)
-	if err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	}
-	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	}
-	resetGoalAccountingBaseline(session)
 	fmt.Printf("Goal 已设置%s\n", replaced)
 	fmt.Println(formatGoalSummary(goal))
 	if err := sendGoalObjectiveRequest(session, objective); err != nil {
@@ -183,51 +265,27 @@ func printGoalStatus(session *ChatSession, jsonOutput bool) {
 		return
 	}
 	fmt.Println(formatGoalSummary(*goal))
-	// G4 rearm 闸可见性：disarmed 的 active goal 明确告知自动续跑被挡、如何恢复。
-	if goal.Status == runtimegoal.StatusActive && session.goalContinuationDisarmed.Load() {
-		fmt.Println(goalDisarmedStatusHint)
+	// G4 rearm 闸可见性：提示行由 goalStatusTrailingHints 单点产出，与结构化
+	// /goal status 文档共用（防入口漂移）。
+	for _, hint := range goalStatusTrailingHints(session, goal) {
+		fmt.Println(hint)
 	}
 }
 
 func updateGoalStatusCommand(session *ChatSession, status runtimegoal.Status, message string, completedBy string, completionSummary string) bool {
-	if err := prepareGoalMutationPersist(session); err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	}
-	store := runtimegoal.NewMetadataStore()
-	goal, ok, err := store.Get(session.RuntimeSession)
+	// 语义单点：校验/持久化/rearm/kick 都在 applyGoalStatusChange；本函数只做
+	// legacy 文本渲染（结构化统一分派走 executeStructuredGoalStatusChange）。
+	goal, err := applyGoalStatusChange(session, status, message, completedBy, completionSummary)
 	if err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	}
-	if !ok || goal == nil {
-		fmt.Println("当前会话未设置 goal")
-		return false
-	}
-	if err := validateGoalStatusTransition(goal.Status, status); err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	}
-	now := time.Now()
-	// 与 runtime-server 的 goal 管理 HTTP 面共用同一规范化（internal/goal），
-	// 保证完成字段 / 阻塞原因的清理规则不漂移。
-	runtimegoal.ApplyUserStatusUpdate(goal, status, completedBy, completionSummary, now)
-	updated, err := store.PutPersistent(context.Background(), session.SessionManager.GetStorage(), currentRuntimeSessionID(session), *goal, runtimegoal.MutationUser)
-	if err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return false
-	}
-	if err := restoreChatStateFromRuntimeSession(session, updated); err != nil {
+		if errors.Is(err, errGoalNotSet) {
+			fmt.Println("当前会话未设置 goal")
+			return false
+		}
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
 	fmt.Println(message)
-	fmt.Println(formatGoalSummary(*goal))
-	if status == runtimegoal.StatusActive {
-		// /goal resume：请求一次隐藏续跑（主循环下一轮迭代消费；对齐 Codex
-		// 的"置 active 立即续跑"语义）。
-		requestGoalContinuationKick(session)
-	}
+	fmt.Println(formatGoalSummary(goal))
 	return false
 }
 

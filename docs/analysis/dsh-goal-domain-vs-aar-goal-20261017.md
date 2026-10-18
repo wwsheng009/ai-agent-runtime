@@ -155,7 +155,7 @@
 
 | 项 | 状态 | 提交 | 落地形态 |
 |---|---|---|---|
-| G4 rearm 闸 | ✅ 已实施 | `31efd9a0` | restore 双路径（resume latest / load by id）置进程内 `goalContinuationDisarmed`；decision 新增 `goal_disarmed` 停止原因；`/goal resume` rearm；`/goal status` 显示提示。无 goal / 非 active 会话零行为变化 |
+| G4 rearm 闸 | ✅ 已实施（2026-10-18 补齐可见性、意图入口与入口收敛） | `31efd9a0` + 2026-10-18 修复 | 三条恢复路径（resume latest / load by id / bootstrap `--session`）统一置进程内 `goalContinuationDisarmed`；decision 保留 `goal_disarmed` 停止原因；rearm 单点 `applyGoalStatusChange`（legacy `handleGoalCommand` 与结构化统一分派共用，2026-10-18 真机根因：structured resume 曾缺 rearm）与显式继续意图消息（`goalContinueIntentPhrases`，查询类不命中）；`/goal status` 提示由 `goalStatusTrailingHints` 单点产出；disarmed 期间状态栏显示 `Goal idle (/goal resume)`；kick 全链路日志（request/refuse/held/dropped/consumed）+ 清道夫（排空落地重估、queued_input 瞬时让位转延迟 kick、actor 未就绪挂就绪 watcher）；入口/恢复 parity 回归测试钉住。无 goal / 非 active 会话零行为变化 |
 | G2 轮数上限 | ✅ 已实施 | `9ea2566f` | `SessionGoal` 增 `max_rounds`/`rounds_started`/`blocked_code`（additive，零值=不限）；`internal/goal.AdmitGoalRound` 单点 admit 语义，双宿主驱动器提交续跑轮前记账；达上限置 `blocked`（code=round-limit）；`/goal status` 显示轮数；`/goal resume` 为用户出口 |
 | G3 终局 wrapup | ✅ 已实施 | `252bf012` | 共享层新增 `CompleteWrapUpPrompt`/`BlockedWrapUpPrompt`（含 grounding 纪律、禁再调工具）；CLI post-turn reconciler 检测模型终态 → 续跑循环退出前消费一次收尾轮；服务端驱动器同条件直接提交收尾轮；用户命令终态与预算收尾路径不受影响 |
 | G1 goal CAS | ⏸ 未实施（后续批） | — | 设计保留（`Revision` + CAS 式 PutPersistent，复用 supervision `UpdateExecutionRunCAS` 形态）；当前 `GoalMergePolicy` 的 actor 裁决已覆盖主要状态机风险 |

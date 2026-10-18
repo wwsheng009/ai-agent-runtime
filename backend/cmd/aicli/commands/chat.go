@@ -77,14 +77,18 @@ type ChatSession struct {
 	goalMaxContinuations int
 	// goalKickPending 表示 resume/恢复态作答后请求的一次性续跑尚未消费；
 	// goalKickWatchActive 保证同一时刻只有一个就绪 watcher；
+	// goalKickHoldNoted 保证一笔待消费 kick 的被挡原因只写一条 debug 日志；
 	// goalContinuationUnavailableWarned 让"update_goal 不可用"提示只出现一次。
 	goalKickPending                   atomic.Bool
 	goalKickWatchActive               atomic.Bool
+	goalKickHoldNoted                 atomic.Bool
 	goalContinuationUnavailableWarned atomic.Bool
 	// goalContinuationDisarmed 是进程内 rearm 闸（DSH goal 借鉴 G4，见
 	// docs/analysis/dsh-goal-domain-vs-aar-goal-20261017.md §2.3/G4）：恢复
 	// 含 active goal 的历史会话后置位——用户发任意消息不再触发自动续跑，
-	// 直到 /goal resume（或用户在消息中明示继续）重新武装。进程局部，不落库。
+	// 直到 /goal resume 或用户在消息中明示继续（收尾清单，见
+	// chat_goal_auto_continue.go 的 goalContinueIntentPhrases）重新武装。
+	// 进程局部，不落库；disarmed 期间状态栏显示 "Goal idle (/goal resume)"。
 	goalContinuationDisarmed atomic.Bool
 	// goalDefaultTokenBudget 是新建 goal 的默认 token 预算（0=无预算），来自
 	// runtime.yaml 的 goal.defaultTokenBudget；goalAccountingGoalID/…Tokens 是

@@ -3286,6 +3286,12 @@ func chatSurfaceGoalStatusSegment(session *ChatSession) chatStatusSegment {
 	usage := chatSurfaceGoalUsage(goal, chatGoalStatusActiveTurnStartedAt(session), time.Now())
 	switch goal.Status {
 	case runtimegoal.StatusActive:
+		// G4 rearm 闸可见性（2026-10-18 修复）：恢复态默认 disarmed，自动续跑
+		// 不会发生。若仍显示 "Pursuing goal"，用户会以为目标在推进而实际静止
+		// （现场事故报告的核心症状），因此 disarmed 时给出明确的 idle 指示。
+		if session != nil && session.goalContinuationDisarmed.Load() {
+			return chatStatusSegment{full: "Goal idle (/goal resume)", compact: "Idle"}
+		}
 		if attempt := goalContinuationAttemptLabel(session); attempt != "" {
 			// 自动续跑进行中：把进度带进状态栏（此前只有 debug 日志可见）。
 			if usage != "" {

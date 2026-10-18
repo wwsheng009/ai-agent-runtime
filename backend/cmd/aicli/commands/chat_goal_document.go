@@ -16,12 +16,13 @@ import (
 // buildChatGoalStatusDocument renders the /goal status view (no argument or
 // "status"). A nil goal renders the same "当前会话未设置 goal" message as the
 // legacy path; goal errors are handled by the dispatch branch (legacy error
-// path stays visible in every mode).
-func buildChatGoalStatusDocument(goal *runtimegoal.SessionGoal) render.Document {
+// path stays visible in every mode). trailing lines (e.g. the G4 disarmed
+// hint) are appended after the summary, matching the legacy print order.
+func buildChatGoalStatusDocument(goal *runtimegoal.SessionGoal, trailing ...string) render.Document {
 	if goal == nil {
 		return render.SingleLineDoc(render.TextSpan("当前会话未设置 goal"))
 	}
-	return goalSummaryDocument(*goal)
+	return goalSummaryDocument(*goal, trailing...)
 }
 
 // buildChatGoalClearDocument renders the /goal clear confirmation.
