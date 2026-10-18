@@ -1283,16 +1283,14 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 			Chat:        msg.Chat,
 			Summary:     "后端处理失败：" + err.Error(),
 		}, logCounters{})
-		if streamer != nil {
-			if failErr := streamer.Fail(ctx, failureText(err)); failErr != nil {
-				s.recordLog(LogEntry{
-					Level:       LogLevelError,
-					Direction:   LogDirectionOut,
-					ConnectorID: cfg.ID,
-					Chat:        msg.Chat,
-					Summary:     "失败回执发送失败：" + failErr.Error(),
-				}, logCounters{})
-			}
+		if failErr := s.sendFailureNotice(ctx, cfg, provider, streamer, msg.Chat, err); failErr != nil {
+			s.recordLog(LogEntry{
+				Level:       LogLevelError,
+				Direction:   LogDirectionOut,
+				ConnectorID: cfg.ID,
+				Chat:        msg.Chat,
+				Summary:     "失败回执发送失败：" + failErr.Error(),
+			}, logCounters{})
 		}
 		return err
 	}
@@ -1607,16 +1605,14 @@ func (s *Service) processMessageLocal(ctx context.Context, cfg Config, provider 
 			Chat:        msg.Chat,
 			Summary:     "后端处理失败：" + err.Error(),
 		}, logCounters{})
-		if streamer != nil {
-			if failErr := streamer.Fail(ctx, failureText(err)); failErr != nil {
-				s.recordLog(LogEntry{
-					Level:       LogLevelError,
-					Direction:   LogDirectionOut,
-					ConnectorID: cfg.ID,
-					Chat:        msg.Chat,
-					Summary:     "失败回执发送失败：" + failErr.Error(),
-				}, logCounters{})
-			}
+		if failErr := s.sendFailureNotice(ctx, cfg, provider, streamer, msg.Chat, err); failErr != nil {
+			s.recordLog(LogEntry{
+				Level:       LogLevelError,
+				Direction:   LogDirectionOut,
+				ConnectorID: cfg.ID,
+				Chat:        msg.Chat,
+				Summary:     "失败回执发送失败：" + failErr.Error(),
+			}, logCounters{})
 		}
 		return err
 	}
@@ -2162,6 +2158,19 @@ func helpText(cfg Config) string {
 	}
 	lines = append(lines, "", "直接发送文本即可与 agent 对话。")
 	return strings.Join(lines, "\n")
+}
+
+// sendFailureNotice 把后端处理失败回执送达用户（best-effort）：
+// 流式通道走 StreamingSession.Fail（会把已流出的内容替换成失败文案）；
+// 非流式通道直接 provider.Send 一条失败提示——修复前非流式通道（如 wechat，
+// 未实现 StreamingProvider）后端出错时只记日志，IM 侧完全静默，用户无法
+// 感知异常。提示发送失败只记日志，不影响主流程。
+func (s *Service) sendFailureNotice(ctx context.Context, cfg Config, provider Provider, streamer StreamingSession, chat string, cause error) error {
+	text := failureText(cause)
+	if streamer != nil {
+		return streamer.Fail(ctx, text)
+	}
+	return provider.Send(ctx, cfg, chat, []OutboundMessage{{Text: text}})
 }
 
 func failureText(err error) string {

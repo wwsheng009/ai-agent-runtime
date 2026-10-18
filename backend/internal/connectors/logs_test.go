@@ -336,6 +336,57 @@ func TestBackendErrorLoggedAndCounted(t *testing.T) {
 	}
 }
 
+// TestBackendErrorNotifiesNonStreamingChat 覆盖非流式通道的后端错误回执：
+// wechat 等未实现 StreamingProvider 的通道此前只记日志、IM 侧完全静默
+//（2026-10-18 真机：BBC 抓取超时，用户收不到任何失败提示）。修复后
+// streamer==nil 时直接 provider.Send 一条失败文案。
+func TestBackendErrorNotifiesNonStreamingChat(t *testing.T) {
+	provider := &basicProvider{}
+	backend := &fakeBackend{err: errors.New("请求失败: dial tcp 67.15.129.210:443: connectex timeout")}
+	service := newTestService(t, NewMemoryStore(testConfig("c1", "basic")), backend, provider)
+
+	if err := service.HandleInbound(context.Background(), inbound("c1", "chat-1", "m1", "hi")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "backend error logged", func() bool {
+		stats, _ := service.Stats("c1")
+		return stats.Errors == 1
+	})
+	texts := provider.sentTexts()
+	if len(texts) != 1 {
+		t.Fatalf("非流式通道应收到 1 条失败回执，got %d: %v", len(texts), texts)
+	}
+	if !strings.Contains(texts[0], "本次处理失败") || !strings.Contains(texts[0], "connectex timeout") {
+		t.Fatalf("失败回执内容不符：%q", texts[0])
+	}
+}
+
+// TestBackendErrorNotifiesFinalModeChat 覆盖 final 回复模式的失败回执：
+// Policy.ReplyMode=final 时不建立流式会话（streamer==nil），同样必须
+// 直接 Send 失败提示而不是静默。
+func TestBackendErrorNotifiesFinalModeChat(t *testing.T) {
+	provider := &fakeProvider{}
+	backend := &fakeBackend{err: errors.New("agent offline")}
+	service := newTestService(t, NewMemoryStore(testConfig("c1", "fake", func(cfg *Config) {
+		cfg.Policy.ReplyMode = "final"
+	})), backend, provider)
+
+	if err := service.HandleInbound(context.Background(), inbound("c1", "chat-1", "m1", "hi")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "backend error logged", func() bool {
+		stats, _ := service.Stats("c1")
+		return stats.Errors == 1
+	})
+	if updates := provider.streamUpdates(); len(updates) != 0 {
+		t.Fatalf("final 模式不应走流式 Fail：%v", updates)
+	}
+	texts := provider.sentTexts()
+	if len(texts) != 1 || !strings.Contains(texts[0], "本次处理失败") {
+		t.Fatalf("final 模式应收到 1 条失败回执，got %d: %v", len(texts), texts)
+	}
+}
+
 // TestStreamerFailFailureLogged 覆盖 streamer.Fail 失败写入点（额外 error 计数）。
 func TestStreamerFailFailureLogged(t *testing.T) {
 	provider := &fakeProvider{streamFailErr: errors.New("edit failed")}
