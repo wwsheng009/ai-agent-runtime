@@ -1365,6 +1365,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		return nil, err
 	}
 	markChatStartup("host_bootstrap_manager")
+	// 非标准 skill 文件（缺 frontmatter 等）只告警：在能力面发现阶段就把
+	// 收集到的跳过告警投递动态状态栏，而不是让整次能力面初始化失败。
+	reportSkillLoadWarnings(bootstrapManager)
 	if err := ensureLocalRuntimeProvider(bootstrapManager.LLMRuntime(), session); err != nil {
 		_ = bootstrapManager.Stop()
 		return nil, err

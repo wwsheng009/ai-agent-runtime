@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"gopkg.in/yaml.v3"
 )
 
@@ -16,6 +17,10 @@ type ManifestParser struct {
 	validateTriggers bool
 	validateTools    bool
 	promptLoadMode   CompanionPromptLoadMode
+	// warningHandler 是解析级告警出口（非标准 skill 文件等）。nil 时回退
+	// logpkg，绝不直接写 stdout——TUI 活动时裸写终端会覆盖底部保留区
+	// （2026-10-18 deskctl 非标准 SKILL.md 实例：fmt.Printf 直接落到屏幕上）。
+	warningHandler func(string)
 }
 
 type CompanionPromptLoadMode string
@@ -45,6 +50,27 @@ func (p *ManifestParser) SetCompanionPromptLoadMode(mode CompanionPromptLoadMode
 	default:
 		p.promptLoadMode = CompanionPromptLoadEager
 	}
+}
+
+// SetWarningHandler 注册解析级告警出口；nil 时回退到 logpkg。
+func (p *ManifestParser) SetWarningHandler(handler func(string)) {
+	if p == nil {
+		return
+	}
+	p.warningHandler = handler
+}
+
+// reportWarning 上报一条解析级告警。非标准 skill 文件只降级为告警：
+// 不产生裸 stdout 字节，也不中断整批扫描。
+func (p *ManifestParser) reportWarning(line string) {
+	if p == nil || strings.TrimSpace(line) == "" {
+		return
+	}
+	if p.warningHandler != nil {
+		p.warningHandler(line)
+		return
+	}
+	logpkg.Warnf("%s", line)
 }
 
 // ParseFile 从文件解析 Manifest
@@ -228,8 +254,9 @@ func (p *ManifestParser) ParseDir(dirPath string) ([]*Skill, error) {
 
 		skill, err := p.ParseFile(entry.Path)
 		if err != nil {
-			// 记录错误但继续解析其他文件。
-			fmt.Printf("Warning: failed to parse %s: %v\n", entry.Path, err)
+			// 非标准文件降级为告警并继续解析其他文件；告警走注册出口
+			// （chat 会话投递动态状态栏），绝不直接写 stdout 破坏 TUI。
+			p.reportWarning(fmt.Sprintf("Warning: 跳过非标准 skill 文件 %s: %v", entry.Path, err))
 			return nil
 		}
 
@@ -259,7 +286,7 @@ func (p *ManifestParser) ParseSummaryDir(dirPath string) ([]*SkillSummary, error
 
 		summary, err := p.ParseSummaryFile(entry.Path)
 		if err != nil {
-			fmt.Printf("Warning: failed to parse summary %s: %v\n", entry.Path, err)
+			p.reportWarning(fmt.Sprintf("Warning: 跳过非标准 skill 文件 %s: %v", entry.Path, err))
 			return nil
 		}
 

@@ -3,6 +3,7 @@ package skill
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -243,7 +244,7 @@ func TestHotReload_WatchRoots_PicksUpFirstInstall(t *testing.T) {
 }
 
 // 回归（2026-10-14 itsm 实例）：目录批量创建后、清单文件隔一段时间才写入
-//（超过防抖窗口），也必须热加载。现有测试都是"目录 + SKILL.md 同批写"，
+// （超过防抖窗口），也必须热加载。现有测试都是"目录 + SKILL.md 同批写"，
 // 覆盖不到"先建目录、后写清单"的真实安装形态。
 // 覆盖链路：watch 候选（含尚不存在的 <cwd>/.agents/skills）→ pending 根
 // 接管 / 目录创建补扫 → 补扫为子树挂监听 → 晚到的 SKILL.md 写事件。
@@ -385,4 +386,39 @@ func TestHotReload_ReloadSkillsUnderDir_AdoptsStuckPendingRoots(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("skill under the adopted pending root must register")
+}
+
+// 回归：全量重载（chat/runtime-server 启用热加载后的启动路径）扫描到非标准
+// skill 文件（缺 YAML frontmatter 的 SKILL.md）时，必须降级为告警并跳过该
+// 文件，而不是让整次 Reload / 能力面初始化失败（2026-10-18 deskctl 实例：
+// "能力面初始化失败: [SKILL_LOAD_FAILED] failed to discover skill file"）。
+func TestHotReload_ReloadAllSkills_NonStandardFileSoftSkipsWithWarning(t *testing.T) {
+	loader := NewLoader(nil)
+	var warnings []string
+	loader.SetWarningHandler(func(line string) { warnings = append(warnings, line) })
+	registry := NewRegistry(nil)
+	hotReload, err := NewHotReload(loader, registry)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = hotReload.Stop() })
+
+	skillDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# desktop-basic\n\nno frontmatter here\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(`name: hot-non-standard-neighbor
+description: valid neighbor skill
+triggers:
+  - type: keyword
+    values: ["hot"]
+    weight: 1
+`), 0o644))
+
+	require.NoError(t, hotReload.reloadAllSkills([]string{skillDir}),
+		"non-standard skill files must be skipped with a warning, not abort the whole reload")
+
+	item, ok := registry.Get("hot-non-standard-neighbor")
+	require.True(t, ok, "valid neighbor skill must still be registered")
+	require.NotNil(t, item)
+
+	joined := strings.Join(warnings, "\n")
+	assert.Contains(t, joined, "SKILL.md", "warning must mention the skipped non-standard file")
+	assert.Contains(t, joined, "非标准 skill 文件")
 }

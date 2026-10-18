@@ -13,6 +13,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
@@ -69,6 +70,11 @@ type Manager struct {
 	teamStore       team.Store
 	stopOnce        sync.Once
 	stopErr         error
+
+	// skillLoadWarnings 收集加载期「非标准 skill 文件跳过」等告警：chat 宿主
+	// 在能力面挂载后取走并投递动态状态栏，/skills reload 也会取走展示。
+	skillLoadWarningsMu sync.Mutex
+	skillLoadWarnings   []string
 }
 
 // NewManager 创建 Runtime Bootstrap Manager
@@ -122,6 +128,10 @@ func NewManager(opts *Options) (*Manager, error) {
 	// Profile skill selection (Batch 1): applied on the loader so every
 	// registration path — including hot reload — honors the same predicate.
 	manager.loader.SetNameFilter(opts.SkillFilter)
+
+	// 非标准 skill 文件（缺 frontmatter / 字段校验失败等）降级为告警收集，
+	// 加载照常继续；告警由 chat 宿主投递动态状态栏，绝不裸写 stdout。
+	manager.loader.SetWarningHandler(manager.appendSkillLoadWarning)
 
 	if len(manager.skillDirs) > 0 {
 		manager.skillDir = manager.skillDirs[0]
@@ -178,6 +188,46 @@ func NewManager(opts *Options) (*Manager, error) {
 
 	cleanupOnError = false
 	return manager, nil
+}
+
+// appendSkillLoadWarning 收集一条 skill 加载告警（去重、上限 64 条），
+// 同时写入文件日志；未取走的告警会随 Manager 生命周期保留。
+func (m *Manager) appendSkillLoadWarning(line string) {
+	if m == nil {
+		return
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	logpkg.Warnf("%s", line)
+	m.skillLoadWarningsMu.Lock()
+	defer m.skillLoadWarningsMu.Unlock()
+	for _, existing := range m.skillLoadWarnings {
+		if existing == line {
+			return
+		}
+	}
+	if len(m.skillLoadWarnings) >= 64 {
+		return
+	}
+	m.skillLoadWarnings = append(m.skillLoadWarnings, line)
+}
+
+// TakeSkillLoadWarnings 取走并清空已收集的加载告警。
+func (m *Manager) TakeSkillLoadWarnings() []string {
+	if m == nil {
+		return nil
+	}
+	m.skillLoadWarningsMu.Lock()
+	defer m.skillLoadWarningsMu.Unlock()
+	if len(m.skillLoadWarnings) == 0 {
+		return nil
+	}
+	out := make([]string, len(m.skillLoadWarnings))
+	copy(out, m.skillLoadWarnings)
+	m.skillLoadWarnings = nil
+	return out
 }
 
 func newSessionManager(config *runtimecfg.RuntimeConfig) (*chat.SessionManager, error) {

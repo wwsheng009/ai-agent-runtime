@@ -888,6 +888,22 @@ func (h *HotReload) removeSkillByManifest(filePath string) {
 	})
 }
 
+// reportLoadWarning 上报单文件跳过告警：经 loader 的解析告警出口收集
+// （chat 会话据此投递动态状态栏），并发出热加载 error 事件让运行中的
+// 回调即时可见。非标准 skill 文件只告警，不中断整表重载。
+func (h *HotReload) reportLoadWarning(filePath string, cause error) {
+	message := fmt.Sprintf("Warning: 跳过非标准 skill 文件 %s: %v", filePath, cause)
+	if h != nil && h.loader != nil {
+		h.loader.ReportWarning(message)
+	}
+	h.emitEvent(&ReloadEvent{
+		Type:      ReloadEventError,
+		FilePath:  filePath,
+		Error:     message,
+		Timestamp: time.Now(),
+	})
+}
+
 func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 	InvalidateAllHydratedSkills()
 	if h.registry != nil {
@@ -924,6 +940,13 @@ func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 
 			skill, loadErr := h.discoverSkillStub(entry.Path)
 			if loadErr != nil {
+				if isNonStandardSkillFileError(loadErr) {
+					// 非标准 skill 文件（缺 frontmatter / 字段校验失败等）：
+					// 跳过该文件并发出告警，不中断整表重载，更不阻断能力面
+					// 初始化；告警经 loader 出口收集后由 chat 投递动态状态栏。
+					h.reportLoadWarning(entry.Path, loadErr)
+					return nil
+				}
 				return loadErr
 			}
 			pathKey := skillIdentityPath(skill)

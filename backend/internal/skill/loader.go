@@ -32,6 +32,22 @@ func NewLoader(mcpManager MCPManager) *Loader {
 	}
 }
 
+// SetWarningHandler 注册加载级告警出口（非标准 skill 文件等）；nil 时回退 logpkg。
+func (l *Loader) SetWarningHandler(handler func(string)) {
+	if l == nil || l.parser == nil {
+		return
+	}
+	l.parser.SetWarningHandler(handler)
+}
+
+// ReportWarning 上报一条 skill 加载告警，供热加载全量重扫等同一表面复用。
+func (l *Loader) ReportWarning(line string) {
+	if l == nil || l.parser == nil {
+		return
+	}
+	l.parser.reportWarning(line)
+}
+
 // Load 从目录加载所有 Skills
 func (l *Loader) Load(dir string) ([]*Skill, error) {
 	l.skillDir = dir

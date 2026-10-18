@@ -34,6 +34,7 @@ type skillReloadReport struct {
 	After     int      `json:"after"`
 	Added     []string `json:"added,omitempty"`
 	Removed   []string `json:"removed,omitempty"`
+	Warnings  []string `json:"warnings,omitempty"`
 	Roots     []string `json:"roots,omitempty"`
 }
 
@@ -52,6 +53,12 @@ func (r *skillReloadReport) Text() string {
 	}
 	if len(r.Removed) > 0 {
 		lines = append(lines, "移除: "+strings.Join(r.Removed, ", "))
+	}
+	for _, warning := range r.Warnings {
+		if strings.TrimSpace(warning) == "" {
+			continue
+		}
+		lines = append(lines, warning)
 	}
 	if len(r.Roots) > 0 {
 		lines = append(lines, "Roots: "+strings.Join(r.Roots, ", "))
@@ -144,6 +151,8 @@ func runSkillReloadCommand(session *ChatSession) (*skillReloadReport, error) {
 			}
 		}
 	}
+	// 非标准 skill 文件跳过等加载告警：随重载回执展示，不阻断重载本身。
+	report.Warnings = manager.TakeSkillLoadWarnings()
 	report.HotReload = usedHotReload
 
 	if err := refreshSkillsRuntimeBinding(session, cfg); err != nil {

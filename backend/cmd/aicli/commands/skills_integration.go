@@ -1236,6 +1236,8 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 			return nil, fmt.Errorf("初始化 skills runtime 失败: %w", err)
 		}
 		ownsManager = true
+		// 非标准 skill 文件跳过告警：与长期宿主路径同口径投递动态状态栏。
+		reportSkillLoadWarnings(manager)
 	}
 
 	if err := bindSessionModelAlias(manager, session); err != nil {
@@ -1500,6 +1502,19 @@ func (b *skillsRuntimeBinding) attachHotReloadRefresh(session *ChatSession) {
 			runtimeskill.ReloadEventSkillUpdated,
 			runtimeskill.ReloadEventSkillRemoved:
 			session.scheduleSkillsRuntimeRefresh()
+		case runtimeskill.ReloadEventError:
+			// 运行中的单文件失败（含非标准 skill 文件跳过）只告警：
+			// 投递动态状态栏，绝不裸写 stderr 覆盖底部保留区。
+			line := strings.TrimSpace(event.Error)
+			if line == "" {
+				line = "skill 热加载失败: " + strings.TrimSpace(event.FilePath)
+			}
+			if !strings.HasPrefix(line, "Warning:") {
+				line = "Warning: " + line
+			}
+			if !NotifyChatDiagnostic(line) {
+				logpkg.Warnf("%s", line)
+			}
 		}
 	})
 }
