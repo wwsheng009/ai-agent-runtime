@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -261,6 +262,43 @@ var chatScreenCapability = func(session *ChatSession) bool {
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
 }
 
+// beginChatScreenInputOwnership 让副屏（L0）在持有租约期间独占 ESC 输入，
+// 返回幂等释放函数。
+//
+// 背景（2026-10-18 入口审计 R5）：副屏打开期间 composer 与 busy capture 都不再
+// 读 stdin，但回合级 ESC 消费者仍会让 KeyHandler 保持 armed——它的 50ms 轮询会与
+// 副屏自身的按键读取抢同一条 console 记录：用户按 Esc 想关面板，却可能被
+// KeyHandler 抢走变成“中断后台回合”，而且被抢走后副屏再也收不到 Esc。
+//
+// 屏幕租约是全框架唯一咽喉（openChatScreen），因此归属登记放在这里，避免散落：
+//   - 仲裁器登记 modal 层：快照 EscAvailable=false，状态行/Web payload 不再承诺
+//     “esc to interrupt”（R4 相邻的诚实性收敛，modal 采样结论待定，此处只做
+//     租约期间这一步）；
+//   - KeyHandler 暂时 Disarm（副屏自身消费 Esc）；
+//   - 释放时只有仍存在回合级 ESC 消费者才重新 Arm——消费者可能已在副屏存续期间
+//     结束，绝不能留下无人消费的 armed 状态（那会把之后的 Esc 静默吞掉）。
+func beginChatScreenInputOwnership(session *ChatSession) func() {
+	if session == nil {
+		return func() {}
+	}
+	releaseModal := beginChatInputShadowLevel(session, chatInputOwnerModal)
+	kh := session.KeyHandler
+	disarmed := false
+	if kh != nil && kh.IsEnabled() && kh.Armed() {
+		kh.Disarm()
+		disarmed = true
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			releaseModal()
+			if disarmed && chatEscapeInterruptConsumerActive(session) {
+				kh.Arm()
+			}
+		})
+	}
+}
+
 // openChatScreen 打开一次副屏并完成整个生命周期（§4.3）。
 //
 // 返回的 outcome 在 close 序列（post Close → release → actor idle）完成之后
@@ -331,6 +369,11 @@ func openChatScreen(session *ChatSession, spec chatScreenSpec) chatScreenOutcome
 
 	chatScreenCounters.opens.Add(1)
 	chatScreenEmitOpen(spec, lease, waitMs)
+
+	// L0 输入独占（2026-10-18 入口审计 R5）：副屏持有租约期间 ESC 归副屏，
+	// KeyHandler 让位。注册顺序保证释放发生在 close 序列之后（LIFO）。
+	releaseInputOwnership := beginChatScreenInputOwnership(session)
+	defer releaseInputOwnership()
 
 	closed := false
 	closeStartedAt := time.Now()

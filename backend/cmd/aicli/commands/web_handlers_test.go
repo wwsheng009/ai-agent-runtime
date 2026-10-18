@@ -782,6 +782,68 @@ func TestHandleChatWebAPIInput_InterruptSharesDecisionWithEscape(t *testing.T) {
 	session.ResetInterrupt()
 }
 
+// 2026-10-18 入口审计 R10：Web 键入 /stop 在忙碌期必须直通中断，
+// 而不是按 preserve 队列语义等到回合结束后才执行。
+func TestHandleChatWebAPIInput_StopPromptInterruptsRunningTurn(t *testing.T) {
+	session, _, _ := newEscapeRetryTestSession(t)
+	session.InputQueue = newChatInputQueue(nil)
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+	stopConsumer := startChatEscapeInterruptWatcher(session)
+	defer stopConsumer()
+	withWebTestSession(t, session)
+
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPIInputPath,
+		strings.NewReader(`{"prompt":"/stop"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIInput(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response invalid: %v", err)
+	}
+	if resp["status"] != "interrupted" {
+		t.Fatalf("忙碌期键入 /stop 必须直通中断，got %v", resp)
+	}
+	if !session.IsInterrupted() {
+		t.Fatal("忙碌期键入 /stop 必须置中断标记")
+	}
+	if count, _ := queuedInteractiveInputState(session); count != 0 {
+		t.Fatalf("直通中断不得入队，queued=%d", count)
+	}
+	session.ResetInterrupt()
+}
+
+// 空闲时 /stop 仍走正常队列/命令路径（命令自身给出“没有在途回合”回执），
+// 不在 HTTP 层伪造 interrupted。
+func TestHandleChatWebAPIInput_StopPromptIdleKeepsQueuePath(t *testing.T) {
+	session := newWebTestSession()
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+	withWebTestSession(t, session)
+
+	req := httptest.NewRequest(http.MethodPost, ChatWebAPIInputPath,
+		strings.NewReader(`{"prompt":"/stop"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIInput(rec, req)
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response invalid: %v", err)
+	}
+	if resp["status"] != "queued" {
+		t.Fatalf("空闲 /stop 应保持队列路径，got %v", resp)
+	}
+	if session.IsInterrupted() {
+		t.Fatal("空闲 /stop 不得置中断标记")
+	}
+}
+
 func TestHandleChatWebAPIInput_InterruptNoSession(t *testing.T) {
 	withWebTestSession(t, nil)
 

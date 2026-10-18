@@ -1007,12 +1007,27 @@ func injectChatWebPrompt(session *ChatSession, prompt string) (chatInputRouteRes
 // handleWebPrompt 路由普通 prompt 到 InputQueue（§4.2.4 步骤 3-5）。
 // 携带 imagePaths 时先把它们并入会话附件列表（见 attachChatWebImages），
 // 再由下一回合的 sendMessage 与文本一起发送并清空——与 CLI /attach 同一语义。
+//
+// /stop 忙碌期直通（2026-10-18 入口审计 R10）：Web 注入行遵循 preserve 队列
+// 语义，忙碌期只会入队、回合结束后才执行——对“停止当前回合”这一条是错误的
+// 体感（Web 客户端已有 Stop 按钮/全局 Esc 走 type=interrupt，但键入 /stop 的
+// 用户也应立即生效）。有在途回合时把这一行按中断处理（与 TUI 键入 /stop、Esc
+// 共用 chatInterruptDecision）；响应沿用客户端已能处理的 interrupted 状态。
+// 空闲时保持队列路径，由命令自身给出“没有在途回合”的回执。
 func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string, imagePaths []string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
 			"status": "rejected",
 			"reason": "empty prompt",
+		})
+		return
+	}
+	if commandMatches(strings.ToLower(prompt), "/stop") && chatStopCommandHasTarget(session) {
+		result := chatInterruptDecision(session, true)
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status": "interrupted",
+			"result": string(result),
 		})
 		return
 	}

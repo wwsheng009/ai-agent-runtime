@@ -1,7 +1,7 @@
 # ESC / 中断入口审计与单一入口梳理（2026-10-18）
 
 - 日期：2026-10-18
-- 状态：**审计完成；TUI 键位平面已收敛到单一决策点；R1/R2/R3/R6/R8 已实施并经真机验证（§6.1）**；R9（Web 粘滞标记导致空闲 `/stop` 假阳性）已修复待重建复验；R10（Web 键入 `/stop` 忙碌期只入队）为已记录行为。剩余 R4/R5（需真实终端取样）与 R7（设计如此）。
+- 状态：**审计完成；TUI 键位平面已收敛到单一决策点；R1/R2/R3/R5/R6/R8/R9/R10 已实施并经真机验证（§6.1）**；R7 已核查（runtime-server/ACP/headless 均有非 Esc 入口，无缺口）；R11（IM 连接器无停止命令）为记录项。剩余 R4（需真实终端取样）与 R5 残余（非副屏窗口的过程性竞态，待阶段 F P2b 灰度）。
 - 关联：
   - `docs/plan/esc-interrupt-priority-and-loop-robustness-plan-20260918.md`（阶段 A–F 方案与实施记录；本审计是其 §13 的延续）
   - `docs/plan/runtime-observability-supervision-http-api-plan.md`（runtime commands / active turn 注册表的 HTTP 契约）
@@ -61,6 +61,8 @@
 | R3 `/stop` | 注册表 inline/live + catalog + install.md 命令表 + `chat_stop_command.go`（只调统一决策点） | `chat_stop_command_test.go` + 目录/补全/忙时审计守卫 |
 | R6 统一中断决策 | `chatInterruptDecision`（started/already_stopping/no_session）成为 TUI Esc / Web interrupt / `/stop` / 忙时 capture 的唯一决策；Web 响应保留 `status` 并新增 `result` | `TestChatInterruptDecisionSharedAcrossPlanes`、`TestHandleChatWebAPIInput_InterruptSharesDecisionWithEscape` |
 | R8 去重打印 | 删除 Unix KeyHandler 的 `[ESC 检测到 - 中断操作]` 直写，反馈统一由决策点渲染 | linux/windows 交叉编译 |
+| R5 副屏 Esc 独占 | `openChatScreen` 登记 L0 输入独占：仲裁 modal + KeyHandler 让位，关闭后仅在仍有消费者时复 Arm | `chat_screen_input_ownership_test.go` |
+| R10 Web `/stop` 直通 | `handleWebPrompt` 忙碌期把 `/stop` 走中断决策，空闲保持队列路径 | `TestHandleChatWebAPIInput_StopPromptInterruptsRunningTurn` 等 |
 
 未改动（有意保留）：Ctrl+C 退出窗口语义（#8）、overlay Esc（#7）、选择器/审批取消语义（#10/#11）、监督/ACP 平面（#15/#16）。
 
@@ -93,22 +95,35 @@
 - 事实：仲裁器目标语义 modal 期 `EscAvailable=false`（`chat_input_arbitration.go:103-117`），但 `chatEscapeInterruptAvailable`（`chat_escape_availability.go:18-26`）用“仲裁器 OR 位路径”，位路径在 modal 期仍为 true → 状态行照旧显示 `esc to interrupt`，实际按 Esc 只关面板（方案 §12.6 步骤 2 的取样未完成）。
 - 建议：按原计划完成真实终端取样后决定 modal 是否参与 `Disarm/Suspend`；未定期间维持现状并在文档标注。
 
-### R5（P3）Windows console 双读者竞态残留（结果已一致，过程仍有交错空间）
-- 事实：修复后“谁先取到 Esc 都会中断”，但 KeyHandler 中签时会 drain 记录并回注前缀（`ui/keyhandler_windows.go:88-120`），与 composer 的即时读在草稿回注/编辑器缓冲上仍可能交错；`chat_composer.go` 的草稿回填与之是两套保序机制。
-- 建议：阶段 F P2b 单一写者在真实终端灰度后，把 console 输入记录的消费收敛到唯一读者（composer 独占、KeyHandler 仅留信号兜底）。
+### R5（P3）Windows console 双读者竞态 / 副屏期 KeyHandler 抢 Esc —— ✅ 已修复（2026-10-19）
+- 事实（修复前）：副屏（pager/picker/overlay/backtrack picker 等）打开期间 composer 与 busy capture 都不再读 stdin，但回合级 ESC 消费者仍让 KeyHandler 保持 armed——50ms 轮询与副屏自身的按键读取抢同一条 console 记录：用户按 Esc 想关面板，却可能被 KeyHandler 抢走变成“中断后台回合”，且被抢走后副屏再也收不到 Esc；状态行/Web payload 也仍承诺可中断。
+- 修复：屏幕租约是全框架唯一咽喉（`openChatScreen`），在那里登记 L0 输入独占——`beginChatScreenInputOwnership`：仲裁器登记 modal 层（EscAvailable=false，承诺变诚实）+ KeyHandler 暂时 `Disarm`；关闭后**只有仍存在回合级 ESC 消费者**时才重新 `Arm`（消费者可能在副屏存续期间结束，绝不留下无人消费的 armed 状态）。回归：`chat_screen_input_ownership_test.go`（两幕：关屏后重新 Arm / 消费者已结束不 Arm）。
+- 残余（保留）：KeyHandler 与 composer 在**非副屏**窗口的 peek/consume 交错仍是结果一致的过程性竞态（正文修复已消除其影响）；阶段 F P2b 单一写者灰度后可进一步收敛为单读者。
+
+### R7（P3）非交互/无 UI 宿主无 Esc 语义 —— ✅ 已核查（2026-10-19，无需修复）
+- 核查结论：runtime-server 有 HTTP `interrupt`（`session_runtime_handlers.go:968`，含 active-turn 注册表与 turn_mismatch 409）；ACP 有 `session/cancel` 协议入口（`agent_stdio.go`）；headless `exec` 走进程信号；TUI 转发远端有 `InterruptTurn`（`chat_runtime_server.go:574+`）。均**不依赖 Esc**，无代码缺口。
+- 新观察 **R11（记录，可选）**：IM 连接器（connectors）核心命令只有 help/new/status/approve/deny/answer 等，**没有停止命令**，且 `connectors.Backend` 接口无中断能力——IM 用户无法停止在途回合。若要补齐需新增 Backend 能力 + `/stop` 核心命令（复用 runtime API interrupt），属新功能而非本轮缺口修复。
+
+### R8（P3）Unix SIGUSR2 的 KeyHandler 打印与新提示重复 —— ✅ 已修复（2026-10-18）
+- 修复：删除 `ui/keyhandler_unix.go` 的 `fmt.Println("[ESC 检测到 - 中断操作]")` 直写与 `fmt` 导入；用户可见反馈统一由决策点渲染（避免与固定 surface 绘制竞争）。
+- 门禁同步：`ui/writer_inventory_test.go` 受认可写入基线按“实现退役时删除条目”规则下调（17 条/20 点位 → 16 条/19 点位，ceiling 20→19）。
 
 ### R6（P3）Web/HTTP interrupt 反馈语义与 TUI Esc 不一致 —— ✅ 已修复（2026-10-18）
 - 事实（修复前）：`handleWebInterrupt` 直呼 `interrupt`，没有停止窗口折叠、也没有 stalled-cleanup 重试。
 - 修复：抽出会话级唯一决策 `chatInterruptDecision(session, preserve)`（返回 `started` / `already_stopping` / `no_session`，`chat_escape_interrupt.go`）；TUI Esc（`handleChatEscapeInterruptRequest`）、Web/HTTP interrupt、`/stop`、忙时 capture 全部共用它，渲染仍由各平面自理（TUI 提示不变；Web 保持静默 + 状态复位）。`handleWebInterrupt` 响应契约 `{"status":"interrupted"}` 不变，新增机读字段 `"result"`。
 - 回归：`TestChatInterruptDecisionSharedAcrossPlanes`、`TestHandleChatWebAPIInput_InterruptSharesDecisionWithEscape`（既有 `TestHandleChatWebAPIInput_Interrupt` 保持通过——客户端只读 `status`）。
 
-### R7（P3）非交互/无 UI 宿主无 Esc 语义
-- 事实：`NoInteractive/JSONOutput` 不创建 KeyHandler/编辑器；中断仅经 #12/#13/#15/#16。方案 §2.6 已文档化。
-- 建议：维持；R3 的 `/stop` 可覆盖部分脚本化场景。
+### R7（P3）非交互/无 UI 宿主无 Esc 语义 —— ✅ 已核查（2026-10-19，无需修复）
+- 核查结论：runtime-server 有 HTTP `interrupt`（`session_runtime_handlers.go:968`，含 active-turn 注册表与 turn_mismatch 409）；ACP 有 `session/cancel` 协议入口（`agent_stdio.go`）；headless `exec` 走进程信号；TUI 转发远端有 `InterruptTurn`（`chat_runtime_server.go:574+`）。均**不依赖 Esc**，无代码缺口。
+- 新观察 **R11（记录，可选）**：IM 连接器（connectors）核心命令只有 help/new/status/approve/deny/answer 等，**没有停止命令**，且 `connectors.Backend` 接口无中断能力——IM 用户无法停止在途回合。若要补齐需新增 Backend 能力 + `/stop` 核心命令（复用 runtime API interrupt），属新功能而非本轮缺口修复。
 
 ### R8（P3）Unix SIGUSR2 的 KeyHandler 打印与新提示重复 —— ✅ 已修复（2026-10-18）
 - 修复：删除 `ui/keyhandler_unix.go` 的 `fmt.Println("[ESC 检测到 - 中断操作]")` 直写与 `fmt` 导入；用户可见反馈统一由决策点渲染（避免与固定 surface 绘制竞争）。
 - 门禁同步：`ui/writer_inventory_test.go` 受认可写入基线按“实现退役时删除条目”规则下调（17 条/20 点位 → 16 条/19 点位，ceiling 20→19）。
+
+### R10（P3）Web 键入 `/stop` 忙碌期只入队 —— ✅ 已修复（2026-10-19）
+- 修复：`handleWebPrompt` 对 `/stop` 增加忙碌期直通——`commandMatches` 命中且 `chatStopCommandHasTarget` 为真时走 `chatInterruptDecision`，回 `{"status":"interrupted","result":…}`（微客户端已能处理该状态）；空闲时保持队列路径，由命令自身给出“没有在途回合”回执。
+- 回归：`TestHandleChatWebAPIInput_StopPromptInterruptsRunningTurn` / `…IdleKeepsQueuePath`。
 
 ## 6. 回归与验收建议
 
@@ -126,6 +141,8 @@
 | Go 单测 | 统一决策：started / already_stopping / 重试 / 非 preserve | 已有（`TestChatInterruptDecisionSharedAcrossPlanes`） |
 | Go 单测 | Web interrupt 共用决策（`result` 字段） | 已有（`TestHandleChatWebAPIInput_InterruptSharesDecisionWithEscape`） |
 | Go 单测 | Web 粘滞标记不误报（R9） | 已有（`TestStopCommandIgnoresStaleWebCaptureLatch`） |
+| Go 单测 | 副屏期 KeyHandler 让位/复 Arm（R5） | 已有（`chat_screen_input_ownership_test.go`） |
+| Go 单测 | Web 键入 `/stop` 忙碌期直通 / 空闲入队（R10） | 已有（`TestHandleChatWebAPIInput_StopPromptInterruptsRunningTurn` 等） |
 | 真机 | 运行中状态行诚实 + Web 中断取消运行中 shell + 重复中断折叠 + 停止摘要 | ✅ 2026-10-18（§6.1） |
 | 真机 | TUI 物理 Esc / 键入 `/stop` 打断运行中回合 | 待用户按键（本机无法注入物理键） |
 | 真机 | 空闲 `/stop` 不误报（R9 修复复验） | ✅ 2026-10-18 23:53 构建复验（§6.1） |
@@ -170,11 +187,9 @@
   真的触发一次中断（实测复现）。修复：新增 `chatInputQueue.consoleInputCaptureActive()`
   （只看控制台 busy capture），`chatStopCommandHasTarget` 与 `chatInputEscBitsAvailable`
   改用它；回归 `TestStopCommandIgnoresStaleWebCaptureLatch`。
-- **R10（记录，待决策）Web 注入的 `/stop` 在忙碌期只入队**：Web 注入行遵循 P2-8 的
-  preserve/队列语义（忙碌期由控制台 capture 消费 stdin，注入行走队列，回合结束后才执行）。
-  因此 Web 客户端停止应使用 `{"type":"interrupt"}`（微客户端 Stop 按钮/全局 Esc 正是如此），
-  不要依赖键入 `/stop`。可选改进：Web prompt 路径在忙碌期把 `/stop` 直通中断并回
-  `interrupted`（客户端已能处理该状态）；未实施，避免为一个语义引入注入层特例。
+- **R10（已修复，2026-10-19）Web 注入的 `/stop` 在忙碌期只入队**：Web 注入行遵循
+  P2-8 的 preserve/队列语义（忙碌期由控制台 capture 消费 stdin，注入行走队列，回合结束后
+  才执行）。修复见 §5 R10：`handleWebPrompt` 在忙碌期把 `/stop` 直通 `chatInterruptDecision`。
 
 ## 7. 关键证据索引
 
