@@ -260,6 +260,11 @@ type InboundMessage struct {
 	Chat      string
 	ChatTitle string
 	MessageID string
+	// DedupeKey 是通道私有的幂等后缀（可空）。与 MessageID 一起构成入站去重
+	// 键：QQ 官方要求同 id 的重复推送结合 message_scene.ext 的 msg_idx 去重，
+	// 仅靠 MessageID 会把同 id 的不同推送误判为重复。其它通道留空即沿用
+	// chat|messageID 的既有口径。
+	DedupeKey string
 	UserID    string
 	UserName  string
 	Text      string
@@ -461,6 +466,25 @@ type StreamingProvider interface {
 	StartStreaming(ctx context.Context, cfg Config, chat string) (StreamingSession, error)
 }
 
+// MessageRetractor 是可选能力：撤回机器人自己发送的消息（QQ 官方 2 分钟内）。
+// 未实现该接口的通道不受影响；调用方应做能力探测。
+type MessageRetractor interface {
+	Provider
+	// RetractMessage 撤回 chat 中 messageID 对应的机器人消息。
+	RetractMessage(ctx context.Context, cfg Config, chat, messageID string) error
+	// LastRecallableMessage 返回该会话最近一条仍在平台撤回窗口内的机器人
+	// 消息 id；没有可用消息时 ok=false（不报错）。
+	LastRecallableMessage(chat string) (messageID string, ok bool)
+}
+
+// ShareLinkProvider 是可选能力：生成机器人邀请/分享链接（QQ 官方
+// POST /v2/generate_url_link）。未实现该接口的通道 `/invite` 会明确提示。
+type ShareLinkProvider interface {
+	Provider
+	// GenerateShareLink 生成邀请链接；callbackData 可空（用户添加时回传）。
+	GenerateShareLink(ctx context.Context, cfg Config, callbackData string) (string, error)
+}
+
 // BackendRequest 是交给宿主 agent 的一次交互请求。
 type BackendRequest struct {
 	ConnectorID string
@@ -542,6 +566,41 @@ type CommandBackend interface {
 	DecideApproval(ctx context.Context, req CommandRequest) (CommandResult, error)
 	// AnswerQuestion 处理 /answer（Args[0] 为序号或 request_id，其余为回答内容）。
 	AnswerQuestion(ctx context.Context, req CommandRequest) (CommandResult, error)
+}
+
+// BacktrackBackend 是可选能力：把 IM 会话回退到上一轮（对应 TUI /backtrack）。
+//
+// 语义（与 runtimechat.BacktrackRequest 对齐）：
+//   - 默认回退「最近一轮」：删除最后一轮用户提问及其后的助手回复；
+//   - TurnsBefore=1 表示保留最近一轮、回退到再上一轮（即删除最近两轮）；
+//   - 只做 conversation 模式（IM 用户看不到代码 diff，不默认恢复代码）。
+//
+// 未实现该接口的宿主（当前 gateway）由核心回明确提示，不静默。
+type BacktrackBackend interface {
+	Backend
+	Backtrack(ctx context.Context, req BacktrackRequest) (BacktrackResult, error)
+}
+
+// BacktrackRequest 是 IM 侧的回退请求（通道无关）。
+type BacktrackRequest struct {
+	ConnectorID string
+	Chat        string
+	// Session 是当前 IM 会话绑定的宿主会话（零值表示尚未绑定）。
+	Session SessionRef
+	// TurnsBefore 是要保留的最近轮数：0 = 回退最近一轮（默认）。
+	TurnsBefore int
+}
+
+// BacktrackResult 是回退结果摘要。
+type BacktrackResult struct {
+	// Handled 表示宿主已执行回退；false = 没有可回退的轮次。
+	Handled bool
+	// RemovedTurns 是被删除的用户轮数。
+	RemovedTurns int
+	// AnchorPreview 是被回退那一轮的用户提问预览（用于回执）。
+	AnchorPreview string
+	// Reply 是给 IM 的回执文案（宿主可定制；空则由核心生成）。
+	Reply string
 }
 
 // 注意力通知类型（AttentionNotice.Kind）。

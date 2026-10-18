@@ -111,6 +111,22 @@ func TestLocalConnectorBackendWithoutHostFailsSoftly(t *testing.T) {
 	require.Contains(t, err.Error(), "本机 chat 运行时未就绪")
 }
 
+// TestLocalConnectorBackendSessionRefCarriesHostNodeID 锁定 2026-10-17 真机
+// qq-bot1 双 actor 复盘修复：Handle 返回的 SessionRef 必须携带本宿主实例
+// 身份（HostID 全形）——空 NodeID 会把绑定归属抹空，下一条消息落进假 R2a
+// 接管（反复回写 + 「原节点 (空) 掉线」提示）。
+func TestLocalConnectorBackendSessionRefCarriesHostNodeID(t *testing.T) {
+	backend := localConnectorBackend{hostID: "aicli:node-unit"}
+	ref := backend.sessionRef("conn-x")
+	require.Equal(t, "aicli:node-unit", ref.NodeID)
+	require.Equal(t, "conn-x", ref.SessionID)
+
+	// 未显式注入（测试直连构造/旧路径）时回退进程级身份，不为空。
+	fallback := localConnectorBackend{}
+	require.NotEmpty(t, fallback.sessionRef("s").NodeID)
+	require.True(t, strings.HasPrefix(fallback.sessionRef("s").NodeID, "aicli:"))
+}
+
 func TestLocalConnectorHostCloseIsIdempotent(t *testing.T) {
 	service, _ := newTestConnectorService(t)
 	host := &LocalConnectorHost{service: service}

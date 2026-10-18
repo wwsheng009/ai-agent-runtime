@@ -270,25 +270,41 @@
   | 文本 / Markdown 发送（msg_type 0/2） | ✅ 文本 + `markdown_support`（原生 content） | — |
   | 富媒体发送（msg_type=7：图片/视频/语音/文件） | ✅ 整文件上传（file_data base64）+ **官方 URL 直传**（平台代下转存，失败回落下载上传）+ **大文件分片上传**（prepare/parts/part-finish/merge，阈值可配；2026-10-15）+ 单聊/群聊端点隔离 + **文本媒体指令协议**（```qq-attachments``` 围栏块、`IMAGE:/VIDEO:/FILE:/VOICE:` 指令行；单条失败降级文本提示） | 已接（远端 URL 直传需公网可达；分片阈值/并发按官方 `upload_config` 执行） |
   | 富媒体接收（`attachments`） | ✅ 元数据入 `Media` + `MediaFetcher` 下载（Service 工作协程；SSRF 守卫/重定向逐跳/100MB）→ `local_path` 摘要；语音优先 `voice_wav_url`/ASR；入站临时目录 24h 低频清扫 | 已接（转存/清理与微信同口径） |
+  | 富媒体软/硬限制（图片/语音 20MB、视频 30MB、文件 200MB；硬限 200MB） | ✅ 超软限制自动降级 `file_type=4`，超硬限制本地拒绝 | 已接（2026:10: 17，官方契约核对） |
   | 语音 `voice_wav_url` | ✅ 语音附件优先取 `voice_wav_url`（官方转 WAV，agent 可直接读；无则回退原始地址/ASR 转写） | — |
-  | 引用消息（`message_reference` / `message_type=103`+`msg_elements`） | ◐ 旧 `message_reference` 摘要；103 嵌套元素未解析 | P2 |
+   | 引用消息（`message_reference` / `message_type=103`+`msg_elements`+`message_scene.ext`） | ✅ legacy 摘要 + 103 嵌套元素展开 + `ref_msg_idx` 引用索引；`msg_idx` 并入入站去重键 | 已接（2026:10: 17，官方契约核对） |
   | `GROUP_MESSAGE_CREATE`（全量群消息，平台开启后推送） | ✅ 已解析：`group_message_mode`（默认 `mention` 仅@机器人；`all` 全量） | 已接（2026-10-15，切片 4） |
    | 流式消息（`/v2/users/{openid}/stream_messages`，单聊） | ✅ 已接 `StreamingProvider`（`qqbot/stream.go`：`input_mode=replace` + 累积全文、`input_state` 1/10、`stream_msg_id` 回填；群/频道/无被动上下文安全退化） | 已接（2026:10: 15，切片 7；契约核对 2026:10: 17） |
   | 输入状态（msg_type=6 `input_notify`） | ✅ 已接 `TypingProvider`（仅单聊；主动消息语义不占被动回复配额；失败静默降级） | 已接（2026-10-15，切片 5） |
-  | 消息撤回（发送后 2 分钟内） | ❌ 未实现 | P3 |
+   | 消息撤回（发送后 2 分钟内） | ✅ `MessageRetractor` + `qqbot/retract.go`（单聊/群聊 DELETE；频道明确拒绝；空 id/缺凭据前置校验） | 已接（2026:10: 17，官方契约核对） |
   | 频道（子频道/私信/Embed/表情表态） | ◐ 仅 `AT_MESSAGE_CREATE` 防御性解析，发送未实现；表情仅频道 | 设计范围外（QQ=群/C2C）；按需扩展 |
-  | 键盘/按钮交互（`keyboard`/`INTERACTION_CREATE`）、Ark/Embed 发送 | ❌ | NG（按需；接收侧卡片 data 可透出） |
-  | 主动消息频控（10 qps、1000/日/会话；用户可关闭） | ✅ 本机预检账本（`proactive_qps`/`proactive_daily_limit`，进程内；被动回复与输入状态不计入）+ 平台兜底 | 已接（2026-10-15，切片 5） |
-  | 被动回复窗口（单聊 60min/4 次、群 5min/5 次） | ✅ `msg_id`+`msg_seq` 递增、失败降级主动 + **次数本地计数**（达到上限预判改走主动，失败不计数；窗口过期仍由平台裁决） | 已接（2026-10-15，切片 5） |
+  | 键盘/按钮交互（`INTERACTION_CREATE`） | ✅ 按钮(11)/快捷菜单(12)：`PUT /interactions/{id}` 回应 + `button_data` 作为入站交给 agent；反馈/授权等非对话类型忽略 | 已接（2026:10: 17；需显式订阅 Intent 1<<26） |
+  | 好友添加（`FRIEND_ADD`） | ✅ 归一为单聊入站（`[好友添加] scene=… callback_data=…`），可触发欢迎语 | 已接（2026:10: 17） |
+  | Ark/Embed 发送、消息反馈/授权事件处理 | ❌ | NG（按需；反馈/授权当前只忽略） |
+  | 主动消息频控（单聊 10/qps、群 60/qpm、单关系 20/qpm、1000/日/会话；用户可关闭） | ✅ 本机预检账本（`proactive_qps` / `proactive_group_qpm` / `proactive_relation_qpm` / `proactive_daily_limit`，进程内；被动回复与输入状态不计入）+ 平台兜底 | 已接（2026:10: 17，补齐单关系与群维度） |
+| 互动召回消息（`is_wakeup=true`，30 天 4 周期每周期 1 条） | ✅ `qqbot/wakeup.go`（单聊；周期账本；与 msg_id/event_id 互斥；富媒体明确拒绝） | 已接（2026:10: 17，官方契约核对） |
+| 业务错误码判定（`err_code`） | ✅ HTTP 200/201/202 也按响应体 `err_code` 判失败（顶层/`data` 内、数字/字符串均兼容）；令牌接口 `code=100001` 标记可重试 | 已接（2026:10: 17，官方 API 调用指南） |
+| 异步审核受理（201/202 + 304023/304024） | ✅ 按官方语义视为成功（消息已受理等待审核），不触发降级重发；400+审核码仍报错 | 已接（2026:10: 17，官方 API 调用指南） |
+| 群管理（成员/黑名单/禁言/入群审批） | ✅ `qqbot/group.go`：成员列表与详情、批量移除（≤20）、黑名单查询与 add/del（≤20）、禁言状态与成员禁言 add/update/del（≤20）、入群申请列表与审批 | 已接（2026:10: 17；官方标注「内邀接入」，需 11253 白名单或群管理员） |
+| 全局自定义菜单（`GET/PUT /v2/menu`） | ✅ `qqbot/menu.go`：switch/send_message/link/menu 四类，≤10 项、子菜单 ≤5；本地校验 https/必填 | 已接（2026:10: 17，仅 C2C） |
+| 自定义菜单自动同步 | ✅ `qqbot/menu_sync.go`：激活时把核心命令幂等同步为全局菜单（send_message 点击直发 `/命令`，不依赖面板填写行为）；仅空菜单/与内置一致/可识别的旧版内置菜单时写入，运营自建菜单不覆盖（`command_menu_sync` 可关） | 已接（2026:10: 17） |
+| 指令面板（`/v2/panels` CRUD + target） | ✅ `qqbot/panel.go`：列表/创建/详情/修改/删除/关联对象；scope 四场景、target_type 校验、≤20 元素/关联 | 已接（2026:10: 17） |
+| 生成分享链接（`POST /v2/generate_url_link`） | ✅ `qqbot/share.go`：callback_data ≤32 字符，返回邀请链接 | 已接（2026:10: 17） |
+| 核心命令目录（单一事实来源） | ✅ `connectors/commands_catalog.go`：帮助文本、命令识别、QQ 指令面板均由此生成，避免多处漂移；**中文标签别名归一**（面板点击发送元素名称/中文直输 → 核心命令，`parseLabelCommand`，2026-10-17 真机确认面板点击发中文后补齐） | 已接（2026:10: 17） |
+| `/invite` 命令 | ✅ 走可选接口 `ShareLinkProvider`；不支持该能力的通道明确提示 | 已接（2026:10: 17） |
+| 指令面板自动同步 | ✅ `qqbot/panel_sync.go`：激活时按 `remark` 幂等维护 c2c 面板；内容未变不写；失败只记日志（`command_panel_sync` 可关）。**点击语义（2026-10-17 真机）**：type=command 元素点击发送元素名称（中文 Label），靠命令层中文标签别名闭环进入核心命令（不再落 agent 回合） | 已接（2026:10:  17） |
+| `/undo` 会话回退 | ✅ `connectors/service_undo.go` + `BacktrackBackend`：先回退历史（runtime-server/aicli 走 actor.Backtrack），再尽力撤回最近消息；gateway 明确提示不支持 | 已接（2026:10: 17，conversation 模式） |
+| 已发消息账本（撤回用） | ✅ `qqbot/sent_ledger.go`：按 chat 保留最近 8 条 id+时间；2 分钟窗口校验；撤回成功后移除 | 已接（2026:10: 17） |
+| 被动回复窗口（单聊 60min/4 次、群 5min/5 次） | ✅ `msg_id`+`msg_seq` 递增、失败降级主动 + **次数本地计数**（达到上限预判改走主动，失败不计数；窗口过期仍由平台裁决） | 已接（2026-10-15，切片 5） |
 | Webhook 事件订阅（官方支持 HTTP 回调） | ❌ 仅 WebSocket | P2 → **方案已立项**：[11-qq-webhook-design.md](./11-qq-webhook-design.md)（Ed25519 验签/op13 挑战/D1–D8 决策/W1–W3 切片，待评审） |
   | WS 错误码语义（4006/4007/4009/4914/4915…） | ◐ op9/session 清理 + 退避重连；4914/4915 未特判 | P2 |
-  | 接口域名（官方 2026-08 统一 `api.bot.qq.com`） | ◐ 默认 `api.sgroup.qq.com`（实测可用），`api_base` 可覆盖 | P2（默认值切换评估） |
+  | 接口域名（官方 2026-08 统一 `api.bot.qq.com`） | ✅ 默认 `api.bot.qq.com`；legacy `api.sgroup.qq.com` 仅作 404/405 回退；`api_base` 可覆盖 | 已接（2026:10: 17 核实） |
   | Shard 分片（`/gateway/bot` 建议数、`session_start_limit`） | ◐ 固定 `[0,1]`；`intents` 可覆盖 | 大规模再议 |
 
   > 审计结论（2026-10-15 更新）：**对话主链路 + 媒体双向**（入站 `MediaFetcher`
   > 物化注入 `local_path`、出站富媒体〔整文件 + URL 直传 + 大文件分片〕+ 文本媒体
-  > 指令协议 + 临时目录清扫）已完整；缺口集中在 **流式消息**（单聊）、消息撤回、
-  > Webhook 事件订阅与运维向的频控/域名/回调方式；本地超大文件按分片配置处理，
+  > 指令协议 + 临时目录清扫）已完整；流式消息、消息撤回、互动召回与频控维度
+  > 已补齐；剩余缺口是 Webhook 事件订阅与频道能力。本地超大文件按分片配置处理，
   > 远端大文件走 `url` 直传（需公网可达）。
 
 - 状态（2026-10-15，QQ 切片 4：入站媒体物化 + 全量群消息 + URL 直传）：
@@ -507,6 +523,10 @@
   宿主身份实例唯一化（A）+ turn 派发端点/R1-R3 路由决策（B）+ R2a 接管语义（C）+
   scope=all 跨宿主注意力扇出（D）；`runner_preference` 配置键 + 选举器；实现地图 #8/#9/#10 全收口
   （N6/N7/N8 测试覆盖；见 09 §9 实施地图逐行状态）。配置在三宿主间可迁移（共享 config.yaml + D1 统一 state）；未配置连接器时回归全绿。
+  - [x] P2 修复（2026-10-17 真机 qq-bot1 双 actor 事件）：远端派发失败不再无差别回落本机——
+    绑定属远端节点时拒绝本机重放（同 ID 双 actor/历史分叉；改为 IM 诚实提示，掉线自走 R2a 接管）；
+    两个本地 backend 回填 `Session.NodeID` + 绑定落账前空值收敛，消除「NodeID 被抹空 → 假 R2a」循环
+    （细节与回归用例见 09 §7.2 修复注记）。
 - [ ] P3：微信扫码登录 + 文本/图片/语音；IM 通道可开关/静音。
   （◐ 扫码登录 + 文本收发已落地（切片 2b）；媒体链路已落地（切片 2c 2026-10-14：
   入站 CDN 下载/解密/语音 silk→wav 转码 + 出站 CDN 上传与 attachment 协议，

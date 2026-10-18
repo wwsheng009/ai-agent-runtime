@@ -72,8 +72,18 @@ type fakeQQ struct {
 	partFinishes     []map[string]any
 	// 流式消息（stream_messages）分片记录。
 	streamFragments []map[string]any
-	script          wsScript
-	wsURL           string
+	// shareURL 是 /v2/generate_url_link 的返回链接（空则用默认）。
+	shareURL string
+	// menuBody 是 GET /v2/menu 的返回体；PUT /v2/menu 会覆盖它（自动菜单
+	// 同步的幂等用例依赖）。nil 表示默认夹具（一条 send_message 帮助项）。
+	menuBody map[string]any
+	// panelRecords 是 /v2/panels 返回的记录（nil 表示默认空列表）。
+	panelRecords []map[string]any
+	// panelCreates / panelUpdates 记录面板写操作（断言幂等）。
+	panelCreates []map[string]any
+	panelUpdates []map[string]any
+	script       wsScript
+	wsURL        string
 }
 
 // presignedPart 记录一次预签名 URL 的 PUT 内容（分片字节）。
@@ -181,12 +191,29 @@ func (f *fakeQQ) handler() http.Handler {
 			writeJSON(w, map[string]any{
 				"id": "stream-1", "timestamp": "2026-07-21T10:00:00+08:00",
 			})
+		case r.URL.Path == "/v2/generate_url_link":
+			f.mu.Lock()
+			f.sent = append(f.sent, sentMessage{path: r.URL.Path})
+			shareURL := f.shareURL
+			f.mu.Unlock()
+			if shareURL == "" {
+				shareURL = "https://qun.qq.com/qunpro/robot/qunshare?robot_appid=1"
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"url": shareURL}})
 		case strings.HasPrefix(r.URL.Path, "/presigned/"):
 			body, _ := io.ReadAll(r.Body)
 			f.mu.Lock()
 			f.presignedParts = append(f.presignedParts, presignedPart{path: r.URL.Path, body: body})
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/interactions/"):
+			var payload map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			f.mu.Lock()
+			f.authHeaders = append(f.authHeaders, r.Header.Get("Authorization"))
+			f.sent = append(f.sent, sentMessage{path: r.URL.Path, payload: payload})
+			f.mu.Unlock()
+			writeJSON(w, map[string]any{"code": 0})
 		case r.URL.Path == "/ws":
 			f.mu.Lock()
 			f.connects++
@@ -204,6 +231,85 @@ func (f *fakeQQ) handler() http.Handler {
 			}
 			drainGateway(conn)
 		case strings.HasPrefix(r.URL.Path, "/v2/"):
+			if r.Method == http.MethodDelete {
+				f.mu.Lock()
+				f.authHeaders = append(f.authHeaders, r.Header.Get("Authorization"))
+				f.sent = append(f.sent, sentMessage{path: r.URL.Path})
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.Method == http.MethodGet {
+				f.mu.Lock()
+				f.authHeaders = append(f.authHeaders, r.Header.Get("Authorization"))
+				f.sent = append(f.sent, sentMessage{path: r.URL.Path + "?" + r.URL.RawQuery})
+				f.mu.Unlock()
+				switch {
+				case r.URL.Path == "/v2/menu":
+					f.mu.Lock()
+					menuBody := f.menuBody
+					f.mu.Unlock()
+					if menuBody == nil {
+						menuBody = map[string]any{
+							"version": 1,
+							"menu": map[string]any{"items": []map[string]any{{
+								"name": "帮助", "type": "send_message", "send_message": "/help",
+							}}},
+						}
+					}
+					writeJSON(w, menuBody)
+				case r.URL.Path == "/v2/panels":
+					f.mu.Lock()
+					records := append([]map[string]any(nil), f.panelRecords...)
+					f.mu.Unlock()
+					if records == nil {
+						records = []map[string]any{}
+					}
+					writeJSON(w, map[string]any{
+						"records":     records,
+						"next_cursor": "", "is_end": true,
+					})
+				case strings.HasPrefix(r.URL.Path, "/v2/panels/"):
+					writeJSON(w, map[string]any{
+						"panel_id": "p1", "scope": "c2c", "target_type": "all",
+						"panel": map[string]any{"items": []map[string]any{}},
+					})
+				case strings.HasSuffix(r.URL.Path, "/members"):
+					writeJSON(w, map[string]any{
+						"members": []map[string]any{{
+							"member_openid": "m1", "username": "小明",
+							"member_role": "member", "bot": false,
+							"joined_at": "2025-08-20T09:15:00+08:00",
+						}},
+						"next_cursor": "next-1",
+					})
+				case strings.Contains(r.URL.Path, "/members/"):
+					writeJSON(w, map[string]any{
+						"member_openid": "m1", "username": "小明", "member_role": "admin",
+					})
+				case strings.HasSuffix(r.URL.Path, "/member_blacklist"):
+					writeJSON(w, map[string]any{
+						"users":       []map[string]any{{"member_openid": "b1", "username": "黑名单用户"}},
+						"next_cursor": "",
+					})
+				case strings.HasSuffix(r.URL.Path, "/restrict_chat_setting"):
+					writeJSON(w, map[string]any{
+						"global_rule": map[string]any{"mode": "none"},
+						"members":     []map[string]any{},
+					})
+				case strings.HasSuffix(r.URL.Path, "/join_request_list"):
+					writeJSON(w, map[string]any{
+						"list": []map[string]any{{
+							"join_request_id": "jr-1", "member_openid": "m2",
+							"username": "申请人", "apply_source": "self_apply",
+						}},
+						"next_cursor": "",
+					})
+				default:
+					writeJSON(w, map[string]any{})
+				}
+				return
+			}
 			var payload map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&payload)
 			f.mu.Lock()
@@ -226,6 +332,38 @@ func (f *fakeQQ) handler() http.Handler {
 				f.sent = append(f.sent, sentMessage{path: r.URL.Path, payload: payload})
 				f.mu.Unlock()
 				writeJSON(w, map[string]any{"file_info": "file-info-1"})
+				return
+			}
+			if r.URL.Path == "/v2/panels" {
+				// 创建面板：记录并让后续 GET 能命中（幂等用例依赖）。
+				panel, _ := payload["panel"].(map[string]any)
+				record := map[string]any{
+					"panel_id": "p-created", "scope": payload["scope"],
+					"target_type": payload["target_type"], "panel": panel,
+				}
+				f.panelCreates = append(f.panelCreates, payload)
+				f.panelRecords = append(f.panelRecords, record)
+				f.mu.Unlock()
+				writeJSON(w, record)
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/v2/panels/") && r.Method == http.MethodPut {
+				panel, _ := payload["panel"].(map[string]any)
+				record := map[string]any{
+					"panel_id": strings.TrimPrefix(r.URL.Path, "/v2/panels/"),
+					"panel":    panel,
+				}
+				f.panelUpdates = append(f.panelUpdates, record)
+				f.mu.Unlock()
+				writeJSON(w, map[string]any{"version": 1})
+				return
+			}
+			if r.URL.Path == "/v2/menu" && r.Method == http.MethodPut {
+				// 修改菜单：记录并让后续 GET 命中新配置（自动同步幂等用例依赖）。
+				f.sent = append(f.sent, sentMessage{path: r.URL.Path, payload: payload})
+				f.menuBody = payload
+				f.mu.Unlock()
+				writeJSON(w, map[string]any{"version": 1})
 				return
 			}
 			status, body := f.msgStatus, f.msgBody
@@ -598,6 +736,27 @@ func TestTokenErrorRedactsSecret(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid") {
 		t.Fatalf("error should keep the platform detail: %v", err)
+	}
+}
+
+// 官方令牌接口的业务错误：HTTP 200 + body.code，需按 code 区分限频与凭据错误。
+func TestTokenBusinessErrorHTTP200(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	fake.tokenStatus = http.StatusOK
+	fake.tokenBody = `{"code":100007,"message":"appid invalid"}`
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+
+	_, err := provider.Activate(context.Background(), testConfig("qq-1", "app-1", "secret-1"))
+	var business *tokenBusinessError
+	if !errors.As(err, &business) || business.code != 100007 || business.retryable {
+		t.Fatalf("err = %v, want non-retryable tokenBusinessError(100007)", err)
+	}
+
+	fake.tokenBody = `{"code":100001,"message":"Too many requests"}`
+	_, err = provider.Activate(context.Background(), testConfig("qq-1", "app-1", "secret-1"))
+	if !errors.As(err, &business) || business.code != 100001 || !business.retryable {
+		t.Fatalf("err = %v, want retryable tokenBusinessError(100001)", err)
 	}
 }
 

@@ -51,6 +51,10 @@ type fakeRuntimeConnectorHost struct {
 	// 验证 L3 登记确实覆盖了提交阶段的会话（内容镜像据此跳过 IM 回合）。
 	activityProbe      func(sessionID string) bool
 	activeDuringSubmit bool
+	// /undo 面：turns 与 backtrack 结果（缺省无轮次）。
+	turns           []runtimechat.UserTurn
+	backtrackResult *runtimechat.BacktrackResult
+	backtrackCalls  int
 }
 
 func (h *fakeRuntimeConnectorHost) SubmitConnectorPrompt(_ context.Context, req runtimeapi.ConnectorTurnRequest) (*runtimeapi.ConnectorTurnResult, error) {
@@ -110,6 +114,24 @@ func (h *fakeRuntimeConnectorHost) ConnectorAnswerQuestion(_ context.Context, se
 }
 
 func (h *fakeRuntimeConnectorHost) ConnectorSessionParked(string) bool { return h.parked }
+
+// ConnectorBacktrack / ConnectorListUserTurns：/undo 面（测试默认无轮次，
+// 需要时由用例覆盖）。
+func (h *fakeRuntimeConnectorHost) ConnectorBacktrack(_ context.Context, _ string, _ runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.backtrackCalls++
+	if h.backtrackResult == nil {
+		return &runtimechat.BacktrackResult{}, nil
+	}
+	return h.backtrackResult, nil
+}
+
+func (h *fakeRuntimeConnectorHost) ConnectorListUserTurns(_ context.Context, _ string) ([]runtimechat.UserTurn, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]runtimechat.UserTurn(nil), h.turns...), nil
+}
 
 func (h *fakeRuntimeConnectorHost) decideCallsSnapshot() []runtimeConnectorDecideCall {
 	h.mu.Lock()

@@ -24,16 +24,23 @@ import (
 const (
 	// defaultProactiveQPS 是主动消息的默认每秒上限（官方 10 qps）。
 	defaultProactiveQPS = 10
+	// defaultProactiveGroupQPM 是群聊主动消息的 Bot 维度默认每分钟上限
+	// （官方：企业/个人认证 60/qpm，未认证 30/qpm；这里取认证后默认值）。
+	defaultProactiveGroupQPM = 60
+	// defaultProactiveRelationQPM 是单关系维度（每用户/每群）默认每分钟上限
+	// （官方单聊与群聊均为 20/qpm）。
+	defaultProactiveRelationQPM = 20
 	// defaultProactiveDailyLimit 是每会话每日主动消息默认上限（官方 1000 条/日）。
 	defaultProactiveDailyLimit = 1000
-	// proactiveQPSWindow / proactiveDailyWindow 是两个计数窗口。
+	// proactiveQPSWindow / proactiveQPMWindow / proactiveDailyWindow 是计数窗口。
 	proactiveQPSWindow   = time.Second
+	proactiveQPMWindow   = time.Minute
 	proactiveDailyWindow = 24 * time.Hour
 )
 
 // proactiveQuotaError 是本机频控预检失败（可直接记日志/回给用户）。
 type proactiveQuotaError struct {
-	scope string // qps | daily
+	scope string // qps | qpm | relation | daily
 	limit int
 	chat  string
 }
@@ -45,17 +52,32 @@ func (e *proactiveQuotaError) Error() string {
 	switch e.scope {
 	case "qps":
 		return fmt.Sprintf("qqbot: 主动消息触发本机频控（每秒上限 %d 条）：请稍后重试", e.limit)
+	case "qpm":
+		return fmt.Sprintf("qqbot: 主动消息触发本机频控（Bot 每分钟上限 %d 条）：请稍后重试", e.limit)
+	case "relation":
+		return fmt.Sprintf("qqbot: 主动消息触发本机频控（单关系每分钟上限 %d 条）：请稍后重试", e.limit)
 	default:
 		return fmt.Sprintf("qqbot: 会话 %s 今日主动消息已达本机上限（%d 条，平台同限）：请明日再试，或等待用户主动发起", e.chat, e.limit)
 	}
 }
 
-// proactiveLedger 是进程内主动消息计数（qps 窗口 + 每会话日窗口）。
+// proactiveLedger 是进程内主动消息计数（Bot 维度 qps/qpm 窗口 + 单关系 qpm
+// 窗口 + 每会话日窗口）。
 type proactiveLedger struct {
 	mu          sync.Mutex
 	windowStart time.Time
 	windowCount int
-	daily       map[string]proactiveDailyCounter
+	// minuteStart/minuteCount 是 Bot 维度每分钟窗口（群聊使用）。
+	minuteStart time.Time
+	minuteCount int
+	// relation 是单关系维度（用户/群）每分钟窗口。
+	relation map[string]proactiveRelationCounter
+	daily    map[string]proactiveDailyCounter
+}
+
+type proactiveRelationCounter struct {
+	minuteStart time.Time
+	count       int
 }
 
 type proactiveDailyCounter struct {
@@ -63,9 +85,10 @@ type proactiveDailyCounter struct {
 	count    int
 }
 
-// allow 预检一次主动消息；超限返回 *proactiveQuotaError。qps/dailyLimit <= 0
-// 表示该项不限制。
-func (l *proactiveLedger) allow(chat string, now time.Time, qps, dailyLimit int) error {
+// allow 预检一次主动消息；超限返回 *proactiveQuotaError。任一 limit <= 0
+// 表示该项不限制。qps 与 qpm 是 Bot 维度（按场景二选一），relationQPM 是
+// 单关系维度，dailyLimit 是每会话日上限。
+func (l *proactiveLedger) allow(chat string, now time.Time, qps, qpm, relationQPM, dailyLimit int) error {
 	if l == nil {
 		return nil
 	}
@@ -81,6 +104,36 @@ func (l *proactiveLedger) allow(chat string, now time.Time, qps, dailyLimit int)
 			return &proactiveQuotaError{scope: "qps", limit: qps, chat: chat}
 		}
 		l.windowCount++
+	}
+
+	if qpm > 0 {
+		if l.minuteStart.IsZero() || now.Sub(l.minuteStart) >= proactiveQPMWindow {
+			l.minuteStart = now
+			l.minuteCount = 0
+		}
+		if l.minuteCount >= qpm {
+			return &proactiveQuotaError{scope: "qpm", limit: qpm, chat: chat}
+		}
+		l.minuteCount++
+	}
+
+	if relationQPM > 0 {
+		if l.relation == nil {
+			l.relation = make(map[string]proactiveRelationCounter)
+		}
+		entry, exists := l.relation[chat]
+		if !exists && len(l.relation) >= maxTrackedChats {
+			l.relation = make(map[string]proactiveRelationCounter)
+		}
+		if entry.minuteStart.IsZero() || now.Sub(entry.minuteStart) >= proactiveQPMWindow {
+			entry = proactiveRelationCounter{minuteStart: now}
+		}
+		if entry.count >= relationQPM {
+			l.relation[chat] = entry
+			return &proactiveQuotaError{scope: "relation", limit: relationQPM, chat: chat}
+		}
+		entry.count++
+		l.relation[chat] = entry
 	}
 
 	if dailyLimit > 0 {
@@ -110,6 +163,14 @@ func (p *Provider) proactiveQPS(cfg connectors.Config) int {
 	return proactiveSettingInt(cfg, "proactive_qps", defaultProactiveQPS)
 }
 
+func (p *Provider) proactiveGroupQPM(cfg connectors.Config) int {
+	return proactiveSettingInt(cfg, "proactive_group_qpm", defaultProactiveGroupQPM)
+}
+
+func (p *Provider) proactiveRelationQPM(cfg connectors.Config) int {
+	return proactiveSettingInt(cfg, "proactive_relation_qpm", defaultProactiveRelationQPM)
+}
+
 func (p *Provider) proactiveDailyLimit(cfg connectors.Config) int {
 	return proactiveSettingInt(cfg, "proactive_daily_limit", defaultProactiveDailyLimit)
 }
@@ -126,7 +187,13 @@ func proactiveSettingInt(cfg connectors.Config, key string, fallback int) int {
 	return value
 }
 
-// guardProactive 在发送一条主动消息前预检（被动回复不调用）。
+// guardProactive 在发送一条主动消息前预检（被动回复不调用）。Bot 维度按
+// 场景区分：单聊走 qps（官方 10/qps），群聊走 qpm（官方 60/qpm）；单关系
+// 维度两者都是 20/qpm。
 func (p *Provider) guardProactive(cfg connectors.Config, chat string) error {
-	return p.proactive.allow(chat, p.now(), p.proactiveQPS(cfg), p.proactiveDailyLimit(cfg))
+	qps, qpm := p.proactiveQPS(cfg), 0
+	if strings.HasPrefix(strings.TrimSpace(chat), chatKindGroup+":") {
+		qps, qpm = 0, p.proactiveGroupQPM(cfg)
+	}
+	return p.proactive.allow(chat, p.now(), qps, qpm, p.proactiveRelationQPM(cfg), p.proactiveDailyLimit(cfg))
 }

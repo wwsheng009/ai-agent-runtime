@@ -17,6 +17,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/configaudit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/connectors/providers/feishu"
@@ -248,6 +249,10 @@ type runtimeConnectorCommandHost interface {
 	ConnectorDecideApproval(ctx context.Context, sessionID, requestID string, allow bool) (runtimeapi.ConnectorCommandOutcome, error)
 	ConnectorAnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error
 	ConnectorSessionParked(sessionID string) bool
+	// ConnectorBacktrack 把会话回退到指定 user turn（TUI /backtrack 同一实现）。
+	ConnectorBacktrack(ctx context.Context, sessionID string, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error)
+	// ConnectorListUserTurns 返回会话可见历史的 user turn 列表（只读）。
+	ConnectorListUserTurns(ctx context.Context, sessionID string) ([]runtimechat.UserTurn, error)
 }
 
 // runtimeConnectorRunner 是本宿主作为 runner 接收跨节点派发的执行面
@@ -391,7 +396,10 @@ func (b runtimeConnectorBackend) Handle(ctx context.Context, req connectors.Back
 	if turn == nil {
 		return connectors.BackendResult{}, err
 	}
-	result := connectors.BackendResult{Session: connectors.SessionRef{SessionID: turn.SessionID}}
+	// NodeID 必须回填（本宿主 = 裸 kind "runtime-server"，与 Deps.HostID 一致）：
+	// 空 NodeID 会把绑定归属抹空，下一条消息落进假 R2a 接管（2026-10-17 真机
+	// qq-bot1 双 actor 复盘；aicli 侧同款修复见 localConnectorBackend.Handle）。
+	result := connectors.BackendResult{Session: connectors.SessionRef{NodeID: connectors.HostKindRuntimeServer, SessionID: turn.SessionID}}
 	if reply := strings.TrimSpace(turn.Reply); reply != "" {
 		result.Reply = []connectors.OutboundMessage{{Text: reply}}
 	}
@@ -496,6 +504,45 @@ func (b runtimeConnectorBackend) AnswerQuestion(ctx context.Context, req connect
 // connectorCommandNotice 构造 Handled=false 的明确文案（核心会原样回给 IM）。
 func connectorCommandNotice(text string) connectors.CommandResult {
 	return connectors.CommandResult{Handled: false, Reply: []connectors.OutboundMessage{{Text: text}}}
+}
+
+// Backtrack 实现 connectors.BacktrackBackend（/undo）。
+//
+// TurnsBefore 语义：保留最近 N 轮 → 回退到「倒数第 N+1 轮」。
+// 实现先把请求换算成 UserTurnIndex（需要先读 turns 列表），再调 actor。
+func (b runtimeConnectorBackend) Backtrack(ctx context.Context, req connectors.BacktrackRequest) (connectors.BacktrackResult, error) {
+	if b.handler == nil {
+		return connectors.BacktrackResult{}, errors.New("runtime-server: session handler is not ready")
+	}
+	sessionID := strings.TrimSpace(req.Session.SessionID)
+	if sessionID == "" {
+		return connectors.BacktrackResult{}, errors.New("runtime-server: session is not bound")
+	}
+	turns, err := b.handler.ConnectorListUserTurns(ctx, sessionID)
+	if err != nil {
+		return connectors.BacktrackResult{}, fmt.Errorf("list user turns: %w", err)
+	}
+	index, ok := connectors.ResolveUndoTurnIndex(len(turns), req.TurnsBefore)
+	if !ok {
+		return connectors.BacktrackResult{Handled: false}, nil
+	}
+	anchor := turns[index]
+	backtrackReq := runtimechat.BacktrackRequest{
+		UserTurnIndex: runtimechat.IntPtr(anchor.Index),
+		Mode:          runtimechat.BacktrackModeConversation,
+	}
+	result, err := b.handler.ConnectorBacktrack(ctx, sessionID, backtrackReq)
+	if err != nil {
+		return connectors.BacktrackResult{}, err
+	}
+	if result == nil {
+		return connectors.BacktrackResult{Handled: false}, nil
+	}
+	return connectors.BacktrackResult{
+		Handled:       true,
+		RemovedTurns:  result.RemovedUserTurns,
+		AnchorPreview: result.AnchorPreview,
+	}, nil
 }
 
 // connectorCommandAnswerText 从命令原文中剥离首个参数（序号/问题 id），保留

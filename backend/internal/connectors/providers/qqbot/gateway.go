@@ -335,6 +335,33 @@ func (p *Provider) handleDispatch(ctx context.Context, cfg connectors.Config, pa
 		p.persistGatewayState(state, current)
 	case "RESUMED":
 		p.persistGatewayState(state, current)
+	case "INTERACTION_CREATE":
+		// 互动事件：仅按钮/快捷菜单需要 PUT 回应并作为一次用户输入进入
+		// agent；反馈/授权等非对话事件只推进游标，避免误触发回复。
+		p.persistGatewayState(state, current)
+		msg, ok := parseInteractionMessage(cfg, payload.D)
+		if !ok {
+			return current, nil
+		}
+		if err := p.ackInteraction(ctx, cfg, msg.ProviderData["qqbot_interaction_id"].(string)); err != nil {
+			p.logf("qqbot: ack interaction %s failed: %v", msg.MessageID, err)
+		}
+		if err := handle(ctx, msg); err != nil {
+			p.logf("qqbot: handle interaction %s failed: %v", msg.MessageID, err)
+			connectors.PollingLogf(ctx, connectors.LogLevelWarn, "处理互动事件 %s 失败：%v", msg.MessageID, err)
+		}
+	case "FRIEND_ADD":
+		// 用户添加好友：归一为一次入站（文本为事件摘要），让 agent 可发欢迎语。
+		p.persistGatewayState(state, current)
+		msg, ok := parseFriendAddMessage(cfg, payload.D)
+		if !ok {
+			return current, nil
+		}
+		p.rememberInboundMsgID(msg.Chat, msg.MessageID)
+		if err := handle(ctx, msg); err != nil {
+			p.logf("qqbot: handle friend_add %s failed: %v", msg.MessageID, err)
+			connectors.PollingLogf(ctx, connectors.LogLevelWarn, "处理好友添加事件 %s 失败：%v", msg.MessageID, err)
+		}
 	default:
 		msg, ok := parseGatewayMessage(cfg, payload.T, payload.D)
 		// 游标先落盘：消息一旦认领（进入 handle），重启后不应重复消费。
@@ -549,6 +576,35 @@ type gatewayMsgElement struct {
 	MsgElements []gatewayMsgElement `json:"msg_elements"`
 }
 
+// gatewayMessageScene 是官方 message_scene：ext 为 key=value 列表，携带
+// msg_idx（消息索引，官方去重依据）、ref_msg_idx（被引用消息索引）与
+// auth_token（鉴权令牌）。
+type gatewayMessageScene struct {
+	Source string   `json:"source"`
+	Ext    []string `json:"ext"`
+}
+
+// sceneExt 解析 message_scene.ext 的 key=value 列表（忽略无等号/空值项）。
+func (s *gatewayMessageScene) sceneExt() map[string]string {
+	if s == nil || len(s.Ext) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(s.Ext))
+	for _, item := range s.Ext {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 // gatewayArkData 是结构化卡片数据（message_type=3 的 ark_data 字段）。
 type gatewayArkData struct {
 	Prompt  string         `json:"prompt"`
@@ -562,6 +618,7 @@ type inboundTextInput struct {
 	Content      string
 	StripMention bool
 	Reference    *messageReference
+	Scene        *gatewayMessageScene
 	Attachments  []gatewayAttachment
 	Elements     []gatewayMsgElement
 	Ark          *gatewayArkData
@@ -585,14 +642,15 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 	switch strings.TrimSpace(eventType) {
 	case "GROUP_AT_MESSAGE_CREATE":
 		var event struct {
-			ID               string              `json:"id"`
-			MsgID            string              `json:"msg_id"`
-			GroupOpenID      string              `json:"group_openid"`
-			Content          string              `json:"content"`
-			MessageReference *messageReference   `json:"message_reference"`
-			Attachments      []gatewayAttachment `json:"attachments"`
-			MsgElements      []gatewayMsgElement `json:"msg_elements"`
-			ArkData          *gatewayArkData     `json:"ark_data"`
+			ID               string               `json:"id"`
+			MsgID            string               `json:"msg_id"`
+			GroupOpenID      string               `json:"group_openid"`
+			Content          string               `json:"content"`
+			MessageReference *messageReference    `json:"message_reference"`
+			MessageScene     *gatewayMessageScene `json:"message_scene"`
+			Attachments      []gatewayAttachment  `json:"attachments"`
+			MsgElements      []gatewayMsgElement  `json:"msg_elements"`
+			ArkData          *gatewayArkData      `json:"ark_data"`
 			Author           struct {
 				MemberOpenID string `json:"member_openid"`
 				Username     string `json:"username"`
@@ -609,6 +667,7 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			inboundTextInput{
 				Content:     event.Content,
 				Reference:   event.MessageReference,
+				Scene:       event.MessageScene,
 				Attachments: event.Attachments,
 				Elements:    event.MsgElements,
 				Ark:         event.ArkData,
@@ -619,15 +678,16 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		// 消息进入 agent（mentions 含 bot:true 或原始 content 带 <@ 标记）；
 		// all=每条群消息都参与（需运维显式开启，避免刷屏）。
 		var event struct {
-			ID               string              `json:"id"`
-			MsgID            string              `json:"msg_id"`
-			GroupOpenID      string              `json:"group_openid"`
-			Content          string              `json:"content"`
-			MessageReference *messageReference   `json:"message_reference"`
-			Attachments      []gatewayAttachment `json:"attachments"`
-			Mentions         []gatewayMention    `json:"mentions"`
-			MsgElements      []gatewayMsgElement `json:"msg_elements"`
-			ArkData          *gatewayArkData     `json:"ark_data"`
+			ID               string               `json:"id"`
+			MsgID            string               `json:"msg_id"`
+			GroupOpenID      string               `json:"group_openid"`
+			Content          string               `json:"content"`
+			MessageReference *messageReference    `json:"message_reference"`
+			MessageScene     *gatewayMessageScene `json:"message_scene"`
+			Attachments      []gatewayAttachment  `json:"attachments"`
+			Mentions         []gatewayMention     `json:"mentions"`
+			MsgElements      []gatewayMsgElement  `json:"msg_elements"`
+			ArkData          *gatewayArkData      `json:"ark_data"`
 			Author           struct {
 				MemberOpenID string `json:"member_openid"`
 				Username     string `json:"username"`
@@ -647,19 +707,21 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 			inboundTextInput{
 				Content:     event.Content,
 				Reference:   event.MessageReference,
+				Scene:       event.MessageScene,
 				Attachments: event.Attachments,
 				Elements:    event.MsgElements,
 				Ark:         event.ArkData,
 			})
 	case "C2C_MESSAGE_CREATE":
 		var event struct {
-			ID               string              `json:"id"`
-			MsgID            string              `json:"msg_id"`
-			Content          string              `json:"content"`
-			MessageReference *messageReference   `json:"message_reference"`
-			Attachments      []gatewayAttachment `json:"attachments"`
-			MsgElements      []gatewayMsgElement `json:"msg_elements"`
-			ArkData          *gatewayArkData     `json:"ark_data"`
+			ID               string               `json:"id"`
+			MsgID            string               `json:"msg_id"`
+			Content          string               `json:"content"`
+			MessageReference *messageReference    `json:"message_reference"`
+			MessageScene     *gatewayMessageScene `json:"message_scene"`
+			Attachments      []gatewayAttachment  `json:"attachments"`
+			MsgElements      []gatewayMsgElement  `json:"msg_elements"`
+			ArkData          *gatewayArkData      `json:"ark_data"`
 			Author           struct {
 				UserOpenID string `json:"user_openid"`
 				Username   string `json:"username"`
@@ -676,6 +738,7 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		text := normalizeInboundText(inboundTextInput{
 			Content:     event.Content,
 			Reference:   event.MessageReference,
+			Scene:       event.MessageScene,
 			Attachments: event.Attachments,
 			Elements:    event.MsgElements,
 			Ark:         event.ArkData,
@@ -683,11 +746,13 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
+		scene := event.MessageScene.sceneExt()
 		return connectors.InboundMessage{
 			ConnectorID: connectorID,
 			Provider:    Name,
 			Chat:        chatKindUser + ":" + userOpenID,
 			MessageID:   messageID,
+			DedupeKey:   scene["msg_idx"],
 			UserID:      userOpenID,
 			UserName:    firstNonEmpty(event.Author.Username, userOpenID),
 			Text:        text,
@@ -696,6 +761,8 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 				"qqbot_message_type": chatKindUser,
 				"qqbot_user_openid":  userOpenID,
 				"qqbot_event_msg_id": messageID,
+				"qqbot_msg_idx":      scene["msg_idx"],
+				"qqbot_ref_msg_idx":  scene["ref_msg_idx"],
 			},
 			ReceivedAt: time.Now().UTC(),
 		}, true
@@ -703,14 +770,15 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		// 频道（guild）@机器人消息：防御性解析（默认 intents 未订阅频道事件，
 		// 后续切片放开 intents 后即可用）；发送路径未实现，见 Send。
 		var event struct {
-			ID               string              `json:"id"`
-			Content          string              `json:"content"`
-			ChannelID        string              `json:"channel_id"`
-			GuildID          string              `json:"guild_id"`
-			MessageReference *messageReference   `json:"message_reference"`
-			Attachments      []gatewayAttachment `json:"attachments"`
-			MsgElements      []gatewayMsgElement `json:"msg_elements"`
-			ArkData          *gatewayArkData     `json:"ark_data"`
+			ID               string               `json:"id"`
+			Content          string               `json:"content"`
+			ChannelID        string               `json:"channel_id"`
+			GuildID          string               `json:"guild_id"`
+			MessageReference *messageReference    `json:"message_reference"`
+			MessageScene     *gatewayMessageScene `json:"message_scene"`
+			Attachments      []gatewayAttachment  `json:"attachments"`
+			MsgElements      []gatewayMsgElement  `json:"msg_elements"`
+			ArkData          *gatewayArkData      `json:"ark_data"`
 			Author           struct {
 				ID       string `json:"id"`
 				Username string `json:"username"`
@@ -728,6 +796,7 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		text := normalizeInboundText(inboundTextInput{
 			Content:      event.Content,
 			Reference:    event.MessageReference,
+			Scene:        event.MessageScene,
 			Attachments:  event.Attachments,
 			Elements:     event.MsgElements,
 			Ark:          event.ArkData,
@@ -736,12 +805,14 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 		if text == "" {
 			return connectors.InboundMessage{}, false
 		}
+		scene := event.MessageScene.sceneExt()
 		return connectors.InboundMessage{
 			ConnectorID: connectorID,
 			Provider:    Name,
 			Chat:        chatKindChannel + ":" + channelID,
 			ChatTitle:   channelID,
 			MessageID:   messageID,
+			DedupeKey:   scene["msg_idx"],
 			UserID:      userID,
 			UserName:    firstNonEmpty(event.Author.Username, userID),
 			Text:        text,
@@ -751,6 +822,8 @@ func parseGatewayMessage(cfg connectors.Config, eventType string, data json.RawM
 				"qqbot_channel_id":   channelID,
 				"qqbot_guild_id":     strings.TrimSpace(event.GuildID),
 				"qqbot_event_msg_id": messageID,
+				"qqbot_msg_idx":      scene["msg_idx"],
+				"qqbot_ref_msg_idx":  scene["ref_msg_idx"],
 			},
 			ReceivedAt: time.Now().UTC(),
 		}, true
@@ -800,12 +873,14 @@ func buildGroupInboundMessage(cfg connectors.Config, connectorID, messageID, gro
 	if !shareSessionInChannelSetting(cfg) {
 		chat += ":user:" + memberOpenID
 	}
+	scene := in.Scene.sceneExt()
 	return connectors.InboundMessage{
 		ConnectorID: connectorID,
 		Provider:    Name,
 		Chat:        chat,
 		ChatTitle:   groupOpenID,
 		MessageID:   messageID,
+		DedupeKey:   scene["msg_idx"],
 		UserID:      memberOpenID,
 		UserName:    firstNonEmpty(username, memberOpenID),
 		Text:        text,
@@ -815,6 +890,8 @@ func buildGroupInboundMessage(cfg connectors.Config, connectorID, messageID, gro
 			"qqbot_group_openid":  groupOpenID,
 			"qqbot_member_openid": memberOpenID,
 			"qqbot_event_msg_id":  messageID,
+			"qqbot_msg_idx":       scene["msg_idx"],
+			"qqbot_ref_msg_idx":   scene["ref_msg_idx"],
 		},
 		ReceivedAt: time.Now().UTC(),
 	}, true
@@ -963,6 +1040,14 @@ func normalizeInboundText(in inboundTextInput) string {
 		}
 	}
 	quoted := extractQuotedText(in.Reference)
+	if quoted == "" && in.Scene != nil {
+		// 官方引用消息（message_type=103）的引用索引在 message_scene.ext：
+		// ref_msg_idx 指向被引用消息，msg_elements 通常只带引用正文。这里不
+		// 伪造正文，只在正文/元素都为空时用索引占位，避免消息被丢弃。
+		if refIdx := strings.TrimSpace(in.Scene.sceneExt()["ref_msg_idx"]); refIdx != "" {
+			quoted = refIdx
+		}
+	}
 	if quoted == "" {
 		return trimmed
 	}

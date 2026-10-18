@@ -911,14 +911,18 @@ func (s *Service) HandleInbound(_ context.Context, msg InboundMessage) error {
 	return err
 }
 
-// inboundDedupeKey 构造幂等去重键：connector + chat + messageID。
+// inboundDedupeKey 构造幂等去重键：connector + chat + messageID [+ DedupeKey]。
 // telegram 等平台的 message_id 仅在单个 chat 内唯一，跨会话复用同一 ID 是常态，
 // 因此必须把 chat 并入键；chat 为空时回落为裸 MessageID，MessageID 为空时返回
-// 空串（调用方跳过认领）。
+// 空串（调用方跳过认领）。DedupeKey 是通道私有后缀（QQ 的 msg_idx），为空时
+// 不改变既有键。
 func inboundDedupeKey(msg InboundMessage) string {
 	messageID := strings.TrimSpace(msg.MessageID)
 	if messageID == "" {
 		return ""
+	}
+	if suffix := strings.TrimSpace(msg.DedupeKey); suffix != "" {
+		messageID += "|" + suffix
 	}
 	if chat := strings.TrimSpace(msg.Chat); chat != "" {
 		return chat + "|" + messageID
@@ -1215,7 +1219,22 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		if s.deps.RemoteDispatch != nil {
 			return s.dispatchRemote(ctx, cfg, provider, msg, binding.Session, decision, rrNext)
 		}
-		// RemoteDispatch 未装配：回落本机执行（能力未装配不拒收）。
+		// RemoteDispatch 未装配：回落本机执行（能力未装配不拒收）。但绑定属
+		// 别的节点时，不得以远端会话在本机重放（会建同 ID 双 actor，见
+		// dispatchRemote 的归属分流，2026-10-17 真机 qq-bot1 复盘）——给出
+		// 诚实提示并保持绑定。
+		if bindingOwnedByRemoteNode(binding.Session, s.deps.HostID) {
+			err := errors.New("远程派发能力未装配（RemoteDispatch=nil），绑定会话属远端节点")
+			s.recordLog(LogEntry{
+				Level:       LogLevelWarn,
+				Direction:   LogDirectionSystem,
+				ConnectorID: cfg.ID,
+				Chat:        msg.Chat,
+				Summary:     "远程派发未装配，绑定属远端节点，不回放本机：" + err.Error(),
+			}, logCounters{})
+			s.notifyRemoteDispatchFailure(ctx, cfg, provider, msg, decision.Peer.NodeID, err)
+			return err
+		}
 	} else {
 		s.mu.Lock()
 		s.runnerRoundRobin = rrNext
@@ -1278,8 +1297,12 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		return err
 	}
 
-	if !result.Session.IsZero() && binding.Session != result.Session {
-		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: result.Session}); err != nil {
+	// 后端返回的会话引用先做空值收敛再落账：本地 backend 只回 SessionID 时
+	// 不得把绑定已记录的 NodeID 抹成空（2026-10-17 真机 qq-bot1：抹空 ⇒ 下
+	// 一条消息落进假 R2a 接管，反复回写与提示）。
+	persisted := mergeBackendSessionNodeID(binding.Session, result.Session)
+	if !persisted.IsZero() && binding.Session != persisted {
+		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: persisted}); err != nil {
 			s.logf("connector %s: persist binding failed: %v", cfg.ID, err)
 		}
 	}
@@ -1287,8 +1310,8 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 	// 为本宿主身份（亲和转移，绑定记录不变）并在 IM 提示一次。回写只在
 	// backend 未自行改 Session（改了则上面的常规回写已带新值）且原绑定确实
 	// 指向别节点时进行。
-	if failoverNotice && result.Session.NodeID != s.deps.HostID {
-		updated := result.Session
+	if failoverNotice && persisted.NodeID != s.deps.HostID {
+		updated := persisted
 		if updated.IsZero() {
 			updated = binding.Session
 		}
@@ -1302,12 +1325,16 @@ func (s *Service) processMessage(ctx context.Context, cfg Config, provider Provi
 		if err := provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: notice}}); err != nil {
 			s.logf("connector %s: failover notice failed: %v", cfg.ID, err)
 		}
+		original := strings.TrimSpace(binding.Session.NodeID)
+		if original == "" {
+			original = "(空)"
+		}
 		s.recordLog(LogEntry{
 			Level:       LogLevelInfo,
 			Direction:   LogDirectionSystem,
 			ConnectorID: cfg.ID,
 			Chat:        msg.Chat,
-			Summary:     "R2a 接管：原节点 " + strings.TrimSpace(binding.Session.NodeID) + " 掉线，本机继续服务（已回写 NodeID）",
+			Summary:     "R2a 接管：原节点 " + original + " 掉线，本机继续服务（已回写 NodeID）",
 		}, logCounters{})
 	}
 	if len(result.Reply) == 0 {
@@ -1421,8 +1448,26 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 		Session: binding,
 	})
 	if err != nil {
-		// 派发失败不静默吞消息：记日志后回落本机执行（可用性优先——远程
-		// 节点瞬时故障不应让 IM 停摆；failover 语义与 gateway_node 一致）。
+		// 远端失败按绑定归属分流（2026-10-17 真机 qq-bot1 双 actor 复盘）：
+		//   - 绑定属别的节点（R1 亲和）：绝不回落本机——那会拿远端 session
+		//     id 在本进程再建一个 actor（同 ID 双 actor/历史分叉），并重放
+		//     用户刚取消的回合（真机：ESC 取消 → 502 → 本机重放 7 分钟，
+		//     串行消息队列被堵死，IM 长静默）。改为 IM 提示 + 保持绑定；
+		//     节点被判掉线后，下一条消息自然走 R2a 本机接管（会话级
+		//     failover 的正确路径）。
+		//   - 无绑定（R3 选举失败）：回落本机（可用性优先——远程节点瞬时
+		//     故障不应让 IM 停摆；本地 auto-create 派生会话，无归属分叉）。
+		if bindingOwnedByRemoteNode(binding, s.deps.HostID) {
+			s.recordLog(LogEntry{
+				Level:       LogLevelWarn,
+				Direction:   LogDirectionSystem,
+				ConnectorID: cfg.ID,
+				Chat:        msg.Chat,
+				Summary:     "远程派发失败（绑定属远端节点），不回放本机：" + err.Error(),
+			}, logCounters{})
+			s.notifyRemoteDispatchFailure(ctx, cfg, provider, msg, decision.Peer.NodeID, err)
+			return err
+		}
 		s.recordLog(LogEntry{
 			Level:       LogLevelWarn,
 			Direction:   LogDirectionSystem,
@@ -1471,6 +1516,49 @@ func (s *Service) dispatchRemote(ctx context.Context, cfg Config, provider Provi
 		Summary:     "远程派发完成（runner=" + decision.Peer.NodeID + "，回复 " + strconv.Itoa(len(result.Reply)) + " 条）",
 	}, logCounters{})
 	return nil
+}
+
+// notifyRemoteDispatchFailure 向 IM 回一条诚实的失败提示（best-effort）：
+// 远端拥有的会话失败时不回落本机重放（避免同 ID 双 actor 与重放已取消的
+// 回合），用户必须得到可行动的信号而不是静默（2026-10-17 真机 qq-bot1
+// 「没有响应」长静默复盘）。提示发送失败只记日志，不影响主流程。
+func (s *Service) notifyRemoteDispatchFailure(ctx context.Context, cfg Config, provider Provider, msg InboundMessage, nodeID string, cause error) {
+	where := "远端执行节点"
+	if nodeID = strings.TrimSpace(nodeID); nodeID != "" {
+		where += " " + nodeID
+	}
+	notice := "⚠️ 本轮处理未完成：" + where + "返回错误（" + dispatchFailureLine(cause) + "）。该消息未在本机重放，请稍后重试。"
+	if err := provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: notice}}); err != nil {
+		s.logf("connector %s: dispatch failure notice failed: %v", cfg.ID, err)
+	}
+}
+
+// dispatchFailureLine 把派发错误压成单行短文案（IM 提示不放大段错误）。
+func dispatchFailureLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	line := strings.TrimSpace(err.Error())
+	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+		line = strings.TrimSpace(line[:idx])
+	}
+	const maxRunes = 160
+	if runes := []rune(line); len(runes) > maxRunes {
+		line = string(runes[:maxRunes]) + "…"
+	}
+	return line
+}
+
+// mergeBackendSessionNodeID 收敛后端返回会话引用的 NodeID 空值：本地 backend
+// （aicli/runtime-server 历史实现只回 SessionID）省略 NodeID 时保留绑定现值，
+// 避免把已知归属抹成空——空 NodeID 会让下一条消息落进「R2a 空值接管」
+// （2026-10-17 真机 qq-bot1：绑定 NodeID 被逐条消息抹空，R2a 反复回写+提示）。
+// NodeID 非空时以 backend 返回为准。
+func mergeBackendSessionNodeID(prev, next SessionRef) SessionRef {
+	if strings.TrimSpace(next.NodeID) == "" {
+		next.NodeID = strings.TrimSpace(prev.NodeID)
+	}
+	return next
 }
 
 // processMessageLocal 是原本地执行路径（远程派发失败回落用）；与
@@ -1533,8 +1621,11 @@ func (s *Service) processMessageLocal(ctx context.Context, cfg Config, provider 
 		return err
 	}
 
-	if !result.Session.IsZero() && binding.Session != result.Session {
-		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: result.Session}); err != nil {
+	// 同 processMessage：后端返回的空 NodeID 不得抹掉绑定已记录的归属
+	//（2026-10-17 真机 qq-bot1 复盘）。
+	persisted := mergeBackendSessionNodeID(binding.Session, result.Session)
+	if !persisted.IsZero() && binding.Session != persisted {
+		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat, Session: persisted}); err != nil {
 			s.logf("connector %s: persist binding failed: %v", cfg.ID, err)
 		}
 	}
@@ -1809,19 +1900,63 @@ type command struct {
 
 func parseCommand(prefix, text string) (command, bool) {
 	text = strings.TrimSpace(text)
-	if prefix == "" || !strings.HasPrefix(text, prefix) {
+	if prefix != "" && strings.HasPrefix(text, prefix) {
+		trimmed := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+		if trimmed == "" {
+			return command{}, false
+		}
+		fields := strings.SplitN(trimmed, " ", 2)
+		cmd := command{name: strings.ToLower(fields[0])}
+		if len(fields) == 2 {
+			cmd.args = strings.TrimSpace(fields[1])
+		}
+		// 斜杠 + 中文标签（"/帮助"）同样归一为核心命令。
+		if canonical, ok := canonicalLabelName(fields[0]); ok {
+			cmd.name = canonical
+		}
+		return cmd, true
+	}
+	// 中文标签别名（指令面板点击 / 中文直输）——2026-10-17 真机确认：
+	// QQ 指令面板 type=command 元素点击后发送的是**元素名称（中文 Label）**，
+	// 必须归一为核心命令，否则会落进 agent 回合（实测：点「状态」触发了一次
+	// 仓库状态调查、点「帮助」得到 agent 自拟的帮助文本）。
+	return parseLabelCommand(text)
+}
+
+// parseLabelCommand 把命令目录的中文标签归一为命令：整词匹配「Label」、
+// 「/Label」或「Label + 空格 + 参数」（如 "回退 2" → /undo 2）。
+// Labels 均为无空格短词，因此 "帮助我看看" 这类以标签开头但未跟空格的
+// 普通文本不受影响。
+func parseLabelCommand(text string) (command, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return command{}, false
 	}
-	trimmed := strings.TrimSpace(strings.TrimPrefix(text, prefix))
-	if trimmed == "" {
+	fields := strings.SplitN(strings.TrimPrefix(text, "/"), " ", 2)
+	canonical, ok := canonicalLabelName(fields[0])
+	if !ok {
 		return command{}, false
 	}
-	fields := strings.SplitN(trimmed, " ", 2)
-	cmd := command{name: strings.ToLower(fields[0])}
+	cmd := command{name: canonical}
 	if len(fields) == 2 {
 		cmd.args = strings.TrimSpace(fields[1])
 	}
 	return cmd, true
+}
+
+// canonicalLabelName 报告 name（不含前缀）是否命中命令目录的中文标签，
+// 命中返回规范命令名（小写）。
+func canonicalLabelName(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	for _, item := range agentCommands {
+		if strings.EqualFold(name, strings.TrimSpace(item.Label)) {
+			return strings.ToLower(item.Name), true
+		}
+	}
+	return "", false
 }
 
 // isCoreCommand 报告文本是否为核心本地命令：这些命令在 handleCommand 内闭环
@@ -1833,12 +1968,15 @@ func isCoreCommand(prefix, text string) bool {
 	if !ok {
 		return false
 	}
-	switch cmd.name {
-	case "help", "start", "new", "status", "approve", "deny", "answer":
+	if cmd.name == "start" { // start 是 help 的别名
 		return true
-	default:
-		return false
 	}
+	for _, command := range agentCommands {
+		if command.Name == cmd.name {
+			return true
+		}
+	}
+	return false
 }
 
 // handleCommand 处理核心通用命令；返回 handled=false 时交还给 Backend
@@ -1847,6 +1985,22 @@ func (s *Service) handleCommand(ctx context.Context, cfg Config, provider Provid
 	switch cmd.name {
 	case "help", "start":
 		return true, provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: helpText(cfg)}})
+	case "invite":
+		// 通道可选能力：能生成邀请链接的 provider（当前仅 QQ）直接闭环。
+		sharer, ok := provider.(ShareLinkProvider)
+		if !ok {
+			return true, provider.Send(ctx, cfg, msg.Chat,
+				[]OutboundMessage{{Text: "当前通道不支持生成邀请链接。"}})
+		}
+		link, err := sharer.GenerateShareLink(ctx, cfg, cmd.args)
+		if err != nil {
+			return true, provider.Send(ctx, cfg, msg.Chat,
+				[]OutboundMessage{{Text: "生成邀请链接失败：" + err.Error()}})
+		}
+		return true, provider.Send(ctx, cfg, msg.Chat,
+			[]OutboundMessage{{Text: "邀请链接（好友通过该链接添加后，来源参数会回传）：\n" + link}})
+	case "undo":
+		return true, s.handleUndo(ctx, cfg, provider, msg, cmd.args)
 	case "new":
 		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat}); err != nil {
 			return true, err
@@ -1998,17 +2152,16 @@ func describeSession(ref SessionRef) string {
 
 func helpText(cfg Config) string {
 	prefix := cfg.Policy.commandPrefix()
-	return strings.Join([]string{
-		"可用命令：",
-		prefix + "help 显示本帮助",
-		prefix + "new 开启新会话",
-		prefix + "status 查看当前绑定会话",
-		prefix + "approve [request_id] 批准挂起的审批（缺省 = 当前挂起项）",
-		prefix + "deny [request_id] 拒绝挂起的审批（缺省 = 当前挂起项）",
-		prefix + "answer <序号|request_id> <内容> 回答挂起的提问",
-		"",
-		"直接发送文本即可与 agent 对话。",
-	}, "\n")
+	lines := []string{"可用命令："}
+	for _, command := range agentCommands {
+		usage := command.Name
+		if command.Usage != "" {
+			usage += " " + command.Usage
+		}
+		lines = append(lines, prefix+usage+" "+command.Description)
+	}
+	lines = append(lines, "", "直接发送文本即可与 agent 对话。")
+	return strings.Join(lines, "\n")
 }
 
 func failureText(err error) string {

@@ -115,6 +115,32 @@ func runnerPeerMatchesNodeID(p RunnerPeer, nodeID string) bool {
 	return strings.EqualFold(peerNodeID, HostIDInstance(nodeID))
 }
 
+// bindingOwnedByRemoteNode 报告绑定会话是否由别的节点拥有（R1 亲和）。
+// 用于远程派发失败后的回落决策（2026-10-17 真机 qq-bot1 双 actor 复盘）：
+// 远端拥有的会话若在本机回落重放，会以同一 session id 在两个进程各建一个
+// actor（历史分叉），并重放用户刚取消的回合；此时必须放弃本机回落，改为
+// IM 提示 + 保持绑定（节点被判掉线后下一条消息自然走 R2a 本机接管）。
+// 形态口径与 DecideRoute 的本机判定一致：全形 HostID / instance 段 / 裸 kind。
+func bindingOwnedByRemoteNode(binding SessionRef, localHostID string) bool {
+	nodeID := strings.TrimSpace(binding.NodeID)
+	if nodeID == "" {
+		return false
+	}
+	localID := strings.TrimSpace(localHostID)
+	if strings.EqualFold(nodeID, localID) {
+		return false
+	}
+	if instance := HostIDInstance(localID); instance != "" &&
+		strings.EqualFold(HostIDInstance(nodeID), instance) {
+		return false
+	}
+	// 裸 kind 形态（单实例宿主格式）：与绑定的裸 kind 相同即本机。
+	if kind := HostKindOf(localID); kind != "" && strings.EqualFold(nodeID, kind) {
+		return false
+	}
+	return true
+}
+
 // routeDecision 是 DecideRoute 的输出。
 type routeDecision struct {
 	// Remote 为 true 时派发到 Peer（R1/R3-remote）；false 本机执行。

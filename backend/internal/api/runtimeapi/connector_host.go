@@ -314,6 +314,65 @@ func (h *Handler) ConnectorAnswerQuestion(ctx context.Context, sessionID, questi
 	return actor.AnswerQuestion(ctx, questionID, answer)
 }
 
+// ConnectorBacktrack 把 IM 会话回退到指定 user turn（与 TUI /backtrack 同一
+// actor 实现）。语义与 REST POST /sessions/{id}/backtrack 一致：
+//   - 需要会话写租约（与正在进行的 turn 互斥）；
+//   - 只做 conversation 模式（IM 无代码 diff 上下文）；
+//   - 调用方负责把 runtimechat.BacktrackRequest 的 selector 换算成
+//     UserTurnIndex（IM 侧 /undo 默认回退最近一轮）。
+func (h *Handler) ConnectorBacktrack(ctx context.Context, sessionID string, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error) {
+	if h == nil {
+		return nil, fmt.Errorf("handler is nil")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	hub := h.getSessionHub()
+	if hub == nil {
+		return nil, fmt.Errorf("session hub not configured")
+	}
+	actor, err := hub.GetOrCreate(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	req.PreviewOnly = false
+	req.AutoSubmit = false
+	if strings.TrimSpace(req.Mode) == "" {
+		req.Mode = runtimechat.BacktrackModeConversation
+	}
+	leaseHandle, leaseErr := h.acquireSessionLease(ctx, sessionID, sessionActorLeaseOwnerKind, "connector-undo")
+	if leaseErr != nil {
+		return nil, leaseErr
+	}
+	if leaseHandle != nil {
+		defer func() { _ = leaseHandle.Release(context.Background()) }()
+	}
+	result, _, err := actor.Backtrack(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ConnectorListUserTurns 返回会话当前可见历史的 user turn 列表（只读，
+// 不需要租约；与 GET /sessions/{id}/turns 同源）。
+func (h *Handler) ConnectorListUserTurns(ctx context.Context, sessionID string) ([]runtimechat.UserTurn, error) {
+	if h == nil {
+		return nil, fmt.Errorf("handler is nil")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	session, err := h.readSessionSnapshot(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	checkpoints := h.readSessionCheckpoints(ctx, sessionID)
+	return runtimechat.ListUserTurns(session.GetMessages(), checkpoints), nil
+}
+
 // connectorAttentionEventTypes 是连接器注意力出站（FR-7/FR-8）订阅的事件类型：
 // 审批请求、提问请求、回合结束（completion）与工作类（S4 聚合订阅：工具/子代理）。
 // 事件名与 gateway_attention.go 的状态投影、共享层 connectors.AttentionEventTypes()

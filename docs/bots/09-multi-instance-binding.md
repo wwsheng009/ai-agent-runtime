@@ -283,7 +283,7 @@ flowchart TD
 
 | 分支 | 条件 | 行为 |
 |------|------|------|
-| **R1** | 绑定存在且 `NodeID` 在 mesh peers 中活跃 | turn 派发到该节点执行（远程 submit，v1 仅终态回传；本机节点直接本地执行） |
+| **R1** | 绑定存在且 `NodeID` 在 mesh peers 中活跃 | turn 派发到该节点执行（远程 submit，v1 仅终态回传；本机节点直接本地执行）。**派发失败时：绑定属远端节点 → 不回放本机**（IM 收诚实提示、绑定不变；节点被判掉线后由 R2a 接管），仅无绑定（R3 选举失败）才回落本机 auto-create（2026-10-17） |
 | **R2a**（D3 前半） | 绑定存在但 NodeID 掉线 | **先核对"当前运行会话==绑定会话"**：一致 → 由接管节点继续服务该绑定会话（绑定记录不变，仅执行体转移）；成功后更新 `NodeID` 并在 IM 提示一次。**✅ 2026-10-14（切片 C）**：`DecideRoute` R2 分支置 `Failover`（有活 runner 在场时），`processMessage` 本机执行成功后回写 `binding.Session.NodeID = 本宿主 HostID` 并经 poller Send 提示一次；纯单机模式（无 peers 视图）保持静默（历史行为） |
 | **R2b**（D3 后半） | 无绑定 | **不迁移/不新增任何绑定**；接管处理器按共享绑定表现状处理：该 chat 之后的消息走 auto-create（在新节点建会话并按 §5.1 正常落绑定） |
 | **R3**（D2） | 无绑定 | 按 `connectors.runner_preference` 选举：默认优先任一活着的 runtime-server；没有则 aicli；`round-robin` 轮转 |
@@ -295,6 +295,20 @@ flowchart TD
 > 短路为本机亲和，不再进 R2a 分支；②`dispatchRemote` 回写绑定前把 `Session.NodeID`
 > 归一化为**路由目标 peer 的 NodeID**（runner 回传的宿主身份不再污染绑定）。回归用例：
 > `TestDecideRouteLocalBindingNoFalseFailover`（自绑定 / 裸 kind / 他实例陈旧三态）。
+
+> **真机修复（2026-10-17，qq-bot1 双 actor 事件）**：远端 turn 被用户 ESC 取消 → 派发端点
+> 返回 502 → 旧「失败一律回落本机」把同一条消息以**同一 session id** 在 owner 进程重放——
+> 同会话在两个进程各有一个 actor（历史分叉），回落 turn 还跑了 7 分钟堵死该 chat 的串行
+> 消息队列（IM 长静默、`outbound=0`）。修复分三层：①`dispatchRemote` 失败按归属分流：
+> **远端拥有的会话绝不本机重放**（`bindingOwnedByRemoteNode`；IM 收「未在本机重放」提示，
+> 绑定保持，掉线自走 R2a），无绑定（R3）才回落本机；②两个本地 backend（aicli
+> `localConnectorBackend.Handle` / runtime-server `runtimeConnectorBackend.Handle`）回填
+> `Session.NodeID`；③`processMessage`/`processMessageLocal` 落账前对后端返回做空值收敛
+> （`mergeBackendSessionNodeID`）：空 NodeID 不得抹掉绑定已记录的归属——否则下一条消息落进
+> 假 R2a（日志「原节点 (空) 掉线」、反复回写+提示）。回归用例：
+> `TestServiceR1AffinityDispatch`（远端失败不回放）、`TestServiceUnboundRemoteFailureFallsBackLocal`、
+> `TestServiceLocalBackendBlankNodeIDKeepsBindingOwner`、`TestServiceR2aFailoverTakeover`（空 NodeID 单次提示）、
+> `TestBindingOwnedByRemoteNode`、两宿主的 Handle NodeID 用例。
 
 > **跨系统复用（2026-10-14）**：自动化任务（Schedule）的联盟式调度直接复用本章模式——能力位选举（`scheduler`）、绑定亲和（会话宿主优先）、掉线接管（R2a 式 failover）、幂等键（`occurrence_key`）；实现侧可共享 `DecideRoute` 的思路。差异仅在候选集语义：Schedule 竞争的是"调度领导权"，而非消息 runner。见 [`../automation-tasks/mesh-scheduler-federation-design.md`](../automation-tasks/mesh-scheduler-federation-design.md) §2.2/§3.3。
 

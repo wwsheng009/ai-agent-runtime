@@ -11,7 +11,7 @@ func testPeers() []RunnerPeer {
 }
 
 // 真机形态（2026-10-15 qq-bot1）：TUI bind 写入 HostID 全形
-//（`aicli:node-…`），mesh peers 视图是裸 node id（`node-…`）——两种形态
+// （`aicli:node-…`），mesh peers 视图是裸 node id（`node-…`）——两种形态
 // 必须能匹配，否则活节点亲和被误判为掉线退化 R2a，IM 消息进不了会话。
 func TestDecideRouteR1AffinityHostIDFormMismatch(t *testing.T) {
 	peers := []RunnerPeer{
@@ -168,5 +168,35 @@ func TestDecideRouteLocalBindingNoFalseFailover(t *testing.T) {
 	d, _ = DecideRoute("", peers, "aicli:node-self", SessionRef{NodeID: "aicli:node-gone", SessionID: "sess-3"}, 0)
 	if d.Remote || !d.Failover {
 		t.Fatalf("foreign stale binding = %+v, want failover", d)
+	}
+}
+
+// TestBindingOwnedByRemoteNode 锁定远程派发失败分流（2026-10-17 真机
+// qq-bot1 双 actor 复盘）：只有「绑定归属别的节点」才禁止本机回落，
+// 形态口径与 DecideRoute 本机判定一致（全形 / instance 段 / 裸 kind）。
+func TestBindingOwnedByRemoteNode(t *testing.T) {
+	const local = "aicli:node-abc"
+	cases := []struct {
+		name    string
+		binding string
+		local   string
+		want    bool
+	}{
+		{name: "空绑定", binding: "", local: local, want: false},
+		{name: "同全形", binding: "aicli:node-abc", local: local, want: false},
+		{name: "裸 node id 同实例", binding: "node-abc", local: local, want: false},
+		{name: "全形对裸 local", binding: "aicli:node-abc", local: "node-abc", want: false},
+		{name: "裸 kind 同 kind", binding: "aicli", local: local, want: false},
+		{name: "别的实例", binding: "aicli:node-xyz", local: local, want: true},
+		{name: "别的 host kind", binding: "runtime-server", local: local, want: true},
+		{name: "runtime-server 自绑定", binding: "runtime-server", local: "runtime-server", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bindingOwnedByRemoteNode(SessionRef{NodeID: tc.binding, SessionID: "sess-1"}, tc.local)
+			if got != tc.want {
+				t.Fatalf("bindingOwnedByRemoteNode(%q, %q) = %v, want %v", tc.binding, tc.local, got, tc.want)
+			}
+		})
 	}
 }

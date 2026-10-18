@@ -21,6 +21,7 @@ func TestProactiveQPSLimit(t *testing.T) {
 
 	cfg := testConfig("qq-1", "app-1", "secret-1")
 	cfg.Settings["proactive_qps"] = "2"
+	cfg.Settings["proactive_relation_qpm"] = "0"
 	cfg.Settings["proactive_daily_limit"] = "100"
 
 	for i := 0; i < 2; i++ {
@@ -53,6 +54,7 @@ func TestProactiveDailyLimitPerChat(t *testing.T) {
 
 	cfg := testConfig("qq-1", "app-1", "secret-1")
 	cfg.Settings["proactive_qps"] = "100"
+	cfg.Settings["proactive_relation_qpm"] = "0"
 	cfg.Settings["proactive_daily_limit"] = "2"
 
 	for i := 0; i < 2; i++ {
@@ -79,6 +81,7 @@ func TestProactiveLimitSkipsPassiveAndTyping(t *testing.T) {
 
 	cfg := testConfig("qq-1", "app-1", "secret-1")
 	cfg.Settings["proactive_qps"] = "100"
+	cfg.Settings["proactive_relation_qpm"] = "0"
 	cfg.Settings["proactive_daily_limit"] = "1"
 
 	// u1 有最近入站 msg_id：回复走被动路径，不计入主动配额。
@@ -114,9 +117,74 @@ func TestSchemaDeclaresProactiveLimits(t *testing.T) {
 	for _, field := range schema.Fields {
 		keys[field.Key] = true
 	}
-	for _, key := range []string{"proactive_qps", "proactive_daily_limit"} {
+	for _, key := range []string{
+		"proactive_qps", "proactive_group_qpm", "proactive_relation_qpm", "proactive_daily_limit",
+	} {
 		if !keys[key] {
 			t.Fatalf("schema missing field %q", key)
 		}
+	}
+}
+
+// TestProactiveRelationQPMPerChat 锁定单关系维度（每用户/每群 20/qpm）：
+// 同一会话第 21 条被本地拦截，另一会话不受影响。
+func TestProactiveRelationQPMPerChat(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+	fixedNow := time.Now()
+	provider.now = func() time.Time { return fixedNow }
+
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+	cfg.Settings["proactive_qps"] = "100"
+	cfg.Settings["proactive_relation_qpm"] = "2"
+	cfg.Settings["proactive_daily_limit"] = "100"
+
+	for i := 0; i < 2; i++ {
+		if err := provider.Send(context.Background(), cfg, "user:u1", []connectors.OutboundMessage{{Text: "hi"}}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	err := provider.Send(context.Background(), cfg, "user:u1", []connectors.OutboundMessage{{Text: "hi"}})
+	var quota *proactiveQuotaError
+	if !errors.As(err, &quota) || quota.scope != "relation" {
+		t.Fatalf("third send err = %v, want relation quota error", err)
+	}
+	if err := provider.Send(context.Background(), cfg, "user:u2", []connectors.OutboundMessage{{Text: "hi"}}); err != nil {
+		t.Fatalf("other relation should not be limited: %v", err)
+	}
+}
+
+// TestProactiveGroupUsesQPMM 锁定群聊 Bot 维度走每分钟窗口（官方 60/qpm），
+// 而不是单聊的每秒窗口。
+func TestProactiveGroupUsesQPMM(t *testing.T) {
+	fake := newFakeQQ("secret-1", "token-1")
+	server := newFakeQQServer(t, fake)
+	provider := New(WithAPIBase(server.URL))
+	fixedNow := time.Now()
+	provider.now = func() time.Time { return fixedNow }
+
+	cfg := testConfig("qq-1", "app-1", "secret-1")
+	cfg.Settings["proactive_qps"] = "1"       // 单聊窗口：不应作用于群聊
+	cfg.Settings["proactive_group_qpm"] = "2" // 群聊 Bot 维度
+	cfg.Settings["proactive_relation_qpm"] = "0"
+	cfg.Settings["proactive_daily_limit"] = "100"
+
+	for i := 0; i < 2; i++ {
+		if err := provider.Send(context.Background(), cfg, "group:g1", []connectors.OutboundMessage{{Text: "hi"}}); err != nil {
+			t.Fatalf("group send %d: %v", i, err)
+		}
+	}
+	err := provider.Send(context.Background(), cfg, "group:g1", []connectors.OutboundMessage{{Text: "hi"}})
+	var quota *proactiveQuotaError
+	if !errors.As(err, &quota) || quota.scope != "qpm" {
+		t.Fatalf("third group send err = %v, want qpm quota error", err)
+	}
+	// 单聊仍受 qps 限制，与群聊窗口独立。
+	if err := provider.Send(context.Background(), cfg, "user:u1", []connectors.OutboundMessage{{Text: "hi"}}); err != nil {
+		t.Fatalf("first user send: %v", err)
+	}
+	if err := provider.Send(context.Background(), cfg, "user:u1", []connectors.OutboundMessage{{Text: "hi"}}); err == nil {
+		t.Fatal("second user send should hit qps limit")
 	}
 }

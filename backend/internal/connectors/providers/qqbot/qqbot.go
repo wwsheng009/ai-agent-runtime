@@ -59,6 +59,10 @@ const (
 	// gatewayIntents 至少覆盖群@（GROUP_AT_MESSAGE_CREATE）与 C2C 私信
 	// （C2C_MESSAGE_CREATE）：QQ 的 1<<25 = GROUP_AND_C2C_EVENT。
 	gatewayIntents = 1 << 25
+	// gatewayIntentInteraction 是互动事件（INTERACTION_CREATE，1<<26）。
+	// 默认不订阅，避免按钮/反馈等高频事件放大；需要时在 settings.intents
+	// 里显式加上（如 1<<25 | 1<<26）。
+	gatewayIntentInteraction = 1 << 26
 
 	// PollingState 游标键（docs/bots/02-solution-design.md §3 Conversation.cursor）。
 	gatewaySessionKey = "gateway_session_id"
@@ -115,6 +119,12 @@ type Provider struct {
 
 	// proactive 是主动消息（无 msg_id）的本机频控账本（见 ratelimit.go）。
 	proactive proactiveLedger
+
+	// wakeup 是互动召回消息（is_wakeup=true）的本机配额账本（见 wakeup.go）。
+	wakeup wakeupLedger
+
+	// sent 是已发消息账本（撤回用，见 sent_ledger.go）。
+	sent sentLedger
 
 	// passiveReplies 是被动回复次数账本（见 passive_reply.go）；
 	// passiveLimitUser/Group 覆盖官方次数上限（0 = 用默认，测试/高级用）。
@@ -278,8 +288,24 @@ func (p *Provider) Schema() api.ProviderSchema {
 				Help: "平台开启「接收所有消息」后生效：mention=仅响应@机器人的消息；all=每条群消息都交给 agent",
 			},
 			{
+				Key: "command_panel_sync", Label: "自动同步指令面板", Type: api.FieldBool, Default: "true",
+				Help: "激活时把内置命令（帮助/新会话/状态/审批/邀请）同步为 QQ 指令面板；关闭后不写面板",
+			},
+			{
+				Key: "command_menu_sync", Label: "自动同步自定义菜单", Type: api.FieldBool, Default: "true",
+				Help: "激活时把内置命令同步为 QQ 单聊自定义菜单（点击即发送对应 /命令）；仅在菜单为空或与内置一致时写入，已有自定义配置不会被覆盖",
+			},
+			{
 				Key: "proactive_qps", Label: "主动消息 QPS 上限", Type: api.FieldNumber, Default: "10",
 				Help: "本机预检：主动消息（无 msg_id）每秒上限；留空=默认 10，填 0=不限制（平台仍兜底）",
+			},
+			{
+				Key: "proactive_group_qpm", Label: "群主动消息 QPM 上限", Type: api.FieldNumber, Default: "60",
+				Help: "本机预检：群聊主动消息 Bot 维度每分钟上限；留空=默认 60，填 0=不限制（未认证机器人平台限 30）",
+			},
+			{
+				Key: "proactive_relation_qpm", Label: "单关系 QPM 上限", Type: api.FieldNumber, Default: "20",
+				Help: "本机预检：每个用户/每个群每分钟主动消息上限；留空=默认 20，填 0=不限制（平台仍兜底）",
 			},
 			{
 				Key: "proactive_daily_limit", Label: "主动消息日上限", Type: api.FieldNumber, Default: "1000",
@@ -305,6 +331,25 @@ func (p *Provider) Activate(ctx context.Context, cfg connectors.Config) (connect
 	}
 	if _, err := p.accessToken(ctx, cfg, false); err != nil {
 		return connectors.Activation{}, err
+	}
+	// 指令面板同步：体验增强，失败只记日志（不阻断激活/消息收发）。
+	// 用独立短超时，避免平台面板接口异常拖慢连接器启动。
+	if p.commandPanelSyncEnabled(cfg) {
+		syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if _, syncErr := p.SyncCommandPanel(syncCtx, cfg); syncErr != nil {
+			p.logf("qqbot: 同步指令面板失败（不影响消息收发）：%v", syncErr)
+		}
+		cancel()
+	}
+	// 全局自定义菜单同步（2026-10-17）：与面板同一口径——体验增强、失败只记
+	// 日志；仅当菜单为空或与内置一致时写入，绝不覆盖他人配置（无 remark 归属
+	// 字段，保守处理；见 menu_sync.go）。
+	if p.commandMenuSyncEnabled(cfg) {
+		syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if _, syncErr := p.SyncCommandMenu(syncCtx, cfg); syncErr != nil {
+			p.logf("qqbot: 同步自定义菜单失败（不影响消息收发）：%v", syncErr)
+		}
+		cancel()
 	}
 	info := "app_id=" + appID
 	if p.sandbox(cfg) {
@@ -495,12 +540,16 @@ func (p *Provider) sendText(ctx context.Context, cfg connectors.Config, target c
 		}
 	}
 	msgID := p.applyPassiveReply(payload, target, passive)
-	if err := p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil); err != nil {
+	var response struct {
+		ID string `json:"id"`
+	}
+	if err := p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, &response); err != nil {
 		return err
 	}
 	if msgID != "" {
 		p.passiveReplies.record(target.chat, msgID)
 	}
+	p.sent.record(target.chat, response.ID, p.now())
 	return nil
 }
 
@@ -520,12 +569,16 @@ func (p *Provider) sendMedia(ctx context.Context, cfg connectors.Config, target 
 		"media":    map[string]any{"file_info": fileInfo},
 	}
 	msgID := p.applyPassiveReply(payload, target, passive)
-	if err := p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, nil); err != nil {
+	var response struct {
+		ID string `json:"id"`
+	}
+	if err := p.apiJSON(ctx, cfg, http.MethodPost, messagesEndpoint(p.baseFor(cfg), target), payload, &response); err != nil {
 		return err
 	}
 	if msgID != "" {
 		p.passiveReplies.record(target.chat, msgID)
 	}
+	p.sent.record(target.chat, response.ID, p.now())
 	return nil
 }
 
@@ -541,7 +594,12 @@ func (p *Provider) uploadRichMedia(ctx context.Context, cfg connectors.Config, t
 	endpoint := filesEndpoint(p.baseFor(cfg), target)
 	if mediaURL := strings.TrimSpace(media.URL); mediaURL != "" {
 		if fileType, ok := declaredMediaFileType(media); ok {
-			fileInfo, err := p.uploadMediaByURL(ctx, cfg, endpoint, mediaURL, fileType)
+			// 已知大小时先按官方软/硬限制修正 file_type（超软限制降级为文件）。
+			adjusted, limitErr := applyMediaSizeLimits(fileType, media.Size)
+			if limitErr != nil {
+				return "", limitErr
+			}
+			fileInfo, err := p.uploadMediaByURL(ctx, cfg, endpoint, mediaURL, adjusted)
 			if err == nil && fileInfo != "" {
 				return fileInfo, nil
 			}
@@ -555,6 +613,10 @@ func (p *Provider) uploadRichMedia(ctx context.Context, cfg connectors.Config, t
 		return "", err
 	}
 	fileType := mediaFileType(media, contentType)
+	fileType, err = applyMediaSizeLimits(fileType, int64(len(data)))
+	if err != nil {
+		return "", err
+	}
 	// 大文件走官方分片上传（避免 base64 膨胀与单请求体量限制）；失败回落
 	// 整文件上传（file_data）。
 	if int64(len(data)) > p.chunkedUploadThresholdFor() {
@@ -723,6 +785,48 @@ func mediaFileType(media connectors.Media, contentType string) int {
 	default:
 		return 4
 	}
+}
+
+// 官方富媒体软/硬限制（字节）。
+const (
+	mediaSoftLimitImage = 20 << 20
+	mediaSoftLimitVideo = 30 << 20
+	mediaSoftLimitVoice = 20 << 20
+	mediaSoftLimitFile  = 200 << 20
+	mediaHardLimit      = 200 << 20
+)
+
+// applyMediaSizeLimits 按官方限制修正 file_type 并拒绝超大文件：
+//   - 超过硬限制（200MB）→ 错误；
+//   - 超过软限制（图片/语音 20MB、视频 30MB）→ 降级为 file_type=4（文件）。
+//
+// size<=0 表示未知（不判定，交给平台）。
+func applyMediaSizeLimits(fileType int, size int64) (int, error) {
+	if size <= 0 {
+		return fileType, nil
+	}
+	if size > mediaHardLimit {
+		return 0, fmt.Errorf("qqbot: 媒体超过官方硬限制 200MB（%d 字节）", size)
+	}
+	switch fileType {
+	case 1:
+		if size > mediaSoftLimitImage {
+			return 4, nil
+		}
+	case 2:
+		if size > mediaSoftLimitVideo {
+			return 4, nil
+		}
+	case 3:
+		if size > mediaSoftLimitVoice {
+			return 4, nil
+		}
+	case 4:
+		if size > mediaSoftLimitFile {
+			return 0, fmt.Errorf("qqbot: 文件超过官方硬限制 200MB（%d 字节）", size)
+		}
+	}
+	return fileType, nil
 }
 
 // filesEndpoint 返回媒体上传端点（群 /v2/groups/{id}/files，
@@ -995,11 +1099,22 @@ func (p *Provider) fetchAccessToken(ctx context.Context, base, appID, appSecret 
 		}
 		accessToken := strings.TrimSpace(envelope.AccessToken)
 		if accessToken == "" {
+			// 官方约定：业务错误时 HTTP 仍为 200，错误码在 body.code。
+			// 100001 是限频（可重试），其余是凭据/机器人状态错误（不可重试），
+			// 分开报出便于宿主判断是否刷新凭据。
 			detail := strings.TrimSpace(envelope.Message)
 			if detail == "" {
 				detail = truncate(string(raw), 200)
 			}
-			return "", 0, fmt.Errorf("qqbot: token request failed: %s", truncate(redact(detail, appSecret), 200))
+			detail = truncate(redact(detail, appSecret), 200)
+			if envelope.Code == tokenCodeRateLimited {
+				return "", 0, &tokenBusinessError{
+					code: envelope.Code, message: detail, retryable: true,
+				}
+			}
+			return "", 0, &tokenBusinessError{
+				code: envelope.Code, message: detail,
+			}
 		}
 		ttl := parseExpiresIn(envelope.ExpiresIn)
 		if ttl <= 0 {
@@ -1052,6 +1167,83 @@ type apiError struct {
 	status     string
 	body       string
 	cause      error
+	// code 是官方响应体的业务错误码 err_code（0=成功；HTTP 层失败时为 0）。
+	code int
+}
+
+// 官方异步审核受理码（HTTP 201/202 时返回，属于成功语义）。
+const (
+	errCodePushMessageAudit  = 304023 // 推送消息异步调用成功，等待人工审核
+	errCodeReplyMessageAudit = 304024 // 回复消息异步调用成功，等待人工审核
+)
+
+// isAsyncAccepted 报告该错误码是否为「异步受理成功」。
+func isAsyncAccepted(code int) bool {
+	return code == errCodePushMessageAudit || code == errCodeReplyMessageAudit
+}
+
+// apiErrCode 从响应体提取官方业务错误码（err_code）与 message。
+// 兼容顶层与 data 内两种常见形态；未找到 err_code 时返回 ok=false。
+func apiErrCode(raw []byte) (int, string, bool) {
+	var envelope struct {
+		ErrCode json.RawMessage `json:"err_code"`
+		Message string          `json:"message"`
+		Data    struct {
+			ErrCode json.RawMessage `json:"err_code"`
+			Message string          `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return 0, "", false
+	}
+	code, ok := parseErrCode(envelope.ErrCode)
+	if !ok {
+		code, ok = parseErrCode(envelope.Data.ErrCode)
+		if !ok {
+			return 0, "", false
+		}
+		if envelope.Data.Message != "" {
+			return code, envelope.Data.Message, true
+		}
+	}
+	return code, envelope.Message, true
+}
+
+// parseErrCode 兼容数字与字符串两种 err_code 编码。
+func parseErrCode(raw json.RawMessage) (int, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return 0, false
+	}
+	var value int
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return value, true
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		parsed, err := strconv.Atoi(strings.TrimSpace(text))
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+// tokenCodeRateLimited 是官方令牌接口的业务错误码：请求过于频繁（可重试）。
+const tokenCodeRateLimited = 100001
+
+// tokenBusinessError 是令牌接口的业务错误（HTTP 200 + body.code != 0）。
+// 与 apiError 区分：它不是 HTTP 层失败，错误文本也不含令牌/密钥。
+type tokenBusinessError struct {
+	code      int
+	message   string
+	retryable bool
+}
+
+func (e *tokenBusinessError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("qqbot: token request failed (code=%d): %s", e.code, e.message)
 }
 
 func (e *apiError) Error() string {
@@ -1133,6 +1325,23 @@ func (p *Provider) doJSON(ctx context.Context, method, endpoint, token string, s
 			method: method, endpoint: endpoint,
 			statusCode: response.StatusCode, status: response.Status,
 			body: truncate(redactAll(string(raw), token, secrets...), 300),
+		}
+	}
+	// 官方 API 调用指南：业务失败时响应体含 err_code（成功为 0）。HTTP 200
+	// 也可能是业务失败（尤其 201/202 异步审核场景），必须按 err_code 判定。
+	if code, message, ok := apiErrCode(raw); ok && code != 0 {
+		// 201/202 + 304023/304024 = 官方「异步受理成功，等待人工审核」，
+		// 属于成功语义（消息已受理），不能当失败触发降级重发。
+		if (response.StatusCode == http.StatusCreated || response.StatusCode == http.StatusAccepted) &&
+			isAsyncAccepted(code) {
+			return nil
+		}
+		return &apiError{
+			method: method, endpoint: endpoint,
+			statusCode: response.StatusCode, status: response.Status,
+			body:  truncate(redactAll(fmt.Sprintf("err_code=%d: %s", code, message), token, secrets...), 300),
+			cause: nil,
+			code:  code,
 		}
 	}
 	if out == nil || len(bytes.TrimSpace(raw)) == 0 {

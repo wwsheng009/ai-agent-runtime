@@ -338,7 +338,11 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 	// 共享实现随 S1b 提为 connectors.TurnActivityTracker）。进程级单例：
 	// 即便宿主被意外重复装配，任一实例的镜像都能看到进行中的 IM 回合。
 	turns := aicliConnectorTurnActivity
-	backend := localConnectorBackend{host: host, logf: logf, turns: turns}
+	// 宿主实例身份在 Service 亲和判定、Backend 会话引用回写与 runner 回执三处
+	// 必须同一取值：单点计算后注入，避免各处独立计算漂移（2026-10-17 真机
+	// qq-bot1：Backend 未回填 NodeID 导致绑定被抹空）。
+	hostID := connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID())
+	backend := localConnectorBackend{host: host, logf: logf, turns: turns, hostID: hostID}
 	service := connectors.New(connectors.Deps{
 		Store:   store,
 		Backend: backend,
@@ -347,7 +351,7 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		// `aicli:<mesh-node-id>`（同机多 TUI 各自唯一，P2 NodeID 亲和的判定键）；
 		// mesh 不可用/未入网时退回 `aicli:<pid>`。policy.runtime_owner 准入按
 		// HostKind（connectors.HostMatchesPolicy）匹配，存量裸词配置不受影响。
-		HostID: connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID()),
+		HostID: hostID,
 		// 白名单策略（2026-10-15 调整）：allowed_users 为空 = 不限制（放行所有
 		// 平台用户），非空 = 仅命中清单的用户可对话。此前 aicli 侧 fail-closed
 		//（空白名单跳过启动）会让新连接器既不轮询也无法通过 IM 首条消息拿到
@@ -385,7 +389,7 @@ func StartLocalConnectors(parent context.Context, host *localChatRuntimeHost, co
 		// 回环/同源/写令牌）；这里的路由只挂在同一 mux 上，不额外暴露面。
 		Authorize: func(*http.Request) error { return nil },
 		Logf:      logf,
-		HostID:    connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID()),
+		HostID:    hostID,
 		// runner 接收面（P2 切片 B 后半）：POST /connectors/dispatch 执行后端
 		// （prompt 注入走 ActorRegistry、命令回环走 commandPlane）。
 		Runner: localConnectorRunner{backend: backend},
@@ -551,7 +555,7 @@ func (r localConnectorRunner) DispatchTurn(ctx context.Context, req connectors.D
 	// 回执 Session.NodeID 必须是本 runner 的实例唯一 HostID（不是裸 "aicli"）：
 	// poller 侧 processMessage 用它回写绑定（service.go 回写路径），形态错乱会
 	// 污染绑定账本的下一次路由匹配（2026-10-15 qq-bot1 第三轮复盘）。
-	nodeID := connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID())
+	nodeID := r.backend.localHostID()
 	if req.Command {
 		return r.dispatchCommand(ctx, req, sessionID)
 	}
@@ -631,6 +635,11 @@ type localConnectorBackend struct {
 	// turns 是 IM 来源回合登记器（S1a/S1b 内容镜像的 L3 判据，docs/bots/13 §4.2；
 	// 共享实现 connectors.TurnActivityTracker）。
 	turns *connectors.TurnActivityTracker
+	// hostID 是本宿主实例身份（`aicli:<mesh-node-id>`，与 Service.Deps.HostID
+	// 同一取值）：Handle 返回的 SessionRef 必须携带它——空 NodeID 会把绑定
+	// 归属抹空（2026-10-17 真机 qq-bot1：绑定 NodeID 被逐条消息抹空，下一条
+	// 消息落进假 R2a 接管）。未显式注入（测试直连构造）时回退进程级计算。
+	hostID string
 }
 
 // localConnectorCommandPlane 是 IM 审批/提问命令依赖的 actor 响应入口：
@@ -665,7 +674,66 @@ func (b localConnectorBackend) commandPlane() localConnectorCommandPlane {
 	return localConnectorActorCommands{registry: b.host.ActorRegistry}
 }
 
+// localHostID 返回本宿主实例身份（HostID 全形）。未显式注入（测试直连构造）
+// 时回退进程级身份计算，保证 sessionRef 携带的 NodeID 永不为空——空 NodeID
+// 会把绑定归属抹空（2026-10-17 真机 qq-bot1 复盘）。
+func (b localConnectorBackend) localHostID() string {
+	if id := strings.TrimSpace(b.hostID); id != "" {
+		return id
+	}
+	return connectors.BuildHostID(connectors.HostKindAICLI, aicliHostInstanceID())
+}
+
+// sessionRef 组装带宿主身份的会话引用（Handle 的全部返回路径共用，保证
+// 连接器回写绑定时拿到的 NodeID 与本宿主 Service 的 HostID 一致）。
+func (b localConnectorBackend) sessionRef(sessionID string) connectors.SessionRef {
+	return connectors.SessionRef{NodeID: b.localHostID(), SessionID: sessionID}
+}
+
 func (b localConnectorBackend) Name() string { return "aicli" }
+
+// Backtrack 实现 connectors.BacktrackBackend（/undo）：与 TUI /backtrack
+// 走同一 actor 入口（SessionHub.GetOrCreate → actor.Backtrack）。
+//
+// TurnsBefore 语义：保留最近 N 轮 → 回退到倒数第 N+1 轮。
+func (b localConnectorBackend) Backtrack(ctx context.Context, req connectors.BacktrackRequest) (connectors.BacktrackResult, error) {
+	if b.host == nil || b.host.SessionHub == nil {
+		return connectors.BacktrackResult{}, errors.New("aicli: 本机 chat 运行时未就绪")
+	}
+	sessionID := strings.TrimSpace(req.Session.SessionID)
+	if sessionID == "" {
+		return connectors.BacktrackResult{}, errors.New("aicli: session is not bound")
+	}
+	actor, err := b.host.SessionHub.GetOrCreate(sessionID)
+	if err != nil {
+		return connectors.BacktrackResult{}, err
+	}
+	// 先读当前可见历史，换算 anchor 下标（与 TUI 的 turns 列表同源）。
+	turns, err := actor.ListTurns(ctx)
+	if err != nil {
+		return connectors.BacktrackResult{}, err
+	}
+	index, ok := connectors.ResolveUndoTurnIndex(len(turns), req.TurnsBefore)
+	if !ok {
+		return connectors.BacktrackResult{Handled: false}, nil
+	}
+	anchor := turns[index]
+	result, _, err := actor.Backtrack(ctx, runtimechat.BacktrackRequest{
+		UserTurnIndex: runtimechat.IntPtr(anchor.Index),
+		Mode:          runtimechat.BacktrackModeConversation,
+	})
+	if err != nil {
+		return connectors.BacktrackResult{}, err
+	}
+	if result == nil {
+		return connectors.BacktrackResult{Handled: false}, nil
+	}
+	return connectors.BacktrackResult{
+		Handled:       true,
+		RemovedTurns:  result.RemovedUserTurns,
+		AnchorPreview: result.AnchorPreview,
+	}, nil
+}
 
 // Handle 把一条 IM 消息提交为一次本机 chat turn，并把流式增量与终态回复回吐给
 // 连接器：增量经会话事件总线（assistant_delta）转发给 ReplySink（P1，2026-10-15
@@ -724,16 +792,16 @@ func (b localConnectorBackend) Handle(ctx context.Context, req connectors.Backen
 	// 实例里打开着）。给 IM 可行动的提示，而不是原始 "already owned by ..."。
 	var leaseConflict *runtimechat.LeaseConflictError
 	if errors.As(err, &leaseConflict) {
-		return connectors.BackendResult{Session: connectors.SessionRef{SessionID: sessionID}},
+		return connectors.BackendResult{Session: b.sessionRef(sessionID)},
 			errors.New(localConnectorLeaseConflictText(sessionID, leaseConflict.Lease))
 	}
 	if result == nil {
 		if err == nil {
 			err = errors.New("aicli: empty session result")
 		}
-		return connectors.BackendResult{Session: connectors.SessionRef{SessionID: sessionID}}, err
+		return connectors.BackendResult{Session: b.sessionRef(sessionID)}, err
 	}
-	out := connectors.BackendResult{Session: connectors.SessionRef{SessionID: sessionID}}
+	out := connectors.BackendResult{Session: b.sessionRef(sessionID)}
 	if reply := strings.TrimSpace(result.Output); reply != "" {
 		out.Reply = []connectors.OutboundMessage{{Text: reply}}
 	}
