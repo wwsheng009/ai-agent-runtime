@@ -80,7 +80,7 @@ func TestBuildChatDynamicStatusModelEscHintMatchesConsumer(t *testing.T) {
 	if withoutEsc == nil {
 		t.Fatal("retrying status must produce a dynamic model")
 	}
-	wantWithoutEsc := "◦ Retrying step=1 attempt=2/3 (5s • ctrl+c to stop)"
+	wantWithoutEsc := "◦ Retrying step=1 attempt=2/3 (5s • ctrl+c or /stop)"
 	if plain := style.StatusLineDocument(*withoutEsc, 160).PlainText(); plain != wantWithoutEsc {
 		t.Fatalf("esc-unavailable hint = %q, want %q", plain, wantWithoutEsc)
 	}

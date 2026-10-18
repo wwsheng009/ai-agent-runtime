@@ -64,8 +64,12 @@ func TestUIInteractiveDirectWriterInventory(t *testing.T) {
 // 合计 18 条/21 点位。
 // §4.3（2026-10-09）：processTerminalOutput 默认绑定退役后，**债务清零**；
 // 受认可 17 条/20 点位，合计 17 条/20 点位。
+// R8（2026-10-18，docs/plan/esc-interrupt-entrypoint-audit-20261018.md）：
+// Unix SIGUSR2 的 “[ESC 检测到 - 中断操作]” 直写退役（用户可见反馈统一由
+// 会话级中断决策点渲染，避免与固定 surface 绘制竞争）；受认可降至
+// 16 条/19 点位。
 const (
-	uiSanctionedConsoleWriterCeiling = 20
+	uiSanctionedConsoleWriterCeiling = 19
 	uiWriterMigrationDebtCeiling     = 0
 )
 
@@ -119,8 +123,6 @@ func uiSanctionedConsoleWriterInventory() []uiDirectWriterInventoryEntry {
 		// console/plain 投影链（plan §4.1 A 类）：M2/M3/M4 输出主通道——会话信息、
 		// 欢迎页、助手/系统消息、选择/分隔打印族经这些 printer 落 stdout（产品承诺）。
 		{File: "info.go", Func: "writeInfoDocument", Kind: "os.Std*", Count: 1},
-		// 平台差异：Unix SIGUSR2 模拟 ESC（Windows 生产派发见 keyhandler_windows.go）。
-		{File: "keyhandler_unix.go", Func: "method Start", Kind: "fmt.Print", Count: 1},
 		{File: "message.go", Func: "DisplayAssistantMessage", Kind: "os.Std*", Count: 1},
 		{File: "message.go", Func: "method Print", Kind: "os.Std*", Count: 1},
 		{File: "separator.go", Func: "PrintEmptyLine", Kind: "os.Std*", Count: 1},

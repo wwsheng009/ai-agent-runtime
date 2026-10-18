@@ -744,6 +744,44 @@ func TestHandleChatWebAPIInput_Interrupt(t *testing.T) {
 	session.ResetInterrupt()
 }
 
+// 2026-10-18 入口审计 R6：Web interrupt 与 TUI Esc 共用同一决策点。
+// 第一次 stop 回执 result=started；停止清理在途时的重复 stop 折叠为
+// already_stopping，不再叠加第二次取消（响应契约 status 字段保持不变）。
+func TestHandleChatWebAPIInput_InterruptSharesDecisionWithEscape(t *testing.T) {
+	session := newWebTestSession()
+	withWebTestSession(t, session)
+
+	post := func() map[string]string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, ChatWebAPIInputPath,
+			strings.NewReader(`{"type":"interrupt"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		HandleChatWebAPIInput(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("response invalid: %v", err)
+		}
+		return resp
+	}
+
+	if resp := post(); resp["status"] != "interrupted" || resp["result"] != string(chatInterruptStarted) {
+		t.Fatalf("首次 stop = %v，期望 status=interrupted result=started", resp)
+	}
+
+	// 模拟停止清理仍在途：重复 stop 必须折叠，不叠加取消。
+	inFlight := make(chan struct{})
+	session.setInterruptCleanup(inFlight)
+	if resp := post(); resp["result"] != string(chatInterruptAlreadyStopping) {
+		t.Fatalf("清理在途的重复 stop = %v，期望 result=already_stopping", resp)
+	}
+	close(inFlight)
+	session.ResetInterrupt()
+}
+
 func TestHandleChatWebAPIInput_InterruptNoSession(t *testing.T) {
 	withWebTestSession(t, nil)
 

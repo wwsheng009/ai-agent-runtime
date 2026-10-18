@@ -201,3 +201,73 @@ func TestChatBusyInputEscInterruptPreservesHalfTypedDraft(t *testing.T) {
 		t.Fatalf("下次 capture InitialText = %q cursor = %d，期望 %q/%d", next.InitialText, next.InitialCursor, draft.Text, draft.Cursor)
 	}
 }
+
+// 2026-10-18 入口审计：忙时 capture 的 Esc 必须走会话级统一决策点
+// （handleChatEscapeInterruptRequest），与 KeyHandler/composer 共享“重复 Esc
+// 节流提示 + stalled cleanup 重试”语义；旧实现直调
+// InterruptPreservePendingInput，停止窗口内重复 Esc 完全静默。
+func TestBusyInputEscRoutesThroughSharedDecision(t *testing.T) {
+	session, _ := newEscapeConsumerTestSession(t)
+	release := startChatEscapeInterruptWatcher(session)
+	defer release()
+
+	interruptChatTurnFromBusyInputCancel(session)
+	waitForEscapeInterrupt(t, session)
+
+	// 停止清理仍在途：重复 Esc 只提示一次（统一决策点的节流语义）。
+	inFlight := make(chan struct{})
+	session.setInterruptCleanup(inFlight)
+	interruptChatTurnFromBusyInputCancel(session)
+	deadline := time.After(2 * time.Second)
+	for !session.escapeStoppingNoticeShown.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("忙时重复 Esc 必须经统一决策点给出停止处理中提示")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if session.chatEscapeStoppingNoticeDue() {
+		t.Fatal("同一中断周期内停止提示必须只出现一次")
+	}
+	close(inFlight)
+	session.ResetInterrupt()
+}
+
+// 2026-10-18 入口审计：Unix SIGUSR2 只有一个消费者——KeyHandler 确实会消费
+// （enabled && armed && !suspended）时让位；其余状态保留信号处理器兜底
+// （chat_unix.go）。
+func TestChatEscapeSignalOwnedByKeyHandlerMatrix(t *testing.T) {
+	var nilSession *ChatSession
+	if chatEscapeSignalOwnedByKeyHandler(nilSession) {
+		t.Fatal("nil session must not report KeyHandler ownership")
+	}
+	if chatEscapeSignalOwnedByKeyHandler(&ChatSession{}) {
+		t.Fatal("session without KeyHandler must fall back to the signal bridge")
+	}
+
+	disabled := ui.NewKeyHandler() // 未 Start：enabled=false
+	if chatEscapeSignalOwnedByKeyHandler(&ChatSession{KeyHandler: disabled}) {
+		t.Fatal("disabled KeyHandler must fall back to the signal bridge")
+	}
+
+	kh := ui.NewKeyHandler()
+	kh.Start()
+	t.Cleanup(kh.Stop)
+	session := &ChatSession{KeyHandler: kh}
+	if chatEscapeSignalOwnedByKeyHandler(session) {
+		t.Fatal("disarmed KeyHandler must fall back to the signal bridge")
+	}
+	kh.Arm()
+	if !chatEscapeSignalOwnedByKeyHandler(session) {
+		t.Fatal("armed KeyHandler must own the SIGUSR2 ESC translation")
+	}
+	kh.Suspend()
+	if chatEscapeSignalOwnedByKeyHandler(session) {
+		t.Fatal("suspended KeyHandler (busy capture) must fall back to the signal bridge")
+	}
+	kh.Resume()
+	if !chatEscapeSignalOwnedByKeyHandler(session) {
+		t.Fatal("resumed KeyHandler must own the SIGUSR2 ESC translation again")
+	}
+}

@@ -326,6 +326,7 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 	auditedInlineWrites := map[string]string{
 		"/title":   "next-turn：Phase A 写 Metadata.Title，下一回合读取",
 		"/gateway": "live：connect/disconnect/reconnect 仅改网关隧道状态，不触碰 turn/会话上下文，忙时可即时执行（docs/gateway/12-connection-control.md）",
+		"/stop":    "live：只调用会话级唯一中断决策点（handleChatEscapeInterruptRequest），与 Esc 等价；不写会话上下文、无 Phase B 效应（2026-10-18 入口审计 R3）",
 	}
 
 	for name, entry := range runtimeCommandRegistry {

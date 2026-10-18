@@ -302,6 +302,13 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/retry") {
 		return handleRetryCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/stop") {
+		// /stop 结构化路径在 tryExecuteStructuredChatCommand 中接管（统一渲染
+		// 面与忙时通道都走它）；这里保留 legacy/JSON 出口，保持 handleCommand
+		// 路由表与 catalog 一致。
+		printChatCommandOutput(session, stopCommandText(session))
+		return false
+	}
 	if commandMatches(cmdLower, "/compact") {
 		return handleCompactCommand(session, command)
 	}

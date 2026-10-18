@@ -21,6 +21,12 @@ type chatComposerController struct {
 	skillCompletion *chatSkillMentionCompletionController
 	// mentionRoot 是 @ 路径补全的扫描根；为空时取进程工作目录（测试注入用）。
 	mentionRoot string
+	// cancelDraft parks the draft the editor is about to drop after an ESC that
+	// was routed to the running turn's interrupt (the editor calls onChange("")
+	// when the OnCancel hook claims the key; see onCancel). ReadLine hands the
+	// draft back afterwards so an interrupt never wipes composer text.
+	cancelDraft    ui.LineEditorSnapshot
+	cancelDraftSet bool
 }
 
 type chatBusyComposerCapture struct {
@@ -94,6 +100,7 @@ func (c *chatComposerController) ReadLine() (string, error) {
 	ctx, done := c.session.newComposerReadContext()
 	defer done()
 	line, err := c.session.InputBox.ReadWithHistoryPromptWithHooksContext(ctx, c.prompt, c.hooks())
+	c.restoreCancelledDraft()
 	return line, normalizeChatComposerReadError(c.session, err)
 }
 
@@ -118,6 +125,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		InitialCursor:         c.initial.Cursor,
 		RedrawInitialText:     chatComposerUsesFixedSurface(c.session),
 		OnChange:              c.onChange,
+		OnCancel:              c.onCancel,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
 		OnTerminalControl:     c.onTerminalControl,
@@ -337,6 +345,48 @@ func (c *chatComposerController) onCancelPopup(ui.LineEditorSnapshot) bool {
 		return true
 	}
 	return c.skillCompletion != nil && c.skillCompletion.Cancel()
+}
+
+// onCancel routes Esc to the running turn's interrupt decision while a
+// turn-scoped ESC consumer exists, and keeps the draft.
+//
+// Actor / goal-continuation / supervision-wake turns register a session-level
+// ESC consumer (startChatEscapeInterruptWatcher) but never start the busy input
+// capture, so the main-loop composer remains the live reader of the same
+// console input the KeyHandler polls. Without this hook the editor swallowed the
+// key as a popup cancel / empty-draft backtrack / no-op-with-draft, and the
+// KeyHandler peek usually lost the race against the composer read: the status
+// line promised "esc to interrupt" while the keypress could never reach the
+// interrupt path (2026-10-18, session_20261018191622_xGGs4QZJ: repeated Esc
+// during 429-retrying wake turns did nothing).
+//
+// Returning true claims the key: the editor then calls onChange("") (dropping
+// the semantic draft) and ReadLine returns an empty line, which the main loop
+// treats as "no input". ReadLine restores the parked draft afterwards, so Esc
+// interrupts without discarding what the user typed (same contract as the busy
+// capture's PreserveDraft). Without a live consumer the hook returns false and
+// the previous semantics stay untouched: cancel popup, then backtrack on an
+// empty draft, no-op with a draft.
+func (c *chatComposerController) onCancel(snapshot ui.LineEditorSnapshot) bool {
+	if c == nil || !chatEscapeInterruptConsumerActive(c.session) {
+		return false
+	}
+	c.cancelDraft = snapshot
+	c.cancelDraftSet = true
+	handleChatEscapeInterruptRequest(c.session)
+	return true
+}
+
+// restoreCancelledDraft hands the draft parked by onCancel back to the prompt
+// state so the next composer read re-seeds it as InitialText.
+func (c *chatComposerController) restoreCancelledDraft() {
+	if c == nil || !c.cancelDraftSet {
+		return
+	}
+	c.cancelDraftSet = false
+	if c.session != nil && c.session.Interaction != nil {
+		c.session.Interaction.SetPromptInputSnapshot(c.cancelDraft)
+	}
 }
 
 func (c *chatComposerController) onTranscriptRequested(snapshot ui.LineEditorSnapshot) bool {

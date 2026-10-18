@@ -339,6 +339,11 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/retry") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredRetryCommand(session, command), true, nil
 	}
+	// /stop（2026-10-18 入口审计 R3）：可键入的回合中断，与 Esc 共用唯一决策点；
+	// 任何输出模式都认领，忙时由 runtimeCommandHost 的 inline 通道立即执行。
+	if commandMatches(cmdLower, "/stop") {
+		return executeStructuredStopCommand(session), true, nil
+	}
 	// /hotkeys（批次 3）：键位表是典型分页器内容，统一出口迁入只读副屏；
 	// reload 保留主屏回执（短确认）并在其后打开同一副屏。plain 会话仍走
 	// 同一构建函数的行内文档（与 /help 同策略）；JSON 出口保留在

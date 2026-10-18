@@ -30,7 +30,11 @@ func chatEscapeInterruptAvailable(session *ChatSession) bool {
 //
 // Consumers (see startChatEscapeInterruptWatcher / startBusyQueuedInputCapture):
 //   - the turn-scoped KeyHandler consumer: armed && !suspended;
-//   - the busy queued-input capture: it owns stdin while a turn runs.
+//   - the busy queued-input capture: it owns console stdin while a turn runs.
+//
+// 只认控制台 capture（consoleInputCaptureActive）：Web/远程接管的粘滞标记
+// （webCaptureActive）既不消费 Esc，也不代表有在途回合，不能作为承诺依据
+// （2026-10-18 真机：Web 注入过一行后，空闲状态也会被误判为可中断）。
 func chatInputEscBitsAvailable(session *ChatSession) bool {
 	if session == nil {
 		return false
@@ -38,7 +42,7 @@ func chatInputEscBitsAvailable(session *ChatSession) bool {
 	if chatKeyHandlerConsumesEscape(session.KeyHandler) {
 		return true
 	}
-	return session.InputQueue != nil && session.InputQueue.hasExternalInputCaptureActive()
+	return session.InputQueue != nil && session.InputQueue.consoleInputCaptureActive()
 }
 
 func chatKeyHandlerConsumesEscape(kh *ui.KeyHandler) bool {

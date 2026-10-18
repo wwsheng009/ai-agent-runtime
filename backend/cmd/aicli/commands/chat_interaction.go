@@ -2996,8 +2996,9 @@ func buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(s chatSurfaceS
 		if !escAvailable {
 			// No armed ESC consumer (non-interactive/PTY host, or a turn not
 			// driven by the local sendMessage frame): advertise the interrupt
-			// path that actually exists instead of a dead key.
-			hint = "ctrl+c to stop"
+			// paths that actually exist instead of a dead key. /stop is the
+			// typed equivalent of Esc (2026-10-18 audit R3).
+			hint = "ctrl+c or /stop"
 		}
 		suffix = fmt.Sprintf(" (%s • %s)", formatChatDynamicStatusElapsed(elapsed), hint)
 	}

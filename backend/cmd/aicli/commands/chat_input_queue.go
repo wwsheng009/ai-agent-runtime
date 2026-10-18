@@ -1247,7 +1247,7 @@ func chatInteractiveReadLine(session *ChatSession, ctx context.Context) (string,
 		return line, normalizeChatComposerReadError(session, err)
 	}
 	if pipeConsoleLineEditorSupported() {
-		line, ok, err := readPipeInteractiveLineFn(readCtx, chatInteractiveInputPromptText(session))
+		line, ok, err := readPipeInteractiveLineFn(readCtx, session, chatInteractiveInputPromptText(session))
 		if ok || err != nil {
 			return line, normalizeChatComposerReadError(session, err)
 		}
@@ -1761,6 +1761,23 @@ func (q *chatInputQueue) hasExternalInputCaptureActive() bool {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	return q.externalCaptureActive || q.webCaptureActive
+}
+
+// consoleInputCaptureActive 报告 TUI busy queued-input capture 是否正在持有
+// 控制台输入（externalCaptureActive）。与 hasExternalInputCaptureActive 的区别：
+// 不包含 webCaptureActive —— 后者是"外部 Web/远程客户端接管输入面"的粘滞标记
+// （首次 Web 注入即置真，直到下一次控制台前台回合释放，见
+// beginConsoleForegroundInputCapture），既不消费 Esc，也不代表有在途回合。
+// ESC 可用性与 /stop 的目标判定必须用它（2026-10-18 真机会话
+// session_20261018233755_ZxzOaDFH：Web 注入过一行命令后，空闲 /stop 误报
+// "已请求停止"并真的触发了中断）。
+func (q *chatInputQueue) consoleInputCaptureActive() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.externalCaptureActive
 }
 
 func (q *chatInputQueue) routeLine(item chatQueuedInput) chatInputRouteResult {

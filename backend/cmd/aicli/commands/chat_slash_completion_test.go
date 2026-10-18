@@ -152,9 +152,9 @@ func TestMatchSlashCommandCandidates(t *testing.T) {
 		{
 			name:  "slash s prefix order",
 			query: "/s",
-			// P4 E3 引入 /schedule（930f5415）后目录全集为 10 项；排序沿用
-			// 既有规则：catalog 注册顺序优先，/schedule 排在 /session 之前。
-			want: []string{"/s", "/schedule", "/session", "/sessions", "/status", "/supervision", "/stream", "/skill", "/skills", "/shell"},
+			// 目录全集随命令增补演进（/schedule、/stop）；排序沿用既有规则：
+			// catalog 注册顺序优先，/stop 紧随 /status。
+			want: []string{"/s", "/schedule", "/session", "/sessions", "/status", "/stop", "/supervision", "/stream", "/skill", "/skills", "/shell"},
 		},
 		{
 			name:  "exact alias outranks prefix",
@@ -431,6 +431,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 
 	expectations := []slashRouteExpectation{
 		{canonical: "/help", forms: []string{"/help", "/?"}, acceptsArgs: false, requiresArgs: false},
+		{canonical: "/stop", forms: []string{"/stop"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/exit", forms: []string{"/exit", "/quit", "/q"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/clear", forms: []string{"/clear", "/cls"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/new", forms: []string{"/new"}, acceptsArgs: false, requiresArgs: false},

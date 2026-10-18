@@ -668,3 +668,48 @@ P2b（删除散点 Arm/Suspend，单一写者）进入条件与验证步骤：
 **其它观察**：`/debug/chat/status` 的 `AppState parity` 显示 38 行 legacy/derived 差异
 （scrollback 重放场景），与中断链路无关，未影响本次结论；`Debug Mode: off` 时
 `[input-arbitration]` 日志不可用，P2b 的零分叉检查需以 `--debug` 重跑。
+
+## 13. 后台回合 ESC 空转修复（2026-10-18）
+
+**现场**：`session_20261018191622_xGGs4QZJ`（TUI，`aicli-3x.exe`）在 provider 429
+重试中出现 `◦ Retrying step=1 … attempt=1/11 reason=http_429 … (55s • esc to interrupt)`，
+连续多次按 Esc 无任何反应（无“已中断”、无 Stopping、无 `session_interrupted`）。
+
+**证据（会话日志 `chat-logs/2026/10/18/session_20261018191622_xGGs4QZJ/`）**：
+
+| 时间（UTC） | 回合 | 驱动 | Esc 结果 |
+| --- | --- | --- | --- |
+| 13:48:12 前 | `turn_62612a91` | 前台 `sendMessage`（用户“继续”消息） | ✅ `已中断 - ESC 取消当前操作`、`session_interrupted`、`context canceled` |
+| 13:48:12–13:51:07 | `turn_5b3de39b`（429 重试 174s） | actor/wake（无 busy capture） | ❌ 全程无中断痕迹（补齐项 1785–1788 无 supplement、无 `session_interrupted`、debug 无 `[interrupt]`） |
+| 13:51:48–13:54:50 | `turn_4f51c0e0`（429 重试 182s） | 同上 | ❌ 同上 |
+
+**机制（根因）**：阶段 C 为 actor / goal 续跑 / supervision wake 回合登记了会话级
+ESC 消费者（KeyHandler.Arm → 状态行承诺 `esc to interrupt`），但这些回合**不启动 busy
+input capture**，主循环此时停在 `chatInteractiveReadLine` 的 composer 逐键编辑器上，
+它才是同一份 stdin/console 输入记录的**实录侧**。composer 的 `hooks()` 未接
+`OnCancel`（`chat_composer.go`），编辑器把 Esc 解码为 `editorKeyCancelPopup` 后落到
+“关补全弹层 / 空草稿回溯 / 有草稿无操作”分支；KeyHandler 的 50ms peek 轮询与 composer
+的即时读取竞争同一队列，几乎总是后者先取走按键。二者叠加 = 界面承诺可中断、按键却被
+composer 静默吞掉（§12.1 的 L2 旁路消费者在“编辑器正在读”的真实竞争下失效）。
+
+**修复（统一到同一决策点，谁读谁负责）**：
+- `chat_escape_interrupt.go`：新增 `chatEscapeInterruptConsumerActive(session)`——精确报告
+  当前是否存在活跃的回合级 ESC 消费者（引用计数 >0）。
+- `chat_composer.go`：`chatComposerController.hooks()` 接 `OnCancel`；`onCancel` 在
+  “存在活跃消费者”时认领按键并把中断交给既有唯一决策点
+  `handleChatEscapeInterruptRequest`（含 Stopping 提示、stalled cleanup 重试、重复 Esc
+  反馈等既有语义），否则返回 false 保持原语义（弹层取消 / 空草稿回溯 / 有草稿无操作）。
+  认领后编辑器会 `onChange("")` 清稿，`ReadLine` 收尾时 `restoreCancelledDraft()` 把草稿
+  回填（与忙时 capture 的 `PreserveDraft` 同契约）。这样 KeyHandler 与 composer 谁先取到
+  Esc 都得到同一结果，竞态不再影响可达性。
+- 测试：`chat_composer_escape_test.go` 两条——有消费者时 composer Esc 中断回合且草稿
+  保留到下一次 composer 实例；无消费者时不认领、不中断。
+- 不改动：Stopping/重复 Esc 语义、Ctrl+C 退出窗口语义、overlay 的 Esc 语义。
+
+> 后续：对所有 Esc/中断入口的完整审计（入口清单、单一入口判定、剩余问题 R1–R8）
+> 见 `docs/plan/esc-interrupt-entrypoint-audit-20261018.md`。本次审计另收敛了三处
+> 散落决策：忙时 capture（`chat_busy_input.go` 的 `interruptChatTurnFromBusyInputCancel`
+> 改为委托统一决策点）、Unix SIGUSR2 兜底（`chat_unix.go`，KeyHandler 会消费时
+> 让位，避免同一信号双消费）、PTY 管道行编辑器（`chat_pipe_console_line.go` 新增
+> `OnCancel` 中断钩子）。审计 R1（管道 Esc）/R2（Web 全局 Esc）/R3（`/stop`
+> 可键入入口）已实施，R4~R8 仍待处理。

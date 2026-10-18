@@ -1243,9 +1243,60 @@ export function getUiState() { return uiState; }
 export function clearPendingPrompts() { localPendingPrompts = []; }
 export function getUserScrolledAway() { return userScrolledAway; }
 
+// escOverlayOwnsKey 判定当前是否有浮层/菜单正在接管 Esc：有则全局 Esc=中断让位。
+// 微客户端没有统一的浮层注册中心，这里用两类事实判定：
+//   - 命名约定：所有对话框容器 id 以 "-overlay" 结尾（approval / session-switch /
+//     session-conflict / skill-detail / connectors / git-diff / mcp-tools /
+//     analysis-detail / config-editor / config-import / schedule-form）；
+//   - 状态类/属性：顶栏菜单 .menu-root.open、页签菜单 .tab-menu:not([hidden])、
+//     配置面板 #cfg-bar.cfg-open、配置下拉 popup（可见性用 getClientRects 判定，
+//     兼容 .active 类与内联 display 两种显隐方式）。
+function escOverlayOwnsKey() {
+  if (document.querySelector("#menu-bar .menu-root.open")) { return true; }
+  if (document.querySelector(".tab-menu:not([hidden])")) { return true; }
+  if (document.querySelector("#cfg-bar.cfg-open")) { return true; }
+  var overlays = document.querySelectorAll(
+    '[id$="-overlay"], .cfg-model-popup, .cfg-combo-popup, .connector-combo-popup');
+  for (var i = 0; i < overlays.length; i++) {
+    var el = overlays[i];
+    if (el && typeof el.getClientRects === "function" && el.getClientRects().length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// onGlobalEscapeInterrupt 是 #prompt 之外的 Esc 兜底：焦点在停止/发送等按钮或
+// 页面其它位置时，运行中按 Esc 仍等价于点击「停止」。helpers 顺序即优先级：
+// 快捷键帮助面板 → 浮层/菜单 → 运行中中断。
+function onGlobalEscapeInterrupt(e) {
+  if (!e || e.key !== "Escape") { return; }
+  if (e.defaultPrevented) { return; }
+  if (e.metaKey || e.ctrlKey || e.altKey) { return; }
+  var target = e.target;
+  if (target && target.tagName === "SELECT") { return; }
+  if (closeShortcutHelpIfOpen()) { return; }
+  if (escOverlayOwnsKey()) { return; }
+  if (uiState !== "busy") { return; }
+  e.preventDefault();
+  sendInput({ type: "interrupt" });
+}
+
 export function initChat() {
   // 过滤条件变化 → 整块重建对话区（msg-filter.js 只维护面板状态与条件）
   setFilterChangeHandler(onFilterChange);
+
+  // ---- 全局 Esc = 中断（运行中，任意焦点） ----
+  // 旧实现只把 Escape 绑在 #prompt 上：点击「停止/发送/配置/附件」等按钮后焦点
+  // 移出输入框，Esc 完全无效（2026-10-18 入口审计 R2，
+  // docs/plan/esc-interrupt-entrypoint-audit-20261018.md）。这里补 document 级
+  // bubble 兜底，并让位给浮层/菜单/快捷键面板自己的 Esc 语义：
+  //   - #prompt 处理器先于本监听执行并 preventDefault（defaultPrevented 短路）；
+  //   - 会话切换/冲突弹窗在 document capture 阶段 stopPropagation，事件到不了这里；
+  //   - 其余浮层用统一可见性判定让位（*-overlay / 顶栏菜单 / 页签菜单 / 配置面板）。
+  if (document && typeof document.addEventListener === "function") {
+    document.addEventListener("keydown", onGlobalEscapeInterrupt);
+  }
 
   // 窄屏换短占位提示：桌面文案（含 Shift+Enter）在手机上既无意义，又会在 16px 字号下
   // 折成两行把输入框挤高。跟随视口宽度（旋屏）切换，桌面文案取自 HTML，避免两处漂移。
@@ -1321,6 +1372,9 @@ export function initChat() {
     if (e.key === "Escape") {
       // Esc：若快捷键帮助面板打开则先关闭它
       if (closeShortcutHelpIfOpen()) {
+        // 声明本次 Esc 已被消费：document 级兜底（onGlobalEscapeInterrupt）
+        // 依据 defaultPrevented 短路，避免「关帮助面板」同时触发中断。
+        e.preventDefault();
         return;
       }
       // Esc：执行中触发中断（与「停止」按钮同路径）

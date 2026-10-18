@@ -788,6 +788,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/new` | 创建新会话 |
 | `/session` | 显示当前会话信息 |
 | `/status` | 显示当前会话状态 |
+| `/stop` | 停止当前回合（与 Esc 等价：保留草稿与排队输入；焦点不在输入框 / PTY 管道 / Web 无焦点等 Esc 不可达场景的可键入兜底） |
 | `/debug [on|off|status|display|routing|export|zip]` | 控制会话 debug 模式；`routing` 显示 subagent difficulty routing 摘要，`display` 显示当前会话调试信息，`export/zip` 打包会话日志与 artifacts |
 | `/title <title>`、`/rename <title>` | 更新当前会话标题 |
 | `/history`、`/h` | 显示当前会话历史 |

@@ -64,7 +64,12 @@ func chatInteractiveInputPromptText(session *ChatSession) string {
 // readPipeInteractiveLine 在 stdin/stdout 均为管道或字符设备（即非普通文件
 // 重定向、非真实控制台）时，用 ui 包的逐键编辑器读取一行。返回 ok=false
 // 表示当前环境不适合逐键编辑，调用方应保持原有 buffered 回退读取。
-func readPipeInteractiveLine(ctx context.Context, prompt string) (string, bool, error) {
+//
+// session 用于 Esc 中断：管道模式下编辑器就是 stdin 的实录侧，存在回合级 ESC
+// 消费者（actor / goal 续跑 / supervision wake 回合）时，Esc 必须进入会话统一
+// 中断决策点（2026-10-18 入口审计 R1）；没有消费者时保持编辑器原有语义
+// （空草稿回溯、有草稿无操作）。
+func readPipeInteractiveLine(ctx context.Context, session *ChatSession, prompt string) (string, bool, error) {
 	if !pipeConsoleLineEditorSupported() {
 		return "", false, nil
 	}
@@ -85,7 +90,22 @@ func readPipeInteractiveLine(ctx context.Context, prompt string) (string, bool, 
 	if chatDebugFlagEnabled() {
 		writer = &pipeFrameDiagWriter{w: os.Stdout}
 	}
-	line, err := ui.ReadInteractiveLineContextWithPrompt(ctx, os.Stdin, writer, prompt)
+	// Esc 认领：只有存在回合级 ESC 消费者时才把按键交给统一中断决策点，否则
+	// 返回 false 保持编辑器原语义。认领后编辑器直接返回（不再换行），这里先补
+	// 一个 "\r\n" 终止草稿行——与编辑器 Ctrl+C 的收尾一致，避免残留草稿行把下
+	// 一轮提示符和编辑器的光标假设推错列。管道模式没有可回注的输入队列，草稿
+	// 因此不跨读保留（审计文档 R1 已记录该差异）。
+	hooks := &ui.LineEditorHooks{
+		OnCancel: func(ui.LineEditorSnapshot) bool {
+			if session == nil || !chatEscapeInterruptConsumerActive(session) {
+				return false
+			}
+			fmt.Fprint(writer, "\r\n")
+			handleChatEscapeInterruptRequest(session)
+			return true
+		},
+	}
+	line, err := ui.ReadInteractiveLineContextWithPromptHooks(ctx, os.Stdin, writer, prompt, hooks)
 	if err != nil {
 		return "", false, err
 	}

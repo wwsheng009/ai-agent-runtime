@@ -31,7 +31,7 @@ func TestReadPipeInteractiveLineFromPipe(t *testing.T) {
 	if !pipeConsoleLineEditorSupported() {
 		t.Skipf("stdout 不是管道/字符设备（%v），跳过", os.Stdout)
 	}
-	line, ok, err := readPipeInteractiveLineFn(context.Background(), "")
+	line, ok, err := readPipeInteractiveLineFn(context.Background(), nil, "")
 	if err != nil {
 		t.Fatalf("readPipeInteractiveLineFn: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPipeInteractiveDebugHookReceivesKeys(t *testing.T) {
 	})
 	defer ui.SetInteractiveInputDebugHook(nil)
 
-	line, ok, err := readPipeInteractiveLine(context.Background(), "")
+	line, ok, err := readPipeInteractiveLine(context.Background(), nil, "")
 	if err != nil {
 		t.Fatalf("readPipeInteractiveLine: %v", err)
 	}
@@ -104,5 +104,56 @@ func TestPipeInteractiveDebugHookReceivesKeys(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("debug hook output missing %q; got:\n%s", want, joined)
 		}
+	}
+}
+
+// 2026-10-18 入口审计 R1：管道/PTY 模式存在回合级 ESC 消费者时，裸 Esc 必须
+// 进入会话统一中断决策点，而不是被编辑器当成空草稿回溯（或带草稿时静默吞掉）。
+func TestReadPipeInteractiveLineEscInterruptsActiveTurn(t *testing.T) {
+	origStdin := os.Stdin
+	defer func() { os.Stdin = origStdin }()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+	os.Stdin = r
+	if _, err := w.WriteString("\x1b"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	defer w.Close()
+
+	if !pipeConsoleLineEditorSupported() {
+		t.Skipf("stdout 不是管道/字符设备（%v），跳过", os.Stdout)
+	}
+
+	kh := ui.NewKeyHandler()
+	kh.Start()
+	defer kh.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session := &ChatSession{KeyHandler: kh, cancelCtx: ctx, cancelFunc: cancel}
+	session.Interaction = newTestChatInteractionCoordinator(t, session)
+	stopConsumer := startChatEscapeInterruptWatcher(session)
+	defer stopConsumer()
+
+	line, ok, err := readPipeInteractiveLine(context.Background(), session, "")
+	if err != nil {
+		t.Fatalf("readPipeInteractiveLine: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected pipe editor to take over, got ok=false")
+	}
+	if line != "" {
+		t.Fatalf("Esc 被中断认领后应返回空行，got %q", line)
+	}
+	if !session.IsInterrupted() {
+		t.Fatal("管道模式 Esc 必须中断当前回合")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("管道模式 Esc 必须取消当前回合的 context")
 	}
 }

@@ -232,6 +232,10 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 	},
 
 	// C2 回合、目标与计划
+	// /stop（2026-10-18 入口审计 R3）：可键入的中断入口，与 Esc 共用同一决策点
+	// （handleChatEscapeInterruptRequest）。inline 档 = 忙时立即执行，覆盖
+	// “焦点不在 composer / PTY 管道 / Web 无焦点”等 Esc 不可达场景。
+	"/stop": {Bare: rtBare(rtSpec("/stop", categoryTurnsGoals, runtimeModeInline, runtimeEffectLive))},
 	"/goal": {
 		Bare: rtBare(rtSpec("/goal", categoryTurnsGoals, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{

@@ -171,3 +171,53 @@ func TestInterruptCleanupStalledDetach(t *testing.T) {
 		t.Fatal("closed cleanup signal must never be reported as stalled")
 	}
 }
+
+// 2026-10-18 入口审计 R6：chatInterruptDecision 是 TUI Esc / Web interrupt /
+// /stop 共用的唯一决策。本用例锁定机读结果与“不叠加第二次取消”的语义。
+func TestChatInterruptDecisionSharedAcrossPlanes(t *testing.T) {
+	session, _, interrupts := newEscapeRetryTestSession(t)
+
+	if got := chatInterruptDecision(nil, true); got != chatInterruptNoSession {
+		t.Fatalf("nil session = %q，期望 no_session", got)
+	}
+
+	// 首次请求（preserve）→ started，且真的触发了中断。
+	if got := chatInterruptDecision(session, true); got != chatInterruptStarted {
+		t.Fatalf("首次中断 = %q，期望 started", got)
+	}
+	if !session.IsInterrupted() {
+		t.Fatal("started 必须置中断标记")
+	}
+	if got := atomic.LoadInt32(interrupts); got != 1 {
+		t.Fatalf("首次中断取消次数 = %d，期望 1", got)
+	}
+
+	// 停止清理在途（未超期）→ already_stopping，不叠加第二次取消。
+	inFlight := make(chan struct{})
+	session.setInterruptCleanup(inFlight)
+	if got := chatInterruptDecision(session, true); got != chatInterruptAlreadyStopping {
+		t.Fatalf("清理在途 = %q，期望 already_stopping", got)
+	}
+	if got := atomic.LoadInt32(interrupts); got != 1 {
+		t.Fatalf("already_stopping 不得叠加取消，got %d", got)
+	}
+
+	// 清理完成 → 重新发起真实中断（与 Esc 重试语义一致）。
+	close(inFlight)
+	session.waitForInterruptCleanupWithin(time.Second)
+	if got := chatInterruptDecision(session, true); got != chatInterruptStarted {
+		t.Fatalf("清理完成后 = %q，期望 started", got)
+	}
+	if got := atomic.LoadInt32(interrupts); got != 2 {
+		t.Fatalf("清理完成后取消次数 = %d，期望 2", got)
+	}
+
+	// 非 preserve 路径（Web discard / 远端 stop 语义）同样经同一决策。
+	session.waitForInterruptCleanupWithin(time.Second)
+	if got := chatInterruptDecision(session, false); got != chatInterruptStarted {
+		t.Fatalf("非 preserve 请求 = %q，期望 started", got)
+	}
+	if got := atomic.LoadInt32(interrupts); got != 3 {
+		t.Fatalf("非 preserve 请求取消次数 = %d，期望 3", got)
+	}
+}

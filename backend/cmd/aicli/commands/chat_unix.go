@@ -26,15 +26,21 @@ func setupSignalHandler(session *ChatSession, sigChan chan os.Signal, shouldExit
 			case sig := <-sigChan:
 				if sig == syscall.SIGUSR2 {
 					if session != nil {
-						// KeyHandler also translates SIGUSR2 into an ESC event
-						// while the turn-scoped watcher is armed; keep the
-						// legacy bridge idempotent with that path.
-						if session.IsInterrupted() {
+						// SIGUSR2 有两个潜在消费者：KeyHandler（交互 TTY，armed
+						// 且未 suspend 时经会话级 watcher 进入统一中断决策点）
+						// 与本信号处理器（无 KeyHandler 的宿主兜底，例如
+						// MobaXterm/SSH/管道场景）。只有 KeyHandler 确实会消费
+						// 时才让位，避免一个信号被两条路径各消费一次；其余情况
+						// （未 arm / capture 期间 suspend / 无 KeyHandler）本
+						// 处理器进入同一决策点，语义与 TUI Esc 完全一致
+						// （2026-10-18 入口审计：原先这里直接
+						// InterruptPreservePendingInput，绕过了重复 Esc 提示与
+						// stalled cleanup 重试）。
+						if chatEscapeSignalOwnedByKeyHandler(session) {
 							continue
 						}
-						session.InterruptPreservePendingInput()
+						handleChatEscapeInterruptRequest(session)
 					}
-					renderChatEscapeInterruptNotice(session)
 					continue
 				}
 				state.handleInterruptSignal(session, shouldExit, time.Now())

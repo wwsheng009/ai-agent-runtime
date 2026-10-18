@@ -626,6 +626,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/stop",
+			Usage:       "/stop",
+			Summary:     "停止当前回合（与 Esc 等价：保留草稿与排队输入）",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: false,
+		},
+		{
 			Name:        "/memory",
 			Usage:       "/memory [status|add <text>|list [n]|search <query>]",
 			Summary:     "查看或写入项目级持久记忆（.aicli/memory）",

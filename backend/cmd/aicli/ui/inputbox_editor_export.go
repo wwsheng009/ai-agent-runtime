@@ -12,6 +12,14 @@ func ReadInteractiveLineContextWithPrompt(ctx context.Context, reader io.Reader,
 	return readInteractiveLineWithHooksContext(ctx, reader, writer, prompt, nil, nil, nil, true, defaultPasteBurstHoldFirstRune())
 }
 
+// ReadInteractiveLineContextWithPromptHooks 是 ReadInteractiveLineContextWithPrompt
+// 的 hooks 变体。管道/PTY 宿主用它把 Esc 接到会话级中断决策点（OnCancel 认领），
+// 否则裸 Esc 会被当成「空草稿回溯」、带草稿时被静默吞掉（2026-10-18 入口审计
+// R1）。其余默认设置与无 hooks 包装完全一致。
+func ReadInteractiveLineContextWithPromptHooks(ctx context.Context, reader io.Reader, writer io.Writer, prompt string, hooks *LineEditorHooks) (string, error) {
+	return readInteractiveLineWithHooksContext(ctx, reader, writer, prompt, nil, nil, hooks, true, defaultPasteBurstHoldFirstRune())
+}
+
 // ReadInteractiveLineContext 是 readInteractiveLineWithHooksContext 的导出包装：
 // 以默认设置（无历史、无变更回调、提交时回显、默认粘贴保持首字符）在
 // reader/writer 上读取一行交互输入。适用于 stdin 不是真实控制台、但终端

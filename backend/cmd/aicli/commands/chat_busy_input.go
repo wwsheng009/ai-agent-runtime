@@ -343,15 +343,19 @@ func renderBusyInputRouteFeedback(session *ChatSession, input string, result cha
 	))
 }
 
+// interruptChatTurnFromBusyInputCancel 把忙时输入行的 Esc 交给会话级统一中断
+// 决策点（handleChatEscapeInterruptRequest），与 KeyHandler watcher、composer、
+// 回溯选择器共用同一套语义：重复 Esc 的“停止处理中”提示（P2-10）、stalled
+// cleanup 后的重试（63207abc）、fresh interrupt 的“已中断”提示。
+//
+// 旧实现直接调用 InterruptPreservePendingInput 并自渲染提示，是 2026-10-18
+// 入口审计发现的散落决策之一：忙时重复 Esc 静默、其他路径都有节流提示，行为
+// 不一致。
 func interruptChatTurnFromBusyInputCancel(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	wasInterrupted := session.IsInterrupted()
-	session.InterruptPreservePendingInput()
-	if !wasInterrupted {
-		renderChatEscapeInterruptNotice(session)
-	}
+	handleChatEscapeInterruptRequest(session)
 }
 
 func ensureChatBufferedInputQueue(session *ChatSession) *chatInputQueue {

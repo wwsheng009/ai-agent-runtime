@@ -948,17 +948,21 @@ func HandleChatWebAPIInput(w http.ResponseWriter, r *http.Request) {
 
 // handleWebInterrupt 中断当前正在执行的 turn（§4.2.4 扩展）。
 //
-// 缺省语义与终端运行期 Esc 完全一致（ChatSession.InterruptPreservePendingInput，
-// 保留排队输入）；discardPending=true 时退回旧的停止并清队行为。两种路径都
+// 缺省语义与终端运行期 Esc 完全一致，并共用同一决策点 chatInterruptDecision
+// （2026-10-18 入口审计 R6）：重复 stop 在停止清理在途时折叠为 already_stopping，
+// 不再叠加第二次取消；stalled cleanup 会被剥离后重试（与 TUI Esc 一致）。
+// discardPending=true 时退回旧的停止并清队行为（preserve=false）。两种路径都
 // 幂等，无运行中 turn 时也安全（仅置中断标记并触发一次清理，随后由前端收到
 // 的 session_interrupted/turn_end 事件复位）。
+//
+// 回应契约保持 {"status":"interrupted"} 不变，新增机读字段 "result"
+// （started / already_stopping），供调用方区分「已受理」与「已在停止中」。
 func handleWebInterrupt(w http.ResponseWriter, session *ChatSession, discardPending bool) {
-	if discardPending {
-		session.Interrupt()
-	} else {
-		session.InterruptPreservePendingInput()
-	}
-	writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
+	result := chatInterruptDecision(session, !discardPending)
+	writeWebAPIJSON(w, http.StatusOK, map[string]string{
+		"status": "interrupted",
+		"result": string(result),
+	})
 }
 
 // injectChatWebPrompt 把 Web 注入的 prompt 路由到会话 InputQueue
