@@ -879,6 +879,46 @@ func localConnectorSessionID(connectorID, chat string) string {
 	return id
 }
 
+// Interrupt 实现 connectors.InterruptBackend：IM /stop。
+//
+//   - 绑定会话就是本进程当前展示会话（TUI）时，走与 TUI Esc / 键入 /stop 完全
+//     相同的决策点，本地界面拿到同样的中断提示与状态复位；
+//   - 其它 IM 绑定会话（conn-* actor）走宿主级中断（interruptActiveRuns，含
+//     team/子会话级联），语义与 TUI 中断清理一致。
+func (b localConnectorBackend) Interrupt(ctx context.Context, req connectors.InterruptRequest) (connectors.InterruptResult, error) {
+	if b.host == nil || b.host.ActorRegistry == nil {
+		return connectors.InterruptResult{}, errors.New("aicli: 本机 chat 运行时未就绪（连接器需要运行在 aicli chat 会话内）")
+	}
+	sessionID := strings.TrimSpace(req.Session.SessionID)
+	if sessionID == "" {
+		sessionID = localConnectorSessionID(req.ConnectorID, req.Chat)
+	}
+	if base := b.host.BaseSession; base != nil && base.RuntimeSession != nil &&
+		strings.EqualFold(strings.TrimSpace(base.RuntimeSession.ID), sessionID) {
+		if !chatStopCommandHasTarget(base) {
+			return connectors.InterruptResult{Handled: true}, nil
+		}
+		handleChatEscapeInterruptRequest(base)
+		return connectors.InterruptResult{Handled: true, Stopped: true}, nil
+	}
+	// IM 绑定会话（conn-* actor）：先查在途 run，空闲时如实回“无回合”，
+	// 不惊动 actor（一次 /stop 不该把空闲会话的 actor 停掉）。
+	active := false
+	if hub := b.host.SessionHub; hub != nil {
+		if actor, ok := hub.Get(sessionID); ok && actor != nil {
+			active = actor.RunInFlight()
+		}
+	}
+	if !active {
+		return connectors.InterruptResult{Handled: true}, nil
+	}
+	outcome := b.host.interruptActiveRuns(ctx, sessionID, strings.TrimSpace(req.UserID), "")
+	if !outcome.stopped {
+		return connectors.InterruptResult{}, errors.New("停止清理未在时限内完成；可稍后重试 /stop")
+	}
+	return connectors.InterruptResult{Handled: true, Stopped: true}, nil
+}
+
 // ── 审批/提问命令（FR-7）：/approve /deny /answer 的 IM 闭环 ────────────────
 
 // DecideApproval 处理 /approve 与 /deny：解析可选 request_id → 校验它确实是

@@ -294,6 +294,7 @@
 | `/invite` 命令 | ✅ 走可选接口 `ShareLinkProvider`；不支持该能力的通道明确提示 | 已接（2026:10: 17） |
 | 指令面板自动同步 | ✅ `qqbot/panel_sync.go`：激活时按 `remark` 幂等维护 c2c 面板；内容未变不写；失败只记日志（`command_panel_sync` 可关）。**点击语义（2026-10-17 真机）**：type=command 元素点击发送元素名称（中文 Label），靠命令层中文标签别名闭环进入核心命令（不再落 agent 回合） | 已接（2026:10:  17） |
 | `/undo` 会话回退 | ✅ `connectors/service_undo.go` + `BacktrackBackend`：先回退历史（runtime-server/aicli 走 actor.Backtrack），再尽力撤回最近消息；gateway 明确提示不支持 | 已接（2026:10: 17，conversation 模式） |
+| `/stop` 停止当前回合 | ✅ `connectors/commands_catalog.go` 注册 + `InterruptBackend`：runtime-server 走 `Handler.InterruptSessionTurn`（与 HTTP interrupt 同一实现），aicli 走 TUI Esc / `/stop` 同一决策点（展示会话）或 `interruptActiveRuns`（`conn-*` actor）；无在途回合如实回执；gateway 明确提示不支持 | 已接（2026-10-19） |
 | 已发消息账本（撤回用） | ✅ `qqbot/sent_ledger.go`：按 chat 保留最近 8 条 id+时间；2 分钟窗口校验；撤回成功后移除 | 已接（2026:10: 17） |
 | 被动回复窗口（单聊 60min/4 次、群 5min/5 次） | ✅ `msg_id`+`msg_seq` 递增、失败降级主动 + **次数本地计数**（达到上限预判改走主动，失败不计数；窗口过期仍由平台裁决） | 已接（2026-10-15，切片 5） |
 | Webhook 事件订阅（官方支持 HTTP 回调） | ❌ 仅 WebSocket | P2 → **方案已立项**：[11-qq-webhook-design.md](./11-qq-webhook-design.md)（Ed25519 验签/op13 挑战/D1–D8 决策/W1–W3 切片，待评审） |

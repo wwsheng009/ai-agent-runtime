@@ -568,6 +568,39 @@ type CommandBackend interface {
 	AnswerQuestion(ctx context.Context, req CommandRequest) (CommandResult, error)
 }
 
+// InterruptBackend 是可选能力：把 IM 侧的 /stop 映射到宿主会话的中断入口
+//（语义与 TUI Esc / Web interrupt / `/stop` 一致：取消当前在途回合，保留草稿与
+// 排队输入；重复请求折叠为“已在停止中”）。
+//
+// 未实现该接口的宿主由核心回明确提示，不静默、不把命令落进普通 turn。
+type InterruptBackend interface {
+	Backend
+	// Interrupt 取消绑定会话的当前在途回合。
+	//   - Handled=false：宿主无法定位会话（如尚未绑定）→ 核心回“没有可停止的回合”；
+	//   - Handled=true, Stopped=false：受理但没有在途回合（空闲/已在停止窗口）；
+	//   - Handled=true, Stopped=true：确实发起了一次中断。
+	Interrupt(ctx context.Context, req InterruptRequest) (InterruptResult, error)
+}
+
+// InterruptRequest 是 IM 侧的停止请求（通道无关）。
+type InterruptRequest struct {
+	ConnectorID string
+	Chat        string
+	// Session 是当前 IM 会话绑定的宿主会话（零值表示尚未绑定）。
+	Session   SessionRef
+	UserID    string
+	UserName  string
+	MessageID string
+}
+
+// InterruptResult 是宿主对停止请求的处理结果。
+type InterruptResult struct {
+	Handled bool
+	Stopped bool
+	// Reply 是给 IM 的可选回执文案（空则由核心生成）。
+	Reply string
+}
+
 // BacktrackBackend 是可选能力：把 IM 会话回退到上一轮（对应 TUI /backtrack）。
 //
 // 语义（与 runtimechat.BacktrackRequest 对齐）：

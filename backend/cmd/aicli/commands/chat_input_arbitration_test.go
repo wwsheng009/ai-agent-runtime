@@ -1,9 +1,78 @@
 package commands
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+)
 
 // 阶段 F P0（影子模式）：仲裁器只做登记与快照，不改变按键行为。
 // 优先级：modal > busy capture > ESC 消费者 > 空闲编辑器。
+
+// R4/R5 灰度取样：期望态（仲裁器）与实际 KeyHandler 位的分叉必须可机读
+//（/debug 的 Input Arbitration 节），不依赖 DebugMode 日志。
+func TestChatInputArbitrationDivergenceTelemetry(t *testing.T) {
+	session, kh := newEscapeConsumerTestSession(t)
+	release := startChatEscapeInterruptWatcher(session)
+	defer release()
+	if !kh.Armed() {
+		t.Fatal("precondition: 消费者必须让 KeyHandler 处于 armed")
+	}
+
+	// 人为造成实际位与期望态分叉：期望 suspend=false（无 capture），实际 suspend=true。
+	kh.Suspend()
+	syncChatInputArbitration(session)
+	count, last := chatInputArbitrationDivergenceSnapshot(session)
+	if count != 1 {
+		t.Fatalf("分叉计数 = %d，期望 1", count)
+	}
+	if last.Summary == "" || !strings.Contains(last.Summary, "actual_suspend=true") {
+		t.Fatalf("最近分叉摘要不符：%q", last.Summary)
+	}
+	if last.At.IsZero() {
+		t.Fatal("最近分叉必须带时间戳")
+	}
+
+	// 纠偏后不再累计。
+	kh.Resume()
+	syncChatInputArbitration(session)
+	if count, _ := chatInputArbitrationDivergenceSnapshot(session); count != 1 {
+		t.Fatalf("纠偏后分叉计数 = %d，期望保持 1", count)
+	}
+}
+
+func TestChatDebugDisplayIncludesInputArbitration(t *testing.T) {
+	session, kh := newEscapeConsumerTestSession(t)
+	release := startChatEscapeInterruptWatcher(session)
+	defer release()
+	kh.Suspend()
+	syncChatInputArbitration(session)
+
+	doc := ui.RenderDocumentPlain(buildChatDebugDisplayDocument(session))
+	for _, want := range []string{
+		"Input Arbitration:",
+		"Snapshot:",
+		"Esc Available:",
+		"KeyHandler:",
+		"Divergences:",
+		"Last Divergence:",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("/debug display 缺少 %q\n%s", want, doc)
+		}
+	}
+	countLine := ""
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.Contains(line, "Divergences:") {
+			countLine = line
+			break
+		}
+	}
+	if !strings.Contains(countLine, "1") {
+		t.Fatalf("分叉计数未呈现：%q\n%s", countLine, doc)
+	}
+}
 
 func TestChatInputArbitrationSnapshotMatrix(t *testing.T) {
 	arb := &chatInputArbitrator{}

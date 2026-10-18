@@ -29,6 +29,7 @@ var agentCommands = []AgentCommand{
 	{Name: "answer", Label: "回答", Description: "回答挂起的提问", Usage: "<序号|id> <内容>"},
 	{Name: "invite", Label: "邀请", Description: "生成机器人邀请链接", Usage: "[callback_data]"},
 	{Name: "undo", Label: "回退", Description: "回退最近一轮并撤回消息", Usage: "[轮数]"},
+	{Name: "stop", Label: "停止", Description: "停止当前回合"},
 }
 
 // AgentCommands 返回核心命令表的副本（供通道侧生成面板/菜单）。

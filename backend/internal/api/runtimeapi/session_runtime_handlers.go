@@ -966,19 +966,26 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 	//     且它可能因会话租约被别的宿主持有而报冲突 —— 那种情况下本进程的在途回合
 	//     其实是可停的，不该因为拿不到 actor 就 503/409 拒掉停止请求。
 	if commandType == "interrupt" {
-		result := h.getActiveTurnRegistry().cancel(sessionID, strings.TrimSpace(req.TurnID), activeTurnCancelSourceUserInterrupt)
-		switch result.Reason {
-		case activeTurnCancelReasonTurnMismatch:
+		result, channel, failure, err := h.interruptSessionTurnResult(r.Context(), sessionID, strings.TrimSpace(req.TurnID))
+		switch failure {
+		case sessionTurnInterruptMismatch:
 			// 迟到的 stop 打到新回合上是最危险的误伤：拒绝，并回带当前在途回合，
 			// 让调用方自行决定是否重发（不要静默取消一个它没打算取消的回合）。
 			h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed,
 				fmt.Sprintf("turn_id does not match the active turn (%s)", result.Turn.TurnID)))
 			return
-		case activeTurnCancelReasonCancelled, activeTurnCancelReasonAlreadyCancelled:
-			h.writeJSON(w, http.StatusOK, sessionTurnInterruptPayload(result, sessionTurnInterruptChannelActiveTurn))
+		case sessionTurnInterruptHubUnavailable:
+			h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "session hub not configured"))
+			return
+		case sessionTurnInterruptOther:
+			if h.writeSessionLeaseConflict(w, err) {
+				return
+			}
+			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		// no_active_turn / not_cancelable → 落回下面的 durable actor 路径。
+		h.writeJSON(w, http.StatusOK, sessionTurnInterruptPayload(result, channel))
+		return
 	}
 
 	// Batch 12：`set_profile` 不经过 actor —— 它写会话身份并驱逐空闲 actor，由
@@ -1346,6 +1353,88 @@ const (
 	sessionTurnInterruptChannelActiveTurn   = "active_turn"
 	sessionTurnInterruptChannelSessionActor = "session_actor"
 )
+
+// ErrSessionTurnMismatch 表示请求携带的 turn_id 与当前在途回合不一致（迟到 stop）。
+// HTTP 命令入口映射为 409；连接器宿主（IM /stop）不携带 turn_id，正常不会遇到。
+// 失败分类用 sessionTurnInterruptFailure 枚举承载（内部 errors 包按 ErrorCode
+// 判等，不适合做哨兵值）。
+type sessionTurnInterruptFailure int
+
+const (
+	sessionTurnInterruptOK sessionTurnInterruptFailure = iota
+	sessionTurnInterruptMismatch
+	sessionTurnInterruptHubUnavailable
+	sessionTurnInterruptOther
+)
+
+// SessionTurnInterruptOutcome 是 InterruptSessionTurn 的机读投影（连接器宿主用）。
+type SessionTurnInterruptOutcome struct {
+	// Cancelled 表示本次确实触发了取消。
+	Cancelled bool
+	// Reason: cancelled | already_cancelled | no_active_turn | not_cancelable | turn_mismatch。
+	Reason string
+	// Channel: active_turn（进程内注册表）| session_actor（durable actor 回退）。
+	Channel string
+}
+
+// interruptSessionTurnResult 是 interrupt 命令的共享实现（HTTP 命令入口与连接器
+// 宿主 /stop 共用），返回内部结果与通道供 HTTP 契约复用，保证两个平面语义一致：
+//   - 先作用在「本进程在途回合」（activeTurnRegistry）：web 直连/detached 回合
+//     只登记在注册表，先查它才能取消到真回合；
+//   - 未命中时回落到 durable actor（不把「本来就空闲」谎报成「已停止」）；
+//   - turn_id 非空且不匹配 → mismatch + 当前回合快照，调用方必须拒绝。
+func (h *Handler) interruptSessionTurnResult(ctx context.Context, sessionID, turnID string) (activeTurnCancelResult, string, sessionTurnInterruptFailure, error) {
+	sessionID = chat.NormalizeSessionID(sessionID)
+	if sessionID == "" {
+		return activeTurnCancelResult{}, "", sessionTurnInterruptOther,
+			errors.New(errors.ErrValidationFailed, "session id is required")
+	}
+	result := h.getActiveTurnRegistry().cancel(sessionID, strings.TrimSpace(turnID), activeTurnCancelSourceUserInterrupt)
+	switch result.Reason {
+	case activeTurnCancelReasonTurnMismatch:
+		return result, "", sessionTurnInterruptMismatch, nil
+	case activeTurnCancelReasonCancelled, activeTurnCancelReasonAlreadyCancelled:
+		return result, sessionTurnInterruptChannelActiveTurn, sessionTurnInterruptOK, nil
+	}
+	// no_active_turn / not_cancelable → durable actor 路径。
+	hub := h.getSessionHub()
+	if hub == nil {
+		return result, "", sessionTurnInterruptHubUnavailable, nil
+	}
+	actor, err := hub.GetOrCreate(sessionID)
+	if err != nil {
+		return result, "", sessionTurnInterruptOther, err
+	}
+	cancelled := sessionActorRunActive(actor)
+	if err := actor.Interrupt(ctx); err != nil {
+		return result, "", sessionTurnInterruptOther, err
+	}
+	reason := activeTurnCancelReasonNoActiveTurn
+	if cancelled {
+		reason = activeTurnCancelReasonCancelled
+	}
+	return activeTurnCancelResult{Cancelled: cancelled, Reason: reason}, sessionTurnInterruptChannelSessionActor, sessionTurnInterruptOK, nil
+}
+
+// InterruptSessionTurn 让连接器宿主（IM /stop）复用与 HTTP interrupt 命令完全相同的
+// 取消语义（进程内注册表 → durable actor 回退）。turn_mismatch 时返回校验错误。
+func (h *Handler) InterruptSessionTurn(ctx context.Context, sessionID, turnID string) (SessionTurnInterruptOutcome, error) {
+	result, channel, failure, err := h.interruptSessionTurnResult(ctx, sessionID, turnID)
+	outcome := SessionTurnInterruptOutcome{
+		Cancelled: result.Cancelled,
+		Reason:    string(result.Reason),
+		Channel:   channel,
+	}
+	switch failure {
+	case sessionTurnInterruptOK:
+		return outcome, nil
+	case sessionTurnInterruptMismatch:
+		return outcome, errors.Newf(errors.ErrValidationFailed,
+			"turn_id does not match the active turn (%s)", result.Turn.TurnID)
+	default:
+		return SessionTurnInterruptOutcome{}, err
+	}
+}
 
 // sessionTurnInterruptPayload 是 interrupt 命令的统一响应（建议 3 契约）。
 //

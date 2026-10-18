@@ -239,6 +239,7 @@ runtime-server 与 aicli 已完成命令闭环，runtime-server 另完成注意�
   | `/approve [request_id]` | 批准挂起的审批 | 转 `CommandBackend.DecideApproval`（`Command=approve`）；无参数 = “当前挂起项”，由宿主解释 |
   | `/deny [request_id]` | 拒绝挂起的审批 | 同上（`Command=deny`） |
   | `/answer <序号\|request_id> <内容>` | 回答挂起的提问 | 转 `CommandBackend.AnswerQuestion`；`Args[0]` 为目标、其余为内容分词，`Text` 保留原文；无参数 = 当前挂起的提问 |
+  | `/stop` | 停止当前回合（与 TUI Esc / Web interrupt / `/stop` 同语义：保留草稿与排队输入） | 转 `InterruptBackend.Interrupt`；`Handled=true, Stopped=false` = 无在途回合（回“没有在途回合可停止”），未实现该能力的宿主回“未接入停止命令” |
 
 - `CommandBackend`（`types.go`）是 `Backend` 的**可选能力接口**：宿主实现后上述命令才
   闭环。核心只解析命令名/参数、补齐当前绑定会话（`CommandRequest.Session`），
@@ -259,8 +260,8 @@ runtime-server 与 aicli 已完成命令闭环，runtime-server 另完成注意�
 
   | 宿主 | 命令闭环（FR-7） | 注意力出站（FR-8） |
   |------|------------------|--------------------|
-  | runtime-server | ✅ `cmd/runtime-server/connector_bootstrap.go` + `internal/api/runtimeapi/connector_host.go`：`/approve [request_id]`、`/deny [request_id]` 先读 durable runtime state（与 `GET /sessions/{id}/runtime` 同源）解析当前挂起审批，再经 hub → `actor.ApproveToolWithDecision`（与 REST `approve_tool` 同一路径，`request_id` 缺省=当前挂起项、不匹配=不触碰 actor）；`/answer <1\|question_id> <内容>` → `actor.AnswerQuestion`（与 REST `answer_question` 同一路径，序号 1=当前挂起提问）；无绑定会话/无挂起项/目标不匹配 → `Handled=false` + 明确文案（不报错、不落普通 turn） | ✅ 订阅 `approval_requested`/`question_asked`/`agent.turn.finished`（与 `gateway_attention.go` 同一事件源），映射 `AttentionNotice` → `Service.NotifyAttention`；进程内事件级去重（request/question/turn id，缺失回落事件时间戳）+ 有界异步队列（不阻塞事件总线发布方，队列满丢弃记日志）；订阅随宿主 ctx（close）退订；§6.12 托管挂起的 turn.finished 按 waiting 文案出站（与 gateway 状态投影同口径） |
-  | aicli | ✅ `cmd/aicli/commands/connector_host.go`：同一参数解释；审批走 `localActorRegistry.ResolveApproval`（`toolbroker.ResolveAgentApprovalArgs`，与 Web/TUI 同一 actor 入口），回答走新增 `ConnectorAnswerQuestion`（与 ResolveApproval 同源解析目标会话后 `actor.AnswerQuestion`）；无挂起项/目标不匹配 → `Handled=false` + 文案 | ◻ 待接：chat 事件 → `NotifyAttention`（可复用 runtime-server 的映射/去重样板） |
+  | runtime-server | ✅ `cmd/runtime-server/connector_bootstrap.go` + `internal/api/runtimeapi/connector_host.go`：`/approve [request_id]`、`/deny [request_id]` 先读 durable runtime state（与 `GET /sessions/{id}/runtime` 同源）解析当前挂起审批，再经 hub → `actor.ApproveToolWithDecision`（与 REST `approve_tool` 同一路径，`request_id` 缺省=当前挂起项、不匹配=不触碰 actor）；`/answer <1\|question_id> <内容>` → `actor.AnswerQuestion`（与 REST `answer_question` 同一路径，序号 1=当前挂起提问）；无绑定会话/无挂起项/目标不匹配 → `Handled=false` + 明确文案（不报错、不落普通 turn）；`/stop` → `InterruptSessionTurn`（与 HTTP `runtime/commands {"type":"interrupt"}` **同一实现**：active-turn 注册表 → durable actor 回退） | ✅ 订阅 `approval_requested`/`question_asked`/`agent.turn.finished`（与 `gateway_attention.go` 同一事件源），映射 `AttentionNotice` → `Service.NotifyAttention`；进程内事件级去重（request/question/turn id，缺失回落事件时间戳）+ 有界异步队列（不阻塞事件总线发布方，队列满丢弃记日志）；订阅随宿主 ctx（close）退订；§6.12 托管挂起的 turn.finished 按 waiting 文案出站（与 gateway 状态投影同口径） |
+  | aicli | ✅ `cmd/aicli/commands/connector_host.go`：同一参数解释；审批走 `localActorRegistry.ResolveApproval`（`toolbroker.ResolveAgentApprovalArgs`，与 Web/TUI 同一 actor 入口），回答走新增 `ConnectorAnswerQuestion`（与 ResolveApproval 同源解析目标会话后 `actor.AnswerQuestion`）；无挂起项/目标不匹配 → `Handled=false` + 文案；`/stop`：绑定会话 = 本进程展示会话时走 TUI Esc / `/stop` 同一决策点（`handleChatEscapeInterruptRequest`），其它 `conn-*` actor 走 `interruptActiveRuns`（含子会话级联） | ◻ 待接：chat 事件 → `NotifyAttention`（可复用 runtime-server 的映射/去重样板） |
   | gateway | ◻ 待接：`gateway_node` Backend 经隧道把命令转给节点会话（与入站 `submit_prompt` 同链路，节点侧需新增命令转发） | ◻ 待接：把 gateway 现有 attention 差分（`push.go`）接 `NotifyAttention`，与 pushNotifier 共用去重键 |
 
   > 去重边界：runtime-server 的出站去重是**进程内、事件级**的（保证同一 event 不推两次）；

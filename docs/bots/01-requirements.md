@@ -50,7 +50,7 @@
 | FR-3 | 入站消息归一 | 统一 `InboundMessage`（文本/媒体/来源/会话键），去重（消息 ID 幂等账本） |
 | FR-4 | 会话绑定 | IM 会话 ↔ 本机 agent 会话；默认「自动建会话」，可指定已有 session / 节点 |
 | FR-5 | 出站回复 | 文本 + 媒体；按通道能力选择 流式编辑 / 追加 / 一次性；失败重试与降级 |
-| FR-6 | 命令 | 通用：`/new`、`/threads`、`/rename`、`/archive`、`/help`；审批：`/approve`、`/deny`、`/answer <n>` |
+| FR-6 | 命令 | 通用：`/new`、`/threads`、`/rename`、`/archive`、`/help`；审批：`/approve`、`/deny`、`/answer <n>`；控制：`/stop`（停止当前回合，与 TUI Esc 同语义） |
 | FR-7 | 审批与提问往返 | 订阅 `approval_requested` / `question_asked` → 发 IM；IM 回复关联 request_id 回注宿主 |
 | FR-8 | 注意力事件出站 | 复用 attention 语义，把 completion/approval/question/error 推给 IM（第三条通道，与 Web Push/ntfy 并列） |
 | FR-9 | 媒体 | 入站下载/转存与出站上传；语音/视频转码、markdown 清洗按通道降级 |

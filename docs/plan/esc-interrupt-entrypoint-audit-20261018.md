@@ -1,7 +1,7 @@
 # ESC / 中断入口审计与单一入口梳理（2026-10-18）
 
 - 日期：2026-10-18
-- 状态：**审计完成；TUI 键位平面已收敛到单一决策点；R1/R2/R3/R5/R6/R8/R9/R10 已实施并经真机验证（§6.1）**；R7 已核查（runtime-server/ACP/headless 均有非 Esc 入口，无缺口）；R11（IM 连接器无停止命令）为记录项。剩余 R4（需真实终端取样）与 R5 残余（非副屏窗口的过程性竞态，待阶段 F P2b 灰度）。
+- 状态：**审计完成；TUI 键位平面已收敛到单一决策点；R1/R2/R3/R5/R6/R8/R9/R10 已实施并经真机验证（§6.1）；R11（IM `/stop`）已实施（2026-10-19）**；R7 已核查（runtime-server/ACP/headless 均有非 Esc 入口，无缺口）。剩余 R4（需真实终端取样）与 R5 残余（非副屏窗口的过程性竞态，待阶段 F P2b 灰度）。
 - 关联：
   - `docs/plan/esc-interrupt-priority-and-loop-robustness-plan-20260918.md`（阶段 A–F 方案与实施记录；本审计是其 §13 的延续）
   - `docs/plan/runtime-observability-supervision-http-api-plan.md`（runtime commands / active turn 注册表的 HTTP 契约）
@@ -100,14 +100,6 @@
 - 修复：屏幕租约是全框架唯一咽喉（`openChatScreen`），在那里登记 L0 输入独占——`beginChatScreenInputOwnership`：仲裁器登记 modal 层（EscAvailable=false，承诺变诚实）+ KeyHandler 暂时 `Disarm`；关闭后**只有仍存在回合级 ESC 消费者**时才重新 `Arm`（消费者可能在副屏存续期间结束，绝不留下无人消费的 armed 状态）。回归：`chat_screen_input_ownership_test.go`（两幕：关屏后重新 Arm / 消费者已结束不 Arm）。
 - 残余（保留）：KeyHandler 与 composer 在**非副屏**窗口的 peek/consume 交错仍是结果一致的过程性竞态（正文修复已消除其影响）；阶段 F P2b 单一写者灰度后可进一步收敛为单读者。
 
-### R7（P3）非交互/无 UI 宿主无 Esc 语义 —— ✅ 已核查（2026-10-19，无需修复）
-- 核查结论：runtime-server 有 HTTP `interrupt`（`session_runtime_handlers.go:968`，含 active-turn 注册表与 turn_mismatch 409）；ACP 有 `session/cancel` 协议入口（`agent_stdio.go`）；headless `exec` 走进程信号；TUI 转发远端有 `InterruptTurn`（`chat_runtime_server.go:574+`）。均**不依赖 Esc**，无代码缺口。
-- 新观察 **R11（记录，可选）**：IM 连接器（connectors）核心命令只有 help/new/status/approve/deny/answer 等，**没有停止命令**，且 `connectors.Backend` 接口无中断能力——IM 用户无法停止在途回合。若要补齐需新增 Backend 能力 + `/stop` 核心命令（复用 runtime API interrupt），属新功能而非本轮缺口修复。
-
-### R8（P3）Unix SIGUSR2 的 KeyHandler 打印与新提示重复 —— ✅ 已修复（2026-10-18）
-- 修复：删除 `ui/keyhandler_unix.go` 的 `fmt.Println("[ESC 检测到 - 中断操作]")` 直写与 `fmt` 导入；用户可见反馈统一由决策点渲染（避免与固定 surface 绘制竞争）。
-- 门禁同步：`ui/writer_inventory_test.go` 受认可写入基线按“实现退役时删除条目”规则下调（17 条/20 点位 → 16 条/19 点位，ceiling 20→19）。
-
 ### R6（P3）Web/HTTP interrupt 反馈语义与 TUI Esc 不一致 —— ✅ 已修复（2026-10-18）
 - 事实（修复前）：`handleWebInterrupt` 直呼 `interrupt`，没有停止窗口折叠、也没有 stalled-cleanup 重试。
 - 修复：抽出会话级唯一决策 `chatInterruptDecision(session, preserve)`（返回 `started` / `already_stopping` / `no_session`，`chat_escape_interrupt.go`）；TUI Esc（`handleChatEscapeInterruptRequest`）、Web/HTTP interrupt、`/stop`、忙时 capture 全部共用它，渲染仍由各平面自理（TUI 提示不变；Web 保持静默 + 状态复位）。`handleWebInterrupt` 响应契约 `{"status":"interrupted"}` 不变，新增机读字段 `"result"`。
@@ -115,7 +107,7 @@
 
 ### R7（P3）非交互/无 UI 宿主无 Esc 语义 —— ✅ 已核查（2026-10-19，无需修复）
 - 核查结论：runtime-server 有 HTTP `interrupt`（`session_runtime_handlers.go:968`，含 active-turn 注册表与 turn_mismatch 409）；ACP 有 `session/cancel` 协议入口（`agent_stdio.go`）；headless `exec` 走进程信号；TUI 转发远端有 `InterruptTurn`（`chat_runtime_server.go:574+`）。均**不依赖 Esc**，无代码缺口。
-- 新观察 **R11（记录，可选）**：IM 连接器（connectors）核心命令只有 help/new/status/approve/deny/answer 等，**没有停止命令**，且 `connectors.Backend` 接口无中断能力——IM 用户无法停止在途回合。若要补齐需新增 Backend 能力 + `/stop` 核心命令（复用 runtime API interrupt），属新功能而非本轮缺口修复。
+- **R11（已实施，2026-10-19）**：IM 连接器新增 `/stop` 停止命令——核心 `InterruptBackend` 可选能力（`internal/connectors/types.go`）+ 命令表注册（`commands_catalog.go`，帮助/面板/识别同源）+ `dispatchInterrupt` 回执语义（未实现宿主明确提示；`Stopped=false` 如实回“没有在途回合”）。宿主接线：runtime-server 复用 `Handler.InterruptSessionTurn`（从 HTTP interrupt 用例抽出的同一实现：active-turn 注册表 → durable actor 回退）；aicli 展示会话走 TUI Esc / `/stop` 同一决策点、`conn-*` actor 走 `interruptActiveRuns`（含级联）；gateway 未实现 → 核心明确提示（与 /undo 同口径）。回归：`internal/connectors/service_stop_test.go`、`cmd/runtime-server/connector_stop_test.go`、`cmd/aicli/commands/connector_stop_host_test.go`。
 
 ### R8（P3）Unix SIGUSR2 的 KeyHandler 打印与新提示重复 —— ✅ 已修复（2026-10-18）
 - 修复：删除 `ui/keyhandler_unix.go` 的 `fmt.Println("[ESC 检测到 - 中断操作]")` 直写与 `fmt` 导入；用户可见反馈统一由决策点渲染（避免与固定 surface 绘制竞争）。
@@ -143,6 +135,8 @@
 | Go 单测 | Web 粘滞标记不误报（R9） | 已有（`TestStopCommandIgnoresStaleWebCaptureLatch`） |
 | Go 单测 | 副屏期 KeyHandler 让位/复 Arm（R5） | 已有（`chat_screen_input_ownership_test.go`） |
 | Go 单测 | Web 键入 `/stop` 忙碌期直通 / 空闲入队（R10） | 已有（`TestHandleChatWebAPIInput_StopPromptInterruptsRunningTurn` 等） |
+| Go 单测 | IM `/stop`（R11）：核心路由/回执、runtime-server、aicli 宿主 | 已有（`service_stop_test.go`、`connector_stop_test.go`、`connector_stop_host_test.go`） |
+| Go 单测 | 输入仲裁分叉遥测（R4/R5 取样） | 已有（`TestChatInputArbitrationDivergenceTelemetry`、`TestChatDebugDisplayIncludesInputArbitration`） |
 | 真机 | 运行中状态行诚实 + Web 中断取消运行中 shell + 重复中断折叠 + 停止摘要 | ✅ 2026-10-18（§6.1） |
 | 真机 | 空闲 `/stop` 不误报（R9 修复复验） | ✅ 2026-10-18 23:53 构建复验（§6.1） |
 | 真机 | TUI 物理 Esc / 键入 `/stop` 打断运行中回合 | ✅ 2026-10-19 01:05 构建复验（§6.1 #5/#6） |

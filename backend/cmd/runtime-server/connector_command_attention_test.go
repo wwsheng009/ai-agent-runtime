@@ -55,6 +55,14 @@ type fakeRuntimeConnectorHost struct {
 	turns           []runtimechat.UserTurn
 	backtrackResult *runtimechat.BacktrackResult
 	backtrackCalls  int
+	// /stop 面：interrupt 调用记录与结果注入（缺省“无在途回合”）。
+	interruptCalls   []runtimeConnectorInterruptCall
+	interruptOutcome *runtimeapi.SessionTurnInterruptOutcome
+}
+
+type runtimeConnectorInterruptCall struct {
+	sessionID string
+	turnID    string
 }
 
 func (h *fakeRuntimeConnectorHost) SubmitConnectorPrompt(_ context.Context, req runtimeapi.ConnectorTurnRequest) (*runtimeapi.ConnectorTurnResult, error) {
@@ -131,6 +139,17 @@ func (h *fakeRuntimeConnectorHost) ConnectorListUserTurns(_ context.Context, _ s
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]runtimechat.UserTurn(nil), h.turns...), nil
+}
+
+// InterruptSessionTurn：/stop 面（测试默认“无在途回合”，需要时由用例覆盖）。
+func (h *fakeRuntimeConnectorHost) InterruptSessionTurn(_ context.Context, sessionID, turnID string) (runtimeapi.SessionTurnInterruptOutcome, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.interruptCalls = append(h.interruptCalls, runtimeConnectorInterruptCall{sessionID: sessionID, turnID: turnID})
+	if h.interruptOutcome != nil {
+		return *h.interruptOutcome, nil
+	}
+	return runtimeapi.SessionTurnInterruptOutcome{Reason: "no_active_turn", Channel: "session_actor"}, nil
 }
 
 func (h *fakeRuntimeConnectorHost) decideCallsSnapshot() []runtimeConnectorDecideCall {

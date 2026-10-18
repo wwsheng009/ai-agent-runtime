@@ -226,6 +226,11 @@ type ChatSession struct {
 	escapeConsumer            *chatEscapeConsumerState             // 共享 ESC 消费者：按引用计数持有 Arm/goroutine
 	inputArbitrationMu        sync.Mutex                           // 保护阶段 F 影子仲裁器（§12.3 P0）
 	inputArbitration          *chatInputArbitrator                 // 统一输入仲裁器：P0 只观测不改变行为
+	// 输入仲裁遥测（R4/R5 灰度取样的机读依据）：期望态 vs KeyHandler 实际位的
+	// 分叉在任何模式下都累计，DebugMode 关闭时也能从 /debug 读数。
+	inputArbitrationTelemetryMu sync.Mutex
+	inputArbitrationDivergences int64
+	inputArbitrationLastDiverge chatInputArbitrationDivergence
 	busyInteractiveScreen     atomic.Int32                         // 忙时副屏交互窗口计数（>0 = 忙时 S 档副屏/prompt 通道内；语义见 chat_busy_screen_exec.go）
 	deferredSlashMu           sync.Mutex                           // 保护挂起态暂存的 slash 命令队列
 	deferredSlashCommands     []string                             // 挂起态 deferred 档 slash 命令，会话回到 Ready 后由主循环取出执行

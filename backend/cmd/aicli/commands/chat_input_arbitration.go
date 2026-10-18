@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // 阶段 F（方案 §12.3 P0，影子模式）：统一输入仲裁器的第一层落地。
@@ -159,6 +160,36 @@ func chatInputArbitrationDesiredKeyHandlerState(snapshot chatInputArbitrationSna
 	}
 }
 
+// chatInputArbitrationDivergence 记录最近一次“期望态 ≠ 实际位”的快照摘要，
+// 供 /debug 展示（R4/R5 灰度取样的机读依据）。
+type chatInputArbitrationDivergence struct {
+	Summary string
+	At      time.Time
+}
+
+func recordChatInputArbitrationDivergence(session *ChatSession, summary string) {
+	if session == nil {
+		return
+	}
+	session.inputArbitrationTelemetryMu.Lock()
+	session.inputArbitrationDivergences++
+	if len(session.inputArbitrationLastDiverge.Summary) == 0 || session.inputArbitrationDivergences%32 == 0 {
+		// 首条必存；之后每 32 条刷新一次摘要，避免高频分叉场景下写入放大，
+		// 同时保证“最后一次”类查询仍有相对新鲜的数据。
+		session.inputArbitrationLastDiverge = chatInputArbitrationDivergence{Summary: summary, At: time.Now()}
+	}
+	session.inputArbitrationTelemetryMu.Unlock()
+}
+
+func chatInputArbitrationDivergenceSnapshot(session *ChatSession) (int64, chatInputArbitrationDivergence) {
+	if session == nil {
+		return 0, chatInputArbitrationDivergence{}
+	}
+	session.inputArbitrationTelemetryMu.Lock()
+	defer session.inputArbitrationTelemetryMu.Unlock()
+	return session.inputArbitrationDivergences, session.inputArbitrationLastDiverge
+}
+
 // syncChatInputArbitration compares the desired single-writer state with the
 // actual KeyHandler bits. Divergence is always logged in DebugMode; it is only
 // corrected when the gray switch is enabled. Scattered Arm/Suspend calls are
@@ -179,20 +210,22 @@ func syncChatInputArbitration(session *ChatSession) {
 		return
 	}
 	enforced := chatInputArbitrationEnforced()
+	summary := fmt.Sprintf(
+		"desired_arm=%t desired_suspend=%t actual_arm=%t actual_suspend=%t enforced=%t owner=%s esc=%d capture=%d modal=%d",
+		desired.Arm,
+		desired.Suspend,
+		actual.Arm,
+		actual.Suspend,
+		enforced,
+		snapshot.Owner.String(),
+		snapshot.ESCConsumers,
+		snapshot.CaptureDepth,
+		snapshot.ModalDepth,
+	)
 	if chatSessionDebugMode(session) {
-		writeSessionDebugInfo(session, fmt.Sprintf(
-			"[input-arbitration] divergence desired_arm=%t desired_suspend=%t actual_arm=%t actual_suspend=%t enforced=%t owner=%s esc=%d capture=%d modal=%d",
-			desired.Arm,
-			desired.Suspend,
-			actual.Arm,
-			actual.Suspend,
-			enforced,
-			snapshot.Owner.String(),
-			snapshot.ESCConsumers,
-			snapshot.CaptureDepth,
-			snapshot.ModalDepth,
-		), false)
+		writeSessionDebugInfo(session, "[input-arbitration] divergence "+summary, false)
 	}
+	recordChatInputArbitrationDivergence(session, summary)
 	if !enforced {
 		return
 	}
@@ -208,8 +241,7 @@ func syncChatInputArbitration(session *ChatSession) {
 	}
 }
 
-func ensureChatInputArbitrator(session *ChatSession) *chatInputArbitrator {
-	if session == nil {
+func ensureChatInputArbitrator(session *ChatSession) *chatInputArbitrator {	if session == nil {
 		return nil
 	}
 	session.inputArbitrationMu.Lock()
@@ -277,4 +309,43 @@ func logChatInputArbitrationSnapshot(session *ChatSession, event string, level c
 		snap.CaptureDepth,
 		snap.ESCConsumers,
 	), false)
+}
+
+// appendChatDebugInputArbitrationLines 把输入仲裁快照与分叉遥测写进 /debug
+// （R4/R5 灰度取样：DebugMode 关闭时也能读到“期望态 vs 实际位”）。
+//
+// 读数含义：
+//   - Snapshot/Esc Available：当前拥有者、各层深度、仲裁器与位路径的可中断
+//     结论（divergence=true 即方案 §12.6 要取样的分叉窗口）；
+//   - Divergences/Last Divergence：累计分叉次数与最近一次的快照摘要（含
+//     enforced 与 owner），是决定 P2b 是否收紧 modal 语义的真实数据；
+//   - Enforce：灰度开关状态（AICLI_CHAT_INPUT_ARBITRATION_ENFORCE）。
+func appendChatDebugInputArbitrationLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
+	if builder == nil || session == nil {
+		return
+	}
+	builder.heading("Input Arbitration: (GET /debug/chat/status#input_arbitration)")
+	bitsEsc := chatInputEscBitsAvailable(session)
+	if snapshot, ok := chatInputArbitrationSnapshotOf(session); ok {
+		builder.meta("Snapshot:", fmt.Sprintf(
+			"owner=%s esc_consumers=%d capture=%d modal=%d",
+			snapshot.Owner.String(), snapshot.ESCConsumers, snapshot.CaptureDepth, snapshot.ModalDepth))
+		builder.meta("Esc Available:", fmt.Sprintf(
+			"arbitrated=%t bits=%t divergence=%t",
+			snapshot.EscAvailable, bitsEsc, snapshot.EscAvailable != bitsEsc))
+	} else {
+		builder.meta("Snapshot:", fmt.Sprintf("<not materialized> bits_esc=%t", bitsEsc))
+	}
+	if kh := session.KeyHandler; kh != nil {
+		builder.meta("KeyHandler:", fmt.Sprintf(
+			"enabled=%t armed=%t suspended=%t", kh.IsEnabled(), kh.Armed(), kh.Suspended()))
+	} else {
+		builder.meta("KeyHandler:", "<none>")
+	}
+	builder.meta("Enforce:", fmt.Sprintf("%t (%s)", chatInputArbitrationEnforced(), chatInputArbitrationEnforceEnv))
+	divergences, last := chatInputArbitrationDivergenceSnapshot(session)
+	builder.meta("Divergences:", fmt.Sprintf("%d", divergences))
+	if strings.TrimSpace(last.Summary) != "" {
+		builder.meta("Last Divergence:", fmt.Sprintf("%s @ %s", last.Summary, last.At.Format("2006-01-02 15:04:05")))
+	}
 }

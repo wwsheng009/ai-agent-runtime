@@ -253,6 +253,9 @@ type runtimeConnectorCommandHost interface {
 	ConnectorBacktrack(ctx context.Context, sessionID string, req runtimechat.BacktrackRequest) (*runtimechat.BacktrackResult, error)
 	// ConnectorListUserTurns 返回会话可见历史的 user turn 列表（只读）。
 	ConnectorListUserTurns(ctx context.Context, sessionID string) ([]runtimechat.UserTurn, error)
+	// InterruptSessionTurn 取消会话当前在途回合（IM /stop 的宿主面；与 HTTP
+	// interrupt 命令共用 runtimeapi 的同一实现）。
+	InterruptSessionTurn(ctx context.Context, sessionID, turnID string) (runtimeapi.SessionTurnInterruptOutcome, error)
 }
 
 // runtimeConnectorRunner 是本宿主作为 runner 接收跨节点派发的执行面
@@ -360,6 +363,22 @@ func (r runtimeConnectorRunner) dispatchCommand(ctx context.Context, req connect
 }
 
 func (b runtimeConnectorBackend) Name() string { return "runtime-server" }
+
+// Interrupt 实现 connectors.InterruptBackend：IM /stop 复用 runtimeapi 的
+// interrupt 命令实现（进程内 active-turn 注册表 → durable actor 回退），
+// 与 HTTP `/runtime/commands {"type":"interrupt"}` 完全同语义。
+func (b runtimeConnectorBackend) Interrupt(ctx context.Context, req connectors.InterruptRequest) (connectors.InterruptResult, error) {
+	sessionID := strings.TrimSpace(req.Session.SessionID)
+	if sessionID == "" || b.handler == nil {
+		// 尚未绑定会话：如实回“没有可停止的回合”（不当作错误）。
+		return connectors.InterruptResult{Handled: true}, nil
+	}
+	outcome, err := b.handler.InterruptSessionTurn(ctx, sessionID, "")
+	if err != nil {
+		return connectors.InterruptResult{}, err
+	}
+	return connectors.InterruptResult{Handled: true, Stopped: outcome.Cancelled}, nil
+}
 
 func (b runtimeConnectorBackend) Handle(ctx context.Context, req connectors.BackendRequest, sink connectors.ReplySink) (connectors.BackendResult, error) {
 	text := strings.TrimSpace(req.Text)

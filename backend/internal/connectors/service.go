@@ -1997,6 +1997,11 @@ func (s *Service) handleCommand(ctx context.Context, cfg Config, provider Provid
 			[]OutboundMessage{{Text: "邀请链接（好友通过该链接添加后，来源参数会回传）：\n" + link}})
 	case "undo":
 		return true, s.handleUndo(ctx, cfg, provider, msg, cmd.args)
+	case "stop":
+		// 停止当前回合（与 TUI Esc / Web interrupt 同语义）：转给宿主
+		// InterruptBackend；未实现时回明确提示，不落进普通 turn、不计入
+		// 普通 turn 统计（isCoreCommand 由 agentCommands 表驱动）。
+		return true, s.dispatchInterrupt(ctx, cfg, provider, msg)
 	case "new":
 		if err := s.deps.Store.PutBinding(Binding{ConnectorID: cfg.ID, Chat: msg.Chat}); err != nil {
 			return true, err
@@ -2121,6 +2126,65 @@ func splitCommandArgs(args string) []string {
 		return nil
 	}
 	return strings.Fields(args)
+}
+
+// dispatchInterrupt 把 /stop 转给宿主（InterruptBackend）。
+//
+// 语义（与 TUI Esc / Web interrupt / `/stop` 对齐）：
+//   - 未实现 InterruptBackend 的宿主回明确提示（不静默、不落进普通 turn）；
+//   - Handled=false：宿主无法定位会话 → “没有可停止的回合”；
+//   - Stopped=false：受理但没有在途回合（空闲 / 已在停止窗口）；
+//   - 宿主自带 Reply 时优先使用。
+func (s *Service) dispatchInterrupt(ctx context.Context, cfg Config, provider Provider, msg InboundMessage) error {
+	backend, ok := s.deps.Backend.(InterruptBackend)
+	if !ok {
+		s.recordLog(LogEntry{
+			Level:       LogLevelWarn,
+			Direction:   LogDirectionIn,
+			ConnectorID: cfg.ID,
+			Chat:        msg.Chat,
+			Summary:     "停止命令未闭环：宿主 Backend 未实现 InterruptBackend（/stop）",
+		}, logCounters{})
+		return provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: interruptUnavailableText()}})
+	}
+	binding, _ := s.deps.Store.GetBinding(cfg.ID, msg.Chat)
+	result, err := backend.Interrupt(ctx, InterruptRequest{
+		ConnectorID: cfg.ID,
+		Chat:        msg.Chat,
+		Session:     binding.Session,
+		UserID:      msg.UserID,
+		UserName:    msg.UserName,
+		MessageID:   msg.MessageID,
+	})
+	if err != nil {
+		return provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: "停止失败：" + err.Error()}})
+	}
+	if reply := strings.TrimSpace(result.Reply); reply != "" {
+		return provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: reply}})
+	}
+	text := interruptIdleText()
+	if !result.Handled {
+		text = interruptNoTargetText()
+	} else if result.Stopped {
+		text = interruptStoppedText()
+	}
+	return provider.Send(ctx, cfg, msg.Chat, []OutboundMessage{{Text: text}})
+}
+
+func interruptUnavailableText() string {
+	return "当前宿主未接入停止命令（/stop）：请在 TUI 按 Esc 或在 Web 控制台停止，或升级宿主后重试。"
+}
+
+func interruptNoTargetText() string {
+	return "没有可停止的回合（当前 IM 尚未绑定会话）。"
+}
+
+func interruptIdleText() string {
+	return "当前没有在途回合可停止。"
+}
+
+func interruptStoppedText() string {
+	return "已请求停止当前回合。"
 }
 
 // commandUnavailableText 是宿主未实现 CommandBackend 时的明确提示（不静默）。
