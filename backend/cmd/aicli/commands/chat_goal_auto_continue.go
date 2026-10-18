@@ -804,7 +804,7 @@ func disarmGoalContinuationAfterRestore(session *ChatSession) {
 	if !sessionHasActivePersistedGoal(session) {
 		return
 	}
-	if session.goalContinuationDisarmed.Swap(true) {
+	if !session.setGoalContinuationDisarmed("restore") {
 		return
 	}
 	writeSessionDebugInfo(session, "[goal] continuation disarmed after restore; /goal resume or an explicit continue message re-arms", false)
@@ -820,10 +820,18 @@ func rearmGoalContinuation(session *ChatSession, reason string) {
 	if !session.goalContinuationDisarmed.Swap(false) {
 		return
 	}
+	session.clearGoalContinuationDisarmReason()
 	if strings.TrimSpace(reason) == "" {
 		reason = "explicit"
 	}
 	writeSessionDebugInfo(session, "[goal] continuation rearmed reason="+reason, false)
+	// Phase 1（方案 §4.8）驱动接力修复：rearm 是驱动许可的状态变更，必须立即
+	// 请求一次驱动检查——历史实现把接力赌在"后续某轮正常收尾自然接上"上，
+	// 2026-10-18 事故中该假设在"rearm 后首轮被中断"组合下断裂，goal 悬置为
+	// active 且无人驱动。回退开关（AICLI_GOAL_DRIVER_DISABLED）设置时维持旧行为（零变化）。
+	if session.goalDriverEnabled {
+		requestGoalDriverKick(session)
+	}
 }
 
 // goalContinueIntentPhrases 是「用户在消息中明示继续」的保守匹配表（G4 的第二
@@ -924,6 +932,15 @@ func maybeConsumeDeferredGoalKick(session *ChatSession) {
 			reason = "no_interactive"
 		}
 		writeSessionDebugInfo(session, "[goal] continuation kick dropped reason="+reason, false)
+		session.goalKickPending.Store(false)
+		session.goalKickHoldNoted.Store(false)
+		return
+	}
+	if session.goalContinuationDisarmed.Load() {
+		// 未武装（恢复态 / 用户中断冻结）：kick 是给已武装目标的一次性驱动，
+		// 冻结期间直接作废（中断冻结已清 flag；此处兜底消费与冻结的竞态窗口）。
+		// rearm 路径（rearmGoalContinuation）会重新请求。
+		writeSessionDebugInfo(session, "[goal] continuation kick dropped reason=goal_disarmed", false)
 		session.goalKickPending.Store(false)
 		session.goalKickHoldNoted.Store(false)
 		return

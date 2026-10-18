@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	runtimegoal "github.com/wwsheng009/ai-agent-runtime/internal/goal"
 )
@@ -92,8 +93,34 @@ func requestGoalTerminalWrapUp(session *ChatSession, goal *runtimegoal.SessionGo
 	default:
 		return
 	}
+	// 终态去重（2026-10-18 真机）：reconcile 的增量扫描在 goal 保持终态期间
+	// 每轮都会重新命中同一条 complete/blocked 记录；旧实现每次都重新 Store，
+	// 使下一个前台轮收尾的决策路径反复消费并补跑收尾轮（每发一条消息多一个
+	// 隐藏轮）。按“终态标识”只触发一次；resume 后再次终态（updated_at 前移）
+	// 视为新的终态，允许再次收尾。
+	key := goalTerminalWrapUpKey(goal)
+	if key != "" {
+		if existing, _ := session.goalTerminalWrapUpKey.Load().(string); existing == key {
+			return
+		}
+		session.goalTerminalWrapUpKey.Store(key)
+	}
 	session.goalTerminalWrapUpPrompt.Store(prompt)
 	writeSessionDebugInfo(session, "[goal] terminal wrap-up requested status="+string(goal.Status), false)
+}
+
+// goalTerminalWrapUpKey 构造终态去重标识：goal_id | status | updated_at。
+// updated_at 优先取 CompletedAt（较晚者），保证同一 goal 经 resume 重新
+// 终态后 key 变化、可再次触发收尾。
+func goalTerminalWrapUpKey(goal *runtimegoal.SessionGoal) string {
+	if goal == nil {
+		return ""
+	}
+	updated := goal.UpdatedAt
+	if goal.CompletedAt != nil && goal.CompletedAt.After(updated) {
+		updated = *goal.CompletedAt
+	}
+	return strings.TrimSpace(goal.GoalID) + "|" + string(goal.Status) + "|" + updated.UTC().Format(time.RFC3339Nano)
 }
 
 // consumeGoalTerminalWrapUp 取走暂存的收尾轮提示词（一次性）；空串表示无。

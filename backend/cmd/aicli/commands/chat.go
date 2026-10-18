@@ -90,6 +90,21 @@ type ChatSession struct {
 	// chat_goal_auto_continue.go 的 goalContinueIntentPhrases）重新武装。
 	// 进程局部，不落库；disarmed 期间状态栏显示 "Goal idle (/goal resume)"。
 	goalContinuationDisarmed atomic.Bool
+	// goalContinuationDisarmReason 记录 disarmed 的首次原因（restore /
+	// user_interrupt），供审计与 UI 文案；由 goalDisarmMu 保护，仅在
+	// armed→disarmed 转换时写入。
+	goalDisarmMu                 sync.Mutex
+	goalContinuationDisarmReason string
+	// goalDriverEnabled 是 Phase 1 goal driver 的会话级开关（默认启用；
+	// AICLI_GOAL_DRIVER_DISABLED 可应急关闭，见 docs/plan/
+	// aicli-goal-driver-unification-plan-20261018.md）：开启后由
+	// chat_goal_driver.go 的 EventSessionEnd 订阅统一评估续跑；关闭时行为零变化。
+	goalDriverEnabled bool
+	// goalDriverTerminalMu/goalDriverSeenTurns/goalDriverSeenOrder 是 run 终态
+	// 评估去重（同一 turn 的既有内联路径与订阅路径只评估一次；容量有界）。
+	goalDriverTerminalMu sync.Mutex
+	goalDriverSeenTurns  map[string]struct{}
+	goalDriverSeenOrder  []string
 	// goalDefaultTokenBudget 是新建 goal 的默认 token 预算（0=无预算），来自
 	// runtime.yaml 的 goal.defaultTokenBudget；goalAccountingGoalID/…Tokens 是
 	// 自动续跑的记账基线（同一 goal 的会话累计 token 增量，见 M3 方案 §5.5）。
@@ -104,6 +119,13 @@ type ChatSession struct {
 	// 循环在下一轮决策前消费并执行收尾轮，然后自然退出（goal 已终态）。
 	// 空串 = 无待执行收尾。进程内标记，不落库。
 	goalTerminalWrapUpPrompt atomic.Value
+	// goalTerminalWrapUpKey 是最近一次触发收尾轮的终态标识
+	// （goal_id|status|updated_at）：reconcile 的增量扫描会在 goal 保持终态
+	// 期间反复命中同一条 complete/blocked 记录，必须按终态标识去重——否则
+	// goal 完成后每次新的前台轮收尾都会再补一个收尾轮（2026-10-18 真机复现：
+	// 每发一条消息模型多输出一段收尾）。同一 goal 经 resume 再次终态时
+	// updated_at 前移，允许再次收尾。
+	goalTerminalWrapUpKey atomic.Value
 
 	RequestedProvider        string
 	EffectiveProvider        string

@@ -197,6 +197,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		goalMaxContinuations:     persistenceState.goalMaxContinuations,
 		goalDefaultTokenBudget:   persistenceState.goalDefaultTokenBudget,
 		goalDefaultMaxRounds:     persistenceState.goalDefaultMaxRounds,
+		goalDriverEnabled:        goalDriverEnabledFromEnv(),
 		OutputFormat:             opts.OutputFormat,
 		InputReader:              chatOptionInputReader(opts),
 		ScriptedInput:            newChatScriptedInput(opts.ScriptLines),

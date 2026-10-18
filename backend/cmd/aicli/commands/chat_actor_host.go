@@ -1510,6 +1510,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	}
 	host.ActorRegistry = newLocalActorRegistry(host)
 	host.wireLocalSupervisionExecutor()
+	// Phase 1 goal driver（docs/plan/aicli-goal-driver-unification-plan-20261018.md）：
+	// 订阅 run 终态事件统一评估续跑；AICLI_GOAL_DRIVER_DISABLED 设置时 no-op（零行为变化）。
+	host.wireLocalGoalDriver()
 	// G2：控制面就绪后立刻把 batch 账本/进度投影接到 wake scheduler，保证第一次
 	// resume 投递就带上 pending_count 与 rollup（不依赖 opt-in 的周期巡查）。
 	host.wireLocalSupervisionSources()
