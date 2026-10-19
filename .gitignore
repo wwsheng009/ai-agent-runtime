@@ -25,6 +25,9 @@ __pycache__/
 .aicli/
 _baseline-check/
 
+# Local agent workspace ignore file
+.zcodeignore
+
 # Reasonix tool local state (session/topic metadata)
 .reasonix/
 
