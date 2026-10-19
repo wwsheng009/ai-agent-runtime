@@ -64,6 +64,49 @@ func TestViewImagePassthroughReturnsImageMetadata(t *testing.T) {
 	}
 }
 
+// TestViewImagePassthroughHonorsAttachmentTokenBudget pins the 2026-10-19
+// incident gate: a geometrically valid image whose estimated vision cost
+// exceeds the per-attachment budget must degrade to a text note with the path,
+// not be attached inline.
+func TestViewImagePassthroughHonorsAttachmentTokenBudget(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "wide.png")
+	writeViewTestPNG(t, path, 1200, 900)
+
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	tool.SetImageAttachmentTokenLimit(200)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"file_path": "wide.png"})
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("view image failed: %v %+v", err, result)
+	}
+	if result.Metadata["image_passthrough"] == true {
+		t.Fatalf("oversized vision cost must not pass through, got %#v", result.Metadata)
+	}
+	if result.Metadata["image_skip_reason"] != "image_attachment_token_budget_exceeded" {
+		t.Fatalf("expected token-budget skip reason, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "未附加图像输入") || !strings.Contains(result.Content, "wide.png") {
+		t.Fatalf("expected a path-bearing degradation note, got %q", result.Content)
+	}
+}
+
+func TestViewImagePassthroughReportsEstimatedTokens(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "small.png")
+	writeViewTestPNG(t, path, 3, 5)
+
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"file_path": "small.png"})
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("view image failed: %v %+v", err, result)
+	}
+	if result.Metadata["image_estimated_tokens"] == nil {
+		t.Fatalf("expected image_estimated_tokens metadata, got %#v", result.Metadata)
+	}
+}
+
 func TestViewImagePassthroughSkipsFakeImageExtension(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "not-really.png")

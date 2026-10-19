@@ -3194,6 +3194,9 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	if ctxCfg.MaxObservationItems > 0 {
 		agentConfig.Options["context_max_observation_items"] = ctxCfg.MaxObservationItems
 	}
+	if ctxCfg.MaxImageAttachmentTokens != 0 {
+		agentConfig.Options["context_max_image_attachment_tokens"] = ctxCfg.MaxImageAttachmentTokens
+	}
 
 	if wsCfg.MaxFileSize > 0 {
 		agentConfig.Options["workspace_max_file_size"] = wsCfg.MaxFileSize

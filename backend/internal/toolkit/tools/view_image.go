@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/imageprep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 )
 
 // viewSupportedImageFormats 与 imageprep 的解码面保持一致（png/jpeg/gif）：
@@ -169,6 +170,36 @@ func (v *ViewTool) viewImageResult(absPath, displayPath string) (*toolkit.ToolRe
 		mimeType = "image/gif"
 	}
 
+	estimatedTokens := tokenestimate.EstimateImageTokens(prepared.Width, prepared.Height)
+	if v.imageAttachmentTokenLimit > 0 && estimatedTokens > v.imageAttachmentTokenLimit {
+		// Geometry-based gate: the bytes are fine, but the vision charge would
+		// consume too much of the prompt budget. Degrade to a text note with
+		// the path so the model can crop/re-encode and retry deliberately.
+		return &toolkit.ToolResult{
+			Success:    true,
+			OutputKind: toolresult.KindText,
+			Content: fmt.Sprintf(
+				"图片文件: %s\nMIME: %s，尺寸: %dx%d，大小: %d 字节\n"+
+					"预估视觉 token 约 %d，超过当前附加预算 %d，未附加图像输入；"+
+					"可用 shell 裁剪/缩小后重试 view。",
+				displayPath, mimeType, prepared.Width, prepared.Height, prepared.Bytes,
+				estimatedTokens, v.imageAttachmentTokenLimit,
+			),
+			Metadata: map[string]interface{}{
+				"file_path":              absPath,
+				"image_passthrough":      false,
+				"image_skipped":          true,
+				"image_mime_type":        mimeType,
+				"image_width":            prepared.Width,
+				"image_height":           prepared.Height,
+				"image_bytes":            prepared.Bytes,
+				"image_estimated_tokens": estimatedTokens,
+				"image_token_limit":      v.imageAttachmentTokenLimit,
+				"image_skip_reason":      "image_attachment_token_budget_exceeded",
+			},
+		}, true
+	}
+
 	metadata := map[string]interface{}{
 		"file_path":                            absPath,
 		toolresult.MetadataImagePassthroughKey: true,
@@ -177,6 +208,7 @@ func (v *ViewTool) viewImageResult(absPath, displayPath string) (*toolkit.ToolRe
 		toolresult.MetadataImageWidthKey:       prepared.Width,
 		toolresult.MetadataImageHeightKey:      prepared.Height,
 		toolresult.MetadataImageBytesKey:       prepared.Bytes,
+		"image_estimated_tokens":               estimatedTokens,
 		"image_detected_format":                format,
 	}
 	content := fmt.Sprintf(

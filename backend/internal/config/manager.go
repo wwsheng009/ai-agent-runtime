@@ -270,6 +270,10 @@ type ContextConfig struct {
 	KeepRecentMessages      int    `yaml:"keepRecentMessages" json:"keepRecentMessages"`
 	MaxRecallResults        int    `yaml:"maxRecallResults" json:"maxRecallResults"`
 	MaxObservationItems     int    `yaml:"maxObservationItems" json:"maxObservationItems"`
+	// MaxImageAttachmentTokens bounds the estimated prompt cost of a single
+	// image the view tool attaches inline. Zero uses the built-in default
+	// (contextmgr budget / 4, capped); negative disables the gate.
+	MaxImageAttachmentTokens int `yaml:"maxImageAttachmentTokens,omitempty" json:"maxImageAttachmentTokens,omitempty"`
 	// AccountingMode selects the context accounting source: "provider_first"
 	// (default, empty) anchors pre-send decisions on provider-reported usage
 	// with local estimation for the delta; "estimate_only" restores the legacy
@@ -893,6 +897,10 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		Context: ContextConfig{
 			Profile:                 runtimecontext.BudgetProfileBalanced,
 			FallbackMaxPromptTokens: runtimecontext.DefaultFallbackMaxPromptTokens,
+			// A single inline image may use at most a quarter of the prompt
+			// budget; the view tool degrades anything larger to a text note
+			// (2026-10-19 incident). Negative disables the gate.
+			MaxImageAttachmentTokens: 8000,
 		},
 		Catalog: CatalogConfig{
 			Backend: "memory",

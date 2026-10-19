@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -24,10 +25,17 @@ func (b *MessageBuilder) appendImagePassthroughMessages(results []ToolResultPayl
 	}
 	prompt += "。请结合图片内容继续。"
 
-	message, err := llm.NewUserPromptMessageWithImages(prompt, paths)
+	message, omitted, err := llm.NewUserPromptMessageWithImageAttachmentLimit(prompt, paths, b.imageAttachmentTokenLimit)
 	if err != nil || message == nil {
 		// 单张图不可读不应吞掉整批工具结果：退化为纯文本提示。
 		message = types.NewUserMessage(prompt)
+	} else if len(omitted) > 0 {
+		// 超预算的图片保留路径与原因，正文继续交给模型；避免一张大图把
+		// 整个 prompt 钉死在预算之外（2026-10-19 incident）。
+		message.Content = prompt + fmt.Sprintf(
+			" 有 %d 张图片因预估视觉 token 超过单图附加预算而未附带，可先裁剪/缩小后重试 view。",
+			len(omitted),
+		)
 	}
 	b.history = append(b.history, *message)
 }

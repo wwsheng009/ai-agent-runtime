@@ -12532,6 +12532,9 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activatio
 	if ctxCfg.MaxObservationItems > 0 {
 		options["context_max_observation_items"] = ctxCfg.MaxObservationItems
 	}
+	if ctxCfg.MaxImageAttachmentTokens != 0 {
+		options["context_max_image_attachment_tokens"] = ctxCfg.MaxImageAttachmentTokens
+	}
 	wsCfg := config.Workspace
 	if strings.TrimSpace(ctxCfg.WorkspaceMode) == "" && strings.TrimSpace(wsCfg.Mode) != "" {
 		options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(wsCfg.Mode))

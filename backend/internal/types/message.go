@@ -18,6 +18,11 @@ type ContentPart struct {
 	MimeType string          `json:"mime_type,omitempty" yaml:"mime_type,omitempty"` // e.g. "image/png"
 	Path     string          `json:"path,omitempty" yaml:"path,omitempty"`           // original file path (for display)
 	Source   string          `json:"source,omitempty" yaml:"source,omitempty"`       // "explicit" | "prompt" | ...
+	// Width/Height describe the pixels actually sent. They let the token
+	// estimator price vision input by geometry instead of by the base64
+	// envelope (2026-10-19 incident).
+	Width  int `json:"width,omitempty" yaml:"width,omitempty"`
+	Height int `json:"height,omitempty" yaml:"height,omitempty"`
 }
 
 // Message 消息

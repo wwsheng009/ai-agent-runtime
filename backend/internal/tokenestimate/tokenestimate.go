@@ -36,11 +36,41 @@
 package tokenestimate
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"strings"
 	"unicode"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+)
+
+// Image pricing constants. Providers bill vision input by pixels, not by the
+// base64 envelope that carries the bytes: OpenAI's tiled rule is roughly one
+// 512×512 tile per 170 tokens after the first, Anthropic scales by
+// width×height/750, and Gemini charges a flat 258 tokens per image. Base64 is
+// ~1.37 bytes of wire per image byte and tokenizes at ~1 token per 2-3 chars,
+// so pricing it as text inflates a 400 KB screenshot to ~140k tokens — the
+// 2026-10-19 incident where a single image part made compaction unable to
+// reach the prompt budget. Keep the estimate conservative (round up) so the
+// send gate still protects the window, but bound it by real image geometry.
+const (
+	// ImageTileSize is the side of one provider vision tile.
+	ImageTileSize = 512
+	// ImageTileTokens is the per-tile prompt charge (OpenAI high-detail rule).
+	ImageTileTokens = 170
+	// ImageBaseTokens covers the image envelope/priming per attachment.
+	ImageBaseTokens = 85
+	// ImageMaxTokens bounds a single attachment so an absurdly large but
+	// still-accepted image cannot dominate the prompt budget.
+	ImageMaxTokens = 4096
+	// ImageUnknownDimensionsTokens is charged when geometry is unavailable
+	// (e.g. a remote URL or a part without width/height metadata).
+	ImageUnknownDimensionsTokens = 1024
 )
 
 // Profile carries the per-encoding constants of the heuristic. Values are
@@ -285,7 +315,7 @@ func EstimateMessages(messages []types.Message, profile Profile) int {
 		total += p.MessageOverhead
 		total += Estimate(message.Role, p)
 		if len(message.ContentParts) > 0 {
-			total += estimateJSON(message.ContentParts, p)
+			total += estimateContentParts(message.ContentParts, p)
 		} else {
 			total += Estimate(message.Content, p)
 		}
@@ -297,6 +327,93 @@ func EstimateMessages(messages []types.Message, profile Profile) int {
 		}
 	}
 	return total
+}
+
+// estimateContentParts prices text parts as text and image parts as vision
+// input. The previous implementation JSON-marshaled every part, which billed
+// the base64 data URL as ordinary prose (2026-10-19 incident).
+func estimateContentParts(parts []types.ContentPart, p Profile) int {
+	total := 0
+	for _, part := range parts {
+		switch part.Type {
+		case types.ContentPartImage:
+			total += EstimateImagePart(part)
+		case types.ContentPartText:
+			total += Estimate(part.Text, p)
+		default:
+			// Unknown part types keep the old structured-payload accounting
+			// so new multimodal kinds are not silently free.
+			total += estimateJSON(part, p)
+		}
+	}
+	return total
+}
+
+// EstimateImagePart returns the prompt-token charge for one image content
+// part. Width/height may be carried in the part or recovered from the data
+// URL header; when neither is available a conservative flat charge is used.
+func EstimateImagePart(part types.ContentPart) int {
+	width, height := part.Width, part.Height
+	if width <= 0 || height <= 0 {
+		if w, h, ok := ImageDimensionsFromDataURL(part.ImageURL); ok {
+			width, height = w, h
+		}
+	}
+	if width <= 0 || height <= 0 {
+		return ImageUnknownDimensionsTokens
+	}
+	tokens := EstimateImageTokens(width, height)
+	if tokens > ImageMaxTokens {
+		return ImageMaxTokens
+	}
+	return tokens
+}
+
+// EstimateImageTokens applies the tiled vision rule to known geometry:
+// ceil(w/512) × ceil(h/512) tiles at ImageTileTokens each, plus base tokens.
+// Callers that need a hard per-attachment ceiling apply ImageMaxTokens
+// themselves (EstimateImagePart does; the view-tool gate compares the raw
+// geometry cost against its own attachment budget).
+func EstimateImageTokens(width, height int) int {
+	if width <= 0 || height <= 0 {
+		return ImageUnknownDimensionsTokens
+	}
+	tilesW := (width + ImageTileSize - 1) / ImageTileSize
+	tilesH := (height + ImageTileSize - 1) / ImageTileSize
+	tiles := tilesW * tilesH
+	if tiles <= 0 {
+		tiles = 1
+	}
+	return ImageBaseTokens + tiles*ImageTileTokens
+}
+
+// ImageDimensionsFromDataURL recovers width/height from a base64 image data
+// URL. It only decodes enough bytes for the format header, so a 400 KB
+// screenshot does not need a full base64 decode on every estimate. Width and
+// height are normally stamped onto the ContentPart at creation; this is the
+// fallback for persisted/legacy parts.
+func ImageDimensionsFromDataURL(dataURL string) (int, int, bool) {
+	dataURL = strings.TrimSpace(dataURL)
+	comma := strings.IndexByte(dataURL, ',')
+	if comma <= 0 || !strings.Contains(strings.ToLower(dataURL[:comma]), ";base64") {
+		return 0, 0, false
+	}
+	encoded := dataURL[comma+1:]
+	// 64 KiB of base64 is ~48 KiB of image bytes: enough for PNG/GIF headers
+	// and the JPEG SOF marker in normal files.
+	const maxEncoded = 64 << 10
+	if len(encoded) > maxEncoded {
+		encoded = encoded[:maxEncoded-(maxEncoded%4)]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(decoded) == 0 {
+		return 0, 0, false
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(decoded))
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return 0, 0, false
+	}
+	return config.Width, config.Height, true
 }
 
 func estimateJSON(value interface{}, p Profile) int {

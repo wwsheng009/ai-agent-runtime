@@ -1846,6 +1846,88 @@ func TestMaybeCompactReplacementShrinksAndDoesNotAccumulateSummaries(t *testing.
 	require.Equal(t, 1, compactionCount)
 }
 
+// TestMaybeCompactDegradesInlineImageBytesFromPinnedUserTurn pins the
+// 2026-10-19 incident: a real user turn carrying a 410 KB base64 image was
+// pinned across compaction, so every replacement stayed above the prompt
+// budget and recovery looped until the send gate hard-failed. The request text
+// and image path must survive; the bytes must not.
+func TestMaybeCompactDegradesInlineImageBytesFromPinnedUserTurn(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name:            "provider-a",
+		responseContent: "Continue from the retained request.",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {AutoCompactTokenLimit: 100},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	imageUser := types.NewUserMessage("please inspect this screenshot")
+	imageUser.Metadata["input_images"] = []map[string]interface{}{{
+		"path":          `E:\temp\shot1.png`,
+		"resolved_path": `E:\temp\shot1.png`,
+		"mime_type":     "image/png",
+	}}
+	imageUser.ContentParts = []types.ContentPart{
+		{Type: types.ContentPartText, Text: "please inspect this screenshot"},
+		{
+			Type:     types.ContentPartImage,
+			ImageURL: "data:image/png;base64," + strings.Repeat("A", 410*1024),
+			Path:     `E:\temp\shot1.png`,
+			Width:    1200,
+			Height:   900,
+		},
+	}
+	history := []types.Message{
+		*types.NewSystemMessage("canonical"),
+		*imageUser,
+		*types.NewAssistantMessage("I inspected it."),
+	}
+	counter := func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content)
+			for _, part := range message.ContentParts {
+				if part.Type == types.ContentPartImage {
+					total += 1600
+					continue
+				}
+				total += len(part.Text)
+			}
+		}
+		return total
+	}
+
+	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID: "session-image-pinned-user",
+		Model:     "gpt-5",
+		Force:     true,
+		History:   history,
+		Phase:     PhaseMidTurn,
+		CountTokens: counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	keptUser := false
+	for _, message := range result.ReplacementHistory {
+		for _, part := range message.ContentParts {
+			require.NotEqual(t, types.ContentPartImage, part.Type,
+				"compaction must not pin inline image bytes across the replacement")
+		}
+		if message.Content == "please inspect this screenshot" {
+			keptUser = true
+		}
+	}
+	require.True(t, keptUser, "the real user request text must survive compaction")
+	require.Less(t, result.TokenAfter, result.TokenBefore)
+}
+
 func requireCompactionMessage(t *testing.T, messages []types.Message) types.Message {
 	t.Helper()
 	for _, message := range messages {

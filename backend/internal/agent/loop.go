@@ -44,6 +44,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -820,6 +821,14 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// Once preflight compacts a long active turn, later model calls build on that
 	// view instead of reprocessing the same raw replay on every step.
 	promptBuilder := NewMessageBuilder(history)
+	// Bound each inline image attachment to a fraction of the turn prompt
+	// budget. Without this, one large screenshot can exceed the send gate on
+	// its own and no compaction can bring the prompt back under budget
+	// (2026-10-19 incident).
+	if limit := loop.imageAttachmentTokenLimit(); limit > 0 {
+		builder.WithImageAttachmentTokenLimit(limit)
+		promptBuilder.WithImageAttachmentTokenLimit(limit)
+	}
 
 	sessionID := options.SessionID
 	if sessionID == "" {
@@ -6256,6 +6265,35 @@ func estimatePromptTokenBreakdown(runtime *llm.LLMRuntime, messages []types.Mess
 	return estimatePromptMessageTokens(runtime, history), estimatePromptMessageTokens(runtime, toolResults)
 }
 
+// addImageContentPartMetadata exposes image attachment pressure on preflight
+// events. A single inline image is often the dominant, unshrinkable part of an
+// oversized prompt; without these fields the failure is indistinguishable from
+// ordinary text growth (2026-10-19 incident).
+func addImageContentPartMetadata(payload map[string]interface{}, messages []types.Message) {
+	if payload == nil || len(messages) == 0 {
+		return
+	}
+	count := 0
+	encodedBytes := 0
+	estimatedTokens := 0
+	for index := range messages {
+		for _, part := range messages[index].ContentParts {
+			if part.Type != types.ContentPartImage {
+				continue
+			}
+			count++
+			encodedBytes += len(part.ImageURL)
+			estimatedTokens += tokenestimate.EstimateImagePart(part)
+		}
+	}
+	if count == 0 {
+		return
+	}
+	payload["image_content_part_count"] = count
+	payload["image_content_part_bytes"] = encodedBytes
+	payload["image_content_part_tokens"] = estimatedTokens
+}
+
 // A zero run budget means "not configured", not "exhausted". Omitting the
 // numeric field prevents logs and downstream UIs from reporting a false zero.
 func addRemainingBudgetMetadata(metadata map[string]interface{}, remainingBudget int) {
@@ -6451,6 +6489,23 @@ func (loop *ReActLoop) enforcePromptPreflight(traceID, sessionID string, step in
 	return loop.enforcePromptPreflightWithTools(traceID, sessionID, step, messages, nil, remainingBudget, 0)
 }
 
+// imageAttachmentTokenLimit bounds one inline image attachment to a quarter of
+// the prompt budget the send gate will enforce. It mirrors the context-manager
+// option (context_max_image_attachment_tokens) and falls back to a quarter of
+// context_max_prompt_tokens. Non-positive means "no gate".
+func (loop *ReActLoop) imageAttachmentTokenLimit() int {
+	if loop == nil || loop.agent == nil || loop.agent.config == nil {
+		return 0
+	}
+	if value, ok := contextOptionInt(loop.agent.config.Options, "context_max_image_attachment_tokens"); ok {
+		return value
+	}
+	if value, ok := contextOptionInt(loop.agent.config.Options, "context_max_prompt_tokens"); ok && value > 0 {
+		return value / 4
+	}
+	return 0
+}
+
 func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string, step int, messages []types.Message, tools []types.ToolDefinition, remainingBudget int, promptCacheEpoch int) ([]types.Message, map[string]interface{}, error) {
 	if len(messages) == 0 || loop == nil || loop.llmRuntime == nil {
 		return messages, nil, nil
@@ -6487,6 +6542,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	preflightMetadata["tool_schema_tokens"] = toolSchemaTokens
 	preflightMetadata["tool_count"] = len(tools)
 	preflightMetadata["estimated_input_tokens"] = estimateTokensBefore
+	addImageContentPartMetadata(preflightMetadata, messages)
 	addContextProjectionMetadata(preflightMetadata, projection)
 	inputBudget := budget.enforcedInputBudget()
 	preflightMetadata["compaction_required"] = promptTokensBefore > inputBudget
@@ -6508,6 +6564,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	startedPayload["tool_schema_tokens"] = toolSchemaTokens
 	startedPayload["tool_count"] = len(tools)
 	startedPayload["message_count"] = len(messages)
+	addImageContentPartMetadata(startedPayload, messages)
 	addContextProjectionMetadata(startedPayload, projection)
 	addRemainingBudgetMetadata(startedPayload, remainingBudget)
 	startedPayload["active_turn_replay"] = true
@@ -6525,6 +6582,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		failureErr := newPromptPreflightError(budget, failure, promptTokensBefore, false, nil)
 		failedPayload := cloneInterfaceMap(startedPayload)
 		failedPayload["active_turn_compacted"] = false
+		addImageContentPartMetadata(failedPayload, messages)
 		for key, value := range failureErr.Metadata() {
 			failedPayload[key] = value
 			preflightMetadata[key] = value
@@ -6553,6 +6611,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		preflightMetadata["message_tokens_after"] = messageTokensAfter
 		preflightMetadata["message_count_after"] = len(compactedMessages)
 		preflightMetadata["estimated_input_tokens"] = promptTokensAfter
+		addImageContentPartMetadata(preflightMetadata, compactedMessages)
 		preflightMetadata["compaction_required"] = promptTokensAfter > inputBudget
 		if promptTokensAfter <= inputBudget {
 			preflightMetadata["compaction_reason"] = "active_turn_replay_compacted"
@@ -6572,6 +6631,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		compactedPayload["tool_count"] = len(tools)
 		compactedPayload["message_count_before"] = len(messages)
 		compactedPayload["message_count_after"] = len(compactedMessages)
+		addImageContentPartMetadata(compactedPayload, compactedMessages)
 		addRemainingBudgetMetadata(compactedPayload, remainingBudget)
 		compactedPayload["prompt_only"] = true
 		compactedPayload["prompt_cache_epoch_break"] = true
@@ -6599,6 +6659,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 		failedPayload["tool_schema_tokens"] = toolSchemaTokens
 		failedPayload["tool_count"] = len(tools)
 		failedPayload["message_count"] = len(compactedMessages)
+		addImageContentPartMetadata(failedPayload, compactedMessages)
 		addRemainingBudgetMetadata(failedPayload, remainingBudget)
 		failedPayload["active_turn_compacted"] = true
 		failedPayload["prompt_tokens_before"] = promptTokensBefore
@@ -6630,6 +6691,7 @@ func (loop *ReActLoop) enforcePromptPreflightWithTools(traceID, sessionID string
 	failedPayload["tool_schema_tokens"] = toolSchemaTokens
 	failedPayload["tool_count"] = len(tools)
 	failedPayload["message_count"] = len(messages)
+	addImageContentPartMetadata(failedPayload, messages)
 	addRemainingBudgetMetadata(failedPayload, remainingBudget)
 	failedPayload["active_turn_compacted"] = false
 	for key, value := range failureErr.Metadata() {

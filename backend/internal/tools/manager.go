@@ -528,6 +528,36 @@ type builtinToolkitRegistration struct {
 	New func(*runtimecfg.RuntimeConfig) toolkit.Tool
 }
 
+// defaultImageAttachmentTokenDivisor converts the configured prompt budget
+// into a per-image attachment ceiling: one image may consume at most a
+// quarter of the budget. Without a bound, a single screenshot can dominate
+// the prompt and make every compaction replacement exceed the send gate
+// (2026-10-19 incident: one 1200×900 PNG priced as ~139k text tokens).
+const defaultImageAttachmentTokenDivisor = 4
+
+// newConfiguredViewTool applies the runtime image-attachment budget to a view
+// (or read) tool. A negative context.maxImageAttachmentTokens disables the
+// gate; zero derives a quarter of the configured prompt budget.
+func newConfiguredViewTool(view *tools.ViewTool, cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+	if view == nil {
+		return nil
+	}
+	limit := 0
+	if cfg != nil {
+		limit = cfg.Context.MaxImageAttachmentTokens
+		if limit == 0 && cfg.Context.MaxPromptTokens > 0 {
+			limit = cfg.Context.MaxPromptTokens / defaultImageAttachmentTokenDivisor
+		}
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 0 {
+		view.SetImageAttachmentTokenLimit(limit)
+	}
+	return view
+}
+
 // builtinToolkitRegistrations 是内置 toolkit 工具的构造表（顺序不承载语义）。
 //
 // 重复注册被忽略（`register` 吞掉 registry 的报错，沿用既有行为）。
@@ -542,8 +572,12 @@ var builtinToolkitRegistrations = []builtinToolkitRegistration{
 	// read 是 view 的兼容别名（同一 schema/执行实现）：注册它让偏好 `read` 这个
 	// 习惯名的模型调用落到 view，而不是 "tool not found"。模型面仍只列出 view
 	// （见 agent.optimizeModelToolSurface 的读取面折叠）。
-	{Canonical: "view", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewViewTool() }},
-	{Canonical: "view", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewReadTool() }},
+	{Canonical: "view", New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+		return newConfiguredViewTool(tools.NewViewTool(), cfg)
+	}},
+	{Canonical: "view", New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
+		return newConfiguredViewTool(tools.NewReadTool(), cfg)
+	}},
 	{Canonical: "edit", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewEditTool() }},
 	{Canonical: "write", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewWriteTool() }},
 	{Canonical: "append_write", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewAppendWriteTool() }},

@@ -2726,6 +2726,61 @@ func TestReActLoop_Run_PromptPreflightFailsWhenReplayCannotBeCompactedFurther(t 
 	require.NotNil(t, payload["latest_replay_block_message_count"])
 }
 
+// TestPromptPreflightReportsImageAttachmentPressure pins the observability
+// contract for the 2026-10-19 incident: when an inline image dominates the
+// prompt, context.preflight.failed must say so explicitly instead of looking
+// like ordinary text growth.
+func TestPromptPreflightReportsImageAttachmentPressure(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	provider := &SequenceLLMProvider{name: "test-provider"}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		MaxSteps:         1,
+		DefaultMaxTokens: 64,
+		SystemPrompt:     "You are a helpful assistant.",
+		Options: map[string]interface{}{
+			"context_max_prompt_tokens": 700,
+		},
+	}, &MockSequenceMCPManager{output: "ok"}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var failedEvents []runtimeevents.Event
+	bus.Subscribe("context.preflight.failed", func(event runtimeevents.Event) {
+		failedEvents = append(failedEvents, event)
+	})
+	agent.SetEventBus(bus)
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{
+		MaxSteps:        1,
+		EnableToolCalls: true,
+	})
+	imageMessage := types.NewUserMessage("inspect the screenshot")
+	imageMessage.ContentParts = []types.ContentPart{
+		{Type: types.ContentPartText, Text: "inspect the screenshot"},
+		{
+			Type:     types.ContentPartImage,
+			ImageURL: "data:image/png;base64," + strings.Repeat("A", 64*1024),
+			Path:     `E:\temp\shot1.png`,
+			Width:    1200,
+			Height:   900,
+		},
+	}
+	_, metadata, err := loop.enforcePromptPreflight("trace", "session", 1, []types.Message{
+		*types.NewSystemMessage("canonical"),
+		*imageMessage,
+	}, 0)
+	require.Error(t, err)
+	require.NotNil(t, metadata)
+	require.Equal(t, 1, metadata["image_content_part_count"])
+	require.Greater(t, metadata["image_content_part_bytes"].(int), 0)
+	require.Greater(t, metadata["image_content_part_tokens"].(int), 0)
+	require.NotEmpty(t, failedEvents)
+	require.Equal(t, 1, failedEvents[len(failedEvents)-1].Payload["image_content_part_count"])
+}
+
 func TestReActLoop_RunWithSession_AutoCompactionRecoveryContinuesAfterPromptPreflightFailure(t *testing.T) {
 	large := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 400)
 	llmRuntime := llm.NewLLMRuntime(nil)

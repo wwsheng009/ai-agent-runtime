@@ -23,6 +23,9 @@ type MessageBuilder struct {
 	// 在构造处一次性铸 message_id/turn_id，不再依赖 persist 时的 substance 反推。
 	// nil 时保持历史行为（由 ReplaceHistory 的继承层兜底），零行为变化。
 	identity *BuilderIdentity
+	// imageAttachmentTokenLimit bounds the estimated prompt cost of one
+	// passthrough image. Zero keeps the legacy unlimited behaviour.
+	imageAttachmentTokenLimit int
 }
 
 // BuilderIdentity 是一个 run 的身份上下文：turn_id 由 actor 在 run 边界授予，
@@ -75,6 +78,16 @@ func NewMessageBuilderWithIdentity(history []types.Message, identity *BuilderIde
 		builder.history = append(builder.history, *message.Clone())
 	}
 	return builder
+}
+
+// WithImageAttachmentTokenLimit bounds the estimated prompt cost of one
+// passthrough image attached by AppendToolResults. Non-positive disables it.
+func (b *MessageBuilder) WithImageAttachmentTokenLimit(limit int) *MessageBuilder {
+	if b == nil {
+		return b
+	}
+	b.imageAttachmentTokenLimit = limit
+	return b
 }
 
 // Messages 返回已构建的消息历史。

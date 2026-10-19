@@ -3,6 +3,10 @@ package llm
 import (
 	"encoding/base64"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"net/http"
@@ -12,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -170,11 +175,99 @@ func NewUserPromptMessageWithImages(prompt string, explicitPaths []string) (*typ
 			if dataErr == nil {
 				part.ImageURL = dataURL
 			}
+			if width, height, ok := imagePixelDimensions(image); ok {
+				part.Width = width
+				part.Height = height
+			}
 			parts = append(parts, part)
 		}
 		message.ContentParts = parts
 	}
 	return message, nil
+}
+
+// NewUserPromptMessageWithImageAttachmentLimit is NewUserPromptMessageWithImages
+// with a token-aware attachment gate. Images whose estimated prompt cost would
+// exceed maxImageTokens are left as a text reference instead of being embedded
+// as base64; the rest are attached normally. A non-positive limit keeps the
+// unlimited behaviour.
+func NewUserPromptMessageWithImageAttachmentLimit(prompt string, explicitPaths []string, maxImageTokens int) (*types.Message, []types.ContentPart, error) {
+	message, err := NewUserPromptMessageWithImages(prompt, explicitPaths)
+	if err != nil {
+		return nil, nil, err
+	}
+	if message == nil || maxImageTokens <= 0 || len(message.ContentParts) == 0 {
+		return message, nil, nil
+	}
+	kept := make([]types.ContentPart, 0, len(message.ContentParts))
+	omitted := make([]types.ContentPart, 0, 1)
+	for _, part := range message.ContentParts {
+		if part.Type != types.ContentPartImage {
+			kept = append(kept, part)
+			continue
+		}
+		if tokenestimate.EstimateImagePart(part) <= maxImageTokens {
+			kept = append(kept, part)
+			continue
+		}
+		omitted = append(omitted, part)
+		reference := strings.TrimSpace(part.Path)
+		if reference == "" {
+			reference = "inline image"
+		}
+		kept = append(kept, types.ContentPart{
+			Type: types.ContentPartText,
+			Text: fmt.Sprintf("[image attachment skipped: %s would exceed the prompt attachment budget of %d tokens; call view with a smaller image or crop it first]", reference, maxImageTokens),
+		})
+	}
+	if len(omitted) == 0 {
+		return message, nil, nil
+	}
+	message.ContentParts = kept
+	if message.Metadata == nil {
+		message.Metadata = types.NewMetadata()
+	}
+	message.Metadata["image_attachments_omitted"] = len(omitted)
+	// The metadata sideband is what protocol builders read; if any image was
+	// omitted it must not be re-inflated from metadata either.
+	if len(keptImages(kept)) == 0 {
+		delete(message.Metadata, MetadataKeyInputImages)
+	}
+	return message, omitted, nil
+}
+
+func keptImages(parts []types.ContentPart) []types.ContentPart {
+	images := make([]types.ContentPart, 0)
+	for _, part := range parts {
+		if part.Type == types.ContentPartImage {
+			images = append(images, part)
+		}
+	}
+	return images
+}
+
+// imagePixelDimensions returns the decoded header geometry for one local
+// attachment. The estimator needs it to price vision input by pixels instead
+// of by the base64 envelope; a failed decode simply leaves geometry unset and
+// the estimator falls back to a bounded flat charge.
+func imagePixelDimensions(attachment LocalInputImage) (int, int, bool) {
+	path := strings.TrimSpace(attachment.ResolvedPath)
+	if path == "" {
+		path = strings.TrimSpace(attachment.Path)
+	}
+	if path == "" {
+		return 0, 0, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer file.Close()
+	config, _, err := image.DecodeConfig(file)
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return 0, 0, false
+	}
+	return config.Width, config.Height, true
 }
 
 // ResolveLocalInputImages resolves prompt-detected and explicit local image

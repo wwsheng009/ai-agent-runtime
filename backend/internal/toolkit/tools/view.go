@@ -80,11 +80,26 @@ type ViewTool struct {
 	// symbolResolver 是 Phase 3 的 view --symbol 支持：nil 表示索引不可用
 	// （symbol 参数退化为行范围读取/报错口径，04 §5 Phase 3 交付 4）。
 	symbolResolver CodeIndexResolver
+	// imageAttachmentTokenLimit bounds the estimated prompt cost of one
+	// passthrough image. Zero disables the gate (legacy behaviour); callers
+	// that know the prompt budget set it explicitly.
+	imageAttachmentTokenLimit int
 }
 
 // NewViewTool 创建 View 工具
 func NewViewTool() *ViewTool {
 	return newViewTool("view")
+}
+
+// SetImageAttachmentTokenLimit bounds the estimated prompt cost of a
+// passthrough image. Images above the limit degrade to a text note with the
+// path, so one screenshot cannot pin an unshrinkable payload in the prompt
+// (2026-10-19 incident). A non-positive value disables the gate.
+func (v *ViewTool) SetImageAttachmentTokenLimit(limit int) {
+	if v == nil {
+		return
+	}
+	v.imageAttachmentTokenLimit = limit
 }
 
 // NewReadTool 创建 `read` 兼容别名工具。

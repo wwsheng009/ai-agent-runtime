@@ -198,6 +198,46 @@ func TestEstimateMessageFraming(t *testing.T) {
 	require.Equal(t, 13, EstimateMessages(two, profile)+profile.ReplyPriming)
 }
 
+// TestEstimateMessagesPricesImagePartsByGeometry pins the 2026-10-19 incident:
+// a 1200×900 PNG carried as a 410 KB base64 data URL was billed as ~139k text
+// tokens, so every compaction replacement exceeded the prompt budget. Image
+// parts must be priced by pixels, not by the base64 envelope.
+func TestEstimateMessagesPricesImagePartsByGeometry(t *testing.T) {
+	// 3×3 tiles at 170 tokens + 85 base = 1615.
+	image := types.ContentPart{
+		Type:     types.ContentPartImage,
+		ImageURL: "data:image/png;base64," + strings.Repeat("A", 410*1024),
+		Width:    1200,
+		Height:   900,
+	}
+	message := types.Message{
+		Role:         "user",
+		Content:      "look at this",
+		ContentParts: []types.ContentPart{{Type: types.ContentPartText, Text: "look at this"}, image},
+	}
+	estimate := EstimateMessages([]types.Message{message}, ProfileCL100k)
+	require.Less(t, estimate, 3000, "image parts must not be priced as base64 text")
+	require.GreaterOrEqual(t, estimate, EstimateImageTokens(1200, 900))
+
+	// Geometry wins over the envelope size: doubling the encoded bytes without
+	// changing dimensions must not change the price.
+	larger := image
+	larger.ImageURL = "data:image/png;base64," + strings.Repeat("A", 800*1024)
+	largerMessage := message
+	largerMessage.ContentParts = []types.ContentPart{message.ContentParts[0], larger}
+	require.Equal(t,
+		EstimateMessages([]types.Message{message}, ProfileCL100k),
+		EstimateMessages([]types.Message{largerMessage}, ProfileCL100k),
+	)
+}
+
+func TestEstimateImagePartFallsBackToBoundedFlatCharge(t *testing.T) {
+	// No geometry and no decodable data URL: bounded flat charge, never the
+	// base64 length.
+	part := types.ContentPart{Type: types.ContentPartImage, ImageURL: "data:image/png;base64,not-base64"}
+	require.Equal(t, ImageUnknownDimensionsTokens, EstimateImagePart(part))
+}
+
 func TestEstimateScriptOrdering(t *testing.T) {
 	profile := ProfileO200k
 	ascii := Estimate("abcdefghijklmnopqrstuvwxyz", profile)

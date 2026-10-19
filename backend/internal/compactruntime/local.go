@@ -851,7 +851,12 @@ func buildLocalRetentionUnits(messages []types.Message) []localRetentionUnit {
 			continue
 		}
 		if role != "assistant" || len(message.ToolCalls) == 0 {
-			units = append(units, localRetentionUnit{*message.Clone()})
+			// A pinned user turn carries no tool pairing, so inline image
+			// bytes can be degraded here without breaking replay structure.
+			if role == "user" {
+				message = *compactUserMessageForPrompt(message)
+			}
+			units = append(units, localRetentionUnit{message})
 			index++
 			continue
 		}
@@ -932,7 +937,10 @@ func selectCompactionRecentMessages(messages []types.Message, keepRecent int, co
 
 	// The active request is pinned even when it alone exceeds the recent token
 	// budget. Drop whole older suffix units until the combined replay fits.
-	pinned := cloneMessages(units[activeUserUnit])
+	// Inline image bytes are degraded to a text reference: keeping them would
+	// pin an unshrinkable payload across every compaction (2026-10-19
+	// incident). The request text and image paths survive.
+	pinned := []types.Message{*compactUserMessageForPrompt(units[activeUserUnit][0])}
 	for start < len(units) {
 		candidate := append(cloneMessages(pinned), flattenLocalRetentionUnits(units[start:])...)
 		if localRetentionFits(candidate, keepRecent, counter, maxTokens) {
@@ -997,16 +1005,61 @@ func selectCompactionUserMessages(messages []types.Message, counter TokenCounter
 		if !isRealCompactionUserMessage(message) {
 			continue
 		}
-		candidate := append([]types.Message{*message.Clone()}, selected...)
+		candidate := append([]types.Message{*compactUserMessageForPrompt(message)}, selected...)
 		if counter != nil && maxTokens > 0 && counter(candidate) > maxTokens {
 			if len(selected) == 0 {
-				return []types.Message{*message.Clone()}
+				return []types.Message{*compactUserMessageForPrompt(message)}
 			}
 			break
 		}
 		selected = candidate
 	}
 	return selected
+}
+
+// compactUserMessageForPrompt degrades inline image attachments to a textual
+// reference before a user message is pinned across compaction.
+//
+// A real user request must survive compaction, but its base64 image payload
+// must not: one 1200×900 screenshot inflated the prompt by ~139k text tokens
+// and made every replacement exceed the budget, so the recovery loop could
+// never converge (2026-10-19 incident). Dropping the bytes keeps the request
+// text and the file path, and the model can call view again if it still needs
+// the image. Messages without images are cloned unchanged.
+func compactUserMessageForPrompt(message types.Message) *types.Message {
+	cloned := message.Clone()
+	if len(cloned.ContentParts) == 0 {
+		return cloned
+	}
+	parts := make([]types.ContentPart, 0, len(cloned.ContentParts))
+	replaced := 0
+	for _, part := range cloned.ContentParts {
+		if part.Type != types.ContentPartImage {
+			parts = append(parts, part)
+			continue
+		}
+		reference := strings.TrimSpace(part.Path)
+		if reference == "" {
+			reference = "inline image"
+		}
+		parts = append(parts, types.ContentPart{
+			Type: types.ContentPartText,
+			Text: fmt.Sprintf("[image attachment omitted during compaction: %s; call view on the path if the pixels are still needed]", reference),
+		})
+		replaced++
+	}
+	if replaced == 0 {
+		return cloned
+	}
+	cloned.ContentParts = parts
+	if cloned.Metadata == nil {
+		cloned.Metadata = types.NewMetadata()
+	}
+	cloned.Metadata["compaction_image_parts_omitted"] = replaced
+	// The image sideband would re-inflate the same message on the next
+	// protocol build, so remove it together with the content parts.
+	delete(cloned.Metadata, llm.MetadataKeyInputImages)
+	return cloned
 }
 
 func isRealCompactionUserMessage(message types.Message) bool {
@@ -1054,10 +1107,48 @@ func selectCompactionDurableContext(messages []types.Message, counter TokenCount
 	ordered := make([]types.Message, 0, len(selectedIndexes))
 	for index := range messages {
 		if selectedIndexes[index] {
-			ordered = append(ordered, *messages[index].Clone())
+			ordered = append(ordered, *compactDurableMessageForPrompt(messages[index]))
 		}
 	}
 	return ordered
+}
+
+// compactDurableMessageForPrompt strips inline image bytes from a durable
+// world-state projection while keeping its text. Durable stages are normally
+// text, but a fact ledger can quote a tool result that mentions an image;
+// nothing in that projection needs the base64 payload.
+func compactDurableMessageForPrompt(message types.Message) *types.Message {
+	cloned := message.Clone()
+	if len(cloned.ContentParts) == 0 {
+		return cloned
+	}
+	parts := make([]types.ContentPart, 0, len(cloned.ContentParts))
+	replaced := 0
+	for _, part := range cloned.ContentParts {
+		if part.Type != types.ContentPartImage {
+			parts = append(parts, part)
+			continue
+		}
+		reference := strings.TrimSpace(part.Path)
+		if reference == "" {
+			reference = "inline image"
+		}
+		parts = append(parts, types.ContentPart{
+			Type: types.ContentPartText,
+			Text: fmt.Sprintf("[image attachment omitted during compaction: %s]", reference),
+		})
+		replaced++
+	}
+	if replaced == 0 {
+		return cloned
+	}
+	cloned.ContentParts = parts
+	if cloned.Metadata == nil {
+		cloned.Metadata = types.NewMetadata()
+	}
+	cloned.Metadata["compaction_image_parts_omitted"] = replaced
+	delete(cloned.Metadata, llm.MetadataKeyInputImages)
+	return cloned
 }
 
 func stripDurableContextMessages(messages []types.Message) []types.Message {
