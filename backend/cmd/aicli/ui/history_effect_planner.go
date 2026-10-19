@@ -683,8 +683,17 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 // reconcile（复用段整 cell 跳过）+ memo。Stage 3 起这是唯一实现（无异步结果
 // 路径）。
 func applyTranscriptPlan(state *UIControllerState, commits []HistoryCommit, retained transcriptPlanRetention) {
+	mintedBefore := state.HistoryEffects.NextToken
 	syncHistoryEffectCandidatesRetained(state, commits, retained)
 	recordTranscriptPlanMemo(state, len(commits))
+	if state.HistoryEffects.armedReplayProofPending {
+		// 一次授权式装载重证明跑完了一遍计划（B）：结算"零新增提交"。新增提交
+		// 以 token 分配为准——被 retention/reconcile/dedup 吸收的候选都不算新增。
+		// "转录非空"以 finalized cell 为准（活动 cell 本就不铸提交，不能算历史）。
+		state.HistoryEffects.armedReplayProofPending = false
+		state.HistoryEffects.armedReplayNoop = state.HistoryEffects.NextToken == mintedBefore &&
+			transcriptFinalizedCellCount(state.Transcript) > 0
+	}
 }
 
 // transcriptLayoutWarmChunkCells 是单次预热块的 cell 上限。块只做布局投影

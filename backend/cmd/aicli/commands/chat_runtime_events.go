@@ -3584,6 +3584,18 @@ func (b *chatRuntimeEventBridge) sessionInteractionReplacementSnapshot() {
 	}
 }
 
+// sessionInteractionLoadReplacementSnapshot is the session-load flavor of
+// sessionInteractionReplacementSnapshot: identical armed replacement semantics,
+// plus the coordinator bookkeeping that reports a zero-row re-proof explicitly
+// when the loaded history was already printed to this terminal (see
+// postLoadReplacementTranscriptSnapshotFromBridge). /backtrack keeps the plain
+// entry point so the notice stays load-specific.
+func (b *chatRuntimeEventBridge) sessionInteractionLoadReplacementSnapshot() {
+	if b != nil && b.session != nil && b.session.Interaction != nil {
+		b.session.Interaction.postLoadReplacementTranscriptSnapshotFromBridge(b)
+	}
+}
+
 // submitPriorityTranscript finalizes the mutable Scene item created by the
 // matching approval/question runtime event. It returns false for a missing or
 // already-finalized target; callers must then use a generic local supplement

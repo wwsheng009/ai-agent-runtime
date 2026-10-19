@@ -1007,8 +1007,24 @@ func (c *chatInteractionCoordinator) postReplacementTranscriptSnapshotFromBridge
 	c.postTranscriptSnapshotFromBridgeWithReplayAuthorization(bridge, true)
 }
 
+// postLoadReplacementTranscriptSnapshotFromBridge is the session-load flavor of
+// postReplacementTranscriptSnapshotFromBridge: the same armed replacement
+// action, plus the ticket-tracked post that lets a bounded background observer
+// report a zero-row re-proof explicitly (see
+// notifyWhenLoadReplayAppendedNothing). /backtrack and other canonical-history
+// rewrites keep the untracked entry point so that notice stays load-specific.
+func (c *chatInteractionCoordinator) postLoadReplacementTranscriptSnapshotFromBridge(bridge *chatRuntimeEventBridge) {
+	c.postTranscriptSnapshotFromBridgeWithTrackedReplayAuthorization(bridge, true, true)
+}
+
 func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridgeWithReplayAuthorization(
 	bridge *chatRuntimeEventBridge, armReplay bool,
+) {
+	c.postTranscriptSnapshotFromBridgeWithTrackedReplayAuthorization(bridge, armReplay, false)
+}
+
+func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridgeWithTrackedReplayAuthorization(
+	bridge *chatRuntimeEventBridge, armReplay, trackLoadReplay bool,
 ) {
 	if c == nil || bridge == nil {
 		return
@@ -1017,17 +1033,104 @@ func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridgeWithReplayA
 	if snapshot == nil {
 		return
 	}
+	// 会话切换信号（A）：授权式替换到不同 runtime session 时开启新的交付代次。
+	// 只有真正的切换才开启：同会话重载、/backtrack、resize/流式增量都不开，
+	// append-only 去重语义保持不变。
+	newDeliveryEpoch := false
+	if armReplay {
+		newDeliveryEpoch = c.noteArmedTranscriptSession()
+	}
 	// 快照发布要走两段：生产侧把整份 Scene 拷成不可变快照，再投递给 UI actor。
 	// 逐页补齐实测「非授权快照」是这段里最贵的一笔（首次 2.3-2.8s，其后 0.13-0.77s）；
 	// 拆开后定论在**投递**侧（构造 0-134ms，post 74ms-1.12s），因此增量载荷不是正解，
 	// 非阻塞 ingress 才是（见 tryPostTranscriptSnapshotFromBridge）。
 	markChatStartup("transcript_snapshot_build")
-	_ = c.postUIAction(ui.ReplaceTranscriptAction{
+	action := ui.ReplaceTranscriptAction{
 		Snapshot:             snapshot,
 		ArmScrollbackReplay:  armReplay,
 		DeferHistoryDelivery: c.historyDeliveryDeferred(),
-	})
+		NewDeliveryEpoch:     newDeliveryEpoch,
+	}
+	if !trackLoadReplay {
+		_ = c.postUIAction(action)
+		markChatStartup("transcript_snapshot_post")
+		return
+	}
+	// B：装载回放必须走同步投递（命令路径不能等整段重证明），ticket 交给后台
+	// 观察者，在计划真正跑完之后结算「零新增行」的判定并给用户显式提示。
+	actor := c.ensureUIActor()
+	if actor == nil {
+		_ = c.postUIAction(action)
+		markChatStartup("transcript_snapshot_post")
+		return
+	}
+	outcome, ticket := actor.PostTracked(action)
 	markChatStartup("transcript_snapshot_post")
+	if outcome != ui.PostDropped && ticket != 0 {
+		go c.notifyWhenLoadReplayAppendedNothing(actor, ticket)
+	}
+}
+
+// loadReplayHintApplyWait/loadReplayHintSettleWait 界定装载回放提示观察者的
+// 等待上限：action 应用等待 + 重证明结算等待（大会话的整段规划实测 0.5-7s）。
+const (
+	loadReplayHintApplyWait  = 20 * time.Second
+	loadReplayHintSettleWait = 45 * time.Second
+	loadReplayHintPollEvery  = 50 * time.Millisecond
+)
+
+// noteArmedTranscriptSession 记录一次授权式发布的 runtime session 身份，并
+// 报告它是否切换到了与「最近一次发布」不同的会话。首个发布（进程内还没有
+// 任何已交付记录）不开启代次。发布漏斗也会在后台装载收尾 goroutine 上运行，
+// 因此这里用独立互斥锁，不依赖 c.mu。
+func (c *chatInteractionCoordinator) noteArmedTranscriptSession() bool {
+	if c == nil || c.session == nil {
+		return false
+	}
+	sessionID := strings.TrimSpace(currentRuntimeSessionID(c.session))
+	if sessionID == "" {
+		// 空身份不携带会话信息（运行时指针切换的瞬间可能为空）：保留上一次
+		// 已知身份，否则下一次真实装载会被误判成「首次发布」而漏开代次。
+		return false
+	}
+	c.replayedHistorySessionMu.Lock()
+	previous := c.replayedHistorySessionID
+	c.replayedHistorySessionID = sessionID
+	c.replayedHistorySessionMu.Unlock()
+	return previous != "" && !strings.EqualFold(previous, sessionID)
+}
+
+// notifyWhenLoadReplayAppendedNothing 实现「历史已在本终端输出过」的显式提示
+// （B）：装载替换的重证明跑完一遍计划却零新增提交，而转录里有 finalized cell
+// 时，用户请求的历史其实已经在本终端的 scrollback 里（交付账本在同代次内去重），
+// 否则屏幕上只会多一行装载确认——假成功。命令路径不能等整段重证明，因此判定
+// 放在有界后台观察者里：先等这次授权 action 被应用，再等重证明结算（窗口化装载
+// 的挂起/预热续跑会在后续 action 里完成），超时即放弃（静默，不误报）。
+func (c *chatInteractionCoordinator) notifyWhenLoadReplayAppendedNothing(actor *ui.UIController, ticket uint64) {
+	if c == nil || actor == nil {
+		return
+	}
+	if !actor.WaitActionApplied(ticket, loadReplayHintApplyWait) {
+		return
+	}
+	deadline := time.Now().Add(loadReplayHintSettleWait)
+	for {
+		diagnostics := actor.HistoryEffectDiagnostics()
+		if diagnostics.DeferHistoryDelivery {
+			// 交付被窗口化装载挂起：释放那一次授权替换会重新记录并自行观察。
+			return
+		}
+		if !diagnostics.ArmedReplayProofPending {
+			if diagnostics.ArmedReplayNoop {
+				c.RenderEphemeralSupplement("历史已在本终端输出过，未重复打印；可向上滚动查看")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(loadReplayHintPollEvery)
+	}
 }
 
 // historyDeliveryDeferred reports whether native-scrollback delivery must be

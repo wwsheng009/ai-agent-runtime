@@ -298,7 +298,12 @@ func replayLoadedSessionHistory(session *ChatSession, header string) int {
 	// 进度，startDeferredResumeHistoryLoad 随后接手（有较早页时更新「已加载
 	// N/M」计数，没有时立即清除并恢复空闲状态行）。
 	showChatResumeProgress(session, chatResumeProgressPhaseRestore, 0, 0)
-	count := printVisibleChatHistory(session, header)
+	// 会话装载回放走装载授权（load grant）：即使 Scene 已经与重放的事件日志
+	// 协调一致（seeded=false，没有新增 seed），也必须发布一次授权式替换，让
+	// 装载好的 generation 从源重证明——否则切回会话时不会有任何重证明，历史
+	// 永远不会重新追加（用户只看到确认行）。标题保持调用方给的原文，不附加
+	// compact 提示（那是 printVisibleSessionLoadHistory 的语义）。
+	count := printVisibleChatHistoryWithLoadGrant(session, header, true)
 	startDeferredResumeHistoryLoad(session)
 	return count
 }

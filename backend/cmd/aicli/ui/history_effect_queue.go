@@ -114,6 +114,13 @@ type HistoryEffectQueueState struct {
 	// now additionally requires the ledger to still hold a lifecycle whenever
 	// the last plan produced candidates.
 	lastPlannedCandidateCount int
+	// armedReplayProofPending/armedReplayNoop 记录一次授权式装载替换的重证明
+	// 结果（"假成功"观测）：pending 表示装载替换已安装但重证明尚未跑完一遍计划
+	// （窗口化装载挂起或预热续跑会在后续 action 里完成）；结算时若"零新增提交
+	// 而转录非空"，armedReplayNoop 置位。命令侧据此给用户显式提示（历史已在
+	// 本终端输出过），而不是只留一行装载确认。
+	armedReplayProofPending bool
+	armedReplayNoop         bool
 	// PlanCount / LastPlanDuration / MaxPlanDuration 是 P16 的归因读数（方案
 	// docs/plan/resume-large-session-optimization-plan-20260924.md §7.3）：
 	// P12（端点冻结）只说「用户被卡住」，这三个标量说明冻结是不是花在**规划**
@@ -237,8 +244,9 @@ func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSour
 		// 不影响投递语义，跳过纯属省分配；旧实现会先白物化一次 payload，随后
 		// 在入队处以墓碑跳过）。无墓碑则只可能是 remintable 的
 		// invalidated-clean（pruneEntry 不留墓碑）：必须物化以允许再铸。
-		_, blocked := s.ledger.compactedTerminalSources[key]
-		return blocked
+		// 代次口径：上一代次的 Delivered 墓碑不再阻断（会话切回要重新追加），
+		// 只有本代次/永久墓碑才让分片跳过物化。
+		return s.ledger.tombstoneBlocksRemint(key)
 	}
 	for token := range tokens {
 		entry, ok := s.ledger.byToken[token]
@@ -246,6 +254,11 @@ func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSour
 			continue
 		}
 		if entry.State == HistoryCommitQueued {
+			return false
+		}
+		if entry.State == HistoryCommitDelivered && !s.ledger.entryBlocksRemintInEpoch(entry) {
+			// 上一交付代次的已交付记录：当前代次可再铸，分片必须重新物化，
+			// 否则会话切回时这段历史不会被重新追加。
 			return false
 		}
 	}
@@ -272,7 +285,7 @@ func (s HistoryEffectQueueState) retainedQueuedCommitForSource(key historyCommit
 	if !s.ledger.mintedThrough(key) {
 		return HistoryCommit{}, false, false, false
 	}
-	if _, blocked := s.ledger.compactedTerminalSources[key]; blocked {
+	if s.ledger.tombstoneBlocksRemint(key) {
 		return HistoryCommit{}, false, true, true
 	}
 	tokens := s.ledger.bySource[key]
@@ -285,7 +298,9 @@ func (s HistoryEffectQueueState) retainedQueuedCommitForSource(key historyCommit
 		if !ok {
 			continue
 		}
-		if !entry.BlocksRemint() {
+		// 代次口径：旧代次的 Delivered 记录不再让整个 cell 被"整行保留"（否则
+		// 会话切回时不会重铸）；Queued 与不可重铸的隔离终态语义不变。
+		if !s.ledger.entryBlocksRemintInEpoch(entry) {
 			continue
 		}
 		terminal = true
@@ -311,6 +326,16 @@ func (s *HistoryEffectQueueState) pruneCompactedSourcesNotInTranscript(transcrip
 		return
 	}
 	s.ledger.pruneCompactedSourcesNotInTranscript(transcript.Cells)
+}
+
+// openDeliveryEpoch 开启新一代交付代次：授权式装载替换到**不同** runtime
+// session 时调用（见 HistoryCommitLedger.openDeliveryEpoch）。上一代次的
+// Delivered 记录从此不再阻断重铸，切回同一会话时历史重新追加在旧内容下方。
+func (s *HistoryEffectQueueState) openDeliveryEpoch() {
+	if s == nil || s.ledger == nil {
+		return
+	}
+	s.ledger.openDeliveryEpoch()
 }
 
 // recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。
@@ -498,7 +523,15 @@ type HistoryEffectDiagnostics struct {
 	PlanWindowsDelegated uint64
 	NextToken            uint64
 	TerminalEpoch        uint64
-	Summary              HistoryEffectQueueSummary
+	// DeliveryEpoch 是当前交付代次（会话切换推进，见
+	// HistoryCommitLedger.deliveryEpoch）。
+	DeliveryEpoch uint64
+	// ArmedReplayProofPending/ArmedReplayNoop 报告最近一次授权式装载替换的重
+	// 证明状态：pending=计划尚未跑完；Noop=计划跑完但零新增提交（历史已在本
+	// 终端输出过，命令侧据此给出显式提示）。
+	ArmedReplayProofPending bool
+	ArmedReplayNoop         bool
+	Summary                 HistoryEffectQueueSummary
 }
 
 // Diagnostics projects the queue without detaching anything. The caller must
@@ -506,13 +539,16 @@ type HistoryEffectDiagnostics struct {
 // UIController.HistoryEffectDiagnostics.
 func (s HistoryEffectQueueState) Diagnostics() HistoryEffectDiagnostics {
 	return HistoryEffectDiagnostics{
-		Frozen:                 s.Frozen,
-		ProjectionUnknown:      s.ProjectionUnknown,
-		ReconciliationRequired: s.ReconciliationRequired,
-		DeferHistoryDelivery:   s.DeferHistoryDelivery,
-		NextToken:              s.NextToken,
-		TerminalEpoch:          s.TerminalEpoch,
-		Summary:                s.Summary(),
+		Frozen:                  s.Frozen,
+		ProjectionUnknown:       s.ProjectionUnknown,
+		ReconciliationRequired:  s.ReconciliationRequired,
+		DeferHistoryDelivery:    s.DeferHistoryDelivery,
+		NextToken:               s.NextToken,
+		TerminalEpoch:           s.TerminalEpoch,
+		DeliveryEpoch:           s.ledger.currentDeliveryEpoch(),
+		ArmedReplayProofPending: s.armedReplayProofPending,
+		ArmedReplayNoop:         s.armedReplayNoop,
+		Summary:                 s.Summary(),
 	}
 }
 
@@ -677,8 +713,11 @@ func (s *HistoryEffectQueueState) ackBatch(commits []HistoryCommit, frame, gener
 		entry, ok := s.ledger.Entry(commit.Token)
 		if !ok {
 			// A compacted token was already resolved; a source with no terminal
-			// record at all cannot have been minted by this ledger.
-			if !s.ledger.hasTerminalRecordForSource(historyCommitSourceIdentity(commit)) {
+			// record at all cannot have been minted by this ledger. The check is
+			// deliberately epoch-agnostic: a proof that crosses a session switch
+			// must be attributed to the record that was minted, not re-qualified
+			// against the current delivery epoch.
+			if !s.ledger.hasResolvedRecordForSource(historyCommitSourceIdentity(commit)) {
 				return s.quarantineCoveredBatch(commits, ErrCommitSourceChanged), ErrCommitSourceChanged
 			}
 			continue

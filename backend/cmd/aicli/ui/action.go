@@ -600,6 +600,17 @@ type ReplaceTranscriptAction struct {
 	// cleared); it re-proves the plan from source and mints the complete
 	// transcript in cell order (oldest -> newest).
 	DeferHistoryDelivery bool
+	// NewDeliveryEpoch opens a new delivery generation in the history commit
+	// ledger. It is set by the producer only when the armed load replacement
+	// switches to a *different* runtime session: cell identities are reused
+	// across sessions, so the previous session's delivered records would
+	// otherwise block the re-proof and the loaded history would never be
+	// re-appended. Native scrollback is append-only: the old rows stay and the
+	// new session's history is appended below them. A same-session reload or
+	// /backtrack must never set it (append-only dedup stays authoritative).
+	// Distinct from TerminalEpoch: that counts physical terminal acts and is
+	// deliberately not advanced here.
+	NewDeliveryEpoch bool
 }
 
 func (ReplaceTranscriptAction) isUIAction()         {}

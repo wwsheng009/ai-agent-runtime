@@ -106,6 +106,162 @@ func TestLoadReproofOnNoOpInstallRePlansFromSource(t *testing.T) {
 	}
 }
 
+// B：授权式装载重证明跑完一遍计划却零新增提交、且转录非空时，必须置
+// ArmedReplayNoop，命令侧据此给出「历史已在本终端输出过」的显式提示；
+// 真正追加了历史（新交付代次）或转录为空时不得误报。
+func TestArmedLoadReplayNoopFlagTracksZeroRowProof(t *testing.T) {
+	state := reduceUIControllerState(UIControllerState{}, Resize{Width: 72, Height: 12, Generation: 1}, 1)
+	snapshot := scrollbackGrantSnapshot(1, "loaded session")
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, 2)
+	firstToken := queuedHistoryTokenForCell(t, state, 1)
+	state = deliverHistoryToken(state, firstToken, 3)
+	if state.HistoryEffects.armedReplayProofPending || state.HistoryEffects.armedReplayNoop {
+		t.Fatalf("non-armed install must not arm the load replay proof: %#v", state.HistoryEffects)
+	}
+
+	// 同会话授权式重载：同一来源已在当前代次交付，计划零新增提交。
+	tokensBefore := state.HistoryEffects.NextToken
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{
+		Snapshot:            snapshot,
+		ArmScrollbackReplay: true,
+	}, 5)
+	if state.HistoryEffects.NextToken != tokensBefore {
+		t.Fatalf("same-session no-op load minted rows: next=%d want %d",
+			state.HistoryEffects.NextToken, tokensBefore)
+	}
+	if state.HistoryEffects.armedReplayProofPending {
+		t.Fatalf("load replay proof did not settle: %#v", state.HistoryEffects)
+	}
+	if !state.HistoryEffects.armedReplayNoop {
+		t.Fatalf("zero-row re-proof over non-empty transcript must set ArmedReplayNoop: %#v",
+			state.HistoryEffects)
+	}
+
+	// 新交付代次会真正重铸同一来源：不得误报 no-op。
+	tokensBeforeSwitch := state.HistoryEffects.NextToken
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{
+		Snapshot:            snapshot,
+		ArmScrollbackReplay: true,
+		NewDeliveryEpoch:    true,
+	}, 7)
+	if state.HistoryEffects.NextToken <= tokensBeforeSwitch {
+		t.Fatalf("new delivery epoch did not re-mint: next=%d before=%d",
+			state.HistoryEffects.NextToken, tokensBeforeSwitch)
+	}
+	if state.HistoryEffects.armedReplayNoop {
+		t.Fatalf("load replay that appended rows must not report no-op: %#v", state.HistoryEffects)
+	}
+
+	// 空转录：零新增提交也不得提示「历史已输出过」。
+	empty := reduceUIControllerState(UIControllerState{}, Resize{Width: 72, Height: 12, Generation: 1}, 20)
+	empty = reduceUIControllerState(empty, ReplaceTranscriptAction{
+		Snapshot:            &scene.Snapshot{Revision: 1},
+		ArmScrollbackReplay: true,
+	}, 21)
+	if empty.HistoryEffects.armedReplayNoop {
+		t.Fatalf("empty transcript must not report a history no-op: %#v", empty.HistoryEffects)
+	}
+}
+
+// A→B→A 会话切换回归：cell 身份跨会话复用（同一 cellID/revision/来源区间），
+// 上一交付代次的 Delivered 记录不得阻断切回后的重铸。append-only 语义下旧行
+// 保留，新会话历史追加在其下方；同会话的授权式重载仍按同代次去重，不重复打印。
+func TestSessionSwitchReAppendsHistoryAcrossDeliveryEpochs(t *testing.T) {
+	state := reduceUIControllerState(UIControllerState{}, Resize{Width: 72, Height: 12, Generation: 1}, 1)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{
+		Snapshot: scrollbackGrantSnapshot(1, "session A"),
+	}, 2)
+	firstToken := queuedHistoryTokenForCell(t, state, 1)
+	state = deliverHistoryToken(state, firstToken, 3)
+	if entry := historyCommitEntry(t, state, firstToken); entry.State != HistoryCommitDelivered {
+		t.Fatalf("session A token not delivered: %#v", entry)
+	}
+	tokensAfterA := state.HistoryEffects.NextToken
+
+	// A → B：cellID/revision/来源长度与 A 完全一致（跨会话复用的最坏形状）。
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{
+		Snapshot:            scrollbackGrantSnapshot(2, "session B"),
+		ArmScrollbackReplay: true,
+		NewDeliveryEpoch:    true,
+	}, 4)
+	if state.HistoryEffects.NextToken <= tokensAfterA {
+		t.Fatalf("switch to session B did not re-mint the reused source: next=%d before=%d",
+			state.HistoryEffects.NextToken, tokensAfterA)
+	}
+	// 替换丢掉了上一会话已交付的 cell：投影未知由一次非破坏性 settle 收敛，
+	// 与生产恢复计划（SettleHistoryProjection）一致。
+	state = settleSessionSwitch(state, 5)
+	secondToken := queuedHistoryTokenForCell(t, state, 1)
+	state = deliverHistoryToken(state, secondToken, 7)
+
+	// B → A：切回同一份历史，必须再次追加。
+	tokensAfterB := state.HistoryEffects.NextToken
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{
+		Snapshot:            scrollbackGrantSnapshot(3, "session A"),
+		ArmScrollbackReplay: true,
+		NewDeliveryEpoch:    true,
+	}, 9)
+	if state.HistoryEffects.NextToken <= tokensAfterB {
+		t.Fatalf("switch back to session A did not re-append its history: next=%d before=%d",
+			state.HistoryEffects.NextToken, tokensAfterB)
+	}
+	state = settleSessionSwitch(state, 10)
+	thirdToken := queuedHistoryTokenForCell(t, state, 1)
+	state = deliverHistoryToken(state, thirdToken, 12)
+
+	// append-only：三次交付都还在账本里，没有任何一次被销毁。
+	for _, token := range []uint64{firstToken, secondToken, thirdToken} {
+		if entry := historyCommitEntry(t, state, token); entry.State != HistoryCommitDelivered {
+			t.Fatalf("append-only ledger lost token %d: %#v", token, entry)
+		}
+	}
+	if state.HistoryEffects.TerminalEpoch != 0 {
+		t.Fatalf("session switch advanced the physical terminal epoch: %d", state.HistoryEffects.TerminalEpoch)
+	}
+
+	// 同会话的授权式重载：不开启新代次，已交付来源仍被去重。
+	tokensBeforeReload := state.HistoryEffects.NextToken
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{
+		Snapshot:            state.Transcript.Snapshot(),
+		ArmScrollbackReplay: true,
+	}, 14)
+	if state.HistoryEffects.NextToken != tokensBeforeReload {
+		t.Fatalf("same-session reload re-minted a delivered source: next=%d want %d",
+			state.HistoryEffects.NextToken, tokensBeforeReload)
+	}
+}
+
+// settleSessionSwitch 模拟生产恢复计划对「替换丢掉了已交付 cell」的收敛：
+// 先结算未决投影（非破坏性），再宣告主帧已从语义源重建。
+func settleSessionSwitch(state UIControllerState, seq uint64) UIControllerState {
+	state = reduceUIControllerState(state, HistoryReconciliationSettled{
+		LayoutGeneration: state.Geometry.Generation,
+	}, seq)
+	return reduceUIControllerState(state, HistoryProjectionRecovered{
+		LayoutGeneration: state.Geometry.Generation,
+	}, seq+1)
+}
+
+func queuedHistoryTokenForCell(t *testing.T, state UIControllerState, cellID scene.CellID) uint64 {
+	t.Helper()
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.Commit.CellID == cellID && entry.State == HistoryCommitQueued {
+			return entry.Commit.Token
+		}
+	}
+	t.Fatalf("no queued history commit for cell %d: %#v", cellID, state.HistoryEffects.Entries())
+	return 0
+}
+
+func deliverHistoryToken(state UIControllerState, token, seq uint64) UIControllerState {
+	state = reduceUIControllerState(state, BeginHistoryCommit{
+		Token: token, LayoutGeneration: state.Geometry.Generation,
+	}, seq)
+	return reduceUIControllerState(state, HistoryCommitAcknowledged{
+		Token: token, Frame: seq, LayoutGeneration: state.Geometry.Generation,
+	}, seq+1)
+}
+
 // historyPendingCount counts ledger entries still awaiting delivery, without the
 // ProjectionUnknown gate that HasPending applies to the scheduler predicate.
 func historyPendingCount(state UIControllerState) int {

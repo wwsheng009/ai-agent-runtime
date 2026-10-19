@@ -386,6 +386,19 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			refreshTranscriptOverlayPager(&state)
 		}
 	case ReplaceTranscriptAction:
+		// 会话切换：授权式装载替换到**不同** runtime session 时开启新的交付
+		// 代次。cell 身份跨会话复用，上一代次的 Delivered 记录若不失效，重证明
+		// 会把它判成"已交付"而零行追加（用户只看到装载确认——假成功）。新代次
+		// 下同一来源可重新铸造：append-only，旧行保留，新会话历史追加在其下方。
+		if a.ArmScrollbackReplay && a.NewDeliveryEpoch {
+			state.HistoryEffects.openDeliveryEpoch()
+		}
+		// 记录一次授权式装载重证明（B）：计划跑完一遍后结算"零新增提交而转录
+		// 非空"，命令侧据此给出显式提示，而不是只留一行装载确认。
+		if a.ArmScrollbackReplay {
+			state.HistoryEffects.armedReplayProofPending = true
+			state.HistoryEffects.armedReplayNoop = false
+		}
 		// 窗口化装载的交付挂起是**装载边界状态**：翻转时必须使规划 memo 失效，
 		// 否则「释放」那一次会因为 memo 命中而跳过整批铸造（被挂起的装载历史
 		// 就永远到不了原生 scrollback）。释放发生在装载收尾的授权式替换上，
@@ -395,12 +408,15 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.HistoryEffects.invalidateTranscriptPlanMemo()
 		}
 		// A session load re-proves the plan from source rather than trusting a
-		// memo. The delivery ledger and the semantic epoch are deliberately
-		// untouched: native scrollback is append-only, so records for content
-		// that is still part of the transcript remain authoritative and
-		// re-emitting them would duplicate rows. A replacement that invalidates
-		// acknowledged history is detected below and resolved by the
-		// non-destructive settle transaction — never by clearing scrollback.
+		// memo. Native scrollback is append-only, so records for content that is
+		// still part of the same delivery generation remain authoritative and
+		// a same-session re-proof must not duplicate rows; only a switch to a
+		// different runtime session (a.NewDeliveryEpoch, handled above) opens a
+		// new generation in which those rows are re-appended below the old ones.
+		// The semantic terminal epoch stays untouched either way. A replacement
+		// that invalidates acknowledged history is detected below and resolved
+		// by the non-destructive settle transaction — never by clearing
+		// scrollback.
 		// The re-proof happens before the no-op check below: a replacement
 		// snapshot that is already installed must still be replanned.
 		if a.ArmScrollbackReplay {

@@ -127,6 +127,13 @@ type HistoryCommitEntry struct {
 	// invalidation, Committed -> invalidated with bytes on screen, partial
 	// failure -> unresolved. The cursor alone never decides this.
 	InvalidationPending bool
+	// DeliveryEpoch is the ledger delivery generation this record was minted in
+	// (see HistoryCommitLedger.deliveryEpoch; 0 is normalized to 1). A Delivered
+	// record blocks a re-mint only inside its own generation: after a session
+	// switch opens a new generation the same source identity must be mintable
+	// again so the loaded history is re-appended below the previous one
+	// (native scrollback is append-only).
+	DeliveryEpoch uint64
 }
 
 func (e HistoryCommitEntry) Clone() HistoryCommitEntry {
@@ -223,6 +230,17 @@ func historyCommitKey(c HistoryCommit) historyCommitRangeKey {
 	}
 }
 
+// historyCommitTombstone 是终态压缩后保留的来源阻断身份：
+//   - permanent=true：已结算且不可重铸的隔离终态，跨交付代次永久阻断同源铸造
+//     （settle 契约：来源身份保持终态）；
+//   - permanent=false：Delivered（已交付）记录，只在交付代次 epoch 内阻断。
+//     会话切换会开启新一代次，此时同一来源可重新铸造——新会话历史按 append-only
+//     语义重新追加在旧内容下方。
+type historyCommitTombstone struct {
+	epoch     uint64
+	permanent bool
+}
+
 // HistoryCommitLedger is reducer-owned effect progress. It deliberately has
 // no terminal I/O and does not infer identity from line text or hashes.
 type HistoryCommitLedger struct {
@@ -242,12 +260,19 @@ type HistoryCommitLedger struct {
 	// hasUnresolvedTerminalDelivery O(1); production pprof showed the previous
 	// full-map scan inside the per-action wake predicate as a hot spot.
 	unresolvedCount int
-	// compactedTerminalSources 是被终态压缩剪除、但来源身份仍必须阻断再次铸造的
+	// compactedTerminalSources 是被终态压缩剪除、但来源身份仍需阻断再次铸造的
 	// source key 最小集（Delivered/Settled 等阻断态）。P2-1：Delivered transcript 条目
 	// 与 settle 后的隔离终态条目不再被任何读取方消费（行载荷已置 nil 或无用），
-	// 但 "该来源已交付" 必须永远阻断重复铸造（append-only 去重）；只有外部整体
-	// 替换 ledger 时随之清零。
-	compactedTerminalSources map[historyCommitSourceKey]struct{}
+	// 但 "该来源已交付" 在**同一交付代次内**必须阻断重复铸造（append-only 去重）。
+	// 代次口径见 historyCommitTombstone / deliveryEpoch。
+	compactedTerminalSources map[historyCommitSourceKey]historyCommitTombstone
+	// deliveryEpoch 是 ledger 内部的逻辑交付代次（1-based；0 视同 1）。会话切换
+	// （授权式装载发布到不同 runtime session）开启新一代次：上一代次的 Delivered
+	// 记录不再阻断重铸，新会话历史重新追加在旧内容下方（append-only：旧行保留）。
+	// 它与 TerminalEpoch 是两回事：后者计数物理终端代次（测试钉住"无物理动作不
+	// 推进"），这里只是交付账本的去重口径。Queued（在途写入必然落地）与已结算的
+	// 隔离终态跨代次仍然阻断。
+	deliveryEpoch uint64
 	// compactedEntries 是累计剪除的条目数（单调，soak 观测用：证明压缩确实发生）。
 	compactedEntries uint64
 	// acksSinceCompact 是距上次终态压缩的成功 ack 数。装载期 ledger 会一次性
@@ -279,7 +304,7 @@ func NewHistoryCommitLedger() *HistoryCommitLedger {
 		byToken:                  make(map[uint64]HistoryCommitEntry),
 		byRange:                  make(map[historyCommitRangeKey]uint64),
 		bySource:                 make(map[historyCommitSourceKey]map[uint64]struct{}),
-		compactedTerminalSources: make(map[historyCommitSourceKey]struct{}),
+		compactedTerminalSources: make(map[historyCommitSourceKey]historyCommitTombstone),
 		tokens:                   make([]uint64, 0, 64),
 	}
 }
@@ -306,17 +331,21 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	key := historyCommitKey(commit)
 	if token, exists := l.byRange[key]; exists {
 		previous := l.byToken[token]
-		if previous.BlocksRemint() {
+		if l.entryBlocksRemintInEpoch(previous) {
 			return ErrDuplicateCommitRange
 		}
 	}
 	sourceKey := historyCommitSourceIdentity(commit)
 	// 已压缩的阻断身份仍然生效：调用方绕过 enqueueHistoryCandidates 的直接入队
-	// （测试、手写状态）同样不得二次铸造同一来源。
-	if _, blocked := l.compactedTerminalSources[sourceKey]; blocked {
+	// （测试、手写状态）同样不得在同一交付代次内二次铸造同一来源。
+	if l.tombstoneBlocksRemint(sourceKey) {
 		return ErrDuplicateCommitRange
 	}
-	l.byToken[commit.Token] = HistoryCommitEntry{Commit: commit.Clone(), State: HistoryCommitQueued}
+	l.byToken[commit.Token] = HistoryCommitEntry{
+		Commit:        commit.Clone(),
+		State:         HistoryCommitQueued,
+		DeliveryEpoch: l.currentDeliveryEpoch(),
+	}
 	l.byRange[key] = commit.Token
 	l.tokens = insertSortedToken(l.tokens, commit.Token)
 	if l.bySource[sourceKey] == nil {
@@ -346,6 +375,53 @@ func (l *HistoryCommitLedger) mintedThrough(key historyCommitSourceKey) bool {
 		return false
 	}
 	return !historyCommitSourceKeyLess(l.mintedFrontier, key)
+}
+
+// currentDeliveryEpoch 归一化交付代次：0 值 ledger（手写测试状态）视同第 1 代。
+func (l *HistoryCommitLedger) currentDeliveryEpoch() uint64 {
+	if l == nil || l.deliveryEpoch == 0 {
+		return 1
+	}
+	return l.deliveryEpoch
+}
+
+// openDeliveryEpoch 开启新一代交付代次（会话切换）。单调递增，永不回退。
+func (l *HistoryCommitLedger) openDeliveryEpoch() {
+	if l == nil {
+		return
+	}
+	l.deliveryEpoch = l.currentDeliveryEpoch() + 1
+}
+
+// entryBlocksRemintInEpoch 是 BlocksRemint 的代次化口径：Queued（在途写入必然
+// 落地）与不可重铸的隔离终态跨代次阻断；Delivered 记录只在它被交付的那一代次
+// 内阻断。会话切换后旧代次的 Delivered 来源可再次铸造（历史重新追加）。
+func (l *HistoryCommitLedger) entryBlocksRemintInEpoch(entry HistoryCommitEntry) bool {
+	switch entry.State {
+	case HistoryCommitQueued:
+		return true
+	case HistoryCommitDelivered:
+		return entry.DeliveryEpoch == 0 || entry.DeliveryEpoch == l.currentDeliveryEpoch()
+	case HistoryCommitQuarantined:
+		return !entry.MayRemint
+	default:
+		return false
+	}
+}
+
+// tombstoneBlocksRemint 是压缩墓碑的代次化口径（见 historyCommitTombstone）。
+func (l *HistoryCommitLedger) tombstoneBlocksRemint(key historyCommitSourceKey) bool {
+	if l == nil {
+		return false
+	}
+	block, ok := l.compactedTerminalSources[key]
+	if !ok {
+		return false
+	}
+	if block.permanent {
+		return true
+	}
+	return block.epoch == 0 || block.epoch == l.currentDeliveryEpoch()
 }
 
 // RebasePending updates only the display payload of an unstarted effect after
@@ -731,23 +807,73 @@ func (l *HistoryCommitLedger) pruneEntry(token uint64, entry HistoryCommitEntry)
 	//（既有语义），因此不留 tombstone。
 	if entry.BlocksRemint() {
 		if l.compactedTerminalSources == nil {
-			l.compactedTerminalSources = make(map[historyCommitSourceKey]struct{})
+			l.compactedTerminalSources = make(map[historyCommitSourceKey]historyCommitTombstone)
 		}
-		l.compactedTerminalSources[sourceKey] = struct{}{}
+		block := historyCommitTombstone{
+			epoch: entry.DeliveryEpoch,
+			// settle 终态（不可重铸的隔离）跨代次永久阻断；Delivered 只阻断本代。
+			permanent: entry.State == HistoryCommitQuarantined,
+		}
+		if block.epoch == 0 {
+			block.epoch = l.currentDeliveryEpoch()
+		}
+		if previous, ok := l.compactedTerminalSources[sourceKey]; ok {
+			// 同一来源可能先后在不同代次被剪除：永久阻断取或；代次取较新者
+			// （代次单调递增，旧代次的墓碑表示已被更新的阻断吸收）。
+			if previous.permanent {
+				block.permanent = true
+			}
+			if previous.epoch > block.epoch {
+				block.epoch = previous.epoch
+			}
+		}
+		l.compactedTerminalSources[sourceKey] = block
 	}
 	l.compactedEntries++
 }
 
+// hasTerminalRecordForSource reports whether this source identity already blocks
+// a second mint in the ledger's *current* delivery epoch. Delivered records from
+// an earlier delivery epoch deliberately do not block: a session switch must be
+// able to re-mint the same source identity so the loaded history is re-appended
+// (native scrollback is append-only).
 func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSourceKey) bool {
 	if l == nil {
 		return false
 	}
 	// A1-3 步 3b：游标早出——未铸造（且无墓碑，墓碑必然已铸造）的来源不可能
-	// 有终态记录。语义与旧实现逐字等价：bySource 非空或墓碑存在 ⇒ minted。
+	// 有终态记录。
 	if !l.mintedThrough(key) {
 		return false
 	}
-	if _, blocked := l.compactedTerminalSources[key]; blocked {
+	if l.tombstoneBlocksRemint(key) {
+		return true
+	}
+	for token := range l.bySource[key] {
+		entry, ok := l.byToken[token]
+		if !ok {
+			continue
+		}
+		if l.entryBlocksRemintInEpoch(entry) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasResolvedRecordForSource reports whether this source identity was ever
+// resolved (or is still live) in ANY delivery epoch. The acknowledgment path
+// uses it to attribute a proof for a compacted token to the record that was
+// minted: re-qualifying against the current epoch would quarantine every late
+// ack that crosses a session switch as ErrCommitSourceChanged.
+func (l *HistoryCommitLedger) hasResolvedRecordForSource(key historyCommitSourceKey) bool {
+	if l == nil {
+		return false
+	}
+	if !l.mintedThrough(key) {
+		return false
+	}
+	if _, ok := l.compactedTerminalSources[key]; ok {
 		return true
 	}
 	for token := range l.bySource[key] {
@@ -846,11 +972,12 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 		clone.bySource[key] = cloneTokens
 	}
 	if len(l.compactedTerminalSources) > 0 {
-		clone.compactedTerminalSources = make(map[historyCommitSourceKey]struct{}, len(l.compactedTerminalSources))
-		for key := range l.compactedTerminalSources {
-			clone.compactedTerminalSources[key] = struct{}{}
+		clone.compactedTerminalSources = make(map[historyCommitSourceKey]historyCommitTombstone, len(l.compactedTerminalSources))
+		for key, block := range l.compactedTerminalSources {
+			clone.compactedTerminalSources[key] = block
 		}
 	}
+	clone.deliveryEpoch = l.deliveryEpoch
 	clone.compactedEntries = l.compactedEntries
 	clone.acksSinceCompact = l.acksSinceCompact
 	clone.compactedOnce = l.compactedOnce

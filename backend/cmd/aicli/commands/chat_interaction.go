@@ -71,6 +71,13 @@ type chatInteractionCoordinator struct {
 	// durable action，mailbox 满时避免锁环）；surface 自带锁。
 	uiSurface atomic.Pointer[ui.FixedBottomSurface]
 
+	// replayedHistorySessionMu/ID 记录最近一次**授权式**（装载标记）转录发布
+	// 的 runtime session 身份：同一个进程内切到不同会话时，发布漏斗据此开启
+	// 新的交付代次（见 noteArmedTranscriptSession）。装载收尾会在后台 goroutine
+	// 上发布，因此这里用独立互斥锁而不是 c.mu。
+	replayedHistorySessionMu sync.Mutex
+	replayedHistorySessionID string
+
 	mu            sync.Mutex
 	promptVisible bool
 	// promptInputMu protects the editor-facing draft independently from c.mu.

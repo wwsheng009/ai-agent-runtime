@@ -109,6 +109,12 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryWithLoadGrant(
 	// native scrollback 是 append-only：装载不清屏，内容按序追加。正常交互
 	// （resize/流式增量/主题切换/写入恢复）走上面的提前返回，永远不会触发装载
 	// 重证明。
+	if sessionLoad {
+		// 会话装载（/resume、/load、启动恢复）：同一份授权替换，外加「零行
+		// 重证明」的显式提示记账（历史已在本终端输出过时不再只留确认行）。
+		b.sessionInteractionLoadReplacementSnapshot()
+		return
+	}
 	b.sessionInteractionReplacementSnapshot()
 }
 
@@ -476,7 +482,7 @@ func (b *chatRuntimeEventBridge) replaceResumeCompactHistoryProjection(messages 
 	// 与 replaceCanonicalHistoryProjection 相同的发布语义：replacement snapshot
 	// 同时携带一次性的原生 scrollback 替换授权，compact 后视图才能替换掉
 	// 事件日志重放出来的全量旧 cell。
-	b.sessionInteractionReplacementSnapshot()
+	b.sessionInteractionLoadReplacementSnapshot()
 	return true
 }
 
