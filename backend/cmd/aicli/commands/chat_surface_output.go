@@ -84,12 +84,38 @@ func (o chatPromptOverlay) showComposerPreview(prompt string) bool {
 		return false
 	}
 	o.beginDirectOutput()
-	chatSessionPopupPort(o.session).ShowPopupInputForOwner(nil, prompt, chatComposerPreviewPopupOwner)
+	// The preview must own a tokenized (handle-based) popup input: the modal
+	// composer folds the typed text into the popup composer line
+	// (foldChatPriorityPromptPopupInput) and claims the line editor's raw
+	// echoes (onTerminalWrite) only while a valid handle is registered. With
+	// the previous owner-only ShowPopupInputForOwner the editor stayed in its
+	// raw fallback: its relative-column echo (CR + N columns, no absolute row
+	// placement) landed on whatever row painted last — the status row — so the
+	// typed answer overwrote the bottom status bar instead of appearing after
+	// the prompt label.
+	handle := chatSessionPopupPort(o.session).BeginPopupInputForOwner(nil, prompt, chatComposerPreviewPopupOwner)
+	if o.session != nil && handle.Valid() {
+		o.session.priorityPopupHandle = handle
+		o.session.priorityPopupLines = nil
+	}
 	o.resetPromptState()
 	return true
 }
 
 func (o chatPromptOverlay) clearComposerPreview() {
+	handle := ui.PopupHandle{}
+	if o.session != nil {
+		// Release the popup-input registration together with the popup: a
+		// stale handle would make the next modal composer claim its writes
+		// into a popup that no longer renders, hiding the typed text.
+		handle = o.session.priorityPopupHandle
+		o.session.priorityPopupHandle = ui.PopupHandle{}
+		o.session.priorityPopupLines = nil
+	}
+	if handle.Valid() {
+		o.clearPopupHandle(handle)
+		return
+	}
 	o.clearOwnedModalPopup(chatComposerPreviewPopupOwner)
 }
 

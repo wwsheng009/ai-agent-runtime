@@ -1546,7 +1546,8 @@ func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, stream
 	// 检查危险命令
 	if isDangerousCommand(executedCommand) {
 		printfDirectInteractiveOutput(session, "\n警告: 检测到可能危险的命令: %s\n", executedCommand)
-		if !showRuntimeComposerPrompt(session, "确认执行? (yes/no): ") {
+		renderedConfirmOnSurface := showRuntimeComposerPrompt(session, "确认执行? (yes/no): ")
+		if !renderedConfirmOnSurface {
 			// The unified TerminalSession path has no legacy surface to host
 			// transient composer UI. Route the fallback prompt through the same
 			// owned-output adapter instead of reviving a raw stdout writer.
@@ -1557,6 +1558,13 @@ func executeShellCommandDetailedMode(session *ChatSession, cmdStr string, stream
 			defer endAction()
 			return chatInteractiveReadTransientLine(session, context.Background())
 		}()
+		if renderedConfirmOnSurface {
+			// Release the transient confirm popup (and its popup-input
+			// registration) right after the decision was read; a lingering
+			// registration would make the next modal composer claim its
+			// writes into a popup that no longer renders.
+			clearRuntimeComposerPrompt(session)
+		}
 		if err != nil || strings.ToLower(strings.TrimSpace(normalizeQueuedInputLine(confirm))) != "yes" {
 			return result, fmt.Errorf("命令已取消")
 		}
