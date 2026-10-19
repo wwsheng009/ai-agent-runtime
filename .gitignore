@@ -127,3 +127,4 @@ backend/configs/backend/
 backend/runtime-server.exe.bak-*
 /data/
 .stash-recovery-backup/
+.arts/
