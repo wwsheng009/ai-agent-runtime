@@ -131,6 +131,65 @@ func TestBuildChatExportResultDocument(t *testing.T) {
 	}
 }
 
+func TestChatExportShouldOpenPickerOnlyForBareExport(t *testing.T) {
+	cases := []struct {
+		name string
+		opts chatExportOptions
+		want bool
+	}{
+		{"bare export", chatExportOptions{}, true},
+		// 解析器默认把 Format 预置为 full 但不置 ExplicitFormat：裸 /export 仍应
+		// 打开选择器。
+		{"default format not explicit", chatExportOptions{Format: chatExportFormatFull}, true},
+		{"explicit target", chatExportOptions{Target: "current", ExplicitTarget: true}, false},
+		{"explicit body format", chatExportOptions{Format: chatExportFormatBody, ExplicitFormat: true}, false},
+		{"explicit tools format", chatExportOptions{Format: chatExportFormatMarkdownTools, ExplicitFormat: true}, false},
+		{"explicit trace format", chatExportOptions{Format: chatExportFormatMarkdownTrace, ExplicitFormat: true}, false},
+		{"explicit output path", chatExportOptions{OutputPath: "/tmp/out.md"}, false},
+		{"explicit dir", chatExportOptions{OutputDir: "/tmp/exports"}, false},
+	}
+	for _, tc := range cases {
+		if got := chatExportShouldOpenPicker(tc.opts); got != tc.want {
+			t.Fatalf("%s: chatExportShouldOpenPicker()=%v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestExecuteStructuredExportCommandExplicitFormatKeepsFormat(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	sessionDir := t.TempDir()
+	manager, userID, _, err := newChatSessionManager(sessionDir)
+	if err != nil {
+		t.Fatalf("create session manager: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+	runtimeSession, err := manager.CreateSession(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("create runtime session: %v", err)
+	}
+
+	session := &ChatSession{
+		Model:          "gpt-test",
+		RuntimeSession: runtimeSession,
+		SessionManager: manager,
+		SessionDir:     sessionDir,
+		SessionUserID:  userID,
+	}
+	// 显式 --body 但省略目标：必须直接导出当前会话正文，而不是打开选择器后
+	// 被硬编码的 full 覆盖。
+	result, handled := executeStructuredExportCommand(session, "/export --body")
+	if !handled {
+		t.Fatal("/export --body was not handled by the structured executor")
+	}
+	if result.Screen != nil {
+		t.Fatalf("explicit --body must not open the picker, got %#v", result.Screen)
+	}
+	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
+	if !strings.Contains(text, "Format:") || !strings.Contains(text, string(chatExportFormatBody)) {
+		t.Fatalf("explicit --body must export the body format, got:\n%s", text)
+	}
+}
+
 func TestBuildExportSessionFullScreenItemsCurrentIsSelectable(t *testing.T) {
 	current := &runtimechat.Session{ID: "current-1"}
 	items, selectable := buildExportSessionFullScreenItems(nil, current, time.Now())

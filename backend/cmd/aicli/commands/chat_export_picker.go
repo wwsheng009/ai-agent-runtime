@@ -44,8 +44,8 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 		return
 	}
 
-	// Candidate sessions: the current session first (disabled row), then the
-	// resumable history list. No candidates → nothing to export.
+	// Candidate sessions: the current session first (selectable, unlike the
+	// resume picker's disabled placeholder), then the resumable history list.
 	currentID := currentRuntimeSessionID(session)
 	var candidates []*runtimechat.Session
 	if session.SessionManager != nil {
@@ -60,24 +60,11 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 		_ = renderChatCommandResult(session, commandTextResult("当前没有可导出的会话"), false)
 		return
 	}
-	if len(candidates) == 0 && session.RuntimeSession != nil {
-		// No resumable history but a live current session: mirror the legacy
-		// exportInteractiveSelect fast path and export the current session in
-		// full instead of opening a picker with only a disabled row.
-		opts := chatExportOptions{
-			Target:         "current",
-			Format:         chatExportFormatFull,
-			ExplicitTarget: true,
-			ExplicitFormat: true,
-		}
-		result, err := exportChatSession(session, opts)
-		if err != nil {
-			_ = renderChatCommandResult(session, commandErrorResult(err), false)
-			return
-		}
-		_ = renderChatCommandResult(session, buildChatExportResultDocument(result), false)
-		return
-	}
+	// 即使没有其它可恢复历史、只剩当前会话，也必须进入选择器：export picker
+	// 的 current 行是可选中项（buildExportSessionFullScreenItems 与 resume
+	// picker 的 disabled 占位不同），且第二阶段是格式选择。此前的“候选为空即直接
+	// 导出 full”快路径会跳过整个选择器并硬编码 full，导致裸 /export 不弹选择器、
+	// 且 --body/--tools/--trace 被静默改写成 full。
 
 	// 批次 2：租约与 close 序列由统一框架承担；两阶段（会话 → 格式）在同一
 	// 租约内推进（与 backtrack 同型），文件写入仍在租约释放之后。
@@ -243,7 +230,14 @@ func executeStructuredExportCommand(session *ChatSession, command string) (Comma
 	if err != nil {
 		return commandTextResult("错误: " + err.Error() + "\n用法: " + chatExportUsage), true
 	}
-	if !opts.ExplicitTarget && canOpenChatExportPicker(session) {
+	// 只有完全裸的 /export 才进入交互式选择器：任一显式选项（目标、格式或
+	// --output/--dir）都表示用户已表达意图，必须直接应用。此前门禁只判
+	// ExplicitTarget，于是 `/export --body`（省略目标）被误判成裸命令打开选择器，
+	// 而 ExportPickerRequest 是空结构、picker 内又把格式起点硬编码为 full，最终
+	// 将 --body/--tools/--trace/--output/--dir 全部静默丢弃。现在显式选项一律直
+	// 接生效（无目标时降级为 current），与 /resume 用 ResumePickerRequest 携带
+	// filter 的语义对齐。
+	if chatExportShouldOpenPicker(opts) && canOpenChatExportPicker(session) {
 		return CommandResult{
 			Action: CommandContinue,
 			Screen: chatScreenEffectSpec("export.picker", "导出会话", func(s *ChatSession) {
@@ -260,6 +254,21 @@ func executeStructuredExportCommand(session *ChatSession, command string) (Comma
 		return commandErrorResult(err), true
 	}
 	return buildChatExportResultDocument(result), true
+}
+
+// chatExportShouldOpenPicker reports whether a parsed /export invocation should
+// open the interactive session/format picker. Only a fully bare invocation —
+// no target, no explicit format, and no output path/dir — qualifies; any
+// explicit option means the user already stated intent and the command must
+// apply directly instead of silently discarding it behind the picker.
+func chatExportShouldOpenPicker(opts chatExportOptions) bool {
+	if opts.ExplicitTarget || opts.ExplicitFormat {
+		return false
+	}
+	if strings.TrimSpace(opts.OutputPath) != "" || strings.TrimSpace(opts.OutputDir) != "" {
+		return false
+	}
+	return true
 }
 
 // buildChatExportResultDocument is the terminal-neutral projection of the
