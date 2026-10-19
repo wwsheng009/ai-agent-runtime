@@ -125,3 +125,80 @@ func TestCacheSourceOverviewHitRatioLegacyFallback(t *testing.T) {
 		t.Fatalf("legacy cache_hit_ratio = %v, want %v", *overview.CacheHitRatio, want)
 	}
 }
+
+// TestCacheSourceOverviewReasoningAlignedWithInputTotal 锁定总览 SQL 的相邻列序：
+// reasoning_tokens 与输入总量（input_total_tokens）来自第 10/11 列，互换会把
+// reasoning 汇总写成输入总量（并让写缓存比率分母失真）。两者数值故意不同，
+// 任一方向错位都会失败。
+func TestCacheSourceOverviewReasoningAlignedWithInputTotal(t *testing.T) {
+	store, err := Open(Config{Path: filepath.Join(t.TempDir(), "usage_analytics.sqlite")})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	collector := newCollector(store, nil, nil)
+	finished := time.Now()
+	records := []cacheanalytics.CacheRequestRecord{
+		{
+			LLMRequestID: "req-align-a",
+			SessionID:    "s-align",
+			Status:       cacheanalytics.RequestStatusSuccess,
+			CacheStatus:  cacheanalytics.CacheStatusHit,
+			FinishedAt:   &finished,
+			Usage: &cacheanalytics.CacheUsage{
+				PromptTokens:          2000,
+				CompletionTokens:      100,
+				TotalTokens:           2100,
+				CachedTokens:          1500,
+				CacheReadTokens:       1500,
+				UncachedInputTokens:   500,
+				InputTotalTokens:      2000,
+				ReasoningTokens:       111,
+				CacheCreationTokens:   400,
+				CacheReadReported:     true,
+				CacheCreationReported: true,
+			},
+		},
+		{
+			LLMRequestID: "req-align-b",
+			SessionID:    "s-align",
+			Status:       cacheanalytics.RequestStatusSuccess,
+			CacheStatus:  cacheanalytics.CacheStatusHit,
+			FinishedAt:   &finished,
+			Usage: &cacheanalytics.CacheUsage{
+				PromptTokens:        800,
+				CompletionTokens:    50,
+				TotalTokens:         1350,
+				CachedTokens:        500,
+				CacheReadTokens:     500,
+				UncachedInputTokens: 800,
+				InputTotalTokens:    1300,
+				ReasoningTokens:     22,
+				CacheReadReported:   true,
+			},
+		},
+	}
+	for _, record := range records {
+		collector.upsertRequest(record)
+	}
+
+	overview, err := NewCacheSource(store, nil, false).Overview("s-align")
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if overview.Tokens.ReasoningTokens != 133 {
+		t.Fatalf("reasoning_tokens 汇总 = %d, want 133（等于输入总量 3300 即列序错位）",
+			overview.Tokens.ReasoningTokens)
+	}
+	if overview.Tokens.UncachedInputTokens != 1300 {
+		t.Fatalf("uncached_input_tokens 汇总 = %d, want 1300", overview.Tokens.UncachedInputTokens)
+	}
+	if overview.CacheWriteRatio == nil {
+		t.Fatal("cache_write_ratio missing")
+	}
+	// 写缓存比率分母是输入总量（2000 + 1300），不是 reasoning 汇总。
+	if want := 400.0 / 3300.0; math.Abs(*overview.CacheWriteRatio-want) > 1e-9 {
+		t.Fatalf("cache_write_ratio = %v, want %v", *overview.CacheWriteRatio, want)
+	}
+}

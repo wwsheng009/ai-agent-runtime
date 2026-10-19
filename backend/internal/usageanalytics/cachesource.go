@@ -182,8 +182,10 @@ FROM usage_requests WHERE ` + scope
 	if err := rows.Scan(
 		&total, &withUsage, &cacheReported,
 		&prompt, &completion, &totalTokens,
-		&cacheRead, &cacheCreation, &uncachedInput, &reasoning,
-		&inputTotalSum,
+		// 顺序严格对齐 SELECT 列序：uncached_input → input_total → reasoning
+		// （两者互换曾导致总览 reasoning 汇总显示为输入总量、写缓存比率分母失真）。
+		&cacheRead, &cacheCreation, &uncachedInput, &inputTotalSum,
+		&reasoning,
 		&windowFrom, &windowTo,
 		&hit, &write, &reportedZero, &notReported, &errCnt,
 		&hitRatio,
