@@ -4747,6 +4747,13 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 					assistant: inj.Assistant, assistantBoundaryGroup: inj.AssistantBoundaryGroup,
 				})
 			case inj.Command != "":
+				// 命令回执默认写入事件日志（保留审计），但 resume 不回放：
+				// 只读命令（/export 等）的回执是本次运行的画面，每次 resume 都重放
+				// 会累积历史、污染可恢复会话。--debug 模式开启时才回放，用于
+				// 调试命令渲染与 Scene 重建。
+				if b.session == nil || !chatSessionDebugMode(b.session) {
+					continue
+				}
 				en := entry{command: inj.Command}
 				if inj.Document != nil {
 					en.document = inj.Document.Clone()

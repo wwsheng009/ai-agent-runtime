@@ -216,8 +216,9 @@ func TestReplaceCanonicalHistoryProjectionDiscardsTruncatedTurnsAcrossEventLogRe
 
 	replayed := newChatRuntimeEventBridge(&ChatSession{})
 	replayed.eventLogPathOverride = logPath
-	if count, err := replayed.replayEventLog(); err != nil || count != 4 {
-		t.Fatalf("replay history-reset log = (%d, %v), want 4 records and nil error", count, err)
+	// 默认不回放命令回执（只读命令的回执是本次运行的画面，resume 不应累积）。
+	if count, err := replayed.replayEventLog(); err != nil || count != 3 {
+		t.Fatalf("replay history-reset log = (%d, %v), want 3 records and nil error", count, err)
 	}
 	assertCanonicalBacktrackProjection(t, replayed.sceneSnapshot())
 }
@@ -239,7 +240,6 @@ func assertCanonicalBacktrackProjection(t *testing.T, snapshot *scene.Snapshot) 
 		"已回退到 user turn 0：上方旧消息已失效",
 		"surviving user turn",
 		"surviving assistant answer",
-		"backtrack apply: turn=0",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("canonical projection is missing %q:\n%s", want, got)

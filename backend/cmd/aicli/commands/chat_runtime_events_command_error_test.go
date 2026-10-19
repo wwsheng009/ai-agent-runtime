@@ -135,35 +135,47 @@ func TestRenderLayer_Scene_ReplayRestoresCommandAndError(t *testing.T) {
 	}
 
 	snap1 := bridge1.sceneSnapshot()
-	want := scene.RenderText(snap1.Cells, snap1.Revision)
 
-	// 新 bridge（模拟会话重启）重放日志：命令/错误注入记录同样恢复。
+	// 新 bridge（模拟会话重启）重放日志：默认不回放命令/错误注入记录
+	// （只读命令的回执是本次运行的画面，resume 不应累积历史）。
 	bridge2 := newChatRuntimeEventBridge(&ChatSession{})
 	bridge2.eventLogPathOverride = logPath
 	n, err := bridge2.replayEventLog()
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
-	if n != 13 {
-		t.Fatalf("replayed=%d want 13", n)
+	if n != 11 {
+		t.Fatalf("replayed=%d want 11", n)
 	}
 	snap2 := bridge2.sceneSnapshot()
-	if len(snap2.Cells) != len(snap1.Cells) {
-		t.Fatalf("cells after replay=%d want %d", len(snap2.Cells), len(snap1.Cells))
+	// 默认不回放命令注入记录（2 条），但错误注入记录仍回放。
+	// 所以 replay 的 cell 数比 live 少 2。
+	if len(snap2.Cells) != len(snap1.Cells)-2 {
+		t.Fatalf("cells after replay=%d want %d", len(snap2.Cells), len(snap1.Cells)-2)
 	}
-	for i := range snap1.Cells {
-		if snap1.Cells[i].Kind != snap2.Cells[i].Kind {
-			t.Fatalf("cell %d kind: live=%v replay=%v", i, snap1.Cells[i].Kind, snap2.Cells[i].Kind)
-		}
-	}
+	// 验证 replay 中不包含命令内容，但包含用户输入、错误和事件内容。
 	got := scene.RenderText(snap2.Cells, snap2.Revision)
-	if len(got) != len(want) {
-		t.Fatalf("render rows after replay=%d want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("render row %d: live=%q replay=%q", i, want[i], got[i])
+	for _, missing := range []string{"cmd output", "cmd output 2"} {
+		for _, row := range got {
+			if strings.Contains(row, missing) {
+				t.Fatalf("replay unexpectedly contains command %q: %q", missing, row)
+			}
 		}
+	}
+	foundUserInput, foundError := false, false
+	for _, row := range got {
+		if strings.Contains(row, "U1") {
+			foundUserInput = true
+		}
+		if strings.Contains(row, "操作错误") {
+			foundError = true
+		}
+	}
+	if !foundUserInput {
+		t.Fatalf("replay missing user input")
+	}
+	if !foundError {
+		t.Fatalf("replay missing error")
 	}
 }
 
