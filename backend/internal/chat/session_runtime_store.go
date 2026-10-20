@@ -3,7 +3,9 @@ package chat
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +35,21 @@ type RuntimeStateStore interface {
 	LoadState(ctx context.Context, sessionID string) (*RuntimeState, error)
 	SaveState(ctx context.Context, state *RuntimeState) error
 	DeleteState(ctx context.Context, sessionID string) error
+}
+
+// RuntimeStateStatusReader 是可选接口：只读运行时状态的**标量投影**
+// （status / turn / checkpoint / head_offset），不解析任何大 JSON 列。
+//
+// 为什么需要：`LoadState` 会解码 9 个 JSON 列，其中
+// `stable_tool_surface_json` 平均 70 KB、最大 131 KB（全库 117.5 MB）；
+// 而注册表对账、终态判定等调用方只关心 `status`。
+// pprof 实测（compact 会话冷启动）：`LoadState` 占 188.9 MB / 28.5% 的累计分配，
+// 其中绝大部分是这些与判定无关的工具面 JSON。
+//
+// 语义：与 LoadState 的标量字段完全一致；JSON 形态字段（RunMeta / 工具面 /
+// pending 项 / active jobs）留空。需要完整状态的调用方仍应用 LoadState。
+type RuntimeStateStatusReader interface {
+	LoadStateStatus(ctx context.Context, sessionID string) (*RuntimeState, error)
 }
 
 // StableToolSurfaceInvalidator 由支持批量清理「会话级稳定工具面」缓存的 store 实现。
@@ -2149,6 +2166,131 @@ func (s *SQLiteRuntimeStore) GetLease(ctx context.Context, sessionID string) (*S
 	return lease, nil
 }
 
+// putToolSurfaceContent 把工具面 JSON 按内容寻址写入，返回 fingerprint 引用。
+//
+// 相同 payload 只落一份（INSERT ... DO NOTHING），因此 N 个会话共享同一套
+// 工具面时存储量恒为一份。fingerprint 用 sha256 全量摘要：工具面最大约 131 KB，
+// 摘要计算远低于一次写入的成本。
+//
+// 调用方在失败时会回退到内联列（见 SaveState），因此本函数不需要保证一定成功。
+func (s *SQLiteRuntimeStore) putToolSurfaceContent(ctx context.Context, payload []byte) (string, error) {
+	if s == nil || len(payload) == 0 {
+		return "", nil
+	}
+	sum := sha256.Sum256(payload)
+	fingerprint := hex.EncodeToString(sum[:])
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO runtime_tool_surface_content (fingerprint, payload_json, byte_count, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(fingerprint) DO NOTHING
+	`, fingerprint, payload, len(payload), time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return "", fmt.Errorf("store tool surface content: %w", err)
+	}
+	return fingerprint, nil
+}
+
+// loadToolSurfaceContent 按 fingerprint 取回工具面 JSON。
+// 不存在时返回 (nil, nil)，调用方按「无工具面」处理。
+func (s *SQLiteRuntimeStore) loadToolSurfaceContent(ctx context.Context, fingerprint string) ([]byte, error) {
+	fingerprint = strings.TrimSpace(fingerprint)
+	if s == nil || fingerprint == "" {
+		return nil, nil
+	}
+	// 读侧超时：内容表查询同样不得无限期挂住（门禁 TestReadAPIInventoryRouting
+	// 要求每个读 API 都带 readOperationContext）。
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
+	var payload []byte
+	err := s.readQueryer().QueryRowContext(ctx, `
+		SELECT payload_json FROM runtime_tool_surface_content WHERE fingerprint = ?
+	`, fingerprint).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load tool surface content: %w", err)
+	}
+	return payload, nil
+}
+
+// LoadStateStatus 只读运行时状态的标量投影，不解析任何大 JSON 列。
+//
+// 与 LoadState 的唯一差别：`stable_tool_surface_json`（平均 70 KB / 最大 131 KB）
+// 与 `frozen_turn_tools_json`（最大 83 KB）等 JSON 列**根本不进入 SELECT**，
+// 因此既没有 SQL 侧的字节拷贝，也没有 json.Unmarshal 的反射开销。
+//
+// 用于「只关心 status」的判定路径：注册表对账、终态判定、租约检查。
+// 需要 RunMeta / 工具面 / pending 项的调用方必须继续用 LoadState。
+func (s *SQLiteRuntimeStore) LoadStateStatus(ctx context.Context, sessionID string) (*RuntimeState, error) {
+	if s == nil {
+		return nil, fmt.Errorf("runtime store is not initialized")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	if skip, err := s.ensureForReadCtx(ctx); err != nil {
+		return nil, err
+	} else if skip {
+		return nil, nil
+	}
+	ctx, cancel := s.readOperationContext(ctx)
+	defer cancel()
+	if err := s.checkPoolReentry("LoadStateStatus"); err != nil {
+		return nil, err
+	}
+	row := s.readQueryer().QueryRowContext(ctx, `
+		SELECT session_id, status, current_turn_id, current_checkpoint_id,
+		       suspended_turn_id, last_run_terminal_reason, head_offset, updated_at
+		FROM session_runtime_state
+		WHERE session_id = ?
+	`, sessionID)
+
+	var (
+		state                RuntimeState
+		statusRaw            string
+		currentTurnIDRaw     sql.NullString
+		currentCheckpointRaw sql.NullString
+		suspendedTurnIDRaw   sql.NullString
+		lastRunReasonRaw     sql.NullString
+		updatedAtRaw         string
+	)
+	if err := row.Scan(
+		&state.SessionID,
+		&statusRaw,
+		&currentTurnIDRaw,
+		&currentCheckpointRaw,
+		&suspendedTurnIDRaw,
+		&lastRunReasonRaw,
+		&state.HeadOffset,
+		&updatedAtRaw,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load runtime state status: %w", err)
+	}
+	state.Status = SessionStatus(statusRaw)
+	if currentTurnIDRaw.Valid {
+		state.CurrentTurnID = currentTurnIDRaw.String
+	}
+	if currentCheckpointRaw.Valid {
+		state.CurrentCheckpointID = currentCheckpointRaw.String
+	}
+	if suspendedTurnIDRaw.Valid {
+		state.SuspendedTurnID = suspendedTurnIDRaw.String
+	}
+	if lastRunReasonRaw.Valid {
+		state.LastRunTerminalReason = lastRunReasonRaw.String
+	}
+	if updatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(updatedAtRaw)); err == nil {
+		state.UpdatedAt = updatedAt
+	}
+	// 标量投影：JSON 形态字段留空，调用方不应依赖它们。
+	return &state, nil
+}
+
 // LoadState loads runtime state for a session.
 func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*RuntimeState, error) {
 	if s == nil {
@@ -2166,6 +2308,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	}
 	row := s.readQueryer().QueryRowContext(ctx, `
 		SELECT session_id, status, current_turn_id, current_checkpoint_id, suspended_turn_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
+		       stable_tool_surface_ref,
 		       pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
 		FROM session_runtime_state
 		WHERE session_id = ?
@@ -2187,6 +2330,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		currentTurnIDRaw     sql.NullString
 		currentCheckpointRaw sql.NullString
 		suspendedTurnIDRaw   sql.NullString
+		stableToolSurfaceRef sql.NullString
 	)
 	if err := row.Scan(
 		&state.SessionID,
@@ -2198,6 +2342,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		&ambientRunMetaRaw,
 		&stableToolSurfaceRaw,
 		&frozenTurnToolsRaw,
+		&stableToolSurfaceRef,
 		&pendingToolRaw,
 		&pendingApprovalRaw,
 		&pendingQuestionRaw,
@@ -2231,6 +2376,17 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		var runMeta team.RunMeta
 		if err := json.Unmarshal(ambientRunMetaRaw, &runMeta); err == nil {
 			state.AmbientRunMeta = &runMeta
+		}
+	}
+	// 内容寻址优先：新行只写 ref，旧行仍带内联 JSON（两者互斥，ref 优先）。
+	// 这样既支持新数据，也不需要一次性回填迁移旧数据。
+	if stableToolSurfaceRef.Valid && strings.TrimSpace(stableToolSurfaceRef.String) != "" {
+		content, loadErr := s.loadToolSurfaceContent(ctx, stableToolSurfaceRef.String)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if len(content) > 0 {
+			stableToolSurfaceRaw = content
 		}
 	}
 	if len(bytes.TrimSpace(stableToolSurfaceRaw)) > 0 {
@@ -2326,12 +2482,26 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 		ambientRunMetaJSON = payload
 	}
 	var stableToolSurfaceJSON []byte
+	// stableToolSurfaceRef 是内容寻址引用；为空表示「本会话没有工具面」
+	// 或「走旧列回退」。与 stableToolSurfaceJSON 互斥：写入新行时只填 ref。
+	var stableToolSurfaceRef string
 	if state.StableToolSurfaceSet {
 		payload, err := json.Marshal(state.StableToolSurface)
 		if err != nil {
 			return fmt.Errorf("marshal stable tool surface: %w", err)
 		}
-		stableToolSurfaceJSON = payload
+		// 内容寻址：相同工具面在 runtime_tool_surface_content 只落一份，
+		// 会话行仅保存 fingerprint 引用。
+		//
+		// 实测收益：全库 1,968 个会话共享的其实是少数几套工具面
+		// （前 4 个大会话字节数完全相同），117.5 MB 可压缩到 KB 级。
+		if ref, putErr := s.putToolSurfaceContent(ctx, payload); putErr != nil {
+			// 去重失败不应阻断状态写入：回退到内联列，行为与改动前一致。
+			logpkg.Debugf("[runtime-store] tool surface dedup skipped: session=%s err=%v", state.SessionID, putErr)
+			stableToolSurfaceJSON = payload
+		} else {
+			stableToolSurfaceRef = ref
+		}
 	}
 	var frozenTurnToolsJSON []byte
 	if state.FrozenTurnToolsSet {
@@ -2381,8 +2551,9 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO session_runtime_state (
 			session_id, status, current_turn_id, current_checkpoint_id, suspended_turn_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json,
-			frozen_turn_tools_json, pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			frozen_turn_tools_json, pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at,
+			stable_tool_surface_ref
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			status = excluded.status,
 			current_turn_id = excluded.current_turn_id,
@@ -2391,6 +2562,7 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 			current_run_meta_json = excluded.current_run_meta_json,
 			ambient_run_meta_json = excluded.ambient_run_meta_json,
 			stable_tool_surface_json = excluded.stable_tool_surface_json,
+			stable_tool_surface_ref = excluded.stable_tool_surface_ref,
 			frozen_turn_tools_json = excluded.frozen_turn_tools_json,
 			pending_tool_json = excluded.pending_tool_json,
 			pending_approval_json = excluded.pending_approval_json,
@@ -2400,7 +2572,8 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 			active_job_ids_json = excluded.active_job_ids_json,
 			updated_at = excluded.updated_at
 	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentCheckpointID), nullIfEmpty(state.SuspendedTurnID),
-		nullIfEmptyBytes(currentRunMetaJSON), nullIfEmptyBytes(ambientRunMetaJSON), nullIfEmptyBytes(stableToolSurfaceJSON), nullIfEmptyBytes(frozenTurnToolsJSON), nullIfEmptyBytes(pendingToolJSON), nullIfEmptyBytes(pendingApprovalJSON), nullIfEmptyBytes(pendingQuestionJSON), nullIfEmpty(state.LastRunTerminalReason), state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
+		nullIfEmptyBytes(currentRunMetaJSON), nullIfEmptyBytes(ambientRunMetaJSON), nullIfEmptyBytes(stableToolSurfaceJSON), nullIfEmptyBytes(frozenTurnToolsJSON), nullIfEmptyBytes(pendingToolJSON), nullIfEmptyBytes(pendingApprovalJSON), nullIfEmptyBytes(pendingQuestionJSON), nullIfEmpty(state.LastRunTerminalReason), state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano),
+		nullIfEmpty(stableToolSurfaceRef))
 	if err != nil {
 		return fmt.Errorf("save runtime state: %w", err)
 	}
@@ -2424,9 +2597,10 @@ func (s *SQLiteRuntimeStore) InvalidateStableToolSurfaces(ctx context.Context) (
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE session_runtime_state
 		SET stable_tool_surface_json = NULL,
+			stable_tool_surface_ref = NULL,
 			frozen_turn_tools_json = CASE WHEN COALESCE(current_turn_id, '') = '' THEN NULL ELSE frozen_turn_tools_json END,
 			updated_at = ?
-		WHERE stable_tool_surface_json IS NOT NULL OR frozen_turn_tools_json IS NOT NULL
+		WHERE stable_tool_surface_json IS NOT NULL OR stable_tool_surface_ref IS NOT NULL OR frozen_turn_tools_json IS NOT NULL
 	`, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("invalidate stable tool surfaces: %w", err)
@@ -4972,6 +5146,29 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 				DROP INDEX IF EXISTS idx_cache_requests_root_started;
 				CREATE INDEX IF NOT EXISTS idx_cache_requests_root_started
 				ON cache_requests(root_session_id, started_at_unix_nano ASC, llm_request_id ASC);
+			`,
+		},
+		{
+			// v25：工具面内容寻址表。
+			//
+			// 背景：`stable_tool_surface_json` 平均 70 KB / 最大 131 KB，全库 117.5 MB，
+			// 而实测「前 4 个大会话的字节数完全相同」—— 同一批工具定义被存了上千份。
+			// 本表让相同内容只落一份，`session_runtime_state` 改为存 fingerprint 引用。
+			//
+			// 兼容：旧的 `stable_tool_surface_json` 列**保留不动**（回滚安全），
+			// 读取侧优先走新列 `stable_tool_surface_ref`，为空时回退旧列。
+			Version: 25,
+			Name:    "tool_surface_content_store",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS runtime_tool_surface_content (
+					fingerprint TEXT PRIMARY KEY,
+					payload_json BLOB NOT NULL,
+					byte_count INTEGER NOT NULL,
+					created_at TEXT NOT NULL
+				);
+				ALTER TABLE session_runtime_state ADD COLUMN stable_tool_surface_ref TEXT;
+				CREATE INDEX IF NOT EXISTS idx_runtime_state_tool_surface_ref
+				ON session_runtime_state(stable_tool_surface_ref);
 			`,
 		},
 	}

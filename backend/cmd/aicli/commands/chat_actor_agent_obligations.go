@@ -152,7 +152,8 @@ func (h *localChatRuntimeHost) localTurnIDForSession(ctx context.Context, sessio
 	if h == nil || h.RuntimeStore == nil {
 		return ""
 	}
-	state, err := h.RuntimeStore.LoadState(ctx, sessionID)
+	// 只读 CurrentTurnID / SuspendedTurnID：标量投影足够。
+	state, err := h.loadRuntimeStatus(ctx, sessionID)
 	if err != nil || state == nil {
 		return ""
 	}

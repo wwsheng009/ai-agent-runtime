@@ -1817,12 +1817,15 @@ func TestSQLiteRuntimeStoreSharesIdenticalToolSurfacesAfterLoad(t *testing.T) {
 		FrozenTurnToolsSet:   true,
 	}
 	require.NoError(t, store.SaveState(context.Background(), state))
-	var stableJSON, frozenJSON []byte
+	// v25 起：stable 走内容寻址（ref），不再内联 JSON；frozen 仍用引用标记。
+	var stableRef sql.NullString
+	var frozenJSON []byte
 	require.NoError(t, store.db.QueryRow(`
-		SELECT stable_tool_surface_json, frozen_turn_tools_json
+		SELECT stable_tool_surface_ref, frozen_turn_tools_json
 		FROM session_runtime_state WHERE session_id = ?
-	`, state.SessionID).Scan(&stableJSON, &frozenJSON))
-	require.Greater(t, len(stableJSON), len(frozenJSON))
+	`, state.SessionID).Scan(&stableRef, &frozenJSON))
+	require.True(t, stableRef.Valid, "stable tool surface must be content-addressed")
+	require.NotEmpty(t, stableRef.String)
 	require.JSONEq(t, stableToolSurfaceReferenceMarker, string(frozenJSON))
 
 	loaded, err := store.LoadState(context.Background(), state.SessionID)
@@ -1834,13 +1837,21 @@ func TestSQLiteRuntimeStoreSharesIdenticalToolSurfacesAfterLoad(t *testing.T) {
 
 	loaded.Status = SessionWaitingApproval
 	require.NoError(t, store.SaveState(context.Background(), loaded))
-	var stableJSONAfter []byte
+	// 改动后的工具面必须落成一个**新的** fingerprint（内容变了，引用也要变）。
+	var stableRefAfter sql.NullString
 	require.NoError(t, store.db.QueryRow(`
-		SELECT stable_tool_surface_json
+		SELECT stable_tool_surface_ref
 		FROM session_runtime_state WHERE session_id = ?
-	`, state.SessionID).Scan(&stableJSONAfter))
-	require.NotEqual(t, stableJSON, stableJSONAfter)
-	require.Contains(t, string(stableJSONAfter), `"changed"`)
+	`, state.SessionID).Scan(&stableRefAfter))
+	require.True(t, stableRefAfter.Valid)
+	require.NotEqual(t, stableRef.String, stableRefAfter.String,
+		"mutated tool surface must produce a different content fingerprint")
+	// 内容表里必须能查到改写后的内容。
+	var content []byte
+	require.NoError(t, store.db.QueryRow(`
+		SELECT payload_json FROM runtime_tool_surface_content WHERE fingerprint = ?
+	`, stableRefAfter.String).Scan(&content))
+	require.Contains(t, string(content), `"changed"`)
 }
 
 func TestSQLiteRuntimeStorePersistsToolReceipt(t *testing.T) {

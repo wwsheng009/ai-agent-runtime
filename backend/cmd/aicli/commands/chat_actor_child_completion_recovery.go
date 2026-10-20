@@ -211,7 +211,8 @@ func (h *localChatRuntimeHost) replayLocalChildCompletions(ctx context.Context, 
 		// 终态之后子会话又有新动作（例如已被 resume 并跑起新一轮）：该终态属于
 		// 历史，不重放——避免给正在运行的子代理补一条"已完成"。
 		if h.RuntimeStore != nil {
-			if state, stateErr := h.RuntimeStore.LoadState(ctx, childSessionID); stateErr == nil && state != nil {
+			// 只读 UpdatedAt：标量投影足够，避免解码 70 KB 的工具面 JSON。
+			if state, stateErr := h.loadRuntimeStatus(ctx, childSessionID); stateErr == nil && state != nil {
 				if !state.UpdatedAt.IsZero() && !terminal.Timestamp.IsZero() && state.UpdatedAt.After(terminal.Timestamp) {
 					continue
 				}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
@@ -209,7 +210,21 @@ func (r *localActorRegistry) liveWorktreePaths(ctx context.Context, records []ag
 			continue
 		}
 		seen[sessionID] = true
-		session, err := r.Host.SessionStore.Load(ctx, sessionID)
+		// 只需要 Metadata.Context 里的一个 worktree 路径：完整 Load 会把整段
+		// prompt 投影反序列化进内存。
+		//
+		// 实测（compact 后的大会话，投影 1.66 MB / 528 行）：这条链占该进程
+		// 累计分配的 **98.25%（1,359 MB）**，因为工位回收在对账每个轮次都会
+		// 遍历一次 registry 里的全部记录，每次都对同一批会话做全量 Load。
+		// LoadMetadata 只读 sessions 单行，语义足够（worktree_path 存在
+		// metadata_json 里）。
+		var session *runtimechat.Session
+		var err error
+		if reader, ok := r.Host.SessionStore.(runtimechat.SessionStorageMetadataReader); ok {
+			session, err = reader.LoadMetadata(ctx, sessionID)
+		} else {
+			session, err = r.Host.SessionStore.Load(ctx, sessionID)
+		}
 		if err != nil || session == nil {
 			continue
 		}

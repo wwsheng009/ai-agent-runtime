@@ -12,6 +12,7 @@
 |---|---|---|
 | [tui-turn-latency-root-cause-20261003.md](./tui-turn-latency-root-cause-20261003.md) | TUI 回合延迟根因：工具面把一次知识库全表聚合放大成 56 次 | 已定位 |
 | [knowledge-read-path-optimization-20261003.md](./knowledge-read-path-optimization-20261003.md) | 上述根因的修复实施与实测；含 P2（PRAGMA）否定结论与平台矩阵 | 已实施并验证 |
+| [aicli-process-memory-growth-and-compact-release-20261020.md](./aicli-process-memory-growth-and-compact-release-20261020.md) | 进程内存膨胀：GC 后存活堆仅 10.8 MB，主因是分配 churn；含 compact 后释放历史的设计 | 已定位，方案待实施 |
 
 ## TL;DR（2026-10-03）
 

@@ -60,7 +60,8 @@ func (h *localChatRuntimeHost) maybeScheduleWaitFeedback(ctx context.Context, pa
 	// working or inside an explicit wait — both are progress channels of their
 	// own and the fallback must not race them.
 	if h.RuntimeStore != nil {
-		state, err := h.RuntimeStore.LoadState(ctx, parentSessionID)
+		// 只读 Status：标量投影足够。
+		state, err := h.loadRuntimeStatus(ctx, parentSessionID)
 		if err != nil || state == nil {
 			return
 		}

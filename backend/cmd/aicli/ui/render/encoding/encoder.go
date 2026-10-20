@@ -106,6 +106,17 @@ type EventEncoder struct {
 	assistantTombstones    map[string]struct{}              // canonical request key -> 已移除的空 assistant 终态
 	reasoningBy            map[string]*Item                 // canonical request key -> 当前 reasoning item
 	reasoningBarriers      map[string]bool                  // request key -> assistant native-history ordering fence
+
+	// reasoningBuilders 按 request key 缓存 reasoning 正文的增量缓冲。
+	//
+	// 为什么需要：applyReasoning 的流式分支原先写 `nextHead = t.Head + text`，
+	// 每个 delta 都把已累积的全部正文复制一次 —— N 个 delta 共 O(N²) 字节复制。
+	// pprof 实测（ConPTY，8 轮对话）把 1.38 GB / 11.35% 的累计分配记在
+	// applyReasoning.func1 上，且随 reasoning 长度平方增长（reasoning=max 时最明显）。
+	//
+	// strings.Builder 的 String() 与 WriteString 都不复制已写内容，因此追加降为
+	// O(len(delta))；仅在快照替换（非 delta 路径）或 item 终态时丢弃重建。
+	reasoningBuilders map[string]*strings.Builder
 	requestAliases         map[string]string                // transport/logical alias -> canonical request key
 	latestRequestByScope   map[string]string                // turn/logical-turn/trace scope -> 最新 request key
 	requestFinished        map[string]bool                  // request key -> 已收到 request finished
@@ -193,6 +204,7 @@ func NewEventEncoder() *EventEncoder {
 		assistantTombstones:  make(map[string]struct{}),
 		reasoningBy:          make(map[string]*Item),
 		reasoningBarriers:    make(map[string]bool),
+		reasoningBuilders:    make(map[string]*strings.Builder),
 		requestAliases:       make(map[string]string),
 		latestRequestByScope: make(map[string]string),
 		requestFinished:      make(map[string]bool),
@@ -1401,16 +1413,36 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 			e.applyFinalReasoningSnapshot(key, text, cs)
 			return
 		}
+		// 增量追加走缓冲：直接用 `t.Head + text` 会在每个 delta 复制全部已积累
+		// 正文（O(N²)）。builder 只在首次追加、或发现缓冲与 Item 不一致时
+		// 重建，其余路径是纯追加。
+		if streamDelta {
+			nextHead, appended := e.appendReasoningText(key, it, text)
+			if !appended {
+				e.stats.DuplicateCount++
+				return
+			}
+			u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
+				t.BoundaryGroupKey = key
+				if t.Head == nextHead {
+					return false
+				}
+				t.Head = nextHead
+				t.Status = StatusRunning
+				setReasoningPresentation(t)
+				return true
+			})
+			if changed {
+				e.change(cs, OpUpsert, u)
+			}
+			e.removeReasoningBarrier(key, cs)
+			return
+		}
 		u, changed := e.upsertItem(it.ID, KindReasoning, func(t *Item) bool {
 			t.BoundaryGroupKey = key
+			// 权威快照：整体替换正文，并丢弃增量缓冲（下文 builder 由
+			// appendReasoningText 按需重建）。
 			nextHead := text
-			if streamDelta {
-				// Ordered deltas are byte-faithful appends. A provider may split
-				// inside a word, punctuation token, code span, or UTF-8 rune
-				// boundary represented by separate valid strings; the renderer
-				// must never infer whitespace from that transport seam.
-				nextHead = t.Head + text
-			}
 			if t.Head == nextHead {
 				return false
 			}
@@ -1419,6 +1451,7 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 			setReasoningPresentation(t)
 			return true
 		})
+		delete(e.reasoningBuilders, key)
 		if changed {
 			e.change(cs, OpUpsert, u)
 		}
@@ -1439,6 +1472,38 @@ func (e *EventEncoder) applyReasoning(ev runtimeevents.Event, cs *ChangeSet) {
 	}
 	e.reasoningBy[key] = it
 	e.removeReasoningBarrier(key, cs)
+}
+
+// appendReasoningText 把流式增量追加到 reasoning 正文，返回新正文与是否产生变化。
+//
+// 语义与原先的 `t.Head + text` 完全一致（字节级追加，不推断空白：
+// provider 可能在单词、标点、code span 或 UTF-8 rune 中间切开），
+// 区别只在实现：用 strings.Builder 避免每个 delta 复制全部已积累正文。
+//
+// 缓冲失效自愈：Item.Head 可能被其它路径（终态纠正、历史重放、
+// applyFinalReasoningSnapshot）改写。这里用"缓冲内容必须等于当前 Head"
+// 作为不变量检查，一旦不相等就丢弃重建，因此不会出现缓冲漂移。
+func (e *EventEncoder) appendReasoningText(key string, item *Item, delta string) (string, bool) {
+	if item == nil {
+		return "", false
+	}
+	if delta == "" {
+		return item.Head, false
+	}
+	if e.reasoningBuilders == nil {
+		e.reasoningBuilders = make(map[string]*strings.Builder)
+	}
+	builder := e.reasoningBuilders[key]
+	if builder == nil || builder.String() != item.Head {
+		// 首次追加，或 Item 正文已被其它路径替换：以当前 Head 为基线重建。
+		// Grow 按 delta 长度预留，避免逐次扩容（真实正文长度未知）。
+		builder = &strings.Builder{}
+		builder.Grow(len(item.Head) + len(delta))
+		builder.WriteString(item.Head)
+		e.reasoningBuilders[key] = builder
+	}
+	builder.WriteString(delta)
+	return builder.String(), true
 }
 
 // setReasoningPresentation keeps reasoning source-faithful. Reasoning prose is

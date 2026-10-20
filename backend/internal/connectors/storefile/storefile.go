@@ -38,6 +38,31 @@ type ConfigStore struct {
 	// lockOptions 是数据目录锁参数（写 state.json/config.yaml/secrets 前先抢锁）；
 	// 零值由 LockOptions.withDefaults 补齐。
 	lockOptions LockOptions
+
+	// docCache 缓存 config.yaml 解析后的 YAML 文档。
+	//
+	// 为什么必须缓存：streamMirror.handleDelta 每收到一个 assistant delta 就调用
+	// ListConfigs()，而 ListConfigs 走 loadDocument() —— 对 150 KB 的 config.yaml
+	// 做完整 YAML AST 解析。实测一个 30 分钟会话累计分配 11.7 GB / 41.6% 落在
+	// 这条链上（pprof alloc_space：storefile.ListConfigs 11676 MB，其中
+	// 11568 MB 在 loadDocument 的 yaml.Unmarshal）。流式增量是每 token 级的
+	// 事件，等于把"读配置文件"放大成每 token 一次。
+	//
+	// 失效口径：mtime + size 变化即视为已修改（config.yaml 由本包 writeDocument
+	// 原子替换，也允许用户/其它进程直接编辑，所以不能只靠本进程写时失效）。
+	docCache      *yaml.Node
+	docCacheMTime time.Time
+	docCacheSize  int64
+
+	// stateCache 是 state.json 的解析结果缓存，失效口径与 docCache 相同
+	// （mtime + size）。让 ListBindings（每个流式 delta 经 streamMirror 调用）
+	// 不再重新读盘 + json.Unmarshal。
+	//
+	// 写路径（writeStateLocked）成功后主动刷新缓存，因此「刚改的绑定」仍然
+	// 立即生效，不存在 TTL 延迟。
+	stateCacheLoaded bool
+	stateCacheMTime  time.Time
+	stateCacheSize   int64
 }
 
 // NewConfigStore 构造文件存储；configPath 为共享 config.yaml，statePath 为宿主
@@ -167,7 +192,11 @@ func (s *ConfigStore) PutConfig(cfg connectors.Config) error {
 	}
 	defer unlockDir()
 
-	doc, err := s.loadDocument()
+	// 写路径必须拿到私有副本：loadDocument 现在返回共享缓存对象，而下面的
+	// 代码会原地修改 AST（seq.Content / setMappingEntry）。直接改缓存会让
+	// 后续 ListConfigs 读到已被写入改写的文档；写失败时更会让缓存与磁盘永久
+	// 分叉。
+	doc, err := s.loadDocumentCopy()
 	if err != nil {
 		return err
 	}
@@ -222,7 +251,8 @@ func (s *ConfigStore) DeleteConfig(id string) error {
 	}
 	defer unlockDir()
 
-	doc, err := s.loadDocument()
+	// 写路径：私有副本，理由同 PutConfig。
+	doc, err := s.loadDocumentCopy()
 	if err != nil {
 		return err
 	}
@@ -684,7 +714,8 @@ func (s *ConfigStore) SetRunnerPreference(preference string) error {
 	}
 	defer unlockDir()
 
-	doc, err := s.loadDocument()
+	// 写路径：私有副本，理由同 PutConfig。
+	doc, err := s.loadDocumentCopy()
 	if err != nil {
 		return err
 	}
@@ -725,6 +756,11 @@ func bindingKey(connectorID, chat string) string {
 // config.yaml 读写
 
 func (s *ConfigStore) loadDocument() (*yaml.Node, error) {
+	// 调用方已持有 s.mu（见各 ListConfigs/GetConfig/... 入口），缓存读写与
+	// 下面的文件读取处于同一临界区，无需额外加锁。
+	if doc, ok := s.cachedDocumentLocked(); ok {
+		return doc, nil
+	}
 	data, err := os.ReadFile(s.configPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -735,11 +771,89 @@ func (s *ConfigStore) loadDocument() (*yaml.Node, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return emptyDocument(), nil
 	}
+
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("storefile: parse config %s: %w", s.configPath, err)
 	}
+	s.storeDocumentLocked(&doc)
 	return &doc, nil
+}
+
+// loadDocumentCopy 返回文档的深拷贝，供写路径在副本上原地修改。
+//
+// yaml.Node 的 Content 是指针切片，浅拷贝会让写路径改到共享缓存（甚至改到
+// 上一次写回后仍被读者持有的事件对象）。这里按节点递归复制，代价与文档规模
+// 成正比，但只在写路径发生（用户显式改连接器配置），不在每 delta 的热路径上。
+func (s *ConfigStore) loadDocumentCopy() (*yaml.Node, error) {
+	doc, err := s.loadDocument()
+	if err != nil {
+		return nil, err
+	}
+	return cloneYAMLNode(doc), nil
+}
+
+// cloneYAMLNode 深拷贝一个 YAML 文档树。
+func cloneYAMLNode(node *yaml.Node) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+	cloned := *node
+	if node.Alias != nil {
+		cloned.Alias = cloneYAMLNode(node.Alias)
+	}
+	if len(node.Content) > 0 {
+		cloned.Content = make([]*yaml.Node, len(node.Content))
+		for i, child := range node.Content {
+			cloned.Content[i] = cloneYAMLNode(child)
+		}
+	}
+	return &cloned
+}
+
+// cachedDocumentLocked 返回仍然有效的缓存文档（调用方持有 s.mu）。
+//
+// 只比较 mtime + size：两者都没变就认为文件未修改。配置文件由本包通过
+// writeFileAtomic 原子替换，替换后 mtime 必然推进；同秒内两次写入且大小相同的
+// 极端情形由 writeDocument 主动清缓存兜住。
+func (s *ConfigStore) cachedDocumentLocked() (*yaml.Node, bool) {
+	if s == nil || s.docCache == nil || s.configPath == "" {
+		return nil, false
+	}
+	info, err := os.Stat(s.configPath)
+	if err != nil {
+		return nil, false
+	}
+	if info.Size() != s.docCacheSize || !info.ModTime().Equal(s.docCacheMTime) {
+		return nil, false
+	}
+	return s.docCache, true
+}
+
+// storeDocumentLocked 记录刚解析出的文档及其文件指纹（调用方持有 s.mu）。
+func (s *ConfigStore) storeDocumentLocked(doc *yaml.Node) {
+	if s == nil || doc == nil {
+		return
+	}
+	info, err := os.Stat(s.configPath)
+	if err != nil {
+		// 拿不到指纹就不缓存：宁可多解析一次，也不能让缓存永不失效。
+		s.docCache = nil
+		return
+	}
+	s.docCache = doc
+	s.docCacheMTime = info.ModTime()
+	s.docCacheSize = info.Size()
+}
+
+// invalidateDocumentLocked 丢弃文档缓存（调用方持有 s.mu）。
+func (s *ConfigStore) invalidateDocumentLocked() {
+	if s == nil {
+		return
+	}
+	s.docCache = nil
+	s.docCacheMTime = time.Time{}
+	s.docCacheSize = 0
 }
 
 func (s *ConfigStore) writeDocument(doc *yaml.Node) error {
@@ -747,7 +861,13 @@ func (s *ConfigStore) writeDocument(doc *yaml.Node) error {
 	if err != nil {
 		return fmt.Errorf("storefile: encode config: %w", err)
 	}
-	return writeFileAtomic(s.configPath, out, 0o644)
+	if err := writeFileAtomic(s.configPath, out, 0o644); err != nil {
+		return err
+	}
+	// 写入的是本次调用方构造的新文档：直接把它登记为缓存，避免紧接着的
+	// ListConfigs 再解析一遍刚写出的文件。同时刷新指纹。
+	s.storeDocumentLocked(doc)
+	return nil
 }
 
 // loadSecretsLocked 读取密钥文件（要求调用方已持有 s.mu）。缺失/空文件视为空表。
@@ -1181,6 +1301,10 @@ func (s *ConfigStore) mutateState(mutate func(state *stateFile)) error {
 // mutateStateLocked 要求调用方已持有 s.mu 与数据目录锁；写前重新读盘，
 // 使「读旧值 → 判存活 → 写新值」在跨进程锁内原子完成（另一实例的写入不会被覆盖）。
 func (s *ConfigStore) mutateStateLocked(mutate func(state *stateFile)) error {
+	// 写前必须读到磁盘最新值：跨进程锁保护的是「读旧值 → 判存活 → 写新值」，
+	// 若命中本进程的状态缓存就会把另一实例刚写的绑定覆盖掉。因此这里强制
+	// 绕过缓存重读。
+	s.invalidateStateCacheLocked()
 	if err := s.reloadStateLocked(); err != nil {
 		return err
 	}
@@ -1203,6 +1327,11 @@ func (s *ConfigStore) observeState(observe func(state *stateFile)) error {
 // reloadStateLocked 从磁盘重读 state.json（要求调用方已持有 s.mu）；文件缺失或
 // 为空时视为空表，旧文件缺 owners 键时补空表（向后兼容）。
 func (s *ConfigStore) reloadStateLocked() error {
+	if ok, err := s.cachedStateLocked(); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
 	s.state = stateFile{
 		Bindings: make(map[string]bindingRecord),
 		Claimed:  make(map[string]time.Time),
@@ -1253,7 +1382,68 @@ func (s *ConfigStore) reloadStateLocked() error {
 	// 本宿主的旧位置数据仍需并入——所以迁移不只在"文件缺失"时跑一次，而是
 	// 每次重载都扫描旧候选；仅在带来**规范文件没有的键**时才写回（幂等，
 	// 无新键零写放大）。全部旧文件成功并入后按 .bak 归档。
-	return s.mergeLegacyCandidatesLocked()
+	if err := s.mergeLegacyCandidatesLocked(); err != nil {
+		return err
+	}
+	// mergeLegacyCandidatesLocked 可能写回 state.json（并入旧键），因此在它
+	// 之后才记录指纹，避免缓存住一个"刚被自己改写前"的版本。
+	s.rememberStateFingerprintLocked()
+	return nil
+}
+
+// cachedStateLocked 报告内存中的 state 是否仍与磁盘一致（调用方持有 s.mu）。
+//
+// 只比 mtime + size：state.json 由 writeStateLocked 原子替换，替换后 mtime 必然
+// 推进；本进程的写路径在写成功后主动刷新指纹，因此"本进程刚写的绑定"不会
+// 因为时间戳精度而被误判为过期。
+func (s *ConfigStore) cachedStateLocked() (bool, error) {
+	if s == nil || !s.stateCacheLoaded || s.statePath == "" {
+		return false, nil
+	}
+	info, err := os.Stat(s.statePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// 文件被删除：缓存不再可信，让调用方按空表重建。
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Size() != s.stateCacheSize || !info.ModTime().Equal(s.stateCacheMTime) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// rememberStateFingerprintLocked 记录当前 state 对应的文件指纹（调用方持有 s.mu）。
+func (s *ConfigStore) rememberStateFingerprintLocked() {
+	if s == nil {
+		return
+	}
+	if s.statePath == "" {
+		s.stateCacheLoaded = true
+		s.stateCacheMTime = time.Time{}
+		s.stateCacheSize = 0
+		return
+	}
+	info, err := os.Stat(s.statePath)
+	if err != nil {
+		// 拿不到指纹就不缓存：宁可多读一次，也不能让缓存永不失效。
+		s.stateCacheLoaded = false
+		return
+	}
+	s.stateCacheLoaded = true
+	s.stateCacheMTime = info.ModTime()
+	s.stateCacheSize = info.Size()
+}
+
+// invalidateStateCacheLocked 丢弃状态缓存（调用方持有 s.mu）。
+func (s *ConfigStore) invalidateStateCacheLocked() {
+	if s == nil {
+		return
+	}
+	s.stateCacheLoaded = false
+	s.stateCacheMTime = time.Time{}
+	s.stateCacheSize = 0
 }
 
 // migrateLegacyStateLocked 把旧位置（statepath.LegacyCandidates + 宿主注入的
@@ -1402,7 +1592,15 @@ func (s *ConfigStore) writeStateLocked() error {
 	if err != nil {
 		return fmt.Errorf("storefile: encode state: %w", err)
 	}
-	return writeFileAtomic(s.statePath, data, 0o600)
+	if err := writeFileAtomic(s.statePath, data, 0o600); err != nil {
+		// 写失败：内存 state 与磁盘可能已分叉，丢弃缓存让下次读回权威值。
+		s.invalidateStateCacheLocked()
+		return err
+	}
+	// 内存 state 就是刚写入的内容：直接登记指纹，让随后的 ListBindings
+	// （同一回合内高频）命中缓存。
+	s.rememberStateFingerprintLocked()
+	return nil
 }
 
 func writeFileAtomic(path string, data []byte, mode fs.FileMode) error {

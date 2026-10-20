@@ -27,6 +27,18 @@ var (
 )
 
 func main() {
+	// 内存上限前置：必须在任何大分配（配置解析、历史装载）之前生效。
+	//
+	// 为什么需要：本进程是长驻的交互式 CLI。实测（2,146 行大会话冷启动）
+	// 私有内存 414 MB，而强制 GC 后的存活堆只有 9 MB —— 差额是 Go 运行时
+	// 保留但未归还的 arena。Windows 上的 scavenger 在长空闲期不主动归还，
+	// 进程就一直停在装载峰值。
+	//
+	// GOMEMLIMIT 让运行时在接近上限时主动 GC 并把空闲 span 交还操作系统；
+	// 它是软上限（不会 OOM-kill），因此可以安全地设成"远低于峰值"的值。
+	// 用户已在环境里设置时以用户的为准（不覆盖）。
+	applyMemoryLimitFromEnv()
+
 	// --console-host 必须先于 .env、配置、日志和终端初始化处理。MobaXterm /
 	// mintty 中的原生 Windows 进程拿到的是 pipe；父进程通过
 	// CREATE_NEW_CONSOLE 重启自身后，子进程才能从 CONIN$/CONOUT$ 获得真实

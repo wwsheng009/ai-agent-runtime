@@ -823,16 +823,45 @@ func (s *Screen) CellRows(from, to int) [][]Cell {
 	}
 	out := make([][]Cell, 0, to-from+1)
 	for row := from; row <= to; row++ {
-		cells := make([]Cell, s.width)
-		for col, cell := range s.rows[row-1] {
-			cells[col] = cell
-			if len(cell.SGR) > 0 {
-				cells[col].SGR = append([]string(nil), cell.SGR...)
-			}
-		}
-		out = append(out, cells)
+		out = append(out, cloneScreenRow(s.rows[row-1], s.width))
 	}
 	return out
+}
+
+// CellRow returns a deep copy of one row (1-based).
+//
+// 存在的理由：`CellRows(1, 1)[0]` 曾是 terminal_session 每行渲染的写法，它
+// 先构造外层 [][]Cell 再取第 0 个——单行调用多付一次 slice 头分配。更重要的是
+// pprof 实测（ConPTY 会话，8 轮对话）把 3.12 GB / 26.2% 的累计分配落在
+// CellRows 的 `make([]Cell, s.width)` 上：每帧、每个可见行都重新分配一整行
+// width 个 Cell。单行入口让调用方可以只拷需要的行。
+func (s *Screen) CellRow(row int) []Cell {
+	if s == nil || row < 1 || row > s.height {
+		return nil
+	}
+	return cloneScreenRow(s.rows[row-1], s.width)
+}
+
+// cloneScreenRow 深拷贝一行 cell（含 SGR 切片）。
+//
+// 两种宽度取大者：屏幕宽度保证返回行与 viewport 契约一致（右侧补空白 cell），
+// 而行本身更长时（异常状态）也不能截断。全空行直接返回与宽度一致的零值行。
+func cloneScreenRow(row []Cell, width int) []Cell {
+	size := width
+	if len(row) > size {
+		size = len(row)
+	}
+	if size <= 0 {
+		return nil
+	}
+	cells := make([]Cell, size)
+	for col, cell := range row {
+		cells[col] = cell
+		if len(cell.SGR) > 0 {
+			cells[col].SGR = append([]string(nil), cell.SGR...)
+		}
+	}
+	return cells
 }
 
 // RowSGRCodes returns the union of graphic rendition codes on the row's visible

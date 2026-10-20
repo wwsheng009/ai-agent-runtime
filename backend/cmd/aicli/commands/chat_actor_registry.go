@@ -555,7 +555,14 @@ func (r *localTeamTaskRouteResolver) parentDefaults(ctx context.Context, request
 		parentSessionID = r.Host.baseRuntimeSessionID()
 	}
 	if parentSessionID != "" && r != nil && r.Host != nil && r.Host.SessionStore != nil {
-		if session, err := r.Host.SessionStore.Load(ctx, parentSessionID); err == nil {
+		var session *runtimechat.Session
+		var err error
+		if reader, ok := r.Host.SessionStore.(runtimechat.SessionStorageMetadataReader); ok {
+			session, err = reader.LoadMetadata(ctx, parentSessionID)
+		} else {
+			session, err = r.Host.SessionStore.Load(ctx, parentSessionID)
+		}
+		if err == nil {
 			parentSession = session
 		}
 	}
@@ -672,6 +679,9 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 
 	var parentSession *runtimechat.Session
 	if parentSessionID != "" {
+		// 必须用完整 Load：下方 fork 分支会调用
+		// `parentSession.GetRecentMessages(forkTurns)` 复制父会话历史到子会话，
+		// 元数据壳（History 为空）会让 fork 静默产出空历史。
 		parent, err := r.Host.SessionStore.Load(ctx, parentSessionID)
 		if err == nil {
 			parentSession = parent
@@ -692,7 +702,7 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	}
 
 	if sessionID != "" {
-		existing, err := r.Host.SessionStore.Load(ctx, sessionID)
+		existing, err := r.loadLocalAgentSessionMetadata(ctx, sessionID)
 		if err == nil && existing != nil {
 			return nil, fmt.Errorf("session already exists: %s", sessionID)
 		}
@@ -886,7 +896,7 @@ func (r *localActorRegistry) cleanupLocalSpawnIsolation(ctx context.Context, chi
 	// Prefer live session context if available (may include path after reload).
 	session := childSession
 	if r != nil && r.Host != nil && r.Host.SessionStore != nil {
-		if loaded, err := r.Host.SessionStore.Load(ctx, childSession.ID); err == nil && loaded != nil {
+		if loaded, err := r.loadLocalAgentSessionMetadata(ctx, childSession.ID); err == nil && loaded != nil {
 			session = loaded
 		}
 	}
@@ -983,7 +993,7 @@ func (r *localActorRegistry) ApplyWorktree(ctx context.Context, args toolbroker.
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 		return nil, fmt.Errorf("session store is not configured")
 	}
-	session, err := r.Host.SessionStore.Load(ctx, sessionID)
+	session, err := r.loadLocalAgentSessionMetadata(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1078,7 +1088,7 @@ func (r *localActorRegistry) DiscardWorktree(ctx context.Context, args toolbroke
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 		return nil, fmt.Errorf("session store is not configured")
 	}
-	session, err := r.Host.SessionStore.Load(ctx, sessionID)
+	session, err := r.loadLocalAgentSessionMetadata(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1137,7 +1147,7 @@ func annotateLocalSpawnWorktreeCompletion(ctx context.Context, r *localActorRegi
 	}
 	session := childSession
 	if r != nil && r.Host != nil && r.Host.SessionStore != nil {
-		if loaded, err := r.Host.SessionStore.Load(ctx, childSession.ID); err == nil && loaded != nil {
+		if loaded, err := r.loadLocalAgentSessionMetadata(ctx, childSession.ID); err == nil && loaded != nil {
 			session = loaded
 		}
 	}
@@ -1451,7 +1461,7 @@ func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, pa
 	}
 	rootScopeID := strings.TrimSpace(parentSessionID)
 	if r.Host.SessionStore != nil {
-		if session, err := r.Host.SessionStore.Load(ctx, childSessionID); err == nil && session != nil {
+		if session, err := r.loadLocalAgentSessionMetadata(ctx, childSessionID); err == nil && session != nil {
 			rootScopeID = localAgentRootSessionID(session, parentSessionID)
 		}
 	}
@@ -1500,7 +1510,7 @@ func (r *localActorRegistry) projectLocalAgentApproval(ctx context.Context, pare
 	}
 	rootScopeID := strings.TrimSpace(parentSessionID)
 	if r.Host.SessionStore != nil {
-		if session, err := r.Host.SessionStore.Load(ctx, childSessionID); err == nil && session != nil {
+		if session, err := r.loadLocalAgentSessionMetadata(ctx, childSessionID); err == nil && session != nil {
 			rootScopeID = localAgentRootSessionID(session, parentSessionID)
 		}
 	}
@@ -1532,7 +1542,7 @@ func (r *localActorRegistry) resolveLocalAgentApproval(ctx context.Context, pare
 	}
 	rootScopeID := strings.TrimSpace(parentSessionID)
 	if r.Host.SessionStore != nil {
-		if session, err := r.Host.SessionStore.Load(ctx, childSessionID); err == nil && session != nil {
+		if session, err := r.loadLocalAgentSessionMetadata(ctx, childSessionID); err == nil && session != nil {
 			rootScopeID = localAgentRootSessionID(session, parentSessionID)
 		}
 	}
@@ -1556,10 +1566,14 @@ func (r *localActorRegistry) resolveLocalAgentApproval(ctx context.Context, pare
 }
 
 func (r *localActorRegistry) dispatchLocalAgentHook(event runtimehooks.Event, payload map[string]interface{}) {
-	if r == nil || r.Host == nil || r.Host.RuntimeConfig == nil || len(r.Host.RuntimeConfig.Hooks) == 0 || len(payload) == 0 {
+	if r == nil || r.Host == nil || r.Host.RuntimeConfig == nil || len(payload) == 0 {
 		return
 	}
-	runtimehooks.NewManager(r.Host.RuntimeConfig.Hooks).DispatchAsync(context.Background(), event, payload)
+	merged := mergeActivePluginHooks(r.Host.RuntimeConfig.Hooks)
+	if len(merged) == 0 {
+		return
+	}
+	runtimehooks.NewManager(merged).DispatchAsync(context.Background(), event, payload)
 }
 
 func localSpawnAgentHookPayload(parentSessionID string, childSession *runtimechat.Session, extra map[string]interface{}) map[string]interface{} {
@@ -1573,6 +1587,7 @@ func localSpawnAgentHookPayload(parentSessionID string, childSession *runtimecha
 	payload := map[string]interface{}{
 		"agent_id":          childSessionID,
 		"session_id":        childSessionID,
+		"child_session_id":  childSessionID,
 		"parent_session_id": strings.TrimSpace(parentSessionID),
 		"path":              localAgentSessionPath(childSession),
 	}
@@ -1851,7 +1866,7 @@ func (r *localActorRegistry) localAgentRegistryRootAndPath(ctx context.Context, 
 		}
 		return "", parentSessionID, nil
 	}
-	parent, err := r.Host.SessionStore.Load(ctx, parentSessionID)
+	parent, err := r.loadLocalAgentSessionMetadata(ctx, parentSessionID)
 	if err != nil {
 		if err == runtimechat.ErrSessionNotFound {
 			return parentSessionID, "", nil
@@ -2072,7 +2087,7 @@ func (r *localActorRegistry) localAgentSessionBindingLookup() agentcontrol.Sessi
 		if r.Host.RuntimeStore == nil {
 			return result, nil
 		}
-		state, stateErr := r.Host.RuntimeStore.LoadState(ctx, result.SessionID)
+		state, stateErr := r.loadLocalAgentRuntimeStatus(ctx, result.SessionID)
 		if stateErr != nil || state == nil {
 			return result, stateErr
 		}
@@ -2236,7 +2251,7 @@ func (r *localActorRegistry) localAgentSessionLiveAgain(ctx context.Context, ses
 	if err != nil || !live {
 		return false, err
 	}
-	state, err := r.Host.RuntimeStore.LoadState(ctx, sessionID)
+	state, err := r.loadLocalAgentRuntimeStatus(ctx, sessionID)
 	if err != nil || state == nil {
 		return false, err
 	}
@@ -2252,7 +2267,22 @@ func (r *localActorRegistry) localAgentRegistryTerminalState(ctx context.Context
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 		return false, false, nil
 	}
-	session, err := r.Host.SessionStore.Load(ctx, strings.TrimSpace(sessionID))
+	sessionID = strings.TrimSpace(sessionID)
+	// 只需要「存在性 + state」：优先走元数据读取。
+	//
+	// 完整 Load 会把整段 prompt 投影反序列化进内存，而本函数每个对账轮次都要
+	// 为注册表里的每条记录调用一次。pprof 实测（生产实例，运行 14h）把
+	// 129 GB ScanColumn + 78 GB json.makeString 记在这条链上 —— 也就是
+	// `Load → loadPromptMessages`，占该进程累计分配的 42.7%。
+	//
+	// 同包的 localAgentSessionBindingLookup（下方约 30 行）早已采用同一范式，
+	// 这里补齐即可；未实现 SessionStorageMetadataReader 的存储自动回落。
+	var session *runtimechat.Session
+	if reader, ok := r.Host.SessionStore.(runtimechat.SessionStorageMetadataReader); ok {
+		session, err = reader.LoadMetadata(ctx, sessionID)
+	} else {
+		session, err = r.Host.SessionStore.Load(ctx, sessionID)
+	}
 	if err == runtimechat.ErrSessionNotFound || session == nil {
 		return true, true, nil
 	}
@@ -2265,7 +2295,7 @@ func (r *localActorRegistry) localAgentRegistryTerminalState(ctx context.Context
 	if r.Host.RuntimeStore == nil {
 		return false, false, nil
 	}
-	state, err := r.Host.RuntimeStore.LoadState(ctx, strings.TrimSpace(sessionID))
+	state, err := r.loadLocalAgentRuntimeStatus(ctx, sessionID)
 	if err != nil || state == nil {
 		return false, false, err
 	}
@@ -2927,7 +2957,7 @@ func (r *localActorRegistry) localAgentSessionTerminal(ctx context.Context, sess
 		return false
 	}
 	if r.Host.SessionStore != nil {
-		if session, err := r.Host.SessionStore.Load(ctx, sessionID); err == nil && session != nil {
+		if session, err := r.loadLocalAgentSessionMetadata(ctx, sessionID); err == nil && session != nil {
 			return isClosedLocalAgentSession(session)
 		}
 	}
@@ -2980,7 +3010,7 @@ func (r *localActorRegistry) localAgentRunMeta(ctx context.Context, sessionID st
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 		return nil
 	}
-	session, err := r.Host.SessionStore.Load(ctx, strings.TrimSpace(sessionID))
+	session, err := r.loadLocalAgentSessionMetadata(ctx, sessionID)
 	if err != nil || session == nil {
 		return nil
 	}
@@ -4582,7 +4612,7 @@ func (r *localActorRegistry) Resume(ctx context.Context, sessionID string) (*too
 	// 完成订阅是进程内存态、只在 spawn 时登记：重启后 resume 的子会话必须重建，
 	// 否则它再次结束时 mailbox/通知/wake 都不会产生（2026-09-30 现场缺口）。
 	if r.Host.SessionStore != nil {
-		if session, loadErr := r.Host.SessionStore.Load(ctx, sessionID); loadErr == nil && session != nil {
+		if session, loadErr := r.loadLocalAgentSessionMetadata(ctx, sessionID); loadErr == nil && session != nil {
 			if parentSessionID := localChildParentSessionID(session); parentSessionID != "" {
 				r.subscribeLocalAgentCompletion(parentSessionID, session)
 			}
@@ -4600,7 +4630,7 @@ func (r *localActorRegistry) agentSnapshot(ctx context.Context, sessionID string
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 		return result, nil
 	}
-	session, err := r.Host.SessionStore.Load(ctx, sessionID)
+	session, err := r.loadLocalAgentSessionMetadata(ctx, sessionID)
 	if err != nil {
 		if err == runtimechat.ErrSessionNotFound {
 			// 子代理会话不落 SessionStore：先回退到批任务账本行（真机 E2E 缺口）。
@@ -4855,7 +4885,7 @@ func (r *localActorRegistry) observeLocalQuotaChildren(ctx context.Context, reco
 		}
 		sessionID := strings.TrimSpace(record.SessionID)
 		if sessionID != "" && r != nil && r.Host != nil && r.Host.SessionStore != nil {
-			session, err := r.Host.SessionStore.Load(ctx, sessionID)
+			session, err := r.loadLocalAgentSessionMetadata(ctx, sessionID)
 			switch {
 			case err != nil:
 				if stderrors.Is(err, runtimechat.ErrSessionNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
@@ -4998,7 +5028,7 @@ func (r *localActorRegistry) localAgentScopeSessionID(ctx context.Context, sessi
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 		return sessionID
 	}
-	session, err := r.Host.SessionStore.Load(ctx, sessionID)
+	session, err := r.loadLocalAgentSessionMetadata(ctx, sessionID)
 	if err != nil || session == nil {
 		return sessionID
 	}
@@ -5190,6 +5220,70 @@ func isClosedLocalAgentSession(session *runtimechat.Session) bool {
 		return false
 	}
 	return session.State == runtimechat.StateClosed || session.State == runtimechat.StateArchived
+}
+
+// loadLocalAgentSessionMetadata 只读会话元数据（状态 + Metadata.Context），
+// **不解码历史**。
+//
+// 存在的理由：本文件的 agent registry 有一大批调用点只需要 State、root/parent
+// 身份、depth 或 Metadata.Context 里的 worktree/isolation 键，却使用了完整
+// `SessionStore.Load`。`Load` 会把整段 prompt 投影 `json.Unmarshal` 进内存，
+// 而实测（compact 后的大会话，投影仅 1.66 MB / 528 行）这条链在**单次启动**
+// 就吃掉 1.36 GB / 98.25% 的累计分配 —— 因为它被对账轮次 × registry 记录数
+// 反复调用，每次重新解码同一批会话。
+//
+// 语义：LoadMetadata 与 Load 的「存在性 + 状态 + 元数据」完全一致，只是
+// History 为空、HistoryLoaded=false（见 sqlite_storage.go LoadMetadata 注释）。
+// 因此**只能用于不读 History 的调用点**；要改写历史（Update）时必须用 Load。
+//
+// 未实现 SessionStorageMetadataReader 的存储自动回退到 Load，行为不变。
+func (r *localActorRegistry) loadLocalAgentSessionMetadata(ctx context.Context, sessionID string) (*runtimechat.Session, error) {
+	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
+		return nil, runtimechat.ErrSessionNotFound
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, runtimechat.ErrSessionNotFound
+	}
+	if reader, ok := r.Host.SessionStore.(runtimechat.SessionStorageMetadataReader); ok {
+		return reader.LoadMetadata(ctx, sessionID)
+	}
+	return r.Host.SessionStore.Load(ctx, sessionID)
+}
+
+// loadLocalAgentRuntimeStatus 只读运行时状态的标量投影（status / turn / head）。
+//
+// 存在的理由：`LoadState` 会解码 9 个 JSON 列，其中 `stable_tool_surface_json`
+// 平均 70 KB、最大 131 KB（全库 117.5 MB）。注册表对账、lease 存活判定、
+// 终态判定**只关心 state.Status**，却为每 session 付一次工具面解码。
+//
+// pprof 实测（compact 会话冷启动）：`LoadState` 占 188.9 MB / 28.5%。
+//
+// 未实现 RuntimeStateStatusReader 的 store 自动回退 LoadState，行为不变。
+func (r *localActorRegistry) loadLocalAgentRuntimeStatus(ctx context.Context, sessionID string) (*runtimechat.RuntimeState, error) {
+	if r == nil || r.Host == nil || r.Host.RuntimeStore == nil {
+		return nil, nil
+	}
+	return loadRuntimeStatusFrom(r.Host.RuntimeStore, ctx, sessionID)
+}
+
+// loadRuntimeStatus 是 host 侧的同义封装（与 localActorRegistry 版本共用实现）。
+func (h *localChatRuntimeHost) loadRuntimeStatus(ctx context.Context, sessionID string) (*runtimechat.RuntimeState, error) {
+	if h == nil || h.RuntimeStore == nil {
+		return nil, nil
+	}
+	return loadRuntimeStatusFrom(h.RuntimeStore, ctx, sessionID)
+}
+
+// loadRuntimeStatusFrom 是标量投影读取的单一实现。
+func loadRuntimeStatusFrom(store runtimechat.RuntimeStateStore, ctx context.Context, sessionID string) (*runtimechat.RuntimeState, error) {
+	if store == nil {
+		return nil, nil
+	}
+	if reader, ok := store.(runtimechat.RuntimeStateStatusReader); ok {
+		return reader.LoadStateStatus(ctx, sessionID)
+	}
+	return store.LoadState(ctx, sessionID)
 }
 
 func localAgentHasAncestor(session *runtimechat.Session, ancestorID string, byID map[string]*runtimechat.Session) bool {

@@ -1710,6 +1710,16 @@ func scanSQLiteSession(row rowScanner) (*Session, error) {
 
 func (s *SQLiteSessionStorage) loadPromptMessages(ctx context.Context, sessionID string) ([]types.Message, error) {
 	// 只读：走读池（不受并发写阻塞）。
+	//
+	// 先取行数只为预分配 history 的容量：大会话下 append 增长会把整个
+	// []types.Message 反复复制（2,146 行 ≈ 每个 Message 结构体 100+ 字节）。
+	// COUNT(*) 走 (session_id, position) 主键前缀，成本可忽略。
+	var rowCount int
+	if err := s.readPoolHandle().QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM session_prompt_messages WHERE session_id = ?
+	`, sessionID).Scan(&rowCount); err != nil {
+		return nil, fmt.Errorf("count prompt projection: %w", err)
+	}
 	rows, err := s.readPoolHandle().QueryContext(ctx, `
 		SELECT payload_json FROM session_prompt_messages
 		WHERE session_id = ? ORDER BY position ASC
@@ -1718,9 +1728,15 @@ func (s *SQLiteSessionStorage) loadPromptMessages(ctx context.Context, sessionID
 		return nil, fmt.Errorf("query prompt projection: %w", err)
 	}
 	defer rows.Close()
-	var history []types.Message
+	history := make([]types.Message, 0, rowCount)
 	for rows.Next() {
-		var payload []byte
+		// sql.RawBytes 直接引用驱动的行缓冲，不额外分配/拷贝 —— 该切片只在
+		// 下一次 rows.Next() 之前有效，而这里紧接着就把它解码掉，不保留引用。
+		//
+		// 实测（大会话 2,146 行 / 11.56 MB）：`var payload []byte` 的逐行拷贝
+		// 在 Scan 阶段产生 325 MB（约 29.7% 的 Load 成本），是整个冷启动
+		// 分配峰值的第三大来源。改 RawBytes 后这部分归零。
+		var payload sql.RawBytes
 		if err := rows.Scan(&payload); err != nil {
 			return nil, fmt.Errorf("scan prompt projection: %w", err)
 		}
@@ -1755,6 +1771,20 @@ func (s *SQLiteSessionStorage) healLegacyTruncatedProjection(ctx context.Context
 	if session.CanonicalMessageCount <= len(projection) {
 		return nil, nil
 	}
+	// 逐条比对 canonical 尾部以确认是否 cap 残留。
+	//
+	// 性能记录（勿重复踩坑）：
+	//   - 曾尝试"只读尾部 len(projection) 行"（ORDER BY seq DESC LIMIT）来降低
+	//     解码量，实测在 compact 后的大会话上反而产生 558 MB 累计分配
+	//     （loadCanonicalTailReadOnly 87.7%），而原来的全量读取只有 78 MB。
+	//     原因是 Load 会被反复调用（每个状态查询一次），每次都要重新读尾部；
+	//     而全量读取只在确认是 cap 残留后才发生（极少数会话、一次性）。
+	//   - 也尝试过用"投影长度 == 旧上限"或"canonical 规模"做廉价指纹，
+	//     均被数据否证：需要自愈的会话投影长度是 1~201，不需要自愈的
+	//     canonical 最小只有 10 行。
+	//
+	// 因此保留最直白的实现：先排除 compaction 投影（绝大多数大会话在此返回），
+	// 再对剩余极少数会话做一次全量读取。
 	for index := range projection {
 		if strings.EqualFold(strings.TrimSpace(projection[index].Metadata.GetString("context_stage", "")), "compaction") {
 			return nil, nil

@@ -1926,7 +1926,9 @@ func terminalFrameCellsWindow(rows []AppScreenRow, renderRows []render.Line, wid
 			materializer.Reset()
 		}
 		materializer.Feed(text)
-		frame[index-windowStart] = materializer.CellRows(1, 1)[0]
+		// 单行拷贝：CellRows(1,1)[0] 会先构造外层 [][]Cell 再取首元素，
+		// 在"每个可见行都跑一次"的循环里等于多付一份 slice 头分配。
+		frame[index-windowStart] = materializer.CellRow(1)
 	}
 	return frame, nil
 }

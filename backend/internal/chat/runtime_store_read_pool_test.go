@@ -386,8 +386,14 @@ func TestReadAPIInventoryRouting(t *testing.T) {
 		"ListAgentControlMailbox": true, "ListAgentControlMailboxRecords": true,
 		"LastEventSeq": true, "LastMailboxSeq": true,
 		"LastAgentControlMailboxSeq": true, "LastAgentControlMailboxRecordSeq": true,
+		// LoadStateStatus 是 LoadState 的标量投影：同样只读、同样走读池，
+		// 只是不 SELECT 工具面等大 JSON 列（见 RuntimeStateStatusReader 注释）。
+		"LoadStateStatus": true,
+		// loadToolSurfaceContent 是 LoadState 解析内容寻址引用时的子查询：
+		// 同样只读、同样走读池（v25 工具面去重）。
+		"loadToolSurfaceContent": true,
 	}
-	require.Len(t, allowed, 13)
+	require.Len(t, allowed, 15)
 
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
