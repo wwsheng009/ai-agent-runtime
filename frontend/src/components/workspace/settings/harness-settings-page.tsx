@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { useHarnessControlPlane } from "@/hooks/workspace/use-harness-control-plane";
 
 import { HarnessGrantsSection } from "./harness-settings-page/grants-section";
+import { HarnessHooksSection } from "./harness-settings-page/hooks-section";
 import { HarnessMemorySection } from "./harness-settings-page/memory-section";
 import { HarnessPermissionsSection } from "./harness-settings-page/permissions-section";
 import { HarnessPluginsSection } from "./harness-settings-page/plugins-section";
@@ -22,6 +23,10 @@ export function HarnessSettingsPage({
     error,
     grants,
     grantsStorePath,
+    hookRuns,
+    hooks,
+    hooksSources,
+    hooksWarnings,
     loading,
     memoryNotes,
     memoryQuery,
@@ -33,6 +38,7 @@ export function HarnessSettingsPage({
     searchMemory,
     setMemoryQuery,
     updatePlugin,
+    updateHook,
   } = useHarnessControlPlane({ workspacePath });
 
   const [grantTool, setGrantTool] = useState("write");
@@ -151,6 +157,16 @@ export function HarnessSettingsPage({
         setLocalActionError={setLocalActionError}
         t={t}
         updatePlugin={updatePlugin}
+      />
+
+      <HarnessHooksSection
+        actionPending={actionPending}
+        hooks={hooks}
+        runs={hookRuns}
+        sources={hooksSources}
+        updateHook={updateHook}
+        warnings={hooksWarnings}
+        t={t}
       />
     </div>
   );

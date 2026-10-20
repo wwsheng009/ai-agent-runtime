@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
@@ -695,6 +696,69 @@ func (a *Agent) SetHookManager(manager *HookManager) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.hookManager = manager
+	if manager != nil {
+		manager.SetStatusObserver(func(hook runtimehooks.HookConfig, phase string) {
+			payload := map[string]interface{}{
+				"hook_id":     hook.ID,
+				"event":       string(hook.Event),
+				"phase":       phase,
+				"source":      hook.Source,
+				"source_path": hook.SourcePath,
+			}
+			if strings.TrimSpace(hook.StatusMessage) != "" {
+				payload["status_message"] = hook.StatusMessage
+			}
+			a.emitRuntimeEvent("hooks.status", "", "", payload)
+		})
+		manager.SetContextSpiller(func(ctx context.Context, text string, limit int) (string, error) {
+			threshold := limit
+			if threshold <= 0 {
+				threshold = 2500
+			}
+			if len(text)/4 <= threshold {
+				return text, nil
+			}
+			store := a.GetArtifactStore()
+			if store == nil {
+				return text, nil
+			}
+			id, err := store.Put(ctx, artifact.Record{
+				SessionID: "",
+				ToolName:  "hook_additional_context",
+				Summary:   "Hook additional context",
+				Content:   text,
+				Metadata:  map[string]interface{}{"kind": "hook_additional_context"},
+			})
+			if err != nil || id == "" {
+				return text, err
+			}
+			return fmt.Sprintf("[hook additional context spilled to artifact %s; use artifact_read with id=%s to inspect it]", id, id), nil
+		})
+		if a.mcpManager != nil {
+			manager.SetMCPToolCaller(func(ctx context.Context, server, tool string, input map[string]interface{}) (interface{}, error) {
+				return a.mcpManager.CallTool(ctx, server, tool, input)
+			})
+		}
+		manager.SetAsyncObserver(func(result runtimehooks.AsyncResult) {
+			payload := map[string]interface{}{
+				"hook_id":     result.Hook.ID,
+				"event":       string(result.Hook.Event),
+				"source":      result.Hook.Source,
+				"source_path": result.Hook.SourcePath,
+				"async":       true,
+			}
+			if result.Err != nil {
+				payload["error"] = result.Err.Error()
+			}
+			if strings.TrimSpace(result.Decision.Message) != "" {
+				payload["message"] = result.Decision.Message
+			}
+			if contextText := result.Decision.ExtraContext["additional_context"]; strings.TrimSpace(contextText) != "" {
+				payload["additional_context"] = contextText
+			}
+			a.emitRuntimeEvent("hooks.async_completed", "", "", payload)
+		})
+	}
 	// Explicit manager replacement always mirrors into the permission engine so
 	// permission-request hooks and PreToolUse hooks cannot diverge.
 	if a.permEngine != nil {

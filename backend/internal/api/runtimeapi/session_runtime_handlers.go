@@ -89,7 +89,15 @@ func (h *Handler) SpawnSessionAgent(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
 		return
 	}
-	result, err := controller.Spawn(r.Context(), parentSessionID, req)
+	// The child runs asynchronously, so its lifetime must not be tied to this
+	// HTTP request. Passing r.Context() here makes every delegated run die with
+	// "context canceled" the moment the spawn response is written: the handler
+	// returns, the request context is cancelled, and childExecutionContext's
+	// AfterFunc propagates that to the child. Keep the request values (tracing,
+	// identity) but detach cancellation; explicit child cancel/stop still works
+	// through the actor and the child's own limits.
+	spawnCtx := context.WithoutCancel(r.Context())
+	result, err := controller.Spawn(spawnCtx, parentSessionID, req)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err)
 		return

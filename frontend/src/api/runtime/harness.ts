@@ -1,6 +1,8 @@
 import type {
   RuntimeHarnessGrantsResponse,
   RuntimeHarnessGrantsUpdateRequest,
+  RuntimeHarnessHooksResponse,
+  RuntimeHarnessHookUpdateRequest,
   RuntimeHarnessMemoryAppendRequest,
   RuntimeHarnessMemoryResponse,
   RuntimeHarnessPermissionsResponse,
@@ -182,6 +184,41 @@ export async function updateHarnessPlugin(
       `/api/runtime/harness/plugins/${encodeURIComponent(pluginId)}`,
       resolvedWorkspace,
     ),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...request,
+        workspace_path: resolvedWorkspace,
+      }),
+    },
+  );
+}
+
+export async function getHarnessHooks(
+  workspacePath?: string,
+): Promise<RuntimeHarnessHooksResponse> {
+  return fetchRuntimeJson<RuntimeHarnessHooksResponse>(
+    withWorkspacePath("/api/runtime/harness/hooks", workspacePath),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+export async function updateHarnessHook(
+  request: RuntimeHarnessHookUpdateRequest,
+  workspacePath?: string,
+): Promise<RuntimeHarnessHooksResponse> {
+  const resolvedWorkspace =
+    request.workspace_path?.trim() || workspacePath?.trim() || undefined;
+  return fetchRuntimeJson<RuntimeHarnessHooksResponse>(
+    withWorkspacePath("/api/runtime/harness/hooks", resolvedWorkspace),
     {
       method: "POST",
       headers: {

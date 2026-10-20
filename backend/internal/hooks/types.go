@@ -31,6 +31,9 @@ const (
 	EventCheckpointCreated  Event = "checkpoint_created"
 	EventRewindCompleted    Event = "rewind_completed"
 	EventBacktrackCompleted Event = "backtrack_completed"
+	// EventInterrupt fires when a run is interrupted by the user or host.
+	// Codex exposes this as a system-message-only hook event.
+	EventInterrupt Event = "interrupt"
 )
 
 // IsBlockingAction reports whether a decision should halt the enclosing flow.
@@ -44,9 +47,12 @@ type DecisionAction string
 const (
 	DecisionContinue DecisionAction = "continue"
 	DecisionBlock    DecisionAction = "block"
-	DecisionModify   DecisionAction = "modify"
-	DecisionNotify   DecisionAction = "notify"
-	DecisionEnrich   DecisionAction = "enrich"
+	// DecisionStop requests a terminal stop without further model turns.
+	// It is distinct from block: block asks the agent to keep working.
+	DecisionStop   DecisionAction = "stop"
+	DecisionModify DecisionAction = "modify"
+	DecisionNotify DecisionAction = "notify"
+	DecisionEnrich DecisionAction = "enrich"
 )
 
 // Decision captures a hook decision.

@@ -32,12 +32,14 @@ export { sendAgentChat } from "./agent-chat";
 export {
   appendHarnessMemory,
   getHarnessGrants,
+  getHarnessHooks,
   getHarnessMemory,
   getHarnessPermissions,
   getHarnessPlugins,
   getHarnessTrust,
   grantHarnessTrust,
   updateHarnessGrants,
+  updateHarnessHook,
   updateHarnessPlugin,
 } from "./harness";
 export {

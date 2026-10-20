@@ -26,6 +26,10 @@ type Package struct {
 	AgentDirs []string
 	// Hooks are hook configs loaded from the plugin (empty when untrusted/disabled).
 	Hooks []hooks.HookConfig
+	// HooksFilePath is the resolved hooks file declared by the manifest (empty
+	// when none). Declarative discovery uses it to load Codex-format hooks.json
+	// without re-parsing the legacy list.
+	HooksFilePath string
 	// MCP is optional MCP config contributed by the plugin.
 	MCP *mcpconfig.Config
 	// Warnings collect non-fatal load issues.
@@ -146,6 +150,7 @@ func (p *Package) resolveContributions() error {
 	// runtime apply still gated by IsActive.
 	if file := strings.TrimSpace(p.Manifest.HooksFile); file != "" {
 		abs := resolvePluginPath(p.Root, file)
+		p.HooksFilePath = abs
 		hooksList, err := loadHooksFile(abs)
 		if err != nil {
 			p.Warnings = append(p.Warnings, fmt.Sprintf("hooks: %v", err))

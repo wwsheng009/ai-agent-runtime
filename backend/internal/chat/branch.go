@@ -192,6 +192,9 @@ func (s *Session) ApplyForkLineage(source *Session, sourceMessageID string, crea
 		s.SetContext(ContextForkSourceMessageID, id)
 	}
 	s.SetContext(ContextForkCreatedAt, createdAt.UTC().Format(time.RFC3339))
+	// A forked session should emit SessionStart with source=fork on its first
+	// turn. The actor consumes and clears this marker.
+	s.SetContext(ContextPendingSessionStartSource, "fork")
 }
 
 // forkOriginTitle returns the source session's display title for fork lineage,

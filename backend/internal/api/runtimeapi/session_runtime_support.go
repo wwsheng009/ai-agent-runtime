@@ -1133,6 +1133,7 @@ func (c *sessionAgentController) subscribeAgentCompletion(parentSessionID string
 		payload := map[string]interface{}{
 			"agent_id":              childSessionID,
 			"session_id":            childSessionID,
+			"child_session_id":      childSessionID,
 			"parent_session_id":     parentSessionID,
 			"path":                  childPath,
 			"source_event_type":     eventType,
@@ -1400,10 +1401,15 @@ func (c *sessionAgentController) dispatchAgentHook(event runtimehooks.Event, pay
 		return
 	}
 	runtimeConfig := c.handler.resolveRuntimeConfig(UsageScope{})
-	if runtimeConfig == nil || len(runtimeConfig.Hooks) == 0 {
+	if runtimeConfig == nil {
 		return
 	}
-	runtimehooks.NewManager(runtimeConfig.Hooks).DispatchAsync(context.Background(), event, payload)
+	workspace := strings.TrimSpace(runtimeConfig.Workspace.Root)
+	merged := c.handler.mergeDeclarativeAgentHooks(runtimeConfig.Hooks, workspace)
+	if len(merged) == 0 {
+		return
+	}
+	runtimehooks.NewManager(merged).DispatchAsync(context.Background(), event, payload)
 }
 
 func apiSpawnAgentHookPayload(parentSessionID string, childSession *chat.Session, extra map[string]interface{}) map[string]interface{} {
@@ -1417,6 +1423,7 @@ func apiSpawnAgentHookPayload(parentSessionID string, childSession *chat.Session
 	payload := map[string]interface{}{
 		"agent_id":          childSessionID,
 		"session_id":        childSessionID,
+		"child_session_id":  childSessionID,
 		"parent_session_id": strings.TrimSpace(parentSessionID),
 		"path":              apiAgentSessionPath(childSession),
 	}

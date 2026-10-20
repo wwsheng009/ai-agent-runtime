@@ -24,6 +24,16 @@ type SessionManager struct {
 	storage SessionStorage
 	config  *SessionManagerConfig
 
+	// closeHook is invoked once when Close succeeds. Hosts inject it to emit a
+	// session-scoped SessionEnd hook (Codex semantics) without coupling chat
+	// to the agent/hook implementation.
+	closeHookMu sync.RWMutex
+	closeHook   func(ctx context.Context, session *Session)
+	// closedSessions makes the close hook idempotent: repeated Close calls must
+	// not emit duplicate session-scoped SessionEnd hooks.
+	closedMu       sync.Mutex
+	closedSessions map[string]struct{}
+
 	// 清理定时器
 	cleanupTicker *time.Ticker
 	cleanupStop   chan struct{}
@@ -32,6 +42,16 @@ type SessionManager struct {
 	archiveTicker *time.Ticker
 	archiveStop   chan struct{}
 	stopOnce      sync.Once
+}
+
+// SetSessionCloseHook installs the session-close observer. Nil clears it.
+func (m *SessionManager) SetSessionCloseHook(hook func(ctx context.Context, session *Session)) {
+	if m == nil {
+		return
+	}
+	m.closeHookMu.Lock()
+	defer m.closeHookMu.Unlock()
+	m.closeHook = hook
 }
 
 // DefaultSessionManagerConfig 默认配置
@@ -78,6 +98,9 @@ func (m *SessionManager) Create(ctx context.Context, userID string) (*Session, e
 	if err := m.storage.Save(ctx, session); err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
+	m.closedMu.Lock()
+	delete(m.closedSessions, session.ID)
+	m.closedMu.Unlock()
 
 	return session, nil
 }
@@ -234,7 +257,30 @@ func (m *SessionManager) Update(ctx context.Context, session *Session) error {
 
 // Close 关闭会话
 func (m *SessionManager) Close(ctx context.Context, sessionID string) error {
-	return m.storage.Close(ctx, sessionID)
+	if err := m.storage.Close(ctx, sessionID); err != nil {
+		return err
+	}
+	m.closedMu.Lock()
+	if m.closedSessions == nil {
+		m.closedSessions = make(map[string]struct{})
+	}
+	_, alreadyClosed := m.closedSessions[sessionID]
+	if !alreadyClosed {
+		m.closedSessions[sessionID] = struct{}{}
+	}
+	m.closedMu.Unlock()
+	if alreadyClosed {
+		return nil
+	}
+	m.closeHookMu.RLock()
+	hook := m.closeHook
+	m.closeHookMu.RUnlock()
+	if hook != nil {
+		if session, err := m.Get(ctx, sessionID); err == nil && session != nil {
+			hook(ctx, session)
+		}
+	}
+	return nil
 }
 
 // Delete 删除会话
@@ -446,6 +492,14 @@ func (m *SessionManager) StreamHistory(ctx context.Context, sessionID string, vi
 
 // ClearHistory 清空会话历史
 func (m *SessionManager) ClearHistory(ctx context.Context, sessionID string) error {
+	// Mark the next turn's SessionStart source before clearing. This must
+	// happen for both storage paths (direct message clear and session update).
+	if err := m.SetContext(ctx, sessionID, ContextPendingSessionStartSource, "clear"); err != nil {
+		return err
+	}
+	if err := m.SetContext(ctx, sessionID, sessionHookStartedContextKey, nil); err != nil {
+		return err
+	}
 	if clearer, ok := m.storage.(SessionStorageHistoryClearer); ok {
 		return clearer.ClearMessages(ctx, sessionID)
 	}

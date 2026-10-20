@@ -1053,6 +1053,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 		payload := mergeRouteAuditPayload(map[string]interface{}{
 			"subagent_id":         task.ID,
+			"agent_id":            task.ID,
+			"agent_type":          task.Role,
+			"hook_event_name":     "SubagentStart",
 			"role":                task.Role,
 			"goal":                task.Goal,
 			"depth":               options.Depth,
@@ -1187,6 +1190,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 		}, spec.Decision))
 		if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 			payload := mergeRouteAuditPayload(map[string]interface{}{
+				"agent_id":            task.ID,
+				"agent_type":          task.Role,
+				"hook_event_name":     "SubagentStop",
 				"subagent_id":         task.ID,
 				"role":                task.Role,
 				"read_only":           task.ReadOnly,
@@ -1321,6 +1327,9 @@ func (s *SubagentScheduler) runChildUncontracted(ctx context.Context, options Su
 	}, spec.Decision))
 	if hookMgr := s.parent.GetHookManager(); hookMgr != nil {
 		payload := mergeRouteAuditPayload(map[string]interface{}{
+			"agent_id":            task.ID,
+			"agent_type":          task.Role,
+			"hook_event_name":     "SubagentStop",
 			"subagent_id":         task.ID,
 			"role":                task.Role,
 			"read_only":           task.ReadOnly,

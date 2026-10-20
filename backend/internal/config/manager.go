@@ -1649,6 +1649,8 @@ func ValidateContextConfig(config *ContextConfig) error {
 		{"keepRecentMessages", config.KeepRecentMessages},
 		{"maxRecallResults", config.MaxRecallResults},
 		{"maxObservationItems", config.MaxObservationItems},
+		// MaxImageAttachmentTokens is intentionally excluded: a negative value
+		// disables the image attachment gate (documented opt-out).
 	} {
 		if item.value < 0 {
 			return errors.New(errors.ErrValidationFailed, fmt.Sprintf("%s cannot be negative", item.name))
@@ -1893,20 +1895,23 @@ func ValidateRolloutConfig(config *RolloutConfig, activeVersion string) error {
 
 // ValidateHookConfig validates runtime hook configuration.
 func ValidateHookConfig(hooks []runtimehooks.HookConfig) error {
-	for _, hook := range hooks {
+	for index := range hooks {
+		hook := &hooks[index]
 		if strings.TrimSpace(hook.ID) == "" {
 			return errors.New(errors.ErrValidationFailed, "hook id cannot be empty")
 		}
-		if strings.TrimSpace(string(hook.Event)) == "" {
+		event, ok := runtimehooks.ParseEventName(string(hook.Event))
+		if strings.TrimSpace(string(hook.Event)) == "" || !ok {
 			return errors.New(errors.ErrValidationFailed, fmt.Sprintf("hook %s event is required", hook.ID))
 		}
+		hook.Event = event
 		execType := strings.ToLower(strings.TrimSpace(hook.Exec.Type))
 		if execType == "" {
 			return errors.New(errors.ErrValidationFailed, fmt.Sprintf("hook %s exec.type is required", hook.ID))
 		}
 		switch execType {
 		case "shell":
-			if len(hook.Exec.Cmd) == 0 {
+			if len(hook.Exec.Cmd) == 0 && strings.TrimSpace(hook.Exec.Command) == "" {
 				return errors.New(errors.ErrValidationFailed, fmt.Sprintf("hook %s exec.cmd is required for shell hooks", hook.ID))
 			}
 		case "http":

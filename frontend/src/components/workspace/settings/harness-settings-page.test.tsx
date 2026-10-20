@@ -59,6 +59,35 @@ const pluginsResponse = {
   count: 1,
 };
 
+const hooksResponse = {
+  workspace_path: "E:/projects/ai/ai-agent-runtime",
+  hooks: [
+    {
+      id: "project:pre_tool_use:0:0",
+      event: "pre_tool_use",
+      handler_type: "shell",
+      execution_mode: "sync",
+      matcher: "Write|Edit",
+      command: "check.sh",
+      timeout_seconds: 10,
+      source: "project",
+      enabled: true,
+    },
+  ],
+  sources: ["E:/projects/ai/ai-agent-runtime/.aicli/hooks.json"],
+  recent_runs: [
+    {
+      hook_id: "project:pre_tool_use:0:0",
+      event: "pre_tool_use",
+      phase: "completed",
+      status_message: "checking",
+      source: "project",
+      at: "2026-10-19T08:00:00Z",
+    },
+  ],
+  count: 1,
+};
+
 describe("HarnessSettingsPage", () => {
   const originalFetch = globalThis.fetch;
 
@@ -89,6 +118,12 @@ describe("HarnessSettingsPage", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
+      if (url.includes("/api/runtime/harness/hooks")) {
+        return new Response(JSON.stringify(hooksResponse), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response(JSON.stringify({ error: "not found" }), {
         status: 404,
         headers: { "Content-Type": "application/json" },
@@ -100,7 +135,7 @@ describe("HarnessSettingsPage", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("renders harness panels for permissions, grants, memory, and plugins", () => {
+  it("renders harness panels for permissions, grants, memory, plugins, and hooks", () => {
     const previousSettings = window.localStorage.getItem(APP_SETTINGS_STORAGE_KEY);
     window.localStorage.setItem(
       APP_SETTINGS_STORAGE_KEY,
@@ -126,6 +161,7 @@ describe("HarnessSettingsPage", () => {
       expect(markup).toContain("权限规则");
       expect(markup).toContain("记忆笔记");
       expect(markup).toContain("插件目录");
+      expect(markup).toContain("生命周期 Hooks");
       expect(markup).toContain("记住授权");
       expect(markup).toContain("permissions.yaml");
       expect(markup).toContain("grants.json");

@@ -11,6 +11,36 @@ type turnSystemMessagesKey struct{}
 
 type turnPinnedToolsKey struct{}
 
+type hookAdditionalContextKey struct{}
+
+// WithHookAdditionalContext adds model-visible context returned by hooks
+// (Codex's additionalContext) to the current run. It is prompt-only: the
+// context is appended to the request view, never written to durable history.
+func WithHookAdditionalContext(ctx context.Context, text string) context.Context {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	existing, _ := ctx.Value(hookAdditionalContextKey{}).([]string)
+	next := append(append([]string(nil), existing...), text)
+	return context.WithValue(ctx, hookAdditionalContextKey{}, next)
+}
+
+// HookAdditionalContextFromContext returns the accumulated hook context.
+func HookAdditionalContextFromContext(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	values, _ := ctx.Value(hookAdditionalContextKey{}).([]string)
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
 // WithTurnSystemMessages 为当前回合附加一次性 system 消息（如 skill 程序说明）。
 // 这些消息随 ctx 传入 loop，只在本次 run 的请求历史里生效，不落会话持久历史。
 func WithTurnSystemMessages(ctx context.Context, messages []types.Message) context.Context {

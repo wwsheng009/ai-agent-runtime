@@ -133,3 +133,43 @@ export type RuntimeHarnessPluginUpdateRequest = {
   trust?: string;
   enabled?: boolean;
 };
+
+export type RuntimeHarnessHook = {
+  id: string;
+  event: string;
+  handler_type: string;
+  execution_mode: string;
+  matcher?: string;
+  command?: string;
+  url?: string;
+  timeout_seconds?: number;
+  status_message?: string;
+  source?: string;
+  source_path?: string;
+  enabled: boolean;
+};
+
+export type RuntimeHarnessHooksResponse = {
+  workspace_path: string;
+  hooks: RuntimeHarnessHook[];
+  sources?: string[];
+  warnings?: string[];
+  recent_runs?: RuntimeHarnessHookRun[];
+  count: number;
+};
+
+export type RuntimeHarnessHookRun = {
+  hook_id: string;
+  event: string;
+  phase: string;
+  status_message?: string;
+  source?: string;
+  at: string;
+};
+
+export type RuntimeHarnessHookUpdateRequest = {
+  workspace_path?: string;
+  id: string;
+  source_path: string;
+  enabled: boolean;
+};

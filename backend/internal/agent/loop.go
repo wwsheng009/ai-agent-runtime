@@ -38,13 +38,13 @@ import (
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolregistry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
-	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolsurface"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -235,7 +235,24 @@ type ReActLoop struct {
 	// 结果盖进请求 metadata。生命周期等于一次 run()。
 	forkAudit     *ForkAuditSpec
 	forkAuditDone bool
+	// stopHookContinued marks that this run already continued because a Stop
+	// hook blocked finishing. Codex exposes this as stop_hook_active so a hook
+	// can avoid blocking forever.
+	stopHookContinued bool
+	// stopHookContinues counts how many times this run continued because of a
+	// Stop hook block. Capped by maxStopHookContinues so a hook that always
+	// blocks cannot spin until an unlimited step budget runs out.
+	stopHookContinues int
+	// pendingHookContexts accumulates PreToolUse additionalContext for the next
+	// model request. It is run-scoped and cleared after injection.
+	pendingHookContexts []string
 }
+
+// maxStopHookContinues bounds how many extra steps a Stop hook may force in one
+// run. The limit exists because "hook asks the agent to keep going" is an easy
+// accidental infinite loop: any hook whose condition never becomes true keeps
+// returning block, and an unlimited maxSteps never stops it.
+const maxStopHookContinues = 5
 
 // runLineage 描述本次运行的父链归属；全空 = 顶层运行（不注入载荷）。
 type runLineage struct {
@@ -645,6 +662,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// attempt 不得继承上一 attempt 已接受的回执。
 	loop.reportSchema = options.ReportSchema
 	loop.reportSubmitted = nil
+	loop.stopHookContinued = false
+	loop.stopHookContinues = 0
+	loop.pendingHookContexts = nil
 	// Fork 前缀审计（P2-1'）：同样按 run 重置，重试不自带上一 attempt 的结果。
 	loop.forkAudit = options.ForkAudit
 	loop.forkAuditDone = false
@@ -811,6 +831,21 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	history := composeInitialHistory(options.History, turnMessages, loop.agent.config.SystemPrompt)
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
+	}
+	// Hook additionalContext is model-visible but prompt-only: append it to the
+	// request view. The reminder channel is stripped before durable persist, so
+	// it never rewrites session history.
+	if hookContexts := HookAdditionalContextFromContext(currentCtx); len(hookContexts) > 0 {
+		if reminder := NewSystemReminderMessage(SystemReminder{
+			Kind:    ReminderKindRuntimeAdvisory,
+			Body:    strings.Join(hookContexts, "\n\n"),
+			Durable: false,
+			Extra: types.Metadata{
+				"hook_additional_context": true,
+			},
+		}); reminder != nil {
+			history = append(history, *reminder)
+		}
 	}
 	// P1 INV-1（session-message-identity-protocol-20261017）：run 起点构造身份源，
 	// 本 run 新建的 assistant/tool 消息在 builder 创建处铸 id（空 turnID 时
@@ -1034,6 +1069,22 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 		}
 
+		// Codex PreToolUse additionalContext is model-visible context for the
+		// next request. It is prompt-only and consumed once.
+		if len(loop.pendingHookContexts) > 0 {
+			if reminder := NewSystemReminderMessage(SystemReminder{
+				Kind:    ReminderKindRuntimeAdvisory,
+				Body:    strings.Join(loop.pendingHookContexts, "\n\n"),
+				Durable: false,
+				Extra: types.Metadata{
+					"hook_additional_context": true,
+				},
+			}); reminder != nil {
+				promptBuilder.Add(*reminder)
+			}
+			loop.pendingHookContexts = nil
+		}
+
 		// 1. Think: LLM 推理决定下一步行动
 		thought, action, usage, err := loop.think(currentCtx, traceID, sessionID, step, prompt, promptBuilder.Messages(), observations, options.ToolWhitelist, remainingBudget, promptCacheEpoch)
 		if nextEpoch, ok := promptCacheEpochFromAction(action); ok && nextEpoch > promptCacheEpoch {
@@ -1253,7 +1304,17 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			// Stop gate: hooks may block finishing and force another step when
 			// step budget remains (e.g. tests not green yet).
 			if result.Success {
-				if continueRun, stopMsg := loop.dispatchStopHook(currentCtx, sessionID, traceID, step, result, "no_tool_calls"); continueRun {
+				if continueRun, stopMsg, stopNow := loop.dispatchStopHook(currentCtx, sessionID, traceID, step, result, "no_tool_calls"); stopNow {
+					if strings.TrimSpace(stopMsg) != "" {
+						result.Output = stopMsg
+						result.Error = stopMsg
+					}
+					result.Success = false
+					if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
+						return nil, err
+					}
+					return result, nil
+				} else if continueRun {
 					// Durable history already has the assistant text (above);
 					// mirror it into the prompt view and inject a recovery cue.
 					promptBuilder.AppendAssistantAction(action.Content, nil, action.Reasoning, action.MessageMetadata)
@@ -1559,6 +1620,38 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// Prompt path keeps pure advisories; durable builder strips them so
 		// session history / resume do not accumulate doom-loop noise (R3 residual).
 		toolPayloads := toolResultsToPayloads(toolResults, repeatedSemanticAdvisory)
+		// Codex-compatible PostToolUse: the tool already ran, so a block or
+		// additionalContext is feedback for the next model step. Apply it only
+		// to the prompt view; durable tool results stay free of hook noise.
+		postToolStopMessage := ""
+		for i := range toolResults {
+			decision := loop.agent.dispatchPostToolUseHook(currentCtx, sessionID, toolResults[i])
+			if i >= len(toolPayloads) {
+				break
+			}
+			feedback := strings.TrimSpace(decision.Message)
+			if decision.Action == runtimehooks.DecisionBlock && feedback == "" {
+				feedback = "post_tool_use hook blocked the next step"
+			}
+			if decision.Action == runtimehooks.DecisionStop && feedback != "" {
+				postToolStopMessage = feedback
+			}
+			contextText := strings.TrimSpace(decision.ExtraContext["additional_context"])
+			combined := strings.TrimSpace(strings.Join([]string{feedback, contextText}, "\n\n"))
+			if combined == "" {
+				continue
+			}
+			wrapped := FormatSystemReminder(ReminderKindRuntimeAdvisory, combined)
+			if wrapped == "" {
+				continue
+			}
+			toolPayloads[i].Content = strings.TrimSpace(toolPayloads[i].Content) + "\n\n" + wrapped
+			toolPayloads[i].Metadata["hook_post_tool_use"] = true
+			toolPayloads[i].Metadata[MetaSystemReminder] = true
+			toolPayloads[i].Metadata[MetaSystemReminderKind] = ReminderKindRuntimeAdvisory
+			toolPayloads[i].Metadata[MetaEphemeralInstruction] = true
+			toolPayloads[i].Metadata[MetaSystemReminderDurable] = false
+		}
 		// A pointer to artifact_read is only actionable when the reader is in the
 		// current surface. When it is absent, degrade the notice instead of
 		// handing the model a dead pointer.
@@ -1595,6 +1688,15 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		promptBuilder.AppendToolResults(normalizedCalls, toolPayloads)
 		if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 			return nil, err
+		}
+		if postToolStopMessage != "" {
+			result.Success = false
+			result.Output = postToolStopMessage
+			result.Error = postToolStopMessage
+			result.Steps = step
+			result.Observations = observations
+			result.Usage = totalUsage.Clone()
+			return result, nil
 		}
 
 		compactedHistory, compactUsage, compacted, compactErr := loop.tryActiveTurnSemanticCompaction(
@@ -3302,13 +3404,11 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		}
 
 		if hookManager := loop.agent.GetHookManager(); hookManager != nil {
-			decision, hookErr := hookManager.Dispatch(ctx, runtimehooks.EventPreToolUse, map[string]interface{}{
-				"tool_name":  tc.Name,
-				"tool_call":  tc.ID,
-				"session_id": sessionID,
-				"trace_id":   traceID,
-				"args":       tc.Args,
-			})
+			hookPayload := loop.agent.hookBasePayload(ctx, sessionID, traceID, tc.Name, tc.ID, tc.Args)
+			hookPayload["tool_call"] = tc.ID
+			hookPayload["args"] = tc.Args
+			hookPayload["hook_event_name"] = "PreToolUse"
+			decision, hookErr := hookManager.Dispatch(ctx, runtimehooks.EventPreToolUse, hookPayload)
 			if hookErr != nil {
 				result.Error = hookErr.Error()
 				loop.emitToolDenied(sessionID, tc, step, traceID, "hook", result.Error, nil)
@@ -3340,6 +3440,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				}
 				tc.Args = patched
 				result.Call.Args = patched
+			}
+			if contextText := strings.TrimSpace(decision.ExtraContext["additional_context"]); contextText != "" {
+				loop.pendingHookContexts = append(loop.pendingHookContexts, contextText)
 			}
 			mergeHookMetadata(metadata, decision.Message, decision.ExtraContext)
 		}

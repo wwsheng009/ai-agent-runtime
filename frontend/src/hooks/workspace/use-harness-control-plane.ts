@@ -3,13 +3,17 @@ import { useCallback, useEffect, useState } from "react";
 import {
   appendHarnessMemory,
   getHarnessGrants,
+  getHarnessHooks,
   getHarnessMemory,
   getHarnessPermissions,
   getHarnessPlugins,
   updateHarnessGrants,
+  updateHarnessHook,
   updateHarnessPlugin,
   type RuntimeHarnessGrant,
   type RuntimeHarnessGrantsUpdateRequest,
+  type RuntimeHarnessHook,
+  type RuntimeHarnessHookRun,
   type RuntimeHarnessMemoryNote,
   type RuntimeHarnessPermissionsResponse,
   type RuntimeHarnessPlugin,
@@ -38,6 +42,10 @@ export function useHarnessControlPlane({
   );
   const [memoryQuery, setMemoryQuery] = useState("");
   const [plugins, setPlugins] = useState<RuntimeHarnessPlugin[]>([]);
+  const [hooks, setHooks] = useState<RuntimeHarnessHook[]>([]);
+  const [hooksSources, setHooksSources] = useState<string[]>([]);
+  const [hooksWarnings, setHooksWarnings] = useState<string[]>([]);
+  const [hookRuns, setHookRuns] = useState<RuntimeHarnessHookRun[]>([]);
   const [loading, setLoading] = useState(false);
   const [actionPending, setActionPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,6 +60,10 @@ export function useHarnessControlPlane({
         setGrantsStorePath("");
         setMemoryNotes([]);
         setPlugins([]);
+        setHooks([]);
+        setHooksSources([]);
+        setHooksWarnings([]);
+        setHookRuns([]);
         setError(null);
         return;
       }
@@ -60,7 +72,7 @@ export function useHarnessControlPlane({
       setError(null);
 
       try {
-        const [permissionsResponse, grantsResponse, memoryResponse, pluginsResponse] =
+        const [permissionsResponse, grantsResponse, memoryResponse, pluginsResponse, hooksResponse] =
           await Promise.all([
             getHarnessPermissions(resolvedWorkspace),
             getHarnessGrants(resolvedWorkspace),
@@ -69,6 +81,7 @@ export function useHarnessControlPlane({
               limit: 50,
             }),
             getHarnessPlugins(resolvedWorkspace),
+            getHarnessHooks(resolvedWorkspace),
           ]);
 
         setPermissions(permissionsResponse);
@@ -80,6 +93,10 @@ export function useHarnessControlPlane({
             : (memoryResponse.notes ?? memoryResponse.hits ?? []),
         );
         setPlugins(pluginsResponse.plugins ?? []);
+        setHooks(hooksResponse.hooks ?? []);
+        setHooksSources(hooksResponse.sources ?? []);
+        setHooksWarnings(hooksResponse.warnings ?? []);
+        setHookRuns(hooksResponse.recent_runs ?? []);
       } catch (loadError) {
         setError(
           errorMessage(loadError, "failed to load harness control plane"),
@@ -250,12 +267,47 @@ export function useHarnessControlPlane({
     [resolvedWorkspace],
   );
 
+  const updateHook = useCallback(
+    async (hook: RuntimeHarnessHook, enabled: boolean) => {
+      if (!resolvedWorkspace || !hook.source_path) {
+        return;
+      }
+      setActionPending(true);
+      setError(null);
+      try {
+        const response = await updateHarnessHook(
+          {
+            id: hook.id,
+            source_path: hook.source_path,
+            enabled,
+            workspace_path: resolvedWorkspace,
+          },
+          resolvedWorkspace,
+        );
+        setHooks(response.hooks ?? []);
+        setHooksSources(response.sources ?? []);
+        setHooksWarnings(response.warnings ?? []);
+        setHookRuns(response.recent_runs ?? []);
+      } catch (actionError) {
+        setError(errorMessage(actionError, "failed to update hook"));
+        throw actionError;
+      } finally {
+        setActionPending(false);
+      }
+    },
+    [resolvedWorkspace],
+  );
+
   return {
     actionPending,
     appendMemory,
     error,
     grants,
     grantsStorePath,
+    hooks,
+    hooksSources,
+    hooksWarnings,
+    hookRuns,
     loading,
     memoryNotes,
     memoryQuery,
@@ -267,6 +319,7 @@ export function useHarnessControlPlane({
     searchMemory,
     setMemoryQuery,
     updatePlugin,
+    updateHook,
     workspacePath: resolvedWorkspace,
   };
 }

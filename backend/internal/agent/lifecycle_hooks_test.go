@@ -159,3 +159,48 @@ func TestReActLoop_PreCompactHookBlockSkipsCompaction(t *testing.T) {
 	require.Empty(t, completedEvents)
 	require.NotContains(t, joinedMessageContents(provider.requests[0].Messages), "CONTEXT CHECKPOINT COMPACTION")
 }
+
+func TestReActLoop_StopHookContinueFalseTerminates(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+		MaxRetries:      0,
+	})
+	provider := &SequenceLLMProvider{
+		name:         "test-provider",
+		defaultModel: "test-model",
+		responses: []*llm.LLMResponse{
+			{Content: "first answer", Model: "test-model"},
+			{Content: "should not be requested", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		DefaultMaxTokens: 256,
+		SystemPrompt:     "You are a helpful assistant.",
+	}, nil, llmRuntime)
+
+	hookServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"continue":false,"stopReason":"stop requested"}`))
+	}))
+	defer hookServer.Close()
+	agent.SetHookManager(runtimehooks.NewManager([]runtimehooks.HookConfig{{
+		ID:    "stop-now",
+		Event: runtimehooks.EventStop,
+		Exec:  runtimehooks.ExecConfig{Type: "http", URL: hookServer.URL, Method: http.MethodPost},
+	}}))
+
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 3, EnableToolCalls: false})
+	session := newTestHistorySession("session-stop-now")
+
+	result, err := loop.RunWithSession(context.Background(), "finish", session)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.Success)
+	require.Equal(t, "stop requested", result.Output)
+	require.Len(t, provider.requests, 1)
+}

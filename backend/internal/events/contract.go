@@ -244,32 +244,33 @@ var runtimeEventContracts = []Contract{
 	// 既不在注册表也不在 runtimeobserve 目录 ⇒ 与「完全未知类型」不可区分（三分法
 	// 失效）。登记为 0 通道 = 显式表态「当前无 chat 侧交付通道」，**不改变任何投递
 	// 行为**；是否给某条通道需单独评审（方案 §6.1 第 6 条的说明）。
-	{Type: "agent.turn.started"},                   // loop.go
-	{Type: "agent.turn.finished"},                  // loop.go
-	{Type: "completion.requirement_recovery"},      // loop.go
-	{Type: "context.preflight.started"},            // loop.go
-	{Type: "context.preflight.compacted"},          // loop.go
-	{Type: "context.preflight.failed"},             // loop.go
-	{Type: "context.tool_schema.compacted"},        // loop.go
-	{Type: "context.tool_schema.frozen"},           // loop.go
-	{Type: "context.usage_over_budget"},            // loop.go
-	{Type: "hooks.stop_blocked"},                   // loop.go
-	{Type: "llm.request.started"},                  // loop.go（点分隔形；下划线形见上）
-	{Type: "llm.request.finished"},                 // loop.go（点分隔形；下划线形见上）
-	{Type: "llm.retry"},                            // loop.go
-	{Type: "llm.retry.aggregated"},                 // loop.go
-	{Type: "llm.max_output_tokens.escalated"},      // loop.go
-	{Type: "llm.prompt_cache.backoff_applied"},     // loop.go
-	{Type: "llm.reasoning_only.guardrail_hit"},     // loop.go
-	{Type: "llm.reasoning_only.recovered"},         // loop.go
-	{Type: "patch.decision"},                       // orchestrator.go
-	{Type: "patch.applied"},                        // scheduler.go
-	{Type: "subagent.batch.created"},               // loop.go（批次创建里程碑）
-	{Type: "subagent.batch.circuit_open"},          // scheduler.go（熔断治理信号）
-	{Type: "subagent.denied"},                      // scheduler.go
-	{Type: "subagent.requires_write"},              // loop.go
-	{Type: "tool_loop.exploration_stall_observed"}, // loop.go
-	{Type: "tool_loop.repeated_prompt_observed"},   // loop.go
+	{Type: "agent.turn.started"},                      // loop.go
+	{Type: "agent.turn.finished"},                     // loop.go
+	{Type: "completion.requirement_recovery"},         // loop.go
+	{Type: "context.preflight.started"},               // loop.go
+	{Type: "context.preflight.compacted"},             // loop.go
+	{Type: "context.preflight.failed"},                // loop.go
+	{Type: "context.tool_schema.compacted"},           // loop.go
+	{Type: "context.tool_schema.frozen"},              // loop.go
+	{Type: "context.usage_over_budget"},               // loop.go
+	{Type: "hooks.stop_blocked"},                      // loop.go
+	{Type: "hooks.status", Channels: ChannelLiveOnly}, // agent.go
+	{Type: "llm.request.started"},                     // loop.go（点分隔形；下划线形见上）
+	{Type: "llm.request.finished"},                    // loop.go（点分隔形；下划线形见上）
+	{Type: "llm.retry"},                               // loop.go
+	{Type: "llm.retry.aggregated"},                    // loop.go
+	{Type: "llm.max_output_tokens.escalated"},         // loop.go
+	{Type: "llm.prompt_cache.backoff_applied"},        // loop.go
+	{Type: "llm.reasoning_only.guardrail_hit"},        // loop.go
+	{Type: "llm.reasoning_only.recovered"},            // loop.go
+	{Type: "patch.decision"},                          // orchestrator.go
+	{Type: "patch.applied"},                           // scheduler.go
+	{Type: "subagent.batch.created"},                  // loop.go（批次创建里程碑）
+	{Type: "subagent.batch.circuit_open"},             // scheduler.go（熔断治理信号）
+	{Type: "subagent.denied"},                         // scheduler.go
+	{Type: "subagent.requires_write"},                 // loop.go
+	{Type: "tool_loop.exploration_stall_observed"},    // loop.go
+	{Type: "tool_loop.repeated_prompt_observed"},      // loop.go
 }
 
 var runtimeEventContractByType = buildRuntimeEventContractIndex()

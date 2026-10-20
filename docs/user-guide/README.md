@@ -40,6 +40,7 @@
 > SSH/SFTP 客户端完整手册（认证、config、FAQ）另见 [docs/tools/ssh-sftp-clients-usage.md](../tools/ssh-sftp-clients-usage.md)；aicli 详细文档见 [docs/aicli/](../aicli/README.md)。
 > 对**正在运行的** aicli TUI 做脚本化远程操作（`/web/api/*`：注入 prompt、SSE 流式、
 > 审批/提问、屏幕快照、会话管理、写令牌）见 [aicli-tui-remote.md](aicli-tui-remote.md)。
+> Hooks（生命周期回调）配置与调试见 [hooks.md](hooks.md)。
 
 ---
 

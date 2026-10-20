@@ -289,14 +289,25 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	// rules, and mode below; it never short-circuits to allow.
 	if e.Hooks != nil {
 		payload := map[string]interface{}{
-			"tool_name": req.ToolName,
-			"args":      req.Args,
+			"tool_name":       req.ToolName,
+			"tool_input":      req.Args,
+			"args":            req.Args,
+			"hook_event_name": "PermissionRequest",
 		}
 		if req.SessionID != "" {
 			payload["session_id"] = req.SessionID
 		}
 		if req.TraceID != "" {
 			payload["trace_id"] = req.TraceID
+		}
+		if req.ToolCallID != "" {
+			payload["tool_use_id"] = req.ToolCallID
+		}
+		if req.Mode != "" {
+			payload["permission_mode"] = string(req.Mode)
+		}
+		if root := toolctx.WorkspaceRoot(ctx); root != "" {
+			payload["cwd"] = root
 		}
 		if req.ToolInfo != nil {
 			payload["mcp_name"] = req.ToolInfo.MCPName
@@ -700,14 +711,25 @@ func (e *Engine) ValidateHardConstraints(ctx context.Context, req EvalRequest) (
 	var patched json.RawMessage
 	if e.Hooks != nil {
 		payload := map[string]interface{}{
-			"tool_name": req.ToolName,
-			"args":      req.Args,
+			"tool_name":       req.ToolName,
+			"tool_input":      req.Args,
+			"args":            req.Args,
+			"hook_event_name": "PermissionRequest",
 		}
 		if req.SessionID != "" {
 			payload["session_id"] = req.SessionID
 		}
 		if req.TraceID != "" {
 			payload["trace_id"] = req.TraceID
+		}
+		if req.ToolCallID != "" {
+			payload["tool_use_id"] = req.ToolCallID
+		}
+		if req.Mode != "" {
+			payload["permission_mode"] = string(req.Mode)
+		}
+		if root := toolctx.WorkspaceRoot(ctx); root != "" {
+			payload["cwd"] = root
 		}
 		if req.ToolInfo != nil {
 			payload["mcp_name"] = req.ToolInfo.MCPName

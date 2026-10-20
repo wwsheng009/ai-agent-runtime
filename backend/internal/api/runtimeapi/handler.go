@@ -110,6 +110,11 @@ const (
 
 // Handler Skills API 处理器
 type Handler struct {
+	// lastHookManager is the most recently built session agent's hook manager.
+	// The Harness panel reads its bounded in-memory run history.
+	hookManagerMu   sync.Mutex
+	lastHookManager *runtimehooks.Manager
+
 	skillRegistry *skill.Registry
 	skillLoader   *skill.Loader
 	mcpManager    skill.MCPManager
@@ -765,6 +770,7 @@ func cloneBoolPointer(value *bool) *bool {
 // SetSessionManager 设置 Session Manager
 func (h *Handler) SetSessionManager(manager *chat.SessionManager) {
 	h.sessionManager = manager
+	h.installSessionCloseHook(h.runtimeConfig)
 }
 
 // SetHotReload 设置 HotReload
@@ -885,9 +891,43 @@ func (h *Handler) SetRuntimeConfig(config *runtimecfg.RuntimeConfig, configFile 
 	}
 	h.runtimeConfig = config
 	h.runtimeConfigFile = strings.TrimSpace(configFile)
+	h.installSessionCloseHook(config)
 	_, _ = h.refreshTeamStore(config, h.runtimeConfigFile, "", "")
 	_, _ = h.refreshSessionRuntimeStore(config, h.runtimeConfigFile)
 	_, _ = h.refreshAgentControlRegistryService(config, h.runtimeConfigFile)
+}
+
+// installSessionCloseHook emits a session-scoped SessionEnd hook when a
+// session is closed. Turn-level SessionEnd hooks continue to carry
+// scope=turn; this one carries scope=session (Codex semantics).
+func (h *Handler) installSessionCloseHook(config *runtimecfg.RuntimeConfig) {
+	if h.sessionManager == nil {
+		return
+	}
+	h.sessionManager.SetSessionCloseHook(func(ctx context.Context, session *chat.Session) {
+		if session == nil {
+			return
+		}
+		var base []runtimehooks.HookConfig
+		if config != nil {
+			base = config.Hooks
+		}
+		workspace := ""
+		if config != nil {
+			workspace = strings.TrimSpace(config.Workspace.Root)
+		}
+		merged := h.mergeDeclarativeAgentHooks(base, workspace)
+		if len(merged) == 0 {
+			return
+		}
+		manager := runtimehooks.NewManager(merged)
+		manager.DispatchAsync(ctx, runtimehooks.EventSessionEnd, map[string]interface{}{
+			"session_id":      session.ID,
+			"hook_event_name": "SessionEnd",
+			"reason":          "other",
+			"scope":           "session",
+		})
+	})
 }
 
 // SetRuntimeConfigResolver 设置 runtime config 选择器（用于 rollout）
@@ -1212,6 +1252,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/harness/memory", h.UpdateHarnessMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/harness/hooks", h.GetHarnessHooks).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/hooks", h.UpdateHarnessHook).Methods(http.MethodPost)
 
 	// Teams
 	runtimeRouter.HandleFunc("/agent-control/agents", h.ListAgentControlAgents).Methods(http.MethodGet)
@@ -2824,7 +2866,28 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		// execSession 由 chatcore 在内部创建、失败时不返回，因此非流式入口用
 		// 提交点快照做中途落库与失败收尾，保证长 turn 不会整轮丢失。
 		historyCheckpointer := newAgentChatHistoryCheckpointer(h, r, session, nil, contextMessages, turnID)
-		execResult, reactErr := runtimechatcore.ExecuteNonStream(ctx, runtimechatcore.ExecuteRequest{
+		// 在途回合登记（与流式直连路径同一约定）：interrupt 命令先查
+		// activeTurnRegistry，非流式回合若不登记，就只能回落到 hub，并在
+		// web turn 仍持有会话租约时被 409 拒绝——表现为「正在跑的回合停不掉」。
+		// 非流式请求天然不可续传，因此按 detached=false 登记。
+		runCtx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
+		// turnInterrupted 是「本回合收到过接口显式取消」的进程内真相来源，
+		// 与流式直连路径同一约定：错误出口据此把「用户停止」和「真失败」分开。
+		var turnInterrupted atomic.Bool
+		releaseActiveTurn := h.getActiveTurnRegistry().beginCancelable(
+			sessionID(session),
+			turnID,
+			agentChatActiveTurnSource,
+			false,
+			func(string) bool {
+				turnInterrupted.Store(true)
+				cancelRun()
+				return true
+			},
+		)
+		defer releaseActiveTurn()
+		execResult, reactErr := runtimechatcore.ExecuteNonStream(runCtx, runtimechatcore.ExecuteRequest{
 			Agent:           a,
 			LLMRuntime:      h.llmRuntime,
 			Session:         session,
@@ -2866,7 +2929,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
 				logger.Warnf("agent chat: persist turn history after failure: %s", persistErr)
 			}
-			h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, reactErr, session, requestTraceID)
+			h.writeAgentChatExecutionError(ctx, w, agentChatErrorStatus(reactErr, turnInterrupted.Load()), reactErr, session, requestTraceID)
 			return
 		}
 		reactResult := execResult.ReactResult
@@ -2925,7 +2988,26 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		orchestrationMode = agent.OrchestrationLLMOnly
 	}
 
-	execResult, orchErr := runtimechatcore.ExecuteNonStream(ctx, runtimechatcore.ExecuteRequest{
+	// Same active-turn contract as the ReAct branch above: without a registry
+	// entry an interrupt has nothing to cancel and falls through to the hub,
+	// where the running web turn's own session lease rejects it with 409.
+	orchRunCtx, cancelOrchRun := context.WithCancel(ctx)
+	defer cancelOrchRun()
+	var orchInterrupted atomic.Bool
+	releaseOrchTurn := h.getActiveTurnRegistry().beginCancelable(
+		sessionID(session),
+		turnID,
+		agentChatActiveTurnSource,
+		false,
+		func(string) bool {
+			orchInterrupted.Store(true)
+			cancelOrchRun()
+			return true
+		},
+	)
+	defer releaseOrchTurn()
+
+	execResult, orchErr := runtimechatcore.ExecuteNonStream(orchRunCtx, runtimechatcore.ExecuteRequest{
 		Agent:  a,
 		Prompt: lastMessage,
 		TurnID: turnID,
@@ -2950,7 +3032,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if orchErr != nil {
-		h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, orchErr, session, requestTraceID)
+		h.writeAgentChatExecutionError(ctx, w, agentChatErrorStatus(orchErr, orchInterrupted.Load()), orchErr, session, requestTraceID)
 		return
 	}
 	orchResult := execResult.OrchestrationResult
@@ -5721,10 +5803,44 @@ func (h *Handler) applyAgentHooks(a *agent.Agent, runtimeConfig *runtimecfg.Runt
 	if config == nil {
 		config = h.runtimeConfig
 	}
-	if config == nil || len(config.Hooks) == 0 {
+	var base []runtimehooks.HookConfig
+	if config != nil {
+		base = config.Hooks
+	}
+	workspace := ""
+	if config != nil {
+		workspace = strings.TrimSpace(config.Workspace.Root)
+	}
+	merged := h.mergeDeclarativeAgentHooks(base, workspace)
+	if len(merged) == 0 {
 		return
 	}
-	a.SetHookManager(runtimehooks.NewManager(config.Hooks))
+	a.SetHookManager(runtimehooks.NewManager(merged))
+	h.hookManagerMu.Lock()
+	h.lastHookManager = a.GetHookManager()
+	h.hookManagerMu.Unlock()
+}
+
+func (h *Handler) recentHookRuns() []runtimehooks.RunRecord {
+	if h == nil {
+		return nil
+	}
+	h.hookManagerMu.Lock()
+	manager := h.lastHookManager
+	h.hookManagerMu.Unlock()
+	if manager == nil {
+		return nil
+	}
+	return manager.RecentRuns()
+}
+
+// mergeDeclarativeAgentHooks loads user/project/plugin hooks.json layers. The
+// project layer is gated by folder trust (server never prompts: unresolved
+// project configs fail closed).
+func (h *Handler) mergeDeclarativeAgentHooks(base []runtimehooks.HookConfig, workspace string) []runtimehooks.HookConfig {
+	trust := workspaceFolderTrust(workspace)
+	sources := h.hostHookSources(workspace, trust.Trusted, base)
+	return runtimehooks.MergeForHostFromEnv(sources)
 }
 
 func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runtimecfg.RuntimeConfig) {
@@ -10329,6 +10445,21 @@ func (h *Handler) writeAgentChatExecutionError(ctx context.Context, w http.Respo
 	if err == nil {
 		return
 	}
+	// A cancelled turn is not a server fault. Emit the same cancel marker the
+	// streaming path puts on its error frame so clients can distinguish "the
+	// user stopped this" from a real failure, and use 499 (client closed /
+	// aborted request, nginx convention) instead of 500.
+	if statusCode == statusClientClosedRequest {
+		response := map[string]interface{}{
+			"error":         err.Error(),
+			"cancel_source": activeTurnCancelSourceUserInterrupt,
+		}
+		if traceID := strings.TrimSpace(traceID); traceID != "" {
+			response["trace_id"] = traceID
+		}
+		h.writeJSON(w, statusClientClosedRequest, response)
+		return
+	}
 	if stream := agentChatStreamFrom(w); stream != nil {
 		// 流式出口：preflight 修正/落库逻辑保留，trace 写进帧内（响应头已发出，
 		// 不能再改 X-Trace-ID）。
@@ -10340,6 +10471,23 @@ func (h *Handler) writeAgentChatExecutionError(ctx context.Context, w http.Respo
 		w.Header().Set("X-Trace-ID", resolvedTraceID)
 	}
 	h.writeError(w, statusCode, preparedErr)
+}
+
+// statusClientClosedRequest is the de-facto "client cancelled this request"
+// status (nginx 499). It is not an IANA code, so net/http has no constant.
+const statusClientClosedRequest = 499
+
+// agentChatErrorStatus maps a turn error to its HTTP status. An explicit
+// user/host interrupt is not a server failure: the run ends with context
+// cancellation, and reporting 500 makes clients treat a deliberate stop as a
+// crash (retry loops, error banners). Callers pass the request's
+// turnInterrupted flag because the error itself is indistinguishable from any
+// other context cancellation.
+func agentChatErrorStatus(err error, interrupted bool) int {
+	if interrupted && stderrors.Is(err, context.Canceled) {
+		return statusClientClosedRequest
+	}
+	return http.StatusInternalServerError
 }
 
 func (h *Handler) prepareAgentChatExecutionError(ctx context.Context, err error, session *chat.Session, traceID string) (error, string) {

@@ -104,6 +104,37 @@ func (c *Catalog) ActiveMCPConfigs() []*mcpconfig.Config {
 	return out
 }
 
+// ActiveHooksFiles returns declarative hook files from trusted+enabled plugins.
+// The list is stable and deduplicated by path.
+func (c *Catalog) ActiveHooksFiles() []HookFile {
+	if c == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []HookFile
+	for _, pkg := range c.List() {
+		if !pkg.IsActive() {
+			continue
+		}
+		path := strings.TrimSpace(pkg.HooksFilePath)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, HookFile{Path: path, PluginID: pkg.Manifest.Name})
+	}
+	return out
+}
+
+// HookFile is one declarative hooks file contributed by a plugin.
+type HookFile struct {
+	Path     string
+	PluginID string
+}
+
 func (c *Catalog) collectActive(fn func(*Package) []string) []string {
 	if c == nil {
 		return nil

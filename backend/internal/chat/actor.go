@@ -50,6 +50,14 @@ const aicliRuntimeContextCanonicalTokenCountKey = "context_token_count"
 // the structured keys carry the prompt identity that makes the anchor
 // verifiable across turns.
 const (
+	// sessionHookStartedContextKey marks that the session-level SessionStart
+	// hook has been dispatched once. It is stored in durable session context so
+	// a reloaded session does not re-run startup hooks on every turn.
+	sessionHookStartedContextKey = "hooks.session_started"
+	// ContextPendingSessionStartSource carries an explicit SessionStart source
+	// (resume/clear/fork) for the next turn. The actor consumes it once.
+	ContextPendingSessionStartSource = "hooks.pending_session_start_source"
+
 	aicliRuntimeContextTokenFingerprintKey     = "aicli_context_token_fingerprint"
 	aicliRuntimeContextTokenMessageCountKey    = "aicli_context_token_message_count"
 	aicliRuntimeContextTokenMessageEstimateKey = "aicli_context_token_message_estimate"
@@ -1555,6 +1563,16 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	// A4：中断型终态同样尽力带出已产出的部分产物（fail-open、有硬性时间上限，
 	// 见 enrichSessionInterruptedPayload）；存储不可用时行为与原先完全一致。
 	a.enrichSessionInterruptedPayload(payload, run)
+	// Codex-compatible Interrupt hook: observational/system-message only. It
+	// runs after cancellation is requested and must never delay or reverse it.
+	if a.agent != nil && a.agent.GetHookManager() != nil {
+		hookMgr := a.agent.GetHookManager()
+		hookMgr.DispatchAsync(context.Background(), runtimehooks.EventInterrupt, map[string]interface{}{
+			"session_id": a.id,
+			"turn_id":    sessionRunTurnID(run),
+			"reason":     "interrupt",
+		})
+	}
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,
 		SessionID: a.id,
@@ -2647,6 +2665,13 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		TraceID:   turnID,
 		Payload:   payload,
 	})
+	// Codex emits SessionStart(source=compact) after compaction. The runtime
+	// has no separate session-start entry point here, so mark the next turn.
+	session.SetContext(ContextPendingSessionStartSource, "compact")
+	session.SetContext(sessionHookStartedContextKey, nil)
+	if err := a.persistSession(ctx, session); err != nil {
+		logpkg.Warnf("persist compact session-start marker failed: session=%s error=%v", a.id, err)
+	}
 	a.dispatchPostCompactHook(ctx, payload)
 	a.publishCompactReconciliation(turnID, result)
 }
@@ -2868,6 +2893,11 @@ func (a *SessionActor) runManualCompact(
 		TraceID:   traceID,
 		Payload:   payload,
 	})
+	session.SetContext(ContextPendingSessionStartSource, "compact")
+	session.SetContext(sessionHookStartedContextKey, nil)
+	if err := a.persistSession(ctx, session); err != nil {
+		logpkg.Warnf("persist compact session-start marker failed: session=%s error=%v", a.id, err)
+	}
 	a.dispatchPostCompactHook(ctx, payload)
 	a.publishCompactReconciliation(traceID, result)
 	return result, status, nil
@@ -2882,7 +2912,7 @@ func (a *SessionActor) dispatchPreCompactHook(ctx context.Context, payload map[s
 	if hookMgr == nil {
 		return true, ""
 	}
-	decision, err := hookMgr.Dispatch(ctx, runtimehooks.EventPreCompact, cloneEventPayload(payload))
+	decision, err := hookMgr.Dispatch(ctx, runtimehooks.EventPreCompact, payload)
 	if err != nil {
 		return true, ""
 	}
@@ -2905,7 +2935,7 @@ func (a *SessionActor) dispatchPostCompactHook(ctx context.Context, payload map[
 	if hookMgr == nil {
 		return
 	}
-	hookMgr.DispatchAsync(ctx, runtimehooks.EventPostCompact, cloneEventPayload(payload))
+	hookMgr.DispatchAsync(ctx, runtimehooks.EventPostCompact, payload)
 }
 
 func cloneEventPayload(input map[string]interface{}) map[string]interface{} {
@@ -3133,16 +3163,117 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 	}
 
 	if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
+		// SessionStart is a session-level event in Codex, not a per-turn event.
+		// Trigger it once per session (first turn) so hooks do not re-inject
+		// context or re-run setup on every user message. A future explicit
+		// resume/clear/fork entry point can set the source directly.
+		sessionStartSource := "startup"
+		shouldDispatchSessionStart := false
+		if session != nil {
+			if raw, ok := session.GetContext(ContextPendingSessionStartSource); ok && raw != nil {
+				if text := strings.TrimSpace(fmt.Sprint(raw)); text != "" {
+					sessionStartSource = text
+					shouldDispatchSessionStart = true
+					session.SetContext(ContextPendingSessionStartSource, nil)
+				}
+			}
+			if _, seen := session.GetContext(sessionHookStartedContextKey); !seen {
+				shouldDispatchSessionStart = true
+			}
+		}
 		hookPayload := map[string]interface{}{
-			"session_id": a.id,
-			"turn_id":    turnID,
-			"resume":     resume,
+			"session_id":      a.id,
+			"turn_id":         turnID,
+			"resume":          resume,
+			"source":          sessionStartSource,
+			"hook_event_name": "SessionStart",
+		}
+		if cfg := a.agent.GetConfig(); cfg != nil {
+			hookPayload["model"] = cfg.Model
+		}
+		if mode := a.currentPermissionMode(session, runCtx); mode != "" {
+			hookPayload["permission_mode"] = mode
 		}
 		if !resume {
 			hookPayload["prompt"] = prompt
-			hookMgr.DispatchAsync(runCtx, runtimehooks.EventUserPromptSubmit, hookPayload)
+			hookPayload["hook_event_name"] = "UserPromptSubmit"
+			allowed, message, nextCtx := a.agent.DispatchUserPromptSubmit(runCtx, hookPayload)
+			if !allowed {
+				// The hook owns the terminal result: no provider call, no tool
+				// execution. Release the run and surface the reason as the turn
+				// error so callers/hosts can render it consistently.
+				cancel()
+				a.clearSessionRunCancel(run)
+				_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+					if state.CurrentTurnID != turnID {
+						return nil
+					}
+					state.Status = SessionIdle
+					state.CurrentTurnID = ""
+					state.CurrentRunMeta = nil
+					resetFrozenTurnTools(state)
+					state.UpdatedAt = time.Now().UTC()
+					return nil
+				})
+				a.releaseSessionRun(run)
+				a.publish(runtimeevents.Event{
+					Type:      EventSessionEnd,
+					SessionID: a.id,
+					TraceID:   turnID,
+					Payload: map[string]interface{}{
+						"turn_id": turnID,
+						"success": false,
+						"error":   "user_prompt_submit hook blocked the turn: " + message,
+						"hook":    "user_prompt_submit",
+					},
+				})
+				run.complete(SubmitResult{Err: fmt.Errorf("user_prompt_submit hook blocked the turn: %s", message)})
+				return
+			}
+			runCtx = nextCtx
 		}
-		hookMgr.DispatchAsync(runCtx, runtimehooks.EventSessionStart, hookPayload)
+		if shouldDispatchSessionStart {
+			hookPayload["hook_event_name"] = "SessionStart"
+			allowed, message, nextCtx := a.agent.DispatchSessionStart(runCtx, hookPayload)
+			if !allowed {
+				cancel()
+				a.clearSessionRunCancel(run)
+				_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
+					if state.CurrentTurnID != turnID {
+						return nil
+					}
+					state.Status = SessionIdle
+					state.CurrentTurnID = ""
+					state.CurrentRunMeta = nil
+					resetFrozenTurnTools(state)
+					state.UpdatedAt = time.Now().UTC()
+					return nil
+				})
+				a.releaseSessionRun(run)
+				a.publish(runtimeevents.Event{
+					Type:      EventSessionEnd,
+					SessionID: a.id,
+					TraceID:   turnID,
+					Payload: map[string]interface{}{
+						"turn_id": turnID,
+						"success": false,
+						"error":   "session_start hook stopped the session: " + message,
+						"hook":    "session_start",
+					},
+				})
+				run.complete(SubmitResult{Err: fmt.Errorf("session_start hook stopped the session: %s", message)})
+				return
+			}
+			if session != nil {
+				session.SetContext(sessionHookStartedContextKey, true)
+				// The marker must survive a reload; SetContext only mutates the
+				// in-memory session.
+				if err := a.persistSession(runCtx, session); err != nil {
+					logpkg.Warnf("persist session-start hook marker failed: session=%s error=%v", a.id, err)
+				}
+			}
+			runCtx = nextCtx
+		}
 	}
 	startPayload := map[string]interface{}{
 		"turn_id": turnID,
@@ -3380,15 +3511,21 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		if publishTerminal {
 			if hookMgr := a.agent.GetHookManager(); hookMgr != nil {
 				hookPayload := map[string]interface{}{
-					"session_id": a.id,
-					"turn_id":    turnID,
-					"resume":     resume,
-					"success":    execErr == nil && result != nil && result.Success,
-					"error":      firstNonEmptyError(execErr, result),
+					"session_id":      a.id,
+					"turn_id":         turnID,
+					"resume":          resume,
+					"success":         execErr == nil && result != nil && result.Success,
+					"error":           firstNonEmptyError(execErr, result),
+					"hook_event_name": "SessionEnd",
+					"reason":          "other",
+					"scope":           "turn",
 				}
 				appendStructuredRunErrorPayload(hookPayload, execErr)
 				if result != nil {
 					hookPayload["trace_id"] = result.TraceID
+					if strings.TrimSpace(result.Output) != "" {
+						hookPayload["last_assistant_message"] = result.Output
+					}
 					appendSessionActorUsagePayload(hookPayload, result.Usage)
 					appendSessionActorToolErrorPayload(hookPayload, result)
 				}

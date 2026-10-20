@@ -413,6 +413,18 @@ export const enSettings = {
     disable: "Disable",
     noPlugins: "No local plugins discovered.",
     pluginUpdateFailed: "Failed to update plugin",
+    hooksTitle: "Lifecycle hooks",
+    hooksDescription:
+      "Effective Codex-compatible hooks for this workspace (runtime/user/project/plugin/managed). Read-only diagnostics; handlers are not executed.",
+    hookSources: "{{count}} hooks files loaded",
+    hookNoMatcher: "No matcher (matches all)",
+    hookEnabled: "enabled",
+    hookDisabled: "disabled",
+    hookTimeout: "timeout {{seconds}}s",
+    hookEnable: "Enable",
+    hookDisable: "Disable",
+    noHooks: "No effective hooks for this workspace.",
+    hookRecentRuns: "Recent runs",
   },
   about: {
     currentWorkspace: "Current workspace",

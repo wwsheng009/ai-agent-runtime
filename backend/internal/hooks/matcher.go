@@ -10,6 +10,11 @@ import (
 )
 
 func matchesHook(cfg HookConfig, payload map[string]interface{}) bool {
+	if strings.TrimSpace(cfg.Matcher) != "" {
+		if !matchCodexMatcher(cfg.Matcher, matcherInputForHook(cfg.Event, payload)) {
+			return false
+		}
+	}
 	if len(cfg.Match.Tools) > 0 {
 		toolName := stringPayload(payload, "tool_name")
 		if !stringInSlice(cfg.Match.Tools, toolName) {
@@ -39,6 +44,65 @@ func matchesHook(cfg HookConfig, payload map[string]interface{}) bool {
 		}
 	}
 	return true
+}
+
+// matcherInputForHook resolves the Codex matcher input for an event:
+// tool name for tool events, start source for SessionStart, end reason for
+// SessionEnd, subagent type for SubagentStart/Stop, compaction trigger for
+// compact events, and empty for events that do not dispatch on a matcher.
+func matcherInputForHook(event Event, payload map[string]interface{}) string {
+	switch event {
+	case EventPreToolUse, EventPermissionRequest, EventPostToolUse:
+		return stringPayload(payload, "tool_name")
+	case EventSessionStart:
+		return firstPayloadString(payload, "source", "session_source")
+	case EventSessionEnd:
+		return firstPayloadString(payload, "reason", "end_reason")
+	case EventSubagentStart, EventSubagentStop:
+		return firstPayloadString(payload, "agent_type", "subagent_type")
+	case EventPreCompact, EventPostCompact:
+		return firstPayloadString(payload, "trigger", "compact_trigger")
+	default:
+		return ""
+	}
+}
+
+// PrepareEventPayload stamps the Codex-compatible identity fields a host payload
+// may be missing, so matching and output validation see the same view.
+//
+// Compaction payloads are the motivating case: hosts build them from telemetry
+// fields only, so they carry neither hook_event_name (validated in the output
+// parser) nor trigger (the matcher input for PreCompact/PostCompact). Without
+// this normalization a matcher on a compaction hook can never match, and any
+// hookSpecificOutput it returns is rejected as belonging to another event.
+//
+// The input map is never mutated; hosts keep using it for their own telemetry.
+func PrepareEventPayload(event Event, payload map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(payload)+2)
+	for key, value := range payload {
+		out[key] = value
+	}
+	if label := eventLabel(event); label != "" {
+		out["hook_event_name"] = label
+	}
+	if strings.TrimSpace(stringPayload(out, "trigger")) == "" {
+		switch event {
+		case EventPreCompact, EventPostCompact:
+			if trigger := firstPayloadString(out, "compact_trigger", "reason", "phase"); trigger != "" {
+				out["trigger"] = trigger
+			}
+		}
+	}
+	return out
+}
+
+func firstPayloadString(payload map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value := stringPayload(payload, key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func stringPayload(payload map[string]interface{}, key string) string {

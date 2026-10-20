@@ -488,6 +488,9 @@ func main() {
 	// plugin 本地打包/信任管理（无 marketplace）
 	rootCmd.AddCommand(commands.NewPluginCommand())
 
+	// hooks 本地诊断（只读：不启动模型、不执行 Agent 回合）
+	rootCmd.AddCommand(commands.NewHooksCommand())
+
 	// image 子命令
 	rootCmd.AddCommand(commands.NewImageCommand(func() *config.Config {
 		return cfg

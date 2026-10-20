@@ -405,6 +405,18 @@ export const zhSettings = {
     disable: "禁用",
     noPlugins: "未发现本地插件。",
     pluginUpdateFailed: "更新插件失败",
+    hooksTitle: "生命周期 Hooks",
+    hooksDescription:
+      "展示当前工作区生效的 Codex 兼容 hooks（runtime/user/project/plugin/managed）。只读诊断，不执行 handler。",
+    hookSources: "已加载 {{count}} 个 hooks 文件",
+    hookNoMatcher: "无 matcher（匹配全部）",
+    hookEnabled: "已启用",
+    hookDisabled: "已禁用",
+    hookTimeout: "超时 {{seconds}}s",
+    hookEnable: "启用",
+    hookDisable: "禁用",
+    noHooks: "当前工作区没有生效的 hooks。",
+    hookRecentRuns: "最近运行记录",
   },
   about: {
     currentWorkspace: "当前工作区",

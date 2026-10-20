@@ -120,8 +120,21 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 			}),
 		))
 		a.runPostToolUseHooks(ctx, sessionID, result)
+		// Approved replays bypass the ReAct loop's post-tool feedback path;
+		// run the synchronous handler here so Codex-compatible hooks still
+		// observe (and can feed back) the result.
+		postDecision := a.dispatchPostToolUseHook(ctx, sessionID, result)
 		message := types.NewToolMessage(call.ID, "")
 		message.Content = output.RenderToolResultContentForModel(result.Output, result.Error, envelope)
+		if feedback := strings.TrimSpace(postDecision.Message); feedback != "" || strings.TrimSpace(postDecision.ExtraContext["additional_context"]) != "" {
+			body := strings.TrimSpace(strings.Join([]string{
+				feedback,
+				strings.TrimSpace(postDecision.ExtraContext["additional_context"]),
+			}, "\n\n"))
+			if wrapped := FormatSystemReminder(ReminderKindRuntimeAdvisory, body); wrapped != "" {
+				message.Content = strings.TrimSpace(message.Content) + "\n\n" + wrapped
+			}
+		}
 		if toolSurfaceKnown(ctx) && !toolAdvertisedInTurn(ctx, toolNameArtifactRead) {
 			message.Content = output.DegradeArtifactPointerForModel(message.Content, envelope)
 		}
@@ -148,13 +161,11 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 	}
 
 	if hookManager := a.GetHookManager(); hookManager != nil {
-		decision, hookErr := hookManager.Dispatch(ctx, runtimehooks.EventPreToolUse, map[string]interface{}{
-			"tool_name":  call.Name,
-			"tool_call":  call.ID,
-			"session_id": sessionID,
-			"trace_id":   traceID,
-			"args":       call.Args,
-		})
+		hookPayload := a.hookBasePayload(ctx, sessionID, traceID, call.Name, call.ID, call.Args)
+		hookPayload["tool_call"] = call.ID
+		hookPayload["args"] = call.Args
+		hookPayload["hook_event_name"] = "PreToolUse"
+		decision, hookErr := hookManager.Dispatch(ctx, runtimehooks.EventPreToolUse, hookPayload)
 		if hookErr != nil {
 			result.Error = hookErr.Error()
 			return finalize(), nil

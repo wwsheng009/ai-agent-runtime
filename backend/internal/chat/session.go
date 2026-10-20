@@ -228,6 +228,9 @@ func (s *Session) ClearHistory() {
 	}
 	s.Metadata.TotalTurns = 0
 	s.Metadata.Summary = ""
+	// The next turn should emit SessionStart with source=clear.
+	s.SetContext(ContextPendingSessionStartSource, "clear")
+	s.SetContext(sessionHookStartedContextKey, nil)
 }
 
 // ReplaceHistory 替换会话历史
