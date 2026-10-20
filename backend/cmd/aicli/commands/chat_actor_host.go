@@ -1457,6 +1457,23 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		ledgerEnabled:      cfg.SkillsRuntime != nil && cfg.SkillsRuntime.UsageLedgerEnabled,
 	}
 	host.lifecycleCtx, host.lifecycleCancel = context.WithCancel(context.Background())
+	// Codex-compatible session-scoped SessionEnd: turn-level SessionEnd keeps
+	// scope=turn; this hook fires once when the session is closed.
+	session.SessionManager.SetSessionCloseHook(func(ctx context.Context, closed *runtimechat.Session) {
+		if closed == nil {
+			return
+		}
+		merged := mergeActivePluginHooks(runtimeConfig.Hooks)
+		if len(merged) == 0 {
+			return
+		}
+		runtimehooks.NewManager(merged).DispatchAsync(ctx, runtimehooks.EventSessionEnd, map[string]interface{}{
+			"session_id":      closed.ID,
+			"hook_event_name": "SessionEnd",
+			"reason":          "other",
+			"scope":           "session",
+		})
+	})
 	// 绑定完成后 manager 的终态事件就能投影到 supervision inbox 并唤醒所属会话。
 	backgroundEvents.bind(host)
 	// Recover only rows whose heartbeat is older than the restart grace period.
