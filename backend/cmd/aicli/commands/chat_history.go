@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -124,7 +125,64 @@ func countChatStatusMessages(messages []runtimetypes.Message) int {
 }
 
 func printVisibleChatHistory(session *ChatSession, header string) int {
+	// 装载交付完成后展示历史会被裁剪到固定上限（见 trimResumeHistoryAfterDelivery）。
+	// /history 的语义是「完整对话历史」，因此裁剪过的会话必须先从存储重新分页
+	// 读回完整转录，否则用户只能看到保留窗口内的尾部——那是静默的降级。
+	// 读取失败时保留当前窗口并在标题上显式标注，绝不伪装成完整历史。
+	if session != nil && session.resumeHistoryTruncated() {
+		if !refreshResumeHistoryForReplay(session) {
+			header = appendResumeHistoryPartialNotice(header)
+		}
+	}
 	return printVisibleChatHistoryWithLoadGrant(session, header, false)
+}
+
+// appendResumeHistoryPartialNotice 在重放标题上标注「只显示保留窗口」。
+func appendResumeHistoryPartialNotice(header string) string {
+	const notice = "仅显示最近保留的历史（完整历史读取失败）"
+	if strings.TrimSpace(header) == "" {
+		return notice
+	}
+	return strings.TrimSpace(header) + "，" + notice
+}
+
+// refreshResumeHistoryForReplay 在展示历史被裁剪过之后，从存储重新装载完整
+// canonical 转录，供 /history、重绘等「需要完整历史」的重放入口使用。
+//
+// 复用与恢复装载完全相同的分页链路（loadNewestResumeHistoryPage +
+// streamOlderResumeHistoryPages），因此页序、去重与身份对齐语义与 /resume 一致。
+// 返回 false 表示无法读取（无分页后端 / 存储错误 / 会话无 ID），调用方应保留
+// 现有窗口并对用户显式说明。
+func refreshResumeHistoryForReplay(session *ChatSession) bool {
+	if session == nil || session.SessionManager == nil {
+		return false
+	}
+	sessionID := currentRuntimeSessionID(session)
+	if strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	first, ok := loadNewestResumeHistoryPage(session, sessionID)
+	if !ok {
+		return false
+	}
+	if !first.HasMore {
+		return true
+	}
+	// 分页读取剩余较早页；此路径是同步的（/history 需要完整结果后才重放），
+	// 因此不走后台补齐，避免与主循环的重放竞争。
+	pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, first.NextBeforeSeq)
+	if len(pages) == 0 {
+		// 游标表明仍有较早页却一页都没取到：只能视为读取失败。
+		return false
+	}
+	if !session.prependResumeHistoryPages(session.resumeHistoryGenerationValue(), pages) {
+		return false
+	}
+	// 已重新装载完整转录：清除裁剪标记，后续重放不再重复读取。
+	session.resumeHistoryMu.Lock()
+	session.resumeHistoryTrimmedOff = 0
+	session.resumeHistoryMu.Unlock()
+	return true
 }
 
 // printVisibleSessionLoadHistory is the session-load entry point (/resume,

@@ -66,6 +66,12 @@ type SQLiteSessionStorage struct {
 	canonicalFullLoads      atomic.Int64
 	canonicalFastProofs     atomic.Int64
 	canonicalBackfilledRows atomic.Int64
+	// canonicalBoundedRebuilds 统计「以已存投影为基线、只追加缺失尾部」的次数。
+	// 这些 checkpoint 保住了压缩边界，没有解码整段 canonical。
+	canonicalBoundedRebuilds atomic.Int64
+	// canonicalBoundedFallbacks 统计投影与 canonical 尾部无法对齐、因而保留
+	// 原投影（不追加）的次数：模型视图可能落后，但压缩摘要不会被冲掉。
+	canonicalBoundedFallbacks atomic.Int64
 	// forceLegacyProjectionRebuild 仅供测试/基准注入：跳过 identity_hash 快速
 	// 路径，强制 default 分支走全量 canonical 解码，用于 A/B 对比与差分验证。
 	forceLegacyProjectionRebuild bool
@@ -917,29 +923,44 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 				// 下一次 Load/恢复就重新发送全量历史。这里无条件信任调用者；
 				// 一次性标志在本次 Update 成功后清除。
 			} else {
-				proven := false
-				if !s.forceLegacyProjectionRebuild {
-					proven, err = s.incomingHistoryReachesNewestFastTx(ctx, tx, session.ID, session.History)
-					if err != nil {
-						// 证据查询失败不改变语义：按未证明处理，回退全量路径。
-						proven = false
-					}
-				}
-				if proven {
-					s.canonicalFastProofs.Add(1)
+				// 首选：若已存投影携带压缩边界（context_stage=compaction），
+				// 这次同步只能在该投影上追加，绝不整段覆盖。
+				//
+				// 为什么必须在 proven 之前判断：proven 只证明「调用方的历史到达了
+				// canonical 最新行」，**不证明它就是模型视图**。典型反例是 CLI 把
+				// 展示用全量历史（ResumeHistory，可达 18k 条）同步回来 —— 它确实
+				// 到达最新行，但它是给人看的、没有压缩边界。直接采用就会用全量历史
+				// 覆盖 48 行的「摘要 + 尾巴」，压缩摘要随即消失（canonical 里没有
+				// 摘要行），模型丢失压缩前上下文并对整段原始历史重复压缩。
+				bounded, boundedApplied := s.rebuildProjectionFromStoredBaseTx(ctx, tx, session)
+				if boundedApplied {
+					source = bounded
+					s.canonicalBoundedRebuilds.Add(1)
 				} else {
-					canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
-					if loadErr != nil || len(canonical) == 0 {
-						canonical = session.History
+					proven := false
+					if !s.forceLegacyProjectionRebuild {
+						proven, err = s.incomingHistoryReachesNewestFastTx(ctx, tx, session.ID, session.History)
+						if err != nil {
+							// 证据查询失败不改变语义：按未证明处理，回退全量路径。
+							proven = false
+						}
 					}
-					source = canonical
-					if incomingHistoryReachesNewest(session.History, canonical) {
-						source = session.History
+					if proven {
+						s.canonicalFastProofs.Add(1)
+					} else {
+						canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
+						if loadErr != nil || len(canonical) == 0 {
+							canonical = session.History
+						}
+						source = canonical
+						if incomingHistoryReachesNewest(session.History, canonical) {
+							source = session.History
+						}
+						s.canonicalFullLoads.Add(1)
+						// 本次回退已经把整段 canonical 读进内存，顺手补齐 identity_hash：
+						// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
+						s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
 					}
-					s.canonicalFullLoads.Add(1)
-					// 本次回退已经把整段 canonical 读进内存，顺手补齐 identity_hash：
-					// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
-					s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
 				}
 			}
 			projection, err := s.buildPromptProjection(source)
@@ -1885,6 +1906,131 @@ func (s *SQLiteSessionStorage) scanCanonicalMessages(rows *sql.Rows) ([]types.Me
 	// The rebuild input is normalized as well so the repaired projection is
 	// persisted on the next write of the same transaction.
 	return collapseDuplicateMessages(messages), nil
+}
+
+// loadPromptProjectionMessagesTx 读取当前持久化的 prompt 投影（模型可见的完整
+// 历史），不参与任何 prefix 比对。
+//
+// 与 loadMatchingPromptRowsTx 的区别是关键的：后者只要首条消息与入参不一致就
+// 整体返回空（用于判断"投影是否就是调用方这份历史"），而本函数回答的是另一个
+// 问题——"表里现在到底存着什么"。有界重建必须以已存投影为基线，否则压缩摘要
+// （只存在于投影、canonical 里没有）会在重建时被抹掉。
+func (s *SQLiteSessionStorage) loadPromptProjectionMessagesTx(ctx context.Context, tx *sql.Tx, sessionID string) ([]types.Message, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT payload_json FROM session_prompt_messages
+		WHERE session_id = ? ORDER BY position ASC
+	`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("query stored prompt projection: %w", err)
+	}
+	defer rows.Close()
+	var messages []types.Message
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("scan stored prompt projection: %w", err)
+		}
+		var message types.Message
+		if err := json.Unmarshal(payload, &message); err != nil {
+			return nil, fmt.Errorf("decode stored prompt projection: %w", err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
+// rebuildProjectionFromStoredBaseTx 以**已存的 prompt 投影**为基线，只把 canonical
+// 中尚未进入投影的最新尾部追加进去，返回重建后的模型可见历史。
+//
+// 这是 default 分支的首选路径，替代"整段 canonical 重建"。两者的区别是本质性的：
+//   - session_messages 是事实来源（append-only、无压缩边界、可到 18k 条）；
+//   - session_prompt_messages 是模型视图（「一条 compaction 摘要 + 保留尾巴」，有界）。
+//
+// 用前者重建后者必然冲掉压缩边界：canonical 里**没有**摘要行（摘要只在投影里），
+// 所以任何"从 canonical 重建"都会把摘要删掉，模型随即丢失压缩前的上下文，并对
+// 整段原始历史重新做一次昂贵的压缩。同时投影会失去上限（实测 724 行 → 18,528 行），
+// 经 applyStoredPromptProjection 挂回 session.History 后在 Go 堆里常驻 157 MB
+// （gc=1 后仍 inuse）。
+//
+// 返回 (source, true) 表示可以用该 source 直接写投影；(nil, false) 表示无法在有界
+// 前提下安全推进，调用方保留原有语义（继续走全量路径）。
+//
+// 判定顺序：
+//  1. 投影为空 → 无法作为基线，交回调用方（新建/空会话没有压缩边界可保）；
+//  2. 用 identity 对齐已存投影与 canonical 尾部，只取投影尚未覆盖的最新消息；
+//  3. 若无法锚定（投影与 canonical 尾部无共同消息），保守保留原投影不动 ——
+//     模型可能暂时看不到最新一轮，但压缩摘要绝不丢失，且不会把内存放大。
+//     这条路径会计入 canonicalBoundedFallbacks 供观测。
+func (s *SQLiteSessionStorage) rebuildProjectionFromStoredBaseTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	session *Session,
+) ([]types.Message, bool) {
+	if session == nil {
+		return nil, false
+	}
+	// base 必须来自**表里已存的投影**，不能依赖 promptRows：loadMatchingPromptRowsTx
+	// 在第一条消息就对不上时整体返回空（调用方递来的是全量/过期窗口，首条必然不同），
+	// 而压缩摘要恰恰只存在于这份投影中。用 promptRows 当基线等于在事故现场又把
+	// 基线丢掉一次。
+	base, err := s.loadPromptProjectionMessagesTx(ctx, tx, session.ID)
+	if err != nil || len(base) == 0 {
+		return nil, false
+	}
+	// 只在投影**携带压缩边界**时接管。没有 compaction 行的投影是普通的增长型
+	// 投影，整段重建不会丢失任何语义，交回原有路径（proven / 全量）以免改变
+	// 它们已锁定的行为。
+	hasCompactionBoundary := false
+	for index := range base {
+		if strings.EqualFold(strings.TrimSpace(base[index].Metadata.GetString("context_stage", "")), "compaction") {
+			hasCompactionBoundary = true
+			break
+		}
+	}
+	if !hasCompactionBoundary {
+		return nil, false
+	}
+	// One extra row makes a truncated tail detectable (same convention as
+	// canonicalAppendStartTx): a tail exhausted without an anchor is not
+	// trustworthy enough to decide what is missing.
+	tail, err := s.loadCanonicalTailMessagesTx(ctx, tx, session.ID, len(session.History)+1)
+	if err != nil || len(tail) == 0 {
+		// Read failure or empty transcript: keep the stored projection intact.
+		s.canonicalBoundedFallbacks.Add(1)
+		return base, true
+	}
+	// 定位 base 的**最后一条**消息在 canonical 尾部中的位置：base 的保留段是
+	// 转录的一个后缀（摘要行只存在于投影、不在 canonical，所以 base 不是转录的
+	// 连续子序列，不能用 identityAlignedAppendStart 的方向）。
+	//
+	// 注意：identityAlignedAppendStart(history, tail) 返回的是 history 里的下标
+	// （"从 history 的哪里开始追加到 canonical"），直接拿它当 tail 的下标会把
+	// 已存在于投影的消息再追加一遍 —— 实测会把 21 行膨胀成 200 行。
+	lastIndex := -1
+	lastBase := base[len(base)-1]
+	for index := len(tail) - 1; index >= 0; index-- {
+		if messageIdentityEqual(lastBase, tail[index]) {
+			lastIndex = index
+			break
+		}
+	}
+	if lastIndex < 0 {
+		// 投影的尾部在转录中找不到：无法安全判断缺了什么，保留原投影不动。
+		s.canonicalBoundedFallbacks.Add(1)
+		return base, true
+	}
+	if lastIndex == len(tail)-1 {
+		// 投影已经覆盖到转录最新一行：无需追加。
+		return base, true
+	}
+	// 只追加转录中位于投影末尾之后的新消息。
+	appended := make([]types.Message, 0, len(base)+len(tail)-lastIndex-1)
+	appended = append(appended, base...)
+	appended = append(appended, tail[lastIndex+1:]...)
+	return appended, true
 }
 
 // incomingHistoryReachesNewest reports whether the caller-supplied history ends

@@ -210,7 +210,11 @@ type ChatSession struct {
 	resumeHistoryBackfillInFlight bool
 	// resumeHistoryGeneration 在展示历史被整体替换/清空时递增，使在途的
 	// 后台补齐任务放弃写入已经失效的旧快照。
-	resumeHistoryGeneration   uint64
+	resumeHistoryGeneration uint64
+	// resumeHistoryTrimmed 记录「装载交付完成后把展示历史裁剪到保留上限」的次数
+	// 与被丢弃的条数，供 §15.3 观测（裁剪不得静默）。
+	resumeHistoryTrimCount  uint64
+	resumeHistoryTrimmedOff int
 	HTTPClient                *http.Client
 	cancelCtx                 context.Context                      // 可取消的上下文
 	cancelFunc                context.CancelFunc                   // 取消函数

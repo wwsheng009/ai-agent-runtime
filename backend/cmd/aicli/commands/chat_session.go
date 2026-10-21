@@ -87,6 +87,9 @@ func newChatSessionManagerWithRuntimeConfig(dir string, runtimeConfig *runtimecf
 		storageConfig.SQLiteCacheKiB = runtimeConfig.Sessions.SQLiteCacheKiB
 		storageConfig.BusyTimeout = runtimeConfig.Sessions.BusyTimeout
 	}
+	// C 档驻留降级开关（默认关闭：不窗口化、不逐出、不懒加载）。
+	// 设计：docs/plan/aicli-transcript-residency-and-lazy-history-design-20261020.md §15.1
+	applyTranscriptResidencyConfig(runtimeConfig, resolvedDir)
 	storage, err := runtimechat.OpenPersistentSessionStorage(storageConfig)
 	if err != nil {
 		return nil, "", "", err
@@ -1335,6 +1338,12 @@ func completeDeferredResumeHistoryLoad(session *ChatSession, pages int, err erro
 	// 收官这一次全量 seed + 授权式快照是 ready 之后最后的固定成本，单独打点，
 	// 否则它只能从 chat_loop_exit 里反推（补齐段的打点在它之前）。
 	markChatStartup("resume_history_complete")
+	// 展示历史已完成“重放 → scene cell → 屏幕”的全部用途。此后若继续整份驻留，
+	// 18k 条消息会连同其 metadata 常驻内存（实测 157 MB 堆），而屏幕上真正被
+	// 绘制的只有 historyWindow 的固定 400 行（fixed_bottom_surface.go:
+	// historyWindowMaxLines），两者数量级完全脱钩。这里把它裁剪到固定上限；
+	// 需要完整历史时 /history 会从存储重新分页读取（见 refreshResumeHistoryForReplay）。
+	trimResumeHistoryAfterDelivery(session)
 	// 补帧后重新钉住 composer，避免补页把主界面输入行挤掉。
 	presentStartupInteractiveComposer(session)
 	// 收尾的全量 seed 只是登记了原生 scrollback 重投递：真正的字节由统一渲染器
@@ -1345,6 +1354,87 @@ func completeDeferredResumeHistoryLoad(session *ChatSession, pages int, err erro
 	// 但「装载历史」是兜底提示，不是固定 30s 的秒表：重投递真正落地后立即撤行
 	// （有界窗口仅在投递失败/挂起时生效，见 settleChatHistoryLoadWhenDelivered）。
 	settleChatHistoryLoadWhenDelivered(session)
+}
+
+// resumeHistoryRetainedAfterDelivery 是展示历史在「装载交付完成」之后保留的
+// 消息条数上限。
+//
+// 依据：屏幕真正绘制的只有 FixedBottomSurface.historyWindow，硬上限
+// historyWindowMaxLines = 400 行（+ historyWindowHeadroom = 40 行冗余），
+// 该窗口在装载交付时就已按 cell 顺序一次性铸造完毕。此后 ResumeHistory 唯一的
+// 用途是「再次重放」（/history、重绘）与「跟随 live 消息追加」，512 条足以覆盖
+// 一次完整重放所需的尾部窗口，且与 §15.1 的 MaxResidentCells=512 同量级。
+//
+// 需要完整历史时不再依赖这份缓存：refreshResumeHistoryForReplay 会从存储按页
+// 重新读取（复用 GetHistoryPage 分页链路），因此裁剪不改变任何用户可见内容。
+const resumeHistoryRetainedAfterDelivery = 512
+
+// trimResumeHistoryAfterDelivery 在装载交付完成后把展示历史裁剪到固定上限，
+// 消除「屏幕 400 行、内存 18k 条」的数量级脱钩。
+//
+// 安全前提（三条，缺一不可）：
+//  1. 必须已有交付：resumeHistoryBackfillInFlight 为 false 且没有待补齐游标，
+//     否则裁剪会丢掉尚未重放的页（会静默少显示历史）。
+//  2. 只裁剪展示快照，绝不碰 session.Messages（模型上下文）；两者严格分离，
+//     见 ChatSession.ResumeHistory 的字段注释。
+//  3. 必须留可观测痕迹：裁剪次数与条数记入 resumeHistoryTrimCount/TrimmedOff，
+//     由 §15.3 的 debug 端点报告（降级不得静默）。
+//
+// 裁剪后 Generation 递增，使在途的旧补齐任务放弃写入（与 setResumeHistory 一致）。
+func trimResumeHistoryAfterDelivery(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	session.resumeHistoryMu.Lock()
+	defer session.resumeHistoryMu.Unlock()
+	// 仍有待补齐的较早页 / 交付挂起中：此时裁剪会让尚未重放的行永久丢失。
+	if session.resumeHistoryDeferredBeforeSeq > 0 || session.resumeHistoryBackfillInFlight {
+		return
+	}
+	if len(session.ResumeHistory) <= resumeHistoryRetainedAfterDelivery {
+		return
+	}
+	// 不从 SYSTEM 前缀中间截断：保留窗口必须从一个完整轮次的起点开始，否则
+	// 重放会把半截 tool 链画成孤立行。向前对齐到最近一个非 tool 边界。
+	keepFrom := len(session.ResumeHistory) - resumeHistoryRetainedAfterDelivery
+	for keepFrom > 0 && keepFrom < len(session.ResumeHistory) {
+		if !strings.EqualFold(strings.TrimSpace(session.ResumeHistory[keepFrom].Role), "tool") {
+			break
+		}
+		keepFrom++
+	}
+	if keepFrom >= len(session.ResumeHistory) {
+		// 尾部整段都是 tool 结果（异常形状）：放弃本次裁剪，保持完整快照。
+		return
+	}
+	trimmed := keepFrom
+	retained := make([]runtimetypes.Message, len(session.ResumeHistory)-keepFrom)
+	copy(retained, session.ResumeHistory[keepFrom:])
+	session.ResumeHistory = retained
+	session.resumeHistoryGeneration++
+	session.resumeHistoryTrimCount++
+	session.resumeHistoryTrimmedOff = trimmed
+}
+
+// resumeHistoryTrimStats 返回裁剪观测值（次数、被裁剪条数），供 debug 端点报告。
+func resumeHistoryTrimStats(session *ChatSession) (uint64, int) {
+	if session == nil {
+		return 0, 0
+	}
+	session.resumeHistoryMu.RLock()
+	defer session.resumeHistoryMu.RUnlock()
+	return session.resumeHistoryTrimCount, session.resumeHistoryTrimmedOff
+}
+
+// resumeHistoryTruncated 报告展示历史是否已被裁剪（不再持有完整转录）。
+// 调用方据此决定是否需要在重放前从存储重新读取。
+func (s *ChatSession) resumeHistoryTruncated() bool {
+	if s == nil {
+		return false
+	}
+	s.resumeHistoryMu.RLock()
+	defer s.resumeHistoryMu.RUnlock()
+	return s.resumeHistoryTrimmedOff > 0
 }
 
 // streamOlderResumeHistoryPagesWithRetry 是后台补齐较早页的有界重试版本。
