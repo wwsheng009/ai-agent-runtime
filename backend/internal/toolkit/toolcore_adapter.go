@@ -101,13 +101,17 @@ func (t *ToolkitTool) Parameters() map[string]interface{} {
 }
 
 func (t *ToolkitTool) DefinitionMetadata() map[string]interface{} {
-	out := make(map[string]interface{}, len(t.def.Metadata))
-	for key, value := range t.def.Metadata {
+	return definitionMetadata(t.def)
+}
+
+func definitionMetadata(def toolcore.Definition) map[string]interface{} {
+	out := make(map[string]interface{}, len(def.Metadata))
+	for key, value := range def.Metadata {
 		out[key] = value
 	}
-	if len(t.def.Capabilities) > 0 {
-		capabilities := make([]string, 0, len(t.def.Capabilities))
-		for _, capability := range t.def.Capabilities {
+	if len(def.Capabilities) > 0 {
+		capabilities := make([]string, 0, len(def.Capabilities))
+		for _, capability := range def.Capabilities {
 			capabilities = append(capabilities, string(capability))
 		}
 		out["capabilities"] = capabilities
@@ -118,6 +122,66 @@ func (t *ToolkitTool) DefinitionMetadata() map[string]interface{} {
 
 func (t *ToolkitTool) Execute(ctx context.Context, params map[string]interface{}) (*ToolResult, error) {
 	result, err := t.in.Execute(ctx, &toolcore.Call{Args: params})
+	if err != nil {
+		return nil, err
+	}
+	return ResultToToolkit(result), nil
+}
+
+// RuntimeFactory builds the call-scoped Runtime for one execution. Surfaces
+// whose runtime state is request-scoped (for example remote MCP roots) use a
+// factory instead of sharing one mutable Runtime across concurrent calls.
+type RuntimeFactory func(ctx context.Context) (toolcore.Runtime, error)
+
+// RuntimeTool adapts a core Handler that needs an injected Runtime back to the
+// legacy interface. It is the migration bridge for handlers that already use
+// the surface-independent contract.
+type RuntimeTool struct {
+	in  toolcore.Handler
+	gen RuntimeFactory
+	def toolcore.Definition
+}
+
+func NewRuntimeTool(handler toolcore.Handler, factory RuntimeFactory) (*RuntimeTool, error) {
+	if handler == nil {
+		return nil, fmt.Errorf("tool handler is nil")
+	}
+	if factory == nil {
+		return nil, fmt.Errorf("tool runtime factory is nil")
+	}
+	def := handler.Definition()
+	if err := toolcore.ValidateDefinition(def); err != nil {
+		return nil, err
+	}
+	return &RuntimeTool{in: handler, gen: factory, def: def}, nil
+}
+
+func (t *RuntimeTool) Name() string        { return t.def.Name }
+func (t *RuntimeTool) Description() string { return t.def.Description }
+func (t *RuntimeTool) Version() string     { return t.def.Version }
+func (t *RuntimeTool) CanDirectCall() bool { return t.def.DirectCall }
+
+func (t *RuntimeTool) Parameters() map[string]interface{} {
+	parameters, err := ParametersFromSchema(t.def.InputSchema)
+	if err != nil {
+		return map[string]interface{}{}
+	}
+	return parameters
+}
+
+func (t *RuntimeTool) DefinitionMetadata() map[string]interface{} {
+	return definitionMetadata(t.def)
+}
+
+func (t *RuntimeTool) Execute(ctx context.Context, params map[string]interface{}) (*ToolResult, error) {
+	if t == nil || t.in == nil || t.gen == nil {
+		return nil, fmt.Errorf("tool handler is nil")
+	}
+	runtime, err := t.gen(ctx)
+	if err != nil {
+		return ResultToToolkit(toolcore.Error(toolcore.ErrInternal, "fix the runtime binding, then retry", err)), nil
+	}
+	result, err := t.in.Execute(ctx, &toolcore.Call{Args: params, Runtime: runtime})
 	if err != nil {
 		return nil, err
 	}

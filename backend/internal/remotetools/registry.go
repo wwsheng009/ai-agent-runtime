@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/shellrisk"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
+	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -97,6 +100,39 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	for _, name := range cfg.enabledTools() {
 		enabled[name] = true
 	}
+	lsBase := remoteToolBase{cfg: cfg, workspace: workspace}
+	lsSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Directory to list, relative to the remote workspace. Default: workspace root.",
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "Maximum entries to return. Default 200.",
+			},
+		},
+		"additionalProperties": false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ls schema: %w", err)
+	}
+	lsTool, err := toolkit.NewRuntimeTool(lscore.NewHandler(toolcore.Definition{
+		Name:                ToolLs,
+		Description:         lsBase.describe("List a remote directory (one level) with entry type and size."),
+		Version:             "1.0.0",
+		InputSchema:         lsSchema,
+		Capabilities:        []toolcore.Capability{toolcore.CapReadFS},
+		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolLs),
+		DirectCall:          true,
+	}), func(ctx context.Context) (toolcore.Runtime, error) {
+		return newRemoteRuntime(ctx, cfg, workspace, sandbox, artifacts), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ls handler: %w", err)
+	}
 
 	type registration struct {
 		name string
@@ -104,7 +140,7 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	}
 	candidates := []registration{
 		{name: ToolView, tool: newRemoteViewTool(cfg, workspace)},
-		{name: ToolLs, tool: newRemoteLsTool(cfg, workspace)},
+		{name: ToolLs, tool: lsTool},
 		{name: ToolGlob, tool: newRemoteGlobTool(cfg, workspace)},
 		{name: ToolGrep, tool: newRemoteGrepTool(cfg, workspace)},
 		{name: ToolWrite, tool: newRemoteWriteTool(cfg, workspace, sandbox)},

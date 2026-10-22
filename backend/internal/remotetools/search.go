@@ -3,75 +3,11 @@ package remotetools
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
-
-const remoteLsDefaultLimit = lscore.DefaultLimit
-
-// remoteLsTool lists one directory inside the workspace jail.
-type remoteLsTool struct {
-	*toolkit.BaseTool
-	remoteToolBase
-}
-
-func newRemoteLsTool(cfg *Config, workspace *Workspace) *remoteLsTool {
-	parameters := map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "Directory to list, relative to the remote workspace. Default: workspace root.",
-			},
-			"limit": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     1,
-				"description": "Maximum entries to return. Default 200.",
-			},
-		},
-		"additionalProperties": false,
-	}
-	tool := &remoteLsTool{remoteToolBase: remoteToolBase{cfg: cfg, workspace: workspace}}
-	tool.BaseTool = toolkit.NewBaseTool(
-		ToolLs,
-		tool.describe("List a remote directory (one level) with entry type and size."),
-		"1.0.0",
-		parameters,
-		true,
-	)
-	return tool
-}
-
-func (t *remoteLsTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
-	if err := contextErr(ctx); err != nil {
-		return remoteErrorResult(err), nil
-	}
-	rawPath, _ := params["path"].(string)
-	target, err := t.resolve(ctx, rawPath)
-	if err != nil {
-		return remoteErrorResult(err), nil
-	}
-	limit := intParam(params, "limit", remoteLsDefaultLimit)
-	listing, readErr := lscore.Read(target, limit)
-	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			return remoteErrorResult(newToolError(CodeNotFound, "verify the workspace path", "directory not found: %s", t.cleanDisplayPath(target))), nil
-		}
-		return remoteErrorResult(newToolError(CodeInvalidArgument, "check directory permissions", "cannot list %s: %v", t.cleanDisplayPath(target), readErr)), nil
-	}
-
-	display := t.cleanDisplayPath(target)
-	body := lscore.Render(display, listing)
-	metadata := lscore.Metadata(display, listing)
-	metadata["remote"] = true
-	metadata["workspace"] = t.workspace.Root()
-	body, metadata = t.shapeModelOutput(ToolLs, body, metadata)
-	return remoteTextResult(body, metadata), nil
-}
 
 const remoteGlobDefaultLimit = 500
 
