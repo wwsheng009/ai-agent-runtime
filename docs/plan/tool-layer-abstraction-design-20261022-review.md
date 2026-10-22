@@ -663,6 +663,7 @@ P2 已处理：现状/目标混写、`InputSchema` adapter、`Registry.Filter`�
 
 结论：当前基线可构建、policy/tool registry/output/MCP/remote/toolkit 测试通过；
 P0/P1 修订未引入代码变更，PR1–3 的新测试仍需按 §11.2 执行。
+
 ### 11.5 Phase 6b 收敛证据（2026-10-22）
 
 Phase 6b 完成 remote 侧去重：remote 工具不再保留 view/ls/glob/grep/
