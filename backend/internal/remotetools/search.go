@@ -167,6 +167,8 @@ func (t *remoteGlobTool) Execute(ctx context.Context, params map[string]interfac
 		"matches":      len(result.Matches),
 		"is_truncated": result.Truncated,
 		"engine":       engine,
+		"hidden_files": true,
+		"ignore_files": false,
 		"remote":       true,
 		"workspace":    t.workspace.Root(),
 	}
@@ -287,6 +289,8 @@ func (t *remoteGrepTool) Execute(ctx context.Context, params map[string]interfac
 		"single_file":   result.SingleFile,
 		"is_truncated":  result.Truncated,
 		"engine":        engine,
+		"hidden_files":  true,
+		"ignore_files":  false,
 		"remote":        true,
 		"workspace":     t.workspace.Root(),
 	}

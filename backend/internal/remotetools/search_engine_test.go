@@ -19,6 +19,8 @@ func newSearchFixture(t *testing.T) (*Config, *Workspace) {
 	for path, content := range map[string]string{
 		"visible.txt":           "needle visible\n",
 		".hidden.txt":           "needle hidden\n",
+		".gitignore":            "ignored.txt\n",
+		"ignored.txt":           "needle ignored but deliberately included\n",
 		"node_modules/skip.txt": "needle dependency\n",
 		"nested/also.txt":       "needle nested\n",
 	} {
@@ -68,7 +70,7 @@ func TestRemoteGrepEnginesPreserveWalkerSemantics(t *testing.T) {
 			if !result.Success {
 				t.Fatalf("grep failed: %+v", result)
 			}
-			for _, want := range []string{"visible.txt", ".hidden.txt", "nested"} {
+			for _, want := range []string{"visible.txt", ".hidden.txt", "ignored.txt", "nested"} {
 				if !strings.Contains(result.Content, want) {
 					t.Fatalf("%s grep output missing %q:\n%s", engine.name, want, result.Content)
 				}
@@ -78,6 +80,12 @@ func TestRemoteGrepEnginesPreserveWalkerSemantics(t *testing.T) {
 			}
 			if got := result.Metadata["engine"]; got != engine.name {
 				t.Fatalf("engine = %v, want %s", got, engine.name)
+			}
+			if got := result.Metadata["hidden_files"]; got != true {
+				t.Fatalf("hidden_files = %v, want true", got)
+			}
+			if got := result.Metadata["ignore_files"]; got != false {
+				t.Fatalf("ignore_files = %v, want false", got)
 			}
 		})
 	}
@@ -108,7 +116,7 @@ func TestRemoteGlobEnginesPreserveWalkerSemantics(t *testing.T) {
 			if !result.Success {
 				t.Fatalf("glob failed: %+v", result)
 			}
-			for _, want := range []string{"visible.txt", ".hidden.txt", "nested"} {
+			for _, want := range []string{"visible.txt", ".hidden.txt", "ignored.txt", "nested"} {
 				if !strings.Contains(result.Content, want) {
 					t.Fatalf("%s glob output missing %q:\n%s", engine.name, want, result.Content)
 				}
@@ -118,6 +126,12 @@ func TestRemoteGlobEnginesPreserveWalkerSemantics(t *testing.T) {
 			}
 			if got := result.Metadata["engine"]; got != engine.name {
 				t.Fatalf("engine = %v, want %s", got, engine.name)
+			}
+			if got := result.Metadata["hidden_files"]; got != true {
+				t.Fatalf("hidden_files = %v, want true", got)
+			}
+			if got := result.Metadata["ignore_files"]; got != false {
+				t.Fatalf("ignore_files = %v, want false", got)
 			}
 		})
 	}
