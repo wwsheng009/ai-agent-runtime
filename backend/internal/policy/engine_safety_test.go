@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -226,10 +228,12 @@ func TestEngineSensitiveWriteDontAskDenies(t *testing.T) {
 	assert.Contains(t, decision.Reason, "sensitive_write:secret")
 }
 
-func TestEngineSensitiveWriteBypassSkipsGate(t *testing.T) {
+func TestEngineSensitiveWriteBypassStillHardAsk(t *testing.T) {
+	handler := &recordingApprovalHandler{response: ApprovalResponse{Allowed: true}}
 	engine := &Engine{
-		Mode:   ModeBypassPermissions,
-		Policy: NewToolExecutionPolicy(nil, false),
+		Mode:       ModeBypassPermissions,
+		Policy:     NewToolExecutionPolicy(nil, false),
+		AskHandler: handler,
 	}
 	decision, err := engine.Evaluate(context.Background(), EvalRequest{
 		ToolName: "write",
@@ -237,8 +241,176 @@ func TestEngineSensitiveWriteBypassSkipsGate(t *testing.T) {
 		Args:     map[string]interface{}{"file_path": ".env", "content": "SECRET=1"},
 	})
 	require.NoError(t, err)
+	require.Equal(t, 1, handler.calls, "bypass must not auto-resolve a sensitive write")
+	assert.Contains(t, handler.requests[0].Reason, "sensitive_write:secret")
 	assert.Equal(t, DecisionAllow, decision.Type)
-	assert.Equal(t, "mode:bypass_permissions", decision.Reason)
+	assert.Equal(t, StageAsk, decision.Stage)
+
+	headless := &Engine{Mode: ModeBypassPermissions, Policy: NewToolExecutionPolicy(nil, false)}
+	denied, err := headless.Evaluate(context.Background(), EvalRequest{
+		ToolName: "write",
+		ToolInfo: writeToolInfo("write"),
+		Args:     map[string]interface{}{"file_path": ".env", "content": "SECRET=1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, denied.Type)
+	assert.Equal(t, "headless_deny:approval_required", denied.Reason)
+}
+
+func TestAllowRuleCannotBypassShellBreaker(t *testing.T) {
+	handler := &recordingApprovalHandler{response: ApprovalResponse{Allowed: true}}
+	engine := &Engine{
+		Mode:       ModeDefault,
+		AskHandler: handler,
+		Policy:     NewToolExecutionPolicy(nil, false),
+		Rules: []Rule{{
+			Name:     "allow-shell",
+			Tools:    []string{"shell"},
+			Decision: DecisionAllow,
+			Reason:   "blanket_allow",
+		}},
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "shell",
+		ToolInfo: shellToolInfo(),
+		Args:     map[string]interface{}{"command": "rm -rf /"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, handler.calls, "allow rule must not short-circuit the breaker")
+	assert.Contains(t, handler.requests[0].Reason, "shell_breaker:root_home_removal")
+	assert.Equal(t, DecisionAllow, decision.Type)
+}
+
+func TestAllowRuleCannotBypassSensitiveWrite(t *testing.T) {
+	handler := &recordingApprovalHandler{response: ApprovalResponse{Allowed: true}}
+	engine := &Engine{
+		Mode:       ModeDefault,
+		AskHandler: handler,
+		Policy:     NewToolExecutionPolicy(nil, false),
+		Rules: []Rule{{
+			Name:     "allow-write",
+			Tools:    []string{"write"},
+			Decision: DecisionAllow,
+			Reason:   "blanket_allow",
+		}},
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "write",
+		ToolInfo: writeToolInfo("write"),
+		Args:     map[string]interface{}{"file_path": ".env", "content": "SECRET=1"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, handler.calls, "allow rule must not short-circuit the sensitive-write gate")
+	assert.Contains(t, handler.requests[0].Reason, "sensitive_write:secret")
+	assert.Equal(t, DecisionAllow, decision.Type)
+}
+
+func TestLegacySafetyOrderRestoresAllowRuleShortCircuit(t *testing.T) {
+	handler := &recordingApprovalHandler{response: ApprovalResponse{Allowed: true}}
+	engine := &Engine{
+		Mode:              ModeDefault,
+		AskHandler:        handler,
+		Policy:            NewToolExecutionPolicy(nil, false),
+		LegacySafetyOrder: true,
+		Rules: []Rule{{
+			Name:     "allow-shell",
+			Tools:    []string{"shell"},
+			Decision: DecisionAllow,
+			Reason:   "blanket_allow",
+		}},
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "shell",
+		ToolInfo: shellToolInfo(),
+		Args:     map[string]interface{}{"command": "rm -rf /"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, handler.calls)
+	assert.Equal(t, DecisionAllow, decision.Type)
+	assert.Equal(t, StageRules, decision.Stage)
+}
+
+func TestCallbackCannotOverrideDontAsk(t *testing.T) {
+	engine := &Engine{
+		Mode:   ModeDontAsk,
+		Policy: NewToolExecutionPolicy(nil, false),
+		Callback: func(context.Context, EvalRequest) (Decision, string, error) {
+			return Decision{Type: DecisionAllow}, "callback_allows", nil
+		},
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "write",
+		ToolInfo: writeToolInfo("write"),
+		Args:     map[string]interface{}{"file_path": "README.md", "content": "x"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, decision.Type)
+	assert.Equal(t, "mode:dont_ask_denies_unapproved", decision.Reason)
+}
+
+func TestCallbackCannotOverridePlanDeny(t *testing.T) {
+	engine := &Engine{
+		Mode:   ModePlan,
+		Policy: NewToolExecutionPolicy(nil, false),
+		Callback: func(context.Context, EvalRequest) (Decision, string, error) {
+			return Decision{Type: DecisionAllow}, "callback_allows", nil
+		},
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "write",
+		ToolInfo: writeToolInfo("write"),
+		Args:     map[string]interface{}{"file_path": "README.md", "content": "x"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, decision.Type)
+	assert.Equal(t, "mode:plan_denies_non_readonly", decision.Reason)
+}
+
+func TestCallbackCannotOverrideSandboxDeny(t *testing.T) {
+	root := t.TempDir()
+	engine := &Engine{
+		Mode:   ModeBypassPermissions,
+		Policy: NewToolExecutionPolicy(nil, false),
+		Callback: func(context.Context, EvalRequest) (Decision, string, error) {
+			return Decision{
+				Type:        DecisionAllow,
+				PatchedArgs: json.RawMessage(`{"path":"outside.txt"}`),
+			}, "callback_allows", nil
+		},
+	}
+	engine.Policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{filepath.Join(root, "inside")},
+	})
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "read_file",
+		ToolInfo: &skill.ToolInfo{Name: "read_file", MCPTrustLevel: "local", ExecutionMode: "local_mcp"},
+		Args:     map[string]interface{}{"path": filepath.Join(root, "inside", "ok.txt")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, decision.Type)
+	assert.Contains(t, decision.Reason, "outside sandbox")
+}
+
+func TestCallbackPatchCannotIntroduceHardSafetyGate(t *testing.T) {
+	engine := &Engine{
+		Mode:   ModeBypassPermissions,
+		Policy: NewToolExecutionPolicy(nil, false),
+		Callback: func(context.Context, EvalRequest) (Decision, string, error) {
+			return Decision{
+				Type:        DecisionAllow,
+				PatchedArgs: json.RawMessage(`{"command":"rm -rf /"}`),
+			}, "callback_allows", nil
+		},
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "shell",
+		ToolInfo: shellToolInfo(),
+		Args:     map[string]interface{}{"command": "git status"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, decision.Type)
+	assert.Contains(t, decision.Reason, "shell_breaker:root_home_removal")
 }
 
 func TestEngineSensitiveWriteCleanPathStillAutoApproved(t *testing.T) {

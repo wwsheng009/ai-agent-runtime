@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -135,6 +136,11 @@ type Engine struct {
 	// vectors, VCS metadata, or the runtime's own configuration. Zero value
 	// keeps it enabled.
 	DisableSensitiveWriteGate bool
+	// LegacySafetyOrder restores the pre-2026-10-22 ordering where an explicit
+	// allow rule or remembered grant could short-circuit the shell breaker and
+	// sensitive-write gates. It is a one-release compatibility switch and must
+	// not be enabled for production targets.
+	LegacySafetyOrder bool
 	// DisableSafeFileFastPath turns off the accept-edits safe-file-command fast
 	// lane (§4.11), which auto-accepts mkdir/touch/cp/mv/rmdir and
 	// non-recursive rm when every target stays inside the workspace and is not
@@ -342,6 +348,15 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 		return *deny, nil
 	}
 
+	// 2b) Hard safety gates. These are computed before allow rules/grants so a
+	// broad allow rule cannot make a destructive command or secret write
+	// disappear from the safety pipeline. The legacy switch restores the old
+	// (unsafe) ordering for one release.
+	var safetyDecision *Decision
+	if !e.legacySafetyOrder() {
+		safetyDecision = e.hardSafetyDecision(ctx, req, mode)
+	}
+
 	// ruleRoot anchors specifier path patterns (/ and relative) to the same
 	// workspace root the executor uses.
 	ruleRoot := planWorkspaceRoot(ctx)
@@ -356,12 +371,16 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 		if decision.Type == DecisionDeny {
 			return decision, nil
 		}
+		if safetyDecision != nil {
+			// An allow/ask rule cannot override a hard safety gate.
+			decision = Decision{}
+		}
 	}
 
 	// 4) Remembered grants (skipped under bypass — bypass already allows without ask).
 	// Both the session store and the durable project store are consulted; the
 	// workspace root resolves "/"-anchored path patterns (§4.8).
-	if decision.Type == "" && mode != ModeBypassPermissions && grantEligible(req.ToolName) {
+	if decision.Type == "" && safetyDecision == nil && mode != ModeBypassPermissions && grantEligible(req.ToolName) {
 		grantRoot := toolctx.WorkspaceRoot(ctx)
 		for _, store := range []GrantStore{e.Grants, e.ProjectGrants} {
 			if grant, ok := findRememberedGrant(store, req.ToolName, req.Args, grantRoot); ok {
@@ -381,7 +400,7 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	// call runs. It sits before the read-only fast lane so external reads are
 	// admitted too, and before the mode stage so bypass silently admits while
 	// dont_ask stays fail-closed.
-	if decision.Type == "" {
+	if decision.Type == "" && safetyDecision == nil {
 		if gate := e.externalDirGate(ctx, req, mode); gate != nil {
 			if gate.Type == DecisionDeny {
 				return *gate, nil
@@ -396,10 +415,15 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	// taxonomy capabilities (read_only + ask_user) would auto-allow it here and
 	// the gate would never see an undecided request. The opt-out paths keep the
 	// legacy behavior untouched, because the gate is not armed for them.
-	if decision.Type == "" && e != nil && !e.DisableReadOnlyAuto && !e.planEnterGateArmed(req) {
+	if decision.Type == "" && safetyDecision == nil && e != nil && !e.DisableReadOnlyAuto && !e.planEnterGateArmed(req) {
 		if auto, reason := e.readOnlyAutoDecision(req); auto {
 			decision = withStage(Decision{Type: DecisionAllow, Reason: reason}, StageReadonlyAuto, reason)
 		}
+	}
+
+	// A hard safety decision takes precedence over mode/read-only decisions.
+	if safetyDecision != nil {
+		decision = *safetyDecision
 	}
 
 	// 5b) Root/home removal circuit breaker. It runs before the mode decision
@@ -511,6 +535,8 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	// host callback may deny or re-ask it, but cannot turn it into an allow.
 	hardAsk := decision.HardAsk
 	hardAskReason := decision.Reason
+	protectedDeny := decision.Type == DecisionDeny && (decision.Stage == StageMode || safetyDecision != nil)
+	protectedDecision := decision
 
 	// 8) Callback override.
 	if e.Callback != nil {
@@ -550,6 +576,16 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 		if hardAsk && decision.Type == DecisionAllow {
 			decision = withStage(Decision{Type: DecisionAsk, Reason: hardAskReason, HardAsk: true}, StageShellBreaker, hardAskReason)
 		}
+		if hardAsk && decision.Type == DecisionAsk {
+			// A callback may re-ask, but the replacement must remain HardAsk so
+			// bypass/approval cannot silently weaken it.
+			decision.HardAsk = true
+		}
+		if protectedDeny && decision.Type != DecisionDeny {
+			// Callback may deny or re-ask, but it cannot turn a mode/safety deny
+			// into an allow (design §10.5.1).
+			decision = protectedDecision
+		}
 	}
 
 	decision.PatchedArgs = finalPatchedArgs
@@ -565,6 +601,53 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	}
 	decision = applyRequestHookMetadata(decision, req.Metadata)
 	return e.resolveAsk(ctx, decision, req)
+}
+
+// legacySafetyOrder reports whether the compatibility ordering is enabled.
+// The switch is intentionally one-release and default-off.
+func (e *Engine) legacySafetyOrder() bool {
+	if e != nil && e.LegacySafetyOrder {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_POLICY_LEGACY_SAFETY_ORDER"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// hardSafetyDecision computes the gates that must be decided before allow
+// rules, grants and callbacks. A nil result means no hard gate applies.
+func (e *Engine) hardSafetyDecision(ctx context.Context, req EvalRequest, mode Mode) *Decision {
+	if e == nil {
+		return nil
+	}
+	if !e.DisableShellBreaker {
+		if commands := shellBreakerCommands(req); len(commands) > 0 {
+			if finding, risky := shellrisk.AssessCommands(commands).First(); risky {
+				reason := "shell_breaker:" + string(finding.Risk)
+				decision := Decision{Type: DecisionAsk, Reason: reason, HardAsk: true}
+				if mode == ModePlan || mode == ModeDontAsk {
+					decision = Decision{Type: DecisionDeny, Reason: reason}
+				}
+				decision = withStage(decision, StageShellBreaker, reason)
+				return &decision
+			}
+		}
+	}
+	if !e.DisableSensitiveWriteGate {
+		if targets := e.sensitiveWriteTargets(ctx, req); len(targets) > 0 {
+			reason := "sensitive_write:" + string(targets[0].Match.Kind)
+			decision := Decision{Type: DecisionAsk, Reason: reason, HardAsk: true}
+			if mode == ModePlan || mode == ModeDontAsk {
+				decision = Decision{Type: DecisionDeny, Reason: reason}
+			}
+			decision = withStage(decision, StageSensitiveWrite, reason)
+			return &decision
+		}
+	}
+	return nil
 }
 
 // resolveCapabilities returns the capabilities for a request using the engine's
@@ -678,6 +761,13 @@ func (e *Engine) applyPatchAndRevalidate(ctx context.Context, req EvalRequest, p
 	}
 	if deny := e.validateHardConstraints(ctx, req); deny != nil {
 		return req, deny
+	}
+	// A callback patch is not an approval. Re-run the hard safety gates against
+	// the replacement args so a patch cannot introduce a destructive command or
+	// sensitive write that was absent from the original request.
+	if gate := e.hardSafetyDecision(ctx, req, e.effectiveMode(req)); gate != nil {
+		denied := withStage(Decision{Type: DecisionDeny, Reason: gate.Reason}, gate.Stage, gate.Reason)
+		return req, &denied
 	}
 	return req, nil
 }
