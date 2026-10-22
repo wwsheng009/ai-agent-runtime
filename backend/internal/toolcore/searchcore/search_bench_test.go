@@ -11,6 +11,17 @@ import (
 
 const benchFileBytes = 1024
 
+// Large benchmarks create 100k files (~100MB) and are opt-in so normal test
+// and benchmark runs stay cheap. Set AICLI_TOOLCORE_BENCH_LARGE=1 to run them.
+const largeBenchEnv = "AICLI_TOOLCORE_BENCH_LARGE"
+
+func requireLargeBench(b *testing.B) {
+	b.Helper()
+	if os.Getenv(largeBenchEnv) == "" {
+		b.Skipf("set %s=1 to run 100k-file benchmarks", largeBenchEnv)
+	}
+}
+
 func benchmarkTree(b *testing.B, files int) string {
 	b.Helper()
 	root := b.TempDir()
@@ -64,6 +75,45 @@ func BenchmarkGrep10kNoMatch(b *testing.B) {
 	root := benchmarkTree(b, 10_000)
 	b.ReportAllocs()
 	b.SetBytes(10_000 * benchFileBytes)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result, err := Grep(context.Background(), GrepOptions{
+			Pattern:      "no-such-needle",
+			Path:         root,
+			Glob:         "*.txt",
+			Limit:        200,
+			MaxFileBytes: 1 << 20,
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(result.Matches) != 0 {
+			b.Fatalf("unexpected matches: %d", len(result.Matches))
+		}
+	}
+}
+
+func BenchmarkGlob100kNoMatch(b *testing.B) {
+	requireLargeBench(b)
+	root := benchmarkTree(b, 100_000)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result, err := Glob(context.Background(), root, "**/*.go", 500)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(result.Matches) != 0 {
+			b.Fatalf("unexpected matches: %d", len(result.Matches))
+		}
+	}
+}
+
+func BenchmarkGrep100kNoMatch(b *testing.B) {
+	requireLargeBench(b)
+	root := benchmarkTree(b, 100_000)
+	b.ReportAllocs()
+	b.SetBytes(100_000 * benchFileBytes)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		result, err := Grep(context.Background(), GrepOptions{
