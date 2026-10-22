@@ -2050,6 +2050,71 @@ func terminalFrameCells(rows []AppScreenRow, renderRows []render.Line, width, he
 	return terminalFrameCellsWindow(rows, renderRows, width, height, 1, height, theme)
 }
 
+// terminalCellRowKey 标识一行的物化结果：同样的文本 + 宽度 + 主题必然产生
+// 同样的 SGR cell 序列。
+type terminalCellRowKey struct {
+	text  string
+	width int
+	theme string
+}
+
+// terminalCellRowCache 缓存「行文本 → 物化后的 []vt.Cell」。
+//
+// 为什么需要：terminalFrameCellsWindow 对每个可见行都要 Feed 一次并用
+// CellRow(1) 克隆 width 个 Cell（cloneScreenRow 内 make([]Cell, width)，
+// 外加 SGR 二次复制）。生产实测该项 6.7 小时累计分配 36.4 GB（占全部 8.2%、
+// 是单一函数中最大的一项）。而视口在稳态帧里绝大多数行是不变的——只有流式
+// 行在变；40 gen/s 下等于把同样的行重复物化了数十万次。
+//
+// 安全性：返回的 []vt.Cell 被所有消费方视为**只读**：
+//   - renderengine.ScreenModel.StageFrame 对变化行走 normalizeRow（复制），
+//     未变化行直接跳过；
+//   - cloneCellGrid 深拷贝（含 SGR）；
+//   - RegionPrefixEquals / rowCellsEqual 只读。
+//
+// 已 grep 确认 ui 包内没有对 Cell 的原地写入（除构造器与克隆函数）。
+//
+// 容量：分「当前代 / 上一代」两表轮转（近似 LRU，O(1) 提升），每代 256 行。
+// 宽 200 时约 4 MiB 常驻，远小于它消除的每帧分配量。
+type terminalCellRowCacheState struct {
+	mu       sync.Mutex
+	current  map[terminalCellRowKey][]vt.Cell
+	previous map[terminalCellRowKey][]vt.Cell
+	limit    int
+}
+
+var terminalCellRowCache = terminalCellRowCacheState{
+	current:  make(map[terminalCellRowKey][]vt.Cell, 256),
+	previous: make(map[terminalCellRowKey][]vt.Cell, 256),
+	limit:    256,
+}
+
+func terminalCachedCellRow(key terminalCellRowKey) ([]vt.Cell, bool) {
+	cache := &terminalCellRowCache
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if row, ok := cache.current[key]; ok {
+		return row, true
+	}
+	if row, ok := cache.previous[key]; ok {
+		// 提升到当前代，避免被下一次轮转淘汰。
+		cache.current[key] = row
+		return row, true
+	}
+	return nil, false
+}
+
+func storeTerminalCellRow(key terminalCellRowKey, row []vt.Cell) {
+	cache := &terminalCellRowCache
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if len(cache.current) >= cache.limit {
+		cache.previous = cache.current
+		cache.current = make(map[terminalCellRowKey][]vt.Cell, cache.limit)
+	}
+	cache.current[key] = row
+}
+
 // terminalFrameCellsWindow materializes only the requested 1-based row window
 // [topRow, topRow+rowCount). Frame-wide validation is deliberately preserved:
 // row identity, text parity and line controls are checked for every row (the
@@ -2076,6 +2141,8 @@ func terminalFrameCellsWindow(rows []AppScreenRow, renderRows []render.Line, wid
 	// streams do not allocate a fresh width×height matrix per line"）正是
 	// 为这条路径准备的。VT 展开规则仍是唯一的（同一 Screen.Feed）。
 	var materializer *vt.Screen
+	// 主题指纹只算一次（fmt.Sprintf 有分配），供整帧的行缓存键复用。
+	themeFP := themeFingerprint(theme)
 	for index, row := range rows {
 		if row.Row != 0 && row.Row != index+1 {
 			return nil, fmt.Errorf("%w: row %d declared as %d", ErrInvalidTerminalFrame, index+1, row.Row)
@@ -2106,6 +2173,14 @@ func terminalFrameCellsWindow(rows []AppScreenRow, renderRows []render.Line, wid
 		if !inWindow {
 			continue
 		}
+		// 稳态帧里绝大多数视口行内容不变：命中缓存即拿到上一次物化的
+		// []vt.Cell，跳过 Feed + CellRow（后者会 make([]Cell, width) 并
+		// 深拷贝 SGR）。返回的切片按只读契约共享，见 terminalCellRowCache。
+		key := terminalCellRowKey{text: text, width: width, theme: themeFP}
+		if cached, ok := terminalCachedCellRow(key); ok {
+			frame[index-windowStart] = cached
+			continue
+		}
 		if materializer == nil {
 			materializer = vt.NewScreen(width, 2)
 		} else {
@@ -2114,7 +2189,9 @@ func terminalFrameCellsWindow(rows []AppScreenRow, renderRows []render.Line, wid
 		materializer.Feed(text)
 		// 单行拷贝：CellRows(1,1)[0] 会先构造外层 [][]Cell 再取首元素，
 		// 在"每个可见行都跑一次"的循环里等于多付一份 slice 头分配。
-		frame[index-windowStart] = materializer.CellRow(1)
+		cells := materializer.CellRow(1)
+		storeTerminalCellRow(key, cells)
+		frame[index-windowStart] = cells
 	}
 	return frame, nil
 }
