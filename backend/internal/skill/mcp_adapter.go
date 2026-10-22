@@ -46,6 +46,7 @@ func (a *MCPAdapter) FindTool(toolName string) (ToolInfo, error) {
 		MaxParallelCalls: a.resolveMaxParallelCalls(info.MCPName),
 		MCPTrustLevel:    a.resolveTrustLevel(info.MCPName),
 		ExecutionMode:    a.resolveExecutionMode(info.MCPName),
+		ExecutionScope:   a.resolveExecutionScope(info.MCPName),
 		Enabled:          info.Enabled,
 	}, nil
 }
@@ -61,6 +62,15 @@ func withRuntimeMCPMetadata(metadata map[string]interface{}) map[string]interfac
 	}
 	metadata[types.ToolMetadataFSOwnerKey] = types.ToolFSOwnerToolServer
 	return metadata
+}
+
+// WithRuntimeMCPMetadata is the exported single implementation point for the
+// "this tool server owns its filesystem paths" stamp. Every adapter that
+// projects MCP tools into the agent tool surface must use it: the tools
+// manager adapter (aicli TUI / runtime-server main path) and this adapter both
+// call it, so a remote path is never stat'ed or sandbox-checked locally.
+func WithRuntimeMCPMetadata(metadata map[string]interface{}) map[string]interface{} {
+	return withRuntimeMCPMetadata(metadata)
 }
 
 // CallTool 调用工具
@@ -175,6 +185,7 @@ func (a *MCPAdapter) ListTools() []ToolInfo {
 			MaxParallelCalls: a.resolveMaxParallelCalls(t.MCPName),
 			MCPTrustLevel:    a.resolveTrustLevel(t.MCPName),
 			ExecutionMode:    a.resolveExecutionMode(t.MCPName),
+			ExecutionScope:   a.resolveExecutionScope(t.MCPName),
 			Enabled:          t.Enabled,
 		}
 	}
@@ -270,6 +281,20 @@ func (a *MCPAdapter) resolveExecutionMode(mcpName string) string {
 		return ""
 	}
 	return status.ExecutionMode
+}
+
+// resolveExecutionScope reads the declared local/remote scope from the manager
+// status. An empty value keeps the historical "local" behavior so existing
+// stdio MCP servers (which are genuinely local) are unaffected.
+func (a *MCPAdapter) resolveExecutionScope(mcpName string) string {
+	if a == nil || a.manager == nil || mcpName == "" {
+		return ""
+	}
+	status, err := a.manager.GetMCPStatus(mcpName)
+	if err != nil || status == nil {
+		return ""
+	}
+	return string(status.ExecutionScope)
 }
 
 func (a *MCPAdapter) resolveMaxParallelCalls(mcpName string) int {

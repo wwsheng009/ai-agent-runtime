@@ -53,6 +53,9 @@ type Manager struct {
 	// lspObserver 是池事件的 host 转发槽：可后置注入（会话 runtime host 建立
 	// 晚于工具管理器构造），桥在构造期即持有 hub，注入后立即生效。
 	lspObserver *lspObserverHub
+	// remoteNameCollisions records remote tools refused by the name-collision
+	// guard (see validateRemoteToolNameCollision). Keyed by server\x00tool.
+	remoteNameCollisions map[string]RemoteNameCollision
 }
 
 const toolkitMCPName = "toolkit"
@@ -67,6 +70,141 @@ var localToolkitPriorityTools = func() map[string]struct{} {
 	}
 	return set
 }()
+
+// remoteNameCollisionMu guards remoteNameCollisions.
+var remoteNameCollisionMu sync.Mutex
+
+// RemoteNameCollision describes a remote MCP tool that was refused because its
+// name is already owned by the local toolkit.
+type RemoteNameCollision struct {
+	// MCPName is the offending server.
+	MCPName string
+	// ToolName is the raw tool name it tried to publish.
+	ToolName string
+	// Reason is the user-facing explanation.
+	Reason string
+}
+
+// validateRemoteToolNameCollision rejects a remote tool whose name shadows a local
+// builtin.
+//
+// Why this is a hard error instead of a silent precedence rule:
+//
+// ListTools and executeWithMeta disagree about ownership for the same name. The
+// listing path consults shouldPreferLocalToolkit(mcpName, name), which returns
+// false for every non-read tool, so a remote `write` CLAIMS the name and is shown
+// with mcp_name set. The execution path consults
+// shouldPreferLocalToolkitTool(name), which calls the same helper with mcpName
+// hard-coded to "toolkit" — that always matches, so the LOCAL implementation
+// runs.
+//
+// The model therefore sees "write (remote)" and mutates the local filesystem
+// without any error. For the read family (ls/glob/grep/view) the remote tool is
+// simply unreachable. Neither outcome is acceptable, and neither is discoverable
+// from the tool list alone, so the collision is refused at load time with an
+// actionable message instead.
+//
+// Local/scoped servers are exempt: an MCP server that is meant to be local has
+// legitimate reasons to mirror a builtin name, and it is not the hazard this
+// guard exists for.
+func (m *Manager) validateRemoteToolNameCollision(info *mcpregistry.ToolInfo) error {
+	if m == nil || info == nil || info.Tool == nil {
+		return nil
+	}
+	// A manager without a local toolkit has nothing to collide with.
+	if m.toolkit == nil {
+		return nil
+	}
+	rawName := strings.TrimSpace(info.Tool.Name)
+	if rawName == "" {
+		return nil
+	}
+	// Only remote-scoped servers are gated.
+	if !m.isRemoteScopedServer(info.MCPName) {
+		return nil
+	}
+	if _, collides := m.toolkit.Get(rawName); !collides {
+		return nil
+	}
+	return fmt.Errorf(
+		"remote MCP server %q publishes tool %q, which collides with the local builtin of the same name; "+
+			"give the remote tools a prefix (remote.toolPrefix) so the two surfaces stay distinguishable",
+		info.MCPName, rawName)
+}
+
+// isRemoteScopedServer reports whether the server declared executionScope=remote.
+//
+// The scope lives on the server config, not on the tool entry, so it has to be
+// fetched by name. A server whose status cannot be read is treated as NOT remote:
+// the guard must never break a working local setup because of an unrelated
+// status-query failure.
+//
+// The call is wrapped in a recover because an MCP manager may be a partial
+// implementation that embeds a nil `manager.Manager` to satisfy the interface
+// (test doubles do this, and so may a wrapper that only forwards a subset of
+// methods). On such a type GetMCPStatus panics instead of returning an error, and
+// a diagnostic guard must never take down a session — especially when the panic
+// would fire on the hot tool-listing path.
+func (m *Manager) isRemoteScopedServer(mcpName string) (remote bool) {
+	name := strings.TrimSpace(mcpName)
+	if name == "" || m.mcp == nil {
+		return false
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			remote = false
+		}
+	}()
+	status, err := m.mcp.GetMCPStatus(name)
+	if err != nil || status == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(string(status.ExecutionScope)), "remote")
+}
+
+// recordRemoteNameCollision remembers a refused tool so the host can surface it.
+//
+// A refused tool is not listed, which means the operator would otherwise see a
+// shorter tool list with no explanation. Keeping the record makes the reason
+// queryable (mcp list / doctor) instead of invisible.
+func (m *Manager) recordRemoteNameCollision(info *mcpregistry.ToolInfo, err error) {
+	if m == nil || info == nil || info.Tool == nil || err == nil {
+		return
+	}
+	remoteNameCollisionMu.Lock()
+	defer remoteNameCollisionMu.Unlock()
+	if m.remoteNameCollisions == nil {
+		m.remoteNameCollisions = map[string]RemoteNameCollision{}
+	}
+	key := info.MCPName + "\x00" + info.Tool.Name
+	m.remoteNameCollisions[key] = RemoteNameCollision{
+		MCPName:  info.MCPName,
+		ToolName: info.Tool.Name,
+		Reason:   err.Error(),
+	}
+}
+
+// RemoteNameCollisions returns the tools refused by the collision guard.
+//
+// Sorted by server then tool so the output is stable for tests and diagnostics.
+func (m *Manager) RemoteNameCollisions() []RemoteNameCollision {
+	if m == nil {
+		return nil
+	}
+	remoteNameCollisionMu.Lock()
+	defer remoteNameCollisionMu.Unlock()
+	result := make([]RemoteNameCollision, 0, len(m.remoteNameCollisions))
+	for _, collision := range m.remoteNameCollisions {
+		result = append(result, collision)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].MCPName != result[j].MCPName {
+			return result[i].MCPName < result[j].MCPName
+		}
+		return result[i].ToolName < result[j].ToolName
+	})
+	return result
+}
 
 // NewDefaultManager registers the built-in toolkit tools and merges MCP tools.
 func NewDefaultManager(mcp manager.Manager) *Manager {
@@ -101,6 +239,32 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 	return manager
 }
 
+// NewRemoteOnlyManager builds a manager whose entire tool surface comes from MCP.
+//
+// It exists for "this session operates one remote host, nothing local" (aicli chat
+// --remote). Two properties make it safer than simply hiding the local tools with
+// an allowlist:
+//
+//   - there is no local toolkit at all, so a remote tool can never shadow a local
+//     one. tools.Manager visits MCP tools first and only the read family
+//     (ls/glob/grep/view) is locally protected; an unprefixed remote `write`
+//     silently claims the name, and the model then mutates the remote machine
+//     believing it wrote locally. With toolkit == nil that failure mode cannot
+//     exist.
+//   - the surface is exactly what the target advertises, so no local path, no
+//     local sandbox and no local LSP pool can be reached by accident.
+//
+// Every m.toolkit use site is already nil-guarded (ListTools, GetToolInfo,
+// Execute, resolveToolSource, SetBackgroundSubmitter), which ListToolsTests and
+// the remote-only integration test pin.
+func NewRemoteOnlyManager(mcp manager.Manager) *Manager {
+	return &Manager{
+		toolkit:     nil,
+		mcp:         mcp,
+		lspObserver: &lspObserverHub{},
+	}
+}
+
 // MCPAvailable reports whether this manager actually carries an MCP runtime.
 //
 // A non-nil Manager does NOT imply a usable MCP surface: hosts construct it with
@@ -131,6 +295,13 @@ func (m *Manager) ListTools() []ToolDescriptor {
 				continue
 			}
 			if m.shouldPreferLocalToolkit(info.MCPName, info.Tool.Name) {
+				continue
+			}
+			// A remote server must not publish a tool under a name the local
+			// toolkit already owns. See validateRemoteToolNameCollision for why
+			// this is a hard error rather than a silent tie-break.
+			if err := m.validateRemoteToolNameCollision(info); err != nil {
+				m.recordRemoteNameCollision(info, err)
 				continue
 			}
 			callableName := callableNames[index]
@@ -356,11 +527,19 @@ func (m *Manager) executeWithMeta(ctx context.Context, name string, args map[str
 	if m.codeGate != nil && m.codeGate.isCodeTool(lookupName) && !m.codeGate.toolVisible(lookupName) {
 		return "", nil, fmt.Errorf("tool '%s' is not available: code index snapshot is out of policy (ADR-0004)", name)
 	}
-	if m.toolkit != nil {
+	// Read-family tools are served locally unconditionally. This is the ONLY
+	// case that may short-circuit before the MCP lookup, and it is exactly the
+	// case ListTools never lets a remote server claim.
+	//
+	// The previous code called shouldPreferLocalToolkitTool here, which evaluates
+	// shouldPreferLocalToolkit with mcpName hard-coded to "toolkit". For any
+	// non-read tool that made this branch always win, while ListTools (which knows
+	// the real mcpName) let the MCP entry claim the name. The model then saw
+	// "write (remote)" and mutated the local disk. Routing every other name
+	// through the MCP lookup below makes execution agree with the listing.
+	if m.toolkit != nil && m.shouldForceLocalToolkitTool(lookupName) {
 		if tool, ok := m.toolkit.Get(lookupName); ok {
-			if m.shouldPreferLocalToolkitTool(lookupName) {
-				return executeLocalToolkitTool(ctx, tool, lookupName, args)
-			}
+			return executeLocalToolkitTool(ctx, tool, lookupName, args)
 		}
 	}
 
@@ -438,8 +617,13 @@ func (m *Manager) resolveToolSource(name string) string {
 		return toolresult.SourceMeta
 	}
 	lookupName := canonicalManagedToolName(name)
-	if m.toolkit != nil {
-		if _, ok := m.toolkit.Get(lookupName); ok && m.shouldPreferLocalToolkitTool(lookupName) {
+	// Keep this in lockstep with executeWithMeta: only the read family is served
+	// locally ahead of MCP. Asking shouldPreferLocalToolkit with a hard-coded
+	// "toolkit" server name here would report SourceToolkit for a call that
+	// executeWithMeta actually routed to the MCP server, mislabelling the audit
+	// record for every shadowed non-read tool.
+	if m.toolkit != nil && m.shouldForceLocalToolkitTool(lookupName) {
+		if _, ok := m.toolkit.Get(lookupName); ok {
 			return toolresult.SourceToolkit
 		}
 	}
@@ -490,10 +674,6 @@ func (m *Manager) shouldForceLocalToolkitTool(toolName string) bool {
 	}
 	_, ok := localToolkitPriorityTools[strings.ToLower(strings.TrimSpace(toolName))]
 	return ok
-}
-
-func (m *Manager) shouldPreferLocalToolkitTool(toolName string) bool {
-	return m.shouldPreferLocalToolkit(toolkitMCPName, toolName)
 }
 
 func canonicalManagedToolName(name string) string {
@@ -846,6 +1026,23 @@ func cloneMetadataMap(input map[string]any) map[string]interface{} {
 	return cloned
 }
 
+// mergeMetadataMaps returns base with overlay's keys applied on top. It is used
+// when an adapter must combine the descriptor metadata (identity fields) with a
+// stamped copy (fs_owner etc.) without dropping either side.
+func mergeMetadataMaps(base, overlay map[string]interface{}) map[string]interface{} {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+	merged := make(map[string]interface{}, len(base)+len(overlay))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range overlay {
+		merged[key] = value
+	}
+	return merged
+}
+
 func withMCPIdentity(metadata map[string]interface{}, info *mcpregistry.ToolInfo, callableName string) map[string]interface{} {
 	if metadata == nil {
 		metadata = map[string]interface{}{}
@@ -861,6 +1058,14 @@ func withMCPIdentity(metadata map[string]interface{}, info *mcpregistry.ToolInfo
 }
 
 func (m *Manager) metaToolDescriptor() *ToolDescriptor {
+	// In exclusive (remote-only) mode the surface must contain nothing but the
+	// target's own tools. `list_mcp_resources` is a runtime-owned meta tool: it
+	// lists resources from every connected MCP server, which is exactly the
+	// "other servers bleed in" hole exclusivity is meant to close. Dropping it
+	// keeps the guarantee literal instead of approximate.
+	if m != nil && m.toolkit == nil {
+		return nil
+	}
 	meta := adapter.BuildMCPMetaTools()
 	if len(meta) == 0 {
 		return nil

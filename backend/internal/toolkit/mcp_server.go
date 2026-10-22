@@ -4,8 +4,8 @@ package toolkit
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/server"
@@ -15,6 +15,24 @@ import (
 type ToolkitMCPServer struct {
 	base     *server.BaseServer
 	registry *Registry
+	// decorate injects per-request state into the tool context. It is how a host
+	// passes request-scoped facts the tool cannot see otherwise (the MCP session,
+	// client roots) without teaching the toolkit about any particular host.
+	decorate ToolContextDecorator
+}
+
+// ToolContextDecorator derives the context one tool call executes with.
+//
+// It receives the raw MCP request so a host can read client capabilities, roots or
+// headers. Returning nil keeps the original context, so a decorator may decline.
+type ToolContextDecorator func(ctx context.Context, req *mcp.CallToolRequest) context.Context
+
+// SetToolContextDecorator installs the per-request context hook.
+func (s *ToolkitMCPServer) SetToolContextDecorator(decorate ToolContextDecorator) {
+	if s == nil {
+		return
+	}
+	s.decorate = decorate
 }
 
 // NewToolkitMCPServer 创建 Toolkit MCP 服务器
@@ -50,13 +68,24 @@ func (s *ToolkitMCPServer) registerTools() {
 
 		// 注册到 MCP Server
 		mcp.AddTool(mcpServer, mcpTool, func(ctx context.Context, req *mcp.CallToolRequest, args map[string]interface{}) (*mcp.CallToolResult, any, error) {
-			return s.handleToolCall(ctx, t, args)
+			return s.handleToolCallWithRequest(ctx, req, t, args)
 		})
 	}
 }
 
 // handleToolCall 处理工具调用
 func (s *ToolkitMCPServer) handleToolCall(ctx context.Context, tool Tool, args map[string]interface{}) (*mcp.CallToolResult, any, error) {
+	return s.handleToolCallWithRequest(ctx, nil, tool, args)
+}
+
+// handleToolCallWithRequest runs one tool call with the request available to the
+// context decorator.
+func (s *ToolkitMCPServer) handleToolCallWithRequest(ctx context.Context, req *mcp.CallToolRequest, tool Tool, args map[string]interface{}) (*mcp.CallToolResult, any, error) {
+	if s != nil && s.decorate != nil {
+		if decorated := s.decorate(ctx, req); decorated != nil {
+			ctx = decorated
+		}
+	}
 	// 执行工具
 	result, err := tool.Execute(ctx, args)
 	if err != nil {
@@ -68,25 +97,46 @@ func (s *ToolkitMCPServer) handleToolCall(ctx context.Context, tool Tool, args m
 		}, nil, nil
 	}
 
-	// 构建返回内容
-	var contents []mcp.Content
+	return buildMCPCallToolResult(result), nil, nil
+}
 
+// buildMCPCallToolResult projects a toolkit result onto the MCP result contract.
+//
+// Metadata travels in CallToolResult.Meta only. It used to be appended to the
+// text body as a "Metadata:" JSON block, which doubled the model-visible token
+// cost, leaked internal fields (artifact ids, dedup flags) into the prompt, and
+// diverged from the local formatToolkitResult* contract (review B5).
+//
+// Binary payloads become ImageContent; without this branch a remote `view` of a
+// PNG returned empty text because only result.Content was ever read.
+func buildMCPCallToolResult(result *ToolResult) *mcp.CallToolResult {
+	if result == nil {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "工具执行失败"}},
+			IsError: true,
+		}
+	}
+
+	var contents []mcp.Content
 	if result.Success {
-		// 成功结果
 		content := result.Content
 		if content == "" && result.Error != nil {
 			content = result.Error.Error()
 		}
-
-		// 如果有 metadata，附加到内容
-		if len(result.Metadata) > 0 {
-			metadataJSON, _ := json.MarshalIndent(result.Metadata, "", "  ")
-			content += fmt.Sprintf("\n\nMetadata:\n%s", string(metadataJSON))
+		if len(result.Data) > 0 {
+			mimeType := strings.TrimSpace(result.MIMEType)
+			if mimeType == "" {
+				mimeType = "application/octet-stream"
+			}
+			contents = append(contents, &mcp.ImageContent{
+				Data:     result.Data,
+				MIMEType: mimeType,
+			})
 		}
-
-		contents = append(contents, &mcp.TextContent{Text: content})
+		if content != "" || len(contents) == 0 {
+			contents = append(contents, &mcp.TextContent{Text: content})
+		}
 	} else {
-		// 错误结果
 		errMsg := "工具执行失败"
 		if result.Error != nil {
 			errMsg = result.Error.Error()
@@ -98,7 +148,7 @@ func (s *ToolkitMCPServer) handleToolCall(ctx context.Context, tool Tool, args m
 		Content: contents,
 		IsError: !result.Success,
 		Meta:    result.MetadataWithOutputKind(),
-	}, nil, nil
+	}
 }
 
 // Start 启动 MCP 服务器

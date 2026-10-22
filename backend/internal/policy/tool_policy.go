@@ -41,7 +41,6 @@ type ToolExecutionPolicy struct {
 	CapabilityScopeEnabled bool
 	CapabilityResolver     CapabilityResolver
 	BlockUntrustedMCP      bool
-	BlockRemoteWrites      bool
 	Sandbox                *executor.Sandbox
 	// PlanModeActive marks that the session is in plan mode, and
 	// PlanWriteAllowPaths / PlanWriteAllowPathsResolved carry the plan write
@@ -71,7 +70,6 @@ func NewToolExecutionPolicy(allowedTools []string, readOnly bool) *ToolExecution
 	policy := &ToolExecutionPolicy{
 		ReadOnly:          readOnly,
 		BlockUntrustedMCP: true,
-		BlockRemoteWrites: true,
 		ContractualTools:  buildContractualToolsMap(),
 	}
 	if allowedTools != nil {
@@ -354,9 +352,6 @@ func (p *ToolExecutionPolicy) AllowToolInfo(tool skill.ToolInfo) error {
 	if p.BlockUntrustedMCP && tool.MCPTrustLevel == "untrusted_remote" && IsWriteLikeToolName(tool.Name) {
 		return fmt.Errorf("untrusted remote MCP cannot execute write-like tool: %s", tool.Name)
 	}
-	if p.BlockRemoteWrites && tool.ExecutionMode == "remote_mcp" && IsWriteLikeToolName(tool.Name) {
-		return fmt.Errorf("remote MCP execution mode blocks write-like tool: %s", tool.Name)
-	}
 	return nil
 }
 
@@ -602,7 +597,6 @@ func (p *ToolExecutionPolicy) Clone() *ToolExecutionPolicy {
 		CapabilityScopeEnabled: p.CapabilityScopeEnabled,
 		CapabilityResolver:     p.CapabilityResolver,
 		BlockUntrustedMCP:      p.BlockUntrustedMCP,
-		BlockRemoteWrites:      p.BlockRemoteWrites,
 		PathAnchorRoot:         p.PathAnchorRoot,
 	}
 	cloned.PlanModeActive = p.PlanModeActive

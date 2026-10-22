@@ -60,6 +60,12 @@ func (a *AgentAdapter) ListTools() []skill.ToolInfo {
 			info.MaxParallelCalls = mcpInfo.MaxParallelCalls
 			info.MCPTrustLevel = mcpInfo.MCPTrustLevel
 			info.ExecutionMode = mcpInfo.ExecutionMode
+			info.ExecutionScope = mcpInfo.ExecutionScope
+			// lookupMCPTool stamps fs_owner=tool_server (B2); the descriptor's
+			// metadata comes from the raw MCP registry and lacks it. Merge the
+			// stamped copy over the descriptor so the owner is present without
+			// dropping the callable-name identity fields ListTools already set.
+			info.Metadata = mergeMetadataMaps(info.Metadata, mcpInfo.Metadata)
 		}
 		tools = append(tools, info)
 	}
@@ -128,15 +134,41 @@ func (a *AgentAdapter) lookupMCPTool(toolName string) (skill.ToolInfo, bool) {
 	if a.manager.shouldPreferLocalToolkit(info.MCPName, toolName) {
 		return skill.ToolInfo{}, false
 	}
+	// The MCP tool server resolves its own filesystem paths: stamp the owner so
+	// the local preflight stops stat'ing remote paths and the sandbox stops
+	// validating them against the local workspace (review B2).
+	metadata := skill.WithRuntimeMCPMetadata(cloneMetadataMap(info.Metadata))
+	trustLevel, executionMode, executionScope := a.resolveMCPGovernance(info.MCPName)
 	return skill.ToolInfo{
 		Name:             info.Tool.Name,
 		Description:      info.Tool.Description,
 		InputSchema:      normalizeParameters(info.Tool.InputSchema),
-		Metadata:         cloneMetadataMap(info.Metadata),
+		Metadata:         metadata,
 		MCPName:          info.MCPName,
 		MaxParallelCalls: a.resolveMCPMaxParallelCalls(info.MCPName),
+		MCPTrustLevel:    trustLevel,
+		ExecutionMode:    executionMode,
+		ExecutionScope:   executionScope,
 		Enabled:          info.Enabled,
 	}, true
+}
+
+// resolveMCPGovernance returns the trust level, execution mode and execution
+// scope recorded for one MCP server.
+//
+// These three values are what ToolExecutionPolicy gates remote writes/shell on
+// (policy/tool_policy.go AllowToolInfo), so dropping them here silently
+// disabled BlockUntrustedMCP / BlockRemoteWrites for every host that projects
+// tools through this adapter (aicli TUI and runtime-server; review B1).
+func (a *AgentAdapter) resolveMCPGovernance(mcpName string) (trustLevel, executionMode, executionScope string) {
+	if a == nil || a.manager == nil || a.manager.mcp == nil || strings.TrimSpace(mcpName) == "" {
+		return "", "", ""
+	}
+	status, err := a.manager.mcp.GetMCPStatus(mcpName)
+	if err != nil || status == nil {
+		return "", "", ""
+	}
+	return string(status.TrustLevel), status.ExecutionMode, string(status.ExecutionScope)
 }
 
 func (a *AgentAdapter) resolveMCPMaxParallelCalls(mcpName string) int {

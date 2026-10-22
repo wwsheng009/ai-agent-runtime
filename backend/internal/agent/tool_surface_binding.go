@@ -79,7 +79,6 @@ func BuildToolSurfaceEligibilityKey(permissionMode string, policy *ToolExecution
 			"read_only":            policy.ReadOnly,
 			"allowlist_enabled":    policy.AllowlistEnabled,
 			"block_untrusted_mcp":  policy.BlockUntrustedMCP,
-			"block_remote_writes":  policy.BlockRemoteWrites,
 			"capability_scope_on":  policy.CapabilityScopeEnabled,
 			"allowed_tools":        policy.AllowedToolNames(),
 			"denied_tools":         sortedPolicyToolNames(policy.DeniedTools),

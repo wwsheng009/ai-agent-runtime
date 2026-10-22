@@ -28,6 +28,12 @@ type ToolInfo struct {
 	MaxParallelCalls int
 	MCPTrustLevel    string
 	ExecutionMode    string
+	// ExecutionScope distinguishes a tool that runs on this host ("local")
+	// from one that runs on another machine ("remote"). It is authored by the
+	// host configuration, never inferred from the tool name or the transport
+	// type: an SSH-launched stdio server is remote even though its MCP config
+	// says "stdio" (MCPConfig.ExecutionMode reports local_mcp for stdio).
+	ExecutionScope string
 	Enabled          bool
 }
 
