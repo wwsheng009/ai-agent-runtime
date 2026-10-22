@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"hash"
 	"math"
 	"os"
 	"path/filepath"
@@ -6069,52 +6071,177 @@ func actionPromptFingerprint(action *AgentAction) string {
 	return strings.TrimSpace(stringValue(action.Metadata["prompt_fingerprint"]))
 }
 
+// promptFingerprintScratchPool 复用「字符串 → 字节」的临时缓冲。
+//
+// 指纹计算在 provider 请求热路径上（每次请求 4~6 次），字段数量级是
+// 「消息数 × 每消息字段数」。若每个字段都做一次 []byte(s) 转换，短字符串
+// （role / id / name / path）会贡献大量小对象。池化后这部分归零。
+var promptFingerprintScratchPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, 4096)
+		return &buf
+	},
+}
+
+// promptFingerprintScratchLimit 是走池化拷贝的最大字段长度；超过它的通常是
+// 消息正文或工具输出，单次转换不可避免，直接写。
+const promptFingerprintScratchLimit = 64 << 10
+
+// promptFingerprintHasher 以「长度前缀 + 原始字节」把字段流式写入 sha256。
+//
+// 为什么需要长度前缀：不同字段拼接时必须有边界，否则 {role:"ab",content:"c"}
+// 与 {role:"a",content:"bc"} 会产生相同字节流。长度前缀比 JSON 的引号/转义
+// 更严格，也更便宜。
+type promptFingerprintHasher struct {
+	hasher hash.Hash
+	length [8]byte
+}
+
+func newPromptFingerprintHasher() *promptFingerprintHasher {
+	return &promptFingerprintHasher{hasher: sha256.New()}
+}
+
+// len8 写入一个 8 字节小端长度（同时承担类型/数量标记的作用）。
+func (h *promptFingerprintHasher) len8(value int) {
+	binary.LittleEndian.PutUint64(h.length[:], uint64(value))
+	_, _ = h.hasher.Write(h.length[:])
+}
+
+// str 写入「长度 + 原始字节」。
+func (h *promptFingerprintHasher) str(value string) {
+	h.len8(len(value))
+	if value == "" {
+		return
+	}
+	if len(value) <= promptFingerprintScratchLimit {
+		bufp := promptFingerprintScratchPool.Get().(*[]byte)
+		buf := (*bufp)[:0]
+		if cap(buf) < len(value) {
+			buf = make([]byte, 0, len(value))
+		}
+		buf = append(buf, value...)
+		_, _ = h.hasher.Write(buf)
+		*bufp = buf[:0]
+		promptFingerprintScratchPool.Put(bufp)
+		return
+	}
+	// 超大字段（例如 MB 级工具输出）：单次转换不可避免，直接写，
+	// 不再经过 JSON 转义（旧实现的 AppendQuote 正是分配大头）。
+	_, _ = h.hasher.Write([]byte(value))
+}
+
+// value 写入一个任意 JSON 值的确定性表示。
+//
+// 只覆盖 encoding/json 反序列化后实际会出现的类型；未知类型退回 JSON，
+// 保证确定性（不会被静默忽略）。
+func (h *promptFingerprintHasher) value(value interface{}) {
+	switch typed := value.(type) {
+	case nil:
+		h.str("\x00nil")
+	case bool:
+		if typed {
+			h.str("\x00true")
+		} else {
+			h.str("\x00false")
+		}
+	case string:
+		h.str("\x00string")
+		h.str(typed)
+	case float64:
+		h.str("\x00float64")
+		var bits [8]byte
+		binary.LittleEndian.PutUint64(bits[:], math.Float64bits(typed))
+		_, _ = h.hasher.Write(bits[:])
+	case float32:
+		h.str("\x00float32")
+		var bits [8]byte
+		binary.LittleEndian.PutUint64(bits[:], math.Float64bits(float64(typed)))
+		_, _ = h.hasher.Write(bits[:])
+	case int:
+		h.str("\x00int")
+		h.len8(typed)
+	case int64:
+		h.str("\x00int64")
+		h.len8(int(typed))
+	case json.Number:
+		h.str("\x00json_number")
+		h.str(string(typed))
+	case []interface{}:
+		h.str("\x00array")
+		h.len8(len(typed))
+		for _, item := range typed {
+			h.value(item)
+		}
+	case map[string]interface{}:
+		h.str("\x00object")
+		// 键必须排序：Go map 迭代顺序随机，不排序会让同一内容产生不同指纹。
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		h.len8(len(keys))
+		for _, key := range keys {
+			h.str(key)
+			h.value(typed[key])
+		}
+	default:
+		h.str("\x00json")
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			h.str("\x00unencodable")
+			return
+		}
+		h.str(string(encoded))
+	}
+}
+
+// promptMessageFingerprint 计算提示历史的稳定内容指纹。
+//
+// 性能契约（2026-10-22 修复）：旧实现把整份 messages 复制成
+// []fingerprintMessage 再 json.Marshal，最后对编码结果取 sha256。生产实测
+// （session_20261018183040_rPueGv9v，6.7h）该函数单项分配 35.2 GB，是全部
+// 分配中最大的单一来源；其中 jsonwire.AppendQuote（转义）贡献 44 GB 的
+// slices.Grow 大头。根因是它每次请求被调用 4~6 次（组装 / 观测 / 两次
+// 「前后是否变化」比较），每次都复制 + 转义整段历史。
+//
+// 新实现把字段直接流式写入 sha256：零中间切片、零 JSON 转义、零 map 序列化。
+//
+// 语义契约不变：相同消息序列 → 相同指纹，不同 → 不同指纹。指纹值是不透明的
+// 内容哈希，只用于进程内相等比较（重复工具轮检测、压缩前后对比）以及写入
+// usage analytics 记录，不做跨版本匹配，因此算法变更不影响正确性。
 func promptMessageFingerprint(messages []types.Message) string {
 	if len(messages) == 0 {
 		return ""
 	}
-	type fingerprintToolCall struct {
-		ID       string                 `json:"id,omitempty"`
-		Type     string                 `json:"type,omitempty"`
-		Name     string                 `json:"name,omitempty"`
-		Args     map[string]interface{} `json:"arguments,omitempty"`
-		RawInput string                 `json:"input,omitempty"`
-	}
-	type fingerprintMessage struct {
-		Role         string                `json:"role,omitempty"`
-		Content      string                `json:"content,omitempty"`
-		ContentParts []types.ContentPart   `json:"content_parts,omitempty"`
-		ToolCalls    []fingerprintToolCall `json:"tool_calls,omitempty"`
-		ToolCallID   string                `json:"tool_call_id,omitempty"`
-	}
-	payload := make([]fingerprintMessage, 0, len(messages))
-	for _, message := range messages {
-		item := fingerprintMessage{
-			Role:         message.Role,
-			Content:      message.Content,
-			ContentParts: append([]types.ContentPart(nil), message.ContentParts...),
-			ToolCallID:   message.ToolCallID,
+	h := newPromptFingerprintHasher()
+	h.len8(len(messages))
+	for index := range messages {
+		message := &messages[index]
+		h.str(message.Role)
+		h.str(message.Content)
+		h.str(message.ToolCallID)
+		h.len8(len(message.ContentParts))
+		for _, part := range message.ContentParts {
+			h.str(string(part.Type))
+			h.str(part.Text)
+			h.str(part.ImageURL)
+			h.str(part.MimeType)
+			h.str(part.Path)
+			h.str(part.Source)
+			h.len8(part.Width)
+			h.len8(part.Height)
 		}
-		if len(message.ToolCalls) > 0 {
-			item.ToolCalls = make([]fingerprintToolCall, 0, len(message.ToolCalls))
-			for _, call := range message.ToolCalls {
-				item.ToolCalls = append(item.ToolCalls, fingerprintToolCall{
-					ID:       call.ID,
-					Type:     call.Type,
-					Name:     call.Name,
-					Args:     call.Args,
-					RawInput: call.RawInput,
-				})
-			}
+		h.len8(len(message.ToolCalls))
+		for _, call := range message.ToolCalls {
+			h.str(call.ID)
+			h.str(call.Type)
+			h.str(call.Name)
+			h.str(call.RawInput)
+			h.value(call.Args)
 		}
-		payload = append(payload, item)
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(encoded)
-	return fmt.Sprintf("%x", sum[:])
+	return fmt.Sprintf("%x", h.hasher.Sum(nil))
 }
 
 func markSessionCompactionRecoveryInput(seen map[string]struct{}, fingerprint string) bool {
