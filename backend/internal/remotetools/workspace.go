@@ -19,6 +19,11 @@ import (
 const (
 	DefaultMaxOutputBytes  = 256 * 1024
 	DefaultMaxBytesPerCall = 2 * 1024 * 1024
+	// DefaultModelVisibleCap is the remote trust-boundary ceiling. It matches
+	// the local output core ceiling; lowering it is allowed, raising it is not.
+	DefaultModelVisibleCap = 64 * 1024
+	// DefaultRemoteOutputHardCap mirrors toolcore/output.
+	DefaultRemoteOutputHardCap = 64 * 1024
 )
 
 // Error codes are stable strings so the local side can branch on them instead

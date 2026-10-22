@@ -114,13 +114,13 @@ type MCPConfig struct {
 	Description string `yaml:"description" json:"description"`
 	// EnvError 记录加载期环境变量插值的缺失项（仅内存态，不落盘）。
 	// 非空时该 server 不参与连接，错误会带进运行时状态。
-	EnvError         string            `yaml:"-" json:"-"`
-	Type             string            `yaml:"type" json:"type"` // stdio | sse | websocket | streamable
-	TrustLevel       MCPTrustLevel     `yaml:"trustLevel,omitempty" json:"trustLevel,omitempty"`
+	EnvError   string        `yaml:"-" json:"-"`
+	Type       string        `yaml:"type" json:"type"` // stdio | sse | websocket | streamable
+	TrustLevel MCPTrustLevel `yaml:"trustLevel,omitempty" json:"trustLevel,omitempty"`
 	// ExecutionScope records whether this server runs on this host ("local") or
 	// on another machine ("remote"). Empty keeps the historical behavior
 	// (derived from type); remote targets must set it explicitly.
-	ExecutionScope ExecutionScope `yaml:"executionScope,omitempty" json:"executionScope,omitempty"`
+	ExecutionScope   ExecutionScope    `yaml:"executionScope,omitempty" json:"executionScope,omitempty"`
 	MaxParallelCalls int               `yaml:"maxParallelCalls,omitempty" json:"maxParallelCalls,omitempty"`
 	Command          string            `yaml:"command" json:"command"` // 启动命令（stdio）
 	Args             []string          `yaml:"args" json:"args"`       // 命令参数
@@ -133,6 +133,9 @@ type MCPConfig struct {
 	// TLS configures client-certificate authentication (mTLS) and a custom CA
 	// bundle for streamable/sse transports. nil keeps the default TLS setup.
 	TLS *MCPTLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+	// MaxResponseBytes bounds one HTTP response before JSON decoding. Zero uses
+	// the local default for remote servers (8 MiB).
+	MaxResponseBytes int64 `yaml:"maxResponseBytes,omitempty" json:"maxResponseBytes,omitempty"`
 	// WorkingDir stdio 子进程工作目录；为空时由传输层回退到进程当前目录。
 	WorkingDir  string                `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 	Enabled     bool                  `yaml:"enabled" json:"enabled"`   // 是否启用
@@ -365,18 +368,18 @@ func (m *MCPConfig) ExecutionMode() string {
 
 // MCPStatus MCP 状态
 type MCPStatus struct {
-	Name             string        `json:"name"`
-	Type             string        `json:"type"`
-	TrustLevel       MCPTrustLevel `json:"trustLevel,omitempty"`
-	ExecutionMode    string        `json:"executionMode,omitempty"`
+	Name          string        `json:"name"`
+	Type          string        `json:"type"`
+	TrustLevel    MCPTrustLevel `json:"trustLevel,omitempty"`
+	ExecutionMode string        `json:"executionMode,omitempty"`
 	// ExecutionScope mirrors MCPConfig.ExecutionScope so hosts can gate remote
 	// writes/shell without re-reading the config file.
-	ExecutionScope ExecutionScope `json:"executionScope,omitempty"`
-	MaxParallelCalls int           `json:"maxParallelCalls,omitempty"`
-	Enabled          bool          `json:"enabled"`
-	Connected        bool          `json:"connected"`
-	ToolCount        int           `json:"toolCount"`
-	LastError        string        `json:"lastError,omitempty"`
+	ExecutionScope   ExecutionScope `json:"executionScope,omitempty"`
+	MaxParallelCalls int            `json:"maxParallelCalls,omitempty"`
+	Enabled          bool           `json:"enabled"`
+	Connected        bool           `json:"connected"`
+	ToolCount        int            `json:"toolCount"`
+	LastError        string         `json:"lastError,omitempty"`
 	// RequiresAuth 表示该 server 配置了 OAuth 但缺少可用令牌（或令牌被拒绝），
 	// 需要用户执行 `aicli mcp auth <name>`（chat 内为 `/mcp auth <name>`）重新授权。
 	RequiresAuth bool      `json:"requiresAuth,omitempty"`

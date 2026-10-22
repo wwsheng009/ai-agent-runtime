@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -331,9 +332,13 @@ func newRemoteArtifactReadTool(cfg *Config, workspace *Workspace, artifacts *Art
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
+			"artifact_ref": map[string]interface{}{
+				"type":        "string",
+				"description": "Namespaced artifact ref (remote:<target>:art_…) or bare art_… id.",
+			},
 			"artifact_id": map[string]interface{}{
 				"type":        "string",
-				"description": "Artifact id (art_…) from a truncated tool result.",
+				"description": "Bare artifact id (art_…) from a truncated tool result.",
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
@@ -346,7 +351,6 @@ func newRemoteArtifactReadTool(cfg *Config, workspace *Workspace, artifacts *Art
 				"description": "Maximum bytes to return. Default 65536.",
 			},
 		},
-		"required":             []string{"artifact_id"},
 		"additionalProperties": false,
 	}
 	tool := &remoteArtifactReadTool{
@@ -367,9 +371,22 @@ func (t *remoteArtifactReadTool) Execute(ctx context.Context, params map[string]
 	if err := contextErr(ctx); err != nil {
 		return remoteErrorResult(err), nil
 	}
+	artifactRef, _ := params["artifact_ref"].(string)
 	artifactID, _ := params["artifact_id"].(string)
+	if strings.TrimSpace(artifactRef) != "" {
+		artifactID = strings.TrimSpace(artifactRef)
+	}
 	if strings.TrimSpace(artifactID) == "" {
-		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass artifact_id", "artifact_id is required")), nil
+		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass artifact_ref or artifact_id", "artifact_ref/artifact_id is required")), nil
+	}
+	// A target-internal read never accepts a namespace: the caller already
+	// selected this target, and accepting remote:<other>: here would turn the
+	// tool into a cross-scope router.
+	if strings.HasPrefix(strings.TrimSpace(artifactID), "remote:") {
+		return remoteErrorResult(newToolError(toolcore.ErrArtifactScopeDenied, "pass the bare art_… id", "remote namespace is not accepted by a target-internal artifact_read")), nil
+	}
+	if !toolcore.ValidArtifactID(artifactID) {
+		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass the art_… id from the tool output", "invalid artifact id: %q", artifactID)), nil
 	}
 	offset := intParam(params, "offset", 0)
 	limit := intParam(params, "limit", artifactReadMaxBytes)
@@ -389,7 +406,8 @@ func (t *remoteArtifactReadTool) Execute(ctx context.Context, params map[string]
 	if !eof {
 		metadata["suggested_next_offset"] = offset + len(content)
 	}
-	return remoteTextResult(content, metadata), nil
+	body, metadata := t.shapeModelOutput(ToolArtifactRead, content, metadata)
+	return remoteTextResult(body, metadata), nil
 }
 
 // truncateForDisplay shortens one line for a table.

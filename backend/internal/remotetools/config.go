@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // Profile selects the allowed tool family for a remote target.
@@ -40,10 +42,17 @@ const (
 // Limits bounds one remote invocation so a single call cannot exhaust the
 // target machine or the model context.
 type Limits struct {
-	// MaxOutputBytes caps the model-visible tool text per call.
+	// MaxOutputBytes is the legacy capture limit for shell output. It no longer
+	// controls the model-visible window; ModelVisibleCap does.
 	MaxOutputBytes int `yaml:"maxOutputBytes" json:"maxOutputBytes"`
 	// MaxBytesPerCall caps one view/grep payload before folding.
 	MaxBytesPerCall int `yaml:"maxBytesPerCall" json:"maxBytesPerCall"`
+	// CaptureLimit is the v1 name for the pre-fold capture ceiling. When set it
+	// supersedes MaxBytesPerCall for read tools.
+	CaptureLimit int `yaml:"captureLimit" json:"captureLimit"`
+	// ModelVisibleCap bounds the model-visible body after folding. It can only
+	// narrow the local tool budget and never exceeds 64 KiB.
+	ModelVisibleCap int `yaml:"modelVisibleCap" json:"modelVisibleCap"`
 	// CommandTimeout bounds one shell command (shell tool only).
 	CommandTimeout Duration `yaml:"commandTimeout" json:"commandTimeout"`
 	// MaxConcurrentCalls bounds in-flight requests in HTTP mode.
@@ -212,6 +221,8 @@ func DefaultConfig() *Config {
 		Limits: Limits{
 			MaxOutputBytes:     DefaultMaxOutputBytes,
 			MaxBytesPerCall:    DefaultMaxBytesPerCall,
+			CaptureLimit:       DefaultMaxBytesPerCall,
+			ModelVisibleCap:    DefaultModelVisibleCap,
 			CommandTimeout:     Duration{120 * time.Second},
 			MaxConcurrentCalls: 8,
 		},
@@ -334,12 +345,25 @@ func (c *Config) Normalize() error {
 	if c.TargetName == "" {
 		c.TargetName = filepath.Base(c.Workspace)
 	}
+	c.TargetName = strings.ToLower(strings.TrimSpace(c.TargetName))
+	if !toolcore.ValidArtifactTarget(c.TargetName) {
+		return fmt.Errorf("targetName %q must match [a-z0-9][a-z0-9_.-]{0,63}", c.TargetName)
+	}
 
 	if c.Limits.MaxOutputBytes <= 0 {
 		c.Limits.MaxOutputBytes = DefaultMaxOutputBytes
 	}
 	if c.Limits.MaxBytesPerCall <= 0 {
 		c.Limits.MaxBytesPerCall = DefaultMaxBytesPerCall
+	}
+	if c.Limits.CaptureLimit <= 0 {
+		c.Limits.CaptureLimit = c.Limits.MaxBytesPerCall
+	}
+	if c.Limits.ModelVisibleCap <= 0 {
+		c.Limits.ModelVisibleCap = DefaultModelVisibleCap
+	}
+	if c.Limits.ModelVisibleCap > DefaultRemoteOutputHardCap {
+		c.Limits.ModelVisibleCap = DefaultRemoteOutputHardCap
 	}
 	if c.Limits.CommandTimeout.Duration <= 0 {
 		c.Limits.CommandTimeout = Duration{120 * time.Second}

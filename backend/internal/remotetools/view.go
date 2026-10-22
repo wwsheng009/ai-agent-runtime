@@ -123,15 +123,15 @@ func (t *remoteViewTool) Execute(ctx context.Context, params map[string]interfac
 	}
 
 	metadata := map[string]interface{}{
-		"file_path":  display,
-		"offset":     offset,
-		"limit":      limit,
-		"lines_read": linesRead,
-		"total_lines": totalLines,
-		"eof":        eof,
+		"file_path":    display,
+		"offset":       offset,
+		"limit":        limit,
+		"lines_read":   linesRead,
+		"total_lines":  totalLines,
+		"eof":          eof,
 		"is_truncated": !eof,
-		"remote":     true,
-		"workspace":  t.workspace.Root(),
+		"remote":       true,
+		"workspace":    t.workspace.Root(),
 	}
 	if !eof && linesRead > 0 {
 		next := offset + linesRead
@@ -145,7 +145,8 @@ func (t *remoteViewTool) Execute(ctx context.Context, params map[string]interfac
 	if !utf8.ValidString(builder.String()) {
 		metadata["binary"] = true
 	}
-	return remoteTextResult(builder.String(), metadata), nil
+	body, metadata := t.shapeModelOutput(ToolView, builder.String(), metadata)
+	return remoteTextResult(body, metadata), nil
 }
 
 // readLineWindow streams the requested line window.

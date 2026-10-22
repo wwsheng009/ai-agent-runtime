@@ -76,6 +76,11 @@ backend/internal/output/*
 !backend/internal/output/
 !backend/internal/output/**
 
+# toolcore/output is the shared tool output contract, not a build directory.
+backend/internal/toolcore/output/*
+!backend/internal/toolcore/output/
+!backend/internal/toolcore/output/**
+
 # runtime-server embeds generated frontend files; only keep the build placeholder.
 !backend/internal/webui/dist/
 backend/internal/webui/dist/*

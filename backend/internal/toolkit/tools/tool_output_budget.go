@@ -9,6 +9,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -30,7 +31,7 @@ import (
 const (
 	// viewOutputBudgetBytes: one code window, large enough for a whole function
 	// or file section without a second round trip.
-	viewOutputBudgetBytes = 32 * 1024
+	viewOutputBudgetBytes = toolcoreoutput.ViewOutputBudgetBytes
 	// viewBatchAggregateBudgetBytes bounds the combined model-visible payload of
 	// one files[] batch. Per-item windows are viewOutputBudgetBytes each, and
 	// view stamps skip_render_truncation, so without an in-tool aggregate cap a
@@ -44,7 +45,7 @@ const (
 	// while really delivering up to 96 KiB archived bodies the model could read
 	// end to end (review m6). Batch results declare this constant as their
 	// model-visible window.
-	viewBatchAggregateBudgetBytes = 64 * 1024
+	viewBatchAggregateBudgetBytes = toolcoreoutput.ViewBatchAggregateBudgetBytes
 	// viewBatchTailReserveBytes is held back from the aggregate budget for the
 	// batch's trailing blocks (skipped-file summary, bounded errors) and for
 	// the render-layer contract header. Appending those after the per-section
@@ -54,15 +55,15 @@ const (
 	viewBatchTailReserveBytes = 4 * 1024
 	// grepOutputBudgetBytes: one match list; wide enough for a useful first
 	// pass before the model narrows the pattern.
-	grepOutputBudgetBytes = 32 * 1024
+	grepOutputBudgetBytes = toolcoreoutput.GrepOutputBudgetBytes
 	// globOutputBudgetBytes: one path result set.
-	globOutputBudgetBytes = 16 * 1024
+	globOutputBudgetBytes = toolcoreoutput.GlobOutputBudgetBytes
 	// lsOutputBudgetBytes: one directory tree listing.
-	lsOutputBudgetBytes = 16 * 1024
+	lsOutputBudgetBytes = toolcoreoutput.LsOutputBudgetBytes
 	// fetchOutputBudgetBytes: one fetched document body.
 	fetchOutputBudgetBytes = 32 * 1024
 	// artifactOutputBudgetBytes: raw archived bytes served per artifact_read page.
-	artifactOutputBudgetBytes = 32 * 1024
+	artifactOutputBudgetBytes = toolcoreoutput.ArtifactOutputBudgetBytes
 	// shellOutputBudgetBytes: one shell command's model-visible window.
 	//
 	// Shell output is produced by a process rather than by a paged data source,
@@ -73,7 +74,7 @@ const (
 	// still page the omitted middle by byte offset. The tool - not the render
 	// layer - owns that window, which is why ownShellOutputWindow stamps
 	// skip_render_truncation on every return path.
-	shellOutputBudgetBytes = 32 * 1024
+	shellOutputBudgetBytes = toolcoreoutput.ShellOutputBudgetBytes
 )
 
 // stampToolOwnsOutput declares that a tool already shaped its own payload and

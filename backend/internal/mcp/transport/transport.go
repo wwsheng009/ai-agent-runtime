@@ -17,6 +17,11 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
+// DefaultMaxResponseBytes is the wire-level response ceiling for remote MCP
+// servers. It is enforced before JSON decoding and cannot be widened by the
+// server.
+const DefaultMaxResponseBytes int64 = 8 * 1024 * 1024
+
 // Transport 传输接口 - 封装官方 SDK 的 Transport
 type Transport interface {
 	// Type 返回传输类型
@@ -58,6 +63,11 @@ type Config struct {
 
 	// WorkingDir 工作目录（stdio）
 	WorkingDir string
+
+	// MaxResponseBytes bounds one HTTP response before JSON decoding. Zero
+	// leaves the transport default untouched. It is enforced by the local
+	// client and cannot be widened by a remote server.
+	MaxResponseBytes int64
 
 	// WebSocket 专用配置
 	WSHeaders http.Header `json:"wsHeaders,omitempty"`
@@ -238,21 +248,8 @@ func (t *SSETransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
 		Endpoint: t.cfg.URL,
 	}
 	headers := buildHeaders(t.cfg.Headers, t.cfg.Env)
-	if len(headers) > 0 || t.cfg.AccessToken != nil || t.cfg.TLS != nil {
-		base, err := newBaseTransport(t.cfg.TLS)
-		if err != nil {
-			// Fall back to the header-only client so the TLS error surfaces from
-			// the actual request rather than as a nil transport.
-			inner.HTTPClient = &http.Client{
-				Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers, provider: t.cfg.AccessToken},
-			}
-		} else if len(headers) > 0 || t.cfg.AccessToken != nil {
-			inner.HTTPClient = &http.Client{
-				Transport: headerRoundTripper{base: base, headers: headers, provider: t.cfg.AccessToken},
-			}
-		} else {
-			inner.HTTPClient = &http.Client{Transport: base}
-		}
+	if client := httpClientWithLimits(t.cfg, headers); client != nil {
+		inner.HTTPClient = client
 	}
 	return newObservedMCPTransport("sse", strings.TrimSpace(t.cfg.URL), inner, &t.emitter)
 }

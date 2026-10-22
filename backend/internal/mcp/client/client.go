@@ -197,6 +197,10 @@ func (c *mcpClient) Connect(ctx context.Context) error {
 		AccessToken: c.cfg.TokenSource,
 		WorkingDir:  strings.TrimSpace(c.cfg.WorkingDir),
 	}
+	transportCfg.MaxResponseBytes = c.cfg.MaxResponseBytes
+	if transportCfg.MaxResponseBytes <= 0 && c.cfg.ResolvedExecutionScope() == config.ExecutionScopeRemote {
+		transportCfg.MaxResponseBytes = transport.DefaultMaxResponseBytes
+	}
 	// mTLS material travels with the server entry so a target that cannot use a
 	// bearer token (proxy strips headers) authenticates by certificate instead.
 	if c.cfg.TLS != nil {

@@ -116,16 +116,17 @@ func (t *remoteLsTool) Execute(ctx context.Context, params map[string]interface{
 	}
 
 	metadata := map[string]interface{}{
-		"path":     display,
-		"entries":  len(entries),
-		"dirs":     dirs,
-		"files":    files,
-		"returned": printed,
+		"path":         display,
+		"entries":      len(entries),
+		"dirs":         dirs,
+		"files":        files,
+		"returned":     printed,
 		"is_truncated": len(entries) > printed,
-		"remote":   true,
-		"workspace": t.workspace.Root(),
+		"remote":       true,
+		"workspace":    t.workspace.Root(),
 	}
-	return remoteTextResult(builder.String(), metadata), nil
+	body, metadata := t.shapeModelOutput(ToolLs, builder.String(), metadata)
+	return remoteTextResult(body, metadata), nil
 }
 
 const remoteGlobDefaultLimit = 500
@@ -253,7 +254,8 @@ func (t *remoteGlobTool) Execute(ctx context.Context, params map[string]interfac
 		"remote":       true,
 		"workspace":    t.workspace.Root(),
 	}
-	return remoteTextResult(builder.String(), metadata), nil
+	body, metadata := t.shapeModelOutput(ToolGlob, builder.String(), metadata)
+	return remoteTextResult(body, metadata), nil
 }
 
 // errStopWalk is an internal sentinel used to stop WalkDir early.
@@ -443,7 +445,8 @@ func (t *remoteGrepTool) Execute(ctx context.Context, params map[string]interfac
 		"remote":        true,
 		"workspace":     t.workspace.Root(),
 	}
-	return remoteTextResult(builder.String(), metadata), nil
+	body, metadata := t.shapeModelOutput(ToolGrep, builder.String(), metadata)
+	return remoteTextResult(body, metadata), nil
 }
 
 // shouldSkipRemoteDir skips VCS and dependency trees that would dominate a walk.

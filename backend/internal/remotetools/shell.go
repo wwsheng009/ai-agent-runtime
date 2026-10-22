@@ -12,6 +12,8 @@ import (
 	"time"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -121,16 +123,22 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		timeout = time.Duration(requested) * time.Millisecond
 	}
 
-	limit := t.cfg.Limits.MaxOutputBytes
-	if limit <= 0 {
-		limit = DefaultMaxOutputBytes
+	captureLimit := DefaultMaxOutputBytes
+	if t.cfg != nil && t.cfg.Limits.MaxOutputBytes > 0 {
+		captureLimit = t.cfg.Limits.MaxOutputBytes
 	}
 
 	started := time.Now()
-	capture, exitCode, runErr, timedOut := runRemoteCommand(ctx, command, workdir, timeout, t.sandbox, limit)
+	capture, exitCode, runErr, timedOut := runRemoteCommand(ctx, command, workdir, timeout, t.sandbox, captureLimit)
 	duration := time.Since(started)
 
-	body, truncated := foldRemoteOutput(capture, limit)
+	display := capture
+	switch {
+	case timedOut:
+		display = fmt.Sprintf("Command timed out after %s.\n\n%s", timeout, capture)
+	case runErr != nil:
+		display = fmt.Sprintf("Command failed: %v\n\n%s", runErr, capture)
+	}
 	metadata := map[string]interface{}{
 		"command":      command,
 		"workdir":      t.cleanDisplayPath(workdir),
@@ -139,21 +147,36 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		"timed_out":    timedOut,
 		"exit_code":    exitCode,
 		"output_bytes": len(capture),
-		"is_truncated": truncated,
 		"remote":       true,
 		"workspace":    effective.Root(),
 		"policy_rule":  rule,
 	}
-	if truncated && t.artifacts != nil {
+	body, metadata := t.shapeModelOutput(ToolShell, display, metadata)
+	if len(capture) > t.modelVisibleCap() && t.artifacts != nil {
 		// Archive the complete capture before the model sees only the window, so
-		// artifact_read can page the omitted middle. A failure here must not fail
-		// the command: the folded body is still accurate about what was dropped.
-		if artifactID, archiveErr := t.artifacts.Put([]byte(capture)); archiveErr == nil && artifactID != "" {
-			metadata["artifact_id"] = artifactID
+		// artifact_read can page the omitted middle. If that archive fails the
+		// folded body is not recoverable, so the call returns a classified error
+		// instead of pretending the omitted middle still exists.
+		if ref, archiveErr := t.artifacts.PutRef(t.cfg.TargetName, []byte(capture)); archiveErr == nil && !ref.IsZero() {
+			metadata[toolcoreoutput.KeyArtifactRef] = ref.String()
+			metadata[toolcoreoutput.KeyArtifactID] = ref.ID
 			metadata["artifact_total_bytes"] = len(capture)
-			body += fmt.Sprintf("\n[full capture archived as %s; page it with artifact_read artifact_id=%s]\n", artifactID, artifactID)
+			notice := fmt.Sprintf("\n[full capture archived as %s; page it with artifact_read artifact_id=%s]\n", ref.String(), ref.ID)
+			budget := toolcoreoutput.ResolveCap(ToolShell, 0, 0, t.modelVisibleCap())
+			body = toolcoreoutput.JoinNotice(body, notice, budget)
 		} else if archiveErr != nil {
-			fmt.Fprintf(os.Stderr, "aicli-remote-tools: artifact archive failed: %v\n", archiveErr)
+			// The folded body is not recoverable without the archived capture.
+			// Returning success here would silently lose the omitted middle, so
+			// the call fails with the documented recovery code instead.
+			metadata[toolcoreoutput.KeyErrorCode] = toolcore.ErrArtifactWriteFailed
+			metadata[toolcoreoutput.KeyNextAction] = "reduce the command output or fix the target artifact store"
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: "text",
+				Content:    body,
+				Error:      fmt.Errorf("artifact archive failed: %w", archiveErr),
+				Metadata:   metadata,
+			}, nil
 		}
 	}
 
@@ -164,7 +187,7 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: "text",
-			Content:    fmt.Sprintf("Command timed out after %s.\n\n%s", timeout, body),
+			Content:    body,
 			Error:      fmt.Errorf("command timed out after %s", timeout),
 			Metadata:   metadata,
 		}, nil
@@ -174,12 +197,12 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: "text",
-			Content:    fmt.Sprintf("Command failed: %v\n\n%s", runErr, body),
+			Content:    body,
 			Error:      fmt.Errorf("command failed: %w", runErr),
 			Metadata:   metadata,
 		}, nil
 	}
-	if truncated {
+	if boolMetadata(metadata, toolcoreoutput.KeyIsTruncated) {
 		metadata["next_action"] = "narrow the command output (grep/tail) or raise max-output-bytes"
 	}
 	return remoteTextResult(body, metadata), nil
@@ -254,37 +277,6 @@ func remoteShellInvocation(command string) (string, []string) {
 		return windowsShellInvocation(command)
 	}
 	return "/bin/sh", []string{"-c", command}
-}
-
-// foldRemoteOutput folds a capture to the model-visible window.
-//
-// Unlike the local shell tool there is no artifact store to page the omitted
-// middle from, so the fold reports exactly what was dropped and tells the model
-// how to narrow the command instead of implying the text is recoverable.
-func foldRemoteOutput(capture string, limit int) (string, bool) {
-	if limit <= 0 {
-		limit = DefaultMaxOutputBytes
-	}
-	if len(capture) <= limit {
-		return capture, false
-	}
-	headBudget := limit / 2
-	tailBudget := limit - headBudget
-
-	head, _ := truncateUTF8Safe(capture, headBudget)
-	tailStart := len(capture) - tailBudget
-	if tailStart < 0 {
-		tailStart = 0
-	}
-	tail := capture[tailStart:]
-
-	var builder strings.Builder
-	builder.WriteString(head)
-	fmt.Fprintf(&builder,
-		"\n\n…[%d bytes omitted: output truncated at the %d-byte limit; re-run with a narrower command (grep/tail/head) or raise max-output-bytes]…\n\n",
-		len(capture)-len(head)-len(tail), limit)
-	builder.WriteString(tail)
-	return builder.String(), true
 }
 
 // boundedWriter keeps at most max bytes, then counts the remainder.

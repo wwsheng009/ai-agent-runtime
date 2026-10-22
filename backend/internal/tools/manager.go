@@ -574,7 +574,7 @@ func (m *Manager) executeWithMeta(ctx context.Context, name string, args map[str
 				}
 				return "", withMCPIdentity(nil, info, name), callErr
 			}
-			output, metadata, formatErr := formatMCPResultWithSource(result, toolresult.SourceMCP)
+			output, metadata, formatErr := formatMCPResultWithContext(result, toolresult.SourceMCP, m.mcpResultContext(info))
 			metadata = withMCPIdentity(metadata, info, name)
 			if strings.TrimSpace(output) != "" {
 				toolprotocol.ReportTextStream(ctx, output, toolprotocol.StreamChannelCombined)
@@ -1012,6 +1012,15 @@ func formatMCPResult(result *protocol.CallToolResult) (string, map[string]interf
 
 func formatMCPResultWithSource(result *protocol.CallToolResult, source string) (string, map[string]interface{}, error) {
 	output, metadata, err := formatMCPResult(result)
+	return output, toolresult.WithSource(metadata, source), err
+}
+
+// formatMCPResultWithContext is the trust-aware MCP entry point. The context is
+// resolved from local server configuration before the remote body is allowed
+// to influence the render-layer budget.
+func formatMCPResultWithContext(result *protocol.CallToolResult, source string, context *MCPResultContext) (string, map[string]interface{}, error) {
+	output, metadata, err := formatMCPResult(result)
+	output, metadata = sanitizeMCPResult(output, metadata, context)
 	return output, toolresult.WithSource(metadata, source), err
 }
 

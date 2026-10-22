@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // Artifact retention bounds disk growth on the target. A remote artifact is a
@@ -28,8 +30,8 @@ const (
 // server archives the full capture under a content-addressed id and exposes
 // remote_artifact_read to page it.
 type ArtifactStore struct {
-	root    string
-	maxBytes int64
+	root      string
+	maxBytes  int64
 	lastPrune time.Time
 }
 
@@ -80,6 +82,21 @@ func (s *ArtifactStore) Put(payload []byte) (string, error) {
 		return "", fmt.Errorf("write artifact: %w", err)
 	}
 	return id, nil
+}
+
+// PutRef archives a payload and returns its target-scoped reference. The store
+// remains target-agnostic; the target namespace is applied at the tool
+// boundary, where the configured target name is authoritative.
+func (s *ArtifactStore) PutRef(target string, payload []byte) (toolcore.ArtifactRef, error) {
+	id, err := s.Put(payload)
+	if err != nil {
+		return toolcore.ArtifactRef{}, err
+	}
+	ref := toolcore.ArtifactRef{Scope: toolcore.ArtifactScopeRemote, Target: strings.TrimSpace(target), ID: id}
+	if err := ref.Validate(); err != nil {
+		return toolcore.ArtifactRef{}, err
+	}
+	return ref, nil
 }
 
 // Read returns a byte window of one artifact.

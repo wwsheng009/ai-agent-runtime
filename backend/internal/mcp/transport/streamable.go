@@ -45,22 +45,8 @@ func (t *StreamableTransport) ToMCPSdkTransport(_ context.Context) mcp.Transport
 		Endpoint: strings.TrimSpace(t.cfg.URL),
 	}
 	headers := buildHeaders(t.cfg.Headers, t.cfg.Env)
-	if len(headers) > 0 || t.cfg.AccessToken != nil || t.cfg.TLS != nil {
-		base, err := newBaseTransport(t.cfg.TLS)
-		if err != nil {
-			// Fall back to the header-only client so a TLS misconfiguration
-			// surfaces as a connection error with the original cause rather than
-			// a nil transport panic.
-			inner.HTTPClient = &http.Client{
-				Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers, provider: t.cfg.AccessToken},
-			}
-		} else if len(headers) > 0 || t.cfg.AccessToken != nil {
-			inner.HTTPClient = &http.Client{
-				Transport: headerRoundTripper{base: base, headers: headers, provider: t.cfg.AccessToken},
-			}
-		} else {
-			inner.HTTPClient = &http.Client{Transport: base}
-		}
+	if client := httpClientWithLimits(t.cfg, headers); client != nil {
+		inner.HTTPClient = client
 	}
 	return newObservedMCPTransport("streamable", t.cfg.URL, inner, &t.emitter)
 }

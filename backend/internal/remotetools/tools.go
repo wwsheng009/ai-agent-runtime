@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -146,10 +147,57 @@ func (b remoteToolBase) resolve(ctx context.Context, raw string) (string, error)
 
 // maxViewBytes resolves the payload ceiling for this call.
 func (b remoteToolBase) maxViewBytes() int {
-	if b.cfg == nil || b.cfg.Limits.MaxBytesPerCall <= 0 {
+	if b.cfg == nil {
 		return DefaultMaxBytesPerCall
 	}
-	return b.cfg.Limits.MaxBytesPerCall
+	if b.cfg.Limits.CaptureLimit > 0 {
+		return b.cfg.Limits.CaptureLimit
+	}
+	if b.cfg.Limits.MaxBytesPerCall > 0 {
+		return b.cfg.Limits.MaxBytesPerCall
+	}
+	return DefaultMaxBytesPerCall
+}
+
+// modelVisibleCap resolves the remote trust ceiling for this target.
+func (b remoteToolBase) modelVisibleCap() int {
+	if b.cfg == nil || b.cfg.Limits.ModelVisibleCap <= 0 {
+		return DefaultModelVisibleCap
+	}
+	cap := b.cfg.Limits.ModelVisibleCap
+	// Legacy configs used maxOutputBytes as the model window. Keep a smaller
+	// explicitly configured value as a narrowing override while the new v1
+	// capture/model split uses modelVisibleCap for the default.
+	if legacy := b.cfg.Limits.MaxOutputBytes; legacy > 0 && legacy < cap {
+		cap = legacy
+	}
+	return cap
+}
+
+// shapeModelOutput applies the shared output contract before a remote result
+// crosses the wire. The local client revalidates this window; shaping here only
+// reduces bytes and preserves the capture, it is never an authorization.
+func (b remoteToolBase) shapeModelOutput(tool, content string, metadata map[string]interface{}) (string, map[string]interface{}) {
+	shaped, shapedMetadata, _, _ := toolcoreoutput.ShapeText(tool, content, metadata, 0, b.modelVisibleCap())
+	return shaped, shapedMetadata
+}
+
+func boolMetadata(metadata map[string]interface{}, key string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	switch value := metadata[key].(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	case int:
+		return value != 0
+	case float64:
+		return value != 0
+	default:
+		return false
+	}
 }
 
 // result builds a successful text result with structured metadata.
