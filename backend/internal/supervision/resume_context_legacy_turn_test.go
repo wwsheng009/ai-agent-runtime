@@ -51,10 +51,12 @@ func TestBatchObligationSource_LegacyRowsWithoutTurnIDDoNotGateFinalize(t *testi
 
 	// ③ 可见性：rollup 里仍有这一行，且被显式标记为 standalone。
 	require.Len(t, rc.Obligations, 2)
-	require.Contains(t, rc.Text, "obligations: total=2 pending=0 can_finalize=true")
-	require.Contains(t, rc.Text, "standalone_obligations: 1 (no turn_id; legacy standalone runs, not gating can_finalize)")
-	require.Contains(t, rc.Text, "batch batch-legacy: status=running total=3 completed=1 failed=0 (not terminal) standalone=true")
-	require.Contains(t, AutoWakePromptFor(rc), "所有 obligation 均已终态：请直接产出终局报告")
+	require.Contains(t, rc.Text, "你派发的 2 项子任务/作业已全部结束，可以直接收尾")
+	require.Contains(t, rc.Text, "batch-legacy：运行中（共 3 项，完成 1，失败 0），尚未结束")
+	// EC-G4 exempts unattributed rows from the join: the row stays visible but
+	// the verdict is finalizable.
+	require.Equal(t, 1, rc.StandaloneCount)
+	require.Contains(t, AutoWakePromptFor(rc), "请直接产出终局报告")
 }
 
 // TestBatchObligationSource_LegacyRowsAloneKeepLegacyNewTurnFallback 覆盖"账本里
@@ -81,9 +83,9 @@ func TestBatchObligationSource_LegacyRowsAloneKeepLegacyNewTurnFallback(t *testi
 	require.Equal(t, 1, rc.StandaloneCount)
 	require.True(t, rc.Terminal)
 
-	require.NotContains(t, rc.Text, "turn_id:", "无 turn 身份时文本不得写出空 turn_id 行")
-	require.Contains(t, rc.Text, "standalone_obligations: 1")
-	require.NotContains(t, AutoWakePromptFor(rc), "turn_id=", "宿主退回原有『新开 turn』路径")
+	require.NotContains(t, rc.Text, "turn_id", "控制面字段不进入注入文本")
+	require.Equal(t, 1, rc.StandaloneCount)
+	require.NotContains(t, AutoWakePromptFor(rc), "turn_id", "宿主退回原有『新开 turn』路径")
 }
 
 // TestResumeContext_AttributedLiveRowsStillGateFinalize 是反证：EC-G4 只豁免无归因
@@ -105,6 +107,6 @@ func TestResumeContext_AttributedLiveRowsStillGateFinalize(t *testing.T) {
 	require.False(t, rc.Terminal)
 
 	prompt := AutoWakePromptFor(rc)
-	require.Contains(t, prompt, "仍有未终态 obligation：不得收尾（I1）")
+	require.Contains(t, prompt, "暂时不能收尾")
 	require.NotContains(t, prompt, "请直接产出终局报告")
 }

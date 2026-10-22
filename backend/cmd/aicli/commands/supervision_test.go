@@ -205,7 +205,7 @@ func TestInjectLocalSupervisionPreflight(t *testing.T) {
 
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "[Child lifecycle preflight]")
+	require.Contains(t, prompt, "[子任务与后台作业进展]")
 	require.Contains(t, prompt, "child-agent")
 	require.Contains(t, prompt, "continue work")
 
@@ -242,16 +242,16 @@ func TestInjectLocalSupervisionPreflight_IncludesWakeBudgetLine(t *testing.T) {
 
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "wake_budget:")
-	require.Contains(t, prompt, "failure=1/5")
-	require.Contains(t, prompt, "approval=0/unlimited")
+	require.NotContains(t, prompt, "wake_budget:", "a partially used budget is telemetry, not prompt content")
+	require.NotContains(t, prompt, "failure=1/5")
+	require.NotContains(t, prompt, "approval=0/unlimited")
 	require.Contains(t, prompt, "continue work")
 
 	noLedger := &localChatRuntimeHost{Supervision: &runtimeserver.SupervisionControlPlane{Store: host.Supervision.Store}}
 	noLedgerPrompt, err := injectLocalSupervisionPreflight(ctx, noLedger, "parent-session", "continue work", nil)
 	require.NoError(t, err)
 	require.NotContains(t, noLedgerPrompt, "wake_budget:")
-	require.Contains(t, noLedgerPrompt, "[Child lifecycle preflight]")
+	require.Contains(t, noLedgerPrompt, "[子任务与后台作业进展]")
 }
 
 // TestInjectLocalSupervisionPreflight_IncludesBatchProgress covers the P0-B
@@ -287,10 +287,10 @@ func TestInjectLocalSupervisionPreflight_IncludesBatchProgress(t *testing.T) {
 
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "[Child lifecycle preflight]")
-	require.Contains(t, prompt, "progress:")
-	require.Contains(t, prompt, "batch-progress-1: 2/3 completed, 1 running")
-	require.Contains(t, prompt, "worker-2: running; session=session-2")
+	require.Contains(t, prompt, "[子任务与后台作业进展]")
+	require.Contains(t, prompt, "批次进度：")
+	require.Contains(t, prompt, "batch-progress-1：共 3 项，完成 2，进行中 1")
+	require.Contains(t, prompt, "worker-2（session session-2）")
 	require.NotContains(t, prompt, "worker-1", "terminal children stay out of the rollup")
 	require.Contains(t, prompt, "continue work")
 

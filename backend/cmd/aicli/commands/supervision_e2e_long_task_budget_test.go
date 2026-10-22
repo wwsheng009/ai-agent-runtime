@@ -219,7 +219,11 @@ func TestSupervisionE2E_LongTaskDeclaredBudgetWithOneExtension(t *testing.T) {
 		IncludeResolvedSince:  true,
 	})
 	require.NoError(t, err)
-	require.Contains(t, digest.Text, "已延长 ×1, +30m0s")
+	// The extension is business state the parent must see; it stays in the
+	// injected text (the reason field), while the control-plane rendering keeps
+	// the machine spelling.
+	require.Contains(t, digest.Text, "已延长 ×1")
+	require.Contains(t, digest.DiagnosticsTextOf(), "已延长 ×1, +30m0s")
 
 	// --- 阶段 3：终局（完成，而不是被取消）-------------------------------------
 	// 墙钟推进被替换成 durable 状态推进：两个 task 成功 → batch 收敛为 completed。

@@ -408,6 +408,9 @@ func (h *Handler) injectSupervisionPreflight(ctx context.Context, sessionID, pro
 		// Progress 为 nil，判定退化成"只看 lifecycle 行"，与 CLI 宿主不对齐）。
 		// 无 batch 控制面的宿主仍是 nil ⇒ digest 与改动前逐字节一致。
 		Progress: h.supervisionProgressSource(),
+		// 业务详情：后台作业输出末尾 / 子会话产出摘要。注入文本只保留"发生了
+		// 什么 + 实际产出 +（需要决策时的）一个句柄"。
+		ItemDetail: h.supervisionItemDetail(sessionID, rootScopeID),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)

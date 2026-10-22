@@ -38,12 +38,26 @@ type DigestRequest struct {
 	// and never triggers a wake: progress is visible inside the parent turn
 	// only. nil keeps the digest byte-identical to the pre-P0-B output.
 	Progress ProgressSource
+	// ItemDetail optionally enriches one notification row with the business
+	// payload the parent actually needs to reason about the event: the child's
+	// result summary, or the tail of a background job's output. Hosts wire it
+	// from stores they already own. nil renders no detail lines.
+	ItemDetail ItemDetailFunc
 }
 
 // SubjectPresenceFunc reports whether the notification subject still exists in
 // the control-plane store that owns it. checked=false means existence could not
 // be verified and the notification must keep its severity.
 type SubjectPresenceFunc func(ctx context.Context, n Notification) (exists bool, checked bool)
+
+// ItemDetailFunc projects the bounded business detail of one notification
+// subject (child result summary / background job output tail). Implementations
+// must be read-only and must respect the caller's scope; "" renders nothing.
+type ItemDetailFunc func(ctx context.Context, n Notification) string
+
+// MaxDigestItemDetailRunes bounds one detail block so a chatty child cannot eat
+// the parent's context budget.
+const MaxDigestItemDetailRunes = 700
 
 // DigestItem is one row of the preflight lifecycle digest (doc 6.4).
 type DigestItem struct {
@@ -70,6 +84,10 @@ type DigestItem struct {
 	// NextAction explains which remediation path was filtered out because this
 	// host has no entry point for it (empty when nothing was filtered).
 	NextAction string
+	// Detail is the bounded business payload of this row (child result summary
+	// or background job output tail). Machine handles stay in the structured
+	// fields; only this text reaches the injected prompt.
+	Detail string
 }
 
 // Digest is the deterministic, budget-limited preflight payload (doc 6.4).
@@ -97,8 +115,16 @@ type Digest struct {
 	// (深度 / 可见性：本回合不得再派发). Nil for ordinary digests, which keeps
 	// unwired hosts byte-identical.
 	ResumeGate *ResumeGateNotice `json:"resume_gate,omitempty"`
-	// Full text block injected into the parent turn.
+	// Text is the block injected into the parent turn: it carries only what
+	// the parent must reason about (what happened, the business payload, and
+	// the single handle needed to act). Control-plane vocabulary deliberately
+	// stays out of it.
 	Text string `json:"text,omitempty"`
+	// DiagnosticsText is the control-plane rendering of the same digest
+	// (seq/counters/action vocabulary/notification ids). It is deliberately
+	// NOT injected into the model prompt: hosts expose it through /debug and
+	// the supervision tools, where machine handles are the point.
+	DiagnosticsText string `json:"diagnostics_text,omitempty"`
 }
 
 // BuildDigest assembles the preflight lifecycle digest for a root scope.
@@ -151,6 +177,11 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 			Resolved:          n.ResolutionState != "" && n.ResolutionState != ResolutionUnresolved,
 			ResolutionState:   n.ResolutionState,
 			DeliveryState:     n.DeliveryState,
+		}
+		// Business payload first: it is what the parent reasons about, and it
+		// must survive even when the row is stale or already resolved.
+		if req.ItemDetail != nil {
+			item.Detail = boundDigestDetail(req.ItemDetail(ctx, n))
 		}
 		// Stale subjects are resolved in the control plane but still carry an
 		// unresolved notification row. Downgrade them before counting so a dead
@@ -218,7 +249,12 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 	digest.Items = items
 	digest.Progress, digest.ProgressTruncated = buildDigestProgress(ctx, req, limit, now)
 	digest.ResumeQueue = buildResumeQueueSummary(ctx, store, req, now)
-	digest.Text = formatDigestText(digest)
+	// Two renderings of the same facts. Text is what the parent model reads;
+	// DiagnosticsText keeps the control-plane spelling (sequence cursors,
+	// counters, notification ids, allowed-action vocabularies) for /debug and
+	// the supervision tools, which is where machine handles belong.
+	digest.DiagnosticsText = formatDigestText(digest)
+	digest.Text = formatDigestBriefText(digest)
 	return digest, nil
 }
 
@@ -253,6 +289,197 @@ func itemPriority(item DigestItem) int {
 }
 
 const defaultDigestLimit = 50
+
+// formatDigestBriefText renders the parent-facing block: what happened, the
+// business payload, and (only on rows that need a decision) the one handle the
+// model must quote. Counters, cursors, recommended/allowed vocabularies and
+// wake budget ledgers stay out — they are control-plane telemetry, available
+// through DiagnosticsText, /debug and the supervision tools.
+func formatDigestBriefText(digest *Digest) string {
+	if digest == nil {
+		return ""
+	}
+	var b strings.Builder
+	// A progress-only digest (P2-D wake) has no event to report, so the header
+	// would introduce an empty section. Only print it when a row explains it.
+	if len(digest.Items) > 0 {
+		b.WriteString("[子任务与后台作业进展]\n")
+	}
+	// A single human sentence replaces four counter lines. Only state that
+	// changes what the parent should do is spelled out.
+	pending := 0
+	resolved := 0
+	for _, item := range digest.Items {
+		if item.Resolved {
+			resolved++
+			continue
+		}
+		if !item.Stale {
+			pending++
+		}
+	}
+	switch {
+	case pending > 0:
+		fmt.Fprintf(&b, "有 %d 项待处理", pending)
+		if resolved > 0 {
+			fmt.Fprintf(&b, "，另有 %d 项已结束", resolved)
+		}
+		b.WriteString("。\n")
+	case resolved > 0:
+		fmt.Fprintf(&b, "%d 项子任务/作业已结束。\n", resolved)
+	}
+	if q := digest.ResumeQueue; q != nil && q.Pending > 0 {
+		fmt.Fprintf(&b, "另有 %d 条唤醒在排队（位次 %d），无需操作。\n", q.Pending, q.HeadPosition)
+	}
+	if gate := digest.ResumeGate; gate != nil {
+		b.WriteString("本回合不得再派发子任务，请就地收尾或直接汇报。\n")
+	}
+	for _, item := range digest.Items {
+		b.WriteString("\n")
+		if item.Resolved {
+			fmt.Fprintf(&b, "- %s 已结束", digestSubjectLabel(item))
+			if reason := strings.TrimSpace(item.Reason); reason != "" {
+				fmt.Fprintf(&b, "：%s", reason)
+			}
+			b.WriteString("\n")
+			writeDigestDetail(&b, item)
+			continue
+		}
+		if item.Stale {
+			fmt.Fprintf(&b, "- %s 已不在控制面中，无需处理。\n", digestSubjectLabel(item))
+			continue
+		}
+		fmt.Fprintf(&b, "- %s：%s", digestSubjectLabel(item), digestStateLabel(item))
+		// The reason is the human explanation of the event (approval prompt,
+		// failure cause, job status). It is business content, not telemetry.
+		if reason := strings.TrimSpace(item.Reason); reason != "" {
+			fmt.Fprintf(&b, "。%s", reason)
+		}
+		b.WriteString("\n")
+		writeDigestDetail(&b, item)
+		// A row that needs a decision still needs its handle: without the
+		// notification id the model either invents one or has to spend a tool
+		// round trip looking it up.
+		if item.ActionRequired {
+			if id := strings.TrimSpace(item.NotificationID); id != "" {
+				fmt.Fprintf(&b, "  需要决定时引用 notification_id=%s（可选动作：%s）。\n",
+					id, strings.Join(item.AllowedActions, "/"))
+			}
+		}
+	}
+	if block := formatProgressBriefText(digest, time.Now()); block != "" {
+		b.WriteString(block)
+	}
+	if digest.Truncated {
+		b.WriteString("\n（还有更多条目未展开，需要时用 subagent_status 查看。）\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// digestSubjectLabel renders a row's subject as something a human (and a model
+// reasoning about business state) can recognize. Raw kind+id stays available in
+// DiagnosticsText.
+func digestSubjectLabel(item DigestItem) string {
+	id := strings.TrimSpace(item.SubjectID)
+	if id == "" {
+		id = "（未知对象）"
+	}
+	switch item.SubjectKind {
+	case SubjectJob:
+		return "后台作业 " + id
+	case SubjectAgentSession:
+		return "子任务会话 " + id
+	case SubjectAgentRun:
+		return "子任务运行 " + id
+	case SubjectTeam:
+		return "Team " + id
+	case SubjectTeamTask:
+		return "Team 任务 " + id
+	default:
+		if kind := strings.TrimSpace(string(item.SubjectKind)); kind != "" {
+			return kind + " " + id
+		}
+		return id
+	}
+}
+
+// digestStateLabel renders the supervision state as a business outcome instead
+// of the state machine's vocabulary.
+func digestStateLabel(item DigestItem) string {
+	switch item.SupervisionState {
+	case SupervisionTimedOut:
+		return "超时"
+	case SupervisionOrphaned, SupervisionOrphanSuspected:
+		return "失去联系"
+	case SupervisionBlocked:
+		return "被阻塞，等待决策"
+	case SupervisionRunning:
+		return "仍在运行"
+	case SupervisionStalled:
+		return "长时间无进展"
+	case SupervisionInvalid:
+		return "状态异常"
+	case SupervisionCancelRequested, SupervisionCanceling:
+		return "正在停止"
+	case SupervisionTerminated:
+		return "已结束"
+	case SupervisionRecovered:
+		return "已恢复"
+	case SupervisionHealthy:
+		return "正常"
+	default:
+		if item.ActionRequired {
+			return "需要你处理"
+		}
+		return "有更新"
+	}
+}
+
+// writeDigestDetail writes the bounded business payload of one row (child
+// result summary, background job output tail).
+func writeDigestDetail(b *strings.Builder, item DigestItem) {
+	detail := strings.TrimSpace(item.Detail)
+	if detail == "" {
+		return
+	}
+	for _, line := range strings.Split(detail, "\n") {
+		line = strings.TrimRight(line, " \t")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		b.WriteString("  ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+}
+
+// boundDigestDetail collapses a detail payload onto the injection budget and
+// keeps the tail: for command output the last lines are the ones that explain
+// the outcome, and for result summaries the head is preserved by the source.
+func boundDigestDetail(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= MaxDigestItemDetailRunes {
+		return text
+	}
+	return "…" + strings.TrimSpace(string(runes[len(runes)-MaxDigestItemDetailRunes:]))
+}
+
+// DiagnosticsTextOf is the accessor hosts and tools use when they want the
+// control-plane rendering. It falls back to Text for digests built before the
+// split (or constructed by hand in tests), so callers never get an empty body.
+func (d *Digest) DiagnosticsTextOf() string {
+	if d == nil {
+		return ""
+	}
+	if text := strings.TrimSpace(d.DiagnosticsText); text != "" {
+		return text
+	}
+	return d.Text
+}
 
 func formatDigestText(digest *Digest) string {
 	var b strings.Builder
@@ -373,7 +600,10 @@ func (d *Digest) SetResumeGate(reason, detail string) {
 		reason = ResumeGateVisibility
 	}
 	d.ResumeGate = &ResumeGateNotice{Reason: reason, Detail: detail}
-	d.Text = formatDigestText(d)
+	// Re-render both channels: the diagnostics body and the injected body must
+	// stay in sync (the resume prompt inlines Text, /debug reads DiagnosticsText).
+	d.DiagnosticsText = formatDigestText(d)
+	d.Text = formatDigestBriefText(d)
 }
 
 // buildResumeQueueSummary projects the pending resume FIFO for the digest's

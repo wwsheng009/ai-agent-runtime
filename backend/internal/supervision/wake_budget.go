@@ -123,18 +123,15 @@ type WakeBudgetState struct {
 	Unlimited bool `json:"unlimited,omitempty"`
 }
 
-// FormatWakeBudgetLine renders the per-class auto-wake ledger as one compact
-// line for the model-visible preflight digest (plan P1-6 follow-up). The line
-// closes the last silent-deferral gap of the wake path: a class at its limit
-// keeps the next wake durable instead of delivering it, and before this line
-// the parent model could only discover that through host diagnostics
-// (`/debug supervision list`) after wondering why a child stopped reporting.
+// FormatWakeBudgetLedger renders the full per-class auto-wake ledger
+// (`failure=1/5 approval=0/unlimited ...`). It is a DIAGNOSTICS rendering:
+// hosts expose it through `/debug supervision list` and the HTTP projection,
+// never through the model prompt — a partially used budget does not change
+// what the parent should do.
 //
-// Rows keep the caller's class order so the API preflight, the HTTP projection
-// and the CLI `/debug` view render the same ledger. An empty slice renders
-// nothing, which keeps the digest byte-identical for hosts without a wired
-// scheduler.
-func FormatWakeBudgetLine(states []WakeBudgetState) string {
+// Rows keep the caller's class order so every diagnostics surface renders the
+// same ledger. An empty slice renders nothing.
+func FormatWakeBudgetLedger(states []WakeBudgetState) string {
 	if len(states) == 0 {
 		return ""
 	}
@@ -151,4 +148,35 @@ func FormatWakeBudgetLine(states []WakeBudgetState) string {
 		rows = append(rows, fmt.Sprintf("%s=%d/%s", class, state.Used, limit))
 	}
 	return "wake_budget: " + strings.Join(rows, " ") + " (exhausted classes defer wakes, not drop them)"
+}
+
+// FormatWakeBudgetLine renders the model-visible preflight note about auto-wake
+// exhaustion (plan P1-6 follow-up). It exists only for the state that changes
+// the parent's next step: a class at its limit keeps the next wake durable
+// instead of delivering it, so the parent must know it may not be woken again
+// this window. A partially used budget renders nothing at all.
+func FormatWakeBudgetLine(states []WakeBudgetState) string {
+	if len(states) == 0 {
+		return ""
+	}
+	// Only an exhausted class changes what the parent may do next; a ledger row
+	// at 0/5 or 1/5 is host telemetry and must never be injected. Printing the
+	// full per-class table was the largest single source of technical noise in
+	// the parent prompt.
+	rows := make([]string, 0, len(states))
+	for _, state := range states {
+		if state.Unlimited || state.Limit <= 0 || state.Used < state.Limit {
+			continue
+		}
+		class := strings.TrimSpace(string(state.BudgetClass))
+		if class == "" {
+			class = string(WakeBudgetClassOther)
+		}
+		rows = append(rows, class)
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	return "[监督提示] 本轮自动唤醒配额已用尽（" + strings.Join(rows, "、") +
+		"）。后续事件不会丢失，会在你下一次交互时汇总呈现，请先完成当前工作。"
 }

@@ -205,11 +205,11 @@ func TestWakeProgressBudget_DurableLedgerSeparatesClasses(t *testing.T) {
 	require.True(t, scheduler.AllowAutoWake(ctx, wakeBudgetTestRoot, WakeBudgetClassOther, now))
 }
 
-// TestFormatWakeBudgetLine_RendersProgressRow locks the model-visible ledger:
-// the new class must appear as its own progress=used/limit row in the preflight
-// digest line (plan §3.2 改动 1, ADR-2).
+// TestFormatWakeBudgetLine_RendersProgressRow locks the progress class onto the
+// diagnostics ledger, and locks the model-visible line to the only state that
+// changes the parent's next step: an exhausted class.
 func TestFormatWakeBudgetLine_RendersProgressRow(t *testing.T) {
-	line := FormatWakeBudgetLine([]WakeBudgetState{
+	line := FormatWakeBudgetLedger([]WakeBudgetState{
 		{BudgetClass: WakeBudgetClassFailure, Used: 5, Limit: 5},
 		{BudgetClass: WakeBudgetClassProgress, Used: 2, Limit: 6},
 	})
@@ -217,10 +217,13 @@ func TestFormatWakeBudgetLine_RendersProgressRow(t *testing.T) {
 	require.Contains(t, line, "failure=5/5")
 	require.Less(t, strings.Index(line, "failure="), strings.Index(line, "progress="),
 		"rows keep the caller's class order")
+	require.Empty(t, FormatWakeBudgetLine([]WakeBudgetState{
+		{BudgetClass: WakeBudgetClassProgress, Used: 2, Limit: 6},
+	}), "a partially used budget is telemetry and must not reach the prompt")
 
 	exhausted := FormatWakeBudgetLine([]WakeBudgetState{
 		{BudgetClass: WakeBudgetClassProgress, Used: 6, Limit: 6},
 	})
-	require.Contains(t, exhausted, "progress=6/6")
-	require.Contains(t, exhausted, "defer", "an exhausted progress class defers, it does not drop")
+	require.Contains(t, exhausted, "progress")
+	require.Contains(t, exhausted, "不会丢失", "an exhausted class defers, it does not drop")
 }

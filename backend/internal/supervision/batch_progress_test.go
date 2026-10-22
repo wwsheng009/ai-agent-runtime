@@ -167,8 +167,11 @@ func TestBatchProgressSource_ActiveBatch(t *testing.T) {
 		Progress:              source,
 	})
 	require.NoError(t, err)
-	require.Contains(t, digest.Text, "batch-b-123: 2/3 completed, 1 running")
-	require.Contains(t, digest.Text, "worker-3: running; session=session-3; last progress 12s ago; bash: go test ./internal/supervision/")
+	require.Contains(t, digest.Text, "batch-b-123：共 3 项，完成 2，进行中 1")
+	require.Contains(t, digest.Text, "worker-3（session session-3）：bash: go test ./internal/supervision/")
+	// The control-plane rendering keeps the machine spelling and the session id.
+	require.Contains(t, digest.DiagnosticsTextOf(), "batch-b-123: 2/3 completed, 1 running")
+	require.Contains(t, digest.DiagnosticsTextOf(), "session=session-3")
 }
 
 func TestBatchProgressSource_KeepsRecentTerminalButDropsOldOnes(t *testing.T) {

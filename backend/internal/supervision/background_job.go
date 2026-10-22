@@ -174,7 +174,7 @@ func FormatBackgroundJobTerminalReason(in BackgroundJobTerminalInput) string {
 	status := strings.ToLower(strings.TrimSpace(in.Status))
 	parts := []string{fmt.Sprintf("background job %s %s", strings.TrimSpace(in.JobID), status)}
 	if command := strings.Join(strings.Fields(in.Command), " "); command != "" {
-		parts = append(parts, "command: "+truncateBackgroundJobField(command, backgroundJobCommandLimit))
+		parts = append(parts, "command: "+truncateBackgroundJobField(redactCommandSecrets(command), backgroundJobCommandLimit))
 	}
 	if exitCode := strings.TrimSpace(in.ExitCode); exitCode != "" {
 		parts = append(parts, "exit_code="+exitCode)
@@ -189,6 +189,56 @@ func FormatBackgroundJobTerminalReason(in BackgroundJobTerminalInput) string {
 		parts = append(parts, "cancel_source="+source)
 	}
 	return truncateBackgroundJobField(strings.Join(parts, "; "), BackgroundJobTerminalReasonLimit)
+}
+
+// redactCommandSecrets removes credential values from a command line before it
+// reaches the model. Observed case: a background job launched through a remote
+// shell wrapper carried `AICLI_REMOTE_TOKEN=...` in its command, and the
+// preflight digest printed the token verbatim into the parent prompt.
+//
+// Matching is deliberately conservative (env assignments, --flag=value pairs and
+// bearer headers); anything unrecognized is left alone so the command stays
+// diagnosable.
+func redactCommandSecrets(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	fields := strings.Fields(command)
+	for i, field := range fields {
+		if redacted, ok := redactSecretField(field); ok {
+			fields[i] = redacted
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
+var secretKeyFragments = []string{
+	"token", "secret", "password", "passwd", "api_key", "apikey",
+	"access_key", "private_key", "credential", "auth", "cookie",
+}
+
+func redactSecretField(field string) (string, bool) {
+	key, value, found := strings.Cut(field, "=")
+	if !found || strings.TrimSpace(value) == "" {
+		return field, false
+	}
+	normalized := strings.ToLower(strings.TrimLeft(strings.TrimSpace(key), "-"))
+	if isBearerValue(normalized, value) {
+		return key + "=***", true
+	}
+	for _, fragment := range secretKeyFragments {
+		if strings.Contains(normalized, fragment) {
+			return key + "=***", true
+		}
+	}
+	return field, false
+}
+
+// isBearerValue catches `Authorization: Bearer <token>` shapes once the field
+// split has already separated the header name.
+func isBearerValue(normalizedKey, value string) bool {
+	return normalizedKey == "authorization" || strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "bearer ")
 }
 
 func truncateBackgroundJobField(value string, limit int) string {

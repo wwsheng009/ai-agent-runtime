@@ -43,8 +43,10 @@ func TestBuildDigest_MissingSubjectDowngradesCriticalToStale(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, digest.CriticalUnresolved, "only the live subject stays critical")
 	require.Equal(t, 1, digest.StaleSubjects)
-	require.Contains(t, digest.Text, "stale_subjects: 1")
-	require.Contains(t, digest.Text, "- agent_run batch-missing: stale (subject absent from control plane; no action required)")
+	require.Contains(t, digest.DiagnosticsTextOf(), "stale_subjects: 1")
+	require.Contains(t, digest.DiagnosticsTextOf(), "- agent_run batch-missing: stale (subject absent from control plane; no action required)")
+	// The injected text says the same thing without control-plane vocabulary.
+	require.Contains(t, digest.Text, "batch-missing 已不在控制面中，无需处理")
 
 	var staleItem *DigestItem
 	for index := range digest.Items {

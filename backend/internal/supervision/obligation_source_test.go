@@ -296,8 +296,9 @@ func TestBatchObligationSource_FeedsResumeContext(t *testing.T) {
 	require.Equal(t, 2, rc.PendingCount, "a running batch and a converging partial batch both keep the join open")
 	require.False(t, rc.Terminal)
 	require.Equal(t, ObligationStateRunning, rc.Status)
-	require.Contains(t, rc.Text, "can_finalize=false")
-	require.Contains(t, rc.Text, "turn_id: turn-1")
+	require.Contains(t, rc.Text, "暂不能收尾")
+	require.False(t, rc.Terminal, "the join verdict is carried structurally, not only in prose")
+	require.Equal(t, "turn-1", rc.TurnID)
 
 	// Once every batch is terminal the same projection authorizes the final
 	// report (pending_count == 0, §16.4).
@@ -313,5 +314,5 @@ func TestBatchObligationSource_FeedsResumeContext(t *testing.T) {
 	require.Equal(t, 0, rc.PendingCount)
 	require.True(t, rc.Terminal)
 	require.Equal(t, ObligationStateCompleted, rc.Status)
-	require.Contains(t, AutoWakePromptFor(rc), "所有 obligation 均已终态：请直接产出终局报告")
+	require.Contains(t, AutoWakePromptFor(rc), "请直接产出终局报告")
 }

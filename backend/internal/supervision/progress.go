@@ -264,6 +264,86 @@ func formatProgressText(digest *Digest, now time.Time) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// formatProgressBriefText is the injected-prompt twin of formatProgressText.
+// Same projection, but only business content: how far the batch got, what is
+// still running, and how long since the last sign of life. Session ids and
+// control-plane pointers stay in the diagnostics rendering.
+func formatProgressBriefText(digest *Digest, now time.Time) string {
+	if digest == nil || len(digest.Progress) == 0 {
+		return ""
+	}
+	if now.IsZero() {
+		now = timeNow().UTC()
+	}
+	var b strings.Builder
+	b.WriteString("\n批次进度：\n")
+	for _, group := range digest.Progress {
+		label := group.Label
+		if label == "" {
+			label = group.GroupID
+		}
+		if label == "" {
+			label = "批次"
+		}
+		fmt.Fprintf(&b, "- %s：共 %d 项，完成 %d", label, group.Total, group.Completed)
+		if group.Failed > 0 {
+			fmt.Fprintf(&b, "，失败 %d", group.Failed)
+		}
+		if group.Running > 0 {
+			fmt.Fprintf(&b, "，进行中 %d", group.Running)
+		}
+		if group.Pending > 0 {
+			fmt.Fprintf(&b, "，排队 %d", group.Pending)
+		}
+		if group.Skipped > 0 {
+			fmt.Fprintf(&b, "，跳过 %d", group.Skipped)
+		}
+		// A terminal group's next step is convergence, and the executable path
+		// is subagent_close (a terminal row only allows inspect, so naming a
+		// control action here would send the parent into a guaranteed rejection).
+		if group.Terminal {
+			b.WriteString("；已全部结束，不再需要时用 subagent_close 释放子会话")
+		} else if group.ProgressAgeMs > 0 {
+			fmt.Fprintf(&b, "；最近进展 %s 前", formatProgressAge(time.Duration(group.ProgressAgeMs)*time.Millisecond))
+		}
+		for _, task := range group.RunningTasks {
+			name := task.TaskID
+			if name == "" {
+				name = task.ChildSessionID
+			}
+			if name == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "\n  · %s", name)
+			// The child session id is the handle convergence tools address
+			// (subagent_close / subagent_control). It is the one machine token
+			// this block keeps: without it the parent must look the session up
+			// before it can act on a stalled or finished child.
+			if task.ChildSessionID != "" && task.ChildSessionID != name {
+				fmt.Fprintf(&b, "（session %s）", task.ChildSessionID)
+			}
+			if task.LastMessage != "" {
+				fmt.Fprintf(&b, "：%s", task.LastMessage)
+			} else if task.State != "" {
+				fmt.Fprintf(&b, "：%s", task.State)
+			}
+			if !task.LastProgressAt.IsZero() {
+				fmt.Fprintf(&b, "（最近进展 %s 前）", formatProgressAge(now.Sub(task.LastProgressAt)))
+			} else {
+				b.WriteString("（尚无进展）")
+			}
+		}
+		if group.Truncated {
+			b.WriteString("\n  · （还有正在运行的子任务未展开）")
+		}
+		b.WriteString("\n")
+	}
+	if digest.ProgressTruncated {
+		b.WriteString("- （还有更多批次未展开）\n")
+	}
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
 // formatProgressAge renders a coarse, model-friendly age. Sub-second ages are
 // "just now" so a freshly started child does not look stalled.
 func formatProgressAge(age time.Duration) string {

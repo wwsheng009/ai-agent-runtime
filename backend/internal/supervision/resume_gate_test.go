@@ -86,13 +86,13 @@ func TestDigest_SetResumeGate_RendersNotice(t *testing.T) {
 	digest := &Digest{}
 	digest.SetResumeGate(ResumeGateDepth, "depth=1 max=1")
 	require.Equal(t, ResumeGateDepth, digest.ResumeGate.Reason)
-	require.Contains(t, digest.Text, "resume_gate: depth（depth=1 max=1）")
+	require.Contains(t, digest.DiagnosticsTextOf(), "resume_gate: depth（depth=1 max=1）")
 	require.Contains(t, digest.Text, "本回合不得再派发子任务")
 
 	// 空 reason 兜底到 visibility 词表，避免出现裸 "resume_gate: " 行。
 	fallback := &Digest{}
 	fallback.SetResumeGate("", "")
-	require.Contains(t, fallback.Text, "resume_gate: "+ResumeGateVisibility)
+	require.Contains(t, fallback.DiagnosticsTextOf(), "resume_gate: "+ResumeGateVisibility)
 }
 
 // TestWakeConsumer_RestrictedResumeDeliversWithNotice is the A6 core for the
@@ -136,7 +136,7 @@ func TestWakeConsumer_RestrictedResumeDeliversWithNotice(t *testing.T) {
 	require.NotNil(t, got)
 	require.NotNil(t, got.ResumeGate)
 	require.Equal(t, ResumeGateDepth, got.ResumeGate.Reason)
-	require.Contains(t, got.Text, "resume_gate: depth")
+	require.Contains(t, got.DiagnosticsTextOf(), "resume_gate: depth")
 	require.Contains(t, got.Text, "本回合不得再派发子任务")
 
 	queued, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-session-gate", UnclaimedOnly: true})

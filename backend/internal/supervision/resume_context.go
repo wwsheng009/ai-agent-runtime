@@ -214,6 +214,8 @@ func BuildResumeContext(ctx context.Context, source ObligationSource, progress P
 	}
 	rc.WakeReasons = normalizeResumeWakeReasons(req.WakeReasons)
 	if req.Digest != nil {
+		// DigestText feeds the resumed turn (and the announcement summary), so it
+		// must be the model-facing rendering, never the diagnostics one.
 		rc.DigestText = req.Digest.Text
 	}
 
@@ -404,97 +406,90 @@ func formatResumeText(rc *ResumeContext, budget ResumeBudget) string {
 	budget = budget.withDefaults()
 	var b strings.Builder
 	b.WriteString("[Child lifecycle resume]\n")
-	if rc.TurnID != "" {
-		fmt.Fprintf(&b, "turn_id: %s\n", rc.TurnID)
-	}
+	// The join verdict is the one thing the resumed turn must not get wrong, so
+	// it is stated as an instruction in business terms instead of a
+	// can_finalize=boolean over internal counters.
 	if rc.PendingCount >= 0 {
-		fmt.Fprintf(&b, "obligations: total=%d pending=%d can_finalize=%t\n",
-			rc.TotalCount, rc.PendingCount, rc.PendingCount == 0)
-		if rc.StandaloneCount > 0 {
-			fmt.Fprintf(&b, "standalone_obligations: %d (no turn_id; legacy standalone runs, not gating can_finalize)\n", rc.StandaloneCount)
+		if rc.PendingCount == 0 {
+			fmt.Fprintf(&b, "你派发的 %d 项子任务/作业已全部结束，可以直接收尾。\n", rc.TotalCount)
+		} else {
+			fmt.Fprintf(&b, "你派发的 %d 项子任务/作业中，仍有 %d 项在运行，暂不能收尾。\n",
+				rc.TotalCount, rc.PendingCount)
 		}
 	} else {
-		b.WriteString("obligations: unknown (no ledger projection wired); can_finalize=unknown\n")
-	}
-	if status := strings.TrimSpace(rc.Status); status != "" {
-		fmt.Fprintf(&b, "rollup_status: %s\n", status)
+		b.WriteString("子任务状态读取失败，无法确认是否已全部结束；请先用 subagent_status 核实。\n")
 	}
 	if len(rc.Rollup) > 0 {
 		b.WriteString("\nprogress:\n")
 		for _, group := range rc.Rollup {
-			fmt.Fprintf(&b, "- %s: %d/%d completed", group.GroupID, group.Completed, group.Total)
+			label := strings.TrimSpace(group.Label)
+			if label == "" {
+				label = strings.TrimSpace(group.GroupID)
+			}
+			if label == "" {
+				label = "批次"
+			}
+			fmt.Fprintf(&b, "- %s: 共 %d 项，完成 %d", label, group.Total, group.Completed)
 			if group.Failed > 0 {
-				fmt.Fprintf(&b, ", %d failed", group.Failed)
+				fmt.Fprintf(&b, "，失败 %d", group.Failed)
 			}
 			if group.Running > 0 {
-				fmt.Fprintf(&b, ", %d running", group.Running)
+				fmt.Fprintf(&b, "，进行中 %d", group.Running)
 			}
 			if group.Pending > 0 {
-				fmt.Fprintf(&b, ", %d pending", group.Pending)
+				fmt.Fprintf(&b, "，排队 %d", group.Pending)
 			}
 			if group.Skipped > 0 {
-				fmt.Fprintf(&b, ", %d skipped", group.Skipped)
+				fmt.Fprintf(&b, "，跳过 %d", group.Skipped)
 			}
 			if group.Terminal {
-				b.WriteString(", terminal")
+				b.WriteString("（已结束）")
 			}
 			b.WriteString("\n")
 		}
 	}
 	if len(rc.Obligations) > 0 {
-		b.WriteString("\nterminal rollup:\n")
+		b.WriteString("\n各项结果：\n")
 		for _, ob := range rc.Obligations {
-			fmt.Fprintf(&b, "- %s %s: status=%s", ob.Kind, ob.ID, ob.State)
+			fmt.Fprintf(&b, "- %s：%s", ob.ID, obligationStateLabel(ob.State))
 			if ob.Total > 0 {
-				fmt.Fprintf(&b, " total=%d completed=%d failed=%d", ob.Total, ob.Completed, ob.Failed)
+				fmt.Fprintf(&b, "（共 %d 项，完成 %d，失败 %d", ob.Total, ob.Completed, ob.Failed)
 				if ob.Skipped > 0 {
-					fmt.Fprintf(&b, " skipped=%d", ob.Skipped)
+					fmt.Fprintf(&b, "，跳过 %d", ob.Skipped)
 				}
+				b.WriteString("）")
 			}
 			if !ob.Terminal {
-				b.WriteString(" (not terminal)")
-			}
-			if strings.TrimSpace(ob.ParentTurnID) == "" {
-				b.WriteString(" standalone=true")
+				b.WriteString("，尚未结束")
 			}
 			if summary := strings.TrimSpace(ob.ResultSummary); summary != "" && ob.Terminal {
-				fmt.Fprintf(&b, "; result: %s", summary)
+				fmt.Fprintf(&b, "：%s", summary)
 			}
 			b.WriteString("\n")
 		}
 	}
 	if len(rc.Failures) > 0 {
-		b.WriteString("\nfailed items:\n")
+		b.WriteString("\n失败项：\n")
 		for _, item := range rc.Failures {
 			fmt.Fprintf(&b, "- %s", firstNonEmptyString(item.TaskID, item.ObligationID, item.BatchID))
 			if item.BatchID != "" && item.BatchID != item.TaskID {
-				fmt.Fprintf(&b, " (batch %s)", item.BatchID)
+				fmt.Fprintf(&b, "（批次 %s）", item.BatchID)
 			}
-			fmt.Fprintf(&b, ": state=%s", item.State)
-			if item.ErrorClass != "" {
-				fmt.Fprintf(&b, " error_class=%s", item.ErrorClass)
-			}
-			if item.ErrorCode != "" {
-				fmt.Fprintf(&b, " error_code=%s", item.ErrorCode)
-			}
-			fmt.Fprintf(&b, " retryable=%t", item.Retryable)
-			if item.ResultRef != "" {
-				fmt.Fprintf(&b, " result_ref=%s", item.ResultRef)
-			}
+			fmt.Fprintf(&b, "：%s", obligationStateLabel(item.State))
 			if item.Summary != "" {
-				fmt.Fprintf(&b, "; %s", item.Summary)
+				fmt.Fprintf(&b, "，%s", item.Summary)
+			}
+			if item.Retryable {
+				b.WriteString("（可重试）")
 			}
 			b.WriteString("\n")
 		}
 	}
-	if len(rc.ArtifactRefs) > 0 {
-		fmt.Fprintf(&b, "\nartifact_refs: %s\n", strings.Join(rc.ArtifactRefs, ", "))
-	}
 	if rc.Truncated {
-		b.WriteString("\ntruncated: true (budget reached; full detail via subagent_status(include_digest=true) / subagent_inspect_task)\n")
+		b.WriteString("\n（条目较多，上面只列了最近的一部分；完整结果用 subagent_inspect_task 查看。）\n")
 	}
 	if rc.SourceError != "" {
-		fmt.Fprintf(&b, "ledger_projection_error: %s\n", rc.SourceError)
+		fmt.Fprintf(&b, "（部分状态读取失败：%s）\n", rc.SourceError)
 	}
 	if text := strings.TrimSpace(rc.DigestText); text != "" {
 		b.WriteString("\n")
@@ -504,6 +499,36 @@ func formatResumeText(rc *ResumeContext, budget ResumeBudget) string {
 		}
 	}
 	return truncateResumeText(b.String(), budget.MaxChars)
+}
+
+// obligationStateLabel renders an obligation state as a business outcome, so
+// the resume block never speaks the ledger's vocabulary to the model.
+func obligationStateLabel(state string) string {
+	switch strings.TrimSpace(state) {
+	case ObligationStatePending:
+		return "排队中"
+	case ObligationStateRunning:
+		return "运行中"
+	case ObligationStateCompleted:
+		return "已完成"
+	case ObligationStateCompletedWithFailures:
+		return "已完成（有失败项）"
+	case ObligationStateFailed:
+		return "失败"
+	case ObligationStateCanceled:
+		return "已取消"
+	case ObligationStateTimedOut:
+		return "超时"
+	case ObligationStateOrphaned:
+		return "失去联系"
+	case ObligationStateAbandoned:
+		return "已放弃"
+	default:
+		if state == "" {
+			return "状态未知"
+		}
+		return state
+	}
 }
 
 // truncateResumeText enforces the byte budget the same way the digest budget
@@ -542,15 +567,14 @@ func ResumePrompt(rc *ResumeContext) string {
 		trigger = "等待期兜底反馈（无新进度）触发"
 	}
 	b.WriteString("[supervision] resume：" + trigger + "**同一 turn 续跑**")
-	if rc != nil && strings.TrimSpace(rc.TurnID) != "" {
-		fmt.Fprintf(&b, "（turn_id=%s）", strings.TrimSpace(rc.TurnID))
-	}
 	b.WriteString("。以下 rollup 由 runtime 组装，无需回溯历史。\n")
 	if rc != nil {
+		// The verdict itself is stated once, in rc.Text, in business terms. A
+		// second copy here only repeated control-plane vocabulary.
 		if rc.PendingCount == 0 {
-			b.WriteString("所有 obligation 均已终态：请直接产出终局报告并结束本 turn（不要重复派发同一工作）。\n")
+			b.WriteString("请直接产出终局报告并结束本 turn，不要重复派发同一工作。\n")
 		} else if rc.PendingCount > 0 {
-			b.WriteString("仍有未终态 obligation：不得收尾（I1）；按可用动作继续巡检 / 有界等待 / 延长 / 取消。\n")
+			b.WriteString("暂时不能收尾：请继续等待或处理仍在运行的子任务。\n")
 		}
 		b.WriteString("\n")
 		b.WriteString(rc.Text)

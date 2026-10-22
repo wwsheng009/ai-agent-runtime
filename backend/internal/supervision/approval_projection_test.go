@@ -154,8 +154,12 @@ func TestResolveApprovalRequest_ClosesDigestEntry(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 1, digest.ResolvedSinceLastTurn)
-	require.Contains(t, digest.Text, "resolved")
-	require.Contains(t, digest.Text, "request_id=req-resolve")
+	// The injected text reports the outcome; the machine spelling stays in the
+	// diagnostics rendering.
+	require.Contains(t, digest.Text, "child-1 已结束")
+	require.Contains(t, digest.Text, "req-resolve")
+	require.Contains(t, digest.DiagnosticsTextOf(), "resolved")
+	require.Contains(t, digest.DiagnosticsTextOf(), "request_id=req-resolve")
 }
 
 // TestApprovalNoticeFromEvent verifies payload parsing used by both hosts.

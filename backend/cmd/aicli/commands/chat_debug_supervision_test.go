@@ -224,9 +224,10 @@ func TestLocalSupervisionSubjectPresenceMarksMissingRunStale(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, digest.CriticalUnresolved, "only the live run stays critical")
 	require.Equal(t, 1, digest.StaleSubjects)
-	require.Contains(t, digest.Text, "stale_subjects: 1")
-	require.Contains(t, digest.Text, "- agent_run batch-missing: stale")
-	require.Contains(t, digest.Text, "batch-alive")
+	require.Contains(t, digest.DiagnosticsTextOf(), "stale_subjects: 1")
+	require.Contains(t, digest.DiagnosticsTextOf(), "- agent_run batch-missing: stale")
+	require.Contains(t, digest.DiagnosticsTextOf(), "batch-alive")
+	require.Contains(t, digest.Text, "batch-missing 已不在控制面中")
 }
 
 // P2-12 残留（N9 同族）：本地操作员入口此前只有 ack/defer/resolve，卡住的子会话

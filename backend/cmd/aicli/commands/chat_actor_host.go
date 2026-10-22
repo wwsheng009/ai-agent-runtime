@@ -3763,6 +3763,10 @@ func injectLocalSupervisionPreflight(ctx context.Context, host *localChatRuntime
 		// 镜像富化（last_message 与 API 宿主一致）；host.SubagentBatches 未装配
 		// 时返回 nil，注入文本与改动前完全一致。
 		Progress: host.newLocalBatchProgressSource(),
+		// 业务详情：后台作业的输出末尾、子 agent 的产出摘要。注入文本只讲
+		// "发生了什么 + 实际产出"，控制面句柄（notification_id 等）只出现在
+		// 需要决策的行上。
+		ItemDetail: host.newLocalSupervisionItemDetail(sessionID, rootScopeID),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build supervision preflight digest: %w", err)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
@@ -431,6 +432,107 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 
 	m.notifyDispatcher()
 	return managed.snapshot(), nil
+}
+
+// ReadOutputTail returns at most limit bytes from the end of the job's output.
+// It exists for supervision projections that need the business payload (what
+// the command actually printed) without asking the model to make a tool call.
+// Best-effort: unknown jobs and unreadable logs return ok=false.
+func (m *Manager) ReadOutputTail(ctx context.Context, jobID string, limit int) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	if err := ctx.Err(); err != nil {
+		return "", false
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return "", false
+	}
+	if limit <= 0 {
+		limit = defaultOutputTailBytes
+	}
+
+	// Live jobs keep their own ring buffer; ReadOutput clamps a negative offset
+	// to the buffer's start, not its end, so the tail is computed here.
+	if managed := m.getJob(jobID); managed != nil {
+		managed.mu.RLock()
+		logPath := managed.logPath
+		buffer := managed.output
+		managed.mu.RUnlock()
+		if logPath == "" && buffer != nil {
+			buffer.mu.RLock()
+			end := buffer.baseOffset + int64(len(buffer.data))
+			base := buffer.baseOffset
+			buffer.mu.RUnlock()
+			start := end - int64(limit)
+			if start < 0 {
+				start = 0
+			}
+			// Read with the buffer's own cursor semantics; a start below its
+			// base offset is clamped by the buffer itself.
+			output, _ := buffer.Read(start, limit)
+			tail := trimToRuneBoundary(output, start > base)
+			return tail, strings.TrimSpace(tail) != ""
+		}
+		if logPath != "" {
+			tail := readTailFromLogFile(logPath, limit)
+			return tail, strings.TrimSpace(tail) != ""
+		}
+	}
+	// A recovered job only carries its log path.
+	job, err := m.GetJob(ctx, jobID)
+	if err != nil || job == nil || strings.TrimSpace(job.LogPath) == "" {
+		return "", false
+	}
+	tail := readTailFromLogFile(job.LogPath, limit)
+	return tail, strings.TrimSpace(tail) != ""
+}
+
+// readTailFromLogFile returns the last limit bytes of a job log, decoding on a
+// rune boundary so the parent never receives a mangled tail.
+func readTailFromLogFile(path string, limit int) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return ""
+	}
+	size := info.Size()
+	start := size - int64(limit)
+	if start < 0 {
+		start = 0
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return ""
+	}
+	buf := make([]byte, size-start)
+	n, _ := io.ReadFull(file, buf)
+	return trimToRuneBoundary(string(buf[:n]), start > 0)
+}
+
+// trimToRuneBoundary drops a partial leading rune when the read started in the
+// middle of a multi-byte sequence.
+func trimToRuneBoundary(text string, cut bool) string {
+	text = strings.TrimRight(text, "\r\n")
+	if !cut {
+		return text
+	}
+	for len(text) > 0 {
+		r, size := utf8.DecodeRuneInString(text)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		text = text[size:]
+	}
+	return text
 }
 
 // ReadOutput returns output for a job.
@@ -3213,6 +3315,11 @@ func (m *Manager) readOutputFromLog(path, jobID string, status JobStatus, exitCo
 }
 
 const defaultOutputEventChunkBytes = 4096
+
+// defaultOutputTailBytes bounds the supervision digest's job-output preview.
+// The full log stays reachable through task_output; this is only enough to see
+// what the command actually produced.
+const defaultOutputTailBytes = 1200
 
 type jobOutputWriter struct {
 	manager   *Manager

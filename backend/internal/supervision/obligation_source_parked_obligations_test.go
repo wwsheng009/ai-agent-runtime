@@ -82,10 +82,10 @@ func TestBatchObligationSource_ProjectsParkedAgentSessionAndTeamObligations(t *t
 	require.Equal(t, 3, rc.PendingCount, "live child + live team + unreadable child all gate the join")
 	require.False(t, rc.Terminal)
 	require.Equal(t, "turn-1", rc.TurnID)
-	require.Contains(t, rc.Text, "obligations: total=5 pending=3 can_finalize=false")
-	require.Contains(t, rc.Text, "agent_session agent_session:child-live: status=running (not terminal)")
+	require.Contains(t, rc.Text, "你派发的 5 项子任务/作业中，仍有 3 项在运行，暂不能收尾")
+	require.Contains(t, rc.Text, "agent_session:child-live：运行中，尚未结束")
 	prompt := AutoWakePromptFor(rc)
-	require.Contains(t, prompt, "仍有未终态 obligation：不得收尾（I1）")
+	require.Contains(t, prompt, "暂时不能收尾")
 	require.NotContains(t, prompt, "请直接产出终局报告")
 
 	// Once every child and the team reach terminal states the same projection
@@ -97,7 +97,7 @@ func TestBatchObligationSource_ProjectsParkedAgentSessionAndTeamObligations(t *t
 	rc = BuildResumeContext(ctx, settled, nil, ResumeContextRequest{ParentSessionID: "root-session-1"})
 	require.Equal(t, 0, rc.PendingCount)
 	require.True(t, rc.Terminal)
-	require.Contains(t, AutoWakePromptFor(rc), "所有 obligation 均已终态")
+	require.Contains(t, AutoWakePromptFor(rc), "可以直接收尾")
 }
 
 // TestBatchObligationSource_UnwiredResolversNeverFinalizeParkedChild pins the
@@ -115,8 +115,8 @@ func TestBatchObligationSource_UnwiredResolversNeverFinalizeParkedChild(t *testi
 	})
 	require.Equal(t, 1, rc.PendingCount, "an unwired resolver must never read as completed")
 	require.False(t, rc.Terminal)
-	require.Contains(t, rc.Text, "agent_session agent_session:child-live: status=pending (not terminal)")
-	require.Contains(t, AutoWakePromptFor(rc), "不得收尾")
+	require.Contains(t, rc.Text, "agent_session:child-live：排队中，尚未结束")
+	require.Contains(t, AutoWakePromptFor(rc), "暂时不能收尾")
 }
 
 // TestBatchObligationSource_SuspensionReadErrorNeverFinalizes pins the degraded
@@ -130,8 +130,8 @@ func TestBatchObligationSource_SuspensionReadErrorNeverFinalizes(t *testing.T) {
 	})
 	require.Equal(t, -1, rc.PendingCount, "an unreadable ledger is unknown, not empty")
 	require.False(t, rc.Terminal)
-	require.Contains(t, rc.Text, "obligations: unknown")
-	require.Contains(t, rc.Text, "ledger_projection_error: parked records offline")
+	require.Contains(t, rc.Text, "子任务状态读取失败")
+	require.Contains(t, rc.Text, "parked records offline")
 	require.NotContains(t, AutoWakePromptFor(rc), "请直接产出终局报告")
 }
 
@@ -150,7 +150,7 @@ func TestResumePrompt_WaitFeedbackTriggerWording(t *testing.T) {
 
 	prompt := ResumePrompt(rc)
 	require.Contains(t, prompt, "resume：等待期兜底反馈（无新进度）触发**同一 turn 续跑**")
-	require.Contains(t, prompt, "不得收尾")
+	require.Contains(t, prompt, "暂时不能收尾")
 	require.NotContains(t, prompt, "请直接产出终局报告")
 
 	// Every other wake family keeps the original trigger phrase byte-identical.

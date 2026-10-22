@@ -124,7 +124,7 @@ func FormatBackgroundJobMonitorReason(in BackgroundJobMonitorInput) string {
 		reason += fmt.Sprintf(" (auto-terminate at %s)", formatMonitorDuration(in.MaxDuration))
 	}
 	if command := strings.Join(strings.Fields(in.Command), " "); command != "" {
-		reason += "; command: " + truncateBackgroundJobField(command, backgroundJobCommandLimit)
+		reason += "; command: " + truncateBackgroundJobField(redactCommandSecrets(command), backgroundJobCommandLimit)
 	}
 	if message := strings.Join(strings.Fields(in.Message), " "); message != "" {
 		reason += "; message: " + truncateBackgroundJobField(message, backgroundJobCommandLimit)

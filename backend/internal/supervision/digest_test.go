@@ -39,7 +39,10 @@ func TestBuildDigest_AggregatesCriticalChildren(t *testing.T) {
 	require.False(t, digest.Truncated)
 	require.Contains(t, digest.Text, "child-1")
 	require.Contains(t, digest.Text, "child-3")
-	require.Contains(t, digest.Text, "recommended=cancel")
+	// Control-plane vocabulary lives in the diagnostics rendering; the injected
+	// text speaks about outcomes.
+	require.Contains(t, digest.DiagnosticsTextOf(), "recommended=cancel")
+	require.NotContains(t, digest.Text, "recommended=", "action vocabulary must not enter the parent prompt")
 }
 
 // TestBuildDigest_AfterSeqCursor verifies the preflight cursor: items with
@@ -109,7 +112,8 @@ func TestBuildDigest_AckAndResolve(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, digest.ResolvedSinceLastTurn)
 	require.Len(t, digest.Items, 1, "acknowledged unresolved notification must not be re-injected")
-	require.Contains(t, digest.Text, "child-resolved: recovered; resolved")
+	require.Contains(t, digest.Text, "child-resolved 已结束")
+	require.Contains(t, digest.DiagnosticsTextOf(), "recovered; resolved")
 	require.NotContains(t, digest.Text, "child-ack")
 }
 
@@ -175,7 +179,8 @@ func TestBuildDigest_Truncation(t *testing.T) {
 	require.Len(t, digest.Items, 2)
 	require.Equal(t, int64(5), digest.NextSeq)
 	require.Equal(t, 5, digest.ActionRequired, "counters stay accurate under truncation")
-	require.Contains(t, digest.Text, "use supervision_snapshot")
+	require.Contains(t, digest.Text, "subagent_status")
+	require.Contains(t, digest.DiagnosticsTextOf(), "use supervision_snapshot(after_seq=")
 }
 
 // TestProjectAgentCompletion_FailedChildAppearsWithoutExplicitWait verifies
@@ -240,5 +245,5 @@ func TestBuildDigest_TextCarriesNotificationID(t *testing.T) {
 	digest, err := BuildDigest(ctx, store, DigestRequest{RootScopeID: "root-session-1"})
 	require.NoError(t, err)
 	require.Contains(t, digest.Text, "notification_id="+created.NotificationID)
-	require.Contains(t, digest.Text, "recommended=cancel")
+	require.Contains(t, digest.DiagnosticsTextOf(), "recommended=cancel")
 }

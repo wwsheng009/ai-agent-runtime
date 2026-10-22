@@ -194,11 +194,14 @@ func TestSupervisionPreflight_IncludesWakeBudgetLine(t *testing.T) {
 
 	prompt, err := handler.InjectSupervisionPreflight(ctx, "root-1", "continue the parent turn", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "wake_budget:")
-	require.Contains(t, prompt, "failure=1/5")
-	require.Contains(t, prompt, "approval=0/unlimited")
+	// One delivered wake out of five is host telemetry: the injected prompt must
+	// not carry the ledger, and must not carry the counters either.
+	require.NotContains(t, prompt, "wake_budget:")
+	require.NotContains(t, prompt, "failure=1/5")
+	require.NotContains(t, prompt, "snapshot_seq:")
+	require.NotContains(t, prompt, "critical_unresolved:")
 	require.Contains(t, prompt, "continue the parent turn")
-	require.True(t, strings.HasPrefix(prompt, "[Child lifecycle preflight]"), "the ledger rides with the digest, ahead of the user prompt")
+	require.True(t, strings.HasPrefix(prompt, "[子任务与后台作业进展]"), "the digest rides ahead of the user prompt")
 
 	// The notification stays in the digest after being marked delivered/seen
 	// (seen is not acknowledged), so an unwired host still renders the digest
@@ -208,5 +211,5 @@ func TestSupervisionPreflight_IncludesWakeBudgetLine(t *testing.T) {
 	barePrompt, err := bare.InjectSupervisionPreflight(ctx, "root-1", "continue the parent turn", nil)
 	require.NoError(t, err)
 	require.NotContains(t, barePrompt, "wake_budget:")
-	require.Contains(t, barePrompt, "[Child lifecycle preflight]")
+	require.Contains(t, barePrompt, "[子任务与后台作业进展]")
 }

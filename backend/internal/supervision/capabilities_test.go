@@ -122,8 +122,11 @@ func TestBuildDigestFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	require.Len(t, digest.Items, 1)
 	require.Equal(t, []string{"inspect", "acknowledge", "defer", "extend_deadline", "takeover"}, digest.Items[0].AllowedActions)
 	require.Equal(t, HintControlRequiresActionExecutor, digest.Items[0].NextAction)
-	require.Contains(t, digest.Text, "allowed=[inspect,acknowledge,defer,extend_deadline,takeover]")
-	require.Contains(t, digest.Text, "next_action="+HintControlRequiresActionExecutor)
+	require.Contains(t, digest.DiagnosticsTextOf(), "allowed=[inspect,acknowledge,defer,extend_deadline,takeover]")
+	require.Contains(t, digest.DiagnosticsTextOf(), "next_action="+HintControlRequiresActionExecutor)
+	// The injected text announces the executable set without the machine
+	// spelling of the action vocabulary.
+	require.Contains(t, digest.Text, "inspect/acknowledge/defer/extend_deadline/takeover")
 
 	// Undeclared capabilities keep the pre-P2-12 wording: a host that has not
 	// audited its wiring still learns every remediation path.
@@ -133,7 +136,8 @@ func TestBuildDigestFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	require.Len(t, digest.Items, 1)
 	require.Equal(t, []string{"inspect", "acknowledge", "defer", "cancel", "close", "extend_deadline", "takeover"}, digest.Items[0].AllowedActions)
 	require.Empty(t, digest.Items[0].NextAction)
-	require.Contains(t, digest.Text, "allowed=[inspect,acknowledge,defer,cancel,close,extend_deadline,takeover]")
+	require.Contains(t, digest.DiagnosticsTextOf(), "allowed=[inspect,acknowledge,defer,cancel,close,extend_deadline,takeover]")
+	require.Contains(t, digest.Text, "inspect/acknowledge/defer/cancel/close/extend_deadline/takeover")
 	require.NotContains(t, digest.Text, "next_action=")
 }
 
@@ -280,7 +284,7 @@ func TestWakeDigestFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	require.Len(t, claimed, 1)
 	require.Len(t, digest.Items, 1)
 	require.Equal(t, []string{"inspect", "acknowledge", "defer", "extend_deadline", "takeover"}, digest.Items[0].AllowedActions)
-	require.Contains(t, digest.Text, "next_action="+HintControlRequiresActionExecutor)
+	require.Contains(t, digest.DiagnosticsTextOf(), "next_action="+HintControlRequiresActionExecutor)
 
 	// Executor wired later (the CLI/HTTP hosts call SetActionExecutor after the
 	// control plane exists): the next digest must announce the control channel.

@@ -1235,7 +1235,7 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 			"item_count":          len(digest.Items),
 			"next_seq":            digest.NextSeq,
 			"next_action":         nextAction,
-		}, digest.Text), nil
+		}, digest.DiagnosticsTextOf()), nil
 
 	case ToolSupervisionDescendants:
 		request, err := parseSupervisionDescendantsArgs(args)

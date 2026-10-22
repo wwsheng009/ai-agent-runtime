@@ -91,24 +91,24 @@ func TestResumeContext_TerminalLedgerRollsUpAndReanchorsTurn(t *testing.T) {
 
 	for _, want := range []string{
 		"[Child lifecycle resume]",
-		"turn_id: turn-1",
-		"obligations: total=2 pending=0 can_finalize=true",
-		"rollup_status: completed_with_failures",
+		"你派发的 2 项子任务/作业已全部结束，可以直接收尾",
 		"progress:",
-		"terminal rollup:",
-		"batch batch-2: status=completed_with_failures total=3 completed=2 failed=1",
-		"failed items:",
-		"state=failed error_class=tool_error error_code=exit_status retryable=true result_ref=art-task-2",
-		"artifact_refs: art-batch-1, art-task-2",
+		"各项结果：",
+		"batch-2：已完成（有失败项）（共 3 项，完成 2，失败 1）",
+		"失败项：",
+		"task-2（批次 batch-2）：失败，unit tests failed（可重试）",
 	} {
 		require.Contains(t, rc.Text, want, "resume text must stay parseable and complete")
 	}
+	// Machine receipts stay structured on the payload, not in the prompt.
+	require.Equal(t, "art-task-2", rc.Failures[0].ResultRef)
+	require.ElementsMatch(t, []string{"art-batch-1", "art-task-2"}, rc.ArtifactRefs)
 
 	prompt := ResumePrompt(rc)
 	require.Contains(t, prompt, "resume：子任务生命周期事件触发**同一 turn 续跑**")
-	require.Contains(t, prompt, "turn_id=turn-1")
-	require.Contains(t, prompt, "所有 obligation 均已终态：请直接产出终局报告")
-	require.Contains(t, prompt, "can_finalize=true")
+	require.Contains(t, prompt, "请直接产出终局报告")
+	require.NotContains(t, prompt, "can_finalize", "control-plane verdict stays structural")
+	require.NotContains(t, prompt, "turn_id=")
 
 	// The consumer must hand exactly this text to the resuming turn.
 	require.Equal(t, prompt, AutoWakePromptFor(rc))
@@ -128,11 +128,11 @@ func TestResumeContext_PendingLedgerBlocksFinalize(t *testing.T) {
 	require.Equal(t, 1, rc.PendingCount)
 	require.False(t, rc.Terminal, "I1: a running obligation keeps the join open")
 	require.Equal(t, ObligationStateRunning, rc.Status)
-	require.Contains(t, rc.Text, "obligations: total=2 pending=1 can_finalize=false")
-	require.Contains(t, rc.Text, "batch batch-2: status=running total=3 completed=1 failed=1 (not terminal)")
+	require.Contains(t, rc.Text, "你派发的 2 项子任务/作业中，仍有 1 项在运行，暂不能收尾")
+	require.Contains(t, rc.Text, "batch-2：运行中（共 3 项，完成 1，失败 1），尚未结束")
 
 	prompt := AutoWakePromptFor(rc)
-	require.Contains(t, prompt, "仍有未终态 obligation：不得收尾（I1）")
+	require.Contains(t, prompt, "暂时不能收尾")
 	require.NotContains(t, prompt, "请直接产出终局报告")
 }
 
@@ -225,7 +225,7 @@ func TestResumeContext_AggregateStatusSeverity(t *testing.T) {
 	// A canceled terminal row renders its skipped count instead of a failure
 	// count, so the parent does not read cancellation as lost work.
 	rc := build(completed, ObligationRef{ID: "batch-canceled", Kind: "batch", State: ObligationStateCanceled, Terminal: true, Total: 1, Skipped: 1})
-	require.Contains(t, rc.Text, "batch batch-canceled: status=canceled total=1 completed=0 failed=0 skipped=1")
+	require.Contains(t, rc.Text, "batch-canceled：已取消（共 1 项，完成 0，失败 0，跳过 1）")
 	require.Empty(t, rc.Failures, "a canceled item is not a failure item")
 }
 
@@ -279,7 +279,7 @@ func TestResumeContext_BudgetBoundsLedgerContent(t *testing.T) {
 	})
 	require.True(t, lightRC.Truncated)
 	require.Len(t, lightRC.Obligations, DefaultConfig().DigestMaxItems)
-	require.Contains(t, lightRC.Text, "truncated: true (budget reached")
+	require.Contains(t, lightRC.Text, "只列了最近的一部分")
 
 	// A tight explicit budget is honored on top of the item caps.
 	tight := BuildResumeContext(context.Background(), &staticObligationSource{obligations: obligations}, nil, ResumeContextRequest{
@@ -305,13 +305,12 @@ func TestResumeContext_LedgerErrorDegrades(t *testing.T) {
 	require.False(t, rc.Terminal)
 	require.Equal(t, "unknown", rc.Status)
 	require.Equal(t, "ledger unreachable", rc.SourceError)
-	require.Contains(t, rc.Text, "obligations: unknown (no ledger projection wired); can_finalize=unknown")
-	require.Contains(t, rc.Text, "ledger_projection_error: ledger unreachable")
+	require.Contains(t, rc.Text, "子任务状态读取失败")
+	require.Contains(t, rc.Text, "ledger unreachable")
 
 	prompt := AutoWakePromptFor(rc)
 	require.Contains(t, prompt, "resume：子任务生命周期事件触发**同一 turn 续跑**")
-	require.Contains(t, prompt, "turn_id=turn-1")
-	require.Contains(t, prompt, "can_finalize=unknown")
+	require.Equal(t, "turn-1", rc.TurnID, "the anchor survives even when the text speaks business")
 	require.NotContains(t, prompt, "请直接产出终局报告", "an unknown verdict must not authorize finalizing")
 
 	// A projection error must not be reported as a progress verdict either.
@@ -413,9 +412,9 @@ func TestWakeConsumer_DeliversResumeContext(t *testing.T) {
 
 	prompt := AutoWakePromptFor(resume)
 	require.Contains(t, prompt, "resume：")
-	require.Contains(t, prompt, "turn_id=turn-1")
-	require.Contains(t, prompt, "can_finalize=false")
-	require.Contains(t, prompt, "batch batch-1: status=running total=2 completed=1 failed=0 (not terminal)")
+	require.Contains(t, prompt, "暂时不能收尾")
+	require.Contains(t, prompt, "batch-1：运行中（共 2 项，完成 1，失败 0），尚未结束")
+	require.Equal(t, "turn-1", resume.TurnID)
 }
 
 // TestWakeConsumer_ResumeBuilderPanicKeepsWakeDurable verifies the panic

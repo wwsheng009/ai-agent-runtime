@@ -413,7 +413,7 @@ func TestFormatWakeBudgetLine_RendersLedgerForModel(t *testing.T) {
 	require.Empty(t, FormatWakeBudgetLine(nil))
 	require.Empty(t, FormatWakeBudgetLine([]WakeBudgetState{}))
 
-	line := FormatWakeBudgetLine([]WakeBudgetState{
+	line := FormatWakeBudgetLedger([]WakeBudgetState{
 		{RootScopeID: "root-1", BudgetClass: WakeBudgetClassApproval, Used: 1, Unlimited: true},
 		{RootScopeID: "root-1", BudgetClass: WakeBudgetClassFailure, Used: 5, Limit: 5, Window: time.Hour},
 		{RootScopeID: "root-1", BudgetClass: WakeBudgetClassOther, Used: 0, Limit: 5, Window: time.Hour},
@@ -432,5 +432,19 @@ func TestFormatWakeBudgetLine_RendersLedgerForModel(t *testing.T) {
 
 	// A blank class is still rendered under a stable name instead of an empty
 	// token, so a partially populated ledger stays readable.
-	require.Contains(t, FormatWakeBudgetLine([]WakeBudgetState{{Used: 2, Limit: 5}}), "other=2/5")
+	require.Contains(t, FormatWakeBudgetLedger([]WakeBudgetState{{Used: 2, Limit: 5}}), "other=2/5")
+
+	// The injected line is not a ledger: it appears only for exhausted classes
+	// and says nothing about how much headroom remains.
+	require.Empty(t, FormatWakeBudgetLine([]WakeBudgetState{
+		{BudgetClass: WakeBudgetClassApproval, Used: 1, Unlimited: true},
+		{BudgetClass: WakeBudgetClassOther, Used: 0, Limit: 5},
+	}))
+	exhausted := FormatWakeBudgetLine([]WakeBudgetState{
+		{BudgetClass: WakeBudgetClassFailure, Used: 5, Limit: 5},
+		{BudgetClass: WakeBudgetClassOther, Used: 0, Limit: 5},
+	})
+	require.Contains(t, exhausted, "failure")
+	require.NotContains(t, exhausted, "failure=5/5")
+	require.NotContains(t, exhausted, "other=")
 }
