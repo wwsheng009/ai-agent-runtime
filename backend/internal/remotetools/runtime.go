@@ -233,9 +233,37 @@ func (a remoteArtifacts) Open(_ context.Context, ref toolcore.ArtifactRef, offse
 	}
 	content, size, eof, err := a.store.Read(ref.ID, offset, limit)
 	if err != nil {
-		return toolcore.ArtifactChunk{}, err
+		return toolcore.ArtifactChunk{}, codedArtifactError(err)
 	}
 	return toolcore.ArtifactChunk{Data: []byte(content), Size: size, Offset: int64(offset), EOF: eof}, nil
+}
+
+// codedArtifactError preserves the store's stable code across the ArtifactSink
+// boundary. A missing file is the documented 72h-expiry case; everything else
+// keeps its own class instead of collapsing into INVALID_ARGUMENT.
+func codedArtifactError(err error) error {
+	if err == nil {
+		return nil
+	}
+	code := toolcore.ErrInternal
+	nextAction := "retry the call; if it persists, check the target artifact store"
+	var toolErr *ToolError
+	if asToolError(err, &toolErr) {
+		switch toolErr.Code {
+		case CodeNotFound:
+			code = toolcore.ErrArtifactExpired
+			nextAction = "re-run the command; remote artifacts expire after 72h"
+		case CodeUnsupported:
+			code = toolcore.ErrUnsupported
+			nextAction = toolErr.NextAction
+		case CodeInvalidArgument:
+			code = toolcore.ErrInvalidArgument
+			nextAction = toolErr.NextAction
+		default:
+			nextAction = toolErr.NextAction
+		}
+	}
+	return &toolcore.CodedError{Code: code, NextAction: nextAction, Err: err}
 }
 
 type remoteSessions struct {

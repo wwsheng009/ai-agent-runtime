@@ -1,10 +1,13 @@
 package remotetools
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
 // TestArtifactStorePrunesExpiredFiles pins the 72h retention contract: the
@@ -43,5 +46,30 @@ func TestArtifactStorePrunesExpiredFiles(t *testing.T) {
 		t.Fatal("reading a pruned artifact must fail")
 	} else if !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("expected the 72h expiry hint, got %v", err)
+	}
+
+	// The shared artifact_handler must preserve ARTIFACT_EXPIRED end to end
+	// instead of collapsing the missing file into INVALID_ARGUMENT.
+	cfg := DefaultConfig()
+	cfg.Workspace = t.TempDir()
+	cfg.TargetName = "dev"
+	cfg.Artifacts.Root = root
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	workspace, err := NewWorkspace(cfg.Workspace, cfg.AllowedRoots)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	tool := newRemoteArtifactReadTool(cfg, workspace, store)
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"artifact_id": oldID})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Success {
+		t.Fatal("expired artifact read must fail")
+	}
+	if result.Metadata["error_code"] != toolcore.ErrArtifactExpired {
+		t.Fatalf("error_code = %v, want %s", result.Metadata["error_code"], toolcore.ErrArtifactExpired)
 	}
 }

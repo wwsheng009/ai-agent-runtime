@@ -70,7 +70,15 @@ func (h *artifactReadHandler) Execute(ctx context.Context, call *Call) (*Result,
 	limit := intArg(call.Args, "limit", 64*1024)
 	chunk, err := call.Runtime.Artifacts().Open(ctx, ref, offset, limit)
 	if err != nil {
-		return artifactFailure(ErrInvalidArgument, "check the artifact id and window", err), nil
+		code := CodeOf(err)
+		if code == "" {
+			code = ErrInvalidArgument
+		}
+		nextAction := NextActionOf(err)
+		if nextAction == "" {
+			nextAction = "check the artifact id and window"
+		}
+		return artifactFailure(code, nextAction, err), nil
 	}
 	metadata := map[string]any{
 		"artifact_id":  ref.ID,
