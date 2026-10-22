@@ -1297,7 +1297,7 @@ func probeFileEncoding(file *os.File) (fileEncoding, bool) {
 		return fileEncodingUTF8, false
 	}
 	enc, _ := detectFileEncoding(head[:n])
-	return enc, enc.hasBOM()
+	return enc, enc.HasBOM()
 }
 
 func (v *ViewTool) readLines(reader io.Reader, offset, limit int) (string, viewReadResult, error) {

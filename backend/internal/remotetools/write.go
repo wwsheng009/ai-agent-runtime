@@ -3,11 +3,10 @@ package remotetools
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -44,49 +43,6 @@ func (b remoteWriteToolBase) authorize(ctx context.Context, rawPath string, op r
 	return target, nil
 }
 
-// writeFileAtomic writes data through a sibling temp file and a rename.
-//
-// A reader (or a parallel agent turn) therefore never observes a half-written
-// file, and a crash mid-write leaves the original intact. The existing mode is
-// preserved; a new file uses the requested fallback mode.
-func writeFileAtomic(path string, data []byte, fallbackMode os.FileMode) error {
-	mode := fallbackMode
-	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
-		mode = info.Mode().Perm()
-	}
-	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".aicli-write-*")
-	if err != nil {
-		return newToolError(CodeInvalidArgument, "check directory permissions", "cannot create temp file in %s: %v", dir, err)
-	}
-	tempName := temp.Name()
-	cleanup := func() {
-		_ = temp.Close()
-		_ = os.Remove(tempName)
-	}
-	if _, err := temp.Write(data); err != nil {
-		cleanup()
-		return newToolError(CodeInternal, "retry the write", "cannot write temp file: %v", err)
-	}
-	if err := temp.Sync(); err != nil {
-		cleanup()
-		return newToolError(CodeInternal, "retry the write", "cannot flush temp file: %v", err)
-	}
-	if err := temp.Close(); err != nil {
-		cleanup()
-		return newToolError(CodeInternal, "retry the write", "cannot close temp file: %v", err)
-	}
-	if err := os.Chmod(tempName, mode); err != nil {
-		_ = os.Remove(tempName)
-		return newToolError(CodeInternal, "retry the write", "cannot set file mode: %v", err)
-	}
-	if err := os.Rename(tempName, path); err != nil {
-		_ = os.Remove(tempName)
-		return newToolError(CodeInternal, "retry the write", "cannot replace %s: %v", path, err)
-	}
-	return nil
-}
-
 // remoteWriteTool implements `write` (full-file overwrite or create).
 type remoteWriteTool struct {
 	*toolkit.BaseTool
@@ -116,7 +72,7 @@ func newRemoteWriteTool(cfg *Config, workspace *Workspace, sandbox *Sandbox) *re
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolWrite,
 		tool.describe("Write a complete file on the remote host (create or overwrite)."),
-		"1.0.0",
+		"1.1.0",
 		parameters,
 		true,
 	)
@@ -142,24 +98,36 @@ func (t *remoteWriteTool) Execute(ctx context.Context, params map[string]interfa
 	if err := validateWriteTarget(target); err != nil {
 		return remoteErrorResult(err), nil
 	}
-	existed := fileExists(target)
-	if err := writeFileAtomic(target, []byte(content), 0o644); err != nil {
-		return remoteErrorResult(err), nil
+
+	result, mutationErr := mutatecore.Write(target, content, mutatecore.WriteOptions{
+		Mode:             mutatecore.DefaultFileMode,
+		PreserveEncoding: true,
+		RefuseBinary:     true,
+	})
+	if mutationErr != nil {
+		return remoteErrorResult(remoteMutationError(mutationErr)), nil
 	}
+
 	display := t.cleanDisplayPath(target)
 	metadata := map[string]interface{}{
-		"file_path":    display,
-		"bytes_written": len(content),
-		"created":      !existed,
-		"remote":       true,
-		"workspace":    t.workspace.Root(),
+		"file_path":     display,
+		"bytes_written": result.NewSize,
+		"old_size":      result.OldSize,
+		"new_size":      result.NewSize,
+		"created":       result.Created,
+		"replayed":      result.Replayed,
+		"encoding":      result.Encoding.String(),
+		"remote":        true,
+		"workspace":     t.workspace.Root(),
 		"mutated_paths": []string{display},
 	}
 	verb := "Updated"
-	if !existed {
+	if result.Created {
 		verb = "Created"
+	} else if result.Replayed {
+		verb = "Unchanged"
 	}
-	return remoteTextResult(fmt.Sprintf("%s %s (%d bytes).", verb, display, len(content)), metadata), nil
+	return remoteTextResult(fmt.Sprintf("%s %s (%d bytes).", verb, display, result.NewSize), metadata), nil
 }
 
 // remoteAppendTool implements `append_write`.
@@ -195,7 +163,7 @@ func newRemoteAppendTool(cfg *Config, workspace *Workspace, sandbox *Sandbox) *r
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolAppend,
 		tool.describe("Append text to the end of a remote file."),
-		"1.0.0",
+		"1.1.0",
 		parameters,
 		true,
 	)
@@ -220,39 +188,39 @@ func (t *remoteAppendTool) Execute(ctx context.Context, params map[string]interf
 	if err != nil {
 		return remoteErrorResult(err), nil
 	}
-	exists := fileExists(target)
-	if !exists && !createIfMissing {
-		return remoteErrorResult(newToolError(CodeNotFound, "pass create_if_missing=true or use write", "file does not exist: %s", t.cleanDisplayPath(target))), nil
-	}
 	if err := validateWriteTarget(target); err != nil {
 		return remoteErrorResult(err), nil
 	}
 
-	// Read-modify-write through the atomic helper: appending in place would leave
-	// a partially written tail if the process died mid-write.
-	existing, readErr := os.ReadFile(target)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		return remoteErrorResult(newToolError(CodeInvalidArgument, "check file permissions", "cannot read %s: %v", t.cleanDisplayPath(target), readErr)), nil
-	}
-	combined := append(existing, []byte(content)...)
-	if err := writeFileAtomic(target, combined, 0o644); err != nil {
-		return remoteErrorResult(err), nil
+	result, mutationErr := mutatecore.Append(ctx, target, content, mutatecore.AppendOptions{
+		CreateIfMissing:  createIfMissing,
+		Mode:             mutatecore.DefaultFileMode,
+		PreserveEncoding: true,
+		RefuseBinary:     true,
+	})
+	if mutationErr != nil {
+		return remoteErrorResult(remoteMutationError(mutationErr)), nil
 	}
 
 	display := t.cleanDisplayPath(target)
 	metadata := map[string]interface{}{
-		"file_path":     display,
-		"bytes_appended": len(content),
-		"total_bytes":   len(combined),
-		"created":       !exists,
-		"remote":        true,
-		"workspace":     t.workspace.Root(),
-		"mutated_paths": []string{display},
+		"file_path":      display,
+		"bytes_appended": result.BytesWritten,
+		"total_bytes":    result.SizeAfter,
+		"created":        result.Created,
+		"replayed":       result.Replayed,
+		"encoding":       result.Encoding.String(),
+		"remote":         true,
+		"workspace":      t.workspace.Root(),
+		"mutated_paths":  []string{display},
 	}
-	return remoteTextResult(fmt.Sprintf("Appended %d bytes to %s (total %d bytes).", len(content), display, len(combined)), metadata), nil
+	return remoteTextResult(
+		fmt.Sprintf("Appended %d bytes to %s (total %d bytes).", result.BytesWritten, display, result.SizeAfter),
+		metadata,
+	), nil
 }
 
-// remoteEditTool implements `edit` (exact single-occurrence replacement).
+// remoteEditTool implements `edit` (exact replacement with ambiguity guard).
 type remoteEditTool struct {
 	*toolkit.BaseTool
 	remoteWriteToolBase
@@ -268,11 +236,19 @@ func newRemoteEditTool(cfg *Config, workspace *Workspace, sandbox *Sandbox) *rem
 			},
 			"old_string": map[string]interface{}{
 				"type":        "string",
-				"description": "Exact text to replace. Must occur exactly once.",
+				"description": "Exact text to replace. Must occur exactly once unless replace_all/replacement_count is set.",
 			},
 			"new_string": map[string]interface{}{
 				"type":        "string",
 				"description": "Replacement text.",
+			},
+			"replace_all": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Replace every match. Mutually exclusive with replacement_count.",
+			},
+			"replacement_count": map[string]interface{}{
+				"type":        "integer",
+				"description": "Replace only the first N matches. Mutually exclusive with replace_all.",
 			},
 		},
 		"required":             []string{"file_path", "old_string", "new_string"},
@@ -284,8 +260,8 @@ func newRemoteEditTool(cfg *Config, workspace *Workspace, sandbox *Sandbox) *rem
 	}}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolEdit,
-		tool.describe("Replace one exact, unique occurrence of old_string in a remote file."),
-		"1.0.0",
+		tool.describe("Replace exact text in a remote file with an ambiguity guard."),
+		"1.1.0",
 		parameters,
 		true,
 	)
@@ -305,6 +281,17 @@ func (t *remoteEditTool) Execute(ctx context.Context, params map[string]interfac
 		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass a non-empty old_string", "old_string is required")), nil
 	}
 	newString, _ := params["new_string"].(string)
+	replaceAll, _ := params["replace_all"].(bool)
+	replacementCount := 0
+	if _, present := params["replacement_count"]; present {
+		replacementCount = intParam(params, "replacement_count", 0)
+		if replacementCount <= 0 {
+			return remoteErrorResult(newToolError(CodeInvalidArgument, "pass a positive replacement_count", "replacement_count must be greater than 0")), nil
+		}
+	}
+	if replaceAll && replacementCount > 0 {
+		return remoteErrorResult(newToolError(CodeInvalidArgument, "choose replace_all or replacement_count", "replace_all and replacement_count are mutually exclusive")), nil
+	}
 
 	target, err := t.authorize(ctx, rawPath, runtimeexecutor.OpWrite)
 	if err != nil {
@@ -313,42 +300,31 @@ func (t *remoteEditTool) Execute(ctx context.Context, params map[string]interfac
 	if err := validateWriteTarget(target); err != nil {
 		return remoteErrorResult(err), nil
 	}
-	existing, readErr := os.ReadFile(target)
-	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			return remoteErrorResult(newToolError(CodeNotFound, "verify the path with ls or glob", "file not found: %s", t.cleanDisplayPath(target))), nil
-		}
-		return remoteErrorResult(newToolError(CodeInvalidArgument, "check file permissions", "cannot read %s: %v", t.cleanDisplayPath(target), readErr)), nil
+
+	result, mutationErr := mutatecore.Edit(target, oldString, newString, mutatecore.EditOptions{
+		ReplaceAll:       replaceAll,
+		ReplacementCount: replacementCount,
+		Mode:             mutatecore.DefaultFileMode,
+		PreserveEncoding: true,
+		MaxBytes:         10 * 1024 * 1024,
+	})
+	if mutationErr != nil {
+		return remoteErrorResult(remoteMutationError(mutationErr)), nil
 	}
 
-	body := string(existing)
-	count := strings.Count(body, oldString)
-	if count == 0 {
-		return remoteErrorResult(newToolError(CodeNotFound, "re-read the file and copy the exact text", "old_string not found in %s", t.cleanDisplayPath(target))), nil
-	}
-	if count > 1 {
-		return remoteErrorResult(newToolError(CodeInvalidArgument, "include more surrounding context to make the match unique", "old_string occurs %d times in %s", count, t.cleanDisplayPath(target))), nil
-	}
-
-	updated := strings.Replace(body, oldString, newString, 1)
-	if err := writeFileAtomic(target, []byte(updated), 0o644); err != nil {
-		return remoteErrorResult(err), nil
-	}
 	display := t.cleanDisplayPath(target)
 	metadata := map[string]interface{}{
 		"file_path":     display,
-		"replacements":  1,
-		"bytes_before":  len(existing),
-		"bytes_after":   len(updated),
+		"replacements":  result.Replacements,
+		"bytes_before":  result.SizeBefore,
+		"bytes_after":   result.SizeAfter,
+		"encoding":      result.Encoding.String(),
 		"remote":        true,
 		"workspace":     t.workspace.Root(),
 		"mutated_paths": []string{display},
 	}
-	return remoteTextResult(fmt.Sprintf("Replaced 1 occurrence in %s (%d -> %d bytes).", display, len(existing), len(updated)), metadata), nil
-}
-
-// fileExists reports whether path exists (any type).
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	return remoteTextResult(
+		fmt.Sprintf("Replaced %d occurrence(s) in %s (%d -> %d bytes).", result.Replacements, display, result.SizeBefore, result.SizeAfter),
+		metadata,
+	), nil
 }

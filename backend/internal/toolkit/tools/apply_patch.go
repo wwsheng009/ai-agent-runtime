@@ -907,7 +907,7 @@ func (a *patchApplier) commit() error {
 		if mode == 0 {
 			mode = defaultPatchedFileMode
 		}
-		if err := os.WriteFile(path, []byte(file.Content), mode); err != nil {
+		if err := writeFileAtomicLocal(path, []byte(file.Content), mode); err != nil {
 			return fmt.Errorf("写入文件失败 %s: %w", path, err)
 		}
 	}

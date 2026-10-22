@@ -1,35 +1,25 @@
 package tools
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"strings"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-const writeRevisionAbsent = "absent"
+const writeRevisionAbsent = mutatecore.RevisionAbsent
 
 func validWritePrecondition(value string) bool {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" || value == writeRevisionAbsent {
-		return true
-	}
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == sha256.Size
+	return mutatecore.ValidRevision(value)
 }
 
 func writeContentRevision(exists bool, content string) string {
-	if !exists {
-		return writeRevisionAbsent
-	}
-	digest := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(digest[:])
+	return mutatecore.Revision(exists, content)
 }
 
 func writePreconditionFailure(message, actual, expected string) *toolkit.ToolResult {

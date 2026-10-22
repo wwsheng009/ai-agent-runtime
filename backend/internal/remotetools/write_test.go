@@ -177,8 +177,8 @@ func TestApplyPatchRejectsMismatchedHunk(t *testing.T) {
 		t.Fatal("expected mismatched hunk to fail")
 	}
 	body := textContent(result)
-	if !strings.Contains(body, "NOT_FOUND") {
-		t.Fatalf("expected NOT_FOUND, got %q", body)
+	if !strings.Contains(body, "STALE_CONTEXT") {
+		t.Fatalf("expected STALE_CONTEXT, got %q", body)
 	}
 	// The file must be untouched.
 	assertFile(t, filepath.Join(root, "README.md"), "# demo\nTODO: fix me\n")
