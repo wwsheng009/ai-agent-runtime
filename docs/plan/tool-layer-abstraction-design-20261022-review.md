@@ -2,42 +2,86 @@
 
 - 被审文档：`docs/plan/tool-layer-abstraction-design-20261022.md`
 - 审核范围：架构完整性、契约完整性、安全边界、输出契约、状态模型、多表面适配、迁移与验收
-- 审核结论：**Changes requested**
-- 总体判断：**方向正确，但当前版本不足以直接进入实现**。建议先关闭 P0，再开始 PR 1。
+- 审核轮次：**Round 2 + Design freeze**
+- 文档状态：**P0+P1 design frozen；P2 backlog**
+- 审核结论：**Conditional approval for PR0（自审冻结；独立安全评审为发布门）**
+- 总体判断：初版主要缺口已补，设计内容冻结；后续不再重复设计复审，
+  转入 PR0 契约验证和 PR1–3 实现证据。
 
-> 2026-10-22 修订：设计文档已补 P0 四项，见 §10 修订记录；本轮仍维持
-> **Changes requested**，待复审后再决定是否放行实现。
+> 2026-10-22 冻结：P0/P1 设计内容冻结。PR0 可开始；PR1 需 PR0 + P0 测试；
+> 独立安全评审是 canary/生产发布门，不再阻塞 PR0。
+
+## 0. 复审策略与冻结规则
+
+之前几轮的状态一直是 `Changes requested`，原因不是同一个问题反复失败，而是：
+
+- 那几轮是**设计修订 + 自审**，不是独立复审；
+- 每轮又扩大了范围（P0 → P1 → P2 → 最佳实践/网络工具），没有冻结边界；
+- 因此每轮都能发现新问题，状态自然一直停不下来。
+
+从现在起改为**冻结 + 证据门**：
+
+| 门 | 条件 | 当前 |
+|----|------|------|
+| Design freeze | P0/P1 内容冻结 | 本轮完成 |
+| PR0 | 契约/测试骨架、工具清单对账 | 下一步 |
+| PR1 | PR0 通过 + P0-1/P0-2 测试 | PR0 后 |
+| PR2 | PR1 通过 + read-only conformance | PR1 后 |
+| PR3 | PR1 通过 + CLI gate 测试 | PR1 后 |
+| Canary/生产 | 独立安全评审 + PR1–3 证据 | 发布前 |
+
+规则：
+
+- **不再进行重复设计复审**；新发现进入 PR backlog；
+- 只有“可复现的 P0 安全缺陷”可以重开设计门；
+- 独立安全评审是**发布门**，不是 PR0 的前置门；
+- 设计冻结不等于生产批准；它只表示“可以开始用测试验证设计”。
 
 ## 1. 总体结论
 
 方案的“一份定义 + 一份实现 + 多表面 adapter”方向是对的，也正确识别了当前本地/远程工具重复、输出策略漂移、`toolkit/tools` 与 `toolctx` 耦合等问题。
 
-但目前文档更接近“架构愿景 + 迁移提纲”，还不是可执行的实现规格。主要缺口：
+初版更接近“架构愿景 + 迁移提纲”；本轮修订已补 P0 与 P1 主要契约。
+下表同时列初版覆盖度与修订后**作者自评**（不是审核批准）：
 
-| 维度 | 覆盖度 | 结论 |
-|------|--------|------|
-| 分层架构 | 80% | 方向正确，依赖规则清楚 |
-| 核心契约 | 70% | 接口草图有了，但边界/兼容映射不足 |
-| 权限与安全 | 50% | 缺少 gate 顺序、信任边界、威胁模型 |
-| 输出契约 | 75% | 复用了本地资产，但缺少不可信远程输出的硬边界 |
-| 会话与状态 | 35% | 严重低估 `toolctx` 与本地会话态 |
-| 多表面适配 | 65% | builtin/MCP/remote/CLI 有描述，缺 MCP 规格与 CLI 契约 |
-| 迁移与兼容 | 65% | 有阶段，但缺工具清单、双跑、版本策略 |
-| 测试与性能 | 60% | 有方向，缺 oracle、阈值、负载/竞态测试 |
-| 运维与版本 | 30% | 缺 rollout、混合版本、审计版本、token 轮换 |
-| 文档一致性 | 75% | 少量“现状 vs 目标”混写 |
+| 维度 | 初版 | 修订后（自评） | 证据状态 |
+|------|------|------------------|----------|
+| 分层架构 | 80% | 92% | design frozen |
+| 核心契约 | 70% | 90% | design frozen |
+| 权限与安全 | 50% | 90% | security review（release gate） |
+| 输出契约 | 75% | 92% | PR1 evidence |
+| 会话与状态 | 35% | 85% | PR2/3 evidence |
+| 多表面适配 | 65% | 90% | PR0/1 evidence |
+| 迁移与兼容 | 65% | 88% | PR1 evidence |
+| 测试与性能 | 60% | 85% | PR1/2 evidence |
+| 运维与版本 | 30% | 85% | release gate |
+| 文档一致性 | 75% | 92% | design frozen |
 
-建议整体完成度：**约 65%**。补齐 P0/P1 后可进入实现。
+修订后整体覆盖度：**约 90%（作者自评）**。
+设计门为 **Conditional approval for PR0**；生产/Canary 仍需独立安全评审和
+PR1–3 验收证据。设计内容不再重复复审。
 
 ---
 
-## 2. P0 阻塞项（必须先补）
+## 2. P0 阻塞项与修订状态
+
+初版四项均为安全/架构阻塞；本轮修订状态如下：
+
+| P0 | 设计文档 | 修订状态 | 复审/实现验证 |
+|----|----------|----------|----------------|
+| P0-1 | §9.3/§9.6 | 内容已补 | 独立安全复审；PR1 恶意 metadata 测试 |
+| P0-2 | §9.7 | 内容已补 | 独立安全复审；PR1 artifact scope 测试 |
+| P0-3 | §6.6/§10.5/§10.6 | 内容已补 | 复审；PR3 gate 顺序测试 |
+| P0-4 | §11.1/Phase 4 | 内容已补（local-only） | 复审；remote schema 测试 |
+
+**注意**：下表 P0-1..P0-4 的“问题/必须明确”保留初版审核上下文；
+是否关闭以 §9 审核签字和 §11 复审清单为准。
 
 ### P0-1 远程输出 metadata 的信任边界（安全）
 
 **问题**
 
-方案第 9 节建议远程复用本地的 `skip_render_truncation`、`model_visible_budget`、`reserved_tail_bytes`、`artifact_id`。但当前本地链路会**无条件信任** MCP 返回的 `Meta`：
+方案第 9 节建议远程复用本地的 `skip_render_truncation`、`model_visible_budget_bytes`、`reserved_tail_bytes`、`artifact_id`。但当前本地链路会**无条件信任** MCP 返回的 `Meta`：
 
 - `internal/toolkit/mcp_server.go:147-151`：远程 `ToolResult.Metadata` → `CallToolResult.Meta`；
 - `internal/tools/manager.go:969-1010`：`formatMCPResult` 直接 `cloneMetadataMap(result.Meta)`；
@@ -47,7 +91,7 @@
 也就是说：一个被攻陷/配置错误的远程 MCP server 可以返回：
 
 ```json
-{"skip_render_truncation": true, "model_visible_budget": 999999999}
+{"skip_render_truncation": true, "model_visible_budget_bytes": 999999999}
 ```
 
 并附带巨大 body，从而**绕过本地 render 层的模型上下文预算**。这不是抽象层的小问题，而是跨信任域的输出注入。
@@ -56,7 +100,7 @@
 
 1. 远程 metadata 是**不可信提示**，不是授权；
 2. 本地 surface 对 `executionScope=remote`（或 trustLevel != local）的响应强制硬上限，不因 `skip_render_truncation` 放行；
-3. `model_visible_budget` 只能**收窄**，不能超过本地 `modelToolTextByteBudget`/硬上限；
+3. `model_visible_budget_bytes` 只能**收窄**，不能超过本地 `modelToolTextByteBudget`/硬上限；
 4. `reserved_tail_bytes` 必须校验（不得超过 hard cap，必须能从 body 中找到对应尾部），否则忽略；
 5. `artifact_id` 必须带 namespace（见 P0-2）；
 6. 增加恶意 metadata 测试：
@@ -65,7 +109,12 @@
    - 远程声明虚假 reserved tail → 忽略；
 7. 文档第 9.3 节要增加“trust boundary”小节，不能只写“链路已通”。
 
-**结论**：不关闭此项，PR 1 不应该上线。
+**修订状态**：§9.3/§9.6 已补 trust boundary、Meta allowlist、hard cap、
+budget clamp、tail 校验和恶意 metadata 测试清单；同时拆分
+`CaptureLimit` / `ModelVisibleCap`，并新增 wire 层 `MaxMCPResponseBytes`
+与显式 `MCPResultContext`（trust 只来自 server config）。
+
+**结论**：内容已补；独立安全复审和 PR1 测试通过前仍不关闭，PR1 不应上线。
 
 ### P0-2 Artifact 命名空间与所有权
 
@@ -91,6 +140,12 @@ type ArtifactRef struct {
 - 远程 `artifact_read` 只解析对应 target scope；
 - 跨 scope 请求返回 `ARTIFACT_SCOPE_DENIED`；
 - 加 conformance/security 测试：伪造/跨 target/跨 scope 的 artifact id 必须拒绝。
+
+**修订状态**：§9.7 已补 `ArtifactRef`、local/remote canonical id、
+`Origin` 感知的裸 id 归属、跨 target 拒绝、严格 ID/target 正则、
+归档失败/过期错误码和兼容迁移规则。
+
+**结论**：内容已补；独立安全复审和 PR1 artifact scope 测试通过前仍不关闭。
 
 ### P0-3 Capability / Policy Gate 的顺序与映射
 
@@ -129,6 +184,13 @@ type ArtifactRef struct {
 - `CanDirectCall` 不得绕过 3/4/5/6；
 - direct CLI 也必须走同一个 gate；
 - 远程 `profile` 只决定“工具是否存在”，不决定“这次是否允许”。
+
+**修订状态**：§6.6/§10.5/§10.6 已补 0–18 固定顺序、复用
+`policy.Engine` / `ToolExecutionPolicy`、direct/CLI 同一性、bypass/HardAsk
+边界和 gate 测试清单；复审发现 allow rule/callback 可短路部分安全门，
+已改为 hard safety gates 并增加 `policy_legacy_safety_order` 兼容开关。
+
+**结论**：内容已补；复审和 PR3 gate 顺序测试通过前仍不关闭。
 
 ### P0-4 Streaming / Jobs / Interactive Terminal 的契约
 
@@ -170,9 +232,32 @@ B. 明确声明 streaming/interactive/jobs 为 **local-only surface**，远程�
 
 无论选哪个，不能保持当前“文档提了 shell core，但没有流式/job 契约”的状态。
 
+**修订状态**：§11.1 已选择方案 B：v1 core 只承诺 final-result；
+interactive/PTY/jobs/streaming 明确 local-only；Phase 4、远程 schema 和
+CLI 契约同步收敛。远程现有 `job_*` 标记为 legacy、默认关闭。
+
+**结论**：内容已补；复审确认 local-only 范围后可关闭。
+
 ---
 
-## 3. P1 缺口（实现前应补齐或明确 defer）
+## 3. P1 缺口与修订状态
+
+初版 P1 缺口与当前修订状态：
+
+| P1 | 设计文档 | 修订状态 | 复审/实现验证 |
+|----|----------|----------|----------------|
+| 工具清单 | §13.0 | 已补 | PR0 与 `toolregistry` 对账 |
+| MCP surface | §8.7 | 已补 | PR0 测试骨架 |
+| 会话状态 | §6.4/§11.2 | 已补 | typed accessor/矩阵复审 |
+| 错误/重试/幂等 | §10.7 | 已补 | golden + 不自动重放测试 |
+| 版本/兼容 | §13.7 | 已补 | 混合版本测试 |
+| CLI/direct | §8.4.1/§10.6 | 已补 | CLI golden |
+| 可观测性 | §12.4 | 已补 + rotation/基数 | schema/脱敏测试 |
+| 性能 | §15.2.1/§15.2.2 | 已补 + race/负载 | benchmark 执行 |
+| 威胁模型 | §16.3 | 已补 + 供应链 | 安全测试映射 |
+
+以下小节保留初版缺口描述，状态以本表为准；未完成“复审/实现验证”的项
+仍按缺口处理。
 
 ### 3.1 工具清单与迁移矩阵缺失
 
@@ -311,7 +396,18 @@ CLI 章节有命令示例，但缺：
 
 ---
 
-## 4. P2 文档一致性问题
+## 4. P2 文档一致性复查
+
+初版 P2 项的复查状态：
+
+| P2 项 | 状态 | 说明 |
+|-------|------|------|
+| 现状 vs 目标混写 | 已处理 | §8.2 标明当前/目标；§9.3 改为 trust boundary；PR1 措辞统一 |
+| 类型细节 | 已处理 | `InputSchema` adapter、`Registry.Filter`、`Clock/IDs`、权限表已补 |
+| 命名/开放问题 | 部分 | `CanDirectCall`/`Sessions` 已收口；`toolcore`/`toolctl` 名称仍开放 |
+| 附录/证据 | 已处理 | Appendix B 改 PowerShell；工具数量与 Appendix A 已修正 |
+
+以下为初版问题清单，保留作审计上下文。
 
 1. **现状 vs 目标混写**
    - 8.2 说 MCP 支持 stdio/http，但当前 `cmd/toolkit-mcp-server` 只 stdio；
@@ -333,51 +429,65 @@ CLI 章节有命令示例，但缺：
 
 ---
 
-## 5. 必须新增的章节
+## 5. 新增章节与状态
 
-建议在方案中新增：
-
-1. **8.7 MCP Surface 规格**：auth/roots/stateless/names/limits/trust/error mapping。
-2. **9.6 输出信任边界**：remote metadata hard cap、artifact namespace、reserved tail 校验。
-3. **10.5 Gate 顺序矩阵**：deny-tool / mode / profile / command policy / approval / direct call。
-4. **11.x SessionState 能力矩阵**：toolctx 全量、TTL/GC、stateless 差异。
-5. **12.4 Observability 接口**：Logger/Tracer/Progress/Metrics + 事件 schema 版本。
-6. **13.x 工具清单与迁移矩阵**：逐工具 core/local-only/surface/phase。
-7. **14.x 版本与 rollout**：core/surface/protocol/audit 版本、混合版本、remote 升级。
-8. **15.x 信任与对抗测试**：恶意 metadata/artifact/schema/tool poisoning。
-9. **16.3 威胁模型**：secrets/SSRF/subagent/OS 隔离。
-10. **17.x 验收标准**：每阶段可量化的 DoD。
-
----
-
-## 6. 修订后的 Definition of Done
-
-方案达到以下条件才算“完整、可进入实现”：
-
-- [ ] P0-1 输出信任边界：有硬上限、clamp、reserved tail 校验、恶意 metadata 测试；
-- [ ] P0-2 artifact namespace：scope/target/id 路由与跨 scope 拒绝测试；
-- [ ] P0-3 gate 顺序矩阵：direct/CLI/MCP/remote 同一顺序，无第二授权层；
-- [ ] P0-4 streaming/jobs/interactive 决策：纳入契约或明确 local-only；
-- [ ] 逐工具清单与迁移矩阵完成；
-- [ ] MCP surface 规格完成（auth/roots/stateless/names/limits/trust）；
-- [ ] SessionState 矩阵完成（含 toolctx 全量能力）；
-- [ ] 错误/重试/幂等映射表完成；
-- [ ] 版本/混合版本/rollout 方案完成；
-- [ ] 性能语料、阈值、CI 方法完成；
-- [ ] 威胁模型与安全测试完成；
-- [ ] 现有 `toolkit.Tool` → core Handler 的兼容映射完成；
-- [ ] P2 文档一致性问题修正。
+| 初版建议 | 设计文档位置 | 状态 |
+|----------|--------------|------|
+| MCP Surface 规格 | §8.7 | 已补 |
+| 输出信任边界 | §9.3/§9.6 | 已补 |
+| Gate 顺序矩阵 | §10.5/§10.6 | 已补 |
+| SessionState 能力矩阵 | §6.4/§11.2 | 已补 |
+| Observability 接口 | §12.4 | 已补 |
+| 工具清单与迁移矩阵 | §13.0 | 已补 |
+| 版本与 rollout | §13.7 | 已补 |
+| 信任与对抗测试 | §15.1、§16.3 | 已补 |
+| 威胁模型 | §16.3 | 已补 |
+| 每阶段可量化 DoD | §17.4/§17.5 | 已补 |
+| 网络类工具迁移 | §13.8 | 新增，v1 deferred |
 
 ---
 
-## 7. 建议修订顺序
+## 6. Definition of Done 与当前状态
 
-1. 先补 P0-1/P0-2（信任边界 + artifact scope），这是安全阻塞；
-2. 补 P0-3（gate 矩阵），避免实现时再长出第二授权层；
-3. 决定 P0-4（streaming/jobs 是否进入 core）；
-4. 补工具清单 + MCP surface 规格；
-5. 补 SessionState/错误/版本/运维；
-6. 最后补测试阈值与 DoD，再开始 PR 1。
+“文档内容完成”不等于“验收完成”。状态如下：
+
+| 条目 | 设计文档 | 安全/发布门 | 实现/测试 | 当前状态 |
+|------|----------|-------------|-----------|----------|
+| P0-1 输出信任边界 | 已补 | release gate | PR1 | design frozen；PR1 evidence pending |
+| P0-2 artifact namespace | 已补 | release gate | PR1 | design frozen；PR1 evidence pending |
+| P0-3 gate 顺序 | 已补 | design frozen | PR3 | design frozen；PR3 evidence pending |
+| P0-4 local-only 决策 | 已补 | design frozen | PR1 | design frozen；PR1 evidence pending |
+| 工具清单/迁移矩阵 | 已补 | design frozen | PR0 | design frozen；PR0 对账 pending |
+| MCP surface 规格 | 已补 | release gate | PR0/PR1 | design frozen；evidence pending |
+| SessionState 矩阵 | 已补 | design frozen | PR2/PR3 | design frozen；evidence pending |
+| 错误/重试/幂等 | 已补 | design frozen | PR1/PR3 | design frozen；evidence pending |
+| 版本/混合版本/rollout | 已补 | design frozen | PR1 | design frozen；evidence pending |
+| 性能语料/阈值/CI | 已补 | design frozen | PR1/PR2 | design frozen；evidence pending |
+| 威胁模型/安全测试 | 已补 | release gate | PR1–3 | design frozen；security evidence pending |
+| `toolkit.Tool` 兼容映射 | 已补 | design frozen | PR1 | design frozen；evidence pending |
+| P2 文档一致性 | 大部分已补 | backlog | PR0/doc | 命名/图片映射仍开放 |
+
+**当前判定**：
+
+- 文档缺口：P0 4/4、P1 主要项已补，P2 大部分已补；
+- 设计门：**conditional pass**（P0/P1 内容冻结；自审，不是独立安全签字）；
+- PR1–3：**未开始**（尚无本方案的实现证据）；
+- 结论：**可进入 PR0**；PR1 需 PR0 通过，生产/canary 需独立安全评审。
+
+---
+
+## 7. 修订进度与下一步
+
+| 步骤 | 状态 | 下一步 |
+|------|------|--------|
+| P0-1/P0-2 信任边界 + artifact scope | 内容已补 | 独立安全复审；PR1 测试 |
+| P0-3 gate 矩阵 | 内容已补 | 复审；PR3 测试 |
+| P0-4 streaming/jobs 范围 | 已决策 local-only | 复审确认 |
+| 工具清单 + MCP surface | 已补 | PR0 对账/测试骨架 |
+| SessionState/错误/版本/运维 | 已补 | PR0/PR1 验证 |
+| 测试阈值 + DoD | 已补 | PR0 复审；PR1 执行 |
+
+**下一步顺序**：PR0 复审 → P0/P1 Approved → PR1 → PR2 → PR3。
 
 ---
 
@@ -422,15 +532,18 @@ go list -deps ./cmd/aicli
 
 ## 9. 审核签字
 
-- 结论：**Changes requested**
-- 可进入实现的条件：P0 全部关闭，P1 全部解决或明确 defer（含 owner/日期）
-- 建议下一次评审重点：P0-1 信任边界、P0-3 gate 矩阵、P0-4 streaming/jobs 范围
+- 设计门：**Conditional approval for PR0**（P0/P1 内容冻结，自审）
+- 已关闭的文档缺口：P0 4/4 内容已补，P1 主要项已补，P2 大部分已补
+- PR1 门：PR0 通过 + P0-1/P0-2/P0-3 测试
+- 发布门：独立安全评审 + PR1–3 证据 + canary/rollback
+- 后续规则：不再重复设计复审；新发现进 PR backlog，只有可复现 P0
+  安全缺陷才重开设计门
 
 ---
 
 ## 10. 修订记录
 
-### 2026-10-22 P0 修订（待复审）
+### 2026-10-22 P0 修订（已冻结）
 
 设计文档已补 P0 四项：
 
@@ -445,4 +558,108 @@ go list -deps ./cmd/aicli
 - P0-4：§11.1 决策为 v1 final-result only；interactive/PTY/jobs/streaming
   明确 local-only，Phase 4 与远程 schema 同步收敛。
 
-当前状态：**P0 已补，等待复审**。P1/P2 仍未全部关闭，因此不建议开始实现。
+当前状态：**P0 已补，设计冻结**；P1 修订见下一节。
+
+### 2026-10-22 P1 修订（已冻结）
+
+- 新增 §13.0 工具清单与迁移矩阵，按 `toolregistry` / `manager.go` 实际注册表
+  标出 core/local-only/control-plane；
+- 新增 §8.7 MCP surface 规格（transport/auth/roots/session/naming/limits/error）；
+- 新增 §10.7 错误/重试/幂等（错误码、表面映射、只读重试、写/执行不重放）；
+- 新增 §12.4 可观测性接口（事件 schema、脱敏、audit/metrics 分工）；
+- 新增 §13.7 版本与 rollout（契约/schema/event 版本、混合版本、feature flag）；
+- 新增 §16.3 威胁模型（远程 metadata、tool poisoning、路径/命令、SSRF、
+  secrets、subagent、DoS）；
+- 补 §15.2.1/§15.2.2 benchmark 语料与初始阈值；
+- 补 §8.4.1 CLI/direct 契约（JSON、exit code、`--yes`、无 bypass）。
+- 补 §13.8 网络类工具迁移：`fetch`/`download`/`web_search`/`sourcegraph`
+  v1 保持 local-only，明确 NetworkPolicy/SecretProvider 进入条件与 N1–N5 顺序。
+- 补 §17.4 验收矩阵：区分 P0/P1 文档门与 PR1–3 实现门，并列出测试/命令/证据。
+- 补 §17.5 最佳实践验收/发布模型：DoR/DoD、T0–T6 测试分层、
+  条目→测试→证据追溯、独立安全评审、canary/回滚阈值、no-go 条件。
+
+当前状态：**P0+P1 设计冻结**。P2（文档一致性、命名/开放问题收尾）
+进入 PR backlog，不阻塞 PR0。
+
+P2 已处理：现状/目标混写、`InputSchema` adapter、`Registry.Filter`、
+`CanDirectCall` 语义、`Sessions()` typed accessor、Windows 命令示例、
+工具数量与附录映射。剩余：包名/CLI 名、图片/notebook 映射细节。
+
+### 2026-10-22 Round 2 复审发现（设计已补，已冻结）
+
+- P0-1：新增 wire 层 `MaxMCPResponseBytes`（8 MiB）与
+  `REMOTE_RESPONSE_TOO_LARGE`，避免在 fold 之前被超大响应耗尽内存；
+- P0-1：新增 `MCPResultContext`，trust 只来自 server config，
+  禁止从 `source` 字符串猜；
+- P0-2：新增 artifact ID/target 严格正则、归档失败
+  `ARTIFACT_WRITE_FAILED`、过期 `ARTIFACT_EXPIRED`；
+- P0-3：发现 allow rule 可短路 shell breaker/sensitive-write、callback
+  可覆盖部分 deny；设计已改为 hard safety gates，并增加
+  `policy_legacy_safety_order` 兼容开关；
+- P1：access/audit log rotation/retention、metrics label 基数限制；
+- P1：威胁模型新增构建/部署链篡改；T1/T5 增加 race。
+
+---
+
+## 11. 证据门与发布签字（Round 2 freeze）
+
+设计已冻结；以下不再是重复设计复审，而是 PR0/PR1/发布证据门：
+
+- **PR0 可开始**：设计冻结（本轮）；
+- **PR1 可开始**：PR0 通过 + P0-1/P0-2/P0-3 测试；
+- **可发布**：11.1/11.2/11.3 全部满足。
+
+### 11.1 设计与安全证据（发布门）
+
+- [ ] P0-1 独立安全复审：恶意/超大 metadata、skip/budget/tail、capture/model 拆分；
+- [ ] P0-1 wire cap / `MCPResultContext` / trust 仅来自 server config；
+- [ ] P0-2 独立安全复审：local/remote/target artifact scope、裸 id 归属；
+- [ ] P0-2 严格 ID/target、归档失败、过期/跨 scope 拒绝；
+- [ ] P0-3 设计/运行时复审：0–18 gate、direct/CLI 同一性、无第二授权层；
+- [ ] P0-3 hard safety gates：allow rule/callback 不能覆盖安全门；
+- [ ] P0-4 范围复审：final-result only、PTY/jobs/streaming local-only；
+- [ ] P1 工具清单：§13.0 与 `toolregistry` / `manager.go` 双向一致；
+- [ ] P1 MCP surface：auth/roots/session/name/limits/error；
+- [ ] P1 错误/重试：错误码、表面映射、写/执行不自动重放；
+- [ ] P1 可观测性：Event schema、脱敏、audit 失败策略；
+- [ ] P1 版本：ContractVersion/schema/event 版本、混合版本；
+- [ ] P1 威胁模型：每条威胁有测试映射；
+- [ ] P1 性能：语料、阈值、CI 方法、基线报告；
+- [ ] P1 运维：log rotation/retention、metrics 基数、race/负载；
+- [ ] P2 收尾：`toolcore`/`toolctl` 命名、图片/notebook 映射。
+
+### 11.2 PR0–3 实现证据
+
+- [ ] PR0：契约冻结、测试骨架、工具清单对账；
+- [ ] PR1：output/trust/artifact 单测、wire cap、恶意 metadata、跨 scope、归档失败、238 canary；
+- [ ] PR2：view/grep/glob/ls conformance、10k/100k benchmark；
+- [ ] PR3：CLI JSON/exit code、hard safety gates、callback 不可覆盖 deny、`--yes` 不绕过；
+- [ ] 全量回归：`go test ./...`、`go vet ./...`；
+- [ ] 回滚演练：关 feature flag / 回退 binary；
+- [ ] 证据归档：测试日志、benchmark JSON、canary 指标、rollback 记录。
+
+### 11.3 签字记录
+
+| 角色 | 姓名/账号 | 结论 | 日期 | 备注 |
+|------|-----------|------|------|------|
+| Design owner | 待填 | 待签 | | |
+| Security reviewer | 待填 | 待签 | 重点 P0-1/P0-2 | |
+| Runtime owner | 待填 | 待签 | PR1–3 | |
+| Release owner | 待填 | 待签 | 238 canary/rollback | |
+
+**发布条件**：11.1 全部勾选；11.2 至少 PR0 + PR1 + 对应 PR 证据齐全；
+11.3 四位角色签字。PR0 不要求 11.1 全部完成，只要求设计冻结。
+
+### 11.4 基线测试记录（2026-10-22）
+
+以下命令验证的是**现有代码基线**，不是 PR1–3 的新实现：
+
+| 命令 | 结果 |
+|------|------|
+| `go test ./internal/policy ./internal/toolregistry ./internal/output ./internal/toolresult -count=1` | PASS |
+| `go test ./internal/tools ./internal/remotetools -count=1` | PASS |
+| `go test ./internal/mcp/... -count=1` | PASS |
+| `go test ./internal/toolkit/... -count=1` | PASS |
+
+结论：当前基线可构建、policy/tool registry/output/MCP/remote/toolkit 测试通过；
+P0/P1 修订未引入代码变更，PR1–3 的新测试仍需按 §11.2 执行。

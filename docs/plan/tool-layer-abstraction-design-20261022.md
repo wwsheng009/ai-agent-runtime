@@ -1,22 +1,42 @@
 # 工具层抽象设计：一份定义，多种调用表面
 
-- 状态：Proposal / P0 revised（2026-10-22）；P1/P2 待补，待复审
+- 状态：Proposal / P0+P1 design frozen（2026-10-22）；P2 backlog；PR0 next
 - 日期：2026-10-22
 - 范围：`internal/toolkit`、`internal/toolkit/tools`、`internal/remotetools`、`internal/tools`、`cmd/toolkit-mcp-server`、`cmd/aicli-remote-tools`，以及后续 CLI/HTTP 表面
 - 目标：把“工具”抽成独立逻辑层，让同一份工具定义与实现可以被内置 Agent、MCP Server、远程工具服务、独立 CLI、HTTP/API 等表面复用
 
-> 上一轮审核结论：**Changes requested**。本次已按审核报告补齐 P0 四项，
-> P1/P2 仍未全部关闭，因此**仍不进入实现**，需复审后再放行。
+> 设计门：P0/P1 内容已冻结，进入 **PR0 契约验证**；不再重复设计复审。
+> 新发现仅在**可复现 P0 安全缺陷**时重开设计，其他进入 PR backlog。
+> PR1 开发门槛：PR0 + P0 测试；生产/canary 门槛：独立安全评审 + PR1 证据。
 > 审核报告：[`tool-layer-abstraction-design-20261022-review.md`](tool-layer-abstraction-design-20261022-review.md)。
 
 ### P0 修订状态
 
 | 编号 | 项目 | 本次处理 | 状态 |
 |------|------|----------|------|
-| P0-1 | 远程输出 metadata 信任边界 | 新增 §9.3/§9.6：远程 `Meta` 视为不可信提示，本地硬上限 + clamp + tail 校验 | 已补，待复审 |
-| P0-2 | Artifact 命名空间与所有权 | 新增 §9.7 与 `ArtifactRef`：local 裸 id、remote `remote:<target>:<id>`，跨 scope 拒绝 | 已补，待复审 |
-| P0-3 | Capability / Policy Gate 顺序 | 重写 §10.1–§10.6：复用现有 `policy.Engine`，给出固定 0–18 顺序，禁止第二授权层 | 已补，待复审 |
-| P0-4 | Streaming / Jobs / Interactive | 决策为 **v1 final-result only**；streaming/PTY/jobs 明确 local-only，见 §11.1 | 已补，待复审 |
+| P0-1 | 远程输出 metadata 信任边界 | 新增 §9.3/§9.6：远程 `Meta` 视为不可信提示，本地硬上限 + clamp + tail 校验 | 已补，design frozen；PR1 验证 |
+| P0-2 | Artifact 命名空间与所有权 | 新增 §9.7 与 `ArtifactRef`：local 裸 id、remote `remote:<target>:<id>`，跨 scope 拒绝 | 已补，design frozen；PR1 验证 |
+| P0-3 | Capability / Policy Gate 顺序 | 重写 §10.1–§10.6：复用现有 `policy.Engine`，给出固定 0–18 顺序，禁止第二授权层 | 已补，design frozen；PR3 验证 |
+| P0-4 | Streaming / Jobs / Interactive | 决策为 **v1 final-result only**；streaming/PTY/jobs 明确 local-only，见 §11.1 | 已补，design frozen；PR1 验证 |
+
+### P1 修订状态
+
+| 项目 | 位置 | 状态 |
+|------|------|------|
+| 工具清单与迁移矩阵 | §13.0 | 已补 |
+| MCP surface 规格 | §8.7 | 已补 |
+| 错误/重试/幂等 | §10.7 | 已补 |
+| 可观测性接口 | §12.4 | 已补 |
+| 版本与 rollout | §13.7 | 已补 |
+| 威胁模型 | §16.3 | 已补 |
+| 性能语料与初始阈值 | §15.2.1/§15.2.2 | 已补 |
+| CLI/direct 完整契约 | §8.4.1/§10.6 | 已补；approval/JSON/exit code |
+| 网络类工具迁移计划 | §13.8 | 已明确 v1 deferred、N1–N5 顺序 |
+| P0/P1/PR1–3 验收矩阵 | §17.4 | 已补；文档门/实现门分离 |
+| 最佳实践验收/发布模型 | §17.5 | 已补；DoR/DoD、测试分层、追溯、安全评审、canary/no-go |
+
+P1 表内“已补”表示随 P0/P1 **design freeze** 冻结；后续差异走 PR backlog，
+不再以重复设计复审推进。
 
 ---
 
@@ -236,6 +256,10 @@ type Definition struct {
 - `Name` 是规范名；`Aliases` 仅用于兼容/模型习惯，注册表要能解析；
 - schema 在注册时统一 canonicalize（复用 `internal/toolschema`）；
 - 远程 prefix（`remote_238__`）、MCP server name、CLI 子命令名都由 surface 添加，不写进 Definition。
+- `InputSchema` 是 canonical JSON；旧 `toolkit.Tool.Parameters()` 的
+  `map[string]interface{}` 由 adapter marshal + canonicalize 后填入，
+  反向读取时 unmarshal，保证两岸 schema 完全一致；
+- `Version` 使用语义化版本；参数/语义变更必须升版本（见 §13.7）。
 
 ### 6.2 Handler 与 Call
 
@@ -264,6 +288,13 @@ type RequestInfo struct {
 - Handler **不**读取 `toolctx`、不持有 `executor.Sandbox`、不解析命令行策略；
 - Handler 只通过 `call.Runtime` 访问环境；
 - Handler 返回 `Result`，不负责 MCP/CLI/HTTP 映射。
+
+兼容 adapter（`toolkit.Tool` ↔ `toolcore.Handler`）：
+
+- `Name` / `Description` / `Version` 直接映射；
+- `Parameters()` ↔ `InputSchema`：marshal + canonicalize / unmarshal；
+- `Execute(ctx, args)` ↔ `Execute(ctx, call)`：args 由 `toolargs` 归一；
+- `CanDirectCall()` ↔ `Definition.DirectCall`：只影响暴露，不影响授权。
 
 ### 6.3 Result 与错误契约
 
@@ -301,6 +332,7 @@ type ResultOrigin struct {
   - MCP：`IsError` + `Meta.error_code/next_action/retriable`；
   - CLI：非零退出码 + JSON error；
   - HTTP：状态码 + JSON error；
+- 完整错误码/重试/幂等映射见 §10.7；
 - 工具不得直接写 stdout/stderr；日志走 runtime/observability。
 
 ### 6.4 Runtime 接口
@@ -408,6 +440,8 @@ type EnvProvider interface {
   `Extensions().Get/Set` 代替 typed accessor；
 - `Result.Origin` 由 Runtime/Surface 填充；远程 MCP 客户端在 `formatMCPResult`
   处必须按 MCP server 的 trust level 重新标注，不得沿用远程自报的信任级别；
+- `Clock` 用于 duration/timeout/deadline 的可测试时间源；`IDs` 用于
+  `ToolCallID`/request id/artifact 临时 id；TestRuntime 必须可确定性注入；
 - 任何未注入的能力默认 fail-closed（返回 `UNSUPPORTED`/`DENIED`）。
 
 ### 6.5 Registry
@@ -417,7 +451,7 @@ Registry 负责：
 - 注册/注销；
 - 别名解析（`read` → `view`）；
 - schema canonicalize + revision；
-- 按 capability / surface / profile 列出；
+- 按 capability / namespace / names 列出；
 - 冲突检测（同名、alias 冲突、canonical name 预算）。
 
 ```go
@@ -428,9 +462,17 @@ type Registry interface {
     List(filter Filter) []Handler
     Schema(name string) (json.RawMessage, bool)
 }
+
+type Filter struct {
+    Capabilities []Capability
+    Names        []string
+    Namespace    string // optional; e.g. "code" or "remote:238"
+}
 ```
 
-**注意**：profile（readonly/standard/ops/custom）、`tools:` allowlist、远程 prefix 都是 **surface filter**，不是 core 的一部分。
+**注意**：profile（readonly/standard/ops/custom）、`tools:` allowlist、远程 prefix
+都是 **surface filter**，不是 core `Registry.Filter` 的一部分；surface 先
+`List`，再按 profile/tools 裁剪。
 
 ### 6.6 执行流水线
 
@@ -565,7 +607,8 @@ tool serve --remote  --profile ops --workspace /home/n9e/itsm/repo
 远程 v1 明确不支持：
 
 - interactive stdin / PTY；
-- `detach` / background job / `job_*`；
+- `detach` / background job / `job_*`（v1 core 不支持；现有 remote
+  `job_*` 仅作 legacy 扩展，默认关闭）；
 - stdout/stderr 流式推送；
 - 跨请求 shell 会话状态。
 
@@ -593,7 +636,34 @@ toolctl serve --mcp http --listen 127.0.0.1:18765
 - `--allow-write` / `--allow-command` 只映射到既有 mode/capability 与
   `AllowToolCallWithContext`，不是第二套授权表；
 - v1 的 `run` 只支持 final-result；不提供 interactive PTY / job 子命令；
-- exit code：0 成功，2 参数错误，3 策略拒绝，4 执行失败，5 超时。
+- exit code：0 成功，2 参数错误，3 策略拒绝，4 执行失败，5 超时，
+  6 限流/不可用。
+
+#### 8.4.1 Direct / CLI 契约
+
+- `CanDirectCall` 只表示“可被非 MCP 表面直接调用”，不是权限；direct 调用
+  仍走 §10.5 的 0–14；
+- `run` 每次只执行一个工具调用；参数用 `--args-json` 或显式 flag；
+- `--json` 固定输出：
+
+```json
+{
+  "tool": "view",
+  "ok": true,
+  "output": "...",
+  "mime_type": "text/plain",
+  "metadata": {},
+  "error_code": "",
+  "next_action": "",
+  "retriable": false,
+  "artifact_ref": ""
+}
+```
+
+- 二进制结果输出 base64 + `mime_type`；大文本按 output core 的预算折叠；
+- `--yes` 只确认 `ask`，不得跳过 deny/HardAsk/sandbox；
+- 不提供 `--dangerously-bypass`；如未来需要，必须单独安全评审；
+- stderr 只放诊断/日志，stdout 只放结果，保证可管道消费。
 
 ### 8.5 HTTP/API / ACP / 测试
 
@@ -614,6 +684,68 @@ toolctl serve --mcp http --listen 127.0.0.1:18765
 | MCP/CLI/HTTP 映射 | ❌ | ✅ |
 | 审计/access/metrics | ❌（只发事件） | ✅ |
 | session state | 接口 | ✅ |
+
+### 8.7 MCP Surface 规格（P1）
+
+#### 8.7.1 Transport 与认证
+
+| 模式 | 当前 | 目标 | 认证 |
+|------|------|------|------|
+| stdio | `cmd/toolkit-mcp-server` | 统一 `tool serve --mcp stdio` | 进程管道；trust 由 server 配置决定 |
+| Streamable HTTP | `cmd/aicli-remote-tools` | 统一 `tool serve --mcp http` | 回环默认；非回环必须 token |
+
+规则：
+
+- HTTP 默认只监听回环；非回环监听必须配置 `AICLI_REMOTE_TOKEN` 或等价
+  secret，不允许把 token 放在 URL query；
+- 跨网段/公网必须 TLS 或 mTLS；token 轮换不要求重启进程；
+- **stdio 不自动等于 trusted local**：本地 `toolkit-mcp-server` 是 local；
+  通过 SSH 启动的 `aicli-remote-tools --stdio` 仍是 remote，按 target 配置；
+- HTTP 的 `trustLevel` 由 target 配置决定：`trusted_remote` /
+  `untrusted_remote`；
+- `untrusted_remote` 默认只读；write-like 工具在
+  `ToolExecutionPolicy.AllowToolInfo` 处硬拒；
+- 远程 metadata 仍按 §9.3/§9.6 处理，认证不等于可信输出。
+
+#### 8.7.2 Roots 与会话
+
+- `roots/list` 只能**收窄** workspace / allowed roots；每个 root 必须落在
+  server 配置的允许根内，不能扩大；
+- 请求未声明 roots 时使用 base workspace；
+- HTTP 默认 stateless：不承诺 dedup/ledger/todos/file change notifier；
+- KeepAlive 30s；`CallTool` 前同步 `ensureClient` 重连；
+- 断连后不自动重放已经发出的写/执行请求；只有明确的只读调用才可在
+  重连后重试一次；
+- 429 必须带 `Retry-After`，客户端不得紧循环重试。
+
+#### 8.7.3 名称、schema 与列表
+
+- canonical name：`mcp__<server>__<tool>`；远程：`remote_<target>__<tool>`；
+- canonical name 上限 64 字符；超长用稳定 hash 截断，不静默截断；
+- 本地 builtin 与远程同名冲突时，远程工具拒绝加载（现有
+  `validateRemoteToolNameCollision` 行为）；
+- `tools/list` 只列 canonical name；`read`/`rg`/`bash` 等别名可调用但不重复列出；
+- 描述默认上限 4 KiB，schema 默认上限 64 KiB，单 server 默认最多 256 个工具；
+- 不可信 server 的 description/schema 只作为数据；不得把其中文本当指令执行；
+- `tools/list` 先过 profile/tools/deny/trust filter，再给模型。
+
+#### 8.7.4 调用、错误与限制
+
+- `tools/call` 与 builtin 走同一 gate（§10.5），server 端不得自行授权；
+- 工具业务失败用 `IsError=true` + `Meta.error_code/next_action/retriable`；
+  协议/传输失败用 JSON-RPC/HTTP 错误，不混用；
+- HTTP 状态：`400` 参数、`401/403` 认证/策略、`404` 工具、`408` 超时、
+  `409` 状态冲突、`429` 并发/限流、`500` 内部、`503` 不可用；
+- 默认并发上限 8；达到上限返回 429 + `Retry-After`；
+- 请求体、`Meta`、输出 body 均有硬上限；超限不得靠“客户端会截断”兜底；
+- `MaxMCPResponseBytes`（默认 8 MiB，可调低）必须在 JSON decode **之前**
+  由 transport 层执行；超限返回 `REMOTE_RESPONSE_TOO_LARGE`，不进入 fold、
+  不重试；
+- access log 记录 principal/token hash、remote addr、tool、decision、
+  duration、bytes、error_code、artifact_ref；不记录原始 token/完整命令。
+
+**现状**：`cmd/toolkit-mcp-server` 仍只 stdio；HTTP 由
+`cmd/aicli-remote-tools` 独立实现。`tool serve` 统一入口是目标，不是现状。
 
 ---
 
@@ -739,6 +871,27 @@ core ToolResult.Metadata
 **禁止只改 `RenderToolResultContentForModel`** 而让 `formatMCPResult`
 继续无条件透传 `skip` / budget / artifact id。
 
+`origin` 必须由调用方显式传入，不能从 `source` 字符串猜：
+
+```go
+type MCPResultContext struct {
+    Server         string // mcp server / target name
+    TrustLevel     string // local | trusted_remote | untrusted_remote
+    ExecutionScope string // local | remote
+}
+```
+
+映射来源是 `internal/config` 的 `MCPTrustLevel` / `ExecutionMode`
+（`mcpregistry.ToolInfo` 已有 `MCPTrustLevel` 字段），不是远程 `Meta`：
+
+| server 配置 | Origin |
+|-------------|--------|
+| 本地 toolkit stdio | `local` |
+| SSH 启动的 remote stdio | `remote` + `trusted_remote` |
+| HTTP loopback + token | `remote` + `trusted_remote` |
+| HTTP 非回环 + TLS/mTLS | `remote` + `trusted_remote` |
+| 普通第三方 MCP | `remote` + `untrusted_remote` |
+
 必须补的契约测试：
 
 ```text
@@ -751,6 +904,9 @@ remote Result(meta) → MCP Meta → local formatMCPResult
 4. remote reserved_tail_bytes 超出 cap → 忽略；
 5. remote bare art_... → 归到该 remote target，不能落到 local store；
 6. remote:other:art_... → ARTIFACT_SCOPE_DENIED。
+7. 同一 body 在 Origin=local 与 Origin=remote 下行为不同：local 可 pass-through，
+   remote 必须 clamp；
+8. 伪造 source 字符串不能改变 TrustLevel；trust 只能来自 server config。
 ```
 
 ### 9.4 二进制输出
@@ -792,6 +948,15 @@ cap =
 `internal/output` 的 ceiling。远程 body 即使带合法 tail，也不得超过该硬上限。
 远程路径不应用本地 4 KiB floor；否则一个小 budget 反而会被放大。
 
+`RemoteOutputHardCap` 只约束**模型可见 body**；wire 层另有
+`MaxMCPResponseBytes`（默认 8 MiB，transport/config 可调低），在 JSON
+decode 前执行。两者不可互相替代：没有 wire cap，恶意 server 可以在本地
+fold 之前用超大响应耗尽内存。
+
+`view` 的普通窗口是 32 KiB，`files[]` 批量聚合窗口是
+`viewBatchAggregateBudgetBytes`（64 KiB）；批量窗口必须由工具/参数语义决定，
+不能只凭远程 `Meta` 声明。
+
 规则：
 
 1. `cap` 永远是远程 body 的模型可见上限；`declared` 不能超过 `hardCap`；
@@ -809,14 +974,15 @@ cap =
 6. 远程 body 被 fold 时，必须保留 artifact 指针；没有 artifact 时给出
    `next_action` 让模型缩小请求；
 7. 本地可信工具的现有行为不变；远程结果的 `Origin.TrustLevel` 默认为
-   `trusted_remote`（带 token/TLS 的专用 target）或 `untrusted_remote`
-   （普通 MCP server），两者都不得绕过上面的硬上限。
+   `trusted_remote`（专用 target，含 SSH stdio / token / TLS）或
+   `untrusted_remote`（普通 MCP server），两者都不得绕过上面的硬上限。
 
 必须覆盖的恶意 metadata 测试：
 
 | 输入 | 期望 |
 |------|------|
 | `skip=true` + 1 MiB body | 忽略 skip，fold 到 cap |
+| wire body 超过 `MaxMCPResponseBytes` | `REMOTE_RESPONSE_TOO_LARGE`，不 decode/fold/重试 |
 | `model_visible_budget_bytes=1<<30` | clamp 到 hardCap |
 | `reserved_tail_bytes=1<<30` | 忽略 tail |
 | `reserved_tail_bytes` 指向不存在的尾部 | 忽略 tail，正常 fold |
@@ -855,6 +1021,13 @@ cap =
    `ARTIFACT_SCOPE_DENIED`；
 7. 本地 `Store.GetOwned` 继续按 session/lineage 校验；远程 store 按
    target 目录隔离；两者都不能通过裸 id 跨 scope 读取。
+8. ID 必须严格匹配 `^art_[0-9a-f]{32}$`；target 必须匹配
+   `^[a-z0-9][a-z0-9_.-]{0,63}$`；不匹配直接拒绝，禁止路径拼接；
+9. target 名称一旦发布必须稳定；重命名 target 视为不同 scope，旧 ref 失效；
+10. 归档失败时：如果结果需要 artifact 才能恢复被折叠内容，返回
+    `ARTIFACT_WRITE_FAILED`，不得返回“看似成功但中间丢失”的 body；
+11. artifact 过期/不存在返回 `ARTIFACT_EXPIRED` / `NOT_FOUND`，并给出
+    “重新执行命令”的 next_action；不得回退到同名本地 artifact。
 
 `ArtifactSink.Put` 返回 `ArtifactRef`，输出层写两处：
 
@@ -945,17 +1118,17 @@ deny list 或 sandbox。
 |---|------|--------|------|
 | 0 | surface filter：profile / `tools:` / prefix / server trust | surface | 不可见则 `TOOL_NOT_FOUND` |
 | 1 | canonical name + alias + collision | registry/surface | 冲突则拒绝加载/调用 |
-| 2 | schema validate（含 hook patch 后重跑） | toolargs/surface | `INVALID_ARGS` |
+| 2 | schema validate（含 hook patch 后重跑） | toolargs/surface | `INVALID_ARGUMENT` |
 | 3 | permission hook：deny / modify | `policy.Engine` | deny 硬拒；modify 回步骤 2 |
 | 4 | static policy：deny → delegation → allowlist → capability scope → read-only → untrusted_remote write deny | `ToolExecutionPolicy.AllowTool` / `AllowToolInfo` | `TOOL_DENIED` / `CAPABILITY_DENIED` |
-| 5 | rules（first match wins；deny 硬拒） | `policy.Engine` | `RULE_DENY` |
-| 6 | remembered grants（session/project） | `policy.Engine` | allow / 继续 |
-| 7 | external-directory gate | `policy.Engine` | ask/deny |
-| 8 | read-only auto allow | `policy.Engine` | allow / 继续 |
-| 9 | shell breaker / sensitive-write | `policy.Engine` | HardAsk / deny |
+| 5 | hard safety gates：shell breaker / sensitive-write | `policy.Engine` | HardAsk / deny；不可被 allow rule/callback 放行 |
+| 6 | rules（first match wins；deny 硬拒；allow 不得覆盖 safety gate） | `policy.Engine` | `RULE_DENY` |
+| 7 | remembered grants（session/project） | `policy.Engine` | allow / 继续 |
+| 8 | external-directory gate | `policy.Engine` | ask/deny |
+| 9 | read-only auto allow | `policy.Engine` | allow / 继续 |
 | 10 | plan-entry gate | `policy.Engine` | ask / allow |
 | 11 | permission mode：default / accept_edits / plan / bypass / dont_ask | `policy.Engine` | allow/ask/deny |
-| 12 | callback override（patch 后重新校验） | host callback | 不能绕过 hard constraints |
+| 12 | callback：deny/ask/patch（patch 后重新校验） | host callback | 不能把 policy deny 改为 allow |
 | 13 | ask 解析：dont_ask 拒绝；bypass 放行但 HardAsk 除外；无 AskHandler = headless deny | `policy.Engine` | allow/deny |
 | 14 | execution preflight：路径 sandbox + command policy + env filter | `ToolExecutionPolicy.AllowToolCallWithContext` + Runtime | `PATH_DENIED` / `COMMAND_DENIED` |
 | 15 | execute | Handler | 结果/错误 |
@@ -967,14 +1140,39 @@ deny list 或 sandbox。
 
 - **步骤 0 不是授权**；`profile/tools` 只决定“是否存在”；
 - **步骤 4 的 deny 恒优先**；`AllowlistEnabled && empty` 等于全拒；
-- **步骤 11 的 bypass 只跳过 mode 的 ask/deny**，不跳过步骤 4、9、14；
+- **步骤 11 的 bypass 只跳过 mode 的 ask/deny**，不跳过步骤 4、5、14；
 - **步骤 13 的 HardAsk 不被 bypass 解决**；`dont_ask` 把 ask 变成 deny；
 - **步骤 14 必须检查实际目标参数**，不能只信工具名；
-- 步骤 5 的显式 allow rule 按现有语义可以短路步骤 9；这是用户显式策略，
-  本方案不偷偷改成“shell breaker 恒优先”；若要改，单独提安全变更；
 - **direct call / CLI 从步骤 0 走到 14**；`CanDirectCall` 只表示“可被
   非 MCP 表面直接调用”，不是跳过 gate 的开关；
 - 远程 `Sandbox.CheckCommand` 是步骤 14 的一部分，不是另一个 allow 表。
+
+#### 10.5.1 复审发现：安全门必须 hard
+
+对照现有 `policy.Engine` 代码后发现两个需要修正的行为：
+
+1. 显式 allow rule 在 `firstMatchingRule` 阶段可以先于
+   shell breaker / sensitive-write 返回 allow，从而短路安全门；
+2. callback 在 mode/敏感门之后可以把部分 `deny` 改成 `allow`；
+   现有代码只对 `HardAsk` 做了回退保护，`dont_ask`/plan deny 仍可能被覆盖。
+
+这与“安全不变量单调”不一致。方案调整为：
+
+- shell breaker、sensitive-write 是 **hard safety gates**，必须先于
+  allow rule/grants/callback 判定；
+- allow rule 只能放宽普通 mode/allowlist，不能放行 hard safety deny；
+- callback 可以 deny、ask、patch；**不能把 policy deny 改为 allow**；
+  只能对已经是 `ask` 且非 `HardAsk` 的决策做批准；
+- `dont_ask`、plan deny、HardAsk、sandbox/command deny 不可被 callback 覆盖；
+- 为兼容旧行为，可提供 `policy_legacy_safety_order` 开关，默认关闭，
+  只保留一个发布周期；开启必须记录风险并禁止用于生产 target。
+
+PR3 必须补测试：
+
+- `TestAllowRuleCannotBypassShellBreaker`
+- `TestCallbackCannotOverrideDontAsk`
+- `TestCallbackCannotOverridePlanDeny`
+- `TestCallbackCannotOverrideSandboxDeny`
 
 ### 10.6 各表面的同一性
 
@@ -988,6 +1186,65 @@ deny list 或 sandbox。
 
 同一工具在不同表面允许的**结果**可以不同（例如远程没有 PTY），但
 **判定顺序和拒绝语义必须相同**。
+
+### 10.7 错误、重试与幂等（P1）
+
+#### 10.7.1 错误分类
+
+`ErrorCode` 使用稳定字符串；`ErrorCode` 优先于 `Err` 的文本：
+
+| 类别 | 规范码 |
+|------|--------|
+| 参数/发现 | `INVALID_ARGUMENT`、`TOOL_NOT_FOUND`、`UNSUPPORTED` |
+| 策略/审批 | `TOOL_DENIED`、`CAPABILITY_DENIED`、`PATH_DENIED`、`COMMAND_DENIED`、`APPROVAL_REQUIRED`、`ARTIFACT_SCOPE_DENIED` |
+| 执行 | `COMMAND_FAILED`、`TIMEOUT`、`CANCELLED`、`OUTPUT_LIMIT_EXCEEDED`、`NOT_FOUND`、`WORKSPACE_UNAVAILABLE`、`ARTIFACT_WRITE_FAILED`、`ARTIFACT_EXPIRED` |
+| 传输 | `REMOTE_UNAVAILABLE`、`RATE_LIMITED`、`PROTOCOL_ERROR`、`REMOTE_RESPONSE_TOO_LARGE` |
+| 内部 | `INTERNAL_ERROR` |
+
+旧码 `INVALID_ARGS` 作为 `INVALID_ARGUMENT` 的兼容别名归一；不要新增第二套拼写。
+
+#### 10.7.2 表面映射
+
+| 类别 | MCP | HTTP | CLI exit |
+|------|-----|------|----------|
+| 参数 | `IsError=true` + `Meta.error_code` | 400 | 2 |
+| 工具不存在 | JSON-RPC error | 404 | 3 |
+| 策略/审批 | `IsError=true` + `Meta` | 403 | 3 |
+| 超时 | `IsError=true` + `Meta` | 408 | 5 |
+| 取消 | `IsError=true` + `Meta` | 409 | 5 |
+| 输出超限 | `IsError=true` + `Meta` | 413 | 4 |
+| 远程响应过大 | JSON-RPC/protocol error | 413 | 6 |
+| 限流 | JSON-RPC error / 429 | 429 + `Retry-After` | 6 |
+| 传输不可用 | JSON-RPC/protocol error | 503 | 6 |
+| 内部 | `IsError=true` + `Meta` | 500 | 4 |
+
+MCP 工具业务失败用 `IsError`，JSON-RPC/HTTP 协议失败用协议错误；
+不得把策略拒绝包装成 500，也不得把内部错误伪装成“模型参数错误”。
+
+#### 10.7.3 重试规则
+
+- **只读工具**（view/ls/glob/grep/artifact_read）允许在 transport
+  失败后重连重试 **最多一次**；
+- **写/编辑**（write/edit/append_write/multiedit/apply_patch）**禁止自动重试**；
+- **shell** 禁止自动重放；命令可能有副作用，超时/断连后由调用方决定；
+- `job_*` 为 local-only；未来 v2 若远程化，必须有 idempotency key 才能重试；
+- `CallTool` 前同步 `ensureClient` 重连是允许的；已经发出的请求不得
+  在不知道是否执行的情况下重放；
+- 429 必须遵守 `Retry-After`，最多重试一次，禁止紧循环；
+- 所有重试计入 audit `retry_count`，并保留同一 `ToolCallID`。
+
+#### 10.7.4 幂等与前置条件
+
+| 操作 | 幂等 | 规则 |
+|------|------|------|
+| view/ls/glob/grep/artifact_read | ✅ | 可安全重试 |
+| write/edit/append_write/multiedit/apply_patch | ❌ | 不自动重试；支持 `expected_sha256` 等前置条件时先校验 |
+| shell | ❌ | 不自动重放；非零 exit 是内容结果 |
+| fetch/download | ❌/部分 | download 落盘，按写操作处理 |
+| job_start（未来 v2） | ❌ | 需要 idempotency key + job 所有权 |
+
+错误判定顺序：**参数 → 策略/审批 → 执行 → 输出整形**。同一错误只能有一个类别，
+不得同时返回 `TOOL_DENIED` 和 `INTERNAL_ERROR`。
 
 ---
 
@@ -1093,6 +1350,7 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 
 ```json
 {
+  "schema_version": 1,
   "surface": "remote",
   "tool": "remote_238__grep",
   "capability": ["read_fs"],
@@ -1136,11 +1394,105 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 
 避免在 toolcore 里重复埋点；统一由 surface/runtime 记录。
 
+### 12.4 可观测性接口（P1）
+
+v1 不把 `Logger` / `Tracer` / `Metrics` 放进 toolcore `Handler`；core 只返回
+结构化 `Result`/`ErrorCode`。surface 通过统一 sink 记录：
+
+```go
+type SurfaceObserver interface {
+    Event(ctx context.Context, event Event)
+    Metric(ctx context.Context, metric Metric)
+}
+
+type Event struct {
+    SchemaVersion int
+    Surface       string   // builtin | mcp | remote | cli | http
+    Origin        string   // local | remote | cli | test
+    TrustLevel    string
+    Target        string
+    Tool          string
+    Capabilities  []string
+    ToolCallID    string
+    TraceID       string
+    SessionID     string
+    Decision      string   // allow | ask | deny
+    Stage         string   // policy stage, e.g. mode / sandbox
+    ErrorCode     string
+    DurationMS    int64
+    BytesIn       int
+    BytesOut      int
+    ArtifactRef   string
+    RetryCount    int
+}
+```
+
+规则：
+
+- `Event.SchemaVersion` 从 1 开始；新增字段只能追加，不改变已有字段语义；
+- audit、access log、metrics 是三个 sink，可以共用事件，但落盘格式独立版本化；
+- 不记录原始 token、完整命令、文件内容；命令只记录 preview/hash；
+- audit 写入失败不阻塞工具结果，但必须计数并输出到 stderr/health；
+- access/audit log 必须有 rotation/retention 配置，禁止无界增长；
+- metrics label 必须限制基数（tool/surface/decision），禁止把路径/命令作为 label；
+- `Progress` 事件是 local-only（v1 远程无流式）；不进 core 契约；
+- 指标名稳定：`tool_calls_total`、`tool_failed_total`、`tool_denied_total`、
+  `tool_duration_ms`、`tool_bytes_in/out`、`artifact_scope_denied_total`、
+  `tool_metadata_rejected_total`。
+
 ---
 
 ## 13. 迁移路线
 
 迁移原则：**小步、可回滚、每阶段都能独立构建与验证**。不要一次性重写所有工具。
+
+### 13.0 工具清单与迁移矩阵（P1）
+
+本表以 `internal/toolregistry/registry.go` 与
+`internal/tools/manager.go` 的实际注册表为准；它是迁移基线，不是第二份工具注册表。
+
+| 工具 | 别名 | 组 | v1 core | Runtime 依赖 | 表面 | 阶段/说明 |
+|------|------|----|---------|--------------|------|-----------|
+| `view` | `read` | read | ✅ | Path / Output | builtin/MCP/remote/CLI | P2；别名同实现 |
+| `ls` | — | read | ✅ | Path | 全部 | P2 |
+| `glob` | — | read | ✅ | Path / ignore | 全部 | P2 |
+| `grep` | `rg` | read | ✅ | Path / ripgrep fallback | 全部 | P2 |
+| `write` | — | edit | ✅ | Path / Permission / Atomic | 全部 | P3 |
+| `edit` | — | edit | ✅ | Path / Permission | 全部 | P3 |
+| `append_write` | — | edit | ✅ | Path / Permission | 全部 | P3 |
+| `multiedit` | — | edit | ✅ | Path / Permission | 全部 | P3 |
+| `apply_patch` | — | edit | ✅ | patch parser / Path / Mutation | 全部 | P3 |
+| `shell` | `bash`、`execute_shell_command` | shell | ✅ final | Command / Env / Artifact | 全部 | P4；无 PTY/job |
+| `artifact_read` | — | io | ✅ interface | ArtifactRef / ReadScope | 全部 | P1/P2；local/remote |
+| `aicli_exec` | — | shell | ❌ local-only | 本地 aicli binary | builtin/CLI | 非远程可移植 |
+| `fetch` | — | webfetch | ❌ local-only v1 | HTTP / URL policy | builtin/CLI | 需 SSRF 防护 |
+| `download` | — | webfetch | ❌ local-only v1 | HTTP / write | builtin/CLI | write-like |
+| `web_search` | — | search | ❌ local-only v1 | providers / network | builtin/CLI | 多 provider |
+| `sourcegraph` | — | search | ❌ local-only v1 | network | builtin/CLI | 公网检索 |
+| `openai_image_generate` | `image_generate` | io | ❌ local-only v1 | provider / output dir | builtin/CLI | 条件注册 |
+| `code_search` / `code_inspect` / `code_navigate` / `code_references` / `code_callers` | — | read | ❌ local-only v1 | knowledge / LSP | builtin/CLI | code gate |
+| `todos` | — | control | ❌ local-only v1 | session state | builtin/CLI | stateful |
+| `job_start` / `job_output` / `job_list` / `job_search` / `job_cancel` / `job_monitor` / `job_control` / `job_input` | `background_task` 等 | orchestration | ❌ local-only v1 | JobRuntime | builtin/CLI | 不进入 core；远程现有 job_* 仅兼容扩展，默认关闭 |
+| `subagent_*` / `team_*` / `supervision_*` / `read_agent_result` | 多个 | orchestration | ❌ not core | control plane | builtin/CLI | 控制面，永不进 core |
+| `schedule_*` | — | orchestration | ❌ not core | scheduler | builtin/CLI | 控制面 |
+| `get_goal` / `read_goal` / `update_goal` | — | control | ❌ not core | goal state | builtin/CLI | 控制面 |
+| `ask_user_question` / `plan_*` | — | orchestration | ❌ not core | UI / plan | builtin/TUI | TUI local |
+| `search_tool` | — | search | ❌ not core | agent-side | builtin | 非 toolkit builtin |
+
+**v1 core 的选择**：
+
+- 文件/搜索：`view`、`ls`、`glob`、`grep`；
+- 写入：`write`、`edit`、`append_write`、`multiedit`、`apply_patch`；
+- 执行：`shell` 的 final-result 形态；
+- 产物：`artifact_read` 的接口与 scope 路由。
+
+其余工具保持现有表面，不为了“统一”而搬进 core。特别是：
+
+- `aicli_exec` 依赖本机 aicli，不适合作为跨 target 工具；
+- `fetch`/`download`/`web_search`/`sourcegraph` 需要单独的 URL/网络策略；
+- `code_*` 依赖 knowledge/LSP 索引；
+- `job_*`、subagent/team、schedule、goal、plan 属于控制面，不是文件工具；
+- 远程现有 `job_*` 是历史 surface 扩展，v1 不纳入 core，默认不暴露。
 
 ### Phase 0：冻结契约与基线
 
@@ -1149,6 +1501,9 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 - `internal/toolcore` 空壳 + `Definition`/`Handler`/`Runtime`/`Result` 接口；
 - `toolkit.Tool` → `toolcore.Handler` 的兼容 adapter；
 - `ArtifactRef` / `ResultOrigin` / trust clamp 的契约测试骨架；
+- §13.0 工具清单与 `toolregistry` / `manager.go` 的双向一致性测试；
+- MCP surface 的 auth/roots/name/limit/error 映射测试骨架；
+- 错误码/重试/幂等/版本兼容 golden fixtures；
 - 一组 conformance fixtures（文本/二进制/大文件/长行/ignore/symlink/图片/notebook/Unicode/CRLF）；
 - 现有本地工具输出基线快照。
 
@@ -1267,13 +1622,105 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 - 代码搜索不再出现第三套同名工具实现；
 - 本地/远程工具差异只由 Runtime/feature matrix 解释。
 
+### 13.7 版本与兼容策略（P1）
+
+#### 13.7.1 版本维度
+
+| 对象 | 字段 | v1 值 | 规则 |
+|------|------|-------|------|
+| toolcore 契约 | `ContractVersion` | `1` | 破坏性变更必须升 major |
+| 工具 schema | `Definition.Version` | 各工具独立 | 参数/语义变更必须升版本 |
+| MCP 协议 | negotiated version | 由 SDK 决定 | 不私下扩展协议 |
+| audit/access 事件 | `SchemaVersion` | `1` | 只追加字段 |
+| remote 配置 | `config_version` | `1` | 未知字段忽略 |
+| artifact ref | `artifact_ref` | `art_...` / `remote:<target>:art_...` | v1 固定 |
+
+#### 13.7.2 兼容规则
+
+- 新增字段只能追加；不改变已有字段语义；
+- 工具参数保持 `additionalProperties: false`；新增参数必须升
+  `Definition.Version`，旧客户端不传时走默认值；
+- 别名至少保留一个大版本；删除别名前先标记 deprecated 并在
+  `tools/list` 元数据中暴露；
+- 新客户端 + 旧 server：缺少的 metadata 按“无声明”处理；
+  不假设 `artifact_ref`、`trust_level` 一定存在；
+- 旧客户端 + 新 server：canonical name、`artifact_id` 兼容字段、
+  未知 metadata 忽略；
+- 新旧版本都必须在 `tools/list` 暴露 `contract_version` /
+  `schema_version`，便于诊断；
+- 远程 binary 与本地客户端独立升级；不要求版本完全一致，但必须
+  通过 capability negotiation 判断是否支持；
+- artifact namespace 是加法：旧裸 `art_...` 继续可读，新远程输出写
+  `remote:<target>:art_...`。
+
+#### 13.7.3 Rollout 与回滚
+
+- 功能开关：`toolcore_output`、`toolcore_read`、`toolcore_mutate`、
+  `toolcore_shell`、`toolcore_cli`；默认按阶段关闭；
+- 临时兼容开关 `policy_legacy_safety_order`：默认关闭，只保留一个发布周期；
+  开启时不得用于生产 target，并记录风险；
+- 远程现有 `job_*` 作为 legacy 开关，默认关闭，不进入 v1 core；
+- 先在 TestRuntime + conformance 跑通，再在单个 target（238）canary；
+- canary 观察：错误率、p95 延迟、输出字节、429、artifact scope denied；
+- 部署由外部 `itsm-deploy-238` / 发布流水线负责；**toolcore 不内置部署脚本**，
+  工具只提供 health/status/版本查询；
+- 回滚只关 feature flag 或回退 binary，不删除旧 artifact/旧表；
+- 破坏性迁移必须提供双写/双读窗口和回滚脚本，且单独评审。
+
+### 13.8 网络类工具迁移（v1 不迁移）
+
+`fetch`、`download`、`web_search`、`sourcegraph`、`openai_image_generate`
+在 v1 **不进入 core**，保持 local-only；原因是它们引入了文件工具没有的
+网络信任边界：
+
+- URL/域名 allowlist、私网/回环/云 metadata 拒绝、重定向复检、DNS rebinding；
+- API key / provider 凭证的注入、脱敏和轮换；
+- 响应大小、content-type、超时、限速、重试/缓存；
+- `download` 同时是网络 + 写文件，必须走路径/原子写/覆盖策略；
+- `web_search` 是多 provider、fallback、成本/速率限制；
+- 远程 target 出网策略与本地完全不同，不能默认共享。
+
+进入条件（全部满足才排期）：
+
+1. **NetworkPolicy** 契约：
+
+```go
+type NetworkPolicy interface {
+    CheckURL(ctx context.Context, rawURL string, op NetworkOp) (URLDecision, error)
+    CheckRedirect(ctx context.Context, from, to string) error
+}
+```
+
+2. **SecretProvider** 契约：按 target/session 取凭证，禁止从进程环境
+   任意继承；日志只记录 hash/名称；
+3. **HTTPClient** 可注入，测试可替换；DNS/重定向/超时/最大字节可配置；
+4. 输出进入共享 output core：fetch body、search 结果、图片走 artifact；
+5. surface 策略明确：先 builtin/CLI，MCP local 次之；远程 target 必须
+   单独 opt-in 出网 allowlist。
+
+推荐迁移顺序：
+
+| 顺序 | 工具 | 类型 | 关键验收 |
+|------|------|------|----------|
+| N1 | `fetch` | 只读网络 | SSRF/私网/重定向/DNS、content-type、大小上限 |
+| N2 | `sourcegraph` | 只读网络 | 单 provider、query 校验、rate limit、结果截断 |
+| N3 | `download` | 网络 + 写 | 路径 jail、原子写、覆盖策略、Content-Length、不自动重试 |
+| N4 | `web_search` | 只读网络 | 多 provider、凭证、fallback、缓存、成本/限速 |
+| N5 | `openai_image_generate` | 网络 + 图片 | provider、generated-images dir、artifact、prompt 安全 |
+
+远程化门槛：在 N1–N2 完成并通过 SSRF/DNS/重定向测试前，不允许把网络工具
+放进远程 profile；`download` 远程化还必须先有远程写入策略和磁盘配额。
+
+验收测试至少覆盖：私网/回环/metadata IP、重定向到私网、DNS rebinding、
+超大响应、错误 content-type、401/403/429、取消/超时、凭证不出现在日志。
+
 ---
 
 ## 14. 文件级改动地图
 
 | 路径 | 动作 |
 |------|------|
-| `internal/toolcore/contract.go` | 新增 Definition/Handler/Runtime/Result/Capability/ArtifactRef/ResultOrigin |
+| `internal/toolcore/contract.go` | 新增 Definition/Handler/Runtime/Result/Capability/ArtifactRef/ResultOrigin/ContractVersion |
 | `internal/toolcore/registry.go` | 新增 core registry（或适配 `toolkit.Registry`） |
 | `internal/toolcore/output/` | 新增共享输出整形（预算/fold/reducer/artifact/trust clamp） |
 | `internal/toolcore/viewcore/` | 新增 view 核心 |
@@ -1285,8 +1732,13 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 | `internal/toolkit/tools/*` | 改为 LocalRuntime adapter 或薄 wrapper；interactive/PTY/job 留在这里 |
 | `internal/remotetools/*` | 改为 RemoteRuntime + surface；删除重复工具实现；artifact 使用 namespaced ref |
 | `internal/remotetools/artifact.go` | 增加 target scope；输出 `remote:<target>:art_...` |
-| `internal/remotetools/workspace.go` | 拆分 `CaptureLimit` 与 `ModelVisibleCap`，不再让 `MaxOutputBytes` 兼任两者 |
-| `internal/tools/manager.go` | 从 core registry 消费；`formatMCPResult` 增加 trust 过滤与 artifact 归属 |
+| `internal/remotetools/workspace.go` | 拆分 `CaptureLimit` 与 `ModelVisibleCap`；MCP roots 只能收窄 |
+| `internal/tools/manager.go` | 从 core registry 消费；`formatMCPResult` 增加 `MCPResultContext`、trust 过滤与 artifact 归属 |
+| `internal/policy` | gate 顺序、错误码映射、retry/idempotency 的 golden tests |
+| `internal/observability` | 统一 Event/Metric schema v1 与脱敏 |
+| `internal/mcp/client` | KeepAlive、同步重连、429/Retry-After 处理 |
+| `internal/mcp/transport` | `MaxMCPResponseBytes` wire cap（decode 前） |
+| `internal/remotetools/server.go` | 非回环 token/TLS、429、health/metrics、access log |
 | `internal/toolkit/mcp_server.go` | 继续做 MCP 投影；补 metadata/binary 契约测试 |
 | `cmd/toolkit-mcp-server` | 保留兼容；内部改 `tool serve --mcp stdio` |
 | `cmd/aicli-remote-tools` | 保留兼容；内部改 `tool serve --remote` |
@@ -1318,6 +1770,8 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
    - `model_visible_budget_bytes` 超大 → clamp 到 hardCap；
    - 虚假/超长 `reserved_tail_bytes` → 忽略；
    - 远程 `is_truncated=false` + 超大 body → 仍 fold；
+   - wire body 超过 `MaxMCPResponseBytes` → `REMOTE_RESPONSE_TOO_LARGE`；
+   - 伪造 source 不能改变 `MCPResultContext.TrustLevel`；
    - 本地可信工具的 pass-through 行为不变。
 6. **Artifact scope tests（P0-2）**
    - 本地裸 `art_...` 可读；
@@ -1328,17 +1782,44 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
    - 远程裸 `art_...` 自动归到当前 target，不落到 local store；
    - 远程 `artifact_read` 收到 `remote:` 前缀 → 拒绝；
    - 本地 `Store.GetOwned` 的 session/lineage 检查仍生效。
+   - 非法 ID/target 字符 → 拒绝；
+   - artifact 归档失败 → `ARTIFACT_WRITE_FAILED`，不返回丢失中间的 body；
+   - artifact 过期 → `ARTIFACT_EXPIRED`，不回退本地同名 id。
 7. **Gate order tests（P0-3）**
    - deny 优先于 allow/contractual/plan exemption；
    - bypass 仍被 hard deny / HardAsk / sandbox / command policy 拦住；
    - dont_ask 把 ask 变 deny；
+   - allow rule 不能绕过 shell breaker/sensitive-write；
+   - callback 不能把 dont_ask/plan/sandbox deny 改成 allow；
    - direct call / CLI 与 builtin 走同一顺序；
    - profile/tools 过滤不改变 allow/deny 结果。
 8. **Local-only matrix tests（P0-4）**
    - remote schema 不含 `stdin`/`detach`/`pty`/`job_id`；
-   - remote 调用这些参数返回 `INVALID_ARGS`/`UNSUPPORTED`；
+   - remote 调用这些参数返回 `INVALID_ARGUMENT`/`UNSUPPORTED`；
    - CLI 不暴露 job/PTY 子命令；
    - 本地 interactive/detach/job 回归测试保持通过。
+9. **MCP surface tests（P1）**
+   - 非回环无 token/TLS 启动失败；
+   - roots 只能收窄，越界 root 拒绝；
+   - canonical name 64 字符/hash/collision；
+   - `tools/list` filter 与 trust level；
+   - 429 + `Retry-After`、401/403/404/408/500/503 映射。
+10. **Error/retry/idempotency tests（P1）**
+    - 只读 transport 失败最多重试一次；
+    - 写/编辑/shell 不自动重放；
+    - 429 遵守 Retry-After；
+    - `ErrorCode` 优先于文本，同一错误只有一个类别。
+11. **Observability tests（P1）**
+    - 事件 schema 版本与字段；
+    - token/命令/文件内容脱敏；
+    - audit 写失败不阻塞结果但计数。
+12. **Version/compat tests（P1）**
+    - 新客户端 + 旧 server、旧客户端 + 新 server；
+    - schema/alias deprecation；
+    - artifact namespace 双读窗口。
+13. **Registry inventory test**
+    - §13.0 的 core/local-only/control-plane 分类与
+      `toolregistry` / `manager.go` 双向一致。
 
 ### 15.2 性能
 
@@ -1358,6 +1839,31 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 5. **CI 门槛**
    - 关键 benchmark 设回归阈值；
    - pprof 在远程 binary 保留开关。
+
+#### 15.2.1 Benchmark 语料
+
+| 语料 | 规模 | 覆盖 |
+|------|------|------|
+| small-repo | 1k 文件 / 10MB | 基础回归 |
+| medium-repo | 10k 文件 / 100MB | grep/glob/view 主路径 |
+| large-repo | 100k 文件 / 1GB | 索引/遍历/ignore |
+| long-line | 单行 1MB / 文件 100MB | view 长行 clamp |
+| shell-capture | 300KiB / 5MB 输出 | 归档、fold、artifact_read |
+| mcp-payload | 16/32/64KiB 文本 | MCP 序列化/元数据开销 |
+
+#### 15.2.2 初始目标（provisional）
+
+| 指标 | 目标 | 说明 |
+|------|------|------|
+| read core p95 开销 | <= 5% | 相对直接调用同实现 |
+| MCP 32KiB 序列化 p95 | <= 10% | 相对 in-process |
+| grep 峰值内存 | 不随文件总量线性增长 | 流式/有界 buffer |
+| shell capture | <= CaptureLimit | 不把完整 capture 放进模型 |
+| 工具列表 | 256 tools 下 p95 <= 50ms | 含 schema/filter |
+| 回归门槛 | 中位数超出基线 10% 失败 | CI 3 次取中位数 |
+
+上述数字是初始门槛，不是承诺；第一轮 benchmark 后按机器基线校准并记录。
+远程网络延迟单列，不混入 core 开销。
 
 ### 15.3 跨平台
 
@@ -1388,24 +1894,86 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 | 第二授权层 | core 又写一套 allow/deny/mode | 只复用 `policy.Engine`；§10.5 顺序矩阵 |
 | v1 范围蔓延 | 把 PTY/job/streaming 混入 core | §11.1 明确 local-only；schema 拒绝相关参数 |
 | gate 顺序漂移 | 不同 surface 各走一套顺序 | §10.5/§10.6 同一性测试 |
+| MCP 认证误配 | 非回环无 token/TLS 暴露 | §8.7 启动 fail-closed + 配置测试 |
+| 错误映射漂移 | 各 surface 返回不同码/状态 | §10.7 映射表 + golden tests |
+| 工具清单漂移 | 文档/注册表/构造表不一致 | §13.0 与 toolregistry 双向契约测试 |
+| 混合版本不兼容 | 新客户端连旧远程 | §13.7 capability negotiation + 兼容测试 |
 
 ### 16.2 开放问题
 
-1. **包名与 CLI 名**：`toolcore` / `toolctl` 是否合适？是否并入 `aicli tool`？
-2. **接口归属**：保留 `toolkit.Tool` 作为兼容接口，还是让 core 成为唯一接口？
-3. **SessionState**：v1 已决定远程 stateless；stateful/dedup/ledger 是否作为 v2，待定。
-4. **profile/filter**：放在 surface 还是 core registry？建议 surface。
-5. **图片/notebook**：远程是否要求与本地完全一致？MCP 已支持 ImageContent，但 CLI/HTTP 需要各自映射。
-6. **jobs/artifacts**：v1 只统一 artifact **接口与命名空间**，不统一存储实现；
-   本地 SQLite、远程文件（72h）。jobs 为 local-only，不进入 core。
-7. **直接 import 整个 tools 包**：结论是不建议；抽 core 更稳。若未来 binary 大小完全无所谓，也应保留 Runtime 注入边界。
-8. **工具版本/schema 演进**：是否需要 `Definition.Version` + deprecated aliases？
-9. **审计归属**：core 发事件 vs surface 写文件；建议 surface 写，core 只发结构化事件。
-10. **性能目标**：p95 开销阈值定多少？建议先用 benchmark 基线，再定 3–5%。
+| # | 问题 | 状态 |
+|---|------|------|
+| 1 | 包名与 CLI 名：`toolcore` / `toolctl`，或并入 `aicli tool` | 开放 |
+| 2 | `toolkit.Tool` 兼容接口保留多久 | 开放 |
+| 3 | 远程 stateful/dedup/ledger 是否作为 v2 | 开放 |
+| 4 | profile/filter 放 surface 还是 core registry | 已定：surface |
+| 5 | 图片/notebook 在 CLI/HTTP 的映射细节 | 开放 |
+| 6 | artifact 存储是否统一 | 已定：只统一接口/namespace，不统一实现 |
+| 7 | 是否直接 import 整个 `toolkit/tools` | 已定：不；抽 core |
+| 8 | 工具版本/schema 演进 | 已定：§13.7 |
+| 9 | 审计归属 | 已定：surface 写，core 只发事件（§12.4） |
+| 10 | 性能 p95 阈值 | 已给 provisional 目标，待基线校准（§15.2.2） |
+
+### 16.3 威胁模型（P1）
+
+#### 16.3.1 资产与信任边界
+
+资产：workspace 文件、命令执行能力、secrets/env、artifact 原文、
+模型上下文、audit/access log、远程 target 凭证。
+
+信任边界：
+
+```text
+user/model
+  → local runtime (trusted)
+  → MCP client/server (local or remote)
+  → remote target (trusted_remote / untrusted_remote)
+  → subagent / CLI / HTTP client
+  → external network (fetch/search)
+```
+
+#### 16.3.2 威胁与缓解
+
+| 威胁 | 影响 | 缓解 |
+|------|------|------|
+| 被攻陷的远程 server 伪造 metadata | 绕过模型预算 | §9.3/§9.6 allowlist + hard cap + tail 校验 |
+| 远程/本地 artifact id 混用 | 跨 scope 读原文 | §9.7 `ArtifactRef` + target 校验 + `GetOwned` |
+| tool poisoning（描述/schema 注入） | 诱导模型越权 | 描述/schema 上限；untrusted 只读；canonical name；不执行描述中的“指令” |
+| 路径穿越 / symlink / TOCTOU | 越界读写 | `PathResolver` + sandbox + symlink 复检；特殊文件拒绝 |
+| 命令注入 / 元字符 / 危险命令 | 任意执行 | `CommandPolicy` + `shellrisk`；deny 优先；空 allowlist 全拒 |
+| secrets 进入日志/预览 | 凭证泄漏 | env allowlist；token hash；命令 preview 上限；不记录文件内容 |
+| SSRF / 恶意 URL | 内网探测 | fetch/download 仅 local-only；URL allowlist/私网拒绝；v1 不远程化 |
+| prompt injection（远程文件/网页） | 诱导越权 | 外部内容标注为不可信；工具结果不执行指令；policy 不读内容做授权 |
+| subagent 权限放大 | 子代理越权 | read-only boundary、BlockDelegation、工具白名单 |
+| 并发/大输出 DoS | 资源耗尽 | maxConcurrentCalls + 429、输出硬上限、Meta 上限、超时/进程组清理 |
+| direct CLI 绕过 | 绕过审批/策略 | 同一 `policy.Engine`；`--yes` 只确认 ask；无 bypass 开关 |
+| token 泄漏/重放 | 未授权访问 | TLS/mTLS、token 轮换、日志只存 hash、非回环强制 token |
+| 构建/部署链被篡改 | 运行恶意 binary | commit/version pinning、发布产物校验、最小权限、canary |
+
+#### 16.3.3 残余风险
+
+- 远程 target 被攻陷后，允许范围内的读写/命令仍可被执行；
+- token 被窃取后，在轮换前仍可访问；
+- 没有 OS 级容器/沙箱隔离时，workspace jail 不能防御内核/本地提权；
+- 多租户共用一个 remote store 时，target 目录隔离必须由部署层保证；
+- 这些风险必须在部署文档和审计中显式说明，不能声称“抽象层已解决”。
 
 ---
 
 ## 17. 第一批落地建议（可独立 PR）
+
+### PR 0：契约冻结（文档，不写代码）
+
+- 工具清单与迁移矩阵（§13.0）；
+- MCP surface 规格（§8.7）；
+- 错误/重试/幂等（§10.7）；
+- 可观测性接口（§12.4）；
+- 版本与 rollout（§13.7）；
+- 威胁模型（§16.3）。
+- CLI/direct 契约（§8.4.1）；
+- benchmark 语料/阈值（§15.2.1/§15.2.2）。
+
+验收：P0/P1 design frozen；工具清单与代码注册表一致；本 PR 不产生运行时改动。
 
 ### PR 1：Output core + remote 接入
 
@@ -1416,18 +1984,21 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
    - `ArtifactSink` + `ArtifactRef`；
    - `ResultOrigin` + `RemoteOutputHardCap` + trust clamp。
 2. `internal/remotetools` 的 `view/grep/glob/ls/shell` 改用共享 output；
-3. `internal/tools/manager.go` 的 `formatMCPResult` 增加远程 trust 过滤与
-   artifact 归属；裸 `art_...` 按 server name 归到 remote target；
-4. `internal/remotetools/artifact.go` 输出 `remote:<target>:art_...`；
-5. 删除 `foldRemoteOutput` 的重复逻辑；`boundedWriter` 如仍用于 capture，
+3. `internal/tools/manager.go` 的 `formatMCPResult` 增加 `MCPResultContext`、
+   远程 trust 过滤与 artifact 归属；裸 `art_...` 按 server name 归到 remote target；
+4. `internal/mcp/transport` 增加 `MaxMCPResponseBytes`（decode 前）；
+5. `internal/remotetools/artifact.go` 输出 `remote:<target>:art_...`；
+6. 删除 `foldRemoteOutput` 的重复逻辑；`boundedWriter` 如仍用于 capture，
    只保留 capture 职责；
-6. 补契约测试：
+7. 补契约测试：
    - remote Result(meta) → MCP Meta → local formatMCPResult → render 不二次 fold；
    - artifact 先归档后折叠；
    - 恶意 skip/budget/tail 被 clamp/忽略；
    - 跨 scope artifact 被拒绝；
+   - wire 超限返回 `REMOTE_RESPONSE_TOO_LARGE`；
+   - 归档失败返回 `ARTIFACT_WRITE_FAILED`；
    - 本地/远程同输入输出一致。
-7. 重建 `aicli-remote-tools`，部署 238，跑 conformance。
+8. 重建 `aicli-remote-tools`，部署 238，跑 conformance。
 
 验收：
 
@@ -1436,6 +2007,8 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 - 无二次截断；
 - 恶意 metadata 不能突破 64 KiB ceiling；
 - artifact 不跨 local/remote/target；
+- wire cap 在 JSON decode 前生效；
+- 归档失败/过期有明确错误码；
 - 现有测试全绿。
 
 ### PR 2：Read-only core
@@ -1449,7 +2022,250 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 - `toolctl list/describe/run`；
 - 复用 core + CLIRuntime；
 - `--yes` 只确认 ask，不跳过 deny / HardAsk / sandbox；
+- hard safety gates 先于 allow rule/callback；callback 不能把 deny 改为 allow；
+- `policy_legacy_safety_order` 默认关闭；
 - JSON/exit code 契约。
+
+### 17.4 验收矩阵（P0/P1/PR1–3）
+
+#### A. P0/P1 文档门
+
+P0/P1 是**设计门**，不是代码门。文档内容已冻结：PR0 可开始；PR1 需
+PR0 + P0 测试；生产/canary 需独立安全评审。
+
+| 门 | 完成条件 | 确认证据 |
+|----|----------|----------|
+| P0-1 | §9.3/§9.6 的 trust clamp、Meta allowlist、wire cap、`MCPResultContext`、tail 校验 | design freeze；PR1 恶意 metadata/超大响应测试 |
+| P0-2 | §9.7 的 `ArtifactRef`、严格 ID/target、归档失败/过期、跨 scope 拒绝 | design freeze；PR1 artifact scope/失败测试 |
+| P0-3 | §10.5/§10.6 的 0–18 gate、hard safety、direct/CLI 不绕过 | design freeze；PR3 gate/callback 测试 |
+| P0-4 | §11.1/Phase 4 的 final-result only；remote schema 无 PTY/job | design freeze；local-only matrix 测试 |
+| P1 工具清单 | §13.0 与 `toolregistry` / `manager.go` 双向一致 | PR0 契约测试；无未登记工具 |
+| P1 MCP surface | §8.7 的 auth/roots/name/limits/error | PR0 auth/roots/name/error 测试骨架 |
+| P1 错误/重试 | §10.7 的错误码与表面映射 | golden mapping；写/执行不自动重放 |
+| P1 可观测性 | §12.4 的 Event schema/脱敏 | schema/redaction 测试 |
+| P1 版本/rollout | §13.7 的版本轴/混合版本/feature flag | 新老版本兼容测试 |
+| P1 威胁模型 | §16.3 的威胁/缓解/残余风险 | security test map |
+| P1 性能 | §15.2.1/§15.2.2 的语料/阈值 | benchmark 脚本与基线报告 |
+| P1 CLI/direct | §8.4.1 的 JSON/exit code/`--yes` | CLI golden tests |
+| P1 网络工具 | §13.8 明确 v1 deferred；N1–N5 顺序 | 不进入 PR1–3；单独排期 |
+
+**放行规则**：P0 全部 Approved；P1 无未决阻塞项（开放问题必须有 owner/日期）。
+
+#### B. PR1：Output core + remote 接入
+
+必须完成：
+
+- `internal/toolcore/output`：预算、fold/reducer、reserved tail、metadata、
+  `ArtifactRef`、`ResultOrigin`、trust clamp；
+- 远程 view/grep/glob/ls/shell 改用共享 output；
+- `formatMCPResult` 的 Meta allowlist、hard cap、artifact 归属；
+- 删除重复 fold 逻辑；`boundedWriter` 只保留 capture 职责；
+- 恶意 metadata、artifact scope、先归档后折叠、本地/远程一致性测试。
+
+确认方式：
+
+```powershell
+go test ./internal/output ./internal/toolresult ./internal/tools ./internal/remotetools ./internal/toolkit ./internal/mcp/... -count=1
+go test ./...
+go vet ./...
+```
+
+238 canary：
+
+```powershell
+aicli.exe mcp test-server 238 -C 'E:\projects\itsm\itsm\.tmp\remote-238\mcp-238.yaml'
+pwsh -File 'E:\projects\itsm\itsm\.tmp\remote-238\call.ps1' -Command 'itsm-deploy-238 status'
+```
+
+退出条件：
+
+- 恶意 `skip`/budget/tail 不能突破 64 KiB ceiling；
+- artifact 不跨 local/remote/target；
+- 无二次 fold；
+- 238 上 6 个工具调用通过；
+- feature flag 可关闭并回退。
+
+#### C. PR2：Read-only core
+
+必须完成：
+
+- `toolcore/viewcore`、`searchcore`、`lscore`；
+- 远程复用 `internal/ripgrep` + fallback；
+- view/grep/glob/ls 的 conformance 与 benchmark；
+- 路径、ignore、hidden、binary、长行、symlink、CRLF 行为一致或显式标注。
+
+确认方式：
+
+```powershell
+go test ./internal/toolcore/viewcore ./internal/toolcore/searchcore ./internal/toolcore/lscore ./internal/remotetools ./internal/toolkit/tools -count=1
+go test ./...
+go test -bench . -benchmem ./internal/toolcore/...
+```
+
+退出条件：
+
+- conformance 全绿；
+- 10k/100k 文件 benchmark 达到 §15.2.2 的 provisional 阈值；
+- 本地/远程输出预算一致；
+- 不再新增第三套 view/grep/glob/ls 实现。
+
+#### D. PR3：CLI surface
+
+必须完成：
+
+- `cmd/toolctl list/describe/run/serve`；
+- `CLIRuntime`；
+- JSON 输出、exit code、`--yes` 语义；
+- 不提供 interactive PTY / job 子命令；
+- 与 builtin 共用同一 `policy.Engine` 和 `AllowToolCallWithContext`。
+
+确认方式：
+
+```powershell
+go test ./cmd/toolctl/... ./internal/policy/... -count=1
+go test ./...
+```
+
+CLI golden cases：
+
+- 成功：exit 0 + JSON；
+- 参数错误：exit 2；
+- 策略拒绝：exit 3；
+- 执行失败：exit 4；
+- 超时：exit 5；
+- 限流/不可用：exit 6；
+- `--yes` 不能放行 deny / HardAsk / sandbox。
+
+#### E. 总体确认顺序
+
+1. **文档门**：P0/P1 review 通过；
+2. **PR1**：unit + trust/artifact + 238 canary；
+3. **PR2**：conformance + benchmark；
+4. **PR3**：CLI golden + 同 gate；
+5. **回归**：`go test ./...`、`go vet ./...`；
+6. **证据归档**：测试日志、benchmark JSON、238 调用记录、rollback 记录。
+
+任何一门未通过，不进入下一门；P1 的网络工具迁移不阻塞 PR1–3。
+
+依赖顺序：
+
+```text
+PR0 (contracts) → PR1 (output/remote) → PR2 (read-only core)
+                                      └→ PR3 (CLI)
+```
+
+PR2 与 PR3 只有在 PR1 的 core 接口冻结、write paths 不重叠时才可并行；
+否则串行，避免 CLI 先于 read-only core 定型。
+
+### 17.5 最佳实践：验收门、证据与发布
+
+#### 17.5.1 Definition of Ready（进入实现前）
+
+每个 PR 开始前必须满足：
+
+- 行为规格已冻结（P0/P1 对应章节 + design freeze）；
+- 输入/输出/golden fixture 已定义；
+- 失败路径、错误码、重试/不重试规则已定义；
+- 安全边界和威胁模型已评审；
+- feature flag、kill switch、回滚路径已定义；
+- 测试数据/一次性凭证、目标环境（238）和证据目录已确定；禁止真实 token 入库；
+- 没有未关闭的 P0，P1 开放问题有 owner/日期。
+
+#### 17.5.2 Definition of Done（合并/发布前）
+
+- 代码 + 单测 + 契约测试 + conformance 全绿；
+- 安全测试和恶意输入测试通过；
+- benchmark 达标或明确记录回归原因；
+- 238 canary 通过；
+- 回滚演练通过；
+- 文档、CHANGELOG、运行手册、仪表盘/告警已更新；
+- 证据归档（测试日志、benchmark JSON、canary 指标、rollback 记录）。
+
+#### 17.5.3 测试分层与 CI 门
+
+| 层级 | 内容 | 何时跑 | 门禁 |
+|------|------|--------|------|
+| T0 静态 | `gofmt`、`go vet`、依赖/许可证检查 | 每次提交 | 必须 |
+| T1 单元 | output/artifact/policy/工具核心；核心包 `go test -race` | 每次提交 | 必须 |
+| T2 契约/兼容 | `toolkit.Tool` ↔ core、新旧版本、artifact ref | 每次提交 | 必须 |
+| T3 Conformance | Local/Remote/CLI/MCP 同 fixture | 每次 PR | 必须 |
+| T4 安全/对抗 | 恶意 metadata、scope、路径、命令、SSRF、tool poisoning、fuzz/属性测试 | 每次 PR（至少 nightly 全量） | 必须 |
+| T5 性能/负载 | 10k/100k 文件、并发/429、长输出、race/负载 | nightly/weekly | 发布前必须 |
+| T6 Canary/回滚 | 238 单 target + rollback | 发布前 | 必须 |
+
+不允许“只在本地手工跑过”作为验收证据；T0–T4 必须能在 CI 复现。
+
+#### 17.5.4 追溯矩阵
+
+每个 P0/P1 条目必须映射到具体测试和证据文件：
+
+| 条目 | 测试示例 | 证据 |
+|------|----------|------|
+| P0-1 | `TestRemoteMetadataTrustBoundary` | `evidence/pr1/metadata.json` |
+| P0-2 | `TestArtifactScopeDenied` | `evidence/pr1/artifact.json` |
+| P0-3 | `TestGateOrderAcrossSurfaces` | `evidence/pr3/gate.json` |
+| P0-4 | `TestRemoteSchemaRejectsPTYAndJobs` | `evidence/pr1/schema.json` |
+| P1 MCP | `TestMCPAuthRootsAndNameBudget` | `evidence/pr0/mcp.json` |
+| P1 error | `TestErrorMappingGolden` | `evidence/pr1/errors.json` |
+| P1 observe | `TestEventSchemaRedaction` | `evidence/pr1/events.json` |
+| P1 version | `TestMixedVersionCompatibility` | `evidence/pr1/version.json` |
+
+测试名可以调整，但“条目 → 测试 → 证据”的映射不能缺；没有映射的测试不算验收证据。
+
+#### 17.5.5 独立安全评审
+
+- P0-1（metadata trust）和 P0-2（artifact scope）必须由非实现者评审；
+- 威胁模型（§16.3）必须逐条映射到测试；
+- 至少覆盖：恶意/超大 metadata、跨 scope artifact、tool poisoning、
+  path traversal/symlink、command injection、SSRF、secret redaction；
+- 安全测试失败一律 no-go，不能用“已知问题”放行。
+- 测试凭证使用一次性 secret；日志/证据中不得出现真实 token。
+
+#### 17.5.6 发布门与 Canary
+
+- 先 T0–T4 全绿，再进入 238 canary；
+- 初始 canary 观察窗口：至少 30 分钟或 100 次调用（先到为准）；
+- 初始阈值（需按基线校准）：
+  - 错误率不高于基线 + 0.5 个百分点；
+  - p95 不高于基线 + 10%；
+  - 非预期 429、artifact scope denied 为 0；
+  - 无数据损坏、无跨 target 读取；
+- 必须有 kill switch；回滚目标 <= 10 分钟；
+- 发布前完成一次“关 flag / 回退 binary”的演练。
+- canary 通过后保留 24 小时观察窗；异常按同一 no-go 条件回滚。
+
+#### 17.5.7 故障注入
+
+至少覆盖：
+
+- 远程断连、半开连接、KeepAlive 失败；
+- 429/Retry-After、远程重启；
+- 超时/取消/进程组清理；
+- artifact store 满、磁盘满、权限变化；
+- 旧客户端/新 server、新客户端/旧 server；
+- 大输出、长行、二进制、Unicode/CRLF。
+
+#### 17.5.8 No-go 条件
+
+- 任一 P0 未 Approved；
+- 安全/对抗测试失败；
+- 出现跨 scope artifact 或 metadata 越界；
+- canary 超出阈值或出现数据损坏；
+- rollback 演练失败；
+- 版本兼容测试失败；
+- benchmark 回归超过约定阈值且没有批准。
+
+#### 17.5.9 角色与证据
+
+| 角色 | 责任 |
+|------|------|
+| Design owner | P0/P1 规格、验收标准 |
+| Runtime owner | PR1–3 实现、测试、回滚 |
+| Security reviewer | P0-1/P0-2/威胁模型独立评审 |
+| Release owner | 238 canary、监控、回滚决策 |
+
+证据统一放在 PR 描述或 `evidence/<pr>/`，至少包含：commit、测试命令/日志、
+benchmark JSON、canary 指标、rollback 记录。
 
 ### 估算（粗略）
 
@@ -1474,6 +2290,8 @@ output: exit_code, stdout, stderr, duration_ms, truncated,
 - `docs/plan/aicli-tool-capability-convergence-plan.md`
 - `docs/plan/artifact-read-contract-and-tool-surface-closure-analysis-20261018.md`
 - `docs/user-guide/aicli-remote-tools.md`
+- `docs/tools/unified-tool-registry-plan.md`
+- `docs/architecture/unified-tool-surface-registry.md`
 
 ---
 
@@ -1496,7 +2314,7 @@ tools:
 
 | 层 | 当前 |
 |----|------|
-| core registry | 当前 14 个内置工具（read + write + shell + job + artifact）；v1 只迁移 read/write/final shell/artifact |
+| 当前 remote registry candidates | 14 个候选（read + write + shell + job_* + artifact）；v1 core 只迁移 read/write/final shell/artifact |
 | RemoteRuntime | `/home/n9e/itsm/repo` + `/tmp` + `/var/log` jail；远程命令策略；audit；ArtifactStore |
 | Remote surface filter | `profile: custom` + `tools` → 只保留 6 个 |
 | 写工具 | 被 filter 裁掉（不是实现不存在） |
@@ -1551,4 +2369,7 @@ Select-String -Path internal/remotetools/search.go -Pattern 'internal/ripgrep'
 | Adapter | Surface 与 core 之间的映射层 |
 | Capability | 工具行为属性（read_fs/write_fs/exec_shell/...） |
 | Policy | 是否允许调用的策略（mode/target policy） |
+| Gate | 参数/策略/审批/执行前检查组成的固定流水线 |
+| ArtifactRef | artifact 的 scope + target + id 命名空间 |
+| TrustLevel | local / trusted_remote / untrusted_remote |
 | OutputShaper | 统一的预算/折叠/reducer/artifact 输出治理 |
