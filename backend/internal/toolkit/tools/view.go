@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -57,7 +57,7 @@ const viewEfficiencyAdvisoryThreshold = 2000
 // 2000-rune clamp (at most 8 KiB even for 4-byte runes), so every over-cap
 // line is still clamped with an honest marker while a 400 MB single-line file
 // never forces the whole line into memory (analysis §3.3).
-const viewReaderLineCapBytes = 256 * 1024
+const viewReaderLineCapBytes = viewcore.ReaderLineCapBytes
 
 // viewReaderClampedMarker replaces the hidden remainder of a line whose byte
 // length exceeds viewReaderLineCapBytes. Unlike viewLongLineMarker it reports
@@ -1301,7 +1301,7 @@ func probeFileEncoding(file *os.File) (fileEncoding, bool) {
 }
 
 func (v *ViewTool) readLines(reader io.Reader, offset, limit int) (string, viewReadResult, error) {
-	br := bufio.NewReaderSize(reader, 64*1024)
+	br := viewcore.NewLineReader(reader)
 	meta := viewReadResult{}
 	if offset < 0 {
 		return v.readTailLines(br, -offset, limit, meta)
@@ -1357,11 +1357,13 @@ func (v *ViewTool) readLines(reader io.Reader, offset, limit int) (string, viewR
 	// Peek instead of consuming: a huge next line must not be drained just to
 	// learn that it exists.
 	if !meta.HasMore && readCount == limit {
-		if _, err := br.Peek(1); err == nil {
+		hasMore, err := br.HasMore()
+		if err != nil {
+			return "", meta, err
+		}
+		if hasMore {
 			meta.HasMore = true
 			observability.RecordToolOutputTruncation(observability.TruncationLayerView, observability.TruncatedByLines)
-		} else if err != io.EOF {
-			return "", meta, err
 		}
 	}
 	if !meta.HasMore {
@@ -1392,7 +1394,7 @@ func (v *ViewTool) readLines(reader io.Reader, offset, limit int) (string, viewR
 // keeping only the last N lines (bounded memory), then trims the kept window
 // from the front until it fits the byte budget - the tail must stay the true
 // tail, so the oldest kept lines are the ones dropped.
-func (v *ViewTool) readTailLines(br *bufio.Reader, requested, limit int, meta viewReadResult) (string, viewReadResult, error) {
+func (v *ViewTool) readTailLines(br *viewcore.LineReader, requested, limit int, meta viewReadResult) (string, viewReadResult, error) {
 	meta.TailRequested = requested
 	tailLines := requested
 	if tailLines > viewMaxLimit {
@@ -1493,88 +1495,43 @@ type viewLineRead struct {
 	OverClamped  bool
 }
 
-// readViewLine reads one line while buffering at most viewReaderLineCapBytes.
-// Past the cap the remainder is drained and counted but never held in memory,
-// so a multi-hundred-megabyte single-line file cannot exhaust memory or turn
-// into a fatal "token too long" error (analysis §3.3).
-func readViewLine(br *bufio.Reader) (viewLineRead, error) {
-	var (
-		buf       []byte
-		over      bool
-		total     int64
-		lastChunk []byte
-	)
-	for {
-		chunk, err := br.ReadSlice('\n')
-		if len(chunk) > 0 {
-			total += int64(len(chunk))
-			lastChunk = chunk
-			if !over {
-				if room := viewReaderLineCapBytes - len(buf); len(chunk) <= room {
-					buf = append(buf, chunk...)
-				} else {
-					if room > 0 {
-						buf = append(buf, chunk[:room]...)
-					}
-					over = true
-				}
-			}
-		}
-		switch err {
-		case nil:
-			return buildViewLine(buf, over, total, lastChunk, false), nil
-		case bufio.ErrBufferFull:
-			continue
-		case io.EOF:
-			return buildViewLine(buf, over, total, lastChunk, true), nil
-		default:
-			return viewLineRead{}, err
-		}
+// readViewLine streams one bounded line from the shared viewcore reader and
+// applies the builtin tool's rune clamp and loss accounting.
+func readViewLine(br *viewcore.LineReader) (viewLineRead, error) {
+	raw, err := br.Next()
+	if err != nil {
+		return viewLineRead{}, err
 	}
-}
+	line := viewLineRead{
+		HasBytes:     raw.HasBytes,
+		EOF:          raw.EOF,
+		ContentBytes: raw.ContentBytes,
+		OverClamped:  raw.Truncated,
+	}
+	if !raw.HasBytes {
+		return line, nil
+	}
 
-// buildViewLine applies the rune clamp to a buffered line and reports honest
-// hidden-byte accounting for both the buffered clamp and the reader drain.
-func buildViewLine(buf []byte, over bool, total int64, lastChunk []byte, eof bool) viewLineRead {
-	line := viewLineRead{HasBytes: total > 0, EOF: eof, OverClamped: over}
-	delimiter := int64(0)
-	if n := len(lastChunk); n > 0 && lastChunk[n-1] == '\n' {
-		delimiter = 1
-		if n > 1 && lastChunk[n-2] == '\r' {
-			delimiter = 2
-		}
-	}
-	line.ContentBytes = total - delimiter
-	if line.ContentBytes < 0 {
-		line.ContentBytes = 0
-	}
-	if !line.HasBytes {
-		return line
-	}
-	text := string(buf)
-	if !over && delimiter > 0 {
-		text = strings.TrimSuffix(text, "\n")
-		text = strings.TrimSuffix(text, "\r")
-	}
-	if over {
+	text := string(raw.Bytes)
+	if raw.Truncated {
 		visible := clampLinePrefix(text, viewMaxLineChars)
-		line.Text = visible + fmt.Sprintf(viewReaderClampedMarker, viewMaxLineChars, line.ContentBytes)
-		hidden := line.ContentBytes - int64(len(visible))
+		line.Text = visible + fmt.Sprintf(viewReaderClampedMarker, viewMaxLineChars, raw.ContentBytes)
+		hidden := raw.ContentBytes - int64(len(visible))
 		if hidden < 0 {
 			hidden = 0
 		}
 		line.HiddenBytes = hidden
-		return line
+		return line, nil
 	}
 	if utf8.RuneCountInString(text) > viewMaxLineChars {
 		visible, hiddenBytes := truncateLongLine(text)
 		line.Text = visible
 		line.HiddenChars = utf8.RuneCountInString(text) - viewMaxLineChars
 		line.HiddenBytes = int64(hiddenBytes)
-		return line
+		return line, nil
 	}
 	line.Text = text
-	return line
+	return line, nil
 }
 
 // accountViewLineTruncation folds one line's clamp/drain loss into the window

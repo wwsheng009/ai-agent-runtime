@@ -33,8 +33,8 @@ func newRemoteViewTool(cfg *Config, workspace *Workspace) *remoteViewTool {
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
-				"minimum":     1,
-				"description": "1-based line number to start from. Default 1.",
+				"minimum":     0,
+				"description": "0-based line offset to start from. Default 0.",
 			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
@@ -86,10 +86,7 @@ func (t *remoteViewTool) Execute(ctx context.Context, params map[string]interfac
 		return remoteErrorResult(newToolError(CodeInvalidArgument, "use ls for directories", "%s is a directory", t.cleanDisplayPath(target))), nil
 	}
 
-	offset := intParam(params, "offset", 1)
-	if offset < 1 {
-		offset = 1
-	}
+	offset := intParam(params, "offset", 0)
 	limit := intParam(params, "limit", viewcore.DefaultLimit)
 	offset, limit = viewcore.Normalize(offset, limit)
 	window, readErr := viewcore.Read(target, offset, limit, t.maxViewBytes())
