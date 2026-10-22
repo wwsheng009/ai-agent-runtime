@@ -46,6 +46,7 @@ export type RuntimeEventType =
   | "context.tool_schema.frozen"
   | "context.usage_over_budget"
   | "context_reconciled"
+  | "hooks.async_completed"
   | "hooks.status"
   | "hooks.stop_blocked"
   | "job_cancelled"
@@ -162,6 +163,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "context.tool_schema.frozen": [],
   "context.usage_over_budget": [],
   "context_reconciled": ["session_store"],
+  "hooks.async_completed": ["live_only"],
   "hooks.status": ["live_only"],
   "hooks.stop_blocked": [],
   "job_cancelled": [],
@@ -294,6 +296,7 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
 ];
 
 export const RUNTIME_EVENT_LIVE_ONLY_TYPES: readonly RuntimeEventType[] = [
+  "hooks.async_completed",
   "hooks.status",
   "lsp.diagnostics.updated",
   "lsp.server.state",
