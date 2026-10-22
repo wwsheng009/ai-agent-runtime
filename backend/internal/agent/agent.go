@@ -82,7 +82,6 @@ type Agent struct {
 	hookManager                    *HookManager
 	checkpointMgr                  *CheckpointManager
 	checkpointDisabled             bool
-
 	mu      sync.RWMutex
 	running bool
 	state   AgentState

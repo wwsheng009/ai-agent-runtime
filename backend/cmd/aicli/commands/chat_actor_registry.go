@@ -5275,6 +5275,21 @@ func (h *localChatRuntimeHost) loadRuntimeStatus(ctx context.Context, sessionID 
 	return loadRuntimeStatusFrom(h.RuntimeStore, ctx, sessionID)
 }
 
+// loadSessionMetadata 是 host 侧的元数据读取封装（与 localActorRegistry 版本同义）。
+func (h *localChatRuntimeHost) loadSessionMetadata(ctx context.Context, sessionID string) (*runtimechat.Session, error) {
+	if h == nil || h.SessionStore == nil {
+		return nil, runtimechat.ErrSessionNotFound
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, runtimechat.ErrSessionNotFound
+	}
+	if reader, ok := h.SessionStore.(runtimechat.SessionStorageMetadataReader); ok {
+		return reader.LoadMetadata(ctx, sessionID)
+	}
+	return h.SessionStore.Load(ctx, sessionID)
+}
+
 // loadRuntimeStatusFrom 是标量投影读取的单一实现。
 func loadRuntimeStatusFrom(store runtimechat.RuntimeStateStore, ctx context.Context, sessionID string) (*runtimechat.RuntimeState, error) {
 	if store == nil {

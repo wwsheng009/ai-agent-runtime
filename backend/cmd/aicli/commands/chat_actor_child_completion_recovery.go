@@ -143,7 +143,9 @@ func (h *localChatRuntimeHost) rebindLocalChildCompletionSubscriptions(ctx conte
 	}
 	rebound := 0
 	for _, record := range h.localChildCompletionCandidates(ctx) {
-		session, err := h.SessionStore.Load(ctx, strings.TrimSpace(record.SessionID))
+		// 只读 State + Metadata.Context（parent/root 身份）：元数据投影足够，
+		// 避免为每个候选子会话反序列化整段 prompt 历史。
+		session, err := h.loadSessionMetadata(ctx, strings.TrimSpace(record.SessionID))
 		if err != nil || session == nil {
 			continue
 		}
@@ -189,7 +191,8 @@ func (h *localChatRuntimeHost) replayLocalChildCompletions(ctx context.Context, 
 	replayed := 0
 	for _, record := range h.localChildCompletionCandidates(ctx) {
 		childSessionID := strings.TrimSpace(record.SessionID)
-		session, err := h.SessionStore.Load(ctx, childSessionID)
+		// 只读 State + Metadata.Context：元数据投影足够。
+		session, err := h.loadSessionMetadata(ctx, childSessionID)
 		if err != nil || session == nil {
 			continue
 		}
