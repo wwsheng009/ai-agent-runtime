@@ -3,6 +3,8 @@ package ui
 import (
 	"errors"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 var (
@@ -175,6 +177,24 @@ func (s HistoryEffectQueueState) cloneForDiagnostics() HistoryEffectQueueState {
 	return s
 }
 
+// DeliveredCellIDs 是 ledger 的只读投影（逐出守卫 §14.3 H3 使用）：不克隆
+// payload，只按 State 收集 CellID。known=false 表示账本为空/不可判定。
+// 调用方必须持有 actor 互斥量（UIController.DeliveredCellIDs 已代为加锁）。
+func (s HistoryEffectQueueState) DeliveredCellIDs() (map[scene.CellID]struct{}, bool) {
+	if s.ledger == nil {
+		return nil, false
+	}
+	return s.ledger.DeliveredCellIDs()
+}
+
+// DeliveryBlockers 报告是否存在不可证明交付的条目（逐出守卫的否定项）。
+func (s HistoryEffectQueueState) DeliveryBlockers() (bool, string) {
+	if s.ledger == nil {
+		return false, ""
+	}
+	return s.ledger.DeliveryBlockers()
+}
+
 // Entries returns a token-ordered detached view for diagnostics, tests, and a
 // future presenter. Callers cannot mutate the actor-owned ledger through it.
 func (s HistoryEffectQueueState) Entries() []HistoryCommitEntry {
@@ -336,6 +356,21 @@ func (s *HistoryEffectQueueState) openDeliveryEpoch() {
 		return
 	}
 	s.ledger.openDeliveryEpoch()
+}
+
+// sourceAlreadyDeliveredInAnyEpoch reports whether candidate re-covers source
+// that already crossed the writer in the current delivery epoch.
+//
+// It is the planner-side gate for the width-independent dedup proof: resize
+// re-wraps a finalized cell, so the fragment identity (source range / ordinal)
+// changes while the content does not. Without this gate the planner mints a
+// fresh commit for the same text and the terminal appends it again — the
+// "everything duplicates after a resize" symptom.
+func (s HistoryEffectQueueState) cellRevisionFullyDelivered(commit HistoryCommit) bool {
+	if s.ledger == nil {
+		return false
+	}
+	return s.ledger.cellRevisionFullyDelivered(commit)
 }
 
 // recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。

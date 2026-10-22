@@ -769,11 +769,7 @@ func warmTranscriptLayoutChunk(state *UIControllerState) bool {
 // unversioned snapshot that rewires tool-chain grouping cannot be memoized as
 // identical (the SceneID == 0 guard this fence replaces).
 func transcriptFinalizedPrefixFence(transcript TranscriptState) uint64 {
-	const (
-		fnvOffset = uint64(14695981039346656037) // FNV-1a 64-bit offset basis
-		fnvPrime  = uint64(1099511628211)
-	)
-	h := fnvOffset
+	h := transcriptFenceOffsetBasis
 	for _, cell := range transcript.Cells {
 		// The mutable cell (and any transient second mutable cell before it
 		// finalizes) is the frontier barrier and never enters the finalized
@@ -781,27 +777,40 @@ func transcriptFinalizedPrefixFence(transcript TranscriptState) uint64 {
 		if cell.Phase == scene.CellMutable {
 			continue
 		}
-		h ^= uint64(cell.ID)
-		h *= fnvPrime
-		h ^= cell.Revision
-		h *= fnvPrime
-		h ^= cell.Sequence
-		h *= fnvPrime
-		h ^= uint64(cell.Kind)
-		h *= fnvPrime
-		h ^= uint64(cell.Phase)
-		h *= fnvPrime
-		if cell.HistoryCommitBlocked {
-			h ^= 1
-		}
-		h *= fnvPrime
-		h ^= uint64(cell.Boundary)
-		h *= fnvPrime
-		h ^= uint64(len(cell.Source))
-		h *= fnvPrime
-		h = transcriptFenceFoldString(h, cell.ChainKey, fnvPrime)
-		h = transcriptFenceFoldString(h, cell.BoundaryGroupKey, fnvPrime)
+		h = transcriptFenceFoldCell(h, cell)
 	}
+	return h
+}
+
+// transcriptFenceOffsetBasis 是前缀指纹链的初始状态（FNV-1a 64-bit offset
+// basis）。冷区账本链与之共用同一初始值，保证两条链可逐值对拍。
+const transcriptFenceOffsetBasis uint64 = 14695981039346656037
+
+// transcriptFenceFoldCell 把单个 finalized cell 折叠进前缀指纹链；语义与
+// transcriptFinalizedPrefixFence 的内联版本逐字一致。提取原因：C 档冷区账本
+// （设计 §14.2/§14.7）复用同一语义，保证"账本前缀链 == 生产 fence"可对拍。
+func transcriptFenceFoldCell(h uint64, cell scene.TranscriptCell) uint64 {
+	const fnvPrime = uint64(1099511628211)
+	h ^= uint64(cell.ID)
+	h *= fnvPrime
+	h ^= cell.Revision
+	h *= fnvPrime
+	h ^= cell.Sequence
+	h *= fnvPrime
+	h ^= uint64(cell.Kind)
+	h *= fnvPrime
+	h ^= uint64(cell.Phase)
+	h *= fnvPrime
+	if cell.HistoryCommitBlocked {
+		h ^= 1
+	}
+	h *= fnvPrime
+	h ^= uint64(cell.Boundary)
+	h *= fnvPrime
+	h ^= uint64(len(cell.Source))
+	h *= fnvPrime
+	h = transcriptFenceFoldString(h, cell.ChainKey, fnvPrime)
+	h = transcriptFenceFoldString(h, cell.BoundaryGroupKey, fnvPrime)
 	return h
 }
 
@@ -1026,6 +1035,12 @@ func enqueueHistoryCandidatesRetained(state *UIControllerState, candidates []His
 			}
 		}
 		if state.HistoryEffects.hasTerminalRecordForSource(candidate) {
+			continue
+		}
+		if state.HistoryEffects.cellRevisionFullyDelivered(candidate) {
+			// Width-independent dedup: the candidate re-covers source bytes (or a
+			// display fragment ordinal) that already crossed the writer under a
+			// different wrap. Resize must never replay delivered content.
 			continue
 		}
 		if err := state.HistoryEffects.enqueue(candidate); err != nil &&

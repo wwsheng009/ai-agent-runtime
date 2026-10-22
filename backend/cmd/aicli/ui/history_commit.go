@@ -186,6 +186,37 @@ type historyCommitSourceKey struct {
 	fragmentID  uint64
 }
 
+// historyCommitCellKey identifies one immutable cell revision. Delivery
+// coverage is tracked per cell revision, not per fragment: a resize re-wraps
+// the same source at a different width, which produces different fragment
+// boundaries for identical content.
+type historyCommitCellKey struct {
+	cellID   scene.CellID
+	revision uint64
+}
+
+// completedCellDelivery marks that every fragment of one finalized cell
+// revision has been delivered for one layout generation.
+//
+// Why this exists: fragment identity (SourceRange + FragmentID) is produced by
+// the layout at one width. A resize re-wraps the same cell, so the fragments get
+// new identities and the range-based dedup accepts them as brand-new commits —
+// the terminal then appends content that already sits in native scrollback. That
+// is the "everything duplicates after a resize" report.
+//
+// The width-independent fact is "this cell revision is fully delivered". Once
+// that is known, any later plan under a *different* layout generation is a
+// re-render and must not be emitted again. Same-generation partial progress is
+// deliberately not recorded, so remaining fragments of an in-flight cell still
+// flow.
+type completedCellDelivery struct {
+	generation uint64
+	// epoch is the delivery epoch that produced this record. A session switch
+	// opens a new epoch and deliberately allows the same source to be appended
+	// again (append-only: old rows stay, the loaded history follows them).
+	epoch uint64
+}
+
 func historyCommitSourceIdentity(commit HistoryCommit) historyCommitSourceKey {
 	return historyCommitSourceKey{
 		cellID:      commit.CellID,
@@ -297,6 +328,15 @@ type HistoryCommitLedger struct {
 	// 铸造任何来源。
 	mintedFrontier      historyCommitSourceKey
 	mintedFrontierValid bool
+	// completedCells 记录「某个 cell revision 在某个布局代次下已完整交付」。
+	// 片段身份随宽度变化，仅凭片段键无法识别“这段源已经交付过”；宽度变化时
+	// 用这条宽度无关事实拦截重铸，避免同一内容被再次写入原生 scrollback
+	// （用户可见的“resize 后大量重复”）。按 epoch 判定，会话切换后可重新追加。
+	completedCells map[historyCommitCellKey]completedCellDelivery
+	// openCellRevisions 是该 revision 尚未终结（未 Delivered/Quarantined）的
+	// 条目计数。只有归零时才能判定“整份已交付”，否则流式单元的剩余分片会被
+	// 误判成重播而永久丢失。
+	openCellRevisions map[historyCommitCellKey]int
 }
 
 func NewHistoryCommitLedger() *HistoryCommitLedger {
@@ -305,6 +345,8 @@ func NewHistoryCommitLedger() *HistoryCommitLedger {
 		byRange:                  make(map[historyCommitRangeKey]uint64),
 		bySource:                 make(map[historyCommitSourceKey]map[uint64]struct{}),
 		compactedTerminalSources: make(map[historyCommitSourceKey]historyCommitTombstone),
+		completedCells:           make(map[historyCommitCellKey]completedCellDelivery),
+		openCellRevisions:        make(map[historyCommitCellKey]int),
 		tokens:                   make([]uint64, 0, 64),
 	}
 }
@@ -327,6 +369,20 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	}
 	if _, exists := l.byToken[commit.Token]; exists {
 		return ErrDuplicateCommitToken
+	}
+	if l.cellRevisionFullyDelivered(commit) {
+		// Width-independent dedup: this cell revision already crossed the writer
+		// in full under a different layout generation, so this fragment is a
+		// re-render caused by a resize/re-wrap. Emitting it again would append
+		// duplicate content to native scrollback.
+		return ErrDuplicateCommitRange
+	}
+	if l.cellRevisionHasQueuedFragmentsFrom(commit) {
+		// The revision still has unwritten payloads. A re-wrap produces new
+		// fragment identities for the same source, so admitting this candidate
+		// would queue the content twice. The existing queued token is rebased in
+		// place (`rebasePending`) instead.
+		return ErrDuplicateCommitRange
 	}
 	key := historyCommitKey(commit)
 	if token, exists := l.byRange[key]; exists {
@@ -353,10 +409,105 @@ func (l *HistoryCommitLedger) Enqueue(commit HistoryCommit) error {
 	}
 	l.bySource[sourceKey][commit.Token] = struct{}{}
 	l.advanceMintedFrontier(sourceKey)
+	l.noteCellRevisionProgress(commit, true, false, false)
 	if l.queueHeadToken == 0 || commit.Token < l.queueHeadToken {
 		l.queueHeadToken = commit.Token
 	}
 	return nil
+}
+
+// cellRevisionFullyDelivered reports whether this exact cell revision was
+// already delivered in full under an earlier layout generation.
+//
+// This is the width-independent dedup proof. Fragment identity (SourceRange +
+// FragmentID) is produced by the layout at one width; a resize re-wraps the same
+// cell, so the fragments get new identities and range-based dedup accepts them
+// as brand-new commits, appending content that already sits in native
+// scrollback. "The whole revision has been delivered" survives the re-wrap, so
+// a later plan under a different generation is provably a re-render.
+func (l *HistoryCommitLedger) cellRevisionFullyDelivered(commit HistoryCommit) bool {
+	if l == nil || len(l.completedCells) == 0 || commit.CellID == 0 {
+		return false
+	}
+	record, ok := l.completedCells[historyCommitCellKey{cellID: commit.CellID, revision: commit.Revision}]
+	if !ok {
+		return false
+	}
+	if record.epoch != 0 && record.epoch != l.currentDeliveryEpoch() {
+		// Previous epoch (a different runtime session): append-only reload may
+		// re-emit this source below the existing scrollback.
+		return false
+	}
+	// A same-generation plan is the ordinary incremental path: remaining
+	// fragments must still flow. Only a generation change proves a re-render.
+	return record.generation != 0 && record.generation != commit.LayoutGeneration
+}
+
+// cellRevisionHasQueuedFragmentsFrom reports whether this cell revision still
+// has unwritten (Queued) payloads minted under a *different* layout generation.
+//
+// It closes the second half of resize duplication: a re-wrap produces new
+// fragment identities for content that is already queued but not yet written.
+// Admitting those as fresh commits would deliver the same source twice; the
+// existing token is rebased in place instead (same token, new payload).
+//
+// Same-generation candidates are the ordinary incremental path (a long cell
+// streams fragment by fragment) and must not be suppressed.
+func (l *HistoryCommitLedger) cellRevisionHasQueuedFragmentsFrom(commit HistoryCommit) bool {
+	if l == nil || commit.CellID == 0 {
+		return false
+	}
+	if l.openCellRevisions[historyCommitCellKey{cellID: commit.CellID, revision: commit.Revision}] == 0 {
+		return false
+	}
+	for token := range l.byToken {
+		entry, ok := l.byToken[token]
+		if !ok || entry.State != HistoryCommitQueued {
+			continue
+		}
+		if entry.Commit.CellID == commit.CellID && entry.Commit.Revision == commit.Revision &&
+			entry.Commit.LayoutGeneration != commit.LayoutGeneration {
+			return true
+		}
+	}
+	return false
+}
+
+// noteCellRevisionProgress maintains the "is this revision fully delivered"
+// bookkeeping in O(1) per state transition.
+//
+// A revision is complete only when it has no Queued entries left *and* at least
+// one entry was actually delivered. Partial progress is deliberately not
+// recorded: a streaming cell must keep flowing its remaining fragments.
+func (l *HistoryCommitLedger) noteCellRevisionProgress(commit HistoryCommit, enqueued, terminal, delivered bool) {
+	if l == nil || commit.CellID == 0 || commit.LayoutGeneration == 0 {
+		return
+	}
+	key := historyCommitCellKey{cellID: commit.CellID, revision: commit.Revision}
+	switch {
+	case enqueued:
+		l.openCellRevisions[key]++
+		return
+	case terminal:
+		if l.openCellRevisions[key] > 0 {
+			l.openCellRevisions[key]--
+			if l.openCellRevisions[key] == 0 {
+				delete(l.openCellRevisions, key)
+			}
+		}
+	}
+	if !delivered || l.openCellRevisions[key] > 0 {
+		return
+	}
+	if l.completedCells == nil {
+		l.completedCells = make(map[historyCommitCellKey]completedCellDelivery)
+	}
+	record := l.completedCells[key]
+	if record.generation != commit.LayoutGeneration {
+		record.generation = commit.LayoutGeneration
+		record.epoch = l.currentDeliveryEpoch()
+		l.completedCells[key] = record
+	}
 }
 
 // advanceMintedFrontier 单调推进已铸造前缀上界（A1-3 步 3a）。
@@ -507,6 +658,7 @@ func (l *HistoryCommitLedger) invalidateQueued(token uint64, mayHavePartiallyWri
 		l.unresolvedCount++
 	}
 	l.byToken[token] = entry
+	l.noteCellRevisionProgress(entry.Commit, false, true, false)
 	l.advanceQueueHeadAfterTerminal(token)
 	return nil
 }
@@ -536,6 +688,7 @@ func (l *HistoryCommitLedger) Ack(token, frame, currentGeneration uint64) error 
 	// lines past ack (A2 第二刀后不再有 Active-origin 交付).
 	entry.Commit.Lines = nil
 	l.byToken[token] = entry
+	l.noteCellRevisionProgress(entry.Commit, false, true, true)
 	l.acksSinceCompact++
 	l.advanceQueueHeadAfterTerminal(token)
 	return nil
@@ -670,6 +823,64 @@ func (l *HistoryCommitLedger) HasPending() bool {
 		return l.nextQueuedToken(0) != 0
 	}
 	return false
+}
+
+// DeliveredCellIDs 返回**已交付**（State=Delivered）的 cell 身份集合。
+//
+// 这是逐出守卫（§14.3 H3）需要的唯一事实：只有已进入原生 scrollback 的 cell
+// 才允许离开驻留窗口。与 Entries() 不同，这里不克隆每条目的 payload（交付期
+// 账本可有 8 万条、每条带 Commit.Lines），只读 Commit.CellID。调用方必须持有
+// actor 互斥量（本方法不加锁）。
+//
+// 第二个返回值 known 表示"能否判定"：账本为空时为 false —— 既可能是首帧尚未
+// 铸提交，也可能是该装配路径根本不产生提交，无法区分，调用方据此决定是否拦截。
+func (l *HistoryCommitLedger) DeliveredCellIDs() (map[scene.CellID]struct{}, bool) {
+	if l == nil || len(l.byToken) == 0 {
+		return nil, false
+	}
+	delivered := make(map[scene.CellID]struct{}, len(l.byToken))
+	for _, entry := range l.byToken {
+		if entry.State != HistoryCommitDelivered {
+			continue
+		}
+		delivered[entry.Commit.CellID] = struct{}{}
+	}
+	return delivered, true
+}
+
+// DeliveryBlockers 报告"当前是否还有**不可证明交付**的 cell"（§14.3 H3 的
+// 否定项）。逐出守卫在存在未决/可能部分写入的条目时必须整体停止：
+// 这些条目对应的屏幕字节可能已经写出，也可能没有；此时逐出会让恢复路径
+// 无法判断该补写还是跳过（R5 / partial-zero-write 互锁）。
+//
+// 与 DeliveredCellIDs 同一口径：不克隆 payload，只读状态位。
+func (l *HistoryCommitLedger) DeliveryBlockers() (blocked bool, reason string) {
+	if l == nil {
+		return false, ""
+	}
+	for _, entry := range l.byToken {
+		if entry.State == HistoryCommitDelivered {
+			continue
+		}
+		switch entry.State {
+		case HistoryCommitQueued:
+			// 失效中：写声明仍在途，屏幕上可能有字节也可能没有 → 恢复路径
+			// 需要先判定（比单纯"未交付"更强的阻断原因）。
+			if entry.InvalidationPending || entry.MayHavePartiallyWritten || entry.UnresolvedDelivery {
+				return true, "projection_unknown"
+			}
+			// 队列里还有未交付行：不能逐出（顺序语义：必须先交付再逐出）。
+			return true, "unacked_rows"
+		case HistoryCommitQuarantined:
+			if entry.UnresolvedDelivery || entry.MayHavePartiallyWritten || entry.InvalidationPending {
+				return true, "projection_unknown"
+			}
+			// 已结算的隔离终态（确定未写入 / 已确定不可重建）不阻断逐出。
+		default:
+			return true, "unsettled_delivery"
+		}
+	}
+	return false, ""
 }
 
 // QueuedCount counts Queued entries by scanning the ledger. Diagnostic-only
@@ -970,6 +1181,18 @@ func (l *HistoryCommitLedger) Clone() *HistoryCommitLedger {
 			cloneTokens[token] = struct{}{}
 		}
 		clone.bySource[key] = cloneTokens
+	}
+	if len(l.completedCells) > 0 {
+		clone.completedCells = make(map[historyCommitCellKey]completedCellDelivery, len(l.completedCells))
+		for key, record := range l.completedCells {
+			clone.completedCells[key] = record
+		}
+	}
+	if len(l.openCellRevisions) > 0 {
+		clone.openCellRevisions = make(map[historyCommitCellKey]int, len(l.openCellRevisions))
+		for key, count := range l.openCellRevisions {
+			clone.openCellRevisions[key] = count
+		}
 	}
 	if len(l.compactedTerminalSources) > 0 {
 		clone.compactedTerminalSources = make(map[historyCommitSourceKey]historyCommitTombstone, len(l.compactedTerminalSources))
