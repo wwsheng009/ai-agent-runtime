@@ -17,6 +17,11 @@ type ApprovalRequest struct {
 	Reason     string          `json:"reason,omitempty"`
 	RiskLevel  string          `json:"risk_level,omitempty"`
 	ExpiresAt  time.Time       `json:"expires_at,omitempty"`
+	// HardAsk marks a confirmation that a blanket "yes to asks" handler must
+	// not auto-approve (root/home removal breaker, sensitive write). It mirrors
+	// Decision.HardAsk so non-interactive surfaces can honor the same boundary
+	// the engine enforces for bypass_permissions.
+	HardAsk bool `json:"hard_ask,omitempty"`
 	// RememberPattern is the grant pattern the engine would store if the host
 	// resolves this ask with RememberScope=session|project (§4.8). It is the
 	// server-derived value ("cmd:/path:/host:/exact:"), so approval UIs can show

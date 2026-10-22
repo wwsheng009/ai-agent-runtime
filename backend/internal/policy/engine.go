@@ -1100,6 +1100,7 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 		ToolName:   req.ToolName,
 		Reason:     decision.Reason,
 		RiskLevel:  riskLevel(req.Capabilities),
+		HardAsk:    decision.HardAsk,
 	}
 	approvalTimeout := e.ApprovalTimeout
 	if approvalTimeout == 0 {

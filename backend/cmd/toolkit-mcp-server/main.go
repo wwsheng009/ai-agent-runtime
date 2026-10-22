@@ -1,17 +1,12 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctl"
 )
 
 func main() {
@@ -19,99 +14,30 @@ func main() {
 	excludeFlag := flag.String("exclude", "", "要排除的工具（逗号分隔）")
 	flag.Parse()
 
-	registry := toolkit.NewRegistry()
-	allTools := []toolkit.Tool{
-		tools.NewShellTool(),
-		tools.NewBashTool(),
-		tools.NewViewTool(),
-		tools.NewApplyPatchTool(),
-		tools.NewEditTool(),
-		tools.NewWriteTool(),
-		tools.NewAppendWriteTool(),
-		tools.NewGlobTool(),
-		tools.NewGrepTool(),
-		tools.NewLsTool(),
-		tools.NewDownloadTool(),
-		tools.NewFetchTool(),
-		tools.NewMultieditTool(),
-		tools.NewTodosTool(),
-		tools.NewArtifactReadTool(),
-		tools.NewSourcegraphTool(),
-		tools.NewWebSearchTool(),
+	// Compatibility wrapper: the tool surface, profile filtering and MCP
+	// transport now live in toolctl. Keep the old flags working, but do not
+	// maintain a second registry or a second stdio server loop.
+	args := []string{"serve", "--mcp", "stdio", "--profile", "ops", "--allow-write", "--allow-command"}
+	if list := normalizeList(*toolsFlag); list != "" {
+		args = append(args, "--tools", list)
 	}
-
-	includeTools := parseList(*toolsFlag)
-	excludeTools := parseList(*excludeFlag)
-
-	registeredCount := 0
-	for _, t := range allTools {
-		name := t.Name()
-		if contains(excludeTools, name) {
-			continue
-		}
-		if len(includeTools) > 0 && !contains(includeTools, name) {
-			continue
-		}
-
-		_ = registry.Register(t)
-		registeredCount++
+	if list := normalizeList(*excludeFlag); list != "" {
+		args = append(args, "--exclude-tools", list)
 	}
-
-	mcpServer := toolkit.NewToolkitMCPServer(registry)
-
-	fmt.Fprintln(os.Stderr, "========================================")
-	fmt.Fprintln(os.Stderr, "  Toolkit MCP Server")
-	fmt.Fprintln(os.Stderr, "========================================")
-	fmt.Fprintf(os.Stderr, "已注册工具: %d 个\n", registeredCount)
-	fmt.Fprintln(os.Stderr, "工具列表:")
-	for _, name := range mcpServer.ListExposedTools() {
-		fmt.Fprintf(os.Stderr, "  - %s\n", name)
+	cli := &toolctl.CLI{Stdout: os.Stdout, Stderr: os.Stderr}
+	if code := cli.Run(args); code != toolctl.ExitOK {
+		fmt.Fprintf(os.Stderr, "toolkit-mcp-server: exited with %d\n", code)
+		os.Exit(code)
 	}
-	fmt.Fprintln(os.Stderr, "========================================")
-	fmt.Fprintln(os.Stderr, "等待客户端连接...")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		if err := mcpServer.Start(ctx); err != nil {
-			log.Fatalf("服务器启动失败: %v", err)
-		}
-	}()
-
-	<-sigChan
-	fmt.Fprintln(os.Stderr, "\n收到退出信号，正在关闭服务器...")
-
-	if err := mcpServer.Stop(); err != nil {
-		log.Printf("服务器停止失败: %v", err)
-	}
-
-	fmt.Fprintln(os.Stderr, "服务器已关闭")
 }
 
-func parseList(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	result := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
+func normalizeList(raw string) string {
+	parts := strings.Split(raw, ",")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			kept = append(kept, trimmed)
 		}
 	}
-	return result
-}
-
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
+	return strings.Join(kept, ",")
 }

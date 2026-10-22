@@ -271,6 +271,9 @@ func runServe(args []string) int {
 		return 2
 	}
 
+	// The remote server keeps its own config loader (YAML/base64/target policy),
+	// but the MCP transport loop now lives in one place: remoteServe adapts the
+	// resolved config to the same stdio/HTTP runner toolctl uses.
 	cfg, err := loadConfig(flags)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools: %v\n", err)
@@ -281,8 +284,15 @@ func runServe(args []string) int {
 	} else {
 		cfg.Transport = "http"
 	}
-	serverName := serverNameFor(cfg)
-	server, err := remotetools.NewServer(cfg, serverName)
+	return remoteServe(cfg, flags.stdio)
+}
+
+// remoteServe is the single MCP transport loop for the remote server. Both
+// transports share workspace jail, schema, error codes and audit; only process
+// lifecycle differs. Keeping it here (rather than a second copy in toolctl)
+// means a transport fix lands once for every remote surface.
+func remoteServe(cfg *remotetools.Config, stdio bool) int {
+	server, err := remotetools.NewServer(cfg, serverNameFor(cfg))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aicli-remote-tools: %v\n", err)
 		return 1
@@ -298,7 +308,7 @@ func runServe(args []string) int {
 		cancel()
 	}()
 
-	if flags.stdio {
+	if stdio {
 		// stdio has no graceful shutdown signal of its own: the MCP server ends
 		// when stdin closes, which is exactly the SSH session ending.
 		if err := server.RunStdio(ctx); err != nil {

@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,9 +21,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
@@ -85,14 +86,17 @@ func (c *CLI) usage() {
 Usage:
   toolctl list [--profile auto|readonly|standard|ops] [--json]
   toolctl describe <tool> [--json]
-  toolctl run <tool> --args-json '<json>' [--json] [--allow-write] [--allow-command]
+  toolctl run <tool> --args-json '<json>' [--json] [--allow-write] [--allow-command] [--yes]
   toolctl serve --mcp stdio|http [--listen 127.0.0.1:18765]
 
 Common flags:
   --workspace <dir>       workspace root (default: current directory)
   --allowed-root <dir>    additional admitted root (repeatable)
   --tools a,b,c           explicit tool allowlist
+  --permission-mode <m>   default|accept_edits|plan|dont_ask
   --yes                   accept ask decisions (never bypasses deny/sandbox)
+  --allow-write           expose write/edit/apply_patch (implies accept_edits)
+  --allow-command         expose the shell tool
 `)
 }
 
@@ -101,10 +105,12 @@ type commonOptions struct {
 	allowed    stringList
 	profile    string
 	tools      string
+	exclude    string
 	json       bool
 	yes        bool
 	allowWrite bool
 	allowCmd   bool
+	mode       string
 	argsJSON   string
 	args       stringList
 }
@@ -122,10 +128,12 @@ func bindCommon(fs *flag.FlagSet, opts *commonOptions) {
 	fs.Var(&opts.allowed, "allowed-root", "additional admitted root")
 	fs.StringVar(&opts.profile, "profile", "auto", "profile: auto|readonly|standard|ops")
 	fs.StringVar(&opts.tools, "tools", "", "comma-separated tool allowlist")
+	fs.StringVar(&opts.exclude, "exclude-tools", "", "comma-separated tool denylist")
 	fs.BoolVar(&opts.json, "json", false, "emit JSON")
 	fs.BoolVar(&opts.yes, "yes", false, "accept ask decisions")
 	fs.BoolVar(&opts.allowWrite, "allow-write", false, "allow write tools")
 	fs.BoolVar(&opts.allowCmd, "allow-command", false, "allow the shell tool")
+	fs.StringVar(&opts.mode, "permission-mode", "", "permission mode: default|accept_edits|plan|dont_ask (default: accept_edits with --allow-write, else default)")
 }
 
 func (c *CLI) runList(args []string) int {
@@ -209,13 +217,19 @@ func (c *CLI) runTool(args []string) int {
 		return ExitPolicy
 	}
 	canonical := surface.canonicalName(name)
-	if err := surface.authorize(canonical, handler.Definition()); err != nil {
-		fmt.Fprintln(c.Stderr, err)
-		return ExitPolicy
-	}
 	arguments, err := parseArguments(opts.argsJSON, opts.args)
 	if err != nil {
 		fmt.Fprintln(c.Stderr, err)
+		return ExitUsage
+	}
+	decision, err := surface.authorize(canonical, handler.Definition(), arguments, &opts)
+	if err != nil {
+		fmt.Fprintln(c.Stderr, err)
+		return ExitPolicy
+	}
+	arguments, err = policy.ApplyPatchedArgs(arguments, decision.PatchedArgs)
+	if err != nil {
+		fmt.Fprintf(c.Stderr, "%s: %v\n", toolcore.ErrInvalidArgument, err)
 		return ExitUsage
 	}
 	ctx := toolctx.WithWorkspaceRoot(context.Background(), surface.workspace)
@@ -267,15 +281,17 @@ func (c *CLI) runTool(args []string) int {
 }
 
 type resultView struct {
-	Tool        string                 `json:"tool"`
-	OK          bool                   `json:"ok"`
-	Output      string                 `json:"output,omitempty"`
-	MIMEType    string                 `json:"mime_type,omitempty"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-	ErrorCode   string                 `json:"error_code,omitempty"`
-	NextAction  string                 `json:"next_action,omitempty"`
-	Retriable   bool                   `json:"retriable,omitempty"`
-	ArtifactRef string                 `json:"artifact_ref,omitempty"`
+	Tool     string                 `json:"tool"`
+	OK       bool                   `json:"ok"`
+	Output   string                 `json:"output,omitempty"`
+	MIMEType string                 `json:"mime_type,omitempty"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	// The documented CLI envelope always carries these fields so a consumer can
+	// read them without distinguishing success from failure shapes.
+	ErrorCode   string `json:"error_code"`
+	NextAction  string `json:"next_action"`
+	Retriable   bool   `json:"retriable"`
+	ArtifactRef string `json:"artifact_ref"`
 }
 
 func writeJSON(out io.Writer, value any, errOut io.Writer) int {
@@ -355,6 +371,7 @@ type toolSurface struct {
 	tools      map[string]toolkit.Tool
 	visible    map[string]bool
 	aliases    map[string]string
+	sandbox    *executor.Sandbox
 	allowWrite bool
 	allowExec  bool
 }
@@ -367,23 +384,113 @@ func (s *toolSurface) canonicalName(name string) string {
 	return name
 }
 
-func (s *toolSurface) authorize(name string, def toolcore.Definition) error {
+// authorize runs the shared policy engine. The surface only narrows the tool
+// set; it must not implement a second permission table (design §8.4).
+func (s *toolSurface) authorize(name string, def toolcore.Definition, args map[string]interface{}, opts *commonOptions) (policy.Decision, error) {
 	if !s.visible[name] {
-		return fmt.Errorf("%s: tool %q is not enabled by the current profile", toolcore.ErrToolNotFound, name)
+		return policy.Decision{}, fmt.Errorf("%s: tool %q is not enabled by the current profile", toolcore.ErrToolNotFound, name)
 	}
-	for _, capability := range def.Capabilities {
-		switch capability {
-		case toolcore.CapWriteFS:
-			if !s.allowWrite {
-				return fmt.Errorf("%s: write tools require --allow-write", toolcore.ErrToolDenied)
-			}
-		case toolcore.CapExecShell:
-			if !s.allowExec {
-				return fmt.Errorf("%s: shell requires --allow-command", toolcore.ErrToolDenied)
-			}
+	modeName := strings.TrimSpace(opts.mode)
+	if modeName == "" {
+		// --allow-write is the explicit mutation opt-in for this surface. The
+		// default engine mode asks for every write, which would make the flag
+		// itself a no-op. Accept-edits keeps the opt-in meaningful while the
+		// engine's hard gates (sensitive write, destructive shell) still apply.
+		if opts.allowWrite {
+			modeName = string(policy.ModeAcceptEdits)
+		} else {
+			modeName = string(policy.ModeDefault)
 		}
 	}
-	return nil
+	mode, ok := policy.ParseMode(modeName)
+	if !ok {
+		return policy.Decision{}, fmt.Errorf("%s: unknown permission mode %q", toolcore.ErrInvalidArgument, modeName)
+	}
+	capabilities := make([]policy.Capability, 0, len(def.Capabilities))
+	for _, capability := range def.Capabilities {
+		switch capability {
+		case toolcore.CapReadFS:
+			capabilities = append(capabilities, policy.CapReadOnly)
+		case toolcore.CapWriteFS:
+			capabilities = append(capabilities, policy.CapWriteFS)
+		case toolcore.CapExecShell:
+			capabilities = append(capabilities, policy.CapExecShell)
+		case toolcore.CapNetwork:
+			capabilities = append(capabilities, policy.CapNetwork)
+		}
+	}
+	engine := &policy.Engine{
+		Mode:   mode,
+		Policy: policy.NewToolExecutionPolicy(s.visibleNames(), false),
+		AskHandler: cliApprovalHandler{
+			accept: opts.yes,
+			errOut: nil,
+		},
+	}
+	engine.Policy.PathAnchorRoot = s.workspace
+	engine.Policy.Sandbox = s.sandbox
+	decision, err := engine.Evaluate(toolctx.WithWorkspaceRoot(context.Background(), s.workspace), policy.EvalRequest{
+		ToolName:     name,
+		Args:         args,
+		Capabilities: capabilities,
+		Mode:         mode,
+		ToolInfo: &skill.ToolInfo{
+			Name:        name,
+			Description: def.Description,
+			Metadata:    def.Metadata,
+			Enabled:     true,
+		},
+	})
+	if err != nil {
+		return decision, err
+	}
+	if decision.Type == policy.DecisionDeny {
+		code := toolcore.ErrToolDenied
+		switch {
+		case decision.Stage == policy.StagePolicy &&
+			(strings.Contains(decision.Reason, "sandbox") || strings.Contains(decision.Reason, "path")):
+			code = toolcore.ErrPathDenied
+		}
+		return decision, fmt.Errorf("%s: %s", code, decision.Reason)
+	}
+	return decision, nil
+}
+
+// visibleNames returns the model-visible tool allowlist for the engine.
+func (s *toolSurface) visibleNames() []string {
+	names := make([]string, 0, len(s.visible))
+	for name, visible := range s.visible {
+		if visible {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// cliApprovalHandler implements --yes as "approve ordinary asks". Hard asks
+// (root/home removal, sensitive writes) stay denied: the CLI has no interactive
+// confirmation channel, and silently approving them would bypass the safety
+// boundary the engine deliberately keeps.
+type cliApprovalHandler struct {
+	accept bool
+	errOut io.Writer
+}
+
+func (h cliApprovalHandler) RequestApproval(_ context.Context, req policy.ApprovalRequest) (policy.ApprovalResponse, error) {
+	if req.HardAsk {
+		return policy.ApprovalResponse{
+			Allowed: false,
+			Reason:  "hard_ask_requires_explicit_confirmation",
+		}, nil
+	}
+	if !h.accept {
+		return policy.ApprovalResponse{
+			Allowed: false,
+			Reason:  "approval_required; pass --yes to accept ordinary asks",
+		}, nil
+	}
+	return policy.ApprovalResponse{Allowed: true, Reason: "cli --yes"}, nil
 }
 
 func (s *toolSurface) describe(name string) (toolDescription, bool) {
@@ -540,6 +647,17 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 		"apply_patch":  tools.NewApplyPatchTool(),
 		"shell":        tools.NewShellTool(),
 	}
+	// Local-only tools are not part of the core inventory, but the full MCP
+	// surface has always exposed them (network, image, stateful helpers). They
+	// are only added for the explicit ops/custom profiles so the default CLI
+	// stays the v1 read-only core rather than silently widening.
+	if profile == "ops" || profile == "custom" {
+		for name, tool := range localOnlyTools() {
+			if _, exists := constructed[name]; !exists {
+				constructed[name] = tool
+			}
+		}
+	}
 	for name, tool := range constructed {
 		if setter, ok := tool.(interface{ SetSandbox(*executor.Sandbox) }); ok {
 			setter.SetSandbox(sandbox)
@@ -555,7 +673,7 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 	inventory := map[string]toolcore.CoreTool{}
 	aliases := map[string]string{}
 	for _, item := range toolcore.V1CoreInventory() {
-		if item.LocalOnly || item.ControlPlane {
+		if item.ControlPlane {
 			continue
 		}
 		inventory[item.Name] = item
@@ -578,6 +696,19 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 		if name == "shell" && !allowExec {
 			continue
 		}
+		// Local-only tools keep the historical MCP surface, but capability
+		// families still need their explicit opt-in: file-writing helpers need
+		// --allow-write, exec helpers need --allow-command.
+		switch name {
+		case "download", "openai_image_generate":
+			if !allowWrite {
+				continue
+			}
+		case "aicli_exec":
+			if !allowExec {
+				continue
+			}
+		}
 		visible[name] = true
 	}
 	if list := parseCSV(opts.tools); len(list) > 0 {
@@ -594,6 +725,14 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 			}
 		}
 	}
+	if list := parseCSV(opts.exclude); len(list) > 0 {
+		for _, name := range list {
+			if canonical, ok := aliases[name]; ok {
+				name = canonical
+			}
+			delete(visible, name)
+		}
+	}
 
 	registry := toolcore.NewRegistry()
 	for name, tool := range constructed {
@@ -605,6 +744,7 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 		if item, ok := inventory[name]; ok {
 			def.Aliases = append([]string(nil), item.Aliases...)
 			def.Capabilities = append([]toolcore.Capability(nil), item.Capabilities...)
+			def.DefaultOutputBudget = toolcoreoutput.ToolBudget(name)
 		}
 		if isWriteTool(name) {
 			def.Capabilities = []toolcore.Capability{toolcore.CapWriteFS}
@@ -624,6 +764,7 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 		tools:      constructed,
 		visible:    visible,
 		aliases:    aliases,
+		sandbox:    sandbox,
 		allowWrite: allowWrite,
 		allowExec:  allowExec,
 	}, nil
@@ -635,6 +776,21 @@ func isWriteTool(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// localOnlyTools lists the local capabilities that are not part of the v1 core
+// migration matrix but have always been exposed by the toolkit MCP surface.
+// They stay behind the same sandbox/allowlist boundary as the core tools.
+func localOnlyTools() map[string]toolkit.Tool {
+	return map[string]toolkit.Tool{
+		"aicli_exec":            tools.NewAICLIExecTool(),
+		"fetch":                 tools.NewFetchTool(),
+		"download":              tools.NewDownloadTool(),
+		"web_search":            tools.NewWebSearchTool(),
+		"sourcegraph":           tools.NewSourcegraphTool(),
+		"openai_image_generate": tools.NewOpenAIImageGenerateTool(nil),
+		"todos":                 tools.NewTodosTool(),
 	}
 }
 
@@ -685,20 +841,7 @@ func (c *CLI) runServe(args []string) int {
 		fmt.Fprintln(c.Stderr, err)
 		return ExitUsage
 	}
-	registry := toolkit.NewRegistry()
-	for name, tool := range surface.tools {
-		if !surface.visible[name] {
-			continue
-		}
-		if err := registry.Register(tool); err != nil {
-			fmt.Fprintf(c.Stderr, "register %s: %v\n", name, err)
-			return ExitExecution
-		}
-	}
-	mcpServer := toolkit.NewToolkitMCPServer(registry)
-	mcpServer.SetToolContextDecorator(func(ctx context.Context, _ *mcp.CallToolRequest) context.Context {
-		return toolctx.WithWorkspaceRoot(ctx, surface.workspace)
-	})
+	mcpServer := newSurfaceMCPServer(surface)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -710,64 +853,11 @@ func (c *CLI) runServe(args []string) int {
 		}
 		return ExitOK
 	case "http":
-		return c.serveHTTP(ctx, mcpServer, *listen, *tokenEnv, *tlsCert, *tlsKey)
+		return c.serveSurfaceHTTP(ctx, surface, *listen, *tokenEnv, *tlsCert, *tlsKey)
 	default:
 		fmt.Fprintf(c.Stderr, "unsupported MCP transport %q (want stdio|http)\n", *transportName)
 		return ExitUsage
 	}
-}
-
-func (c *CLI) serveHTTP(ctx context.Context, mcpServer *toolkit.ToolkitMCPServer, listen, tokenEnv, tlsCert, tlsKey string) int {
-	if (strings.TrimSpace(tlsCert) == "") != (strings.TrimSpace(tlsKey) == "") {
-		fmt.Fprintln(c.Stderr, "--tls-cert and --tls-key must be set together")
-		return ExitUsage
-	}
-	host, _, err := net.SplitHostPort(listen)
-	if err != nil {
-		fmt.Fprintf(c.Stderr, "invalid --listen %q: %v\n", listen, err)
-		return ExitUsage
-	}
-	ip := net.ParseIP(host)
-	nonLoopback := host == "" || ip == nil || !ip.IsLoopback()
-	if nonLoopback {
-		if strings.TrimSpace(os.Getenv(tokenEnv)) == "" {
-			fmt.Fprintf(c.Stderr, "non-loopback listen %q requires %s\n", listen, tokenEnv)
-			return ExitUsage
-		}
-		if strings.TrimSpace(tlsCert) == "" {
-			fmt.Fprintln(c.Stderr, "non-loopback listen requires --tls-cert/--tls-key")
-			return ExitUsage
-		}
-	}
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-		return mcpServer.GetMCPServer()
-	}, &mcp.StreamableHTTPOptions{Stateless: true})
-	root := http.Handler(handler)
-	if token := strings.TrimSpace(os.Getenv(tokenEnv)); token != "" {
-		root = bearerAuthMiddleware(token, root)
-	}
-	server := &http.Server{
-		Addr:              listen,
-		Handler:           root,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	fmt.Fprintf(c.Stderr, "toolctl mcp http listening on %s\n", listen)
-	if strings.TrimSpace(tlsCert) != "" {
-		err = server.ListenAndServeTLS(tlsCert, tlsKey)
-	} else {
-		err = server.ListenAndServe()
-	}
-	if err != nil && err != http.ErrServerClosed {
-		fmt.Fprintf(c.Stderr, "serve http: %v\n", err)
-		return ExitExecution
-	}
-	return ExitOK
 }
 
 func bearerAuthMiddleware(token string, next http.Handler) http.Handler {
