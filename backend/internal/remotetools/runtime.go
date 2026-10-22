@@ -9,6 +9,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 )
 
 // newRemoteRuntime builds the call-scoped Runtime injected into shared core
@@ -23,6 +24,7 @@ func newRemoteRuntime(ctx context.Context, cfg *Config, workspace *Workspace, sa
 		env:       remoteEnv{sandbox: sandbox},
 		capture:   remoteCapture{cfg: cfg},
 		output:    remoteOutput{cfg: cfg, ctx: ctx, workspace: workspace},
+		search:    resolveRipgrepRunner(),
 		artifacts: remoteArtifacts{store: artifacts, target: targetName(cfg)},
 		sessions:  &remoteSessions{ctx: ctx, workspace: workspace},
 		clock:     remoteClock{},
@@ -37,6 +39,7 @@ type remoteRuntime struct {
 	env       toolcore.EnvProvider
 	capture   remoteCapture
 	output    toolcore.OutputShaper
+	search    ripgrepRunner
 	artifacts toolcore.ArtifactSink
 	sessions  toolcore.SessionState
 	clock     toolcore.Clock
@@ -57,6 +60,16 @@ func (r *remoteRuntime) IDs() toolcore.IDGenerator               { return r.ids 
 // capture up to the configured payload ceiling before folding to the
 // model-visible window.
 func (r *remoteRuntime) CaptureLimit(string) int { return r.capture.limit() }
+
+// Glob implements searchcore.Searcher with the resolver-backed ripgrep binary.
+func (r *remoteRuntime) Glob(ctx context.Context, base, pattern string, limit int) (searchcore.GlobResult, bool, error) {
+	return r.search.glob(ctx, base, pattern, limit)
+}
+
+// Grep implements searchcore.Searcher with the resolver-backed ripgrep binary.
+func (r *remoteRuntime) Grep(ctx context.Context, opts searchcore.GrepOptions) (searchcore.GrepResult, bool, error) {
+	return r.search.grep(ctx, opts)
+}
 
 type remoteCapture struct {
 	cfg *Config

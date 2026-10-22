@@ -13,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
@@ -174,6 +175,90 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("view handler: %w", err)
 	}
+	globSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"pattern": map[string]interface{}{
+				"type":        "string",
+				"description": "Glob pattern, e.g. **/*.go. Relative to the remote workspace.",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "Base directory for the pattern. Default: workspace root.",
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "Maximum matches to return. Default 500.",
+			},
+		},
+		"required":             []string{"pattern"},
+		"additionalProperties": false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("glob schema: %w", err)
+	}
+	globBase := remoteToolBase{cfg: cfg, workspace: workspace}
+	globTool, err := toolkit.NewRuntimeTool(searchcore.NewGlobHandler(toolcore.Definition{
+		Name:                ToolGlob,
+		Description:         globBase.describe("Find remote files by glob pattern; respects the workspace boundary."),
+		Version:             "1.0.0",
+		InputSchema:         globSchema,
+		Capabilities:        []toolcore.Capability{toolcore.CapReadFS},
+		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolGlob),
+		DirectCall:          true,
+	}), func(ctx context.Context) (toolcore.Runtime, error) {
+		return newRemoteRuntime(ctx, cfg, workspace, sandbox, artifacts), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("glob handler: %w", err)
+	}
+	grepSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"pattern": map[string]interface{}{
+				"type":        "string",
+				"description": "Regular expression to search for (ripgrep syntax).",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "File or directory to search. Default: workspace root.",
+			},
+			"glob": map[string]interface{}{
+				"type":        "string",
+				"description": "Optional file filter, e.g. *.go.",
+			},
+			"case_insensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Case-insensitive match.",
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "Maximum matches to return. Default 200.",
+			},
+		},
+		"required":             []string{"pattern"},
+		"additionalProperties": false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("grep schema: %w", err)
+	}
+	grepBase := remoteToolBase{cfg: cfg, workspace: workspace}
+	grepTool, err := toolkit.NewRuntimeTool(searchcore.NewGrepHandler(toolcore.Definition{
+		Name:                ToolGrep,
+		Description:         grepBase.describe("Search remote file contents with a regular expression; results are file:line:text."),
+		Version:             "1.0.0",
+		InputSchema:         grepSchema,
+		Capabilities:        []toolcore.Capability{toolcore.CapReadFS},
+		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolGrep),
+		DirectCall:          true,
+	}), func(ctx context.Context) (toolcore.Runtime, error) {
+		return newRemoteRuntime(ctx, cfg, workspace, sandbox, artifacts), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("grep handler: %w", err)
+	}
 
 	type registration struct {
 		name string
@@ -182,8 +267,8 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	candidates := []registration{
 		{name: ToolView, tool: viewTool},
 		{name: ToolLs, tool: lsTool},
-		{name: ToolGlob, tool: newRemoteGlobTool(cfg, workspace)},
-		{name: ToolGrep, tool: newRemoteGrepTool(cfg, workspace)},
+		{name: ToolGlob, tool: globTool},
+		{name: ToolGrep, tool: grepTool},
 		{name: ToolWrite, tool: newRemoteWriteTool(cfg, workspace, sandbox)},
 		{name: ToolAppend, tool: newRemoteAppendTool(cfg, workspace, sandbox)},
 		{name: ToolEdit, tool: newRemoteEditTool(cfg, workspace, sandbox)},

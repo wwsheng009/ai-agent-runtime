@@ -86,7 +86,7 @@ func (r ripgrepRunner) glob(ctx context.Context, base, pattern string, limit int
 		return searchcore.GlobResult{}, false, nil
 	}
 	if limit < 1 {
-		limit = remoteGlobDefaultLimit
+		limit = searchcore.DefaultGlobLimit
 	}
 
 	args := append(r.baseArgs(), "--files", "--glob", pattern)
