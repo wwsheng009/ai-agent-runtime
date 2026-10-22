@@ -126,7 +126,7 @@ func TestSupervisionE2E_LongTaskDeclaredBudgetWithOneExtension(t *testing.T) {
 	// 都没发生」）。
 	parkedReport, err := injectLocalSupervisionPreflight(ctx, host, parent, "USER PROMPT", nil)
 	require.NoError(t, err)
-	require.Contains(t, parkedReport, batch.BatchID+": 0/2 completed, 2 running")
+	require.Contains(t, parkedReport, batch.BatchID+"：共 2 项，完成 0，进行中 2")
 	require.Contains(t, parkedReport, "USER PROMPT")
 
 	// --- 阶段 2：中途一次真实延长 ---------------------------------------------
@@ -245,10 +245,10 @@ func TestSupervisionE2E_LongTaskDeclaredBudgetWithOneExtension(t *testing.T) {
 	require.Equal(t, subagentbatch.BatchCompleted, finalBatch.Status)
 	require.Nil(t, finalBatch.CancelRequestedAt, "长任务走的是完成路径，全程没有取消请求")
 
-	// 终局报告完整：父 turn 的 rollup 给出「2/2 completed (terminal …)」。
+	// 终局报告完整：父 turn 的 rollup 给出「共 2 项，完成 2；已全部结束」。
 	report, err := injectLocalSupervisionPreflight(ctx, host, parent, "USER PROMPT", nil)
 	require.NoError(t, err)
-	require.Contains(t, report, batch.BatchID+": 2/2 completed (terminal")
+	require.Contains(t, report, batch.BatchID+"：共 2 项，完成 2；已全部结束")
 
 	// 全程 turn 不中断：parked-turn 记录仍在、turn_id 未变、义务清单未改，
 	// 且只排了一次 resume（预算内，无唤醒风暴）。

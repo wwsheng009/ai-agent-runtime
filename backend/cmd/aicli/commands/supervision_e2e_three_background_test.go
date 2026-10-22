@@ -126,7 +126,7 @@ func TestSupervisionE2E_ThreeBackgroundChildrenOneCallAndProgressLine(t *testing
 	})
 	require.NoError(t, err)
 
-	// batch 控制面：3 个任务，1 完成 2 运行 → progress 行 "1/3 completed, 2 running"。
+	// batch 控制面：3 个任务，1 完成 2 运行 → 进度行「共 3 项，完成 1，进行中 2」。
 	// 计数以 task 行为单一事实源（batch 计数列只在建批与终态收敛时刷新），
 	// 因此这里的存储列必须与 task 行一致，否则快照自相矛盾。
 	batch := &subagentbatch.SubagentBatch{
@@ -186,8 +186,8 @@ func TestSupervisionE2E_ThreeBackgroundChildrenOneCallAndProgressLine(t *testing
 	// 2) 同一父 turn 的 preflight：progress 行与 lifecycle 行一起注入。
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, supervisionE2EParent, "USER PROMPT", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "progress:")
-	require.Contains(t, prompt, "1/3 completed, 2 running")
+	require.Contains(t, prompt, "批次进度：")
+	require.Contains(t, prompt, batch.BatchID+"：共 3 项，完成 1，进行中 2")
 	require.Contains(t, prompt, "worker-timeout")
 	require.Contains(t, prompt, "USER PROMPT")
 }
@@ -228,7 +228,8 @@ func TestSupervisionE2E_ProgressOnlyTurnIsStillInjected(t *testing.T) {
 
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, supervisionE2EParent, "USER PROMPT", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "progress:")
-	require.Contains(t, prompt, "3/3 completed")
+	require.Contains(t, prompt, "批次进度：")
+	require.Contains(t, prompt, batch.BatchID+"：共 3 项，完成 3；已全部结束")
+	require.Contains(t, prompt, "不再需要时用 subagent_close 释放子会话")
 	require.Contains(t, prompt, "USER PROMPT")
 }

@@ -287,7 +287,6 @@ func TestInjectLocalSupervisionPreflight_IncludesBatchProgress(t *testing.T) {
 
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "[子任务与后台作业进展]")
 	require.Contains(t, prompt, "批次进度：")
 	require.Contains(t, prompt, "batch-progress-1：共 3 项，完成 2，进行中 1")
 	require.Contains(t, prompt, "worker-2（session session-2）")

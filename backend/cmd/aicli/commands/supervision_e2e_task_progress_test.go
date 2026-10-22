@@ -45,11 +45,11 @@ func TestSupervisionE2E_TaskProgressAgeFromLastProgressAt(t *testing.T) {
 
 	prompt, err := injectLocalSupervisionPreflight(ctx, host, "parent-session", "continue work", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "worker-progress: running; session=session-progress; last progress 7s ago",
+	require.Contains(t, prompt, "worker-progress（session session-progress）：running（最近进展 7s 前）",
 		"a running task with a durable LastProgressAt must report the real progress age")
-	require.NotContains(t, prompt, "worker-progress: running; session=session-progress; no progress yet",
+	require.NotContains(t, prompt, "worker-progress（session session-progress）：running（尚无进展）",
 		"the heartbeat fallback must not shadow the recorded progress stamp")
-	require.Contains(t, prompt, "worker-silent: running; session=session-silent; last progress just now ago",
+	require.Contains(t, prompt, "worker-silent（session session-silent）：running（最近进展 just now 前）",
 		"a task without a recorded stamp falls back to the row update time, not to a fabricated value")
-	require.Contains(t, prompt, "batch-progress-age-1: 0/2 completed, 2 running")
+	require.Contains(t, prompt, "batch-progress-age-1：共 2 项，完成 0，进行中 2")
 }
