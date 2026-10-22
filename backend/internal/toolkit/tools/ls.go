@@ -2,23 +2,16 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
-
-// errLsLimitReached is the internal walk sentinel used to stop the traversal
-// once the tool's own entry limit is reached. It is not a user-visible error:
-// the truncation is reported through metadata and an honest content notice.
-var errLsLimitReached = errors.New("ls entry limit reached")
 
 // LsTool 列出目录工具
 type LsTool struct {
@@ -26,12 +19,6 @@ type LsTool struct {
 	sandboxPolicy
 	maxDepth int
 	limit    int
-}
-
-type lsEntry struct {
-	relPath string
-	depth   int
-	isDir   bool
 }
 
 // NewLsTool 创建 Ls 工具
@@ -138,75 +125,19 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 		}, nil
 	}
 
-	// 收集目录内容
-	entries := make([]lsEntry, 0)
-	fileCount := 0
-	dirCount := 0
-	limitReached := false
-
-	err = filepath.Walk(resolvedPath, func(walkPath string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-
-		// 计算相对路径
-		relPath, err := filepath.Rel(resolvedPath, walkPath)
-		if err != nil {
-			relPath = walkPath
-		}
-
-		// 跳过根目录
-		if relPath == "." {
-			return nil
-		}
-
-		// 检查深度
-		depthCount := strings.Count(relPath, string(filepath.Separator))
-		if depthCount >= depth {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// 添加到结果
-		normalizedRelPath := filepath.ToSlash(relPath)
-		if info.IsDir() {
-			entries = append(entries, lsEntry{relPath: normalizedRelPath, depth: depthCount, isDir: true})
-			dirCount++
-		} else {
-			entries = append(entries, lsEntry{relPath: normalizedRelPath, depth: depthCount, isDir: false})
-			fileCount++
-		}
-
-		// 检查限制
-		if len(entries) >= l.limit {
-			limitReached = true
-			return errLsLimitReached
-		}
-
-		return nil
-	})
-
-	// 达到条目上限不是错误：记录标记，由输出层如实标注截断。
-	if err != nil && !errors.Is(err, errLsLimitReached) {
+	// 收集目录内容。遍历、深度裁剪与条目上限由 lscore 共享实现。
+	listing, err := lscore.ReadTree(resolvedPath, depth, l.limit)
+	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("遍历目录失败: %w", err),
 		}, nil
 	}
-
-	// 排序（目录在前，文件在后）
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].relPath == entries[j].relPath {
-			if entries[i].isDir == entries[j].isDir {
-				return entries[i].depth < entries[j].depth
-			}
-			return entries[i].isDir && !entries[j].isDir
-		}
-		return entries[i].relPath < entries[j].relPath
-	})
+	entries := listing.Entries
+	fileCount := listing.Files
+	dirCount := listing.Dirs
+	limitReached := listing.Truncated
 
 	// 格式化输出。条目同时受 l.limit 与 ls 自身字节预算约束：任一命中都标记
 	// truncated 并声明 L4 opt-out，避免已定形的列表被二次折叠。
@@ -228,10 +159,10 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 		output.WriteString("(空目录)")
 	} else {
 		for _, entry := range entries {
-			prefix := strings.Repeat("  ", entry.depth)
-			line := fmt.Sprintf("%s📄 %s\n", prefix, entry.relPath)
-			if entry.isDir {
-				line = fmt.Sprintf("%s📁 %s/\n", prefix, entry.relPath)
+			prefix := strings.Repeat("  ", entry.Depth)
+			line := fmt.Sprintf("%s📄 %s\n", prefix, entry.RelPath)
+			if entry.Dir {
+				line = fmt.Sprintf("%s📁 %s/\n", prefix, entry.RelPath)
 			}
 			if rendered > 0 && used+len(line) > listingBudget {
 				byteBudgetHit = true
