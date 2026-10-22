@@ -242,7 +242,7 @@ func buildKnownEventTypes() map[string]bool {
 
 	// 来源 9：子代理路由审计与批次失败态终态，以及扫描门禁收编的历史裸字面量
 	// （见文件头说明）。前 5 条的常量定义在 internal/events/subagent_audit_events.go；
-	// 其余 20 条是 internal/agent 里以裸字面量发射、经 SA-G2 门禁强制登记的类型。
+	// 其余类型是 internal/agent 里以裸字面量发射、经 SA-G2 门禁强制登记的类型。
 	add(
 		"subagent.route.resolved",              // events.EventSubagentRouteResolved（agent/subagent_route_audit.go）
 		"subagent.batch.failed",                // events.EventSubagentBatchFailed（agent/subagent_batch_coordinator.go）
@@ -258,6 +258,8 @@ func buildKnownEventTypes() map[string]bool {
 		"context.tool_schema.frozen",           // agent/loop.go
 		"context.usage_over_budget",            // agent/loop.go
 		"hooks.stop_blocked",                   // agent/loop.go
+		"hooks.status",                         // agent/agent.go
+		"hooks.async_completed",                // agent/agent.go
 		"llm.max_output_tokens.escalated",      // agent/loop.go
 		"llm.prompt_cache.backoff_applied",     // agent/loop.go
 		"llm.reasoning_only.guardrail_hit",     // agent/loop.go
