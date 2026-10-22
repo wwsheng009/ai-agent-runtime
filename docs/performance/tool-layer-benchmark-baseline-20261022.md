@@ -124,13 +124,56 @@ go test -run '^$' `
 
 对照 §15.2.2“256 tools list p95 ≤ 50ms”：当前实现有两个数量级余量。
 
-## 4. 与 §15.2.2 的对照
+## 4. MCP 32 KiB（in-process vs MCP）
+
+命令：
+
+```powershell
+$env:GOGC='20'; $env:GOMAXPROCS='2'
+go test -run '^$' `
+  -bench 'BenchmarkInProcess32KiB|BenchmarkMCPConvert32KiB|BenchmarkMCPRoundTrip32KiB' `
+  -benchmem -count=3 ./internal/toolkit
+```
+
+结果：
+
+| benchmark | run | ns/op | MB/s | B/op | allocs/op |
+|-----------|-----|-------|------|------|-----------|
+| `BenchmarkInProcess32KiB` | 1 | 33.42 | 980,410 | 8 | 1 |
+| `BenchmarkInProcess32KiB` | 2 | 33.83 | 968,514 | 8 | 1 |
+| `BenchmarkInProcess32KiB` | 3 | 46.18 | 709,638 | 8 | 1 |
+| `BenchmarkMCPConvert32KiB` | 1 | 696.5 | 47,047 | 480 | 6 |
+| `BenchmarkMCPConvert32KiB` | 2 | 1,124 | 29,159 | 480 | 6 |
+| `BenchmarkMCPConvert32KiB` | 3 | 723.1 | 45,315 | 480 | 6 |
+| `BenchmarkMCPRoundTrip32KiB` | 1 | 1,091,724 | 30.01 | 823,844 | 186 |
+| `BenchmarkMCPRoundTrip32KiB` | 2 | 1,086,501 | 30.16 | 823,756 | 186 |
+| `BenchmarkMCPRoundTrip32KiB` | 3 | 1,077,712 | 30.41 | 824,007 | 186 |
+
+中位数：
+
+| benchmark | median ns/op | 说明 |
+|-----------|--------------|------|
+| in-process 直调 | ~33.8 ns | 仅返回同一个内存字符串，不含任何 payload 拷贝 |
+| `buildMCPCallToolResult` | ~723 ns | 32 KiB 内容的 MCP 内容转换 |
+| in-memory MCP 往返 | ~1.09 ms | 完整 JSON-RPC/SDK 编解码 + 传输 |
+
+解读：
+
+- 32 KiB 内容**转换**本身是亚微秒级；
+- 完整 MCP 往返 ~1.09 ms，主要成本是 JSON-RPC framing/SDK，而不是 payload
+  转换；
+- §15.2.2 的“MCP 32 KiB 序列化 p95 ≤10% 相对 in-process”**不能**用一个
+  零工作量 echo 基线评判：in-process 基线只有 ~34 ns，任何协议开销都会被放大
+  到远大于 10%。该门槛需要换成真实工具工作量（如 grep/view 读文件）的基线
+  后再定论，当前标记为 **部分覆盖**。
+
+## 5. 与 §15.2.2 的对照
 
 | 指标 | 设计目标 | 当前证据 |
 |------|----------|----------|
 | grep 峰值内存不随文件总量线性增长 | 流式/有界 buffer | ✅ 已覆盖：峰值 heap 10k→100k 为 ~1.29→1.47 MB（文件 ×10，峰值 ~1.14×）；B/op 仍是累计分配指标 |
 | read core p95 开销 ≤ 5% | 相对直接实现 | 未覆盖（缺 surface 对比基准） |
-| MCP 32 KiB 序列化 p95 ≤ 10% | 相对 in-process | 未覆盖 |
+| MCP 32 KiB 序列化 p95 ≤ 10% | 相对 in-process | ⚠️ 部分覆盖：转换 ~0.72 µs；in-memory 往返 ~1.09 ms，主要为协议开销；需真实工具工作量基线才能评判 10% 门槛 |
 | 256 tools list p95 ≤ 50 ms | 含 schema/filter | ✅ 已覆盖：Definitions ~0.16 ms、List ~0.06 ms（中位数） |
 | shell capture ≤ CaptureLimit | 不把完整 capture 放进模型 | 已有契约测试，未做 benchmark |
 | 回归门槛：中位数超基线 10% 失败 | CI 3 次取中位数 | 本文件提供首轮基线 |

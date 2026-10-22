@@ -32,6 +32,12 @@ try {
         -benchmem -count=3 ./internal/toolcore
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    Write-Host '== MCP 32 KiB: in-process / conversion / round trip =='
+    go test -run '^$' `
+        -bench 'BenchmarkInProcess32KiB|BenchmarkMCPConvert32KiB|BenchmarkMCPRoundTrip32KiB' `
+        -benchmem -count=3 ./internal/toolkit
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     if ($env:AICLI_TOOLCORE_BENCH_LARGE -eq '1') {
         Write-Host '== large-repo / 100k files: glob + grep (peak-heap sampled) =='
         go test -run '^$' `
