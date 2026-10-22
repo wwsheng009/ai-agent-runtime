@@ -48,9 +48,6 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
 		}
 	}
-	if err := checkNotDevice(abs); err != nil {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "use a regular file", err), nil
-	}
 	info, statErr := os.Stat(abs)
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
@@ -60,6 +57,10 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	}
 	if info.IsDir() {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "use ls for directories", fmt.Errorf("%s is a directory", paths.Relative(abs))), nil
+	}
+	if !info.Mode().IsRegular() {
+		return toolcore.Error(toolcore.ErrInvalidArgument, "use a regular file",
+			fmt.Errorf("%s is not a regular file", paths.Relative(abs))), nil
 	}
 
 	offset := intArg(call.Args, "offset", 0)
@@ -89,30 +90,6 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		}
 	}
 	return result, nil
-}
-
-// checkNotDevice rejects FIFO/socket/device paths before any open. Reading a
-// FIFO blocks until a writer appears; this is a portable safety check shared by
-// every read surface.
-func checkNotDevice(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	mode := info.Mode()
-	switch {
-	case mode&os.ModeNamedPipe != 0:
-		return fmt.Errorf("path is a named pipe")
-	case mode&os.ModeSocket != 0:
-		return fmt.Errorf("path is a socket")
-	case mode&os.ModeDevice != 0, mode&os.ModeCharDevice != 0:
-		return fmt.Errorf("path is a device")
-	default:
-		return nil
-	}
 }
 
 func maxBytes(call *toolcore.Call) int {

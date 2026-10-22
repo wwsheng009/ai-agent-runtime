@@ -167,12 +167,54 @@ go test -run '^$' `
   到远大于 10%。该门槛需要换成真实工具工作量（如 grep/view 读文件）的基线
   后再定论，当前标记为 **部分覆盖**。
 
-## 5. 与 §15.2.2 的对照
+## 5. read core 直调对照（view，2000 行窗口）
+
+命令：
+
+```powershell
+$env:GOGC='20'; $env:GOMAXPROCS='2'
+go test -run '^$' `
+  -bench 'BenchmarkViewCoreDirect|BenchmarkViewHandlerRuntime' `
+  -benchmem -count=3 ./internal/toolcore/viewcore
+```
+
+夹具：20,000 行，每行约 1 KiB（long-line 语料），窗口 2000 行；
+`Direct` 直接调用 `Read/Render/Metadata`，`HandlerRuntime` 走完整
+`viewcore.NewHandler` + 注入 `Runtime`（路径解析、stat、参数解析、输出整形）。
+
+结果：
+
+| benchmark | run | ns/op | MB/s | B/op | allocs/op |
+|-----------|-----|-------|------|------|-----------|
+| `BenchmarkViewCoreDirect` | 1 | 11,078,426 | 1871 | 13,370,056 | 5,831 |
+| `BenchmarkViewCoreDirect` | 2 | 12,779,830 | 1622 | 13,370,278 | 5,831 |
+| `BenchmarkViewCoreDirect` | 3 | 12,772,034 | 1623 | 13,370,437 | 5,831 |
+| `BenchmarkViewHandlerRuntime` | 1 | 13,659,250 | 1518 | 13,371,596 | 5,840 |
+| `BenchmarkViewHandlerRuntime` | 2 | 14,769,153 | 1404 | 13,371,539 | 5,840 |
+| `BenchmarkViewHandlerRuntime` | 3 | 12,720,339 | 1630 | 13,371,706 | 5,841 |
+
+中位数与解读：
+
+| 指标 | Direct | Handler | 差值 |
+|------|--------|---------|------|
+| median ns/op | ~12.77 ms | ~13.66 ms | ~+7.0% |
+| B/op | ~13.37 MB | ~13.37 MB | 基本一致 |
+| allocs/op | 5,831 | 5,840 | +9 |
+
+- 长行语料下，适配层开销约 7%，已接近但未稳定低于 §15.2.2 的 5% 门槛；
+- 宿主噪声约 ±10%（第三次 handler run 快于 direct 中位数），5% 门槛需在
+  静默 CI 机器上取 p95 后判定；
+- 早前短行夹具（400 行窗口）下开销约 30–45%，说明该指标对小 I/O 工作量
+  敏感；固定 stat/解析成本会被放大，必须以设计指定的 2000 行/长行语料为准；
+- 顺带优化：Handler 原先 `Lstat + Stat` 两次系统调用已合并为单次 `os.Stat`
+  + `IsRegular`，既降低开销，也补上 symlink→FIFO 的漏检。
+
+## 6. 与 §15.2.2 的对照
 
 | 指标 | 设计目标 | 当前证据 |
 |------|----------|----------|
 | grep 峰值内存不随文件总量线性增长 | 流式/有界 buffer | ✅ 已覆盖：峰值 heap 10k→100k 为 ~1.29→1.47 MB（文件 ×10，峰值 ~1.14×）；B/op 仍是累计分配指标 |
-| read core p95 开销 ≤ 5% | 相对直接实现 | 未覆盖（缺 surface 对比基准） |
+| read core p95 开销 ≤ 5% | 相对直接实现 | ⚠️ 部分覆盖：long-line 2000 行窗口下中位开销 ~7%，宿主噪声 ±10%；需静默 CI 取 p95 判定 |
 | MCP 32 KiB 序列化 p95 ≤ 10% | 相对 in-process | ⚠️ 部分覆盖：转换 ~0.72 µs；in-memory 往返 ~1.09 ms，主要为协议开销；需真实工具工作量基线才能评判 10% 门槛 |
 | 256 tools list p95 ≤ 50 ms | 含 schema/filter | ✅ 已覆盖：Definitions ~0.16 ms、List ~0.06 ms（中位数） |
 | shell capture ≤ CaptureLimit | 不把完整 capture 放进模型 | 已有契约测试，未做 benchmark |

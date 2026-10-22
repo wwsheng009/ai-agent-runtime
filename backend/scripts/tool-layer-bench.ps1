@@ -38,6 +38,12 @@ try {
         -benchmem -count=3 ./internal/toolkit
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    Write-Host '== read core direct vs Handler runtime (view long-line) =='
+    go test -run '^$' `
+        -bench 'BenchmarkViewCoreDirect|BenchmarkViewHandlerRuntime' `
+        -benchmem -count=3 ./internal/toolcore/viewcore
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     if ($env:AICLI_TOOLCORE_BENCH_LARGE -eq '1') {
         Write-Host '== large-repo / 100k files: glob + grep (peak-heap sampled) =='
         go test -run '^$' `
