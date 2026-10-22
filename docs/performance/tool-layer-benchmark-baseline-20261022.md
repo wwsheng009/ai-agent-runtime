@@ -249,7 +249,51 @@ stdout；`CaptureLimit=300 KiB`。benchmark 内部断言：
 - 当前吞吐约 1 MB/s，主要由 Windows `type` + Defender 扫描决定，属于
   保守基线。
 
-## 7. 与 §15.2.2 的对照
+## 7. CI 回归门槛（benchmark gate）
+
+脚本：
+
+```text
+backend/scripts/tool-layer-bench-gate.ps1
+backend/scripts/tool-layer-bench-baseline.json
+```
+
+规则（对应 §15.2“CI 3 次取中位数；中位数超出基线 10% 失败”）：
+
+- 每个包执行 `-bench ... -count=3`，取每个 benchmark 的 ns/op 中位数；
+- 与 `tool-layer-bench-baseline.json` 比较；
+- 中位数超过基线 `(1 + TolerancePercent%)` 即退出码 1。
+
+用法：
+
+```powershell
+pwsh -File backend/scripts/tool-layer-bench-gate.ps1
+pwsh -File backend/scripts/tool-layer-bench-gate.ps1 -TolerancePercent 20
+pwsh -File backend/scripts/tool-layer-bench-gate.ps1 -SkipSearch -SkipShell
+pwsh -File backend/scripts/tool-layer-bench-gate.ps1 -UpdateBaseline
+```
+
+机制验证（`-SkipSearch -SkipShell -TolerancePercent 1000`）：
+
+| benchmark | median | baseline | delta |
+|-----------|--------|----------|-------|
+| `BenchmarkRegistryDefinitions256` | 104,775 | 108,716 | -3.6% |
+| `BenchmarkRegistryList256` | 48,004 | 45,094 | +6.5% |
+| `BenchmarkViewCoreDirect` | 14,349,201 | 12,772,034 | +12.3% |
+| `BenchmarkViewHandlerRuntime` | 14,111,079 | 13,659,250 | +3.3% |
+| `BenchmarkInProcess32KiB` | 32 | 34 | -4.8% |
+| `BenchmarkMCPConvert32KiB` | 488 | 723 | -32.5% |
+| `BenchmarkMCPRoundTrip32KiB` | 944,114 | 1,086,501 | -13.1% |
+
+状态：
+
+- 阈值机制、解析与失败退出已实现并验证；
+- committed baseline 是**首轮笔记本基线**，宿主噪声可达 ±10–30%
+  （上表 `BenchmarkViewCoreDirect` 已达 +12.3%）；
+- 在 CI 上先运行一次 `-UpdateBaseline` 固化静默机基线，再启用默认 10% 门；
+- `-TolerancePercent`、`-SkipSearch`、`-SkipShell` 用于分阶段灰度。
+
+## 8. 与 §15.2.2 的对照
 
 | 指标 | 设计目标 | 当前证据 |
 |------|----------|----------|
@@ -258,4 +302,4 @@ stdout；`CaptureLimit=300 KiB`。benchmark 内部断言：
 | MCP 32 KiB 序列化 p95 ≤ 10% | 相对 in-process | ⚠️ 部分覆盖：转换 ~0.72 µs；in-memory 往返 ~1.09 ms，主要为协议开销；需真实工具工作量基线才能评判 10% 门槛 |
 | 256 tools list p95 ≤ 50 ms | 含 schema/filter | ✅ 已覆盖：Definitions ~0.16 ms、List ~0.06 ms（中位数） |
 | shell capture ≤ CaptureLimit | 不把完整 capture 放进模型 | ✅ 已覆盖：5 MiB 输出 / 300 KiB capture，RetainedBytes ≤ 300 KiB、Truncated=true；artifact tee 路径断言通过 |
-| 回归门槛：中位数超基线 10% 失败 | CI 3 次取中位数 | 本文件提供首轮基线 |
+| 回归门槛：中位数超基线 10% 失败 | CI 3 次取中位数 | ✅ 机制已实现（`tool-layer-bench-gate.ps1` + baseline JSON）；⚠️ 首轮基线需在静默 CI 用 `-UpdateBaseline` 固化 |

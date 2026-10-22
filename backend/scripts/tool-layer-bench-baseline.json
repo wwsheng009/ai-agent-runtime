@@ -1,0 +1,13 @@
+{
+  "BenchmarkGlob10kNoMatch": 47287129,
+  "BenchmarkGrep10kNoMatch": 3120594700,
+  "BenchmarkRegistryDefinitions256": 108716,
+  "BenchmarkRegistryList256": 45094,
+  "BenchmarkViewCoreDirect": 12772034,
+  "BenchmarkViewHandlerRuntime": 13659250,
+  "BenchmarkInProcess32KiB": 33.83,
+  "BenchmarkMCPConvert32KiB": 723.1,
+  "BenchmarkMCPRoundTrip32KiB": 1086501,
+  "BenchmarkShellCapture5MBNoArtifact": 4962616100,
+  "BenchmarkShellCapture5MBWithArtifact": 4964258600
+}
