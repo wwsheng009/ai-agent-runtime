@@ -112,30 +112,144 @@ func CompileRegexp(pattern string, caseInsensitive bool) (*regexp.Regexp, error)
 	return regexp.Compile(pattern)
 }
 
-const lineReaderMaxBytes = 1024 * 1024
+const (
+	lineReaderBufferBytes = 64 * 1024
+	truncatedMarker       = "…"
+)
 
 type lineReader struct {
-	scanner *bufio.Scanner
+	reader  *bufio.Reader
 	line    int
+	prefix  []byte
+	display []byte
 }
 
-func newLineReader(reader io.Reader) *lineReader {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), lineReaderMaxBytes)
-	return &lineReader{scanner: scanner}
+// newLineReader returns a reader that can be reset for every file. Grep uses
+// one instance per call so the read buffer is not allocated once per file.
+func newLineReader() *lineReader {
+	return &lineReader{reader: bufio.NewReaderSize(nil, lineReaderBufferBytes)}
 }
 
-func (r *lineReader) next() (lineNo int, text string, ok bool) {
-	if r == nil || r.scanner == nil {
-		return 0, "", false
+func (r *lineReader) reset(source io.Reader) {
+	if r == nil {
+		return
 	}
-	if !r.scanner.Scan() {
-		return 0, "", false
-	}
-	r.line++
-	return r.line, r.scanner.Text(), true
+	r.reader.Reset(source)
+	r.line = 0
+	r.prefix = r.prefix[:0]
+	r.display = r.display[:0]
 }
 
-func validUTF8(text string) bool {
-	return utf8.ValidString(text)
+func trimLineCR(line []byte) []byte {
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		return line[:len(line)-1]
+	}
+	return line
+}
+
+func (r *lineReader) finish(line []byte, truncated bool) ([]byte, bool) {
+	if !truncated {
+		line = trimLineCR(line)
+	}
+	if len(line) > MaxGrepLineBytes {
+		line = line[:MaxGrepLineBytes]
+		truncated = true
+	}
+	if truncated {
+		line = trimIncompleteUTF8Suffix(line)
+	}
+	return line, truncated
+}
+
+// next returns the next line, capped at MaxGrepLineBytes. The returned slice is
+// valid until the next call. A truncated line reports truncated=true and omits
+// the discarded suffix; displayText adds the marker used in results.
+func (r *lineReader) next() (lineNo int, text []byte, truncated bool, ok bool) {
+	if r == nil || r.reader == nil {
+		return 0, nil, false, false
+	}
+	r.prefix = r.prefix[:0]
+	over := false
+	for {
+		fragment, err := r.reader.ReadSlice('\n')
+		if err == nil {
+			fragment = fragment[:len(fragment)-1]
+			// A complete line's trailing CR is delimiter syntax, not content.
+			// Strip it before applying the byte cap so an exact-limit CRLF
+			// line is not misreported as truncated.
+			fragment = trimLineCR(fragment)
+		}
+		if len(fragment) > 0 && !over {
+			remaining := MaxGrepLineBytes - len(r.prefix)
+			if len(fragment) <= remaining {
+				r.prefix = append(r.prefix, fragment...)
+			} else {
+				if remaining > 0 {
+					r.prefix = append(r.prefix, fragment[:remaining]...)
+				}
+				over = true
+			}
+		}
+		switch {
+		case err == nil:
+			text, truncated = r.finish(r.prefix, over)
+			r.line++
+			return r.line, text, truncated, true
+		case err == bufio.ErrBufferFull:
+			continue
+		case err == io.EOF:
+			if len(r.prefix) == 0 && !over {
+				return 0, nil, false, false
+			}
+			text, truncated = r.finish(r.prefix, over)
+			r.line++
+			return r.line, text, truncated, true
+		default:
+			return 0, nil, false, false
+		}
+	}
+}
+
+// trimIncompleteUTF8Suffix drops a byte-capped rune prefix only when the cap
+// landed inside a multi-byte rune. Genuinely invalid bytes are left untouched
+// so the caller still classifies the file as binary.
+func trimIncompleteUTF8Suffix(line []byte) []byte {
+	for i := len(line) - 1; i >= 0 && len(line)-i <= utf8.UTFMax; i-- {
+		lead := line[i]
+		if lead < utf8.RuneSelf {
+			return line
+		}
+		if lead&0xC0 == 0x80 {
+			continue
+		}
+		want := 0
+		switch {
+		case lead&0xE0 == 0xC0:
+			want = 2
+		case lead&0xF0 == 0xE0:
+			want = 3
+		case lead&0xF8 == 0xF0:
+			want = 4
+		default:
+			return line
+		}
+		if want > len(line)-i {
+			return line[:i]
+		}
+		return line
+	}
+	return line
+}
+
+func (r *lineReader) displayText(text []byte, truncated bool) []byte {
+	if !truncated {
+		return text
+	}
+	r.display = append(r.display[:0], text...)
+	r.display = append(r.display, truncatedMarker...)
+	return r.display
+}
+
+func validUTF8(text []byte) bool {
+	return utf8.Valid(text)
 }

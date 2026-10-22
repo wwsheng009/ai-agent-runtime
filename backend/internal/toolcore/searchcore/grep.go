@@ -53,6 +53,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	}
 
 	var result GrepResult
+	reader := newLineReader()
 	visit := func(path string) error {
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
@@ -73,20 +74,18 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			return nil
 		}
 		defer file.Close()
-		reader := newLineReader(file)
+		reader.reset(file)
 		for {
-			lineNo, text, ok := reader.next()
+			lineNo, text, truncated, ok := reader.next()
 			if !ok {
 				return nil
 			}
-			if len(text) > MaxGrepLineBytes {
-				text = text[:MaxGrepLineBytes] + "…"
-			}
-			if !validUTF8(text) {
+			display := reader.displayText(text, truncated)
+			if !validUTF8(display) {
 				return nil
 			}
-			if compiled.MatchString(text) {
-				result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: text})
+			if compiled.Match(display) {
+				result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
 				if len(result.Matches) > opts.Limit {
 					return filepath.SkipAll
 				}
