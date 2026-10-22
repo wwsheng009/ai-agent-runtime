@@ -59,10 +59,10 @@ func (c *Config) enabledTools() []string {
 		base = append(base, writeTools...)
 		base = append(base, shellTools...)
 	}
-	// Job and artifact tools are capabilities, not profile tiers: they are
-	// exposed whenever the backing store is configured, because a host that
-	// cannot persist output must not offer them at all.
-	if c.Jobs.Root != "" && (c.Profile == ProfileOps || c.Profile == ProfileCustom) {
+	// Job tools are a legacy local-only surface: the store must be configured
+	// and the operator must explicitly opt into the compatibility window. A
+	// configured store alone is not enough to re-expose a v1-local capability.
+	if c.Jobs.Root != "" && c.Jobs.LegacyRemoteJobs && (c.Profile == ProfileOps || c.Profile == ProfileCustom) {
 		base = append(base, jobTools...)
 	}
 	if c.Artifacts.Root != "" {

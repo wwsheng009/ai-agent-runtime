@@ -78,9 +78,15 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	jobs, err := NewJobManager(cfg.Jobs.Root)
-	if err != nil {
-		return nil, err
+	// The job manager is constructed only for the explicit legacy opt-in. A
+	// configured jobs root without that flag must not even create directories:
+	// the v1 remote surface treats background jobs as local-only.
+	var jobs *JobManager
+	if cfg.Jobs.LegacyRemoteJobs {
+		jobs, err = NewJobManager(cfg.Jobs.Root)
+		if err != nil {
+			return nil, err
+		}
 	}
 	artifacts, err := NewArtifactStore(cfg.Artifacts.Root, cfg.Artifacts.MaxBytes)
 	if err != nil {

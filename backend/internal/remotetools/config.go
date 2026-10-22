@@ -163,6 +163,12 @@ type AuditConfig struct {
 // durable jobs should not advertise them).
 type JobsConfig struct {
 	Root string `yaml:"root" json:"root"`
+	// LegacyRemoteJobs re-enables the remote job_* surface. Background jobs are
+	// local-only in v1 (design §11.1); the remote implementation is kept for one
+	// compatibility window and must be opted into explicitly. Default false: a
+	// configured Root alone no longer advertises job_start/job_output/job_cancel/
+	// job_list.
+	LegacyRemoteJobs bool `yaml:"legacyRemoteJobs" json:"legacyRemoteJobs"`
 }
 
 // ArtifactConfig describes the full-capture store.

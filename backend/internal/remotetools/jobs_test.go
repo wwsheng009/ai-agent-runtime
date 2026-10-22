@@ -19,6 +19,9 @@ func newJobsConfig(t *testing.T, root string, allowed []string) *remotetools.Con
 	cfg := newOpsConfig(t, root, allowed)
 	stateDir := t.TempDir()
 	cfg.Jobs.Root = filepath.Join(stateDir, "jobs")
+	// These tests cover the one-release legacy compatibility window; the v1
+	// default is local-only and requires the explicit opt-in.
+	cfg.Jobs.LegacyRemoteJobs = true
 	cfg.Artifacts.Root = filepath.Join(stateDir, "artifacts")
 	cfg.Limits.MaxOutputBytes = 4096
 	return cfg
@@ -118,6 +121,26 @@ func TestJobToolsAbsentWithoutStore(t *testing.T) {
 	for _, name := range server.ToolNames() {
 		if strings.Contains(name, "job_") {
 			t.Fatalf("job tool %q must not be exposed without a jobs store", name)
+		}
+	}
+}
+
+// TestJobToolsAbsentWithoutLegacyOptIn pins the v1 convergence: a configured
+// jobs root alone must not advertise the legacy remote job_* surface.
+func TestJobToolsAbsentWithoutLegacyOptIn(t *testing.T) {
+	root := newTestWorkspace(t)
+	cfg := newOpsConfig(t, root, []string{"echo"})
+	cfg.Jobs.Root = filepath.Join(t.TempDir(), "jobs")
+	// cfg.Jobs.LegacyRemoteJobs deliberately stays false.
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+
+	for _, name := range server.ToolNames() {
+		if strings.Contains(name, "job_") {
+			t.Fatalf("legacy job tool %q must stay off by default", name)
 		}
 	}
 }
