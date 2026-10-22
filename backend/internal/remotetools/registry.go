@@ -269,16 +269,19 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		{name: ToolLs, tool: lsTool},
 		{name: ToolGlob, tool: globTool},
 		{name: ToolGrep, tool: grepTool},
-		{name: ToolWrite, tool: newRemoteWriteTool(cfg, workspace, sandbox)},
-		{name: ToolAppend, tool: newRemoteAppendTool(cfg, workspace, sandbox)},
-		{name: ToolEdit, tool: newRemoteEditTool(cfg, workspace, sandbox)},
-		{name: ToolApplyPatch, tool: newRemoteApplyPatchTool(cfg, workspace, sandbox)},
 		{name: ToolShell, tool: newRemoteShellTool(cfg, workspace, sandbox, artifacts)},
 		{name: ToolJobStart, tool: newRemoteJobStartTool(cfg, workspace, sandbox, jobs)},
 		{name: ToolJobOutput, tool: newRemoteJobOutputTool(cfg, workspace, jobs)},
 		{name: ToolJobCancel, tool: newRemoteJobCancelTool(cfg, workspace, jobs)},
 		{name: ToolJobList, tool: newRemoteJobListTool(cfg, workspace, jobs)},
 		{name: ToolArtifactRead, tool: newRemoteArtifactReadTool(cfg, workspace, artifacts)},
+	}
+	mutationTools, err := buildMutationTools(cfg, workspace, sandbox, artifacts)
+	if err != nil {
+		return nil, err
+	}
+	for _, tool := range mutationTools {
+		candidates = append(candidates, registration{name: tool.Name(), tool: tool})
 	}
 
 	for _, candidate := range candidates {

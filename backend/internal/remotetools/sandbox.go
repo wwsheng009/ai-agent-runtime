@@ -2,7 +2,6 @@ package remotetools
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -315,37 +314,6 @@ func stripQuotedSpans(command string) string {
 		}
 	}
 	return builder.String()
-}
-
-// validateWriteTarget rejects targets that cannot be written as a regular file:
-// directories, device nodes and FIFOs.
-func validateWriteTarget(absPath string) error {
-	info, err := os.Lstat(absPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// New file: the parent must exist and be a directory so a typo does
-			// not silently create a deep tree outside the intended place.
-			parent := filepath.Dir(absPath)
-			parentInfo, parentErr := os.Stat(parent)
-			if parentErr != nil {
-				return newToolError(CodeNotFound, "create the parent directory first", "parent directory does not exist: %s", parent)
-			}
-			if !parentInfo.IsDir() {
-				return newToolError(CodeInvalidArgument, "the parent path is not a directory", "parent is not a directory: %s", parent)
-			}
-			return nil
-		}
-		return newToolError(CodeInvalidArgument, "check permissions on the target", "cannot stat %s: %v", absPath, err)
-	}
-	if info.IsDir() {
-		return newToolError(CodeInvalidArgument, "pass a file path", "target is a directory: %s", absPath)
-	}
-	mode := info.Mode()
-	switch {
-	case mode&os.ModeNamedPipe != 0, mode&os.ModeSocket != 0, mode&os.ModeDevice != 0, mode&os.ModeCharDevice != 0:
-		return newToolError(CodeInvalidArgument, "pass a regular file", "target is a special file: %s", absPath)
-	}
-	return nil
 }
 
 // mustRegexp compiles a pattern known to be valid at package scope.
