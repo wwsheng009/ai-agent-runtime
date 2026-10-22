@@ -45,9 +45,32 @@ type AppRenderFrame struct {
 func ComposeAppRenderFrame(state AppState) AppRenderFrame {
 	screen := LayoutAppScreen(state)
 	text := composeAppTextLayoutFromScreen(screen)
-	transcript := make(map[scene.CellID]scene.TranscriptCell, len(state.Transcript.Cells))
-	for _, cell := range state.Transcript.Cells {
-		transcript[cell.ID] = cell
+	// T7：帧内按需索引。旧实现把整份 transcript 复制进 map（大会话下每帧一次
+	// O(全部 cell)）；appTranscriptRenderLine 只对「无 RenderLine 的 transcript
+	// 回退行」查询该 map（其余行直接复用结构化 line），因此索引只需覆盖帧内
+	// 实际引用到的 cell。map 查询对未引用 cell 不可观测 → 输出逐字节一致。
+	fallbackRows := 0
+	for index := range text.Rows {
+		row := text.Rows[index]
+		if row.Owner == renderengine.RowOwnerTranscript && row.Text != "" && len(row.RenderLine.Spans) == 0 {
+			fallbackRows++
+		}
+	}
+	var transcript map[scene.CellID]scene.TranscriptCell
+	if fallbackRows > 0 {
+		transcript = make(map[scene.CellID]scene.TranscriptCell, fallbackRows)
+		for index := range text.Rows {
+			row := text.Rows[index]
+			if row.Owner == renderengine.RowOwnerTranscript && row.Text != "" && len(row.RenderLine.Spans) == 0 {
+				transcript[row.CellID] = scene.TranscriptCell{}
+			}
+		}
+		for index := range state.Transcript.Cells {
+			cell := state.Transcript.Cells[index]
+			if _, wanted := transcript[cell.ID]; wanted {
+				transcript[cell.ID] = cell
+			}
+		}
 	}
 	bottomLines := appBottomRenderLines(screen.bottom, screen.Geometry.Width)
 

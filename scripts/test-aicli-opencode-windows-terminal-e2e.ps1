@@ -18,7 +18,30 @@ param(
     [string]$Model = 'deepseek-v4-flash',
 
     [ValidateNotNullOrEmpty()]
-    [string]$ReasoningEffort = 'max'
+    [string]$ReasoningEffort = 'max',
+
+    # 端点参数化（T9/T10：用本机可用 provider 复跑同一套 live 断言，不改断言逻辑）。
+    # 默认值保持 opencode.ai 的历史行为；换成代理时显式传 -BaseUrl/-ApiPath。
+    [ValidateNotNullOrEmpty()]
+    [string]$BaseUrl = 'https://opencode.ai/zen/go',
+
+    [ValidateNotNullOrEmpty()]
+    [string]$ApiPath = '/v1/chat/completions',
+
+    # compatibility profile 只影响协议细节（流式/工具调用编码）；本地 openai 代理
+    # 用 empty 表示不套任何 profile。
+    [string]$CompatibilityProfile = 'opencode-console-go-2026-07',
+
+    # T9 R2/R3：非 0 时启用 residency 并把驻留窗口上限设为该值。值小于本轮
+    # cell 数（40 个 marker + 若干事件 cell）时**真实触发写穿逐出**，用于验证
+    # "逐出后 40 个 marker 在终端文档里仍各恰好一次"。
+    #
+    # 注意：`--config` 只喂 agent 配置层；RuntimeConfig（顶层 `ui:`）由
+    # aiclipaths 独立解析。所以本开关同时把 runtime 配置写到
+    # `$AICLI_RUNTIME_CONFIG` 指向的临时文件，并用环境变量下发（见下方
+    # AICLI_RUNTIME_CONFIG 的写法），确保 `ui.residency.*` 真正被读取。
+    [ValidateRange(0, 4096)]
+    [int]$ResidencyKeepCells = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -99,10 +122,12 @@ function Get-OpenCodeApiKey {
 function Protect-SensitiveText {
     param([AllowNull()][string]$Text, [AllowNull()][string]$Secret)
     if ($null -eq $Text) { return "" }
-    if (-not [string]::IsNullOrEmpty($Secret)) {
-        return $Text.Replace($Secret, "[REDACTED]")
-    }
-    return $Text
+    if ([string]::IsNullOrEmpty($Secret)) { return $Text }
+    # 短 token 不是凭据：本地代理（如 magpie）的 key 可能就是 provider 名。
+    # 用 6 字符 token 做全局替换会把状态行里的 provider 名一起抹掉，导致
+    # "footer 里找不到 provider" 的假失败（实测）。
+    if ($Secret.Length -lt 8) { return $Text }
+    return $Text.Replace($Secret, "[REDACTED]")
 }
 
 function Write-Utf8NoBom {
@@ -120,6 +145,9 @@ function Remove-SecretArtifact {
 function Scrub-TextArtifacts {
     param([string]$Root, [string]$Secret)
     if ([string]::IsNullOrEmpty($Secret) -or -not (Test-Path -LiteralPath $Root)) { return }
+    # 与 Protect-SensitiveText 同一口径：短 token（本地代理的 key 可能就是
+    # provider 名）不做全局替换，否则会把状态行里的 provider 名抹成 [REDACTED]。
+    if ($Secret.Length -lt 8) { return }
     $extensions = @(".txt", ".log", ".json", ".jsonl", ".yaml", ".yml", ".ps1", ".cmd")
     foreach ($file in Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue) {
         if ($extensions -notcontains $file.Extension.ToLowerInvariant()) { continue }
@@ -164,7 +192,7 @@ $reasoningSentinel = "REASON" + $runID.Substring(10, 10).ToUpperInvariant()
 $expectedProvider = $Provider
 $expectedModel = $Model
 $expectedReasoningEffort = $ReasoningEffort
-$expectedCompatibilityProfile = "opencode-console-go-2026-07"
+$expectedCompatibilityProfile = $CompatibilityProfile
 $reasoningSentinelSplit = [int][Math]::Floor($reasoningSentinel.Length / 2)
 $reasoningSentinelFirst = $reasoningSentinel.Substring(0, $reasoningSentinelSplit)
 $reasoningSentinelSecond = $reasoningSentinel.Substring($reasoningSentinelSplit)
@@ -186,6 +214,8 @@ $credentialSource = [string]$credential.Source
 Write-Utf8NoBom -Path $secretPath -Value $apiKey
 
 $configYaml = @'
+skills_runtime:
+  config_file: __RUNTIME_CONFIG__
 aicli:
   chat:
     stream: true
@@ -201,8 +231,8 @@ providers:
     __PROVIDER__:
       enabled: true
       protocol: openai
-      base_url: https://opencode.ai/zen/go
-      api_path: /v1/chat/completions
+      base_url: __BASE_URL__
+      api_path: __API_PATH__
       api_key: ${AICLI_TERMINAL_E2E_API_KEY}
       compatibility:
         profile: opencode-console-go-2026-07
@@ -220,6 +250,35 @@ providers:
       timeout: 300s
 '@
 $configYaml = $configYaml.Replace('__PROVIDER__', $Provider).Replace('__MODEL__', $Model)
+$configYaml = $configYaml.Replace('__BASE_URL__', $BaseUrl).Replace('__API_PATH__', $ApiPath)
+$residencyEnabled = if ($ResidencyKeepCells -gt 0) { 'true' } else { 'false' }
+$residencyKeep = if ($ResidencyKeepCells -gt 0) { $ResidencyKeepCells } else { 512 }
+if ([string]::IsNullOrWhiteSpace($CompatibilityProfile)) {
+    # 不套 profile：删掉整个 compatibility 块（本地 openai 兼容代理的通用形态）。
+    $configYaml = $configYaml -replace "(?m)^\s*compatibility:\s*\r?\n\s*profile:\s*opencode-console-go-2026-07\s*\r?\n", ""
+} else {
+    $configYaml = $configYaml.Replace('opencode-console-go-2026-07', $CompatibilityProfile)
+}
+Write-Utf8NoBom -Path $configPath -Value ($configYaml.Trim() + [Environment]::NewLine)
+
+# T9：`--config` 只喂 agent 配置层；RuntimeConfig（顶层 `ui:`）由 aiclipaths
+# 独立解析 —— 依次看显式覆盖、`./.aicli/runtime.yaml`、`$HOME/.aicli/runtime.yaml`。
+# 通过 agent 配置的 `aicli.skills_runtime.config_file` 把 runtime.yaml 指到
+# 本轮运行目录，确保 `ui.residency.*` 真正被读取（实测：只写在 --config 里
+# 顶层 `ui:` 完全不生效——它属于 RuntimeConfig，不是 agent 配置）。
+$runtimeConfigPath = Join-Path $runRoot "runtime.yaml"
+$runtimeYaml = @'
+ui:
+  residency:
+    enabled: __RESIDENCY_ENABLED__
+    evictPrefix: __RESIDENCY_EVICT__
+    maxResidentCells: __RESIDENCY_KEEP__
+'@
+$runtimeYaml = $runtimeYaml.Replace('__RESIDENCY_ENABLED__', $residencyEnabled).
+    Replace('__RESIDENCY_EVICT__', $residencyEnabled).
+    Replace('__RESIDENCY_KEEP__', [string]$residencyKeep)
+Write-Utf8NoBom -Path $runtimeConfigPath -Value ($runtimeYaml.Trim() + [Environment]::NewLine)
+$configYaml = $configYaml.Replace('__RUNTIME_CONFIG__', $runtimeConfigPath)
 Write-Utf8NoBom -Path $configPath -Value ($configYaml.Trim() + [Environment]::NewLine)
 
 function ConvertTo-PowerShellLiteral {
@@ -314,7 +373,22 @@ function Get-ReadyPromptEvidence {
     $result.PromptLineNumber = $promptLineIndex + 1
     for ($index = $promptLineIndex + 1; $index -lt $lines.Count; $index++) {
         $line = $lines[$index]
-        if ($line -match '^\s*Plan\s+(?:ON|OFF)\s*[·|]' -and $line -notmatch '(?i)\b(?:Working|Streaming|Thinking|Waiting|Stopping)\b') {
+        # 页脚首段随权限模式变化：plan 模式是 "Plan ON/OFF"，yolo（--yolo）是
+        # "Full Access"，审批模式可能是其它文案。判定"空闲页脚"用结构 + 身份：
+        #   ① 至少两个 `·` 分隔段（历史正文行通常没有）；
+        #   ② 不含进行时状态词；
+        #   ③ 给了期望身份时，行内必须出现 provider 或 model（避免误判正文）。
+        $segmentCount = ([regex]::Split($line, '\s*[·|]\s*')).Count
+        $identityHint = $true
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedProvider) -and
+            $line.IndexOf($ExpectedProvider, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+            -not [string]::IsNullOrWhiteSpace($ExpectedModel) -and
+            $line.IndexOf($ExpectedModel, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            $identityHint = $false
+        }
+        if ($segmentCount -ge 3 -and
+            $line -notmatch '(?i)\b(?:Working|Streaming|Thinking|Waiting|Stopping)\b' -and
+            $identityHint) {
             $result.Ready = $true
             $result.FooterLineNumber = $index + 1
             $result.FooterLine = $line.Trim()
@@ -553,7 +627,8 @@ function Get-ProviderRouteEvidence {
         [Parameter(Mandatory)][string]$ExpectedProvider,
         [Parameter(Mandatory)][string]$ExpectedModel,
         [Parameter(Mandatory)][string]$ExpectedReasoningEffort,
-        [Parameter(Mandatory)][string]$ExpectedCompatibilityProfile
+        # 允许空串：本地 openai 代理不套 compatibility profile（T9/T10 的参数化路径）。
+        [AllowEmptyString()][string]$ExpectedCompatibilityProfile
     )
     $records = [Collections.Generic.List[object]]::new()
     $parseErrors = [Collections.Generic.List[string]]::new()
@@ -580,7 +655,8 @@ function Get-ProviderRouteEvidence {
                 [string]::Equals($record.effective_model, $ExpectedModel, [StringComparison]::OrdinalIgnoreCase) -and
                 [string]::Equals($record.requested_reasoning_effort, $ExpectedReasoningEffort, [StringComparison]::OrdinalIgnoreCase) -and
                 [string]::Equals($record.effective_reasoning_effort, $ExpectedReasoningEffort, [StringComparison]::OrdinalIgnoreCase) -and
-                [string]::Equals($record.compatibility_profile, $ExpectedCompatibilityProfile, [StringComparison]::OrdinalIgnoreCase)
+                ([string]::IsNullOrWhiteSpace($ExpectedCompatibilityProfile) -or
+                 [string]::Equals($record.compatibility_profile, $ExpectedCompatibilityProfile, [StringComparison]::OrdinalIgnoreCase))
             $records.Add($record)
         } catch {
             $parseErrors.Add("$($file.FullName): $($_.Exception.Message)")
@@ -1246,12 +1322,15 @@ try {
         completed_at = if ($null -eq $completedAt) { $null } else { $completedAt.ToUniversalTime().ToString("o") }
         provider = [ordered]@{
             name = $expectedProvider
-            base_url = "https://opencode.ai/zen/go"
+            base_url = $BaseUrl
+            api_path = $ApiPath
             compatibility_profile = $expectedCompatibilityProfile
             model = $expectedModel
             reasoning_effort = $expectedReasoningEffort
             stream = $true
             tools_disabled = $true
+            residency_enabled = ($ResidencyKeepCells -gt 0)
+            residency_keep_cells = $(if ($ResidencyKeepCells -gt 0) { $ResidencyKeepCells } else { 0 })
             route_artifacts_found = $routeEvidence.Found
             route_artifacts_valid = $routeEvidence.Valid
             route_artifact_count = $routeEvidence.RecordCount
@@ -1369,8 +1448,8 @@ $safeTitle = Protect-SensitiveText $terminalTitle $null
 Write-Host "PASS: real Windows Terminal + UI Automation live E2E completed."
 Write-Host "Build: $($buildInfo.FullName) | UTC $($buildInfo.LastWriteTimeUtc.ToString('o'))"
 Write-Host "Terminal: process=$terminalProcessName.exe PID=$terminalPID HWND=0x$($terminalHandle.ToString('X')) title=$safeTitle"
-Write-Host "Provider: opencode.ai | base_url=https://opencode.ai/zen/go | compatibility=opencode-console-go-2026-07"
-Write-Host "Model: deepseek-v4-flash | reasoning_effort=max | stream=true | yolo=true | tools=disabled"
+Write-Host "Provider: $expectedProvider | base_url=$BaseUrl | compatibility=$expectedCompatibilityProfile"
+Write-Host "Model: $expectedModel | reasoning_effort=$expectedReasoningEffort | stream=true | yolo=true | tools=disabled"
 Write-Host "Credential source: $credentialSource (value was never placed on the command line or in dumps)"
 Write-Host "Markers: 40/40 present exactly once"
 Write-Host "Scrollback: marker01 full=True visible=False | marker40 visible=True"

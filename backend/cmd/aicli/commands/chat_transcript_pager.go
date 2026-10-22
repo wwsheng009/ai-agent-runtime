@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 // canOpenChatTranscriptPager is intentionally strict. Ctrl+T is only claimed
@@ -93,9 +94,26 @@ func chatTranscriptPagerView(session *ChatSession, leaseID uint64) ui.Transcript
 	if active.Phase == ui.ActiveCellInactive {
 		active = ui.ActiveCellState{}
 	}
+	// T10（A）：把已逐出的冷区 cell 读回并前置到 pager 视图。
+	// 数据源 = bridge 的冷区账本 + 写穿 store；读回失败（store 不可用/校验
+	// 失败）时降级为"仅驻留窗口"，并在 PagerTruncated 上显式标注，
+	// 绝不静默少显示。
+	transcript := state.Transcript
+	truncated := false
+	if restored, expected, ok := restoreColdCellsHeader(session); ok {
+		if len(restored) > 0 {
+			merged := make([]scene.TranscriptCell, 0, len(restored)+len(transcript.Cells))
+			merged = append(merged, restored...)
+			merged = append(merged, transcript.Cells...)
+			transcript.Cells = merged
+		}
+		truncated = len(restored) < expected
+	}
 	return ui.TranscriptPagerView{
-		Snapshot:   ui.TranscriptPagerSnapshot{Transcript: state.Transcript, Active: active},
+		Snapshot:   ui.TranscriptPagerSnapshot{Transcript: transcript, Active: active},
 		Pager:      state.TranscriptOverlay.Pager,
 		PagerKnown: state.TranscriptOverlay.Active && state.TranscriptOverlay.LeaseID == leaseID,
+		// PagerTruncated 表示冷区未能全部读回（store 不可用/校验失败）。
+		PagerTruncated: truncated,
 	}
 }

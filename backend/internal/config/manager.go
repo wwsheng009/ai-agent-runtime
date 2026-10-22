@@ -46,6 +46,11 @@ type RuntimeConfig struct {
 	WebSearch      WebSearchConfig           `yaml:"webSearch" json:"webSearch"`
 	Schedule       ScheduleConfig            `yaml:"schedule" json:"schedule"`
 
+	// UI 交互式 TUI 渲染/驻留配置（C 档，默认全部关闭：不窗口化、不逐出、
+	// 不懒加载，行为与引入前逐字节一致）。
+	// 设计：docs/plan/aicli-transcript-residency-and-lazy-history-design-20261020.md §15.1
+	UI UIConfig `yaml:"ui" json:"ui"`
+
 	// Goal 控制 /goal 自动续跑（对齐 Codex 语义；2026-10-14 方案：
 	// docs/plan/aicli-goal-continuation-codex-alignment-plan-20261014.md）。
 	Goal GoalConfig `yaml:"goal" json:"goal"`
@@ -284,6 +289,41 @@ type ContextConfig struct {
 type CatalogConfig struct {
 	Backend      string `yaml:"backend" json:"backend"`
 	SnapshotPath string `yaml:"snapshotPath" json:"snapshotPath"`
+}
+
+// UIConfig 承载交互式 TUI 渲染/驻留配置（C 档）。
+type UIConfig struct {
+	Residency   ResidencyConfig   `yaml:"residency" json:"residency"`
+	LayoutCache LayoutCacheConfig `yaml:"layoutCache" json:"layoutCache"`
+}
+
+// ResidencyConfig 是 transcript 驻留降级（C 档）的配置项（设计文档 §15.1）。
+// 零值语义 = 未配置 → 由 ui 包使用默认值；夹紧统一在 ui 侧，配置层不复制默认值。
+type ResidencyConfig struct {
+	// Enabled 使用指针以区分「未配置」与「显式 false」：
+	// T10-4 起默认值为 true，若用 bool 则显式 `enabled: false` 与省略无法区分，
+	// 回退开关会失效（这正是我们在回退演练里修过的一类"静默 no-op"）。
+	Enabled *bool `yaml:"enabled" json:"enabled,omitempty"`
+	// EvictPrefix 同理：默认 false，显式 true 才开启逐出（canary 开关）。
+	EvictPrefix        *bool   `yaml:"evictPrefix" json:"evictPrefix,omitempty"`
+	MaxResidentCells   int     `yaml:"maxResidentCells" json:"maxResidentCells"`
+	MaxResidentRows    int     `yaml:"maxResidentRows" json:"maxResidentRows"`
+	MaxResidentMiB     int     `yaml:"maxResidentMiB" json:"maxResidentMiB"`
+	ViewportMarginRows int     `yaml:"viewportMarginRows" json:"viewportMarginRows"`
+	HysteresisCells    int     `yaml:"hysteresisCells" json:"hysteresisCells"`
+	EvictHighWater     float64 `yaml:"evictHighWater" json:"evictHighWater"`
+	PageCells          int     `yaml:"pageCells" json:"pageCells"`
+	PageMiB            int     `yaml:"pageMiB" json:"pageMiB"`
+	PrefetchPages      int     `yaml:"prefetchPages" json:"prefetchPages"`
+	BodyStore          string  `yaml:"bodyStore" json:"bodyStore"`
+}
+
+// LayoutCacheConfig 是三类布局缓存的字节预算（MiB）。
+// 零值 = 未配置 → 保留现有硬编码预算；收紧动作在 T3/T8 落地。
+type LayoutCacheConfig struct {
+	CellRowsMiB     int `yaml:"cellRowsMiB" json:"cellRowsMiB"`
+	HistoryPlanMiB  int `yaml:"historyPlanMiB" json:"historyPlanMiB"`
+	FoldOmissionMiB int `yaml:"foldOmissionMiB" json:"foldOmissionMiB"`
 }
 
 // SessionsConfig configures session history persistence.

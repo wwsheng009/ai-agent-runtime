@@ -48,6 +48,18 @@ var sharedHistoryPlan = &historyPlanCache{
 	lru: newCellLayoutLRU[cellLayoutKey, []planPhysicalRow](historyPlanCacheMax, historyPlanCacheMaxBytes),
 }
 
+// setBudgetBytes 调整 history-plan 缓存字节预算并逐出；返回回收的估算字节（T8）。
+func (c *historyPlanCache) setBudgetBytes(maxBytes int) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	before := c.lru.bytes
+	c.lru.setBudget(0, maxBytes)
+	return before - c.lru.bytes
+}
+
 // planCacheKeyFor 派生 history-plan 缓存键（与布局缓存同一套内容寻址键）。
 func planCacheKeyFor(cell scene.TranscriptCell, width int, themeFp string) cellLayoutKey {
 	return cellLayoutKeyFor(cell, width, themeFp)

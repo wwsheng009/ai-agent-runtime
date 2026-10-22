@@ -40,6 +40,10 @@ type TranscriptPagerView struct {
 	Snapshot   TranscriptPagerSnapshot
 	Pager      TranscriptPagerState
 	PagerKnown bool
+	// PagerTruncated 表示冷区未能全部读回（store 不可用或校验失败）：
+	// pager 只能显示驻留窗口。必须显式标注，绝不静默少显示历史
+	// （T10 §14.9 冷区读回的降级口径）。
+	PagerTruncated bool
 }
 
 func (v TranscriptPagerView) Clone() TranscriptPagerView {
@@ -55,6 +59,9 @@ type TranscriptPagerModel struct {
 	Revision uint64
 	Cells    []scene.TranscriptCell
 	LiveTail *TranscriptPagerLiveTail
+	// Truncated 表示冷区未能全部读回：pager 只能显示驻留窗口。
+	// 渲染层必须在标题栏显式标注，否则用户会把"少显示"误读成"历史丢了"。
+	Truncated bool
 	// ExpandAll is the user-owned "show every fold in full" view state. The
 	// pager opens with ExpandAll=false: the transcript keeps its display folds
 	// and only the most recent fold is expanded, so Ctrl+T is not an
@@ -89,6 +96,8 @@ func NewTranscriptPagerModel(snapshot TranscriptPagerSnapshot) TranscriptPagerMo
 	model := TranscriptPagerModel{
 		Revision: snapshot.Transcript.Revision,
 		Cells:    make([]scene.TranscriptCell, 0, len(snapshot.Transcript.Cells)),
+		// Truncated 由调用方（生产 pager 的冷区读回）显式设置；此处保持零值，
+		// 既有调用方的行为不变。
 	}
 	for _, cell := range snapshot.Transcript.Cells {
 		if cell.Phase == scene.CellMutable {
@@ -413,6 +422,13 @@ func transcriptPagerViewportRows(height int) int {
 	return rows
 }
 
+// RenderTranscriptPagerFrameForProbe 暴露 pager 帧渲染给端到端探针使用
+// （ConPTY 行模式下无法注入 Ctrl+T，探针复用同一渲染函数把帧写进真实终端）。
+// 生产渲染路径仍走 renderTranscriptPagerFrame。
+func RenderTranscriptPagerFrameForProbe(model TranscriptPagerModel, state TranscriptPagerState, width, height int) string {
+	return renderTranscriptPagerFrame(model, state, width, height)
+}
+
 func renderTranscriptPagerFrame(model TranscriptPagerModel, state TranscriptPagerState, width, height int) string {
 	if width < 1 {
 		width = 1
@@ -430,6 +446,10 @@ func renderTranscriptPagerFrame(model TranscriptPagerModel, state TranscriptPage
 		label := "Transcript"
 		if model.LiveTail != nil {
 			label += "  streaming"
+		}
+		if model.Truncated {
+			// 冷区未能全部读回：必须显式告知，不能静默少显示历史。
+			label += "  (early history unavailable: store read failed)"
 		}
 		lines[0] = label
 	}
@@ -623,6 +643,9 @@ func runTranscriptPagerLoop(ctx context.Context, hooks transcriptPagerLoopHooks)
 		}
 		snapshot := view.Snapshot
 		model := NewTranscriptPagerModel(snapshot)
+		// 冷区读回降级必须传到渲染层（标题栏显式标注），否则用户会把
+		// "少显示"误读成"历史丢了"。
+		model.Truncated = view.PagerTruncated
 		viewState := view.Pager
 		hasViewState := view.PagerKnown
 		if hasViewState {

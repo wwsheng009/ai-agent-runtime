@@ -70,6 +70,25 @@ type chatInteractionCoordinator struct {
 	// reducer 不得持有 c.mu 获取 surface（生产者可能在持 c.mu 时投递
 	// durable action，mailbox 满时避免锁环）；surface 自带锁。
 	uiSurface atomic.Pointer[ui.FixedBottomSurface]
+	// geometryWatcherStop terminates the unified idle-resize watcher. Windows
+	// consoles have no SIGWINCH, and the unified presenter only probes on a
+	// flush effect, so an otherwise idle session would never observe a window
+	// resize (the layout keeps the old width until the next keypress).
+	geometryWatcherStop chan struct{}
+	// geometryWatcherDone closes when the watcher goroutine has returned. Stop
+	// waits on it so no probe can touch the surface while shutdown tears the
+	// terminal ownership down.
+	geometryWatcherDone chan struct{}
+	geometryWatcherMu   sync.Mutex
+	// geometryWatchObservation is the watcher's settle filter state: a size is
+	// only published after it has been observed unchanged for
+	// geometryWatchSettleTicks. Guarded by geometryWatcherMu.
+	geometryWatchObservation geometryObservation
+	// geometryWatchProbe is a test seam for the idle geometry watcher. Production
+	// leaves it nil and probes through the compatibility surface, which keeps a
+	// single raw-probe authority (TerminalDriver.ProbeSize). Accessed under
+	// geometryWatcherMu because the watcher goroutine reads it every tick.
+	geometryWatchProbe func() (width, height int, ok bool)
 
 	// replayedHistorySessionMu/ID 记录最近一次**授权式**（装载标记）转录发布
 	// 的 runtime session 身份：同一个进程内切到不同会话时，发布漏斗据此开启
@@ -788,11 +807,236 @@ func (c *chatInteractionCoordinator) SetPrimaryPresenter(presenter *ui.TerminalS
 	surface := c.surface
 	c.mu.Unlock()
 	if surface != nil {
+		c.warnIfAbsoluteRowsUnreliable(surface)
 		surface.FencePhysicalWrites()
 		surface.SetAlternateScreenLeaseTransport(presenter)
 	}
+	c.startGeometryWatcher()
 	presenter.Request()
 	return true
+}
+
+// warnIfAbsoluteRowsUnreliable records a one-shot diagnostic when the host
+// console addresses CUP against a scrolled or wider screen buffer.
+//
+// The unified inline projection writes absolute rows; on such a console those
+// rows do not map to the visible window, so repaints can land on hidden buffer
+// cells (observed as content jumping or appearing twice after a resize). This
+// does not change behaviour — the session still starts — but it makes the
+// condition visible in the session debug log instead of being misdiagnosed as a
+// history-model bug.
+func (c *chatInteractionCoordinator) warnIfAbsoluteRowsUnreliable(surface *ui.FixedBottomSurface) {
+	if c == nil || surface == nil {
+		return
+	}
+	screen := surface.ScreenGeometry()
+	if screen.AbsoluteRowsReliable() {
+		return
+	}
+	writeSessionDebugInfo(c.session, fmt.Sprintf(
+		"[render] absolute row addressing is unreliable on this console: window origin row=%d buffer width=%d window width=%d; inline repaint may land on hidden buffer rows (resize the console window to the buffer origin, or set the buffer width equal to the window width)",
+		screen.WindowOriginRow, screen.BufferWidth, screen.WindowWidth), false)
+}
+
+// geometryWatchInterval is the idle resize poll cadence. It must be well above
+// a console size query (a single cheap ioctl) and well below human perception,
+// because this is the only resize signal on platforms without SIGWINCH.
+const geometryWatchInterval = 120 * time.Millisecond
+
+// geometryWatchSettleTicks is how many consecutive identical observations are
+// required before a new size is published. Dragging a window edge produces a
+// stream of intermediate widths; publishing each one would advance the layout
+// generation repeatedly and force a full repaint (plus a history rebase) per
+// intermediate size, which is exactly the churn users see while zooming.
+const geometryWatchSettleTicks = 2
+
+// geometryObservation is the settle-filter state for one probe source.
+type geometryObservation struct {
+	width       int
+	height      int
+	stableTicks int
+}
+
+// startGeometryWatcher begins the unified-mode idle geometry watcher. It is
+// idempotent and is only started after the presenter is attached, so legacy
+// sessions (and tests without a presenter) keep their existing probe cadence.
+//
+// The cadence is the only resize signal on Windows (no SIGWINCH) and covers the
+// idle-session case where the presenter's flush-driven probe never runs.
+//
+// The watcher only observes and posts. It never lays out, reflows or writes
+// terminal bytes: the Resize barrier reaches the reducer and the presenter
+// composition happens on the executor worker as usual.
+func (c *chatInteractionCoordinator) startGeometryWatcher() {
+	if c == nil {
+		return
+	}
+	c.geometryWatcherMu.Lock()
+	if c.geometryWatcherStop != nil {
+		c.geometryWatcherMu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	c.geometryWatcherStop = stop
+	c.geometryWatcherDone = done
+	c.geometryWatcherMu.Unlock()
+	go func() {
+		defer close(done)
+		c.runGeometryWatcher(stop)
+	}()
+}
+
+func (c *chatInteractionCoordinator) stopGeometryWatcher() {
+	if c == nil {
+		return
+	}
+	c.geometryWatcherMu.Lock()
+	stop := c.geometryWatcherStop
+	done := c.geometryWatcherDone
+	c.geometryWatcherStop = nil
+	c.geometryWatcherDone = nil
+	c.geometryWatcherMu.Unlock()
+	if stop == nil {
+		return
+	}
+	select {
+	case <-done:
+	default:
+		close(stop)
+		// Bounded wait: a probe in flight is a single size query. If the
+		// goroutine is wedged, shutdown must not hang on it.
+		select {
+		case <-done:
+		case <-time.After(geometryWatcherStopGrace):
+		}
+	}
+}
+
+// geometryWatcherStopGrace bounds how long shutdown waits for an in-flight
+// geometry probe to finish.
+const geometryWatcherStopGrace = 250 * time.Millisecond
+
+func (c *chatInteractionCoordinator) runGeometryWatcher(stop <-chan struct{}) {
+	ticker := time.NewTicker(geometryWatchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			// The ticker is the throttle; force the probe so a resize that lands
+			// right after a tick is observed on the next one (the surface-level
+			// interval check would otherwise skip roughly every other tick).
+			c.pollUnifiedGeometrySettled()
+		}
+	}
+}
+
+// pollUnifiedGeometrySettled applies the watcher's settle filter and then
+// delegates to pollUnifiedGeometry.
+//
+// A live window drag reports a different width on every tick. Publishing each
+// intermediate value advances LayoutGeneration and rebases every pending
+// history payload, so the renderer repaints (and re-wraps) repeatedly while the
+// user is still dragging — the "messy while zooming" experience. Requiring the
+// same measurement on consecutive ticks collapses a drag into one publish at
+// the size the user actually stopped at.
+func (c *chatInteractionCoordinator) pollUnifiedGeometrySettled() {
+	if c == nil {
+		return
+	}
+	width, height, ok := c.probeUnifiedGeometry(0)
+	if !ok {
+		return
+	}
+	c.geometryWatcherMu.Lock()
+	observation := c.geometryWatchObservation
+	settled := false
+	switch {
+	case observation.width == width && observation.height == height:
+		observation.stableTicks++
+		settled = observation.stableTicks >= geometryWatchSettleTicks
+	default:
+		observation = geometryObservation{width: width, height: height, stableTicks: 1}
+	}
+	c.geometryWatchObservation = observation
+	c.geometryWatcherMu.Unlock()
+	if !settled {
+		return
+	}
+	c.publishUnifiedGeometry(width, height)
+}
+
+// pollUnifiedGeometry probes the host terminal and forwards a changed size to
+// the actor. This is the resize path for an idle session: there is no stream
+// paint and no effect to piggyback the presenter's probe on.
+//
+// minInterval <= 0 forces the probe. It reports whether a Resize was accepted
+// by the actor.
+func (c *chatInteractionCoordinator) pollUnifiedGeometry(minInterval time.Duration) bool {
+	if c == nil {
+		return false
+	}
+	width, height, ok := c.probeUnifiedGeometry(minInterval)
+	if !ok {
+		return false
+	}
+	return c.publishUnifiedGeometry(width, height)
+}
+
+// probeUnifiedGeometry performs one geometry observation without publishing it.
+func (c *chatInteractionCoordinator) probeUnifiedGeometry(minInterval time.Duration) (width, height int, ok bool) {
+	if c == nil {
+		return 0, 0, false
+	}
+	if c.shutdownPublished.Load() {
+		return 0, 0, false
+	}
+	surface := c.uiSurface.Load()
+	if surface == nil {
+		return 0, 0, false
+	}
+	c.geometryWatcherMu.Lock()
+	probe := c.geometryWatchProbe
+	c.geometryWatcherMu.Unlock()
+	if probe != nil {
+		width, height, ok = probe()
+	} else {
+		if !surface.IdleGeometryWatchEnabled() {
+			return 0, 0, false
+		}
+		width, height, ok = surface.RefreshTerminalGeometryProbe(minInterval)
+	}
+	if !ok || width < 1 || height < 1 {
+		return 0, 0, false
+	}
+	return width, height, true
+}
+
+// publishUnifiedGeometry forwards a measured size to the actor when it differs
+// from the reducer-authoritative geometry.
+func (c *chatInteractionCoordinator) publishUnifiedGeometry(width, height int) bool {
+	if c == nil || width < 1 || height < 1 {
+		return false
+	}
+	actor := c.currentUIActor()
+	if actor == nil {
+		return false
+	}
+	geometry := actor.Geometry()
+	if geometry.Width == width && geometry.Height == height {
+		return false
+	}
+	// Applied=true: the surface probe has already refreshed the cached
+	// dimensions and the adapter must not probe again (resize feedback loop).
+	// TryPost keeps the watcher non-blocking when the bounded mailbox is full;
+	// the next tick retries the same measurement.
+	if actor.TryPost(ui.Resize{Width: width, Height: height, Applied: true}) {
+		c.RequestUnifiedFrame()
+		return true
+	}
+	return false
 }
 
 // primaryTerminalGeometry is a read-only geometry bridge for the presenter.
@@ -5891,6 +6135,7 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	}
 	c.shutdownPublished.Store(true)
 	c.shutdown = true
+	c.stopGeometryWatcher()
 	// 先摘掉诊断出口：收尾阶段终端所有权正在释放，后续诊断回退 stderr。
 	unregisterChatDiagnosticSink(c)
 	// primaryTerminalGeometry is intentionally lock-free because it runs from
@@ -7738,8 +7983,18 @@ func (c *chatInteractionCoordinator) publishActiveStreamFrameLocked(force bool) 
 	if c == nil || c.activeStream == nil {
 		return false
 	}
-	if c.maybeRefreshStreamGeometryLocked() {
+	refreshed, geometryPending := c.maybeRefreshStreamGeometryLocked()
+	if refreshed {
 		force = true
+	}
+	if geometryPending {
+		// The measured size has been posted but the reducer has not applied it
+		// yet, so AppState.Geometry still holds the pre-resize width. Painting
+		// the band now would store lines wrapped at the old width, which the
+		// post-resize reflow then wraps a second time (duplicated/interleaved
+		// content while zooming). Keep the stream model advancing but let the
+		// deferred reflow own the next band sync.
+		return false
 	}
 	c.syncActiveStreamViewportLocked()
 	frame, changed := c.activeStream.PaintLines(time.Now(), force)
@@ -7760,9 +8015,14 @@ func (c *chatInteractionCoordinator) publishActiveStreamFrameLocked(force bool) 
 // paint loop does not re-run GetSize every frame. Soft-width drift (layout
 // already updated elsewhere, e.g. EnableForTest / write-path RefreshSize) still
 // forces an immediate reflow without waiting for the probe interval.
-func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
+// The bool results are (refreshed, geometryPending):
+//   - refreshed: a soft reflow ran, callers must force a paint;
+//   - geometryPending: a measured resize was posted but the reducer has not
+//     applied it yet, so callers must not wrap retained source at the stale
+//     AppState width.
+func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() (bool, bool) {
 	if c == nil || c.activeStream == nil || !c.activeStream.Active() {
-		return false
+		return false, false
 	}
 	width := c.currentStreamEmitWidthLocked()
 	softNeedsReflow := c.softEmittedSourceEnd > c.softEmittedSourceStart &&
@@ -7785,12 +8045,27 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 				sizeChanged, geometryProbed = port.RequestGeometrySync(ui.DefaultGeometryProbeMinInterval)
 			}
 		}
-		// Unified mode: the probe above only refreshes the cached dimensions
-		// the presenter reads; the Resize post flows through the presenter
-		// probe -> AppState.Geometry chain instead of a direct surface report
-		// (P1-2b §2.2). Legacy keeps the direct report.
-		if geometryProbed && !c.unifiedRendererEnabledLocked() {
-			c.reportMeasuredSurfaceGeometryLocked()
+		// Forward this measurement to the actor in both modes. The value comes
+		// from the single surface probe (no second authority), and AppState must
+		// learn the new width before the next frame is composed. Previously the
+		// unified path waited for a presenter FlushEffect, so a resize detected
+		// mid-stream reflowed the retained tail at the old width and then again
+		// at the new one (visible duplicated/interleaved content).
+		if geometryProbed {
+			if c.unifiedRendererEnabledLocked() {
+				// This runs under c.mu on a producer goroutine, so the post must
+				// be non-blocking: a full actor mailbox must never park a
+				// producer that the reducer may need to acquire c.mu from.
+				c.tryReportMeasuredSurfaceGeometryLocked()
+			} else {
+				c.reportMeasuredSurfaceGeometryLocked()
+			}
+			if c.unifiedRendererEnabledLocked() && sizeChanged {
+				// The Resize barrier will reflow the retained source under the
+				// new geometry. Reflowing now would use the stale AppState
+				// width, so leave this frame to the barrier effect.
+				return false, true
+			}
 		}
 		// Recompute after a probe may have applied a new scroll-region width.
 		width = c.currentStreamEmitWidthLocked()
@@ -7800,10 +8075,10 @@ func (c *chatInteractionCoordinator) maybeRefreshStreamGeometryLocked() bool {
 			c.softEmittedWidth != width
 	}
 	if !sizeChanged && !softNeedsReflow {
-		return false
+		return false, false
 	}
 	c.refreshActiveStreamViewportLocked()
-	return true
+	return true, false
 }
 
 func (c *chatInteractionCoordinator) syncActiveBandLinesLocked(frame []render.Line) {
@@ -7838,6 +8113,11 @@ func (c *chatInteractionCoordinator) RefreshActiveStreamViewport() {
 	if unified {
 		_ = c.postUIAction(ui.SetThemeContextAction{Theme: ui.CurrentThemeContext()})
 	}
+	// A zero-value Resize is a pure ordering barrier: it carries no dimensions
+	// (the reducer only accepts positive width/height) and exists to serialize
+	// the probe/reflow against stream paints. In unified mode the measured size
+	// is published by the presenter's own probe on the following frame
+	// request, which keeps AppState.Geometry the single authority.
 	if c.postUIAction(ui.Resize{}) {
 		if !c.waitUIActorIdleBounded("RefreshActiveStreamViewport") {
 			return
@@ -7906,6 +8186,30 @@ func (c *chatInteractionCoordinator) reportMeasuredSurfaceGeometryLocked() {
 		return
 	}
 	_ = c.postCausalUIAction(ui.Resize{Width: width, Height: height, Applied: true})
+}
+
+// tryReportMeasuredSurfaceGeometryLocked is the non-blocking variant for
+// producer-side call sites that already hold c.mu. A full mailbox must not park
+// such a producer; the next paint/probe retries the same measurement.
+func (c *chatInteractionCoordinator) tryReportMeasuredSurfaceGeometryLocked() {
+	if c == nil || c.surface == nil {
+		return
+	}
+	width, height, ok := c.surface.MeasuredGeometry()
+	if !ok {
+		return
+	}
+	actor := c.ensureUIActor()
+	if actor == nil {
+		return
+	}
+	// Dedup against reducer-authoritative geometry: an unchanged size must not
+	// advance the layout generation, or every queued history effect would be
+	// invalidated for nothing.
+	if geometry := actor.Geometry(); geometry.Width == width && geometry.Height == height {
+		return
+	}
+	_ = actor.TryPost(ui.Resize{Width: width, Height: height, Applied: true})
 }
 
 // ActiveBandWidth 是几何门面的读侧入口（L5-2 Batch A D2-a ①）：surface 未

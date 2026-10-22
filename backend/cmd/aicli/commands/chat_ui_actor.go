@@ -1287,7 +1287,14 @@ func (c *chatInteractionCoordinator) reduceUIActionWithContext(revision uint64, 
 		// actions. Their terminal semantics remain Phase 3/4 work, so this
 		// legacy coordinator adapter intentionally performs no extra mutation.
 	case ui.DrawRequested:
-		if !c.UnifiedRendererEnabled() {
+		unified := c.UnifiedRendererEnabled()
+		if act.Key == chatGeometryReflowActionKey && unified {
+			// Runs after the Resize barrier in the same causal chain, so
+			// AppState.Geometry is the width this reflow must use.
+			c.refreshActiveStreamViewportNow()
+			return nil
+		}
+		if !unified {
 			c.applyDrawRequested(act)
 		}
 	case ui.SetActiveBandAction, ui.ClearActiveBandAction,
@@ -1476,10 +1483,34 @@ func (c *chatInteractionCoordinator) applyResizeAction(action ui.Resize) {
 		// A legacy probe has already applied this geometry and reflowed its
 		// physical cache. This barrier only transfers the measured dimensions
 		// into AppState; probing again would create a resize feedback loop.
+		//
+		// The adapter runs before reduceUIControllerState applies the Resize, so
+		// AppState.Geometry is still the previous width here. Reflow now would
+		// re-wrap the retained source at the stale width and the following frame
+		// would wrap it again — the duplicated/interleaved band symptom. The
+		// presented frame is composed from the post-reduction snapshot, so the
+		// reflow must be driven by that snapshot's geometry, not by this call.
+		//
+		// In unified mode the retained active-stream source still has to be
+		// re-wrapped after the new geometry lands. Posting the reflow as a
+		// causal follow-up puts it after this action's reduction, where
+		// AppState.Geometry already carries the measured width.
+		if c.UnifiedRendererEnabled() {
+			_ = c.postCausalUIAction(ui.DrawRequested{
+				Key:    chatGeometryReflowActionKey,
+				Reason: "applied-resize",
+				Dirty:  renderengine.DirtyBand,
+			})
+		}
 		return
 	}
 	c.refreshActiveStreamViewportNow()
 }
+
+// chatGeometryReflowActionKey identifies the post-resize reflow follow-up. It is
+// not a paint intent: the reducer runs the source-backed reflow at the geometry
+// that was applied by the Resize barrier it follows.
+const chatGeometryReflowActionKey = "geometry-reflow"
 
 // applyDrawRequested is intentionally narrow in Phase 1: it redraws only the
 // retained ActiveBand projection. Transcript/history handoff remains outside

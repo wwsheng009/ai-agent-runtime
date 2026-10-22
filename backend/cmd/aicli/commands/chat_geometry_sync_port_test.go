@@ -107,7 +107,7 @@ func TestChatInteractionCoordinatorMaybeRefreshStreamGeometryUsesPort(t *testing
 		coord.softEmittedSourceEnd = 4
 		coord.softEmittedLines = []string{"a", "b"}
 		coord.softEmittedWidth = 20
-		refreshed := coord.maybeRefreshStreamGeometryLocked()
+		refreshed, _ := coord.maybeRefreshStreamGeometryLocked()
 		coord.mu.Unlock()
 
 		if !refreshed {
@@ -124,7 +124,7 @@ func TestChatInteractionCoordinatorMaybeRefreshStreamGeometryUsesPort(t *testing
 		coord.softEmittedSourceEnd = 0
 		coord.softEmittedLines = nil
 		coord.softEmittedWidth = 0
-		_ = coord.maybeRefreshStreamGeometryLocked()
+		_, _ = coord.maybeRefreshStreamGeometryLocked()
 		coord.mu.Unlock()
 
 		got := fake.requestIntervals()
@@ -148,7 +148,7 @@ func TestChatInteractionCoordinatorGeometryPortNilSafeDegradation(t *testing.T) 
 		coord.mu.Lock()
 		coord.activeStream = stream
 		coord.geometrySync = nil
-		refreshed := coord.maybeRefreshStreamGeometryLocked()
+		refreshed, _ := coord.maybeRefreshStreamGeometryLocked()
 		coord.mu.Unlock()
 		if refreshed {
 			t.Fatal("no surface + no soft window must not refresh")
@@ -166,7 +166,7 @@ func TestChatInteractionCoordinatorGeometryPortNilSafeDegradation(t *testing.T) 
 		coord.softEmittedSourceEnd = 4
 		coord.softEmittedLines = []string{"a", "b"}
 		coord.softEmittedWidth = 20
-		refreshed = coord.maybeRefreshStreamGeometryLocked()
+		refreshed, _ = coord.maybeRefreshStreamGeometryLocked()
 		coord.mu.Unlock()
 		if !refreshed {
 			t.Fatal("soft drift must still reflow from the cached width when the port is absent")

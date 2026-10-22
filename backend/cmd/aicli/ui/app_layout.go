@@ -48,16 +48,37 @@ type BottomPaneLayout struct {
 // SemanticActiveCellProjection, which makes the mutable Scene/AppState cell the
 // exclusive band source. In either mode Layout never overlays both bodies.
 func LayoutAppState(state AppState) AppLayout {
+	parts := layoutAppStateParts(state)
+	return appLayoutFromParts(state, parts, state.Transcript.LayoutRows(state.Geometry.Generation))
+}
+
+// appLayoutParts 是 AppLayout 中与 transcript 行无关的部分（active band、
+// bottom pane、几何/租约经 state 透传）。窗口化帧合成（T8b-3）与全量路径共用
+// 它：逐帧画面只需要尾部窗口的 transcript 行，不能为了拿到 bottom 布局而先
+// 物化全量 LayoutRows。
+type appLayoutParts struct {
+	activeBand ActiveBandProjection
+	legacyBand bool
+	bottom     appBottomPaneLayout
+}
+
+func layoutAppStateParts(state AppState) appLayoutParts {
 	activeBand := ProjectActiveCellBandWithTheme(state.Active, state.Geometry, state.Theme)
 	legacyBand := !state.SemanticActiveCellProjection && hasLegacyActiveBand(state.Bottom)
 	bottom := layoutBottomPane(state, activeBand, legacyBand)
+	return appLayoutParts{activeBand: activeBand, legacyBand: legacyBand, bottom: bottom}
+}
 
+func appLayoutFromParts(state AppState, parts appLayoutParts, transcriptRows []scene.LayoutRow) AppLayout {
+	activeBand := parts.activeBand
+	legacyBand := parts.legacyBand
+	bottom := parts.bottom
 	layout := AppLayout{
 		Revision:         state.Revision,
 		LayoutGeneration: state.Geometry.Generation,
 		Geometry:         state.Geometry,
 		Lease:            state.Lease,
-		Transcript:       state.Transcript.LayoutRows(state.Geometry.Generation),
+		Transcript:       transcriptRows,
 		Active:           state.Active,
 		ActiveBand:       activeBand.Clone(),
 		Bottom: BottomPaneLayout{

@@ -319,7 +319,7 @@ func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDeb
 		builder.plainLines(chatDebugMailboxLines(session))
 	}
 	appendChatDebugUIActorLines(&builder, session)
-	appendChatDebugRenderEncoderLines(&builder, session)
+	appendChatDebugRenderEncoderLines(&builder, session, opts)
 	appendChatDebugRenderOutputLines(&builder, session)
 	appendChatDebugScreenFrameworkLines(&builder, session)
 	appendChatDebugInputArbitrationLines(&builder, session)
@@ -471,7 +471,22 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 		builder.meta("Terminal Geometry:", fmt.Sprintf("%dx%d (generation %d)", projection.Geometry.Width, projection.Geometry.Height, projection.LayoutGeneration))
 		builder.meta("Mutable Viewport:", fmt.Sprintf("top=%d height=%d width=%d", projection.Viewport.Top, projection.Viewport.Height, projection.Viewport.Width))
 		builder.meta("Resident History:", fmt.Sprintf("rows=%d known=%t", projection.HistoryRows, projection.HistoryKnown))
+		if projection.HistoryTailUnknown {
+			builder.meta("History Tail Model:", "unknown (post-resize append-only delivery)")
+		} else {
+			builder.meta("History Tail Model:", "provable")
+		}
 		builder.meta("Terminal Epoch:", strconv.FormatUint(projection.TerminalEpoch, 10))
+		if session.Surface != nil {
+			screen := session.Surface.ScreenGeometry()
+			if screen.AbsoluteRowsReliable() {
+				builder.meta("Absolute Rows:", "reliable")
+			} else {
+				builder.meta("Absolute Rows:", fmt.Sprintf(
+					"UNRELIABLE (window origin row=%d, buffer width=%d, window width=%d); inline repaint may target the wrong physical rows",
+					screen.WindowOriginRow, screen.BufferWidth, screen.WindowWidth))
+			}
+		}
 	}
 	if session.Surface == nil {
 		builder.heading("AppState Frame Parity: (GET /debug/chat/status#app_state)")
@@ -616,7 +631,7 @@ func appendChatDebugExecutorLines(builder *chatDebugDocumentBuilder) {
 
 // appendChatDebugRenderEncoderLines 输出统一渲染编码器（双跑模式数据面）
 // 的运行统计与模型快照，用于审计事件→渲染顺序映射是否正确。
-func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
+func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, session *ChatSession, opts ChatDebugDisplayOptions) {
 	if builder == nil || session == nil {
 		return
 	}
@@ -697,8 +712,12 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 	// 独立 cell 间分隔数（boundary.ResolveGap 规则表），语义行数 = 各 cell
 	// 源文本行之和；渲染层切换后应与旧路径空行序列一致（见
 	// TestRenderLayer_GapParity_LegacyCoordinatorVsLayoutTranscript）。
-	if len(snap.Cells) > 0 {
-		rows := scene.LayoutTranscript(snap.Cells, snap.Revision)
+	// T8b-4：布局摘要只统计窗口内 cell（§14.10；缺省窗口仅在 residency 开启
+	// 时生效，全量路径逐字节不变）。
+	window := opts.Window
+	windowSnap := window.snapshot(snap)
+	if len(windowSnap.Cells) > 0 {
+		rows := scene.LayoutTranscript(windowSnap.Cells, windowSnap.Revision)
 		gaps := 0
 		for _, r := range rows {
 			if r.Gap > 0 {
@@ -710,7 +729,14 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 		// 文本投影（切片 8）：RenderText 是渲染层切换后 presenter 应写出
 		// 的最终文本行（gap 行投影为空行）。Text Rows 应与旧路径实际输出
 		// 行数一致（含 gap 空行），供双跑人工对照。
-		builder.meta("Layout Text Rows:", strconv.Itoa(len(scene.RenderText(snap.Cells, snap.Revision))))
+		builder.meta("Layout Text Rows:", strconv.Itoa(len(scene.RenderText(windowSnap.Cells, windowSnap.Revision))))
+		if window.windowed() && len(snap.Cells) > len(windowSnap.Cells) {
+			scope := "requested"
+			if window.Defaulted {
+				scope = "default"
+			}
+			builder.meta("Layout Window:", fmt.Sprintf("last %d / %d cells (%s)", len(windowSnap.Cells), len(snap.Cells), scope))
+		}
 		// 运行时双跑文本对照（切片 9）：coordinator 每个完整块提交时由探针
 		// 把旧路径实际行序列与 RenderText 对应片段逐行对照。Matched 应随
 		// 会话推进持续增长；Missed > 0 时 Last Error 给出首个不一致详情

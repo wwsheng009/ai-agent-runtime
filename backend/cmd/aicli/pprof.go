@@ -435,9 +435,9 @@ func registerPprofDiagnosticRoutes(mux *http.ServeMux) {
 	//     ?fast=1 直接跳过重区块（files/storage/scene_layout/plan_layout），
 	//     供风暴期高频采样使用。
 	mux.HandleFunc(chatDisplayPath, func(w http.ResponseWriter, r *http.Request) {
-		opts := commands.ChatDebugDisplayBoundedOptions()
+		opts := commands.ChatDebugDisplayOptionsForRequest(r, commands.ChatDebugDisplayBoundedOptions())
 		if r.URL.Query().Get("fast") == "1" {
-			opts = commands.ChatDebugDisplayFastOptions()
+			opts = commands.ChatDebugDisplayOptionsForRequest(r, commands.ChatDebugDisplayFastOptions())
 		}
 		if r.URL.Query().Get("format") == "text" {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -464,10 +464,10 @@ func registerPprofDiagnosticRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(chatScreenPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("format") == "text" {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte(commands.BuildChatDebugScreenText()))
+			_, _ = w.Write([]byte(commands.ChatDebugScreenTextForRequest(r)))
 			return
 		}
-		body, err := commands.MarshalChatDebugScreenJSON()
+		body, err := commands.ChatDebugScreenJSONForRequest(r)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)

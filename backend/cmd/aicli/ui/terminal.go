@@ -125,6 +125,18 @@ func (t *Terminal) SupportsANSI() bool {
 	return t != nil && t.driver != nil && t.driver.SupportsANSI()
 }
 
+// ScreenGeometry reports the host's screen-buffer geometry. It reads the
+// driver's cached capabilities and performs no terminal I/O.
+func (t *Terminal) ScreenGeometry() ScreenGeometry {
+	if t == nil || t.driver == nil {
+		return ScreenGeometry{}
+	}
+	geometry := t.driver.Capabilities().Screen
+	// ProbeSize refreshes the capability cache; a caller that needs a fresh
+	// answer must have probed recently (the surface does so on every resize).
+	return geometry
+}
+
 // Width 获取终端宽度
 func (t *Terminal) Width() int {
 	return t.width

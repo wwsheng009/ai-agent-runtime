@@ -886,6 +886,34 @@ Presenter geometry probe / theme action
   -> full or diff repaint under new generation
 ```
 
+补充（2026-10 修复）：
+
+- 空闲缩放：Windows 控制台没有 SIGWINCH，presenter 也只在 flush effect 时探测。
+  unified 模式在 presenter attach 后启动 120ms 的几何看门狗
+  （`startGeometryWatcher`），把真实探测结果作为 `Resize{Applied:true}` 投递到
+  actor；它只观察和投递，不排版、不写终端。窗口拖动会逐帧报告不同宽度，
+  因此看门狗要求连续两次观测一致才发布（settle filter），把一次拖动收敛成
+  一次 layout generation 前进。
+- 折行顺序：`Resize` 的 reducer 适配器在 `reduceUIControllerState` 之前执行，
+  此刻 `AppState.Geometry` 仍是旧宽度，因此适配器不直接 reflow，而是把
+  `DrawRequested{Key:"geometry-reflow"}` 作为因果 follow-up 排在归约之后。
+  stream paint 路径在测得新尺寸但归约尚未发生时也不画 band（`geometryPending`），
+  否则会先按旧宽度存一份折行结果、再由新宽度折一次。
+- 历史行模型：宽度变化会让宿主 reflow 已交付行，`TerminalSession` 于是把
+  `historyTailUnknown` 置位——已交付行保持 residency（append-only），但新的
+  历史行一律经滚动区 `HandoffPlan` 追加，不再按绝对行号写入“假定空行”；
+  文本前缀去重证明同时作废。viewport 上移（终端变矮）也走同一路径，避免重画
+  覆盖 resident 历史。零字节写失败会恢复事务前的行模型证明；写入方自己的
+  追加行数累计满 resident 容量后，窗口自动关闭并恢复绝对放置快路径。
+  `TerminalSession.ProjectionState().HistoryTailUnknown` 与
+  `/debug/chat/status#projection.history_tail_unknown` 暴露该窗口。
+- conhost 绝对坐标：`TerminalDriver.ProbeSize` 同时采集 screen-buffer 几何
+  （`ScreenGeometry`）。窗口起点不在 buffer 第 0 行、或 buffer 宽于窗口时，
+  `AbsoluteRowsReliable()` 为 false —— 此时 CUP 行号不对应可见行，内联重绘
+  可能落到隐藏 buffer 行。presenter attach 时会写一条 session debug 诊断，
+  `/debug` 面板与 `projection.absolute_rows_reliable` 也会暴露该状态。
+  Windows Terminal（ConPTY）下 buffer 跟随窗口，判定恒为可靠。
+
 ### 11.6 fullscreen picker/overlay
 
 ```text

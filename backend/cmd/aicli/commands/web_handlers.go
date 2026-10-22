@@ -97,7 +97,9 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 	// 使用的完整语义 transcript（默认视图，见下方注释）。
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "tui") {
 		renderStart := time.Now()
-		snap := BuildChatDebugScreenSnapshot()
+		// T8b-4：?window=N / ?full=1（residency 开启时缺省窗口）只作用于
+		// transcript fallback 通道；geometry 通道本身已是窗口化帧。
+		snap := BuildChatDebugScreenSnapshotWithWindow(chatDebugTranscriptWindowForRequest(r, transcriptResidencyRuntimeEnabled()))
 		chatWebApplyScreenTail(snap, tail)
 		if r.URL.Query().Get("format") == "json" {
 			body, err := json.MarshalIndent(snap, "", "  ")
@@ -324,9 +326,11 @@ func chatWebTailTextLines(text string, n int) string {
 // B5：该端点与 /debug/chat/status 同源，因此同样受跨区块预算约束——
 // 风暴期它必须能返回「部分 + 明确登记」而不是把 web 客户端挂住。
 func HandleChatWebAPIStatus(w http.ResponseWriter, r *http.Request) {
-	opts := ChatDebugDisplayBoundedOptions()
+	// T8b-4：?window=N / ?full=1（residency 开启时缺省窗口）只影响布局摘要
+	// 的 cell 窗口；预算与降级语义不变。
+	opts := chatDebugDisplayOptionsForRequest(r, ChatDebugDisplayBoundedOptions())
 	if r.URL.Query().Get("fast") == "1" {
-		opts = ChatDebugDisplayFastOptions()
+		opts = chatDebugDisplayOptionsForRequest(r, ChatDebugDisplayFastOptions())
 	}
 	renderStart := time.Now()
 	if r.URL.Query().Get("format") == "text" {

@@ -1,7 +1,10 @@
 ﻿[CmdletBinding()]
 param(
     [int]$TimeoutSeconds = 60,
-    [switch]$KeepWindow
+    [switch]$KeepWindow,
+    # T9 R1/R4：冷前缀模式。fixture 在 history 交付后写穿并裁掉前缀（keep=24），
+    # 脚本额外断言：72 行仍 exactly-once 且冷区读回证据齐全。
+    [switch]$ColdPrefix
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,8 +36,12 @@ try {
     Pop-Location
 }
 
+$coldPrefixEnv = ""
+if ($ColdPrefix) {
+    $coldPrefixEnv = "`$env:AICLI_RENDER_FIXTURE_COLD_PREFIX = '1'`r`n"
+}
 $command = @"
-`$env:AICLI_RENDER_FIXTURE_HOLD_MS = '$([Math]::Max(($TimeoutSeconds + 15) * 1000, 30000))'
+$coldPrefixEnv`$env:AICLI_RENDER_FIXTURE_HOLD_MS = '$([Math]::Max(($TimeoutSeconds + 15) * 1000, 30000))'
 `$env:AICLI_RENDER_FIXTURE_RUN_ID = '$runID'
 & '$fixture'
 exit `$LASTEXITCODE
@@ -226,6 +233,23 @@ if ($clearMatches.Count -ne 1) {
     $failures.Add("clear counter marker count=$($clearMatches.Count), want exactly 1")
 } elseif ($clearMatches[0].Groups[1].Value -ne "0") {
     $failures.Add("session writer emitted CSI 3J $($clearMatches[0].Groups[1].Value) time(s), want 0")
+}
+if ($ColdPrefix) {
+    # T9 R1/R4：冷前缀必须真的发生（写穿 + 读回），且裁剪后的快照不得让已交付
+    # 前缀重新出现在文档里（上面的 73 行 exactly-once 断言覆盖后者）。
+    $coldMatches = [regex]::Matches($document, "AICLI-E2E-COLD-PREFIX=persisted:(\d+),readback:(\d+),resident:(\d+)")
+    if ($coldMatches.Count -ne 1) {
+        $failures.Add("cold-prefix evidence marker count=$($coldMatches.Count), want exactly 1")
+    } else {
+        $persisted = [int]$coldMatches[0].Groups[1].Value
+        $readback = [int]$coldMatches[0].Groups[2].Value
+        $resident = [int]$coldMatches[0].Groups[3].Value
+        # 逐出数随 fixture 组成漂移（markdown cell + 72 history）：要求写穿与
+        # 读回一一对应、覆盖至少 48 个 history marker、窗口收敛到 keep=24。
+        if ($persisted -lt 48) { $failures.Add("cold-prefix persisted=$persisted, want >= 48") }
+        if ($readback -ne $persisted) { $failures.Add("cold-prefix readback=$readback != persisted=$persisted") }
+        if ($resident -ne 24) { $failures.Add("cold-prefix resident=$resident, want 24") }
+    }
 }
 if ($visible.Contains($first)) {
     $failures.Add("oldest history marker remained in the visible viewport instead of scrolling out")

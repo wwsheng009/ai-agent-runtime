@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -47,6 +48,9 @@ type chatDebugScreenSnapshot struct {
 	// 见 web_todo_snapshot.go）：刷新页面 / 会话切换后，web 客户端的任务列表
 	// 面板据此恢复，不必重放历史工具事件。无快照时省略该字段（前端保留现值）。
 	TodoSnapshot *chatWebTodoSnapshot `json:"todo_snapshot,omitempty"`
+	// Window 标注本次读取裁剪了 transcript 尾部窗口（T8b-4，§14.10）：仅在
+	// fallback 通道确实裁剪时出现；全量读取省略该字段（历史形状不变）。
+	Window *chatDebugWindowInfo `json:"window,omitempty"`
 }
 
 // chatWebMessageWindow 描述结构化 messages 的分页窗口（绝对索引，左闭右开），
@@ -133,6 +137,16 @@ type chatWebMessageWindowInfo struct {
 // BuildChatDebugScreenSnapshot 返回当前屏幕合成帧的结构化快照。
 // 每行以 TrimRight 去除行尾空白（合成帧固定宽度，行尾多为空白）。
 func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
+	return BuildChatDebugScreenSnapshotWithWindow(chatDebugTranscriptWindow{})
+}
+
+// BuildChatDebugScreenSnapshotWithWindow 是带 transcript 窗口的变体（T8b-4）：
+//   - 有 geometry 的 uiActor 通道走 ComposeAppTextLayout（本身已是窗口化帧，
+//     T8b-3），不受该参数影响；
+//   - 语义 cells / bridge 快照 fallback 只物化窗口内 cell（长会话下这些通道
+//     过去逐 cell 展开整段 transcript）；
+//   - 零值窗口 = 历史全量行为（逐字节不变）。
+func BuildChatDebugScreenSnapshotWithWindow(window chatDebugTranscriptWindow) *chatDebugScreenSnapshot {
 	snap := &chatDebugScreenSnapshot{}
 	session := chatDebugDisplaySession()
 	if session == nil {
@@ -175,10 +189,12 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 		}
 		// 无 geometry（有 surface 或 unifiedRenderer 但未挂载终端尺寸）时回退
 		// 到语义 cells：TranscriptState.Cells 与几何无关（app_state.go §5）。
-		if lines := transcriptFallbackCells(state.Transcript.Cells); len(lines) > 0 {
+		windowedCells := chatDebugTailCells(state.Transcript.Cells, window.Cells)
+		if lines := transcriptFallbackCells(windowedCells); len(lines) > 0 {
 			snap.Available = true
 			snap.Lines = lines
 			snap.Text = strings.Join(lines, "\n")
+			snap.Window = window.info(len(state.Transcript.Cells))
 			return snap
 		}
 	}
@@ -188,10 +204,12 @@ func BuildChatDebugScreenSnapshot() *chatDebugScreenSnapshot {
 	// 是这类形态下唯一可靠的内容源。
 	if session.RuntimeEventBridge != nil {
 		if sceneSnap := session.RuntimeEventBridge.sceneSnapshot(); sceneSnap != nil {
-			if lines := transcriptFallbackSnapshot(sceneSnap); len(lines) > 0 {
+			windowSnap := window.snapshot(sceneSnap)
+			if lines := transcriptFallbackSnapshot(windowSnap); len(lines) > 0 {
 				snap.Available = true
 				snap.Lines = lines
 				snap.Text = strings.Join(lines, "\n")
+				snap.Window = window.info(len(sceneSnap.Cells))
 				return snap
 			}
 		}
@@ -337,9 +355,34 @@ func BuildChatDebugScreenText() string {
 	return snap.Text + "\n"
 }
 
+// BuildChatDebugScreenTextWithWindow 是带 transcript 窗口的文本变体（T8b-4）。
+func BuildChatDebugScreenTextWithWindow(window chatDebugTranscriptWindow) string {
+	snap := BuildChatDebugScreenSnapshotWithWindow(window)
+	if !snap.Available {
+		return "Debug Screen: " + snap.Reason + "\n"
+	}
+	return snap.Text + "\n"
+}
+
 // MarshalChatDebugScreenJSON 返回缩进 JSON 字节，供 HTTP 端点直接写入。
 func MarshalChatDebugScreenJSON() ([]byte, error) {
 	return json.MarshalIndent(BuildChatDebugScreenSnapshot(), "", "  ")
+}
+
+// MarshalChatDebugScreenJSONWithWindow 是带 transcript 窗口的 JSON 变体（T8b-4）。
+func MarshalChatDebugScreenJSONWithWindow(window chatDebugTranscriptWindow) ([]byte, error) {
+	return json.MarshalIndent(BuildChatDebugScreenSnapshotWithWindow(window), "", "  ")
+}
+
+// ChatDebugScreenTextForRequest 是 /debug/chat/screen?format=text 的入口：
+// 解析 ?window=N / ?full=1，缺省在 residency 开启时套用默认窗口（T8b-4）。
+func ChatDebugScreenTextForRequest(r *http.Request) string {
+	return BuildChatDebugScreenTextWithWindow(chatDebugTranscriptWindowForRequest(r, transcriptResidencyRuntimeEnabled()))
+}
+
+// ChatDebugScreenJSONForRequest 是 /debug/chat/screen（JSON）的入口，语义同上。
+func ChatDebugScreenJSONForRequest(r *http.Request) ([]byte, error) {
+	return MarshalChatDebugScreenJSONWithWindow(chatDebugTranscriptWindowForRequest(r, transcriptResidencyRuntimeEnabled()))
 }
 
 // buildChatWebScreenSnapshot 返回 web 客户端所需的完整会话内容快照。

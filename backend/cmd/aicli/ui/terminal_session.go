@@ -213,6 +213,11 @@ type TerminalProjectionState struct {
 	TerminalEpoch    uint64
 	Validity         renderengine.ProjectionValidity
 	Cursor           *AppCursor
+	// HistoryTailUnknown reports that the resident history row model cannot be
+	// trusted (a width/shrink resize invalidated it and the region has not been
+	// fully replaced by appended rows yet). While set, new history is delivered
+	// append-only through the scroll region instead of absolute row placement.
+	HistoryTailUnknown bool
 }
 
 // ViewportArea is the only mutable primary-screen region owned by
@@ -330,6 +335,24 @@ type TerminalSession struct {
 	// a still-mutable cell. It is the dedup proof for a replay that re-covers
 	// delivered bytes; the resident model alone cannot see archived rows.
 	historyStreamTailRows []string
+	// historyTailUnknown marks that historyTailRows no longer describes the
+	// physical resident rows. A width change makes the host reflow delivered
+	// rows, so the old row model (and any text-prefix dedup keyed on it) is
+	// unprovable. The already delivered rows stay resident (append-only
+	// scrollback), but every new row is appended with LF (HandoffPlan) instead
+	// of overwriting an assumed free slot, and the text-prefix dedup proof is
+	// discarded. Once the writer's own appends have scrolled the complete
+	// region, every retained row was written at the current width and the flag
+	// clears. That accounting counts only our own LF scrolls, so it does not
+	// depend on how many physical rows the host's reflow produced.
+	historyTailUnknown bool
+	// historyTailUnknownAppended counts rows appended through the scroll region
+	// since historyTailUnknown was set. Every appended row scrolls exactly one
+	// row out of the region, so once a full region has been replaced the
+	// retained row model describes only current-width rows and the fast path is
+	// provable again. This is not a guess about the host's reflow: it relies
+	// only on the writer's own LF scrolls.
+	historyTailUnknownAppended int
 	// historyTailCells records which semantic cells already own at least one
 	// delivered stream row (resident or archived). It is the provenance half of
 	// the tail proof: a payload may only drop leading rows that re-cover the
@@ -429,17 +452,18 @@ func (s *TerminalSession) projectionStateLocked() TerminalProjectionState {
 		validity = s.screen.ProjectionValidity()
 	}
 	return TerminalProjectionState{
-		Geometry:         s.geometry,
-		Viewport:         s.viewport,
-		HistoryRows:      len(s.historyTailRows),
-		HistoryKnown:     s.historyProjectionKnown,
-		LayoutGeneration: s.generation,
-		Lease:            s.lease,
-		OutputBottomRow:  s.outputBottom,
-		Frame:            s.frame,
-		TerminalEpoch:    s.terminalEpoch,
-		Validity:         validity,
-		Cursor:           cloneTerminalCursor(s.cursor),
+		Geometry:           s.geometry,
+		Viewport:           s.viewport,
+		HistoryRows:        len(s.historyTailRows),
+		HistoryKnown:       s.historyProjectionKnown,
+		LayoutGeneration:   s.generation,
+		Lease:              s.lease,
+		OutputBottomRow:    s.outputBottom,
+		Frame:              s.frame,
+		TerminalEpoch:      s.terminalEpoch,
+		Validity:           validity,
+		Cursor:             cloneTerminalCursor(s.cursor),
+		HistoryTailUnknown: s.historyTailUnknown,
 	}
 }
 
@@ -541,6 +565,8 @@ func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 			s.historyTailRows = nil
 			s.historyStreamTailRows = nil
 			s.historyTailCells = nil
+			s.historyTailUnknown = false
+			s.historyTailUnknownAppended = 0
 			s.historyProjectionKnown = false
 			s.historyProjectionStarted = true
 		}
@@ -623,6 +649,8 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 		s.historyTailRows = nil
 		s.historyStreamTailRows = nil
 		s.historyTailCells = nil
+		s.historyTailUnknown = false
+		s.historyTailUnknownAppended = 0
 		s.historyProjectionKnown = false
 		s.historyProjectionStarted = true
 	}
@@ -869,6 +897,15 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		!s.viewportBoundaryKnown && s.viewport.Top == 0
 	resizeRebuild := s.frame > 0 && s.geometry.Width > 0 && s.geometry.Height > 0 &&
 		(s.geometry.Width != frame.Geometry.Width || s.geometry.Height != frame.Geometry.Height)
+	// Resize reconciliation invalidates tail proofs before the write. A
+	// zero-byte failure proves nothing reached the target, so the confirmed
+	// state must be restored byte-for-byte (P3-S2 contract). Only a resize can
+	// invalidate the proofs, so steady-state frames pay nothing for this.
+	//
+	// The speculative invalidation is applied only after every preflight check
+	// passed (see below): a rejected frame must leave the confirmed projection
+	// untouched, including these proofs.
+	var tailSnapshot *historyTailSnapshot
 	settleHistoryProjection := plan.SettleHistoryProjection
 	historyProjectionWritable := (s.historyProjectionKnown || initializeHistoryProjection) && !resizeRebuild
 	hadKnownProjection := s.screen.ProjectionValidity() == renderengine.ProjectionKnown && !s.lease.Active
@@ -917,6 +954,27 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
 		return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
 	}
+	// Every preflight check has passed: from here the transaction may write, so
+	// the resize invalidation becomes live. Doing it earlier would leak the
+	// speculative state into a rejected frame (the confirmed projection must
+	// stay byte-identical when nothing reached the target).
+	widthResized := resizeRebuild && s.geometry.Width != frame.Geometry.Width
+	if resizeRebuild {
+		snapshot := s.snapshotHistoryTailLocked()
+		tailSnapshot = &snapshot
+	}
+	if widthResized {
+		// A width change makes the host reflow already delivered rows: their
+		// count and physical positions are no longer described by
+		// historyTailRows. Keep the rows resident (append-only scrollback
+		// forbids erasing them) but stop addressing them absolutely, and drop
+		// the text-prefix dedup proof, which compares pre-reflow wrapping.
+		s.historyTailUnknown = true
+		s.historyTailUnknownAppended = 0
+		s.historyTailRows = nil
+		s.historyStreamTailRows = nil
+		s.historyTailCells = nil
+	}
 	historyResult := (*HistoryCommitResult)(nil)
 	historyBytes := ""
 	var delivered []HistoryCommit
@@ -955,13 +1013,35 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	// viewport band that used to be reserved is cleared locally so prompt or
 	// status rows can never masquerade as history when the reserve shrinks.
 	if resizeRebuild {
+		// A shrink moves the viewport up over rows that held resident history.
+		// The host may already have scrolled or reflowed them, so the retained
+		// row model can no longer be trusted: stop addressing those rows and
+		// switch to append-only delivery until the region is fully replaced.
+		if s.viewport.Height > 0 && area.Top < s.viewport.Top {
+			s.historyTailUnknown = true
+			s.historyTailUnknownAppended = 0
+			s.historyTailRows = nil
+			s.historyStreamTailRows = nil
+			s.historyTailCells = nil
+		}
 		transitionBytes = terminalViewportBandClearANSI(s.viewport, area, frame.Geometry.Height, s.viewportBoundaryKnown)
 	} else if initializeHistoryProjection {
 		transitionBytes = terminalClearHistoryRegionANSI(frame.OutputBottomRow)
 	} else if s.historyProjectionKnown && s.viewportBoundaryKnown && s.viewportTerminalHeight == frame.Geometry.Height {
-		transitionBytes = terminalViewportTransitionANSI(
-			s.viewport, area, frame.Geometry.Height, s.historyTailRows,
-		)
+		if s.historyTailUnknown {
+			// The resident row count is unprovable, so the capacity arithmetic
+			// in terminalViewportTransitionANSI would under-scroll and let the
+			// viewport paint over history. Scroll exactly as many rows out as
+			// the viewport moved up: that is provable without knowing how many
+			// rows the region holds, and it re-emits no text.
+			transitionBytes = terminalViewportScrollRowsOutANSI(
+				s.viewport, area, frame.Geometry.Height,
+			)
+		} else {
+			transitionBytes = terminalViewportTransitionANSI(
+				s.viewport, area, frame.Geometry.Height, s.historyTailRows,
+			)
+		}
 	} else if s.viewport.validFor(frame.Geometry) && area.Top > s.viewport.Top {
 		// 完整的边界转换被跳过（历史投影/边界未知，或几何高度刚变化）：至少要清掉
 		// 「刚离开 band、开始属于历史」的行。它们此前画的是 composer/prompt，如果
@@ -993,9 +1073,18 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 	if historyInsertedRows > 0 {
 		// 锚定统一（P2 锚定切片）：交付统一为「resident 之后按序写，写满 LF
 		// 溢出」，不再有底锚/续接启发式。
-		historyBytes = terminalHistoryInsertionANSI(
-			frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload,
-		)
+		if s.historyTailUnknown {
+			// Append-only placement: every row crosses row one through the
+			// scroll region, so no row that may still be resident is addressed
+			// by an absolute coordinate.
+			historyBytes = renderengine.NewHandoffPlan(
+				frame.Geometry.Height, frame.OutputBottomRow, historyInsertedPayload,
+			).ANSI()
+		} else {
+			historyBytes = terminalHistoryInsertionANSI(
+				frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload,
+			)
+		}
 	}
 	// composer band 是本事务的最后一个写入段，而且只要本事务在其上方写过任何字节
 	// （重置 / 边界重排 / 历史插入），band 就必须整段重写：写在上方的字节可能经由
@@ -1029,7 +1118,15 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		if os.Getenv("TERM_SESSION_TRACE") != "" {
 			fmt.Printf("TERMTRACE_WRITE_ERR frame=%d err=%v\n", s.frame, write.Err)
 		}
-		if write.MayHavePartiallyWritten {
+		if !write.MayHavePartiallyWritten {
+			// Zero bytes reached the target: nothing observed this frame, so the
+			// confirmed projection (including the pre-resize tail proofs) is
+			// still the truth. Restore it instead of keeping the speculative
+			// invalidation computed for the transaction.
+			if tailSnapshot != nil {
+				s.restoreHistoryTailLocked(*tailSnapshot)
+			}
+		} else {
 			// The target consumed an unknown prefix. Preserve no incremental
 			// viewport proof, but keep the last confirmed scalar snapshot so the
 			// next source frame replays the complete candidate transition.
@@ -1043,6 +1140,8 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 				s.historyTailRows = nil
 				s.historyStreamTailRows = nil
 				s.historyTailCells = nil
+				s.historyTailUnknown = false
+				s.historyTailUnknownAppended = 0
 				s.historyProjectionKnown = false
 				s.historyProjectionStarted = true
 			}
@@ -1118,6 +1217,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 			s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, delivered)
 			// A2 第一刀：统一交付后 resident 模型无条件跟随已交付行。
 			s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, historyInsertedPayload, frame.OutputBottomRow)
+			s.noteAppendedHistoryRowsLocked(historyInsertedRows, frame.OutputBottomRow)
 		}
 	}
 	s.cursor = cloneTerminalCursor(frame.Cursor)
@@ -1261,9 +1361,16 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	// 锚定统一（P2 锚定切片）：resident 区紧贴 inline viewport 上方，语义行一律
 	// 从 resident 后缀之后按序写，写满后由 LF 把最早的行送入 native scrollback；
 	// prompt/status 行位于 outputBottom 之下，永不参与滚动。
-	bytes := terminalHistoryInsertionANSI(
-		s.geometry.Height, s.outputBottom, s.historyTailRows, rows,
-	)
+	bytes := ""
+	if s.historyTailUnknown {
+		// After a width change the resident row model is unprovable; append so
+		// no absolute row that may still hold reflowed content is overwritten.
+		bytes = renderengine.NewHandoffPlan(s.geometry.Height, s.outputBottom, rows).ANSI()
+	} else {
+		bytes = terminalHistoryInsertionANSI(
+			s.geometry.Height, s.outputBottom, s.historyTailRows, rows,
+		)
+	}
 	if bytes == "" {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
@@ -1276,6 +1383,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 			s.historyTailRows = nil
 			s.historyStreamTailRows = nil
 			s.historyTailCells = nil
+			s.historyTailUnknown = false
 			s.historyProjectionKnown = false
 			s.historyProjectionStarted = true
 			s.preparedHistory = nil
@@ -1291,6 +1399,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, []HistoryCommit{commit})
 	// 锚定统一：交付后 resident 模型无条件跟随已交付行。
 	s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
+	s.noteAppendedHistoryRowsLocked(len(rows), s.outputBottom)
 	s.preparedHistory = nil
 	return HistoryCommitResult{Frame: s.frame}
 }
@@ -1424,6 +1533,24 @@ func terminalOffsetViewportANSI(value string, area ViewportArea) (string, error)
 // 刚转交的旧 viewport 行（不再有 IL 补偿把 resident 推到底部）；收缩时超出新容量
 // 的最早语义行经 LF 进入 native scrollback（HandoffPlan），不再有底锚 headroom
 // 删除补偿。
+//
+// When the resident row model is unprovable (after a width change) the caller
+// must use terminalViewportScrollRowsOutANSI instead: the capacity arithmetic
+// below trusts len(historyTailRows) to decide how much overflow to scroll.
+func terminalViewportScrollRowsOutANSI(previous, next ViewportArea, physicalHeight int) string {
+	if physicalHeight < 1 || next.Height <= 0 || next.Top >= previous.Top {
+		return ""
+	}
+	rows := previous.Top - next.Top
+	if rows < 1 {
+		return ""
+	}
+	if capacity := next.Top - 1; capacity > 0 && rows > capacity {
+		rows = capacity
+	}
+	return renderengine.NewHandoffPlan(physicalHeight, next.Top-1, make([]string, rows)).ANSI()
+}
+
 func terminalViewportTransitionANSI(previous, next ViewportArea, physicalHeight int, historyTailRows []string) string {
 	if previous.Height <= 0 || previous == next || physicalHeight < 1 {
 		return ""
@@ -1469,6 +1596,45 @@ func terminalRetainHistoryTailRows(rows []string, capacity int) []string {
 	return append([]string(nil), rows...)
 }
 
+// historyTailSnapshot captures the tail proofs a resized transaction may
+// invalidate before it knows whether any byte reached the target. A zero-byte
+// failure must restore them verbatim: the physical region did not change.
+type historyTailSnapshot struct {
+	rows          []string
+	streamRows    []string
+	cells         map[uint64]struct{}
+	unknown       bool
+	unknownAppend int
+}
+
+func (s *TerminalSession) snapshotHistoryTailLocked() historyTailSnapshot {
+	snapshot := historyTailSnapshot{
+		unknown:       s.historyTailUnknown,
+		unknownAppend: s.historyTailUnknownAppended,
+	}
+	if len(s.historyTailRows) > 0 {
+		snapshot.rows = append([]string(nil), s.historyTailRows...)
+	}
+	if len(s.historyStreamTailRows) > 0 {
+		snapshot.streamRows = append([]string(nil), s.historyStreamTailRows...)
+	}
+	if len(s.historyTailCells) > 0 {
+		snapshot.cells = make(map[uint64]struct{}, len(s.historyTailCells))
+		for id := range s.historyTailCells {
+			snapshot.cells[id] = struct{}{}
+		}
+	}
+	return snapshot
+}
+
+func (s *TerminalSession) restoreHistoryTailLocked(snapshot historyTailSnapshot) {
+	s.historyTailRows = snapshot.rows
+	s.historyStreamTailRows = snapshot.streamRows
+	s.historyTailCells = snapshot.cells
+	s.historyTailUnknown = snapshot.unknown
+	s.historyTailUnknownAppended = snapshot.unknownAppend
+}
+
 func terminalAppendHistoryTailRows(current, inserted []string, capacity int) []string {
 	if capacity <= 0 {
 		return nil
@@ -1477,6 +1643,21 @@ func terminalAppendHistoryTailRows(current, inserted []string, capacity int) []s
 	combined = append(combined, current...)
 	combined = append(combined, inserted...)
 	return terminalRetainHistoryTailRows(combined, capacity)
+}
+
+// noteAppendedHistoryRowsLocked clears the post-resize unprovable flag once the
+// writer's own scroll-region appends have replaced the complete resident
+// region. Only rows that crossed the writer count: the accounting never
+// assumes anything about how the host reflowed the pre-resize rows.
+func (s *TerminalSession) noteAppendedHistoryRowsLocked(appended, capacity int) {
+	if s == nil || !s.historyTailUnknown || appended <= 0 || capacity <= 0 {
+		return
+	}
+	s.historyTailUnknownAppended += appended
+	if s.historyTailUnknownAppended >= capacity {
+		s.historyTailUnknown = false
+		s.historyTailUnknownAppended = 0
+	}
 }
 
 // terminalHistoryPayloadAfterResident trims the leading rows of a planned
@@ -1619,6 +1800,11 @@ func terminalClearHistoryRegionRowsANSI(first, last int) string {
 // reflow keeps their physical content, and stale prompt/status rows must never
 // be mistaken for delivered history. This is a local row erase: native
 // scrollback is untouched and no history row is re-emitted.
+//
+// The shrink direction (next.Top < previous.Top) intentionally emits nothing
+// here. The resident row model is invalidated by the caller in that case and
+// subsequent history is appended through the scroll region, so there is no
+// provable local erase to perform.
 //
 // The erase deliberately uses absolute addressing only. A resize transaction
 // must never emit DECSC/DECRC, DECSTBM or any other cursor/scroll-region state

@@ -725,6 +725,21 @@ func (c *ActiveStreamController) ViewportRows() int {
 	return c.Buffer.Height
 }
 
+// ViewportWidth reports the current active viewport width in cells. It is the
+// width the retained source was last wrapped at, which makes it the observable
+// signal for "did the resize reflow actually run?".
+func (c *ActiveStreamController) ViewportWidth() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Buffer == nil {
+		return 0
+	}
+	return c.Buffer.Width
+}
+
 func (c *ActiveStreamController) resetLocked() {
 	c.active = false
 	c.markdown = false

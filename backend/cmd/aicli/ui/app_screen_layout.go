@@ -67,7 +67,9 @@ type AppScreenLayout struct {
 // immutable AppState snapshot. It must never inspect FixedBottomSurface,
 // ScreenModel, terminal state, or effect/projection progress.
 func LayoutAppScreen(state AppState) AppScreenLayout {
-	layout := LayoutAppState(state)
+	// T8b-3：逐帧路径不物化全量 transcript 行——bottom/active 布局与 transcript
+	// 行互相独立，先算前者，再按尾部窗口按需生成本帧用得到的语义行。
+	layout := appLayoutFromParts(state, layoutAppStateParts(state), nil)
 	height := layout.Geometry.Height
 	result := AppScreenLayout{
 		Revision:                layout.Revision,
@@ -112,9 +114,11 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 	}
 
 	excluded := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
-	// 逐帧路径只需要视口装得下的最后若干行：只布局尾部窗口，见
-	// layoutTranscriptTailScreenRows。
-	transcript := layoutTranscriptTailScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), excluded, width, result.OutputBottomRow, state.Theme)
+	// 逐帧路径只需要视口装得下的最后若干行：只对尾部窗口的 cell 调用
+	// LayoutTranscript（含一个前驱上下文 cell 以复现首个 cell 的 leading gap），
+	// 见 layoutTranscriptTailScreenRowsWindowed。
+	foldTarget := transcriptGlobalFoldTarget(state.Transcript, excluded)
+	transcript := layoutTranscriptTailScreenRowsWindowed(state.Transcript.Cells, excluded, state.Geometry.Generation, width, result.OutputBottomRow, foldTarget, state.Theme)
 	if len(transcript) > result.OutputBottomRow {
 		transcript = transcript[len(transcript)-result.OutputBottomRow:]
 	}
@@ -189,7 +193,22 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 	if len(themes) > 0 {
 		theme = themes[0]
 	}
-	return layoutTranscriptScreenRowsImpl(rows, cells, mutable, width, theme)
+	return layoutTranscriptScreenRowsImpl(rows, cells, mutable, width, transcriptFoldTarget{}, theme)
+}
+
+// transcriptFoldTarget 是窗口化布局的 fold 覆盖（§14.7：foldTarget 全局唯一，
+// 由冷区/窗口账本给出，禁止在窗口内局部重算）。Known=false 表示调用方没有
+// 全局视图，沿用行内扫描（全量路径的既有行为）。
+type transcriptFoldTarget struct {
+	ID    scene.CellID
+	Known bool
+}
+
+// layoutTranscriptScreenRowsWithFoldTarget 与 layoutTranscriptScreenRows 相同，
+// 但 foldTarget 由调用方给定：窗口化路径下窗口边界之外的「最近一次折叠」必须
+// 仍然决定窗口内的提示位（跨窗口一致）。
+func layoutTranscriptScreenRowsWithFoldTarget(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, fold transcriptFoldTarget, theme style.ThemeContext) []AppScreenRow {
+	return layoutTranscriptScreenRowsImpl(rows, cells, mutable, width, fold, theme)
 }
 
 // layoutTranscriptScreenRowsImpl 是布局投影的唯一实现（P1-1 Stage 2：无预算单遍）。
@@ -231,14 +250,17 @@ type layoutRenderSegment struct {
 	rows   []AppScreenRow
 }
 
-func layoutTranscriptScreenRowsImpl(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, theme style.ThemeContext) []AppScreenRow {
+func layoutTranscriptScreenRowsImpl(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, fold transcriptFoldTarget, theme style.ThemeContext) []AppScreenRow {
 	if len(rows) == 0 {
 		return nil
 	}
 	fp := themeFingerprint(theme)
 	cache := sharedCellRows
 	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
-	foldTarget := toolFoldTargetRows(rows, cells, mutable)
+	foldTarget := fold.ID
+	if !fold.Known {
+		foldTarget = toolFoldTargetRows(rows, cells, mutable)
+	}
 	segments := make([]layoutRenderSegment, 0, len(rows))
 	jobs := make([]layoutRenderJob, 0, 16)
 	renderedStructured := make(map[scene.CellID]struct{})

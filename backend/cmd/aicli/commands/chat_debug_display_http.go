@@ -2,6 +2,7 @@ package commands
 
 import (
 	"encoding/json"
+	"net/http"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -163,6 +164,10 @@ type chatDebugDisplaySceneInfo struct {
 	DeferredQueue *chatDebugDisplayDeferredInfo   `json:"deferred_queue,omitempty"`
 	StreamQueue   *chatDebugDisplayStreamInfo     `json:"stream_queue,omitempty"`
 	CellsTail     []chatDebugDisplayCellInfo      `json:"cells_tail,omitempty"`
+	// Window 标注布局摘要所用的窗口（T8b-4，§14.10）：仅当本次读取确实裁剪了
+	// transcript（缺省窗口或显式 ?window=N）时出现；全量路径省略该字段，历史
+	// 响应逐字节不变。LayoutRows/TextRows 在窗口下只统计窗口内 cell。
+	Window *chatDebugWindowInfo `json:"window,omitempty"`
 }
 
 type chatDebugDisplayTextParityInfo struct {
@@ -284,6 +289,11 @@ type chatDebugDisplayAppStateInfo struct {
 	// 「UI 在算」与「UI 在重复算同样的东西」区分开：命中率低 + 逐出数高是
 	// 缓存容量跟不上会话规模的直接证据。
 	LayoutCache *chatDebugDisplayLayoutCacheInfo `json:"layout_cache,omitempty"`
+	// Residency 是 transcript 驻留降级（C 档）的开关与计数快照（设计文档
+	// §15.2）。T0 阶段只有开关、选项与零值计数；驻留/冷区/索引明细随
+	// T3–T5 填充。恒输出（即使能力默认关闭），让「默认关闭」在状态里
+	// 可见，而不是字段缺失造成的歧义。
+	Residency *ui.TranscriptResidencyStats `json:"residency,omitempty"`
 	// Plan 是历史规划输入/布局的结构化诊断（与面板的 History Plan
 	// Inputs / History Plan Layout 区块同源）。plan 的 cell 走查部分恒定
 	// 输出（便宜，无布局）；plan_layout 部分只在病态场景探测，见
@@ -466,13 +476,27 @@ type chatDebugDisplayExecutorEntryInfo struct {
 // is direct evidence that the terminal believes it cannot trust the scrollback,
 // which is exactly the condition that makes the executor refuse to commit.
 type chatDebugDisplayProjectionInfo struct {
-	HistoryRows      int    `json:"history_rows"`
-	HistoryKnown     bool   `json:"history_known"`
-	LayoutGeneration uint64 `json:"layout_generation"`
-	TerminalEpoch    uint64 `json:"terminal_epoch"`
-	Frame            uint64 `json:"frame"`
-	Validity         string `json:"validity"`
-	OutputBottomRow  int    `json:"output_bottom_row"`
+	HistoryRows  int  `json:"history_rows"`
+	HistoryKnown bool `json:"history_known"`
+	// HistoryTailUnknown marks the window between a width/shrink resize and the
+	// point where the resident region has been fully replaced by appended rows.
+	// While true, history delivery is append-only (no absolute row placement),
+	// which is the direct field to watch when diagnosing post-zoom duplication.
+	HistoryTailUnknown bool   `json:"history_tail_unknown"`
+	LayoutGeneration   uint64 `json:"layout_generation"`
+	TerminalEpoch      uint64 `json:"terminal_epoch"`
+	Frame              uint64 `json:"frame"`
+	Validity           string `json:"validity"`
+	OutputBottomRow    int    `json:"output_bottom_row"`
+	// AbsoluteRowsReliable reports whether CUP row addressing matches the visible
+	// window. False on a scrolled/wider classic console: the inline viewport can
+	// then be painted at the wrong physical rows (content jumps / duplicates),
+	// independent of the history model.
+	AbsoluteRowsReliable bool `json:"absolute_rows_reliable"`
+	// ScreenOriginRow / ScreenBufferWidth expose the console geometry behind
+	// that verdict (0 when the host reports no buffer geometry).
+	ScreenOriginRow   int `json:"screen_origin_row,omitempty"`
+	ScreenBufferWidth int `json:"screen_buffer_width,omitempty"`
 }
 
 // ============================================================================
@@ -489,12 +513,14 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 //   - Fast：跳过已知的重区块（文件系统 / 存储统计 / 场景布局），只保留
 //     渲染器与规划器的核心计数器。
 //   - Deadline：跨区块预算；一旦超时，后续重区块按区块跳过并登记。
+//   - Window：transcript 窗口（T8b-4，§14.10）；零值 = 全量（历史行为）。
 //
 // 面板路径（/debug display）使用零值 = 不设预算、全量输出，行为不变；
 // 只有 HTTP 快照路径传预算，避免风暴期 /debug/chat/status 拖住调用方。
 type ChatDebugDisplayOptions struct {
 	Fast     bool
 	Deadline time.Time
+	Window   chatDebugTranscriptWindow
 }
 
 // heavySectionSkipped 判断一个重区块是否应当跳过。
@@ -525,6 +551,21 @@ func ChatDebugDisplayBoundedOptions() ChatDebugDisplayOptions {
 // ChatDebugDisplayFastOptions 返回 ?fast=1 的选项（跳过重区块 + 预算）。
 func ChatDebugDisplayFastOptions() ChatDebugDisplayOptions {
 	return ChatDebugDisplayOptions{Fast: true, Deadline: time.Now().Add(chatDebugDisplayHTTPBudget)}
+}
+
+// chatDebugDisplayOptionsForRequest 在预算/降级选项之上解析 §14.10 的窗口参数：
+//   - ?window=N 显式窗口、?full=1（或 window=0）显式全量；
+//   - 缺省且 residency 开启时套用 chatDebugDefaultWindowCells；
+//   - 其余情况保持全量（residency 关闭时默认路径逐字节不变）。
+func chatDebugDisplayOptionsForRequest(r *http.Request, opts ChatDebugDisplayOptions) ChatDebugDisplayOptions {
+	opts.Window = chatDebugTranscriptWindowForRequest(r, transcriptResidencyRuntimeEnabled())
+	return opts
+}
+
+// ChatDebugDisplayOptionsForRequest 是 HTTP 端点的导出入口（/debug/chat/status
+// 与 /web/api/status 共用）：在预算/降级选项之上解析 §14.10 窗口参数。
+func ChatDebugDisplayOptionsForRequest(r *http.Request, opts ChatDebugDisplayOptions) ChatDebugDisplayOptions {
+	return chatDebugDisplayOptionsForRequest(r, opts)
 }
 
 // noteSkipped 登记被跳过的区块名（去重，保持插入顺序）。消费者必须把
@@ -684,12 +725,16 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			}
 		}
 		if scn := bridge.sceneSnapshot(); scn != nil {
-			if len(scn.Cells) > 0 && opts.heavySectionSkipped() {
+			// T8b-4：布局摘要只统计窗口内 cell（§14.10）。residency 关闭且未
+			// 显式指定时窗口为零值 → 原快照零拷贝传入，输出与历史逐字节一致。
+			window := opts.Window
+			windowSnap := window.snapshot(scn)
+			if len(windowSnap.Cells) > 0 && opts.heavySectionSkipped() {
 				// 场景布局是 O(transcript) 的一遍走查 + 文本渲染，是
 				// 大会话下 status 变慢的主要来源之一；降级时登记跳过。
 				noteSkipped(snap, "scene_layout")
-			} else if len(scn.Cells) > 0 {
-				rows := scene.LayoutTranscript(scn.Cells, scn.Revision)
+			} else if len(windowSnap.Cells) > 0 {
+				rows := scene.LayoutTranscript(windowSnap.Cells, windowSnap.Revision)
 				gaps := 0
 				for _, r := range rows {
 					if r.Gap > 0 {
@@ -698,7 +743,8 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 				}
 				sc.LayoutRows = len(rows)
 				sc.LayoutGaps = gaps
-				sc.TextRows = len(scene.RenderText(scn.Cells, scn.Revision))
+				sc.TextRows = len(scene.RenderText(windowSnap.Cells, windowSnap.Revision))
+				sc.Window = window.info(len(scn.Cells))
 			}
 			if blocks, matched, missed, lastErr := bridge.textParityStats(); blocks > 0 || matched > 0 || missed > 0 {
 				resyncs, skips := bridge.textParityAlignmentStats()
@@ -858,6 +904,9 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 				FoldOmitHitRate:   chatDebugCacheHitRate(cacheStats.FoldOmitHits, cacheStats.FoldOmitMisses),
 			}
 		}
+		// 驻留降级快照：恒输出（T8b-5：真实计数 + §15.2 分区 + §15.3 内存口径）。
+		residencyStats := chatResidencyStatsForSession(session, &state, &effectDiagnostics)
+		app.Residency = &residencyStats
 		if state.Active.Phase != ui.ActiveCellInactive {
 			app.ActiveCell = &chatDebugDisplayActiveCellInfo{
 				ID:            uint64(state.Active.CellID),
@@ -958,13 +1007,21 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 	if session.TerminalSession != nil {
 		proj := session.TerminalSession.ProjectionState()
 		snap.Projection = &chatDebugDisplayProjectionInfo{
-			HistoryRows:      proj.HistoryRows,
-			HistoryKnown:     proj.HistoryKnown,
-			LayoutGeneration: proj.LayoutGeneration,
-			TerminalEpoch:    proj.TerminalEpoch,
-			Frame:            proj.Frame,
-			Validity:         proj.Validity.String(),
-			OutputBottomRow:  proj.OutputBottomRow,
+			HistoryRows:          proj.HistoryRows,
+			HistoryKnown:         proj.HistoryKnown,
+			HistoryTailUnknown:   proj.HistoryTailUnknown,
+			LayoutGeneration:     proj.LayoutGeneration,
+			TerminalEpoch:        proj.TerminalEpoch,
+			Frame:                proj.Frame,
+			Validity:             proj.Validity.String(),
+			OutputBottomRow:      proj.OutputBottomRow,
+			AbsoluteRowsReliable: true,
+		}
+		if session.Surface != nil {
+			screen := session.Surface.ScreenGeometry()
+			snap.Projection.AbsoluteRowsReliable = screen.AbsoluteRowsReliable()
+			snap.Projection.ScreenOriginRow = screen.WindowOriginRow
+			snap.Projection.ScreenBufferWidth = screen.BufferWidth
 		}
 	}
 

@@ -160,6 +160,21 @@ func (l *cellLayoutLRU[K, V]) evictToBudget() {
 	}
 }
 
+// setBudget 在锁内调整容量预算并立即逐出到新预算（T8：启动期可配置）。
+// max/maxBytes <= 0 表示该维度保持原值。
+func (l *cellLayoutLRU[K, V]) setBudget(max, maxBytes int) {
+	if l == nil {
+		return
+	}
+	if max > 0 {
+		l.max = max
+	}
+	if maxBytes > 0 {
+		l.maxBytes = maxBytes
+	}
+	l.evictToBudget()
+}
+
 // stats 返回命中/未命中/逐出计数与当前条目数、估算字节。调用方负责加锁。
 func (l *cellLayoutLRU[K, V]) stats() (hits, misses, evictions uint64, entries, bytes int) {
 	if l == nil {
@@ -192,6 +207,18 @@ const (
 
 var sharedCellRows = &cellRowsCache{
 	lru: newCellLayoutLRU[cellLayoutKey, []AppScreenRow](cellRowsCacheMax, cellRowsCacheMaxBytes),
+}
+
+// setBudgetBytes 调整 cell 行缓存字节预算并逐出；返回回收的估算字节（T8）。
+func (c *cellRowsCache) setBudgetBytes(maxBytes int) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	before := c.lru.bytes
+	c.lru.setBudget(0, maxBytes)
+	return before - c.lru.bytes
 }
 
 // cellLayoutKeyFor 派生 cell 的布局缓存键。

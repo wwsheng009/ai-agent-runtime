@@ -74,6 +74,11 @@ type chatTTYConPTYScriptStep struct {
 	// RawBytes 非空时按"原样字节"注入（不做行结束符规范化），用于控制字符
 	// （例如 Ctrl+T = 0x14）。Line 仍用于日志/断言可读性。
 	RawBytes string `json:"raw_bytes,omitempty"`
+	// ResizeCols/ResizeRows 非零时，在本步注入按键之前调用
+	// ResizePseudoConsole，模拟用户在真实会话中缩放窗口。Resize 走的是与
+	// 真实宿主相同的 ConPTY 尺寸事件（conhost 会同步 reflow 已交付行）。
+	ResizeCols int `json:"resize_cols,omitempty"`
+	ResizeRows int `json:"resize_rows,omitempty"`
 }
 
 // chatTTYConPTYScript 既是父进程侧的注入脚本+断言清单，也是经环境变量下发
@@ -285,16 +290,16 @@ func driveChatTTYConPTYTrimAfterDelivery(t *testing.T, session *ChatSession, scr
 	afterRestore := len(session.resumeHistorySnapshot())
 
 	probe := map[string]interface{}{
-		"seed_messages":       total,
-		"loaded_after_first":  loadedAfterFirst,
-		"loaded_full":         loadedFull,
-		"delivered_rows":      delivered,
-		"after_trim":          afterTrim,
-		"trim_count":          trimCount,
-		"trimmed_off":         trimmedOff,
-		"restore_ok":          restored,
-		"after_restore":       afterRestore,
-		"retained_limit":      resumeHistoryRetainedAfterDelivery,
+		"seed_messages":        total,
+		"loaded_after_first":   loadedAfterFirst,
+		"loaded_full":          loadedFull,
+		"delivered_rows":       delivered,
+		"after_trim":           afterTrim,
+		"trim_count":           trimCount,
+		"trimmed_off":          trimmedOff,
+		"restore_ok":           restored,
+		"after_restore":        afterRestore,
+		"retained_limit":       resumeHistoryRetainedAfterDelivery,
 		"interactive_terminal": ui.IsInteractiveTerminal(),
 	}
 	encoded, err := json.MarshalIndent(probe, "", "  ")
@@ -707,6 +712,22 @@ func driveChatTTYConPTYStream(t *testing.T, p *pty.PTY, script chatTTYConPTYScri
 	}()
 
 	for i, step := range script.Steps {
+		if step.ResizeCols > 0 || step.ResizeRows > 0 {
+			cols, rows := step.ResizeCols, step.ResizeRows
+			if cols <= 0 {
+				cols = 80
+			}
+			if rows <= 0 {
+				rows = 24
+			}
+			if err := p.Resize(cols, rows); err != nil {
+				t.Fatalf("resize pseudoconsole to %dx%d at step %d: %v", cols, rows, i, err)
+			}
+			// The resize itself is asynchronous on the host side: give the
+			// session a beat to observe the geometry and repaint before the
+			// next keystroke.
+			time.Sleep(300 * time.Millisecond)
+		}
 		if step.WaitSignal != "" {
 			waitForChatTTYConPTYSignal(t, &mu, &stream, step.WaitSignal, timeout)
 		} else {
@@ -987,4 +1008,60 @@ func TestChatTTY_LiveLoop_ConPTY_ResidencyColdPrefixExactlyOnce(t *testing.T) {
 	}
 	t.Logf("T8b-6 ConPTY PASS: history=%d evicted=%d readback=%v resident=%v raw_bytes=%d",
 		history, history-keep, evidence["readback_ok"], evidence["resident_cells"], len(raw))
+}
+
+// TestChatTTY_LiveLoop_ConPTY_ResizeKeepsContentExactlyOnce 是本次缩放修复的
+// 真机门禁（真实 ConPTY + 真实 ConPTY 尺寸事件）：
+//
+//	首轮对话可见 → ResizePseudoConsole 缩小/放大（conhost 会 reflow 已交付行）
+//	→ 再跑一轮对话 → /exit。
+//
+// 断言：两轮回复与用户输入在最终终端投影（scrollback + 可见屏）中各恰好
+// 一次；缩放后不出现相邻重复行；缩放期间不得清屏（?3J）。
+func TestChatTTY_LiveLoop_ConPTY_ResizeKeepsContentExactlyOnce(t *testing.T) {
+	const (
+		firstReply  = "CONPTY-RESIZE-FIRST-REPLY"
+		firstAsk    = "CONPTY-RESIZE-ASK-ONE"
+		postResize  = "/bogus"
+		errorMarker = "未知命令: /bogus"
+	)
+	script := chatTTYConPTYScript{
+		Reply: firstReply,
+		Steps: []chatTTYConPTYScriptStep{
+			{FixedWait: 1500, Line: firstAsk},
+			{WaitSignal: firstReply, Line: ""},
+			// ConPTY 尺寸事件：conhost 在自己的屏幕模型里 reflow 已交付行。
+			{ResizeCols: 48, ResizeRows: 18, FixedWait: 400, Line: ""},
+			{ResizeCols: 96, ResizeRows: 30, FixedWait: 400, Line: ""},
+			{ResizeCols: 64, ResizeRows: 20, FixedWait: 600, Line: postResize},
+			{WaitSignal: errorMarker, FixedWait: 200, Line: "/exit"},
+		},
+		Wants: []string{firstReply, firstAsk},
+	}
+	raw := runChatTTYConPTYLiveLoop(t, script, 120*time.Second)
+	if strings.Contains(raw, "\x1b[3J") {
+		t.Fatalf("resize purged native scrollback (CSI 3J) during a live ConPTY session")
+	}
+	normalized := normalizeChatTTYConPTYStream(raw)
+
+	// 判据取原始字节流：任一内容被重发（历史重放/旧宽度重折）都会让它出现
+	// 多次。这比“重放后的屏幕文本”更准确——屏幕重放只能用一个固定宽度。
+	if count := strings.Count(normalized, firstReply); count != 1 {
+		t.Fatalf("first reply crossed the writer %d times after three resizes, want exactly 1\n%s",
+			count, tailBytes(normalized, 2000))
+	}
+	if count := strings.Count(normalized, errorMarker); count != 1 {
+		t.Fatalf("post-resize output %q crossed the writer %d times, want exactly 1\n%s",
+			errorMarker, count, tailBytes(normalized, 2000))
+	}
+	if strings.Contains(normalized, firstAsk) == false {
+		t.Fatalf("first user turn was never rendered")
+	}
+	// 缩放不得把同一个内容重复写进可见区/滚动区。
+	screen := vt.NewScreen(64, 20)
+	screen.Feed(normalized)
+	assertNoAdjacentDuplicateLines(t, screen.Lines(0, 20))
+	t.Logf("ConPTY resize scenario: %d raw bytes, %d scrollback rows, reply=%d error=%d",
+		len(raw), len(screen.ScrollbackLines()),
+		strings.Count(normalized, firstReply), strings.Count(normalized, errorMarker))
 }

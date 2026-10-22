@@ -44,6 +44,8 @@ import (
 
 type chatRuntimeEventBridge struct {
 	session *ChatSession
+	// sceneTrimPolicy 是 T6 scene 层窗口化策略（默认 nil = 不裁剪，行为与引入前一致）。
+	sceneTrimPolicy *bridgeSceneTrimPolicy
 	// parkedEscapeMu / parkedEscapeStop hold the §6.12 parked-window ESC
 	// consumer: armed on turn.suspended, released on turn.resumed or interrupt
 	// cleanup, so ESC can abandon a parked turn that has no run to interrupt.
@@ -3871,6 +3873,8 @@ func (b *chatRuntimeEventBridge) applyChangeSet(cs *encoding.ChangeSet) {
 		b.sceneApplyFailures++
 		b.sceneLastError = err.Error()
 	}
+	// T6：scene 层窗口化（默认关闭 → 空操作；开启且写穿成功才裁剪）。
+	b.applySceneTrimPolicyLocked()
 }
 
 // eventLogFilePath 返回事件日志文件路径（测试可注入覆盖）。

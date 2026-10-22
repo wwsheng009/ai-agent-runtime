@@ -179,6 +179,10 @@ type FixedBottomSurface struct {
 	lastWidth      int
 	lastHeight     int
 	lastBottomRows int
+	// lastGeometryWatchAt throttles RefreshTerminalGeometryProbe independently
+	// of lastGeometryProbeAt: the geometry watcher must never suppress the
+	// paint-path probe (which also applies layout bookkeeping).
+	lastGeometryWatchAt time.Time
 	// ownedViewport is the normal production renderer. The legacy immediate
 	// scroll-region path remains only as an internal capability fallback.
 	ownedViewport   bool
@@ -443,6 +447,23 @@ func (s *FixedBottomSurface) DynamicStatusTicksEnabled() bool {
 	return s.enabled && !s.testMode
 }
 
+// IdleGeometryWatchEnabled reports whether the host geometry may be polled on a
+// wall-clock cadence. Synthetic surfaces pin their geometry for deterministic
+// tests, so polling them would only manufacture Resize actions that the test
+// never asked for.
+func (s *FixedBottomSurface) IdleGeometryWatchEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled && !s.testMode && !s.sizeOverrideLocked()
+}
+
+func (s *FixedBottomSurface) sizeOverrideLocked() bool {
+	return s.terminal != nil && s.terminal.sizeOverride
+}
+
 func (s *FixedBottomSurface) Disable() {
 	if s == nil || s.terminal == nil {
 		return
@@ -579,6 +600,49 @@ func (s *FixedBottomSurface) TerminalGeometry() (width, height int, ok bool) {
 	}
 	width, height = s.terminal.Width(), s.terminal.Height()
 	return width, height, width > 0 && height > 0
+}
+
+// RefreshTerminalGeometryProbe performs one throttled real geometry probe and
+// returns the fresh dimensions without emitting terminal bytes or applying the
+// legacy layout. It exists for the unified geometry watcher: the presenter's
+// probe contract is read-only (TerminalGeometry), so without this call a resize
+// performed while the session is otherwise idle would never reach AppState.
+//
+// minInterval <= 0 forces the probe. A probe that fails leaves the cached
+// dimensions untouched and returns ok=false.
+func (s *FixedBottomSurface) RefreshTerminalGeometryProbe(minInterval time.Duration) (width, height int, ok bool) {
+	if s == nil || s.terminal == nil {
+		return 0, 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.enabled {
+		return 0, 0, false
+	}
+	now := time.Now()
+	if minInterval > 0 && !s.lastGeometryWatchAt.IsZero() && now.Sub(s.lastGeometryWatchAt) < minInterval {
+		width, height = s.terminal.Width(), s.terminal.Height()
+		return width, height, width > 0 && height > 0
+	}
+	s.lastGeometryWatchAt = now
+	width, height = s.terminal.RefreshSize()
+	if width <= 0 || height <= 0 {
+		width, height = s.terminal.Width(), s.terminal.Height()
+		return width, height, width > 0 && height > 0
+	}
+	return width, height, true
+}
+
+// ScreenGeometry reports whether absolute row addressing still matches the
+// visible window. The unified renderer writes CUP row addresses directly, so a
+// classic console whose window has scrolled (or whose buffer is wider than the
+// window) can render the viewport at the wrong physical rows. Callers use this
+// as a diagnostic and to decide on a safer output mode.
+func (s *FixedBottomSurface) ScreenGeometry() ScreenGeometry {
+	if s == nil || s.terminal == nil {
+		return ScreenGeometry{}
+	}
+	return s.terminal.ScreenGeometry()
 }
 
 // SettleOutputDebt clears layout debt before replaying already-final transcript

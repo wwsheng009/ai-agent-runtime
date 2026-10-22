@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
 
 // UIControllerConfig 控制 UI actor 的 mailbox 容量。
@@ -959,6 +960,30 @@ func (c *UIController) HistoryEffectDiagnostics() HistoryEffectDiagnostics {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.state.HistoryEffects.Diagnostics()
+}
+
+// DeliveredCellIDs 报告"已交付到原生 scrollback"的 cell 身份集合（逐出守卫用）。
+// 零 payload 克隆：只读账本条目的 State/CellID，避免 Entries() 在大账本上
+// 逐条复制 Commit.Lines。known=false 表示账本为空、无法判定（调用方据此决定
+// 是否拦截）。
+func (c *UIController) DeliveredCellIDs() (map[scene.CellID]struct{}, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.HistoryEffects.DeliveredCellIDs()
+}
+
+// DeliveryBlockers 报告是否存在不可证明交付的条目（逐出守卫 §14.3 H3 /
+// R5 partial-zero-write 互锁）。blocked=true 时任何逐出都必须停止。
+func (c *UIController) DeliveryBlockers() (bool, string) {
+	if c == nil {
+		return false, ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.HistoryEffects.DeliveryBlockers()
 }
 
 // historyCommitGate is the payload-free projection of the controller state that

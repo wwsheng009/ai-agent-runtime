@@ -52,6 +52,18 @@ func newFoldOmissionCache() *foldOmissionCache {
 
 var sharedFoldOmissions = newFoldOmissionCache()
 
+// setBudgetBytes 调整折叠判定缓存字节预算并逐出；返回回收的估算字节（T8）。
+func (c *foldOmissionCache) setBudgetBytes(maxBytes int) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	before := c.lru.bytes
+	c.lru.setBudget(0, maxBytes)
+	return before - c.lru.bytes
+}
+
 // omits 返回 source 的 omission 判定，命中缓存时不再触碰 BuildPreview。
 func (c *foldOmissionCache) omits(source string) bool {
 	if c == nil {

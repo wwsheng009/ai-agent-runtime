@@ -31,6 +31,50 @@ type TerminalCapabilities struct {
 	// Full profile resolution (hyperlinks, background) lives in style.DetectColorProfile.
 	ColorEnabled bool
 	ColorDepth   int // 0=none, 1=ansi16, 2=ansi256, 3=truecolor
+	// Screen reports the console screen-buffer geometry when the host exposes
+	// it (classic Windows conhost). Absolute cursor addressing (CUP) targets
+	// buffer coordinates there, not the visible window, so the unified inline
+	// renderer's row arithmetic is only valid when the window origin is (0,0)
+	// and the buffer width equals the window width.
+	//
+	// On Unix terminals (and Windows Terminal, which reports through ConPTY)
+	// Screen.Supported stays false: CUP is window-relative and the inline
+	// projection is always valid.
+	Screen ScreenGeometry
+}
+
+// ScreenGeometry is the console screen-buffer geometry reported by the host.
+type ScreenGeometry struct {
+	// Supported is true only when the host answered a screen-buffer query.
+	Supported bool
+	// WindowOriginRow is the 0-based buffer row at the top of the visible
+	// window. Non-zero means the user scrolled the console (or output pushed
+	// the view), so absolute row writes land at buffer rows, not screen rows.
+	WindowOriginRow int
+	// WindowWidth/Height are the visible window dimensions in cells.
+	WindowWidth  int
+	WindowHeight int
+	// BufferWidth/Height are the scrollback buffer dimensions, which can be
+	// larger than the visible window.
+	BufferWidth  int
+	BufferHeight int
+}
+
+// AbsoluteRowsReliable reports whether CUP row addressing matches the visible
+// window. False means an inline repaint may target a different physical row
+// than the layout intended (the classic conhost "content jumps / duplicates
+// after resize" failure). Callers should surface a diagnostic and prefer
+// relative or alternate-screen output.
+func (g ScreenGeometry) AbsoluteRowsReliable() bool {
+	if !g.Supported {
+		return true
+	}
+	// CUP with a row-only clamp is safe when the window starts at buffer row 0
+	// and the buffer is no wider than the window. A wider buffer means wrapped
+	// rows land beyond the visible columns; a scrolled window means row N is
+	// not the Nth visible row.
+	return g.WindowOriginRow == 0 &&
+		g.BufferWidth > 0 && g.WindowWidth > 0 && g.BufferWidth == g.WindowWidth
 }
 
 // TerminalDriver owns low-level terminal capability detection for aicli UI.
@@ -170,6 +214,7 @@ func (d *TerminalDriver) ProbeSize() (width, height int, err error) {
 	}
 	d.caps.Width = width
 	d.caps.Height = height
+	d.caps.Screen = platformScreenGeometry(int(d.stdout.Fd()))
 	publishProcessTerminalSize(width, height)
 	return width, height, nil
 }

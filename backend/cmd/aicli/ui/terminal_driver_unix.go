@@ -4,6 +4,13 @@ package ui
 
 import "os"
 
+// platformScreenGeometry returns no screen-buffer geometry on Unix: CUP is
+// window-relative there, so the inline projection's absolute rows are always
+// valid.
+func platformScreenGeometry(fd int) ScreenGeometry {
+	return ScreenGeometry{}
+}
+
 func platformTerminalSupportsANSI(stdout *os.File) bool {
 	if stdout == nil {
 		return false

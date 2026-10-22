@@ -52,6 +52,35 @@ func platformTerminalSupportsANSI(stdout *os.File) bool {
 	return windows.GetConsoleMode(windows.Handle(stdout.Fd()), &mode) == nil
 }
 
+// platformScreenGeometry reports the classic-console screen-buffer geometry.
+//
+// x/term's GetSize returns the visible window rectangle, but on conhost every
+// absolute CUP (ESC[row;colH) addresses the screen **buffer**. When the user
+// scrolls (srWindow.Top != 0) or the buffer is wider than the window, the
+// inline viewport's row arithmetic no longer matches the visible rows — the
+// failure mode behind "content jumps / duplicates after a resize" on classic
+// consoles. Windows Terminal goes through ConPTY, where the buffer tracks the
+// window, so the query happily reports a reliable geometry there.
+//
+// A non-console handle (pipe/file) returns the zero value (Supported=false).
+func platformScreenGeometry(fd int) ScreenGeometry {
+	if fd < 0 {
+		return ScreenGeometry{}
+	}
+	var info windows.ConsoleScreenBufferInfo
+	if err := windows.GetConsoleScreenBufferInfo(windows.Handle(uintptr(fd)), &info); err != nil {
+		return ScreenGeometry{}
+	}
+	return ScreenGeometry{
+		Supported:       true,
+		WindowOriginRow: int(info.Window.Top),
+		WindowWidth:     int(info.Window.Right-info.Window.Left) + 1,
+		WindowHeight:    int(info.Window.Bottom-info.Window.Top) + 1,
+		BufferWidth:     int(info.Size.X),
+		BufferHeight:    int(info.Size.Y),
+	}
+}
+
 func platformEnableVirtualTerminalProcessing(stdout *os.File) bool {
 	if stdout == nil {
 		return false
