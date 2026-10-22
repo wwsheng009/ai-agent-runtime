@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -283,26 +282,26 @@ func (b remoteToolBase) cleanDisplayPath(abs string) string {
 	return b.workspace.Relative(abs)
 }
 
-// ensureNotDevice rejects device/FIFO style paths before any open. Reading a FIFO
-// blocks until a writer appears; the local path guard exists for the same reason.
-func ensureNotDevice(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
+// intParam reads an integer argument that may arrive as int/float64/json.Number.
+func intParam(params map[string]interface{}, key string, fallback int) int {
+	raw, ok := params[key]
+	if !ok || raw == nil {
+		return fallback
 	}
-	mode := info.Mode()
-	switch {
-	case mode&os.ModeNamedPipe != 0:
-		return newToolError(CodeInvalidArgument, "use a regular file", "path is a named pipe: %s", filepath.Base(path))
-	case mode&os.ModeSocket != 0:
-		return newToolError(CodeInvalidArgument, "use a regular file", "path is a socket: %s", filepath.Base(path))
-	case mode&os.ModeDevice != 0, mode&os.ModeCharDevice != 0:
-		return newToolError(CodeInvalidArgument, "use a regular file", "path is a device: %s", filepath.Base(path))
+	switch value := raw.(type) {
+	case int:
+		return value
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case float32:
+		return int(value)
+	default:
+		return fallback
 	}
-	return nil
 }
 
 // contextErr classifies a cancelled context so callers return a stable code.

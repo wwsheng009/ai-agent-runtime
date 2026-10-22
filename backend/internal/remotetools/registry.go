@@ -13,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -133,13 +134,53 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ls handler: %w", err)
 	}
+	viewBase := remoteToolBase{cfg: cfg, workspace: workspace}
+	viewSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"file_path": map[string]interface{}{
+				"type":        "string",
+				"description": "File to read, relative to the remote workspace (or an absolute path inside it).",
+			},
+			"offset": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "0-based line offset to start from. Default 0.",
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     1,
+				"maximum":     viewcore.MaxLimit,
+				"description": "Maximum lines to return. Default 400, capped at 2000.",
+			},
+		},
+		"required":             []string{"file_path"},
+		"additionalProperties": false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("view schema: %w", err)
+	}
+	viewTool, err := toolkit.NewRuntimeTool(viewcore.NewHandler(toolcore.Definition{
+		Name:                ToolView,
+		Description:         viewBase.describe("Read a window of a remote text file with stable line numbers and truncation metadata."),
+		Version:             "1.0.0",
+		InputSchema:         viewSchema,
+		Capabilities:        []toolcore.Capability{toolcore.CapReadFS},
+		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolView),
+		DirectCall:          true,
+	}), func(ctx context.Context) (toolcore.Runtime, error) {
+		return newRemoteRuntime(ctx, cfg, workspace, sandbox, artifacts), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("view handler: %w", err)
+	}
 
 	type registration struct {
 		name string
 		tool toolkit.Tool
 	}
 	candidates := []registration{
-		{name: ToolView, tool: newRemoteViewTool(cfg, workspace)},
+		{name: ToolView, tool: viewTool},
 		{name: ToolLs, tool: lsTool},
 		{name: ToolGlob, tool: newRemoteGlobTool(cfg, workspace)},
 		{name: ToolGrep, tool: newRemoteGrepTool(cfg, workspace)},

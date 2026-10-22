@@ -21,6 +21,7 @@ func newRemoteRuntime(ctx context.Context, cfg *Config, workspace *Workspace, sa
 		perms:     remotePermissions{sandbox: sandbox},
 		commands:  remoteCommands{sandbox: sandbox},
 		env:       remoteEnv{sandbox: sandbox},
+		capture:   remoteCapture{cfg: cfg},
 		output:    remoteOutput{cfg: cfg, ctx: ctx, workspace: workspace},
 		artifacts: remoteArtifacts{store: artifacts, target: targetName(cfg)},
 		sessions:  &remoteSessions{ctx: ctx, workspace: workspace},
@@ -34,6 +35,7 @@ type remoteRuntime struct {
 	perms     toolcore.PermissionChecker
 	commands  toolcore.CommandPolicy
 	env       toolcore.EnvProvider
+	capture   remoteCapture
 	output    toolcore.OutputShaper
 	artifacts toolcore.ArtifactSink
 	sessions  toolcore.SessionState
@@ -50,6 +52,28 @@ func (r *remoteRuntime) Artifacts() toolcore.ArtifactSink        { return r.arti
 func (r *remoteRuntime) Sessions() toolcore.SessionState         { return r.sessions }
 func (r *remoteRuntime) Clock() toolcore.Clock                   { return r.clock }
 func (r *remoteRuntime) IDs() toolcore.IDGenerator               { return r.ids }
+
+// CaptureLimit implements toolcore.CaptureBudgetProvider: remote read tools
+// capture up to the configured payload ceiling before folding to the
+// model-visible window.
+func (r *remoteRuntime) CaptureLimit(string) int { return r.capture.limit() }
+
+type remoteCapture struct {
+	cfg *Config
+}
+
+func (c remoteCapture) limit() int {
+	if c.cfg == nil {
+		return DefaultMaxBytesPerCall
+	}
+	if c.cfg.Limits.CaptureLimit > 0 {
+		return c.cfg.Limits.CaptureLimit
+	}
+	if c.cfg.Limits.MaxBytesPerCall > 0 {
+		return c.cfg.Limits.MaxBytesPerCall
+	}
+	return DefaultMaxBytesPerCall
+}
 
 type remotePaths struct {
 	ctx       context.Context

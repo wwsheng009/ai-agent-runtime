@@ -165,6 +165,13 @@ type OutputShaper interface {
 	Shape(tool string, result *Result) (*Result, error)
 }
 
+// CaptureBudgetProvider is an optional Runtime extension for surfaces where the
+// pre-fold capture ceiling differs from the model-visible output budget. A
+// Runtime that does not implement it uses the core package default.
+type CaptureBudgetProvider interface {
+	CaptureLimit(tool string) int
+}
+
 type ArtifactScope string
 
 const (
