@@ -663,3 +663,39 @@ P2 已处理：现状/目标混写、`InputSchema` adapter、`Registry.Filter`�
 
 结论：当前基线可构建、policy/tool registry/output/MCP/remote/toolkit 测试通过；
 P0/P1 修订未引入代码变更，PR1–3 的新测试仍需按 §11.2 执行。
+### 11.5 Phase 6b 收敛证据（2026-10-22）
+
+Phase 6b 完成 remote 侧去重：remote 工具不再保留 view/ls/glob/grep/
+write/append_write/edit/apply_patch/artifact_read 的第二套实现，统一由
+`toolcore` Handler + `RemoteRuntime` 提供。
+
+- 提交：`4145118e`（ls）、`4dc71973`（view）、`5f92d7cb`（glob/grep）、
+  `ed2cb46f`（mutation）、`2ce06d6e`（artifact_read）、
+  `c172a767`（remote core-surface 契约测试）；
+- 删除的重复实现：`remotetools/view.go`、`search.go`、`write.go`、
+  `apply_patch.go`、`mutation_error.go`；
+- 新增共享层：`toolkit.RuntimeTool`（Handler + 每次调用的 Runtime 工厂）、
+  `CaptureBudgetProvider` / `Searcher` / `ArtifactOriginProvider` 可选扩展、
+  `viewcore`/`lscore`/`searchcore`/`mutatecore` 的 Handler、
+  `toolcore.NewArtifactReadHandler`；
+- `RemoteRuntime` 仅保留 surface 策略：workspace jail、permissions、
+  command policy、env filter、capture/model 拆分、输出整形、artifact scope、
+  MCP roots 收窄；
+- `job_*` 收敛为显式 `legacyRemoteJobs`（`--legacy-jobs`），默认关闭；
+- 漂移闸门：`TestRemoteCoreSurfaceComesFromSharedHandlers` 钉死 remote 非
+  shell 工具必须来自 `RuntimeTool` 包装的 core Handler。
+
+验证（均 PASS）：
+
+```powershell
+go test -p 1 -count=1 ./internal/toolcore/... ./internal/toolkit ./internal/remotetools
+go test -p 1 -count=1 ./internal/tools
+go test -p 1 -count=1 ./internal/toolctl
+go test -p 1 -count=1 ./internal/toolkit/...
+go vet ./internal/toolcore/... ./internal/remotetools ./internal/toolkit
+```
+
+本地 `internal/toolkit/tools` 仍是 LocalRuntime adapter：本地专属的
+stale-write/document guard、图片/notebook、read dedup/LSP、PTY/detach、
+todos/code.* 保留在本地实现；公共语义已调用 `viewcore`/`searchcore`/
+`lscore`/`mutatecore`/`shellexec`，本地与 remote 不再维护两套同名算法。
