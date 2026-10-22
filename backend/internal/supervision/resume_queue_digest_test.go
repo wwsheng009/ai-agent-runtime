@@ -43,7 +43,7 @@ func TestBuildDigest_ResumeQueuePosition(t *testing.T) {
 	require.NotNil(t, digest.ResumeQueue)
 	require.Equal(t, 2, digest.ResumeQueue.Pending)
 	require.Equal(t, 1, digest.ResumeQueue.HeadPosition)
-	require.Contains(t, digest.Text, "resume_queue: 排队中 2 条，位次 1/2")
+	require.Contains(t, digest.Text, "另有 2 条唤醒在排队（位次 1），无需操作")
 
 	other, err := BuildDigest(ctx, store, DigestRequest{
 		RootScopeID:           "root-digest-queue",
@@ -68,7 +68,7 @@ func TestBuildDigest_ResumeQueuePosition(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Nil(t, drained.ResumeQueue)
-	require.NotContains(t, drained.Text, "resume_queue")
+	require.NotContains(t, drained.Text, "排队")
 }
 
 // TestFormatDigestText_ResumeQueueWaited pins the age half of the queue line.
@@ -135,7 +135,7 @@ func TestWakeConsumer_DeferredResumeIsVisibleInDigest(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, digest.ResumeQueue, "the queued resume must be visible to the parent")
 	require.Equal(t, 1, digest.ResumeQueue.Pending)
-	require.Contains(t, digest.Text, "位次 1/1")
+	require.Contains(t, digest.Text, "另有 1 条唤醒在排队（位次 1）")
 
 	pending, err := store.ListWakePending(ctx, WakeFilter{RootScopeID: "root-deferred-digest", UnclaimedOnly: true})
 	require.NoError(t, err)

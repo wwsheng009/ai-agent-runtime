@@ -268,8 +268,8 @@ func TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal(t *testi
 	// G2 / AC-P3-1c：投递的 prompt 必须携带同一 turn 的账本判据与 rollup，
 	// 而不是只有"去看摘要"的 legacy 提示。
 	require.Contains(t, prompts[0], "[supervision] resume")
-	require.Contains(t, prompts[0], "turn_id="+parkedTurnID)
-	require.Contains(t, prompts[0], "所有 obligation 均已终态：请直接产出终局报告")
+	// The turn anchor is carried structurally; the prompt speaks business.
+	require.Contains(t, prompts[0], "请直接产出终局报告")
 	require.Contains(t, prompts[0], batchID)
 	require.Len(t, resumed, 1, "投递成功的 resume 必须播报一次 turn.resumed")
 	require.Equal(t, parentSession, resumed[0].SessionID)

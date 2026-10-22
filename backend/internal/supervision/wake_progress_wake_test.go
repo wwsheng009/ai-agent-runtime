@@ -81,7 +81,7 @@ func TestWakeConsumer_ProgressOnlyWakeDeliversRollup(t *testing.T) {
 		"a progress-only digest carries the rollup and must start the report turn")
 	require.NotNil(t, probe.lastDigest)
 	require.NotEmpty(t, probe.lastDigest.Progress, "the wake digest must carry the P0-B rollup")
-	require.Contains(t, probe.lastDigest.Text, "progress:", "the injected text must show the rollup")
+	require.Contains(t, probe.lastDigest.Text, "批次进度", "the injected text must show the rollup")
 
 	pending, err := store.ListWakePending(ctx, WakeFilter{
 		RootScopeID:           "root-session-1",

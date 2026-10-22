@@ -70,16 +70,16 @@ func TestBuildDigest_ProgressRollupVisibleInTurn(t *testing.T) {
 	require.Equal(t, 1, digest.CriticalUnresolved)
 	require.Contains(t, digest.Text, "child-1")
 
-	// The rollup itself ("\nprogress:" — not the unrelated
-	// "auto_actions_in_progress:" counter line).
-	require.Contains(t, digest.Text, "\nprogress:")
-	require.Contains(t, digest.Text, "batch-b-123: 2/3 completed, 1 running")
-	require.Contains(t, digest.Text, "worker-3: running; session=session-worker-3; last progress 12s ago; bash: go test ./internal/supervision/")
-	require.Contains(t, digest.Text, "batch-b-456: 3/3 completed (terminal")
+	// The rollup itself, in business wording; the machine spelling lives in the
+	// diagnostics rendering.
+	require.Contains(t, digest.Text, "批次进度：")
+	require.Contains(t, digest.Text, "batch-b-123：共 3 项，完成 2，进行中 1")
+	require.Contains(t, digest.Text, "worker-3（session session-worker-3）：bash: go test ./internal/supervision/")
+	require.Contains(t, digest.Text, "batch-b-456：共 3 项，完成 3")
 	// 收敛提示必须是可执行路径：终态 batch 的 done 行是 resolution=closed，
 	// evaluator 对这类行只允许 inspect，subagent_control 必然被拒
 	// （plan §4.1.1/§7.1）——提示文本只能指向 broker 工具 subagent_close。
-	require.Contains(t, digest.Text, "close the finished children with subagent_close")
+	require.Contains(t, digest.Text, "用 subagent_close 释放子会话")
 	require.NotContains(t, digest.Text, "subagent_control")
 	require.Len(t, digest.Progress, 2)
 	require.Equal(t, 2, digest.Progress[0].Completed)
@@ -144,7 +144,7 @@ func TestBuildDigest_ProgressSourceFailureIsBestEffort(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, digest.CriticalUnresolved)
 	require.Contains(t, digest.Text, "child-1")
-	require.NotContains(t, digest.Text, "\nprogress:")
+	require.NotContains(t, digest.Text, "批次进度")
 	require.Empty(t, digest.Progress)
 }
 

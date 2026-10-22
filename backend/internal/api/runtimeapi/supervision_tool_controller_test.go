@@ -270,7 +270,8 @@ func TestSupervisionBudgets_ComeFromHostConfig(t *testing.T) {
 	prompt, err := handler.InjectSupervisionPreflight(ctx, "parent-session", "USER PROMPT", nil)
 	require.NoError(t, err)
 	require.Contains(t, prompt, "USER PROMPT")
-	require.Equal(t, 1, strings.Count(prompt, "- agent_run "), "DigestMaxItems caps the injected rows")
+	require.Equal(t, 1, strings.Count(prompt, "子任务运行 timed-out-"),
+		"DigestMaxItems caps the injected rows")
 }
 
 // F1 回归（HTTP 宿主）：team lead 的 ack/control 必须同时接受会话域与团队域

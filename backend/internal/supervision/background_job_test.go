@@ -154,6 +154,30 @@ func TestFormatBackgroundJobTerminalReason(t *testing.T) {
 	require.LessOrEqual(t, strings.Count(reason, "command: "), 1)
 }
 
+// TestFormatBackgroundJobTerminalReason_RedactsCredentials pins the observed
+// leak (2026-10-22): a job started through a remote wrapper carried
+// `AICLI_REMOTE_TOKEN=...` in its command, and the preflight digest printed the
+// token verbatim into the parent prompt.
+func TestFormatBackgroundJobTerminalReason_RedactsCredentials(t *testing.T) {
+	reason := FormatBackgroundJobTerminalReason(BackgroundJobTerminalInput{
+		JobID:   "job-secret",
+		Status:  "failed",
+		Command: "wsl -d Ubuntu -- bash -lc 'exec env AICLI_REMOTE_TOKEN=0123456789abcdef API_KEY=sk-live-42 /tmp/aicli run'",
+	})
+	require.NotContains(t, reason, "0123456789abcdef", "the env token value must never reach the model")
+	require.NotContains(t, reason, "sk-live-42", "flag/env secrets are redacted by key fragment")
+	require.Contains(t, reason, "AICLI_REMOTE_TOKEN=***")
+	require.Contains(t, reason, "API_KEY=***")
+	require.Contains(t, reason, "wsl -d Ubuntu", "non-secret command context stays diagnosable")
+
+	// Values are only redacted when the key looks like a secret: an ordinary
+	// assignment must survive so the command stays recognizable.
+	plain := FormatBackgroundJobTerminalReason(BackgroundJobTerminalInput{
+		JobID: "job-plain", Status: "completed", Command: "env MODE=test go test ./...",
+	})
+	require.Contains(t, plain, "MODE=test")
+}
+
 // TestProjectBackgroundJobTerminal_ZeroEpochStaysIdempotent guards the host
 // that forgets to pass an epoch: the projection must synthesize one instead of
 // leaving SubjectVersion at 0 (which the store would reject or coalesce).

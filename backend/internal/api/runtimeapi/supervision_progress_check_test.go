@@ -68,9 +68,8 @@ func TestAPIInjectSupervisionPreflight_ProgressRollup(t *testing.T) {
 	ctx := context.Background()
 	prompt, err := handler.InjectSupervisionPreflight(ctx, "sess_progress", "USER PROMPT", nil)
 	require.NoError(t, err)
-	require.Contains(t, prompt, "progress:", "an active batch must reach the parent turn")
-	require.Contains(t, prompt, "batch_api_progress: 0/3 completed")
-	require.Contains(t, prompt, "1 running")
+	require.Contains(t, prompt, "批次进度：", "an active batch must reach the parent turn")
+	require.Contains(t, prompt, "batch_api_progress：共 3 项，完成 0，进行中 1")
 	require.Contains(t, prompt, "child_session_1")
 	require.Contains(t, prompt, "USER PROMPT")
 }

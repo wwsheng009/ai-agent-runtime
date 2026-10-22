@@ -120,8 +120,10 @@ func TestLocalSupervisionSourcesBuildResumeContextWithVerdict(t *testing.T) {
 
 	prompt := supervision.AutoWakePromptFor(resume)
 	require.Contains(t, prompt, "[supervision] resume", "投递的 prompt 必须是 resume 文本，不是 legacy 提示")
-	require.Contains(t, prompt, "turn_id=turn_parked")
-	require.Contains(t, prompt, "所有 obligation 均已终态：请直接产出终局报告")
+	// The turn anchor is carried on the resume payload; the prompt itself speaks
+	// business so the model never parses control-plane fields.
+	require.Equal(t, "turn_parked", resume.TurnID)
+	require.Contains(t, prompt, "请直接产出终局报告")
 	require.Contains(t, prompt, "batch_resume_terminal")
 }
 
@@ -166,7 +168,7 @@ func TestLocalSupervisionSourcesParkedChildKeepsJoinOpen(t *testing.T) {
 	prompt := supervision.AutoWakePromptFor(resume)
 	require.Contains(t, prompt, "等待期兜底反馈（无新进度）触发**同一 turn 续跑**",
 		"wait_feedback 不是子任务生命周期事件，触发词必须如实")
-	require.Contains(t, prompt, "仍有未终态 obligation：不得收尾（I1）")
+	require.Contains(t, prompt, "暂时不能收尾")
 	require.NotContains(t, prompt, "请直接产出终局报告")
 	require.Contains(t, prompt, "agent_session:"+childID)
 }
