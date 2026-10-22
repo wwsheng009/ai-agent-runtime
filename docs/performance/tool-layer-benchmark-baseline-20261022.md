@@ -2,6 +2,8 @@
 
 - 设计文档：`docs/plan/tool-layer-abstraction-design-20261022.md` §15.2
 - 代码版本：`910c4f05`
+- 运行脚本：`backend/scripts/tool-layer-bench.ps1`
+  （10k + 256-tool 默认；`AICLI_TOOLCORE_BENCH_LARGE=1` 追加 100k）
 - 运行环境：
   - Windows / amd64
   - Go `go1.27.1 windows/amd64`
@@ -26,29 +28,33 @@ go test -run '^$' `
 
 结果：
 
-| benchmark | run | ns/op | MB/s | B/op | allocs/op |
-|-----------|-----|-------|------|------|-----------|
-| `BenchmarkGlob10kNoMatch` | 1 | 55,883,558 | — | 4,553,498 | 51,595 |
-| `BenchmarkGlob10kNoMatch` | 2 | 55,600,903 | — | 4,579,335 | 51,596 |
-| `BenchmarkGlob10kNoMatch` | 3 | 50,814,825 | — | 4,545,697 | 51,595 |
-| `BenchmarkGrep10kNoMatch` | 1 | 3,345,692,100 | 3.06 | 11,163,944 | 91,724 |
-| `BenchmarkGrep10kNoMatch` | 2 | 3,513,501,500 | 2.91 | 11,062,160 | 91,727 |
-| `BenchmarkGrep10kNoMatch` | 3 | 3,461,170,000 | 2.96 | 11,192,496 | 91,723 |
+| benchmark | run | ns/op | MB/s | peak_heap_B | B/op | allocs/op |
+|-----------|-----|-------|------|-------------|------|-----------|
+| `BenchmarkGlob10kNoMatch` | 1 | 55,883,558 | — | — | 4,553,498 | 51,595 |
+| `BenchmarkGlob10kNoMatch` | 2 | 55,600,903 | — | — | 4,579,335 | 51,596 |
+| `BenchmarkGlob10kNoMatch` | 3 | 50,814,825 | — | — | 4,545,697 | 51,595 |
+| `BenchmarkGrep10kNoMatch` | 1 | 3,290,632,200 | 3.11 | 1,280,416 | 11,105,856 | 91,748 |
+| `BenchmarkGrep10kNoMatch` | 2 | 3,362,231,300 | 3.05 | 1,290,704 | 11,069,600 | 91,720 |
+| `BenchmarkGrep10kNoMatch` | 3 | 2,984,682,800 | 3.43 | 1,292,080 | 11,168,040 | 91,717 |
 
 中位数（3 次）：
 
 | benchmark | median ns/op | median B/op |
 |-----------|--------------|-------------|
 | glob 10k | ~55.6 ms | ~4.55 MB |
-| grep 10k | ~3.46 s | ~11.1 MB |
+| grep 10k | ~3.36 s | ~11.1 MB（累计）/ ~1.29 MB（峰值 heap） |
 
 说明：
 
 - glob 的分配量稳定在 ~4.55 MB、~51.6k allocs；
-- grep 的分配量稳定在 ~11.1 MB、~91.7k allocs，未随 10k→100k 语料线性
-  增长需要在 100k 运行中对照；
+- grep 的累计分配稳定在 ~11.1 MB、~91.7k allocs，但**峰值 heap 只有
+  ~1.29 MB**（20ms 采样 `/memory/classes/heap/objects:bytes`），说明遍历
+  是流式有界的，不能用 B/op 判断峰值；
 - 当前机器/受限并发下 grep 吞吐约 3 MB/s，属于**保守基线**，需在高性能
   CI 机器上复测后再定为回归门槛。
+- 同一脚本第二次运行观察到：glob ~42.6–47.9 ms、grep ~2.28–3.16 s、
+  grep 峰值 heap ~1.29 MB；宿主负载会造成约 2× 波动，CI 门槛必须在
+  静默机上取 3 次中位数后固化。
 
 ## 2. large-repo（100k 文件）
 
@@ -61,7 +67,31 @@ go test -run '^$' `
   -benchmem -benchtime=1x -count=1 ./internal/toolcore/searchcore
 ```
 
-状态：待本轮运行结果回填。
+结果（`-benchtime=1x -count=1`，tree 创建在计时之外）：
+
+| benchmark | ns/op | MB/s | peak_heap_B | B/op | allocs/op |
+|-----------|-------|------|-------------|------|-----------|
+| `BenchmarkGlob100kNoMatch` | 418,426,300 | — | — | 43,903,392 | 502,141 |
+| `BenchmarkGrep100kNoMatch` | 39,079,639,800 | 2.62 | 1,471,776 | 113,838,480 | 903,152 |
+
+10k → 100k 对照：
+
+| 指标 | 10k | 100k | 比例 |
+|------|-----|------|------|
+| glob 耗时（中位数） | ~55.6 ms | ~418 ms | ~7.5× |
+| glob B/op | ~4.55 MB | ~43.9 MB | ~9.7× |
+| grep 耗时（中位数） | ~3.36 s | ~39.1 s | ~11.6× |
+| grep 峰值 heap | ~1.29 MB | ~1.47 MB | ~1.14× |
+| grep B/op（累计分配） | ~11.1 MB | ~113.8 MB | ~10.3× |
+
+重要说明：
+
+- `B/op` 是**单次操作的累计分配量**，不是进程峰值内存；10k→100k 的 B/op
+  近似线性增长，但**峰值 heap 只从 ~1.29 MB 升到 ~1.47 MB（~1.14×）**，
+  说明遍历是流式有界的；
+- §15.2.2 的“grep 峰值内存不随文件总量线性增长”已有关闭证据（20ms 采样
+  `/memory/classes/heap/objects:bytes`）；
+- grep 100k 单次约 39s，若要进 CI 回归门槛，建议改用 10k 语料或抽样目录。
 
 ## 3. 工具列表（256 tools）
 
@@ -98,7 +128,7 @@ go test -run '^$' `
 
 | 指标 | 设计目标 | 当前证据 |
 |------|----------|----------|
-| grep 峰值内存不随文件总量线性增长 | 流式/有界 buffer | 待 100k 对照 |
+| grep 峰值内存不随文件总量线性增长 | 流式/有界 buffer | ✅ 已覆盖：峰值 heap 10k→100k 为 ~1.29→1.47 MB（文件 ×10，峰值 ~1.14×）；B/op 仍是累计分配指标 |
 | read core p95 开销 ≤ 5% | 相对直接实现 | 未覆盖（缺 surface 对比基准） |
 | MCP 32 KiB 序列化 p95 ≤ 10% | 相对 in-process | 未覆盖 |
 | 256 tools list p95 ≤ 50 ms | 含 schema/filter | ✅ 已覆盖：Definitions ~0.16 ms、List ~0.06 ms（中位数） |

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/metrics"
 	"strings"
 	"testing"
+	"time"
 )
 
 const benchFileBytes = 1024
@@ -20,6 +22,48 @@ func requireLargeBench(b *testing.B) {
 	if os.Getenv(largeBenchEnv) == "" {
 		b.Skipf("set %s=1 to run 100k-file benchmarks", largeBenchEnv)
 	}
+}
+
+// heapPeakSampler samples the live heap while a search runs. B/op is a
+// cumulative allocation counter, not a peak; §15.2.2 asks specifically whether
+// peak memory stays bounded as the file count grows, so the benchmark reports
+// this separately.
+type heapPeakSampler struct {
+	samples []metrics.Sample
+	stop    chan struct{}
+	done    chan struct{}
+	peak    uint64
+}
+
+func startHeapPeakSampler() *heapPeakSampler {
+	sampler := &heapPeakSampler{
+		samples: []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}},
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	go func() {
+		defer close(sampler.done)
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			metrics.Read(sampler.samples)
+			if value := sampler.samples[0].Value.Uint64(); value > sampler.peak {
+				sampler.peak = value
+			}
+			select {
+			case <-sampler.stop:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return sampler
+}
+
+func (s *heapPeakSampler) stopAndPeak() uint64 {
+	close(s.stop)
+	<-s.done
+	return s.peak
 }
 
 func benchmarkTree(b *testing.B, files int) string {
@@ -75,6 +119,7 @@ func BenchmarkGrep10kNoMatch(b *testing.B) {
 	root := benchmarkTree(b, 10_000)
 	b.ReportAllocs()
 	b.SetBytes(10_000 * benchFileBytes)
+	sampler := startHeapPeakSampler()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		result, err := Grep(context.Background(), GrepOptions{
@@ -91,6 +136,8 @@ func BenchmarkGrep10kNoMatch(b *testing.B) {
 			b.Fatalf("unexpected matches: %d", len(result.Matches))
 		}
 	}
+	b.StopTimer()
+	b.ReportMetric(float64(sampler.stopAndPeak()), "peak_heap_B")
 }
 
 func BenchmarkGlob100kNoMatch(b *testing.B) {
@@ -114,6 +161,7 @@ func BenchmarkGrep100kNoMatch(b *testing.B) {
 	root := benchmarkTree(b, 100_000)
 	b.ReportAllocs()
 	b.SetBytes(100_000 * benchFileBytes)
+	sampler := startHeapPeakSampler()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		result, err := Grep(context.Background(), GrepOptions{
@@ -130,4 +178,6 @@ func BenchmarkGrep100kNoMatch(b *testing.B) {
 			b.Fatalf("unexpected matches: %d", len(result.Matches))
 		}
 	}
+	b.StopTimer()
+	b.ReportMetric(float64(sampler.stopAndPeak()), "peak_heap_B")
 }
