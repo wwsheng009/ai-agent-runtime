@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
@@ -148,7 +150,7 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 	info, statErr := os.Stat(opts.Path)
 	result := searchcore.GrepResult{SingleFile: statErr == nil && info.Mode().IsRegular()}
 
-	args := append(r.baseArgs(), "--json")
+	args := append(r.baseArgs(), "--text", "--json")
 	if globMatcher != nil {
 		args = append(args, "--glob", opts.Glob)
 	}
@@ -197,7 +199,21 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 			if globMatcher != nil && !globMatcher.Match(filepath.Base(matchPath)) {
 				continue
 			}
-			text := strings.TrimSuffix(strings.TrimSuffix(event.Data.Lines.Text, "\n"), "\r")
+			var text string
+			switch {
+			case event.Data.Lines.Bytes != nil:
+				raw, decodeErr := base64.StdEncoding.DecodeString(*event.Data.Lines.Bytes)
+				if decodeErr != nil {
+					continue
+				}
+				text = string(raw)
+			case event.Data.Lines.Text != nil:
+				text = *event.Data.Lines.Text
+			}
+			text = strings.TrimSuffix(strings.TrimSuffix(text, "\n"), "\r")
+			if !utf8.ValidString(text) {
+				continue
+			}
 			if len(text) > searchcore.MaxGrepLineBytes {
 				text = text[:searchcore.MaxGrepLineBytes] + "…"
 			}
@@ -326,7 +342,8 @@ type rgJSONEvent struct {
 			Text string `json:"text"`
 		} `json:"path"`
 		Lines struct {
-			Text string `json:"text"`
+			Text  *string `json:"text"`
+			Bytes *string `json:"bytes"`
 		} `json:"lines"`
 		LineNumber int `json:"line_number"`
 		Stats      struct {

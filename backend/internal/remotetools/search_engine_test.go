@@ -2,10 +2,15 @@ package remotetools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 )
 
 func newSearchFixture(t *testing.T) (*Config, *Workspace) {
@@ -278,6 +283,105 @@ func TestRemoteGrepInvalidRegexStillFails(t *testing.T) {
 				t.Fatalf("error_code = %v, want %s", got, CodeInvalidArgument)
 			}
 		})
+	}
+}
+
+func TestRemoteRipgrepMatchesWalkerConformance(t *testing.T) {
+	cfg, _ := newSearchFixture(t)
+	root := cfg.Workspace
+	files := map[string][]byte{
+		"crlf.txt":      []byte("needle\r\n"),
+		"unicode.txt":   []byte("héllo 世界 needle\n"),
+		"nul.bin":       []byte("needle\x00binary\n"),
+		"invalid.bin":   []byte("needle\xff\n"),
+		"long.txt":      []byte("needle" + strings.Repeat("x", 5000) + "\n"),
+		".gitignore":    []byte("ignored.txt\n"),
+		"ignored.txt":   []byte("needle ignored but not filtered\n"),
+		"sub/deep.txt":  []byte("needle deep\n"),
+		"sub/empty.txt": []byte("nothing here\n"),
+	}
+	for rel, content := range files {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("needle outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(root, "link-file.txt")); err != nil {
+		t.Logf("symlink fixture unavailable: %v", err)
+	} else if err := os.Symlink(outside, filepath.Join(root, "link-dir")); err != nil {
+		t.Logf("directory symlink fixture unavailable: %v", err)
+	}
+
+	opts := searchcore.GrepOptions{
+		Pattern:      "needle",
+		Path:         root,
+		Limit:        100,
+		MaxFileBytes: 1 << 20,
+	}
+	walker, err := searchcore.Grep(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rg := resolveRipgrepRunner()
+	if !rg.available() {
+		t.Skip("ripgrep is not available")
+	}
+	ripgrepResult, used, err := rg.grep(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !used {
+		t.Fatal("ripgrep runner declined a standard search")
+	}
+
+	if got, want := normalizedGrepMatches(ripgrepResult), normalizedGrepMatches(walker); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ripgrep/walker mismatch\nripgrep: %#v\nwalker:  %#v", got, want)
+	}
+}
+
+func normalizedGrepMatches(result searchcore.GrepResult) []string {
+	matches := make([]string, 0, len(result.Matches))
+	for _, match := range result.Matches {
+		matches = append(matches, fmt.Sprintf("%s:%d:%s", filepath.ToSlash(filepath.Base(match.File)), match.Line, match.Text))
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+func TestRemoteGrepExplicitSymlinkFollows(t *testing.T) {
+	cfg, _ := newSearchFixture(t)
+	link := filepath.Join(cfg.Workspace, "visible-link.txt")
+	if err := os.Symlink(filepath.Join(cfg.Workspace, "visible.txt"), link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	opts := searchcore.GrepOptions{Pattern: "needle", Path: link, Limit: 10, MaxFileBytes: 1 << 20}
+	walker, err := searchcore.Grep(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rg := resolveRipgrepRunner()
+	if !rg.available() {
+		t.Skip("ripgrep is not available")
+	}
+	ripgrepResult, used, err := rg.grep(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !used {
+		t.Fatal("ripgrep runner declined an explicit symlink")
+	}
+	if got, want := normalizedGrepMatches(ripgrepResult), normalizedGrepMatches(walker); !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit symlink mismatch\nripgrep: %#v\nwalker:  %#v", got, want)
+	}
+	if len(walker.Matches) != 1 {
+		t.Fatalf("explicit symlink matches = %d, want 1", len(walker.Matches))
 	}
 }
 

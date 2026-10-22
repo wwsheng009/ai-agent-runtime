@@ -57,6 +57,9 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// The explicit root may be a symlink that the surface adapter already
+		// resolved and verified. Links discovered during traversal are rejected
+		// by the WalkDir callback below and never reach this visit.
 		info, statErr := os.Stat(path)
 		if statErr != nil || !info.Mode().IsRegular() {
 			return nil
@@ -101,6 +104,11 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	} else {
 		walkErr := filepath.WalkDir(opts.Path, func(path string, entry os.DirEntry, err error) error {
 			if err != nil {
+				return nil
+			}
+			// File symlinks are not followed: a link inside the workspace must
+			// not read a target outside the admitted roots.
+			if entry.Type()&os.ModeSymlink != 0 {
 				return nil
 			}
 			if entry.IsDir() {

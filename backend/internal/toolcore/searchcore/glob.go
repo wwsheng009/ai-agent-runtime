@@ -30,6 +30,12 @@ func Glob(ctx context.Context, base, pattern string, limit int) (GlobResult, err
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Traversal never follows links. A discovered link can point outside
+		// the admitted root, so listing it would leak paths the path jail has
+		// not resolved.
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 		if entry.IsDir() {
 			if ShouldSkipDir(entry.Name()) && path != base {
 				return filepath.SkipDir
