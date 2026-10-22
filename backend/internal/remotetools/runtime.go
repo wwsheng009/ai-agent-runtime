@@ -25,6 +25,7 @@ func newRemoteRuntime(ctx context.Context, cfg *Config, workspace *Workspace, sa
 		capture:   remoteCapture{cfg: cfg},
 		output:    remoteOutput{cfg: cfg, ctx: ctx, workspace: workspace},
 		search:    resolveRipgrepRunner(),
+		origin:    toolcore.ResultOrigin{Scope: string(toolcore.ArtifactScopeRemote), Target: targetName(cfg)},
 		artifacts: remoteArtifacts{store: artifacts, target: targetName(cfg)},
 		sessions:  &remoteSessions{ctx: ctx, workspace: workspace},
 		clock:     remoteClock{},
@@ -40,6 +41,7 @@ type remoteRuntime struct {
 	capture   remoteCapture
 	output    toolcore.OutputShaper
 	search    ripgrepRunner
+	origin    toolcore.ResultOrigin
 	artifacts toolcore.ArtifactSink
 	sessions  toolcore.SessionState
 	clock     toolcore.Clock
@@ -60,6 +62,10 @@ func (r *remoteRuntime) IDs() toolcore.IDGenerator               { return r.ids 
 // capture up to the configured payload ceiling before folding to the
 // model-visible window.
 func (r *remoteRuntime) CaptureLimit(string) int { return r.capture.limit() }
+
+// ArtifactOrigin implements toolcore.ArtifactOriginProvider: bare art_… ids on
+// this surface belong to the configured remote target.
+func (r *remoteRuntime) ArtifactOrigin() toolcore.ResultOrigin { return r.origin }
 
 // Glob implements searchcore.Searcher with the resolver-backed ripgrep binary.
 func (r *remoteRuntime) Glob(ctx context.Context, base, pattern string, limit int) (searchcore.GlobResult, bool, error) {

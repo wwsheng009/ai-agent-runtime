@@ -274,7 +274,6 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		{name: ToolJobOutput, tool: newRemoteJobOutputTool(cfg, workspace, jobs)},
 		{name: ToolJobCancel, tool: newRemoteJobCancelTool(cfg, workspace, jobs)},
 		{name: ToolJobList, tool: newRemoteJobListTool(cfg, workspace, jobs)},
-		{name: ToolArtifactRead, tool: newRemoteArtifactReadTool(cfg, workspace, artifacts)},
 	}
 	mutationTools, err := buildMutationTools(cfg, workspace, sandbox, artifacts)
 	if err != nil {
@@ -283,6 +282,49 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	for _, tool := range mutationTools {
 		candidates = append(candidates, registration{name: tool.Name(), tool: tool})
 	}
+	artifactSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"artifact_ref": map[string]interface{}{
+				"type":        "string",
+				"description": "Namespaced artifact ref (remote:<target>:art_…) or bare art_… id.",
+			},
+			"artifact_id": map[string]interface{}{
+				"type":        "string",
+				"description": "Bare artifact id (art_…) from a truncated tool result.",
+			},
+			"offset": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "0-based byte offset. Default 0.",
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "Maximum bytes to return. Default 65536.",
+			},
+		},
+		"additionalProperties": false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("artifact_read schema: %w", err)
+	}
+	artifactBase := remoteToolBase{cfg: cfg, workspace: workspace}
+	artifactTool, err := toolkit.NewRuntimeTool(toolcore.NewArtifactReadHandler(toolcore.Definition{
+		Name:                ToolArtifactRead,
+		Description:         artifactBase.describe("Read a byte window of a full remote tool capture that was folded before reaching the model."),
+		Version:             "1.0.0",
+		InputSchema:         artifactSchema,
+		Capabilities:        []toolcore.Capability{toolcore.CapArtifact},
+		DefaultOutputBudget: toolcoreoutput.ToolBudget(ToolArtifactRead),
+		DirectCall:          true,
+	}), func(ctx context.Context) (toolcore.Runtime, error) {
+		return newRemoteRuntime(ctx, cfg, workspace, sandbox, artifacts), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("artifact_read handler: %w", err)
+	}
+	candidates = append(candidates, registration{name: ToolArtifactRead, tool: artifactTool})
 
 	for _, candidate := range candidates {
 		if !enabled[candidate.name] {

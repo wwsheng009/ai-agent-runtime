@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -319,95 +318,6 @@ func (t *remoteJobListTool) Execute(ctx context.Context, params map[string]inter
 		"remote": true,
 	}
 	return remoteTextResult(builder.String(), metadata), nil
-}
-
-// remoteArtifactReadTool pages a stored artifact.
-type remoteArtifactReadTool struct {
-	*toolkit.BaseTool
-	remoteToolBase
-	artifacts *ArtifactStore
-}
-
-func newRemoteArtifactReadTool(cfg *Config, workspace *Workspace, artifacts *ArtifactStore) *remoteArtifactReadTool {
-	parameters := map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"artifact_ref": map[string]interface{}{
-				"type":        "string",
-				"description": "Namespaced artifact ref (remote:<target>:art_…) or bare art_… id.",
-			},
-			"artifact_id": map[string]interface{}{
-				"type":        "string",
-				"description": "Bare artifact id (art_…) from a truncated tool result.",
-			},
-			"offset": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     0,
-				"description": "0-based byte offset. Default 0.",
-			},
-			"limit": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     1,
-				"description": "Maximum bytes to return. Default 65536.",
-			},
-		},
-		"additionalProperties": false,
-	}
-	tool := &remoteArtifactReadTool{
-		remoteToolBase: remoteToolBase{cfg: cfg, workspace: workspace},
-		artifacts:      artifacts,
-	}
-	tool.BaseTool = toolkit.NewBaseTool(
-		ToolArtifactRead,
-		tool.describe("Read a byte window of a full remote tool capture that was folded before reaching the model."),
-		"1.0.0",
-		parameters,
-		true,
-	)
-	return tool
-}
-
-func (t *remoteArtifactReadTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
-	if err := contextErr(ctx); err != nil {
-		return remoteErrorResult(err), nil
-	}
-	artifactRef, _ := params["artifact_ref"].(string)
-	artifactID, _ := params["artifact_id"].(string)
-	if strings.TrimSpace(artifactRef) != "" {
-		artifactID = strings.TrimSpace(artifactRef)
-	}
-	if strings.TrimSpace(artifactID) == "" {
-		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass artifact_ref or artifact_id", "artifact_ref/artifact_id is required")), nil
-	}
-	// A target-internal read never accepts a namespace: the caller already
-	// selected this target, and accepting remote:<other>: here would turn the
-	// tool into a cross-scope router.
-	if strings.HasPrefix(strings.TrimSpace(artifactID), "remote:") {
-		return remoteErrorResult(newToolError(toolcore.ErrArtifactScopeDenied, "pass the bare art_… id", "remote namespace is not accepted by a target-internal artifact_read")), nil
-	}
-	if !toolcore.ValidArtifactID(artifactID) {
-		return remoteErrorResult(newToolError(CodeInvalidArgument, "pass the art_… id from the tool output", "invalid artifact id: %q", artifactID)), nil
-	}
-	offset := intParam(params, "offset", 0)
-	limit := intParam(params, "limit", artifactReadMaxBytes)
-	content, size, eof, err := t.artifacts.Read(artifactID, offset, limit)
-	if err != nil {
-		return remoteErrorResult(err), nil
-	}
-	metadata := map[string]interface{}{
-		"artifact_id":  artifactID,
-		"offset":       offset,
-		"bytes":        len(content),
-		"total_bytes":  size,
-		"eof":          eof,
-		"is_truncated": !eof,
-		"remote":       true,
-	}
-	if !eof {
-		metadata["suggested_next_offset"] = offset + len(content)
-	}
-	body, metadata := t.shapeModelOutput(ToolArtifactRead, content, metadata)
-	return remoteTextResult(body, metadata), nil
 }
 
 // truncateForDisplay shortens one line for a table.
