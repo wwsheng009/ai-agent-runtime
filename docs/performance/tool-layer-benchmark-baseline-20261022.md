@@ -209,7 +209,47 @@ go test -run '^$' `
 - 顺带优化：Handler 原先 `Lstat + Stat` 两次系统调用已合并为单次 `os.Stat`
   + `IsRegular`，既降低开销，也补上 symlink→FIFO 的漏检。
 
-## 6. 与 §15.2.2 的对照
+## 6. shell capture（5 MiB 输出 / 300 KiB capture）
+
+命令：
+
+```powershell
+$env:GOGC='20'; $env:GOMAXPROCS='2'
+go test -run '^$' `
+  -bench 'BenchmarkShellCapture5MBNoArtifact|BenchmarkShellCapture5MBWithArtifact' `
+  -benchmem -benchtime=1x -count=3 ./internal/toolcore/shellexec
+```
+
+夹具：5 MiB 文本文件，通过平台 shell（Windows `type` / Unix `cat`）流到
+stdout；`CaptureLimit=300 KiB`。benchmark 内部断言：
+
+- `RetainedBytes <= 300 KiB`；
+- `TotalBytes ≈ 5 MiB`；
+- `Truncated == true`；
+- artifact 子基准额外断言 raw-output tee 产出路径且无 tee 错误。
+
+结果：
+
+| benchmark | run | ns/op | MB/s | B/op | allocs/op |
+|-----------|-----|-------|------|------|-----------|
+| `BenchmarkShellCapture5MBNoArtifact` | 1 | 4,962,616,100 | 1.06 | 2,892,744 | 546 |
+| `BenchmarkShellCapture5MBNoArtifact` | 2 | 5,128,525,600 | 1.02 | 2,884,800 | 476 |
+| `BenchmarkShellCapture5MBNoArtifact` | 3 | 4,696,087,900 | 1.12 | 2,884,096 | 478 |
+| `BenchmarkShellCapture5MBWithArtifact` | 1 | 4,923,283,200 | 1.06 | 2,888,728 | 507 |
+| `BenchmarkShellCapture5MBWithArtifact` | 2 | 4,964,258,600 | 1.06 | 2,888,248 | 511 |
+| `BenchmarkShellCapture5MBWithArtifact` | 3 | 5,111,098,900 | 1.03 | 2,888,632 | 505 |
+
+解读：
+
+- 中位数约为 4.96 s（no-artifact）与 4.96 s（with-artifact），artifact tee
+  在本机没有可测量的附加墙钟开销；
+- `RetainedBytes` 被稳定限制在 300 KiB 内并正确标记 truncated，
+  §15.2.2 的“shell capture ≤ CaptureLimit”满足；
+- `B/op ≈ 2.89 MB` 是累计分配（含 5 MiB 输出的分块缓冲），不是峰值；
+- 当前吞吐约 1 MB/s，主要由 Windows `type` + Defender 扫描决定，属于
+  保守基线。
+
+## 7. 与 §15.2.2 的对照
 
 | 指标 | 设计目标 | 当前证据 |
 |------|----------|----------|
@@ -217,5 +257,5 @@ go test -run '^$' `
 | read core p95 开销 ≤ 5% | 相对直接实现 | ⚠️ 部分覆盖：long-line 2000 行窗口下中位开销 ~7%，宿主噪声 ±10%；需静默 CI 取 p95 判定 |
 | MCP 32 KiB 序列化 p95 ≤ 10% | 相对 in-process | ⚠️ 部分覆盖：转换 ~0.72 µs；in-memory 往返 ~1.09 ms，主要为协议开销；需真实工具工作量基线才能评判 10% 门槛 |
 | 256 tools list p95 ≤ 50 ms | 含 schema/filter | ✅ 已覆盖：Definitions ~0.16 ms、List ~0.06 ms（中位数） |
-| shell capture ≤ CaptureLimit | 不把完整 capture 放进模型 | 已有契约测试，未做 benchmark |
+| shell capture ≤ CaptureLimit | 不把完整 capture 放进模型 | ✅ 已覆盖：5 MiB 输出 / 300 KiB capture，RetainedBytes ≤ 300 KiB、Truncated=true；artifact tee 路径断言通过 |
 | 回归门槛：中位数超基线 10% 失败 | CI 3 次取中位数 | 本文件提供首轮基线 |

@@ -44,6 +44,12 @@ try {
         -benchmem -count=3 ./internal/toolcore/viewcore
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+    Write-Host '== shell capture 5 MiB / 300 KiB =='
+    go test -run '^$' `
+        -bench 'BenchmarkShellCapture5MBNoArtifact|BenchmarkShellCapture5MBWithArtifact' `
+        -benchmem -benchtime=1x -count=3 ./internal/toolcore/shellexec
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     if ($env:AICLI_TOOLCORE_BENCH_LARGE -eq '1') {
         Write-Host '== large-repo / 100k files: glob + grep (peak-heap sampled) =='
         go test -run '^$' `
