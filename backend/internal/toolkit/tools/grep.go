@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,6 +22,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -37,6 +37,10 @@ var errGrepOutputLimit = errors.New("grep raw output limit reached")
 // errGrepLineBudget 表示一次 rg 调用已收满本次需要的行数、被主动提前停止：
 // 它不是错误也不是 partial——属于正常分页语义（结果按「还有更多匹配」收尾即可）。
 var errGrepLineBudget = errors.New("grep stream line budget reached")
+
+// errStopScanFileLines is an internal sentinel used by the bounded line reader
+// to stop early without treating the stop as a read failure.
+var errStopScanFileLines = errors.New("stop scanning file lines")
 
 // grepMode defines the output format for search results.
 type grepMode string
@@ -4776,25 +4780,32 @@ func (g *GrepTool) walkerSearchFiles(ctx context.Context, opts *grepOptions, re 
 			}
 		}
 
-		scanner := bufio.NewScanner(file)
 		matchedLinesThisFile := 0
 		actualMatchesThisFile := 0
-		for scanner.Scan() {
+		var callbackErr error
+		scanErr := scanFileLinesFrom(file, func(line string) error {
 			if err := ctx.Err(); err != nil {
+				callbackErr = err
 				return err
 			}
-			line := scanner.Text()
 			if lineSatisfiesMatch(re, line, opts.invertMatch) {
 				if _, exists := fileSet[relPath]; !exists {
 					fileSet[relPath] = struct{}{}
 					results = append(results, relPath)
 				}
 				if stats == nil {
-					return nil // found at least one match, no need to scan further
+					return errStopScanFileLines
 				}
 				matchedLinesThisFile++
 				actualMatchesThisFile += countActualRegexMatches(re, line, opts.invertMatch)
 			}
+			return nil
+		})
+		if callbackErr != nil {
+			return callbackErr
+		}
+		if scanErr != nil && !errors.Is(scanErr, errStopScanFileLines) {
+			return nil
 		}
 		if stats != nil && matchedLinesThisFile > 0 {
 			stats.FilesWithMatches++
@@ -4857,22 +4868,29 @@ func (g *GrepTool) walkerSearchFilesWithout(ctx context.Context, opts *grepOptio
 		}
 
 		hasMatch := false
-		scanner := bufio.NewScanner(file)
 		matchedLinesThisFile := 0
 		actualMatchesThisFile := 0
-		for scanner.Scan() {
+		var callbackErr error
+		scanErr := scanFileLinesFrom(file, func(line string) error {
 			if err := ctx.Err(); err != nil {
+				callbackErr = err
 				return err
 			}
-			line := scanner.Text()
 			if lineSatisfiesMatch(re, line, opts.invertMatch) {
 				hasMatch = true
 				if stats == nil {
-					break
+					return errStopScanFileLines
 				}
 				matchedLinesThisFile++
 				actualMatchesThisFile += countActualRegexMatches(re, line, opts.invertMatch)
 			}
+			return nil
+		})
+		if callbackErr != nil {
+			return callbackErr
+		}
+		if scanErr != nil && !errors.Is(scanErr, errStopScanFileLines) {
+			return nil
 		}
 		if stats != nil && matchedLinesThisFile > 0 {
 			stats.FilesWithMatches++
@@ -4936,14 +4954,14 @@ func (g *GrepTool) walkerSearchCount(ctx context.Context, opts *grepOptions, re 
 		}
 
 		count := 0
-		scanner := bufio.NewScanner(file)
 		matchedLinesThisFile := 0
 		actualMatchesThisFile := 0
-		for scanner.Scan() {
+		var callbackErr error
+		scanErr := scanFileLinesFrom(file, func(line string) error {
 			if err := ctx.Err(); err != nil {
+				callbackErr = err
 				return err
 			}
-			line := scanner.Text()
 			if lineSatisfiesMatch(re, line, opts.invertMatch) {
 				matchedLinesThisFile++
 				actualMatchesThisFile += countActualRegexMatches(re, line, opts.invertMatch)
@@ -4953,9 +4971,16 @@ func (g *GrepTool) walkerSearchCount(ctx context.Context, opts *grepOptions, re 
 					count += countRenderedMatches(re, line, opts.onlyMatching, opts.invertMatch)
 				}
 				if hasReachedMaxCount(opts, count) {
-					break
+					return errStopScanFileLines
 				}
 			}
+			return nil
+		})
+		if callbackErr != nil {
+			return callbackErr
+		}
+		if scanErr != nil && !errors.Is(scanErr, errStopScanFileLines) {
+			return nil
 		}
 		if stats != nil && matchedLinesThisFile > 0 {
 			stats.FilesWithMatches++
@@ -5816,6 +5841,29 @@ func filterRGOnlyArgs(opts *grepOptions) []string {
 	return filtered
 }
 
+// scanFileLinesFrom streams lines through the same bounded reader used by the
+// view surfaces. A line longer than viewcore.ReaderLineCapBytes is clamped and
+// marked, but its remainder is drained so following lines keep their numbers.
+func scanFileLinesFrom(reader io.Reader, fn func(string) error) error {
+	lines := viewcore.NewLineReader(reader)
+	for {
+		line, err := lines.Next()
+		if err != nil {
+			return err
+		}
+		if !line.HasBytes {
+			return nil
+		}
+		text := string(line.Bytes)
+		if line.Truncated {
+			text += "…"
+		}
+		if err := fn(text); err != nil {
+			return err
+		}
+	}
+}
+
 // readFileLines reads an entire file into a slice of lines.
 func readFileLines(path string) ([]string, error) {
 	file, err := os.Open(path)
@@ -5825,11 +5873,10 @@ func readFileLines(path string) ([]string, error) {
 	defer file.Close()
 
 	var lines []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
+	if err := scanFileLinesFrom(file, func(line string) error {
+		lines = append(lines, line)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return lines, nil
