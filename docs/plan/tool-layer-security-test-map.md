@@ -1,0 +1,35 @@
+# 工具层威胁模型 → 测试映射（P1 证据）
+
+- 设计：`docs/plan/tool-layer-abstraction-design-20261022.md` §16.3
+- 审核文档：`docs/plan/tool-layer-abstraction-design-20261022-review.md` §11.1
+- 目的：把 §16.3 的每条威胁映射到仓库中真实存在的测试；缺口显式标注，
+  作为独立安全复审的输入。
+
+## 1. 映射表
+
+| # | 威胁 | 主要缓解 | 测试证据 | 状态 |
+|---|------|----------|----------|------|
+| T1 | 被攻陷的远程 server 伪造 metadata（skip/budget/tail） | §9.3/§9.6 trust clamp、Meta allowlist、hard cap | `internal/tools/mcp_result_trust_test.go::TestSanitizeMCPResultRemoteFoldsMaliciousSkip`、`TestSanitizeMCPResultLocalIsUntouched`、`TestMCPContextOriginUsesConfiguredScope` | ✅ 已覆盖（恶意 skip/budget clamp） |
+| T1b | wire 层超大响应绕过 decode 预算 | `MaxMCPResponseBytes` / `REMOTE_RESPONSE_TOO_LARGE` | 未找到专门测试 | ⚠️ **缺口**：需 wire cap 测试（decode 前拒绝） |
+| T2 | 本地/远程/跨 target artifact id 混用 | `ArtifactRef` + target 校验 + `GetOwned` | `internal/remotetools/artifact_scope_test.go::TestArtifactStorePutRefNamespacesTarget`、`TestRemoteArtifactReadRejectsNamespace`、`TestConfigRejectsInvalidTargetName`；`jobs_test.go::TestArtifactReadRejectsTraversal`、`TestArtifactArchiveAndRead` | ✅ 已覆盖（scope/namespace/traversal） |
+| T2b | 归档失败/过期错误码 | `ARTIFACT_WRITE_FAILED` / `ARTIFACT_EXPIRED` | 未找到专门测试 | ⚠️ **缺口**：需归档失败与过期测试 |
+| T3 | tool poisoning（描述/schema 注入） | 描述/schema 上限；untrusted 只读；canonical name | 未找到专门测试 | ⚠️ **缺口**：需 schema/描述上限与 untrusted 只读测试 |
+| T4 | 路径穿越 / symlink / TOCTOU | PathResolver + sandbox + symlink 复检；特殊文件拒绝 | `toolkit/tools/path_guard_test.go`（FIFO/特殊名）、`device_path_deny_test.go`（device deny）、`remotetools/p4_test.go::TestRootsNarrowOnly`、`roots_transport_test.go`（roots 只能收窄）、`executor/sandbox_symlink_review_test.go` | ✅ 已覆盖 |
+| T5 | 命令注入 / 元字符 / 危险命令 | CommandPolicy + shellrisk；deny 优先；空 allowlist 全拒 | `remotetools/write_test.go::TestShellRejectsMetachars`、`TestShellRejectsDestructiveCommand`、`TestShellFailsClosedWithoutAllowlist`；`policy/engine_safety_test.go`（breaker callback/allow rule/plan/dont_ask 全矩阵）；`policy/specifier_test.go`（复合命令尾部变更拒绝） | ✅ 已覆盖 |
+| T6 | secrets 进入日志/预览 | env allowlist；token hash；命令 preview 上限；不记录文件内容 | `remotetools/audit_fields_test.go`（命令 hash/preview/deny/exit code/request info）；`p4_test.go`（mTLS）；`server_accesslog_test.go`（access log 不含 Authorization） | ⚠️ 部分覆盖：缺“密钥字符串不出现在 audit/access 日志”的显式断言 |
+| T7 | SSRF / 恶意 URL | v1 fetch/download/web_search 仅 local-only，不进远程 | `toolkit/tools/fetch_test.go`、`download_test.go`（本地边界）；远程 profile 不含网络工具 | ⚠️ 设计上 v1 deferred；远程化前必须补 SSRF/DNS/重定向测试 |
+| T8 | prompt injection（远程文件/网页） | 外部内容标注不可信；policy 不读内容做授权 | `mcp_result_trust_test.go`（trust 只来自 config）；web_search 外部内容 notice（工具描述） | ⚠️ 部分覆盖：缺“不可信内容不能触发授权升级”的端到端测试 |
+| T9 | subagent 权限放大 | read-only boundary、BlockDelegation、工具白名单 | `agent/read_only_tool_surface_test.go`、`policy/tool_policy_test.go::TestToolExecutionPolicy_BlockDelegationOverridesRuntimeEssentialBypass`、`agent/spawn_subagents_writer_policy_test.go` | ✅ 已覆盖 |
+| T10 | 并发/大输出 DoS | maxConcurrentCalls + 429、输出硬上限、超时/进程组清理 | `remotetools/concurrency_test.go::TestConcurrencyMiddlewareLimitsInflight`、`remotetools/metrics_test.go`、`gateway/ratelimit/ratelimit_test.go::TestMiddlewareReturns429`、`toolcore/output` fold 测试、`shellexec/capture_bench_test.go`（capture ≤ limit 断言） | ⚠️ 部分覆盖：429/Retry-After 在 MCP client 侧的映射测试未见 |
+| T11 | direct CLI 绕过审批/策略 | 同一 `policy.Engine`；`--yes` 只确认 ask；无 bypass 开关 | `internal/toolctl/cli_test.go::TestHardAskIsNotApprovedByYes`、`TestShellRequiresYesForApproval`、`TestPermissionModePlanDeniesWrites`、`TestServeHTTPRequiresTokenForNonLoopback` | ✅ 已覆盖 |
+| T12 | token 泄漏/重放 | TLS/mTLS、token 轮换、日志只存 hash、非回环强制 token | `remotetools/p4_test.go::TestMutualTLSAuthorizesWithoutToken`、`TestMutualTLSRejectsWithoutClientCert`、`TestMutualTLSRequiresTLSFiles`；`toolctl/cli_test.go::TestServeHTTPRequiresTokenForNonLoopback` | ⚠️ 部分覆盖：token 轮换/重放窗口未见测试 |
+| T13 | 构建/部署链篡改 | commit/version pinning、发布产物校验、最小权限、canary | 部署流程文档；无仓库内自动化测试 | ⚠️ **流程缺口**：需发布签名/校验与 canary 记录 |
+
+## 2. 结论
+
+- 已覆盖：T1、T2、T4、T5、T9、T11；
+- 部分覆盖：T6、T7、T8、T10、T12；
+- 明确缺口：T1b（wire cap）、T2b（归档失败/过期）、T3（tool poisoning）、T13（构建链）。
+
+独立安全复审（review §11.1 P0-1/P0-2/P0-3）应优先针对上表 ⚠️/缺口项；
+新增测试后再更新本映射。
