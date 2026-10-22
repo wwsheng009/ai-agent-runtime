@@ -32,9 +32,11 @@ param(
     # 用 empty 表示不套任何 profile。
     [string]$CompatibilityProfile = 'opencode-console-go-2026-07',
 
-    # T9 R2/R3：非 0 时启用 residency 并把驻留窗口上限设为该值。值小于本轮
-    # cell 数（40 个 marker + 若干事件 cell）时**真实触发写穿逐出**，用于验证
-    # "逐出后 40 个 marker 在终端文档里仍各恰好一次"。
+    # T9 R2/R3：非 0 时启用 residency 并把驻留窗口上限设为该值。**实测本轮
+    # transcript 只有约 7 个 cell**（40 个 marker 是同一批 cell 内的行，不是
+    # 40 个 cell），因此 keep=16 仍是 0 次逐出；要真实触发写穿逐出必须用
+    # keep=1（实测逐出 6 个 cell，含流式 revision 209/115 的 assistant cell），
+    # 用于验证"逐出后 40 个 marker 在终端文档里仍各恰好一次"。
     #
     # 注意：`--config` 只喂 agent 配置层；RuntimeConfig（顶层 `ui:`）由
     # aiclipaths 独立解析。所以本开关同时把 runtime 配置写到
