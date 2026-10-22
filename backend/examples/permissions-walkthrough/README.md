@@ -56,7 +56,7 @@ go test ./examples/permissions-walkthrough/ -count=1 -v
 | 硬门 | 测试里的构造 | 实测结果 |
 |---|---|---|
 | 根/主目录断路器 | `shell` 执行 `rm -rf /`，bypass 模式 | 仍 `HardAsk`：必须人工批准（请求 reason=`shell_breaker:root_home_removal`）；`dont_ask` 下 `deny`/`shell_breaker` |
-| 敏感写保护 | `write` 目标 `.env` | default 询问（reason=`sensitive_write:secret`）、`dont_ask` 拒绝；**raw bypass 会跳过它**（手册 §0.1/§3.2）；示例的 `disable_bypass` 先降级 default，门重新生效 |
+| 敏感写保护 | `write` 目标 `.env` | default 询问（reason=`sensitive_write:secret`）、`dont_ask` 拒绝；**raw bypass 仍为 `HardAsk`，不能自动放行**（手册 §0.1/§3.2）；示例的 `disable_bypass` 先降级 default，同样进入审批 |
 | 外部目录门 | 需要会话工作区之外的路径与会话准入集合，测试未构造 | 手工验证见下节「外部目录」；语义见手册 §4.6 / §3.2 第 3 条 |
 
 ## 亲手验证（copy-paste）

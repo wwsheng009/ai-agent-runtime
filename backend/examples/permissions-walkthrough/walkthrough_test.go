@@ -373,10 +373,10 @@ func TestDisableBypassEnforced(t *testing.T) {
 // TestHardGatesFromTheEngine 覆盖两条不写在 yaml 里的引擎硬门（手册 §3.2）：
 //
 //   - 根/主目录断路器：HardAsk，连 bypass 也要人工确认，plan/dont_ask 直接拒绝；
-//   - 敏感写保护：default/accept_edits 询问、dont_ask 拒绝，但 raw bypass 会跳过它。
+//   - 敏感写保护：default/accept_edits 询问、dont_ask 拒绝；raw bypass 仍为 HardAsk。
 //
-// 这正是示例文件写 disable_bypass 的原因：降级 default 后敏感写门重新生效；
-// 要连 bypass 也硬保证，请用 deny 规则或 hook block（§4.2 注意）。
+// 示例文件写 disable_bypass 的作用是把 bypass 降级为 default；对敏感写而言，
+// 两条路径都会进入审批，而不是自动放行。
 func TestHardGatesFromTheEngine(t *testing.T) {
 	ctx := toolctx.WithWorkspaceRoot(context.Background(), t.TempDir())
 
@@ -439,8 +439,8 @@ func TestHardGatesFromTheEngine(t *testing.T) {
 		assert.Contains(t, decision.Reason, "sensitive_write:secret")
 	})
 
-	t.Run("sensitive_write_is_skipped_by_raw_bypass", func(t *testing.T) {
-		// 边界（§0.1 / §3.2 第 2 条）：bypass 会跳过敏感写门，直接按模式放行。
+	t.Run("sensitive_write_is_hard_ask_under_raw_bypass", func(t *testing.T) {
+		// 边界（§0.1 / §3.2 第 2 条）：bypass 不能跳过敏感写硬门。
 		handler := &recordingApprovalHandler{response: policy.ApprovalResponse{Allowed: true}}
 		engine := buildEngine(t, handler, false)
 		decision, err := engine.Evaluate(ctx, policy.EvalRequest{
@@ -449,10 +449,11 @@ func TestHardGatesFromTheEngine(t *testing.T) {
 			Mode:     policy.ModeBypassPermissions,
 		})
 		require.NoError(t, err)
+		require.Equal(t, 1, handler.calls)
+		require.Len(t, handler.requests, 1)
+		assert.Contains(t, handler.requests[0].Reason, "sensitive_write:secret")
 		assert.Equal(t, policy.DecisionAllow, decision.Type)
-		assert.Equal(t, policy.StageMode, decision.Stage)
-		assert.Contains(t, decision.Reason, "bypass_permissions")
-		assert.Equal(t, 0, handler.calls)
+		assert.Equal(t, policy.StageAsk, decision.Stage)
 	})
 
 	t.Run("sensitive_write_gate_returns_after_disable_bypass_downgrade", func(t *testing.T) {
