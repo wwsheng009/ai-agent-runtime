@@ -10,9 +10,9 @@
 | # | 威胁 | 主要缓解 | 测试证据 | 状态 |
 |---|------|----------|----------|------|
 | T1 | 被攻陷的远程 server 伪造 metadata（skip/budget/tail） | §9.3/§9.6 trust clamp、Meta allowlist、hard cap | `internal/tools/mcp_result_trust_test.go::TestSanitizeMCPResultRemoteFoldsMaliciousSkip`、`TestSanitizeMCPResultLocalIsUntouched`、`TestMCPContextOriginUsesConfiguredScope` | ✅ 已覆盖（恶意 skip/budget clamp） |
-| T1b | wire 层超大响应绕过 decode 预算 | `MaxMCPResponseBytes` / `REMOTE_RESPONSE_TOO_LARGE` | 未找到专门测试 | ⚠️ **缺口**：需 wire cap 测试（decode 前拒绝） |
+| T1b | wire 层超大响应绕过 decode 预算 | `MaxMCPResponseBytes` / `REMOTE_RESPONSE_TOO_LARGE` | `internal/mcp/transport/response_limit_test.go::TestResponseLimitRoundTripperRejectsOversizedBody`、`TestResponseLimitAllowsExactLimit` | ✅ 已覆盖（decode 前按字节拒绝，恰好等于上限放行） |
 | T2 | 本地/远程/跨 target artifact id 混用 | `ArtifactRef` + target 校验 + `GetOwned` | `internal/remotetools/artifact_scope_test.go::TestArtifactStorePutRefNamespacesTarget`、`TestRemoteArtifactReadRejectsNamespace`、`TestConfigRejectsInvalidTargetName`；`jobs_test.go::TestArtifactReadRejectsTraversal`、`TestArtifactArchiveAndRead` | ✅ 已覆盖（scope/namespace/traversal） |
-| T2b | 归档失败/过期错误码 | `ARTIFACT_WRITE_FAILED` / `ARTIFACT_EXPIRED` | 未找到专门测试 | ⚠️ **缺口**：需归档失败与过期测试 |
+| T2b | 归档失败/过期错误码 | `ARTIFACT_WRITE_FAILED` / `ARTIFACT_EXPIRED` | `internal/remotetools/artifact_prune_test.go::TestArtifactStorePrunesExpiredFiles`（72h 回收 + NOT_FOUND expiry 提示） | ⚠️ 部分覆盖：过期已覆盖；`ARTIFACT_WRITE_FAILED` 的存储失败注入测试仍缺 |
 | T3 | tool poisoning（描述/schema 注入） | 描述/schema 上限；untrusted 只读；canonical name | 未找到专门测试 | ⚠️ **缺口**：需 schema/描述上限与 untrusted 只读测试 |
 | T4 | 路径穿越 / symlink / TOCTOU | PathResolver + sandbox + symlink 复检；特殊文件拒绝 | `toolkit/tools/path_guard_test.go`（FIFO/特殊名）、`device_path_deny_test.go`（device deny）、`remotetools/p4_test.go::TestRootsNarrowOnly`、`roots_transport_test.go`（roots 只能收窄）、`executor/sandbox_symlink_review_test.go` | ✅ 已覆盖 |
 | T5 | 命令注入 / 元字符 / 危险命令 | CommandPolicy + shellrisk；deny 优先；空 allowlist 全拒 | `remotetools/write_test.go::TestShellRejectsMetachars`、`TestShellRejectsDestructiveCommand`、`TestShellFailsClosedWithoutAllowlist`；`policy/engine_safety_test.go`（breaker callback/allow rule/plan/dont_ask 全矩阵）；`policy/specifier_test.go`（复合命令尾部变更拒绝） | ✅ 已覆盖 |
@@ -27,9 +27,9 @@
 
 ## 2. 结论
 
-- 已覆盖：T1、T2、T4、T5、T9、T11；
-- 部分覆盖：T6、T7、T8、T10、T12；
-- 明确缺口：T1b（wire cap）、T2b（归档失败/过期）、T3（tool poisoning）、T13（构建链）。
+- 已覆盖：T1、T1b、T2、T4、T5、T9、T11；
+- 部分覆盖：T2b、T6、T7、T8、T10、T12；
+- 明确缺口：T2b 的归档写入失败注入、T3（tool poisoning）、T13（构建链）。
 
 独立安全复审（review §11.1 P0-1/P0-2/P0-3）应优先针对上表 ⚠️/缺口项；
 新增测试后再更新本映射。
