@@ -54,11 +54,32 @@ type BindingUpdate struct {
 // A missing, unreadable, malformed or unknown-schema file — or a port outside
 // 1..65535 — all mean "no usable binding" (ok=false), so the caller falls back
 // to a random port exactly like the pre-mesh port record did.
+//
+// 结果按 (路径, mtime, size) 缓存：buildNodeView 对每个节点都会调用本函数，
+// 而 BuildView 每 5 秒被多个循环各调用一次。binding 文件稳态不变，缓存省掉
+// os.ReadFile + json.Unmarshal（生产实测该路径 6.7h 累计 10.8 GB）。
 func LoadBinding(paths Paths, sessionID string) (SessionBinding, bool) {
 	path := paths.BindingPath(sessionID)
 	if path == "" {
 		return SessionBinding{}, false
 	}
+	key, statOK := statKeyFor(path)
+	if statOK {
+		if cached, found := bindingFileCache.Load(path); found {
+			entry := cached.(bindingCacheEntry)
+			if entry.key == key {
+				return entry.binding, entry.ok
+			}
+		}
+	}
+	binding, ok := loadBindingUncached(path, sessionID)
+	if statOK {
+		bindingFileCache.Store(path, bindingCacheEntry{key: key, binding: binding, ok: ok})
+	}
+	return binding, ok
+}
+
+func loadBindingUncached(path, sessionID string) (SessionBinding, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return SessionBinding{}, false

@@ -196,7 +196,27 @@ func DeleteNodeRecord(paths Paths, nodeID string) error {
 //
 // It never panics and never writes to disk (readers never repair other
 // processes' files — architecture §4.2 rule 4).
+//
+// 结果按 (路径, mtime, size) 缓存：BuildView 每 5 秒被多个循环各调用一次，
+// 节点文件在稳态下不变，缓存可直接省掉 os.ReadFile + json.Unmarshal。
 func ReadNodeFile(path string) NodeFile {
+	key, statOK := statKeyFor(path)
+	if statOK {
+		if cached, found := nodeFileCache.Load(path); found {
+			entry := cached.(nodeFileCacheEntry)
+			if entry.key == key {
+				return entry.file
+			}
+		}
+	}
+	file := readNodeFileUncached(path)
+	if statOK {
+		nodeFileCache.Store(path, nodeFileCacheEntry{key: key, file: file})
+	}
+	return file
+}
+
+func readNodeFileUncached(path string) NodeFile {
 	result := NodeFile{Path: path, State: NodeStateUnknown}
 	data, err := os.ReadFile(path)
 	if err != nil {
