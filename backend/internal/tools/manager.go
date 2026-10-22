@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
@@ -684,105 +683,6 @@ func canonicalManagedToolName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-// builtinToolkitRegistration 是 toolkit 内置工具的一条构造行（P2 收敛点）。
-//
-// 职责边界：本表回答"**怎么构造**"（构造参数只有宿主知道，如 runtimeConfig），
-// toolregistry.Entry.ToolkitBuiltin 回答"**有哪些**"。两侧成员集合由
-// builtin_registry_contract_test.go 双向断言，避免两种漂移：
-// "注册表登记了却没人注册"（工具对模型不可见）与
-// "注册了却不在注册表"（落回启发式判定，正是 P1 修掉的病类）。
-//
-// Condition 为 nil 表示无条件注册；非 nil 表示运行期条件（例：图像工具需要
-// 可用的 images_generations provider）。
-//
-// 别名条目（bash / execute_shell_command / read / rg）各自持有自己的 schema 与
-// 描述，必须作为独立实例注册，否则模型以别名发起调用会得到 "tool not found"。
-// image_generate 是例外：它在派发期由 canonicalManagedToolName 归一到
-// openai_image_generate，因此**不**需要（也不应）有独立实例。
-type builtinToolkitRegistration struct {
-	// Canonical 是该构造行归属的注册表条目**规范名**（T6 对账键）。
-	Canonical string
-	// Condition 为 nil 表示无条件注册。
-	Condition func(*runtimecfg.RuntimeConfig) bool
-	// New 按宿主配置构造工具实例。
-	New func(*runtimecfg.RuntimeConfig) toolkit.Tool
-}
-
-// defaultImageAttachmentTokenDivisor converts the configured prompt budget
-// into a per-image attachment ceiling: one image may consume at most a
-// quarter of the budget. Without a bound, a single screenshot can dominate
-// the prompt and make every compaction replacement exceed the send gate
-// (2026-10-19 incident: one 1200×900 PNG priced as ~139k text tokens).
-const defaultImageAttachmentTokenDivisor = 4
-
-// newConfiguredViewTool applies the runtime image-attachment budget to a view
-// (or read) tool. A negative context.maxImageAttachmentTokens disables the
-// gate; zero derives a quarter of the configured prompt budget.
-func newConfiguredViewTool(view *tools.ViewTool, cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
-	if view == nil {
-		return nil
-	}
-	limit := 0
-	if cfg != nil {
-		limit = cfg.Context.MaxImageAttachmentTokens
-		if limit == 0 && cfg.Context.MaxPromptTokens > 0 {
-			limit = cfg.Context.MaxPromptTokens / defaultImageAttachmentTokenDivisor
-		}
-	}
-	if limit < 0 {
-		limit = 0
-	}
-	if limit > 0 {
-		view.SetImageAttachmentTokenLimit(limit)
-	}
-	return view
-}
-
-// builtinToolkitRegistrations 是内置 toolkit 工具的构造表（顺序不承载语义）。
-//
-// 重复注册被忽略（`register` 吞掉 registry 的报错，沿用既有行为）。
-var builtinToolkitRegistrations = []builtinToolkitRegistration{
-	// shell 是首选的 Codex 对齐面；bash 与 execute_shell_command 是执行语义相同
-	// 的兼容别名（含"非零退出码按内容结果返回"）。
-	{Canonical: "shell", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewShellTool() }},
-	{Canonical: "shell", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewBashTool() }},
-	{Canonical: "shell", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewExecuteShellCommandTool() }},
-	{Canonical: "aicli_exec", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewAICLIExecTool() }},
-	{Canonical: "apply_patch", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewApplyPatchTool() }},
-	// read 是 view 的兼容别名（同一 schema/执行实现）：注册它让偏好 `read` 这个
-	// 习惯名的模型调用落到 view，而不是 "tool not found"。模型面仍只列出 view
-	// （见 agent.optimizeModelToolSurface 的读取面折叠）。
-	{Canonical: "view", New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
-		return newConfiguredViewTool(tools.NewViewTool(), cfg)
-	}},
-	{Canonical: "view", New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool {
-		return newConfiguredViewTool(tools.NewReadTool(), cfg)
-	}},
-	{Canonical: "edit", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewEditTool() }},
-	{Canonical: "write", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewWriteTool() }},
-	{Canonical: "append_write", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewAppendWriteTool() }},
-	{Canonical: "glob", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewGlobTool() }},
-	// rg 是 grep 的兼容别名（同一 schema/执行实现）：注册它让以 shell 习惯名 `rg`
-	// 发起的工具调用落到 grep，而不是 "tool not found"。模型面仍只列出 grep
-	// （见 agent.optimizeModelToolSurface 的搜索面折叠）。
-	{Canonical: "grep", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewGrepTool() }},
-	{Canonical: "grep", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewRGTool() }},
-	{Canonical: "ls", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewLsTool() }},
-	{Canonical: "download", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewDownloadTool() }},
-	{Canonical: "fetch", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewFetchTool() }},
-	{Canonical: "multiedit", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewMultieditTool() }},
-	{Canonical: "todos", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewTodosTool() }},
-	{Canonical: "artifact_read", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewArtifactReadTool() }},
-	{Canonical: "sourcegraph", New: func(*runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewSourcegraphTool() }},
-	{Canonical: "web_search", New: func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewWebSearchToolWithConfig(cfg) }},
-	// 图像工具按 provider 可用性条件注册。
-	{
-		Canonical: "openai_image_generate",
-		Condition: shouldRegisterOpenAIImageGenerateTool,
-		New:       func(cfg *runtimecfg.RuntimeConfig) toolkit.Tool { return tools.NewOpenAIImageGenerateTool(cfg) },
-	},
-}
-
 // codeToolRegistration 是 code.* 构造表的一行（P2 slice 3 收敛点）。
 //
 // 与 builtinToolkitRegistration 同构：本表回答"怎么造 + 属哪一类"，注册表
@@ -886,25 +786,6 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	}
 	gate.sync(context.Background())
 	return gate
-}
-
-func shouldRegisterOpenAIImageGenerateTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
-	globalCfg := agentconfig.GetGlobalConfig()
-	if globalCfg == nil {
-		return false
-	}
-	resolvedRuntime := runtimeConfig
-	if resolvedRuntime == nil {
-		resolvedRuntime = runtimecfg.DefaultRuntimeConfig()
-	}
-	defaultModel := strings.TrimSpace(resolvedRuntime.Images.Generations.DefaultModel)
-	if defaultModel != "" {
-		if _, err := agentconfig.SelectImagesGenerationsProvider(globalCfg, agentconfig.ImagesGenerationsHint{Model: defaultModel}); err == nil {
-			return true
-		}
-	}
-	_, err := agentconfig.SelectImagesGenerationsProvider(globalCfg, agentconfig.ImagesGenerationsHint{})
-	return err == nil
 }
 
 func formatToolkitResult(result *toolkit.ToolResult) (string, map[string]interface{}, error) {

@@ -28,7 +28,7 @@ import (
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
 
 const (
@@ -635,29 +635,7 @@ func (c *CLI) buildSurface(opts *commonOptions) (*toolSurface, error) {
 		MaxExecutionTime: 2 * time.Minute,
 	})
 
-	constructed := map[string]toolkit.Tool{
-		"view":         tools.NewViewTool(),
-		"ls":           tools.NewLsTool(),
-		"glob":         tools.NewGlobTool(),
-		"grep":         tools.NewGrepTool(),
-		"write":        tools.NewWriteTool(),
-		"edit":         tools.NewEditTool(),
-		"append_write": tools.NewAppendWriteTool(),
-		"multiedit":    tools.NewMultieditTool(),
-		"apply_patch":  tools.NewApplyPatchTool(),
-		"shell":        tools.NewShellTool(),
-	}
-	// Local-only tools are not part of the core inventory, but the full MCP
-	// surface has always exposed them (network, image, stateful helpers). They
-	// are only added for the explicit ops/custom profiles so the default CLI
-	// stays the v1 read-only core rather than silently widening.
-	if profile == "ops" || profile == "custom" {
-		for name, tool := range localOnlyTools() {
-			if _, exists := constructed[name]; !exists {
-				constructed[name] = tool
-			}
-		}
-	}
+	constructed := constructToolsFromCatalog(profile)
 	for name, tool := range constructed {
 		if setter, ok := tool.(interface{ SetSandbox(*executor.Sandbox) }); ok {
 			setter.SetSandbox(sandbox)
@@ -779,19 +757,91 @@ func isWriteTool(name string) bool {
 	}
 }
 
-// localOnlyTools lists the local capabilities that are not part of the v1 core
-// migration matrix but have always been exposed by the toolkit MCP surface.
-// They stay behind the same sandbox/allowlist boundary as the core tools.
-func localOnlyTools() map[string]toolkit.Tool {
-	return map[string]toolkit.Tool{
-		"aicli_exec":            tools.NewAICLIExecTool(),
-		"fetch":                 tools.NewFetchTool(),
-		"download":              tools.NewDownloadTool(),
-		"web_search":            tools.NewWebSearchTool(),
-		"sourcegraph":           tools.NewSourcegraphTool(),
-		"openai_image_generate": tools.NewOpenAIImageGenerateTool(nil),
-		"todos":                 tools.NewTodosTool(),
+// constructToolsFromCatalog builds the toolkit instances for this surface from
+// the single builtin construction catalog (internal/tools). No second table is
+// allowed here: a tool added to the catalog becomes visible to every surface
+// through this function, and a tool removed from it disappears everywhere.
+//
+// The default profile is the v1 read-only core. Network/image/stateful helpers
+// are only constructed for the explicit ops/custom profiles, so `toolctl` does
+// not silently widen the default surface.
+func constructToolsFromCatalog(profile string) map[string]toolkit.Tool {
+	constructed := map[string]toolkit.Tool{}
+	for _, spec := range runtimetools.BuiltinToolkitCatalog() {
+		// The catalog contains one row per registered instance, including the
+		// compatibility aliases (bash, execute_shell_command, read, rg). The
+		// toolcore registry already carries those as aliases of the canonical
+		// tool, so constructing them again here would collide on registration.
+		// Keep one instance per canonical identity.
+		if _, exists := constructed[spec.Canonical]; exists {
+			continue
+		}
+		if !profileIncludesTool(profile, spec.Canonical) {
+			continue
+		}
+		if toolctlUnsupportedCatalogTool(spec.Canonical) {
+			continue
+		}
+		if spec.Condition != nil && !spec.Condition(nil) {
+			continue
+		}
+		tool := spec.New(nil)
+		if tool == nil {
+			continue
+		}
+		constructed[spec.Canonical] = tool
 	}
+	return constructed
+}
+
+// toolctlUnsupportedCatalogTool reports catalog rows that need runtime state
+// this surface does not bind yet. artifact_read reads toolctx.ArtifactStore,
+// which is session-scoped; toolctl has no artifact store, so exposing it would
+// only produce a permanent "artifact store unavailable" failure.
+func toolctlUnsupportedCatalogTool(name string) bool {
+	return name == "artifact_read"
+}
+
+// profileIncludesTool answers which catalog tools belong to each surface
+// profile. It is a visibility policy, never an authorization decision.
+func profileIncludesTool(profile, name string) bool {
+	switch profile {
+	case "readonly":
+		return isReadOnlyCoreTool(name)
+	case "ops", "custom":
+		return true
+	default: // "auto" and "standard" keep the v1 core surface.
+		return isCoreTool(name)
+	}
+}
+
+// isCoreTool reports membership in the v1 core migration matrix.
+func isCoreTool(name string) bool {
+	for _, tool := range toolcore.V1CoreInventory() {
+		if tool.Name != name {
+			continue
+		}
+		// Local-only capabilities are not part of the default v1 core; they
+		// require the explicit ops/custom profile.
+		return !tool.LocalOnly
+	}
+	return false
+}
+
+// isReadOnlyCoreTool restricts the surface to non-mutating, non-exec core tools.
+func isReadOnlyCoreTool(name string) bool {
+	for _, tool := range toolcore.V1CoreInventory() {
+		if tool.Name != name {
+			continue
+		}
+		for _, capability := range tool.Capabilities {
+			if capability == toolcore.CapWriteFS || capability == toolcore.CapExecShell {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func parseCSV(raw string) []string {
