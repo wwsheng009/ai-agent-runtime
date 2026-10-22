@@ -35,6 +35,7 @@ Main sections:
 - `design/` - design baseline documents (checkpoint / restore-point design, planned architecture notes)
 - `working/` - point-in-time debugging notes and implementation snapshots
 - `performance/` - 性能专题：实测驱动的诊断与优化记录（现象口径、根因代码路径、改动前后同一口径的数字、以及被否决方案的留档），入口见 `performance/README.md`
+- `agent-memory/` - Agent Memory v2 专题：Codex 记忆机制分析、当前运行时差距、目标架构、数据模型/API、实施与验收方案
 - Provider config field notes live under `backend/docs/config/` (for example `enable_image_generation`)
 
 Recommended starting points:
@@ -55,4 +56,5 @@ Recommended starting points:
 - `aicli/tool_image_generate.md`
 - `skill_runtime/README.md`
 - `multi-agents/README.md`
+- `agent-memory/README.md`
 - `working/README.md`
