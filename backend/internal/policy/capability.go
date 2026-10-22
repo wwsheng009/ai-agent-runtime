@@ -63,6 +63,27 @@ type CapabilityResolver interface {
 // DefaultCapabilityResolver applies taxonomy first, then basic heuristics on tool name.
 type DefaultCapabilityResolver struct{}
 
+// rawToolNameForClassification returns the name a prefixed tool should be
+// classified under.
+//
+// A remote (or namespaced MCP) tool is advertised as `<prefix>__<tool>`, but the
+// registry and the taxonomy tables are keyed by the bare tool name. Without this
+// lookup `remote_prod__job_start` matched no table row and fell through to the
+// substring heuristics, which classify it as read_only because the name carries
+// neither a write marker nor a shell marker - so a tool that starts a process on
+// another machine was gated as if it only read data (probe, 2026-10-22).
+//
+// `mcp_raw_tool_name` is stamped by the MCP adapter from the server's own tool
+// list, so this is the server's declaration rather than a local guess about how
+// the prefix is spelled. When it is absent the caller keeps the prefixed name and
+// the existing heuristics apply unchanged.
+func rawToolNameForClassification(prefixed string, metadata map[string]interface{}) string {
+	if raw, ok := stringMetadataValue(metadata, "mcp_raw_tool_name"); ok {
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+	return prefixed
+}
+
 // Resolve returns capabilities for the given request.
 func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 	toolName := strings.ToLower(strings.TrimSpace(req.ToolName))
@@ -73,6 +94,20 @@ func (r DefaultCapabilityResolver) Resolve(req EvalRequest) []Capability {
 	meta := req.Metadata
 	if meta == nil && req.ToolInfo != nil && len(req.ToolInfo.Metadata) > 0 {
 		meta = req.ToolInfo.Metadata
+	}
+	// Classify by the tool's own declared name when the request carries a prefixed
+	// one. Everything below (taxonomy, control-plane table, heuristics) is keyed by
+	// the bare name, so a single substitution here keeps all three sources honest.
+	classifyName := rawToolNameForClassification(toolName, meta)
+	if classifyName != toolName {
+		// The prefixed spelling still has to win when it carries its own evidence
+		// (an explicit tool_kind in metadata, or a name the tables know directly).
+		if tax, ok := ResolveToolTaxonomy(toolName, meta); ok {
+			if caps := capabilitiesFromTaxonomy(tax); len(caps) > 0 {
+				return caps
+			}
+		}
+		toolName = classifyName
 	}
 	if tax, ok := ResolveToolTaxonomy(toolName, meta); ok {
 		if caps := capabilitiesFromTaxonomy(tax); len(caps) > 0 {

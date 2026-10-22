@@ -95,3 +95,14 @@ func hasCapability(caps []Capability, target Capability) bool {
 	}
 	return false
 }
+
+// ModeDecision reports what a permission mode decides for a capability set.
+//
+// It forwards to the same table the engine consults, so a diagnostic can show
+// "would this be allowed in plan mode" without keeping a second copy of the
+// answer. Scripts and tools that render policy must use this rather than
+// re-implementing the switch: the divergence would be silent, and the whole
+// point of the mode layer is that there is exactly one of them.
+func ModeDecision(mode Mode, caps []Capability) DecisionType {
+	return modeDecision(mode, caps)
+}

@@ -394,6 +394,10 @@ type ChatSession struct {
 	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool.
 	CLIAllowTools []string
 	CLIDenyTools  []string
+	// RemoteFlagTarget is the server synthesized from `--remote <spec>`.
+	// It is session-scoped, never written to disk, and merges with (rather than
+	// replaces) the MCP config chain.
+	RemoteFlagTarget *remoteFlagTarget
 	// PermissionsOverlay is the merged project file + CLI permission product surface.
 	PermissionsOverlay runtimepolicy.PermissionsOverlay
 	// FolderTrust is the workspace trust resolution for project-scope plugins/hooks/MCP (R2).

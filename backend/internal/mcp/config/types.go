@@ -18,6 +18,24 @@ const (
 	MCPTrustLevelUntrusted     MCPTrustLevel = "untrusted_remote"
 )
 
+// ExecutionScope declares where a tool server actually executes.
+//
+// It exists because the transport type cannot answer that question: an
+// SSH-launched server is configured as `type: stdio` on the local host, so
+// ExecutionMode() reports "local_mcp" and ResolvedTrustLevel() reports "local"
+// even though the process, filesystem and shell all live on another machine.
+// Policies must gate remote writes/shell on this explicit declaration
+// (docs/plan/aicli-remote-tools-ssh-http-design-20261021.md §G5b).
+type ExecutionScope string
+
+const (
+	// ExecutionScopeLocal means the tool server runs on this host.
+	ExecutionScopeLocal ExecutionScope = "local"
+	// ExecutionScopeRemote means the tool server runs on another machine and
+	// its filesystem paths must never be resolved or stat'ed locally.
+	ExecutionScopeRemote ExecutionScope = "remote"
+)
+
 // Config 表示 MCP 配置
 type Config struct {
 	MCPServers map[string]MCPConfig `yaml:"mcpServers" json:"mcpServers"`
@@ -99,6 +117,10 @@ type MCPConfig struct {
 	EnvError         string            `yaml:"-" json:"-"`
 	Type             string            `yaml:"type" json:"type"` // stdio | sse | websocket | streamable
 	TrustLevel       MCPTrustLevel     `yaml:"trustLevel,omitempty" json:"trustLevel,omitempty"`
+	// ExecutionScope records whether this server runs on this host ("local") or
+	// on another machine ("remote"). Empty keeps the historical behavior
+	// (derived from type); remote targets must set it explicitly.
+	ExecutionScope ExecutionScope `yaml:"executionScope,omitempty" json:"executionScope,omitempty"`
 	MaxParallelCalls int               `yaml:"maxParallelCalls,omitempty" json:"maxParallelCalls,omitempty"`
 	Command          string            `yaml:"command" json:"command"` // 启动命令（stdio）
 	Args             []string          `yaml:"args" json:"args"`       // 命令参数
@@ -108,6 +130,9 @@ type MCPConfig struct {
 	// 优先于 Env：仅当 Headers 为空时才回退把 Env 整体当作 HTTP 头
 	// （历史行为，见 transport.buildHeadersFromEnv）。
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// TLS configures client-certificate authentication (mTLS) and a custom CA
+	// bundle for streamable/sse transports. nil keeps the default TLS setup.
+	TLS *MCPTLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
 	// WorkingDir stdio 子进程工作目录；为空时由传输层回退到进程当前目录。
 	WorkingDir  string                `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 	Enabled     bool                  `yaml:"enabled" json:"enabled"`   // 是否启用
@@ -122,6 +147,28 @@ type MCPConfig struct {
 	// TokenSource 仅内存态：manager 连接前注入的 OAuth 会话。
 	// 不落盘、不序列化，避免把运行时凭据写回配置文件。
 	TokenSource AccessTokenProvider `yaml:"-" json:"-"`
+}
+
+// MCPTLSConfig describes the client side of a mutual-TLS connection.
+//
+// Remote targets that cannot rely on a bearer token (because a proxy terminates
+// or strips headers) authenticate the client with a certificate instead. The
+// server side of aicli-remote-tools accepts the token OR a verified client
+// certificate, so a deployment can use whichever its network allows.
+type MCPTLSConfig struct {
+	// CAFile is a PEM bundle used to verify the server certificate. Empty uses
+	// the system trust store, which is the right default for a public CA.
+	CAFile string `yaml:"caFile,omitempty" json:"caFile,omitempty"`
+	// CertFile / KeyFile enable client-certificate authentication. Both must be
+	// set together.
+	CertFile string `yaml:"certFile,omitempty" json:"certFile,omitempty"`
+	KeyFile  string `yaml:"keyFile,omitempty" json:"keyFile,omitempty"`
+	// ServerName overrides the verified host name (useful when connecting to a
+	// loopback forward whose certificate names the real host).
+	ServerName string `yaml:"serverName,omitempty" json:"serverName,omitempty"`
+	// InsecureSkipVerify disables verification. It exists only for local
+	// experiments; Validate rejects it together with a non-loopback URL.
+	InsecureSkipVerify bool `yaml:"insecureSkipVerify,omitempty" json:"insecureSkipVerify,omitempty"`
 }
 
 // AccessTokenProvider 是运行时注入的访问令牌来源（OAuth 会话实现）。
@@ -270,6 +317,27 @@ func (m *MCPConfig) ResolvedTrustLevel() MCPTrustLevel {
 	}
 }
 
+// ResolvedExecutionScope returns the declared execution scope, defaulting to
+// local so existing configurations keep their behavior. A remote target must
+// declare `executionScope: remote`; the transport type is deliberately not
+// consulted (see ExecutionScope).
+func (m *MCPConfig) ResolvedExecutionScope() ExecutionScope {
+	if m == nil {
+		return ExecutionScopeLocal
+	}
+	switch ExecutionScope(strings.ToLower(strings.TrimSpace(string(m.ExecutionScope)))) {
+	case ExecutionScopeRemote:
+		return ExecutionScopeRemote
+	case ExecutionScopeLocal, "":
+		return ExecutionScopeLocal
+	default:
+		// Unknown spellings must never widen privileges: fall back to remote so
+		// the stricter gate applies (mirrors FSOwnerFromMetadata's fail-closed
+		// treatment of unknown owners).
+		return ExecutionScopeRemote
+	}
+}
+
 // IsStreamableHTTPTransport 判断是否为 Streamable HTTP 传输类型。
 //
 // 兼容 "streamable" / "streamableHttp" / "streamable-http" /
@@ -301,6 +369,9 @@ type MCPStatus struct {
 	Type             string        `json:"type"`
 	TrustLevel       MCPTrustLevel `json:"trustLevel,omitempty"`
 	ExecutionMode    string        `json:"executionMode,omitempty"`
+	// ExecutionScope mirrors MCPConfig.ExecutionScope so hosts can gate remote
+	// writes/shell without re-reading the config file.
+	ExecutionScope ExecutionScope `json:"executionScope,omitempty"`
 	MaxParallelCalls int           `json:"maxParallelCalls,omitempty"`
 	Enabled          bool          `json:"enabled"`
 	Connected        bool          `json:"connected"`

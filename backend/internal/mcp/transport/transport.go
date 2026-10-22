@@ -52,11 +52,28 @@ type Config struct {
 	// 非空且未配置静态 Authorization 头时，按需注入 Bearer 令牌并在 401 后刷新重试。
 	AccessToken AccessTokenProvider
 
+	// TLS 配置客户端证书与自定义 CA（streamable / sse）。
+	// nil 表示沿用系统默认 TLS 设置。
+	TLS *TLSConfig
+
 	// WorkingDir 工作目录（stdio）
 	WorkingDir string
 
 	// WebSocket 专用配置
 	WSHeaders http.Header `json:"wsHeaders,omitempty"`
+}
+
+// TLSConfig mirrors config.MCPTLSConfig at the transport boundary.
+//
+// The two packages declare the same shape rather than importing each other:
+// transport stays free of config (config already owns transport-adjacent types),
+// and the client simply maps the fields when it builds the transport config.
+type TLSConfig struct {
+	CAFile             string
+	CertFile           string
+	KeyFile            string
+	ServerName         string
+	InsecureSkipVerify bool
 }
 
 // StdioTransport stdio 传输封装
@@ -221,9 +238,20 @@ func (t *SSETransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
 		Endpoint: t.cfg.URL,
 	}
 	headers := buildHeaders(t.cfg.Headers, t.cfg.Env)
-	if len(headers) > 0 || t.cfg.AccessToken != nil {
-		inner.HTTPClient = &http.Client{
-			Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers, provider: t.cfg.AccessToken},
+	if len(headers) > 0 || t.cfg.AccessToken != nil || t.cfg.TLS != nil {
+		base, err := newBaseTransport(t.cfg.TLS)
+		if err != nil {
+			// Fall back to the header-only client so the TLS error surfaces from
+			// the actual request rather than as a nil transport.
+			inner.HTTPClient = &http.Client{
+				Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers, provider: t.cfg.AccessToken},
+			}
+		} else if len(headers) > 0 || t.cfg.AccessToken != nil {
+			inner.HTTPClient = &http.Client{
+				Transport: headerRoundTripper{base: base, headers: headers, provider: t.cfg.AccessToken},
+			}
+		} else {
+			inner.HTTPClient = &http.Client{Transport: base}
 		}
 	}
 	return newObservedMCPTransport("sse", strings.TrimSpace(t.cfg.URL), inner, &t.emitter)

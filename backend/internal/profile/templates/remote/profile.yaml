@@ -1,0 +1,62 @@
+# {{name}} — 只有一个远程目标：所有文件/命令操作都落在远端主机。
+#
+# 这个 profile 解决两类问题：
+#
+#   1. 工具名冲突：远程工具若与本地内置同名，模型的 write/view 可能落到错误的机器。
+#      这里把冲突的本地工具全部 deny，只留远端那一侧。
+#   2. MCP 面收窄：mcp.use_servers 只保留一个 server，其余 server 在建连前就被过滤
+#      （不连接、不注册工具），所以第二次配置的云 MCP 不会混进来。
+#
+# 使用前必须做两件事：
+#   - 把 mcp.use_servers 改成你实际的 server 名（见下方 TODO）；
+#   - 确认该 server 在 mcp.yaml 里配了 executionScope: remote。
+#
+# 注意：denylist 是黑名单 —— 新增的本地工具不会自动被排除。
+# 若要让"本地工具在结构上不存在"，用 `aicli chat --mcp-only <server>`。
+profile:
+  name: {{name}}
+  description: {{description}}
+  default_agent: {{agent}}
+
+mcp:
+  # TODO: 改成你的远程目标名（必须与 mcp.yaml 的 mcpServers 键一致）。
+  use_servers:
+    - wsl
+
+tools:
+  # 只保留远端独有能力（读/写/命令都由 remote 侧提供，且带 toolPrefix）。
+  # 因此本地同名的这些工具必须 deny，否则模型可能操作本机。
+  denylist:
+    # 本地读取（与远端 view/ls/glob/grep 同名）
+    - view
+    - ls
+    - glob
+    - grep
+    - read
+    - rg
+    # 本地写入（最危险：模型以为在改远端，实际改本机）
+    - write
+    - edit
+    - apply_patch
+    - append_write
+    - multiedit
+    # 本地执行（同样危险）
+    - shell
+    - bash
+    - execute_shell_command
+    # 本地进程（远端有自己的 job_* 工具，同名会混淆）
+    - job_start
+    - job_output
+    - job_cancel
+    - job_list
+    - job_search
+    - job_monitor
+    - job_control
+    - job_input
+    # 其他只对本机有意义的能力
+    - aicli_exec
+    - todos
+  read_only: false
+
+# 不裁剪 skills：远程场景下技能仍然有用（它们不直接触碰文件系统，
+# 实际读写要通过工具完成）。需要彻底隔离时改用 --mcp-only。

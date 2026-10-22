@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -38,6 +40,11 @@ type cliFlags struct {
 	noReconnect    bool
 	noTty          bool
 	forceTty       bool
+	// stdioMode forwards local stdin to the remote process and quotes argv so
+	// the remote side receives exactly these arguments. It exists for stdio MCP
+	// servers launched over SSH; the default keeps OpenSSH's single-shell-string
+	// semantics for ordinary command usage.
+	stdioMode      bool
 	showVersion    bool
 	ipv4           bool
 	ipv6           bool
@@ -70,6 +77,11 @@ func parseFlags() *cliFlags {
 	flags := &cliFlags{}
 
 	fs := pflag.NewFlagSet("ssh-client", pflag.ContinueOnError)
+	// 第一个位置参数之后的一切都属于远端命令，不再按本地 flag 解析：
+	//   ssh-client -T host -- /usr/bin/aicli-remote-tools serve --stdio --workspace /srv/app
+	// 默认的交错解析会把 --stdio / --workspace 当成 ssh-client 自己的 flag，
+	// 直接以 "unknown flag" 失败（review B3）。
+	fs.SetInterspersed(false)
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), `ssh-client - OpenSSH 兼容的 SSH 客户端
 
@@ -106,6 +118,9 @@ Examples:
 
 Notes:
   - Authentication order: publickey -> ssh-agent -> password -> keyboard-interactive.
+  - --stdio: pass argv verbatim (POSIX-quoted) and forward local stdin to the
+    remote command. Use it for stdio MCP servers; omit it for ordinary shell
+    commands, which keep OpenSSH's single-shell-string semantics.
   - Connection setup (TCP dial + SSH handshake) is bounded by ConnectTimeout
     (default 30s; use --timeout N or -o ConnectTimeout=N to change). A server that
     accepts TCP but never completes the handshake will time out instead of hanging.
@@ -133,6 +148,7 @@ Notes:
 	fs.BoolVar(&flags.noReconnect, "no-reconnect", false, "In -N mode, exit (255) on link loss instead of reconnecting")
 	fs.BoolVarP(&flags.noTty, "no-tty", "T", false, "Disable pseudo-terminal allocation")
 	fs.BoolVarP(&flags.forceTty, "tty", "t", false, "Force pseudo-terminal allocation")
+	fs.BoolVar(&flags.stdioMode, "stdio", false, "Forward local stdin to the remote command and pass argv verbatim (for stdio MCP servers)")
 	fs.BoolVarP(&flags.showVersion, "version", "V", false, "Show version")
 	fs.BoolVarP(&flags.ipv4, "ipv4", "4", false, "Use IPv4 only")
 	fs.BoolVarP(&flags.ipv6, "ipv6", "6", false, "Use IPv6 only")
@@ -179,6 +195,20 @@ Notes:
 	}
 	flags.host = args[0]
 	flags.command = args[1:]
+	// SetInterspersed(false) stops pflag from treating "everything after the first
+	// positional argument" as flags, but it also stops pflag from consuming the
+	// standard `--` end-of-options marker: it stays in the operand list.
+	//
+	// The documented invocation shape is
+	//     ssh-client -T host -- /usr/bin/aicli-remote-tools serve --stdio ...
+	// and remotetargets expands ssh-stdio targets exactly that way. Without this
+	// strip the remote command string starts with "--", the remote shell / the
+	// program receives it as argv[0], and the session dies with
+	//     /bin/sh: 0: Illegal option --
+	// (found by the real-ssh-client transport test, 2026-10-21).
+	if len(flags.command) > 0 && flags.command[0] == "--" {
+		flags.command = flags.command[1:]
+	}
 
 	return flags
 }
@@ -282,6 +312,13 @@ func run(flags *cliFlags) int {
 		}
 	}
 
+	// x/crypto/ssh only advertises "none" in its compression negotiation. Keep
+	// accepting -C / Compression yes for CLI compatibility, but say plainly that
+	// it does not compress anything instead of implying a guarantee.
+	if opts.Compression {
+		fmt.Fprintln(os.Stderr, "ssh-client: warning: SSH transport compression is not supported (x/crypto/ssh negotiates 'none'); -C/Compression has no effect")
+	}
+
 	// 3. 如果密码未设置但 stdin 是终端，打印横幅
 	if !opts.Quiet && term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Fprintf(os.Stderr, "ssh-client: connecting to %s (port %d)...\n", opts.Host, opts.Port)
@@ -315,9 +352,21 @@ func run(flags *cliFlags) int {
 
 	// 7. 会话模式
 	if len(flags.command) > 0 {
-		// 远程命令执行
+		// 远程命令执行。
+		//
+		// 两种拼接语义：
+		//   - 默认：与 OpenSSH 一致，把 argv 用空格拼成一条 shell 命令串。
+		//     这样 `ssh-client host 'ls | head'` 仍然按 shell 语法工作。
+		//   - --stdio：argv 逐项 POSIX 转义，并把本地 stdin 透传给远端进程。
+		//     stdio MCP 需要双向流，且路径/参数不能进入远端 shell 语法层
+		//     （review B4）；该模式不做隐式推断，避免破坏既有管道用法。
 		cmdStr := strings.Join(flags.command, " ")
-		code, err := sshclient.RunCommand(sshConn, cmdStr, os.Stdout, os.Stderr)
+		var stdin io.Reader
+		if flags.stdioMode {
+			cmdStr = shellQuoteJoin(flags.command)
+			stdin = os.Stdin
+		}
+		code, err := sshclient.RunCommandIO(context.Background(), sshConn, cmdStr, stdin, os.Stdout, os.Stderr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ssh-client: command error: %v\n", err)
 			return 255
@@ -417,6 +466,45 @@ func sessionExitCode(err error, interrupted bool) int {
 	}
 	fmt.Fprintf(os.Stderr, "ssh-client: connection lost: %v\n", err)
 	return 255
+}
+
+// shellQuoteJoin renders argv as a POSIX shell command string in which every
+// element is passed through verbatim.
+//
+// ssh.Session.Run hands the whole string to the remote shell, so an unquoted
+// join lets paths containing spaces, quotes or `$` be re-interpreted remotely.
+// Each argument is wrapped in single quotes and embedded single quotes are
+// closed-reopened ('\” idiom), which is the only portable POSIX spelling.
+func shellQuoteJoin(argv []string) string {
+	quoted := make([]string, 0, len(argv))
+	for _, arg := range argv {
+		quoted = append(quoted, shellQuoteArg(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuoteArg(arg string) string {
+	if arg == "" {
+		return "''"
+	}
+	// Fast path: a token made only of safe characters needs no quoting at all,
+	// which keeps the emitted command readable in logs.
+	safe := true
+	for _, r := range arg {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.' || r == '/' || r == ':' || r == '@' || r == '=' || r == '+':
+		default:
+			safe = false
+		}
+		if !safe {
+			break
+		}
+	}
+	if safe {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
 // applyOptions 解析 -o key=value 并设置 Options。

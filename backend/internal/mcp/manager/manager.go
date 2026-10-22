@@ -784,8 +784,10 @@ func (m *manager) CallTool(ctx context.Context, mcpName, toolName string, args m
 		}
 	}
 
-	// 获取客户端
-	cli, err := m.registry.GetClient(mcpName)
+	// 获取客户端。如果上一次断连后健康检查尚未跑到，先把会话同步重建好，
+	// 避免当前调用直接等 1m 健康检查周期。这里不重放已发出的工具调用：
+	// 只有“调用前就没连接”的情况才会重建。
+	cli, err := m.ensureClient(ctx, mcpName)
 	if err != nil {
 		return nil, err
 	}
@@ -797,6 +799,49 @@ func (m *manager) CallTool(ctx context.Context, mcpName, toolName string, args m
 	}
 
 	return result, nil
+}
+
+// ensureClient returns a connected client, rebuilding the session synchronously
+// when the previous one is known to be disconnected. It never replays a tool
+// call; the caller retries explicitly.
+func (m *manager) ensureClient(ctx context.Context, name string) (client.Client, error) {
+	if cli := m.getClient(name); cli != nil && cli.IsConnected() {
+		return cli, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	m.mu.RLock()
+	if m.cfg == nil {
+		m.mu.RUnlock()
+		// Preserve the registry-only behavior used by tests/custom hosts.
+		if cli, err := m.registry.GetClient(name); err == nil {
+			return cli, nil
+		}
+		return nil, fmt.Errorf("MCP %s 未配置", name)
+	}
+	mcpCfg, ok := m.cfg.MCPServers[name]
+	m.mu.RUnlock()
+	if !ok || !mcpCfg.IsEnabled() {
+		// Preserve the pre-existing registry behavior when no reconnectable
+		// config exists (for example a test-injected client).
+		if cli, err := m.registry.GetClient(name); err == nil {
+			return cli, nil
+		}
+		return nil, fmt.Errorf("MCP %s 未启用", name)
+	}
+	// The registry is the source of truth for clients injected by tests or
+	// custom hosts that do not keep the manager's clients map in sync.
+	if cli, err := m.registry.GetClient(name); err == nil && cli != nil && cli.IsConnected() {
+		return cli, nil
+	}
+
+	m.reconnectMCPWithContext(ctx, name, &mcpCfg)
+	if cli := m.getClient(name); cli != nil && cli.IsConnected() {
+		return cli, nil
+	}
+	return nil, fmt.Errorf("MCP %s 正在重连，请稍后重试", name)
 }
 
 // ListResources 列出资源
@@ -940,6 +985,7 @@ func (m *manager) mcpStatusLocked(name string) (*config.MCPStatus, error) {
 		Type:             mcpCfg.Type,
 		TrustLevel:       mcpCfg.ResolvedTrustLevel(),
 		ExecutionMode:    mcpCfg.ExecutionMode(),
+		ExecutionScope:   mcpCfg.ResolvedExecutionScope(),
 		MaxParallelCalls: mcpCfg.MaxParallelCalls,
 		Enabled:          mcpCfg.IsEnabled(),
 	}
@@ -1276,6 +1322,10 @@ func (m *manager) checkMCPHealth(name string, mcpCfg *config.MCPConfig) {
 }
 
 func (m *manager) reconnectMCP(name string, mcpCfg *config.MCPConfig) {
+	m.reconnectMCPWithContext(context.Background(), name, mcpCfg)
+}
+
+func (m *manager) reconnectMCPWithContext(ctx context.Context, name string, mcpCfg *config.MCPConfig) {
 	if mcpCfg == nil || !mcpCfg.IsEnabled() {
 		return
 	}
@@ -1284,7 +1334,10 @@ func (m *manager) reconnectMCP(name string, mcpCfg *config.MCPConfig) {
 	}
 	gen := m.currentGeneration()
 
-	reconnectCtx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(mcpCfg))
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	reconnectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(mcpCfg))
 	defer cancel()
 	m.emitLifecycleEvent(reconnectCtx, "mcp.reconnect.started", name, map[string]interface{}{
 		"execution_mode": mcpCfg.ExecutionMode(),

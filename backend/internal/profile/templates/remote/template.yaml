@@ -1,0 +1,3 @@
+name: remote
+description: Operate exactly one remote MCP target; local file, shell and job tools are removed so nothing can touch the local machine by mistake
+default_agent: default

@@ -25,19 +25,48 @@ func (e *ExitError) Error() string {
 // RunCommand 在远程执行单条命令，将 stdout/stderr 分别写入 wOut/wErr。
 // 返回远程退出码；连接级错误返回 error。
 func RunCommand(client *ssh.Client, command string, wOut, wErr io.Writer) (int, error) {
+	return RunCommandIO(context.Background(), client, command, nil, wOut, wErr)
+}
+
+// RunCommandIO 在远程执行单条命令，语义与 RunCommand 相同，但支持把本地
+// stdin 持续写入远端进程。stdio MCP 这类双向协议必须用它：RunCommand 只接
+// stdout/stderr，远端进程拿不到任何输入，JSON-RPC 的 initialize 就会一直等待。
+//
+// stdin 为 nil 时不设置 session.Stdin（保持原有单向行为）。
+func RunCommandIO(ctx context.Context, client *ssh.Client, command string, stdin io.Reader, wOut, wErr io.Writer) (int, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return 255, fmt.Errorf("open session: %w", err)
 	}
 	defer session.Close()
 
+	if stdin != nil {
+		session.Stdin = stdin
+	}
 	session.Stdout = wOut
 	session.Stderr = wErr
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// 看门狗：ctx 完成时强制断开底层连接（x/crypto 的 session.Run 不可中断）。
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			client.Close()
+		case <-done:
+		}
+	}()
 
 	if err := session.Run(command); err != nil {
 		var exitErr *ssh.ExitError
 		if IsExitError(err, &exitErr) {
 			return exitErr.ExitStatus(), nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 255, fmt.Errorf("run command interrupted: %w", ctxErr)
 		}
 		return 255, fmt.Errorf("run command: %w", err)
 	}

@@ -26,6 +26,7 @@
 | 程序 | 手册 | 说明 |
 |------|------|------|
 | `aicli` | [aicli.md](aicli.md) | AI CLI：交互式 Chat / Headless Exec / 配置管理 |
+| `aicli-remote-tools` | [aicli-remote-tools.md](aicli-remote-tools.md) | 远程工具服务端；本机用 `aicli chat --remote` 接入 |
 | `aicli-console` | [aicli-console.md](aicli-console.md) | aicli 原生 Windows 控制台启动器（仅 Windows） |
 | `aicli-render-fixture` | [aicli-render-fixture.md](aicli-render-fixture.md) | 终端渲染 E2E 测试 fixture（仅 Windows） |
 | `conpty-probe` | [conpty-probe.md](conpty-probe.md) | ConPTY 可用性探测（仅 Windows） |
@@ -38,6 +39,7 @@
 | `toolkit-mcp-server` | [toolkit-mcp-server.md](toolkit-mcp-server.md) | MCP 服务器（暴露 toolkit 工具） |
 
 > SSH/SFTP 客户端完整手册（认证、config、FAQ）另见 [docs/tools/ssh-sftp-clients-usage.md](../tools/ssh-sftp-clients-usage.md)；aicli 详细文档见 [docs/aicli/](../aicli/README.md)。
+> 跨主机读写文件与执行命令（`--remote` / SSH stdio / 多目标声明）见 [aicli-remote-tools.md](aicli-remote-tools.md)。
 > 对**正在运行的** aicli TUI 做脚本化远程操作（`/web/api/*`：注入 prompt、SSE 流式、
 > 审批/提问、屏幕快照、会话管理、写令牌）见 [aicli-tui-remote.md](aicli-tui-remote.md)。
 > Hooks（生命周期回调）配置与调试见 [hooks.md](hooks.md)。

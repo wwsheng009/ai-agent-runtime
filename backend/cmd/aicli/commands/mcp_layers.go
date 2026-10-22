@@ -13,6 +13,7 @@ import (
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
 // mcpConfigOverride 返回 MCP 配置的「显式覆盖值」：
@@ -73,7 +74,12 @@ func emitMCPConfigWarnings(mgr manager.Manager) {
 		return
 	}
 	for _, warning := range reporter.MCPConfigWarnings() {
-		fmt.Fprintf(os.Stderr, "警告: %s\n", warning)
+		// Same rule as the remote notices: route through the diagnostic channel so
+		// an interactive session shows it on the dynamic row instead of painting
+		// over the bottom status bar. Falls back to stderr when no TUI is active.
+		// The log keeps the full text after the transient row expires.
+		logpkg.Warnf("%s", warning)
+		aicliDiagf("警告: %s\n", warning)
 	}
 }
 

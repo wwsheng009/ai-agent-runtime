@@ -139,6 +139,13 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		mcpmanager.SetStatusOutput(newChatSystemOutputWriterWithSurface(os.Stdout, surface))
 	}
 
+	// Resolve `--remote` before the session is built so a malformed spec fails the
+	// command instead of starting a session with no remote tools and no explanation.
+	remoteTarget, err := buildRemoteFlagTarget(opts.RemoteFlag)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	session := &ChatSession{
 		ProviderName:             runtimeState.providerName,
 		Provider:                 runtimeState.provider,
@@ -206,6 +213,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		AllowedRoots:             dedupeChatPaths(opts.AllowedDirs),
 		CLIAllowTools:            append([]string(nil), opts.CLIAllowTools...),
 		CLIDenyTools:             append([]string(nil), opts.CLIDenyTools...),
+		RemoteFlagTarget:         remoteTarget,
 		ApprovalReuseMode:        opts.ApprovalReuseMode,
 		Surface:                  surface,
 		InteractiveUI:            interactiveUI,
@@ -465,6 +473,20 @@ func discoverChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sess
 		useLocalMCP := mcpMode.allowsLocal()
 		if useLocalMCP {
 			if err := prepareChatMCPManager(cfg, session); err != nil {
+				// An MCP failure is normally non-fatal: a broken mcp.yaml should not
+				// prevent a local session from starting. `--remote` is different —
+				// the user named one specific endpoint and asked to work through it,
+				// so continuing without it produces a session that silently cannot do
+				// the job. Fail closed in that case.
+				//
+				// A target declared in remote-targets.yaml carries the same promise:
+				// it is a deliberate statement about which machines this workspace
+				// works against, not a shared file listing servers that may go unused.
+				// Treating an unreachable declaration as a warning let the run print a
+				// normal answer while the tools it was supposed to use were absent.
+				if session.RemoteFlagTarget != nil || sessionHasDeclaredRemoteTargets(session) {
+					return nil, err
+				}
 				fmt.Fprintf(os.Stderr, "Warning: 初始化 MCP 失败: %v\n", err)
 				logpkg.Warnf("AICLI MCP init failed: %v", err)
 			}

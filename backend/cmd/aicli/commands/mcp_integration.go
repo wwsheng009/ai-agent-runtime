@@ -183,7 +183,9 @@ func emitMCPSelectionNotice(dropped []string) {
 	if len(dropped) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Profile MCP selection: skipped server(s) %s\n", strings.Join(dropped, ", "))
+	// Diagnostic channel, not raw stderr: during an interactive session a bare
+	// write lands on the fixed bottom surface and corrupts the status bar.
+	aicliDiagf("Profile MCP selection: skipped server(s) %s\n", strings.Join(dropped, ", "))
 }
 
 // startMCPManager 优先使用 AsyncManager 的后台启动能力；不支持时回退同步 Start。
@@ -314,14 +316,39 @@ func resolveChatMCPConfigOverride(cfg *config.Config, session *ChatSession) stri
 
 func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
 	configPath, shouldInit := resolveChatMCPStartupConfigPath(cfg, session)
-	if !shouldInit {
-		return StopMCPManager()
-	}
 	var selection runtimeprofileinput.ResolvedMCPSelection
 	if session != nil {
 		selection = session.ProfileMCPSelection
 	}
+	// The `remoteTargets` declaration also connects what it declares, so a session
+	// with no mcp.yaml at all still has a surface to build. Read it before the
+	// shouldInit check: with a declaration present, the missing mcp.yaml is not a
+	// reason to skip MCP initialization.
+	declaration, _ := loadRemoteTargetsDeclaration(chatSessionWorkspaceDir(session))
+	// `--remote <spec>` contributes one extra in-memory server and does NOT
+	// replace the file chain: other MCP servers stay reachable, and no local
+	// mcp.yaml is required at all when the flag or the declaration is the only source.
+	if (session != nil && session.RemoteFlagTarget != nil) || len(declarationServerNames(declaration)) > 0 {
+		if !shouldInit {
+			// A declared target is itself a reason to start the manager. The
+			// resolved path is only used for diagnostics at this point.
+			configPath = ""
+		}
+		return initMCPManagerWithRemoteFlag(configPath, resolveChatMCPConfigOverride(cfg, session), chatSessionWorkspaceDir(session), selection, sessionRemoteFlagTarget(session), declaration, true)
+	}
+	if !shouldInit {
+		return StopMCPManager()
+	}
 	return initMCPManagerWithSelectionFrom(configPath, resolveChatMCPConfigOverride(cfg, session), chatSessionWorkspaceDir(session), selection, true)
+}
+
+// sessionRemoteFlagTarget tolerates a nil session (the same way the rest of the
+// MCP setup does) without repeating the nil check at every call site.
+func sessionRemoteFlagTarget(session *ChatSession) *remoteFlagTarget {
+	if session == nil {
+		return nil
+	}
+	return session.RemoteFlagTarget
 }
 
 // registerMCPTools 注册 MCP 工具到 FunctionRegistry。

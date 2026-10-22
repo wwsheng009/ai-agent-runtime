@@ -112,8 +112,22 @@ type mcpClient struct {
 	activeTransport transport.Transport
 }
 
+// remoteSessionKeepAlive makes a dead remote MCP session visible within roughly
+// one minute instead of waiting for the health-check interval plus probe timeout.
+// Local stdio servers keep the previous behavior (no periodic pings).
+const remoteSessionKeepAlive = 30 * time.Second
+
+func clientOptionsFor(cfg *config.MCPConfig) *mcp.ClientOptions {
+	options := &mcp.ClientOptions{}
+	if cfg != nil && cfg.ResolvedExecutionScope() == config.ExecutionScopeRemote {
+		options.KeepAlive = remoteSessionKeepAlive
+	}
+	return options
+}
+
 // NewClient 创建 MCP 客户端
 func NewClient(name string, cfg *config.MCPConfig) (Client, error) {
+	clientOptions := clientOptionsFor(cfg)
 	return &mcpClient{
 		name:         name,
 		cfg:          cfg,
@@ -122,7 +136,7 @@ func NewClient(name string, cfg *config.MCPConfig) (Client, error) {
 			sdkClient := mcp.NewClient(&mcp.Implementation{
 				Name:    "ai-gateway",
 				Version: "1.0.0",
-			}, nil)
+			}, clientOptions)
 			return sdkClient.Connect(ctx, mcpTransport, &mcp.ClientSessionOptions{})
 		},
 		observers: make([]LifecycleObserver, 0),
@@ -182,6 +196,17 @@ func (c *mcpClient) Connect(ctx context.Context) error {
 		Headers:     c.cfg.Headers,
 		AccessToken: c.cfg.TokenSource,
 		WorkingDir:  strings.TrimSpace(c.cfg.WorkingDir),
+	}
+	// mTLS material travels with the server entry so a target that cannot use a
+	// bearer token (proxy strips headers) authenticates by certificate instead.
+	if c.cfg.TLS != nil {
+		transportCfg.TLS = &transport.TLSConfig{
+			CAFile:             c.cfg.TLS.CAFile,
+			CertFile:           c.cfg.TLS.CertFile,
+			KeyFile:            c.cfg.TLS.KeyFile,
+			ServerName:         c.cfg.TLS.ServerName,
+			InsecureSkipVerify: c.cfg.TLS.InsecureSkipVerify,
+		}
 	}
 
 	t, err := c.newTransport(transportCfg)

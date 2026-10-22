@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +253,19 @@ func (l *Loader) validate(config *Config) error {
 		if mcp.MaxParallelCalls < 0 {
 			return fmt.Errorf("maxParallelCalls cannot be negative (MCP: %s)", name)
 		}
+		// mTLS material must be readable before the manager starts: a typo in a
+		// certificate path should be a startup error, not a connection-time
+		// failure that looks like a network problem.
+		if mcp.TLS != nil {
+			if err := validateTLSFiles(mcp.TLS); err != nil {
+				return fmt.Errorf("MCP %s: %w", name, err)
+			}
+			// Insecure verification against a non-loopback endpoint would silently
+			// turn mTLS into plain encryption; refuse the combination.
+			if mcp.TLS.InsecureSkipVerify && !isLoopbackURL(mcp.URL) {
+				return fmt.Errorf("MCP %s: tls.insecureSkipVerify is only allowed for a loopback url", name)
+			}
+		}
 		for toolName := range mcp.Tools {
 			if strings.TrimSpace(toolName) == "" {
 				return fmt.Errorf("工具级配置的工具名不能为空 (MCP: %s)", name)
@@ -259,6 +274,50 @@ func (l *Loader) validate(config *Config) error {
 	}
 
 	return nil
+}
+
+// validateTLSFiles checks that every configured TLS file exists.
+func validateTLSFiles(cfg *MCPTLSConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if (strings.TrimSpace(cfg.CertFile) == "") != (strings.TrimSpace(cfg.KeyFile) == "") {
+		return fmt.Errorf("tls.certFile and tls.keyFile must be set together")
+	}
+	for _, pair := range []struct {
+		label string
+		path  string
+	}{
+		{"tls.caFile", cfg.CAFile},
+		{"tls.certFile", cfg.CertFile},
+		{"tls.keyFile", cfg.KeyFile},
+	} {
+		resolved := strings.TrimSpace(pair.path)
+		if resolved == "" {
+			continue
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			return fmt.Errorf("%s %q is not readable: %w", pair.label, resolved, err)
+		}
+	}
+	return nil
+}
+
+// isLoopbackURL reports whether a URL points at this host.
+func isLoopbackURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // ValidateConfig 校验配置内容（不依赖配置文件，供管理端/CLI 写入前校验）。

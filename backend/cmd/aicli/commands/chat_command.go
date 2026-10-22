@@ -131,6 +131,7 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().String("permission-mode", "default", "本地 actor/team 运行的权限模式（default|accept_edits|plan|bypass_permissions|dont_ask；兼容别名 manual|standard|auto-accept|acceptEdits|bypass|dontAsk，§4.12）")
 	cmd.Flags().StringSlice("allow-tool", nil, "允许指定工具（可重复；写入权限规则 allow，并参与工具 allowlist）")
 	cmd.Flags().StringSlice("deny-tool", nil, "拒绝指定工具（可重复；硬拒绝，优先于项目 allow 规则）")
+	cmd.Flags().String("remote", "", "直接连接一个远程工具服务，无需本地 mcp.yaml：http://host:port[#readonly|standard|ops] 或 ssh://user@host[/workspace][#depth]（与已有 MCP 服务器共存）")
 	cmd.Flags().Bool("trust", false, "信任当前工作区并允许项目级 plugins/hooks/MCP（写入 durable store；需 AICLI_FOLDER_TRUST=1）")
 	cmd.Flags().StringSlice("add-dir", nil, "预先准入工作区外的目录（可重复指定；等价于会话内 /add-dir，§4.5 外部目录门）")
 	cmd.Flags().String("approval-reuse", "session_readonly_shell", "本地 actor/team 审批复用策略（off|session_readonly_shell|team_readonly_shell）")
