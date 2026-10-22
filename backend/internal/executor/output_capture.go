@@ -91,7 +91,7 @@ func CaptureCombinedOutputWithArtifact(cmd *exec.Cmd, maxBytes int, scope string
 // CaptureCombinedOutputWithArtifactAndMirror captures command output for model
 // history/artifacts while also teeing raw chunks to a live output mirror.
 func CaptureCombinedOutputWithArtifactAndMirror(cmd *exec.Cmd, maxBytes int, scope string, command string, preferredRoot string, mirror io.Writer) (CombinedOutputCapture, string, error, error) {
-	return captureCombinedOutput(context.Background(), cmd, nil, maxBytes, scope, command, preferredRoot, mirror, 0)
+	return captureCombinedOutput(context.Background(), cmd, nil, maxBytes, scope, command, preferredRoot, mirror, false, 0)
 }
 
 // GuardedCaptureOptions configures a guarded, artifact-aware command capture.
@@ -101,6 +101,10 @@ type GuardedCaptureOptions struct {
 	Command       string
 	PreferredRoot string
 	Mirror        io.Writer
+	// DisableArtifact skips the raw-output tee. Remote surfaces archive the
+	// complete capture through their own artifact store, so they must not also
+	// write a second copy under the local shell artifact directory.
+	DisableArtifact bool
 	// QuietNotice emits a diagnostic line into the captured output when the
 	// command produces no output for this long. Zero resolves the default from
 	// AICLI_SHELL_QUIET_NOTICE_TIMEOUT; negative disables the notice.
@@ -119,11 +123,11 @@ func CaptureCombinedOutputGuarded(ctx context.Context, cmd *exec.Cmd, guard *Pro
 	} else if notice < 0 {
 		notice = 0
 	}
-	return captureCombinedOutput(ctx, cmd, guard, opts.MaxBytes, opts.Scope, opts.Command, opts.PreferredRoot, opts.Mirror, notice)
+	return captureCombinedOutput(ctx, cmd, guard, opts.MaxBytes, opts.Scope, opts.Command, opts.PreferredRoot, opts.Mirror, opts.DisableArtifact, notice)
 }
 
-func captureCombinedOutput(ctx context.Context, cmd *exec.Cmd, guard *ProcessGuard, maxBytes int, scope string, command string, preferredRoot string, mirror io.Writer, quietNotice time.Duration) (CombinedOutputCapture, string, error, error) {
-	if maxBytes == DisableRetainedOutputLimit {
+func captureCombinedOutput(ctx context.Context, cmd *exec.Cmd, guard *ProcessGuard, maxBytes int, scope string, command string, preferredRoot string, mirror io.Writer, disableArtifact bool, quietNotice time.Duration) (CombinedOutputCapture, string, error, error) {
+	if maxBytes == DisableRetainedOutputLimit || disableArtifact {
 		writer := newCombinedOutputWriter(maxBytes)
 		err := runCommandCapture(ctx, cmd, guard, commandOutputWriter(writer, mirror), mirror, command, quietNotice, guardPIDFunc(guard))
 		return writer.Result(), "", err, nil

@@ -2,10 +2,8 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
@@ -196,133 +194,15 @@ type shellWindowFoldStats struct {
 // failures, test verdicts and "N passed" summaries live at the end - while the
 // omitted middle stays addressable through the archived capture.
 func foldShellOutputToWindow(text string, budget int) (string, shellWindowFoldStats, bool) {
-	stats := shellWindowFoldStats{TotalBytes: len(text)}
-	if budget <= 0 || len(text) <= budget {
-		stats.HeadBytes = len(text)
-		stats.OmittedStart = len(text)
-		stats.OmittedEnd = len(text)
-		stats.TotalLines = strings.Count(strings.ReplaceAll(text, "\r\n", "\n"), "\n") + 1
-		return text, stats, false
-	}
-	totalBytes := len(text)
-	totalLines := strings.Count(strings.ReplaceAll(text, "\r\n", "\n"), "\n") + 1
-	stats.TotalLines = totalLines
-
-	contentBudget := budget
-	for attempt := 0; attempt < 8; attempt++ {
-		if contentBudget <= 0 {
-			break
-		}
-		headBudget := contentBudget / 2
-		tailBudget := contentBudget - headBudget
-		head := safeShellHeadByBytes(text, headBudget)
-		tail := safeShellTailByBytes(text, tailBudget)
-		omittedStart := len(head)
-		omittedEnd := totalBytes - len(tail)
-		if omittedEnd < omittedStart {
-			omittedEnd = omittedStart
-		}
-		notice := shellWindowFoldNotice(omittedStart, omittedEnd, totalBytes, totalLines)
-		if len(head)+len(tail)+len(notice) <= budget {
-			stats.HeadBytes = len(head)
-			stats.TailBytes = len(tail)
-			stats.OmittedStart = omittedStart
-			stats.OmittedEnd = omittedEnd
-			return head + notice + tail, stats, true
-		}
-		// The notice grows with the digit count of its numbers; shrink the
-		// content window by the overflow and try again (converges in a few
-		// rounds because a shorter window never lengthens the notice).
-		overflow := len(head) + len(tail) + len(notice) - budget
-		next := contentBudget - overflow
-		if next >= contentBudget {
-			next = contentBudget - 1
-		}
-		if next < 0 {
-			next = 0
-		}
-		contentBudget = next
-	}
-	// Degenerate window (notice alone exceeds the budget): keep the notice,
-	// which carries the recovery route, and drop head/tail.
-	notice := shellWindowFoldNotice(0, totalBytes, totalBytes, totalLines)
-	stats.HeadBytes = 0
-	stats.TailBytes = 0
-	stats.OmittedStart = 0
-	stats.OmittedEnd = totalBytes
-	return safeShellHeadByBytes(notice, budget), stats, true
-}
-
-// shellWindowFoldNotice renders the fold notice for a shell payload whose
-// producing tool owns the model-visible window.
-//
-// It states the window arithmetic, the exact byte range of the omitted middle,
-// and the cheapest way back to it: the first artifact_read page offset/limit
-// (with the total page count, so the model can price the full read before
-// starting it), a bisect offset for "the interesting part is somewhere in the
-// middle", and the cheaper alternative of re-running a narrower command.
-func shellWindowFoldNotice(omittedStart, omittedEnd, totalBytes, totalLines int) string {
-	omitted := omittedEnd - omittedStart
-	if omitted < 0 {
-		omitted = 0
-	}
-	pageBytes := artifactReadMaxLimitBytes()
-	pages := 0
-	if omitted > 0 && pageBytes > 0 {
-		pages = (omitted + pageBytes - 1) / pageBytes
-	}
-	middleOffset := omittedStart + omitted/2
-	return fmt.Sprintf(
-		"\n\n[output window: showing head %d B + tail %d B of %d bytes of the captured output (%d lines total); "+
-			"omitted middle bytes [%d,%d) = %d bytes. "+
-			"The complete capture is archived: read the middle with artifact_read on the raw-output pointer below - "+
-			"offset=%d, limit=%d, then follow next_offset (the whole middle costs %d pages), or bisect from offset=%d. "+
-			"Cheapest route when you know what to look for: re-run a narrower command (tighter pattern, Select-String / Select-Object -First/-Last) "+
-			"instead of paging the whole capture.]",
-		omittedStart, totalBytes-omittedEnd, totalBytes, totalLines,
-		omittedStart, omittedEnd, omitted,
-		omittedStart, pageBytes, pages, middleOffset,
-	)
-}
-
-// safeShellHeadByBytes returns the longest prefix of text within limit bytes
-// that does not split a UTF-8 sequence.
-func safeShellHeadByBytes(text string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	if len(text) <= limit {
-		return text
-	}
-	cut := limit
-	for cut > 0 && !utf8.RuneStart(text[cut]) {
-		cut--
-	}
-	return text[:cut]
-}
-
-// safeShellTailByBytes returns the longest suffix of text within limit bytes
-// that does not split a UTF-8 sequence. It also prefers to start right after a
-// newline so the model does not receive a half line first, as long as trimming
-// to that line start keeps at least half of the tail window.
-func safeShellTailByBytes(text string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	if len(text) <= limit {
-		return text
-	}
-	start := len(text) - limit
-	for start < len(text) && !utf8.RuneStart(text[start]) {
-		start++
-	}
-	if idx := strings.IndexByte(text[start:], '\n'); idx >= 0 && idx < 512 {
-		candidate := start + idx + 1
-		if len(text)-candidate >= limit/2 {
-			start = candidate
-		}
-	}
-	return text[start:]
+	shared, sharedStats, didFold := toolcoreoutput.FoldShellWindow(text, budget, artifactReadMaxLimitBytes())
+	return shared, shellWindowFoldStats{
+		HeadBytes:    sharedStats.HeadBytes,
+		TailBytes:    sharedStats.TailBytes,
+		OmittedStart: sharedStats.OmittedStart,
+		OmittedEnd:   sharedStats.OmittedEnd,
+		TotalBytes:   sharedStats.TotalBytes,
+		TotalLines:   sharedStats.TotalLines,
+	}, didFold
 }
 
 // archiveShellOutputWindow stores the complete shell capture in the session's
@@ -367,5 +247,5 @@ func shellWindowSummary(full string) string {
 	if idx := strings.IndexByte(head, '\n'); idx >= 0 {
 		head = head[:idx]
 	}
-	return safeShellHeadByBytes(head, 400)
+	return toolcoreoutput.TrimToBytes(head, 400)
 }

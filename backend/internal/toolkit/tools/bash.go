@@ -24,6 +24,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
@@ -869,56 +870,61 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		})
 	}
 
-	cmd := exec.Command(shellCmd[0], shellCmd[1:]...)
-	cmd.Dir = resolvedWorkdir
-	cmd.Env = runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ())
-
-	// Optional OS-level wrap (Linux bubblewrap when configured). Application-
-	// layer policy already ran above; auto degrades with warnings, require fails closed.
-	if launch, wrapErr := b.sandbox.PrepareOSCommand(cmdCtx, shellCmd[0], shellCmd[1:], resolvedWorkdir, cmd.Env); wrapErr != nil {
-		return CommandExecutionResult{}, wrapSandboxPermissionError("sandbox denied os isolation", wrapErr, map[string]interface{}{
-			"policy":    "sandbox",
-			"operation": string(runtimeexecutor.OpExecute),
-			"command":   mainCmd,
-			"launcher":  shellCmd[0],
-			"os_mode":   b.sandbox.Config().OSSandbox,
-		})
-	} else {
-		cmd = exec.Command(launch.Command, launch.Args...)
-		if strings.TrimSpace(launch.WorkDir) != "" {
-			cmd.Dir = launch.WorkDir
-		} else if !launch.Applied {
-			cmd.Dir = resolvedWorkdir
-		}
-		if launch.Env != nil {
-			cmd.Env = launch.Env
-		}
-		// Surface explicit degrade notices in structured metadata when present.
-		_ = launch.Warnings
-	}
-
-	// PowerShell 需要 UTF-8 输出编码
-	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
-		prefixPowershellUTF8(cmd)
-	}
-
 	outputMirror := resolveToolTerminalOutputMirror(ctx)
-	if outputMirror != nil {
-		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
-	}
 	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
-	guard := runtimeexecutor.NewProcessGuard()
-	if bindErr := guard.Bind(cmd); bindErr != nil {
-		guard.Close()
-		return CommandExecutionResult{}, bindErr
-	}
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputGuarded(cmdCtx, cmd, guard, runtimeexecutor.GuardedCaptureOptions{
-		MaxBytes:      captureSettings.captureLimitBytes(),
-		Scope:         "toolkit",
+	execResult, runErr := shellexec.Run(cmdCtx, shellexec.Options{
 		Command:       command,
-		PreferredRoot: artifactRoot,
+		Workdir:       resolvedWorkdir,
+		Env:           runtimeexecutor.BuildFilteredEnv(b.sandbox, os.Environ()),
+		CaptureLimit:  captureSettings.captureLimitBytes(),
+		ArtifactScope: "toolkit",
+		ArtifactRoot:  artifactRoot,
 		Mirror:        outputMirror,
+		Invocation: func(command string) (string, []string) {
+			argv := shell.DeriveExecArgs(command, false)
+			return argv[0], argv[1:]
+		},
+		Prepare: func(prepareCtx context.Context, launch shellexec.Launch) (shellexec.Launch, error) {
+			if err := b.sandbox.CheckCommandDenied(launch.Command); err != nil {
+				return shellexec.Launch{}, wrapSandboxPermissionError("sandbox denied shell launcher", err, map[string]interface{}{
+					"policy":    "sandbox",
+					"operation": string(runtimeexecutor.OpExecute),
+					"command":   mainCmd,
+					"launcher":  launch.Command,
+				})
+			}
+			wrapped, wrapErr := b.sandbox.PrepareOSCommand(prepareCtx, launch.Command, launch.Args, launch.Workdir, launch.Env)
+			if wrapErr != nil {
+				return shellexec.Launch{}, wrapSandboxPermissionError("sandbox denied os isolation", wrapErr, map[string]interface{}{
+					"policy":    "sandbox",
+					"operation": string(runtimeexecutor.OpExecute),
+					"command":   mainCmd,
+					"launcher":  launch.Command,
+					"os_mode":   b.sandbox.Config().OSSandbox,
+				})
+			}
+			prepared := shellexec.Launch{
+				Command: wrapped.Command,
+				Args:    append([]string(nil), wrapped.Args...),
+				Env:     wrapped.Env,
+				Workdir: launch.Workdir,
+			}
+			if strings.TrimSpace(wrapped.WorkDir) != "" {
+				prepared.Workdir = wrapped.WorkDir
+			}
+			if wrapped.Env == nil {
+				prepared.Env = launch.Env
+			}
+			return prepared, nil
+		},
 	})
+	if !execResult.Started && runErr != nil {
+		return CommandExecutionResult{}, runErr
+	}
+	capture := execResult.Capture
+	artifactPath := execResult.ArtifactPath
+	artifactErr := execResult.ArtifactError
+	err = runErr
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
 	if err != nil {
 		if cmdCtx.Err() == context.DeadlineExceeded {
@@ -928,7 +934,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
-			result = applyProcessGuardResult(result, guard, err, "timeout")
+			result = applyProcessGuardResult(result, execResult, err, "timeout")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.TimeoutError(budget)
 		}
@@ -939,7 +945,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
-			result = applyProcessGuardResult(result, guard, err, "cancel")
+			result = applyProcessGuardResult(result, execResult, err, "cancel")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.ContextCancellationError(ctx)
 		}
@@ -949,7 +955,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 			result.RawOutputArtifactError = artifactErr.Error()
 		}
 		result = applyCommandExecutionShell(result, shell)
-		result = applyProcessGuardResult(result, guard, err, "error")
+		result = applyProcessGuardResult(result, execResult, err, "error")
 		applyCommandTimeoutBudget(&result, budget)
 		return result, err
 	}
@@ -959,7 +965,7 @@ func (b *BashTool) executeCommand(ctx context.Context, command string, workdir s
 		result.RawOutputArtifactError = artifactErr.Error()
 	}
 	result = applyCommandExecutionShell(result, shell)
-	result = applyProcessGuardResult(result, guard, err, "")
+	result = applyProcessGuardResult(result, execResult, err, "")
 	applyCommandTimeoutBudget(&result, budget)
 	return result, nil
 }
@@ -1034,41 +1040,27 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 
 	// 使用智能 shell 检测
 	shell := runtimeexecutor.DefaultUserShell()
-	shellArgs := shell.DeriveExecArgs(command, false)
-
-	cmd := exec.Command(shellArgs[0], shellArgs[1:]...)
-
-	// 设置工作目录
-	if cfg.workdir != "" {
-		cmd.Dir = cfg.workdir
-	}
 
 	// 过滤敏感环境变量，并注入 resolver 选定的 rg 目录，保证 shell 内可直接调用 rg。
-	cmd.Env = runtimeexecutor.WithResolvedRipgrepPath(runtimeexecutor.FilterSensitiveEnv(os.Environ()))
-
-	// PowerShell 需要 UTF-8 输出编码
-	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
-		prefixPowershellUTF8(cmd)
-	}
+	env := runtimeexecutor.WithResolvedRipgrepPath(runtimeexecutor.FilterSensitiveEnv(os.Environ()))
 
 	outputMirror := resolveToolTerminalOutputMirror(ctx)
-	if outputMirror != nil {
-		runtimeexecutor.PrepareCommandForLowLatencyOutput(cmd)
-	}
-
 	artifactRoot := toolctx.ShellOutputArtifactDir(ctx)
-	guard := runtimeexecutor.NewProcessGuard()
-	if bindErr := guard.Bind(cmd); bindErr != nil {
-		guard.Close()
-		return CommandExecutionResult{}, bindErr
-	}
-	capture, artifactPath, err, artifactErr := runtimeexecutor.CaptureCombinedOutputGuarded(cmdCtx, cmd, guard, runtimeexecutor.GuardedCaptureOptions{
-		MaxBytes:      captureLimitBytesFromExecConfig(cfg),
-		Scope:         "toolkit",
+	execResult, err := shellexec.Run(cmdCtx, shellexec.Options{
 		Command:       command,
-		PreferredRoot: artifactRoot,
+		Workdir:       cfg.workdir,
+		Env:           env,
+		CaptureLimit:  captureLimitBytesFromExecConfig(cfg),
+		ArtifactScope: "toolkit",
+		ArtifactRoot:  artifactRoot,
 		Mirror:        outputMirror,
 	})
+	if !execResult.Started && err != nil {
+		return CommandExecutionResult{}, err
+	}
+	capture := execResult.Capture
+	artifactPath := execResult.ArtifactPath
+	artifactErr := execResult.ArtifactError
 	artifactPath, artifactErr = ensureLargeHistoryOutputArtifact(capture, artifactPath, artifactErr, "toolkit", command, artifactRoot)
 
 	if err != nil {
@@ -1079,7 +1071,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
-			result = applyProcessGuardResult(result, guard, err, "timeout")
+			result = applyProcessGuardResult(result, execResult, err, "timeout")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.TimeoutError(budget)
 		}
@@ -1087,7 +1079,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 			result := commandExecutionFromCapture(capture)
 			result.RawOutputArtifactPath = artifactPath
 			result = applyCommandExecutionShell(result, shell)
-			result = applyProcessGuardResult(result, guard, err, "cancel")
+			result = applyProcessGuardResult(result, execResult, err, "cancel")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, runtimeexecution.ContextCancellationError(ctx)
 		}
@@ -1101,7 +1093,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 				result.RawOutputArtifactError = artifactErr.Error()
 			}
 			result = applyCommandExecutionShell(result, shell)
-			result = applyProcessGuardResult(result, guard, err, "error")
+			result = applyProcessGuardResult(result, execResult, err, "error")
 			applyCommandTimeoutBudget(&result, budget)
 			return result, fmt.Errorf("命令执行失败: %w\n%s\n\n当前环境信息:\n%s", err, friendlyHint, GetShellEnvironmentInfo())
 		}
@@ -1111,7 +1103,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 			result.RawOutputArtifactError = artifactErr.Error()
 		}
 		result = applyCommandExecutionShell(result, shell)
-		result = applyProcessGuardResult(result, guard, err, "error")
+		result = applyProcessGuardResult(result, execResult, err, "error")
 		applyCommandTimeoutBudget(&result, budget)
 		return result, err
 	}
@@ -1122,7 +1114,7 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		result.RawOutputArtifactError = artifactErr.Error()
 	}
 	result = applyCommandExecutionShell(result, shell)
-	result = applyProcessGuardResult(result, guard, err, "")
+	result = applyProcessGuardResult(result, execResult, err, "")
 	applyCommandTimeoutBudget(&result, budget)
 	return result, nil
 }
@@ -1341,17 +1333,14 @@ func nonEmptyStrings(values ...string) []string {
 // applyProcessGuardResult copies process-tree termination diagnostics onto a
 // command result so callers (and the model) can see that the runtime had to
 // terminate the tree or bound the post-exit wait instead of hanging.
-func applyProcessGuardResult(result CommandExecutionResult, guard *runtimeexecutor.ProcessGuard, runErr error, termination string) CommandExecutionResult {
-	if guard == nil {
-		return result
-	}
-	report := guard.Report()
+func applyProcessGuardResult(result CommandExecutionResult, execResult shellexec.Result, runErr error, termination string) CommandExecutionResult {
+	report := execResult.GuardReport
 	result.ProcessTreeKill = report.TreeKill
 	result.KilledPIDs = report.Killed
 	result.ProcessTreeMode = report.Mode
 	result.ProcessTreeError = strings.TrimSpace(strings.Join(nonEmptyStrings(report.AttachErr, report.Err), "; "))
-	result.WaitDelayMs = guard.WaitDelay().Milliseconds()
-	if stderrors.Is(runErr, exec.ErrWaitDelay) {
+	result.WaitDelayMs = execResult.WaitDelay.Milliseconds()
+	if execResult.WaitDelayUsed || stderrors.Is(runErr, exec.ErrWaitDelay) {
 		result.WaitDelayUsed = true
 	}
 	if len(report.Leftovers) > 0 {
@@ -1528,22 +1517,6 @@ func resolveWorkdir(workdir string) (string, error) {
 		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
 	}
 	return filepath.Clean(filepath.Join(cwd, workdir)), nil
-}
-
-// prefixPowershellUTF8 prepends a UTF-8 encoding command for PowerShell
-// to ensure output is correctly encoded, mirroring codex-rs/shell-command/src/powershell.rs.
-func prefixPowershellUTF8(cmd *exec.Cmd) {
-	if len(cmd.Args) < 3 {
-		return
-	}
-	// -EncodedCommand already carries the UTF-8 directive inside its base64
-	// payload; prefixing the argument would corrupt the encoded script.
-	if runtimeexecutor.ShellArgsUseEncodedCommand(cmd.Args) {
-		return
-	}
-	// The command is the last arg; prepend UTF-8 encoding directive
-	lastIdx := len(cmd.Args) - 1
-	cmd.Args[lastIdx] = runtimeexecutor.PowerShellCommandPrefix + cmd.Args[lastIdx]
 }
 
 // friendlyHintFor returns a user-friendly hint when a command fails.

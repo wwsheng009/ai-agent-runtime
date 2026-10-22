@@ -23,33 +23,50 @@ func FoldHeadTail(text string, limit int) (string, FoldStats, bool) {
 		stats.HeadBytes = len(text)
 		return text, stats, false
 	}
-	notice := fmt.Sprintf("\n\n…[%d bytes omitted: output truncated at the %d-byte limit; narrow the request or read the archived capture]…\n\n", 0, limit)
-	available := limit - len(notice)
-	if available < 16 {
-		available = limit
-		notice = ""
+	// The notice's digit count depends on the omitted size, so the first guess
+	// can be too long. Shrink the content window until head+notice+tail fits;
+	// this converges quickly because a shorter window never lengthens the
+	// notice. Both ends must survive: a fold that drops the tail loses exactly
+	// the verdicts (test summaries, final errors) the window exists to keep.
+	contentBudget := limit
+	for attempt := 0; attempt < 8; attempt++ {
+		headBudget := contentBudget / 2
+		tailBudget := contentBudget - headBudget
+		head := runeSafePrefix(text, headBudget)
+		tail := runeSafeSuffix(text, tailBudget)
+		omittedStart := len(head)
+		omittedEnd := len(text) - len(tail)
+		if omittedEnd < omittedStart {
+			omittedEnd = omittedStart
+		}
+		notice := foldNotice(omittedEnd-omittedStart, limit)
+		folded := head + notice + tail
+		if len(folded) <= limit {
+			stats.HeadBytes = len(head)
+			stats.TailBytes = len(tail)
+			stats.OmittedStart = omittedStart
+			stats.OmittedEnd = omittedEnd
+			return folded, stats, true
+		}
+		overflow := len(folded) - limit
+		next := contentBudget - overflow
+		if next >= contentBudget {
+			next = contentBudget - 1
+		}
+		if next < 0 {
+			next = 0
+		}
+		contentBudget = next
 	}
-	headBudget := available / 2
-	tailBudget := available - headBudget
-	head := runeSafePrefix(text, headBudget)
-	tail := runeSafeSuffix(text, tailBudget)
-	omitted := len(text) - len(head) - len(tail)
-	if omitted < 0 {
-		omitted = 0
-	}
-	stats.HeadBytes = len(head)
-	stats.TailBytes = len(tail)
-	stats.OmittedStart = len(head)
-	stats.OmittedEnd = len(text) - len(tail)
-	if notice != "" {
-		notice = fmt.Sprintf("\n\n…[%d bytes omitted: output truncated at the %d-byte limit; narrow the request or read the archived capture]…\n\n", omitted, limit)
-	}
-	folded := head + notice + tail
-	if len(folded) > limit {
-		folded = runeSafePrefix(folded, limit)
-		stats.TailBytes = 0
-	}
-	return folded, stats, true
+	// Degenerate budget: keep the notice, which carries the recovery route.
+	notice := foldNotice(len(text), limit)
+	stats.OmittedStart = 0
+	stats.OmittedEnd = len(text)
+	return runeSafePrefix(notice, limit), stats, true
+}
+
+func foldNotice(omitted, limit int) string {
+	return fmt.Sprintf("\n\n…[%d bytes omitted: output truncated at the %d-byte limit; narrow the request or read the archived capture]…\n\n", omitted, limit)
 }
 
 // ShapeText applies the tool-owned output window and stamps the metadata that
