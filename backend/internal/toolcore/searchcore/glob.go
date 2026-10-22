@@ -59,12 +59,25 @@ func Glob(ctx context.Context, base, pattern string, limit int) (GlobResult, err
 	return result, nil
 }
 
-// ShouldSkipDir lists dependency/VCS trees that would dominate a walk.
+// SkippedDirNames lists dependency/VCS trees that would dominate a walk. The
+// list is shared with surfaces that delegate traversal to ripgrep so both
+// engines skip the same directories.
+var SkippedDirNames = [...]string{
+	".git",
+	"node_modules",
+	"vendor",
+	".venv",
+	"__pycache__",
+	".idea",
+	".gradle",
+}
+
+// ShouldSkipDir reports whether a directory name belongs to a skipped tree.
 func ShouldSkipDir(name string) bool {
-	switch name {
-	case ".git", "node_modules", "vendor", ".venv", "__pycache__", ".idea", ".gradle":
-		return true
-	default:
-		return false
+	for _, skipped := range SkippedDirNames {
+		if name == skipped {
+			return true
+		}
 	}
+	return false
 }

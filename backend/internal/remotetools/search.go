@@ -79,6 +79,7 @@ const remoteGlobDefaultLimit = 500
 type remoteGlobTool struct {
 	*toolkit.BaseTool
 	remoteToolBase
+	rg ripgrepRunner
 }
 
 func newRemoteGlobTool(cfg *Config, workspace *Workspace) *remoteGlobTool {
@@ -102,7 +103,10 @@ func newRemoteGlobTool(cfg *Config, workspace *Workspace) *remoteGlobTool {
 		"required":             []string{"pattern"},
 		"additionalProperties": false,
 	}
-	tool := &remoteGlobTool{remoteToolBase: remoteToolBase{cfg: cfg, workspace: workspace}}
+	tool := &remoteGlobTool{
+		remoteToolBase: remoteToolBase{cfg: cfg, workspace: workspace},
+		rg:             resolveRipgrepRunner(),
+	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolGlob,
 		tool.describe("Find remote files by glob pattern; respects the workspace boundary."),
@@ -127,7 +131,16 @@ func (t *remoteGlobTool) Execute(ctx context.Context, params map[string]interfac
 		return remoteErrorResult(err), nil
 	}
 	limit := intParam(params, "limit", remoteGlobDefaultLimit)
-	result, globErr := searchcore.Glob(ctx, base, pattern, limit)
+	engine := "walker"
+	result, rgUsed, globErr := t.rg.glob(ctx, base, pattern, limit)
+	if rgUsed && globErr == nil {
+		engine = "ripgrep"
+	} else {
+		if ctx != nil && ctx.Err() != nil {
+			return remoteErrorResult(contextErr(ctx)), nil
+		}
+		result, globErr = searchcore.Glob(ctx, base, pattern, limit)
+	}
 	if globErr != nil {
 		if ctx != nil && ctx.Err() != nil {
 			return remoteErrorResult(contextErr(ctx)), nil
@@ -153,6 +166,7 @@ func (t *remoteGlobTool) Execute(ctx context.Context, params map[string]interfac
 		"path":         t.cleanDisplayPath(base),
 		"matches":      len(result.Matches),
 		"is_truncated": result.Truncated,
+		"engine":       engine,
 		"remote":       true,
 		"workspace":    t.workspace.Root(),
 	}
@@ -164,6 +178,7 @@ func (t *remoteGlobTool) Execute(ctx context.Context, params map[string]interfac
 type remoteGrepTool struct {
 	*toolkit.BaseTool
 	remoteToolBase
+	rg ripgrepRunner
 }
 
 const remoteGrepDefaultLimit = searchcore.DefaultGrepLimit
@@ -197,7 +212,10 @@ func newRemoteGrepTool(cfg *Config, workspace *Workspace) *remoteGrepTool {
 		"required":             []string{"pattern"},
 		"additionalProperties": false,
 	}
-	tool := &remoteGrepTool{remoteToolBase: remoteToolBase{cfg: cfg, workspace: workspace}}
+	tool := &remoteGrepTool{
+		remoteToolBase: remoteToolBase{cfg: cfg, workspace: workspace},
+		rg:             resolveRipgrepRunner(),
+	}
 	tool.BaseTool = toolkit.NewBaseTool(
 		ToolGrep,
 		tool.describe("Search remote file contents with a regular expression; results are file:line:text."),
@@ -224,14 +242,24 @@ func (t *remoteGrepTool) Execute(ctx context.Context, params map[string]interfac
 	}
 	fileGlob, _ := params["glob"].(string)
 	limit := intParam(params, "limit", remoteGrepDefaultLimit)
-	result, grepErr := searchcore.Grep(ctx, searchcore.GrepOptions{
+	options := searchcore.GrepOptions{
 		Pattern:         pattern,
 		Path:            target,
 		Glob:            fileGlob,
 		CaseInsensitive: caseInsensitive,
 		Limit:           limit,
 		MaxFileBytes:    t.maxViewBytes(),
-	})
+	}
+	engine := "walker"
+	result, rgUsed, grepErr := t.rg.grep(ctx, options)
+	if rgUsed && grepErr == nil {
+		engine = "ripgrep"
+	} else {
+		if ctx != nil && ctx.Err() != nil {
+			return remoteErrorResult(contextErr(ctx)), nil
+		}
+		result, grepErr = searchcore.Grep(ctx, options)
+	}
 	if grepErr != nil {
 		if ctx != nil && ctx.Err() != nil {
 			return remoteErrorResult(contextErr(ctx)), nil
@@ -258,6 +286,7 @@ func (t *remoteGrepTool) Execute(ctx context.Context, params map[string]interfac
 		"files_scanned": result.FilesScanned,
 		"single_file":   result.SingleFile,
 		"is_truncated":  result.Truncated,
+		"engine":        engine,
 		"remote":        true,
 		"workspace":     t.workspace.Root(),
 	}
