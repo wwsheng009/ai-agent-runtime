@@ -82,3 +82,29 @@ func TestRemoteGrepPatternOptionsOverMCP(t *testing.T) {
 		t.Fatalf("invert_match should keep the non-matching lines:\n%s", inverted)
 	}
 }
+
+// TestRemoteGrepContextOverMCP proves the context parameters survive the MCP
+// schema validation and render the documented shapes: `path:line:text` for
+// matches, `path-line-text` for context, `--` between blocks.
+func TestRemoteGrepContextOverMCP(t *testing.T) {
+	root := t.TempDir()
+	content := "one\ntwo\nMATCH three\nfour\nfive\nsix\nMATCH seven\neight\n"
+	if err := os.WriteFile(filepath.Join(root, "ctx.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	out := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "MATCH", "path": "ctx.txt", "context": 1,
+	})
+	for _, want := range []string{"ctx.txt-2-two", "ctx.txt:3:MATCH three", "--", "ctx.txt:7:MATCH seven"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("context output missing %q:\n%s", want, out)
+		}
+	}
+}

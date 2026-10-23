@@ -185,10 +185,33 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 
 	patternLabel := strings.Join(patterns, " | ")
+	contextBefore, contextAfter := grepContextFromArgs(call.Args)
+	contextLineCount := 0
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "=== grep %q ===\n", patternLabel)
-	for _, item := range result.Matches {
-		fmt.Fprintf(&builder, "%s:%d:%s\n", paths.Relative(item.File), item.Line, item.Text)
+	if contextBefore > 0 || contextAfter > 0 {
+		// Context is produced by the shared expander, not by an engine flag:
+		// match lines keep the `path:line:text` shape, neighbouring lines use
+		// ripgrep's `path-line-text` shape, and blocks are separated by `--`.
+		expanded := ExpandGrepContext(result.Matches, contextBefore, contextAfter)
+		contextLineCount = len(expanded)
+		printedAny := false
+		for _, line := range expanded {
+			if line.GroupStart && printedAny {
+				builder.WriteString("--\n")
+			}
+			relative := paths.Relative(line.File)
+			if line.IsMatch {
+				fmt.Fprintf(&builder, "%s:%d:%s\n", relative, line.Line, line.Text)
+			} else {
+				fmt.Fprintf(&builder, "%s-%d-%s\n", relative, line.Line, line.Text)
+			}
+			printedAny = true
+		}
+	} else {
+		for _, item := range result.Matches {
+			fmt.Fprintf(&builder, "%s:%d:%s\n", paths.Relative(item.File), item.Line, item.Text)
+		}
 	}
 	if len(result.Matches) == 0 {
 		builder.WriteString("(no matches)\n")
@@ -197,20 +220,23 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		fmt.Fprintf(&builder, "\n[truncated at %d matches; narrow the pattern or glob]\n", options.Limit)
 	}
 	metadata := map[string]any{
-		"pattern":       patternLabel,
-		"patterns":      patterns,
-		"path":          paths.Relative(target),
-		"matches":       len(result.Matches),
-		"files_scanned": result.FilesScanned,
-		"single_file":   result.SingleFile,
-		"is_truncated":  result.Truncated,
-		"invert_match":  options.InvertMatch,
-		"offset":        options.Offset,
-		"next_offset":   options.Offset + len(result.Matches),
-		"has_more":      result.Truncated,
-		"engine":        engine,
-		"hidden_files":  true,
-		"ignore_files":  false,
+		"pattern":        patternLabel,
+		"patterns":       patterns,
+		"path":           paths.Relative(target),
+		"matches":        len(result.Matches),
+		"files_scanned":  result.FilesScanned,
+		"single_file":    result.SingleFile,
+		"is_truncated":   result.Truncated,
+		"invert_match":   options.InvertMatch,
+		"context_before": contextBefore,
+		"context_after":  contextAfter,
+		"context_lines":  contextLineCount,
+		"offset":         options.Offset,
+		"next_offset":    options.Offset + len(result.Matches),
+		"has_more":       result.Truncated,
+		"engine":         engine,
+		"hidden_files":   true,
+		"ignore_files":   false,
 	}
 	result0 := &toolcore.Result{
 		Success:    true,
@@ -282,6 +308,45 @@ func intArg(args map[string]any, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+// intArgOK reports an integer argument that the caller actually supplied, so
+// "not passed" stays distinguishable from "passed as 0".
+func intArgOK(args map[string]any, key string) (int, bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	switch value := args[key].(type) {
+	case int:
+		return value, true
+	case int32:
+		return int(value), true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), true
+	case float32:
+		return int(value), true
+	default:
+		return 0, false
+	}
+}
+
+// grepContextFromArgs mirrors the local tool's precedence exactly: `context`
+// sets both sides, then before_context/after_context override their own side.
+// The shared clamp is applied afterwards.
+func grepContextFromArgs(args map[string]any) (int, int) {
+	before, after := 0, 0
+	if value, ok := intArgOK(args, "context"); ok {
+		before, after = value, value
+	}
+	if value, ok := intArgOK(args, "before_context"); ok {
+		before = value
+	}
+	if value, ok := intArgOK(args, "after_context"); ok {
+		after = value
+	}
+	return ClampGrepContextLines(before), ClampGrepContextLines(after)
 }
 
 // boolArg reports whether any of the listed spellings is set to true.

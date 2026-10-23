@@ -274,6 +274,21 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --invert-match/-v：输出不匹配模式的行。",
 			},
+			"context": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "显示匹配行前后各 N 行上下文（兼容 rg 的 --context/-C，上限 10）。匹配行保持 path:line:text，上下文行用 rg 的 path-line-text，块之间用 -- 分隔。",
+			},
+			"before_context": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "兼容 rg 的 --before-context/-B：显示匹配行前 N 行（上限 10）。",
+			},
+			"after_context": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "兼容 rg 的 --after-context/-A：显示匹配行后 N 行（上限 10）。",
+			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,

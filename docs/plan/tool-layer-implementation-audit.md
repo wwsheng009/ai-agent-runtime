@@ -136,9 +136,15 @@
   做 rg vs walker 一致性，`grep_conformance_test.go` 再经真实 MCP session 验证。
   同时修正 remote grep schema 的 `required`：`patterns` 可替代 `pattern`，
   「至少一个模式」是 handler 规则而非 schema 规则（否则 MCP 校验会拒绝合法调用）。
+  `grep` 的 `context`/`before_context`/`after_context` 也进 core：`ExpandGrepContext`
+  在 core 内重读匹配文件生成上下文窗口（rg 不传 `--context`，两引擎不可能渲染出
+  不同窗口），匹配行 `path:line:text`、上下文行 `path-line-text`、块间 `--`，
+  上限统一为 `MaxGrepContextLines=10`；本地的优先级规则（`context` 设两侧，
+  `before_context`/`after_context` 各覆盖一侧）由 `grepContextFromArgs` 共享。
+  `remotetools/grep_context_conformance_test.go` 要求 rg 与 walker 输出逐字节相同。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  本地 `grep` 主流程仍为 legacy（模式语义已同构；rg 优选、context/stats/ignore/type/
-  rg_args 等仍在本地）；
+  本地 `grep` 主流程仍为 legacy（模式语义与 context 语义已进 core；rg 优选、
+  stats/ignore/type/rg_args 与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。
