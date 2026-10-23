@@ -743,3 +743,56 @@ CI 机器上补齐，届时更新本表。
 运维注意：238 的 `aicli-remote-238.service` 当前无法由 `n9e` 无密码
 `systemctl restart`；canary 通过既有 `start-remote-238.sh` fallback 启动。
 生产重启必须由 root installer/发布流水线完成。
+
+### 11.8 T3 / T10 收口与新 backlog（2026-10-23）
+
+两项“威胁模型缺口/部分覆盖”经核查后，**缺的是机制而不只是测试**：
+
+- **T3 tool poisoning**：§8.7.3 写了描述 4 KiB / schema 64 KiB / 单 server
+  256 工具三条上限，但 `registry.RegisterTool` 把外部 `tool.Description`
+  原样透传，三条都不存在（`tool-schema-measure` 只测 builtin 自身开销，
+  外部 MCP 面无任何界）。现已全部落在注册入口，且按 **canonical 形态**测量
+  （key 重排/注解剥离无法绕过）：描述 rune 安全截断 + 截断标记计入预算内 +
+  `tool_description_truncated` metadata；schema 超限 fail-closed 拒绝并
+  quarantine（截断的 schema 是非法契约）；工具数默认 256、可经
+  `mcpServers.<name>.maxTools` 上调或置负数取消。另给 quarantine 表本身
+  加了界（512 + `QuarantineOverflow()` 计数），否则“拒绝记录”会变成新的
+  内存 DoS。提交：`93addf20`、`fcd1c9ee`。
+- **T10 429/Retry-After**：client 侧原本**零处理**。实现过程中发现一个
+  必须避免的错误方向：MCP SDK 已把 429 归为 transient
+  （`isTransientHTTPStatus`），若把 429 改写成 error 会移除该分类，
+  导致**单次限流就把 session 拆掉**，比原来的“错误不透明”更糟。因此
+  `rateLimitRoundTripper` 只在返回前等待 `Retry-After`，响应原样透传；
+  等待上限 5s（防恶意 header 拖死客户端）、context 取消即退出并关闭 body、
+  非 429 状态一律不动（保证 401/403 OAuth 重放与 wire cap 行为不变）。
+  提交：`849e1c92`、`fd18c8a0`。
+
+顺带修的两个既有缺陷（stash 复现确认非本次引入）：
+
+- `mcp/registry/registry_test.go` 缺 `!win7compat` tag，使
+  `go vet -tags win7compat` 对 stub 构建报假失败；
+- `mcp/manager/manager_layered_test.go` 的 `connectCalls++` 在
+  `StartAsync` 并发下是真数据竞争，`-race` 必红（已改 `atomic.Int32`）。
+
+新增 backlog：
+
+| # | 项 | 说明 |
+|---|----|------|
+| B1 | `remotetools` legacy `job_*` 在 `-race` 下竞争 | `JobManager.supervise` 写 vs `remoteJobStartTool.Execute` 读（`jobs.go:171`）；`TestJobsSurviveServerRestart` 失败。该路径默认关闭（`--legacy-jobs`），不在 v1 core，但阻塞 `remotetools` 的 `-race` 证据 |
+| B2 | `mcp/auth` 在 `-race` 下竞争 | `TestAuthenticateNoBrowserPrintsUsableURL`、`TestAuthenticateBrowserFailurePrintsURL`；非工具层范围 |
+| B3 | `docs/mcp/chrome-devtools.md` 的 YAML 示例未含 `maxTools` | 该示例已有 `trustLevel`/`maxParallelCalls`，只是新增的 `maxTools` 没有可抄样例；字段语义已记在 `docs/mcp/mcp-tool-llm-integration.md` §2.7 |
+| B4 | §11.1 全部 P0/P1 复选框仍未勾选 | 需**独立**安全复审（§17.5.5 要求非实现者）；`P1 工具清单双向一致` 尚无对账测试，T13 仍属发布流程缺口 |
+
+验证（均 PASS）：`go build ./...`、`go vet ./internal/mcp/...`、
+`go build -tags win7compat ./internal/mcp/...`、
+`go test -p 1 ./internal/mcp/... ./internal/tools ./internal/toolkit/...
+./internal/remotetools ./internal/policy ./internal/toolcore/...
+./internal/toolregistry ./internal/toolctl ./internal/skill
+./internal/toolschema`、
+`go test -race ./internal/mcp/transport ./internal/mcp/registry
+./internal/mcp/manager`；238 smoke 在改动后复跑仍 8/8 通过。
+
+`cmd/aicli/commands` 单项复跑仍未完成：Windows 本机编译期
+`VirtualAlloc errno=1455`；WSL 下该包含 Windows 专属 ConPTY 测试符号
+（`chatTTYConPTYScript` 等）在 Linux 构建失败。需要资源充足的 Windows
+runner，不是代码回归。
