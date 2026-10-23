@@ -20,7 +20,7 @@
 | T7 | SSRF / 恶意 URL | v1 fetch/download/web_search 仅 local-only，不进远程 | `toolkit/tools/fetch_test.go`、`download_test.go`（本地边界）；远程 profile 不含网络工具 | ⚠️ 设计上 v1 deferred；远程化前必须补 SSRF/DNS/重定向测试 |
 | T8 | prompt injection（远程文件/网页） | 外部内容标注不可信；policy 不读内容做授权 | `mcp_result_trust_test.go`（trust 只来自 config）；web_search 外部内容 notice（工具描述） | ⚠️ 部分覆盖：缺“不可信内容不能触发授权升级”的端到端测试 |
 | T9 | subagent 权限放大 | read-only boundary、BlockDelegation、工具白名单 | `agent/read_only_tool_surface_test.go`、`policy/tool_policy_test.go::TestToolExecutionPolicy_BlockDelegationOverridesRuntimeEssentialBypass`、`agent/spawn_subagents_writer_policy_test.go` | ✅ 已覆盖 |
-| T10 | 并发/大输出 DoS | maxConcurrentCalls + 429、输出硬上限、超时/进程组清理 | `remotetools/concurrency_test.go::TestConcurrencyMiddlewareLimitsInflight`、`remotetools/metrics_test.go`、`gateway/ratelimit/ratelimit_test.go::TestMiddlewareReturns429`、`toolcore/output` fold 测试、`shellexec/capture_bench_test.go`（capture ≤ limit 断言） | ⚠️ 部分覆盖：429/Retry-After 在 MCP client 侧的映射测试未见 |
+| T10 | 并发/大输出 DoS | maxConcurrentCalls + 429、输出硬上限、超时/进程组清理 | server 侧：`remotetools/concurrency_test.go::TestConcurrencyMiddlewareLimitsInflight`（429 + `Retry-After: 1`）、`remotetools/metrics_test.go`、`gateway/ratelimit/ratelimit_test.go::TestMiddlewareReturns429`；client 侧：`mcp/transport/rate_limit_test.go::TestRateLimitRoundTripperWaitsThenReturns`（遵循 Retry-After）、`TestRateLimitRoundTripperPreservesResponse`（429 仍作为响应透传，避免 SDK 拆会话）、`TestParseRetryAfterBoundedAndLenient`（5s 上限/异常值不等待）、`TestRateLimitRoundTripperContextCancel`、`TestRateLimitRoundTripperLeavesOtherStatusesAlone`；输出侧：`toolcore/output` fold 测试、`shellexec/capture_bench_test.go`（capture ≤ limit 断言）、`mcp/registry/tool_poisoning_caps_test.go::TestQuarantineTableIsBounded` | ✅ 已覆盖（429/Retry-After 双向；client 不破坏 SDK transient 语义） |
 | T11 | direct CLI 绕过审批/策略 | 同一 `policy.Engine`；`--yes` 只确认 ask；无 bypass 开关 | `internal/toolctl/cli_test.go::TestHardAskIsNotApprovedByYes`、`TestShellRequiresYesForApproval`、`TestPermissionModePlanDeniesWrites`、`TestServeHTTPRequiresTokenForNonLoopback` | ✅ 已覆盖 |
 | T12 | token 泄漏/重放 | TLS/mTLS、token 轮换、日志只存 hash、非回环强制 token | `remotetools/p4_test.go::TestMutualTLSAuthorizesWithoutToken`、`TestMutualTLSRejectsWithoutClientCert`、`TestMutualTLSRequiresTLSFiles`；`toolctl/cli_test.go::TestServeHTTPRequiresTokenForNonLoopback` | ⚠️ 部分覆盖：token 轮换/重放窗口未见测试 |
 | T13 | 构建/部署链篡改 | commit/version pinning、发布产物校验、最小权限、canary | 部署流程文档；无仓库内自动化测试 | ⚠️ **流程缺口**：需发布签名/校验与 canary 记录 |
@@ -28,8 +28,15 @@
 ## 2. 结论
 
 - 已覆盖：T1、T1b、T2、T2b、T3、T4、T5、T9、T11；
-- 部分覆盖：T6、T7、T8、T10、T12；
+- 部分覆盖：T6、T7、T8、T12；
 - 明确缺口：T13（构建链，属发布流程而非仓库内测试）。
+
+T10 补充说明：client 侧原本**没有任何** 429 处理，`Retry-After` 被丢弃；
+`fix(mcp): honor Retry-After on remote 429` 之后才有双向覆盖。注意
+`remotetools` 的 legacy `job_*` 路径在 `-race` 下存在既有数据竞争
+（`JobManager.supervise` 写 vs `remoteJobStartTool.Execute` 读，
+`jobs.go:171`）；该路径默认关闭（`--legacy-jobs`），不在 v1 core，
+作为独立 backlog 项处理。
 
 T3 的“不执行描述中的指令”属行为约束（policy 不以描述内容做授权、外部内容按数据处理），
 由 T8 的端到端项继续跟踪；本行只声明**上限/只读/命名**三条机制已有测试。
