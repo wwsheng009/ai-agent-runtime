@@ -212,6 +212,20 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "string",
 				"description": "Regular expression to search for (ripgrep syntax).",
 			},
+			"regexp": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --regexp/-e 单模式写法；等价于 pattern。",
+			},
+			"patterns": map[string]interface{}{
+				"anyOf": []map[string]interface{}{
+					{"type": "string"},
+					{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"description": "多个模式按 OR 语义匹配，等价于多次 rg -e。可传字符串数组，也可传单个字符串。",
+			},
 			"path": map[string]interface{}{
 				"type":        "string",
 				"description": "File or directory to search. Default: workspace root.",
@@ -222,7 +236,43 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 			},
 			"case_insensitive": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Case-insensitive match.",
+				"description": "兼容别名；等价于 ignore_case=true。",
+			},
+			"literal": map[string]interface{}{
+				"type":        "boolean",
+				"description": "是否为字面文本搜索，关闭正则特殊字符解释（默认为 false）。",
+			},
+			"fixed_strings": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --fixed-strings/-F；等价于 literal=true。",
+			},
+			"ignore_case": map[string]interface{}{
+				"type":        "boolean",
+				"description": "是否忽略大小写；兼容 rg 的 --ignore-case/-i。",
+			},
+			"case_sensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --case-sensitive/-s。true 时会覆盖 ignore_case/smart_case，强制区分大小写。",
+			},
+			"smart_case": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --smart-case/-S。仅当模式中没有大写字母时自动忽略大小写。",
+			},
+			"word": map[string]interface{}{
+				"type":        "boolean",
+				"description": "是否匹配完整单词（默认为 false）。例如搜 err 不会匹配 error/stderr。",
+			},
+			"word_regexp": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --word-regexp/-w；等价于 word=true。",
+			},
+			"line_regexp": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --line-regexp/-x：要求整行匹配。",
+			},
+			"invert_match": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --invert-match/-v：输出不匹配模式的行。",
 			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
@@ -235,7 +285,11 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"description": "Skip the first N matches, then apply limit. Use the returned next_offset to page.",
 			},
 		},
-		"required":             []string{"pattern"},
+		// At least one pattern spelling is required, but which one is a
+		// handler-level rule: `patterns` is a valid substitute for `pattern`,
+		// so binding `required` to the single-value spelling would reject
+		// calls the shared implementation fully supports.
+		"required":             []string{},
 		"additionalProperties": false,
 	})
 	if err != nil {

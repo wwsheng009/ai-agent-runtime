@@ -174,14 +174,43 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 	if globMatcher != nil {
 		args = append(args, "--glob", opts.Glob)
 	}
-	if opts.CaseInsensitive {
+	if opts.Literal {
+		args = append(args, "--fixed-strings")
+	}
+	if opts.Word {
+		args = append(args, "--word-regexp")
+	}
+	if opts.LineRegexp {
+		args = append(args, "--line-regexp")
+	}
+	if opts.InvertMatch {
+		args = append(args, "--invert-match")
+	}
+	// The case mode is resolved once, in the shared core, so the flag rg
+	// receives is the same boolean the pure-Go walker compiles into its
+	// expression. rg's own --smart-case is deliberately unused: its
+	// multi-pattern behaviour is not something the walker can mirror.
+	patterns := opts.Patterns
+	if len(patterns) == 0 && opts.Pattern != "" {
+		patterns = []string{opts.Pattern}
+	}
+	if searchcore.EffectiveIgnoreCase(patterns, searchcore.GrepPatternOptions{
+		IgnoreCase:    opts.IgnoreCase || opts.CaseInsensitive,
+		CaseSensitive: opts.CaseSensitive,
+		SmartCase:     opts.SmartCase,
+	}) {
 		args = append(args, "--ignore-case")
+	} else if opts.CaseSensitive {
+		args = append(args, "--case-sensitive")
 	}
 	if opts.MaxFileBytes > 0 {
 		args = append(args, "--max-filesize", strconv.Itoa(opts.MaxFileBytes))
 	}
 	args = append(args, r.skipArgs()...)
-	args = append(args, "-e", opts.Pattern, "--", opts.Path)
+	for _, pattern := range patterns {
+		args = append(args, "-e", pattern)
+	}
+	args = append(args, "--", opts.Path)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

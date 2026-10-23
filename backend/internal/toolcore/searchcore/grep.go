@@ -13,10 +13,22 @@ const (
 )
 
 type GrepOptions struct {
-	Pattern         string
-	Path            string
-	Glob            string
+	Pattern string
+	// Patterns is the batch spelling (rg -e ...). When it is non-empty the
+	// single-value Pattern is ignored, matching the handler's precedence.
+	Patterns []string
+	Path     string
+	Glob     string
+	// CaseInsensitive is the legacy alias kept for callers that predate
+	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
+	Literal         bool
+	IgnoreCase      bool
+	CaseSensitive   bool
+	SmartCase       bool
+	Word            bool
+	LineRegexp      bool
+	InvertMatch     bool
 	Limit           int
 	MaxFileBytes    int
 	// Offset skips the first N matches before applying Limit. It is the
@@ -46,7 +58,14 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	if opts.Offset < 0 {
 		opts.Offset = 0
 	}
-	compiled, err := CompileRegexp(opts.Pattern, opts.CaseInsensitive)
+	compiled, err := CompileGrepPattern(grepPatterns(opts), GrepPatternOptions{
+		Literal:       opts.Literal,
+		IgnoreCase:    opts.IgnoreCase || opts.CaseInsensitive,
+		CaseSensitive: opts.CaseSensitive,
+		SmartCase:     opts.SmartCase,
+		Word:          opts.Word,
+		LineRegexp:    opts.LineRegexp,
+	})
 	if err != nil {
 		return GrepResult{}, err
 	}
@@ -90,7 +109,8 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			if !validUTF8(display) {
 				return nil
 			}
-			if !compiled.Match(display) {
+			matched := compiled.Match(display)
+			if matched == opts.InvertMatch {
 				continue
 			}
 			result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
@@ -135,6 +155,18 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 
 	ApplyGrepWindow(&result, opts)
 	return result, nil
+}
+
+// grepPatterns returns the pattern list a GrepOptions carries, preferring the
+// batch spelling exactly like the handler does.
+func grepPatterns(opts GrepOptions) []string {
+	if len(opts.Patterns) > 0 {
+		return opts.Patterns
+	}
+	if opts.Pattern != "" {
+		return []string{opts.Pattern}
+	}
+	return nil
 }
 
 // ApplyGrepWindow applies the shared offset/limit window to raw matches.

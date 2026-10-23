@@ -127,8 +127,18 @@
   `view` 的 `files/compact` 已进 `viewcore` handler；`viewcore.Schema()` 是唯一 schema 来源，
   本地与 remote 共用同一份参数声明，remote 只按能力用 `toolcore.FilterSchemaParams`
   裁掉依赖代码索引的 `symbol`（`remotetools/view_conformance_test.go`），不再各自维护弱 schema。
+  `grep` 的模式语义已上移 `searchcore`：`CompileGrepPattern`/`EffectiveIgnoreCase`
+  是 `literal`/`word`/`line_regexp`/`ignore_case`/`case_sensitive`/`smart_case`/
+  多 `patterns` OR/`invert_match` 的唯一定义。walker 编译同一表达式，rg 引擎接收由
+  同一解析产生的旗标（刻意不使用 rg `--smart-case`，多模式行为由 core 决定），
+  本地 legacy `grep` 的 `compileGrepPattern` 改为调用 core，只保留 rg_args/PCRE 提示。
+  remote schema 补齐同一批参数，`remotetools/grep_pattern_conformance_test.go` 逐参数
+  做 rg vs walker 一致性，`grep_conformance_test.go` 再经真实 MCP session 验证。
+  同时修正 remote grep schema 的 `required`：`patterns` 可替代 `pattern`，
+  「至少一个模式」是 handler 规则而非 schema 规则（否则 MCP 校验会拒绝合法调用）。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  本地 `grep` 主流程仍为 legacy（rg 优选、context/stats/ignore 尚未进 `searchcore`）；
+  本地 `grep` 主流程仍为 legacy（模式语义已同构；rg 优选、context/stats/ignore/type/
+  rg_args 等仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。

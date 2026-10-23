@@ -137,8 +137,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if failure != nil {
 		return failure, nil
 	}
-	pattern := stringArg(call.Args, "pattern")
-	if strings.TrimSpace(pattern) == "" {
+	patterns := GrepPatternsFromArgs(call.Args)
+	if len(patterns) == 0 {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "pass pattern", nil), nil
 	}
 	target, err := paths.Resolve(stringArg(call.Args, "path"))
@@ -150,12 +150,18 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
 		}
 	}
-	caseInsensitive, _ := call.Args["case_insensitive"].(bool)
 	options := GrepOptions{
-		Pattern:         pattern,
+		Patterns:        patterns,
 		Path:            target,
 		Glob:            stringArg(call.Args, "glob"),
-		CaseInsensitive: caseInsensitive,
+		CaseInsensitive: boolArg(call.Args, "case_insensitive"),
+		Literal:         boolArg(call.Args, "literal", "fixed_strings"),
+		IgnoreCase:      boolArg(call.Args, "ignore_case"),
+		CaseSensitive:   boolArg(call.Args, "case_sensitive"),
+		SmartCase:       boolArg(call.Args, "smart_case"),
+		Word:            boolArg(call.Args, "word", "word_regexp"),
+		LineRegexp:      boolArg(call.Args, "line_regexp"),
+		InvertMatch:     boolArg(call.Args, "invert_match"),
 		Limit:           intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:    captureLimit(call),
 		Offset:          intArg(call.Args, "offset", 0),
@@ -175,11 +181,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			return toolcore.Error(toolcore.ErrTimeout, "retry with a narrower path or a longer timeout", ctx.Err()), nil
 		}
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check the regex/glob syntax and narrow the path",
-			fmt.Errorf("grep %q in %s: %v", pattern, paths.Relative(target), grepErr)), nil
+			fmt.Errorf("grep %q in %s: %v", strings.Join(patterns, " | "), paths.Relative(target), grepErr)), nil
 	}
 
+	patternLabel := strings.Join(patterns, " | ")
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "=== grep %q ===\n", pattern)
+	fmt.Fprintf(&builder, "=== grep %q ===\n", patternLabel)
 	for _, item := range result.Matches {
 		fmt.Fprintf(&builder, "%s:%d:%s\n", paths.Relative(item.File), item.Line, item.Text)
 	}
@@ -190,12 +197,14 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		fmt.Fprintf(&builder, "\n[truncated at %d matches; narrow the pattern or glob]\n", options.Limit)
 	}
 	metadata := map[string]any{
-		"pattern":       pattern,
+		"pattern":       patternLabel,
+		"patterns":      patterns,
 		"path":          paths.Relative(target),
 		"matches":       len(result.Matches),
 		"files_scanned": result.FilesScanned,
 		"single_file":   result.SingleFile,
 		"is_truncated":  result.Truncated,
+		"invert_match":  options.InvertMatch,
 		"offset":        options.Offset,
 		"next_offset":   options.Offset + len(result.Matches),
 		"has_more":      result.Truncated,
@@ -273,4 +282,14 @@ func intArg(args map[string]any, key string, fallback int) int {
 	default:
 		return fallback
 	}
+}
+
+// boolArg reports whether any of the listed spellings is set to true.
+func boolArg(args map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if value, ok := args[key].(bool); ok && value {
+			return true
+		}
+	}
+	return false
 }

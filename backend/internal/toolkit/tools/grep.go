@@ -22,6 +22,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -1816,41 +1817,24 @@ func (g *GrepTool) parseOptions(ctx context.Context, params map[string]interface
 }
 
 func compileGrepPattern(patterns []string, literal, ignoreCase, word, lineRegexp bool) (*regexp.Regexp, error) {
-	if len(patterns) == 0 {
-		return nil, fmt.Errorf("pattern 参数缺失或无效")
+	// The pattern semantics live in searchcore so the local tool, the remote
+	// tool and the pure-Go walker cannot drift apart. Only the surface hints
+	// below are local: rg_args is a local-only escape hatch to ripgrep's PCRE
+	// engine, which the shared core must not know about.
+	re, err := searchcore.CompileGrepPattern(patterns, searchcore.GrepPatternOptions{
+		Literal:    literal,
+		IgnoreCase: ignoreCase,
+		Word:       word,
+		LineRegexp: lineRegexp,
+	})
+	if err == nil {
+		return re, nil
 	}
-
-	exprs := make([]string, 0, len(patterns))
-	for _, pattern := range patterns {
-		expr := pattern
-		if literal {
-			expr = regexp.QuoteMeta(pattern)
-		}
-		if word {
-			expr = `\b` + expr + `\b`
-		}
-		if lineRegexp {
-			expr = `^(?:` + expr + `)$`
-		}
-		exprs = append(exprs, expr)
+	msg := err.Error() + "；PCRE 语法可改用 rg_args:[\"-P\"]（需本机 rg）"
+	if looksLikePCREOnlyPatterns(patterns) {
+		msg += "。检测到 lookaround/后行断言等 PCRE 语法（如 (?! / (?= / (?<= / (?<!），Go 内置 regexp 不支持；请设置 rg_args:[\"-P\"]（需本机 rg），或改写为不含 lookaround 的模式 / 改用 literal=true"
 	}
-
-	expr := exprs[0]
-	if len(exprs) > 1 {
-		expr = `(?:` + strings.Join(exprs, `)|(?:`) + `)`
-	}
-	if ignoreCase {
-		expr = `(?i)` + expr
-	}
-	re, err := regexp.Compile(expr)
-	if err != nil {
-		msg := fmt.Sprintf("正则表达式无效: %v。若要搜索字面文本请设置 literal=true（或 fixed_strings=true）；PCRE 语法可改用 rg_args:[\"-P\"]（需本机 rg）", err)
-		if looksLikePCREOnlyPattern(expr) || looksLikePCREOnlyPatterns(patterns) {
-			msg += "。检测到 lookaround/后行断言等 PCRE 语法（如 (?! / (?= / (?<= / (?<!），Go 内置 regexp 不支持；请设置 rg_args:[\"-P\"]（需本机 rg），或改写为不含 lookaround 的模式 / 改用 literal=true"
-		}
-		return nil, fmt.Errorf("%s", msg)
-	}
-	return re, nil
+	return nil, fmt.Errorf("%s", msg)
 }
 
 // looksLikePCREOnlyPattern reports patterns that commonly fail on Go's RE2
