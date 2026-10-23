@@ -41,6 +41,10 @@ type GrepOptions struct {
 	// "unset", which means no per-file cap.
 	MaxCount    int
 	MaxCountSet bool
+	// OnlyMatching emits one entry per matched fragment instead of the whole
+	// line. InvertMatch keeps whole lines (rg -o -v), files mode ignores it,
+	// and in count mode the per-file count becomes a match count (rg -o -c).
+	OnlyMatching bool
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -61,7 +65,10 @@ type GrepOptions struct {
 type GrepMatch struct {
 	File string
 	Line int
-	Text string
+	// Column is the 1-based byte column of the match, set only when
+	// only_matching produced the entry (0 elsewhere).
+	Column int
+	Text   string
 }
 
 type GrepResult struct {
@@ -149,7 +156,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 		defer file.Close()
 		reader.reset(file)
-		fileMatches := 0
+		fileLines := 0
 		for {
 			lineNo, text, truncated, ok := reader.next()
 			if !ok {
@@ -163,11 +170,27 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			if matched == opts.InvertMatch {
 				continue
 			}
-			if opts.MaxCountSet && fileMatches >= opts.MaxCount {
+			if opts.MaxCountSet && fileLines >= opts.MaxCount {
 				break
 			}
-			result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
-			fileMatches++
+			// Fragments are the output unit when only_matching is on. Invert
+			// keeps whole lines, exactly like rg -o -v.
+			if opts.OnlyMatching && !opts.InvertMatch && mode != GrepModeFiles {
+				for _, loc := range compiled.FindAllIndex(display, -1) {
+					result.Matches = append(result.Matches, GrepMatch{
+						File:   path,
+						Line:   lineNo,
+						Column: loc[0] + 1,
+						Text:   string(display[loc[0]:loc[1]]),
+					})
+					if GrepPageComplete(result.Matches, mode, opts) {
+						return filepath.SkipAll
+					}
+				}
+			} else {
+				result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
+			}
+			fileLines++
 			if GrepPageComplete(result.Matches, mode, opts) {
 				return filepath.SkipAll
 			}

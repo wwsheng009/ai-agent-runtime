@@ -320,6 +320,12 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	if opts.MaxCountSet {
 		args = append(args, "--max-count", strconv.Itoa(opts.MaxCount))
 	}
+	// Invert keeps whole lines (rg -o -v) and files mode only needs existence,
+	// so the flag is passed only where fragments are the output unit.
+	onlyMatching := opts.OnlyMatching && !opts.InvertMatch && mode != searchcore.GrepModeFiles
+	if onlyMatching {
+		args = append(args, "--only-matching")
+	}
 	args = append(args, r.skipArgs()...)
 	for _, pattern := range patterns {
 		args = append(args, "-e", pattern)
@@ -379,12 +385,44 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 			case event.Data.Lines.Text != nil:
 				text = *event.Data.Lines.Text
 			}
+			// lineText keeps the raw line (trailing newline included) because
+			// submatch offsets point into it; text is the display form.
+			lineText := text
 			text = strings.TrimSuffix(strings.TrimSuffix(text, "\n"), "\r")
 			if !utf8.ValidString(text) {
 				continue
 			}
 			if len(text) > searchcore.MaxGrepLineBytes {
 				text = text[:searchcore.MaxGrepLineBytes] + "…"
+			}
+			if onlyMatching && len(event.Data.Submatches) > 0 {
+				for _, sub := range event.Data.Submatches {
+					if sub.Start < 0 || sub.End > len(lineText) || sub.Start >= sub.End {
+						continue
+					}
+					fragment := strings.TrimSuffix(strings.TrimSuffix(lineText[sub.Start:sub.End], "\n"), "\r")
+					if !utf8.ValidString(fragment) {
+						continue
+					}
+					if len(fragment) > searchcore.MaxGrepLineBytes {
+						fragment = fragment[:searchcore.MaxGrepLineBytes] + "…"
+					}
+					result.Matches = append(result.Matches, searchcore.GrepMatch{
+						File:   matchPath,
+						Line:   event.Data.LineNumber,
+						Column: sub.Start + 1,
+						Text:   fragment,
+					})
+					if searchcore.GrepPageComplete(result.Matches, mode, opts) {
+						truncated = true
+						cancel()
+						break
+					}
+				}
+				if truncated {
+					break
+				}
+				continue
 			}
 			result.Matches = append(result.Matches, searchcore.GrepMatch{
 				File: matchPath,
@@ -512,7 +550,14 @@ type rgJSONEvent struct {
 			Bytes *string `json:"bytes"`
 		} `json:"lines"`
 		LineNumber int `json:"line_number"`
-		Stats      struct {
+		// Submatches carries one entry per matched fragment when ripgrep runs
+		// with --only-matching; offsets are byte positions into the raw line
+		// (including its trailing newline).
+		Submatches []struct {
+			Start int `json:"start"`
+			End   int `json:"end"`
+		} `json:"submatches"`
+		Stats struct {
 			FilesSearched int `json:"files_searched"`
 		} `json:"stats"`
 	} `json:"data"`

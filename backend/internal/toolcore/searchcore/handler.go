@@ -154,6 +154,16 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if maxCountSet && maxCount < 0 {
 		maxCount = 0
 	}
+	onlyMatching := boolArg(call.Args, "only_matching")
+	contextBefore, contextAfter := grepContextFromArgs(call.Args)
+	if onlyMatching && (contextBefore > 0 || contextAfter > 0) {
+		// Reporting the conflict beats silently dropping one of the two
+		// parameters: the fragment output unit and the line-window expansion
+		// cannot both own the same line.
+		return toolcore.Error(toolcore.ErrInvalidArgument,
+			"drop context or only_matching: fragment output and context windows are not combined by the shared core yet",
+			fmt.Errorf("only_matching 与 context 不能同时使用")), nil
+	}
 	options := GrepOptions{
 		Patterns:        patterns,
 		Path:            roots[0],
@@ -174,6 +184,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		InvertMatch:     boolArg(call.Args, "invert_match"),
 		MaxCount:        maxCount,
 		MaxCountSet:     maxCountSet,
+		OnlyMatching:    onlyMatching,
 		Limit:           intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:    captureLimit(call),
 		Offset:          intArg(call.Args, "offset", 0),
@@ -197,7 +208,6 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 
 	patternLabel := strings.Join(patterns, " | ")
-	contextBefore, contextAfter := grepContextFromArgs(call.Args)
 	contextLineCount := 0
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "=== grep %q ===\n", patternLabel)
@@ -232,6 +242,10 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		}
 	default:
 		for _, item := range result.Matches {
+			if item.Column > 0 {
+				fmt.Fprintf(&builder, "%s:%d:%d:%s\n", paths.Relative(item.File), item.Line, item.Column, item.Text)
+				continue
+			}
 			fmt.Fprintf(&builder, "%s:%d:%s\n", paths.Relative(item.File), item.Line, item.Text)
 		}
 	}
@@ -267,6 +281,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"type_not":           options.TypeNot,
 		"max_count":          options.MaxCount,
 		"max_count_explicit": options.MaxCountSet,
+		"only_matching":      options.OnlyMatching,
 		"include_patterns":   len(includeGlobs),
 		"exclude_patterns":   len(excludeGlobs),
 		"context_before":     contextBefore,

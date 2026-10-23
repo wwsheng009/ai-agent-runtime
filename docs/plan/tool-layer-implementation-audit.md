@@ -173,10 +173,17 @@
   `TestGrepTool_MaxCountZeroBuiltin` 一致），未设置表示不限；walker 自己实现每文件
   计数上限，rg 走 `--max-count`，count 模式计数同受上限。上限是搜索范围参数而不是
   分页参数，因此 `is_truncated` 仍只表示页边界。
+  `grep` 的 `only_matching` 进 core，契约按真实 rg 行为逐条实测后写死：片段条目带
+  1-based 字节列号（walker 用 `FindAllIndex` 偏移，rg 用 JSON `submatches` 偏移），
+  **分页单位随之变成片段**；`invert_match` 同用时回退整行（= rg `-o -v`）；count
+  模式下计数变成匹配次数（= rg `-o -c`，实测 `rg -o -c` 对「一行两匹配」计 2）；
+  `max_count` 仍按**匹配行**计数（= rg `-m 1 -o` 输出首行全部片段）；files 模式不受
+  影响。`only_matching + context` 明确报错而不是静默丢弃参数——两个参数都想拥有同
+  一行的渲染权，共享核心暂不支持该组合。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
-  type/type_not、max_count、多根语义已进 core；files_without、stats/ignore 族、
-  only_matching 与本地上下文渲染格式仍在本地）；
+  type/type_not、max_count、only_matching、多根语义已进 core；files_without、
+  stats/ignore 族与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。

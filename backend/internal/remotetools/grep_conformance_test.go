@@ -1,10 +1,13 @@
 package remotetools_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
 )
@@ -320,5 +323,51 @@ func TestRemoteGrepMaxCountOverMCP(t *testing.T) {
 	})
 	if !strings.Contains(suppressed, "(no matches)") {
 		t.Fatalf("max_count=0 must suppress every match:\n%s", suppressed)
+	}
+}
+
+func callToolExpectingError(t *testing.T, ctx context.Context, session *mcp.ClientSession, name string, args map[string]interface{}) string {
+	t.Helper()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("call %s: %v", name, err)
+	}
+	if !result.IsError {
+		t.Fatalf("tool %s should have failed:\n%s", name, textContent(result))
+	}
+	return textContent(result)
+}
+
+// TestRemoteGrepOnlyMatchingOverMCP proves the fragment flag survives schema
+// validation, renders `path:line:column:fragment`, and that the unsupported
+// only_matching+context combination fails loudly instead of silently dropping
+// one of the two parameters.
+func TestRemoteGrepOnlyMatchingOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("foo bar foo\nother\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	fragments := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "foo", "only_matching": true,
+	})
+	if !strings.Contains(fragments, "a.txt:1:1:foo") || !strings.Contains(fragments, "a.txt:1:9:foo") {
+		t.Fatalf("only_matching should print one line per fragment with its column:\n%s", fragments)
+	}
+	if strings.Contains(fragments, "foo bar foo") {
+		t.Fatalf("only_matching must not print whole lines:\n%s", fragments)
+	}
+
+	conflict := callToolExpectingError(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "foo", "only_matching": true, "context": 1,
+	})
+	if !strings.Contains(conflict, "only_matching") || !strings.Contains(conflict, "context") {
+		t.Fatalf("the conflict message should name both parameters:\n%s", conflict)
 	}
 }
