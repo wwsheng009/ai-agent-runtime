@@ -155,9 +155,16 @@
   进程——`--sort path` 的全局排序会与 walker 的按根遍历、本地 scope 循环产生不同
   分页，`ripgrepRunner.grep` 现在包装 `grepSingle` 逐根复用预算与窗口逻辑，
   `grep_paths_conformance_test.go` 覆盖 limit/offset 跨根一致性。
+  `grep` 的 `mode`（content/files/count）进 core，并且**分页单位随模式改变**：
+  `GrepPageComplete` 在 content 模式按匹配、在 files/count 模式按文件计数判断页是否
+  满，引擎在该边界停下 —— 否则「一个文件多条匹配」会让 limit 按匹配算错
+  （`grep_mode_test.go::TestGrepFilesModeDoesNotPageByMatch` 就是这条回归护栏）；
+  count 模式因为多读一个文件而保证页内每个文件的计数完整。`files_without` **故意不支持**
+  且不在 remote schema 声明——它需要全量扫描，两个引擎都还没实现，
+  声明它就是一张空头支票；`NormalizeGrepMode` 会显式报错而不是静默降级。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  本地 `grep` 主流程仍为 legacy（模式/context/include-exclude/多根语义已进 core；
-  rg 优选、stats/ignore/type/rg_args 与本地上下文渲染格式仍在本地）；
+  本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、多根
+  语义已进 core；files_without、stats/ignore/type/rg_args 与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。

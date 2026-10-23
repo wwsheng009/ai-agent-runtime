@@ -161,12 +161,23 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 	if opts.Offset < 0 {
 		opts.Offset = 0
 	}
-	// Raw matches needed: the page plus one, which is the evidence both
-	// engines use for has_more. The shared window then slices it down.
-	rawNeeded := opts.Offset + opts.Limit + 1
+	mode, err := searchcore.NormalizeGrepMode(string(opts.Mode))
+	if err != nil {
+		return searchcore.GrepResult{}, true, err
+	}
+	// Page entries needed including the one that proves has_more. In content
+	// mode an entry is a match; in files/count mode it is a whole file, which
+	// is also why the page's last count is trustworthy.
+	needed := opts.Offset + opts.Limit + 1
+	collected := func(matches []searchcore.GrepMatch) int {
+		if mode == searchcore.GrepModeContent {
+			return len(matches)
+		}
+		return searchcore.CountDistinctGrepFiles(matches)
+	}
 	combined := searchcore.GrepResult{}
 	for _, root := range roots {
-		remaining := rawNeeded - len(combined.Matches)
+		remaining := needed - collected(combined.Matches)
 		if remaining < 1 {
 			break
 		}
@@ -186,12 +197,12 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 		}
 		combined.FilesScanned += page.FilesScanned
 		combined.Matches = append(combined.Matches, page.Matches...)
-		if len(combined.Matches) >= rawNeeded {
+		if searchcore.GrepPageComplete(combined.Matches, mode, opts) {
 			break
 		}
 	}
 	combined.SingleFile = false
-	searchcore.ApplyGrepWindow(&combined, opts)
+	searchcore.ApplyGrepPageWindow(&combined, mode, opts)
 	return combined, true, nil
 }
 
@@ -218,9 +229,10 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	if opts.Offset < 0 {
 		opts.Offset = 0
 	}
-	// Read one match past the requested page so Truncated/has_more stays
-	// accurate, then window through the shared helper below.
-	wanted := opts.Offset + opts.Limit
+	mode, err := searchcore.NormalizeGrepMode(string(opts.Mode))
+	if err != nil {
+		return searchcore.GrepResult{}, true, err
+	}
 	var globMatcher *searchcore.GlobMatcher
 	if strings.TrimSpace(opts.Glob) != "" {
 		matcher, err := searchcore.NewGlobMatcher(opts.Glob)
@@ -373,7 +385,9 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 				Line: event.Data.LineNumber,
 				Text: text,
 			})
-			if len(result.Matches) > wanted {
+			// Stop one page entry past the page so Truncated/has_more stays
+			// accurate; the shared window then slices the raw list down.
+			if searchcore.GrepPageComplete(result.Matches, mode, opts) {
 				truncated = true
 				cancel()
 				break
@@ -386,7 +400,7 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	scanErr := scanner.Err()
 	if truncated {
 		_ = cmd.Wait()
-		searchcore.ApplyGrepWindow(&result, opts)
+		searchcore.ApplyGrepPageWindow(&result, mode, opts)
 		result.Truncated = true
 		return result, true, nil
 	}
@@ -403,7 +417,7 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 		}
 		return searchcore.GrepResult{}, true, fmt.Errorf("ripgrep: %v: %s", waitErr, strings.TrimSpace(stderr.String()))
 	}
-	searchcore.ApplyGrepWindow(&result, opts)
+	searchcore.ApplyGrepPageWindow(&result, mode, opts)
 	return result, true, nil
 }
 

@@ -329,6 +329,19 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"minimum":     0,
 				"description": "Skip the first N matches, then apply limit. Use the returned next_offset to page.",
 			},
+			"mode": map[string]interface{}{
+				"type":        "string",
+				"enum":        []string{"content", "files", "count"},
+				"description": "输出模式：content=显示匹配行（默认），files=仅列出包含匹配的文件，count=每个文件的匹配行数（path:count）。files/count 模式下 limit/offset 以「文件」为单位，next_offset/has_more 同口径。files_without 模式当前不可用。",
+			},
+			"files_with_matches": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --files-with-matches/-l；等价于 mode=files。",
+			},
+			"count": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --count/-c；等价于 mode=count（统计匹配行数）。",
+			},
 		},
 		// At least one pattern spelling is required, but which one is a
 		// handler-level rule: `patterns` is a valid substitute for `pattern`,

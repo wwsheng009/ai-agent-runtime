@@ -28,6 +28,9 @@ type GrepOptions struct {
 	// Paths holds additional search roots, searched in order after Path. The
 	// ordered pair mirrors the local tool: `path` first, then `paths`.
 	Paths []string
+	// Mode selects the output unit (content lines, files, per-file counts) and
+	// with it the pagination unit. Empty means content.
+	Mode GrepMode
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -52,7 +55,12 @@ type GrepMatch struct {
 }
 
 type GrepResult struct {
-	Matches      []GrepMatch
+	Matches []GrepMatch
+	// Files carries the page for files/count modes; Matches keeps the raw
+	// matches those entries were summarized from (including the one file the
+	// engines read past the page as has_more evidence).
+	Files        []GrepFileSummary
+	Mode         GrepMode
 	FilesScanned int
 	SingleFile   bool
 	Truncated    bool
@@ -66,6 +74,10 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	}
 	if opts.Offset < 0 {
 		opts.Offset = 0
+	}
+	mode, err := NormalizeGrepMode(string(opts.Mode))
+	if err != nil {
+		return GrepResult{}, err
 	}
 	compiled, err := CompileGrepPattern(grepPatterns(opts), GrepPatternOptions{
 		Literal:       opts.Literal,
@@ -140,7 +152,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				continue
 			}
 			result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
-			if len(result.Matches) > opts.Offset+opts.Limit {
+			if GrepPageComplete(result.Matches, mode, opts) {
 				return filepath.SkipAll
 			}
 		}
@@ -180,12 +192,12 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 		// Every root after the page is complete would only be scanned to be
 		// discarded by ApplyGrepWindow.
-		if len(result.Matches) > opts.Offset+opts.Limit {
+		if GrepPageComplete(result.Matches, mode, opts) {
 			break
 		}
 	}
 
-	ApplyGrepWindow(&result, opts)
+	ApplyGrepPageWindow(&result, mode, opts)
 	return result, nil
 }
 

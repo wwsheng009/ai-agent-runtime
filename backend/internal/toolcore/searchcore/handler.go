@@ -146,10 +146,15 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		return failure, nil
 	}
 	rootLabel := paths.Relative(roots[0])
+	mode, modeFailure := grepModeFromArgs(call.Args)
+	if modeFailure != nil {
+		return modeFailure, nil
+	}
 	options := GrepOptions{
 		Patterns:        patterns,
 		Path:            roots[0],
 		Paths:           roots[1:],
+		Mode:            mode,
 		Glob:            stringArg(call.Args, "glob"),
 		Include:         GrepGlobListFromArgs(call.Args, "include"),
 		Exclude:         GrepGlobListFromArgs(call.Args, "exclude"),
@@ -188,7 +193,17 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	contextLineCount := 0
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "=== grep %q ===\n", patternLabel)
-	if contextBefore > 0 || contextAfter > 0 {
+	switch {
+	case mode == GrepModeFiles:
+		for _, entry := range result.Files {
+			builder.WriteString(paths.Relative(entry.File))
+			builder.WriteByte('\n')
+		}
+	case mode == GrepModeCount:
+		for _, entry := range result.Files {
+			fmt.Fprintf(&builder, "%s:%d\n", paths.Relative(entry.File), entry.Count)
+		}
+	case contextBefore > 0 || contextAfter > 0:
 		// Context is produced by the shared expander, not by an engine flag:
 		// match lines keep the `path:line:text` shape, neighbouring lines use
 		// ripgrep's `path-line-text` shape, and blocks are separated by `--`.
@@ -207,23 +222,34 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			}
 			printedAny = true
 		}
-	} else {
+	default:
 		for _, item := range result.Matches {
 			fmt.Fprintf(&builder, "%s:%d:%s\n", paths.Relative(item.File), item.Line, item.Text)
 		}
 	}
-	if len(result.Matches) == 0 {
+	if len(result.Matches) == 0 && len(result.Files) == 0 {
 		builder.WriteString("(no matches)\n")
 	}
 	if result.Truncated {
-		fmt.Fprintf(&builder, "\n[truncated at %d matches; narrow the pattern or glob]\n", options.Limit)
+		fmt.Fprintf(&builder, "\n[truncated at %d %s; narrow the pattern or glob]\n", options.Limit, grepPageUnit(mode))
+	}
+	pageMatches := len(result.Matches)
+	pageEntries := len(result.Matches)
+	if mode != GrepModeContent {
+		pageMatches = 0
+		for _, entry := range result.Files {
+			pageMatches += entry.Count
+		}
+		pageEntries = len(result.Files)
 	}
 	metadata := map[string]any{
 		"pattern":          patternLabel,
 		"patterns":         patterns,
+		"mode":             string(mode),
 		"path":             rootLabel,
 		"paths":            grepRootLabels(paths, roots),
-		"matches":          len(result.Matches),
+		"matches":          pageMatches,
+		"files":            len(result.Files),
 		"files_scanned":    result.FilesScanned,
 		"single_file":      result.SingleFile,
 		"is_truncated":     result.Truncated,
@@ -234,7 +260,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"context_after":    contextAfter,
 		"context_lines":    contextLineCount,
 		"offset":           options.Offset,
-		"next_offset":      options.Offset + len(result.Matches),
+		"next_offset":      options.Offset + pageEntries,
 		"has_more":         result.Truncated,
 		"engine":           engine,
 		"hidden_files":     true,
@@ -380,6 +406,34 @@ func grepRootsFromArgs(call *toolcore.Call, paths toolcore.PathResolver) ([]stri
 		roots = append(roots, resolved)
 	}
 	return roots, nil
+}
+
+// grepModeFromArgs mirrors the local precedence: the rg-compatible booleans are
+// read first, then the explicit `mode` string wins over them.
+func grepModeFromArgs(args map[string]any) (GrepMode, *toolcore.Result) {
+	raw := ""
+	if boolArg(args, "files_with_matches") {
+		raw = string(GrepModeFiles)
+	}
+	if boolArg(args, "count") {
+		raw = string(GrepModeCount)
+	}
+	if value, ok := args["mode"].(string); ok && strings.TrimSpace(value) != "" {
+		raw = value
+	}
+	mode, err := NormalizeGrepMode(raw)
+	if err != nil {
+		return "", toolcore.Error(toolcore.ErrInvalidArgument, "use mode=content|files|count", err)
+	}
+	return mode, nil
+}
+
+// grepPageUnit names the pagination unit for the truncation notice.
+func grepPageUnit(mode GrepMode) string {
+	if mode == GrepModeContent {
+		return "matches"
+	}
+	return "files"
 }
 
 func grepRootLabels(paths toolcore.PathResolver, roots []string) []string {

@@ -191,3 +191,48 @@ func TestRemoteGrepMultiRootsOverMCP(t *testing.T) {
 		t.Fatalf("the string spelling must search exactly that root:\n%s", one)
 	}
 }
+
+// TestRemoteGrepModesOverMCP proves the mode parameter survives schema
+// validation and renders the documented shapes: bare paths for files mode,
+// `path:count` for count mode, and the rg-compatible boolean aliases.
+func TestRemoteGrepModesOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"a.txt": "hit one\nhit two\n",
+		"b.txt": "hit again\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	files := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "mode": "files",
+	})
+	if !strings.Contains(files, "a.txt") || !strings.Contains(files, "b.txt") {
+		t.Fatalf("files mode should list both files:\n%s", files)
+	}
+	if strings.Contains(files, "hit one") {
+		t.Fatalf("files mode must not print matching lines:\n%s", files)
+	}
+
+	counts := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "mode": "count",
+	})
+	if !strings.Contains(counts, "a.txt:2") || !strings.Contains(counts, "b.txt:1") {
+		t.Fatalf("count mode should print per-file matching line counts:\n%s", counts)
+	}
+
+	alias := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "files_with_matches": true,
+	})
+	if !strings.Contains(alias, "a.txt") || strings.Contains(alias, "hit one") {
+		t.Fatalf("files_with_matches must behave like mode=files:\n%s", alias)
+	}
+}
