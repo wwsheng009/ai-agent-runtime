@@ -45,6 +45,15 @@ type GrepOptions struct {
 	// line. InvertMatch keeps whole lines (rg -o -v), files mode ignores it,
 	// and in count mode the per-file count becomes a match count (rg -o -c).
 	OnlyMatching bool
+	// MaxDepth bounds directory descent relative to each search root: 0 means
+	// the roots' immediate contents only. MaxDepthSet distinguishes unset from
+	// an explicit 0, mirroring the local tool.
+	MaxDepth    int
+	MaxDepthSet bool
+	// MaxFileSizeBytes skips files larger than this. It is the user-facing
+	// `max_filesize` filter; MaxFileBytes is the runtime capture budget and the
+	// two are applied independently.
+	MaxFileSizeBytes int64
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -146,6 +155,9 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		if opts.MaxFileBytes > 0 && info.Size() > int64(opts.MaxFileBytes) {
 			return nil
 		}
+		if opts.MaxFileSizeBytes > 0 && info.Size() > opts.MaxFileSizeBytes {
+			return nil
+		}
 		if shouldFilterGrepCandidate(relativeGrepCandidate(root, path), includeFilter, excludeFilter) {
 			return nil
 		}
@@ -218,6 +230,16 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				if entry.IsDir() {
 					if ShouldSkipDir(entry.Name()) && path != root {
 						return filepath.SkipDir
+					}
+					// Depth mirrors the local tool: a direct child directory has
+					// depth 1, so max_depth=0 searches only the root's own files.
+					if opts.MaxDepthSet {
+						if rel, err := filepath.Rel(root, path); err == nil && rel != "." {
+							depth := strings.Count(filepath.ToSlash(rel), "/") + 1
+							if depth > opts.MaxDepth {
+								return filepath.SkipDir
+							}
+						}
 					}
 					return nil
 				}

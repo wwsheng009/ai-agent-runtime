@@ -155,6 +155,14 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		maxCount = 0
 	}
 	onlyMatching := boolArg(call.Args, "only_matching")
+	maxDepth, maxDepthSet := intArgOK(call.Args, "max_depth")
+	if maxDepthSet && maxDepth < 0 {
+		maxDepth = 0
+	}
+	maxFileSizeBytes, sizeFailure := grepMaxFileSizeFromArgs(call.Args)
+	if sizeFailure != nil {
+		return sizeFailure, nil
+	}
 	contextBefore, contextAfter := grepContextFromArgs(call.Args)
 	if onlyMatching && (contextBefore > 0 || contextAfter > 0) {
 		// Reporting the conflict beats silently dropping one of the two
@@ -165,29 +173,32 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			fmt.Errorf("only_matching 与 context 不能同时使用")), nil
 	}
 	options := GrepOptions{
-		Patterns:        patterns,
-		Path:            roots[0],
-		Paths:           roots[1:],
-		Mode:            mode,
-		Glob:            stringArg(call.Args, "glob"),
-		Include:         GrepGlobListFromArgs(call.Args, "include"),
-		Exclude:         GrepGlobListFromArgs(call.Args, "exclude"),
-		Type:            stringArgAny(call.Args, "type", "file_type"),
-		TypeNot:         stringArg(call.Args, "type_not"),
-		CaseInsensitive: boolArg(call.Args, "case_insensitive"),
-		Literal:         boolArg(call.Args, "literal", "fixed_strings"),
-		IgnoreCase:      boolArg(call.Args, "ignore_case"),
-		CaseSensitive:   boolArg(call.Args, "case_sensitive"),
-		SmartCase:       boolArg(call.Args, "smart_case"),
-		Word:            boolArg(call.Args, "word", "word_regexp"),
-		LineRegexp:      boolArg(call.Args, "line_regexp"),
-		InvertMatch:     boolArg(call.Args, "invert_match"),
-		MaxCount:        maxCount,
-		MaxCountSet:     maxCountSet,
-		OnlyMatching:    onlyMatching,
-		Limit:           intArg(call.Args, "limit", DefaultGrepLimit),
-		MaxFileBytes:    captureLimit(call),
-		Offset:          intArg(call.Args, "offset", 0),
+		Patterns:         patterns,
+		Path:             roots[0],
+		Paths:            roots[1:],
+		Mode:             mode,
+		Glob:             stringArg(call.Args, "glob"),
+		Include:          GrepGlobListFromArgs(call.Args, "include"),
+		Exclude:          GrepGlobListFromArgs(call.Args, "exclude"),
+		Type:             stringArgAny(call.Args, "type", "file_type"),
+		TypeNot:          stringArg(call.Args, "type_not"),
+		CaseInsensitive:  boolArg(call.Args, "case_insensitive"),
+		Literal:          boolArg(call.Args, "literal", "fixed_strings"),
+		IgnoreCase:       boolArg(call.Args, "ignore_case"),
+		CaseSensitive:    boolArg(call.Args, "case_sensitive"),
+		SmartCase:        boolArg(call.Args, "smart_case"),
+		Word:             boolArg(call.Args, "word", "word_regexp"),
+		LineRegexp:       boolArg(call.Args, "line_regexp"),
+		InvertMatch:      boolArg(call.Args, "invert_match"),
+		MaxCount:         maxCount,
+		MaxCountSet:      maxCountSet,
+		OnlyMatching:     onlyMatching,
+		MaxDepth:         maxDepth,
+		MaxDepthSet:      maxDepthSet,
+		MaxFileSizeBytes: maxFileSizeBytes,
+		Limit:            intArg(call.Args, "limit", DefaultGrepLimit),
+		MaxFileBytes:     captureLimit(call),
+		Offset:           intArg(call.Args, "offset", 0),
 	}
 
 	engine := "walker"
@@ -282,6 +293,9 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"max_count":          options.MaxCount,
 		"max_count_explicit": options.MaxCountSet,
 		"only_matching":      options.OnlyMatching,
+		"max_depth":          options.MaxDepth,
+		"max_depth_explicit": options.MaxDepthSet,
+		"max_filesize_bytes": options.MaxFileSizeBytes,
 		"include_patterns":   len(includeGlobs),
 		"exclude_patterns":   len(excludeGlobs),
 		"context_before":     contextBefore,
@@ -491,4 +505,43 @@ func boolArg(args map[string]any, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+// grepMaxFileSizeFromArgs parses max_filesize in either accepted spelling: an
+// integer byte count or a string with a K/M/G suffix. Blank values (including
+// the quoted-empty placeholders models sometimes emit) mean "unset", matching
+// the local resolver.
+func grepMaxFileSizeFromArgs(args map[string]any) (int64, *toolcore.Result) {
+	if len(args) == 0 {
+		return 0, nil
+	}
+	raw, exists := args["max_filesize"]
+	if !exists || raw == nil {
+		return 0, nil
+	}
+	switch value := raw.(type) {
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" || trimmed == `""` || trimmed == "''" {
+			return 0, nil
+		}
+		parsed, err := ParseGrepSize(trimmed)
+		if err != nil {
+			return 0, toolcore.Error(toolcore.ErrInvalidArgument, "use a byte count or a K/M/G suffix",
+				fmt.Errorf("max_filesize 参数无效: %w", err))
+		}
+		return parsed, nil
+	case int:
+		return int64(value), nil
+	case int32:
+		return int64(value), nil
+	case int64:
+		return value, nil
+	case float64:
+		return int64(value), nil
+	case float32:
+		return int64(value), nil
+	default:
+		return 0, nil
+	}
 }

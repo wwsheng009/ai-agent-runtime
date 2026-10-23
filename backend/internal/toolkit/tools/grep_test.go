@@ -2643,8 +2643,10 @@ func TestGrepTool_RgZeroLimitsTranslateToRipgrep(t *testing.T) {
 		"max_count": 0,
 	})
 	argsStr := strings.Join(gotArgs, " ")
-	if !strings.Contains(argsStr, "--max-depth 0") {
-		t.Fatalf("expected --max-depth 0 in rg args, got %v", gotArgs)
+	// max_depth counts directory levels below the root (0 = root files only),
+	// while rg counts levels beyond the given path, so 0 is forwarded as 1.
+	if !strings.Contains(argsStr, "--max-depth 1") {
+		t.Fatalf("expected --max-depth 1 in rg args, got %v", gotArgs)
 	}
 	if !strings.Contains(argsStr, "--max-count 0") {
 		t.Fatalf("expected --max-count 0 in rg args, got %v", gotArgs)
@@ -4356,8 +4358,8 @@ func TestGrepTool_StructuredPriorityOverridesRemainingRgArgsConflicts(t *testing
 				"max_count":    3,
 				"max_filesize": "2K",
 			},
-			wantContains:   []string{"--max-depth 2", "--max-count 3", "--max-filesize 2K"},
-			wantNotContain: []string{"--max-depth 1", "--max-count 2", "--max-filesize 1K"},
+			wantContains:   []string{"--max-depth 3", "--max-count 3", "--max-filesize 2K"},
+			wantNotContain: []string{"--max-depth 2", "--max-count 2", "--max-filesize 1K"},
 		},
 		{
 			name: "structured max columns preview family overrides rg_args opposite flag",

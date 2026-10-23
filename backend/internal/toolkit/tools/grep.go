@@ -3166,32 +3166,9 @@ func collectIgnoredPresentationParams(params map[string]interface{}) []string {
 }
 
 func parseSizeString(raw string) (int64, error) {
-	value := strings.TrimSpace(strings.ToUpper(raw))
-	if value == "" {
-		return 0, fmt.Errorf("不能为空")
-	}
-	multiplier := int64(1)
-	switch {
-	case strings.HasSuffix(value, "K"):
-		multiplier = 1024
-		value = strings.TrimSuffix(value, "K")
-	case strings.HasSuffix(value, "M"):
-		multiplier = 1024 * 1024
-		value = strings.TrimSuffix(value, "M")
-	case strings.HasSuffix(value, "G"):
-		multiplier = 1024 * 1024 * 1024
-		value = strings.TrimSuffix(value, "G")
-	case strings.HasSuffix(value, "B"):
-		value = strings.TrimSuffix(value, "B")
-	}
-	base, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("无法解析大小 %q", raw)
-	}
-	if base < 0 {
-		return 0, fmt.Errorf("大小不能为负数")
-	}
-	return base * multiplier, nil
+	// The size grammar lives in searchcore so the local tool and the remote
+	// schema accept exactly the same spellings.
+	return searchcore.ParseGrepSize(raw)
 }
 
 func normalizeRGSortValue(raw string) (string, error) {
@@ -3777,7 +3754,11 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 
 	// Max depth
 	if opts.maxDepthSet {
-		args = append(args, "--max-depth", fmt.Sprintf("%d", opts.maxDepth))
+		// ripgrep counts levels beyond the path it was given (rg 0 = "do not
+		// enter the directory at all"), while the builtin engine counts
+		// directory levels below the root (0 = root files only). +1 keeps the
+		// two engines of this same tool telling the same story.
+		args = append(args, "--max-depth", fmt.Sprintf("%d", opts.maxDepth+1))
 	}
 	if opts.maxFilesize != "" {
 		args = append(args, "--max-filesize", opts.maxFilesize)

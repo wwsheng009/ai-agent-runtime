@@ -312,8 +312,22 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	} else if opts.CaseSensitive {
 		args = append(args, "--case-sensitive")
 	}
-	if opts.MaxFileBytes > 0 {
-		args = append(args, "--max-filesize", strconv.Itoa(opts.MaxFileBytes))
+	// The capture budget and the user filter are independent; ripgrep only has
+	// one file-size flag, and the tighter of the two is the one that preserves
+	// the walker's result set.
+	maxFileSize := opts.MaxFileSizeBytes
+	if opts.MaxFileBytes > 0 && (maxFileSize == 0 || int64(opts.MaxFileBytes) < maxFileSize) {
+		maxFileSize = int64(opts.MaxFileBytes)
+	}
+	if maxFileSize > 0 {
+		args = append(args, "--max-filesize", strconv.FormatInt(maxFileSize, 10))
+	}
+	if opts.MaxDepthSet {
+		// ripgrep counts levels beyond the path it was given, so rg's 0 means
+		// "do not enter the directory at all" (verified: `rg --max-depth 0`
+		// with a directory root returns nothing). The shared contract counts
+		// directory levels below each root, which is rg's depth+1.
+		args = append(args, "--max-depth", strconv.Itoa(opts.MaxDepth+1))
 	}
 	// An explicit 0 means "this file contributes nothing", which is exactly
 	// what rg -m 0 does; unset means no per-file cap.

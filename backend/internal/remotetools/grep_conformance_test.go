@@ -371,3 +371,60 @@ func TestRemoteGrepOnlyMatchingOverMCP(t *testing.T) {
 		t.Fatalf("the conflict message should name both parameters:\n%s", conflict)
 	}
 }
+
+// TestRemoteGrepDepthAndSizeOverMCP proves the scope trims survive schema
+// validation in both spellings: max_depth as an integer and max_filesize as
+// either bytes or a K/M/G string.
+func TestRemoteGrepDepthAndSizeOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "dir", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		"top.txt":          "hit top\n",
+		"dir/mid.txt":      "hit mid\n",
+		"dir/sub/deep.txt": "hit deep\n",
+		"big.txt":          "hit big\n" + strings.Repeat("padding\n", 300),
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	depthZero := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "max_depth": 0,
+	})
+	if !strings.Contains(depthZero, "top.txt") || !strings.Contains(depthZero, "big.txt") {
+		t.Fatalf("max_depth=0 should keep the root files:\n%s", depthZero)
+	}
+	if strings.Contains(depthZero, "mid.txt") || strings.Contains(depthZero, "deep.txt") {
+		t.Fatalf("max_depth=0 must not descend into directories:\n%s", depthZero)
+	}
+
+	depthOne := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "max_depth": 1,
+	})
+	if !strings.Contains(depthOne, "mid.txt") || strings.Contains(depthOne, "deep.txt") {
+		t.Fatalf("max_depth=1 should include the first directory level only:\n%s", depthOne)
+	}
+
+	stringSize := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "max_filesize": "1K",
+	})
+	if strings.Contains(stringSize, "big.txt") || !strings.Contains(stringSize, "top.txt") {
+		t.Fatalf("max_filesize=1K must drop the oversized file:\n%s", stringSize)
+	}
+
+	byteSize := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "max_filesize": 1024,
+	})
+	if strings.Contains(byteSize, "big.txt") || !strings.Contains(byteSize, "top.txt") {
+		t.Fatalf("max_filesize as bytes must behave like the string spelling:\n%s", byteSize)
+	}
+}

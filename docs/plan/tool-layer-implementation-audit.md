@@ -180,10 +180,18 @@
   `max_count` 仍按**匹配行**计数（= rg `-m 1 -o` 输出首行全部片段）；files 模式不受
   影响。`only_matching + context` 明确报错而不是静默丢弃参数——两个参数都想拥有同
   一行的渲染权，共享核心暂不支持该组合。
+  `grep` 的 `max_depth`/`max_filesize` 进 core，并顺带修掉一个真实引擎分歧：
+  rg 的 `--max-depth` 以「给定路径之外」计数（WSL 实测：目录根 + `--max-depth 0`
+  返回空），而共享契约（= 本地 builtin）按搜索根下的目录层计数、0 表示只看根自身文件，
+  因此统一为 `rg depth = max_depth + 1`；本地 legacy 的 rg 翻译同步修正（原先直接
+  转发，等于本地 rg 与本地 builtin 对 max_depth=0 给出不同结果）。大小语法
+  `ParseGrepSize`（字节 / K/M/G，1024 进制，可选 B）上移 core，本地 `parseSizeString`
+  改为调用它；rg 侧把「用户过滤」与「抓取预算」合并为一个 `--max-filesize`（取更严格
+  者），与 walker 的双重检查等价。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
-  type/type_not、max_count、only_matching、多根语义已进 core；files_without、
-  stats/ignore 族与本地上下文渲染格式仍在本地）；
+  type/type_not、max_count、only_matching、max_depth/max_filesize、多根语义已进 core；
+  files_without、stats/ignore 族与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。
