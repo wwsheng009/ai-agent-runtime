@@ -429,7 +429,14 @@ func ParsePatch(raw string) ([]PatchOperation, error) {
 				continue
 			}
 			if !inHunk {
-				continue
+				// Models frequently omit the leading @@ for the first update
+				// chunk. Treat a change line as an implicit hunk header.
+				if len(current.Hunks) == 0 && isPatchChangeLine(line) {
+					current.Hunks = append(current.Hunks, PatchHunk{Header: "@@"})
+					inHunk = true
+				} else {
+					continue
+				}
 			}
 			kind := byte(' ')
 			text := line
@@ -813,7 +820,43 @@ func joinPatchBody(lines []string, trailing bool, newline string) string {
 }
 
 func pathFromDirective(line, prefix string) string {
-	return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	return SanitizePatchPath(strings.TrimPrefix(line, prefix))
+}
+
+// SanitizePatchPath trims whitespace and common model punctuation that leaks
+// into Add/Update/Delete headers (quotes, trailing sentence/JSON crumbs). It
+// does not rewrite valid relative/absolute paths or intentional inner spaces.
+func SanitizePatchPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if len(path) >= 2 {
+		first, last := path[0], path[len(path)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') || (first == '`' && last == '`') {
+			path = strings.TrimSpace(path[1 : len(path)-1])
+		}
+	}
+	for {
+		trimmed := strings.TrimRight(path, " \t\"'`.,;:)]}>")
+		if trimmed == path {
+			break
+		}
+		path = strings.TrimSpace(trimmed)
+	}
+	return strings.TrimSpace(strings.TrimLeft(path, " \t\"'`([{<,"))
+}
+
+func isPatchChangeLine(line string) bool {
+	if line == "" {
+		return true
+	}
+	switch line[0] {
+	case ' ', '+', '-':
+		return true
+	default:
+		return false
+	}
 }
 
 // detectNewline returns the dominant line ending used by body. A file without

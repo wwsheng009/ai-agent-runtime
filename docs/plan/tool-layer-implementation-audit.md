@@ -120,9 +120,18 @@
   `apply_patch` 的 hunk 匹配（@@ 上下文、空白容忍、blank-run、EOF、CRLF）与
   closest-window 诊断评分已上移 `mutatecore.ApplyHunks` / `ClosestPatchWindow`；
   本地只保留解析、错误文案与账本/通知。
+  路径尾部引号清理已上移 `mutatecore.SanitizePatchPath`，无 `@@` 的首个 update chunk
+  由 `mutatecore.ParsePatch` 支持；`grep`/`glob` 的 offset 分页已进
+  `searchcore.GrepOptions`/`GlobOptions`，remote 的 rg 与 walker 双路径同语义
+  （`remotetools/glob_offset_test.go` 锁定）。
+  `view` 的 `files/compact` 已进 `viewcore` handler；`viewcore.Schema()` 是唯一 schema 来源，
+  本地与 remote 共用同一份参数声明，remote 只按能力用 `toolcore.FilterSchemaParams`
+  裁掉依赖代码索引的 `symbol`（`remotetools/view_conformance_test.go`），不再各自维护弱 schema。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  `apply_patch` 的本地执行仍由本地 applier 承担：core 已补回滚与 hunk 语义，
-  但路径尾部引号清理、无上下文首个 update chunk、结构化错误文案仍只在本地。
+  本地 `grep` 主流程仍为 legacy（rg 优选、context/stats/ignore 尚未进 `searchcore`）；
+  本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
+  文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
+  surface adapter，按设计保留。
 
 **2026-10-23 安全补强**：
 

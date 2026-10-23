@@ -10,13 +10,34 @@ import (
 type GlobResult struct {
 	Matches   []string
 	Truncated bool
+	// Offset and NextOffset let both surfaces page deterministically.
+	Offset     int
+	NextOffset int
+	HasMore    bool
 }
 
 // Glob walks base and returns paths matching pattern. Unreadable subtrees are
 // skipped; cancellation is returned to the caller.
 func Glob(ctx context.Context, base, pattern string, limit int) (GlobResult, error) {
+	return GlobWithOptions(ctx, GlobOptions{Base: base, Pattern: pattern, Limit: limit})
+}
+
+type GlobOptions struct {
+	Base    string
+	Pattern string
+	Limit   int
+	Offset  int
+}
+
+func GlobWithOptions(ctx context.Context, opts GlobOptions) (GlobResult, error) {
+	base := opts.Base
+	pattern := opts.Pattern
+	limit := opts.Limit
 	if limit < 1 {
 		limit = 500
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
 	}
 	matcher, err := NewGlobMatcher(pattern)
 	if err != nil {
@@ -48,7 +69,7 @@ func Glob(ctx context.Context, base, pattern string, limit int) (GlobResult, err
 		}
 		if matcher.Match(filepath.ToSlash(rel)) {
 			result.Matches = append(result.Matches, path)
-			if len(result.Matches) >= limit+1 {
+			if len(result.Matches) >= opts.Offset+limit+1 {
 				return filepath.SkipAll
 			}
 		}
@@ -57,11 +78,21 @@ func Glob(ctx context.Context, base, pattern string, limit int) (GlobResult, err
 	if walkErr != nil && walkErr != filepath.SkipAll {
 		return GlobResult{}, walkErr
 	}
+	if opts.Offset > 0 {
+		if opts.Offset >= len(result.Matches) {
+			result.Matches = nil
+		} else {
+			result.Matches = result.Matches[opts.Offset:]
+		}
+	}
 	if len(result.Matches) > limit {
 		result.Matches = result.Matches[:limit]
 		result.Truncated = true
 	}
 	sort.Strings(result.Matches)
+	result.Offset = opts.Offset
+	result.NextOffset = opts.Offset + len(result.Matches)
+	result.HasMore = result.Truncated
 	return result, nil
 }
 

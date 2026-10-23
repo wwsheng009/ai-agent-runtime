@@ -15,7 +15,7 @@ const DefaultGlobLimit = 500
 // traversal to ripgrep. The Handler falls back to the pure-Go walker when the
 // extension is absent or declines the request.
 type Searcher interface {
-	Glob(ctx context.Context, base, pattern string, limit int) (GlobResult, bool, error)
+	Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, error)
 	Grep(ctx context.Context, opts GrepOptions) (GrepResult, bool, error)
 }
 
@@ -56,9 +56,20 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	limit := intArg(call.Args, "limit", DefaultGlobLimit)
 
 	engine := "walker"
-	result, globErr := Glob(ctx, base, pattern, limit)
+	offset := intArg(call.Args, "offset", 0)
+	result, globErr := GlobWithOptions(ctx, GlobOptions{
+		Base:    base,
+		Pattern: pattern,
+		Limit:   limit,
+		Offset:  offset,
+	})
 	if searcher, ok := call.Runtime.(Searcher); ok {
-		if rgResult, used, rgErr := searcher.Glob(ctx, base, pattern, limit); used && rgErr == nil {
+		if rgResult, used, rgErr := searcher.Glob(ctx, GlobOptions{
+			Base:    base,
+			Pattern: pattern,
+			Limit:   limit,
+			Offset:  offset,
+		}); used && rgErr == nil {
 			result = rgResult
 			globErr = nil
 			engine = "ripgrep"
@@ -89,6 +100,9 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"path":         paths.Relative(base),
 		"matches":      len(result.Matches),
 		"is_truncated": result.Truncated,
+		"offset":       offset,
+		"next_offset":  result.NextOffset,
+		"has_more":     result.HasMore,
 		"engine":       engine,
 		"hidden_files": true,
 		"ignore_files": false,
@@ -144,6 +158,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		CaseInsensitive: caseInsensitive,
 		Limit:           intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:    captureLimit(call),
+		Offset:          intArg(call.Args, "offset", 0),
 	}
 
 	engine := "walker"
@@ -181,6 +196,9 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"files_scanned": result.FilesScanned,
 		"single_file":   result.SingleFile,
 		"is_truncated":  result.Truncated,
+		"offset":        options.Offset,
+		"next_offset":   options.Offset + len(result.Matches),
+		"has_more":      result.Truncated,
 		"engine":        engine,
 		"hidden_files":  true,
 		"ignore_files":  false,

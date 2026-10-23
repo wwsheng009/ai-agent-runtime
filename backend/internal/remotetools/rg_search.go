@@ -69,10 +69,11 @@ func (r ripgrepRunner) skipArgs() []string {
 	return args
 }
 
-func (r ripgrepRunner) glob(ctx context.Context, base, pattern string, limit int) (searchcore.GlobResult, bool, error) {
+func (r ripgrepRunner) glob(ctx context.Context, opts searchcore.GlobOptions) (searchcore.GlobResult, bool, error) {
 	if !r.available() {
 		return searchcore.GlobResult{}, false, nil
 	}
+	base, pattern, limit := opts.Base, opts.Pattern, opts.Limit
 	matcher, err := searchcore.NewGlobMatcher(pattern)
 	if err != nil {
 		return searchcore.GlobResult{}, true, err
@@ -88,11 +89,14 @@ func (r ripgrepRunner) glob(ctx context.Context, base, pattern string, limit int
 	if limit < 1 {
 		limit = searchcore.DefaultGlobLimit
 	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
 
 	args := append(r.baseArgs(), "--files", "--glob", pattern)
 	args = append(args, r.skipArgs()...)
 	args = append(args, "--", ".")
-	lines, outputTruncated, runErr := r.runLines(ctx, base, args, limit+1)
+	lines, outputTruncated, runErr := r.runLines(ctx, base, args, opts.Offset+limit+1)
 	if runErr != nil {
 		return searchcore.GlobResult{}, true, runErr
 	}
@@ -109,6 +113,13 @@ func (r ripgrepRunner) glob(ctx context.Context, base, pattern string, limit int
 		}
 		result.Matches = append(result.Matches, candidate)
 	}
+	if opts.Offset > 0 {
+		if opts.Offset >= len(result.Matches) {
+			result.Matches = nil
+		} else {
+			result.Matches = result.Matches[opts.Offset:]
+		}
+	}
 	if outputTruncated || len(result.Matches) > limit {
 		result.Truncated = true
 	}
@@ -116,6 +127,9 @@ func (r ripgrepRunner) glob(ctx context.Context, base, pattern string, limit int
 		result.Matches = result.Matches[:limit]
 	}
 	sort.Strings(result.Matches)
+	result.Offset = opts.Offset
+	result.NextOffset = opts.Offset + len(result.Matches)
+	result.HasMore = result.Truncated
 	return result, true, nil
 }
 

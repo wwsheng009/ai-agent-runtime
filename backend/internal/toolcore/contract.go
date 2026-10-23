@@ -33,6 +33,16 @@ const (
 	CapStateful  Capability = "stateful"
 )
 
+// OptionalParam names a tool parameter whose availability depends on the
+// surface runtime (for example symbol lookup needs a code index). A schema is
+// declared once; surfaces that cannot honor an optional parameter simply omit
+// it from the model-facing schema instead of accepting then rejecting it.
+type OptionalParam string
+
+const (
+	ParamSymbol OptionalParam = "symbol"
+)
+
 // Definition is the single declaration of a tool's identity and contract.
 type Definition struct {
 	Name        string

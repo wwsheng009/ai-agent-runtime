@@ -136,30 +136,17 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		return nil, fmt.Errorf("ls handler: %w", err)
 	}
 	viewBase := remoteToolBase{cfg: cfg, workspace: workspace}
-	viewSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"file_path": map[string]interface{}{
-				"type":        "string",
-				"description": "File to read, relative to the remote workspace (or an absolute path inside it).",
-			},
-			"offset": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     0,
-				"description": "0-based line offset to start from. Default 0.",
-			},
-			"limit": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     1,
-				"maximum":     viewcore.MaxLimit,
-				"description": "Maximum lines to return. Default 400, capped at 2000.",
-			},
-		},
-		"required":             []string{"file_path"},
-		"additionalProperties": false,
-	})
+	// One schema for every surface. The remote runtime has no code index, so
+	// `symbol` is filtered out of the model-facing schema instead of being
+	// declared and rejected later. files/compact are handler-level features and
+	// therefore available remotely too.
+	viewSchema, err := toolkit.SchemaFromParameters(viewcore.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("view schema: %w", err)
+	}
+	viewSchema, err = toolcore.FilterSchemaParams(viewSchema, toolcore.ParamSymbol)
+	if err != nil {
+		return nil, fmt.Errorf("view schema capability filter: %w", err)
 	}
 	viewTool, err := toolkit.NewRuntimeTool(viewcore.NewHandler(toolcore.Definition{
 		Name:                ToolView,
@@ -190,6 +177,11 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "integer",
 				"minimum":     1,
 				"description": "Maximum matches to return. Default 500.",
+			},
+			"offset": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "Skip the first N matches, then apply limit. Use next_offset to page.",
 			},
 		},
 		"required":             []string{"pattern"},
@@ -236,6 +228,11 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "integer",
 				"minimum":     1,
 				"description": "Maximum matches to return. Default 200.",
+			},
+			"offset": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "Skip the first N matches, then apply limit. Use the returned next_offset to page.",
 			},
 		},
 		"required":             []string{"pattern"},

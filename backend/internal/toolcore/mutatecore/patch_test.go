@@ -66,6 +66,29 @@ func TestApplyPatchAddUpdateDelete(t *testing.T) {
 	}
 }
 
+func TestParsePatchSanitizesPathAndImplicitHunk(t *testing.T) {
+	raw := strings.Join([]string{
+		PatchBegin,
+		PatchUpdate + `"snippet.go",`,
+		"-old",
+		"+new",
+		PatchEnd,
+	}, "\n")
+	ops, err := ParsePatch(raw)
+	if err != nil {
+		t.Fatalf("ParsePatch: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected one operation, got %+v", ops)
+	}
+	if ops[0].Path != "snippet.go" {
+		t.Fatalf("path not sanitized: %q", ops[0].Path)
+	}
+	if len(ops[0].Hunks) != 1 {
+		t.Fatalf("implicit hunk not created: %+v", ops[0].Hunks)
+	}
+}
+
 func TestApplyPatchIsTransactional(t *testing.T) {
 	root := t.TempDir()
 	patch := strings.Join([]string{

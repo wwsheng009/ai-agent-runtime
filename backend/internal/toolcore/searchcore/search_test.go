@@ -94,6 +94,36 @@ func TestGrepRespectsLimitAndGlob(t *testing.T) {
 	}
 }
 
+func TestGrepOffsetPagesMatches(t *testing.T) {
+	root := testTree(t)
+	first, err := Grep(context.Background(), GrepOptions{
+		Pattern: "TODO",
+		Path:    root,
+		Limit:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Matches) != 1 || !first.Truncated {
+		t.Fatalf("unexpected first page: %+v", first)
+	}
+	second, err := Grep(context.Background(), GrepOptions{
+		Pattern: "TODO",
+		Path:    root,
+		Limit:   1,
+		Offset:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Matches) != 1 {
+		t.Fatalf("unexpected second page: %+v", second)
+	}
+	if first.Matches[0].File == second.Matches[0].File && first.Matches[0].Line == second.Matches[0].Line {
+		t.Fatalf("offset did not advance: first=%+v second=%+v", first.Matches[0], second.Matches[0])
+	}
+}
+
 func TestGrepSingleFile(t *testing.T) {
 	root := testTree(t)
 	result, err := Grep(context.Background(), GrepOptions{

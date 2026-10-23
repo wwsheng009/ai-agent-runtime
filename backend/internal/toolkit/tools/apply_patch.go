@@ -666,28 +666,7 @@ func (a *patchApplier) resolvePath(targetPath string, op runtimeexecutor.Permiss
 // mid-sentence / JSON / markdown fragments). Does not rewrite valid
 // relative/absolute paths or intentional spaces inside names.
 func sanitizeApplyPatchPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	// Strip balanced outer quotes once: "foo.go" / 'foo.go' / `foo.go`.
-	if len(path) >= 2 {
-		first, last := path[0], path[len(path)-1]
-		if (first == '"' && last == '"') || (first == '\'' && last == '\'') || (first == '`' && last == '`') {
-			path = strings.TrimSpace(path[1 : len(path)-1])
-		}
-	}
-	// Trailing punctuation common when models paste path + sentence/JSON crumbs.
-	for {
-		trimmed := strings.TrimRight(path, " \t\"'`.,;:)]}>")
-		if trimmed == path {
-			break
-		}
-		path = strings.TrimSpace(trimmed)
-	}
-	// Leading quote crumbs after unbalanced paste.
-	path = strings.TrimLeft(path, " \t\"'`([{<,")
-	return strings.TrimSpace(path)
+	return mutatecore.SanitizePatchPath(path)
 }
 
 func (a *patchApplier) load(path string) (*stagedFile, error) {

@@ -68,8 +68,8 @@ func (r *remoteRuntime) CaptureLimit(string) int { return r.capture.limit() }
 func (r *remoteRuntime) ArtifactOrigin() toolcore.ResultOrigin { return r.origin }
 
 // Glob implements searchcore.Searcher with the resolver-backed ripgrep binary.
-func (r *remoteRuntime) Glob(ctx context.Context, base, pattern string, limit int) (searchcore.GlobResult, bool, error) {
-	return r.search.glob(ctx, base, pattern, limit)
+func (r *remoteRuntime) Glob(ctx context.Context, opts searchcore.GlobOptions) (searchcore.GlobResult, bool, error) {
+	return r.search.glob(ctx, opts)
 }
 
 // Grep implements searchcore.Searcher with the resolver-backed ripgrep binary.

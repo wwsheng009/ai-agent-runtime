@@ -19,6 +19,9 @@ type GrepOptions struct {
 	CaseInsensitive bool
 	Limit           int
 	MaxFileBytes    int
+	// Offset skips the first N matches before applying Limit. It is the
+	// pagination cursor shared by local and remote grep.
+	Offset int
 }
 
 type GrepMatch struct {
@@ -39,6 +42,9 @@ type GrepResult struct {
 func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	if opts.Limit < 1 {
 		opts.Limit = DefaultGrepLimit
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
 	}
 	compiled, err := CompileRegexp(opts.Pattern, opts.CaseInsensitive)
 	if err != nil {
@@ -84,11 +90,12 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			if !validUTF8(display) {
 				return nil
 			}
-			if compiled.Match(display) {
-				result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
-				if len(result.Matches) > opts.Limit {
-					return filepath.SkipAll
-				}
+			if !compiled.Match(display) {
+				continue
+			}
+			result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
+			if len(result.Matches) > opts.Offset+opts.Limit {
+				return filepath.SkipAll
 			}
 		}
 	}
@@ -126,6 +133,13 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 	}
 
+	if opts.Offset > 0 {
+		if opts.Offset >= len(result.Matches) {
+			result.Matches = nil
+		} else {
+			result.Matches = result.Matches[opts.Offset:]
+		}
+	}
 	if len(result.Matches) > opts.Limit {
 		result.Matches = result.Matches[:opts.Limit]
 		result.Truncated = true
