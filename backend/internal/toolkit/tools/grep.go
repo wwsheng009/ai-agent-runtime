@@ -222,35 +222,10 @@ type grepIgnorePattern struct {
 }
 
 // fileTypeToGlob maps rg --type names to glob patterns for the builtin engine.
-var fileTypeToGlob = map[string]string{
-	"go":    "*.go",
-	"py":    "*.py",
-	"java":  "*.java",
-	"js":    "*.js",
-	"ts":    "*.ts",
-	"tsx":   "*.tsx",
-	"jsx":   "*.jsx",
-	"rs":    "*.rs",
-	"rb":    "*.rb",
-	"cpp":   "*.cpp,*.hpp,*.cc,*.cxx",
-	"c":     "*.c,*.h",
-	"cs":    "*.cs",
-	"swift": "*.swift",
-	"kt":    "*.kt",
-	"scala": "*.scala",
-	"php":   "*.php",
-	"html":  "*.html,*.htm",
-	"css":   "*.css",
-	"json":  "*.json",
-	"yaml":  "*.yaml,*.yml",
-	"toml":  "*.toml",
-	"xml":   "*.xml",
-	"md":    "*.md,*.markdown",
-	"sh":    "*.sh,*.bash",
-	"sql":   "*.sql",
-	"proto": "*.proto",
-	"dart":  "*.dart",
-}
+// The table lives in searchcore so the local tool, the remote schema and the
+// ripgrep runner all agree on what `type=go` means; this alias keeps the local
+// call sites unchanged.
+var fileTypeToGlob = searchcore.FileTypeToGlob
 
 var (
 	ripgrepMatchLineWithColumnPattern = regexp.MustCompile(`^(.*):([0-9]+):([0-9]+):(.*)$`)

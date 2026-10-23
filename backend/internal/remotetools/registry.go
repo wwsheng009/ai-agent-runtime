@@ -264,6 +264,18 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				},
 				"description": "排除的文件名 glob 模式，例如 *_test.go；语义与 include 相同，且优先于 include。",
 			},
+			"type": map[string]interface{}{
+				"type":        "string",
+				"description": "按文件类型过滤，例如 go/py/java/ts/rs 等（兼容 rg 的 --type/-t）。类型名映射到共享 glob 表（go→*.go、cpp→*.cpp,*.hpp,*.cc,*.cxx），未知类型按 *.<type> 处理；它是 include 的并集而不是交集。",
+			},
+			"file_type": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容别名；等价于 type。",
+			},
+			"type_not": map[string]interface{}{
+				"type":        "string",
+				"description": "排除某类文件类型，例如 go/py（兼容 rg 的 --type-not/-T）；映射规则与 type 相同，并集进 exclude。",
+			},
 			"case_insensitive": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容别名；等价于 ignore_case=true。",

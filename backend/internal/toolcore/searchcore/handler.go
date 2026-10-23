@@ -158,6 +158,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		Glob:            stringArg(call.Args, "glob"),
 		Include:         GrepGlobListFromArgs(call.Args, "include"),
 		Exclude:         GrepGlobListFromArgs(call.Args, "exclude"),
+		Type:            stringArgAny(call.Args, "type", "file_type"),
+		TypeNot:         stringArg(call.Args, "type_not"),
 		CaseInsensitive: boolArg(call.Args, "case_insensitive"),
 		Literal:         boolArg(call.Args, "literal", "fixed_strings"),
 		IgnoreCase:      boolArg(call.Args, "ignore_case"),
@@ -242,6 +244,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		}
 		pageEntries = len(result.Files)
 	}
+	includeGlobs, excludeGlobs := EffectiveGrepFilters(options)
 	metadata := map[string]any{
 		"pattern":          patternLabel,
 		"patterns":         patterns,
@@ -254,8 +257,10 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"single_file":      result.SingleFile,
 		"is_truncated":     result.Truncated,
 		"invert_match":     options.InvertMatch,
-		"include_patterns": len(options.Include),
-		"exclude_patterns": len(options.Exclude),
+		"type":             options.Type,
+		"type_not":         options.TypeNot,
+		"include_patterns": len(includeGlobs),
+		"exclude_patterns": len(excludeGlobs),
 		"context_before":   contextBefore,
 		"context_after":    contextAfter,
 		"context_lines":    contextLineCount,
@@ -316,6 +321,17 @@ func stringArg(args map[string]any, key string) string {
 	}
 	value, _ := args[key].(string)
 	return value
+}
+
+// stringArgAny returns the first listed spelling that carries a non-empty
+// string, so alias pairs (type/file_type) behave like one parameter.
+func stringArgAny(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(stringArg(args, key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func intArg(args map[string]any, key string, fallback int) int {

@@ -162,9 +162,16 @@
   count 模式因为多读一个文件而保证页内每个文件的计数完整。`files_without` **故意不支持**
   且不在 remote schema 声明——它需要全量扫描，两个引擎都还没实现，
   声明它就是一张空头支票；`NormalizeGrepMode` 会显式报错而不是静默降级。
+  `grep` 的 `type`/`file_type`/`type_not` 也进 core：`FileTypeToGlob` 表移到
+  `searchcore`（本地原表改为同一变量别名），`GrepTypeGlobs` 负责展开（未知类型回退
+  `*.<type>`，与本地 `appendFileTypeGlobs` 一致），`EffectiveGrepFilters` 把类型
+  glob 并入 include/exclude（并集语义，与本地 `resolveIncludeGlobs` 相同）。
+  rg 侧不再转发 `--type`，改用同一张表推导出的 `--glob`，因此「rg 自带类型定义」
+  与内置引擎的差异被消除；推导出的 glob 同样过 `safeRipgrepGlob` 闸门。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、多根
-  语义已进 core；files_without、stats/ignore/type/rg_args 与本地上下文渲染格式仍在本地）；
+  本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
+  type/type_not、多根语义已进 core；files_without、stats/ignore 族、only_matching/
+  max_count 与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。

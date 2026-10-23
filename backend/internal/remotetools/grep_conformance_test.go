@@ -236,3 +236,52 @@ func TestRemoteGrepModesOverMCP(t *testing.T) {
 		t.Fatalf("files_with_matches must behave like mode=files:\n%s", alias)
 	}
 }
+
+// TestRemoteGrepTypeFiltersOverMCP proves the type parameters survive schema
+// validation and expand through the shared table: `type=go` selects Go files
+// anywhere below the root and `type_not` removes them again.
+func TestRemoteGrepTypeFiltersOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		"a.go":        "hit go\n",
+		"b.py":        "hit py\n",
+		"nested/c.go": "hit nested go\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	goOnly := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "type": "go",
+	})
+	if !strings.Contains(goOnly, "a.go") || !strings.Contains(goOnly, "nested/c.go") {
+		t.Fatalf("type go should select Go files at every depth:\n%s", goOnly)
+	}
+	if strings.Contains(goOnly, "b.py") {
+		t.Fatalf("type go must drop Python files:\n%s", goOnly)
+	}
+
+	notGo := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "type_not": "go",
+	})
+	if !strings.Contains(notGo, "b.py") || strings.Contains(notGo, "a.go") {
+		t.Fatalf("type_not go must keep only the other types:\n%s", notGo)
+	}
+
+	alias := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "file_type": "go",
+	})
+	if !strings.Contains(alias, "a.go") || strings.Contains(alias, "b.py") {
+		t.Fatalf("file_type must behave like type:\n%s", alias)
+	}
+}

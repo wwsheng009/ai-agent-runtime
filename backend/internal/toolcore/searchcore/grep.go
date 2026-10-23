@@ -31,6 +31,11 @@ type GrepOptions struct {
 	// Mode selects the output unit (content lines, files, per-file counts) and
 	// with it the pagination unit. Empty means content.
 	Mode GrepMode
+	// Type/TypeNot are ripgrep file-type names; they are folded into the
+	// include/exclude filters through the shared FileTypeToGlob table so both
+	// engines agree on what `type=go` means.
+	Type    string
+	TypeNot string
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -97,11 +102,12 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			return GrepResult{}, err
 		}
 	}
-	includeFilter, err := newGrepGlobFilter(opts.Include)
+	includeGlobs, excludeGlobs := EffectiveGrepFilters(opts)
+	includeFilter, err := newGrepGlobFilter(includeGlobs)
 	if err != nil {
 		return GrepResult{}, err
 	}
-	excludeFilter, err := newGrepGlobFilter(opts.Exclude)
+	excludeFilter, err := newGrepGlobFilter(excludeGlobs)
 	if err != nil {
 		return GrepResult{}, err
 	}
