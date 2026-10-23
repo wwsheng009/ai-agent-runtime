@@ -700,3 +700,25 @@ go vet ./internal/toolcore/... ./internal/remotetools ./internal/toolkit
 stale-write/document guard、图片/notebook、read dedup/LSP、PTY/detach、
 todos/code.* 保留在本地实现；公共语义已调用 `viewcore`/`searchcore`/
 `lscore`/`mutatecore`/`shellexec`，本地与 remote 不再维护两套同名算法。
+
+### 11.6 全仓 `-p 1` 回归记录（2026-10-22）
+
+命令：
+
+```powershell
+$env:GOGC='20'; $env:GOMAXPROCS='2'
+go test -json -count=1 -p 1 ./...
+```
+
+结果：`EXIT=1 ELAPSED=28m35s EVENTS=88458 FAIL_EVENTS=6`，失败集中在 3 个
+负载敏感测试，工具层包全部通过：
+
+| 测试 | 处置 | 复跑证据 |
+|------|------|----------|
+| `internal/knowledge::TestWatchSourceSoftDeletesExternalRemovalWhileIdle` | 真实竞态修复：新增目录 Create 事件到达时递归补监听并回扫已存在文件（`fix(knowledge): reconcile files in newly watched directories`） | 目标测试 `-count=5` 全绿；`internal/knowledge` 整包 PASS（46s） |
+| `internal/mesh::TestLeaseConcurrentAcquireHasSingleWinner` | 竞争时序抖动，非代码回归 | `-count=3` 全绿；`internal/mesh` 整包 PASS（10s） |
+| `cmd/aicli/commands::TestAICLIChatActorExecutor_InteractiveAutoStartRendersTeamTimeline` | 测试在 team terminal 后再等 2s 收 timeline 行；当前宿主虚拟内存耗尽（`VirtualAlloc errno=1455`）导致该大包无法重新编译复跑 | 待静默 CI 复跑；本次全量前该包曾在低内存配置下整体 PASS（232.6s） |
+
+说明：`go test -p 2 ./...` 与 `-p 1` 全量都受同机内存/分页限制影响，失败包
+逐项复跑后均无工具层回归；`cmd/aicli/commands` 的单项验证需在资源充足的
+CI 机器上补齐，届时更新本表。
