@@ -53,6 +53,9 @@ func unmarshalConfig(data []byte, path string) (*Config, error) {
 		if err := rejectExternalJSONContainers(data, path, &config); err != nil {
 			return nil, err
 		}
+		if err := rejectBareSingleServerJSON(data, path, &config); err != nil {
+			return nil, err
+		}
 	case ".yaml", ".yml":
 		if err := yaml.Unmarshal(data, &config); err != nil {
 			return nil, fmt.Errorf("解析配置文件失败: %w", err)
@@ -62,6 +65,9 @@ func unmarshalConfig(data []byte, path string) (*Config, error) {
 			if err := rejectExternalJSONContainers(data, path, &config); err != nil {
 				return nil, err
 			}
+			if err := rejectBareSingleServerJSON(data, path, &config); err != nil {
+				return nil, err
+			}
 		} else {
 			if err := yaml.Unmarshal(data, &config); err != nil {
 				return nil, fmt.Errorf("无法解析配置文件（尝试了 JSON 和 YAML）: %w", err)
@@ -69,6 +75,39 @@ func unmarshalConfig(data []byte, path string) (*Config, error) {
 		}
 	}
 	return &config, nil
+}
+
+// rejectBareSingleServerJSON 阻止「单个 server 定义」被静默解析成空配置。
+//
+// `aicli mcp add-json` / `mcp get --json` 接受顶层 command/url 的单 server 片段，
+// 但它不是配置文件 schema：配置文件必须把它们放进 mcpServers 映射。直接复制
+// 该片段到自动发现的 mcp.json 时，encoding/json 会忽略 command/url，最终得到
+// 0 个 server，用户只能看到「没有配置」而不知道原因。
+func rejectBareSingleServerJSON(data []byte, path string, cfg *Config) error {
+	if cfg != nil && len(cfg.MCPServers) > 0 {
+		return nil
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil
+	}
+	if _, hasMCPServers := document["mcpServers"]; hasMCPServers {
+		return nil
+	}
+	hasSingleServerField := false
+	for _, key := range []string{"command", "url"} {
+		if _, ok := document[key]; ok {
+			hasSingleServerField = true
+			break
+		}
+	}
+	if !hasSingleServerField {
+		return nil
+	}
+	return fmt.Errorf(
+		"配置文件 %s 是单个 MCP Server 的配置（顶层 command/url），缺少 mcpServers 容器；"+
+			"请用 `aicli mcp add-json <name> @%s` 导入，或包装为 {\"mcpServers\":{\"<name>\":{...}}}",
+		path, path)
 }
 
 // rejectExternalJSONContainers 在 JSON 配置里检测到外部工具的容器键

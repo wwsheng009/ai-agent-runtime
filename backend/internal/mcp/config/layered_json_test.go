@@ -166,3 +166,25 @@ func TestLoadConfigFileRejectsExternalJSONContainers(t *testing.T) {
 		}
 	}
 }
+
+// 单 server 片段（顶层 command/url）不是配置文件 schema，不能静默变成 0 个 server。
+func TestLoadConfigFileRejectsBareSingleServerJSON(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"bare-command.json", `{"command":"npx","args":["-y","@example/mcp-server"]}`},
+		{"bare-url.json", `{"url":"https://example.com/mcp"}`},
+	}
+	for _, tc := range cases {
+		path := writeConfigFile(t, dir, tc.name, tc.body)
+		_, err := NewLoader(path).Load()
+		if err == nil {
+			t.Fatalf("%s: 裸单 server 配置应报错", tc.name)
+		}
+		if !strings.Contains(err.Error(), "mcpServers") || !strings.Contains(err.Error(), "add-json") {
+			t.Fatalf("%s: 错误应指出包装方式及导入命令, got %v", tc.name, err)
+		}
+	}
+}
