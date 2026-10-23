@@ -150,6 +150,12 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 	if opts.Limit < 1 {
 		opts.Limit = searchcore.DefaultGrepLimit
 	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	// Read one match past the requested page so Truncated/has_more stays
+	// accurate, then window through the shared helper below.
+	wanted := opts.Offset + opts.Limit
 	var globMatcher *searchcore.GlobMatcher
 	if strings.TrimSpace(opts.Glob) != "" {
 		matcher, err := searchcore.NewGlobMatcher(opts.Glob)
@@ -236,7 +242,7 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 				Line: event.Data.LineNumber,
 				Text: text,
 			})
-			if len(result.Matches) > opts.Limit {
+			if len(result.Matches) > wanted {
 				truncated = true
 				cancel()
 				break
@@ -249,9 +255,7 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 	scanErr := scanner.Err()
 	if truncated {
 		_ = cmd.Wait()
-		if len(result.Matches) > opts.Limit {
-			result.Matches = result.Matches[:opts.Limit]
-		}
+		searchcore.ApplyGrepWindow(&result, opts)
 		result.Truncated = true
 		return result, true, nil
 	}
@@ -268,10 +272,7 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 		}
 		return searchcore.GrepResult{}, true, fmt.Errorf("ripgrep: %v: %s", waitErr, strings.TrimSpace(stderr.String()))
 	}
-	if len(result.Matches) > opts.Limit {
-		result.Matches = result.Matches[:opts.Limit]
-		result.Truncated = true
-	}
+	searchcore.ApplyGrepWindow(&result, opts)
 	return result, true, nil
 }
 

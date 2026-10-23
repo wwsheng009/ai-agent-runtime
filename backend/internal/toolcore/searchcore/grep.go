@@ -133,16 +133,32 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 	}
 
+	ApplyGrepWindow(&result, opts)
+	return result, nil
+}
+
+// ApplyGrepWindow applies the shared offset/limit window to raw matches.
+// Every grep engine (pure-Go walker, ripgrep runner) funnels its raw matches
+// through this one function, so pagination cannot diverge by engine.
+func ApplyGrepWindow(result *GrepResult, opts GrepOptions) {
+	if result == nil {
+		return
+	}
+	if opts.Limit < 1 {
+		opts.Limit = DefaultGrepLimit
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
 	if opts.Offset > 0 {
 		if opts.Offset >= len(result.Matches) {
 			result.Matches = nil
-		} else {
-			result.Matches = result.Matches[opts.Offset:]
+			return
 		}
+		result.Matches = result.Matches[opts.Offset:]
 	}
 	if len(result.Matches) > opts.Limit {
 		result.Matches = result.Matches[:opts.Limit]
 		result.Truncated = true
 	}
-	return result, nil
 }
