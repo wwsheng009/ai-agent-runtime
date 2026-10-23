@@ -160,6 +160,35 @@ mcpServers:
 - 管理 API：`GET /api/runtime/mcps/{name}/tools` 返回全量工具（含禁用）与 `enabled / configured_enabled / healthy`；`POST .../tools/{tool}/enable|disable` 与 `POST .../tools/enable|disable`（body `{"tools":[...]}`，空数组 = 全部）。
 - 注意：会话工具面按 prompt-cache 语义冻结（`turn_tool_surface_snapshot.go:74-80`），工具开关对**已存在会话**在下一轮新会话或显式刷新后生效；新建会话立即生效。
 
+### 2.7 外部定义的规模上限（tool poisoning 防线）
+
+MCP server 提供的 description/schema 是**外部输入**，直接进入每一轮请求的工具面。
+`registry.RegisterTool` 在注册时施加三条边界（`backend/internal/mcp/registry/registry.go`）：
+
+| 边界 | 默认值 | 超限行为 | 配置 |
+|------|--------|----------|------|
+| 单个工具 description | `MaxToolDescriptionBytes` = 4 KiB | **截断**，追加 `[... MCP tool description truncated ...]` 标记，并写 `metadata.tool_description_truncated=true` | 无 |
+| 单个工具 canonical schema | 64 KiB | **拒绝 + quarantine**（截断的 schema 是非法契约，只能 fail-closed） | 无 |
+| 单个 server 的工具数 | `MaxToolsPerServer` = 256 | 超出部分**拒绝 + quarantine**，错误含 `limit` | `mcpServers.<name>.maxTools` |
+
+```yaml
+mcpServers:
+  big-suite:
+    enabled: true
+    maxTools: 600     # 0 或省略 = 用默认 256；负数 = 不设上限
+```
+
+要点：
+
+- **截断按 canonical 形态测量**：注册前先 `Canonicalize`，因此 key 重排/注解剥离无法绕过边界，约束的正是真正进入模型的字节；
+- **描述截断而非拒绝**：描述是散文，截断后仍可用；schema 是契约，截断即非法，只能拒绝；
+- **标记计入预算内**：截断标记占用 4 KiB 额度，不额外追加，保证边界对模型可见文本恒成立；截断点回退到 rune 边界，不产生半个 UTF-8 序列；
+- **quarantine 表本身有界**（`maxQuarantineRecords` = 512）：恶意 server 可制造无限拒绝，诊断表不能变成内存 DoS；被丢弃的条数由 `Registry.QuarantineOverflow()` 计数，使「没有拒绝」与「拒绝太多放不下」可区分；
+- **上限可上调不是静默裁剪**：`maxTools` 省略（0）回落默认；配置删除该字段后重连会清除旧 override（`loadTools` 无条件调用 `SetServerToolLimit`）；`UnregisterClient` 与 `Clear` 同样清除，避免同名 server 继承上一个 override；
+- **untrusted 只读**与上限是两道独立机制：`policy.BlockUntrustedMCP`（默认开）拒绝 `untrusted_remote` 执行写类工具，见 `policy/tool_policy.go` 与 `policy/filter_test.go`。
+
+测试：`backend/internal/mcp/registry/tool_poisoning_caps_test.go`（上限/并发确定性/quarantine 有界/预算可配置）、`backend/internal/mcp/manager/manager_tool_budget_test.go`（`maxTools` 配置链路与重连清除）。威胁模型映射见 `docs/plan/tool-layer-security-test-map.md` T3。
+
 ---
 
 ## 3. 边界与注意事项
