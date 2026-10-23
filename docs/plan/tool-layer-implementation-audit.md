@@ -115,9 +115,11 @@
   `edit`/`apply_patch` 的行比较与空白/缩进 helper 已上移 `mutatecore`；
   `filetransport.LocalService` 的写/追加也改为调用 `mutatecore.Write/Append`。
   `remotetools/glob_conformance_test.go` 直接锁定 remote 侧使用同一 matcher。
+  `apply_patch` 的 envelope 规范化（heredoc/markdown fence/折叠 marker）已上移
+  `mutatecore.NormalizePatchEnvelope`，本地重复实现删除。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  `TestGrepToolRealRipgrepStopsAfterPage` 在基线（未含本轮改动）同样失败，属既有问题；
-  `remotetools` 偶发 `TestJobListReportsJobs` TempDir 清理竞态（重跑通过）。
+  `apply_patch` 的 staging/回滚仍由本地 applier 承担（core 的 ApplyPatch 无回滚，
+  不能等价替换）。
 - **状态**: ⚠️ 基础覆盖，扩展待 PR2。
 
 #### Benchmark Thresholds (PR2)

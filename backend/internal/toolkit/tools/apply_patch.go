@@ -231,7 +231,7 @@ type patchHunkLine struct {
 }
 
 func parseApplyPatch(input string) ([]patchOperation, error) {
-	normalizedInput := normalizeApplyPatchEnvelope(strings.TrimSpace(strings.ReplaceAll(input, "\r\n", "\n")))
+	normalizedInput := mutatecore.NormalizePatchEnvelope(strings.TrimSpace(strings.ReplaceAll(input, "\r\n", "\n")))
 	lines := strings.Split(normalizedInput, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != applyPatchBeginMarker {
 		return nil, fmt.Errorf("补丁必须以 %q 开始", applyPatchBeginMarker)
@@ -283,143 +283,6 @@ func parseApplyPatch(input string) ([]patchOperation, error) {
 	return nil, fmt.Errorf("补丁缺少 %q 结束标记，且没有可执行的文件操作", applyPatchEndMarker)
 }
 
-func normalizeApplyPatchEnvelope(input string) string {
-	input = unwrapApplyPatchHeredoc(input)
-	lines := strings.Split(input, "\n")
-	if len(lines) >= 3 && strings.HasPrefix(strings.TrimSpace(lines[0]), "```") && strings.TrimSpace(lines[len(lines)-1]) == "```" {
-		lines = lines[1 : len(lines)-1]
-	}
-	// Models sometimes emit the whole patch on one line, e.g.
-	// "*** Begin Patch *** *** Add File: foo.go package foo ..."
-	// Split known markers onto their own lines before per-line cleanup.
-	lines = expandCollapsedApplyPatchLines(lines)
-	normalized := make([]string, 0, len(lines))
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case isApplyPatchBoundaryLine(trimmed, applyPatchBeginMarker):
-			normalized = append(normalized, applyPatchBeginMarker)
-		case isApplyPatchBoundaryLine(trimmed, applyPatchEndMarker):
-			normalized = append(normalized, applyPatchEndMarker)
-		default:
-			normalized = append(normalized, line)
-		}
-	}
-	return strings.TrimSpace(strings.Join(normalized, "\n"))
-}
-
-// expandCollapsedApplyPatchLines splits lines that concatenate multiple Codex
-// patch markers (Begin/End/Add/Update/Delete/Move/@@) without newlines.
-func expandCollapsedApplyPatchLines(lines []string) []string {
-	if len(lines) == 0 {
-		return lines
-	}
-	markers := []string{
-		applyPatchBeginMarker,
-		applyPatchEndMarker,
-		applyPatchAddPrefix,
-		applyPatchUpdatePrefix,
-		applyPatchDeletePrefix,
-		applyPatchMoveToPrefix,
-		applyPatchEOFMarker,
-	}
-	out := make([]string, 0, len(lines)+4)
-	for _, line := range lines {
-		expanded := splitCollapsedApplyPatchLine(line, markers)
-		out = append(out, expanded...)
-	}
-	return out
-}
-
-func splitCollapsedApplyPatchLine(line string, markers []string) []string {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return []string{line}
-	}
-	// Fast path: already a single marker / normal content line.
-	if !strings.Contains(trimmed, "***") && !strings.HasPrefix(trimmed, "@@") {
-		return []string{line}
-	}
-
-	// Walk the line and cut before each marker occurrence after offset 0.
-	type cut struct {
-		at     int
-		marker string
-	}
-	cuts := make([]cut, 0, 4)
-	for _, marker := range markers {
-		searchFrom := 0
-		for {
-			idx := strings.Index(trimmed[searchFrom:], marker)
-			if idx < 0 {
-				break
-			}
-			abs := searchFrom + idx
-			// Skip marker that starts the line (handled as the first segment).
-			if abs > 0 {
-				cuts = append(cuts, cut{at: abs, marker: marker})
-			}
-			searchFrom = abs + len(marker)
-		}
-	}
-	// Also split @@ hunk headers that models paste mid-line after file ops,
-	// e.g. "*** Update File: foo.go @@ func Foo()". If the line already
-	// starts with "@@", it is a complete hunk header (including unified-diff
-	// form "@@ -N,M +N,M @@") and must not be re-split on a trailing "@@".
-	if !strings.HasPrefix(trimmed, "@@") {
-		searchFrom := 0
-		for {
-			idx := strings.Index(trimmed[searchFrom:], "@@")
-			if idx < 0 {
-				break
-			}
-			abs := searchFrom + idx
-			if abs > 0 {
-				cuts = append(cuts, cut{at: abs, marker: "@@"})
-			}
-			searchFrom = abs + 2
-		}
-	}
-	if len(cuts) == 0 {
-		return []string{line}
-	}
-	// Sort cuts by position (stable insertion for tiny N).
-	for i := 1; i < len(cuts); i++ {
-		j := i
-		for j > 0 && cuts[j].at < cuts[j-1].at {
-			cuts[j], cuts[j-1] = cuts[j-1], cuts[j]
-			j--
-		}
-	}
-
-	parts := make([]string, 0, len(cuts)+1)
-	prev := 0
-	for _, c := range cuts {
-		if c.at <= prev {
-			continue
-		}
-		// Avoid cutting inside an already-started marker token stream when
-		// adjacent markers share stars (e.g. "*** Begin Patch *** *** Add").
-		segment := strings.TrimSpace(trimmed[prev:c.at])
-		if segment != "" && !isOnlyStarsAndSpaces(segment) {
-			parts = append(parts, segment)
-		} else if segment != "" && len(parts) > 0 {
-			// Trailing stars after Begin/End markers: drop as noise.
-		} else if segment != "" {
-			parts = append(parts, segment)
-		}
-		prev = c.at
-	}
-	tail := strings.TrimSpace(trimmed[prev:])
-	if tail != "" {
-		parts = append(parts, tail)
-	}
-	if len(parts) == 0 {
-		return []string{line}
-	}
-	return parts
-}
-
 func isOnlyStarsAndSpaces(s string) bool {
 	for _, r := range s {
 		if r != '*' && !unicode.IsSpace(r) {
@@ -427,22 +290,6 @@ func isOnlyStarsAndSpaces(s string) bool {
 		}
 	}
 	return true
-}
-
-func unwrapApplyPatchHeredoc(input string) string {
-	lines := strings.Split(input, "\n")
-	if len(lines) < 4 {
-		return input
-	}
-	first := strings.TrimSpace(lines[0])
-	last := strings.TrimSpace(lines[len(lines)-1])
-	switch first {
-	case "<<EOF", "<<'EOF'", `<<"EOF"`:
-		if strings.HasSuffix(last, "EOF") {
-			return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
-		}
-	}
-	return input
 }
 
 func isApplyPatchBoundaryLine(line, marker string) bool {

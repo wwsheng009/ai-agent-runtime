@@ -398,6 +398,18 @@ func (m *JobManager) Close() {
 	for _, handle := range handles {
 		killProcessGroup(handle.cmd)
 	}
+	// Wait for each supervisor to persist the terminal record and release the
+	// output file. Without this, callers can remove the job root while a
+	// supervisor is still writing job.json (TempDir cleanup, daemon shutdown).
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for _, handle := range handles {
+		select {
+		case <-handle.done:
+		case <-deadline.C:
+			return
+		}
+	}
 }
 
 // writeJobRecord persists the record atomically.
