@@ -436,6 +436,11 @@ func runMCPTestToolCommand(mcpName, toolName, jsonArg string) (*mcpToolCommandRe
 	if err := ensureMCPManager(); err != nil {
 		return nil, err
 	}
+	// `mcp test` prints canonical names from tools/list, but the target's own
+	// documentation and the remote tool prefix make the short name natural too
+	// (remote_238__view -> view). Resolve the short name against this one
+	// server's registered tools before calling; canonical names pass through.
+	toolName = resolveMCPTestToolName(MCPManager, mcpName, toolName)
 
 	toolArgs := make(map[string]interface{})
 	jsonArg = strings.TrimSpace(jsonArg)
@@ -456,6 +461,35 @@ func runMCPTestToolCommand(mcpName, toolName, jsonArg string) (*mcpToolCommandRe
 		Args:     toolArgs,
 		Result:   result,
 	}, nil
+}
+
+// resolveMCPTestToolName accepts either the canonical identity or a unique
+// canonical name suffix for one server. It never guesses across servers: an
+// ambiguous short name is left unchanged so the manager returns its normal
+// actionable error.
+func resolveMCPTestToolName(mgr interface {
+	ListTools() []*registry.ToolInfo
+}, mcpName, toolName string) string {
+	toolName = strings.TrimSpace(toolName)
+	if mgr == nil || toolName == "" {
+		return toolName
+	}
+	tools := mgr.ListTools()
+	suffix := "__" + toolName
+	matches := make([]string, 0, 1)
+	for _, info := range tools {
+		if info == nil || !info.Enabled || info.UserDisabled || info.MCPName != mcpName || info.Tool == nil {
+			continue
+		}
+		name := strings.TrimSpace(info.Tool.Name)
+		if name == toolName || strings.HasSuffix(name, suffix) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
+	}
+	return toolName
 }
 
 func runMCPTestServerCommand(name string, showStderr bool) (*mcpServerCommandResult, error) {

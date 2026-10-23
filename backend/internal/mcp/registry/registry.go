@@ -4,8 +4,8 @@ package registry
 
 import (
 	"crypto/sha256"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"regexp"

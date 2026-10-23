@@ -14,7 +14,7 @@
 | **P0/P1 设计冻结** | ✅ 已冻结 | P0-1/2/3/4内容补完；安全门独立评审未做但缺口已显式标记 |
 | **契约层验证 (PR0)** | ✅ 完成 | 工具清单双向一致测试、MCP surface 字段、错误码映射 |
 | **Output/core (PR1)** | ✅ 完成 | trust clamp, wire cap, artifact scope quarantine, canary + rollback |
-| **Read-only core (PR2)** | ⚠️ 部分 | conformance test: grep/rigrep vs walker; 大仓库 benchmark 有基线但缺 CI gate |
+| **Read-only core (PR2)** | ⚠️ 部分 | glob matcher 已收敛为单一实现；grep/rigrep vs walker conformance 与 benchmark CI gate 仍缺 |
 | **CLI/direct (PR3)** | ⚠️ 部分验证 | WSL 已构建当前源码的 `aicli`，实测 `mcp tools`/`mcp test`/`--remote` 连接；`cmd/aicli/commands` 全量回归仍未跑 |
 | **威胁模型 T1–T13** | ✅ 大部分关闭 | T1/T2/T3/T4/T5/T9/T10/T11/T12 已覆盖；T6 默认姿态关闭；T7/T8 部分；T13 流程缺口 |
 | **Canary/回滚** | ✅ 完成 | 238 target 实测，binary 替换 ±5.5s，100 次 soak 无失败 |
@@ -110,7 +110,11 @@
 - **现状**: 
   - `remotetools/search_engine_test.go::TestRemoteRipgrepMatchesWalkerConformance` 验证 grep 一致性；
   - `internal/toolkit/listable_test.go` 的 shouldList 策略映射。
-- **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展。
+- **2026-10-23 收敛**: `searchcore.GlobMatcher` 已删除 regex 实现，改为与本地 glob 共用
+  `MatchGlobPath`/`MatchGlobSegments`；新增 `glob_conformance_test.go` 锁定同一语义。
+  `edit`/`apply_patch` 的行比较与空白/缩进 helper 已上移 `mutatecore`。
+- **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
+  `TestGrepToolRealRipgrepStopsAfterPage` 在基线（未含本轮改动）同样失败，属既有问题。
 - **状态**: ⚠️ 基础覆盖，扩展待 PR2。
 
 #### Benchmark Thresholds (PR2)
@@ -170,7 +174,7 @@
 |---|------|------|--------|
 | 1 | `cmd/aicli/commands` 全量回归复跑 | CI runner | High（阻塞 PR3 发布） |
 | 2 | benchmark baseline 固化 + CI gate | Release owner | Medium（性能回归风险） |
-| 3 | conformance corpus 扩展 (跨平台) | PR2 owner | Low（质量提升） |
+| 3 | conformance corpus 扩展 (跨平台) + 修复 `TestGrepToolRealRipgrepStopsAfterPage` 基线失败 | PR2 owner | Medium（质量与回归可信度） |
 | 4 | 独立安全复审签字 | 第三方 reviewer | High（发布门） |
 | 5 | release 流程文档化（T13） | Release owner | Medium（合规需求） |
 | 6 | PR0/1/2 代码合并策略 | Tech lead | Low（工程优化） |

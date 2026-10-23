@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -791,135 +791,31 @@ func canDescendGlobParts(compiled compiledGlobPattern, relParts []string, caseIn
 }
 
 func normalizeGlobPattern(pattern string) string {
-	pattern = strings.TrimSpace(pattern)
-	pattern = strings.ReplaceAll(pattern, `\`, `/`)
-	for strings.HasPrefix(pattern, "./") {
-		pattern = strings.TrimPrefix(pattern, "./")
-	}
-	for strings.HasPrefix(pattern, "/") {
-		pattern = strings.TrimPrefix(pattern, "/")
-	}
-	return pattern
+	return searchcore.NormalizeGlobPattern(pattern)
 }
 
 func splitGlobSegments(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	parts := strings.Split(value, "/")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		out = append(out, part)
-	}
-	return out
+	return searchcore.SplitGlobSegments(value)
 }
 
 func matchGlobSegments(patternParts, pathParts []string) (bool, error) {
-	return matchGlobSegmentsWithCase(patternParts, pathParts, false)
+	return searchcore.MatchGlobSegments(patternParts, pathParts, false)
 }
 
 func matchGlobSegmentsWithCase(patternParts, pathParts []string, caseInsensitive bool) (bool, error) {
-	if !containsDoubleStar(patternParts) {
-		if len(patternParts) != len(pathParts) {
-			return false, nil
-		}
-		for i := range patternParts {
-			matched, err := matchGlobPart(patternParts[i], pathParts[i], caseInsensitive)
-			if err != nil || !matched {
-				return false, err
-			}
-		}
-		return true, nil
-	}
-
-	type matchState struct {
-		patternIndex int
-		pathIndex    int
-	}
-	memo := make(map[matchState]bool)
-	var match func(int, int) (bool, error)
-	match = func(patternIndex, pathIndex int) (bool, error) {
-		state := matchState{patternIndex: patternIndex, pathIndex: pathIndex}
-		if cached, ok := memo[state]; ok {
-			return cached, nil
-		}
-		var result bool
-		defer func() {
-			memo[state] = result
-		}()
-
-		if patternIndex >= len(patternParts) {
-			result = pathIndex >= len(pathParts)
-			return result, nil
-		}
-		current := patternParts[patternIndex]
-		if current == "**" {
-			if patternIndex == len(patternParts)-1 {
-				result = true
-				return true, nil
-			}
-			for skip := pathIndex; skip <= len(pathParts); skip++ {
-				matched, err := match(patternIndex+1, skip)
-				if err != nil {
-					return false, err
-				}
-				if matched {
-					result = true
-					return true, nil
-				}
-			}
-			result = false
-			return false, nil
-		}
-		if pathIndex >= len(pathParts) {
-			result = false
-			return false, nil
-		}
-		matched, err := matchGlobPart(current, pathParts[pathIndex], caseInsensitive)
-		if err != nil || !matched {
-			result = false
-			return false, err
-		}
-		return match(patternIndex+1, pathIndex+1)
-	}
-	return match(0, 0)
+	return searchcore.MatchGlobSegments(patternParts, pathParts, caseInsensitive)
 }
 
 func matchLeadingDoubleStarTail(tailParts, pathParts []string, caseInsensitive bool) (bool, error) {
-	if len(tailParts) == 0 {
-		return true, nil
-	}
-	if len(pathParts) < len(tailParts) {
-		return false, nil
-	}
-	start := len(pathParts) - len(tailParts)
-	for i := range tailParts {
-		matched, err := matchGlobPart(tailParts[i], pathParts[start+i], caseInsensitive)
-		if err != nil || !matched {
-			return false, err
-		}
-	}
-	return true, nil
+	return searchcore.MatchLeadingDoubleStarTail(tailParts, pathParts, caseInsensitive)
 }
 
 func matchGlobPattern(pattern, relPath string) (bool, error) {
-	compiled := compileGlobPattern(pattern)
-	if compiled.normalized == "" {
-		return false, nil
-	}
-	return matchGlobSegments(compiled.parts, splitGlobSegments(normalizeGlobPattern(relPath)))
+	return searchcore.MatchGlobPath(pattern, relPath, false)
 }
 
 func matchGlobPart(patternPart, pathPart string, caseInsensitive bool) (bool, error) {
-	if caseInsensitive {
-		patternPart = strings.ToLower(patternPart)
-		pathPart = strings.ToLower(pathPart)
-	}
-	return path.Match(patternPart, pathPart)
+	return searchcore.MatchGlobPart(patternPart, pathPart, caseInsensitive)
 }
 
 func hasGlobMeta(pattern string) bool {
@@ -1052,12 +948,7 @@ func looksLikeUnsupportedBraceGlob(pattern string) bool {
 }
 
 func containsDoubleStar(parts []string) bool {
-	for _, part := range parts {
-		if part == "**" {
-			return true
-		}
-	}
-	return false
+	return searchcore.ContainsDoubleStar(parts)
 }
 
 func staticGlobPrefix(pattern string) string {

@@ -4,18 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
-
-	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
-	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 const (
@@ -1197,57 +1197,20 @@ func hunkSearchRanges(cursor int, maxStart int) []hunkSearchRange {
 type patchLineMatcher func(actual string, expected string) bool
 
 func patchLineMatchers() []patchLineMatcher {
-	return []patchLineMatcher{
-		func(actual string, expected string) bool {
-			return actual == expected
-		},
-		func(actual string, expected string) bool {
-			return strings.TrimRightFunc(actual, unicode.IsSpace) == strings.TrimRightFunc(expected, unicode.IsSpace)
-		},
-		func(actual string, expected string) bool {
-			return strings.TrimSpace(actual) == strings.TrimSpace(expected)
-		},
-		func(actual string, expected string) bool {
-			return normalizePatchComparableLine(actual) == normalizePatchComparableLine(expected)
-		},
+	shared := mutatecore.LineMatchers()
+	out := make([]patchLineMatcher, 0, len(shared))
+	for _, matcher := range shared {
+		out = append(out, patchLineMatcher(matcher))
 	}
+	return out
 }
 
 func patchSliceMatches(left, right []string, matcher patchLineMatcher) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if !matcher(left[index], right[index]) {
-			return false
-		}
-	}
-	return true
+	return mutatecore.SliceMatches(left, right, mutatecore.LineMatcher(matcher))
 }
 
 func normalizePatchComparableLine(line string) string {
-	line = strings.TrimSpace(line)
-	var builder strings.Builder
-	builder.Grow(len(line))
-	for _, char := range line {
-		switch char {
-		case '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212':
-			builder.WriteRune('-')
-		case '\u2018', '\u2019', '\u201a', '\u201b':
-			builder.WriteRune('\'')
-		case '\u201c', '\u201d', '\u201e', '\u201f':
-			builder.WriteRune('"')
-		case '\u00a0', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006',
-			'\u2007', '\u2008', '\u2009', '\u200a', '\u202f', '\u205f', '\u3000':
-			builder.WriteRune(' ')
-		default:
-			builder.WriteRune(char)
-		}
-	}
-	// Collapse internal whitespace so column-alignment padding
-	// (e.g. "Name  Event" vs "Name Event") still matches while
-	// replace continues to use the file's exact bytes.
-	return strings.Join(strings.Fields(builder.String()), " ")
+	return mutatecore.NormalizeComparableLine(line)
 }
 
 func hunkChangeContextLine(header string) string {

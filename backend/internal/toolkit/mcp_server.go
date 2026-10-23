@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/server"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ToolkitMCPServer 将 Toolkit 工具暴露为 MCP 服务
@@ -65,12 +66,37 @@ func (s *ToolkitMCPServer) registerTools() {
 			Description: t.Description(),
 			InputSchema: inputSchema,
 		}
+		mcpTool.Annotations = mcpAnnotationsForTool(t)
 
 		// 注册到 MCP Server
 		mcp.AddTool(mcpServer, mcpTool, func(ctx context.Context, req *mcp.CallToolRequest, args map[string]interface{}) (*mcp.CallToolResult, any, error) {
 			return s.handleToolCallWithRequest(ctx, req, t, args)
 		})
 	}
+}
+
+// mcpAnnotationsForTool projects the toolkit's definition metadata onto the MCP
+// tool annotations. read_only is the only metadata key that has a standard MCP
+// annotation today; keeping the projection here means every toolkit-backed MCP
+// server (remote included) advertises the same hint without each surface
+// hand-building mcp.Tool.
+func mcpAnnotationsForTool(tool Tool) *mcp.ToolAnnotations {
+	if tool == nil {
+		return nil
+	}
+	provider, ok := tool.(ToolDefinitionMetadataProvider)
+	if !ok {
+		return nil
+	}
+	metadata := provider.DefinitionMetadata()
+	if len(metadata) == 0 {
+		return nil
+	}
+	readOnly, ok := metadata[runtimetypes.ToolMetadataReadOnlyKey].(bool)
+	if !ok {
+		return nil
+	}
+	return &mcp.ToolAnnotations{ReadOnlyHint: readOnly}
 }
 
 // handleToolCall 处理工具调用

@@ -750,6 +750,18 @@ func TestResolveToolForMCPPrefersCanonicalIdentityOverRawAlias(t *testing.T) {
 	}
 }
 
+func TestResolveToolForMCPKeepsExactRawNameAddressable(t *testing.T) {
+	reg := NewRegistry()
+	for _, name := range []string{"a", "b"} {
+		if err := reg.RegisterTool("remote_238", &protocol.Tool{Name: name}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := reg.ResolveToolForMCP("remote_238", "a"); err != nil {
+		t.Fatalf("exact raw name should resolve: %v", err)
+	}
+}
+
 func TestRegistryKeysAndCanonicalNamesDoNotSilentlyCollide(t *testing.T) {
 	reg := NewRegistry()
 	if err := reg.RegisterTool("a_b", &protocol.Tool{Name: "c"}, true); err != nil {

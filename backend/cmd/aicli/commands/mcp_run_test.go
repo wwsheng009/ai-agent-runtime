@@ -92,3 +92,27 @@ func TestRunMCPToolsCommandBuildsSortedOutputs(t *testing.T) {
 		t.Fatalf("unexpected tools: %+v", tools)
 	}
 }
+
+func TestResolveMCPTestToolNameAcceptsUniqueShortName(t *testing.T) {
+	mgr := &fakeMCPManager{tools: []*mcpregistry.ToolInfo{
+		{MCPName: "remote_238", Enabled: true, Tool: &mcpprotocol.Tool{Name: "remote_238__view"}},
+		{MCPName: "remote_238", Enabled: true, Tool: &mcpprotocol.Tool{Name: "remote_238__shell"}},
+		{MCPName: "other", Enabled: true, Tool: &mcpprotocol.Tool{Name: "other__view"}},
+	}}
+	if got := resolveMCPTestToolName(mgr, "remote_238", "view"); got != "remote_238__view" {
+		t.Fatalf("short name resolved to %q", got)
+	}
+	if got := resolveMCPTestToolName(mgr, "remote_238", "remote_238__shell"); got != "remote_238__shell" {
+		t.Fatalf("canonical name changed to %q", got)
+	}
+}
+
+func TestResolveMCPTestToolNameLeavesAmbiguousShortNameAlone(t *testing.T) {
+	mgr := &fakeMCPManager{tools: []*mcpregistry.ToolInfo{
+		{MCPName: "remote_238", Enabled: true, Tool: &mcpprotocol.Tool{Name: "remote_238__view"}},
+		{MCPName: "remote_238", Enabled: true, Tool: &mcpprotocol.Tool{Name: "legacy__view"}},
+	}}
+	if got := resolveMCPTestToolName(mgr, "remote_238", "view"); got != "view" {
+		t.Fatalf("ambiguous short name must be left unchanged, got %q", got)
+	}
+}

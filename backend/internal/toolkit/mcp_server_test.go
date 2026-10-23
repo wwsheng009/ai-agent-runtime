@@ -63,4 +63,7 @@ func TestToolkitMCPServer_ListToolsIncludesSchema(t *testing.T) {
 	if _, ok := props["path"]; !ok {
 		t.Fatalf("expected path property, got %v", props)
 	}
+	if lsTool.Annotations == nil || !lsTool.Annotations.ReadOnlyHint {
+		t.Fatalf("expected ls readOnlyHint=true, got %+v", lsTool.Annotations)
+	}
 }

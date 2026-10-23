@@ -11,6 +11,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -670,25 +671,19 @@ func matchEditStringsWhitespaceTolerant(content, oldLF, newLF string) (matchedOl
 		return "", "", false
 	}
 
-	matchers := []func(actual, expected string) bool{
-		func(actual, expected string) bool {
-			return strings.TrimRight(actual, " \t") == strings.TrimRight(expected, " \t")
-		},
-		func(actual, expected string) bool {
-			return strings.TrimSpace(actual) == strings.TrimSpace(expected)
-		},
-		// Same recovery class as apply_patch: collapse internal whitespace and
-		// normalize fancy punctuation so column-aligned Go consts still match.
-		func(actual, expected string) bool {
-			return normalizePatchComparableLine(actual) == normalizePatchComparableLine(expected)
-		},
+	shared := mutatecore.LineMatchers()
+	matchers := make([]func(actual, expected string) bool, 0, len(shared))
+	for _, matcher := range shared {
+		matchers = append(matchers, func(actual, expected string) bool {
+			return matcher(actual, expected)
+		})
 	}
 
 	start := -1
 	for _, matcher := range matchers {
 		for i := 0; i+len(oldLines) <= len(contentLines); i++ {
 			window := contentLines[i : i+len(oldLines)]
-			if editLineWindowMatches(window, oldLines, matcher) {
+			if mutatecore.SliceMatches(window, oldLines, mutatecore.LineMatcher(matcher)) {
 				// Prefer unique windows to avoid wrong-site edits.
 				if start >= 0 {
 					return "", "", false
@@ -726,18 +721,6 @@ func matchEditStringsWhitespaceTolerant(content, oldLF, newLF string) (matchedOl
 			true
 	}
 	return matchedOldLF, matchedNewLF, true
-}
-
-func editLineWindowMatches(actual, expected []string, matcher func(actual, expected string) bool) bool {
-	if len(actual) != len(expected) {
-		return false
-	}
-	for i := range actual {
-		if !matcher(actual[i], expected[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 // matchEditBlankRunWindow finds a unique content span whose non-blank lines
@@ -798,14 +781,7 @@ func locateBlankRunLineSpan(contentLines, oldLines []string) (start, end int, ok
 }
 
 func editNonBlankLines(lines []string) []string {
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		out = append(out, line)
-	}
-	return out
+	return mutatecore.NonBlankLines(lines)
 }
 
 // rebuildEditReplacement constructs the replacement text from the file window
@@ -1058,20 +1034,11 @@ func alignEditReplacementIndent(matchedLines, oldLines []string, newLF string) s
 }
 
 func leadingWhitespace(line string) string {
-	i := 0
-	for i < len(line) {
-		if line[i] != ' ' && line[i] != '\t' {
-			break
-		}
-		i++
-	}
-	return line[:i]
+	return mutatecore.LeadingWhitespace(line)
 }
 
 func normalizeEditLineEndings(text string) string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	return text
+	return mutatecore.NormalizeLineEndings(text)
 }
 
 func findClosestEditSnippet(content, oldString string) string {

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -227,12 +228,15 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 		}, nil
 	}
 
-	// 写入文件：按原编码回写（BOM/UTF-16 保真）并原子替换，避免半截文件。
-	encodedContent := []byte(p.Content)
-	if fileExists {
-		encodedContent = encodeFileText(p.Content, oldEncoding)
-	}
-	err = writeFileAtomicLocal(absPath, encodedContent, writeFileModeDefault)
+	// 写入文件：编码探测/原子替换/前置 revision 检查由 mutatecore 统一实现，
+	// 本地只保留 stale-write 账本、文档扩展名拒绝与变更通知。
+	writeResult, err := mutatecore.Write(absPath, p.Content, mutatecore.WriteOptions{
+		ExpectedRevision: p.ExpectedSHA256,
+		Mode:             writeFileModeDefault,
+		PreserveEncoding: true,
+		RefuseBinary:     true,
+		CreateParents:    true,
+	})
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -240,6 +244,7 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			Error:      fmt.Errorf("写入文件失败: %w", err),
 		}, nil
 	}
+	encodedContent := encodeFileText(p.Content, writeResult.Encoding)
 	recordFileWrite(ctx, absPath, encodedContent, "write")
 
 	// 获取新文件信息
