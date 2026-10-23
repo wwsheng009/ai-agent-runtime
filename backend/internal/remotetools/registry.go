@@ -234,6 +234,26 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "string",
 				"description": "Optional file filter, e.g. *.go.",
 			},
+			"include": map[string]interface{}{
+				"anyOf": []map[string]interface{}{
+					{"type": "string"},
+					{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"description": "包含的文件名 glob 模式，例如 *.go；无斜杠的模式匹配任意目录下的文件名，含斜杠的模式匹配相对搜索根的路径。可传字符串数组，或逗号分隔的单个字符串（*.{go,ts} 这类 brace 形式不会被拆分）。",
+			},
+			"exclude": map[string]interface{}{
+				"anyOf": []map[string]interface{}{
+					{"type": "string"},
+					{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"description": "排除的文件名 glob 模式，例如 *_test.go；语义与 include 相同，且优先于 include。",
+			},
 			"case_insensitive": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容别名；等价于 ignore_case=true。",

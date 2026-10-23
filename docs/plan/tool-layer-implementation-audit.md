@@ -142,9 +142,16 @@
   上限统一为 `MaxGrepContextLines=10`；本地的优先级规则（`context` 设两侧，
   `before_context`/`after_context` 各覆盖一侧）由 `grepContextFromArgs` 共享。
   `remotetools/grep_context_conformance_test.go` 要求 rg 与 walker 输出逐字节相同。
+  `grep` 的 `include`/`exclude` 文件过滤同样进 core：`GrepOptions.Include/Exclude`
+  配 `SplitGrepGlobList`（brace 感知的顶层逗号拆分，与本地 `resolveStringListParam`
+  一致——注意 `patterns` 的字符串形态不拆分，那里的逗号是正则内容）。无斜杠模式
+  匹配任意层级的文件名，含斜杠模式匹配相对搜索根的路径，exclude 优先于 include；
+  rg 只在 `safeRipgrepGlob` 认可时接手，否则声明 used=false 交给 walker。
+  `remotetools/grep_filters_conformance_test.go` 逐过滤集比较两引擎，并断言
+  「rg 不能表达时必须拒绝而不是静默返回不同结果」。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  本地 `grep` 主流程仍为 legacy（模式语义与 context 语义已进 core；rg 优选、
-  stats/ignore/type/rg_args 与本地上下文渲染格式仍在本地）；
+  本地 `grep` 主流程仍为 legacy（模式/context/include-exclude 语义已进 core；
+  rg 优选、stats/ignore/type/rg_args 与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。

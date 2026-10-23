@@ -19,6 +19,12 @@ type GrepOptions struct {
 	Patterns []string
 	Path     string
 	Glob     string
+	// Include/Exclude are file filters applied to the path relative to the
+	// search root (a bare file name for a single-file root). Include is an
+	// allow-list; exclude wins over include. Patterns without a slash match
+	// the basename anywhere below the root.
+	Include []string
+	Exclude []string
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -76,6 +82,14 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			return GrepResult{}, err
 		}
 	}
+	includeFilter, err := newGrepGlobFilter(opts.Include)
+	if err != nil {
+		return GrepResult{}, err
+	}
+	excludeFilter, err := newGrepGlobFilter(opts.Exclude)
+	if err != nil {
+		return GrepResult{}, err
+	}
 
 	var result GrepResult
 	reader := newLineReader()
@@ -91,6 +105,9 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			return nil
 		}
 		if opts.MaxFileBytes > 0 && info.Size() > int64(opts.MaxFileBytes) {
+			return nil
+		}
+		if shouldFilterGrepCandidate(relativeGrepCandidate(opts.Path, path), includeFilter, excludeFilter) {
 			return nil
 		}
 		result.FilesScanned++
@@ -155,6 +172,17 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 
 	ApplyGrepWindow(&result, opts)
 	return result, nil
+}
+
+// relativeGrepCandidate is the path an include/exclude pattern is matched
+// against: the slash path relative to the configured search root, or the bare
+// file name when the root itself is the searched file.
+func relativeGrepCandidate(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.Base(path)
+	}
+	return filepath.ToSlash(rel)
 }
 
 // grepPatterns returns the pattern list a GrepOptions carries, preferring the

@@ -167,12 +167,27 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 		}
 		globMatcher = matcher
 	}
+	// Include/exclude share the glob safety rule: ripgrep's path matching and
+	// the walker's basename/relative matching only agree on the simple forms
+	// safeRipgrepGlob accepts. Anything else takes the walker so one filter
+	// language serves both paths.
+	for _, pattern := range append(append([]string{}, opts.Include...), opts.Exclude...) {
+		if !safeRipgrepGlob(pattern) {
+			return searchcore.GrepResult{}, false, nil
+		}
+	}
 	info, statErr := os.Stat(opts.Path)
 	result := searchcore.GrepResult{SingleFile: statErr == nil && info.Mode().IsRegular()}
 
 	args := append(r.baseArgs(), "--text", "--json")
 	if globMatcher != nil {
 		args = append(args, "--glob", opts.Glob)
+	}
+	for _, pattern := range opts.Include {
+		args = append(args, "--glob", pattern)
+	}
+	for _, pattern := range opts.Exclude {
+		args = append(args, "--glob", "!"+pattern)
 	}
 	if opts.Literal {
 		args = append(args, "--fixed-strings")

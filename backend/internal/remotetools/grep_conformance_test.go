@@ -108,3 +108,48 @@ func TestRemoteGrepContextOverMCP(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoteGrepFiltersOverMCP proves the include/exclude filters survive the
+// MCP schema validation and select the same files a local search would:
+// a bare pattern matches the basename anywhere below the root.
+func TestRemoteGrepFiltersOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		"a.go":        "hit go\n",
+		"b.ts":        "hit ts\n",
+		"nested/c.go": "hit nested\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	included := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "include": "*.go",
+	})
+	if !strings.Contains(included, "a.go:1:hit go") || !strings.Contains(included, "nested/c.go:1:hit nested") {
+		t.Fatalf("include *.go should keep nested Go files:\n%s", included)
+	}
+	if strings.Contains(included, "b.ts") {
+		t.Fatalf("include *.go must drop TypeScript files:\n%s", included)
+	}
+
+	excluded := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "exclude": []interface{}{"b.ts"},
+	})
+	if strings.Contains(excluded, "b.ts") {
+		t.Fatalf("exclude b.ts must drop the file:\n%s", excluded)
+	}
+	if !strings.Contains(excluded, "a.go:1:hit go") {
+		t.Fatalf("exclude must not drop unrelated files:\n%s", excluded)
+	}
+}
