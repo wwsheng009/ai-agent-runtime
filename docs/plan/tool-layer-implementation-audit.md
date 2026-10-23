@@ -112,9 +112,12 @@
   - `internal/toolkit/listable_test.go` 的 shouldList 策略映射。
 - **2026-10-23 收敛**: `searchcore.GlobMatcher` 已删除 regex 实现，改为与本地 glob 共用
   `MatchGlobPath`/`MatchGlobSegments`；新增 `glob_conformance_test.go` 锁定同一语义。
-  `edit`/`apply_patch` 的行比较与空白/缩进 helper 已上移 `mutatecore`。
+  `edit`/`apply_patch` 的行比较与空白/缩进 helper 已上移 `mutatecore`；
+  `filetransport.LocalService` 的写/追加也改为调用 `mutatecore.Write/Append`。
+  `remotetools/glob_conformance_test.go` 直接锁定 remote 侧使用同一 matcher。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  `TestGrepToolRealRipgrepStopsAfterPage` 在基线（未含本轮改动）同样失败，属既有问题。
+  `TestGrepToolRealRipgrepStopsAfterPage` 在基线（未含本轮改动）同样失败，属既有问题；
+  `remotetools` 偶发 `TestJobListReportsJobs` TempDir 清理竞态（重跑通过）。
 - **状态**: ⚠️ 基础覆盖，扩展待 PR2。
 
 #### Benchmark Thresholds (PR2)
