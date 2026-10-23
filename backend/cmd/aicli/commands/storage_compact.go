@@ -251,6 +251,14 @@ func storageRenderCompactText(out io.Writer, reports []storageCompactReport) {
 // storageResolveTargets 解析用户选定的库文件；--db 与 --target 互斥，
 // 两者都缺省时压缩全部已知本地库（不存在的自动跳过）。
 func storageResolveTargets(opts storageCompactOptions) ([]storageCompactTarget, error) {
+	config, configFile := storageLoadRuntimeConfig()
+	return storageResolveTargetsFromConfig(opts, config, configFile)
+}
+
+// storageResolveTargetsFromConfig is the pure resolver used by tests: it never
+// discovers the user's ~/.aicli/runtime.yaml, so assertions about canonical
+// default file names do not depend on the developer machine.
+func storageResolveTargetsFromConfig(opts storageCompactOptions, config *runtimecfg.RuntimeConfig, configFile string) ([]storageCompactTarget, error) {
 	if opts.dbPath != "" {
 		return []storageCompactTarget{{
 			Name: "custom",
@@ -265,8 +273,6 @@ func storageResolveTargets(opts storageCompactOptions) ([]storageCompactTarget, 
 	if !storageContainsString(known, target) {
 		return nil, fmt.Errorf("未知 --target %q（可选：%s）", opts.target, strings.Join(known, "|"))
 	}
-
-	config, configFile := storageLoadRuntimeConfig()
 	paths := sessionruntime.ResolvePaths(sessionruntime.ResolveOptions{
 		Config:     config,
 		ConfigFile: configFile,

@@ -15,7 +15,7 @@
 | **契约层验证 (PR0)** | ✅ 完成 | 工具清单双向一致测试、MCP surface 字段、错误码映射 |
 | **Output/core (PR1)** | ✅ 完成 | trust clamp, wire cap, artifact scope quarantine, canary + rollback |
 | **Read-only core (PR2)** | ⚠️ 部分 | glob matcher 已收敛为单一实现；grep/rigrep vs walker conformance 与 benchmark CI gate 仍缺 |
-| **CLI/direct (PR3)** | ⚠️ 部分验证 | WSL 已构建当前源码的 `aicli`，实测 `mcp tools`/`mcp test`/`--remote` 连接；`cmd/aicli/commands` 全量回归仍未跑 |
+| **CLI/direct (PR3)** | ✅ 已验证 | WSL 构建 + `mcp tools`/`mcp test`/`--remote` 连接；`cmd/aicli/commands` 全量回归 PASS（197.1s） |
 | **威胁模型 T1–T13** | ✅ 大部分关闭 | T1/T2/T3/T4/T5/T9/T10/T11/T12 已覆盖；T6 默认姿态关闭；T7/T8 部分；T13 流程缺口 |
 | **Canary/回滚** | ✅ 完成 | 238 target 实测，binary 替换 ±5.5s，100 次 soak 无失败 |
 | **CI 回归门槛** | ❌ 缺失 | `tool-layer-bench-gate.ps1` 脚本存在但 baseline 在 Windows laptop，需 CI 机器固化 |
@@ -29,9 +29,9 @@
 
 #### §8.4 CLI/direct 契约 (PR3)
 - **要求**: JSON/exit code/审批同一性；no bypass switch；direct 绕过检测。
-- **现状**: `internal/toolctl/cli_test.go::TestHardAskIsNotApprovedByYes` 等验证了 `--yes` 不绕过审批；exit code/JSON schema 见 `toolcore/contract.go` 断言。2026-10-23 在 WSL 用当前源码构建 `aicli`，实测 `aicli mcp tools`、`aicli mcp test`（view/shell）与 `aicli chat --remote` 连接。
-- **缺口**: 未在 `cmd/aicli/commands` 中复跑完整集成测试（内存问题）；W-21 模型调用因 WSL provider 回环不可达而 BLOCKED。
-- **状态**: ⚠️ 部分验证（客户端工具面/调用链已实测；全量回归未跑）。
+- **现状**: `internal/toolctl/cli_test.go::TestHardAskIsNotApprovedByYes` 等验证了 `--yes` 不绕过审批；exit code/JSON schema 见 `toolcore/contract.go` 断言。2026-10-23 在 WSL 用当前源码构建 `aicli`，实测 `aicli mcp tools`、`aicli mcp test`（view/shell）与 `aicli chat --remote` 连接；`cmd/aicli/commands` 全量回归 PASS。
+- **缺口**: W-21 模型调用因 WSL provider 回环不可达而 BLOCKED；不影响 CLI/远程工具契约。
+- **状态**: ✅ 已验证（全量 CLI 回归 + 客户端调用链）。
 
 #### §8.7 MCP surface (PR0)
 - **要求**: auth/roots/session/name/limits/error 字段齐全。

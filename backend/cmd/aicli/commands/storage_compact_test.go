@@ -175,7 +175,13 @@ func TestStorageCommandSurface(t *testing.T) {
 // 运行时（sessionruntime.ResolvePaths CLI-local + aiclipaths 默认）一致，
 // 否则离线压缩会打开错的库（甚至不存在）。
 func TestStorageResolveTargetsDefaults(t *testing.T) {
-	all, err := storageResolveTargets(storageCompactOptions{target: "all"})
+	// defaultSessionRuntimePath prefers an existing legacy chat_runtime.sqlite.
+	// Isolate HOME so the canonical-name assertion is not affected by the
+	// developer machine's migration state.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	all, err := storageResolveTargetsFromConfig(storageCompactOptions{target: "all"}, nil, "")
 	require.NoError(t, err)
 	byName := map[string]string{}
 	for _, target := range all {
@@ -189,7 +195,7 @@ func TestStorageResolveTargetsDefaults(t *testing.T) {
 	require.Equal(t, "agent_control.sqlite", byName["agent-control"])
 	require.Equal(t, "background.sqlite", byName["background"])
 
-	history, err := storageResolveTargets(storageCompactOptions{target: "history"})
+	history, err := storageResolveTargetsFromConfig(storageCompactOptions{target: "history"}, nil, "")
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, "history", history[0].Name)

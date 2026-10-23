@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -354,20 +353,18 @@ func TestGrepToolRealRipgrepStopsAfterPage(t *testing.T) {
 	if scope, _ := result.Metadata["match_count_scope"].(string); scope != "observed_before_stop" {
 		t.Fatalf("match_count_scope=%v, want observed_before_stop (metadata=%v)", result.Metadata["match_count_scope"], result.Metadata)
 	}
-	// rg 的遍历起点由并发调度决定（part-000/001 都可能先出现），因此不断言具体
-	// 文件名，而是断言「页内文件序号必须很小」——证明 rg 在第一页收满后即被终止，
-	// 而不是扫完 400 个文件。
-	highest := -1
-	for _, match := range regexp.MustCompile(`part-(\d+)`).FindAllStringSubmatch(result.Content, -1) {
-		if index, err := strconv.Atoi(match[1]); err == nil && index > highest {
-			highest = index
-		}
+	// rg 的文件遍历顺序由并发调度决定，part-217 可能先于 part-000 出现，
+	// 因此不能用「最大文件序号」证明早停。改断言页内实际覆盖的文件数：
+	// 100 行页 + 8 行探针不可能覆盖 400 个文件。
+	files := map[string]struct{}{}
+	for _, match := range regexp.MustCompile(`part-\d+`).FindAllString(result.Content, -1) {
+		files[match] = struct{}{}
 	}
-	if highest < 0 {
-		t.Fatalf("expected matches from leading files, output head: %.200s", result.Content)
+	if len(files) == 0 {
+		t.Fatalf("expected matches from the page, output head: %.200s", result.Content)
 	}
-	if highest > 50 {
-		t.Fatalf("expected rg to stop early, but page reached part-%03d; output head: %.200s", highest, result.Content)
+	if len(files) > 50 {
+		t.Fatalf("expected rg to stop after one page, but output covered %d files; head: %.200s", len(files), result.Content)
 	}
 	if elapsed > 30*time.Second {
 		t.Fatalf("page stop did not terminate rg quickly: %s", elapsed)
