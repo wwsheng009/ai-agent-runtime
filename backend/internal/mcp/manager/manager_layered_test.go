@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,9 +56,12 @@ func TestManagerLoadConfigEffectiveMergesLayers(t *testing.T) {
 `)
 
 	mgr := newTestManager(nil)
-	connectCalls := 0
+	// StartAsync connects every server in its own goroutine, so the fake
+	// constructor is called concurrently: the counter must be atomic or -race
+	// flags the instrumentation rather than the product code.
+	var connectCalls atomic.Int32
 	mgr.newClient = func(name string, _ *config.MCPConfig) (client.Client, error) {
-		connectCalls++
+		connectCalls.Add(1)
 		return &fakeClient{name: name, connected: true}, nil
 	}
 	require.NoError(t, mgr.LoadConfigEffective(""))
@@ -69,7 +73,7 @@ func TestManagerLoadConfigEffectiveMergesLayers(t *testing.T) {
 		names = append(names, status.Name)
 	}
 	require.ElementsMatch(t, []string{"base", "shared", "extra"}, names)
-	require.Equal(t, 3, connectCalls, "合并后的 server 都应参与连接")
+	require.Equal(t, int32(3), connectCalls.Load(), "合并后的 server 都应参与连接")
 
 	status, err := mgr.GetMCPStatus("shared")
 	require.NoError(t, err)

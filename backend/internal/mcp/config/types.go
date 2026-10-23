@@ -136,6 +136,10 @@ type MCPConfig struct {
 	// MaxResponseBytes bounds one HTTP response before JSON decoding. Zero uses
 	// the local default for remote servers (8 MiB).
 	MaxResponseBytes int64 `yaml:"maxResponseBytes,omitempty" json:"maxResponseBytes,omitempty"`
+	// MaxTools bounds how many tools this server may contribute to the model
+	// surface. Zero uses the registry default (256); a negative value removes
+	// the bound for a trusted server that really does expose more.
+	MaxTools int `yaml:"maxTools,omitempty" json:"maxTools,omitempty"`
 	// WorkingDir stdio 子进程工作目录；为空时由传输层回退到进程当前目录。
 	WorkingDir  string                `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 	Enabled     bool                  `yaml:"enabled" json:"enabled"`   // 是否启用

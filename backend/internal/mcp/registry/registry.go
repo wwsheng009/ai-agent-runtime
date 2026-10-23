@@ -5,12 +5,14 @@ package registry
 import (
 	"crypto/sha256"
 	"errors"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/client"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
@@ -18,6 +20,30 @@ import (
 )
 
 const maxCanonicalToolNameLength = 64
+
+const (
+	// MaxToolDescriptionBytes bounds one externally supplied tool description.
+	// A hostile or broken MCP server must not be able to smuggle an unbounded
+	// "instruction manual" into every model request (design §16.3 T3).
+	MaxToolDescriptionBytes = 4096
+	// maxToolSchemaBytes bounds the canonical schema snapshot. A schema is
+	// rejected rather than truncated: a cut JSON schema is invalid, so the only
+	// safe bound here is fail-closed, the same way an uncompilable schema is
+	// already quarantined.
+	maxToolSchemaBytes = 64 * 1024
+	// descriptionTruncationMarker is appended so a reader (and the model) can
+	// tell a clipped description from a complete one without counting bytes.
+	descriptionTruncationMarker = "\n[... MCP tool description truncated ...]"
+	// MaxToolsPerServer bounds how many tools one MCP server may contribute to
+	// the model surface (design §8.7.3). Every tool costs schema tokens on every
+	// request, so an unbounded server is a context-budget DoS even when each
+	// individual definition is well formed.
+	MaxToolsPerServer = 256
+	// maxQuarantineRecords bounds the diagnostic table. Without it, a hostile
+	// server streaming millions of invalid definitions would grow memory
+	// without limit while none of those tools are ever exposed.
+	maxQuarantineRecords = 512
+)
 
 // ToolInfo 工具信息
 type ToolInfo struct {
@@ -71,15 +97,62 @@ type Registry struct {
 	tools       map[string]*ToolInfo // key: mcp name + NUL + raw tool name
 	quarantined map[string]*QuarantinedToolInfo
 	mcps        map[string]client.Client
+	// quarantineOverflow counts rejections that were not stored because the
+	// bounded diagnostic table was already full.
+	quarantineOverflow int
+	// serverToolLimits holds per-server overrides of MaxToolsPerServer.
+	// A stored negative value means "unbounded" and a missing key means the
+	// default.
+	serverToolLimits map[string]int
 }
 
 // NewRegistry 创建注册表
 func NewRegistry() *Registry {
 	return &Registry{
-		tools:       make(map[string]*ToolInfo),
-		quarantined: make(map[string]*QuarantinedToolInfo),
-		mcps:        make(map[string]client.Client),
+		tools:            make(map[string]*ToolInfo),
+		quarantined:      make(map[string]*QuarantinedToolInfo),
+		mcps:             make(map[string]client.Client),
+		serverToolLimits: make(map[string]int),
 	}
+}
+
+// SetServerToolLimit overrides MaxToolsPerServer for one server.
+//
+// The bound is a default, not a hard ceiling: a trusted server that legitimately
+// exposes more tools must be adjustable, otherwise the guard silently deletes
+// part of that server's surface with no way for the operator to notice.
+//
+//   - limit > 0: that many tools at most;
+//   - limit < 0: unbounded for this server;
+//   - limit == 0 (or the default): back to MaxToolsPerServer. Zero is the
+//     "unset" value in the config file, so a reload that drops the setting must
+//     not keep the previous override alive.
+func (r *Registry) SetServerToolLimit(mcpName string, limit int) {
+	mcpName = strings.TrimSpace(mcpName)
+	if mcpName == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.serverToolLimits == nil {
+		r.serverToolLimits = make(map[string]int)
+	}
+	if limit == 0 || limit == MaxToolsPerServer {
+		// Keep the map sparse: an explicit default is not an override.
+		delete(r.serverToolLimits, mcpName)
+		return
+	}
+	r.serverToolLimits[mcpName] = limit
+}
+
+// serverToolLimitLocked returns the effective per-server budget. Callers must
+// hold r.mu (either mode): RegisterTool reads it inside its write lock, so a
+// self-locking helper would deadlock.
+func (r *Registry) serverToolLimitLocked(mcpName string) int {
+	if limit, ok := r.serverToolLimits[mcpName]; ok {
+		return limit
+	}
+	return MaxToolsPerServer
 }
 
 // RegisterClient 注册 MCP 客户端
@@ -109,6 +182,9 @@ func (r *Registry) UnregisterClient(name string) {
 			delete(r.quarantined, key)
 		}
 	}
+	// Drop the budget override too: a later server that reuses this name with no
+	// MaxTools setting must not inherit the previous override.
+	delete(r.serverToolLimits, name)
 }
 
 // RegisterTool 注册工具
@@ -130,6 +206,20 @@ func (r *Registry) RegisterTool(mcpName string, tool *protocol.Tool, enabled boo
 		r.quarantineTool(mcpName, toolName, tool.InputSchema, err)
 		return fmt.Errorf("invalid schema for MCP tool %s/%s: %w", mcpName, toolName, err)
 	}
+	// Both bounds are checked on the *canonical* form: the caller may smuggle
+	// weight in key reordering or annotation stripping, so measuring the raw
+	// input would not bound what actually reaches the model.
+	canonicalRaw, marshalErr := json.Marshal(canonical)
+	if marshalErr != nil {
+		r.quarantineTool(mcpName, toolName, tool.InputSchema, marshalErr)
+		return fmt.Errorf("canonical schema for MCP tool %s/%s cannot be measured: %w", mcpName, toolName, marshalErr)
+	}
+	if len(canonicalRaw) > maxToolSchemaBytes {
+		oversizeErr := fmt.Errorf("canonical schema is %d bytes, limit %d", len(canonicalRaw), maxToolSchemaBytes)
+		r.quarantineTool(mcpName, toolName, tool.InputSchema, oversizeErr)
+		return fmt.Errorf("oversized schema for MCP tool %s/%s: %w", mcpName, toolName, oversizeErr)
+	}
+	description, descriptionTruncated := capToolDescription(tool.Description)
 	metadata := cloneMetadata(tool.Metadata)
 	if metadata == nil {
 		metadata = map[string]interface{}{}
@@ -137,6 +227,9 @@ func (r *Registry) RegisterTool(mcpName string, tool *protocol.Tool, enabled boo
 	metadata["mcp_name"] = mcpName
 	metadata["mcp_raw_tool_name"] = toolName
 	metadata["mcp_canonical_name"] = CanonicalToolName(mcpName, toolName)
+	if descriptionTruncated {
+		metadata["tool_description_truncated"] = true
+	}
 	if schemaHash, hashErr := toolschema.Hash(canonical); hashErr == nil {
 		metadata["tool_schema_hash"] = schemaHash
 	}
@@ -145,7 +238,7 @@ func (r *Registry) RegisterTool(mcpName string, tool *protocol.Tool, enabled boo
 	}
 	normalizedTool := &protocol.Tool{
 		Name:        toolName,
-		Description: tool.Description,
+		Description: description,
 		InputSchema: canonical,
 		Metadata:    cloneMetadata(metadata),
 	}
@@ -164,13 +257,31 @@ func (r *Registry) RegisterTool(mcpName string, tool *protocol.Tool, enabled boo
 		}
 		collisionErr := fmt.Errorf("canonical MCP tool name %q collides with %s/%s", canonicalName, existing.MCPName, existing.Tool.Name)
 		delete(r.tools, key)
-		r.quarantined[key] = &QuarantinedToolInfo{
-			MCPName:    mcpName,
-			ToolName:   toolName,
-			SchemaHash: stringMetadata(metadata, "tool_schema_hash"),
-			Error:      collisionErr.Error(),
-		}
+		r.rememberQuarantineLocked(key, mcpName, toolName,
+			stringMetadata(metadata, "tool_schema_hash"), collisionErr.Error())
 		return collisionErr
+	}
+	// Per-server budget (design §8.7.3): counted under the same lock as the
+	// insert, so concurrent loads from one server cannot both pass the check and
+	// jointly exceed the cap. Re-registering an existing key is an update, not a
+	// new slot, so reloads stay cheap.
+	if _, exists := r.tools[key]; !exists {
+		limit := r.serverToolLimitLocked(mcpName)
+		contributed := 0
+		if limit > 0 {
+			for _, existing := range r.tools {
+				if existing != nil && existing.MCPName == mcpName {
+					contributed++
+				}
+			}
+			if contributed >= limit {
+				limitErr := fmt.Errorf("server %q already contributes %d tools, limit %d",
+					mcpName, contributed, limit)
+				r.rememberQuarantineLocked(key, mcpName, toolName,
+					stringMetadata(metadata, "tool_schema_hash"), limitErr.Error())
+				return limitErr
+			}
+		}
 	}
 	r.tools[key] = &ToolInfo{
 		Tool:     normalizedTool,
@@ -545,6 +656,10 @@ func (r *Registry) Clear() {
 	r.tools = make(map[string]*ToolInfo)
 	r.quarantined = make(map[string]*QuarantinedToolInfo)
 	r.mcps = make(map[string]client.Client)
+	r.quarantineOverflow = 0
+	// Per-server budgets follow the server config, so a reload that no longer
+	// mentions them must not keep the previous override alive.
+	r.serverToolLimits = make(map[string]int)
 }
 
 // makeToolKey 生成工具键
@@ -571,17 +686,51 @@ func (r *Registry) ListQuarantinedTools() []QuarantinedToolInfo {
 	return result
 }
 
+// QuarantineOverflow returns how many rejections were not stored because the
+// bounded diagnostic table was already full. A non-zero value means the
+// snapshot from ListQuarantinedTools is a sample, not the whole story.
+func (r *Registry) QuarantineOverflow() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.quarantineOverflow
+}
+
 func (r *Registry) quarantineTool(mcpName, toolName string, schema map[string]interface{}, cause error) {
 	schemaHash, _ := toolschema.RawHash(schema)
 	key := r.makeToolKey(mcpName, toolName)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.tools, key)
+	r.rememberQuarantineLocked(key, mcpName, toolName, schemaHash, cause.Error())
+}
+
+// rememberQuarantineLocked stores one rejection in the bounded diagnostic
+// table. Callers must hold r.mu.
+//
+// The table is capped because a hostile server can produce unbounded
+// rejections: quarantining must not turn a rejected tool into a memory DoS.
+// Overflow is counted rather than dropped silently, so a reviewer can still
+// tell "nothing was rejected" apart from "too many rejections to show".
+func (r *Registry) rememberQuarantineLocked(key, mcpName, toolName, schemaHash, reason string) {
+	if _, exists := r.quarantined[key]; exists {
+		// Updating a known rejection never grows the table.
+		r.quarantined[key] = &QuarantinedToolInfo{
+			MCPName:    mcpName,
+			ToolName:   toolName,
+			SchemaHash: schemaHash,
+			Error:      reason,
+		}
+		return
+	}
+	if len(r.quarantined) >= maxQuarantineRecords {
+		r.quarantineOverflow++
+		return
+	}
 	r.quarantined[key] = &QuarantinedToolInfo{
 		MCPName:    mcpName,
 		ToolName:   toolName,
 		SchemaHash: schemaHash,
-		Error:      cause.Error(),
+		Error:      reason,
 	}
 }
 
@@ -642,6 +791,30 @@ func shortIdentityHash(value string) string {
 func stringMetadata(metadata map[string]interface{}, key string) string {
 	value, _ := metadata[key].(string)
 	return value
+}
+
+// capToolDescription bounds an externally supplied tool description to
+// MaxToolDescriptionBytes without splitting a UTF-8 sequence.
+//
+// Truncation is deliberate rather than rejective: a description is prose, so a
+// clipped one is still useful, whereas a clipped schema would be invalid. The
+// marker is part of the budget, never added on top of it, so the bound holds
+// for the exact string that reaches the model. The boolean lets the caller
+// stamp metadata for diagnostics.
+func capToolDescription(description string) (string, bool) {
+	if len(description) <= MaxToolDescriptionBytes {
+		return description, false
+	}
+	body := description[:MaxToolDescriptionBytes-len(descriptionTruncationMarker)]
+	for len(body) > 0 {
+		value, size := utf8.DecodeLastRuneInString(body)
+		if value == utf8.RuneError && size <= 1 {
+			body = body[:len(body)-1]
+			continue
+		}
+		break
+	}
+	return body + descriptionTruncationMarker, true
 }
 
 func cloneToolInfo(info *ToolInfo) *ToolInfo {

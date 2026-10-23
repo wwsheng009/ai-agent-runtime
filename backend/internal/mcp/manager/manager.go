@@ -645,6 +645,17 @@ func (m *manager) loadTools(ctx context.Context, cli client.Client, mcpName stri
 		return
 	}
 
+	// Apply this server's configured tool budget before registering anything, so
+	// a trusted server that legitimately exposes more than the default is not
+	// silently truncated (design §8.7.3).
+	//
+	// The call is unconditional: SetServerToolLimit treats 0 as "no override",
+	// so removing maxTools from the config clears the previous bound even on a
+	// reconnect, which — unlike ReloadConfig — does not reset the registry.
+	if mcpCfg := m.lookupMCPConfig(mcpName); mcpCfg != nil {
+		m.registry.SetServerToolLimit(mcpName, mcpCfg.MaxTools)
+	}
+
 	loadedCount := 0
 	quarantinedCount := 0
 	for _, tool := range tools {
