@@ -108,8 +108,12 @@ func GrepPatternsFromArgs(args map[string]any) []string {
 	}
 	switch value := args["patterns"].(type) {
 	case string:
-		for _, item := range splitGrepPatternList(value) {
-			patterns = append(patterns, item)
+		// The string spelling is one pattern, never a comma-separated list:
+		// a comma is ordinary regex content ("a,b" means a-then-b). This is
+		// the behaviour the local tool's resolvePatternListParam has always
+		// had, and both surfaces must keep it.
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			patterns = append(patterns, trimmed)
 		}
 	case []string:
 		for _, item := range value {
@@ -125,31 +129,27 @@ func GrepPatternsFromArgs(args map[string]any) []string {
 			}
 		}
 	}
-	return patterns
+	return dedupeGrepPatterns(patterns)
 }
 
-// splitGrepPatternList mirrors the local scalar-list handling: an array
-// spelling is preferred, but a single string that contains separators is still
-// accepted as a list.
-func splitGrepPatternList(value string) []string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil
+// dedupeGrepPatterns mirrors the local normalizePatternList: the first
+// occurrence wins, so `-e foo -e foo` searches once.
+func dedupeGrepPatterns(patterns []string) []string {
+	if len(patterns) < 2 {
+		return patterns
 	}
-	if !strings.ContainsAny(trimmed, ",;") {
-		return []string{trimmed}
-	}
-	parts := strings.FieldsFunc(trimmed, func(r rune) bool {
-		return r == ',' || r == ';' || r == '\n'
-	})
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if item := strings.TrimSpace(part); item != "" {
-			out = append(out, item)
+	out := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		seen := false
+		for _, existing := range out {
+			if existing == pattern {
+				seen = true
+				break
+			}
 		}
-	}
-	if len(out) == 0 {
-		return []string{trimmed}
+		if !seen {
+			out = append(out, pattern)
+		}
 	}
 	return out
 }

@@ -172,7 +172,8 @@ func TestGrepPatternsFromArgsPrecedence(t *testing.T) {
 		{"pattern before patterns", map[string]any{"pattern": "alpha", "patterns": []any{"beta"}},
 			[]string{"alpha", "beta"}},
 		{"array patterns", map[string]any{"patterns": []any{"a", "b"}}, []string{"a", "b"}},
-		{"string patterns split", map[string]any{"patterns": "a,b"}, []string{"a", "b"}},
+		{"string pattern keeps commas as content", map[string]any{"patterns": "a,b"}, []string{"a,b"}},
+		{"duplicates collapse", map[string]any{"patterns": []any{"a", "a", "b"}}, []string{"a", "b"}},
 		{"blank entries dropped", map[string]any{"pattern": "  ", "patterns": " "}, nil},
 	}
 	for _, tc := range cases {
