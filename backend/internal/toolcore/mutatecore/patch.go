@@ -84,6 +84,28 @@ type PatchResult struct {
 	Files        []PatchFileResult
 }
 
+// PatchHunkError carries the structured data a surface needs to render its own
+// recovery diagnostic (expected lines, current file lines, closest window).
+// Error() stays short and stable for non-interactive consumers.
+type PatchHunkError struct {
+	Code       string
+	Message    string
+	NextAction string
+	HunkIndex  int
+	Header     string
+	Expected   []string
+	Actual     []string
+	Closest    []string
+	StartLine  int
+}
+
+func (e *PatchHunkError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
 // ApplyPatch parses a Codex-style patch, authorizes every operation before any
 // filesystem mutation, then applies add/update/delete/move operations.
 func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchResult, error) {
@@ -441,13 +463,20 @@ func ParsePatch(raw string) ([]PatchOperation, error) {
 	return operations, nil
 }
 
-// ApplyHunks applies @@ blocks with exact line matching. Each old-side block
-// must match exactly once; ambiguity is an error.
+// ApplyHunks applies @@ blocks. Matching uses the shared recovery ladder
+// (exact, trailing-space, trim, punctuation/whitespace collapse), supports a
+// leading @@ context anchor, EOF anchoring, and blank-run drift. Each old-side
+// block must match exactly once; ambiguity is an error.
 func ApplyHunks(body string, hunks []PatchHunk) (string, error) {
 	if len(hunks) == 0 {
 		return "", errorf(CodeInvalidArgument, "include at least one @@ block", "update block has no hunks")
 	}
-	lines := strings.Split(body, "\n")
+	newline := detectNewline(body)
+	normalized := body
+	if newline == "\r\n" {
+		normalized = strings.ReplaceAll(normalized, "\r\n", "\n")
+	}
+	lines, trailingNewline := splitPatchBody(normalized)
 	cursor := 0
 	for index, hunk := range hunks {
 		var oldLines, newLines []string
@@ -470,69 +499,317 @@ func ApplyHunks(body string, hunks []PatchHunk) (string, error) {
 			cursor = len(lines)
 			continue
 		}
-		position, occurrences := findBlock(lines, oldLines, cursor, hunk.EndOfFile)
+		searchCursor := cursor
+		if contextLine := HunkContextLine(hunk.Header); contextLine != "" {
+			if contextStart := locateHunk(lines, []string{contextLine}, searchCursor, false); contextStart >= 0 {
+				searchCursor = contextStart + 1
+			}
+		}
+		position := locateHunk(lines, oldLines, searchCursor, hunk.EndOfFile)
+		matchedOld := oldLines
+		matchedEnd := -1
+		if position < 0 {
+			if start, end, ok := locateBlankRunSpan(lines, oldLines); ok {
+				position = start
+				matchedEnd = end
+			}
+		}
+		occurrences := 0
+		if position >= 0 {
+			occurrences = 1
+		}
 		if occurrences == 0 {
-			return "", &Error{
+			startLine, closest := ClosestPatchWindow(lines, oldLines)
+			return "", &PatchHunkError{
 				Code:       CodeStaleContext,
 				Message:    fmt.Sprintf("hunk %d does not match the file", index+1),
 				NextAction: "re-read the file and rebuild the hunk from current context",
+				HunkIndex:  index + 1,
+				Header:     hunk.Header,
+				Expected:   append([]string(nil), oldLines...),
+				Actual:     append([]string(nil), lines...),
+				Closest:    closest,
+				StartLine:  startLine,
 			}
 		}
-		if occurrences > 1 {
-			return "", errorf(CodeInvalidArgument, "add more context lines to make the hunk unique", "hunk %d matches %d locations", index+1, occurrences)
+		replaceLines := newLines
+		oldSpanLen := len(matchedOld)
+		if matchedEnd >= position {
+			replaceLines = rebuildBlankRunReplacement(lines[position:matchedEnd+1], matchedOld, newLines)
+			oldSpanLen = matchedEnd - position + 1
 		}
-		replaced := make([]string, 0, len(lines)-len(oldLines)+len(newLines))
+		replaced := make([]string, 0, len(lines)-oldSpanLen+len(replaceLines))
 		replaced = append(replaced, lines[:position]...)
-		replaced = append(replaced, newLines...)
-		replaced = append(replaced, lines[position+len(oldLines):]...)
+		replaced = append(replaced, replaceLines...)
+		replaced = append(replaced, lines[position+oldSpanLen:]...)
 		lines = replaced
-		cursor = position + len(newLines)
+		cursor = position + len(replaceLines)
+		if hunk.EndOfFile {
+			trailingNewline = true
+		}
 	}
-	return strings.Join(lines, "\n"), nil
+	result := joinPatchBody(lines, trailingNewline, "\n")
+	if newline == "\r\n" {
+		result = strings.ReplaceAll(result, "\n", "\r\n")
+	}
+	return result, nil
 }
 
-func findBlock(lines, oldLines []string, cursor int, eof bool) (int, int) {
-	first, count := -1, 0
+func locateHunk(lines, expected []string, cursor int, eof bool) int {
 	if cursor < 0 {
 		cursor = 0
 	}
-	if eof {
-		end := len(lines)
-		if end > 0 && lines[end-1] == "" {
-			end--
-		}
-		start := end - len(oldLines)
-		if start >= cursor && start >= 0 && blockMatches(lines[start:start+len(oldLines)], oldLines) {
-			return start, 1
-		}
-		return -1, 0
+	if cursor > len(lines) {
+		cursor = len(lines)
 	}
-	for start := cursor; start+len(oldLines) <= len(lines); start++ {
-		matched := true
-		for offset, expected := range oldLines {
-			if lines[start+offset] != expected {
-				matched = false
-				break
+	if len(expected) == 0 {
+		if eof {
+			return len(lines)
+		}
+		return cursor
+	}
+	if len(expected) > len(lines) {
+		return -1
+	}
+	maxStart := len(lines) - len(expected)
+	if eof {
+		tailStart := maxStart
+		for _, matcher := range LineMatchers() {
+			if SliceMatches(lines[tailStart:tailStart+len(expected)], expected, matcher) {
+				return tailStart
 			}
 		}
-		if !matched {
-			continue
-		}
-		if first < 0 {
-			first = start
-		}
-		count++
+		return -1
 	}
-	return first, count
+	for _, matcher := range LineMatchers() {
+		for _, searchRange := range hunkSearchRanges(cursor, maxStart) {
+			for start := searchRange.start; start <= searchRange.end; start++ {
+				if SliceMatches(lines[start:start+len(expected)], expected, matcher) {
+					return start
+				}
+			}
+		}
+	}
+	return -1
 }
 
-func blockMatches(lines, expected []string) bool {
-	for index, line := range expected {
-		if lines[index] != line {
+type hunkSearchRange struct {
+	start int
+	end   int
+}
+
+func hunkSearchRanges(cursor, maxStart int) []hunkSearchRange {
+	if maxStart < 0 {
+		return nil
+	}
+	if cursor > maxStart {
+		cursor = maxStart + 1
+	}
+	ranges := make([]hunkSearchRange, 0, 2)
+	if cursor <= maxStart {
+		ranges = append(ranges, hunkSearchRange{start: cursor, end: maxStart})
+	}
+	if cursor > 0 {
+		ranges = append(ranges, hunkSearchRange{start: 0, end: cursor - 1})
+	}
+	return ranges
+}
+
+// HunkContextLine extracts the model-supplied text after "@@" (Codex style) or
+// after a unified-diff range. It returns "" for a bare "@@" or a pure range.
+func HunkContextLine(header string) string {
+	header = strings.TrimRight(header, "\r")
+	if header == "@@" || !strings.HasPrefix(header, "@@") {
+		return ""
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(header, "@@"))
+	if strings.HasSuffix(rest, "@@") {
+		rest = strings.TrimSpace(strings.TrimSuffix(rest, "@@"))
+	}
+	if rest == "" {
+		return ""
+	}
+	parts := strings.Fields(rest)
+	i := 0
+	for i < len(parts) && isUnifiedRangePart(parts[i]) {
+		i++
+	}
+	if i == 0 {
+		return rest
+	}
+	if i < len(parts) && parts[i] == "@@" {
+		i++
+	}
+	return strings.Join(parts[i:], " ")
+}
+
+func isUnifiedRangePart(part string) bool {
+	if part == "" || (part[0] != '-' && part[0] != '+') {
+		return false
+	}
+	body := part[1:]
+	if body == "" {
+		return false
+	}
+	comma := strings.IndexByte(body, ',')
+	if comma < 0 {
+		return allDigits(body)
+	}
+	return allDigits(body[:comma]) && allDigits(body[comma+1:])
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
 	return true
+}
+
+// locateBlankRunSpan finds the unique span whose non-blank lines match the
+// expected non-blank lines under comparable normalization. Blank-run length may
+// differ. It requires at least two significant lines to avoid over-healing.
+func locateBlankRunSpan(lines, expected []string) (start, end int, ok bool) {
+	expectedNB := NonBlankLines(expected)
+	if len(expectedNB) < 2 {
+		return 0, 0, false
+	}
+	type span struct{ start, end int }
+	found := make([]span, 0, 1)
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		if NormalizeComparableLine(lines[i]) != NormalizeComparableLine(expectedNB[0]) {
+			continue
+		}
+		cursor := i
+		matched := true
+		for k := 1; k < len(expectedNB); k++ {
+			cursor++
+			for cursor < len(lines) && strings.TrimSpace(lines[cursor]) == "" {
+				cursor++
+			}
+			if cursor >= len(lines) ||
+				NormalizeComparableLine(lines[cursor]) != NormalizeComparableLine(expectedNB[k]) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			found = append(found, span{start: i, end: cursor})
+			if len(found) > 1 {
+				return 0, 0, false
+			}
+		}
+	}
+	if len(found) != 1 {
+		return 0, 0, false
+	}
+	return found[0].start, found[0].end, true
+}
+
+// rebuildBlankRunReplacement keeps the file's blank-run shape and exact bytes
+// for unchanged non-blank lines, applying the model's changed bodies with the
+// file's indentation.
+func rebuildBlankRunReplacement(fileSpan, oldLines, newLines []string) []string {
+	if len(newLines) == 0 {
+		return nil
+	}
+	fileNB := NonBlankLines(fileSpan)
+	oldNB := NonBlankLines(oldLines)
+	newNB := NonBlankLines(newLines)
+	if len(newNB) == 0 {
+		return append([]string(nil), fileSpan...)
+	}
+	if len(newNB) != len(fileNB) || len(oldNB) != len(fileNB) {
+		return append([]string(nil), newLines...)
+	}
+	out := make([]string, 0, len(fileSpan)+2)
+	nbIdx := 0
+	for _, fileLine := range fileSpan {
+		if strings.TrimSpace(fileLine) == "" {
+			out = append(out, fileLine)
+			continue
+		}
+		if nbIdx >= len(newNB) {
+			out = append(out, fileLine)
+			continue
+		}
+		modelLine := newNB[nbIdx]
+		if NormalizeComparableLine(modelLine) == NormalizeComparableLine(fileLine) ||
+			NormalizeComparableLine(modelLine) == NormalizeComparableLine(oldNB[nbIdx]) {
+			out = append(out, fileLine)
+		} else {
+			newWS := LeadingWhitespace(modelLine)
+			body := strings.TrimPrefix(modelLine, newWS)
+			oldWS := LeadingWhitespace(oldNB[nbIdx])
+			fileWS := LeadingWhitespace(fileLine)
+			rel := newWS
+			if oldWS != "" && strings.HasPrefix(newWS, oldWS) {
+				rel = strings.TrimPrefix(newWS, oldWS)
+			} else if newWS == oldWS {
+				rel = ""
+			} else if oldWS == "" {
+				rel = newWS
+			} else {
+				out = append(out, modelLine)
+				nbIdx++
+				continue
+			}
+			out = append(out, fileWS+rel+body)
+		}
+		nbIdx++
+	}
+	for ; nbIdx < len(newNB); nbIdx++ {
+		line := newNB[nbIdx]
+		if len(fileNB) > 0 {
+			fileWS0 := LeadingWhitespace(fileNB[0])
+			oldWS0 := ""
+			if len(oldNB) > 0 {
+				oldWS0 = LeadingWhitespace(oldNB[0])
+			}
+			newWS := LeadingWhitespace(line)
+			if oldWS0 == "" && fileWS0 != "" && !strings.HasPrefix(newWS, fileWS0) {
+				out = append(out, fileWS0+line)
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func splitPatchBody(content string) ([]string, bool) {
+	if content == "" {
+		return nil, false
+	}
+	trailing := strings.HasSuffix(content, "\n")
+	if trailing {
+		content = strings.TrimSuffix(content, "\n")
+	}
+	if content == "" {
+		return []string{""}, trailing
+	}
+	return strings.Split(content, "\n"), trailing
+}
+
+func joinPatchBody(lines []string, trailing bool, newline string) string {
+	if len(lines) == 0 {
+		if trailing {
+			return newline
+		}
+		return ""
+	}
+	joined := strings.Join(lines, newline)
+	if trailing {
+		joined += newline
+	}
+	return joined
 }
 
 func pathFromDirective(line, prefix string) string {

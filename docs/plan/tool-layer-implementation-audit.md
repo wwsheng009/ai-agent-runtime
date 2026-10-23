@@ -117,10 +117,12 @@
   `remotetools/glob_conformance_test.go` 直接锁定 remote 侧使用同一 matcher。
   `apply_patch` 的 envelope 规范化（heredoc/markdown fence/折叠 marker）已上移
   `mutatecore.NormalizePatchEnvelope`，本地重复实现删除。
+  `apply_patch` 的 hunk 匹配（@@ 上下文、空白容忍、blank-run、EOF、CRLF）与
+  closest-window 诊断评分已上移 `mutatecore.ApplyHunks` / `ClosestPatchWindow`；
+  本地只保留解析、错误文案与账本/通知。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  `apply_patch` 的本地执行仍由本地 applier 承担：core `ApplyPatch` 已补回滚，
-  但缺少本地路径清理、EOF/无上下文 hunk、空白容忍与最近片段诊断；强行替换会
-  回归（已用测试验证并回退）。
+  `apply_patch` 的本地执行仍由本地 applier 承担：core 已补回滚与 hunk 语义，
+  但路径尾部引号清理、无上下文首个 update chunk、结构化错误文案仍只在本地。
 
 **2026-10-23 安全补强**：
 

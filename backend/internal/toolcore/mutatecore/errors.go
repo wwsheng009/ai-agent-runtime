@@ -70,6 +70,10 @@ func CodeOf(err error) string {
 	if errors.As(err, &mutationErr) && mutationErr.Code != "" {
 		return mutationErr.Code
 	}
+	var hunkErr *PatchHunkError
+	if errors.As(err, &hunkErr) && hunkErr.Code != "" {
+		return hunkErr.Code
+	}
 	return CodeInternal
 }
 
@@ -78,6 +82,10 @@ func NextActionOf(err error) string {
 	var mutationErr *Error
 	if errors.As(err, &mutationErr) {
 		return mutationErr.NextAction
+	}
+	var hunkErr *PatchHunkError
+	if errors.As(err, &hunkErr) {
+		return hunkErr.NextAction
 	}
 	return ""
 }
@@ -90,7 +98,11 @@ func IsPrecondition(err error) bool {
 // IsStaleContext reports whether err is a patch/edit context mismatch.
 func IsStaleContext(err error) bool {
 	var mutationErr *Error
-	return errors.As(err, &mutationErr) && mutationErr.Code == CodeStaleContext
+	if errors.As(err, &mutationErr) {
+		return mutationErr.Code == CodeStaleContext
+	}
+	var hunkErr *PatchHunkError
+	return errors.As(err, &hunkErr) && hunkErr.Code == CodeStaleContext
 }
 
 const CodeStaleContext = "STALE_CONTEXT"

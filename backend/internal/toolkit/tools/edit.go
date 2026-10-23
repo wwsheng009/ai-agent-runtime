@@ -1500,14 +1500,7 @@ func editClosestLineScore(actual, expected string) float64 {
 }
 
 func isGenericStructuralLine(line string) bool {
-	line = strings.TrimSpace(line)
-	switch line {
-	case "}", ")", "(", "{", "};", "},", "];", "],", "*/", "/*":
-		return true
-	}
-	// bare braces / parens only
-	trimmed := strings.Trim(line, " \t{};,()")
-	return trimmed == "" && line != ""
+	return mutatecore.IsGenericStructuralLine(line)
 }
 
 func editLineSimilarity(a, b string) float64 {
@@ -1573,55 +1566,5 @@ func editLineSimilarity(a, b string) float64 {
 // runeEditSimilarity is a cheap normalized inverse Levenshtein on runes.
 // Used only for closest-snippet ranking (never for auto-heal writes).
 func runeEditSimilarity(a, b string) float64 {
-	if a == b {
-		return 1
-	}
-	ar := []rune(a)
-	br := []rune(b)
-	if len(ar) == 0 || len(br) == 0 {
-		return 0
-	}
-	// Reject wildly different lengths early.
-	if len(ar) > len(br)*2 || len(br) > len(ar)*2 {
-		return 0
-	}
-	// DP Levenshtein with two rows.
-	prev := make([]int, len(br)+1)
-	cur := make([]int, len(br)+1)
-	for j := 0; j <= len(br); j++ {
-		prev[j] = j
-	}
-	for i := 1; i <= len(ar); i++ {
-		cur[0] = i
-		for j := 1; j <= len(br); j++ {
-			cost := 1
-			if ar[i-1] == br[j-1] {
-				cost = 0
-			}
-			del := prev[j] + 1
-			ins := cur[j-1] + 1
-			sub := prev[j-1] + cost
-			cur[j] = del
-			if ins < cur[j] {
-				cur[j] = ins
-			}
-			if sub < cur[j] {
-				cur[j] = sub
-			}
-		}
-		prev, cur = cur, prev
-	}
-	dist := prev[len(br)]
-	maxLen := len(ar)
-	if len(br) > maxLen {
-		maxLen = len(br)
-	}
-	if maxLen == 0 {
-		return 1
-	}
-	sim := 1 - float64(dist)/float64(maxLen)
-	if sim < 0 {
-		return 0
-	}
-	return sim
+	return mutatecore.RuneEditSimilarity(a, b)
 }
