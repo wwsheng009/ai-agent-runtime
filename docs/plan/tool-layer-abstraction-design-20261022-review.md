@@ -631,12 +631,13 @@ P2 已处理：现状/目标混写、`InputSchema` adapter、`Registry.Filter`�
 ### 11.2 PR0–3 实现证据
 
 - [ ] PR0：契约冻结、测试骨架、工具清单对账；
-- [ ] PR1：output/trust/artifact 单测、wire cap、恶意 metadata、跨 scope、归档失败、238 canary；
+- [x] PR1：output/trust/artifact 单测、wire cap、恶意 metadata、跨 scope、归档失败、238 canary；
 - [ ] PR2：view/grep/glob/ls conformance、10k/100k benchmark；
 - [ ] PR3：CLI JSON/exit code、hard safety gates、callback 不可覆盖 deny、`--yes` 不绕过；
 - [ ] 全量回归：`go test ./...`、`go vet ./...`；
-- [ ] 回滚演练：关 feature flag / 回退 binary；
-- [ ] 证据归档：测试日志、benchmark JSON、canary 指标、rollback 记录。
+- [x] 回滚演练：回退 binary（当前无 toolcore feature flag；binary rollback 已实测）；
+- [x] 证据归档：测试日志、benchmark JSON、canary 指标、rollback 记录；
+  238 证据见 `docs/evidence/toolcore-238-canary-20261023.md`。
 
 ### 11.3 签字记录
 
@@ -645,7 +646,7 @@ P2 已处理：现状/目标混写、`InputSchema` adapter、`Registry.Filter`�
 | Design owner | 待填 | 待签 | | |
 | Security reviewer | 待填 | 待签 | 重点 P0-1/P0-2 | |
 | Runtime owner | 待填 | 待签 | PR1–3 | |
-| Release owner | 待填 | 待签 | 238 canary/rollback | |
+| Release owner | 待填 | 待签 | 证据已备：`docs/evidence/toolcore-238-canary-20261023.md` | |
 
 **发布条件**：11.1 全部勾选；11.2 至少 PR0 + PR1 + 对应 PR 证据齐全；
 11.3 四位角色签字。PR0 不要求 11.1 全部完成，只要求设计冻结。
@@ -722,3 +723,23 @@ go test -json -count=1 -p 1 ./...
 说明：`go test -p 2 ./...` 与 `-p 1` 全量都受同机内存/分页限制影响，失败包
 逐项复跑后均无工具层回归；`cmd/aicli/commands` 的单项验证需在资源充足的
 CI 机器上补齐，届时更新本表。
+
+### 11.7 238 canary 与回滚演练（2026-10-23）
+
+- 目标：`238`（`172.18.3.238:18765/mcp`），workspace `/home/n9e/itsm/repo`；
+- 源码基线：`d1fc884a`；canary 客户端：`scripts/canary-remote-tools.ps1`；
+- 初始发现：238 运行的是旧版 remote-tools，`artifact_read` 仍拒绝
+  `artifact_ref`（JSON-RPC `-32602`），不能作为当前 Phase 6b 的证据；
+- 处置：构建并安装当前 Linux amd64 binary（SHA-256
+  `1a7eabe2...`），保留旧 binary（SHA-256 `48ab4f08...`）；
+- 六工具 smoke：view/ls/glob/grep/shell/artifact_read 全 PASS；跨 target
+  `remote:999:art_...` 返回 `ARTIFACT_SCOPE_DENIED`；
+- 100 次 canary：100/100 成功，`error_rate=0`，`p50=228ms`，`p95=690ms`；
+- 回滚演练：回退 binary 5.6s，前滚 5.5s；回退后
+  `itsm-deploy-238 status` 仍为 front-http=200、三个容器 healthy；前滚后
+  重跑 smoke + 100 calls 全 PASS；
+- 证据：`docs/evidence/toolcore-238-canary-20261023.md`。
+
+运维注意：238 的 `aicli-remote-238.service` 当前无法由 `n9e` 无密码
+`systemctl restart`；canary 通过既有 `start-remote-238.sh` fallback 启动。
+生产重启必须由 root installer/发布流水线完成。
