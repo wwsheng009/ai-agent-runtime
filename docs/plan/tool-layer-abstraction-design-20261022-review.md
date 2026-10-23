@@ -778,7 +778,7 @@ CI 机器上补齐，届时更新本表。
 
 | # | 项 | 说明 |
 |---|----|------|
-| B1 | `remotetools` legacy `job_*` 在 `-race` 下竞争 | `JobManager.supervise` 写 vs `remoteJobStartTool.Execute` 读（`jobs.go:171`）；`TestJobsSurviveServerRestart` 失败。该路径默认关闭（`--legacy-jobs`），不在 v1 core，但阻塞 `remotetools` 的 `-race` 证据 |
+| ~~B1~~ | ~~`remotetools` legacy `job_*` 在 `-race` 下竞争~~ **已修** | 根因是 `JobManager.Start` 把 supervisor 原地改写的同一个 `*Job` 指针返回给调用方；改为返回启动前快照（`fix(remote): return an immutable job record from Start`）。新增 `TestJobStartReturnsImmutableRecord`：修复前失败（`start record mutated under the caller: state=exited`）、修复后通过；`./internal/remotetools -race -count=2` 干净 |
 | B2 | `mcp/auth` 在 `-race` 下竞争 | `TestAuthenticateNoBrowserPrintsUsableURL`、`TestAuthenticateBrowserFailurePrintsURL`；非工具层范围 |
 | B3 | `docs/mcp/chrome-devtools.md` 的 YAML 示例未含 `maxTools` | 该示例已有 `trustLevel`/`maxParallelCalls`，只是新增的 `maxTools` 没有可抄样例；字段语义已记在 `docs/mcp/mcp-tool-llm-integration.md` §2.7 |
 | B4 | §11.1 全部 P0/P1 复选框仍未勾选 | 需**独立**安全复审（§17.5.5 要求非实现者）；`P1 工具清单双向一致` 尚无对账测试，T13 仍属发布流程缺口 |

@@ -32,11 +32,17 @@
 - 明确缺口：T13（构建链，属发布流程而非仓库内测试）。
 
 T10 补充说明：client 侧原本**没有任何** 429 处理，`Retry-After` 被丢弃；
-`fix(mcp): honor Retry-After on remote 429` 之后才有双向覆盖。注意
-`remotetools` 的 legacy `job_*` 路径在 `-race` 下存在既有数据竞争
-（`JobManager.supervise` 写 vs `remoteJobStartTool.Execute` 读，
-`jobs.go:171`）；该路径默认关闭（`--legacy-jobs`），不在 v1 core，
-作为独立 backlog 项处理。
+`fix(mcp): honor Retry-After on remote 429` 之后才有双向覆盖。
+
+`remotetools` 的 legacy `job_*` 路径曾在 `-race` 下暴露真实数据竞争
+（`JobManager.Start` 把 supervisor 正在原地改写的同一个 `*Job` 指针交给调用方，
+`job_start` 读 `job.State` 与 `JobManager.supervise` 写冲突，
+表现为 `TestJobsSurviveServerRestart` 失败）。已由
+`fix(remote): return an immutable job record from Start` 修复：`Start`
+改为返回 supervisor 启动前的快照（其余读取路径 `Status/ReadOutput/Cancel/List`
+一直走磁盘记录，本就安全）。回归测试
+`TestJobStartReturnsImmutableRecord` 在修复前失败、修复后通过，
+`./internal/remotetools -race -count=2` 现已干净。
 
 T3 的“不执行描述中的指令”属行为约束（policy 不以描述内容做授权、外部内容按数据处理），
 由 T8 的端到端项继续跟踪；本行只声明**上限/只读/命名**三条机制已有测试。
