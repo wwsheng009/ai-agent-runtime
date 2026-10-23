@@ -155,8 +155,15 @@ func (m *JobManager) Start(ctx context.Context, command, workdir string, sandbox
 	m.active[id] = handle
 	m.mu.Unlock()
 
+	// Snapshot before the supervisor starts: `supervise` mutates `job` in place
+	// once the process exits, and every other reader (Status/ReadOutput/Cancel/
+	// List) goes through the on-disk record. Returning the shared pointer here
+	// would let the caller's read of job.State race the supervisor's write.
+	// Job holds only value fields, so this copy is a real snapshot.
+	snapshot := *job
+
 	go m.supervise(handle, output)
-	return job, nil
+	return &snapshot, nil
 }
 
 // supervise waits for the process and stamps the terminal state.

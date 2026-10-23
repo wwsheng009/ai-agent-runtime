@@ -27,6 +27,75 @@ func newJobsConfig(t *testing.T, root string, allowed []string) *remotetools.Con
 	return cfg
 }
 
+// TestJobStartReturnsImmutableRecord pins the contract in JobManager.Start's
+// doc comment: the caller gets a snapshot, not the pointer the supervisor keeps
+// mutating after the process exits. Returning the shared pointer made the
+// tool's read of job.State race the supervisor's write (visible under -race in
+// TestJobsSurviveServerRestart).
+func TestJobStartReturnsImmutableRecord(t *testing.T) {
+	root := newTestWorkspace(t)
+	cfg := newJobsConfig(t, root, []string{"echo"})
+	workspace, err := remotetools.NewWorkspace(root, nil)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+	sandbox, err := remotetools.NewSandbox(cfg, workspace)
+	if err != nil {
+		t.Fatalf("NewSandbox: %v", err)
+	}
+	jobs, err := remotetools.NewJobManager(cfg.Jobs.Root)
+	if err != nil {
+		t.Fatalf("NewJobManager: %v", err)
+	}
+	if jobs == nil {
+		t.Fatal("jobs must be enabled for the legacy opt-in")
+	}
+
+	started, err := jobs.Start(context.Background(), "echo race-probe", root, sandbox)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if started.State != remotetools.JobRunning {
+		t.Fatalf("starting state = %q, want %q", started.State, remotetools.JobRunning)
+	}
+
+	// Let the process finish so the supervisor stamps its own copy. The record
+	// the caller received must not change: a poller still shows "running" for
+	// the call that started it, and reads of the on-disk record pick up the
+	// terminal state instead.
+	deadline := time.Now().Add(10 * time.Second)
+	var final *remotetools.Job
+	for time.Now().Before(deadline) {
+		final, err = jobs.Status(started.ID)
+		if err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		if final.State != remotetools.JobRunning {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if final == nil || final.State == remotetools.JobRunning {
+		t.Fatal("job never reached a terminal state")
+	}
+	if started.State != remotetools.JobRunning {
+		t.Fatalf("start record mutated under the caller: state = %q", started.State)
+	}
+	// The snapshot was taken while the job was running, so it must still carry
+	// no finish stamp, while the on-disk record does. If the shared pointer had
+	// been returned, the supervisor would have stamped this same object and both
+	// sides would report a finished job.
+	if !started.FinishedAt.IsZero() {
+		t.Fatalf("start record was stamped after the call returned: %v", started.FinishedAt)
+	}
+	if final.FinishedAt.IsZero() {
+		t.Fatal("terminal record is missing its finish stamp")
+	}
+	if final.State == remotetools.JobRunning {
+		t.Fatalf("on-disk record should have advanced past running: %v", final.State)
+	}
+}
+
 // TestJobLifecycle covers start → poll → terminal state.
 func TestJobLifecycle(t *testing.T) {
 	root := newTestWorkspace(t)
