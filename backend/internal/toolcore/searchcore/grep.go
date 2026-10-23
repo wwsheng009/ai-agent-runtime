@@ -36,6 +36,11 @@ type GrepOptions struct {
 	// engines agree on what `type=go` means.
 	Type    string
 	TypeNot string
+	// MaxCount caps matching lines per file. MaxCountSet distinguishes an
+	// explicit 0 - the file contributes nothing, matching rg -m 0 - from
+	// "unset", which means no per-file cap.
+	MaxCount    int
+	MaxCountSet bool
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -144,6 +149,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 		defer file.Close()
 		reader.reset(file)
+		fileMatches := 0
 		for {
 			lineNo, text, truncated, ok := reader.next()
 			if !ok {
@@ -157,11 +163,16 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			if matched == opts.InvertMatch {
 				continue
 			}
+			if opts.MaxCountSet && fileMatches >= opts.MaxCount {
+				break
+			}
 			result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
+			fileMatches++
 			if GrepPageComplete(result.Matches, mode, opts) {
 				return filepath.SkipAll
 			}
 		}
+		return nil
 	}
 
 	for _, root := range roots {

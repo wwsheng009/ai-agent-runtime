@@ -285,3 +285,40 @@ func TestRemoteGrepTypeFiltersOverMCP(t *testing.T) {
 		t.Fatalf("file_type must behave like type:\n%s", alias)
 	}
 }
+
+// TestRemoteGrepMaxCountOverMCP proves the per-file cap survives schema
+// validation, including the explicit-zero contract shared with rg -m 0.
+func TestRemoteGrepMaxCountOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"a.txt": "hit a1\nhit a2\n",
+		"b.txt": "hit b1\nhit b2\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	capped := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "max_count": 1,
+	})
+	if !strings.Contains(capped, "hit a1") || !strings.Contains(capped, "hit b1") {
+		t.Fatalf("max_count=1 should keep the first match of each file:\n%s", capped)
+	}
+	if strings.Contains(capped, "hit a2") || strings.Contains(capped, "hit b2") {
+		t.Fatalf("max_count=1 must drop later matches in each file:\n%s", capped)
+	}
+
+	suppressed := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "max_count": 0,
+	})
+	if !strings.Contains(suppressed, "(no matches)") {
+		t.Fatalf("max_count=0 must suppress every match:\n%s", suppressed)
+	}
+}

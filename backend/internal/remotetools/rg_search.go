@@ -315,6 +315,11 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	if opts.MaxFileBytes > 0 {
 		args = append(args, "--max-filesize", strconv.Itoa(opts.MaxFileBytes))
 	}
+	// An explicit 0 means "this file contributes nothing", which is exactly
+	// what rg -m 0 does; unset means no per-file cap.
+	if opts.MaxCountSet {
+		args = append(args, "--max-count", strconv.Itoa(opts.MaxCount))
+	}
 	args = append(args, r.skipArgs()...)
 	for _, pattern := range patterns {
 		args = append(args, "-e", pattern)

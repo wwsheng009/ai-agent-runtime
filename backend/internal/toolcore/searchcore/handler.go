@@ -150,6 +150,10 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if modeFailure != nil {
 		return modeFailure, nil
 	}
+	maxCount, maxCountSet := intArgOK(call.Args, "max_count")
+	if maxCountSet && maxCount < 0 {
+		maxCount = 0
+	}
 	options := GrepOptions{
 		Patterns:        patterns,
 		Path:            roots[0],
@@ -168,6 +172,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		Word:            boolArg(call.Args, "word", "word_regexp"),
 		LineRegexp:      boolArg(call.Args, "line_regexp"),
 		InvertMatch:     boolArg(call.Args, "invert_match"),
+		MaxCount:        maxCount,
+		MaxCountSet:     maxCountSet,
 		Limit:           intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:    captureLimit(call),
 		Offset:          intArg(call.Args, "offset", 0),
@@ -246,30 +252,32 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	includeGlobs, excludeGlobs := EffectiveGrepFilters(options)
 	metadata := map[string]any{
-		"pattern":          patternLabel,
-		"patterns":         patterns,
-		"mode":             string(mode),
-		"path":             rootLabel,
-		"paths":            grepRootLabels(paths, roots),
-		"matches":          pageMatches,
-		"files":            len(result.Files),
-		"files_scanned":    result.FilesScanned,
-		"single_file":      result.SingleFile,
-		"is_truncated":     result.Truncated,
-		"invert_match":     options.InvertMatch,
-		"type":             options.Type,
-		"type_not":         options.TypeNot,
-		"include_patterns": len(includeGlobs),
-		"exclude_patterns": len(excludeGlobs),
-		"context_before":   contextBefore,
-		"context_after":    contextAfter,
-		"context_lines":    contextLineCount,
-		"offset":           options.Offset,
-		"next_offset":      options.Offset + pageEntries,
-		"has_more":         result.Truncated,
-		"engine":           engine,
-		"hidden_files":     true,
-		"ignore_files":     false,
+		"pattern":            patternLabel,
+		"patterns":           patterns,
+		"mode":               string(mode),
+		"path":               rootLabel,
+		"paths":              grepRootLabels(paths, roots),
+		"matches":            pageMatches,
+		"files":              len(result.Files),
+		"files_scanned":      result.FilesScanned,
+		"single_file":        result.SingleFile,
+		"is_truncated":       result.Truncated,
+		"invert_match":       options.InvertMatch,
+		"type":               options.Type,
+		"type_not":           options.TypeNot,
+		"max_count":          options.MaxCount,
+		"max_count_explicit": options.MaxCountSet,
+		"include_patterns":   len(includeGlobs),
+		"exclude_patterns":   len(excludeGlobs),
+		"context_before":     contextBefore,
+		"context_after":      contextAfter,
+		"context_lines":      contextLineCount,
+		"offset":             options.Offset,
+		"next_offset":        options.Offset + pageEntries,
+		"has_more":           result.Truncated,
+		"engine":             engine,
+		"hidden_files":       true,
+		"ignore_files":       false,
 	}
 	result0 := &toolcore.Result{
 		Success:    true,

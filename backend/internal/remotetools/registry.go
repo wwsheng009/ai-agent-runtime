@@ -354,6 +354,11 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --count/-c；等价于 mode=count（统计匹配行数）。",
 			},
+			"max_count": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "兼容 rg 的 --max-count/-m：每个文件的匹配行上限（count 模式下计数同样受此上限）。显式传 0 表示该文件不产生任何匹配（与 rg -m 0 一致）；不传表示不限。",
+			},
 		},
 		// At least one pattern spelling is required, but which one is a
 		// handler-level rule: `patterns` is a valid substitute for `pattern`,
