@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 )
 
 // WriteResult describes one filesystem transfer mutation.
@@ -57,25 +58,23 @@ func (s *LocalService) WriteFile(ctx context.Context, path string, data []byte) 
 	if err != nil {
 		return nil, err
 	}
-
-	sizeBefore, created, err := ensureWritableFileTarget(absPath)
+	result, err := mutatecore.Write(absPath, string(data), mutatecore.WriteOptions{
+		Mode:          0o644,
+		CreateParents: true,
+	})
 	if err != nil {
+		if info, statErr := os.Stat(absPath); statErr == nil && info.IsDir() {
+			return nil, pathKindMismatchError(absPath)
+		}
 		return nil, err
-	}
-	if err := os.WriteFile(absPath, data, 0o644); err != nil {
-		return nil, fmt.Errorf("写入文件失败: %w", err)
-	}
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("读取写入后文件信息失败: %w", err)
 	}
 	return &WriteResult{
 		Path:         absPath,
 		BytesWritten: len(data),
-		SizeBefore:   sizeBefore,
-		SizeAfter:    info.Size(),
-		Created:      created,
-		Action:       actionForWrite(created),
+		SizeBefore:   result.OldSize,
+		SizeAfter:    result.NewSize,
+		Created:      result.Created,
+		Action:       actionForWrite(result.Created),
 	}, nil
 }
 
@@ -87,34 +86,26 @@ func (s *LocalService) AppendFile(ctx context.Context, path string, data []byte)
 	if err != nil {
 		return nil, err
 	}
-
-	sizeBefore, created, err := ensureWritableFileTarget(absPath)
+	result, err := mutatecore.Append(ctx, absPath, string(data), mutatecore.AppendOptions{
+		CreateIfMissing: true,
+		Mode:            0o644,
+	})
 	if err != nil {
+		if info, statErr := os.Stat(absPath); statErr == nil && info.IsDir() {
+			return nil, pathKindMismatchError(absPath)
+		}
 		return nil, err
 	}
-	file, err := os.OpenFile(absPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("以追加模式打开文件失败: %w", err)
-	}
-	defer file.Close()
-
-	if _, err := file.Write(data); err != nil {
-		return nil, fmt.Errorf("追加写入文件失败: %w", err)
-	}
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("读取写入后文件信息失败: %w", err)
-	}
 	action := "append"
-	if created {
+	if result.Created {
 		action = "create_append"
 	}
 	return &WriteResult{
 		Path:         absPath,
 		BytesWritten: len(data),
-		SizeBefore:   sizeBefore,
-		SizeAfter:    info.Size(),
-		Created:      created,
+		SizeBefore:   result.SizeBefore,
+		SizeAfter:    result.SizeAfter,
+		Created:      result.Created,
 		Action:       action,
 	}, nil
 }
@@ -128,32 +119,6 @@ func resolveTransportPath(path string) (string, error) {
 		return "", fmt.Errorf("解析文件路径失败: %w", err)
 	}
 	return absPath, nil
-}
-
-func ensureWritableFileTarget(absPath string) (sizeBefore int64, created bool, err error) {
-	if absPath == "" {
-		return 0, false, fmt.Errorf("path 不能为空")
-	}
-	info, statErr := os.Stat(absPath)
-	switch {
-	case statErr == nil:
-		if info.IsDir() {
-			return 0, false, pathKindMismatchError(absPath)
-		}
-		if !info.Mode().IsRegular() {
-			return 0, false, fmt.Errorf("目标路径不是常规文件: %s", absPath)
-		}
-		sizeBefore = info.Size()
-	case os.IsNotExist(statErr):
-		created = true
-	default:
-		return 0, false, fmt.Errorf("访问文件失败: %w", statErr)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
-		return 0, false, fmt.Errorf("创建目录失败: %w", err)
-	}
-	return sizeBefore, created, nil
 }
 
 func actionForWrite(created bool) string {
