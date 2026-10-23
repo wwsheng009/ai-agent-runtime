@@ -651,6 +651,12 @@ remote tools are governed by the session permission mode like local ones ...
 - 非回环监听必须配置 token，否则启动失败。
 - 客户端若拿不到 token，请求会得到 `401 Unauthorized`；不会静默降级。
 - 生产环境请用 `chmod 600` 保护 `.env` / `remote.env`，并在 systemd 中用 `EnvironmentFile=` 注入，而不是写在 unit 的 `ExecStart` 里。
+- **轮换 = 重启**：服务在启动时读取一次 `http.tokenEnv` 指向的变量，之后不再重读。
+  换 token 的次序是：更新目标机 env 文件 → 重启目标服务 → 更新本机同名变量。
+  重启后旧 token 立即失效（不保留双活窗口），因此本机与目标机必须同步更新，
+  否则下一次调用直接 `401`。
+  比较使用 `crypto/subtle.ConstantTimeCompare`；audit/access 日志只记
+  `bearer:<8 位 hash>`，不落 token 原文（`internal/remotetools/token_rotation_test.go` 固定该行为）。
 
 ### 9.2 TLS / mTLS
 
