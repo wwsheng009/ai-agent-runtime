@@ -17,13 +17,18 @@ import (
 func watchLayerForTest(t *testing.T, root string) *Layer {
 	t.Helper()
 	ctx := context.Background()
+	// Seed the initial tree before the watcher starts. Creating `demo/` after
+	// startup turned the first file's Create event into a race: the directory
+	// event may be processed after the file was already written, so the file
+	// event was never observed in test runs that happened to lose that race.
+	// New-directory catch-up has its own dedicated test below.
+	writeTree(t, root, "demo/a.go", demoGoSource)
 	cfg := layerConfigForTest(root)
 	cfg.Watch = CodeToolsOn
 	layer, err := Open(ctx, cfg)
 	require.NoError(t, err)
 	require.True(t, layer.WatchStatus().Active, "watch=on 时必须真的在监听")
 	t.Cleanup(func() { _ = layer.Close() })
-	writeTree(t, root, "demo/a.go", demoGoSource)
 	if _, err := RunIndex(ctx, layer.Store(), cfg); err != nil {
 		t.Fatalf("RunIndex(initial): %v", err)
 	}
@@ -80,6 +85,17 @@ func TestWatchSourceIndexesExternalWritesWhileIdle(t *testing.T) {
 		}
 	}
 	require.True(t, found, "watcher 必须发现空闲期的文件修改（新符号 Gamma 进库）")
+}
+
+// 新建目录（含嵌套子目录）内的文件也必须在空闲期被发现：目录 Create 事件
+// 可能晚于其中文件的创建，watcher 必须补监听并回扫已存在的文件。
+func TestWatchSourceIndexesFilesInNewDirectory(t *testing.T) {
+	root := t.TempDir()
+	layer := watchLayerForTest(t, root)
+
+	writeTree(t, root, "newdir/sub/b.go", "package sub\n\nfunc C() int { return 3 }\n")
+	require.True(t, waitForFileIndexed(t, layer, "newdir/sub/b.go", 5*time.Second),
+		"watcher 必须发现空闲期新建目录内的代码文件")
 }
 
 // 空闲期的外部删除必须被 watcher 发现：定向增量对"磁盘已不存在"的路径走软删除

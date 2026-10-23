@@ -131,6 +131,14 @@ func (s *watchSource) addTree() {
 		s.noteDegraded(fmt.Sprintf("workspace path is not resolvable: %v", err))
 		return
 	}
+	s.addTreeAt(absRoot)
+}
+
+// addTreeAt adds every indexable directory at or below absRoot. It is shared
+// by initial startup and by watchNewDir: a directory created while the process
+// runs may contain files whose Create events were emitted before the watch on
+// that directory existed, so the subtree must be registered explicitly.
+func (s *watchSource) addTreeAt(absRoot string) {
 	useGitignore := s.cfg.Index.UseGitignoreEnabled()
 	_ = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -153,8 +161,12 @@ func (s *watchSource) addTree() {
 			}
 		}
 		s.mu.Lock()
+		_, watched := s.dirs[path]
 		reachedCap := len(s.dirs) >= s.maxDirs
 		s.mu.Unlock()
+		if watched {
+			return nil
+		}
 		if reachedCap {
 			s.noteDegraded(fmt.Sprintf("watch directory cap reached (%d)", s.maxDirs))
 			return fs.SkipDir
@@ -234,20 +246,56 @@ func (s *watchSource) watchNewDir(path string) {
 	if ignoreDirs[name] || strings.HasPrefix(name, ".") {
 		return
 	}
-	s.mu.Lock()
-	reachedCap := len(s.dirs) >= s.maxDirs
-	s.mu.Unlock()
-	if reachedCap {
-		s.noteDegraded(fmt.Sprintf("watch directory cap reached (%d)", s.maxDirs))
-		return
+	// Register the new subtree, then reconcile the files that were written
+	// before the watch became active. Without the reconcile, a Create event for
+	// the directory can be processed after a file inside it was already
+	// created, losing that file until the next turn boundary.
+	s.addTreeAt(path)
+	s.markTreeFiles(path)
+}
+
+// markTreeFiles walks root and enqueues every file that passes the same
+// indexable-path filter as the normal event path. It is the catch-up half of
+// new-directory registration.
+func (s *watchSource) markTreeFiles(root string) {
+	useGitignore := s.cfg.Index.UseGitignoreEnabled()
+	batch := make([]string, 0, 64)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if indexable := indexableChangePaths(s.cfg, batch); len(indexable) > 0 {
+			s.queue.Mark(indexable...)
+		}
+		batch = batch[:0]
 	}
-	if err := s.watcher.Add(path); err != nil {
-		s.noteDegraded(fmt.Sprintf("cannot watch %s: %v", path, err))
-		return
-	}
-	s.mu.Lock()
-	s.dirs[path] = struct{}{}
-	s.mu.Unlock()
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			name := d.Name()
+			if ignoreDirs[name] || strings.HasPrefix(name, ".") {
+				return fs.SkipDir
+			}
+			if useGitignore {
+				if rel, relErr := filepath.Rel(root, path); relErr == nil &&
+					isIgnoredByGitignore(root, normalizeRelPath(rel), true) {
+					return fs.SkipDir
+				}
+			}
+			return nil
+		}
+		batch = append(batch, path)
+		if len(batch) >= 256 {
+			flush()
+		}
+		return nil
+	})
+	flush()
 }
 
 // hasCodeExtension 是事件预筛：只有内置 adapter 认识的后缀才值得走完整口径过滤。
