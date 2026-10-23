@@ -47,11 +47,20 @@ type PatchOperation struct {
 }
 
 type PatchBindings struct {
-	Resolve       func(raw string) (string, error)
-	CheckWrite    func(abs string) error
+	Resolve    func(raw string) (string, error)
+	CheckWrite func(abs string) error
+	// CheckDelete is optional. Nil falls back to CheckWrite. Move operations
+	// need the delete permission on the source, which is not the same grant as
+	// write on the target.
+	CheckDelete   func(abs string) error
 	Display       func(abs string) string
 	CreateParents bool
 	Mode          os.FileMode
+	// Write and Remove are optional IO seams. Nil uses WriteAtomic / os.Remove.
+	// They exist so rollback can be tested with a deterministic failure without
+	// adding a second patch implementation.
+	Write  func(abs string, data []byte, mode os.FileMode) error
+	Remove func(abs string) error
 }
 
 type PatchFileResult struct {
@@ -94,11 +103,23 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 	if bindings.CheckWrite == nil {
 		bindings.CheckWrite = func(string) error { return nil }
 	}
+	checkDelete := bindings.CheckDelete
+	if checkDelete == nil {
+		checkDelete = bindings.CheckWrite
+	}
 	if bindings.Display == nil {
 		bindings.Display = func(abs string) string { return abs }
 	}
 	if bindings.Mode == 0 {
 		bindings.Mode = DefaultFileMode
+	}
+	writeFile := bindings.Write
+	if writeFile == nil {
+		writeFile = WriteAtomic
+	}
+	removeFile := bindings.Remove
+	if removeFile == nil {
+		removeFile = os.Remove
 	}
 
 	type plannedFile struct {
@@ -124,6 +145,11 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 		if checkErr := bindings.CheckWrite(absPath); checkErr != nil {
 			return PatchResult{}, checkErr
 		}
+		if op.Kind == PatchDeleteOp {
+			if checkErr := checkDelete(absPath); checkErr != nil {
+				return PatchResult{}, checkErr
+			}
+		}
 		if seen[absPath] {
 			return PatchResult{}, errorf(CodeInvalidArgument, "combine operations on the same file into one update block", "patch contains duplicate operations for %s", bindings.Display(absPath))
 		}
@@ -133,6 +159,9 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 			moveAbs, moveErr := bindings.Resolve(op.MoveTo)
 			if moveErr != nil {
 				return PatchResult{}, moveErr
+			}
+			if checkErr := checkDelete(absPath); checkErr != nil {
+				return PatchResult{}, checkErr
 			}
 			if checkErr := bindings.CheckWrite(moveAbs); checkErr != nil {
 				return PatchResult{}, checkErr
@@ -211,6 +240,24 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 		planned = append(planned, item)
 	}
 
+	type undoStep struct {
+		path    string
+		exists  bool
+		content []byte
+		mode    os.FileMode
+	}
+	undo := make([]undoStep, 0, len(planned)*2)
+	rollback := func() {
+		for i := len(undo) - 1; i >= 0; i-- {
+			step := undo[i]
+			if step.exists {
+				_ = writeFile(step.path, step.content, step.mode)
+			} else {
+				_ = removeFile(step.path)
+			}
+		}
+	}
+
 	result := PatchResult{}
 	for _, item := range planned {
 		if bindings.CreateParents && item.operation.Kind != PatchDeleteOp {
@@ -230,20 +277,33 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 		switch item.operation.Kind {
 		case PatchAddOp, PatchUpdateOp:
 			encoded := Encode(item.newBody, item.encoding)
-			if err := WriteAtomic(item.absPath, encoded, bindings.Mode); err != nil {
+			if item.operation.Kind == PatchAddOp {
+				undo = append(undo, undoStep{path: item.absPath})
+			} else {
+				oldBytes := Encode(item.oldBody, item.encoding)
+				undo = append(undo, undoStep{path: item.absPath, exists: true, content: oldBytes, mode: bindings.Mode})
+			}
+			if err := writeFile(item.absPath, encoded, bindings.Mode); err != nil {
+				rollback()
 				return PatchResult{}, err
 			}
 			fileResult.BytesAfter = int64(len(encoded))
 			if item.wasMoved {
 				if bindings.CreateParents {
 					if err := os.MkdirAll(filepath.Dir(item.moveAbs), 0o755); err != nil {
+						rollback()
 						return PatchResult{}, newError(CodeInvalidArgument, "check the move target directory", fmt.Errorf("create move target directory: %w", err))
 					}
 				}
-				if err := WriteAtomic(item.moveAbs, encoded, bindings.Mode); err != nil {
+				undo = append(undo, undoStep{path: item.moveAbs})
+				if err := writeFile(item.moveAbs, encoded, bindings.Mode); err != nil {
+					rollback()
 					return PatchResult{}, err
 				}
-				if err := os.Remove(item.absPath); err != nil {
+				// The source is still on disk; removing it is recorded by the
+				// update undo entry above (it restores the old body).
+				if err := removeFile(item.absPath); err != nil {
+					rollback()
 					return PatchResult{}, newError(CodeInvalidArgument, "check permissions", fmt.Errorf("remove moved source %s: %w", item.display, err))
 				}
 				result.Moved++
@@ -253,7 +313,10 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 				result.MutatedPaths = append(result.MutatedPaths, item.display)
 			}
 		case PatchDeleteOp:
-			if err := os.Remove(item.absPath); err != nil {
+			oldBytes := Encode(item.oldBody, item.encoding)
+			undo = append(undo, undoStep{path: item.absPath, exists: true, content: oldBytes, mode: bindings.Mode})
+			if err := removeFile(item.absPath); err != nil {
+				rollback()
 				return PatchResult{}, newError(CodeInvalidArgument, "check permissions", fmt.Errorf("delete %s: %w", item.display, err))
 			}
 			result.Deleted++

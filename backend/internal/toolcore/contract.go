@@ -140,10 +140,11 @@ type Runtime interface {
 type Operation string
 
 const (
-	OpRead  Operation = "read"
-	OpWrite Operation = "write"
-	OpList  Operation = "list"
-	OpExec  Operation = "exec"
+	OpRead   Operation = "read"
+	OpWrite  Operation = "write"
+	OpDelete Operation = "delete"
+	OpList   Operation = "list"
+	OpExec   Operation = "exec"
 )
 
 type PathResolver interface {

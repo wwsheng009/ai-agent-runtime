@@ -143,6 +143,8 @@ func (p remotePermissions) CheckPath(op toolcore.Operation, abs string) error {
 		return p.sandbox.CheckPath(runtimeexecutor.OpRead, abs)
 	case toolcore.OpWrite:
 		return p.sandbox.CheckPath(runtimeexecutor.OpWrite, abs)
+	case toolcore.OpDelete:
+		return p.sandbox.CheckPath(runtimeexecutor.OpDelete, abs)
 	case toolcore.OpExec:
 		return p.sandbox.CheckPath(runtimeexecutor.OpExecute, abs)
 	default:

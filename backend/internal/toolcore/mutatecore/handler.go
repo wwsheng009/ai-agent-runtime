@@ -222,7 +222,15 @@ func (h *applyPatchHandler) Execute(ctx context.Context, call *toolcore.Call) (*
 			}
 			return target, nil
 		},
-		CheckWrite:    ValidateWriteTarget,
+		CheckWrite: ValidateWriteTarget,
+		CheckDelete: func(abs string) error {
+			if permissions := call.Runtime.Permissions(); permissions != nil {
+				if err := permissions.CheckPath(toolcore.OpDelete, abs); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
 		Display:       func(abs string) string { return displayPath(call, abs) },
 		CreateParents: false,
 		Mode:          DefaultFileMode,

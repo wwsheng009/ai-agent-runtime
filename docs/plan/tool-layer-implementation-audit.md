@@ -118,8 +118,18 @@
   `apply_patch` 的 envelope 规范化（heredoc/markdown fence/折叠 marker）已上移
   `mutatecore.NormalizePatchEnvelope`，本地重复实现删除。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  `apply_patch` 的 staging/回滚仍由本地 applier 承担（core 的 ApplyPatch 无回滚，
-  不能等价替换）。
+  `apply_patch` 的本地执行仍由本地 applier 承担：core `ApplyPatch` 已补回滚，
+  但缺少本地路径清理、EOF/无上下文 hunk、空白容忍与最近片段诊断；强行替换会
+  回归（已用测试验证并回退）。
+
+**2026-10-23 安全补强**：
+
+- `mutatecore.ApplyPatch` 现在记录反向操作，写/删/move 中途失败会逆序回滚；
+  新增 `PatchBindings.Write/Remove` IO seam，并用注入失败测试验证。
+- 新增 `toolcore.OpDelete`：此前 delete/move 只能走 `OpWrite`，无法表达删除权限。
+  `mutatecore` 对 delete 与 move 的源路径显式调用 `CheckDelete`；remote
+  `remotePermissions` 将其映射到 `runtimeexecutor.OpDelete`，不再落到
+  `unsupported path operation`。
 - **状态**: ⚠️ 基础覆盖，扩展待 PR2。
 
 #### Benchmark Thresholds (PR2)

@@ -88,6 +88,104 @@ func TestApplyPatchIsTransactional(t *testing.T) {
 	}
 }
 
+// TestApplyPatchRollsBackCompletedWritesOnIOFailure forces the second write to
+// fail after the first file was already written. The first file must be
+// restored (or removed if it was newly created).
+func TestApplyPatchRollsBackCompletedWritesOnIOFailure(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("seed existing: %v", err)
+	}
+	bindings := testPatchBindings(root)
+	writeCalls := 0
+	bindings.Write = func(abs string, data []byte, mode os.FileMode) error {
+		writeCalls++
+		if writeCalls == 2 {
+			return &Error{Code: CodeInternal, Message: "injected write failure"}
+		}
+		return WriteAtomic(abs, data, mode)
+	}
+	patch := strings.Join([]string{
+		PatchBegin,
+		PatchUpdate + "existing.txt",
+		"@@",
+		"-old",
+		"+new",
+		PatchAdd + "created.txt",
+		"+created",
+		PatchEnd,
+	}, "\n")
+	_, err := ApplyPatch(context.Background(), patch, bindings)
+	if err == nil {
+		t.Fatal("expected injected failure")
+	}
+	assertMutationFile(t, filepath.Join(root, "existing.txt"), "old\n")
+	if _, statErr := os.Stat(filepath.Join(root, "created.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("new file survived rollback: %v", statErr)
+	}
+}
+
+func TestApplyPatchRollsBackDeleteOnIOFailure(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "deleted.txt"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatalf("seed deleted: %v", err)
+	}
+	bindings := testPatchBindings(root)
+	removeCalls := 0
+	bindings.Remove = func(abs string) error {
+		removeCalls++
+		if removeCalls == 1 {
+			return os.ErrPermission
+		}
+		return os.Remove(abs)
+	}
+	patch := strings.Join([]string{
+		PatchBegin,
+		PatchDelete + "deleted.txt",
+		PatchEnd,
+	}, "\n")
+	_, err := ApplyPatch(context.Background(), patch, bindings)
+	if err == nil {
+		t.Fatal("expected injected remove failure")
+	}
+	assertMutationFile(t, filepath.Join(root, "deleted.txt"), "keep\n")
+}
+
+func TestApplyPatchChecksDeletePermissionForDeleteAndMove(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "delete.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("seed delete: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "move.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("seed move: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		patch string
+	}{
+		{"delete", strings.Join([]string{PatchBegin, PatchDelete + "delete.txt", PatchEnd}, "\n")},
+		{"move", strings.Join([]string{
+			PatchBegin, PatchUpdate + "move.txt", PatchMoveTo + "moved.txt", PatchEnd,
+		}, "\n")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bindings := testPatchBindings(root)
+			deleteChecks := 0
+			bindings.CheckDelete = func(string) error {
+				deleteChecks++
+				return os.ErrPermission
+			}
+			_, err := ApplyPatch(context.Background(), tc.patch, bindings)
+			if err == nil {
+				t.Fatal("expected delete permission denial")
+			}
+			if deleteChecks == 0 {
+				t.Fatal("CheckDelete was not consulted")
+			}
+		})
+	}
+}
+
 func TestApplyPatchPreservesCRLFAndBOM(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "encoded.txt")
