@@ -141,18 +141,15 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if len(patterns) == 0 {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "pass pattern", nil), nil
 	}
-	target, err := paths.Resolve(stringArg(call.Args, "path"))
-	if err != nil {
-		return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
+	roots, failure := grepRootsFromArgs(call, paths)
+	if failure != nil {
+		return failure, nil
 	}
-	if permissions := call.Runtime.Permissions(); permissions != nil {
-		if err := permissions.CheckPath(toolcore.OpRead, target); err != nil {
-			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
-		}
-	}
+	rootLabel := paths.Relative(roots[0])
 	options := GrepOptions{
 		Patterns:        patterns,
-		Path:            target,
+		Path:            roots[0],
+		Paths:           roots[1:],
 		Glob:            stringArg(call.Args, "glob"),
 		Include:         GrepGlobListFromArgs(call.Args, "include"),
 		Exclude:         GrepGlobListFromArgs(call.Args, "exclude"),
@@ -183,7 +180,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			return toolcore.Error(toolcore.ErrTimeout, "retry with a narrower path or a longer timeout", ctx.Err()), nil
 		}
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check the regex/glob syntax and narrow the path",
-			fmt.Errorf("grep %q in %s: %v", strings.Join(patterns, " | "), paths.Relative(target), grepErr)), nil
+			fmt.Errorf("grep %q in %s: %v", strings.Join(patterns, " | "), rootLabel, grepErr)), nil
 	}
 
 	patternLabel := strings.Join(patterns, " | ")
@@ -224,7 +221,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	metadata := map[string]any{
 		"pattern":          patternLabel,
 		"patterns":         patterns,
-		"path":             paths.Relative(target),
+		"path":             rootLabel,
+		"paths":            grepRootLabels(paths, roots),
 		"matches":          len(result.Matches),
 		"files_scanned":    result.FilesScanned,
 		"single_file":      result.SingleFile,
@@ -351,6 +349,45 @@ func grepContextFromArgs(args map[string]any) (int, int) {
 		after = value
 	}
 	return ClampGrepContextLines(before), ClampGrepContextLines(after)
+}
+
+// grepRootsFromArgs resolves the ordered search roots: `path` first, then every
+// entry of `paths`. When neither is supplied the workspace root is searched,
+// exactly like the local tool. Every root is admitted before the search starts,
+// so one denied path fails the whole call instead of silently returning a
+// partial result.
+func grepRootsFromArgs(call *toolcore.Call, paths toolcore.PathResolver) ([]string, *toolcore.Result) {
+	rawRoots := make([]string, 0, 2)
+	if rawPath := strings.TrimSpace(stringArg(call.Args, "path")); rawPath != "" {
+		rawRoots = append(rawRoots, rawPath)
+	}
+	rawRoots = append(rawRoots, GrepPathListFromArgs(call.Args, "paths")...)
+	if len(rawRoots) == 0 {
+		rawRoots = []string{""}
+	}
+
+	roots := make([]string, 0, len(rawRoots))
+	for _, raw := range rawRoots {
+		resolved, err := paths.Resolve(raw)
+		if err != nil {
+			return nil, toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err)
+		}
+		if permissions := call.Runtime.Permissions(); permissions != nil {
+			if err := permissions.CheckPath(toolcore.OpRead, resolved); err != nil {
+				return nil, toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err)
+			}
+		}
+		roots = append(roots, resolved)
+	}
+	return roots, nil
+}
+
+func grepRootLabels(paths toolcore.PathResolver, roots []string) []string {
+	labels := make([]string, 0, len(roots))
+	for _, root := range roots {
+		labels = append(labels, paths.Relative(root))
+	}
+	return labels
 }
 
 // boolArg reports whether any of the listed spellings is set to true.

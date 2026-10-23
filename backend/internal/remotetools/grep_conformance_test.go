@@ -153,3 +153,41 @@ func TestRemoteGrepFiltersOverMCP(t *testing.T) {
 		t.Fatalf("exclude must not drop unrelated files:\n%s", excluded)
 	}
 }
+
+// TestRemoteGrepMultiRootsOverMCP proves `paths` survives schema validation and
+// searches every root in order, including the single-string spelling.
+func TestRemoteGrepMultiRootsOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for path, content := range map[string]string{
+		"alpha/one.txt": "hit one\n",
+		"beta/two.txt":  "hit two\n",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	both := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "paths": []interface{}{"alpha", "beta"},
+	})
+	if !strings.Contains(both, "alpha/one.txt:1:hit one") || !strings.Contains(both, "beta/two.txt:1:hit two") {
+		t.Fatalf("paths should search every root:\n%s", both)
+	}
+
+	one := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "paths": "alpha",
+	})
+	if !strings.Contains(one, "one.txt") || strings.Contains(one, "two.txt") {
+		t.Fatalf("the string spelling must search exactly that root:\n%s", one)
+	}
+}

@@ -25,6 +25,9 @@ type GrepOptions struct {
 	// the basename anywhere below the root.
 	Include []string
 	Exclude []string
+	// Paths holds additional search roots, searched in order after Path. The
+	// ordered pair mirrors the local tool: `path` first, then `paths`.
+	Paths []string
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -92,8 +95,14 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	}
 
 	var result GrepResult
+	roots := grepRoots(opts)
+	if len(roots) == 1 {
+		if info, statErr := os.Stat(roots[0]); statErr == nil && info.Mode().IsRegular() {
+			result.SingleFile = true
+		}
+	}
 	reader := newLineReader()
-	visit := func(path string) error {
+	visit := func(root, path string) error {
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -107,7 +116,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		if opts.MaxFileBytes > 0 && info.Size() > int64(opts.MaxFileBytes) {
 			return nil
 		}
-		if shouldFilterGrepCandidate(relativeGrepCandidate(opts.Path, path), includeFilter, excludeFilter) {
+		if shouldFilterGrepCandidate(relativeGrepCandidate(root, path), includeFilter, excludeFilter) {
 			return nil
 		}
 		result.FilesScanned++
@@ -137,41 +146,62 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 	}
 
-	if info, statErr := os.Stat(opts.Path); statErr == nil && info.Mode().IsRegular() {
-		result.SingleFile = true
-		if globMatcher == nil || globMatcher.Match(filepath.Base(opts.Path)) {
-			if err := visit(opts.Path); err != nil && err != filepath.SkipAll {
-				return GrepResult{}, err
+	for _, root := range roots {
+		if info, statErr := os.Stat(root); statErr == nil && info.Mode().IsRegular() {
+			if globMatcher == nil || globMatcher.Match(filepath.Base(root)) {
+				if err := visit(root, root); err != nil && err != filepath.SkipAll {
+					return GrepResult{}, err
+				}
+			}
+		} else {
+			walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				// File symlinks are not followed: a link inside the workspace must
+				// not read a target outside the admitted roots.
+				if entry.Type()&os.ModeSymlink != 0 {
+					return nil
+				}
+				if entry.IsDir() {
+					if ShouldSkipDir(entry.Name()) && path != root {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if globMatcher != nil && !globMatcher.Match(entry.Name()) {
+					return nil
+				}
+				return visit(root, path)
+			})
+			if walkErr != nil && walkErr != filepath.SkipAll {
+				return GrepResult{}, walkErr
 			}
 		}
-	} else {
-		walkErr := filepath.WalkDir(opts.Path, func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			// File symlinks are not followed: a link inside the workspace must
-			// not read a target outside the admitted roots.
-			if entry.Type()&os.ModeSymlink != 0 {
-				return nil
-			}
-			if entry.IsDir() {
-				if ShouldSkipDir(entry.Name()) && path != opts.Path {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if globMatcher != nil && !globMatcher.Match(entry.Name()) {
-				return nil
-			}
-			return visit(path)
-		})
-		if walkErr != nil && walkErr != filepath.SkipAll {
-			return GrepResult{}, walkErr
+		// Every root after the page is complete would only be scanned to be
+		// discarded by ApplyGrepWindow.
+		if len(result.Matches) > opts.Offset+opts.Limit {
+			break
 		}
 	}
 
 	ApplyGrepWindow(&result, opts)
 	return result, nil
+}
+
+// grepRoots returns the ordered search roots: the single spelling first, then
+// the batch spelling, exactly like the local tool builds searchPaths.
+func grepRoots(opts GrepOptions) []string {
+	roots := make([]string, 0, 1+len(opts.Paths))
+	if strings.TrimSpace(opts.Path) != "" {
+		roots = append(roots, opts.Path)
+	}
+	for _, path := range opts.Paths {
+		if strings.TrimSpace(path) != "" {
+			roots = append(roots, path)
+		}
+	}
+	return roots
 }
 
 // relativeGrepCandidate is the path an include/exclude pattern is matched

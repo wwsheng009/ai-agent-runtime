@@ -143,7 +143,72 @@ func hasSkippedPathComponent(rel string) bool {
 	return false
 }
 
+// grep runs one ripgrep process per search root. ripgrep's --sort path sorts
+// globally across roots, which would page differently from the walker's
+// root-by-root walk (and from the local tool's per-scope loop); one process per
+// root keeps the page composition identical on every engine.
 func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (searchcore.GrepResult, bool, error) {
+	if !r.available() {
+		return searchcore.GrepResult{}, false, nil
+	}
+	roots := ripgrepGrepRoots(opts)
+	if len(roots) <= 1 {
+		return r.grepSingle(ctx, opts)
+	}
+	if opts.Limit < 1 {
+		opts.Limit = searchcore.DefaultGrepLimit
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	// Raw matches needed: the page plus one, which is the evidence both
+	// engines use for has_more. The shared window then slices it down.
+	rawNeeded := opts.Offset + opts.Limit + 1
+	combined := searchcore.GrepResult{}
+	for _, root := range roots {
+		remaining := rawNeeded - len(combined.Matches)
+		if remaining < 1 {
+			break
+		}
+		perRoot := opts
+		perRoot.Path = root
+		perRoot.Paths = nil
+		perRoot.Offset = 0
+		perRoot.Limit = remaining
+		page, used, err := r.grepSingle(ctx, perRoot)
+		if err != nil {
+			return searchcore.GrepResult{}, true, err
+		}
+		if !used {
+			// A filter this root cannot express must take the walker for the
+			// whole call, not just this root.
+			return searchcore.GrepResult{}, false, nil
+		}
+		combined.FilesScanned += page.FilesScanned
+		combined.Matches = append(combined.Matches, page.Matches...)
+		if len(combined.Matches) >= rawNeeded {
+			break
+		}
+	}
+	combined.SingleFile = false
+	searchcore.ApplyGrepWindow(&combined, opts)
+	return combined, true, nil
+}
+
+func ripgrepGrepRoots(opts searchcore.GrepOptions) []string {
+	roots := make([]string, 0, 1+len(opts.Paths))
+	if strings.TrimSpace(opts.Path) != "" {
+		roots = append(roots, opts.Path)
+	}
+	for _, root := range opts.Paths {
+		if strings.TrimSpace(root) != "" {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptions) (searchcore.GrepResult, bool, error) {
 	if !r.available() {
 		return searchcore.GrepResult{}, false, nil
 	}
@@ -176,8 +241,24 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 			return searchcore.GrepResult{}, false, nil
 		}
 	}
-	info, statErr := os.Stat(opts.Path)
-	result := searchcore.GrepResult{SingleFile: statErr == nil && info.Mode().IsRegular()}
+	roots := make([]string, 0, 1+len(opts.Paths))
+	if strings.TrimSpace(opts.Path) != "" {
+		roots = append(roots, opts.Path)
+	}
+	for _, root := range opts.Paths {
+		if strings.TrimSpace(root) != "" {
+			roots = append(roots, root)
+		}
+	}
+	if len(roots) == 0 {
+		return searchcore.GrepResult{}, true, fmt.Errorf("ripgrep: no search root")
+	}
+	result := searchcore.GrepResult{}
+	if len(roots) == 1 {
+		if info, statErr := os.Stat(roots[0]); statErr == nil && info.Mode().IsRegular() {
+			result.SingleFile = true
+		}
+	}
 
 	args := append(r.baseArgs(), "--text", "--json")
 	if globMatcher != nil {
@@ -225,7 +306,8 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 	for _, pattern := range patterns {
 		args = append(args, "-e", pattern)
 	}
-	args = append(args, "--", opts.Path)
+	args = append(args, "--")
+	args = append(args, roots...)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -240,9 +322,14 @@ func (r ripgrepRunner) grep(ctx context.Context, opts searchcore.GrepOptions) (s
 		return searchcore.GrepResult{}, true, startErr
 	}
 
-	baseDir := opts.Path
-	if result.SingleFile {
-		baseDir = filepath.Dir(opts.Path)
+	// With one root ripgrep may print paths relative to it; with several roots
+	// every root is absolute and so are the printed paths.
+	baseDir := ""
+	if len(roots) == 1 {
+		baseDir = roots[0]
+		if result.SingleFile {
+			baseDir = filepath.Dir(roots[0])
+		}
 	}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), rgScanMaxLineBytes)

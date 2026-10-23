@@ -119,3 +119,47 @@ func GrepGlobListFromArgs(args map[string]any, key string) []string {
 		return nil
 	}
 }
+
+// GrepPathListFromArgs reads the `paths` batch spelling. Unlike include/exclude
+// this list never splits a string on commas: a filesystem path may legitimately
+// contain one, and the local resolver has always treated the string spelling as
+// a single path.
+func GrepPathListFromArgs(args map[string]any, key string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	var raw []string
+	switch value := args[key].(type) {
+	case string:
+		raw = []string{value}
+	case []string:
+		raw = value
+	case []interface{}:
+		raw = make([]string, 0, len(value))
+		for _, item := range value {
+			if text, ok := item.(string); ok {
+				raw = append(raw, text)
+			}
+		}
+	default:
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		path := strings.TrimSpace(item)
+		if path == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == path {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, path)
+		}
+	}
+	return out
+}

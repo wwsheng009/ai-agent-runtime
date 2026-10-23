@@ -230,6 +230,16 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "string",
 				"description": "File or directory to search. Default: workspace root.",
 			},
+			"paths": map[string]interface{}{
+				"anyOf": []map[string]interface{}{
+					{"type": "string"},
+					{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"description": "批量搜索多个文件或目录，按顺序在 path 之后搜索，等价于 rg pattern path1 path2 ...。可传字符串数组，也可传单个字符串（字符串按整条路径处理，不按逗号拆分）。每个根都必须位于工作区内，否则整次调用被拒绝。",
+			},
 			"glob": map[string]interface{}{
 				"type":        "string",
 				"description": "Optional file filter, e.g. *.go.",

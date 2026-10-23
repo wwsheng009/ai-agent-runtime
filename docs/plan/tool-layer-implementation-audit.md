@@ -149,8 +149,14 @@
   rg 只在 `safeRipgrepGlob` 认可时接手，否则声明 used=false 交给 walker。
   `remotetools/grep_filters_conformance_test.go` 逐过滤集比较两引擎，并断言
   「rg 不能表达时必须拒绝而不是静默返回不同结果」。
+  `grep` 的多根搜索（`path` + `paths`）也已进 core：`GrepOptions.Paths` 按
+  「path 先、paths 后」的顺序搜索，分页窗口作用于拼接后的结果，include/exclude
+  在每个根内按各自相对路径匹配（`grep_paths_test.go` 锁定）。rg 侧改为每个根一次
+  进程——`--sort path` 的全局排序会与 walker 的按根遍历、本地 scope 循环产生不同
+  分页，`ripgrepRunner.grep` 现在包装 `grepSingle` 逐根复用预算与窗口逻辑，
+  `grep_paths_conformance_test.go` 覆盖 limit/offset 跨根一致性。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  本地 `grep` 主流程仍为 legacy（模式/context/include-exclude 语义已进 core；
+  本地 `grep` 主流程仍为 legacy（模式/context/include-exclude/多根语义已进 core；
   rg 优选、stats/ignore/type/rg_args 与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
