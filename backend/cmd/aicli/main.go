@@ -548,6 +548,10 @@ func main() {
 	rootCmd.AddCommand(commands.NewResumeCommand(func() *config.Config {
 		return cfg
 	}))
+	// sessions 子命令 — 独立会话列表（默认当前工作目录，--all 列出全部）
+	rootCmd.AddCommand(commands.NewSessionsCommand(func() *config.Config {
+		return cfg
+	}))
 
 	// profile 子命令 — 场景化 profile 管理（list/show/validate/create）
 	rootCmd.AddCommand(commands.NewProfileCommand(func() *config.Config {

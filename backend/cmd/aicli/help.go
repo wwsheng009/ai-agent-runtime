@@ -6,6 +6,7 @@ const rootCommandLongHelp = `aicli 是 ai-agent-runtime 的命令行工具，默
   - 初始化配置：aicli init [--global]
   - 登录 provider：aicli login
   - 交互式 chat / 顶层 resume / session resume / slash commands
+  - 会话列表：aicli sessions（默认当前工作目录，--all 列出全部）
   - 配置查看与 provider 管理
   - doctor 诊断、端点测试、上下文测试
   - headless exec、图片生成、MCP、管道模式
@@ -45,6 +46,7 @@ const rootCommandExampleHelp = `  # 首次使用
   aicli resume
   aicli resume session_xxx
   aicli chat --resume
+  aicli sessions --all                     # 列出所有工作目录的会话
 
   # 诊断
   aicli doctor provider
