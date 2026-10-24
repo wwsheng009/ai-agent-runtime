@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -631,17 +632,19 @@ func TestGrepTool_OneFileSystemBuiltinSkipsCrossDeviceDirectories(t *testing.T) 
 		t.Fatalf("write sub file: %v", err)
 	}
 
-	origFSID := fileSystemIdentityFn
-	defer func() { fileSystemIdentityFn = origFSID }()
+	// one_file_system now lives in the shared core, so the seam under test is
+	// the core's. This used to patch the legacy seam, which the core path never
+	// consults - the test kept passing while covering nothing.
+	origFSID := searchcore.FilesystemIdentityFunc
+	defer func() { searchcore.FilesystemIdentityFunc = origFSID }()
 	subPrefix := filepath.ToSlash(subDir)
-	fileSystemIdentityFn = func(path string) (string, error) {
+	searchcore.FilesystemIdentityFunc = func(path string) (string, error) {
 		cleaned := filepath.ToSlash(filepath.Clean(path))
 		if strings.HasPrefix(cleaned, subPrefix) {
 			return "other-fs", nil
 		}
 		return "root-fs", nil
 	}
-
 	tool := NewGrepTool()
 	tool.lookPath = func(name string) (string, error) {
 		return "", os.ErrNotExist
@@ -677,7 +680,7 @@ func TestGrepTool_OneFileSystemBuiltinSkipsCrossDeviceDirectories(t *testing.T) 
 	if err := os.WriteFile(directFile, []byte("needle\n"), 0o644); err != nil {
 		t.Fatalf("write direct file: %v", err)
 	}
-	fileSystemIdentityFn = func(path string) (string, error) {
+	searchcore.FilesystemIdentityFunc = func(path string) (string, error) {
 		cleaned := filepath.ToSlash(filepath.Clean(path))
 		switch cleaned {
 		case filepath.ToSlash(directFile):
@@ -700,7 +703,7 @@ func TestGrepTool_OneFileSystemBuiltinSkipsCrossDeviceDirectories(t *testing.T) 
 
 	linkFile := filepath.Join(tmpDir, "link.txt")
 	if err := os.Symlink(directFile, linkFile); err == nil {
-		fileSystemIdentityFn = func(path string) (string, error) {
+		searchcore.FilesystemIdentityFunc = func(path string) (string, error) {
 			cleaned := filepath.ToSlash(filepath.Clean(path))
 			switch cleaned {
 			case filepath.ToSlash(linkFile):

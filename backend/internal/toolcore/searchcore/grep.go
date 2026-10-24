@@ -63,6 +63,11 @@ type GrepOptions struct {
 	// `max_filesize` filter; MaxFileBytes is the runtime capture budget and the
 	// two are applied independently.
 	MaxFileSizeBytes int64
+	// OneFileSystem keeps the walk inside the filesystem each search root lives
+	// on: a directory on another device is not descended. It only bounds
+	// recursion - a root the caller names explicitly is always searched, which
+	// is exactly what rg --one-file-system does.
+	OneFileSystem bool
 	// IncludeHidden searches dotfiles and dot-directories. The tool default is
 	// false on every surface: hidden content is skipped unless the caller asks
 	// for it, which is both the long-standing local behaviour and ripgrep's own
@@ -335,6 +340,16 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				}
 			}
 		} else {
+			rootDevice := ""
+			if opts.OneFileSystem {
+				// The root itself is always searched: the boundary only stops
+				// the walk from entering a *different* filesystem below it.
+				identity, identityErr := FilesystemIdentityFunc(root)
+				if identityErr != nil {
+					return GrepResult{}, identityErr
+				}
+				rootDevice = identity
+			}
 			walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 				if err != nil {
 					return nil
@@ -345,6 +360,18 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 					return nil
 				}
 				if entry.IsDir() {
+					if rootDevice != "" && path != root {
+						// A mount point on another filesystem: do not descend.
+						// The directory entry itself was already returned by
+						// the walk, and skipping it here keeps its files out.
+						identity, identityErr := FilesystemIdentityFunc(path)
+						if identityErr != nil {
+							return identityErr
+						}
+						if identity != rootDevice {
+							return filepath.SkipDir
+						}
+					}
 					// Hidden directories are skipped wholesale, so a search
 					// never descends into .git or a hidden cache tree. The
 					// explicitly requested root is exempt: asking for `.config`

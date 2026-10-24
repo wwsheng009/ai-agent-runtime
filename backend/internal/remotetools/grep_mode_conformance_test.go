@@ -239,6 +239,79 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
+// TestRemoteGrepOneFileSystemMatchesWalker pins one_file_system across engines.
+//
+// A fabricated boundary would only be visible to the walker: ripgrep decides
+// device identity in its own process, so an injected seam cannot reach it. That
+// is precisely why this test does NOT compare the two engine outputs on a
+// simulated boundary - it would assert an agreement that cannot exist in a
+// test process without mount privileges. What it does pin is the contract both
+// sides share: a tree on one real filesystem is searched identically, and the
+// walker honours a boundary.
+func TestRemoteGrepOneFileSystemMatchesWalker(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"local.txt", "other/near.txt"} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("needle "+name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts := searchcore.GrepOptions{
+		Pattern: "needle", Path: root, Limit: 50, OneFileSystem: true,
+	}
+	walker, err := searchcore.Grep(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("walker: %v", err)
+	}
+	assertStringList(t, grepMatchFiles(walker), []string{"local.txt", "near.txt"})
+
+	if runner := resolveRipgrepRunner(); runner.available() {
+		rgResult, used, rgErr := runner.grep(context.Background(), opts)
+		if rgErr != nil || !used {
+			t.Fatalf("ripgrep used=%v err=%v", used, rgErr)
+		}
+		if got, want := grepMatchFiles(rgResult), grepMatchFiles(walker); !equalStringSlices(got, want) {
+			t.Fatalf("engines diverged on one_file_system:\nripgrep: %v\nwalker:  %v", got, want)
+		}
+	}
+}
+
+// TestRemoteGrepOneFileSystemFlagReachesRipgrep proves the flag is actually
+// forwarded, since the boundary itself cannot be fabricated for a separate
+// process. The fake runner records the argv and returns one path.
+func TestRemoteGrepOneFileSystemFlagReachesRipgrep(t *testing.T) {
+	var gotArgs []string
+	engine := searchcore.Ripgrep{
+		Path: "rg",
+		Stream: func(ctx context.Context, args []string, dir string, consume func(line []byte) bool) error {
+			gotArgs = append([]string(nil), args...)
+			return nil
+		},
+	}
+	root := t.TempDir()
+	if _, used, err := engine.Grep(context.Background(), searchcore.GrepOptions{
+		Pattern: "needle", Path: root, OneFileSystem: true,
+	}); err != nil || !used {
+		t.Fatalf("used=%v err=%v", used, err)
+	}
+	if !strings.Contains(strings.Join(gotArgs, " "), "--one-file-system") {
+		t.Fatalf("--one-file-system was not forwarded: %v", gotArgs)
+	}
+
+	gotArgs = nil
+	if _, used, err := engine.Grep(context.Background(), searchcore.GrepOptions{
+		Pattern: "needle", Path: root,
+	}); err != nil || !used {
+		t.Fatalf("used=%v err=%v", used, err)
+	}
+	if strings.Contains(strings.Join(gotArgs, " "), "--one-file-system") {
+		t.Fatalf("--one-file-system must not be sent when unset: %v", gotArgs)
+	}
+}
+
 // TestRemoteGrepRejectsUnknownMode keeps a genuinely unknown spelling failing on
 // both engines: the enum must stay honest about what it can serve.
 func TestRemoteGrepRejectsUnknownMode(t *testing.T) {

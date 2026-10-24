@@ -473,6 +473,11 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		// directory levels below each root, which is rg's depth+1.
 		args = append(args, "--max-depth", strconv.Itoa(opts.MaxDepth+1))
 	}
+	if opts.OneFileSystem {
+		// Limits recursion only: an explicitly named root on another device is
+		// still searched, verified against rg's own behaviour.
+		args = append(args, "--one-file-system")
+	}
 	// An explicit 0 means "this file contributes nothing", which is exactly
 	// what rg -m 0 does; unset means no per-file cap.
 	if opts.MaxCountSet {

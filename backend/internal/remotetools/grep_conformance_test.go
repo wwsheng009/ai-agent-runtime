@@ -575,6 +575,29 @@ func TestRemoteGrepUnrestrictedOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepOneFileSystemOverMCP proves the parameter survives schema
+// validation. The boundary behaviour itself belongs to the core tests; what is
+// pinned here is that the remote surface accepts it and reports it back.
+func TestRemoteGrepOneFileSystemOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	output := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "one_file_system": true,
+	})
+	if !strings.Contains(output, "a.txt") {
+		t.Fatalf("one_file_system must not hide same-device files:\n%s", output)
+	}
+}
+
 // TestRemoteGrepPatternFileOverMCP proves pattern_file(s) survive schema
 // validation and behave like the local tool: each line becomes one pattern.
 func TestRemoteGrepPatternFileOverMCP(t *testing.T) {

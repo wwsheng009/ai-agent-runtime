@@ -319,6 +319,18 @@
      引擎把 NUL 替换为 `␀`，两引擎输出逐字节一致。
   层级映射与本地一致：1 = 不读 ignore、2 = 加 hidden、3 = 加二进制；
   `no_ignore=true` ≡ 层级 1，`no_hidden` 优先于层级里的 hidden 步骤。
+  **`one_file_system` 上移 core（2026-10-24）**：语义是「递归时不下降进入其它文件系统，
+  但调用方显式给出的根始终搜索」，与 rg `--one-file-system` 实测一致（在 `/dev` 下
+  `--one-file-system` 会跳过 `/dev/shm` 挂载，而对 `/dev/shm` 作为显式根仍然搜索）。
+  walker 侧在 WalkDir 的目录回调里比较设备标识；rg 侧直接转发
+  `--one-file-system`。这轮同时发现并修掉一个**长期存在的底层 bug**：
+  Linux 上 `os.Stat` 返回的是 `*syscall.Stat_t` 而不是 `*unix.Stat_t`，
+  而本地 `fileSystemIdentity` 只断言后者，导致每次调用都返回
+  「无法获取文件系统标识」——也就是说本地 walker 的 `one_file_system` 在 Linux 上
+  **从来没有生效过**（只是恰好没有测试覆盖真实设备）。core 与 legacy 两处都已修正。
+  测试策略需要说明：本进程没有 mount 权限，无法伪造真实挂载点，因此设备边界通过
+  `FilesystemIdentityFunc` 注入验证；rg 侧无法接收注入（它自己判定设备），
+  所以另有一条假 runner 测试专门证明 `--one-file-system` 确实被转发。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
@@ -332,8 +344,8 @@
   本地 `grep` 主流程仍在 `grep_core_switch.go` 里按参数集分流：四类 mode（content/
   files/files_without/count）与 context、include-exclude、type/type_not、max_count、
   only_matching、max_depth/max_filesize、stats、pattern_file(s)、多根语义、ignore 族
-  与 unrestricted_level 均已进 core，`rg_args`、`json` 透传、展示类开关（`column`/`trim`/`max_columns`/
-  `heading`/`color`）、`one_file_system`、读取侧 16MiB 流闸门、
+  与 unrestricted_level、one_file_system 均已进 core，`rg_args`、`json` 透传、展示类开关
+  （`column`/`trim`/`max_columns`/`heading`/`color`）、读取侧 16MiB 流闸门、
   partial/timeout 标注与 path-not-found 候选提示仍在本地；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于

@@ -177,3 +177,35 @@ func TestLocalToolUnrestrictedLevelUsesSharedCore(t *testing.T) {
 		t.Fatalf("a raw NUL reached the model-visible content:\n%q", topRun.Content)
 	}
 }
+
+// TestLocalToolOneFileSystemUsesSharedCore proves one_file_system routes into
+// the shared handler. The boundary itself is already covered by the core tests;
+// what matters here is that the local entry point does not fall back to legacy.
+func TestLocalToolOneFileSystemUsesSharedCore(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGrepTool()
+	tool.SetBasePath(root)
+	tool.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "needle", "path": ".", "one_file_system": true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %v", result.Error)
+	}
+	if got := result.Metadata["engine"]; got != "walker" {
+		t.Fatalf("one_file_system must route through the shared core, got engine=%v", got)
+	}
+	if got := result.Metadata["one_file_system"]; got != true {
+		t.Fatalf("one_file_system metadata = %v, want true", got)
+	}
+	if !strings.Contains(result.Content, "a.txt") {
+		t.Fatalf("expected the root file in the page:\n%s", result.Content)
+	}
+}

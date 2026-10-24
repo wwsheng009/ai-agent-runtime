@@ -653,7 +653,7 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"one_file_system": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --one-file-system：限制递归在单一文件系统内。它主要影响递归遍历；当与 follow/-L/--follow 同时使用时，完整语义依赖 rg 的 symlink 跟随实现。grep 会接受这个熟悉写法并在 rg 可用时透传；回退引擎会尽量保持现有目录遍历行为。",
+				"description": "兼容 rg 的 --one-file-system：递归时不再下降进入其它文件系统（挂载点），但调用方显式给出的搜索根始终会被搜索。本地与 remote 使用同一实现。",
 			},
 			"no_messages": map[string]interface{}{
 				"type":        "boolean",
