@@ -33,6 +33,7 @@ var coreSearchParams = map[string]bool{
 	"unrestricted_level": true,
 	"no_ignore":          true, "no_ignore_parent": true, "no_ignore_vcs": true,
 	"no_ignore_dot": true, "no_ignore_global": true, "no_ignore_files": true,
+	"no_messages": true,
 	"ignore_file": true, "ignore_files": true,
 }
 

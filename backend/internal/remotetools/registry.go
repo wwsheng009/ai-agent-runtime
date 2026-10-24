@@ -439,6 +439,10 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --no-ignore-files：禁用通过 ignore_file(s) 显式指定的 ignore 文件。",
 			},
+			"no_messages": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-messages：跳过不可读的显式 ignore_file 而不报错。默认（false）下，调用方显式指定的 ignore_file 读不到会直接失败——静默丢弃会改变规则集却不告知。按惯例发现的 .gitignore/.ignore/全局 ignore 文件始终可选，不受该开关影响。",
+			},
 			"ignore_file": map[string]interface{}{
 				"anyOf": []map[string]interface{}{
 					{"type": "string"},

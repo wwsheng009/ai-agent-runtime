@@ -1,6 +1,7 @@
 package searchcore
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -41,6 +42,40 @@ func newGrepIgnorePolicy(opts GrepOptions) *grepIgnorePolicy {
 		skipExplicitFiles: opts.NoIgnoreFiles,
 		explicitFiles:     opts.IgnoreFiles,
 	}
+}
+
+// ValidateGrepIgnoreFiles checks the explicit ignore_file(s) before a search
+// starts. A caller that names a file expects its rules to apply; silently
+// dropping an unreadable one would change the result set without saying so.
+// Missing ignore files discovered by convention (.gitignore, .ignore, globals)
+// are not checked here - they are optional by nature, which is also why rg
+// stays quiet about them.
+//
+// NoMessages mirrors rg --no-messages: skip an unreadable explicit file instead
+// of failing the whole call.
+func ValidateGrepIgnoreFiles(opts GrepOptions) error {
+	if opts.NoIgnore || opts.NoIgnoreFiles {
+		return nil
+	}
+	for _, file := range opts.IgnoreFiles {
+		info, err := os.Stat(file)
+		if err == nil && info.IsDir() {
+			err = fmt.Errorf("is a directory")
+		}
+		if err != nil {
+			if opts.NoMessages {
+				continue
+			}
+			return fmt.Errorf("读取 ignore_file 失败 %s: %w", file, err)
+		}
+		if _, readErr := os.ReadFile(file); readErr != nil {
+			if opts.NoMessages {
+				continue
+			}
+			return fmt.Errorf("读取 ignore_file 失败 %s: %w", file, readErr)
+		}
+	}
+	return nil
 }
 
 // grepIgnoreRules is the cache + assembler the walk keeps for one search root.

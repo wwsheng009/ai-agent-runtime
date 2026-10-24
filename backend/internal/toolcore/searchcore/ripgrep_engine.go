@@ -404,6 +404,13 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if opts.NoIgnoreFiles {
 		args = append(args, "--no-ignore-files")
 	}
+	if opts.NoMessages {
+		// rg writes permission/IO diagnostics to stderr and keeps exit 0. The
+		// engine reads stdout only, so either way those warnings never reach the
+		// caller; passing the flag keeps rg from doing the formatting work and
+		// states the intent explicitly.
+		args = append(args, "--no-messages")
+	}
 	for _, file := range opts.IgnoreFiles {
 		args = append(args, "--ignore-file", file)
 	}

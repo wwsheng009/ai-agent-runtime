@@ -598,6 +598,36 @@ func TestRemoteGrepOneFileSystemOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepNoMessagesOverMCP pins the pair through schema validation: an
+// unreadable explicit ignore_file fails by default, and no_messages turns that
+// into a skip. Both are the local tool's long-standing behaviour.
+func TestRemoteGrepNoMessagesOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	failing := callToolExpectingError(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "ignore_file": "absent.ignore",
+	})
+	if !strings.Contains(failing, "ignore_file") {
+		t.Fatalf("the error must name ignore_file:\n%s", failing)
+	}
+
+	skipped := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "ignore_file": "absent.ignore", "no_messages": true,
+	})
+	if !strings.Contains(skipped, "a.txt") {
+		t.Fatalf("no_messages must let the search run:\n%s", skipped)
+	}
+}
+
 // TestRemoteGrepPatternFileOverMCP proves pattern_file(s) survive schema
 // validation and behave like the local tool: each line becomes one pattern.
 func TestRemoteGrepPatternFileOverMCP(t *testing.T) {

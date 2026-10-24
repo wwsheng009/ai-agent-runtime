@@ -657,7 +657,7 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"no_messages": map[string]interface{}{
 				"type":        "boolean",
-				"description": "兼容 rg 的 --no-messages：尽量抑制非致命的文件读取/遍历提示。grep 会在回退引擎中尽量安静地跳过读取失败项，并在 rg 可用时透传。",
+				"description": "兼容 rg 的 --no-messages：跳过不可读的显式 ignore_file 而不报错。默认（false）下，显式指定的 ignore_file 读不到会直接失败——静默丢弃会改变规则集却不告知。按惯例发现的 .gitignore/.ignore/全局 ignore 文件始终可选，不受该开关影响。本地与 remote 使用同一实现。",
 			},
 			"rg_args": map[string]interface{}{
 				"type": "array",

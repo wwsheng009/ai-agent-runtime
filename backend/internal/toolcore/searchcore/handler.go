@@ -227,12 +227,19 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		NoIgnoreGlobal:   boolArg(call.Args, "no_ignore_global"),
 		NoIgnoreFiles:    boolArg(call.Args, "no_ignore_files"),
 		IgnoreFiles:      ignoreFiles,
+		NoMessages:       boolArg(call.Args, "no_messages"),
 		Limit:            intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:     captureLimit(call),
 		Offset:           intArg(call.Args, "offset", 0),
 	}
 
 	engine := "walker"
+	// An explicit ignore_file that cannot be read is a caller-visible failure,
+	// not a silent difference in the rule set. NoMessages turns it into a skip.
+	if err := ValidateGrepIgnoreFiles(options); err != nil {
+		return toolcore.Error(toolcore.ErrInvalidArgument,
+			"fix the ignore_file path or pass no_messages to skip unreadable ones", err), nil
+	}
 	result, grepErr := Grep(ctx, options)
 	if searcher, ok := call.Runtime.(Searcher); ok {
 		if rgResult, used, rgErr := searcher.Grep(ctx, options); used && rgErr == nil {
@@ -334,6 +341,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"no_ignore_dot":      options.NoIgnoreDot,
 		"no_ignore_global":   options.NoIgnoreGlobal,
 		"no_ignore_files":    options.NoIgnoreFiles,
+		"no_messages":        options.NoMessages,
 		"literal":            options.Literal,
 		"ignore_case":        options.IgnoreCase || options.CaseInsensitive,
 		"case_sensitive":     options.CaseSensitive,

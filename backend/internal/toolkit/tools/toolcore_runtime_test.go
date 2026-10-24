@@ -209,3 +209,53 @@ func TestLocalToolOneFileSystemUsesSharedCore(t *testing.T) {
 		t.Fatalf("expected the root file in the page:\n%s", result.Content)
 	}
 }
+
+// TestLocalToolNoMessagesUsesSharedCore pins the local behaviour of the pair:
+// an explicit ignore_file that cannot be read fails the call, and no_messages
+// turns that into a silent skip. Both cases must run through the shared core,
+// not the legacy path.
+func TestLocalToolNoMessagesUsesSharedCore(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(root, "absent.ignore")
+
+	run := func(params map[string]interface{}) *toolkit.ToolResult {
+		t.Helper()
+		tool := NewGrepTool()
+		tool.SetBasePath(root)
+		tool.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+		result, err := tool.Execute(context.Background(), params)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return result
+	}
+
+	failing := run(map[string]interface{}{
+		"pattern": "needle", "path": ".", "ignore_file": missing,
+	})
+	if failing.Success {
+		t.Fatalf("a missing explicit ignore_file must fail:\n%s", failing.Content)
+	}
+	if failing.Error == nil || !strings.Contains(failing.Error.Error(), "ignore_file") {
+		t.Fatalf("the error must name ignore_file, got %v", failing.Error)
+	}
+
+	skipped := run(map[string]interface{}{
+		"pattern": "needle", "path": ".", "ignore_file": missing, "no_messages": true,
+	})
+	if !skipped.Success {
+		t.Fatalf("no_messages must skip the unreadable file: %v", skipped.Error)
+	}
+	if got := skipped.Metadata["engine"]; got != "walker" {
+		t.Fatalf("no_messages must route through the shared core, got engine=%v", got)
+	}
+	if got := skipped.Metadata["no_messages"]; got != true {
+		t.Fatalf("no_messages metadata = %v, want true", got)
+	}
+	if !strings.Contains(skipped.Content, "a.txt") {
+		t.Fatalf("the search must still run:\n%s", skipped.Content)
+	}
+}

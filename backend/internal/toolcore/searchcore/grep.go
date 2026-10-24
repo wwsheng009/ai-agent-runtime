@@ -93,6 +93,13 @@ type GrepOptions struct {
 	NoIgnoreGlobal bool
 	NoIgnoreFiles  bool
 	IgnoreFiles    []string
+	// NoMessages decides what an unreadable *explicit* ignore_file does. The
+	// local tool has always treated an explicit file as a promise: if it cannot
+	// be read, the caller gets an error instead of a silently different rule
+	// set. NoMessages turns that into a silent skip, which is what rg
+	// --no-messages is for. Discovered ignore files (.gitignore, .ignore, the
+	// globals) are always optional and are never reported either way.
+	NoMessages bool
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -431,6 +438,11 @@ func GrepPatternsWithFiles(opts GrepOptions) ([]string, error) {
 	for _, path := range opts.PatternFiles {
 		lines, err := readGrepPatternFile(path)
 		if err != nil {
+			if opts.NoMessages {
+				// Same rule as an explicit ignore_file: no_messages turns a
+				// missing/unreadable auxiliary input into a skip.
+				continue
+			}
 			return nil, fmt.Errorf("读取 pattern_file 失败 %s: %w", path, err)
 		}
 		out = append(out, lines...)

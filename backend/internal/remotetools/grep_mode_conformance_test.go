@@ -312,6 +312,38 @@ func TestRemoteGrepOneFileSystemFlagReachesRipgrep(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepNoMessagesFlagReachesRipgrep proves no_messages is forwarded,
+// since its visible effect in rg is on stderr only.
+func TestRemoteGrepNoMessagesFlagReachesRipgrep(t *testing.T) {
+	var gotArgs []string
+	engine := searchcore.Ripgrep{
+		Path: "rg",
+		Stream: func(ctx context.Context, args []string, dir string, consume func(line []byte) bool) error {
+			gotArgs = append([]string(nil), args...)
+			return nil
+		},
+	}
+	root := t.TempDir()
+	if _, used, err := engine.Grep(context.Background(), searchcore.GrepOptions{
+		Pattern: "needle", Path: root, NoMessages: true,
+	}); err != nil || !used {
+		t.Fatalf("used=%v err=%v", used, err)
+	}
+	if !strings.Contains(strings.Join(gotArgs, " "), "--no-messages") {
+		t.Fatalf("--no-messages was not forwarded: %v", gotArgs)
+	}
+
+	gotArgs = nil
+	if _, used, err := engine.Grep(context.Background(), searchcore.GrepOptions{
+		Pattern: "needle", Path: root,
+	}); err != nil || !used {
+		t.Fatalf("used=%v err=%v", used, err)
+	}
+	if strings.Contains(strings.Join(gotArgs, " "), "--no-messages") {
+		t.Fatalf("--no-messages must not be sent when unset: %v", gotArgs)
+	}
+}
+
 // TestRemoteGrepRejectsUnknownMode keeps a genuinely unknown spelling failing on
 // both engines: the enum must stay honest about what it can serve.
 func TestRemoteGrepRejectsUnknownMode(t *testing.T) {
