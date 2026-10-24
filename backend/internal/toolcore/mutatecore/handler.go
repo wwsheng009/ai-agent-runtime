@@ -222,7 +222,16 @@ func (h *appendHandler) Execute(ctx context.Context, call *toolcore.Call) (*tool
 	if guardResult != nil {
 		return guardResult, nil
 	}
-	createIfMissing, _ := call.Args["create_if_missing"].(bool)
+	// Append creates a missing file by default. That is the long-standing
+	// behavior of this tool: it exists for chunked first writes, so requiring a
+	// separate create call would defeat its purpose. `create_if_missing: false`
+	// is still honored when a caller explicitly asks for the stricter contract.
+	createIfMissing := true
+	if raw, present := call.Args["create_if_missing"]; present {
+		if value, ok := raw.(bool); ok {
+			createIfMissing = value
+		}
+	}
 	truncateFirst, _ := call.Args["truncate_first"].(bool)
 	ensureTrailingNewline, _ := call.Args["ensure_trailing_newline"].(bool)
 	expectedOffset, offsetOK, offsetFailure := expectedOffsetArg(call)

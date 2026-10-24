@@ -45,7 +45,7 @@ func AppendParameters() map[string]interface{} {
 			},
 			"create_if_missing": map[string]interface{}{
 				"type":        "boolean",
-				"description": "文件不存在时是否创建（默认 false）。",
+				"description": "文件不存在时是否创建（默认 true；显式传 false 可要求目标必须已存在）。",
 			},
 			"truncate_first": map[string]interface{}{
 				"type":        "boolean",

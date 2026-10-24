@@ -448,8 +448,11 @@ func TestAppendWriteTool_AppendsChunks(t *testing.T) {
 	if string(data) != "第一段\n第二段" {
 		t.Fatalf("unexpected appended content: %q", string(data))
 	}
-	if got := second.Metadata["transport_backend"]; got != "local_filetransport" {
-		t.Fatalf("expected transport_backend metadata, got %#v", got)
+	// `transport_backend` was a local implementation detail and is gone: the
+	// append pipeline is shared, so there is no longer a local-only transport to
+	// report. What matters is that the chunk actually landed as an append.
+	if got := second.Metadata["appended"]; got != true {
+		t.Fatalf("expected the second chunk to be reported as an append, got %#v", got)
 	}
 }
 

@@ -2,15 +2,9 @@ package tools
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
-	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -19,48 +13,18 @@ import (
 type AppendWriteTool struct {
 	*toolkit.BaseTool
 	sandboxPolicy
-	transport filetransport.Service
 }
 
 // NewAppendWriteTool creates a chunk-friendly append tool for long text writes.
 func NewAppendWriteTool() *AppendWriteTool {
-	parameters := map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"file_path": map[string]interface{}{
-				"type":        "string",
-				"description": "要写入的文件路径。一次只处理一个目标文件。",
-			},
-			"content": map[string]interface{}{
-				"type":        "string",
-				"description": "本次要追加或写入的单个文本块。适合长文本分块落盘；请多次调用，每次只发送一个较小块。",
-			},
-			"truncate_first": map[string]interface{}{
-				"type":        "boolean",
-				"description": "若为 true，则先清空/覆盖文件，再写入本块；适合第一块写入。默认 false。",
-			},
-			"ensure_trailing_newline": map[string]interface{}{
-				"type":        "boolean",
-				"description": "若为 true 且本块末尾没有换行，则自动补一个换行。默认 false。",
-			},
-			"expected_offset": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     0,
-				"description": "可选并发与重试保护：追加前预期文件字节数。相同 offset 和内容的重复请求会作为幂等回放，不会重复追加。",
-			},
-		},
-		"required": []string{"file_path", "content"},
-	}
-
 	return &AppendWriteTool{
 		BaseTool: toolkit.NewBaseTool(
 			"append_write",
 			"按块追加写入文件；适合长文本、长代码、章节内容等分块落盘。第一块可用 truncate_first=true，后续块继续调用 append_write，避免单次 write(content=全文) 导致工具参数过大或输出截断。",
 			"1.0.0",
-			parameters,
+			mutatecore.AppendParameters(),
 			true,
 		),
-		transport: filetransport.NewLocalService(),
 	}
 }
 
@@ -79,184 +43,13 @@ func (w *AppendWriteTool) DefinitionMetadata() map[string]interface{} {
 	}
 }
 
-type AppendWriteParams struct {
-	FilePath              string `json:"file_path"`
-	Content               string `json:"content"`
-	TruncateFirst         bool   `json:"truncate_first"`
-	EnsureTrailingNewline bool   `json:"ensure_trailing_newline"`
-}
-
+// Execute runs the shared mutatecore handler. Every chunking rule - the first
+// chunk overwrite, the trailing-newline option, the expected_offset replay and
+// precondition - has one implementation, so a remote caller gets the same
+// behavior as a local one.
 func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	if result, truncated := truncatedToolArgsResult(params); truncated {
 		return result, nil
 	}
-
-	filePath, ok := params["file_path"].(string)
-	if !ok || strings.TrimSpace(filePath) == "" {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("file_path 参数缺失或无效"),
-		}, nil
-	}
-
-	content, ok := params["content"].(string)
-	if !ok {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("content 参数缺失或无效"),
-		}, nil
-	}
-	if err := validateInlineFileMutationPayload("append_write", inlineMutationSegment{
-		Name:  "content",
-		Value: content,
-	}); err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      err,
-		}, nil
-	}
-
-	truncateFirst, _ := params["truncate_first"].(bool)
-	ensureTrailingNewline, _ := params["ensure_trailing_newline"].(bool)
-	expectedOffset, hasExpectedOffset, validExpectedOffset := optionalNonNegativeInt64(params, "expected_offset")
-	if !validExpectedOffset {
-		return writePreconditionFailure("expected_offset 必须是非负整数", "", fmt.Sprint(params["expected_offset"])), nil
-	}
-	if ensureTrailingNewline && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-
-	resolvedPath := w.resolvePathWithContext(ctx, filePath)
-	if err := w.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      err,
-		}, nil
-	}
-
-	absPath, err := filepath.Abs(resolvedPath)
-	if err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("解析文件路径失败: %w", err),
-		}, nil
-	}
-	if ext := documentExtensionRefusal(absPath); ext != "" {
-		return documentRefusalResult("append_write", "以文本追加到", absPath, ext), nil
-	}
-
-	// 首次读取之前先拒绝特殊文件：FIFO 无写端时会阻塞打开，设备链接可能无限读取。
-	// os.Stat 跟随链接，保持“链接到普通文件”的既有保真行为。
-	if info, statErr := os.Stat(absPath); statErr == nil {
-		if reason := unsupportedFileModeReason(info.Mode()); reason != "" {
-			return &toolkit.ToolResult{
-				Success:    false,
-				OutputKind: toolresult.KindText,
-				Error:      fmt.Errorf("路径不是普通文件（%s），append_write 已拒绝读取以免阻塞或误写", reason),
-			}, nil
-		}
-	}
-	oldContentBytes, readErr := os.ReadFile(absPath)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("读取写入前文件失败: %w", readErr),
-		}, nil
-	}
-	oldContent := string(oldContentBytes)
-	actualOffset := int64(len(oldContentBytes))
-	chunkBytes := []byte(content)
-	if truncateFirst && readErr == nil && oldContent == content {
-		recordFileWrite(ctx, absPath, oldContentBytes, "append_write")
-		return idempotentAppendWriteResult(absPath, actualOffset, content, expectedOffset, hasExpectedOffset, true), nil
-	}
-	if truncateFirst && readErr == nil {
-		// A truncating first chunk overwrites whatever is on disk: apply the
-		// same stale-write guard as write, or an external edit is silently
-		// lost (2026-09-27 review H6).
-		verdict := evaluateStaleWrite(ctx, absPath, oldContentBytes)
-		if shouldRefuseStaleWrite(verdict) {
-			return staleWriteFailure(absPath, verdict.CurrentSHA, verdict.LastRecord, false), nil
-		}
-	}
-	if !truncateFirst && hasExpectedOffset {
-		replayedSize := expectedOffset + int64(len(chunkBytes))
-		if actualOffset == replayedSize && expectedOffset <= actualOffset &&
-			string(oldContentBytes[int(expectedOffset):]) == content {
-			recordFileWrite(ctx, absPath, oldContentBytes, "append_write")
-			return idempotentAppendWriteResult(absPath, actualOffset, content, expectedOffset, true, false), nil
-		}
-		if actualOffset != expectedOffset {
-			return writePreconditionFailure(
-				fmt.Sprintf("追加写入前置条件不匹配: 当前 offset 为 %d", actualOffset),
-				fmt.Sprint(actualOffset),
-				fmt.Sprint(expectedOffset),
-			), nil
-		}
-	}
-
-	var transferResult *filetransport.WriteResult
-	if truncateFirst {
-		transferResult, err = w.transport.WriteFile(ctx, absPath, []byte(content))
-	} else {
-		transferResult, err = w.transport.AppendFile(ctx, absPath, []byte(content))
-	}
-	if err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      err,
-		}, nil
-	}
-
-	newContentBytes, err := os.ReadFile(absPath)
-	if err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("读取写入后文件失败: %w", err),
-		}, nil
-	}
-	newContent := string(newContentBytes)
-	// Record the session's own append/overwrite: without it, the next edit or
-	// multiedit mistakes this session's append for an external change and
-	// refuses, and a truncating overwrite bypasses read-before-write entirely
-	// (2026-09-27 review H6).
-	recordFileWrite(ctx, absPath, newContentBytes, "append_write")
-	// Phase 5 变更源 1（edit hook）：落盘成功后同步标记（非阻塞入队）。
-	notifyFileChanges(ctx, absPath)
-
-	action := transferResult.Action
-	if truncateFirst && transferResult.Created {
-		action = "create_first_chunk"
-	} else if truncateFirst {
-		action = "overwrite_first_chunk"
-	}
-
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    fmt.Sprintf("成功写入块到文件: %s\n本次写入: %d 字节\n文件当前大小: %d 字节", transferResult.Path, transferResult.BytesWritten, transferResult.SizeAfter),
-		Metadata: map[string]interface{}{
-			"file_path":         transferResult.Path,
-			"action":            action,
-			"bytes_written":     transferResult.BytesWritten,
-			"size_before":       transferResult.SizeBefore,
-			"size_after":        transferResult.SizeAfter,
-			"truncate_first":    truncateFirst,
-			"appended":          !truncateFirst,
-			"patch":             buildUnifiedPatch(transferResult.Path, oldContent, newContent),
-			"mutated_paths":     []string{transferResult.Path},
-			"transport_backend": "local_filetransport",
-			"expected_offset":   expectedOffsetMetadata(expectedOffset, hasExpectedOffset),
-			"chunk_sha256":      writeContentRevision(true, content),
-			"retry_class":       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
-		},
-	}, nil
+	return executeCoreSearchTool(ctx, w, params)
 }
