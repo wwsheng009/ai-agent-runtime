@@ -261,7 +261,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		if !ok {
 			errText := mutatecore.BuildEditOldStringNotFoundError(result, edit.OldString)
 			failedEdits = append(failedEdits, fmt.Sprintf("编辑 %d: %s", i, errText))
-			ref := truncateDiagnosticText(edit.OldString, 60)
+			ref := mutatecore.TruncateDiagnosticText(edit.OldString, 60)
 			if row := toolresult.FailedItemMap(toolresult.IntPtr(i), filePath, ref, errText); row != nil {
 				failedItems = append(failedItems, row)
 			}
@@ -360,7 +360,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		"size_before":     len(originalContent),
 		"size_after":      len(result),
 		"size_difference": len(result) - len(originalContent),
-		"patch":           buildUnifiedPatch(absPath, originalContent, result),
+		"patch":           mutatecore.UnifiedDiff(absPath, originalContent, result),
 		"mutated_paths":   []string{absPath},
 		"encoding":        fileEnc.String(),
 	}

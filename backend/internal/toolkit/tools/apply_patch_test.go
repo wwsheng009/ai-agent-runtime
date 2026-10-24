@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
@@ -152,8 +153,8 @@ func TestSanitizeApplyPatchPath(t *testing.T) {
 		"":               "",
 	}
 	for in, want := range cases {
-		if got := sanitizeApplyPatchPath(in); got != want {
-			t.Fatalf("sanitizeApplyPatchPath(%q)=%q want %q", in, got, want)
+		if got := mutatecore.SanitizePatchPath(in); got != want {
+			t.Fatalf("mutatecore.SanitizePatchPath(%q)=%q want %q", in, got, want)
 		}
 	}
 }
@@ -327,7 +328,7 @@ func TestHunkChangeContextLine_StripsUnifiedRanges(t *testing.T) {
 		{"@@ -1,3 +1,4 @@ type X struct {", "type X struct {"},
 	}
 	for _, tc := range cases {
-		if got := hunkChangeContextLine(tc.header); got != tc.want {
+		if got := mutatecore.HunkContextLine(tc.header); got != tc.want {
 			t.Fatalf("hunkChangeContextLine(%q)=%q, want %q", tc.header, got, tc.want)
 		}
 	}
@@ -1094,7 +1095,7 @@ func TestClosestPatchCurrentContext_MultiLineBeatsGenericFirstLine(t *testing.T)
 		"\treturn helper(9)",
 		"}",
 	}
-	start, closest := closestPatchCurrentContext(actual, expected)
+	start, closest := mutatecore.ClosestPatchWindow(actual, expected)
 	joined := strings.Join(closest, "\n")
 	if !strings.Contains(joined, "GammaSpecial") {
 		t.Fatalf("expected GammaSpecial in closest window, start=%d closest=%q", start, joined)
@@ -1126,7 +1127,7 @@ func TestClosestPatchCurrentContext_AnchorsOnNearIdentifierTypo(t *testing.T) {
 		"\treturn 1",
 		"}",
 	}
-	start, closest := closestPatchCurrentContext(actual, expected)
+	start, closest := mutatecore.ClosestPatchWindow(actual, expected)
 	joined := strings.Join(closest, "\n")
 	if !strings.Contains(joined, "HelloWorld") {
 		t.Fatalf("expected HelloWorld in closest window, start=%d closest=%q", start, joined)

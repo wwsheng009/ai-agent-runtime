@@ -31,6 +31,11 @@ type Error struct {
 	Expected   string
 	Metadata   map[string]any
 	Err        error
+	// Rendered carries a failure that already went through mutationFailure - it
+	// came back from a nested call such as the patch resolver's authorize step.
+	// Re-rendering it would stack the code prefix and the next_action hint, so
+	// the stored result is re-emitted as it stands.
+	Rendered *toolcore.Result
 }
 
 func (e *Error) Error() string {

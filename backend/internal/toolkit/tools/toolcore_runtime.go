@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // localCoreRuntime adapts a local file tool's sandbox to the toolcore Runtime
@@ -186,8 +188,24 @@ func executeCoreSearchTool(ctx context.Context, tool coreBackedTool, params map[
 	converted := toolkit.ResultToToolkit(result)
 	if converted != nil {
 		converted = stampToolOwnsOutput(converted)
+		converted = localizeErrorCode(converted)
 	}
 	return converted, nil
+}
+
+// localizeErrorCode maps a shared handler's surface-independent code onto the
+// spelling the local surface has always published. Agents classify retries on
+// that string (it is what the diagnostic table and the retry policy read), so
+// the local surface must not start answering in a second vocabulary just
+// because the handler moved into the core.
+func localizeErrorCode(result *toolkit.ToolResult) *toolkit.ToolResult {
+	if result == nil || result.Metadata == nil {
+		return result
+	}
+	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code == toolcore.ErrInvalidArgument {
+		result.Metadata[toolresult.MetadataErrorCodeKey] = string(runtimeerrors.ErrToolInvalidArgs)
+	}
+	return result
 }
 
 // CoreRuntime exposes this tool's sandbox as a toolcore.Runtime, letting shared

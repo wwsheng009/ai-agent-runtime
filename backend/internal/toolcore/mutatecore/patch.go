@@ -2,6 +2,7 @@ package mutatecore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,7 +53,11 @@ type PatchBindings struct {
 	// CheckDelete is optional. Nil falls back to CheckWrite. Move operations
 	// need the delete permission on the source, which is not the same grant as
 	// write on the target.
-	CheckDelete   func(abs string) error
+	CheckDelete func(abs string) error
+	// PathHint is optional and explains a missing target the way the surface
+	// always has (nearby candidate paths). It receives the spelling the caller
+	// used, exactly like the other file tools' hint seam.
+	PathHint      func(raw string) string
 	Display       func(abs string) string
 	CreateParents bool
 	Mode          os.FileMode
@@ -67,11 +72,19 @@ type PatchFileResult struct {
 	Kind        PatchOperationKind
 	Path        string
 	DisplayPath string
+	// MoveTo is the display spelling of the move target; MovePath is the
+	// resolved one a surface needs to key its ledger on.
 	MoveTo      string
+	MovePath    string
 	BytesBefore int64
 	BytesAfter  int64
 	WasNew      bool
 	WasMoved    bool
+	// NewBytes is the post-image the write left on disk, or nil when the
+	// operation removed the file. Surfaces that maintain a read/write ledger or
+	// a change feed need it per path, and re-reading the file to get it back
+	// would race the next writer.
+	NewBytes []byte
 }
 
 type PatchResult struct {
@@ -81,7 +94,11 @@ type PatchResult struct {
 	Updated      int
 	Deleted      int
 	Moved        int
-	Files        []PatchFileResult
+	// Diff is the unified diff of everything the patch changed, in the same
+	// "a/… b/…" form edit publishes. Callers render it; an empty diff means the
+	// patch produced no textual change.
+	Diff  string
+	Files []PatchFileResult
 }
 
 // PatchHunkError carries the structured data a surface needs to render its own
@@ -93,10 +110,13 @@ type PatchHunkError struct {
 	NextAction string
 	HunkIndex  int
 	Header     string
-	Expected   []string
-	Actual     []string
-	Closest    []string
-	StartLine  int
+	// Path is the display path of the file whose hunk missed, stamped by
+	// ApplyPatch so the diagnostic can name the file it is talking about.
+	Path      string
+	Expected  []string
+	Actual    []string
+	Closest   []string
+	StartLine int
 }
 
 func (e *PatchHunkError) Error() string {
@@ -223,7 +243,7 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 				return PatchResult{}, inspectErr
 			}
 			if !state.Exists {
-				return PatchResult{}, errorf(CodeNotFound, "check the path", "cannot delete missing file: %s", item.display)
+				return PatchResult{}, missingTargetError(bindings, op.Path, "文件不存在，无法删除", "verify the path with ls")
 			}
 			item.oldBody = state.Text
 			item.oldSize = state.Size
@@ -234,7 +254,7 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 				return PatchResult{}, inspectErr
 			}
 			if !state.Exists {
-				return PatchResult{}, errorf(CodeNotFound, "verify the path with view", "cannot update missing file: %s", item.display)
+				return PatchResult{}, missingTargetError(bindings, op.Path, "文件不存在，无法更新", "verify the path with view or ls")
 			}
 			updated := state.Text
 			if len(op.Hunks) > 0 {
@@ -246,6 +266,13 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 				var applyErr error
 				updated, applyErr = ApplyHunks(normalized, op.Hunks)
 				if applyErr != nil {
+					// Name the file the diagnostic is about. Without this the
+					// caller sees line numbers and a snippet but has to guess
+					// which of the patch's targets they belong to.
+					var hunkErr *PatchHunkError
+					if errors.As(applyErr, &hunkErr) {
+						hunkErr.Path = item.display
+					}
 					return PatchResult{}, applyErr
 				}
 				if newline == "\r\n" {
@@ -292,6 +319,7 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 			Path:        item.absPath,
 			DisplayPath: item.display,
 			MoveTo:      item.moveDisp,
+			MovePath:    item.moveAbs,
 			BytesBefore: item.oldSize,
 			WasNew:      item.wasNew,
 			WasMoved:    item.wasMoved,
@@ -310,6 +338,15 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 				return PatchResult{}, err
 			}
 			fileResult.BytesAfter = int64(len(encoded))
+			fileResult.NewBytes = encoded
+			// An add has no old side: the diff says /dev/null, not "empty file".
+			var before *string
+			if !item.wasNew {
+				old := item.oldBody
+				before = &old
+			}
+			body := item.newBody
+			result.Diff += UnifiedDiffStates(item.absPath, before, &body)
 			if item.wasMoved {
 				if bindings.CreateParents {
 					if err := os.MkdirAll(filepath.Dir(item.moveAbs), 0o755); err != nil {
@@ -328,6 +365,9 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 					rollback()
 					return PatchResult{}, newError(CodeInvalidArgument, "check permissions", fmt.Errorf("remove moved source %s: %w", item.display, err))
 				}
+				// A move shows twice: the source loses its body, the target
+				// gains it. Publishing only one half reads as a delete.
+				result.Diff += UnifiedDiffStates(item.moveAbs, nil, &item.newBody)
 				result.Moved++
 				result.MutatedPaths = append(result.MutatedPaths, item.display)
 				result.MutatedPaths = append(result.MutatedPaths, item.moveDisp)
@@ -341,6 +381,7 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 				rollback()
 				return PatchResult{}, newError(CodeInvalidArgument, "check permissions", fmt.Errorf("delete %s: %w", item.display, err))
 			}
+			result.Diff += UnifiedDiffStates(item.absPath, &item.oldBody, nil)
 			result.Deleted++
 			result.MutatedPaths = append(result.MutatedPaths, item.display)
 		}
@@ -356,120 +397,23 @@ func ApplyPatch(ctx context.Context, raw string, bindings PatchBindings) (PatchR
 	return result, nil
 }
 
-// ParsePatch parses the Codex patch grammar.
-func ParsePatch(raw string) ([]PatchOperation, error) {
-	normalized := strings.ReplaceAll(raw, "\r\n", "\n")
-	lines := strings.Split(normalized, "\n")
-	var (
-		operations []PatchOperation
-		current    *PatchOperation
-		inHunk     bool
-	)
-	flush := func() {
-		if current != nil {
-			operations = append(operations, *current)
-			current = nil
-			inHunk = false
-		}
+// missingTargetError reports a target the patch requires but the workspace does
+// not have, in the same shape the other local file tools use: the prefix names
+// the operation, and the surface's candidate hint (when it has one) follows on
+// its own line so a typo is usually self-correcting.
+func missingTargetError(bindings PatchBindings, rawPath, prefix, nextAction string) error {
+	hint := ""
+	if bindings.PathHint != nil {
+		hint = bindings.PathHint(rawPath)
 	}
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case trimmed == "":
-			if current != nil && current.Kind == PatchAddOp {
-				current.AddLines = append(current.AddLines, "")
-			} else if current != nil && current.Kind == PatchUpdateOp && inHunk {
-				current.Hunks[len(current.Hunks)-1].Lines = append(current.Hunks[len(current.Hunks)-1].Lines, PatchHunkLine{Kind: ' ', Text: ""})
-			}
-			continue
-		case trimmed == PatchBegin:
-			flush()
-			continue
-		case trimmed == PatchEnd:
-			flush()
-			continue
-		case strings.HasPrefix(trimmed, PatchAdd):
-			flush()
-			current = &PatchOperation{Kind: PatchAddOp, Path: pathFromDirective(trimmed, PatchAdd)}
-			continue
-		case strings.HasPrefix(trimmed, PatchDelete):
-			flush()
-			current = &PatchOperation{Kind: PatchDeleteOp, Path: pathFromDirective(trimmed, PatchDelete)}
-			continue
-		case strings.HasPrefix(trimmed, PatchUpdate):
-			flush()
-			current = &PatchOperation{Kind: PatchUpdateOp, Path: pathFromDirective(trimmed, PatchUpdate)}
-			continue
-		case strings.HasPrefix(trimmed, PatchMoveTo) && current != nil:
-			current.MoveTo = pathFromDirective(trimmed, PatchMoveTo)
-			continue
-		case trimmed == PatchEOF && current != nil:
-			switch current.Kind {
-			case PatchAddOp:
-				current.NoFinalNewline = true
-			case PatchUpdateOp:
-				if inHunk && len(current.Hunks) > 0 {
-					current.Hunks[len(current.Hunks)-1].EndOfFile = true
-					inHunk = false
-				}
-			}
-			continue
-		}
-		if current == nil {
-			continue
-		}
-		if current.Kind == PatchAddOp {
-			current.AddLines = append(current.AddLines, strings.TrimPrefix(line, "+"))
-			continue
-		}
-		if current.Kind == PatchUpdateOp {
-			if strings.HasPrefix(trimmed, "@@") {
-				current.Hunks = append(current.Hunks, PatchHunk{Header: trimmed})
-				inHunk = true
-				continue
-			}
-			if !inHunk {
-				// Models frequently omit the leading @@ for the first update
-				// chunk. Treat a change line as an implicit hunk header.
-				if len(current.Hunks) == 0 && isPatchChangeLine(line) {
-					current.Hunks = append(current.Hunks, PatchHunk{Header: "@@"})
-					inHunk = true
-				} else {
-					continue
-				}
-			}
-			kind := byte(' ')
-			text := line
-			if len(line) > 0 {
-				switch line[0] {
-				case ' ', '-', '+':
-					kind = line[0]
-					text = line[1:]
-				default:
-					if strings.HasPrefix(trimmed, "\\ No newline at end of file") {
-						current.NoFinalNewline = true
-						continue
-					}
-				}
-			}
-			current.Hunks[len(current.Hunks)-1].Lines = append(current.Hunks[len(current.Hunks)-1].Lines, PatchHunkLine{Kind: kind, Text: text})
-		}
+	return &Error{
+		Code:       CodeNotFound,
+		NextAction: nextAction,
+		Message:    PatchNotFoundMessage(prefix, rawPath, hint),
 	}
-	flush()
-	if len(operations) == 0 {
-		return nil, errorf(CodeInvalidArgument, "wrap the patch in Begin/End markers and include an Add/Update/Delete block", "patch has no recognized operations")
-	}
-	for _, op := range operations {
-		if strings.TrimSpace(op.Path) == "" {
-			return nil, errorf(CodeInvalidArgument, "name a path in every block", "patch operation is missing a path")
-		}
-		if op.Kind == PatchUpdateOp && len(op.Hunks) == 0 && strings.TrimSpace(op.MoveTo) == "" {
-			return nil, errorf(CodeInvalidArgument, "include at least one @@ block or a Move to directive", "update block has no hunks for %s", op.Path)
-		}
-	}
-	return operations, nil
 }
 
+// ParsePatch parses the Codex patch grammar.
 // ApplyHunks applies @@ blocks. Matching uses the shared recovery ladder
 // (exact, trailing-space, trim, punctuation/whitespace collapse), supports a
 // leading @@ context anchor, EOF anchoring, and blank-run drift. Each old-side
@@ -529,8 +473,8 @@ func ApplyHunks(body string, hunks []PatchHunk) (string, error) {
 			startLine, closest := ClosestPatchWindow(lines, oldLines)
 			return "", &PatchHunkError{
 				Code:       CodeStaleContext,
-				Message:    fmt.Sprintf("hunk %d does not match the file", index+1),
-				NextAction: "re-read the file and rebuild the hunk from current context",
+				Message:    PatchHunkDiagnostic(hunk.Header, oldLines, closest, startLine, PatchStaleReason),
+				NextAction: PatchStaleContextNextAction(),
 				HunkIndex:  index + 1,
 				Header:     hunk.Header,
 				Expected:   append([]string(nil), oldLines...),

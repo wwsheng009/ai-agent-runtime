@@ -63,9 +63,12 @@ func executeCoreSearchTool(ctx, tool, params) (*toolkit.ToolResult, error)
   内联载荷闸门与 `expected_sha256` 前置条件都搬进了 core。
 - `append_write`：只有一行委托；`create_if_missing` 默认值修正为 true（该工具
   的存在意义就是首块创建），本地 `filetransport` 包装层已删除。
+- `edit`：只有一行委托；本地 1078 行匹配层（六层阶梯、closest 片段搜索、
+  歧义保护、诊断文案）整段平移进 `mutatecore/edit_match.go`。
+- `apply_patch`：只有一行委托；解析器、应用器与诊断渲染层全部搬进 core，
+  本地只剩 schema、freeform 语法元数据与参数归一化。
 
-`view` / `edit` / `apply_patch`
-在本地还是各自的实现（`view.go`、`edit.go`、`apply_patch.go`）。
+`view` 在本地还是自己的实现（`view.go`）。
 
 ## 一个直接矛盾
 
@@ -82,8 +85,8 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 | 视角 | 现状 |
 |---|---|
 | remote 工具面 | 已全部走 core（grep/glob/view/ls/write/append_write/edit/apply_patch/artifact_read） |
-| 本地工具面 | grep / glob / ls / write / append_write 走 core；其余仍是 legacy |
-| 两套实现是否分叉 | glob 与 ls 只有一套代码（本地 `Execute` 直接调用 core handler），各自有对拍 public 入口的等价性测试；grep 仍有 legacy 兜底分支 |
+| 本地工具面 | grep / glob / ls / write / append_write / edit / apply_patch 走 core；其余仍是 legacy |
+| 两套实现是否分叉 | 上述工具都只有一套代码（本地 `Execute` 直接调用 core handler），各自有对拍 public 入口的等价性测试；grep 仍有 legacy 兜底分支 |
 
 ## 尚未完成的迁移（按缺口大小）
 
@@ -92,14 +95,9 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 3. **本地 `view`**：core handler 只覆盖纯文本窗口；本地的图片直通、文档转换、
    notebook 渲染、符号解析、去重与读取台账都还没有对应实现。这是最大的一块，
    需要先决定哪些属于工具能力（应进 core）、哪些属于宿主能力（应留在本地）。
-4. **本地 `edit`**：core 的匹配只有 3 种 CRLF 变体，本地有 6 层阶梯（空白容忍、
-   缩进对齐、空行窗口漂移、token 回退最近片段、相似度排序）。这些直接决定
-   `edit` 能不能命中，属于工具能力；移植约 700 行 + 30 个测试，是独立一轮。
-5. **本地 `apply_patch`**：同上，本地还多出 envelope 归一化与最近窗口诊断。
-   `write` / `append_write` 已完成，见下。
-6. **本地 `artifact_read`**：本地是独立实现（`toolkit/tools/artifact_read.go`），
+4. **本地 `artifact_read`**：本地是独立实现（`toolkit/tools/artifact_read.go`），
    core 的 `NewArtifactReadHandler` 只被 remote 用。
-7. **grep 的 legacy 兜底**：`rg_args` / `pattern_file` 之外的参数组合里仍有
+5. **grep 的 legacy 兜底**：`rg_args` / `pattern_file` 之外的参数组合里仍有
    未进 core 的路径；glob 已经没有这一层。
 
 ## 建议的收敛顺序
@@ -187,3 +185,85 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 4. 回放结果仍把路径列进 `mutated_paths`。
 5. `ResultToToolkit` 丢掉了 precondition 的错误身份，`errors.Is(...ErrWritePrecondition)`
    失效；现在在边界处翻译。
+## edit 已收敛（2026-10-24，`Execute` 已翻转）
+
+`edit` 只有一套实现。翻之前 core 的匹配只有三种 CRLF 拼写变体，本地有完整的
+六层阶梯；差一层就意味着「同一个 old_string，本地命中、远程报 stale」。这直接
+决定编辑能不能落地，属于工具能力，所以整段平移而不是在 core 重写。
+
+搬到 `mutatecore/edit_match.go`（≈1100 行）的：
+
+- 六层匹配阶梯：精确 → CRLF → 尾随空白 → 缩进对齐 → 空行窗口漂移 → token 回退，
+  加上替换重建时未触及行保持原字节。
+- 最近片段搜索：token 回退、窗口收紧、相似度排序（`FindClosestEditSnippet*`、
+  `scoreEditClosestWindow`），与 apply_patch 共用 `PatchLineSimilarity` 的排序口径。
+- 歧义保护：命中数 + 行号；`next_action` 与诊断文案。
+- 共享文案：`FormatEditSuccessContent`（`…\n\n文件差异:\n```diff`）、
+  `FormatEditClosestLines`（`%6d|` 行号前缀）、`TruncateDiagnosticText`。
+
+同时补齐了 core handler 与本地等价的周边语义：
+
+- 文档容器拒绝、缺失目标报候选路径（而不是「先建父目录」）、文件大小上限
+  （`failure_class` / `file_size` / `max_file_bytes`）。
+- 成功路径发布 `occurrences` / `replacement_count` / unified diff / `edited_snippet` 行号。
+- **只有 `write` 在 stale 拒绝中广告 `expected_sha256`**（`supportsExplicitRevision := tool == "write"`）。
+- `EditTool.insideGitWorkTree` 原先没有被 runtime 使用（测试假绿），现在
+  `CoreRuntime()` 真的把一个缝传下去，并有反向探测的测试锁住。
+
+`multiedit` 也改调 core 的同一批函数，`apply_patch.go` 共用
+`mutatecore.FormatEditSuccessContent`：一工具一文案。
+
+## apply_patch 已收敛（2026-10-24，`Execute` 已翻转）
+
+`apply_patch` 现在只有一套实现。本地文件从 1106 行降到 98 行，只剩 schema、
+freeform lark 语法元数据、`patch` / `_raw` 参数归一化，以及一行委托。
+
+搬进 core 的：
+
+- `patch_parse.go`：解析器（Add/Delete/Update/Move、`*** End of File`、
+  bare `+` 行、折叠行展开后的边界识别）。
+- `patch.go` 的 `ApplyPatch`：事务式应用（先全部 resolve/authorize，再逐个落盘，
+  失败按 undo 栈回滚）、`CreateParents`、`Move` 语义、CRLF/BOM 保持。
+- `patch_render.go`：`PatchSummaryMessage`（`补丁已应用：…；影响 N 个路径`）、
+  `PatchHunkDiagnostic`（`无法定位 hunk: … 期望内容: … 最接近的当前内容（第 N 行附近）`）、
+  `PatchHunkErrorMetadata`、`IsPatchInvalidSyntaxError`、`PatchFailureNextAction`、
+  `ExtractPatchSuggestedViewLine`、`PatchNotFoundMessage`。
+- `diff.go` 的 `UnifiedDiffStates`：带 `/dev/null` 一侧的 diff（新增/删除不会被
+  渲染成「空文件」），`multiedit` 的 `patch` 元数据也改用它，本地 diff 渲染器删除。
+
+修掉的等价缺口（翻转后由本地测试逐个暴露并补齐）：
+
+1. **`CreateParents`**：补丁会创建它命名的目录（`moved/b.txt`）。core 之前用
+   与 write 相同的 `ValidateWriteTarget` 先拒绝「父目录不存在」，等于把 patch
+   降级成「目标目录必须已存在」。现在 `authorizeWriteTarget(..., createsParents)`
+   区分两者：普通 write 仍然拒绝，patch 不拒绝。
+2. **缺失目标的候选提示**：update / delete 找不到文件时，core 只报
+   `cannot update missing file`；本地一直给候选路径。新增 `PatchBindings.PathHint`
+   接上同一个 `toolcore.PathHinter`（remote 侧由 workspace 实现，本地由 sandbox 实现），
+   文案统一为 `文件不存在，无法更新: <path>\n<候选>`。
+3. **hunk 诊断**：core 原来只回一句 `hunk 1 does not match the file`。现在
+   `ApplyHunks` 直接产出带期望行、最近窗口与 `next_action` 的完整诊断，并由
+   `PatchHunkError.Path` 标注是哪个文件；`mutationFailure` 认识 `*PatchHunkError`，
+   把 `failure_class` / `suggested_view_offset` / `suggested_view_limit` /
+   `current_snippet` / `current_snippet_start_line` / `file_path` 一起发布。
+4. **非法语法 = TOOL_INVALID_ARGS**：解析失败原先落到 `INTERNAL_ERROR` +
+   通用 next_action。现在 `IsPatchInvalidSyntaxError` 分类，code 走
+   `INVALID_ARGUMENT`，`failure_class=invalid_patch_syntax`，并给出针对语法的
+   next_action。本地面在 `executeCoreSearchTool` 里把 `INVALID_ARGUMENT`
+   本地化为既有的 `TOOL_INVALID_ARGS`（remote 面保持 core 的拼写，
+   `ResultToToolkit` 不做这层翻译）。
+5. **成功文案与 diff**：`Applied patch to N file(s):` 改成与 edit 同源的
+   `补丁已应用：… 文件差异: ```diff …`，`PatchResult.Diff` 逐路径累积
+   （move 会出两条：源端 `/dev/null`、目标端新建）。
+6. **变更通知**：`apply_patch` 原先不调用 `MutationObserver`，改完之后
+   「解析成功但不通知」会静默丢掉知识层增量。现在每个被改的路径都上报
+   （move 报两条，源端 post-image 为 nil），`PatchFileResult.NewBytes` / `MovePath`
+   是为这条通道新增的字段。
+
+## 一个曾经静默失效的 bug（本轮）
+
+`mutationFailure` 会重新给消息加 `code: ` 前缀，而 patch resolver 里
+`resultAsError` 已经把渲染好的文案塞进 `Error.Message`，于是同一个失败被拼成
+`NOT_FOUND: NOT_FOUND: parent directory does not exist: … (next: …) (next: …)`。
+现在 `Error.Rendered` 记住「这个失败已经渲染过」，`mutationFailure` 直接原样返回，
+不再二次加工。

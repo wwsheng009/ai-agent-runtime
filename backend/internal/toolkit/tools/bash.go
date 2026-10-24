@@ -24,6 +24,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/shellexec"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -1682,7 +1683,7 @@ func friendlyHintForSearchTool(toolName, command, output string, exitCode int, w
 		return fmt.Sprintf(
 			"提示: %s 路径参数含 shell 通配符或路径 IO 失败（Windows 常见 os error 123 / 文件名语法不正确）。不要写 `rg pattern backend/**/*.go`；改用 `rg -g \"*.go\" pattern backend`，或优先 toolkit `grep` 的 path/glob。命令: %s",
 			toolName,
-			truncateDiagnosticText(strings.TrimSpace(command), 160),
+			mutatecore.TruncateDiagnosticText(strings.TrimSpace(command), 160),
 		)
 	case looksLikeMissingSearchToolOutput(cleanedLower, toolName) ||
 		looksLikeMissingSearchToolOutput(rawLower, toolName):
@@ -1706,7 +1707,7 @@ func friendlyHintForSearchTool(toolName, command, output string, exitCode int, w
 			return fmt.Sprintf(
 				"提示: %s 退出码 1 通常表示未匹配到结果（不是命令崩溃）。若要搜索代码，优先用 toolkit `grep`（支持 literal/paths/glob，错误信息更可行动）；确认无结果后换关键词或扩大 path。命令: %s",
 				toolName,
-				truncateDiagnosticText(strings.TrimSpace(command), 160),
+				mutatecore.TruncateDiagnosticText(strings.TrimSpace(command), 160),
 			)
 		}
 	case exitCode == 2:
@@ -2330,17 +2331,17 @@ func buildBashCommandFailureError(command, output string, err error) error {
 		// narrower scopes instead of blindly replaying the same broad scan.
 		if looksLikeSearchShellCommand(command) {
 			return fmt.Errorf("%w。命令: %s。代码搜索超时请改用 toolkit `grep`（可设 path/glob/max_count），或缩小 workdir/pattern；不要原样重试同一宽范围 shell 搜索",
-				err, truncateDiagnosticText(strings.TrimSpace(command), 120))
+				err, mutatecore.TruncateDiagnosticText(strings.TrimSpace(command), 120))
 		}
 		return fmt.Errorf("%w。命令: %s。超时后先检查是否已有部分输出；缩小范围、提高 timeout，或改用更专用的工具，不要盲目重试同一命令",
-			err, truncateDiagnosticText(strings.TrimSpace(command), 120))
+			err, mutatecore.TruncateDiagnosticText(strings.TrimSpace(command), 120))
 	}
 	base := strings.TrimSpace(err.Error())
 	// friendlyHintFor already embeds 提示 / environment info; keep as-is.
 	if strings.Contains(base, "提示:") || strings.Contains(base, "当前环境信息:") {
 		return err
 	}
-	cmdPreview := truncateDiagnosticText(strings.TrimSpace(command), 120)
+	cmdPreview := mutatecore.TruncateDiagnosticText(strings.TrimSpace(command), 120)
 	snippet := firstNonEmptyLines(output, 4, 240)
 	if snippet != "" {
 		return fmt.Errorf("%s。命令: %s。输出摘要: %s。完整输出见 Content；批量检查请用 commands 并查看失败摘要", base, cmdPreview, snippet)
@@ -2367,9 +2368,9 @@ func firstNonEmptyLines(text string, maxLines, maxChars int) string {
 		}
 	}
 	if len(picked) == 0 {
-		return truncateDiagnosticText(text, maxChars)
+		return mutatecore.TruncateDiagnosticText(text, maxChars)
 	}
-	return truncateDiagnosticText(strings.Join(picked, " | "), maxChars)
+	return mutatecore.TruncateDiagnosticText(strings.Join(picked, " | "), maxChars)
 }
 
 func buildBashBatchFailureError(failed int, items []map[string]interface{}) error {
@@ -2380,8 +2381,8 @@ func buildBashBatchFailureError(failed int, items []map[string]interface{}) erro
 			continue
 		}
 		index, _ := item["index"].(int)
-		command := truncateDiagnosticText(extractString(item["command"]), 80)
-		errText := truncateDiagnosticText(extractString(item["error"]), 120)
+		command := mutatecore.TruncateDiagnosticText(extractString(item["command"]), 80)
+		errText := mutatecore.TruncateDiagnosticText(extractString(item["error"]), 120)
 		if errText == "" {
 			errText = "unknown error"
 		}

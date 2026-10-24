@@ -14,14 +14,39 @@ import (
 // the field is advisory, and a diff failure must not turn a successful write
 // into a failure.
 func UnifiedDiff(path, before, after string) string {
-	if before == after {
+	return UnifiedDiffStates(path, &before, &after)
+}
+
+// UnifiedDiffStates is the same renderer for a mutation that has no side on one
+// end: a created file has no old text, a deleted one has no new text. Those
+// sides render as /dev/null instead of an empty file, which is the difference
+// between "this file was created" and "this file was emptied".
+func UnifiedDiffStates(path string, before, after *string) string {
+	if before != nil && after != nil && *before == *after {
 		return ""
 	}
+	if before == nil && after == nil {
+		return ""
+	}
+	fromFile := "a/" + filepath.ToSlash(path)
+	toFile := "b/" + filepath.ToSlash(path)
+	var beforeLines []string
+	var afterLines []string
+	if before == nil {
+		fromFile = "/dev/null"
+	} else {
+		beforeLines = difflib.SplitLines(*before)
+	}
+	if after == nil {
+		toFile = "/dev/null"
+	} else {
+		afterLines = difflib.SplitLines(*after)
+	}
 	diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-		A:        difflib.SplitLines(before),
-		B:        difflib.SplitLines(after),
-		FromFile: "a/" + filepath.ToSlash(path),
-		ToFile:   "b/" + filepath.ToSlash(path),
+		A:        beforeLines,
+		B:        afterLines,
+		FromFile: fromFile,
+		ToFile:   toFile,
 		Context:  3,
 	})
 	if err != nil {

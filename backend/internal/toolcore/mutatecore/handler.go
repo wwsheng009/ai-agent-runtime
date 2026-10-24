@@ -480,7 +480,9 @@ func (h *applyPatchHandler) Execute(ctx context.Context, call *toolcore.Call) (*
 	}
 	result, mutationErr := ApplyPatch(ctx, rawPatch, PatchBindings{
 		Resolve: func(raw string) (string, error) {
-			target, failure := authorizeWrite(call, raw)
+			// A patch creates the tree it names, so a missing parent is not a
+			// refusal here (CreateParents below does the mkdir).
+			target, failure := authorizeWriteTarget(call, raw, true)
 			if failure != nil {
 				return "", resultAsError(failure)
 			}
@@ -493,7 +495,13 @@ func (h *applyPatchHandler) Execute(ctx context.Context, call *toolcore.Call) (*
 			}
 			return target, nil
 		},
-		CheckWrite: ValidateWriteTarget,
+		CheckWrite: func(abs string) error {
+			err := ValidateWriteTarget(abs)
+			if IsMissingParentError(err) {
+				return nil
+			}
+			return err
+		},
 		CheckDelete: func(abs string) error {
 			if permissions := call.Runtime.Permissions(); permissions != nil {
 				if err := permissions.CheckPath(toolcore.OpDelete, abs); err != nil {
@@ -502,17 +510,42 @@ func (h *applyPatchHandler) Execute(ctx context.Context, call *toolcore.Call) (*
 			}
 			return nil
 		},
+		PathHint: func(raw string) string {
+			if hinter, ok := call.Runtime.(toolcore.PathHinter); ok {
+				return hinter.PathHint(raw)
+			}
+			return ""
+		},
 		Display:       func(abs string) string { return displayPath(call, abs) },
-		CreateParents: false,
+		CreateParents: true,
 		Mode:          DefaultFileMode,
 	})
 	if mutationErr != nil {
 		return mutationFailure(mutationErr), nil
 	}
-	summary := fmt.Sprintf("Applied patch to %d file(s):\n", result.FilesChanged)
-	for _, path := range result.MutatedPaths {
-		summary += "  - " + path + "\n"
+	// Every path the patch touched is announced, exactly like write/edit: the
+	// session's read/write ledger and the change feed are keyed on this, and a
+	// patch that silently moved files left both stale.
+	if observer, ok := call.Runtime.(toolcore.MutationObserver); ok {
+		for _, file := range result.Files {
+			// A moved file's source is gone, so its post-image is nothing; the
+			// target carries the bytes. Confusing the two told the ledger the
+			// source still holds the target's content.
+			sourceBytes := file.NewBytes
+			if file.WasMoved {
+				sourceBytes = nil
+			}
+			if strings.TrimSpace(file.Path) != "" {
+				observer.FileMutated(h.def.Name, file.Path, sourceBytes)
+			}
+			if file.WasMoved && strings.TrimSpace(file.MovePath) != "" {
+				observer.FileMutated(h.def.Name, file.MovePath, file.NewBytes)
+			}
+		}
 	}
+	// Success reads exactly like edit: what changed, then the diff that proves
+	// it. Both tools mutate files, so both answer the same question the same way.
+	summary := FormatEditSuccessContent(PatchSummaryMessage(result), result.Diff)
 	return shapeResult(call, h.def.Name, &toolcore.Result{
 		Success:    true,
 		OutputKind: toolcore.KindText,
@@ -524,6 +557,7 @@ func (h *applyPatchHandler) Execute(ctx context.Context, call *toolcore.Call) (*
 			"deleted_files": result.Deleted,
 			"moved_files":   result.Moved,
 			"mutated_paths": result.MutatedPaths,
+			"patch":         result.Diff,
 		},
 	})
 }
@@ -561,6 +595,14 @@ func ValidateWriteTarget(absPath string) error {
 }
 
 func authorizeWrite(call *toolcore.Call, rawPath string) (string, *toolcore.Result) {
+	return authorizeWriteTarget(call, rawPath, false)
+}
+
+// authorizeWriteTarget is authorizeWrite plus the one policy that is not
+// universal: whether a missing parent directory is a refusal. It is a refusal
+// for a plain write, which must not silently invent a tree, and it is not one
+// for apply_patch, which creates the tree its patch names.
+func authorizeWriteTarget(call *toolcore.Call, rawPath string, createsParents bool) (string, *toolcore.Result) {
 	if failure := runtimeFailure(call); failure != nil {
 		return "", failure
 	}
@@ -574,6 +616,9 @@ func authorizeWrite(call *toolcore.Call, rawPath string) (string, *toolcore.Resu
 		}
 	}
 	if err := ValidateWriteTarget(target); err != nil {
+		if createsParents && IsMissingParentError(err) {
+			return target, nil
+		}
 		// A directory target is a kind mismatch with a specific recovery route
 		// (find the file the caller meant); everything else keeps its own code.
 		if needsKindHint(err) {
@@ -582,6 +627,14 @@ func authorizeWrite(call *toolcore.Call, rawPath string) (string, *toolcore.Resu
 		return "", mutationFailure(err)
 	}
 	return target, nil
+}
+
+// IsMissingParentError reports the "the parent directory does not exist"
+// refusal. A caller that creates the parent itself must not inherit it.
+func IsMissingParentError(err error) bool {
+	var coded *Error
+	return errors.As(err, &coded) && coded.Code == CodeNotFound &&
+		strings.Contains(coded.Message, "parent directory does not exist")
 }
 
 func needsKindHint(err error) bool {
@@ -748,11 +801,51 @@ func displayPath(call *toolcore.Call, abs string) string {
 }
 
 func mutationFailure(err error) *toolcore.Result {
+	// A failure that already rendered (a nested call handed it back as a result)
+	// is returned verbatim: rendering it twice stacks the code and next_action.
+	var alreadyRendered *Error
+	if errors.As(err, &alreadyRendered) && alreadyRendered.Rendered != nil {
+		return alreadyRendered.Rendered
+	}
+	// A hunk whose @@ / old lines no longer match is the one mutation failure
+	// with a repair recipe: it carries the expected lines and the closest
+	// current window, so the caller can rebuild the hunk instead of guessing.
+	var hunkErr *PatchHunkError
+	if errors.As(err, &hunkErr) {
+		nextAction := hunkErr.NextAction
+		if nextAction == "" {
+			nextAction = PatchStaleContextNextAction()
+		}
+		content := hunkErr.Message
+		if content == "" {
+			content = CodeStaleContext
+		} else {
+			// Name the class in the text too: a surface whose caller only sees
+			// the message body (the remote MCP projection) must still be able to
+			// tell a stale context from a generic execution failure.
+			content = CodeStaleContext + ": " + content
+		}
+		return &toolcore.Result{
+			Success:    false,
+			OutputKind: toolcore.KindText,
+			Content:    content,
+			ErrorCode:  CodeStaleContext,
+			NextAction: nextAction,
+			Metadata:   PatchHunkErrorMetadata(hunkErr),
+			Err:        errors.New(content),
+		}
+	}
 	code := CodeOf(err)
 	if code == "" {
 		code = CodeInternal
 	}
 	nextAction := NextActionOf(err)
+	syntaxFailure := IsPatchInvalidSyntaxError(err)
+	if syntaxFailure {
+		// A malformed patch is the caller's own typo, not an execution fault.
+		code = CodeInvalidArgument
+		nextAction = PatchFailureNextAction(err)
+	}
 	if nextAction == "" {
 		nextAction = defaultMutationNextAction
 	}
@@ -773,6 +866,11 @@ func mutationFailure(err error) *toolcore.Result {
 		for key, value := range coded.Metadata {
 			metadata[key] = value
 		}
+	}
+	if syntaxFailure {
+		// Callers classify synthetic retry failures on this field, so it must
+		// ride along with the code instead of only living in the prose.
+		metadata["failure_class"] = "invalid_patch_syntax"
 	}
 	if len(metadata) == 0 {
 		metadata = nil
@@ -854,7 +952,12 @@ func resultAsError(result *toolcore.Result) error {
 	if code == "" {
 		code = CodeInternal
 	}
-	return &Error{Code: code, NextAction: result.NextAction, Message: result.Content}
+	return &Error{
+		Code:       code,
+		NextAction: result.NextAction,
+		Message:    result.Content,
+		Rendered:   result,
+	}
 }
 
 func shapeResult(call *toolcore.Call, tool string, result *toolcore.Result) (*toolcore.Result, error) {
