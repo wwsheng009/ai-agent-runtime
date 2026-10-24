@@ -55,7 +55,18 @@ func (in grepRenderInputs) displayPathFor(file string) string {
 			return label + "/" + rel
 		}
 	}
-	return in.paths.Relative(file)
+	rel := in.paths.Relative(file)
+	// A surface whose workspace root is unrelated to the search root can only
+	// answer absolutely. The local tool has always shown such files relative to
+	// the search root, so fall back to that rather than leaking a host path
+	// into model-visible output.
+	if len(in.roots) == 1 && filepath.IsAbs(rel) {
+		if rootRel, err := filepath.Rel(in.roots[0], file); err == nil &&
+			!strings.HasPrefix(rootRel, "..") {
+			return filepath.ToSlash(rootRel)
+		}
+	}
+	return rel
 }
 
 func closestRoot(roots []string, file string) string {
@@ -69,6 +80,48 @@ func closestRoot(roots []string, file string) string {
 		}
 	}
 	return best
+}
+
+// grepOmittedLongLine and grepLongLinePreviewSuffix are the markers the local
+// tool has always printed. They are part of the visible contract, so the core
+// reproduces them verbatim.
+const (
+	grepOmittedLongLine       = "[Omitted long matching line]"
+	grepLongLinePreviewSuffix = " [... omitted end of long line]"
+)
+
+// renderText applies the two text-shaping parameters to one output line. Trim
+// runs first because it only removes content the caller asked to hide, then
+// the length cap decides whether anything is left to show. Neither touches the
+// stored GrepMatch, so column numbers and counts stay derived from the original
+// bytes.
+func (in grepRenderInputs) renderText(text string) string {
+	if in.options.Trim {
+		text = strings.TrimLeft(text, " \t")
+	}
+	if !in.options.MaxColumnsSet || in.options.MaxColumns <= 0 {
+		return text
+	}
+	if len(text) <= in.options.MaxColumns {
+		return text
+	}
+	if in.options.MaxColumnsPreview {
+		return truncateGrepTextBytes(text, in.options.MaxColumns) + grepLongLinePreviewSuffix
+	}
+	return grepOmittedLongLine
+}
+
+// truncateGrepTextBytes cuts at a UTF-8 boundary so the preview never ends in
+// half a rune.
+func truncateGrepTextBytes(text string, limit int) string {
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 // renderGrepPage renders one result page in the local tool's output shapes:
@@ -104,19 +157,20 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 			}
 			display := in.displayPathFor(line.File)
 			if line.IsMatch {
-				lines = append(lines, fmt.Sprintf("%s>%d: %s", display, line.Line, line.Text))
+				lines = append(lines, fmt.Sprintf("%s>%d: %s", display, line.Line, in.renderText(line.Text)))
 			} else {
-				lines = append(lines, fmt.Sprintf("%s %d: %s", display, line.Line, line.Text))
+				lines = append(lines, fmt.Sprintf("%s %d: %s", display, line.Line, in.renderText(line.Text)))
 			}
 			printedAny = true
 		}
 	default:
 		for _, item := range in.result.Matches {
+			text := in.renderText(item.Text)
 			if item.Column > 0 {
-				lines = append(lines, fmt.Sprintf("%s:%d:%d: %s", in.displayPathFor(item.File), item.Line, item.Column, item.Text))
+				lines = append(lines, fmt.Sprintf("%s:%d:%d: %s", in.displayPathFor(item.File), item.Line, item.Column, text))
 				continue
 			}
-			lines = append(lines, fmt.Sprintf("%s:%d: %s", in.displayPathFor(item.File), item.Line, item.Text))
+			lines = append(lines, fmt.Sprintf("%s:%d: %s", in.displayPathFor(item.File), item.Line, text))
 		}
 	}
 

@@ -342,6 +342,30 @@
   全局 ignore 文件始终可选，不受该开关影响（rg 也是这么做的）。
   rg 侧转发 `--no-messages`；实测 rg 的权限/IO 诊断只写 stderr 且退出码仍为 0，
   而引擎只读 stdout，所以那些警告本来就不会进入模型可见输出。
+  **展示类参数上移 core（2026-10-24）**：`column`/`trim`/`max_columns`/
+  `max_columns_preview`/`no_max_columns_preview` 进 core。这里要先区分两类参数，
+  它们的性质完全不同：
+  - **真的增加信息**：`column` 给出匹配在行内的 1-based 字节列号，默认输出没有这个信息。
+    它不是展示风格开关。
+  - **只改变已匹配行的文本呈现**：`trim` 去掉前导空白、`max_columns` 用
+    `[Omitted long matching line]` 或 `… [... omitted end of long line]` 替换长行。
+
+  实现上的关键决定：`trim`/`max_columns` **不再转发给 rg**，改由共享渲染层统一处理。
+  原因是标记文案属于输出契约，rg 会打印自己的措辞、并按自己的长度口径截断——一旦让它
+  处理，渲染层就看不到原始行，两个引擎的输出必然分叉。实测两引擎八种组合逐字节一致
+  （基线/column/trim/两者/omit/preview/only_matching+column/invert+column）。
+  `column` 不转发而是由引擎计算：walker 用 regexp 索引，rg 用 JSON 里已有的
+  submatches 字节偏移，两边是同一坐标系。`trim` 不会移动列号（按原始行算）。
+  `invert_match` 不产生列号——整行不匹配，没有位置可言。
+
+  **纯展示参数保持"接受但不生效"**：`heading`/`no_heading`/`color`/`pretty` 等对
+  模型没有意义（颜色码会污染 payload，标题分组会破坏稳定骨架）。本地早就明确忽略它们，
+  remote 目前**不声明**这些参数——不声明比声明后无声忽略更诚实。
+
+  顺带修了一处**真实的路径泄漏**：当 runtime 的 workspace 根与搜索根无关时，
+  `Relative()` 只能返回绝对路径，于是 core 会把宿主机的绝对路径写进模型可见输出
+  （`/tmp/TestXxx/001/sample.txt:1:3: foo`）。legacy 一直以搜索根为基准显示相对路径。
+  现在 renderer 在拿不到相对路径时回退到搜索根相对路径，两者一致。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
@@ -355,8 +379,8 @@
   本地 `grep` 主流程仍在 `grep_core_switch.go` 里按参数集分流：四类 mode（content/
   files/files_without/count）与 context、include-exclude、type/type_not、max_count、
   only_matching、max_depth/max_filesize、stats、pattern_file(s)、多根语义、ignore 族
-  与 unrestricted_level、one_file_system、no_messages 均已进 core，`rg_args`、`json` 透传、
-  展示类开关（`column`/`trim`/`max_columns`/`heading`/`color`）、读取侧 16MiB 流闸门、
+  与 unrestricted_level、one_file_system、no_messages、column/trim/max_columns 均已进 core，
+  `rg_args`、`json` 透传、读取侧 16MiB 流闸门、
   partial/timeout 标注与 path-not-found 候选提示仍在本地；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于

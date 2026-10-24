@@ -259,3 +259,41 @@ func TestLocalToolNoMessagesUsesSharedCore(t *testing.T) {
 		t.Fatalf("the search must still run:\n%s", skipped.Content)
 	}
 }
+
+// TestLocalToolPresentationUsesSharedCore proves column/trim/max_columns route
+// into the shared handler; before this they landed on the legacy path.
+func TestLocalToolPresentationUsesSharedCore(t *testing.T) {
+	root := t.TempDir()
+	content := "   indented needle here\n"
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(params map[string]interface{}) *toolkit.ToolResult {
+		t.Helper()
+		tool := NewGrepTool()
+		tool.SetBasePath(root)
+		tool.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+		result, err := tool.Execute(context.Background(), params)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return result
+	}
+
+	withColumn := run(map[string]interface{}{"pattern": "needle", "path": ".", "column": true})
+	if got := withColumn.Metadata["engine"]; got != "walker" {
+		t.Fatalf("column must route through the shared core, got engine=%v", got)
+	}
+	if !strings.Contains(withColumn.Content, "a.txt:1:13:") {
+		t.Fatalf("expected the match column:\n%s", withColumn.Content)
+	}
+
+	trimmed := run(map[string]interface{}{"pattern": "needle", "path": ".", "trim": true})
+	if got := trimmed.Metadata["engine"]; got != "walker" {
+		t.Fatalf("trim must route through the shared core, got engine=%v", got)
+	}
+	if !strings.Contains(trimmed.Content, "a.txt:1: indented needle here") {
+		t.Fatalf("expected the trimmed line:\n%s", trimmed.Content)
+	}
+}

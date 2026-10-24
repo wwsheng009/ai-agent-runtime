@@ -344,6 +344,43 @@ func TestRemoteGrepNoMessagesFlagReachesRipgrep(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepColumnMatchesWalker pins column across engines. The two derive
+// it in completely different ways (regexp indices versus ripgrep's JSON
+// offsets), so this is the case most likely to drift by one byte.
+func TestRemoteGrepColumnMatchesWalker(t *testing.T) {
+	root := t.TempDir()
+	content := "   indented needle here\n" +
+		"second line\n" +
+		strings.Repeat("y", 300) + "needle tail\n"
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := resolveRipgrepRunner()
+
+	for _, onlyMatching := range []bool{false, true} {
+		opts := searchcore.GrepOptions{
+			Pattern: "needle", Path: root, Limit: 50,
+			Column: true, OnlyMatching: onlyMatching,
+		}
+		walker, err := searchcore.Grep(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("onlyMatching=%v: %v", onlyMatching, err)
+		}
+		if !runner.available() {
+			continue
+		}
+		rgResult, used, rgErr := runner.grep(context.Background(), opts)
+		if rgErr != nil || !used {
+			t.Fatalf("ripgrep used=%v err=%v", used, rgErr)
+		}
+		got, want := grepMatchLines(rgResult), grepMatchLines(walker)
+		if !equalStringSlices(got, want) {
+			t.Fatalf("engines disagreed on column (onlyMatching=%v):\nripgrep: %v\nwalker:  %v",
+				onlyMatching, got, want)
+		}
+	}
+}
+
 // TestRemoteGrepRejectsUnknownMode keeps a genuinely unknown spelling failing on
 // both engines: the enum must stay honest about what it can serve.
 func TestRemoteGrepRejectsUnknownMode(t *testing.T) {

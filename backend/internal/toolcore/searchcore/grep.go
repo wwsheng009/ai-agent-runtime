@@ -54,6 +54,19 @@ type GrepOptions struct {
 	// line. InvertMatch keeps whole lines (rg -o -v), files mode ignores it,
 	// and in count mode the per-file count becomes a match count (rg -o -c).
 	OnlyMatching bool
+	// Column renders `path:line:column: text` instead of `path:line: text`.
+	// It adds real information (where on the line the match starts), so it is
+	// a search parameter, not a style switch.
+	Column bool
+	// Trim strips leading indentation from the rendered line only. Column
+	// numbers are computed on the original line, exactly like rg --trim.
+	Trim bool
+	// MaxColumns replaces an over-long rendered line with a marker. Zero means
+	// no limit; MaxColumnsSet distinguishes "unset" from an explicit 0.
+	// MaxColumnsPreview keeps a prefix instead of omitting the line entirely.
+	MaxColumns        int
+	MaxColumnsSet     bool
+	MaxColumnsPreview bool
 	// MaxDepth bounds directory descent relative to each search root: 0 means
 	// the roots' immediate contents only. MaxDepthSet distinguishes unset from
 	// an explicit 0, mirroring the local tool.
@@ -120,10 +133,13 @@ type GrepOptions struct {
 type GrepMatch struct {
 	File string
 	Line int
-	// Column is the 1-based byte column of the match, set only when
-	// only_matching produced the entry (0 elsewhere).
+	// Column is the 1-based byte column where the match starts: always set for
+	// only_matching fragments, and set for whole lines when Column was asked
+	// for. Zero means "not computed" (invert_match, or column not requested).
 	Column int
-	Text   string
+	// Text is the raw line or fragment. Rendering applies trim/max_columns to
+	// a copy, so the raw text stays available for counting and metadata.
+	Text string
 }
 
 type GrepResult struct {
@@ -315,10 +331,19 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 					}
 				}
 			} else {
+				// Column is computed on the original line, so Trim can drop the
+				// indentation without moving the reported position.
+				column := 0
+				if opts.Column && !opts.InvertMatch {
+					if loc := compiled.FindIndex(display); len(loc) == 2 {
+						column = loc[0] + 1
+					}
+				}
 				result.Matches = append(result.Matches, GrepMatch{
-					File: path,
-					Line: lineNo,
-					Text: sanitizeGrepNulText(string(display)),
+					File:   path,
+					Line:   lineNo,
+					Column: column,
+					Text:   sanitizeGrepNulText(string(display)),
 				})
 			}
 			fileLines++

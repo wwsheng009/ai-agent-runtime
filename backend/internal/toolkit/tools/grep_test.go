@@ -4222,7 +4222,11 @@ func TestGrepTool_StructuredBufferedAndNullFlagsRecordAndSuppressRgArgs(t *testi
 	}
 }
 
-func TestGrepTool_StructuredMaxColumnsPreviewFlagsOverrideRgArgs(t *testing.T) {
+// TestGrepTool_MaxColumnsFlagsAreNeverForwarded pins the split introduced when
+// these parameters moved into the shared core: max_columns* is rendered by this
+// tool, so no spelling of it - structured or via rg_args - may reach ripgrep.
+// rg would replace the line before the renderer could apply the contract marker.
+func TestGrepTool_MaxColumnsFlagsAreNeverForwarded(t *testing.T) {
 	tmpDir := t.TempDir()
 	tool := NewGrepTool()
 
@@ -4238,29 +4242,26 @@ func TestGrepTool_StructuredMaxColumnsPreviewFlagsOverrideRgArgs(t *testing.T) {
 	cases := []struct {
 		name           string
 		params         map[string]interface{}
-		wantContains   []string
 		wantNotContain []string
 	}{
 		{
-			name: "max_columns_preview true suppresses rg_args no-max-columns-preview",
+			name: "structured preview true plus rg_args no-max-columns-preview",
 			params: map[string]interface{}{
 				"rg_args":             []interface{}{"--no-max-columns-preview"},
 				"pattern":             "needle",
 				"path":                tmpDir,
 				"max_columns_preview": true,
 			},
-			wantContains:   []string{"--max-columns-preview"},
 			wantNotContain: []string{"--no-max-columns-preview"},
 		},
 		{
-			name: "no_max_columns_preview true suppresses rg_args max-columns-preview",
+			name: "structured no_max_columns_preview plus rg_args max-columns-preview",
 			params: map[string]interface{}{
 				"rg_args":                []interface{}{"--max-columns-preview"},
 				"pattern":                "needle",
 				"path":                   tmpDir,
 				"no_max_columns_preview": true,
 			},
-			wantContains:   []string{"--no-max-columns-preview"},
 			wantNotContain: []string{"--max-columns-preview"},
 		},
 	}
@@ -4276,22 +4277,23 @@ func TestGrepTool_StructuredMaxColumnsPreviewFlagsOverrideRgArgs(t *testing.T) {
 				t.Fatalf("expected success, got error %v", result.Error)
 			}
 			argsStr := strings.Join(gotArgs, " ")
-			for _, want := range tc.wantContains {
-				if !strings.Contains(argsStr, want) {
-					t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
-				}
-			}
 			for _, notWant := range tc.wantNotContain {
 				if strings.Contains(argsStr, notWant) {
 					t.Fatalf("expected %q to be filtered from rg args, got %v", notWant, gotArgs)
 				}
 			}
-			if tc.name == "max_columns_preview true suppresses rg_args no-max-columns-preview" {
+			// Both spellings are renderer-owned now, so neither may appear.
+			for _, never := range []string{"--max-columns-preview", "--no-max-columns-preview", "--max-columns "} {
+				if strings.Contains(argsStr, never) {
+					t.Fatalf("%q must never be forwarded, got %v", never, gotArgs)
+				}
+			}
+			if tc.name == "structured preview true plus rg_args no-max-columns-preview" {
 				if result.Metadata["max_columns_preview"] != true || result.Metadata["no_max_columns_preview"] != false {
 					t.Fatalf("expected max_columns_preview metadata to be true and no_max_columns_preview false, got %#v", result.Metadata)
 				}
 			}
-			if tc.name == "no_max_columns_preview true suppresses rg_args max-columns-preview" {
+			if tc.name == "structured no_max_columns_preview plus rg_args max-columns-preview" {
 				if result.Metadata["max_columns_preview"] != false || result.Metadata["no_max_columns_preview"] != true {
 					t.Fatalf("expected no_max_columns_preview metadata to be true and max_columns_preview false, got %#v", result.Metadata)
 				}
@@ -4377,28 +4379,6 @@ func TestGrepTool_StructuredPriorityOverridesRemainingRgArgsConflicts(t *testing
 			},
 			wantContains:   []string{"--max-depth 3", "--max-count 3", "--max-filesize 2K"},
 			wantNotContain: []string{"--max-depth 2", "--max-count 2", "--max-filesize 1024"},
-		},
-		{
-			name: "structured max columns preview family overrides rg_args opposite flag",
-			params: map[string]interface{}{
-				"pattern":             "needle",
-				"path":                tmpDir,
-				"rg_args":             []interface{}{"--no-max-columns-preview"},
-				"max_columns_preview": true,
-			},
-			wantContains:   []string{"--max-columns-preview"},
-			wantNotContain: []string{"--no-max-columns-preview"},
-		},
-		{
-			name: "structured no max columns preview family overrides rg_args opposite flag",
-			params: map[string]interface{}{
-				"pattern":                "needle",
-				"path":                   tmpDir,
-				"rg_args":                []interface{}{"--max-columns-preview"},
-				"no_max_columns_preview": true,
-			},
-			wantContains:   []string{"--no-max-columns-preview"},
-			wantNotContain: []string{"--max-columns-preview"},
 		},
 	}
 
@@ -4544,39 +4524,35 @@ func TestGrepTool_IgnoreFileCaseInsensitiveOnlyAppliesToExplicitIgnoreFile(t *te
 	}
 }
 
-func TestGrepTool_RgArgsMaxColumnsTranslateToRipgrep(t *testing.T) {
+// TestGrepTool_MaxColumnsIsRenderedNotForwarded pins the deliberate split:
+// the flags belong to the shared renderer now, because the marker text is part
+// of the output contract and rg would print its own wording. The legacy arg
+// builder must therefore stay silent about them.
+func TestGrepTool_MaxColumnsIsRenderedNotForwarded(t *testing.T) {
 	tool := NewGrepTool()
-	var gotArgs []string
+	tool.lookPath = func(string) (string, error) { return "rg", nil }
 
-	tool.lookPath = func(name string) (string, error) {
-		return "rg", nil
+	opts := &grepOptions{
+		maxColumns:        20,
+		maxColumnsSet:     true,
+		maxColumnsPreview: true,
 	}
-	tool.runCommand = func(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
-		gotArgs = append([]string(nil), args...)
-		return []byte("sample.txt:1:[Omitted long matching line]\n"), nil
-	}
-
-	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern":                "foo",
-		"path":                   t.TempDir(),
-		"max_columns":            20,
-		"max_columns_preview":    true,
-		"no_max_columns_preview": false,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.Success {
-		t.Fatalf("expected success, got error %v", result.Error)
-	}
-	argsStr := strings.Join(gotArgs, " ")
-	for _, want := range []string{"--max-columns 20", "--max-columns-preview"} {
-		if !strings.Contains(argsStr, want) {
-			t.Fatalf("expected %q in rg args, got %v", want, gotArgs)
+	args := buildRipgrepArgs(opts, grepSearchScope{}, 100)
+	argsStr := strings.Join(args, " ")
+	for _, unwanted := range []string{"--max-columns", "--max-columns-preview"} {
+		if strings.Contains(argsStr, unwanted) {
+			t.Fatalf("%q must not be forwarded to rg, got %v", unwanted, args)
 		}
 	}
-	if result.Metadata["max_columns"] != 20 || result.Metadata["max_columns_preview"] != true {
-		t.Fatalf("expected max_columns metadata, got %#v", result.Metadata)
+
+	// The renderer still produces the legacy markers: the preview suffix when
+	// preview is on, and the whole-line omission when it is off.
+	if got := applyMaxColumnsToRenderedText(opts, strings.Repeat("x", 60)); !strings.HasSuffix(got, " [... omitted end of long line]") {
+		t.Fatalf("expected the preview marker, got %q", got)
+	}
+	opts.maxColumnsPreview = false
+	if got := applyMaxColumnsToRenderedText(opts, strings.Repeat("x", 60)); got != "[Omitted long matching line]" {
+		t.Fatalf("expected the omit marker, got %q", got)
 	}
 }
 

@@ -28,6 +28,8 @@ var coreSearchParams = map[string]bool{
 	"max_count": true, "max_depth": true, "max_filesize": true,
 	"one_file_system": true,
 	"stats":           true, "only_matching": true,
+	"column": true, "trim": true,
+	"max_columns": true, "max_columns_preview": true, "no_max_columns_preview": true,
 	"context": true, "before_context": true, "after_context": true,
 	"hidden": true, "no_hidden": true,
 	"unrestricted_level": true,

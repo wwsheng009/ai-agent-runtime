@@ -628,6 +628,43 @@ func TestRemoteGrepNoMessagesOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepPresentationOverMCP proves column/trim/max_columns survive
+// schema validation and render through the shared page layer.
+func TestRemoteGrepPresentationOverMCP(t *testing.T) {
+	root := t.TempDir()
+	content := "   indented needle here\n" + strings.Repeat("y", 300) + "needle tail\n"
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	column := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "column": true,
+	})
+	if !strings.Contains(column, "a.txt:1:13:") {
+		t.Fatalf("column must report the match offset:\n%s", column)
+	}
+
+	trimmed := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "trim": true, "column": true,
+	})
+	if !strings.Contains(trimmed, "a.txt:1:13: indented needle here") {
+		t.Fatalf("trim must not move the column:\n%s", trimmed)
+	}
+
+	limited := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "max_columns": 20,
+	})
+	if !strings.Contains(limited, "[Omitted long matching line]") {
+		t.Fatalf("max_columns must omit the long line:\n%s", limited)
+	}
+}
+
 // TestRemoteGrepPatternFileOverMCP proves pattern_file(s) survive schema
 // validation and behave like the local tool: each line becomes one pattern.
 func TestRemoteGrepPatternFileOverMCP(t *testing.T) {

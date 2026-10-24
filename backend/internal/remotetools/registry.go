@@ -397,6 +397,27 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --only-matching/-o：每个匹配片段单独输出一行，格式 path:line:column:fragment。与 invert_match 同用时回退为整行内容（同 rg -o -v）；count 模式下计数变为匹配次数（同 rg -o -c）；files 模式不受影响；与 context 不能同时使用（会显式报错，共享核心暂不支持该组合）。",
 			},
+			"column": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --column：输出 path:line:column: content，给出匹配在行内的 1-based 字节列号。与 only_matching 同用时每个片段带自己的列号；invert_match 不产生列号（整行不匹配，没有位置可言）。列号按原始行计算，不受 trim 影响。",
+			},
+			"trim": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --trim：仅在渲染时去掉匹配行/上下文行的前导空白（空格与制表符），不改变匹配语义，也不改变 column 的取值。",
+			},
+			"max_columns": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "兼容 rg 的 --max-columns/-M：行内容超过该字节数时，整行替换为 [Omitted long matching line]。0 表示不限制。与 max_columns_preview 配合时改为保留前缀。",
+			},
+			"max_columns_preview": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --max-columns-preview：与 max_columns 配合时保留前缀并在行尾追加 \" [... omitted end of long line]\"，而不是整行省略。",
+			},
+			"no_max_columns_preview": map[string]interface{}{
+				"type":        "boolean",
+				"description": "显式关闭 max_columns 的预览模式；与 max_columns_preview 同时出现时它优先。",
+			},
 			"stats": map[string]interface{}{
 				"type":        "boolean",
 				"description": "返回统计摘要（metadata.stats）：matches（本页出现次数）、matched_lines（本页去重后的行数）、files_with_matched（本页文件数）、files_scanned（本次实际扫描文件数）。它是**页级**统计而不是全量搜索统计——引擎会在页后一条/一个文件处停止，因此全量数字需要额外一次完整扫描。",

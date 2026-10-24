@@ -3710,15 +3710,9 @@ func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) 
 	if opts.trim {
 		args = append(args, "--trim")
 	}
-	if opts.maxColumnsSet {
-		args = append(args, "--max-columns", fmt.Sprintf("%d", opts.maxColumns))
-	}
-	if opts.maxColumnsPreview {
-		args = append(args, "--max-columns-preview")
-	}
-	if opts.noMaxColumnsPreview {
-		args = append(args, "--no-max-columns-preview")
-	}
+	// max_columns* are rendered by this tool (applyMaxColumnsToRenderedText),
+	// not by rg: the marker wording is part of the output contract, and letting
+	// rg apply its own cap would replace the line before the renderer sees it.
 	if opts.follow {
 		args = append(args, "--follow")
 	}

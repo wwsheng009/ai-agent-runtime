@@ -497,6 +497,12 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if onlyMatching {
 		args = append(args, "--only-matching")
 	}
+	// trim and max_columns are applied by the shared renderer, not by rg: the
+	// markers they print are part of the contract, and rg would print its own
+	// wording (and a different length measure) for the same flags.
+	// Column is different - it only affects the line prefix, which the renderer
+	// owns - so it is not forwarded either; the engine computes it from the
+	// match offsets it already parses.
 	for _, pattern := range patterns {
 		args = append(args, "-e", pattern)
 	}
@@ -584,9 +590,10 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 				return true
 			}
 			result.Matches = append(result.Matches, GrepMatch{
-				File: matchPath,
-				Line: event.Data.LineNumber,
-				Text: text,
+				File:   matchPath,
+				Line:   event.Data.LineNumber,
+				Column: grepLineColumn(opts, lineText, event.Data.Submatches),
+				Text:   text,
 			})
 			// Stop one page entry past the page so Truncated/has_more stays
 			// accurate; the shared window then slices the raw list down.
@@ -716,6 +723,25 @@ func isRipgrepStatsTailLine(line string) bool {
 	return false
 }
 
+// grepLineColumn derives the reported column for a whole-line match from the
+// offsets ripgrep already sends. It is only computed when the caller asked for
+// column, so the ordinary path stays free of the extra work. rg reports byte
+// offsets into the raw line, which is exactly the coordinate the walker's
+// regexp indices use.
+func grepLineColumn(opts GrepOptions, lineText string, submatches []rgSubmatch) int {
+	if !opts.Column {
+		return 0
+	}
+	if len(submatches) == 0 {
+		return 0
+	}
+	start := submatches[0].Start
+	if start < 0 || start > len(lineText) {
+		return 0
+	}
+	return start + 1
+}
+
 func safeRipgrepGlob(pattern string) bool {
 	pattern = strings.TrimSpace(pattern)
 	if pattern == "" || strings.HasPrefix(pattern, "!") || strings.HasPrefix(pattern, "/") {
@@ -745,14 +771,17 @@ type rgJSONEvent struct {
 		// Submatches carries one entry per matched fragment when ripgrep runs
 		// with --only-matching; offsets are byte positions into the raw line
 		// (including its trailing newline).
-		Submatches []struct {
-			Start int `json:"start"`
-			End   int `json:"end"`
-		} `json:"submatches"`
-		Stats struct {
+		Submatches []rgSubmatch `json:"submatches"`
+		Stats      struct {
 			FilesSearched int `json:"files_searched"`
 		} `json:"stats"`
 	} `json:"data"`
+}
+
+// rgSubmatch is one match location inside a line, in byte offsets.
+type rgSubmatch struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 type ripgrepCappedBuffer struct {
