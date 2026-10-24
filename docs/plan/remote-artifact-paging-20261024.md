@@ -139,26 +139,75 @@ if c.Artifacts.Root != "" {
 
 # ArtifactStore 依赖什么
 
-## 运行时依赖（没有外部服务）
+## 载体形态：一个目录，每个产物一个 `.log` 文件
 
-`ArtifactStore` 是**纯本地文件存储**，不依赖数据库、对象存储或网络：
+`ArtifactStore` 没有数据库、没有索引文件、没有对象存储。载体就是**普通目录**：
+
+```
+<artifacts.root>/
+  art_b94d27b9934d3e08a52e52d7da7dabfa.log   11 bytes   -rw-------（0600）
+  art_2a40b3dc29c93462d15333424cdddcd2.log   900 bytes  -rw-------
+  ...
+```
+
+| 属性 | 值 |
+|---|---|
+| 目录权限 | `0700`（`NewArtifactStore` 建目录时设定） |
+| 文件权限 | `0600` |
+| 文件名 | `art_<32 hex>.log`，id 是 payload 的 SHA-256 前 16 字节 |
+| 写入方式 | 临时文件 → `Chmod(0600)` → `os.Rename`（原子替换） |
+| 内容寻址 | 是。同一 payload 重复归档得到同一 id，`Put` 检测到文件已存在就直接返回，不重写 |
+| 读取 | `os.Open` + `file.ReadAt(offset)`，按字节窗口，起始位置会前移到 UTF-8 边界 |
+
+## 依赖（没有外部服务）
 
 | 依赖 | 说明 |
 |---|---|
 | 一个可写目录 | `artifacts.root`，启动时 `os.MkdirAll(0o700)` |
-| 磁盘空间 | `artifacts.maxBytes`，默认 64 MiB |
-| 文件系统语义 | 原子写：临时文件 → `Chmod(0600)` → `os.Rename` |
-| 时间 | mtime 用于 72h 保留期（`artifactRetention`），每 6h 惰性清理一次 |
+| 文件系统语义 | 需要支持 `os.Rename` 同一目录内的原子替换 |
+| 系统时间 | mtime 用于 72h 保留期，每 6h 惰性清理一次 |
+
+## `maxBytes` 的准确含义：单产物上限，**不是**总量配额
+
+这一点容易误解，实测确认（把上限设为 1024 字节）：
+
+```
+dedupe: id1 == id2 (same payload -> same id, no rewrite)
+oversize rejected: OUTPUT_LIMIT_EXCEEDED: payload is 2000 bytes, artifact limit is 1024
+
+files on disk (6):
+  art_2a40...log    900 bytes
+  art_584f...log    900 bytes
+  art_6def...log    900 bytes
+  art_afd8...log    900 bytes
+  art_b94d...log     11 bytes
+  art_d401...log    900 bytes
+total on disk: 4511 bytes (store cap was 1024)
+```
+
+**上限 1024，目录里却存了 4511 字节。** `maxBytes` 只在 `Put` 里做一件事：
+拒绝超过该值的**单个** payload。目录总量没有任何约束，只受 72h 保留期影响。
+
+命令行帮助写的是 `"per-artifact size limit"`，与实现一致；把它理解成磁盘配额是错的。
+
+### 权限上的一处修正
+
+`os.MkdirAll(dir, 0o700)` 的 mode **只作用于它新建的目录**。运维若指定一个已存在的
+目录（例如 `/var/lib/...` 由打包脚本以 0755 建好），权限不会被收紧——
+而 artifact 文件是 shell 输出的逐字节副本，可能含密钥。
+
+已修：`NewArtifactStore` 在 `MkdirAll` 之后显式 `os.Chmod(abs, 0o700)`，
+不依赖调用方的 umask 或预先存在的权限。
 
 ## 配置来源
 
 ```yaml
 artifacts:
   root: /var/lib/aicli-remote/artifacts   # 空 = 禁用
-  maxBytes: 67108864                     # 默认 64 MiB
+  maxBytes: 67108864                     # 单个产物的上限，默认 64 MiB；不是磁盘配额
 ```
 
-或命令行 `--artifacts-root` / `--artifact-max`。启动时用
+或命令行 `--artifacts-root` / `--artifacts-max-bytes`。启动时用
 `probeWritableDir` 探测可写性，`--check` 会把它列为 problem。
 
 ## 代码依赖

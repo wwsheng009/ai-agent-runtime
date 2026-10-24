@@ -48,6 +48,13 @@ func NewArtifactStore(root string, maxBytes int64) (*ArtifactStore, error) {
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return nil, fmt.Errorf("create artifact root: %w", err)
 	}
+	// MkdirAll's mode only applies to directories it creates. An operator-supplied
+	// root that already exists keeps whatever permissions it had - and an artifact
+	// file is a verbatim copy of shell output, which may contain secrets. Tighten
+	// the directory we own rather than trusting the caller's umask.
+	if err := os.Chmod(abs, 0o700); err != nil {
+		return nil, fmt.Errorf("restrict artifact root permissions: %w", err)
+	}
 	if maxBytes <= 0 {
 		maxBytes = 64 * 1024 * 1024
 	}
