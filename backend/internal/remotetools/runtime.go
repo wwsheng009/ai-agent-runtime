@@ -3,6 +3,7 @@ package remotetools
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 // a Runtime shared across concurrent sessions.
 func newRemoteRuntime(ctx context.Context, cfg *Config, workspace *Workspace, sandbox *Sandbox, artifacts *ArtifactStore) toolcore.Runtime {
 	return &remoteRuntime{
+		ctx:       ctx,
+		workspace: workspace,
 		paths:     &remotePaths{ctx: ctx, workspace: workspace},
 		perms:     remotePermissions{sandbox: sandbox},
 		commands:  remoteCommands{sandbox: sandbox},
@@ -34,6 +37,8 @@ func newRemoteRuntime(ctx context.Context, cfg *Config, workspace *Workspace, sa
 }
 
 type remoteRuntime struct {
+	ctx       context.Context
+	workspace *Workspace
 	paths     toolcore.PathResolver
 	perms     toolcore.PermissionChecker
 	commands  toolcore.CommandPolicy
@@ -66,6 +71,27 @@ func (r *remoteRuntime) CaptureLimit(string) int { return r.capture.limit() }
 // ArtifactOrigin implements toolcore.ArtifactOriginProvider: bare art_… ids on
 // this surface belong to the configured remote target.
 func (r *remoteRuntime) ArtifactOrigin() toolcore.ResultOrigin { return r.origin }
+
+// SearchBackend reports the engine and command for search diagnostics. Only the
+// ripgrep path has a retypable command; the walker is in-process.
+func (r *remoteRuntime) SearchBackend(engine string) (string, string) {
+	switch engine {
+	case "ripgrep", "rg":
+		return "rg --files", strings.TrimSpace(r.search.path)
+	default:
+		return "builtin-walker", ""
+	}
+}
+
+// PathHint explains a missing path the same way the local tool does: resolved
+// against this surface's workspace, with the closest existing candidate.
+func (r *remoteRuntime) PathHint(raw string) string {
+	workspace := workspaceForCall(r.ctx, r.workspace)
+	if workspace == nil {
+		return ""
+	}
+	return runtimeexecutor.BuildPathNotFoundHintForPath(raw, workspace.Root())
+}
 
 // Glob implements searchcore.Searcher with the resolver-backed ripgrep binary.
 func (r *remoteRuntime) Glob(ctx context.Context, opts searchcore.GlobOptions) (searchcore.GlobResult, bool, error) {

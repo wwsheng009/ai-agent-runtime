@@ -1,34 +1,26 @@
-// Package lscore implements the shared one-level directory listing used by
-// local and remote ls surfaces.
+// Package lscore implements the shared directory listing used by the local and
+// remote ls surfaces: one depth-limited tree walk, one renderer, one schema.
 package lscore
 
 import (
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-const DefaultLimit = 200
-const DefaultTreeLimit = 1000
-
-type Entry struct {
-	Name string
-	Dir  bool
-	Size int64
-}
-
-type Listing struct {
-	Path      string
-	Entries   []Entry
-	Total     int
-	Dirs      int
-	Files     int
-	Returned  int
-	Truncated bool
-}
+const (
+	// DefaultLimit is the one-level page size.
+	DefaultLimit = 200
+	// DefaultTreeLimit bounds a depth>1 listing.
+	DefaultTreeLimit = 1000
+	// MaxDepth is the deepest tree the tool will walk. Deeper requests are
+	// clamped rather than rejected: the caller asked for "as deep as sensible".
+	MaxDepth = 10
+	// OutputBudgetBytes is ls's model-visible window.
+	OutputBudgetBytes = 16 * 1024
+)
 
 // TreeEntry is one path in a depth-limited recursive listing.
 type TreeEntry struct {
@@ -46,46 +38,9 @@ type TreeListing struct {
 	Dirs      int
 	Files     int
 	Truncated bool
-}
-
-// Read lists one directory, sorts directories first, and applies limit. Counts
-// describe the returned window, matching the long-standing ls contract.
-func Read(path string, limit int) (Listing, error) {
-	if limit < 1 {
-		limit = DefaultLimit
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return Listing{}, err
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir() != entries[j].IsDir() {
-			return entries[i].IsDir()
-		}
-		return entries[i].Name() < entries[j].Name()
-	})
-
-	listing := Listing{Path: path, Total: len(entries)}
-	for _, entry := range entries {
-		if listing.Returned >= limit {
-			break
-		}
-		item := Entry{Name: entry.Name(), Dir: entry.IsDir(), Size: -1}
-		if !entry.IsDir() {
-			if info, infoErr := entry.Info(); infoErr == nil {
-				item.Size = info.Size()
-			}
-		}
-		listing.Entries = append(listing.Entries, item)
-		if item.Dir {
-			listing.Dirs++
-		} else {
-			listing.Files++
-		}
-		listing.Returned++
-	}
-	listing.Truncated = len(entries) > listing.Returned
-	return listing, nil
+	// LimitHit reports a row cut, the local tool's `limit_hit`. Truncated also
+	// covers the byte window, which is not a row limit.
+	LimitHit bool
 }
 
 // ReadTree walks path up to maxDepth, sorts paths deterministically, and keeps
@@ -94,6 +49,9 @@ func Read(path string, limit int) (Listing, error) {
 func ReadTree(path string, maxDepth, limit int) (TreeListing, error) {
 	if maxDepth < 1 {
 		maxDepth = 1
+	}
+	if maxDepth > MaxDepth {
+		maxDepth = MaxDepth
 	}
 	if limit < 1 {
 		limit = DefaultTreeLimit
@@ -128,6 +86,7 @@ func ReadTree(path string, maxDepth, limit int) (TreeListing, error) {
 		}
 		if len(listing.Entries) >= limit {
 			listing.Truncated = true
+			listing.LimitHit = true
 			return filepath.SkipAll
 		}
 		return nil
@@ -148,42 +107,62 @@ func ReadTree(path string, maxDepth, limit int) (TreeListing, error) {
 	return listing, nil
 }
 
-// Render formats one listing with the stable type/size columns.
-func Render(display string, listing Listing) string {
+// RenderTree writes one depth-limited listing in the local tool's shape: a
+// "目录: <path>" header, indented entries with a directory/file marker, a
+// statistics trailer, and a truncation notice that names the next step.
+//
+// The byte window is applied here, not after rendering: the header and trailer
+// are reserved first, so a cut listing still ends with a complete trailer and a
+// usable recovery instruction.
+func RenderTree(display string, listing TreeListing, budget int) (string, int, bool) {
 	if display == "" {
 		display = "."
 	}
+	header := fmt.Sprintf("目录: %s\n\n", display)
+	trailer := treeTrailer(listing.Files, listing.Dirs, listing.Total)
+	listingBudget := budget - len(header) - len(trailer)
+	if budget <= 0 || listingBudget < 0 {
+		listingBudget = 0
+	}
+
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "=== %s ===\n", display)
-	for _, entry := range listing.Entries {
-		if entry.Dir {
-			fmt.Fprintf(&builder, "d  %s/\n", entry.Name)
-			continue
-		}
-		switch {
-		case entry.Size < 0:
-			fmt.Fprintf(&builder, "f  %s\n", entry.Name)
-		default:
-			fmt.Fprintf(&builder, "f  %-48s %10d\n", entry.Name, entry.Size)
-		}
-	}
+	builder.WriteString(header)
+	rendered := 0
+	used := 0
+	byteBudgetHit := false
 	if len(listing.Entries) == 0 {
-		builder.WriteString("(empty directory)\n")
+		builder.WriteString("(空目录)")
+	} else {
+		for _, entry := range listing.Entries {
+			prefix := strings.Repeat("  ", entry.Depth)
+			line := fmt.Sprintf("%s📄 %s\n", prefix, entry.RelPath)
+			if entry.Dir {
+				line = fmt.Sprintf("%s📁 %s/\n", prefix, entry.RelPath)
+			}
+			if rendered > 0 && used+len(line) > listingBudget {
+				byteBudgetHit = true
+				break
+			}
+			used += len(line)
+			rendered++
+			builder.WriteString(line)
+		}
 	}
-	fmt.Fprintf(&builder, "\n[entries=%d dirs=%d files=%d]\n", listing.Total, listing.Dirs, listing.Files)
-	if listing.Truncated {
-		fmt.Fprintf(&builder, "[list truncated: showing %d of %d; raise limit or list a subdirectory]\n", listing.Returned, listing.Total)
+	builder.WriteString(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", listing.Files, listing.Dirs))
+	if listing.Truncated || byteBudgetHit {
+		// ls has no offset paging: the recovery path is a smaller depth or a
+		// narrower directory. Saying only "N shown" reads as data loss.
+		fmt.Fprintf(&builder,
+			"\n(条目过多，已显示前 %d 个，共 %d 个；next_step: 减小 depth 或分目录查看，不要原样重试)",
+			rendered, listing.Total)
 	}
-	return builder.String()
+	return builder.String(), rendered, byteBudgetHit
 }
 
-func Metadata(display string, listing Listing) map[string]interface{} {
-	return map[string]interface{}{
-		"path":         display,
-		"entries":      listing.Total,
-		"dirs":         listing.Dirs,
-		"files":        listing.Files,
-		"returned":     listing.Returned,
-		"is_truncated": listing.Truncated,
-	}
+// treeTrailer is the worst-case length of the lines appended after the entry
+// list (statistics + truncation notice). Both notices print counts bounded by
+// the total, so the reserve is an upper bound and not an estimate.
+func treeTrailer(files, dirs, total int) string {
+	return fmt.Sprintf("\n统计: %d 个文件, %d 个目录", files, dirs) +
+		fmt.Sprintf("\n(条目过多，已显示前 %d 个，共 %d 个；next_step: 减小 depth 或分目录查看，不要原样重试)", total, total)
 }

@@ -103,21 +103,10 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 		enabled[name] = true
 	}
 	lsBase := remoteToolBase{cfg: cfg, workspace: workspace}
-	lsSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "Directory to list, relative to the remote workspace. Default: workspace root.",
-			},
-			"limit": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     1,
-				"description": "Maximum entries to return. Default 200.",
-			},
-		},
-		"additionalProperties": false,
-	})
+	// One ls tool means one schema. depth defaults to 1, so the remote surface
+	// keeps its old one-level behavior while gaining the local tree listing
+	// instead of declaring a parameter that only one side could honour.
+	lsSchema, err := toolkit.SchemaFromParameters(lscore.Parameters())
 	if err != nil {
 		return nil, fmt.Errorf("ls schema: %w", err)
 	}

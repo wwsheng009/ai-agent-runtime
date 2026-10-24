@@ -9,6 +9,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
@@ -75,22 +76,30 @@ func (g *GlobTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
 	return newGlobCoreRuntime(ctx, g)
 }
 
-// coreSearchTool is the local half of the shared search handlers: a tool that
-// already owns a sandbox and (optionally) a ripgrep seam.
-type coreSearchTool interface {
+// CoreRuntime exposes ls's sandbox as a toolcore.Runtime.
+func (l *LsTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	if l == nil {
+		return nil
+	}
+	return newLocalCoreRuntimeWith(ctx, &l.sandboxPolicy, nil)
+}
+
+// coreBackedTool is the local half of a shared handler: a tool that owns a
+// sandbox (and, for the search tools, a ripgrep seam).
+type coreBackedTool interface {
 	toolkit.Tool
 	CoreRuntime(context.Context) toolcore.Runtime
 }
 
-// executeCoreSearchTool runs a search tool through its shared core handler.
-// Local glob and local grep both delegate here, which is what makes "one tool,
-// two run locations" literal: the handler, the matcher, the paging rules and
-// the output shape are the same code the remote surface executes.
+// executeCoreSearchTool runs a file tool through its shared core handler. Local
+// glob, grep and ls all delegate here, which is what makes "one tool, two run
+// locations" literal: the handler, the traversal rules, the paging rules and the
+// output shape are the same code the remote surface executes.
 //
 // The result is stamped as tool-owned because the core handler already applied
 // the tool's own byte window; letting the render layer fold it again would cut
 // a page the handler had sized deliberately.
-func executeCoreSearchTool(ctx context.Context, tool coreSearchTool, params map[string]interface{}) (*toolkit.ToolResult, error) {
+func executeCoreSearchTool(ctx context.Context, tool coreBackedTool, params map[string]interface{}) (*toolkit.ToolResult, error) {
 	if tool == nil {
 		return nil, fmt.Errorf("tool is nil")
 	}
@@ -100,6 +109,8 @@ func executeCoreSearchTool(ctx context.Context, tool coreSearchTool, params map[
 		handler = searchcore.NewGlobHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
 	case *GrepTool:
 		handler = searchcore.NewGrepHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
+	case *LsTool:
+		handler = lscore.NewHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
 	default:
 		return nil, fmt.Errorf("tool %q has no shared core handler", tool.Name())
 	}

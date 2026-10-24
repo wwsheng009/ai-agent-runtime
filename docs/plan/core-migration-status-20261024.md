@@ -2,7 +2,7 @@
 
 ## 结论先说
 
-**没有。** 现状是「remote 全部走 core，本地只有 grep / glob 走 core」。
+**没有。** 现状是「remote 全部走 core，本地只有 grep / glob / ls 走 core」。
 
 这不是设计清单写错，而是**迁移只完成了一半**：core 里几乎每个工具都有 handler，
 但本地工具大多仍执行自己的 legacy 实现。
@@ -57,9 +57,10 @@ func executeCoreSearchTool(ctx, tool, params) (*toolkit.ToolResult, error)
 - `grep`：`grep_core_switch.go` 按参数集分流（`rg_args` 等 core 未覆盖的键仍走
   legacy），命中的调用进入 `executeCoreSearchTool`。
 - `glob`：`glob.go` 的 `Execute` **只有一行委托**，本地 legacy 实现已删除。
+- `ls`：同样只有一行委托；本地 legacy 的遍历、渲染与字节裁剪已删除。
 
-`view` / `ls` / `write` / `edit` / `append_write` / `apply_patch`
-在本地还是各自的实现（`view.go`、`ls.go`、`write.go`、`edit.go`、
+`view` / `write` / `edit` / `append_write` / `apply_patch`
+在本地还是各自的实现（`view.go`、`write.go`、`edit.go`、
 `append_write.go`、`apply_patch.go`）。
 
 ## 一个直接矛盾
@@ -77,14 +78,16 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 | 视角 | 现状 |
 |---|---|
 | remote 工具面 | 已全部走 core（grep/glob/view/ls/write/append_write/edit/apply_patch/artifact_read） |
-| 本地工具面 | grep / glob 走 core；其余仍是 legacy |
-| 两套实现是否分叉 | glob 只有一套代码（本地 `Execute` 直接调用 core handler），`glob_local_remote_equivalence_test.go` 对拍 public 入口；grep 仍有 legacy 兜底分支 |
+| 本地工具面 | grep / glob / ls 走 core；其余仍是 legacy |
+| 两套实现是否分叉 | glob 与 ls 只有一套代码（本地 `Execute` 直接调用 core handler），各自有对拍 public 入口的等价性测试；grep 仍有 legacy 兜底分支 |
 
 ## 尚未完成的迁移（按缺口大小）
 
 1. **`multiedit`**：core 完全没有，清单却写它是 core。
 2. **`shell`**：core 没有 Handler；`shellexec` 只是执行原语，不是工具层。
-3. **本地 `view` / `ls`**：core 已有 handler，本地未接。
+3. **本地 `view`**：core handler 只覆盖纯文本窗口；本地的图片直通、文档转换、
+   notebook 渲染、符号解析、去重与读取台账都还没有对应实现。这是最大的一块，
+   需要先决定哪些属于工具能力（应进 core）、哪些属于宿主能力（应留在本地）。
 4. **本地 `write` / `edit` / `append_write` / `apply_patch`**：core 已有 handler，本地未接。
 5. **本地 `artifact_read`**：本地是独立实现（`toolkit/tools/artifact_read.go`），
    core 的 `NewArtifactReadHandler` 只被 remote 用。
@@ -121,3 +124,22 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 - 字节窗口：16 KiB 在渲染分页时按提示长度预留后裁剪，`files` / `count` /
   `next_offset` 描述的是**实际交付**的行，不再让 L4 二次折叠。
 - schema：`searchcore.GlobParameters()` 是唯一来源，本地与 remote 不再各写一份。
+
+## ls 已收敛（2026-10-24，`Execute` 已翻转）
+
+`ls` 也只有一套实现。此前面向模型的两面行为不同：本地是带 `depth` 的树形
+列表（emoji 标记 + 统计行），remote 是单层 `d name/` 列表。按「以本地为准」，
+树形语义进 core，`depth` 默认 1 正好等于 remote 原来的行为。
+
+- `lscore.Parameters()` 是唯一 schema；remote 不再单独声明 `depth` 缺失的版本。
+- 深度上限 `MaxDepth=10`，超出则 clamp（调用方要的是「尽可能深」而不是报错）；
+  显式 `depth: 0` 才报 `INVALID_ARGUMENT`。
+- 单层默认 200 条、多层默认 1000 条：同一个数字在两种遍历下含义差太多。
+- `path` 指向文件时返回大小与权限位（本地旧行为），不再报错。
+- 空目录是 `empty_result`/`outcome=empty` 的成功结果，不是失败。
+- 16 KiB 窗口在渲染时按 header + trailer 预留后裁剪，`returned_count` 是实际
+  交付行数。
+- 路径不存在时带候选提示；本地由 sandbox 计算，remote 由 workspace 计算，
+  通过 `PathHinter` 接进同一个 handler。
+- 删掉了 `lscore.Read` / `Render` / `Metadata` / `Listing` / `Entry`：handler
+  改用 `ReadTree` 后，这些只剩自己的测试在引用，属于死代码。

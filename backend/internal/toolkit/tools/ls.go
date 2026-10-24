@@ -2,52 +2,32 @@ package tools
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"strings"
 
-	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // LsTool 列出目录工具
+//
+// It has no implementation of its own: Execute delegates to the shared lscore
+// handler, which is the same code the remote surface runs. Only the sandbox and
+// the schema live here, because those are the parts a surface actually owns.
 type LsTool struct {
 	*toolkit.BaseTool
 	sandboxPolicy
-	maxDepth int
-	limit    int
 }
 
 // NewLsTool 创建 Ls 工具
 func NewLsTool() *LsTool {
-	parameters := map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "目录路径，默认为当前目录。多个独立目录可在同一 assistant 响应中并行发起 ls 调用。",
-			},
-			"depth": map[string]interface{}{
-				"type":        "integer",
-				"description": "递归深度（默认为 1，只显示当前目录）。若目录结构很大，建议保持较小深度并分次查看不同目录。",
-			},
-		},
-		"required": []string{},
-	}
-
 	return &LsTool{
 		BaseTool: toolkit.NewBaseTool(
 			"ls",
 			"列出目录内容。优先用合适的 depth 一次取得所需子树；多个独立目录可在同一轮并行调用。",
 			"1.0.0",
-			parameters,
+			lscore.Parameters(),
 			true,
 		),
-		maxDepth: 10,
-		limit:    1000,
 	}
 }
 
@@ -62,160 +42,8 @@ func (l *LsTool) DefinitionMetadata() map[string]interface{} {
 	}
 }
 
-// Execute 实现 Tool 接口
+// Execute runs the shared lscore handler: ls has exactly one implementation, and
+// the local surface contributes only its sandbox through CoreRuntime.
 func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
-	// 解析路径
-	path := "."
-	if p, ok := params["path"].(string); ok && p != "" {
-		path = p
-	}
-	resolvedPath := l.resolvePathWithContext(ctx, path)
-	if err := l.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      err,
-		}, nil
-	}
-
-	// 解析深度
-	depth := 1
-	if d, ok := params["depth"].(float64); ok {
-		depth = int(d)
-	}
-	if d, ok := params["depth"].(int); ok {
-		depth = d
-	}
-	if d, ok := params["depth"].(int64); ok {
-		depth = int(d)
-	}
-	if depth > l.maxDepth {
-		depth = l.maxDepth
-	}
-
-	// 检查路径是否存在
-	info, err := os.Stat(resolvedPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &toolkit.ToolResult{
-				Success:    false,
-				OutputKind: toolresult.KindText,
-				Error:      l.buildPathNotFoundError(ctx, "路径不存在", path),
-			}, nil
-		}
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("无法访问路径 %s: %w", path, err),
-		}, nil
-	}
-
-	if !info.IsDir() {
-		// 如果是文件，返回文件信息
-		return &toolkit.ToolResult{
-			Success:    true,
-			OutputKind: toolresult.KindText,
-			Content:    fmt.Sprintf("%s (%d bytes, %s)", path, info.Size(), info.Mode().String()),
-			Metadata: map[string]interface{}{
-				"path":  path,
-				"isDir": false,
-				"size":  info.Size(),
-				"mode":  info.Mode().String(),
-			},
-		}, nil
-	}
-
-	// 收集目录内容。遍历、深度裁剪与条目上限由 lscore 共享实现。
-	listing, err := lscore.ReadTree(resolvedPath, depth, l.limit)
-	if err != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("遍历目录失败: %w", err),
-		}, nil
-	}
-	entries := listing.Entries
-	fileCount := listing.Files
-	dirCount := listing.Dirs
-	limitReached := listing.Truncated
-
-	// 格式化输出。条目同时受 l.limit 与 ls 自身字节预算约束：任一命中都标记
-	// truncated 并声明 L4 opt-out，避免已定形的列表被二次折叠。
-	// 头部、统计行与截断提示同属这份预算：先按最坏情况预留其长度，列表行只在
-	// 剩余额度内写入，最终 payload 才真正不超过 lsOutputBudgetBytes。
-	header := fmt.Sprintf("目录: %s\n\n", path)
-	listingBudget := lsOutputBudgetBytes - len(header) - lsTrailerReserve(fileCount, dirCount, len(entries))
-	if listingBudget < 0 {
-		listingBudget = 0
-	}
-
-	var output strings.Builder
-	output.WriteString(header)
-
-	rendered := 0
-	used := 0
-	byteBudgetHit := false
-	if len(entries) == 0 {
-		output.WriteString("(空目录)")
-	} else {
-		for _, entry := range entries {
-			prefix := strings.Repeat("  ", entry.Depth)
-			line := fmt.Sprintf("%s📄 %s\n", prefix, entry.RelPath)
-			if entry.Dir {
-				line = fmt.Sprintf("%s📁 %s/\n", prefix, entry.RelPath)
-			}
-			if rendered > 0 && used+len(line) > listingBudget {
-				byteBudgetHit = true
-				break
-			}
-			used += len(line)
-			rendered++
-			output.WriteString(line)
-		}
-	}
-
-	output.WriteString(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount))
-	if limitReached || byteBudgetHit {
-		// ls 没有 offset/limit 分页参数，恢复路径是缩小 depth / 分目录查看：
-		// 提示必须把这条路线写进模型可见正文，只报条数会被读成数据丢失。
-		output.WriteString(fmt.Sprintf("\n(条目过多，已显示前 %d 个，共 %d 个；next_step: 减小 depth 或分目录查看，不要原样重试)", rendered, len(entries)))
-	}
-
-	// Directory listing with zero entries is a true empty success (empty dir),
-	// not a tool failure. Stamp empty disposition so models do not retry the
-	// same path unchanged.
-	truncated := limitReached || byteBudgetHit
-	metadata := map[string]interface{}{
-		"path":           path,
-		"depth":          depth,
-		"file_count":     fileCount,
-		"dir_count":      dirCount,
-		"total":          len(entries),
-		"returned_count": rendered,
-		"result_count":   rendered,
-		"truncated":      truncated,
-		"limit_hit":      truncated,
-	}
-	if truncated {
-		metadata[toolresult.MetadataNextActionKey] = "目录条目超过 ls 预算已截断；请缩小 depth、分目录查看，或用 glob/grep 精确定位。不要原样重试同一路径。"
-	}
-	if len(entries) == 0 {
-		toolresult.MarkEmptySuccess(metadata)
-	}
-
-	return stampToolOwnsOutputWithBudget(&toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    output.String(),
-		Metadata:   metadata,
-	}, lsOutputBudgetBytes), nil
-}
-
-// lsTrailerReserve is the worst-case byte length of the lines ls appends after
-// the listing itself (statistics + truncation notice). The notice prints the
-// rendered and total entry counts, and the total count is a valid ceiling for
-// both, so the reserve is an upper bound rather than a guess.
-func lsTrailerReserve(fileCount, dirCount, total int) int {
-	return len(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount)) +
-		len(fmt.Sprintf("\n(条目过多，已显示前 %d 个，共 %d 个；next_step: 减小 depth 或分目录查看，不要原样重试)", total, total))
+	return executeCoreSearchTool(ctx, l, params)
 }
