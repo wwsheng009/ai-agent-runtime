@@ -70,7 +70,7 @@ func TestRemoteGrepEnginesPreserveWalkerSemantics(t *testing.T) {
 			if !result.Success {
 				t.Fatalf("grep failed: %+v", result)
 			}
-			for _, want := range []string{"visible.txt", "ignored.txt", "nested"} {
+			for _, want := range []string{"visible.txt", "nested", "node_modules"} {
 				if !strings.Contains(result.Content, want) {
 					t.Fatalf("%s grep output missing %q:\n%s", engine.name, want, result.Content)
 				}
@@ -80,14 +80,33 @@ func TestRemoteGrepEnginesPreserveWalkerSemantics(t *testing.T) {
 			if strings.Contains(result.Content, ".hidden.txt") {
 				t.Fatalf("%s grep must skip hidden files by default:\n%s", engine.name, result.Content)
 			}
-			if strings.Contains(result.Content, "node_modules") {
-				t.Fatalf("%s grep must skip node_modules:\n%s", engine.name, result.Content)
+			// .gitignore is respected by default, so the ignored file is out...
+			if strings.Contains(result.Content, "ignored.txt") {
+				t.Fatalf("%s grep must respect .gitignore by default:\n%s", engine.name, result.Content)
 			}
 			if got := result.Metadata["engine"]; got != engine.name {
 				t.Fatalf("engine = %v, want %s", got, engine.name)
 			}
 			if got := result.Metadata["hidden_files"]; got != false {
 				t.Fatalf("hidden_files = %v, want false", got)
+			}
+			if got := result.Metadata["ignore_files"]; got != true {
+				t.Fatalf("ignore_files = %v, want true", got)
+			}
+			// ...and no_ignore brings it back without touching anything else.
+			noIgnore, err := tool.Execute(context.Background(), map[string]interface{}{
+				"pattern":   "needle",
+				"path":      ".",
+				"no_ignore": true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(noIgnore.Content, "ignored.txt") {
+				t.Fatalf("%s grep with no_ignore=true must find the ignored file:\n%s", engine.name, noIgnore.Content)
+			}
+			if got := noIgnore.Metadata["ignore_files"]; got != false {
+				t.Fatalf("ignore_files = %v, want false when no_ignore=true", got)
 			}
 			// The same call with `hidden: true` must reach the hidden file on
 			// both engines, so the flag is a capability and not a difference.
@@ -104,9 +123,6 @@ func TestRemoteGrepEnginesPreserveWalkerSemantics(t *testing.T) {
 			}
 			if got := withHidden.Metadata["hidden_files"]; got != true {
 				t.Fatalf("hidden_files = %v, want true when hidden=true", got)
-			}
-			if got := result.Metadata["ignore_files"]; got != false {
-				t.Fatalf("ignore_files = %v, want false", got)
 			}
 		})
 	}
@@ -137,13 +153,10 @@ func TestRemoteGlobEnginesPreserveWalkerSemantics(t *testing.T) {
 			if !result.Success {
 				t.Fatalf("glob failed: %+v", result)
 			}
-			for _, want := range []string{"visible.txt", ".hidden.txt", "ignored.txt", "nested"} {
+			for _, want := range []string{"visible.txt", ".hidden.txt", "ignored.txt", "nested", "node_modules"} {
 				if !strings.Contains(result.Content, want) {
 					t.Fatalf("%s glob output missing %q:\n%s", engine.name, want, result.Content)
 				}
-			}
-			if strings.Contains(result.Content, "node_modules") {
-				t.Fatalf("%s glob must skip node_modules:\n%s", engine.name, result.Content)
 			}
 			if got := result.Metadata["engine"]; got != engine.name {
 				t.Fatalf("engine = %v, want %s", got, engine.name)
@@ -208,7 +221,10 @@ func TestRemoteSearchLimitTruncates(t *testing.T) {
 	}
 }
 
-func TestRemoteSearchCallerGlobCannotReincludeSkippedDirs(t *testing.T) {
+// TestRemoteSearchReachesDependencyTrees pins the unified scope policy: there
+// is no hardcoded skipped-tree list any more (the local tools never had one),
+// so both grep and glob reach node_modules unless an ignore file excludes it.
+func TestRemoteSearchReachesDependencyTrees(t *testing.T) {
 	cfg, workspace := newSearchFixture(t)
 	engines := []struct {
 		name string
@@ -231,8 +247,8 @@ func TestRemoteSearchCallerGlobCannotReincludeSkippedDirs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := result.Metadata["matches"]; got != 0 {
-				t.Fatalf("grep matches = %v, want 0:\n%s", got, result.Content)
+			if got := result.Metadata["matches"]; got != 1 {
+				t.Fatalf("grep matches = %v, want 1:\n%s", got, result.Content)
 			}
 
 			glob := newRemoteGlobTool(cfg, workspace)
@@ -243,8 +259,8 @@ func TestRemoteSearchCallerGlobCannotReincludeSkippedDirs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := result.Metadata["matches"]; got != 0 {
-				t.Fatalf("glob matches = %v, want 0:\n%s", got, result.Content)
+			if got := result.Metadata["matches"]; got != 1 {
+				t.Fatalf("glob matches = %v, want 1:\n%s", got, result.Content)
 			}
 		})
 	}

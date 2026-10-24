@@ -499,3 +499,49 @@ func TestRemoteGrepHiddenOverMCP(t *testing.T) {
 		t.Fatalf("no_hidden must win over hidden:\n%s", noHidden)
 	}
 }
+
+// TestRemoteGrepIgnoreOverMCP proves the ignore parameters survive schema
+// validation: .gitignore is respected by default, no_ignore disables the whole
+// mechanism, and an explicit ignore_file stacks on top of it.
+func TestRemoteGrepIgnoreOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		".gitignore":   "skip.txt\n",
+		"keep.txt":     "hit keep\n",
+		"skip.txt":     "hit skip\n",
+		"third.txt":    "hit third\n",
+		"extra.ignore": "third.txt\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	def := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{"pattern": "hit"})
+	if !strings.Contains(def, "keep.txt") || strings.Contains(def, "skip.txt") {
+		t.Fatalf(".gitignore must be respected by default:\n%s", def)
+	}
+
+	noIgnore := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "no_ignore": true,
+	})
+	if !strings.Contains(noIgnore, "skip.txt") {
+		t.Fatalf("no_ignore must bring the ignored file back:\n%s", noIgnore)
+	}
+
+	stacked := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "ignore_file": "extra.ignore",
+	})
+	if !strings.Contains(stacked, "keep.txt") {
+		t.Fatalf("an explicit ignore_file must not drop unrelated files:\n%s", stacked)
+	}
+	if strings.Contains(stacked, "third.txt") || strings.Contains(stacked, "skip.txt") {
+		t.Fatalf("an explicit ignore_file stacks on .gitignore (both stay ignored):\n%s", stacked)
+	}
+}

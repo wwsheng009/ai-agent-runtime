@@ -59,6 +59,18 @@ type GrepOptions struct {
 	// for it, which is both the long-standing local behaviour and ripgrep's own
 	// default.
 	IncludeHidden bool
+	// Ignore-file handling follows the local tool: `.ignore`/`.rgignore`,
+	// `.gitignore`, `.git/info/exclude`, ancestor directories and the two global
+	// candidates are consulted unless a switch turns that source off, and
+	// NoIgnore turns the whole mechanism off. IgnoreFiles holds absolute paths
+	// from the `ignore_file(s)` argument.
+	NoIgnore       bool
+	NoIgnoreParent bool
+	NoIgnoreVCS    bool
+	NoIgnoreDot    bool
+	NoIgnoreGlobal bool
+	NoIgnoreFiles  bool
+	IgnoreFiles    []string
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -146,7 +158,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 	}
 	reader := newLineReader()
-	visit := func(root, path string) error {
+	visit := func(root string, rules *grepIgnoreRules, path string) error {
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -164,6 +176,9 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			return nil
 		}
 		if !opts.IncludeHidden && isHiddenGrepPath(relativeGrepCandidate(root, path)) {
+			return nil
+		}
+		if rules != nil && ignoredByGrepRules(rules.rulesFor(path), path) {
 			return nil
 		}
 		if shouldFilterGrepCandidate(relativeGrepCandidate(root, path), includeFilter, excludeFilter) {
@@ -219,9 +234,10 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	}
 
 	for _, root := range roots {
+		rules := newGrepIgnoreRules(newGrepIgnorePolicy(opts), root)
 		if info, statErr := os.Stat(root); statErr == nil && info.Mode().IsRegular() {
 			if globMatcher == nil || globMatcher.Match(filepath.Base(root)) {
-				if err := visit(root, root); err != nil && err != filepath.SkipAll {
+				if err := visit(root, rules, root); err != nil && err != filepath.SkipAll {
 					return GrepResult{}, err
 				}
 			}
@@ -243,7 +259,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 					if !opts.IncludeHidden && path != root && strings.HasPrefix(entry.Name(), ".") {
 						return filepath.SkipDir
 					}
-					if ShouldSkipDir(entry.Name()) && path != root {
+					if rules != nil && ignoredByGrepRules(rules.rulesFor(path), path) {
 						return filepath.SkipDir
 					}
 					// Depth mirrors the local tool: a direct child directory has
@@ -261,7 +277,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				if globMatcher != nil && !globMatcher.Match(entry.Name()) {
 					return nil
 				}
-				return visit(root, path)
+				return visit(root, rules, path)
 			})
 			if walkErr != nil && walkErr != filepath.SkipAll {
 				return GrepResult{}, walkErr

@@ -222,18 +222,29 @@
   因此主流程翻转的推荐顺序是：先 (1) 作用域参数进 core → (2) 本地 rg runner 接
   `Searcher` → (3) 输出/预算层归属决策与分批迁移测试，再翻转。
   **hidden 语义统一（2026-10-24，按「同一工具一套行为」执行）**：core 新增
-  `GrepOptions.IncludeHidden`，walker 跳过隐藏文件与隐藏目录（含 `.git` 在内的
-  `SkippedDirNames` 仍独立跳过），显式请求的隐藏根目录保持可搜索；rg 侧不再无条件传
+  `GrepOptions.IncludeHidden`，walker 跳过隐藏文件与隐藏目录，显式请求的隐藏根目录保持可搜索；rg 侧不再无条件传
   `--hidden`，改由该选项驱动（glob 仍显式传 `--hidden`，它的隐藏策略属于待参数化的
   独立项）。默认值与本地工具、ripgrep 默认一致：**跳过隐藏**，`hidden: true` 打开，
   `no_hidden` 覆盖 `hidden`；remote schema 声明同一对参数，metadata `hidden_files`
   反映实际生效值。副作用是 remote 的默认搜索不再包含隐藏文件——这是刻意对齐默认值，
-  而不是按运行位置保留差异。注意 ignore 文件策略仍待统一（core 现状：不读取 ignore
-  文件，walker/rg 一致；本地 legacy 仍读 `.gitignore`，翻转时按 core 契约收敛）。
+  而不是按运行位置保留差异。
+  **ignore 策略以本地为准统一（2026-10-24）**：本地 ignore 引擎按同一规则移植进
+  core（`searchcore/grep_ignore.go`）：来源为 `.ignore`/`.rgignore`、`.gitignore`、
+  `.git/info/exclude`、祖先目录、两个全局候选（`~/.config/git/ignore`、
+  `~/.gitignore_global`）与显式 `ignore_file(s)`；解析支持 `#` 注释、`\#`/`\!` 转义、
+  `!` 取反；规则「后匹配者胜」、按文件所在目录限定作用域；显式给出的单个文件同样受
+  其目录规则约束（继承本地行为）。`no_ignore`/`no_ignore_parent`/`no_ignore_vcs`/
+  `no_ignore_dot`/`no_ignore_global`/`no_ignore_files` 与 rg 同名旗标一一映射。
+  **同时删除硬编码跳过表**（`SkippedDirNames`/`ShouldSkipDir`/`skipArgs`/
+  `hasSkippedPathComponent`）：grep 与 glob 都不再按名字跳过 `node_modules`/`.git`
+  （与本地一致，本地测试明确断言 node_modules 默认可搜索）；`.git` 现在只由 hidden
+  规则排除，`hidden: true` 时可进入。另修正一个实测发现：非 git 目录下 rg 默认不套用
+  `.gitignore`，需 `--no-require-git`（无该旗标时 temp 目录的 `.gitignore` 完全不生效），
+  否则 walker 与 rg 同一目录结果不同。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
   type/type_not、max_count、only_matching、max_depth/max_filesize、stats、多根语义
-  已进 core；files_without、ignore 族与本地上下文渲染格式仍在本地）；
+  与 ignore 族已进 core；files_without 与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。

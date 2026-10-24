@@ -43,28 +43,15 @@ func (r ripgrepRunner) available() bool {
 	return r.path != ""
 }
 
-// baseArgs keep ripgrep's traversal aligned with searchcore: ignore files are
-// not consulted and the same dependency/VCS trees are skipped. Hidden handling
-// is per caller - grep passes it only when its IncludeHidden option is set,
-// glob keeps its (still unconditional) inclusion. A single thread plus path
-// sorting makes limit behavior deterministic.
+// baseArgs hold the flags every caller shares: no ripgrep config file, one
+// thread and path sorting for deterministic paging. Ignore/hidden/skip handling
+// is per caller, because grep mirrors the tool's ignore-file contract while glob
+// keeps its own.
 func (r ripgrepRunner) baseArgs() []string {
 	args := []string{
 		"--no-config",
-		"--no-ignore",
 		"--threads", "1",
 		"--sort", "path",
-	}
-	return args
-}
-
-// skipArgs must be appended after any caller-supplied glob. ripgrep applies
-// glob rules in order, with later rules winning, so the walker's skipped trees
-// stay excluded even when a caller writes a broad include glob.
-func (r ripgrepRunner) skipArgs() []string {
-	args := make([]string, 0, 2*len(searchcore.SkippedDirNames))
-	for _, name := range searchcore.SkippedDirNames {
-		args = append(args, "--glob", "!**/"+name+"/**")
 	}
 	return args
 }
@@ -95,9 +82,9 @@ func (r ripgrepRunner) glob(ctx context.Context, opts searchcore.GlobOptions) (s
 
 	args := append(r.baseArgs(), "--files", "--glob", pattern)
 	// Glob's contract still includes hidden entries on both surfaces; that
-	// stays explicit here until its hidden policy is parameterized too.
-	args = append(args, "--hidden")
-	args = append(args, r.skipArgs()...)
+	// stays explicit here until its hidden policy is parameterized too, and it
+	// keeps ignoring nothing (the same policy the local glob tool has).
+	args = append(args, "--hidden", "--no-ignore")
 	args = append(args, "--", ".")
 	lines, outputTruncated, runErr := r.runLines(ctx, base, args, opts.Offset+limit+1)
 	if runErr != nil {
@@ -107,7 +94,7 @@ func (r ripgrepRunner) glob(ctx context.Context, opts searchcore.GlobOptions) (s
 	result := searchcore.GlobResult{}
 	for _, line := range lines {
 		rel := filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(line), "./"))
-		if rel == "" || rel == "." || hasSkippedPathComponent(rel) || !matcher.Match(rel) {
+		if rel == "" || rel == "." || !matcher.Match(rel) {
 			continue
 		}
 		candidate := filepath.FromSlash(rel)
@@ -134,16 +121,6 @@ func (r ripgrepRunner) glob(ctx context.Context, opts searchcore.GlobOptions) (s
 	result.NextOffset = opts.Offset + len(result.Matches)
 	result.HasMore = result.Truncated
 	return result, true, nil
-}
-
-func hasSkippedPathComponent(rel string) bool {
-	parts := strings.Split(rel, "/")
-	for i := 0; i < len(parts)-1; i++ {
-		if searchcore.ShouldSkipDir(parts[i]) {
-			return true
-		}
-	}
-	return false
 }
 
 // grep runs one ripgrep process per search root. ripgrep's --sort path sorts
@@ -277,8 +254,37 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	}
 
 	args := append(r.baseArgs(), "--text", "--json")
+	// The walker applies ignore files wherever they exist; ripgrep only applies
+	// them inside a git repository unless told otherwise (verified: without
+	// this flag a temp directory's .gitignore is not consulted at all).
+	// --no-require-git keeps the two engines on the same contract.
+	args = append(args, "--no-require-git")
 	if opts.IncludeHidden {
 		args = append(args, "--hidden")
+	}
+	// Ignore-file handling mirrors the walker and the local tool: files are
+	// consulted by default, every `no_ignore*` switch maps to its ripgrep flag,
+	// and explicit ignore_file entries are passed through.
+	if opts.NoIgnore {
+		args = append(args, "--no-ignore")
+	}
+	if opts.NoIgnoreParent {
+		args = append(args, "--no-ignore-parent")
+	}
+	if opts.NoIgnoreVCS {
+		args = append(args, "--no-ignore-vcs")
+	}
+	if opts.NoIgnoreDot {
+		args = append(args, "--no-ignore-dot")
+	}
+	if opts.NoIgnoreGlobal {
+		args = append(args, "--no-ignore-global")
+	}
+	if opts.NoIgnoreFiles {
+		args = append(args, "--no-ignore-files")
+	}
+	for _, file := range opts.IgnoreFiles {
+		args = append(args, "--ignore-file", file)
 	}
 	if globMatcher != nil {
 		args = append(args, "--glob", opts.Glob)
@@ -346,7 +352,6 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	if onlyMatching {
 		args = append(args, "--only-matching")
 	}
-	args = append(args, r.skipArgs()...)
 	for _, pattern := range patterns {
 		args = append(args, "-e", pattern)
 	}

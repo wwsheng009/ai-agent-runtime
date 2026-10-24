@@ -387,6 +387,50 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "显式关闭隐藏文件：与 hidden 同时出现时 no_hidden 优先。",
 			},
+			"no_ignore": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore：完全关闭 ignore 文件（.gitignore/.ignore/.rgignore/.git/info/exclude/祖先/全局都不再生效）。默认行为是尊重这些 ignore 文件。",
+			},
+			"no_ignore_parent": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-parent：忽略祖先目录中的 ignore 文件。",
+			},
+			"no_ignore_vcs": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-vcs：忽略版本控制系统的 ignore 规则（.gitignore、.git/info/exclude）。",
+			},
+			"no_ignore_dot": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-dot：忽略 .ignore/.rgignore 规则。",
+			},
+			"no_ignore_global": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-global：忽略全局 ignore 文件（~/.config/git/ignore、~/.gitignore_global）。",
+			},
+			"no_ignore_files": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --no-ignore-files：禁用通过 ignore_file(s) 显式指定的 ignore 文件。",
+			},
+			"ignore_file": map[string]interface{}{
+				"anyOf": []map[string]interface{}{
+					{"type": "string"},
+					{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"description": "兼容 rg 的 --ignore-file：额外指定 ignore 文件；每行规则的作用域是该文件所在目录。可传字符串数组或逗号分隔的单个字符串。",
+			},
+			"ignore_files": map[string]interface{}{
+				"anyOf": []map[string]interface{}{
+					{"type": "string"},
+					{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"description": "ignore_file 的复数拼写，两者等价并合并使用。",
+			},
 		},
 		// At least one pattern spelling is required, but which one is a
 		// handler-level rule: `patterns` is a valid substitute for `pattern`,

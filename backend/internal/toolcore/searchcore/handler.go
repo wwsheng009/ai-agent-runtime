@@ -165,6 +165,10 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	// `no_hidden` wins over `hidden`, mirroring the local parameter pair.
 	includeHidden := boolArg(call.Args, "hidden") && !boolArg(call.Args, "no_hidden")
+	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(call, paths)
+	if ignoreFailure != nil {
+		return ignoreFailure, nil
+	}
 	contextBefore, contextAfter := grepContextFromArgs(call.Args)
 	if onlyMatching && (contextBefore > 0 || contextAfter > 0) {
 		// Reporting the conflict beats silently dropping one of the two
@@ -199,6 +203,13 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		MaxDepthSet:      maxDepthSet,
 		MaxFileSizeBytes: maxFileSizeBytes,
 		IncludeHidden:    includeHidden,
+		NoIgnore:         boolArg(call.Args, "no_ignore"),
+		NoIgnoreParent:   boolArg(call.Args, "no_ignore_parent"),
+		NoIgnoreVCS:      boolArg(call.Args, "no_ignore_vcs"),
+		NoIgnoreDot:      boolArg(call.Args, "no_ignore_dot"),
+		NoIgnoreGlobal:   boolArg(call.Args, "no_ignore_global"),
+		NoIgnoreFiles:    boolArg(call.Args, "no_ignore_files"),
+		IgnoreFiles:      ignoreFiles,
 		Limit:            intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:     captureLimit(call),
 		Offset:           intArg(call.Args, "offset", 0),
@@ -309,7 +320,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"has_more":           result.Truncated,
 		"engine":             engine,
 		"hidden_files":       options.IncludeHidden,
-		"ignore_files":       false,
+		"ignore_files":       !options.NoIgnore,
+		"ignore_file_count":  len(options.IgnoreFiles),
 	}
 	if boolArg(call.Args, "stats") {
 		// Page-level statistics, not a whole-search summary: see GrepStats.
@@ -492,6 +504,26 @@ func grepModeFromArgs(args map[string]any) (GrepMode, *toolcore.Result) {
 		return "", toolcore.Error(toolcore.ErrInvalidArgument, "use mode=content|files|count", err)
 	}
 	return mode, nil
+}
+
+// grepIgnoreFilesFromArgs resolves the explicit ignore_file(s) spellings into
+// absolute paths, so both engines read the same files. The string spelling is
+// split on top-level commas exactly like the other scalar lists.
+func grepIgnoreFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver) ([]string, *toolcore.Result) {
+	raw := append(append([]string{}, GrepGlobListFromArgs(call.Args, "ignore_file")...),
+		GrepGlobListFromArgs(call.Args, "ignore_files")...)
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	resolved := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		abs, err := paths.Resolve(entry)
+		if err != nil {
+			return nil, toolcore.Error(toolcore.ErrPathDenied, "use an ignore_file inside the workspace", err)
+		}
+		resolved = append(resolved, abs)
+	}
+	return resolved, nil
 }
 
 // grepPageUnit names the pagination unit for the truncation notice.

@@ -36,10 +36,10 @@ func TestGrepHiddenPolicy(t *testing.T) {
 	assertFileList(t, grepFilterMatches(t, root, GrepOptions{Pattern: "needle", Limit: 50}),
 		[]string{"nested/ok.txt", "visible.txt"})
 
-	// `.git` stays on the shared skipped-tree list even with hidden enabled, so
-	// only the hidden file and the hidden cache tree reappear.
+	// With hidden enabled every dot-path is searched, including .git: there is
+	// no hardcoded skip list left, exactly like the local tool.
 	withHidden := grepFilterMatches(t, root, GrepOptions{Pattern: "needle", IncludeHidden: true})
-	assertFileList(t, withHidden, []string{".cache/deep.txt", ".hidden.txt", "nested/ok.txt", "visible.txt"})
+	assertFileList(t, withHidden, []string{".cache/deep.txt", ".git/config", ".hidden.txt", "nested/ok.txt", "visible.txt"})
 
 	// An explicitly requested hidden directory stays searchable: the exemption
 	// is about the given root, not about its name.
