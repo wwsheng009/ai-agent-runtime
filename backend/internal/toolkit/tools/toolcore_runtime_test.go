@@ -1,0 +1,83 @@
+package tools
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
+)
+
+type coreRun struct {
+	Content  string
+	Metadata map[string]interface{}
+}
+
+func runLocalCoreGrep(t *testing.T, root string, rgAvailable bool, args map[string]interface{}) coreRun {
+	t.Helper()
+	tool := NewGrepTool()
+	tool.SetBasePath(root)
+	tool.lookPath = func(string) (string, error) {
+		if rgAvailable {
+			return "rg", nil
+		}
+		return "", os.ErrNotExist
+	}
+	tool.runCommand = realRunGrepCommand
+	handler := searchcore.NewGrepHandler(toolcore.Definition{Name: "grep", Version: "1.0.0"})
+	result, err := handler.Execute(context.Background(), &toolcore.Call{
+		Args:    args,
+		Runtime: tool.CoreRuntime(context.Background()),
+	})
+	if err != nil {
+		t.Fatalf("core grep (rg=%v): %v", rgAvailable, err)
+	}
+	converted := toolkit.ResultToToolkit(result)
+	return coreRun{Content: converted.Content, Metadata: converted.Metadata}
+}
+
+// realRunGrepCommand shells out to the actual binary, mirroring runGrepCommand
+// without the budget plumbing: this test only needs a real ripgrep process.
+func realRunGrepCommand(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, binaryPath, args...)
+	cmd.Dir = workingDir
+	cmd.Stdin = nil
+	return cmd.Output()
+}
+
+// TestLocalCoreRuntimeUsesRipgrepThroughSearcher proves the local core runtime
+// reaches the shared ripgrep engine through the tool's lookPath/runCommand
+// seam: engine metadata flips to ripgrep when the binary is available, and
+// back to walker when it is not. Both engines must return the same content.
+func TestLocalCoreRuntimeUsesRipgrepThroughSearcher(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"a.txt": "needle a\n",
+		"b.txt": "needle b\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	walkerRun := runLocalCoreGrep(t, root, false, map[string]interface{}{"pattern": "needle", "path": "."})
+	if got := walkerRun.Metadata["engine"]; got != "walker" {
+		t.Fatalf("engine = %v, want walker when rg is unavailable", got)
+	}
+
+	rgRun := runLocalCoreGrep(t, root, true, map[string]interface{}{"pattern": "needle", "path": "."})
+	if got := rgRun.Metadata["engine"]; got != "ripgrep" {
+		t.Fatalf("engine = %v, want ripgrep when rg is available", got)
+	}
+	if rgRun.Content != walkerRun.Content {
+		t.Fatalf("engine outputs diverged:\nwalker:\n%s\nripgrep:\n%s", walkerRun.Content, rgRun.Content)
+	}
+	if !strings.Contains(rgRun.Content, "a.txt") {
+		t.Fatalf("expected matches in output:\n%s", rgRun.Content)
+	}
+}

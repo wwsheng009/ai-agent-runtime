@@ -450,8 +450,8 @@ func TestSafeRipgrepGlob(t *testing.T) {
 		"/root/*.go":  false,
 	}
 	for pattern, want := range cases {
-		if got := safeRipgrepGlob(pattern); got != want {
-			t.Errorf("safeRipgrepGlob(%q) = %v, want %v", pattern, got, want)
+		if got := searchcore.RipgrepGlobIsSafe(pattern); got != want {
+			t.Errorf("RipgrepGlobIsSafe(%q) = %v, want %v", pattern, got, want)
 		}
 	}
 }

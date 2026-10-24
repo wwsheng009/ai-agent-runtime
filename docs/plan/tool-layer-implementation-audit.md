@@ -241,6 +241,13 @@
   规则排除，`hidden: true` 时可进入。另修正一个实测发现：非 git 目录下 rg 默认不套用
   `.gitignore`，需 `--no-require-git`（无该旗标时 temp 目录的 `.gitignore` 完全不生效），
   否则 walker 与 rg 同一目录结果不同。
+  **rg 引擎上移 core（2026-10-24）**：ripgrep 执行体从 `remotetools/rg_search.go`
+  整体迁入 `searchcore/ripgrep_engine.go`（`searchcore.Ripgrep` + `RipgrepStream`
+  seam）。remote 侧 `ripgrepRunner` 缩为二进制查找 + 委托（全部旗标构造、JSON 解析、
+  分页与早停逻辑只有这一份）；本地 `localCoreRuntime` 实现 `searchcore.Searcher`
+  （`Grep`/`Glob`），经工具自身的 `lookPath`/`runCommand` 注入面驱动同一引擎——
+  `TestLocalCoreRuntimeUsesRipgrepThroughSearcher` 证明 rg 可用时 engine=ripgrep、
+  不可用时回退 walker 且两条路径 Content 一致。这补上了翻转缺口清单的 (a) 类。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、

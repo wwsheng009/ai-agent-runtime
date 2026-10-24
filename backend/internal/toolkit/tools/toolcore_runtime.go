@@ -8,6 +8,7 @@ import (
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 )
 
 // localCoreRuntime adapts a local file tool's sandbox to the toolcore Runtime
@@ -17,19 +18,24 @@ import (
 // nil because the read-only handlers do not consume them.
 type localCoreRuntime struct {
 	policy *sandboxPolicy
+	grep   *GrepTool
 	ctx    context.Context
 	base   string
 }
 
-func newLocalCoreRuntime(ctx context.Context, policy *sandboxPolicy) toolcore.Runtime {
+func newLocalCoreRuntime(ctx context.Context, tool *GrepTool) toolcore.Runtime {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	var policy *sandboxPolicy
+	if tool != nil {
+		policy = &tool.sandboxPolicy
 	}
 	base := ""
 	if policy != nil {
 		base = policy.effectiveBasePath(ctx)
 	}
-	return &localCoreRuntime{policy: policy, ctx: ctx, base: base}
+	return &localCoreRuntime{policy: policy, grep: tool, ctx: ctx, base: base}
 }
 
 // CoreRuntime exposes this tool's sandbox as a toolcore.Runtime, letting shared
@@ -39,7 +45,104 @@ func (g *GrepTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
 	if g == nil {
 		return nil
 	}
-	return newLocalCoreRuntime(ctx, &g.sandboxPolicy)
+	return newLocalCoreRuntime(ctx, g)
+}
+
+// Grep implements searchcore.Searcher with the shared ripgrep engine, executed
+// through this tool's lookPath/runCommand seam so tests and hosts keep their
+// injection point. wasUsed=false means "use the pure-Go walker".
+func (r *localCoreRuntime) Grep(ctx context.Context, opts searchcore.GrepOptions) (searchcore.GrepResult, bool, error) {
+	engine, ok := r.ripgrepEngine()
+	if !ok {
+		return searchcore.GrepResult{}, false, nil
+	}
+	return engine.Grep(ctx, opts)
+}
+
+// Glob implements searchcore.Searcher the same way as Grep.
+func (r *localCoreRuntime) Glob(ctx context.Context, opts searchcore.GlobOptions) (searchcore.GlobResult, bool, error) {
+	engine, ok := r.ripgrepEngine()
+	if !ok {
+		return searchcore.GlobResult{}, false, nil
+	}
+	return engine.Glob(ctx, opts)
+}
+
+func (r *localCoreRuntime) ripgrepEngine() (searchcore.Ripgrep, bool) {
+	if r == nil || r.grep == nil {
+		return searchcore.Ripgrep{}, false
+	}
+	path, ok := r.grep.ripgrepBinaryPath()
+	if !ok {
+		return searchcore.Ripgrep{}, false
+	}
+	return searchcore.Ripgrep{Path: path, Stream: r.grep.ripgrepStream()}, true
+}
+
+// ripgrepBinaryPath resolves the rg binary through the tool's lookPath seam,
+// which is exactly how the local legacy path decides whether ripgrep is usable.
+func (g *GrepTool) ripgrepBinaryPath() (string, bool) {
+	if g == nil || g.lookPath == nil {
+		return "", false
+	}
+	path, err := g.lookPath("rg")
+	if err != nil || strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(path), true
+}
+
+// ripgrepStream runs ripgrep through the tool's runCommand seam and replays its
+// buffered output line by line. That seam cannot cancel a process mid-stream,
+// so the shared engine's early stop only ends consumption here; surfaces whose
+// stream is the engine's own exec implementation keep streaming cancellation.
+func (g *GrepTool) ripgrepStream() searchcore.RipgrepStream {
+	return func(ctx context.Context, args []string, dir string, consume func(line []byte) bool) error {
+		if g == nil || g.runCommand == nil {
+			return fmt.Errorf("ripgrep runner is not bound")
+		}
+		path, ok := g.ripgrepBinaryPath()
+		if !ok {
+			return fmt.Errorf("ripgrep is not available")
+		}
+		if strings.TrimSpace(dir) == "" {
+			dir = g.effectiveBasePath(ctx)
+		}
+		output, err := g.runCommand(ctx, path, dir, args)
+		if err != nil {
+			if !isRipgrepNoMatch(err) {
+				return err
+			}
+		}
+		for _, line := range splitRipgrepStreamLines(output) {
+			if !consume(line) {
+				break
+			}
+		}
+		return nil
+	}
+}
+
+func splitRipgrepStreamLines(output []byte) [][]byte {
+	if len(output) == 0 {
+		return nil
+	}
+	lines := make([][]byte, 0, 16)
+	start := 0
+	for i := 0; i < len(output); i++ {
+		if output[i] != '\n' {
+			continue
+		}
+		line := output[start:i]
+		if len(line) > 0 {
+			lines = append(lines, line)
+		}
+		start = i + 1
+	}
+	if start < len(output) {
+		lines = append(lines, output[start:])
+	}
+	return lines
 }
 
 func (r *localCoreRuntime) Root() string { return r.base }
