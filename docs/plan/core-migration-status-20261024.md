@@ -300,3 +300,87 @@ freeform lark 语法元数据、`patch` / `_raw` 参数归一化，以及一行�
 然后 2+6（目录与拼写），最后 4+5（文档/图片/符号，需要先定宿主/工具边界）。
 每一步都按 apply_patch 那轮的做法：整段平移 -> 翻转 `Execute` -> 用本地测试
 逐个暴露等价缺口 -> 补 core -> 全量回归。
+## view 第一段已收敛（2026-10-25）：读取窗口层
+
+按上一节的顺序先做第 1 项（纯读窗口语义）＋第 2/7 项里不依赖宿主的那几块。
+做法和 edit/apply_patch 那两轮一样：整段平移，不是重写。
+
+量级变化（同一把尺子）：
+
+| 文件 | 之前 | 现在 |
+|---|---|---|
+| `toolkit/tools/view.go`（本地） | 1606 | **1040** |
+| `toolcore/viewcore/read.go`（新） | — | 688 |
+| `toolcore/viewcore/view.go` | 328（含 `Read`/`Render`/`Metadata`） | 188（只剩 `LineReader`） |
+| `toolcore/textcodec/encoding.go`（新） | — | 171 |
+
+平移进 core 的（逐段对应本地实现）：
+
+- `ReadText` / `ReadWindow`：编码感知读取（BOM/UTF-16 先解码）、正向窗口、
+  负向窗口（`-N` 读最后 N 行，环形缓冲 + `orderedTailLines` + `trimTailToByteBudget`）、
+  字节预算、行数上限、`readLine` 的 rune 截断与 `accountLineTruncation` 的
+  逐行丢失记账。
+- `Stats`：本地 `viewReadResult` 的全部字段（tail 系列、reader clamp 计数、
+  长行丢失、original bytes、空文件标记）。宿主侧的台账/去重不需要重新推导窗口语义。
+- `WindowMetadata` / `BuildResult` / `AttachEfficiencyHints`：**纯文本与派生渲染
+  （文档/notebook）共用同一份窗口元数据**，本地 `view_window_meta.go` 随之删除。
+- `FormatContent`、`IsBinaryContent`、`DirectoryPreview`、`ClampLinePrefix`。
+
+编码编解码器挪到 `toolcore/textcodec`：读取路径不必再 import 变更路径（原来的
+`viewcore -> mutatecore` 依赖是这次拆包的原因），`mutatecore` 保留同名薄别名，
+写入侧所有调用点零改动。
+
+## 这一轮定下的三处「以本地为准」
+
+1. **一种渲染**：`N: 文本`，没有头部。core 原来的
+   `=== path (offset N, limit M) ===` 头部本地从来没有过，已删除；批处理的每节
+   也统一成本地的 `===== path =====`（原来是 `=== path ===`）。
+2. **一种行截断**：2000 rune + 诚实标记（`…[line truncated: N more chars]`）。
+   core 原来的 4096 字节上限被替换——两者同时存在时，同一个文件在两侧会被截到
+   不同的位置。
+3. **一种字节预算**：工具自己声明的 32 KiB 窗口，所有面共用
+   （`byteBudget` 依次取 surface `CaptureLimit` → `Definition.DefaultOutputBudget`
+   → `DefaultByteBudget`）。
+
+顺带修掉一个陷阱：`ByteBudget == 0` 在本地语义里不是「不限量」而是「每窗口一行」。
+`ReadWindow` 现在把非正值当默认预算，免得某个面漏传参数就悄悄退化成一行窗口。
+
+## 证据
+
+- `TestViewLocalAndCoreRenderTheSameWindow`（新，`toolkit/tools`）：同一个请求分别
+  走本地工具和 core handler（remote 执行的那条路），断言 **content 逐字节相同**
+  且 17 个窗口元数据字段相同，覆盖 8 种窗口形态（整文件/窗口/tail/tail+limit/
+  越界/空文件/UTF-16/长行）。这是「一套实现、两个位置」第一次可被测试直接验证，
+  而不是靠人工比对。
+- `viewcore` 的读取测试按新 API 重写（窗口、tail、越界与空文件提示、字节预算、
+  长行记账、UTF-16 解码、目录预览）。
+- 本地 `view_read_hardening_test.go` 一行断言改为引用 `viewcore` 常量后原样通过，
+  说明本地测试仍然守着同一套契约。
+- `go build ./...`、`go vet ./...` 干净；`./internal/...` 全绿。
+
+**本机预存在失败（与本次改动无关，已单独验证）**：
+`internal/api/runtimeapi` 的 `TestSessionMCPAddCreatesWorkspaceFileWhenMissing`
+断言「首次 add 前应回落到 workspace 作用域」，但本机存在
+`~/.aicli/mcp.yaml`（user 作用域，`Exists:true`），于是前置条件不成立。
+用 `HOME=/tmp/emptyhome` 重跑同一个测试即通过——失败来自开发机 home 目录，
+不是代码回归。
+
+## 下一轮：view 剩下的四块
+
+1. **非文本结果**（上一节第 3 项）：`binaryNoteResult`（二进制给 MIME+大小+恢复
+   路线而不是硬失败）、`unsupportedPathResult`（设备/FIFO/保留名在 open 之前拒绝，
+   带 `path_refused`/`refusal_reason`）。纯策略，进 core 没有障碍。
+2. **批处理预算**（第 8 项）：`viewBatchSectionBudgetBytes`、尾块预留
+   `trimBatchTail`、`attachBatchWindowMetadata`、失败明细上限
+   `viewBatchFailureDetailLimit`、`compactViewSummary`。core 的 `readBatch` 目前
+   只有逐项聚合，没有分节预算——这是 remote 侧现在最大的一处能力缺口。
+3. **路径拼写治愈**（第 6 项）：`healSpellingPath` 要真的读成功，不能只像
+   `PathHinter` 那样解释失败。需要决定：宿主提供候选（拼写枚举依赖文件系统），
+   core 决定「唯一候选就采用、多个候选就报错」的策略。
+4. **宿主钩子 + 翻转 `Execute`**（第 4/5/7 项）：符号索引、读台账、去重、
+   图片附件、文档/notebook 渲染器、`annotateIgnoredBatchWindow`。
+   这些是宿主状态，需要像 `MutationObserver`/`MutationGuard` 那样定成可选接口，
+   定完才能把本地 `Execute` 翻到 core handler 上。
+
+顺序建议：1 → 2 → 3 → 4。前两块纯工具能力，风险低；第 3 块要先定宿主边界；
+第 4 块是翻转前的最后一步，必须等接口定义清楚。
