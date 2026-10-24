@@ -194,6 +194,16 @@
   的结果不一致的数字。`SummarizeGrepResult` 在窗口之后计算，并显式剔除 files/count
   模式下「作为 has_more 证据被多读的那个文件」（`grep_stats_test.go` 有专门护栏）；
   统计只进 metadata、不改动文本输出。
+  **本地-remote 同源证明（切换前置件）**：新增本地 `toolcore.Runtime` 适配器
+  `backend/internal/toolkit/tools/toolcore_runtime.go`（`localCoreRuntime` +
+  `GrepTool.CoreRuntime`）——解析与准入复用本地 `sandboxPolicy`
+  （`resolvePathWithContext` + `checkPath`，设备路径/Sandbox 根统一拒），
+  `Relative` 逐字镜像 remote 的 `Workspace.Relative`，其余 runtime 槽位为 nil
+  （只读 handler 不消费）。`remotetools/grep_local_remote_equivalence_test.go`
+  用**同一个 searchcore handler** 跑两条 runtime（本地适配器 vs 真实 MCP server），
+  13 组参数（含 context/only_matching/mode/stats/type/paths）要求 Content 逐字节
+  一致——本地侧刻意不带 ripgrep 扩展，因此顺带证明 rg 与 walker 渲染一致。
+  这是翻转本地主流程前的等价性证据。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
   type/type_not、max_count、only_matching、max_depth/max_filesize、stats、多根语义
