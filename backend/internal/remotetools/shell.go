@@ -229,8 +229,14 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 				Success:    false,
 				OutputKind: "text",
 				Content:    body,
-				Error:      fmt.Errorf("artifact archive failed: %w", archiveErr),
-				Metadata:   metadata,
+				// The MCP projection sends only Error for a failed result, so the
+				// code and the recovery hint must live here; Content is dropped on
+				// this path. See buildMCPCallToolResult.
+				Error: shellFailureError(
+					fmt.Errorf("artifact archive failed: %w", archiveErr),
+					toolcore.ErrArtifactWriteFailed,
+					"reduce the command output or fix the target artifact store"),
+				Metadata: metadata,
 			}, nil
 		}
 		metadata[toolcoreoutput.KeyArtifactRef] = ref.String()
@@ -274,8 +280,10 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 			Success:    false,
 			OutputKind: "text",
 			Content:    body,
-			Error:      fmt.Errorf("command timed out after %s", timeout),
-			Metadata:   metadata,
+			Error: shellFailureError(
+				fmt.Errorf("command timed out after %s", timeout),
+				CodeTimeout, "narrow the command or raise the target timeout"),
+			Metadata: metadata,
 		}, nil
 	case runErr != nil:
 		metadata["error_code"] = CodeCommandFailed
@@ -284,14 +292,34 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 			Success:    false,
 			OutputKind: "text",
 			Content:    body,
-			Error:      fmt.Errorf("command failed: %w", runErr),
-			Metadata:   metadata,
+			Error: shellFailureError(
+				fmt.Errorf("command failed: %w", runErr),
+				CodeCommandFailed, "check the command output and the target environment"),
+			Metadata: metadata,
 		}, nil
 	}
 	if boolMetadata(metadata, toolcoreoutput.KeyIsTruncated) {
 		metadata["next_action"] = "narrow the command output (grep/tail) or raise max-output-bytes"
 	}
 	return remoteTextResult(body, metadata), nil
+}
+
+// shellFailureError builds the error a failed shell call reports.
+//
+// The code and recovery hint go into the error text on purpose. The MCP
+// projection emits only result.Error for a failed result and drops Content
+// entirely (buildMCPCallToolResult), so anything left in Content or metadata
+// never reaches the caller. Without this the model saw a bare
+// "artifact archive failed: ... permission denied" with no class to act on.
+func shellFailureError(cause error, code, nextAction string) error {
+	message := cause.Error()
+	if trimmed := strings.TrimSpace(code); trimmed != "" {
+		message = trimmed + ": " + message
+	}
+	if trimmed := strings.TrimSpace(nextAction); trimmed != "" {
+		message += " (next: " + trimmed + ")"
+	}
+	return fmt.Errorf("%s", message)
 }
 
 // remoteShellInvocation returns the platform shell and its arguments.

@@ -239,3 +239,75 @@ offset。现在 `ShapeShellWindowWithArchive(..., archived)` 会按实际能力�
 
 部署结论：**要使 artifact 指针有意义，必须配置 `artifacts.root`**。
 否则 shell 折叠会成为不可恢复的截断（只是提示现在是诚实的）。
+
+---
+
+# 没有写权限时会怎样
+
+分两种情形，行为不同：
+
+## 情形 A：目录建不出来（启动期）
+
+`NewArtifactStore` 里 `MkdirAll` 失败 → 返回 error → `registry.go` 直接向上抛，
+**server 拒绝启动**。
+
+```
+create artifact root: mkdir /var/lib/.../artifacts: permission denied
+```
+
+这是 fail-fast，正确：与其带着一个半坏的 surface 跑起来，不如在启动时就说清楚。
+
+## 情形 B：目录存在但不可写（运行期）
+
+能启动（目录存在），但每次需要归档的调用都会失败，返回
+`ARTIFACT_WRITE_FAILED`。
+
+这条路径上发现并修掉一个**让错误变得不可诊断**的缺陷。
+
+### 缺陷：错误码到不了模型
+
+`buildMCPCallToolResult` 对失败结果只发送 `result.Error`，**完全丢弃 `result.Content`**：
+
+```go
+} else {
+    errMsg := "工具执行失败"
+    if result.Error != nil {
+        errMsg = result.Error.Error()
+    }
+    contents = append(contents, &mcp.TextContent{Text: errMsg})
+}
+```
+
+而 shell 的三条失败路径（超时、命令失败、归档失败）都把稳定错误码写在
+`metadata["error_code"]` 里、把捕获的输出写在 `Content` 里 —— 两处都不会到达调用方。
+
+实测模型当时只看到：
+
+```
+artifact archive failed: write artifact: open /tmp/.../.aicli-art-xxx: permission denied
+```
+
+没有错误码，没有 next action，无法区分"磁盘满了/只读"与"命令被拒"。
+
+### 修法
+
+`shellFailureError(cause, code, nextAction)` 把三者拼进 `Error` 文本 ——
+这是唯一能穿过 MCP 投影的字段：
+
+```
+ARTIFACT_WRITE_FAILED: artifact archive failed: write artifact: ... permission denied
+ (next: reduce the command output or fix the target artifact store)
+```
+
+底层 cause 保留，便于诊断。已覆盖超时、命令失败、归档失败三条路径。
+
+### 未改的部分
+
+`buildMCPCallToolResult` 丢弃 `Content` 是**全局**行为，影响所有工具的错误呈现。
+本次不动它：改动面超出 artifact 范围，且现有工具大多已把码写进 `Error`。
+若要统一，应作为独立变更评估（例如：失败时同时发送 Content 与 Error）。
+
+## 固化为
+
+- `TestRemoteArtifactRootUnwritableFailsAtStartup`
+- `TestRemoteShellArchiveFailureCarriesStableCode`（断言正文含 code、`next:`、以及底层 cause）
