@@ -30,6 +30,14 @@ type ShellWindowStats struct {
 //
 // pageBytes is the artifact_read page size, used to price the omitted middle.
 func FoldShellWindow(text string, budget, pageBytes int) (string, ShellWindowStats, bool) {
+	return FoldShellWindowWithArchive(text, budget, pageBytes, true)
+}
+
+// FoldShellWindowWithArchive is FoldShellWindow with an explicit statement of
+// whether the omitted middle was archived. A surface without an artifact store
+// must pass archived=false so the notice does not promise a retrieval route
+// that does not exist.
+func FoldShellWindowWithArchive(text string, budget, pageBytes int, archived bool) (string, ShellWindowStats, bool) {
 	stats := ShellWindowStats{TotalBytes: len(text)}
 	if budget <= 0 || len(text) <= budget {
 		stats.HeadBytes = len(text)
@@ -55,7 +63,7 @@ func FoldShellWindow(text string, budget, pageBytes int) (string, ShellWindowSta
 		if omittedEnd < omittedStart {
 			omittedEnd = omittedStart
 		}
-		notice := shellWindowNotice(omittedStart, omittedEnd, totalBytes, stats.TotalLines, pageBytes)
+		notice := shellWindowNoticeFor(omittedStart, omittedEnd, totalBytes, stats.TotalLines, pageBytes, archived)
 		if len(head)+len(tail)+len(notice) <= budget {
 			stats.HeadBytes = len(head)
 			stats.TailBytes = len(tail)
@@ -78,7 +86,7 @@ func FoldShellWindow(text string, budget, pageBytes int) (string, ShellWindowSta
 	}
 	// Degenerate window (notice alone exceeds the budget): keep the notice,
 	// which carries the recovery route, and drop head/tail.
-	notice := shellWindowNotice(0, totalBytes, totalBytes, stats.TotalLines, pageBytes)
+	notice := shellWindowNoticeFor(0, totalBytes, totalBytes, stats.TotalLines, pageBytes, archived)
 	stats.OmittedStart = 0
 	stats.OmittedEnd = totalBytes
 	return safeHeadByBytes(notice, budget), stats, true
@@ -87,16 +95,27 @@ func FoldShellWindow(text string, budget, pageBytes int) (string, ShellWindowSta
 // ShapeShellWindow folds a shell payload to the tool window and stamps the
 // ownership/window metadata the render layer and artifact gateway consume.
 func ShapeShellWindow(tool, content string, metadata map[string]any, outputBudget, remoteHardCap, pageBytes int) (string, map[string]any, ShellWindowStats, bool) {
+	return ShapeShellWindowWithArchive(tool, content, metadata, outputBudget, remoteHardCap, pageBytes, true)
+}
+
+// ShapeShellWindowWithArchive is ShapeShellWindow with an explicit statement of
+// whether the omitted middle was archived. Surfaces without an artifact store
+// pass archived=false: the body still folds (the model window is a hard limit)
+// but the notice says the bytes are gone instead of pointing at artifact_read.
+func ShapeShellWindowWithArchive(tool, content string, metadata map[string]any, outputBudget, remoteHardCap, pageBytes int, archived bool) (string, map[string]any, ShellWindowStats, bool) {
 	budget := ResolveCap(tool, 0, outputBudget, remoteHardCap)
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
-	folded, stats, didFold := FoldShellWindow(content, budget, pageBytes)
+	folded, stats, didFold := FoldShellWindowWithArchive(content, budget, pageBytes, archived)
 	metadata[KeySkipRenderTruncation] = true
 	metadata[KeyModelVisibleBudget] = budget
 	if didFold {
 		metadata[KeyIsTruncated] = true
 		metadata[KeyTruncated] = true
+		// Record whether the omitted middle still exists anywhere. A consumer
+		// that sees archived=false must not offer a retrieval route.
+		metadata["output_window_archived"] = archived
 		metadata["output_window_bytes"] = budget
 		metadata["output_window_total_bytes"] = stats.TotalBytes
 		metadata["output_window_head_bytes"] = stats.HeadBytes
@@ -115,9 +134,29 @@ func ShapeShellWindow(tool, content string, metadata map[string]any, outputBudge
 }
 
 func shellWindowNotice(omittedStart, omittedEnd, totalBytes, totalLines, pageBytes int) string {
+	return shellWindowNoticeFor(omittedStart, omittedEnd, totalBytes, totalLines, pageBytes, true)
+}
+
+// shellWindowNoticeFor renders the fold notice. archived tells the reader
+// whether the omitted middle can actually be retrieved: when no artifact store
+// is configured there is no archive and no artifact_read tool, so promising
+// "read the middle with artifact_read" would send the model after a tool that
+// does not exist and bytes that were never kept.
+func shellWindowNoticeFor(omittedStart, omittedEnd, totalBytes, totalLines, pageBytes int, archived bool) string {
 	omitted := omittedEnd - omittedStart
 	if omitted < 0 {
 		omitted = 0
+	}
+	if !archived {
+		return fmt.Sprintf(
+			"\n\n[output window: showing head %d B + tail %d B of %d bytes of the captured output "+
+				"(%d lines total); omitted middle bytes [%d,%d) = %d bytes. "+
+				"This target has no artifact store, so the omitted middle was NOT kept and cannot be read "+
+				"back. Re-run a narrower command (tighter pattern, Select-String / Select-Object -First/-Last) "+
+				"to see what you need.]",
+			omittedStart, totalBytes-omittedEnd, totalBytes, totalLines,
+			omittedStart, omittedEnd, omitted,
+		)
 	}
 	pages := 0
 	if omitted > 0 && pageBytes > 0 {

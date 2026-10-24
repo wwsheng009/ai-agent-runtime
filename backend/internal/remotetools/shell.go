@@ -250,7 +250,12 @@ func (t *remoteShellTool) Execute(ctx context.Context, params map[string]interfa
 	if pageBytes < 1024 {
 		pageBytes = 1024
 	}
-	body, shapedMetadata, _, _ := toolcoreoutput.ShapeShellWindow(ToolShell, display, metadata, shapeBudget, t.modelVisibleCap(), pageBytes)
+	// archived tells the notice whether the omitted middle can be retrieved.
+	// Without an artifact store nothing was written, and artifact_read is not
+	// even registered on this surface - promising it would send the model after
+	// a tool that does not exist.
+	body, shapedMetadata, _, _ := toolcoreoutput.ShapeShellWindowWithArchive(
+		ToolShell, display, metadata, shapeBudget, t.modelVisibleCap(), pageBytes, t.artifacts != nil)
 	metadata = shapedMetadata
 	if archiveNotice != "" {
 		if shapeBudget > 0 {

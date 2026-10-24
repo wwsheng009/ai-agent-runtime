@@ -134,3 +134,59 @@ if c.Artifacts.Root != "" {
 - `TestRemoteArtifactReadSurvivesReadOnlyGating`
 - `TestRemoteArtifactReadWithoutStoreFailsCleanly`
 - `TestRemoteArtifactReadIsNarrowableByToolList`
+
+---
+
+# ArtifactStore 依赖什么
+
+## 运行时依赖（没有外部服务）
+
+`ArtifactStore` 是**纯本地文件存储**，不依赖数据库、对象存储或网络：
+
+| 依赖 | 说明 |
+|---|---|
+| 一个可写目录 | `artifacts.root`，启动时 `os.MkdirAll(0o700)` |
+| 磁盘空间 | `artifacts.maxBytes`，默认 64 MiB |
+| 文件系统语义 | 原子写：临时文件 → `Chmod(0600)` → `os.Rename` |
+| 时间 | mtime 用于 72h 保留期（`artifactRetention`），每 6h 惰性清理一次 |
+
+## 配置来源
+
+```yaml
+artifacts:
+  root: /var/lib/aicli-remote/artifacts   # 空 = 禁用
+  maxBytes: 67108864                     # 默认 64 MiB
+```
+
+或命令行 `--artifacts-root` / `--artifact-max`。启动时用
+`probeWritableDir` 探测可写性，`--check` 会把它列为 problem。
+
+## 代码依赖
+
+- `internal/toolcore` 的 `ArtifactRef` / `ArtifactSink` 接口（scope 校验、id 形状）
+- `writeFileAtomicRaw`（同包内）
+- 无第三方依赖
+
+## 与本地 artifact 的关系
+
+两者**互相独立**：远程 store 是目标机上的短期缓存（72h），本地 store 是长期副本。
+id 空间也不同（远程带 `remote:<target>:` 前缀，本地无前缀），
+`ResolveBareArtifactRef` 负责把裸 id 解析成当前 surface 的 scope。
+
+## 一个必须记住的前提
+
+**没有 store 时 shell 仍然折叠，但省略的中段不会被保存。**
+
+修复前，折叠提示会照抄“The complete capture is archived: read the middle with
+artifact_read ...”，而该 surface 上：
+
+- `artifact_read` 根本没注册；
+- 108421 字节的中段从未写盘。
+
+这比单纯丢数据更糟：它指示模型去调用一个不存在的工具，并给出指向从未存在过的数据的
+offset。现在 `ShapeShellWindowWithArchive(..., archived)` 会按实际能力渲染提示，
+无 store 时明确写 “NOT kept and cannot be read back”，并打上
+`output_window_archived=false`。
+
+部署结论：**要使 artifact 指针有意义，必须配置 `artifacts.root`**。
+否则 shell 折叠会成为不可恢复的截断（只是提示现在是诚实的）。

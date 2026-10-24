@@ -143,6 +143,53 @@ func TestRemoteArtifactReadPagesCoverEveryByte(t *testing.T) {
 	}
 }
 
+// TestRemoteShellWithoutStoreDoesNotPromiseArtifact pins the failure mode this
+// probe uncovered: with no artifact store the shell output still folds (the
+// model window is a hard limit), but nothing is archived and artifact_read is
+// not even registered.
+//
+// The notice used to keep saying "The complete capture is archived: read the
+// middle with artifact_read ... offset=N, limit=N". That is worse than losing
+// the bytes: it instructs the model to call a tool the server does not expose,
+// with offsets into data that was never written.
+func TestRemoteShellWithoutStoreDoesNotPromiseArtifact(t *testing.T) {
+	root := t.TempDir()
+	cfg := newOpsConfig(t, root, []string{"seq"})
+	cfg.Limits.ModelVisibleCap = 1024 // force a fold
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	server, err := remotetools.NewServer(cfg, "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	// Precondition: the paging tool really is absent on this surface.
+	for _, name := range server.ToolNames() {
+		if strings.HasSuffix(name, "__artifact_read") {
+			t.Fatalf("this scenario needs no artifact store, but %s is registered", name)
+		}
+	}
+
+	body := callTool(t, ctx, session, "remote_dev__shell", map[string]interface{}{
+		"command": "seq 1 20000",
+	})
+	if !strings.Contains(body, "output window") {
+		t.Skipf("capture was not folded; body:\n%s", body)
+	}
+	if strings.Contains(body, "The complete capture is archived") {
+		t.Fatalf("the notice must not claim an archive that does not exist:\n%s", body)
+	}
+	if strings.Contains(body, "read the middle with artifact_read") {
+		t.Fatalf("the notice must not point at a tool this surface does not expose:\n%s", body)
+	}
+	if !strings.Contains(body, "NOT kept") {
+		t.Fatalf("the notice must state that the omitted bytes are gone:\n%s", body)
+	}
+}
+
 // TestRemoteShellFoldedOutputPointsAtArtifact is the counterpart that makes the
 // paging test meaningful: folding is only acceptable because the omitted middle
 // stays reachable. If this ever stops holding, the fold is silent data loss.
