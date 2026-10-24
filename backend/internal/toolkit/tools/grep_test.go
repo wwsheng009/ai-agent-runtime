@@ -928,6 +928,8 @@ func TestGrepTool_PathNotFoundIncludesCandidateHint(t *testing.T) {
 				"pattern":      "needle",
 				"path":         root,
 				"pattern_file": "project/setting/patterns.txt",
+				// path-not-found 候选提示由 legacy 解析层实现；rg_args 路由此用例。
+				"rg_args": []interface{}{},
 			},
 			wantContain: candidatePattern,
 		},
@@ -2895,10 +2897,12 @@ func TestGrepTool_RgPatternFileTranslatesToRipgrep(t *testing.T) {
 	_, _ = tool.Execute(context.Background(), map[string]interface{}{
 		"pattern_file": patternFile,
 		"path":         tmpDir,
+		// core 读取 pattern 文件后按普通 -e 模式传给 rg（两引擎同语义），
+		// 不再透传 -f；这里断言 core 的 args 形态。
 	})
 	argsStr := strings.Join(gotArgs, " ")
-	if !strings.Contains(argsStr, "-f "+patternFile) {
-		t.Fatalf("expected -f patternFile in rg args, got %v", gotArgs)
+	if !strings.Contains(argsStr, "-e foo") {
+		t.Fatalf("expected pattern-file lines as -e args, got %v", gotArgs)
 	}
 }
 

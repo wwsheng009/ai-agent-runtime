@@ -2,6 +2,7 @@ package searchcore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,8 +18,12 @@ type GrepOptions struct {
 	// Patterns is the batch spelling (rg -e ...). When it is non-empty the
 	// single-value Pattern is ignored, matching the handler's precedence.
 	Patterns []string
-	Path     string
-	Glob     string
+	// PatternFiles holds absolute paths whose lines are appended to Patterns as
+	// one pattern each (rg -f). A blank line stays an empty regex, which matches
+	// every line - the long-standing local behaviour.
+	PatternFiles []string
+	Path         string
+	Glob         string
 	// Globs carries the array spelling of `glob`: several patterns, any may
 	// match, `!`-prefixed ones exclude (the local tool's partition rule).
 	// The single-value Glob joins the same list when set.
@@ -126,7 +131,21 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	if err != nil {
 		return GrepResult{}, err
 	}
-	compiled, err := CompileGrepPattern(grepPatterns(opts), GrepPatternOptions{
+	patterns, err := GrepPatternsWithFiles(opts)
+	if err != nil {
+		return GrepResult{}, err
+	}
+	if len(patterns) == 0 {
+		// An empty pattern file is a valid zero-match search (rg -f with no
+		// patterns matches nothing), not a missing-pattern error.
+		if len(opts.PatternFiles) > 0 {
+			var empty GrepResult
+			ApplyGrepPageWindow(&empty, mode, opts)
+			return empty, nil
+		}
+		return GrepResult{}, fmt.Errorf("pattern 参数缺失或无效")
+	}
+	compiled, err := CompileGrepPattern(patterns, GrepPatternOptions{
 		Literal:       opts.Literal,
 		IgnoreCase:    opts.IgnoreCase || opts.CaseInsensitive,
 		CaseSensitive: opts.CaseSensitive,
@@ -320,6 +339,47 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 
 	ApplyGrepPageWindow(&result, mode, opts)
 	return result, nil
+}
+
+// GrepPatternsWithFiles returns the effective pattern list: the direct
+// spellings followed by every line of each pattern file. Direct spellings win
+// in order, exactly like the local tool's loadPatternFiles.
+func GrepPatternsWithFiles(opts GrepOptions) ([]string, error) {
+	patterns := grepPatterns(opts)
+	if len(opts.PatternFiles) == 0 {
+		return patterns, nil
+	}
+	out := make([]string, 0, len(patterns)+8)
+	out = append(out, patterns...)
+	for _, path := range opts.PatternFiles {
+		lines, err := readGrepPatternFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("读取 pattern_file 失败 %s: %w", path, err)
+		}
+		out = append(out, lines...)
+	}
+	return out, nil
+}
+
+// readGrepPatternFile reads one pattern file through the shared bounded line
+// reader, so a huge line cannot blow memory and line numbering stays stable.
+func readGrepPatternFile(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	reader := newLineReader()
+	reader.reset(file)
+	lines := make([]string, 0, 16)
+	for {
+		_, text, truncated, ok := reader.next()
+		if !ok {
+			return lines, nil
+		}
+		line := string(reader.displayText(text, truncated))
+		lines = append(lines, line)
+	}
 }
 
 // grepRoots returns the ordered search roots: the single spelling first, then

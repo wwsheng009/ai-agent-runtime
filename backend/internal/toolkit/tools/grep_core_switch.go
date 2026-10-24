@@ -15,6 +15,7 @@ import (
 // on the legacy path until its semantics move into the core.
 var coreSearchParams = map[string]bool{
 	"pattern": true, "regexp": true, "patterns": true,
+	"pattern_file": true, "pattern_files": true,
 	"path": true, "paths": true,
 	"glob": true, "include": true, "exclude": true,
 	"literal": true, "fixed_strings": true,

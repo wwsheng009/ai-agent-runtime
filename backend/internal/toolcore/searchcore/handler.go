@@ -141,11 +141,19 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	patterns := GrepPatternsFromArgs(call.Args)
 	if len(patterns) == 0 {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "pass pattern", nil), nil
+		// pattern_file(s) can supply every pattern on its own (rg -f).
+		if len(GrepGlobListFromArgs(call.Args, "pattern_file")) == 0 &&
+			len(GrepGlobListFromArgs(call.Args, "pattern_files")) == 0 {
+			return toolcore.Error(toolcore.ErrInvalidArgument, "pass pattern", nil), nil
+		}
 	}
 	roots, failure := grepRootsFromArgs(call, paths)
 	if failure != nil {
 		return failure, nil
+	}
+	patternFiles, patternFailure := grepPatternFilesFromArgs(call, paths, roots)
+	if patternFailure != nil {
+		return patternFailure, nil
 	}
 	rootLabel := paths.Relative(roots[0])
 	mode, modeFailure := grepModeFromArgs(call.Args)
@@ -182,6 +190,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	options := GrepOptions{
 		Patterns:         patterns,
+		PatternFiles:     patternFiles,
 		Path:             roots[0],
 		Paths:            roots[1:],
 		Mode:             mode,
@@ -255,11 +264,21 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		pageEntries = len(result.Files)
 	}
 	includeGlobs, excludeGlobs := EffectiveGrepFilters(options)
+	// Effective patterns include every line of the pattern files; report what
+	// was actually searched rather than only the direct spellings.
+	effectivePatterns := patterns
+	if len(options.PatternFiles) > 0 {
+		if withFiles, err := GrepPatternsWithFiles(options); err == nil {
+			effectivePatterns = withFiles
+		}
+	}
 	metadata := map[string]any{
-		"pattern":            strings.Join(patterns, " | "),
-		"patterns":           patterns,
-		"pattern_count":      len(patterns),
-		"pattern_source":     grepPatternSource(patterns),
+		"pattern":            strings.Join(effectivePatterns, " | "),
+		"patterns":           effectivePatterns,
+		"pattern_files":      grepPatternFilesLabels(paths, options.PatternFiles),
+		"pattern_count":      len(effectivePatterns),
+		"pattern_source":     grepPatternSourceFor(patterns, len(options.PatternFiles) > 0),
+		"case_mode":          grepCaseMode(options),
 		"mode":               string(mode),
 		"path":               rootLabel,
 		"paths":              grepRootLabels(paths, roots),
@@ -530,6 +549,32 @@ func grepIgnoreFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver, r
 	return resolved, nil
 }
 
+// grepPatternFilesFromArgs resolves pattern_file(s) into absolute paths. Both
+// spellings are accepted and merged; each file's lines join the pattern list.
+func grepPatternFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
+	raw := append(append([]string{}, GrepGlobListFromArgs(call.Args, "pattern_file")...),
+		GrepGlobListFromArgs(call.Args, "pattern_files")...)
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	resolved := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		if !filepath.IsAbs(entry) && len(roots) > 0 {
+			anchor := roots[0]
+			if info, statErr := os.Stat(anchor); statErr == nil && !info.IsDir() {
+				anchor = filepath.Dir(anchor)
+			}
+			entry = filepath.Join(anchor, entry)
+		}
+		abs, err := paths.Resolve(entry)
+		if err != nil {
+			return nil, toolcore.Error(toolcore.ErrPathDenied, "use a pattern_file inside the workspace", err)
+		}
+		resolved = append(resolved, abs)
+	}
+	return resolved, nil
+}
+
 // grepPageUnit names the pagination unit for the truncation notice.
 func grepPageUnit(mode GrepMode) string {
 	if mode == GrepModeContent {
@@ -549,6 +594,46 @@ func grepPatternSource(patterns []string) string {
 	default:
 		return "direct"
 	}
+}
+
+// grepPatternSourceFor folds pattern files into the same vocabulary the local
+// tool used (pattern_file / mixed / multiple_patterns / direct).
+func grepPatternSourceFor(patterns []string, hasFiles bool) string {
+	switch {
+	case hasFiles && len(patterns) > 0:
+		return "mixed"
+	case hasFiles:
+		return "pattern_file"
+	default:
+		return grepPatternSource(patterns)
+	}
+}
+
+// grepCaseMode reports the effective case strategy, matching the local tool's
+// case_mode metadata.
+func grepCaseMode(opts GrepOptions) string {
+	switch {
+	case opts.CaseSensitive:
+		return "case_sensitive"
+	case opts.IgnoreCase || opts.CaseInsensitive:
+		return "ignore_case"
+	case opts.SmartCase:
+		return "smart_case"
+	default:
+		return "case_sensitive"
+	}
+}
+
+// grepPatternFilesLabels renders pattern files as caller-spelled paths.
+func grepPatternFilesLabels(paths toolcore.PathResolver, files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	labels := make([]string, 0, len(files))
+	for _, file := range files {
+		labels = append(labels, paths.Relative(file))
+	}
+	return labels
 }
 
 // grepScopeKind names the search-root shape the way the local tool reported

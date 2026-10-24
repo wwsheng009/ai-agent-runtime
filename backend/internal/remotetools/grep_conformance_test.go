@@ -499,6 +499,50 @@ func TestRemoteGrepHiddenOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepPatternFileOverMCP proves pattern_file(s) survive schema
+// validation and behave like the local tool: each line becomes one pattern.
+func TestRemoteGrepPatternFileOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"patterns.txt": "alpha\nbeta\n",
+		"data.txt":     "alpha here\nbeta here\ngamma here\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	fromFile := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern_file": "patterns.txt", "path": "data.txt",
+	})
+	if !strings.Contains(fromFile, "alpha here") || !strings.Contains(fromFile, "beta here") {
+		t.Fatalf("pattern_file should match both lines:\n%s", fromFile)
+	}
+	if strings.Contains(fromFile, "gamma here") {
+		t.Fatalf("pattern_file must not match unrelated lines:\n%s", fromFile)
+	}
+
+	withDirect := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "gamma", "pattern_file": "patterns.txt", "path": "data.txt",
+	})
+	if !strings.Contains(withDirect, "gamma here") || !strings.Contains(withDirect, "alpha here") {
+		t.Fatalf("direct pattern and pattern_file must merge:\n%s", withDirect)
+	}
+
+	missing := callToolExpectingError(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern_file": "absent.txt",
+	})
+	if !strings.Contains(missing, "pattern_file") {
+		t.Fatalf("a missing pattern_file must be reported:\n%s", missing)
+	}
+}
+
 // TestRemoteGrepIgnoreOverMCP proves the ignore parameters survive schema
 // validation: .gitignore is respected by default, no_ignore disables the whole
 // mechanism, and an explicit ignore_file stacks on top of it.

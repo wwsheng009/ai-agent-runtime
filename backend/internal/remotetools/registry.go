@@ -226,6 +226,20 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				},
 				"description": "多个模式按 OR 语义匹配，等价于多次 rg -e。可传字符串数组，也可传单个字符串。",
 			},
+			"pattern_file": map[string]interface{}{
+				"type":        "string",
+				"description": "兼容 rg 的 --file/-f：从文件读取模式，每行一个；与 pattern/patterns 合并。空行按空正则处理（匹配所有行，与 rg 一致）。",
+			},
+			"pattern_files": map[string]interface{}{
+				"anyOf": []map[string]interface{}{
+					{"type": "string"},
+					{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+					},
+				},
+				"description": "pattern_file 的复数拼写，可传数组或逗号分隔字符串；与 pattern_file 合并使用。",
+			},
 			"path": map[string]interface{}{
 				"type":        "string",
 				"description": "File or directory to search. Default: workspace root.",

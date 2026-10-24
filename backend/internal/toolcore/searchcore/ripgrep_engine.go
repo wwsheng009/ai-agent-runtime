@@ -405,6 +405,15 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	if len(patterns) == 0 && opts.Pattern != "" {
 		patterns = []string{opts.Pattern}
 	}
+	if len(opts.PatternFiles) > 0 {
+		// Pattern files are read by the core, not passed to rg: the effective
+		// pattern list must be identical on both engines.
+		withFiles, err := GrepPatternsWithFiles(opts)
+		if err != nil {
+			return GrepResult{}, true, err
+		}
+		patterns = withFiles
+	}
 	if EffectiveIgnoreCase(patterns, GrepPatternOptions{
 		IgnoreCase:    opts.IgnoreCase || opts.CaseInsensitive,
 		CaseSensitive: opts.CaseSensitive,
