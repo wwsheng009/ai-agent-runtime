@@ -660,4 +660,88 @@ schema **故意不声明**它（没有索引，声明的代价是「收了再拒
    一起消失；`annotateViewSymbolNote` 与 `annotateIgnoredBatchWindow` 的文字进 core。
 
 翻完之后，对拍测试可以进一步扩到「图片 / 文档 / notebook / files-only 带顶层窗口」
-这几类，届时两侧应该是同一段代码，测试的意义从「对拍」变成「回归锁定」。
+这几类，届时两侧应该是同一段代码，测试的意义从「对拍」变成「回归锁定」。## view 已完成收敛（2026-10-25）：本地 `Execute` 翻到共享 handler
+
+最后一块做完，view 不再有自己的读取路径。
+
+### 翻转后的形态
+
+`Execute` 现在只做两件事：把参数归一化（模型常把数字写成字符串），以及套上本地渲染层
+的契约标记（`skip_render_truncation` + 声明窗口，按结果上的 `batch` 标记选 32 KiB /
+64 KiB）。读取、窗口、批处理、特殊路径拒绝、拼写治愈、符号解析、派生渲染的记账全部
+走共享 handler。
+
+**删掉的东西**：`executeSingle`、`executeBatch`、`recordDerivedRender`、
+`annotateIgnoredBatchWindow`、`annotateViewSymbolNote`、`viewCoreResult` 之外的本地结果
+构造、以及 `ViewFileRequest` 上 `dedupDefer` / `dedupRecordDefer` / `ledgerDefer` 三个
+字段。「分节真的交付了才提交」这个顺序现在由 core 拥有，本地不再需要回调机制。
+`view.go` 从本轮开始时的 **1606 行降到 379 行**，而且它不再读文件。
+
+### 新接口：`toolcore.ContentRenderer` + `RenderRequest`
+
+面回答文本读取器读不了的东西（图片附件、notebook、文档容器），并声明自己是否处理了；
+**共享 handler 保留交付窗口的记账**（读台账 + 已交付窗口缓存）。`viewcore` 从渲染结果的
+元数据里还原窗口，所以「图片附件不是窗口」（它不声明 `lines_read`）这一条**由数据本身
+决定**，而不是让每个渲染器各自声明——附件因此完全不会在台账里留下「这个文件我看过」的
+记录，也就不会让后续写操作误判为安全。
+
+本地剩下的全是**能力**而非行为：沙箱与权限、代码索引、三个渲染器、会话读台账与窗口缓存。
+
+### 翻转后本地套件抓出的两个真 bug（都在新代码里）
+
+1. **派生渲染的台账条目凭空造出 `total_lines`**：窗口描述无条件带上了 `TotalLines`，
+   于是第二次读取的 stub 会宣称一个第一次窗口从未公布过的行数（`recordViewWindowRead`
+   是按「未知就记 0」设计的，stub 也只在 >0 时才公布）。现在 `DeliveredWindow` 只在实际
+   扫到文件末尾时才给出行数。这个 bug 从第二段（引入 `ReadObserver`）就存在，只是因为
+   当时本地读取还走自己的路径（记 0）而没被触发，翻转后才暴露。
+2. **读台账的 source 用了注册名而不是能力名**：`read` 别名调用会被记成 `Source:"read"`，
+   后续写入就不再认为它是「刚读过」。测试 `TestReadAliasRecordsViewLedgerSource` 的注释
+   说得很清楚：「ledger source 是稳定的能力字符串，永远不是注册的工具名」。现在
+   `coreDefinition()` 固定用 `"view"`。
+
+### 证据
+
+- **本地整套 view 测试现在都跑在共享 handler 上**：图片、文档、notebook、去重 stub、
+  读台账与别名、批处理上限、compact 扫描、符号区间、拼写治愈、特殊路径拒绝、
+  ignored-window 提示——`internal/toolkit/tools` 40 秒全绿。
+- 新增 `viewcore/render_test.go`：把派生渲染的记账规则搬到它现在所在的地方，并且双向
+  覆盖——完整的渲染窗口「记一次台账 + 记一次缓存」，被行截断或提前停止的只记台账，
+  附件两者都不记。
+- `./internal/...` 全绿，除 `internal/api/runtimeapi`（下文）。
+
+### 翻转后的行为差异（有意为之，已记录）
+
+1. **错误结果的信封**：本地自己构造的失败结果历来是 `Error` 有文案、`Content` 为空，
+   而共享 handler 两处都有（remote 消费方读的就是 `Content`）。翻转后本地的失败结果也
+   统一成后者——这是收敛的副作用，方向是「信息更全」。
+2. **remote 侧没有渲染器**：remote 的 runtime 不实现 `ContentRenderer`，所以文档/notebook
+   在 remote 上仍走文本路径（二进制摘要）。这是**能力差异**（remote 主机没有转换器），
+   不是实现分叉；如果将来 remote 有转换器，接上同一个 seam 就自动获得渲染。
+3. **「可缓存窗口」的两条规则**：文本框口（停在 limit 也算完整窗口）与派生渲染（必须
+   扫到 EOF）在本地从来就不同，本次**保留原样**而没有顺手统一——统一是行为变更，应该在
+   单独一轮里带着理由做。差异写在 `viewcore/render.go` 的注释里。
+4. **`internal/toolexec/preflight` 的治愈**：见上一节记录，工具级治愈与 preflight 重写
+   是否合并成一层属于上层问题，本方案不动。
+
+### 本轮外部失败（与本改动无关）
+
+`./internal/...` 扫描里 `internal/api/runtimeapi` 有两个失败：
+`TestSessionMCPAddCreatesWorkspaceFileWhenMissing`（本机 `~/.aicli/mcp.yaml` 导致，空
+`HOME` 下通过）与 `TestAgentRegistryReconcilerConvergesMissingAgentSession`
+（单独跑 0.07s 通过，高并发负载下的偶发）。两者都与 view 无关。
+
+提交：`34e318ca`。
+
+## 工具层收敛现状总览（2026-10-25）
+
+| 工具 | 本地 | remote | 状态 |
+|---|---|---|---|
+| `grep` / `glob` / `ls` | 共享 handler | 共享 handler | 已收敛（grep 仍留 legacy 兜底分支，优先级低） |
+| `write` / `append_write` | 共享 handler | 共享 handler | 已收敛 |
+| `edit` / `apply_patch` | 共享 handler | 共享 handler | 已收敛 |
+| `view` | 共享 handler | 共享 handler | **已收敛（本轮）** |
+| `artifact_read` | 独立实现 | 共享 handler | **待收敛** |
+
+view 是最后一块「大」的重复实现。剩下的 `artifact_read` 是本地一份、core 一份
+（`NewArtifactReadHandler` 只被 remote 用），量级小得多，做法相同：平移 + 翻转 + 对拍。
+另外 `grep` 的 legacy 兜底分支（`rg_args` / `pattern_file` 之外的参数组合）仍未收敛或删除。
