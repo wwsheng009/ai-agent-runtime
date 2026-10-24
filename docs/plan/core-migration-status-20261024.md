@@ -594,4 +594,70 @@ runtime 用已有的 ledger / dedup 助手实现这三个方法，没有这个�
    `SetImageAttachmentTokenLimit` 的 token 闸门）、文档/notebook 渲染与
    `recordDerivedRender`、`annotateIgnoredBatchWindow`。做完这些，本地不再有
    `executeSingle`，`ViewFileRequest` 上那三个 `*Defer` 字段与 `viewMetadataInt`
-   一起消失，`Execute` 翻到 core handler，view 收敛完成。
+   一起消失，`Execute` 翻到 core handler，view 收敛完成。## view 第五段已收敛（2026-10-25）：符号解析
+
+原清单第 5 项。本地用注入的代码索引解析 `symbol`；core handler 之前**完全忽略**这个
+参数——remote 的 schema 声明了它然后再用 `FilterSchemaParams(ParamSymbol)` 摘掉，而
+真有人传进来时，只是静默按 file_path 读，连一句说明都没有。
+
+### 搬运
+
+- `toolcore.SymbolTarget` + `toolcore.SymbolResolver`：面把符号名解析成一个普通的
+  「路径 + offset/limit」，于是符号请求复用同一个读取器，而不是变成第二条读取路径。
+  **索引本身、它的 shadow 档规则、file-id→路径 的映射全部留在宿主。**
+- **策略归 core**：符号优先于同一次调用里的 file_path 窗口；解析不了但给了 file_path
+  就降级读取并在正文里附上说明（`SymbolFallbackNote`）；解析不了又没有可读窗口就按
+  同一句话失败（`SymbolFailureMessage`）。三处文案都在 `viewcore/symbol.go`。
+- 本地 runtime 用已有的 `resolveViewSymbol` 实现这个 seam——**解析逻辑本身只有一份**，
+  两条路径共用。
+
+### 顺带修掉的一个门禁盲点（这是真收获，不是为了让测试变绿）
+
+`internal/remotetools` 的 schema 门禁双向断言「schema 声明的参数必须被 handler 读到」
+与「handler 读的参数必须在 schema 里声明」。handler 现在读 `symbol`，而 remote 的
+schema **故意不声明**它（没有索引，声明的代价是「收了再拒绝」）。门禁没有
+「按能力裁掉的参数」这个概念，于是它红在了正确的地方。
+
+处理方式不是放宽门禁，而是让 `schemaAudit` 学会 `filtered`：**「canonical schema 声明、
+本面用 `FilterSchemaParams` 摘掉」**，并要求写明理由。这样意图被固定下来，而不是被
+静默豁免。
+
+### 证据
+
+- 新增 `TestViewLocalAndCoreResolveTheSameSymbol`：**6 个用例**（解析命中、命中并带
+  limit、命中且同时给了 file_path、未命中但有回退、未命中且无窗口、未命中且只有
+  files）走同一份代码索引分别跑两条路径，比较正文与 10 个元数据字段，并断言命中时
+  读到的**确实是符号的行区间**（第 5-7 行，不是第 1 行）。
+- 本地原有的 view --symbol 套件（`code_tools_test.go`）原样通过。
+- `go build` / `go vet` 干净；`./internal/{toolcore,toolkit,remotetools,tools,agent,toolexec}`
+  全绿。
+
+**一处流程失误（已修正）**：我对 `internal/remotetools/` 整个目录跑了 `gofmt -l -w`，
+它顺手重排了该目录里 7 个**本来就未格式化**的文件（`audit.go`、`metrics.go`、
+`platform.go`、`roots.go`、几个 `_test.go`）。这些都不是本次改动范围，已用
+`git checkout --` 全部还原，提交里只包含我真正改过的文件。教训：`gofmt -w` 只列
+具体文件，不要给目录。
+
+提交：`684290f5`。
+
+## 下一轮：最后一块（宿主渲染器 + 翻转 `Execute`）
+
+只剩这一块，做完 view 就收敛完成：
+
+1. **图片直通**：`viewImageResult` + `sniffImageFormat` + `SetImageAttachmentTokenLimit`
+   的 token 闸门。附件投递是「元数据驱动」的（`image_passthrough` / `image_paths` 等
+   键），所以渲染判定可以进 core，真正留在宿主的是「把图片写进内容寻址目录」和
+   「下一轮把附件塞进 provider 请求」。
+2. **文档 / notebook 渲染**：`viewDocumentResult` / `viewNotebookResult` +
+   `recordDerivedRender`（派生渲染也要走同一套台账/去重，且只在真的交付后才提交）。
+   渲染本身是纯函数（输入绝对路径与 head，输出 markdown），可以整体进 core；
+   `docread` / `ipynb` 是本地进程，属于宿主能力，用注入实现。
+3. **`annotateIgnoredBatchWindow`**：files-only 调用带了顶层 offset/limit 时明说
+   它们没生效。
+4. **翻转 `Execute`**：本地 `Execute` 变成「归一化参数 → 组装 core Call → 调 core
+   handler → 转回 toolkit 结果」，`executeSingle` 删除，`ViewFileRequest` 上
+   `dedupDefer` / `dedupRecordDefer` / `ledgerDefer` 三个字段与 `viewMetadataInt`
+   一起消失；`annotateViewSymbolNote` 与 `annotateIgnoredBatchWindow` 的文字进 core。
+
+翻完之后，对拍测试可以进一步扩到「图片 / 文档 / notebook / files-only 带顶层窗口」
+这几类，届时两侧应该是同一段代码，测试的意义从「对拍」变成「回归锁定」。
