@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
-	runtimetoolkit "github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
 // TestViewBatchCapDoesNotStubDroppedItem: an item dropped by the aggregate cap
@@ -124,38 +123,5 @@ func TestViewBatchFailureDetailBounded(t *testing.T) {
 	}
 	if got, _ := result.Metadata["failures_omitted"].(int); got <= 0 {
 		t.Fatalf("expected failures_omitted > 0, got %#v", result.Metadata["failures_omitted"])
-	}
-}
-
-// TestDerivedRenderClampIsNotRememberedAsCompleteWindow: a notebook/document
-// render that folded a long line still registered a complete window, so the next
-// identical read returned a stub for content the model never saw.
-func TestDerivedRenderClampIsNotRememberedAsCompleteWindow(t *testing.T) {
-	t.Setenv("AICLI_VIEW_DEDUP", "")
-	ctx := dedupSessionContext(t)
-	root := t.TempDir()
-	path := filepath.Join(root, "derived.ipynb")
-	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool := newViewToolAt(t, root)
-	result := &runtimetoolkit.ToolResult{
-		Success: true,
-		Metadata: map[string]interface{}{
-			"offset":               0,
-			"limit":                10,
-			"lines_read":           10,
-			"eof":                  true,
-			"is_truncated":         false,
-			"long_lines_truncated": 1,
-		},
-	}
-	tool.recordDerivedRender(ctx, path, result, ViewFileRequest{Offset: 0, Limit: 10}, info)
-	if _, hit, _ := viewDedupPeek(ctx, path, info, 0, 10); hit {
-		t.Fatal("a clamp-folded derived render must not be remembered as a complete window")
 	}
 }

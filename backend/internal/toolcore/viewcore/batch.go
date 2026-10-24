@@ -252,6 +252,27 @@ func ReadBatch(requests []Request, compact bool, readOne ReadItem) *toolcore.Res
 	}
 }
 
+// AttachIgnoredBatchWindow tells the model that a batch call carried a top-level
+// offset/limit that only applies to single-file reads. Silently dropping them is
+// the "silence still costs" shape: state it so the window can be moved onto the
+// files[] entries instead.
+func AttachIgnoredBatchWindow(result *toolcore.Result, offset, limit int) *toolcore.Result {
+	if result == nil {
+		return nil
+	}
+	if result.Metadata == nil {
+		result.Metadata = map[string]any{}
+	}
+	note := fmt.Sprintf(
+		"[note] 顶层 offset=%d limit=%d 未生效：files[] 批量读取需要在每个条目上设置 offset/limit。",
+		offset, limit,
+	)
+	result.Metadata["ignored_top_level_window"] = map[string]any{"offset": offset, "limit": limit}
+	result.Metadata["ignored_top_level_window_note"] = note
+	appendNote(&result.Content, note)
+	return result
+}
+
 // batchFailureMessage is the per-item reason recorded in the failures block: the
 // underlying error when there is one, otherwise whatever the result carried.
 func batchFailureMessage(result *toolcore.Result) string {

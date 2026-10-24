@@ -34,8 +34,9 @@ const (
 	// one files[] batch. Per-item windows are viewOutputBudgetBytes each, and
 	// view stamps skip_render_truncation, so without an in-tool aggregate cap a
 	// wide batch rides the exemption past the render-layer backstop. The cap is
-	// enforced in view.executeBatch and the result carries the skipped count so
-	// the model can re-read omitted files individually (analysis §3.1).
+	// enforced by the shared handler (viewcore.ReadBatch, BatchSectionBudgetBytes)
+	// and the result carries the skipped count so the model can re-read omitted
+	// files individually (analysis §3.1).
 	//
 	// It must equal output.modelToolTextBudgetCeilingBytes (64 KiB), not exceed
 	// it: a wider aggregate can never be model-visible in one piece, and the
@@ -44,13 +45,6 @@ const (
 	// end to end (review m6). Batch results declare this constant as their
 	// model-visible window.
 	viewBatchAggregateBudgetBytes = toolcoreoutput.ViewBatchAggregateBudgetBytes
-	// viewBatchTailReserveBytes is held back from the aggregate budget for the
-	// batch's trailing blocks (skipped-file summary, bounded errors) and for
-	// the render-layer contract header. Appending those after the per-section
-	// checks made the delivered body exceed the declared window, and the render
-	// contract then silently dropped a section the tool had already registered
-	// as delivered (2026-09-27 review H9).
-	viewBatchTailReserveBytes = 4 * 1024
 	// grepOutputBudgetBytes: one match list; wide enough for a useful first
 	// pass before the model narrows the pattern.
 	grepOutputBudgetBytes = toolcoreoutput.GrepOutputBudgetBytes

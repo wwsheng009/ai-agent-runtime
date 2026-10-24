@@ -35,6 +35,9 @@ type localCoreRuntime struct {
 	// symbolResolver is the tool's injected code index, when it has one. The
 	// index itself never leaves the host: only the resolved window crosses.
 	symbolResolver toolcore.SymbolResolver
+	// contentRenderer is the tool's non-text renderer (image, notebook, document).
+	// The shared handler asks it before reading text and keeps the bookkeeping.
+	contentRenderer toolcore.ContentRenderer
 	// insideGitWorkTree reports whether a directory is covered by version
 	// control. A work tree already holds the pre-edit content, so the local host
 	// does not ask for a `.backups/` copy there.
@@ -518,6 +521,34 @@ func (r localSymbolResolver) ResolveSymbol(_ context.Context, name string, limit
 		return toolcore.SymbolTarget{}, false
 	}
 	return toolcore.SymbolTarget{Path: window.FilePath, Offset: window.Offset, Limit: window.Limit}, true
+}
+
+// localContentRenderer adapts the local view tool's non-text renderers (image,
+// notebook, document container) to the toolcore.ContentRenderer seam. The
+// renders stay in the tool; the shared handler only asks whether this surface
+// can answer, and keeps the delivered-window bookkeeping either way.
+type localContentRenderer struct {
+	tool *ViewTool
+	ctx  context.Context
+}
+
+func (r localContentRenderer) RenderContent(ctx context.Context, req toolcore.RenderRequest) (*toolcore.Result, bool) {
+	if r.tool == nil {
+		return nil, false
+	}
+	result, handled := r.tool.renderContent(r.ctx, req)
+	if !handled || result == nil {
+		return nil, false
+	}
+	return toolkit.ResultFromToolkit(result), true
+}
+
+// RenderContent exposes the tool's renderers to the shared handler.
+func (r *localCoreRuntime) RenderContent(ctx context.Context, req toolcore.RenderRequest) (*toolcore.Result, bool) {
+	if r == nil || r.contentRenderer == nil {
+		return nil, false
+	}
+	return r.contentRenderer.RenderContent(ctx, req)
 }
 
 // The next three methods implement toolcore.ReadObserver for the local surface:

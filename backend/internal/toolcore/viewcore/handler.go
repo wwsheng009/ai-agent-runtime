@@ -90,7 +90,7 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	}
 
 	if len(requests) == 1 && (!hasFilesArg(call.Args) || symbolWindow) {
-		result, delivered := h.readTarget(call, paths, requests[0], DefaultLimit)
+		result, delivered := h.readTarget(ctx, call, paths, requests[0], DefaultLimit)
 		// A single read is delivered as soon as it is produced: there is no
 		// aggregate cap that could drop it.
 		delivered.Commit()
@@ -99,8 +99,18 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	}
 
 	result := ReadBatch(requests, compact, func(req Request) (*toolcore.Result, *DeliveredRead) {
-		return h.readTarget(call, paths, req, BatchDefaultLimit)
+		return h.readTarget(ctx, call, paths, req, BatchDefaultLimit)
 	})
+	// A files[] call cannot honor a top-level offset/limit (only file_path can);
+	// silently dropping them is the "silence still costs" shape, so it is stated
+	// instead of leaving the model to wonder why its window was ignored.
+	if !symbolWindow && hasFilesArg(call.Args) && strings.TrimSpace(stringArg(call.Args, "file_path")) == "" {
+		offset := intArg(call.Args, "offset", 0)
+		limit := intArg(call.Args, "limit", 0)
+		if offset != 0 || limit != 0 {
+			result = AttachIgnoredBatchWindow(result, offset, limit)
+		}
+	}
 	return shapeResult(call, h.def.Name, result), nil
 }
 
@@ -164,7 +174,7 @@ func boolArg(args map[string]any, key string, fallback bool) bool {
 // The second return value is the host bookkeeping this read owes (a read ledger
 // entry, a delivered-window cache entry); it is nil when the surface has no such
 // state. Callers commit it once the result is really delivered.
-func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, req Request, defaultLimit int) (*toolcore.Result, *DeliveredRead) {
+func (h *handler) readTarget(ctx context.Context, call *toolcore.Call, paths toolcore.PathResolver, req Request, defaultLimit int) (*toolcore.Result, *DeliveredRead) {
 	abs, err := paths.Resolve(req.FilePath)
 	if err != nil {
 		return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
@@ -222,6 +232,22 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 	}
 	offset, limit := Normalize(req.Offset, limit)
 	window := Request{FilePath: req.FilePath, Offset: offset, Limit: limit}
+
+	// Containers the text reader cannot read on its own (a document, a notebook,
+	// an image) are answered by the surface before the read; the bookkeeping
+	// below then applies to whatever it returned.
+	if renderer := contentRenderer(call); renderer != nil {
+		if rendered, handled := renderer.RenderContent(ctx, toolcore.RenderRequest{
+			ToolName:    h.def.Name,
+			AbsPath:     abs,
+			DisplayPath: req.FilePath,
+			Offset:      offset,
+			Limit:       limit,
+		}); handled {
+			return h.renderedRead(call, abs, rendered)
+		}
+	}
+
 	observer := readObserver(call)
 	// A complete window the model already saw can answer for itself. The peek
 	// runs before the read so a repeat costs nothing; the entry is consumed only

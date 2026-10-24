@@ -589,11 +589,18 @@ func DeliveredWindow(req Request, stats Stats, size int64) toolcore.ReadWindow {
 		windowOffset = stats.WindowStart
 		windowLimit = stats.LinesRead
 	}
+	// TotalLines stays zero when the read never scanned to the end: the host must
+	// be able to tell "0 lines" from "unknown", and a remembered window must not
+	// invent a length its own result never published.
+	totalLines := 0
+	if stats.TotalLinesKnown {
+		totalLines = stats.TotalLines
+	}
 	return toolcore.ReadWindow{
 		Offset:             windowOffset,
 		Limit:              windowLimit,
 		LinesRead:          stats.LinesRead,
-		TotalLines:         stats.TotalLines,
+		TotalLines:         totalLines,
 		EOF:                stats.EOF,
 		More:               stats.HasMore,
 		ByteBudgetApplied:  stats.ByteBudgetApplied,

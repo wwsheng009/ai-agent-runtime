@@ -63,6 +63,28 @@ type SymbolResolver interface {
 	ResolveSymbol(ctx context.Context, name string, limit int) (SymbolTarget, bool)
 }
 
+// RenderRequest is one non-text request handed to a surface's ContentRenderer.
+// The path is already resolved and authorized.
+type RenderRequest struct {
+	ToolName    string
+	AbsPath     string
+	DisplayPath string
+	Offset      int
+	Limit       int
+}
+
+// ContentRenderer is an optional Runtime extension for containers the shared
+// text reader cannot read on its own: a document, a notebook, an image.
+//
+// The surface decides what to answer with (a window, an attachment declaration,
+// a degradation note, or nothing at all); the shared handler keeps the
+// delivered-window bookkeeping, so "only a window that was really delivered may
+// be remembered" stays in one place instead of being re-derived per renderer.
+type ContentRenderer interface {
+	// RenderContent answers one request. handled=false means "read it as text".
+	RenderContent(ctx context.Context, req RenderRequest) (*Result, bool)
+}
+
 // Definition is the single declaration of a tool's identity and contract.
 type Definition struct {
 	Name        string
