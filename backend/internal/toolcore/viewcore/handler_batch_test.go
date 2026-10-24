@@ -45,7 +45,7 @@ func TestHandlerBatchFilesAndCompact(t *testing.T) {
 	if err != nil || result == nil || !result.Success {
 		t.Fatalf("batch view failed: err=%v result=%+v", err, result)
 	}
-	for _, want := range []string{"=== a.txt", "1: a1", "=== b.txt", "2: b2", "[compact:"} {
+	for _, want := range []string{"===== a.txt =====", "1: a1", "===== b.txt =====", "2: b2", "[compact:"} {
 		if !strings.Contains(result.Content, want) {
 			t.Fatalf("batch output missing %q:\n%s", want, result.Content)
 		}

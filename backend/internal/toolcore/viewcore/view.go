@@ -1,23 +1,15 @@
-// Package viewcore implements the shared text-window reader used by every
-// view surface. Path resolution and permission checks stay outside; this
-// package only reads an already-authorized absolute path.
+// Package viewcore implements the shared file reader used by every view
+// surface. Path resolution and permission checks stay outside; this package
+// only reads an already-authorized absolute path.
 package viewcore
 
 import (
 	"bufio"
-	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"strings"
 	"unicode/utf8"
 )
 
 const (
-	DefaultLimit = 400
-	MaxLimit     = 2000
-	LineCap      = 4096
-
 	// ReaderLineCapBytes bounds how much of a single line the streaming reader
 	// holds in memory. Longer lines are drained and counted, never buffered in
 	// full, so one huge line cannot turn into a scanner error or an unbounded
@@ -26,16 +18,6 @@ const (
 
 	lineReaderBufferBytes = 64 * 1024
 )
-
-type Window struct {
-	Offset           int
-	Limit            int
-	Lines            []string
-	LinesRead        int
-	TotalLines       int
-	EOF              bool
-	TruncatedByBytes bool
-}
 
 // LineRead is one logical line produced by LineReader. Bytes is a prefix of
 // the line (valid until the next call); ContentBytes is the full on-disk line
@@ -197,128 +179,6 @@ func trimIncompleteUTF8Suffix(line []byte) []byte {
 		return line
 	}
 	return line
-}
-
-// Read reads one zero-based line window without loading the whole file. Lines
-// longer than LineCap are clamped with an explicit marker.
-func Read(path string, offset, limit, maxBytes int) (Window, error) {
-	offset, limit = Normalize(offset, limit)
-	window := Window{Offset: offset, Limit: limit}
-	file, err := os.Open(path)
-	if err != nil {
-		return window, fmt.Errorf("open %s: %w", filepath.Base(path), err)
-	}
-	defer file.Close()
-
-	reader := NewLineReader(file)
-	lineNo := 0
-	totalBytes := 0
-	for {
-		line, readErr := reader.Next()
-		if readErr != nil {
-			return window, fmt.Errorf("scan %s: %w", filepath.Base(path), readErr)
-		}
-		if !line.HasBytes {
-			break
-		}
-		lineNo++
-		// The public offset is zero-based, matching the builtin view tool.
-		if lineNo-1 < offset {
-			continue
-		}
-		if len(window.Lines) >= limit {
-			continue
-		}
-		text := clampViewLine(string(line.Bytes), line.ContentBytes, line.Truncated)
-		totalBytes += len(text) + 1
-		if maxBytes > 0 && totalBytes > maxBytes && len(window.Lines) > 0 {
-			window.TruncatedByBytes = true
-			break
-		}
-		window.Lines = append(window.Lines, text)
-	}
-	window.TotalLines = lineNo
-	window.LinesRead = len(window.Lines)
-	window.EOF = offset+window.LinesRead >= window.TotalLines
-	return window, nil
-}
-
-func Normalize(offset, limit int) (int, int) {
-	if offset < 0 {
-		offset = 0
-	}
-	if limit < 1 {
-		limit = DefaultLimit
-	}
-	if limit > MaxLimit {
-		limit = MaxLimit
-	}
-	return offset, limit
-}
-
-// clampViewLine keeps at most LineCap bytes of one line and reports the full
-// length so the model can see how much was hidden.
-func clampViewLine(text string, contentBytes int64, readerTruncated bool) string {
-	if !readerTruncated && len(text) <= LineCap {
-		return text
-	}
-	visible := clampUTF8Prefix(text, LineCap)
-	if int64(len(visible)) >= contentBytes {
-		return visible
-	}
-	return visible + fmt.Sprintf("…[line truncated: showing first %d of %d bytes]", len(visible), contentBytes)
-}
-
-func clampUTF8Prefix(text string, max int) string {
-	if len(text) <= max {
-		return text
-	}
-	text = text[:max]
-	for i := 0; i < utf8.UTFMax-1 && len(text) > 0 && !utf8.ValidString(text); i++ {
-		text = text[:len(text)-1]
-	}
-	return text
-}
-
-// Render formats the window exactly as the local and remote view surfaces have
-// always done: stable line numbers plus explicit continuation guidance.
-func Render(display string, window Window) string {
-	var builder strings.Builder
-	fmt.Fprintf(&builder, "=== %s (offset %d, limit %d) ===\n", display, window.Offset, window.Limit)
-	for i, line := range window.Lines {
-		fmt.Fprintf(&builder, "%d: %s\n", window.Offset+i+1, line)
-	}
-	if len(window.Lines) == 0 {
-		fmt.Fprintf(&builder, "(no lines in this window; total_lines=%d)\n", window.TotalLines)
-	}
-	if !window.EOF && window.LinesRead > 0 {
-		next := window.Offset + window.LinesRead
-		fmt.Fprintf(&builder, "\n[more lines available: continue with offset=%d limit<=%d]\n", next, DefaultLimit)
-	}
-	if window.TruncatedByBytes {
-		builder.WriteString("\n[window stopped at the byte budget; narrow the window with offset/limit]\n")
-	}
-	return builder.String()
-}
-
-// Metadata returns the stable view fields shared by all surfaces.
-func Metadata(display string, window Window) map[string]interface{} {
-	metadata := map[string]interface{}{
-		"file_path":    display,
-		"offset":       window.Offset,
-		"limit":        window.Limit,
-		"lines_read":   window.LinesRead,
-		"total_lines":  window.TotalLines,
-		"eof":          window.EOF,
-		"is_truncated": !window.EOF,
-	}
-	if !window.EOF && window.LinesRead > 0 {
-		metadata["suggested_next_offset"] = window.Offset + window.LinesRead
-	}
-	if window.TruncatedByBytes {
-		metadata["truncated_by_bytes"] = true
-	}
-	return metadata
 }
 
 // ValidUTF8 reports whether rendered text is valid UTF-8; callers use it to

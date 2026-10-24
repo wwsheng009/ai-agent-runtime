@@ -74,14 +74,18 @@ func BenchmarkViewCoreDirect(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		offset, limit := Normalize(0, MaxLimit)
-		window, err := Read(path, offset, limit, 0)
+		req := Request{Offset: offset, Limit: limit}
+		content, stats, err := ReadText(path, req, Options{})
 		if err != nil {
 			b.Fatal(err)
 		}
-		if body := Render("large.txt", window); body == "" {
+		if content == "" {
 			b.Fatal("empty render")
 		}
-		_ = Metadata("large.txt", window)
+		result := BuildResult("large.txt", 0, req, content, stats)
+		if _, ok := result.Metadata["is_truncated"].(bool); !ok {
+			b.Fatalf("missing truncation metadata: %#v", result.Metadata)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 )
 
 const (
@@ -15,6 +16,10 @@ const (
 	batchDefaultLimit = 200
 	// compactHeadLines matches the builtin view compact head window.
 	compactHeadLines = 10
+	// DefaultByteBudget is the window one read may spend when the surface does
+	// not set one: the tool's own model-visible budget. A zero Options.ByteBudget
+	// must not silently degrade into "one line per window".
+	DefaultByteBudget = toolcoreoutput.ViewOutputBudgetBytes
 )
 
 // NewHandler builds the shared view Handler. The Definition carries the
@@ -59,19 +64,11 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	return shapeResult(call, h.def.Name, result), nil
 }
 
-// viewRequest is one file window. The same shape backs file_path and every
-// files[] entry, so single and batch reads share one code path.
-type viewRequest struct {
-	FilePath string
-	Offset   int
-	Limit    int
-}
-
-func viewRequests(args map[string]any) ([]viewRequest, bool) {
+func viewRequests(args map[string]any) ([]Request, bool) {
 	compact := boolArg(args, "compact", false)
-	requests := make([]viewRequest, 0, 1)
+	requests := make([]Request, 0, 1)
 	if rawPath, _ := args["file_path"].(string); strings.TrimSpace(rawPath) != "" {
-		requests = append(requests, viewRequest{
+		requests = append(requests, Request{
 			FilePath: rawPath,
 			Offset:   intArg(args, "offset", 0),
 			Limit:    intArg(args, "limit", 0),
@@ -86,7 +83,7 @@ func viewRequests(args map[string]any) ([]viewRequest, bool) {
 		if strings.TrimSpace(rawPath) == "" {
 			continue
 		}
-		requests = append(requests, viewRequest{
+		requests = append(requests, Request{
 			FilePath: rawPath,
 			Offset:   intArg(entry, "offset", 0),
 			Limit:    intArg(entry, "limit", 0),
@@ -123,7 +120,7 @@ func boolArg(args map[string]any, key string, fallback bool) bool {
 // readTarget resolves, authorizes, stats and reads one request. Errors are
 // returned as toolcore error results so single reads can return them directly
 // and batch reads can report one failed file without dropping the batch.
-func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, req viewRequest, defaultLimit int) *toolcore.Result {
+func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, req Request, defaultLimit int) *toolcore.Result {
 	abs, err := paths.Resolve(req.FilePath)
 	if err != nil {
 		return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err)
@@ -153,17 +150,12 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 		limit = defaultLimit
 	}
 	offset, limit := Normalize(req.Offset, limit)
-	window, readErr := Read(abs, offset, limit, maxBytes(call))
+	window := Request{FilePath: req.FilePath, Offset: offset, Limit: limit}
+	content, stats, readErr := ReadText(abs, window, Options{ByteBudget: byteBudget(call, h.def)})
 	if readErr != nil {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check the file and narrow the window", readErr)
 	}
-	display := paths.Relative(abs)
-	result := &toolcore.Result{
-		Success:    true,
-		OutputKind: toolcore.KindText,
-		Content:    Render(display, window),
-		Metadata:   Metadata(display, window),
-	}
+	result := BuildResult(abs, info.Size(), window, content, stats)
 	if !ValidUTF8(result.Content) {
 		result.Metadata["binary"] = true
 	}
@@ -172,7 +164,7 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 
 // readBatch reads every request and renders one section per file. A failed
 // file becomes an error section plus metadata instead of failing the batch.
-func (h *handler) readBatch(call *toolcore.Call, paths toolcore.PathResolver, requests []viewRequest, compact bool) *toolcore.Result {
+func (h *handler) readBatch(call *toolcore.Call, paths toolcore.PathResolver, requests []Request, compact bool) *toolcore.Result {
 	perFileLimit := batchDefaultLimit
 	if compact {
 		perFileLimit = compactHeadLines
@@ -184,6 +176,7 @@ func (h *handler) readBatch(call *toolcore.Call, paths toolcore.PathResolver, re
 		section := h.readTarget(call, paths, req, perFileLimit)
 		display := req.FilePath
 		meta := map[string]any{"index": index, "file_path": display}
+		body := section.Content
 		if section.Success {
 			if resolved, ok := section.Metadata["file_path"].(string); ok {
 				display = resolved
@@ -195,7 +188,7 @@ func (h *handler) readBatch(call *toolcore.Call, paths toolcore.PathResolver, re
 				}
 			}
 			if compact {
-				section.Content += compactSummary(section.Metadata)
+				body += compactSummary(section.Metadata)
 			}
 		} else {
 			failures++
@@ -204,12 +197,14 @@ func (h *handler) readBatch(call *toolcore.Call, paths toolcore.PathResolver, re
 			if message == "" {
 				message = section.ErrorCode
 			}
-			section.Content = fmt.Sprintf("=== %s ===\n[error: %s]\n", display, message)
+			body = fmt.Sprintf("[error: %s]", message)
 		}
+		// One section per file, headed by the path the caller asked for: the
+		// shape every view surface has always produced.
 		if index > 0 {
-			builder.WriteString("\n")
+			builder.WriteString("\n\n")
 		}
-		builder.WriteString(section.Content)
+		fmt.Fprintf(&builder, "===== %s =====\n%s", req.FilePath, body)
 		files = append(files, meta)
 	}
 	metadata := map[string]any{
@@ -257,16 +252,22 @@ func shapeResult(call *toolcore.Call, toolName string, result *toolcore.Result) 
 	return result
 }
 
-func maxBytes(call *toolcore.Call) int {
-	// The capture ceiling is a surface policy, separate from the model-visible
-	// output budget. A zero value lets viewcore fall back to its default.
-	if call == nil || call.Runtime == nil {
-		return 0
+// byteBudget resolves the byte budget one window may spend. Every surface reads
+// the same budget: the tool's own declared window, which is what the result is
+// allowed to deliver. A surface may raise it through CaptureLimit when its echo
+// layer folds later than the tool's own stop condition.
+func byteBudget(call *toolcore.Call, def toolcore.Definition) int {
+	if call != nil && call.Runtime != nil {
+		if provider, ok := call.Runtime.(toolcore.CaptureBudgetProvider); ok {
+			if limit := provider.CaptureLimit("view"); limit > 0 {
+				return limit
+			}
+		}
 	}
-	if provider, ok := call.Runtime.(toolcore.CaptureBudgetProvider); ok {
-		return provider.CaptureLimit("view")
+	if def.DefaultOutputBudget > 0 {
+		return def.DefaultOutputBudget
 	}
-	return 0
+	return DefaultByteBudget
 }
 
 func intArg(args map[string]any, key string, fallback int) int {

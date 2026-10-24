@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -52,24 +50,25 @@ const viewMaxLimit = 2000
 // large enough that models should prefer narrower ranges or continue via offset.
 const viewEfficiencyAdvisoryThreshold = 2000
 
-// viewReaderLineCapBytes bounds how many bytes of a single line the reader
-// buffers before switching to drain-and-count mode. 256 KiB is far above the
-// 2000-rune clamp (at most 8 KiB even for 4-byte runes), so every over-cap
-// line is still clamped with an honest marker while a 400 MB single-line file
-// never forces the whole line into memory (analysis §3.3).
-const viewReaderLineCapBytes = viewcore.ReaderLineCapBytes
-
-// viewReaderClampedMarker replaces the hidden remainder of a line whose byte
-// length exceeds viewReaderLineCapBytes. Unlike viewLongLineMarker it reports
-// bytes (the drain path does not decode the hidden part), which is still an
-// honest, countable-loss notice.
-const viewReaderClampedMarker = "…[line truncated: showing first %d chars of a %d-byte line]"
-
 // viewByteBudgetBytes resolves the in-tool byte stop condition. view owns its
 // own 32 KiB window (independent of the render-layer budget) and stamps
 // skip_render_truncation on every result, so the window is never re-folded.
 func viewByteBudgetBytes() int {
 	return viewOutputBudgetBytes
+}
+
+// recordViewTruncation reports one truncation event from the shared reader to
+// the local metrics sink. The reader owns the decision of *when* a window was
+// cut; only the surface knows where to count it.
+func recordViewTruncation(reason viewcore.TruncReason) {
+	observability.RecordToolOutputTruncation(observability.TruncationLayerView, string(reason))
+}
+
+// viewReadOptions is the local surface's read configuration: view's own byte
+// window plus the metric sink. Every read this surface performs - plain text,
+// document render, notebook render - uses it, so one window semantics applies.
+func viewReadOptions() viewcore.Options {
+	return viewcore.Options{ByteBudget: viewByteBudgetBytes(), Truncated: recordViewTruncation}
 }
 
 // ViewTool 文件查看工具
@@ -463,7 +462,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 
 	// 检查是否为目录：自动列出浅层内容，避免模型多一轮改用 ls。
 	if fileInfo.IsDir() {
-		listing, listErr := v.listDirectoryPreview(resolvedPath)
+		listing, listErr := viewcore.DirectoryPreview(resolvedPath)
 		if listErr != nil {
 			return &toolkit.ToolResult{
 				Success:    false,
@@ -516,7 +515,11 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 		}
 		return stub, nil
 	}
-	content, readMeta, err := v.readFile(resolvedPath, p.Offset, p.Limit)
+	content, readMeta, err := viewcore.ReadText(resolvedPath, viewcore.Request{
+		FilePath: p.FilePath,
+		Offset:   p.Offset,
+		Limit:    p.Limit,
+	}, viewReadOptions())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &toolkit.ToolResult{
@@ -533,7 +536,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	}
 
 	// 检查是否为二进制文件
-	if v.isBinaryFile(content) {
+	if viewcore.IsBinaryContent(content) {
 		// 二进制不再是一句无法行动的报错：给一行 MIME + 大小 + 恢复路径
 		// （analysis §3.9：模型据此判断下一步是转码、下载还是换格式）。
 		return v.binaryNoteResult(resolvedPath, p.FilePath, fileInfo), nil
@@ -547,31 +550,11 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 		windowOffset = readMeta.WindowStart
 		windowLimit = readMeta.LinesRead
 	}
-	result := &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    content,
-		Metadata: map[string]interface{}{
-			"file_path":    resolvedPath,
-			"file_size":    fileInfo.Size(),
-			"lines_read":   readMeta.LinesRead,
-			"offset":       windowOffset,
-			"limit":        windowLimit,
-			"eof":          readMeta.EOF,
-			"is_truncated": readMeta.HasMore,
-		},
-	}
-	if readMeta.Tail {
-		result.Metadata["tail"] = true
-		result.Metadata["tail_lines"] = readMeta.LinesRead
-	}
-	if readMeta.EmptyFile {
-		result.Metadata["empty"] = true
-	}
-	if readMeta.ReaderClampedLines > 0 {
-		result.Metadata["reader_clamped_lines"] = readMeta.ReaderClampedLines
-		result.Metadata["reader_clamped_bytes"] = readMeta.ReaderClampedBytes
-	}
+	result := toolkit.ResultToToolkit(viewcore.BuildResult(resolvedPath, fileInfo.Size(), viewcore.Request{
+		FilePath: p.FilePath,
+		Offset:   p.Offset,
+		Limit:    p.Limit,
+	}, content, readMeta))
 	if pathHealed {
 		result.Metadata["path_auto_healed"] = true
 		result.Metadata["original_path"] = p.FilePath
@@ -581,12 +564,6 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 			p.FilePath, resolvedPath,
 		)
 		result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + note
-	}
-	if readMeta.ByteBudgetApplied {
-		result.Metadata["byte_budget_applied"] = true
-	}
-	if readMeta.Encoding != "" && readMeta.Encoding != fileEncodingUTF8.String() {
-		result.Metadata["encoding"] = readMeta.Encoding
 	}
 	// 读账本：记录本次磁盘状态，供 write/edit 判断「读后是否被外部修改」。
 	fullRead := p.Offset == 0 && !readMeta.HasMore && !readMeta.ByteBudgetApplied && readMeta.LongLinesTruncated == 0
@@ -623,20 +600,9 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 			recordWindow()
 		}
 	}
-	// §10.6 honest-truncation contract: surface in-line loss instead of a
-	// silent "...", so the model knows what it did not see and can decide
-	// whether a second targeted read is worth the cost.
-	if readMeta.LongLinesTruncated > 0 {
-		result.Metadata["long_lines_truncated"] = readMeta.LongLinesTruncated
-		result.Metadata["hidden_bytes"] = readMeta.HiddenBytes
-	}
 	if readMeta.OriginalBytes > 0 {
 		observability.RecordToolOutputBytes(observability.MetricToolOutputOriginalBytes, observability.TruncationLayerView, readMeta.OriginalBytes)
 	}
-	if readMeta.TotalLinesKnown {
-		result.Metadata["total_lines"] = readMeta.TotalLines
-	}
-	attachViewEfficiencyHints(result, p, readMeta)
 	return result, nil
 }
 
@@ -714,81 +680,6 @@ func (v *ViewTool) healSpellingPath(ctx context.Context, resolvedPath string) (s
 		return candidates[0], candidates
 	}
 	return "", candidates
-}
-
-// attachViewEfficiencyHints stamps continuation metadata and a soft advisory when
-// a large leading window is truncated. This is non-blocking guidance only.
-func attachViewEfficiencyHints(result *toolkit.ToolResult, request ViewFileRequest, readMeta viewReadResult) {
-	if result == nil || result.Metadata == nil {
-		return
-	}
-	// offset_resolved publishes the window the reader actually opened; for a
-	// tail read that is the resolved absolute line, not the negative request
-	// (review m11).
-	result.Metadata["offset_resolved"] = readMeta.WindowStart
-	if readMeta.Tail {
-		// Tail windows are already the cheapest way to read a file's end, but a
-		// clamped/cropped tail still needs the "read earlier" route: otherwise
-		// the model has no way back into the part it never saw (review m11).
-		if readMeta.TailClamped || readMeta.TailDroppedByBudget > 0 || readMeta.TailDroppedByLimit > 0 {
-			if readMeta.TailClamped {
-				result.Metadata["tail_clamped"] = true
-			}
-			if readMeta.TailDroppedByBudget > 0 {
-				result.Metadata["tail_lines_dropped_by_budget"] = readMeta.TailDroppedByBudget
-			}
-			if readMeta.TailDroppedByLimit > 0 {
-				result.Metadata["tail_lines_dropped_by_limit"] = readMeta.TailDroppedByLimit
-			}
-			result.Metadata["tail_window_start"] = readMeta.WindowStart
-			if readMeta.WindowStart > 0 {
-				earlier := readMeta.WindowStart - viewDefaultLimit
-				if earlier < 0 {
-					earlier = 0
-				}
-				result.Metadata["suggested_earlier_offset"] = earlier
-				advisory := fmt.Sprintf(
-					"[efficiency] tail window starts at line %d (lines_read=%d); for earlier content use offset=%d limit<=%d.",
-					readMeta.WindowStart+1, readMeta.LinesRead, earlier, viewDefaultLimit,
-				)
-				if strings.TrimSpace(result.Content) == "" {
-					result.Content = advisory
-				} else {
-					result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + advisory
-				}
-			}
-		}
-		return
-	}
-	if readMeta.HasMore {
-		nextOffset := request.Offset + readMeta.LinesRead
-		if nextOffset < request.Offset {
-			nextOffset = request.Offset
-		}
-		result.Metadata["suggested_next_offset"] = nextOffset
-	}
-	// Soft-warn when a leading window still truncated: default-size windows
-	// (or byte-budget-stopped windows) need continuation guidance; explicit
-	// small ranges are already efficient; EOF windows need no advisory.
-	if !readMeta.HasMore || request.Offset != 0 {
-		return
-	}
-	if request.Limit < viewDefaultLimit && !readMeta.ByteBudgetApplied {
-		return
-	}
-	nextOffset, _ := result.Metadata["suggested_next_offset"].(int)
-	result.Metadata["efficiency_advisory"] = "prefer_offset_limit"
-	advisory := fmt.Sprintf(
-		"[efficiency] File continues past this window (is_truncated=true, lines_read=%d). Prefer a smaller limit for large files, or continue with offset=%d limit<=%d. For multiple independent files, use view.files in one call instead of repeated full-file views.",
-		readMeta.LinesRead,
-		nextOffset,
-		viewDefaultLimit,
-	)
-	if strings.TrimSpace(result.Content) == "" {
-		result.Content = advisory
-		return
-	}
-	result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + advisory
 }
 
 // recordDerivedRender closes the read-side bookkeeping for renders that do not
@@ -1146,461 +1037,4 @@ func compactViewSummary(metadata map[string]interface{}) string {
 		return "..."
 	}
 	return "... " + strings.Join(parts, ", ")
-}
-
-type viewReadResult struct {
-	TotalLines      int
-	TotalLinesKnown bool
-	LinesRead       int
-	HasMore         bool
-	EOF             bool
-	// ByteBudgetApplied marks windows stopped by the byte budget rather than
-	// the line limit, so callers can distinguish the truncation cause.
-	ByteBudgetApplied bool
-	// LongLinesTruncated counts lines cut by the in-line guard so the honest
-	// truncation contract (plan §10.6) can surface how much was hidden.
-	LongLinesTruncated int
-	// HiddenBytes is the byte size of the hidden remainder of over-limit
-	// in-line-truncated lines within this window.
-	HiddenBytes int
-	// OriginalBytes is the raw window byte size before the in-line guard.
-	OriginalBytes int
-	// Encoding is the detected on-disk text encoding (utf-8 / utf-8-bom /
-	// utf-16le / utf-16be) used for this read.
-	Encoding string
-	// Tail marks a read requested with a negative offset (last N lines). When
-	// set, WindowStart holds the resolved absolute first line and the reader
-	// function already consumed the whole stream.
-	Tail bool
-	// TailRequested is the requested tail length before clamping.
-	TailRequested int
-	// TailClamped marks a tail request clamped to viewMaxLimit.
-	TailClamped bool
-	// TailDroppedByBudget / TailDroppedByLimit count kept lines the byte budget
-	// or the explicit limit removed from the front of the tail window
-	// (review m11).
-	TailDroppedByBudget int
-	TailDroppedByLimit  int
-	// WindowStart is the resolved 0-based first line of the returned window
-	// (equal to the requested offset for normal reads).
-	WindowStart int
-	// ReaderClampedLines counts lines whose byte length exceeded
-	// viewReaderLineCapBytes and were drained (counted, not buffered).
-	ReaderClampedLines int
-	// ReaderClampedBytes is the hidden byte total of those lines.
-	ReaderClampedBytes int64
-	// EmptyFile marks a zero-line file so callers can publish an explicit note
-	// instead of an offset-beyond-EOF message.
-	EmptyFile bool
-}
-
-// viewMaxLineChars bounds a single rendered line (plan L1).
-const viewMaxLineChars = 2000
-
-// viewLongLineMarker replaces the hidden remainder of an over-limit line.
-// It is honest by construction: the model sees that content was cut and how
-// many characters remain hidden, instead of a bare silent "...".
-const viewLongLineMarker = "…[line truncated: %d more chars]"
-
-// truncateLongLine keeps a rune-safe prefix of an over-limit line and appends
-// the honest marker reporting the hidden rune count. It returns the visible
-// text and the hidden byte count for loss accounting.
-func truncateLongLine(line string) (visible string, hiddenBytes int) {
-	runes := []rune(line)
-	if len(runes) <= viewMaxLineChars {
-		return line, 0
-	}
-	marker := fmt.Sprintf(viewLongLineMarker, len(runes)-viewMaxLineChars)
-	markerRunes := len([]rune(marker))
-	prefixRunes := viewMaxLineChars - markerRunes
-	if prefixRunes < 0 {
-		prefixRunes = 0
-	}
-	visible = string(runes[:prefixRunes]) + marker
-	return visible, len(line) - len(string(runes[:prefixRunes]))
-}
-
-// viewMaxDecodeBytes bounds in-memory decoding for BOM/UTF-16 files. Larger
-// files keep the streaming path instead of risking a multi-megabyte allocation
-// on every read.
-const viewMaxDecodeBytes int64 = 8 << 20
-
-// readFile 读取文件内容：UTF-8 走流式扫描；带 BOM/UTF-16 的文件先解码，
-// 保证模型看到的是可读文本，同时把编码记入元数据。
-func (v *ViewTool) readFile(filePath string, offset, limit int) (string, viewReadResult, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", viewReadResult{}, err
-	}
-	defer file.Close()
-
-	if enc, hasBOM := probeFileEncoding(file); hasBOM {
-		if info, statErr := file.Stat(); statErr == nil && info.Size() > viewMaxDecodeBytes {
-			return "", viewReadResult{}, fmt.Errorf(
-				"文件使用 %s 编码且超过 %d 字节，view 未做整文件解码；请改用 shell/download 转换后查看",
-				enc, viewMaxDecodeBytes,
-			)
-		}
-		data, readErr := io.ReadAll(file)
-		if readErr != nil {
-			return "", viewReadResult{}, readErr
-		}
-		text, actual := decodeFileBytes(data)
-		content, meta, readErr := v.readLines(strings.NewReader(text), offset, limit)
-		meta.Encoding = actual.String()
-		return content, meta, readErr
-	}
-
-	return v.readLines(file, offset, limit)
-}
-
-// probeFileEncoding peeks the leading BOM and rewinds the reader.
-func probeFileEncoding(file *os.File) (fileEncoding, bool) {
-	var head [4]byte
-	n, _ := file.Read(head[:])
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fileEncodingUTF8, false
-	}
-	enc, _ := detectFileEncoding(head[:n])
-	return enc, enc.HasBOM()
-}
-
-func (v *ViewTool) readLines(reader io.Reader, offset, limit int) (string, viewReadResult, error) {
-	br := viewcore.NewLineReader(reader)
-	meta := viewReadResult{}
-	if offset < 0 {
-		return v.readTailLines(br, -offset, limit, meta)
-	}
-
-	// 跳过 offset 行
-	skipped := 0
-	for skipped < offset {
-		line, err := readViewLine(br)
-		if err != nil {
-			return "", meta, err
-		}
-		if !line.HasBytes {
-			meta.EOF = true
-			meta.TotalLinesKnown = true
-			break
-		}
-		skipped++
-		meta.TotalLines++
-	}
-
-	// 读取 limit 行，同时做字节感知提前停止
-	var lines []string
-	readCount := 0
-	accumulated := 0
-	byteBudget := viewByteBudgetBytes()
-	for readCount < limit {
-		line, err := readViewLine(br)
-		if err != nil {
-			return "", meta, err
-		}
-		if !line.HasBytes {
-			break
-		}
-		meta.TotalLines++
-		meta.OriginalBytes += int(line.ContentBytes) + 1 // + newline
-		accountViewLineTruncation(&meta, line)
-
-		lineBytes := len(line.Text) + 12 // rendered prefix "<lineNum>: " + newline
-		if readCount > 0 && accumulated+lineBytes > byteBudget {
-			meta.HasMore = true
-			meta.ByteBudgetApplied = true
-			observability.RecordToolOutputTruncation(observability.TruncationLayerView, observability.TruncatedByBytes)
-			break
-		}
-
-		lines = append(lines, line.Text)
-		accumulated += lineBytes
-		readCount++
-	}
-	meta.LinesRead = readCount
-
-	// Peek instead of consuming: a huge next line must not be drained just to
-	// learn that it exists.
-	if !meta.HasMore && readCount == limit {
-		hasMore, err := br.HasMore()
-		if err != nil {
-			return "", meta, err
-		}
-		if hasMore {
-			meta.HasMore = true
-			observability.RecordToolOutputTruncation(observability.TruncationLayerView, observability.TruncatedByLines)
-		}
-	}
-	if !meta.HasMore {
-		meta.TotalLinesKnown = true
-		meta.EOF = true
-	}
-
-	if readCount == 0 {
-		meta.EOF = true
-		meta.TotalLinesKnown = true
-		meta.WindowStart = offset
-		if meta.TotalLines == 0 {
-			meta.EmptyFile = true
-			return "Note: file is empty (0 lines).", meta, nil
-		}
-		last := meta.TotalLines - 1
-		if offset == meta.TotalLines {
-			return fmt.Sprintf("Note: offset %d equals total lines %d; use offset %d to read the last line.", offset, meta.TotalLines, last), meta, nil
-		}
-		return fmt.Sprintf("Note: offset %d is beyond the end of the file (%d lines); retry with a smaller offset (0..%d).", offset, meta.TotalLines, last), meta, nil
-	}
-
-	meta.WindowStart = offset
-	return v.formatContent(lines, offset), meta, nil
-}
-
-// readTailLines implements a negative offset: it streams the whole file while
-// keeping only the last N lines (bounded memory), then trims the kept window
-// from the front until it fits the byte budget - the tail must stay the true
-// tail, so the oldest kept lines are the ones dropped.
-func (v *ViewTool) readTailLines(br *viewcore.LineReader, requested, limit int, meta viewReadResult) (string, viewReadResult, error) {
-	meta.TailRequested = requested
-	tailLines := requested
-	if tailLines > viewMaxLimit {
-		tailLines = viewMaxLimit
-		meta.TailClamped = true
-	}
-	if tailLines < 1 {
-		// -MinInt 取负仍为负数（溢出），0/负值会让 make() panic；尾部读取
-		// 至少保留一行。
-		tailLines = 1
-	}
-	ring := make([]string, tailLines)
-	count := 0
-	for {
-		line, err := readViewLine(br)
-		if err != nil {
-			return "", meta, err
-		}
-		if !line.HasBytes {
-			break
-		}
-		count++
-		meta.OriginalBytes += int(line.ContentBytes) + 1
-		accountViewLineTruncation(&meta, line)
-		// Slot for the 1-based line number count; orderedTailLines undoes this
-		// rotation with count%capacity as the oldest-slot index.
-		ring[(count-1)%tailLines] = line.Text
-	}
-	meta.TotalLines = count
-	meta.TotalLinesKnown = true
-	meta.EOF = true
-	meta.Tail = true
-	ordered := orderedTailLines(ring, count)
-	kept := ordered
-	if len(ordered) > 0 {
-		kept = trimTailToByteBudget(ordered, viewByteBudgetBytes())
-		meta.TailDroppedByBudget = len(ordered) - len(kept)
-	}
-	// An explicit limit also bounds a tail window: the newest lines are the
-	// recovery-relevant ones, so the oldest kept lines are dropped (review m11).
-	if limit > 0 && len(kept) > limit {
-		meta.TailDroppedByLimit = len(kept) - limit
-		kept = kept[len(kept)-limit:]
-	}
-	meta.WindowStart = count - len(kept)
-	meta.LinesRead = len(kept)
-	if len(kept) == 0 {
-		meta.EmptyFile = true
-		return "Note: file is empty (0 lines).", meta, nil
-	}
-	return v.formatContent(kept, meta.WindowStart), meta, nil
-}
-
-// orderedTailLines returns the ring contents oldest-first. When the file has
-// fewer lines than the ring capacity the prefix slice is already in order.
-func orderedTailLines(ring []string, count int) []string {
-	if count == 0 {
-		return nil
-	}
-	capacity := len(ring)
-	if count <= capacity {
-		return ring[:count]
-	}
-	start := count % capacity
-	ordered := make([]string, 0, capacity)
-	ordered = append(ordered, ring[start:]...)
-	ordered = append(ordered, ring[:start]...)
-	return ordered
-}
-
-// trimTailToByteBudget drops the oldest lines until the remaining window fits
-// the budget. The newest line is always kept so the result still carries the
-// recovery-relevant end of the file.
-func trimTailToByteBudget(lines []string, budget int) []string {
-	start := len(lines)
-	accumulated := 0
-	for index := len(lines) - 1; index >= 0; index-- {
-		lineBytes := len(lines[index]) + 12
-		if start < len(lines) && accumulated+lineBytes > budget {
-			break
-		}
-		accumulated += lineBytes
-		start = index
-	}
-	return lines[start:]
-}
-
-// viewLineRead is one logical line produced by readViewLine. Text is already
-// clamped to viewMaxLineChars; ContentBytes is the full on-disk line length
-// (delimiter excluded) even when the hidden remainder was never buffered.
-type viewLineRead struct {
-	Text         string
-	HasBytes     bool
-	EOF          bool
-	ContentBytes int64
-	HiddenChars  int
-	HiddenBytes  int64
-	OverClamped  bool
-}
-
-// readViewLine streams one bounded line from the shared viewcore reader and
-// applies the builtin tool's rune clamp and loss accounting.
-func readViewLine(br *viewcore.LineReader) (viewLineRead, error) {
-	raw, err := br.Next()
-	if err != nil {
-		return viewLineRead{}, err
-	}
-	line := viewLineRead{
-		HasBytes:     raw.HasBytes,
-		EOF:          raw.EOF,
-		ContentBytes: raw.ContentBytes,
-		OverClamped:  raw.Truncated,
-	}
-	if !raw.HasBytes {
-		return line, nil
-	}
-
-	text := string(raw.Bytes)
-	if raw.Truncated {
-		visible := clampLinePrefix(text, viewMaxLineChars)
-		line.Text = visible + fmt.Sprintf(viewReaderClampedMarker, viewMaxLineChars, raw.ContentBytes)
-		hidden := raw.ContentBytes - int64(len(visible))
-		if hidden < 0 {
-			hidden = 0
-		}
-		line.HiddenBytes = hidden
-		return line, nil
-	}
-	if utf8.RuneCountInString(text) > viewMaxLineChars {
-		visible, hiddenBytes := truncateLongLine(text)
-		line.Text = visible
-		line.HiddenChars = utf8.RuneCountInString(text) - viewMaxLineChars
-		line.HiddenBytes = int64(hiddenBytes)
-		return line, nil
-	}
-	line.Text = text
-	return line, nil
-}
-
-// accountViewLineTruncation folds one line's clamp/drain loss into the window
-// metadata and the truncation metric.
-func accountViewLineTruncation(meta *viewReadResult, line viewLineRead) {
-	if line.OverClamped || line.HiddenChars > 0 {
-		meta.LongLinesTruncated++
-		meta.HiddenBytes += int(line.HiddenBytes)
-		observability.RecordToolOutputTruncation(observability.TruncationLayerView, observability.TruncatedByBytes)
-	}
-	if line.OverClamped {
-		meta.ReaderClampedLines++
-		meta.ReaderClampedBytes += line.HiddenBytes
-	}
-}
-
-// clampLinePrefix returns the prefix of s up to max runes without splitting a
-// rune. It walks rune starts only, so a 256 KiB over-cap prefix costs no
-// full-string rune conversion.
-func clampLinePrefix(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	count := 0
-	for index := range s {
-		if count == max {
-			return s[:index]
-		}
-		count++
-	}
-	return s
-}
-
-// formatContent 格式化内容
-func (v *ViewTool) formatContent(lines []string, offset int) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	var output strings.Builder
-	for index, line := range lines {
-		fmt.Fprintf(&output, "%d: %s", offset+index+1, line)
-		if index < len(lines)-1 {
-			output.WriteByte('\n')
-		}
-	}
-	return output.String()
-}
-
-// listDirectoryPreview returns a shallow directory listing for auto-heal when
-// view is pointed at a directory instead of a file.
-func (v *ViewTool) listDirectoryPreview(dirPath string) (string, error) {
-	entries, err := os.ReadDir(dirPath)
-	if err != nil {
-		return "", err
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() {
-			name += string(filepath.Separator)
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	var b strings.Builder
-	limit := viewDirPreviewLimit
-	if len(names) < limit {
-		limit = len(names)
-	}
-	for i := 0; i < limit; i++ {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		fmt.Fprintf(&b, "%d: %s", i+1, names[i])
-	}
-	if len(names) > viewDirPreviewLimit {
-		fmt.Fprintf(&b, "\n... 省略 %d 项（共 %d）", len(names)-viewDirPreviewLimit, len(names))
-	}
-	if len(names) == 0 {
-		return "(空目录)", nil
-	}
-	return b.String(), nil
-}
-
-// isBinaryFile 检查文件是否为二进制文件
-func (v *ViewTool) isBinaryFile(content string) bool {
-	if len(content) == 0 {
-		return false
-	}
-
-	// 检查前 500 个字节
-	checkLen := 500
-	if len(content) < checkLen {
-		checkLen = len(content)
-	}
-
-	nullCount := 0
-	for i := 0; i < checkLen; i++ {
-		if content[i] == 0 {
-			nullCount++
-		}
-	}
-
-	// 如果超过一定比例是 null 字节，认为是二进制文件
-	return nullCount > checkLen/20
 }

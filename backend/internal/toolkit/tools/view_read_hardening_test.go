@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 )
 
 // newViewToolAt builds a view tool bound to root; every hardening test needs
@@ -202,7 +204,7 @@ func TestViewTool_LongLineFollowedByNormalLines(t *testing.T) {
 	if err != nil || result == nil || !result.Success {
 		t.Fatalf("long-line read failed: result=%#v err=%v", result, err)
 	}
-	if !strings.Contains(result.Content, fmt.Sprintf(viewReaderClampedMarker, viewMaxLineChars, 300*1024)) {
+	if !strings.Contains(result.Content, fmt.Sprintf(viewcore.ReaderClampedMarker, viewcore.MaxLineChars, 300*1024)) {
 		t.Fatalf("expected the reader clamp marker, got %q", result.Content[:min(400, len(result.Content))])
 	}
 	if !strings.Contains(result.Content, "\n2: after") {

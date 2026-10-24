@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/docread"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -67,7 +68,8 @@ func (v *ViewTool) viewDocumentResult(ctx context.Context, absPath, displayPath 
 		}, true
 	}
 
-	content, readMeta, readErr := v.readLines(strings.NewReader(render.Markdown), p.Offset, p.Limit)
+	window := viewcore.Request{FilePath: p.FilePath, Offset: p.Offset, Limit: p.Limit}
+	content, readMeta, readErr := viewcore.ReadWindow(strings.NewReader(render.Markdown), window, viewReadOptions())
 	if readErr != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -80,7 +82,7 @@ func (v *ViewTool) viewDocumentResult(ctx context.Context, absPath, displayPath 
 		"file_path": absPath,
 		"file_size": info.Size(),
 	}
-	for key, value := range viewWindowMetadata(p, readMeta) {
+	for key, value := range viewcore.WindowMetadata(window, readMeta) {
 		metadata[key] = value
 	}
 	for key, value := range render.Metadata {
@@ -99,7 +101,7 @@ func (v *ViewTool) viewDocumentResult(ctx context.Context, absPath, displayPath 
 	if note := scannedDocumentNote(render.Metadata); note != "" {
 		result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + note
 	}
-	attachViewEfficiencyHints(result, p, readMeta)
+	viewcore.AttachEfficiencyHints(result.Metadata, &result.Content, window, readMeta)
 	return result, true
 }
 

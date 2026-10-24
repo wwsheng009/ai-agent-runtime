@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/ipynb"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -74,7 +75,8 @@ func (v *ViewTool) viewNotebookResult(absPath, displayPath string, p ViewFileReq
 		}, true
 	}
 
-	content, readMeta, readErr := v.readLines(strings.NewReader(render.Markdown), p.Offset, p.Limit)
+	window := viewcore.Request{FilePath: p.FilePath, Offset: p.Offset, Limit: p.Limit}
+	content, readMeta, readErr := viewcore.ReadWindow(strings.NewReader(render.Markdown), window, viewReadOptions())
 	if readErr != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -90,7 +92,7 @@ func (v *ViewTool) viewNotebookResult(absPath, displayPath string, p ViewFileReq
 		"doc_kind":     "ipynb",
 		"doc_degraded": false,
 	}
-	for key, value := range viewWindowMetadata(p, readMeta) {
+	for key, value := range viewcore.WindowMetadata(window, readMeta) {
 		metadata[key] = value
 	}
 	for source, target := range map[string]string{
@@ -156,7 +158,7 @@ func (v *ViewTool) viewNotebookResult(absPath, displayPath string, p ViewFileReq
 			fmt.Sprintf("\n\n[note] 另有 %d 张图片输出不在本次窗口内，未附加；读取其所在行区间后重试即可获取。", delivered.skipped)
 	}
 
-	attachViewEfficiencyHints(result, p, readMeta)
+	viewcore.AttachEfficiencyHints(result.Metadata, &result.Content, window, readMeta)
 	return result, true
 }
 
@@ -169,7 +171,7 @@ type notebookImageWindow struct {
 
 // deliveredNotebookImages keeps only the images whose placeholder line belongs to
 // the window that was actually returned to the model.
-func deliveredNotebookImages(images []ipynb.Image, readMeta viewReadResult) notebookImageWindow {
+func deliveredNotebookImages(images []ipynb.Image, readMeta viewcore.Stats) notebookImageWindow {
 	if len(images) == 0 {
 		return notebookImageWindow{}
 	}
