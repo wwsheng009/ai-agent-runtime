@@ -399,6 +399,18 @@
   才算读取（`metadata["k"]=v` 是输出字段）；不能把"写入不算读取"当全局规则
   （同一键可能既读又写）。`shell`/`job_*`/`artifact_read` 默认不注册，不在
   tools/list 覆盖面内。
+  **远程输出裁剪与 artifact_read 分页契约（2026-10-24）**：详见
+  `remote-artifact-paging-20261024.md`。远程有三层裁剪（抓取上限 / 工具预算 /
+  远程硬顶 ModelVisibleCap），shell 走 head+tail 折叠并保留 artifact 指针。
+  发现并修复一个真实缺陷：`remoteOutput.Shape` 对所有 KindText 结果无条件折叠，
+  **包括 artifact_read**——而它本身就是分页工具。实测 limit=4096/32768/61440/65536
+  全部只返回 1024 字节，三个后果同时发生：请求与响应不一致、页面中段被丢弃、
+  续读指针与实际内容脱节。修复三处：分页工具跳过折叠（`IsSelfSizedWindowTool`）、
+  页大小由工具自定（自身窗口 − 头部预留，超限收敛而非折叠）、
+  发布自己的续读契约（artifact_eof/artifact_next_offset）。
+  修复后 limit=4096 回 4096，超限收敛到窗口；整份 108894 字节抓取逐页读回
+  恰好 108894 字节，无缺口无重复。因 `toolcore/output` 导入 `toolcore`，
+  预算常量与 metadata key 定义在 artifact_handler 内以避免 import cycle。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、

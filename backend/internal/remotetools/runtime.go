@@ -201,6 +201,18 @@ func (o remoteOutput) Shape(tool string, result *toolcore.Result) (*toolcore.Res
 	if result.OutputKind != toolcore.KindText {
 		return result, nil
 	}
+	// artifact_read is a paging tool: its whole job is to hand back exactly the
+	// window the caller asked for, together with the offset of the next one.
+	// Folding that page again would (a) return fewer bytes than `limit`
+	// promised, (b) drop the middle of the page - the very bytes the caller is
+	// reading - and (c) leave `suggested_next_offset` describing a window that
+	// no longer matches the content. The handler already sizes its page against
+	// the same budget, so there is nothing left for the shaper to do.
+	if toolcoreoutput.IsSelfSizedWindowTool(tool) {
+		result.Metadata[toolcoreoutput.KeySkipRenderTruncation] = true
+		result.Metadata[toolcoreoutput.KeyModelVisibleBudget] = toolcoreoutput.ToolBudget(tool)
+		return result, nil
+	}
 	shaped, shapedMetadata, _, _ := toolcoreoutput.ShapeText(tool, result.Content, result.Metadata, 0, o.Budget(tool))
 	result.Content = shaped
 	result.Metadata = shapedMetadata

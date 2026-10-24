@@ -6,6 +6,23 @@ import (
 	"strings"
 )
 
+const (
+	// artifactReadMinLimitBytes keeps a page useful even when the configured
+	// budget is unusually tight.
+	artifactReadMinLimitBytes = 1024
+	// artifactReadHeaderReserveBytes is the room the rendered page needs for its
+	// framing, charged against the same budget.
+	artifactReadHeaderReserveBytes = 512
+	// artifactReadBudgetBytes is this tool's declared model-visible window. It
+	// lives here rather than in toolcore/output because that package imports
+	// toolcore; output re-exports the same number via ToolBudget("artifact_read").
+	artifactReadBudgetBytes = 32 * 1024
+	// Metadata keys, mirroring toolresult's wire names. artifact_handler cannot
+	// import the output package without creating an import cycle.
+	keySkipRenderTruncation = "skip_render_truncation"
+	keyModelVisibleBudget   = "model_visible_budget_bytes"
+)
+
 // ArtifactOriginProvider is an optional Runtime extension declaring which store
 // owns bare `art_…` ids on this surface. Without it, bare ids default to local.
 type ArtifactOriginProvider interface {
@@ -67,7 +84,18 @@ func (h *artifactReadHandler) Execute(ctx context.Context, call *Call) (*Result,
 	if offset < 0 {
 		offset = 0
 	}
-	limit := intArg(call.Args, "limit", 64*1024)
+	// The page size is this tool's own contract, bounded here rather than by the
+	// output shaper: a page must fit the artifact window together with its
+	// metadata, and a caller asking for more gets the largest page that still
+	// does. Without this the request and the response disagree about how many
+	// bytes a page holds, which is exactly what breaks paging.
+	limit := intArg(call.Args, "limit", artifactReadMaxLimit(call))
+	if maxLimit := artifactReadMaxLimit(call); limit > maxLimit {
+		limit = maxLimit
+	}
+	if limit < artifactReadMinLimitBytes {
+		limit = artifactReadMinLimitBytes
+	}
 	chunk, err := call.Runtime.Artifacts().Open(ctx, ref, offset, limit)
 	if err != nil {
 		code := CodeOf(err)
@@ -91,6 +119,17 @@ func (h *artifactReadHandler) Execute(ctx context.Context, call *Call) (*Result,
 	if !chunk.EOF {
 		metadata["suggested_next_offset"] = offset + len(chunk.Data)
 	}
+	// This tool owns its window: publish the page size it actually used and
+	// declare the render-layer opt-out, so the body is not folded a second time.
+	// The continuation offset then always describes bytes the caller received.
+	metadata["artifact_window_bytes"] = len(chunk.Data)
+	metadata["artifact_window_limit"] = limit
+	metadata["artifact_eof"] = chunk.EOF
+	if !chunk.EOF {
+		metadata["artifact_next_offset"] = offset + len(chunk.Data)
+	}
+	metadata[keySkipRenderTruncation] = true
+	metadata[keyModelVisibleBudget] = artifactReadBudgetBytes
 	result := &Result{
 		Success:    true,
 		OutputKind: KindText,
@@ -149,4 +188,27 @@ func artifactFailure(code, nextAction string, err error) *Result {
 	result.Content = content
 	result.Err = fmt.Errorf("%s", content)
 	return result
+}
+
+// artifactReadMaxLimit is the largest page one call may return: the tool's own
+// window minus its framing. Both the default and any caller-supplied limit are
+// bounded by it, so a response never exceeds what the tool declared.
+func artifactReadMaxLimit(call *Call) int {
+	budget := artifactReadBudgetBytes
+	if call != nil && call.Runtime != nil {
+		if shaper := call.Runtime.Output(); shaper != nil {
+			if provider, ok := shaper.(interface{ Budget(string) int }); ok {
+				// A surface may narrow the window; it can never widen it past
+				// the tool's declared budget.
+				if remote := provider.Budget("artifact_read"); remote > 0 && remote < budget {
+					budget = remote
+				}
+			}
+		}
+	}
+	limit := budget - artifactReadHeaderReserveBytes
+	if limit < artifactReadMinLimitBytes {
+		limit = artifactReadMinLimitBytes
+	}
+	return limit
 }

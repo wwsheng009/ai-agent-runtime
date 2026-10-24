@@ -70,6 +70,26 @@ func ToolBudget(tool string) int {
 	}
 }
 
+// selfSizedWindowTools are tools that already return exactly one page of their
+// own choosing, with their own continuation metadata. Their output must not be
+// folded again:
+//   - artifact_read's `limit` is the page size, and the whole point of the call
+//     is to receive that window unchanged;
+//   - folding it would return fewer bytes than requested, drop the middle of the
+//     page, and leave its continuation offset pointing at bytes that were
+//     silently discarded.
+//
+// The handler is responsible for keeping each page within the same budget, which
+// is what makes skipping the shaper safe rather than just convenient.
+func IsSelfSizedWindowTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "artifact_read":
+		return true
+	default:
+		return false
+	}
+}
+
 // ResolveCap implements the trust-boundary arithmetic from design §9.6.
 //
 // hardCap = min(toolWindow, remoteHardCap)
