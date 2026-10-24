@@ -2,7 +2,8 @@
 
 ## 结论先说
 
-**没有。** 现状是「remote 全部走 core，本地只有 grep / glob / ls / write 走 core」。
+**没有。** 现状是「remote 全部走 core，本地只有 grep / glob / ls / write /
+append_write 走 core」。
 
 这不是设计清单写错，而是**迁移只完成了一半**：core 里几乎每个工具都有 handler，
 但本地工具大多仍执行自己的 legacy 实现。
@@ -60,9 +61,11 @@ func executeCoreSearchTool(ctx, tool, params) (*toolkit.ToolResult, error)
 - `ls`：同样只有一行委托；本地 legacy 的遍历、渲染与字节裁剪已删除。
 - `write`：只有一行委托；本地 legacy 的编码探测、原子替换、文档拒绝、
   内联载荷闸门与 `expected_sha256` 前置条件都搬进了 core。
+- `append_write`：只有一行委托；`create_if_missing` 默认值修正为 true（该工具
+  的存在意义就是首块创建），本地 `filetransport` 包装层已删除。
 
-`view` / `edit` / `append_write` / `apply_patch`
-在本地还是各自的实现（`view.go`、`edit.go`、`append_write.go`、`apply_patch.go`）。
+`view` / `edit` / `apply_patch`
+在本地还是各自的实现（`view.go`、`edit.go`、`apply_patch.go`）。
 
 ## 一个直接矛盾
 
@@ -79,7 +82,7 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 | 视角 | 现状 |
 |---|---|
 | remote 工具面 | 已全部走 core（grep/glob/view/ls/write/append_write/edit/apply_patch/artifact_read） |
-| 本地工具面 | grep / glob / ls / write 走 core；其余仍是 legacy |
+| 本地工具面 | grep / glob / ls / write / append_write 走 core；其余仍是 legacy |
 | 两套实现是否分叉 | glob 与 ls 只有一套代码（本地 `Execute` 直接调用 core handler），各自有对拍 public 入口的等价性测试；grep 仍有 legacy 兜底分支 |
 
 ## 尚未完成的迁移（按缺口大小）
@@ -89,11 +92,14 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 3. **本地 `view`**：core handler 只覆盖纯文本窗口；本地的图片直通、文档转换、
    notebook 渲染、符号解析、去重与读取台账都还没有对应实现。这是最大的一块，
    需要先决定哪些属于工具能力（应进 core）、哪些属于宿主能力（应留在本地）。
-4. **本地 `edit` / `append_write` / `apply_patch`**：core 已有 handler，本地未接。
-   `write` 已完成，见下。
-5. **本地 `artifact_read`**：本地是独立实现（`toolkit/tools/artifact_read.go`），
+4. **本地 `edit`**：core 的匹配只有 3 种 CRLF 变体，本地有 6 层阶梯（空白容忍、
+   缩进对齐、空行窗口漂移、token 回退最近片段、相似度排序）。这些直接决定
+   `edit` 能不能命中，属于工具能力；移植约 700 行 + 30 个测试，是独立一轮。
+5. **本地 `apply_patch`**：同上，本地还多出 envelope 归一化与最近窗口诊断。
+   `write` / `append_write` 已完成，见下。
+6. **本地 `artifact_read`**：本地是独立实现（`toolkit/tools/artifact_read.go`），
    core 的 `NewArtifactReadHandler` 只被 remote 用。
-6. **grep 的 legacy 兜底**：`rg_args` / `pattern_file` 之外的参数组合里仍有
+7. **grep 的 legacy 兜底**：`rg_args` / `pattern_file` 之外的参数组合里仍有
    未进 core 的路径；glob 已经没有这一层。
 
 ## 建议的收敛顺序
