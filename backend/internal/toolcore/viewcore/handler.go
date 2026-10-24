@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/pathguard"
 )
 
 const (
@@ -53,6 +54,16 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	requests, compact := viewRequests(call.Args)
 	if len(requests) == 0 {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "pass file_path or files", nil), nil
+	}
+
+	// The name guard runs before resolution on purpose: a surface whose
+	// resolver refuses device paths itself would otherwise answer with its own
+	// refusal shape, and one path would be refused two different ways depending
+	// on where it ran.
+	if len(requests) == 1 {
+		if reason := pathguard.NameReason(requests[0].FilePath); reason != "" {
+			return shapeResult(call, h.def.Name, RefusalResult(requests[0].FilePath, reason)), nil
+		}
 	}
 
 	if len(requests) == 1 && !hasFilesArg(call.Args) {
@@ -125,6 +136,13 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 	if err != nil {
 		return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err)
 	}
+	// Device / FIFO / reserved names are refused before any I/O: opening a FIFO
+	// blocks until a writer appears and /dev/zero streams meaningless bytes. The
+	// check runs ahead of the permission hook so the refusal keeps the
+	// view-specific shape (path_refused / refusal_reason) on every surface.
+	if reason := pathguard.NameReason(abs); reason != "" {
+		return RefusalResult(abs, reason)
+	}
 	if permissions := call.Runtime.Permissions(); permissions != nil {
 		if err := permissions.CheckPath(toolcore.OpRead, abs); err != nil {
 			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err)
@@ -137,12 +155,19 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 		}
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check permissions on the target file", statErr)
 	}
-	if info.IsDir() {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "use ls for directories", fmt.Errorf("%s is a directory", paths.Relative(abs)))
+	// A stat result is safe; the refusal here is what keeps a character device
+	// or named pipe from ever reaching open.
+	if reason := pathguard.ModeReason(info.Mode()); reason != "" {
+		return RefusalResult(abs, reason)
 	}
-	if !info.Mode().IsRegular() {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "use a regular file",
-			fmt.Errorf("%s is not a regular file", paths.Relative(abs)))
+	if info.IsDir() {
+		// Pointing view at a directory lists it instead of failing: the caller
+		// wanted to know what is there, and the metadata says so explicitly.
+		listing, listErr := DirectoryListing(abs, req.FilePath)
+		if listErr != nil {
+			return toolcore.Error(toolcore.ErrInvalidArgument, "use ls for directories", listErr)
+		}
+		return listing
 	}
 
 	limit := req.Limit
@@ -155,11 +180,12 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 	if readErr != nil {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check the file and narrow the window", readErr)
 	}
-	result := BuildResult(abs, info.Size(), window, content, stats)
-	if !ValidUTF8(result.Content) {
-		result.Metadata["binary"] = true
+	// A window that is mostly NUL bytes is a binary file: describe it (MIME,
+	// size, recovery route) instead of handing the model unreadable content.
+	if IsBinaryContent(content) {
+		return BinaryNote(abs, req.FilePath, info.Size())
 	}
-	return result
+	return BuildResult(abs, info.Size(), window, content, stats)
 }
 
 // readBatch reads every request and renders one section per file. A failed

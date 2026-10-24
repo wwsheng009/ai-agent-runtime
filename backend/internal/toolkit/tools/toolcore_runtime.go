@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/pathguard"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -467,7 +469,7 @@ func (r *localCoreRuntime) Resolve(raw string) (string, error) {
 	// perform; admitting the path as a read here hid that call and let a
 	// mutation through on a read-only path.
 	if reason := unsupportedPathNameReason(resolved); reason != "" {
-		return "", fmt.Errorf("不支持的特殊文件（%s）: %s", reason, resolved)
+		return "", errors.New(pathguard.RefusalMessage(resolved, reason))
 	}
 	return resolved, nil
 }

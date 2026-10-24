@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"mime"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,13 +13,12 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
-
-const viewDirPreviewLimit = 40
 
 // viewBatchDefaultLimit caps per-item reads in batch mode when the caller
 // omits limit. Batch calls are for scanning many files, not pulling whole
@@ -400,14 +397,17 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	if p.Limit > viewMaxLimit {
 		p.Limit = viewMaxLimit
 	}
-	resolvedPath := v.resolvePathWithContext(ctx, p.FilePath)
-
 	// 设备/FIFO/Windows 保留名在任何 I/O 之前拒绝：open 一个 FIFO 会阻塞，
-	// /dev/zero 会灌入无意义字节（analysis §3.2）。放在 checkPath 之前，让
-	// view 的拒绝保持带 path_refused/refusal_reason 元数据的既有形状；
-	// checkPath 中的同一道门是给其余文件工具的兜底。
+	// /dev/zero 会灌入无意义字节（analysis §3.2）。先用请求的原样拼写判一次，
+	// 和 core handler 同序——否则同一次调用会因为「谁先跑」而得到两句话；
+	// 解析后再判一次兜底。拒绝一律保持带 path_refused/refusal_reason 元数据的
+	// 既有形状；checkPath 中的同一道门是给其余文件工具的兜底。
+	if reason := unsupportedPathNameReason(p.FilePath); reason != "" {
+		return viewCoreResult(viewcore.RefusalResult(p.FilePath, reason)), nil
+	}
+	resolvedPath := v.resolvePathWithContext(ctx, p.FilePath)
 	if reason := unsupportedPathNameReason(resolvedPath); reason != "" {
-		return v.unsupportedPathResult(resolvedPath, reason), nil
+		return viewCoreResult(viewcore.RefusalResult(resolvedPath, reason)), nil
 	}
 	// 检查文件是否存在
 	if err := v.checkPath(runtimeexecutor.OpRead, resolvedPath); err != nil {
@@ -457,12 +457,12 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 		}, nil
 	}
 	if reason := unsupportedFileModeReason(fileInfo.Mode()); reason != "" {
-		return v.unsupportedPathResult(resolvedPath, reason), nil
+		return viewCoreResult(viewcore.RefusalResult(resolvedPath, reason)), nil
 	}
 
 	// 检查是否为目录：自动列出浅层内容，避免模型多一轮改用 ls。
 	if fileInfo.IsDir() {
-		listing, listErr := viewcore.DirectoryPreview(resolvedPath)
+		listing, listErr := viewcore.DirectoryListing(resolvedPath, p.FilePath)
 		if listErr != nil {
 			return &toolkit.ToolResult{
 				Success:    false,
@@ -470,22 +470,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 				Error:      fmt.Errorf("路径是目录，不是文件: %s；尝试列出内容失败: %w", p.FilePath, listErr),
 			}, nil
 		}
-		return &toolkit.ToolResult{
-			Success:    true,
-			OutputKind: toolresult.KindText,
-			Content: fmt.Sprintf(
-				"路径是目录，不是文件: %s\n已自动列出目录内容（depth=1，最多 %d 项）。如需递归请改用 ls 并设置 depth。\n\n%s",
-				p.FilePath,
-				viewDirPreviewLimit,
-				listing,
-			),
-			Metadata: map[string]interface{}{
-				"file_path":    resolvedPath,
-				"is_directory": true,
-				"auto_listed":  true,
-				"depth":        1,
-			},
-		}, nil
+		return viewCoreResult(listing), nil
 	}
 
 	// 读取 limit 行（字节感知：累计输出超过模型可见预算的预留比例时提前停止，
@@ -539,7 +524,7 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	if viewcore.IsBinaryContent(content) {
 		// 二进制不再是一句无法行动的报错：给一行 MIME + 大小 + 恢复路径
 		// （analysis §3.9：模型据此判断下一步是转码、下载还是换格式）。
-		return v.binaryNoteResult(resolvedPath, p.FilePath, fileInfo), nil
+		return viewCoreResult(viewcore.BinaryNote(resolvedPath, p.FilePath, fileInfo.Size())), nil
 	}
 
 	windowOffset := p.Offset
@@ -606,55 +591,13 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	return result, nil
 }
 
-// binaryNoteResult describes a non-renderable binary file without failing the
-// call: one line of MIME + size + a recovery route.
-func (v *ViewTool) binaryNoteResult(absPath, displayPath string, info os.FileInfo) *toolkit.ToolResult {
-	var size int64
-	if info != nil {
-		size = info.Size()
-	}
-	mimeType := ""
-	if head, err := readViewFileHead(absPath, 512); err == nil {
-		mimeType = strings.TrimSpace(http.DetectContentType(head))
-	}
-	if extMIME := strings.TrimSpace(mime.TypeByExtension(strings.ToLower(filepath.Ext(absPath)))); extMIME != "" &&
-		(mimeType == "" || mimeType == "application/octet-stream") {
-		mimeType = extMIME
-	}
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
-	}
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content: fmt.Sprintf(
-			"二进制文件: %s\nMIME: %s，大小: %d 字节。\n未附加文本或图像内容；可用 download 拉取，或按 MIME 选择外部工具转换后重试 view。",
-			displayPath, mimeType, size,
-		),
-		Metadata: map[string]interface{}{
-			"file_path":   absPath,
-			"is_binary":   true,
-			"binary_note": true,
-			"binary_mime": mimeType,
-			"file_size":   size,
-		},
-	}
-}
-
-// unsupportedPathResult turns a special-path refusal (device name, FIFO,
-// socket, reserved Windows device) into a structured failure with a recovery
-// route instead of a bare error.
-func (v *ViewTool) unsupportedPathResult(path, reason string) *toolkit.ToolResult {
-	return &toolkit.ToolResult{
-		Success:    false,
-		OutputKind: toolresult.KindText,
-		Error:      fmt.Errorf("不支持的特殊文件（%s）: %s；请改用 ls/glob 选择普通文件后重试。", reason, path),
-		Metadata: map[string]interface{}{
-			"file_path":      path,
-			"path_refused":   true,
-			"refusal_reason": reason,
-		},
-	}
+// viewCoreResult converts a result produced by the shared viewcore handler into
+// the local shape. The shared code answers in surface-independent vocabulary
+// (INVALID_ARGUMENT); the local surface keeps its own spelling so agents and
+// diagnostics that classify on the string never see two vocabularies for one
+// tool.
+func viewCoreResult(result *toolcore.Result) *toolkit.ToolResult {
+	return localizeErrorCode(toolkit.ResultToToolkit(result))
 }
 
 // healSpellingPath looks for directory entries whose name differs from the

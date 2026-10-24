@@ -180,9 +180,3 @@ func trimIncompleteUTF8Suffix(line []byte) []byte {
 	}
 	return line
 }
-
-// ValidUTF8 reports whether rendered text is valid UTF-8; callers use it to
-// annotate binary-looking windows without changing the bytes they return.
-func ValidUTF8(text string) bool {
-	return utf8.ValidString(text)
-}

@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -19,6 +21,8 @@ func viewConformanceFixtures(t *testing.T, root string) {
 		"small.txt": []byte("one\ntwo\nthree\nfour\n"),
 		"empty.txt": nil,
 		"long.txt":  []byte(strings.Repeat("x", viewcore.MaxLineChars+10) + "\nafter\n"),
+		// ELF magic plus NULs: the binary window classifier must fire.
+		"blob.bin": append([]byte{0x7F, 'E', 'L', 'F'}, bytes.Repeat([]byte{0x00}, 128)...),
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(root, name), content, 0o600); err != nil {
@@ -30,6 +34,22 @@ func viewConformanceFixtures(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, "utf16.txt"), utf16, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A directory exercises the auto-listing path.
+	if err := os.MkdirAll(filepath.Join(root, "subdir", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "subdir", "entry.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// viewConformanceDevicePath is a special path the guard must refuse on this
+// host (a device on Unix, a reserved DOS name on Windows).
+func viewConformanceDevicePath() string {
+	if runtime.GOOS == "windows" {
+		return "NUL"
+	}
+	return "/dev/null"
 }
 
 // TestViewLocalAndCoreRenderTheSameWindow is the conformance test that makes
@@ -55,6 +75,9 @@ func TestViewLocalAndCoreRenderTheSameWindow(t *testing.T) {
 		{"empty file", map[string]interface{}{"file_path": "empty.txt"}},
 		{"utf16", map[string]interface{}{"file_path": "utf16.txt"}},
 		{"long line", map[string]interface{}{"file_path": "long.txt"}},
+		{"binary note", map[string]interface{}{"file_path": "blob.bin"}},
+		{"directory listing", map[string]interface{}{"file_path": "subdir"}},
+		{"refused device", map[string]interface{}{"file_path": viewConformanceDevicePath()}},
 	}
 
 	// The shared window fields both surfaces must agree on. Local-only stamps
@@ -68,6 +91,10 @@ func TestViewLocalAndCoreRenderTheSameWindow(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// The read-dedup cache is host state the shared handler does not have
+			// yet; disabling it keeps this a comparison of the reader, not of the
+			// host's memory.
+			t.Setenv("AICLI_VIEW_DEDUP", "")
 			root := t.TempDir()
 			viewConformanceFixtures(t, root)
 			ctx := context.Background()

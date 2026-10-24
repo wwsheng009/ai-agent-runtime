@@ -3,13 +3,13 @@ package tools
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/imageprep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
@@ -70,18 +70,10 @@ func looksLikeBMP(head []byte) bool {
 	return false
 }
 
+// readViewFileHead 返回文件开头的 size 字节，供格式嗅探使用。实现在
+// viewcore，和 core 侧的二进制识读共用同一份读取。
 func readViewFileHead(path string, size int) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	head := make([]byte, size)
-	n, err := io.ReadFull(file, head)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-		return nil, err
-	}
-	return head[:n], nil
+	return viewcore.ReadFileHead(path, size)
 }
 
 // viewImageResult 让 view 对图片返回可发送的图片附件（而非二进制报错）：
