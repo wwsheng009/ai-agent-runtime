@@ -204,6 +204,23 @@
   13 组参数（含 context/only_matching/mode/stats/type/paths）要求 Content 逐字节
   一致——本地侧刻意不带 ripgrep 扩展，因此顺带证明 rg 与 walker 渲染一致。
   这是翻转本地主流程前的等价性证据。
+  **翻转影响面实测（临时启用后回退，2026-10-24）**：把「core 覆盖参数集」的调用
+  临时改走 core handler 后，`internal/toolkit/tools` 出现 **42 个失败**，且暴露出
+  三类**真实语义差异**而不是格式问题：
+  1. **作用域默认值不同**：core walker 跳过 `node_modules` 等 `SkippedDirNames` 且
+     默认包含隐藏文件，而本地 legacy 默认跳过隐藏文件、并按 `hidden`/`no_ignore*`
+     参数决定 node_modules/ignore 行为（`TestGrepTool_NodeModulesAreNotSpecialHiddenBuiltin`、
+     `HiddenAndNoHidden`、`NoIgnoreAndUnrestricted`、`IgnoreHierarchy` 全部失败）。
+     翻转前必须先把「默认作用域策略」变成 core 的可选参数，或明确本地采纳 core 默认值。
+  2. **本地 rg 引擎能力**：core 路径没有 `Searcher` 实现，本地 `lookPath`/`runCommand`
+     注入（`PrefersRipgrepWhenAvailable`、`FallsBackWhenRipgrepUnavailable`、
+     各 `*TranslateToRipgrep*`）全部失效——翻转需要给本地适配器补一个 rg runner，
+     否则本地既丢 rg 加速又丢既有 args 契约。
+  3. **本地输出/预算层**：`context` 的 `>` 标记、中文空结果文案、`stats` metadata 形状、
+     字节预算/partial/timeout 标注（`ByteBudgetTruncation…`、`RealRipgrepStops…`、
+     `RipgrepKeepsPartialOutput…`）都在 legacy 层。
+  因此主流程翻转的推荐顺序是：先 (1) 作用域参数进 core → (2) 本地 rg runner 接
+  `Searcher` → (3) 输出/预算层归属决策与分批迁移测试，再翻转。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
   type/type_not、max_count、only_matching、max_depth/max_filesize、stats、多根语义
