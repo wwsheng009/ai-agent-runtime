@@ -70,10 +70,15 @@ func TestRemoteGrepEnginesPreserveWalkerSemantics(t *testing.T) {
 			if !result.Success {
 				t.Fatalf("grep failed: %+v", result)
 			}
-			for _, want := range []string{"visible.txt", ".hidden.txt", "ignored.txt", "nested"} {
+			for _, want := range []string{"visible.txt", "ignored.txt", "nested"} {
 				if !strings.Contains(result.Content, want) {
 					t.Fatalf("%s grep output missing %q:\n%s", engine.name, want, result.Content)
 				}
+			}
+			// Hidden entries are skipped by default: the same contract the
+			// local tool has always had (and ripgrep's own default).
+			if strings.Contains(result.Content, ".hidden.txt") {
+				t.Fatalf("%s grep must skip hidden files by default:\n%s", engine.name, result.Content)
 			}
 			if strings.Contains(result.Content, "node_modules") {
 				t.Fatalf("%s grep must skip node_modules:\n%s", engine.name, result.Content)
@@ -81,8 +86,24 @@ func TestRemoteGrepEnginesPreserveWalkerSemantics(t *testing.T) {
 			if got := result.Metadata["engine"]; got != engine.name {
 				t.Fatalf("engine = %v, want %s", got, engine.name)
 			}
-			if got := result.Metadata["hidden_files"]; got != true {
-				t.Fatalf("hidden_files = %v, want true", got)
+			if got := result.Metadata["hidden_files"]; got != false {
+				t.Fatalf("hidden_files = %v, want false", got)
+			}
+			// The same call with `hidden: true` must reach the hidden file on
+			// both engines, so the flag is a capability and not a difference.
+			withHidden, err := tool.Execute(context.Background(), map[string]interface{}{
+				"pattern": "needle",
+				"path":    ".",
+				"hidden":  true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(withHidden.Content, ".hidden.txt") {
+				t.Fatalf("%s grep with hidden=true must find the hidden file:\n%s", engine.name, withHidden.Content)
+			}
+			if got := withHidden.Metadata["hidden_files"]; got != true {
+				t.Fatalf("hidden_files = %v, want true when hidden=true", got)
 			}
 			if got := result.Metadata["ignore_files"]; got != false {
 				t.Fatalf("ignore_files = %v, want false", got)

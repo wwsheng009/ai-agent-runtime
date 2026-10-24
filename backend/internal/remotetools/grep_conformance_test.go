@@ -452,3 +452,50 @@ func TestRemoteGrepStatsOverMCP(t *testing.T) {
 		t.Fatalf("stats must not change the text output:\nplain:\n%s\nstats:\n%s", plain, withStats)
 	}
 }
+
+// TestRemoteGrepHiddenOverMCP proves the hidden parameters survive schema
+// validation and behave the same as the local tool: hidden content is skipped
+// by default and reachable through `hidden: true`.
+func TestRemoteGrepHiddenOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".secret"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		"visible.txt":       "hit visible\n",
+		".hidden.txt":       "hit hidden\n",
+		".secret/config.md": "hit secret\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(path)), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	def := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{"pattern": "hit"})
+	if !strings.Contains(def, "visible.txt") {
+		t.Fatalf("default search should find the visible file:\n%s", def)
+	}
+	if strings.Contains(def, ".hidden.txt") || strings.Contains(def, ".secret") {
+		t.Fatalf("hidden entries must be skipped by default:\n%s", def)
+	}
+
+	hidden := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "hidden": true,
+	})
+	if !strings.Contains(hidden, ".hidden.txt") || !strings.Contains(hidden, ".secret/config.md") {
+		t.Fatalf("hidden=true must reach dotfiles and dot-directories:\n%s", hidden)
+	}
+
+	noHidden := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "hidden": true, "no_hidden": true,
+	})
+	if strings.Contains(noHidden, ".hidden.txt") {
+		t.Fatalf("no_hidden must win over hidden:\n%s", noHidden)
+	}
+}

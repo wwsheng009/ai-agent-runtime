@@ -43,14 +43,14 @@ func (r ripgrepRunner) available() bool {
 	return r.path != ""
 }
 
-// baseArgs keep ripgrep's traversal aligned with searchcore: hidden files are
-// included, ignore files are not consulted, and the same dependency/VCS trees
-// are skipped. A single thread plus path sorting makes limit behavior
-// deterministic.
+// baseArgs keep ripgrep's traversal aligned with searchcore: ignore files are
+// not consulted and the same dependency/VCS trees are skipped. Hidden handling
+// is per caller - grep passes it only when its IncludeHidden option is set,
+// glob keeps its (still unconditional) inclusion. A single thread plus path
+// sorting makes limit behavior deterministic.
 func (r ripgrepRunner) baseArgs() []string {
 	args := []string{
 		"--no-config",
-		"--hidden",
 		"--no-ignore",
 		"--threads", "1",
 		"--sort", "path",
@@ -94,6 +94,9 @@ func (r ripgrepRunner) glob(ctx context.Context, opts searchcore.GlobOptions) (s
 	}
 
 	args := append(r.baseArgs(), "--files", "--glob", pattern)
+	// Glob's contract still includes hidden entries on both surfaces; that
+	// stays explicit here until its hidden policy is parameterized too.
+	args = append(args, "--hidden")
 	args = append(args, r.skipArgs()...)
 	args = append(args, "--", ".")
 	lines, outputTruncated, runErr := r.runLines(ctx, base, args, opts.Offset+limit+1)
@@ -274,6 +277,9 @@ func (r ripgrepRunner) grepSingle(ctx context.Context, opts searchcore.GrepOptio
 	}
 
 	args := append(r.baseArgs(), "--text", "--json")
+	if opts.IncludeHidden {
+		args = append(args, "--hidden")
+	}
 	if globMatcher != nil {
 		args = append(args, "--glob", opts.Glob)
 	}

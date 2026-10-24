@@ -379,6 +379,14 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "返回统计摘要（metadata.stats）：matches（本页出现次数）、matched_lines（本页去重后的行数）、files_with_matched（本页文件数）、files_scanned（本次实际扫描文件数）。它是**页级**统计而不是全量搜索统计——引擎会在页后一条/一个文件处停止，因此全量数字需要额外一次完整扫描。",
 			},
+			"hidden": map[string]interface{}{
+				"type":        "boolean",
+				"description": "包含以 . 开头的隐藏文件与隐藏目录（默认 false = 跳过，与本地工具及 ripgrep 默认一致）。只影响 hidden 层；显式传入的隐藏根目录始终会被搜索。",
+			},
+			"no_hidden": map[string]interface{}{
+				"type":        "boolean",
+				"description": "显式关闭隐藏文件：与 hidden 同时出现时 no_hidden 优先。",
+			},
 		},
 		// At least one pattern spelling is required, but which one is a
 		// handler-level rule: `patterns` is a valid substitute for `pattern`,

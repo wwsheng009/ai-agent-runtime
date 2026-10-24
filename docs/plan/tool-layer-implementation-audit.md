@@ -221,6 +221,15 @@
      `RipgrepKeepsPartialOutput…`）都在 legacy 层。
   因此主流程翻转的推荐顺序是：先 (1) 作用域参数进 core → (2) 本地 rg runner 接
   `Searcher` → (3) 输出/预算层归属决策与分批迁移测试，再翻转。
+  **hidden 语义统一（2026-10-24，按「同一工具一套行为」执行）**：core 新增
+  `GrepOptions.IncludeHidden`，walker 跳过隐藏文件与隐藏目录（含 `.git` 在内的
+  `SkippedDirNames` 仍独立跳过），显式请求的隐藏根目录保持可搜索；rg 侧不再无条件传
+  `--hidden`，改由该选项驱动（glob 仍显式传 `--hidden`，它的隐藏策略属于待参数化的
+  独立项）。默认值与本地工具、ripgrep 默认一致：**跳过隐藏**，`hidden: true` 打开，
+  `no_hidden` 覆盖 `hidden`；remote schema 声明同一对参数，metadata `hidden_files`
+  反映实际生效值。副作用是 remote 的默认搜索不再包含隐藏文件——这是刻意对齐默认值，
+  而不是按运行位置保留差异。注意 ignore 文件策略仍待统一（core 现状：不读取 ignore
+  文件，walker/rg 一致；本地 legacy 仍读 `.gitignore`，翻转时按 core 契约收敛）。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
   type/type_not、max_count、only_matching、max_depth/max_filesize、stats、多根语义

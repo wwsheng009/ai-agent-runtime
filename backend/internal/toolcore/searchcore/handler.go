@@ -163,6 +163,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if sizeFailure != nil {
 		return sizeFailure, nil
 	}
+	// `no_hidden` wins over `hidden`, mirroring the local parameter pair.
+	includeHidden := boolArg(call.Args, "hidden") && !boolArg(call.Args, "no_hidden")
 	contextBefore, contextAfter := grepContextFromArgs(call.Args)
 	if onlyMatching && (contextBefore > 0 || contextAfter > 0) {
 		// Reporting the conflict beats silently dropping one of the two
@@ -196,6 +198,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		MaxDepth:         maxDepth,
 		MaxDepthSet:      maxDepthSet,
 		MaxFileSizeBytes: maxFileSizeBytes,
+		IncludeHidden:    includeHidden,
 		Limit:            intArg(call.Args, "limit", DefaultGrepLimit),
 		MaxFileBytes:     captureLimit(call),
 		Offset:           intArg(call.Args, "offset", 0),
@@ -305,7 +308,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"next_offset":        options.Offset + pageEntries,
 		"has_more":           result.Truncated,
 		"engine":             engine,
-		"hidden_files":       true,
+		"hidden_files":       options.IncludeHidden,
 		"ignore_files":       false,
 	}
 	if boolArg(call.Args, "stats") {

@@ -54,6 +54,11 @@ type GrepOptions struct {
 	// `max_filesize` filter; MaxFileBytes is the runtime capture budget and the
 	// two are applied independently.
 	MaxFileSizeBytes int64
+	// IncludeHidden searches dotfiles and dot-directories. The tool default is
+	// false on every surface: hidden content is skipped unless the caller asks
+	// for it, which is both the long-standing local behaviour and ripgrep's own
+	// default.
+	IncludeHidden bool
 	// CaseInsensitive is the legacy alias kept for callers that predate
 	// IgnoreCase; it is folded into IgnoreCase by the pattern options.
 	CaseInsensitive bool
@@ -158,6 +163,9 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		if opts.MaxFileSizeBytes > 0 && info.Size() > opts.MaxFileSizeBytes {
 			return nil
 		}
+		if !opts.IncludeHidden && isHiddenGrepPath(relativeGrepCandidate(root, path)) {
+			return nil
+		}
 		if shouldFilterGrepCandidate(relativeGrepCandidate(root, path), includeFilter, excludeFilter) {
 			return nil
 		}
@@ -228,6 +236,13 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 					return nil
 				}
 				if entry.IsDir() {
+					// Hidden directories are skipped wholesale, so a search
+					// never descends into .git or a hidden cache tree. The
+					// explicitly requested root is exempt: asking for `.config`
+					// must work.
+					if !opts.IncludeHidden && path != root && strings.HasPrefix(entry.Name(), ".") {
+						return filepath.SkipDir
+					}
 					if ShouldSkipDir(entry.Name()) && path != root {
 						return filepath.SkipDir
 					}
@@ -287,6 +302,20 @@ func relativeGrepCandidate(root, path string) string {
 		return filepath.Base(path)
 	}
 	return filepath.ToSlash(rel)
+}
+
+// isHiddenGrepPath reports whether any segment of the relative candidate starts
+// with a dot, which is exactly what ripgrep treats as hidden.
+func isHiddenGrepPath(candidate string) bool {
+	for _, segment := range strings.Split(filepath.ToSlash(candidate), "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			continue
+		}
+		if strings.HasPrefix(segment, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // grepPatterns returns the pattern list a GrepOptions carries, preferring the
