@@ -375,6 +375,10 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --only-matching/-o：每个匹配片段单独输出一行，格式 path:line:column:fragment。与 invert_match 同用时回退为整行内容（同 rg -o -v）；count 模式下计数变为匹配次数（同 rg -o -c）；files 模式不受影响；与 context 不能同时使用（会显式报错，共享核心暂不支持该组合）。",
 			},
+			"stats": map[string]interface{}{
+				"type":        "boolean",
+				"description": "返回统计摘要（metadata.stats）：matches（本页出现次数）、matched_lines（本页去重后的行数）、files_with_matched（本页文件数）、files_scanned（本次实际扫描文件数）。它是**页级**统计而不是全量搜索统计——引擎会在页后一条/一个文件处停止，因此全量数字需要额外一次完整扫描。",
+			},
 		},
 		// At least one pattern spelling is required, but which one is a
 		// handler-level rule: `patterns` is a valid substitute for `pattern`,

@@ -308,6 +308,16 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"hidden_files":       true,
 		"ignore_files":       false,
 	}
+	if boolArg(call.Args, "stats") {
+		// Page-level statistics, not a whole-search summary: see GrepStats.
+		summary := SummarizeGrepResult(result)
+		metadata["stats"] = map[string]any{
+			"matches":            summary.Matches,
+			"matched_lines":      summary.MatchedLines,
+			"files_with_matched": summary.FilesWithMatched,
+			"files_scanned":      summary.FilesScanned,
+		}
+	}
 	result0 := &toolcore.Result{
 		Success:    true,
 		OutputKind: toolcore.KindText,

@@ -428,3 +428,27 @@ func TestRemoteGrepDepthAndSizeOverMCP(t *testing.T) {
 		t.Fatalf("max_filesize as bytes must behave like the string spelling:\n%s", byteSize)
 	}
 }
+
+// TestRemoteGrepStatsOverMCP proves the stats flag survives schema validation
+// and that statistics travel in metadata instead of polluting the text output
+// (the metadata values themselves are pinned by the handler-level tests).
+func TestRemoteGrepStatsOverMCP(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hit a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	plain := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{"pattern": "hit"})
+	withStats := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "hit", "stats": true,
+	})
+	if plain != withStats {
+		t.Fatalf("stats must not change the text output:\nplain:\n%s\nstats:\n%s", plain, withStats)
+	}
+}

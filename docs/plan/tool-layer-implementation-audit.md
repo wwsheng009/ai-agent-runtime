@@ -188,10 +188,16 @@
   `ParseGrepSize`（字节 / K/M/G，1024 进制，可选 B）上移 core，本地 `parseSizeString`
   改为调用它；rg 侧把「用户过滤」与「抓取预算」合并为一个 `--max-filesize`（取更严格
   者），与 walker 的双重检查等价。
+  `grep` 的 `stats` 进 core，并把契约明确定义为**页级统计**（`GrepStats`：
+  matches/matched_lines/files_with_matched/files_scanned）——引擎在页后一 entry 处
+  早停，全量统计需要额外一次完整扫描，直接复用 rg 的 summary 会给出与调用者实际收到
+  的结果不一致的数字。`SummarizeGrepResult` 在窗口之后计算，并显式剔除 files/count
+  模式下「作为 has_more 证据被多读的那个文件」（`grep_stats_test.go` 有专门护栏）；
+  统计只进 metadata、不改动文本输出。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
-  type/type_not、max_count、only_matching、max_depth/max_filesize、多根语义已进 core；
-  files_without、stats/ignore 族与本地上下文渲染格式仍在本地）；
+  type/type_not、max_count、only_matching、max_depth/max_filesize、stats、多根语义
+  已进 core；files_without、ignore 族与本地上下文渲染格式仍在本地）；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。
