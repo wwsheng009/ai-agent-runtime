@@ -93,3 +93,44 @@ requested=65536   returned=7680     ← 同上，不折叠
 - `TestRemoteShellFoldedOutputPointsAtArtifact` —— 折叠**只有**在省略中段可取回时才允许。
 
 最后一条是前三者的前提：如果 shell 折叠后不再给 artifact 指针，折叠就是静默丢数据。
+
+## artifact_read 是否在默认 MCP 列表里
+
+**不在**。它由 `Artifacts.Root` 控制，与 profile 无关：
+
+```go
+// tools.go, enabledTools()
+if c.Artifacts.Root != "" {
+    base = append(base, artifactTools...)
+}
+```
+
+实测各场景（`remote_dev__artifact_read` 是否出现）：
+
+| 场景 | 出现 |
+|---|---|
+| 默认配置（未设 artifact root） | ❌ |
+| 设置 `Artifacts.Root` | ✅ |
+| readonly profile + `Artifacts.Root` | ✅ |
+| `ReadOnly=true` + `Artifacts.Root` | ✅ |
+| custom profile，`Tools=[grep]` + `Artifacts.Root` | ❌ |
+| custom profile，`Tools=[grep, artifact_read]`，**无** store | ✅（但调用必失败） |
+
+三个要点：
+
+1. **门槛是 store，不是 profile。** 没有 artifact store 时列出这个工具，
+   每次调用都会返回「artifact store is not configured」——声明了一个必然失败的能力。
+2. **read-only 不会砍掉它。** 解引用 artifact 是读操作，只读目标必须保留，
+   否则 agent 生成的每个折叠输出都无法取回。`ReadOnly` 的硬过滤白名单里
+   明确包含 `ToolArtifactRead`。
+3. **custom profile 是唯一例外**：它以 `Tools` 为完整清单，所以显式写
+   `artifact_read` 会被列出，即使没配 store。这是调用方明确的越权选择，
+   失败信息是可行动的 `UNSUPPORTED`（不是 panic、不是空读取）。
+
+## 固化为（`remotetools/artifact_listing_test.go`）
+
+- `TestRemoteArtifactReadIsNotInTheDefaultSurface`
+- `TestRemoteArtifactReadAppearsWhenStoreIsConfigured`
+- `TestRemoteArtifactReadSurvivesReadOnlyGating`
+- `TestRemoteArtifactReadWithoutStoreFailsCleanly`
+- `TestRemoteArtifactReadIsNarrowableByToolList`
