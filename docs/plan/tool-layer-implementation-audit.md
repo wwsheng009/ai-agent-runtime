@@ -271,6 +271,16 @@
   （渲染层不再二次折叠）、真·零命中页的 `empty_result`/`outcome=empty`（截断页绝不打
   空标记）、字节截断时的 `results_truncated`/`truncation_reason=byte_budget`/
   `next_action`。护栏：`grep_render_budget_test.go`。
+  **本地主流程翻转完成（2026-10-24，提交 f2e4b6ee）**：`grep_core_switch.go` 把
+  「core 覆盖参数集」内的调用改走 searchcore handler——本地与 remote 从此同源执行；
+  core 覆盖集之外的参数（`rg_args`/`pattern_file`/`files_without`/`json`/展示类开关、
+  读取侧 16MiB 流闸门、partial/timeout 标注、path-not-found 候选提示）留在 legacy 路径，
+  相关测试显式以 `rg_args:[]` 路由到 legacy 并注明原因。翻转过程中在 core 补齐：
+  `glob` 数组拼写与 `!` 负模式（`Globs` + 本地 partition 规则）、`type` 推导 glob、
+  `ignore_file` 相对搜索根解析、全局 ignore 尊重 `HOME`/`USERPROFILE`、页边界提示
+  （页满即发 next_offset）、渲染窗 offset/limit 兜底、PCRE 提示文案、
+  `pattern_source`/`search_scope_count/kind` metadata。engine 取值统一为
+  `walker`/`ripgrep`（原 `builtin`/`rg` 保留在 legacy 输出）。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
