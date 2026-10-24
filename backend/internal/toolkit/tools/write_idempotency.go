@@ -39,29 +39,6 @@ func writePreconditionFailure(message, actual, expected string) *toolkit.ToolRes
 	}
 }
 
-func idempotentWriteResult(path string, size int64, revision, expected string) *toolkit.ToolResult {
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    fmt.Sprintf("文件内容已与请求一致，按幂等回放处理: %s\n文件大小: %d 字节", path, size),
-		Metadata: map[string]interface{}{
-			"file_path":         path,
-			"action":            "unchanged",
-			"old_existed":       true,
-			"old_size":          size,
-			"new_size":          size,
-			"size_changed":      int64(0),
-			"patch":             "",
-			"mutated_paths":     []string{},
-			"old_sha256":        revision,
-			"new_sha256":        revision,
-			"expected_sha256":   strings.TrimSpace(expected),
-			"idempotent_replay": true,
-			"retry_class":       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
-		},
-	}
-}
-
 func optionalNonNegativeInt64(params map[string]interface{}, key string) (int64, bool, bool) {
 	value, exists := params[key]
 	if !exists || value == nil {

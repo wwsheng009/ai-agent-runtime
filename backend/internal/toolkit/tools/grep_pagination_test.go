@@ -52,8 +52,8 @@ func TestGrepPaginationSlicesFixedOutput(t *testing.T) {
 	tool := stubGrepToolWithLines(t, lines)
 
 	first, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern":    "needle",
-		"limit": 2,
+		"pattern": "needle",
+		"limit":   2,
 	})
 	if err != nil || first == nil || !first.Success {
 		t.Fatalf("page 1 failed: %v %+v", err, first)
@@ -67,9 +67,9 @@ func TestGrepPaginationSlicesFixedOutput(t *testing.T) {
 	}
 
 	second, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern":    "needle",
-		"limit": 2,
-		"offset":     2,
+		"pattern": "needle",
+		"limit":   2,
+		"offset":  2,
 	})
 	if err != nil || second == nil || !second.Success {
 		t.Fatalf("page 2 failed: %v %+v", err, second)
@@ -90,9 +90,9 @@ func TestGrepOffsetBeyondWindowGivesNextAction(t *testing.T) {
 	tool := stubGrepToolWithLines(t, []string{"src/file.txt:1:needle"})
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern":    "needle",
-		"limit": 2,
-		"offset":     500,
+		"pattern": "needle",
+		"limit":   2,
+		"offset":  500,
 	})
 	if err != nil || result == nil || !result.Success {
 		t.Fatalf("deep offset failed: %v %+v", err, result)
@@ -116,9 +116,9 @@ func TestGrepWalkerPaginationIsConsistent(t *testing.T) {
 	tool.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
 
 	first, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern":    "needle",
-		"path":       root,
-		"limit": 2,
+		"pattern": "needle",
+		"path":    root,
+		"limit":   2,
 	})
 	if err != nil || first == nil || !first.Success {
 		t.Fatalf("walker page 1 failed: %v %+v", err, first)
@@ -132,10 +132,10 @@ func TestGrepWalkerPaginationIsConsistent(t *testing.T) {
 	}
 
 	second, err := tool.Execute(context.Background(), map[string]interface{}{
-		"pattern":    "needle",
-		"path":       root,
-		"limit": 2,
-		"offset":     2,
+		"pattern": "needle",
+		"path":    root,
+		"limit":   2,
+		"offset":  2,
 	})
 	if err != nil || second == nil || !second.Success {
 		t.Fatalf("walker page 2 failed: %v %+v", err, second)

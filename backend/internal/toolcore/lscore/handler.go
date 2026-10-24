@@ -78,7 +78,7 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
 			hint := ""
-			if hinter, ok := call.Runtime.(PathHinter); ok {
+			if hinter, ok := call.Runtime.(toolcore.PathHinter); ok {
 				hint = hinter.PathHint(rawPath)
 			}
 			message := fmt.Errorf("路径不存在: %s", display)
@@ -169,12 +169,6 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		Content:    content,
 		Metadata:   metadata,
 	}), nil
-}
-
-// PathHinter lets a Runtime explain where a missing path probably meant to
-// point; candidates are a workspace concern, so each surface computes its own.
-type PathHinter interface {
-	PathHint(raw string) string
 }
 
 func (h *handler) shape(call *toolcore.Call, result *toolcore.Result) *toolcore.Result {

@@ -10,6 +10,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/lscore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
@@ -27,6 +28,10 @@ type localCoreRuntime struct {
 	searcher coreSearcher
 	ctx      context.Context
 	base     string
+	// insideGitWorkTree reports whether a directory is covered by version
+	// control. A work tree already holds the pre-edit content, so the local host
+	// does not ask for a `.backups/` copy there.
+	insideGitWorkTree func(string) bool
 }
 
 // coreSearcher is the slice of a local search tool the runtime adapter needs:
@@ -68,6 +73,19 @@ func newLocalCoreRuntimeWith(ctx context.Context, policy *sandboxPolicy, searche
 	return &localCoreRuntime{policy: policy, searcher: searcher, ctx: ctx, base: base}
 }
 
+// WantsBackup asks for a rollback point only where version control will not
+// provide one.
+func (r *localCoreRuntime) WantsBackup(absPath string) bool {
+	if r == nil {
+		return false
+	}
+	probe := r.insideGitWorkTree
+	if probe == nil {
+		probe = isInsideGitWorkTree
+	}
+	return !probe(filepath.Dir(absPath))
+}
+
 // CoreRuntime exposes glob's sandbox as a toolcore.Runtime.
 func (g *GlobTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
 	if g == nil {
@@ -82,6 +100,38 @@ func (l *LsTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
 		return nil
 	}
 	return newLocalCoreRuntimeWith(ctx, &l.sandboxPolicy, nil)
+}
+
+// CoreRuntime exposes write's sandbox as a toolcore.Runtime.
+func (w *WriteTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	if w == nil {
+		return nil
+	}
+	return newLocalCoreRuntimeWith(ctx, &w.sandboxPolicy, nil)
+}
+
+// CoreRuntime exposes append_write's sandbox as a toolcore.Runtime.
+func (w *AppendWriteTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	if w == nil {
+		return nil
+	}
+	return newLocalCoreRuntimeWith(ctx, &w.sandboxPolicy, nil)
+}
+
+// CoreRuntime exposes edit's sandbox as a toolcore.Runtime.
+func (e *EditTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	if e == nil {
+		return nil
+	}
+	return newLocalCoreRuntimeWith(ctx, &e.sandboxPolicy, nil)
+}
+
+// CoreRuntime exposes apply_patch's sandbox as a toolcore.Runtime.
+func (a *ApplyPatchTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	if a == nil {
+		return nil
+	}
+	return newLocalCoreRuntimeWith(ctx, &a.sandboxPolicy, nil)
 }
 
 // coreBackedTool is the local half of a shared handler: a tool that owns a
@@ -111,6 +161,14 @@ func executeCoreSearchTool(ctx context.Context, tool coreBackedTool, params map[
 		handler = searchcore.NewGrepHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
 	case *LsTool:
 		handler = lscore.NewHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
+	case *WriteTool:
+		handler = mutatecore.NewWriteHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
+	case *AppendWriteTool:
+		handler = mutatecore.NewAppendHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
+	case *EditTool:
+		handler = mutatecore.NewEditHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
+	case *ApplyPatchTool:
+		handler = mutatecore.NewApplyPatchHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
 	default:
 		return nil, fmt.Errorf("tool %q has no shared core handler", tool.Name())
 	}
@@ -288,7 +346,61 @@ func (r *localCoreRuntime) PathHint(raw string) string {
 	if r == nil || r.policy == nil {
 		return ""
 	}
+	// The hint builder wants the spelling the caller used; it resolves it
+	// against the workspace itself. An already-absolute path is used as-is.
 	return r.policy.buildPathNotFoundHint(r.ctx, raw)
+}
+
+// KindHint explains a path that exists but is not the kind the caller wanted.
+// A request for a file that names an existing directory usually means a typo in
+// the file name, so the hint proposes near-name siblings.
+func (r *localCoreRuntime) KindHint(raw string) string {
+	if r == nil || r.policy == nil {
+		return ""
+	}
+	return r.policy.buildPathKindMismatchHint(r.ctx, raw)
+}
+
+// FileMutated keeps the session state the local host maintains for mutations:
+// the read-before-write ledger and the knowledge-layer change notification.
+// Neither has meaning on a remote host, which is why they live behind this
+// optional interface instead of inside the shared mutation handler.
+func (r *localCoreRuntime) FileMutated(tool, absPath string, newBytes []byte) {
+	if r == nil {
+		return
+	}
+	recordFileWrite(r.ctx, absPath, newBytes, tool)
+	notifyFileChanges(r.ctx, absPath)
+}
+
+// CheckMutation is the read-before-write guard. It refuses a write whose target
+// changed since this session last read it, unless the caller supplied its own
+// explicit precondition - in that case the precondition is the authority.
+func (r *localCoreRuntime) CheckMutation(tool, absPath string, raw []byte, hasExplicitPrecondition bool) (*toolcore.Result, map[string]any) {
+	if r == nil || hasExplicitPrecondition {
+		// An explicit precondition is the caller's own statement about the
+		// expected state, so there is nothing to veto; the ledger note is still
+		// useful, and it is computed from the pre-write snapshot.
+		if r == nil {
+			return nil, nil
+		}
+		return nil, staleWriteMetadata(evaluateStaleWrite(r.ctx, absPath, raw))
+	}
+	verdict := evaluateStaleWrite(r.ctx, absPath, raw)
+	if !shouldRefuseStaleWrite(verdict) {
+		return nil, staleWriteMetadata(verdict)
+	}
+	// Advertise the revision the shared handler actually compares. That is
+	// mutatecore.Revision over decoded text, not the raw-byte digest the ledger
+	// uses for change detection: for a BOM/UTF-16 file the raw digest can never
+	// pass expected_sha256, so following the hint would fail again.
+	state, inspectErr := mutatecore.Inspect(absPath, 0)
+	currentRevision := verdict.CurrentSHA
+	if inspectErr == nil {
+		currentRevision = state.Revision
+	}
+	refusal := staleWriteFailure(absPath, currentRevision, verdict.LastRecord, true)
+	return toolkit.ResultFromToolkit(refusal), nil
 }
 
 // Paths returns the runtime itself: the same value implements the resolver
@@ -317,8 +429,17 @@ func (r *localCoreRuntime) Resolve(raw string) (string, error) {
 		return "", fmt.Errorf("workspace is not configured")
 	}
 	resolved = filepath.Clean(resolved)
-	if err := r.policy.checkPath(runtimeexecutor.OpRead, resolved); err != nil {
-		return "", err
+	// Device/FIFO/reserved-name rejection is a path-shape invariant, not a
+	// permission: opening /dev/zero blocks or streams forever regardless of what
+	// the caller is allowed to do. It stays at resolution time so every core
+	// handler inherits it.
+	//
+	// The operation-specific permission check does NOT happen here. The core
+	// handlers call Permissions().CheckPath with the operation they actually
+	// perform; admitting the path as a read here hid that call and let a
+	// mutation through on a read-only path.
+	if reason := unsupportedPathNameReason(resolved); reason != "" {
+		return "", fmt.Errorf("不支持的特殊文件（%s）: %s", reason, resolved)
 	}
 	return resolved, nil
 }
@@ -337,9 +458,43 @@ func (r *localCoreRuntime) Relative(abs string) string {
 	return filepath.ToSlash(rel)
 }
 
-// Permissions stays nil: admission already happens in Resolve, and the core
-// handlers skip CheckPath when no checker is supplied.
-func (r *localCoreRuntime) Permissions() toolcore.PermissionChecker { return nil }
+// Permissions exposes the sandbox by operation. Resolution alone is not enough:
+// Resolve admits a path for reading, while a mutation must additionally be
+// checked against the write/delete rules (a read-only path is readable and must
+// still be refused for write). Returning nil here silently disabled those
+// checks for every core mutation handler.
+func (r *localCoreRuntime) Permissions() toolcore.PermissionChecker {
+	if r == nil || r.policy == nil {
+		return nil
+	}
+	return localCorePermissions{policy: r.policy}
+}
+
+type localCorePermissions struct {
+	policy *sandboxPolicy
+}
+
+func (p localCorePermissions) CheckPath(op toolcore.Operation, abs string) error {
+	if p.policy == nil {
+		return nil
+	}
+	return p.policy.checkPath(corePermissionOp(op), abs)
+}
+
+// corePermissionOp maps the surface-independent operation onto the executor's
+// permission vocabulary.
+func corePermissionOp(op toolcore.Operation) runtimeexecutor.PermissionOp {
+	switch op {
+	case toolcore.OpWrite:
+		return runtimeexecutor.OpWrite
+	case toolcore.OpDelete:
+		return runtimeexecutor.OpDelete
+	case toolcore.OpExec:
+		return runtimeexecutor.OpExecute
+	default:
+		return runtimeexecutor.OpRead
+	}
+}
 
 func (r *localCoreRuntime) Commands() toolcore.CommandPolicy { return nil }
 func (r *localCoreRuntime) Env() toolcore.EnvProvider        { return nil }

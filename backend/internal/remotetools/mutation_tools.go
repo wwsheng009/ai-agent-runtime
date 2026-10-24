@@ -3,7 +3,6 @@ package remotetools
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
@@ -39,105 +38,33 @@ func buildMutationTools(cfg *Config, workspace *Workspace, sandbox *Sandbox, art
 			name:        ToolWrite,
 			description: base.describe("Write a complete file on the remote host (create or overwrite)."),
 			version:     "1.1.0",
-			schema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"file_path": map[string]interface{}{
-						"type":        "string",
-						"description": "Target file, relative to the remote workspace.",
-					},
-					"content": map[string]interface{}{
-						"type":        "string",
-						"description": "Complete file content. This replaces the file.",
-					},
-				},
-				"required":             []string{"file_path", "content"},
-				"additionalProperties": false,
-			},
-			capability: toolcore.CapWriteFS,
-			newHandler: mutatecore.NewWriteHandler,
+			schema:      mutatecore.WriteParameters(),
+			capability:  toolcore.CapWriteFS,
+			newHandler:  mutatecore.NewWriteHandler,
 		},
 		{
 			name:        ToolAppend,
 			description: base.describe("Append text to the end of a remote file."),
 			version:     "1.1.0",
-			schema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"file_path": map[string]interface{}{
-						"type":        "string",
-						"description": "Target file, relative to the remote workspace.",
-					},
-					"content": map[string]interface{}{
-						"type":        "string",
-						"description": "Text appended to the end of the file.",
-					},
-					"create_if_missing": map[string]interface{}{
-						"type":        "boolean",
-						"description": "Create the file when it does not exist. Default false.",
-					},
-				},
-				"required":             []string{"file_path", "content"},
-				"additionalProperties": false,
-			},
-			capability: toolcore.CapWriteFS,
-			newHandler: mutatecore.NewAppendHandler,
+			schema:      mutatecore.AppendParameters(),
+			capability:  toolcore.CapWriteFS,
+			newHandler:  mutatecore.NewAppendHandler,
 		},
 		{
 			name:        ToolEdit,
 			description: base.describe("Replace exact text in a remote file with an ambiguity guard."),
 			version:     "1.1.0",
-			schema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"file_path": map[string]interface{}{
-						"type":        "string",
-						"description": "Target file, relative to the remote workspace.",
-					},
-					"old_string": map[string]interface{}{
-						"type":        "string",
-						"description": "Exact text to replace. Must occur exactly once unless replace_all/replacement_count is set.",
-					},
-					"new_string": map[string]interface{}{
-						"type":        "string",
-						"description": "Replacement text.",
-					},
-					"replace_all": map[string]interface{}{
-						"type":        "boolean",
-						"description": "Replace every match. Mutually exclusive with replacement_count.",
-					},
-					"replacement_count": map[string]interface{}{
-						"type":        "integer",
-						"description": "Replace only the first N matches. Mutually exclusive with replace_all.",
-					},
-				},
-				"required":             []string{"file_path", "old_string", "new_string"},
-				"additionalProperties": false,
-			},
-			capability: toolcore.CapWriteFS,
-			newHandler: mutatecore.NewEditHandler,
+			schema:      mutatecore.EditParameters(),
+			capability:  toolcore.CapWriteFS,
+			newHandler:  mutatecore.NewEditHandler,
 		},
 		{
 			name:        ToolApplyPatch,
 			description: base.describe("Apply a Codex-style patch to remote files (add, update, delete, move)."),
 			version:     "1.1.0",
-			schema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"patch": map[string]interface{}{
-						"type": "string",
-						"description": "Codex-style patch: " + mutatecore.PatchBegin + " / " +
-							strings.TrimSuffix(mutatecore.PatchAdd, ": ") + " / " +
-							strings.TrimSuffix(mutatecore.PatchUpdate, ": ") +
-							" with @@ blocks / " + strings.TrimSuffix(mutatecore.PatchDelete, ": ") + " / " +
-							mutatecore.PatchEnd + ".",
-					},
-				},
-				"required":             []string{"patch"},
-				"additionalProperties": false,
-			},
-			capability: toolcore.CapWriteFS,
-			newHandler: mutatecore.NewApplyPatchHandler,
+			schema:      mutatecore.ApplyPatchParameters(),
+			capability:  toolcore.CapWriteFS,
+			newHandler:  mutatecore.NewApplyPatchHandler,
 		},
 	}
 

@@ -130,9 +130,9 @@ func newFreshnessFixture(t *testing.T) *freshnessFixture {
 			Size:        info.Size(),
 			ContentHash: hash,
 		}},
-		SnapshotTS:  time.Now().Unix(),
-		Tier:        CodeIndexTierAll,
-		Writer:      true,
+		SnapshotTS: time.Now().Unix(),
+		Tier:       CodeIndexTierAll,
+		Writer:     true,
 	}
 	return &freshnessFixture{
 		root:     root,
@@ -264,4 +264,3 @@ func TestFileFreshStamps(t *testing.T) {
 		t.Errorf("文件消失后 fileFresh = (%v, %v), want (true, false)", known, fresh)
 	}
 }
-

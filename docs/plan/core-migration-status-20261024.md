@@ -2,7 +2,7 @@
 
 ## 结论先说
 
-**没有。** 现状是「remote 全部走 core，本地只有 grep / glob / ls 走 core」。
+**没有。** 现状是「remote 全部走 core，本地只有 grep / glob / ls / write 走 core」。
 
 这不是设计清单写错，而是**迁移只完成了一半**：core 里几乎每个工具都有 handler，
 但本地工具大多仍执行自己的 legacy 实现。
@@ -58,10 +58,11 @@ func executeCoreSearchTool(ctx, tool, params) (*toolkit.ToolResult, error)
   legacy），命中的调用进入 `executeCoreSearchTool`。
 - `glob`：`glob.go` 的 `Execute` **只有一行委托**，本地 legacy 实现已删除。
 - `ls`：同样只有一行委托；本地 legacy 的遍历、渲染与字节裁剪已删除。
+- `write`：只有一行委托；本地 legacy 的编码探测、原子替换、文档拒绝、
+  内联载荷闸门与 `expected_sha256` 前置条件都搬进了 core。
 
-`view` / `write` / `edit` / `append_write` / `apply_patch`
-在本地还是各自的实现（`view.go`、`write.go`、`edit.go`、
-`append_write.go`、`apply_patch.go`）。
+`view` / `edit` / `append_write` / `apply_patch`
+在本地还是各自的实现（`view.go`、`edit.go`、`append_write.go`、`apply_patch.go`）。
 
 ## 一个直接矛盾
 
@@ -78,7 +79,7 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 | 视角 | 现状 |
 |---|---|
 | remote 工具面 | 已全部走 core（grep/glob/view/ls/write/append_write/edit/apply_patch/artifact_read） |
-| 本地工具面 | grep / glob / ls 走 core；其余仍是 legacy |
+| 本地工具面 | grep / glob / ls / write 走 core；其余仍是 legacy |
 | 两套实现是否分叉 | glob 与 ls 只有一套代码（本地 `Execute` 直接调用 core handler），各自有对拍 public 入口的等价性测试；grep 仍有 legacy 兜底分支 |
 
 ## 尚未完成的迁移（按缺口大小）
@@ -88,7 +89,8 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 3. **本地 `view`**：core handler 只覆盖纯文本窗口；本地的图片直通、文档转换、
    notebook 渲染、符号解析、去重与读取台账都还没有对应实现。这是最大的一块，
    需要先决定哪些属于工具能力（应进 core）、哪些属于宿主能力（应留在本地）。
-4. **本地 `write` / `edit` / `append_write` / `apply_patch`**：core 已有 handler，本地未接。
+4. **本地 `edit` / `append_write` / `apply_patch`**：core 已有 handler，本地未接。
+   `write` 已完成，见下。
 5. **本地 `artifact_read`**：本地是独立实现（`toolkit/tools/artifact_read.go`），
    core 的 `NewArtifactReadHandler` 只被 remote 用。
 6. **grep 的 legacy 兜底**：`rg_args` / `pattern_file` 之外的参数组合里仍有
@@ -143,3 +145,39 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
   通过 `PathHinter` 接进同一个 handler。
 - 删掉了 `lscore.Read` / `Render` / `Metadata` / `Listing` / `Entry`：handler
   改用 `ReadTree` 后，这些只剩自己的测试在引用，属于死代码。
+
+## write 已收敛（2026-10-24，`Execute` 已翻转）
+
+`write` 现在只有一套实现。翻之前它是「core 有引擎、本地有一套策略」的分裂状态，
+而且 split 的方向是错的：`expected_sha256` 只在本地 schema 里、core handler 根本
+不读它——同一个工具在两个面上确实是两种能力。
+
+搬进 core 的（都是工具能力，远程同样需要）：
+
+- `expected_sha256`：并发前置条件，含 `absent`；回放（内容已相同）不再算改动。
+- 文档容器拒绝（pdf/docx/xlsx/pptx/epub/rtf…）：纯文本写进这些格式会毁掉原文档。
+  先于写目标校验执行，否则 `report.pptx.` 会先报「父目录不存在」。
+- 内联载荷上限（单段 64 KiB / 总量 128 KiB）：超过后传输层可能截断参数，
+  静默截断的写入比拒绝更糟。
+- `patch` 元数据（unified diff）与 `idempotent_replay` / `mutated_paths` 语义：
+  回放时 `mutated_paths` 必须为空，否则调用方会以为改动落地了。
+
+留在宿主、通过可选接口注入的（远程没有对应状态）：
+
+- `toolcore.MutationGuard`：读后写账本。写入前否决，并把 pre-write 快照的
+  读状态（fresh/partial/stale/unread/unverified）作为注解返回。
+- `toolcore.MutationObserver`：落盘后刷新账本、通知知识层。
+- `toolcore.BackupPolicy`：非 git 工作树才落 `.backups/` 快照。
+- `toolcore.KindHinter`：目录当成文件时给近似名字候选。
+
+这一轮修出的真 bug：
+
+1. `ValidateWriteTarget` 用 `Lstat`，把符号链接一律当成特殊文件——链接到普通
+   文本的别名写不进去，而链接到只读路径的写入反而绕过了检查。
+2. 本地 adapter 的 `Resolve` 只做 `OpRead` 准入、`Permissions()` 返回 nil：
+   翻转后**只读路径保护完全失效**。现在按真实操作查权限。
+3. `staleWriteFailure` 广告的是 raw 字节哈希，而 `expected_sha256` 比较的是
+   解码文本——BOM/UTF-16 文件照提示重试必然再失败。
+4. 回放结果仍把路径列进 `mutated_paths`。
+5. `ResultToToolkit` 丢掉了 precondition 的错误身份，`errors.Is(...ErrWritePrecondition)`
+   失效；现在在边界处翻译。

@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/imageprep"
+	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
-	"github.com/wwsheng009/ai-agent-runtime/internal/tokenestimate"
 )
 
 // viewSupportedImageFormats 与 imageprep 的解码面保持一致（png/jpeg/gif）：

@@ -27,7 +27,7 @@ type fakeSymbolAdapter struct {
 }
 
 func (f *fakeSymbolAdapter) Name() knowledge.RefSource { return knowledge.SourceLSP }
-func (f *fakeSymbolAdapter) Version() string          { return "lsp/fake-1" }
+func (f *fakeSymbolAdapter) Version() string           { return "lsp/fake-1" }
 func (f *fakeSymbolAdapter) Available() bool           { return true }
 
 func (f *fakeSymbolAdapter) Definition(context.Context, string, int, int) ([]knowledge.SemanticLocation, error) {

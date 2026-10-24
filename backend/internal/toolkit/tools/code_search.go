@@ -176,7 +176,7 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	// 在索引结果之后，不替换主结果集，因此延迟有界、失败不影响主路径。
 	if semEnv, ok := trySemanticWorkspaceSymbols(ctx, handle, query, limit); ok {
 		// env.Results 是 interface{}（不同工具的结果形状不同），这里显式收回
-	// 本工具已知的 []codeSymbolHit 再合并，避免依赖类型断言的静默失败。
+		// 本工具已知的 []codeSymbolHit 再合并，避免依赖类型断言的静默失败。
 		base, _ := env.Results.([]codeSymbolHit)
 		extra, _ := semEnv.Results.([]codeSymbolHit)
 		env.Results = append(base, extra...)

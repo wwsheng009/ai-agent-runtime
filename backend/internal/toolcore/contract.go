@@ -183,6 +183,58 @@ type CaptureBudgetProvider interface {
 	CaptureLimit(tool string) int
 }
 
+// MutationObserver is an optional Runtime extension for mutations: it reports a
+// write that actually landed, so a host can update its own state (a read-before-
+// write ledger, a knowledge index, a change notifier).
+//
+// It exists because that state is genuinely host-scoped - a session ledger has
+// no meaning on a remote host that never saw the read - while the mutation
+// itself must run in one shared implementation. A Runtime that does not
+// implement it simply has no such state to maintain.
+type MutationObserver interface {
+	FileMutated(tool, absPath string, newBytes []byte)
+}
+
+// MutationGuard is an optional Runtime extension that can refuse a mutation
+// before it lands. The host knows what the model has actually seen (a
+// read-before-write ledger); the shared handler cannot. Returning a non-nil
+// result vetoes the write and becomes the tool result.
+//
+// A caller that supplied an explicit precondition does not need the guard: the
+// precondition is the caller's own statement about the expected state, and
+// re-checking against a stale ledger would reject a legitimate write.
+type MutationGuard interface {
+	// CheckMutation runs before the write. It returns a non-nil result to veto,
+	// and may return metadata describing the read state the host observed (for
+	// example read_before_write=partial). The metadata is computed from the
+	// pre-write snapshot on purpose: after the write the ledger describes the
+	// new content, not what the model had seen.
+	CheckMutation(tool, absPath string, raw []byte, hasExplicitPrecondition bool) (*Result, map[string]any)
+}
+
+// PathHinter lets a Runtime explain where a missing path probably meant to
+// point. Candidates depend on each surface's root, so the runtime computes them
+// and the shared handler only formats the error.
+type PathHinter interface {
+	PathHint(raw string) string
+}
+
+// KindHinter explains a path that exists but is not the expected kind (a file
+// name that resolves to a directory, most commonly). It is separate from
+// PathHinter because the candidate search is different: near-name siblings
+// rather than the closest existing ancestor.
+type KindHinter interface {
+	KindHint(raw string) string
+}
+
+// BackupPolicy is an optional Runtime extension: a host whose workspace has no
+// version control (or that wants belt-and-braces rollback points) asks mutation
+// tools to leave a copy behind. The decision is host-scoped because only the
+// host knows whether `.backups/` is useful or just litter.
+type BackupPolicy interface {
+	WantsBackup(absPath string) bool
+}
+
 type ArtifactScope string
 
 const (

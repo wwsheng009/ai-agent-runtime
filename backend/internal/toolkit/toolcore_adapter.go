@@ -3,10 +3,13 @@ package toolkit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/mutatecore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 )
 
@@ -264,7 +267,7 @@ func ResultToToolkit(result *toolcore.Result) *ToolResult {
 	if result.Retriable {
 		metadata["retriable"] = true
 	}
-	return &ToolResult{
+	converted := &ToolResult{
 		Success:    result.Success,
 		OutputKind: result.OutputKind,
 		Content:    result.Content,
@@ -273,6 +276,14 @@ func ResultToToolkit(result *toolcore.Result) *ToolResult {
 		Error:      result.Err,
 		Metadata:   metadata,
 	}
+	// A shared handler can only publish the surface-independent identity of a
+	// precondition failure. The local error vocabulary has its own sentinel that
+	// callers and hosts test with errors.Is, so translate at the boundary
+	// instead of making every call site learn a second spelling.
+	if result.Err != nil && errors.Is(result.Err, mutatecore.PreconditionError) {
+		converted.Error = runtimeerrors.New(runtimeerrors.ErrWritePrecondition, strings.TrimSpace(result.Content))
+	}
+	return converted
 }
 
 func cloneAnyMap(input map[string]interface{}) map[string]interface{} {

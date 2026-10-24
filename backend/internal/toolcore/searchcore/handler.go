@@ -77,14 +77,6 @@ type BackendReporter interface {
 	SearchBackend(engine string) (command, path string)
 }
 
-// PathHinter lets a Runtime explain where a missing path probably meant to
-// point. Candidates are a workspace concern (they depend on what exists relative
-// to the surface's root), so the runtime computes them and the shared handler
-// only formats the error.
-type PathHinter interface {
-	PathHint(raw string) string
-}
-
 func NewGlobHandler(def toolcore.Definition) toolcore.Handler {
 	if def.Name == "" {
 		def.Name = "glob"
@@ -131,7 +123,7 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	// remote surface now says the same.
 	if _, statErr := os.Stat(base); statErr != nil {
 		hint := ""
-		if hinter, ok := call.Runtime.(PathHinter); ok {
+		if hinter, ok := call.Runtime.(toolcore.PathHinter); ok {
 			hint = hinter.PathHint(stringArg(call.Args, "path"))
 		}
 		message := fmt.Errorf("搜索路径不可用: %s", paths.Relative(base))
