@@ -14,6 +14,9 @@ type GrepStats struct {
 	FilesWithMatched int
 	// FilesScanned is the whole-call scan counter, not a page statistic.
 	FilesScanned int
+	// BytesPrinted mirrors the local tool's rg-style stat: the size of the
+	// rendered page body.
+	BytesPrinted int
 }
 
 // SummarizeGrepResult reduces a windowed result to its page statistics. For

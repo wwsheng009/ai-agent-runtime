@@ -730,6 +730,13 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// One tool, one implementation: calls inside the core-covered parameter
+	// set run the very same searchcore handler the remote surface executes.
+	// The legacy path below only serves parameters whose semantics have not
+	// moved into the core yet.
+	if result, handled := g.executeCoreSearch(ctx, params); handled {
+		return result, nil
+	}
 	opts, err := g.parseOptions(ctx, params)
 	if err != nil {
 		return &toolkit.ToolResult{

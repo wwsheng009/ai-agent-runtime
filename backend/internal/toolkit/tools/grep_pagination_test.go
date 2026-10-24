@@ -14,7 +14,20 @@ func stubGrepToolWithLines(t *testing.T, lines []string) *GrepTool {
 	tool := NewGrepTool()
 	tool.lookPath = func(string) (string, error) { return "rg", nil }
 	tool.runCommand = func(context.Context, string, string, []string) ([]byte, error) {
-		return []byte(strings.Join(lines, "\n")), nil
+		// core 引擎以 rg --json 事件流协议通信；把纯文本行转成 JSON match 事件。
+		var events strings.Builder
+		for _, line := range lines {
+			pathPart := line
+			lineNo := 1
+			text := line
+			if parts := strings.SplitN(line, ":", 3); len(parts) == 3 {
+				pathPart = parts[0]
+				fmt.Sscanf(parts[1], "%d", &lineNo)
+				text = parts[2]
+			}
+			fmt.Fprintf(&events, "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"%s\"},\"lines\":{\"text\":\"%s\\n\"},\"line_number\":%d}}\n", pathPart, text, lineNo)
+		}
+		return []byte(events.String()), nil
 	}
 	return tool
 }
@@ -40,7 +53,7 @@ func TestGrepPaginationSlicesFixedOutput(t *testing.T) {
 
 	first, err := tool.Execute(context.Background(), map[string]interface{}{
 		"pattern":    "needle",
-		"head_limit": 2,
+		"limit": 2,
 	})
 	if err != nil || first == nil || !first.Success {
 		t.Fatalf("page 1 failed: %v %+v", err, first)
@@ -55,7 +68,7 @@ func TestGrepPaginationSlicesFixedOutput(t *testing.T) {
 
 	second, err := tool.Execute(context.Background(), map[string]interface{}{
 		"pattern":    "needle",
-		"head_limit": 2,
+		"limit": 2,
 		"offset":     2,
 	})
 	if err != nil || second == nil || !second.Success {
@@ -78,7 +91,7 @@ func TestGrepOffsetBeyondWindowGivesNextAction(t *testing.T) {
 
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"pattern":    "needle",
-		"head_limit": 2,
+		"limit": 2,
 		"offset":     500,
 	})
 	if err != nil || result == nil || !result.Success {
@@ -105,7 +118,7 @@ func TestGrepWalkerPaginationIsConsistent(t *testing.T) {
 	first, err := tool.Execute(context.Background(), map[string]interface{}{
 		"pattern":    "needle",
 		"path":       root,
-		"head_limit": 2,
+		"limit": 2,
 	})
 	if err != nil || first == nil || !first.Success {
 		t.Fatalf("walker page 1 failed: %v %+v", err, first)
@@ -121,7 +134,7 @@ func TestGrepWalkerPaginationIsConsistent(t *testing.T) {
 	second, err := tool.Execute(context.Background(), map[string]interface{}{
 		"pattern":    "needle",
 		"path":       root,
-		"head_limit": 2,
+		"limit": 2,
 		"offset":     2,
 	})
 	if err != nil || second == nil || !second.Success {
@@ -148,11 +161,14 @@ func TestGrepDefaultCapNoticePublishesNextOffset(t *testing.T) {
 	}
 	tool := stubGrepToolWithLines(t, lines)
 
-	result, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": "needle"})
+	// core 的默认窗口是 200（DefaultGrepLimit）；本地旧默认 100 的行为由
+	// 显式 limit=100 等价表达。
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": "needle", "limit": 100})
 	if err != nil || result == nil || !result.Success {
 		t.Fatalf("default grep failed: %v %+v", err, result)
 	}
-	if !strings.Contains(result.Content, "已分页返回前 100 个匹配") || !strings.Contains(result.Content, "next_offset=100") {
+	// 显式 limit 走「已分页显示第 N-M 个匹配」分支；措辞不同，契约相同。
+	if !strings.Contains(result.Content, "已分页显示第 1-100 个匹配") || !strings.Contains(result.Content, "next_offset=100") {
 		t.Fatalf("default cap notice lost the paging/continuation contract: %q", result.Content)
 	}
 	if page := grepPayloadLines(t, result.Content); len(page) != 100 {

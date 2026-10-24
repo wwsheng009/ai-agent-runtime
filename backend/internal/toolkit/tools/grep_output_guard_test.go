@@ -78,10 +78,13 @@ func TestGrepSearchStreamLineBudgetReachesRunner(t *testing.T) {
 		}
 	}
 	run(map[string]interface{}{"pattern": "needle"})
-	run(map[string]interface{}{"pattern": "needle", "head_limit": 5})
-	run(map[string]interface{}{"pattern": "needle", "stats": true})
+	run(map[string]interface{}{"pattern": "needle", "rg_args": []interface{}{}})
 
-	want := []int{100 + grepStreamLineProbe, 5 + grepStreamLineProbe, 0}
+	// core 路径通过共享引擎通信，不再向 runner ctx 注入行预算（0）；
+	// rg_args 分支的 head_limit 注入语义由 legacy 路径保留，这里只验证 core 默认调用。
+	// core 默认调用注入 0（无行预算，共享引擎满页即停），rg_args 分支保留
+	// legacy 的 head_limit 注入（100+probe）。
+	want := []int{0, 100 + grepStreamLineProbe}
 	if !reflect.DeepEqual(budgets, want) {
 		t.Fatalf("runner line budgets = %v, want %v", budgets, want)
 	}
@@ -280,6 +283,10 @@ func TestGrepToolRealRipgrepStopsAtRawOutputBudget(t *testing.T) {
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"pattern": "gateway",
 		"path":    dir,
+		// 读取侧字节闸门（AICLI_GREP_MAX_OUTPUT_BYTES / 16MiB 原始流闸门）目前
+		// 仍由 legacy rg 路径实现；core 路径的 32KiB 渲染窗口由
+		// TestGrepRenderByteBudgetKeepsLeadingLines 覆盖。此用例强制走 legacy。
+		"rg_args": []interface{}{"--max-count", "100"},
 	})
 	elapsed := time.Since(start)
 	if err != nil {
@@ -327,6 +334,10 @@ func TestGrepToolRealRipgrepStopsAfterPage(t *testing.T) {
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
 		"pattern": "page-stop",
 		"path":    dir,
+		// 页边界语义（match_count_scope=observed_before_stop、truncation_reason=
+		// page_stop）目前由 legacy rg 路径实现；core 路径的分页契约
+		// （next_offset/has_more/is_truncated）由 searchcore 测试覆盖。强制 legacy。
+		"rg_args": []interface{}{"--max-count", "100"},
 	})
 	elapsed := time.Since(start)
 	if err != nil {
@@ -378,7 +389,9 @@ func TestGrepCompleteResultHasNoObservedAnnotation(t *testing.T) {
 	tool := NewGrepTool()
 	tool.lookPath = func(string) (string, error) { return "rg", nil }
 	tool.runCommand = func(context.Context, string, string, []string) ([]byte, error) {
-		return []byte("a.go:1:needle\nb.go:2:needle\n"), nil
+		// core 引擎以 rg --json 事件流协议与 runner 通信。
+		return []byte("{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"a.go\"},\"lines\":{\"text\":\"needle\\n\"},\"line_number\":1}}\n" +
+			"{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"b.go\"},\"lines\":{\"text\":\"needle\\n\"},\"line_number\":2}}\n"), nil
 	}
 	result, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": "needle"})
 	if err != nil {

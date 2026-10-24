@@ -43,7 +43,7 @@ func TestGrepRenderByteBudgetKeepsLeadingLines(t *testing.T) {
 		t.Fatalf("byte-budget hint missing:\n%s", tailOf(page.content))
 	}
 
-	metadata := renderGrepMetadataStamps(map[string]any{}, page, &result)
+	metadata := renderGrepMetadataStamps(map[string]any{}, page, &result, 0)
 	if metadata["skip_render_truncation"] != true {
 		t.Fatalf("render opt-out missing: %#v", metadata)
 	}
@@ -75,14 +75,14 @@ func TestGrepRenderEmptySuccessDisposition(t *testing.T) {
 		paths: fakeRenderPaths{root: root}, result: &empty,
 		options: GrepOptions{}, mode: GrepModeContent, roots: []string{root},
 	})
-	metadata := renderGrepMetadataStamps(map[string]any{}, page, &empty)
+	metadata := renderGrepMetadataStamps(map[string]any{}, page, &empty, 0)
 	if metadata["empty_result"] != true || metadata["outcome"] != "empty" {
 		t.Fatalf("empty success must be marked: %#v", metadata)
 	}
 
 	truncated := GrepResult{Truncated: true, Matches: []GrepMatch{{File: "f", Line: 1}}}
 	truncatedPage := grepPage{content: "f:1: m", byteTruncated: true}
-	stamped := renderGrepMetadataStamps(map[string]any{}, truncatedPage, &truncated)
+	stamped := renderGrepMetadataStamps(map[string]any{}, truncatedPage, &truncated, 0)
 	if stamped["empty_result"] == true {
 		t.Fatalf("a truncated page must not be marked empty: %#v", stamped)
 	}

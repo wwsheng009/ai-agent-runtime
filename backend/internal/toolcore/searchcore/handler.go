@@ -3,6 +3,8 @@ package searchcore
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
@@ -165,7 +167,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	// `no_hidden` wins over `hidden`, mirroring the local parameter pair.
 	includeHidden := boolArg(call.Args, "hidden") && !boolArg(call.Args, "no_hidden")
-	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(call, paths)
+	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(call, paths, roots)
 	if ignoreFailure != nil {
 		return ignoreFailure, nil
 	}
@@ -184,6 +186,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		Paths:            roots[1:],
 		Mode:             mode,
 		Glob:             stringArg(call.Args, "glob"),
+		Globs:            GrepGlobListFromArgs(call.Args, "glob"),
 		Include:          GrepGlobListFromArgs(call.Args, "include"),
 		Exclude:          GrepGlobListFromArgs(call.Args, "exclude"),
 		Type:             stringArgAny(call.Args, "type", "file_type"),
@@ -255,9 +258,14 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	metadata := map[string]any{
 		"pattern":            strings.Join(patterns, " | "),
 		"patterns":           patterns,
+		"pattern_count":      len(patterns),
+		"pattern_source":     grepPatternSource(patterns),
 		"mode":               string(mode),
 		"path":               rootLabel,
 		"paths":              grepRootLabels(paths, roots),
+		"search_scope_count": len(roots),
+		"search_scope_kind":  grepScopeKind(roots),
+		"normalized_output":  true,
 		"match_count":        pageMatches,
 		"matches":            pageMatches,
 		"files":              len(result.Files),
@@ -282,22 +290,43 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"next_offset":        options.Offset + pageEntries,
 		"has_more":           result.Truncated,
 		"engine":             engine,
+		"engine_name":        engine,
 		"limit":              options.Limit,
 		"hidden_files":       options.IncludeHidden,
 		"ignore_files":       !options.NoIgnore,
+		"ignore_files_list":  grepIgnoreFilesLabels(paths, options.IgnoreFiles),
 		"ignore_file_count":  len(options.IgnoreFiles),
+		"no_ignore":          options.NoIgnore,
+		"no_ignore_parent":   options.NoIgnoreParent,
+		"no_ignore_vcs":      options.NoIgnoreVCS,
+		"no_ignore_dot":      options.NoIgnoreDot,
+		"no_ignore_global":   options.NoIgnoreGlobal,
+		"no_ignore_files":    options.NoIgnoreFiles,
+		"literal":            options.Literal,
+		"ignore_case":        options.IgnoreCase || options.CaseInsensitive,
+		"case_sensitive":     options.CaseSensitive,
+		"smart_case":         options.SmartCase,
+		"word":               options.Word,
+		"line_regexp":        options.LineRegexp,
+		"hidden":             options.IncludeHidden,
 	}
 	if boolArg(call.Args, "stats") {
 		// Page-level statistics, not a whole-search summary: see GrepStats.
 		summary := SummarizeGrepResult(result)
+		summary.BytesPrinted = len(page.content)
 		metadata["stats"] = map[string]any{
 			"matches":            summary.Matches,
 			"matched_lines":      summary.MatchedLines,
 			"files_with_matched": summary.FilesWithMatched,
 			"files_scanned":      summary.FilesScanned,
+			"files_searched":     summary.FilesScanned,
+			"files_with_matches": summary.FilesWithMatched,
+			"bytes_printed":      summary.BytesPrinted,
 		}
+		metadata["stats_requested"] = true
+		page.content += "\n\n" + renderGrepStatsSummary(summary)
 	}
-	renderGrepMetadataStamps(metadata, page, &result)
+	renderGrepMetadataStamps(metadata, page, &result, options.Offset)
 	result0 := &toolcore.Result{
 		Success:    true,
 		OutputKind: toolcore.KindText,
@@ -474,7 +503,7 @@ func grepModeFromArgs(args map[string]any) (GrepMode, *toolcore.Result) {
 // grepIgnoreFilesFromArgs resolves the explicit ignore_file(s) spellings into
 // absolute paths, so both engines read the same files. The string spelling is
 // split on top-level commas exactly like the other scalar lists.
-func grepIgnoreFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver) ([]string, *toolcore.Result) {
+func grepIgnoreFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver, roots []string) ([]string, *toolcore.Result) {
 	raw := append(append([]string{}, GrepGlobListFromArgs(call.Args, "ignore_file")...),
 		GrepGlobListFromArgs(call.Args, "ignore_files")...)
 	if len(raw) == 0 {
@@ -482,6 +511,16 @@ func grepIgnoreFilesFromArgs(call *toolcore.Call, paths toolcore.PathResolver) (
 	}
 	resolved := make([]string, 0, len(raw))
 	for _, entry := range raw {
+		// A relative ignore_file spelling anchors to the search root's
+		// directory (the local tool's workingDir rule), not the process CWD.
+		anchor := ""
+		if !filepath.IsAbs(entry) && len(roots) > 0 {
+			anchor = roots[0]
+			if info, statErr := os.Stat(anchor); statErr == nil && !info.IsDir() {
+				anchor = filepath.Dir(anchor)
+			}
+			entry = filepath.Join(anchor, entry)
+		}
 		abs, err := paths.Resolve(entry)
 		if err != nil {
 			return nil, toolcore.Error(toolcore.ErrPathDenied, "use an ignore_file inside the workspace", err)
@@ -499,10 +538,49 @@ func grepPageUnit(mode GrepMode) string {
 	return "files"
 }
 
+// grepPatternSource names where the effective pattern list came from, the same
+// way the local tool reported it.
+func grepPatternSource(patterns []string) string {
+	switch {
+	case len(patterns) > 1:
+		return "multiple_patterns"
+	case len(patterns) == 1:
+		return "direct"
+	default:
+		return "direct"
+	}
+}
+
+// grepScopeKind names the search-root shape the way the local tool reported
+// it, so dashboards keep their vocabulary.
+func grepScopeKind(roots []string) string {
+	switch {
+	case len(roots) > 1:
+		return "multi_path"
+	case len(roots) == 1:
+		return "single"
+	default:
+		return "single"
+	}
+}
+
 func grepRootLabels(paths toolcore.PathResolver, roots []string) []string {
 	labels := make([]string, 0, len(roots))
 	for _, root := range roots {
 		labels = append(labels, paths.Relative(root))
+	}
+	return labels
+}
+
+// grepIgnoreFilesLabels renders the explicit ignore files as the caller
+// spelled them (relative), mirroring the local metadata shape.
+func grepIgnoreFilesLabels(paths toolcore.PathResolver, files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	labels := make([]string, 0, len(files))
+	for _, file := range files {
+		labels = append(labels, paths.Relative(file))
 	}
 	return labels
 }

@@ -74,7 +74,11 @@ func TestBudgetOwningToolsDoNotTriggerRenderLayerTruncation(t *testing.T) {
 			run: func(t *testing.T) *toolkit.ToolResult {
 				return executeBudgetTool(t, NewGrepTool(), map[string]interface{}{
 					"pattern": "budget fixture payload",
+					// rg_args 为空数组强制走 legacy 路径：读取侧 16MiB 闸门仍在
+					// legacy rg 流式路径实现，core 的 32KiB 渲染窗口由
+					// TestGrepRenderByteBudgetKeepsLeadingLines 覆盖。
 					"paths":   []string{largeFile},
+					"rg_args": []interface{}{},
 				})
 			},
 		},

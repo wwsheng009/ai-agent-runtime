@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -32,8 +33,16 @@ func newLocalCoreRuntime(ctx context.Context, tool *GrepTool) toolcore.Runtime {
 		policy = &tool.sandboxPolicy
 	}
 	base := ""
-	if policy != nil {
+	if policy != nil && base == "" {
 		base = policy.effectiveBasePath(ctx)
+	}
+	// When neither a session workspace nor a registered base path is bound,
+	// anchor to the process CWD so unqualified `path` arguments still resolve
+	// (the legacy path did this through resolvePathWithContext).
+	if base == "" {
+		if cwd, err := os.Getwd(); err == nil && cwd != "" {
+			base = cwd
+		}
 	}
 	return &localCoreRuntime{policy: policy, grep: tool, ctx: ctx, base: base}
 }
@@ -105,9 +114,8 @@ func (g *GrepTool) ripgrepStream() searchcore.RipgrepStream {
 		if !ok {
 			return fmt.Errorf("ripgrep is not available")
 		}
-		if strings.TrimSpace(dir) == "" {
-			dir = g.effectiveBasePath(ctx)
-		}
+		_ = dir // the shared engine passes absolute roots; the runner's dir is informational
+		dir = g.sandboxPolicy.effectiveBasePath(ctx)
 		output, err := g.runCommand(ctx, path, dir, args)
 		if err != nil {
 			if !isRipgrepNoMatch(err) {
@@ -157,6 +165,13 @@ func (r *localCoreRuntime) Paths() toolcore.PathResolver { return r }
 func (r *localCoreRuntime) Resolve(raw string) (string, error) {
 	if r.policy == nil {
 		return "", fmt.Errorf("workspace is not configured")
+	}
+	if strings.TrimSpace(raw) != "" && !filepath.IsAbs(raw) {
+		// Resolve relative ignore_file spellings against the workspace root
+		// first, matching how search roots are resolved.
+		if base := r.policy.effectiveBasePath(r.ctx); base != "" {
+			raw = filepath.Join(base, raw)
+		}
 	}
 	resolved := r.policy.resolvePathWithContext(r.ctx, raw)
 	if strings.TrimSpace(resolved) == "" {

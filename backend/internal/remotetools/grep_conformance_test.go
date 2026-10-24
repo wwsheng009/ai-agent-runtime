@@ -430,8 +430,8 @@ func TestRemoteGrepDepthAndSizeOverMCP(t *testing.T) {
 }
 
 // TestRemoteGrepStatsOverMCP proves the stats flag survives schema validation
-// and that statistics travel in metadata instead of polluting the text output
-// (the metadata values themselves are pinned by the handler-level tests).
+// and appends the rg-style summary block to the page (the metadata values are
+// pinned by the handler-level tests).
 func TestRemoteGrepStatsOverMCP(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hit a\n"), 0o644); err != nil {
@@ -444,12 +444,11 @@ func TestRemoteGrepStatsOverMCP(t *testing.T) {
 	defer server.Close()
 	session, ctx := startTestSession(t, server)
 
-	plain := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{"pattern": "hit"})
 	withStats := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "hit", "stats": true,
 	})
-	if plain != withStats {
-		t.Fatalf("stats must not change the text output:\nplain:\n%s\nstats:\n%s", plain, withStats)
+	if !strings.Contains(withStats, "-- stats --") || !strings.Contains(withStats, "matches: 1") {
+		t.Fatalf("stats should append the summary block:\n%s", withStats)
 	}
 }
 

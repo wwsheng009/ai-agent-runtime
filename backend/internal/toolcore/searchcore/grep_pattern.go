@@ -84,9 +84,27 @@ func CompileGrepPattern(patterns []string, opts GrepPatternOptions) (*regexp.Reg
 	}
 	re, err := regexp.Compile(expr)
 	if err != nil {
-		return nil, fmt.Errorf("正则表达式无效: %v。若要搜索字面文本请设置 literal=true（或 fixed_strings=true）", err)
+		msg := fmt.Sprintf("正则表达式无效: %v。若要搜索字面文本请设置 literal=true（或 fixed_strings=true）", err)
+		if LooksLikePCREOnlyPatterns(patterns) {
+			msg += "。检测到 lookaround/后行断言等 PCRE 语法（如 (?! / (?= / (?<= / (?<!），Go 内置 regexp 不支持；请设置 rg_args:[\"-P\"]（需本机 rg）"
+		}
+		return nil, fmt.Errorf("%s", msg)
 	}
 	return re, nil
+}
+
+// LooksLikePCREOnlyPatterns reports whether any pattern uses constructs Go's
+// RE2 cannot compile (lookaround, backreferences); rg -P is the escape hatch.
+func LooksLikePCREOnlyPatterns(patterns []string) bool {
+	for _, pattern := range patterns {
+		if strings.Contains(pattern, "(?!") ||
+			strings.Contains(pattern, "(?=") ||
+			strings.Contains(pattern, "(?<!") ||
+			strings.Contains(pattern, "(?<=") {
+			return true
+		}
+	}
+	return false
 }
 
 // GrepPatternsFromArgs selects the search patterns from an argument map with

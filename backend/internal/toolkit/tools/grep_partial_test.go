@@ -21,7 +21,9 @@ func TestGrepRipgrepKeepsPartialOutputOnTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
-	result, err := tool.Execute(ctx, map[string]interface{}{"pattern": "needled"})
+	// partial/timeout 标注由 legacy rg 路径的流式读取实现；core 引擎的超时语义
+	// 由 searchcore 的超时测试覆盖。rg_args 路由此用例到 legacy。
+	result, err := tool.Execute(ctx, map[string]interface{}{"pattern": "needled", "rg_args": []interface{}{}})
 	if err != nil {
 		t.Fatalf("timeout with partial output must not be an outer error: %v", err)
 	}
@@ -87,7 +89,8 @@ func TestGrepRipgrepKeepsPartialOutputOnCancel(t *testing.T) {
 		return []byte("src/c.go:3: cancelled-but-found\n"), context.Canceled
 	}
 
-	result, err := tool.Execute(ctx, map[string]interface{}{"pattern": "cancelled"})
+	// 同上：取消时的 partial 标注由 legacy 流式路径实现，rg_args 路由此用例。
+	result, err := tool.Execute(ctx, map[string]interface{}{"pattern": "cancelled", "rg_args": []interface{}{}})
 	if err != nil {
 		t.Fatalf("cancel with partial output must not be an outer error: %v", err)
 	}

@@ -292,13 +292,31 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		return GrepResult{}, true, err
 	}
 	var globMatcher *GlobMatcher
+	globPatterns := append([]string{}, opts.Globs...)
 	if strings.TrimSpace(opts.Glob) != "" {
-		matcher, err := NewGlobMatcher(opts.Glob)
+		globPatterns = append(globPatterns, opts.Glob)
+	}
+	var engineGlobs []string
+	for _, pattern := range globPatterns {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "!") {
+			engineGlobs = append(engineGlobs, trimmed)
+			continue
+		}
+		engineGlobs = append(engineGlobs, trimmed)
+	}
+	if len(engineGlobs) > 0 {
+		matcher, err := NewGlobMatcher(strings.Join(engineGlobs, ","))
 		if err != nil {
 			return GrepResult{}, true, err
 		}
-		if !safeRipgrepGlob(opts.Glob) {
-			return GrepResult{}, false, nil
+		for _, pattern := range engineGlobs {
+			if !safeRipgrepGlob(strings.TrimPrefix(pattern, "!")) {
+				return GrepResult{}, false, nil
+			}
 		}
 		globMatcher = matcher
 	}
@@ -357,7 +375,9 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		args = append(args, "--ignore-file", file)
 	}
 	if globMatcher != nil {
-		args = append(args, "--glob", opts.Glob)
+		for _, pattern := range engineGlobs {
+			args = append(args, "--glob", pattern)
+		}
 	}
 	for _, pattern := range includeGlobs {
 		args = append(args, "--glob", pattern)
@@ -452,7 +472,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 			if !filepath.IsAbs(matchPath) {
 				matchPath = filepath.Join(baseDir, matchPath)
 			}
-			if globMatcher != nil && !globMatcher.Match(filepath.Base(matchPath)) {
+			if globMatcher != nil && !globMatcher.Match(matchPath) {
 				return true
 			}
 			var text string

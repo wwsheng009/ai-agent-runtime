@@ -144,6 +144,23 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 	}
 	page.renderedLines = len(lines)
 
+	// Page cap: the walker stops one entry past the page, but a runner-fed
+	// engine can hand back the whole list at once. The offset window was
+	// already applied by the shared window helpers; the renderer only re-applies
+	// the limit cap so the paging notice matches the caller's page size.
+	if len(lines) > in.options.Limit && !in.result.SingleFile {
+		lines = lines[:in.options.Limit]
+		if !in.result.Truncated {
+			in.result.Truncated = true
+		}
+	}
+	// A page that fills the requested window is a page boundary, not data
+	// loss: the paging notice below must fire so the model continues with
+	// next_offset instead of rewording the search.
+	if !in.result.Truncated && in.options.Limit > 0 && len(lines) >= in.options.Limit {
+		in.result.Truncated = true
+	}
+
 	content := strings.Join(lines, "\n")
 	if content == "" {
 		content = "未找到匹配的内容"
@@ -171,7 +188,7 @@ func GrepRenderBudget() int { return toolcoreoutput.GrepOutputBudgetBytes }
 // renderGrepMetadataStamps adds the dispositions the local tool has always
 // published: the render-layer opt-out with its declared window, empty-success
 // marking for a true no-match page, and the byte-budget next_action.
-func renderGrepMetadataStamps(metadata map[string]any, page grepPage, result *GrepResult) map[string]any {
+func renderGrepMetadataStamps(metadata map[string]any, page grepPage, result *GrepResult, offset int) map[string]any {
 	if metadata == nil {
 		return nil
 	}
@@ -182,9 +199,27 @@ func renderGrepMetadataStamps(metadata map[string]any, page grepPage, result *Gr
 		metadata["truncation_reason"] = "byte_budget"
 		metadata["next_action"] = "输出超过 grep 字节预算已提前停止；请收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数。不要原样重试同一查询。"
 	}
+	if offset > 0 && page.matchCount == 0 && page.renderedFiles == 0 && !result.Truncated && offset >= 500 {
+		// Deep offset beyond the collected window: keep the legacy guidance.
+		metadata["next_action"] = "offset 超出本次抓取窗口（抓取上限 5000 条）：请减小 offset，或先收窄 pattern/paths 再分页。不要原样重试同一查询。"
+	}
 	if page.matchCount == 0 && page.renderedFiles == 0 && !result.Truncated && utf8.ValidString(page.content) {
 		metadata["empty_result"] = true
 		metadata["outcome"] = "empty"
 	}
 	return metadata
+}
+
+// renderGrepStatsSummary prints the stats block in the local tool's rg-style
+// wording, appended to the page when stats was requested.
+func renderGrepStatsSummary(summary GrepStats) string {
+	lines := []string{
+		"-- stats --",
+		fmt.Sprintf("matches: %d", summary.Matches),
+		fmt.Sprintf("matched lines: %d", summary.MatchedLines),
+		fmt.Sprintf("files contained matches: %d", summary.FilesWithMatched),
+		fmt.Sprintf("files searched: %d", summary.FilesScanned),
+		fmt.Sprintf("bytes printed: %d", summary.BytesPrinted),
+	}
+	return strings.Join(lines, "\n")
 }

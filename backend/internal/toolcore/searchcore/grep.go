@@ -19,6 +19,10 @@ type GrepOptions struct {
 	Patterns []string
 	Path     string
 	Glob     string
+	// Globs carries the array spelling of `glob`: several patterns, any may
+	// match, `!`-prefixed ones exclude (the local tool's partition rule).
+	// The single-value Glob joins the same list when set.
+	Globs []string
 	// Include/Exclude are file filters applied to the path relative to the
 	// search root (a bare file name for a single-file root). Include is an
 	// allow-list; exclude wins over include. Patterns without a slash match
@@ -134,11 +138,31 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		return GrepResult{}, err
 	}
 	var globMatcher *GlobMatcher
+	globPatterns := append([]string{}, opts.Globs...)
 	if strings.TrimSpace(opts.Glob) != "" {
-		globMatcher, err = NewGlobMatcher(opts.Glob)
+		globPatterns = append(globPatterns, opts.Glob)
+	}
+	var excludeFromGlobs []string
+	includeGlobsFromParam := make([]string, 0, len(globPatterns))
+	for _, pattern := range globPatterns {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "!") {
+			excludeFromGlobs = append(excludeFromGlobs, strings.TrimSpace(strings.TrimPrefix(trimmed, "!")))
+			continue
+		}
+		includeGlobsFromParam = append(includeGlobsFromParam, trimmed)
+	}
+	if len(includeGlobsFromParam) > 0 {
+		globMatcher, err = NewGlobMatcher(strings.Join(includeGlobsFromParam, ","))
 		if err != nil {
 			return GrepResult{}, err
 		}
+	}
+	if len(excludeFromGlobs) > 0 {
+		opts.Exclude = append(append([]string{}, opts.Exclude...), excludeFromGlobs...)
 	}
 	includeGlobs, excludeGlobs := EffectiveGrepFilters(opts)
 	includeFilter, err := newGrepGlobFilter(includeGlobs)
@@ -274,7 +298,11 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 					}
 					return nil
 				}
-				if globMatcher != nil && !globMatcher.Match(entry.Name()) {
+				// `glob` is path-aware: a pattern with a slash matches the
+				// root-relative path, a bare pattern matches the basename. This is
+				// the local tool's rule (verified against rg: `pkg/*.go` does not
+				// match pkg/nested/deep.go).
+				if globMatcher != nil && !globMatcher.Match(relativeGrepCandidate(root, path)) {
 					return nil
 				}
 				return visit(root, rules, path)

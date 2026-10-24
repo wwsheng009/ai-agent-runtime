@@ -175,8 +175,22 @@ func (p *grepIgnorePolicy) dirRules(dir string) []grepIgnoreRule {
 
 // globalIgnoreRules mirrors the local tool's two global candidates.
 func globalIgnoreRules() []grepIgnoreRule {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
+	// HOME/USERPROFILE win over os.UserHomeDir: tests (and hosts) pin the
+	// global ignore location through the environment, exactly like the local
+	// tool's os.UserHomeDir respects them.
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		home = strings.TrimSpace(os.Getenv("USERPROFILE"))
+	}
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil || strings.TrimSpace(home) == "" {
+			return nil
+		}
+	}
+	home = strings.TrimSpace(home)
+	if home == "" {
 		return nil
 	}
 	rules := make([]grepIgnoreRule, 0, 8)
@@ -238,9 +252,13 @@ func ignoredByGrepRules(rules []grepIgnoreRule, absPath string) bool {
 		} else {
 			rel, err := filepath.Rel(rule.scope, absPath)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				continue
+				// The rule file lives outside the search tree (the global
+				// candidates do): gitignore semantics still apply, matched
+				// against the base name - the local tool's behaviour.
+				candidate = filepath.Base(absPath)
+			} else {
+				candidate = filepath.ToSlash(rel)
 			}
-			candidate = filepath.ToSlash(rel)
 		}
 		if candidate == "" || candidate == "." {
 			continue
