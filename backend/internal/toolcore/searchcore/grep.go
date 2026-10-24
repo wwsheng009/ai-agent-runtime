@@ -54,6 +54,19 @@ type GrepOptions struct {
 	// line. InvertMatch keeps whole lines (rg -o -v), files mode ignores it,
 	// and in count mode the per-file count becomes a match count (rg -o -c).
 	OnlyMatching bool
+	// CountMatches makes count mode count occurrences instead of matching
+	// lines (rg --count-matches). It is the same arithmetic only_matching
+	// already produces in count mode, so it folds into OnlyMatching rather
+	// than becoming a third counting rule.
+	CountMatches bool
+	// GlobCaseInsensitive applies case-insensitive matching to the include/
+	// exclude/glob patterns (rg --glob-case-insensitive). It never changes how
+	// the search pattern itself is compared.
+	GlobCaseInsensitive bool
+	// IgnoreFileCaseInsensitive applies case-insensitive matching to the rules
+	// read from an explicit ignore_file only (rg --ignore-file-case-insensitive).
+	// The conventionally discovered ignore files keep their normal semantics.
+	IgnoreFileCaseInsensitive bool
 	// Column renders `path:line:column: text` instead of `path:line: text`.
 	// It adds real information (where on the line the match starts), so it is
 	// a search parameter, not a style switch.
@@ -192,7 +205,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	if err != nil {
 		return GrepResult{}, err
 	}
-	var globMatcher *GlobMatcher
+	var globMatcher *grepGlobFilter
 	globPatterns := append([]string{}, opts.Globs...)
 	if strings.TrimSpace(opts.Glob) != "" {
 		globPatterns = append(globPatterns, opts.Glob)
@@ -211,7 +224,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		includeGlobsFromParam = append(includeGlobsFromParam, trimmed)
 	}
 	if len(includeGlobsFromParam) > 0 {
-		globMatcher, err = NewGlobMatcher(strings.Join(includeGlobsFromParam, ","))
+		globMatcher, err = newGrepGlobFilterWithCase(includeGlobsFromParam, opts.GlobCaseInsensitive)
 		if err != nil {
 			return GrepResult{}, err
 		}
@@ -220,11 +233,11 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		opts.Exclude = append(append([]string{}, opts.Exclude...), excludeFromGlobs...)
 	}
 	includeGlobs, excludeGlobs := EffectiveGrepFilters(opts)
-	includeFilter, err := newGrepGlobFilter(includeGlobs)
+	includeFilter, err := newGrepGlobFilterWithCase(includeGlobs, opts.GlobCaseInsensitive)
 	if err != nil {
 		return GrepResult{}, err
 	}
-	excludeFilter, err := newGrepGlobFilter(excludeGlobs)
+	excludeFilter, err := newGrepGlobFilterWithCase(excludeGlobs, opts.GlobCaseInsensitive)
 	if err != nil {
 		return GrepResult{}, err
 	}
@@ -366,7 +379,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 	for _, root := range roots {
 		rules := newGrepIgnoreRules(newGrepIgnorePolicy(opts), root)
 		if info, statErr := os.Stat(root); statErr == nil && info.Mode().IsRegular() {
-			if globMatcher == nil || globMatcher.Match(filepath.Base(root)) {
+			if globMatcher == nil || globMatcher.matches(filepath.Base(root)) {
 				if err := visit(root, rules, root); err != nil && err != filepath.SkipAll {
 					return GrepResult{}, err
 				}
@@ -430,7 +443,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 				// root-relative path, a bare pattern matches the basename. This is
 				// the local tool's rule (verified against rg: `pkg/*.go` does not
 				// match pkg/nested/deep.go).
-				if globMatcher != nil && !globMatcher.Match(relativeGrepCandidate(root, path)) {
+				if globMatcher != nil && !globMatcher.matches(relativeGrepCandidate(root, path)) {
 					return nil
 				}
 				return visit(root, rules, path)

@@ -366,6 +366,23 @@
   `Relative()` 只能返回绝对路径，于是 core 会把宿主机的绝对路径写进模型可见输出
   （`/tmp/TestXxx/001/sample.txt:1:3: foo`）。legacy 一直以搜索根为基准显示相对路径。
   现在 renderer 在拿不到相对路径时回退到搜索根相对路径，两者一致。
+  **参数收敛审计（2026-10-24）**：见 `grep-convergence-audit-20261022.md`。
+  运行时枚举本地 schema 的 96 个参数，52 个已进 core、44 个仍在 legacy。
+  逐条判定后补上三个**真正的语义缺口**（不是展示风格，remote 完全没有）：
+  `count_matches`（count 模式统计次数而非行数）、`glob_case_insensitive`、
+  `ignore_file_case_insensitive`。其余 41 项归为六类，每类都有明确的留本地理由：
+  rg-only 透传（离开 rg 无实现）、json 透传（与规范化输出互斥的另一种格式）、
+  纯展示开关（对模型无意义，本地一直是"接受但不生效"）、本地遍历/预算机制、
+  以及 `rg_args` 逃生舱（remote 声明它等于暴露宿主机命令行）。
+  **结论：grep 的语义参数收敛完毕，剩余缺口为 0。**
+
+  审计过程中修掉三个真实缺陷：(a) `no_ignore_files` 没有抑制显式 ignore_file 的转发，
+  调用方说"不要用这些规则"规则却生效；(b) `ignore_files` 键在 core 是 bool、
+  在本地是 `[]string`，同名不同类型，已在 surface adapter 做形状映射并登记该分歧；
+  (c) `ignore_file_case_insensitive` 的作用域被本地实现理解反了——实测 rg 只作用于
+  **发现的** ignore 文件（其 --help 原文如此），显式 `--ignore-file` 保持大小写敏感。
+  实测还发现：非 git 目录里 `.gitignore` 根本不被读取，所以该 flag 看似无效；
+  core 默认的 `--no-require-git` 让两引擎都能一致地让 flag 生效。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
@@ -379,7 +396,8 @@
   本地 `grep` 主流程仍在 `grep_core_switch.go` 里按参数集分流：四类 mode（content/
   files/files_without/count）与 context、include-exclude、type/type_not、max_count、
   only_matching、max_depth/max_filesize、stats、pattern_file(s)、多根语义、ignore 族
-  与 unrestricted_level、one_file_system、no_messages、column/trim/max_columns 均已进 core，
+  与 unrestricted_level、one_file_system、no_messages、column/trim/max_columns、
+  count_matches/glob_case_insensitive/ignore_file_case_insensitive 均已进 core，
   `rg_args`、`json` 透传、读取侧 16MiB 流闸门、
   partial/timeout 标注与 path-not-found 候选提示仍在本地；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的

@@ -665,6 +665,53 @@ func TestRemoteGrepPresentationOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepSemanticsOverMCP proves the three audit parameters survive
+// schema validation and change the result set as documented.
+func TestRemoteGrepSemanticsOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"a.txt":      "foo foo\nfoo bar\n",
+		"UP.GO":      "needle up\n",
+		"UPSKIP.TXT": "needle skip\n",
+		".gitignore": "upskip.txt\n",
+		"keep.txt":   "needle keep\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	countMatches := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "foo", "count_matches": true,
+	})
+	if !strings.Contains(countMatches, "a.txt:3") {
+		t.Fatalf("count_matches must count occurrences:\n%s", countMatches)
+	}
+
+	globCI := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "glob": "*.go", "glob_case_insensitive": true,
+	})
+	if !strings.Contains(globCI, "UP.GO") {
+		t.Fatalf("glob_case_insensitive must match the uppercase extension:\n%s", globCI)
+	}
+
+	ignoreCI := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "ignore_file_case_insensitive": true,
+	})
+	if strings.Contains(ignoreCI, "UPSKIP.TXT") {
+		t.Fatalf("ignore_file_case_insensitive must fold .gitignore case:\n%s", ignoreCI)
+	}
+	if !strings.Contains(ignoreCI, "keep.txt") {
+		t.Fatalf("the unfiltered file must still appear:\n%s", ignoreCI)
+	}
+}
+
 // TestRemoteGrepPatternFileOverMCP proves pattern_file(s) survive schema
 // validation and behave like the local tool: each line becomes one pattern.
 func TestRemoteGrepPatternFileOverMCP(t *testing.T) {

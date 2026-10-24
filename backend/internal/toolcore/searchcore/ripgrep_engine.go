@@ -303,7 +303,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		// prints nothing instead, so this case belongs to the walker.
 		return GrepResult{}, false, nil
 	}
-	var globMatcher *GlobMatcher
+	var globMatcher *grepGlobFilter
 	globPatterns := append([]string{}, opts.Globs...)
 	if strings.TrimSpace(opts.Glob) != "" {
 		globPatterns = append(globPatterns, opts.Glob)
@@ -321,7 +321,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		engineGlobs = append(engineGlobs, trimmed)
 	}
 	if len(engineGlobs) > 0 {
-		matcher, err := NewGlobMatcher(strings.Join(engineGlobs, ","))
+		matcher, err := newGrepGlobFilterWithCase(engineGlobs, opts.GlobCaseInsensitive)
 		if err != nil {
 			return GrepResult{}, true, err
 		}
@@ -411,8 +411,13 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		// states the intent explicitly.
 		args = append(args, "--no-messages")
 	}
-	for _, file := range opts.IgnoreFiles {
-		args = append(args, "--ignore-file", file)
+	if !opts.NoIgnoreFiles && !opts.NoIgnore {
+		// no_ignore_files discards the explicit list entirely; rg's own
+		// --no-ignore-files only disables files added *by that flag* the other
+		// way round, so the list must be dropped here rather than relied on.
+		for _, file := range opts.IgnoreFiles {
+			args = append(args, "--ignore-file", file)
+		}
 	}
 	if globMatcher != nil {
 		for _, pattern := range engineGlobs {
@@ -503,6 +508,14 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	// Column is different - it only affects the line prefix, which the renderer
 	// owns - so it is not forwarded either; the engine computes it from the
 	// match offsets it already parses.
+	if opts.GlobCaseInsensitive {
+		// Applies to the glob family only; the case mode of the search pattern
+		// is resolved separately above.
+		args = append(args, "--glob-case-insensitive")
+	}
+	if opts.IgnoreFileCaseInsensitive {
+		args = append(args, "--ignore-file-case-insensitive")
+	}
 	for _, pattern := range patterns {
 		args = append(args, "-e", pattern)
 	}
@@ -537,7 +550,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 			if !filepath.IsAbs(matchPath) {
 				matchPath = filepath.Join(baseDir, matchPath)
 			}
-			if globMatcher != nil && !globMatcher.Match(matchPath) {
+			if globMatcher != nil && !globMatcher.matches(matchPath) {
 				return true
 			}
 			var text string
@@ -626,7 +639,7 @@ func RipgrepGlobIsSafe(pattern string) bool {
 // --json for this mode and prints one plain path per file, plus a trailing
 // --stats block; both are parsed here so the page, the has_more bit and the
 // scanned-file count mean the same thing as on every other engine.
-func (e Ripgrep) grepRootFilesWithout(ctx context.Context, opts GrepOptions, mode GrepMode, result GrepResult, args []string, baseDir string, globMatcher *GlobMatcher) (GrepResult, bool, error) {
+func (e Ripgrep) grepRootFilesWithout(ctx context.Context, opts GrepOptions, mode GrepMode, result GrepResult, args []string, baseDir string, globMatcher *grepGlobFilter) (GrepResult, bool, error) {
 	lines := make([]string, 0, 64)
 	streamErr := e.stream()(ctx, args, "", func(line []byte) bool {
 		lines = append(lines, string(line))
@@ -649,7 +662,7 @@ func (e Ripgrep) grepRootFilesWithout(ctx context.Context, opts GrepOptions, mod
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(baseDir, path)
 		}
-		if globMatcher != nil && !globMatcher.Match(path) {
+		if globMatcher != nil && !globMatcher.matches(path) {
 			continue
 		}
 		result.Files = append(result.Files, GrepFileSummary{File: path})

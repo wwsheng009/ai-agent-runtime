@@ -16,6 +16,10 @@ type grepIgnoreRule struct {
 	pattern string
 	negate  bool
 	scope   string // absolute directory the rule file lived in
+	// caseInsensitive applies only to rules read from an explicit ignore_file
+	// when the caller asked for it (rg --ignore-file-case-insensitive).
+	// Conventionally discovered files keep case-sensitive semantics.
+	caseInsensitive bool
 }
 
 // grepIgnorePolicy carries the resolved ignore switches. A nil policy means
@@ -28,6 +32,15 @@ type grepIgnorePolicy struct {
 	skipGlobal        bool
 	skipExplicitFiles bool
 	explicitFiles     []string
+	// discoveredCaseInsensitive makes the conventionally discovered ignore
+	// files (.gitignore, .ignore, .git/info/exclude, ...) compare
+	// case-insensitively.
+	//
+	// It deliberately does NOT cover explicit ignore_file entries: rg's own
+	// --help says "Process ignore files (.gitignore, .ignore, etc.) case
+	// insensitively", and probing rg 14 confirms an explicit --ignore-file keeps
+	// case-sensitive matching even when the flag is set.
+	discoveredCaseInsensitive bool
 }
 
 func newGrepIgnorePolicy(opts GrepOptions) *grepIgnorePolicy {
@@ -35,12 +48,13 @@ func newGrepIgnorePolicy(opts GrepOptions) *grepIgnorePolicy {
 		return nil
 	}
 	return &grepIgnorePolicy{
-		skipParent:        opts.NoIgnoreParent,
-		skipVCS:           opts.NoIgnoreVCS,
-		skipDot:           opts.NoIgnoreDot,
-		skipGlobal:        opts.NoIgnoreGlobal,
-		skipExplicitFiles: opts.NoIgnoreFiles,
-		explicitFiles:     opts.IgnoreFiles,
+		skipParent:                opts.NoIgnoreParent,
+		skipVCS:                   opts.NoIgnoreVCS,
+		skipDot:                   opts.NoIgnoreDot,
+		skipGlobal:                opts.NoIgnoreGlobal,
+		skipExplicitFiles:         opts.NoIgnoreFiles,
+		explicitFiles:             opts.IgnoreFiles,
+		discoveredCaseInsensitive: opts.IgnoreFileCaseInsensitive,
 	}
 }
 
@@ -163,7 +177,7 @@ func (p *grepIgnorePolicy) baseRules(root string) []grepIgnoreRule {
 	}
 	rules := make([]grepIgnoreRule, 0, 16)
 	if !p.skipGlobal {
-		rules = append(rules, globalIgnoreRules()...)
+		rules = append(rules, globalIgnoreRulesWithCase(p.discoveredCaseInsensitive)...)
 	}
 	if !p.skipParent {
 		ancestors := []string{}
@@ -184,6 +198,9 @@ func (p *grepIgnorePolicy) baseRules(root string) []grepIgnoreRule {
 	}
 	if !p.skipExplicitFiles {
 		for _, file := range p.explicitFiles {
+			// Explicit files stay case-sensitive even under the flag: rg does
+			// the same (verified), and the flag's own help text scopes it to
+			// the discovered file family.
 			rules = append(rules, loadGrepIgnoreFile(file, filepath.Dir(file))...)
 		}
 	}
@@ -197,12 +214,14 @@ func (p *grepIgnorePolicy) dirRules(dir string) []grepIgnoreRule {
 	rules := make([]grepIgnoreRule, 0, 8)
 	if !p.skipDot {
 		for _, name := range []string{".ignore", ".rgignore"} {
-			rules = append(rules, loadGrepIgnoreFile(filepath.Join(dir, name), dir)...)
+			rules = append(rules, loadGrepIgnoreFileWithCase(
+				filepath.Join(dir, name), dir, p.discoveredCaseInsensitive)...)
 		}
 	}
 	if !p.skipVCS {
 		for _, rel := range []string{".gitignore", filepath.Join(".git", "info", "exclude")} {
-			rules = append(rules, loadGrepIgnoreFile(filepath.Join(dir, rel), dir)...)
+			rules = append(rules, loadGrepIgnoreFileWithCase(
+				filepath.Join(dir, rel), dir, p.discoveredCaseInsensitive)...)
 		}
 	}
 	return rules
@@ -210,6 +229,10 @@ func (p *grepIgnorePolicy) dirRules(dir string) []grepIgnoreRule {
 
 // globalIgnoreRules mirrors the local tool's two global candidates.
 func globalIgnoreRules() []grepIgnoreRule {
+	return globalIgnoreRulesWithCase(false)
+}
+
+func globalIgnoreRulesWithCase(caseInsensitive bool) []grepIgnoreRule {
 	// HOME/USERPROFILE win over os.UserHomeDir: tests (and hosts) pin the
 	// global ignore location through the environment, exactly like the local
 	// tool's os.UserHomeDir respects them.
@@ -233,7 +256,7 @@ func globalIgnoreRules() []grepIgnoreRule {
 		filepath.Join(home, ".config", "git", "ignore"),
 		filepath.Join(home, ".gitignore_global"),
 	} {
-		rules = append(rules, loadGrepIgnoreFile(candidate, filepath.Dir(candidate))...)
+		rules = append(rules, loadGrepIgnoreFileWithCase(candidate, filepath.Dir(candidate), caseInsensitive)...)
 	}
 	return rules
 }
@@ -241,6 +264,13 @@ func globalIgnoreRules() []grepIgnoreRule {
 // loadGrepIgnoreFile parses one ignore file the way the local loader does.
 // Missing files are silent: ignore files are optional by nature.
 func loadGrepIgnoreFile(filePath, scope string) []grepIgnoreRule {
+	return loadGrepIgnoreFileWithCase(filePath, scope, false)
+}
+
+// loadGrepIgnoreFileWithCase is the same loader with the per-file case mode
+// recorded on each rule, so the comparison rule travels with the rule instead of
+// being a global switch that would leak into discovered files.
+func loadGrepIgnoreFileWithCase(filePath, scope string, caseInsensitive bool) []grepIgnoreRule {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil
@@ -265,7 +295,12 @@ func loadGrepIgnoreFile(filePath, scope string) []grepIgnoreRule {
 		if line == "" {
 			continue
 		}
-		rules = append(rules, grepIgnoreRule{pattern: line, negate: negate, scope: scope})
+		rules = append(rules, grepIgnoreRule{
+			pattern:         line,
+			negate:          negate,
+			scope:           scope,
+			caseInsensitive: caseInsensitive,
+		})
 	}
 	return rules
 }
@@ -300,11 +335,20 @@ func ignoredByGrepRules(rules []grepIgnoreRule, absPath string) bool {
 		}
 		matched := false
 		if strings.Contains(pattern, "/") || strings.Contains(pattern, "**") {
-			ok, err := MatchGlobPath(pattern, candidate, false)
+			ok, err := MatchGlobPath(pattern, candidate, rule.caseInsensitive)
 			matched = err == nil && ok
 		} else {
-			ok, err := path.Match(pattern, path.Base(candidate))
-			matched = err == nil && ok
+			base := path.Base(candidate)
+			if rule.caseInsensitive {
+				// path.Match has no case folding, so compare lowered copies.
+				// The pattern itself is left untouched for the slash branch,
+				// which goes through MatchGlobPath and folds internally.
+				ok, err := path.Match(strings.ToLower(pattern), strings.ToLower(base))
+				matched = err == nil && ok
+			} else {
+				ok, err := path.Match(pattern, base)
+				matched = err == nil && ok
+			}
 		}
 		if matched {
 			ignored = !rule.negate

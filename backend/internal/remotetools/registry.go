@@ -372,6 +372,18 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --count/-c；等价于 mode=count（统计匹配行数）。",
 			},
+			"count_matches": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --count-matches：进入 count 模式，但统计的是匹配次数而非匹配行数（同一行出现两次算 2）。在非 count 模式下无效。",
+			},
+			"glob_case_insensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --glob-case-insensitive：让 glob/include/exclude 的模式按大小写不敏感匹配。不影响搜索 pattern 本身的大小写规则。",
+			},
+			"ignore_file_case_insensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --ignore-file-case-insensitive：只让 **显式传入的** ignore_file 规则按大小写不敏感匹配。按惯例发现的 .gitignore/.ignore/全局 ignore 文件保持原有语义。",
+			},
 			"max_count": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     0,

@@ -2814,7 +2814,7 @@ func loadLocalIgnorePatternsForDir(opts *grepOptions, dir string) ([]grepIgnoreP
 	patterns := make([]grepIgnorePattern, 0, 8)
 	if !opts.noIgnoreDot {
 		for _, rel := range []string{".ignore", ".rgignore"} {
-			loaded, err := loadIgnorePatternFile(filepath.Join(dir, rel), false, true, opts.noMessages)
+			loaded, err := loadIgnorePatternFile(filepath.Join(dir, rel), opts.ignoreFileCaseInsensitive, true, opts.noMessages)
 			if err != nil {
 				return nil, err
 			}
@@ -2823,7 +2823,7 @@ func loadLocalIgnorePatternsForDir(opts *grepOptions, dir string) ([]grepIgnoreP
 	}
 	if !opts.noIgnoreVCS {
 		for _, rel := range []string{".gitignore", filepath.Join(".git", "info", "exclude")} {
-			loaded, err := loadIgnorePatternFile(filepath.Join(dir, rel), false, true, opts.noMessages)
+			loaded, err := loadIgnorePatternFile(filepath.Join(dir, rel), opts.ignoreFileCaseInsensitive, true, opts.noMessages)
 			if err != nil {
 				return nil, err
 			}
@@ -2882,7 +2882,7 @@ func loadGlobalIgnorePatterns(opts *grepOptions) ([]grepIgnorePattern, error) {
 	}
 	patterns := make([]grepIgnorePattern, 0, len(candidates)*4)
 	for _, candidate := range candidates {
-		loaded, err := loadIgnorePatternFile(candidate, false, true, opts.noMessages)
+		loaded, err := loadIgnorePatternFile(candidate, opts.ignoreFileCaseInsensitive, true, opts.noMessages)
 		if err != nil {
 			return nil, err
 		}
@@ -2901,7 +2901,10 @@ func loadExplicitIgnorePatterns(opts *grepOptions, workingDir string) ([]grepIgn
 		if !filepath.IsAbs(resolved) {
 			resolved = filepath.Join(workingDir, resolved)
 		}
-		loaded, err := loadIgnorePatternFile(resolved, opts.ignoreFileCaseInsensitive, false, opts.noMessages)
+		// Explicit ignore_file entries stay case-sensitive even under
+		// ignore_file_case_insensitive: rg scopes that flag to the discovered
+		// files, and probing rg 14 confirms this half.
+		loaded, err := loadIgnorePatternFile(resolved, false, false, opts.noMessages)
 		if err != nil {
 			return nil, err
 		}

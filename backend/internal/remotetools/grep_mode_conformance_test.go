@@ -381,6 +381,67 @@ func TestRemoteGrepColumnMatchesWalker(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepSemanticsMatchWalker pins the three parameters added in the
+// convergence audit. Each one changes the result set rather than its
+// presentation, so a divergence here is a correctness bug, not a style issue.
+func TestRemoteGrepSemanticsMatchWalker(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"a.txt":      "foo foo\nfoo bar\n",
+		"UP.GO":      "needle up\n",
+		"low.go":     "needle low\n",
+		"UPSKIP.TXT": "needle upskip\n",
+		"keep.txt":   "needle keep\n",
+		".gitignore": "upskip.txt\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := resolveRipgrepRunner()
+
+	cases := []struct {
+		name string
+		opts searchcore.GrepOptions
+	}{
+		{"count_matches", searchcore.GrepOptions{
+			Pattern: "foo", Path: root, Mode: searchcore.GrepModeCount,
+			CountMatches: true, OnlyMatching: true, Limit: 50,
+		}},
+		{"glob_case_insensitive", searchcore.GrepOptions{
+			Pattern: "needle", Path: root, Glob: "*.go",
+			GlobCaseInsensitive: true, Limit: 50,
+		}},
+		{"ignore_file_case_insensitive", searchcore.GrepOptions{
+			Pattern: "needle", Path: root, Glob: "*.txt",
+			IgnoreFileCaseInsensitive: true, Limit: 50,
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			walker, err := searchcore.Grep(context.Background(), tc.opts)
+			if err != nil {
+				t.Fatalf("walker: %v", err)
+			}
+			if !runner.available() {
+				return
+			}
+			rgResult, used, rgErr := runner.grep(context.Background(), tc.opts)
+			if rgErr != nil || !used {
+				t.Fatalf("ripgrep used=%v err=%v", used, rgErr)
+			}
+			got, want := grepMatchLines(rgResult), grepMatchLines(walker)
+			if tc.opts.Mode != "" {
+				got, want = grepMatchFiles(rgResult), grepMatchFiles(walker)
+			}
+			if !equalStringSlices(got, want) {
+				t.Fatalf("engines diverged:\nripgrep: %v\nwalker:  %v", got, want)
+			}
+		})
+	}
+}
+
 // TestRemoteGrepRejectsUnknownMode keeps a genuinely unknown spelling failing on
 // both engines: the enum must stay honest about what it can serve.
 func TestRemoteGrepRejectsUnknownMode(t *testing.T) {

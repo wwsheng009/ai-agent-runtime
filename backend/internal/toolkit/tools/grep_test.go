@@ -4486,7 +4486,12 @@ func TestGrepTool_NoIgnoreFilesOverridesExplicitIgnoreFileBuiltinAndRipgrep(t *t
 	})
 }
 
-func TestGrepTool_IgnoreFileCaseInsensitiveOnlyAppliesToExplicitIgnoreFile(t *testing.T) {
+// TestGrepTool_IgnoreFileCaseInsensitiveOnlyAppliesToDiscoveredIgnoreFiles pins
+// the scope rg actually implements: its --help says "Process ignore files
+// (.gitignore, .ignore, etc.) case insensitively", and probing rg 14 confirms an
+// explicit --ignore-file keeps case-sensitive matching. This test previously
+// asserted the exact opposite.
+func TestGrepTool_IgnoreFileCaseInsensitiveOnlyAppliesToDiscoveredIgnoreFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	explicitIgnore := filepath.Join(tmpDir, "custom.ignore")
 	if err := os.WriteFile(explicitIgnore, []byte("EXPLICIT-ONLY.TXT\n"), 0o644); err != nil {
@@ -4516,11 +4521,14 @@ func TestGrepTool_IgnoreFileCaseInsensitiveOnlyAppliesToExplicitIgnoreFile(t *te
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if strings.Contains(result.Content, "explicit-only.txt:1: needle") {
-		t.Fatalf("expected explicit ignore_file case-insensitive match to hide explicit-only.txt, got %q", result.Content)
+	if !strings.Contains(result.Content, "explicit-only.txt:1: needle") {
+		// rg scopes this flag to the *discovered* ignore files (its own --help
+		// says ".gitignore, .ignore, etc."); an explicit --ignore-file keeps
+		// case-sensitive matching. This test used to assert the opposite.
+		t.Fatalf("explicit ignore_file must stay case-sensitive and NOT hide the file, got %q", result.Content)
 	}
-	if !strings.Contains(result.Content, "local-git-only.txt:1: needle") {
-		t.Fatalf("expected local .gitignore to remain case-sensitive and not hide local-git-only.txt, got %q", result.Content)
+	if strings.Contains(result.Content, "local-git-only.txt:1: needle") {
+		t.Fatalf("the discovered .gitignore must fold case under this flag, got %q", result.Content)
 	}
 }
 

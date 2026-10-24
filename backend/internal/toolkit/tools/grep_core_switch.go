@@ -35,8 +35,11 @@ var coreSearchParams = map[string]bool{
 	"unrestricted_level": true,
 	"no_ignore":          true, "no_ignore_parent": true, "no_ignore_vcs": true,
 	"no_ignore_dot": true, "no_ignore_global": true, "no_ignore_files": true,
-	"no_messages": true,
-	"ignore_file": true, "ignore_files": true,
+	"no_messages":                  true,
+	"count_matches":                true,
+	"glob_case_insensitive":        true,
+	"ignore_file_case_insensitive": true,
+	"ignore_file":                  true, "ignore_files": true,
 }
 
 // executeCoreSearch runs the shared core handler when a call stays inside the
@@ -61,7 +64,20 @@ func (g *GrepTool) executeCoreSearch(ctx context.Context, params map[string]inte
 	if err != nil {
 		return nil, false
 	}
-	return toolkit.ResultToToolkit(result), true
+	converted := toolkit.ResultToToolkit(result)
+	// The local tool has always published `ignore_files` as the explicit path
+	// list, while the shared handler uses that key for the "ignore handling is
+	// on" bit and keeps the list in ignore_files_list. Both shapes are relied
+	// on, so adapt at the surface boundary instead of repurposing a key that
+	// existing callers type-assert.
+	if converted != nil && converted.Metadata != nil {
+		if list, ok := converted.Metadata["ignore_files_list"].([]string); ok {
+			converted.Metadata["ignore_files"] = list
+		} else {
+			converted.Metadata["ignore_files"] = []string{}
+		}
+	}
+	return converted, true
 }
 
 func boolParamValue(params map[string]interface{}, key string) bool {

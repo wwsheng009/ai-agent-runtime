@@ -165,6 +165,15 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		maxCount = 0
 	}
 	onlyMatching := boolArg(call.Args, "only_matching")
+	// count_matches is "count occurrences instead of lines". In count mode the
+	// fragment unit already produces exactly that arithmetic, so it folds into
+	// OnlyMatching instead of becoming a separate counting rule. Outside count
+	// mode the local tool treats the flag as a no-op, which matches rg: the
+	// flag only selects a counting mode.
+	countMatches := boolArg(call.Args, "count_matches") && mode == GrepModeCount
+	if countMatches {
+		onlyMatching = true
+	}
 	maxColumns, maxColumnsSet := intArgOK(call.Args, "max_columns")
 	if maxColumnsSet && maxColumns < 0 {
 		maxColumns = 0
@@ -198,50 +207,53 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			fmt.Errorf("only_matching 与 context 不能同时使用")), nil
 	}
 	options := GrepOptions{
-		Patterns:          patterns,
-		PatternFiles:      patternFiles,
-		Path:              roots[0],
-		Paths:             roots[1:],
-		Mode:              mode,
-		Glob:              stringArg(call.Args, "glob"),
-		Globs:             GrepGlobListFromArgs(call.Args, "glob"),
-		Include:           GrepGlobListFromArgs(call.Args, "include"),
-		Exclude:           GrepGlobListFromArgs(call.Args, "exclude"),
-		Type:              stringArgAny(call.Args, "type", "file_type"),
-		TypeNot:           stringArg(call.Args, "type_not"),
-		CaseInsensitive:   boolArg(call.Args, "case_insensitive"),
-		Literal:           boolArg(call.Args, "literal", "fixed_strings"),
-		IgnoreCase:        boolArg(call.Args, "ignore_case"),
-		CaseSensitive:     boolArg(call.Args, "case_sensitive"),
-		SmartCase:         boolArg(call.Args, "smart_case"),
-		Word:              boolArg(call.Args, "word", "word_regexp"),
-		LineRegexp:        boolArg(call.Args, "line_regexp"),
-		InvertMatch:       boolArg(call.Args, "invert_match"),
-		MaxCount:          maxCount,
-		MaxCountSet:       maxCountSet,
-		OnlyMatching:      onlyMatching,
-		Column:            boolArg(call.Args, "column"),
-		Trim:              boolArg(call.Args, "trim"),
-		MaxColumns:        maxColumns,
-		MaxColumnsSet:     maxColumnsSet,
-		MaxColumnsPreview: maxColumnsPreview,
-		MaxDepth:          maxDepth,
-		MaxDepthSet:       maxDepthSet,
-		MaxFileSizeBytes:  maxFileSizeBytes,
-		OneFileSystem:     boolArg(call.Args, "one_file_system"),
-		IncludeHidden:     includeHidden,
-		Unrestricted:      unrestricted,
-		NoIgnore:          noIgnore,
-		NoIgnoreParent:    boolArg(call.Args, "no_ignore_parent"),
-		NoIgnoreVCS:       boolArg(call.Args, "no_ignore_vcs"),
-		NoIgnoreDot:       boolArg(call.Args, "no_ignore_dot"),
-		NoIgnoreGlobal:    boolArg(call.Args, "no_ignore_global"),
-		NoIgnoreFiles:     boolArg(call.Args, "no_ignore_files"),
-		IgnoreFiles:       ignoreFiles,
-		NoMessages:        boolArg(call.Args, "no_messages"),
-		Limit:             intArg(call.Args, "limit", DefaultGrepLimit),
-		MaxFileBytes:      captureLimit(call),
-		Offset:            intArg(call.Args, "offset", 0),
+		Patterns:                  patterns,
+		PatternFiles:              patternFiles,
+		Path:                      roots[0],
+		Paths:                     roots[1:],
+		Mode:                      mode,
+		Glob:                      stringArg(call.Args, "glob"),
+		Globs:                     GrepGlobListFromArgs(call.Args, "glob"),
+		Include:                   GrepGlobListFromArgs(call.Args, "include"),
+		Exclude:                   GrepGlobListFromArgs(call.Args, "exclude"),
+		Type:                      stringArgAny(call.Args, "type", "file_type"),
+		TypeNot:                   stringArg(call.Args, "type_not"),
+		CaseInsensitive:           boolArg(call.Args, "case_insensitive"),
+		Literal:                   boolArg(call.Args, "literal", "fixed_strings"),
+		IgnoreCase:                boolArg(call.Args, "ignore_case"),
+		CaseSensitive:             boolArg(call.Args, "case_sensitive"),
+		SmartCase:                 boolArg(call.Args, "smart_case"),
+		Word:                      boolArg(call.Args, "word", "word_regexp"),
+		LineRegexp:                boolArg(call.Args, "line_regexp"),
+		InvertMatch:               boolArg(call.Args, "invert_match"),
+		MaxCount:                  maxCount,
+		MaxCountSet:               maxCountSet,
+		OnlyMatching:              onlyMatching,
+		CountMatches:              countMatches,
+		GlobCaseInsensitive:       boolArg(call.Args, "glob_case_insensitive"),
+		IgnoreFileCaseInsensitive: boolArg(call.Args, "ignore_file_case_insensitive"),
+		Column:                    boolArg(call.Args, "column"),
+		Trim:                      boolArg(call.Args, "trim"),
+		MaxColumns:                maxColumns,
+		MaxColumnsSet:             maxColumnsSet,
+		MaxColumnsPreview:         maxColumnsPreview,
+		MaxDepth:                  maxDepth,
+		MaxDepthSet:               maxDepthSet,
+		MaxFileSizeBytes:          maxFileSizeBytes,
+		OneFileSystem:             boolArg(call.Args, "one_file_system"),
+		IncludeHidden:             includeHidden,
+		Unrestricted:              unrestricted,
+		NoIgnore:                  noIgnore,
+		NoIgnoreParent:            boolArg(call.Args, "no_ignore_parent"),
+		NoIgnoreVCS:               boolArg(call.Args, "no_ignore_vcs"),
+		NoIgnoreDot:               boolArg(call.Args, "no_ignore_dot"),
+		NoIgnoreGlobal:            boolArg(call.Args, "no_ignore_global"),
+		NoIgnoreFiles:             boolArg(call.Args, "no_ignore_files"),
+		IgnoreFiles:               ignoreFiles,
+		NoMessages:                boolArg(call.Args, "no_messages"),
+		Limit:                     intArg(call.Args, "limit", DefaultGrepLimit),
+		MaxFileBytes:              captureLimit(call),
+		Offset:                    intArg(call.Args, "offset", 0),
 	}
 
 	engine := "walker"
@@ -348,24 +360,35 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"engine_name":          engine,
 		"limit":                options.Limit,
 		"hidden_files":         options.IncludeHidden,
-		"ignore_files":         !options.NoIgnore,
-		"ignore_files_list":    grepIgnoreFilesLabels(paths, options.IgnoreFiles),
-		"ignore_file_count":    len(options.IgnoreFiles),
-		"no_ignore":            options.NoIgnore,
-		"no_ignore_parent":     options.NoIgnoreParent,
-		"no_ignore_vcs":        options.NoIgnoreVCS,
-		"no_ignore_dot":        options.NoIgnoreDot,
-		"no_ignore_global":     options.NoIgnoreGlobal,
-		"no_ignore_files":      options.NoIgnoreFiles,
-		"no_messages":          options.NoMessages,
-		"literal":              options.Literal,
-		"ignore_case":          options.IgnoreCase || options.CaseInsensitive,
-		"case_sensitive":       options.CaseSensitive,
-		"smart_case":           options.SmartCase,
-		"word":                 options.Word,
-		"line_regexp":          options.LineRegexp,
-		"hidden":               options.IncludeHidden,
-		"unrestricted_level":   options.Unrestricted,
+		// `ignore_files` is the "is ignore handling on" bit on this surface;
+		// the path list lives in ignore_files_list. The local tool uses the
+		// same key for the list instead - a long-standing mismatch, left as-is
+		// here because changing either side breaks existing readers. The
+		// convergence work tracks it rather than silently repurposing a key.
+		"ignore_files":          !options.NoIgnore,
+		"ignore_files_list":     grepIgnoreFilesLabels(paths, options.IgnoreFiles),
+		"ignore_file_count":     len(options.IgnoreFiles),
+		"no_ignore":             options.NoIgnore,
+		"no_ignore_parent":      options.NoIgnoreParent,
+		"no_ignore_vcs":         options.NoIgnoreVCS,
+		"no_ignore_dot":         options.NoIgnoreDot,
+		"no_ignore_global":      options.NoIgnoreGlobal,
+		"no_ignore_files":       options.NoIgnoreFiles,
+		"no_messages":           options.NoMessages,
+		"count_matches":         options.CountMatches,
+		"glob_case_insensitive": options.GlobCaseInsensitive,
+		// Report the flag as off when the list it modifies was discarded:
+		// claiming it is on would describe an effect that cannot happen.
+		"ignore_file_case_insensitive": options.IgnoreFileCaseInsensitive &&
+			!options.NoIgnoreFiles && !options.NoIgnore,
+		"literal":            options.Literal,
+		"ignore_case":        options.IgnoreCase || options.CaseInsensitive,
+		"case_sensitive":     options.CaseSensitive,
+		"smart_case":         options.SmartCase,
+		"word":               options.Word,
+		"line_regexp":        options.LineRegexp,
+		"hidden":             options.IncludeHidden,
+		"unrestricted_level": options.Unrestricted,
 	}
 	if boolArg(call.Args, "stats") {
 		// Page-level statistics, not a whole-search summary: see GrepStats.
@@ -560,6 +583,11 @@ func grepModeFromArgs(args map[string]any) (GrepMode, *toolcore.Result) {
 		raw = string(GrepModeFilesWithout)
 	}
 	if boolArg(args, "count") {
+		raw = string(GrepModeCount)
+	}
+	if boolArg(args, "count_matches") {
+		// rg --count-matches is itself a counting mode, so the flag selects
+		// count mode on its own. An explicit `mode` still wins below.
 		raw = string(GrepModeCount)
 	}
 	if value, ok := args["mode"].(string); ok && strings.TrimSpace(value) != "" {

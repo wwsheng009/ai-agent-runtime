@@ -6,14 +6,26 @@ import "strings"
 // represented by a nil filter so "not configured" and "nothing matched" stay
 // distinguishable.
 type grepGlobFilter struct {
-	matchers []*GlobMatcher
+	matchers        []*GlobMatcher
+	caseInsensitive bool
 }
 
 func newGrepGlobFilter(patterns []string) (*grepGlobFilter, error) {
+	return newGrepGlobFilterWithCase(patterns, false)
+}
+
+// newGrepGlobFilterWithCase builds a filter whose patterns may compare
+// case-insensitively (rg --glob-case-insensitive). The matcher keeps the parsed
+// pattern list; the comparison mode is a property of the filter, so one pattern
+// set can be reused without re-parsing.
+func newGrepGlobFilterWithCase(patterns []string, caseInsensitive bool) (*grepGlobFilter, error) {
 	if len(patterns) == 0 {
 		return nil, nil
 	}
-	filter := &grepGlobFilter{matchers: make([]*GlobMatcher, 0, len(patterns))}
+	filter := &grepGlobFilter{
+		matchers:        make([]*GlobMatcher, 0, len(patterns)),
+		caseInsensitive: caseInsensitive,
+	}
 	for _, pattern := range patterns {
 		matcher, err := NewGlobMatcher(pattern)
 		if err != nil {
@@ -29,8 +41,10 @@ func (f *grepGlobFilter) matches(candidate string) bool {
 		return false
 	}
 	for _, matcher := range f.matchers {
-		if matcher.Match(candidate) {
-			return true
+		for _, pattern := range matcher.patterns {
+			if matched, err := MatchGlobPath(pattern, candidate, f.caseInsensitive); err == nil && matched {
+				return true
+			}
 		}
 	}
 	return false
