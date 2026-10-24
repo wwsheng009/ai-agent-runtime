@@ -538,4 +538,60 @@ runtime 用已有的 ledger / dedup 助手实现这三个方法，没有这个�
 顺序建议：1（纯工具能力，形最小）→ 2 → 3（翻转）。第 3 块之前要先确认一件事：
 文档/notebook 渲染依赖宿主的转换器（`docread`、`ipynb`），按「工具能力进 core、
 宿主能力留宿主」的划分，渲染本身是纯函数（输入路径与 head，输出 markdown），
-因此可以整体进 core，真正留宿主的只有「附件投递」和「台账写入」。
+因此可以整体进 core，真正留宿主的只有「附件投递」和「台账写入」。## view 第四段已收敛（2026-10-25）：拼写治愈
+
+原清单第 6 项。本地会治愈「只在大小写/不可见 Unicode 码点上不同」的文件名，remote
+完全没有这层——请求一个磁盘上真实存在、但拼写不同的路径，存在性检查会永远失败，
+模型只能反复重试死路径（analysis §3.7）。
+
+### 搬运
+
+- `viewcore.HealSpelling(checker, absPath)`：唯一候选被采用并**真的读成功**；
+  多个候选走「选一个」的失败形状。**每个候选都要过一遍与原始请求同一道
+  `toolcore.PermissionChecker`**——治愈不能变成越界逃逸。
+- `viewcore.AmbiguousSpellingResult`：带 `path_candidates` 与 pick-one next action
+  的失败结果。
+- 治愈成功后发布 `path_auto_healed` / `original_path` / `resolved_path`，并追加
+  「按磁盘实际拼写解析为 X，后续请用解析后的路径」的说明。
+- 折叠规则本来就在 `internal/pathrepair`（`toolkit/tools/path_spelling.go` 只是个
+  三行包装），删掉包装，它的测试改为直接调 `pathrepair`。
+
+本地 `view.go` 改用同一个 `HealSpelling`，`healSpellingPath` 删除。
+
+### 分层说明（重要，避免误解为「还有第二套实现」）
+
+`internal/toolexec/preflight.go` 已经在**派发之前**为本地所有工具做过一次同类修复
+（`decision.Preflight = "path_auto_heal"`，重写 args 后继续执行）。也就是说本地面的
+工具级治愈平时是被它抢先的。工具级治愈仍然必须存在且必须进 core，因为 remote/MCP/
+直接调用 handler 的路径上没有 preflight——remote 之前根本无法从这种拼写差异里恢复。
+
+「preflight 的重写」与「handler 的 stat 失败后治愈」要不要合并成一层，属于更上层的
+问题（它影响所有文件工具，不只 view），本方案不改，但记录在此以免下次重复发现。
+
+### 证据
+
+- 对拍测试再增两个用例（`spelling healed` / `spelling ambiguous`），并给单文件表加上
+  **成功/失败一致性**断言；现在共 **13 个用例**，全部 content 逐字节相同 + 元数据相同
+  （含 `file_path` / `path_auto_healed` / `original_path` / `resolved_path` 这些路径
+  身份字段——治愈后模型需要照着解析结果继续，两侧必须一致）。
+- 本地 `view_spelling_heal_test`、`path_spelling_test` 通过。
+- `go build` / `go vet` 干净；`./internal/...` 全绿，除上一节记录的本机预存在失败。
+
+**一处诚实记录**：本轮全量扫描中有一次 `internal/events` 的
+`TestMainAgentEventFamilyIsNotEmittedAsBareLiteral` 失败（那是全仓 `.go` AST 门禁，
+耗时 35s），随后单独跑（11s）与下一次全量扫描都通过。按证据判断是**该门禁在高并发
+负载下的偶发失败**，与本轮改动无关；既不是本提交引入，也没有被本提交修掉。
+
+提交：`00adbcb3`。
+
+## 下一轮：view 只剩两块
+
+1. **符号解析**（原清单第 5 项）：`CodeIndexResolver` + `resolveViewSymbol` +
+   `annotateViewSymbolNote`（`view --symbol`）。工具能力进 core，注入的索引实现留宿主；
+   remote 侧已用 `FilterSchemaParams(ParamSymbol)` 把参数摘掉，本地翻过去之后这条
+   路径才真正一分为二。
+2. **宿主渲染器 + 翻转 `Execute`**（第 4 项）：图片直通（含
+   `SetImageAttachmentTokenLimit` 的 token 闸门）、文档/notebook 渲染与
+   `recordDerivedRender`、`annotateIgnoredBatchWindow`。做完这些，本地不再有
+   `executeSingle`，`ViewFileRequest` 上那三个 `*Defer` 字段与 `viewMetadataInt`
+   一起消失，`Execute` 翻到 core handler，view 收敛完成。
