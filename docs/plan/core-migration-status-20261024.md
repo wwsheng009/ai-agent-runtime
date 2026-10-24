@@ -383,4 +383,82 @@ freeform lark 语法元数据、`patch` / `_raw` 参数归一化，以及一行�
    定完才能把本地 `Execute` 翻到 core handler 上。
 
 顺序建议：1 → 2 → 3 → 4。前两块纯工具能力，风险低；第 3 块要先定宿主边界；
-第 4 块是翻转前的最后一步，必须等接口定义清楚。
+第 4 块是翻转前的最后一步，必须等接口定义清楚。## view 第二段已收敛（2026-10-25）：非文本结果 + 特殊路径拒绝
+
+按上一节剩余清单的第 1 项。这一段的产出不只是「搬过去」，还把一处**三方重复**
+收敛成一句话——这正是靠「两侧对拍」才暴露出来的。
+
+### 搬运
+
+| 原来在哪 | 现在在哪 |
+|---|---|
+| `toolkit/tools/path_guard.go`（279 行规则） | `toolcore/pathguard/pathguard.go`（`NameReason` / `ModeReason` / `RefusalMessage` / `RefusalNextAction`） |
+| `view.go` 的 `unsupportedPathResult` | `viewcore.RefusalResult` |
+| `view.go` 的 `binaryNoteResult` | `viewcore.BinaryNote` |
+| `view.go` 的目录自动列目录分支 | `viewcore.DirectoryListing` |
+| `view_image.go` 的 `readViewFileHead` | `viewcore.ReadFileHead`（本地留一个薄别名，4 个调用点零改动） |
+
+本地 `path_guard.go` 只剩别名 + 本地错误词汇（`devicePathRefusalError`、
+`errDevicePath`），`multiedit`、`sandbox_support`、`toolcore_runtime` 和三个
+guard 测试文件全部不动。
+
+### 顺带修掉的三方重复（对拍发现的）
+
+同一条 `/dev/null` 在三个地方被拒绝，用了三种说法：
+
+1. `viewcore` 的新 handler（结构化拒绝：`path_refused` / `refusal_reason` / `next_action`）；
+2. 本地 core runtime 的 `Resolve()`，它自己先拒了，用的是短句
+   `不支持的特殊文件（reason）: path`；
+3. view 自己的 open 前守卫，又是另一份文案。
+
+于是「同一个调用」会因为「谁先跑」而得到两句话——`TestViewLocalAndCoreRenderTheSameWindow`
+的 `refused_device` 用例第一次跑就红在这里。现在三处都产出
+`pathguard.RefusalMessage`，并且 handler 把守卫提到 `Resolve()` **之前**（按请求的
+原样拼写判定），这样即使某个面的 resolver 自己也会拒绝设备路径，也不会换一种形状。
+守卫排在权限钩子前面是刻意的。
+
+### 同时收敛的行为（仍以本地为准）
+
+- **目录**：core 以前回 `use ls for directories`，本地是自动列目录。现在统一为
+  自动列出（`is_directory` / `auto_listed` / `depth=1`）。
+- **二进制**：core 以前给正文盖一个 `binary: true` 元数据却照样把 NUL 字节交给
+  模型；现在统一为一行 MIME + 大小 + 恢复路径。
+- 删掉随调用点一起消失的死代码：`viewcore.ValidUTF8`、本地 `viewDirPreviewLimit`。
+
+### 证据
+
+- 对拍测试从 8 个用例扩到 **11 个**（新增二进制、目录、被拒设备），全部
+  content 逐字节相同 + 17 个窗口元数据字段相同；
+- `viewcore/refusals_test.go`（新）：在**没有 sandbox 守卫的 runtime** 上钉住
+  拒绝、自动列目录、二进制摘要三个形状——这是 remote 侧的形态，本地 runtime 会
+  在 Resolve 阶段先拒，测不到 handler 自己那道门；
+- 本地 guard 套件（`device_path_deny_test`、`path_guard_test`、
+  `path_guard_review_fixes_test`、`view_binary_note_test`、`view_test` 的目录断言）
+  原样通过；
+- `go build` / `go vet` 干净；`./internal/...` 全绿（除上一节记录的本机预存在失败）。
+
+提交：`596541b6`。
+
+## 下一轮：批处理预算（剩余第 2 项）
+
+`executeBatch` 是 remote 侧现在最大的能力缺口，也是唯一还整段留在本地的读逻辑。
+要搬的东西：分节预算（`viewBatchSectionBudgetBytes`）、跳过项记账
+（`batch_skipped_files` / `batch_bytes_emitted`）、尾块预留与裁剪
+（`viewBatchTailReserveBytes`、`trimBatchTail`）、失败明细上限
+（`viewBatchFailureDetailLimit = 20` 的 `===== errors =====` 块）、全部批处理元数据
+（`request_count` / `succeeded_count` / `failed_count` / `partial_failure` / `items` /
+`batch_default_limit_applied`）、以及全失败时的 `批量读取失败` 形状。
+
+**为什么这一块必须先定接口**：本地的去重/读台账是通过
+`ViewFileRequest.dedupDefer / ledgerDefer / dedupRecordDefer` 三个回调实现的，语义是
+「分节真的被交付了才提交」。这三个回调之所以存在，正是因为**本地 batch 才是知道
+「这一节有没有被聚合上限丢掉」的地方**。一旦 core 拥有 batch 循环，这个「何时提交」
+的判断就归 core，宿主只需要一个直白的钩子：
+
+- `ReadServed(tool, absPath, window)`：宿主记台账/窗口缓存（对应 `MutationObserver` 的读侧）；
+- `DedupStub(tool, absPath, window) (stub, commit, hit)`：宿主可以拿一个未变的重复窗口
+  换掉这次读取，core 在**真的把这一节写入正文之后**才调用 `commit`。
+
+接口定完，本地 `ViewFileRequest` 上那三个 `*Defer` 字段就可以删掉，
+`recordDerivedRender` 也跟着简化。这一步做完，view 只剩符号解析、图片/文档渲染
+和 `annotateIgnoredBatchWindow`，然后就能翻转 `Execute`。
