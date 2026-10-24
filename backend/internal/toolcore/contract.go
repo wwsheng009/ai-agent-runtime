@@ -212,6 +212,49 @@ type MutationGuard interface {
 	CheckMutation(tool, absPath string, raw []byte, hasExplicitPrecondition bool) (*Result, map[string]any)
 }
 
+// ReadWindow describes one window that was really delivered to the model. It is
+// the host-facing summary of a read; the shared handler derives it so the rule
+// of what counts as a complete window exists once, and a host only maps it onto
+// whatever state it keeps.
+type ReadWindow struct {
+	Offset    int
+	Limit     int
+	LinesRead int
+	// TotalLines is zero when the read never learned the file length.
+	TotalLines int
+	EOF        bool
+	// More marks a window that stopped before EOF (is_truncated).
+	More               bool
+	ByteBudgetApplied  bool
+	LongLinesTruncated int
+	Tail               bool
+	Empty              bool
+	// FullRead marks a window that covered the whole file from line 1, which is
+	// what a read-before-write ledger treats as "the model has seen this file".
+	FullRead bool
+}
+
+// ReadObserver is an optional Runtime extension for reads: the host learns what
+// the model has actually seen, and may answer an unchanged repeat with a stub.
+//
+// It exists for the same reason as MutationObserver: that state is genuinely
+// host-scoped (a session read ledger has no meaning on a remote host that never
+// served the read), while the policy of *when* an entry may be written must not
+// drift between surfaces - a window dropped by a batch aggregate cap was never
+// delivered and must not be remembered as seen.
+type ReadObserver interface {
+	// ReadDelivered is called once a window was really delivered.
+	ReadDelivered(tool, absPath string, window ReadWindow)
+	// ReadRemembered is called only for complete windows: the ones a later
+	// identical read may answer with a stub.
+	ReadRemembered(tool, absPath string, window ReadWindow)
+	// RememberedStub returns a stub for an unchanged window the model already
+	// saw, plus the closure that consumes the entry. The handler calls consume
+	// only once the stub is really delivered, so a batch item dropped by the
+	// aggregate cap does not burn it.
+	RememberedStub(tool, absPath string, offset, limit int) (stub *Result, consume func(), hit bool)
+}
+
 // PathHinter lets a Runtime explain where a missing path probably meant to
 // point. Candidates depend on each surface's root, so the runtime computes them
 // and the shared handler only formats the error.

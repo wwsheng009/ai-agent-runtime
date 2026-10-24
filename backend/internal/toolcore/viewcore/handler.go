@@ -67,11 +67,16 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	}
 
 	if len(requests) == 1 && !hasFilesArg(call.Args) {
-		result := h.readTarget(call, paths, requests[0], DefaultLimit)
+		result, delivered := h.readTarget(call, paths, requests[0], DefaultLimit)
+		// A single read is delivered as soon as it is produced: there is no
+		// aggregate cap that could drop it.
+		delivered.Commit()
 		return shapeResult(call, h.def.Name, result), nil
 	}
 
-	result := h.readBatch(call, paths, requests, compact)
+	result := ReadBatch(requests, compact, func(req Request) (*toolcore.Result, *DeliveredRead) {
+		return h.readTarget(call, paths, req, BatchDefaultLimit)
+	})
 	return shapeResult(call, h.def.Name, result), nil
 }
 
@@ -131,43 +136,47 @@ func boolArg(args map[string]any, key string, fallback bool) bool {
 // readTarget resolves, authorizes, stats and reads one request. Errors are
 // returned as toolcore error results so single reads can return them directly
 // and batch reads can report one failed file without dropping the batch.
-func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, req Request, defaultLimit int) *toolcore.Result {
+//
+// The second return value is the host bookkeeping this read owes (a read ledger
+// entry, a delivered-window cache entry); it is nil when the surface has no such
+// state. Callers commit it once the result is really delivered.
+func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, req Request, defaultLimit int) (*toolcore.Result, *DeliveredRead) {
 	abs, err := paths.Resolve(req.FilePath)
 	if err != nil {
-		return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err)
+		return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
 	}
 	// Device / FIFO / reserved names are refused before any I/O: opening a FIFO
 	// blocks until a writer appears and /dev/zero streams meaningless bytes. The
 	// check runs ahead of the permission hook so the refusal keeps the
 	// view-specific shape (path_refused / refusal_reason) on every surface.
 	if reason := pathguard.NameReason(abs); reason != "" {
-		return RefusalResult(abs, reason)
+		return RefusalResult(abs, reason), nil
 	}
 	if permissions := call.Runtime.Permissions(); permissions != nil {
 		if err := permissions.CheckPath(toolcore.OpRead, abs); err != nil {
-			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err)
+			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
 		}
 	}
 	info, statErr := os.Stat(abs)
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
-			return toolcore.Error(toolcore.ErrNotFound, "verify the path with ls or glob", statErr)
+			return toolcore.Error(toolcore.ErrNotFound, "verify the path with ls or glob", pathNotFoundError(call, "路径不存在", req.FilePath)), nil
 		}
-		return toolcore.Error(toolcore.ErrInvalidArgument, "check permissions on the target file", statErr)
+		return toolcore.Error(toolcore.ErrInvalidArgument, "check permissions on the target file", statErr), nil
 	}
 	// A stat result is safe; the refusal here is what keeps a character device
 	// or named pipe from ever reaching open.
 	if reason := pathguard.ModeReason(info.Mode()); reason != "" {
-		return RefusalResult(abs, reason)
+		return RefusalResult(abs, reason), nil
 	}
 	if info.IsDir() {
 		// Pointing view at a directory lists it instead of failing: the caller
 		// wanted to know what is there, and the metadata says so explicitly.
 		listing, listErr := DirectoryListing(abs, req.FilePath)
 		if listErr != nil {
-			return toolcore.Error(toolcore.ErrInvalidArgument, "use ls for directories", listErr)
+			return toolcore.Error(toolcore.ErrInvalidArgument, "use ls for directories", listErr), nil
 		}
-		return listing
+		return listing, nil
 	}
 
 	limit := req.Limit
@@ -176,88 +185,50 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 	}
 	offset, limit := Normalize(req.Offset, limit)
 	window := Request{FilePath: req.FilePath, Offset: offset, Limit: limit}
+	observer := readObserver(call)
+	// A complete window the model already saw can answer for itself. The peek
+	// runs before the read so a repeat costs nothing; the entry is consumed only
+	// once the stub is really delivered.
+	if observer != nil {
+		if stub, consume, hit := observer.RememberedStub(h.def.Name, abs, offset, limit); hit {
+			delivered := &DeliveredRead{}
+			delivered.Defer(consume)
+			return stub, delivered
+		}
+	}
+
 	content, stats, readErr := ReadText(abs, window, Options{ByteBudget: byteBudget(call, h.def)})
 	if readErr != nil {
-		return toolcore.Error(toolcore.ErrInvalidArgument, "check the file and narrow the window", readErr)
+		if os.IsNotExist(readErr) {
+			return toolcore.Error(toolcore.ErrNotFound, "verify the path with ls or glob", pathNotFoundError(call, "读取文件失败", req.FilePath)), nil
+		}
+		return toolcore.Error(toolcore.ErrInvalidArgument, "check the file and narrow the window", readErr), nil
 	}
 	// A window that is mostly NUL bytes is a binary file: describe it (MIME,
 	// size, recovery route) instead of handing the model unreadable content.
 	if IsBinaryContent(content) {
-		return BinaryNote(abs, req.FilePath, info.Size())
+		return BinaryNote(abs, req.FilePath, info.Size()), nil
 	}
-	return BuildResult(abs, info.Size(), window, content, stats)
-}
+	result := BuildResult(abs, info.Size(), window, content, stats)
+	if observer == nil {
+		return result, nil
+	}
 
-// readBatch reads every request and renders one section per file. A failed
-// file becomes an error section plus metadata instead of failing the batch.
-func (h *handler) readBatch(call *toolcore.Call, paths toolcore.PathResolver, requests []Request, compact bool) *toolcore.Result {
-	perFileLimit := batchDefaultLimit
-	if compact {
-		perFileLimit = compactHeadLines
+	deliveredWindow := DeliveredWindow(window, stats, info.Size())
+	delivered := &DeliveredRead{}
+	delivered.Defer(func() {
+		observer.ReadDelivered(h.def.Name, abs, deliveredWindow)
+	})
+	// Only a complete window is worth remembering: a byte-budget stop, a line
+	// clamp or a tail window means a later stub would hide content the model
+	// never saw.
+	if !stats.Tail && stats.LinesRead > 0 && !stats.ByteBudgetApplied &&
+		stats.LongLinesTruncated == 0 && !stats.EmptyFile {
+		delivered.Defer(func() {
+			observer.ReadRemembered(h.def.Name, abs, deliveredWindow)
+		})
 	}
-	var builder strings.Builder
-	files := make([]map[string]any, 0, len(requests))
-	failures := 0
-	for index, req := range requests {
-		section := h.readTarget(call, paths, req, perFileLimit)
-		display := req.FilePath
-		meta := map[string]any{"index": index, "file_path": display}
-		body := section.Content
-		if section.Success {
-			if resolved, ok := section.Metadata["file_path"].(string); ok {
-				display = resolved
-				meta["file_path"] = resolved
-			}
-			for _, key := range []string{"lines_read", "total_lines", "is_truncated", "suggested_next_offset"} {
-				if value, ok := section.Metadata[key]; ok {
-					meta[key] = value
-				}
-			}
-			if compact {
-				body += compactSummary(section.Metadata)
-			}
-		} else {
-			failures++
-			meta["error"] = section.ErrorCode
-			message := strings.TrimSpace(section.Content)
-			if message == "" {
-				message = section.ErrorCode
-			}
-			body = fmt.Sprintf("[error: %s]", message)
-		}
-		// One section per file, headed by the path the caller asked for: the
-		// shape every view surface has always produced.
-		if index > 0 {
-			builder.WriteString("\n\n")
-		}
-		fmt.Fprintf(&builder, "===== %s =====\n%s", req.FilePath, body)
-		files = append(files, meta)
-	}
-	metadata := map[string]any{
-		"files": files,
-		"count": len(requests),
-	}
-	if compact {
-		metadata["compact"] = true
-	}
-	if failures > 0 {
-		metadata["failed"] = failures
-	}
-	return &toolcore.Result{
-		Success:    true,
-		OutputKind: toolcore.KindText,
-		Content:    builder.String(),
-		Metadata:   metadata,
-	}
-}
-
-func compactSummary(metadata map[string]any) string {
-	next := "-"
-	if value, ok := metadata["suggested_next_offset"]; ok {
-		next = fmt.Sprintf("%v", value)
-	}
-	return fmt.Sprintf("\n[compact: lines_read=%v total_lines=%v is_truncated=%v suggested_next_offset=%s]\n",
-		metadata["lines_read"], metadata["total_lines"], metadata["is_truncated"], next)
+	return result, delivered
 }
 
 // shapeResult applies the surface's output shaper to successful reads; error
@@ -276,6 +247,32 @@ func shapeResult(call *toolcore.Call, toolName string, result *toolcore.Result) 
 		}
 	}
 	return result
+}
+
+// pathNotFoundError renders the "path not found" sentence every file tool
+// publishes: a prefix, the spelling the caller used, and the candidate hint the
+// surface can compute. Candidates depend on each surface's root, so the runtime
+// supplies them through PathHinter and the shared handler only formats the text.
+func pathNotFoundError(call *toolcore.Call, prefix, raw string) error {
+	if call != nil && call.Runtime != nil {
+		if hinter, ok := call.Runtime.(toolcore.PathHinter); ok {
+			if hint := hinter.PathHint(raw); hint != "" {
+				return fmt.Errorf("%s: %s\n%s", prefix, raw, hint)
+			}
+		}
+	}
+	return fmt.Errorf("%s: %s", prefix, raw)
+}
+
+// readObserver returns the surface's read-state extension, if it has one. A
+// runtime without a session ledger or a delivered-window cache simply has no
+// such state to maintain and reads stay stateless.
+func readObserver(call *toolcore.Call) toolcore.ReadObserver {
+	if call == nil || call.Runtime == nil {
+		return nil
+	}
+	observer, _ := call.Runtime.(toolcore.ReadObserver)
+	return observer
 }
 
 // byteBudget resolves the byte budget one window may spend. Every surface reads

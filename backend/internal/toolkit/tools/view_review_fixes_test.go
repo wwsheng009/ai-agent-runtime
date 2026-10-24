@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/viewcore"
 	runtimetoolkit "github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -118,8 +119,8 @@ func TestViewBatchFailureDetailBounded(t *testing.T) {
 		t.Fatalf("bounded errors block must disclose the omitted failures, got %q", result.Content)
 	}
 	rows, _ := result.Metadata["failed_items"].([]map[string]interface{})
-	if len(rows) > viewBatchFailureDetailLimit {
-		t.Fatalf("failed_items rows must be bounded to %d, got %d", viewBatchFailureDetailLimit, len(rows))
+	if len(rows) > viewcore.BatchFailureDetailLimit {
+		t.Fatalf("failed_items rows must be bounded to %d, got %d", viewcore.BatchFailureDetailLimit, len(rows))
 	}
 	if got, _ := result.Metadata["failures_omitted"].(int); got <= 0 {
 		t.Fatalf("expected failures_omitted > 0, got %#v", result.Metadata["failures_omitted"])

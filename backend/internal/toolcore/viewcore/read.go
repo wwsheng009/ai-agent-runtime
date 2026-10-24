@@ -577,6 +577,33 @@ func WindowMetadata(req Request, stats Stats) map[string]any {
 	return metadata
 }
 
+// DeliveredWindow describes one delivered window in the terms a host read ledger
+// needs. It sits next to WindowMetadata so the rule of what counts as a complete
+// window exists once, for every surface.
+func DeliveredWindow(req Request, stats Stats, size int64) toolcore.ReadWindow {
+	windowOffset := req.Offset
+	windowLimit := req.Limit
+	if stats.Tail {
+		// Tail reads report the resolved absolute window, not the negative
+		// request, so a ledger entry can be used as a continuation as-is.
+		windowOffset = stats.WindowStart
+		windowLimit = stats.LinesRead
+	}
+	return toolcore.ReadWindow{
+		Offset:             windowOffset,
+		Limit:              windowLimit,
+		LinesRead:          stats.LinesRead,
+		TotalLines:         stats.TotalLines,
+		EOF:                stats.EOF,
+		More:               stats.HasMore,
+		ByteBudgetApplied:  stats.ByteBudgetApplied,
+		LongLinesTruncated: stats.LongLinesTruncated,
+		Tail:               stats.Tail,
+		Empty:              stats.EmptyFile,
+		FullRead:           req.Offset == 0 && !stats.HasMore && !stats.ByteBudgetApplied && stats.LongLinesTruncated == 0,
+	}
+}
+
 // BuildResult assembles the canonical single-file view result from one window:
 // the window metadata, the file identity and the continuation advisories.
 func BuildResult(absPath string, size int64, req Request, content string, stats Stats) *toolcore.Result {

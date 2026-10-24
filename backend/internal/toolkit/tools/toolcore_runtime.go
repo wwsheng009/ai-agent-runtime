@@ -488,6 +488,56 @@ func (r *localCoreRuntime) Relative(abs string) string {
 	return filepath.ToSlash(rel)
 }
 
+// The next three methods implement toolcore.ReadObserver for the local surface:
+// the session read ledger and the delivered-window cache both live here, because
+// they are session-scoped host state. The shared handler decides *when* an entry
+// may be written (only for a window that was really delivered); this adapter only
+// knows *where* to write it. A runtime whose ctx carries no session records
+// nothing, which is exactly what the helpers already do.
+
+func (r *localCoreRuntime) ReadDelivered(tool, absPath string, window toolcore.ReadWindow) {
+	if r == nil || r.ctx == nil {
+		return
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		info = nil
+	}
+	recordFileReadFromDiskObserved(r.ctx, absPath, window.FullRead, tool, fileReadWindow{
+		Offset:     window.Offset,
+		Limit:      window.Limit,
+		LinesRead:  window.LinesRead,
+		TotalLines: window.TotalLines,
+		Truncated:  window.More || window.ByteBudgetApplied || window.LongLinesTruncated > 0 || window.Tail,
+	}, info)
+}
+
+func (r *localCoreRuntime) ReadRemembered(tool, absPath string, window toolcore.ReadWindow) {
+	if r == nil || r.ctx == nil {
+		return
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return
+	}
+	recordViewWindowRead(r.ctx, absPath, info, window.Offset, window.Limit, window.LinesRead, window.TotalLines, window.EOF)
+}
+
+func (r *localCoreRuntime) RememberedStub(tool, absPath string, offset, limit int) (*toolcore.Result, func(), bool) {
+	if r == nil || r.ctx == nil {
+		return nil, nil, false
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, nil, false
+	}
+	stub, hit, commit := viewDedupPeek(r.ctx, absPath, info, offset, limit)
+	if !hit {
+		return nil, nil, false
+	}
+	return toolkit.ResultFromToolkit(stub), func() { commit() }, true
+}
+
 // Permissions exposes the sandbox by operation. Resolution alone is not enough:
 // Resolve admits a path for reading, while a mutation must additionally be
 // checked against the write/delete rules (a read-only path is readable and must

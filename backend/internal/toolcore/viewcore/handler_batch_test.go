@@ -45,17 +45,17 @@ func TestHandlerBatchFilesAndCompact(t *testing.T) {
 	if err != nil || result == nil || !result.Success {
 		t.Fatalf("batch view failed: err=%v result=%+v", err, result)
 	}
-	for _, want := range []string{"===== a.txt =====", "1: a1", "===== b.txt =====", "2: b2", "[compact:"} {
+	for _, want := range []string{"===== a.txt =====", "1: a1", "===== b.txt =====", "2: b2", "lines_read=1"} {
 		if !strings.Contains(result.Content, want) {
 			t.Fatalf("batch output missing %q:\n%s", want, result.Content)
 		}
 	}
-	if count, _ := result.Metadata["count"].(int); count != 2 {
-		t.Fatalf("count = %v, want 2", result.Metadata["count"])
+	if count, _ := result.Metadata["request_count"].(int); count != 2 {
+		t.Fatalf("request_count = %v, want 2", result.Metadata["request_count"])
 	}
-	files, _ := result.Metadata["files"].([]map[string]any)
-	if len(files) != 2 {
-		t.Fatalf("files metadata = %#v, want 2 entries", result.Metadata["files"])
+	items, _ := result.Metadata["items"].([]map[string]interface{})
+	if len(items) != 2 {
+		t.Fatalf("items metadata = %#v, want 2 entries", result.Metadata["items"])
 	}
 }
 
@@ -80,8 +80,8 @@ func TestHandlerBatchKeepsGoingAfterOneBadFile(t *testing.T) {
 	if !strings.Contains(result.Content, "missing.txt") || !strings.Contains(result.Content, "1: a1") {
 		t.Fatalf("batch must report the failure and keep the successful file:\n%s", result.Content)
 	}
-	if failed, _ := result.Metadata["failed"].(int); failed != 1 {
-		t.Fatalf("failed = %v, want 1", result.Metadata["failed"])
+	if failed, _ := result.Metadata["failed_count"].(int); failed != 1 {
+		t.Fatalf("failed_count = %v, want 1", result.Metadata["failed_count"])
 	}
 }
 

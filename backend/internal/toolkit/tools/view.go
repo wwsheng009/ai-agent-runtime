@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
@@ -228,6 +227,17 @@ func coerceIntField(params map[string]interface{}, key string) {
 		return
 	}
 	params[key] = parsed
+}
+
+// CoreRuntime exposes the local view tool's sandbox and session read state as a
+// toolcore.Runtime, so the shared view handler can run locally with the same
+// permissions, the same read-before-write ledger and the same delivered-window
+// cache the local tool has always kept.
+func (v *ViewTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	if v == nil {
+		return nil
+	}
+	return newLocalCoreRuntimeWith(ctx, &v.sandboxPolicy, nil)
 }
 
 // Execute 实现 Tool 接口
@@ -699,285 +709,35 @@ func viewMetadataInt(metadata map[string]interface{}, key string, fallback int) 
 	return fallback
 }
 
-// viewBatchFailureDetailLimit bounds how many per-item failures a batch lists
-// in full. Without it, 400 unreadable files print into the errors block and the
-// failed_items contract, pushing the delivered payload past the aggregate
-// budget the tool declared (2026-09-27 review).
-const viewBatchFailureDetailLimit = 20
-
-// appendBatchFailure records one failure line while the detail budget lasts and
-// counts the rest as omitted.
-func appendBatchFailure(failures *[]string, omitted *int, line string) {
-	if failures == nil || omitted == nil {
-		return
-	}
-	if len(*failures) < viewBatchFailureDetailLimit {
-		*failures = append(*failures, line)
-		return
-	}
-	*omitted++
-}
-
-// appendBatchFailedItem records one structured failed-item row under the same
-// detail budget. A nil row is ignored and does not consume budget.
-func appendBatchFailedItem(items *[]map[string]interface{}, omitted *int, row map[string]interface{}) {
-	if items == nil || omitted == nil || row == nil {
-		return
-	}
-	if len(*items) < viewBatchFailureDetailLimit {
-		*items = append(*items, row)
-		return
-	}
-	*omitted++
-}
-
+// executeBatch runs a request list inside the shared aggregate window. The
+// window itself - per-item defaults, the section budget, the skip accounting,
+// the trailing blocks and the batch metadata - lives in viewcore so remote and
+// local answer a batch identically; this adapter supplies the per-item read,
+// which is where the local surface's own renderers and session state live.
 func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest, compact bool) (*toolkit.ToolResult, error) {
-	sections := make([]string, 0, len(requests))
-	items := make([]map[string]interface{}, 0, len(requests))
-	failures := make([]string, 0)
-	failedItems := make([]map[string]interface{}, 0)
-	failuresOmitted := 0
-	failedItemsOmitted := 0
-	succeeded := 0
-	defaulted := make([]int, 0, len(requests))
-	// Aggregate window: per-item byte budgets do not bound the combined
-	// payload, and skip_render_truncation removes the render-layer backstop.
-	// Once the budget is reached the remaining requests are reported as
-	// skipped instead of silently flooding the context (analysis §3.1).
-	skippedFiles := make([]map[string]interface{}, 0)
-	emittedBytes := 0
-	for index, request := range requests {
-		if len(sections) > 0 && emittedBytes >= viewBatchSectionBudgetBytes() {
-			skippedFiles = append(skippedFiles, map[string]interface{}{
-				"index":     index,
-				"file_path": request.FilePath,
-				"reason":    "aggregate_budget",
-			})
-			continue
-		}
-		if request.Limit <= 0 {
-			request.Limit = viewBatchDefaultLimit
-			defaulted = append(defaulted, index)
-		}
-		if request.Limit > viewMaxLimit {
-			request.Limit = viewMaxLimit
-		}
-		if compact && request.Limit > viewCompactHeadLines {
-			request.Limit = viewCompactHeadLines
-		}
-		// Dedup hits are consumed only after the section is really appended:
-		// an item dropped by the cap below must keep its entry (review m13).
-		var pendingDedup viewDedupCommit
-		request.dedupDefer = func(commit viewDedupCommit) { pendingDedup = commit }
-		var pendingRecord func()
-		request.dedupRecordDefer = func(record func()) { pendingRecord = record }
-		var pendingLedger func()
-		request.ledgerDefer = func(record func()) { pendingLedger = record }
-		result, err := v.executeSingle(ctx, request)
+	coreRequests := make([]viewcore.Request, 0, len(requests))
+	for _, request := range requests {
+		coreRequests = append(coreRequests, viewcore.Request{
+			FilePath: request.FilePath,
+			Offset:   request.Offset,
+			Limit:    request.Limit,
+		})
+	}
+	result := viewcore.ReadBatch(coreRequests, compact, func(req viewcore.Request) (*toolcore.Result, *viewcore.DeliveredRead) {
+		request := ViewFileRequest{FilePath: req.FilePath, Offset: req.Offset, Limit: req.Limit}
+		// The read state is committed by the shared batch, and only once the
+		// section it belongs to was really appended: a cap-dropped item must not
+		// burn its dedup entry or refresh the read ledger (review m13/H4).
+		var delivered viewcore.DeliveredRead
+		request.dedupDefer = func(commit viewDedupCommit) { delivered.Defer(func() { commit() }) }
+		request.dedupRecordDefer = delivered.Defer
+		request.ledgerDefer = delivered.Defer
+
+		local, err := v.executeSingle(ctx, request)
 		if err != nil {
-			appendBatchFailure(&failures, &failuresOmitted, fmt.Sprintf("%s: %v", request.FilePath, err))
-			appendBatchFailedItem(&failedItems, &failedItemsOmitted,
-				toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, err.Error()))
-			continue
+			return &toolcore.Result{Success: false, OutputKind: toolcore.KindText, Content: err.Error(), Err: err}, &delivered
 		}
-		if result == nil || !result.Success {
-			message := "unknown error"
-			if result != nil && result.Error != nil {
-				message = result.Error.Error()
-			}
-			appendBatchFailure(&failures, &failuresOmitted, fmt.Sprintf("%s: %s", request.FilePath, message))
-			appendBatchFailedItem(&failedItems, &failedItemsOmitted,
-				toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, message))
-			continue
-		}
-		section := fmt.Sprintf("===== %s =====\n%s", request.FilePath, result.Content)
-		if compact {
-			section += "\n" + compactViewSummary(result.Metadata)
-		}
-		if len(sections) > 0 && emittedBytes+len(section) > viewBatchSectionBudgetBytes() {
-			skippedFiles = append(skippedFiles, map[string]interface{}{
-				"index":     index,
-				"file_path": request.FilePath,
-				"reason":    "aggregate_budget",
-			})
-			continue
-		}
-		sections = append(sections, section)
-		emittedBytes += len(section)
-		items = append(items, result.Metadata)
-		// Count only sections that are actually delivered: a cap-dropped item
-		// must not be reported as read (review m5).
-		succeeded = len(items)
-		if pendingLedger != nil {
-			pendingLedger()
-		}
-		if pendingDedup != nil {
-			pendingDedup()
-		}
-		if pendingRecord != nil {
-			pendingRecord()
-		}
-	}
-	// The trailing blocks share one reserved window: appending them after the
-	// last per-section cap check let the body exceed its own declared budget,
-	// and the render contract then cut content whose ledger/dedup entries were
-	// already committed (2026-09-27 review H9).
-	var tail strings.Builder
-	if len(skippedFiles) > 0 {
-		fmt.Fprintf(&tail,
-			"===== batch window =====\n本次批量输出受聚合上限 %d 字节保护：已读取 %d/%d 个文件，跳过 %d 个。请对跳过项单独调用 view（可先用 compact=true 扫描）。",
-			viewBatchAggregateBudgetBytes, succeeded, len(requests), len(skippedFiles),
-		)
-	}
-	if len(failures) > 0 || failuresOmitted > 0 {
-		// The errors block is part of the same aggregate window as the file
-		// sections: letting every failure print in full made 400 unreadable
-		// files deliver ~95 KiB against a 64 KiB declaration (2026-09-27 review).
-		if tail.Len() > 0 {
-			tail.WriteString("\n")
-		}
-		tail.WriteString("===== errors =====\n")
-		tail.WriteString(strings.Join(failures, "\n"))
-		if failuresOmitted > 0 {
-			if len(failures) > 0 {
-				tail.WriteString("\n")
-			}
-			fmt.Fprintf(&tail, "... 另有 %d 个失败未逐条列出（失败合计 %d/%d）",
-				failuresOmitted, len(failures)+failuresOmitted, len(requests))
-		}
-	}
-	if tail.Len() > 0 {
-		tailText := trimBatchTail(tail.String(), viewBatchTailReserveBytes)
-		sections = append(sections, tailText)
-		emittedBytes += len(tailText)
-	}
-	if succeeded == 0 {
-		meta := map[string]interface{}{
-			"batch":         true,
-			"request_count": len(requests),
-			// Total failures, not just the bounded detail rows: consumers
-			// derive success counts from requested-failed, so under-reporting
-			// failed_count invented successes for an all-failed batch
-			// (2026-09-27 review H8).
-			"failed_count":                len(failures) + failuresOmitted,
-			"batch_default_limit_applied": defaulted,
-			"compact":                     compact,
-		}
-		if len(failedItems) > 0 {
-			meta[toolresult.MetadataFailedItemsKey] = failedItems
-		}
-		if failuresOmitted > 0 {
-			meta["failures_omitted"] = failuresOmitted
-			meta["failed_items_omitted"] = failedItemsOmitted
-		}
-		meta["batch_tail_reserve_bytes"] = viewBatchTailReserveBytes
-		attachBatchWindowMetadata(meta, emittedBytes, skippedFiles)
-		summary := strings.Join(failures, "; ")
-		if failuresOmitted > 0 {
-			if summary != "" {
-				summary += "; "
-			}
-			summary += fmt.Sprintf("另有 %d 个失败未逐条列出", failuresOmitted)
-		}
-		if strings.TrimSpace(summary) == "" {
-			summary = "没有可读取的条目"
-		}
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("批量读取失败: %s", summary),
-			Metadata:   meta,
-		}, nil
-	}
-	meta := map[string]interface{}{
-		"batch":                       true,
-		"request_count":               len(requests),
-		"succeeded_count":             succeeded,
-		"failed_count":                len(failures) + failuresOmitted,
-		"partial_failure":             len(failures) > 0,
-		"items":                       items,
-		"batch_default_limit_applied": defaulted,
-		"compact":                     compact,
-	}
-	if len(failedItems) > 0 {
-		meta[toolresult.MetadataFailedItemsKey] = failedItems
-	}
-	if failuresOmitted > 0 {
-		meta["failures_omitted"] = failuresOmitted
-		meta["failed_items_omitted"] = failedItemsOmitted
-	}
-	meta["batch_tail_reserve_bytes"] = viewBatchTailReserveBytes
-	attachBatchWindowMetadata(meta, emittedBytes, skippedFiles)
-	return &toolkit.ToolResult{
-		Success:    true,
-		OutputKind: toolresult.KindText,
-		Content:    strings.Join(sections, "\n\n"),
-		Metadata:   meta,
-	}, nil
-}
-
-// attachBatchWindowMetadata publishes the aggregate-window accounting so the
-// model (and tests) can tell how many bytes were emitted and which files were
-// skipped to stay inside the cap.
-func attachBatchWindowMetadata(meta map[string]interface{}, emittedBytes int, skipped []map[string]interface{}) {
-	if meta == nil || len(skipped) == 0 {
-		return
-	}
-	meta["batch_aggregate_budget_bytes"] = viewBatchAggregateBudgetBytes
-	meta["batch_bytes_emitted"] = emittedBytes
-	meta["batch_skipped_count"] = len(skipped)
-	meta["batch_skipped_files"] = skipped
-}
-
-// viewBatchSectionBudgetBytes is the aggregate budget available to file
-// sections: the declared window minus the reserve for the trailing blocks (and
-// the render-layer contract header). Sections decide admission against this,
-// so the assembled body — tail included — stays inside the declared window.
-func viewBatchSectionBudgetBytes() int {
-	budget := viewBatchAggregateBudgetBytes - viewBatchTailReserveBytes
-	if budget < viewOutputBudgetBytes {
-		budget = viewOutputBudgetBytes
-	}
-	return budget
-}
-
-// trimBatchTail keeps the trailing batch blocks inside their reserved window,
-// cutting on a UTF-8 boundary and stating that the details were trimmed so the
-// model is never silently missing the skipped-file/error accounting.
-func trimBatchTail(text string, limit int) string {
-	if limit <= 0 || len(text) <= limit {
-		return text
-	}
-	const marker = "\n... 尾部细节已按聚合预算截断（跳过项与失败数仍见 metadata）。"
-	cut := limit - len(marker)
-	if cut < 0 {
-		cut = 0
-	}
-	for cut > 0 && !utf8.RuneStart(text[cut]) {
-		cut--
-	}
-	return strings.TrimRight(text[:cut], "\n") + marker
-}
-
-// compactViewSummary renders a single-line metadata digest for compact batch
-// mode, so models can decide the next offset without re-reading the tool
-// schema or guessing from truncated content.
-func compactViewSummary(metadata map[string]interface{}) string {
-	parts := make([]string, 0, 4)
-	if v, ok := metadata["lines_read"].(int); ok {
-		parts = append(parts, fmt.Sprintf("lines_read=%d", v))
-	}
-	if v, ok := metadata["is_truncated"].(bool); ok {
-		parts = append(parts, fmt.Sprintf("is_truncated=%t", v))
-	}
-	if v, ok := metadata["suggested_next_offset"].(int); ok {
-		parts = append(parts, fmt.Sprintf("suggested_next_offset=%d", v))
-	}
-	if v, ok := metadata["total_lines"].(int); ok {
-		parts = append(parts, fmt.Sprintf("total_lines=%d", v))
-	}
-	if len(parts) == 0 {
-		return "..."
-	}
-	return "... " + strings.Join(parts, ", ")
+		return toolkit.ResultFromToolkit(local), &delivered
+	})
+	return toolkit.ResultToToolkit(result), nil
 }
