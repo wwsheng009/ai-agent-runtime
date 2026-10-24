@@ -281,6 +281,14 @@
   （页满即发 next_offset）、渲染窗 offset/limit 兜底、PCRE 提示文案、
   `pattern_source`/`search_scope_count/kind` metadata。engine 取值统一为
   `walker`/`ripgrep`（原 `builtin`/`rg` 保留在 legacy 输出）。
+  **`pattern_file(s)` 上移 core（2026-10-24，提交 c7d0c5ec）**：这是本地有、
+  remote 完全没有的搜索能力，属于「远程不该砍功能」的直接体现。
+  `GrepOptions.PatternFiles` 把每个文件按行追加为模式（空行保持空正则 = 匹配所有行，
+  与 rg `-f` 一致），与直接 `pattern`/`patterns` 合并；rg 引擎**不转发 `-f`**，
+  而是读取同一份有效模式列表后逐个 `-e`，因此两引擎的模式集不可能分叉。
+  相对路径锚定搜索根、缺失文件显式报错、**空 pattern 文件视为零命中搜索**（非参数错误）；
+  metadata 补 `pattern_files`/`pattern_source(pattern_file|mixed)`/`case_mode`，
+  `patterns`/`pattern_count` 报告**有效**模式集。remote schema 声明同一对参数。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
