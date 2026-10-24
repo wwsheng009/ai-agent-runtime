@@ -248,6 +248,14 @@
   （`Grep`/`Glob`），经工具自身的 `lookPath`/`runCommand` 注入面驱动同一引擎——
   `TestLocalCoreRuntimeUsesRipgrepThroughSearcher` 证明 rg 可用时 engine=ripgrep、
   不可用时回退 walker 且两条路径 Content 一致。这补上了翻转缺口清单的 (a) 类。
+  **rg 引擎接入后的翻转复测（同日，临时启用后回退）**：`internal/toolkit/tools`
+  剩 **42 个失败**，其中 (a) 类rg 注入/翻译测试大多转为「core 路径已用 rg 但测试
+  断言 legacy 的 args/workingDir 采集方式」（如 PrefersRipgrep 断言 runCommand 的
+  workingDir 参数，core 路径 cwd 取 effectiveBasePath 且不再逐 scope 调用）；
+  行为差异集中在 (b)/(c) 类：context 渲染（legacy `>` 标记 vs core `path:line:text`）、
+  空结果文案（中文「未找到匹配的内容」vs `(no matches)`）、stats 输出形状、
+  match_count 等 metadata 键名、`head_limit` 缺省（100）、`unrestricted`/`one_file_system`
+  未实现、path-not-found 候选提示。结论保持：输出/预算层归属决策是翻转前最后一步。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
