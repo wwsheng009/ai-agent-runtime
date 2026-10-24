@@ -158,6 +158,19 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 		}
 	}
 	info, statErr := os.Stat(abs)
+	healed := false
+	if statErr != nil && os.IsNotExist(statErr) {
+		// An invisible-spelling mismatch (case or Unicode variants) makes the
+		// existence check fail forever while the file is right there, so a unique
+		// candidate is adopted and the read proceeds.
+		if candidate, candidates := HealSpelling(permissionChecker(call), abs); candidate != "" {
+			abs = candidate
+			healed = true
+			info, statErr = os.Stat(abs)
+		} else if len(candidates) > 1 {
+			return AmbiguousSpellingResult(req.FilePath, abs, candidates), nil
+		}
+	}
 	if statErr != nil {
 		if os.IsNotExist(statErr) {
 			return toolcore.Error(toolcore.ErrNotFound, "verify the path with ls or glob", pathNotFoundError(call, "路径不存在", req.FilePath)), nil
@@ -210,6 +223,17 @@ func (h *handler) readTarget(call *toolcore.Call, paths toolcore.PathResolver, r
 		return BinaryNote(abs, req.FilePath, info.Size()), nil
 	}
 	result := BuildResult(abs, info.Size(), window, content, stats)
+	if healed {
+		// The caller asked for a spelling that did not exist; say which path was
+		// really read so the next call uses it instead of repeating the mismatch.
+		result.Metadata["path_auto_healed"] = true
+		result.Metadata["original_path"] = req.FilePath
+		result.Metadata["resolved_path"] = abs
+		appendNote(&result.Content, fmt.Sprintf(
+			"[note] 路径 %q 按磁盘实际拼写解析为 %q（大小写/Unicode 差异）。后续调用请使用解析后的路径。",
+			req.FilePath, abs,
+		))
+	}
 	if observer == nil {
 		return result, nil
 	}
@@ -247,6 +271,15 @@ func shapeResult(call *toolcore.Call, toolName string, result *toolcore.Result) 
 		}
 	}
 	return result
+}
+
+// permissionChecker returns the surface's authorization hook, if it has one.
+// A runtime without one admits every already-resolved path.
+func permissionChecker(call *toolcore.Call) toolcore.PermissionChecker {
+	if call == nil || call.Runtime == nil {
+		return nil
+	}
+	return call.Runtime.Permissions()
 }
 
 // pathNotFoundError renders the "path not found" sentence every file tool

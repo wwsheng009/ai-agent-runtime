@@ -41,6 +41,13 @@ func viewConformanceFixtures(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, "subdir", "entry.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Invisible-spelling fixtures: one unique candidate and one ambiguous pair,
+	// so both the heal and the "pick one" answer are covered.
+	for _, name := range []string{"report\u202Ffinal.txt", "cap\u2000file.txt", "cap\u2001file.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("healed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // viewConformanceDevicePath is a special path the guard must refuse on this
@@ -78,6 +85,8 @@ func TestViewLocalAndCoreRenderTheSameWindow(t *testing.T) {
 		{"binary note", map[string]interface{}{"file_path": "blob.bin"}},
 		{"directory listing", map[string]interface{}{"file_path": "subdir"}},
 		{"refused device", map[string]interface{}{"file_path": viewConformanceDevicePath()}},
+		{"spelling healed", map[string]interface{}{"file_path": "report final.txt"}},
+		{"spelling ambiguous", map[string]interface{}{"file_path": "cap file.txt"}},
 	}
 
 	// The shared window fields both surfaces must agree on. Local-only stamps
@@ -87,6 +96,9 @@ func TestViewLocalAndCoreRenderTheSameWindow(t *testing.T) {
 		"is_truncated", "suggested_next_offset", "tail", "tail_lines", "empty",
 		"byte_budget_applied", "encoding", "long_lines_truncated", "hidden_bytes",
 		"reader_clamped_lines", "reader_clamped_bytes",
+		// Path identity: a healed spelling must be reported the same way on both
+		// sides, since the next call is supposed to use the resolved path.
+		"file_path", "path_auto_healed", "original_path", "resolved_path",
 	}
 
 	for _, tc := range cases {
@@ -119,6 +131,9 @@ func TestViewLocalAndCoreRenderTheSameWindow(t *testing.T) {
 			}
 			shared := toolkit.ResultToToolkit(core)
 
+			if shared.Success != local.Success {
+				t.Fatalf("success diverged: local=%v core=%v", local.Success, shared.Success)
+			}
 			if shared.Content != local.Content {
 				t.Fatalf("content diverged:\n--- local ---\n%s\n--- core ---\n%s", local.Content, shared.Content)
 			}

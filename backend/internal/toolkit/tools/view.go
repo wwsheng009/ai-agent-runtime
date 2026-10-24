@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -432,24 +431,14 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	if err != nil && os.IsNotExist(err) {
 		// 不可见文件名修复：磁盘名与请求名只差大小写/Unicode 拼写时，
 		// 路径存在性检查会永远失败并且模型无法推理出正确字节（analysis §3.7）。
-		if healed, candidates := v.healSpellingPath(ctx, resolvedPath); healed != "" {
-			resolvedPath = healed
+		// 唯一的候选由共享实现决定并真的读成功；候选必须过同一道沙箱门。
+		checker := localCorePermissions{policy: &v.sandboxPolicy}
+		if candidate, candidates := viewcore.HealSpelling(checker, resolvedPath); candidate != "" {
+			resolvedPath = candidate
 			pathHealed = true
 			fileInfo, err = os.Stat(resolvedPath)
 		} else if len(candidates) > 1 {
-			return &toolkit.ToolResult{
-				Success:    false,
-				OutputKind: toolresult.KindText,
-				Error: fmt.Errorf(
-					"路径不存在: %s；父目录中存在多个仅大小写/Unicode 拼写不同的候选: %s。请确认后重试。",
-					p.FilePath, strings.Join(candidates, ", "),
-				),
-				Metadata: map[string]interface{}{
-					"file_path":       resolvedPath,
-					"path_candidates": candidates,
-					"path_auto_heal":  "ambiguous",
-				},
-			}, nil
+			return viewCoreResult(viewcore.AmbiguousSpellingResult(p.FilePath, resolvedPath, candidates)), nil
 		}
 	}
 	if err != nil {
@@ -608,31 +597,6 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 // tool.
 func viewCoreResult(result *toolcore.Result) *toolkit.ToolResult {
 	return localizeErrorCode(toolkit.ResultToToolkit(result))
-}
-
-// healSpellingPath looks for directory entries whose name differs from the
-// request only in case or invisible Unicode code points. A unique candidate is
-// returned for the caller to use; multiple candidates are returned as a list
-// for a "pick one" error. Every candidate is re-checked against the sandbox
-// boundary: a repair must never become an escape hatch (analysis §3.7).
-func (v *ViewTool) healSpellingPath(ctx context.Context, resolvedPath string) (string, []string) {
-	dir, base := filepath.Dir(resolvedPath), filepath.Base(resolvedPath)
-	matches := findSpellingMatches(dir, base)
-	if len(matches) == 0 {
-		return "", nil
-	}
-	candidates := make([]string, 0, len(matches))
-	for _, name := range matches {
-		candidate := filepath.Join(dir, name)
-		if err := v.checkPath(runtimeexecutor.OpRead, candidate); err != nil {
-			continue
-		}
-		candidates = append(candidates, candidate)
-	}
-	if len(candidates) == 1 {
-		return candidates[0], candidates
-	}
-	return "", candidates
 }
 
 // recordDerivedRender closes the read-side bookkeeping for renders that do not
