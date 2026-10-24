@@ -22,6 +22,11 @@ import (
 // surface. Keeping one implementation prevents the two surfaces from drifting.
 type GlobMatcher struct {
 	patterns []string
+	// caseInsensitive folds letter case in Match. It is a property of the
+	// matcher rather than an argument so callers that hold a compiled matcher
+	// (the walker, the ripgrep engine, the ignore-rule loader) all fold the same
+	// way without threading a bool through every Match call.
+	caseInsensitive bool
 }
 
 func NewGlobMatcher(pattern string) (*GlobMatcher, error) {
@@ -49,7 +54,22 @@ func (m *GlobMatcher) Match(candidate string) bool {
 		return false
 	}
 	for _, pattern := range m.patterns {
-		if matched, err := MatchGlobPath(pattern, candidate, false); err == nil && matched {
+		if matched, err := MatchGlobPath(pattern, candidate, m.caseInsensitive); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchRelative applies the glob tool's rule: the pattern is matched against the
+// whole root-relative path, so `*.go` stays depth 1 and `**/*.go` recurses.
+// Match keeps the include/exclude rule for callers that want it.
+func (m *GlobMatcher) MatchRelative(candidate string) bool {
+	if m == nil || len(m.patterns) == 0 {
+		return false
+	}
+	for _, pattern := range m.patterns {
+		if matched, err := MatchGlobRelative(pattern, candidate, m.caseInsensitive); err == nil && matched {
 			return true
 		}
 	}
@@ -270,8 +290,12 @@ func MatchGlobSegments(patternParts, pathParts []string, caseInsensitive bool) (
 }
 
 // MatchGlobPath applies the shared full-path rule: a pattern without a slash
-// also matches a file's basename, which is what both local and remote glob
-// surfaces have always exposed to models.
+// also matches a file's basename. That is the right rule for grep's
+// include/exclude filters, where `*.go` means "a Go file anywhere".
+//
+// It is NOT the rule for the glob tool: there `*.go` means "a .go file directly
+// under the search root", and `**/*.go` reaches into subdirectories. Use
+// MatchGlobRelative for that.
 func MatchGlobPath(pattern, candidate string, caseInsensitive bool) (bool, error) {
 	pattern = NormalizeGlobPattern(pattern)
 	candidate = NormalizeGlobPattern(candidate)
@@ -284,6 +308,20 @@ func MatchGlobPath(pattern, candidate string, caseInsensitive bool) (bool, error
 		return MatchGlobSegments(patternParts, []string{baseName(candidate)}, caseInsensitive)
 	}
 	return false, nil
+}
+
+// MatchGlobRelative matches a root-relative path against a pattern with standard
+// glob semantics: `*` and `?` never cross a directory separator, so `*.go`
+// matches only the files directly under the root and `**/*.go` is what reaches
+// into subdirectories.
+//
+// This is the glob tool's rule (verified against the local tool, which has
+// always behaved this way). It differs from MatchGlobPath on purpose: using the
+// grep rule here made `*.go` silently recursive.
+func MatchGlobRelative(pattern, candidate string, caseInsensitive bool) (bool, error) {
+	pattern = NormalizeGlobPattern(pattern)
+	candidate = NormalizeGlobPattern(candidate)
+	return MatchGlobSegments(SplitGlobSegments(pattern), SplitGlobSegments(candidate), caseInsensitive)
 }
 
 // MatchLeadingDoubleStarTail matches a pattern whose leading `**` was already

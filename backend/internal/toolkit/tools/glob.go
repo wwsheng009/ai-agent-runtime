@@ -269,7 +269,10 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		if truncated {
 			// 默认 limit/字节预算截断同样要给出续读入口：只报“显示前 N 个文件”
 			// 会让模型把窗口读成数据丢失，然后换词重搜而不是分页。
-			output += globTruncationNotice(pageStart+len(rendered), offset+len(rendered))
+			// shown is this page's row count, not the absolute end position:
+			// reporting pageStart+len(rendered) told the caller "前 3 个文件"
+			// after a 2-row page whenever offset was 1.
+			output += globTruncationNotice(len(rendered), offset+len(rendered))
 		} else if hasMore {
 			nextOffset := offset + len(rendered)
 			output += globPaginationNotice(offset, nextOffset, nextOffset)

@@ -176,12 +176,20 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 			"limit": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "Maximum matches to return. Default 500.",
+				"description": "Maximum matches to return. Default 100.",
 			},
 			"offset": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     0,
 				"description": "Skip the first N matches, then apply limit. Use next_offset to page.",
+			},
+			"case_insensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "匹配路径时忽略大小写。用于查找 BotPage/botpage 这类大小写不确定的文件名，避免反复换大小写重搜。",
+			},
+			"ignore_case": map[string]interface{}{
+				"type":        "boolean",
+				"description": "case_insensitive 的兼容别名。",
 			},
 		},
 		"required":             []string{"pattern"},

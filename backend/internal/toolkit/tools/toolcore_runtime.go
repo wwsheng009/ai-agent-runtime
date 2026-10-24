@@ -19,18 +19,37 @@ import (
 // nil because the read-only handlers do not consume them.
 type localCoreRuntime struct {
 	policy *sandboxPolicy
-	grep   *GrepTool
-	ctx    context.Context
-	base   string
+	// searcher is the tool's own ripgrep seam, when it has one. Grep and glob
+	// both reach ripgrep through it; a tool without one simply gets the shared
+	// pure-Go walker.
+	searcher coreSearcher
+	ctx      context.Context
+	base     string
+}
+
+// coreSearcher is the slice of a local search tool the runtime adapter needs:
+// where ripgrep is and how to run it. Both GrepTool and GlobTool satisfy it.
+type coreSearcher interface {
+	ripgrepBinaryPath() (string, bool)
+	ripgrepStream() searchcore.RipgrepStream
 }
 
 func newLocalCoreRuntime(ctx context.Context, tool *GrepTool) toolcore.Runtime {
+	return newLocalCoreRuntimeWith(ctx, &tool.sandboxPolicy, tool)
+}
+
+// newGlobCoreRuntime binds glob's sandbox and ripgrep seam to the same runtime
+// contract, so the shared glob handler can run locally.
+func newGlobCoreRuntime(ctx context.Context, tool *GlobTool) toolcore.Runtime {
+	return newLocalCoreRuntimeWith(ctx, &tool.sandboxPolicy, tool)
+}
+
+// newLocalCoreRuntimeWith is the shared constructor: a sandbox policy plus an
+// optional ripgrep seam. Everything else in the runtime is nil because the
+// read-only handlers do not consume it.
+func newLocalCoreRuntimeWith(ctx context.Context, policy *sandboxPolicy, searcher coreSearcher) toolcore.Runtime {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	var policy *sandboxPolicy
-	if tool != nil {
-		policy = &tool.sandboxPolicy
 	}
 	base := ""
 	if policy != nil && base == "" {
@@ -44,7 +63,15 @@ func newLocalCoreRuntime(ctx context.Context, tool *GrepTool) toolcore.Runtime {
 			base = cwd
 		}
 	}
-	return &localCoreRuntime{policy: policy, grep: tool, ctx: ctx, base: base}
+	return &localCoreRuntime{policy: policy, searcher: searcher, ctx: ctx, base: base}
+}
+
+// CoreRuntime exposes glob's sandbox as a toolcore.Runtime.
+func (g *GlobTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
+	if g == nil {
+		return nil
+	}
+	return newGlobCoreRuntime(ctx, g)
 }
 
 // CoreRuntime exposes this tool's sandbox as a toolcore.Runtime, letting shared
@@ -78,23 +105,33 @@ func (r *localCoreRuntime) Glob(ctx context.Context, opts searchcore.GlobOptions
 }
 
 func (r *localCoreRuntime) ripgrepEngine() (searchcore.Ripgrep, bool) {
-	if r == nil || r.grep == nil {
+	if r == nil || r.searcher == nil {
 		return searchcore.Ripgrep{}, false
 	}
-	path, ok := r.grep.ripgrepBinaryPath()
+	path, ok := r.searcher.ripgrepBinaryPath()
 	if !ok {
 		return searchcore.Ripgrep{}, false
 	}
-	return searchcore.Ripgrep{Path: path, Stream: r.grep.ripgrepStream()}, true
+	return searchcore.Ripgrep{Path: path, Stream: r.searcher.ripgrepStream()}, true
 }
 
 // ripgrepBinaryPath resolves the rg binary through the tool's lookPath seam,
 // which is exactly how the local legacy path decides whether ripgrep is usable.
 func (g *GrepTool) ripgrepBinaryPath() (string, bool) {
-	if g == nil || g.lookPath == nil {
+	return resolveRipgrepBinary(g.lookPath)
+}
+
+// ripgrepBinaryPath is the same seam for glob, so both search tools share one
+// binary-resolution rule.
+func (g *GlobTool) ripgrepBinaryPath() (string, bool) {
+	return resolveRipgrepBinary(g.lookPath)
+}
+
+func resolveRipgrepBinary(lookPath func(string) (string, error)) (string, bool) {
+	if lookPath == nil {
 		return "", false
 	}
-	path, err := g.lookPath("rg")
+	path, err := lookPath("rg")
 	if err != nil || strings.TrimSpace(path) == "" {
 		return "", false
 	}
@@ -106,17 +143,37 @@ func (g *GrepTool) ripgrepBinaryPath() (string, bool) {
 // so the shared engine's early stop only ends consumption here; surfaces whose
 // stream is the engine's own exec implementation keep streaming cancellation.
 func (g *GrepTool) ripgrepStream() searchcore.RipgrepStream {
+	return localRipgrepStream(g.lookPath, g.runCommand, &g.sandboxPolicy)
+}
+
+// ripgrepStream is the same runner for glob.
+func (g *GlobTool) ripgrepStream() searchcore.RipgrepStream {
+	return localRipgrepStream(g.lookPath, g.runCommand, &g.sandboxPolicy)
+}
+
+func localRipgrepStream(
+	lookPath func(string) (string, error),
+	runCommand func(context.Context, string, string, []string) ([]byte, error),
+	policy *sandboxPolicy,
+) searchcore.RipgrepStream {
 	return func(ctx context.Context, args []string, dir string, consume func(line []byte) bool) error {
-		if g == nil || g.runCommand == nil {
+		if runCommand == nil {
 			return fmt.Errorf("ripgrep runner is not bound")
 		}
-		path, ok := g.ripgrepBinaryPath()
+		path, ok := resolveRipgrepBinary(lookPath)
 		if !ok {
 			return fmt.Errorf("ripgrep is not available")
 		}
-		_ = dir // the shared engine passes absolute roots; the runner's dir is informational
-		dir = g.sandboxPolicy.effectiveBasePath(ctx)
-		output, err := g.runCommand(ctx, path, dir, args)
+		// The engine runs ripgrep with "." as the path argument and passes the
+		// admitted search root as dir. Ignoring it and always running from the
+		// workspace base made `path: "nested"` list the whole workspace and then
+		// join the results onto "nested", producing paths that do not exist
+		// (`nested/nested/c.go`). Use the root the handler resolved; fall back to
+		// the policy base only when no dir was supplied.
+		if strings.TrimSpace(dir) == "" {
+			dir = policy.effectiveBasePath(ctx)
+		}
+		output, err := runCommand(ctx, path, dir, args)
 		if err != nil {
 			if !isRipgrepNoMatch(err) {
 				return err

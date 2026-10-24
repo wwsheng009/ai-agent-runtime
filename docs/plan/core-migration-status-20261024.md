@@ -72,14 +72,14 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 | 视角 | 现状 |
 |---|---|
 | remote 工具面 | 已全部走 core（grep/glob/view/ls/write/append_write/edit/apply_patch/artifact_read） |
-| 本地工具面 | 只有 grep 走 core；其余仍是 legacy |
-| 两套实现是否分叉 | 是。同一工具在两处各有一份实现，行为一致性靠测试而非共用代码 |
+| 本地工具面 | grep / glob 走 core；其余仍是 legacy |
+| 两套实现是否分叉 | glob 已同源（`glob_local_remote_equivalence_test.go`）；其余仍是两套实现，一致性靠测试而非共用代码 |
 
 ## 尚未完成的迁移（按缺口大小）
 
 1. **`multiedit`**：core 完全没有，清单却写它是 core。
 2. **`shell`**：core 没有 Handler；`shellexec` 只是执行原语，不是工具层。
-3. **本地 `view` / `ls` / `glob`**：core 已有 handler，本地未接。
+3. **本地 `view` / `ls`**：core 已有 handler，本地未接。（`glob` 已接，见下）
 4. **本地 `write` / `edit` / `append_write` / `apply_patch`**：core 已有 handler，本地未接。
 5. **本地 `artifact_read`**：本地是独立实现（`toolkit/tools/artifact_read.go`），
    core 的 `NewArtifactReadHandler` 只被 remote 用。
@@ -89,3 +89,17 @@ sourcegraph / openai_image_generate / code_* / todos），这些明确设计为�
 本地 grep 的翻转经验可以直接复用：先在 core 补齐差异 → 加开关按参数集分流 →
 同源等价性测试 → 删 legacy 分支。read 系（view/ls/glob）比 mutate 系风险低，
 应先做；`multiedit` 需要先决定它是否真的属于 core（或从清单里移除）。
+
+## glob 已收敛（2026-10-24）
+
+`glob` 已按本地语义收进 core，并用等价性测试固定两侧一致：
+
+- 深度语义：本地/remote 都改成标准 glob（`*.go` 只匹配根层，`**/*.go` 递归），
+  由 `MatchGlobRelative` 承担；`MatchGlobPath` 保留 basename 回退，专供
+  grep 的 include/exclude。
+- 排序分页：`SortByModTime` 先全量排序再分页，walker 与 rg 一致（旧实现边早停
+  边排序，第 2 页会重复/丢项）。
+- 默认值：`DefaultGlobLimit` 500 → **100**（与本地一致）。
+- 输出形态：去 header、空结果「未找到匹配项」、分页提示两种形态。
+- 本地 `GlobTool` 只提供 `CoreRuntime`（rg 缝 + sandbox），尚未把
+  `Execute` 切到 core handler —— 这是下一步，等价性测试已就绪。

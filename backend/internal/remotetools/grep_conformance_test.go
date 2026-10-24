@@ -665,6 +665,58 @@ func TestRemoteGrepPresentationOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGlobSemanticsOverMCP proves the remote glob surface carries the same
+// semantics as the local tool: depth-1 patterns stay shallow, case-insensitive
+// matching works, and paging is coherent.
+func TestRemoteGlobSemanticsOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"a.go", "pkg/c.go", "pkg/nested/d.go", "BotPage.tsx"} {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	shallow := callTool(t, ctx, session, "remote_dev__glob", map[string]interface{}{
+		"pattern": "*.go",
+	})
+	if !strings.Contains(shallow, "a.go") {
+		t.Fatalf("*.go must list the root-level file:\n%s", shallow)
+	}
+	if strings.Contains(shallow, "c.go") {
+		t.Fatalf("*.go must not recurse; use **/*.go for that:\n%s", shallow)
+	}
+
+	deep := callTool(t, ctx, session, "remote_dev__glob", map[string]interface{}{
+		"pattern": "**/*.go",
+	})
+	if !strings.Contains(deep, "pkg/c.go") || !strings.Contains(deep, "pkg/nested/d.go") {
+		t.Fatalf("**/*.go must reach subdirectories:\n%s", deep)
+	}
+
+	folded := callTool(t, ctx, session, "remote_dev__glob", map[string]interface{}{
+		"pattern": "*.tsx", "case_insensitive": true,
+	})
+	if !strings.Contains(folded, "BotPage.tsx") {
+		t.Fatalf("case_insensitive must match the mixed-case name:\n%s", folded)
+	}
+
+	// The output is a bare path list: a header line would break piping and
+	// repeat what the call already stated.
+	if strings.HasPrefix(strings.TrimSpace(shallow), "===") {
+		t.Fatalf("glob must not print a header:\n%s", shallow)
+	}
+}
+
 // TestRemoteGrepSemanticsOverMCP proves the three audit parameters survive
 // schema validation and change the result set as documented.
 func TestRemoteGrepSemanticsOverMCP(t *testing.T) {

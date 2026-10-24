@@ -22,21 +22,39 @@ func testTree(t *testing.T) string {
 	return root
 }
 
-func TestGlobMatchesNestedAndBaseName(t *testing.T) {
+// TestGlobDepthRules pins standard glob depth semantics for the glob tool:
+// `*` never crosses a directory separator, so `*.go` is depth 1 and only
+// `**/*.go` reaches into subdirectories.
+//
+// This test previously asserted that `*.go` matched a nested file. That was the
+// include/exclude rule leaking in from grep, where `*.go` legitimately means "a
+// Go file anywhere". The two rules must stay separate: a caller writing `*.go`
+// in glob expects the files sitting right under the path they named.
+func TestGlobDepthRules(t *testing.T) {
 	root := testTree(t)
-	result, err := Glob(context.Background(), root, "*.go", 10)
+
+	shallow, err := Glob(context.Background(), root, "*.go", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Matches) != 2 {
-		t.Fatalf("matches = %v", result.Matches)
+	if len(shallow.Matches) != 1 || filepath.Base(shallow.Matches[0]) != "a.go" {
+		t.Fatalf("*.go must stay at depth 1, got %v", shallow.Matches)
 	}
-	result, err = Glob(context.Background(), root, "sub/*.go", 10)
+
+	recursive, err := Glob(context.Background(), root, "**/*.go", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Matches) != 1 || filepath.Base(result.Matches[0]) != "b.go" {
-		t.Fatalf("matches = %v", result.Matches)
+	if len(recursive.Matches) != 2 {
+		t.Fatalf("**/*.go must reach the nested file, got %v", recursive.Matches)
+	}
+
+	explicit, err := Glob(context.Background(), root, "sub/*.go", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(explicit.Matches) != 1 || filepath.Base(explicit.Matches[0]) != "b.go" {
+		t.Fatalf("sub/*.go = %v", explicit.Matches)
 	}
 }
 

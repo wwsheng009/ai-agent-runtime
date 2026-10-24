@@ -40,17 +40,20 @@ type Ripgrep struct {
 func (e Ripgrep) Available() bool { return strings.TrimSpace(e.Path) != "" }
 
 func (e Ripgrep) lines(ctx context.Context, dir string, args []string, maxLines int) ([]string, bool, error) {
-	if maxLines < 1 {
-		maxLines = 1
-	}
+	// maxLines <= 0 means "read the whole stream" (used when the caller must
+	// order the full listing before paging).
+	unbounded := maxLines < 1
 	capacity := maxLines
+	if capacity < 16 {
+		capacity = 16
+	}
 	if capacity > 1024 {
 		capacity = 1024
 	}
 	lines := make([]string, 0, capacity)
 	truncated := false
 	err := e.stream()(ctx, args, dir, func(line []byte) bool {
-		if len(lines) >= maxLines {
+		if !unbounded && len(lines) >= maxLines {
 			truncated = true
 			return false
 		}
@@ -143,6 +146,9 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	if err != nil {
 		return GlobResult{}, true, err
 	}
+	if opts.CaseInsensitive {
+		matcher.caseInsensitive = true
+	}
 	if !safeRipgrepGlob(pattern) {
 		return GlobResult{}, false, nil
 	}
@@ -164,7 +170,17 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	// keeps ignoring nothing (the same policy the local glob tool has).
 	args = append(args, "--hidden", "--no-ignore")
 	args = append(args, "--", ".")
-	lines, outputTruncated, runErr := e.lines(ctx, base, args, opts.Offset+limit+1)
+	// Readers take the first N lines ripgrep prints. That is sound only while the
+	// output order is the page order: with --sort path, the first N lines are the
+	// first N names. Sorting by mtime instead happens after reading, so stopping
+	// early would keep an arbitrary prefix and then sort it - and "newest 100"
+	// would silently become "newest of whatever came first alphabetically".
+	// Ordering by mtime therefore needs the whole listing.
+	maxLines := opts.Offset + limit + 1
+	if opts.SortByModTime {
+		maxLines = 0 // unbounded: collect everything, then order and page
+	}
+	lines, outputTruncated, runErr := e.lines(ctx, base, args, maxLines)
 	if runErr != nil {
 		return GlobResult{}, true, runErr
 	}
@@ -172,7 +188,7 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	result := GlobResult{}
 	for _, line := range lines {
 		rel := filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(line), "./"))
-		if rel == "" || rel == "." || !matcher.Match(rel) {
+		if rel == "" || rel == "." || !matcher.MatchRelative(rel) {
 			continue
 		}
 		candidate := filepath.FromSlash(rel)
@@ -180,6 +196,13 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 			candidate = filepath.Join(base, candidate)
 		}
 		result.Matches = append(result.Matches, candidate)
+	}
+	// Order before paging, exactly like the walker: sorting a page afterwards
+	// gives each page its own order and makes next_offset meaningless.
+	if opts.SortByModTime {
+		sortGlobMatchesByModTime(result.Matches)
+	} else {
+		sort.Strings(result.Matches)
 	}
 	if opts.Offset > 0 {
 		if opts.Offset >= len(result.Matches) {
@@ -194,7 +217,6 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	if len(result.Matches) > limit {
 		result.Matches = result.Matches[:limit]
 	}
-	sort.Strings(result.Matches)
 	result.Offset = opts.Offset
 	result.NextOffset = opts.Offset + len(result.Matches)
 	result.HasMore = result.Truncated

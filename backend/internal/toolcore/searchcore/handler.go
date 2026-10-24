@@ -10,8 +10,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 )
 
-// DefaultGlobLimit mirrors the long-standing remote glob default.
-const DefaultGlobLimit = 500
+// DefaultGlobLimit is the shared glob page size. It was 500 on the remote
+// surface and 100 in the local tool; a single tool cannot have two defaults, and
+// 100 is the one callers of this tool have always seen first.
+const DefaultGlobLimit = 100
 
 // Searcher is an optional Runtime extension for surfaces that can delegate the
 // traversal to ripgrep. The Handler falls back to the pure-Go walker when the
@@ -59,19 +61,20 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 
 	engine := "walker"
 	offset := intArg(call.Args, "offset", 0)
-	result, globErr := GlobWithOptions(ctx, GlobOptions{
-		Base:    base,
-		Pattern: pattern,
-		Limit:   limit,
-		Offset:  offset,
-	})
+	caseInsensitive := boolArg(call.Args, "case_insensitive", "ignore_case")
+	options := GlobOptions{
+		Base:            base,
+		Pattern:         pattern,
+		Limit:           limit,
+		Offset:          offset,
+		CaseInsensitive: caseInsensitive,
+		// Match order follows the local tool: newest first. It is not exposed as
+		// a parameter because both surfaces have always behaved this way.
+		SortByModTime: true,
+	}
+	result, globErr := GlobWithOptions(ctx, options)
 	if searcher, ok := call.Runtime.(Searcher); ok {
-		if rgResult, used, rgErr := searcher.Glob(ctx, GlobOptions{
-			Base:    base,
-			Pattern: pattern,
-			Limit:   limit,
-			Offset:  offset,
-		}); used && rgErr == nil {
+		if rgResult, used, rgErr := searcher.Glob(ctx, options); used && rgErr == nil {
 			result = rgResult
 			globErr = nil
 			engine = "ripgrep"
@@ -86,17 +89,7 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "=== glob %q in %s ===\n", pattern, paths.Relative(base))
-	for _, match := range result.Matches {
-		builder.WriteString(paths.Relative(match))
-		builder.WriteByte('\n')
-	}
-	if len(result.Matches) == 0 {
-		builder.WriteString("(no matches)\n")
-	}
-	if result.Truncated {
-		fmt.Fprintf(&builder, "\n[truncated at %d matches; narrow the pattern]\n", limit)
-	}
+	renderGlobPage(&builder, paths, result, offset)
 	metadata := map[string]any{
 		"pattern":      pattern,
 		"path":         paths.Relative(base),
