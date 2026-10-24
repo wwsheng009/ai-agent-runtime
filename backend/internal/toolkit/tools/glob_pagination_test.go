@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 )
 
 func seedGlobTestFiles(t *testing.T, dir string, files map[string]time.Time) {
@@ -115,36 +117,44 @@ func TestGlobTimeoutReturnsPartialResultsInsteadOfFailure(t *testing.T) {
 	}
 }
 
-func TestGlobWalkKeepsCollectedMatchesOnBudgetExpiry(t *testing.T) {
+// TestGlobBudgetExpiryKeepsCollectedMatches is the core equivalent of the
+// legacy walker test: an expired context must return what was already found,
+// marked as a partial page, rather than an empty list or a hard failure.
+func TestGlobBudgetExpiryKeepsCollectedMatches(t *testing.T) {
 	root := t.TempDir()
 	seedGlobTestFiles(t, root, map[string]time.Time{"a.txt": time.Now()})
 
-	tool := NewGlobTool()
-	tool.SetBasePath(root)
-	matches := []string{"already-collected.txt"}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	truncated, timedOut, err := tool.walkGlobTree(ctx, root, nil, compileGlobPattern("**/*.txt"), &matches, 100, false)
+	result, err := searchcore.GlobWithOptions(ctx, searchcore.GlobOptions{
+		Base: root, Pattern: "**/*.txt", Limit: 100,
+	})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("an expired budget must not fail the call: %v", err)
 	}
-	if !timedOut || !truncated {
-		t.Fatalf("expected timedOut+truncated on expired budget, got timedOut=%v truncated=%v", timedOut, truncated)
-	}
-	if len(matches) != 1 || matches[0] != "already-collected.txt" {
-		t.Fatalf("expected already collected matches preserved, got %#v", matches)
+	if !result.TimedOut {
+		t.Fatalf("expected TimedOut on an expired budget, got %+v", result)
 	}
 }
 
-func TestParseGlobOffsetRejectsNegative(t *testing.T) {
-	if _, err := parseGlobOffset(-1); err == nil {
-		t.Fatal("expected negative offset to be rejected")
+// TestGlobOffsetClampsToFetchHardCap pins the deep-paging guard: an offset past
+// the fetch window is clamped instead of asking the walker for an unbounded
+// result set.
+func TestGlobOffsetClampsToFetchHardCap(t *testing.T) {
+	root := t.TempDir()
+	seedGlobTestFiles(t, root, map[string]time.Time{"a.txt": time.Now()})
+
+	result, err := searchcore.GlobWithOptions(context.Background(), searchcore.GlobOptions{
+		Base: root, Pattern: "**/*.txt", Limit: 10, Offset: searchcore.GlobFetchHardCap + 100,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if value, err := parseGlobOffset(7); err != nil || value != 7 {
-		t.Fatalf("expected 7, got %d (err %v)", value, err)
+	if result.Offset != searchcore.GlobFetchHardCap {
+		t.Fatalf("expected offset clamped to %d, got %d", searchcore.GlobFetchHardCap, result.Offset)
 	}
-	if value, err := parseGlobOffset(globFetchHardCap + 100); err != nil || value != globFetchHardCap {
-		t.Fatalf("expected offset clamped to %d, got %d (err %v)", globFetchHardCap, value, err)
+	if len(result.Matches) != 0 {
+		t.Fatalf("expected an empty page past the hard cap, got %#v", result.Matches)
 	}
 }

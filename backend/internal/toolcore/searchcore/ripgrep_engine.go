@@ -61,7 +61,10 @@ func (e Ripgrep) lines(ctx context.Context, dir string, args []string, maxLines 
 		return true
 	})
 	if err != nil {
-		return nil, false, err
+		// Keep what was read before the stream stopped. A cancelled search has
+		// already produced real paths, and the caller reports them as a partial
+		// page; returning nil here threw that evidence away.
+		return lines, truncated, err
 	}
 	return lines, truncated, nil
 }
@@ -141,30 +144,68 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	if !e.Available() {
 		return GlobResult{}, false, nil
 	}
-	base, pattern, limit := opts.Base, opts.Pattern, opts.Limit
-	matcher, err := NewGlobMatcher(pattern)
-	if err != nil {
-		return GlobResult{}, true, err
+	base, pattern, limit := opts.Base, strings.TrimSpace(opts.Pattern), opts.Limit
+	if limit < 1 {
+		limit = DefaultGlobLimit
 	}
-	if opts.CaseInsensitive {
-		matcher.caseInsensitive = true
+	if limit > MaxGlobLimit {
+		limit = MaxGlobLimit
 	}
-	if !safeRipgrepGlob(pattern) {
-		return GlobResult{}, false, nil
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	if opts.Offset > GlobFetchHardCap {
+		opts.Offset = GlobFetchHardCap
 	}
 	info, statErr := os.Stat(base)
 	if statErr != nil || !info.IsDir() {
 		// Match the walker's file-base behavior by leaving it to the walker.
 		return GlobResult{}, false, nil
 	}
-	if limit < 1 {
-		limit = DefaultGlobLimit
+	expanded := ExpandGlobBraces(pattern)
+	if len(expanded) == 0 {
+		expanded = []string{pattern}
 	}
-	if opts.Offset < 0 {
-		opts.Offset = 0
+	// ripgrep's --files lists files only, while the glob tool also returns
+	// directories. Use rg only for a pattern whose last segment looks like a
+	// file name; a trailing `**` or a directory-shaped tail (`**/docs`) needs
+	// the walker, which can report both kinds.
+	for _, candidate := range expanded {
+		if !engineCanExpressGlob(candidate) {
+			return GlobResult{}, false, nil
+		}
+	}
+	// One rg process serves every brace alternative: ripgrep accepts repeated
+	// --glob flags and unions them, which is the same union the walker builds.
+	globFlag := "--glob"
+	if opts.CaseInsensitive {
+		globFlag = "--iglob"
+	}
+	enginePatterns := make([]string, 0, len(expanded))
+	for _, candidate := range expanded {
+		if !safeRipgrepGlob(candidate) {
+			// A pattern ripgrep cannot express the way the walker does takes the
+			// whole call to the walker: mixing engines per alternative would
+			// make one page come from two different rule sets.
+			return GlobResult{}, false, nil
+		}
+		enginePatterns = append(enginePatterns, candidate)
+	}
+	matchers := make([]*GlobMatcher, 0, len(enginePatterns))
+	for _, candidate := range enginePatterns {
+		matcher, err := NewGlobMatcher(candidate)
+		if err != nil {
+			return GlobResult{}, true, err
+		}
+		matcher.caseInsensitive = opts.CaseInsensitive
+		matchers = append(matchers, matcher)
 	}
 
-	args := append(ripgrepBaseArgs(), "--files", "--glob", pattern)
+	args := ripgrepBaseArgs()
+	args = append(args, "--files")
+	for _, candidate := range enginePatterns {
+		args = append(args, globFlag, candidate)
+	}
 	// Glob's contract still includes hidden entries on both surfaces; that
 	// stays explicit here until its hidden policy is parameterized too, and it
 	// keeps ignoring nothing (the same policy the local glob tool has).
@@ -181,20 +222,43 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 		maxLines = 0 // unbounded: collect everything, then order and page
 	}
 	lines, outputTruncated, runErr := e.lines(ctx, base, args, maxLines)
-	if runErr != nil {
+	// The budget expiring mid-listing still produced real paths: the local tool
+	// returns those as a partial page (TimedOut) instead of failing the call.
+	// `lines` holds every line read before the cancellation, so it is the
+	// partial result, not an empty one.
+	timedOut := runErr != nil && ctx != nil && ctx.Err() != nil
+	if runErr != nil && !timedOut {
 		return GlobResult{}, true, runErr
 	}
 
 	result := GlobResult{}
+	seen := make(map[string]struct{}, len(lines))
 	for _, line := range lines {
-		rel := filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(line), "./"))
-		if rel == "" || rel == "." || !matcher.MatchRelative(rel) {
+		// rg prints paths in the platform's separator spelling (backslashes on
+		// Windows). Normalize the same way the matcher does, or a Windows
+		// listing would be matched as one giant filename instead of segments.
+		rel := NormalizeGlobPattern(strings.TrimSpace(line))
+		if rel == "" || rel == "." {
+			continue
+		}
+		matched := false
+		for _, matcher := range matchers {
+			if matcher.MatchRelative(rel) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			continue
 		}
 		candidate := filepath.FromSlash(rel)
 		if !filepath.IsAbs(candidate) {
 			candidate = filepath.Join(base, candidate)
 		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
 		result.Matches = append(result.Matches, candidate)
 	}
 	// Order before paging, exactly like the walker: sorting a page afterwards
@@ -204,6 +268,9 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 	} else {
 		sort.Strings(result.Matches)
 	}
+	// Record the ordered total before the offset window, so "offset is past the
+	// end of a non-empty result" can be distinguished from "nothing matched".
+	result.MatchedTotal = len(result.Matches)
 	if opts.Offset > 0 {
 		if opts.Offset >= len(result.Matches) {
 			result.Matches = nil
@@ -211,16 +278,47 @@ func (e Ripgrep) Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, 
 			result.Matches = result.Matches[opts.Offset:]
 		}
 	}
-	if outputTruncated || len(result.Matches) > limit {
-		result.Truncated = true
-	}
 	if len(result.Matches) > limit {
+		result.LimitHit = true
 		result.Matches = result.Matches[:limit]
 	}
+	if outputTruncated {
+		result.LimitHit = true
+	}
+	result.TimedOut = timedOut
+	result.Truncated = result.LimitHit
 	result.Offset = opts.Offset
 	result.NextOffset = opts.Offset + len(result.Matches)
 	result.HasMore = result.Truncated
+	result.BraceExpanded = HasGlobBraceAlternatives(pattern) && len(expanded) > 1
+	result.ExpandedPatterns = append([]string(nil), expanded...)
+	result.UnsupportedBracePattern = HasGlobBraceAlternatives(pattern) && !result.BraceExpanded
 	return result, true, nil
+}
+
+// engineCanExpressGlob decides whether `rg --files` can produce a superset whose
+// filtered result equals the walker's. The last segment must look like a file
+// name; everything else (a directory-shaped tail such as `**/docs`, a trailing
+// `**`) would silently drop directories that the glob tool is expected to
+// return, so those go to the walker.
+//
+// A single-segment pattern (`*.go`) is fine: rg would list deeper files too, but
+// every line is re-matched against the same root-relative rule, so the extra
+// candidates are filtered out and the page is identical.
+func engineCanExpressGlob(pattern string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return false
+	}
+	parts := SplitGlobSegments(NormalizeGlobPattern(pattern))
+	if len(parts) == 0 {
+		return false
+	}
+	last := parts[len(parts)-1]
+	if last == "**" || last == "" {
+		return false
+	}
+	return strings.Contains(last, ".")
 }
 
 // Grep implements the Searcher contract. It runs one ripgrep process per

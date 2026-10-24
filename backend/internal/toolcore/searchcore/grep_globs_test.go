@@ -12,10 +12,10 @@ import (
 func TestGrepGlobsArrayAndNegation(t *testing.T) {
 	root := t.TempDir()
 	for path, content := range map[string]string{
-		"pkg/main.go":       "needle\n",
-		"pkg/nested/d.go":   "needle\n",
-		"vendor/skip.go":    "needle\n",
-		"other/keep.go":     "needle\n",
+		"pkg/main.go":     "needle\n",
+		"pkg/nested/d.go": "needle\n",
+		"vendor/skip.go":  "needle\n",
+		"other/keep.go":   "needle\n",
 	} {
 		full := filepath.Join(root, filepath.FromSlash(path))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {

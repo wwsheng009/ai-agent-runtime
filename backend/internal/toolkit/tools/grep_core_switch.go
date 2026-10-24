@@ -3,8 +3,6 @@ package tools
 import (
 	"context"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -56,15 +54,10 @@ func (g *GrepTool) executeCoreSearch(ctx context.Context, params map[string]inte
 		// route it there until the core implements the mix.
 		return nil, false
 	}
-	handler := searchcore.NewGrepHandler(toolcore.Definition{Name: g.Name(), Version: g.Version()})
-	result, err := handler.Execute(ctx, &toolcore.Call{
-		Args:    params,
-		Runtime: newLocalCoreRuntime(ctx, g),
-	})
-	if err != nil {
+	converted, err := executeCoreSearchTool(ctx, g, params)
+	if err != nil || converted == nil {
 		return nil, false
 	}
-	converted := toolkit.ResultToToolkit(result)
 	// The local tool has always published `ignore_files` as the explicit path
 	// list, while the shared handler uses that key for the "ignore handling is
 	// on" bit and keeps the list in ignore_files_list. Both shapes are relied

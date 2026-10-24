@@ -167,21 +167,6 @@ func (p *sandboxPolicy) checkURL(rawURL string) error {
 	return nil
 }
 
-func validateRelativePattern(pattern string) error {
-	trimmed := strings.TrimSpace(pattern)
-	if trimmed == "" {
-		return nil
-	}
-	if filepath.IsAbs(trimmed) {
-		return fmt.Errorf("sandbox policy requires a relative pattern")
-	}
-	cleaned := filepath.Clean(trimmed)
-	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("sandbox policy forbids escaping the search path")
-	}
-	return nil
-}
-
 func wrapSandboxPermissionError(message string, cause error, ctx map[string]interface{}) error {
 	return runtimeerrors.WrapWithContext(
 		runtimeerrors.ErrAgentPermission,

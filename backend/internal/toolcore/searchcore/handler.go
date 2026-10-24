@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // DefaultGlobLimit is the shared glob page size. It was 500 on the remote
@@ -15,12 +16,73 @@ import (
 // 100 is the one callers of this tool have always seen first.
 const DefaultGlobLimit = 100
 
+// GlobParameters is the schema both surfaces publish. There is one glob tool,
+// so there is one list of parameters it accepts: a field that appears here is
+// read by the handler below, and a field the handler reads is declared here.
+//
+// The descriptions are the ones callers have always seen locally, because the
+// local surface is the reference implementation this tool converged on.
+func GlobParameters() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"pattern": map[string]interface{}{
+				"type":        "string",
+				"description": "文件名/路径 glob 模式，例如 *.go, **/*.yaml。支持 * ? [] 与 **；常见 shell brace（如 *.{go,ts}）会自动展开为多个模式。多扩展名也可直接传 brace 或分多次调用。glob 只匹配路径，不搜索文件内容；若要查内容请使用 grep。大小写不确定时用 case_insensitive=true。",
+			},
+			"path": map[string]interface{}{
+				"type":        "string",
+				"description": "搜索路径（默认为当前目录）。先把 path 缩小到最可能的子目录，再使用 glob，可避免不必要的全仓 ** 扫描。",
+			},
+			"case_insensitive": map[string]interface{}{
+				"type":        "boolean",
+				"description": "路径匹配是否忽略大小写。用于查找 BotPage/botpage 等大小写不确定的文件名，避免重复发多个大小写变体 glob。",
+				"default":     false,
+			},
+			"ignore_case": map[string]interface{}{
+				"type":        "boolean",
+				"description": "case_insensitive 的兼容别名。",
+				"default":     false,
+			},
+			"limit": map[string]interface{}{
+				"type":        "integer",
+				"description": "最多返回的匹配数量（默认为 100，最大 1000）。结果按 mtime 从新到旧排序，可用 offset/limit 分页。",
+				"default":     DefaultGlobLimit,
+				"maximum":     MaxGlobLimit,
+			},
+			"offset": map[string]interface{}{
+				"type":        "integer",
+				"description": "跳过按 mtime 排序后的前 N 个匹配（默认 0），配合 limit 翻页；返回的 next_offset 可直接用于下一页。",
+				"default":     0,
+				"minimum":     0,
+			},
+		},
+		"required": []string{"pattern"},
+	}
+}
+
 // Searcher is an optional Runtime extension for surfaces that can delegate the
 // traversal to ripgrep. The Handler falls back to the pure-Go walker when the
 // extension is absent or declines the request.
 type Searcher interface {
 	Glob(ctx context.Context, opts GlobOptions) (GlobResult, bool, error)
 	Grep(ctx context.Context, opts GrepOptions) (GrepResult, bool, error)
+}
+
+// BackendReporter lets a Runtime describe the engine it just used: the command
+// a human would run and, when the surface can resolve it, the binary path. The
+// handler publishes it so diagnostics read the same on both surfaces; a
+// runtime that does not implement it simply contributes no command detail.
+type BackendReporter interface {
+	SearchBackend(engine string) (command, path string)
+}
+
+// PathHinter lets a Runtime explain where a missing path probably meant to
+// point. Candidates are a workspace concern (they depend on what exists relative
+// to the surface's root), so the runtime computes them and the shared handler
+// only formats the error.
+type PathHinter interface {
+	PathHint(raw string) string
 }
 
 func NewGlobHandler(def toolcore.Definition) toolcore.Handler {
@@ -48,6 +110,12 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if strings.TrimSpace(pattern) == "" {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "pass pattern", nil), nil
 	}
+	// A pattern that is absolute or climbs out of the search root can never be
+	// satisfied by a root-relative match. Rejecting it beats silently returning
+	// nothing (and means no future engine can turn it into an escape).
+	if err := validateGlobPatternShape(pattern); err != nil {
+		return toolcore.Error(toolcore.ErrInvalidArgument, "pass a pattern relative to the search path", err), nil
+	}
 	base, err := paths.Resolve(stringArg(call.Args, "path"))
 	if err != nil {
 		return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
@@ -57,10 +125,48 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			return toolcore.Error(toolcore.ErrPathDenied, "use a path inside the workspace", err), nil
 		}
 	}
+	// A missing or unreadable search root is a caller-visible failure, not an
+	// empty result: "no matches" and "there is nothing there" lead to different
+	// next actions. The local tool says which path it could not use, and the
+	// remote surface now says the same.
+	if _, statErr := os.Stat(base); statErr != nil {
+		hint := ""
+		if hinter, ok := call.Runtime.(PathHinter); ok {
+			hint = hinter.PathHint(stringArg(call.Args, "path"))
+		}
+		message := fmt.Errorf("搜索路径不可用: %s", paths.Relative(base))
+		if hint != "" {
+			message = fmt.Errorf("搜索路径不可用: %s\n%s", paths.Relative(base), hint)
+		}
+		if os.IsNotExist(statErr) {
+			return toolcore.Error(toolcore.ErrNotFound,
+				"check the path; narrow it to a directory that exists in the workspace",
+				message), nil
+		}
+		return toolcore.Error(toolcore.ErrInvalidArgument,
+			"check the path permissions and retry",
+			message), nil
+	}
 	limit := intArg(call.Args, "limit", DefaultGlobLimit)
+	if limit < 1 {
+		// An explicit limit:0 is a mistake, not a request for the default; the
+		// local tool reports it rather than silently returning 100 rows.
+		return toolcore.Error(toolcore.ErrInvalidArgument, "pass limit >= 1, or omit it for the default",
+			fmt.Errorf("limit 参数必须大于 0")), nil
+	}
+	if limit > MaxGlobLimit {
+		limit = MaxGlobLimit
+	}
+	offset, offsetOK := intArgOK(call.Args, "offset")
+	if offsetOK && offset < 0 {
+		return toolcore.Error(toolcore.ErrInvalidArgument, "pass offset >= 0",
+			fmt.Errorf("offset 参数不能为负数")), nil
+	}
+	if !offsetOK {
+		offset = 0
+	}
 
 	engine := "walker"
-	offset := intArg(call.Args, "offset", 0)
 	caseInsensitive := boolArg(call.Args, "case_insensitive", "ignore_case")
 	options := GlobOptions{
 		Base:            base,
@@ -72,9 +178,14 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// a parameter because both surfaces have always behaved this way.
 		SortByModTime: true,
 	}
-	result, globErr := GlobWithOptions(ctx, options)
+	// One budget covers both engines: the walker and ripgrep must stop at the
+	// same deadline, otherwise a slow listing would change behavior based only
+	// on whether ripgrep happens to be installed.
+	budgetCtx, cancel := context.WithTimeout(ctx, GlobSearchBudget)
+	defer cancel()
+	result, globErr := GlobWithOptions(budgetCtx, options)
 	if searcher, ok := call.Runtime.(Searcher); ok {
-		if rgResult, used, rgErr := searcher.Glob(ctx, options); used && rgErr == nil {
+		if rgResult, used, rgErr := searcher.Glob(budgetCtx, options); used && rgErr == nil {
 			result = rgResult
 			globErr = nil
 			engine = "ripgrep"
@@ -85,27 +196,86 @@ func (h *globHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			return toolcore.Error(toolcore.ErrTimeout, "retry with a narrower path or a longer timeout", ctx.Err()), nil
 		}
 		return toolcore.Error(toolcore.ErrInvalidArgument, "check the pattern syntax and narrow the base path",
-			fmt.Errorf("glob %q in %s: %v", pattern, paths.Relative(base), globErr)), nil
+			fmt.Errorf("glob 匹配失败: %w", globErr)), nil
 	}
 
 	var builder strings.Builder
-	renderGlobPage(&builder, paths, result, offset)
+	// The byte window is applied while the page is written: the notice is
+	// reserved first, so a cut list still ends with a usable next_offset.
+	rendered, byteTruncated := renderGlobPage(&builder, paths, result, offset, GlobOutputBudgetBytes)
+	body := builder.String()
+	if byteTruncated {
+		result.Truncated = true
+		result.HasMore = true
+		result.NextOffset = offset + len(rendered)
+	}
 	metadata := map[string]any{
-		"pattern":      pattern,
-		"path":         paths.Relative(base),
-		"matches":      len(result.Matches),
-		"is_truncated": result.Truncated,
-		"offset":       offset,
-		"next_offset":  result.NextOffset,
-		"has_more":     result.HasMore,
-		"engine":       engine,
-		"hidden_files": true,
-		"ignore_files": false,
+		"pattern":          pattern,
+		"path":             paths.Relative(base),
+		"limit":            limit,
+		"offset":           offset,
+		"case_insensitive": caseInsensitive,
+		"count":            len(rendered),
+		"returned_count":   len(rendered),
+		"files":            append([]string(nil), rendered...),
+		"truncated":        result.Truncated,
+		"limit_hit":        result.LimitHit,
+		"has_more":         result.HasMore,
+		"next_offset":      result.NextOffset,
+		"engine":           engine,
+		"matches":          len(result.Matches),
+		"is_truncated":     result.Truncated,
+		"hidden_files":     true,
+		"ignore_files":     false,
+	}
+	command, binaryPath := "", ""
+	if reporter, ok := call.Runtime.(BackendReporter); ok {
+		command, binaryPath = reporter.SearchBackend(engine)
+	}
+	metadata["execution_backend"] = engine
+	if command != "" {
+		metadata["backend_command"] = command
+	}
+	if binaryPath != "" {
+		metadata["backend_path"] = binaryPath
+	}
+	if byteTruncated {
+		metadata["output_window_bytes"] = GlobOutputBudgetBytes
+	}
+	if result.TimedOut {
+		metadata["timed_out"] = true
+		metadata["next_action"] = "glob 在 20s 搜索预算内未完成：以上是已收集的部分结果。请收窄 path 或 pattern 后重试，或改用 shell 运行 rg --files 直接列出文件；不要原样重试同一调用。"
+		body += globTimeoutNotice()
+	}
+	if result.BraceExpanded {
+		metadata["brace_expanded"] = true
+		metadata["expanded_patterns"] = append([]string(nil), result.ExpandedPatterns...)
+	}
+	if result.UnsupportedBracePattern {
+		metadata["unsupported_brace_pattern"] = true
+	}
+	// A true no-match success carries the empty disposition so the model
+	// broadens the query instead of treating it as a hard failure. A page cut
+	// by limit or a byte window is not empty: it has a continuation.
+	if len(result.Matches) == 0 && !result.Truncated && !result.TimedOut {
+		if offset > 0 && result.MatchedTotal > 0 {
+			metadata[toolresult.MetadataNextActionKey] = "offset 超出本次抓取的结果窗口：请减小 offset，或收窄 pattern/path 后重新分页（深分页受 5000 条硬上限保护）。"
+		} else {
+			toolresult.MarkEmptySuccess(metadata)
+			if result.UnsupportedBracePattern {
+				metadata[toolresult.MetadataNextActionKey] = "glob 无法安全展开该 shell brace pattern（如过大或畸形 *.{go,ts}）。请拆成多次 pattern 调用（*.go、*.ts），或改用 toolkit grep 的 include/glob 数组。不要原样重试同一 brace pattern。"
+			}
+		}
+	}
+	// A no-match page still needs the brace guidance in the body: the model
+	// reads the body, not the metadata, when deciding how to retry.
+	if len(result.Matches) == 0 && result.UnsupportedBracePattern {
+		body += "\n（检测到无法安全展开的 shell brace 语法如 *.{a,b}；请拆成多次 pattern 调用，或改用 grep include/glob 数组。）"
 	}
 	result0 := &toolcore.Result{
 		Success:    true,
 		OutputKind: toolcore.KindText,
-		Content:    builder.String(),
+		Content:    body,
 		Metadata:   metadata,
 	}
 	return shape(call, h.def.Name, result0)

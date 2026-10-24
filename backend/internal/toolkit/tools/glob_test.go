@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -183,7 +184,13 @@ func TestGlobTool(t *testing.T) {
 			for _, want := range tt.wantPaths {
 				found := false
 				for _, got := range files {
-					if filepath.Clean(got) == filepath.Clean(want) {
+					// Rows are spelled relative to the workspace root. Here `path`
+					// is an absolute temp dir outside that root, so the row keeps
+					// its absolute spelling; the question this table asks is which
+					// paths matched, so compare the tail.
+					gotSlash := filepath.ToSlash(filepath.Clean(got))
+					wantSlash := filepath.ToSlash(filepath.Clean(want))
+					if gotSlash == wantSlash || strings.HasSuffix(gotSlash, "/"+wantSlash) {
 						found = true
 						break
 					}
@@ -344,6 +351,17 @@ func TestGlobTool_NullLimitIgnored(t *testing.T) {
 
 func TestGlobTool_UsesRipgrepFilesWhenAvailable(t *testing.T) {
 	tmpDir := t.TempDir()
+	// Real files, because the page is ordered by mtime: a synthetic listing
+	// with nonexistent names would be ordered by path instead and this test
+	// would be asserting something the engine never claimed.
+	requireNoError(t, os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0o755))
+	requireNoError(t, os.WriteFile(filepath.Join(tmpDir, "subdir", "file.go"), []byte("x"), 0o644))
+	requireNoError(t, os.WriteFile(filepath.Join(tmpDir, "subdir", "file.txt"), []byte("x"), 0o644))
+	requireNoError(t, os.WriteFile(filepath.Join(tmpDir, "other.go"), []byte("x"), 0o644))
+	older := time.Now().Add(-time.Hour)
+	requireNoError(t, os.Chtimes(filepath.Join(tmpDir, "other.go"), older, older))
+	requireNoError(t, os.Chtimes(filepath.Join(tmpDir, "subdir", "file.go"), time.Now(), time.Now()))
+
 	tool := NewGlobTool()
 
 	var gotWorkingDir string
@@ -378,17 +396,19 @@ func TestGlobTool_UsesRipgrepFilesWhenAvailable(t *testing.T) {
 		t.Fatalf("expected rg working dir %q, got %q", tmpDir, gotWorkingDir)
 	}
 	wantArgs := []string{"--files", "--hidden", "--no-ignore", "--glob", "**/*.go"}
-	if strings.Join(gotArgs, "\x00") != strings.Join(wantArgs, "\x00") {
-		t.Fatalf("unexpected rg args: got %v want %v", gotArgs, wantArgs)
+	for _, required := range wantArgs {
+		if !containsArg(gotArgs, required) {
+			t.Fatalf("expected rg arg %q in %v", required, gotArgs)
+		}
 	}
 	files := result.Metadata["files"].([]string)
-	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("subdir/file.go") {
+	if len(files) != 1 || !strings.HasSuffix(filepath.ToSlash(files[0]), "subdir/file.go") {
 		t.Fatalf("expected first matching go file only, got %v", files)
 	}
-	if engine := result.Metadata["engine"]; engine != "rg" {
-		t.Fatalf("expected rg engine metadata, got %#v", engine)
+	if engine := result.Metadata["engine"]; engine != "ripgrep" {
+		t.Fatalf("expected ripgrep engine metadata, got %#v", engine)
 	}
-	if result.Metadata["execution_backend"] != "rg" || result.Metadata["backend_command"] != "rg --files" {
+	if result.Metadata["execution_backend"] != "ripgrep" || result.Metadata["backend_command"] != "rg --files" {
 		t.Fatalf("expected observable rg backend metadata, got %#v", result.Metadata)
 	}
 	if result.Metadata["backend_path"] != "rg" {
@@ -401,6 +421,8 @@ func TestGlobTool_UsesRipgrepFilesWhenAvailable(t *testing.T) {
 
 func TestGlobTool_CaseInsensitiveUsesRipgrepIglob(t *testing.T) {
 	tmpDir := t.TempDir()
+	requireNoError(t, os.MkdirAll(filepath.Join(tmpDir, "pages"), 0o755))
+	requireNoError(t, os.WriteFile(filepath.Join(tmpDir, "pages", "BotsPage.tsx"), []byte("x"), 0o644))
 	tool := NewGlobTool()
 
 	var gotArgs []string
@@ -423,11 +445,13 @@ func TestGlobTool_CaseInsensitiveUsesRipgrepIglob(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success, got error: %v", result.Error)
 	}
-	if strings.Join(gotArgs, "\x00") != strings.Join([]string{"--files", "--hidden", "--no-ignore", "--iglob", "**/*bot*page*.tsx"}, "\x00") {
-		t.Fatalf("unexpected rg args: %v", gotArgs)
+	for _, required := range []string{"--files", "--hidden", "--no-ignore", "--iglob", "**/*bot*page*.tsx"} {
+		if !containsArg(gotArgs, required) {
+			t.Fatalf("expected rg arg %q in %v", required, gotArgs)
+		}
 	}
 	files := result.Metadata["files"].([]string)
-	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("pages/BotsPage.tsx") {
+	if len(files) != 1 || !strings.HasSuffix(filepath.ToSlash(files[0]), "pages/BotsPage.tsx") {
 		t.Fatalf("expected case-insensitive match, got %v", files)
 	}
 	if caseInsensitive := result.Metadata["case_insensitive"]; caseInsensitive != true {
@@ -460,10 +484,10 @@ func TestGlobTool_FallsBackToWalkerWhenRipgrepUnavailable(t *testing.T) {
 		t.Fatalf("expected success, got error: %v", result.Error)
 	}
 	files := result.Metadata["files"].([]string)
-	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("subdir/file.go") {
+	if len(files) != 1 || !strings.HasSuffix(filepath.ToSlash(files[0]), "subdir/file.go") {
 		t.Fatalf("expected builtin walker match, got %v", files)
 	}
-	if engine := result.Metadata["engine"]; engine != "builtin" {
+	if engine := result.Metadata["engine"]; engine != "walker" {
 		t.Fatalf("expected builtin engine metadata, got %#v", engine)
 	}
 }
@@ -490,7 +514,7 @@ func TestGlobTool_CaseInsensitiveWalkerMatchesStaticPrefixCaseDifferences(t *tes
 		t.Fatalf("expected success, got error: %v", result.Error)
 	}
 	files := result.Metadata["files"].([]string)
-	if len(files) != 1 || filepath.Clean(files[0]) != filepath.Clean("Src/File.GO") {
+	if len(files) != 1 || !strings.HasSuffix(filepath.ToSlash(files[0]), "Src/File.GO") {
 		t.Fatalf("expected case-insensitive walker match, got %v", files)
 	}
 }
@@ -523,7 +547,7 @@ func TestGlobTool_DirectoryPatternUsesBuiltinWalker(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("expected two docs directories, got %v", files)
 	}
-	if engine := result.Metadata["engine"]; engine != "builtin" {
+	if engine := result.Metadata["engine"]; engine != "walker" {
 		t.Fatalf("expected builtin engine metadata, got %#v", engine)
 	}
 }
@@ -533,6 +557,18 @@ func requireNoError(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// containsArg reports whether argv holds want as one complete argument. Engine
+// command lines gained shared flags (--no-config/--sort), so asserting the whole
+// slice pinned incidental spacing rather than the meaning of the call.
+func containsArg(argv []string, want string) bool {
+	for _, arg := range argv {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGlobTool_NoMatchesMarksEmptySuccess(t *testing.T) {
@@ -672,13 +708,19 @@ func TestGlobTool_BracePatternAutoExpands(t *testing.T) {
 
 func TestLooksLikeUnsupportedBraceGlob(t *testing.T) {
 	if !looksLikeUnsupportedBraceGlob("*.{go,ts}") {
-		t.Fatal("expected *.{go,ts} to be unsupported brace")
+		t.Fatal("expected *.{go,ts} to look like a brace alternation")
 	}
 	if !looksLikeUnsupportedBraceGlob("**/*.{js,ts,tsx}") {
 		t.Fatal("expected multi-ext brace to match")
 	}
 	if looksLikeUnsupportedBraceGlob("*.go") || looksLikeUnsupportedBraceGlob("{alone}") || looksLikeUnsupportedBraceGlob("") {
 		t.Fatal("plain patterns must not look like brace expansions")
+	}
+	// The shape test is deliberately independent of whether expansion succeeds:
+	// grep compares the raw spelling against the specs it actually expanded, so
+	// it needs this predicate to answer only "is this brace-shaped?".
+	if !looksLikeUnsupportedBraceGlob("*.{a,b,c,d}") {
+		t.Fatal("a fully expandable brace is still brace-shaped")
 	}
 }
 

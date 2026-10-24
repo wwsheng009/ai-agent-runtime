@@ -10,6 +10,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
 // localCoreRuntime adapts a local file tool's sandbox to the toolcore Runtime
@@ -72,6 +73,45 @@ func (g *GlobTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
 		return nil
 	}
 	return newGlobCoreRuntime(ctx, g)
+}
+
+// coreSearchTool is the local half of the shared search handlers: a tool that
+// already owns a sandbox and (optionally) a ripgrep seam.
+type coreSearchTool interface {
+	toolkit.Tool
+	CoreRuntime(context.Context) toolcore.Runtime
+}
+
+// executeCoreSearchTool runs a search tool through its shared core handler.
+// Local glob and local grep both delegate here, which is what makes "one tool,
+// two run locations" literal: the handler, the matcher, the paging rules and
+// the output shape are the same code the remote surface executes.
+//
+// The result is stamped as tool-owned because the core handler already applied
+// the tool's own byte window; letting the render layer fold it again would cut
+// a page the handler had sized deliberately.
+func executeCoreSearchTool(ctx context.Context, tool coreSearchTool, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	if tool == nil {
+		return nil, fmt.Errorf("tool is nil")
+	}
+	var handler toolcore.Handler
+	switch typed := tool.(type) {
+	case *GlobTool:
+		handler = searchcore.NewGlobHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
+	case *GrepTool:
+		handler = searchcore.NewGrepHandler(toolcore.Definition{Name: typed.Name(), Version: typed.Version()})
+	default:
+		return nil, fmt.Errorf("tool %q has no shared core handler", tool.Name())
+	}
+	result, err := handler.Execute(ctx, &toolcore.Call{Args: params, Runtime: tool.CoreRuntime(ctx)})
+	if err != nil {
+		return nil, err
+	}
+	converted := toolkit.ResultToToolkit(result)
+	if converted != nil {
+		converted = stampToolOwnsOutput(converted)
+	}
+	return converted, nil
 }
 
 // CoreRuntime exposes this tool's sandbox as a toolcore.Runtime, letting shared
@@ -211,6 +251,34 @@ func splitRipgrepStreamLines(output []byte) [][]byte {
 }
 
 func (r *localCoreRuntime) Root() string { return r.base }
+
+// SearchBackend reports how the last search ran. The local tool has always
+// published the ripgrep path it resolved, and the command a human would retype;
+// keeping that here preserves the diagnostics while the engine itself moved
+// into the core.
+func (r *localCoreRuntime) SearchBackend(engine string) (string, string) {
+	switch engine {
+	case "ripgrep", "rg":
+		path := ""
+		if r != nil && r.searcher != nil {
+			if resolved, ok := r.searcher.ripgrepBinaryPath(); ok {
+				path = resolved
+			}
+		}
+		return "rg --files", path
+	default:
+		return "builtin-walker", ""
+	}
+}
+
+// PathHint explains a missing path the way the local tool always has: relative
+// to the sandbox root, with the closest existing candidate.
+func (r *localCoreRuntime) PathHint(raw string) string {
+	if r == nil || r.policy == nil {
+		return ""
+	}
+	return r.policy.buildPathNotFoundHint(r.ctx, raw)
+}
 
 // Paths returns the runtime itself: the same value implements the resolver
 // contract the core handlers consume.

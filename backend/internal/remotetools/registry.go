@@ -162,39 +162,9 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("view handler: %w", err)
 	}
-	globSchema, err := toolkit.SchemaFromParameters(map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"pattern": map[string]interface{}{
-				"type":        "string",
-				"description": "Glob pattern, e.g. **/*.go. Relative to the remote workspace.",
-			},
-			"path": map[string]interface{}{
-				"type":        "string",
-				"description": "Base directory for the pattern. Default: workspace root.",
-			},
-			"limit": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     1,
-				"description": "Maximum matches to return. Default 100.",
-			},
-			"offset": map[string]interface{}{
-				"type":        "integer",
-				"minimum":     0,
-				"description": "Skip the first N matches, then apply limit. Use next_offset to page.",
-			},
-			"case_insensitive": map[string]interface{}{
-				"type":        "boolean",
-				"description": "匹配路径时忽略大小写。用于查找 BotPage/botpage 这类大小写不确定的文件名，避免反复换大小写重搜。",
-			},
-			"ignore_case": map[string]interface{}{
-				"type":        "boolean",
-				"description": "case_insensitive 的兼容别名。",
-			},
-		},
-		"required":             []string{"pattern"},
-		"additionalProperties": false,
-	})
+	// One glob tool means one schema: the remote surface publishes exactly the
+	// parameter list the local tool publishes, because both run the same handler.
+	globSchema, err := toolkit.SchemaFromParameters(searchcore.GlobParameters())
 	if err != nil {
 		return nil, fmt.Errorf("glob schema: %w", err)
 	}

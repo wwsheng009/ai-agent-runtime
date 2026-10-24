@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/remotetools"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
-	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 )
@@ -18,23 +16,17 @@ func runLocalCoreGlob(t *testing.T, root string, args map[string]interface{}) *t
 	t.Helper()
 	tool := tools.NewGlobTool()
 	tool.SetBasePath(root)
-	handler := searchcore.NewGlobHandler(toolcore.Definition{Name: "glob", Version: "1.0.0"})
-	result, err := handler.Execute(context.Background(), &toolcore.Call{
-		Args:    args,
-		Runtime: tool.CoreRuntime(context.Background()),
-	})
+	result, err := tool.Execute(context.Background(), args)
 	if err != nil {
-		t.Fatalf("local core glob: %v", err)
+		t.Fatalf("local glob execute: %v", err)
 	}
-	return toolkit.ResultToToolkit(result)
+	return result
 }
 
-// TestLocalCoreRuntimeAgreesWithRemoteGlob is the glob counterpart of the grep
-// equivalence test: the same searchcore handler, driven through the local
-// sandbox adapter and through the remote MCP server, must produce the same page
-// for the same arguments. The adapter is what a local switch to the core handler
-// would use, so agreement here is the precondition for deleting the legacy glob
-// path rather than a claim that it is already deleted.
+// TestLocalCoreRuntimeAgreesWithRemoteGlob drives the public local entry point
+// (GlobTool.Execute) and the remote MCP surface with the same arguments and
+// requires the same body. There is no second implementation left to compare:
+// glob runs one handler, so any difference here is a real surface divergence.
 func TestLocalCoreRuntimeAgreesWithRemoteGlob(t *testing.T) {
 	root := t.TempDir()
 	base := time.Now().Add(-3 * time.Hour)
@@ -81,6 +73,8 @@ func TestLocalCoreRuntimeAgreesWithRemoteGlob(t *testing.T) {
 		{"paged second", map[string]interface{}{"pattern": "**/*.*", "limit": 2, "offset": 2}},
 		{"ignore case", map[string]interface{}{"pattern": "*.txt", "case_insensitive": true}},
 		{"sub path", map[string]interface{}{"pattern": "**/*.go", "path": "nested"}},
+		{"directory match", map[string]interface{}{"pattern": "**/nested"}},
+		{"single file root", map[string]interface{}{"pattern": "**/*.go", "path": "a.go"}},
 		{"brace", map[string]interface{}{"pattern": "**/*.{go,ts}"}},
 		{"no match", map[string]interface{}{"pattern": "**/*.missing"}},
 	}
