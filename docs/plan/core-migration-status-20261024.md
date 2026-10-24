@@ -267,3 +267,36 @@ freeform lark 语法元数据、`patch` / `_raw` 参数归一化，以及一行�
 `NOT_FOUND: NOT_FOUND: parent directory does not exist: … (next: …) (next: …)`。
 现在 `Error.Rendered` 记住「这个失败已经渲染过」，`mutationFailure` 直接原样返回，
 不再二次加工。
+
+## 下一轮：view（最大的剩余缺口）
+
+量级：本地 `toolkit/tools/view.go` 1606 行 / 56 KB，core 的
+`viewcore/{view,handler,schema}.go` 合计约 620 行 / 17 KB。差的不是参数，
+是一整层读取能力，因此和其它工具一样必须平移，不能在 core 重写一遍。
+
+本地有、core 没有的（按依赖顺序）：
+
+1. **读取形态**：`readTailLines` / `orderedTailLines` / `trimTailToByteBudget`
+   的负向窗口（「最后 N 行」）、`viewLineRead` 的行截断记账
+   （`accountViewLineTruncation`、`clampLinePrefix`）、`truncateLongLine`。
+   core 的 `Read` 目前只有正向窗口 + 字节上限。
+2. **目录预览**：`listDirectoryPreview`（`view` 一个目录时列条目）。
+3. **非文本结果**：`binaryNoteResult`（二进制只给摘要而不是硬失败）、
+   `unsupportedPathResult`（设备/保留名拒绝，带 `path_refused` 元数据）。
+4. **文档与图片**：文档容器渲染（docx/pdf/…，`recordDerivedRender` 记录派生
+   产物）、图片直通与 `SetImageAttachmentTokenLimit` 的 token 预算。
+   这一层要区分「工具能力」（渲染-> core）与「宿主能力」（附件投递-> 本地）。
+5. **符号解析**：`CodeIndexResolver` + `resolveViewSymbol` + `annotateViewSymbolNote`
+   （`view --symbol`）。属于工具能力，依赖注入的索引实现留在宿主。
+6. **路径拼写治愈**：`healSpellingPath`（拼错的文件名给候选并继续读）。
+   注意与 `PathHinter` 的关系：hinter 只解释失败，治愈要真的读成功。
+7. **读取台账与效率提示**：`annotateIgnoredBatchWindow`、
+   `attachViewEfficiencyHints`（告诉调用方这次窗口够不够、要不要续读）。
+8. **批处理**：`executeBatch` 的分节预算（`viewBatchSectionBudgetBytes`、
+   `attachBatchWindowMetadata`、`trimBatchTail`、`compactViewSummary`）。
+   core 的 `readBatch` 只有逐项聚合，没有分节预算与尾裁剪。
+
+建议顺序：先 1+3（纯读窗口语义，风险低、测试最密），再 7+8（元数据与预算），
+然后 2+6（目录与拼写），最后 4+5（文档/图片/符号，需要先定宿主/工具边界）。
+每一步都按 apply_patch 那轮的做法：整段平移 -> 翻转 `Execute` -> 用本地测试
+逐个暴露等价缺口 -> 补 core -> 全量回归。
