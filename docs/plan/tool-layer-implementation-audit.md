@@ -383,6 +383,13 @@
   **发现的** ignore 文件（其 --help 原文如此），显式 `--ignore-file` 保持大小写敏感。
   实测还发现：非 git 目录里 `.gitignore` 根本不被读取，所以该 flag 看似无效；
   core 默认的 `--no-require-git` 让两引擎都能一致地让 flag 生效。
+  **反向审计：remote 声明的参数是否都有实现（2026-10-24）**：通过 MCP `tools/list`
+  取客户端视角的 schema，用 `go/ast` 扫描 handler 实际读取的键，两者求差。
+  初始 58 个声明中 4 个「疑似未读取」，逐一核实全是静态扫描盲区（经辅助函数
+  直接索引 map），不是缺失实现；反向发现 1 个「实现了但未声明」——
+  `files_without_matches` 别名，已补。最终声明 59 个、未实现 0 个。
+  固化为 `remotetools/grep_schema_audit_test.go` 三条断言，并验证过它们确实能失败
+  （注入一个假参数名后审计立即报错）。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、

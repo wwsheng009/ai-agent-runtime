@@ -91,3 +91,49 @@ remote 不声明它们。
 
 下一步若要继续，应当转向 remote 侧的 schema 一致性检查
 （确保 remote 声明的每个参数都有真实实现），而不是继续搬运本地参数。
+
+---
+
+# 反向审计：remote 声明的参数是否都有实现
+
+## 方法
+
+两路取证：
+
+1. 通过 MCP `tools/list` 取 remote grep 的实际 schema（客户端视角，不是源码视角）；
+2. 用 `go/ast` 静态扫描 `searchcore` 包，收集所有传给 `stringArg`/`boolArg`/
+   `intArg`/`intArgOK`/`stringArgAny`/`GrepGlobListFromArgs`/`GrepPathListFromArgs`/
+   `GrepPatternsFromArgs` 的字符串字面量，即「实现真正读取的键」。
+
+两者求差，得到「声明但没实现」和「实现了但没声明」。
+
+## 结果
+
+初始：remote 声明 58 个，静态扫描到 55 个读取点。
+
+**声明但未读取 4 个**，逐一核实后：
+
+| 参数 | 结论 |
+|---|---|
+| `mode` | 经 `grepModeFromArgs` 直接索引 `args["mode"]`，静态扫描看不到 |
+| `max_filesize` | 经 `grepMaxFileSizeFromArgs` 直接索引，同样看不到 |
+| `patterns` / `regexp` | 经 `GrepPatternsFromArgs` 读取，该函数接收整个 map |
+
+三者都是**扫描器盲区，不是缺失实现**，已登记在测试的 `indirectArgKeys` 中并注明原因。
+
+**实现了但未声明 1 个**：`files_without_matches`（`files_without_match` 的复数别名，
+handler 接受但 remote 未声明）。已补上。
+
+**最终：声明 59 个，未实现 0 个。**
+
+## 固化为回归测试
+
+`internal/remotetools/grep_schema_audit_test.go`：
+
+- `TestRemoteGrepSchemaEveryParamIsRead` —— 声明但没人读 = 失败。
+  一个调用方看得见、运行时却静默忽略的参数，是工具契约最糟的形态。
+- `TestRemoteGrepSchemaMatchesLocalCoreSet` —— handler 读的参数必须对客户端可见。
+- `TestRemoteGrepSchemaAliasesAreDeclared` —— handler 接受的别名必须可发现。
+
+**这些测试被验证过确实能抓到问题**：临时注入一个不存在的参数名，
+审计立即报告「flagged 1 unread param」。测试不是摆设。

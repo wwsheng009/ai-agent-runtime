@@ -368,6 +368,10 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "兼容 rg 的 --files-without-match；等价于 mode=files_without。",
 			},
+			"files_without_matches": map[string]interface{}{
+				"type":        "boolean",
+				"description": "files_without_match 的复数拼写，两者等价。",
+			},
 			"count": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容 rg 的 --count/-c；等价于 mode=count（统计匹配行数）。",
