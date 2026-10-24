@@ -81,7 +81,7 @@ func TestRemoteGrepPatternOptionsOverMCP(t *testing.T) {
 	inverted := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "one", "path": "opts.txt", "invert_match": true,
 	})
-	if !strings.Contains(inverted, "Alpha") || strings.Contains(inverted, "opts.txt:1:one") {
+	if !strings.Contains(inverted, "Alpha") || strings.Contains(inverted, "opts.txt:1: one") {
 		t.Fatalf("invert_match should keep the non-matching lines:\n%s", inverted)
 	}
 }
@@ -105,7 +105,7 @@ func TestRemoteGrepContextOverMCP(t *testing.T) {
 	out := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "MATCH", "path": "ctx.txt", "context": 1,
 	})
-	for _, want := range []string{"ctx.txt-2-two", "ctx.txt:3:MATCH three", "--", "ctx.txt:7:MATCH seven"} {
+	for _, want := range []string{"ctx.txt 2: two", "ctx.txt>3: MATCH three", "--", "ctx.txt>7: MATCH seven"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("context output missing %q:\n%s", want, out)
 		}
@@ -139,7 +139,7 @@ func TestRemoteGrepFiltersOverMCP(t *testing.T) {
 	included := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "hit", "include": "*.go",
 	})
-	if !strings.Contains(included, "a.go:1:hit go") || !strings.Contains(included, "nested/c.go:1:hit nested") {
+	if !strings.Contains(included, "a.go:1: hit go") || !strings.Contains(included, "nested/c.go:1: hit nested") {
 		t.Fatalf("include *.go should keep nested Go files:\n%s", included)
 	}
 	if strings.Contains(included, "b.ts") {
@@ -152,7 +152,7 @@ func TestRemoteGrepFiltersOverMCP(t *testing.T) {
 	if strings.Contains(excluded, "b.ts") {
 		t.Fatalf("exclude b.ts must drop the file:\n%s", excluded)
 	}
-	if !strings.Contains(excluded, "a.go:1:hit go") {
+	if !strings.Contains(excluded, "a.go:1: hit go") {
 		t.Fatalf("exclude must not drop unrelated files:\n%s", excluded)
 	}
 }
@@ -183,7 +183,7 @@ func TestRemoteGrepMultiRootsOverMCP(t *testing.T) {
 	both := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "hit", "paths": []interface{}{"alpha", "beta"},
 	})
-	if !strings.Contains(both, "alpha/one.txt:1:hit one") || !strings.Contains(both, "beta/two.txt:1:hit two") {
+	if !strings.Contains(both, "alpha/one.txt:1: hit one") || !strings.Contains(both, "beta/two.txt:1: hit two") {
 		t.Fatalf("paths should search every root:\n%s", both)
 	}
 
@@ -321,7 +321,7 @@ func TestRemoteGrepMaxCountOverMCP(t *testing.T) {
 	suppressed := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "hit", "max_count": 0,
 	})
-	if !strings.Contains(suppressed, "(no matches)") {
+	if !strings.Contains(suppressed, "未找到匹配的内容") {
 		t.Fatalf("max_count=0 must suppress every match:\n%s", suppressed)
 	}
 }
@@ -357,7 +357,7 @@ func TestRemoteGrepOnlyMatchingOverMCP(t *testing.T) {
 	fragments := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
 		"pattern": "foo", "only_matching": true,
 	})
-	if !strings.Contains(fragments, "a.txt:1:1:foo") || !strings.Contains(fragments, "a.txt:1:9:foo") {
+	if !strings.Contains(fragments, "a.txt:1:1: foo") || !strings.Contains(fragments, "a.txt:1:9: foo") {
 		t.Fatalf("only_matching should print one line per fragment with its column:\n%s", fragments)
 	}
 	if strings.Contains(fragments, "foo bar foo") {

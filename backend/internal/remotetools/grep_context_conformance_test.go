@@ -31,13 +31,13 @@ func TestRemoteGrepContextIsEngineIndependent(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"ctx.txt-2-two",
-		"ctx.txt:3:MATCH three",
-		"ctx.txt-4-four",
+		"ctx.txt 2: two",
+		"ctx.txt>3: MATCH three",
+		"ctx.txt 4: four",
 		"--",
-		"ctx.txt-6-six",
-		"ctx.txt:7:MATCH seven",
-		"ctx.txt-8-eight",
+		"ctx.txt 6: six",
+		"ctx.txt>7: MATCH seven",
+		"ctx.txt 8: eight",
 	} {
 		if !strings.Contains(walkerResult.Content, want) {
 			t.Fatalf("walker output missing %q:\n%s", want, walkerResult.Content)

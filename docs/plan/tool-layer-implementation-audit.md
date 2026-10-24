@@ -256,6 +256,14 @@
   空结果文案（中文「未找到匹配的内容」vs `(no matches)`）、stats 输出形状、
   match_count 等 metadata 键名、`head_limit` 缺省（100）、`unrestricted`/`one_file_system`
   未实现、path-not-found 候选提示。结论保持：输出/预算层归属决策是翻转前最后一步。
+  **输出渲染以本地为准统一（2026-10-24）**：core 新增 `searchcore/grep_render.go`
+  （`renderGrepPage`），把本地输出形状变成共享契约：content `path:line: text`（带空格，
+  片段 `path:line:col: text`）、context 匹配行 `path>N: text` / 上下文行 `path N: text`、
+  块间 `--`、files/count 形状、空页文案「未找到匹配的内容」、分页提示（中文，
+  含 next_offset，不使用「截断」一词）、单文件根只显示文件名、多根搜索按调用拼写
+  前缀路径。remote conformance 测试同步迁移到新形状（如 `ctx.txt>3: MATCH three`）；
+  metadata 补 `match_count` 与 `limit` 键（与本地同名）。core 渲染契约由
+  `grep_render_test.go` 锁定（含「禁用『截断』措辞」护栏）。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、

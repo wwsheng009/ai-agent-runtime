@@ -232,54 +232,16 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			fmt.Errorf("grep %q in %s: %v", strings.Join(patterns, " | "), rootLabel, grepErr)), nil
 	}
 
-	patternLabel := strings.Join(patterns, " | ")
-	contextLineCount := 0
-	var builder strings.Builder
-	fmt.Fprintf(&builder, "=== grep %q ===\n", patternLabel)
-	switch {
-	case mode == GrepModeFiles:
-		for _, entry := range result.Files {
-			builder.WriteString(paths.Relative(entry.File))
-			builder.WriteByte('\n')
-		}
-	case mode == GrepModeCount:
-		for _, entry := range result.Files {
-			fmt.Fprintf(&builder, "%s:%d\n", paths.Relative(entry.File), entry.Count)
-		}
-	case contextBefore > 0 || contextAfter > 0:
-		// Context is produced by the shared expander, not by an engine flag:
-		// match lines keep the `path:line:text` shape, neighbouring lines use
-		// ripgrep's `path-line-text` shape, and blocks are separated by `--`.
-		expanded := ExpandGrepContext(result.Matches, contextBefore, contextAfter)
-		contextLineCount = len(expanded)
-		printedAny := false
-		for _, line := range expanded {
-			if line.GroupStart && printedAny {
-				builder.WriteString("--\n")
-			}
-			relative := paths.Relative(line.File)
-			if line.IsMatch {
-				fmt.Fprintf(&builder, "%s:%d:%s\n", relative, line.Line, line.Text)
-			} else {
-				fmt.Fprintf(&builder, "%s-%d-%s\n", relative, line.Line, line.Text)
-			}
-			printedAny = true
-		}
-	default:
-		for _, item := range result.Matches {
-			if item.Column > 0 {
-				fmt.Fprintf(&builder, "%s:%d:%d:%s\n", paths.Relative(item.File), item.Line, item.Column, item.Text)
-				continue
-			}
-			fmt.Fprintf(&builder, "%s:%d:%s\n", paths.Relative(item.File), item.Line, item.Text)
-		}
-	}
-	if len(result.Matches) == 0 && len(result.Files) == 0 {
-		builder.WriteString("(no matches)\n")
-	}
-	if result.Truncated {
-		fmt.Fprintf(&builder, "\n[truncated at %d %s; narrow the pattern or glob]\n", options.Limit, grepPageUnit(mode))
-	}
+	page := renderGrepPage(grepRenderInputs{
+		paths:         paths,
+		result:        &result,
+		options:       options,
+		patterns:      patterns,
+		roots:         roots,
+		mode:          mode,
+		contextBefore: contextBefore,
+		contextAfter:  contextAfter,
+	})
 	pageMatches := len(result.Matches)
 	pageEntries := len(result.Matches)
 	if mode != GrepModeContent {
@@ -291,11 +253,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	}
 	includeGlobs, excludeGlobs := EffectiveGrepFilters(options)
 	metadata := map[string]any{
-		"pattern":            patternLabel,
+		"pattern":            strings.Join(patterns, " | "),
 		"patterns":           patterns,
 		"mode":               string(mode),
 		"path":               rootLabel,
 		"paths":              grepRootLabels(paths, roots),
+		"match_count":        pageMatches,
 		"matches":            pageMatches,
 		"files":              len(result.Files),
 		"files_scanned":      result.FilesScanned,
@@ -314,11 +277,12 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"exclude_patterns":   len(excludeGlobs),
 		"context_before":     contextBefore,
 		"context_after":      contextAfter,
-		"context_lines":      contextLineCount,
+		"context_lines":      page.contextLines,
 		"offset":             options.Offset,
 		"next_offset":        options.Offset + pageEntries,
 		"has_more":           result.Truncated,
 		"engine":             engine,
+		"limit":              options.Limit,
 		"hidden_files":       options.IncludeHidden,
 		"ignore_files":       !options.NoIgnore,
 		"ignore_file_count":  len(options.IgnoreFiles),
@@ -336,7 +300,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	result0 := &toolcore.Result{
 		Success:    true,
 		OutputKind: toolcore.KindText,
-		Content:    builder.String(),
+		Content:    page.content,
 		Metadata:   metadata,
 	}
 	return shape(call, h.def.Name, result0)
