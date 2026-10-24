@@ -264,6 +264,13 @@
   前缀路径。remote conformance 测试同步迁移到新形状（如 `ctx.txt>3: MATCH three`）；
   metadata 补 `match_count` 与 `limit` 键（与本地同名）。core 渲染契约由
   `grep_render_test.go` 锁定（含「禁用『截断』措辞」护栏）。
+  **字节预算与结果标注统一（同日）**：`renderGrepPage` 内建 32 KiB 模型可见窗口
+  （常量本就共享于 `toolcore/output.GrepOutputBudgetBytes`）——超过预算在**完整行边界**
+  停止、保留前导匹配、附中文预算提示（next_step 指引）；`renderGrepMetadataStamps`
+  发布本地一直有的标注：`skip_render_truncation` + `model_visible_budget_bytes`
+  （渲染层不再二次折叠）、真·零命中页的 `empty_result`/`outcome=empty`（截断页绝不打
+  空标记）、字节截断时的 `results_truncated`/`truncation_reason=byte_budget`/
+  `next_action`。护栏：`grep_render_budget_test.go`。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、

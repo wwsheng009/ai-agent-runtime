@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore"
+	toolcoreoutput "github.com/wwsheng009/ai-agent-runtime/internal/toolcore/output"
 )
 
 // grepRenderInputs carries everything the page renderer needs. Rendering is
@@ -27,6 +29,8 @@ type grepPage struct {
 	contextLines  int
 	matchCount    int
 	renderedFiles int
+	byteTruncated bool
+	renderedLines int
 }
 
 // displayPathFor renders the file column of one match. A single-file search
@@ -116,6 +120,30 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 		}
 	}
 
+	// Byte window: grep owns its model-visible budget (32 KiB, shared with the
+	// local tool through toolcore/output), stops at complete leading lines and
+	// declares the window so the render layer never folds the page again.
+	if len(lines) > 0 {
+		budget := toolcoreoutput.GrepOutputBudgetBytes
+		kept, used := 0, 0
+		for _, line := range lines {
+			lineBytes := len(line) + 1
+			if kept > 0 && used+lineBytes > budget {
+				break
+			}
+			used += lineBytes
+			kept++
+		}
+		if kept < len(lines) {
+			lines = lines[:kept]
+			page.byteTruncated = true
+			if !in.result.Truncated {
+				in.result.Truncated = true
+			}
+		}
+	}
+	page.renderedLines = len(lines)
+
 	content := strings.Join(lines, "\n")
 	if content == "" {
 		content = "未找到匹配的内容"
@@ -127,7 +155,36 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 		} else {
 			content += fmt.Sprintf("\n\n(已分页返回前 %d 个匹配；next_offset=%d 可继续分页读取后续匹配)", len(lines), nextOffset)
 		}
+		if page.byteTruncated {
+			content += fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", toolcoreoutput.GrepOutputBudgetBytes)
+		}
 	}
+
 	page.content = content
 	return page
+}
+
+// GrepRenderBudget exposes the shared in-tool byte window so surfaces can
+// declare the same model-visible budget the renderer enforced.
+func GrepRenderBudget() int { return toolcoreoutput.GrepOutputBudgetBytes }
+
+// renderGrepMetadataStamps adds the dispositions the local tool has always
+// published: the render-layer opt-out with its declared window, empty-success
+// marking for a true no-match page, and the byte-budget next_action.
+func renderGrepMetadataStamps(metadata map[string]any, page grepPage, result *GrepResult) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	metadata["skip_render_truncation"] = true
+	metadata["model_visible_budget_bytes"] = toolcoreoutput.GrepOutputBudgetBytes
+	if page.byteTruncated {
+		metadata["results_truncated"] = true
+		metadata["truncation_reason"] = "byte_budget"
+		metadata["next_action"] = "输出超过 grep 字节预算已提前停止；请收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数。不要原样重试同一查询。"
+	}
+	if page.matchCount == 0 && page.renderedFiles == 0 && !result.Truncated && utf8.ValidString(page.content) {
+		metadata["empty_result"] = true
+		metadata["outcome"] = "empty"
+	}
+	return metadata
 }

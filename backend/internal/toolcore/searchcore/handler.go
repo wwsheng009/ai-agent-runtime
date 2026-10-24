@@ -297,6 +297,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 			"files_scanned":      summary.FilesScanned,
 		}
 	}
+	renderGrepMetadataStamps(metadata, page, &result)
 	result0 := &toolcore.Result{
 		Success:    true,
 		OutputKind: toolcore.KindText,
