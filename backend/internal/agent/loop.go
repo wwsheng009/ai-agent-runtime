@@ -56,6 +56,11 @@ const emptyTerminalAssistantResponseError = "upstream model returned an empty re
 // repeatedSemanticToolCallNoticeThreshold aliases the productized warning threshold
 // so existing tests and call sites keep a stable local name.
 const repeatedSemanticToolCallNoticeThreshold = DoomLoopWarningThreshold
+
+// explorationStallNoticeThreshold is the consecutive read-only step count that
+// emits the one-shot tool_loop.exploration_stall_observed observation event.
+// The model-facing stall advisory was removed (2026-10-24): consecutive reads
+// are legitimate exploration and must not re-inject a reminder every step.
 const explorationStallNoticeThreshold = 12
 
 // defaultPromptPreflightAutoCompactRatio is the fallback ratio for prompt
@@ -1401,6 +1406,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, dispositionAdvisory)
 			}
 		}
+		// 连续只读步只在阈值处发一次观测事件（遥测/复盘）。产品决策（2026-10-24）：
+		// 不再向模型注入 stall 软提醒——连续读取是合法探索，逐步重复的提醒只会
+		// 污染上下文并骚扰模型；真正的收敛护栏仍是下面按配置启用的 MaxExplorationSteps。
 		consecutiveExplorationSteps = nextExplorationStallCount(consecutiveExplorationSteps, action.ToolCalls)
 		if consecutiveExplorationSteps == explorationStallNoticeThreshold {
 			loop.emitRuntimeEvent("tool_loop.exploration_stall_observed", sessionID, "", map[string]interface{}{
@@ -1409,12 +1417,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				"consecutive_readonly_steps": consecutiveExplorationSteps,
 				"tool_call_count":            len(action.ToolCalls),
 			})
-		}
-		if consecutiveExplorationSteps >= explorationStallNoticeThreshold {
-			repeatedSemanticAdvisory = joinRuntimeAdvisories(
-				repeatedSemanticAdvisory,
-				explorationStallAdvisory(consecutiveExplorationSteps),
-			)
 		}
 		if loop.config.MaxExplorationSteps > 0 && consecutiveExplorationSteps >= loop.config.MaxExplorationSteps {
 			result.Success = false
@@ -5411,6 +5413,7 @@ func inferAdvisoryReminderKind(advisory string) string {
 		strings.Contains(text, "empty result"):
 		return ReminderKindDispositionReplay
 	case strings.Contains(text, "only inspected") || strings.Contains(text, "exploration"):
+		// 历史会话仍可能带 2026-10-24 之前的 stall 软提醒文本；新 run 不再产生。
 		return ReminderKindExplorationStall
 	case strings.Contains(text, "polling/control request"):
 		return ReminderKindPollingBackoff
@@ -5687,16 +5690,6 @@ func toolCallDeclaresMutatedPaths(args map[string]interface{}) bool {
 		}
 	}
 	return false
-}
-
-func explorationStallAdvisory(stepCount int) string {
-	if stepCount < explorationStallNoticeThreshold {
-		return ""
-	}
-	return fmt.Sprintf(
-		"Runtime advisory: %d consecutive tool rounds have only inspected or checked state without a declared workspace mutation. Execution remains unrestricted. Reuse the evidence already collected: state the current root-cause hypothesis, implement the smallest justified fix, and verify it. If the task is read-only or already solved, stop calling tools and return the conclusion. Do not repeat searches merely to reconfirm unchanged evidence.",
-		stepCount,
-	)
 }
 
 func joinRuntimeAdvisories(values ...string) string {

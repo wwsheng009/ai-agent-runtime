@@ -1685,7 +1685,7 @@ func TestSemanticToolCallFingerprintExemptsPollingTools(t *testing.T) {
 	require.Empty(t, fingerprint)
 }
 
-func TestReActLoop_AdvisesAfterProlongedExplorationWithoutStopping(t *testing.T) {
+func TestReActLoop_ObservesProlongedExplorationWithoutModelAdvisory(t *testing.T) {
 	manager := &MockSequenceMCPManager{output: "inspection result"}
 	llmRuntime := llm.NewLLMRuntime(nil)
 	responses := make([]*llm.LLMResponse, 0, explorationStallNoticeThreshold+1)
@@ -1727,17 +1727,21 @@ func TestReActLoop_AdvisesAfterProlongedExplorationWithoutStopping(t *testing.T)
 	require.True(t, result.Success)
 	require.Equal(t, "已根据现有证据完成分析。", result.Output)
 	require.Len(t, provider.requests, explorationStallNoticeThreshold+1)
-	require.Len(t, observedEvents, 1)
+	require.Len(t, observedEvents, 1, "the one-shot observation event must survive the advisory removal")
 	require.Equal(t, explorationStallNoticeThreshold, observedEvents[0].Payload["consecutive_readonly_steps"])
 
-	advisoryFound := false
-	for _, message := range provider.requests[len(provider.requests)-1].Messages {
-		if message.Role == "tool" && strings.Contains(message.Content, "only inspected or checked state") {
-			advisoryFound = true
-			break
+	// 产品决策（2026-10-24）：连续只读步不再向模型注入 stall 软提醒——所有请求
+	// 的工具结果都必须保持干净，只有一次性观测事件保留。
+	for _, request := range provider.requests {
+		for _, message := range request.Messages {
+			if message.Role != "tool" {
+				continue
+			}
+			require.NotContains(t, message.Content, "only inspected or checked state",
+				"consecutive read-only rounds must not inject the stall advisory")
+			require.NotContains(t, message.Content, "<system-reminder kind=\"exploration_stall\">")
 		}
 	}
-	require.True(t, advisoryFound, "the next model turn should receive non-blocking progress guidance")
 }
 
 func TestNextExplorationStallCountResetsOnMutation(t *testing.T) {

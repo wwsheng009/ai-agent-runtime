@@ -34,9 +34,12 @@ const (
 	ReminderKindStopHook              = "stop_hook"
 	ReminderKindDoomLoop              = "doom_loop"
 	ReminderKindDispositionReplay     = "disposition_replay"
-	ReminderKindExplorationStall      = "exploration_stall"
-	ReminderKindPollingBackoff        = "polling_backoff"
-	ReminderKindPlanMode              = "plan_mode"
+	// ReminderKindExplorationStall：2026-10-24 起不再产生（连续只读步的软提醒按
+	// 产品决策移除，只保留一次性的观测事件）；保留该 kind 只为历史会话里已存在的
+	// 旧 reminder 仍能正常归一化、分类与剥离。
+	ReminderKindExplorationStall = "exploration_stall"
+	ReminderKindPollingBackoff   = "polling_backoff"
+	ReminderKindPlanMode         = "plan_mode"
 	// ReminderKindPlanReview carries user plan-review feedback into the model's
 	// next turn. It is prompt-only: the feedback is delivered exactly once from
 	// durable plan state and never re-injected after consumption.
