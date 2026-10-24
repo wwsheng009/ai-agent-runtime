@@ -63,9 +63,9 @@ func TestGrepTool_BuiltinWalkerHandlesLinesBeyondReaderCaps(t *testing.T) {
 			params: map[string]interface{}{
 				"pattern": "needle-after",
 				"path":    longFile,
-				// files_without 尚未进 core（需全量扫描契约），路由回 legacy 路径。
+				// files_without now lives in the shared core: the same walker
+				// reader must prove "no matching line" past both caps.
 				"files_without_match": true,
-				"rg_args":             []interface{}{},
 			},
 			wantAbsent: []string{"long.txt"},
 		},
@@ -87,9 +87,10 @@ func TestGrepTool_BuiltinWalkerHandlesLinesBeyondReaderCaps(t *testing.T) {
 			}
 			engine := result.Metadata["engine"]
 			if tc.name == "files without match" {
-				// files_without 走 legacy 路径，engine 取值为 builtin。
-				if engine != "builtin" {
-					t.Fatalf("expected builtin engine for files_without, got %#v", engine)
+				// The core path proves itself with the same engine label as
+				// every other core call, not the legacy "builtin" marker.
+				if engine != "walker" {
+					t.Fatalf("expected walker engine for files_without, got %#v", engine)
 				}
 			} else if engine != "walker" {
 				t.Fatalf("expected walker engine, got %#v", result.Metadata["engine"])

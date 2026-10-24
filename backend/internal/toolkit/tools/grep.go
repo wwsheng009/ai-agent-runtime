@@ -579,7 +579,7 @@ func newGrepTool(name string) *GrepTool {
 			"max_filesize": stringOrIntegerSchema("兼容 rg 的 --max-filesize。可传字节整数，或如 10K/2M/1G 这类大小字符串；内置回退引擎会跳过超出大小限制的文件。"),
 			"mode": map[string]interface{}{
 				"type":        "string",
-				"description": "输出模式：content=显示匹配行（默认），files=仅列出包含匹配的文件，files_without=仅列出不包含匹配的文件，count=统计每个文件的匹配数",
+				"description": "输出模式：content=显示匹配行（默认），files=仅列出包含匹配的文件，files_without=仅列出不包含匹配的文件，count=统计每个文件的匹配数。三种文件级模式下 limit/offset 以文件为单位；files_without 需读每个候选直到首个匹配或 EOF，max_count=0 时所有候选都算无匹配。",
 			},
 			"files_with_matches": map[string]interface{}{
 				"type":        "boolean",

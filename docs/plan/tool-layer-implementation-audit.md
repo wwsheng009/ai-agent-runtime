@@ -289,6 +289,22 @@
   相对路径锚定搜索根、缺失文件显式报错、**空 pattern 文件视为零命中搜索**（非参数错误）；
   metadata 补 `pattern_files`/`pattern_source(pattern_file|mixed)`/`case_mode`，
   `patterns`/`pattern_count` 报告**有效**模式集。remote schema 声明同一对参数。
+  **`files_without` 上移 core（2026-10-24）**：这是 core 最后一个缺失的 mode，
+  此前 `NormalizeGrepMode` 明确拒绝、remote schema 写「当前不可用」。现在两引擎都实现：
+  walker 逐文件读到首个匹配即止（匹配则整文件排除，读到 EOF 才证明无匹配），
+  rg 用 `--files-without-match`。这条路径有个必须记录的实测事实：**rg 在该模式下无视
+  `--json`**，只输出纯路径，因此引擎改用 `--stats` 作为结构化尾部并解析
+  `files searched`（同时兼容 rg 14 的 `0.001296 seconds` 与 rg 15 的
+  `... seconds total` 两种尾行拼写——只认一种会把另一种当成文件名）。
+  分页单位是「已证明无匹配的文件」，`GrepFilesWithoutComplete`/`GrepResultPageComplete`
+  把 files/count 的页边界规则推广到该模式；`GrepStats` 增 `FilesWithoutMatched`，
+  stats 摘要只报 `files without matches`/`files searched`/`bytes printed`
+  （该模式不收集匹配行，match 计数是不可观测的，报 0 会被误读成「全库无匹配」）。
+  一处刻意的引擎分工：`max_count=0` 在本地语义是「该文件不产生任何匹配」，
+  于是所有候选都算无匹配；而 rg `-m 0` 什么都不打印。该组合**直接交给 walker**，
+  不是降级而是避免两引擎给出相反答案。`only_matching`/`context` 在该模式下是
+  no-op（页单位是文件，片段展开改变不了内容），沿用 rg 的接受但不生效。
+  remote 侧同时补 `mode=files_without` 枚举值与 `files_without_match` 布尔别名。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
@@ -299,9 +315,12 @@
   单文件显示路径、path-not-found 提示）以及 `one_file_system`/`unrestricted` 这类 core
   尚未实现的本地参数。翻转顺序保持：本地 rg runner → 输出层归属 → 分批迁移测试。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
-  本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
-  type/type_not、max_count、only_matching、max_depth/max_filesize、stats、多根语义
-  与 ignore 族已进 core；files_without 与本地上下文渲染格式仍在本地）；
+  本地 `grep` 主流程仍在 `grep_core_switch.go` 里按参数集分流：四类 mode（content/
+  files/files_without/count）与 context、include-exclude、type/type_not、max_count、
+  only_matching、max_depth/max_filesize、stats、pattern_file(s)、多根语义与 ignore 族
+  均已进 core，`rg_args`、`json` 透传、展示类开关（`column`/`trim`/`max_columns`/
+  `heading`/`color`）、`one_file_system`/`unrestricted`、读取侧 16MiB 流闸门、
+  partial/timeout 标注与 path-not-found 候选提示仍在本地；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于
   surface adapter，按设计保留。

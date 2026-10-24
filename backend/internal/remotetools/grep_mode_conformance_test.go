@@ -84,31 +84,84 @@ func TestRemoteGrepModesMatchWalker(t *testing.T) {
 	}
 }
 
-func TestRemoteGrepRejectsUnsupportedMode(t *testing.T) {
-	root := grepModeTree(t)
-	for _, engine := range []struct {
-		name string
-		rg   ripgrepRunner
-	}{
-		{name: "walker"},
-		{name: "ripgrep", rg: resolveRipgrepRunner()},
+// TestRemoteGrepFilesWithoutMatchesWalker pins files_without across engines: the
+// same page, the same has_more bit and an empty match list. rg ignores --json in
+// this mode and prints plain paths, so the ripgrep engine parses them instead;
+// this test is what keeps that separate parse path honest.
+func TestRemoteGrepFilesWithoutMatchesWalker(t *testing.T) {
+	runner := resolveRipgrepRunner()
+	// a/b/d have no match, c has one: enough files for a real has_more page.
+	pagedRoot := t.TempDir()
+	for name, content := range map[string]string{
+		"a.txt": "nothing\n",
+		"b.txt": "nothing\n",
+		"c.txt": "hit\n",
+		"d.txt": "nothing\n",
 	} {
-		if engine.name == "ripgrep" && !engine.rg.available() {
-			continue
+		if err := os.WriteFile(filepath.Join(pagedRoot, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
 		}
-		t.Run(engine.name, func(t *testing.T) {
+	}
+
+	cases := []struct {
+		name     string
+		limit    int
+		offset   int
+		want     []string
+		wantMore bool
+	}{
+		{"all", 50, 0, []string{"a.txt:0", "b.txt:0", "d.txt:0"}, false},
+		{"first page", 2, 0, []string{"a.txt:0", "b.txt:0"}, true},
+		{"last page", 2, 2, []string{"d.txt:0"}, false},
+		{"offset past the last file", 2, 5, nil, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			opts := searchcore.GrepOptions{
-				Pattern: "hit", Path: root, Mode: searchcore.GrepMode("files_without"),
+				Pattern: "hit", Path: pagedRoot, Mode: searchcore.GrepModeFilesWithout,
+				Limit: tc.limit, Offset: tc.offset,
 			}
-			if engine.name == "walker" {
-				if _, err := searchcore.Grep(context.Background(), opts); err == nil {
-					t.Fatal("walker must reject an unsupported mode")
-				}
+			walker, err := searchcore.Grep(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("walker: %v", err)
+			}
+			assertStringList(t, modeEntries(walker), tc.want)
+			if walker.Truncated != tc.wantMore {
+				t.Fatalf("walker truncated=%v want %v (%+v)", walker.Truncated, tc.wantMore, walker.Files)
+			}
+			if len(walker.Matches) != 0 {
+				t.Fatalf("walker must not collect match lines: %+v", walker.Matches)
+			}
+
+			if !runner.available() {
 				return
 			}
-			if _, used, err := engine.rg.grep(context.Background(), opts); err == nil || !used {
-				t.Fatalf("ripgrep must reject an unsupported mode: used=%v err=%v", used, err)
+			rgResult, used, rgErr := runner.grep(context.Background(), opts)
+			if rgErr != nil || !used {
+				t.Fatalf("ripgrep used=%v err=%v", used, rgErr)
+			}
+			assertStringList(t, modeEntries(rgResult), tc.want)
+			if rgResult.Truncated != tc.wantMore {
+				t.Fatalf("ripgrep truncated=%v want %v (%+v)", rgResult.Truncated, tc.wantMore, rgResult.Files)
 			}
 		})
+	}
+}
+
+// TestRemoteGrepRejectsUnknownMode keeps a genuinely unknown spelling failing on
+// both engines: the enum must stay honest about what it can serve.
+func TestRemoteGrepRejectsUnknownMode(t *testing.T) {
+	root := grepModeTree(t)
+	opts := searchcore.GrepOptions{
+		Pattern: "hit", Path: root, Mode: searchcore.GrepMode("bogus"),
+	}
+	if _, err := searchcore.Grep(context.Background(), opts); err == nil {
+		t.Fatal("walker must reject an unknown mode")
+	}
+	if runner := resolveRipgrepRunner(); runner.available() {
+		if _, used, err := runner.grep(context.Background(), opts); err == nil || !used {
+			t.Fatalf("ripgrep must reject an unknown mode: used=%v err=%v", used, err)
+		}
 	}
 }

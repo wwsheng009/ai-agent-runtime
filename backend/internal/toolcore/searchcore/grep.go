@@ -201,6 +201,10 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 	}
 	reader := newLineReader()
+	// files_without inverts the unit of the page: the entry is a file proven to
+	// have no matching line, so matches are not collected and the page check
+	// counts proven files instead.
+	filesWithout := mode == GrepModeFilesWithout
 	visit := func(root string, rules *grepIgnoreRules, path string) error {
 		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
@@ -227,6 +231,18 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		if shouldFilterGrepCandidate(relativeGrepCandidate(root, path), includeFilter, excludeFilter) {
 			return nil
 		}
+		if filesWithout && opts.MaxCountSet && opts.MaxCount == 0 {
+			// Local contract for an explicit `max_count: 0`: the file
+			// contributes no match at all, so every candidate is a
+			// no-match file. ripgrep's -m 0 disagrees (it prints nothing),
+			// which is why that case never reaches the ripgrep engine.
+			result.FilesScanned++
+			result.Files = append(result.Files, GrepFileSummary{File: path})
+			if GrepFilesWithoutComplete(result.Files, opts) {
+				return filepath.SkipAll
+			}
+			return nil
+		}
 		result.FilesScanned++
 		file, openErr := os.Open(path)
 		if openErr != nil {
@@ -235,10 +251,11 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		defer file.Close()
 		reader.reset(file)
 		fileLines := 0
+		hasMatch := false
 		for {
 			lineNo, text, truncated, ok := reader.next()
 			if !ok {
-				return nil
+				break
 			}
 			display := reader.displayText(text, truncated)
 			if !validUTF8(display) {
@@ -247,6 +264,12 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			matched := compiled.Match(display)
 			if matched == opts.InvertMatch {
 				continue
+			}
+			hasMatch = true
+			if filesWithout {
+				// One matching line is enough to prove the file belongs on the
+				// other side; the rest of it does not need reading.
+				break
 			}
 			if opts.MaxCountSet && fileLines >= opts.MaxCount {
 				break
@@ -270,6 +293,15 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			}
 			fileLines++
 			if GrepPageComplete(result.Matches, mode, opts) {
+				return filepath.SkipAll
+			}
+		}
+		if filesWithout {
+			if hasMatch {
+				return nil
+			}
+			result.Files = append(result.Files, GrepFileSummary{File: path})
+			if GrepFilesWithoutComplete(result.Files, opts) {
 				return filepath.SkipAll
 			}
 		}
@@ -332,7 +364,7 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 		}
 		// Every root after the page is complete would only be scanned to be
 		// discarded by ApplyGrepWindow.
-		if GrepPageComplete(result.Matches, mode, opts) {
+		if GrepResultPageComplete(&result, mode, opts) {
 			break
 		}
 	}

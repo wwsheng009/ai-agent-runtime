@@ -256,7 +256,14 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	})
 	pageMatches := len(result.Matches)
 	pageEntries := len(result.Matches)
-	if mode != GrepModeContent {
+	switch mode {
+	case GrepModeFilesWithout:
+		// The page unit is a proven no-match file and there are no matches to
+		// count; `files` already carries the page size.
+		pageMatches = 0
+		pageEntries = len(result.Files)
+	case GrepModeContent:
+	default:
 		pageMatches = 0
 		for _, entry := range result.Files {
 			pageMatches += entry.Count
@@ -333,14 +340,26 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		// Page-level statistics, not a whole-search summary: see GrepStats.
 		summary := SummarizeGrepResult(result)
 		summary.BytesPrinted = len(page.content)
-		metadata["stats"] = map[string]any{
-			"matches":            summary.Matches,
-			"matched_lines":      summary.MatchedLines,
-			"files_with_matched": summary.FilesWithMatched,
-			"files_scanned":      summary.FilesScanned,
-			"files_searched":     summary.FilesScanned,
-			"files_with_matches": summary.FilesWithMatched,
-			"bytes_printed":      summary.BytesPrinted,
+		if mode == GrepModeFilesWithout {
+			// The match counters are unobservable in this mode; publishing
+			// zeros would read as "no matches anywhere", which is the exact
+			// opposite of what the page is reporting.
+			metadata["stats"] = map[string]any{
+				"files_without_matches": summary.FilesWithoutMatched,
+				"files_scanned":         summary.FilesScanned,
+				"files_searched":        summary.FilesScanned,
+				"bytes_printed":         summary.BytesPrinted,
+			}
+		} else {
+			metadata["stats"] = map[string]any{
+				"matches":            summary.Matches,
+				"matched_lines":      summary.MatchedLines,
+				"files_with_matched": summary.FilesWithMatched,
+				"files_scanned":      summary.FilesScanned,
+				"files_searched":     summary.FilesScanned,
+				"files_with_matches": summary.FilesWithMatched,
+				"bytes_printed":      summary.BytesPrinted,
+			}
 		}
 		metadata["stats_requested"] = true
 		page.content += "\n\n" + renderGrepStatsSummary(summary)
@@ -506,6 +525,9 @@ func grepModeFromArgs(args map[string]any) (GrepMode, *toolcore.Result) {
 	if boolArg(args, "files_with_matches") {
 		raw = string(GrepModeFiles)
 	}
+	if boolArg(args, "files_without_match", "files_without_matches") {
+		raw = string(GrepModeFilesWithout)
+	}
 	if boolArg(args, "count") {
 		raw = string(GrepModeCount)
 	}
@@ -514,7 +536,7 @@ func grepModeFromArgs(args map[string]any) (GrepMode, *toolcore.Result) {
 	}
 	mode, err := NormalizeGrepMode(raw)
 	if err != nil {
-		return "", toolcore.Error(toolcore.ErrInvalidArgument, "use mode=content|files|count", err)
+		return "", toolcore.Error(toolcore.ErrInvalidArgument, "use mode=content|files|files_without|count", err)
 	}
 	return mode, nil
 }

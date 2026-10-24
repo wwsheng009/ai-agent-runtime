@@ -18,12 +18,16 @@ const (
 	GrepModeFiles GrepMode = "files"
 	// GrepModeCount lists one `<file>:<matching line count>` entry per file.
 	GrepModeCount GrepMode = "count"
+	// GrepModeFilesWithout lists the files containing no matching line. Unlike
+	// files/count it has no match list to summarize: the page unit is a file
+	// that the scan actively proved to be match-free, which is why the walker
+	// has to read every candidate to its first match instead of stopping at a
+	// page boundary.
+	GrepModeFilesWithout GrepMode = "files_without"
 )
 
-// NormalizeGrepMode parses the mode spelling. The shared core deliberately has
-// no files_without mode yet: that one requires a full scan of every file, and
-// until both engines implement it, declaring it would be a promise neither can
-// keep.
+// NormalizeGrepMode parses the mode spelling, including the rg-compatible
+// `files_without` aliases (`--files-without-match`).
 func NormalizeGrepMode(raw string) (GrepMode, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", string(GrepModeContent):
@@ -33,9 +37,9 @@ func NormalizeGrepMode(raw string) (GrepMode, error) {
 	case string(GrepModeCount):
 		return GrepModeCount, nil
 	case "files_without", "files-without", "files_without_match", "files_without_matches":
-		return "", fmt.Errorf("mode %q is not supported by the shared grep core yet", raw)
+		return GrepModeFilesWithout, nil
 	default:
-		return "", fmt.Errorf("unknown mode %q (supported: content, files, count)", raw)
+		return "", fmt.Errorf("unknown mode %q (supported: content, files, files_without, count)", raw)
 	}
 }
 
@@ -87,17 +91,55 @@ func ApplyGrepPageWindow(result *GrepResult, mode GrepMode, opts GrepOptions) {
 		return
 	}
 	result.Mode = mode
-	if mode == GrepModeContent {
+	switch mode {
+	case GrepModeContent:
 		ApplyGrepWindow(result, opts)
-		return
+	case GrepModeFilesWithout:
+		// engines fill Files directly: there is no match list to group.
+		applyGrepFileEntriesWindow(result, mode, opts, result.Files)
+	default:
+		ApplyGrepFileWindow(result, mode, opts)
 	}
-	ApplyGrepFileWindow(result, mode, opts)
+}
+
+// GrepFilesWithoutComplete reports whether the collected no-match files already
+// fill the page plus the one extra entry that proves has_more.
+func GrepFilesWithoutComplete(files []GrepFileSummary, opts GrepOptions) bool {
+	limit := opts.Limit
+	if limit < 1 {
+		limit = DefaultGrepLimit
+	}
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	return len(files) > offset+limit
+}
+
+// GrepResultPageComplete reports whether the collected result already covers
+// the page plus the evidence entry for its mode. It is the one stop condition
+// the engines and the walker share, so a page means the same thing everywhere.
+func GrepResultPageComplete(result *GrepResult, mode GrepMode, opts GrepOptions) bool {
+	if result == nil {
+		return false
+	}
+	if mode == GrepModeFilesWithout {
+		return GrepFilesWithoutComplete(result.Files, opts)
+	}
+	return GrepPageComplete(result.Matches, mode, opts)
 }
 
 // ApplyGrepFileWindow reduces raw matches to the page of files for files/count
 // modes. Entries keep first-match order and only files with complete counts are
 // emitted.
 func ApplyGrepFileWindow(result *GrepResult, mode GrepMode, opts GrepOptions) {
+	applyGrepFileEntriesWindow(result, mode, opts, SummarizeGrepFiles(result.Matches))
+}
+
+// applyGrepFileEntriesWindow slices a file-entry list to the requested page. It
+// is the single window for every file-valued mode: files/count feed it grouped
+// matches, files_without feeds the proven no-match files it collected.
+func applyGrepFileEntriesWindow(result *GrepResult, mode GrepMode, opts GrepOptions, entries []GrepFileSummary) {
 	limit := opts.Limit
 	if limit < 1 {
 		limit = DefaultGrepLimit
@@ -107,7 +149,6 @@ func ApplyGrepFileWindow(result *GrepResult, mode GrepMode, opts GrepOptions) {
 		offset = 0
 	}
 
-	entries := SummarizeGrepFiles(result.Matches)
 	if offset > 0 {
 		if offset >= len(entries) {
 			entries = nil

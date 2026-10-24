@@ -132,11 +132,15 @@ func TestGrepCountModeCompleteCountsAcrossPage(t *testing.T) {
 
 func TestNormalizeGrepMode(t *testing.T) {
 	cases := map[string]GrepMode{
-		"":        GrepModeContent,
-		"content": GrepModeContent,
-		"files":   GrepModeFiles,
-		" FILES ": GrepModeFiles,
-		"count":   GrepModeCount,
+		"":                      GrepModeContent,
+		"content":               GrepModeContent,
+		"files":                 GrepModeFiles,
+		" FILES ":               GrepModeFiles,
+		"count":                 GrepModeCount,
+		"files_without":         GrepModeFilesWithout,
+		"files-without":         GrepModeFilesWithout,
+		"files_without_match":   GrepModeFilesWithout,
+		"FILES_WITHOUT_MATCHES": GrepModeFilesWithout,
 	}
 	for raw, want := range cases {
 		got, err := NormalizeGrepMode(raw)
@@ -147,9 +151,9 @@ func TestNormalizeGrepMode(t *testing.T) {
 			t.Fatalf("NormalizeGrepMode(%q) = %q, want %q", raw, got, want)
 		}
 	}
-	for _, raw := range []string{"files_without", "files_without_match", "bogus"} {
+	for _, raw := range []string{"bogus", "files_without_all"} {
 		if _, err := NormalizeGrepMode(raw); err == nil {
-			t.Fatalf("NormalizeGrepMode(%q) must fail: the shared core does not implement it", raw)
+			t.Fatalf("NormalizeGrepMode(%q) must fail", raw)
 		}
 	}
 }

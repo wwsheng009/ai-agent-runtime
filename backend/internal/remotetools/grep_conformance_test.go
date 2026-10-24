@@ -543,6 +543,45 @@ func TestRemoteGrepPatternFileOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepFilesWithoutOverMCP proves the mode is declared in the remote
+// schema and actually runs there: the local tool has always had it, and the
+// remote surface must not be a reduced copy.
+func TestRemoteGrepFilesWithoutOverMCP(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"hit.txt":  "needle\n",
+		"miss.txt": "nothing here\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	output := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "mode": "files_without",
+	})
+	if !strings.Contains(output, "miss.txt") {
+		t.Fatalf("files_without must list the file without a match:\n%s", output)
+	}
+	if strings.Contains(output, "hit.txt") {
+		t.Fatalf("files_without must not list a file that matches:\n%s", output)
+	}
+
+	// The rg-compatible boolean alias is part of the same contract.
+	aliased := callTool(t, ctx, session, "remote_dev__grep", map[string]interface{}{
+		"pattern": "needle", "files_without_match": true,
+	})
+	if !strings.Contains(aliased, "miss.txt") || strings.Contains(aliased, "hit.txt") {
+		t.Fatalf("files_without_match must equal mode=files_without:\n%s", aliased)
+	}
+}
+
 // TestRemoteGrepIgnoreOverMCP proves the ignore parameters survive schema
 // validation: .gitignore is respected by default, no_ignore disables the whole
 // mechanism, and an explicit ignore_file stacks on top of it.

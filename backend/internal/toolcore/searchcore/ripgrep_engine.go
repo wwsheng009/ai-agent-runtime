@@ -236,6 +236,11 @@ func (e Ripgrep) Grep(ctx context.Context, opts GrepOptions) (GrepResult, bool, 
 	combined := GrepResult{}
 	for _, root := range roots {
 		remaining := needed - collected(combined.Matches)
+		if mode == GrepModeFilesWithout {
+			// The page unit is the proven no-match file, so the per-root
+			// budget and the completion test count files, not matches.
+			remaining = needed - len(combined.Files)
+		}
 		if remaining < 1 {
 			break
 		}
@@ -255,7 +260,8 @@ func (e Ripgrep) Grep(ctx context.Context, opts GrepOptions) (GrepResult, bool, 
 		}
 		combined.FilesScanned += page.FilesScanned
 		combined.Matches = append(combined.Matches, page.Matches...)
-		if GrepPageComplete(combined.Matches, mode, opts) {
+		combined.Files = append(combined.Files, page.Files...)
+		if GrepResultPageComplete(&combined, mode, opts) {
 			break
 		}
 	}
@@ -290,6 +296,12 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	mode, err := NormalizeGrepMode(string(opts.Mode))
 	if err != nil {
 		return GrepResult{}, true, err
+	}
+	if mode == GrepModeFilesWithout && opts.MaxCountSet && opts.MaxCount == 0 {
+		// The local contract for an explicit `max_count: 0` is "this file
+		// produces no match", so every candidate is a no-match file. rg -m 0
+		// prints nothing instead, so this case belongs to the walker.
+		return GrepResult{}, false, nil
 	}
 	var globMatcher *GlobMatcher
 	globPatterns := append([]string{}, opts.Globs...)
@@ -341,7 +353,15 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		}
 	}
 
-	args := append(ripgrepBaseArgs(), "--text", "--json")
+	args := ripgrepBaseArgs()
+	if mode == GrepModeFilesWithout {
+		// rg ignores --json in this mode and prints plain paths, so the stats
+		// block is the only structured evidence available. It arrives after
+		// the paths; the parser below separates it from them.
+		args = append(args, "--text", "--stats", "--files-without-match")
+	} else {
+		args = append(args, "--text", "--json")
+	}
 	// The walker applies ignore files wherever they exist; ripgrep only applies
 	// them inside a git repository unless told otherwise (verified: without
 	// this flag a temp directory's .gitignore is not consulted at all).
@@ -447,7 +467,8 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	}
 	// Invert keeps whole lines (rg -o -v) and files mode only needs existence,
 	// so the flag is passed only where fragments are the output unit.
-	onlyMatching := opts.OnlyMatching && !opts.InvertMatch && mode != GrepModeFiles
+	onlyMatching := opts.OnlyMatching && !opts.InvertMatch &&
+		mode != GrepModeFiles && mode != GrepModeFilesWithout
 	if onlyMatching {
 		args = append(args, "--only-matching")
 	}
@@ -465,6 +486,10 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 		if result.SingleFile {
 			baseDir = filepath.Dir(roots[0])
 		}
+	}
+
+	if mode == GrepModeFilesWithout {
+		return e.grepRootFilesWithout(ctx, opts, mode, result, args, baseDir, globMatcher)
 	}
 
 	truncated := false
@@ -560,6 +585,107 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 // pure-Go walker instead of risking a silent false negative.
 func RipgrepGlobIsSafe(pattern string) bool {
 	return safeRipgrepGlob(pattern)
+}
+
+// grepRootFilesWithout parses `rg --files-without-match` output. ripgrep ignores
+// --json for this mode and prints one plain path per file, plus a trailing
+// --stats block; both are parsed here so the page, the has_more bit and the
+// scanned-file count mean the same thing as on every other engine.
+func (e Ripgrep) grepRootFilesWithout(ctx context.Context, opts GrepOptions, mode GrepMode, result GrepResult, args []string, baseDir string, globMatcher *GlobMatcher) (GrepResult, bool, error) {
+	lines := make([]string, 0, 64)
+	streamErr := e.stream()(ctx, args, "", func(line []byte) bool {
+		lines = append(lines, string(line))
+		return true
+	})
+	if streamErr != nil {
+		return GrepResult{}, true, streamErr
+	}
+	content, stats := splitRipgrepStatsTail(lines)
+	result.FilesScanned = stats.FilesSearched
+	truncated := false
+	for _, line := range content {
+		// Only the CR of CRLF is stripped: a path may legitimately begin or end
+		// with a space, and trimming it would name a different file.
+		display := strings.TrimRight(line, "\r")
+		if strings.TrimSpace(display) == "" {
+			continue
+		}
+		path := filepath.FromSlash(display)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(baseDir, path)
+		}
+		if globMatcher != nil && !globMatcher.Match(path) {
+			continue
+		}
+		result.Files = append(result.Files, GrepFileSummary{File: path})
+		if GrepFilesWithoutComplete(result.Files, opts) {
+			// One entry past the page proves has_more; stop reading.
+			truncated = true
+			break
+		}
+	}
+	ApplyGrepPageWindow(&result, mode, opts)
+	if truncated {
+		result.Truncated = true
+	}
+	return result, true, nil
+}
+
+// ripgrepStatsTail is the part of rg's --stats block the shared engine uses.
+type ripgrepStatsTail struct {
+	FilesSearched int
+}
+
+// splitRipgrepStatsTail separates the trailing --stats block from the path
+// lines. Paths are matched first: only a line that is exactly a stats sentence
+// belongs to the tail, so a file whose name contains prose stays a path.
+func splitRipgrepStatsTail(lines []string) ([]string, ripgrepStatsTail) {
+	end := len(lines)
+	for end > 0 && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	start := end
+	for start > 0 && isRipgrepStatsTailLine(strings.TrimSpace(lines[start-1])) {
+		start--
+	}
+	var stats ripgrepStatsTail
+	for _, line := range lines[start:end] {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == "files" && fields[2] == "searched" {
+			if value, err := strconv.Atoi(fields[0]); err == nil {
+				stats.FilesSearched = value
+			}
+		}
+	}
+	contentEnd := start
+	for contentEnd > 0 && strings.TrimSpace(lines[contentEnd-1]) == "" {
+		contentEnd--
+	}
+	return lines[:contentEnd], stats
+}
+
+func isRipgrepStatsTailLine(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	if _, err := strconv.Atoi(fields[0]); err != nil {
+		if _, floatErr := strconv.ParseFloat(fields[0], 64); floatErr != nil {
+			return false
+		}
+	}
+	rest := strings.Join(fields[1:], " ")
+	switch rest {
+	case "matches", "matched lines", "files contained matches", "files searched",
+		"bytes printed", "bytes searched", "seconds spent searching", "seconds total":
+		return true
+	}
+	// ripgrep 14 prints the total as "0.001296 seconds"; 15 appends "total".
+	// Accepting only one spelling silently turns the other into a file path.
+	if len(fields) == 2 && fields[1] == "seconds" {
+		return true
+	}
+	return false
 }
 
 func safeRipgrepGlob(pattern string) bool {

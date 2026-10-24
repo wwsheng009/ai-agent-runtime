@@ -84,7 +84,7 @@ func renderGrepPage(in grepRenderInputs) grepPage {
 	var lines []string
 
 	switch {
-	case in.mode == GrepModeFiles:
+	case in.mode == GrepModeFiles || in.mode == GrepModeFilesWithout:
 		for _, entry := range in.result.Files {
 			lines = append(lines, in.displayPathFor(entry.File))
 		}
@@ -213,6 +213,16 @@ func renderGrepMetadataStamps(metadata map[string]any, page grepPage, result *Gr
 // renderGrepStatsSummary prints the stats block in the local tool's rg-style
 // wording, appended to the page when stats was requested.
 func renderGrepStatsSummary(summary GrepStats) string {
+	if summary.Mode == GrepModeFilesWithout {
+		// The mode never collects matches, so the match counters would be a
+		// fabricated zero. Report only what the scan actually observed.
+		return strings.Join([]string{
+			"-- stats --",
+			fmt.Sprintf("files without matches: %d", summary.FilesWithoutMatched),
+			fmt.Sprintf("files searched: %d", summary.FilesScanned),
+			fmt.Sprintf("bytes printed: %d", summary.BytesPrinted),
+		}, "\n")
+	}
 	lines := []string{
 		"-- stats --",
 		fmt.Sprintf("matches: %d", summary.Matches),

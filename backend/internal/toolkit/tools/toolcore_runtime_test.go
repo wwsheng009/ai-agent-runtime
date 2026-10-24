@@ -81,3 +81,49 @@ func TestLocalCoreRuntimeUsesRipgrepThroughSearcher(t *testing.T) {
 		t.Fatalf("expected matches in output:\n%s", rgRun.Content)
 	}
 }
+
+// TestLocalCoreRuntimeFilesWithoutMatchesAcrossEngines runs files_without
+// through the real local tool entry point: the same page, the same metadata and
+// the same rendering on both engines. This is the mode where rg ignores --json,
+// so it is the one most likely to drift between the two implementations.
+func TestLocalCoreRuntimeFilesWithoutMatchesAcrossEngines(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"a.txt": "needle a\n",
+		"b.txt": "nothing here\n",
+		"c.txt": "also nothing\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := map[string]interface{}{
+		"pattern": "needle", "path": ".", "mode": "files_without",
+	}
+
+	walkerRun := runLocalCoreGrep(t, root, false, args)
+	if got := walkerRun.Metadata["engine"]; got != "walker" {
+		t.Fatalf("engine = %v, want walker when rg is unavailable", got)
+	}
+	rgRun := runLocalCoreGrep(t, root, true, args)
+	if got := rgRun.Metadata["engine"]; got != "ripgrep" {
+		t.Fatalf("engine = %v, want ripgrep when rg is available", got)
+	}
+	if rgRun.Content != walkerRun.Content {
+		t.Fatalf("engine outputs diverged:\nwalker:\n%s\nripgrep:\n%s", walkerRun.Content, rgRun.Content)
+	}
+	for _, want := range []string{"b.txt", "c.txt"} {
+		if !strings.Contains(rgRun.Content, want) {
+			t.Fatalf("expected %q in files_without output:\n%s", want, rgRun.Content)
+		}
+	}
+	if strings.Contains(rgRun.Content, "a.txt") {
+		t.Fatalf("a.txt matches and must not be listed:\n%s", rgRun.Content)
+	}
+	if got := rgRun.Metadata["mode"]; got != "files_without" {
+		t.Fatalf("mode = %v, want files_without", got)
+	}
+	if got := rgRun.Metadata["match_count"]; got != 0 {
+		t.Fatalf("files_without has no match lines to count, got match_count=%v", got)
+	}
+}

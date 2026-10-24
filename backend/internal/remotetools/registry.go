@@ -357,12 +357,16 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 			},
 			"mode": map[string]interface{}{
 				"type":        "string",
-				"enum":        []string{"content", "files", "count"},
-				"description": "输出模式：content=显示匹配行（默认），files=仅列出包含匹配的文件，count=每个文件的匹配行数（path:count）。files/count 模式下 limit/offset 以「文件」为单位，next_offset/has_more 同口径。files_without 模式当前不可用。",
+				"enum":        []string{"content", "files", "files_without", "count"},
+				"description": "输出模式：content=显示匹配行（默认），files=仅列出包含匹配的文件，files_without=仅列出不包含匹配的文件，count=每个文件的匹配行数（path:count）。三种文件级模式（files/files_without/count）下 limit/offset 以「文件」为单位，next_offset/has_more 同口径。files_without 需要读每个候选文件直到首个匹配（或读到 EOF 证明无匹配），因此比其它模式扫描更久，且 max_count=0 时所有候选都算无匹配。",
 			},
 			"files_with_matches": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容 rg 的 --files-with-matches/-l；等价于 mode=files。",
+			},
+			"files_without_match": map[string]interface{}{
+				"type":        "boolean",
+				"description": "兼容 rg 的 --files-without-match；等价于 mode=files_without。",
 			},
 			"count": map[string]interface{}{
 				"type":        "boolean",

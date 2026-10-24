@@ -24,6 +24,7 @@ var coreSearchParams = map[string]bool{
 	"limit": true, "offset": true,
 	"type": true, "file_type": true, "type_not": true,
 	"mode": true, "files_with_matches": true, "count": true,
+	"files_without_match": true, "files_without_matches": true,
 	"max_count": true, "max_depth": true, "max_filesize": true,
 	"stats": true, "only_matching": true,
 	"context": true, "before_context": true, "after_context": true,
