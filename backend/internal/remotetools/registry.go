@@ -405,6 +405,12 @@ func buildRegistry(cfg *Config, workspace *Workspace) (*buildResult, error) {
 				"type":        "boolean",
 				"description": "显式关闭隐藏文件：与 hidden 同时出现时 no_hidden 优先。",
 			},
+			"unrestricted_level": map[string]interface{}{
+				"type":        "integer",
+				"minimum":     0,
+				"maximum":     3,
+				"description": "兼容 rg 的 -u/-uu/-uuu/--unrestricted 层级：0=默认，1=不读 ignore 文件，2=同时搜索隐藏文件/目录，3=同时搜索含 NUL 字节的二进制文件（越过 NUL 继续匹配，但输出里的 NUL 显示为 ␀，保证文本可读）。no_hidden 仍然优先于该层级的隐藏步骤；no_ignore=true 等价于 1。",
+			},
 			"no_ignore": map[string]interface{}{
 				"type":        "boolean",
 				"description": "兼容 rg 的 --no-ignore：完全关闭 ignore 文件（.gitignore/.ignore/.rgignore/.git/info/exclude/祖先/全局都不再生效）。默认行为是尊重这些 ignore 文件。",

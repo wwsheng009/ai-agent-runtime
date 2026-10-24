@@ -173,8 +173,11 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 	if sizeFailure != nil {
 		return sizeFailure, nil
 	}
-	// `no_hidden` wins over `hidden`, mirroring the local parameter pair.
-	includeHidden := boolArg(call.Args, "hidden") && !boolArg(call.Args, "no_hidden")
+	unrestricted, noIgnore := grepUnrestrictedFromArgs(call.Args)
+	// `no_hidden` wins over both `hidden` and the ladder's hidden step,
+	// mirroring the local parameter pair.
+	includeHidden := !boolArg(call.Args, "no_hidden") &&
+		(boolArg(call.Args, "hidden") || unrestricted >= 2)
 	ignoreFiles, ignoreFailure := grepIgnoreFilesFromArgs(call, paths, roots)
 	if ignoreFailure != nil {
 		return ignoreFailure, nil
@@ -215,7 +218,8 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		MaxDepthSet:      maxDepthSet,
 		MaxFileSizeBytes: maxFileSizeBytes,
 		IncludeHidden:    includeHidden,
-		NoIgnore:         boolArg(call.Args, "no_ignore"),
+		Unrestricted:     unrestricted,
+		NoIgnore:         noIgnore,
 		NoIgnoreParent:   boolArg(call.Args, "no_ignore_parent"),
 		NoIgnoreVCS:      boolArg(call.Args, "no_ignore_vcs"),
 		NoIgnoreDot:      boolArg(call.Args, "no_ignore_dot"),
@@ -335,6 +339,7 @@ func (h *grepHandler) Execute(ctx context.Context, call *toolcore.Call) (*toolco
 		"word":               options.Word,
 		"line_regexp":        options.LineRegexp,
 		"hidden":             options.IncludeHidden,
+		"unrestricted_level": options.Unrestricted,
 	}
 	if boolArg(call.Args, "stats") {
 		// Page-level statistics, not a whole-search summary: see GrepStats.
@@ -539,6 +544,30 @@ func grepModeFromArgs(args map[string]any) (GrepMode, *toolcore.Result) {
 		return "", toolcore.Error(toolcore.ErrInvalidArgument, "use mode=content|files|files_without|count", err)
 	}
 	return mode, nil
+}
+
+// grepUnrestrictedFromArgs folds the rg-compatible `-u/-uu/-uuu` ladder and its
+// structured spellings into one level plus the ignore switch it implies.
+//
+// The local tool has always treated these as one control: level 0 is the
+// default, 1 disables ignore files, 2 also searches hidden paths, 3 also looks
+// past a file's first NUL byte. `no_ignore: true` is the same thing as level 1,
+// which is how the parameter was documented before the ladder existed.
+func grepUnrestrictedFromArgs(args map[string]any) (int, bool) {
+	level, set := intArgOK(args, "unrestricted_level")
+	if set {
+		if level < 0 {
+			level = 0
+		}
+		if level > 3 {
+			level = 3
+		}
+		return level, level > 0
+	}
+	if boolArg(args, "no_ignore") {
+		return 1, true
+	}
+	return 0, false
 }
 
 // grepIgnoreFilesFromArgs resolves the explicit ignore_file(s) spellings into

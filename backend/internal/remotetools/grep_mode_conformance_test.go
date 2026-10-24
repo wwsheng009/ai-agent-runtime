@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolcore/searchcore"
@@ -147,6 +148,95 @@ func TestRemoteGrepFilesWithoutMatchesWalker(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRemoteGrepBinaryHandlingMatchesWalker pins the binary contract across
+// engines. The two implementations decide "is this file binary" in completely
+// different ways (a fixed head probe versus ripgrep's own detector), so this is
+// exactly the kind of divergence a shared contract must catch.
+func TestRemoteGrepBinaryHandlingMatchesWalker(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"plain.txt":   "needle plain\n",
+		"before.dat":  "needle before\x00DATA\n",
+		"after.dat":   "DATA\x00needle after\n",
+		"nomatch.dat": "DATA\x00DATA\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := resolveRipgrepRunner()
+
+	for _, level := range []int{0, 1, 2, 3} {
+		t.Run(fmt.Sprintf("level %d", level), func(t *testing.T) {
+			opts := searchcore.GrepOptions{
+				Pattern: "needle", Path: root, Limit: 50,
+				Unrestricted: level, NoIgnore: level > 0,
+			}
+			walker, err := searchcore.Grep(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("walker: %v", err)
+			}
+			if !runner.available() {
+				return
+			}
+			rgResult, used, rgErr := runner.grep(context.Background(), opts)
+			if rgErr != nil || !used {
+				t.Fatalf("ripgrep used=%v err=%v", used, rgErr)
+			}
+			if got, want := grepMatchFiles(rgResult), grepMatchFiles(walker); !equalStringSlices(got, want) {
+				t.Fatalf("engines diverged at level %d:\nripgrep: %v\nwalker:  %v", level, got, want)
+			}
+			// Line numbers must agree too. This is the regression guard for the
+			// first implementation, which used rg --binary: that flag makes the
+			// NUL a line terminator, so "a\0b" became lines 1 and 2 while the
+			// walker kept it as one line.
+			if got, want := grepMatchLines(rgResult), grepMatchLines(walker); !equalStringSlices(got, want) {
+				t.Fatalf("engines disagreed on match lines at level %d:\nripgrep: %v\nwalker:  %v", level, got, want)
+			}
+			for _, match := range rgResult.Matches {
+				if strings.ContainsRune(match.Text, 0) {
+					t.Fatalf("ripgrep emitted a raw NUL: %q", match.Text)
+				}
+			}
+		})
+	}
+}
+
+func grepMatchLines(result searchcore.GrepResult) []string {
+	out := make([]string, 0, len(result.Matches))
+	for _, match := range result.Matches {
+		out = append(out, fmt.Sprintf("%s:%d:%s", filepath.Base(match.File), match.Line, match.Text))
+	}
+	return out
+}
+
+func grepMatchFiles(result searchcore.GrepResult) []string {
+	seen := make(map[string]bool, len(result.Matches))
+	out := make([]string, 0, len(result.Matches))
+	for _, match := range result.Matches {
+		name := filepath.Base(match.File)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestRemoteGrepRejectsUnknownMode keeps a genuinely unknown spelling failing on

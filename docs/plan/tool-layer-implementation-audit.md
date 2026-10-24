@@ -305,6 +305,20 @@
   不是降级而是避免两引擎给出相反答案。`only_matching`/`context` 在该模式下是
   no-op（页单位是文件，片段展开改变不了内容），沿用 rg 的接受但不生效。
   remote 侧同时补 `mode=files_without` 枚举值与 `files_without_match` 布尔别名。
+  **`unrestricted_level` 上移 core，并修正二进制处理（2026-10-24）**：这是本地有、
+  remote 完全没有的语义参数，且暴露了一个翻转时引入的回归——core 曾无条件给 rg 传
+  `--text`，等于所有层级都把二进制当文本。实测（`rg-binary-handling-contract-20261022.md`
+  记录了全部原始输出）确定三件事：
+  1. rg 默认把「含 NUL 的文件」当作**第三种状态**：既不算 match，也不算 without-match。
+     因此 `files_without` 必须显式排除它——否则会断言「该文件无匹配」，而搜索从未证明过。
+  2. rg 的默认二进制判定依赖内部读缓冲（同一批文件里 64 KiB 内的 NUL 会隐藏第 1 行的匹配，
+     128 KiB 之后的不会），不是文件属性。core 改用**固定 8 KiB 头部探测**，保证同一文件
+     在任何页大小/搜索深度下分类一致。
+  3. `rg --binary` 会把 NUL 当换行（`a\0b` → 行 1 `a`、行 2 `b`），与 walker 的行号
+     不一致。**最终不用 `--binary`，用 `--text` + 输出脱敏**：`-uuu` 时保留原始行结构，
+     引擎把 NUL 替换为 `␀`，两引擎输出逐字节一致。
+  层级映射与本地一致：1 = 不读 ignore、2 = 加 hidden、3 = 加二进制；
+  `no_ignore=true` ≡ 层级 1，`no_hidden` 优先于层级里的 hidden 步骤。
   **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
   `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
   (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
@@ -317,9 +331,9 @@
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍在 `grep_core_switch.go` 里按参数集分流：四类 mode（content/
   files/files_without/count）与 context、include-exclude、type/type_not、max_count、
-  only_matching、max_depth/max_filesize、stats、pattern_file(s)、多根语义与 ignore 族
-  均已进 core，`rg_args`、`json` 透传、展示类开关（`column`/`trim`/`max_columns`/
-  `heading`/`color`）、`one_file_system`/`unrestricted`、读取侧 16MiB 流闸门、
+  only_matching、max_depth/max_filesize、stats、pattern_file(s)、多根语义、ignore 族
+  与 unrestricted_level 均已进 core，`rg_args`、`json` 透传、展示类开关（`column`/`trim`/`max_columns`/
+  `heading`/`color`）、`one_file_system`、读取侧 16MiB 流闸门、
   partial/timeout 标注与 path-not-found 候选提示仍在本地；
   本地 `view` 仍保留 symbol 解析、图片附件与特殊文件策略，`viewcore` 目前覆盖同构的
   文本窗口与 files/compact 批量路径；`apply_patch` 的账本、审批、备份与 LSP 通知属于

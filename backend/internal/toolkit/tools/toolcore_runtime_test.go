@@ -127,3 +127,53 @@ func TestLocalCoreRuntimeFilesWithoutMatchesAcrossEngines(t *testing.T) {
 		t.Fatalf("files_without has no match lines to count, got match_count=%v", got)
 	}
 }
+
+// TestLocalToolUnrestrictedLevelUsesSharedCore proves the local entry point
+// routes unrestricted_level into the shared handler rather than the legacy
+// path: the engine label must be the core's ("walker"/"ripgrep"), and the
+// binary file must be invisible until the top level.
+func TestLocalToolUnrestrictedLevelUsesSharedCore(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"plain.txt":  "needle plain\n",
+		"binary.dat": "DATA\x00needle after\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	run := func(level int) *toolkit.ToolResult {
+		t.Helper()
+		tool := NewGrepTool()
+		tool.SetBasePath(root)
+		tool.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+		result, err := tool.Execute(context.Background(), map[string]interface{}{
+			"pattern": "needle", "path": ".", "unrestricted_level": level,
+		})
+		if err != nil {
+			t.Fatalf("level %d: %v", level, err)
+		}
+		return result
+	}
+
+	defaultRun := run(0)
+	if got := defaultRun.Metadata["engine"]; got != "walker" {
+		t.Fatalf("unrestricted_level must route through the shared core, got engine=%v", got)
+	}
+	if strings.Contains(defaultRun.Content, "binary.dat") {
+		t.Fatalf("the default must skip the binary file:\n%s", defaultRun.Content)
+	}
+
+	topRun := run(3)
+	if got := topRun.Metadata["unrestricted_level"]; got != 3 {
+		t.Fatalf("unrestricted_level = %v, want 3", got)
+	}
+	if !strings.Contains(topRun.Content, "binary.dat") {
+		t.Fatalf("-uuu must search the binary file:\n%s", topRun.Content)
+	}
+	if strings.ContainsRune(topRun.Content, 0) {
+		t.Fatalf("a raw NUL reached the model-visible content:\n%q", topRun.Content)
+	}
+}

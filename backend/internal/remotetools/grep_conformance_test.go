@@ -499,6 +499,82 @@ func TestRemoteGrepHiddenOverMCP(t *testing.T) {
 	}
 }
 
+// TestRemoteGrepUnrestrictedOverMCP proves the -u/-uu/-uuu ladder survives
+// schema validation and runs the shared core: each level adds exactly one layer
+// (ignore files, then hidden paths, then binary files), and no_hidden still wins
+// over the ladder's hidden step.
+func TestRemoteGrepUnrestrictedOverMCP(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		".gitignore":        "ignored.txt\n",
+		"plain.txt":         "hit plain\n",
+		"ignored.txt":       "hit ignored\n",
+		".hidden.txt":       "hit hidden\n",
+		".secret/config.md": "hit secret\n",
+		"binary.dat":        "DATA\x00hit binary after nul\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := remotetools.NewServer(newTestConfig(t, root), "dev")
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	defer server.Close()
+	session, ctx := startTestSession(t, server)
+
+	grep := func(params map[string]interface{}) string {
+		t.Helper()
+		params["pattern"] = "hit"
+		return callTool(t, ctx, session, "remote_dev__grep", params)
+	}
+
+	level0 := grep(map[string]interface{}{"unrestricted_level": 0})
+	if strings.Contains(level0, "ignored.txt") || strings.Contains(level0, ".hidden.txt") ||
+		strings.Contains(level0, ".secret") || strings.Contains(level0, "binary.dat") {
+		t.Fatalf("level 0 must respect every filter:\n%s", level0)
+	}
+
+	level1 := grep(map[string]interface{}{"unrestricted_level": 1})
+	if !strings.Contains(level1, "ignored.txt") {
+		t.Fatalf("level 1 must stop reading ignore files:\n%s", level1)
+	}
+	if strings.Contains(level1, ".hidden.txt") {
+		t.Fatalf("level 1 must still skip hidden paths:\n%s", level1)
+	}
+
+	level2 := grep(map[string]interface{}{"unrestricted_level": 2})
+	if !strings.Contains(level2, "ignored.txt") || !strings.Contains(level2, ".hidden.txt") {
+		t.Fatalf("level 2 must add hidden paths:\n%s", level2)
+	}
+	if strings.Contains(level2, "binary.dat") {
+		t.Fatalf("level 2 must still skip binary files:\n%s", level2)
+	}
+
+	level3 := grep(map[string]interface{}{"unrestricted_level": 3})
+	if !strings.Contains(level3, "binary.dat") {
+		t.Fatalf("level 3 must search binary files:\n%s", level3)
+	}
+	if strings.ContainsRune(level3, 0) {
+		t.Fatalf("a raw NUL reached the remote payload:\n%q", level3)
+	}
+	if !strings.Contains(level3, "␀") {
+		t.Fatalf("the NUL should be rendered as a visible symbol:\n%s", level3)
+	}
+
+	// The ladder's hidden step is not a stronger authority than no_hidden.
+	suppressed := grep(map[string]interface{}{"unrestricted_level": 2, "no_hidden": true})
+	if strings.Contains(suppressed, ".hidden.txt") {
+		t.Fatalf("no_hidden must win over the ladder's hidden step:\n%s", suppressed)
+	}
+}
+
 // TestRemoteGrepPatternFileOverMCP proves pattern_file(s) survive schema
 // validation and behave like the local tool: each line becomes one pattern.
 func TestRemoteGrepPatternFileOverMCP(t *testing.T) {

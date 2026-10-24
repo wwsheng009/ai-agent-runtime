@@ -643,7 +643,9 @@ func newGrepTool(name string) *GrepTool {
 			},
 			"unrestricted_level": map[string]interface{}{
 				"type":        "integer",
-				"description": "兼容 rg 的 -u/-uu/-uuu/--unrestricted 语义层级：0=默认，1=放宽 ignore 过滤但仍保留 hidden 默认，2=继续放宽 hidden 文件/目录，3=继续放宽二进制文件。grep 会尽量按这个层级模拟 rg 的过滤顺序，并在 rg 可用时原样透传。",
+				"minimum":     0,
+				"maximum":     3,
+				"description": "兼容 rg 的 -u/-uu/-uuu/--unrestricted 语义层级：0=默认，1=不读 ignore 文件（仍跳过 hidden），2=同时搜索 hidden 文件/目录，3=同时搜索含 NUL 字节的二进制文件（越过 NUL 继续匹配；输出中的 NUL 显示为 ␀，保证可读）。no_hidden 优先于该层级的隐藏步骤；no_ignore=true 等价于层级 1。本地与 remote 使用同一实现。",
 			},
 			"no_config": map[string]interface{}{
 				"type":        "boolean",

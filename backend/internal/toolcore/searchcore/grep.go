@@ -68,6 +68,14 @@ type GrepOptions struct {
 	// for it, which is both the long-standing local behaviour and ripgrep's own
 	// default.
 	IncludeHidden bool
+	// Unrestricted is rg's -u/-uu/-uuu ladder. Only the top level changes which
+	// bytes a search can see: 1 and 2 are expressible as NoIgnore/IncludeHidden
+	// (the handler already folds them), while 3 additionally lets a file be
+	// searched past its first NUL byte. Under the default the file ends at the
+	// first NUL, exactly like ripgrep; under 3 the remaining lines are searched
+	// but the NUL itself is never emitted (rg --binary also stops the *display*
+	// at the NUL, and a raw NUL in tool output is unreadable to a model).
+	Unrestricted int
 	// Ignore-file handling follows the local tool: `.ignore`/`.rgignore`,
 	// `.gitignore`, `.git/info/exclude`, ancestor directories and the two global
 	// candidates are consulted unless a switch turns that source off, and
@@ -243,6 +251,12 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 			}
 			return nil
 		}
+		if opts.Unrestricted < 3 && grepFileIsBinary(path) {
+			// ripgrep's default: a file with a NUL byte is skipped outright.
+			// It is neither a match nor a proven no-match file, so it is
+			// reported to neither mode. -uuu (Unrestricted 3) searches it.
+			return nil
+		}
 		result.FilesScanned++
 		file, openErr := os.Open(path)
 		if openErr != nil {
@@ -282,14 +296,18 @@ func Grep(ctx context.Context, opts GrepOptions) (GrepResult, error) {
 						File:   path,
 						Line:   lineNo,
 						Column: loc[0] + 1,
-						Text:   string(display[loc[0]:loc[1]]),
+						Text:   sanitizeGrepNulText(string(display[loc[0]:loc[1]])),
 					})
 					if GrepPageComplete(result.Matches, mode, opts) {
 						return filepath.SkipAll
 					}
 				}
 			} else {
-				result.Matches = append(result.Matches, GrepMatch{File: path, Line: lineNo, Text: string(display)})
+				result.Matches = append(result.Matches, GrepMatch{
+					File: path,
+					Line: lineNo,
+					Text: sanitizeGrepNulText(string(display)),
+				})
 			}
 			fileLines++
 			if GrepPageComplete(result.Matches, mode, opts) {

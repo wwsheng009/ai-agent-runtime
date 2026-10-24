@@ -354,13 +354,26 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 	}
 
 	args := ripgrepBaseArgs()
+	// Binary handling follows the walker: the default behaves like ripgrep's own
+	// default (a NUL byte ends the search for that file), and only the top
+	// unrestricted level lets ripgrep look past it.
+	//
+	// --text rather than --binary, even though both read past the NUL: rg's
+	// --binary treats the NUL as a line terminator for *display*, so a line like
+	// "a\0b" is reported as line 1 "a" and line 2 "b". The walker has no such
+	// notion, so --binary would give the same files but different line numbers.
+	// --text keeps the line structure and the NUL itself; the engine then
+	// sanitizes that NUL into a printable symbol before it reaches the caller.
+	if opts.Unrestricted >= 3 {
+		args = append(args, "--text")
+	}
 	if mode == GrepModeFilesWithout {
 		// rg ignores --json in this mode and prints plain paths, so the stats
 		// block is the only structured evidence available. It arrives after
 		// the paths; the parser below separates it from them.
-		args = append(args, "--text", "--stats", "--files-without-match")
+		args = append(args, "--stats", "--files-without-match")
 	} else {
-		args = append(args, "--text", "--json")
+		args = append(args, "--json")
 	}
 	// The walker applies ignore files wherever they exist; ripgrep only applies
 	// them inside a git repository unless told otherwise (verified: without
@@ -530,6 +543,9 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 			if len(text) > MaxGrepLineBytes {
 				text = text[:MaxGrepLineBytes] + "…"
 			}
+			// A raw NUL must never reach the caller: it truncates the string in
+			// most clients and hides everything after it.
+			text = sanitizeGrepNulText(text)
 			if onlyMatching && len(event.Data.Submatches) > 0 {
 				for _, sub := range event.Data.Submatches {
 					if sub.Start < 0 || sub.End > len(lineText) || sub.Start >= sub.End {
@@ -546,7 +562,7 @@ func (e Ripgrep) grepRoot(ctx context.Context, opts GrepOptions) (GrepResult, bo
 						File:   matchPath,
 						Line:   event.Data.LineNumber,
 						Column: sub.Start + 1,
-						Text:   fragment,
+						Text:   sanitizeGrepNulText(fragment),
 					})
 					if GrepPageComplete(result.Matches, mode, opts) {
 						truncated = true

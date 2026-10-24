@@ -29,7 +29,8 @@ var coreSearchParams = map[string]bool{
 	"stats": true, "only_matching": true,
 	"context": true, "before_context": true, "after_context": true,
 	"hidden": true, "no_hidden": true,
-	"no_ignore": true, "no_ignore_parent": true, "no_ignore_vcs": true,
+	"unrestricted_level": true,
+	"no_ignore":          true, "no_ignore_parent": true, "no_ignore_vcs": true,
 	"no_ignore_dot": true, "no_ignore_global": true, "no_ignore_files": true,
 	"ignore_file": true, "ignore_files": true,
 }
