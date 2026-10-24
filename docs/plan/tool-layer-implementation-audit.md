@@ -241,6 +241,15 @@
   规则排除，`hidden: true` 时可进入。另修正一个实测发现：非 git 目录下 rg 默认不套用
   `.gitignore`，需 `--no-require-git`（无该旗标时 temp 目录的 `.gitignore` 完全不生效），
   否则 walker 与 rg 同一目录结果不同。
+  **复测翻转影响面（同日，同样临时启用后回退）**：作用域统一后再次临时切换，
+  `internal/toolkit/tools` 仍有 **44 个失败**，但类别已从「行为分歧」转为三类工程缺口：
+  (a) core 路径没有本地 rg 引擎（`PrefersRipgrepWhenAvailable`、`FallsBack…`、
+  `*TranslateToRipgrep*` 等 ~12 个，需给本地适配器接 `Searcher`）；
+  (b) 本地输出/预算层仍未归属（`ByteBudget…`、`RealRipgrepStops…`、`KeepsPartialOutput…`、
+  `CompleteResultHasNoObservedAnnotation`、`BudgetOwningTools…` 等）；
+  (c) 测试仍钉住本地 metadata/渲染形状（空结果中文文案、`stats` shape、`>` 标记、
+  单文件显示路径、path-not-found 提示）以及 `one_file_system`/`unrestricted` 这类 core
+  尚未实现的本地参数。翻转顺序保持：本地 rg runner → 输出层归属 → 分批迁移测试。
 - **缺口**: 无跨平台 conformance suite（Linux/Windows 文件命名/路径差异），需扩展；
   本地 `grep` 主流程仍为 legacy（模式含 files/count、context、include-exclude、
   type/type_not、max_count、only_matching、max_depth/max_filesize、stats、多根语义
