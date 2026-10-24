@@ -461,4 +461,81 @@ guard 测试文件全部不动。
 
 接口定完，本地 `ViewFileRequest` 上那三个 `*Defer` 字段就可以删掉，
 `recordDerivedRender` 也跟着简化。这一步做完，view 只剩符号解析、图片/文档渲染
-和 `annotateIgnoredBatchWindow`，然后就能翻转 `Execute`。
+和 `annotateIgnoredBatchWindow`，然后就能翻转 `Execute`。## view 第三段已收敛（2026-10-25）：批处理聚合窗口
+
+上一节说「批处理必须先定接口」，定完就做了。这是 remote 侧最大的一处能力缺口，
+也是唯一还整段留在本地的读逻辑。
+
+### 搬进 `viewcore/batch.go`
+
+- **逐项默认**：`BatchDefaultLimit = 200`、compact 的 10 行头窗口、`MaxLimit` 截断。
+- **聚合窗口**：`BatchSectionBudgetBytes()` = 声明的 64 KiB 减去 4 KiB 尾块预留
+  （下限是单窗口的 32 KiB）；两道准入检查（读之前一次、分节拼出来之后一次）；
+  `===== batch window =====` 块公布「已读取 X/N，跳过 K 个」。
+- **有界错误块**：`BatchFailureDetailLimit = 20` 条明细 + 省略数量的披露。
+- `trimBatchTail`（按 UTF-8 边界裁剪并说明「尾部细节已按聚合预算截断」）、失败行、
+  以及全部批处理元数据词汇（`request_count` / `succeeded_count` / `failed_count` /
+  `partial_failure` / `items` / `batch_default_limit_applied` / `batch_skipped_*`）。
+- 全失败时的 `批量读取失败: …` 形状。
+
+**逐项读取是注入的**（`viewcore.ReadItem`）：某个面独有的逐项能力（宿主渲染器、
+宿主的读状态）保留在自己手里，而**不该漂移的策略**由 core 独占。它还顺带返回这次
+读取欠宿主的账（`viewcore.DeliveredRead`）——batch 只在**这一节真的被写进正文之后**
+才 commit。这部分是整块里最微妙的：被聚合上限丢掉的那一节既不能进读台账，也不能
+烧掉去重条目（review m13/H4）。
+
+### 新接口：`toolcore.ReadObserver` + `toolcore.ReadWindow`
+
+```
+ReadDelivered / ReadRemembered / RememberedStub
+```
+
+和 `MutationObserver` 同一个理由：会话读台账与「已交付窗口」缓存是**宿主状态**
+（remote 主机没服务过这次读取，台账在那里没有意义），而**什么时候可以写条目**的
+策略不能每个面各写一遍。所以「什么算一个完整窗口」由共享 handler 判定
+（`viewcore.DeliveredWindow` 挨着 `WindowMetadata`），宿主只知道写到哪去；本地
+runtime 用已有的 ledger / dedup 助手实现这三个方法，没有这个扩展的 runtime 就是
+无状态的——remote 一直如此。
+
+### 对拍又逼出两处收敛
+
+1. **缺失路径文案带候选**：本地说 `路径不存在: a.txt\n<候选>`，core 原来只回一句
+   stat 错误。现在 core 接上了早就存在的 `toolcore.PathHinter`（本地 sandbox 与
+   remote workspace 各自实现），两边同一句话。
+2. **core 的批处理词汇退场**：`count` / `files` / `failed` 与 `[compact: …]` 摘要
+   换成上表那套本地词汇与 `... lines_read=…, is_truncated=…` 摘要。
+
+### 证据
+
+- `TestViewLocalAndCoreRenderTheSameBatch`（新）：三个批次——带一个失败项的混合批、
+  compact 扫描、以及**超出分节预算**的批——分别走本地工具与 core handler，断言正文
+  **逐字节相同**且 16 个批处理元数据字段相同。
+- 每个用例还钉住自己的结果（`wantFailed` / `wantSkipped`）：这一条不是形式主义——
+  第一版的「超预算」用例只放了两个请求，两个 ~28 KiB 的分节刚好塞进 61 KiB 预算，
+  于是它在比较「两个空跳过记录」，什么也没验证；断言把它抓住了，改成三个请求后
+  `batch_skipped_count == 1` 才真正跑在跳过路径上。
+- `viewcore` 的批处理测试按本地契约更新；`go build` / `go vet` 干净；
+  `./internal/...` 全绿（163 个包），除上一节记录的本机预存在失败。
+
+提交：`1ac9ac51`。本地 `view.go` 现在 **702 行**，`executeBatch` 只剩 30 行适配器。
+
+## 下一轮：view 只剩三块
+
+1. **路径拼写治愈**（原清单第 6 项）：`healSpellingPath` 要真的读成功，不只是
+   `PathHinter` 那样解释失败。宿主提供候选（拼写枚举依赖文件系统枚举），core 决定
+   「唯一候选就采用、多个候选就报错」的策略与文案。注意它必须发生在 `os.Stat`
+   失败之后、真正读取之前，和本地同序。
+2. **符号解析**（第 5 项）：`CodeIndexResolver` + `resolveViewSymbol` +
+   `annotateViewSymbolNote`。工具能力进 core，注入的索引实现留宿主；remote 侧已经
+   用 `FilterSchemaParams(ParamSymbol)` 把参数摘掉了，本地翻过去之后这条路径才真正
+   一分为二。
+3. **宿主渲染器 + 翻转 `Execute`**（第 4 项）：图片直通（含
+   `SetImageAttachmentTokenLimit` 的 token 闸门）、文档/notebook 渲染与
+   `recordDerivedRender`、`annotateIgnoredBatchWindow`。做完这些，本地就不再有
+   `executeSingle`，`ViewFileRequest` 上那三个 `*Defer` 字段和
+   `viewMetadataInt` 也一起消失。
+
+顺序建议：1（纯工具能力，形最小）→ 2 → 3（翻转）。第 3 块之前要先确认一件事：
+文档/notebook 渲染依赖宿主的转换器（`docread`、`ipynb`），按「工具能力进 core、
+宿主能力留宿主」的划分，渲染本身是纯函数（输入路径与 head，输出 markdown），
+因此可以整体进 core，真正留宿主的只有「附件投递」和「台账写入」。
