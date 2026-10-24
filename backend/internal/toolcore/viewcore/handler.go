@@ -2,6 +2,7 @@ package viewcore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -52,6 +53,28 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 	}
 
 	requests, compact := viewRequests(call.Args)
+	// `symbol` wins over the file window it was passed: a resolved symbol names
+	// exactly where to read, and a surface whose index cannot answer falls back
+	// to the file window with a note instead of failing.
+	symbolWindow := false
+	symbolNote := ""
+	if symbol := strings.TrimSpace(stringArg(call.Args, "symbol")); symbol != "" {
+		target, found := toolcore.SymbolTarget{}, false
+		if resolver := symbolResolver(call); resolver != nil {
+			target, found = resolver.ResolveSymbol(ctx, symbol, intArg(call.Args, "limit", 0))
+		}
+		switch {
+		case found:
+			requests = []Request{{FilePath: target.Path, Offset: target.Offset, Limit: target.Limit}}
+			symbolWindow = true
+		case strings.TrimSpace(stringArg(call.Args, "file_path")) != "":
+			symbolNote = SymbolFallbackNote(symbol)
+		default:
+			return toolcore.Error(toolcore.ErrInvalidArgument,
+				"改用 file_path+offset/limit 或 grep",
+				errors.New(SymbolFailureMessage(symbol))), nil
+		}
+	}
 	if len(requests) == 0 {
 		return toolcore.Error(toolcore.ErrInvalidArgument, "pass file_path or files", nil), nil
 	}
@@ -66,11 +89,12 @@ func (h *handler) Execute(ctx context.Context, call *toolcore.Call) (*toolcore.R
 		}
 	}
 
-	if len(requests) == 1 && !hasFilesArg(call.Args) {
+	if len(requests) == 1 && (!hasFilesArg(call.Args) || symbolWindow) {
 		result, delivered := h.readTarget(call, paths, requests[0], DefaultLimit)
 		// A single read is delivered as soon as it is produced: there is no
 		// aggregate cap that could drop it.
 		delivered.Commit()
+		AttachSymbolNote(result.Metadata, &result.Content, symbolNote)
 		return shapeResult(call, h.def.Name, result), nil
 	}
 
@@ -273,6 +297,15 @@ func shapeResult(call *toolcore.Call, toolName string, result *toolcore.Result) 
 	return result
 }
 
+// symbolResolver returns the surface's code-index extension, if it has one.
+func symbolResolver(call *toolcore.Call) toolcore.SymbolResolver {
+	if call == nil || call.Runtime == nil {
+		return nil
+	}
+	resolver, _ := call.Runtime.(toolcore.SymbolResolver)
+	return resolver
+}
+
 // permissionChecker returns the surface's authorization hook, if it has one.
 // A runtime without one admits every already-resolved path.
 func permissionChecker(call *toolcore.Call) toolcore.PermissionChecker {
@@ -324,6 +357,14 @@ func byteBudget(call *toolcore.Call, def toolcore.Definition) int {
 		return def.DefaultOutputBudget
 	}
 	return DefaultByteBudget
+}
+
+func stringArg(args map[string]any, key string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	value, _ := args[key].(string)
+	return value
 }
 
 func intArg(args map[string]any, key string, fallback int) int {

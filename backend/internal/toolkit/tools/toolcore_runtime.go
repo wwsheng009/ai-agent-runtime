@@ -32,6 +32,9 @@ type localCoreRuntime struct {
 	searcher coreSearcher
 	ctx      context.Context
 	base     string
+	// symbolResolver is the tool's injected code index, when it has one. The
+	// index itself never leaves the host: only the resolved window crosses.
+	symbolResolver toolcore.SymbolResolver
 	// insideGitWorkTree reports whether a directory is covered by version
 	// control. A work tree already holds the pre-edit content, so the local host
 	// does not ask for a `.backups/` copy there.
@@ -486,6 +489,35 @@ func (r *localCoreRuntime) Relative(abs string) string {
 		return abs
 	}
 	return filepath.ToSlash(rel)
+}
+
+// ResolveSymbol exposes the tool's injected code index to the shared handler, so
+// a `symbol` request resolves the same way on every surface that has one.
+func (r *localCoreRuntime) ResolveSymbol(ctx context.Context, name string, limit int) (toolcore.SymbolTarget, bool) {
+	if r == nil || r.symbolResolver == nil {
+		return toolcore.SymbolTarget{}, false
+	}
+	return r.symbolResolver.ResolveSymbol(ctx, name, limit)
+}
+
+// localSymbolResolver adapts the local view tool's code index to the
+// toolcore.SymbolResolver seam. The index, its shadow-mode rule and the
+// path-for-file mapping stay in the tool; the shared handler only receives the
+// window to read.
+type localSymbolResolver struct {
+	tool *ViewTool
+	ctx  context.Context
+}
+
+func (r localSymbolResolver) ResolveSymbol(_ context.Context, name string, limit int) (toolcore.SymbolTarget, bool) {
+	if r.tool == nil {
+		return toolcore.SymbolTarget{}, false
+	}
+	window, ok := r.tool.resolveViewSymbol(r.ctx, name, limit)
+	if !ok {
+		return toolcore.SymbolTarget{}, false
+	}
+	return toolcore.SymbolTarget{Path: window.FilePath, Offset: window.Offset, Limit: window.Limit}, true
 }
 
 // The next three methods implement toolcore.ReadObserver for the local surface:

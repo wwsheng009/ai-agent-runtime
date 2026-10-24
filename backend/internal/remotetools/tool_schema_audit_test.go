@@ -182,6 +182,12 @@ type schemaAudit struct {
 	// indirect names keys the functions read without a literal the AST can see,
 	// each with the reason. Every entry is a claim that has to stay true.
 	indirect map[string]string
+	// filtered names parameters the canonical schema declares and this surface
+	// removes with toolcore.FilterSchemaParams because the capability behind them
+	// is absent here (view's `symbol` needs a code index a remote host does not
+	// have). The handler still reads them: a caller that sends one anyway gets the
+	// documented fallback instead of silence.
+	filtered map[string]string
 }
 
 func searchHandlerPath() string { return repoPath("toolcore", "searchcore", "handler.go") }
@@ -231,6 +237,9 @@ func viewAudit() schemaAudit {
 			{file: viewHandlerPath(), receiver: "handler", name: "Execute"},
 			{file: viewHandlerPath(), name: "viewRequests"},
 			{file: viewHandlerPath(), name: "hasFilesArg"},
+		},
+		filtered: map[string]string{
+			"symbol": "the remote runtime has no code index, so registry.go removes it with FilterSchemaParams(ParamSymbol); the handler resolves it through toolcore.SymbolResolver and falls back to the file window when the surface cannot answer",
 		},
 	}
 }
@@ -283,6 +292,9 @@ func TestRemoteToolSchemasExposeWhatHandlersRead(t *testing.T) {
 			hidden := make([]string, 0, len(read))
 			for key := range read {
 				if declared[key] || audit.indirect[key] != "" {
+					continue
+				}
+				if reason, ok := audit.filtered[key]; ok && reason != "" {
 					continue
 				}
 				hidden = append(hidden, key)

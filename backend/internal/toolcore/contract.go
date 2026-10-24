@@ -43,6 +43,26 @@ const (
 	ParamSymbol OptionalParam = "symbol"
 )
 
+// SymbolTarget is one resolved symbol window: where to read it from. It is a
+// plain path plus offset/limit so a symbol request can reuse the ordinary file
+// reader instead of becoming a second read path.
+type SymbolTarget struct {
+	Path   string
+	Offset int
+	Limit  int
+}
+
+// SymbolResolver is an optional Runtime extension for symbol-aware tools: a
+// surface with a code index resolves `symbol` to a window, one without an index
+// filters the parameter out of its schema with FilterSchemaParams and never
+// sees this call. The index itself stays host-side; only the window crosses.
+type SymbolResolver interface {
+	// ResolveSymbol maps a symbol name to a read window. ok=false means the index
+	// is unavailable, is in shadow mode, or the symbol does not exist, and the
+	// caller falls back to the file_path window it was given.
+	ResolveSymbol(ctx context.Context, name string, limit int) (SymbolTarget, bool)
+}
+
 // Definition is the single declaration of a tool's identity and contract.
 type Definition struct {
 	Name        string

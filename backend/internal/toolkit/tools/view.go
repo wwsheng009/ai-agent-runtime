@@ -236,7 +236,13 @@ func (v *ViewTool) CoreRuntime(ctx context.Context) toolcore.Runtime {
 	if v == nil {
 		return nil
 	}
-	return newLocalCoreRuntimeWith(ctx, &v.sandboxPolicy, nil)
+	runtime := newLocalCoreRuntimeWith(ctx, &v.sandboxPolicy, nil)
+	if local, ok := runtime.(*localCoreRuntime); ok {
+		// The code index is a local capability; the shared handler asks for a
+		// window and never learns what answered.
+		local.symbolResolver = localSymbolResolver{tool: v, ctx: ctx}
+	}
+	return runtime
 }
 
 // Execute 实现 Tool 接口
